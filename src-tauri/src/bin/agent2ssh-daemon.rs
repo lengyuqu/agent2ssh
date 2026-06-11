@@ -266,30 +266,53 @@ async fn risk_check(State(s): State<AppState>, headers: HeaderMap, Json(body): J
 
 // ── WebSocket streaming exec ─────────────────────────────────────────────────
 
-async fn exec_stream(State(_s): State<AppState>, ws: WebSocketUpgrade) -> impl IntoResponse {
-    ws.on_upgrade(|mut socket| async move {
+async fn exec_stream(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
+    // Fix-2: Authenticate before WebSocket upgrade
+    if let Err(e) = check_auth(&s, &headers) {
+        return e.into_response();
+    }
+    ws.on_upgrade(|socket| async move {
         use axum::extract::ws::Message;
         use tokio::io::AsyncReadExt;
+        use std::sync::Arc;
+
+        let socket = Arc::new(tokio::sync::Mutex::new(socket));
 
         // Wait for ExecRequest message
-        let req_msg = match socket.recv().await {
-            Some(Ok(Message::Text(text))) => text,
-            _ => return,
+        let req_msg = {
+            let mut s = socket.lock().await;
+            match s.recv().await {
+                Some(Ok(Message::Text(text))) => text,
+                _ => return,
+            }
         };
         let req: ExecRequest = match serde_json::from_str(&req_msg) {
             Ok(r) => r,
-            Err(e) => { let _ = socket.send(Message::Text(serde_json::json!({"type":"error","error":e.to_string()}).to_string())).await; return; }
+            Err(e) => {
+                let mut s = socket.lock().await;
+                let _ = s.send(Message::Text(serde_json::json!({"type":"error","error":e.to_string()}).to_string())).await;
+                return;
+            }
         };
 
         let risk = classify_risk(&req.command);
         if risk == RiskLevel::Blocked || (risk == RiskLevel::High && !req.force) {
-            let _ = socket.send(Message::Text(serde_json::json!({"type":"error","error":"blocked or force required"}).to_string())).await;
+            let mut s = socket.lock().await;
+            let _ = s.send(Message::Text(serde_json::json!({"type":"error","error":"blocked or force required"}).to_string())).await;
             return;
         }
 
         let host = match load_config().ok().and_then(|c| c.hosts.into_iter().find(|h| h.name == req.host)) {
             Some(h) => h,
-            None => { let _ = socket.send(Message::Text(serde_json::json!({"type":"error","error":"unknown host"}).to_string())).await; return; }
+            None => {
+                let mut s = socket.lock().await;
+                let _ = s.send(Message::Text(serde_json::json!({"type":"error","error":"unknown host"}).to_string())).await;
+                return;
+            }
         };
 
         let started = std::time::Instant::now();
@@ -299,32 +322,93 @@ async fn exec_stream(State(_s): State<AppState>, ws: WebSocketUpgrade) -> impl I
         cmd.arg("-o").arg("BatchMode=yes").arg("-o").arg("StrictHostKeyChecking=accept-new")
            .arg("-p").arg(host.port.unwrap_or(22).to_string());
         if let Some(kp) = &host.key_path { if !kp.trim().is_empty() { cmd.arg("-i").arg(expand_tilde(kp)); } }
+        // ProxyJump support
+        if let Some(jump_name) = &host.jump_host {
+            if let Some(jump) = load_config().ok().and_then(|c| c.hosts.into_iter().find(|h| h.name == *jump_name)) {
+                let jump_target = match &jump.user {
+                    Some(u) if !u.trim().is_empty() => format!("{}@{}:{}", u, jump.host, jump.port.unwrap_or(22)),
+                    _ => format!("{}:{}", jump.host, jump.port.unwrap_or(22)),
+                };
+                cmd.arg("-J").arg(jump_target);
+                if let Some(jkey) = &jump.key_path {
+                    if !jkey.trim().is_empty() { cmd.arg("-i").arg(expand_tilde(jkey)); }
+                }
+            }
+        }
         let target = match &host.user { Some(u) if !u.trim().is_empty() => format!("{}@{}", u, host.host), _ => host.host.clone() };
         cmd.arg(&target).arg(&req.command)
            .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).stdin(std::process::Stdio::null());
 
         let mut child = match cmd.spawn() {
             Ok(c) => c,
-            Err(e) => { let _ = socket.send(Message::Text(serde_json::json!({"type":"error","error":e.to_string()}).to_string())).await; return; }
+            Err(e) => {
+                let mut s = socket.lock().await;
+                let _ = s.send(Message::Text(serde_json::json!({"type":"error","error":e.to_string()}).to_string())).await;
+                return;
+            }
         };
 
-        if let Some(stdout) = child.stdout.take() {
-            let mut reader = tokio::io::BufReader::new(stdout);
-            let mut buf = [0u8; 4096];
-            loop {
-                match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), reader.read(&mut buf)).await {
-                    Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
-                    Ok(Ok(n)) => {
-                        let data = String::from_utf8_lossy(&buf[..n]).to_string();
-                        if socket.send(Message::Text(serde_json::json!({"type":"stdout","data":data}).to_string())).await.is_err() { break; }
+        // Fix-3: Concurrently stream both stdout and stderr
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+
+        let sock_out = socket.clone();
+        let stdout_task = tokio::spawn(async move {
+            if let Some(stdout) = stdout {
+                let mut reader = tokio::io::BufReader::new(stdout);
+                let mut buf = [0u8; 4096];
+                loop {
+                    match reader.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            let data = String::from_utf8_lossy(&buf[..n]).to_string();
+                            let mut s = sock_out.lock().await;
+                            if s.send(Message::Text(serde_json::json!({"type":"stdout","data":data}).to_string())).await.is_err() { break; }
+                        }
                     }
                 }
             }
-        }
+        });
 
-        let status = child.wait().await;
-        let code = status.ok().and_then(|s| s.code());
-        let _ = socket.send(Message::Text(serde_json::json!({"type":"exit","code":code,"duration_ms":started.elapsed().as_millis()}).to_string())).await;
+        let sock_err = socket.clone();
+        let stderr_task = tokio::spawn(async move {
+            if let Some(stderr) = stderr {
+                let mut reader = tokio::io::BufReader::new(stderr);
+                let mut buf = [0u8; 4096];
+                loop {
+                    match reader.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            let data = String::from_utf8_lossy(&buf[..n]).to_string();
+                            let mut s = sock_err.lock().await;
+                            if s.send(Message::Text(serde_json::json!({"type":"stderr","data":data}).to_string())).await.is_err() { break; }
+                        }
+                    }
+                }
+            }
+        });
+
+        // Wait for child process with timeout
+        let status = tokio::time::timeout(
+            std::time::Duration::from_secs(timeout_secs),
+            child.wait(),
+        ).await;
+
+        let _ = tokio::join!(stdout_task, stderr_task);
+
+        let code = match status {
+            Ok(Ok(s)) => s.code(),
+            Ok(Err(_)) => None,
+            Err(_) => {
+                let _ = child.kill().await;
+                None
+            }
+        };
+
+        let mut s = socket.lock().await;
+        let _ = s.send(Message::Text(
+            serde_json::json!({"type":"exit","code":code,"duration_ms":started.elapsed().as_millis()}).to_string()
+        )).await;
     })
 }
 

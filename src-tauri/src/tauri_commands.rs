@@ -192,6 +192,22 @@ pub fn list_audit(filter: Option<AuditFilter>) -> Result<Vec<AuditEntry>, String
     list_audit_core(filter).map_err(|e| e.to_string())
 }
 
+// ── Daemon helpers (for desktop approval polling) ───────────────────────────
+
+/// Read the daemon bearer token from ~/.agent2ssh/daemon.token
+#[tauri::command]
+pub fn get_daemon_token() -> Result<String, String> {
+    let config_dir = crate::store::config_dir().map_err(|e| e.to_string())?;
+    let token_path = config_dir.join("daemon.token");
+    if token_path.exists() {
+        std::fs::read_to_string(&token_path)
+            .map(|s| s.trim().to_string())
+            .map_err(|e| e.to_string())
+    } else {
+        Err("daemon token not found (daemon not started?)".into())
+    }
+}
+
 // ── Bootstrap ────────────────────────────────────────────────────────────────
 
 pub fn run_tauri() {
@@ -226,6 +242,8 @@ pub fn run_tauri() {
             forward_remove,
             // Audit
             list_audit,
+            // Daemon helpers
+            get_daemon_token,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

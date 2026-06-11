@@ -863,6 +863,35 @@ textarea {
   background: #b91c1c;
 }
 
+/* ── Approval indicator in sidebar ───────────────────────────────────────── */
+.approval-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  margin: 8px 12px;
+  background: rgba(245, 158, 11, 0.15);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  border-radius: 6px;
+  color: #fbbf24;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: default;
+}
+
+.approval-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #f59e0b;
+  animation: pulse-approval 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse-approval {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
 /* ── Common ──────────────────────────────────────────────────────────────── */
 .empty,
 .error {

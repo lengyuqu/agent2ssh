@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  ApprovalRequest,
   AuditEntry,
   AuditFilter,
   ExecMultiResult,
@@ -13,6 +14,8 @@ import type {
   SessionInfo,
   SftpResult,
 } from "./types";
+
+const DAEMON_URL = "http://127.0.0.1:7722";
 
 export const api = {
   // Host management
@@ -107,4 +110,39 @@ export const api = {
   // Audit
   listAudit: (filter?: AuditFilter) =>
     invoke<AuditEntry[]>("list_audit", { filter: filter ?? null }),
+
+  // Daemon approval polling (Fix-1)
+  getDaemonToken: () => invoke<string>("get_daemon_token"),
+
+  /** Fetch pending approvals from the running daemon. Returns [] if daemon is unreachable. */
+  fetchApprovals: async (): Promise<ApprovalRequest[]> => {
+    try {
+      const token = await invoke<string>("get_daemon_token");
+      const res = await fetch(`${DAEMON_URL}/approvals`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) return [];
+      return (await res.json()) as ApprovalRequest[];
+    } catch {
+      return []; // daemon not running — silent
+    }
+  },
+
+  /** Approve a pending approval request via the daemon. */
+  approvalApprove: async (id: string): Promise<void> => {
+    const token = await invoke<string>("get_daemon_token");
+    await fetch(`${DAEMON_URL}/approvals/${id}/approve`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+  },
+
+  /** Reject a pending approval request via the daemon. */
+  approvalReject: async (id: string): Promise<void> => {
+    const token = await invoke<string>("get_daemon_token");
+    await fetch(`${DAEMON_URL}/approvals/${id}/reject`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+  },
 };

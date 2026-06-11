@@ -383,19 +383,200 @@ feat/m5-mobile
 
 | 任务 | 状态 | 负责人 |
 |------|------|--------|
-| M1-1 API 规范 | 待认领 | — |
-| M1-2 Daemon 二进制 | 待认领 | — |
-| M1-3 REST 端点 | 待认领 | — |
-| M1-4 WebSocket 流式 | 待认领 | — |
-| M1-5 生命周期管理 | 待认领 | — |
-| M2-1 审批队列 | 待认领 | — |
-| M2-2 Exec 集成审批 | 待认领 | — |
-| M2-3 桌面弹窗 | 待认领 | — |
-| M2-4 Daemon 端点 | 待认领 | — |
-| M3-1 规则配置文件 | 待认领 | — |
-| M3-2 Per-host override | 待认领 | — |
-| M3-3 risk check CLI | 待认领 | — |
-| M4-1 Web App 骨架 | 待认领 | — |
-| M4-2 主机管理 UI | 待认领 | — |
-| M4-3 执行面板 | 待认领 | — |
-| M4-4 审计日志 | 待认领 | — |
+| M1-1 API 规范 | ✅ 已完成 | — |
+| M1-2 Daemon 二进制 | ✅ 已完成 | — |
+| M1-3 REST 端点 | ✅ 已完成 | — |
+| M1-4 WebSocket 流式 | ✅ 已完成（有缺陷，见 Fix-2/Fix-3） | — |
+| M1-5 生命周期管理 | ✅ 已完成 | — |
+| M2-1 审批队列 | ✅ 已完成 | — |
+| M2-2 Exec 集成审批 | ✅ 已完成 | — |
+| M2-3 桌面弹窗 | ⚠️ 组件已写未接入（见 Fix-1） | — |
+| M2-4 Daemon 端点 | ✅ 已完成 | — |
+| M3-1 规则配置文件 | ✅ 已完成 | — |
+| M3-2 Per-host override | ✅ 已完成 | — |
+| M3-3 risk check CLI | ✅ 已完成 | — |
+| M4-1 Web App 骨架 | ✅ 已完成 | — |
+| M4-2 主机管理 UI | ✅ 已完成 | — |
+| M4-3 执行面板 | ✅ 已完成 | — |
+| M4-4 审计日志 | ✅ 已完成 | — |
+
+---
+
+## 遗留缺陷修复
+
+> 以下三项是在代码审查中发现的遗留问题，优先级高于新里程碑，建议最先认领。
+
+### Fix-1 · 桌面审批弹窗未接入（M2-3 收尾）
+
+**问题**
+`src/components/ApprovalDialog.tsx` 已实现完整组件，但 `src/App.tsx` 既未导入该组件，也没有轮询待审批任务的逻辑，导致 Tauri 桌面 App 无法弹出审批窗口。
+
+**需要做的事**
+- 在 `App.tsx` 中每 2 秒轮询一次 `GET http://127.0.0.1:7722/approvals`（读取 `~/.agent2ssh/daemon.token` 作 Bearer token）
+- 当存在 `status === "pending"` 的审批请求时，渲染 `ApprovalDialog`
+- 用户点击"批准"调用 `POST /approvals/:id/approve`，点击"拒绝"调用 `POST /approvals/:id/reject`
+- 注意：daemon 未运行时轮询应静默失败，不展示错误
+
+**涉及文件**
+- `src/App.tsx`（主改动）
+- `src/components/ApprovalDialog.tsx`（只读，已实现好，直接使用）
+- `src/api.ts`（可能需要补 approvalApprove / approvalReject 方法）
+
+**验收标准**
+- [ ] MCP 触发 high-risk exec → Tauri 桌面弹出审批窗口
+- [ ] 点击批准 → 命令执行，MCP 收到结果
+- [ ] 点击拒绝 → MCP 收到 403 错误
+- [ ] TTL 超时后弹窗自动消失
+
+---
+
+### Fix-2 · `exec_stream` WebSocket 无鉴权（安全漏洞）
+
+**问题**
+`src-tauri/src/bin/agent2ssh-daemon.rs:269` 的 `exec_stream` handler 声明为：
+
+```rust
+async fn exec_stream(State(_s): State<AppState>, ws: WebSocketUpgrade) -> impl IntoResponse {
+```
+
+`_s` 以下划线忽略了 state，从未调用 `check_auth()`。任何人连接 `ws://127.0.0.1:7722/exec/stream` 即可不带 token 执行命令。
+
+**需要做的事**
+- 将 `State(_s)` 改为 `State(s)`
+- 在 `ws.on_upgrade` 回调之前检查 HTTP 握手阶段的 Authorization header；axum WebSocket 升级前可通过 `HeaderMap` 提取，示例：
+
+```rust
+async fn exec_stream(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
+    if let Err(e) = check_auth(&s, &headers) {
+        return e.into_response();
+    }
+    ws.on_upgrade(|socket| async move { /* ... */ })
+}
+```
+
+**涉及文件**
+- `src-tauri/src/bin/agent2ssh-daemon.rs:269`
+
+**验收标准**
+- [ ] 无 token 的 WebSocket 连接收到 HTTP 401 响应
+- [ ] 携带正确 token 的连接正常工作
+
+---
+
+### Fix-3 · `exec_stream` 只流 stdout，stderr 丢失
+
+**问题**
+`exec_stream` 中仅对 `child.stdout` 进行了流式读取，`child.stderr` 未被处理，SSH 命令的所有错误输出对客户端不可见。
+
+**需要做的事**
+- 同时消费 stdout 和 stderr，分别推送 `{"type":"stdout","data":"..."}` 和 `{"type":"stderr","data":"..."}`
+- 两个流需要并发读取（使用 `tokio::select!` 或分两个 task），避免一方堵塞另一方
+- 注意：WebSocket `send` 不是 `Clone` 的，需要用 `Arc<Mutex<>>` 或将 socket 传给 select! 循环
+
+**涉及文件**
+- `src-tauri/src/bin/agent2ssh-daemon.rs:267–329`
+
+**验收标准**
+- [ ] 执行会向 stderr 输出内容的命令（如 `ls /nonexistent`），客户端收到 `{"type":"stderr",...}` 帧
+- [ ] stdout 和 stderr 能并发到达，不互相阻塞
+
+---
+
+## 后续里程碑
+
+### M5 · 测试覆盖
+
+> 目标：关键路径有自动化测试，防止重构破坏核心逻辑。
+
+| 子任务 | 内容 | 验收标准 |
+|--------|------|----------|
+| M5-1 | `approval.rs` 单元测试：批准/拒绝/超时三条路径 | `cargo test` 全绿 |
+| M5-2 | `risk_config.rs` 单元测试：glob 匹配、用户规则优先级 | `cargo test` 全绿 |
+| M5-3 | `core.rs` 单元测试：`classify_risk`、per-host override 逻辑 | `cargo test` 全绿 |
+| M5-4 | Daemon HTTP 集成测试（axum::test）：健康检查、鉴权、exec 拦截 | `cargo test` 全绿 |
+
+---
+
+### M6 · 打包发布
+
+> 目标：用户可通过常规渠道安装，无需手动编译。
+
+| 子任务 | 内容 |
+|--------|------|
+| M6-1 | Tauri bundle 配置：macOS .dmg、Linux AppImage、Windows .msi |
+| M6-2 | CI 流水线（GitHub Actions）：PR 触发构建 + 测试，tag 触发发布到 GitHub Releases |
+| M6-3 | Homebrew formula（macOS tap）：`brew install agent2ssh` |
+| M6-4 | README 安装文档更新 |
+
+**验收标准**
+- [ ] 在全新 macOS / Linux / Windows 机器上按文档安装后能正常使用
+- [ ] GitHub Releases 页面包含三平台产物
+
+---
+
+### M7 · SSH 密钥管理
+
+> 目标：在 UI 中管理 SSH 密钥对，无需手动操作 `~/.ssh/`。
+
+| 子任务 | 内容 |
+|--------|------|
+| M7-1 | 生成 Ed25519 密钥对，存入 `~/.agent2ssh/keys/` |
+| M7-2 | 导入现有私钥文件 |
+| M7-3 | Host profile 关联密钥（下拉选择） |
+| M7-4 | 显示公钥，一键复制到剪贴板 |
+
+**涉及文件（新增）**
+- `src-tauri/src/keys.rs`
+- `src/components/KeysPanel.tsx`
+
+---
+
+### M8 · 主机分组与批量操作
+
+> 目标：对大量主机按标签分组，exec-multi 支持按组执行。
+
+| 子任务 | 内容 |
+|--------|------|
+| M8-1 | `HostProfile` 新增 `tags: Vec<String>` 字段 |
+| M8-2 | `ssh_exec_multi` 支持 `tags` 参数（替代手动枚举 hosts） |
+| M8-3 | Web 控制台与桌面 UI 展示标签，支持按标签过滤 |
+
+---
+
+### M9 · MCP 审批工具
+
+> 目标：AI agent 可通过 MCP 工具自助查询和响应审批，无需人工介入（适合自动化流水线）。
+
+| 子任务 | 内容 |
+|--------|------|
+| M9-1 | MCP server 新增 `ssh_approval_list` 工具（列出 pending 审批） |
+| M9-2 | MCP server 新增 `ssh_approval_respond` 工具（批准/拒绝，参数：`approval_id`, `approved: bool`） |
+| M9-3 | `docs/skills.md` 更新工具列表（MCP 工具数从 21 升至 23） |
+
+---
+
+## 任务状态速查（续）
+
+| 任务 | 状态 | 负责人 |
+|------|------|--------|
+| Fix-1 桌面审批弹窗接入 | 待认领 | — |
+| Fix-2 exec_stream 鉴权 | 待认领 | — |
+| Fix-3 exec_stream stderr | 待认领 | — |
+| M5-1 approval 单元测试 | 待认领 | — |
+| M5-2 risk_config 单元测试 | 待认领 | — |
+| M5-3 core 单元测试 | 待认领 | — |
+| M5-4 Daemon 集成测试 | 待认领 | — |
+| M6-1 Tauri bundle | 待认领 | — |
+| M6-2 CI/CD 流水线 | 待认领 | — |
+| M6-3 Homebrew formula | 待认领 | — |
+| M7-1 密钥生成 | 待认领 | — |
+| M7-2 密钥导入 | 待认领 | — |
+| M7-3 Host 关联密钥 | 待认领 | — |
+| M8-1 Host tags 字段 | 待认领 | — |
+| M8-2 exec-multi 按 tag | 待认领 | — |
+| M9-1 MCP approval_list | 待认领 | — |
+| M9-2 MCP approval_respond | 待认领 | — |
