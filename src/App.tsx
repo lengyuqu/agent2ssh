@@ -1,4 +1,4 @@
-import { Activity, Terminal } from "lucide-react";
+import { Activity, Loader2, Terminal } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import "./styles.css";
 import { api } from "./api";
@@ -7,26 +7,28 @@ import AuditPanel from "./components/AuditPanel";
 import ExecPanel from "./components/ExecPanel";
 import ForwardPanel from "./components/ForwardPanel";
 import HostList from "./components/HostList";
+import MultiExecPanel from "./components/MultiExecPanel";
 import PingPanel from "./components/PingPanel";
 import SFTPPanel from "./components/SFTPPanel";
 import SessionPanel from "./components/SessionPanel";
-import type { AuditEntry, HostProfile } from "./types";
+import type { AuditEntry, AuditFilter, HostProfile } from "./types";
 
 export default function App() {
   const [hosts, setHosts] = useState<HostProfile[]>([]);
   const [selectedHost, setSelectedHost] = useState("");
   const [audit, setAudit] = useState<AuditEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
 
   const currentHost = useMemo(
     () => hosts.find((h) => h.name === selectedHost),
     [hosts, selectedHost]
   );
 
-  async function refresh() {
+  async function refresh(filter?: AuditFilter) {
     const [hostList, auditList] = await Promise.all([
       api.listHosts(),
-      api.listAudit(),
+      api.listAudit(filter),
     ]);
     setHosts(hostList);
     setAudit(auditList);
@@ -34,7 +36,9 @@ export default function App() {
   }
 
   useEffect(() => {
-    refresh().catch((err) => setError(String(err)));
+    refresh()
+      .catch((err) => setError(String(err)))
+      .finally(() => setLoading(false));
   }, []);
 
   async function handleRemoveHost(name: string) {
@@ -56,6 +60,15 @@ export default function App() {
     } catch (err) {
       setError(String(err));
     }
+  }
+
+  if (loading) {
+    return (
+      <main className="app-loading">
+        <Loader2 size={32} className="spin" />
+        <span>Loading Agent2SSH...</span>
+      </main>
+    );
   }
 
   return (
@@ -87,7 +100,7 @@ export default function App() {
             <h2>{currentHost?.name ?? "No host selected"}</h2>
             <p>
               {currentHost
-                ? `${currentHost.user ? `${currentHost.user}@` : ""}${currentHost.host}:${currentHost.port ?? 22}`
+                ? `${currentHost.user ? `${currentHost.user}@` : ""}${currentHost.host}:${currentHost.port ?? 22}${currentHost.jump_host ? ` via ${currentHost.jump_host}` : ""}`
                 : "Add a host to start issuing SSH commands"}
             </p>
           </div>
@@ -101,8 +114,10 @@ export default function App() {
 
         <div className="grid">
           <ExecPanel selectedHost={selectedHost} onExecComplete={refresh} />
-          <AddHostForm onSaved={refresh} />
+          <AddHostForm hosts={hosts} onSaved={refresh} />
         </div>
+
+        <MultiExecPanel hosts={hosts} onExecComplete={refresh} />
 
         <div className="grid grid-equal">
           <SFTPPanel selectedHost={selectedHost} />
@@ -111,7 +126,7 @@ export default function App() {
 
         <ForwardPanel selectedHost={selectedHost} />
 
-        <AuditPanel audit={audit} />
+        <AuditPanel audit={audit} onRefresh={refresh} />
       </section>
     </main>
   );

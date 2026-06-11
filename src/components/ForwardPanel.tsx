@@ -1,5 +1,5 @@
-import { ArrowLeftRight, Plus, Trash2 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { ArrowLeftRight, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
 import type { ForwardDirection, ForwardRule } from "../types";
 
@@ -16,18 +16,18 @@ export default function ForwardPanel({ selectedHost }: Props) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  async function refresh() {
+  const refresh = useCallback(async () => {
     try {
       const list = await api.forwardList();
       setRules(list);
     } catch (err) {
       setError(String(err));
     }
-  }
+  }, []);
 
   useEffect(() => {
     refresh();
-  }, []);
+  }, [refresh]);
 
   async function addForward() {
     if (!selectedHost) return;
@@ -63,6 +63,9 @@ export default function ForwardPanel({ selectedHost }: Props) {
       <div className="panel-title">
         <ArrowLeftRight size={16} />
         Port Forwarding
+        <button className="icon-button" onClick={refresh} title="Refresh">
+          <RefreshCw size={15} />
+        </button>
       </div>
       {error && <div className="error">{error}</div>}
 

@@ -9,6 +9,7 @@ import type {
   ForwardRule,
   HostProfile,
   PingResult,
+  RiskLevel,
   SessionInfo,
   SftpResult,
 } from "./types";
@@ -20,6 +21,10 @@ export const api = {
   removeHost: (name: string) => invoke<void>("remove_host", { name }),
   importSshConfig: (path?: string) =>
     invoke<HostProfile[]>("import_ssh_config", { path: path ?? null }),
+
+  // Risk classification
+  classifyRisk: (command: string) =>
+    invoke<RiskLevel>("classify_command_risk", { command }),
 
   // Execution
   execSsh: (host: string, command: string, force = false) =>
@@ -53,12 +58,24 @@ export const api = {
     invoke<SftpResult>("sftp_download", {
       request: { host, remote_path: remotePath, local_path: localPath },
     }),
-  sftpLs: (host: string, path: string) =>
-    invoke<ExecResult>("sftp_ls", { host, path }),
-  sftpStat: (host: string, path: string) =>
-    invoke<ExecResult>("sftp_stat", { host, path }),
-  sftpMkdir: (host: string, path: string) =>
-    invoke<ExecResult>("sftp_mkdir", { host, path }),
+  sftpLs: (host: string, path: string, timeoutSecs?: number) =>
+    invoke<ExecResult>("sftp_ls", {
+      host,
+      path,
+      timeoutSecs: timeoutSecs ?? null,
+    }),
+  sftpStat: (host: string, path: string, timeoutSecs?: number) =>
+    invoke<ExecResult>("sftp_stat", {
+      host,
+      path,
+      timeoutSecs: timeoutSecs ?? null,
+    }),
+  sftpMkdir: (host: string, path: string, timeoutSecs?: number) =>
+    invoke<ExecResult>("sftp_mkdir", {
+      host,
+      path,
+      timeoutSecs: timeoutSecs ?? null,
+    }),
 
   // Sessions
   sessionOpen: (host: string) => invoke<string>("session_open", { host }),

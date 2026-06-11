@@ -1,14 +1,16 @@
 import { FileKey, Plus } from "lucide-react";
 import { FormEvent, useState } from "react";
 import { api } from "../api";
+import type { HostProfile } from "../types";
 
-const emptyForm = { name: "", host: "", user: "", port: 22, key_path: "" };
+const emptyForm = { name: "", host: "", user: "", port: 22, key_path: "", jump_host: "" };
 
 type Props = {
+  hosts: HostProfile[];
   onSaved: () => void;
 };
 
-export default function AddHostForm({ onSaved }: Props) {
+export default function AddHostForm({ hosts, onSaved }: Props) {
   const [form, setForm] = useState(emptyForm);
 
   async function handleSubmit(event: FormEvent) {
@@ -19,10 +21,13 @@ export default function AddHostForm({ onSaved }: Props) {
       user: form.user.trim() || null,
       port: form.port || null,
       key_path: form.key_path.trim() || null,
+      jump_host: form.jump_host.trim() || null,
     });
     setForm(emptyForm);
     onSaved();
   }
+
+  const otherHosts = hosts.filter((h) => h.name !== form.name);
 
   return (
     <section className="panel">
@@ -78,6 +83,20 @@ export default function AddHostForm({ onSaved }: Props) {
             onChange={(e) => setForm({ ...form, key_path: e.target.value })}
             placeholder="~/.ssh/id_ed25519"
           />
+        </label>
+        <label>
+          Jump host (bastion)
+          <select
+            value={form.jump_host}
+            onChange={(e) => setForm({ ...form, jump_host: e.target.value })}
+          >
+            <option value="">None</option>
+            {otherHosts.map((h) => (
+              <option key={h.name} value={h.name}>
+                {h.name} ({h.host})
+              </option>
+            ))}
+          </select>
         </label>
         <button className="secondary" type="submit">
           <FileKey size={16} />

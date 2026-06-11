@@ -1,4 +1,5 @@
 import { RefreshCw, Server, Trash2 } from "lucide-react";
+import { useState } from "react";
 import type { HostProfile } from "../types";
 
 type Props = {
@@ -16,6 +17,8 @@ export default function HostList({
   onRemove,
   onRefresh,
 }: Props) {
+  const [confirmTarget, setConfirmTarget] = useState<string | null>(null);
+
   return (
     <section className="panel">
       <div className="panel-title">
@@ -43,14 +46,13 @@ export default function HostList({
               <span>
                 {host.user ? `${host.user}@` : ""}
                 {host.host}:{host.port ?? 22}
+                {host.jump_host && ` via ${host.jump_host}`}
               </span>
             </button>
             <button
               className="icon-button host-delete"
               title={`Remove ${host.name}`}
-              onClick={() => {
-                if (confirm(`Remove host "${host.name}"?`)) onRemove(host.name);
-              }}
+              onClick={() => setConfirmTarget(host.name)}
             >
               <Trash2 size={14} />
             </button>
@@ -60,6 +62,33 @@ export default function HostList({
           <div className="empty">No hosts configured</div>
         )}
       </div>
+
+      {confirmTarget && (
+        <div className="confirm-overlay" onClick={() => setConfirmTarget(null)}>
+          <div className="confirm-dialog" onClick={(e) => e.stopPropagation()}>
+            <p>
+              Remove host <strong>{confirmTarget}</strong>?
+            </p>
+            <p className="confirm-hint">
+              Any open sessions or forwards to this host will become orphaned.
+            </p>
+            <div className="confirm-actions">
+              <button className="secondary" onClick={() => setConfirmTarget(null)}>
+                Cancel
+              </button>
+              <button
+                className="primary confirm-danger"
+                onClick={() => {
+                  onRemove(confirmTarget);
+                  setConfirmTarget(null);
+                }}
+              >
+                Remove
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }

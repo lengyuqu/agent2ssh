@@ -1,24 +1,14 @@
-import { Play, ShieldAlert } from "lucide-react";
-import { useState } from "react";
+import { ChevronDown, ChevronUp, Play, ShieldAlert } from "lucide-react";
+import { useEffect, useState } from "react";
 import { api } from "../api";
 import type { ExecResult, RiskLevel } from "../types";
 import ApprovalDialog from "./ApprovalDialog";
+import RiskBadge from "./RiskBadge";
 
 type Props = {
   selectedHost: string;
   onExecComplete: () => void;
 };
-
-function RiskBadge({ level }: { level: RiskLevel }) {
-  const map: Record<RiskLevel, { label: string; cls: string }> = {
-    low:     { label: "low",     cls: "risk-low" },
-    medium:  { label: "medium",  cls: "risk-medium" },
-    high:    { label: "high",    cls: "risk-high" },
-    blocked: { label: "blocked", cls: "risk-blocked" },
-  };
-  const { label, cls } = map[level];
-  return <span className={`risk-badge ${cls}`}>{label}</span>;
-}
 
 export default function ExecPanel({ selectedHost, onExecComplete }: Props) {
   const [command, setCommand] = useState("uname -a");
@@ -28,26 +18,73 @@ export default function ExecPanel({ selectedHost, onExecComplete }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [pendingApproval, setPendingApproval] = useState(false);
 
+  // Advanced options
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [stdin, setStdin] = useState("");
+  const [timeoutSecs, setTimeoutSecs] = useState(60);
+  const [maxOutputMb, setMaxOutputMb] = useState(4);
+
+  // Pre-flight risk check
+  const [previewRisk, setPreviewRisk] = useState<RiskLevel | null>(null);
+
+  useEffect(() => {
+    // Reset result when host changes
+    setResult(null);
+    setError(null);
+    setPendingApproval(false);
+    setPreviewRisk(null);
+  }, [selectedHost]);
+
+  // Debounced risk preview
+  useEffect(() => {
+    if (!command.trim()) {
+      setPreviewRisk(null);
+      return;
+    }
+    const timer = setTimeout(async () => {
+      try {
+        const level = await api.classifyRisk(command);
+        setPreviewRisk(level);
+      } catch {
+        setPreviewRisk(null);
+      }
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [command]);
+
   async function runCommand(withForce = false) {
     if (!selectedHost || !command.trim()) return;
     setBusy(true);
     setError(null);
     setPendingApproval(false);
     try {
-      const next = await api.execSsh(selectedHost, command, withForce || force);
+      const next = await api.execSshFull({
+        host: selectedHost,
+        command,
+        force: withForce || force,
+        timeout_secs: timeoutSecs || null,
+        stdin: stdin.trim() || null,
+        max_output_bytes: maxOutputMb ? maxOutputMb * 1024 * 1024 : null,
+      });
       setResult(next);
       onExecComplete();
     } catch (err) {
-      const msg = String(err);
-      // Detect high-risk rejection → show approval dialog
-      if (msg.includes("force=true") || msg.includes("risk=high")) {
-        setPendingApproval(true);
-      } else {
-        setError(msg);
-      }
+      setError(String(err));
     } finally {
       setBusy(false);
     }
+  }
+
+  function handleRun() {
+    if (previewRisk === "high" && !force) {
+      setPendingApproval(true);
+      return;
+    }
+    if (previewRisk === "blocked") {
+      setError("This command is blocked (risk=blocked).");
+      return;
+    }
+    runCommand();
   }
 
   function handleApprovalConfirm() {
@@ -65,6 +102,7 @@ export default function ExecPanel({ selectedHost, onExecComplete }: Props) {
       <div className="panel-title">
         <Play size={16} />
         Execute
+        {previewRisk && <RiskBadge level={previewRisk} />}
       </div>
       {error && <div className="error">{error}</div>}
       <label>
@@ -75,6 +113,51 @@ export default function ExecPanel({ selectedHost, onExecComplete }: Props) {
           spellCheck={false}
         />
       </label>
+
+      <button
+        className="toggle-advanced"
+        onClick={() => setShowAdvanced(!showAdvanced)}
+      >
+        {showAdvanced ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+        Advanced options
+      </button>
+
+      {showAdvanced && (
+        <div className="advanced-options">
+          <label>
+            Stdin (piped to command)
+            <textarea
+              value={stdin}
+              onChange={(e) => setStdin(e.target.value)}
+              placeholder="optional input..."
+              style={{ minHeight: 60 }}
+            />
+          </label>
+          <div className="two-col">
+            <label>
+              Timeout (seconds)
+              <input
+                type="number"
+                min={1}
+                max={3600}
+                value={timeoutSecs}
+                onChange={(e) => setTimeoutSecs(Number(e.target.value))}
+              />
+            </label>
+            <label>
+              Max output (MiB)
+              <input
+                type="number"
+                min={1}
+                max={64}
+                value={maxOutputMb}
+                onChange={(e) => setMaxOutputMb(Number(e.target.value))}
+              />
+            </label>
+          </div>
+        </div>
+      )}
+
       <label className="force-row">
         <input
           type="checkbox"
@@ -86,7 +169,7 @@ export default function ExecPanel({ selectedHost, onExecComplete }: Props) {
       </label>
       <button
         className="primary"
-        onClick={() => runCommand()}
+        onClick={handleRun}
         disabled={busy || !selectedHost}
       >
         <Play size={16} />

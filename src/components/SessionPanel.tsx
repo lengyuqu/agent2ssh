@@ -10,6 +10,7 @@ type Props = {
 export default function SessionPanel({ selectedHost }: Props) {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
+  const [activeHost, setActiveHost] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [output, setOutput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -29,6 +30,11 @@ export default function SessionPanel({ selectedHost }: Props) {
     refresh();
   }, []);
 
+  // Reset when selectedHost changes
+  useEffect(() => {
+    setError(null);
+  }, [selectedHost]);
+
   async function openSession() {
     if (!selectedHost) return;
     setBusy(true);
@@ -36,8 +42,8 @@ export default function SessionPanel({ selectedHost }: Props) {
     try {
       const id = await api.sessionOpen(selectedHost);
       setActiveId(id);
+      setActiveHost(selectedHost);
       await refresh();
-      // Initial read
       const initial = await api.sessionRead(id, 1500);
       setOutput(initial);
     } catch (err) {
@@ -54,7 +60,6 @@ export default function SessionPanel({ selectedHost }: Props) {
     try {
       await api.sessionWrite(activeId, input + "\n");
       setInput("");
-      // Read response
       const data = await api.sessionRead(activeId, 2000);
       setOutput((prev) => prev + "\n" + data);
       setTimeout(() => {
@@ -82,12 +87,15 @@ export default function SessionPanel({ selectedHost }: Props) {
     try {
       await api.sessionClose(activeId);
       setActiveId(null);
+      setActiveHost(null);
       setOutput("");
       await refresh();
     } catch (err) {
       setError(String(err));
     }
   }
+
+  const hostMismatch = activeId && activeHost && activeHost !== selectedHost;
 
   return (
     <section className="panel session-panel">
@@ -98,12 +106,19 @@ export default function SessionPanel({ selectedHost }: Props) {
       </div>
       {error && <div className="error">{error}</div>}
 
+      {hostMismatch && (
+        <div className="session-warning">
+          Session is connected to <strong>{activeHost}</strong>, not the
+          currently selected host.
+        </div>
+      )}
+
       {!activeId ? (
         <>
           <div className="session-list">
             {sessions.map(([id, host]) => (
               <div key={id} className="session-row">
-                <code>{id.slice(0, 8)}</code>
+                <code title={id}>{id.slice(0, 8)}</code>
                 <span>{host}</span>
               </div>
             ))}

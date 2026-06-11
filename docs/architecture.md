@@ -64,10 +64,9 @@ All executions (including blocked attempts) are appended to `~/.agent2ssh/audit.
 
 ## Roadmap
 
-The next safety layer is an approval gates UI: high-risk commands trigger a desktop pop-up that must be confirmed before dispatch. This pairs with a local HTTP daemon that would let web and mobile clients connect to the same local core.
+The next safety layer is an approval gates UI: high-risk commands trigger a desktop pop-up that must be confirmed before dispatch. This pairs with a local HTTP daemon that lets the web console connect to the same local core.
 
 ```text
-Desktop App  →  local HTTP/WebSocket daemon
-Web Console  →  local daemon or team relay
-Mobile App   →  approvals, monitoring, emergency cancel
+Desktop App (Windows / Linux / macOS)  →  local HTTP/WebSocket daemon
+Web Console                            →  local daemon or team relay
 ```

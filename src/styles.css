@@ -24,6 +24,28 @@ select {
   font: inherit;
 }
 
+/* ── Loading screen ──────────────────────────────────────────────────────── */
+.app-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  gap: 16px;
+  color: #667783;
+  font-size: 16px;
+}
+
+.spin {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* ── Layout ──────────────────────────────────────────────────────────────── */
 .app-shell {
   display: grid;
   grid-template-columns: 300px 1fr;
@@ -95,6 +117,7 @@ select {
   grid-template-columns: 1fr 1fr;
 }
 
+/* ── Panel ───────────────────────────────────────────────────────────────── */
 .panel {
   background: #fff;
   border: 1px solid #d8e0e6;
@@ -129,6 +152,15 @@ select {
   cursor: pointer;
 }
 
+.icon-button:first-of-type {
+  margin-left: auto;
+}
+
+.icon-button + .icon-button {
+  margin-left: 0;
+}
+
+/* ── Host list ───────────────────────────────────────────────────────────── */
 .host-list {
   display: grid;
   gap: 8px;
@@ -164,6 +196,7 @@ select {
   color: #9fb0bd;
   margin-top: 4px;
   word-break: break-all;
+  font-size: 12px;
 }
 
 .host-delete {
@@ -187,6 +220,7 @@ select {
   color: #ff8080;
 }
 
+/* ── Forms ───────────────────────────────────────────────────────────────── */
 label {
   display: grid;
   gap: 7px;
@@ -258,7 +292,30 @@ textarea {
   min-height: 36px;
 }
 
-/* Terminal output */
+/* ── Toggle advanced ─────────────────────────────────────────────────────── */
+.toggle-advanced {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  color: #0f766e;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 13px;
+  padding: 0;
+}
+
+.advanced-options {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+}
+
+/* ── Terminal output ─────────────────────────────────────────────────────── */
 .terminal-output {
   background: #101820;
   color: #e6edf3;
@@ -300,7 +357,7 @@ textarea {
   font-weight: 600;
 }
 
-/* Risk badges */
+/* ── Risk badges ─────────────────────────────────────────────────────────── */
 .risk-badge {
   display: inline-block;
   padding: 1px 7px;
@@ -332,9 +389,31 @@ textarea {
   cursor: pointer;
 }
 
-/* Audit panel */
+/* ── Audit panel ─────────────────────────────────────────────────────────── */
 .audit-panel {
   margin-top: 0;
+}
+
+.audit-filters {
+  margin-bottom: 12px;
+}
+
+.audit-filter-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 100px auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.audit-filter-actions {
+  display: flex;
+  gap: 6px;
+  align-items: end;
+}
+
+.audit-filter-actions button {
+  min-height: 36px;
+  font-size: 13px;
 }
 
 .audit-list {
@@ -369,7 +448,93 @@ textarea {
   font-style: normal;
 }
 
-/* SFTP panel */
+/* ── Multi-exec panel ────────────────────────────────────────────────────── */
+.multi-exec-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.multi-host-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.host-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.host-chip {
+  padding: 4px 12px;
+  border: 1px solid #d8e0e6;
+  border-radius: 16px;
+  background: #f8fafc;
+  color: #475569;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  transition: all 0.15s;
+}
+
+.host-chip.active {
+  background: #0f766e;
+  color: #fff;
+  border-color: #0f766e;
+}
+
+.multi-results {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.multi-result-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 10px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+}
+
+.multi-result-row span {
+  color: #64748b;
+  font-size: 13px;
+}
+
+.multi-error {
+  color: #dc2626;
+}
+
+.multi-result-output {
+  background: #101820;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.multi-output-header {
+  padding: 6px 14px;
+  background: #1a2836;
+  color: #8fb0c5;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.multi-result-output pre {
+  margin: 0;
+  padding: 10px 14px;
+  color: #e6edf3;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 13px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ── SFTP panel ──────────────────────────────────────────────────────────── */
 .sftp-panel {
   display: flex;
   flex-direction: column;
@@ -403,7 +568,7 @@ textarea {
   border-radius: 3px;
 }
 
-/* Session panel */
+/* ── Session panel ───────────────────────────────────────────────────────── */
 .session-panel {
   display: flex;
   flex-direction: column;
@@ -418,6 +583,15 @@ textarea {
   font-size: 11px;
   font-weight: 600;
   margin-left: auto;
+}
+
+.session-warning {
+  background: #fef3c7;
+  color: #92400e;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  border: 1px solid #fde68a;
 }
 
 .session-list {
@@ -474,7 +648,7 @@ textarea {
   flex-shrink: 0;
 }
 
-/* Forward panel */
+/* ── Forward panel ───────────────────────────────────────────────────────── */
 .forward-panel {
   display: flex;
   flex-direction: column;
@@ -535,7 +709,7 @@ textarea {
   color: #64748b;
 }
 
-/* Ping panel */
+/* ── Ping panel ──────────────────────────────────────────────────────────── */
 .ping-panel {
   margin-top: 0;
 }
@@ -576,8 +750,9 @@ textarea {
   margin-left: auto;
 }
 
-/* Approval dialog */
-.approval-overlay {
+/* ── Approval dialog ─────────────────────────────────────────────────────── */
+.approval-overlay,
+.confirm-overlay {
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.5);
@@ -587,13 +762,45 @@ textarea {
   z-index: 1000;
 }
 
-.approval-dialog {
+.approval-dialog,
+.confirm-dialog {
   background: #fff;
   border-radius: 12px;
   padding: 24px;
   max-width: 480px;
   width: 90%;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+}
+
+.confirm-dialog {
+  max-width: 360px;
+}
+
+.confirm-dialog p {
+  margin: 0 0 8px;
+}
+
+.confirm-hint {
+  color: #92400e;
+  font-size: 13px;
+  background: #fef3c7;
+  padding: 8px 10px;
+  border-radius: 4px;
+}
+
+.confirm-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
+.confirm-danger {
+  background: #dc2626;
+}
+
+.confirm-danger:hover {
+  background: #b91c1c;
 }
 
 .approval-header {
@@ -656,7 +863,7 @@ textarea {
   background: #b91c1c;
 }
 
-/* Common */
+/* ── Common ──────────────────────────────────────────────────────────────── */
 .empty,
 .error {
   color: #667783;
@@ -681,6 +888,7 @@ textarea {
   font-size: 13px;
 }
 
+/* ── Responsive ──────────────────────────────────────────────────────────── */
 @media (max-width: 900px) {
   body {
     min-width: 0;
@@ -697,6 +905,10 @@ textarea {
   }
 
   .audit-row {
+    grid-template-columns: 1fr;
+  }
+
+  .audit-filter-row {
     grid-template-columns: 1fr;
   }
 

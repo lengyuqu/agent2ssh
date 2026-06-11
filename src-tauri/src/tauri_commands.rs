@@ -1,8 +1,8 @@
 use crate::{
     core::{
-        add_host_core, exec_multi_core, exec_ssh_core, import_ssh_config_core, list_audit_core,
-        list_hosts_core, ping_hosts_core, remove_host_core, sftp_download_core, sftp_ls_core,
-        sftp_mkdir_core, sftp_stat_core, sftp_upload_core,
+        add_host_core, classify_risk, exec_multi_core, exec_ssh_core, import_ssh_config_core,
+        list_audit_core, list_hosts_core, ping_hosts_core, remove_host_core, sftp_download_core,
+        sftp_ls_core, sftp_mkdir_core, sftp_stat_core, sftp_upload_core,
     },
     forward::{forward_add_core, forward_list_core, forward_remove_core},
     session::{
@@ -11,7 +11,8 @@ use crate::{
     },
     types::{
         AuditEntry, AuditFilter, ExecMultiResult, ExecRequest, ExecResult, ForwardDirection,
-        ForwardRule, HostProfile, PingResult, SftpDownloadRequest, SftpResult, SftpUploadRequest,
+        ForwardRule, HostProfile, PingResult, RiskLevel, SftpDownloadRequest, SftpResult,
+        SftpUploadRequest,
     },
 };
 use uuid::Uuid;
@@ -39,6 +40,11 @@ pub fn import_ssh_config(path: Option<String>) -> Result<Vec<HostProfile>, Strin
 }
 
 // ── Command execution ────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn classify_command_risk(command: String) -> Result<RiskLevel, String> {
+    Ok(classify_risk(&command))
+}
 
 #[tauri::command]
 pub async fn exec_ssh(request: ExecRequest) -> Result<ExecResult, String> {
@@ -198,6 +204,7 @@ pub fn run_tauri() {
             remove_host,
             import_ssh_config,
             // Execution
+            classify_command_risk,
             exec_ssh,
             exec_multi,
             ping_hosts,

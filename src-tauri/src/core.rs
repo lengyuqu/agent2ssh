@@ -544,12 +544,14 @@ pub fn import_ssh_config_core(path: Option<&str>) -> Result<Vec<HostProfile>> {
     let mut user: Option<String> = None;
     let mut port: Option<u16> = None;
     let mut identity: Option<String> = None;
+    let mut proxy_jump: Option<String> = None;
 
     let flush = |alias: &Option<String>,
                  hn: &Option<String>,
                  u: &Option<String>,
                  p: Option<u16>,
                  id: &Option<String>,
+                 pj: &Option<String>,
                  profiles: &mut Vec<HostProfile>| {
         let alias = alias.as_deref().unwrap_or("");
         let hn = hn.as_deref().unwrap_or("");
@@ -557,13 +559,20 @@ pub fn import_ssh_config_core(path: Option<&str>) -> Result<Vec<HostProfile>> {
         if alias.is_empty() || alias.contains('*') || alias.contains('?') || hn.is_empty() {
             return;
         }
+        // Map ProxyJump user@host:port to a profile alias (best-effort: use the host part)
+        let jump_host = pj.as_ref().map(|raw| {
+            let target = raw.split_whitespace().next().unwrap_or(raw);
+            // Strip user@ prefix and :port suffix to get a usable alias hint
+            let no_user = target.split('@').last().unwrap_or(target);
+            no_user.split(':').next().unwrap_or(no_user).to_string()
+        });
         profiles.push(HostProfile {
             name: alias.to_string(),
             host: hn.to_string(),
             user: u.clone(),
             port: p,
             key_path: id.clone(),
-            jump_host: None,
+            jump_host,
         });
     };
 
@@ -579,22 +588,24 @@ pub fn import_ssh_config_core(path: Option<&str>) -> Result<Vec<HostProfile>> {
         match key.as_str() {
             "host" => {
                 // Flush previous entry
-                flush(&current_alias, &hostname, &user, port, &identity, &mut profiles);
+                flush(&current_alias, &hostname, &user, port, &identity, &proxy_jump, &mut profiles);
                 current_alias = Some(value);
                 hostname = None;
                 user = None;
                 port = None;
                 identity = None;
+                proxy_jump = None;
             }
             "hostname" => hostname = Some(value),
             "user" => user = Some(value),
             "port" => port = value.parse().ok(),
             "identityfile" => identity = Some(value),
+            "proxyjump" => proxy_jump = Some(value),
             _ => {}
         }
     }
     // Flush last entry
-    flush(&current_alias, &hostname, &user, port, &identity, &mut profiles);
+    flush(&current_alias, &hostname, &user, port, &identity, &proxy_jump, &mut profiles);
 
     // Add only profiles whose name doesn't already exist
     let _guard = hosts_lock().lock().unwrap();

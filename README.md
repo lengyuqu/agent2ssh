@@ -119,6 +119,9 @@ Local data is stored under:
 
 ## Roadmap
 
-- HTTP daemon API (so web/mobile clients can connect to the local core)
-- Approval gates UI (desktop/mobile pop-up for high-risk commands)
-- Risk scoring tuning based on real-world usage
+Target platforms: **Windows / Linux / macOS** (Tauri desktop app runs on all three).
+
+- HTTP daemon API — lets the web console connect to the local core
+- Approval gates — desktop pop-up for high-risk commands before dispatch
+- Configurable risk rules — user-defined blocked/high/medium patterns, per-host overrides
+- Web console — browser-based audit log viewer, host manager, and live exec panel
