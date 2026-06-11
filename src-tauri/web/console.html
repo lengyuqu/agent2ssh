@@ -303,6 +303,57 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 .mt-8 { margin-top: 8px; }
 .mt-12 { margin-top: 12px; }
 .mb-8 { margin-bottom: 8px; }
+
+/* ── Connection status dot ───────────────────────────────── */
+.conn-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.conn-ok { background: var(--green); }
+.conn-off { background: var(--text-dim); }
+
+/* ── Daemon switcher ─────────────────────────────────────── */
+.daemon-switcher {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.daemon-switcher select {
+  padding: 5px 10px;
+  font-size: 0.85rem;
+  min-width: 160px;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.daemon-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+}
+.daemon-status-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  background: var(--text-dim);
+}
+.daemon-status-dot.connected { background: var(--green); }
+.daemon-status-dot.disconnected { background: var(--red); }
+.daemon-url {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 </style>
 </head>
 <body>
@@ -311,6 +362,15 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 <div class="header">
   <h1><span>Agent2SSH</span> Console</h1>
   <div class="auth-area">
+    <div class="daemon-switcher">
+      <select id="daemon-select" onchange="switchDaemon()" title="Select daemon">
+        <option value="localhost">localhost</option>
+      </select>
+      <span class="daemon-status">
+        <span id="daemon-status-dot" class="daemon-status-dot" title="Unknown"></span>
+        <span id="daemon-url" class="daemon-url">http://127.0.0.1:7722</span>
+      </span>
+    </div>
     <span id="health-dot" title="Not connected"></span>
     <input type="password" id="token-input" placeholder="Bearer token" autocomplete="off">
     <button id="connect-btn" onclick="doConnect()">Connect</button>
@@ -323,6 +383,8 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   <div class="tab" data-tab="execute">Execute</div>
   <div class="tab" data-tab="audit">Audit</div>
   <div class="tab" data-tab="approvals">Approvals</div>
+  <div class="tab" data-tab="playbooks">Playbooks</div>
+  <div class="tab" data-tab="settings">Settings</div>
 </div>
 
 <!-- ═══ Error bar ═══════════════════════════════════════ -->
@@ -338,17 +400,18 @@ tr:hover td { background: rgba(255,255,255,0.02); }
       <button onclick="loadHosts()">Refresh</button>
       <button onclick="doImportSSH()">Import SSH Config</button>
       <button onclick="doPingAll()">Ping All</button>
+      <button onclick="loadConnectionStatus()">Refresh Connections</button>
     </div>
     <div class="table-wrap">
       <table>
         <thead>
           <tr>
-            <th>Name</th><th>Host</th><th>User</th><th>Port</th>
+            <th>Status</th><th>Name</th><th>Host</th><th>User</th><th>Port</th>
             <th>Jump Host</th><th>Risk Override</th><th>Tags</th><th>Ping</th><th>Actions</th>
           </tr>
         </thead>
         <tbody id="hosts-tbody">
-          <tr><td colspan="9" class="empty-msg">Connect to load hosts</td></tr>
+          <tr><td colspan="10" class="empty-msg">Connect to load hosts</td></tr>
         </tbody>
       </table>
     </div>
@@ -504,14 +567,112 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   </div>
 </div>
 
+<!-- ═══ Playbooks Tab ═══════════════════════════════════ -->
+<div id="panel-playbooks" class="tab-panel">
+
+  <div class="section">
+    <div class="section-title">Playbooks</div>
+    <div class="gap-row mb-8">
+      <button onclick="loadPlaybooks()">Refresh</button>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Name</th><th>Description</th><th>Steps</th><th>Tags</th><th>Risk Override</th><th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="playbooks-tbody">
+          <tr><td colspan="6" class="empty-msg">Connect to load playbooks</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="section" id="playbook-run-section" style="display:none">
+    <div class="section-title">Run Playbook: <span id="playbook-run-name" class="mono"></span></div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Target Host</label>
+        <select id="playbook-host-select"></select>
+      </div>
+      <div class="form-group" style="flex-direction:row;align-items:center;gap:6px;padding-top:18px">
+        <input type="checkbox" id="playbook-force">
+        <label for="playbook-force" style="cursor:pointer">Force (high-risk)</label>
+      </div>
+      <button class="success" onclick="doRunPlaybook()">Run</button>
+      <button onclick="hidePlaybookRun()">Cancel</button>
+    </div>
+  </div>
+
+  <div class="section" id="playbook-results-section" style="display:none">
+    <div class="section-title">
+      Results: <span id="playbook-result-name" class="mono"></span>
+      <span id="playbook-result-status" class="badge" style="margin-left:8px"></span>
+    </div>
+    <div id="playbook-steps"></div>
+    <div id="playbook-summary" class="mt-8" style="color:var(--text-dim);font-size:0.85rem"></div>
+  </div>
+</div>
+
+<!-- ═══ Settings Tab ═══════════════════════════════════ -->
+<div id="panel-settings" class="tab-panel">
+
+  <div class="section">
+    <div class="section-title">Webhook Notifications</div>
+    <p style="color:var(--text-dim);font-size:0.85rem;margin-bottom:14px">
+      Configure a webhook URL to receive event notifications (e.g. Slack, Discord, or any HTTP endpoint).
+      Events are sent as JSON POST requests. Slack URLs automatically use Block Kit formatting.
+    </p>
+    <div class="form-row">
+      <div class="form-group flex-1" style="min-width:300px">
+        <label>Webhook URL</label>
+        <input id="webhook-url" placeholder="https://hooks.slack.com/services/... or any URL">
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Events</label>
+        <div style="display:flex;gap:16px;flex-wrap:wrap;padding-top:4px">
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;color:var(--text)">
+            <input type="checkbox" id="webhook-evt-approval" value="approval_required">
+            Approval Required
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;color:var(--text)">
+            <input type="checkbox" id="webhook-evt-blocked" value="exec_blocked">
+            Command Blocked
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;color:var(--text)">
+            <input type="checkbox" id="webhook-evt-completed" value="exec_completed">
+            Command Completed
+          </label>
+        </div>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group" style="min-width:250px">
+        <label>HMAC-SHA256 Secret <span style="color:var(--text-dim)">(optional, for X-Agent2SSH-Signature header)</span></label>
+        <input id="webhook-secret" type="password" placeholder="signing secret" autocomplete="off">
+      </div>
+    </div>
+    <div class="form-row" style="margin-top:4px">
+      <button class="success" onclick="doSaveWebhook()">Save</button>
+      <button onclick="loadWebhookConfig()">Reload</button>
+      <span id="webhook-status" style="color:var(--text-dim);font-size:0.85rem;align-self:center"></span>
+    </div>
+  </div>
+</div>
+
 </div><!-- /content -->
 
 <script>
 // ── State ──────────────────────────────────────────────────
-const API = 'http://127.0.0.1:7722';
+let API = 'http://127.0.0.1:7722';
 let token = '';
 let hosts = [];
 let approvalTimer = null;
+let connectionStatuses = {};  // host -> { connected, socket_path }
+let daemons = [];  // [{ alias, url, connected }]
 
 // ── Helpers ────────────────────────────────────────────────
 function $(id) { return document.getElementById(id); }
@@ -590,14 +751,102 @@ async function doConnect() {
     await api('GET', '/health');
     dot.className = 'ok';
     dot.title = 'Connected';
+    updateDaemonStatus(true);
+    await loadDaemons();
     await loadHosts();
     startApprovalPolling();
   } catch(e) {
     dot.className = 'fail';
     dot.title = 'Failed';
+    updateDaemonStatus(false);
     showError('Connection failed: ' + e.message);
   } finally {
     $('connect-btn').disabled = false;
+  }
+}
+
+// ── Daemon switcher ────────────────────────────────────────
+async function loadDaemons() {
+  try {
+    daemons = await api('GET', '/daemons');
+    renderDaemonDropdown();
+  } catch(_) {
+    // Daemon might not support /daemons endpoint; silently keep defaults
+    daemons = [{ alias: 'localhost', url: 'http://127.0.0.1:7722', connected: true }];
+    renderDaemonDropdown();
+  }
+}
+
+function renderDaemonDropdown() {
+  const select = $('daemon-select');
+  const currentAlias = select.value || 'localhost';
+  select.innerHTML = daemons.map(d => {
+    const statusIcon = d.connected ? '\u2713 ' : '\u2717 ';
+    const selected = d.alias === currentAlias ? ' selected' : '';
+    return '<option value="' + esc(d.alias) + '"' + selected + '>' +
+           statusIcon + esc(d.alias) + '</option>';
+  }).join('');
+  // Update URL display
+  const current = daemons.find(d => d.alias === currentAlias) || daemons[0];
+  if (current) {
+    $('daemon-url').textContent = current.url;
+    $('daemon-url').title = current.url;
+  }
+}
+
+function updateDaemonStatus(connected) {
+  const dot = $('daemon-status-dot');
+  if (connected) {
+    dot.className = 'daemon-status-dot connected';
+    dot.title = 'Connected';
+  } else {
+    dot.className = 'daemon-status-dot disconnected';
+    dot.title = 'Disconnected';
+  }
+}
+
+async function switchDaemon() {
+  const alias = $('daemon-select').value;
+  const daemon = daemons.find(d => d.alias === alias);
+  if (!daemon) return;
+
+  // For remote daemons, use the proxy endpoint on the local daemon
+  // For localhost, use the daemon's URL directly
+  if (alias === 'localhost') {
+    API = daemon.url;
+  } else {
+    // All API calls still go to the local daemon, which proxies to remote.
+    // We keep API as the local URL. The proxy routes via /daemons/:alias/*
+    // For now, switch the base URL to the local daemon (which we're already connected to).
+    const localDaemon = daemons.find(d => d.alias === 'localhost');
+    API = localDaemon ? localDaemon.url : 'http://127.0.0.1:7722';
+  }
+
+  $('daemon-url').textContent = daemon.url;
+  $('daemon-url').title = daemon.url;
+
+  // Test connectivity to the target daemon
+  clearError();
+  try {
+    if (alias === 'localhost') {
+      await api('GET', '/health');
+      updateDaemonStatus(true);
+    } else {
+      // Test via proxy: try listing hosts on the remote daemon
+      await api('POST', '/daemons/' + encodeURIComponent(alias) + '/exec',
+        { host: '__ping__', command: 'echo ok', force: false, timeout_secs: 5 });
+      updateDaemonStatus(true);
+    }
+  } catch(e) {
+    updateDaemonStatus(false);
+    if (alias !== 'localhost') {
+      showError('Remote daemon \'' + alias + '\' unreachable: ' + e.message);
+    }
+  }
+
+  // Reload data for the selected daemon
+  if (token) {
+    await loadHosts();
   }
 }
 
@@ -609,6 +858,8 @@ document.querySelectorAll('.tab').forEach(tab => {
     tab.classList.add('active');
     $('panel-' + tab.dataset.tab).classList.add('active');
     if (tab.dataset.tab === 'audit') loadAudit();
+    if (tab.dataset.tab === 'playbooks') loadPlaybooks();
+    if (tab.dataset.tab === 'settings') loadWebhookConfig();
   });
 });
 
@@ -623,17 +874,24 @@ async function loadHosts() {
     hosts = await api('GET', '/hosts');
     renderHosts();
     populateHostDropdowns();
+    await loadConnectionStatus();
   } catch(e) { showError('Failed to load hosts: ' + e.message); }
 }
 
 function renderHosts() {
   const tbody = $('hosts-tbody');
   if (!hosts.length) {
-    tbody.innerHTML = '<tr><td colspan="9" class="empty-msg">No hosts configured</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="10" class="empty-msg">No hosts configured</td></tr>';
     return;
   }
-  tbody.innerHTML = hosts.map(h => `
+  tbody.innerHTML = hosts.map(h => {
+    const cs = connectionStatuses[h.name];
+    const connected = cs && cs.connected;
+    const dotClass = connected ? 'conn-dot conn-ok' : 'conn-dot conn-off';
+    const dotTitle = connected ? 'Connected' : 'Disconnected';
+    return `
     <tr>
+      <td><span class="${dotClass}" title="${dotTitle}"></span></td>
       <td class="mono">${esc(h.name)}</td>
       <td class="mono">${esc(h.host)}</td>
       <td>${esc(h.user || '-')}</td>
@@ -644,9 +902,15 @@ function renderHosts() {
       <td id="ping-${esc(h.name)}">-</td>
       <td>
         <button class="small" onclick="doPingOne('${esc(h.name)}')">Ping</button>
+        ${connected
+          ? '<button class="small danger" onclick="doDisconnect(\'' + esc(h.name) + '\')">Disc</button>'
+          : '<button class="small success" onclick="doConnectHost(\'' + esc(h.name) + '\')">Conn</button>'
+        }
         <button class="small danger" onclick="doRemoveHost('${esc(h.name)}')">Del</button>
       </td>
-    </tr>
+    </tr>`;
+  }).join('');
+}
   `).join('');
 }
 
@@ -747,6 +1011,32 @@ async function doPingAll() {
       }
     });
   } catch(e) { showError('Ping failed: ' + e.message); }
+}
+
+// ── Connection pool ────────────────────────────────────────
+async function loadConnectionStatus() {
+  try {
+    const statuses = await api('GET', '/connections');
+    connectionStatuses = {};
+    statuses.forEach(s => { connectionStatuses[s.host] = s; });
+    renderHosts();
+  } catch(_) { /* silent */ }
+}
+
+async function doConnectHost(name) {
+  clearError();
+  try {
+    await api('POST', '/connections/' + encodeURIComponent(name) + '/connect');
+    await loadConnectionStatus();
+  } catch(e) { showError('Connect failed: ' + e.message); }
+}
+
+async function doDisconnect(name) {
+  clearError();
+  try {
+    await api('POST', '/connections/' + encodeURIComponent(name) + '/disconnect');
+    await loadConnectionStatus();
+  } catch(e) { showError('Disconnect failed: ' + e.message); }
 }
 
 // ── Execute ────────────────────────────────────────────────
@@ -907,6 +1197,159 @@ async function doReject(id) {
     await api('POST', '/approvals/' + encodeURIComponent(id) + '/reject');
     await loadApprovals();
   } catch(e) { showError('Reject failed: ' + e.message); }
+}
+
+// ── Playbooks ──────────────────────────────────────────────
+let playbooks = [];
+let pendingPlaybookName = '';
+
+async function loadPlaybooks() {
+  clearError();
+  const tbody = $('playbooks-tbody');
+  tbody.innerHTML = '<tr><td colspan="6" class="empty-msg"><span class="spinner"></span> Loading...</td></tr>';
+  try {
+    playbooks = await api('GET', '/playbooks');
+    renderPlaybooks();
+  } catch(e) {
+    tbody.innerHTML = '<tr><td colspan="6" class="empty-msg">Failed to load playbooks</td></tr>';
+    showError('Load playbooks failed: ' + e.message);
+  }
+}
+
+function renderPlaybooks() {
+  const tbody = $('playbooks-tbody');
+  if (!playbooks.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="empty-msg">No playbooks configured. Add playbooks to ~/.agent2ssh/playbooks.toml</td></tr>';
+    return;
+  }
+  tbody.innerHTML = playbooks.map(p => `
+    <tr>
+      <td class="mono">${esc(p.name)}</td>
+      <td>${esc(p.description)}</td>
+      <td>${p.steps.length}</td>
+      <td>${(p.tags || []).map(t => '<span class="tag-badge">' + esc(t) + '</span>').join(' ') || '-'}</td>
+      <td>${p.risk_override ? riskBadge(p.risk_override) : '-'}</td>
+      <td><button class="success small" onclick="showPlaybookRun('${esc(p.name)}')">Run</button></td>
+    </tr>
+  `).join('');
+}
+
+function showPlaybookRun(name) {
+  pendingPlaybookName = name;
+  $('playbook-run-name').textContent = name;
+  // populate host dropdown
+  const opts = hosts.map(h => '<option value="' + esc(h.name) + '">' + esc(h.name) + '</option>').join('');
+  $('playbook-host-select').innerHTML = opts || '<option value="">No hosts</option>';
+  $('playbook-run-section').style.display = 'block';
+  $('playbook-results-section').style.display = 'none';
+}
+
+function hidePlaybookRun() {
+  $('playbook-run-section').style.display = 'none';
+  pendingPlaybookName = '';
+}
+
+async function doRunPlaybook() {
+  clearError();
+  const host = $('playbook-host-select').value;
+  const force = $('playbook-force').checked;
+  if (!host) { showError('Select a target host'); return; }
+  if (!pendingPlaybookName) { showError('No playbook selected'); return; }
+
+  $('playbook-run-section').style.display = 'none';
+  $('playbook-results-section').style.display = 'block';
+  $('playbook-result-name').textContent = pendingPlaybookName;
+  $('playbook-result-status').textContent = 'Running...';
+  $('playbook-result-status').className = 'badge badge-pending';
+  $('playbook-steps').innerHTML = '<span class="spinner"></span> Executing playbook...';
+  $('playbook-summary').textContent = '';
+
+  try {
+    const result = await api('POST', '/playbooks/run', { playbook: pendingPlaybookName, host, force });
+    renderPlaybookResult(result);
+  } catch(e) {
+    $('playbook-result-status').textContent = 'Error';
+    $('playbook-result-status').className = 'badge badge-high';
+    $('playbook-steps').innerHTML = '<div class="output-stderr">Error: ' + esc(e.message) + '</div>';
+  }
+}
+
+function renderPlaybookResult(result) {
+  const statusEl = $('playbook-result-status');
+  if (result.success) {
+    statusEl.textContent = 'Success';
+    statusEl.className = 'badge badge-low';
+  } else {
+    statusEl.textContent = 'Failed';
+    statusEl.className = 'badge badge-high';
+  }
+
+  const stepsHtml = result.steps_completed.map(s => {
+    const ok = s.result && s.result.exit_code === 0;
+    const icon = ok ? '<span class="ping-ok">&#10003;</span>' : '<span class="ping-fail">&#10007;</span>';
+    const exitInfo = s.result
+      ? 'exit=' + (s.result.exit_code != null ? s.result.exit_code : 'n/a') + ' ' + fmtDuration(s.result.duration_ms)
+      : '';
+    const errorInfo = s.error ? '<div class="output-stderr" style="margin-top:4px">' + esc(s.error) + '</div>' : '';
+    const stdout = s.result && s.result.stdout ? '<pre style="margin:4px 0;max-height:120px;overflow:auto">' + esc(s.result.stdout) + '</pre>' : '';
+    const stderr = s.result && s.result.stderr ? '<pre class="output-stderr" style="margin:4px 0;max-height:80px;overflow:auto">' + esc(s.result.stderr) + '</pre>' : '';
+    return `
+      <div class="playbook-step" style="padding:8px 10px;border:1px solid var(--border);border-radius:4px;margin-bottom:6px;background:${ok ? 'rgba(76,175,80,0.05)' : 'rgba(231,76,60,0.05)'}">
+        <div class="gap-row">
+          ${icon}
+          <span class="mono" style="flex:1">${esc(s.step + 1)}. ${esc(s.command)}</span>
+          <span style="color:var(--text-dim);font-size:0.8rem">${exitInfo}</span>
+        </div>
+        ${stdout}${stderr}${errorInfo}
+      </div>
+    `;
+  }).join('');
+
+  $('playbook-steps').innerHTML = stepsHtml || '<div class="empty-msg">No steps executed</div>';
+  $('playbook-summary').textContent =
+    'Host: ' + result.host + ' | Steps completed: ' + result.steps_completed.length +
+    ' | Total: ' + fmtDuration(result.total_duration_ms);
+}
+
+// ── Settings / Webhook ─────────────────────────────────────
+async function loadWebhookConfig() {
+  clearError();
+  try {
+    const config = await api('GET', '/webhook/config');
+    $('webhook-url').value = config.url || '';
+    $('webhook-secret').value = config.secret || '';
+    const events = config.events || [];
+    $('webhook-evt-approval').checked = events.includes('approval_required');
+    $('webhook-evt-blocked').checked = events.includes('exec_blocked');
+    $('webhook-evt-completed').checked = events.includes('exec_completed');
+    $('webhook-status').textContent = 'Loaded';
+    $('webhook-status').style.color = 'var(--green)';
+    setTimeout(() => { $('webhook-status').textContent = ''; }, 2000);
+  } catch(e) {
+    showError('Failed to load webhook config: ' + e.message);
+    $('webhook-status').textContent = '';
+  }
+}
+
+async function doSaveWebhook() {
+  clearError();
+  const url = $('webhook-url').value.trim() || null;
+  const secret = $('webhook-secret').value.trim() || null;
+  const events = [];
+  if ($('webhook-evt-approval').checked) events.push('approval_required');
+  if ($('webhook-evt-blocked').checked) events.push('exec_blocked');
+  if ($('webhook-evt-completed').checked) events.push('exec_completed');
+  if (events.length === 0) events.push('approval_required');
+  const config = { url, events, secret };
+  try {
+    await api('PUT', '/webhook/config', config);
+    $('webhook-status').textContent = 'Saved';
+    $('webhook-status').style.color = 'var(--green)';
+    setTimeout(() => { $('webhook-status').textContent = ''; }, 3000);
+  } catch(e) {
+    showError('Failed to save webhook config: ' + e.message);
+    $('webhook-status').textContent = '';
+  }
 }
 
 // ── Enter key shortcuts ────────────────────────────────────

@@ -104,3 +104,53 @@ export type SshKeyInfo = {
   key_type: string;
   created_at?: string | null;
 };
+
+export type ConnectionStatus = {
+  host: string;
+  connected: boolean;
+  socket_path?: string | null;
+};
+
+export type Playbook = {
+  name: string;
+  description: string;
+  steps: string[];
+  tags: string[];
+  risk_override?: RiskLevel | null;
+};
+
+export type PlaybookStepResult = {
+  step: number;
+  command: string;
+  result?: ExecResult | null;
+  error?: string | null;
+};
+
+export type PlaybookRunResult = {
+  playbook: string;
+  host: string;
+  steps_completed: PlaybookStepResult[];
+  success: boolean;
+  total_duration_ms: number;
+};
+
+export type WebhookConfig = {
+  url?: string | null;
+  events: string[];
+  secret?: string | null;
+};
+
+export type WebhookEvent = {
+  event: string;
+  host: string;
+  command: string;
+  approval_id?: string | null;
+  risk_level?: string | null;
+  exit_code?: number | null;
+};
+
+export type DaemonInfo = {
+  alias: string;
+  url: string;
+  connected: boolean;
+};

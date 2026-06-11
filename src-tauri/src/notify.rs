@@ -1,0 +1,295 @@
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WebhookConfig {
+    pub url: Option<String>,
+    #[serde(default = "default_events")]
+    pub events: Vec<String>,
+    pub secret: Option<String>,
+}
+
+fn default_events() -> Vec<String> {
+    vec!["approval_required".to_string()]
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookEvent {
+    pub event: String,
+    pub host: String,
+    pub command: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub risk_level: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+}
+
+fn webhook_config_path() -> Result<PathBuf> {
+    Ok(crate::store::config_dir()?.join("webhook.toml"))
+}
+
+/// Load webhook config from ~/.agent2ssh/webhook.toml.
+/// Returns None if the file does not exist or cannot be parsed.
+pub fn load_webhook_config() -> Option<WebhookConfig> {
+    let path = webhook_config_path().ok()?;
+    if !path.exists() {
+        return None;
+    }
+    let raw = std::fs::read_to_string(&path).ok()?;
+    toml::from_str(&raw).ok()
+}
+
+/// Save webhook config to ~/.agent2ssh/webhook.toml.
+pub fn save_webhook_config(config: &WebhookConfig) -> Result<()> {
+    let path = webhook_config_path()?;
+    crate::store::ensure_config_dir()?;
+    let raw = toml::to_string_pretty(config)?;
+    std::fs::write(&path, raw)?;
+    Ok(())
+}
+
+/// Fire a webhook event if configured.
+/// Non-blocking: errors are logged to stderr but don't fail the main flow.
+#[cfg(feature = "daemon")]
+pub async fn fire_webhook(event: WebhookEvent) -> Result<()> {
+    let config = match load_webhook_config() {
+        Some(c) => c,
+        None => return Ok(()),
+    };
+
+    let url = match &config.url {
+        Some(u) if !u.is_empty() => u.clone(),
+        _ => return Ok(()),
+    };
+
+    // Check if event type is in the subscribed events list
+    if !config.events.iter().any(|e| e == &event.event) {
+        return Ok(());
+    }
+
+    // Format payload: Slack Block Kit for Slack URLs, plain JSON otherwise
+    let payload = if url.contains("hooks.slack.com") {
+        format_slack_message(&event)
+    } else {
+        serde_json::to_value(&event)?
+    };
+
+    let body = serde_json::to_vec(&payload)?;
+
+    // Compute HMAC-SHA256 signature if secret is set
+    let signature = config
+        .secret
+        .as_ref()
+        .filter(|s| !s.is_empty())
+        .map(|s| compute_signature(&body, s));
+
+    // POST with timeout (fire-and-forget via spawned task)
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+
+    let mut req = client.post(&url).header("Content-Type", "application/json");
+
+    if let Some(sig) = signature {
+        req = req.header("X-Agent2SSH-Signature", format!("sha256={}", sig));
+    }
+
+    match req.body(body).send().await {
+        Ok(resp) => {
+            if !resp.status().is_success() {
+                eprintln!(
+                    "[webhook] POST {} returned status {}",
+                    url,
+                    resp.status()
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!("[webhook] POST {} failed: {}", url, e);
+        }
+    }
+
+    Ok(())
+}
+
+/// Format event as Slack Block Kit message.
+#[allow(dead_code)]
+fn format_slack_message(event: &WebhookEvent) -> serde_json::Value {
+    let event_name = match event.event.as_str() {
+        "approval_required" => "Approval Required",
+        "exec_blocked" => "Command Blocked",
+        "exec_completed" => "Command Completed",
+        other => other,
+    };
+
+    let mut fields = vec![
+        serde_json::json!({
+            "type": "mrkdwn",
+            "text": format!("*Host:*\n{}", event.host),
+        }),
+        serde_json::json!({
+            "type": "mrkdwn",
+            "text": format!("*Command:*\n```{}```", event.command),
+        }),
+    ];
+
+    if let Some(ref risk) = event.risk_level {
+        fields.push(serde_json::json!({
+            "type": "mrkdwn",
+            "text": format!("*Risk Level:*\n{}", risk),
+        }));
+    }
+
+    if let Some(code) = event.exit_code {
+        fields.push(serde_json::json!({
+            "type": "mrkdwn",
+            "text": format!("*Exit Code:*\n{}", code),
+        }));
+    }
+
+    let mut blocks = vec![
+        serde_json::json!({
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": format!("Agent2SSH: {}", event_name),
+            }
+        }),
+        serde_json::json!({
+            "type": "section",
+            "fields": fields,
+        }),
+    ];
+
+    if event.event == "approval_required" {
+        if let Some(ref approval_id) = event.approval_id {
+            blocks.push(serde_json::json!({
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": { "type": "plain_text", "text": "Approve" },
+                        "style": "primary",
+                        "url": format!("http://127.0.0.1:7722/approvals/{}/approve", approval_id),
+                    },
+                    {
+                        "type": "button",
+                        "text": { "type": "plain_text", "text": "Reject" },
+                        "style": "danger",
+                        "url": format!("http://127.0.0.1:7722/approvals/{}/reject", approval_id),
+                    }
+                ]
+            }));
+        }
+    }
+
+    serde_json::json!({ "blocks": blocks })
+}
+
+/// Compute HMAC-SHA256 signature and return hex-encoded lowercase string.
+#[allow(dead_code)]
+fn compute_signature(payload: &[u8], secret: &str) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    type HmacSha256 = Hmac<Sha256>;
+
+    let mut mac =
+        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC can take key of any size");
+    mac.update(payload);
+    let result = mac.finalize();
+    hex::encode(result.into_bytes())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_events() {
+        let defaults = default_events();
+        assert_eq!(defaults, vec!["approval_required"]);
+    }
+
+    #[test]
+    fn test_webhook_config_serialize_roundtrip() {
+        let config = WebhookConfig {
+            url: Some("https://example.com/hook".into()),
+            events: vec!["approval_required".into(), "exec_completed".into()],
+            secret: Some("mysecret".into()),
+        };
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let parsed: WebhookConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.url, config.url);
+        assert_eq!(parsed.events, config.events);
+        assert_eq!(parsed.secret, config.secret);
+    }
+
+    #[test]
+    fn test_webhook_config_default() {
+        let config = WebhookConfig::default();
+        assert!(config.url.is_none());
+        assert!(config.secret.is_none());
+    }
+
+    #[test]
+    fn test_compute_signature() {
+        let sig = compute_signature(b"hello", "secret");
+        // HMAC-SHA256("hello", "secret") — just verify it's a 64-char hex string
+        assert_eq!(sig.len(), 64);
+        assert!(sig.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_format_slack_message_approval() {
+        let event = WebhookEvent {
+            event: "approval_required".into(),
+            host: "myserver".into(),
+            command: "sudo rm -rf /tmp".into(),
+            approval_id: Some("abc-123".into()),
+            risk_level: Some("high".into()),
+            exit_code: None,
+        };
+        let msg = format_slack_message(&event);
+        let blocks = msg["blocks"].as_array().unwrap();
+        // Should have header, section, and actions blocks
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[0]["type"], "header");
+        assert_eq!(blocks[2]["type"], "actions");
+    }
+
+    #[test]
+    fn test_format_slack_message_completed() {
+        let event = WebhookEvent {
+            event: "exec_completed".into(),
+            host: "myserver".into(),
+            command: "ls -la".into(),
+            approval_id: None,
+            risk_level: Some("low".into()),
+            exit_code: Some(0),
+        };
+        let msg = format_slack_message(&event);
+        let blocks = msg["blocks"].as_array().unwrap();
+        // Should have header and section (no actions)
+        assert_eq!(blocks.len(), 2);
+    }
+
+    #[test]
+    fn test_webhook_event_skip_serializing_none() {
+        let event = WebhookEvent {
+            event: "exec_completed".into(),
+            host: "h".into(),
+            command: "c".into(),
+            approval_id: None,
+            risk_level: None,
+            exit_code: None,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(!json.contains("approval_id"));
+        assert!(!json.contains("risk_level"));
+        assert!(!json.contains("exit_code"));
+    }
+}

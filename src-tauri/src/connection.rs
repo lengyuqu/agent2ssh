@@ -7,7 +7,10 @@ use std::{
 };
 use tokio::{process::Command, sync::Mutex};
 
-use crate::{store::config_dir, types::HostProfile};
+use crate::{
+    store::{config_dir, load_config},
+    types::{ConnectionStatus, HostProfile},
+};
 
 // Per-host creation lock: ensures only one goroutine establishes ControlMaster per host.
 static HOST_LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
@@ -128,3 +131,101 @@ pub async fn get_or_create_socket(host: &HostProfile) -> Option<PathBuf> {
 pub fn apply_socket(cmd: &mut Command, socket: &PathBuf) {
     cmd.arg("-S").arg(socket).arg("-o").arg("ControlMaster=no");
 }
+
+/// List all hosts that currently have an active ControlMaster socket.
+pub async fn list_active_connections() -> Vec<ConnectionStatus> {
+    let config = match load_config() {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut statuses = Vec::new();
+    for host in &config.hosts {
+        let sock = match socket_path(host) {
+            Ok(p) => p,
+            Err(_) => {
+                statuses.push(ConnectionStatus {
+                    host: host.name.clone(),
+                    connected: false,
+                    socket_path: None,
+                });
+                continue;
+            }
+        };
+        let target = ssh_target(host);
+        let alive = socket_alive(&sock, &target).await;
+        statuses.push(ConnectionStatus {
+            host: host.name.clone(),
+            connected: alive,
+            socket_path: Some(sock.display().to_string()),
+        });
+    }
+    statuses
+}
+
+/// Manually establish a ControlMaster connection to a specific host.
+pub async fn connect_host(host_name: &str) -> Result<()> {
+    let config = load_config()?;
+    let host = config
+        .hosts
+        .iter()
+        .find(|h| h.name == host_name)
+        .ok_or_else(|| anyhow!("unknown host profile: {host_name}"))?
+        .clone();
+
+    // Reuse get_or_create_socket which handles locking and master creation.
+    match get_or_create_socket(&host).await {
+        Some(_) => Ok(()),
+        None => Err(anyhow!(
+            "failed to establish ControlMaster connection to '{}'",
+            host_name
+        )),
+    }
+}
+
+/// Manually close a ControlMaster connection.
+pub async fn disconnect_host(host_name: &str) -> Result<()> {
+    let config = load_config()?;
+    let host = config
+        .hosts
+        .iter()
+        .find(|h| h.name == host_name)
+        .ok_or_else(|| anyhow!("unknown host profile: {host_name}"))?
+        .clone();
+
+    let sock = socket_path(&host)?;
+    if !sock.exists() {
+        return Ok(()); // already disconnected
+    }
+
+    let target = ssh_target(&host);
+    let output = Command::new("ssh")
+        .arg("-S").arg(&sock)
+        .arg("-O").arg("exit")
+        .arg(&target)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await
+        .context("failed to send exit command to ControlMaster")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!(
+            "ControlMaster exit failed for '{}': {stderr}",
+            host_name
+        ));
+    }
+
+    // Verify socket file is removed
+    if sock.exists() {
+        // Give it a moment, then clean up manually if still present
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        if sock.exists() {
+            let _ = std::fs::remove_file(&sock);
+        }
+    }
+
+    Ok(())
+}
+

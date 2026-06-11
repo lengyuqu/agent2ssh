@@ -1,7 +1,11 @@
 use agent2ssh::approval::{approval_list, approval_request, approval_respond, approval_wait, ApprovalStatus};
 use agent2ssh::approval::ApprovalRequest as ApprovalRequestType;
+use agent2ssh::connection::{connect_host, disconnect_host, list_active_connections};
 use agent2ssh::core::*;
 use agent2ssh::forward::*;
+use agent2ssh::notify::{fire_webhook, load_webhook_config, save_webhook_config, WebhookConfig, WebhookEvent};
+use agent2ssh::playbook::{list_playbooks_core, run_playbook_core, Playbook, PlaybookRunResult};
+use agent2ssh::remote::{get_daemon, list_daemons_core};
 use agent2ssh::risk_config::classify_with_user_rules;
 use agent2ssh::session::*;
 use agent2ssh::store::*;
@@ -63,6 +67,7 @@ fn err(status: StatusCode, msg: impl ToString) -> (StatusCode, Json<ErrorBody>) 
 #[derive(Deserialize)] struct ReadQuery { timeout_ms: Option<u64> }
 #[derive(Deserialize)] struct AuditQuery { host: Option<String>, risk_level: Option<RiskLevel>, exit_code: Option<i32>, since: Option<String>, until: Option<String>, limit: Option<usize> }
 #[derive(Deserialize)] struct RiskCheckBody { command: String, #[allow(dead_code)] host: Option<String> }
+#[derive(Deserialize)] struct PlaybookRunBody { playbook: String, host: String, #[serde(default)] force: bool }
 #[derive(Serialize)] struct RiskCheckResult { risk_level: RiskLevel, matched_rule: Option<String> }
 #[derive(Serialize)] struct OkBody { ok: bool }
 #[derive(Serialize)] struct IdBody { id: String }
@@ -117,6 +122,19 @@ async fn exec(
     // Check user-defined rules first
     if let Some(user_risk) = classify_with_user_rules(&req.command).await {
         if user_risk == RiskLevel::Blocked {
+            let evt = WebhookEvent {
+                event: "exec_blocked".into(),
+                host: req.host.clone(),
+                command: req.command.clone(),
+                approval_id: None,
+                risk_level: Some("blocked".into()),
+                exit_code: None,
+            };
+            tokio::spawn(async move {
+                if let Err(e) = fire_webhook(evt).await {
+                    eprintln!("[webhook] fire error: {e}");
+                }
+            });
             return Err(err(StatusCode::BAD_REQUEST, format!("command blocked by user rule: '{}'", req.command)));
         }
     }
@@ -133,18 +151,79 @@ async fn exec(
     // If high risk and not forced, require approval
     if effective_risk == RiskLevel::High && !req.force {
         let approval_id = approval_request(&req.host, &req.command, effective_risk).await;
+        let host_clone = req.host.clone();
+        let cmd_clone = req.command.clone();
+        let approval_id_str = approval_id.to_string();
+        let risk_str = format!("{:?}", effective_risk).to_lowercase();
+
+        // Fire approval_required webhook
+        let evt = WebhookEvent {
+            event: "approval_required".into(),
+            host: host_clone.clone(),
+            command: cmd_clone.clone(),
+            approval_id: Some(approval_id_str.clone()),
+            risk_level: Some(risk_str),
+            exit_code: None,
+        };
+        tokio::spawn(async move {
+            if let Err(e) = fire_webhook(evt).await {
+                eprintln!("[webhook] fire error: {e}");
+            }
+        });
+
         let status = approval_wait(approval_id).await;
         match status {
             ApprovalStatus::Approved => {
                 // Execute with force
                 let mut approved_req = req;
                 approved_req.force = true;
-                exec_ssh_core(approved_req).await.map(Json).map_err(|e| err(StatusCode::BAD_REQUEST, e))
+                let result = exec_ssh_core(approved_req).await;
+                let exit_code = result.as_ref().ok().and_then(|r| r.exit_code);
+                let evt = WebhookEvent {
+                    event: "exec_completed".into(),
+                    host: host_clone,
+                    command: cmd_clone,
+                    approval_id: Some(approval_id_str),
+                    risk_level: None,
+                    exit_code,
+                };
+                tokio::spawn(async move {
+                    if let Err(e) = fire_webhook(evt).await {
+                        eprintln!("[webhook] fire error: {e}");
+                    }
+                });
+                result.map(Json).map_err(|e| err(StatusCode::BAD_REQUEST, e))
             }
             ApprovalStatus::Rejected => {
+                let evt = WebhookEvent {
+                    event: "exec_completed".into(),
+                    host: host_clone,
+                    command: cmd_clone,
+                    approval_id: Some(approval_id_str),
+                    risk_level: None,
+                    exit_code: None,
+                };
+                tokio::spawn(async move {
+                    if let Err(e) = fire_webhook(evt).await {
+                        eprintln!("[webhook] fire error: {e}");
+                    }
+                });
                 Err(err(StatusCode::FORBIDDEN, "command rejected by approver"))
             }
             ApprovalStatus::TimedOut => {
+                let evt = WebhookEvent {
+                    event: "exec_completed".into(),
+                    host: host_clone,
+                    command: cmd_clone,
+                    approval_id: Some(approval_id_str),
+                    risk_level: None,
+                    exit_code: None,
+                };
+                tokio::spawn(async move {
+                    if let Err(e) = fire_webhook(evt).await {
+                        eprintln!("[webhook] fire error: {e}");
+                    }
+                });
                 Err(err(StatusCode::REQUEST_TIMEOUT, "approval request timed out"))
             }
             _ => {
@@ -152,7 +231,24 @@ async fn exec(
             }
         }
     } else {
-        exec_ssh_core(req).await.map(Json).map_err(|e| err(StatusCode::BAD_REQUEST, e))
+        let host_clone = req.host.clone();
+        let cmd_clone = req.command.clone();
+        let result = exec_ssh_core(req).await;
+        let exit_code = result.as_ref().ok().and_then(|r| r.exit_code);
+        let evt = WebhookEvent {
+            event: "exec_completed".into(),
+            host: host_clone,
+            command: cmd_clone,
+            approval_id: None,
+            risk_level: None,
+            exit_code,
+        };
+        tokio::spawn(async move {
+            if let Err(e) = fire_webhook(evt).await {
+                eprintln!("[webhook] fire error: {e}");
+            }
+        });
+        result.map(Json).map_err(|e| err(StatusCode::BAD_REQUEST, e))
     }
 }
 
@@ -262,6 +358,118 @@ async fn risk_check(State(s): State<AppState>, headers: HeaderMap, Json(body): J
         return Ok(Json(RiskCheckResult { risk_level: final_risk, matched_rule: Some("user_rule".into()) }));
     }
     Ok(Json(RiskCheckResult { risk_level: base, matched_rule: None }))
+}
+
+// ── Connections ──────────────────────────────────────────────────────────────
+
+async fn connection_status(State(s): State<AppState>, headers: HeaderMap) -> Result<Json<Vec<ConnectionStatus>>, (StatusCode, Json<ErrorBody>)> {
+    check_auth(&s, &headers)?;
+    Ok(Json(list_active_connections().await))
+}
+async fn ssh_connect(State(s): State<AppState>, headers: HeaderMap, Path(host): Path<String>) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
+    check_auth(&s, &headers)?;
+    connect_host(&host).await.map(|_| Json(OkBody { ok: true })).map_err(|e| err(StatusCode::BAD_REQUEST, e))
+}
+async fn ssh_disconnect(State(s): State<AppState>, headers: HeaderMap, Path(host): Path<String>) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
+    check_auth(&s, &headers)?;
+    disconnect_host(&host).await.map(|_| Json(OkBody { ok: true })).map_err(|e| err(StatusCode::BAD_REQUEST, e))
+}
+
+// ── Webhook config ───────────────────────────────────────────────────────────
+
+async fn get_webhook_config(
+    State(s): State<AppState>, headers: HeaderMap,
+) -> Result<Json<WebhookConfig>, (StatusCode, Json<ErrorBody>)> {
+    check_auth(&s, &headers)?;
+    Ok(Json(load_webhook_config().unwrap_or_default()))
+}
+
+async fn set_webhook_config(
+    State(s): State<AppState>, headers: HeaderMap, Json(config): Json<WebhookConfig>,
+) -> Result<Json<WebhookConfig>, (StatusCode, Json<ErrorBody>)> {
+    check_auth(&s, &headers)?;
+    save_webhook_config(&config).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(config))
+}
+
+// ── Playbooks ─────────────────────────────────────────────────────────────────
+
+async fn list_playbooks(
+    State(s): State<AppState>, headers: HeaderMap,
+) -> Result<Json<Vec<Playbook>>, (StatusCode, Json<ErrorBody>)> {
+    check_auth(&s, &headers)?;
+    list_playbooks_core().map(Json).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))
+}
+
+async fn run_playbook(
+    State(s): State<AppState>, headers: HeaderMap, Json(body): Json<PlaybookRunBody>,
+) -> Result<Json<PlaybookRunResult>, (StatusCode, Json<ErrorBody>)> {
+    check_auth(&s, &headers)?;
+    run_playbook_core(&body.playbook, &body.host, body.force)
+        .await
+        .map(Json)
+        .map_err(|e| err(StatusCode::BAD_REQUEST, e))
+}
+
+// ── Remote daemons ───────────────────────────────────────────────────────────
+
+async fn list_daemons(
+    State(s): State<AppState>, headers: HeaderMap,
+) -> Result<Json<Vec<agent2ssh::remote::DaemonInfo>>, (StatusCode, Json<ErrorBody>)> {
+    check_auth(&s, &headers)?;
+    list_daemons_core().map(Json).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))
+}
+
+async fn proxy_exec(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Path(alias): Path<String>,
+    Json(req): Json<ExecRequest>,
+) -> Result<Json<ExecResult>, (StatusCode, Json<ErrorBody>)> {
+    check_auth(&s, &headers)?;
+
+    // If alias is "localhost", execute locally
+    if alias == "localhost" {
+        // Apply same user-rule checks as local exec
+        if let Some(user_risk) = classify_with_user_rules(&req.command).await {
+            if user_risk == RiskLevel::Blocked {
+                return Err(err(StatusCode::BAD_REQUEST, format!("command blocked by user rule: '{}'", req.command)));
+            }
+        }
+        return exec_ssh_core(req).await.map(Json).map_err(|e| err(StatusCode::BAD_REQUEST, e));
+    }
+
+    // Look up remote daemon
+    let (url, remote_token) = get_daemon(&alias)
+        .map_err(|e| err(StatusCode::NOT_FOUND, e))?;
+    let token = remote_token
+        .ok_or_else(|| err(StatusCode::UNAUTHORIZED, format!("no token configured for daemon '{}'", alias)))?;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(req.timeout_secs.unwrap_or(60) + 10))
+        .build()
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    let resp = client
+        .post(format!("{}/exec", url.trim_end_matches('/')))
+        .bearer_auth(&token)
+        .json(&req)
+        .send()
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("remote exec failed: {e}")))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(err(
+            StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+            body,
+        ));
+    }
+
+    let result: ExecResult = resp.json().await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("invalid response from remote: {e}")))?;
+    Ok(Json(result))
 }
 
 // ── WebSocket streaming exec ─────────────────────────────────────────────────
@@ -477,6 +685,14 @@ async fn main() -> anyhow::Result<()> {
         .route("/approvals/:id/approve", post(approval_approve))
         .route("/approvals/:id/reject", post(approval_reject))
         .route("/risk/check", post(risk_check))
+        .route("/connections", get(connection_status))
+        .route("/connections/:host/connect", post(ssh_connect))
+        .route("/connections/:host/disconnect", post(ssh_disconnect))
+        .route("/playbooks", get(list_playbooks))
+        .route("/playbooks/run", post(run_playbook))
+        .route("/daemons", get(list_daemons))
+        .route("/daemons/:alias/exec", post(proxy_exec))
+        .route("/webhook/config", get(get_webhook_config).put(set_webhook_config))
         .layer(cors)
         .with_state(state);
 

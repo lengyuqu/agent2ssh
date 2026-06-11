@@ -180,3 +180,10 @@ pub struct ForwardRule {
     pub target_host: String,
     pub target_port: u16,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectionStatus {
+    pub host: String,
+    pub connected: bool,
+    pub socket_path: Option<String>,
+}

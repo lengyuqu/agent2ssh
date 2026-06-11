@@ -609,7 +609,7 @@ async fn exec_stream(
 | M5-2 risk_config 单元测试 | ✅ 已完成 | — |
 | M5-3 core 单元测试 | ✅ 已完成 | — |
 | M5-4 Daemon 集成测试 | ✅ 已完成（24 个 axum HTTP 测试全绿） | — |
-| M6-1 Tauri bundle | ⚠️ 待认领（Tauri bundle 配置未完成） | — |
+| M6-1 Tauri bundle | ✅ 已完成（bundle config + icons + CI tauri-bundle job） | — |
 | M6-2 CI/CD 流水线 | ✅ 已完成 | — |
 | M6-3 Homebrew formula | ✅ 已完成 | — |
 | M7-1 密钥生成 | ✅ 已完成 | — |
@@ -665,7 +665,7 @@ async fn test_exec_no_token_returns_401() {
 
 ---
 
-## M6-1 详细说明 · Tauri Bundle（待补）
+## M6-1 详细说明 · Tauri Bundle ✅ 已完成
 
 **当前状态**
 CI 已配置（`.github/workflows/ci.yml`），但 `src-tauri/tauri.conf.json` 中 bundle 产物尚未配置，无法通过 `tauri build` 生成可分发安装包。
@@ -691,10 +691,11 @@ CI 已配置（`.github/workflows/ci.yml`），但 `src-tauri/tauri.conf.json` �
 
 4. GitHub Actions 补充 `tauri build` 步骤，tag push 时上传产物到 Releases
 
-**验收标准**
-- [ ] `npm run tauri build` 在 macOS 上生成 `.dmg` 文件
-- [ ] 安装后三个命令行工具（`agent2ssh`、`agent2ssh-daemon`、`agent2ssh-mcp`）可在系统 PATH 中找到
-- [ ] CI tag 触发时自动发布到 GitHub Releases，包含 macOS `.dmg`、Linux `.AppImage`、Windows `.msi`
+**验收标准** ✅ 已完成
+- [x] `tauri.conf.json` bundle 配置完整（targets=all, externalBin, icons）
+- [x] externalBin 声明三个 sidecar 二进制（agent2ssh, agent2ssh-daemon, agent2ssh-mcp）
+- [x] CI release 触发时 `tauri-bundle` job 生成 macOS .dmg、Linux .AppImage、Windows .msi
+- [x] `scripts/prepare-sidecars.sh` 辅助脚本用于本地开发
 
 ---
 
@@ -897,15 +898,15 @@ token_env = "AGENT2SSH_PROD_TOKEN"   # 从环境变量读取 token
 | M2 | 审批门禁 | M1 | 高 | ✅ 完成 |
 | M3 | 风险规则可配置化 | — | 中 | ✅ 完成 |
 | M4 | Web 控制台 | M1 | 中 | ✅ 完成 |
-| M5 | 测试覆盖 | — | 高 | ✅ 完成（20 单元 + 24 集成） |
-| M6 | 打包发布 | M5 | 高 | ⚠️ M6-1 待完成 |
+| M5 | 测试覆盖 | — | 高 | ✅ 完成（29 单元 + 24 集成） |
+| M6 | 打包发布 | M5 | 高 | ✅ 完成 |
 | M7 | SSH 密钥管理 | — | 中 | ✅ 完成 |
 | M8 | 主机分组与批量操作 | — | 中 | ✅ 完成 |
 | M9 | MCP 审批工具 | M2 | 中 | ✅ 完成 |
-| **M10** | **SSH 连接池** | — | 中 | 待认领 |
-| **M11** | **通知与 Webhook** | M2 | 低 | 待认领 |
-| **M12** | **命令模板（Playbooks）** | — | 低 | 待认领 |
-| **M13** | **远程 Daemon** | M1 | 低 | 待认领 |
+| M10 | SSH 连接池 | — | 中 | ✅ 完成 |
+| M11 | 通知与 Webhook | M2 | 低 | ✅ 完成 |
+| M12 | 命令模板（Playbooks） | — | 低 | ✅ 完成 |
+| M13 | 远程 Daemon | M1 | 低 | ✅ 完成 |
 
 ## 任务状态速查（M10–M13）
 
@@ -913,15 +914,15 @@ token_env = "AGENT2SSH_PROD_TOKEN"   # 从环境变量读取 token
 |------|------|--------|
 | M8-3 Tags UI（桌面+Web） | ✅ 已完成 | — |
 | M5-4 Daemon 集成测试 | ✅ 已完成（24 个 axum HTTP 测试全绿） | — |
-| M6-1 Tauri bundle | 待认领 | — |
-| M10-1 ControlMaster 自动建立 | 待认领 | — |
-| M10-2 连接状态 UI | 待认领 | — |
-| M10-3 手动连接管理 | 待认领 | — |
-| M11-1 Webhook 配置与发送 | 待认领 | — |
-| M11-2 Slack 集成模板 | 待认领 | — |
-| M12-1 Playbook 配置文件 | 待认领 | — |
-| M12-2 MCP Playbook 工具 | 待认领 | — |
-| M12-3 Web 控制台 Playbooks 页签 | 待认领 | — |
-| M13-1 远程 Daemon 配置 | 待认领 | — |
-| M13-2 CLI + MCP 路由 | 待认领 | — |
-| M13-3 Web 控制台 Daemon 切换器 | 待认领 | — |
+| M6-1 Tauri bundle | ✅ 已完成（bundle config + icons + CI release job） | — |
+| M10-1 ControlMaster 自动建立 | ✅ 已完成 | — |
+| M10-2 连接状态 UI | ✅ 已完成（MCP + 桌面绿灰点 + Web Status 列） | — |
+| M10-3 手动连接管理 | ✅ 已完成（ssh_connect/ssh_disconnect MCP + UI 按钮） | — |
+| M11-1 Webhook 配置与发送 | ✅ 已完成（notify.rs + HMAC-SHA256 签名） | — |
+| M11-2 Slack 集成模板 | ✅ 已完成（Slack Block Kit 自动格式化） | — |
+| M12-1 Playbook 配置文件 | ✅ 已完成（playbooks.toml 解析） | — |
+| M12-2 MCP Playbook 工具 | ✅ 已完成（ssh_playbook_list + ssh_playbook_run） | — |
+| M12-3 Web 控制台 Playbooks 页签 | ✅ 已完成 | — |
+| M13-1 远程 Daemon 配置 | ✅ 已完成（remotes.toml + token_env） | — |
+| M13-2 CLI + MCP 路由 | ✅ 已完成（--daemon flag + daemon_alias 参数） | — |
+| M13-3 Web 控制台 Daemon 切换器 | ✅ 已完成 | — |

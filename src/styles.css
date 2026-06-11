@@ -220,6 +220,46 @@ select {
   color: #ff8080;
 }
 
+/* ── Connection status ───────────────────────────────────────────────────── */
+.status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+
+.status-connected {
+  background: #42b883;
+}
+
+.status-disconnected {
+  background: #9fb0bd;
+}
+
+.host-connect {
+  flex-shrink: 0;
+  width: 32px;
+  height: auto;
+  margin-left: 0;
+  border: 0;
+  border-left: 1px solid #40535e;
+  border-radius: 0;
+  color: #9fb0bd;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.host-row:hover .host-connect {
+  opacity: 1;
+}
+
+.host-connect:hover {
+  color: #42b883;
+}
+
 /* ── Forms ───────────────────────────────────────────────────────────────── */
 label {
   display: grid;
@@ -1020,6 +1060,103 @@ textarea {
   color: #60a5fa;
   border: 1px solid rgba(59, 130, 246, 0.25);
   line-height: 1.4;
+}
+
+/* ── Playbook list ────────────────────────────────────────────────────────── */
+.playbook-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.playbook-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 10px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+}
+
+.step-result {
+  padding: 8px 10px;
+  border-radius: 6px;
+  margin-bottom: 6px;
+}
+
+.step-success {
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+}
+
+.step-failure {
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+}
+
+.step-result .mono {
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 13px;
+}
+
+.step-result pre {
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  background: rgba(0, 0, 0, 0.03);
+  padding: 4px 6px;
+  border-radius: 3px;
+}
+
+/* ── Daemon switcher ──────────────────────────────────────────────────────── */
+.daemon-switcher {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.daemon-switcher select {
+  padding: 6px 10px;
+  border: 1px solid #c9d4db;
+  border-radius: 6px;
+  background: #fbfdfe;
+  color: #172026;
+  font-size: 13px;
+  min-width: 150px;
+}
+
+.daemon-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: #667783;
+}
+
+.daemon-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  background: #c9d4db;
+}
+
+.daemon-status-dot.connected {
+  background: #42b883;
+}
+
+.daemon-status-dot.disconnected {
+  background: #ef4444;
+}
+
+.daemon-url {
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  color: #9fb0bd;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ── Responsive ──────────────────────────────────────────────────────────── */

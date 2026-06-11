@@ -1,21 +1,25 @@
 use crate::{
+    connection::{connect_host, disconnect_host, list_active_connections},
     core::{
         add_host_core, classify_risk, exec_multi_core, exec_ssh_core, import_ssh_config_core,
         list_audit_core, list_hosts_core, ping_hosts_core, remove_host_core, sftp_download_core,
         sftp_ls_core, sftp_mkdir_core, sftp_stat_core, sftp_upload_core,
     },
     forward::{forward_add_core, forward_list_core, forward_remove_core},
+    playbook::{list_playbooks_core, run_playbook_core, Playbook, PlaybookRunResult},
+    remote::{list_daemons_core, DaemonInfo},
     session::{
         session_close_core, session_list_core, session_open_core, session_read_core,
         session_write_core,
     },
     types::{
-        AuditEntry, AuditFilter, ExecMultiResult, ExecRequest, ExecResult, ForwardDirection,
-        ForwardRule, HostProfile, PingResult, RiskLevel, SftpDownloadRequest, SftpResult,
-        SftpUploadRequest,
+        AuditEntry, AuditFilter, ConnectionStatus, ExecMultiResult, ExecRequest, ExecResult,
+        ForwardDirection, ForwardRule, HostProfile, PingResult, RiskLevel, SftpDownloadRequest,
+        SftpResult, SftpUploadRequest,
     },
 };
 use crate::keys::{delete_key_core, generate_key_core, import_key_core, list_keys_core, SshKeyInfo};
+use crate::notify::{load_webhook_config, save_webhook_config, WebhookConfig};
 use uuid::Uuid;
 
 // ── Host management ──────────────────────────────────────────────────────────
@@ -210,6 +214,12 @@ pub fn get_daemon_token() -> Result<String, String> {
     }
 }
 
+/// List all configured daemons (localhost + remotes from ~/.agent2ssh/remotes.toml)
+#[tauri::command]
+pub fn list_daemons() -> Result<Vec<DaemonInfo>, String> {
+    list_daemons_core().map_err(|e| e.to_string())
+}
+
 // ── SSH Key management ──────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -230,6 +240,47 @@ pub fn import_key(source_path: String, name: Option<String>) -> Result<SshKeyInf
 #[tauri::command]
 pub fn delete_key(name: String) -> Result<(), String> {
     delete_key_core(&name).map_err(|e| e.to_string())
+}
+
+// ── Connection pool ─────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn connection_status() -> Result<Vec<ConnectionStatus>, String> {
+    Ok(list_active_connections().await)
+}
+
+#[tauri::command]
+pub async fn ssh_connect(host: String) -> Result<(), String> {
+    connect_host(&host).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn ssh_disconnect(host: String) -> Result<(), String> {
+    disconnect_host(&host).await.map_err(|e| e.to_string())
+}
+
+// ── Playbooks ────────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn list_playbooks() -> Result<Vec<Playbook>, String> {
+    list_playbooks_core().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn run_playbook(playbook: String, host: String, force: bool) -> Result<PlaybookRunResult, String> {
+    run_playbook_core(&playbook, &host, force).await.map_err(|e| e.to_string())
+}
+
+// ── Webhook config ───────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn get_webhook_config() -> Result<WebhookConfig, String> {
+    Ok(load_webhook_config().unwrap_or_default())
+}
+
+#[tauri::command]
+pub fn set_webhook_config(config: WebhookConfig) -> Result<(), String> {
+    save_webhook_config(&config).map_err(|e| e.to_string())
 }
 
 // ── Bootstrap ────────────────────────────────────────────────────────────────
@@ -268,11 +319,22 @@ pub fn run_tauri() {
             list_audit,
             // Daemon helpers
             get_daemon_token,
+            list_daemons,
             // SSH Keys
             list_keys,
             generate_key,
             import_key,
             delete_key,
+            // Connection pool
+            connection_status,
+            ssh_connect,
+            ssh_disconnect,
+            // Playbooks
+            list_playbooks,
+            run_playbook,
+            // Webhook config
+            get_webhook_config,
+            set_webhook_config,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

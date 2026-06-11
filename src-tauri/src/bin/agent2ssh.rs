@@ -1,11 +1,13 @@
 use agent2ssh::{
     add_host_core, classify_risk, exec_multi_core, exec_ssh_core, forward_add_core,
     forward_list_core, forward_remove_core, import_ssh_config_core, list_audit_core,
-    list_hosts_core, ping_hosts_core, remove_host_core, session_close_core, session_list_core,
-    session_open_core, session_read_core, session_write_core, sftp_download_core, sftp_ls_core,
-    sftp_mkdir_core, sftp_stat_core, sftp_upload_core, AuditFilter, ExecRequest, ForwardDirection,
-    HostProfile, RiskLevel, SftpDownloadRequest, SftpUploadRequest,
+    list_daemons_core, list_hosts_core, ping_hosts_core, remove_host_core, session_close_core,
+    session_list_core, session_open_core, session_read_core, session_write_core,
+    sftp_download_core, sftp_ls_core, sftp_mkdir_core, sftp_stat_core, sftp_upload_core,
+    AuditFilter, ExecRequest, ForwardDirection, HostProfile, RiskLevel, SftpDownloadRequest,
+    SftpUploadRequest,
 };
+use agent2ssh::remote::get_daemon;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
@@ -13,6 +15,10 @@ use clap::{Parser, Subcommand};
 #[command(name = "agent2ssh")]
 #[command(about = "SSH capability layer for agents")]
 struct Cli {
+    /// Route operations through a remote daemon by alias (from ~/.agent2ssh/remotes.toml).
+    /// Use "localhost" or omit for the local daemon.
+    #[arg(long, global = true)]
+    daemon: Option<String>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -265,15 +271,50 @@ enum DaemonCommands {
     Status,
     /// Restart the daemon
     Restart,
+    /// List all configured daemons (localhost + remotes)
+    List {
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    let daemon_alias = cli.daemon.clone();
 
     match cli.command {
         Commands::Host { command } => match command {
             HostCommands::List { json } => {
+                // If --daemon is set and remote, forward via HTTP
+                if let Some(ref alias) = daemon_alias {
+                    if alias != "localhost" {
+                        let (url, token) = get_daemon(alias)?;
+                        let client = reqwest::Client::new();
+                        let mut req = client.get(format!("{}/hosts", url.trim_end_matches('/')));
+                        if let Some(ref t) = token {
+                            req = req.bearer_auth(t);
+                        }
+                        let resp = req.send().await?;
+                        let hosts: Vec<HostProfile> = resp.json().await?;
+                        if json {
+                            println!("{}", serde_json::to_string_pretty(&hosts)?);
+                        } else if hosts.is_empty() {
+                            println!("No hosts configured on daemon '{alias}'.");
+                        } else {
+                            for host in hosts {
+                                println!(
+                                    "{}\t{}{}:{}",
+                                    host.name,
+                                    host.user.map(|u| format!("{u}@")).unwrap_or_default(),
+                                    host.host,
+                                    host.port.unwrap_or(22)
+                                );
+                            }
+                        }
+                        return Ok(());
+                    }
+                }
                 let hosts = list_hosts_core()?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&hosts)?);
@@ -360,6 +401,38 @@ async fn main() -> Result<()> {
         } => {
             let risk = classify_risk(&command);
             let req = ExecRequest { host, command, force, timeout_secs, stdin, max_output_bytes: None };
+
+            // If --daemon is set and remote, forward via HTTP
+            if let Some(ref alias) = daemon_alias {
+                if alias != "localhost" {
+                    let (url, token) = get_daemon(alias)?;
+                    let token_val = token.ok_or_else(|| anyhow::anyhow!("no token for daemon '{alias}'"))?;
+                    let client = reqwest::Client::builder()
+                        .timeout(std::time::Duration::from_secs(req.timeout_secs.unwrap_or(60) + 10))
+                        .build()?;
+                    let resp = client
+                        .post(format!("{}/exec", url.trim_end_matches('/')))
+                        .bearer_auth(&token_val)
+                        .json(&req)
+                        .send()
+                        .await?;
+                    if !resp.status().is_success() {
+                        let body = resp.text().await.unwrap_or_default();
+                        eprintln!("Remote daemon error: {body}");
+                        std::process::exit(1);
+                    }
+                    let result: agent2ssh::types::ExecResult = resp.json().await?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&result)?);
+                    } else {
+                        print!("{}", result.stdout);
+                        eprint!("{}", result.stderr);
+                        std::process::exit(result.exit_code.unwrap_or(1));
+                    }
+                    return Ok(());
+                }
+            }
+
             if json {
                 let result = exec_ssh_core(req).await?;
                 println!("{}", serde_json::to_string_pretty(&result)?);
@@ -676,6 +749,19 @@ async fn main() -> Result<()> {
                         .spawn()
                         .map_err(|e| anyhow::anyhow!("Failed to start daemon: {}", e))?;
                     println!("Daemon restarted.");
+                }
+                DaemonCommands::List { json } => {
+                    let daemons = list_daemons_core()?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&daemons)?);
+                    } else if daemons.is_empty() {
+                        println!("No daemons configured.");
+                    } else {
+                        for d in &daemons {
+                            let status = if d.connected { "connected" } else { "unreachable" };
+                            println!("{}\t{}\t[{}]", d.alias, d.url, status);
+                        }
+                    }
                 }
             }
         }

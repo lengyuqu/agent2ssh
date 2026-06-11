@@ -1,6 +1,6 @@
 # Agent2SSH MCP Tools Reference
 
-Agent2SSH exposes 24 tools via the Model Context Protocol (MCP) stdio server.
+Agent2SSH exposes 31 tools via the Model Context Protocol (MCP) stdio server.
 
 ## Tool List
 
@@ -10,7 +10,7 @@ Agent2SSH exposes 24 tools via the Model Context Protocol (MCP) stdio server.
 | 2 | `ssh_add_host` | Create or update an SSH host profile |
 | 3 | `ssh_remove_host` | Remove a host profile by alias |
 | 4 | `ssh_import_config` | Import hosts from ~/.ssh/config |
-| 5 | `ssh_exec` | Run a non-interactive command over SSH |
+| 5 | `ssh_exec` | Run a non-interactive command over SSH (supports `daemon_alias` for remote routing) |
 | 6 | `ssh_exec_multi` | Run the same command on multiple hosts concurrently |
 | 7 | `ssh_ping` | Check SSH reachability of hosts |
 | 8 | `ssh_audit` | Query execution audit log entries |
@@ -30,6 +30,13 @@ Agent2SSH exposes 24 tools via the Model Context Protocol (MCP) stdio server.
 | 22 | `ssh_risk_check` | Check risk level of a command |
 | 23 | `ssh_approval_list` | List pending approval requests |
 | 24 | `ssh_approval_respond` | Approve or reject an approval request |
+| 25 | `ssh_connection_status` | List ControlMaster connection states for all hosts |
+| 26 | `ssh_connect` | Manually establish a ControlMaster connection to a host |
+| 27 | `ssh_disconnect` | Manually close a ControlMaster connection |
+| 28 | `ssh_webhook_config` | Get or set webhook notification configuration |
+| 29 | `ssh_playbook_list` | List all configured playbooks |
+| 30 | `ssh_playbook_run` | Execute a playbook (command sequence) on a host |
+| 31 | `ssh_list_daemons` | List configured daemon instances with connectivity status |
 
 ## Risk Levels
 
@@ -70,3 +77,56 @@ Rules support glob patterns with `*`. User rules are checked before built-in rul
 ## Per-Host Risk Override
 
 Set `risk_override` on a host profile to override the risk level for all commands on that host. For example, setting `risk_override: "low"` on a sandbox host allows running any command without confirmation.
+
+## SSH Connection Pool (ControlMaster)
+
+Agent2SSH automatically manages SSH ControlMaster connections for faster repeated execution:
+
+- First command to a host establishes the ControlMaster socket (`~/.agent2ssh/cm_<host>.sock`)
+- Subsequent commands reuse the existing connection, skipping SSH handshake (~500ms → ~10ms)
+- Use `ssh_connection_status` to see which hosts have active connections
+- Use `ssh_connect` to pre-establish a connection, `ssh_disconnect` to tear one down
+- ControlPersist=600 keeps idle connections alive for 10 minutes
+
+## Webhook Notifications
+
+Configure `~/.agent2ssh/webhook.toml` to receive event notifications:
+
+```toml
+url = "https://hooks.slack.com/services/T.../B.../..."
+events = ["approval_required", "exec_blocked", "exec_completed"]
+secret = ""  # Optional HMAC-SHA256 signing key
+```
+
+When the URL contains `hooks.slack.com`, messages are automatically formatted as Slack Block Kit messages. Use `ssh_webhook_config` to get or set configuration programmatically.
+
+## Playbooks
+
+Define reusable command sequences in `~/.agent2ssh/playbooks.toml`:
+
+```toml
+[[playbooks]]
+name = "deploy-web"
+description = "Pull latest code and restart web service"
+steps = [
+  "cd /opt/app && git pull",
+  "systemctl restart nginx",
+]
+tags = ["production", "web"]
+risk_override = "high"
+```
+
+Use `ssh_playbook_list` to list all playbooks, `ssh_playbook_run` to execute one on a target host. Steps run sequentially and halt on first failure.
+
+## Remote Daemon
+
+Connect to agent2ssh-daemon instances running on other machines via `~/.agent2ssh/remotes.toml`:
+
+```toml
+[[remotes]]
+alias = "ci-server"
+url = "http://192.168.1.100:7722"
+token_env = "AGENT2SSH_PROD_TOKEN"
+```
+
+Use `ssh_list_daemons` to see configured daemons with connectivity status. Pass `daemon_alias` to `ssh_exec` to route commands through a remote daemon. The CLI supports `--daemon <alias>` as a global flag.

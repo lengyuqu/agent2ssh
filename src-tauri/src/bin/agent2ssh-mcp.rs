@@ -1,12 +1,15 @@
 use agent2ssh::{
-    add_host_core, classify_risk, exec_multi_core, exec_ssh_core, forward_add_core,
-    forward_list_core, forward_remove_core, import_ssh_config_core, list_audit_core,
-    list_hosts_core, ping_hosts_core, remove_host_core, session_close_core, session_list_core,
-    session_open_core, session_read_core, session_write_core, sftp_download_core, sftp_ls_core,
-    sftp_mkdir_core, sftp_stat_core, sftp_upload_core, AuditFilter, ExecRequest, ForwardDirection,
-    HostProfile, RiskLevel, SftpDownloadRequest, SftpUploadRequest,
+    add_host_core, classify_risk, connect_host, disconnect_host, exec_multi_core, exec_ssh_core,
+    forward_add_core, forward_list_core, forward_remove_core, import_ssh_config_core,
+    list_active_connections, list_audit_core, list_hosts_core, list_playbooks_core, ping_hosts_core,
+    remove_host_core, run_playbook_core, session_close_core, session_list_core, session_open_core,
+    session_read_core, session_write_core, sftp_download_core, sftp_ls_core, sftp_mkdir_core,
+    sftp_stat_core, sftp_upload_core, AuditFilter, ExecRequest, ForwardDirection, HostProfile,
+    RiskLevel, SftpDownloadRequest, SftpUploadRequest,
 };
 use agent2ssh::approval::{approval_list, approval_respond};
+use agent2ssh::notify::{load_webhook_config, save_webhook_config};
+use agent2ssh::remote::{get_daemon, list_daemons_core};
 use agent2ssh::risk_config::classify_with_user_rules;
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
@@ -99,6 +102,11 @@ async fn handle_request(request: &Value) -> std::result::Result<Value, McpError>
                     "inputSchema": { "type": "object", "properties": {} }
                 },
                 {
+                    "name": "ssh_list_daemons",
+                    "description": "List all configured daemons (localhost + remote daemons from ~/.agent2ssh/remotes.toml). Returns alias, url, and connected status for each.",
+                    "inputSchema": { "type": "object", "properties": {} }
+                },
+                {
                     "name": "ssh_import_config",
                     "description": "Import SSH host profiles from ~/.ssh/config (or a custom path). Skips aliases that already exist.",
                     "inputSchema": {
@@ -137,7 +145,7 @@ async fn handle_request(request: &Value) -> std::result::Result<Value, McpError>
                 },
                 {
                     "name": "ssh_exec",
-                    "description": "Run a non-interactive command over SSH. Returns stdout, stderr, exit code, timing, and risk_level. High-risk commands require force=true; blocked commands always fail.",
+                    "description": "Run a non-interactive command over SSH. Returns stdout, stderr, exit code, timing, and risk_level. High-risk commands require force=true; blocked commands always fail. Optionally forward to a remote daemon via daemon_alias.",
                     "inputSchema": {
                         "type": "object",
                         "required": ["host", "command"],
@@ -147,7 +155,8 @@ async fn handle_request(request: &Value) -> std::result::Result<Value, McpError>
                             "force":        { "type": "boolean", "description": "Set true to run high-risk commands." },
                             "timeout_secs":     { "type": "integer", "description": "Kill the command after N seconds (default 60)." },
                             "stdin":            { "type": "string", "description": "Pipe this string into the remote command's stdin." },
-                            "max_output_bytes": { "type": "integer", "description": "Truncate stdout to this many bytes (default 4 MiB)." }
+                            "max_output_bytes": { "type": "integer", "description": "Truncate stdout to this many bytes (default 4 MiB)." },
+                            "daemon_alias":     { "type": "string", "description": "Forward this exec to a remote daemon by alias (omit or 'localhost' for local)." }
                         }
                     }
                 },
@@ -367,6 +376,65 @@ async fn handle_request(request: &Value) -> std::result::Result<Value, McpError>
                             "approved": { "type": "boolean", "description": "true to approve, false to reject." }
                         }
                     }
+                },
+                {
+                    "name": "ssh_playbook_list",
+                    "description": "List all configured playbooks (command templates) from ~/.agent2ssh/playbooks.toml.",
+                    "inputSchema": { "type": "object", "properties": {} }
+                },
+                {
+                    "name": "ssh_playbook_run",
+                    "description": "Run a named playbook (sequence of SSH commands) against a target host. Steps execute sequentially; halts on first failure.",
+                    "inputSchema": {
+                        "type": "object",
+                        "required": ["playbook", "host"],
+                        "properties": {
+                            "playbook": { "type": "string", "description": "Name of the playbook to run." },
+                            "host":     { "type": "string", "description": "Target host profile alias." },
+                            "force":    { "type": "boolean", "description": "Set true to allow high-risk steps within the playbook." }
+                        }
+                    }
+                },
+                {
+                    "name": "ssh_connection_status",
+                    "description": "List all configured hosts and their current ControlMaster connection status (connected/disconnected, socket path).",
+                    "inputSchema": { "type": "object", "properties": {} }
+                },
+                {
+                    "name": "ssh_connect",
+                    "description": "Manually establish a persistent ControlMaster connection to a specific host.",
+                    "inputSchema": {
+                        "type": "object",
+                        "required": ["host"],
+                        "properties": {
+                            "host": { "type": "string", "description": "Host profile alias to connect to." }
+                        }
+                    }
+                },
+                {
+                    "name": "ssh_disconnect",
+                    "description": "Manually close an existing ControlMaster connection to a specific host.",
+                    "inputSchema": {
+                        "type": "object",
+                        "required": ["host"],
+                        "properties": {
+                            "host": { "type": "string", "description": "Host profile alias to disconnect from." }
+                        }
+                    }
+                },
+                {
+                    "name": "ssh_webhook_config",
+                    "description": "Get or set webhook notification configuration. Use action='get' to retrieve current config, or action='set' with url/events/secret to update.",
+                    "inputSchema": {
+                        "type": "object",
+                        "required": ["action"],
+                        "properties": {
+                            "action": { "type": "string", "enum": ["get", "set"], "description": "Use 'get' to read current config or 'set' to update." },
+                            "url":    { "type": "string", "description": "Webhook URL to POST events to." },
+                            "events": { "type": "array", "items": { "type": "string", "enum": ["approval_required", "exec_blocked", "exec_completed"] }, "description": "Event types to subscribe to." },
+                            "secret": { "type": "string", "description": "HMAC-SHA256 signing secret for X-Agent2SSH-Signature header." }
+                        }
+                    }
                 }
             ]
         })),
@@ -395,6 +463,9 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
             serde_json::to_value(import_ssh_config_core(path).map_err(McpError::from)?)?
         }
         "ssh_list_hosts" => serde_json::to_value(list_hosts_core().map_err(McpError::from)?)?,
+        "ssh_list_daemons" => {
+            serde_json::to_value(list_daemons_core().map_err(McpError::from)?)?
+        }
         "ssh_add_host" => {
             let host: HostProfile =
                 serde_json::from_value(args).map_err(|e| McpError::internal(e))?;
@@ -429,14 +500,53 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
             let force = args["force"].as_bool().unwrap_or(false);
             let timeout_secs = args["timeout_secs"].as_u64();
             let stdin = args["stdin"].as_str().map(str::to_string);
+            let daemon_alias = args["daemon_alias"].as_str().map(str::to_string);
 
             let risk = classify_risk(&command);
             let max_output_bytes = args["max_output_bytes"].as_u64().map(|v| v as usize);
             let request = ExecRequest { host, command, force, timeout_secs, stdin, max_output_bytes };
-            let result = exec_ssh_core(request).await.map_err(|e| {
-                McpError::internal(format!("{e} (risk_level={risk})"))
-            })?;
-            serde_json::to_value(result)?
+
+            // If daemon_alias is set and not "localhost", forward to remote daemon
+            if let Some(ref alias) = daemon_alias {
+                if alias != "localhost" {
+                    let (url, remote_token) = get_daemon(alias)
+                        .map_err(|e| McpError::internal(format!("daemon lookup failed: {e}")))?;
+                    let token = remote_token
+                        .ok_or_else(|| McpError::internal(format!("no token configured for daemon '{alias}'")))?;
+
+                    let client = reqwest::Client::builder()
+                        .timeout(std::time::Duration::from_secs(request.timeout_secs.unwrap_or(60) + 10))
+                        .build()
+                        .map_err(|e| McpError::internal(e))?;
+
+                    let resp = client
+                        .post(format!("{}/exec", url.trim_end_matches('/')))
+                        .bearer_auth(&token)
+                        .json(&request)
+                        .send()
+                        .await
+                        .map_err(|e| McpError::internal(format!("remote exec failed: {e}")))?;
+
+                    if !resp.status().is_success() {
+                        let body = resp.text().await.unwrap_or_default();
+                        return Err(McpError::internal(format!("remote daemon error: {body}")));
+                    }
+
+                    let result: agent2ssh::types::ExecResult = resp.json().await
+                        .map_err(|e| McpError::internal(format!("invalid response from remote: {e}")))?;
+                    serde_json::to_value(result)?
+                } else {
+                    let result = exec_ssh_core(request).await.map_err(|e| {
+                        McpError::internal(format!("{e} (risk_level={risk})"))
+                    })?;
+                    serde_json::to_value(result)?
+                }
+            } else {
+                let result = exec_ssh_core(request).await.map_err(|e| {
+                    McpError::internal(format!("{e} (risk_level={risk})"))
+                })?;
+                serde_json::to_value(result)?
+            }
         }
         "ssh_exec_multi" => {
             let hosts: Vec<String> = args["hosts"]
@@ -604,6 +714,82 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 .map_err(|e| McpError::internal(format!("invalid id: {e}")))?;
             approval_respond(uuid, approved).await.map_err(McpError::from)?;
             json!({ "ok": true, "id": id, "approved": approved })
+        }
+        "ssh_playbook_list" => {
+            let playbooks = list_playbooks_core().map_err(McpError::from)?;
+            let summaries: Vec<Value> = playbooks
+                .iter()
+                .map(|p| {
+                    json!({
+                        "name": p.name,
+                        "description": p.description,
+                        "step_count": p.steps.len(),
+                        "tags": p.tags,
+                    })
+                })
+                .collect();
+            serde_json::to_value(summaries)?
+        }
+        "ssh_playbook_run" => {
+            let playbook = args["playbook"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("playbook required"))?;
+            let host = args["host"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("host required"))?;
+            let force = args["force"].as_bool().unwrap_or(false);
+            let result = run_playbook_core(playbook, host, force).await.map_err(McpError::from)?;
+            serde_json::to_value(result)?
+        }
+        "ssh_connection_status" => {
+            let statuses = list_active_connections().await;
+            serde_json::to_value(statuses)?
+        }
+        "ssh_connect" => {
+            let host = args["host"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("host required"))?;
+            connect_host(host).await.map_err(McpError::from)?;
+            json!({ "ok": true, "host": host })
+        }
+        "ssh_disconnect" => {
+            let host = args["host"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("host required"))?;
+            disconnect_host(host).await.map_err(McpError::from)?;
+            json!({ "ok": true, "host": host })
+        }
+        "ssh_webhook_config" => {
+            let action = args["action"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("action required: 'get' or 'set'"))?;
+            match action {
+                "get" => {
+                    let config = load_webhook_config().unwrap_or_default();
+                    serde_json::to_value(config)?
+                }
+                "set" => {
+                    let mut config = load_webhook_config().unwrap_or_default();
+                    if let Some(url) = args["url"].as_str() {
+                        config.url = Some(url.to_string());
+                    }
+                    if let Some(events) = args["events"].as_array() {
+                        config.events = events
+                            .iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect();
+                    }
+                    if let Some(secret) = args["secret"].as_str() {
+                        config.secret = Some(secret.to_string());
+                    }
+                    save_webhook_config(&config)
+                        .map_err(|e| McpError::internal(format!("failed to save webhook config: {e}")))?;
+                    serde_json::to_value(config)?
+                }
+                other => {
+                    return Err(McpError::internal(format!("unknown action '{}', expected 'get' or 'set'", other)));
+                }
+            }
         }
         unknown => return Err(McpError::internal(anyhow!("unknown tool: {unknown}"))),
     };

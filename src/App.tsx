@@ -11,9 +11,10 @@ import HostList from "./components/HostList";
 import KeysPanel from "./components/KeysPanel";
 import MultiExecPanel from "./components/MultiExecPanel";
 import PingPanel from "./components/PingPanel";
+import PlaybooksPanel from "./components/PlaybooksPanel";
 import SFTPPanel from "./components/SFTPPanel";
 import SessionPanel from "./components/SessionPanel";
-import type { ApprovalRequest, AuditEntry, AuditFilter, HostProfile } from "./types";
+import type { ApprovalRequest, AuditEntry, AuditFilter, ConnectionStatus, HostProfile } from "./types";
 
 const APPROVAL_POLL_MS = 2000;
 
@@ -24,6 +25,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [pendingApprovals, setPendingApprovals] = useState<ApprovalRequest[]>([]);
+  const [connectionStatuses, setConnectionStatuses] = useState<ConnectionStatus[]>([]);
 
   const currentHost = useMemo(
     () => hosts.find((h) => h.name === selectedHost),
@@ -57,6 +59,22 @@ export default function App() {
     pollApprovals(); // immediate first poll
     return () => clearInterval(id);
   }, [pollApprovals]);
+
+  // Poll connection status every 5 seconds
+  const pollConnections = useCallback(async () => {
+    try {
+      const statuses = await api.connectionStatus();
+      setConnectionStatuses(statuses);
+    } catch {
+      // silent
+    }
+  }, []);
+
+  useEffect(() => {
+    const id = setInterval(pollConnections, 5000);
+    pollConnections(); // immediate first poll
+    return () => clearInterval(id);
+  }, [pollConnections]);
 
   async function handleApprove(approval: ApprovalRequest) {
     try {
@@ -97,6 +115,26 @@ export default function App() {
     }
   }
 
+  async function handleConnect(name: string) {
+    setError(null);
+    try {
+      await api.sshConnect(name);
+      await pollConnections();
+    } catch (err) {
+      setError(`Failed to connect: ${err}`);
+    }
+  }
+
+  async function handleDisconnect(name: string) {
+    setError(null);
+    try {
+      await api.sshDisconnect(name);
+      await pollConnections();
+    } catch (err) {
+      setError(`Failed to disconnect: ${err}`);
+    }
+  }
+
   if (loading) {
     return (
       <main className="app-loading">
@@ -131,9 +169,12 @@ export default function App() {
         <HostList
           hosts={hosts}
           selectedHost={selectedHost}
+          connectionStatuses={connectionStatuses}
           onSelect={setSelectedHost}
           onRemove={handleRemoveHost}
           onRefresh={refresh}
+          onConnect={handleConnect}
+          onDisconnect={handleDisconnect}
         />
         <button className="secondary import-btn" onClick={handleImportConfig}>
           Import from ~/.ssh/config
@@ -180,6 +221,8 @@ export default function App() {
         <ForwardPanel selectedHost={selectedHost} />
 
         <KeysPanel />
+
+        <PlaybooksPanel hosts={hosts} />
 
         <AuditPanel audit={audit} onRefresh={refresh} />
       </section>
