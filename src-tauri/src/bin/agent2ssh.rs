@@ -90,6 +90,19 @@ enum Commands {
         #[arg(long)]
         until: Option<String>,
     },
+    /// Check risk level of a command
+    Risk {
+        command: String,
+        #[arg(long)]
+        host: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Manage the daemon process
+    Daemon {
+        #[command(subcommand)]
+        command: DaemonCommands,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -111,6 +124,9 @@ enum HostCommands {
         /// Host profile alias to use as ProxyJump bastion
         #[arg(long)]
         jump: Option<String>,
+        /// Override risk level for all commands on this host (low/medium/high)
+        #[arg(long)]
+        risk_override: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -234,6 +250,18 @@ enum ForwardCommands {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum DaemonCommands {
+    /// Start the daemon in the background
+    Start,
+    /// Stop the running daemon
+    Stop,
+    /// Check if the daemon is running
+    Status,
+    /// Restart the daemon
+    Restart,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -265,8 +293,16 @@ async fn main() -> Result<()> {
                 port,
                 key,
                 jump,
+                risk_override,
                 json,
             } => {
+                let risk_override = risk_override.and_then(|s| match s.to_lowercase().as_str() {
+                    "low" => Some(RiskLevel::Low),
+                    "medium" => Some(RiskLevel::Medium),
+                    "high" => Some(RiskLevel::High),
+                    "blocked" => Some(RiskLevel::Blocked),
+                    _ => None,
+                });
                 let profile = add_host_core(HostProfile {
                     name,
                     host,
@@ -274,6 +310,7 @@ async fn main() -> Result<()> {
                     port,
                     key_path: key,
                     jump_host: jump,
+                    risk_override,
                 })?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&profile)?);
@@ -546,6 +583,92 @@ async fn main() -> Result<()> {
                         entry.risk_level,
                         entry.command
                     );
+                }
+            }
+        }
+        Commands::Risk { command, host: _, json } => {
+            let risk = classify_risk(&command);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                    "command": command,
+                    "risk_level": risk,
+                }))?);
+            } else {
+                println!("Command: {}", command);
+                println!("Risk:    {}", risk);
+            }
+        }
+        Commands::Daemon { command } => {
+            let config_dir = agent2ssh::config_dir()?;
+            let pid_path = config_dir.join("daemon.pid");
+            match command {
+                DaemonCommands::Start => {
+                    if pid_path.exists() {
+                        let pid = std::fs::read_to_string(&pid_path)?.trim().to_string();
+                        // Check if process is alive
+                        if let Ok(_) = std::process::Command::new("kill").arg("-0").arg(&pid).status() {
+                            println!("Daemon is already running (pid={})", pid);
+                            return Ok(());
+                        }
+                    }
+                    // Start daemon as background process
+                    let exe = std::env::current_exe()?;
+                    let daemon_bin = exe.parent().unwrap().join("agent2ssh-daemon");
+                    if !daemon_bin.exists() {
+                        println!("Daemon binary not found: {}", daemon_bin.display());
+                        return Ok(());
+                    }
+                    std::process::Command::new(&daemon_bin)
+                        .spawn()
+                        .map_err(|e| anyhow::anyhow!("Failed to start daemon: {}", e))?;
+                    println!("Daemon started.");
+                }
+                DaemonCommands::Stop => {
+                    if !pid_path.exists() {
+                        println!("Daemon is not running (no PID file).");
+                        return Ok(());
+                    }
+                    let pid = std::fs::read_to_string(&pid_path)?.trim().to_string();
+                    let _ = std::process::Command::new("kill").arg(&pid).status();
+                    let _ = std::fs::remove_file(&pid_path);
+                    println!("Daemon stopped (pid={}).", pid);
+                }
+                DaemonCommands::Status => {
+                    if !pid_path.exists() {
+                        println!("Daemon is not running.");
+                        return Ok(());
+                    }
+                    let pid = std::fs::read_to_string(&pid_path)?.trim().to_string();
+                    // Check health endpoint
+                    let status = std::process::Command::new("curl")
+                        .arg("-s")
+                        .arg("http://127.0.0.1:7722/health")
+                        .output();
+                    match status {
+                        Ok(output) if output.status.success() => {
+                            println!("Daemon is running (pid={}).", pid);
+                            println!("{}", String::from_utf8_lossy(&output.stdout));
+                        }
+                        _ => {
+                            println!("Daemon PID file exists (pid={}) but health check failed.", pid);
+                        }
+                    }
+                }
+                DaemonCommands::Restart => {
+                    // Stop first
+                    if pid_path.exists() {
+                        let pid = std::fs::read_to_string(&pid_path)?.trim().to_string();
+                        let _ = std::process::Command::new("kill").arg(&pid).status();
+                        let _ = std::fs::remove_file(&pid_path);
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                    }
+                    // Then start
+                    let exe = std::env::current_exe()?;
+                    let daemon_bin = exe.parent().unwrap().join("agent2ssh-daemon");
+                    std::process::Command::new(&daemon_bin)
+                        .spawn()
+                        .map_err(|e| anyhow::anyhow!("Failed to start daemon: {}", e))?;
+                    println!("Daemon restarted.");
                 }
             }
         }

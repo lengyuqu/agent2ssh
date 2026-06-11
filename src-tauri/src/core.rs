@@ -196,7 +196,27 @@ pub fn classify_risk(command: &str) -> RiskLevel {
 }
 
 pub async fn exec_ssh_core(request: ExecRequest) -> Result<ExecResult> {
-    let risk = classify_risk(&request.command);
+    let host = resolve_host(&request.host)?;
+
+    // M3-2: Per-host risk override — if the host specifies a risk_override, use it
+    // instead of the built-in classification (allows e.g. marking a sandbox host as all-low).
+    let built_in_risk = classify_risk(&request.command);
+    let risk = match host.risk_override {
+        Some(override_level) => override_level,
+        None => {
+            // Also check user-defined risk rules from risk_rules.toml
+            if let Some(user_risk) = crate::risk_config::classify_with_user_rules(&request.command).await {
+                // User rules escalate but never de-escalate below built-in
+                match (&user_risk, &built_in_risk) {
+                    (RiskLevel::Blocked, _) => RiskLevel::Blocked,
+                    (RiskLevel::High, RiskLevel::Blocked) => RiskLevel::Blocked,
+                    (ur, _) => *ur,
+                }
+            } else {
+                built_in_risk
+            }
+        }
+    };
 
     if risk == RiskLevel::Blocked {
         return Err(anyhow!(
@@ -210,8 +230,6 @@ pub async fn exec_ssh_core(request: ExecRequest) -> Result<ExecResult> {
             request.command
         ));
     }
-
-    let host = resolve_host(&request.host)?;
     let started = Instant::now();
     let timeout_secs = request.timeout_secs.unwrap_or(60);
 
@@ -573,6 +591,7 @@ pub fn import_ssh_config_core(path: Option<&str>) -> Result<Vec<HostProfile>> {
             port: p,
             key_path: id.clone(),
             jump_host,
+            risk_override: None,
         });
     };
 

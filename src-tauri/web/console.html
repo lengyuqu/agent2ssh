@@ -1,0 +1,898 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent2SSH Console</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #1a1a2e;
+  --bg-alt: #16213e;
+  --accent: #0f3460;
+  --text: #e0e0e0;
+  --text-dim: #8892a4;
+  --border: #2a2a4a;
+  --green: #4caf50;
+  --red: #e74c3c;
+  --yellow: #f1c40f;
+  --orange: #e67e22;
+  --blue: #3498db;
+  --mono: 'SF Mono', 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+  --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+html { font-size: 14px; }
+body {
+  font-family: var(--sans);
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+}
+
+/* ── Header ─────────────────────────────────────────────── */
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 24px;
+  background: var(--bg-alt);
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.header h1 {
+  font-size: 1.1rem;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  white-space: nowrap;
+}
+.header h1 span { color: var(--blue); }
+.auth-area {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.auth-area input {
+  width: 260px;
+  padding: 6px 10px;
+  font-family: var(--mono);
+  font-size: 0.85rem;
+}
+#health-dot {
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  display: inline-block;
+  flex-shrink: 0;
+}
+#health-dot.ok { background: var(--green); }
+#health-dot.fail { background: var(--red); }
+
+/* ── Shared form elements ───────────────────────────────── */
+input, select, textarea {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-family: var(--sans);
+  font-size: 0.9rem;
+  outline: none;
+  transition: border-color 0.15s;
+}
+input:focus, select:focus, textarea:focus { border-color: var(--blue); }
+input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--blue); }
+
+button {
+  background: var(--accent);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 14px;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: background 0.15s;
+  white-space: nowrap;
+}
+button:hover { background: #14497a; }
+button:active { background: #0b2a48; }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+button.danger { background: var(--red); border-color: var(--red); }
+button.danger:hover { background: #c0392b; }
+button.success { background: var(--green); border-color: var(--green); }
+button.success:hover { background: #388e3c; }
+button.small { padding: 3px 8px; font-size: 0.8rem; }
+
+label { font-size: 0.85rem; color: var(--text-dim); }
+
+/* ── Tabs ───────────────────────────────────────────────── */
+.tabs {
+  display: flex;
+  border-bottom: 2px solid var(--border);
+  background: var(--bg-alt);
+  padding: 0 24px;
+  overflow-x: auto;
+}
+.tab {
+  padding: 10px 20px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: var(--text-dim);
+  border-bottom: 2px solid transparent;
+  margin-bottom: -2px;
+  transition: color 0.15s, border-color 0.15s;
+  user-select: none;
+}
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--blue); border-bottom-color: var(--blue); }
+
+/* ── Content area ───────────────────────────────────────── */
+.content { padding: 20px 24px; max-width: 1200px; }
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+
+/* ── Sections ───────────────────────────────────────────── */
+.section { margin-bottom: 24px; }
+.section-title {
+  font-size: 1rem;
+  font-weight: 600;
+  margin-bottom: 12px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+/* ── Table ──────────────────────────────────────────────── */
+.table-wrap { overflow-x: auto; }
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+th {
+  text-align: left;
+  padding: 8px 10px;
+  background: var(--bg-alt);
+  color: var(--text-dim);
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 0.75rem;
+  letter-spacing: 0.5px;
+  border-bottom: 1px solid var(--border);
+}
+td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+tr:hover td { background: rgba(255,255,255,0.02); }
+
+.mono { font-family: var(--mono); font-size: 0.82rem; }
+
+/* ── Risk badges ────────────────────────────────────────── */
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 3px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+.badge-low { background: rgba(76,175,80,0.15); color: var(--green); }
+.badge-medium { background: rgba(241,196,15,0.15); color: var(--yellow); }
+.badge-high { background: rgba(230,126,34,0.15); color: var(--orange); }
+.badge-blocked { background: rgba(231,76,60,0.15); color: var(--red); }
+.badge-pending { background: rgba(52,152,219,0.15); color: var(--blue); }
+.badge-approved { background: rgba(76,175,80,0.15); color: var(--green); }
+.badge-rejected { background: rgba(231,76,60,0.15); color: var(--red); }
+.badge-timed_out { background: rgba(136,146,164,0.15); color: var(--text-dim); }
+
+/* ── Forms ──────────────────────────────────────────────── */
+.form-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.form-group { display: flex; flex-direction: column; gap: 4px; }
+.form-group input, .form-group select { min-width: 120px; }
+
+/* ── Output area ────────────────────────────────────────── */
+.output-area {
+  background: #0d0d1a;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 12px;
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 500px;
+  overflow-y: auto;
+  min-height: 60px;
+}
+.output-stdout { color: var(--text); }
+.output-stderr { color: var(--red); }
+.output-meta { color: var(--text-dim); margin-top: 8px; }
+
+/* ── Error bar ──────────────────────────────────────────── */
+.error-bar {
+  background: rgba(231,76,60,0.12);
+  border: 1px solid var(--red);
+  color: var(--red);
+  padding: 8px 14px;
+  border-radius: 4px;
+  margin-bottom: 14px;
+  font-size: 0.85rem;
+  display: none;
+}
+.error-bar.visible { display: block; }
+
+/* ── Spinner ────────────────────────────────────────────── */
+.spinner {
+  display: inline-block;
+  width: 14px; height: 14px;
+  border: 2px solid var(--text-dim);
+  border-top-color: var(--blue);
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+  vertical-align: middle;
+  margin-right: 6px;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── Approval cards ─────────────────────────────────────── */
+.approval-card {
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 14px;
+  margin-bottom: 10px;
+}
+.approval-card .card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.approval-card .card-row {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  font-size: 0.85rem;
+  margin-bottom: 6px;
+}
+.approval-card .card-row span { color: var(--text-dim); }
+.approval-card .card-actions { display: flex; gap: 8px; margin-top: 10px; }
+.approval-card .cmd {
+  font-family: var(--mono);
+  background: var(--bg);
+  padding: 4px 8px;
+  border-radius: 3px;
+  font-size: 0.82rem;
+}
+
+/* ── Misc ───────────────────────────────────────────────── */
+.empty-msg {
+  color: var(--text-dim);
+  font-style: italic;
+  padding: 20px 0;
+  text-align: center;
+}
+.ping-ok { color: var(--green); }
+.ping-fail { color: var(--red); }
+.gap-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.flex-1 { flex: 1; min-width: 0; }
+.mt-8 { margin-top: 8px; }
+.mt-12 { margin-top: 12px; }
+.mb-8 { margin-bottom: 8px; }
+</style>
+</head>
+<body>
+
+<!-- ═══ Header ═══════════════════════════════════════════ -->
+<div class="header">
+  <h1><span>Agent2SSH</span> Console</h1>
+  <div class="auth-area">
+    <span id="health-dot" title="Not connected"></span>
+    <input type="password" id="token-input" placeholder="Bearer token" autocomplete="off">
+    <button id="connect-btn" onclick="doConnect()">Connect</button>
+  </div>
+</div>
+
+<!-- ═══ Tabs ════════════════════════════════════════════ -->
+<div class="tabs">
+  <div class="tab active" data-tab="hosts">Hosts</div>
+  <div class="tab" data-tab="execute">Execute</div>
+  <div class="tab" data-tab="audit">Audit</div>
+  <div class="tab" data-tab="approvals">Approvals</div>
+</div>
+
+<!-- ═══ Error bar ═══════════════════════════════════════ -->
+<div class="content">
+<div id="error-bar" class="error-bar"></div>
+
+<!-- ═══ Hosts Tab ═══════════════════════════════════════ -->
+<div id="panel-hosts" class="tab-panel active">
+
+  <div class="section">
+    <div class="section-title">Configured Hosts</div>
+    <div class="gap-row mb-8">
+      <button onclick="loadHosts()">Refresh</button>
+      <button onclick="doImportSSH()">Import SSH Config</button>
+      <button onclick="doPingAll()">Ping All</button>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Name</th><th>Host</th><th>User</th><th>Port</th>
+            <th>Jump Host</th><th>Risk Override</th><th>Ping</th><th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="hosts-tbody">
+          <tr><td colspan="8" class="empty-msg">Connect to load hosts</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Add Host</div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Name *</label>
+        <input id="add-name" placeholder="my-server">
+      </div>
+      <div class="form-group">
+        <label>Host *</label>
+        <input id="add-host" placeholder="192.168.1.10">
+      </div>
+      <div class="form-group">
+        <label>User</label>
+        <input id="add-user" placeholder="root">
+      </div>
+      <div class="form-group">
+        <label>Port</label>
+        <input id="add-port" type="number" placeholder="22">
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Key Path</label>
+        <input id="add-keypath" placeholder="~/.ssh/id_rsa">
+      </div>
+      <div class="form-group">
+        <label>Jump Host</label>
+        <input id="add-jumphost" placeholder="bastion">
+      </div>
+      <div class="form-group">
+        <label>Risk Override</label>
+        <select id="add-risk">
+          <option value="">None</option>
+          <option value="low">Low</option>
+          <option value="medium">Medium</option>
+          <option value="high">High</option>
+          <option value="blocked">Blocked</option>
+        </select>
+      </div>
+      <button onclick="doAddHost()">Add Host</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ Execute Tab ═════════════════════════════════════ -->
+<div id="panel-execute" class="tab-panel">
+
+  <div class="section">
+    <div class="section-title">Execute Command</div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Host</label>
+        <select id="exec-host"></select>
+      </div>
+      <div class="form-group flex-1" style="min-width:200px">
+        <label>Command</label>
+        <input id="exec-cmd" class="mono" placeholder="ls -la /tmp">
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Timeout (s)</label>
+        <input id="exec-timeout" type="number" value="60" style="width:80px">
+      </div>
+      <div class="form-group" style="flex-direction:row;align-items:center;gap:6px;padding-top:18px">
+        <input type="checkbox" id="exec-force">
+        <label for="exec-force" style="cursor:pointer">Force (high-risk)</label>
+      </div>
+      <div class="form-group" style="flex-direction:row;align-items:center;gap:6px;padding-top:18px">
+        <input type="checkbox" id="exec-stdin-toggle">
+        <label for="exec-stdin-toggle" style="cursor:pointer">Pipe stdin</label>
+      </div>
+      <button onclick="doRiskCheck()">Check Risk</button>
+      <button class="success" onclick="doExec()">Run</button>
+    </div>
+    <div id="exec-stdin-row" class="form-row" style="display:none">
+      <div class="form-group flex-1">
+        <label>Stdin Data</label>
+        <textarea id="exec-stdin" rows="3" class="mono" style="width:100%" placeholder="data to pipe into stdin..."></textarea>
+      </div>
+    </div>
+    <div id="risk-result" class="mt-8" style="display:none"></div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Output</div>
+    <div id="exec-output" class="output-area"><span class="output-meta">No output yet</span></div>
+  </div>
+</div>
+
+<!-- ═══ Audit Tab ═══════════════════════════════════════ -->
+<div id="panel-audit" class="tab-panel">
+
+  <div class="section">
+    <div class="section-title">Audit Log</div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Host</label>
+        <select id="audit-host"><option value="">All</option></select>
+      </div>
+      <div class="form-group">
+        <label>Risk Level</label>
+        <select id="audit-risk">
+          <option value="">All</option>
+          <option value="low">Low</option>
+          <option value="medium">Medium</option>
+          <option value="high">High</option>
+          <option value="blocked">Blocked</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Limit</label>
+        <input id="audit-limit" type="number" value="20" style="width:80px">
+      </div>
+      <button onclick="loadAudit()">Refresh</button>
+    </div>
+    <div class="table-wrap mt-12">
+      <table>
+        <thead>
+          <tr>
+            <th>Timestamp</th><th>Host</th><th>Command</th>
+            <th>Exit Code</th><th>Duration</th><th>Risk</th>
+          </tr>
+        </thead>
+        <tbody id="audit-tbody">
+          <tr><td colspan="6" class="empty-msg">Connect and refresh to load audit entries</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ Approvals Tab ═══════════════════════════════════ -->
+<div id="panel-approvals" class="tab-panel">
+
+  <div class="section">
+    <div class="section-title">
+      Pending Approvals
+      <span id="approval-auto" style="font-weight:400;font-size:0.8rem;color:var(--text-dim);margin-left:12px">Auto-refresh: on</span>
+    </div>
+    <div id="approvals-list">
+      <div class="empty-msg">No pending approvals</div>
+    </div>
+  </div>
+</div>
+
+</div><!-- /content -->
+
+<script>
+// ── State ──────────────────────────────────────────────────
+const API = 'http://127.0.0.1:7722';
+let token = '';
+let hosts = [];
+let approvalTimer = null;
+
+// ── Helpers ────────────────────────────────────────────────
+function $(id) { return document.getElementById(id); }
+
+function showError(msg) {
+  const bar = $('error-bar');
+  bar.textContent = msg;
+  bar.classList.add('visible');
+  setTimeout(() => bar.classList.remove('visible'), 8000);
+}
+
+function clearError() {
+  $('error-bar').classList.remove('visible');
+}
+
+function headers() {
+  return { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' };
+}
+
+async function api(method, path, body) {
+  const opts = { method, headers: headers() };
+  if (body !== undefined) opts.body = JSON.stringify(body);
+  const res = await fetch(API + path, opts);
+  if (!res.ok) {
+    let msg = res.status + ' ' + res.statusText;
+    try { const j = await res.json(); if (j.error) msg = j.error; } catch(_) {}
+    throw new Error(msg);
+  }
+  const ct = res.headers.get('content-type') || '';
+  if (ct.includes('application/json')) return res.json();
+  return res.text();
+}
+
+function riskBadge(level) {
+  if (!level) return '';
+  const l = level.toLowerCase();
+  return '<span class="badge badge-' + l + '">' + esc(level) + '</span>';
+}
+
+function statusBadge(status) {
+  if (!status) return '';
+  const s = status.toLowerCase();
+  return '<span class="badge badge-' + s + '">' + esc(status) + '</span>';
+}
+
+function esc(s) {
+  if (s === null || s === undefined) return '';
+  const d = document.createElement('div');
+  d.textContent = String(s);
+  return d.innerHTML;
+}
+
+function fmtDuration(ms) {
+  if (ms == null) return '-';
+  if (ms < 1000) return ms + 'ms';
+  return (ms / 1000).toFixed(2) + 's';
+}
+
+function fmtTime(iso) {
+  if (!iso) return '-';
+  try {
+    const d = new Date(iso);
+    return d.toLocaleString();
+  } catch(_) { return iso; }
+}
+
+// ── Connect ────────────────────────────────────────────────
+async function doConnect() {
+  token = $('token-input').value.trim();
+  if (!token) { showError('Please enter a token'); return; }
+  clearError();
+  const dot = $('health-dot');
+  dot.className = '';
+  $('connect-btn').disabled = true;
+  try {
+    await api('GET', '/health');
+    dot.className = 'ok';
+    dot.title = 'Connected';
+    await loadHosts();
+    startApprovalPolling();
+  } catch(e) {
+    dot.className = 'fail';
+    dot.title = 'Failed';
+    showError('Connection failed: ' + e.message);
+  } finally {
+    $('connect-btn').disabled = false;
+  }
+}
+
+// ── Tab switching ──────────────────────────────────────────
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    tab.classList.add('active');
+    $('panel-' + tab.dataset.tab).classList.add('active');
+    if (tab.dataset.tab === 'audit') loadAudit();
+  });
+});
+
+// stdin toggle
+$('exec-stdin-toggle').addEventListener('change', function() {
+  $('exec-stdin-row').style.display = this.checked ? 'flex' : 'none';
+});
+
+// ── Hosts ──────────────────────────────────────────────────
+async function loadHosts() {
+  try {
+    hosts = await api('GET', '/hosts');
+    renderHosts();
+    populateHostDropdowns();
+  } catch(e) { showError('Failed to load hosts: ' + e.message); }
+}
+
+function renderHosts() {
+  const tbody = $('hosts-tbody');
+  if (!hosts.length) {
+    tbody.innerHTML = '<tr><td colspan="8" class="empty-msg">No hosts configured</td></tr>';
+    return;
+  }
+  tbody.innerHTML = hosts.map(h => `
+    <tr>
+      <td class="mono">${esc(h.name)}</td>
+      <td class="mono">${esc(h.host)}</td>
+      <td>${esc(h.user || '-')}</td>
+      <td>${h.port || 22}</td>
+      <td>${esc(h.jump_host || '-')}</td>
+      <td>${h.risk_override ? riskBadge(h.risk_override) : '-'}</td>
+      <td id="ping-${esc(h.name)}">-</td>
+      <td>
+        <button class="small" onclick="doPingOne('${esc(h.name)}')">Ping</button>
+        <button class="small danger" onclick="doRemoveHost('${esc(h.name)}')">Del</button>
+      </td>
+    </tr>
+  `).join('');
+}
+
+function populateHostDropdowns() {
+  const opts = hosts.map(h => '<option value="' + esc(h.name) + '">' + esc(h.name) + ' (' + esc(h.host) + ')</option>').join('');
+  $('exec-host').innerHTML = opts || '<option value="">No hosts</option>';
+  $('audit-host').innerHTML = '<option value="">All</option>' + opts;
+}
+
+async function doAddHost() {
+  clearError();
+  const name = $('add-name').value.trim();
+  const host = $('add-host').value.trim();
+  if (!name || !host) { showError('Name and Host are required'); return; }
+  const profile = { name, host };
+  const user = $('add-user').value.trim();
+  const port = $('add-port').value.trim();
+  const key_path = $('add-keypath').value.trim();
+  const jump_host = $('add-jumphost').value.trim();
+  const risk = $('add-risk').value;
+  if (user) profile.user = user;
+  if (port) profile.port = parseInt(port, 10);
+  if (key_path) profile.key_path = key_path;
+  if (jump_host) profile.jump_host = jump_host;
+  if (risk) profile.risk_override = risk;
+  try {
+    await api('POST', '/hosts', profile);
+    // clear form
+    ['add-name','add-host','add-user','add-port','add-keypath','add-jumphost'].forEach(id => $(id).value = '');
+    $('add-risk').value = '';
+    await loadHosts();
+  } catch(e) { showError('Add host failed: ' + e.message); }
+}
+
+async function doRemoveHost(name) {
+  clearError();
+  if (!confirm('Delete host "' + name + '"?')) return;
+  try {
+    await api('DELETE', '/hosts/' + encodeURIComponent(name));
+    await loadHosts();
+  } catch(e) { showError('Delete failed: ' + e.message); }
+}
+
+async function doImportSSH() {
+  clearError();
+  try {
+    const imported = await api('POST', '/hosts/import');
+    await loadHosts();
+    // show count
+    const count = Array.isArray(imported) ? imported.length : 0;
+    showError('Imported ' + count + ' host(s) from SSH config');
+    $('error-bar').style.borderColor = 'var(--green)';
+    $('error-bar').style.color = 'var(--green)';
+    $('error-bar').style.background = 'rgba(76,175,80,0.12)';
+  } catch(e) { showError('Import failed: ' + e.message); }
+}
+
+async function doPingOne(name) {
+  clearError();
+  const cell = $('ping-' + name);
+  if (cell) cell.innerHTML = '<span class="spinner"></span>';
+  try {
+    const results = await api('POST', '/ping', { hosts: [name], timeout_secs: 5 });
+    const r = results[0];
+    if (cell) {
+      if (r.reachable) {
+        cell.innerHTML = '<span class="ping-ok">OK ' + (r.latency_ms != null ? r.latency_ms + 'ms' : '') + '</span>';
+      } else {
+        cell.innerHTML = '<span class="ping-fail">' + esc(r.error || 'unreachable') + '</span>';
+      }
+    }
+  } catch(e) {
+    if (cell) cell.innerHTML = '<span class="ping-fail">error</span>';
+    showError('Ping failed: ' + e.message);
+  }
+}
+
+async function doPingAll() {
+  clearError();
+  if (!hosts.length) return;
+  // set spinners
+  hosts.forEach(h => {
+    const cell = $('ping-' + h.name);
+    if (cell) cell.innerHTML = '<span class="spinner"></span>';
+  });
+  try {
+    const names = hosts.map(h => h.name);
+    const results = await api('POST', '/ping', { hosts: names, timeout_secs: 5 });
+    results.forEach(r => {
+      const cell = $('ping-' + r.host);
+      if (!cell) return;
+      if (r.reachable) {
+        cell.innerHTML = '<span class="ping-ok">OK ' + (r.latency_ms != null ? r.latency_ms + 'ms' : '') + '</span>';
+      } else {
+        cell.innerHTML = '<span class="ping-fail">' + esc(r.error || 'unreachable') + '</span>';
+      }
+    });
+  } catch(e) { showError('Ping failed: ' + e.message); }
+}
+
+// ── Execute ────────────────────────────────────────────────
+async function doRiskCheck() {
+  clearError();
+  const cmd = $('exec-cmd').value.trim();
+  if (!cmd) { showError('Enter a command to check risk'); return; }
+  try {
+    const res = await api('POST', '/risk/check', { command: cmd });
+    const div = $('risk-result');
+    div.style.display = 'block';
+    div.innerHTML = 'Risk level: ' + riskBadge(res.risk_level) +
+      (res.matched_rule ? ' &nbsp; Matched: <span class="mono">' + esc(res.matched_rule) + '</span>' : '');
+  } catch(e) { showError('Risk check failed: ' + e.message); }
+}
+
+async function doExec() {
+  clearError();
+  const host = $('exec-host').value;
+  const command = $('exec-cmd').value.trim();
+  if (!host) { showError('Select a host'); return; }
+  if (!command) { showError('Enter a command'); return; }
+  const force = $('exec-force').checked;
+  const timeout_secs = parseInt($('exec-timeout').value, 10) || 60;
+  const req = { host, command, force, timeout_secs };
+  if ($('exec-stdin-toggle').checked) {
+    const stdinData = $('exec-stdin').value;
+    if (stdinData) req.stdin = stdinData;
+  }
+  const out = $('exec-output');
+  out.innerHTML = '<span class="spinner"></span> Executing...';
+  try {
+    const res = await api('POST', '/exec', req);
+    let html = '';
+    if (res.stdout) {
+      html += '<div class="output-stdout">' + esc(res.stdout) + '</div>';
+    }
+    if (res.stderr) {
+      html += '<div class="output-stderr">' + esc(res.stderr) + '</div>';
+    }
+    if (res.truncated) {
+      html += '<div class="output-stderr">[output truncated]</div>';
+    }
+    html += '<div class="output-meta">';
+    html += 'host: ' + esc(res.host) + ' &middot; ';
+    html += 'exit code: ' + (res.exit_code != null ? res.exit_code : 'n/a') + ' &middot; ';
+    html += 'duration: ' + fmtDuration(res.duration_ms) + ' &middot; ';
+    html += 'risk: ' + (res.risk_level || 'unknown');
+    html += '</div>';
+    out.innerHTML = html || '<span class="output-meta">No output (command produced no stdout/stderr)</span>';
+  } catch(e) {
+    out.innerHTML = '<div class="output-stderr">Error: ' + esc(e.message) + '</div>';
+  }
+}
+
+// ── Audit ──────────────────────────────────────────────────
+async function loadAudit() {
+  clearError();
+  const host = $('audit-host').value;
+  const risk = $('audit-risk').value;
+  const limit = parseInt($('audit-limit').value, 10) || 20;
+  let qs = '?limit=' + limit;
+  if (host) qs += '&host=' + encodeURIComponent(host);
+  if (risk) qs += '&risk_level=' + encodeURIComponent(risk);
+  const tbody = $('audit-tbody');
+  tbody.innerHTML = '<tr><td colspan="6" class="empty-msg"><span class="spinner"></span> Loading...</td></tr>';
+  try {
+    const entries = await api('GET', '/audit' + qs);
+    if (!entries.length) {
+      tbody.innerHTML = '<tr><td colspan="6" class="empty-msg">No audit entries found</td></tr>';
+      return;
+    }
+    // sort newest first
+    entries.sort((a, b) => new Date(b.ts) - new Date(a.ts));
+    tbody.innerHTML = entries.map(e => `
+      <tr>
+        <td style="white-space:nowrap">${fmtTime(e.ts)}</td>
+        <td class="mono">${esc(e.host)}</td>
+        <td class="mono" title="${esc(e.command)}">${esc(truncate(e.command, 60))}</td>
+        <td>${e.exit_code != null ? e.exit_code : '-'}</td>
+        <td>${fmtDuration(e.duration_ms)}</td>
+        <td>${riskBadge(e.risk_level)}</td>
+      </tr>
+    `).join('');
+  } catch(e) {
+    tbody.innerHTML = '<tr><td colspan="6" class="empty-msg">Failed to load audit log</td></tr>';
+    showError('Audit load failed: ' + e.message);
+  }
+}
+
+function truncate(s, n) {
+  if (!s) return '';
+  return s.length > n ? s.slice(0, n) + '...' : s;
+}
+
+// ── Approvals ──────────────────────────────────────────────
+function startApprovalPolling() {
+  if (approvalTimer) clearInterval(approvalTimer);
+  loadApprovals();
+  approvalTimer = setInterval(loadApprovals, 2000);
+}
+
+async function loadApprovals() {
+  try {
+    const list = await api('GET', '/approvals');
+    renderApprovals(list);
+  } catch(_) { /* silent during auto-refresh */ }
+}
+
+function renderApprovals(list) {
+  const container = $('approvals-list');
+  // Filter to show pending first, then others
+  const pending = list.filter(a => a.status === 'pending' || a.status === 'Pending');
+  const others = list.filter(a => a.status !== 'pending' && a.status !== 'Pending');
+  const sorted = [...pending, ...others];
+
+  if (!sorted.length) {
+    container.innerHTML = '<div class="empty-msg">No approvals</div>';
+    return;
+  }
+  container.innerHTML = sorted.map(a => {
+    const isPending = (a.status === 'pending' || a.status === 'Pending');
+    return `
+    <div class="approval-card">
+      <div class="card-header">
+        <div class="gap-row">
+          ${riskBadge(a.risk_level)}
+          ${statusBadge(a.status)}
+        </div>
+        <span style="color:var(--text-dim);font-size:0.8rem">${fmtTime(a.requested_at)}</span>
+      </div>
+      <div class="card-row">
+        <div><span>Host: </span><strong>${esc(a.host)}</strong></div>
+        <div><span>TTL: </span>${a.ttl_secs}s</div>
+        <div><span>ID: </span><span class="mono" style="font-size:0.75rem">${esc(a.id)}</span></div>
+      </div>
+      <div class="cmd">${esc(a.command)}</div>
+      ${isPending ? `
+      <div class="card-actions">
+        <button class="success small" onclick="doApprove('${esc(a.id)}')">Approve</button>
+        <button class="danger small" onclick="doReject('${esc(a.id)}')">Reject</button>
+      </div>` : ''}
+    </div>`;
+  }).join('');
+}
+
+async function doApprove(id) {
+  clearError();
+  try {
+    await api('POST', '/approvals/' + encodeURIComponent(id) + '/approve');
+    await loadApprovals();
+  } catch(e) { showError('Approve failed: ' + e.message); }
+}
+
+async function doReject(id) {
+  clearError();
+  try {
+    await api('POST', '/approvals/' + encodeURIComponent(id) + '/reject');
+    await loadApprovals();
+  } catch(e) { showError('Reject failed: ' + e.message); }
+}
+
+// ── Enter key shortcuts ────────────────────────────────────
+$('token-input').addEventListener('keydown', e => { if (e.key === 'Enter') doConnect(); });
+$('exec-cmd').addEventListener('keydown', e => { if (e.key === 'Enter') doExec(); });
+</script>
+</body>
+</html>

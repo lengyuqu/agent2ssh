@@ -7,6 +7,7 @@ export type HostProfile = {
   port?: number | null;
   key_path?: string | null;
   jump_host?: string | null;
+  risk_override?: RiskLevel | null;
 };
 
 export type ExecRequest = {
@@ -80,4 +81,16 @@ export type AuditEntry = {
   exit_code: number | null;
   duration_ms: number;
   risk_level: RiskLevel;
+};
+
+export type ApprovalStatus = "pending" | "approved" | "rejected" | "timed_out";
+
+export type ApprovalRequest = {
+  id: string;
+  host: string;
+  command: string;
+  risk_level: RiskLevel;
+  requested_at: string;
+  ttl_secs: number;
+  status: ApprovalStatus;
 };

@@ -32,6 +32,9 @@ pub struct HostProfile {
     /// Another host profile alias to use as a ProxyJump (-J) bastion.
     #[serde(default)]
     pub jump_host: Option<String>,
+    /// Override risk level for all commands on this host (e.g. "low" to skip confirmations).
+    #[serde(default)]
+    pub risk_override: Option<RiskLevel>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

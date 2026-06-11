@@ -6,6 +6,8 @@ use agent2ssh::{
     sftp_mkdir_core, sftp_stat_core, sftp_upload_core, AuditFilter, ExecRequest, ForwardDirection,
     HostProfile, RiskLevel, SftpDownloadRequest, SftpUploadRequest,
 };
+use agent2ssh::approval::{approval_list, approval_respond};
+use agent2ssh::risk_config::classify_with_user_rules;
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -336,6 +338,35 @@ async fn handle_request(request: &Value) -> std::result::Result<Value, McpError>
                             "forward_id": { "type": "string" }
                         }
                     }
+                },
+                {
+                    "name": "ssh_risk_check",
+                    "description": "Check the risk level of a command using built-in rules and user-defined risk_rules.toml.",
+                    "inputSchema": {
+                        "type": "object",
+                        "required": ["command"],
+                        "properties": {
+                            "command": { "type": "string", "description": "The command to check." },
+                            "host":    { "type": "string", "description": "Optional host alias to check per-host overrides." }
+                        }
+                    }
+                },
+                {
+                    "name": "ssh_approval_list",
+                    "description": "List all pending and recent approval requests (for high-risk command authorization).",
+                    "inputSchema": { "type": "object", "properties": {} }
+                },
+                {
+                    "name": "ssh_approval_respond",
+                    "description": "Approve or reject a pending approval request by ID.",
+                    "inputSchema": {
+                        "type": "object",
+                        "required": ["id", "approved"],
+                        "properties": {
+                            "id":       { "type": "string", "description": "The approval request UUID." },
+                            "approved": { "type": "boolean", "description": "true to approve, false to reject." }
+                        }
+                    }
                 }
             ]
         })),
@@ -538,6 +569,41 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 .map_err(|e| McpError::internal(format!("invalid forward_id: {e}")))?;
             forward_remove_core(id).await.map_err(McpError::from)?;
             json!({ "removed": id.to_string() })
+        }
+        "ssh_risk_check" => {
+            let command = args["command"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("command required"))?;
+            let base = classify_risk(command);
+            let user_risk = classify_with_user_rules(command).await;
+            let final_risk = if let Some(ur) = &user_risk {
+                match (ur, &base) {
+                    (RiskLevel::Blocked, _) => RiskLevel::Blocked,
+                    (RiskLevel::High, RiskLevel::Blocked) => RiskLevel::Blocked,
+                    (ur, _) => *ur,
+                }
+            } else { base };
+            json!({
+                "command": command,
+                "risk_level": final_risk,
+                "matched_user_rule": user_risk.is_some(),
+            })
+        }
+        "ssh_approval_list" => {
+            let approvals = approval_list().await;
+            serde_json::to_value(approvals)?
+        }
+        "ssh_approval_respond" => {
+            let id = args["id"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("id required"))?;
+            let approved = args["approved"]
+                .as_bool()
+                .ok_or_else(|| McpError::internal("approved boolean required"))?;
+            let uuid: uuid::Uuid = id.parse()
+                .map_err(|e| McpError::internal(format!("invalid id: {e}")))?;
+            approval_respond(uuid, approved).await.map_err(McpError::from)?;
+            json!({ "ok": true, "id": id, "approved": approved })
         }
         unknown => return Err(McpError::internal(anyhow!("unknown tool: {unknown}"))),
     };

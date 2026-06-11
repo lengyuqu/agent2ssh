@@ -25,9 +25,15 @@ name = "agent2ssh-mcp"
 path = "src/bin/agent2ssh-mcp.rs"
 required-features = []
 
+[[bin]]
+name = "agent2ssh-daemon"
+path = "src/bin/agent2ssh-daemon.rs"
+required-features = ["daemon"]
+
 [features]
 default = ["tauri"]
 tauri = ["dep:tauri", "dep:tauri-plugin-shell", "dep:tauri-build"]
+daemon = ["dep:axum", "dep:tower", "dep:tower-http", "dep:futures-util"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [], optional = true }
@@ -43,3 +49,8 @@ tauri = { version = "2", features = [], optional = true }
 tauri-plugin-shell = { version = "2", optional = true }
 tokio = { version = "1", features = ["macros", "process", "rt-multi-thread", "time", "io-util", "sync"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+axum = { version = "0.7", features = ["ws"], optional = true }
+tower = { version = "0.4", optional = true }
+tower-http = { version = "0.5", features = ["cors"], optional = true }
+toml = "0.8"
+futures-util = { version = "0.3", optional = true }

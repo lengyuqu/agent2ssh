@@ -1,0 +1,613 @@
+openapi: "3.1.0"
+info:
+  title: Agent2SSH Daemon API
+  version: "0.1.0"
+  description: Local HTTP API for the Agent2SSH capability layer.
+servers:
+  - url: http://127.0.0.1:7722
+    description: Local daemon
+
+security:
+  - bearerAuth: []
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: token
+
+  schemas:
+    HostProfile:
+      type: object
+      required: [name, host]
+      properties:
+        name:      { type: string }
+        host:      { type: string }
+        user:      { type: string, nullable: true }
+        port:      { type: integer, nullable: true }
+        key_path:  { type: string, nullable: true }
+        jump_host: { type: string, nullable: true }
+
+    ExecRequest:
+      type: object
+      required: [host, command]
+      properties:
+        host:             { type: string }
+        command:          { type: string }
+        force:            { type: boolean, default: false }
+        timeout_secs:     { type: integer, nullable: true }
+        stdin:            { type: string, nullable: true }
+        max_output_bytes: { type: integer, nullable: true }
+
+    ExecResult:
+      type: object
+      properties:
+        host:        { type: string }
+        command:     { type: string }
+        exit_code:   { type: integer, nullable: true }
+        stdout:      { type: string }
+        stderr:      { type: string }
+        duration_ms: { type: integer }
+        risk_level:  { $ref: "#/components/schemas/RiskLevel" }
+        truncated:   { type: boolean }
+
+    ExecMultiResult:
+      type: object
+      properties:
+        host:   { type: string }
+        result: { $ref: "#/components/schemas/ExecResult", nullable: true }
+        error:  { type: string, nullable: true }
+
+    PingResult:
+      type: object
+      properties:
+        host:       { type: string }
+        reachable:  { type: boolean }
+        latency_ms: { type: integer, nullable: true }
+        error:      { type: string, nullable: true }
+
+    RiskLevel:
+      type: string
+      enum: [low, medium, high, blocked]
+
+    AuditEntry:
+      type: object
+      properties:
+        id:          { type: string, format: uuid }
+        ts:          { type: string, format: date-time }
+        host:        { type: string }
+        command:     { type: string }
+        exit_code:   { type: integer, nullable: true }
+        duration_ms: { type: integer }
+        risk_level:  { $ref: "#/components/schemas/RiskLevel" }
+
+    AuditFilter:
+      type: object
+      properties:
+        host:       { type: string, nullable: true }
+        risk_level: { $ref: "#/components/schemas/RiskLevel", nullable: true }
+        exit_code:  { type: integer, nullable: true }
+        since:      { type: string, format: date-time, nullable: true }
+        until:      { type: string, format: date-time, nullable: true }
+        limit:      { type: integer, default: 20 }
+
+    SftpUploadRequest:
+      type: object
+      required: [host, local_path, remote_path]
+      properties:
+        host:        { type: string }
+        local_path:  { type: string }
+        remote_path: { type: string }
+
+    SftpDownloadRequest:
+      type: object
+      required: [host, remote_path, local_path]
+      properties:
+        host:        { type: string }
+        remote_path: { type: string }
+        local_path:  { type: string }
+
+    SftpResult:
+      type: object
+      properties:
+        host:        { type: string }
+        local_path:  { type: string }
+        remote_path: { type: string }
+        direction:   { type: string, enum: [upload, download] }
+        duration_ms: { type: integer }
+
+    SessionOpenRequest:
+      type: object
+      required: [host]
+      properties:
+        host: { type: string }
+
+    SessionWriteRequest:
+      type: object
+      required: [input]
+      properties:
+        input: { type: string }
+
+    ForwardAddRequest:
+      type: object
+      required: [host, direction, bind_port, target_host, target_port]
+      properties:
+        host:        { type: string }
+        direction:   { type: string, enum: [local, remote] }
+        bind_port:   { type: integer }
+        target_host: { type: string }
+        target_port: { type: integer }
+
+    ForwardRule:
+      type: object
+      properties:
+        id:          { type: string, format: uuid }
+        host:        { type: string }
+        direction:   { type: string, enum: [local, remote] }
+        bind_port:   { type: integer }
+        target_host: { type: string }
+        target_port: { type: integer }
+
+    ApprovalRequest:
+      type: object
+      properties:
+        id:           { type: string, format: uuid }
+        host:         { type: string }
+        command:      { type: string }
+        risk_level:   { $ref: "#/components/schemas/RiskLevel" }
+        requested_at: { type: string, format: date-time }
+        status:       { type: string, enum: [pending, approved, rejected, timed_out] }
+
+    ApprovalResponse:
+      type: object
+      required: [approved]
+      properties:
+        approved: { type: boolean }
+
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+
+  /hosts:
+    get:
+      summary: List host profiles
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/HostProfile" }
+    post:
+      summary: Create or update a host profile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HostProfile" }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HostProfile" }
+
+  /hosts/import:
+    post:
+      summary: Import hosts from ~/.ssh/config
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/HostProfile" }
+
+  /hosts/{name}:
+    delete:
+      summary: Remove a host profile
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+        "404":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /ping:
+    post:
+      summary: Check host reachability
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [hosts]
+              properties:
+                hosts:        { type: array, items: { type: string } }
+                timeout_secs: { type: integer, nullable: true }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/PingResult" }
+
+  /exec:
+    post:
+      summary: Execute a command over SSH
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ExecRequest" }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExecResult" }
+        "400":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /exec-multi:
+    post:
+      summary: Execute a command on multiple hosts
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [hosts, command]
+              properties:
+                hosts:        { type: array, items: { type: string } }
+                command:      { type: string }
+                force:        { type: boolean, default: false }
+                timeout_secs: { type: integer, nullable: true }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ExecMultiResult" }
+
+  /exec/stream:
+    get:
+      summary: WebSocket streaming exec
+      description: |
+        Upgrade to WebSocket. Send an ExecRequest JSON message.
+        Server pushes: {"type":"stdout","data":"..."}, {"type":"stderr","data":"..."}, {"type":"exit","code":0,"duration_ms":1234}
+      responses:
+        "101":
+          description: Switching Protocols
+
+  /audit:
+    get:
+      summary: Query audit log
+      parameters:
+        - name: host       { in: query, schema: { type: string } }
+        - name: risk_level { in: query, schema: { $ref: "#/components/schemas/RiskLevel" } }
+        - name: exit_code  { in: query, schema: { type: integer } }
+        - name: since      { in: query, schema: { type: string, format: date-time } }
+        - name: until      { in: query, schema: { type: string, format: date-time } }
+        - name: limit      { in: query, schema: { type: integer, default: 20 } }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/AuditEntry" }
+
+  /sftp/upload:
+    post:
+      summary: Upload a file via SCP
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SftpUploadRequest" }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SftpResult" }
+
+  /sftp/download:
+    post:
+      summary: Download a file via SCP
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SftpDownloadRequest" }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SftpResult" }
+
+  /sftp/ls:
+    post:
+      summary: List a remote directory
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [host, path]
+              properties:
+                host: { type: string }
+                path: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExecResult" }
+
+  /sftp/stat:
+    post:
+      summary: Stat a remote path
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [host, path]
+              properties:
+                host: { type: string }
+                path: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExecResult" }
+
+  /sftp/mkdir:
+    post:
+      summary: Create a remote directory
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [host, path]
+              properties:
+                host: { type: string }
+                path: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExecResult" }
+
+  /sessions:
+    post:
+      summary: Open a persistent PTY session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SessionOpenRequest" }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string, format: uuid }
+    get:
+      summary: List open sessions
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:   { type: string, format: uuid }
+                    host: { type: string }
+
+  /sessions/{id}/write:
+    post:
+      summary: Write input to a session
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SessionWriteRequest" }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+
+  /sessions/{id}/read:
+    get:
+      summary: Read buffered output from a session
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: timeout_ms
+          in: query
+          schema: { type: integer, default: 2000 }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  output: { type: string }
+
+  /sessions/{id}:
+    delete:
+      summary: Close a session
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+
+  /forwards:
+    post:
+      summary: Add a port forward tunnel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ForwardAddRequest" }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ForwardRule" }
+    get:
+      summary: List active tunnels
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ForwardRule" }
+
+  /forwards/{id}:
+    delete:
+      summary: Remove a tunnel
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+
+  /approvals:
+    get:
+      summary: List pending approval requests
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ApprovalRequest" }
+
+  /approvals/{id}/approve:
+    post:
+      summary: Approve a pending request
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+
+  /approvals/{id}/reject:
+    post:
+      summary: Reject a pending request
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+
+  /risk/check:
+    post:
+      summary: Check risk level of a command
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [command]
+              properties:
+                command: { type: string }
+                host:    { type: string, nullable: true }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  risk_level: { $ref: "#/components/schemas/RiskLevel" }
+                  matched_rule: { type: string, nullable: true }
