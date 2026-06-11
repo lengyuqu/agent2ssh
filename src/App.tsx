@@ -5,7 +5,11 @@ import { api } from "./api";
 import AddHostForm from "./components/AddHostForm";
 import AuditPanel from "./components/AuditPanel";
 import ExecPanel from "./components/ExecPanel";
+import ForwardPanel from "./components/ForwardPanel";
 import HostList from "./components/HostList";
+import PingPanel from "./components/PingPanel";
+import SFTPPanel from "./components/SFTPPanel";
+import SessionPanel from "./components/SessionPanel";
 import type { AuditEntry, HostProfile } from "./types";
 
 export default function App() {
@@ -44,6 +48,16 @@ export default function App() {
     }
   }
 
+  async function handleImportConfig() {
+    setError(null);
+    try {
+      await api.importSshConfig();
+      await refresh();
+    } catch (err) {
+      setError(String(err));
+    }
+  }
+
   return (
     <main className="app-shell">
       <aside className="sidebar">
@@ -61,6 +75,10 @@ export default function App() {
           onRemove={handleRemoveHost}
           onRefresh={refresh}
         />
+        <button className="secondary import-btn" onClick={handleImportConfig}>
+          Import from ~/.ssh/config
+        </button>
+        <PingPanel hosts={hosts} />
       </aside>
 
       <section className="workspace">
@@ -85,6 +103,13 @@ export default function App() {
           <ExecPanel selectedHost={selectedHost} onExecComplete={refresh} />
           <AddHostForm onSaved={refresh} />
         </div>
+
+        <div className="grid grid-equal">
+          <SFTPPanel selectedHost={selectedHost} />
+          <SessionPanel selectedHost={selectedHost} />
+        </div>
+
+        <ForwardPanel selectedHost={selectedHost} />
 
         <AuditPanel audit={audit} />
       </section>

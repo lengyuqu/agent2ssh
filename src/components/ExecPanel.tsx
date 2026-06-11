@@ -2,6 +2,7 @@ import { Play, ShieldAlert } from "lucide-react";
 import { useState } from "react";
 import { api } from "../api";
 import type { ExecResult, RiskLevel } from "../types";
+import ApprovalDialog from "./ApprovalDialog";
 
 type Props = {
   selectedHost: string;
@@ -25,20 +26,38 @@ export default function ExecPanel({ selectedHost, onExecComplete }: Props) {
   const [result, setResult] = useState<ExecResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [pendingApproval, setPendingApproval] = useState(false);
 
-  async function runCommand() {
+  async function runCommand(withForce = false) {
     if (!selectedHost || !command.trim()) return;
     setBusy(true);
     setError(null);
+    setPendingApproval(false);
     try {
-      const next = await api.execSsh(selectedHost, command, force);
+      const next = await api.execSsh(selectedHost, command, withForce || force);
       setResult(next);
       onExecComplete();
     } catch (err) {
-      setError(String(err));
+      const msg = String(err);
+      // Detect high-risk rejection → show approval dialog
+      if (msg.includes("force=true") || msg.includes("risk=high")) {
+        setPendingApproval(true);
+      } else {
+        setError(msg);
+      }
     } finally {
       setBusy(false);
     }
+  }
+
+  function handleApprovalConfirm() {
+    setPendingApproval(false);
+    setForce(true);
+    runCommand(true);
+  }
+
+  function handleApprovalCancel() {
+    setPendingApproval(false);
   }
 
   return (
@@ -67,7 +86,7 @@ export default function ExecPanel({ selectedHost, onExecComplete }: Props) {
       </label>
       <button
         className="primary"
-        onClick={runCommand}
+        onClick={() => runCommand()}
         disabled={busy || !selectedHost}
       >
         <Play size={16} />
@@ -79,6 +98,9 @@ export default function ExecPanel({ selectedHost, onExecComplete }: Props) {
             <div className="meta">
               exit={result.exit_code ?? "signal"} duration={result.duration_ms}ms{" "}
               <RiskBadge level={result.risk_level} />
+              {result.truncated && (
+                <span className="truncated-badge">output truncated</span>
+              )}
             </div>
             <pre>{result.stdout || result.stderr || "(no output)"}</pre>
             {result.stderr && <pre className="stderr">{result.stderr}</pre>}
@@ -87,6 +109,15 @@ export default function ExecPanel({ selectedHost, onExecComplete }: Props) {
           <pre>Command output will appear here.</pre>
         )}
       </div>
+
+      {pendingApproval && (
+        <ApprovalDialog
+          command={command}
+          riskLevel="high"
+          onConfirm={handleApprovalConfirm}
+          onCancel={handleApprovalCancel}
+        />
+      )}
     </section>
   );
 }

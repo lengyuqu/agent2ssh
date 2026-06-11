@@ -18,35 +18,56 @@ Remote hosts
 
 ## Components
 
-- `src-tauri/src/lib.rs`: shared core for host config, SSH exec, audit logging, and Tauri commands.
-- `src-tauri/src/bin/agent2ssh.rs`: CLI for shell scripts and skill-driven agents.
-- `src-tauri/src/bin/agent2ssh-mcp.rs`: MCP stdio server for MCP-capable agents.
-- `src/App.tsx`: desktop console for host management, execution, and audit review.
-- `skills/agent2ssh/SKILL.md`: operational guidance for agents using the CLI.
+| File | Role |
+|------|------|
+| `src-tauri/src/core.rs` | SSH exec, ping, exec-multi, SFTP wrappers, risk scoring |
+| `src-tauri/src/store.rs` | Host profile persistence (`~/.agent2ssh/hosts.json`) and audit log (`~/.agent2ssh/audit.jsonl`) |
+| `src-tauri/src/session.rs` | Persistent PTY sessions (process-local) |
+| `src-tauri/src/forward.rs` | SSH port forward tunnel management (process-local) |
+| `src-tauri/src/connection.rs` | `~/.ssh/config` parser for `host import-config` |
+| `src-tauri/src/types.rs` | Shared types: `HostProfile`, `ExecRequest`, `ExecResult`, `RiskLevel`, etc. |
+| `src-tauri/src/tauri_commands.rs` | Tauri IPC commands wrapping the core |
+| `src-tauri/src/bin/agent2ssh.rs` | CLI binary |
+| `src-tauri/src/bin/agent2ssh-mcp.rs` | MCP stdio server (JSON-RPC 2.0, 21 tools) |
+| `src/App.tsx` | Desktop console: host management, execution, audit review |
+| `skills/agent2ssh/SKILL.md` | Operational guidance for agents using the CLI or MCP |
 
-## Three-End Plan
-
-The Tauri app is the desktop control center for macOS, Windows, and Linux.
-
-The same local core should next be promoted into a daemon API:
+## Three-Surface Design
 
 ```text
-Desktop App  -> local HTTP/WebSocket daemon
-Web Console  -> local daemon or team relay
-Mobile App   -> approvals, monitoring, and emergency cancel
+                  ┌──────────────────────────────────────────────────┐
+                  │               Agent2SSH Core (Rust)              │
+                  │  host CRUD · exec · risk scoring · SFTP          │
+                  │  PTY sessions · port forwards · audit log         │
+                  └────────┬────────────────┬────────────────┬───────┘
+                           │                │                │
+                    Tauri IPC          CLI binary       MCP stdio
+                    (desktop)        (agent2ssh)    (agent2ssh-mcp)
+                           │
+                    React/TS UI
 ```
 
-Desktop owns local credentials and terminal visibility. Web owns team administration and shared audit review. Mobile owns approvals and lightweight incident response.
+All three surfaces share the same Rust core library. The MCP server exposes 21 tools and speaks JSON-RPC 2.0 over stdio, making it compatible with any MCP-capable agent host.
 
 ## Safety Model
 
-The MVP records all executions in `~/.agent2ssh/audit.jsonl`.
+Every command passes through `classify_risk()` before execution:
 
-The next safety layer should classify commands before execution:
+| Level | Examples | Behaviour |
+|-------|----------|-----------|
+| `low` | `ls`, `cat`, `ps`, `df`, `grep` | Executes freely |
+| `medium` | `apt install`, `sed -i`, `git push`, `chmod` | Executes; shown in UI with badge |
+| `high` | `sudo`, `rm -rf`, `kill -9`, `iptables` | Requires `--force` / `force: true` |
+| `blocked` | `shutdown`, `mkfs`, `rm -rf /`, fork-bomb | Always rejected |
 
-- low: read-only inspection commands
-- medium: restart, upload, config edit
-- high: sudo, deletion, process kill, production deploy
-- blocked: disk formatting, broad system deletion, destructive shutdown
+All executions (including blocked attempts) are appended to `~/.agent2ssh/audit.jsonl` with the risk level recorded.
 
-High-risk actions should require a desktop or mobile approval before dispatch.
+## Roadmap
+
+The next safety layer is an approval gates UI: high-risk commands trigger a desktop pop-up that must be confirmed before dispatch. This pairs with a local HTTP daemon that would let web and mobile clients connect to the same local core.
+
+```text
+Desktop App  →  local HTTP/WebSocket daemon
+Web Console  →  local daemon or team relay
+Mobile App   →  approvals, monitoring, emergency cancel
+```

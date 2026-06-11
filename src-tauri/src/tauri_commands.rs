@@ -1,12 +1,22 @@
 use crate::{
-    core::{add_host_core, exec_ssh_core, list_audit_core, list_hosts_core, remove_host_core},
-    types::{AuditEntry, AuditFilter, ExecRequest, ExecResult, HostProfile},
+    core::{
+        add_host_core, exec_multi_core, exec_ssh_core, import_ssh_config_core, list_audit_core,
+        list_hosts_core, ping_hosts_core, remove_host_core, sftp_download_core, sftp_ls_core,
+        sftp_mkdir_core, sftp_stat_core, sftp_upload_core,
+    },
+    forward::{forward_add_core, forward_list_core, forward_remove_core},
+    session::{
+        session_close_core, session_list_core, session_open_core, session_read_core,
+        session_write_core,
+    },
+    types::{
+        AuditEntry, AuditFilter, ExecMultiResult, ExecRequest, ExecResult, ForwardDirection,
+        ForwardRule, HostProfile, PingResult, SftpDownloadRequest, SftpResult, SftpUploadRequest,
+    },
 };
+use uuid::Uuid;
 
-#[tauri::command]
-pub async fn exec_ssh(request: ExecRequest) -> Result<ExecResult, String> {
-    exec_ssh_core(request).await.map_err(|e| e.to_string())
-}
+// ── Host management ──────────────────────────────────────────────────────────
 
 #[tauri::command]
 pub fn list_hosts() -> Result<Vec<HostProfile>, String> {
@@ -24,19 +34,191 @@ pub fn remove_host(name: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn list_audit() -> Result<Vec<AuditEntry>, String> {
-    list_audit_core(AuditFilter { limit: 50, ..Default::default() }).map_err(|e| e.to_string())
+pub fn import_ssh_config(path: Option<String>) -> Result<Vec<HostProfile>, String> {
+    import_ssh_config_core(path.as_deref()).map_err(|e| e.to_string())
 }
+
+// ── Command execution ────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn exec_ssh(request: ExecRequest) -> Result<ExecResult, String> {
+    exec_ssh_core(request).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn exec_multi(
+    hosts: Vec<String>,
+    command: String,
+    force: bool,
+    timeout_secs: Option<u64>,
+) -> Result<Vec<ExecMultiResult>, String> {
+    Ok(exec_multi_core(hosts, command, force, timeout_secs).await)
+}
+
+#[tauri::command]
+pub async fn ping_hosts(
+    hosts: Vec<String>,
+    timeout_secs: Option<u64>,
+) -> Result<Vec<PingResult>, String> {
+    Ok(ping_hosts_core(hosts, timeout_secs).await)
+}
+
+// ── SFTP ─────────────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn sftp_upload(request: SftpUploadRequest) -> Result<SftpResult, String> {
+    sftp_upload_core(request).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn sftp_download(request: SftpDownloadRequest) -> Result<SftpResult, String> {
+    sftp_download_core(request).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn sftp_ls(
+    host: String,
+    path: String,
+    timeout_secs: Option<u64>,
+) -> Result<ExecResult, String> {
+    sftp_ls_core(&host, &path, timeout_secs)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn sftp_stat(
+    host: String,
+    path: String,
+    timeout_secs: Option<u64>,
+) -> Result<ExecResult, String> {
+    sftp_stat_core(&host, &path, timeout_secs)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn sftp_mkdir(
+    host: String,
+    path: String,
+    timeout_secs: Option<u64>,
+) -> Result<ExecResult, String> {
+    sftp_mkdir_core(&host, &path, timeout_secs)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+// ── Sessions ─────────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn session_open(host: String) -> Result<String, String> {
+    session_open_core(&host)
+        .await
+        .map(|id| id.to_string())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn session_write(id: String, input: String) -> Result<(), String> {
+    let uuid = Uuid::parse_str(&id).map_err(|e| e.to_string())?;
+    session_write_core(uuid, &input)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn session_read(id: String, timeout_ms: Option<u64>) -> Result<String, String> {
+    let uuid = Uuid::parse_str(&id).map_err(|e| e.to_string())?;
+    session_read_core(uuid, timeout_ms.unwrap_or(2000))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn session_close(id: String) -> Result<(), String> {
+    let uuid = Uuid::parse_str(&id).map_err(|e| e.to_string())?;
+    session_close_core(uuid).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn session_list() -> Result<Vec<(String, String)>, String> {
+    Ok(session_list_core()
+        .await
+        .into_iter()
+        .map(|(id, host)| (id.to_string(), host))
+        .collect())
+}
+
+// ── Port forwarding ──────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn forward_add(
+    host: String,
+    direction: ForwardDirection,
+    bind_port: u16,
+    target_host: String,
+    target_port: u16,
+) -> Result<ForwardRule, String> {
+    forward_add_core(&host, direction, bind_port, &target_host, target_port)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn forward_list() -> Result<Vec<ForwardRule>, String> {
+    Ok(forward_list_core().await)
+}
+
+#[tauri::command]
+pub async fn forward_remove(id: String) -> Result<(), String> {
+    let uuid = Uuid::parse_str(&id).map_err(|e| e.to_string())?;
+    forward_remove_core(uuid).await.map_err(|e| e.to_string())
+}
+
+// ── Audit ────────────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn list_audit(filter: Option<AuditFilter>) -> Result<Vec<AuditEntry>, String> {
+    let filter = filter.unwrap_or(AuditFilter {
+        limit: 50,
+        ..Default::default()
+    });
+    list_audit_core(filter).map_err(|e| e.to_string())
+}
+
+// ── Bootstrap ────────────────────────────────────────────────────────────────
 
 pub fn run_tauri() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![
-            exec_ssh,
+            // Host management
             list_hosts,
             add_host,
             remove_host,
-            list_audit
+            import_ssh_config,
+            // Execution
+            exec_ssh,
+            exec_multi,
+            ping_hosts,
+            // SFTP
+            sftp_upload,
+            sftp_download,
+            sftp_ls,
+            sftp_stat,
+            sftp_mkdir,
+            // Sessions
+            session_open,
+            session_write,
+            session_read,
+            session_close,
+            session_list,
+            // Port forwarding
+            forward_add,
+            forward_list,
+            forward_remove,
+            // Audit
+            list_audit,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
