@@ -190,6 +190,18 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 .badge-rejected { background: rgba(231,76,60,0.15); color: var(--red); }
 .badge-timed_out { background: rgba(136,146,164,0.15); color: var(--text-dim); }
 
+/* ── Tag badges ──────────────────────────────────────────── */
+.tag-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: rgba(59,130,246,0.15);
+  color: #60a5fa;
+  border: 1px solid rgba(59,130,246,0.25);
+  display: inline-block;
+  margin: 1px;
+}
+
 /* ── Forms ──────────────────────────────────────────────── */
 .form-row {
   display: flex;
@@ -332,11 +344,11 @@ tr:hover td { background: rgba(255,255,255,0.02); }
         <thead>
           <tr>
             <th>Name</th><th>Host</th><th>User</th><th>Port</th>
-            <th>Jump Host</th><th>Risk Override</th><th>Ping</th><th>Actions</th>
+            <th>Jump Host</th><th>Risk Override</th><th>Tags</th><th>Ping</th><th>Actions</th>
           </tr>
         </thead>
         <tbody id="hosts-tbody">
-          <tr><td colspan="8" class="empty-msg">Connect to load hosts</td></tr>
+          <tr><td colspan="9" class="empty-msg">Connect to load hosts</td></tr>
         </tbody>
       </table>
     </div>
@@ -380,6 +392,10 @@ tr:hover td { background: rgba(255,255,255,0.02); }
           <option value="high">High</option>
           <option value="blocked">Blocked</option>
         </select>
+      </div>
+      <div class="form-group">
+        <label>Tags</label>
+        <input id="add-tags" placeholder="production, web">
       </div>
       <button onclick="doAddHost()">Add Host</button>
     </div>
@@ -613,7 +629,7 @@ async function loadHosts() {
 function renderHosts() {
   const tbody = $('hosts-tbody');
   if (!hosts.length) {
-    tbody.innerHTML = '<tr><td colspan="8" class="empty-msg">No hosts configured</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9" class="empty-msg">No hosts configured</td></tr>';
     return;
   }
   tbody.innerHTML = hosts.map(h => `
@@ -624,6 +640,7 @@ function renderHosts() {
       <td>${h.port || 22}</td>
       <td>${esc(h.jump_host || '-')}</td>
       <td>${h.risk_override ? riskBadge(h.risk_override) : '-'}</td>
+      <td>${(h.tags || []).map(t => '<span class="tag-badge">' + esc(t) + '</span>').join(' ') || '-'}</td>
       <td id="ping-${esc(h.name)}">-</td>
       <td>
         <button class="small" onclick="doPingOne('${esc(h.name)}')">Ping</button>
@@ -650,15 +667,17 @@ async function doAddHost() {
   const key_path = $('add-keypath').value.trim();
   const jump_host = $('add-jumphost').value.trim();
   const risk = $('add-risk').value;
+  const tags = $('add-tags').value.split(',').map(t => t.trim()).filter(Boolean);
   if (user) profile.user = user;
   if (port) profile.port = parseInt(port, 10);
   if (key_path) profile.key_path = key_path;
   if (jump_host) profile.jump_host = jump_host;
   if (risk) profile.risk_override = risk;
+  if (tags.length) profile.tags = tags;
   try {
     await api('POST', '/hosts', profile);
     // clear form
-    ['add-name','add-host','add-user','add-port','add-keypath','add-jumphost'].forEach(id => $(id).value = '');
+    ['add-name','add-host','add-user','add-port','add-keypath','add-jumphost','add-tags'].forEach(id => $(id).value = '');
     $('add-risk').value = '';
     await loadHosts();
   } catch(e) { showError('Add host failed: ' + e.message); }

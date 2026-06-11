@@ -1,9 +1,9 @@
 import { FileKey, Plus } from "lucide-react";
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { api } from "../api";
-import type { HostProfile } from "../types";
+import type { HostProfile, SshKeyInfo } from "../types";
 
-const emptyForm = { name: "", host: "", user: "", port: 22, key_path: "", jump_host: "" };
+const emptyForm = { name: "", host: "", user: "", port: 22, key_path: "", jump_host: "", tags: "" };
 
 type Props = {
   hosts: HostProfile[];
@@ -12,9 +12,18 @@ type Props = {
 
 export default function AddHostForm({ hosts, onSaved }: Props) {
   const [form, setForm] = useState(emptyForm);
+  const [keys, setKeys] = useState<SshKeyInfo[]>([]);
+
+  useEffect(() => {
+    api.listKeys().then(setKeys).catch(() => setKeys([]));
+  }, []);
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
+    const tags = form.tags
+      .split(",")
+      .map((t) => t.trim())
+      .filter(Boolean);
     await api.addHost({
       name: form.name.trim(),
       host: form.host.trim(),
@@ -22,6 +31,7 @@ export default function AddHostForm({ hosts, onSaved }: Props) {
       port: form.port || null,
       key_path: form.key_path.trim() || null,
       jump_host: form.jump_host.trim() || null,
+      tags,
     });
     setForm(emptyForm);
     onSaved();
@@ -77,11 +87,32 @@ export default function AddHostForm({ hosts, onSaved }: Props) {
           </label>
         </div>
         <label>
-          Key path
+          SSH Key
+          {keys.length > 0 ? (
+            <select
+              value={form.key_path}
+              onChange={(e) => setForm({ ...form, key_path: e.target.value })}
+            >
+              <option value="">None / manual path</option>
+              {keys.map((k) => (
+                <option key={k.name} value={k.private_path}>
+                  {k.name} ({k.key_type})
+                </option>
+              ))}
+            </select>
+          ) : null}
           <input
             value={form.key_path}
             onChange={(e) => setForm({ ...form, key_path: e.target.value })}
             placeholder="~/.ssh/id_ed25519"
+          />
+        </label>
+        <label>
+          Tags (comma-separated)
+          <input
+            value={form.tags}
+            onChange={(e) => setForm({ ...form, tags: e.target.value })}
+            placeholder="production, web, staging"
           />
         </label>
         <label>

@@ -48,6 +48,13 @@ export default function HostList({
                 {host.host}:{host.port ?? 22}
                 {host.jump_host && ` via ${host.jump_host}`}
               </span>
+              {host.tags && host.tags.length > 0 && (
+                <span className="host-tags">
+                  {host.tags.map((tag) => (
+                    <span key={tag} className="tag-badge">{tag}</span>
+                  ))}
+                </span>
+              )}
             </button>
             <button
               className="icon-button host-delete"

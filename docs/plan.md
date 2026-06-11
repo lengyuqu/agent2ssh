@@ -550,6 +550,42 @@ async fn exec_stream(
 
 ---
 
+### M8-3 详细说明 · Tags UI
+
+**当前状态** ✅ 已完成
+- `HostProfile.tags` 字段已实现（`src-tauri/src/types.rs:40`）
+- `exec_multi_core` 支持按 tag 过滤（`src-tauri/src/core.rs:311-322`）
+- 桌面 UI：`AddHostForm.tsx` 新增 tags 输入框，`HostList.tsx` 展示 tag 徽章，`MultiExecPanel.tsx` 支持按 tag 执行
+- Web 控制台：`console.html` 新增 Tags 列与 tag 徽章展示，Add Host 表单支持 tags
+
+**桌面 UI 需要做的事**
+
+1. `AddHostForm.tsx` — 新增 tags 输入框（逗号分隔，如 `production, web`），保存时解析为 `string[]`
+2. `HostList.tsx` — 主机条目下展示 tag 徽章（小色块）
+3. `MultiExecPanel.tsx` — 新增"按标签执行"模式：输入 tag → 自动展示匹配主机 → 执行
+4. `src/types.ts` — 确认 `HostProfile.tags` 字段已声明（如缺失需补加）
+
+**Web 控制台需要做的事**
+
+1. "Add Host"表单补 tags 输入行
+2. 主机表格新增 Tags 列（多个 tag 用 `<span class="badge">` 展示）
+3. "Execute"面板 MultiExec 区域补 "By tag" 单选，选中后显示 tag 输入框
+
+**涉及文件**
+- `src/components/AddHostForm.tsx`
+- `src/components/HostList.tsx`
+- `src/components/MultiExecPanel.tsx`
+- `src/types.ts`
+- `src-tauri/web/console.html`
+
+**验收标准**
+- [x] 在 AddHostForm 填写 tags 并保存，`hosts.json` 中该 host 包含正确的 tags 数组
+- [x] HostList 展示 tag 徽章
+- [x] MultiExecPanel 输入 tag "production" → 只向该 tag 下的主机发送命令
+- [x] Web 控制台主机表格显示 Tags 列，执行面板支持 "By tag" 模式
+
+---
+
 ### M9 · MCP 审批工具
 
 > 目标：AI agent 可通过 MCP 工具自助查询和响应审批，无需人工介入（适合自动化流水线）。
@@ -572,16 +608,320 @@ async fn exec_stream(
 | M5-1 approval 单元测试 | ✅ 已完成 | — |
 | M5-2 risk_config 单元测试 | ✅ 已完成 | — |
 | M5-3 core 单元测试 | ✅ 已完成 | — |
-| M5-4 Daemon 集成测试 | ⚠️ 部分完成（基础端点通过手动测试） | — |
-| M6-1 Tauri bundle | ⏳ 待后续（需 Tauri bundle 配置） | — |
+| M5-4 Daemon 集成测试 | ✅ 已完成（24 个 axum HTTP 测试全绿） | — |
+| M6-1 Tauri bundle | ⚠️ 待认领（Tauri bundle 配置未完成） | — |
 | M6-2 CI/CD 流水线 | ✅ 已完成 | — |
 | M6-3 Homebrew formula | ✅ 已完成 | — |
 | M7-1 密钥生成 | ✅ 已完成 | — |
 | M7-2 密钥导入 | ✅ 已完成 | — |
-| M7-3 Host 关联密钥 | ✅ 已完成（key_path 已存在于 HostProfile） | — |
+| M7-3 Host 关联密钥 | ✅ 已完成（密钥下拉选择 + 手动路径输入） | — |
 | M7-4 公钥展示 | ✅ 已完成 | — |
 | M8-1 Host tags 字段 | ✅ 已完成 | — |
 | M8-2 exec-multi 按 tag | ✅ 已完成 | — |
+| M8-3 Tags UI（桌面+Web） | ✅ 已完成（AddHostForm tags 输入 + HostList 徽章 + Web Console tags 列） | — |
 | M9-1 MCP approval_list | ✅ 已完成 | — |
 | M9-2 MCP approval_respond | ✅ 已完成 | — |
 | M9-3 MCP ssh_risk_check | ✅ 已完成 | — |
+
+---
+
+## M5-4 详细说明 · Daemon 集成测试 ✅ 已完成
+
+**当前状态** ✅ 已完成
+已在 `src-tauri/tests/daemon_integration.rs` 中实现 24 个 axum HTTP 集成测试，使用 `tower::ServiceExt::oneshot()` 测试所有端点。daemon `main()` 已重构为 `daemon_app()` 工厂函数。
+
+**需要做的事**
+
+在 `src-tauri/src/bin/agent2ssh-daemon.rs` 末尾（或新建 `src-tauri/tests/daemon_integration.rs`）添加 `#[cfg(test)]` 集成测试，使用 `axum::test` 辅助工具：
+
+```rust
+// 示例
+#[tokio::test]
+async fn test_health_no_auth() {
+    let app = build_app("test-token");
+    let resp = app.oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_exec_no_token_returns_401() {
+    let app = build_app("test-token");
+    let resp = app.oneshot(Request::builder().method("POST").uri("/exec")
+        .body(Body::from(r#"{"host":"h","command":"ls"}"#)).unwrap()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+```
+
+**需要重构 `main()` 为 `build_app(token: &str) -> Router`**，以便测试可以构造 app 实例。
+
+**验收标准** ✅ 全部通过
+- [x] `cargo test` 包含以下集成测试并全绿：
+  - `GET /health` 返回 200
+  - 无 token 请求返回 401
+  - `POST /exec` blocked 命令返回 400
+  - `POST /exec` high-risk 命令（无 force）触发审批流程，返回相应状态
+  - `GET /approvals` 返回正确列表
+  - `POST /approvals/:id/approve` 正确更新状态
+
+---
+
+## M6-1 详细说明 · Tauri Bundle（待补）
+
+**当前状态**
+CI 已配置（`.github/workflows/ci.yml`），但 `src-tauri/tauri.conf.json` 中 bundle 产物尚未配置，无法通过 `tauri build` 生成可分发安装包。
+
+**需要做的事**
+
+1. `src-tauri/tauri.conf.json` 中补全 `bundle` 配置：
+
+```json
+"bundle": {
+  "active": true,
+  "targets": ["dmg", "app"],        // macOS
+  "identifier": "com.agent2ssh.app",
+  "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
+  "resources": [],
+  "externalBin": ["binaries/agent2ssh", "binaries/agent2ssh-daemon", "binaries/agent2ssh-mcp"]
+}
+```
+
+2. 图标文件：在 `src-tauri/icons/` 目录下放置标准尺寸图标（可用 `tauri icon` 命令从单张 1024×1024 PNG 批量生成）
+
+3. sidecar 配置：`agent2ssh`、`agent2ssh-daemon`、`agent2ssh-mcp` 三个二进制需要作为 sidecar 打包进安装包，更新 `tauri.conf.json` 的 `externalBin`
+
+4. GitHub Actions 补充 `tauri build` 步骤，tag push 时上传产物到 Releases
+
+**验收标准**
+- [ ] `npm run tauri build` 在 macOS 上生成 `.dmg` 文件
+- [ ] 安装后三个命令行工具（`agent2ssh`、`agent2ssh-daemon`、`agent2ssh-mcp`）可在系统 PATH 中找到
+- [ ] CI tag 触发时自动发布到 GitHub Releases，包含 macOS `.dmg`、Linux `.AppImage`、Windows `.msi`
+
+---
+
+## M10 · SSH 连接池（ControlMaster Persistence）
+
+> 目标：利用 OpenSSH ControlMaster 复用已认证连接，避免每次 exec 重新握手，将重复命令延迟从 ~500ms 降至 ~10ms。
+>
+> `connection.rs` 已有 ControlMaster socket 管理基础，本里程碑在此之上完成自动化管理。
+
+### M10-1 · 自动建立 ControlMaster
+
+**内容**
+- 首次向某 host 执行 exec 时，检查 `~/.agent2ssh/cm/<host>_<port>_<user>` socket 是否存在
+- 若不存在，后台 spawn `ssh -N -M -o ControlMaster=yes -o ControlPath=<socket> <target>` 进程
+- 后续所有 exec/sftp/session 命令携带 `-o ControlMaster=no -o ControlPath=<socket>`
+- ControlMaster 进程在 daemon 退出时一并关闭
+
+**涉及文件**
+- `src-tauri/src/connection.rs`（主改动）
+- `src-tauri/src/core.rs`（exec_ssh_core 调用时传入 socket 路径）
+
+**验收标准**
+- [ ] 第二次向同一 host 执行 exec 耗时比首次减少 ≥ 200ms（有网络延迟的真实主机上测试）
+- [ ] 执行 `ssh_list_hosts` 能看到哪些 host 有活跃 ControlMaster
+
+---
+
+### M10-2 · 连接状态 UI
+
+**内容**
+- MCP 新增工具 `ssh_connection_status`：返回每个 host 的连接状态（connected / disconnected）
+- 桌面 UI `HostList.tsx` 在主机名旁显示绿/灰点
+- Web 控制台主机表格新增 Status 列
+
+**验收标准**
+- [ ] ControlMaster 建立后 UI 显示绿点
+- [ ] 手动关闭 ControlMaster 进程后 UI 更新为灰点（轮询间隔 ≤ 5s）
+
+---
+
+### M10-3 · 手动连接管理
+
+**内容**
+- MCP 新增 `ssh_connect` / `ssh_disconnect` 工具（参数：`host` alias）
+- 桌面 UI 主机条目增加「连接」/「断开」按钮
+- Web 控制台同步增加按钮
+
+**验收标准**
+- [ ] `ssh_connect` 预建立连接，后续 exec 无握手延迟
+- [ ] `ssh_disconnect` 正确关闭 ControlMaster 进程和 socket 文件
+
+---
+
+## M11 · 通知与 Webhook
+
+> 目标：审批请求、高风险命令拦截、exec 完成等关键事件，自动推送到外部系统（Slack、自定义 webhook）。
+
+### M11-1 · Webhook 配置
+
+**路径**：`~/.agent2ssh/config.toml`
+
+**格式**
+```toml
+[webhook]
+url = "https://hooks.slack.com/services/T.../B.../..."
+events = ["approval_required", "exec_blocked", "exec_completed"]  # 可选，默认只推 approval_required
+secret = ""  # 若设置，在 HTTP header X-Agent2SSH-Signature 里附 HMAC-SHA256 签名
+```
+
+**涉及文件**
+- `src-tauri/src/bin/agent2ssh-daemon.rs`（读取配置、发送）
+- 新增 `src-tauri/src/notify.rs`（封装 HTTP POST 逻辑）
+
+**验收标准**
+- [ ] 配置 webhook 后，审批入队时 daemon 在 1s 内 POST 到目标 URL
+- [ ] Payload 包含 `{"event":"approval_required","host":"...","command":"...","approval_id":"..."}`
+- [ ] 设置 secret 后，签名校验通过
+
+---
+
+### M11-2 · Slack 集成模板
+
+**内容**
+- 当 webhook url 为 Slack Incoming Webhook 时，自动格式化为 Slack Block Kit 消息（包含 Approve/Reject 按钮）
+- 自动检测：url 包含 `hooks.slack.com` 时启用 Slack 模板
+
+**验收标准**
+- [ ] Slack channel 收到格式化消息，包含主机名、命令、风险等级
+- [ ] 按钮点击（通过 Slack 交互端点）触发审批（需额外配置公网可达的 callback URL，文档说明）
+
+---
+
+## M12 · 命令模板（Playbooks）
+
+> 目标：预定义可复用的命令序列，AI agent 和用户可按名称调用，减少重复输入并降低人为出错风险。
+
+### M12-1 · Playbook 配置文件
+
+**路径**：`~/.agent2ssh/playbooks.toml`
+
+**格式**
+```toml
+[[playbooks]]
+name = "deploy-web"
+description = "拉取最新代码并重启 web 服务"
+steps = [
+  "cd /opt/app && git pull",
+  "systemctl restart nginx",
+]
+tags = ["production", "web"]     # 只允许在带这些 tag 的 host 上执行（可选）
+risk_override = "high"           # 整体风险等级（可选，默认按每步命令评估）
+
+[[playbooks]]
+name = "disk-check"
+description = "检查磁盘使用率"
+steps = ["df -h", "du -sh /var/log/*"]
+```
+
+### M12-2 · MCP 工具
+
+| 工具 | 说明 |
+|------|------|
+| `ssh_playbook_list` | 列出所有 playbook（name、description、step 数量、tags） |
+| `ssh_playbook_run` | 在指定 host 上按顺序执行 playbook 各步骤，返回每步 `ExecResult` |
+
+**验收标准**
+- [ ] `ssh_playbook_run` 每步失败时中止后续步骤，返回已执行步骤结果和失败原因
+- [ ] 整体风险等级按 `risk_override` 或各步骤中最高级计算
+
+---
+
+### M12-3 · Web 控制台 Playbooks 页签
+
+**内容**
+- 新增 "Playbooks" tab，列出所有 playbook
+- 点击 "Run" 选择目标主机，实时展示每步输出（WebSocket 逐步流式）
+- 允许查看 playbook 定义（只读）
+
+**验收标准**
+- [ ] Web 控制台能完整运行一个多步 playbook 并展示每步输出
+
+---
+
+## M13 · 远程 Daemon 支持
+
+> 目标：不仅支持 localhost，还能连接运行在其他机器上的 agent2ssh-daemon（团队共享场景、CI 服务器场景）。
+
+### M13-1 · 远程 Daemon 配置
+
+**路径**：`~/.agent2ssh/remotes.toml`
+
+**格式**
+```toml
+[[remotes]]
+alias = "ci-server"
+url = "http://192.168.1.100:7722"
+token = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+
+[[remotes]]
+alias = "prod-gateway"
+url = "https://agent2ssh.internal.example.com"
+token_env = "AGENT2SSH_PROD_TOKEN"   # 从环境变量读取 token
+```
+
+**验收标准**
+- [ ] 配置文件解析正确，`token_env` 优先于 `token` 字段
+
+---
+
+### M13-2 · CLI 与 MCP 路由
+
+**内容**
+- CLI 所有子命令支持 `--daemon <alias>` 参数，将请求路由到对应远程 daemon
+- MCP server 新增工具 `ssh_list_daemons`（列出已配置的 daemon alias 和连接状态）
+- MCP 工具新增可选参数 `daemon_alias`，未指定时默认 localhost
+
+**验收标准**
+- [ ] `agent2ssh --daemon ci-server exec --host web1 "uptime"` 通过远程 daemon 执行命令
+- [ ] MCP `ssh_exec` 携带 `daemon_alias: "ci-server"` 路由正确
+
+---
+
+### M13-3 · Web 控制台 Daemon 切换器
+
+**内容**
+- 顶部 header 增加 daemon 下拉选择器（localhost + 已配置 remote）
+- 切换时 token 和 url 自动更新，页面数据重新加载
+
+**验收标准**
+- [ ] 切换到远程 daemon 后，所有 API 调用路由到新 url
+- [ ] 远程 daemon 不可达时显示错误提示，不影响本地 daemon 使用
+
+---
+
+## 里程碑总览（更新）
+
+| 里程碑 | 主题 | 依赖 | 优先级 | 状态 |
+|--------|------|------|--------|------|
+| M1 | HTTP Daemon API | — | 高 | ✅ 完成 |
+| M2 | 审批门禁 | M1 | 高 | ✅ 完成 |
+| M3 | 风险规则可配置化 | — | 中 | ✅ 完成 |
+| M4 | Web 控制台 | M1 | 中 | ✅ 完成 |
+| M5 | 测试覆盖 | — | 高 | ✅ 完成（20 单元 + 24 集成） |
+| M6 | 打包发布 | M5 | 高 | ⚠️ M6-1 待完成 |
+| M7 | SSH 密钥管理 | — | 中 | ✅ 完成 |
+| M8 | 主机分组与批量操作 | — | 中 | ✅ 完成 |
+| M9 | MCP 审批工具 | M2 | 中 | ✅ 完成 |
+| **M10** | **SSH 连接池** | — | 中 | 待认领 |
+| **M11** | **通知与 Webhook** | M2 | 低 | 待认领 |
+| **M12** | **命令模板（Playbooks）** | — | 低 | 待认领 |
+| **M13** | **远程 Daemon** | M1 | 低 | 待认领 |
+
+## 任务状态速查（M10–M13）
+
+| 任务 | 状态 | 负责人 |
+|------|------|--------|
+| M8-3 Tags UI（桌面+Web） | ✅ 已完成 | — |
+| M5-4 Daemon 集成测试 | ✅ 已完成（24 个 axum HTTP 测试全绿） | — |
+| M6-1 Tauri bundle | 待认领 | — |
+| M10-1 ControlMaster 自动建立 | 待认领 | — |
+| M10-2 连接状态 UI | 待认领 | — |
+| M10-3 手动连接管理 | 待认领 | — |
+| M11-1 Webhook 配置与发送 | 待认领 | — |
+| M11-2 Slack 集成模板 | 待认领 | — |
+| M12-1 Playbook 配置文件 | 待认领 | — |
+| M12-2 MCP Playbook 工具 | 待认领 | — |
+| M12-3 Web 控制台 Playbooks 页签 | 待认领 | — |
+| M13-1 远程 Daemon 配置 | 待认领 | — |
+| M13-2 CLI + MCP 路由 | 待认领 | — |
+| M13-3 Web 控制台 Daemon 切换器 | 待认领 | — |
