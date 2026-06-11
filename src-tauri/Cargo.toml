@@ -1,0 +1,45 @@
+[package]
+name = "agent2ssh"
+version = "0.1.0"
+description = "SSH capability layer for general-purpose agents"
+authors = ["agent2ssh"]
+edition = "2021"
+default-run = "agent2ssh-app"
+
+[lib]
+name = "agent2ssh"
+path = "src/lib.rs"
+
+[[bin]]
+name = "agent2ssh-app"
+path = "src/main.rs"
+required-features = ["tauri"]
+
+[[bin]]
+name = "agent2ssh"
+path = "src/bin/agent2ssh.rs"
+required-features = []
+
+[[bin]]
+name = "agent2ssh-mcp"
+path = "src/bin/agent2ssh-mcp.rs"
+required-features = []
+
+[features]
+default = ["tauri"]
+tauri = ["dep:tauri", "dep:tauri-plugin-shell", "dep:tauri-build"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [], optional = true }
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+dirs = "5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [], optional = true }
+tauri-plugin-shell = { version = "2", optional = true }
+tokio = { version = "1", features = ["macros", "process", "rt-multi-thread", "time"] }
+uuid = { version = "1", features = ["v4", "serde"] }
