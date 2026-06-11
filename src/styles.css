@@ -279,11 +279,18 @@ textarea {
 
 .audit-row {
   display: grid;
-  grid-template-columns: 180px 110px minmax(0, 1fr) 120px;
+  grid-template-columns: 180px 110px minmax(0, 1fr) 120px auto;
   gap: 12px;
   align-items: center;
   border-top: 1px solid #edf1f4;
   padding-top: 8px;
+}
+
+.audit-row--high {
+  background: #fff9f0;
+  border-radius: 4px;
+  padding: 6px 8px;
+  border: 1px solid #fde68a;
 }
 
 .audit-row code {
@@ -295,6 +302,37 @@ textarea {
 .audit-row em {
   color: #667783;
   font-style: normal;
+}
+
+.risk-badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  vertical-align: middle;
+}
+
+.risk-low    { background: #d1fae5; color: #065f46; }
+.risk-medium { background: #fef3c7; color: #92400e; }
+.risk-high   { background: #fee2e2; color: #991b1b; }
+.risk-blocked { background: #7f1d1d; color: #fff; }
+
+.force-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  color: #9f1239;
+  cursor: pointer;
+  user-select: none;
+}
+
+.force-row input {
+  width: auto;
+  cursor: pointer;
 }
 
 .empty,

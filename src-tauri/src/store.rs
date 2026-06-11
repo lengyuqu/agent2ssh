@@ -6,7 +6,7 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
-use crate::types::{AppConfig, AuditEntry, ExecResult};
+use crate::types::{AppConfig, AuditEntry, AuditFilter, ExecResult, RiskLevel};
 
 static STORE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -48,7 +48,7 @@ pub fn save_config(config: &AppConfig) -> Result<()> {
     fs::write(config_path()?, raw).context("failed to write hosts config")
 }
 
-pub fn append_audit(result: &ExecResult) -> Result<()> {
+pub fn append_audit(result: &ExecResult, risk_level: RiskLevel) -> Result<()> {
     use chrono::Utc;
     use uuid::Uuid;
 
@@ -60,6 +60,7 @@ pub fn append_audit(result: &ExecResult) -> Result<()> {
         command: result.command.clone(),
         exit_code: result.exit_code,
         duration_ms: result.duration_ms,
+        risk_level,
     };
     let mut file = OpenOptions::new()
         .create(true)
@@ -70,18 +71,41 @@ pub fn append_audit(result: &ExecResult) -> Result<()> {
     Ok(())
 }
 
-pub fn list_audit_raw(limit: usize) -> Result<Vec<AuditEntry>> {
+pub fn list_audit_raw(filter: &AuditFilter) -> Result<Vec<AuditEntry>> {
     ensure_config_dir()?;
     let path = audit_path()?;
     if !path.exists() {
         return Ok(Vec::new());
     }
     let raw = fs::read_to_string(path).context("failed to read audit log")?;
-    let mut entries = raw
+
+    let since = filter.since.as_deref().and_then(|s| s.parse::<chrono::DateTime<chrono::Utc>>().ok());
+    let until = filter.until.as_deref().and_then(|s| s.parse::<chrono::DateTime<chrono::Utc>>().ok());
+
+    let mut entries: Vec<AuditEntry> = raw
         .lines()
         .filter_map(|line| serde_json::from_str::<AuditEntry>(line).ok())
-        .collect::<Vec<_>>();
+        .filter(|e| {
+            if let Some(h) = &filter.host {
+                if !e.host.eq_ignore_ascii_case(h) { return false; }
+            }
+            if let Some(r) = filter.risk_level {
+                if e.risk_level != r { return false; }
+            }
+            if let Some(code) = filter.exit_code {
+                if e.exit_code != Some(code) { return false; }
+            }
+            if let Some(since) = since {
+                if e.ts < since { return false; }
+            }
+            if let Some(until) = until {
+                if e.ts > until { return false; }
+            }
+            true
+        })
+        .collect();
+
     entries.reverse();
-    entries.truncate(limit);
+    entries.truncate(filter.limit);
     Ok(entries)
 }

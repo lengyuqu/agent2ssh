@@ -1,6 +1,6 @@
 use crate::{
     core::{add_host_core, exec_ssh_core, list_audit_core, list_hosts_core, remove_host_core},
-    types::{AuditEntry, ExecRequest, ExecResult, HostProfile},
+    types::{AuditEntry, AuditFilter, ExecRequest, ExecResult, HostProfile},
 };
 
 #[tauri::command]
@@ -25,7 +25,7 @@ pub fn remove_host(name: String) -> Result<(), String> {
 
 #[tauri::command]
 pub fn list_audit() -> Result<Vec<AuditEntry>, String> {
-    list_audit_core(50).map_err(|e| e.to_string())
+    list_audit_core(AuditFilter { limit: 50, ..Default::default() }).map_err(|e| e.to_string())
 }
 
 pub fn run_tauri() {

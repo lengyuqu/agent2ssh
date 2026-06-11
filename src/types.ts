@@ -1,3 +1,5 @@
+export type RiskLevel = "low" | "medium" | "high" | "blocked";
+
 export type HostProfile = {
   name: string;
   host: string;
@@ -13,6 +15,7 @@ export type ExecResult = {
   stdout: string;
   stderr: string;
   duration_ms: number;
+  risk_level: RiskLevel;
 };
 
 export type AuditEntry = {
@@ -22,4 +25,5 @@ export type AuditEntry = {
   command: string;
   exit_code: number | null;
   duration_ms: number;
+  risk_level: RiskLevel;
 };
