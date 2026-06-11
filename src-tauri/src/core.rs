@@ -308,10 +308,34 @@ pub async fn exec_multi_core(
     command: String,
     force: bool,
     timeout_secs: Option<u64>,
+    tags: Option<Vec<String>>,
 ) -> Vec<ExecMultiResult> {
+    // Expand tags into host names
+    let resolved_hosts = if let Some(tag_list) = tags {
+        if !tag_list.is_empty() {
+            let config = match crate::store::load_config() {
+                Ok(c) => c,
+                Err(_) => return vec![],
+            };
+            let mut expanded = hosts.clone();
+            for h in &config.hosts {
+                if h.tags.iter().any(|t| tag_list.contains(t)) {
+                    if !expanded.contains(&h.name) {
+                        expanded.push(h.name.clone());
+                    }
+                }
+            }
+            expanded
+        } else {
+            hosts
+        }
+    } else {
+        hosts
+    };
+
     let mut set = JoinSet::new();
 
-    for host in hosts {
+    for host in resolved_hosts {
         let cmd = command.clone();
         set.spawn(async move {
             let req = ExecRequest {
@@ -592,6 +616,7 @@ pub fn import_ssh_config_core(path: Option<&str>) -> Result<Vec<HostProfile>> {
             key_path: id.clone(),
             jump_host,
             risk_override: None,
+            tags: vec![],
         });
     };
 
@@ -719,4 +744,88 @@ pub async fn ping_hosts_core(host_names: Vec<String>, timeout_secs: Option<u64>)
         }));
     }
     results
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_classify_risk_blocked() {
+        assert_eq!(classify_risk("mkfs /dev/sda"), RiskLevel::Blocked);
+        assert_eq!(classify_risk("rm -rf /"), RiskLevel::Blocked);
+        assert_eq!(classify_risk("shutdown"), RiskLevel::Blocked);
+        assert_eq!(classify_risk("halt"), RiskLevel::Blocked);
+        assert_eq!(classify_risk("poweroff"), RiskLevel::Blocked);
+        assert_eq!(classify_risk("reboot"), RiskLevel::Blocked);
+        assert_eq!(classify_risk("sudo shutdown"), RiskLevel::Blocked);
+        assert_eq!(classify_risk("init 0"), RiskLevel::Blocked);
+        assert_eq!(classify_risk("init 6"), RiskLevel::Blocked);
+    }
+
+    #[test]
+    fn test_classify_risk_high() {
+        assert_eq!(classify_risk("sudo whoami"), RiskLevel::High);
+        assert_eq!(classify_risk("rm -rf /tmp/stuff"), RiskLevel::High);
+        assert_eq!(classify_risk("kill -9 -1"), RiskLevel::High);
+        assert_eq!(classify_risk("chmod 777 /etc/passwd"), RiskLevel::High);
+        assert_eq!(classify_risk("passwd root"), RiskLevel::High);
+        assert_eq!(classify_risk("userdel admin"), RiskLevel::High);
+        assert_eq!(classify_risk("iptables -f"), RiskLevel::High);
+        assert_eq!(classify_risk("systemctl stop nginx"), RiskLevel::High);
+        assert_eq!(classify_risk("drop table users"), RiskLevel::High);
+    }
+
+    #[test]
+    fn test_classify_risk_medium() {
+        assert_eq!(classify_risk("apt install nginx"), RiskLevel::Medium);
+        assert_eq!(classify_risk("pip install requests"), RiskLevel::Medium);
+        assert_eq!(classify_risk("npm install express"), RiskLevel::Medium);
+        assert_eq!(classify_risk("systemctl restart nginx"), RiskLevel::Medium);
+        assert_eq!(classify_risk("git push origin main"), RiskLevel::Medium);
+        assert_eq!(classify_risk("echo hello > /tmp/file"), RiskLevel::Medium);
+        assert_eq!(classify_risk("sed -i 's/foo/bar/' file.txt"), RiskLevel::Medium);
+    }
+
+    #[test]
+    fn test_classify_risk_low() {
+        assert_eq!(classify_risk("ls -la"), RiskLevel::Low);
+        assert_eq!(classify_risk("cat /etc/hosts"), RiskLevel::Low);
+        assert_eq!(classify_risk("uname -a"), RiskLevel::Low);
+        assert_eq!(classify_risk("whoami"), RiskLevel::Low);
+        assert_eq!(classify_risk("df -h"), RiskLevel::Low);
+        assert_eq!(classify_risk("ps aux"), RiskLevel::Low);
+    }
+
+    #[test]
+    fn test_classify_risk_dd_blocked() {
+        assert_eq!(classify_risk("dd if=/dev/zero of=/dev/sda bs=1M"), RiskLevel::Blocked);
+        assert_eq!(classify_risk("dd if=/dev/zero of=/dev/nvme0n1 bs=1M"), RiskLevel::Blocked);
+    }
+
+    #[test]
+    fn test_classify_risk_fork_bomb() {
+        assert_eq!(classify_risk(":(){ :|:& }"), RiskLevel::Blocked);
+        assert_eq!(classify_risk(":(){ :|: & }"), RiskLevel::Blocked);
+    }
+
+    #[test]
+    fn test_classify_risk_sudo_variants() {
+        assert_eq!(classify_risk("sudo rm -rf /"), RiskLevel::Blocked);
+        assert_eq!(classify_risk("sudo reboot"), RiskLevel::Blocked);
+        assert_eq!(classify_risk("sudo whoami"), RiskLevel::High);
+    }
+
+    #[test]
+    fn test_classify_risk_case_insensitive() {
+        assert_eq!(classify_risk("SUDO whoami"), RiskLevel::High);
+        assert_eq!(classify_risk("MKFS /dev/sda"), RiskLevel::Blocked);
+        assert_eq!(classify_risk("SHUTDOWN"), RiskLevel::Blocked);
+    }
+
+    #[test]
+    fn test_shell_escape() {
+        assert_eq!(shell_escape("/tmp/file"), "'/tmp/file'");
+        assert_eq!(shell_escape("it's a test"), "'it'\\''s a test'");
+    }
 }

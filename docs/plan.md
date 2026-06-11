@@ -2,7 +2,7 @@
 
 ## 当前状态（基线）
 
-MVP 已完整实现，包含 21 个 MCP 工具、CLI、桌面 UI。详见 [README](../README.md)。
+MVP 已完整实现，包含 24 个 MCP 工具、CLI、桌面 UI、HTTP Daemon、Web Console。详见 [README](../README.md)。
 
 核心库 (`src-tauri/src/`) 已拆分为独立模块：
 - `types.rs` — 所有共享类型
@@ -11,6 +11,9 @@ MVP 已完整实现，包含 21 个 MCP 工具、CLI、桌面 UI。详见 [READM
 - `session.rs` — PTY 会话（进程内 in-memory）
 - `forward.rs` — 端口转发（进程内 in-memory）
 - `connection.rs` — SSH ControlMaster socket 管理、ssh_config 解析
+- `approval.rs` — 审批请求队列（进程内 in-memory）
+- `risk_config.rs` — 用户自定义风险规则（risk_rules.toml）
+- `keys.rs` — SSH 密钥管理（生成/导入/删除）
 
 ---
 
@@ -386,11 +389,11 @@ feat/m5-mobile
 | M1-1 API 规范 | ✅ 已完成 | — |
 | M1-2 Daemon 二进制 | ✅ 已完成 | — |
 | M1-3 REST 端点 | ✅ 已完成 | — |
-| M1-4 WebSocket 流式 | ✅ 已完成（有缺陷，见 Fix-2/Fix-3） | — |
+| M1-4 WebSocket 流式 | ✅ 已完成（Fix-2/3 已修复鉴权+stderr） | — |
 | M1-5 生命周期管理 | ✅ 已完成 | — |
 | M2-1 审批队列 | ✅ 已完成 | — |
 | M2-2 Exec 集成审批 | ✅ 已完成 | — |
-| M2-3 桌面弹窗 | ⚠️ 组件已写未接入（见 Fix-1） | — |
+| M2-3 桌面弹窗 | ✅ 已完成（Fix-1 接入轮询+弹窗） | — |
 | M2-4 Daemon 端点 | ✅ 已完成 | — |
 | M3-1 规则配置文件 | ✅ 已完成 | — |
 | M3-2 Per-host override | ✅ 已完成 | — |
@@ -563,20 +566,22 @@ async fn exec_stream(
 
 | 任务 | 状态 | 负责人 |
 |------|------|--------|
-| Fix-1 桌面审批弹窗接入 | 待认领 | — |
-| Fix-2 exec_stream 鉴权 | 待认领 | — |
-| Fix-3 exec_stream stderr | 待认领 | — |
-| M5-1 approval 单元测试 | 待认领 | — |
-| M5-2 risk_config 单元测试 | 待认领 | — |
-| M5-3 core 单元测试 | 待认领 | — |
-| M5-4 Daemon 集成测试 | 待认领 | — |
-| M6-1 Tauri bundle | 待认领 | — |
-| M6-2 CI/CD 流水线 | 待认领 | — |
-| M6-3 Homebrew formula | 待认领 | — |
-| M7-1 密钥生成 | 待认领 | — |
-| M7-2 密钥导入 | 待认领 | — |
-| M7-3 Host 关联密钥 | 待认领 | — |
-| M8-1 Host tags 字段 | 待认领 | — |
-| M8-2 exec-multi 按 tag | 待认领 | — |
-| M9-1 MCP approval_list | 待认领 | — |
-| M9-2 MCP approval_respond | 待认领 | — |
+| Fix-1 桌面审批弹窗接入 | ✅ 已完成 | — |
+| Fix-2 exec_stream 鉴权 | ✅ 已完成 | — |
+| Fix-3 exec_stream stderr | ✅ 已完成 | — |
+| M5-1 approval 单元测试 | ✅ 已完成 | — |
+| M5-2 risk_config 单元测试 | ✅ 已完成 | — |
+| M5-3 core 单元测试 | ✅ 已完成 | — |
+| M5-4 Daemon 集成测试 | ⚠️ 部分完成（基础端点通过手动测试） | — |
+| M6-1 Tauri bundle | ⏳ 待后续（需 Tauri bundle 配置） | — |
+| M6-2 CI/CD 流水线 | ✅ 已完成 | — |
+| M6-3 Homebrew formula | ✅ 已完成 | — |
+| M7-1 密钥生成 | ✅ 已完成 | — |
+| M7-2 密钥导入 | ✅ 已完成 | — |
+| M7-3 Host 关联密钥 | ✅ 已完成（key_path 已存在于 HostProfile） | — |
+| M7-4 公钥展示 | ✅ 已完成 | — |
+| M8-1 Host tags 字段 | ✅ 已完成 | — |
+| M8-2 exec-multi 按 tag | ✅ 已完成 | — |
+| M9-1 MCP approval_list | ✅ 已完成 | — |
+| M9-2 MCP approval_respond | ✅ 已完成 | — |
+| M9-3 MCP ssh_risk_check | ✅ 已完成 | — |

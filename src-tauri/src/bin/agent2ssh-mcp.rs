@@ -451,7 +451,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 .to_string();
             let force = args["force"].as_bool().unwrap_or(false);
             let timeout_secs = args["timeout_secs"].as_u64();
-            let results = exec_multi_core(hosts, command, force, timeout_secs).await;
+            let results = exec_multi_core(hosts, command, force, timeout_secs, None).await;
             serde_json::to_value(results)?
         }
         "ssh_sftp_ls" => {

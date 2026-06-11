@@ -128,3 +128,47 @@ pub async fn approval_wait(id: Uuid) -> ApprovalStatus {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_approval_approve_flow() {
+        let id = approval_request("testhost", "ls -la", RiskLevel::High).await;
+        assert_eq!(approval_poll(id).await, Some(ApprovalStatus::Pending));
+        approval_respond(id, true).await.unwrap();
+        assert_eq!(approval_poll(id).await, Some(ApprovalStatus::Approved));
+    }
+
+    #[tokio::test]
+    async fn test_approval_reject_flow() {
+        let id = approval_request("testhost", "rm -rf /tmp", RiskLevel::High).await;
+        assert_eq!(approval_poll(id).await, Some(ApprovalStatus::Pending));
+        approval_respond(id, false).await.unwrap();
+        assert_eq!(approval_poll(id).await, Some(ApprovalStatus::Rejected));
+    }
+
+    #[tokio::test]
+    async fn test_approval_unknown_id() {
+        let fake = Uuid::new_v4();
+        assert_eq!(approval_poll(fake).await, None);
+        assert!(approval_respond(fake, true).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_approval_double_respond() {
+        let id = approval_request("testhost", "sudo whoami", RiskLevel::High).await;
+        approval_respond(id, true).await.unwrap();
+        assert!(approval_respond(id, false).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_approval_list_returns_all() {
+        let id1 = approval_request("h1", "cmd1", RiskLevel::Medium).await;
+        let id2 = approval_request("h2", "cmd2", RiskLevel::High).await;
+        let list = approval_list().await;
+        assert!(list.iter().any(|r| r.id == id1));
+        assert!(list.iter().any(|r| r.id == id2));
+    }
+}

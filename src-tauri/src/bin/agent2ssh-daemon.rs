@@ -56,7 +56,7 @@ fn err(status: StatusCode, msg: impl ToString) -> (StatusCode, Json<ErrorBody>) 
 // ── Request/Response types ───────────────────────────────────────────────────
 
 #[derive(Deserialize)] struct PingBody { hosts: Vec<String>, timeout_secs: Option<u64> }
-#[derive(Deserialize)] struct ExecMultiBody { hosts: Vec<String>, command: String, #[serde(default)] force: bool, timeout_secs: Option<u64> }
+#[derive(Deserialize)] struct ExecMultiBody { hosts: Vec<String>, command: String, #[serde(default)] force: bool, timeout_secs: Option<u64>, #[serde(default)] tags: Option<Vec<String>> }
 #[derive(Deserialize)] struct SftpDirBody { host: String, path: String }
 #[derive(Deserialize)] struct SessionOpenBody { host: String }
 #[derive(Deserialize)] struct SessionWriteBody { input: String }
@@ -160,7 +160,7 @@ async fn exec_multi(
     State(s): State<AppState>, headers: HeaderMap, Json(body): Json<ExecMultiBody>,
 ) -> Result<Json<Vec<ExecMultiResult>>, (StatusCode, Json<ErrorBody>)> {
     check_auth(&s, &headers)?;
-    Ok(Json(exec_multi_core(body.hosts, body.command, body.force, body.timeout_secs).await))
+    Ok(Json(exec_multi_core(body.hosts, body.command, body.force, body.timeout_secs, body.tags).await))
 }
 
 async fn audit(

@@ -8,6 +8,7 @@ import AuditPanel from "./components/AuditPanel";
 import ExecPanel from "./components/ExecPanel";
 import ForwardPanel from "./components/ForwardPanel";
 import HostList from "./components/HostList";
+import KeysPanel from "./components/KeysPanel";
 import MultiExecPanel from "./components/MultiExecPanel";
 import PingPanel from "./components/PingPanel";
 import SFTPPanel from "./components/SFTPPanel";
@@ -177,6 +178,8 @@ export default function App() {
         </div>
 
         <ForwardPanel selectedHost={selectedHost} />
+
+        <KeysPanel />
 
         <AuditPanel audit={audit} onRefresh={refresh} />
       </section>

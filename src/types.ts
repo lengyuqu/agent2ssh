@@ -8,6 +8,7 @@ export type HostProfile = {
   key_path?: string | null;
   jump_host?: string | null;
   risk_override?: RiskLevel | null;
+  tags?: string[];
 };
 
 export type ExecRequest = {
@@ -93,4 +94,13 @@ export type ApprovalRequest = {
   requested_at: string;
   ttl_secs: number;
   status: ApprovalStatus;
+};
+
+export type SshKeyInfo = {
+  name: string;
+  private_path: string;
+  public_path: string;
+  public_key: string;
+  key_type: string;
+  created_at?: string | null;
 };

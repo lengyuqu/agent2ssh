@@ -15,6 +15,7 @@ use crate::{
         SftpUploadRequest,
     },
 };
+use crate::keys::{delete_key_core, generate_key_core, import_key_core, list_keys_core, SshKeyInfo};
 use uuid::Uuid;
 
 // ── Host management ──────────────────────────────────────────────────────────
@@ -57,8 +58,9 @@ pub async fn exec_multi(
     command: String,
     force: bool,
     timeout_secs: Option<u64>,
+    tags: Option<Vec<String>>,
 ) -> Result<Vec<ExecMultiResult>, String> {
-    Ok(exec_multi_core(hosts, command, force, timeout_secs).await)
+    Ok(exec_multi_core(hosts, command, force, timeout_secs, tags).await)
 }
 
 #[tauri::command]
@@ -208,6 +210,28 @@ pub fn get_daemon_token() -> Result<String, String> {
     }
 }
 
+// ── SSH Key management ──────────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn list_keys() -> Result<Vec<SshKeyInfo>, String> {
+    list_keys_core().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn generate_key(name: String, comment: Option<String>) -> Result<SshKeyInfo, String> {
+    generate_key_core(&name, comment.as_deref()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn import_key(source_path: String, name: Option<String>) -> Result<SshKeyInfo, String> {
+    import_key_core(&source_path, name.as_deref()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_key(name: String) -> Result<(), String> {
+    delete_key_core(&name).map_err(|e| e.to_string())
+}
+
 // ── Bootstrap ────────────────────────────────────────────────────────────────
 
 pub fn run_tauri() {
@@ -244,6 +268,11 @@ pub fn run_tauri() {
             list_audit,
             // Daemon helpers
             get_daemon_token,
+            // SSH Keys
+            list_keys,
+            generate_key,
+            import_key,
+            delete_key,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

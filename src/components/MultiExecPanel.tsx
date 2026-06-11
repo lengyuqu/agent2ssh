@@ -13,6 +13,7 @@ export default function MultiExecPanel({ hosts, onExecComplete }: Props) {
   const [selected, setSelected] = useState<string[]>([]);
   const [command, setCommand] = useState("");
   const [force, setForce] = useState(false);
+  const [tags, setTags] = useState("");
   const [results, setResults] = useState<ExecMultiResult[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -36,7 +37,8 @@ export default function MultiExecPanel({ hosts, onExecComplete }: Props) {
     setBusy(true);
     setError(null);
     try {
-      const res = await api.execMulti(selected, command, force);
+      const parsedTags = tags.trim() ? tags.split(",").map(t => t.trim()) : undefined;
+      const res = await api.execMulti(selected, command, force, undefined, parsedTags);
       setResults(res);
       onExecComplete();
     } catch (err) {
@@ -88,6 +90,16 @@ export default function MultiExecPanel({ hosts, onExecComplete }: Props) {
           onChange={(e) => setForce(e.target.checked)}
         />
         Force
+      </label>
+      <label>
+        Tags (comma-separated, optional)
+        <div className="tags-input">
+          <input
+            value={tags}
+            onChange={(e) => setTags(e.target.value)}
+            placeholder="web, production"
+          />
+        </div>
       </label>
       <button
         className="primary"

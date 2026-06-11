@@ -2,6 +2,7 @@ pub mod approval;
 pub mod connection;
 pub mod core;
 pub mod forward;
+pub mod keys;
 pub mod risk_config;
 pub mod session;
 pub mod store;

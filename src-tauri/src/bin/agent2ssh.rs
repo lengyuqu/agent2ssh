@@ -50,6 +50,8 @@ enum Commands {
         force: bool,
         #[arg(long)]
         timeout_secs: Option<u64>,
+        #[arg(long, value_delimiter = ',')]
+        tags: Option<Vec<String>>,
     },
     Sftp {
         #[command(subcommand)]
@@ -127,6 +129,9 @@ enum HostCommands {
         /// Override risk level for all commands on this host (low/medium/high)
         #[arg(long)]
         risk_override: Option<String>,
+        /// Comma-separated tags for grouping
+        #[arg(long, value_delimiter = ',')]
+        tags: Option<Vec<String>>,
         #[arg(long)]
         json: bool,
     },
@@ -294,6 +299,7 @@ async fn main() -> Result<()> {
                 key,
                 jump,
                 risk_override,
+                tags,
                 json,
             } => {
                 let risk_override = risk_override.and_then(|s| match s.to_lowercase().as_str() {
@@ -311,6 +317,7 @@ async fn main() -> Result<()> {
                     key_path: key,
                     jump_host: jump,
                     risk_override,
+                    tags: tags.unwrap_or_default(),
                 })?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&profile)?);
@@ -372,8 +379,8 @@ async fn main() -> Result<()> {
                 std::process::exit(result.exit_code.unwrap_or(1));
             }
         }
-        Commands::ExecMulti { hosts, command, json, force, timeout_secs } => {
-            let results = exec_multi_core(hosts, command, force, timeout_secs).await;
+        Commands::ExecMulti { hosts, command, json, force, timeout_secs, tags } => {
+            let results = exec_multi_core(hosts, command, force, timeout_secs, tags).await;
             if json {
                 println!("{}", serde_json::to_string_pretty(&results)?);
             } else {

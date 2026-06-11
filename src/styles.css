@@ -917,6 +917,93 @@ textarea {
   font-size: 13px;
 }
 
+/* ── SSH Keys panel ────────────────────────────────────────────────────────── */
+.key-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+}
+
+.key-mode-toggle {
+  display: flex;
+  gap: 4px;
+}
+
+.key-mode-toggle button {
+  flex: 1;
+  padding: 6px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+}
+
+.key-mode-toggle button.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.key-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.key-table th {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.key-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.key-type-badge {
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+.pub-key-cell {
+  max-width: 300px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.pub-key-cell code {
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 240px;
+  display: inline-block;
+}
+
+.tags-input {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tags-input input {
+  flex: 1;
+}
+
 /* ── Responsive ──────────────────────────────────────────────────────────── */
 @media (max-width: 900px) {
   body {

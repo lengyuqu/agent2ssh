@@ -13,6 +13,7 @@ import type {
   RiskLevel,
   SessionInfo,
   SftpResult,
+  SshKeyInfo,
 } from "./types";
 
 const DAEMON_URL = "http://127.0.0.1:7722";
@@ -38,13 +39,15 @@ export const api = {
     hosts: string[],
     command: string,
     force = false,
-    timeoutSecs?: number
+    timeoutSecs?: number,
+    tags?: string[]
   ) =>
     invoke<ExecMultiResult[]>("exec_multi", {
       hosts,
       command,
       force,
       timeoutSecs: timeoutSecs ?? null,
+      tags: tags ?? null,
     }),
   pingHosts: (hosts: string[], timeoutSecs?: number) =>
     invoke<PingResult[]>("ping_hosts", {
@@ -110,6 +113,14 @@ export const api = {
   // Audit
   listAudit: (filter?: AuditFilter) =>
     invoke<AuditEntry[]>("list_audit", { filter: filter ?? null }),
+
+  // SSH Keys
+  listKeys: () => invoke<SshKeyInfo[]>("list_keys"),
+  generateKey: (name: string, comment?: string) =>
+    invoke<SshKeyInfo>("generate_key", { name, comment: comment ?? null }),
+  importKey: (sourcePath: string, name?: string) =>
+    invoke<SshKeyInfo>("import_key", { sourcePath, name: name ?? null }),
+  deleteKey: (name: string) => invoke<void>("delete_key", { name }),
 
   // Daemon approval polling (Fix-1)
   getDaemonToken: () => invoke<string>("get_daemon_token"),

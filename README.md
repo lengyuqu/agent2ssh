@@ -37,6 +37,43 @@ cd src-tauri
 cargo run --bin agent2ssh-mcp
 ```
 
+## Installation
+
+### Homebrew (macOS)
+
+```bash
+brew tap lengyuqu/agent2ssh
+brew install agent2ssh
+```
+
+### From source
+
+```bash
+git clone https://github.com/lengyuqu/agent2ssh.git
+cd agent2ssh
+npm install && npm run build
+cd src-tauri
+cargo build --release --no-default-features --bin agent2ssh --bin agent2ssh-mcp
+cargo build --release --no-default-features --features daemon --bin agent2ssh-daemon
+```
+
+### Pre-built binaries
+
+Download from [GitHub Releases](https://github.com/lengyuqu/agent2ssh/releases).
+
+### Daemon
+
+```bash
+# Start the HTTP daemon
+agent2ssh daemon start
+
+# Check status
+agent2ssh daemon status
+
+# Open web console
+open http://127.0.0.1:7722/console
+```
+
 ## Data
 
 Local data is stored under:
@@ -45,6 +82,23 @@ Local data is stored under:
 ~/.agent2ssh/hosts.json
 ~/.agent2ssh/audit.jsonl
 ```
+
+## MCP Integration
+
+Configure Agent2SSH as an MCP server in your agent's config:
+
+```json
+{
+  "mcpServers": {
+    "agent2ssh": {
+      "command": "agent2ssh-mcp",
+      "args": []
+    }
+  }
+}
+```
+
+See [docs/skills.md](docs/skills.md) for the full list of 24 MCP tools.
 
 ## Implemented Features
 

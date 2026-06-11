@@ -112,3 +112,48 @@ fn matches_pattern(command: &str, pattern: &str) -> bool {
         command.contains(&pattern)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_matches_pattern_exact() {
+        assert!(matches_pattern("docker system prune", "docker system prune"));
+        assert!(!matches_pattern("docker system prune -a", "docker system prune -af"));
+    }
+
+    #[test]
+    fn test_matches_pattern_glob() {
+        assert!(matches_pattern("git push --force origin main", "git push *force*"));
+        assert!(matches_pattern("kubectl delete namespace kube-system", "kubectl delete*"));
+        assert!(!matches_pattern("kubectl get pods", "kubectl delete*"));
+    }
+
+    #[test]
+    fn test_matches_pattern_contains() {
+        assert!(matches_pattern("sudo apt install nginx", "apt install"));
+        assert!(matches_pattern("terraform destroy -auto-approve", "terraform destroy"));
+    }
+
+    #[test]
+    fn test_matches_pattern_empty_glob_parts() {
+        // "**" should match anything
+        assert!(matches_pattern("anything goes here", "*"));
+    }
+
+    #[tokio::test]
+    async fn test_load_risk_rules_missing_file() {
+        // When no file exists, should return default (empty) rules
+        let rules = load_risk_rules().await.unwrap();
+        assert!(rules.blocked.patterns.is_empty());
+        assert!(rules.high.patterns.is_empty());
+        assert!(rules.medium.patterns.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_classify_with_no_rules() {
+        // With no rules file, should return None
+        assert_eq!(classify_with_user_rules("ls -la").await, None);
+    }
+}

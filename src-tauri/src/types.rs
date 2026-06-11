@@ -35,6 +35,9 @@ pub struct HostProfile {
     /// Override risk level for all commands on this host (e.g. "low" to skip confirmations).
     #[serde(default)]
     pub risk_override: Option<RiskLevel>,
+    /// Tags for grouping hosts (e.g. ["production", "web"])
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
