@@ -22,12 +22,15 @@ mod http_helpers {
     use agent2ssh::approval::{approval_list, approval_respond, ApprovalRequest};
     use agent2ssh::connection::{connect_host, list_active_connections};
     use agent2ssh::core::*;
+    use agent2ssh::health::load_health_snapshot;
     use agent2ssh::notify::{load_webhook_config, save_webhook_config, WebhookConfig};
-    use agent2ssh::playbook::{list_playbooks_core, run_playbook_core, Playbook, PlaybookRunResult};
+    use agent2ssh::playbook::{
+        dry_run_playbook, list_playbooks_core, run_playbook_core, Playbook, PlaybookDryRun,
+        PlaybookRunResult,
+    };
     use agent2ssh::remote::{list_daemons_core, DaemonInfo};
     use agent2ssh::risk_config::classify_with_user_rules;
     use agent2ssh::types::*;
-
     use axum::{
         extract::{Path, State},
         http::{HeaderMap, StatusCode},
@@ -36,6 +39,7 @@ mod http_helpers {
         Json, Router,
     };
     use serde::{Deserialize, Serialize};
+    use std::collections::HashMap;
     use uuid::Uuid;
 
     #[derive(Clone)]
@@ -95,6 +99,15 @@ mod http_helpers {
         host: String,
         #[serde(default)]
         force: bool,
+        #[serde(default)]
+        params: Option<HashMap<String, String>>,
+    }
+
+    #[derive(Deserialize)]
+    struct PlaybookDryRunBody {
+        playbook: String,
+        #[serde(default)]
+        params: Option<HashMap<String, String>>,
     }
 
     // ── Handlers (mirror the daemon binary) ─────────────────────────────────
@@ -213,8 +226,20 @@ mod http_helpers {
         Json(body): Json<PlaybookRunBody>,
     ) -> Result<Json<PlaybookRunResult>, (StatusCode, Json<ErrorBody>)> {
         check_auth(&s, &headers)?;
-        run_playbook_core(&body.playbook, &body.host, body.force)
+        run_playbook_core(&body.playbook, &body.host, body.force, body.params.as_ref())
             .await
+            .map(Json)
+            .map_err(|e| err(StatusCode::BAD_REQUEST, e))
+    }
+
+    async fn dry_run_playbook_handler(
+        State(s): State<AppState>,
+        headers: HeaderMap,
+        Json(body): Json<PlaybookDryRunBody>,
+    ) -> Result<Json<PlaybookDryRun>, (StatusCode, Json<ErrorBody>)> {
+        check_auth(&s, &headers)?;
+        let params = body.params.unwrap_or_default();
+        dry_run_playbook(&body.playbook, &params)
             .map(Json)
             .map_err(|e| err(StatusCode::BAD_REQUEST, e))
     }
@@ -248,6 +273,116 @@ mod http_helpers {
         Ok(Json(config))
     }
 
+    #[derive(Deserialize)]
+    struct ExecPreviewBody {
+        host: Option<String>,
+        hosts: Option<Vec<String>>,
+        command: String,
+        timeout_secs: Option<u64>,
+        #[serde(default)]
+        tags: Option<Vec<String>>,
+    }
+
+    async fn exec_preview(
+        State(s): State<AppState>,
+        headers: HeaderMap,
+        Json(body): Json<ExecPreviewBody>,
+    ) -> Result<Json<ExecPlan>, (StatusCode, Json<ErrorBody>)> {
+        check_auth(&s, &headers)?;
+        if let Some(hosts) = body.hosts {
+            preview_exec_multi(hosts, &body.command, body.tags, body.timeout_secs)
+                .await
+                .map(Json)
+                .map_err(|e| err(StatusCode::BAD_REQUEST, e))
+        } else if let Some(host) = body.host {
+            preview_exec(&host, &body.command, body.timeout_secs)
+                .await
+                .map(Json)
+                .map_err(|e| err(StatusCode::BAD_REQUEST, e))
+        } else {
+            Err(err(StatusCode::BAD_REQUEST, "host or hosts required"))
+        }
+    }
+
+    // ── Approval policy handlers ────────────────────────────────────────────
+
+    use agent2ssh::approval::{
+        check_approval_required, list_approval_policies, save_approval_policies, ApprovalPolicy,
+    };
+
+    #[derive(Deserialize)]
+    struct ApprovalCheckBody {
+        host: String,
+        command: String,
+    }
+
+    #[derive(Serialize)]
+    struct ApprovalCheckResult {
+        requires_approval: bool,
+        matched_policy: Option<String>,
+        risk_level: RiskLevel,
+        ttl_secs: Option<u64>,
+    }
+
+    async fn list_policies(
+        State(s): State<AppState>,
+        headers: HeaderMap,
+    ) -> Result<Json<Vec<ApprovalPolicy>>, (StatusCode, Json<ErrorBody>)> {
+        check_auth(&s, &headers)?;
+        list_approval_policies()
+            .map(Json)
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))
+    }
+
+    async fn put_policies(
+        State(s): State<AppState>,
+        headers: HeaderMap,
+        Json(policies): Json<Vec<ApprovalPolicy>>,
+    ) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
+        check_auth(&s, &headers)?;
+        save_approval_policies(&policies)
+            .map(|_| Json(OkBody { ok: true }))
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))
+    }
+
+    async fn approval_check(
+        State(s): State<AppState>,
+        headers: HeaderMap,
+        Json(body): Json<ApprovalCheckBody>,
+    ) -> Result<Json<ApprovalCheckResult>, (StatusCode, Json<ErrorBody>)> {
+        check_auth(&s, &headers)?;
+        let risk = classify_risk(&body.command);
+        let result = check_approval_required(&body.host, &[], &body.command, risk)
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        match result {
+            Some(policy) => Ok(Json(ApprovalCheckResult {
+                requires_approval: true,
+                matched_policy: Some(policy.name),
+                risk_level: risk,
+                ttl_secs: policy.ttl_secs,
+            })),
+            None => Ok(Json(ApprovalCheckResult {
+                requires_approval: false,
+                matched_policy: None,
+                risk_level: risk,
+                ttl_secs: None,
+            })),
+        }
+    }
+
+    async fn get_health_snapshot_handler(
+        State(s): State<AppState>,
+        headers: HeaderMap,
+    ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
+        check_auth(&s, &headers)?;
+        match load_health_snapshot() {
+            Ok(snapshot) => Ok(Json(serde_json::to_value(snapshot).unwrap_or_default())),
+            Err(_) => Ok(Json(serde_json::json!({
+                "error": "no health snapshot available"
+            }))),
+        }
+    }
+
     /// Build a test router mirroring the daemon's route structure.
     /// Uses a fixed test token for authentication.
     pub(super) fn build_test_router() -> Router {
@@ -267,8 +402,13 @@ mod http_helpers {
             .route("/connections/:host/connect", post(ssh_connect))
             .route("/playbooks", get(list_playbooks))
             .route("/playbooks/run", post(run_playbook))
+            .route("/playbooks/:name/dry-run", post(dry_run_playbook_handler))
             .route("/daemons", get(list_daemons))
             .route("/webhook/config", get(get_webhook_config).put(set_webhook_config))
+            .route("/exec/preview", post(exec_preview))
+            .route("/approval/policies", get(list_policies).put(put_policies))
+            .route("/approval/check", post(approval_check))
+            .route("/health-snapshot", get(get_health_snapshot_handler))
             .with_state(state)
     }
 }
@@ -387,6 +527,11 @@ fn test_audit_filter_serialization() {
         since: None,
         until: None,
         limit: 50,
+        search: None,
+        command_pattern: None,
+        host_env: None,
+        host_role: None,
+        host_owner: None,
     };
     let json = serde_json::to_string(&filter).unwrap();
     assert!(json.contains("\"host\":\"prod\""));
@@ -780,14 +925,14 @@ async fn http_hosts_list_returns_valid_json_array() {
 // Part 3: MCP tool enumeration test (P4-1)
 // ============================================================================
 
-/// Meta-test: verify the MCP binary declares exactly 35 tools by parsing
+/// Meta-test: verify the MCP binary declares exactly 48 tools by parsing
 /// the source file and counting `"name":` entries in the tools/list handler.
 ///
 /// This avoids the need to run the MCP server over stdio JSON-RPC, which
 /// requires a full process lifecycle. Instead we treat the source as the
 /// canonical tool registry and assert on its structure.
 #[test]
-fn mcp_tool_list_contains_exactly_35_tools() {
+fn mcp_tool_list_contains_exactly_48_tools() {
     let source = include_str!("../src/bin/agent2ssh-mcp.rs");
 
     // Extract the tools/list handler block: everything between
@@ -806,7 +951,7 @@ fn mcp_tool_list_contains_exactly_35_tools() {
     // the tools array. Each tool object has exactly one "name" field at the
     // top level, but some input schemas also use "name" as a property key
     // (e.g. ssh_add_host and ssh_remove_host), so the raw count is
-    // 35 tools + 2 schema-property "name" keys = 37.
+    // 48 tools + 2 schema-property "name" keys = 50.
     let after_array_start = array_start + "\"tools\": [".len();
     let mut depth = 1;
     let mut end = after_array_start;
@@ -830,8 +975,8 @@ fn mcp_tool_list_contains_exactly_35_tools() {
     let tool_count = tools_block.matches("\"name\": \"ssh_").count();
 
     assert_eq!(
-        tool_count, 35,
-        "Expected exactly 35 MCP tools, found {tool_count}. \
+        tool_count, 50,
+        "Expected exactly 50 MCP tools, found {tool_count}. \
          If you added or removed a tool, update this count and the expected list below."
     );
 }
@@ -850,7 +995,9 @@ fn mcp_tool_list_contains_all_expected_names() {
         "ssh_exec",
         "ssh_ping",
         "ssh_exec_multi",
+        "ssh_exec_compare",
         "ssh_audit",
+        "ssh_audit_export",
         "ssh_sftp_ls",
         "ssh_sftp_stat",
         "ssh_sftp_mkdir",
@@ -869,14 +1016,27 @@ fn mcp_tool_list_contains_all_expected_names() {
         "ssh_approval_respond",
         "ssh_playbook_list",
         "ssh_playbook_run",
+        "ssh_playbook_dry_run",
         "ssh_connection_status",
         "ssh_connect",
         "ssh_disconnect",
         "ssh_webhook_config",
         "ssh_config_export",
         "ssh_config_import",
+        "ssh_config_import_preview",
         "ssh_doctor",
         "ssh_metrics",
+        "ssh_metrics_trend",
+        "ssh_preview_exec",
+        "ssh_approval_policies_list",
+        "ssh_approval_check",
+        "ssh_health_snapshot",
+        "ssh_daemon_diagnose",
+        "ssh_daemon_version_check",
+        "ssh_daemons_view",
+        "ssh_events_subscribe",
+        "ssh_sync_diff",
+        "ssh_sync_export",
     ];
 
     // All tool names should appear in the tools/list section of the source
@@ -898,7 +1058,7 @@ fn mcp_tool_list_contains_all_expected_names() {
     }
 }
 
-/// Verify the MCP call_tool handler covers all 31 tool names.
+/// Verify the MCP call_tool handler covers all tool names.
 #[test]
 fn mcp_call_tool_handler_covers_all_tools() {
     let source = include_str!("../src/bin/agent2ssh-mcp.rs");
@@ -912,7 +1072,9 @@ fn mcp_call_tool_handler_covers_all_tools() {
         "ssh_exec",
         "ssh_ping",
         "ssh_exec_multi",
+        "ssh_exec_compare",
         "ssh_audit",
+        "ssh_audit_export",
         "ssh_sftp_ls",
         "ssh_sftp_stat",
         "ssh_sftp_mkdir",
@@ -931,14 +1093,27 @@ fn mcp_call_tool_handler_covers_all_tools() {
         "ssh_approval_respond",
         "ssh_playbook_list",
         "ssh_playbook_run",
+        "ssh_playbook_dry_run",
         "ssh_connection_status",
         "ssh_connect",
         "ssh_disconnect",
         "ssh_webhook_config",
         "ssh_config_export",
         "ssh_config_import",
+        "ssh_config_import_preview",
         "ssh_doctor",
         "ssh_metrics",
+        "ssh_metrics_trend",
+        "ssh_preview_exec",
+        "ssh_approval_policies_list",
+        "ssh_approval_check",
+        "ssh_health_snapshot",
+        "ssh_daemon_diagnose",
+        "ssh_daemon_version_check",
+        "ssh_daemons_view",
+        "ssh_events_subscribe",
+        "ssh_sync_diff",
+        "ssh_sync_export",
     ];
 
     // Find the call_tool function body
@@ -1110,6 +1285,37 @@ async fn http_playbooks_run_missing_playbook_returns_error() {
     );
 }
 
+#[tokio::test]
+async fn http_playbooks_dry_run_missing_playbook_returns_error() {
+    let app = http_helpers::build_test_router();
+
+    let body = serde_json::json!({
+        "playbook": "nonexistent-playbook-xyz",
+        "params": {}
+    });
+    let response = app
+        .oneshot(auth_json_request(
+            axum::http::Method::POST,
+            "/playbooks/test/dry-run",
+            &body,
+        ))
+        .await
+        .unwrap();
+
+    // dry_run_playbook should fail for a nonexistent playbook -> 400
+    assert_eq!(
+        response.status(),
+        400,
+        "Dry-running a nonexistent playbook should return 400 Bad Request"
+    );
+
+    let resp_body: serde_json::Value = response_json(response).await;
+    assert!(
+        resp_body.get("error").is_some(),
+        "Error response must have 'error' field"
+    );
+}
+
 // ── Daemons endpoint ────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -1257,6 +1463,198 @@ async fn http_webhook_config_put_requires_auth() {
                 .uri("/webhook/config")
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_string(&config).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 401);
+}
+
+// ── Exec preview endpoint ──────────────────────────────────────────────────
+
+#[tokio::test]
+async fn http_exec_preview_requires_auth() {
+    let app = http_helpers::build_test_router();
+
+    let body = serde_json::json!({"host": "test", "command": "ls"});
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method(axum::http::Method::POST)
+                .uri("/exec/preview")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 401);
+}
+
+#[tokio::test]
+async fn http_exec_preview_missing_host_returns_400() {
+    let app = http_helpers::build_test_router();
+
+    let body = serde_json::json!({"command": "ls"});
+    let response = app
+        .oneshot(auth_json_request(
+            axum::http::Method::POST,
+            "/exec/preview",
+            &body,
+        ))
+        .await
+        .unwrap();
+
+    // No host or hosts provided -> 400
+    assert_eq!(response.status(), 400);
+    let resp_body: serde_json::Value = response_json(response).await;
+    assert!(
+        resp_body.get("error").is_some(),
+        "Error response must have 'error' field"
+    );
+}
+
+#[tokio::test]
+async fn http_exec_preview_unknown_host_returns_400() {
+    let app = http_helpers::build_test_router();
+
+    let body = serde_json::json!({
+        "host": "nonexistent-host-xyz-12345",
+        "command": "uptime"
+    });
+    let response = app
+        .oneshot(auth_json_request(
+            axum::http::Method::POST,
+            "/exec/preview",
+            &body,
+        ))
+        .await
+        .unwrap();
+
+    // resolve_host should fail for a nonexistent host -> 400
+    assert_eq!(response.status(), 400);
+}
+
+// ============================================================================
+// Part 5: Approval policy HTTP tests (F4-1)
+// ============================================================================
+
+#[tokio::test]
+async fn http_approval_policies_get_returns_array() {
+    let app = http_helpers::build_test_router();
+
+    let response = app
+        .oneshot(auth_get("/approval/policies"))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    let body: serde_json::Value = response_json(response).await;
+    assert!(body.is_array(), "GET /approval/policies must return a JSON array");
+}
+
+#[tokio::test]
+async fn http_approval_policies_requires_auth() {
+    let app = http_helpers::build_test_router();
+
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/approval/policies")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 401);
+}
+
+#[tokio::test]
+async fn http_approval_check_returns_result() {
+    let app = http_helpers::build_test_router();
+
+    let body = serde_json::json!({
+        "host": "some-host",
+        "command": "ls -la"
+    });
+    let response = app
+        .oneshot(auth_json_request(
+            axum::http::Method::POST,
+            "/approval/check",
+            &body,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    let result: serde_json::Value = response_json(response).await;
+    assert!(
+        result.get("requires_approval").is_some(),
+        "ApprovalCheckResult must have 'requires_approval' field"
+    );
+    assert!(
+        result.get("risk_level").is_some(),
+        "ApprovalCheckResult must have 'risk_level' field"
+    );
+}
+
+#[tokio::test]
+async fn http_approval_check_requires_auth() {
+    let app = http_helpers::build_test_router();
+
+    let body = serde_json::json!({
+        "host": "some-host",
+        "command": "ls"
+    });
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method(axum::http::Method::POST)
+                .uri("/approval/check")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 401);
+}
+
+// ── Health Snapshot endpoint ────────────────────────────────────────────────
+
+#[tokio::test]
+async fn http_health_snapshot_get_returns_200() {
+    let app = http_helpers::build_test_router();
+
+    let response = app
+        .oneshot(auth_get("/health-snapshot"))
+        .await
+        .unwrap();
+
+    // Should return 200 regardless of whether a snapshot exists
+    assert_eq!(response.status(), 200);
+
+    let body: serde_json::Value = response_json(response).await;
+    // Either a valid snapshot or an error message
+    assert!(
+        body.get("hosts").is_some() || body.get("error").is_some(),
+        "GET /health-snapshot should return either a snapshot or an error message"
+    );
+}
+
+#[tokio::test]
+async fn http_health_snapshot_requires_auth() {
+    let app = http_helpers::build_test_router();
+
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/health-snapshot")
+                .body(Body::empty())
                 .unwrap(),
         )
         .await

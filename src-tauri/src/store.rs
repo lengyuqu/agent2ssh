@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, OpenOptions},
     io::Write,
@@ -73,7 +74,12 @@ pub fn save_config(config: &AppConfig) -> Result<()> {
     fs::write(config_path()?, raw).context("failed to write hosts config")
 }
 
-pub fn append_audit(result: &ExecResult, risk_level: RiskLevel) -> Result<()> {
+pub fn append_audit(
+    result: &ExecResult,
+    risk_level: RiskLevel,
+    reason: Option<&str>,
+    change_id: Option<&str>,
+) -> Result<()> {
     use chrono::Utc;
     use uuid::Uuid;
 
@@ -87,6 +93,8 @@ pub fn append_audit(result: &ExecResult, risk_level: RiskLevel) -> Result<()> {
         exit_code: result.exit_code,
         duration_ms: result.duration_ms,
         risk_level,
+        reason: reason.map(str::to_string),
+        change_id: change_id.map(str::to_string),
     };
     let mut file = OpenOptions::new()
         .create(true)
@@ -134,12 +142,156 @@ pub fn rotate_audit_if_needed(max_size_bytes: u64) -> Result<()> {
         std::fs::remove_file(&rotated)?;
     }
     std::fs::rename(&path, &rotated)?;
+
+    // Publish audit rotated event
+    crate::events::publish_event(
+        crate::events::EventType::AuditRotated,
+        serde_json::json!({"file": rotated.display().to_string()}),
+    );
+
     Ok(())
 }
 
 /// Public wrapper for CLI/daemon invocation of audit rotation with the default 10 MB limit.
 pub fn rotate_audit_core() -> Result<()> {
     rotate_audit_if_needed(10 * 1024 * 1024)
+}
+
+// ── Metrics Trends (F6-3) ───────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricsTrend {
+    pub period: TrendPeriod,
+    pub total_executions: usize,
+    pub success_count: usize,
+    pub failure_count: usize,
+    pub blocked_count: usize,
+    pub failure_rate: f64,
+    pub risk_distribution: RiskDistribution,
+    pub avg_duration_ms: f64,
+    pub top_hosts: Vec<HostExecutionCount>,
+    pub hourly_breakdown: Vec<HourlyBucket>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TrendPeriod {
+    Last24h,
+    Last7d,
+    Last30d,
+    All,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RiskDistribution {
+    pub low: usize,
+    pub medium: usize,
+    pub high: usize,
+    pub blocked: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostExecutionCount {
+    pub host: String,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HourlyBucket {
+    pub hour: String,  // ISO-8601 truncated to hour
+    pub count: usize,
+    pub failures: usize,
+}
+
+/// Compute metrics trends from audit data.
+pub fn compute_metrics_trend(period: TrendPeriod) -> Result<MetricsTrend> {
+    let now = chrono::Utc::now();
+    let since = match period {
+        TrendPeriod::Last24h => Some((now - chrono::Duration::hours(24)).to_rfc3339()),
+        TrendPeriod::Last7d => Some((now - chrono::Duration::days(7)).to_rfc3339()),
+        TrendPeriod::Last30d => Some((now - chrono::Duration::days(30)).to_rfc3339()),
+        TrendPeriod::All => None,
+    };
+
+    let filter = crate::types::AuditFilter {
+        host: None,
+        risk_level: None,
+        exit_code: None,
+        since,
+        until: None,
+        limit: usize::MAX,
+        search: None,
+        command_pattern: None,
+        host_env: None,
+        host_role: None,
+        host_owner: None,
+    };
+
+    let entries = list_audit_raw(&filter)?;
+
+    let total_executions = entries.len();
+    let failure_count = entries.iter().filter(|e| e.exit_code.map(|c| c != 0).unwrap_or(true)).count();
+    let success_count = total_executions.saturating_sub(failure_count);
+    let blocked_count = entries.iter().filter(|e| e.risk_level == RiskLevel::Blocked).count();
+
+    let failure_rate = if total_executions > 0 {
+        failure_count as f64 / total_executions as f64
+    } else {
+        0.0
+    };
+
+    let risk_distribution = RiskDistribution {
+        low: entries.iter().filter(|e| e.risk_level == RiskLevel::Low).count(),
+        medium: entries.iter().filter(|e| e.risk_level == RiskLevel::Medium).count(),
+        high: entries.iter().filter(|e| e.risk_level == RiskLevel::High).count(),
+        blocked: entries.iter().filter(|e| e.risk_level == RiskLevel::Blocked).count(),
+    };
+
+    let avg_duration_ms = if total_executions > 0 {
+        entries.iter().map(|e| e.duration_ms as f64).sum::<f64>() / total_executions as f64
+    } else {
+        0.0
+    };
+
+    // Top 10 hosts by execution count
+    let mut host_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for e in &entries {
+        *host_counts.entry(e.host.clone()).or_insert(0) += 1;
+    }
+    let mut top_hosts: Vec<HostExecutionCount> = host_counts
+        .into_iter()
+        .map(|(host, count)| HostExecutionCount { host, count })
+        .collect();
+    top_hosts.sort_by(|a, b| b.count.cmp(&a.count));
+    top_hosts.truncate(10);
+
+    // Hourly breakdown
+    let mut hourly: std::collections::BTreeMap<String, (usize, usize)> = std::collections::BTreeMap::new();
+    for e in &entries {
+        let hour_key = e.ts.format("%Y-%m-%dT%H:00:00Z").to_string();
+        let entry = hourly.entry(hour_key).or_insert((0, 0));
+        entry.0 += 1;
+        if e.exit_code.map(|c| c != 0).unwrap_or(true) {
+            entry.1 += 1;
+        }
+    }
+    let hourly_breakdown: Vec<HourlyBucket> = hourly
+        .into_iter()
+        .map(|(hour, (count, failures))| HourlyBucket { hour, count, failures })
+        .collect();
+
+    Ok(MetricsTrend {
+        period,
+        total_executions,
+        success_count,
+        failure_count,
+        blocked_count,
+        failure_rate,
+        risk_distribution,
+        avg_duration_ms,
+        top_hosts,
+        hourly_breakdown,
+    })
 }
 
 pub fn redact_sensitive_text(input: &str) -> String {
@@ -187,6 +339,46 @@ pub fn list_audit_raw(filter: &AuditFilter) -> Result<Vec<AuditEntry>> {
     let since = filter.since.as_deref().and_then(|s| s.parse::<chrono::DateTime<chrono::Utc>>().ok());
     let until = filter.until.as_deref().and_then(|s| s.parse::<chrono::DateTime<chrono::Utc>>().ok());
 
+    // Build a lookup map from host name to labels for host group filtering.
+    let host_label_map: Option<std::collections::HashMap<String, (Option<String>, Option<String>, Option<String>)>> =
+        if filter.host_env.is_some() || filter.host_role.is_some() || filter.host_owner.is_some() {
+            let config = load_config().unwrap_or_default();
+            let mut map = std::collections::HashMap::new();
+            for h in &config.hosts {
+                map.insert(
+                    h.name.clone(),
+                    (h.env.clone(), h.role.clone(), h.owner.clone()),
+                );
+            }
+            Some(map)
+        } else {
+            None
+        };
+
+    // Compute the set of host names matching the host group filters.
+    let matching_hosts: Option<std::collections::HashSet<String>> = host_label_map.map(|map| {
+        map.into_iter()
+            .filter(|(_, (env, role, owner))| {
+                let env_ok = match &filter.host_env {
+                    Some(v) => env.as_deref().map(|e| e.eq_ignore_ascii_case(v)).unwrap_or(false),
+                    None => true,
+                };
+                let role_ok = match &filter.host_role {
+                    Some(v) => role.as_deref().map(|r| r.eq_ignore_ascii_case(v)).unwrap_or(false),
+                    None => true,
+                };
+                let owner_ok = match &filter.host_owner {
+                    Some(v) => owner.as_deref().map(|o| o.eq_ignore_ascii_case(v)).unwrap_or(false),
+                    None => true,
+                };
+                env_ok && role_ok && owner_ok
+            })
+            .map(|(name, _)| name)
+            .collect()
+    });
+
+    let search_lower = filter.search.as_deref().map(|s| s.to_lowercase());
+
     let mut entries: Vec<AuditEntry> = raw
         .lines()
         .filter_map(|line| serde_json::from_str::<AuditEntry>(line).ok())
@@ -206,6 +398,26 @@ pub fn list_audit_raw(filter: &AuditFilter) -> Result<Vec<AuditEntry>> {
             if let Some(until) = until {
                 if e.ts > until { return false; }
             }
+            // F6-1: full-text search (case-insensitive substring on command and host)
+            if let Some(ref needle) = search_lower {
+                if !e.command.to_lowercase().contains(needle)
+                    && !e.host.to_lowercase().contains(needle)
+                {
+                    return false;
+                }
+            }
+            // F6-1: command pattern (glob-style match)
+            if let Some(ref pattern) = filter.command_pattern {
+                if !glob_match(pattern, &e.command) {
+                    return false;
+                }
+            }
+            // F6-1: host group filtering
+            if let Some(ref hosts_set) = matching_hosts {
+                if !hosts_set.contains(&e.host) {
+                    return false;
+                }
+            }
             true
         })
         .collect();
@@ -213,6 +425,86 @@ pub fn list_audit_raw(filter: &AuditFilter) -> Result<Vec<AuditEntry>> {
     entries.reverse();
     entries.truncate(filter.limit);
     Ok(entries)
+}
+
+/// Simple glob-style pattern matching supporting `*` (any sequence) and `?` (any single char).
+/// Case-insensitive.
+pub fn glob_match(pattern: &str, text: &str) -> bool {
+    let pat: Vec<char> = pattern.to_lowercase().chars().collect();
+    let txt: Vec<char> = text.to_lowercase().chars().collect();
+    glob_match_inner(&pat, &txt)
+}
+
+fn glob_match_inner(pat: &[char], txt: &[char]) -> bool {
+    if pat.is_empty() {
+        return txt.is_empty();
+    }
+    if pat[0] == '*' {
+        // Try matching * with 0..n chars
+        for i in 0..=txt.len() {
+            if glob_match_inner(&pat[1..], &txt[i..]) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if txt.is_empty() {
+        return false;
+    }
+    if pat[0] == '?' || pat[0] == txt[0] {
+        return glob_match_inner(&pat[1..], &txt[1..]);
+    }
+    false
+}
+
+// ── Audit Export (F6-2) ─────────────────────────────────────────────────────
+
+/// Export audit entries as JSONL (one JSON object per line).
+/// Redaction is already applied at write time, so entries are emitted as-is.
+pub fn export_audit_jsonl(filter: &AuditFilter) -> Result<String> {
+    let entries = list_audit_raw(filter)?;
+    let mut output = String::new();
+    for entry in &entries {
+        output.push_str(&serde_json::to_string(entry)?);
+        output.push('\n');
+    }
+    Ok(output)
+}
+
+/// Export audit entries as CSV with headers.
+/// Fields: id, timestamp, host, command, exit_code, duration_ms, risk_level, reason, change_id
+/// Fields containing commas, quotes, or newlines are properly quoted/escaped per RFC 4180.
+pub fn export_audit_csv(filter: &AuditFilter) -> Result<String> {
+    let entries = list_audit_raw(filter)?;
+    let mut output = String::new();
+    // Header row
+    output.push_str("id,timestamp,host,command,exit_code,duration_ms,risk_level,reason,change_id\n");
+    for entry in &entries {
+        output.push_str(&format!(
+            "{},{},{},{},{},{},{},{},{}\n",
+            entry.id,
+            entry.ts.to_rfc3339(),
+            csv_escape(&entry.host),
+            csv_escape(&entry.command),
+            entry.exit_code.map(|c| c.to_string()).unwrap_or_default(),
+            entry.duration_ms,
+            entry.risk_level,
+            csv_escape(entry.reason.as_deref().unwrap_or("")),
+            csv_escape(entry.change_id.as_deref().unwrap_or("")),
+        ));
+    }
+    Ok(output)
+}
+
+/// Escape a field value for CSV output per RFC 4180.
+/// If the value contains a comma, double-quote, or newline, wrap it in
+/// double-quotes and double any internal quotes.
+fn csv_escape(value: &str) -> String {
+    if value.contains(',') || value.contains('"') || value.contains('\n') {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -255,5 +547,325 @@ mod tests {
             redacted,
             "deploy --token [REDACTED] password=[REDACTED] --api-key [REDACTED] --safe value"
         );
+    }
+
+    #[test]
+    fn test_glob_match_exact() {
+        assert!(glob_match("hello", "hello"));
+        assert!(!glob_match("hello", "world"));
+    }
+
+    #[test]
+    fn test_glob_match_star() {
+        assert!(glob_match("*", "anything"));
+        assert!(glob_match("sudo *", "sudo rm -rf /"));
+        assert!(glob_match("*.sh", "deploy.sh"));
+        assert!(!glob_match("*.sh", "deploy.py"));
+        assert!(glob_match("kubectl delete *", "kubectl delete namespace default"));
+    }
+
+    #[test]
+    fn test_glob_match_question() {
+        assert!(glob_match("h?llo", "hello"));
+        assert!(glob_match("h?llo", "hallo"));
+        assert!(!glob_match("h?llo", "heello"));
+    }
+
+    #[test]
+    fn test_glob_match_case_insensitive() {
+        assert!(glob_match("SUDO *", "sudo whoami"));
+        assert!(glob_match("sudo *", "SUDO REBOOT"));
+    }
+
+    #[test]
+    fn test_audit_filter_search() {
+        // Test the search/glob logic directly without relying on env vars
+        // (env vars have race conditions in parallel tests)
+        use crate::types::{AuditEntry, RiskLevel};
+        use chrono::Utc;
+        use uuid::Uuid;
+
+        let entry1 = AuditEntry {
+            id: Uuid::new_v4(),
+            ts: Utc::now(),
+            host: "prod-server".into(),
+            command: "sudo apt update".into(),
+            exit_code: Some(0),
+            duration_ms: 100,
+            risk_level: RiskLevel::High,
+            reason: None,
+            change_id: None,
+        };
+        let entry2 = AuditEntry {
+            id: Uuid::new_v4(),
+            ts: Utc::now(),
+            host: "dev-box".into(),
+            command: "ls -la".into(),
+            exit_code: Some(0),
+            duration_ms: 50,
+            risk_level: RiskLevel::Low,
+            reason: None,
+            change_id: None,
+        };
+
+        // Test search: "apt" should match entry1's command
+        let needle = "apt".to_lowercase();
+        let entries = [&entry1, &entry2];
+        let matches: Vec<_> = entries
+            .iter()
+            .filter(|e| {
+                e.command.to_lowercase().contains(&needle)
+                    || e.host.to_lowercase().contains(&needle)
+            })
+            .collect();
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].command.contains("apt"));
+
+        // Test search: "prod" should match entry1's host
+        let needle = "prod".to_lowercase();
+        let entries = [&entry1, &entry2];
+        let matches: Vec<_> = entries
+            .iter()
+            .filter(|e| {
+                e.command.to_lowercase().contains(&needle)
+                    || e.host.to_lowercase().contains(&needle)
+            })
+            .collect();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].host, "prod-server");
+    }
+
+    #[test]
+    fn test_audit_filter_command_pattern() {
+        use crate::types::{AuditEntry, RiskLevel};
+        use chrono::Utc;
+        use uuid::Uuid;
+
+        let entry1 = AuditEntry {
+            id: Uuid::new_v4(),
+            ts: Utc::now(),
+            host: "server".into(),
+            command: "kubectl delete namespace default".into(),
+            exit_code: Some(0),
+            duration_ms: 200,
+            risk_level: RiskLevel::High,
+            reason: None,
+            change_id: None,
+        };
+        let entry2 = AuditEntry {
+            id: Uuid::new_v4(),
+            ts: Utc::now(),
+            host: "server".into(),
+            command: "ls -la".into(),
+            exit_code: Some(0),
+            duration_ms: 50,
+            risk_level: RiskLevel::Low,
+            reason: None,
+            change_id: None,
+        };
+
+        // Test command_pattern: "kubectl delete *" should match entry1
+        let pattern = "kubectl delete *";
+        let entries = [&entry1, &entry2];
+        let matches: Vec<_> = entries
+            .iter()
+            .filter(|e| glob_match(pattern, &e.command))
+            .collect();
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].command.starts_with("kubectl delete"));
+
+        // Test command_pattern: "ls *" should match entry2
+        let pattern = "ls *";
+        let entries = [&entry1, &entry2];
+        let matches: Vec<_> = entries
+            .iter()
+            .filter(|e| glob_match(pattern, &e.command))
+            .collect();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].command, "ls -la");
+    }
+
+    // ── F6-3: Metrics trend tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_metrics_trend_empty() {
+        // compute_metrics_trend should work even if there is no audit data.
+        // We don't set AGENT2SSH_CONFIG_DIR to avoid parallel test race conditions.
+        // Just verify it returns a valid MetricsTrend with correct structure.
+        let trend = super::compute_metrics_trend(super::TrendPeriod::All);
+        // It should succeed regardless of whether audit data exists
+        assert!(trend.is_ok(), "compute_metrics_trend should not fail");
+        let trend = trend.unwrap();
+        assert_eq!(trend.period, super::TrendPeriod::All);
+        // Verify structural integrity
+        assert!(trend.failure_rate >= 0.0 && trend.failure_rate <= 1.0);
+        assert!(trend.avg_duration_ms >= 0.0);
+        assert_eq!(
+            trend.risk_distribution.low
+                + trend.risk_distribution.medium
+                + trend.risk_distribution.high
+                + trend.risk_distribution.blocked,
+            trend.total_executions
+        );
+    }
+
+    #[test]
+    fn test_risk_distribution_serialization() {
+        let dist = super::RiskDistribution {
+            low: 10,
+            medium: 5,
+            high: 2,
+            blocked: 1,
+        };
+        let json = serde_json::to_string(&dist).unwrap();
+        let de: super::RiskDistribution = serde_json::from_str(&json).unwrap();
+        assert_eq!(de.low, 10);
+        assert_eq!(de.medium, 5);
+        assert_eq!(de.high, 2);
+        assert_eq!(de.blocked, 1);
+    }
+
+    #[test]
+    fn test_trend_period_values() {
+        let periods = vec![
+            super::TrendPeriod::Last24h,
+            super::TrendPeriod::Last7d,
+            super::TrendPeriod::Last30d,
+            super::TrendPeriod::All,
+        ];
+        for p in &periods {
+            let json = serde_json::to_string(p).unwrap();
+            let de: super::TrendPeriod = serde_json::from_str(&json).unwrap();
+            assert_eq!(*p, de);
+        }
+        // Verify serialized names
+        assert_eq!(serde_json::to_string(&super::TrendPeriod::Last24h).unwrap(), "\"last24h\"");
+        assert_eq!(serde_json::to_string(&super::TrendPeriod::Last7d).unwrap(), "\"last7d\"");
+        assert_eq!(serde_json::to_string(&super::TrendPeriod::Last30d).unwrap(), "\"last30d\"");
+        assert_eq!(serde_json::to_string(&super::TrendPeriod::All).unwrap(), "\"all\"");
+    }
+
+    // ── F6-2: Audit export tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_export_audit_jsonl_empty() {
+        // With a temp config dir (no audit data), JSONL export should be empty
+        let config_dir = std::env::temp_dir().join(format!(
+            "agent2ssh-export-jsonl-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::env::set_var("AGENT2SSH_CONFIG_DIR", &config_dir);
+
+        let filter = AuditFilter::default();
+        let output = super::export_audit_jsonl(&filter).unwrap();
+        assert!(output.is_empty(), "empty audit should return empty string");
+
+        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&config_dir);
+    }
+
+    #[test]
+    fn test_export_audit_csv_headers() {
+        // CSV output should always contain the correct header row
+        let config_dir = std::env::temp_dir().join(format!(
+            "agent2ssh-export-csv-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::env::set_var("AGENT2SSH_CONFIG_DIR", &config_dir);
+
+        let filter = AuditFilter::default();
+        let output = super::export_audit_csv(&filter).unwrap();
+        assert!(output.starts_with("id,timestamp,host,command,exit_code,duration_ms,risk_level,reason,change_id\n"));
+        // Should only contain the header row (no data)
+        assert_eq!(output.lines().count(), 1);
+
+        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&config_dir);
+    }
+
+    #[test]
+    fn test_export_audit_csv_escaping() {
+        // Test that csv_escape handles commas, quotes, and newlines
+        assert_eq!(super::csv_escape("simple"), "simple");
+        assert_eq!(super::csv_escape("has,comma"), "\"has,comma\"");
+        assert_eq!(super::csv_escape("has\"quote"), "\"has\"\"quote\"");
+        assert_eq!(super::csv_escape("has\nnewline"), "\"has\nnewline\"");
+        assert_eq!(
+            super::csv_escape("both,\"comma and quote\""),
+            "\"both,\"\"comma and quote\"\"\""
+        );
+    }
+
+    #[test]
+    fn test_export_audit_jsonl_with_data() {
+        // Test the JSONL and CSV formatting logic directly without relying on
+        // env vars (which have race conditions in parallel tests).
+        use chrono::Utc;
+        use uuid::Uuid;
+
+        let entry1 = AuditEntry {
+            id: Uuid::new_v4(),
+            ts: Utc::now(),
+            host: "test-host".into(),
+            command: "ls -la".into(),
+            exit_code: Some(0),
+            duration_ms: 100,
+            risk_level: RiskLevel::Low,
+            reason: None,
+            change_id: None,
+        };
+        let entry2 = AuditEntry {
+            id: Uuid::new_v4(),
+            ts: Utc::now(),
+            host: "prod-host".into(),
+            command: "sudo apt update".into(),
+            exit_code: Some(0),
+            duration_ms: 5000,
+            risk_level: RiskLevel::High,
+            reason: Some("weekly update".into()),
+            change_id: Some("CHG-001".into()),
+        };
+
+        let entries = vec![entry1, entry2];
+
+        // Test JSONL formatting (same logic as export_audit_jsonl)
+        let mut jsonl_output = String::new();
+        for entry in &entries {
+            jsonl_output.push_str(&serde_json::to_string(entry).unwrap());
+            jsonl_output.push('\n');
+        }
+        let lines: Vec<&str> = jsonl_output.lines().collect();
+        assert_eq!(lines.len(), 2, "should have 2 JSONL lines");
+        for line in &lines {
+            let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert!(parsed.get("host").is_some());
+        }
+
+        // Test CSV formatting (same logic as export_audit_csv)
+        let mut csv_output = String::new();
+        csv_output.push_str("id,timestamp,host,command,exit_code,duration_ms,risk_level,reason,change_id\n");
+        for entry in &entries {
+            csv_output.push_str(&format!(
+                "{},{},{},{},{},{},{},{},{}\n",
+                entry.id,
+                entry.ts.to_rfc3339(),
+                super::csv_escape(&entry.host),
+                super::csv_escape(&entry.command),
+                entry.exit_code.map(|c| c.to_string()).unwrap_or_default(),
+                entry.duration_ms,
+                entry.risk_level,
+                super::csv_escape(entry.reason.as_deref().unwrap_or("")),
+                super::csv_escape(entry.change_id.as_deref().unwrap_or("")),
+            ));
+        }
+        let csv_lines: Vec<&str> = csv_output.lines().collect();
+        assert_eq!(csv_lines.len(), 3, "header + 2 data rows");
+        assert!(csv_lines[0].starts_with("id,"));
+        // Verify data row contains expected values
+        assert!(csv_lines[1].contains("test-host"));
+        assert!(csv_lines[2].contains("prod-host"));
+        assert!(csv_lines[2].contains("CHG-001"));
     }
 }

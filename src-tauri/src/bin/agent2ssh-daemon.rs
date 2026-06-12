@@ -1,24 +1,34 @@
-use agent2ssh::approval::{approval_list, approval_request, approval_respond, approval_wait, ApprovalStatus};
+use agent2ssh::approval::{approval_list, approval_request, approval_request_with_context, approval_respond, approval_wait, ApprovalStatus};
 use agent2ssh::approval::ApprovalRequest as ApprovalRequestType;
+use agent2ssh::approval::{
+    check_approval_required, list_approval_policies, save_approval_policies, ApprovalPolicy,
+    approval_action_url, build_approval_context,
+};
 use agent2ssh::connection::{connect_host, disconnect_host, list_active_connections};
 use agent2ssh::core::*;
 use agent2ssh::forward::*;
-use agent2ssh::notify::{fire_webhook, load_webhook_config, save_webhook_config, WebhookConfig, WebhookEvent};
-use agent2ssh::playbook::{list_playbooks_core, run_playbook_core, Playbook, PlaybookRunResult};
-use agent2ssh::remote::{get_daemon, list_daemons_core};
+use agent2ssh::health::{collect_health_snapshot, load_health_snapshot};
+use agent2ssh::notify::{fire_webhook, load_webhook_config, save_webhook_config, WebhookConfig, WebhookEvent, notify_approval_pending};
+use agent2ssh::playbook::{
+    dry_run_playbook, list_playbooks_core, run_playbook_core, Playbook, PlaybookDryRun,
+    PlaybookRunResult,
+};
+use agent2ssh::remote::{get_daemon, list_daemons_core, diagnose_daemon, check_daemon_version, get_daemons_unified_view};
 use agent2ssh::risk_config::classify_with_user_rules;
 use agent2ssh::session::*;
 use agent2ssh::store::*;
 use agent2ssh::types::*;
+use agent2ssh::events::subscribe_events;
 
 use axum::{
     extract::{Path, Query, State, WebSocketUpgrade},
     http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    response::{IntoResponse, sse::{Sse, Event, KeepAlive}},
     routing::{delete, get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tokio::net::TcpListener;
@@ -83,14 +93,19 @@ fn err(status: StatusCode, msg: impl ToString) -> (StatusCode, Json<ErrorBody>) 
 // ── Request/Response types ───────────────────────────────────────────────────
 
 #[derive(Deserialize)] struct PingBody { hosts: Vec<String>, timeout_secs: Option<u64> }
-#[derive(Deserialize)] struct ExecMultiBody { hosts: Vec<String>, command: String, #[serde(default)] force: bool, timeout_secs: Option<u64>, #[serde(default)] tags: Option<Vec<String>> }
+#[derive(Deserialize)] struct ExecMultiBody { hosts: Vec<String>, command: String, #[serde(default)] force: bool, timeout_secs: Option<u64>, #[serde(default)] tags: Option<Vec<String>>, #[serde(default)] strategy: Option<BatchStrategy> }
+#[derive(Deserialize)] struct ExecCompareBody { hosts: Vec<String>, command: String, #[serde(default)] force: bool, timeout_secs: Option<u64>, #[serde(default)] tags: Option<Vec<String>> }
 #[derive(Deserialize)] struct SftpDirBody { host: String, path: String }
 #[derive(Deserialize)] struct SessionOpenBody { host: String }
 #[derive(Deserialize)] struct SessionWriteBody { input: String }
 #[derive(Deserialize)] struct ReadQuery { timeout_ms: Option<u64> }
-#[derive(Deserialize)] struct AuditQuery { host: Option<String>, risk_level: Option<RiskLevel>, exit_code: Option<i32>, since: Option<String>, until: Option<String>, limit: Option<usize> }
+#[derive(Deserialize)] struct AuditQuery { host: Option<String>, risk_level: Option<RiskLevel>, exit_code: Option<i32>, since: Option<String>, until: Option<String>, limit: Option<usize>, search: Option<String>, command_pattern: Option<String>, host_env: Option<String>, host_role: Option<String>, host_owner: Option<String> }
+#[derive(Deserialize)] struct AuditExportQuery { host: Option<String>, risk_level: Option<RiskLevel>, exit_code: Option<i32>, since: Option<String>, until: Option<String>, limit: Option<usize>, search: Option<String>, command_pattern: Option<String>, host_env: Option<String>, host_role: Option<String>, host_owner: Option<String>, format: Option<String> }
 #[derive(Deserialize)] struct RiskCheckBody { command: String, #[allow(dead_code)] host: Option<String> }
-#[derive(Deserialize)] struct PlaybookRunBody { playbook: String, host: String, #[serde(default)] force: bool }
+#[derive(Deserialize)] struct PlaybookRunBody { playbook: String, host: String, #[serde(default)] force: bool, #[serde(default)] params: Option<HashMap<String, String>> }
+#[derive(Deserialize)] struct PlaybookDryRunBody { playbook: String, #[serde(default)] params: Option<HashMap<String, String>> }
+#[derive(Deserialize)] struct ExecPreviewBody { host: Option<String>, hosts: Option<Vec<String>>, command: String, timeout_secs: Option<u64>, #[serde(default)] tags: Option<Vec<String>> }
+#[derive(Deserialize, Default)] struct HealthSnapshotBody { #[serde(default)] hosts: Option<Vec<String>>, timeout_secs: Option<u64> }
 #[derive(Serialize)] struct RiskCheckResult { risk_level: RiskLevel, matched_rule: Option<String> }
 #[derive(Serialize)] struct OkBody { ok: bool }
 #[derive(Serialize)] struct IdBody { id: String }
@@ -205,22 +220,57 @@ async fn exec(
     // If high risk and not forced, require approval
     if effective_risk == RiskLevel::High && !req.force {
         APPROVAL_COUNT.fetch_add(1, Ordering::Relaxed);
-        let approval_id = approval_request(&req.host, &req.command, effective_risk).await;
+
+        // Build approval context with host details, history, and risk breakdown
+        let approval_ctx = build_approval_context(&req.host, &req.command, "daemon")
+            .ok()
+            .map(|mut ctx| {
+                ctx.reason = req.reason.clone();
+                ctx.change_id = req.change_id.clone();
+                ctx
+            });
+
+        let approval_id = if let Some(ctx) = approval_ctx {
+            approval_request_with_context(&req.host, &req.command, effective_risk, 300, ctx).await
+        } else {
+            approval_request(&req.host, &req.command, effective_risk).await
+        };
+
         let host_clone = req.host.clone();
         let cmd_clone = req.command.clone();
         let approval_id_str = approval_id.to_string();
         let risk_str = format!("{:?}", effective_risk).to_lowercase();
 
-        // Fire approval_required webhook
+        // Build the approval action URL for notification
+        let action_url = approval_action_url("http://127.0.0.1:7722", &approval_id_str);
+
+        // Fire approval_required webhook with approval-specific notification
         let evt = WebhookEvent {
             event: "approval_required".into(),
             host: host_clone.clone(),
             command: cmd_clone.clone(),
             approval_id: Some(approval_id_str.clone()),
-            risk_level: Some(risk_str),
+            risk_level: Some(risk_str.clone()),
             exit_code: None,
         };
+
+        let action_url_clone = action_url.clone();
+        let host_notify = host_clone.clone();
+        let cmd_notify = cmd_clone.clone();
+        let risk_notify = risk_str.clone();
+        let approval_id_notify = approval_id_str.clone();
         tokio::spawn(async move {
+            // Fire the new approval-specific notification
+            if let Err(e) = notify_approval_pending(
+                &approval_id_notify,
+                &host_notify,
+                &cmd_notify,
+                &risk_notify,
+                Some(&action_url_clone),
+            ).await {
+                tracing::error!(error = %e, "approval notification error");
+            }
+            // Also fire the legacy webhook event
             if let Err(e) = fire_webhook(evt).await {
                 tracing::error!(error = %e, "webhook fire error");
             }
@@ -314,11 +364,21 @@ async fn exec(
 
 async fn exec_multi(
     State(s): State<AppState>, headers: HeaderMap, Json(body): Json<ExecMultiBody>,
-) -> Result<Json<Vec<ExecMultiResult>>, (StatusCode, Json<ErrorBody>)> {
+) -> Result<Json<ExecMultiBatchResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
     tracing::info!(hosts = ?body.hosts, command = %body.command, "exec-multi handler invoked");
-    Ok(Json(exec_multi_core(body.hosts, body.command, body.force, body.timeout_secs, body.tags).await))
+    Ok(Json(exec_multi_with_strategy(body.hosts, body.command, body.force, body.timeout_secs, body.tags, body.strategy).await))
+}
+
+async fn exec_compare(
+    State(s): State<AppState>, headers: HeaderMap, Json(body): Json<ExecCompareBody>,
+) -> Result<Json<ExecComparison>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    check_auth(&s, &headers)?;
+    tracing::info!(hosts = ?body.hosts, command = %body.command, "exec-compare handler invoked");
+    let results = exec_multi_core(body.hosts, body.command, body.force, body.timeout_secs, body.tags).await;
+    Ok(Json(compare_exec_results(&results)))
 }
 
 async fn audit(
@@ -326,8 +386,52 @@ async fn audit(
 ) -> Result<Json<Vec<AuditEntry>>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
-    let filter = AuditFilter { host: q.host, risk_level: q.risk_level, exit_code: q.exit_code, since: q.since, until: q.until, limit: q.limit.unwrap_or(20) };
+    let filter = AuditFilter { host: q.host, risk_level: q.risk_level, exit_code: q.exit_code, since: q.since, until: q.until, limit: q.limit.unwrap_or(20), search: q.search, command_pattern: q.command_pattern, host_env: q.host_env, host_role: q.host_role, host_owner: q.host_owner };
     list_audit_core(filter).map(Json).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))
+}
+
+// ── Audit Export (F6-2) ─────────────────────────────────────────────────────
+
+async fn audit_export(
+    State(s): State<AppState>, headers: HeaderMap, Query(q): Query<AuditExportQuery>,
+) -> Result<axum::response::Response, (StatusCode, Json<ErrorBody>)> {
+    use axum::response::IntoResponse;
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    check_auth(&s, &headers)?;
+    let filter = AuditFilter {
+        host: q.host,
+        risk_level: q.risk_level,
+        exit_code: q.exit_code,
+        since: q.since,
+        until: q.until,
+        limit: q.limit.unwrap_or(20),
+        search: q.search,
+        command_pattern: q.command_pattern,
+        host_env: q.host_env,
+        host_role: q.host_role,
+        host_owner: q.host_owner,
+    };
+    let format = q.format.unwrap_or_else(|| "jsonl".to_string());
+    match format.to_lowercase().as_str() {
+        "jsonl" => {
+            let data = export_audit_jsonl(&filter)
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert("content-type", "application/x-ndjson".parse().unwrap());
+            Ok((StatusCode::OK, headers, data).into_response())
+        }
+        "csv" => {
+            let data = export_audit_csv(&filter)
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert("content-type", "text/csv".parse().unwrap());
+            Ok((StatusCode::OK, headers, data).into_response())
+        }
+        other => Err(err(
+            StatusCode::BAD_REQUEST,
+            format!("unsupported format '{}', expected 'jsonl' or 'csv'", other),
+        )),
+    }
 }
 
 // ── SFTP ─────────────────────────────────────────────────────────────────────
@@ -424,6 +528,72 @@ async fn approval_reject(State(s): State<AppState>, headers: HeaderMap, Path(id)
     approval_respond(uuid, false).await.map(|_| Json(OkBody { ok: true })).map_err(|e| err(StatusCode::BAD_REQUEST, e))
 }
 
+#[derive(Deserialize)] struct ApprovalRespondBody { approved: bool }
+
+/// Generic approval respond endpoint used by notification action URLs.
+/// Accepts a JSON body with `approved: bool`.
+async fn approval_respond_generic(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<ApprovalRespondBody>,
+) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    check_auth(&s, &headers)?;
+    let uuid = Uuid::parse_str(&id).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
+    approval_respond(uuid, body.approved).await.map(|_| Json(OkBody { ok: true })).map_err(|e| err(StatusCode::BAD_REQUEST, e))
+}
+
+// ── Approval policies ────────────────────────────────────────────────────────
+
+#[derive(Deserialize)] struct ApprovalCheckBody { host: String, command: String }
+#[derive(Serialize)] struct ApprovalCheckResult { requires_approval: bool, matched_policy: Option<String>, risk_level: RiskLevel, ttl_secs: Option<u64> }
+
+async fn list_policies(
+    State(s): State<AppState>, headers: HeaderMap,
+) -> Result<Json<Vec<ApprovalPolicy>>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    check_auth(&s, &headers)?;
+    list_approval_policies().map(Json).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))
+}
+
+async fn put_policies(
+    State(s): State<AppState>, headers: HeaderMap, Json(policies): Json<Vec<ApprovalPolicy>>,
+) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    check_auth(&s, &headers)?;
+    save_approval_policies(&policies).map(|_| Json(OkBody { ok: true })).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))
+}
+
+async fn approval_check(
+    State(s): State<AppState>, headers: HeaderMap, Json(body): Json<ApprovalCheckBody>,
+) -> Result<Json<ApprovalCheckResult>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    check_auth(&s, &headers)?;
+    let host_tags: Vec<String> = load_config()
+        .ok()
+        .and_then(|c| c.hosts.into_iter().find(|h| h.name == body.host))
+        .map(|h| h.tags)
+        .unwrap_or_default();
+    let risk = classify_risk(&body.command);
+    let result = check_approval_required(&body.host, &host_tags, &body.command, risk)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    match result {
+        Some(policy) => Ok(Json(ApprovalCheckResult {
+            requires_approval: true,
+            matched_policy: Some(policy.name),
+            risk_level: risk,
+            ttl_secs: policy.ttl_secs,
+        })),
+        None => Ok(Json(ApprovalCheckResult {
+            requires_approval: false,
+            matched_policy: None,
+            risk_level: risk,
+            ttl_secs: None,
+        })),
+    }
+}
+
 // ── Risk check ───────────────────────────────────────────────────────────────
 
 async fn risk_check(State(s): State<AppState>, headers: HeaderMap, Json(body): Json<RiskCheckBody>) -> Result<Json<RiskCheckResult>, (StatusCode, Json<ErrorBody>)> {
@@ -439,6 +609,29 @@ async fn risk_check(State(s): State<AppState>, headers: HeaderMap, Json(body): J
         return Ok(Json(RiskCheckResult { risk_level: final_risk, matched_rule: Some("user_rule".into()) }));
     }
     Ok(Json(RiskCheckResult { risk_level: base, matched_rule: None }))
+}
+
+// ── Exec Preview ────────────────────────────────────────────────────────────
+
+async fn exec_preview(State(s): State<AppState>, headers: HeaderMap, Json(body): Json<ExecPreviewBody>) -> Result<Json<ExecPlan>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    check_auth(&s, &headers)?;
+
+    if let Some(hosts) = body.hosts {
+        // Multi-host preview
+        preview_exec_multi(hosts, &body.command, body.tags, body.timeout_secs)
+            .await
+            .map(Json)
+            .map_err(|e| err(StatusCode::BAD_REQUEST, e))
+    } else if let Some(host) = body.host {
+        // Single-host preview
+        preview_exec(&host, &body.command, body.timeout_secs)
+            .await
+            .map(Json)
+            .map_err(|e| err(StatusCode::BAD_REQUEST, e))
+    } else {
+        Err(err(StatusCode::BAD_REQUEST, "host or hosts required"))
+    }
 }
 
 // ── Connections ──────────────────────────────────────────────────────────────
@@ -493,8 +686,19 @@ async fn run_playbook(
 ) -> Result<Json<PlaybookRunResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
-    run_playbook_core(&body.playbook, &body.host, body.force)
+    run_playbook_core(&body.playbook, &body.host, body.force, body.params.as_ref())
         .await
+        .map(Json)
+        .map_err(|e| err(StatusCode::BAD_REQUEST, e))
+}
+
+async fn dry_run_playbook_handler(
+    State(s): State<AppState>, headers: HeaderMap, Json(body): Json<PlaybookDryRunBody>,
+) -> Result<Json<PlaybookDryRun>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    check_auth(&s, &headers)?;
+    let params = body.params.unwrap_or_default();
+    dry_run_playbook(&body.playbook, &params)
         .map(Json)
         .map_err(|e| err(StatusCode::BAD_REQUEST, e))
 }
@@ -507,6 +711,62 @@ async fn list_daemons(
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
     list_daemons_core().map(Json).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))
+}
+
+// ── Daemon Diagnostics (F5-1) ───────────────────────────────────────────────
+
+async fn diagnose_alias(
+    State(s): State<AppState>, headers: HeaderMap, Path(alias): Path<String>,
+) -> Result<Json<agent2ssh::remote::DaemonDiagnostic>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    check_auth(&s, &headers)?;
+    diagnose_daemon(&alias)
+        .await
+        .map(Json)
+        .map_err(|e| err(StatusCode::BAD_REQUEST, e))
+}
+
+async fn diagnose_all(
+    State(s): State<AppState>, headers: HeaderMap,
+) -> Result<Json<Vec<agent2ssh::remote::DaemonDiagnostic>>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    check_auth(&s, &headers)?;
+    let remotes = agent2ssh::remote::load_remotes()
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let mut results = Vec::new();
+    for remote in &remotes {
+        match diagnose_daemon(&remote.alias).await {
+            Ok(diag) => results.push(diag),
+            Err(e) => {
+                // Still include failed diagnostics for reporting
+                results.push(agent2ssh::remote::DaemonDiagnostic {
+                    alias: remote.alias.clone(),
+                    url: remote.url.clone(),
+                    checks: vec![agent2ssh::remote::DiagnosticCheck {
+                        name: "diagnostic".to_string(),
+                        status: agent2ssh::remote::DiagnosticStatus::Error,
+                        message: format!("Failed to run diagnostic: {}", e),
+                        details: None,
+                    }],
+                    overall_status: agent2ssh::remote::DiagnosticStatus::Error,
+                });
+            }
+        }
+    }
+    Ok(Json(results))
+}
+
+// ── Daemon Version Check (F5-2) ─────────────────────────────────────────────
+
+async fn version_check_alias(
+    State(s): State<AppState>, headers: HeaderMap, Path(alias): Path<String>,
+) -> Result<Json<agent2ssh::remote::VersionCompatibility>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    check_auth(&s, &headers)?;
+    check_daemon_version(&alias)
+        .await
+        .map(Json)
+        .map_err(|e| err(StatusCode::BAD_REQUEST, e))
 }
 
 // ── Team Config Export/Import ───────────────────────────────────────────────
@@ -523,6 +783,13 @@ async fn config_import(
 ) -> Result<Json<ImportResult>, (StatusCode, Json<ErrorBody>)> {
     check_auth(&s, &headers)?;
     import_team_config(&export).map(Json).map_err(|e| err(StatusCode::BAD_REQUEST, e))
+}
+
+async fn config_import_preview(
+    State(s): State<AppState>, headers: HeaderMap, Json(export): Json<TeamConfigExport>,
+) -> Result<Json<ConfigDiffPreview>, (StatusCode, Json<ErrorBody>)> {
+    check_auth(&s, &headers)?;
+    preview_team_config_import(&export).map(Json).map_err(|e| err(StatusCode::BAD_REQUEST, e))
 }
 
 async fn proxy_exec(
@@ -577,6 +844,92 @@ async fn proxy_exec(
     let result: ExecResult = resp.json().await
         .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("invalid response from remote: {e}")))?;
     Ok(Json(result))
+}
+
+// ── Daemons Unified View (F5-4) ─────────────────────────────────────────────
+
+async fn daemons_view(
+    State(s): State<AppState>, headers: HeaderMap,
+) -> Result<Json<agent2ssh::remote::DaemonUnifiedView>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    check_auth(&s, &headers)?;
+    get_daemons_unified_view()
+        .await
+        .map(Json)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))
+}
+
+// ── Metrics Trend (F6-3) ────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct TrendQuery {
+    period: Option<String>,
+}
+
+async fn metrics_trend(
+    State(s): State<AppState>, headers: HeaderMap, Query(q): Query<TrendQuery>,
+) -> Result<Json<MetricsTrend>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    check_auth(&s, &headers)?;
+    let period = match q.period.as_deref().unwrap_or("24h") {
+        "24h" | "last24h" => TrendPeriod::Last24h,
+        "7d" | "last7d" => TrendPeriod::Last7d,
+        "30d" | "last30d" => TrendPeriod::Last30d,
+        "all" => TrendPeriod::All,
+        other => return Err(err(StatusCode::BAD_REQUEST, format!("unknown period '{}'. Use: 24h, 7d, 30d, or all", other))),
+    };
+    compute_metrics_trend(period)
+        .map(Json)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))
+}
+
+// ── Event Stream SSE (F6-4) ─────────────────────────────────────────────────
+
+async fn events_stream(
+    State(s): State<AppState>, headers: HeaderMap,
+) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>>, (StatusCode, Json<ErrorBody>)> {
+    check_auth(&s, &headers)?;
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+
+    let rx = subscribe_events();
+    let rx = std::sync::Arc::new(tokio::sync::Mutex::new(rx));
+    let stream = futures_util::stream::unfold(rx, move |rx| async move {
+        let mut guard = rx.lock().await;
+        match guard.recv().await {
+            Ok(evt) => {
+                let data = serde_json::to_string(&evt).unwrap_or_default();
+                drop(guard);
+                Some((Ok(Event::default().event("agent2ssh").data(data)), rx))
+            }
+            Err(_) => {
+                None
+            }
+        }
+    });
+
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+// ── SSH config sync (F2-4) ───────────────────────────────────────────────────
+
+async fn ssh_sync_diff(
+    State(s): State<AppState>, headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
+    check_auth(&s, &headers)?;
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    let diff = agent2ssh::compare_ssh_configs(None)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("ssh sync diff failed: {e}")))?;
+    Ok(Json(serde_json::to_value(diff).unwrap_or_default()))
+}
+
+async fn ssh_sync_export_handler(
+    State(s): State<AppState>, headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
+    check_auth(&s, &headers)?;
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    let (path, count) = agent2ssh::export_to_ssh_config(None, None)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("ssh sync export failed: {e}")))?;
+    Ok(Json(serde_json::json!({ "path": path, "hosts_exported": count })))
 }
 
 // ── WebSocket streaming exec ─────────────────────────────────────────────────
@@ -744,6 +1097,50 @@ pub fn which_binary(name: &str) -> Option<String> {
     None
 }
 
+// ── Health Snapshot ─────────────────────────────────────────────────────────
+
+async fn get_health_snapshot(
+    State(s): State<AppState>, headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    check_auth(&s, &headers)?;
+    match load_health_snapshot() {
+        Ok(snapshot) => Ok(Json(serde_json::to_value(snapshot).unwrap_or_default())),
+        Err(_) => Ok(Json(serde_json::json!({
+            "error": "no health snapshot available",
+            "hint": "POST /health-snapshot to collect a fresh one"
+        }))),
+    }
+}
+
+async fn post_health_snapshot(
+    State(s): State<AppState>, headers: HeaderMap, body: Option<Json<HealthSnapshotBody>>,
+) -> Result<Json<agent2ssh::health::HealthSnapshot>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    check_auth(&s, &headers)?;
+
+    let (hosts, timeout_secs) = match body {
+        Some(Json(b)) => (b.hosts, b.timeout_secs),
+        None => (None, None),
+    };
+
+    let target_hosts = match hosts {
+        Some(h) if !h.is_empty() => h,
+        _ => {
+            // Collect health for ALL configured hosts
+            load_config()
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?
+                .hosts
+                .iter()
+                .map(|h| h.name.clone())
+                .collect()
+        }
+    };
+
+    let snapshot = collect_health_snapshot(target_hosts, timeout_secs).await;
+    Ok(Json(snapshot))
+}
+
 // ── Web Console ──────────────────────────────────────────────────────────────
 
 async fn serve_console() -> axum::response::Html<&'static str> {
@@ -822,14 +1219,17 @@ async fn main() -> anyhow::Result<()> {
         .route("/console", get(serve_console))
         .route("/health", get(health))
         .route("/metrics", get(metrics))
+        .route("/metrics/trend", get(metrics_trend))
         .route("/hosts", get(list_hosts).post(add_host))
         .route("/hosts/import", post(import_config))
         .route("/hosts/:name", delete(remove_host))
         .route("/ping", post(ping))
         .route("/exec", post(exec))
         .route("/exec-multi", post(exec_multi))
+        .route("/exec/compare", post(exec_compare))
         .route("/exec/stream", get(exec_stream))
         .route("/audit", get(audit))
+        .route("/audit/export", get(audit_export))
         .route("/sftp/upload", post(sftp_upload))
         .route("/sftp/download", post(sftp_download))
         .route("/sftp/ls", post(sftp_ls))
@@ -844,17 +1244,31 @@ async fn main() -> anyhow::Result<()> {
         .route("/approvals", get(approvals_list))
         .route("/approvals/:id/approve", post(approval_approve))
         .route("/approvals/:id/reject", post(approval_reject))
+        .route("/approval/:id/respond", post(approval_respond_generic))
+        .route("/approval/policies", get(list_policies).put(put_policies))
+        .route("/approval/check", post(approval_check))
         .route("/risk/check", post(risk_check))
+        .route("/exec/preview", post(exec_preview))
         .route("/connections", get(connection_status))
         .route("/connections/:host/connect", post(ssh_connect))
         .route("/connections/:host/disconnect", post(ssh_disconnect))
         .route("/playbooks", get(list_playbooks))
         .route("/playbooks/run", post(run_playbook))
+        .route("/playbooks/:name/dry-run", post(dry_run_playbook_handler))
         .route("/daemons", get(list_daemons))
+        .route("/daemons/view", get(daemons_view))
         .route("/daemons/:alias/exec", post(proxy_exec))
+        .route("/diagnostics", get(diagnose_all))
+        .route("/diagnostics/:alias", get(diagnose_alias))
+        .route("/version-check/:alias", get(version_check_alias))
         .route("/config/export", get(config_export))
         .route("/config/import", post(config_import))
+        .route("/config/import/preview", post(config_import_preview))
         .route("/webhook/config", get(get_webhook_config).put(set_webhook_config))
+        .route("/health-snapshot", get(get_health_snapshot).post(post_health_snapshot))
+        .route("/events/stream", get(events_stream))
+        .route("/ssh-sync/diff", get(ssh_sync_diff))
+        .route("/ssh-sync/export", post(ssh_sync_export_handler))
         .layer(cors)
         .with_state(state);
 

@@ -1,22 +1,29 @@
-#![recursion_limit = "512"]
+#![recursion_limit = "2048"]
 
 use agent2ssh::{
-    add_host_core, classify_risk, connect_host, disconnect_host, exec_multi_core, exec_ssh_core,
-    export_team_config, forward_add_core, forward_list_core, forward_remove_core,
-    import_ssh_config_core, import_team_config, list_active_connections, list_audit_core,
-    list_hosts_core, list_playbooks_core, ping_hosts_core, remove_host_core, run_playbook_core,
-    session_close_core, session_list_core, session_open_core, session_read_core,
-    session_write_core, sftp_download_core, sftp_ls_core, sftp_mkdir_core, sftp_stat_core,
-    sftp_upload_core, AuditFilter, ExecRequest, ForwardDirection, HostProfile, RiskLevel,
-    SftpDownloadRequest, SftpUploadRequest, TeamConfigExport,
+    add_host_core, classify_risk, collect_health_snapshot, compare_exec_results, compare_ssh_configs,
+    connect_host, disconnect_host, dry_run_playbook, exec_multi_core, exec_multi_with_strategy,
+    exec_ssh_core, export_audit_csv, export_audit_jsonl, export_team_config,
+    export_to_ssh_config, forward_add_core,
+    forward_list_core, forward_remove_core, import_ssh_config_core, import_team_config,
+    list_active_connections, list_audit_core, list_hosts_core, list_playbooks_core,
+    ping_hosts_core, preview_exec, preview_exec_multi, preview_team_config_import,
+    remove_host_core, run_playbook_core, session_close_core, session_list_core,
+    session_open_core, session_read_core, session_write_core, sftp_download_core, sftp_ls_core,
+    sftp_mkdir_core, sftp_stat_core, sftp_upload_core, AuditFilter, ExecRequest,
+    ForwardDirection, HostProfile, RiskLevel, SftpDownloadRequest, SftpUploadRequest,
+    TeamConfigExport,
 };
-use agent2ssh::approval::{approval_list, approval_respond};
+use agent2ssh::approval::{approval_list, approval_respond, check_approval_required, list_approval_policies};
+use agent2ssh::approval::build_approval_context;
 use agent2ssh::notify::{load_webhook_config, save_webhook_config};
-use agent2ssh::remote::{get_daemon, list_daemons_core};
+use agent2ssh::remote::{get_daemon, list_daemons_core, check_daemon_version, diagnose_daemon, get_daemons_unified_view};
 use agent2ssh::risk_config::classify_with_user_rules;
-use agent2ssh::store::audit_path;
+use agent2ssh::store::{audit_path, compute_metrics_trend, TrendPeriod};
+use agent2ssh::events::subscribe_events;
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 
 struct McpError {
@@ -164,7 +171,9 @@ async fn handle_request(request: &Value) -> std::result::Result<Value, McpError>
                             "timeout_secs":     { "type": "integer", "description": "Kill the command after N seconds (default 60)." },
                             "stdin":            { "type": "string", "description": "Pipe this string into the remote command's stdin." },
                             "max_output_bytes": { "type": "integer", "description": "Truncate stdout to this many bytes (default 4 MiB)." },
-                            "daemon_alias":     { "type": "string", "description": "Forward this exec to a remote daemon by alias (omit or 'localhost' for local)." }
+                            "daemon_alias":     { "type": "string", "description": "Forward this exec to a remote daemon by alias (omit or 'localhost' for local)." },
+                            "reason":           { "type": "string", "description": "Optional reason/note for this operation (audit trail)." },
+                            "change_id":        { "type": "string", "description": "Optional change/ticket ID for this operation (audit trail)." }
                         }
                     }
                 },
@@ -182,7 +191,7 @@ async fn handle_request(request: &Value) -> std::result::Result<Value, McpError>
                 },
                 {
                     "name": "ssh_exec_multi",
-                    "description": "Run the same command on multiple hosts concurrently. Returns an array of per-host results.",
+                    "description": "Run the same command on multiple hosts concurrently. Returns an array of per-host results. Supports optional batch strategy for concurrency limits, failure thresholds, and batched rollout.",
                     "inputSchema": {
                         "type": "object",
                         "required": ["hosts", "command"],
@@ -190,7 +199,34 @@ async fn handle_request(request: &Value) -> std::result::Result<Value, McpError>
                             "hosts":        { "type": "array", "items": { "type": "string" }, "description": "List of host profile aliases." },
                             "command":      { "type": "string" },
                             "force":        { "type": "boolean" },
-                            "timeout_secs": { "type": "integer" }
+                            "timeout_secs": { "type": "integer" },
+                            "tags":         { "type": "array", "items": { "type": "string" }, "description": "Expand hosts by tag." },
+                            "strategy":     {
+                                "type": "object",
+                                "description": "Optional batch execution strategy.",
+                                "properties": {
+                                    "concurrency":                { "type": "integer", "description": "Max concurrent hosts (0 = unlimited)." },
+                                    "max_failures":               { "type": "integer", "description": "Stop after this many failures (0 = never stop)." },
+                                    "batch_size":                 { "type": "integer", "description": "Execute in batches of this size." },
+                                    "pause_between_batches_secs": { "type": "integer", "description": "Pause between batches (seconds)." }
+                                }
+                            },
+                            "reason":       { "type": "string", "description": "Optional reason/note for this operation (audit trail)." },
+                            "change_id":    { "type": "string", "description": "Optional change/ticket ID for this operation (audit trail)." }
+                        }
+                    }
+                },
+                {
+                    "name": "ssh_exec_compare",
+                    "description": "Compare execution results across multiple hosts. Groups by exit code and highlights stdout/stderr differences. Provide either results directly or run a command on multiple hosts.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "hosts":        { "type": "array", "items": { "type": "string" }, "description": "List of host profile aliases to execute and compare." },
+                            "command":      { "type": "string", "description": "Command to run on all hosts." },
+                            "force":        { "type": "boolean" },
+                            "timeout_secs": { "type": "integer" },
+                            "tags":         { "type": "array", "items": { "type": "string" }, "description": "Expand hosts by tag." }
                         }
                     }
                 },
@@ -205,7 +241,34 @@ async fn handle_request(request: &Value) -> std::result::Result<Value, McpError>
                             "risk_level": { "type": "string", "enum": ["low","medium","high","blocked"] },
                             "exit_code":  { "type": "integer", "description": "Filter by exit code." },
                             "since":      { "type": "string", "description": "ISO-8601 lower bound." },
-                            "until":      { "type": "string", "description": "ISO-8601 upper bound." }
+                            "until":      { "type": "string", "description": "ISO-8601 upper bound." },
+                            "search":     { "type": "string", "description": "Full-text search across command and host fields." },
+                            "command_pattern": { "type": "string", "description": "Command pattern (glob-style: *, ?)." },
+                            "host_env":   { "type": "string", "description": "Filter by host environment label." },
+                            "host_role":  { "type": "string", "description": "Filter by host role label." },
+                            "host_owner": { "type": "string", "description": "Filter by host owner label." }
+                        }
+                    }
+                },
+                {
+                    "name": "ssh_audit_export",
+                    "description": "Export audit log entries as JSONL or CSV format with optional filtering. Redaction is applied at write time so exported data preserves redaction.",
+                    "inputSchema": {
+                        "type": "object",
+                        "required": ["format"],
+                        "properties": {
+                            "format":     { "type": "string", "enum": ["jsonl", "csv"], "description": "Export format: jsonl (one JSON per line) or csv." },
+                            "limit":      { "type": "integer", "default": 20 },
+                            "host":       { "type": "string", "description": "Filter by host alias." },
+                            "risk_level": { "type": "string", "enum": ["low","medium","high","blocked"] },
+                            "exit_code":  { "type": "integer", "description": "Filter by exit code." },
+                            "since":      { "type": "string", "description": "ISO-8601 lower bound." },
+                            "until":      { "type": "string", "description": "ISO-8601 upper bound." },
+                            "search":     { "type": "string", "description": "Full-text search across command and host fields." },
+                            "command_pattern": { "type": "string", "description": "Command pattern (glob-style: *, ?)." },
+                            "host_env":   { "type": "string", "description": "Filter by host environment label." },
+                            "host_role":  { "type": "string", "description": "Filter by host role label." },
+                            "host_owner": { "type": "string", "description": "Filter by host owner label." }
                         }
                     }
                 },
@@ -392,14 +455,27 @@ async fn handle_request(request: &Value) -> std::result::Result<Value, McpError>
                 },
                 {
                     "name": "ssh_playbook_run",
-                    "description": "Run a named playbook (sequence of SSH commands) against a target host. Steps execute sequentially; halts on first failure.",
+                    "description": "Run a named playbook (sequence of SSH commands) against a target host. Steps execute sequentially; halts on first failure. Supports template parameters via the params object.",
                     "inputSchema": {
                         "type": "object",
                         "required": ["playbook", "host"],
                         "properties": {
                             "playbook": { "type": "string", "description": "Name of the playbook to run." },
                             "host":     { "type": "string", "description": "Target host profile alias." },
-                            "force":    { "type": "boolean", "description": "Set true to allow high-risk steps within the playbook." }
+                            "force":    { "type": "boolean", "description": "Set true to allow high-risk steps within the playbook." },
+                            "params":   { "type": "object", "description": "Key-value parameters to substitute into step command templates ({{param_name}} syntax)." }
+                        }
+                    }
+                },
+                {
+                    "name": "ssh_playbook_dry_run",
+                    "description": "Preview a playbook without executing. Resolves template parameters and returns the commands that would be run.",
+                    "inputSchema": {
+                        "type": "object",
+                        "required": ["playbook"],
+                        "properties": {
+                            "playbook": { "type": "string", "description": "Name of the playbook to preview." },
+                            "params":   { "type": "object", "description": "Key-value parameters to substitute into step command templates." }
                         }
                     }
                 },
@@ -469,6 +545,25 @@ async fn handle_request(request: &Value) -> std::result::Result<Value, McpError>
                     }
                 },
                 {
+                    "name": "ssh_config_import_preview",
+                    "description": "Preview what a team config import will change without actually importing. Shows hosts to add, skip, update, and risk rules/playbook changes.",
+                    "inputSchema": {
+                        "type": "object",
+                        "required": ["config"],
+                        "properties": {
+                            "config": {
+                                "type": "object",
+                                "description": "Team config export object with hosts, risk_rules, and playbooks fields.",
+                                "properties": {
+                                    "hosts":      { "type": "array", "items": { "type": "object" } },
+                                    "risk_rules":  { "type": "string", "description": "Raw TOML content of risk rules." },
+                                    "playbooks":   { "type": "string", "description": "Raw TOML content of playbooks." }
+                                }
+                            }
+                        }
+                    }
+                },
+                {
                     "name": "ssh_doctor",
                     "description": "Run diagnostic checks on the agent2ssh environment: verify ssh/ssh-keygen binaries, config directory, hosts.json, daemon.token permissions, daemon health, optional config files, and audit log size.",
                     "inputSchema": { "type": "object", "properties": {} }
@@ -477,6 +572,111 @@ async fn handle_request(request: &Value) -> std::result::Result<Value, McpError>
                     "name": "ssh_metrics",
                     "description": "Retrieve basic metrics from the local agent2ssh daemon (requests, execs, blocked commands, durations, approvals). Reads from GET /metrics on 127.0.0.1:7722.",
                     "inputSchema": { "type": "object", "properties": {} }
+                },
+                {
+                    "name": "ssh_preview_exec",
+                    "description": "Preview what an execution will do before running it. Returns target hosts, commands, risk levels, warnings, and whether approval is required. Supports single-host and multi-host preview.",
+                    "inputSchema": {
+                        "type": "object",
+                        "required": ["command"],
+                        "properties": {
+                            "host":         { "type": "string", "description": "Single target host profile alias." },
+                            "hosts":        { "type": "array", "items": { "type": "string" }, "description": "Multiple target host profile aliases (for multi-host preview)." },
+                            "command":      { "type": "string", "description": "The command to preview." },
+                            "timeout_secs": { "type": "integer", "description": "Timeout that would be used for execution (default 60)." },
+                            "tags":         { "type": "array", "items": { "type": "string" }, "description": "Tags to expand into host names for multi-host preview." }
+                        }
+                    }
+                },
+                {
+                    "name": "ssh_approval_policies_list",
+                    "description": "List all configured approval policies. Each policy specifies when approval is required based on host, tags, risk level, and command pattern.",
+                    "inputSchema": { "type": "object", "properties": {} }
+                },
+                {
+                    "name": "ssh_approval_check",
+                    "description": "Check if running a command on a specific host requires approval based on configured policies. Returns the matching policy name and whether approval is needed.",
+                    "inputSchema": {
+                        "type": "object",
+                        "required": ["host", "command"],
+                        "properties": {
+                            "host":    { "type": "string", "description": "Host profile alias." },
+                            "command": { "type": "string", "description": "The command to check." }
+                        }
+                    }
+                },
+                {
+                    "name": "ssh_health_snapshot",
+                    "description": "Collect health snapshot (uptime, disk, memory, load, SSH latency) for configured hosts. Returns per-host health data collected concurrently via SSH.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "hosts":        { "type": "array", "items": { "type": "string" }, "description": "Host aliases to collect health from (default: all configured hosts)." },
+                            "timeout_secs": { "type": "integer", "description": "SSH connection timeout in seconds (default 10)." }
+                        }
+                    }
+                },
+                {
+                    "name": "ssh_daemon_diagnose",
+                    "description": "Run connection diagnostics on a remote daemon: checks TCP connectivity, TLS handshake, token configuration, authentication, version compatibility, and latency. Returns a detailed diagnostic report.",
+                    "inputSchema": {
+                        "type": "object",
+                        "required": ["alias"],
+                        "properties": {
+                            "alias": { "type": "string", "description": "The remote daemon alias from ~/.agent2ssh/remotes.toml (e.g. 'prod')." }
+                        }
+                    }
+                },
+                {
+                    "name": "ssh_daemon_version_check",
+                    "description": "Check version compatibility between this build and a remote daemon. Returns local version, remote version, compatibility status, and a human-readable message.",
+                    "inputSchema": {
+                        "type": "object",
+                        "required": ["alias"],
+                        "properties": {
+                            "alias": { "type": "string", "description": "The remote daemon alias from ~/.agent2ssh/remotes.toml (e.g. 'prod')." }
+                        }
+                    }
+                },
+                {
+                    "name": "ssh_daemons_view",
+                    "description": "Get a unified view of all daemons (localhost + remotes) with their health, metrics, and host counts.",
+                    "inputSchema": { "type": "object", "properties": {} }
+                },
+                {
+                    "name": "ssh_metrics_trend",
+                    "description": "Show execution metrics trends: volume, failure rate, risk distribution, top hosts, and hourly breakdown. Supports period selection.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "period": { "type": "string", "enum": ["24h", "7d", "30d", "all"], "default": "24h", "description": "Time period for the trend report." }
+                        }
+                    }
+                },
+                {
+                    "name": "ssh_events_subscribe",
+                    "description": "Subscribe to the real-time event stream. Returns the latest events from the event bus. Note: for continuous streaming, use the daemon's SSE endpoint GET /events/stream.",
+                    "inputSchema": { "type": "object", "properties": {} }
+                },
+                {
+                    "name": "ssh_sync_diff",
+                    "description": "Compare Agent2SSH hosts with ~/.ssh/config. Shows hosts only in one side and conflicts.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "path": { "type": "string", "description": "Path to SSH config file (default: ~/.ssh/config)" }
+                        }
+                    }
+                },
+                {
+                    "name": "ssh_sync_export",
+                    "description": "Export Agent2SSH hosts to SSH config format file.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "path": { "type": "string", "description": "Path to write SSH config (default: ~/.ssh/config.d/agent2ssh.conf)" }
+                        }
+                    }
                 }
             ]
         })),
@@ -543,10 +743,12 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
             let timeout_secs = args["timeout_secs"].as_u64();
             let stdin = args["stdin"].as_str().map(str::to_string);
             let daemon_alias = args["daemon_alias"].as_str().map(str::to_string);
+            let reason = args["reason"].as_str().map(str::to_string);
+            let change_id = args["change_id"].as_str().map(str::to_string);
 
             let risk = classify_risk(&command);
             let max_output_bytes = args["max_output_bytes"].as_u64().map(|v| v as usize);
-            let request = ExecRequest { host, command, force, timeout_secs, stdin, max_output_bytes };
+            let request = ExecRequest { host, command, force, timeout_secs, stdin, max_output_bytes, reason, change_id };
 
             // If daemon_alias is set and not "localhost", forward to remote daemon
             if let Some(ref alias) = daemon_alias {
@@ -603,8 +805,54 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 .to_string();
             let force = args["force"].as_bool().unwrap_or(false);
             let timeout_secs = args["timeout_secs"].as_u64();
-            let results = exec_multi_core(hosts, command, force, timeout_secs, None).await;
-            serde_json::to_value(results)?
+            let tags: Option<Vec<String>> = args["tags"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                });
+
+            // Parse optional strategy
+            let strategy: Option<agent2ssh::types::BatchStrategy> = args["strategy"]
+                .as_object()
+                .map(|obj| agent2ssh::types::BatchStrategy {
+                    concurrency: obj.get("concurrency").and_then(|v| v.as_u64()).map(|v| v as usize),
+                    max_failures: obj.get("max_failures").and_then(|v| v.as_u64()).map(|v| v as usize),
+                    batch_size: obj.get("batch_size").and_then(|v| v.as_u64()).map(|v| v as usize),
+                    pause_between_batches_secs: obj.get("pause_between_batches_secs").and_then(|v| v.as_u64()),
+                });
+
+            let batch_result = exec_multi_with_strategy(
+                hosts, command, force, timeout_secs, tags, strategy,
+            )
+            .await;
+            serde_json::to_value(batch_result)?
+        }
+        "ssh_exec_compare" => {
+            let hosts: Vec<String> = args["hosts"]
+                .as_array()
+                .ok_or_else(|| McpError::internal("hosts array required"))?
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect();
+            let command = args["command"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("command required"))?
+                .to_string();
+            let force = args["force"].as_bool().unwrap_or(false);
+            let timeout_secs = args["timeout_secs"].as_u64();
+            let tags: Option<Vec<String>> = args["tags"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                });
+
+            let results = exec_multi_core(hosts, command, force, timeout_secs, tags).await;
+            let comparison = compare_exec_results(&results);
+            serde_json::to_value(comparison)?
         }
         "ssh_sftp_ls" => {
             let host = args["host"].as_str().ok_or_else(|| McpError::internal("host required"))?;
@@ -633,8 +881,38 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 since: args["since"].as_str().map(str::to_string),
                 until: args["until"].as_str().map(str::to_string),
                 limit: args["limit"].as_u64().unwrap_or(20) as usize,
+                search: args["search"].as_str().map(str::to_string),
+                command_pattern: args["command_pattern"].as_str().map(str::to_string),
+                host_env: args["host_env"].as_str().map(str::to_string),
+                host_role: args["host_role"].as_str().map(str::to_string),
+                host_owner: args["host_owner"].as_str().map(str::to_string),
             };
             serde_json::to_value(list_audit_core(filter).map_err(McpError::from)?)?
+        }
+        "ssh_audit_export" => {
+            let format = args["format"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("format required: 'jsonl' or 'csv'"))?;
+            let risk_level = args["risk_level"].as_str().and_then(|s| serde_json::from_value::<RiskLevel>(serde_json::Value::String(s.to_string())).ok());
+            let filter = AuditFilter {
+                host: args["host"].as_str().map(str::to_string),
+                risk_level,
+                exit_code: args["exit_code"].as_i64().map(|v| v as i32),
+                since: args["since"].as_str().map(str::to_string),
+                until: args["until"].as_str().map(str::to_string),
+                limit: args["limit"].as_u64().unwrap_or(20) as usize,
+                search: args["search"].as_str().map(str::to_string),
+                command_pattern: args["command_pattern"].as_str().map(str::to_string),
+                host_env: args["host_env"].as_str().map(str::to_string),
+                host_role: args["host_role"].as_str().map(str::to_string),
+                host_owner: args["host_owner"].as_str().map(str::to_string),
+            };
+            let exported = match format {
+                "jsonl" => export_audit_jsonl(&filter).map_err(McpError::from)?,
+                "csv" => export_audit_csv(&filter).map_err(McpError::from)?,
+                other => return Err(McpError::internal(format!("unsupported format '{}', expected 'jsonl' or 'csv'", other))),
+            };
+            json!({ "format": format, "data": exported })
         }
         "ssh_sftp_upload" => {
             let request: SftpUploadRequest =
@@ -780,7 +1058,36 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 .as_str()
                 .ok_or_else(|| McpError::internal("host required"))?;
             let force = args["force"].as_bool().unwrap_or(false);
-            let result = run_playbook_core(playbook, host, force).await.map_err(McpError::from)?;
+            let params_map: Option<HashMap<String, String>> = args["params"]
+                .as_object()
+                .map(|obj| {
+                    obj.iter()
+                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                        .collect()
+                });
+            let result = run_playbook_core(
+                playbook,
+                host,
+                force,
+                params_map.as_ref(),
+            )
+            .await
+            .map_err(McpError::from)?;
+            serde_json::to_value(result)?
+        }
+        "ssh_playbook_dry_run" => {
+            let playbook = args["playbook"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("playbook required"))?;
+            let params_map: HashMap<String, String> = args["params"]
+                .as_object()
+                .map(|obj| {
+                    obj.iter()
+                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let result = dry_run_playbook(playbook, &params_map).map_err(McpError::from)?;
             serde_json::to_value(result)?
         }
         "ssh_connection_status" => {
@@ -844,6 +1151,14 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 .map_err(|e| McpError::internal(format!("invalid config object: {e}")))?;
             let result = import_team_config(&export).map_err(McpError::from)?;
             serde_json::to_value(result)?
+        }
+        "ssh_config_import_preview" => {
+            let config_value = args.get("config")
+                .ok_or_else(|| McpError::internal("config object required"))?;
+            let export: TeamConfigExport = serde_json::from_value(config_value.clone())
+                .map_err(|e| McpError::internal(format!("invalid config object: {e}")))?;
+            let preview = preview_team_config_import(&export).map_err(McpError::from)?;
+            serde_json::to_value(preview)?
         }
         "ssh_doctor" => {
             let mut checks: Vec<Value> = Vec::new();
@@ -931,6 +1246,178 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
             let metrics: Value = resp.json().await
                 .map_err(|e| McpError::internal(format!("invalid JSON from /metrics: {e}")))?;
             metrics
+        }
+        "ssh_preview_exec" => {
+            let command = args["command"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("command required"))?;
+            let timeout_secs = args["timeout_secs"].as_u64();
+
+            // Check if multi-host or single-host
+            let hosts_array: Option<Vec<String>> = args["hosts"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                });
+
+            let tags: Option<Vec<String>> = args["tags"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                });
+
+            if let Some(hosts) = hosts_array {
+                let plan = preview_exec_multi(hosts, command, tags, timeout_secs)
+                    .await
+                    .map_err(McpError::from)?;
+                serde_json::to_value(plan)?
+            } else {
+                let host = args["host"]
+                    .as_str()
+                    .ok_or_else(|| McpError::internal("host or hosts required"))?;
+                let plan = preview_exec(host, command, timeout_secs)
+                    .await
+                    .map_err(McpError::from)?;
+                serde_json::to_value(plan)?
+            }
+        }
+        "ssh_approval_policies_list" => {
+            let policies = list_approval_policies().map_err(McpError::from)?;
+            serde_json::to_value(policies)?
+        }
+        "ssh_approval_check" => {
+            let host = args["host"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("host required"))?;
+            let command = args["command"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("command required"))?;
+
+            // Look up host tags from config
+            let host_tags: Vec<String> = list_hosts_core()
+                .unwrap_or_default()
+                .into_iter()
+                .find(|h| h.name == host)
+                .map(|h| h.tags)
+                .unwrap_or_default();
+
+            let risk = classify_risk(command);
+            let result = check_approval_required(host, &host_tags, command, risk)
+                .map_err(McpError::from)?;
+
+            // Build approval context for richer response
+            let context = build_approval_context(host, command, "mcp").ok();
+
+            match result {
+                Some(policy) => json!({
+                    "requires_approval": true,
+                    "matched_policy": policy.name,
+                    "host": host,
+                    "command": command,
+                    "risk_level": risk,
+                    "ttl_secs": policy.ttl_secs,
+                    "context": context,
+                }),
+                None => json!({
+                    "requires_approval": false,
+                    "host": host,
+                    "command": command,
+                    "risk_level": risk,
+                    "context": context,
+                }),
+            }
+        }
+        "ssh_health_snapshot" => {
+            let hosts: Option<Vec<String>> = args["hosts"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                });
+            let timeout_secs = args["timeout_secs"].as_u64();
+
+            let target_hosts = match hosts {
+                Some(h) if !h.is_empty() => h,
+                _ => {
+                    // Collect health for ALL configured hosts
+                    list_hosts_core()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|h| h.name)
+                        .collect()
+                }
+            };
+
+            let snapshot = collect_health_snapshot(target_hosts, timeout_secs).await;
+            serde_json::to_value(snapshot)?
+        }
+        "ssh_daemon_diagnose" => {
+            let alias = args["alias"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("alias required"))?;
+            let diagnostic = diagnose_daemon(alias).await
+                .map_err(|e| McpError::internal(format!("diagnose_daemon failed: {e}")))?;
+            serde_json::to_value(diagnostic)?
+        }
+        "ssh_daemon_version_check" => {
+            let alias = args["alias"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("alias required"))?;
+            let compat = check_daemon_version(alias).await
+                .map_err(|e| McpError::internal(format!("version check failed: {e}")))?;
+            serde_json::to_value(compat)?
+        }
+        "ssh_daemons_view" => {
+            let view = get_daemons_unified_view().await
+                .map_err(|e| McpError::internal(format!("unified view failed: {e}")))?;
+            serde_json::to_value(view)?
+        }
+        "ssh_metrics_trend" => {
+            let period_str = args["period"].as_str().unwrap_or("24h");
+            let period = match period_str {
+                "24h" | "last24h" => TrendPeriod::Last24h,
+                "7d" | "last7d" => TrendPeriod::Last7d,
+                "30d" | "last30d" => TrendPeriod::Last30d,
+                "all" => TrendPeriod::All,
+                other => return Err(McpError::internal(format!("unknown period '{}'. Use: 24h, 7d, 30d, or all", other))),
+            };
+            let trend = compute_metrics_trend(period)
+                .map_err(|e| McpError::internal(format!("metrics trend failed: {e}")))?;
+            serde_json::to_value(trend)?
+        }
+        "ssh_events_subscribe" => {
+            // Return a snapshot of recent events from the bus.
+            // For continuous streaming, use the daemon SSE endpoint.
+            let mut rx = subscribe_events();
+            let mut events = Vec::new();
+            // Drain any currently buffered events (non-blocking)
+            loop {
+                match rx.try_recv() {
+                    Ok(event) => events.push(serde_json::to_value(event).unwrap_or_default()),
+                    Err(_) => break,
+                }
+            }
+            json!({
+                "events": events,
+                "hint": "For real-time streaming, use the daemon SSE endpoint: GET /events/stream"
+            })
+        }
+        "ssh_sync_diff" => {
+            let path = args["path"].as_str();
+            let diff = compare_ssh_configs(path)
+                .map_err(|e| McpError::internal(format!("ssh sync diff failed: {e}")))?;
+            serde_json::to_value(diff)?
+        }
+        "ssh_sync_export" => {
+            let path = args["path"].as_str();
+            let (out_path, count) = export_to_ssh_config(path, None)
+                .map_err(|e| McpError::internal(format!("ssh sync export failed: {e}")))?;
+            json!({ "path": out_path, "hosts_exported": count })
         }
         unknown => return Err(McpError::internal(anyhow!("unknown tool: {unknown}"))),
     };

@@ -1,16 +1,25 @@
 use agent2ssh::remote::get_daemon;
-use agent2ssh::store::{audit_path, restrict_file_to_owner};
+use agent2ssh::remote::{check_daemon_version, diagnose_daemon, get_daemons_unified_view, PROTOCOL_VERSION};
+use agent2ssh::store::{audit_path, compute_metrics_trend, restrict_file_to_owner, TrendPeriod};
+use agent2ssh::events::subscribe_events;
 use agent2ssh::{
-    add_host_core, classify_risk, exec_multi_core, exec_ssh_core, export_team_config, filter_hosts,
-    import_ssh_config_core, import_team_config, list_audit_core, list_daemons_core,
-    list_hosts_filtered_core, ping_hosts_core, remove_host_core, sftp_download_core, sftp_ls_core,
-    sftp_mkdir_core, sftp_stat_core, sftp_upload_core, AuditFilter, ExecRequest, ForwardDirection,
-    ForwardRule, HostFilter, HostProfile, RiskLevel, SftpDownloadRequest, SftpUploadRequest,
-    TeamConfigExport,
+    add_host_core, classify_risk, collect_health_snapshot, compare_exec_results, dry_run_playbook,
+    exec_multi_core, exec_multi_with_strategy, exec_ssh_core, export_audit_csv,
+    export_audit_jsonl, export_team_config, filter_hosts, import_ssh_config_core,
+    import_team_config, list_audit_core, list_daemons_core, list_hosts_filtered_core,
+    ping_hosts_core, preview_exec, preview_exec_multi, remove_host_core, run_playbook_core,
+    sftp_download_core, sftp_ls_core, sftp_mkdir_core, sftp_stat_core, sftp_upload_core,
+    AuditFilter, BatchStrategy, ExecComparison, ExecRequest, ForwardDirection, ForwardRule,
+    HostFilter, HostProfile, RiskLevel, SftpDownloadRequest, SftpUploadRequest, TeamConfigExport,
+};
+use agent2ssh::approval::{
+    check_approval_required, list_approval_policies, load_approval_policies,
+    save_approval_policies, ApprovalPolicy,
 };
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Parser)]
 #[command(name = "agent2ssh", version)]
@@ -44,6 +53,15 @@ enum Commands {
         /// Pipe this string into the remote command's stdin
         #[arg(long)]
         stdin: Option<String>,
+        /// Show execution plan without running the command
+        #[arg(long)]
+        plan: bool,
+        /// Optional reason/note for this operation (audit trail)
+        #[arg(long)]
+        reason: Option<String>,
+        /// Optional change/ticket ID for this operation (audit trail)
+        #[arg(long)]
+        change_id: Option<String>,
     },
     /// Run the same command on multiple hosts concurrently
     ExecMulti {
@@ -59,6 +77,30 @@ enum Commands {
         timeout_secs: Option<u64>,
         #[arg(long, value_delimiter = ',')]
         tags: Option<Vec<String>>,
+        /// Show execution plan without running the command
+        #[arg(long)]
+        plan: bool,
+        /// Maximum number of concurrent hosts (0 = unlimited)
+        #[arg(long)]
+        concurrency: Option<usize>,
+        /// Stop after this many failures (0 = never stop)
+        #[arg(long)]
+        max_failures: Option<usize>,
+        /// Execute in batches of this size, waiting for each batch to complete
+        #[arg(long)]
+        batch_size: Option<usize>,
+        /// Pause between batches in seconds
+        #[arg(long)]
+        pause_secs: Option<u64>,
+        /// Show comparison of results across hosts
+        #[arg(long)]
+        compare: bool,
+        /// Optional reason/note for this operation (audit trail)
+        #[arg(long)]
+        reason: Option<String>,
+        /// Optional change/ticket ID for this operation (audit trail)
+        #[arg(long)]
+        change_id: Option<String>,
     },
     Sftp {
         #[command(subcommand)]
@@ -98,6 +140,27 @@ enum Commands {
         /// ISO-8601 upper bound
         #[arg(long)]
         until: Option<String>,
+        /// Full-text search across command and host fields
+        #[arg(long)]
+        search: Option<String>,
+        /// Command pattern (glob-style: *, ?)
+        #[arg(long)]
+        command_pattern: Option<String>,
+        /// Filter by host environment label
+        #[arg(long)]
+        env: Option<String>,
+        /// Filter by host role label
+        #[arg(long)]
+        role: Option<String>,
+        /// Filter by host owner label
+        #[arg(long)]
+        owner: Option<String>,
+        /// Export format: jsonl or csv (writes to stdout or --output file)
+        #[arg(long, value_name = "FORMAT")]
+        format: Option<String>,
+        /// Write output to file instead of stdout
+        #[arg(long, value_name = "PATH")]
+        output: Option<String>,
     },
     /// Check risk level of a command
     Risk {
@@ -125,10 +188,61 @@ enum Commands {
         /// Input is JSON format
         #[arg(long)]
         json: bool,
+        /// Preview what will change without actually importing
+        #[arg(long)]
+        preview: bool,
+    },
+    /// Compare and sync Agent2SSH hosts with ~/.ssh/config
+    SshSync {
+        /// Show diff between Agent2SSH and ~/.ssh/config without changes
+        #[arg(long)]
+        diff: bool,
+        /// Export Agent2SSH hosts to SSH config format
+        #[arg(long)]
+        export: bool,
+        /// Path to SSH config file (default: ~/.ssh/config)
+        #[arg(long)]
+        path: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Run diagnostic checks on the agent2ssh environment
     Doctor {
         /// Output results as JSON
+        #[arg(long)]
+        json: bool,
+        /// Run diagnostics against a specific remote daemon (by alias from remotes.toml)
+        #[arg(long)]
+        daemon: Option<String>,
+    },
+    /// Collect health snapshot (uptime, disk, memory, load) for configured hosts
+    Health {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+        /// Hosts to collect health from (default: all configured hosts)
+        #[arg(long)]
+        hosts: Option<Vec<String>>,
+    },
+    /// Manage approval policies for high-risk command authorization
+    Policy {
+        #[command(subcommand)]
+        command: PolicyCommands,
+    },
+    /// Run or dry-run a named playbook (sequence of SSH commands)
+    Playbook {
+        #[command(subcommand)]
+        command: PlaybookCommands,
+    },
+    /// Show execution metrics trends over time
+    Metrics {
+        #[command(subcommand)]
+        command: MetricsCommands,
+    },
+    /// Subscribe to the real-time event stream
+    Events {
+        /// Output events as JSON lines
         #[arg(long)]
         json: bool,
     },
@@ -342,6 +456,104 @@ enum DaemonCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Show unified view of all daemons with health and metrics
+    View {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum PolicyCommands {
+    /// List all configured approval policies
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add a new approval policy
+    Add {
+        /// Name for the new policy
+        name: String,
+        /// Comma-separated host names this policy applies to
+        #[arg(long, value_delimiter = ',')]
+        hosts: Option<Vec<String>>,
+        /// Comma-separated tags this policy applies to
+        #[arg(long, value_delimiter = ',')]
+        tags: Option<Vec<String>>,
+        /// Minimum risk level that triggers approval (low/medium/high/blocked)
+        #[arg(long)]
+        min_risk: Option<String>,
+        /// Glob command pattern that triggers approval (e.g. "kubectl delete *")
+        #[arg(long)]
+        command_pattern: Option<String>,
+        /// Set to auto-approve instead of requiring approval
+        #[arg(long)]
+        auto_approve: bool,
+        /// Custom TTL for approvals in seconds
+        #[arg(long)]
+        ttl_secs: Option<u64>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove an approval policy by name
+    Remove {
+        name: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Check if a command on a host would require approval
+    Check {
+        host: String,
+        command: String,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum MetricsCommands {
+    /// Show execution metrics trend report
+    Trend {
+        /// Time period: 24h, 7d, 30d, or all
+        #[arg(long, default_value = "24h")]
+        period: String,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum PlaybookCommands {
+    /// List all configured playbooks
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run a named playbook against a host
+    Run {
+        /// Playbook name to run
+        name: String,
+        /// Target host profile alias
+        #[arg(long)]
+        host: String,
+        /// Required for high-risk steps
+        #[arg(long)]
+        force: bool,
+        /// Parameters as key=value pairs (repeatable)
+        #[arg(long = "params", value_name = "KEY=VALUE")]
+        params: Option<Vec<String>>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show resolved commands without executing (dry run)
+    DryRun {
+        /// Playbook name to preview
+        name: String,
+        /// Parameters as key=value pairs (repeatable)
+        #[arg(long = "params", value_name = "KEY=VALUE")]
+        params: Option<Vec<String>>,
+    },
 }
 
 #[tokio::main]
@@ -471,7 +683,21 @@ async fn main() -> Result<()> {
             force,
             timeout_secs,
             stdin,
+            plan,
+            reason,
+            change_id,
         } => {
+            // --plan: show execution plan without running
+            if plan {
+                let plan_result = preview_exec(&host, &command, timeout_secs).await?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&plan_result)?);
+                } else {
+                    print_exec_plan(&plan_result);
+                }
+                return Ok(());
+            }
+
             let risk = classify_risk(&command);
             let req = ExecRequest {
                 host,
@@ -480,6 +706,8 @@ async fn main() -> Result<()> {
                 timeout_secs,
                 stdin,
                 max_output_bytes: None,
+                reason,
+                change_id,
             };
 
             // If --daemon is set and remote, forward via HTTP
@@ -542,25 +770,111 @@ async fn main() -> Result<()> {
             force,
             timeout_secs,
             tags,
+            plan,
+            concurrency,
+            max_failures,
+            batch_size,
+            pause_secs,
+            compare,
+            reason: _,
+            change_id: _,
         } => {
-            let results = exec_multi_core(hosts, command, force, timeout_secs, tags).await;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&results)?);
+            // --plan: show execution plan without running
+            if plan {
+                let plan_result = preview_exec_multi(hosts, &command, tags, timeout_secs).await?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&plan_result)?);
+                } else {
+                    print_exec_plan(&plan_result);
+                }
+                return Ok(());
+            }
+
+            // Check if any strategy options are set
+            let has_strategy = concurrency.is_some()
+                || max_failures.is_some()
+                || batch_size.is_some()
+                || pause_secs.is_some();
+
+            if has_strategy {
+                let strategy = BatchStrategy {
+                    concurrency,
+                    max_failures,
+                    batch_size,
+                    pause_between_batches_secs: pause_secs,
+                };
+                let batch_result = exec_multi_with_strategy(
+                    hosts, command, force, timeout_secs, tags, Some(strategy),
+                )
+                .await;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&batch_result)?);
+                } else {
+                    for r in &batch_result.results {
+                        match &r.result {
+                            Some(res) => println!(
+                                "[{}] exit={:?} {}ms\n{}",
+                                r.host,
+                                res.exit_code,
+                                res.duration_ms,
+                                res.stdout.trim_end()
+                            ),
+                            None => eprintln!(
+                                "[{}] ERROR: {}",
+                                r.host,
+                                r.error.as_deref().unwrap_or("unknown")
+                            ),
+                        }
+                    }
+                    println!(
+                        "\n--- Batch Summary ---\n\
+                         Total: {} | Success: {} | Failed: {} | Skipped: {}\n\
+                         Batches: {} | Stopped early: {} | Duration: {}ms",
+                        batch_result.total_hosts,
+                        batch_result.successful,
+                        batch_result.failed,
+                        batch_result.skipped,
+                        batch_result.batches_executed,
+                        batch_result.stopped_early,
+                        batch_result.total_duration_ms,
+                    );
+                }
+                if compare {
+                    let comparison = compare_exec_results(&batch_result.results);
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&comparison)?);
+                    } else {
+                        print_comparison(&comparison);
+                    }
+                }
             } else {
-                for r in &results {
-                    match &r.result {
-                        Some(res) => println!(
-                            "[{}] exit={:?} {}ms\n{}",
-                            r.host,
-                            res.exit_code,
-                            res.duration_ms,
-                            res.stdout.trim_end()
-                        ),
-                        None => eprintln!(
-                            "[{}] ERROR: {}",
-                            r.host,
-                            r.error.as_deref().unwrap_or("unknown")
-                        ),
+                let results = exec_multi_core(hosts, command, force, timeout_secs, tags).await;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&results)?);
+                } else {
+                    for r in &results {
+                        match &r.result {
+                            Some(res) => println!(
+                                "[{}] exit={:?} {}ms\n{}",
+                                r.host,
+                                res.exit_code,
+                                res.duration_ms,
+                                res.stdout.trim_end()
+                            ),
+                            None => eprintln!(
+                                "[{}] ERROR: {}",
+                                r.host,
+                                r.error.as_deref().unwrap_or("unknown")
+                            ),
+                        }
+                    }
+                }
+                if compare {
+                    let comparison = compare_exec_results(&results);
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&comparison)?);
+                    } else {
+                        print_comparison(&comparison);
                     }
                 }
             }
@@ -848,6 +1162,13 @@ async fn main() -> Result<()> {
             exit_code,
             since,
             until,
+            search,
+            command_pattern,
+            env,
+            role,
+            owner,
+            format,
+            output,
         } => {
             let filter = AuditFilter {
                 host,
@@ -856,7 +1177,32 @@ async fn main() -> Result<()> {
                 since,
                 until,
                 limit,
+                search,
+                command_pattern,
+                host_env: env,
+                host_role: role,
+                host_owner: owner,
             };
+
+            // Handle --format export mode
+            if let Some(ref fmt) = format {
+                let exported = match fmt.to_lowercase().as_str() {
+                    "jsonl" => export_audit_jsonl(&filter)?,
+                    "csv" => export_audit_csv(&filter)?,
+                    other => {
+                        anyhow::bail!("unsupported export format '{}', expected 'jsonl' or 'csv'", other);
+                    }
+                };
+                if let Some(ref path) = output {
+                    std::fs::write(path, &exported)
+                        .with_context(|| format!("failed to write to '{}'", path))?;
+                    println!("Exported audit log to '{}' ({} format).", path, fmt);
+                } else {
+                    print!("{}", exported);
+                }
+                return Ok(());
+            }
+
             let entries = list_audit_core(filter)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&entries)?);
@@ -998,7 +1344,35 @@ async fn main() -> Result<()> {
                 DaemonCommands::List { json } => {
                     let daemons = list_daemons_core()?;
                     if json {
-                        println!("{}", serde_json::to_string_pretty(&daemons)?);
+                        // Augment with version compatibility info
+                        let mut augmented = Vec::new();
+                        for d in &daemons {
+                            let compat = if d.connected && d.alias != "localhost" {
+                                check_daemon_version(&d.alias).await.ok().map(|c| {
+                                    serde_json::json!({
+                                        "local_version": c.local_version,
+                                        "remote_version": c.remote_version,
+                                        "compatible": c.compatible,
+                                        "message": c.message,
+                                    })
+                                })
+                            } else {
+                                None
+                            };
+                            let mut info = serde_json::json!({
+                                "alias": d.alias,
+                                "url": d.url,
+                                "connected": d.connected,
+                            });
+                            if let Some(c) = compat {
+                                info["version_compatibility"] = c;
+                            }
+                            if let Some(ref scope) = d.scope {
+                                info["scope"] = serde_json::to_value(scope).unwrap_or_default();
+                            }
+                            augmented.push(info);
+                        }
+                        println!("{}", serde_json::to_string_pretty(&augmented)?);
                     } else if daemons.is_empty() {
                         println!("No daemons configured.");
                     } else {
@@ -1008,8 +1382,86 @@ async fn main() -> Result<()> {
                             } else {
                                 "unreachable"
                             };
-                            println!("{}\t{}\t[{}]", d.alias, d.url, status);
+                            let mut line = format!("{}\t{}\t[{}]", d.alias, d.url, status);
+                            if d.connected && d.alias != "localhost" {
+                                if let Ok(compat) = check_daemon_version(&d.alias).await {
+                                    if !compat.compatible {
+                                        line.push_str(&format!(
+                                            "\t[version: incompatible - {}]",
+                                            compat.message
+                                        ));
+                                    } else if compat.remote_version.as_deref() != Some(PROTOCOL_VERSION) {
+                                        line.push_str(&format!(
+                                            "\t[version: {}]",
+                                            compat.remote_version.as_deref().unwrap_or("?")
+                                        ));
+                                    }
+                                }
+                            }
+                            if let Some(ref scope) = d.scope {
+                                let mut scope_parts = Vec::new();
+                                if !scope.allowed_hosts.is_empty() {
+                                    scope_parts.push(format!("hosts={}", scope.allowed_hosts.len()));
+                                }
+                                if !scope.allowed_tags.is_empty() {
+                                    scope_parts.push(format!("tags={}", scope.allowed_tags.len()));
+                                }
+                                if !scope.allowed_commands.is_empty() {
+                                    scope_parts.push(format!("cmds={}", scope.allowed_commands.len()));
+                                }
+                                if !scope.denied_commands.is_empty() {
+                                    scope_parts.push(format!("denied={}", scope.denied_commands.len()));
+                                }
+                                if !scope_parts.is_empty() {
+                                    line.push_str(&format!("\t[scope: {}]", scope_parts.join(", ")));
+                                } else {
+                                    line.push_str("\t[scope: open]");
+                                }
+                            }
+                            println!("{}", line);
                         }
+                    }
+                }
+                DaemonCommands::View { json } => {
+                    let view = get_daemons_unified_view().await?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&view)?);
+                    } else {
+                        println!("Daemon Unified View");
+                        println!("{:-<80}", "");
+                        println!(
+                            "{:<15} {:<12} {:<10} {:<8} {:<10}",
+                            "ALIAS", "STATUS", "VERSION", "HOSTS", "EXECS"
+                        );
+                        for d in &view.daemons {
+                            let status = if d.connected { "connected" } else { "offline" };
+                            let version = d
+                                .health
+                                .as_ref()
+                                .and_then(|h| h.version.as_deref())
+                                .unwrap_or("-");
+                            let hosts = d
+                                .host_count
+                                .map(|c| c.to_string())
+                                .unwrap_or_else(|| "-".into());
+                            let execs = d
+                                .metrics
+                                .as_ref()
+                                .and_then(|m| m.exec_count)
+                                .map(|c| c.to_string())
+                                .unwrap_or_else(|| "-".into());
+                            println!(
+                                "{:<15} {:<12} {:<10} {:<8} {:<10}",
+                                d.alias, status, version, hosts, execs
+                            );
+                        }
+                        println!("{:-<80}", "");
+                        println!(
+                            "Total: {} daemon(s), {} connected, {} hosts",
+                            view.daemons.len(),
+                            view.total_connected,
+                            view.total_hosts
+                        );
                     }
                 }
             }
@@ -1054,11 +1506,41 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Commands::ConfigImport { path, json } => {
+        Commands::ConfigImport { path, json, preview } => {
             let raw = std::fs::read_to_string(&path)
                 .map_err(|e| anyhow::anyhow!("failed to read '{}': {}", path, e))?;
             let export: TeamConfigExport = serde_json::from_str(&raw)
                 .map_err(|e| anyhow::anyhow!("failed to parse JSON from '{}': {}", path, e))?;
+
+            if preview {
+                let diff = agent2ssh::preview_team_config_import(&export)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&diff)?);
+                } else {
+                    println!("Config Import Preview:");
+                    println!("  {}", diff.summary);
+                    if !diff.hosts_to_add.is_empty() {
+                        println!("  Hosts to add:");
+                        for h in &diff.hosts_to_add {
+                            println!("    + {}", h);
+                        }
+                    }
+                    if !diff.hosts_to_skip.is_empty() {
+                        println!("  Hosts to skip (duplicates):");
+                        for h in &diff.hosts_to_skip {
+                            println!("    ~ {}", h);
+                        }
+                    }
+                    if !diff.hosts_to_update.is_empty() {
+                        println!("  Hosts to update:");
+                        for h in &diff.hosts_to_update {
+                            println!("    * {}", h);
+                        }
+                    }
+                }
+                return Ok(());
+            }
+
             let result = import_team_config(&export)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&result)?);
@@ -1084,12 +1566,418 @@ async fn main() -> Result<()> {
                 );
             }
         }
-        Commands::Doctor { json: output_json } => {
-            run_doctor(output_json).await?;
+        Commands::SshSync { diff, export, path, json } => {
+            let ssh_path = path.as_deref();
+            if diff || (!diff && !export) {
+                // Default: show diff
+                let result = agent2ssh::compare_ssh_configs(ssh_path)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                } else {
+                    println!("SSH Config Sync: {}", result.summary);
+                    if !result.only_in_agent2ssh.is_empty() {
+                        println!("\n  Only in Agent2SSH:");
+                        for h in &result.only_in_agent2ssh {
+                            println!("    + {} ({})", h.name, h.host);
+                        }
+                    }
+                    if !result.only_in_ssh_config.is_empty() {
+                        println!("\n  Only in ~/.ssh/config:");
+                        for h in &result.only_in_ssh_config {
+                            println!("    + {} ({})", h.name, h.host);
+                        }
+                    }
+                    if !result.conflicts.is_empty() {
+                        println!("\n  Conflicts:");
+                        for c in &result.conflicts {
+                            println!("    {} {}: '{}' (agent2ssh) vs '{}' (ssh config)",
+                                c.name, c.field, c.agent2ssh_value, c.ssh_config_value);
+                        }
+                    }
+                    if !result.matching.is_empty() {
+                        println!("\n  Matching: {}", result.matching.join(", "));
+                    }
+                }
+            }
+            if export {
+                let (out_path, count) = agent2ssh::export_to_ssh_config(ssh_path, None)?;
+                if json {
+                    println!("{}", serde_json::json!({ "path": out_path, "hosts_exported": count }));
+                } else {
+                    println!("Exported {} hosts to {}", count, out_path);
+                }
+            }
+        }
+        Commands::Doctor { json: output_json, daemon } => {
+            if let Some(ref alias) = daemon {
+                run_daemon_doctor(alias, output_json).await?;
+            } else {
+                run_doctor(output_json).await?;
+            }
+        }
+        Commands::Health { json, hosts } => {
+            let target_hosts = match hosts {
+                Some(h) if !h.is_empty() => h,
+                _ => {
+                    // Collect health for ALL configured hosts
+                    let config = agent2ssh::store::load_config()
+                        .context("failed to load configuration")?;
+                    config.hosts.iter().map(|h| h.name.clone()).collect()
+                }
+            };
+            let snapshot = collect_health_snapshot(target_hosts, None).await;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&snapshot)?);
+            } else {
+                println!("Health Snapshot (collected in {}ms):", snapshot.total_ms);
+                println!("{:-<70}", "");
+                for h in &snapshot.hosts {
+                    let status = if h.reachable { "UP" } else { "DOWN" };
+                    let latency = h
+                        .latency_ms
+                        .map(|ms| format!("{ms}ms"))
+                        .unwrap_or_else(|| "-".into());
+                    println!(
+                        "[{}] {}\tlatency={}\t{}",
+                        status,
+                        h.host,
+                        latency,
+                        h.error.as_deref().unwrap_or("")
+                    );
+                    if let Some(ref uptime) = h.uptime {
+                        println!("  uptime:   {}", uptime.trim());
+                    }
+                    if let Some(ref load) = h.load_avg {
+                        println!("  load avg: {}", load);
+                    }
+                    if let Some(ref disk) = h.disk_usage {
+                        println!("  disk:     {}", disk.trim());
+                    }
+                    if let Some(ref mem) = h.memory_usage {
+                        for line in mem.lines() {
+                            println!("  mem:      {}", line.trim());
+                        }
+                    }
+                }
+            }
+        }
+        Commands::Policy { command } => match command {
+            PolicyCommands::List { json } => {
+                let policies = list_approval_policies()?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&policies)?);
+                } else if policies.is_empty() {
+                    println!("No approval policies configured.");
+                } else {
+                    for p in &policies {
+                        let hosts = if p.hosts.is_empty() {
+                            "*".to_string()
+                        } else {
+                            p.hosts.join(", ")
+                        };
+                        let tags = if p.tags.is_empty() {
+                            "*".to_string()
+                        } else {
+                            p.tags.join(", ")
+                        };
+                        let risk = p
+                            .min_risk
+                            .map(|r| r.to_string())
+                            .unwrap_or_else(|| "any".to_string());
+                        let pattern = p
+                            .command_pattern
+                            .as_deref()
+                            .unwrap_or("*");
+                        let action = if p.requires_approval {
+                            "require"
+                        } else {
+                            "auto-approve"
+                        };
+                        let ttl = p
+                            .ttl_secs
+                            .map(|t| format!("{t}s"))
+                            .unwrap_or_else(|| "default".to_string());
+                        println!(
+                            "{}\thosts={}\ttags={}\tmin_risk={}\tpattern={}\t{}\tTTL={}",
+                            p.name, hosts, tags, risk, pattern, action, ttl
+                        );
+                    }
+                }
+            }
+            PolicyCommands::Add {
+                name,
+                hosts,
+                tags,
+                min_risk,
+                command_pattern,
+                auto_approve,
+                ttl_secs,
+                json,
+            } => {
+                let mut policies = load_approval_policies()?;
+                let min_risk_level = min_risk.and_then(|s| match s.to_lowercase().as_str() {
+                    "low" => Some(RiskLevel::Low),
+                    "medium" => Some(RiskLevel::Medium),
+                    "high" => Some(RiskLevel::High),
+                    "blocked" => Some(RiskLevel::Blocked),
+                    _ => None,
+                });
+                let policy = ApprovalPolicy {
+                    name: name.clone(),
+                    hosts: hosts.unwrap_or_default(),
+                    tags: tags.unwrap_or_default(),
+                    min_risk: min_risk_level,
+                    command_pattern,
+                    requires_approval: !auto_approve,
+                    ttl_secs,
+                };
+                policies.push(policy);
+                save_approval_policies(&policies)?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(
+                            &serde_json::json!({ "added": name, "total": policies.len() })
+                        )?
+                    );
+                } else {
+                    println!("Policy '{}' added ({} total).", name, policies.len());
+                }
+            }
+            PolicyCommands::Remove { name, json } => {
+                let mut policies = load_approval_policies()?;
+                let before = policies.len();
+                policies.retain(|p| p.name != name);
+                if policies.len() == before {
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(
+                                &serde_json::json!({ "removed": false, "name": name })
+                            )?
+                        );
+                    } else {
+                        println!("Policy '{}' not found.", name);
+                    }
+                } else {
+                    save_approval_policies(&policies)?;
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(
+                                &serde_json::json!({ "removed": true, "name": name, "remaining": policies.len() })
+                            )?
+                        );
+                    } else {
+                        println!("Policy '{}' removed ({} remaining).", name, policies.len());
+                    }
+                }
+            }
+            PolicyCommands::Check { host, command, json } => {
+                // Look up host tags from config
+                let host_tags: Vec<String> = list_hosts_filtered_core(&HostFilter::default())
+                    .unwrap_or_default()
+                    .iter()
+                    .find(|h| h.name == host)
+                    .map(|h| h.tags.clone())
+                    .unwrap_or_default();
+
+                let risk = classify_risk(&command);
+                let result = check_approval_required(&host, &host_tags, &command, risk)?;
+                if json {
+                    let output = match &result {
+                        Some(policy) => serde_json::json!({
+                            "requires_approval": true,
+                            "matched_policy": policy.name,
+                            "risk_level": risk,
+                            "ttl_secs": policy.ttl_secs,
+                        }),
+                        None => serde_json::json!({
+                            "requires_approval": false,
+                            "risk_level": risk,
+                        }),
+                    };
+                    println!("{}", serde_json::to_string_pretty(&output)?);
+                } else {
+                    match &result {
+                        Some(policy) => {
+                            println!(
+                                "Approval REQUIRED for '{}' on '{}' (risk: {}, policy: '{}')",
+                                command, host, risk, policy.name
+                            );
+                        }
+                        None => {
+                            println!(
+                                "No approval needed for '{}' on '{}' (risk: {})",
+                                command, host, risk
+                            );
+                        }
+                    }
+                }
+            }
+        },
+        Commands::Playbook { command } => match command {
+            PlaybookCommands::List { json } => {
+                let playbooks = agent2ssh::list_playbooks_core()?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&playbooks)?);
+                } else if playbooks.is_empty() {
+                    println!("No playbooks configured.");
+                } else {
+                    for pb in &playbooks {
+                        let step_count = pb
+                            .advanced_steps
+                            .as_ref()
+                            .map(|a| a.len())
+                            .unwrap_or(pb.steps.len());
+                        println!(
+                            "{}\t{} step(s)\t{}",
+                            pb.name,
+                            step_count,
+                            pb.description
+                        );
+                    }
+                }
+            }
+            PlaybookCommands::Run {
+                name,
+                host,
+                force,
+                params,
+                json,
+            } => {
+                let params_map = parse_cli_params(params);
+                let result = run_playbook_core(
+                    &name,
+                    &host,
+                    force,
+                    if params_map.is_empty() {
+                        None
+                    } else {
+                        Some(&params_map)
+                    },
+                )
+                .await?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                } else if result.success {
+                    println!(
+                        "Playbook '{}' completed on '{}' ({} step(s), {}ms).",
+                        result.playbook,
+                        result.host,
+                        result.steps_completed.len(),
+                        result.total_duration_ms
+                    );
+                } else {
+                    eprintln!(
+                        "Playbook '{}' failed on '{}' after {} step(s) ({}ms).",
+                        result.playbook,
+                        result.host,
+                        result.steps_completed.len(),
+                        result.total_duration_ms
+                    );
+                    if let Some(last) = result.steps_completed.last() {
+                        if let Some(ref err) = last.error {
+                            eprintln!("Error at step {}: {}", last.step, err);
+                        }
+                    }
+                    std::process::exit(1);
+                }
+            }
+            PlaybookCommands::DryRun { name, params } => {
+                let params_map = parse_cli_params(params);
+                let dry_run = dry_run_playbook(&name, &params_map)?;
+                println!("Playbook: {}", dry_run.playbook);
+                println!("Steps:");
+                for step in &dry_run.steps {
+                    println!("  [{}] Template: {}", step.step, step.command_template);
+                    println!("         Resolved: {}", step.command_resolved);
+                    if !step.params_used.is_empty() {
+                        println!("         Params:   {}", step.params_used.join(", "));
+                    }
+                }
+            }
+        },
+        Commands::Metrics { command } => match command {
+            MetricsCommands::Trend { period, json } => {
+                let trend_period = match period.to_lowercase().as_str() {
+                    "24h" | "last24h" => TrendPeriod::Last24h,
+                    "7d" | "last7d" => TrendPeriod::Last7d,
+                    "30d" | "last30d" => TrendPeriod::Last30d,
+                    "all" => TrendPeriod::All,
+                    other => {
+                        anyhow::bail!("unknown period '{}'. Use: 24h, 7d, 30d, or all", other);
+                    }
+                };
+                let trend = compute_metrics_trend(trend_period)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&trend)?);
+                } else {
+                    println!("Metrics Trend ({})", period);
+                    println!("{:-<60}", "");
+                    println!("Total executions : {}", trend.total_executions);
+                    println!("Successful       : {}", trend.success_count);
+                    println!("Failed           : {}", trend.failure_count);
+                    println!("Blocked          : {}", trend.blocked_count);
+                    println!("Failure rate     : {:.1}%", trend.failure_rate * 100.0);
+                    println!("Avg duration     : {:.1}ms", trend.avg_duration_ms);
+                    println!();
+                    println!("Risk distribution:");
+                    println!("  low     : {}", trend.risk_distribution.low);
+                    println!("  medium  : {}", trend.risk_distribution.medium);
+                    println!("  high    : {}", trend.risk_distribution.high);
+                    println!("  blocked : {}", trend.risk_distribution.blocked);
+                    if !trend.top_hosts.is_empty() {
+                        println!();
+                        println!("Top hosts:");
+                        for h in &trend.top_hosts {
+                            println!("  {:<20} {} executions", h.host, h.count);
+                        }
+                    }
+                }
+            }
+        },
+        Commands::Events { json } => {
+            let mut rx = subscribe_events();
+            println!("Subscribed to event stream (Ctrl+C to exit)...");
+            loop {
+                match rx.recv().await {
+                    Ok(event) => {
+                        if json {
+                            println!("{}", serde_json::to_string(&event)?);
+                        } else {
+                            println!(
+                                "[{}] {} {}",
+                                event.timestamp.format("%H:%M:%S"),
+                                serde_json::to_string(&event.event_type)?,
+                                serde_json::to_string(&event.data)?,
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Event stream error: {}", e);
+                        break;
+                    }
+                }
+            }
         }
     }
 
     Ok(())
+}
+
+fn parse_cli_params(params: Option<Vec<String>>) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    if let Some(items) = params {
+        for item in items {
+            if let Some(pos) = item.find('=') {
+                let key = item[..pos].to_string();
+                let value = item[pos + 1..].to_string();
+                map.insert(key, value);
+            }
+        }
+    }
+    map
 }
 
 fn process_is_alive(pid: &str) -> bool {
@@ -1335,6 +2223,48 @@ fn which_exists(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+// ── Daemon Doctor (F5-1) ────────────────────────────────────────────────────
+
+async fn run_daemon_doctor(alias: &str, output_json: bool) -> Result<()> {
+    let diagnostic = diagnose_daemon(alias).await?;
+
+    if output_json {
+        println!("{}", serde_json::to_string_pretty(&diagnostic)?);
+    } else {
+        println!("Daemon diagnostic: {}", diagnostic.alias);
+        println!("URL: {}", diagnostic.url);
+        println!("{:-<60}", "");
+        for check in &diagnostic.checks {
+            let icon = match check.status {
+                agent2ssh::remote::DiagnosticStatus::Ok => "[PASS]",
+                agent2ssh::remote::DiagnosticStatus::Warning => "[WARN]",
+                agent2ssh::remote::DiagnosticStatus::Error => "[FAIL]",
+            };
+            println!("{} {:<24} {}", icon, check.name, check.message);
+            if let Some(ref details) = check.details {
+                println!("  {:<26} {}", "", details);
+            }
+        }
+        println!("{:-<60}", "");
+        let overall_icon = match diagnostic.overall_status {
+            agent2ssh::remote::DiagnosticStatus::Ok => "OK",
+            agent2ssh::remote::DiagnosticStatus::Warning => "WARNING",
+            agent2ssh::remote::DiagnosticStatus::Error => "ERROR",
+        };
+        println!(
+            "Overall: {} ({} check(s))",
+            overall_icon,
+            diagnostic.checks.len()
+        );
+
+        if diagnostic.overall_status == agent2ssh::remote::DiagnosticStatus::Error {
+            std::process::exit(1);
+        }
+    }
+
+    Ok(())
+}
+
 fn clean_optional(value: Option<String>) -> Option<String> {
     value
         .map(|item| item.trim().to_string())
@@ -1370,6 +2300,83 @@ fn print_host_row(host: &HostProfile) {
     } else {
         println!("{}\t{}\t{}", host.name, target, metadata.join(" "));
     }
+}
+
+fn print_exec_plan(plan: &agent2ssh::ExecPlan) {
+    println!("Execution Plan");
+    println!("{:-<60}", "");
+    println!("Overall risk : {}", plan.overall_risk);
+    println!("Requires approval: {}", plan.requires_approval);
+    println!("Targets ({}):", plan.targets.len());
+    for target in &plan.targets {
+        let status = if target.blocked {
+            "BLOCKED"
+        } else if target.needs_force {
+            "needs --force"
+        } else {
+            "ok"
+        };
+        println!(
+            "  {}\t{}\t[{}]\t{}s\t{}",
+            target.host, target.host_address, target.risk_level, target.timeout_secs, status,
+        );
+        println!("    command: {}", target.command);
+        if let Some(ref jh) = target.jump_host {
+            println!("    jump host: {}", jh);
+        }
+    }
+    if !plan.warnings.is_empty() {
+        println!("Warnings:");
+        for w in &plan.warnings {
+            println!("  ! {}", w);
+        }
+    }
+}
+
+fn print_comparison(comparison: &ExecComparison) {
+    println!("\n--- Result Comparison ---");
+    println!("Hosts compared: {}", comparison.hosts_count);
+    println!("\nExit code groups:");
+    for group in &comparison.exit_code_groups {
+        let code_str = group
+            .exit_code
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "unknown".into());
+        println!("  code {}: {:?}", code_str, group.hosts);
+    }
+    println!("\nStdout:");
+    if comparison.stdout_comparison.identical {
+        println!("  Identical across all hosts.");
+    } else {
+        println!("  Differs across hosts.");
+        if !comparison.stdout_comparison.common_prefix.is_empty() {
+            println!(
+                "  Common prefix: {:?}...",
+                &comparison.stdout_comparison.common_prefix
+            );
+        }
+        for diff in &comparison.stdout_comparison.diffs {
+            let marker = if diff.differs_from_first { " (differs)" } else { "" };
+            println!("  [{}]{}", diff.host, marker);
+            for line in diff.output_summary.lines().take(5) {
+                println!("    {}", line);
+            }
+        }
+    }
+    println!("\nStderr:");
+    if comparison.stderr_comparison.identical {
+        println!("  Identical across all hosts.");
+    } else {
+        println!("  Differs across hosts.");
+        for diff in &comparison.stderr_comparison.diffs {
+            let marker = if diff.differs_from_first { " (differs)" } else { "" };
+            println!("  [{}]{}", diff.host, marker);
+            for line in diff.output_summary.lines().take(5) {
+                println!("    {}", line);
+            }
+        }
+    }
+    println!("\nSummary: {}", comparison.summary);
 }
 
 async fn check_daemon_health() -> bool {

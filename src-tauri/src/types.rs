@@ -11,6 +11,21 @@ pub enum RiskLevel {
     Blocked,
 }
 
+impl RiskLevel {
+    /// Return whichever of `self` and `other` represents the higher severity.
+    pub fn max_severity(self, other: RiskLevel) -> RiskLevel {
+        fn rank(r: RiskLevel) -> u8 {
+            match r {
+                RiskLevel::Low => 0,
+                RiskLevel::Medium => 1,
+                RiskLevel::High => 2,
+                RiskLevel::Blocked => 3,
+            }
+        }
+        if rank(self) >= rank(other) { self } else { other }
+    }
+}
+
 impl std::fmt::Display for RiskLevel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -73,6 +88,12 @@ pub struct ExecRequest {
     /// Truncate stdout+stderr to this many bytes total (default 4 MiB).
     #[serde(default)]
     pub max_output_bytes: Option<usize>,
+    /// Optional reason/note for this operation (for audit trail).
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// Optional change/ticket ID for this operation (for audit trail).
+    #[serde(default)]
+    pub change_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,6 +101,36 @@ pub struct ExecMultiResult {
     pub host: String,
     pub result: Option<ExecResult>,
     pub error: Option<String>,
+}
+
+/// Strategy for batch multi-host execution
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchStrategy {
+    /// Maximum number of concurrent hosts (0 = unlimited)
+    #[serde(default)]
+    pub concurrency: Option<usize>,
+    /// Stop after this many failures (0 = never stop)
+    #[serde(default)]
+    pub max_failures: Option<usize>,
+    /// Execute in batches of this size, waiting for each batch to complete
+    #[serde(default)]
+    pub batch_size: Option<usize>,
+    /// Pause between batches (seconds)
+    #[serde(default)]
+    pub pause_between_batches_secs: Option<u64>,
+}
+
+/// Aggregated result of a batched multi-host execution
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecMultiBatchResult {
+    pub results: Vec<ExecMultiResult>,
+    pub total_hosts: usize,
+    pub successful: usize,
+    pub failed: usize,
+    pub skipped: usize,
+    pub stopped_early: bool,
+    pub batches_executed: usize,
+    pub total_duration_ms: u128,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -93,6 +144,21 @@ pub struct AuditFilter {
     pub until: Option<String>,
     #[serde(default = "default_audit_limit")]
     pub limit: usize,
+    /// Full-text search across command, host, and other text fields.
+    #[serde(default)]
+    pub search: Option<String>,
+    /// Command pattern (glob-style: *, ?)
+    #[serde(default)]
+    pub command_pattern: Option<String>,
+    /// Host group: filter by env label
+    #[serde(default)]
+    pub host_env: Option<String>,
+    /// Host group: filter by role label
+    #[serde(default)]
+    pub host_role: Option<String>,
+    /// Host group: filter by owner label
+    #[serde(default)]
+    pub host_owner: Option<String>,
 }
 
 fn default_audit_limit() -> usize {
@@ -131,6 +197,12 @@ pub struct AuditEntry {
     pub duration_ms: u128,
     #[serde(default = "default_risk")]
     pub risk_level: RiskLevel,
+    /// Optional reason/note for the operation
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// Optional change/ticket ID
+    #[serde(default)]
+    pub change_id: Option<String>,
 }
 
 fn default_risk() -> RiskLevel {

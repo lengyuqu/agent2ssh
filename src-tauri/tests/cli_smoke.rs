@@ -78,6 +78,10 @@ async fn cli_exec_help_exits_zero() {
         stdout.contains("--force") || stdout.contains("force"),
         "exec --help should mention the --force flag"
     );
+    assert!(
+        stdout.contains("--plan") || stdout.contains("plan"),
+        "exec --help should mention the --plan flag"
+    );
 }
 
 #[tokio::test]
@@ -118,7 +122,7 @@ async fn mcp_stdio_end_to_end_initialize_tools_and_risk() {
         serde_json::from_str(&lines.next_line().await.unwrap().expect("missing tools response"))
             .unwrap();
     let tool_count = tools["result"]["tools"].as_array().unwrap().len();
-    assert_eq!(tool_count, 35);
+    assert_eq!(tool_count, 50);
 
     let risk: serde_json::Value =
         serde_json::from_str(&lines.next_line().await.unwrap().expect("missing risk response"))
@@ -394,6 +398,27 @@ async fn cli_daemon_rotate_token_help_exits_zero() {
     );
 }
 
+#[tokio::test]
+async fn cli_health_help_exits_zero() {
+    let output = tokio::process::Command::new(cli_bin())
+        .args(["health", "--help"])
+        .output()
+        .await
+        .expect("failed to run CLI binary");
+
+    assert!(
+        output.status.success(),
+        "agent2ssh health --help should exit 0, got: {:?}",
+        output.status.code()
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("--json") || stdout.contains("json"),
+        "health --help should mention the --json flag"
+    );
+}
+
 // ── Error cases ─────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -465,5 +490,57 @@ async fn cli_version_flag() {
         stdout.contains("agent2ssh"),
         "--version output should contain the binary name, got: {}",
         stdout
+    );
+}
+
+// ── Policy subcommand smoke tests ────────────────────────────────────────────
+
+#[tokio::test]
+async fn cli_policy_help_exits_zero() {
+    let output = tokio::process::Command::new(cli_bin())
+        .args(["policy", "--help"])
+        .output()
+        .await
+        .expect("failed to run CLI binary");
+
+    assert!(
+        output.status.success(),
+        "agent2ssh policy --help should exit 0, got: {:?}",
+        output.status.code()
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("list") || stdout.contains("add") || stdout.contains("Manage"),
+        "policy --help should mention subcommands, got: {}",
+        stdout
+    );
+}
+
+#[tokio::test]
+async fn cli_policy_list_json_exits_zero() {
+    let output = tokio::process::Command::new(cli_bin())
+        .args(["policy", "list", "--json"])
+        .output()
+        .await
+        .expect("failed to run CLI binary");
+
+    assert!(
+        output.status.success(),
+        "agent2ssh policy list --json should exit 0, got: {:?}\nstderr: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: Result<serde_json::Value, _> = serde_json::from_str(stdout.trim());
+    assert!(
+        parsed.is_ok(),
+        "policy list --json should produce valid JSON, got: {}",
+        stdout
+    );
+    assert!(
+        parsed.unwrap().is_array(),
+        "policy list --json should produce a JSON array"
     );
 }

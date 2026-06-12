@@ -1,6 +1,6 @@
 # Agent2SSH MCP Tools Reference
 
-Agent2SSH exposes 35 tools via the Model Context Protocol (MCP) stdio server.
+Agent2SSH exposes 50 tools via the Model Context Protocol (MCP) stdio server.
 
 ## Tool List
 
@@ -41,6 +41,21 @@ Agent2SSH exposes 35 tools via the Model Context Protocol (MCP) stdio server.
 | 33 | `ssh_config_import` | Import team config from JSON |
 | 34 | `ssh_doctor` | Run diagnostic checks on SSH, config, and daemon |
 | 35 | `ssh_metrics` | Get daemon request/execution/approval counters |
+| 36 | `ssh_health_snapshot` | Collect host health data (uptime, disk, memory, load) |
+| 37 | `ssh_playbook_dry_run` | Preview playbook steps with resolved parameters |
+| 38 | `ssh_preview_exec` | Preview execution plan before running (risk, warnings) |
+| 39 | `ssh_approval_policies_list` | List all approval policy rules |
+| 40 | `ssh_approval_check` | Check if a host+command requires approval |
+| 41 | `ssh_config_import_preview` | Preview team config import diff |
+| 42 | `ssh_exec_compare` | Compare execution results across multiple hosts |
+| 43 | `ssh_daemon_diagnose` | Run diagnostic checks on a remote daemon |
+| 44 | `ssh_daemon_version_check` | Check version compatibility with a remote daemon |
+| 45 | `ssh_audit_export` | Export audit log as JSONL or CSV |
+| 46 | `ssh_daemons_view` | Unified view of all daemons with health and metrics |
+| 47 | `ssh_metrics_trend` | Compute execution trends (24h, 7d, 30d, all) |
+| 48 | `ssh_events_subscribe` | Subscribe to the real-time event stream |
+| 49 | `ssh_sync_diff` | Compare Agent2SSH hosts with ~/.ssh/config |
+| 50 | `ssh_sync_export` | Export Agent2SSH hosts to SSH config format |
 
 ## Risk Levels
 

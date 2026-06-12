@@ -51,6 +51,158 @@ pub fn save_webhook_config(config: &WebhookConfig) -> Result<()> {
     Ok(())
 }
 
+/// Send a notification about a pending approval request.
+///
+/// Fires a webhook with approval-specific payload. If the webhook URL is a
+/// Slack URL, formats with Slack Block Kit including Approve/Reject action
+/// buttons.
+#[cfg(feature = "daemon")]
+pub async fn notify_approval_pending(
+    approval_id: &str,
+    host: &str,
+    command: &str,
+    risk_level: &str,
+    approval_url: Option<&str>,
+) -> Result<()> {
+    let config = match load_webhook_config() {
+        Some(c) => c,
+        None => return Ok(()),
+    };
+
+    let url = match &config.url {
+        Some(u) if !u.is_empty() => u.clone(),
+        _ => return Ok(()),
+    };
+
+    // Check if event type is in the subscribed events list
+    if !config.events.iter().any(|e| e == "approval_required") {
+        return Ok(());
+    }
+
+    let redacted_command = crate::store::redact_sensitive_text(command);
+
+    // Format payload: Slack Block Kit for Slack URLs, plain JSON otherwise
+    let payload = if url.contains("hooks.slack.com") {
+        format_slack_approval_notification(approval_id, host, &redacted_command, risk_level, approval_url)
+    } else {
+        serde_json::json!({
+            "event": "approval_required",
+            "approval_id": approval_id,
+            "host": host,
+            "command": redacted_command,
+            "risk_level": risk_level,
+            "approval_url": approval_url,
+        })
+    };
+
+    let body = serde_json::to_vec(&payload)?;
+
+    // Compute HMAC-SHA256 signature if secret is set
+    let signature = config
+        .secret
+        .as_ref()
+        .filter(|s| !s.is_empty())
+        .map(|s| compute_signature(&body, s));
+
+    // POST with timeout (fire-and-forget via spawned task)
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+
+    let mut req = client.post(&url).header("Content-Type", "application/json");
+
+    if let Some(sig) = signature {
+        req = req.header("X-Agent2SSH-Signature", format!("sha256={}", sig));
+    }
+
+    match req.body(body).send().await {
+        Ok(resp) => {
+            if !resp.status().is_success() {
+                eprintln!(
+                    "[webhook] approval notification POST {} returned status {}",
+                    url,
+                    resp.status()
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!("[webhook] approval notification POST {} failed: {}", url, e);
+        }
+    }
+
+    Ok(())
+}
+
+/// Format an approval notification for Slack Block Kit.
+///
+/// Builds a Slack Block Kit message with:
+/// - Header: "Approval Required"
+/// - Fields: host, command, risk level
+/// - Action buttons: Approve (green), Reject (red) linking to approval_url
+pub fn format_slack_approval_notification(
+    approval_id: &str,
+    host: &str,
+    command: &str,
+    risk_level: &str,
+    approval_url: Option<&str>,
+) -> serde_json::Value {
+    let fields = vec![
+        serde_json::json!({
+            "type": "mrkdwn",
+            "text": format!("*Host:*\n{}", host),
+        }),
+        serde_json::json!({
+            "type": "mrkdwn",
+            "text": format!("*Command:*\n```{}```", command),
+        }),
+        serde_json::json!({
+            "type": "mrkdwn",
+            "text": format!("*Risk Level:*\n{}", risk_level),
+        }),
+        serde_json::json!({
+            "type": "mrkdwn",
+            "text": format!("*Approval ID:*\n`{}`", approval_id),
+        }),
+    ];
+
+    let mut blocks = vec![
+        serde_json::json!({
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": "Agent2SSH: Approval Required",
+            }
+        }),
+        serde_json::json!({
+            "type": "section",
+            "fields": fields,
+        }),
+    ];
+
+    // Add action buttons if approval_url is provided
+    if let Some(url) = approval_url {
+        blocks.push(serde_json::json!({
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": { "type": "plain_text", "text": "Approve" },
+                    "style": "primary",
+                    "url": format!("{}/approve", url),
+                },
+                {
+                    "type": "button",
+                    "text": { "type": "plain_text", "text": "Reject" },
+                    "style": "danger",
+                    "url": format!("{}/reject", url),
+                }
+            ]
+        }));
+    }
+
+    serde_json::json!({ "blocks": blocks })
+}
+
 /// Fire a webhook event if configured.
 /// Non-blocking: errors are logged to stderr but don't fail the main flow.
 #[cfg(feature = "daemon")]
@@ -288,6 +440,55 @@ mod tests {
         assert!(!json.contains("approval_id"));
         assert!(!json.contains("risk_level"));
         assert!(!json.contains("exit_code"));
+    }
+
+    #[test]
+    fn test_format_slack_approval_notification_with_url() {
+        let msg = format_slack_approval_notification(
+            "test-uuid-123",
+            "prod-server",
+            "sudo rm -rf /tmp",
+            "high",
+            Some("http://127.0.0.1:7722/approval/test-uuid-123/respond"),
+        );
+
+        let blocks = msg["blocks"].as_array().unwrap();
+        // Should have: header, section, actions
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[0]["type"], "header");
+        assert_eq!(
+            blocks[0]["text"]["text"],
+            "Agent2SSH: Approval Required"
+        );
+        assert_eq!(blocks[1]["type"], "section");
+        assert_eq!(blocks[2]["type"], "actions");
+
+        // Verify action buttons
+        let elements = blocks[2]["elements"].as_array().unwrap();
+        assert_eq!(elements.len(), 2);
+        assert_eq!(elements[0]["text"]["text"], "Approve");
+        assert_eq!(elements[0]["style"], "primary");
+        assert!(elements[0]["url"].as_str().unwrap().contains("/approve"));
+        assert_eq!(elements[1]["text"]["text"], "Reject");
+        assert_eq!(elements[1]["style"], "danger");
+        assert!(elements[1]["url"].as_str().unwrap().contains("/reject"));
+    }
+
+    #[test]
+    fn test_format_slack_approval_notification_without_url() {
+        let msg = format_slack_approval_notification(
+            "test-uuid-456",
+            "staging-server",
+            "apt update",
+            "medium",
+            None,
+        );
+
+        let blocks = msg["blocks"].as_array().unwrap();
+        // Should have: header, section (no actions since no URL)
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0]["type"], "header");
+        assert_eq!(blocks[1]["type"], "section");
     }
 
     // ── Outbound protection tests ───────────────────────────────────────────
