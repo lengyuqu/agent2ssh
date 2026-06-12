@@ -1,16 +1,15 @@
-use agent2ssh::{
-    add_host_core, classify_risk, exec_multi_core, exec_ssh_core, export_team_config,
-    forward_add_core, forward_list_core, forward_remove_core, import_ssh_config_core,
-    import_team_config, list_audit_core, list_daemons_core, list_hosts_core, ping_hosts_core,
-    remove_host_core, session_close_core, session_list_core, session_open_core,
-    session_read_core, session_write_core, sftp_download_core, sftp_ls_core, sftp_mkdir_core,
-    sftp_stat_core, sftp_upload_core, AuditFilter, ExecRequest, ForwardDirection, HostProfile,
-    RiskLevel, SftpDownloadRequest, SftpUploadRequest, TeamConfigExport,
-};
 use agent2ssh::remote::get_daemon;
 use agent2ssh::store::{audit_path, restrict_file_to_owner};
-use anyhow::Result;
+use agent2ssh::{
+    add_host_core, classify_risk, exec_multi_core, exec_ssh_core, export_team_config,
+    import_ssh_config_core, import_team_config, list_audit_core, list_daemons_core,
+    list_hosts_core, ping_hosts_core, remove_host_core, sftp_download_core, sftp_ls_core,
+    sftp_mkdir_core, sftp_stat_core, sftp_upload_core, AuditFilter, ExecRequest, ForwardDirection,
+    ForwardRule, HostProfile, RiskLevel, SftpDownloadRequest, SftpUploadRequest, TeamConfigExport,
+};
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Parser)]
 #[command(name = "agent2ssh", version)]
@@ -227,10 +226,7 @@ enum SessionCommands {
         json: bool,
     },
     /// Write input to an open session
-    Write {
-        session_id: String,
-        input: String,
-    },
+    Write { session_id: String, input: String },
     /// Read buffered output from a session
     Read {
         session_id: String,
@@ -280,6 +276,32 @@ enum ForwardCommands {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Debug, Serialize)]
+struct SessionOpenRequest {
+    host: String,
+}
+
+#[derive(Debug, Serialize)]
+struct SessionWriteRequest {
+    input: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct IdResponse {
+    id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct OutputResponse {
+    output: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionListItem {
+    id: String,
+    host: String,
 }
 
 #[derive(Debug, Subcommand)]
@@ -426,15 +448,25 @@ async fn main() -> Result<()> {
             stdin,
         } => {
             let risk = classify_risk(&command);
-            let req = ExecRequest { host, command, force, timeout_secs, stdin, max_output_bytes: None };
+            let req = ExecRequest {
+                host,
+                command,
+                force,
+                timeout_secs,
+                stdin,
+                max_output_bytes: None,
+            };
 
             // If --daemon is set and remote, forward via HTTP
             if let Some(ref alias) = daemon_alias {
                 if alias != "localhost" {
                     let (url, token) = get_daemon(alias)?;
-                    let token_val = token.ok_or_else(|| anyhow::anyhow!("no token for daemon '{alias}'"))?;
+                    let token_val =
+                        token.ok_or_else(|| anyhow::anyhow!("no token for daemon '{alias}'"))?;
                     let client = reqwest::Client::builder()
-                        .timeout(std::time::Duration::from_secs(req.timeout_secs.unwrap_or(60) + 10))
+                        .timeout(std::time::Duration::from_secs(
+                            req.timeout_secs.unwrap_or(60) + 10,
+                        ))
                         .build()?;
                     let resp = client
                         .post(format!("{}/exec", url.trim_end_matches('/')))
@@ -478,15 +510,32 @@ async fn main() -> Result<()> {
                 std::process::exit(result.exit_code.unwrap_or(1));
             }
         }
-        Commands::ExecMulti { hosts, command, json, force, timeout_secs, tags } => {
+        Commands::ExecMulti {
+            hosts,
+            command,
+            json,
+            force,
+            timeout_secs,
+            tags,
+        } => {
             let results = exec_multi_core(hosts, command, force, timeout_secs, tags).await;
             if json {
                 println!("{}", serde_json::to_string_pretty(&results)?);
             } else {
                 for r in &results {
                     match &r.result {
-                        Some(res) => println!("[{}] exit={:?} {}ms\n{}", r.host, res.exit_code, res.duration_ms, res.stdout.trim_end()),
-                        None => eprintln!("[{}] ERROR: {}", r.host, r.error.as_deref().unwrap_or("unknown")),
+                        Some(res) => println!(
+                            "[{}] exit={:?} {}ms\n{}",
+                            r.host,
+                            res.exit_code,
+                            res.duration_ms,
+                            res.stdout.trim_end()
+                        ),
+                        None => eprintln!(
+                            "[{}] ERROR: {}",
+                            r.host,
+                            r.error.as_deref().unwrap_or("unknown")
+                        ),
                     }
                 }
             }
@@ -564,45 +613,95 @@ async fn main() -> Result<()> {
         },
         Commands::Session { command } => match command {
             SessionCommands::Open { host, json } => {
-                let id = session_open_core(&host).await?;
+                let (client, base_url, token) = daemon_client(daemon_alias.as_deref())?;
+                let result: IdResponse = daemon_json(
+                    client
+                        .post(format!("{base_url}/sessions"))
+                        .bearer_auth(token)
+                        .json(&SessionOpenRequest { host: host.clone() }),
+                )
+                .await?;
                 if json {
-                    println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "session_id": id.to_string(), "host": host }))?);
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(
+                            &serde_json::json!({ "session_id": result.id, "host": host })
+                        )?
+                    );
                 } else {
-                    println!("Session opened: {id}");
+                    println!("Session opened: {}", result.id);
                 }
             }
             SessionCommands::Write { session_id, input } => {
-                let id: uuid::Uuid = session_id.parse()?;
-                session_write_core(id, &input).await?;
+                let (client, base_url, token) = daemon_client(daemon_alias.as_deref())?;
+                let _: serde_json::Value = daemon_json(
+                    client
+                        .post(format!("{base_url}/sessions/{session_id}/write"))
+                        .bearer_auth(token)
+                        .json(&SessionWriteRequest { input }),
+                )
+                .await?;
             }
-            SessionCommands::Read { session_id, timeout_ms, json } => {
-                let id: uuid::Uuid = session_id.parse()?;
-                let output = session_read_core(id, timeout_ms).await?;
+            SessionCommands::Read {
+                session_id,
+                timeout_ms,
+                json,
+            } => {
+                let (client, base_url, token) = daemon_client(daemon_alias.as_deref())?;
+                let result: OutputResponse = daemon_json(
+                    client
+                        .get(format!("{base_url}/sessions/{session_id}/read"))
+                        .bearer_auth(token)
+                        .query(&[("timeout_ms", timeout_ms)]),
+                )
+                .await?;
                 if json {
-                    println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "output": output }))?);
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(
+                            &serde_json::json!({ "output": result.output })
+                        )?
+                    );
                 } else {
-                    print!("{output}");
+                    print!("{}", result.output);
                 }
             }
             SessionCommands::Close { session_id, json } => {
-                let id: uuid::Uuid = session_id.parse()?;
-                session_close_core(id).await?;
+                let (client, base_url, token) = daemon_client(daemon_alias.as_deref())?;
+                let _: serde_json::Value = daemon_json(
+                    client
+                        .delete(format!("{base_url}/sessions/{session_id}"))
+                        .bearer_auth(token),
+                )
+                .await?;
                 if json {
-                    println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "closed": session_id }))?);
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({ "closed": session_id }))?
+                    );
                 } else {
                     println!("Session {session_id} closed.");
                 }
             }
             SessionCommands::List { json } => {
-                let sessions = session_list_core().await;
+                let (client, base_url, token) = daemon_client(daemon_alias.as_deref())?;
+                let sessions: Vec<SessionListItem> = daemon_json(
+                    client
+                        .get(format!("{base_url}/sessions"))
+                        .bearer_auth(token),
+                )
+                .await?;
                 if json {
-                    let items: Vec<_> = sessions.iter().map(|(id, host)| serde_json::json!({ "session_id": id.to_string(), "host": host })).collect();
+                    let items: Vec<_> = sessions
+                        .iter()
+                        .map(|item| serde_json::json!({ "session_id": item.id, "host": item.host }))
+                        .collect();
                     println!("{}", serde_json::to_string_pretty(&items)?);
                 } else if sessions.is_empty() {
                     println!("No open sessions.");
                 } else {
-                    for (id, host) in &sessions {
-                        println!("{id}\t{host}");
+                    for item in &sessions {
+                        println!("{}\t{}", item.id, item.host);
                     }
                 }
             }
@@ -620,39 +719,85 @@ async fn main() -> Result<()> {
                     "remote" => ForwardDirection::Remote,
                     _ => ForwardDirection::Local,
                 };
-                let rule = forward_add_core(&host, dir, bind_port, &target_host, target_port).await?;
+                let (client, base_url, token) = daemon_client(daemon_alias.as_deref())?;
+                let rule: ForwardRule = daemon_json(
+                    client
+                        .post(format!("{base_url}/forwards"))
+                        .bearer_auth(token)
+                        .json(&ForwardRule {
+                            id: uuid::Uuid::new_v4(),
+                            host,
+                            direction: dir,
+                            bind_port,
+                            target_host,
+                            target_port,
+                        }),
+                )
+                .await?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&rule)?);
                 } else {
                     println!(
                         "Forward {} started: {}:{} → {}:{} (id={})",
-                        rule.direction, rule.bind_port, rule.target_host, rule.host, rule.target_port, rule.id
+                        rule.direction,
+                        rule.bind_port,
+                        rule.target_host,
+                        rule.host,
+                        rule.target_port,
+                        rule.id
                     );
                 }
             }
             ForwardCommands::List { json } => {
-                let rules = forward_list_core().await;
+                let (client, base_url, token) = daemon_client(daemon_alias.as_deref())?;
+                let rules: Vec<ForwardRule> = daemon_json(
+                    client
+                        .get(format!("{base_url}/forwards"))
+                        .bearer_auth(token),
+                )
+                .await?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&rules)?);
                 } else if rules.is_empty() {
                     println!("No active forwards.");
                 } else {
                     for r in &rules {
-                        println!("{}\t{}\t{}\t{}:{} → {}:{}", r.id, r.host, r.direction, r.bind_port, r.target_host, r.host, r.target_port);
+                        println!(
+                            "{}\t{}\t{}\t{}:{} → {}:{}",
+                            r.id,
+                            r.host,
+                            r.direction,
+                            r.bind_port,
+                            r.target_host,
+                            r.host,
+                            r.target_port
+                        );
                     }
                 }
             }
             ForwardCommands::Rm { id, json } => {
-                let uid: uuid::Uuid = id.parse()?;
-                forward_remove_core(uid).await?;
+                let (client, base_url, token) = daemon_client(daemon_alias.as_deref())?;
+                let _: serde_json::Value = daemon_json(
+                    client
+                        .delete(format!("{base_url}/forwards/{id}"))
+                        .bearer_auth(token),
+                )
+                .await?;
                 if json {
-                    println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "removed": id }))?);
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({ "removed": id }))?
+                    );
                 } else {
                     println!("Forward {id} removed.");
                 }
             }
         },
-        Commands::Ping { hosts, timeout_secs, json } => {
+        Commands::Ping {
+            hosts,
+            timeout_secs,
+            json,
+        } => {
             let results = ping_hosts_core(hosts, Some(timeout_secs)).await;
             if json {
                 println!("{}", serde_json::to_string_pretty(&results)?);
@@ -661,12 +806,24 @@ async fn main() -> Result<()> {
                     if r.reachable {
                         println!("✓ {} ({}ms)", r.host, r.latency_ms.unwrap_or(0));
                     } else {
-                        println!("✗ {}  {}", r.host, r.error.as_deref().unwrap_or("unreachable"));
+                        println!(
+                            "✗ {}  {}",
+                            r.host,
+                            r.error.as_deref().unwrap_or("unreachable")
+                        );
                     }
                 }
             }
         }
-        Commands::Audit { limit, json, host, risk, exit_code, since, until } => {
+        Commands::Audit {
+            limit,
+            json,
+            host,
+            risk,
+            exit_code,
+            since,
+            until,
+        } => {
             let filter = AuditFilter {
                 host,
                 risk_level: risk,
@@ -692,13 +849,20 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Commands::Risk { command, host: _, json } => {
+        Commands::Risk {
+            command,
+            host: _,
+            json,
+        } => {
             let risk = classify_risk(&command);
             if json {
-                println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-                    "command": command,
-                    "risk_level": risk,
-                }))?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "command": command,
+                        "risk_level": risk,
+                    }))?
+                );
             } else {
                 println!("Command: {}", command);
                 println!("Risk:    {}", risk);
@@ -756,7 +920,10 @@ async fn main() -> Result<()> {
                             println!("{}", String::from_utf8_lossy(&output.stdout));
                         }
                         _ => {
-                            println!("Daemon PID file exists (pid={}) but health check failed.", pid);
+                            println!(
+                                "Daemon PID file exists (pid={}) but health check failed.",
+                                pid
+                            );
                         }
                     }
                 }
@@ -811,7 +978,11 @@ async fn main() -> Result<()> {
                         println!("No daemons configured.");
                     } else {
                         for d in &daemons {
-                            let status = if d.connected { "connected" } else { "unreachable" };
+                            let status = if d.connected {
+                                "connected"
+                            } else {
+                                "unreachable"
+                            };
                             println!("{}\t{}\t[{}]", d.alias, d.url, status);
                         }
                     }
@@ -829,13 +1000,30 @@ async fn main() -> Result<()> {
                     println!(
                         "    {}\t{}{}:{}",
                         h.name,
-                        h.user.as_deref().map(|u| format!("{u}@")).unwrap_or_default(),
+                        h.user
+                            .as_deref()
+                            .map(|u| format!("{u}@"))
+                            .unwrap_or_default(),
                         h.host,
                         h.port.unwrap_or(22)
                     );
                 }
-                println!("  Risk rules: {}", if export.risk_rules.is_some() { "included" } else { "not configured" });
-                println!("  Playbooks:  {}", if export.playbooks.is_some() { "included" } else { "not configured" });
+                println!(
+                    "  Risk rules: {}",
+                    if export.risk_rules.is_some() {
+                        "included"
+                    } else {
+                        "not configured"
+                    }
+                );
+                println!(
+                    "  Playbooks:  {}",
+                    if export.playbooks.is_some() {
+                        "included"
+                    } else {
+                        "not configured"
+                    }
+                );
                 if json {
                     println!("\nUse --json to output machine-readable JSON.");
                 }
@@ -853,8 +1041,22 @@ async fn main() -> Result<()> {
                 println!("Import complete:");
                 println!("  Hosts added:   {}", result.hosts_added);
                 println!("  Hosts skipped: {}", result.hosts_skipped);
-                println!("  Risk rules:    {}", if result.risk_rules_imported { "imported" } else { "not included" });
-                println!("  Playbooks:     {}", if result.playbooks_imported { "imported" } else { "not included" });
+                println!(
+                    "  Risk rules:    {}",
+                    if result.risk_rules_imported {
+                        "imported"
+                    } else {
+                        "not included"
+                    }
+                );
+                println!(
+                    "  Playbooks:     {}",
+                    if result.playbooks_imported {
+                        "imported"
+                    } else {
+                        "not included"
+                    }
+                );
             }
         }
         Commands::Doctor { json: output_json } => {
@@ -897,7 +1099,11 @@ async fn run_doctor(output_json: bool) -> Result<()> {
     checks.push(DoctorCheck {
         name: "ssh binary".into(),
         status: if ssh_ok { "pass" } else { "fail" }.into(),
-        detail: if ssh_ok { "ssh found in PATH".into() } else { "ssh binary not found in PATH".into() },
+        detail: if ssh_ok {
+            "ssh found in PATH".into()
+        } else {
+            "ssh binary not found in PATH".into()
+        },
     });
 
     // 2. Check `ssh-keygen` exists
@@ -905,7 +1111,11 @@ async fn run_doctor(output_json: bool) -> Result<()> {
     checks.push(DoctorCheck {
         name: "ssh-keygen binary".into(),
         status: if keygen_ok { "pass" } else { "warn" }.into(),
-        detail: if keygen_ok { "ssh-keygen found in PATH".into() } else { "ssh-keygen not found (key generation unavailable)".into() },
+        detail: if keygen_ok {
+            "ssh-keygen found in PATH".into()
+        } else {
+            "ssh-keygen not found (key generation unavailable)".into()
+        },
     });
 
     // 3. Check ~/.agent2ssh/ directory exists and is writable
@@ -915,17 +1125,36 @@ async fn run_doctor(output_json: bool) -> Result<()> {
         // Try to create a temp file to verify write access
         let probe = config_dir.join(".doctor_probe");
         match std::fs::write(&probe, "ok") {
-            Ok(_) => { let _ = std::fs::remove_file(&probe); true }
+            Ok(_) => {
+                let _ = std::fs::remove_file(&probe);
+                true
+            }
             Err(_) => false,
         }
-    } else { false };
+    } else {
+        false
+    };
     checks.push(DoctorCheck {
         name: "config directory".into(),
-        status: if dir_exists && dir_writable { "pass" } else if dir_exists { "warn" } else { "fail" }.into(),
-        detail: format!("{} ({})", config_dir.display(),
-            if dir_exists && dir_writable { "exists, writable" }
-            else if dir_exists { "exists, NOT writable" }
-            else { "does not exist" }),
+        status: if dir_exists && dir_writable {
+            "pass"
+        } else if dir_exists {
+            "warn"
+        } else {
+            "fail"
+        }
+        .into(),
+        detail: format!(
+            "{} ({})",
+            config_dir.display(),
+            if dir_exists && dir_writable {
+                "exists, writable"
+            } else if dir_exists {
+                "exists, NOT writable"
+            } else {
+                "does not exist"
+            }
+        ),
     });
 
     // 4. Check hosts.json exists and is valid JSON
@@ -938,7 +1167,11 @@ async fn run_doctor(output_json: bool) -> Result<()> {
         checks.push(DoctorCheck {
             name: "hosts.json".into(),
             status: if hosts_valid { "pass" } else { "fail" }.into(),
-            detail: if hosts_valid { "valid JSON".into() } else { "exists but invalid JSON".into() },
+            detail: if hosts_valid {
+                "valid JSON".into()
+            } else {
+                "exists but invalid JSON".into()
+            },
         });
     } else {
         checks.push(DoctorCheck {
@@ -961,8 +1194,11 @@ async fn run_doctor(output_json: bool) -> Result<()> {
             checks.push(DoctorCheck {
                 name: "daemon.token".into(),
                 status: if ok { "pass" } else { "warn" }.into(),
-                detail: if ok { format!("permissions 0{:o} (correct)", mode) }
-                    else { format!("permissions 0{:o} (should be 0600)", mode) },
+                detail: if ok {
+                    format!("permissions 0{:o} (correct)", mode)
+                } else {
+                    format!("permissions 0{:o} (should be 0600)", mode)
+                },
             });
         }
         #[cfg(not(unix))]
@@ -986,7 +1222,11 @@ async fn run_doctor(output_json: bool) -> Result<()> {
     checks.push(DoctorCheck {
         name: "daemon health".into(),
         status: if daemon_running { "pass" } else { "warn" }.into(),
-        detail: if daemon_running { "GET /health returned 200".into() } else { "daemon not reachable on 127.0.0.1:7722".into() },
+        detail: if daemon_running {
+            "GET /health returned 200".into()
+        } else {
+            "daemon not reachable on 127.0.0.1:7722".into()
+        },
     });
 
     // 7. Check optional config files
@@ -1002,7 +1242,11 @@ async fn run_doctor(output_json: bool) -> Result<()> {
         checks.push(DoctorCheck {
             name: format!("{filename} ({label})"),
             status: if exists { "pass" } else { "warn" }.into(),
-            detail: if exists { "present".into() } else { format!("not found ({label} unavailable)") },
+            detail: if exists {
+                "present".into()
+            } else {
+                format!("not found ({label} unavailable)")
+            },
         });
     }
 
@@ -1046,7 +1290,9 @@ async fn run_doctor(output_json: bool) -> Result<()> {
         println!("{:-<60}", "");
         println!(
             "Summary: {} check(s), {} fail, {} warn",
-            checks.len(), fail_count, warn_count
+            checks.len(),
+            fail_count,
+            warn_count
         );
         if fail_count > 0 {
             std::process::exit(1);
@@ -1073,4 +1319,39 @@ async fn check_daemon_health() -> bool {
         Ok(resp) => resp.status().is_success(),
         Err(_) => false,
     }
+}
+
+fn daemon_client(alias: Option<&str>) -> Result<(reqwest::Client, String, String)> {
+    let alias = alias.unwrap_or("localhost");
+    let (url, token) = get_daemon(alias)?;
+    let token = token.with_context(|| {
+        if alias == "localhost" {
+            "local daemon token not found; run `agent2ssh daemon start` before using session/forward CLI commands"
+                .to_string()
+        } else {
+            format!("no token configured for daemon '{alias}'")
+        }
+    })?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
+    Ok((client, url.trim_end_matches('/').to_string(), token))
+}
+
+async fn daemon_json<T: serde::de::DeserializeOwned>(
+    request: reqwest::RequestBuilder,
+) -> Result<T> {
+    let response = request
+        .send()
+        .await
+        .context("failed to reach daemon; run `agent2ssh daemon start` or pass --daemon <alias>")?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!("daemon request failed ({status}): {body}");
+    }
+    response
+        .json::<T>()
+        .await
+        .context("failed to parse daemon response")
 }

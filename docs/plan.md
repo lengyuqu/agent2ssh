@@ -10,7 +10,7 @@ P0-P10 已全部完成。当前基线：
 - 安全能力：风险评分、自定义风险规则、审批队列、审批端点、桌面审批弹窗、敏感命令脱敏
 - 运维能力：SSH ControlMaster 连接池、Webhook 通知、remote daemon registry、健康检查、指标、审计轮转
 - 生态能力：SSH key 管理、团队配置导入导出、MCP 客户端模板、插件/Skill 分发文档
-- 验收结果：45 单元测试 + 40 集成测试 + 17 CLI smoke 测试 = 102 测试全绿
+- 验收结果：46 单元测试 + 40 集成测试 + 17 CLI smoke 测试 = 103 测试全绿
 - MCP 工具：35 个，详见 [skills.md](skills.md)
 
 ## 协作规则
@@ -57,7 +57,7 @@ P0-P10 已全部完成。当前基线：
 | P8 | 安全边界加固 | ✅ 已完成 | 高 | Codex |
 | P9 | 运维与可观测性 | ✅ 已完成 | 中 | Qoder |
 | P10 | 产品化与生态集成 | ✅ 已完成 | 中 | Qoder |
-| F1 | 真实环境试运行 | ⬜ 待认领 | 高 | - |
+| F1 | 真实环境试运行 | 🟨 进行中 | 高 | Codex |
 | F2 | 主机与环境管理 | ⬜ 待认领 | 高 | - |
 | F3 | 执行体验与 Runbook | ⬜ 待认领 | 高 | - |
 | F4 | 审批与协作 | ⬜ 待认领 | 高 | - |
@@ -103,7 +103,7 @@ P0-P10 已全部完成。当前基线：
 | 认证方式 | 用户已提供 root 密码；明文密码保存在本地 gitignored 文件 `.agent2ssh-test.env` 的 `AGENT2SSH_TEST_PASSWORD` 中，测试时建议用它生成临时 SSH key |
 | 测试约束 | 只在 `/tmp/agent2ssh-*` 写入临时文件；测试结束必须清理临时目录和临时 `authorized_keys` 条目 |
 | 已验证能力 | SSH 登录、host add/list、risk、ping、exec、exec-multi、SFTP upload/download/list/stat、audit、doctor、MCP tools/list、MCP list_hosts/exec/audit/doctor |
-| 已知限制 | CLI `session`/`forward` 跨进程状态问题见 B2 |
+| 已知限制 | PTY session 首次读取可能先返回登录 banner/prompt，命令输出可能需要后续 read |
 
 推荐接入方式：
 
@@ -120,7 +120,7 @@ P0-P10 已全部完成。当前基线：
 | 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
 |------|------|--------|--------|------|----------|
 | F1-1 | ✅ 已完成 | 高 | Codex | 建立真实服务器 fixture | 107.174.36.91 使用临时 key 完成 exec、ping、sftp 验证；临时 key 和远端 `/tmp` 目录已清理 |
-| F1-2 | 🟨 进行中 | 高 | Codex | 跑完整 CLI 工作流 | host add/list、risk、exec、exec-multi、sftp、audit、doctor 已记录；session/forward 进入 B2 |
+| F1-2 | ✅ 已完成 | 高 | Codex | 跑完整 CLI 工作流 | host add/list、risk、exec、exec-multi、sftp、audit、doctor、daemon-backed session/forward 已记录 |
 | F1-3 | ✅ 已完成 | 高 | Codex | 跑 MCP 工作流 | MCP `tools/list` 返回 35 工具；`ssh_list_hosts`、`ssh_exec`、`ssh_audit`、`ssh_doctor` 在真实服务器通过 |
 | F1-4 | ⬜ 待认领 | 中 | - | 跑桌面端首次启动和常规操作 | SetupWizard、Host 管理、Exec、Approvals、Keys 无阻断问题 |
 | F1-5 | ✅ 已完成 | 高 | Codex | 输出 bug backlog | B1、B2 已记录；后续按影响等级进入修复 |
@@ -130,7 +130,7 @@ P0-P10 已全部完成。当前基线：
 | 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
 |------|------|--------|--------|------|----------|
 | B1 | ✅ 已完成 | 高 | Codex | `AGENT2SSH_CONFIG_DIR` 文档存在但实现未生效 | `config_dir()` 优先使用非空 `AGENT2SSH_CONFIG_DIR`；单测 `store::tests::test_config_dir_uses_env_override` 通过 |
-| B2 | ⬜ 待认领 | 高 | - | CLI `session`/`forward` 状态只保存在单进程内 | 明确 CLI 语义：要么改为默认走 daemon 管理长生命周期资源，要么在 CLI 禁用跨进程 session/forward 并给出清晰错误 |
+| B2 | ✅ 已完成 | 高 | Codex | CLI `session`/`forward` 状态只保存在单进程内 | CLI `session`/`forward` 默认通过 daemon HTTP API 管理长生命周期资源；真实服务器验证 open/list/write/read/close 和 forward add/list/rm 通过 |
 
 ## F2 · 主机与环境管理
 

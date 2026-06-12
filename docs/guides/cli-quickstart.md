@@ -226,6 +226,12 @@ agent2ssh sftp mkdir <host> <path> [--json]
 
 持久化 PTY 会话允许保持交互式 SSH 连接，适合需要多次输入输出的场景。
 
+CLI 会话由 daemon 持有生命周期，使用前先启动本地 daemon：
+
+```bash
+agent2ssh daemon start
+```
+
 ### 打开会话
 
 ```bash
@@ -248,6 +254,8 @@ agent2ssh session read <session-id> [--timeout-ms N] [--json]
 
 `--timeout-ms` 默认 2000 毫秒。
 
+PTY 首次读取可能先返回登录 banner 或 shell prompt；写入命令后如未立即看到输出，可再次执行 `session read`。
+
 ### 列出所有会话
 
 ```bash
@@ -265,6 +273,12 @@ agent2ssh session close <session-id> [--json]
 ## 端口转发 (forward)
 
 管理 SSH 端口转发隧道（本地转发 `-L` 或远程转发 `-R`）。
+
+CLI 转发由 daemon 持有生命周期，使用前先启动本地 daemon：
+
+```bash
+agent2ssh daemon start
+```
 
 ### 添加端口转发
 

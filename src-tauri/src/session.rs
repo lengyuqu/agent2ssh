@@ -1,9 +1,5 @@
 use anyhow::{anyhow, Context, Result};
-use std::{
-    collections::HashMap,
-    sync::OnceLock,
-    time::Duration,
-};
+use std::{collections::HashMap, sync::OnceLock, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout},
@@ -64,8 +60,6 @@ pub async fn session_open_core(host_name: &str) -> Result<Uuid> {
         .arg("BatchMode=yes")
         .arg("-o")
         .arg("StrictHostKeyChecking=accept-new")
-        .arg("-o")
-        .arg("TERM=dumb")
         .arg("-p")
         .arg(host.port.unwrap_or(22).to_string());
 
@@ -82,8 +76,14 @@ pub async fn session_open_core(host_name: &str) -> Result<Uuid> {
 
     let mut child = cmd.spawn().context("failed to spawn ssh session")?;
 
-    let stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin on child"))?;
-    let stdout_raw = child.stdout.take().ok_or_else(|| anyhow!("no stdout on child"))?;
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("no stdin on child"))?;
+    let stdout_raw = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("no stdout on child"))?;
     let stdout = BufReader::new(stdout_raw);
 
     let id = Uuid::new_v4();
@@ -101,20 +101,28 @@ pub async fn session_open_core(host_name: &str) -> Result<Uuid> {
 
 pub async fn session_write_core(id: Uuid, input: &str) -> Result<()> {
     let mut store = sessions().lock().await;
-    let handle = store.get_mut(&id).ok_or_else(|| anyhow!("unknown session: {id}"))?;
+    let handle = store
+        .get_mut(&id)
+        .ok_or_else(|| anyhow!("unknown session: {id}"))?;
     handle
         .stdin
         .write_all(input.as_bytes())
         .await
         .context("failed to write to session stdin")?;
     // Flush to ensure the command is sent
-    handle.stdin.flush().await.context("failed to flush session stdin")?;
+    handle
+        .stdin
+        .flush()
+        .await
+        .context("failed to flush session stdin")?;
     Ok(())
 }
 
 pub async fn session_read_core(id: Uuid, timeout_ms: u64) -> Result<String> {
     let mut store = sessions().lock().await;
-    let handle = store.get_mut(&id).ok_or_else(|| anyhow!("unknown session: {id}"))?;
+    let handle = store
+        .get_mut(&id)
+        .ok_or_else(|| anyhow!("unknown session: {id}"))?;
 
     let mut output = Vec::new();
     let mut chunk = [0u8; 4096];
