@@ -40,7 +40,10 @@ JSON 格式，包含一个 `hosts` 数组：
       "key_path": "~/.ssh/id_ed25519",
       "jump_host": null,
       "risk_override": null,
-      "tags": ["production", "web"]
+      "tags": ["production", "web"],
+      "env": "prod",
+      "role": "web",
+      "owner": "platform"
     },
     {
       "name": "bastion",
@@ -88,6 +91,9 @@ JSON 格式，包含一个 `hosts` 数组：
 | `jump_host` | string | 否 | ProxyJump 跳板机别名 |
 | `risk_override` | string | 否 | 覆盖该主机的风险等级（low/medium/high） |
 | `tags` | array | 否 | 标签列表，用于分组和批量执行 |
+| `env` | string | 否 | 环境标签，用于按生产、预发、开发等环境过滤 |
+| `role` | string | 否 | 角色标签，用于按 web、db、worker 等职责过滤 |
+| `owner` | string | 否 | 负责人或团队标签，用于按归属过滤 |
 
 ### 注意事项
 
@@ -96,6 +102,7 @@ JSON 格式，包含一个 `hosts` 数组：
 - `jump_host` 必须引用已存在的主机别名
 - `risk_override` 设置为 `"low"` 可以跳过该主机上所有命令的风险确认
 - `risk_override` 不能降级 `blocked` 命令；内置或用户规则判定为 `blocked` 的命令仍会被拒绝
+- `env`、`role`、`owner` 和 `tags` 可用于桌面端主机视图过滤，也可用于 CLI `host list` 过滤
 
 ---
 

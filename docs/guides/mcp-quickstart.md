@@ -65,7 +65,10 @@ MCP 服务器以 `agent2ssh-mcp` 二进制运行，通过标准输入/输出与 
     "port": 22,
     "key_path": "~/.ssh/id_ed25519",
     "jump_host": "bastion",
-    "tags": ["production", "web"]
+    "tags": ["production", "web"],
+    "env": "prod",
+    "role": "web",
+    "owner": "platform"
   }
 }
 ```

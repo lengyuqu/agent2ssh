@@ -3,7 +3,18 @@ import { FormEvent, useEffect, useState } from "react";
 import { api } from "../api";
 import type { HostProfile, SshKeyInfo } from "../types";
 
-const emptyForm = { name: "", host: "", user: "", port: 22, key_path: "", jump_host: "", tags: "" };
+const emptyForm = {
+  name: "",
+  host: "",
+  user: "",
+  port: 22,
+  key_path: "",
+  jump_host: "",
+  tags: "",
+  env: "",
+  role: "",
+  owner: "",
+};
 
 type Props = {
   hosts: HostProfile[];
@@ -32,6 +43,9 @@ export default function AddHostForm({ hosts, onSaved }: Props) {
       key_path: form.key_path.trim() || null,
       jump_host: form.jump_host.trim() || null,
       tags,
+      env: form.env.trim() || null,
+      role: form.role.trim() || null,
+      owner: form.owner.trim() || null,
     });
     setForm(emptyForm);
     onSaved();
@@ -115,6 +129,32 @@ export default function AddHostForm({ hosts, onSaved }: Props) {
             placeholder="production, web, staging"
           />
         </label>
+        <div className="three-col">
+          <label>
+            Env
+            <input
+              value={form.env}
+              onChange={(e) => setForm({ ...form, env: e.target.value })}
+              placeholder="prod"
+            />
+          </label>
+          <label>
+            Role
+            <input
+              value={form.role}
+              onChange={(e) => setForm({ ...form, role: e.target.value })}
+              placeholder="web"
+            />
+          </label>
+          <label>
+            Owner
+            <input
+              value={form.owner}
+              onChange={(e) => setForm({ ...form, owner: e.target.value })}
+              placeholder="platform"
+            />
+          </label>
+        </div>
         <label>
           Jump host (bastion)
           <select

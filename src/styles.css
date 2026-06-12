@@ -166,6 +166,26 @@ select {
   gap: 8px;
 }
 
+.host-filters {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.host-filters input {
+  min-width: 0;
+  padding: 7px 8px;
+  border-radius: 6px;
+  border: 1px solid #40535e;
+  background: #182229;
+  color: #edf4f7;
+}
+
+.host-filters input::placeholder {
+  color: #728491;
+}
+
 .host-row {
   display: flex;
   align-items: stretch;
@@ -197,6 +217,19 @@ select {
   margin-top: 4px;
   word-break: break-all;
   font-size: 12px;
+}
+
+.host .host-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  word-break: normal;
+}
+
+.host-meta span {
+  margin-top: 0;
+  color: #c8d3da;
+  font-size: 10px;
 }
 
 .host-delete {
@@ -294,6 +327,12 @@ textarea {
 .two-col {
   display: grid;
   grid-template-columns: 1fr 110px;
+  gap: 10px;
+}
+
+.three-col {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
 }
 

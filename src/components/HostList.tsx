@@ -1,5 +1,5 @@
 import { Plug, PlugZap, RefreshCw, Server, Trash2 } from "lucide-react";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import type { ConnectionStatus, HostProfile } from "../types";
 
 type Props = {
@@ -24,6 +24,22 @@ export default function HostList({
   onDisconnect,
 }: Props) {
   const [confirmTarget, setConfirmTarget] = useState<string | null>(null);
+  const [filters, setFilters] = useState({ env: "", role: "", owner: "", tag: "" });
+
+  const filteredHosts = useMemo(
+    () =>
+      hosts.filter((host) => {
+        if (!matchesFilter(host.env, filters.env)) return false;
+        if (!matchesFilter(host.role, filters.role)) return false;
+        if (!matchesFilter(host.owner, filters.owner)) return false;
+        const tag = filters.tag.trim().toLowerCase();
+        if (tag && !(host.tags ?? []).some((item) => item.trim().toLowerCase() === tag)) {
+          return false;
+        }
+        return true;
+      }),
+    [hosts, filters]
+  );
 
   function isConnected(name: string): boolean {
     return connectionStatuses.some((s) => s.host === name && s.connected);
@@ -42,8 +58,30 @@ export default function HostList({
           <RefreshCw size={15} />
         </button>
       </div>
+      <div className="host-filters">
+        <input
+          value={filters.env}
+          onChange={(e) => setFilters({ ...filters, env: e.target.value })}
+          placeholder="env"
+        />
+        <input
+          value={filters.role}
+          onChange={(e) => setFilters({ ...filters, role: e.target.value })}
+          placeholder="role"
+        />
+        <input
+          value={filters.owner}
+          onChange={(e) => setFilters({ ...filters, owner: e.target.value })}
+          placeholder="owner"
+        />
+        <input
+          value={filters.tag}
+          onChange={(e) => setFilters({ ...filters, tag: e.target.value })}
+          placeholder="tag"
+        />
+      </div>
       <div className="host-list">
-        {hosts.map((host) => {
+        {filteredHosts.map((host) => {
           const connected = isConnected(host.name);
           return (
             <div
@@ -73,6 +111,13 @@ export default function HostList({
                     ))}
                   </span>
                 )}
+                {(host.env || host.role || host.owner) && (
+                  <span className="host-meta">
+                    {host.env && <span>env={host.env}</span>}
+                    {host.role && <span>role={host.role}</span>}
+                    {host.owner && <span>owner={host.owner}</span>}
+                  </span>
+                )}
               </button>
               <button
                 className="icon-button host-connect"
@@ -95,6 +140,9 @@ export default function HostList({
         })}
         {hosts.length === 0 && (
           <div className="empty">No hosts configured</div>
+        )}
+        {hosts.length > 0 && filteredHosts.length === 0 && (
+          <div className="empty">No hosts match filters</div>
         )}
       </div>
 
@@ -126,4 +174,10 @@ export default function HostList({
       )}
     </section>
   );
+}
+
+function matchesFilter(value: string | null | undefined, filter: string): boolean {
+  const normalized = filter.trim().toLowerCase();
+  if (!normalized) return true;
+  return (value ?? "").trim().toLowerCase() === normalized;
 }

@@ -58,7 +58,7 @@ P0-P10 已全部完成。当前基线：
 | P9 | 运维与可观测性 | ✅ 已完成 | 中 | Qoder |
 | P10 | 产品化与生态集成 | ✅ 已完成 | 中 | Qoder |
 | F1 | 真实环境试运行 | ✅ 已完成 | 高 | Codex |
-| F2 | 主机与环境管理 | ⬜ 待认领 | 高 | - |
+| F2 | 主机与环境管理 | 🟨 进行中 | 高 | Codex |
 | F3 | 执行体验与 Runbook | ⬜ 待认领 | 高 | - |
 | F4 | 审批与协作 | ⬜ 待认领 | 高 | - |
 | F5 | 远程 daemon 与多节点 | ⬜ 待认领 | 高 | - |
@@ -141,7 +141,7 @@ P0-P10 已全部完成。当前基线：
 
 | 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
 |------|------|--------|--------|------|----------|
-| F2-1 | ⬜ 待认领 | 高 | - | 主机分组与环境视图 | UI/CLI 可按 env、role、owner、tag 过滤主机 |
+| F2-1 | ✅ 已完成 | 高 | Codex | 主机分组与环境视图 | HostProfile 支持 `env`、`role`、`owner`；CLI `host list` 和桌面端 HostList 可按 env、role、owner、tag 过滤；`npm run build`、Rust check、lib test、CLI smoke 通过 |
 | F2-2 | ⬜ 待认领 | 中 | - | 主机健康快照 | 批量采集 uptime、disk、memory、load、ssh latency，并写入本地快照 |
 | F2-3 | ⬜ 待认领 | 中 | - | 主机配置变更预览 | team config import 前显示新增、修改、删除差异 |
 | F2-4 | ⬜ 待认领 | 中 | - | SSH config 双向同步策略 | 明确 Agent2SSH 与 `~/.ssh/config` 的导入、覆盖、冲突处理规则 |

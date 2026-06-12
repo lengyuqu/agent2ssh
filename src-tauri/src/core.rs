@@ -7,7 +7,7 @@ use crate::{
     connection::{apply_socket, get_or_create_socket},
     store::{append_audit, hosts_lock, list_audit_raw, load_config, save_config},
     types::{
-        AuditEntry, AuditFilter, ExecMultiResult, ExecRequest, ExecResult, HostProfile,
+        AuditEntry, AuditFilter, ExecMultiResult, ExecRequest, ExecResult, HostFilter, HostProfile,
         PingResult, RiskLevel, SftpDirection, SftpDownloadRequest, SftpResult, SftpUploadRequest,
     },
 };
@@ -122,6 +122,51 @@ pub struct ImportResult {
 
 pub fn list_hosts_core() -> Result<Vec<HostProfile>> {
     Ok(load_config()?.hosts)
+}
+
+pub fn list_hosts_filtered_core(filter: &HostFilter) -> Result<Vec<HostProfile>> {
+    Ok(filter_hosts(load_config()?.hosts, filter))
+}
+
+pub fn filter_hosts(hosts: Vec<HostProfile>, filter: &HostFilter) -> Vec<HostProfile> {
+    hosts
+        .into_iter()
+        .filter(|host| host_matches_filter(host, filter))
+        .collect()
+}
+
+fn host_matches_filter(host: &HostProfile, filter: &HostFilter) -> bool {
+    if !matches_optional_label(host.env.as_deref(), filter.env.as_deref()) {
+        return false;
+    }
+    if !matches_optional_label(host.role.as_deref(), filter.role.as_deref()) {
+        return false;
+    }
+    if !matches_optional_label(host.owner.as_deref(), filter.owner.as_deref()) {
+        return false;
+    }
+    if let Some(tag) = normalized_filter(filter.tag.as_deref()) {
+        if !host.tags.iter().any(|item| item.trim().eq_ignore_ascii_case(&tag)) {
+            return false;
+        }
+    }
+    true
+}
+
+fn matches_optional_label(value: Option<&str>, filter: Option<&str>) -> bool {
+    let Some(filter) = normalized_filter(filter) else {
+        return true;
+    };
+    value
+        .map(|item| item.trim().eq_ignore_ascii_case(&filter))
+        .unwrap_or(false)
+}
+
+fn normalized_filter(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 pub fn add_host_core(host: HostProfile) -> Result<HostProfile> {
@@ -739,6 +784,9 @@ pub fn import_ssh_config_core(path: Option<&str>) -> Result<Vec<HostProfile>> {
             jump_host,
             risk_override: None,
             tags: vec![],
+            env: None,
+            role: None,
+            owner: None,
         });
     };
 
@@ -935,6 +983,61 @@ mod tests {
             apply_risk_override(RiskLevel::High, Some(RiskLevel::Low)),
             RiskLevel::Low
         );
+    }
+
+    #[test]
+    fn test_filter_hosts_by_metadata_and_tag() {
+        let hosts = vec![
+            HostProfile {
+                name: "prod-web-1".into(),
+                host: "10.0.0.1".into(),
+                user: None,
+                port: None,
+                key_path: None,
+                jump_host: None,
+                risk_override: None,
+                tags: vec!["blue".into(), "web".into()],
+                env: Some("prod".into()),
+                role: Some("web".into()),
+                owner: Some("platform".into()),
+            },
+            HostProfile {
+                name: "stage-db-1".into(),
+                host: "10.0.1.1".into(),
+                user: None,
+                port: None,
+                key_path: None,
+                jump_host: None,
+                risk_override: None,
+                tags: vec!["db".into()],
+                env: Some("staging".into()),
+                role: Some("db".into()),
+                owner: Some("data".into()),
+            },
+        ];
+
+        let filtered = filter_hosts(
+            hosts.clone(),
+            &HostFilter {
+                env: Some("PROD".into()),
+                role: Some("web".into()),
+                owner: Some("platform".into()),
+                tag: Some("blue".into()),
+            },
+        );
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "prod-web-1");
+
+        let filtered = filter_hosts(
+            hosts,
+            &HostFilter {
+                env: None,
+                role: None,
+                owner: None,
+                tag: Some("missing".into()),
+            },
+        );
+        assert!(filtered.is_empty());
     }
 
     #[test]

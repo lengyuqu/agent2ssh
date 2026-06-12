@@ -353,20 +353,29 @@ fn test_host_profile_tags_serialization() {
         jump_host: None,
         risk_override: None,
         tags: vec!["production".to_string(), "web".to_string()],
+        env: Some("prod".to_string()),
+        role: Some("web".to_string()),
+        owner: Some("platform".to_string()),
     };
 
     let json = serde_json::to_string(&host).unwrap();
     let deserialized: HostProfile = serde_json::from_str(&json).unwrap();
     assert_eq!(deserialized.tags, vec!["production", "web"]);
+    assert_eq!(deserialized.env.as_deref(), Some("prod"));
+    assert_eq!(deserialized.role.as_deref(), Some("web"));
+    assert_eq!(deserialized.owner.as_deref(), Some("platform"));
     assert_eq!(deserialized.name, "test");
 }
 
 #[test]
-fn test_host_profile_default_tags_empty() {
-    // HostProfile without tags field should deserialize with empty tags
+fn test_host_profile_default_metadata_empty() {
+    // HostProfile without optional metadata should deserialize with defaults
     let json = r#"{"name":"test","host":"10.0.0.1"}"#;
     let host: HostProfile = serde_json::from_str(json).unwrap();
     assert!(host.tags.is_empty());
+    assert!(host.env.is_none());
+    assert!(host.role.is_none());
+    assert!(host.owner.is_none());
 }
 
 #[test]

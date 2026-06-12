@@ -32,6 +32,9 @@ components:
         tags:
           type: array
           items: { type: string }
+        env:       { type: string, nullable: true }
+        role:      { type: string, nullable: true }
+        owner:     { type: string, nullable: true }
 
     ExecRequest:
       type: object

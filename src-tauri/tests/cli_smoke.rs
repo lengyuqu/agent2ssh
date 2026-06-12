@@ -161,6 +161,85 @@ async fn cli_host_list_json_exits_zero() {
 }
 
 #[tokio::test]
+async fn cli_host_list_filters_by_metadata_and_tag() {
+    let config_dir = std::env::temp_dir().join(format!(
+        "agent2ssh-cli-filter-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&config_dir).expect("create temp config dir");
+
+    let add = tokio::process::Command::new(cli_bin())
+        .env("AGENT2SSH_CONFIG_DIR", &config_dir)
+        .args([
+            "host",
+            "add",
+            "prod-web-1",
+            "--host",
+            "10.0.0.1",
+            "--env",
+            "prod",
+            "--role",
+            "web",
+            "--owner",
+            "platform",
+            "--tags",
+            "blue,web",
+            "--json",
+        ])
+        .output()
+        .await
+        .expect("failed to run CLI binary");
+    assert!(
+        add.status.success(),
+        "host add should exit 0, stderr: {}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+
+    let list = tokio::process::Command::new(cli_bin())
+        .env("AGENT2SSH_CONFIG_DIR", &config_dir)
+        .args([
+            "host",
+            "list",
+            "--env",
+            "PROD",
+            "--role",
+            "web",
+            "--owner",
+            "platform",
+            "--tag",
+            "blue",
+            "--json",
+        ])
+        .output()
+        .await
+        .expect("failed to run CLI binary");
+    assert!(
+        list.status.success(),
+        "host list filter should exit 0, stderr: {}",
+        String::from_utf8_lossy(&list.stderr)
+    );
+    let hosts: serde_json::Value =
+        serde_json::from_slice(&list.stdout).expect("host list should return JSON");
+    assert_eq!(hosts.as_array().unwrap().len(), 1);
+    assert_eq!(hosts[0]["name"], "prod-web-1");
+    assert_eq!(hosts[0]["env"], "prod");
+    assert_eq!(hosts[0]["role"], "web");
+    assert_eq!(hosts[0]["owner"], "platform");
+
+    let empty = tokio::process::Command::new(cli_bin())
+        .env("AGENT2SSH_CONFIG_DIR", &config_dir)
+        .args(["host", "list", "--env", "staging", "--json"])
+        .output()
+        .await
+        .expect("failed to run CLI binary");
+    let hosts: serde_json::Value =
+        serde_json::from_slice(&empty.stdout).expect("host list should return JSON");
+    assert!(hosts.as_array().unwrap().is_empty());
+
+    let _ = std::fs::remove_dir_all(config_dir);
+}
+
+#[tokio::test]
 async fn cli_risk_json_exits_zero() {
     let output = tokio::process::Command::new(cli_bin())
         .args(["risk", "ls", "--json"])

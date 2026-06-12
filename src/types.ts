@@ -42,6 +42,9 @@ export type HostProfile = {
   jump_host?: string | null;
   risk_override?: RiskLevel | null;
   tags?: string[];
+  env?: string | null;
+  role?: string | null;
+  owner?: string | null;
 };
 
 // Rust: types.rs — ExecRequest

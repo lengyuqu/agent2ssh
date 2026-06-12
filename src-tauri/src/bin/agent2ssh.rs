@@ -1,11 +1,12 @@
 use agent2ssh::remote::get_daemon;
 use agent2ssh::store::{audit_path, restrict_file_to_owner};
 use agent2ssh::{
-    add_host_core, classify_risk, exec_multi_core, exec_ssh_core, export_team_config,
+    add_host_core, classify_risk, exec_multi_core, exec_ssh_core, export_team_config, filter_hosts,
     import_ssh_config_core, import_team_config, list_audit_core, list_daemons_core,
-    list_hosts_core, ping_hosts_core, remove_host_core, sftp_download_core, sftp_ls_core,
+    list_hosts_filtered_core, ping_hosts_core, remove_host_core, sftp_download_core, sftp_ls_core,
     sftp_mkdir_core, sftp_stat_core, sftp_upload_core, AuditFilter, ExecRequest, ForwardDirection,
-    ForwardRule, HostProfile, RiskLevel, SftpDownloadRequest, SftpUploadRequest, TeamConfigExport,
+    ForwardRule, HostFilter, HostProfile, RiskLevel, SftpDownloadRequest, SftpUploadRequest,
+    TeamConfigExport,
 };
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -137,6 +138,14 @@ enum Commands {
 enum HostCommands {
     List {
         #[arg(long)]
+        env: Option<String>,
+        #[arg(long)]
+        role: Option<String>,
+        #[arg(long)]
+        owner: Option<String>,
+        #[arg(long)]
+        tag: Option<String>,
+        #[arg(long)]
         json: bool,
     },
     Add {
@@ -158,6 +167,15 @@ enum HostCommands {
         /// Comma-separated tags for grouping
         #[arg(long, value_delimiter = ',')]
         tags: Option<Vec<String>>,
+        /// Environment label for grouping hosts
+        #[arg(long)]
+        env: Option<String>,
+        /// Role label for grouping hosts
+        #[arg(long)]
+        role: Option<String>,
+        /// Owner label for grouping hosts
+        #[arg(long)]
+        owner: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -333,7 +351,19 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Host { command } => match command {
-            HostCommands::List { json } => {
+            HostCommands::List {
+                env,
+                role,
+                owner,
+                tag,
+                json,
+            } => {
+                let filter = HostFilter {
+                    env,
+                    role,
+                    owner,
+                    tag,
+                };
                 // If --daemon is set and remote, forward via HTTP
                 if let Some(ref alias) = daemon_alias {
                     if alias != "localhost" {
@@ -345,38 +375,27 @@ async fn main() -> Result<()> {
                         }
                         let resp = req.send().await?;
                         let hosts: Vec<HostProfile> = resp.json().await?;
+                        let hosts = filter_hosts(hosts, &filter);
                         if json {
                             println!("{}", serde_json::to_string_pretty(&hosts)?);
                         } else if hosts.is_empty() {
                             println!("No hosts configured on daemon '{alias}'.");
                         } else {
                             for host in hosts {
-                                println!(
-                                    "{}\t{}{}:{}",
-                                    host.name,
-                                    host.user.map(|u| format!("{u}@")).unwrap_or_default(),
-                                    host.host,
-                                    host.port.unwrap_or(22)
-                                );
+                                print_host_row(&host);
                             }
                         }
                         return Ok(());
                     }
                 }
-                let hosts = list_hosts_core()?;
+                let hosts = list_hosts_filtered_core(&filter)?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&hosts)?);
                 } else if hosts.is_empty() {
                     println!("No hosts configured.");
                 } else {
                     for host in hosts {
-                        println!(
-                            "{}\t{}{}:{}",
-                            host.name,
-                            host.user.map(|u| format!("{u}@")).unwrap_or_default(),
-                            host.host,
-                            host.port.unwrap_or(22)
-                        );
+                        print_host_row(&host);
                     }
                 }
             }
@@ -389,6 +408,9 @@ async fn main() -> Result<()> {
                 jump,
                 risk_override,
                 tags,
+                env,
+                role,
+                owner,
                 json,
             } => {
                 let risk_override = risk_override.and_then(|s| match s.to_lowercase().as_str() {
@@ -407,6 +429,9 @@ async fn main() -> Result<()> {
                     jump_host: jump,
                     risk_override,
                     tags: tags.unwrap_or_default(),
+                    env: clean_optional(env),
+                    role: clean_optional(role),
+                    owner: clean_optional(owner),
                 })?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&profile)?);
@@ -1308,6 +1333,43 @@ fn which_exists(name: &str) -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+fn clean_optional(value: Option<String>) -> Option<String> {
+    value
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
+}
+
+fn print_host_row(host: &HostProfile) {
+    let target = format!(
+        "{}{}:{}",
+        host.user
+            .as_ref()
+            .map(|u| format!("{u}@"))
+            .unwrap_or_default(),
+        host.host,
+        host.port.unwrap_or(22)
+    );
+    let mut metadata = Vec::new();
+    if let Some(env) = &host.env {
+        metadata.push(format!("env={env}"));
+    }
+    if let Some(role) = &host.role {
+        metadata.push(format!("role={role}"));
+    }
+    if let Some(owner) = &host.owner {
+        metadata.push(format!("owner={owner}"));
+    }
+    if !host.tags.is_empty() {
+        metadata.push(format!("tags={}", host.tags.join(",")));
+    }
+
+    if metadata.is_empty() {
+        println!("{}\t{}", host.name, target);
+    } else {
+        println!("{}\t{}\t{}", host.name, target, metadata.join(" "));
+    }
 }
 
 async fn check_daemon_health() -> bool {

@@ -132,7 +132,11 @@ async fn handle_request(request: &Value) -> std::result::Result<Value, McpError>
                             "user":      { "type": "string" },
                             "port":      { "type": "integer" },
                             "key_path":  { "type": "string" },
-                            "jump_host": { "type": "string", "description": "Host profile alias to use as ProxyJump bastion." }
+                            "jump_host": { "type": "string", "description": "Host profile alias to use as ProxyJump bastion." },
+                            "tags":      { "type": "array", "items": { "type": "string" } },
+                            "env":       { "type": "string", "description": "Environment label for grouping hosts." },
+                            "role":      { "type": "string", "description": "Role label for grouping hosts." },
+                            "owner":     { "type": "string", "description": "Owner label for grouping hosts." }
                         }
                     }
                 },

@@ -112,7 +112,10 @@ curl -X POST -H "$AUTH" \
     "key_path": "~/.ssh/id_ed25519",
     "jump_host": null,
     "risk_override": null,
-    "tags": ["production", "web"]
+    "tags": ["production", "web"],
+    "env": "prod",
+    "role": "web",
+    "owner": "platform"
   }' \
   http://127.0.0.1:7722/hosts
 ```

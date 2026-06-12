@@ -56,7 +56,7 @@ agent2ssh host list --json
 添加一个新的 SSH 主机配置：
 
 ```bash
-agent2ssh host add <name> --host <addr> [--user <u>] [--port <p>] [--key <path>] [--jump <alias>] [--risk-override <level>] [--tags <t1,t2>]
+agent2ssh host add <name> --host <addr> [--user <u>] [--port <p>] [--key <path>] [--jump <alias>] [--risk-override <level>] [--tags <t1,t2>] [--env <env>] [--role <role>] [--owner <owner>]
 ```
 
 参数说明：
@@ -71,13 +71,23 @@ agent2ssh host add <name> --host <addr> [--user <u>] [--port <p>] [--key <path>]
 | `--jump` | 否 | ProxyJump 跳板机别名 |
 | `--risk-override` | 否 | 覆盖该主机的风险等级（low/medium/high） |
 | `--tags` | 否 | 逗号分隔的标签列表，用于分组 |
+| `--env` | 否 | 环境标签，用于 `host list` 过滤 |
+| `--role` | 否 | 主机角色标签，用于 `host list` 过滤 |
+| `--owner` | 否 | 负责人或团队标签，用于 `host list` 过滤 |
 | `--json` | 否 | 以 JSON 格式输出结果 |
 
 示例 -- 添加带跳板机的主机：
 
 ```bash
 agent2ssh host add bastion --host 10.0.0.1 --user admin --key ~/.ssh/id_ed25519
-agent2ssh host add internal --host 192.168.1.100 --user deploy --jump bastion
+agent2ssh host add internal --host 192.168.1.100 --user deploy --jump bastion --env prod --role web --owner platform
+```
+
+按分组查看主机：
+
+```bash
+agent2ssh host list --env prod --role web
+agent2ssh host list --owner platform --tag production --json
 ```
 
 示例 -- 设置风险覆盖（沙箱主机跳过确认）：
@@ -441,9 +451,9 @@ agent2ssh --daemon <alias> host list
 agent2ssh host import-config
 
 # 2. 添加一组带标签的生产服务器
-agent2ssh host add web1 --host 10.0.1.10 --user deploy --key ~/.ssh/id_ed25519 --tags production,web
-agent2ssh host add web2 --host 10.0.1.11 --user deploy --key ~/.ssh/id_ed25519 --tags production,web
-agent2ssh host add db1  --host 10.0.1.20 --user deploy --key ~/.ssh/id_ed25519 --tags production,db
+agent2ssh host add web1 --host 10.0.1.10 --user deploy --key ~/.ssh/id_ed25519 --tags production,web --env prod --role web --owner platform
+agent2ssh host add web2 --host 10.0.1.11 --user deploy --key ~/.ssh/id_ed25519 --tags production,web --env prod --role web --owner platform
+agent2ssh host add db1  --host 10.0.1.20 --user deploy --key ~/.ssh/id_ed25519 --tags production,db --env prod --role db --owner data
 
 # 3. 检查所有主机的连通性
 agent2ssh ping web1 web2 db1

@@ -38,6 +38,23 @@ pub struct HostProfile {
     /// Tags for grouping hosts (e.g. ["production", "web"])
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Environment label for grouping hosts (e.g. "prod", "staging").
+    #[serde(default)]
+    pub env: Option<String>,
+    /// Role label for grouping hosts (e.g. "web", "db").
+    #[serde(default)]
+    pub role: Option<String>,
+    /// Owner label for grouping hosts by team or person.
+    #[serde(default)]
+    pub owner: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HostFilter {
+    pub env: Option<String>,
+    pub role: Option<String>,
+    pub owner: Option<String>,
+    pub tag: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

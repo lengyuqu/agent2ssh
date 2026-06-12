@@ -17,7 +17,8 @@ pub mod tauri_commands;
 pub use connection::{connect_host, disconnect_host, list_active_connections};
 pub use core::{
     add_host_core, classify_risk, exec_multi_core, exec_ssh_core, export_team_config,
-    import_ssh_config_core, import_team_config, list_audit_core, list_hosts_core,
+    filter_hosts, import_ssh_config_core, import_team_config, list_audit_core, list_hosts_core,
+    list_hosts_filtered_core,
     ping_hosts_core, remove_host_core, sftp_download_core, sftp_ls_core, sftp_mkdir_core,
     sftp_stat_core, sftp_upload_core, ImportResult, TeamConfigExport,
 };
