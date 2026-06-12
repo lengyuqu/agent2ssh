@@ -100,17 +100,18 @@ P0-P10 已全部完成。当前基线：
 | SSH 用户 | `root` |
 | SSH 端口 | `22` |
 | 系统 | Debian，主机名 `racknerd-ef7655c` |
-| 认证方式 | 用户已提供 root 密码；不要把明文密码提交到仓库，建议运行时放入 `AGENT2SSH_TEST_PASSWORD` 或使用临时 SSH key |
+| 认证方式 | 用户已提供 root 密码；明文密码保存在本地 gitignored 文件 `.agent2ssh-test.env` 的 `AGENT2SSH_TEST_PASSWORD` 中，测试时建议用它生成临时 SSH key |
 | 测试约束 | 只在 `/tmp/agent2ssh-*` 写入临时文件；测试结束必须清理临时目录和临时 `authorized_keys` 条目 |
 | 已验证能力 | SSH 登录、host add/list、risk、ping、exec、exec-multi、SFTP upload/download/list/stat、audit、doctor、MCP tools/list、MCP list_hosts/exec/audit/doctor |
 | 已知限制 | CLI `session`/`forward` 跨进程状态问题见 B2 |
 
 推荐接入方式：
 
-1. 使用密码登录服务器，生成并追加临时 SSH 公钥到 `~/.ssh/authorized_keys`。
-2. 使用 `AGENT2SSH_CONFIG_DIR=$(mktemp -d)` 隔离本次测试配置。
-3. 用临时 key 执行 Agent2SSH 测试，不在本机正式 `~/.agent2ssh` 写入测试 host。
-4. 测试结束后删除远端临时公钥、本地临时配置目录和远端 `/tmp/agent2ssh-*` 文件。
+1. 运行 `set -a; source .agent2ssh-test.env; set +a` 读取测试机密码。
+2. 使用密码登录服务器，生成并追加临时 SSH 公钥到 `~/.ssh/authorized_keys`。
+3. 使用 `AGENT2SSH_CONFIG_DIR=$(mktemp -d)` 隔离本次测试配置。
+4. 用临时 key 执行 Agent2SSH 测试，不在本机正式 `~/.agent2ssh` 写入测试 host。
+5. 测试结束后删除远端临时公钥、本地临时配置目录和远端 `/tmp/agent2ssh-*` 文件。
 
 ## F1 · 真实环境试运行
 

@@ -5,3 +5,4 @@ src-tauri/binaries/*
 !src-tauri/binaries/.gitkeep
 .DS_Store
 *.log
+.agent2ssh-test.env
