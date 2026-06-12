@@ -42,9 +42,12 @@ export default function SetupWizard({ onComplete, onSkip }: SetupWizardProps) {
   const checkDaemon = useCallback(async () => {
     try {
       const res = await fetch("http://127.0.0.1:7722/health");
-      setDaemonRunning(res.ok);
+      const running = res.ok;
+      setDaemonRunning(running);
+      return running;
     } catch {
       setDaemonRunning(false);
+      return false;
     }
   }, []);
 
@@ -90,8 +93,8 @@ export default function SetupWizard({ onComplete, onSkip }: SetupWizardProps) {
     try {
       // The Tauri app embeds the daemon internally; we simply check if it's
       // already reachable. If not, we inform the user to start it via CLI.
-      await checkDaemon();
-      if (!daemonRunning) {
+      const running = await checkDaemon();
+      if (!running) {
         setDaemonError(
           "The embedded daemon is not reachable. Start it via: agent2ssh daemon start"
         );
