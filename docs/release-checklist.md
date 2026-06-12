@@ -18,7 +18,28 @@
   ```
 - [ ] 本地运行 Rust 测试，确保全部通过：
   ```bash
-  cargo test --no-default-features --lib
+  cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib
+  ```
+- [ ] 本地运行 CLI / MCP / daemon 编译检查：
+  ```bash
+  cargo check --manifest-path src-tauri/Cargo.toml --no-default-features --bin agent2ssh --bin agent2ssh-mcp
+  cargo check --manifest-path src-tauri/Cargo.toml --no-default-features --features daemon --bin agent2ssh-daemon
+  ```
+- [ ] 本地运行集成与 smoke 测试：
+  ```bash
+  cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --test cli_smoke
+  cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features daemon --test daemon_integration
+  ```
+- [ ] 如需完整本机验收，可运行：
+  ```bash
+  ./scripts/e2e-local.sh
+  ```
+- [ ] 如需本地 Tauri 打包，先准备 sidecar 二进制：
+  ```bash
+  TARGET="$(rustc -vV | sed -n 's/^host: //p')"
+  cargo build --manifest-path src-tauri/Cargo.toml --release --target "$TARGET" --no-default-features --bin agent2ssh --bin agent2ssh-mcp
+  cargo build --manifest-path src-tauri/Cargo.toml --release --target "$TARGET" --no-default-features --features daemon --bin agent2ssh-daemon
+  ./scripts/prepare-sidecars.sh "$TARGET"
   ```
 
 ---
@@ -40,6 +61,25 @@ git push git233 main --tags
 - [ ] 确认 `build` job 已通过（4 平台编译：macOS x86_64 / aarch64、Linux x86_64、Windows x86_64）
 - [ ] 确认 `tauri-bundle` job 已产出安装包（`.dmg` / `.AppImage` / `.msi`）
 - [ ] 检查 GitHub Releases 页面，确认所有构建资产完整
+- [ ] 确认每个平台的 `CHECKSUMS-SHA256.txt` 已上传为 release asset
+
+---
+
+## 3.5 校验和验证（Checksum Verification）
+
+- [ ] 下载 release 资产和对应的 `CHECKSUMS-SHA256.txt`
+- [ ] 验证下载文件的 SHA256 校验和：
+
+```bash
+# macOS / Linux
+shasum -a 256 -c CHECKSUMS-SHA256.txt --ignore-missing
+# 或
+sha256sum -c CHECKSUMS-SHA256.txt --ignore-missing
+```
+
+- [ ] 确认所有文件校验通过（输出 `OK`）
+
+> **用户提示**：在 README 和安装文档中建议用户在安装前验证校验和。详见 [配置指南 - 校验和验证](guides/configuration-guide.md#校验和验证)。
 
 ---
 

@@ -1,0 +1,217 @@
+# Skill 分发指南
+
+本文档描述 Agent2SSH 作为 MCP (Model Context Protocol) skill 的使用方式、安装前提、版本管理以及安全建议。
+
+---
+
+## Skill 概述
+
+Agent2SSH 以 `agent2ssh-mcp` 二进制形式暴露 MCP stdio 服务器，将 SSH 操作能力（主机管理、命令执行、SFTP、会话、端口转发、审计、审批等）封装为 33 个 MCP 工具，供任何支持 MCP 协议的 AI 客户端（Claude Desktop、Cursor、Codex 等）直接调用。
+
+**工作原理**：
+
+1. AI 客户端通过 stdio 启动 `agent2ssh-mcp` 进程
+2. 客户端发送 JSON-RPC 请求调用工具
+3. `agent2ssh-mcp` 执行本地 SSH 操作并返回结果
+
+无需额外服务器——MCP server 与 AI 客户端运行在同一台机器上。
+
+---
+
+## 安装前提
+
+### 方式一：预编译二进制（推荐）
+
+从 [GitHub Releases](https://github.com/your-org/agent2ssh/releases) 下载对应平台的二进制文件：
+
+| 平台 | 文件名 |
+|------|--------|
+| macOS (Apple Silicon) | `agent2ssh-mcp` (aarch64-apple-darwin) |
+| macOS (Intel) | `agent2ssh-mcp` (x86_64-apple-darwin) |
+| Linux (x86_64) | `agent2ssh-mcp` (x86_64-unknown-linux-gnu) |
+| Windows (x86_64) | `agent2ssh-mcp.exe` (x86_64-pc-windows-msvc) |
+
+下载后将二进制放入系统 PATH 中，例如：
+
+```bash
+# macOS / Linux
+sudo mv agent2ssh-mcp /usr/local/bin/
+chmod +x /usr/local/bin/agent2ssh-mcp
+
+# Homebrew
+brew install agent2ssh
+```
+
+### 方式二：从源码编译
+
+需要 Rust 1.70+ 工具链：
+
+```bash
+cargo install --path src-tauri --bin agent2ssh-mcp --no-default-features
+```
+
+### 验证安装
+
+```bash
+agent2ssh-mcp --version
+# 或手动测试 stdio 通信
+echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}' | agent2ssh-mcp
+```
+
+---
+
+## 版本匹配
+
+Agent2SSH 的所有组件（CLI、MCP server、daemon、Tauri 桌面应用）共享同一版本号，遵循 [语义化版本](versioning.md)。
+
+| Skill 版本 | Agent2SSH 版本 | 兼容性 |
+|-----------|---------------|--------|
+| 0.5.x | 0.5.x | 完全兼容 |
+| 0.4.x | 0.4.x | 完全兼容 |
+| 0.3.x | 0.5.x | 可能缺少新工具（如 `ssh_config_export`） |
+
+**建议**：始终保持 MCP server 与 CLI/daemon 版本一致。工具集在次版本（minor）之间向后兼容，补丁版本（patch）之间完全兼容。
+
+---
+
+## 最小权限建议
+
+在授予 AI 客户端 Agent2SSH 访问权限时，应了解哪些工具是只读（安全）的，哪些会产生副作用（需谨慎）。
+
+### 只读工具（无副作用）
+
+以下工具仅读取信息，不会修改远程系统或本地配置：
+
+| # | 工具 | 说明 |
+|---|------|------|
+| 1 | `ssh_list_hosts` | 列出已配置的主机 |
+| 2 | `ssh_list_daemons` | 列出已配置的守护进程 |
+| 3 | `ssh_ping` | 检查主机可达性 |
+| 4 | `ssh_audit` | 查询审计日志 |
+| 5 | `ssh_sftp_ls` | 列出远程目录 |
+| 6 | `ssh_sftp_stat` | 查询远程文件状态 |
+| 7 | `ssh_session_list` | 列出打开的会话 |
+| 8 | `ssh_session_read` | 读取会话输出 |
+| 9 | `ssh_forward_list` | 列出端口转发 |
+| 10 | `ssh_risk_check` | 检查命令风险等级 |
+| 11 | `ssh_approval_list` | 列出待审批请求 |
+| 12 | `ssh_connection_status` | 查看连接池状态 |
+| 13 | `ssh_playbook_list` | 列出 Playbook 定义 |
+| 14 | `ssh_config_export` | 导出团队配置（无密钥） |
+| 15 | `ssh_webhook_config` (get) | 读取 Webhook 配置 |
+
+### 写入工具（有副作用）
+
+以下工具会修改远程系统或本地配置，使用时需谨慎：
+
+| # | 工具 | 副作用级别 | 说明 |
+|---|------|-----------|------|
+| 1 | `ssh_exec` | **高** | 在远程主机执行命令 |
+| 2 | `ssh_exec_multi` | **高** | 在多主机执行命令 |
+| 3 | `ssh_session_open` | 中 | 打开远程 PTY 会话 |
+| 4 | `ssh_session_write` | **高** | 向远程会话发送输入 |
+| 5 | `ssh_session_close` | 低 | 关闭会话 |
+| 6 | `ssh_sftp_upload` | 中 | 上传文件到远程主机 |
+| 7 | `ssh_sftp_download` | 低 | 下载远程文件 |
+| 8 | `ssh_sftp_mkdir` | 低 | 创建远程目录 |
+| 9 | `ssh_forward_add` | 中 | 启动端口转发 |
+| 10 | `ssh_forward_remove` | 低 | 移除端口转发 |
+| 11 | `ssh_add_host` | 低 | 添加主机配置 |
+| 12 | `ssh_remove_host` | 低 | 删除主机配置 |
+| 13 | `ssh_import_config` | 低 | 导入 SSH 配置 |
+| 14 | `ssh_connect` | 低 | 建立 ControlMaster 连接 |
+| 15 | `ssh_disconnect` | 低 | 断开 ControlMaster 连接 |
+| 16 | `ssh_approval_respond` | 中 | 审批/拒绝高风险命令 |
+| 17 | `ssh_playbook_run` | **高** | 执行 Playbook 命令序列 |
+| 18 | `ssh_webhook_config` (set) | 低 | 修改 Webhook 配置 |
+| 19 | `ssh_config_import` | 中 | 导入团队配置 |
+
+---
+
+## 工具分类表
+
+以下按风险级别对所有 33 个工具进行分类：
+
+### 只读类（Read-only） — 15 个
+
+安全级别高，不会触发任何变更，可放心授予 AI 客户端。
+
+```
+ssh_list_hosts          ssh_list_daemons
+ssh_ping                ssh_audit
+ssh_sftp_ls             ssh_sftp_stat
+ssh_session_list        ssh_session_read
+ssh_forward_list        ssh_risk_check
+ssh_approval_list       ssh_connection_status
+ssh_playbook_list       ssh_config_export
+ssh_webhook_config (get)
+```
+
+### 写入类（Write/Mutate） — 18 个
+
+会产生副作用，建议配合 `risk_rules.toml` 和审批流程使用。
+
+```
+ssh_exec                ssh_exec_multi
+ssh_session_open        ssh_session_write
+ssh_session_close       ssh_sftp_upload
+ssh_sftp_download       ssh_sftp_mkdir
+ssh_forward_add         ssh_forward_remove
+ssh_add_host            ssh_remove_host
+ssh_import_config       ssh_connect
+ssh_disconnect          ssh_approval_respond
+ssh_playbook_run        ssh_webhook_config (set)
+ssh_config_import
+```
+
+---
+
+## 更新策略
+
+### 检测新版本
+
+```bash
+# 查看当前版本
+agent2ssh-mcp --version
+
+# 通过 CLI 检查更新（如果已安装）
+agent2ssh --version
+```
+
+### Homebrew 更新
+
+```bash
+brew update
+brew upgrade agent2ssh
+```
+
+### 手动更新
+
+1. 从 [GitHub Releases](https://github.com/your-org/agent2ssh/releases) 下载最新版本
+2. 替换旧的二进制文件
+3. 重启 AI 客户端（MCP server 会在下次调用时重新启动）
+
+### 自动更新建议
+
+对于团队部署，建议使用版本锁定策略：
+
+```toml
+# 在 CI/CD 中固定版本
+[agent2ssh]
+version = "=0.5.0"
+```
+
+### 变更日志
+
+每次版本更新的详细变更记录见 [CHANGELOG.md](../CHANGELOG.md)。
+
+---
+
+## 安全建议
+
+1. **最小权限原则**：如果 AI 客户端仅需查询信息，可在 `risk_rules.toml` 中将所有写入操作设为 `blocked`
+2. **审批流程**：启用 daemon 后，所有高风险命令均需人工审批
+3. **风险规则**：通过 `risk_rules.toml` 自定义哪些命令需要额外确认
+4. **Per-Host 覆盖**：为生产环境主机设置更严格的风险等级
+5. **审计日志**：所有命令执行均记录在 `~/.agent2ssh/audit.jsonl` 中
+6. **密钥安全**：`TeamConfigExport` 自动剥离 SSH 密钥路径，可安全分享

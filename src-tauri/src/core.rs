@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Context, Result};
+use serde::{Deserialize, Serialize};
 use std::{process::Stdio, time::Duration, time::Instant};
 use tokio::{io::{AsyncReadExt, AsyncWriteExt}, process::Command, task::JoinSet};
 
@@ -10,6 +11,114 @@ use crate::{
         PingResult, RiskLevel, SftpDirection, SftpDownloadRequest, SftpResult, SftpUploadRequest,
     },
 };
+
+// ── Team Config Export / Import ──────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TeamConfigExport {
+    /// Host profiles with key_path stripped for safe sharing
+    pub hosts: Vec<HostProfile>,
+    /// Raw TOML content of risk_rules.toml (if it exists)
+    pub risk_rules: Option<String>,
+    /// Raw TOML content of playbooks.toml (if it exists)
+    pub playbooks: Option<String>,
+}
+
+/// Export team configuration: hosts (without private key paths), risk rules,
+/// and playbooks. Suitable for sharing within a team.
+pub fn export_team_config() -> Result<TeamConfigExport> {
+    let config = load_config()?;
+
+    // Strip key_path from all hosts
+    let hosts: Vec<HostProfile> = config
+        .hosts
+        .into_iter()
+        .map(|mut h| {
+            h.key_path = None;
+            h
+        })
+        .collect();
+
+    let config_dir = crate::store::config_dir()?;
+
+    let risk_rules_path = config_dir.join("risk_rules.toml");
+    let risk_rules = if risk_rules_path.exists() {
+        Some(
+            std::fs::read_to_string(&risk_rules_path)
+                .with_context(|| format!("failed to read {}", risk_rules_path.display()))?,
+        )
+    } else {
+        None
+    };
+
+    let playbooks_path = config_dir.join("playbooks.toml");
+    let playbooks = if playbooks_path.exists() {
+        Some(
+            std::fs::read_to_string(&playbooks_path)
+                .with_context(|| format!("failed to read {}", playbooks_path.display()))?,
+        )
+    } else {
+        None
+    };
+
+    Ok(TeamConfigExport {
+        hosts,
+        risk_rules,
+        playbooks,
+    })
+}
+
+/// Import team configuration: merge hosts (skip duplicates by name), and
+/// optionally overwrite risk rules and playbooks.
+pub fn import_team_config(export: &TeamConfigExport) -> Result<ImportResult> {
+    let _guard = hosts_lock().lock().unwrap();
+    let mut config = load_config()?;
+
+    let existing_names: std::collections::HashSet<String> =
+        config.hosts.iter().map(|h| h.name.clone()).collect();
+
+    let mut added = 0u32;
+    let mut skipped = 0u32;
+    for host in &export.hosts {
+        if existing_names.contains(&host.name) {
+            skipped += 1;
+        } else {
+            config.hosts.push(host.clone());
+            added += 1;
+        }
+    }
+    config.hosts.sort_by(|a, b| a.name.cmp(&b.name));
+    save_config(&config)?;
+
+    let config_dir = crate::store::config_dir()?;
+
+    if let Some(ref rules) = export.risk_rules {
+        let path = config_dir.join("risk_rules.toml");
+        std::fs::write(&path, rules)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+    }
+
+    if let Some(ref pbs) = export.playbooks {
+        let path = config_dir.join("playbooks.toml");
+        std::fs::write(&path, pbs)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+    }
+
+    Ok(ImportResult {
+        hosts_added: added,
+        hosts_skipped: skipped,
+        risk_rules_imported: export.risk_rules.is_some(),
+        playbooks_imported: export.playbooks.is_some(),
+    })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportResult {
+    pub hosts_added: u32,
+    pub hosts_skipped: u32,
+    pub risk_rules_imported: bool,
+    pub playbooks_imported: bool,
+}
 
 pub fn list_hosts_core() -> Result<Vec<HostProfile>> {
     Ok(load_config()?.hosts)
@@ -196,27 +305,40 @@ pub fn classify_risk(command: &str) -> RiskLevel {
 }
 
 pub async fn exec_ssh_core(request: ExecRequest) -> Result<ExecResult> {
+    exec_ssh_core_with_risk_override(request, None).await
+}
+
+pub fn apply_risk_override(classified: RiskLevel, override_level: Option<RiskLevel>) -> RiskLevel {
+    if classified == RiskLevel::Blocked {
+        RiskLevel::Blocked
+    } else {
+        override_level.unwrap_or(classified)
+    }
+}
+
+pub(crate) async fn exec_ssh_core_with_risk_override(
+    request: ExecRequest,
+    request_risk_override: Option<RiskLevel>,
+) -> Result<ExecResult> {
     let host = resolve_host(&request.host)?;
 
-    // M3-2: Per-host risk override — if the host specifies a risk_override, use it
-    // instead of the built-in classification (allows e.g. marking a sandbox host as all-low).
+    // Risk overrides are reserved for explicitly trusted scopes such as a host
+    // profile or a playbook. They never downgrade a blocked command.
     let built_in_risk = classify_risk(&request.command);
-    let risk = match host.risk_override {
-        Some(override_level) => override_level,
-        None => {
-            // Also check user-defined risk rules from risk_rules.toml
-            if let Some(user_risk) = crate::risk_config::classify_with_user_rules(&request.command).await {
-                // User rules escalate but never de-escalate below built-in
-                match (&user_risk, &built_in_risk) {
-                    (RiskLevel::Blocked, _) => RiskLevel::Blocked,
-                    (RiskLevel::High, RiskLevel::Blocked) => RiskLevel::Blocked,
-                    (ur, _) => *ur,
-                }
-            } else {
-                built_in_risk
+    let classified_risk = {
+        // Also check user-defined risk rules from risk_rules.toml.
+        if let Some(user_risk) = crate::risk_config::classify_with_user_rules(&request.command).await {
+            // User rules escalate but never de-escalate below built-in.
+            match (&user_risk, &built_in_risk) {
+                (RiskLevel::Blocked, _) => RiskLevel::Blocked,
+                (RiskLevel::High, RiskLevel::Blocked) => RiskLevel::Blocked,
+                (ur, _) => *ur,
             }
+        } else {
+            built_in_risk
         }
     };
+    let risk = apply_risk_override(classified_risk, request_risk_override.or(host.risk_override));
 
     if risk == RiskLevel::Blocked {
         return Err(anyhow!(
@@ -801,6 +923,18 @@ mod tests {
     fn test_classify_risk_dd_blocked() {
         assert_eq!(classify_risk("dd if=/dev/zero of=/dev/sda bs=1M"), RiskLevel::Blocked);
         assert_eq!(classify_risk("dd if=/dev/zero of=/dev/nvme0n1 bs=1M"), RiskLevel::Blocked);
+    }
+
+    #[test]
+    fn test_risk_override_cannot_downgrade_blocked() {
+        assert_eq!(
+            apply_risk_override(RiskLevel::Blocked, Some(RiskLevel::Low)),
+            RiskLevel::Blocked
+        );
+        assert_eq!(
+            apply_risk_override(RiskLevel::High, Some(RiskLevel::Low)),
+            RiskLevel::Low
+        );
     }
 
     #[test]

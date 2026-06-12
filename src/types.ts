@@ -224,3 +224,20 @@ export type DaemonInfo = {
   url: string;
   connected: boolean;
 };
+
+// Rust: core.rs — TeamConfigExport
+// Host profiles with key_path stripped, plus optional raw TOML content.
+export type TeamConfigExport = {
+  hosts: HostProfile[];
+  risk_rules?: string | null;
+  playbooks?: string | null;
+};
+
+// Rust: core.rs — ImportResult
+// Result of importing a team configuration.
+export type ImportResult = {
+  hosts_added: number;
+  hosts_skipped: number;
+  risk_rules_imported: boolean;
+  playbooks_imported: boolean;
+};

@@ -1,6 +1,6 @@
 # Agent2SSH MCP Tools Reference
 
-Agent2SSH exposes 31 tools via the Model Context Protocol (MCP) stdio server.
+Agent2SSH exposes 35 tools via the Model Context Protocol (MCP) stdio server.
 
 ## Tool List
 
@@ -37,6 +37,10 @@ Agent2SSH exposes 31 tools via the Model Context Protocol (MCP) stdio server.
 | 29 | `ssh_playbook_list` | List all configured playbooks |
 | 30 | `ssh_playbook_run` | Execute a playbook (command sequence) on a host |
 | 31 | `ssh_list_daemons` | List configured daemon instances with connectivity status |
+| 32 | `ssh_config_export` | Export team config (hosts without keys, risk rules, playbooks) |
+| 33 | `ssh_config_import` | Import team config from JSON |
+| 34 | `ssh_doctor` | Run diagnostic checks on SSH, config, and daemon |
+| 35 | `ssh_metrics` | Get daemon request/execution/approval counters |
 
 ## Risk Levels
 
@@ -76,7 +80,7 @@ Rules support glob patterns with `*`. User rules are checked before built-in rul
 
 ## Per-Host Risk Override
 
-Set `risk_override` on a host profile to override the risk level for all commands on that host. For example, setting `risk_override: "low"` on a sandbox host allows running any command without confirmation.
+Set `risk_override` on a host profile to override the risk level for commands on that host. For example, setting `risk_override: "low"` on a sandbox host allows non-blocked commands to run without confirmation. Commands classified as `blocked` by built-in or user-defined rules are never downgraded by overrides.
 
 ## SSH Connection Pool (ControlMaster)
 

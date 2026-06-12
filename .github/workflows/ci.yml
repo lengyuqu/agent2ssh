@@ -118,6 +118,17 @@ jobs:
           cargo build --release --no-default-features --features daemon --bin agent2ssh-daemon --target ${{ matrix.target }}
         working-directory: src-tauri
 
+      - name: Generate checksums
+        if: github.event_name == 'release'
+        run: |
+          mkdir -p dist
+          EXT=""
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then EXT=".exe"; fi
+          cp "src-tauri/target/${{ matrix.target }}/release/agent2ssh${EXT}" "dist/agent2ssh-${{ matrix.target }}${EXT}"
+          cp "src-tauri/target/${{ matrix.target }}/release/agent2ssh-mcp${EXT}" "dist/agent2ssh-mcp-${{ matrix.target }}${EXT}"
+          cp "src-tauri/target/${{ matrix.target }}/release/agent2ssh-daemon${EXT}" "dist/agent2ssh-daemon-${{ matrix.target }}${EXT}"
+          bash scripts/generate-checksums.sh dist
+
       - name: Upload release assets
         if: github.event_name == 'release' && matrix.os != 'windows-latest'
         uses: softprops/action-gh-release@v2
@@ -126,6 +137,7 @@ jobs:
             src-tauri/target/${{ matrix.target }}/release/agent2ssh
             src-tauri/target/${{ matrix.target }}/release/agent2ssh-mcp
             src-tauri/target/${{ matrix.target }}/release/agent2ssh-daemon
+            dist/CHECKSUMS-SHA256.txt
 
       - name: Upload release assets (Windows)
         if: github.event_name == 'release' && matrix.os == 'windows-latest'
@@ -135,6 +147,7 @@ jobs:
             src-tauri/target/${{ matrix.target }}/release/agent2ssh.exe
             src-tauri/target/${{ matrix.target }}/release/agent2ssh-mcp.exe
             src-tauri/target/${{ matrix.target }}/release/agent2ssh-daemon.exe
+            dist/CHECKSUMS-SHA256.txt
 
   tauri-bundle:
     if: github.event_name == 'release'

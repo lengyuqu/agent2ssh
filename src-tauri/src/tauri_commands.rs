@@ -1,9 +1,10 @@
 use crate::{
     connection::{connect_host, disconnect_host, list_active_connections},
     core::{
-        add_host_core, classify_risk, exec_multi_core, exec_ssh_core, import_ssh_config_core,
-        list_audit_core, list_hosts_core, ping_hosts_core, remove_host_core, sftp_download_core,
-        sftp_ls_core, sftp_mkdir_core, sftp_stat_core, sftp_upload_core,
+        add_host_core, classify_risk, exec_multi_core, exec_ssh_core, export_team_config,
+        import_ssh_config_core, import_team_config, list_audit_core, list_hosts_core,
+        ping_hosts_core, remove_host_core, sftp_download_core, sftp_ls_core, sftp_mkdir_core,
+        sftp_stat_core, sftp_upload_core, ImportResult, TeamConfigExport,
     },
     forward::{forward_add_core, forward_list_core, forward_remove_core},
     playbook::{list_playbooks_core, run_playbook_core, Playbook, PlaybookRunResult},
@@ -283,6 +284,26 @@ pub fn set_webhook_config(config: WebhookConfig) -> Result<(), String> {
     save_webhook_config(&config).map_err(|e| e.to_string())
 }
 
+// ── Audit rotation ───────────────────────────────────────────────────────────
+
+/// Rotate the audit log if it exceeds 10 MB.
+#[tauri::command]
+pub fn rotate_audit() -> Result<(), String> {
+    crate::store::rotate_audit_core().map_err(|e| e.to_string())
+}
+
+// ── Team Config Export/Import ────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn export_team_config_cmd() -> Result<TeamConfigExport, String> {
+    export_team_config().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn import_team_config_cmd(config: TeamConfigExport) -> Result<ImportResult, String> {
+    import_team_config(&config).map_err(|e| e.to_string())
+}
+
 // ── Bootstrap ────────────────────────────────────────────────────────────────
 
 pub fn run_tauri() {
@@ -335,6 +356,11 @@ pub fn run_tauri() {
             // Webhook config
             get_webhook_config,
             set_webhook_config,
+            // Team config export/import
+            export_team_config_cmd,
+            import_team_config_cmd,
+            // Audit rotation
+            rotate_audit,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -31,6 +31,7 @@ mod http_helpers {
     use axum::{
         extract::{Path, State},
         http::{HeaderMap, StatusCode},
+        response::Html,
         routing::{get, post},
         Json, Router,
     };
@@ -100,6 +101,10 @@ mod http_helpers {
 
     async fn health() -> Json<serde_json::Value> {
         Json(serde_json::json!({"ok": true}))
+    }
+
+    async fn console() -> Html<&'static str> {
+        Html(include_str!("../web/console.html"))
     }
 
     async fn list_hosts(
@@ -250,6 +255,7 @@ mod http_helpers {
             token: "test-token".to_string(),
         };
         Router::new()
+            .route("/console", get(console))
             .route("/health", get(health))
             .route("/hosts", get(list_hosts))
             .route("/risk/check", post(risk_check))
@@ -437,6 +443,11 @@ async fn response_json<T: serde::de::DeserializeOwned>(
     serde_json::from_slice(&bytes).unwrap()
 }
 
+async fn response_text(response: axum::http::Response<Body>) -> String {
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    String::from_utf8(bytes.to_vec()).unwrap()
+}
+
 // ── Health ──────────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -457,6 +468,37 @@ async fn http_health_returns_ok() {
 
     let body: serde_json::Value = response_json(response).await;
     assert_eq!(body["ok"], true);
+}
+
+#[tokio::test]
+async fn http_console_serves_key_workflow_entrypoints() {
+    let app = http_helpers::build_test_router();
+
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/console")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    let html = response_text(response).await;
+    for expected in [
+        "Agent2SSH",
+        "data-tab=\"hosts\"",
+        "data-tab=\"execute\"",
+        "data-tab=\"approvals\"",
+        "data-tab=\"settings\"",
+        "token-input",
+    ] {
+        assert!(
+            html.contains(expected),
+            "console HTML should contain {expected}"
+        );
+    }
 }
 
 // ── Auth middleware ─────────────────────────────────────────────────────────
@@ -729,14 +771,14 @@ async fn http_hosts_list_returns_valid_json_array() {
 // Part 3: MCP tool enumeration test (P4-1)
 // ============================================================================
 
-/// Meta-test: verify the MCP binary declares exactly 31 tools by parsing
+/// Meta-test: verify the MCP binary declares exactly 35 tools by parsing
 /// the source file and counting `"name":` entries in the tools/list handler.
 ///
 /// This avoids the need to run the MCP server over stdio JSON-RPC, which
 /// requires a full process lifecycle. Instead we treat the source as the
 /// canonical tool registry and assert on its structure.
 #[test]
-fn mcp_tool_list_contains_exactly_31_tools() {
+fn mcp_tool_list_contains_exactly_35_tools() {
     let source = include_str!("../src/bin/agent2ssh-mcp.rs");
 
     // Extract the tools/list handler block: everything between
@@ -755,7 +797,7 @@ fn mcp_tool_list_contains_exactly_31_tools() {
     // the tools array. Each tool object has exactly one "name" field at the
     // top level, but some input schemas also use "name" as a property key
     // (e.g. ssh_add_host and ssh_remove_host), so the raw count is
-    // 31 tools + 2 schema-property "name" keys = 33.
+    // 35 tools + 2 schema-property "name" keys = 37.
     let after_array_start = array_start + "\"tools\": [".len();
     let mut depth = 1;
     let mut end = after_array_start;
@@ -779,8 +821,8 @@ fn mcp_tool_list_contains_exactly_31_tools() {
     let tool_count = tools_block.matches("\"name\": \"ssh_").count();
 
     assert_eq!(
-        tool_count, 31,
-        "Expected exactly 31 MCP tools, found {tool_count}. \
+        tool_count, 35,
+        "Expected exactly 35 MCP tools, found {tool_count}. \
          If you added or removed a tool, update this count and the expected list below."
     );
 }
@@ -822,6 +864,10 @@ fn mcp_tool_list_contains_all_expected_names() {
         "ssh_connect",
         "ssh_disconnect",
         "ssh_webhook_config",
+        "ssh_config_export",
+        "ssh_config_import",
+        "ssh_doctor",
+        "ssh_metrics",
     ];
 
     // All tool names should appear in the tools/list section of the source
@@ -880,6 +926,10 @@ fn mcp_call_tool_handler_covers_all_tools() {
         "ssh_connect",
         "ssh_disconnect",
         "ssh_webhook_config",
+        "ssh_config_export",
+        "ssh_config_import",
+        "ssh_doctor",
+        "ssh_metrics",
     ];
 
     // Find the call_tool function body

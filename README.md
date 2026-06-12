@@ -13,7 +13,9 @@ Agent2SSH is a local SSH capability layer for general-purpose agents. It exposes
 ```bash
 npm install
 npm run build
-cd src-tauri && cargo check
+cd src-tauri
+cargo check --no-default-features --bin agent2ssh --bin agent2ssh-mcp
+cargo check --no-default-features --features daemon --bin agent2ssh-daemon
 ```
 
 Run the desktop app:
@@ -26,16 +28,16 @@ Run the CLI:
 
 ```bash
 cd src-tauri
-cargo run --bin agent2ssh -- host add prod --host 10.0.0.12 --user ubuntu --key ~/.ssh/id_ed25519
-cargo run --bin agent2ssh -- host list --json
-cargo run --bin agent2ssh -- exec prod "uname -a" --json
+cargo run --no-default-features --bin agent2ssh -- host add prod --host 10.0.0.12 --user ubuntu --key ~/.ssh/id_ed25519
+cargo run --no-default-features --bin agent2ssh -- host list --json
+cargo run --no-default-features --bin agent2ssh -- exec prod "uname -a" --json
 ```
 
 Run the MCP server:
 
 ```bash
 cd src-tauri
-cargo run --bin agent2ssh-mcp
+cargo run --no-default-features --bin agent2ssh-mcp
 ```
 
 Run the HTTP daemon:
@@ -229,7 +231,7 @@ When connecting to remote `agent2ssh-daemon` instances, follow these guidelines:
 
 - **Token storage**: Prefer storing the remote token via `token_env` (environment variable reference) in `remotes.toml` rather than writing the plaintext token directly. For example:
   ```toml
-  [[daemons]]
+  [[remotes]]
   alias = "prod"
   url = "https://daemon.example.com:7722"
   token_env = "AGENT2SSH_PROD_TOKEN"
@@ -238,7 +240,7 @@ When connecting to remote `agent2ssh-daemon` instances, follow these guidelines:
 
 - **HTTPS in production**: Remote daemon connections should always use HTTPS in production environments. The daemon itself listens on HTTP by default (`127.0.0.1:7722`); place a TLS-terminating reverse proxy (e.g., Caddy, nginx) in front of it for remote access.
 
-- **Token rotation**: To rotate the daemon token, stop the daemon, replace the contents of `~/.agent2ssh/daemon.token`, and restart. Update all clients (local `remotes.toml` or environment variables) with the new token. All clients must be updated before they can resume communication.
+- **Token rotation**: To rotate the daemon token, stop the daemon, run `agent2ssh daemon rotate-token`, and restart. Update all clients (local `remotes.toml` or environment variables) with the new token. All clients must be updated before they can resume communication.
 
 - **Network security**: The daemon should be placed behind a firewall and never exposed directly to the public internet. Use VPN, SSH tunnels, or IP allowlisting to restrict access. The daemon provides full SSH execution capabilities to any authenticated caller.
 
@@ -247,6 +249,14 @@ When connecting to remote `agent2ssh-daemon` instances, follow these guidelines:
 ### SSH Key Permissions
 
 All private keys managed by Agent2SSH (generated or imported) are automatically restricted to `0600` permissions on Unix systems. The SSH key directory is located at `~/.agent2ssh/keys/`.
+
+### Risk Overrides
+
+Host and playbook `risk_override` settings can lower or raise command risk for trusted scopes, but they cannot downgrade commands classified as `blocked`. Built-in or user-defined blocked rules always reject execution.
+
+### Sensitive Command Redaction
+
+Audit entries and webhook payloads redact common secret-bearing command arguments such as `--token`, `--password`, `--secret`, `--api-key`, and `key=value` variants before persistence or outbound delivery.
 
 ### Webhook Outbound
 

@@ -1,16 +1,20 @@
+#![recursion_limit = "512"]
+
 use agent2ssh::{
     add_host_core, classify_risk, connect_host, disconnect_host, exec_multi_core, exec_ssh_core,
-    forward_add_core, forward_list_core, forward_remove_core, import_ssh_config_core,
-    list_active_connections, list_audit_core, list_hosts_core, list_playbooks_core, ping_hosts_core,
-    remove_host_core, run_playbook_core, session_close_core, session_list_core, session_open_core,
-    session_read_core, session_write_core, sftp_download_core, sftp_ls_core, sftp_mkdir_core,
-    sftp_stat_core, sftp_upload_core, AuditFilter, ExecRequest, ForwardDirection, HostProfile,
-    RiskLevel, SftpDownloadRequest, SftpUploadRequest,
+    export_team_config, forward_add_core, forward_list_core, forward_remove_core,
+    import_ssh_config_core, import_team_config, list_active_connections, list_audit_core,
+    list_hosts_core, list_playbooks_core, ping_hosts_core, remove_host_core, run_playbook_core,
+    session_close_core, session_list_core, session_open_core, session_read_core,
+    session_write_core, sftp_download_core, sftp_ls_core, sftp_mkdir_core, sftp_stat_core,
+    sftp_upload_core, AuditFilter, ExecRequest, ForwardDirection, HostProfile, RiskLevel,
+    SftpDownloadRequest, SftpUploadRequest, TeamConfigExport,
 };
 use agent2ssh::approval::{approval_list, approval_respond};
 use agent2ssh::notify::{load_webhook_config, save_webhook_config};
 use agent2ssh::remote::{get_daemon, list_daemons_core};
 use agent2ssh::risk_config::classify_with_user_rules;
+use agent2ssh::store::audit_path;
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -435,6 +439,40 @@ async fn handle_request(request: &Value) -> std::result::Result<Value, McpError>
                             "secret": { "type": "string", "description": "HMAC-SHA256 signing secret for X-Agent2SSH-Signature header." }
                         }
                     }
+                },
+                {
+                    "name": "ssh_config_export",
+                    "description": "Export team configuration (hosts without private key paths, risk rules, and playbooks). Returns a JSON object suitable for sharing within a team.",
+                    "inputSchema": { "type": "object", "properties": {} }
+                },
+                {
+                    "name": "ssh_config_import",
+                    "description": "Import team configuration from a JSON object. Merges hosts (skips duplicates by name), and overwrites risk rules and playbooks if provided.",
+                    "inputSchema": {
+                        "type": "object",
+                        "required": ["config"],
+                        "properties": {
+                            "config": {
+                                "type": "object",
+                                "description": "Team config export object with hosts, risk_rules, and playbooks fields.",
+                                "properties": {
+                                    "hosts":      { "type": "array", "items": { "type": "object" } },
+                                    "risk_rules":  { "type": "string", "description": "Raw TOML content of risk rules." },
+                                    "playbooks":   { "type": "string", "description": "Raw TOML content of playbooks." }
+                                }
+                            }
+                        }
+                    }
+                },
+                {
+                    "name": "ssh_doctor",
+                    "description": "Run diagnostic checks on the agent2ssh environment: verify ssh/ssh-keygen binaries, config directory, hosts.json, daemon.token permissions, daemon health, optional config files, and audit log size.",
+                    "inputSchema": { "type": "object", "properties": {} }
+                },
+                {
+                    "name": "ssh_metrics",
+                    "description": "Retrieve basic metrics from the local agent2ssh daemon (requests, execs, blocked commands, durations, approvals). Reads from GET /metrics on 127.0.0.1:7722.",
+                    "inputSchema": { "type": "object", "properties": {} }
                 }
             ]
         })),
@@ -791,6 +829,105 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 }
             }
         }
+        "ssh_config_export" => {
+            let export = export_team_config().map_err(McpError::from)?;
+            serde_json::to_value(export)?
+        }
+        "ssh_config_import" => {
+            let config_value = args.get("config")
+                .ok_or_else(|| McpError::internal("config object required"))?;
+            let export: TeamConfigExport = serde_json::from_value(config_value.clone())
+                .map_err(|e| McpError::internal(format!("invalid config object: {e}")))?;
+            let result = import_team_config(&export).map_err(McpError::from)?;
+            serde_json::to_value(result)?
+        }
+        "ssh_doctor" => {
+            let mut checks: Vec<Value> = Vec::new();
+
+            // ssh binary
+            let ssh_ok = which_check("ssh");
+            checks.push(json!({"name": "ssh binary", "status": if ssh_ok {"pass"} else {"fail"}, "detail": if ssh_ok {"ssh found in PATH"} else {"ssh binary not found"}}));
+
+            // ssh-keygen
+            let keygen_ok = which_check("ssh-keygen");
+            checks.push(json!({"name": "ssh-keygen binary", "status": if keygen_ok {"pass"} else {"warn"}, "detail": if keygen_ok {"ssh-keygen found"} else {"ssh-keygen not found"}}));
+
+            // config directory
+            let config_dir = agent2ssh::config_dir().map_err(McpError::from)?;
+            let dir_ok = config_dir.exists();
+            checks.push(json!({"name": "config directory", "status": if dir_ok {"pass"} else {"fail"}, "detail": format!("{}", config_dir.display())}));
+
+            // hosts.json
+            let hosts_path = config_dir.join("hosts.json");
+            let hosts_ok = hosts_path.exists()
+                && std::fs::read_to_string(&hosts_path).ok()
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()).is_some();
+            checks.push(json!({"name": "hosts.json", "status": if hosts_path.exists() && hosts_ok {"pass"} else if hosts_path.exists() {"fail"} else {"warn"}, "detail": if !hosts_path.exists() {"not configured"} else if hosts_ok {"valid"} else {"invalid JSON"}}));
+
+            // daemon.token
+            let token_path = config_dir.join("daemon.token");
+            if token_path.exists() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mode = std::fs::metadata(&token_path).map(|m| m.permissions().mode() & 0o777).unwrap_or(0o777);
+                    checks.push(json!({"name": "daemon.token", "status": if mode == 0o600 {"pass"} else {"warn"}, "detail": format!("permissions 0{:o}", mode)}));
+                }
+                #[cfg(not(unix))]
+                { checks.push(json!({"name": "daemon.token", "status": "pass", "detail": "exists"})); }
+            } else {
+                checks.push(json!({"name": "daemon.token", "status": "warn", "detail": "not found"}));
+            }
+
+            // daemon health
+            let daemon_ok = match reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(2))
+                .build()
+            {
+                Ok(client) => match client.get("http://127.0.0.1:7722/health").send().await {
+                    Ok(resp) => resp.status().is_success(),
+                    Err(_) => false,
+                },
+                Err(_) => false,
+            };
+            checks.push(json!({"name": "daemon health", "status": if daemon_ok {"pass"} else {"warn"}, "detail": if daemon_ok {"healthy"} else {"not reachable"}}));
+
+            // optional config files
+            for (filename, label) in &[("risk_rules.toml","risk rules"),("playbooks.toml","playbooks"),("remotes.toml","remote daemons"),("webhook.toml","webhook config")] {
+                let exists = config_dir.join(filename).exists();
+                checks.push(json!({"name": format!("{filename} ({label})"), "status": if exists {"pass"} else {"warn"}, "detail": if exists {"present"} else {"not found"}}));
+            }
+
+            // audit log
+            if let Ok(audit_p) = audit_path() {
+                if audit_p.exists() {
+                    let size = std::fs::metadata(&audit_p).map(|m| m.len()).unwrap_or(0);
+                    let size_mb = size as f64 / (1024.0 * 1024.0);
+                    checks.push(json!({"name": "audit log", "status": if size_mb > 10.0 {"warn"} else {"pass"}, "detail": format!("{:.2} MB", size_mb)}));
+                } else {
+                    checks.push(json!({"name": "audit log", "status": "pass", "detail": "no audit log yet"}));
+                }
+            }
+
+            json!(checks)
+        }
+        "ssh_metrics" => {
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(3))
+                .build()
+                .map_err(|e| McpError::internal(format!("client build failed: {e}")))?;
+            let resp = client
+                .get("http://127.0.0.1:7722/metrics")
+                .send()
+                .await
+                .map_err(|e| McpError::internal(format!("daemon /metrics unreachable: {e}")))?;
+            if !resp.status().is_success() {
+                return Err(McpError::internal(format!("daemon returned status {}", resp.status())));
+            }
+            let metrics: Value = resp.json().await
+                .map_err(|e| McpError::internal(format!("invalid JSON from /metrics: {e}")))?;
+            metrics
+        }
         unknown => return Err(McpError::internal(anyhow!("unknown tool: {unknown}"))),
     };
 
@@ -798,4 +935,12 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
         "content": [{ "type": "text", "text": serde_json::to_string_pretty(&payload)? }],
         "structuredContent": payload
     }))
+}
+
+fn which_check(name: &str) -> bool {
+    std::process::Command::new("which")
+        .arg(name)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }

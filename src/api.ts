@@ -11,6 +11,7 @@ import type {
   ForwardDirection,
   ForwardRule,
   HostProfile,
+  ImportResult,
   PingResult,
   Playbook,
   PlaybookRunResult,
@@ -18,6 +19,7 @@ import type {
   SessionInfo,
   SftpResult,
   SshKeyInfo,
+  TeamConfigExport,
   WebhookConfig,
 } from "./types";
 
@@ -157,6 +159,11 @@ export const api = {
 
   // Remote daemons
   listDaemons: () => invoke<DaemonInfo[]>("list_daemons"),
+
+  // Team config export/import
+  exportTeamConfig: () => invoke<TeamConfigExport>("export_team_config_cmd"),
+  importTeamConfig: (config: TeamConfigExport) =>
+    invoke<ImportResult>("import_team_config_cmd", { config }),
 
   /** Fetch pending approvals from the running daemon. Returns [] if daemon is unreachable. */
   fetchApprovals: async (): Promise<ApprovalRequest[]> => {

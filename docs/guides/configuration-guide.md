@@ -95,6 +95,7 @@ JSON 格式，包含一个 `hosts` 数组：
 - `name` 字段必须唯一
 - `jump_host` 必须引用已存在的主机别名
 - `risk_override` 设置为 `"low"` 可以跳过该主机上所有命令的风险确认
+- `risk_override` 不能降级 `blocked` 命令；内置或用户规则判定为 `blocked` 的命令仍会被拒绝
 
 ---
 
@@ -325,6 +326,7 @@ tags = ["database"]
 
 - 步骤中的 shell 变量（如 `$(date)`）会在远程主机上展开
 - `risk_override` 可以统一设置所有步骤的风险等级
+- `risk_override` 不能降级 `blocked` 命令；内置或用户规则判定为 `blocked` 的步骤仍会被拒绝
 - 文件不存在时返回空 Playbook 列表（不会报错）
 
 ---
@@ -404,6 +406,8 @@ curl -X POST -H "$AUTH" \
 ### 注意事项
 
 - `alias` 必须唯一，不能与 `localhost` 冲突
+- `url` 必须以 `http://` 或 `https://` 开头
+- 每个远程守护进程必须配置 `token_env` 或 `token`
 - 推荐使用 `token_env` 而非 `token`，避免在配置文件中明文存储敏感令牌
 - 远程守护进程的健康状态通过 `/health` 端点检测（2 秒超时）
 - 生产环境应使用 HTTPS，并在远程守护进程前放置 TLS 终止反向代理（如 Caddy、nginx）
@@ -451,7 +455,7 @@ secret = "my-secret-key"
 
 - 标题显示事件类型（Approval Required / Command Blocked / Command Completed）
 - 字段显示主机名、命令、风险等级、退出码
-- `approval_required` 事件包含 Approve/Reject 按钮
+- `approval_required` 事件包含打开本地 Approvals 控制台的按钮；实际批准或拒绝仍通过已认证的控制台/API 完成
 
 ### 自定义 Webhook
 
@@ -591,3 +595,73 @@ agent2ssh daemon start
 - **谨慎处理 `daemon.token`**（包含敏感认证信息）
 - `audit.jsonl` 可能很大，可以选择性备份
 - 迁移后需要更新 `remotes.toml` 中引用的环境变量
+
+---
+
+## 校验和验证
+
+从 GitHub Releases 下载 Agent2SSH 二进制文件后，建议验证文件完整性以确保未被篡改。
+
+### 下载校验和文件
+
+每个 release 版本均附带 `CHECKSUMS-SHA256.txt` 文件，包含所有发布资产的 SHA256 校验和。从 release 页面同时下载二进制文件和对应的校验和文件。
+
+### 验证步骤
+
+**macOS：**
+
+```bash
+# 将校验和文件和二进制放在同一目录
+cd ~/Downloads
+
+# 验证
+shasum -a 256 -c CHECKSUMS-SHA256.txt --ignore-missing
+```
+
+**Linux：**
+
+```bash
+cd ~/Downloads
+
+# 验证（两种命令均可）
+sha256sum -c CHECKSUMS-SHA256.txt --ignore-missing
+# 或
+shasum -a 256 -c CHECKSUMS-SHA256.txt --ignore-missing
+```
+
+**Windows (PowerShell)：**
+
+```powershell
+# 计算文件哈希
+Get-FileHash .\agent2ssh.exe -Algorithm SHA256
+
+# 手动对比 CHECKSUMS-SHA256.txt 中的值
+type CHECKSUMS-SHA256.txt
+```
+
+### 预期输出
+
+验证通过时，每行输出 `OK`：
+
+```text
+agent2ssh-x86_64-apple-darwin: OK
+agent2ssh-mcp-x86_64-apple-darwin: OK
+agent2ssh-daemon-x86_64-apple-darwin: OK
+```
+
+如果校验和不匹配，输出将包含 `FAILED`。此时**请勿使用**该文件，并重新下载或从其他源获取。
+
+### 团队配置分享验证
+
+使用 `agent2ssh config-export` 导出团队配置时，可通过 SHA256 验证文件完整性：
+
+```bash
+# 导出配置
+agent2ssh config-export --json > team-config.json
+
+# 生成校验和
+shasum -a 256 team-config.json
+
+# 分享给团队成员后，他们可验证
+shasum -a 256 -c <checksum> team-config.json
+```

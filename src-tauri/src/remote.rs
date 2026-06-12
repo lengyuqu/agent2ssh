@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 
 use crate::store::config_dir;
@@ -37,7 +38,38 @@ pub fn load_remotes() -> Result<Vec<RemoteDaemon>> {
     }
     let raw = std::fs::read_to_string(&path)?;
     let file: RemotesFile = toml::from_str(&raw)?;
+    validate_remotes(&file.remotes)?;
     Ok(file.remotes)
+}
+
+fn validate_remotes(remotes: &[RemoteDaemon]) -> Result<()> {
+    let mut aliases = HashSet::new();
+    for remote in remotes {
+        if remote.alias.trim().is_empty() {
+            return Err(anyhow!("remote daemon alias cannot be empty"));
+        }
+        if remote.alias == "localhost" {
+            return Err(anyhow!("remote daemon alias 'localhost' is reserved"));
+        }
+        if !aliases.insert(remote.alias.as_str()) {
+            return Err(anyhow!("duplicate remote daemon alias '{}'", remote.alias));
+        }
+        if !(remote.url.starts_with("http://") || remote.url.starts_with("https://")) {
+            return Err(anyhow!(
+                "remote daemon '{}' URL must start with http:// or https://",
+                remote.alias
+            ));
+        }
+        if remote.token_env.as_deref().unwrap_or("").trim().is_empty()
+            && remote.token.as_deref().unwrap_or("").trim().is_empty()
+        {
+            return Err(anyhow!(
+                "remote daemon '{}' must set token_env or token",
+                remote.alias
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// List all configured daemons (localhost + remotes).
@@ -59,7 +91,7 @@ pub fn list_daemons_core() -> Result<Vec<DaemonInfo>> {
     });
 
     // Add all configured remotes
-    let remotes = load_remotes().unwrap_or_default();
+    let remotes = load_remotes()?;
     for remote in remotes {
         let connected = check_health_blocking(&remote.url);
         daemons.push(DaemonInfo {
@@ -159,4 +191,47 @@ fn check_health_blocking(url: &str) -> bool {
         });
         handle.join().unwrap_or(false)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn remote(alias: &str) -> RemoteDaemon {
+        RemoteDaemon {
+            alias: alias.to_string(),
+            url: "https://daemon.example.com:7722".to_string(),
+            token: None,
+            token_env: Some("AGENT2SSH_TOKEN".to_string()),
+        }
+    }
+
+    #[test]
+    fn validate_remotes_accepts_valid_remote() {
+        assert!(validate_remotes(&[remote("prod")]).is_ok());
+    }
+
+    #[test]
+    fn validate_remotes_rejects_reserved_alias() {
+        assert!(validate_remotes(&[remote("localhost")]).is_err());
+    }
+
+    #[test]
+    fn validate_remotes_rejects_duplicate_aliases() {
+        assert!(validate_remotes(&[remote("prod"), remote("prod")]).is_err());
+    }
+
+    #[test]
+    fn validate_remotes_rejects_missing_token() {
+        let mut item = remote("prod");
+        item.token_env = None;
+        assert!(validate_remotes(&[item]).is_err());
+    }
+
+    #[test]
+    fn validate_remotes_rejects_non_http_url() {
+        let mut item = remote("prod");
+        item.url = "file:///tmp/socket".to_string();
+        assert!(validate_remotes(&[item]).is_err());
+    }
 }

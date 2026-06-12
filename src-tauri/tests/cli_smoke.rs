@@ -10,6 +10,10 @@ fn cli_bin() -> std::path::PathBuf {
     env!("CARGO_BIN_EXE_agent2ssh").into()
 }
 
+fn mcp_bin() -> std::path::PathBuf {
+    env!("CARGO_BIN_EXE_agent2ssh-mcp").into()
+}
+
 // ── Help flags ────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -74,6 +78,55 @@ async fn cli_exec_help_exits_zero() {
         stdout.contains("--force") || stdout.contains("force"),
         "exec --help should mention the --force flag"
     );
+}
+
+#[tokio::test]
+async fn mcp_stdio_end_to_end_initialize_tools_and_risk() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::process::Command;
+
+    let mut child = Command::new(mcp_bin())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to start MCP binary");
+
+    let mut stdin = child.stdin.take().expect("missing MCP stdin");
+    let stdout = child.stdout.take().expect("missing MCP stdout");
+    let mut lines = BufReader::new(stdout).lines();
+
+    let requests = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"ssh_risk_check","arguments":{"command":"rm -rf /"}}}"#,
+    ];
+
+    for req in requests {
+        stdin.write_all(req.as_bytes()).await.unwrap();
+        stdin.write_all(b"\n").await.unwrap();
+    }
+    drop(stdin);
+
+    let init: serde_json::Value = serde_json::from_str(
+        &lines.next_line().await.unwrap().expect("missing initialize response"),
+    )
+    .unwrap();
+    assert_eq!(init["result"]["serverInfo"]["name"], "agent2ssh-mcp");
+
+    let tools: serde_json::Value =
+        serde_json::from_str(&lines.next_line().await.unwrap().expect("missing tools response"))
+            .unwrap();
+    let tool_count = tools["result"]["tools"].as_array().unwrap().len();
+    assert_eq!(tool_count, 35);
+
+    let risk: serde_json::Value =
+        serde_json::from_str(&lines.next_line().await.unwrap().expect("missing risk response"))
+            .unwrap();
+    assert_eq!(risk["result"]["structuredContent"]["risk_level"], "blocked");
+
+    let status = child.wait().await.expect("failed waiting for MCP process");
+    assert!(status.success());
 }
 
 // ── Read-only commands ──────────────────────────────────────────────────────
@@ -238,6 +291,27 @@ async fn cli_daemon_help_exits_zero() {
     assert!(
         output.status.success(),
         "agent2ssh daemon --help should exit 0"
+    );
+}
+
+#[tokio::test]
+async fn cli_daemon_rotate_token_help_exits_zero() {
+    let output = tokio::process::Command::new(cli_bin())
+        .args(["daemon", "rotate-token", "--help"])
+        .output()
+        .await
+        .expect("failed to run CLI binary");
+
+    assert!(
+        output.status.success(),
+        "agent2ssh daemon rotate-token --help should exit 0, got: {:?}",
+        output.status.code()
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Rotate daemon token"),
+        "rotate-token help should mention token rotation"
     );
 }
 

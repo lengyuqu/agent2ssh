@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::time::Instant;
 
 use crate::{
-    core::exec_ssh_core,
+    core::exec_ssh_core_with_risk_override,
     store::config_dir,
     types::{ExecRequest, ExecResult, RiskLevel},
 };
@@ -98,11 +98,6 @@ pub async fn run_playbook_core(
     let mut success = true;
 
     for (idx, command) in playbook.steps.iter().enumerate() {
-        // Determine effective force flag:
-        // If the playbook has a risk_override we still need `force` for steps
-        // whose actual classification is High (the override is applied inside
-        // exec_ssh_core via the host profile). Here we simply pass the user's
-        // `force` flag through.
         let request = ExecRequest {
             host: host.to_string(),
             command: command.clone(),
@@ -112,7 +107,7 @@ pub async fn run_playbook_core(
             max_output_bytes: None,
         };
 
-        match exec_ssh_core(request).await {
+        match exec_ssh_core_with_risk_override(request, playbook.risk_override).await {
             Ok(result) => {
                 let exit_ok = result.exit_code == Some(0);
                 steps_completed.push(PlaybookStepResult {

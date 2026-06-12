@@ -385,6 +385,16 @@ agent2ssh daemon status
 agent2ssh daemon restart
 ```
 
+### 轮换认证令牌
+
+守护进程停止后可轮换 `~/.agent2ssh/daemon.token`：
+
+```bash
+agent2ssh daemon stop
+agent2ssh daemon rotate-token
+agent2ssh daemon start
+```
+
 ### 列出所有守护进程
 
 列出本地和远程守护进程及其连接状态：

@@ -14,6 +14,7 @@ import PingPanel from "./components/PingPanel";
 import PlaybooksPanel from "./components/PlaybooksPanel";
 import SFTPPanel from "./components/SFTPPanel";
 import SessionPanel from "./components/SessionPanel";
+import SetupWizard from "./components/SetupWizard";
 import type { ApprovalRequest, AuditEntry, AuditFilter, ConnectionStatus, HostProfile } from "./types";
 
 const APPROVAL_POLL_MS = 2000;
@@ -26,6 +27,8 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [pendingApprovals, setPendingApprovals] = useState<ApprovalRequest[]>([]);
   const [connectionStatuses, setConnectionStatuses] = useState<ConnectionStatus[]>([]);
+  const [showWizard, setShowWizard] = useState(false);
+  const [wizardDismissed, setWizardDismissed] = useState(false);
 
   const currentHost = useMemo(
     () => hosts.find((h) => h.name === selectedHost),
@@ -47,6 +50,13 @@ export default function App() {
       .catch((err) => setError(String(err)))
       .finally(() => setLoading(false));
   }, []);
+
+  // Show wizard when no hosts are configured and user hasn't dismissed it
+  useEffect(() => {
+    if (!loading && hosts.length === 0 && !wizardDismissed) {
+      setShowWizard(true);
+    }
+  }, [loading, hosts.length, wizardDismissed]);
 
   // Fix-1: Poll daemon for pending approvals every 2 seconds
   const pollApprovals = useCallback(async () => {
@@ -145,6 +155,23 @@ export default function App() {
   }
 
   const currentApproval = pendingApprovals[0] ?? null;
+
+  // Render setup wizard overlay when active
+  if (showWizard) {
+    return (
+      <SetupWizard
+        onComplete={() => {
+          setShowWizard(false);
+          setWizardDismissed(true);
+          refresh().catch((err) => setError(String(err)));
+        }}
+        onSkip={() => {
+          setShowWizard(false);
+          setWizardDismissed(true);
+        }}
+      />
+    );
+  }
 
   return (
     <main className="app-shell">

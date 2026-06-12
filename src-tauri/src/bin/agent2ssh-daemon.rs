@@ -19,9 +19,31 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 use tokio::net::TcpListener;
 use tower_http::cors::{Any, CorsLayer};
+use tracing;
 use uuid::Uuid;
+
+// ── Metrics counters ─────────────────────────────────────────────────────────
+
+static REQUEST_COUNT: AtomicU64 = AtomicU64::new(0);
+static EXEC_COUNT: AtomicU64 = AtomicU64::new(0);
+static EXEC_BLOCKED_COUNT: AtomicU64 = AtomicU64::new(0);
+static EXEC_TOTAL_DURATION_MS: AtomicU64 = AtomicU64::new(0);
+static APPROVAL_COUNT: AtomicU64 = AtomicU64::new(0);
+
+// ── Uptime tracking ──────────────────────────────────────────────────────────
+
+static START_TIME: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+fn uptime_secs() -> u64 {
+    START_TIME
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_secs()
+}
 
 // ── State ────────────────────────────────────────────────────────────────────
 
@@ -41,6 +63,7 @@ fn check_auth(state: &AppState, headers: &HeaderMap) -> Result<(), (StatusCode, 
     if token == state.token {
         Ok(())
     } else {
+        tracing::warn!("failed authentication attempt");
         Err((
             StatusCode::UNAUTHORIZED,
             Json(ErrorBody { error: "unauthorized".into() }),
@@ -77,12 +100,32 @@ fn err(status: StatusCode, msg: impl ToString) -> (StatusCode, Json<ErrorBody>) 
 // ── Handlers ─────────────────────────────────────────────────────────────────
 
 async fn health() -> Json<serde_json::Value> {
-    Json(serde_json::json!({"ok": true}))
+    let config_ok = config_dir().map(|d| d.exists()).unwrap_or(false);
+    let ssh_ok = which_binary("ssh").is_some();
+    Json(serde_json::json!({
+        "ok": true,
+        "version": env!("CARGO_PKG_VERSION"),
+        "uptime_secs": uptime_secs(),
+        "config_dir_available": config_ok,
+        "ssh_available": ssh_ok,
+        "pid": std::process::id(),
+    }))
+}
+
+async fn metrics() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "requests_total": REQUEST_COUNT.load(Ordering::Relaxed),
+        "exec_total": EXEC_COUNT.load(Ordering::Relaxed),
+        "exec_blocked_total": EXEC_BLOCKED_COUNT.load(Ordering::Relaxed),
+        "exec_total_duration_ms": EXEC_TOTAL_DURATION_MS.load(Ordering::Relaxed),
+        "approvals_total": APPROVAL_COUNT.load(Ordering::Relaxed),
+    }))
 }
 
 async fn list_hosts(
     State(s): State<AppState>, headers: HeaderMap,
 ) -> Result<Json<Vec<HostProfile>>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
     list_hosts_core().map(Json).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))
 }
@@ -90,6 +133,7 @@ async fn list_hosts(
 async fn add_host(
     State(s): State<AppState>, headers: HeaderMap, Json(host): Json<HostProfile>,
 ) -> Result<Json<HostProfile>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
     add_host_core(host).map(Json).map_err(|e| err(StatusCode::BAD_REQUEST, e))
 }
@@ -97,6 +141,7 @@ async fn add_host(
 async fn remove_host(
     State(s): State<AppState>, headers: HeaderMap, Path(name): Path<String>,
 ) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
     remove_host_core(&name).map(|_| Json(OkBody { ok: true })).map_err(|e| err(StatusCode::NOT_FOUND, e))
 }
@@ -104,6 +149,7 @@ async fn remove_host(
 async fn import_config(
     State(s): State<AppState>, headers: HeaderMap,
 ) -> Result<Json<Vec<HostProfile>>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
     import_ssh_config_core(None).map(Json).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))
 }
@@ -111,6 +157,7 @@ async fn import_config(
 async fn ping(
     State(s): State<AppState>, headers: HeaderMap, Json(body): Json<PingBody>,
 ) -> Result<Json<Vec<PingResult>>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
     Ok(Json(ping_hosts_core(body.hosts, body.timeout_secs).await))
 }
@@ -118,10 +165,17 @@ async fn ping(
 async fn exec(
     State(s): State<AppState>, headers: HeaderMap, Json(req): Json<ExecRequest>,
 ) -> Result<Json<ExecResult>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
+    tracing::info!(host = %req.host, command = %req.command, "exec handler invoked");
+
+    let exec_start = Instant::now();
+
     // Check user-defined rules first
     if let Some(user_risk) = classify_with_user_rules(&req.command).await {
         if user_risk == RiskLevel::Blocked {
+            EXEC_BLOCKED_COUNT.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(host = %req.host, command = %req.command, "command blocked by user rule");
             let evt = WebhookEvent {
                 event: "exec_blocked".into(),
                 host: req.host.clone(),
@@ -132,7 +186,7 @@ async fn exec(
             };
             tokio::spawn(async move {
                 if let Err(e) = fire_webhook(evt).await {
-                    eprintln!("[webhook] fire error: {e}");
+                    tracing::error!(error = %e, "webhook fire error");
                 }
             });
             return Err(err(StatusCode::BAD_REQUEST, format!("command blocked by user rule: '{}'", req.command)));
@@ -150,6 +204,7 @@ async fn exec(
 
     // If high risk and not forced, require approval
     if effective_risk == RiskLevel::High && !req.force {
+        APPROVAL_COUNT.fetch_add(1, Ordering::Relaxed);
         let approval_id = approval_request(&req.host, &req.command, effective_risk).await;
         let host_clone = req.host.clone();
         let cmd_clone = req.command.clone();
@@ -167,7 +222,7 @@ async fn exec(
         };
         tokio::spawn(async move {
             if let Err(e) = fire_webhook(evt).await {
-                eprintln!("[webhook] fire error: {e}");
+                tracing::error!(error = %e, "webhook fire error");
             }
         });
 
@@ -178,6 +233,8 @@ async fn exec(
                 let mut approved_req = req;
                 approved_req.force = true;
                 let result = exec_ssh_core(approved_req).await;
+                EXEC_COUNT.fetch_add(1, Ordering::Relaxed);
+                EXEC_TOTAL_DURATION_MS.fetch_add(exec_start.elapsed().as_millis() as u64, Ordering::Relaxed);
                 let exit_code = result.as_ref().ok().and_then(|r| r.exit_code);
                 let evt = WebhookEvent {
                     event: "exec_completed".into(),
@@ -189,7 +246,7 @@ async fn exec(
                 };
                 tokio::spawn(async move {
                     if let Err(e) = fire_webhook(evt).await {
-                        eprintln!("[webhook] fire error: {e}");
+                        tracing::error!(error = %e, "webhook fire error");
                     }
                 });
                 result.map(Json).map_err(|e| err(StatusCode::BAD_REQUEST, e))
@@ -205,7 +262,7 @@ async fn exec(
                 };
                 tokio::spawn(async move {
                     if let Err(e) = fire_webhook(evt).await {
-                        eprintln!("[webhook] fire error: {e}");
+                        tracing::error!(error = %e, "webhook fire error");
                     }
                 });
                 Err(err(StatusCode::FORBIDDEN, "command rejected by approver"))
@@ -221,12 +278,13 @@ async fn exec(
                 };
                 tokio::spawn(async move {
                     if let Err(e) = fire_webhook(evt).await {
-                        eprintln!("[webhook] fire error: {e}");
+                        tracing::error!(error = %e, "webhook fire error");
                     }
                 });
                 Err(err(StatusCode::REQUEST_TIMEOUT, "approval request timed out"))
             }
             _ => {
+                tracing::error!("unexpected approval status");
                 Err(err(StatusCode::INTERNAL_SERVER_ERROR, "unexpected approval status"))
             }
         }
@@ -234,6 +292,8 @@ async fn exec(
         let host_clone = req.host.clone();
         let cmd_clone = req.command.clone();
         let result = exec_ssh_core(req).await;
+        EXEC_COUNT.fetch_add(1, Ordering::Relaxed);
+        EXEC_TOTAL_DURATION_MS.fetch_add(exec_start.elapsed().as_millis() as u64, Ordering::Relaxed);
         let exit_code = result.as_ref().ok().and_then(|r| r.exit_code);
         let evt = WebhookEvent {
             event: "exec_completed".into(),
@@ -245,7 +305,7 @@ async fn exec(
         };
         tokio::spawn(async move {
             if let Err(e) = fire_webhook(evt).await {
-                eprintln!("[webhook] fire error: {e}");
+                tracing::error!(error = %e, "webhook fire error");
             }
         });
         result.map(Json).map_err(|e| err(StatusCode::BAD_REQUEST, e))
@@ -255,13 +315,16 @@ async fn exec(
 async fn exec_multi(
     State(s): State<AppState>, headers: HeaderMap, Json(body): Json<ExecMultiBody>,
 ) -> Result<Json<Vec<ExecMultiResult>>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
+    tracing::info!(hosts = ?body.hosts, command = %body.command, "exec-multi handler invoked");
     Ok(Json(exec_multi_core(body.hosts, body.command, body.force, body.timeout_secs, body.tags).await))
 }
 
 async fn audit(
     State(s): State<AppState>, headers: HeaderMap, Query(q): Query<AuditQuery>,
 ) -> Result<Json<Vec<AuditEntry>>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
     let filter = AuditFilter { host: q.host, risk_level: q.risk_level, exit_code: q.exit_code, since: q.since, until: q.until, limit: q.limit.unwrap_or(20) };
     list_audit_core(filter).map(Json).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))
@@ -270,43 +333,54 @@ async fn audit(
 // ── SFTP ─────────────────────────────────────────────────────────────────────
 
 async fn sftp_upload(State(s): State<AppState>, headers: HeaderMap, Json(req): Json<SftpUploadRequest>) -> Result<Json<SftpResult>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?; sftp_upload_core(req).await.map(Json).map_err(|e| err(StatusCode::BAD_REQUEST, e))
 }
 async fn sftp_download(State(s): State<AppState>, headers: HeaderMap, Json(req): Json<SftpDownloadRequest>) -> Result<Json<SftpResult>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?; sftp_download_core(req).await.map(Json).map_err(|e| err(StatusCode::BAD_REQUEST, e))
 }
 async fn sftp_ls(State(s): State<AppState>, headers: HeaderMap, Json(body): Json<SftpDirBody>) -> Result<Json<ExecResult>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?; sftp_ls_core(&body.host, &body.path, None).await.map(Json).map_err(|e| err(StatusCode::BAD_REQUEST, e))
 }
 async fn sftp_stat(State(s): State<AppState>, headers: HeaderMap, Json(body): Json<SftpDirBody>) -> Result<Json<ExecResult>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?; sftp_stat_core(&body.host, &body.path, None).await.map(Json).map_err(|e| err(StatusCode::BAD_REQUEST, e))
 }
 async fn sftp_mkdir(State(s): State<AppState>, headers: HeaderMap, Json(body): Json<SftpDirBody>) -> Result<Json<ExecResult>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?; sftp_mkdir_core(&body.host, &body.path, None).await.map(Json).map_err(|e| err(StatusCode::BAD_REQUEST, e))
 }
 
 // ── Sessions ─────────────────────────────────────────────────────────────────
 
 async fn session_open(State(s): State<AppState>, headers: HeaderMap, Json(body): Json<SessionOpenBody>) -> Result<Json<IdBody>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
+    tracing::info!(host = %body.host, "session_open invoked");
     session_open_core(&body.host).await.map(|id| Json(IdBody { id: id.to_string() })).map_err(|e| err(StatusCode::BAD_REQUEST, e))
 }
 async fn session_write(State(s): State<AppState>, headers: HeaderMap, Path(id): Path<String>, Json(body): Json<SessionWriteBody>) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
     let uuid = Uuid::parse_str(&id).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
     session_write_core(uuid, &body.input).await.map(|_| Json(OkBody { ok: true })).map_err(|e| err(StatusCode::BAD_REQUEST, e))
 }
 async fn session_read(State(s): State<AppState>, headers: HeaderMap, Path(id): Path<String>, Query(q): Query<ReadQuery>) -> Result<Json<OutputBody>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
     let uuid = Uuid::parse_str(&id).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
     session_read_core(uuid, q.timeout_ms.unwrap_or(2000)).await.map(|output| Json(OutputBody { output })).map_err(|e| err(StatusCode::BAD_REQUEST, e))
 }
 async fn session_close(State(s): State<AppState>, headers: HeaderMap, Path(id): Path<String>) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
     let uuid = Uuid::parse_str(&id).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
     session_close_core(uuid).await.map(|_| Json(OkBody { ok: true })).map_err(|e| err(StatusCode::BAD_REQUEST, e))
 }
 async fn session_list(State(s): State<AppState>, headers: HeaderMap) -> Result<Json<Vec<SessionListItem>>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
     Ok(Json(session_list_core().await.into_iter().map(|(id, host)| SessionListItem { id: id.to_string(), host }).collect()))
 }
@@ -314,14 +388,17 @@ async fn session_list(State(s): State<AppState>, headers: HeaderMap) -> Result<J
 // ── Forwards ─────────────────────────────────────────────────────────────────
 
 async fn forward_add(State(s): State<AppState>, headers: HeaderMap, Json(req): Json<ForwardRule>) -> Result<Json<ForwardRule>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
     forward_add_core(&req.host, req.direction, req.bind_port, &req.target_host, req.target_port).await.map(Json).map_err(|e| err(StatusCode::BAD_REQUEST, e))
 }
 async fn forward_list(State(s): State<AppState>, headers: HeaderMap) -> Result<Json<Vec<ForwardRule>>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
     Ok(Json(forward_list_core().await))
 }
 async fn forward_remove(State(s): State<AppState>, headers: HeaderMap, Path(id): Path<String>) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
     let uuid = Uuid::parse_str(&id).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
     forward_remove_core(uuid).await.map(|_| Json(OkBody { ok: true })).map_err(|e| err(StatusCode::BAD_REQUEST, e))
@@ -330,15 +407,18 @@ async fn forward_remove(State(s): State<AppState>, headers: HeaderMap, Path(id):
 // ── Approvals ────────────────────────────────────────────────────────────────
 
 async fn approvals_list(State(s): State<AppState>, headers: HeaderMap) -> Result<Json<Vec<ApprovalRequestType>>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
     Ok(Json(approval_list().await))
 }
 async fn approval_approve(State(s): State<AppState>, headers: HeaderMap, Path(id): Path<String>) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
     let uuid = Uuid::parse_str(&id).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
     approval_respond(uuid, true).await.map(|_| Json(OkBody { ok: true })).map_err(|e| err(StatusCode::BAD_REQUEST, e))
 }
 async fn approval_reject(State(s): State<AppState>, headers: HeaderMap, Path(id): Path<String>) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
     let uuid = Uuid::parse_str(&id).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
     approval_respond(uuid, false).await.map(|_| Json(OkBody { ok: true })).map_err(|e| err(StatusCode::BAD_REQUEST, e))
@@ -347,6 +427,7 @@ async fn approval_reject(State(s): State<AppState>, headers: HeaderMap, Path(id)
 // ── Risk check ───────────────────────────────────────────────────────────────
 
 async fn risk_check(State(s): State<AppState>, headers: HeaderMap, Json(body): Json<RiskCheckBody>) -> Result<Json<RiskCheckResult>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
     let base = classify_risk(&body.command);
     if let Some(user_risk) = classify_with_user_rules(&body.command).await {
@@ -363,14 +444,17 @@ async fn risk_check(State(s): State<AppState>, headers: HeaderMap, Json(body): J
 // ── Connections ──────────────────────────────────────────────────────────────
 
 async fn connection_status(State(s): State<AppState>, headers: HeaderMap) -> Result<Json<Vec<ConnectionStatus>>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
     Ok(Json(list_active_connections().await))
 }
 async fn ssh_connect(State(s): State<AppState>, headers: HeaderMap, Path(host): Path<String>) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
     connect_host(&host).await.map(|_| Json(OkBody { ok: true })).map_err(|e| err(StatusCode::BAD_REQUEST, e))
 }
 async fn ssh_disconnect(State(s): State<AppState>, headers: HeaderMap, Path(host): Path<String>) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
     disconnect_host(&host).await.map(|_| Json(OkBody { ok: true })).map_err(|e| err(StatusCode::BAD_REQUEST, e))
 }
@@ -380,6 +464,7 @@ async fn ssh_disconnect(State(s): State<AppState>, headers: HeaderMap, Path(host
 async fn get_webhook_config(
     State(s): State<AppState>, headers: HeaderMap,
 ) -> Result<Json<WebhookConfig>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
     Ok(Json(load_webhook_config().unwrap_or_default()))
 }
@@ -387,6 +472,7 @@ async fn get_webhook_config(
 async fn set_webhook_config(
     State(s): State<AppState>, headers: HeaderMap, Json(config): Json<WebhookConfig>,
 ) -> Result<Json<WebhookConfig>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
     save_webhook_config(&config).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(config))
@@ -397,6 +483,7 @@ async fn set_webhook_config(
 async fn list_playbooks(
     State(s): State<AppState>, headers: HeaderMap,
 ) -> Result<Json<Vec<Playbook>>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
     list_playbooks_core().map(Json).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))
 }
@@ -404,6 +491,7 @@ async fn list_playbooks(
 async fn run_playbook(
     State(s): State<AppState>, headers: HeaderMap, Json(body): Json<PlaybookRunBody>,
 ) -> Result<Json<PlaybookRunResult>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
     run_playbook_core(&body.playbook, &body.host, body.force)
         .await
@@ -416,8 +504,25 @@ async fn run_playbook(
 async fn list_daemons(
     State(s): State<AppState>, headers: HeaderMap,
 ) -> Result<Json<Vec<agent2ssh::remote::DaemonInfo>>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
     list_daemons_core().map(Json).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))
+}
+
+// ── Team Config Export/Import ───────────────────────────────────────────────
+
+async fn config_export(
+    State(s): State<AppState>, headers: HeaderMap,
+) -> Result<Json<TeamConfigExport>, (StatusCode, Json<ErrorBody>)> {
+    check_auth(&s, &headers)?;
+    export_team_config().map(Json).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))
+}
+
+async fn config_import(
+    State(s): State<AppState>, headers: HeaderMap, Json(export): Json<TeamConfigExport>,
+) -> Result<Json<ImportResult>, (StatusCode, Json<ErrorBody>)> {
+    check_auth(&s, &headers)?;
+    import_team_config(&export).map(Json).map_err(|e| err(StatusCode::BAD_REQUEST, e))
 }
 
 async fn proxy_exec(
@@ -426,6 +531,7 @@ async fn proxy_exec(
     Path(alias): Path<String>,
     Json(req): Json<ExecRequest>,
 ) -> Result<Json<ExecResult>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
 
     // If alias is "localhost", execute locally
@@ -433,6 +539,7 @@ async fn proxy_exec(
         // Apply same user-rule checks as local exec
         if let Some(user_risk) = classify_with_user_rules(&req.command).await {
             if user_risk == RiskLevel::Blocked {
+                EXEC_BLOCKED_COUNT.fetch_add(1, Ordering::Relaxed);
                 return Err(err(StatusCode::BAD_REQUEST, format!("command blocked by user rule: '{}'", req.command)));
             }
         }
@@ -483,6 +590,7 @@ async fn exec_stream(
     if let Err(e) = check_auth(&s, &headers) {
         return e.into_response();
     }
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     ws.on_upgrade(|socket| async move {
         use axum::extract::ws::Message;
         use tokio::io::AsyncReadExt;
@@ -626,6 +734,16 @@ fn expand_tilde(path: &str) -> String {
     path.to_string()
 }
 
+/// Check whether a binary exists on PATH (used by health + doctor).
+pub fn which_binary(name: &str) -> Option<String> {
+    let output = std::process::Command::new("which").arg(name).output().ok()?;
+    if output.status.success() {
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !path.is_empty() { return Some(path); }
+    }
+    None
+}
+
 // ── Web Console ──────────────────────────────────────────────────────────────
 
 async fn serve_console() -> axum::response::Html<&'static str> {
@@ -636,6 +754,30 @@ async fn serve_console() -> axum::response::Html<&'static str> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // ── P9-1: Initialize structured logging ──────────────────────────────────
+    let log_level = std::env::var("AGENT2SSH_LOG").unwrap_or_else(|_| "info".to_string());
+    let log_format = std::env::var("AGENT2SSH_LOG_FORMAT").unwrap_or_else(|_| "text".to_string());
+
+    let env_filter = tracing_subscriber::EnvFilter::try_new(&log_level)
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
+    match log_format.as_str() {
+        "json" => {
+            tracing_subscriber::fmt()
+                .json()
+                .with_env_filter(env_filter)
+                .init();
+        }
+        _ => {
+            tracing_subscriber::fmt()
+                .with_env_filter(env_filter)
+                .init();
+        }
+    }
+
+    // Record start time for uptime calculation
+    START_TIME.get_or_init(Instant::now);
+
     let addr = "127.0.0.1:7722";
     let config_dir = config_dir()?;
     std::fs::create_dir_all(&config_dir)?;
@@ -650,9 +792,9 @@ async fn main() -> anyhow::Result<()> {
             if let Ok(meta) = std::fs::metadata(&token_path) {
                 let mode = meta.permissions().mode() & 0o777;
                 if mode != 0o600 {
-                    eprintln!(
-                        "[security] WARNING: daemon.token had overly permissive mode {:o}, fixing to 0600",
-                        mode
+                    tracing::warn!(
+                        mode = format!("{:o}", mode),
+                        "daemon.token had overly permissive mode, fixing to 0600"
                     );
                 }
             }
@@ -679,6 +821,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/", get(|| async { axum::response::Redirect::to("/console") }))
         .route("/console", get(serve_console))
         .route("/health", get(health))
+        .route("/metrics", get(metrics))
         .route("/hosts", get(list_hosts).post(add_host))
         .route("/hosts/import", post(import_config))
         .route("/hosts/:name", delete(remove_host))
@@ -709,12 +852,14 @@ async fn main() -> anyhow::Result<()> {
         .route("/playbooks/run", post(run_playbook))
         .route("/daemons", get(list_daemons))
         .route("/daemons/:alias/exec", post(proxy_exec))
+        .route("/config/export", get(config_export))
+        .route("/config/import", post(config_import))
         .route("/webhook/config", get(get_webhook_config).put(set_webhook_config))
         .layer(cors)
         .with_state(state);
 
-    println!("Agent2SSH daemon listening on {addr}");
-    println!("Web console: http://{addr}/console");
+    tracing::info!(addr = %addr, "Agent2SSH daemon listening");
+    tracing::info!(url = %format!("http://{addr}/console"), "Web console available");
     let listener = TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     let _ = std::fs::remove_file(&pid_path);

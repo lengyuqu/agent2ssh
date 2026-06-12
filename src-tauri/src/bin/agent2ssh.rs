@@ -1,13 +1,14 @@
 use agent2ssh::{
-    add_host_core, classify_risk, exec_multi_core, exec_ssh_core, forward_add_core,
-    forward_list_core, forward_remove_core, import_ssh_config_core, list_audit_core,
-    list_daemons_core, list_hosts_core, ping_hosts_core, remove_host_core, session_close_core,
-    session_list_core, session_open_core, session_read_core, session_write_core,
-    sftp_download_core, sftp_ls_core, sftp_mkdir_core, sftp_stat_core, sftp_upload_core,
-    AuditFilter, ExecRequest, ForwardDirection, HostProfile, RiskLevel, SftpDownloadRequest,
-    SftpUploadRequest,
+    add_host_core, classify_risk, exec_multi_core, exec_ssh_core, export_team_config,
+    forward_add_core, forward_list_core, forward_remove_core, import_ssh_config_core,
+    import_team_config, list_audit_core, list_daemons_core, list_hosts_core, ping_hosts_core,
+    remove_host_core, session_close_core, session_list_core, session_open_core,
+    session_read_core, session_write_core, sftp_download_core, sftp_ls_core, sftp_mkdir_core,
+    sftp_stat_core, sftp_upload_core, AuditFilter, ExecRequest, ForwardDirection, HostProfile,
+    RiskLevel, SftpDownloadRequest, SftpUploadRequest, TeamConfigExport,
 };
 use agent2ssh::remote::get_daemon;
+use agent2ssh::store::{audit_path, restrict_file_to_owner};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
@@ -110,6 +111,26 @@ enum Commands {
     Daemon {
         #[command(subcommand)]
         command: DaemonCommands,
+    },
+    /// Export team configuration (hosts without keys, risk rules, playbooks)
+    ConfigExport {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Import team configuration from a JSON file
+    ConfigImport {
+        /// Path to the JSON file to import
+        path: String,
+        /// Input is JSON format
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run diagnostic checks on the agent2ssh environment
+    Doctor {
+        /// Output results as JSON
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -271,6 +292,11 @@ enum DaemonCommands {
     Status,
     /// Restart the daemon
     Restart,
+    /// Rotate daemon token while the daemon is stopped
+    RotateToken {
+        #[arg(long)]
+        json: bool,
+    },
     /// List all configured daemons (localhost + remotes)
     List {
         #[arg(long)]
@@ -686,7 +712,7 @@ async fn main() -> Result<()> {
                     if pid_path.exists() {
                         let pid = std::fs::read_to_string(&pid_path)?.trim().to_string();
                         // Check if process is alive
-                        if let Ok(_) = std::process::Command::new("kill").arg("-0").arg(&pid).status() {
+                        if process_is_alive(&pid) {
                             println!("Daemon is already running (pid={})", pid);
                             return Ok(());
                         }
@@ -750,6 +776,33 @@ async fn main() -> Result<()> {
                         .map_err(|e| anyhow::anyhow!("Failed to start daemon: {}", e))?;
                     println!("Daemon restarted.");
                 }
+                DaemonCommands::RotateToken { json } => {
+                    if pid_path.exists() {
+                        let pid = std::fs::read_to_string(&pid_path)?.trim().to_string();
+                        if process_is_alive(&pid) {
+                            anyhow::bail!(
+                                "daemon is running (pid={pid}); stop it before rotating daemon.token"
+                            );
+                        }
+                        let _ = std::fs::remove_file(&pid_path);
+                    }
+                    std::fs::create_dir_all(&config_dir)?;
+                    let token_path = config_dir.join("daemon.token");
+                    std::fs::write(&token_path, uuid::Uuid::new_v4().to_string())?;
+                    restrict_file_to_owner(&token_path)?;
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "rotated": true,
+                                "path": token_path,
+                            }))?
+                        );
+                    } else {
+                        println!("Rotated daemon token at {}.", token_path.display());
+                        println!("Restart the daemon and update clients that use this token.");
+                    }
+                }
                 DaemonCommands::List { json } => {
                     let daemons = list_daemons_core()?;
                     if json {
@@ -765,7 +818,259 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Commands::ConfigExport { json } => {
+            let export = export_team_config()?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&export)?);
+            } else {
+                println!("Team config export:");
+                println!("  Hosts: {} (key paths stripped)", export.hosts.len());
+                for h in &export.hosts {
+                    println!(
+                        "    {}\t{}{}:{}",
+                        h.name,
+                        h.user.as_deref().map(|u| format!("{u}@")).unwrap_or_default(),
+                        h.host,
+                        h.port.unwrap_or(22)
+                    );
+                }
+                println!("  Risk rules: {}", if export.risk_rules.is_some() { "included" } else { "not configured" });
+                println!("  Playbooks:  {}", if export.playbooks.is_some() { "included" } else { "not configured" });
+                if json {
+                    println!("\nUse --json to output machine-readable JSON.");
+                }
+            }
+        }
+        Commands::ConfigImport { path, json } => {
+            let raw = std::fs::read_to_string(&path)
+                .map_err(|e| anyhow::anyhow!("failed to read '{}': {}", path, e))?;
+            let export: TeamConfigExport = serde_json::from_str(&raw)
+                .map_err(|e| anyhow::anyhow!("failed to parse JSON from '{}': {}", path, e))?;
+            let result = import_team_config(&export)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                println!("Import complete:");
+                println!("  Hosts added:   {}", result.hosts_added);
+                println!("  Hosts skipped: {}", result.hosts_skipped);
+                println!("  Risk rules:    {}", if result.risk_rules_imported { "imported" } else { "not included" });
+                println!("  Playbooks:     {}", if result.playbooks_imported { "imported" } else { "not included" });
+            }
+        }
+        Commands::Doctor { json: output_json } => {
+            run_doctor(output_json).await?;
+        }
     }
 
     Ok(())
+}
+
+fn process_is_alive(pid: &str) -> bool {
+    #[cfg(unix)]
+    {
+        matches!(
+            std::process::Command::new("kill").arg("-0").arg(pid).status(),
+            Ok(status) if status.success()
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        true
+    }
+}
+
+// ── Doctor command ───────────────────────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+struct DoctorCheck {
+    name: String,
+    status: String, // "pass", "fail", "warn"
+    detail: String,
+}
+
+async fn run_doctor(output_json: bool) -> Result<()> {
+    let mut checks: Vec<DoctorCheck> = Vec::new();
+
+    // 1. Check `ssh` binary exists
+    let ssh_ok = which_exists("ssh");
+    checks.push(DoctorCheck {
+        name: "ssh binary".into(),
+        status: if ssh_ok { "pass" } else { "fail" }.into(),
+        detail: if ssh_ok { "ssh found in PATH".into() } else { "ssh binary not found in PATH".into() },
+    });
+
+    // 2. Check `ssh-keygen` exists
+    let keygen_ok = which_exists("ssh-keygen");
+    checks.push(DoctorCheck {
+        name: "ssh-keygen binary".into(),
+        status: if keygen_ok { "pass" } else { "warn" }.into(),
+        detail: if keygen_ok { "ssh-keygen found in PATH".into() } else { "ssh-keygen not found (key generation unavailable)".into() },
+    });
+
+    // 3. Check ~/.agent2ssh/ directory exists and is writable
+    let config_dir = agent2ssh::config_dir()?;
+    let dir_exists = config_dir.exists();
+    let dir_writable = if dir_exists {
+        // Try to create a temp file to verify write access
+        let probe = config_dir.join(".doctor_probe");
+        match std::fs::write(&probe, "ok") {
+            Ok(_) => { let _ = std::fs::remove_file(&probe); true }
+            Err(_) => false,
+        }
+    } else { false };
+    checks.push(DoctorCheck {
+        name: "config directory".into(),
+        status: if dir_exists && dir_writable { "pass" } else if dir_exists { "warn" } else { "fail" }.into(),
+        detail: format!("{} ({})", config_dir.display(),
+            if dir_exists && dir_writable { "exists, writable" }
+            else if dir_exists { "exists, NOT writable" }
+            else { "does not exist" }),
+    });
+
+    // 4. Check hosts.json exists and is valid JSON
+    let hosts_path = config_dir.join("hosts.json");
+    if hosts_path.exists() {
+        let hosts_valid = std::fs::read_to_string(&hosts_path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .is_some();
+        checks.push(DoctorCheck {
+            name: "hosts.json".into(),
+            status: if hosts_valid { "pass" } else { "fail" }.into(),
+            detail: if hosts_valid { "valid JSON".into() } else { "exists but invalid JSON".into() },
+        });
+    } else {
+        checks.push(DoctorCheck {
+            name: "hosts.json".into(),
+            status: "warn".into(),
+            detail: "not configured yet (no hosts.json)".into(),
+        });
+    }
+
+    // 5. Check daemon.token exists and permissions are 0600 (Unix)
+    let token_path = config_dir.join("daemon.token");
+    if token_path.exists() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&token_path)
+                .map(|m| m.permissions().mode() & 0o777)
+                .unwrap_or(0o777);
+            let ok = mode == 0o600;
+            checks.push(DoctorCheck {
+                name: "daemon.token".into(),
+                status: if ok { "pass" } else { "warn" }.into(),
+                detail: if ok { format!("permissions 0{:o} (correct)", mode) }
+                    else { format!("permissions 0{:o} (should be 0600)", mode) },
+            });
+        }
+        #[cfg(not(unix))]
+        {
+            checks.push(DoctorCheck {
+                name: "daemon.token".into(),
+                status: "pass".into(),
+                detail: "exists".into(),
+            });
+        }
+    } else {
+        checks.push(DoctorCheck {
+            name: "daemon.token".into(),
+            status: "warn".into(),
+            detail: "not found (daemon not started?)".into(),
+        });
+    }
+
+    // 6. Check daemon is running (hit /health)
+    let daemon_running = check_daemon_health().await;
+    checks.push(DoctorCheck {
+        name: "daemon health".into(),
+        status: if daemon_running { "pass" } else { "warn" }.into(),
+        detail: if daemon_running { "GET /health returned 200".into() } else { "daemon not reachable on 127.0.0.1:7722".into() },
+    });
+
+    // 7. Check optional config files
+    let optional_files = [
+        ("risk_rules.toml", "risk rules"),
+        ("playbooks.toml", "playbooks"),
+        ("remotes.toml", "remote daemons"),
+        ("webhook.toml", "webhook config"),
+    ];
+    for (filename, label) in &optional_files {
+        let path = config_dir.join(filename);
+        let exists = path.exists();
+        checks.push(DoctorCheck {
+            name: format!("{filename} ({label})"),
+            status: if exists { "pass" } else { "warn" }.into(),
+            detail: if exists { "present".into() } else { format!("not found ({label} unavailable)") },
+        });
+    }
+
+    // 8. Check audit log size
+    if let Ok(audit_p) = audit_path() {
+        if audit_p.exists() {
+            let size = std::fs::metadata(&audit_p).map(|m| m.len()).unwrap_or(0);
+            let size_mb = size as f64 / (1024.0 * 1024.0);
+            let status = if size_mb > 10.0 { "warn" } else { "pass" };
+            checks.push(DoctorCheck {
+                name: "audit log".into(),
+                status: status.into(),
+                detail: format!("{:.2} MB ({})", size_mb, audit_p.display()),
+            });
+        } else {
+            checks.push(DoctorCheck {
+                name: "audit log".into(),
+                status: "pass".into(),
+                detail: "no audit log yet".into(),
+            });
+        }
+    }
+
+    // Output
+    if output_json {
+        println!("{}", serde_json::to_string_pretty(&checks)?);
+    } else {
+        println!("agent2ssh doctor report");
+        println!("{:-<60}", "");
+        for check in &checks {
+            let icon = match check.status.as_str() {
+                "pass" => "[PASS]",
+                "fail" => "[FAIL]",
+                "warn" => "[WARN]",
+                _ => "[????]",
+            };
+            println!("{} {:<28} {}", icon, check.name, check.detail);
+        }
+        let fail_count = checks.iter().filter(|c| c.status == "fail").count();
+        let warn_count = checks.iter().filter(|c| c.status == "warn").count();
+        println!("{:-<60}", "");
+        println!(
+            "Summary: {} check(s), {} fail, {} warn",
+            checks.len(), fail_count, warn_count
+        );
+        if fail_count > 0 {
+            std::process::exit(1);
+        }
+    }
+
+    Ok(())
+}
+
+fn which_exists(name: &str) -> bool {
+    std::process::Command::new("which")
+        .arg(name)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+async fn check_daemon_health() -> bool {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+    match client.get("http://127.0.0.1:7722/health").send().await {
+        Ok(resp) => resp.status().is_success(),
+        Err(_) => false,
+    }
 }

@@ -70,6 +70,9 @@ pub async fn fire_webhook(event: WebhookEvent) -> Result<()> {
         return Ok(());
     }
 
+    let mut event = event;
+    event.command = crate::store::redact_sensitive_text(&event.command);
+
     // Format payload: Slack Block Kit for Slack URLs, plain JSON otherwise
     let payload = if url.contains("hooks.slack.com") {
         format_slack_message(&event)
@@ -171,15 +174,9 @@ fn format_slack_message(event: &WebhookEvent) -> serde_json::Value {
                 "elements": [
                     {
                         "type": "button",
-                        "text": { "type": "plain_text", "text": "Approve" },
+                        "text": { "type": "plain_text", "text": "Open Approvals" },
                         "style": "primary",
-                        "url": format!("http://127.0.0.1:7722/approvals/{}/approve", approval_id),
-                    },
-                    {
-                        "type": "button",
-                        "text": { "type": "plain_text", "text": "Reject" },
-                        "style": "danger",
-                        "url": format!("http://127.0.0.1:7722/approvals/{}/reject", approval_id),
+                        "url": format!("http://127.0.0.1:7722/console#approvals-{}", approval_id),
                     }
                 ]
             }));
