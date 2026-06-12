@@ -10,7 +10,7 @@
 # If no target-triple is given, the script auto-detects the current host triple.
 #
 # Expected output layout:
-#   src-tauri/binaries/agent2ssh-<triple>
+#   src-tauri/binaries/agent2ssh-cli-<triple>
 #   src-tauri/binaries/agent2ssh-daemon-<triple>
 #   src-tauri/binaries/agent2ssh-mcp-<triple>
 #
@@ -50,13 +50,17 @@ if [[ ! -d "$RELEASE_DIR" ]]; then
 fi
 
 # ---------- binaries to copy ----------
-BINS=("agent2ssh" "agent2ssh-daemon" "agent2ssh-mcp")
+# The CLI sidecar is named agent2ssh-cli in the Tauri bundle because Tauri
+# rejects sidecars with the same name as the Cargo package.
+BINS=("agent2ssh:agent2ssh-cli" "agent2ssh-daemon:agent2ssh-daemon" "agent2ssh-mcp:agent2ssh-mcp")
 
 mkdir -p "$BINARIES_DIR"
 
-for bin in "${BINS[@]}"; do
-  src="$RELEASE_DIR/${bin}${EXT}"
-  dst="$BINARIES_DIR/${bin}-${TARGET}${EXT}"
+for pair in "${BINS[@]}"; do
+  src_name="${pair%%:*}"
+  dst_name="${pair##*:}"
+  src="$RELEASE_DIR/${src_name}${EXT}"
+  dst="$BINARIES_DIR/${dst_name}-${TARGET}${EXT}"
 
   if [[ ! -f "$src" ]]; then
     echo "WARN: Source binary not found, skipping: $src"

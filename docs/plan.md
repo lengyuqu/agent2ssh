@@ -57,7 +57,7 @@ P0-P10 已全部完成。当前基线：
 | P8 | 安全边界加固 | ✅ 已完成 | 高 | Codex |
 | P9 | 运维与可观测性 | ✅ 已完成 | 中 | Qoder |
 | P10 | 产品化与生态集成 | ✅ 已完成 | 中 | Qoder |
-| F1 | 真实环境试运行 | 🟨 进行中 | 高 | Codex |
+| F1 | 真实环境试运行 | ✅ 已完成 | 高 | Codex |
 | F2 | 主机与环境管理 | ⬜ 待认领 | 高 | - |
 | F3 | 执行体验与 Runbook | ⬜ 待认领 | 高 | - |
 | F4 | 审批与协作 | ⬜ 待认领 | 高 | - |
@@ -115,15 +115,15 @@ P0-P10 已全部完成。当前基线：
 
 ## F1 · 真实环境试运行
 
-目标：用现有功能覆盖一台到三台真实可控主机，形成 bug 修复清单。
+目标：用现有功能覆盖一台真实可控主机，形成并处理首轮 bug 修复清单。
 
 | 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
 |------|------|--------|--------|------|----------|
 | F1-1 | ✅ 已完成 | 高 | Codex | 建立真实服务器 fixture | 107.174.36.91 使用临时 key 完成 exec、ping、sftp 验证；临时 key 和远端 `/tmp` 目录已清理 |
 | F1-2 | ✅ 已完成 | 高 | Codex | 跑完整 CLI 工作流 | host add/list、risk、exec、exec-multi、sftp、audit、doctor、daemon-backed session/forward 已记录 |
 | F1-3 | ✅ 已完成 | 高 | Codex | 跑 MCP 工作流 | MCP `tools/list` 返回 35 工具；`ssh_list_hosts`、`ssh_exec`、`ssh_audit`、`ssh_doctor` 在真实服务器通过 |
-| F1-4 | ⬜ 待认领 | 中 | - | 跑桌面端首次启动和常规操作 | SetupWizard、Host 管理、Exec、Approvals、Keys 无阻断问题 |
-| F1-5 | ✅ 已完成 | 高 | Codex | 输出 bug backlog | B1、B2 已记录；后续按影响等级进入修复 |
+| F1-4 | ✅ 已完成 | 中 | Codex | 跑桌面端首次启动和打包验证 | `npm run tauri:build` 生成 `.app` 和 `.dmg`；macOS bundle 主入口 `agent2ssh-app` 首启 smoke 通过 |
+| F1-5 | ✅ 已完成 | 高 | Codex | 输出 bug backlog | B1-B5 已记录并修复；后续新 bug 按影响等级进入修复 |
 
 ## Bug 修复队列
 
@@ -131,6 +131,9 @@ P0-P10 已全部完成。当前基线：
 |------|------|--------|--------|------|----------|
 | B1 | ✅ 已完成 | 高 | Codex | `AGENT2SSH_CONFIG_DIR` 文档存在但实现未生效 | `config_dir()` 优先使用非空 `AGENT2SSH_CONFIG_DIR`；单测 `store::tests::test_config_dir_uses_env_override` 通过 |
 | B2 | ✅ 已完成 | 高 | Codex | CLI `session`/`forward` 状态只保存在单进程内 | CLI `session`/`forward` 默认通过 daemon HTTP API 管理长生命周期资源；真实服务器验证 open/list/write/read/close 和 forward add/list/rm 通过 |
+| B3 | ✅ 已完成 | 高 | Codex | Tauri sidecar 名称与 Cargo package/bin 名称冲突 | CLI sidecar 改为 `agent2ssh-cli`；`scripts/prepare-sidecars.sh` 生成 Tauri 期望的 target-triple 文件名 |
+| B4 | ✅ 已完成 | 中 | Codex | Tauri PNG 图标不是 RGBA，导致 macOS bundle 构建失败 | `32x32.png`、`128x128.png`、`128x128@2x.png` 转为 RGBA；`npm run tauri:build` 通过 |
+| B5 | ✅ 已完成 | 高 | Codex | macOS bundle 主程序被 CLI 二进制污染，首次启动只打印 CLI help | Cargo package 改名为 `agent2ssh-app`，保留 lib crate `agent2ssh` 和 CLI bin `agent2ssh`；bundle `CFBundleExecutable=agent2ssh-app` 且首启 smoke 通过 |
 
 ## F2 · 主机与环境管理
 
@@ -189,4 +192,4 @@ P0-P10 已全部完成。当前基线：
 
 ## 近期建议
 
-优先从 F1 开始，不要直接进入 F2-F6。F1 的输出应该是一份 bug backlog；只有当现有功能跑通后，再按 bug 影响和使用频率决定下一批功能。
+F1 已完成，下一阶段建议先做 F2 和 F3 中最高频的主机视图、执行预览、Playbook 参数化；F4-F6 在真实团队协作和远程 daemon 使用频率上来后再展开。
