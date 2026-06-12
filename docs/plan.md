@@ -97,11 +97,18 @@ P0-P10 已全部完成。当前基线：
 
 | 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
 |------|------|--------|--------|------|----------|
-| F1-1 | ⬜ 待认领 | 高 | - | 建立本地 sshd 或测试机 fixture | exec、ping、sftp、session、forward 可在同一 fixture 上重复运行 |
-| F1-2 | ⬜ 待认领 | 高 | - | 跑完整 CLI 工作流 | host add/import、risk、exec、exec-multi、audit、daemon、doctor 全部有记录 |
-| F1-3 | ⬜ 待认领 | 高 | - | 跑 MCP 工作流 | MCP 客户端通过 `ssh_list_hosts`、`ssh_exec`、`ssh_audit`、`ssh_doctor` 完成一次诊断 |
+| F1-1 | ✅ 已完成 | 高 | Codex | 建立真实服务器 fixture | 107.174.36.91 使用临时 key 完成 exec、ping、sftp 验证；临时 key 和远端 `/tmp` 目录已清理 |
+| F1-2 | 🟨 进行中 | 高 | Codex | 跑完整 CLI 工作流 | host add/list、risk、exec、exec-multi、sftp、audit、doctor 已记录；session/forward 进入 B2 |
+| F1-3 | ✅ 已完成 | 高 | Codex | 跑 MCP 工作流 | MCP `tools/list` 返回 35 工具；`ssh_list_hosts`、`ssh_exec`、`ssh_audit`、`ssh_doctor` 在真实服务器通过 |
 | F1-4 | ⬜ 待认领 | 中 | - | 跑桌面端首次启动和常规操作 | SetupWizard、Host 管理、Exec、Approvals、Keys 无阻断问题 |
-| F1-5 | ⬜ 待认领 | 高 | - | 输出 bug backlog | 每个 bug 有复现步骤、期望行为、实际行为和影响等级 |
+| F1-5 | ✅ 已完成 | 高 | Codex | 输出 bug backlog | B1、B2 已记录；后续按影响等级进入修复 |
+
+## Bug 修复队列
+
+| 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
+|------|------|--------|--------|------|----------|
+| B1 | ✅ 已完成 | 高 | Codex | `AGENT2SSH_CONFIG_DIR` 文档存在但实现未生效 | `config_dir()` 优先使用非空 `AGENT2SSH_CONFIG_DIR`；单测 `store::tests::test_config_dir_uses_env_override` 通过 |
+| B2 | ⬜ 待认领 | 高 | - | CLI `session`/`forward` 状态只保存在单进程内 | 明确 CLI 语义：要么改为默认走 daemon 管理长生命周期资源，要么在 CLI 禁用跨进程 session/forward 并给出清晰错误 |
 
 ## F2 · 主机与环境管理
 

@@ -15,9 +15,17 @@ pub fn hosts_lock() -> &'static Mutex<()> {
 }
 
 pub fn config_dir() -> Result<PathBuf> {
+    if let Some(path) = config_dir_override(std::env::var("AGENT2SSH_CONFIG_DIR").ok()) {
+        return Ok(path);
+    }
+
     let base =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("unable to locate home directory"))?;
     Ok(base.join(".agent2ssh"))
+}
+
+fn config_dir_override(path: Option<String>) -> Option<PathBuf> {
+    path.filter(|value| !value.trim().is_empty()).map(PathBuf::from)
 }
 
 fn config_path() -> Result<PathBuf> {
@@ -210,6 +218,18 @@ pub fn list_audit_raw(filter: &AuditFilter) -> Result<Vec<AuditEntry>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_config_dir_uses_env_override() {
+        let expected = std::env::temp_dir().join(format!("agent2ssh-config-{}", uuid::Uuid::new_v4()));
+
+        assert_eq!(
+            config_dir_override(Some(expected.display().to_string())).unwrap(),
+            expected
+        );
+        assert!(config_dir_override(Some("   ".to_string())).is_none());
+        assert!(config_dir_override(None).is_none());
+    }
 
     #[cfg(unix)]
     #[test]
