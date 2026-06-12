@@ -28,6 +28,10 @@ components:
         port:      { type: integer, nullable: true }
         key_path:  { type: string, nullable: true }
         jump_host: { type: string, nullable: true }
+        risk_override: { $ref: "#/components/schemas/RiskLevel", nullable: true }
+        tags:
+          type: array
+          items: { type: string }
 
     ExecRequest:
       type: object
@@ -58,6 +62,21 @@ components:
         host:   { type: string }
         result: { $ref: "#/components/schemas/ExecResult", nullable: true }
         error:  { type: string, nullable: true }
+
+    ExecMultiRequest:
+      type: object
+      required: [hosts, command]
+      properties:
+        hosts:
+          type: array
+          items: { type: string }
+        command:      { type: string }
+        force:        { type: boolean, default: false }
+        timeout_secs: { type: integer, nullable: true }
+        tags:
+          type: array
+          nullable: true
+          items: { type: string }
 
     PingResult:
       type: object
@@ -149,6 +168,13 @@ components:
         target_host: { type: string }
         target_port: { type: integer }
 
+    ConnectionStatus:
+      type: object
+      properties:
+        host:        { type: string }
+        connected:   { type: boolean }
+        socket_path: { type: string, nullable: true }
+
     ApprovalRequest:
       type: object
       properties:
@@ -164,6 +190,62 @@ components:
       required: [approved]
       properties:
         approved: { type: boolean }
+
+    WebhookConfig:
+      type: object
+      properties:
+        url: { type: string, nullable: true }
+        events:
+          type: array
+          items: { type: string }
+        secret: { type: string, nullable: true }
+
+    Playbook:
+      type: object
+      properties:
+        name:        { type: string }
+        description: { type: string }
+        steps:
+          type: array
+          items: { type: string }
+        tags:
+          type: array
+          items: { type: string }
+        risk_override: { $ref: "#/components/schemas/RiskLevel", nullable: true }
+
+    PlaybookRunRequest:
+      type: object
+      required: [playbook, host]
+      properties:
+        playbook: { type: string }
+        host:     { type: string }
+        force:    { type: boolean, default: false }
+
+    PlaybookStepResult:
+      type: object
+      properties:
+        step:    { type: integer }
+        command: { type: string }
+        result:  { $ref: "#/components/schemas/ExecResult", nullable: true }
+        error:   { type: string, nullable: true }
+
+    PlaybookRunResult:
+      type: object
+      properties:
+        playbook:          { type: string }
+        host:              { type: string }
+        steps_completed:
+          type: array
+          items: { $ref: "#/components/schemas/PlaybookStepResult" }
+        success:           { type: boolean }
+        total_duration_ms: { type: integer }
+
+    DaemonInfo:
+      type: object
+      properties:
+        alias:     { type: string }
+        url:       { type: string }
+        connected: { type: boolean }
 
     Error:
       type: object
@@ -286,14 +368,7 @@ paths:
         required: true
         content:
           application/json:
-            schema:
-              type: object
-              required: [hosts, command]
-              properties:
-                hosts:        { type: array, items: { type: string } }
-                command:      { type: string }
-                force:        { type: boolean, default: false }
-                timeout_secs: { type: integer, nullable: true }
+            schema: { $ref: "#/components/schemas/ExecMultiRequest" }
       responses:
         "200":
           content:
@@ -316,12 +391,24 @@ paths:
     get:
       summary: Query audit log
       parameters:
-        - name: host       { in: query, schema: { type: string } }
-        - name: risk_level { in: query, schema: { $ref: "#/components/schemas/RiskLevel" } }
-        - name: exit_code  { in: query, schema: { type: integer } }
-        - name: since      { in: query, schema: { type: string, format: date-time } }
-        - name: until      { in: query, schema: { type: string, format: date-time } }
-        - name: limit      { in: query, schema: { type: integer, default: 20 } }
+        - name: host
+          in: query
+          schema: { type: string }
+        - name: risk_level
+          in: query
+          schema: { $ref: "#/components/schemas/RiskLevel" }
+        - name: exit_code
+          in: query
+          schema: { type: integer }
+        - name: since
+          in: query
+          schema: { type: string, format: date-time }
+        - name: until
+          in: query
+          schema: { type: string, format: date-time }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 20 }
       responses:
         "200":
           content:
@@ -611,3 +698,124 @@ paths:
                 properties:
                   risk_level: { $ref: "#/components/schemas/RiskLevel" }
                   matched_rule: { type: string, nullable: true }
+
+  /connections:
+    get:
+      summary: List SSH ControlMaster connection states
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ConnectionStatus" }
+
+  /connections/{host}/connect:
+    post:
+      summary: Establish a ControlMaster connection to a host
+      parameters:
+        - name: host
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+
+  /connections/{host}/disconnect:
+    post:
+      summary: Close a ControlMaster connection to a host
+      parameters:
+        - name: host
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+
+  /playbooks:
+    get:
+      summary: List configured playbooks
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Playbook" }
+
+  /playbooks/run:
+    post:
+      summary: Execute a playbook on a host
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PlaybookRunRequest" }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlaybookRunResult" }
+
+  /daemons:
+    get:
+      summary: List configured daemon instances
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/DaemonInfo" }
+
+  /daemons/{alias}/exec:
+    post:
+      summary: Execute a command through a configured daemon alias
+      parameters:
+        - name: alias
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ExecRequest" }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExecResult" }
+
+  /webhook/config:
+    get:
+      summary: Get webhook notification configuration
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WebhookConfig" }
+    put:
+      summary: Set webhook notification configuration
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WebhookConfig" }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WebhookConfig" }

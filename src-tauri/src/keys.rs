@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use crate::store::config_dir;
+use crate::store::{config_dir, restrict_file_to_owner};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SshKeyInfo {
@@ -27,6 +27,10 @@ fn keys_dir() -> Result<PathBuf> {
     let dir = config_dir()?.join("keys");
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
+}
+
+fn restrict_private_key_permissions(path: impl AsRef<std::path::Path>) -> Result<()> {
+    restrict_file_to_owner(path)
 }
 
 /// List all key pairs in ~/.agent2ssh/keys/
@@ -130,6 +134,7 @@ pub fn generate_key_core(name: &str, comment: Option<&str>) -> Result<SshKeyInfo
     if !status.success() {
         return Err(anyhow!("ssh-keygen failed"));
     }
+    restrict_private_key_permissions(&private_path)?;
 
     let public_key = std::fs::read_to_string(&public_path)
         .unwrap_or_default()
@@ -168,14 +173,7 @@ pub fn import_key_core(source_path: &str, name: Option<&str>) -> Result<SshKeyIn
     }
 
     std::fs::copy(&source, &dest)?;
-
-    // Set permissions to 600
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o600);
-        std::fs::set_permissions(&dest, perms)?;
-    }
+    restrict_private_key_permissions(&dest)?;
 
     // Try to copy .pub file too
     let source_pub = PathBuf::from(format!("{}.pub", source.display()));
@@ -203,6 +201,26 @@ pub fn import_key_core(source_path: &str, name: Option<&str>) -> Result<SshKeyIn
         key_type,
         created_at: Some(chrono::Utc::now().to_rfc3339()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn test_restrict_private_key_permissions_sets_0600() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!("agent2ssh-key-perms-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&path, "private-key").unwrap();
+
+        restrict_private_key_permissions(&path).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(mode, 0o600);
+    }
 }
 
 /// Delete a key pair from the keys directory

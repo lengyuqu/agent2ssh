@@ -643,10 +643,27 @@ async fn main() -> anyhow::Result<()> {
     // Token
     let token_path = config_dir.join("daemon.token");
     let token = if token_path.exists() {
-        std::fs::read_to_string(&token_path)?.trim().to_string()
+        // Audit existing token file permissions before fixing
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(meta) = std::fs::metadata(&token_path) {
+                let mode = meta.permissions().mode() & 0o777;
+                if mode != 0o600 {
+                    eprintln!(
+                        "[security] WARNING: daemon.token had overly permissive mode {:o}, fixing to 0600",
+                        mode
+                    );
+                }
+            }
+        }
+        let existing = std::fs::read_to_string(&token_path)?.trim().to_string();
+        restrict_file_to_owner(&token_path)?;
+        existing
     } else {
         let t = Uuid::new_v4().to_string();
         std::fs::write(&token_path, &t)?;
+        restrict_file_to_owner(&token_path)?;
         t
     };
 

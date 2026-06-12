@@ -32,6 +32,23 @@ pub fn ensure_config_dir() -> Result<()> {
     fs::create_dir_all(config_dir()?).context("failed to create ~/.agent2ssh")
 }
 
+/// Restrict a sensitive file to owner read/write on Unix.
+pub fn restrict_file_to_owner(path: impl AsRef<std::path::Path>) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = fs::Permissions::from_mode(0o600);
+        fs::set_permissions(path.as_ref(), perms).with_context(|| {
+            format!("failed to restrict permissions for {}", path.as_ref().display())
+        })?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+    Ok(())
+}
+
 pub fn load_config() -> Result<AppConfig> {
     ensure_config_dir()?;
     let path = config_path()?;
@@ -108,4 +125,24 @@ pub fn list_audit_raw(filter: &AuditFilter) -> Result<Vec<AuditEntry>> {
     entries.reverse();
     entries.truncate(filter.limit);
     Ok(entries)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn test_restrict_file_to_owner_sets_0600() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!("agent2ssh-perms-{}", uuid::Uuid::new_v4()));
+        fs::write(&path, "secret").unwrap();
+
+        restrict_file_to_owner(&path).unwrap();
+
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        let _ = fs::remove_file(&path);
+        assert_eq!(mode, 0o600);
+    }
 }

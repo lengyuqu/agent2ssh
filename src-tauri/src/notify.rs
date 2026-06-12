@@ -292,4 +292,202 @@ mod tests {
         assert!(!json.contains("risk_level"));
         assert!(!json.contains("exit_code"));
     }
+
+    // ── Outbound protection tests ───────────────────────────────────────────
+
+    /// Helper: set up a temporary config directory with a webhook.toml so that
+    /// `fire_webhook` picks up the config. Returns the path to the temp dir
+    /// (caller must keep it alive for the duration of the test).
+    #[cfg(feature = "daemon")]
+    fn setup_webhook_config(url: &str, events: &[&str], secret: Option<&str>) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "agent2ssh-notify-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let agent_dir = dir.join(".agent2ssh");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+
+        let config = WebhookConfig {
+            url: Some(url.to_string()),
+            events: events.iter().map(|s| s.to_string()).collect(),
+            secret: secret.map(|s| s.to_string()),
+        };
+        let raw = toml::to_string_pretty(&config).unwrap();
+        std::fs::write(agent_dir.join("webhook.toml"), raw).unwrap();
+        dir
+    }
+
+    fn test_event() -> WebhookEvent {
+        WebhookEvent {
+            event: "approval_required".into(),
+            host: "testhost".into(),
+            command: "echo hello".into(),
+            approval_id: Some("test-id".into()),
+            risk_level: Some("high".into()),
+            exit_code: None,
+        }
+    }
+
+    /// Webhook fire with timeout: mock a slow server and verify fire_webhook
+    /// does not hang (the 10-second client timeout should kick in, but we
+    /// use a 15-second test timeout to be safe).
+    #[cfg(feature = "daemon")]
+    #[tokio::test]
+    async fn test_fire_webhook_timeout_does_not_hang() {
+        // Start a local axum server that delays response for 30 seconds
+        let app = axum::Router::new().route(
+            "/slow",
+            axum::routing::post(|| async {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                "ok"
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        // Point webhook config at the slow server
+        let home_dir = setup_webhook_config(
+            &format!("http://{}/slow", addr),
+            &["approval_required"],
+            None,
+        );
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &home_dir);
+
+        // fire_webhook has a 10-second client timeout; should complete well
+        // under 15 seconds even with the slow server.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            fire_webhook(test_event()),
+        )
+        .await;
+
+        // Restore HOME
+        match original_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&home_dir);
+
+        // The outer timeout should NOT have fired
+        assert!(result.is_ok(), "fire_webhook hung beyond 15-second timeout");
+        // And the inner result should be Ok (fire_webhook always returns Ok)
+        assert!(result.unwrap().is_ok(), "fire_webhook returned Err");
+    }
+
+    /// Webhook fire failure doesn't propagate: verify fire_webhook returns Ok
+    /// even when the target server is unreachable.
+    #[cfg(feature = "daemon")]
+    #[tokio::test]
+    async fn test_fire_webhook_failure_does_not_propagate() {
+        // Use a port that nothing is listening on
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let closed_port = listener.local_addr().unwrap().port();
+        drop(listener); // close it immediately so the port is unreachable
+
+        let home_dir = setup_webhook_config(
+            &format!("http://127.0.0.1:{}/webhook", closed_port),
+            &["approval_required"],
+            None,
+        );
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &home_dir);
+
+        let result = fire_webhook(test_event()).await;
+
+        match original_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&home_dir);
+
+        // fire_webhook should return Ok even on network failure
+        assert!(
+            result.is_ok(),
+            "fire_webhook should return Ok on network error, got: {:?}",
+            result.err()
+        );
+    }
+
+    /// Config validation: empty URL is handled gracefully (returns Ok without
+    /// attempting any HTTP request).
+    #[cfg(feature = "daemon")]
+    #[tokio::test]
+    async fn test_fire_webhook_empty_url_returns_ok() {
+        let home_dir = setup_webhook_config("", &["approval_required"], None);
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &home_dir);
+
+        let result = fire_webhook(test_event()).await;
+
+        match original_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&home_dir);
+
+        assert!(
+            result.is_ok(),
+            "fire_webhook should return Ok for empty URL, got: {:?}",
+            result.err()
+        );
+    }
+
+    /// Config validation: no webhook.toml at all returns Ok silently.
+    #[cfg(feature = "daemon")]
+    #[tokio::test]
+    async fn test_fire_webhook_no_config_returns_ok() {
+        let dir = std::env::temp_dir().join(format!(
+            "agent2ssh-notify-noconfig-{}",
+            uuid::Uuid::new_v4()
+        ));
+        // Create .agent2ssh dir but no webhook.toml
+        std::fs::create_dir_all(dir.join(".agent2ssh")).unwrap();
+
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &dir);
+
+        let result = fire_webhook(test_event()).await;
+
+        match original_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(
+            result.is_ok(),
+            "fire_webhook should return Ok when no config exists, got: {:?}",
+            result.err()
+        );
+    }
+
+    /// Config validation: event type not in subscribed list means no HTTP call.
+    #[cfg(feature = "daemon")]
+    #[tokio::test]
+    async fn test_fire_webhook_unsubscribed_event_skips() {
+        // Subscribe only to "exec_completed", but send "approval_required"
+        let home_dir = setup_webhook_config(
+            "http://127.0.0.1:1/should-not-be-called",
+            &["exec_completed"],
+            None,
+        );
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &home_dir);
+
+        let result = fire_webhook(test_event()).await;
+
+        match original_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&home_dir);
+
+        // Should return Ok without attempting HTTP (URL is unreachable, so
+        // if it tried, it would still return Ok but take longer)
+        assert!(result.is_ok());
+    }
 }

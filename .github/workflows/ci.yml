@@ -1,3 +1,23 @@
+# =============================================================================
+# CI / Release Workflow
+# =============================================================================
+#
+# This workflow serves dual purposes:
+#
+# 1. **PR dry-run**: Every pull request triggers the full `build` job matrix,
+#    which compiles all binaries (CLI, MCP, daemon) across 4 target platforms
+#    (x86_64 macOS, aarch64 macOS, x86_64 Linux, x86_64 Windows), runs unit
+#    tests, integration tests, and CLI smoke tests, and builds the frontend.
+#    This acts as a release dry-run — if a PR passes all checks here, the code
+#    is ready to be merged and released.
+#
+# 2. **Release**: When a GitHub release is published, the same build job produces
+#    release binaries and uploads them as assets. The `tauri-bundle` job then
+#    builds platform-native installers (DMG, AppImage, deb, MSI/NSIS).
+#
+# No separate dry-run job is needed: the PR build IS the dry-run.
+# =============================================================================
+
 name: CI
 
 on:
@@ -52,11 +72,23 @@ jobs:
       - name: Install npm deps
         run: npm install
 
-      - name: Rust test
+      # ── Test suite (runs on every push/PR, not just releases) ────────────
+
+      - name: Rust unit tests
         run: cargo test --no-default-features --lib
         working-directory: src-tauri
 
-      - name: Rust check (CLI)
+      - name: Rust integration tests (daemon)
+        run: cargo test --no-default-features --test daemon_integration
+        working-directory: src-tauri
+
+      - name: Rust CLI smoke tests
+        run: cargo test --no-default-features --test cli_smoke
+        working-directory: src-tauri
+
+      # ── Compilation checks ────────────────────────────────────────────────
+
+      - name: Rust check (CLI + MCP)
         run: cargo check --no-default-features --bin agent2ssh --bin agent2ssh-mcp --target ${{ matrix.target }}
         working-directory: src-tauri
 
@@ -66,6 +98,18 @@ jobs:
 
       - name: Frontend build
         run: npm run build
+
+      # ── PR dry-run: build release binaries to validate compilation ───────
+      # On PRs we build in release mode to catch optimization-level errors
+      # that only appear with -O2 / LTO, mirroring the release build.
+      - name: Build validation (PR dry-run)
+        if: github.event_name == 'pull_request'
+        run: |
+          cargo build --release --no-default-features --bin agent2ssh --bin agent2ssh-mcp --target ${{ matrix.target }}
+          cargo build --release --no-default-features --features daemon --bin agent2ssh-daemon --target ${{ matrix.target }}
+        working-directory: src-tauri
+
+      # ── Release: build and upload ─────────────────────────────────────────
 
       - name: Build release binaries
         if: github.event_name == 'release'

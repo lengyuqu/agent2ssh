@@ -10,6 +10,11 @@ use uuid::Uuid;
 
 use crate::types::RiskLevel;
 
+/// Default TTL for approval requests in seconds (5 minutes).
+/// Can be overridden per-request by setting `ttl_secs` on the `ApprovalRequest`
+/// after creation, or by using `approval_request_with_ttl`.
+pub const DEFAULT_APPROVAL_TTL_SECS: u64 = 300;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApprovalRequest {
     pub id: Uuid,
@@ -45,6 +50,16 @@ fn store() -> &'static Mutex<ApprovalStore> {
 }
 
 pub async fn approval_request(host: &str, command: &str, risk_level: RiskLevel) -> Uuid {
+    approval_request_with_ttl(host, command, risk_level, DEFAULT_APPROVAL_TTL_SECS).await
+}
+
+/// Create an approval request with a custom TTL.
+pub async fn approval_request_with_ttl(
+    host: &str,
+    command: &str,
+    risk_level: RiskLevel,
+    ttl_secs: u64,
+) -> Uuid {
     let id = Uuid::new_v4();
     let req = ApprovalRequest {
         id,
@@ -52,7 +67,7 @@ pub async fn approval_request(host: &str, command: &str, risk_level: RiskLevel) 
         command: command.to_string(),
         risk_level,
         requested_at: Utc::now(),
-        ttl_secs: 120,
+        ttl_secs,
         status: ApprovalStatus::Pending,
     };
     store().lock().await.requests.insert(id, req);
@@ -82,13 +97,16 @@ pub async fn approval_respond(id: Uuid, approved: bool) -> Result<()> {
         .get_mut(&id)
         .ok_or_else(|| anyhow!("unknown approval: {id}"))?;
 
-    if req.status != ApprovalStatus::Pending {
-        // Check if it's timed out
-        let elapsed = Utc::now().signed_duration_since(req.requested_at);
-        if elapsed.num_seconds() as u64 > req.ttl_secs {
+    // Check TTL expiration first, regardless of current status
+    let elapsed = Utc::now().signed_duration_since(req.requested_at);
+    if elapsed.num_seconds() as u64 > req.ttl_secs {
+        if req.status == ApprovalStatus::Pending {
             req.status = ApprovalStatus::TimedOut;
-            return Err(anyhow!("approval {id} has timed out"));
         }
+        return Err(anyhow!("approval {id} has timed out"));
+    }
+
+    if req.status != ApprovalStatus::Pending {
         return Err(anyhow!("approval {id} already {:?}", req.status));
     }
 
@@ -170,5 +188,94 @@ mod tests {
         let list = approval_list().await;
         assert!(list.iter().any(|r| r.id == id1));
         assert!(list.iter().any(|r| r.id == id2));
+    }
+
+    // ── TTL behavior tests ──────────────────────────────────────────────────
+
+    /// Approval created within TTL reports as Pending.
+    #[tokio::test]
+    async fn test_approval_within_ttl_is_pending() {
+        let id = approval_request_with_ttl("host", "cmd", RiskLevel::High, 60).await;
+        let status = approval_poll(id).await;
+        assert_eq!(status, Some(ApprovalStatus::Pending));
+
+        // Also verify via approval_list: should still be pending
+        let list = approval_list().await;
+        let entry = list.iter().find(|r| r.id == id).unwrap();
+        assert_eq!(entry.status, ApprovalStatus::Pending);
+    }
+
+    /// Approval past TTL is reported as TimedOut.
+    #[tokio::test]
+    async fn test_approval_past_ttl_is_timed_out() {
+        // Use a 1-second TTL and wait for it to expire
+        let id = approval_request_with_ttl("host", "cmd", RiskLevel::High, 1).await;
+
+        // Confirm it's pending immediately
+        assert_eq!(approval_poll(id).await, Some(ApprovalStatus::Pending));
+
+        // Wait for TTL to expire
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        // Now it should be TimedOut
+        assert_eq!(approval_poll(id).await, Some(ApprovalStatus::TimedOut));
+    }
+
+    /// Approval list marks expired entries as TimedOut.
+    #[tokio::test]
+    async fn test_approval_list_marks_expired_as_timed_out() {
+        let id = approval_request_with_ttl("host", "cmd", RiskLevel::High, 1).await;
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        let list = approval_list().await;
+        let entry = list.iter().find(|r| r.id == id).unwrap();
+        assert_eq!(entry.status, ApprovalStatus::TimedOut);
+    }
+
+    /// Timed-out approval cannot be approved.
+    #[tokio::test]
+    async fn test_timed_out_approval_cannot_be_approved() {
+        let id = approval_request_with_ttl("host", "cmd", RiskLevel::High, 1).await;
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        let result = approval_respond(id, true).await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("timed out"),
+            "expected 'timed out' in error, got: {}",
+            err_msg
+        );
+    }
+
+    /// Timed-out approval cannot be rejected.
+    #[tokio::test]
+    async fn test_timed_out_approval_cannot_be_rejected() {
+        let id = approval_request_with_ttl("host", "cmd", RiskLevel::High, 1).await;
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        let result = approval_respond(id, false).await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("timed out"),
+            "expected 'timed out' in error, got: {}",
+            err_msg
+        );
+    }
+
+    /// Default TTL constant is 300 seconds.
+    #[test]
+    fn test_default_ttl_is_300() {
+        assert_eq!(DEFAULT_APPROVAL_TTL_SECS, 300);
+    }
+
+    /// Default approval_request uses DEFAULT_APPROVAL_TTL_SECS.
+    #[tokio::test]
+    async fn test_default_approval_uses_default_ttl() {
+        let id = approval_request("host", "cmd", RiskLevel::High).await;
+        let s = store().lock().await;
+        let req = s.requests.get(&id).unwrap();
+        assert_eq!(req.ttl_secs, DEFAULT_APPROVAL_TTL_SECS);
     }
 }

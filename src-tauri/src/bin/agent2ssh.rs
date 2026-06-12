@@ -12,7 +12,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
-#[command(name = "agent2ssh")]
+#[command(name = "agent2ssh", version)]
 #[command(about = "SSH capability layer for agents")]
 struct Cli {
     /// Route operations through a remote daemon by alias (from ~/.agent2ssh/remotes.toml).
