@@ -91,6 +91,27 @@ P0-P10 已全部完成。当前基线：
 - 功能必须有验收场景：新增功能需要同时给出 CLI/API/MCP 或 UI 至少一个可复现验收路径。
 - 安全默认保守：涉及批量执行、凭证、审批绕过、远程 daemon 的能力必须默认最小权限。
 
+## 真实测试服务器
+
+| 字段 | 值 |
+|------|----|
+| 用途 | F1 真实环境试运行、CLI/MCP/daemon/桌面端回归测试 |
+| Host | `107.174.36.91` |
+| SSH 用户 | `root` |
+| SSH 端口 | `22` |
+| 系统 | Debian，主机名 `racknerd-ef7655c` |
+| 认证方式 | 用户已提供 root 密码；不要把明文密码提交到仓库，建议运行时放入 `AGENT2SSH_TEST_PASSWORD` 或使用临时 SSH key |
+| 测试约束 | 只在 `/tmp/agent2ssh-*` 写入临时文件；测试结束必须清理临时目录和临时 `authorized_keys` 条目 |
+| 已验证能力 | SSH 登录、host add/list、risk、ping、exec、exec-multi、SFTP upload/download/list/stat、audit、doctor、MCP tools/list、MCP list_hosts/exec/audit/doctor |
+| 已知限制 | CLI `session`/`forward` 跨进程状态问题见 B2 |
+
+推荐接入方式：
+
+1. 使用密码登录服务器，生成并追加临时 SSH 公钥到 `~/.ssh/authorized_keys`。
+2. 使用 `AGENT2SSH_CONFIG_DIR=$(mktemp -d)` 隔离本次测试配置。
+3. 用临时 key 执行 Agent2SSH 测试，不在本机正式 `~/.agent2ssh` 写入测试 host。
+4. 测试结束后删除远端临时公钥、本地临时配置目录和远端 `/tmp/agent2ssh-*` 文件。
+
 ## F1 · 真实环境试运行
 
 目标：用现有功能覆盖一台到三台真实可控主机，形成 bug 修复清单。
