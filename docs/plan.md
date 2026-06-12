@@ -1,40 +1,17 @@
-# Agent2SSH 后续计划
+# Agent2SSH 计划
 
-## 当前基线
+## 当前状态
 
-Agent2SSH 当前已经完成原 MVP 和后续扩展，包含：
+P0-P10 已全部完成。当前基线：
 
-- Tauri 桌面 App、CLI、MCP stdio server、HTTP/WebSocket daemon、Web Console
-- 31 个 MCP 工具，详见 [skills.md](skills.md)
-- Host CRUD、SSH config 导入、Jump Host、tags、per-host risk override
-- SSH exec、exec-multi、ping、SFTP、PTY sessions、port forwarding
-- 风险评分、自定义风险规则、审批队列、审批端点、桌面审批弹窗
-- SSH ControlMaster 连接池
-- Webhook 通知
-- Playbooks
-- Remote daemon registry 与远程 exec 路由
-- SSH key 生成、导入、删除与 Host 关联
-- CI、release binary build、Tauri bundle job
-
-核心模块：
-
-| File | Role |
-|------|------|
-| `src-tauri/src/types.rs` | 共享类型 |
-| `src-tauri/src/store.rs` | `~/.agent2ssh` 数据持久化 |
-| `src-tauri/src/core.rs` | SSH exec、风险评分、SFTP、ping、exec-multi |
-| `src-tauri/src/session.rs` | PTY sessions |
-| `src-tauri/src/forward.rs` | SSH port forwarding |
-| `src-tauri/src/connection.rs` | ControlMaster 与 ssh_config 解析 |
-| `src-tauri/src/approval.rs` | 审批队列 |
-| `src-tauri/src/risk_config.rs` | 用户风险规则 |
-| `src-tauri/src/keys.rs` | SSH key 管理 |
-| `src-tauri/src/playbook.rs` | Playbook 加载与执行 |
-| `src-tauri/src/notify.rs` | Webhook 配置与发送 |
-| `src-tauri/src/remote.rs` | Remote daemon 配置与探活 |
-| `src-tauri/src/bin/agent2ssh-daemon.rs` | HTTP/WebSocket daemon |
-| `src-tauri/src/bin/agent2ssh-mcp.rs` | MCP stdio server |
-| `src-tauri/src/bin/agent2ssh.rs` | CLI |
+- 产品形态：Tauri 桌面 App、CLI、MCP stdio server、HTTP/WebSocket daemon、Web Console
+- 核心能力：Host 管理、SSH config 导入、Jump Host、tags、per-host risk override
+- 执行能力：SSH exec、exec-multi、ping、SFTP、PTY sessions、port forwarding、Playbooks
+- 安全能力：风险评分、自定义风险规则、审批队列、审批端点、桌面审批弹窗、敏感命令脱敏
+- 运维能力：SSH ControlMaster 连接池、Webhook 通知、remote daemon registry、健康检查、指标、审计轮转
+- 生态能力：SSH key 管理、团队配置导入导出、MCP 客户端模板、插件/Skill 分发文档
+- 验收结果：45 单元测试 + 40 集成测试 + 17 CLI smoke 测试 = 102 测试全绿
+- MCP 工具：35 个，详见 [skills.md](skills.md)
 
 ## 协作规则
 
@@ -52,9 +29,20 @@ Agent2SSH 当前已经完成原 MVP 和后续扩展，包含：
 - 开始开发前，把任务状态改为 `🟨 进行中`，负责人填自己的名字或 ID。
 - 一个任务只建议一个负责人，协作者可写在备注或 PR 中。
 - 完成后更新为 `✅ 已完成`，并在验收标准里补充实际通过的命令、测试或文档链接。
-- 如果任务被拆分，保留原任务编号，新增后缀任务，例如 `P4-2a`。
+- 如果任务被拆分，保留原任务编号，新增后缀任务，例如 `F2-1a`。
 
-## 任务总览
+任务表统一规格：
+
+| 字段 | 说明 |
+|------|------|
+| 任务 | 稳定编号，阶段号 + 序号 |
+| 状态 | 使用上方状态定义 |
+| 优先级 | 高 / 中 / 低 |
+| 负责人 | 当前 owner，未认领时填 `-` |
+| 内容 | 要实现或验证的范围 |
+| 验收标准 | 可复现的命令、路径、文档或行为结果 |
+
+## 阶段总览
 
 | 阶段 | 主题 | 状态 | 优先级 | 负责人 |
 |------|------|------|--------|--------|
@@ -69,218 +57,107 @@ Agent2SSH 当前已经完成原 MVP 和后续扩展，包含：
 | P8 | 安全边界加固 | ✅ 已完成 | 高 | Codex |
 | P9 | 运维与可观测性 | ✅ 已完成 | 中 | Qoder |
 | P10 | 产品化与生态集成 | ✅ 已完成 | 中 | Qoder |
+| F1 | 真实环境试运行 | ⬜ 待认领 | 高 | - |
+| F2 | 主机与环境管理 | ⬜ 待认领 | 高 | - |
+| F3 | 执行体验与 Runbook | ⬜ 待认领 | 高 | - |
+| F4 | 审批与协作 | ⬜ 待认领 | 高 | - |
+| F5 | 远程 daemon 与多节点 | ⬜ 待认领 | 高 | - |
+| F6 | 可观测与审计分析 | ⬜ 待认领 | 中 | - |
 
-## P0 · 文档基线对齐
+## 已完成阶段归档
 
-目标：让 README、OpenAPI、MCP 文档和实际代码保持一致。
-
-| 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
-|------|------|--------|--------|------|----------|
-| P0-1 | ✅ 已完成 | 高 | Codex | README 同步当前能力和 31 个 MCP 工具 | README 不再出现 21/24 工具数 |
-| P0-2 | ✅ 已完成 | 高 | Codex | `docs/api.yaml` 补齐 daemon 已实现端点 | OpenAPI 覆盖 daemon 路由表中的公开端点 |
-| P0-3 | ✅ 已完成 | 高 | Codex | `docs/skills.md` 与 MCP server 工具枚举对齐 | 工具数和工具名与 `agent2ssh-mcp.rs` 一致 |
-| P0-4 | ✅ 已完成 | 中 | Codex | 增加配置文件说明 | README 覆盖 hosts、audit、risk rules、playbooks、remotes、webhook、keys |
-
-## P1 · 自动化验收基线
-
-目标：明确当前主干能否构建、测试和发布。
-
-| 任务 | 状态 | 优先级 | 负责人 | 命令 | 验收标准 |
-|------|------|--------|--------|------|----------|
-| P1-1 | ✅ 已完成 | 高 | Codex | `npm run build` | TypeScript 与 Vite build 通过 |
-| P1-2 | ✅ 已完成 | 高 | Codex | `cd src-tauri && cargo test --no-default-features --lib` | Rust library tests 通过，当前 38 passed |
-| P1-3 | ✅ 已完成 | 高 | Codex | `cd src-tauri && cargo check --no-default-features --bin agent2ssh --bin agent2ssh-mcp` | CLI 与 MCP server 编译通过 |
-| P1-4 | ✅ 已完成 | 高 | Codex | `cd src-tauri && cargo check --no-default-features --features daemon --bin agent2ssh-daemon` | daemon 编译通过 |
-
-## P2 · 使用文档与示例
-
-目标：降低真实用户和 agent 接入成本。
-
-| 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
-|------|------|--------|--------|------|----------|
-| P2-1 | ✅ 已完成 | 高 | Qoder | CLI quickstart | `docs/guides/cli-quickstart.md`，覆盖所有子命令 |
-| P2-2 | ✅ 已完成 | 高 | Qoder | MCP quickstart | `docs/guides/mcp-quickstart.md`，31 工具分类示例 |
-| P2-3 | ✅ 已完成 | 高 | Qoder | Daemon API quickstart | `docs/guides/daemon-api-quickstart.md`，37 端点 curl 示例 |
-| P2-4 | ✅ 已完成 | 中 | Qoder | 配置文件指南 | `docs/guides/configuration-guide.md`，9 种配置文件全覆盖 |
-| P2-5 | ✅ 已完成 | 中 | Qoder | Web Console 指南 | `docs/guides/web-console-guide.md`，6 个 tab 操作路径 |
-
-## P3 · 安全与可靠性硬化
-
-目标：把 SSH 能力层从“可用”推进到“可放心长期运行”。
-
-| 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
-|------|------|--------|--------|------|----------|
-| P3-1 | ✅ 已完成 | 高 | Codex | daemon token 权限检查 | token 文件在 Unix 上限制为 0600，启动时会修正既有 token |
-| P3-2 | ✅ 已完成 | 高 | Codex | SSH key 文件权限检查 | 私钥导入/生成后在 Unix 上限制为 0600 |
-| P3-3 | ✅ 已完成 | 高 | Qoder | remote daemon 安全模型 | README Security 节补充 trust model、webhook 出站保护 |
-| P3-4 | ✅ 已完成 | 中 | Qoder | webhook 出站保护 | 5 个出站测试全绿（timeout/failure/empty-url/no-config/unsubscribed） |
-| P3-5 | ✅ 已完成 | 中 | Qoder | approval TTL 行为 | 8 个 TTL 测试覆盖 pending/approved/rejected/timed_out |
-
-## P4 · 测试扩展
-
-目标：覆盖关键跨模块行为，减少回归。
-
-| 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
-|------|------|--------|--------|------|----------|
-| P4-1 | ✅ 已完成 | 高 | Qoder | MCP 工具枚举测试 | 3 个测试验证 31 工具与文档同步 |
-| P4-2 | ✅ 已完成 | 高 | Qoder | daemon HTTP 集成测试扩展 | 12 个测试覆盖 connections/playbooks/daemons/webhook |
-| P4-3 | ✅ 已完成 | 中 | Qoder | CLI smoke tests | 15 个测试覆盖所有子命令参数解析与 JSON 输出 |
-| P4-4 | ✅ 已完成 | 中 | Qoder | frontend type checks | types.ts 与 Rust 类型完全对齐，已标注验证日期 |
-| P4-5 | ✅ 已完成 | 低 | Qoder | release workflow dry-run | CI 注释明确 PR build 即为 dry-run |
-
-## P5 · 发布准备
-
-目标：形成可重复发布流程。
-
-| 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
-|------|------|--------|--------|------|----------|
-| P5-1 | ✅ 已完成 | 高 | Qoder | release checklist | `docs/release-checklist.md` 步骤完整 |
-| P5-2 | ✅ 已完成 | 高 | Qoder | installation verification | `scripts/verify-install.sh` 可执行 |
-| P5-3 | ✅ 已完成 | 中 | Qoder | versioning policy | `docs/versioning.md` 策略明确 |
-| P5-4 | ✅ 已完成 | 中 | Qoder | changelog | `CHANGELOG.md` v0.1.0 条目完整 |
-
-## P6 · 文档与实现复核
-
-目标：修复文档承诺、开发命令和实现行为之间的偏差，避免用户照文档操作踩坑。
-
-| 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
-|------|------|--------|--------|------|----------|
-| P6-1 | ✅ 已完成 | 高 | Codex | 修正 README 开发命令 | README 使用 `--no-default-features` 检查 CLI/MCP/daemon，不再推荐会因缺少 sidecar 失败的裸 `cargo check` |
-| P6-2 | ✅ 已完成 | 高 | Codex | 修正 remote daemon 配置示例 | README 使用代码实际解析的 `[[remotes]]` |
-| P6-3 | ✅ 已完成 | 高 | Codex | 实现 Playbook `risk_override` | Playbook 执行时将 `risk_override` 注入每个 step 的风险判定 |
-| P6-4 | ✅ 已完成 | 高 | Codex | 修正 Slack 审批通知行为 | Slack 通知提供打开 Approvals 控制台的按钮，真实审批继续走已认证控制台/API |
-| P6-5 | ✅ 已完成 | 中 | Codex | 扩展 release checklist | 发布前检查覆盖前端构建、Rust 单测、CLI/MCP/daemon check、集成测试、sidecar 准备 |
-
-## P7 · 端到端运行验证
-
-目标：从“编译和单元测试通过”推进到“真实安装包、daemon、console、MCP 在本机闭环通过”。
-
-| 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
-|------|------|--------|--------|------|----------|
-| P7-1 | ✅ 已完成 | 高 | Codex | 本地 sidecar 与 Tauri 前置验证脚本 | `scripts/e2e-local.sh` 覆盖 frontend build、Rust checks/tests、release sidecar build 与 `prepare-sidecars.sh` |
-| P7-2 | ✅ 已完成 | 高 | Codex | Web Console smoke | daemon HTTP 集成测试覆盖 `/console` 并验证关键 workflow 入口 |
-| P7-3 | ✅ 已完成 | 高 | Codex | MCP stdio 协议端到端测试 | CLI smoke 测试真实启动 `agent2ssh-mcp`，覆盖 `initialize`、`tools/list`、`ssh_risk_check` |
-| P7-4 | ✅ 已完成 | 中 | Codex | OpenSSH fixture 准备检查 | 本机确认具备 `sshd` 与 Docker；完整 OpenSSH fixture 可在后续运行 `scripts/e2e-local.sh` 基线上扩展 |
-| P7-5 | ✅ 已完成 | 中 | Codex | 安装脚本端到端入口 | release checklist 增加 `scripts/e2e-local.sh`，保留 `scripts/verify-install.sh` 用于安装后验证 |
-
-## P8 · 安全边界加固
-
-目标：降低误执行、凭证泄露和远程 daemon 暴露带来的高影响风险。
-
-| 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
-|------|------|--------|--------|------|----------|
-| P8-1 | ✅ 已完成 | 高 | Codex | 风险覆盖策略审计 | host/playbook `risk_override` 不能降级 `blocked`，补充单元测试和配置文档 |
-| P8-2 | ✅ 已完成 | 高 | Codex | daemon token 轮换命令 | `agent2ssh daemon rotate-token` 只允许 daemon 停止时轮换，并保持 token 文件 0600 |
-| P8-3 | ✅ 已完成 | 高 | Codex | remote daemon 配置校验 | `remotes.toml` 校验 alias、URL scheme、token/token_env；文档明确 HTTPS 生产建议 |
-| P8-4 | ✅ 已完成 | 中 | Codex | 审批请求防重放 | 继续使用既有 TTL/double-respond 状态机测试，Slack 不再暴露未认证 approve/reject 链接 |
-| P8-5 | ✅ 已完成 | 中 | Codex | 敏感输出处理 | audit/webhook 对常见 token/password/secret/api-key 参数做命令脱敏 |
-
-## P9 · 运维与可观测性
-
-目标：让长期运行的 daemon 更容易监控、诊断和维护。
-
-| 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
-|------|------|--------|--------|------|----------|
-| P9-1 | ✅ 已完成 | 中 | Qoder | 结构化日志 | tracing + tracing-subscriber，AGENT2SSH_LOG/LOG_FORMAT 环境变量 |
-| P9-2 | ✅ 已完成 | 中 | Qoder | 健康检查扩展 | /health 返回 version/uptime/config_dir/ssh_available/pid |
-| P9-3 | ✅ 已完成 | 中 | Qoder | 审计日志轮转 | 10MB 自动轮转，保留最多 3 个历史文件 |
-| P9-4 | ✅ 已完成 | 低 | Qoder | 指标端点 | GET /metrics 返回请求数/执行数/阻断数/审批数 |
-| P9-5 | ✅ 已完成 | 低 | Qoder | 故障诊断命令 | `agent2ssh doctor` 12 项检查 + MCP ssh_doctor 工具 |
-
-## P10 · 产品化与生态集成
-
-目标：提升安装、接入、团队协作和 agent 生态里的可用性。
-
-| 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
-|------|------|--------|--------|------|----------|
-| P10-1 | ✅ 已完成 | 中 | Qoder | 桌面端首次启动向导 | SetupWizard.tsx 5 步引导，hosts 为空时自动显示 |
-| P10-2 | ✅ 已完成 | 中 | Qoder | MCP 客户端模板 | `docs/guides/mcp-client-templates.md` 覆盖 5 个客户端 |
-| P10-3 | ✅ 已完成 | 中 | Qoder | 团队配置导入导出 | export/import CLI + daemon + MCP，自动剥离 key_path |
-| P10-4 | ✅ 已完成 | 低 | Qoder | 插件/Skill 分发完善 | `docs/skill-distribution.md` 工具分类 + 最小权限建议 |
-| P10-5 | ✅ 已完成 | 低 | Qoder | 发布资产签名与校验 | `scripts/generate-checksums.sh` + CI checksum 步骤 |
-
-## 当前状态
-
-P0–P10 全部完成。测试覆盖：45 单元测试 + 40 集成测试 + 17 CLI smoke 测试 = 102 测试全绿。MCP 工具 35 个。
+| 阶段 | 目标 | 主要交付 | 验收结果 |
+|------|------|----------|----------|
+| P0 | 让 README、OpenAPI、MCP 文档和实际代码保持一致 | README、`docs/api.yaml`、`docs/skills.md`、配置说明 | 文档工具数、端点和配置说明与实现对齐 |
+| P1 | 明确当前主干能否构建、测试和发布 | 前端 build、Rust 单测、CLI/MCP/daemon check | `npm run build`、Rust tests/checks 通过 |
+| P2 | 降低真实用户和 agent 接入成本 | CLI/MCP/daemon/Web Console/configuration guides | 快速开始和配置指南覆盖主要入口 |
+| P3 | 把 SSH 能力层推进到可长期运行 | token/private key 权限、remote trust model、webhook 保护、approval TTL | 权限修正、出站保护和 TTL 测试覆盖 |
+| P4 | 覆盖关键跨模块行为，减少回归 | MCP 枚举测试、daemon 集成测试、CLI smoke tests、frontend type checks | 关键工具、HTTP 路由、CLI 参数和类型同步完成 |
+| P5 | 形成可重复发布流程 | release checklist、安装验证脚本、versioning policy、changelog | 发布流程和安装校验入口成型 |
+| P6 | 修复文档承诺、开发命令和实现行为之间的偏差 | README 命令修正、remote 示例修正、Playbook risk override、Slack 审批行为修正 | 文档、实现和发布前检查重新对齐 |
+| P7 | 完成本机端到端闭环验证 | `scripts/e2e-local.sh`、Web Console smoke、MCP stdio e2e、OpenSSH fixture 准备检查 | build、checks、tests、sidecar 和 MCP 协议路径可验证 |
+| P8 | 降低误执行、凭证泄露和远程 daemon 暴露风险 | blocked 风险不可降级、daemon token 轮换、remote 配置校验、审批防重放、敏感输出脱敏 | 安全边界由测试和文档覆盖 |
+| P9 | 让长期运行的 daemon 更容易监控、诊断和维护 | 结构化日志、扩展 health、审计轮转、metrics、doctor/MCP doctor | daemon 运维诊断入口完成 |
+| P10 | 提升安装、接入、团队协作和 agent 生态可用性 | SetupWizard、MCP 客户端模板、团队配置导入导出、Skill 分发、checksum 脚本 | 产品化入口和生态接入文档完成 |
 
 ## 后续功能路线图
 
-当前 P0-P10 已完成，后续不再先堆底层能力，而是以真实使用场景驱动：每一阶段都先跑现有功能、记录 bug，再决定是否扩展功能。
+后续不再先堆底层能力，而是以真实使用场景驱动：每一阶段都先跑现有功能、记录 bug，再决定是否扩展功能。
 
-### 原则
+执行原则：
 
 - 先 dogfood，再扩展：每个新功能阶段开始前，先用当前 CLI、daemon、MCP、桌面端完成一遍真实 SSH 工作流。
 - bug 修复优先于新功能：真实工作流中发现的认证、权限、审计、执行、安全和 UI 问题优先进入修复队列。
 - 功能必须有验收场景：新增功能需要同时给出 CLI/API/MCP 或 UI 至少一个可复现验收路径。
 - 安全默认保守：涉及批量执行、凭证、审批绕过、远程 daemon 的能力必须默认最小权限。
 
-### F1 · 真实环境试运行
+## F1 · 真实环境试运行
 
 目标：用现有功能覆盖一台到三台真实可控主机，形成 bug 修复清单。
 
-| 任务 | 优先级 | 内容 | 验收标准 |
-|------|--------|------|----------|
-| F1-1 | 高 | 建立本地 sshd 或测试机 fixture | exec、ping、sftp、session、forward 可在同一 fixture 上重复运行 |
-| F1-2 | 高 | 跑完整 CLI 工作流 | host add/import、risk、exec、exec-multi、audit、daemon、doctor 全部有记录 |
-| F1-3 | 高 | 跑 MCP 工作流 | MCP 客户端通过 `ssh_list_hosts`、`ssh_exec`、`ssh_audit`、`ssh_doctor` 完成一次诊断 |
-| F1-4 | 中 | 跑桌面端首次启动和常规操作 | SetupWizard、Host 管理、Exec、Approvals、Keys 无阻断问题 |
-| F1-5 | 高 | 输出 bug backlog | 每个 bug 有复现步骤、期望行为、实际行为和影响等级 |
+| 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
+|------|------|--------|--------|------|----------|
+| F1-1 | ⬜ 待认领 | 高 | - | 建立本地 sshd 或测试机 fixture | exec、ping、sftp、session、forward 可在同一 fixture 上重复运行 |
+| F1-2 | ⬜ 待认领 | 高 | - | 跑完整 CLI 工作流 | host add/import、risk、exec、exec-multi、audit、daemon、doctor 全部有记录 |
+| F1-3 | ⬜ 待认领 | 高 | - | 跑 MCP 工作流 | MCP 客户端通过 `ssh_list_hosts`、`ssh_exec`、`ssh_audit`、`ssh_doctor` 完成一次诊断 |
+| F1-4 | ⬜ 待认领 | 中 | - | 跑桌面端首次启动和常规操作 | SetupWizard、Host 管理、Exec、Approvals、Keys 无阻断问题 |
+| F1-5 | ⬜ 待认领 | 高 | - | 输出 bug backlog | 每个 bug 有复现步骤、期望行为、实际行为和影响等级 |
 
-### F2 · 主机与环境管理
+## F2 · 主机与环境管理
 
 目标：让 Agent2SSH 更适合管理多环境、多角色主机。
 
-| 任务 | 优先级 | 内容 | 验收标准 |
-|------|--------|------|----------|
-| F2-1 | 高 | 主机分组与环境视图 | UI/CLI 可按 env、role、owner、tag 过滤主机 |
-| F2-2 | 中 | 主机健康快照 | 批量采集 uptime、disk、memory、load、ssh latency，并写入本地快照 |
-| F2-3 | 中 | 主机配置变更预览 | team config import 前显示新增、修改、删除差异 |
-| F2-4 | 中 | SSH config 双向同步策略 | 明确 Agent2SSH 与 `~/.ssh/config` 的导入、覆盖、冲突处理规则 |
+| 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
+|------|------|--------|--------|------|----------|
+| F2-1 | ⬜ 待认领 | 高 | - | 主机分组与环境视图 | UI/CLI 可按 env、role、owner、tag 过滤主机 |
+| F2-2 | ⬜ 待认领 | 中 | - | 主机健康快照 | 批量采集 uptime、disk、memory、load、ssh latency，并写入本地快照 |
+| F2-3 | ⬜ 待认领 | 中 | - | 主机配置变更预览 | team config import 前显示新增、修改、删除差异 |
+| F2-4 | ⬜ 待认领 | 中 | - | SSH config 双向同步策略 | 明确 Agent2SSH 与 `~/.ssh/config` 的导入、覆盖、冲突处理规则 |
 
-### F3 · 执行体验与 Runbook
+## F3 · 执行体验与 Runbook
 
 目标：把一次性命令执行升级为可审计、可复用的运维流程。
 
-| 任务 | 优先级 | 内容 | 验收标准 |
-|------|--------|------|----------|
-| F3-1 | 高 | Playbook 参数化 | playbook step 支持参数、默认值、必填校验和 dry-run 展示 |
-| F3-2 | 高 | 执行计划预览 | 高风险或多主机执行前展示目标、命令、风险、预计影响 |
-| F3-3 | 中 | 批量执行策略 | 支持并发数、失败阈值、逐批 rollout、暂停/继续 |
-| F3-4 | 中 | 执行结果比较 | 多主机结果可按 exit code、stdout diff、stderr 聚合查看 |
+| 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
+|------|------|--------|--------|------|----------|
+| F3-1 | ⬜ 待认领 | 高 | - | Playbook 参数化 | playbook step 支持参数、默认值、必填校验和 dry-run 展示 |
+| F3-2 | ⬜ 待认领 | 高 | - | 执行计划预览 | 高风险或多主机执行前展示目标、命令、风险、预计影响 |
+| F3-3 | ⬜ 待认领 | 中 | - | 批量执行策略 | 支持并发数、失败阈值、逐批 rollout、暂停/继续 |
+| F3-4 | ⬜ 待认领 | 中 | - | 执行结果比较 | 多主机结果可按 exit code、stdout diff、stderr 聚合查看 |
 
-### F4 · 审批与协作
+## F4 · 审批与协作
 
 目标：让高风险操作适合团队协作，而不是只适合单机个人使用。
 
-| 任务 | 优先级 | 内容 | 验收标准 |
-|------|--------|------|----------|
-| F4-1 | 高 | 审批策略配置 | 按 host/tag/risk/command pattern 配置是否需要审批 |
-| F4-2 | 高 | 审批上下文增强 | 审批请求包含 diff、目标主机、历史执行、发起来源 |
-| F4-3 | 中 | 审批通知回调 | Slack/自定义 webhook 可跳转到认证后的审批页面 |
-| F4-4 | 中 | 操作备注与变更单号 | exec/playbook 支持 reason/change_id 并进入 audit |
+| 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
+|------|------|--------|--------|------|----------|
+| F4-1 | ⬜ 待认领 | 高 | - | 审批策略配置 | 按 host/tag/risk/command pattern 配置是否需要审批 |
+| F4-2 | ⬜ 待认领 | 高 | - | 审批上下文增强 | 审批请求包含 diff、目标主机、历史执行、发起来源 |
+| F4-3 | ⬜ 待认领 | 中 | - | 审批通知回调 | Slack/自定义 webhook 可跳转到认证后的审批页面 |
+| F4-4 | ⬜ 待认领 | 中 | - | 操作备注与变更单号 | exec/playbook 支持 reason/change_id 并进入 audit |
 
-### F5 · 远程 daemon 与多节点
+## F5 · 远程 daemon 与多节点
 
 目标：把 remote daemon 从“可路由”推进到“可运营”。
 
-| 任务 | 优先级 | 内容 | 验收标准 |
-|------|--------|------|----------|
-| F5-1 | 高 | remote daemon 连接诊断 | `agent2ssh doctor --daemon <alias>` 检查 TLS、token、health、version |
-| F5-2 | 高 | daemon 版本兼容检查 | CLI/MCP 调用远程 daemon 前提示协议或版本不兼容 |
-| F5-3 | 中 | remote daemon 权限范围 | 每个 remote 配置允许的 hosts/tags/commands 范围 |
-| F5-4 | 中 | 多 daemon 统一视图 | UI/CLI 可按 daemon 查看 host、health、metrics |
+| 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
+|------|------|--------|--------|------|----------|
+| F5-1 | ⬜ 待认领 | 高 | - | remote daemon 连接诊断 | `agent2ssh doctor --daemon <alias>` 检查 TLS、token、health、version |
+| F5-2 | ⬜ 待认领 | 高 | - | daemon 版本兼容检查 | CLI/MCP 调用远程 daemon 前提示协议或版本不兼容 |
+| F5-3 | ⬜ 待认领 | 中 | - | remote daemon 权限范围 | 每个 remote 配置允许的 hosts/tags/commands 范围 |
+| F5-4 | ⬜ 待认领 | 中 | - | 多 daemon 统一视图 | UI/CLI 可按 daemon 查看 host、health、metrics |
 
-### F6 · 可观测与审计分析
+## F6 · 可观测与审计分析
 
 目标：让 audit 和 metrics 变成定位问题、复盘操作的工具。
 
-| 任务 | 优先级 | 内容 | 验收标准 |
-|------|--------|------|----------|
-| F6-1 | 高 | 审计查询增强 | 支持全文搜索、时间范围、主机组、命令模式组合过滤 |
-| F6-2 | 中 | 审计导出 | 支持 JSONL/CSV 导出，并保留脱敏策略 |
-| F6-3 | 中 | 指标趋势 | 展示执行量、失败率、风险分布、审批耗时趋势 |
-| F6-4 | 低 | 事件订阅 | 提供本地事件流供外部监控或自动化消费 |
+| 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
+|------|------|--------|--------|------|----------|
+| F6-1 | ⬜ 待认领 | 高 | - | 审计查询增强 | 支持全文搜索、时间范围、主机组、命令模式组合过滤 |
+| F6-2 | ⬜ 待认领 | 中 | - | 审计导出 | 支持 JSONL/CSV 导出，并保留脱敏策略 |
+| F6-3 | ⬜ 待认领 | 中 | - | 指标趋势 | 展示执行量、失败率、风险分布、审批耗时趋势 |
+| F6-4 | ⬜ 待认领 | 低 | - | 事件订阅 | 提供本地事件流供外部监控或自动化消费 |
 
-### 近期建议
+## 近期建议
 
 优先从 F1 开始，不要直接进入 F2-F6。F1 的输出应该是一份 bug backlog；只有当现有功能跑通后，再按 bug 影响和使用频率决定下一批功能。
