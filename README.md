@@ -169,8 +169,9 @@ See [docs/skills.md](docs/skills.md) for the full list of 50 MCP tools.
 ### Desktop And Web UI
 
 - Desktop host manager, exec panel, audit viewer, approval dialog, key manager, playbooks, tunnels, sessions, and connection status
+- Live Agent Activity panel for local visibility into daemon session activity, WebSocket exec streams, and recent audit records from CLI/MCP/daemon operations
 - Browser console served by the daemon at `/console`
-- Daemon REST API and WebSocket streaming exec endpoint
+- Daemon REST API, WebSocket streaming exec endpoint, and authenticated SSE event stream
 
 ### Automation
 
@@ -178,6 +179,7 @@ See [docs/skills.md](docs/skills.md) for the full list of 50 MCP tools.
 - Reusable command playbooks from `~/.agent2ssh/playbooks.toml`
 - Remote daemon registry from `~/.agent2ssh/remotes.toml`
 - MCP tools for local and remote operation
+- Bounded event previews for session input/output and streaming exec output, suitable for local agent activity monitoring
 
 ## MCP Tools (50)
 

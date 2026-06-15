@@ -1,7 +1,7 @@
 class Agent2ssh < Formula
   desc "SSH capability layer for general-purpose agents"
   homepage "https://github.com/lengyuqu/agent2ssh"
-  version "0.1.0"
+  version "0.1.1"
 
   on_macos do
     if Hardware::CPU.arm?

@@ -9,6 +9,7 @@ import ExecPanel from "./components/ExecPanel";
 import ForwardPanel from "./components/ForwardPanel";
 import HostList from "./components/HostList";
 import KeysPanel from "./components/KeysPanel";
+import LiveActivityPanel from "./components/LiveActivityPanel";
 import MultiExecPanel from "./components/MultiExecPanel";
 import PingPanel from "./components/PingPanel";
 import PlaybooksPanel from "./components/PlaybooksPanel";
@@ -246,6 +247,8 @@ export default function App() {
         </div>
 
         <ForwardPanel selectedHost={selectedHost} />
+
+        <LiveActivityPanel audit={audit} />
 
         <KeysPanel />
 

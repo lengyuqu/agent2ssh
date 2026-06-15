@@ -1,6 +1,6 @@
 [package]
 name = "agent2ssh-app"
-version = "0.1.0"
+version = "0.1.1"
 description = "SSH capability layer for general-purpose agents"
 authors = ["agent2ssh"]
 edition = "2021"

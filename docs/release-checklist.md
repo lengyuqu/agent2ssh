@@ -2,6 +2,8 @@
 
 本文件描述 agent2ssh 每次发布新版本时需要执行的完整流程。
 
+当前发布收口版本：`v0.1.1`。
+
 ---
 
 ## 1. 发布前（Pre-release）
@@ -11,7 +13,10 @@
 - [ ] 版本号同步修改：
   - `src-tauri/Cargo.toml` — `[package] version`
   - `package.json` — `"version"`
+  - `package-lock.json` — root package `"version"`
   - `src-tauri/tauri.conf.json` — `"version"`
+  - `docs/api.yaml` — `info.version`
+  - `scripts/agent2ssh.rb` — Homebrew formula `version`
 - [ ] 本地运行前端构建，确保无报错：
   ```bash
   npm run build
@@ -52,7 +57,7 @@
 ## 2. 打标签并推送（Tag and Push）
 
 ```bash
-git tag -a v0.X.0 -m "Release v0.X.0"
+git tag -a vX.Y.Z -m "Release vX.Y.Z"
 git push github main --tags
 git push git233 main --tags
 ```
@@ -103,9 +108,12 @@ sha256sum -c CHECKSUMS-SHA256.txt --ignore-missing
 
 | 文件                        | 字段                          |
 |-----------------------------|-------------------------------|
-| `src-tauri/Cargo.toml`      | `[package] version = "0.X.0"` |
-| `package.json`              | `"version": "0.X.0"`          |
-| `src-tauri/tauri.conf.json` | `"version": "0.X.0"`          |
+| `src-tauri/Cargo.toml`      | `[package] version = "X.Y.Z"` |
+| `package.json`              | `"version": "X.Y.Z"`          |
+| `package-lock.json`         | root package `"version"`      |
+| `src-tauri/tauri.conf.json` | `"version": "X.Y.Z"`          |
+| `docs/api.yaml`             | `info.version = "X.Y.Z"`      |
+| `scripts/agent2ssh.rb`      | `version "X.Y.Z"`             |
 
 版本号策略详见 [docs/versioning.md](versioning.md)。
 
@@ -114,6 +122,6 @@ sha256sum -c CHECKSUMS-SHA256.txt --ignore-missing
 ## 已知限制
 
 - PTY session 首次读取可能返回 SSH 登录 banner/prompt，命令输出可能需要后续 read
-- `agent2ssh-daemon` 和 `agent2ssh-mcp` 不支持 `--help`，运行即启动服务
+- `agent2ssh-daemon` 和 `agent2ssh-mcp` 运行即启动服务；安装验证脚本只检查二进制存在和可执行权限，避免阻塞在服务进程上
 - Windows 仅支持构建，运行时测试仅在 macOS 和 Debian Linux 验证过
 - Webhook 出站使用非阻塞 fire，远端慢时通知可能超时且无自动重试

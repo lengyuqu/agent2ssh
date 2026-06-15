@@ -136,6 +136,30 @@ export type AuditEntry = {
   exit_code: number | null;
   duration_ms: number;
   risk_level: RiskLevel;
+  reason?: string | null;
+  change_id?: string | null;
+};
+
+export type AgentEventType =
+  | "exec_started"
+  | "exec_output"
+  | "exec_completed"
+  | "approval_requested"
+  | "approval_responded"
+  | "host_connected"
+  | "host_disconnected"
+  | "session_opened"
+  | "session_input"
+  | "session_output"
+  | "session_closed"
+  | "audit_rotated"
+  | "config_changed";
+
+export type AgentEvent = {
+  id: string;
+  event_type: AgentEventType;
+  timestamp: string;
+  data: Record<string, unknown>;
 };
 
 // Rust: approval.rs — ApprovalStatus (rename_all = "snake_case")

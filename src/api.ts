@@ -3,6 +3,7 @@ import type {
   ApprovalRequest,
   AuditEntry,
   AuditFilter,
+  AgentEvent,
   ConnectionStatus,
   DaemonInfo,
   ExecMultiResult,
@@ -220,5 +221,44 @@ export const api = {
     });
     if (!res.ok) throw new Error(`Failed to save webhook config: ${res.status}`);
     return (await res.json()) as WebhookConfig;
+  },
+
+  /** Subscribe to the daemon SSE activity stream using Bearer auth. */
+  subscribeEvents: async (
+    onEvent: (event: AgentEvent) => void,
+    signal?: AbortSignal
+  ): Promise<void> => {
+    const token = await invoke<string>("get_daemon_token");
+    const res = await fetch(`${daemonUrl}/events/stream`, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal,
+    });
+    if (!res.ok) throw new Error(`Failed to subscribe to events: ${res.status}`);
+    if (!res.body) throw new Error("Event stream has no response body");
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      let boundary = buffer.indexOf("\n\n");
+      while (boundary >= 0) {
+        const frame = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        const data = frame
+          .split("\n")
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trimStart())
+          .join("\n");
+        if (data) {
+          onEvent(JSON.parse(data) as AgentEvent);
+        }
+        boundary = buffer.indexOf("\n\n");
+      }
+    }
   },
 };

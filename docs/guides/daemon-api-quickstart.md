@@ -702,6 +702,48 @@ Web 控制台提供可视化操作界面，详见 [Web 控制台指南](./web-co
 
 ---
 
+## 实时事件流（SSE）
+
+Daemon 提供认证后的 Server-Sent Events 流，用于本机安全可视化和 agent activity 观察：
+
+```bash
+curl -N -H "$AUTH" http://127.0.0.1:7722/events/stream
+```
+
+事件格式为 SSE `event: agent2ssh`，`data` 字段是 JSON：
+
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "event_type": "session_output",
+  "timestamp": "2026-06-15T13:30:00Z",
+  "data": {
+    "source": "daemon",
+    "session_id": "550e8400-e29b-41d4-a716-446655440000",
+    "output_preview": "uptime\n",
+    "output_bytes": 7
+  }
+}
+```
+
+当前主要事件类型：
+
+| 类型 | 说明 |
+|------|------|
+| `exec_started` | WebSocket streaming exec 开始 |
+| `exec_output` | WebSocket streaming exec 输出片段，包含 `stream` 和 bounded preview |
+| `exec_completed` | 命令执行完成；普通 CLI/MCP exec 也会写入 audit 并发布完成事件 |
+| `session_opened` | daemon-managed PTY session 打开 |
+| `session_input` | 向 PTY session 写入输入，包含输入预览和字节数 |
+| `session_output` | 读取到 PTY session 输出，包含输出预览和字节数 |
+| `session_closed` | PTY session 关闭 |
+| `approval_requested` / `approval_responded` | 审批请求和响应 |
+| `audit_rotated` | 审计日志轮转 |
+
+桌面端的 Live Agent Activity 面板会订阅该事件流，并同时轮询 recent audit，用来观察 Codex、Claude Code、opencode 等 agent 通过 CLI/MCP/daemon 发起的 SSH 操作。
+
+---
+
 ## 错误响应
 
 所有错误返回统一的 JSON 格式：

@@ -1,7 +1,7 @@
 openapi: "3.1.0"
 info:
   title: Agent2SSH Daemon API
-  version: "0.1.0"
+  version: "0.1.1"
   description: Local HTTP API for the Agent2SSH capability layer.
 servers:
   - url: http://127.0.0.1:7722
@@ -131,6 +131,31 @@ components:
         risk_level:  { $ref: "#/components/schemas/RiskLevel" }
         reason:      { type: string, nullable: true }
         change_id:   { type: string, nullable: true }
+
+    AgentEvent:
+      type: object
+      properties:
+        id:         { type: string, format: uuid }
+        event_type:
+          type: string
+          enum:
+            - exec_started
+            - exec_output
+            - exec_completed
+            - approval_requested
+            - approval_responded
+            - host_connected
+            - host_disconnected
+            - session_opened
+            - session_input
+            - session_output
+            - session_closed
+            - audit_rotated
+            - config_changed
+        timestamp:  { type: string, format: date-time }
+        data:
+          type: object
+          additionalProperties: true
 
     AuditFilter:
       type: object
@@ -421,6 +446,27 @@ paths:
       responses:
         "101":
           description: Switching Protocols
+
+  /events/stream:
+    get:
+      summary: Subscribe to daemon events
+      description: |
+        Authenticated Server-Sent Events stream. Each event uses event name
+        `agent2ssh`; the data payload is an AgentEvent JSON object. Used by
+        the desktop Live Agent Activity panel to observe local daemon/session
+        activity and streaming exec output.
+      responses:
+        "200":
+          description: Event stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: SSE frames containing AgentEvent JSON in data lines.
+        "401":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /audit:
     get:

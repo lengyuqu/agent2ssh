@@ -18,7 +18,7 @@ use agent2ssh::risk_config::classify_with_user_rules;
 use agent2ssh::session::*;
 use agent2ssh::store::*;
 use agent2ssh::types::*;
-use agent2ssh::events::subscribe_events;
+use agent2ssh::events::{publish_event, subscribe_events, EventType};
 
 use axum::{
     extract::{Path, Query, State, WebSocketUpgrade},
@@ -463,25 +463,71 @@ async fn session_open(State(s): State<AppState>, headers: HeaderMap, Json(body):
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
     tracing::info!(host = %body.host, "session_open invoked");
-    session_open_core(&body.host).await.map(|id| Json(IdBody { id: id.to_string() })).map_err(|e| err(StatusCode::BAD_REQUEST, e))
+    match session_open_core(&body.host).await {
+        Ok(id) => {
+            publish_event(
+                EventType::SessionOpened,
+                serde_json::json!({
+                    "source": "daemon",
+                    "host": body.host,
+                    "session_id": id.to_string(),
+                }),
+            );
+            Ok(Json(IdBody { id: id.to_string() }))
+        }
+        Err(e) => Err(err(StatusCode::BAD_REQUEST, e)),
+    }
 }
 async fn session_write(State(s): State<AppState>, headers: HeaderMap, Path(id): Path<String>, Json(body): Json<SessionWriteBody>) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
     let uuid = Uuid::parse_str(&id).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
-    session_write_core(uuid, &body.input).await.map(|_| Json(OkBody { ok: true })).map_err(|e| err(StatusCode::BAD_REQUEST, e))
+    session_write_core(uuid, &body.input).await.map(|_| {
+        publish_event(
+            EventType::SessionInput,
+            serde_json::json!({
+                "source": "daemon",
+                "session_id": id,
+                "input_preview": preview_text(&body.input, 2048),
+                "input_bytes": body.input.len(),
+            }),
+        );
+        Json(OkBody { ok: true })
+    }).map_err(|e| err(StatusCode::BAD_REQUEST, e))
 }
 async fn session_read(State(s): State<AppState>, headers: HeaderMap, Path(id): Path<String>, Query(q): Query<ReadQuery>) -> Result<Json<OutputBody>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
     let uuid = Uuid::parse_str(&id).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
-    session_read_core(uuid, q.timeout_ms.unwrap_or(2000)).await.map(|output| Json(OutputBody { output })).map_err(|e| err(StatusCode::BAD_REQUEST, e))
+    session_read_core(uuid, q.timeout_ms.unwrap_or(2000)).await.map(|output| {
+        if !output.is_empty() {
+            publish_event(
+                EventType::SessionOutput,
+                serde_json::json!({
+                    "source": "daemon",
+                    "session_id": id,
+                    "output_preview": preview_text(&output, 4096),
+                    "output_bytes": output.len(),
+                }),
+            );
+        }
+        Json(OutputBody { output })
+    }).map_err(|e| err(StatusCode::BAD_REQUEST, e))
 }
 async fn session_close(State(s): State<AppState>, headers: HeaderMap, Path(id): Path<String>) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
     let uuid = Uuid::parse_str(&id).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
-    session_close_core(uuid).await.map(|_| Json(OkBody { ok: true })).map_err(|e| err(StatusCode::BAD_REQUEST, e))
+    session_close_core(uuid).await.map(|_| {
+        publish_event(
+            EventType::SessionClosed,
+            serde_json::json!({
+                "source": "daemon",
+                "session_id": id,
+            }),
+        );
+        Json(OkBody { ok: true })
+    }).map_err(|e| err(StatusCode::BAD_REQUEST, e))
 }
 async fn session_list(State(s): State<AppState>, headers: HeaderMap) -> Result<Json<Vec<SessionListItem>>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -986,6 +1032,17 @@ async fn exec_stream(
 
         let started = std::time::Instant::now();
         let timeout_secs = req.timeout_secs.unwrap_or(60);
+        publish_event(
+            EventType::ExecStarted,
+            serde_json::json!({
+                "source": "daemon_ws",
+                "host": req.host,
+                "command": req.command,
+                "reason": req.reason.clone(),
+                "change_id": req.change_id.clone(),
+                "risk_level": format!("{}", risk),
+            }),
+        );
 
         let mut cmd = tokio::process::Command::new("ssh");
         cmd.arg("-o").arg("BatchMode=yes").arg("-o").arg("StrictHostKeyChecking=accept-new")
@@ -1022,6 +1079,8 @@ async fn exec_stream(
         let stderr = child.stderr.take();
 
         let sock_out = socket.clone();
+        let out_host = req.host.clone();
+        let out_command = req.command.clone();
         let stdout_task = tokio::spawn(async move {
             if let Some(stdout) = stdout {
                 let mut reader = tokio::io::BufReader::new(stdout);
@@ -1031,6 +1090,17 @@ async fn exec_stream(
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
                             let data = String::from_utf8_lossy(&buf[..n]).to_string();
+                            publish_event(
+                                EventType::ExecOutput,
+                                serde_json::json!({
+                                    "source": "daemon_ws",
+                                    "host": out_host,
+                                    "command": out_command,
+                                    "stream": "stdout",
+                                    "output_preview": preview_text(&data, 4096),
+                                    "output_bytes": data.len(),
+                                }),
+                            );
                             let mut s = sock_out.lock().await;
                             if s.send(Message::Text(serde_json::json!({"type":"stdout","data":data}).to_string())).await.is_err() { break; }
                         }
@@ -1040,6 +1110,8 @@ async fn exec_stream(
         });
 
         let sock_err = socket.clone();
+        let err_host = req.host.clone();
+        let err_command = req.command.clone();
         let stderr_task = tokio::spawn(async move {
             if let Some(stderr) = stderr {
                 let mut reader = tokio::io::BufReader::new(stderr);
@@ -1049,6 +1121,17 @@ async fn exec_stream(
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
                             let data = String::from_utf8_lossy(&buf[..n]).to_string();
+                            publish_event(
+                                EventType::ExecOutput,
+                                serde_json::json!({
+                                    "source": "daemon_ws",
+                                    "host": err_host,
+                                    "command": err_command,
+                                    "stream": "stderr",
+                                    "output_preview": preview_text(&data, 4096),
+                                    "output_bytes": data.len(),
+                                }),
+                            );
                             let mut s = sock_err.lock().await;
                             if s.send(Message::Text(serde_json::json!({"type":"stderr","data":data}).to_string())).await.is_err() { break; }
                         }
@@ -1073,12 +1156,32 @@ async fn exec_stream(
                 None
             }
         };
+        let duration_ms = started.elapsed().as_millis();
+        publish_event(
+            EventType::ExecCompleted,
+            serde_json::json!({
+                "source": "daemon_ws",
+                "host": req.host,
+                "command": req.command,
+                "exit_code": code,
+                "risk_level": format!("{}", risk),
+                "duration_ms": duration_ms,
+            }),
+        );
 
         let mut s = socket.lock().await;
         let _ = s.send(Message::Text(
-            serde_json::json!({"type":"exit","code":code,"duration_ms":started.elapsed().as_millis()}).to_string()
+            serde_json::json!({"type":"exit","code":code,"duration_ms":duration_ms}).to_string()
         )).await;
     })
+}
+
+fn preview_text(value: &str, max_chars: usize) -> String {
+    let mut preview: String = value.chars().take(max_chars).collect();
+    if value.chars().count() > max_chars {
+        preview.push_str("\n...[truncated]");
+    }
+    preview
 }
 
 fn expand_tilde(path: &str) -> String {

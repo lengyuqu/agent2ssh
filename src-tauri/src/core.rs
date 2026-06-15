@@ -813,6 +813,8 @@ pub(crate) async fn exec_ssh_core_with_risk_override(
             "exit_code": result.exit_code,
             "risk_level": format!("{}", result.risk_level),
             "duration_ms": result.duration_ms,
+            "reason": request.reason,
+            "change_id": request.change_id,
         }),
     );
 

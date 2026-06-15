@@ -20,11 +20,17 @@ pub struct Agent2SSHEvent {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum EventType {
+    ExecStarted,
+    ExecOutput,
     ExecCompleted,
     ApprovalRequested,
     ApprovalResponded,
     HostConnected,
     HostDisconnected,
+    SessionOpened,
+    SessionInput,
+    SessionOutput,
+    SessionClosed,
     AuditRotated,
     ConfigChanged,
 }
@@ -77,11 +83,17 @@ mod tests {
 
         // Test all event type variants serialize correctly
         let types = vec![
+            EventType::ExecStarted,
+            EventType::ExecOutput,
             EventType::ExecCompleted,
             EventType::ApprovalRequested,
             EventType::ApprovalResponded,
             EventType::HostConnected,
             EventType::HostDisconnected,
+            EventType::SessionOpened,
+            EventType::SessionInput,
+            EventType::SessionOutput,
+            EventType::SessionClosed,
             EventType::AuditRotated,
             EventType::ConfigChanged,
         ];

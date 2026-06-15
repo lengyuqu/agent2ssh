@@ -240,4 +240,18 @@ P0-P10 已全部完成。当前基线：
 
 ## 近期建议
 
-下一阶段不再新增大功能，先按 S1 → S2 → S3 → S4 推进。S1 和 S2 是发布前阻塞项；S3 可以和 S2 并行，但不要晚于 S4；S4 只在真实环境回归没有高优先级 bug 后开始。
+S1-S4 已完成，下一步进入发布收口：
+
+1. 打 `v0.1.1` 标签并推送到 `github`、`git233`。
+2. 等待 CI 产出跨平台 release assets 和 `CHECKSUMS-SHA256.txt`。
+3. 用 release assets 回填 `scripts/agent2ssh.rb` 的平台 sha256，并在 macOS / Linux / Windows 跑 `scripts/verify-install.sh`。
+4. 发布后保留 1-2 轮真实服务器 smoke；若发现问题，优先走 `0.1.2` 补丁修复，不在当前窗口追加大功能。
+
+## 安全可视化后续
+
+Agent2SSH 已开始从“agent 可调用 SSH 能力层”扩展为“本机 SSH 操作观察面”。当前 Live Agent Activity 面板覆盖 daemon SSE 实时事件和本地 audit 补偿；下一步建议优先完成：
+
+1. MCP session 默认路由到 local daemon registry，使 Claude Code、Codex、opencode 等 agent 打开的 PTY 都能被桌面端实时接管和观察。
+2. 为 CLI/MCP 增加标准 `source` 字段或环境变量（例如 `AGENT2SSH_SOURCE=codex`），让前端区分发起方。
+3. 为 Live Activity 增加敏感输出显示策略：默认预览、可手动展开、支持按 host/env/risk 过滤。
+4. 增加“高风险操作前台提醒”，当非前端来源触发 high/blocked/approval 事件时在桌面端明显提示。

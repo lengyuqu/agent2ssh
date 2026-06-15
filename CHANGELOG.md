@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+- **Live Agent Activity**: Added a desktop activity panel that subscribes to daemon SSE events and polls recent audit entries, giving local visibility into SSH exec/session activity initiated by agents, CLI, daemon API, or the desktop app.
+
+### Changed
+- **Daemon event stream**: Session open/write/read/close and WebSocket exec stream output now publish structured local events with source, host/session identifiers, command metadata, and bounded input/output previews.
+
+## [0.1.1] - 2026-06-15
+
 ### Fixed
 - **Audit chain (F4-4)**: `exec-multi` and `playbook run` now correctly propagate `reason` and `change_id` through to every per-host audit entry. Previously, audit entries created via multi-host execution or playbook steps could lose the operation context.
 - **MCP tool count**: Corrected documented MCP tool count from 31 to 50, reflecting all tools added in F2–F6 phases (host health, audit export, playbook run, metrics trends, etc.).

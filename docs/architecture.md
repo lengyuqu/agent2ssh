@@ -30,6 +30,7 @@ Remote hosts
 | `src-tauri/src/keys.rs` | SSH key generation, import, listing, and deletion |
 | `src-tauri/src/playbook.rs` | Playbook loading and sequential execution |
 | `src-tauri/src/notify.rs` | Webhook configuration and delivery |
+| `src-tauri/src/events.rs` | Local event bus for daemon SSE, activity monitoring, approvals, audit rotation, and SSH operation events |
 | `src-tauri/src/remote.rs` | Remote daemon registry and health probing |
 | `src-tauri/src/types.rs` | Shared types: `HostProfile`, `ExecRequest`, `ExecResult`, `RiskLevel`, etc. |
 | `src-tauri/src/tauri_commands.rs` | Tauri IPC commands wrapping the core |
@@ -61,6 +62,14 @@ Remote hosts
 ```
 
 The desktop app, CLI, MCP server, and daemon share the same Rust core library. The MCP server exposes 50 tools and speaks JSON-RPC 2.0 over stdio, making it compatible with any MCP-capable agent host.
+
+## Local Activity Visibility
+
+Agent2SSH is also a local observation surface for agent-driven SSH activity. The daemon exposes an authenticated SSE endpoint at `/events/stream`, and the desktop app subscribes to it through the Live Agent Activity panel.
+
+Current live events cover daemon-managed PTY session open/write/read/close, WebSocket exec start/output/exit, approvals, audit rotation, and connection/config changes. The panel also polls recent audit records, so completed CLI/MCP execs that write to the same config directory are visible even when they did not originate from the desktop UI.
+
+Known boundary: MCP PTY sessions are still process-local to the MCP server. They are usable through `ssh_session_open/write/read/close`, but full desktop-side real-time takeover requires routing MCP sessions through the local daemon registry.
 
 ## Safety Model
 

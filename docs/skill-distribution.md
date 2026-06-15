@@ -6,7 +6,7 @@
 
 ## Skill 概述
 
-Agent2SSH 以 `agent2ssh-mcp` 二进制形式暴露 MCP stdio 服务器，将 SSH 操作能力（主机管理、命令执行、SFTP、会话、端口转发、审计、审批等）封装为 33 个 MCP 工具，供任何支持 MCP 协议的 AI 客户端（Claude Desktop、Cursor、Codex 等）直接调用。
+Agent2SSH 以 `agent2ssh-mcp` 二进制形式暴露 MCP stdio 服务器，将 SSH 操作能力（主机管理、命令执行、SFTP、会话、端口转发、Playbook、审计、审批、健康检查、指标和 remote daemon 等）封装为 50 个 MCP 工具，供任何支持 MCP 协议的 AI 客户端（Claude Desktop、Cursor、Codex 等）直接调用。
 
 **工作原理**：
 
@@ -22,7 +22,7 @@ Agent2SSH 以 `agent2ssh-mcp` 二进制形式暴露 MCP stdio 服务器，将 SS
 
 ### 方式一：预编译二进制（推荐）
 
-从 [GitHub Releases](https://github.com/your-org/agent2ssh/releases) 下载对应平台的二进制文件：
+从 [GitHub Releases](https://github.com/lengyuqu/agent2ssh/releases) 下载对应平台的二进制文件：
 
 | 平台 | 文件名 |
 |------|--------|
@@ -66,9 +66,7 @@ Agent2SSH 的所有组件（CLI、MCP server、daemon、Tauri 桌面应用）共
 
 | Skill 版本 | Agent2SSH 版本 | 兼容性 |
 |-----------|---------------|--------|
-| 0.5.x | 0.5.x | 完全兼容 |
-| 0.4.x | 0.4.x | 完全兼容 |
-| 0.3.x | 0.5.x | 可能缺少新工具（如 `ssh_config_export`） |
+| 0.1.x | 0.1.x | 完全兼容 |
 
 **建议**：始终保持 MCP server 与 CLI/daemon 版本一致。工具集在次版本（minor）之间向后兼容，补丁版本（patch）之间完全兼容。
 
@@ -130,9 +128,9 @@ Agent2SSH 的所有组件（CLI、MCP server、daemon、Tauri 桌面应用）共
 
 ## 工具分类表
 
-以下按风险级别对所有 33 个工具进行分类：
+以下按风险级别列出常用工具；完整 50 个工具列表以 [MCP Tools Reference](skills.md) 为准。
 
-### 只读类（Read-only） — 15 个
+### 只读类（Read-only）
 
 安全级别高，不会触发任何变更，可放心授予 AI 客户端。
 
@@ -147,7 +145,7 @@ ssh_playbook_list       ssh_config_export
 ssh_webhook_config (get)
 ```
 
-### 写入类（Write/Mutate） — 18 个
+### 写入类（Write/Mutate）
 
 会产生副作用，建议配合 `risk_rules.toml` 和审批流程使用。
 
@@ -187,7 +185,7 @@ brew upgrade agent2ssh
 
 ### 手动更新
 
-1. 从 [GitHub Releases](https://github.com/your-org/agent2ssh/releases) 下载最新版本
+1. 从 [GitHub Releases](https://github.com/lengyuqu/agent2ssh/releases) 下载最新版本
 2. 替换旧的二进制文件
 3. 重启 AI 客户端（MCP server 会在下次调用时重新启动）
 
@@ -198,7 +196,7 @@ brew upgrade agent2ssh
 ```toml
 # 在 CI/CD 中固定版本
 [agent2ssh]
-version = "=0.5.0"
+version = "=0.1.1"
 ```
 
 ### 变更日志

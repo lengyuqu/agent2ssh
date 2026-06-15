@@ -196,7 +196,7 @@ npm install @modelcontextprotocol/sdk
 
 在使用上述任何客户端之前，请确保：
 
-1. **已安装 agent2ssh-mcp**：通过 Homebrew、cargo install 或从 [GitHub Releases](https://github.com/your-org/agent2ssh/releases) 下载预编译二进制
+1. **已安装 agent2ssh-mcp**：通过 Homebrew、cargo install 或从 [GitHub Releases](https://github.com/lengyuqu/agent2ssh/releases) 下载预编译二进制
 2. **已配置主机**：运行 `agent2ssh host import-config` 从 `~/.ssh/config` 导入，或通过 `agent2ssh host add` 手动添加
 3. **SSH 密钥已就位**：确保对应的 SSH 密钥文件存在且权限正确（`chmod 600`）
 
