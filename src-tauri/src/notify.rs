@@ -515,6 +515,7 @@ mod tests {
         dir
     }
 
+    #[cfg(feature = "daemon")]
     fn test_event() -> WebhookEvent {
         WebhookEvent {
             event: "approval_required".into(),

@@ -544,3 +544,135 @@ async fn cli_policy_list_json_exits_zero() {
         "policy list --json should produce a JSON array"
     );
 }
+
+// ============================================================================
+// S3-4: CLI help alignment with documentation
+// ============================================================================
+
+#[test]
+fn cli_exec_multi_help_shows_reason_and_change_id() {
+    // Verify that `exec-multi --help` documents --reason and --change-id flags,
+    // matching the README and guides documentation.
+    let output = std::process::Command::new(cli_bin())
+        .args(["exec-multi", "--help"])
+        .output()
+        .expect("failed to run exec-multi --help");
+
+    assert!(output.status.success(), "exec-multi --help should exit 0");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        stdout.contains("--reason"),
+        "exec-multi --help should document --reason flag, got:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("--change-id"),
+        "exec-multi --help should document --change-id flag, got:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("--command"),
+        "exec-multi --help should document --command flag, got:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("--tags"),
+        "exec-multi --help should document --tags flag, got:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("--concurrency"),
+        "exec-multi --help should document --concurrency flag, got:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("--max-failures"),
+        "exec-multi --help should document --max-failures flag, got:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("--batch-size"),
+        "exec-multi --help should document --batch-size flag, got:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("--compare"),
+        "exec-multi --help should document --compare flag, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn cli_playbook_run_help_shows_reason_and_change_id() {
+    // Verify that `playbook run --help` documents --reason and --change-id flags.
+    let output = std::process::Command::new(cli_bin())
+        .args(["playbook", "run", "--help"])
+        .output()
+        .expect("failed to run playbook run --help");
+
+    assert!(
+        output.status.success(),
+        "playbook run --help should exit 0"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        stdout.contains("--reason"),
+        "playbook run --help should document --reason flag, got:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("--change-id"),
+        "playbook run --help should document --change-id flag, got:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("--host"),
+        "playbook run --help should document --host flag, got:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("--params"),
+        "playbook run --help should document --params flag, got:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("--force"),
+        "playbook run --help should document --force flag, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn cli_exec_help_shows_reason_and_change_id() {
+    // Verify that `exec --help` documents --reason and --change-id flags.
+    let output = std::process::Command::new(cli_bin())
+        .args(["exec", "--help"])
+        .output()
+        .expect("failed to run exec --help");
+
+    assert!(output.status.success(), "exec --help should exit 0");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        stdout.contains("--reason"),
+        "exec --help should document --reason flag, got:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("--change-id"),
+        "exec --help should document --change-id flag, got:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("--force"),
+        "exec --help should document --force flag, got:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("--timeout-secs"),
+        "exec --help should document --timeout-secs flag, got:\n{}",
+        stdout
+    );
+}

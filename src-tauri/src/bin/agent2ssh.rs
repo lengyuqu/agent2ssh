@@ -542,6 +542,12 @@ enum PlaybookCommands {
         /// Parameters as key=value pairs (repeatable)
         #[arg(long = "params", value_name = "KEY=VALUE")]
         params: Option<Vec<String>>,
+        /// Optional reason/note for this operation (audit trail)
+        #[arg(long)]
+        reason: Option<String>,
+        /// Optional change/ticket ID for this operation (audit trail)
+        #[arg(long)]
+        change_id: Option<String>,
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -776,8 +782,8 @@ async fn main() -> Result<()> {
             batch_size,
             pause_secs,
             compare,
-            reason: _,
-            change_id: _,
+            reason,
+            change_id,
         } => {
             // --plan: show execution plan without running
             if plan {
@@ -804,7 +810,7 @@ async fn main() -> Result<()> {
                     pause_between_batches_secs: pause_secs,
                 };
                 let batch_result = exec_multi_with_strategy(
-                    hosts, command, force, timeout_secs, tags, Some(strategy),
+                    hosts, command, force, timeout_secs, tags, Some(strategy), reason, change_id,
                 )
                 .await;
                 if json {
@@ -848,7 +854,7 @@ async fn main() -> Result<()> {
                     }
                 }
             } else {
-                let results = exec_multi_core(hosts, command, force, timeout_secs, tags).await;
+                let results = exec_multi_core(hosts, command, force, timeout_secs, tags, reason, change_id).await;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&results)?);
                 } else {
@@ -1844,6 +1850,8 @@ async fn main() -> Result<()> {
                 host,
                 force,
                 params,
+                reason,
+                change_id,
                 json,
             } => {
                 let params_map = parse_cli_params(params);
@@ -1856,6 +1864,8 @@ async fn main() -> Result<()> {
                     } else {
                         Some(&params_map)
                     },
+                    reason,
+                    change_id,
                 )
                 .await?;
                 if json {

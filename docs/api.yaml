@@ -46,6 +46,8 @@ components:
         timeout_secs:     { type: integer, nullable: true }
         stdin:            { type: string, nullable: true }
         max_output_bytes: { type: integer, nullable: true }
+        reason:           { type: string, nullable: true }
+        change_id:        { type: string, nullable: true }
 
     ExecResult:
       type: object
@@ -80,6 +82,30 @@ components:
           type: array
           nullable: true
           items: { type: string }
+        strategy:
+          type: object
+          nullable: true
+          properties:
+            concurrency: { type: integer, nullable: true }
+            max_failures: { type: integer, nullable: true }
+            batch_size: { type: integer, nullable: true }
+            pause_between_batches_secs: { type: integer, nullable: true }
+        reason:       { type: string, nullable: true }
+        change_id:    { type: string, nullable: true }
+
+    ExecMultiBatchResult:
+      type: object
+      properties:
+        results:
+          type: array
+          items: { $ref: "#/components/schemas/ExecMultiResult" }
+        total_hosts:       { type: integer }
+        successful:        { type: integer }
+        failed:            { type: integer }
+        skipped:           { type: integer }
+        stopped_early:     { type: boolean }
+        batches_executed:  { type: integer }
+        total_duration_ms: { type: integer }
 
     PingResult:
       type: object
@@ -103,6 +129,8 @@ components:
         exit_code:   { type: integer, nullable: true }
         duration_ms: { type: integer }
         risk_level:  { $ref: "#/components/schemas/RiskLevel" }
+        reason:      { type: string, nullable: true }
+        change_id:   { type: string, nullable: true }
 
     AuditFilter:
       type: object
@@ -223,6 +251,12 @@ components:
         playbook: { type: string }
         host:     { type: string }
         force:    { type: boolean, default: false }
+        params:
+          type: object
+          nullable: true
+          additionalProperties: { type: string }
+        reason:   { type: string, nullable: true }
+        change_id: { type: string, nullable: true }
 
     PlaybookStepResult:
       type: object
@@ -376,9 +410,7 @@ paths:
         "200":
           content:
             application/json:
-              schema:
-                type: array
-                items: { $ref: "#/components/schemas/ExecMultiResult" }
+              schema: { $ref: "#/components/schemas/ExecMultiBatchResult" }
 
   /exec/stream:
     get:

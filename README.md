@@ -120,7 +120,7 @@ Configure Agent2SSH as an MCP server in your agent's config:
 }
 ```
 
-See [docs/skills.md](docs/skills.md) for the full list of 31 MCP tools.
+See [docs/skills.md](docs/skills.md) for the full list of 50 MCP tools.
 
 ## Implemented Features
 
@@ -179,41 +179,11 @@ See [docs/skills.md](docs/skills.md) for the full list of 31 MCP tools.
 - Remote daemon registry from `~/.agent2ssh/remotes.toml`
 - MCP tools for local and remote operation
 
-## MCP Tools (31)
+## MCP Tools (50)
 
-| Tool | Description |
-|------|-------------|
-| `ssh_list_hosts` | List configured host profiles |
-| `ssh_add_host` | Create or update a host profile |
-| `ssh_remove_host` | Remove a host profile |
-| `ssh_import_config` | Import from `~/.ssh/config` |
-| `ssh_exec` | Run a command, optionally routed through a daemon alias |
-| `ssh_exec_multi` | Run a command on multiple hosts concurrently |
-| `ssh_ping` | Check reachability and latency |
-| `ssh_audit` | Query the execution audit log |
-| `ssh_sftp_ls` | List a remote directory |
-| `ssh_sftp_stat` | Stat a remote file |
-| `ssh_sftp_mkdir` | Create a remote directory |
-| `ssh_sftp_upload` | Upload a file via scp |
-| `ssh_sftp_download` | Download a file via scp |
-| `ssh_session_open` | Open a persistent PTY session |
-| `ssh_session_write` | Send input to a PTY session |
-| `ssh_session_read` | Read buffered output from a PTY session |
-| `ssh_session_close` | Close a PTY session |
-| `ssh_session_list` | List open PTY sessions |
-| `ssh_forward_add` | Start a port forward tunnel |
-| `ssh_forward_list` | List active tunnels |
-| `ssh_forward_remove` | Stop a tunnel |
-| `ssh_risk_check` | Check risk level for a command |
-| `ssh_approval_list` | List pending approval requests |
-| `ssh_approval_respond` | Approve or reject an approval request |
-| `ssh_connection_status` | List ControlMaster connection states |
-| `ssh_connect` | Establish a ControlMaster connection |
-| `ssh_disconnect` | Close a ControlMaster connection |
-| `ssh_webhook_config` | Get or set webhook notification configuration |
-| `ssh_playbook_list` | List configured playbooks |
-| `ssh_playbook_run` | Execute a playbook on a host |
-| `ssh_list_daemons` | List configured daemon instances |
+Agent2SSH exposes **50 MCP tools** covering host management, command execution, SFTP, persistent sessions, port forwarding, playbooks, audit, approval workflows, daemon management, and more.
+
+For the complete tool reference with descriptions and parameters, see [docs/skills.md](docs/skills.md).
 
 ## API Reference
 

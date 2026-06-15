@@ -35,7 +35,7 @@ Agent2SSH exposes 50 tools via the Model Context Protocol (MCP) stdio server.
 | 27 | `ssh_disconnect` | Manually close a ControlMaster connection |
 | 28 | `ssh_webhook_config` | Get or set webhook notification configuration |
 | 29 | `ssh_playbook_list` | List all configured playbooks |
-| 30 | `ssh_playbook_run` | Execute a playbook (command sequence) on a host |
+| 30 | `ssh_playbook_run` | Execute a playbook on a host with optional params, reason, and change ID |
 | 31 | `ssh_list_daemons` | List configured daemon instances with connectivity status |
 | 32 | `ssh_config_export` | Export team config (hosts without keys, risk rules, playbooks) |
 | 33 | `ssh_config_import` | Import team config from JSON |
@@ -135,7 +135,7 @@ tags = ["production", "web"]
 risk_override = "high"
 ```
 
-Use `ssh_playbook_list` to list all playbooks, `ssh_playbook_run` to execute one on a target host. Steps run sequentially and halt on first failure.
+Use `ssh_playbook_list` to list all playbooks, `ssh_playbook_run` to execute one on a target host. Steps run sequentially and halt on first failure. Provide `reason` and `change_id` when the resulting audit entries need operational context.
 
 ## Remote Daemon
 

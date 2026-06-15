@@ -210,4 +210,4 @@ npm install @modelcontextprotocol/sdk
 
 ## 可用工具
 
-Agent2SSH 共暴露 31 个 MCP 工具，涵盖主机管理、命令执行、SFTP、会话、端口转发、审计和审批等。完整列表参见 [MCP Tools Reference](../skills.md)。
+Agent2SSH 共暴露 50 个 MCP 工具，涵盖主机管理、命令执行、SFTP、会话、端口转发、审计、审批、健康检查、指标和远程 daemon 等。完整列表参见 [MCP Tools Reference](../skills.md)。

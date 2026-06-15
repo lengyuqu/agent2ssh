@@ -65,7 +65,7 @@ pub async fn exec_multi(
     timeout_secs: Option<u64>,
     tags: Option<Vec<String>>,
 ) -> Result<Vec<ExecMultiResult>, String> {
-    Ok(exec_multi_core(hosts, command, force, timeout_secs, tags).await)
+    Ok(exec_multi_core(hosts, command, force, timeout_secs, tags, None, None).await)
 }
 
 #[tauri::command]
@@ -269,7 +269,7 @@ pub fn list_playbooks() -> Result<Vec<Playbook>, String> {
 
 #[tauri::command]
 pub async fn run_playbook(playbook: String, host: String, force: bool) -> Result<PlaybookRunResult, String> {
-    run_playbook_core(&playbook, &host, force, None).await.map_err(|e| e.to_string())
+    run_playbook_core(&playbook, &host, force, None, None, None).await.map_err(|e| e.to_string())
 }
 
 // ── Webhook config ───────────────────────────────────────────────────────────

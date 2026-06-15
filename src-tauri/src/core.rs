@@ -825,6 +825,8 @@ pub async fn exec_multi_core(
     force: bool,
     timeout_secs: Option<u64>,
     tags: Option<Vec<String>>,
+    reason: Option<String>,
+    change_id: Option<String>,
 ) -> Vec<ExecMultiResult> {
     // Expand tags into host names
     let resolved_hosts = if let Some(tag_list) = tags {
@@ -853,6 +855,8 @@ pub async fn exec_multi_core(
 
     for host in resolved_hosts {
         let cmd = command.clone();
+        let req_reason = reason.clone();
+        let req_change_id = change_id.clone();
         set.spawn(async move {
             let req = ExecRequest {
                 host: host.clone(),
@@ -861,8 +865,8 @@ pub async fn exec_multi_core(
                 timeout_secs,
                 stdin: None,
                 max_output_bytes: None,
-                reason: None,
-                change_id: None,
+                reason: req_reason,
+                change_id: req_change_id,
             };
             match exec_ssh_core(req).await {
                 Ok(r) => ExecMultiResult { host, result: Some(r), error: None },
@@ -891,6 +895,8 @@ pub async fn exec_multi_with_strategy(
     timeout_secs: Option<u64>,
     tags: Option<Vec<String>>,
     strategy: Option<BatchStrategy>,
+    reason: Option<String>,
+    change_id: Option<String>,
 ) -> ExecMultiBatchResult {
     let started = Instant::now();
 
@@ -942,6 +948,8 @@ pub async fn exec_multi_with_strategy(
         for host in &resolved_hosts {
             let cmd = command.clone();
             let h = host.clone();
+            let req_reason = reason.clone();
+            let req_change_id = change_id.clone();
             set.spawn(async move {
                 let req = ExecRequest {
                     host: h.clone(),
@@ -950,8 +958,8 @@ pub async fn exec_multi_with_strategy(
                     timeout_secs,
                     stdin: None,
                     max_output_bytes: None,
-                    reason: None,
-                    change_id: None,
+                    reason: req_reason,
+                    change_id: req_change_id,
                 };
                 match exec_ssh_core(req).await {
                     Ok(r) => ExecMultiResult { host: h, result: Some(r), error: None },
@@ -1013,6 +1021,8 @@ pub async fn exec_multi_with_strategy(
             let cmd = command.clone();
             let h = host.clone();
             let sem_clone = sem.clone();
+            let req_reason = reason.clone();
+            let req_change_id = change_id.clone();
             set.spawn(async move {
                 // Acquire semaphore permit if concurrency is limited
                 let _permit = if let Some(ref s) = sem_clone {
@@ -1027,8 +1037,8 @@ pub async fn exec_multi_with_strategy(
                     timeout_secs,
                     stdin: None,
                     max_output_bytes: None,
-                    reason: None,
-                    change_id: None,
+                    reason: req_reason,
+                    change_id: req_change_id,
                 };
                 match exec_ssh_core(req).await {
                     Ok(r) => ExecMultiResult { host: h, result: Some(r), error: None },

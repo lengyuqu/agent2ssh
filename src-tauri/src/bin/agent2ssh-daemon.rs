@@ -93,7 +93,7 @@ fn err(status: StatusCode, msg: impl ToString) -> (StatusCode, Json<ErrorBody>) 
 // ── Request/Response types ───────────────────────────────────────────────────
 
 #[derive(Deserialize)] struct PingBody { hosts: Vec<String>, timeout_secs: Option<u64> }
-#[derive(Deserialize)] struct ExecMultiBody { hosts: Vec<String>, command: String, #[serde(default)] force: bool, timeout_secs: Option<u64>, #[serde(default)] tags: Option<Vec<String>>, #[serde(default)] strategy: Option<BatchStrategy> }
+#[derive(Deserialize)] struct ExecMultiBody { hosts: Vec<String>, command: String, #[serde(default)] force: bool, timeout_secs: Option<u64>, #[serde(default)] tags: Option<Vec<String>>, #[serde(default)] strategy: Option<BatchStrategy>, #[serde(default)] reason: Option<String>, #[serde(default)] change_id: Option<String> }
 #[derive(Deserialize)] struct ExecCompareBody { hosts: Vec<String>, command: String, #[serde(default)] force: bool, timeout_secs: Option<u64>, #[serde(default)] tags: Option<Vec<String>> }
 #[derive(Deserialize)] struct SftpDirBody { host: String, path: String }
 #[derive(Deserialize)] struct SessionOpenBody { host: String }
@@ -102,7 +102,7 @@ fn err(status: StatusCode, msg: impl ToString) -> (StatusCode, Json<ErrorBody>) 
 #[derive(Deserialize)] struct AuditQuery { host: Option<String>, risk_level: Option<RiskLevel>, exit_code: Option<i32>, since: Option<String>, until: Option<String>, limit: Option<usize>, search: Option<String>, command_pattern: Option<String>, host_env: Option<String>, host_role: Option<String>, host_owner: Option<String> }
 #[derive(Deserialize)] struct AuditExportQuery { host: Option<String>, risk_level: Option<RiskLevel>, exit_code: Option<i32>, since: Option<String>, until: Option<String>, limit: Option<usize>, search: Option<String>, command_pattern: Option<String>, host_env: Option<String>, host_role: Option<String>, host_owner: Option<String>, format: Option<String> }
 #[derive(Deserialize)] struct RiskCheckBody { command: String, #[allow(dead_code)] host: Option<String> }
-#[derive(Deserialize)] struct PlaybookRunBody { playbook: String, host: String, #[serde(default)] force: bool, #[serde(default)] params: Option<HashMap<String, String>> }
+#[derive(Deserialize)] struct PlaybookRunBody { playbook: String, host: String, #[serde(default)] force: bool, #[serde(default)] params: Option<HashMap<String, String>>, #[serde(default)] reason: Option<String>, #[serde(default)] change_id: Option<String> }
 #[derive(Deserialize)] struct PlaybookDryRunBody { playbook: String, #[serde(default)] params: Option<HashMap<String, String>> }
 #[derive(Deserialize)] struct ExecPreviewBody { host: Option<String>, hosts: Option<Vec<String>>, command: String, timeout_secs: Option<u64>, #[serde(default)] tags: Option<Vec<String>> }
 #[derive(Deserialize, Default)] struct HealthSnapshotBody { #[serde(default)] hosts: Option<Vec<String>>, timeout_secs: Option<u64> }
@@ -368,7 +368,7 @@ async fn exec_multi(
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
     tracing::info!(hosts = ?body.hosts, command = %body.command, "exec-multi handler invoked");
-    Ok(Json(exec_multi_with_strategy(body.hosts, body.command, body.force, body.timeout_secs, body.tags, body.strategy).await))
+    Ok(Json(exec_multi_with_strategy(body.hosts, body.command, body.force, body.timeout_secs, body.tags, body.strategy, body.reason, body.change_id).await))
 }
 
 async fn exec_compare(
@@ -377,7 +377,7 @@ async fn exec_compare(
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
     tracing::info!(hosts = ?body.hosts, command = %body.command, "exec-compare handler invoked");
-    let results = exec_multi_core(body.hosts, body.command, body.force, body.timeout_secs, body.tags).await;
+    let results = exec_multi_core(body.hosts, body.command, body.force, body.timeout_secs, body.tags, None, None).await;
     Ok(Json(compare_exec_results(&results)))
 }
 
@@ -686,7 +686,7 @@ async fn run_playbook(
 ) -> Result<Json<PlaybookRunResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
-    run_playbook_core(&body.playbook, &body.host, body.force, body.params.as_ref())
+    run_playbook_core(&body.playbook, &body.host, body.force, body.params.as_ref(), body.reason, body.change_id)
         .await
         .map(Json)
         .map_err(|e| err(StatusCode::BAD_REQUEST, e))

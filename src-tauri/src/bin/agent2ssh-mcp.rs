@@ -463,7 +463,9 @@ async fn handle_request(request: &Value) -> std::result::Result<Value, McpError>
                             "playbook": { "type": "string", "description": "Name of the playbook to run." },
                             "host":     { "type": "string", "description": "Target host profile alias." },
                             "force":    { "type": "boolean", "description": "Set true to allow high-risk steps within the playbook." },
-                            "params":   { "type": "object", "description": "Key-value parameters to substitute into step command templates ({{param_name}} syntax)." }
+                            "params":   { "type": "object", "description": "Key-value parameters to substitute into step command templates ({{param_name}} syntax)." },
+                            "reason":   { "type": "string", "description": "Optional reason/note for this operation (audit trail)." },
+                            "change_id": { "type": "string", "description": "Optional change/ticket ID for this operation (audit trail)." }
                         }
                     }
                 },
@@ -812,6 +814,8 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                         .filter_map(|v| v.as_str().map(str::to_string))
                         .collect()
                 });
+            let reason = args["reason"].as_str().map(str::to_string);
+            let change_id = args["change_id"].as_str().map(str::to_string);
 
             // Parse optional strategy
             let strategy: Option<agent2ssh::types::BatchStrategy> = args["strategy"]
@@ -824,7 +828,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 });
 
             let batch_result = exec_multi_with_strategy(
-                hosts, command, force, timeout_secs, tags, strategy,
+                hosts, command, force, timeout_secs, tags, strategy, reason, change_id,
             )
             .await;
             serde_json::to_value(batch_result)?
@@ -850,7 +854,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                         .collect()
                 });
 
-            let results = exec_multi_core(hosts, command, force, timeout_secs, tags).await;
+            let results = exec_multi_core(hosts, command, force, timeout_secs, tags, None, None).await;
             let comparison = compare_exec_results(&results);
             serde_json::to_value(comparison)?
         }
@@ -1065,11 +1069,15 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                         .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
                         .collect()
                 });
+            let reason = args["reason"].as_str().map(str::to_string);
+            let change_id = args["change_id"].as_str().map(str::to_string);
             let result = run_playbook_core(
                 playbook,
                 host,
                 force,
                 params_map.as_ref(),
+                reason,
+                change_id,
             )
             .await
             .map_err(McpError::from)?;

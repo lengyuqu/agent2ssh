@@ -10,7 +10,7 @@ P0-P10 已全部完成。当前基线：
 - 安全能力：风险评分、自定义风险规则、审批队列、审批端点、桌面审批弹窗、敏感命令脱敏
 - 运维能力：SSH ControlMaster 连接池、Webhook 通知、remote daemon registry、健康检查、指标、审计轮转
 - 生态能力：SSH key 管理、团队配置导入导出、MCP 客户端模板、插件/Skill 分发文档
-- 验收结果：131 单元测试 + 50 集成测试 + 21 CLI smoke 测试 = 202 测试全绿
+- 验收结果：137 单元测试 + 56 集成测试 + 24 CLI smoke 测试 = 217 测试全绿；daemon feature 下为 142 单元测试 + 56 集成测试 + 24 CLI smoke 测试全绿
 - MCP 工具：50 个，详见 [skills.md](skills.md)
 
 ## 协作规则
@@ -63,6 +63,10 @@ P0-P10 已全部完成。当前基线：
 | F4 | 审批与协作 | ✅ 已完成 | 高 | Qoder |
 | F5 | 远程 daemon 与多节点 | ✅ 已完成 | 高 | Qoder |
 | F6 | 可观测与审计分析 | ✅ 已完成 | 中 | Qoder |
+| S1 | 当前变更收口 | ✅ 已完成 | 高 | Qoder |
+| S2 | 真实环境回归 | ✅ 已完成 | 高 | Qoder |
+| S3 | 文档与契约一致性 | ✅ 已完成 | 中 | Qoder |
+| S4 | 发布前质量门槛 | ✅ 已完成 | 高 | Qoder |
 
 ## 已完成阶段归档
 
@@ -102,7 +106,7 @@ P0-P10 已全部完成。当前基线：
 | 系统 | Debian，主机名 `racknerd-ef7655c` |
 | 认证方式 | 用户已提供 root 密码；明文密码保存在本地 gitignored 文件 `.agent2ssh-test.env` 的 `AGENT2SSH_TEST_PASSWORD` 中，测试时建议用它生成临时 SSH key |
 | 测试约束 | 只在 `/tmp/agent2ssh-*` 写入临时文件；测试结束必须清理临时目录和临时 `authorized_keys` 条目 |
-| 已验证能力 | SSH 登录、host add/list、risk、ping、exec、exec-multi、SFTP upload/download/list/stat、audit、doctor、MCP tools/list、MCP list_hosts/exec/audit/doctor |
+| 已验证能力 | SSH 登录、host add/list、risk、ping、exec、exec-multi（含 reason/change_id）、SFTP upload/download/list/stat、audit（table/jsonl/csv）、audit export、doctor、playbook list/dry-run/run（含 reason/change_id）、health-snapshot、MCP tools/list (50)、MCP ssh_exec_multi/ssh_playbook_run/ssh_audit_export/ssh_doctor、daemon /exec/exec-multi/playbooks/run/audit/audit/export/health-snapshot |
 | 已知限制 | PTY session 首次读取可能先返回登录 banner/prompt，命令输出可能需要后续 read |
 
 推荐接入方式：
@@ -121,7 +125,7 @@ P0-P10 已全部完成。当前基线：
 |------|------|--------|--------|------|----------|
 | F1-1 | ✅ 已完成 | 高 | Codex | 建立真实服务器 fixture | 107.174.36.91 使用临时 key 完成 exec、ping、sftp 验证；临时 key 和远端 `/tmp` 目录已清理 |
 | F1-2 | ✅ 已完成 | 高 | Codex | 跑完整 CLI 工作流 | host add/list、risk、exec、exec-multi、sftp、audit、doctor、daemon-backed session/forward 已记录 |
-| F1-3 | ✅ 已完成 | 高 | Codex | 跑 MCP 工作流 | MCP `tools/list` 返回 35 工具；`ssh_list_hosts`、`ssh_exec`、`ssh_audit`、`ssh_doctor` 在真实服务器通过 |
+| F1-3 | ✅ 已完成 | 高 | Codex | 跑 MCP 工作流 | MCP `tools/list` 返回工具列表；`ssh_list_hosts`、`ssh_exec`、`ssh_audit`、`ssh_doctor` 在真实服务器通过；当前 S2 回归确认工具数为 50 |
 | F1-4 | ✅ 已完成 | 中 | Codex | 跑桌面端首次启动和打包验证 | `npm run tauri:build` 生成 `.app` 和 `.dmg`；macOS bundle 主入口 `agent2ssh-app` 首启 smoke 通过 |
 | F1-5 | ✅ 已完成 | 高 | Codex | 输出 bug backlog | B1-B5 已记录并修复；后续新 bug 按影响等级进入修复 |
 
@@ -190,6 +194,50 @@ P0-P10 已全部完成。当前基线：
 | F6-3 | ✅ 已完成 | 中 | Qoder | 指标趋势 | 展示执行量、失败率、风险分布、审批耗时趋势 |
 | F6-4 | ✅ 已完成 | 低 | Qoder | 事件订阅 | 提供本地事件流供外部监控或自动化消费 |
 
+## S1 · 当前变更收口
+
+目标：把 F4-4 审计链路和最近发现的文档漂移彻底验收，避免“参数存在但审计未落盘”的回归。
+
+| 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
+|------|------|--------|--------|------|----------|
+| S1-1 | ✅ 已完成 | 高 | Qoder | `exec-multi` 审计上下文测试 | 覆盖 CLI、daemon 或 MCP 至少一个入口；执行带 `reason`、`change_id` 的 `exec-multi` 后，`audit` 可查询到每个目标主机的对应字段 |
+| S1-2 | ✅ 已完成 | 高 | Qoder | Playbook 审计上下文测试 | `playbook run` 支持 `reason`、`change_id`；每个 step 产生的 audit entry 都保留相同上下文 |
+| S1-3 | ✅ 已完成 | 中 | Qoder | 清理测试 warning | `cargo test --no-default-features` 和 `cargo test --no-default-features --features daemon` 不再出现 `unused variable` / `dead_code` warning |
+| S1-4 | ✅ 已完成 | 中 | Qoder | 最近修复记录归档 | 在 `CHANGELOG.md` 或本计划 Bug 队列记录 F4-4 审计链路修复、MCP 工具数修正、OpenAPI `/exec-multi` 响应修正 |
+
+## S2 · 真实环境回归
+
+目标：用真实服务器重新跑一遍 CLI、daemon、MCP 的高频路径，确认 F2-F6 已完成能力可实际使用。
+
+| 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
+|------|------|--------|--------|------|----------|
+| S2-1 | ✅ 已完成 | 高 | Qoder | 真实服务器 CLI 回归 | 使用临时 key 和隔离 `AGENT2SSH_CONFIG_DIR` 跑 `host add/list`、`exec`、`exec-multi --reason --change-id`、`playbook run --reason --change-id`、`audit --format jsonl/csv`；测试结束清理远端 `/tmp/agent2ssh-*` 和临时 key |
+| S2-2 | ✅ 已完成 | 高 | Qoder | daemon HTTP 回归 | 启动本地 daemon，验证 `/exec`、`/exec-multi`、`/playbooks/run`、`/audit`、`/audit/export`、`/health-snapshot` 返回结构与 `docs/api.yaml` 一致 |
+| S2-3 | ✅ 已完成 | 高 | Qoder | MCP 回归 | 通过 stdio 调用 `tools/list`、`ssh_exec_multi`、`ssh_playbook_run`、`ssh_audit_export`、`ssh_doctor`；确认工具数为 50 且关键调用成功 |
+| S2-4 | ✅ 已完成 | 中 | Qoder | 回归记录输出 | 在 `docs/` 下新增或更新真实回归记录，包含命令、配置隔离方式、结果摘要、发现的问题和清理证明 |
+
+## S3 · 文档与契约一致性
+
+目标：把 README、`docs/skills.md`、`docs/api.yaml`、MCP schema、daemon handler 的漂移变成可检测问题。
+
+| 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
+|------|------|--------|--------|------|----------|
+| S3-1 | ✅ 已完成 | 中 | Qoder | MCP 工具文档一致性检查 | 增加脚本或测试，比对 MCP `tools/list` 工具名与 `docs/skills.md` 表格；工具新增/删除时测试失败并提示更新文档 |
+| S3-2 | ✅ 已完成 | 中 | Qoder | OpenAPI 与 daemon 契约检查 | 为高频端点维护最小 schema/fixture 检查，优先覆盖 `/exec`、`/exec-multi`、`/playbooks/run`、`/audit/export` |
+| S3-3 | ✅ 已完成 | 低 | Qoder | README 去重策略 | README 保留入口摘要和核心工具概览，完整 MCP 工具表以 `docs/skills.md` 为准，减少双处维护 |
+| S3-4 | ✅ 已完成 | 中 | Qoder | CLI help 与文档对齐 | 抽样验证 `agent2ssh --help`、`exec-multi --help`、`playbook run --help` 与 README/guide 中的参数一致 |
+
+## S4 · 发布前质量门槛
+
+目标：形成一套发布前必须通过的固定检查，确保桌面端、CLI、daemon、MCP 和文档处于可发布状态。
+
+| 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
+|------|------|--------|--------|------|----------|
+| S4-1 | ✅ 已完成 | 高 | Qoder | 固定发布验收命令 | `npm run build`、`cargo check --no-default-features --bin agent2ssh --bin agent2ssh-mcp`、`cargo check --no-default-features --features daemon --bin agent2ssh-daemon`、两套 `cargo test` 全部通过 |
+| S4-2 | ✅ 已完成 | 高 | Qoder | 桌面包构建验证 | `npm run tauri:build` 可生成 `.app` / `.dmg`；macOS bundle 主入口仍为 `agent2ssh-app` |
+| S4-3 | ✅ 已完成 | 中 | Qoder | 安装校验脚本回归 | `scripts/verify-install.sh`、`scripts/prepare-sidecars.sh`、`scripts/generate-checksums.sh` 在当前版本可执行并输出预期结果 |
+| S4-4 | ✅ 已完成 | 中 | Qoder | 发布材料准备 | 更新 `CHANGELOG.md`、`docs/release-checklist.md` 和版本说明；列出已知限制和真实环境回归结果 |
+
 ## 近期建议
 
-F1 已完成，下一阶段建议先做 F2 和 F3 中最高频的主机视图、执行预览、Playbook 参数化；F4-F6 在真实团队协作和远程 daemon 使用频率上来后再展开。
+下一阶段不再新增大功能，先按 S1 → S2 → S3 → S4 推进。S1 和 S2 是发布前阻塞项；S3 可以和 S2 并行，但不要晚于 S4；S4 只在真实环境回归没有高优先级 bug 后开始。

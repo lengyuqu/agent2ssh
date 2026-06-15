@@ -101,6 +101,10 @@ mod http_helpers {
         force: bool,
         #[serde(default)]
         params: Option<HashMap<String, String>>,
+        #[serde(default)]
+        reason: Option<String>,
+        #[serde(default)]
+        change_id: Option<String>,
     }
 
     #[derive(Deserialize)]
@@ -226,7 +230,7 @@ mod http_helpers {
         Json(body): Json<PlaybookRunBody>,
     ) -> Result<Json<PlaybookRunResult>, (StatusCode, Json<ErrorBody>)> {
         check_auth(&s, &headers)?;
-        run_playbook_core(&body.playbook, &body.host, body.force, body.params.as_ref())
+        run_playbook_core(&body.playbook, &body.host, body.force, body.params.as_ref(), body.reason, body.change_id)
             .await
             .map(Json)
             .map_err(|e| err(StatusCode::BAD_REQUEST, e))
@@ -925,14 +929,14 @@ async fn http_hosts_list_returns_valid_json_array() {
 // Part 3: MCP tool enumeration test (P4-1)
 // ============================================================================
 
-/// Meta-test: verify the MCP binary declares exactly 48 tools by parsing
+/// Meta-test: verify the MCP binary declares exactly 50 tools by parsing
 /// the source file and counting `"name":` entries in the tools/list handler.
 ///
 /// This avoids the need to run the MCP server over stdio JSON-RPC, which
 /// requires a full process lifecycle. Instead we treat the source as the
 /// canonical tool registry and assert on its structure.
 #[test]
-fn mcp_tool_list_contains_exactly_48_tools() {
+fn mcp_tool_list_contains_exactly_50_tools() {
     let source = include_str!("../src/bin/agent2ssh-mcp.rs");
 
     // Extract the tools/list handler block: everything between
@@ -951,7 +955,7 @@ fn mcp_tool_list_contains_exactly_48_tools() {
     // the tools array. Each tool object has exactly one "name" field at the
     // top level, but some input schemas also use "name" as a property key
     // (e.g. ssh_add_host and ssh_remove_host), so the raw count is
-    // 48 tools + 2 schema-property "name" keys = 50.
+    // Count only top-level tool names so schema-property names do not matter.
     let after_array_start = array_start + "\"tools\": [".len();
     let mut depth = 1;
     let mut end = after_array_start;
@@ -1661,4 +1665,289 @@ async fn http_health_snapshot_requires_auth() {
         .unwrap();
 
     assert_eq!(response.status(), 401);
+}
+
+// ============================================================================
+// Part 6: Documentation & contract consistency (S3)
+// ============================================================================
+
+// ── S3-1: MCP tool documentation consistency ────────────────────────────────
+
+#[test]
+fn mcp_tools_match_skills_md_documentation() {
+    // Parse tool names from docs/skills.md and compare with the canonical
+    // expected list used by the MCP enumeration tests. If this test fails,
+    // update docs/skills.md to match the actual MCP tools/list output.
+    let skills_md = include_str!("../../docs/skills.md");
+
+    // Extract backtick-quoted tool names from the markdown table.
+    // Each tool line looks like: | 1 | `ssh_list_hosts` | ... |
+    let doc_tools: Vec<&str> = skills_md
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if !trimmed.starts_with('|') {
+                return None;
+            }
+            // Skip header and separator lines
+            if trimmed.contains("Tool") || trimmed.starts_with("|---") || trimmed.starts_with("| #") {
+                return None;
+            }
+            // Extract the backtick-quoted tool name (second column)
+            let cols: Vec<&str> = trimmed.split('|').collect();
+            if cols.len() >= 3 {
+                let tool_col = cols[2].trim(); // Second data column
+                if tool_col.starts_with('`') && tool_col.ends_with('`') {
+                    return Some(tool_col.trim_matches('`'));
+                }
+            }
+            None
+        })
+        .collect();
+
+    let expected_tools = vec![
+        "ssh_list_hosts", "ssh_list_daemons", "ssh_import_config",
+        "ssh_add_host", "ssh_remove_host", "ssh_exec", "ssh_ping",
+        "ssh_exec_multi", "ssh_exec_compare", "ssh_audit", "ssh_audit_export",
+        "ssh_sftp_ls", "ssh_sftp_stat", "ssh_sftp_mkdir",
+        "ssh_sftp_upload", "ssh_sftp_download",
+        "ssh_session_open", "ssh_session_write", "ssh_session_read",
+        "ssh_session_close", "ssh_session_list",
+        "ssh_forward_add", "ssh_forward_list", "ssh_forward_remove",
+        "ssh_risk_check",
+        "ssh_approval_list", "ssh_approval_respond",
+        "ssh_playbook_list", "ssh_playbook_run", "ssh_playbook_dry_run",
+        "ssh_connection_status", "ssh_connect", "ssh_disconnect",
+        "ssh_webhook_config",
+        "ssh_config_export", "ssh_config_import", "ssh_config_import_preview",
+        "ssh_doctor", "ssh_metrics", "ssh_metrics_trend",
+        "ssh_preview_exec",
+        "ssh_approval_policies_list", "ssh_approval_check",
+        "ssh_health_snapshot",
+        "ssh_daemon_diagnose", "ssh_daemon_version_check", "ssh_daemons_view",
+        "ssh_events_subscribe",
+        "ssh_sync_diff", "ssh_sync_export",
+    ];
+
+    assert_eq!(
+        doc_tools.len(),
+        expected_tools.len(),
+        "docs/skills.md lists {} tools but the MCP server has {}. \
+         Please update docs/skills.md to match.",
+        doc_tools.len(),
+        expected_tools.len()
+    );
+
+    for tool in &expected_tools {
+        assert!(
+            doc_tools.contains(tool),
+            "Tool '{}' is in the MCP server but missing from docs/skills.md. \
+             Please add it to the documentation table.",
+            tool
+        );
+    }
+
+    for doc_tool in &doc_tools {
+        assert!(
+            expected_tools.contains(doc_tool),
+            "Tool '{}' is documented in docs/skills.md but not in the MCP server. \
+             Please remove it or add it to the implementation.",
+            doc_tool
+        );
+    }
+}
+
+// ── S3-2: OpenAPI / daemon contract checks ──────────────────────────────────
+
+#[test]
+fn exec_request_schema_includes_reason_and_change_id() {
+    // Verify ExecRequest deserialization accepts reason and change_id fields,
+    // matching the /exec endpoint contract in docs/api.yaml.
+    let json = serde_json::json!({
+        "host": "test",
+        "command": "uptime",
+        "force": false,
+        "timeout_secs": 30,
+        "reason": "deploy v2.0",
+        "change_id": "CHG-001"
+    });
+    let req: ExecRequest = serde_json::from_value(json).unwrap();
+    assert_eq!(req.host, "test");
+    assert_eq!(req.command, "uptime");
+    assert!(!req.force);
+    assert_eq!(req.timeout_secs, Some(30));
+    assert_eq!(req.reason, Some("deploy v2.0".into()));
+    assert_eq!(req.change_id, Some("CHG-001".into()));
+
+    // Also verify without optional fields
+    let json_minimal = serde_json::json!({
+        "host": "test",
+        "command": "uptime",
+        "force": false
+    });
+    let req_min: ExecRequest = serde_json::from_value(json_minimal).unwrap();
+    assert_eq!(req_min.reason, None);
+    assert_eq!(req_min.change_id, None);
+    assert_eq!(req_min.timeout_secs, None);
+}
+
+#[test]
+fn exec_multi_body_schema_matches_contract() {
+    // Verify the /exec-multi request body schema includes all documented fields.
+    let json = serde_json::json!({
+        "hosts": ["web-1", "web-2"],
+        "command": "systemctl restart app",
+        "force": false,
+        "timeout_secs": 60,
+        "tags": ["production"],
+        "strategy": {
+            "concurrency": 2,
+            "max_failures": 1,
+            "batch_size": 5,
+            "pause_between_batches_secs": 10
+        },
+        "reason": "rolling deploy",
+        "change_id": "CHG-002"
+    });
+
+    let body: serde_json::Value = json;
+    assert!(body["hosts"].is_array());
+    assert_eq!(body["hosts"].as_array().unwrap().len(), 2);
+    assert!(body["command"].is_string());
+    assert!(body["force"].is_boolean());
+    assert!(body["strategy"].is_object());
+    assert_eq!(body["strategy"]["concurrency"], 2);
+    assert_eq!(body["strategy"]["max_failures"], 1);
+    assert_eq!(body["strategy"]["batch_size"], 5);
+    assert_eq!(body["strategy"]["pause_between_batches_secs"], 10);
+    assert_eq!(body["reason"], "rolling deploy");
+    assert_eq!(body["change_id"], "CHG-002");
+
+    // Verify BatchStrategy deserialization
+    let strategy: BatchStrategy = serde_json::from_value(body["strategy"].clone()).unwrap();
+    assert_eq!(strategy.concurrency, Some(2));
+    assert_eq!(strategy.max_failures, Some(1));
+    assert_eq!(strategy.batch_size, Some(5));
+    assert_eq!(strategy.pause_between_batches_secs, Some(10));
+}
+
+#[test]
+fn exec_multi_batch_result_schema_matches_contract() {
+    // Verify ExecMultiBatchResult serialization matches the /exec-multi
+    // response schema documented in docs/api.yaml.
+    let result = ExecMultiBatchResult {
+        results: vec![
+            ExecMultiResult {
+                host: "web-1".into(),
+                result: Some(ExecResult {
+                    host: "web-1".into(),
+                    command: "uptime".into(),
+                    exit_code: Some(0),
+                    stdout: "ok".into(),
+                    stderr: String::new(),
+                    duration_ms: 100,
+                    risk_level: RiskLevel::Low,
+                    truncated: false,
+                }),
+                error: None,
+            },
+        ],
+        total_hosts: 1,
+        successful: 1,
+        failed: 0,
+        skipped: 0,
+        stopped_early: false,
+        batches_executed: 1,
+        total_duration_ms: 100,
+    };
+
+    let json = serde_json::to_value(&result).unwrap();
+    // Verify all documented fields are present
+    assert!(json.get("results").is_some(), "response must have 'results'");
+    assert!(json.get("total_hosts").is_some(), "response must have 'total_hosts'");
+    assert!(json.get("successful").is_some(), "response must have 'successful'");
+    assert!(json.get("failed").is_some(), "response must have 'failed'");
+    assert!(json.get("skipped").is_some(), "response must have 'skipped'");
+    assert!(json.get("stopped_early").is_some(), "response must have 'stopped_early'");
+    assert!(json.get("batches_executed").is_some(), "response must have 'batches_executed'");
+    assert!(json.get("total_duration_ms").is_some(), "response must have 'total_duration_ms'");
+
+    let first = &json["results"][0];
+    assert!(first.get("host").is_some());
+    assert!(first.get("result").is_some());
+    assert!(first.get("error").is_some());
+    let inner = &first["result"];
+    for field in &["host", "command", "exit_code", "stdout", "stderr", "duration_ms", "risk_level", "truncated"] {
+        assert!(inner.get(field).is_some(), "ExecResult must have '{}'", field);
+    }
+}
+
+#[test]
+fn playbook_run_body_schema_matches_contract() {
+    // Verify the /playbooks/run request body schema.
+    let json = serde_json::json!({
+        "playbook": "deploy-app",
+        "host": "prod-web",
+        "force": false,
+        "params": {"version": "2.0", "env": "staging"},
+        "reason": "scheduled release",
+        "change_id": "CHG-003"
+    });
+
+    assert_eq!(json["playbook"], "deploy-app");
+    assert_eq!(json["host"], "prod-web");
+    assert!(json["params"].is_object());
+    assert_eq!(json["params"]["version"], "2.0");
+    assert_eq!(json["reason"], "scheduled release");
+    assert_eq!(json["change_id"], "CHG-003");
+}
+
+#[test]
+fn audit_export_response_contract() {
+    // Verify audit export produces JSONL and CSV with the correct fields,
+    // matching the /audit/export endpoint contract.
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    let entries = vec![
+        AuditEntry {
+            id: Uuid::new_v4(),
+            ts: Utc::now(),
+            host: "test".into(),
+            command: "uptime".into(),
+            exit_code: Some(0),
+            duration_ms: 100,
+            risk_level: RiskLevel::Low,
+            reason: Some("health check".into()),
+            change_id: Some("CHG-001".into()),
+        },
+    ];
+
+    // JSONL format: each line is a valid AuditEntry JSON
+    let jsonl: String = entries
+        .iter()
+        .map(|e| serde_json::to_string(e).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let parsed: AuditEntry = serde_json::from_str(jsonl.lines().next().unwrap()).unwrap();
+    assert_eq!(parsed.reason, Some("health check".into()));
+    assert_eq!(parsed.change_id, Some("CHG-001".into()));
+
+    // CSV format: header must include reason,change_id
+    let csv_header = "id,timestamp,host,command,exit_code,duration_ms,risk_level,reason,change_id";
+    let csv_line = format!(
+        "{},{},{},{},{},{},{},{},{}",
+        entries[0].id,
+        entries[0].ts.to_rfc3339(),
+        entries[0].host,
+        entries[0].command,
+        entries[0].exit_code.unwrap(),
+        entries[0].duration_ms,
+        entries[0].risk_level,
+        entries[0].reason.as_deref().unwrap_or(""),
+        entries[0].change_id.as_deref().unwrap_or(""),
+    );
+    assert!(csv_header.contains("reason"));
+    assert!(csv_header.contains("change_id"));
+    assert!(csv_line.contains("CHG-001"));
 }

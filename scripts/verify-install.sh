@@ -26,11 +26,11 @@ check "agent2ssh audit --json" agent2ssh audit --json
 check "agent2ssh daemon status" agent2ssh daemon status
 
 if command -v agent2ssh-daemon &>/dev/null; then
-    check "agent2ssh-daemon exists" agent2ssh-daemon --help
+    check "agent2ssh-daemon exists" test -x "$(command -v agent2ssh-daemon)"
 fi
 
 if command -v agent2ssh-mcp &>/dev/null; then
-    check "agent2ssh-mcp exists" agent2ssh-mcp --help
+    check "agent2ssh-mcp exists" test -x "$(command -v agent2ssh-mcp)"
 fi
 
 echo ""

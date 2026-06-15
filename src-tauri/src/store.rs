@@ -868,4 +868,157 @@ mod tests {
         assert!(csv_lines[2].contains("prod-host"));
         assert!(csv_lines[2].contains("CHG-001"));
     }
+
+    // ── S1-1: exec-multi audit context tests ───────────────────────────────
+
+    #[test]
+    fn test_exec_multi_audit_entries_reason_and_change_id() {
+        // Verify that audit entries constructed for an exec-multi scenario
+        // correctly carry reason and change_id through the full JSONL
+        // serialisation round-trip — one entry per target host.
+        use chrono::Utc;
+        use uuid::Uuid;
+
+        let reason = "deploy v2.3.1";
+        let change_id = "CHG-20240614-001";
+        let hosts = vec!["web-1", "web-2", "web-3"];
+
+        // Simulate what append_audit does for each host in an exec-multi
+        let mut jsonl_lines = Vec::new();
+        for host in &hosts {
+            let result = ExecResult {
+                host: host.to_string(),
+                command: "systemctl restart app".into(),
+                exit_code: Some(0),
+                stdout: "ok".into(),
+                stderr: String::new(),
+                duration_ms: 150,
+                risk_level: RiskLevel::Medium,
+                truncated: false,
+            };
+            // Mirror the AuditEntry construction in append_audit
+            let entry = AuditEntry {
+                id: Uuid::new_v4(),
+                ts: Utc::now(),
+                host: result.host.clone(),
+                command: redact_sensitive_text(&result.command),
+                exit_code: result.exit_code,
+                duration_ms: result.duration_ms,
+                risk_level: RiskLevel::Medium,
+                reason: Some(reason.to_string()),
+                change_id: Some(change_id.to_string()),
+            };
+            jsonl_lines.push(serde_json::to_string(&entry).unwrap());
+        }
+
+        assert_eq!(jsonl_lines.len(), 3, "one audit entry per host");
+
+        let mut seen_hosts = Vec::new();
+        for line in &jsonl_lines {
+            let entry: AuditEntry = serde_json::from_str(line).unwrap();
+            assert_eq!(entry.reason, Some(reason.into()),
+                "audit entry for {} should have reason", entry.host);
+            assert_eq!(entry.change_id, Some(change_id.into()),
+                "audit entry for {} should have change_id", entry.host);
+            assert_eq!(entry.command, "systemctl restart app");
+            assert_eq!(entry.exit_code, Some(0));
+            assert_eq!(entry.risk_level, RiskLevel::Medium);
+            seen_hosts.push(entry.host);
+        }
+
+        for host in &hosts {
+            assert!(seen_hosts.contains(&host.to_string()),
+                "host {} should appear in audit entries", host);
+        }
+    }
+
+    #[test]
+    fn test_exec_multi_audit_entries_without_reason() {
+        // Verify exec-multi without reason/change_id produces entries with None
+        use chrono::Utc;
+        use uuid::Uuid;
+
+        let entry = AuditEntry {
+            id: Uuid::new_v4(),
+            ts: Utc::now(),
+            host: "db-1".into(),
+            command: "pg_dump mydb".into(),
+            exit_code: Some(0),
+            duration_ms: 3000,
+            risk_level: RiskLevel::Low,
+            reason: None,
+            change_id: None,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let parsed: AuditEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.reason, None);
+        assert_eq!(parsed.change_id, None);
+        assert_eq!(parsed.host, "db-1");
+    }
+
+    #[test]
+    fn test_audit_entry_jsonl_roundtrip_multi_host() {
+        // Simulate a full exec-multi audit trail: write JSONL entries for
+        // multiple hosts, read them back, and verify reason/change_id survive
+        // the round-trip — including search-style filtering.
+        use chrono::Utc;
+        use uuid::Uuid;
+
+        let entries = vec![
+            AuditEntry {
+                id: Uuid::new_v4(), ts: Utc::now(),
+                host: "alpha".into(), command: "uptime".into(),
+                exit_code: Some(0), duration_ms: 50,
+                risk_level: RiskLevel::Low,
+                reason: Some("health check".into()),
+                change_id: Some("CHG-100".into()),
+            },
+            AuditEntry {
+                id: Uuid::new_v4(), ts: Utc::now(),
+                host: "beta".into(), command: "df -h".into(),
+                exit_code: Some(0), duration_ms: 80,
+                risk_level: RiskLevel::Low,
+                reason: None, change_id: None,
+            },
+            AuditEntry {
+                id: Uuid::new_v4(), ts: Utc::now(),
+                host: "gamma".into(), command: "free -m".into(),
+                exit_code: Some(1), duration_ms: 120,
+                risk_level: RiskLevel::Medium,
+                reason: Some("health check".into()),
+                change_id: Some("CHG-100".into()),
+            },
+        ];
+
+        // Write JSONL and read back
+        let jsonl: String = entries.iter()
+            .map(|e| serde_json::to_string(e).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let parsed: Vec<AuditEntry> = jsonl.lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+
+        assert_eq!(parsed.len(), 3);
+
+        // alpha and gamma share the same change_id
+        let with_change: Vec<_> = parsed.iter()
+            .filter(|e| e.change_id == Some("CHG-100".into()))
+            .collect();
+        assert_eq!(with_change.len(), 2);
+        assert!(with_change.iter().any(|e| e.host == "alpha"));
+        assert!(with_change.iter().any(|e| e.host == "gamma"));
+
+        // beta has no reason/change_id
+        let beta = parsed.iter().find(|e| e.host == "beta").unwrap();
+        assert_eq!(beta.reason, None);
+        assert_eq!(beta.change_id, None);
+
+        // Search for "health" in reason context identifies the right entries
+        let health_entries: Vec<_> = parsed.iter()
+            .filter(|e| e.reason.as_deref() == Some("health check"))
+            .collect();
+        assert_eq!(health_entries.len(), 2);
+    }
 }

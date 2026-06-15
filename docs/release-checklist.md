@@ -16,9 +16,10 @@
   ```bash
   npm run build
   ```
-- [ ] 本地运行 Rust 测试，确保全部通过：
+- [ ] 本地运行 Rust 测试，确保全部通过（两套配置均需零 warning）：
   ```bash
-  cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib
+  cargo test --manifest-path src-tauri/Cargo.toml --no-default-features
+  cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features daemon
   ```
 - [ ] 本地运行 CLI / MCP / daemon 编译检查：
   ```bash
@@ -30,6 +31,10 @@
   cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --test cli_smoke
   cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features daemon --test daemon_integration
   ```
+- [ ] 文档一致性自动检查（已内置于测试套件）：
+  - MCP 工具名与 `docs/skills.md` 交叉比对（`mcp_tools_match_skills_md_documentation`）
+  - `/exec`、`/exec-multi`、`/playbooks/run`、`/audit/export` 请求响应 schema fixture 检查
+  - CLI `exec`、`exec-multi`、`playbook run` 的 `--help` 与文档参数对齐检查
 - [ ] 如需完整本机验收，可运行：
   ```bash
   ./scripts/e2e-local.sh
@@ -90,7 +95,7 @@ sha256sum -c CHECKSUMS-SHA256.txt --ignore-missing
 - [ ] 确认 CLI、daemon、MCP server 均可正常启动：
   - CLI：`agent2ssh --version`
   - Daemon：`agent2ssh daemon status`
-  - MCP Server：`agent2ssh-mcp --help`
+  - MCP Server：通过 stdio 发送 `tools/list` 确认可用工具数
 
 ---
 
@@ -103,3 +108,12 @@ sha256sum -c CHECKSUMS-SHA256.txt --ignore-missing
 | `src-tauri/tauri.conf.json` | `"version": "0.X.0"`          |
 
 版本号策略详见 [docs/versioning.md](versioning.md)。
+
+---
+
+## 已知限制
+
+- PTY session 首次读取可能返回 SSH 登录 banner/prompt，命令输出可能需要后续 read
+- `agent2ssh-daemon` 和 `agent2ssh-mcp` 不支持 `--help`，运行即启动服务
+- Windows 仅支持构建，运行时测试仅在 macOS 和 Debian Linux 验证过
+- Webhook 出站使用非阻塞 fire，远端慢时通知可能超时且无自动重试
