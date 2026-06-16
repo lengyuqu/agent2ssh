@@ -297,11 +297,20 @@ pub fn compute_metrics_trend(period: TrendPeriod) -> Result<MetricsTrend> {
 }
 
 pub fn redact_sensitive_text(input: &str) -> String {
+    let upper = input.to_ascii_uppercase();
+    if upper.contains("BEGIN ") && upper.contains("PRIVATE KEY") {
+        return "[REDACTED PRIVATE KEY]".to_string();
+    }
+
     let mut out = Vec::new();
     let mut redact_next = false;
     for token in input.split_whitespace() {
         let lower = token.to_ascii_lowercase();
         if redact_next {
+            if matches!(lower.as_str(), "bearer" | "basic") {
+                redact_next = true;
+                continue;
+            }
             out.push("[REDACTED]".to_string());
             redact_next = false;
             continue;
@@ -325,8 +334,18 @@ pub fn redact_sensitive_text(input: &str) -> String {
 
 fn is_sensitive_key(key: &str) -> bool {
     matches!(
-        key.trim_start_matches('-'),
-        "password" | "passwd" | "token" | "secret" | "api-key" | "apikey" | "access-token"
+        key.trim_start_matches('-').trim_end_matches(':'),
+        "password"
+            | "passwd"
+            | "token"
+            | "secret"
+            | "api-key"
+            | "apikey"
+            | "access-token"
+            | "authorization"
+            | "bearer"
+            | "cookie"
+            | "set-cookie"
     )
 }
 
@@ -551,6 +570,12 @@ mod tests {
             redacted,
             "deploy --token [REDACTED] password=[REDACTED] --api-key [REDACTED] --safe value"
         );
+
+        let auth = redact_sensitive_text("Authorization: Bearer abc123\ncookie=session-id");
+        assert_eq!(auth, "Authorization: [REDACTED] cookie=[REDACTED]");
+
+        let private_key = redact_sensitive_text("-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----");
+        assert_eq!(private_key, "[REDACTED PRIVATE KEY]");
     }
 
     #[test]

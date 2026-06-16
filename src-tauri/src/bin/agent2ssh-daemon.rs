@@ -1192,8 +1192,9 @@ async fn exec_stream(
 }
 
 fn preview_text(value: &str, max_chars: usize) -> String {
-    let mut preview: String = value.chars().take(max_chars).collect();
-    if value.chars().count() > max_chars {
+    let redacted = redact_sensitive_text(value);
+    let mut preview: String = redacted.chars().take(max_chars).collect();
+    if redacted.chars().count() > max_chars {
         preview.push_str("\n...[truncated]");
     }
     preview
