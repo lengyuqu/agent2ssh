@@ -72,7 +72,7 @@ P0-P10 已全部完成。当前基线：
 | S7 | 桌面 Session 接管 | ✅ 已完成 | 高 | Codex |
 | S8 | Session 接管体验与安全 | ✅ 已完成 | 高 | Codex |
 | S9 | 0.1.1 发布前收口 | ✅ 已完成 | 高 | Codex |
-| R | 发布与采用闭环 | ⬜ 待认领 | 高 | - |
+| R | 发布与采用闭环 | 🟨 进行中 | 高 | Codex |
 | G | 观察面升级为控制面 | ✅ 已完成 | 高 | Codex |
 | T | 团队化与多用户 | ⬜ 待认领 | 中 | - |
 | E | 生态与可靠性 | ⬜ 待认领 | 中 | - |
@@ -378,7 +378,7 @@ S9(0.1.1 已收口)
 | 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
 |------|------|--------|--------|------|----------|
 | R1 | ⬜ 待认领 | 高 | - | 跨平台桌面包真实验证 | 在 Windows / Linux 实测 sidecar 命名、PTY、`scp`/`ssh` 子进程行为；记录与 macOS 的差异和修复 |
-| R2 | ⬜ 待认领 | 高 | - | 完成 0.1.1 发布动作 | 打 `v0.1.1` tag 并推送、等待 CI assets、回填 `scripts/agent2ssh.rb` 平台 sha256、跑通 `verify-install.sh` |
+| R2 | ✅ 已完成 | 高 | Codex | 完成 0.1.1 发布动作 | `v0.1.1` tag 已推送到 GitHub/git233；release CI run `27638444133` 通过并上传 CLI tarballs、checksums、macOS/Linux/Windows 桌面包；`scripts/agent2ssh.rb` 已回填 macOS arm64、macOS x86_64、Linux x86_64 sha256；发布 tarball checksum 校验通过；使用 macOS arm64 release tarball 跑通 `scripts/verify-install.sh`（7 passed, 0 failed） |
 | R3 | ⬜ 待认领 | 中 | - | 外部接入剧本与反馈入口 | "陌生人 10 分钟接入 Claude Code / Codex"最短路径文档；issue 模板与可选匿名遥测开关 |
 | R4 | ⬜ 待认领 | 高 | - | 首次外部 dogfood | 1-2 个非本人用户接自己的机器；产出首轮外部 bug backlog（对标 F1） |
 
