@@ -70,6 +70,7 @@ P0-P10 已全部完成。当前基线：
 | S5 | Agent Activity 可观测性闭环 | ✅ 已完成 | 高 | Codex |
 | S6 | 真实会话回归 | ✅ 已完成 | 高 | Codex |
 | S7 | 桌面 Session 接管 | ✅ 已完成 | 高 | Codex |
+| S8 | Session 接管体验与安全 | ✅ 已完成 | 高 | Codex |
 
 ## 已完成阶段归档
 
@@ -100,7 +101,7 @@ P0-P10 已全部完成。当前基线：
 
 当前下一步聚焦：
 
-- S7 已完成桌面 SessionPanel 接管 daemon-managed sessions；MCP/CLI/daemon 打开的统一 registry 会话可在桌面端列出、读取、写入和关闭。
+- S8 已完成 SessionPanel 接管后的体验与安全收口：自动 tail、只读接管和危险输入确认。
 - 若进入发布收口，打 `v0.1.1` 标签，等待 CI assets，并回填 Homebrew sha256。
 
 ## 真实测试服务器
@@ -282,12 +283,24 @@ P0-P10 已全部完成。当前基线：
 | S7-4 | ✅ 已完成 | 中 | Codex | UI 状态与布局 | 面板显示 registry/backend 状态、active session 元信息和来源标识；按钮尺寸稳定，窄面板不挤压文本 |
 | S7-5 | ✅ 已完成 | 高 | Codex | 验证 | `npm run build` 通过；计划和架构文档同步 |
 
+## S8 · Session 接管体验与安全
+
+目标：在 S7 的 daemon session 接管基础上，把日常使用所需的持续读取、只读观察和危险输入保护补齐。
+
+| 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
+|------|------|--------|--------|------|----------|
+| S8-1 | ✅ 已完成 | 中 | Codex | 自动 tail | active session 支持 `Tail` 开关，每 2 秒读取一次输出；使用并发 guard 避免重叠 read |
+| S8-2 | ✅ 已完成 | 高 | Codex | 只读接管 | session 列表提供 read-only attach；active session 可切换 read-only，禁止写入输入 |
+| S8-3 | ✅ 已完成 | 高 | Codex | 危险输入确认 | 发送前调用现有 risk classifier；`high`/`blocked` 输入显示确认条，用户显式确认后才写入 PTY |
+| S8-4 | ✅ 已完成 | 中 | Codex | UI 状态稳定 | Tail、Read-only、危险确认和接管按钮有稳定尺寸和可访问标签；窄面板下文本截断不挤压操作按钮 |
+| S8-5 | ✅ 已完成 | 高 | Codex | 验证 | `npm run build` 通过；Browser 渲染检查通过；`git diff --check` 通过 |
+
 ## 近期建议
 
-S1-S7 已完成，下一步建议进入发布收口或继续体验细化：
+S1-S8 已完成，下一步建议进入发布收口或继续体验细化：
 
 1. 若进入发布收口，打 `v0.1.1` 标签并推送到 `github`、`git233`，等待 CI assets，回填 `scripts/agent2ssh.rb` 的平台 sha256。
-2. 若继续体验细化，可增加 SessionPanel 的自动 tail、只读接管模式、会话重命名和危险输入确认。
+2. 若继续体验细化，可增加 session 重命名、会话所有者标识、按 host/source 分组和自动重连提示。
 
 ## 安全可视化后续
 
@@ -297,3 +310,4 @@ Agent2SSH 已开始从“agent 可调用 SSH 能力层”扩展为“本机 SSH 
 2. CLI/MCP/daemon/desktop 均具备标准 `source` 字段或 `AGENT2SSH_SOURCE` 覆盖。
 3. Live Activity 支持过滤、展开、敏感 preview 脱敏和高风险外部来源提醒。
 4. SessionPanel 可列出并接管 daemon-managed sessions，支持读取、写入和关闭来自统一 registry 的 PTY。
+5. SessionPanel 支持自动 tail、只读观察和高风险 PTY 输入二次确认。

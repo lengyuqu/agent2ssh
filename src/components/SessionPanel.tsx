@@ -1,6 +1,7 @@
-import { PlugZap, RefreshCw, Send, Terminal, X } from "lucide-react";
+import { Eye, PlugZap, RefreshCw, Send, Terminal, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
+import type { RiskLevel } from "../types";
 
 type Props = {
   selectedHost: string;
@@ -24,7 +25,14 @@ export default function SessionPanel({ selectedHost }: Props) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [registryMode, setRegistryMode] = useState<SessionBackend>("daemon");
+  const [autoTail, setAutoTail] = useState(false);
+  const [readOnly, setReadOnly] = useState(false);
+  const [pendingDanger, setPendingDanger] = useState<{
+    input: string;
+    risk: RiskLevel;
+  } | null>(null);
   const outputRef = useRef<HTMLPreElement>(null);
+  const readingRef = useRef(false);
 
   async function refresh() {
     try {
@@ -48,6 +56,14 @@ export default function SessionPanel({ selectedHost }: Props) {
     return () => window.clearInterval(timer);
   }, []);
 
+  useEffect(() => {
+    if (!autoTail || !activeId) return;
+    const timer = window.setInterval(() => {
+      if (!busy) void readOutput();
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [activeId, activeBackend, autoTail, busy]);
+
   // Reset when selectedHost changes
   useEffect(() => {
     setError(null);
@@ -69,6 +85,8 @@ export default function SessionPanel({ selectedHost }: Props) {
       setActiveId(id);
       setActiveHost(selectedHost);
       setActiveBackend(backend);
+      setReadOnly(false);
+      setPendingDanger(null);
       await refresh();
       const initial = await readFromBackend(id, backend, 1500);
       setOutput(initial);
@@ -79,13 +97,15 @@ export default function SessionPanel({ selectedHost }: Props) {
     }
   }
 
-  async function attachSession(session: ManagedSession) {
+  async function attachSession(session: ManagedSession, readOnlyMode: boolean) {
     setBusy(true);
     setError(null);
     try {
       setActiveId(session.id);
       setActiveHost(session.host);
       setActiveBackend(session.backend);
+      setReadOnly(readOnlyMode);
+      setPendingDanger(null);
       const initial = await readFromBackend(session.id, session.backend, 500);
       setOutput(initial);
       scrollOutput();
@@ -124,13 +144,26 @@ export default function SessionPanel({ selectedHost }: Props) {
     }, 50);
   }
 
-  async function sendInput() {
+  async function sendInput(confirmDanger = false) {
     if (!activeId || !input) return;
+    if (readOnly) {
+      setError("Session is attached in read-only mode.");
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
-      await writeToBackend(activeId, activeBackend, input + "\n");
+      if (!confirmDanger) {
+        const risk = await api.classifyRisk(input);
+        if (risk === "high" || risk === "blocked") {
+          setPendingDanger({ input, risk });
+          return;
+        }
+      }
+      const value = confirmDanger && pendingDanger ? pendingDanger.input : input;
+      await writeToBackend(activeId, activeBackend, value + "\n");
       setInput("");
+      setPendingDanger(null);
       const data = await readFromBackend(activeId, activeBackend, 2000);
       setOutput((prev) => prev + "\n" + data);
       scrollOutput();
@@ -143,13 +176,19 @@ export default function SessionPanel({ selectedHost }: Props) {
 
   async function readOutput() {
     if (!activeId) return;
+    if (readingRef.current) return;
+    readingRef.current = true;
     try {
       const data = await readFromBackend(activeId, activeBackend, 1000);
-      setOutput((prev) => prev + data);
-      scrollOutput();
+      if (data) {
+        setOutput((prev) => prev + data);
+        scrollOutput();
+      }
     } catch (err) {
       setError(String(err));
       await refresh();
+    } finally {
+      readingRef.current = false;
     }
   }
 
@@ -160,6 +199,8 @@ export default function SessionPanel({ selectedHost }: Props) {
       setActiveId(null);
       setActiveHost(null);
       setOutput("");
+      setReadOnly(false);
+      setPendingDanger(null);
       await refresh();
     } catch (err) {
       setError(String(err));
@@ -195,12 +236,21 @@ export default function SessionPanel({ selectedHost }: Props) {
                 <span className="session-source">{session.backend}</span>
                 <button
                   className="secondary session-attach"
-                  onClick={() => attachSession(session)}
+                  onClick={() => attachSession(session, false)}
                   disabled={busy}
                   title="Attach to this session"
                   aria-label={`Attach to ${session.host} session ${session.id.slice(0, 8)}`}
                 >
                   <PlugZap size={14} />
+                </button>
+                <button
+                  className="secondary session-attach"
+                  onClick={() => attachSession(session, true)}
+                  disabled={busy}
+                  title="Attach read-only"
+                  aria-label={`Attach read-only to ${session.host} session ${session.id.slice(0, 8)}`}
+                >
+                  <Eye size={14} />
                 </button>
               </div>
             ))}
@@ -233,17 +283,61 @@ export default function SessionPanel({ selectedHost }: Props) {
               <X size={14} />
               Close
             </button>
+            <label className="session-toggle">
+              <input
+                type="checkbox"
+                checked={autoTail}
+                onChange={(e) => setAutoTail(e.target.checked)}
+              />
+              Tail
+            </label>
+            <label className="session-toggle">
+              <input
+                type="checkbox"
+                checked={readOnly}
+                onChange={(e) => {
+                  setReadOnly(e.target.checked);
+                  setPendingDanger(null);
+                }}
+              />
+              Read-only
+            </label>
             <span className="session-active-meta">
               {activeHost} / {activeBackend} / {activeId.slice(0, 8)}
             </span>
           </div>
+          {pendingDanger && (
+            <div className="session-danger-confirm">
+              <span>
+                {pendingDanger.risk} input: <code>{pendingDanger.input}</code>
+              </span>
+              <button
+                className="secondary"
+                onClick={() => {
+                  setPendingDanger(null);
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                className="primary"
+                onClick={() => sendInput(true)}
+                disabled={busy}
+              >
+                Send anyway
+              </button>
+            </div>
+          )}
           <div className="terminal-output session-output">
             <pre ref={outputRef}>{output || "(no output yet)"}</pre>
           </div>
           <div className="session-input-row">
             <input
               value={input}
-              onChange={(e) => setInput(e.target.value)}
+              onChange={(e) => {
+                setInput(e.target.value);
+                setPendingDanger(null);
+              }}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
@@ -251,9 +345,15 @@ export default function SessionPanel({ selectedHost }: Props) {
                 }
               }}
               placeholder="Type command and press Enter..."
-              disabled={busy}
+              disabled={busy || readOnly}
             />
-            <button className="primary" onClick={sendInput} disabled={busy || !input}>
+            <button
+              className="primary"
+              onClick={() => sendInput()}
+              disabled={busy || !input || readOnly}
+              title={readOnly ? "Read-only session" : "Send input"}
+              aria-label={readOnly ? "Read-only session" : "Send input"}
+            >
               <Send size={14} />
             </button>
           </div>

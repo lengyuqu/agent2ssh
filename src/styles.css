@@ -694,7 +694,7 @@ textarea {
 
 .session-row {
   display: grid;
-  grid-template-columns: 64px minmax(0, 1fr) auto 32px;
+  grid-template-columns: 64px minmax(0, 1fr) auto 32px 32px;
   align-items: center;
   gap: 12px;
   padding: 8px 10px;
@@ -752,6 +752,51 @@ textarea {
   font-size: 12px;
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+.session-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.session-toggle input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+}
+
+.session-danger-confirm {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  background: #fef2f2;
+  color: #991b1b;
+  border: 1px solid #fecaca;
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 12px;
+}
+
+.session-danger-confirm span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-danger-confirm code {
+  color: #7f1d1d;
+  font-size: 12px;
+}
+
+.session-danger-confirm button {
+  min-height: 30px;
+  font-size: 12px;
 }
 
 .session-output {
