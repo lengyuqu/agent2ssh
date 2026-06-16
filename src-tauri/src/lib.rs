@@ -6,6 +6,7 @@ pub mod forward;
 pub mod gate;
 pub mod health;
 pub mod keys;
+pub mod limits;
 pub mod notify;
 pub mod playbook;
 pub mod remote;
@@ -43,6 +44,10 @@ pub use gate::{
 };
 pub use health::{
     collect_health_snapshot, load_health_snapshot, HealthSnapshot, HostHealthSnapshot,
+};
+pub use limits::{
+    load_execution_limits, ExecutionLimitConfig, ExecutionLimitRejection, ExecutionLimitRule,
+    ExecutionLimiter,
 };
 pub use playbook::{
     dry_run_playbook, list_playbooks_core, resolve_command_template, run_playbook_core,

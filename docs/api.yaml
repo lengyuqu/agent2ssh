@@ -157,6 +157,7 @@ components:
             - config_changed
             - gate_changed
             - gate_rejected
+            - limit_rejected
         timestamp:  { type: string, format: date-time }
         data:
           type: object
@@ -401,11 +402,6 @@ paths:
                 type: object
                 properties:
                   ok: { type: boolean }
-        "423":
-          description: Execution gate paused
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
         "404":
           content:
             application/json:
@@ -454,6 +450,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Execution limit exceeded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /exec-multi:
     post:
@@ -470,6 +471,11 @@ paths:
               schema: { $ref: "#/components/schemas/ExecMultiBatchResult" }
         "423":
           description: Execution gate paused
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Execution limit exceeded
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -673,6 +679,11 @@ paths:
                 type: object
                 properties:
                   id: { type: string, format: uuid }
+        "429":
+          description: Execution limit exceeded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
     get:
       summary: List open sessions
       responses:
@@ -708,6 +719,16 @@ paths:
                 type: object
                 properties:
                   ok: { type: boolean }
+        "423":
+          description: Execution gate paused
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Execution limit exceeded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /sessions/{id}/read:
     get:
@@ -928,6 +949,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Execution limit exceeded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /daemons:
     get:
@@ -958,6 +984,16 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ExecResult" }
+        "423":
+          description: Execution gate paused
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Execution limit exceeded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /webhook/config:
     get:

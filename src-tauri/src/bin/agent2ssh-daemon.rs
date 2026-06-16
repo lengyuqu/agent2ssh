@@ -16,6 +16,9 @@ use agent2ssh::gate::{
     ExecutionGateStatus,
 };
 use agent2ssh::health::{collect_health_snapshot, load_health_snapshot};
+use agent2ssh::limits::{
+    load_execution_limits, ExecutionLimitRejection, ExecutionLimiter,
+};
 use agent2ssh::notify::{
     fire_webhook, load_webhook_config, notify_approval_pending, save_webhook_config, WebhookConfig,
     WebhookEvent,
@@ -44,9 +47,11 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tokio::net::TcpListener;
+use tokio::sync::Mutex;
 use tower_http::cors::{Any, CorsLayer};
 use tracing;
 use uuid::Uuid;
@@ -72,6 +77,7 @@ fn uptime_secs() -> u64 {
 #[derive(Clone)]
 struct AppState {
     token: String,
+    limiter: Arc<Mutex<ExecutionLimiter>>,
 }
 
 // ── Auth ─────────────────────────────────────────────────────────────────────
@@ -113,6 +119,10 @@ fn err(status: StatusCode, msg: impl ToString) -> (StatusCode, Json<ErrorBody>) 
 
 fn locked_status() -> StatusCode {
     StatusCode::from_u16(423).expect("423 is a valid HTTP status")
+}
+
+fn too_many_requests_status() -> StatusCode {
+    StatusCode::from_u16(429).expect("429 is a valid HTTP status")
 }
 
 fn source_or_env(source: Option<String>, default_source: &str) -> String {
@@ -164,6 +174,123 @@ fn reject_if_gate_paused(
         }),
     );
     Err(err(locked_status(), "execution gate paused"))
+}
+
+fn host_tags(host: &str) -> Vec<String> {
+    load_config()
+        .ok()
+        .and_then(|c| c.hosts.into_iter().find(|h| h.name == host))
+        .map(|h| h.tags)
+        .unwrap_or_default()
+}
+
+fn targets_for_exec_multi(
+    hosts: &[String],
+    tags: &Option<Vec<String>>,
+) -> Vec<(String, Vec<String>)> {
+    if hosts.is_empty() {
+        return tags
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|tag| (format!("tag:{tag}"), vec![tag]))
+            .collect();
+    }
+    let request_tags = tags.clone().unwrap_or_default();
+    hosts
+        .iter()
+        .map(|host| {
+            let mut all_tags = host_tags(host);
+            for tag in &request_tags {
+                if !all_tags.iter().any(|existing| existing == tag) {
+                    all_tags.push(tag.clone());
+                }
+            }
+            (host.clone(), all_tags)
+        })
+        .collect()
+}
+
+fn write_limit_rejection_audit(
+    rejection: &ExecutionLimitRejection,
+    source: &str,
+    host: &str,
+    command: &str,
+) {
+    let result = ExecResult {
+        host: host.to_string(),
+        command: command.to_string(),
+        exit_code: None,
+        stdout: String::new(),
+        stderr: format!(
+            "execution limit exceeded: {} current={} limit={}",
+            rejection.scope, rejection.current, rejection.limit
+        ),
+        duration_ms: 0,
+        risk_level: RiskLevel::Blocked,
+        truncated: false,
+    };
+    let reason = format!(
+        "execution limit exceeded: {} current={} limit={}",
+        rejection.scope, rejection.current, rejection.limit
+    );
+    let _ = append_audit(&result, RiskLevel::Blocked, Some(&reason), None, Some(source));
+    publish_event(
+        EventType::LimitRejected,
+        serde_json::json!({
+            "source": source,
+            "host": host,
+            "command_preview": preview_text(command, 2048),
+            "scope": rejection.scope,
+            "current": rejection.current,
+            "limit": rejection.limit,
+        }),
+    );
+}
+
+async fn reject_if_rate_limited(
+    state: &AppState,
+    source: &str,
+    targets: &[(String, Vec<String>)],
+    command: &str,
+) -> Result<(), (StatusCode, Json<ErrorBody>)> {
+    let mut limiter = state.limiter.lock().await;
+    if let Err(rejection) = limiter.check_execution_batch(source, targets) {
+        let host = targets
+            .iter()
+            .map(|(host, _)| host.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        write_limit_rejection_audit(&rejection, source, &host, command);
+        return Err(err(
+            too_many_requests_status(),
+            format!(
+                "execution limit exceeded: {} current={} limit={}",
+                rejection.scope, rejection.current, rejection.limit
+            ),
+        ));
+    }
+    Ok(())
+}
+
+async fn reject_if_session_limited(
+    state: &AppState,
+    source: &str,
+    host: &str,
+    tags: &[String],
+) -> Result<(), (StatusCode, Json<ErrorBody>)> {
+    let limiter = state.limiter.lock().await;
+    if let Err(rejection) = limiter.check_session_open(source, host, tags) {
+        write_limit_rejection_audit(&rejection, source, host, "session_open");
+        return Err(err(
+            too_many_requests_status(),
+            format!(
+                "execution limit exceeded: {} current={} limit={}",
+                rejection.scope, rejection.current, rejection.limit
+            ),
+        ));
+    }
+    Ok(())
 }
 
 // ── Request/Response types ───────────────────────────────────────────────────
@@ -491,6 +618,8 @@ async fn exec(
     }
     let source = req.source.as_deref().unwrap_or("daemon").to_string();
     reject_if_gate_paused(&source, &req.host, &req.command)?;
+    let targets = vec![(req.host.clone(), host_tags(&req.host))];
+    reject_if_rate_limited(&s, &source, &targets, &req.command).await?;
     tracing::info!(host = %req.host, command = %req.command, "exec handler invoked");
 
     let exec_start = Instant::now();
@@ -699,7 +828,9 @@ async fn exec_multi(
     check_auth(&s, &headers)?;
     tracing::info!(hosts = ?body.hosts, command = %body.command, "exec-multi handler invoked");
     let source = source_or_env(body.source, "daemon");
+    let targets = targets_for_exec_multi(&body.hosts, &body.tags);
     reject_if_gate_paused(&source, &body.hosts.join(","), &body.command)?;
+    reject_if_rate_limited(&s, &source, &targets, &body.command).await?;
     Ok(Json(
         exec_multi_with_strategy(
             body.hosts,
@@ -884,8 +1015,14 @@ async fn session_open(
     check_auth(&s, &headers)?;
     tracing::info!(host = %body.host, "session_open invoked");
     let source = body.source.as_deref().unwrap_or("daemon");
+    let tags = host_tags(&body.host);
+    reject_if_session_limited(&s, source, &body.host, &tags).await?;
     match session_open_core(&body.host).await {
         Ok(id) => {
+            s.limiter
+                .lock()
+                .await
+                .register_session(id, source, &body.host, &tags);
             publish_event(
                 EventType::SessionOpened,
                 serde_json::json!({
@@ -910,6 +1047,14 @@ async fn session_write(
     let uuid = Uuid::parse_str(&id).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
     let source = body.source.as_deref().unwrap_or("daemon");
     reject_if_gate_paused(source, &format!("session:{id}"), &body.input)?;
+    let targets = s
+        .limiter
+        .lock()
+        .await
+        .session_target(&uuid)
+        .map(|target| vec![target])
+        .unwrap_or_else(|| vec![(format!("session:{id}"), Vec::new())]);
+    reject_if_rate_limited(&s, source, &targets, &body.input).await?;
     session_write_core(uuid, &body.input)
         .await
         .map(|_| {
@@ -966,17 +1111,16 @@ async fn session_close(
     let source = q.source.as_deref().unwrap_or("daemon");
     session_close_core(uuid)
         .await
-        .map(|_| {
-            publish_event(
-                EventType::SessionClosed,
-                serde_json::json!({
-                    "source": source,
-                    "session_id": id,
-                }),
-            );
-            Json(OkBody { ok: true })
-        })
-        .map_err(|e| err(StatusCode::BAD_REQUEST, e))
+        .map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
+    s.limiter.lock().await.unregister_session(&uuid);
+    publish_event(
+        EventType::SessionClosed,
+        serde_json::json!({
+            "source": source,
+            "session_id": id,
+        }),
+    );
+    Ok(Json(OkBody { ok: true }))
 }
 async fn session_list(
     State(s): State<AppState>,
@@ -1299,6 +1443,8 @@ async fn run_playbook(
     check_auth(&s, &headers)?;
     let source = source_or_env(body.source, "daemon");
     reject_if_gate_paused(&source, &body.host, &format!("playbook:{}", body.playbook))?;
+    let targets = vec![(body.host.clone(), host_tags(&body.host))];
+    reject_if_rate_limited(&s, &source, &targets, &format!("playbook:{}", body.playbook)).await?;
     run_playbook_core_with_source(
         &body.playbook,
         &body.host,
@@ -1438,13 +1584,20 @@ async fn proxy_exec(
     State(s): State<AppState>,
     headers: HeaderMap,
     Path(alias): Path<String>,
-    Json(req): Json<ExecRequest>,
+    Json(mut req): Json<ExecRequest>,
 ) -> Result<Json<ExecResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
+    if req.source.is_none() {
+        req.source = Some(source_from_env("daemon_proxy"));
+    }
 
     // If alias is "localhost", execute locally
     if alias == "localhost" {
+        let source = req.source.as_deref().unwrap_or("daemon_proxy").to_string();
+        reject_if_gate_paused(&source, &req.host, &req.command)?;
+        let targets = vec![(req.host.clone(), host_tags(&req.host))];
+        reject_if_rate_limited(&s, &source, &targets, &req.command).await?;
         // Apply same user-rule checks as local exec
         if let Some(user_risk) = classify_with_user_rules(&req.command).await {
             if user_risk == RiskLevel::Blocked {
@@ -1623,6 +1776,7 @@ async fn exec_stream(
         return e.into_response();
     }
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    let app_state = s.clone();
     ws.on_upgrade(|socket| async move {
         use axum::extract::ws::Message;
         use std::sync::Arc;
@@ -1660,6 +1814,18 @@ async fn exec_stream(
             let _ = s
                 .send(Message::Text(
                     serde_json::json!({"type":"error","error":"execution gate paused"}).to_string(),
+                ))
+                .await;
+            return;
+        }
+        let targets = vec![(req.host.clone(), host_tags(&req.host))];
+        if let Err((_, Json(body))) =
+            reject_if_rate_limited(&app_state, &source, &targets, &req.command).await
+        {
+            let mut s = socket.lock().await;
+            let _ = s
+                .send(Message::Text(
+                    serde_json::json!({"type":"error","error":body.error}).to_string(),
                 ))
                 .await;
             return;
@@ -1975,6 +2141,7 @@ async fn serve_console() -> axum::response::Html<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent2ssh::limits::ExecutionLimitConfig;
     use std::sync::{Mutex, OnceLock};
 
     fn with_temp_config<T>(f: impl FnOnce() -> T) -> T {
@@ -1990,6 +2157,13 @@ mod tests {
         std::env::remove_var("AGENT2SSH_CONFIG_DIR");
         let _ = std::fs::remove_dir_all(&temp);
         out
+    }
+
+    fn test_state(config: ExecutionLimitConfig) -> AppState {
+        AppState {
+            token: "test-token".into(),
+            limiter: Arc::new(tokio::sync::Mutex::new(ExecutionLimiter::new(config))),
+        }
     }
 
     #[test]
@@ -2026,6 +2200,72 @@ mod tests {
         with_temp_config(|| {
             save_execution_gate(ExecutionGateMode::Paused, Some("desktop".into()), None).unwrap();
             assert!(reject_if_gate_paused("desktop", "test-host", "uptime").is_ok());
+        });
+    }
+
+    #[test]
+    fn rate_limit_rejects_with_429_and_writes_audit() {
+        with_temp_config(|| {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                let state = test_state(ExecutionLimitConfig {
+                    default_source_per_minute: 1,
+                    default_host_per_minute: 0,
+                    default_tag_per_minute: 0,
+                    ..Default::default()
+                });
+                let targets = vec![("test-host".to_string(), vec![])];
+                assert!(
+                    reject_if_rate_limited(&state, "mcp", &targets, "uptime")
+                        .await
+                        .is_ok()
+                );
+                let err = reject_if_rate_limited(&state, "mcp", &targets, "uptime")
+                    .await
+                    .unwrap_err();
+                assert_eq!(err.0, too_many_requests_status());
+
+                let audit = list_audit_core(AuditFilter {
+                    limit: 10,
+                    ..Default::default()
+                })
+                .unwrap();
+                let entry = audit.first().expect("limit rejection should write audit");
+                assert_eq!(entry.host, "test-host");
+                assert_eq!(entry.command, "uptime");
+                assert_eq!(entry.risk_level, RiskLevel::Blocked);
+                assert_eq!(entry.source.as_deref(), Some("mcp"));
+                assert!(
+                    entry
+                        .reason
+                        .as_deref()
+                        .unwrap_or_default()
+                        .contains("source:mcp rate")
+                );
+            })
+        });
+    }
+
+    #[test]
+    fn session_limit_rejects_with_429() {
+        with_temp_config(|| {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                let state = test_state(ExecutionLimitConfig {
+                    default_source_max_sessions: 0,
+                    default_host_max_sessions: 1,
+                    default_tag_max_sessions: 0,
+                    ..Default::default()
+                });
+                state.limiter.lock().await.register_session(
+                    Uuid::new_v4(),
+                    "mcp",
+                    "test-host",
+                    &[],
+                );
+                let err = reject_if_session_limited(&state, "cli", "test-host", &[])
+                    .await
+                    .unwrap_err();
+                assert_eq!(err.0, too_many_requests_status());
+            })
         });
     }
 }
@@ -2091,8 +2331,10 @@ async fn main() -> anyhow::Result<()> {
     let pid_path = config_dir.join("daemon.pid");
     std::fs::write(&pid_path, std::process::id().to_string())?;
 
+    let limits = load_execution_limits()?;
     let state = AppState {
         token: token.clone(),
+        limiter: Arc::new(Mutex::new(ExecutionLimiter::new(limits))),
     };
 
     let cors = CorsLayer::new()

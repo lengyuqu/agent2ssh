@@ -364,8 +364,8 @@ S9(0.1.1 已收口)
 | G1-1 | ✅ 已完成 | 高 | Codex | 全局急停 gate（daemon 层） | daemon 维护 `execution_gate` 状态（active/paused）；paused 时所有非 `desktop` 来源的 `/exec`、`/exec-multi`、`/playbooks/run`、session write 和 WebSocket exec 被拒，HTTP 入口返回 423 并写入 audit gate 拒绝事件；`desktop` 来源仍可操作以便恢复 |
 | G1-2 | ✅ 已完成 | 高 | Codex | 急停 CLI 与桌面入口 | `agent2ssh pause` / `resume` / `status` 可切换并查询 gate；桌面端提供急停按钮和当前 gate 状态指示；MCP 暴露只读 `ssh_gate_status` |
 | G1-3 | ✅ 已完成 | 中 | Codex | 急停回归验证 | paused 状态下 daemon/MCP 非 desktop 执行被拒且 audit 落盘，resume 后恢复；新增 `docs/g1-gate-regression-report.md` |
-| G2-1 | ⬜ 待认领 | 高 | - | 速率与并发限额配置 | 配置文件定义 per-source / per-host / per-tag 的每分钟最大执行数与最大并发 session 数；缺省值保守且可覆盖 |
-| G2-2 | ⬜ 待认领 | 高 | - | 限额强制与拒绝审计 | 超限请求在 daemon 层返回 429 并写入 audit；限额计数按滑动窗口；并发 session 上限阻止新建 session |
+| G2-1 | ✅ 已完成 | 高 | Codex | 速率与并发限额配置 | `execution_limits.toml` 定义 per-source / per-host / per-tag 的每窗口最大执行数与最大并发 session 数；缺省值保守且可覆盖，详见 `docs/guides/configuration-guide.md` |
+| G2-2 | ✅ 已完成 | 高 | Codex | 限额强制与拒绝审计 | 超限请求在 daemon 层返回 429 并写入 blocked audit；限额计数按滑动窗口；并发 session 上限阻止新建 session；新增 `docs/g2-limits-regression-report.md` |
 | G3-1 | ⬜ 待认领 | 高 | - | 策略即代码收敛 | 把分散的 risk rules + approval policy 收敛成单一可版本化 policy 文件（TOML/JSON）；保留向后兼容或提供迁移 |
 | G3-2 | ⬜ 待认领 | 中 | - | 策略校验与 dry-run | `agent2ssh policy validate` 校验语法；`agent2ssh policy test <cmd>` 对样例命令输出判定（allow/approve/block）；CI 可跑策略测试 |
 | G4-1 | ⬜ 待认领 | 中 | - | 异常行为基线检测 | 基于 audit 滑动窗口检测：某 source 频率突增、命中敏感模式、非常规时段；触发本地提醒 + 复用现有 webhook |

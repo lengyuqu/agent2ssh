@@ -494,6 +494,62 @@ X-Agent2SSH-Signature: sha256=<hex-encoded-signature>
 
 ---
 
+## execution_limits.toml
+
+### 用途
+
+配置 daemon 层的执行速率和 session 并发限额。限额在 daemon 进程内强制执行，覆盖 `/exec`、`/exec-multi`、`/playbooks/run`、session write、session open、WebSocket exec 和 `/daemons/localhost/exec`。
+
+### 文件位置
+
+```text
+~/.agent2ssh/execution_limits.toml
+```
+
+### 默认行为
+
+文件不存在时使用内置默认值：
+
+| 配置 | 默认值 | 含义 |
+|------|--------|------|
+| `enabled` | `true` | 是否启用限额 |
+| `window_secs` | `60` | 滑动窗口长度 |
+| `default_source_per_minute` | `30` | 每个 source 每窗口最大执行数 |
+| `default_host_per_minute` | `20` | 每个 host 每窗口最大执行数 |
+| `default_tag_per_minute` | `60` | 每个 tag 每窗口最大执行数 |
+| `default_source_max_sessions` | `4` | 每个 source 最大并发 session |
+| `default_host_max_sessions` | `4` | 每个 host 最大并发 session |
+| `default_tag_max_sessions` | `8` | 每个 tag 最大并发 session |
+
+### 文件格式
+
+```toml
+enabled = true
+window_secs = 60
+default_source_per_minute = 30
+default_host_per_minute = 20
+default_tag_per_minute = 60
+default_source_max_sessions = 4
+default_host_max_sessions = 4
+default_tag_max_sessions = 8
+
+[source.mcp]
+per_minute = 10
+max_sessions = 2
+
+[host.web1]
+per_minute = 5
+max_sessions = 1
+
+[tag.production]
+per_minute = 10
+max_sessions = 2
+```
+
+`per_minute = 0` 或 `max_sessions = 0` 表示该维度不限额。超限请求返回 HTTP 429，写入 `blocked` audit，并发布 `limit_rejected` 事件。
+
+---
+
 ## keys/
 
 ### 用途

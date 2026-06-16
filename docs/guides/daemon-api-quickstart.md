@@ -288,6 +288,41 @@ curl -X POST -H "$AUTH" \
 }
 ```
 
+### Execution Limits
+
+daemon 会在进程内维护滑动窗口限额和 session 并发计数。配置文件为：
+
+```text
+~/.agent2ssh/execution_limits.toml
+```
+
+缺省配置启用限额；如需覆盖，可写入：
+
+```toml
+enabled = true
+window_secs = 60
+default_source_per_minute = 30
+default_host_per_minute = 20
+default_tag_per_minute = 60
+default_source_max_sessions = 4
+default_host_max_sessions = 4
+default_tag_max_sessions = 8
+
+[source.mcp]
+per_minute = 10
+max_sessions = 2
+
+[host.web1]
+per_minute = 5
+max_sessions = 1
+
+[tag.production]
+per_minute = 10
+max_sessions = 2
+```
+
+`per_minute = 0` 或 `max_sessions = 0` 表示该维度不限额。超限时 HTTP 入口返回 429，并写入 `blocked` audit；事件流发布 `limit_rejected`。本地代理执行路径 `/daemons/localhost/exec` 同样受本地 daemon 限额约束。
+
 ---
 
 ## Exec-Multi
@@ -783,6 +818,7 @@ curl -N -H "$AUTH" http://127.0.0.1:7722/events/stream
 | `audit_rotated` | 审计日志轮转 |
 | `gate_changed` | execution gate 状态切换 |
 | `gate_rejected` | execution gate 拒绝了一次非桌面来源执行 |
+| `limit_rejected` | execution limits 拒绝了一次执行或 session open |
 
 桌面端的 Live Agent Activity 面板会订阅该事件流，并同时轮询 recent audit，用来观察 Codex、Claude Code、opencode 等 agent 通过 CLI/MCP/daemon 发起的 SSH 操作。
 
@@ -807,6 +843,7 @@ curl -N -H "$AUTH" http://127.0.0.1:7722/events/stream
 | 404 | 资源未找到 |
 | 408 | 审批超时 |
 | 423 | execution gate 已暂停 |
+| 429 | execution limits 超限 |
 | 502 | 远程守护进程错误 |
 
 ## API 参考
