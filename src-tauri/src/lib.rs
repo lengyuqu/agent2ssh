@@ -8,6 +8,7 @@ pub mod health;
 pub mod keys;
 pub mod limits;
 pub mod notify;
+pub mod policy;
 pub mod playbook;
 pub mod remote;
 pub mod risk_config;
@@ -53,6 +54,10 @@ pub use playbook::{
     dry_run_playbook, list_playbooks_core, resolve_command_template, run_playbook_core,
     run_playbook_core_with_source, validate_playbook_params, DryRunStep, Playbook, PlaybookDryRun,
     PlaybookParam, PlaybookRunResult, PlaybookStep, PlaybookStepResult,
+};
+pub use policy::{
+    existing_policy_path, load_policy_file, load_policy_from_path, parse_policy, policy_json_path,
+    policy_toml_path, validate_policy_path, AgentPolicyFile, PolicyDecision, PolicyTestResult,
 };
 pub use remote::{
     check_daemon_version, check_version_compatibility, diagnose_daemon, get_daemons_unified_view,

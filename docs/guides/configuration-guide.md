@@ -198,7 +198,90 @@ JSON Lines 格式，每行一个 JSON 对象：
 
 ---
 
+## policy.toml / policy.json
+
+### 用途
+
+`policy.toml` 是首选的策略即代码文件，用一个可版本化文件统一管理风险规则和审批策略。Agent2SSH 会优先读取：
+
+1. `~/.agent2ssh/policy.toml`
+2. `~/.agent2ssh/policy.json`
+3. 兼容旧文件：`risk_rules.toml` 和 `approval_policies.toml`
+
+### TOML 示例
+
+```toml
+[risk.blocked]
+patterns = [
+    "terraform destroy*",
+    "kubectl delete namespace*",
+]
+
+[risk.high]
+patterns = [
+    "git push *force*",
+    "sudo*",
+]
+
+[risk.medium]
+patterns = [
+    "apt install*",
+]
+
+[[approval.policies]]
+name = "prod high risk"
+tags = ["prod"]
+min_risk = "high"
+requires_approval = true
+ttl_secs = 300
+
+[[approval.policies]]
+name = "sandbox auto approve"
+hosts = ["sandbox"]
+requires_approval = false
+```
+
+### JSON 示例
+
+```json
+{
+  "risk": {
+    "blocked": { "patterns": ["terraform destroy*"] },
+    "high": { "patterns": ["sudo*"] },
+    "medium": { "patterns": ["apt install*"] }
+  },
+  "approval": {
+    "policies": [
+      {
+        "name": "prod high risk",
+        "tags": ["prod"],
+        "min_risk": "high",
+        "requires_approval": true,
+        "ttl_secs": 300
+      }
+    ]
+  }
+}
+```
+
+### 校验和 dry-run
+
+```bash
+# 校验默认 policy.toml / policy.json
+agent2ssh policy validate
+
+# 校验指定文件
+agent2ssh policy validate --path ./policy.toml --json
+
+# 测试命令最终判定：allow / approve / block
+agent2ssh policy test "terraform destroy -auto-approve" --host prod-db --json
+```
+
+`policy test` 会同时考虑内置风险规则、统一 policy 中的 risk rules、主机标签和 approval policies。`blocked` 命令输出 `block`；`high` 风险或命中审批策略输出 `approve`；其他输出 `allow`。
+
 ## risk_rules.toml
+
+> 兼容旧配置。新配置建议迁移到 `policy.toml` 的 `[risk.*]` 区块。
 
 ### 用途
 

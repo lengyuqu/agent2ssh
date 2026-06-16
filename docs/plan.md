@@ -366,8 +366,8 @@ S9(0.1.1 已收口)
 | G1-3 | ✅ 已完成 | 中 | Codex | 急停回归验证 | paused 状态下 daemon/MCP 非 desktop 执行被拒且 audit 落盘，resume 后恢复；新增 `docs/g1-gate-regression-report.md` |
 | G2-1 | ✅ 已完成 | 高 | Codex | 速率与并发限额配置 | `execution_limits.toml` 定义 per-source / per-host / per-tag 的每窗口最大执行数与最大并发 session 数；缺省值保守且可覆盖，详见 `docs/guides/configuration-guide.md` |
 | G2-2 | ✅ 已完成 | 高 | Codex | 限额强制与拒绝审计 | 超限请求在 daemon 层返回 429 并写入 blocked audit；限额计数按滑动窗口；并发 session 上限阻止新建 session；新增 `docs/g2-limits-regression-report.md` |
-| G3-1 | ⬜ 待认领 | 高 | - | 策略即代码收敛 | 把分散的 risk rules + approval policy 收敛成单一可版本化 policy 文件（TOML/JSON）；保留向后兼容或提供迁移 |
-| G3-2 | ⬜ 待认领 | 中 | - | 策略校验与 dry-run | `agent2ssh policy validate` 校验语法；`agent2ssh policy test <cmd>` 对样例命令输出判定（allow/approve/block）；CI 可跑策略测试 |
+| G3-1 | ✅ 已完成 | 高 | Codex | 策略即代码收敛 | 新增统一 `policy.toml` / `policy.json`，将 risk rules 与 approval policies 收敛到单一可版本化文件；运行时优先读取统一 policy，缺失时兼容旧 `risk_rules.toml` / `approval_policies.toml` |
+| G3-2 | ✅ 已完成 | 中 | Codex | 策略校验与 dry-run | 新增 `agent2ssh policy validate [--path]` 校验统一 policy 语法，`agent2ssh policy test <cmd> --host <host>` 输出 allow/approve/block；CLI smoke 覆盖统一 policy validate/test |
 | G4-1 | ⬜ 待认领 | 中 | - | 异常行为基线检测 | 基于 audit 滑动窗口检测：某 source 频率突增、命中敏感模式、非常规时段；触发本地提醒 + 复用现有 webhook |
 | G4-2 | ⬜ 待认领 | 低 | - | 异常检测可视化 | Live Activity 标注异常事件并给出原因；可调阈值；构造异常序列可触发提醒 |
 

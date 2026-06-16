@@ -676,3 +676,94 @@ fn cli_exec_help_shows_reason_and_change_id() {
         stdout
     );
 }
+
+#[test]
+fn cli_policy_validate_accepts_unified_policy_file() {
+    let dir = unique_temp_config_dir("policy-validate");
+    std::fs::create_dir_all(&dir).expect("create temp config dir");
+    let policy_path = dir.join("policy.toml");
+    std::fs::write(
+        &policy_path,
+        r#"
+[risk.high]
+patterns = ["kubectl delete*"]
+
+[[approval.policies]]
+name = "prod high"
+tags = ["prod"]
+min_risk = "high"
+requires_approval = true
+"#,
+    )
+    .expect("write policy file");
+
+    let output = std::process::Command::new(cli_bin())
+        .env("AGENT2SSH_CONFIG_DIR", &dir)
+        .args(["policy", "validate", "--json"])
+        .output()
+        .expect("failed to run policy validate");
+
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        output.status.success(),
+        "policy validate should exit 0, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("\"valid\": true"),
+        "policy validate output should mark the file valid, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn cli_policy_test_returns_block_for_unified_risk_rule() {
+    let dir = unique_temp_config_dir("policy-test");
+    std::fs::create_dir_all(&dir).expect("create temp config dir");
+    std::fs::write(
+        dir.join("policy.toml"),
+        r#"
+[risk.blocked]
+patterns = ["terraform destroy*"]
+"#,
+    )
+    .expect("write policy file");
+
+    let output = std::process::Command::new(cli_bin())
+        .env("AGENT2SSH_CONFIG_DIR", &dir)
+        .args([
+            "policy",
+            "test",
+            "terraform destroy -auto-approve",
+            "--host",
+            "prod",
+            "--json",
+        ])
+        .output()
+        .expect("failed to run policy test");
+
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        output.status.success(),
+        "policy test should exit 0, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("\"decision\": \"block\""),
+        "policy test should return block, got:\n{}",
+        stdout
+    );
+}
+
+fn unique_temp_config_dir(name: &str) -> std::path::PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system time before unix epoch")
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "agent2ssh-{name}-{}-{nanos}",
+        std::process::id()
+    ))
+}

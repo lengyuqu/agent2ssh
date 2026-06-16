@@ -407,6 +407,9 @@ fn approval_policies_path() -> PathBuf {
 ///
 /// Returns an empty `Vec` if the file does not exist.
 pub fn load_approval_policies() -> Result<Vec<ApprovalPolicy>> {
+    if let Some(policies) = crate::policy::policy_approval_policies()? {
+        return Ok(policies);
+    }
     let path = approval_policies_path();
     if !path.exists() {
         return Ok(Vec::new());
@@ -418,6 +421,9 @@ pub fn load_approval_policies() -> Result<Vec<ApprovalPolicy>> {
 
 /// Save approval policies to `~/.agent2ssh/approval_policies.toml`.
 pub fn save_approval_policies(policies: &[ApprovalPolicy]) -> Result<()> {
+    if crate::policy::save_policy_approval_policies(policies)? {
+        return Ok(());
+    }
     let path = approval_policies_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;

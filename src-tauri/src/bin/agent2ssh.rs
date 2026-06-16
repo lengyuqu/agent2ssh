@@ -14,14 +14,16 @@ use agent2ssh::{
     export_team_config, filter_hosts, import_ssh_config_core, import_team_config, list_audit_core,
     list_daemons_core, list_hosts_filtered_core, ping_hosts_core, preview_exec, preview_exec_multi,
     remove_host_core, run_playbook_core_with_source, sftp_download_core, sftp_ls_core,
-    sftp_mkdir_core, sftp_stat_core, sftp_upload_core, source_from_env, AuditFilter, BatchStrategy,
-    ExecComparison, ExecRequest, ExecutionGateStatus, ForwardDirection, ForwardRule, HostFilter,
-    HostProfile, RiskLevel, SftpDownloadRequest, SftpUploadRequest, TeamConfigExport,
+    sftp_mkdir_core, sftp_stat_core, sftp_upload_core, source_from_env, validate_policy_path,
+    AuditFilter, BatchStrategy, ExecComparison, ExecRequest, ExecutionGateStatus,
+    ForwardDirection, ForwardRule, HostFilter, HostProfile, PolicyDecision, PolicyTestResult,
+    RiskLevel, SftpDownloadRequest, SftpUploadRequest, TeamConfigExport,
 };
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
 #[command(name = "agent2ssh", version)]
@@ -498,6 +500,23 @@ enum DaemonCommands {
 
 #[derive(Debug, Subcommand)]
 enum PolicyCommands {
+    /// Validate the unified policy.toml or policy.json file
+    Validate {
+        /// Validate a specific policy file instead of ~/.agent2ssh/policy.toml
+        #[arg(long)]
+        path: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Test the effective policy decision for a command
+    Test {
+        command: String,
+        /// Host name used for approval policy host/tag matching
+        #[arg(long, default_value = "localhost")]
+        host: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// List all configured approval policies
     List {
         #[arg(long)]
@@ -593,6 +612,49 @@ enum PlaybookCommands {
         #[arg(long = "params", value_name = "KEY=VALUE")]
         params: Option<Vec<String>>,
     },
+}
+
+async fn effective_risk_for_policy(command: &str) -> (RiskLevel, bool) {
+    let base = classify_risk(command);
+    let user_risk = agent2ssh::risk_config::classify_with_user_rules(command).await;
+    let risk = if let Some(user_risk) = user_risk {
+        match (&user_risk, &base) {
+            (RiskLevel::Blocked, _) => RiskLevel::Blocked,
+            (RiskLevel::High, RiskLevel::Blocked) => RiskLevel::Blocked,
+            (ur, _) => *ur,
+        }
+    } else {
+        base
+    };
+    (risk, user_risk.is_some())
+}
+
+async fn test_policy_decision(host: &str, command: &str) -> Result<PolicyTestResult> {
+    let host_tags: Vec<String> = list_hosts_filtered_core(&HostFilter::default())
+        .unwrap_or_default()
+        .iter()
+        .find(|h| h.name == host)
+        .map(|h| h.tags.clone())
+        .unwrap_or_default();
+
+    let (risk, matched_user_rule) = effective_risk_for_policy(command).await;
+    let approval = check_approval_required(host, &host_tags, command, risk)?;
+    let decision = if risk == RiskLevel::Blocked {
+        PolicyDecision::Block
+    } else if risk == RiskLevel::High || approval.is_some() {
+        PolicyDecision::Approve
+    } else {
+        PolicyDecision::Allow
+    };
+
+    Ok(PolicyTestResult {
+        command: command.to_string(),
+        host: host.to_string(),
+        risk_level: risk,
+        decision,
+        matched_approval_policy: approval.map(|policy| policy.name),
+        matched_user_rule,
+    })
 }
 
 #[tokio::main]
@@ -1765,6 +1827,56 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Policy { command } => match command {
+            PolicyCommands::Validate { path, json } => {
+                let policy = validate_policy_path(path.as_deref())?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "valid": true,
+                            "risk_rules": {
+                                "blocked": policy.risk.blocked.patterns.len(),
+                                "high": policy.risk.high.patterns.len(),
+                                "medium": policy.risk.medium.patterns.len(),
+                            },
+                            "approval_policies": policy.approval.policies.len(),
+                        }))?
+                    );
+                } else {
+                    println!(
+                        "Policy valid: {} blocked, {} high, {} medium risk rules; {} approval policies.",
+                        policy.risk.blocked.patterns.len(),
+                        policy.risk.high.patterns.len(),
+                        policy.risk.medium.patterns.len(),
+                        policy.approval.policies.len()
+                    );
+                }
+            }
+            PolicyCommands::Test {
+                command,
+                host,
+                json,
+            } => {
+                let result = test_policy_decision(&host, &command).await?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                } else {
+                    let approval = result
+                        .matched_approval_policy
+                        .as_deref()
+                        .map(|name| format!(", policy={name}"))
+                        .unwrap_or_default();
+                    let user_rule = if result.matched_user_rule {
+                        ", user_rule=true"
+                    } else {
+                        ""
+                    };
+                    println!(
+                        "{}\trisk={}{}{}",
+                        result.decision, result.risk_level, approval, user_rule
+                    );
+                }
+            }
             PolicyCommands::List { json } => {
                 let policies = list_approval_policies()?;
                 if json {
@@ -1886,7 +1998,7 @@ async fn main() -> Result<()> {
                     .map(|h| h.tags.clone())
                     .unwrap_or_default();
 
-                let risk = classify_risk(&command);
+                let (risk, _matched_user_rule) = effective_risk_for_policy(&command).await;
                 let result = check_approval_required(&host, &host_tags, &command, risk)?;
                 if json {
                     let output = match &result {

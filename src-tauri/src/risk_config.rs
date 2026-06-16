@@ -49,7 +49,8 @@ pub fn risk_rules_path() -> PathBuf {
 
 /// Load risk rules from disk, with file modification time cache.
 pub async fn load_risk_rules() -> Result<RiskRules> {
-    let path = risk_rules_path();
+    let policy_path = crate::policy::existing_policy_path()?;
+    let path = policy_path.clone().unwrap_or_else(risk_rules_path);
     let mut c = cache().lock().await;
 
     let current_modified = std::fs::metadata(&path)
@@ -61,14 +62,18 @@ pub async fn load_risk_rules() -> Result<RiskRules> {
         return Ok(c.rules.clone());
     }
 
-    if !path.exists() {
+    if policy_path.is_none() && !path.exists() {
         c.rules = RiskRules::default();
         c.modified = None;
         return Ok(c.rules.clone());
     }
 
-    let raw = std::fs::read_to_string(&path)?;
-    let rules: RiskRules = toml::from_str(&raw)?;
+    let rules = if policy_path.is_some() {
+        crate::policy::load_policy_from_path(&path)?.risk
+    } else {
+        let raw = std::fs::read_to_string(&path)?;
+        toml::from_str(&raw)?
+    };
     c.rules = rules.clone();
     c.modified = current_modified;
     Ok(rules)

@@ -381,6 +381,25 @@ agent2ssh risk "<command>" [--host H] [--json]
 
 ---
 
+## 策略校验与测试 (policy)
+
+统一策略文件 `~/.agent2ssh/policy.toml` / `policy.json` 可以同时管理 risk rules 和 approval policies。CLI 可直接校验并 dry-run 单条命令的最终判定：
+
+```bash
+# 校验默认统一策略文件
+agent2ssh policy validate
+
+# 校验指定策略文件
+agent2ssh policy validate --path ./policy.toml --json
+
+# 测试命令最终判定：allow / approve / block
+agent2ssh policy test "terraform destroy -auto-approve" --host prod-db --json
+```
+
+`policy test` 会同时考虑内置风险规则、统一 policy 中的风险规则、主机标签和审批策略。旧的 `policy list/add/remove/check` 命令仍可用于审批策略管理。
+
+---
+
 ## 守护进程管理 (daemon)
 
 ### 启动守护进程
