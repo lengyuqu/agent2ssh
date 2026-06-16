@@ -1,4 +1,4 @@
-import { Activity, RefreshCw, ShieldAlert } from "lucide-react";
+import { Activity, ChevronDown, ChevronRight, RefreshCw, Search, ShieldAlert } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import type { AgentEvent, AuditEntry } from "../types";
@@ -17,6 +17,8 @@ type ActivityItem = {
   exitCode?: number | null;
   riskLevel?: string;
   changeId?: string | null;
+  sessionId?: string;
+  raw?: Record<string, unknown>;
 };
 
 type Props = {
@@ -54,6 +56,8 @@ function eventToItem(event: AgentEvent): ActivityItem {
     exitCode: asNumber(data.exit_code),
     riskLevel: asString(data.risk_level),
     changeId: asString(data.change_id) ?? null,
+    sessionId,
+    raw: data,
   };
 }
 
@@ -61,7 +65,7 @@ function auditToItem(entry: AuditEntry): ActivityItem {
   return {
     id: `audit-${entry.id}`,
     ts: entry.ts,
-    source: "audit",
+    source: entry.source ?? "audit",
     kind: "exec recorded",
     host: entry.host,
     command: entry.command,
@@ -69,6 +73,12 @@ function auditToItem(entry: AuditEntry): ActivityItem {
     exitCode: entry.exit_code,
     riskLevel: entry.risk_level,
     changeId: entry.change_id ?? null,
+    raw: {
+      id: entry.id,
+      reason: entry.reason ?? null,
+      change_id: entry.change_id ?? null,
+      source: entry.source ?? null,
+    },
   };
 }
 
@@ -83,6 +93,10 @@ export default function LiveActivityPanel({ audit }: Props) {
   const [recentAudit, setRecentAudit] = useState<AuditEntry[]>(audit.slice(0, 20));
   const [status, setStatus] = useState<"connecting" | "live" | "offline">("connecting");
   const [error, setError] = useState<string | null>(null);
+  const [sourceFilter, setSourceFilter] = useState("all");
+  const [kindFilter, setKindFilter] = useState("all");
+  const [search, setSearch] = useState("");
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
 
   useEffect(() => {
     setRecentAudit(audit.slice(0, 20));
@@ -128,7 +142,7 @@ export default function LiveActivityPanel({ audit }: Props) {
     };
   }, []);
 
-  const items = useMemo(() => {
+  const allItems = useMemo(() => {
     const byId = new Map<string, ActivityItem>();
     for (const item of events.map(eventToItem)) byId.set(item.id, item);
     for (const item of recentAudit.map(auditToItem)) byId.set(item.id, item);
@@ -136,6 +150,46 @@ export default function LiveActivityPanel({ audit }: Props) {
       .sort((a, b) => new Date(b.ts).getTime() - new Date(a.ts).getTime())
       .slice(0, 50);
   }, [events, recentAudit]);
+
+  const sourceOptions = useMemo(
+    () => [...new Set(allItems.map((item) => item.source).filter(Boolean))].sort(),
+    [allItems],
+  );
+
+  const kindOptions = useMemo(
+    () => [...new Set(allItems.map((item) => item.kind).filter(Boolean))].sort(),
+    [allItems],
+  );
+
+  const items = useMemo(() => {
+    const needle = search.trim().toLowerCase();
+    return allItems.filter((item) => {
+      if (sourceFilter !== "all" && item.source !== sourceFilter) return false;
+      if (kindFilter !== "all" && item.kind !== kindFilter) return false;
+      if (!needle) return true;
+      return [
+        item.source,
+        item.kind,
+        item.host,
+        item.command,
+        item.detail,
+        item.riskLevel,
+        item.changeId ?? undefined,
+        item.sessionId,
+      ]
+        .filter(Boolean)
+        .some((value) => value!.toLowerCase().includes(needle));
+    });
+  }, [allItems, kindFilter, search, sourceFilter]);
+
+  function toggleExpanded(id: string) {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
 
   return (
     <section className="panel live-activity-panel">
@@ -153,6 +207,33 @@ export default function LiveActivityPanel({ audit }: Props) {
 
       {error && <div className="error compact">{error}</div>}
 
+      <div className="activity-filters">
+        <label className="activity-search">
+          <Search size={14} />
+          <input
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Search activity"
+          />
+        </label>
+        <select value={sourceFilter} onChange={(event) => setSourceFilter(event.target.value)}>
+          <option value="all">All sources</option>
+          {sourceOptions.map((source) => (
+            <option key={source} value={source}>
+              {source}
+            </option>
+          ))}
+        </select>
+        <select value={kindFilter} onChange={(event) => setKindFilter(event.target.value)}>
+          <option value="all">All types</option>
+          {kindOptions.map((kind) => (
+            <option key={kind} value={kind}>
+              {kind}
+            </option>
+          ))}
+        </select>
+      </div>
+
       <div className="activity-list">
         {items.length === 0 && (
           <div className="empty">
@@ -164,10 +245,19 @@ export default function LiveActivityPanel({ audit }: Props) {
           <article className="activity-row" key={item.id}>
             <div className="activity-main">
               <div className="activity-meta">
+                <button
+                  className="activity-toggle"
+                  type="button"
+                  onClick={() => toggleExpanded(item.id)}
+                  aria-label={expanded.has(item.id) ? "Collapse details" : "Expand details"}
+                >
+                  {expanded.has(item.id) ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                </button>
                 <span>{formatTime(item.ts)}</span>
                 <span>{item.source}</span>
                 <span>{item.kind}</span>
                 {item.host && <strong>{item.host}</strong>}
+                {item.sessionId && <span>{item.sessionId.slice(0, 8)}</span>}
                 {item.exitCode !== undefined && (
                   <span className={item.exitCode === 0 ? "ok" : "fail"}>
                     exit {item.exitCode ?? "?"}
@@ -178,6 +268,35 @@ export default function LiveActivityPanel({ audit }: Props) {
               </div>
               {item.command && <code className="activity-command">{item.command}</code>}
               {item.detail && <pre>{item.detail}</pre>}
+              {expanded.has(item.id) && (
+                <div className="activity-details">
+                  <dl>
+                    <div>
+                      <dt>time</dt>
+                      <dd>{item.ts}</dd>
+                    </div>
+                    {item.host && (
+                      <div>
+                        <dt>host</dt>
+                        <dd>{item.host}</dd>
+                      </div>
+                    )}
+                    {item.sessionId && (
+                      <div>
+                        <dt>session</dt>
+                        <dd>{item.sessionId}</dd>
+                      </div>
+                    )}
+                    {item.changeId && (
+                      <div>
+                        <dt>change</dt>
+                        <dd>{item.changeId}</dd>
+                      </div>
+                    )}
+                  </dl>
+                  {item.raw && <pre>{JSON.stringify(item.raw, null, 2)}</pre>}
+                </div>
+              )}
             </div>
           </article>
         ))}

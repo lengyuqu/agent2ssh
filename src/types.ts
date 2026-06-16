@@ -56,6 +56,9 @@ export type ExecRequest = {
   timeout_secs?: number | null;
   stdin?: string | null;
   max_output_bytes?: number | null;
+  reason?: string | null;
+  change_id?: string | null;
+  source?: string | null;
 };
 
 // Rust: types.rs — ExecResult
@@ -138,6 +141,7 @@ export type AuditEntry = {
   risk_level: RiskLevel;
   reason?: string | null;
   change_id?: string | null;
+  source?: string | null;
 };
 
 export type AgentEventType =

@@ -253,7 +253,7 @@ P0-P10 已全部完成。当前基线：
 |------|------|--------|--------|------|----------|
 | S5-1 | ✅ 已完成 | 高 | Codex | MCP session 默认路由到 local daemon | `ssh_session_open/write/read/close/list` 优先使用 `127.0.0.1:7722` daemon session API；daemon 不可用时回退到 MCP 进程内 session；`cargo check --no-default-features --bin agent2ssh-mcp`、MCP stdio smoke 和 MCP 枚举测试通过 |
 | S5-2 | ✅ 已完成 | 高 | Codex | 标准来源字段 | `ExecRequest`、`AuditEntry`、daemon session events、daemon exec/playbook bodies 支持 `source`；CLI/MCP/daemon/desktop 默认来源分别为 `cli`、`mcp`、`daemon`、`desktop`，并允许 `AGENT2SSH_SOURCE` 覆盖；Rust checks 和 lib tests 通过 |
-| S5-3 | ⬜ 待认领 | 中 | - | Live Activity 过滤与展开 | UI 可按 source、host、session、事件类型过滤，并能展开查看 reason、change_id、exit code、duration、bounded output preview |
+| S5-3 | ✅ 已完成 | 中 | Codex | Live Activity 过滤与展开 | UI 可按 source、事件类型和文本搜索过滤；事件可展开查看 time、host、session、change_id 和原始 payload；`npm run build` 通过，Browser 验证过滤控件可渲染 |
 | S5-4 | ⬜ 待认领 | 高 | - | 高风险非前端来源提醒 | MCP/CLI 等非桌面来源触发高风险操作时，桌面端显示前台提醒或确认入口，不放宽现有审批边界 |
 | S5-5 | ⬜ 待认领 | 高 | - | 敏感输出策略 | session/output/exec preview 对 token、password、private key、Authorization 等敏感片段做 redaction，复制或展开完整输出时有明确边界 |
 
