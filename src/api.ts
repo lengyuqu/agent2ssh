@@ -5,6 +5,7 @@ import type {
   AuditFilter,
   AgentEvent,
   ConnectionStatus,
+  DaemonSessionInfo,
   DaemonInfo,
   ExecMultiResult,
   ExecRequest,
@@ -109,6 +110,66 @@ export const api = {
     invoke<string>("session_read", { id, timeoutMs: timeoutMs ?? 2000 }),
   sessionClose: (id: string) => invoke<void>("session_close", { id }),
   sessionList: () => invoke<SessionInfo[]>("session_list"),
+  sessionOpenDaemon: async (host: string): Promise<string> => {
+    const token = await invoke<string>("get_daemon_token");
+    const res = await fetch(`${daemonUrl}/sessions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ host, source: "desktop" }),
+    });
+    if (!res.ok) throw new Error(`Failed to open daemon session: ${res.status}`);
+    const body = (await res.json()) as { id: string };
+    return body.id;
+  },
+  sessionWriteDaemon: async (id: string, input: string): Promise<void> => {
+    const token = await invoke<string>("get_daemon_token");
+    const res = await fetch(`${daemonUrl}/sessions/${encodeURIComponent(id)}/write`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ input, source: "desktop" }),
+    });
+    if (!res.ok) throw new Error(`Failed to write daemon session: ${res.status}`);
+  },
+  sessionReadDaemon: async (id: string, timeoutMs?: number): Promise<string> => {
+    const token = await invoke<string>("get_daemon_token");
+    const params = new URLSearchParams({
+      timeout_ms: String(timeoutMs ?? 2000),
+      source: "desktop",
+    });
+    const res = await fetch(
+      `${daemonUrl}/sessions/${encodeURIComponent(id)}/read?${params.toString()}`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    if (!res.ok) throw new Error(`Failed to read daemon session: ${res.status}`);
+    const body = (await res.json()) as { output: string };
+    return body.output;
+  },
+  sessionCloseDaemon: async (id: string): Promise<void> => {
+    const token = await invoke<string>("get_daemon_token");
+    const params = new URLSearchParams({ source: "desktop" });
+    const res = await fetch(
+      `${daemonUrl}/sessions/${encodeURIComponent(id)}?${params.toString()}`,
+      {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` },
+      }
+    );
+    if (!res.ok) throw new Error(`Failed to close daemon session: ${res.status}`);
+  },
+  sessionListDaemon: async (): Promise<DaemonSessionInfo[]> => {
+    const token = await invoke<string>("get_daemon_token");
+    const res = await fetch(`${daemonUrl}/sessions`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) throw new Error(`Failed to list daemon sessions: ${res.status}`);
+    return (await res.json()) as DaemonSessionInfo[];
+  },
 
   // Port forwarding
   forwardAdd: (

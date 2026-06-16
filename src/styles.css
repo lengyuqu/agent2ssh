@@ -664,6 +664,20 @@ textarea {
   margin-left: auto;
 }
 
+.session-registry-badge {
+  background: #eef2ff;
+  color: #3730a3;
+  padding: 1px 7px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  margin-left: auto;
+}
+
+.session-registry-badge + .session-active-badge {
+  margin-left: 0;
+}
+
 .session-warning {
   background: #fef3c7;
   color: #92400e;
@@ -679,7 +693,8 @@ textarea {
 }
 
 .session-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr) auto 32px;
   align-items: center;
   gap: 12px;
   padding: 8px 10px;
@@ -691,16 +706,52 @@ textarea {
 .session-row code {
   color: #64748b;
   font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.session-row span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-source {
+  background: #e2e8f0;
+  color: #475569;
+  padding: 2px 7px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.session-attach {
+  width: 32px;
+  min-width: 32px;
+  height: 30px;
+  min-height: 30px;
+  padding: 0;
+  justify-content: center;
 }
 
 .session-controls {
   display: flex;
+  align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
 }
 
 .session-controls button {
   font-size: 13px;
   min-height: 34px;
+}
+
+.session-active-meta {
+  color: #64748b;
+  font-size: 12px;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .session-output {

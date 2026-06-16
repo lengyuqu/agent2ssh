@@ -49,4 +49,4 @@ S6 validated the S5 Live Agent Activity changes against the real test server wit
 
 ## Follow-Up
 
-S6 closes the S5 validation loop. The next engineering step should be S7: expose daemon-managed sessions in the desktop `SessionPanel`, so a session opened by MCP can be actively taken over from the UI.
+S7 has since exposed daemon-managed sessions in the desktop `SessionPanel`, so sessions opened through MCP can be listed, attached, read, written to, and closed from the UI.

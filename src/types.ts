@@ -104,6 +104,13 @@ export type SftpResult = {
 // an array of two-element arrays: [id_string, host_string].
 export type SessionInfo = [string, string]; // [id, host]
 
+// Daemon GET /sessions returns object rows so the desktop can take over
+// sessions opened by MCP, CLI, or another daemon client.
+export type DaemonSessionInfo = {
+  id: string;
+  host: string;
+};
+
 // Rust: types.rs — ForwardDirection (rename_all = "lowercase")
 export type ForwardDirection = "local" | "remote";
 

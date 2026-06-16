@@ -1,33 +1,51 @@
-import { Send, Terminal, X } from "lucide-react";
+import { PlugZap, RefreshCw, Send, Terminal, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
-import type { SessionInfo } from "../types";
 
 type Props = {
   selectedHost: string;
 };
 
+type SessionBackend = "daemon" | "local";
+
+type ManagedSession = {
+  id: string;
+  host: string;
+  backend: SessionBackend;
+};
+
 export default function SessionPanel({ selectedHost }: Props) {
-  const [sessions, setSessions] = useState<SessionInfo[]>([]);
+  const [sessions, setSessions] = useState<ManagedSession[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [activeHost, setActiveHost] = useState<string | null>(null);
+  const [activeBackend, setActiveBackend] = useState<SessionBackend>("daemon");
   const [input, setInput] = useState("");
   const [output, setOutput] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [registryMode, setRegistryMode] = useState<SessionBackend>("daemon");
   const outputRef = useRef<HTMLPreElement>(null);
 
   async function refresh() {
     try {
-      const list = await api.sessionList();
-      setSessions(list);
+      const list = await api.sessionListDaemon();
+      setSessions(list.map((session) => ({ ...session, backend: "daemon" })));
+      setRegistryMode("daemon");
     } catch (err) {
-      setError(String(err));
+      try {
+        const list = await api.sessionList();
+        setSessions(list.map(([id, host]) => ({ id, host, backend: "local" })));
+        setRegistryMode("local");
+      } catch (fallbackErr) {
+        setError(`${String(err)}; ${String(fallbackErr)}`);
+      }
     }
   }
 
   useEffect(() => {
     refresh();
+    const timer = window.setInterval(refresh, 3000);
+    return () => window.clearInterval(timer);
   }, []);
 
   // Reset when selectedHost changes
@@ -40,11 +58,19 @@ export default function SessionPanel({ selectedHost }: Props) {
     setBusy(true);
     setError(null);
     try {
-      const id = await api.sessionOpen(selectedHost);
+      let id: string;
+      let backend: SessionBackend = "daemon";
+      try {
+        id = await api.sessionOpenDaemon(selectedHost);
+      } catch {
+        id = await api.sessionOpen(selectedHost);
+        backend = "local";
+      }
       setActiveId(id);
       setActiveHost(selectedHost);
+      setActiveBackend(backend);
       await refresh();
-      const initial = await api.sessionRead(id, 1500);
+      const initial = await readFromBackend(id, backend, 1500);
       setOutput(initial);
     } catch (err) {
       setError(String(err));
@@ -53,18 +79,61 @@ export default function SessionPanel({ selectedHost }: Props) {
     }
   }
 
+  async function attachSession(session: ManagedSession) {
+    setBusy(true);
+    setError(null);
+    try {
+      setActiveId(session.id);
+      setActiveHost(session.host);
+      setActiveBackend(session.backend);
+      const initial = await readFromBackend(session.id, session.backend, 500);
+      setOutput(initial);
+      scrollOutput();
+    } catch (err) {
+      setActiveId(null);
+      setActiveHost(null);
+      setOutput("");
+      setError(String(err));
+      await refresh();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function readFromBackend(id: string, backend: SessionBackend, timeoutMs: number) {
+    return backend === "daemon"
+      ? api.sessionReadDaemon(id, timeoutMs)
+      : api.sessionRead(id, timeoutMs);
+  }
+
+  async function writeToBackend(id: string, backend: SessionBackend, value: string) {
+    return backend === "daemon"
+      ? api.sessionWriteDaemon(id, value)
+      : api.sessionWrite(id, value);
+  }
+
+  async function closeFromBackend(id: string, backend: SessionBackend) {
+    return backend === "daemon"
+      ? api.sessionCloseDaemon(id)
+      : api.sessionClose(id);
+  }
+
+  function scrollOutput() {
+    setTimeout(() => {
+      outputRef.current?.scrollTo(0, outputRef.current.scrollHeight);
+    }, 50);
+  }
+
   async function sendInput() {
     if (!activeId || !input) return;
     setBusy(true);
     setError(null);
     try {
-      await api.sessionWrite(activeId, input + "\n");
+      await writeToBackend(activeId, activeBackend, input + "\n");
       setInput("");
-      const data = await api.sessionRead(activeId, 2000);
+      const data = await readFromBackend(activeId, activeBackend, 2000);
       setOutput((prev) => prev + "\n" + data);
-      setTimeout(() => {
-        outputRef.current?.scrollTo(0, outputRef.current.scrollHeight);
-      }, 50);
+      scrollOutput();
     } catch (err) {
       setError(String(err));
     } finally {
@@ -75,17 +144,19 @@ export default function SessionPanel({ selectedHost }: Props) {
   async function readOutput() {
     if (!activeId) return;
     try {
-      const data = await api.sessionRead(activeId, 1000);
+      const data = await readFromBackend(activeId, activeBackend, 1000);
       setOutput((prev) => prev + data);
+      scrollOutput();
     } catch (err) {
       setError(String(err));
+      await refresh();
     }
   }
 
   async function closeSession() {
     if (!activeId) return;
     try {
-      await api.sessionClose(activeId);
+      await closeFromBackend(activeId, activeBackend);
       setActiveId(null);
       setActiveHost(null);
       setOutput("");
@@ -102,6 +173,7 @@ export default function SessionPanel({ selectedHost }: Props) {
       <div className="panel-title">
         <Terminal size={16} />
         Session
+        <span className="session-registry-badge">{registryMode}</span>
         {activeId && <span className="session-active-badge">active</span>}
       </div>
       {error && <div className="error">{error}</div>}
@@ -116,10 +188,20 @@ export default function SessionPanel({ selectedHost }: Props) {
       {!activeId ? (
         <>
           <div className="session-list">
-            {sessions.map(([id, host]) => (
-              <div key={id} className="session-row">
-                <code title={id}>{id.slice(0, 8)}</code>
-                <span>{host}</span>
+            {sessions.map((session) => (
+              <div key={session.id} className="session-row">
+                <code title={session.id}>{session.id.slice(0, 8)}</code>
+                <span>{session.host}</span>
+                <span className="session-source">{session.backend}</span>
+                <button
+                  className="secondary session-attach"
+                  onClick={() => attachSession(session)}
+                  disabled={busy}
+                  title="Attach to this session"
+                  aria-label={`Attach to ${session.host} session ${session.id.slice(0, 8)}`}
+                >
+                  <PlugZap size={14} />
+                </button>
               </div>
             ))}
             {sessions.length === 0 && (
@@ -138,13 +220,22 @@ export default function SessionPanel({ selectedHost }: Props) {
       ) : (
         <>
           <div className="session-controls">
-            <button className="secondary" onClick={readOutput} disabled={busy}>
-              Read
+            <button
+              className="secondary"
+              onClick={readOutput}
+              disabled={busy}
+              title="Read session output"
+              aria-label="Read session output"
+            >
+              <RefreshCw size={14} />
             </button>
             <button className="secondary" onClick={closeSession}>
               <X size={14} />
               Close
             </button>
+            <span className="session-active-meta">
+              {activeHost} / {activeBackend} / {activeId.slice(0, 8)}
+            </span>
           </div>
           <div className="terminal-output session-output">
             <pre ref={outputRef}>{output || "(no output yet)"}</pre>

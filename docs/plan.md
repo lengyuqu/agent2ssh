@@ -69,6 +69,7 @@ P0-P10 已全部完成。当前基线：
 | S4 | 发布前质量门槛 | ✅ 已完成 | 高 | Qoder |
 | S5 | Agent Activity 可观测性闭环 | ✅ 已完成 | 高 | Codex |
 | S6 | 真实会话回归 | ✅ 已完成 | 高 | Codex |
+| S7 | 桌面 Session 接管 | ✅ 已完成 | 高 | Codex |
 
 ## 已完成阶段归档
 
@@ -99,8 +100,7 @@ P0-P10 已全部完成。当前基线：
 
 当前下一步聚焦：
 
-- S6 已完成真实服务器回归，MCP PTY session 默认 daemon 路由、fallback、source 归因和 Live Activity preview 脱敏均已验证。
-- 若继续产品体验开发，进入 S7：让桌面 SessionPanel 直接列出并接管 daemon-managed sessions。
+- S7 已完成桌面 SessionPanel 接管 daemon-managed sessions；MCP/CLI/daemon 打开的统一 registry 会话可在桌面端列出、读取、写入和关闭。
 - 若进入发布收口，打 `v0.1.1` 标签，等待 CI assets，并回填 Homebrew sha256。
 
 ## 真实测试服务器
@@ -270,12 +270,24 @@ P0-P10 已全部完成。当前基线：
 | S6-4 | ✅ 已完成 | 高 | Codex | 敏感 preview 脱敏回归 | SSE preview 中 `Authorization: Bearer ...` 被替换为 `[REDACTED]`，测试 secret 未出现在事件 payload summary |
 | S6-5 | ✅ 已完成 | 高 | Codex | 回归报告与清理证明 | 新增 `docs/s6-regression-report.md`；远端临时 key 和 `/tmp/agent2ssh-s6-*` 清理完成，本地 daemon 停止 |
 
+## S7 · 桌面 Session 接管
+
+目标：让桌面端 SessionPanel 不只打开自己的进程内 PTY，而是优先连接 daemon session registry，直接接管 MCP/CLI/daemon 创建的 daemon-managed sessions。
+
+| 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
+|------|------|--------|--------|------|----------|
+| S7-1 | ✅ 已完成 | 高 | Codex | daemon session API 前端封装 | `src/api.ts` 新增 `sessionOpenDaemon/write/read/close/list`，所有请求继续使用 Bearer token，并写入 `source: "desktop"` |
+| S7-2 | ✅ 已完成 | 高 | Codex | SessionPanel daemon registry 列表 | `SessionPanel` 优先轮询 daemon `/sessions`，显示 daemon sessions；daemon 不可用时回退 Tauri 本地 `session_list` |
+| S7-3 | ✅ 已完成 | 高 | Codex | 接管已有 session | session 列表支持 Attach；接管后可 read/write/close 原 daemon session，并保留本地 fallback session 操作 |
+| S7-4 | ✅ 已完成 | 中 | Codex | UI 状态与布局 | 面板显示 registry/backend 状态、active session 元信息和来源标识；按钮尺寸稳定，窄面板不挤压文本 |
+| S7-5 | ✅ 已完成 | 高 | Codex | 验证 | `npm run build` 通过；计划和架构文档同步 |
+
 ## 近期建议
 
-S1-S6 已完成，下一步建议进入桌面 session 接管或发布收口：
+S1-S7 已完成，下一步建议进入发布收口或继续体验细化：
 
-1. 若继续完善产品体验，进入 S7：让桌面 SessionPanel 直接列出并接管 daemon-managed sessions。
-2. 若进入发布收口，打 `v0.1.1` 标签并推送到 `github`、`git233`，等待 CI assets，回填 `scripts/agent2ssh.rb` 的平台 sha256。
+1. 若进入发布收口，打 `v0.1.1` 标签并推送到 `github`、`git233`，等待 CI assets，回填 `scripts/agent2ssh.rb` 的平台 sha256。
+2. 若继续体验细化，可增加 SessionPanel 的自动 tail、只读接管模式、会话重命名和危险输入确认。
 
 ## 安全可视化后续
 
@@ -284,4 +296,4 @@ Agent2SSH 已开始从“agent 可调用 SSH 能力层”扩展为“本机 SSH 
 1. MCP session 默认路由到 local daemon registry，使 Claude Code、Codex、opencode 等 agent 打开的 PTY 能被桌面端实时观察。
 2. CLI/MCP/daemon/desktop 均具备标准 `source` 字段或 `AGENT2SSH_SOURCE` 覆盖。
 3. Live Activity 支持过滤、展开、敏感 preview 脱敏和高风险外部来源提醒。
-4. 后续重点转为桌面 SessionPanel 接管 daemon-managed sessions。
+4. SessionPanel 可列出并接管 daemon-managed sessions，支持读取、写入和关闭来自统一 registry 的 PTY。

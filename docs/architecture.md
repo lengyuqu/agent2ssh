@@ -69,7 +69,7 @@ Agent2SSH is also a local observation surface for agent-driven SSH activity. The
 
 Current live events cover daemon-managed PTY session open/write/read/close, WebSocket exec start/output/exit, approvals, audit rotation, and connection/config changes. The panel also polls recent audit records, so completed CLI/MCP execs that write to the same config directory are visible even when they did not originate from the desktop UI.
 
-MCP PTY sessions route to the local daemon registry by default when the daemon is reachable and the local token is available. If the daemon is unavailable, MCP falls back to the process-local session store so basic PTY usage still works. The remaining product boundary is desktop takeover: the Live Activity panel can observe daemon-managed MCP sessions, but the main desktop Session panel still needs to list and control those daemon sessions directly.
+MCP PTY sessions route to the local daemon registry by default when the daemon is reachable and the local token is available. If the daemon is unavailable, MCP falls back to the process-local session store so basic PTY usage still works. The desktop Session panel also connects to the daemon session registry, so daemon-managed MCP sessions can be listed, attached, read, written to, and closed from the UI.
 
 ## Safety Model
 
