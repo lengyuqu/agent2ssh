@@ -96,9 +96,10 @@ fn err(status: StatusCode, msg: impl ToString) -> (StatusCode, Json<ErrorBody>) 
 #[derive(Deserialize)] struct ExecMultiBody { hosts: Vec<String>, command: String, #[serde(default)] force: bool, timeout_secs: Option<u64>, #[serde(default)] tags: Option<Vec<String>>, #[serde(default)] strategy: Option<BatchStrategy>, #[serde(default)] reason: Option<String>, #[serde(default)] change_id: Option<String> }
 #[derive(Deserialize)] struct ExecCompareBody { hosts: Vec<String>, command: String, #[serde(default)] force: bool, timeout_secs: Option<u64>, #[serde(default)] tags: Option<Vec<String>> }
 #[derive(Deserialize)] struct SftpDirBody { host: String, path: String }
-#[derive(Deserialize)] struct SessionOpenBody { host: String }
-#[derive(Deserialize)] struct SessionWriteBody { input: String }
-#[derive(Deserialize)] struct ReadQuery { timeout_ms: Option<u64> }
+#[derive(Deserialize)] struct SessionOpenBody { host: String, #[serde(default)] source: Option<String> }
+#[derive(Deserialize)] struct SessionWriteBody { input: String, #[serde(default)] source: Option<String> }
+#[derive(Deserialize)] struct ReadQuery { timeout_ms: Option<u64>, #[serde(default)] source: Option<String> }
+#[derive(Deserialize)] struct SourceQuery { #[serde(default)] source: Option<String> }
 #[derive(Deserialize)] struct AuditQuery { host: Option<String>, risk_level: Option<RiskLevel>, exit_code: Option<i32>, since: Option<String>, until: Option<String>, limit: Option<usize>, search: Option<String>, command_pattern: Option<String>, host_env: Option<String>, host_role: Option<String>, host_owner: Option<String> }
 #[derive(Deserialize)] struct AuditExportQuery { host: Option<String>, risk_level: Option<RiskLevel>, exit_code: Option<i32>, since: Option<String>, until: Option<String>, limit: Option<usize>, search: Option<String>, command_pattern: Option<String>, host_env: Option<String>, host_role: Option<String>, host_owner: Option<String>, format: Option<String> }
 #[derive(Deserialize)] struct RiskCheckBody { command: String, #[allow(dead_code)] host: Option<String> }
@@ -463,12 +464,13 @@ async fn session_open(State(s): State<AppState>, headers: HeaderMap, Json(body):
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
     tracing::info!(host = %body.host, "session_open invoked");
+    let source = body.source.as_deref().unwrap_or("daemon");
     match session_open_core(&body.host).await {
         Ok(id) => {
             publish_event(
                 EventType::SessionOpened,
                 serde_json::json!({
-                    "source": "daemon",
+                    "source": source,
                     "host": body.host,
                     "session_id": id.to_string(),
                 }),
@@ -482,11 +484,12 @@ async fn session_write(State(s): State<AppState>, headers: HeaderMap, Path(id): 
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
     let uuid = Uuid::parse_str(&id).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
+    let source = body.source.as_deref().unwrap_or("daemon");
     session_write_core(uuid, &body.input).await.map(|_| {
         publish_event(
             EventType::SessionInput,
             serde_json::json!({
-                "source": "daemon",
+                "source": source,
                 "session_id": id,
                 "input_preview": preview_text(&body.input, 2048),
                 "input_bytes": body.input.len(),
@@ -499,12 +502,13 @@ async fn session_read(State(s): State<AppState>, headers: HeaderMap, Path(id): P
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
     let uuid = Uuid::parse_str(&id).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
+    let source = q.source.as_deref().unwrap_or("daemon");
     session_read_core(uuid, q.timeout_ms.unwrap_or(2000)).await.map(|output| {
         if !output.is_empty() {
             publish_event(
                 EventType::SessionOutput,
                 serde_json::json!({
-                    "source": "daemon",
+                    "source": source,
                     "session_id": id,
                     "output_preview": preview_text(&output, 4096),
                     "output_bytes": output.len(),
@@ -514,15 +518,16 @@ async fn session_read(State(s): State<AppState>, headers: HeaderMap, Path(id): P
         Json(OutputBody { output })
     }).map_err(|e| err(StatusCode::BAD_REQUEST, e))
 }
-async fn session_close(State(s): State<AppState>, headers: HeaderMap, Path(id): Path<String>) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
+async fn session_close(State(s): State<AppState>, headers: HeaderMap, Path(id): Path<String>, Query(q): Query<SourceQuery>) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
     let uuid = Uuid::parse_str(&id).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
+    let source = q.source.as_deref().unwrap_or("daemon");
     session_close_core(uuid).await.map(|_| {
         publish_event(
             EventType::SessionClosed,
             serde_json::json!({
-                "source": "daemon",
+                "source": source,
                 "session_id": id,
             }),
         );

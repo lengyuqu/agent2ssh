@@ -22,6 +22,7 @@ use agent2ssh::risk_config::classify_with_user_rules;
 use agent2ssh::store::{audit_path, compute_metrics_trend, TrendPeriod};
 use agent2ssh::events::subscribe_events;
 use anyhow::{anyhow, Result};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
@@ -56,6 +57,200 @@ impl From<serde_json::Error> for McpError {
     fn from(err: serde_json::Error) -> Self {
         Self::internal(err)
     }
+}
+
+#[derive(Deserialize)]
+struct DaemonIdBody {
+    id: String,
+}
+
+#[derive(Deserialize)]
+struct DaemonOutputBody {
+    output: String,
+}
+
+#[derive(Deserialize)]
+struct DaemonSessionListItem {
+    id: String,
+    host: String,
+}
+
+enum DaemonAttempt<T> {
+    Handled(T),
+    Fallback,
+}
+
+fn mcp_source() -> String {
+    std::env::var("AGENT2SSH_SOURCE")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "mcp".to_string())
+}
+
+fn local_daemon_client() -> std::result::Result<Option<(reqwest::Client, String, String)>, McpError> {
+    let (url, token) = get_daemon("localhost")
+        .map_err(|e| McpError::internal(format!("local daemon lookup failed: {e}")))?;
+    let Some(token) = token else {
+        return Ok(None);
+    };
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(McpError::internal)?;
+    Ok(Some((client, url.trim_end_matches('/').to_string(), token)))
+}
+
+fn daemon_error_body(status: reqwest::StatusCode, body: String) -> McpError {
+    McpError::internal(format!("local daemon request failed ({status}): {body}"))
+}
+
+fn can_fallback_session_error(body: &str) -> bool {
+    body.contains("unknown session")
+}
+
+async fn try_daemon_session_open(host: &str) -> std::result::Result<DaemonAttempt<Value>, McpError> {
+    let Some((client, base_url, token)) = local_daemon_client()? else {
+        return Ok(DaemonAttempt::Fallback);
+    };
+    let source = mcp_source();
+    let response = match client
+        .post(format!("{base_url}/sessions"))
+        .bearer_auth(token)
+        .json(&json!({ "host": host, "source": source }))
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(_) => return Ok(DaemonAttempt::Fallback),
+    };
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(daemon_error_body(status, body));
+    }
+    let body: DaemonIdBody = response
+        .json()
+        .await
+        .map_err(|e| McpError::internal(format!("invalid daemon session response: {e}")))?;
+    Ok(DaemonAttempt::Handled(json!({
+        "session_id": body.id,
+        "host": host,
+        "backend": "daemon",
+        "source": source,
+    })))
+}
+
+async fn try_daemon_session_write(session_id: &str, input: &str) -> std::result::Result<DaemonAttempt<Value>, McpError> {
+    let Some((client, base_url, token)) = local_daemon_client()? else {
+        return Ok(DaemonAttempt::Fallback);
+    };
+    let source = mcp_source();
+    let response = match client
+        .post(format!("{base_url}/sessions/{session_id}/write"))
+        .bearer_auth(token)
+        .json(&json!({ "input": input, "source": source }))
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(_) => return Ok(DaemonAttempt::Fallback),
+    };
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        if can_fallback_session_error(&body) {
+            return Ok(DaemonAttempt::Fallback);
+        }
+        return Err(daemon_error_body(status, body));
+    }
+    Ok(DaemonAttempt::Handled(json!({ "ok": true, "backend": "daemon", "source": source })))
+}
+
+async fn try_daemon_session_read(session_id: &str, timeout_ms: u64) -> std::result::Result<DaemonAttempt<Value>, McpError> {
+    let Some((client, base_url, token)) = local_daemon_client()? else {
+        return Ok(DaemonAttempt::Fallback);
+    };
+    let source = mcp_source();
+    let response = match client
+        .get(format!("{base_url}/sessions/{session_id}/read"))
+        .query(&[("timeout_ms", timeout_ms.to_string()), ("source", source.clone())])
+        .bearer_auth(token)
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(_) => return Ok(DaemonAttempt::Fallback),
+    };
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        if can_fallback_session_error(&body) {
+            return Ok(DaemonAttempt::Fallback);
+        }
+        return Err(daemon_error_body(status, body));
+    }
+    let body: DaemonOutputBody = response
+        .json()
+        .await
+        .map_err(|e| McpError::internal(format!("invalid daemon session output response: {e}")))?;
+    Ok(DaemonAttempt::Handled(json!({ "output": body.output, "backend": "daemon", "source": source })))
+}
+
+async fn try_daemon_session_close(session_id: &str) -> std::result::Result<DaemonAttempt<Value>, McpError> {
+    let Some((client, base_url, token)) = local_daemon_client()? else {
+        return Ok(DaemonAttempt::Fallback);
+    };
+    let source = mcp_source();
+    let response = match client
+        .delete(format!("{base_url}/sessions/{session_id}"))
+        .query(&[("source", source.clone())])
+        .bearer_auth(token)
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(_) => return Ok(DaemonAttempt::Fallback),
+    };
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        if can_fallback_session_error(&body) {
+            return Ok(DaemonAttempt::Fallback);
+        }
+        return Err(daemon_error_body(status, body));
+    }
+    Ok(DaemonAttempt::Handled(json!({ "closed": session_id, "backend": "daemon", "source": source })))
+}
+
+async fn try_daemon_session_list() -> std::result::Result<DaemonAttempt<Vec<Value>>, McpError> {
+    let Some((client, base_url, token)) = local_daemon_client()? else {
+        return Ok(DaemonAttempt::Fallback);
+    };
+    let response = match client
+        .get(format!("{base_url}/sessions"))
+        .bearer_auth(token)
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(_) => return Ok(DaemonAttempt::Fallback),
+    };
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(daemon_error_body(status, body));
+    }
+    let sessions: Vec<DaemonSessionListItem> = response
+        .json()
+        .await
+        .map_err(|e| McpError::internal(format!("invalid daemon session list response: {e}")))?;
+    Ok(DaemonAttempt::Handled(
+        sessions
+            .into_iter()
+            .map(|s| json!({ "session_id": s.id, "host": s.host, "backend": "daemon" }))
+            .collect(),
+    ))
 }
 
 #[tokio::main]
@@ -385,7 +580,7 @@ async fn handle_request(request: &Value) -> std::result::Result<Value, McpError>
                 },
                 {
                     "name": "ssh_session_list",
-                    "description": "List all open PTY sessions in this MCP server process.",
+                    "description": "List open PTY sessions. Defaults to the local daemon registry and includes MCP process-local fallback sessions when present.",
                     "inputSchema": { "type": "object", "properties": {} }
                 },
                 {
@@ -932,43 +1127,75 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
             let host = args["host"]
                 .as_str()
                 .ok_or_else(|| McpError::internal("host required"))?;
-            let id = session_open_core(host).await.map_err(McpError::from)?;
-            json!({ "session_id": id.to_string(), "host": host })
+            match try_daemon_session_open(host).await? {
+                DaemonAttempt::Handled(value) => value,
+                DaemonAttempt::Fallback => {
+                    let id = session_open_core(host).await.map_err(McpError::from)?;
+                    json!({ "session_id": id.to_string(), "host": host, "backend": "process", "source": mcp_source() })
+                }
+            }
         }
         "ssh_session_write" => {
-            let id: uuid::Uuid = args["session_id"]
+            let session_id = args["session_id"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("session_id required"))?
-                .parse()
-                .map_err(|e| McpError::internal(format!("invalid session_id: {e}")))?;
+                .ok_or_else(|| McpError::internal("session_id required"))?;
             let input = args["input"]
                 .as_str()
                 .ok_or_else(|| McpError::internal("input required"))?;
-            session_write_core(id, input).await.map_err(McpError::from)?;
-            json!({ "ok": true })
+            match try_daemon_session_write(session_id, input).await? {
+                DaemonAttempt::Handled(value) => value,
+                DaemonAttempt::Fallback => {
+                    let id: uuid::Uuid = session_id
+                        .parse()
+                        .map_err(|e| McpError::internal(format!("invalid session_id: {e}")))?;
+                    session_write_core(id, input).await.map_err(McpError::from)?;
+                    json!({ "ok": true, "backend": "process", "source": mcp_source() })
+                }
+            }
         }
         "ssh_session_read" => {
-            let id: uuid::Uuid = args["session_id"]
+            let session_id = args["session_id"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("session_id required"))?
-                .parse()
-                .map_err(|e| McpError::internal(format!("invalid session_id: {e}")))?;
+                .ok_or_else(|| McpError::internal("session_id required"))?;
             let timeout_ms = args["timeout_ms"].as_u64().unwrap_or(2000);
-            let output = session_read_core(id, timeout_ms).await.map_err(McpError::from)?;
-            json!({ "output": output })
+            match try_daemon_session_read(session_id, timeout_ms).await? {
+                DaemonAttempt::Handled(value) => value,
+                DaemonAttempt::Fallback => {
+                    let id: uuid::Uuid = session_id
+                        .parse()
+                        .map_err(|e| McpError::internal(format!("invalid session_id: {e}")))?;
+                    let output = session_read_core(id, timeout_ms).await.map_err(McpError::from)?;
+                    json!({ "output": output, "backend": "process", "source": mcp_source() })
+                }
+            }
         }
         "ssh_session_close" => {
-            let id: uuid::Uuid = args["session_id"]
+            let session_id = args["session_id"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("session_id required"))?
-                .parse()
-                .map_err(|e| McpError::internal(format!("invalid session_id: {e}")))?;
-            session_close_core(id).await.map_err(McpError::from)?;
-            json!({ "closed": id.to_string() })
+                .ok_or_else(|| McpError::internal("session_id required"))?;
+            match try_daemon_session_close(session_id).await? {
+                DaemonAttempt::Handled(value) => value,
+                DaemonAttempt::Fallback => {
+                    let id: uuid::Uuid = session_id
+                        .parse()
+                        .map_err(|e| McpError::internal(format!("invalid session_id: {e}")))?;
+                    session_close_core(id).await.map_err(McpError::from)?;
+                    json!({ "closed": id.to_string(), "backend": "process", "source": mcp_source() })
+                }
+            }
         }
         "ssh_session_list" => {
-            let sessions = session_list_core().await;
-            json!(sessions.iter().map(|(id, host)| json!({ "session_id": id.to_string(), "host": host })).collect::<Vec<_>>())
+            let mut items = match try_daemon_session_list().await? {
+                DaemonAttempt::Handled(items) => items,
+                DaemonAttempt::Fallback => Vec::new(),
+            };
+            items.extend(
+                session_list_core()
+                    .await
+                    .iter()
+                    .map(|(id, host)| json!({ "session_id": id.to_string(), "host": host, "backend": "process" })),
+            );
+            json!(items)
         }
         "ssh_forward_add" => {
             let host = args["host"]

@@ -67,6 +67,7 @@ P0-P10 已全部完成。当前基线：
 | S2 | 真实环境回归 | ✅ 已完成 | 高 | Qoder |
 | S3 | 文档与契约一致性 | ✅ 已完成 | 中 | Qoder |
 | S4 | 发布前质量门槛 | ✅ 已完成 | 高 | Qoder |
+| S5 | Agent Activity 可观测性闭环 | 🟨 进行中 | 高 | Codex |
 
 ## 已完成阶段归档
 
@@ -94,6 +95,12 @@ P0-P10 已全部完成。当前基线：
 - bug 修复优先于新功能：真实工作流中发现的认证、权限、审计、执行、安全和 UI 问题优先进入修复队列。
 - 功能必须有验收场景：新增功能需要同时给出 CLI/API/MCP 或 UI 至少一个可复现验收路径。
 - 安全默认保守：涉及批量执行、凭证、审批绕过、远程 daemon 的能力必须默认最小权限。
+
+当前下一步聚焦：
+
+- 先把 MCP PTY session 默认路由到本地 daemon session registry，让 Codex / Claude Code / opencode 通过 MCP 打开的交互会话能被桌面端 Live Agent Activity 实时观察。
+- 保留本地进程内 session fallback，避免未启动 daemon 的 MCP 用户失去基本 PTY 能力。
+- daemon session 事件携带标准 `source`，MCP 默认使用 `mcp`，并允许 `AGENT2SSH_SOURCE` 覆盖为 `codex`、`claude-code`、`opencode` 等上层来源。
 
 ## 真实测试服务器
 
@@ -238,18 +245,30 @@ P0-P10 已全部完成。当前基线：
 | S4-3 | ✅ 已完成 | 中 | Qoder | 安装校验脚本回归 | `scripts/verify-install.sh`、`scripts/prepare-sidecars.sh`、`scripts/generate-checksums.sh` 在当前版本可执行并输出预期结果 |
 | S4-4 | ✅ 已完成 | 中 | Qoder | 发布材料准备 | 更新 `CHANGELOG.md`、`docs/release-checklist.md` 和版本说明；列出已知限制和真实环境回归结果 |
 
+## S5 · Agent Activity 可观测性闭环
+
+目标：让不同 agent 入口打开的 PTY session 进入统一 daemon registry，并在桌面端 Live Agent Activity 中具备可归因、可观察、可接管的基础。
+
+| 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
+|------|------|--------|--------|------|----------|
+| S5-1 | 🟨 进行中 | 高 | Codex | MCP session 默认路由到 local daemon | `ssh_session_open/write/read/close/list` 优先使用 `127.0.0.1:7722` daemon session API；daemon 不可用时回退到 MCP 进程内 session；MCP 打开的 session 出现在 daemon `/sessions` 和 Live Activity session 事件中 |
+| S5-2 | ⬜ 待认领 | 高 | - | 标准来源字段 | CLI/MCP/daemon 支持统一 `source`，默认值按入口设置，并允许 `AGENT2SSH_SOURCE` 覆盖；audit、event payload、UI 展示保持一致 |
+| S5-3 | ⬜ 待认领 | 中 | - | Live Activity 过滤与展开 | UI 可按 source、host、session、事件类型过滤，并能展开查看 reason、change_id、exit code、duration、bounded output preview |
+| S5-4 | ⬜ 待认领 | 高 | - | 高风险非前端来源提醒 | MCP/CLI 等非桌面来源触发高风险操作时，桌面端显示前台提醒或确认入口，不放宽现有审批边界 |
+| S5-5 | ⬜ 待认领 | 高 | - | 敏感输出策略 | session/output/exec preview 对 token、password、private key、Authorization 等敏感片段做 redaction，复制或展开完整输出时有明确边界 |
+
 ## 近期建议
 
-S1-S4 已完成，下一步进入发布收口：
+S1-S4 已完成，当前先完成 S5 可观测性闭环，再进入发布收口：
 
-1. 打 `v0.1.1` 标签并推送到 `github`、`git233`。
-2. 等待 CI 产出跨平台 release assets 和 `CHECKSUMS-SHA256.txt`。
-3. 用 release assets 回填 `scripts/agent2ssh.rb` 的平台 sha256，并在 macOS / Linux / Windows 跑 `scripts/verify-install.sh`。
-4. 发布后保留 1-2 轮真实服务器 smoke；若发现问题，优先走 `0.1.2` 补丁修复，不在当前窗口追加大功能。
+1. 完成 S5-1：MCP session 默认路由到 local daemon registry，并保留进程内 fallback。
+2. 完成 S5-2：统一 CLI/MCP/daemon 的 `source` 归因，优先支持 `AGENT2SSH_SOURCE`。
+3. 补齐 Live Activity 的过滤、展开、敏感输出和高风险提醒。
+4. 再打 `v0.1.1` 标签并推送到 `github`、`git233`，等待 CI assets，回填 `scripts/agent2ssh.rb` 的平台 sha256。
 
 ## 安全可视化后续
 
-Agent2SSH 已开始从“agent 可调用 SSH 能力层”扩展为“本机 SSH 操作观察面”。当前 Live Agent Activity 面板覆盖 daemon SSE 实时事件和本地 audit 补偿；下一步建议优先完成：
+Agent2SSH 已开始从“agent 可调用 SSH 能力层”扩展为“本机 SSH 操作观察面”。当前 Live Agent Activity 面板覆盖 daemon SSE 实时事件和本地 audit 补偿；S5 将继续完成：
 
 1. MCP session 默认路由到 local daemon registry，使 Claude Code、Codex、opencode 等 agent 打开的 PTY 都能被桌面端实时接管和观察。
 2. 为 CLI/MCP 增加标准 `source` 字段或环境变量（例如 `AGENT2SSH_SOURCE=codex`），让前端区分发起方。
