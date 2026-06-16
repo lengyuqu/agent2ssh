@@ -35,7 +35,7 @@ Remote hosts
 | `src-tauri/src/types.rs` | Shared types: `HostProfile`, `ExecRequest`, `ExecResult`, `RiskLevel`, etc. |
 | `src-tauri/src/tauri_commands.rs` | Tauri IPC commands wrapping the core |
 | `src-tauri/src/bin/agent2ssh.rs` | CLI binary |
-| `src-tauri/src/bin/agent2ssh-mcp.rs` | MCP stdio server (JSON-RPC 2.0, 50 tools) |
+| `src-tauri/src/bin/agent2ssh-mcp.rs` | MCP stdio server (JSON-RPC 2.0, 51 tools) |
 | `src-tauri/src/bin/agent2ssh-daemon.rs` | Local HTTP/WebSocket daemon and browser console server |
 | `src/App.tsx` | Desktop console |
 | `src-tauri/web/console.html` | Daemon-served browser console |
@@ -61,7 +61,7 @@ Remote hosts
                                   browser console
 ```
 
-The desktop app, CLI, MCP server, and daemon share the same Rust core library. The MCP server exposes 50 tools and speaks JSON-RPC 2.0 over stdio, making it compatible with any MCP-capable agent host.
+The desktop app, CLI, MCP server, and daemon share the same Rust core library. The MCP server exposes 51 tools and speaks JSON-RPC 2.0 over stdio, making it compatible with any MCP-capable agent host.
 
 ## Local Activity Visibility
 

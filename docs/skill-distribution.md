@@ -6,7 +6,7 @@
 
 ## Skill 概述
 
-Agent2SSH 以 `agent2ssh-mcp` 二进制形式暴露 MCP stdio 服务器，将 SSH 操作能力（主机管理、命令执行、SFTP、会话、端口转发、Playbook、审计、审批、健康检查、指标和 remote daemon 等）封装为 50 个 MCP 工具，供任何支持 MCP 协议的 AI 客户端（Claude Desktop、Cursor、Codex 等）直接调用。
+Agent2SSH 以 `agent2ssh-mcp` 二进制形式暴露 MCP stdio 服务器，将 SSH 操作能力（主机管理、命令执行、SFTP、会话、端口转发、Playbook、审计、审批、健康检查、指标、execution gate 和 remote daemon 等）封装为 51 个 MCP 工具，供任何支持 MCP 协议的 AI 客户端（Claude Desktop、Cursor、Codex 等）直接调用。
 
 **工作原理**：
 
@@ -128,7 +128,7 @@ Agent2SSH 的所有组件（CLI、MCP server、daemon、Tauri 桌面应用）共
 
 ## 工具分类表
 
-以下按风险级别列出常用工具；完整 50 个工具列表以 [MCP Tools Reference](skills.md) 为准。
+以下按风险级别列出常用工具；完整 51 个工具列表以 [MCP Tools Reference](skills.md) 为准。
 
 ### 只读类（Read-only）
 

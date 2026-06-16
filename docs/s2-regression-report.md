@@ -58,13 +58,13 @@ The MCP server was tested via stdio with JSON-RPC 2.0 protocol.
 
 | Tool | Result | Notes |
 |------|--------|-------|
-| `tools/list` | Pass | **50 tools** confirmed (matching `docs/skills.md`) |
+| `tools/list` | Pass | **50 tools** confirmed at S2 time; current G1 baseline is 51 tools (matching `docs/skills.md`) |
 | `ssh_doctor` | Pass | 11 checks: ssh, ssh-keygen, config, hosts.json, daemon.token, playbooks, audit = pass |
 | `ssh_exec_multi` | Pass | 2 hosts, both exit 0, reason="S2 MCP regression", change_id="CHG-S2-M01" |
 | `ssh_playbook_run` | Pass | 3/3 steps completed, reason="S2 MCP playbook", change_id="CHG-S2-M02" |
 | `ssh_audit_export` (csv) | Pass | Valid CSV with reason/change_id columns |
 
-**Tool count verification:** The `tools/list` response contains exactly 50 tools, matching the documented count in `docs/skills.md` and the integration test `mcp_tool_list_contains_exactly_50_tools`.
+**Tool count verification:** At S2 time, the `tools/list` response contained exactly 50 tools. Current G1 baseline contains 51 tools, matching the documented count in `docs/skills.md` and the integration test `mcp_tool_list_contains_exactly_51_tools`.
 
 ### Issues Found
 

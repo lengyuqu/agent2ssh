@@ -1,4 +1,4 @@
-import { Activity, Loader2, Terminal } from "lucide-react";
+import { Activity, Loader2, PauseCircle, PlayCircle, Terminal } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import "./styles.css";
 import { api } from "./api";
@@ -16,7 +16,7 @@ import PlaybooksPanel from "./components/PlaybooksPanel";
 import SFTPPanel from "./components/SFTPPanel";
 import SessionPanel from "./components/SessionPanel";
 import SetupWizard from "./components/SetupWizard";
-import type { ApprovalRequest, AuditEntry, AuditFilter, ConnectionStatus, HostProfile } from "./types";
+import type { ApprovalRequest, AuditEntry, AuditFilter, ConnectionStatus, ExecutionGateStatus, HostProfile } from "./types";
 
 const APPROVAL_POLL_MS = 2000;
 
@@ -28,6 +28,8 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [pendingApprovals, setPendingApprovals] = useState<ApprovalRequest[]>([]);
   const [connectionStatuses, setConnectionStatuses] = useState<ConnectionStatus[]>([]);
+  const [gateStatus, setGateStatus] = useState<ExecutionGateStatus | null>(null);
+  const [gateBusy, setGateBusy] = useState(false);
   const [showWizard, setShowWizard] = useState(false);
   const [wizardDismissed, setWizardDismissed] = useState(false);
 
@@ -86,6 +88,33 @@ export default function App() {
     pollConnections(); // immediate first poll
     return () => clearInterval(id);
   }, [pollConnections]);
+
+  const pollGateStatus = useCallback(async () => {
+    const status = await api.getGateStatus();
+    setGateStatus(status);
+  }, []);
+
+  useEffect(() => {
+    const id = setInterval(pollGateStatus, 5000);
+    pollGateStatus();
+    return () => clearInterval(id);
+  }, [pollGateStatus]);
+
+  async function handleGateToggle() {
+    setError(null);
+    setGateBusy(true);
+    try {
+      const status =
+        gateStatus?.mode === "paused"
+          ? await api.resumeGate("desktop resume")
+          : await api.pauseGate("desktop emergency stop");
+      setGateStatus(status);
+    } catch (err) {
+      setError(`Failed to update execution gate: ${err}`);
+    } finally {
+      setGateBusy(false);
+    }
+  }
 
   async function handleApprove(approval: ApprovalRequest) {
     try {
@@ -226,9 +255,25 @@ export default function App() {
                 : "Add a host to start issuing SSH commands"}
             </p>
           </div>
-          <div className="status-pill">
-            <Activity size={15} />
-            Local daemon embedded
+          <div className="topbar-actions">
+            <div className={`gate-pill ${gateStatus?.mode === "paused" ? "paused" : "active"}`}>
+              <Activity size={15} />
+              {gateStatus?.mode === "paused" ? "Gate paused" : "Gate active"}
+            </div>
+            <button
+              type="button"
+              className={`gate-action ${gateStatus?.mode === "paused" ? "resume" : "pause"}`}
+              onClick={handleGateToggle}
+              disabled={gateBusy || gateStatus === null}
+              title={gateStatus?.mode === "paused" ? "Resume execution gate" : "Pause execution gate"}
+            >
+              {gateStatus?.mode === "paused" ? <PlayCircle size={16} /> : <PauseCircle size={16} />}
+              {gateStatus?.mode === "paused" ? "Resume" : "Pause"}
+            </button>
+            <div className="status-pill">
+              <Activity size={15} />
+              Local daemon embedded
+            </div>
           </div>
         </header>
 

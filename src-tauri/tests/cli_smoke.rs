@@ -113,20 +113,34 @@ async fn mcp_stdio_end_to_end_initialize_tools_and_risk() {
     drop(stdin);
 
     let init: serde_json::Value = serde_json::from_str(
-        &lines.next_line().await.unwrap().expect("missing initialize response"),
+        &lines
+            .next_line()
+            .await
+            .unwrap()
+            .expect("missing initialize response"),
     )
     .unwrap();
     assert_eq!(init["result"]["serverInfo"]["name"], "agent2ssh-mcp");
 
-    let tools: serde_json::Value =
-        serde_json::from_str(&lines.next_line().await.unwrap().expect("missing tools response"))
-            .unwrap();
+    let tools: serde_json::Value = serde_json::from_str(
+        &lines
+            .next_line()
+            .await
+            .unwrap()
+            .expect("missing tools response"),
+    )
+    .unwrap();
     let tool_count = tools["result"]["tools"].as_array().unwrap().len();
-    assert_eq!(tool_count, 50);
+    assert_eq!(tool_count, 51);
 
-    let risk: serde_json::Value =
-        serde_json::from_str(&lines.next_line().await.unwrap().expect("missing risk response"))
-            .unwrap();
+    let risk: serde_json::Value = serde_json::from_str(
+        &lines
+            .next_line()
+            .await
+            .unwrap()
+            .expect("missing risk response"),
+    )
+    .unwrap();
     assert_eq!(risk["result"]["structuredContent"]["risk_level"], "blocked");
 
     let status = child.wait().await.expect("failed waiting for MCP process");
@@ -166,10 +180,8 @@ async fn cli_host_list_json_exits_zero() {
 
 #[tokio::test]
 async fn cli_host_list_filters_by_metadata_and_tag() {
-    let config_dir = std::env::temp_dir().join(format!(
-        "agent2ssh-cli-filter-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let config_dir =
+        std::env::temp_dir().join(format!("agent2ssh-cli-filter-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&config_dir).expect("create temp config dir");
 
     let add = tokio::process::Command::new(cli_bin())
@@ -202,17 +214,8 @@ async fn cli_host_list_filters_by_metadata_and_tag() {
     let list = tokio::process::Command::new(cli_bin())
         .env("AGENT2SSH_CONFIG_DIR", &config_dir)
         .args([
-            "host",
-            "list",
-            "--env",
-            "PROD",
-            "--role",
-            "web",
-            "--owner",
-            "platform",
-            "--tag",
-            "blue",
-            "--json",
+            "host", "list", "--env", "PROD", "--role", "web", "--owner", "platform", "--tag",
+            "blue", "--json",
         ])
         .output()
         .await
@@ -611,10 +614,7 @@ fn cli_playbook_run_help_shows_reason_and_change_id() {
         .output()
         .expect("failed to run playbook run --help");
 
-    assert!(
-        output.status.success(),
-        "playbook run --help should exit 0"
-    );
+    assert!(output.status.success(), "playbook run --help should exit 0");
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     assert!(

@@ -1,6 +1,6 @@
 # Agent2SSH MCP Tools Reference
 
-Agent2SSH exposes 50 tools via the Model Context Protocol (MCP) stdio server.
+Agent2SSH exposes 51 tools via the Model Context Protocol (MCP) stdio server.
 
 ## Tool List
 
@@ -28,34 +28,35 @@ Agent2SSH exposes 50 tools via the Model Context Protocol (MCP) stdio server.
 | 20 | `ssh_forward_list` | List active port forwards |
 | 21 | `ssh_forward_remove` | Stop a port forward |
 | 22 | `ssh_risk_check` | Check risk level of a command |
-| 23 | `ssh_approval_list` | List pending approval requests |
-| 24 | `ssh_approval_respond` | Approve or reject an approval request |
-| 25 | `ssh_connection_status` | List ControlMaster connection states for all hosts |
-| 26 | `ssh_connect` | Manually establish a ControlMaster connection to a host |
-| 27 | `ssh_disconnect` | Manually close a ControlMaster connection |
-| 28 | `ssh_webhook_config` | Get or set webhook notification configuration |
-| 29 | `ssh_playbook_list` | List all configured playbooks |
-| 30 | `ssh_playbook_run` | Execute a playbook on a host with optional params, reason, and change ID |
-| 31 | `ssh_list_daemons` | List configured daemon instances with connectivity status |
-| 32 | `ssh_config_export` | Export team config (hosts without keys, risk rules, playbooks) |
-| 33 | `ssh_config_import` | Import team config from JSON |
-| 34 | `ssh_doctor` | Run diagnostic checks on SSH, config, and daemon |
-| 35 | `ssh_metrics` | Get daemon request/execution/approval counters |
-| 36 | `ssh_health_snapshot` | Collect host health data (uptime, disk, memory, load) |
-| 37 | `ssh_playbook_dry_run` | Preview playbook steps with resolved parameters |
-| 38 | `ssh_preview_exec` | Preview execution plan before running (risk, warnings) |
-| 39 | `ssh_approval_policies_list` | List all approval policy rules |
-| 40 | `ssh_approval_check` | Check if a host+command requires approval |
-| 41 | `ssh_config_import_preview` | Preview team config import diff |
-| 42 | `ssh_exec_compare` | Compare execution results across multiple hosts |
-| 43 | `ssh_daemon_diagnose` | Run diagnostic checks on a remote daemon |
-| 44 | `ssh_daemon_version_check` | Check version compatibility with a remote daemon |
-| 45 | `ssh_audit_export` | Export audit log as JSONL or CSV |
-| 46 | `ssh_daemons_view` | Unified view of all daemons with health and metrics |
-| 47 | `ssh_metrics_trend` | Compute execution trends (24h, 7d, 30d, all) |
-| 48 | `ssh_events_subscribe` | Subscribe to the real-time event stream |
-| 49 | `ssh_sync_diff` | Compare Agent2SSH hosts with ~/.ssh/config |
-| 50 | `ssh_sync_export` | Export Agent2SSH hosts to SSH config format |
+| 23 | `ssh_gate_status` | Read the daemon execution gate status |
+| 24 | `ssh_approval_list` | List pending approval requests |
+| 25 | `ssh_approval_respond` | Approve or reject an approval request |
+| 26 | `ssh_connection_status` | List ControlMaster connection states for all hosts |
+| 27 | `ssh_connect` | Manually establish a ControlMaster connection to a host |
+| 28 | `ssh_disconnect` | Manually close a ControlMaster connection |
+| 29 | `ssh_webhook_config` | Get or set webhook notification configuration |
+| 30 | `ssh_playbook_list` | List all configured playbooks |
+| 31 | `ssh_playbook_run` | Execute a playbook on a host with optional params, reason, and change ID |
+| 32 | `ssh_list_daemons` | List configured daemon instances with connectivity status |
+| 33 | `ssh_config_export` | Export team config (hosts without keys, risk rules, playbooks) |
+| 34 | `ssh_config_import` | Import team config from JSON |
+| 35 | `ssh_doctor` | Run diagnostic checks on SSH, config, and daemon |
+| 36 | `ssh_metrics` | Get daemon request/execution/approval counters |
+| 37 | `ssh_health_snapshot` | Collect host health data (uptime, disk, memory, load) |
+| 38 | `ssh_playbook_dry_run` | Preview playbook steps with resolved parameters |
+| 39 | `ssh_preview_exec` | Preview execution plan before running (risk, warnings) |
+| 40 | `ssh_approval_policies_list` | List all approval policy rules |
+| 41 | `ssh_approval_check` | Check if a host+command requires approval |
+| 42 | `ssh_config_import_preview` | Preview team config import diff |
+| 43 | `ssh_exec_compare` | Compare execution results across multiple hosts |
+| 44 | `ssh_daemon_diagnose` | Run diagnostic checks on a remote daemon |
+| 45 | `ssh_daemon_version_check` | Check version compatibility with a remote daemon |
+| 46 | `ssh_audit_export` | Export audit log as JSONL or CSV |
+| 47 | `ssh_daemons_view` | Unified view of all daemons with health and metrics |
+| 48 | `ssh_metrics_trend` | Compute execution trends (24h, 7d, 30d, all) |
+| 49 | `ssh_events_subscribe` | Subscribe to the real-time event stream |
+| 50 | `ssh_sync_diff` | Compare Agent2SSH hosts with ~/.ssh/config |
+| 51 | `ssh_sync_export` | Export Agent2SSH hosts to SSH config format |
 
 ## Risk Levels
 

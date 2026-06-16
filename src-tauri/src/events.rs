@@ -33,6 +33,8 @@ pub enum EventType {
     SessionClosed,
     AuditRotated,
     ConfigChanged,
+    GateChanged,
+    GateRejected,
 }
 
 static EVENT_BUS: OnceLock<broadcast::Sender<Agent2SSHEvent>> = OnceLock::new();
@@ -96,6 +98,8 @@ mod tests {
             EventType::SessionClosed,
             EventType::AuditRotated,
             EventType::ConfigChanged,
+            EventType::GateChanged,
+            EventType::GateRejected,
         ];
         for et in types {
             let json = serde_json::to_string(&et).unwrap();

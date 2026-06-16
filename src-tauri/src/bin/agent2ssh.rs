@@ -1,21 +1,22 @@
-use agent2ssh::remote::get_daemon;
-use agent2ssh::remote::{check_daemon_version, diagnose_daemon, get_daemons_unified_view, PROTOCOL_VERSION};
-use agent2ssh::store::{audit_path, compute_metrics_trend, restrict_file_to_owner, TrendPeriod};
-use agent2ssh::events::subscribe_events;
-use agent2ssh::{
-    add_host_core, classify_risk, collect_health_snapshot, compare_exec_results, dry_run_playbook,
-    exec_multi_core, exec_multi_with_strategy, exec_ssh_core, export_audit_csv,
-    export_audit_jsonl, export_team_config, filter_hosts, import_ssh_config_core,
-    import_team_config, list_audit_core, list_daemons_core, list_hosts_filtered_core,
-    ping_hosts_core, preview_exec, preview_exec_multi, remove_host_core,
-    run_playbook_core_with_source, sftp_download_core, sftp_ls_core, sftp_mkdir_core,
-    sftp_stat_core, sftp_upload_core, source_from_env, AuditFilter, BatchStrategy,
-    ExecComparison, ExecRequest, ForwardDirection, ForwardRule, HostFilter, HostProfile,
-    RiskLevel, SftpDownloadRequest, SftpUploadRequest, TeamConfigExport,
-};
 use agent2ssh::approval::{
     check_approval_required, list_approval_policies, load_approval_policies,
     save_approval_policies, ApprovalPolicy,
+};
+use agent2ssh::events::subscribe_events;
+use agent2ssh::remote::get_daemon;
+use agent2ssh::remote::{
+    check_daemon_version, diagnose_daemon, get_daemons_unified_view, PROTOCOL_VERSION,
+};
+use agent2ssh::store::{audit_path, compute_metrics_trend, restrict_file_to_owner, TrendPeriod};
+use agent2ssh::{
+    add_host_core, classify_risk, collect_health_snapshot, compare_exec_results, dry_run_playbook,
+    exec_multi_core, exec_multi_with_strategy, exec_ssh_core, export_audit_csv, export_audit_jsonl,
+    export_team_config, filter_hosts, import_ssh_config_core, import_team_config, list_audit_core,
+    list_daemons_core, list_hosts_filtered_core, ping_hosts_core, preview_exec, preview_exec_multi,
+    remove_host_core, run_playbook_core_with_source, sftp_download_core, sftp_ls_core,
+    sftp_mkdir_core, sftp_stat_core, sftp_upload_core, source_from_env, AuditFilter, BatchStrategy,
+    ExecComparison, ExecRequest, ExecutionGateStatus, ForwardDirection, ForwardRule, HostFilter,
+    HostProfile, RiskLevel, SftpDownloadRequest, SftpUploadRequest, TeamConfigExport,
 };
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -175,6 +176,30 @@ enum Commands {
     Daemon {
         #[command(subcommand)]
         command: DaemonCommands,
+    },
+    /// Pause non-desktop daemon execution through the global execution gate
+    Pause {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+        /// Optional reason/note stored with the gate state
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Resume daemon execution through the global execution gate
+    Resume {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+        /// Optional reason/note stored with the gate state
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Show the global execution gate status
+    Status {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Export team configuration (hosts without keys, risk rules, playbooks)
     ConfigExport {
@@ -419,6 +444,13 @@ struct SessionOpenRequest {
 #[derive(Debug, Serialize)]
 struct SessionWriteRequest {
     input: String,
+    source: String,
+}
+
+#[derive(Debug, Serialize)]
+struct GateUpdateRequest {
+    source: String,
+    reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -812,7 +844,14 @@ async fn main() -> Result<()> {
                     pause_between_batches_secs: pause_secs,
                 };
                 let batch_result = exec_multi_with_strategy(
-                    hosts, command, force, timeout_secs, tags, Some(strategy), reason, change_id,
+                    hosts,
+                    command,
+                    force,
+                    timeout_secs,
+                    tags,
+                    Some(strategy),
+                    reason,
+                    change_id,
                     Some(source_from_env("cli")),
                 )
                 .await;
@@ -996,7 +1035,10 @@ async fn main() -> Result<()> {
                     client
                         .post(format!("{base_url}/sessions/{session_id}/write"))
                         .bearer_auth(token)
-                        .json(&SessionWriteRequest { input }),
+                        .json(&SessionWriteRequest {
+                            input,
+                            source: source_from_env("cli"),
+                        }),
                 )
                 .await?;
             }
@@ -1209,7 +1251,10 @@ async fn main() -> Result<()> {
                     "jsonl" => export_audit_jsonl(&filter)?,
                     "csv" => export_audit_csv(&filter)?,
                     other => {
-                        anyhow::bail!("unsupported export format '{}', expected 'jsonl' or 'csv'", other);
+                        anyhow::bail!(
+                            "unsupported export format '{}', expected 'jsonl' or 'csv'",
+                            other
+                        );
                     }
                 };
                 if let Some(ref path) = output {
@@ -1409,7 +1454,9 @@ async fn main() -> Result<()> {
                                             "\t[version: incompatible - {}]",
                                             compat.message
                                         ));
-                                    } else if compat.remote_version.as_deref() != Some(PROTOCOL_VERSION) {
+                                    } else if compat.remote_version.as_deref()
+                                        != Some(PROTOCOL_VERSION)
+                                    {
                                         line.push_str(&format!(
                                             "\t[version: {}]",
                                             compat.remote_version.as_deref().unwrap_or("?")
@@ -1420,19 +1467,25 @@ async fn main() -> Result<()> {
                             if let Some(ref scope) = d.scope {
                                 let mut scope_parts = Vec::new();
                                 if !scope.allowed_hosts.is_empty() {
-                                    scope_parts.push(format!("hosts={}", scope.allowed_hosts.len()));
+                                    scope_parts
+                                        .push(format!("hosts={}", scope.allowed_hosts.len()));
                                 }
                                 if !scope.allowed_tags.is_empty() {
                                     scope_parts.push(format!("tags={}", scope.allowed_tags.len()));
                                 }
                                 if !scope.allowed_commands.is_empty() {
-                                    scope_parts.push(format!("cmds={}", scope.allowed_commands.len()));
+                                    scope_parts
+                                        .push(format!("cmds={}", scope.allowed_commands.len()));
                                 }
                                 if !scope.denied_commands.is_empty() {
-                                    scope_parts.push(format!("denied={}", scope.denied_commands.len()));
+                                    scope_parts
+                                        .push(format!("denied={}", scope.denied_commands.len()));
                                 }
                                 if !scope_parts.is_empty() {
-                                    line.push_str(&format!("\t[scope: {}]", scope_parts.join(", ")));
+                                    line.push_str(&format!(
+                                        "\t[scope: {}]",
+                                        scope_parts.join(", ")
+                                    ));
                                 } else {
                                     line.push_str("\t[scope: open]");
                                 }
@@ -1485,6 +1538,20 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Commands::Pause { json, reason } => {
+            let status = update_gate(daemon_alias.as_deref(), "pause", reason).await?;
+            print_gate_status(&status, json)?;
+        }
+        Commands::Resume { json, reason } => {
+            let status = update_gate(daemon_alias.as_deref(), "resume", reason).await?;
+            print_gate_status(&status, json)?;
+        }
+        Commands::Status { json } => {
+            let (client, base_url, token) = daemon_client(daemon_alias.as_deref())?;
+            let status: ExecutionGateStatus =
+                daemon_json(client.get(format!("{base_url}/gate")).bearer_auth(token)).await?;
+            print_gate_status(&status, json)?;
+        }
         Commands::ConfigExport { json } => {
             let export = export_team_config()?;
             if json {
@@ -1525,7 +1592,11 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Commands::ConfigImport { path, json, preview } => {
+        Commands::ConfigImport {
+            path,
+            json,
+            preview,
+        } => {
             let raw = std::fs::read_to_string(&path)
                 .map_err(|e| anyhow::anyhow!("failed to read '{}': {}", path, e))?;
             let export: TeamConfigExport = serde_json::from_str(&raw)
@@ -1585,7 +1656,12 @@ async fn main() -> Result<()> {
                 );
             }
         }
-        Commands::SshSync { diff, export, path, json } => {
+        Commands::SshSync {
+            diff,
+            export,
+            path,
+            json,
+        } => {
             let ssh_path = path.as_deref();
             if diff || (!diff && !export) {
                 // Default: show diff
@@ -1609,8 +1685,10 @@ async fn main() -> Result<()> {
                     if !result.conflicts.is_empty() {
                         println!("\n  Conflicts:");
                         for c in &result.conflicts {
-                            println!("    {} {}: '{}' (agent2ssh) vs '{}' (ssh config)",
-                                c.name, c.field, c.agent2ssh_value, c.ssh_config_value);
+                            println!(
+                                "    {} {}: '{}' (agent2ssh) vs '{}' (ssh config)",
+                                c.name, c.field, c.agent2ssh_value, c.ssh_config_value
+                            );
                         }
                     }
                     if !result.matching.is_empty() {
@@ -1621,13 +1699,19 @@ async fn main() -> Result<()> {
             if export {
                 let (out_path, count) = agent2ssh::export_to_ssh_config(ssh_path, None)?;
                 if json {
-                    println!("{}", serde_json::json!({ "path": out_path, "hosts_exported": count }));
+                    println!(
+                        "{}",
+                        serde_json::json!({ "path": out_path, "hosts_exported": count })
+                    );
                 } else {
                     println!("Exported {} hosts to {}", count, out_path);
                 }
             }
         }
-        Commands::Doctor { json: output_json, daemon } => {
+        Commands::Doctor {
+            json: output_json,
+            daemon,
+        } => {
             if let Some(ref alias) = daemon {
                 run_daemon_doctor(alias, output_json).await?;
             } else {
@@ -1639,8 +1723,8 @@ async fn main() -> Result<()> {
                 Some(h) if !h.is_empty() => h,
                 _ => {
                     // Collect health for ALL configured hosts
-                    let config = agent2ssh::store::load_config()
-                        .context("failed to load configuration")?;
+                    let config =
+                        agent2ssh::store::load_config().context("failed to load configuration")?;
                     config.hosts.iter().map(|h| h.name.clone()).collect()
                 }
             };
@@ -1703,10 +1787,7 @@ async fn main() -> Result<()> {
                             .min_risk
                             .map(|r| r.to_string())
                             .unwrap_or_else(|| "any".to_string());
-                        let pattern = p
-                            .command_pattern
-                            .as_deref()
-                            .unwrap_or("*");
+                        let pattern = p.command_pattern.as_deref().unwrap_or("*");
                         let action = if p.requires_approval {
                             "require"
                         } else {
@@ -1792,7 +1873,11 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-            PolicyCommands::Check { host, command, json } => {
+            PolicyCommands::Check {
+                host,
+                command,
+                json,
+            } => {
                 // Look up host tags from config
                 let host_tags: Vec<String> = list_hosts_filtered_core(&HostFilter::default())
                     .unwrap_or_default()
@@ -1849,12 +1934,7 @@ async fn main() -> Result<()> {
                             .as_ref()
                             .map(|a| a.len())
                             .unwrap_or(pb.steps.len());
-                        println!(
-                            "{}\t{} step(s)\t{}",
-                            pb.name,
-                            step_count,
-                            pb.description
-                        );
+                        println!("{}\t{} step(s)\t{}", pb.name, step_count, pb.description);
                     }
                 }
             }
@@ -2380,7 +2460,11 @@ fn print_comparison(comparison: &ExecComparison) {
             );
         }
         for diff in &comparison.stdout_comparison.diffs {
-            let marker = if diff.differs_from_first { " (differs)" } else { "" };
+            let marker = if diff.differs_from_first {
+                " (differs)"
+            } else {
+                ""
+            };
             println!("  [{}]{}", diff.host, marker);
             for line in diff.output_summary.lines().take(5) {
                 println!("    {}", line);
@@ -2393,7 +2477,11 @@ fn print_comparison(comparison: &ExecComparison) {
     } else {
         println!("  Differs across hosts.");
         for diff in &comparison.stderr_comparison.diffs {
-            let marker = if diff.differs_from_first { " (differs)" } else { "" };
+            let marker = if diff.differs_from_first {
+                " (differs)"
+            } else {
+                ""
+            };
             println!("  [{}]{}", diff.host, marker);
             for line in diff.output_summary.lines().take(5) {
                 println!("    {}", line);
@@ -2412,6 +2500,43 @@ async fn check_daemon_health() -> bool {
         Ok(resp) => resp.status().is_success(),
         Err(_) => false,
     }
+}
+
+async fn update_gate(
+    alias: Option<&str>,
+    action: &str,
+    reason: Option<String>,
+) -> Result<ExecutionGateStatus> {
+    let (client, base_url, token) = daemon_client(alias)?;
+    let status = daemon_json(
+        client
+            .post(format!("{base_url}/gate/{action}"))
+            .bearer_auth(token)
+            .json(&GateUpdateRequest {
+                source: source_from_env("cli"),
+                reason,
+            }),
+    )
+    .await?;
+    Ok(status)
+}
+
+fn print_gate_status(status: &ExecutionGateStatus, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(status)?);
+    } else {
+        println!("Execution gate: {}", status.mode);
+        if let Some(updated_at) = status.updated_at.as_ref() {
+            println!("Updated at: {}", updated_at);
+        }
+        if let Some(updated_by) = status.updated_by.as_deref() {
+            println!("Updated by: {}", updated_by);
+        }
+        if let Some(reason) = status.reason.as_deref() {
+            println!("Reason: {}", reason);
+        }
+    }
+    Ok(())
 }
 
 fn daemon_client(alias: Option<&str>) -> Result<(reqwest::Client, String, String)> {

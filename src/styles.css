@@ -93,6 +93,7 @@ select {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 16px;
 }
 
 .status-pill {
@@ -104,6 +105,63 @@ select {
   border-radius: 6px;
   padding: 9px 12px;
   color: #41515c;
+}
+
+.topbar-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.gate-pill,
+.gate-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border-radius: 6px;
+  padding: 9px 12px;
+  line-height: 1;
+}
+
+.gate-pill {
+  border: 1px solid #c7d2da;
+  background: #fff;
+  color: #41515c;
+}
+
+.gate-pill.active {
+  border-color: #a7d8c0;
+  background: #f1fbf6;
+  color: #246d4a;
+}
+
+.gate-pill.paused {
+  border-color: #ffc0c0;
+  background: #fff2f2;
+  color: #a33a3a;
+}
+
+.gate-action {
+  border: 1px solid #c7d2da;
+  background: #fff;
+  color: #41515c;
+  cursor: pointer;
+}
+
+.gate-action.pause:hover {
+  border-color: #f0a4a4;
+  color: #a33a3a;
+}
+
+.gate-action.resume:hover {
+  border-color: #89c8a8;
+  color: #246d4a;
+}
+
+.gate-action:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .grid {

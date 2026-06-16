@@ -2,7 +2,7 @@
 
 ## 概述
 
-Agent2SSH 通过 MCP (Model Context Protocol) stdio 协议暴露 **50 个工具**，使任何兼容 MCP 的 AI Agent 都能直接管理 SSH 主机、执行远程命令、传输文件、管理会话、端口转发、Playbook、审计、健康检查、指标和远程 daemon。
+Agent2SSH 通过 MCP (Model Context Protocol) stdio 协议暴露 **51 个工具**，使任何兼容 MCP 的 AI Agent 都能直接管理 SSH 主机、执行远程命令、传输文件、管理会话、端口转发、Playbook、审计、健康检查、指标和远程 daemon。
 
 MCP 服务器以 `agent2ssh-mcp` 二进制运行，通过标准输入/输出与 Agent 通信，遵循 JSON-RPC 2.0 协议，无需网络端口或 HTTP 服务。
 
@@ -36,7 +36,7 @@ MCP 服务器以 `agent2ssh-mcp` 二进制运行，通过标准输入/输出与 
 }
 ```
 
-配置完成后，Agent 将自动发现并调用所有 50 个 SSH 工具。
+配置完成后，Agent 将自动发现并调用所有 51 个 SSH 工具。
 
 ---
 
@@ -580,7 +580,7 @@ token_env = "AGENT2SSH_CI_TOKEN"
 
 ## 常用工具摘录
 
-完整 50 个工具列表以 [MCP Tools Reference](../skills.md) 为准。下表只列出最常用的基础入口。
+完整 51 个工具列表以 [MCP Tools Reference](../skills.md) 为准。下表只列出最常用的基础入口。
 
 | # | 工具名称 | 说明 |
 |---|----------|------|

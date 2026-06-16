@@ -11,7 +11,7 @@ P0-P10 已全部完成。当前基线：
 - 运维能力：SSH ControlMaster 连接池、Webhook 通知、remote daemon registry、健康检查、指标、审计轮转
 - 生态能力：SSH key 管理、团队配置导入导出、MCP 客户端模板、插件/Skill 分发文档
 - 验收结果：137 单元测试 + 56 集成测试 + 24 CLI smoke 测试 = 217 测试全绿；daemon feature 下为 142 单元测试 + 56 集成测试 + 24 CLI smoke 测试全绿
-- MCP 工具：50 个，详见 [skills.md](skills.md)
+- MCP 工具：51 个，详见 [skills.md](skills.md)
 
 ## 协作规则
 
@@ -72,6 +72,10 @@ P0-P10 已全部完成。当前基线：
 | S7 | 桌面 Session 接管 | ✅ 已完成 | 高 | Codex |
 | S8 | Session 接管体验与安全 | ✅ 已完成 | 高 | Codex |
 | S9 | 0.1.1 发布前收口 | ✅ 已完成 | 高 | Codex |
+| R | 发布与采用闭环 | ⬜ 待认领 | 高 | - |
+| G | 观察面升级为控制面 | 🟨 进行中 | 高 | Codex |
+| T | 团队化与多用户 | ⬜ 待认领 | 中 | - |
+| E | 生态与可靠性 | ⬜ 待认领 | 中 | - |
 
 ## 已完成阶段归档
 
@@ -102,8 +106,8 @@ P0-P10 已全部完成。当前基线：
 
 当前下一步聚焦：
 
-- S9 已完成 `0.1.1` 发布前本地收口：版本字段一致、CHANGELOG 合并、质量门槛通过，详见 `docs/s9-release-preflight-report.md`。
-- 下一步发布动作是打 `v0.1.1` 标签并推送，等待 CI assets 后回填 Homebrew sha256。
+- G 阶段正在把 Live Activity 从观察面升级为控制面，当前从 G1 全局急停 gate 起步。
+- 发布动作仍可并行推进：打 `v0.1.1` 标签并推送，等待 CI assets 后回填 Homebrew sha256。
 
 ## 真实测试服务器
 
@@ -116,7 +120,7 @@ P0-P10 已全部完成。当前基线：
 | 系统 | Debian，主机名 `racknerd-ef7655c` |
 | 认证方式 | 用户已提供 root 密码；明文密码保存在本地 gitignored 文件 `.agent2ssh-test.env` 的 `AGENT2SSH_TEST_PASSWORD` 中，测试时建议用它生成临时 SSH key |
 | 测试约束 | 只在 `/tmp/agent2ssh-*` 写入临时文件；测试结束必须清理临时目录和临时 `authorized_keys` 条目 |
-| 已验证能力 | SSH 登录、host add/list、risk、ping、exec、exec-multi（含 reason/change_id）、SFTP upload/download/list/stat、audit（table/jsonl/csv）、audit export、doctor、playbook list/dry-run/run（含 reason/change_id）、health-snapshot、MCP tools/list (50)、MCP ssh_exec_multi/ssh_playbook_run/ssh_audit_export/ssh_doctor、daemon /exec/exec-multi/playbooks/run/audit/audit/export/health-snapshot |
+| 已验证能力 | SSH 登录、host add/list、risk、ping、exec、exec-multi（含 reason/change_id）、SFTP upload/download/list/stat、audit（table/jsonl/csv）、audit export、doctor、playbook list/dry-run/run（含 reason/change_id）、health-snapshot、MCP tools/list (51)、MCP ssh_exec_multi/ssh_playbook_run/ssh_audit_export/ssh_doctor/ssh_gate_status、daemon /exec/exec-multi/playbooks/run/audit/audit/export/health-snapshot/gate |
 | 已知限制 | PTY session 首次读取可能先返回登录 banner/prompt，命令输出可能需要后续 read |
 
 推荐接入方式：
@@ -135,7 +139,7 @@ P0-P10 已全部完成。当前基线：
 |------|------|--------|--------|------|----------|
 | F1-1 | ✅ 已完成 | 高 | Codex | 建立真实服务器 fixture | 107.174.36.91 使用临时 key 完成 exec、ping、sftp 验证；临时 key 和远端 `/tmp` 目录已清理 |
 | F1-2 | ✅ 已完成 | 高 | Codex | 跑完整 CLI 工作流 | host add/list、risk、exec、exec-multi、sftp、audit、doctor、daemon-backed session/forward 已记录 |
-| F1-3 | ✅ 已完成 | 高 | Codex | 跑 MCP 工作流 | MCP `tools/list` 返回工具列表；`ssh_list_hosts`、`ssh_exec`、`ssh_audit`、`ssh_doctor` 在真实服务器通过；当前 S2 回归确认工具数为 50 |
+| F1-3 | ✅ 已完成 | 高 | Codex | 跑 MCP 工作流 | MCP `tools/list` 返回工具列表；`ssh_list_hosts`、`ssh_exec`、`ssh_audit`、`ssh_doctor` 在真实服务器通过；当前 G1 基线确认工具数为 51 |
 | F1-4 | ✅ 已完成 | 中 | Codex | 跑桌面端首次启动和打包验证 | `npm run tauri:build` 生成 `.app` 和 `.dmg`；macOS bundle 主入口 `agent2ssh-app` 首启 smoke 通过 |
 | F1-5 | ✅ 已完成 | 高 | Codex | 输出 bug backlog | B1-B5 已记录并修复；后续新 bug 按影响等级进入修复 |
 
@@ -223,7 +227,7 @@ P0-P10 已全部完成。当前基线：
 |------|------|--------|--------|------|----------|
 | S2-1 | ✅ 已完成 | 高 | Qoder | 真实服务器 CLI 回归 | 使用临时 key 和隔离 `AGENT2SSH_CONFIG_DIR` 跑 `host add/list`、`exec`、`exec-multi --reason --change-id`、`playbook run --reason --change-id`、`audit --format jsonl/csv`；测试结束清理远端 `/tmp/agent2ssh-*` 和临时 key |
 | S2-2 | ✅ 已完成 | 高 | Qoder | daemon HTTP 回归 | 启动本地 daemon，验证 `/exec`、`/exec-multi`、`/playbooks/run`、`/audit`、`/audit/export`、`/health-snapshot` 返回结构与 `docs/api.yaml` 一致 |
-| S2-3 | ✅ 已完成 | 高 | Qoder | MCP 回归 | 通过 stdio 调用 `tools/list`、`ssh_exec_multi`、`ssh_playbook_run`、`ssh_audit_export`、`ssh_doctor`；确认工具数为 50 且关键调用成功 |
+| S2-3 | ✅ 已完成 | 高 | Qoder | MCP 回归 | 通过 stdio 调用 `tools/list`、`ssh_exec_multi`、`ssh_playbook_run`、`ssh_audit_export`、`ssh_doctor`；S2 当时确认工具数为 50，当前 G1 基线为 51 |
 | S2-4 | ✅ 已完成 | 中 | Qoder | 回归记录输出 | 在 `docs/` 下新增或更新真实回归记录，包含命令、配置隔离方式、结果摘要、发现的问题和清理证明 |
 
 ## S3 · 文档与契约一致性
@@ -310,10 +314,11 @@ P0-P10 已全部完成。当前基线：
 
 ## 近期建议
 
-S1-S9 已完成，下一步建议进入最终发布动作或继续体验细化：
+S1-S9 已完成，0.1.1 处于发布就绪状态。长远重心已定为 **G 阶段：把观察面升级为控制面**，详见下方「长远路线图（0.1.1 之后）」。下一步并行推进：
 
-1. 若进入最终发布，打 `v0.1.1` 标签并推送到 `github`、`git233`，等待 CI assets，回填 `scripts/agent2ssh.rb` 的平台 sha256。
-2. 若继续体验细化，可增加 session 重命名、会话所有者标识、按 host/source 分组和自动重连提示。
+1. G 阶段（当前重心）：从 G1 全局急停 gate 起步，在 daemon 层强制 kill switch、限额、策略判定。
+2. R 阶段（并行，关闭反馈回路）：完成 0.1.1 发布动作并拿到首个外部用户反馈。
+3. 体验细化（穿插，低风险增量）：session 重命名、会话所有者标识、按 host/source 分组和自动重连提示。
 
 ## 安全可视化后续
 
@@ -324,3 +329,75 @@ Agent2SSH 已开始从“agent 可调用 SSH 能力层”扩展为“本机 SSH 
 3. Live Activity 支持过滤、展开、敏感 preview 脱敏和高风险外部来源提醒。
 4. SessionPanel 可列出并接管 daemon-managed sessions，支持读取、写入和关闭来自统一 registry 的 PTY。
 5. SessionPanel 支持自动 tail、只读观察和高风险 PTY 输入二次确认。
+
+## 长远路线图（0.1.1 之后）
+
+### 战略定位
+
+Agent2SSH 的护城河不是"又一个 SSH 客户端"，而是"**AI agent 在本机做 SSH 操作的观察面 + 控制面**"。S5-S8 已经把"观察面"做厚（统一 registry、source 归因、Live Activity、敏感脱敏、session 接管）。下一阶段的核心是把观察面升级为**控制面**：当多个 agent 并发操作时，人类能实时干预，而不只是事后看审计。
+
+后续不再往"通用 SSH 工具"方向铺功能（Termius / tmux / ansible 已占满该位置），而是死磕"多 agent 并发操作下的可观测、可归因、可干预"这个差异化位置。
+
+### 执行原则（在 0.1.1 之前原则基础上新增）
+
+- 采用驱动取代纯 dogfood 驱动：之前是"自己跑一遍再扩展"，现在升级为"有外部用户或真实滥用信号再扩展"。
+- 控制面（G）优先于团队化（T）：控制面是差异化能力，团队化是通用能力；先把别人没有的做厚。
+- 每个阶段先问"这能不能等到有人要"：尤其 T 阶段，没有真实多人场景前不提前造 RBAC。
+- 控制类能力必须在 daemon 层强制：kill switch、限额、策略判定不能只做在 UI/前端，否则绕过 desktop 的 agent 来源不受约束。
+
+### 阶段排序与依赖
+
+```
+S9(0.1.1 已收口)
+   ├─ R 发布与采用闭环   ← 关闭反馈回路，建议与 G 并行启动
+   └─ G 观察面→控制面    ← 当前重心，差异化核心
+          └─ T 团队化     ← 有真实多人场景后再做
+   E 生态与可靠性         ← 持续进行，穿插在 R/G/T 之间
+```
+
+## G · 观察面升级为控制面
+
+目标：当多个 agent 并发操作时，人类能在 daemon 层实时干预——暂停、限额、按策略拒绝、对异常行为告警。这是当前开发重心。
+
+| 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
+|------|------|--------|--------|------|----------|
+| G1-1 | ✅ 已完成 | 高 | Codex | 全局急停 gate（daemon 层） | daemon 维护 `execution_gate` 状态（active/paused）；paused 时所有非 `desktop` 来源的 `/exec`、`/exec-multi`、`/playbooks/run`、session write 和 WebSocket exec 被拒，HTTP 入口返回 423 并写入 audit gate 拒绝事件；`desktop` 来源仍可操作以便恢复 |
+| G1-2 | ✅ 已完成 | 高 | Codex | 急停 CLI 与桌面入口 | `agent2ssh pause` / `resume` / `status` 可切换并查询 gate；桌面端提供急停按钮和当前 gate 状态指示；MCP 暴露只读 `ssh_gate_status` |
+| G1-3 | ✅ 已完成 | 中 | Codex | 急停回归验证 | paused 状态下 daemon/MCP 非 desktop 执行被拒且 audit 落盘，resume 后恢复；新增 `docs/g1-gate-regression-report.md` |
+| G2-1 | ⬜ 待认领 | 高 | - | 速率与并发限额配置 | 配置文件定义 per-source / per-host / per-tag 的每分钟最大执行数与最大并发 session 数；缺省值保守且可覆盖 |
+| G2-2 | ⬜ 待认领 | 高 | - | 限额强制与拒绝审计 | 超限请求在 daemon 层返回 429 并写入 audit；限额计数按滑动窗口；并发 session 上限阻止新建 session |
+| G3-1 | ⬜ 待认领 | 高 | - | 策略即代码收敛 | 把分散的 risk rules + approval policy 收敛成单一可版本化 policy 文件（TOML/JSON）；保留向后兼容或提供迁移 |
+| G3-2 | ⬜ 待认领 | 中 | - | 策略校验与 dry-run | `agent2ssh policy validate` 校验语法；`agent2ssh policy test <cmd>` 对样例命令输出判定（allow/approve/block）；CI 可跑策略测试 |
+| G4-1 | ⬜ 待认领 | 中 | - | 异常行为基线检测 | 基于 audit 滑动窗口检测：某 source 频率突增、命中敏感模式、非常规时段；触发本地提醒 + 复用现有 webhook |
+| G4-2 | ⬜ 待认领 | 低 | - | 异常检测可视化 | Live Activity 标注异常事件并给出原因；可调阈值；构造异常序列可触发提醒 |
+
+## R · 发布与采用闭环
+
+目标：让产品真正能被别人装上、用起来、反馈回来。建议与 G 并行启动——在拿到第一个非本人用户的真实信号前，所有新功能都是猜测。
+
+| 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
+|------|------|--------|--------|------|----------|
+| R1 | ⬜ 待认领 | 高 | - | 跨平台桌面包真实验证 | 在 Windows / Linux 实测 sidecar 命名、PTY、`scp`/`ssh` 子进程行为；记录与 macOS 的差异和修复 |
+| R2 | ⬜ 待认领 | 高 | - | 完成 0.1.1 发布动作 | 打 `v0.1.1` tag 并推送、等待 CI assets、回填 `scripts/agent2ssh.rb` 平台 sha256、跑通 `verify-install.sh` |
+| R3 | ⬜ 待认领 | 中 | - | 外部接入剧本与反馈入口 | "陌生人 10 分钟接入 Claude Code / Codex"最短路径文档；issue 模板与可选匿名遥测开关 |
+| R4 | ⬜ 待认领 | 高 | - | 首次外部 dogfood | 1-2 个非本人用户接自己的机器；产出首轮外部 bug backlog（对标 F1） |
+
+## T · 团队化与多用户
+
+目标：从"单机个人"走向"小团队共享"。⚠️ 没有真实多人场景前不要提前做，RBAC 是纯负担。
+
+| 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
+|------|------|--------|--------|------|----------|
+| T1 | ⬜ 待认领 | 中 | - | 集中式审计聚合 | 多 daemon 的 audit 聚合到一处可查询 |
+| T2 | ⬜ 待认领 | 中 | - | 身份与 RBAC | 区分谁能 approve、谁能对哪些 host 执行；当前 token 仅单一信任级别 |
+| T3 | ⬜ 待认领 | 低 | - | 审批协作闭环 | approval 的指派、转交、SLA 超时升级 |
+
+## E · 生态与可靠性
+
+目标：持续进行，穿插在 R/G/T 之间。
+
+| 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
+|------|------|--------|--------|------|----------|
+| E1 | ⬜ 待认领 | 中 | - | 多 agent 集成验证 | 实测 Codex、opencode、Cursor 等 MCP 接入，不只 Claude Code |
+| E2 | ⬜ 待认领 | 中 | - | 可靠性与规模 | 100+ host、多 daemon 下的连接池、SSE 稳定性与性能 |
+| E3 | ⬜ 待认领 | 中 | - | 契约一致性接入 CI | 把 S3 的文档/OpenAPI/MCP 一致性检查接入 CI，杜绝漂移 |

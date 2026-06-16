@@ -7,6 +7,7 @@ import type {
   ConnectionStatus,
   DaemonSessionInfo,
   DaemonInfo,
+  ExecutionGateStatus,
   ExecMultiResult,
   ExecRequest,
   ExecResult,
@@ -218,6 +219,47 @@ export const api = {
 
   // Daemon approval polling (Fix-1)
   getDaemonToken: () => invoke<string>("get_daemon_token"),
+
+  getGateStatus: async (): Promise<ExecutionGateStatus | null> => {
+    try {
+      const token = await invoke<string>("get_daemon_token");
+      const res = await fetch(`${daemonUrl}/gate`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) return null;
+      return (await res.json()) as ExecutionGateStatus;
+    } catch {
+      return null;
+    }
+  },
+
+  pauseGate: async (reason?: string): Promise<ExecutionGateStatus> => {
+    const token = await invoke<string>("get_daemon_token");
+    const res = await fetch(`${daemonUrl}/gate/pause`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ source: "desktop", reason: reason ?? null }),
+    });
+    if (!res.ok) throw new Error(`Failed to pause execution gate: ${res.status}`);
+    return (await res.json()) as ExecutionGateStatus;
+  },
+
+  resumeGate: async (reason?: string): Promise<ExecutionGateStatus> => {
+    const token = await invoke<string>("get_daemon_token");
+    const res = await fetch(`${daemonUrl}/gate/resume`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ source: "desktop", reason: reason ?? null }),
+    });
+    if (!res.ok) throw new Error(`Failed to resume execution gate: ${res.status}`);
+    return (await res.json()) as ExecutionGateStatus;
+  },
 
   // Remote daemons
   listDaemons: () => invoke<DaemonInfo[]>("list_daemons"),

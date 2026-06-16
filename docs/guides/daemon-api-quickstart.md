@@ -44,6 +44,9 @@ AUTH="Authorization: Bearer $TOKEN"
 | POST | `/exec` | 执行命令 |
 | POST | `/exec-multi` | 多主机并发执行 |
 | GET | `/exec/stream` | WebSocket 流式执行 |
+| GET | `/gate` | 查询全局执行 gate |
+| POST | `/gate/pause` | 暂停非桌面来源执行 |
+| POST | `/gate/resume` | 恢复执行 |
 | GET | `/audit` | 查询审计日志 |
 | POST | `/sftp/upload` | 上传文件 |
 | POST | `/sftp/download` | 下载文件 |
@@ -244,6 +247,45 @@ curl -X POST -H "$AUTH" \
     "stdin": "hello world"
   }' \
   http://127.0.0.1:7722/exec
+```
+
+### Execution Gate
+
+全局 execution gate 可在紧急情况下暂停非 `desktop` 来源的 daemon 执行入口。`paused` 状态下，`/exec`、`/exec-multi`、`/playbooks/run`、session write 和 WebSocket exec 会被拒绝；HTTP 入口返回 423，并写入 `blocked` audit。
+
+查询状态：
+
+```bash
+curl -H "$AUTH" http://127.0.0.1:7722/gate
+```
+
+暂停执行：
+
+```bash
+curl -X POST -H "$AUTH" \
+  -H "Content-Type: application/json" \
+  -d '{"source":"cli","reason":"maintenance window"}' \
+  http://127.0.0.1:7722/gate/pause
+```
+
+恢复执行：
+
+```bash
+curl -X POST -H "$AUTH" \
+  -H "Content-Type: application/json" \
+  -d '{"source":"desktop","reason":"operator resumed"}' \
+  http://127.0.0.1:7722/gate/resume
+```
+
+响应示例：
+
+```json
+{
+  "mode": "paused",
+  "updated_at": "2026-06-16T10:30:00Z",
+  "updated_by": "cli",
+  "reason": "maintenance window"
+}
 ```
 
 ---
@@ -739,6 +781,8 @@ curl -N -H "$AUTH" http://127.0.0.1:7722/events/stream
 | `session_closed` | PTY session 关闭 |
 | `approval_requested` / `approval_responded` | 审批请求和响应 |
 | `audit_rotated` | 审计日志轮转 |
+| `gate_changed` | execution gate 状态切换 |
+| `gate_rejected` | execution gate 拒绝了一次非桌面来源执行 |
 
 桌面端的 Live Agent Activity 面板会订阅该事件流，并同时轮询 recent audit，用来观察 Codex、Claude Code、opencode 等 agent 通过 CLI/MCP/daemon 发起的 SSH 操作。
 
@@ -762,6 +806,7 @@ curl -N -H "$AUTH" http://127.0.0.1:7722/events/stream
 | 403 | 审批被拒绝 |
 | 404 | 资源未找到 |
 | 408 | 审批超时 |
+| 423 | execution gate 已暂停 |
 | 502 | 远程守护进程错误 |
 
 ## API 参考

@@ -164,13 +164,24 @@ export type AgentEventType =
   | "session_output"
   | "session_closed"
   | "audit_rotated"
-  | "config_changed";
+  | "config_changed"
+  | "gate_changed"
+  | "gate_rejected";
 
 export type AgentEvent = {
   id: string;
   event_type: AgentEventType;
   timestamp: string;
   data: Record<string, unknown>;
+};
+
+export type ExecutionGateMode = "active" | "paused";
+
+export type ExecutionGateStatus = {
+  mode: ExecutionGateMode;
+  updated_at?: string | null;
+  updated_by?: string | null;
+  reason?: string | null;
 };
 
 // Rust: approval.rs — ApprovalStatus (rename_all = "snake_case")

@@ -1,26 +1,29 @@
 #![recursion_limit = "2048"]
 
-use agent2ssh::{
-    add_host_core, classify_risk, collect_health_snapshot, compare_exec_results, compare_ssh_configs,
-    connect_host, disconnect_host, dry_run_playbook, exec_multi_core, exec_multi_with_strategy,
-    exec_ssh_core, export_audit_csv, export_audit_jsonl, export_team_config,
-    export_to_ssh_config, forward_add_core,
-    forward_list_core, forward_remove_core, import_ssh_config_core, import_team_config,
-    list_active_connections, list_audit_core, list_hosts_core, list_playbooks_core,
-    ping_hosts_core, preview_exec, preview_exec_multi, preview_team_config_import,
-    remove_host_core, run_playbook_core_with_source, session_close_core, session_list_core,
-    session_open_core, session_read_core, session_write_core, sftp_download_core, sftp_ls_core,
-    sftp_mkdir_core, sftp_stat_core, sftp_upload_core, AuditFilter, ExecRequest,
-    ForwardDirection, HostProfile, RiskLevel, SftpDownloadRequest, SftpUploadRequest,
-    TeamConfigExport,
-};
-use agent2ssh::approval::{approval_list, approval_respond, check_approval_required, list_approval_policies};
 use agent2ssh::approval::build_approval_context;
+use agent2ssh::approval::{
+    approval_list, approval_respond, check_approval_required, list_approval_policies,
+};
+use agent2ssh::events::subscribe_events;
 use agent2ssh::notify::{load_webhook_config, save_webhook_config};
-use agent2ssh::remote::{get_daemon, list_daemons_core, check_daemon_version, diagnose_daemon, get_daemons_unified_view};
+use agent2ssh::remote::{
+    check_daemon_version, diagnose_daemon, get_daemon, get_daemons_unified_view, list_daemons_core,
+};
 use agent2ssh::risk_config::classify_with_user_rules;
 use agent2ssh::store::{audit_path, compute_metrics_trend, TrendPeriod};
-use agent2ssh::events::subscribe_events;
+use agent2ssh::{
+    add_host_core, classify_risk, collect_health_snapshot, compare_exec_results,
+    compare_ssh_configs, connect_host, disconnect_host, dry_run_playbook, exec_multi_core,
+    exec_multi_with_strategy, exec_ssh_core, export_audit_csv, export_audit_jsonl,
+    export_team_config, export_to_ssh_config, forward_add_core, forward_list_core,
+    forward_remove_core, import_ssh_config_core, import_team_config, list_active_connections,
+    list_audit_core, list_hosts_core, list_playbooks_core, ping_hosts_core, preview_exec,
+    preview_exec_multi, preview_team_config_import, remove_host_core,
+    run_playbook_core_with_source, session_close_core, session_list_core, session_open_core,
+    session_read_core, session_write_core, sftp_download_core, sftp_ls_core, sftp_mkdir_core,
+    sftp_stat_core, sftp_upload_core, AuditFilter, ExecRequest, ForwardDirection, HostProfile,
+    RiskLevel, SftpDownloadRequest, SftpUploadRequest, TeamConfigExport,
+};
 use anyhow::{anyhow, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -88,7 +91,8 @@ fn mcp_source() -> String {
         .unwrap_or_else(|| "mcp".to_string())
 }
 
-fn local_daemon_client() -> std::result::Result<Option<(reqwest::Client, String, String)>, McpError> {
+fn local_daemon_client() -> std::result::Result<Option<(reqwest::Client, String, String)>, McpError>
+{
     let (url, token) = get_daemon("localhost")
         .map_err(|e| McpError::internal(format!("local daemon lookup failed: {e}")))?;
     let Some(token) = token else {
@@ -109,7 +113,9 @@ fn can_fallback_session_error(body: &str) -> bool {
     body.contains("unknown session")
 }
 
-async fn try_daemon_session_open(host: &str) -> std::result::Result<DaemonAttempt<Value>, McpError> {
+async fn try_daemon_session_open(
+    host: &str,
+) -> std::result::Result<DaemonAttempt<Value>, McpError> {
     let Some((client, base_url, token)) = local_daemon_client()? else {
         return Ok(DaemonAttempt::Fallback);
     };
@@ -141,7 +147,36 @@ async fn try_daemon_session_open(host: &str) -> std::result::Result<DaemonAttemp
     })))
 }
 
-async fn try_daemon_session_write(session_id: &str, input: &str) -> std::result::Result<DaemonAttempt<Value>, McpError> {
+async fn try_daemon_gate_status() -> std::result::Result<Value, McpError> {
+    let Some((client, base_url, token)) = local_daemon_client()? else {
+        return Ok(json!({
+            "reachable": false,
+            "mode": "unknown",
+            "error": "local daemon token not found"
+        }));
+    };
+    let response = client
+        .get(format!("{base_url}/gate"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| McpError::internal(format!("local daemon gate status failed: {e}")))?;
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(daemon_error_body(status, body));
+    }
+    let mut value: Value = serde_json::from_str(&body).map_err(McpError::internal)?;
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("reachable".into(), Value::Bool(true));
+    }
+    Ok(value)
+}
+
+async fn try_daemon_session_write(
+    session_id: &str,
+    input: &str,
+) -> std::result::Result<DaemonAttempt<Value>, McpError> {
     let Some((client, base_url, token)) = local_daemon_client()? else {
         return Ok(DaemonAttempt::Fallback);
     };
@@ -164,17 +199,25 @@ async fn try_daemon_session_write(session_id: &str, input: &str) -> std::result:
         }
         return Err(daemon_error_body(status, body));
     }
-    Ok(DaemonAttempt::Handled(json!({ "ok": true, "backend": "daemon", "source": source })))
+    Ok(DaemonAttempt::Handled(
+        json!({ "ok": true, "backend": "daemon", "source": source }),
+    ))
 }
 
-async fn try_daemon_session_read(session_id: &str, timeout_ms: u64) -> std::result::Result<DaemonAttempt<Value>, McpError> {
+async fn try_daemon_session_read(
+    session_id: &str,
+    timeout_ms: u64,
+) -> std::result::Result<DaemonAttempt<Value>, McpError> {
     let Some((client, base_url, token)) = local_daemon_client()? else {
         return Ok(DaemonAttempt::Fallback);
     };
     let source = mcp_source();
     let response = match client
         .get(format!("{base_url}/sessions/{session_id}/read"))
-        .query(&[("timeout_ms", timeout_ms.to_string()), ("source", source.clone())])
+        .query(&[
+            ("timeout_ms", timeout_ms.to_string()),
+            ("source", source.clone()),
+        ])
         .bearer_auth(token)
         .send()
         .await
@@ -194,10 +237,14 @@ async fn try_daemon_session_read(session_id: &str, timeout_ms: u64) -> std::resu
         .json()
         .await
         .map_err(|e| McpError::internal(format!("invalid daemon session output response: {e}")))?;
-    Ok(DaemonAttempt::Handled(json!({ "output": body.output, "backend": "daemon", "source": source })))
+    Ok(DaemonAttempt::Handled(
+        json!({ "output": body.output, "backend": "daemon", "source": source }),
+    ))
 }
 
-async fn try_daemon_session_close(session_id: &str) -> std::result::Result<DaemonAttempt<Value>, McpError> {
+async fn try_daemon_session_close(
+    session_id: &str,
+) -> std::result::Result<DaemonAttempt<Value>, McpError> {
     let Some((client, base_url, token)) = local_daemon_client()? else {
         return Ok(DaemonAttempt::Fallback);
     };
@@ -220,7 +267,9 @@ async fn try_daemon_session_close(session_id: &str) -> std::result::Result<Daemo
         }
         return Err(daemon_error_body(status, body));
     }
-    Ok(DaemonAttempt::Handled(json!({ "closed": session_id, "backend": "daemon", "source": source })))
+    Ok(DaemonAttempt::Handled(
+        json!({ "closed": session_id, "backend": "daemon", "source": source }),
+    ))
 }
 
 async fn try_daemon_session_list() -> std::result::Result<DaemonAttempt<Vec<Value>>, McpError> {
@@ -627,6 +676,11 @@ async fn handle_request(request: &Value) -> std::result::Result<Value, McpError>
                     }
                 },
                 {
+                    "name": "ssh_gate_status",
+                    "description": "Read the local daemon execution gate status. When paused, non-desktop daemon execution is rejected until resumed from CLI or desktop.",
+                    "inputSchema": { "type": "object", "properties": {} }
+                },
+                {
                     "name": "ssh_approval_list",
                     "description": "List all pending and recent approval requests (for high-risk command authorization).",
                     "inputSchema": { "type": "object", "properties": {} }
@@ -902,9 +956,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
             serde_json::to_value(import_ssh_config_core(path).map_err(McpError::from)?)?
         }
         "ssh_list_hosts" => serde_json::to_value(list_hosts_core().map_err(McpError::from)?)?,
-        "ssh_list_daemons" => {
-            serde_json::to_value(list_daemons_core().map_err(McpError::from)?)?
-        }
+        "ssh_list_daemons" => serde_json::to_value(list_daemons_core().map_err(McpError::from)?)?,
         "ssh_add_host" => {
             let host: HostProfile =
                 serde_json::from_value(args).map_err(|e| McpError::internal(e))?;
@@ -962,11 +1014,14 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 if alias != "localhost" {
                     let (url, remote_token) = get_daemon(alias)
                         .map_err(|e| McpError::internal(format!("daemon lookup failed: {e}")))?;
-                    let token = remote_token
-                        .ok_or_else(|| McpError::internal(format!("no token configured for daemon '{alias}'")))?;
+                    let token = remote_token.ok_or_else(|| {
+                        McpError::internal(format!("no token configured for daemon '{alias}'"))
+                    })?;
 
                     let client = reqwest::Client::builder()
-                        .timeout(std::time::Duration::from_secs(request.timeout_secs.unwrap_or(60) + 10))
+                        .timeout(std::time::Duration::from_secs(
+                            request.timeout_secs.unwrap_or(60) + 10,
+                        ))
                         .build()
                         .map_err(|e| McpError::internal(e))?;
 
@@ -983,19 +1038,20 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                         return Err(McpError::internal(format!("remote daemon error: {body}")));
                     }
 
-                    let result: agent2ssh::types::ExecResult = resp.json().await
-                        .map_err(|e| McpError::internal(format!("invalid response from remote: {e}")))?;
+                    let result: agent2ssh::types::ExecResult = resp.json().await.map_err(|e| {
+                        McpError::internal(format!("invalid response from remote: {e}"))
+                    })?;
                     serde_json::to_value(result)?
                 } else {
-                    let result = exec_ssh_core(request).await.map_err(|e| {
-                        McpError::internal(format!("{e} (risk_level={risk})"))
-                    })?;
+                    let result = exec_ssh_core(request)
+                        .await
+                        .map_err(|e| McpError::internal(format!("{e} (risk_level={risk})")))?;
                     serde_json::to_value(result)?
                 }
             } else {
-                let result = exec_ssh_core(request).await.map_err(|e| {
-                    McpError::internal(format!("{e} (risk_level={risk})"))
-                })?;
+                let result = exec_ssh_core(request)
+                    .await
+                    .map_err(|e| McpError::internal(format!("{e} (risk_level={risk})")))?;
                 serde_json::to_value(result)?
             }
         }
@@ -1012,13 +1068,11 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 .to_string();
             let force = args["force"].as_bool().unwrap_or(false);
             let timeout_secs = args["timeout_secs"].as_u64();
-            let tags: Option<Vec<String>> = args["tags"]
-                .as_array()
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(str::to_string))
-                        .collect()
-                });
+            let tags: Option<Vec<String>> = args["tags"].as_array().map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            });
             let reason = args["reason"].as_str().map(str::to_string);
             let change_id = args["change_id"].as_str().map(str::to_string);
 
@@ -1026,10 +1080,21 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
             let strategy: Option<agent2ssh::types::BatchStrategy> = args["strategy"]
                 .as_object()
                 .map(|obj| agent2ssh::types::BatchStrategy {
-                    concurrency: obj.get("concurrency").and_then(|v| v.as_u64()).map(|v| v as usize),
-                    max_failures: obj.get("max_failures").and_then(|v| v.as_u64()).map(|v| v as usize),
-                    batch_size: obj.get("batch_size").and_then(|v| v.as_u64()).map(|v| v as usize),
-                    pause_between_batches_secs: obj.get("pause_between_batches_secs").and_then(|v| v.as_u64()),
+                    concurrency: obj
+                        .get("concurrency")
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v as usize),
+                    max_failures: obj
+                        .get("max_failures")
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v as usize),
+                    batch_size: obj
+                        .get("batch_size")
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v as usize),
+                    pause_between_batches_secs: obj
+                        .get("pause_between_batches_secs")
+                        .and_then(|v| v.as_u64()),
                 });
 
             let batch_result = exec_multi_with_strategy(
@@ -1059,13 +1124,11 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 .to_string();
             let force = args["force"].as_bool().unwrap_or(false);
             let timeout_secs = args["timeout_secs"].as_u64();
-            let tags: Option<Vec<String>> = args["tags"]
-                .as_array()
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(str::to_string))
-                        .collect()
-                });
+            let tags: Option<Vec<String>> = args["tags"].as_array().map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            });
 
             let results = exec_multi_core(
                 hosts,
@@ -1082,25 +1145,51 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
             serde_json::to_value(comparison)?
         }
         "ssh_sftp_ls" => {
-            let host = args["host"].as_str().ok_or_else(|| McpError::internal("host required"))?;
-            let path = args["path"].as_str().ok_or_else(|| McpError::internal("path required"))?;
+            let host = args["host"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("host required"))?;
+            let path = args["path"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("path required"))?;
             let timeout_secs = args["timeout_secs"].as_u64();
-            serde_json::to_value(sftp_ls_core(host, path, timeout_secs).await.map_err(McpError::from)?)?
+            serde_json::to_value(
+                sftp_ls_core(host, path, timeout_secs)
+                    .await
+                    .map_err(McpError::from)?,
+            )?
         }
         "ssh_sftp_stat" => {
-            let host = args["host"].as_str().ok_or_else(|| McpError::internal("host required"))?;
-            let path = args["path"].as_str().ok_or_else(|| McpError::internal("path required"))?;
+            let host = args["host"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("host required"))?;
+            let path = args["path"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("path required"))?;
             let timeout_secs = args["timeout_secs"].as_u64();
-            serde_json::to_value(sftp_stat_core(host, path, timeout_secs).await.map_err(McpError::from)?)?
+            serde_json::to_value(
+                sftp_stat_core(host, path, timeout_secs)
+                    .await
+                    .map_err(McpError::from)?,
+            )?
         }
         "ssh_sftp_mkdir" => {
-            let host = args["host"].as_str().ok_or_else(|| McpError::internal("host required"))?;
-            let path = args["path"].as_str().ok_or_else(|| McpError::internal("path required"))?;
+            let host = args["host"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("host required"))?;
+            let path = args["path"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("path required"))?;
             let timeout_secs = args["timeout_secs"].as_u64();
-            serde_json::to_value(sftp_mkdir_core(host, path, timeout_secs).await.map_err(McpError::from)?)?
+            serde_json::to_value(
+                sftp_mkdir_core(host, path, timeout_secs)
+                    .await
+                    .map_err(McpError::from)?,
+            )?
         }
         "ssh_audit" => {
-            let risk_level = args["risk_level"].as_str().and_then(|s| serde_json::from_value::<RiskLevel>(serde_json::Value::String(s.to_string())).ok());
+            let risk_level = args["risk_level"].as_str().and_then(|s| {
+                serde_json::from_value::<RiskLevel>(serde_json::Value::String(s.to_string())).ok()
+            });
             let filter = AuditFilter {
                 host: args["host"].as_str().map(str::to_string),
                 risk_level,
@@ -1120,7 +1209,9 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
             let format = args["format"]
                 .as_str()
                 .ok_or_else(|| McpError::internal("format required: 'jsonl' or 'csv'"))?;
-            let risk_level = args["risk_level"].as_str().and_then(|s| serde_json::from_value::<RiskLevel>(serde_json::Value::String(s.to_string())).ok());
+            let risk_level = args["risk_level"].as_str().and_then(|s| {
+                serde_json::from_value::<RiskLevel>(serde_json::Value::String(s.to_string())).ok()
+            });
             let filter = AuditFilter {
                 host: args["host"].as_str().map(str::to_string),
                 risk_level,
@@ -1137,7 +1228,12 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
             let exported = match format {
                 "jsonl" => export_audit_jsonl(&filter).map_err(McpError::from)?,
                 "csv" => export_audit_csv(&filter).map_err(McpError::from)?,
-                other => return Err(McpError::internal(format!("unsupported format '{}', expected 'jsonl' or 'csv'", other))),
+                other => {
+                    return Err(McpError::internal(format!(
+                        "unsupported format '{}', expected 'jsonl' or 'csv'",
+                        other
+                    )))
+                }
             };
             json!({ "format": format, "data": exported })
         }
@@ -1176,7 +1272,9 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                     let id: uuid::Uuid = session_id
                         .parse()
                         .map_err(|e| McpError::internal(format!("invalid session_id: {e}")))?;
-                    session_write_core(id, input).await.map_err(McpError::from)?;
+                    session_write_core(id, input)
+                        .await
+                        .map_err(McpError::from)?;
                     json!({ "ok": true, "backend": "process", "source": mcp_source() })
                 }
             }
@@ -1192,7 +1290,9 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                     let id: uuid::Uuid = session_id
                         .parse()
                         .map_err(|e| McpError::internal(format!("invalid session_id: {e}")))?;
-                    let output = session_read_core(id, timeout_ms).await.map_err(McpError::from)?;
+                    let output = session_read_core(id, timeout_ms)
+                        .await
+                        .map_err(McpError::from)?;
                     json!({ "output": output, "backend": "process", "source": mcp_source() })
                 }
             }
@@ -1235,21 +1335,21 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
             };
             let bind_port = args["bind_port"]
                 .as_u64()
-                .ok_or_else(|| McpError::internal("bind_port required"))? as u16;
+                .ok_or_else(|| McpError::internal("bind_port required"))?
+                as u16;
             let target_host = args["target_host"]
                 .as_str()
                 .ok_or_else(|| McpError::internal("target_host required"))?;
             let target_port = args["target_port"]
                 .as_u64()
-                .ok_or_else(|| McpError::internal("target_port required"))? as u16;
+                .ok_or_else(|| McpError::internal("target_port required"))?
+                as u16;
             let rule = forward_add_core(host, direction, bind_port, target_host, target_port)
                 .await
                 .map_err(McpError::from)?;
             serde_json::to_value(rule)?
         }
-        "ssh_forward_list" => {
-            serde_json::to_value(forward_list_core().await)?
-        }
+        "ssh_forward_list" => serde_json::to_value(forward_list_core().await)?,
         "ssh_forward_remove" => {
             let id: uuid::Uuid = args["forward_id"]
                 .as_str()
@@ -1271,13 +1371,16 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                     (RiskLevel::High, RiskLevel::Blocked) => RiskLevel::Blocked,
                     (ur, _) => *ur,
                 }
-            } else { base };
+            } else {
+                base
+            };
             json!({
                 "command": command,
                 "risk_level": final_risk,
                 "matched_user_rule": user_risk.is_some(),
             })
         }
+        "ssh_gate_status" => try_daemon_gate_status().await?,
         "ssh_approval_list" => {
             let approvals = approval_list().await;
             serde_json::to_value(approvals)?
@@ -1289,9 +1392,12 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
             let approved = args["approved"]
                 .as_bool()
                 .ok_or_else(|| McpError::internal("approved boolean required"))?;
-            let uuid: uuid::Uuid = id.parse()
+            let uuid: uuid::Uuid = id
+                .parse()
                 .map_err(|e| McpError::internal(format!("invalid id: {e}")))?;
-            approval_respond(uuid, approved).await.map_err(McpError::from)?;
+            approval_respond(uuid, approved)
+                .await
+                .map_err(McpError::from)?;
             json!({ "ok": true, "id": id, "approved": approved })
         }
         "ssh_playbook_list" => {
@@ -1317,9 +1423,8 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 .as_str()
                 .ok_or_else(|| McpError::internal("host required"))?;
             let force = args["force"].as_bool().unwrap_or(false);
-            let params_map: Option<HashMap<String, String>> = args["params"]
-                .as_object()
-                .map(|obj| {
+            let params_map: Option<HashMap<String, String>> =
+                args["params"].as_object().map(|obj| {
                     obj.iter()
                         .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
                         .collect()
@@ -1395,12 +1500,16 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                     if let Some(secret) = args["secret"].as_str() {
                         config.secret = Some(secret.to_string());
                     }
-                    save_webhook_config(&config)
-                        .map_err(|e| McpError::internal(format!("failed to save webhook config: {e}")))?;
+                    save_webhook_config(&config).map_err(|e| {
+                        McpError::internal(format!("failed to save webhook config: {e}"))
+                    })?;
                     serde_json::to_value(config)?
                 }
                 other => {
-                    return Err(McpError::internal(format!("unknown action '{}', expected 'get' or 'set'", other)));
+                    return Err(McpError::internal(format!(
+                        "unknown action '{}', expected 'get' or 'set'",
+                        other
+                    )));
                 }
             }
         }
@@ -1409,7 +1518,8 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
             serde_json::to_value(export)?
         }
         "ssh_config_import" => {
-            let config_value = args.get("config")
+            let config_value = args
+                .get("config")
                 .ok_or_else(|| McpError::internal("config object required"))?;
             let export: TeamConfigExport = serde_json::from_value(config_value.clone())
                 .map_err(|e| McpError::internal(format!("invalid config object: {e}")))?;
@@ -1417,7 +1527,8 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
             serde_json::to_value(result)?
         }
         "ssh_config_import_preview" => {
-            let config_value = args.get("config")
+            let config_value = args
+                .get("config")
                 .ok_or_else(|| McpError::internal("config object required"))?;
             let export: TeamConfigExport = serde_json::from_value(config_value.clone())
                 .map_err(|e| McpError::internal(format!("invalid config object: {e}")))?;
@@ -1443,8 +1554,10 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
             // hosts.json
             let hosts_path = config_dir.join("hosts.json");
             let hosts_ok = hosts_path.exists()
-                && std::fs::read_to_string(&hosts_path).ok()
-                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()).is_some();
+                && std::fs::read_to_string(&hosts_path)
+                    .ok()
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                    .is_some();
             checks.push(json!({"name": "hosts.json", "status": if hosts_path.exists() && hosts_ok {"pass"} else if hosts_path.exists() {"fail"} else {"warn"}, "detail": if !hosts_path.exists() {"not configured"} else if hosts_ok {"valid"} else {"invalid JSON"}}));
 
             // daemon.token
@@ -1453,13 +1566,20 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
-                    let mode = std::fs::metadata(&token_path).map(|m| m.permissions().mode() & 0o777).unwrap_or(0o777);
+                    let mode = std::fs::metadata(&token_path)
+                        .map(|m| m.permissions().mode() & 0o777)
+                        .unwrap_or(0o777);
                     checks.push(json!({"name": "daemon.token", "status": if mode == 0o600 {"pass"} else {"warn"}, "detail": format!("permissions 0{:o}", mode)}));
                 }
                 #[cfg(not(unix))]
-                { checks.push(json!({"name": "daemon.token", "status": "pass", "detail": "exists"})); }
+                {
+                    checks.push(
+                        json!({"name": "daemon.token", "status": "pass", "detail": "exists"}),
+                    );
+                }
             } else {
-                checks.push(json!({"name": "daemon.token", "status": "warn", "detail": "not found"}));
+                checks
+                    .push(json!({"name": "daemon.token", "status": "warn", "detail": "not found"}));
             }
 
             // daemon health
@@ -1476,7 +1596,12 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
             checks.push(json!({"name": "daemon health", "status": if daemon_ok {"pass"} else {"warn"}, "detail": if daemon_ok {"healthy"} else {"not reachable"}}));
 
             // optional config files
-            for (filename, label) in &[("risk_rules.toml","risk rules"),("playbooks.toml","playbooks"),("remotes.toml","remote daemons"),("webhook.toml","webhook config")] {
+            for (filename, label) in &[
+                ("risk_rules.toml", "risk rules"),
+                ("playbooks.toml", "playbooks"),
+                ("remotes.toml", "remote daemons"),
+                ("webhook.toml", "webhook config"),
+            ] {
                 let exists = config_dir.join(filename).exists();
                 checks.push(json!({"name": format!("{filename} ({label})"), "status": if exists {"pass"} else {"warn"}, "detail": if exists {"present"} else {"not found"}}));
             }
@@ -1505,9 +1630,14 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 .await
                 .map_err(|e| McpError::internal(format!("daemon /metrics unreachable: {e}")))?;
             if !resp.status().is_success() {
-                return Err(McpError::internal(format!("daemon returned status {}", resp.status())));
+                return Err(McpError::internal(format!(
+                    "daemon returned status {}",
+                    resp.status()
+                )));
             }
-            let metrics: Value = resp.json().await
+            let metrics: Value = resp
+                .json()
+                .await
                 .map_err(|e| McpError::internal(format!("invalid JSON from /metrics: {e}")))?;
             metrics
         }
@@ -1518,21 +1648,17 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
             let timeout_secs = args["timeout_secs"].as_u64();
 
             // Check if multi-host or single-host
-            let hosts_array: Option<Vec<String>> = args["hosts"]
-                .as_array()
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(str::to_string))
-                        .collect()
-                });
+            let hosts_array: Option<Vec<String>> = args["hosts"].as_array().map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            });
 
-            let tags: Option<Vec<String>> = args["tags"]
-                .as_array()
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(str::to_string))
-                        .collect()
-                });
+            let tags: Option<Vec<String>> = args["tags"].as_array().map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            });
 
             if let Some(hosts) = hosts_array {
                 let plan = preview_exec_multi(hosts, command, tags, timeout_secs)
@@ -1570,8 +1696,8 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 .unwrap_or_default();
 
             let risk = classify_risk(command);
-            let result = check_approval_required(host, &host_tags, command, risk)
-                .map_err(McpError::from)?;
+            let result =
+                check_approval_required(host, &host_tags, command, risk).map_err(McpError::from)?;
 
             // Build approval context for richer response
             let context = build_approval_context(host, command, "mcp").ok();
@@ -1596,13 +1722,11 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
             }
         }
         "ssh_health_snapshot" => {
-            let hosts: Option<Vec<String>> = args["hosts"]
-                .as_array()
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(str::to_string))
-                        .collect()
-                });
+            let hosts: Option<Vec<String>> = args["hosts"].as_array().map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            });
             let timeout_secs = args["timeout_secs"].as_u64();
 
             let target_hosts = match hosts {
@@ -1624,7 +1748,8 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
             let alias = args["alias"]
                 .as_str()
                 .ok_or_else(|| McpError::internal("alias required"))?;
-            let diagnostic = diagnose_daemon(alias).await
+            let diagnostic = diagnose_daemon(alias)
+                .await
                 .map_err(|e| McpError::internal(format!("diagnose_daemon failed: {e}")))?;
             serde_json::to_value(diagnostic)?
         }
@@ -1632,12 +1757,14 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
             let alias = args["alias"]
                 .as_str()
                 .ok_or_else(|| McpError::internal("alias required"))?;
-            let compat = check_daemon_version(alias).await
+            let compat = check_daemon_version(alias)
+                .await
                 .map_err(|e| McpError::internal(format!("version check failed: {e}")))?;
             serde_json::to_value(compat)?
         }
         "ssh_daemons_view" => {
-            let view = get_daemons_unified_view().await
+            let view = get_daemons_unified_view()
+                .await
                 .map_err(|e| McpError::internal(format!("unified view failed: {e}")))?;
             serde_json::to_value(view)?
         }
@@ -1648,7 +1775,12 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 "7d" | "last7d" => TrendPeriod::Last7d,
                 "30d" | "last30d" => TrendPeriod::Last30d,
                 "all" => TrendPeriod::All,
-                other => return Err(McpError::internal(format!("unknown period '{}'. Use: 24h, 7d, 30d, or all", other))),
+                other => {
+                    return Err(McpError::internal(format!(
+                        "unknown period '{}'. Use: 24h, 7d, 30d, or all",
+                        other
+                    )))
+                }
             };
             let trend = compute_metrics_trend(period)
                 .map_err(|e| McpError::internal(format!("metrics trend failed: {e}")))?;

@@ -53,7 +53,12 @@ mod http_helpers {
     }
 
     fn err(status: StatusCode, msg: impl ToString) -> (StatusCode, Json<ErrorBody>) {
-        (status, Json(ErrorBody { error: msg.to_string() }))
+        (
+            status,
+            Json(ErrorBody {
+                error: msg.to_string(),
+            }),
+        )
     }
 
     fn check_auth(
@@ -70,7 +75,9 @@ mod http_helpers {
         } else {
             Err((
                 StatusCode::UNAUTHORIZED,
-                Json(ErrorBody { error: "unauthorized".into() }),
+                Json(ErrorBody {
+                    error: "unauthorized".into(),
+                }),
             ))
         }
     }
@@ -230,10 +237,17 @@ mod http_helpers {
         Json(body): Json<PlaybookRunBody>,
     ) -> Result<Json<PlaybookRunResult>, (StatusCode, Json<ErrorBody>)> {
         check_auth(&s, &headers)?;
-        run_playbook_core(&body.playbook, &body.host, body.force, body.params.as_ref(), body.reason, body.change_id)
-            .await
-            .map(Json)
-            .map_err(|e| err(StatusCode::BAD_REQUEST, e))
+        run_playbook_core(
+            &body.playbook,
+            &body.host,
+            body.force,
+            body.params.as_ref(),
+            body.reason,
+            body.change_id,
+        )
+        .await
+        .map(Json)
+        .map_err(|e| err(StatusCode::BAD_REQUEST, e))
     }
 
     async fn dry_run_playbook_handler(
@@ -272,8 +286,7 @@ mod http_helpers {
         Json(config): Json<WebhookConfig>,
     ) -> Result<Json<WebhookConfig>, (StatusCode, Json<ErrorBody>)> {
         check_auth(&s, &headers)?;
-        save_webhook_config(&config)
-            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        save_webhook_config(&config).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
         Ok(Json(config))
     }
 
@@ -408,7 +421,10 @@ mod http_helpers {
             .route("/playbooks/run", post(run_playbook))
             .route("/playbooks/:name/dry-run", post(dry_run_playbook_handler))
             .route("/daemons", get(list_daemons))
-            .route("/webhook/config", get(get_webhook_config).put(set_webhook_config))
+            .route(
+                "/webhook/config",
+                get(get_webhook_config).put(set_webhook_config),
+            )
             .route("/exec/preview", post(exec_preview))
             .route("/approval/policies", get(list_policies).put(put_policies))
             .route("/approval/check", post(approval_check))
@@ -462,9 +478,7 @@ async fn test_approval_reject_and_list() {
     let id = approval_request("integration-host", "sudo reboot", RiskLevel::High).await;
 
     // Reject
-    approval_respond(id, false)
-        .await
-        .expect("should succeed");
+    approval_respond(id, false).await.expect("should succeed");
 
     let status = approval_poll(id).await.expect("approval should exist");
     assert_eq!(status, ApprovalStatus::Rejected);
@@ -594,9 +608,7 @@ fn auth_get(uri: &str) -> axum::http::Request<Body> {
 }
 
 /// Helper: extract JSON body from a response.
-async fn response_json<T: serde::de::DeserializeOwned>(
-    response: axum::http::Response<Body>,
-) -> T {
+async fn response_json<T: serde::de::DeserializeOwned>(response: axum::http::Response<Body>) -> T {
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     serde_json::from_slice(&bytes).unwrap()
 }
@@ -714,7 +726,11 @@ async fn http_risk_check_blocked_command() {
 
     let body = serde_json::json!({"command": "rm -rf /"});
     let response = app
-        .oneshot(auth_json_request(axum::http::Method::POST, "/risk/check", &body))
+        .oneshot(auth_json_request(
+            axum::http::Method::POST,
+            "/risk/check",
+            &body,
+        ))
         .await
         .unwrap();
 
@@ -730,7 +746,11 @@ async fn http_risk_check_high_command() {
 
     let body = serde_json::json!({"command": "sudo whoami"});
     let response = app
-        .oneshot(auth_json_request(axum::http::Method::POST, "/risk/check", &body))
+        .oneshot(auth_json_request(
+            axum::http::Method::POST,
+            "/risk/check",
+            &body,
+        ))
         .await
         .unwrap();
 
@@ -745,7 +765,11 @@ async fn http_risk_check_low_command() {
 
     let body = serde_json::json!({"command": "ls -la"});
     let response = app
-        .oneshot(auth_json_request(axum::http::Method::POST, "/risk/check", &body))
+        .oneshot(auth_json_request(
+            axum::http::Method::POST,
+            "/risk/check",
+            &body,
+        ))
         .await
         .unwrap();
 
@@ -760,7 +784,11 @@ async fn http_risk_check_medium_command() {
 
     let body = serde_json::json!({"command": "apt install nginx"});
     let response = app
-        .oneshot(auth_json_request(axum::http::Method::POST, "/risk/check", &body))
+        .oneshot(auth_json_request(
+            axum::http::Method::POST,
+            "/risk/check",
+            &body,
+        ))
         .await
         .unwrap();
 
@@ -795,10 +823,7 @@ async fn http_risk_check_requires_auth() {
 async fn http_approvals_list_returns_array() {
     let app = http_helpers::build_test_router();
 
-    let response = app
-        .oneshot(auth_get("/approvals"))
-        .await
-        .unwrap();
+    let response = app.oneshot(auth_get("/approvals")).await.unwrap();
 
     assert_eq!(response.status(), 200);
     let body: serde_json::Value = response_json(response).await;
@@ -929,14 +954,14 @@ async fn http_hosts_list_returns_valid_json_array() {
 // Part 3: MCP tool enumeration test (P4-1)
 // ============================================================================
 
-/// Meta-test: verify the MCP binary declares exactly 50 tools by parsing
+/// Meta-test: verify the MCP binary declares exactly 51 tools by parsing
 /// the source file and counting `"name":` entries in the tools/list handler.
 ///
 /// This avoids the need to run the MCP server over stdio JSON-RPC, which
 /// requires a full process lifecycle. Instead we treat the source as the
 /// canonical tool registry and assert on its structure.
 #[test]
-fn mcp_tool_list_contains_exactly_50_tools() {
+fn mcp_tool_list_contains_exactly_51_tools() {
     let source = include_str!("../src/bin/agent2ssh-mcp.rs");
 
     // Extract the tools/list handler block: everything between
@@ -979,8 +1004,8 @@ fn mcp_tool_list_contains_exactly_50_tools() {
     let tool_count = tools_block.matches("\"name\": \"ssh_").count();
 
     assert_eq!(
-        tool_count, 50,
-        "Expected exactly 50 MCP tools, found {tool_count}. \
+        tool_count, 51,
+        "Expected exactly 51 MCP tools, found {tool_count}. \
          If you added or removed a tool, update this count and the expected list below."
     );
 }
@@ -1016,6 +1041,7 @@ fn mcp_tool_list_contains_all_expected_names() {
         "ssh_forward_list",
         "ssh_forward_remove",
         "ssh_risk_check",
+        "ssh_gate_status",
         "ssh_approval_list",
         "ssh_approval_respond",
         "ssh_playbook_list",
@@ -1093,6 +1119,7 @@ fn mcp_call_tool_handler_covers_all_tools() {
         "ssh_forward_list",
         "ssh_forward_remove",
         "ssh_risk_check",
+        "ssh_gate_status",
         "ssh_approval_list",
         "ssh_approval_respond",
         "ssh_playbook_list",
@@ -1378,14 +1405,14 @@ async fn http_daemons_requires_auth() {
 async fn http_webhook_config_get_returns_config_or_default() {
     let app = http_helpers::build_test_router();
 
-    let response = app
-        .oneshot(auth_get("/webhook/config"))
-        .await
-        .unwrap();
+    let response = app.oneshot(auth_get("/webhook/config")).await.unwrap();
     assert_eq!(response.status(), 200);
 
     let body: serde_json::Value = response_json(response).await;
-    assert!(body.is_object(), "GET /webhook/config must return a JSON object");
+    assert!(
+        body.is_object(),
+        "GET /webhook/config must return a JSON object"
+    );
 
     // Default config should have an "events" field (array)
     assert!(
@@ -1421,11 +1448,7 @@ async fn http_webhook_config_put_accepts_and_stores_config() {
         .await
         .unwrap();
 
-    assert_eq!(
-        response.status(),
-        200,
-        "PUT /webhook/config should succeed"
-    );
+    assert_eq!(response.status(), 200, "PUT /webhook/config should succeed");
 
     let body: serde_json::Value = response_json(response).await;
     assert_eq!(body["url"], "https://example.com/test-hook");
@@ -1549,14 +1572,14 @@ async fn http_exec_preview_unknown_host_returns_400() {
 async fn http_approval_policies_get_returns_array() {
     let app = http_helpers::build_test_router();
 
-    let response = app
-        .oneshot(auth_get("/approval/policies"))
-        .await
-        .unwrap();
+    let response = app.oneshot(auth_get("/approval/policies")).await.unwrap();
 
     assert_eq!(response.status(), 200);
     let body: serde_json::Value = response_json(response).await;
-    assert!(body.is_array(), "GET /approval/policies must return a JSON array");
+    assert!(
+        body.is_array(),
+        "GET /approval/policies must return a JSON array"
+    );
 }
 
 #[tokio::test]
@@ -1634,10 +1657,7 @@ async fn http_approval_check_requires_auth() {
 async fn http_health_snapshot_get_returns_200() {
     let app = http_helpers::build_test_router();
 
-    let response = app
-        .oneshot(auth_get("/health-snapshot"))
-        .await
-        .unwrap();
+    let response = app.oneshot(auth_get("/health-snapshot")).await.unwrap();
 
     // Should return 200 regardless of whether a snapshot exists
     assert_eq!(response.status(), 200);
@@ -1690,7 +1710,8 @@ fn mcp_tools_match_skills_md_documentation() {
                 return None;
             }
             // Skip header and separator lines
-            if trimmed.contains("Tool") || trimmed.starts_with("|---") || trimmed.starts_with("| #") {
+            if trimmed.contains("Tool") || trimmed.starts_with("|---") || trimmed.starts_with("| #")
+            {
                 return None;
             }
             // Extract the backtick-quoted tool name (second column)
@@ -1706,27 +1727,57 @@ fn mcp_tools_match_skills_md_documentation() {
         .collect();
 
     let expected_tools = vec![
-        "ssh_list_hosts", "ssh_list_daemons", "ssh_import_config",
-        "ssh_add_host", "ssh_remove_host", "ssh_exec", "ssh_ping",
-        "ssh_exec_multi", "ssh_exec_compare", "ssh_audit", "ssh_audit_export",
-        "ssh_sftp_ls", "ssh_sftp_stat", "ssh_sftp_mkdir",
-        "ssh_sftp_upload", "ssh_sftp_download",
-        "ssh_session_open", "ssh_session_write", "ssh_session_read",
-        "ssh_session_close", "ssh_session_list",
-        "ssh_forward_add", "ssh_forward_list", "ssh_forward_remove",
+        "ssh_list_hosts",
+        "ssh_list_daemons",
+        "ssh_import_config",
+        "ssh_add_host",
+        "ssh_remove_host",
+        "ssh_exec",
+        "ssh_ping",
+        "ssh_exec_multi",
+        "ssh_exec_compare",
+        "ssh_audit",
+        "ssh_audit_export",
+        "ssh_sftp_ls",
+        "ssh_sftp_stat",
+        "ssh_sftp_mkdir",
+        "ssh_sftp_upload",
+        "ssh_sftp_download",
+        "ssh_session_open",
+        "ssh_session_write",
+        "ssh_session_read",
+        "ssh_session_close",
+        "ssh_session_list",
+        "ssh_forward_add",
+        "ssh_forward_list",
+        "ssh_forward_remove",
         "ssh_risk_check",
-        "ssh_approval_list", "ssh_approval_respond",
-        "ssh_playbook_list", "ssh_playbook_run", "ssh_playbook_dry_run",
-        "ssh_connection_status", "ssh_connect", "ssh_disconnect",
+        "ssh_gate_status",
+        "ssh_approval_list",
+        "ssh_approval_respond",
+        "ssh_playbook_list",
+        "ssh_playbook_run",
+        "ssh_playbook_dry_run",
+        "ssh_connection_status",
+        "ssh_connect",
+        "ssh_disconnect",
         "ssh_webhook_config",
-        "ssh_config_export", "ssh_config_import", "ssh_config_import_preview",
-        "ssh_doctor", "ssh_metrics", "ssh_metrics_trend",
+        "ssh_config_export",
+        "ssh_config_import",
+        "ssh_config_import_preview",
+        "ssh_doctor",
+        "ssh_metrics",
+        "ssh_metrics_trend",
         "ssh_preview_exec",
-        "ssh_approval_policies_list", "ssh_approval_check",
+        "ssh_approval_policies_list",
+        "ssh_approval_check",
         "ssh_health_snapshot",
-        "ssh_daemon_diagnose", "ssh_daemon_version_check", "ssh_daemons_view",
+        "ssh_daemon_diagnose",
+        "ssh_daemon_version_check",
+        "ssh_daemons_view",
         "ssh_events_subscribe",
-        "ssh_sync_diff", "ssh_sync_export",
+        "ssh_sync_diff",
+        "ssh_sync_export",
     ];
 
     assert_eq!(
@@ -1836,22 +1887,20 @@ fn exec_multi_batch_result_schema_matches_contract() {
     // Verify ExecMultiBatchResult serialization matches the /exec-multi
     // response schema documented in docs/api.yaml.
     let result = ExecMultiBatchResult {
-        results: vec![
-            ExecMultiResult {
+        results: vec![ExecMultiResult {
+            host: "web-1".into(),
+            result: Some(ExecResult {
                 host: "web-1".into(),
-                result: Some(ExecResult {
-                    host: "web-1".into(),
-                    command: "uptime".into(),
-                    exit_code: Some(0),
-                    stdout: "ok".into(),
-                    stderr: String::new(),
-                    duration_ms: 100,
-                    risk_level: RiskLevel::Low,
-                    truncated: false,
-                }),
-                error: None,
-            },
-        ],
+                command: "uptime".into(),
+                exit_code: Some(0),
+                stdout: "ok".into(),
+                stderr: String::new(),
+                duration_ms: 100,
+                risk_level: RiskLevel::Low,
+                truncated: false,
+            }),
+            error: None,
+        }],
         total_hosts: 1,
         successful: 1,
         failed: 0,
@@ -1863,22 +1912,56 @@ fn exec_multi_batch_result_schema_matches_contract() {
 
     let json = serde_json::to_value(&result).unwrap();
     // Verify all documented fields are present
-    assert!(json.get("results").is_some(), "response must have 'results'");
-    assert!(json.get("total_hosts").is_some(), "response must have 'total_hosts'");
-    assert!(json.get("successful").is_some(), "response must have 'successful'");
+    assert!(
+        json.get("results").is_some(),
+        "response must have 'results'"
+    );
+    assert!(
+        json.get("total_hosts").is_some(),
+        "response must have 'total_hosts'"
+    );
+    assert!(
+        json.get("successful").is_some(),
+        "response must have 'successful'"
+    );
     assert!(json.get("failed").is_some(), "response must have 'failed'");
-    assert!(json.get("skipped").is_some(), "response must have 'skipped'");
-    assert!(json.get("stopped_early").is_some(), "response must have 'stopped_early'");
-    assert!(json.get("batches_executed").is_some(), "response must have 'batches_executed'");
-    assert!(json.get("total_duration_ms").is_some(), "response must have 'total_duration_ms'");
+    assert!(
+        json.get("skipped").is_some(),
+        "response must have 'skipped'"
+    );
+    assert!(
+        json.get("stopped_early").is_some(),
+        "response must have 'stopped_early'"
+    );
+    assert!(
+        json.get("batches_executed").is_some(),
+        "response must have 'batches_executed'"
+    );
+    assert!(
+        json.get("total_duration_ms").is_some(),
+        "response must have 'total_duration_ms'"
+    );
 
     let first = &json["results"][0];
     assert!(first.get("host").is_some());
     assert!(first.get("result").is_some());
     assert!(first.get("error").is_some());
     let inner = &first["result"];
-    for field in &["host", "command", "exit_code", "stdout", "stderr", "duration_ms", "risk_level", "truncated"] {
-        assert!(inner.get(field).is_some(), "ExecResult must have '{}'", field);
+    for field in &[
+        "host",
+        "command",
+        "exit_code",
+        "stdout",
+        "stderr",
+        "duration_ms",
+        "risk_level",
+        "truncated",
+    ] {
+        assert!(
+            inner.get(field).is_some(),
+            "ExecResult must have '{}'",
+            field
+        );
     }
 }
 
@@ -1909,20 +1992,18 @@ fn audit_export_response_contract() {
     use chrono::Utc;
     use uuid::Uuid;
 
-    let entries = vec![
-        AuditEntry {
-            id: Uuid::new_v4(),
-            ts: Utc::now(),
-            host: "test".into(),
-            command: "uptime".into(),
-            exit_code: Some(0),
-            duration_ms: 100,
-            risk_level: RiskLevel::Low,
-            reason: Some("health check".into()),
-            change_id: Some("CHG-001".into()),
-            source: Some("daemon".into()),
-        },
-    ];
+    let entries = vec![AuditEntry {
+        id: Uuid::new_v4(),
+        ts: Utc::now(),
+        host: "test".into(),
+        command: "uptime".into(),
+        exit_code: Some(0),
+        duration_ms: 100,
+        risk_level: RiskLevel::Low,
+        reason: Some("health check".into()),
+        change_id: Some("CHG-001".into()),
+        source: Some("daemon".into()),
+    }];
 
     // JSONL format: each line is a valid AuditEntry JSON
     let jsonl: String = entries
