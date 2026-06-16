@@ -1,3 +1,4 @@
+pub mod anomaly;
 pub mod approval;
 pub mod connection;
 pub mod core;
@@ -24,6 +25,10 @@ pub use approval::{
     check_approval_required, list_approval_policies, load_approval_policies,
     save_approval_policies, ApprovalContext, ApprovalHistoryEntry, ApprovalPolicy,
     ApprovalPolicyFile, RiskDetails,
+};
+pub use anomaly::{
+    detect_anomalies, load_anomaly_config, publish_anomalies, AnomalyConfig, AnomalyFinding,
+    AnomalyKind, AnomalySeverity,
 };
 pub use connection::{connect_host, disconnect_host, list_active_connections};
 pub use core::{

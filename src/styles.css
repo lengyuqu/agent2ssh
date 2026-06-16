@@ -1013,6 +1013,17 @@ textarea {
   padding: 10px 12px;
 }
 
+.activity-row--anomaly {
+  border-color: #f97316;
+  background: #fff7ed;
+}
+
+.activity-severity {
+  color: #c2410c;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
 .activity-main {
   display: grid;
   gap: 7px;

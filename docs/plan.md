@@ -368,8 +368,8 @@ S9(0.1.1 已收口)
 | G2-2 | ✅ 已完成 | 高 | Codex | 限额强制与拒绝审计 | 超限请求在 daemon 层返回 429 并写入 blocked audit；限额计数按滑动窗口；并发 session 上限阻止新建 session；新增 `docs/g2-limits-regression-report.md` |
 | G3-1 | ✅ 已完成 | 高 | Codex | 策略即代码收敛 | 新增统一 `policy.toml` / `policy.json`，将 risk rules 与 approval policies 收敛到单一可版本化文件；运行时优先读取统一 policy，缺失时兼容旧 `risk_rules.toml` / `approval_policies.toml` |
 | G3-2 | ✅ 已完成 | 中 | Codex | 策略校验与 dry-run | 新增 `agent2ssh policy validate [--path]` 校验统一 policy 语法，`agent2ssh policy test <cmd> --host <host>` 输出 allow/approve/block；CLI smoke 覆盖统一 policy validate/test |
-| G4-1 | ⬜ 待认领 | 中 | - | 异常行为基线检测 | 基于 audit 滑动窗口检测：某 source 频率突增、命中敏感模式、非常规时段；触发本地提醒 + 复用现有 webhook |
-| G4-2 | ⬜ 待认领 | 低 | - | 异常检测可视化 | Live Activity 标注异常事件并给出原因；可调阈值；构造异常序列可触发提醒 |
+| G4-1 | ✅ 已完成 | 中 | Codex | 异常行为基线检测 | 新增 `anomaly.toml` 可调阈值；audit append 后按滑动窗口检测 source 频率突增、敏感命令模式和非常规时段高危操作；发布 `anomaly_detected` 事件并支持复用 webhook |
+| G4-2 | ✅ 已完成 | 低 | Codex | 异常检测可视化 | Live Activity 标注 `anomaly_detected` 事件，展示异常类型、严重度和原因；异常序列由单元测试和 CLI/MCP/daemon audit 补偿路径覆盖 |
 
 ## R · 发布与采用闭环
 

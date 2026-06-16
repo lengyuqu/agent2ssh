@@ -36,6 +36,7 @@ pub enum EventType {
     GateChanged,
     GateRejected,
     LimitRejected,
+    AnomalyDetected,
 }
 
 static EVENT_BUS: OnceLock<broadcast::Sender<Agent2SSHEvent>> = OnceLock::new();
@@ -102,6 +103,7 @@ mod tests {
             EventType::GateChanged,
             EventType::GateRejected,
             EventType::LimitRejected,
+            EventType::AnomalyDetected,
         ];
         for et in types {
             let json = serde_json::to_string(&et).unwrap();

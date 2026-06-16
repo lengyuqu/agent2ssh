@@ -167,7 +167,8 @@ export type AgentEventType =
   | "config_changed"
   | "gate_changed"
   | "gate_rejected"
-  | "limit_rejected";
+  | "limit_rejected"
+  | "anomaly_detected";
 
 export type AgentEvent = {
   id: string;

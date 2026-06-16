@@ -158,6 +158,7 @@ components:
             - gate_changed
             - gate_rejected
             - limit_rejected
+            - anomaly_detected
         timestamp:  { type: string, format: date-time }
         data:
           type: object

@@ -104,7 +104,30 @@ pub fn append_audit(
         .open(audit_path()?)
         .context("failed to open audit log")?;
     writeln!(file, "{}", serde_json::to_string(&entry)?)?;
+    detect_and_publish_audit_anomalies(&entry);
     Ok(())
+}
+
+fn detect_and_publish_audit_anomalies(entry: &AuditEntry) {
+    let Ok(config) = crate::anomaly::load_anomaly_config() else {
+        return;
+    };
+    if !config.enabled {
+        return;
+    }
+    let filter = AuditFilter {
+        since: Some(
+            (entry.ts - chrono::Duration::seconds(config.window_secs.max(1))).to_rfc3339(),
+        ),
+        until: Some(entry.ts.to_rfc3339()),
+        limit: 1000,
+        ..Default::default()
+    };
+    let Ok(entries) = list_audit_raw(&filter) else {
+        return;
+    };
+    let findings = crate::anomaly::detect_anomalies(&entries, entry, &config);
+    crate::anomaly::publish_anomalies(&findings);
 }
 
 /// Rotate audit log if it exceeds `max_size_bytes`.

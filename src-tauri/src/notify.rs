@@ -277,6 +277,7 @@ fn format_slack_message(event: &WebhookEvent) -> serde_json::Value {
         "approval_required" => "Approval Required",
         "exec_blocked" => "Command Blocked",
         "exec_completed" => "Command Completed",
+        "anomaly_detected" => "Anomaly Detected",
         other => other,
     };
 

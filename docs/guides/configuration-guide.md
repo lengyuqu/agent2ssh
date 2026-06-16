@@ -536,6 +536,7 @@ secret = "my-secret-key"
 | `approval_required` | 高风险命令需要审批时 |
 | `exec_blocked` | 命令被用户自定义规则阻止时 |
 | `exec_completed` | 命令执行完成时（无论成功或失败） |
+| `anomaly_detected` | audit 滑动窗口检测到异常行为时 |
 
 默认仅订阅 `approval_required` 事件。
 
@@ -543,7 +544,7 @@ secret = "my-secret-key"
 
 当 URL 包含 `hooks.slack.com` 时，自动使用 Slack Block Kit 格式：
 
-- 标题显示事件类型（Approval Required / Command Blocked / Command Completed）
+- 标题显示事件类型（Approval Required / Command Blocked / Command Completed / Anomaly Detected）
 - 字段显示主机名、命令、风险等级、退出码
 - `approval_required` 事件包含打开本地 Approvals 控制台的按钮；实际批准或拒绝仍通过已认证的控制台/API 完成
 
@@ -630,6 +631,49 @@ max_sessions = 2
 ```
 
 `per_minute = 0` 或 `max_sessions = 0` 表示该维度不限额。超限请求返回 HTTP 429，写入 `blocked` audit，并发布 `limit_rejected` 事件。
+
+---
+
+## anomaly.toml
+
+### 用途
+
+配置 audit 滑动窗口异常检测。每次执行写入 audit 后，Agent2SSH 会检测 source 频率突增、敏感命令模式和非常规时段高危操作；命中后发布 `anomaly_detected` SSE 事件，并可通过 webhook 订阅同名事件。
+
+### 默认行为
+
+| 配置 | 默认值 | 说明 |
+|------|--------|------|
+| `enabled` | `true` | 是否启用异常检测 |
+| `window_secs` | `300` | 滑动窗口长度 |
+| `source_burst_threshold` | `10` | 同一 source 在窗口内达到该执行数触发 |
+| `sensitive_threshold` | `1` | 敏感模式命中次数阈值 |
+| `after_hours_start` | `22` | 非常规时段起始小时，UTC |
+| `after_hours_end` | `6` | 非常规时段结束小时，UTC |
+
+### 文件格式
+
+```toml
+enabled = true
+window_secs = 300
+source_burst_threshold = 8
+sensitive_threshold = 1
+sensitive_patterns = [
+  "sudo*",
+  "rm -rf*",
+  "terraform destroy*",
+  "kubectl delete*",
+]
+after_hours_start = 22
+after_hours_end = 6
+after_hours_risks = ["high", "blocked"]
+```
+
+Webhook 需要显式订阅：
+
+```toml
+events = ["approval_required", "exec_blocked", "exec_completed", "anomaly_detected"]
+```
 
 ---
 

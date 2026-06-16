@@ -18,6 +18,9 @@ type ActivityItem = {
   riskLevel?: string;
   changeId?: string | null;
   sessionId?: string;
+  anomalyKind?: string;
+  anomalyReason?: string;
+  severity?: string;
   raw?: Record<string, unknown>;
 };
 
@@ -40,8 +43,11 @@ function eventToItem(event: AgentEvent): ActivityItem {
   const stream = asString(data.stream);
   const sessionId = asString(data.session_id);
   const source = asString(data.source) ?? "daemon";
+  const anomalyReason = asString(data.reason);
+  const anomalyKind = asString(data.kind);
+  const severity = asString(data.severity);
 
-  let detail = output ?? input;
+  let detail = anomalyReason ?? output ?? input;
   if (!detail && sessionId) detail = `session ${sessionId.slice(0, 8)}`;
   if (stream && detail) detail = `${stream}: ${detail}`;
 
@@ -57,6 +63,9 @@ function eventToItem(event: AgentEvent): ActivityItem {
     riskLevel: asString(data.risk_level),
     changeId: asString(data.change_id) ?? null,
     sessionId,
+    anomalyKind,
+    anomalyReason,
+    severity,
     raw: data,
   };
 }
@@ -92,6 +101,7 @@ function needsAttention(item: ActivityItem): boolean {
   if (item.source === "desktop") return false;
   const risk = item.riskLevel?.toLowerCase();
   if (risk === "high" || risk === "blocked") return true;
+  if (item.anomalyReason) return true;
   return item.kind.includes("approval");
 }
 
@@ -181,6 +191,9 @@ export default function LiveActivityPanel({ audit }: Props) {
         item.command,
         item.detail,
         item.riskLevel,
+        item.anomalyKind,
+        item.anomalyReason,
+        item.severity,
         item.changeId ?? undefined,
         item.sessionId,
       ]
@@ -228,6 +241,7 @@ export default function LiveActivityPanel({ audit }: Props) {
               {attentionItem.kind}
               {attentionItem.host ? ` on ${attentionItem.host}` : ""}
               {attentionItem.riskLevel ? ` (${attentionItem.riskLevel})` : ""}
+              {attentionItem.anomalyReason ? `: ${attentionItem.anomalyReason}` : ""}
             </span>
           </div>
         </div>
@@ -268,7 +282,10 @@ export default function LiveActivityPanel({ audit }: Props) {
           </div>
         )}
         {items.map((item) => (
-          <article className="activity-row" key={item.id}>
+          <article
+            className={`activity-row ${item.anomalyReason ? "activity-row--anomaly" : ""}`}
+            key={item.id}
+          >
             <div className="activity-main">
               <div className="activity-meta">
                 <button
@@ -290,6 +307,8 @@ export default function LiveActivityPanel({ audit }: Props) {
                   </span>
                 )}
                 {item.riskLevel && <span>{item.riskLevel}</span>}
+                {item.severity && <span className="activity-severity">{item.severity}</span>}
+                {item.anomalyKind && <span>{item.anomalyKind.split("_").join(" ")}</span>}
                 {item.changeId && <span>{item.changeId}</span>}
               </div>
               {item.command && <code className="activity-command">{item.command}</code>}

@@ -819,6 +819,7 @@ curl -N -H "$AUTH" http://127.0.0.1:7722/events/stream
 | `gate_changed` | execution gate 状态切换 |
 | `gate_rejected` | execution gate 拒绝了一次非桌面来源执行 |
 | `limit_rejected` | execution limits 拒绝了一次执行或 session open |
+| `anomaly_detected` | audit 滑动窗口检测到异常行为，包含 `kind`、`severity` 和 `reason` |
 
 桌面端的 Live Agent Activity 面板会订阅该事件流，并同时轮询 recent audit，用来观察 Codex、Claude Code、opencode 等 agent 通过 CLI/MCP/daemon 发起的 SSH 操作。
 
