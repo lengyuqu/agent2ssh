@@ -123,6 +123,7 @@ jobs:
 
       - name: Generate checksums
         if: github.event_name == 'release'
+        shell: bash
         run: |
           mkdir -p dist
           EXT=""
@@ -130,6 +131,12 @@ jobs:
           cp "src-tauri/target/${{ matrix.target }}/release/agent2ssh${EXT}" "dist/agent2ssh-${{ matrix.target }}${EXT}"
           cp "src-tauri/target/${{ matrix.target }}/release/agent2ssh-mcp${EXT}" "dist/agent2ssh-mcp-${{ matrix.target }}${EXT}"
           cp "src-tauri/target/${{ matrix.target }}/release/agent2ssh-daemon${EXT}" "dist/agent2ssh-daemon-${{ matrix.target }}${EXT}"
+          mkdir -p "dist/package-${{ matrix.target }}"
+          cp "src-tauri/target/${{ matrix.target }}/release/agent2ssh${EXT}" "dist/package-${{ matrix.target }}/agent2ssh${EXT}"
+          cp "src-tauri/target/${{ matrix.target }}/release/agent2ssh-mcp${EXT}" "dist/package-${{ matrix.target }}/agent2ssh-mcp${EXT}"
+          cp "src-tauri/target/${{ matrix.target }}/release/agent2ssh-daemon${EXT}" "dist/package-${{ matrix.target }}/agent2ssh-daemon${EXT}"
+          tar -czf "dist/agent2ssh-${{ matrix.target }}.tar.gz" -C "dist/package-${{ matrix.target }}" .
+          rm -rf "dist/package-${{ matrix.target }}"
           bash scripts/generate-checksums.sh dist
           mv dist/CHECKSUMS-SHA256.txt "dist/CHECKSUMS-SHA256-${{ matrix.target }}.txt"
 
@@ -141,6 +148,7 @@ jobs:
             dist/agent2ssh-${{ matrix.target }}
             dist/agent2ssh-mcp-${{ matrix.target }}
             dist/agent2ssh-daemon-${{ matrix.target }}
+            dist/agent2ssh-${{ matrix.target }}.tar.gz
             dist/CHECKSUMS-SHA256-${{ matrix.target }}.txt
 
       - name: Upload release assets (Windows)
@@ -151,6 +159,7 @@ jobs:
             dist/agent2ssh-${{ matrix.target }}.exe
             dist/agent2ssh-mcp-${{ matrix.target }}.exe
             dist/agent2ssh-daemon-${{ matrix.target }}.exe
+            dist/agent2ssh-${{ matrix.target }}.tar.gz
             dist/CHECKSUMS-SHA256-${{ matrix.target }}.txt
 
   tauri-bundle:
@@ -211,6 +220,7 @@ jobs:
         working-directory: src-tauri
 
       - name: Prepare sidecars for Tauri
+        shell: bash
         run: ./scripts/prepare-sidecars.sh ${{ matrix.target }}
 
       - name: Frontend build
