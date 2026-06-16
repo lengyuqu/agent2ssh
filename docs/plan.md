@@ -71,6 +71,7 @@ P0-P10 已全部完成。当前基线：
 | S6 | 真实会话回归 | ✅ 已完成 | 高 | Codex |
 | S7 | 桌面 Session 接管 | ✅ 已完成 | 高 | Codex |
 | S8 | Session 接管体验与安全 | ✅ 已完成 | 高 | Codex |
+| S9 | 0.1.1 发布前收口 | ✅ 已完成 | 高 | Codex |
 
 ## 已完成阶段归档
 
@@ -101,8 +102,8 @@ P0-P10 已全部完成。当前基线：
 
 当前下一步聚焦：
 
-- S8 已完成 SessionPanel 接管后的体验与安全收口：自动 tail、只读接管和危险输入确认。
-- 若进入发布收口，打 `v0.1.1` 标签，等待 CI assets，并回填 Homebrew sha256。
+- S9 已完成 `0.1.1` 发布前本地收口：版本字段一致、CHANGELOG 合并、质量门槛通过，详见 `docs/s9-release-preflight-report.md`。
+- 下一步发布动作是打 `v0.1.1` 标签并推送，等待 CI assets 后回填 Homebrew sha256。
 
 ## 真实测试服务器
 
@@ -295,11 +296,23 @@ P0-P10 已全部完成。当前基线：
 | S8-4 | ✅ 已完成 | 中 | Codex | UI 状态稳定 | Tail、Read-only、危险确认和接管按钮有稳定尺寸和可访问标签；窄面板下文本截断不挤压操作按钮 |
 | S8-5 | ✅ 已完成 | 高 | Codex | 验证 | `npm run build` 通过；Browser 渲染检查通过；`git diff --check` 通过 |
 
+## S9 · 0.1.1 发布前收口
+
+目标：在真正打 `v0.1.1` tag 前，把版本、发布说明和本地质量门槛收齐，避免 tag 推送后才发现可避免的发布问题。
+
+| 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
+|------|------|--------|--------|------|----------|
+| S9-1 | ✅ 已完成 | 高 | Codex | 版本字段一致性 | `Cargo.toml`、`package.json`、`package-lock.json`、`tauri.conf.json`、`docs/api.yaml`、`scripts/agent2ssh.rb` 均为 `0.1.1` |
+| S9-2 | ✅ 已完成 | 高 | Codex | 发布说明收口 | `CHANGELOG.md` 合并为单一 `0.1.1` 发布段，覆盖 S1-S8 主要交付 |
+| S9-3 | ✅ 已完成 | 高 | Codex | 本地质量门槛 | `npm run build`、两套 `cargo check`、两套 `cargo test`、`git diff --check` 通过 |
+| S9-4 | ✅ 已完成 | 中 | Codex | 发布前报告 | 新增 `docs/s9-release-preflight-report.md`，记录版本状态、质量门槛和剩余发布动作 |
+| S9-5 | ✅ 已完成 | 中 | Codex | tag 状态确认 | 本地 `v0.1.1` tag 尚不存在；S9 不创建 tag，留给最终发布动作 |
+
 ## 近期建议
 
-S1-S8 已完成，下一步建议进入发布收口或继续体验细化：
+S1-S9 已完成，下一步建议进入最终发布动作或继续体验细化：
 
-1. 若进入发布收口，打 `v0.1.1` 标签并推送到 `github`、`git233`，等待 CI assets，回填 `scripts/agent2ssh.rb` 的平台 sha256。
+1. 若进入最终发布，打 `v0.1.1` 标签并推送到 `github`、`git233`，等待 CI assets，回填 `scripts/agent2ssh.rb` 的平台 sha256。
 2. 若继续体验细化，可增加 session 重命名、会话所有者标识、按 host/source 分组和自动重连提示。
 
 ## 安全可视化后续
