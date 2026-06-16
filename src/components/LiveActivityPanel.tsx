@@ -88,6 +88,13 @@ function formatTime(value: string): string {
   return date.toLocaleTimeString();
 }
 
+function needsAttention(item: ActivityItem): boolean {
+  if (item.source === "desktop") return false;
+  const risk = item.riskLevel?.toLowerCase();
+  if (risk === "high" || risk === "blocked") return true;
+  return item.kind.includes("approval");
+}
+
 export default function LiveActivityPanel({ audit }: Props) {
   const [events, setEvents] = useState<AgentEvent[]>([]);
   const [recentAudit, setRecentAudit] = useState<AuditEntry[]>(audit.slice(0, 20));
@@ -182,6 +189,11 @@ export default function LiveActivityPanel({ audit }: Props) {
     });
   }, [allItems, kindFilter, search, sourceFilter]);
 
+  const attentionItem = useMemo(
+    () => allItems.find((item) => needsAttention(item)),
+    [allItems],
+  );
+
   function toggleExpanded(id: string) {
     setExpanded((prev) => {
       const next = new Set(prev);
@@ -206,6 +218,20 @@ export default function LiveActivityPanel({ audit }: Props) {
       </div>
 
       {error && <div className="error compact">{error}</div>}
+
+      {attentionItem && (
+        <div className="activity-alert">
+          <ShieldAlert size={15} />
+          <div>
+            <strong>{attentionItem.source}</strong>
+            <span>
+              {attentionItem.kind}
+              {attentionItem.host ? ` on ${attentionItem.host}` : ""}
+              {attentionItem.riskLevel ? ` (${attentionItem.riskLevel})` : ""}
+            </span>
+          </div>
+        </div>
+      )}
 
       <div className="activity-filters">
         <label className="activity-search">

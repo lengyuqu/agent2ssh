@@ -777,6 +777,33 @@ textarea {
   margin-top: 1px;
 }
 
+.activity-alert {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 11px;
+  border: 1px solid #fca5a5;
+  border-radius: 6px;
+  background: #fef2f2;
+  color: #991b1b;
+  line-height: 1.35;
+}
+
+.activity-alert svg {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.activity-alert div {
+  display: grid;
+  gap: 2px;
+}
+
+.activity-alert strong,
+.activity-alert span {
+  overflow-wrap: anywhere;
+}
+
 .activity-filters {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(120px, 0.35fr) minmax(120px, 0.35fr);
