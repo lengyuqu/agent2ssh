@@ -131,26 +131,27 @@ jobs:
           cp "src-tauri/target/${{ matrix.target }}/release/agent2ssh-mcp${EXT}" "dist/agent2ssh-mcp-${{ matrix.target }}${EXT}"
           cp "src-tauri/target/${{ matrix.target }}/release/agent2ssh-daemon${EXT}" "dist/agent2ssh-daemon-${{ matrix.target }}${EXT}"
           bash scripts/generate-checksums.sh dist
+          mv dist/CHECKSUMS-SHA256.txt "dist/CHECKSUMS-SHA256-${{ matrix.target }}.txt"
 
       - name: Upload release assets
         if: github.event_name == 'release' && matrix.os != 'windows-latest'
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            src-tauri/target/${{ matrix.target }}/release/agent2ssh
-            src-tauri/target/${{ matrix.target }}/release/agent2ssh-mcp
-            src-tauri/target/${{ matrix.target }}/release/agent2ssh-daemon
-            dist/CHECKSUMS-SHA256.txt
+            dist/agent2ssh-${{ matrix.target }}
+            dist/agent2ssh-mcp-${{ matrix.target }}
+            dist/agent2ssh-daemon-${{ matrix.target }}
+            dist/CHECKSUMS-SHA256-${{ matrix.target }}.txt
 
       - name: Upload release assets (Windows)
         if: github.event_name == 'release' && matrix.os == 'windows-latest'
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            src-tauri/target/${{ matrix.target }}/release/agent2ssh.exe
-            src-tauri/target/${{ matrix.target }}/release/agent2ssh-mcp.exe
-            src-tauri/target/${{ matrix.target }}/release/agent2ssh-daemon.exe
-            dist/CHECKSUMS-SHA256.txt
+            dist/agent2ssh-${{ matrix.target }}.exe
+            dist/agent2ssh-mcp-${{ matrix.target }}.exe
+            dist/agent2ssh-daemon-${{ matrix.target }}.exe
+            dist/CHECKSUMS-SHA256-${{ matrix.target }}.txt
 
   tauri-bundle:
     if: github.event_name == 'release'
@@ -210,16 +211,7 @@ jobs:
         working-directory: src-tauri
 
       - name: Prepare sidecars for Tauri
-        run: |
-          mkdir -p src-tauri/binaries
-          EXT=""
-          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then EXT=".exe"; fi
-          cp "src-tauri/target/${{ matrix.target }}/release/agent2ssh${EXT}" \
-             "src-tauri/binaries/agent2ssh-${{ matrix.target }}${EXT}"
-          cp "src-tauri/target/${{ matrix.target }}/release/agent2ssh-daemon${EXT}" \
-             "src-tauri/binaries/agent2ssh-daemon-${{ matrix.target }}${EXT}"
-          cp "src-tauri/target/${{ matrix.target }}/release/agent2ssh-mcp${EXT}" \
-             "src-tauri/binaries/agent2ssh-mcp-${{ matrix.target }}${EXT}"
+        run: ./scripts/prepare-sidecars.sh ${{ matrix.target }}
 
       - name: Frontend build
         run: npm run build
