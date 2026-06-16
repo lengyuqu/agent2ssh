@@ -31,6 +31,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: write
+
 jobs:
   build:
     strategy:
@@ -156,12 +159,16 @@ jobs:
         include:
           - os: macos-latest
             target: aarch64-apple-darwin
+            bundles: app,dmg
           - os: macos-latest
             target: x86_64-apple-darwin
+            bundles: app,dmg
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            bundles: appimage,deb
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            bundles: msi,nsis
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -218,7 +225,7 @@ jobs:
         run: npm run build
 
       - name: Tauri bundle
-        run: npx @tauri-apps/cli build --target ${{ matrix.target }} --bundles default
+        run: npx @tauri-apps/cli build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
