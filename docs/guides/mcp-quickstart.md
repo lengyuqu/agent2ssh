@@ -517,7 +517,7 @@ Agent2SSH 对每条命令进行风险分级，并根据分级结果决定是否�
 4. 管理员通过 API、Web 控制台或 MCP 工具批准或拒绝
 5. 批准后自动执行命令；拒绝后返回 403 错误；超时返回 408 错误
 
-**用户自定义规则：** 在 `~/.agent2ssh/risk_rules.toml` 中用 glob 模式定义额外规则，优先级高于内置分级。详见 [配置指南](./configuration-guide.md)。
+**用户自定义规则：** 推荐在 `~/.agent2ssh/policy.toml` / `policy.json` 的 `[risk.*]` 区块中定义额外规则；旧版 `risk_rules.toml` 仍兼容。详见 [配置指南](./configuration-guide.md)。
 
 ---
 

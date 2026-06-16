@@ -98,7 +98,12 @@ Local data is stored under:
 ```text
 ~/.agent2ssh/hosts.json
 ~/.agent2ssh/audit.jsonl
+~/.agent2ssh/policy.toml
 ~/.agent2ssh/risk_rules.toml
+~/.agent2ssh/approval_policies.toml
+~/.agent2ssh/execution_gate.toml
+~/.agent2ssh/execution_limits.toml
+~/.agent2ssh/anomaly.toml
 ~/.agent2ssh/playbooks.toml
 ~/.agent2ssh/remotes.toml
 ~/.agent2ssh/webhook.toml
@@ -120,7 +125,7 @@ Configure Agent2SSH as an MCP server in your agent's config:
 }
 ```
 
-See [docs/skills.md](docs/skills.md) for the full list of 50 MCP tools.
+See [docs/skills.md](docs/skills.md) for the full list of 51 MCP tools.
 
 ## Implemented Features
 
@@ -147,9 +152,10 @@ See [docs/skills.md](docs/skills.md) for the full list of 50 MCP tools.
 - Every command is classified as `low / medium / high / blocked`
 - High-risk commands require `--force` / `force: true`
 - Blocked commands are always rejected
-- User-defined risk rules in `~/.agent2ssh/risk_rules.toml`
+- Unified policy-as-code in `~/.agent2ssh/policy.toml` / `policy.json`, with compatibility for legacy `risk_rules.toml` and `approval_policies.toml`
 - Approval queue and daemon approval endpoints for high-risk commands
 - Execution audit log with risk level recorded
+- Daemon-level execution gate, execution rate/session limits, and audit-window anomaly detection
 
 ### File Transfer (SFTP)
 
@@ -169,21 +175,21 @@ See [docs/skills.md](docs/skills.md) for the full list of 50 MCP tools.
 ### Desktop And Web UI
 
 - Desktop host manager, exec panel, audit viewer, approval dialog, key manager, playbooks, tunnels, sessions, and connection status
-- Live Agent Activity panel for local visibility into daemon session activity, WebSocket exec streams, and recent audit records from CLI/MCP/daemon operations
+- Live Agent Activity panel for local visibility into daemon session activity, WebSocket exec streams, recent audit records from CLI/MCP/daemon operations, and anomaly alerts
 - Browser console served by the daemon at `/console`
 - Daemon REST API, WebSocket streaming exec endpoint, and authenticated SSE event stream
 
 ### Automation
 
-- Webhook notifications for approval, blocked execution, and completed execution events
+- Webhook notifications for approval, blocked execution, completed execution, and anomaly events
 - Reusable command playbooks from `~/.agent2ssh/playbooks.toml`
 - Remote daemon registry from `~/.agent2ssh/remotes.toml`
 - MCP tools for local and remote operation
 - Bounded event previews for session input/output and streaming exec output, suitable for local agent activity monitoring
 
-## MCP Tools (50)
+## MCP Tools (51)
 
-Agent2SSH exposes **50 MCP tools** covering host management, command execution, SFTP, persistent sessions, port forwarding, playbooks, audit, approval workflows, daemon management, and more.
+Agent2SSH exposes **51 MCP tools** covering host management, command execution, SFTP, persistent sessions, port forwarding, playbooks, audit, approval workflows, execution gate visibility, daemon management, and more.
 
 For the complete tool reference with descriptions and parameters, see [docs/skills.md](docs/skills.md).
 

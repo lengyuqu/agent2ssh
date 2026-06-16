@@ -528,7 +528,12 @@ agent2ssh audit --host web1 --limit 5 --json
   daemon.token     # 守护进程认证令牌
   daemon.pid       # 守护进程 PID
   audit.jsonl      # 执行审计日志
-  risk_rules.toml  # 用户自定义风险规则
+  policy.toml      # 统一策略文件（推荐）
+  risk_rules.toml  # 旧版用户自定义风险规则（兼容）
+  approval_policies.toml # 旧版审批策略（兼容）
+  execution_gate.toml    # 全局执行急停状态
+  execution_limits.toml  # 执行速率和 session 并发限额
+  anomaly.toml     # audit 异常检测阈值
   playbooks.toml   # Playbook 定义
   remotes.toml     # 远程守护进程配置
   webhook.toml     # Webhook 通知配置

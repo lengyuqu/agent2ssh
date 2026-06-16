@@ -6,7 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
-No unreleased changes.
+### Added
+- **Control-plane safety layer**: Added daemon-level execution gate controls, execution rate/session limits, unified policy-as-code validation, and audit-window anomaly detection.
+- **Execution gate**: Added `agent2ssh pause/resume/status`, daemon 423 rejection for paused non-desktop sources, gate audit entries, and `gate_rejected` / `gate_changed` events.
+- **Execution limits**: Added `execution_limits.toml` with per-source, per-host, and per-tag rate/session limits, plus 429 rejection auditing and `limit_rejected` events.
+- **Unified policy files**: Added `policy.toml` / `policy.json` support for colocating risk rules and approval policies, with `agent2ssh policy validate` and `agent2ssh policy test`.
+- **Anomaly detection**: Added `anomaly.toml`, source burst detection, sensitive command pattern detection, after-hours high-risk detection, `anomaly_detected` events, webhook support, and Live Activity anomaly highlighting.
+
+### Changed
+- **Policy compatibility**: Runtime policy loading now prefers unified policy files and falls back to legacy `risk_rules.toml` / `approval_policies.toml` when no unified policy exists.
+- **Documentation**: README, architecture, OpenAPI, configuration, daemon quickstart, and plan docs now describe the completed G-stage control-plane capabilities.
 
 ## [0.1.1] - 2026-06-16
 

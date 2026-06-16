@@ -26,7 +26,11 @@ Remote hosts
 | `src-tauri/src/forward.rs` | SSH port forward tunnel management |
 | `src-tauri/src/connection.rs` | SSH ControlMaster management and `~/.ssh/config` parser |
 | `src-tauri/src/approval.rs` | Approval request queue and response handling |
-| `src-tauri/src/risk_config.rs` | User-defined risk rules from `risk_rules.toml` |
+| `src-tauri/src/policy.rs` | Unified policy-as-code loader for `policy.toml` / `policy.json` |
+| `src-tauri/src/risk_config.rs` | Risk rule compatibility layer for legacy `risk_rules.toml` |
+| `src-tauri/src/gate.rs` | Daemon execution gate state and source bypass rules |
+| `src-tauri/src/limits.rs` | Daemon execution rate and session concurrency limits |
+| `src-tauri/src/anomaly.rs` | Audit-window anomaly detection and anomaly event publishing |
 | `src-tauri/src/keys.rs` | SSH key generation, import, listing, and deletion |
 | `src-tauri/src/playbook.rs` | Playbook loading and sequential execution |
 | `src-tauri/src/notify.rs` | Webhook configuration and delivery |
@@ -67,7 +71,7 @@ The desktop app, CLI, MCP server, and daemon share the same Rust core library. T
 
 Agent2SSH is also a local observation surface for agent-driven SSH activity. The daemon exposes an authenticated SSE endpoint at `/events/stream`, and the desktop app subscribes to it through the Live Agent Activity panel.
 
-Current live events cover daemon-managed PTY session open/write/read/close, WebSocket exec start/output/exit, approvals, audit rotation, and connection/config changes. The panel also polls recent audit records, so completed CLI/MCP execs that write to the same config directory are visible even when they did not originate from the desktop UI.
+Current live events cover daemon-managed PTY session open/write/read/close, WebSocket exec start/output/exit, approvals, audit rotation, execution gate changes/rejections, execution limit rejections, anomaly detections, and connection/config changes. The panel also polls recent audit records, so completed CLI/MCP execs that write to the same config directory are visible even when they did not originate from the desktop UI.
 
 MCP PTY sessions route to the local daemon registry by default when the daemon is reachable and the local token is available. If the daemon is unavailable, MCP falls back to the process-local session store so basic PTY usage still works. The desktop Session panel also connects to the daemon session registry, so daemon-managed MCP sessions can be listed, attached, tailed, read, written to, and closed from the UI. Read-only attach and high-risk input confirmation provide a conservative default for observing externally created PTY sessions.
 
@@ -82,11 +86,24 @@ Every command passes through `classify_risk()` before execution:
 | `high` | `sudo`, `rm -rf`, `kill -9`, `iptables` | Requires `--force` / `force: true`, or daemon approval flow |
 | `blocked` | `shutdown`, `mkfs`, `rm -rf /`, fork-bomb | Always rejected |
 
-User-defined risk rules can override built-in classification. All executions, including blocked attempts, are appended to `~/.agent2ssh/audit.jsonl` with the risk level recorded.
+Unified policy files (`policy.toml` / `policy.json`) can define custom risk rules and approval policies in one versionable file. Legacy `risk_rules.toml` and `approval_policies.toml` remain supported when no unified policy file exists. All executions, including blocked attempts, are appended to `~/.agent2ssh/audit.jsonl` with the risk level recorded.
+
+## Control Plane
+
+The current control-plane layer is enforced at the daemon/audit boundary rather than only in the desktop UI:
+
+| Capability | Config / entry point | Behaviour |
+|------------|----------------------|-----------|
+| Execution gate | `agent2ssh pause/resume/status`, `execution_gate.toml` | Pauses non-desktop daemon execution and returns HTTP 423 for blocked sources |
+| Execution limits | `execution_limits.toml` | Enforces per-source, per-host, and per-tag execution rate/session concurrency limits; returns HTTP 429 on limit rejection |
+| Policy dry-run | `policy.toml` / `policy.json`, `agent2ssh policy validate/test` | Validates policy-as-code and predicts `allow` / `approve` / `block` decisions |
+| Anomaly detection | `anomaly.toml` | Detects source bursts, sensitive command patterns, and after-hours high-risk activity from audit windows |
+
+The daemon event stream exposes `gate_rejected`, `limit_rejected`, and `anomaly_detected`, allowing Live Agent Activity and webhook consumers to react while the activity is still local and recent.
 
 ## Current Direction
 
-The original daemon, approval, risk configuration, and web console milestones are implemented. The next phase is documentation accuracy, release validation, security hardening, and broader end-to-end testing.
+The original daemon, approval, risk configuration, web console, Live Activity, session takeover, and G-stage control-plane milestones are implemented. The next phase is release/adoption closure, cross-platform validation, and broader end-to-end testing.
 
 ```text
 Desktop App (Windows / Linux / macOS)  →  local HTTP/WebSocket daemon

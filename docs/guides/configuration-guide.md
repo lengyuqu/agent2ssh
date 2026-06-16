@@ -10,7 +10,12 @@ Agent2SSH 的所有配置和数据文件存储在 `~/.agent2ssh/` 目录下。�
   daemon.token     # 守护进程认证令牌（自动生成）
   daemon.pid       # 守护进程 PID（自动管理）
   audit.jsonl      # 执行审计日志（自动追加）
-  risk_rules.toml  # 用户自定义风险规则
+  policy.toml      # 统一策略文件（推荐）
+  risk_rules.toml  # 旧版用户自定义风险规则（兼容）
+  approval_policies.toml # 旧版审批策略（兼容）
+  execution_gate.toml    # 全局执行急停状态
+  execution_limits.toml  # 执行速率和 session 并发限额
+  anomaly.toml     # audit 异常检测阈值
   playbooks.toml   # Playbook 命令模板定义
   remotes.toml     # 远程守护进程注册表
   webhook.toml     # Webhook 通知配置

@@ -7,10 +7,10 @@ P0-P10 已全部完成。当前基线：
 - 产品形态：Tauri 桌面 App、CLI、MCP stdio server、HTTP/WebSocket daemon、Web Console
 - 核心能力：Host 管理、SSH config 导入、Jump Host、tags、per-host risk override
 - 执行能力：SSH exec、exec-multi、ping、SFTP、PTY sessions、port forwarding、Playbooks
-- 安全能力：风险评分、自定义风险规则、审批队列、审批端点、桌面审批弹窗、敏感命令脱敏
+- 安全能力：风险评分、统一 policy-as-code、审批队列、审批端点、桌面审批弹窗、敏感命令脱敏、execution gate、执行限额、异常检测
 - 运维能力：SSH ControlMaster 连接池、Webhook 通知、remote daemon registry、健康检查、指标、审计轮转
 - 生态能力：SSH key 管理、团队配置导入导出、MCP 客户端模板、插件/Skill 分发文档
-- 验收结果：137 单元测试 + 56 集成测试 + 24 CLI smoke 测试 = 217 测试全绿；daemon feature 下为 142 单元测试 + 56 集成测试 + 24 CLI smoke 测试全绿
+- 验收结果：148 单元测试 + 56 集成测试 + 26 CLI smoke 测试 = 230 测试全绿；daemon feature 下为 153 lib 单元测试 + 4 daemon 单元测试 + 56 集成测试 + 26 CLI smoke 测试全绿
 - MCP 工具：51 个，详见 [skills.md](skills.md)
 
 ## 协作规则
@@ -73,7 +73,7 @@ P0-P10 已全部完成。当前基线：
 | S8 | Session 接管体验与安全 | ✅ 已完成 | 高 | Codex |
 | S9 | 0.1.1 发布前收口 | ✅ 已完成 | 高 | Codex |
 | R | 发布与采用闭环 | ⬜ 待认领 | 高 | - |
-| G | 观察面升级为控制面 | 🟨 进行中 | 高 | Codex |
+| G | 观察面升级为控制面 | ✅ 已完成 | 高 | Codex |
 | T | 团队化与多用户 | ⬜ 待认领 | 中 | - |
 | E | 生态与可靠性 | ⬜ 待认领 | 中 | - |
 
@@ -106,8 +106,8 @@ P0-P10 已全部完成。当前基线：
 
 当前下一步聚焦：
 
-- G 阶段正在把 Live Activity 从观察面升级为控制面，当前从 G1 全局急停 gate 起步。
-- 发布动作仍可并行推进：打 `v0.1.1` 标签并推送，等待 CI assets 后回填 Homebrew sha256。
+- G 阶段已完成：Live Activity 已从观察面升级为控制面，覆盖 execution gate、执行限额、policy dry-run 和异常检测。
+- R 阶段成为当前优先级：完成 `v0.1.1` 发布动作，等待 CI assets 后回填 Homebrew sha256，并启动首轮外部 dogfood。
 
 ## 真实测试服务器
 
@@ -139,7 +139,7 @@ P0-P10 已全部完成。当前基线：
 |------|------|--------|--------|------|----------|
 | F1-1 | ✅ 已完成 | 高 | Codex | 建立真实服务器 fixture | 107.174.36.91 使用临时 key 完成 exec、ping、sftp 验证；临时 key 和远端 `/tmp` 目录已清理 |
 | F1-2 | ✅ 已完成 | 高 | Codex | 跑完整 CLI 工作流 | host add/list、risk、exec、exec-multi、sftp、audit、doctor、daemon-backed session/forward 已记录 |
-| F1-3 | ✅ 已完成 | 高 | Codex | 跑 MCP 工作流 | MCP `tools/list` 返回工具列表；`ssh_list_hosts`、`ssh_exec`、`ssh_audit`、`ssh_doctor` 在真实服务器通过；当前 G1 基线确认工具数为 51 |
+| F1-3 | ✅ 已完成 | 高 | Codex | 跑 MCP 工作流 | MCP `tools/list` 返回工具列表；`ssh_list_hosts`、`ssh_exec`、`ssh_audit`、`ssh_doctor` 在真实服务器通过；当前 MCP 基线工具数为 51 |
 | F1-4 | ✅ 已完成 | 中 | Codex | 跑桌面端首次启动和打包验证 | `npm run tauri:build` 生成 `.app` 和 `.dmg`；macOS bundle 主入口 `agent2ssh-app` 首启 smoke 通过 |
 | F1-5 | ✅ 已完成 | 高 | Codex | 输出 bug backlog | B1-B5 已记录并修复；后续新 bug 按影响等级进入修复 |
 
@@ -227,7 +227,7 @@ P0-P10 已全部完成。当前基线：
 |------|------|--------|--------|------|----------|
 | S2-1 | ✅ 已完成 | 高 | Qoder | 真实服务器 CLI 回归 | 使用临时 key 和隔离 `AGENT2SSH_CONFIG_DIR` 跑 `host add/list`、`exec`、`exec-multi --reason --change-id`、`playbook run --reason --change-id`、`audit --format jsonl/csv`；测试结束清理远端 `/tmp/agent2ssh-*` 和临时 key |
 | S2-2 | ✅ 已完成 | 高 | Qoder | daemon HTTP 回归 | 启动本地 daemon，验证 `/exec`、`/exec-multi`、`/playbooks/run`、`/audit`、`/audit/export`、`/health-snapshot` 返回结构与 `docs/api.yaml` 一致 |
-| S2-3 | ✅ 已完成 | 高 | Qoder | MCP 回归 | 通过 stdio 调用 `tools/list`、`ssh_exec_multi`、`ssh_playbook_run`、`ssh_audit_export`、`ssh_doctor`；S2 当时确认工具数为 50，当前 G1 基线为 51 |
+| S2-3 | ✅ 已完成 | 高 | Qoder | MCP 回归 | 通过 stdio 调用 `tools/list`、`ssh_exec_multi`、`ssh_playbook_run`、`ssh_audit_export`、`ssh_doctor`；S2 当时确认工具数为 50，当前 MCP 基线为 51 |
 | S2-4 | ✅ 已完成 | 中 | Qoder | 回归记录输出 | 在 `docs/` 下新增或更新真实回归记录，包含命令、配置隔离方式、结果摘要、发现的问题和清理证明 |
 
 ## S3 · 文档与契约一致性
@@ -314,11 +314,11 @@ P0-P10 已全部完成。当前基线：
 
 ## 近期建议
 
-S1-S9 已完成，0.1.1 处于发布就绪状态。长远重心已定为 **G 阶段：把观察面升级为控制面**，详见下方「长远路线图（0.1.1 之后）」。下一步并行推进：
+S1-S9 与 G 阶段已完成，0.1.1 处于发布就绪状态，Live Activity 已从观察面升级为控制面。下一步聚焦：
 
-1. G 阶段（当前重心）：从 G1 全局急停 gate 起步，在 daemon 层强制 kill switch、限额、策略判定。
-2. R 阶段（并行，关闭反馈回路）：完成 0.1.1 发布动作并拿到首个外部用户反馈。
-3. 体验细化（穿插，低风险增量）：session 重命名、会话所有者标识、按 host/source 分组和自动重连提示。
+1. R 阶段（当前优先级）：完成 0.1.1 发布动作并拿到首个外部用户反馈。
+2. E 阶段（穿插推进）：多 agent 接入验证、规模与 SSE 稳定性、契约一致性接入 CI。
+3. T 阶段（有真实多人场景后再做）：集中审计聚合、RBAC、审批协作闭环。
 
 ## 安全可视化后续
 
@@ -357,7 +357,7 @@ S9(0.1.1 已收口)
 
 ## G · 观察面升级为控制面
 
-目标：当多个 agent 并发操作时，人类能在 daemon 层实时干预——暂停、限额、按策略拒绝、对异常行为告警。这是当前开发重心。
+目标：当多个 agent 并发操作时，人类能在 daemon 层实时干预——暂停、限额、按策略拒绝、对异常行为告警。该阶段已完成，后续仅按真实采用反馈继续迭代。
 
 | 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
 |------|------|--------|--------|------|----------|

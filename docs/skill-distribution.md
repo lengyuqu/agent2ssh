@@ -147,7 +147,7 @@ ssh_webhook_config (get)
 
 ### 写入类（Write/Mutate）
 
-会产生副作用，建议配合 `risk_rules.toml` 和审批流程使用。
+会产生副作用，建议配合统一 `policy.toml` / `policy.json`、execution gate、执行限额和审批流程使用。
 
 ```
 ssh_exec                ssh_exec_multi
@@ -207,9 +207,9 @@ version = "=0.1.1"
 
 ## 安全建议
 
-1. **最小权限原则**：如果 AI 客户端仅需查询信息，可在 `risk_rules.toml` 中将所有写入操作设为 `blocked`
+1. **最小权限原则**：如果 AI 客户端仅需查询信息，可在 `policy.toml` 中将所有写入操作设为 `blocked`
 2. **审批流程**：启用 daemon 后，所有高风险命令均需人工审批
-3. **风险规则**：通过 `risk_rules.toml` 自定义哪些命令需要额外确认
+3. **风险规则**：通过 `policy.toml` / `policy.json` 自定义哪些命令需要额外确认；旧版 `risk_rules.toml` 仅作为兼容入口
 4. **Per-Host 覆盖**：为生产环境主机设置更严格的风险等级
 5. **审计日志**：所有命令执行均记录在 `~/.agent2ssh/audit.jsonl` 中
 6. **密钥安全**：`TeamConfigExport` 自动剥离 SSH 密钥路径，可安全分享
