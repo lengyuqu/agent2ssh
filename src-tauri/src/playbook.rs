@@ -6,7 +6,7 @@ use std::time::Instant;
 use crate::{
     core::exec_ssh_core_with_risk_override,
     store::config_dir,
-    types::{ExecRequest, ExecResult, RiskLevel},
+    types::{source_from_env, ExecRequest, ExecResult, RiskLevel},
 };
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -273,6 +273,27 @@ pub async fn run_playbook_core(
     reason: Option<String>,
     change_id: Option<String>,
 ) -> Result<PlaybookRunResult> {
+    run_playbook_core_with_source(
+        playbook_name,
+        host,
+        force,
+        params,
+        reason,
+        change_id,
+        Some(source_from_env("core")),
+    )
+    .await
+}
+
+pub async fn run_playbook_core_with_source(
+    playbook_name: &str,
+    host: &str,
+    force: bool,
+    params: Option<&HashMap<String, String>>,
+    reason: Option<String>,
+    change_id: Option<String>,
+    source: Option<String>,
+) -> Result<PlaybookRunResult> {
     let playbooks = load_playbooks()?;
     let playbook = playbooks
         .iter()
@@ -301,6 +322,7 @@ pub async fn run_playbook_core(
             max_output_bytes: None,
             reason: reason.clone(),
             change_id: change_id.clone(),
+            source: source.clone(),
         };
 
         match exec_ssh_core_with_risk_override(request, playbook.risk_override).await {
@@ -670,6 +692,7 @@ required = false
                 max_output_bytes: None,
                 reason: reason.clone(),
                 change_id: change_id.clone(),
+                source: None,
             };
             requests.push(request);
             let _ = idx;
@@ -728,6 +751,7 @@ required = false
                 risk_level: RiskLevel::Medium,
                 reason: Some(reason.to_string()),
                 change_id: Some(change_id.to_string()),
+                source: None,
             };
             entries.push(entry);
         }
@@ -789,6 +813,7 @@ required = false
             max_output_bytes: None,
             reason: Some("emergency fix".to_string()),
             change_id: Some("CHG-EMERGENCY".to_string()),
+            source: None,
         };
 
         // Verify request carries both risk_override and audit context

@@ -42,8 +42,8 @@ pub use forward::{forward_add_core, forward_list_core, forward_remove_core};
 pub use health::{collect_health_snapshot, load_health_snapshot, HealthSnapshot, HostHealthSnapshot};
 pub use playbook::{
     dry_run_playbook, list_playbooks_core, resolve_command_template, run_playbook_core,
-    validate_playbook_params, DryRunStep, Playbook, PlaybookDryRun, PlaybookParam,
-    PlaybookRunResult, PlaybookStep, PlaybookStepResult,
+    run_playbook_core_with_source, validate_playbook_params, DryRunStep, Playbook, PlaybookDryRun,
+    PlaybookParam, PlaybookRunResult, PlaybookStep, PlaybookStepResult,
 };
 pub use remote::{
     check_daemon_version, check_version_compatibility, diagnose_daemon, get_daemons_unified_view,

@@ -94,6 +94,9 @@ pub struct ExecRequest {
     /// Optional change/ticket ID for this operation (for audit trail).
     #[serde(default)]
     pub change_id: Option<String>,
+    /// Source that initiated the operation, such as cli, mcp, daemon, or desktop.
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -203,10 +206,21 @@ pub struct AuditEntry {
     /// Optional change/ticket ID
     #[serde(default)]
     pub change_id: Option<String>,
+    /// Source that initiated the operation, such as cli, mcp, daemon, or desktop.
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
 fn default_risk() -> RiskLevel {
     RiskLevel::Low
+}
+
+pub fn source_from_env(default_source: &str) -> String {
+    std::env::var("AGENT2SSH_SOURCE")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| default_source.to_string())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

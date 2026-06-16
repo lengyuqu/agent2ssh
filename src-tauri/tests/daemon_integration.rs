@@ -1920,6 +1920,7 @@ fn audit_export_response_contract() {
             risk_level: RiskLevel::Low,
             reason: Some("health check".into()),
             change_id: Some("CHG-001".into()),
+            source: Some("daemon".into()),
         },
     ];
 

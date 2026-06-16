@@ -9,7 +9,7 @@ use crate::{
     types::{
         AuditEntry, AuditFilter, BatchStrategy, ExecMultiBatchResult, ExecMultiResult, ExecRequest,
         ExecResult, HostFilter, HostProfile, PingResult, RiskLevel, SftpDirection,
-        SftpDownloadRequest, SftpResult, SftpUploadRequest,
+        SftpDownloadRequest, SftpResult, SftpUploadRequest, source_from_env,
     },
 };
 
@@ -697,6 +697,7 @@ pub(crate) async fn exec_ssh_core_with_risk_override(
     request_risk_override: Option<RiskLevel>,
 ) -> Result<ExecResult> {
     let host = resolve_host(&request.host)?;
+    let source = request.source.clone().unwrap_or_else(|| source_from_env("core"));
 
     // Risk overrides are reserved for explicitly trusted scopes such as a host
     // profile or a playbook. They never downgrade a blocked command.
@@ -802,6 +803,7 @@ pub(crate) async fn exec_ssh_core_with_risk_override(
         risk,
         request.reason.as_deref(),
         request.change_id.as_deref(),
+        Some(&source),
     )?;
 
     // Publish ExecCompleted event
@@ -815,6 +817,7 @@ pub(crate) async fn exec_ssh_core_with_risk_override(
             "duration_ms": result.duration_ms,
             "reason": request.reason,
             "change_id": request.change_id,
+            "source": source,
         }),
     );
 
@@ -829,6 +832,7 @@ pub async fn exec_multi_core(
     tags: Option<Vec<String>>,
     reason: Option<String>,
     change_id: Option<String>,
+    source: Option<String>,
 ) -> Vec<ExecMultiResult> {
     // Expand tags into host names
     let resolved_hosts = if let Some(tag_list) = tags {
@@ -859,6 +863,7 @@ pub async fn exec_multi_core(
         let cmd = command.clone();
         let req_reason = reason.clone();
         let req_change_id = change_id.clone();
+        let req_source = source.clone().or_else(|| Some(source_from_env("core")));
         set.spawn(async move {
             let req = ExecRequest {
                 host: host.clone(),
@@ -869,6 +874,7 @@ pub async fn exec_multi_core(
                 max_output_bytes: None,
                 reason: req_reason,
                 change_id: req_change_id,
+                source: req_source,
             };
             match exec_ssh_core(req).await {
                 Ok(r) => ExecMultiResult { host, result: Some(r), error: None },
@@ -899,6 +905,7 @@ pub async fn exec_multi_with_strategy(
     strategy: Option<BatchStrategy>,
     reason: Option<String>,
     change_id: Option<String>,
+    source: Option<String>,
 ) -> ExecMultiBatchResult {
     let started = Instant::now();
 
@@ -952,6 +959,7 @@ pub async fn exec_multi_with_strategy(
             let h = host.clone();
             let req_reason = reason.clone();
             let req_change_id = change_id.clone();
+            let req_source = source.clone().or_else(|| Some(source_from_env("core")));
             set.spawn(async move {
                 let req = ExecRequest {
                     host: h.clone(),
@@ -962,6 +970,7 @@ pub async fn exec_multi_with_strategy(
                     max_output_bytes: None,
                     reason: req_reason,
                     change_id: req_change_id,
+                    source: req_source,
                 };
                 match exec_ssh_core(req).await {
                     Ok(r) => ExecMultiResult { host: h, result: Some(r), error: None },
@@ -1025,6 +1034,7 @@ pub async fn exec_multi_with_strategy(
             let sem_clone = sem.clone();
             let req_reason = reason.clone();
             let req_change_id = change_id.clone();
+            let req_source = source.clone().or_else(|| Some(source_from_env("core")));
             set.spawn(async move {
                 // Acquire semaphore permit if concurrency is limited
                 let _permit = if let Some(ref s) = sem_clone {
@@ -1041,6 +1051,7 @@ pub async fn exec_multi_with_strategy(
                     max_output_bytes: None,
                     reason: req_reason,
                     change_id: req_change_id,
+                    source: req_source,
                 };
                 match exec_ssh_core(req).await {
                     Ok(r) => ExecMultiResult { host: h, result: Some(r), error: None },
@@ -1458,6 +1469,7 @@ pub async fn sftp_ls_core(host_name: &str, path: &str, timeout_secs: Option<u64>
         max_output_bytes: None,
         reason: None,
         change_id: None,
+        source: Some(source_from_env("core")),
     })
     .await
 }
@@ -1472,6 +1484,7 @@ pub async fn sftp_stat_core(host_name: &str, path: &str, timeout_secs: Option<u6
         max_output_bytes: None,
         reason: None,
         change_id: None,
+        source: Some(source_from_env("core")),
     })
     .await
 }
@@ -1486,6 +1499,7 @@ pub async fn sftp_mkdir_core(host_name: &str, path: &str, timeout_secs: Option<u
         max_output_bytes: None,
         reason: None,
         change_id: None,
+        source: Some(source_from_env("core")),
     })
     .await
 }
@@ -2369,6 +2383,7 @@ mod tests {
             risk_level: RiskLevel::Low,
             reason: Some("daily health check".into()),
             change_id: Some("CHG-12345".into()),
+            source: Some("cli".into()),
         };
 
         let json = serde_json::to_string(&entry).unwrap();

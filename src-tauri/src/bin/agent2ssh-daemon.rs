@@ -10,8 +10,8 @@ use agent2ssh::forward::*;
 use agent2ssh::health::{collect_health_snapshot, load_health_snapshot};
 use agent2ssh::notify::{fire_webhook, load_webhook_config, save_webhook_config, WebhookConfig, WebhookEvent, notify_approval_pending};
 use agent2ssh::playbook::{
-    dry_run_playbook, list_playbooks_core, run_playbook_core, Playbook, PlaybookDryRun,
-    PlaybookRunResult,
+    dry_run_playbook, list_playbooks_core, run_playbook_core_with_source, Playbook,
+    PlaybookDryRun, PlaybookRunResult,
 };
 use agent2ssh::remote::{get_daemon, list_daemons_core, diagnose_daemon, check_daemon_version, get_daemons_unified_view};
 use agent2ssh::risk_config::classify_with_user_rules;
@@ -93,7 +93,7 @@ fn err(status: StatusCode, msg: impl ToString) -> (StatusCode, Json<ErrorBody>) 
 // ── Request/Response types ───────────────────────────────────────────────────
 
 #[derive(Deserialize)] struct PingBody { hosts: Vec<String>, timeout_secs: Option<u64> }
-#[derive(Deserialize)] struct ExecMultiBody { hosts: Vec<String>, command: String, #[serde(default)] force: bool, timeout_secs: Option<u64>, #[serde(default)] tags: Option<Vec<String>>, #[serde(default)] strategy: Option<BatchStrategy>, #[serde(default)] reason: Option<String>, #[serde(default)] change_id: Option<String> }
+#[derive(Deserialize)] struct ExecMultiBody { hosts: Vec<String>, command: String, #[serde(default)] force: bool, timeout_secs: Option<u64>, #[serde(default)] tags: Option<Vec<String>>, #[serde(default)] strategy: Option<BatchStrategy>, #[serde(default)] reason: Option<String>, #[serde(default)] change_id: Option<String>, #[serde(default)] source: Option<String> }
 #[derive(Deserialize)] struct ExecCompareBody { hosts: Vec<String>, command: String, #[serde(default)] force: bool, timeout_secs: Option<u64>, #[serde(default)] tags: Option<Vec<String>> }
 #[derive(Deserialize)] struct SftpDirBody { host: String, path: String }
 #[derive(Deserialize)] struct SessionOpenBody { host: String, #[serde(default)] source: Option<String> }
@@ -103,7 +103,7 @@ fn err(status: StatusCode, msg: impl ToString) -> (StatusCode, Json<ErrorBody>) 
 #[derive(Deserialize)] struct AuditQuery { host: Option<String>, risk_level: Option<RiskLevel>, exit_code: Option<i32>, since: Option<String>, until: Option<String>, limit: Option<usize>, search: Option<String>, command_pattern: Option<String>, host_env: Option<String>, host_role: Option<String>, host_owner: Option<String> }
 #[derive(Deserialize)] struct AuditExportQuery { host: Option<String>, risk_level: Option<RiskLevel>, exit_code: Option<i32>, since: Option<String>, until: Option<String>, limit: Option<usize>, search: Option<String>, command_pattern: Option<String>, host_env: Option<String>, host_role: Option<String>, host_owner: Option<String>, format: Option<String> }
 #[derive(Deserialize)] struct RiskCheckBody { command: String, #[allow(dead_code)] host: Option<String> }
-#[derive(Deserialize)] struct PlaybookRunBody { playbook: String, host: String, #[serde(default)] force: bool, #[serde(default)] params: Option<HashMap<String, String>>, #[serde(default)] reason: Option<String>, #[serde(default)] change_id: Option<String> }
+#[derive(Deserialize)] struct PlaybookRunBody { playbook: String, host: String, #[serde(default)] force: bool, #[serde(default)] params: Option<HashMap<String, String>>, #[serde(default)] reason: Option<String>, #[serde(default)] change_id: Option<String>, #[serde(default)] source: Option<String> }
 #[derive(Deserialize)] struct PlaybookDryRunBody { playbook: String, #[serde(default)] params: Option<HashMap<String, String>> }
 #[derive(Deserialize)] struct ExecPreviewBody { host: Option<String>, hosts: Option<Vec<String>>, command: String, timeout_secs: Option<u64>, #[serde(default)] tags: Option<Vec<String>> }
 #[derive(Deserialize, Default)] struct HealthSnapshotBody { #[serde(default)] hosts: Option<Vec<String>>, timeout_secs: Option<u64> }
@@ -179,10 +179,13 @@ async fn ping(
 }
 
 async fn exec(
-    State(s): State<AppState>, headers: HeaderMap, Json(req): Json<ExecRequest>,
+    State(s): State<AppState>, headers: HeaderMap, Json(mut req): Json<ExecRequest>,
 ) -> Result<Json<ExecResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
+    if req.source.is_none() {
+        req.source = Some(source_from_env("daemon"));
+    }
     tracing::info!(host = %req.host, command = %req.command, "exec handler invoked");
 
     let exec_start = Instant::now();
@@ -369,7 +372,8 @@ async fn exec_multi(
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
     tracing::info!(hosts = ?body.hosts, command = %body.command, "exec-multi handler invoked");
-    Ok(Json(exec_multi_with_strategy(body.hosts, body.command, body.force, body.timeout_secs, body.tags, body.strategy, body.reason, body.change_id).await))
+    let source = body.source.or_else(|| Some(source_from_env("daemon")));
+    Ok(Json(exec_multi_with_strategy(body.hosts, body.command, body.force, body.timeout_secs, body.tags, body.strategy, body.reason, body.change_id, source).await))
 }
 
 async fn exec_compare(
@@ -378,7 +382,8 @@ async fn exec_compare(
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
     tracing::info!(hosts = ?body.hosts, command = %body.command, "exec-compare handler invoked");
-    let results = exec_multi_core(body.hosts, body.command, body.force, body.timeout_secs, body.tags, None, None).await;
+    let source = Some(source_from_env("daemon"));
+    let results = exec_multi_core(body.hosts, body.command, body.force, body.timeout_secs, body.tags, None, None, source).await;
     Ok(Json(compare_exec_results(&results)))
 }
 
@@ -737,7 +742,8 @@ async fn run_playbook(
 ) -> Result<Json<PlaybookRunResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
-    run_playbook_core(&body.playbook, &body.host, body.force, body.params.as_ref(), body.reason, body.change_id)
+    let source = body.source.or_else(|| Some(source_from_env("daemon")));
+    run_playbook_core_with_source(&body.playbook, &body.host, body.force, body.params.as_ref(), body.reason, body.change_id, source)
         .await
         .map(Json)
         .map_err(|e| err(StatusCode::BAD_REQUEST, e))
@@ -1010,7 +1016,7 @@ async fn exec_stream(
                 _ => return,
             }
         };
-        let req: ExecRequest = match serde_json::from_str(&req_msg) {
+        let mut req: ExecRequest = match serde_json::from_str(&req_msg) {
             Ok(r) => r,
             Err(e) => {
                 let mut s = socket.lock().await;
@@ -1018,6 +1024,8 @@ async fn exec_stream(
                 return;
             }
         };
+        let source = req.source.clone().unwrap_or_else(|| source_from_env("daemon_ws"));
+        req.source = Some(source.clone());
 
         let risk = classify_risk(&req.command);
         if risk == RiskLevel::Blocked || (risk == RiskLevel::High && !req.force) {
@@ -1040,7 +1048,7 @@ async fn exec_stream(
         publish_event(
             EventType::ExecStarted,
             serde_json::json!({
-                "source": "daemon_ws",
+                "source": source,
                 "host": req.host,
                 "command": req.command,
                 "reason": req.reason.clone(),
@@ -1086,6 +1094,7 @@ async fn exec_stream(
         let sock_out = socket.clone();
         let out_host = req.host.clone();
         let out_command = req.command.clone();
+        let out_source = source.clone();
         let stdout_task = tokio::spawn(async move {
             if let Some(stdout) = stdout {
                 let mut reader = tokio::io::BufReader::new(stdout);
@@ -1098,7 +1107,7 @@ async fn exec_stream(
                             publish_event(
                                 EventType::ExecOutput,
                                 serde_json::json!({
-                                    "source": "daemon_ws",
+                                    "source": out_source,
                                     "host": out_host,
                                     "command": out_command,
                                     "stream": "stdout",
@@ -1117,6 +1126,7 @@ async fn exec_stream(
         let sock_err = socket.clone();
         let err_host = req.host.clone();
         let err_command = req.command.clone();
+        let err_source = source.clone();
         let stderr_task = tokio::spawn(async move {
             if let Some(stderr) = stderr {
                 let mut reader = tokio::io::BufReader::new(stderr);
@@ -1129,7 +1139,7 @@ async fn exec_stream(
                             publish_event(
                                 EventType::ExecOutput,
                                 serde_json::json!({
-                                    "source": "daemon_ws",
+                                    "source": err_source,
                                     "host": err_host,
                                     "command": err_command,
                                     "stream": "stderr",
@@ -1165,7 +1175,7 @@ async fn exec_stream(
         publish_event(
             EventType::ExecCompleted,
             serde_json::json!({
-                "source": "daemon_ws",
+                "source": source,
                 "host": req.host,
                 "command": req.command,
                 "exit_code": code,

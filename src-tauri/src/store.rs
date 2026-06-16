@@ -79,6 +79,7 @@ pub fn append_audit(
     risk_level: RiskLevel,
     reason: Option<&str>,
     change_id: Option<&str>,
+    source: Option<&str>,
 ) -> Result<()> {
     use chrono::Utc;
     use uuid::Uuid;
@@ -95,6 +96,7 @@ pub fn append_audit(
         risk_level,
         reason: reason.map(str::to_string),
         change_id: change_id.map(str::to_string),
+        source: source.map(str::to_string),
     };
     let mut file = OpenOptions::new()
         .create(true)
@@ -402,6 +404,7 @@ pub fn list_audit_raw(filter: &AuditFilter) -> Result<Vec<AuditEntry>> {
             if let Some(ref needle) = search_lower {
                 if !e.command.to_lowercase().contains(needle)
                     && !e.host.to_lowercase().contains(needle)
+                    && !e.source.as_deref().unwrap_or("").to_lowercase().contains(needle)
                 {
                     return false;
                 }
@@ -472,16 +475,16 @@ pub fn export_audit_jsonl(filter: &AuditFilter) -> Result<String> {
 }
 
 /// Export audit entries as CSV with headers.
-/// Fields: id, timestamp, host, command, exit_code, duration_ms, risk_level, reason, change_id
+/// Fields: id, timestamp, host, command, exit_code, duration_ms, risk_level, reason, change_id, source
 /// Fields containing commas, quotes, or newlines are properly quoted/escaped per RFC 4180.
 pub fn export_audit_csv(filter: &AuditFilter) -> Result<String> {
     let entries = list_audit_raw(filter)?;
     let mut output = String::new();
     // Header row
-    output.push_str("id,timestamp,host,command,exit_code,duration_ms,risk_level,reason,change_id\n");
+    output.push_str("id,timestamp,host,command,exit_code,duration_ms,risk_level,reason,change_id,source\n");
     for entry in &entries {
         output.push_str(&format!(
-            "{},{},{},{},{},{},{},{},{}\n",
+            "{},{},{},{},{},{},{},{},{},{}\n",
             entry.id,
             entry.ts.to_rfc3339(),
             csv_escape(&entry.host),
@@ -491,6 +494,7 @@ pub fn export_audit_csv(filter: &AuditFilter) -> Result<String> {
             entry.risk_level,
             csv_escape(entry.reason.as_deref().unwrap_or("")),
             csv_escape(entry.change_id.as_deref().unwrap_or("")),
+            csv_escape(entry.source.as_deref().unwrap_or("")),
         ));
     }
     Ok(output)
@@ -595,6 +599,7 @@ mod tests {
             risk_level: RiskLevel::High,
             reason: None,
             change_id: None,
+            source: None,
         };
         let entry2 = AuditEntry {
             id: Uuid::new_v4(),
@@ -606,6 +611,7 @@ mod tests {
             risk_level: RiskLevel::Low,
             reason: None,
             change_id: None,
+            source: None,
         };
 
         // Test search: "apt" should match entry1's command
@@ -651,6 +657,7 @@ mod tests {
             risk_level: RiskLevel::High,
             reason: None,
             change_id: None,
+            source: None,
         };
         let entry2 = AuditEntry {
             id: Uuid::new_v4(),
@@ -662,6 +669,7 @@ mod tests {
             risk_level: RiskLevel::Low,
             reason: None,
             change_id: None,
+            source: None,
         };
 
         // Test command_pattern: "kubectl delete *" should match entry1
@@ -777,7 +785,7 @@ mod tests {
 
         let filter = AuditFilter::default();
         let output = super::export_audit_csv(&filter).unwrap();
-        assert!(output.starts_with("id,timestamp,host,command,exit_code,duration_ms,risk_level,reason,change_id\n"));
+        assert!(output.starts_with("id,timestamp,host,command,exit_code,duration_ms,risk_level,reason,change_id,source\n"));
         // Should only contain the header row (no data)
         assert_eq!(output.lines().count(), 1);
 
@@ -815,6 +823,7 @@ mod tests {
             risk_level: RiskLevel::Low,
             reason: None,
             change_id: None,
+            source: None,
         };
         let entry2 = AuditEntry {
             id: Uuid::new_v4(),
@@ -826,6 +835,7 @@ mod tests {
             risk_level: RiskLevel::High,
             reason: Some("weekly update".into()),
             change_id: Some("CHG-001".into()),
+            source: Some("cli".into()),
         };
 
         let entries = vec![entry1, entry2];
@@ -907,6 +917,7 @@ mod tests {
                 risk_level: RiskLevel::Medium,
                 reason: Some(reason.to_string()),
                 change_id: Some(change_id.to_string()),
+                source: Some("mcp".into()),
             };
             jsonl_lines.push(serde_json::to_string(&entry).unwrap());
         }
@@ -948,6 +959,7 @@ mod tests {
             risk_level: RiskLevel::Low,
             reason: None,
             change_id: None,
+            source: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
         let parsed: AuditEntry = serde_json::from_str(&json).unwrap();
@@ -972,6 +984,7 @@ mod tests {
                 risk_level: RiskLevel::Low,
                 reason: Some("health check".into()),
                 change_id: Some("CHG-100".into()),
+                source: Some("cli".into()),
             },
             AuditEntry {
                 id: Uuid::new_v4(), ts: Utc::now(),
@@ -979,6 +992,7 @@ mod tests {
                 exit_code: Some(0), duration_ms: 80,
                 risk_level: RiskLevel::Low,
                 reason: None, change_id: None,
+                source: None,
             },
             AuditEntry {
                 id: Uuid::new_v4(), ts: Utc::now(),
@@ -987,6 +1001,7 @@ mod tests {
                 risk_level: RiskLevel::Medium,
                 reason: Some("health check".into()),
                 change_id: Some("CHG-100".into()),
+                source: Some("mcp".into()),
             },
         ];
 

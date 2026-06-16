@@ -7,10 +7,11 @@ use agent2ssh::{
     exec_multi_core, exec_multi_with_strategy, exec_ssh_core, export_audit_csv,
     export_audit_jsonl, export_team_config, filter_hosts, import_ssh_config_core,
     import_team_config, list_audit_core, list_daemons_core, list_hosts_filtered_core,
-    ping_hosts_core, preview_exec, preview_exec_multi, remove_host_core, run_playbook_core,
-    sftp_download_core, sftp_ls_core, sftp_mkdir_core, sftp_stat_core, sftp_upload_core,
-    AuditFilter, BatchStrategy, ExecComparison, ExecRequest, ForwardDirection, ForwardRule,
-    HostFilter, HostProfile, RiskLevel, SftpDownloadRequest, SftpUploadRequest, TeamConfigExport,
+    ping_hosts_core, preview_exec, preview_exec_multi, remove_host_core,
+    run_playbook_core_with_source, sftp_download_core, sftp_ls_core, sftp_mkdir_core,
+    sftp_stat_core, sftp_upload_core, source_from_env, AuditFilter, BatchStrategy,
+    ExecComparison, ExecRequest, ForwardDirection, ForwardRule, HostFilter, HostProfile,
+    RiskLevel, SftpDownloadRequest, SftpUploadRequest, TeamConfigExport,
 };
 use agent2ssh::approval::{
     check_approval_required, list_approval_policies, load_approval_policies,
@@ -714,6 +715,7 @@ async fn main() -> Result<()> {
                 max_output_bytes: None,
                 reason,
                 change_id,
+                source: Some(source_from_env("cli")),
             };
 
             // If --daemon is set and remote, forward via HTTP
@@ -811,6 +813,7 @@ async fn main() -> Result<()> {
                 };
                 let batch_result = exec_multi_with_strategy(
                     hosts, command, force, timeout_secs, tags, Some(strategy), reason, change_id,
+                    Some(source_from_env("cli")),
                 )
                 .await;
                 if json {
@@ -854,7 +857,17 @@ async fn main() -> Result<()> {
                     }
                 }
             } else {
-                let results = exec_multi_core(hosts, command, force, timeout_secs, tags, reason, change_id).await;
+                let results = exec_multi_core(
+                    hosts,
+                    command,
+                    force,
+                    timeout_secs,
+                    tags,
+                    reason,
+                    change_id,
+                    Some(source_from_env("cli")),
+                )
+                .await;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&results)?);
                 } else {
@@ -1855,7 +1868,7 @@ async fn main() -> Result<()> {
                 json,
             } => {
                 let params_map = parse_cli_params(params);
-                let result = run_playbook_core(
+                let result = run_playbook_core_with_source(
                     &name,
                     &host,
                     force,
@@ -1866,6 +1879,7 @@ async fn main() -> Result<()> {
                     },
                     reason,
                     change_id,
+                    Some(source_from_env("cli")),
                 )
                 .await?;
                 if json {

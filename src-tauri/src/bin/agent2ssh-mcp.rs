@@ -8,7 +8,7 @@ use agent2ssh::{
     forward_list_core, forward_remove_core, import_ssh_config_core, import_team_config,
     list_active_connections, list_audit_core, list_hosts_core, list_playbooks_core,
     ping_hosts_core, preview_exec, preview_exec_multi, preview_team_config_import,
-    remove_host_core, run_playbook_core, session_close_core, session_list_core,
+    remove_host_core, run_playbook_core_with_source, session_close_core, session_list_core,
     session_open_core, session_read_core, session_write_core, sftp_download_core, sftp_ls_core,
     sftp_mkdir_core, sftp_stat_core, sftp_upload_core, AuditFilter, ExecRequest,
     ForwardDirection, HostProfile, RiskLevel, SftpDownloadRequest, SftpUploadRequest,
@@ -945,7 +945,17 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
 
             let risk = classify_risk(&command);
             let max_output_bytes = args["max_output_bytes"].as_u64().map(|v| v as usize);
-            let request = ExecRequest { host, command, force, timeout_secs, stdin, max_output_bytes, reason, change_id };
+            let request = ExecRequest {
+                host,
+                command,
+                force,
+                timeout_secs,
+                stdin,
+                max_output_bytes,
+                reason,
+                change_id,
+                source: Some(mcp_source()),
+            };
 
             // If daemon_alias is set and not "localhost", forward to remote daemon
             if let Some(ref alias) = daemon_alias {
@@ -1023,7 +1033,15 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 });
 
             let batch_result = exec_multi_with_strategy(
-                hosts, command, force, timeout_secs, tags, strategy, reason, change_id,
+                hosts,
+                command,
+                force,
+                timeout_secs,
+                tags,
+                strategy,
+                reason,
+                change_id,
+                Some(mcp_source()),
             )
             .await;
             serde_json::to_value(batch_result)?
@@ -1049,7 +1067,17 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                         .collect()
                 });
 
-            let results = exec_multi_core(hosts, command, force, timeout_secs, tags, None, None).await;
+            let results = exec_multi_core(
+                hosts,
+                command,
+                force,
+                timeout_secs,
+                tags,
+                None,
+                None,
+                Some(mcp_source()),
+            )
+            .await;
             let comparison = compare_exec_results(&results);
             serde_json::to_value(comparison)?
         }
@@ -1298,13 +1326,14 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 });
             let reason = args["reason"].as_str().map(str::to_string);
             let change_id = args["change_id"].as_str().map(str::to_string);
-            let result = run_playbook_core(
+            let result = run_playbook_core_with_source(
                 playbook,
                 host,
                 force,
                 params_map.as_ref(),
                 reason,
                 change_id,
+                Some(mcp_source()),
             )
             .await
             .map_err(McpError::from)?;

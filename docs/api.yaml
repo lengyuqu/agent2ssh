@@ -48,6 +48,7 @@ components:
         max_output_bytes: { type: integer, nullable: true }
         reason:           { type: string, nullable: true }
         change_id:        { type: string, nullable: true }
+        source:           { type: string, nullable: true }
 
     ExecResult:
       type: object
@@ -92,6 +93,7 @@ components:
             pause_between_batches_secs: { type: integer, nullable: true }
         reason:       { type: string, nullable: true }
         change_id:    { type: string, nullable: true }
+        source:       { type: string, nullable: true }
 
     ExecMultiBatchResult:
       type: object
@@ -131,6 +133,7 @@ components:
         risk_level:  { $ref: "#/components/schemas/RiskLevel" }
         reason:      { type: string, nullable: true }
         change_id:   { type: string, nullable: true }
+        source:      { type: string, nullable: true }
 
     AgentEvent:
       type: object
@@ -282,6 +285,7 @@ components:
           additionalProperties: { type: string }
         reason:   { type: string, nullable: true }
         change_id: { type: string, nullable: true }
+        source:   { type: string, nullable: true }
 
     PlaybookStepResult:
       type: object

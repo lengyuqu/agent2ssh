@@ -251,8 +251,8 @@ P0-P10 已全部完成。当前基线：
 
 | 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
 |------|------|--------|--------|------|----------|
-| S5-1 | 🟨 进行中 | 高 | Codex | MCP session 默认路由到 local daemon | `ssh_session_open/write/read/close/list` 优先使用 `127.0.0.1:7722` daemon session API；daemon 不可用时回退到 MCP 进程内 session；MCP 打开的 session 出现在 daemon `/sessions` 和 Live Activity session 事件中 |
-| S5-2 | ⬜ 待认领 | 高 | - | 标准来源字段 | CLI/MCP/daemon 支持统一 `source`，默认值按入口设置，并允许 `AGENT2SSH_SOURCE` 覆盖；audit、event payload、UI 展示保持一致 |
+| S5-1 | ✅ 已完成 | 高 | Codex | MCP session 默认路由到 local daemon | `ssh_session_open/write/read/close/list` 优先使用 `127.0.0.1:7722` daemon session API；daemon 不可用时回退到 MCP 进程内 session；`cargo check --no-default-features --bin agent2ssh-mcp`、MCP stdio smoke 和 MCP 枚举测试通过 |
+| S5-2 | ✅ 已完成 | 高 | Codex | 标准来源字段 | `ExecRequest`、`AuditEntry`、daemon session events、daemon exec/playbook bodies 支持 `source`；CLI/MCP/daemon/desktop 默认来源分别为 `cli`、`mcp`、`daemon`、`desktop`，并允许 `AGENT2SSH_SOURCE` 覆盖；Rust checks 和 lib tests 通过 |
 | S5-3 | ⬜ 待认领 | 中 | - | Live Activity 过滤与展开 | UI 可按 source、host、session、事件类型过滤，并能展开查看 reason、change_id、exit code、duration、bounded output preview |
 | S5-4 | ⬜ 待认领 | 高 | - | 高风险非前端来源提醒 | MCP/CLI 等非桌面来源触发高风险操作时，桌面端显示前台提醒或确认入口，不放宽现有审批边界 |
 | S5-5 | ⬜ 待认领 | 高 | - | 敏感输出策略 | session/output/exec preview 对 token、password、private key、Authorization 等敏感片段做 redaction，复制或展开完整输出时有明确边界 |

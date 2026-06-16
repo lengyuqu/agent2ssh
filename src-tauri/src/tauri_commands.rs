@@ -7,16 +7,16 @@ use crate::{
         sftp_stat_core, sftp_upload_core, ImportResult, TeamConfigExport,
     },
     forward::{forward_add_core, forward_list_core, forward_remove_core},
-    playbook::{list_playbooks_core, run_playbook_core, Playbook, PlaybookRunResult},
+    playbook::{list_playbooks_core, run_playbook_core_with_source, Playbook, PlaybookRunResult},
     remote::{list_daemons_core, DaemonInfo},
     session::{
         session_close_core, session_list_core, session_open_core, session_read_core,
         session_write_core,
     },
     types::{
-        AuditEntry, AuditFilter, ConnectionStatus, ExecMultiResult, ExecRequest, ExecResult,
-        ForwardDirection, ForwardRule, HostProfile, PingResult, RiskLevel, SftpDownloadRequest,
-        SftpResult, SftpUploadRequest,
+        source_from_env, AuditEntry, AuditFilter, ConnectionStatus, ExecMultiResult, ExecRequest,
+        ExecResult, ForwardDirection, ForwardRule, HostProfile, PingResult, RiskLevel,
+        SftpDownloadRequest, SftpResult, SftpUploadRequest,
     },
 };
 use crate::keys::{delete_key_core, generate_key_core, import_key_core, list_keys_core, SshKeyInfo};
@@ -53,7 +53,10 @@ pub fn classify_command_risk(command: String) -> Result<RiskLevel, String> {
 }
 
 #[tauri::command]
-pub async fn exec_ssh(request: ExecRequest) -> Result<ExecResult, String> {
+pub async fn exec_ssh(mut request: ExecRequest) -> Result<ExecResult, String> {
+    if request.source.is_none() {
+        request.source = Some(source_from_env("desktop"));
+    }
     exec_ssh_core(request).await.map_err(|e| e.to_string())
 }
 
@@ -65,7 +68,7 @@ pub async fn exec_multi(
     timeout_secs: Option<u64>,
     tags: Option<Vec<String>>,
 ) -> Result<Vec<ExecMultiResult>, String> {
-    Ok(exec_multi_core(hosts, command, force, timeout_secs, tags, None, None).await)
+    Ok(exec_multi_core(hosts, command, force, timeout_secs, tags, None, None, Some(source_from_env("desktop"))).await)
 }
 
 #[tauri::command]
@@ -269,7 +272,7 @@ pub fn list_playbooks() -> Result<Vec<Playbook>, String> {
 
 #[tauri::command]
 pub async fn run_playbook(playbook: String, host: String, force: bool) -> Result<PlaybookRunResult, String> {
-    run_playbook_core(&playbook, &host, force, None, None, None).await.map_err(|e| e.to_string())
+    run_playbook_core_with_source(&playbook, &host, force, None, None, None, Some(source_from_env("desktop"))).await.map_err(|e| e.to_string())
 }
 
 // ── Webhook config ───────────────────────────────────────────────────────────
