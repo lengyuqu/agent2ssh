@@ -67,7 +67,8 @@ P0-P10 已全部完成。当前基线：
 | S2 | 真实环境回归 | ✅ 已完成 | 高 | Qoder |
 | S3 | 文档与契约一致性 | ✅ 已完成 | 中 | Qoder |
 | S4 | 发布前质量门槛 | ✅ 已完成 | 高 | Qoder |
-| S5 | Agent Activity 可观测性闭环 | 🟨 进行中 | 高 | Codex |
+| S5 | Agent Activity 可观测性闭环 | ✅ 已完成 | 高 | Codex |
+| S6 | 真实会话回归 | ✅ 已完成 | 高 | Codex |
 
 ## 已完成阶段归档
 
@@ -98,9 +99,9 @@ P0-P10 已全部完成。当前基线：
 
 当前下一步聚焦：
 
-- 先把 MCP PTY session 默认路由到本地 daemon session registry，让 Codex / Claude Code / opencode 通过 MCP 打开的交互会话能被桌面端 Live Agent Activity 实时观察。
-- 保留本地进程内 session fallback，避免未启动 daemon 的 MCP 用户失去基本 PTY 能力。
-- daemon session 事件携带标准 `source`，MCP 默认使用 `mcp`，并允许 `AGENT2SSH_SOURCE` 覆盖为 `codex`、`claude-code`、`opencode` 等上层来源。
+- S6 已完成真实服务器回归，MCP PTY session 默认 daemon 路由、fallback、source 归因和 Live Activity preview 脱敏均已验证。
+- 若继续产品体验开发，进入 S7：让桌面 SessionPanel 直接列出并接管 daemon-managed sessions。
+- 若进入发布收口，打 `v0.1.1` 标签，等待 CI assets，并回填 Homebrew sha256。
 
 ## 真实测试服务器
 
@@ -257,20 +258,30 @@ P0-P10 已全部完成。当前基线：
 | S5-4 | ✅ 已完成 | 高 | Codex | 高风险非前端来源提醒 | Live Activity 对非 `desktop` 来源的 high/blocked/approval 事件显示本地提醒条；不改变后端审批边界；`npm run build` 通过 |
 | S5-5 | ✅ 已完成 | 高 | Codex | 敏感输出策略 | session/output/exec preview 统一经过 `redact_sensitive_text`，覆盖 token、password、Authorization/Bearer、cookie 和 private key；bounded preview 继续保留截断边界；lib tests 和 daemon check 通过 |
 
+## S6 · 真实会话回归
+
+目标：用真实服务器验证 S5 的 daemon session registry、source 归因、Live Activity SSE 事件和敏感 preview 脱敏在端到端链路中实际可用。
+
+| 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
+|------|------|--------|--------|------|----------|
+| S6-1 | ✅ 已完成 | 高 | Codex | MCP session daemon registry 回归 | 使用隔离 `AGENT2SSH_CONFIG_DIR` 和真实服务器，`ssh_session_open/write/read/close/list` 返回 `backend: "daemon"`；daemon `/sessions` 可见打开的 session，关闭后为空 |
+| S6-2 | ✅ 已完成 | 高 | Codex | Live Activity SSE 事件回归 | `/events/stream` 捕获 `session_opened`、`session_input`、`session_output`、`session_closed`，并携带 `source: "claude-code"` |
+| S6-3 | ✅ 已完成 | 高 | Codex | source 与 audit 回归 | `AGENT2SSH_SOURCE=opencode` 的 CLI exec 写入 audit JSON/CSV，`source` 字段落盘并导出 |
+| S6-4 | ✅ 已完成 | 高 | Codex | 敏感 preview 脱敏回归 | SSE preview 中 `Authorization: Bearer ...` 被替换为 `[REDACTED]`，测试 secret 未出现在事件 payload summary |
+| S6-5 | ✅ 已完成 | 高 | Codex | 回归报告与清理证明 | 新增 `docs/s6-regression-report.md`；远端临时 key 和 `/tmp/agent2ssh-s6-*` 清理完成，本地 daemon 停止 |
+
 ## 近期建议
 
-S1-S4 已完成，当前先完成 S5 可观测性闭环，再进入发布收口：
+S1-S6 已完成，下一步建议进入桌面 session 接管或发布收口：
 
-1. 完成 S5-1：MCP session 默认路由到 local daemon registry，并保留进程内 fallback。
-2. 完成 S5-2：统一 CLI/MCP/daemon 的 `source` 归因，优先支持 `AGENT2SSH_SOURCE`。
-3. 补齐 Live Activity 的过滤、展开、敏感输出和高风险提醒。
-4. 再打 `v0.1.1` 标签并推送到 `github`、`git233`，等待 CI assets，回填 `scripts/agent2ssh.rb` 的平台 sha256。
+1. 若继续完善产品体验，进入 S7：让桌面 SessionPanel 直接列出并接管 daemon-managed sessions。
+2. 若进入发布收口，打 `v0.1.1` 标签并推送到 `github`、`git233`，等待 CI assets，回填 `scripts/agent2ssh.rb` 的平台 sha256。
 
 ## 安全可视化后续
 
-Agent2SSH 已开始从“agent 可调用 SSH 能力层”扩展为“本机 SSH 操作观察面”。当前 Live Agent Activity 面板覆盖 daemon SSE 实时事件和本地 audit 补偿；S5 将继续完成：
+Agent2SSH 已开始从“agent 可调用 SSH 能力层”扩展为“本机 SSH 操作观察面”。当前 Live Agent Activity 面板覆盖 daemon SSE 实时事件和本地 audit 补偿；S5/S6 已完成：
 
-1. MCP session 默认路由到 local daemon registry，使 Claude Code、Codex、opencode 等 agent 打开的 PTY 都能被桌面端实时接管和观察。
-2. 为 CLI/MCP 增加标准 `source` 字段或环境变量（例如 `AGENT2SSH_SOURCE=codex`），让前端区分发起方。
-3. 为 Live Activity 增加敏感输出显示策略：默认预览、可手动展开、支持按 host/env/risk 过滤。
-4. 增加“高风险操作前台提醒”，当非前端来源触发 high/blocked/approval 事件时在桌面端明显提示。
+1. MCP session 默认路由到 local daemon registry，使 Claude Code、Codex、opencode 等 agent 打开的 PTY 能被桌面端实时观察。
+2. CLI/MCP/daemon/desktop 均具备标准 `source` 字段或 `AGENT2SSH_SOURCE` 覆盖。
+3. Live Activity 支持过滤、展开、敏感 preview 脱敏和高风险外部来源提醒。
+4. 后续重点转为桌面 SessionPanel 接管 daemon-managed sessions。
