@@ -91,6 +91,16 @@ export type PingResult = {
   error?: string | null;
 };
 
+// Daemon GET /health response.
+export type DaemonHealth = {
+  ok: boolean;
+  version?: string | null;
+  uptime_secs?: number | null;
+  config_dir_available?: boolean | null;
+  ssh_available?: boolean | null;
+  pid?: number | null;
+};
+
 // Rust: types.rs — SftpResult
 // direction is SftpDirection enum (rename_all = "lowercase"): "upload" | "download"
 export type SftpResult = {

@@ -429,6 +429,11 @@ paths:
                 type: object
                 properties:
                   ok: { type: boolean }
+                  version: { type: string }
+                  uptime_secs: { type: integer }
+                  config_dir_available: { type: boolean }
+                  ssh_available: { type: boolean }
+                  pid: { type: integer }
 
   /hosts:
     get:

@@ -29,7 +29,7 @@ import SessionPanel from "./components/SessionPanel";
 import SettingsMenu from "./components/SettingsMenu";
 import SetupWizard from "./components/SetupWizard";
 import { useI18n } from "./i18n";
-import type { ApprovalRequest, AuditEntry, AuditFilter, ConnectionStatus, ExecutionGateStatus, HostProfile } from "./types";
+import type { ApprovalRequest, AuditEntry, AuditFilter, ConnectionStatus, DaemonHealth, ExecutionGateStatus, HostProfile } from "./types";
 
 const APPROVAL_POLL_MS = 2000;
 
@@ -57,6 +57,8 @@ export default function App() {
   const [gateStatus, setGateStatus] = useState<ExecutionGateStatus | null>(null);
   const [gateBusy, setGateBusy] = useState(false);
   const [gateCheckedAt, setGateCheckedAt] = useState<number | null>(null);
+  const [daemonHealth, setDaemonHealth] = useState<DaemonHealth | null>(null);
+  const [daemonHealthCheckedAt, setDaemonHealthCheckedAt] = useState<number | null>(null);
   const [showWizard, setShowWizard] = useState(false);
   const [wizardDismissed, setWizardDismissed] = useState(false);
 
@@ -127,6 +129,18 @@ export default function App() {
     pollGateStatus();
     return () => clearInterval(id);
   }, [pollGateStatus]);
+
+  const pollDaemonHealth = useCallback(async () => {
+    const health = await api.getDaemonHealth();
+    setDaemonHealth(health);
+    setDaemonHealthCheckedAt(Date.now());
+  }, []);
+
+  useEffect(() => {
+    const id = setInterval(pollDaemonHealth, 10000);
+    pollDaemonHealth();
+    return () => clearInterval(id);
+  }, [pollDaemonHealth]);
 
   async function handleGateToggle() {
     setError(null);
@@ -319,8 +333,11 @@ export default function App() {
               gateStatus={gateStatus}
               gateBusy={gateBusy}
               gateCheckedAt={gateCheckedAt}
+              daemonHealth={daemonHealth}
+              daemonHealthCheckedAt={daemonHealthCheckedAt}
               onGateToggle={handleGateToggle}
               onGateRefresh={pollGateStatus}
+              onDaemonHealthRefresh={pollDaemonHealth}
               onImportConfig={handleImportConfig}
               onOpenSetup={() => {
                 setWizardDismissed(false);

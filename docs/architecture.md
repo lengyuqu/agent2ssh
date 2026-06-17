@@ -119,7 +119,7 @@ The current control-plane layer is enforced at the daemon/audit boundary rather 
 | Policy dry-run | `policy.toml` / `policy.json`, `agent2ssh policy validate/test` | Validates policy-as-code and predicts `allow` / `approve` / `block` decisions |
 | Anomaly detection | `anomaly.toml` | Detects source bursts, sensitive command patterns, and after-hours high-risk activity from audit windows |
 
-The desktop Settings menu is the operator surface for local recovery and control. It exposes execution gate status as active, paused, or unavailable, shows the last gate status check time, supports manual refresh, and links to the daemon Web Console URL.
+The desktop Settings menu is the operator surface for local recovery and control. It exposes local daemon health from `/health` with version, PID, and last check time; shows execution gate status as active, paused, or unavailable; supports manual refresh; and links to the daemon Web Console URL.
 
 The daemon event stream exposes `gate_rejected`, `limit_rejected`, and `anomaly_detected`, allowing Live Agent Activity and webhook consumers to react while the activity is still local and recent.
 

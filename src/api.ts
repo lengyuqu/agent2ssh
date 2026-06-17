@@ -5,6 +5,7 @@ import type {
   AuditFilter,
   AgentEvent,
   ConnectionStatus,
+  DaemonHealth,
   DaemonSessionInfo,
   DaemonInfo,
   ExecutionGateStatus,
@@ -234,6 +235,16 @@ export const api = {
       });
       if (!res.ok) return null;
       return (await res.json()) as ExecutionGateStatus;
+    } catch {
+      return null;
+    }
+  },
+
+  getDaemonHealth: async (): Promise<DaemonHealth | null> => {
+    try {
+      const res = await fetch(`${daemonUrl}/health`);
+      if (!res.ok) return null;
+      return (await res.json()) as DaemonHealth;
     } catch {
       return null;
     }

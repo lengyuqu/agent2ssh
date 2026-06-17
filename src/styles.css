@@ -377,6 +377,9 @@ select {
 }
 
 .settings-metadata {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 10px;
   color: #667783;
   font-size: 12px;
 }

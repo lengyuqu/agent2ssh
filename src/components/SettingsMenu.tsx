@@ -15,15 +15,18 @@ import {
 import { useEffect, useRef, useState } from "react";
 import { getDaemonUrl } from "../api";
 import { useI18n } from "../i18n";
-import type { ExecutionGateStatus } from "../types";
+import type { DaemonHealth, ExecutionGateStatus } from "../types";
 import LanguageSwitcher from "./LanguageSwitcher";
 
 type Props = {
   gateStatus: ExecutionGateStatus | null;
   gateBusy: boolean;
   gateCheckedAt: number | null;
+  daemonHealth: DaemonHealth | null;
+  daemonHealthCheckedAt: number | null;
   onGateToggle: () => void;
   onGateRefresh: () => void | Promise<void>;
+  onDaemonHealthRefresh: () => void | Promise<void>;
   onImportConfig: () => void;
   onOpenSetup: () => void;
 };
@@ -32,22 +35,35 @@ export default function SettingsMenu({
   gateStatus,
   gateBusy,
   gateCheckedAt,
+  daemonHealth,
+  daemonHealthCheckedAt,
   onGateToggle,
   onGateRefresh,
+  onDaemonHealthRefresh,
   onImportConfig,
   onOpenSetup,
 }: Props) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const [refreshBusy, setRefreshBusy] = useState(false);
+  const [healthBusy, setHealthBusy] = useState(false);
   const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "failed">("idle");
   const menuRef = useRef<HTMLDivElement>(null);
   const gatePaused = gateStatus?.mode === "paused";
   const gateUnavailable = gateStatus === null;
+  const daemonHealthy = daemonHealth?.ok === true;
+  const daemonStatusText = daemonHealthy ? t("Daemon healthy") : t("Daemon unavailable");
   const daemonUrl = getDaemonUrl();
   const consoleUrl = `${daemonUrl}/console`;
   const checkedAtText = gateCheckedAt
     ? new Date(gateCheckedAt).toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+      })
+    : t("Never");
+  const daemonCheckedAtText = daemonHealthCheckedAt
+    ? new Date(daemonHealthCheckedAt).toLocaleTimeString([], {
         hour: "2-digit",
         minute: "2-digit",
         second: "2-digit",
@@ -81,6 +97,15 @@ export default function SettingsMenu({
       await onGateRefresh();
     } finally {
       setRefreshBusy(false);
+    }
+  }
+
+  async function handleDaemonHealthRefresh() {
+    setHealthBusy(true);
+    try {
+      await onDaemonHealthRefresh();
+    } finally {
+      setHealthBusy(false);
     }
   }
 
@@ -169,6 +194,32 @@ export default function SettingsMenu({
             >
               <RefreshCw size={16} className={refreshBusy ? "spin" : ""} />
               {t("Refresh gate status")}
+            </button>
+          </section>
+
+          <section className="settings-section">
+            <div className="settings-section-title">
+              <Activity size={15} />
+              {t("Daemon health")}
+            </div>
+            <div className={`settings-status ${daemonHealthy ? "active" : "unknown"}`}>
+              {daemonHealthy ? <CheckCircle2 size={16} /> : <CircleDashed size={16} />}
+              <span>{daemonStatusText}</span>
+            </div>
+            <div className="settings-metadata">
+              {daemonHealth?.version && <span>{t("Version: {version}", { version: daemonHealth.version })}</span>}
+              {daemonHealth?.pid != null && <span>{t("PID: {pid}", { pid: daemonHealth.pid })}</span>}
+              <span>{t("Last checked: {time}", { time: daemonCheckedAtText })}</span>
+            </div>
+            <button
+              type="button"
+              className="settings-action refresh"
+              onClick={handleDaemonHealthRefresh}
+              disabled={healthBusy}
+              title={t("Refresh daemon health")}
+            >
+              <RefreshCw size={16} className={healthBusy ? "spin" : ""} />
+              {t("Refresh daemon health")}
             </button>
           </section>
 
