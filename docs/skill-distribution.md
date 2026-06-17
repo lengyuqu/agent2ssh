@@ -74,61 +74,7 @@ Agent2SSH 的所有组件（CLI、MCP server、daemon、Tauri 桌面应用）共
 
 ## 最小权限建议
 
-在授予 AI 客户端 Agent2SSH 访问权限时，应了解哪些工具是只读（安全）的，哪些会产生副作用（需谨慎）。
-
-### 只读工具（无副作用）
-
-以下工具仅读取信息，不会修改远程系统或本地配置：
-
-| # | 工具 | 说明 |
-|---|------|------|
-| 1 | `ssh_list_hosts` | 列出已配置的主机 |
-| 2 | `ssh_list_daemons` | 列出已配置的守护进程 |
-| 3 | `ssh_ping` | 检查主机可达性 |
-| 4 | `ssh_audit` | 查询审计日志 |
-| 5 | `ssh_sftp_ls` | 列出远程目录 |
-| 6 | `ssh_sftp_stat` | 查询远程文件状态 |
-| 7 | `ssh_session_list` | 列出打开的会话 |
-| 8 | `ssh_session_read` | 读取会话输出 |
-| 9 | `ssh_forward_list` | 列出端口转发 |
-| 10 | `ssh_risk_check` | 检查命令风险等级 |
-| 11 | `ssh_approval_list` | 列出待审批请求 |
-| 12 | `ssh_connection_status` | 查看连接池状态 |
-| 13 | `ssh_playbook_list` | 列出 Playbook 定义 |
-| 14 | `ssh_config_export` | 导出团队配置（无密钥） |
-| 15 | `ssh_webhook_config` (get) | 读取 Webhook 配置 |
-
-### 写入工具（有副作用）
-
-以下工具会修改远程系统或本地配置，使用时需谨慎：
-
-| # | 工具 | 副作用级别 | 说明 |
-|---|------|-----------|------|
-| 1 | `ssh_exec` | **高** | 在远程主机执行命令 |
-| 2 | `ssh_exec_multi` | **高** | 在多主机执行命令 |
-| 3 | `ssh_session_open` | 中 | 打开远程 PTY 会话 |
-| 4 | `ssh_session_write` | **高** | 向远程会话发送输入 |
-| 5 | `ssh_session_close` | 低 | 关闭会话 |
-| 6 | `ssh_sftp_upload` | 中 | 上传文件到远程主机 |
-| 7 | `ssh_sftp_download` | 低 | 下载远程文件 |
-| 8 | `ssh_sftp_mkdir` | 低 | 创建远程目录 |
-| 9 | `ssh_forward_add` | 中 | 启动端口转发 |
-| 10 | `ssh_forward_remove` | 低 | 移除端口转发 |
-| 11 | `ssh_add_host` | 低 | 添加主机配置 |
-| 12 | `ssh_remove_host` | 低 | 删除主机配置 |
-| 13 | `ssh_import_config` | 低 | 导入 SSH 配置 |
-| 14 | `ssh_connect` | 低 | 建立 ControlMaster 连接 |
-| 15 | `ssh_disconnect` | 低 | 断开 ControlMaster 连接 |
-| 16 | `ssh_approval_respond` | 中 | 审批/拒绝高风险命令 |
-| 17 | `ssh_playbook_run` | **高** | 执行 Playbook 命令序列 |
-| 18 | `ssh_webhook_config` (set) | 低 | 修改 Webhook 配置 |
-| 19 | `ssh_config_import` | 中 | 导入团队配置 |
-
----
-
-## 工具分类表
-
-以下按风险级别列出常用工具；完整 51 个工具列表以 [MCP Tools Reference](skills.md) 为准。
+在授予 AI 客户端 Agent2SSH 访问权限时，需了解不同工具的副作用范围。完整 51 个工具定义见 [MCP Tools Reference](skills.md)，以下按风险级别分类：
 
 ### 只读类（Read-only）
 

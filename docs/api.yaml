@@ -247,6 +247,7 @@ components:
         command:      { type: string }
         risk_level:   { $ref: "#/components/schemas/RiskLevel" }
         requested_at: { type: string, format: date-time }
+        ttl_secs:     { type: integer, description: "TTL in seconds before auto-expiry" }
         status:       { type: string, enum: [pending, approved, rejected, timed_out] }
 
     ApprovalResponse:

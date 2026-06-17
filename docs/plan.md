@@ -274,7 +274,7 @@ P0-P10 已全部完成。当前基线：
 | S6-2 | ✅ 已完成 | 高 | Codex | Live Activity SSE 事件回归 | `/events/stream` 捕获 `session_opened`、`session_input`、`session_output`、`session_closed`，并携带 `source: "claude-code"` |
 | S6-3 | ✅ 已完成 | 高 | Codex | source 与 audit 回归 | `AGENT2SSH_SOURCE=opencode` 的 CLI exec 写入 audit JSON/CSV，`source` 字段落盘并导出 |
 | S6-4 | ✅ 已完成 | 高 | Codex | 敏感 preview 脱敏回归 | SSE preview 中 `Authorization: Bearer ...` 被替换为 `[REDACTED]`，测试 secret 未出现在事件 payload summary |
-| S6-5 | ✅ 已完成 | 高 | Codex | 回归报告与清理证明 | 新增 `docs/s6-regression-report.md`；远端临时 key 和 `/tmp/agent2ssh-s6-*` 清理完成，本地 daemon 停止 |
+| S6-5 | ✅ 已完成 | 高 | Codex | 回归报告与清理证明 | 新增 `docs/reports/s6-regression-report.md`；远端临时 key 和 `/tmp/agent2ssh-s6-*` 清理完成，本地 daemon 停止 |
 
 ## S7 · 桌面 Session 接管
 
@@ -363,9 +363,9 @@ S9(0.1.1 已收口)
 |------|------|--------|--------|------|----------|
 | G1-1 | ✅ 已完成 | 高 | Codex | 全局急停 gate（daemon 层） | daemon 维护 `execution_gate` 状态（active/paused）；paused 时所有非 `desktop` 来源的 `/exec`、`/exec-multi`、`/playbooks/run`、session write 和 WebSocket exec 被拒，HTTP 入口返回 423 并写入 audit gate 拒绝事件；`desktop` 来源仍可操作以便恢复 |
 | G1-2 | ✅ 已完成 | 高 | Codex | 急停 CLI 与桌面入口 | `agent2ssh pause` / `resume` / `status` 可切换并查询 gate；桌面端提供急停按钮和当前 gate 状态指示；MCP 暴露只读 `ssh_gate_status` |
-| G1-3 | ✅ 已完成 | 中 | Codex | 急停回归验证 | paused 状态下 daemon/MCP 非 desktop 执行被拒且 audit 落盘，resume 后恢复；新增 `docs/g1-gate-regression-report.md` |
+| G1-3 | ✅ 已完成 | 中 | Codex | 急停回归验证 | paused 状态下 daemon/MCP 非 desktop 执行被拒且 audit 落盘，resume 后恢复；新增 `docs/reports/g1-gate-regression-report.md` |
 | G2-1 | ✅ 已完成 | 高 | Codex | 速率与并发限额配置 | `execution_limits.toml` 定义 per-source / per-host / per-tag 的每窗口最大执行数与最大并发 session 数；缺省值保守且可覆盖，详见 `docs/guides/configuration-guide.md` |
-| G2-2 | ✅ 已完成 | 高 | Codex | 限额强制与拒绝审计 | 超限请求在 daemon 层返回 429 并写入 blocked audit；限额计数按滑动窗口；并发 session 上限阻止新建 session；新增 `docs/g2-limits-regression-report.md` |
+| G2-2 | ✅ 已完成 | 高 | Codex | 限额强制与拒绝审计 | 超限请求在 daemon 层返回 429 并写入 blocked audit；限额计数按滑动窗口；并发 session 上限阻止新建 session；新增 `docs/reports/g2-limits-regression-report.md` |
 | G3-1 | ✅ 已完成 | 高 | Codex | 策略即代码收敛 | 新增统一 `policy.toml` / `policy.json`，将 risk rules 与 approval policies 收敛到单一可版本化文件；运行时优先读取统一 policy，缺失时兼容旧 `risk_rules.toml` / `approval_policies.toml` |
 | G3-2 | ✅ 已完成 | 中 | Codex | 策略校验与 dry-run | 新增 `agent2ssh policy validate [--path]` 校验统一 policy 语法，`agent2ssh policy test <cmd> --host <host>` 输出 allow/approve/block；CLI smoke 覆盖统一 policy validate/test |
 | G4-1 | ✅ 已完成 | 中 | Codex | 异常行为基线检测 | 新增 `anomaly.toml` 可调阈值；audit append 后按滑动窗口检测 source 频率突增、敏感命令模式和非常规时段高危操作；发布 `anomaly_detected` 事件并支持复用 webhook |
@@ -398,6 +398,6 @@ S9(0.1.1 已收口)
 
 | 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
 |------|------|--------|--------|------|----------|
-| E1 | ✅ 已完成 | 中 | Codex | 多 agent 集成验证 | 新增 `scripts/e1-mcp-client-smoke.py` 和 `docs/e1-multi-agent-integration-report.md`，用 MCP stdio 协议分别模拟 `codex`、`opencode`、`cursor`、`claude-code` source，验证 initialize、51 工具枚举和 `ssh_risk_check` blocked 判定；真实客户端 UI 行为留给 R4 dogfood |
-| E2 | ✅ 已完成 | 中 | Codex | 可靠性与规模 | 新增 `scripts/e2-scale-plan-smoke.py` 和 `docs/e2-scale-reliability-report.md`，在隔离配置中生成 100 个 synthetic host 并跑通 `exec-multi --plan`；新增 100 host plan Rust 回归与 1000 event burst 事件总线回归；真实 100 台 SSH/多 daemon 压测留给后续外部环境 |
+| E1 | ✅ 已完成 | 中 | Codex | 多 agent 集成验证 | 新增 `scripts/e1-mcp-client-smoke.py` 和 `docs/reports/e1-multi-agent-integration-report.md`，用 MCP stdio 协议分别模拟 `codex`、`opencode`、`cursor`、`claude-code` source，验证 initialize、51 工具枚举和 `ssh_risk_check` blocked 判定；真实客户端 UI 行为留给 R4 dogfood |
+| E2 | ✅ 已完成 | 中 | Codex | 可靠性与规模 | 新增 `scripts/e2-scale-plan-smoke.py` 和 `docs/reports/e2-scale-reliability-report.md`，在隔离配置中生成 100 个 synthetic host 并跑通 `exec-multi --plan`；新增 100 host plan Rust 回归与 1000 event burst 事件总线回归；真实 100 台 SSH/多 daemon 压测留给后续外部环境 |
 | E3 | ✅ 已完成 | 中 | Codex | 契约一致性接入 CI | `.github/workflows/ci.yml` 新增 `contract-consistency` job，在 PR、push 和 release 入口显式运行 S3 的 `docs/skills.md` vs MCP 工具、OpenAPI/daemon schema fixture、CLI help 参数一致性检查；`build` matrix 和 release-only `tauri-bundle` job 依赖该 job，契约漂移会先于跨平台构建/打包失败 |

@@ -93,22 +93,7 @@ Authenticated requests use the bearer token stored at `~/.agent2ssh/daemon.token
 
 ## Data
 
-Local data is stored under:
-
-```text
-~/.agent2ssh/hosts.json
-~/.agent2ssh/audit.jsonl
-~/.agent2ssh/policy.toml
-~/.agent2ssh/risk_rules.toml
-~/.agent2ssh/approval_policies.toml
-~/.agent2ssh/execution_gate.toml
-~/.agent2ssh/execution_limits.toml
-~/.agent2ssh/anomaly.toml
-~/.agent2ssh/playbooks.toml
-~/.agent2ssh/remotes.toml
-~/.agent2ssh/webhook.toml
-~/.agent2ssh/keys/
-```
+Local data is stored under `~/.agent2ssh/`. See [docs/guides/configuration-guide.md](docs/guides/configuration-guide.md) for the full file layout, configuration format, and storage details.
 
 ## MCP Integration
 

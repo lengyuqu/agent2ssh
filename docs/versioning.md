@@ -35,6 +35,8 @@
 | `src-tauri/Cargo.toml`        | `version`                     |
 | `src-tauri/tauri.conf.json`   | `version`                     |
 | `package.json`                | `version`                     |
+| `package-lock.json`           | root package `"version"`      |
+| `docs/api.yaml`               | `info.version = "X.Y.Z"`      |
 | `scripts/agent2ssh.rb`        | Homebrew formula version      |
 
 ---

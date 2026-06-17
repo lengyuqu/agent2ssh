@@ -518,26 +518,25 @@ agent2ssh audit --host web1 --limit 5 --json
 
 ---
 
-## 本地数据
+## 执行控制
 
-所有配置和数据存储在 `~/.agent2ssh/` 目录下：
+Agent2SSH 支持通过 daemon CLI 命令进行执行控制管理：
 
-```text
-~/.agent2ssh/
-  hosts.json       # 主机配置
-  daemon.token     # 守护进程认证令牌
-  daemon.pid       # 守护进程 PID
-  audit.jsonl      # 执行审计日志
-  policy.toml      # 统一策略文件（推荐）
-  risk_rules.toml  # 旧版用户自定义风险规则（兼容）
-  approval_policies.toml # 旧版审批策略（兼容）
-  execution_gate.toml    # 全局执行急停状态
-  execution_limits.toml  # 执行速率和 session 并发限额
-  anomaly.toml     # audit 异常检测阈值
-  playbooks.toml   # Playbook 定义
-  remotes.toml     # 远程守护进程配置
-  webhook.toml     # Webhook 通知配置
-  keys/            # SSH 密钥存储
+```bash
+# 查看当前执行状态（gate 开关、执行限额、异常检测状态等）
+agent2ssh status
+
+# 暂停所有执行（紧急停止，阻止新的执行请求）
+agent2ssh pause
+
+# 恢复执行
+agent2ssh resume
 ```
 
-详细配置说明请参考 [配置指南](./configuration-guide.md)。
+`pause`/`resume`/`status` 需要 daemon 运行时使用，详见 [配置指南](./configuration-guide.md) 中的策略文件说明。
+
+---
+
+## 本地数据
+
+所有配置和数据存储在 `~/.agent2ssh/` 目录下。详细文件布局和配置格式请参考 [配置指南](./configuration-guide.md)。

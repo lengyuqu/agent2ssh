@@ -77,22 +77,33 @@ When the daemon is running, high-risk commands can be routed through an approval
 2. Query pending approvals with `ssh_approval_list`
 3. Approve or reject with `ssh_approval_respond`
 
-## User-Defined Risk Rules
+## Policy-as-Code (Recommended)
 
-Custom rules can be added to `~/.agent2ssh/risk_rules.toml`:
+Define unified security policies in `~/.agent2ssh/policy.toml`. This file supports execution gate rules, execution limits, and risk rules in a single place:
 
 ```toml
-[blocked]
+[risk_rules]
+[risk_rules.blocked]
 patterns = ["kubectl delete namespace", "terraform destroy"]
 
-[high]
+[risk_rules.high]
 patterns = ["docker system prune", "git push --force"]
 
-[medium]
+[risk_rules.medium]
 patterns = []
+
+[gate]
+max_concurrent = 5          # cap concurrent exec-multi tasks
+max_daily_ops = 500         # cap daily operations per host
+emergency_stop = false      # set true to pause all execution
+
+[anomaly]
+min_threshold = 10          # minimum events to trigger anomaly scoring
 ```
 
-Rules support glob patterns with `*`. User rules are checked before built-in rules.
+All risk rules support glob patterns with `*`. User rules are checked before built-in rules.
+
+> Legacy `~/.agent2ssh/risk_rules.toml` is still supported for backward compatibility, but `policy.toml` is the recommended approach for new deployments.
 
 ## Per-Host Risk Override
 
