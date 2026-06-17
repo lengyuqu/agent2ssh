@@ -42,15 +42,10 @@ export default function SetupWizard({ onComplete, onSkip }: SetupWizardProps) {
   }, []);
 
   const checkDaemon = useCallback(async () => {
-    try {
-      const res = await fetch("http://127.0.0.1:7722/health");
-      const running = res.ok;
-      setDaemonRunning(running);
-      return running;
-    } catch {
-      setDaemonRunning(false);
-      return false;
-    }
+    const health = await api.getDaemonHealth();
+    const running = health?.ok === true;
+    setDaemonRunning(running);
+    return running;
   }, []);
 
   useEffect(() => {
@@ -93,13 +88,13 @@ export default function SetupWizard({ onComplete, onSkip }: SetupWizardProps) {
     setDaemonLoading(true);
     setDaemonError(null);
     try {
-      // The Tauri app embeds the daemon internally; we simply check if it's
-      // already reachable. If not, we inform the user to start it via CLI.
+      if (!daemonRunning) {
+        await api.daemonStart();
+        await new Promise((resolve) => window.setTimeout(resolve, 700));
+      }
       const running = await checkDaemon();
       if (!running) {
-        setDaemonError(
-          "The embedded daemon is not reachable. Start it via: agent2ssh daemon start"
-        );
+        setDaemonError(t("Daemon started, but the health endpoint is not reachable yet."));
       }
     } catch (err) {
       setDaemonError(String(err));
@@ -249,11 +244,15 @@ export default function SetupWizard({ onComplete, onSkip }: SetupWizardProps) {
                 onClick={handleStartDaemon}
                 disabled={daemonLoading}
               >
-                {daemonLoading ? t("Checking...") : t("Check Daemon Status")}
+                {daemonLoading
+                  ? t("Checking...")
+                  : daemonRunning
+                    ? t("Check Daemon Status")
+                    : t("Start Daemon")}
               </button>
               {daemonError && <div className="error">{daemonError}</div>}
               <p className="wizard-hint">
-                {t("You can also start the daemon from a terminal:")}{" "}
+                {t("You can also manage the daemon from Settings or a terminal:")}{" "}
                 <code>agent2ssh daemon start</code>
               </p>
             </div>

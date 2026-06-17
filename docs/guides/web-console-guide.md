@@ -34,7 +34,7 @@ open http://127.0.0.1:7722/console
 2. 在 **Daemon console** 区域点击 **Open Web Console**。
 3. 如需在其他浏览器或终端中使用，点击 **Copy console URL** 复制地址。
 
-桌面设置菜单显示当前 daemon console URL，默认是 `http://127.0.0.1:7722/console`。它也会通过 `/health` 展示本地 daemon 健康状态、版本、PID 和最近检查时间。若本地 daemon 不可达，daemon health 和 execution gate 都会显示不可用；启动 daemon 后可在设置菜单点击 **Refresh daemon health** 和 **Refresh gate status** 重新检查。
+桌面首次启动向导和设置菜单都可以启动本地 bundled daemon sidecar。设置菜单显示当前 daemon console URL，默认是 `http://127.0.0.1:7722/console`。它也会通过 `/health` 展示本地 daemon 健康状态、版本、PID 和最近检查时间。若本地 daemon 不可达，daemon health 和 execution gate 都会显示不可用；可以在 **Daemon controls** 区域启动、停止或重启 daemon，并可点击 **Refresh daemon health** 和 **Refresh gate status** 重新检查。
 
 ### 认证连接
 

@@ -440,11 +440,27 @@ select {
   background: #f8fafc;
 }
 
+.settings-row-button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.settings-row-button:disabled:hover {
+  border-color: #cbd5df;
+  background: #fff;
+}
+
 .settings-row-button span {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.settings-control-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
 }
 
 .settings-daemon {

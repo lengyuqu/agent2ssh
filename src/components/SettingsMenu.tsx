@@ -6,14 +6,16 @@ import {
   ExternalLink,
   PauseCircle,
   PlayCircle,
+  Power,
   RefreshCw,
   Settings,
+  Square,
   Upload,
   Wand2,
   X,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { getDaemonUrl } from "../api";
+import { api, getDaemonUrl } from "../api";
 import { useI18n } from "../i18n";
 import type { DaemonHealth, ExecutionGateStatus } from "../types";
 import LanguageSwitcher from "./LanguageSwitcher";
@@ -47,6 +49,8 @@ export default function SettingsMenu({
   const [open, setOpen] = useState(false);
   const [refreshBusy, setRefreshBusy] = useState(false);
   const [healthBusy, setHealthBusy] = useState(false);
+  const [daemonActionBusy, setDaemonActionBusy] = useState<"start" | "stop" | "restart" | null>(null);
+  const [daemonActionMessage, setDaemonActionMessage] = useState<string | null>(null);
   const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "failed">("idle");
   const menuRef = useRef<HTMLDivElement>(null);
   const gatePaused = gateStatus?.mode === "paused";
@@ -106,6 +110,29 @@ export default function SettingsMenu({
       await onDaemonHealthRefresh();
     } finally {
       setHealthBusy(false);
+    }
+  }
+
+  async function runDaemonAction(action: "start" | "stop" | "restart") {
+    setDaemonActionBusy(action);
+    setDaemonActionMessage(null);
+    try {
+      const result =
+        action === "start"
+          ? await api.daemonStart()
+          : action === "stop"
+            ? await api.daemonStop()
+            : await api.daemonRestart();
+      setDaemonActionMessage(result.message);
+      if (action !== "stop") {
+        await new Promise((resolve) => window.setTimeout(resolve, 700));
+      }
+      await onDaemonHealthRefresh();
+      await onGateRefresh();
+    } catch (err) {
+      setDaemonActionMessage(String(err));
+    } finally {
+      setDaemonActionBusy(null);
     }
   }
 
@@ -221,6 +248,40 @@ export default function SettingsMenu({
               <RefreshCw size={16} className={healthBusy ? "spin" : ""} />
               {t("Refresh daemon health")}
             </button>
+          </section>
+
+          <section className="settings-section">
+            <div className="settings-section-title">{t("Daemon controls")}</div>
+            <div className="settings-control-grid">
+              <button
+                type="button"
+                className="settings-row-button"
+                onClick={() => runDaemonAction("start")}
+                disabled={daemonActionBusy !== null || daemonHealthy}
+              >
+                <Power size={16} />
+                <span>{daemonActionBusy === "start" ? t("Starting...") : t("Start daemon")}</span>
+              </button>
+              <button
+                type="button"
+                className="settings-row-button"
+                onClick={() => runDaemonAction("stop")}
+                disabled={daemonActionBusy !== null || !daemonHealthy}
+              >
+                <Square size={16} />
+                <span>{daemonActionBusy === "stop" ? t("Stopping...") : t("Stop daemon")}</span>
+              </button>
+              <button
+                type="button"
+                className="settings-row-button"
+                onClick={() => runDaemonAction("restart")}
+                disabled={daemonActionBusy !== null}
+              >
+                <RefreshCw size={16} className={daemonActionBusy === "restart" ? "spin" : ""} />
+                <span>{daemonActionBusy === "restart" ? t("Restarting...") : t("Restart daemon")}</span>
+              </button>
+            </div>
+            {daemonActionMessage && <div className="settings-metadata">{daemonActionMessage}</div>}
           </section>
 
           <section className="settings-section">

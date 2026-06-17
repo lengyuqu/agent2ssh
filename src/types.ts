@@ -101,6 +101,12 @@ export type DaemonHealth = {
   pid?: number | null;
 };
 
+export type DaemonControlResult = {
+  running: boolean;
+  pid?: number | null;
+  message: string;
+};
+
 // Rust: types.rs — SftpResult
 // direction is SftpDirection enum (rename_all = "lowercase"): "upload" | "download"
 export type SftpResult = {

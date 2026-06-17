@@ -5,6 +5,7 @@ import type {
   AuditFilter,
   AgentEvent,
   ConnectionStatus,
+  DaemonControlResult,
   DaemonHealth,
   DaemonSessionInfo,
   DaemonInfo,
@@ -249,6 +250,11 @@ export const api = {
       return null;
     }
   },
+
+  daemonStatus: () => invoke<DaemonControlResult>("daemon_status"),
+  daemonStart: () => invoke<DaemonControlResult>("daemon_start"),
+  daemonStop: () => invoke<DaemonControlResult>("daemon_stop"),
+  daemonRestart: () => invoke<DaemonControlResult>("daemon_restart"),
 
   pauseGate: async (reason?: string): Promise<ExecutionGateStatus> => {
     const token = await invoke<string>("get_daemon_token");

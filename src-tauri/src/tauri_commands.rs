@@ -33,7 +33,10 @@ use crate::{
         SftpDownloadRequest, SftpResult, SftpUploadRequest,
     },
 };
-use std::{collections::HashMap, sync::OnceLock, time::Instant};
+use serde::Serialize;
+use std::{collections::HashMap, path::PathBuf, sync::OnceLock, time::Instant};
+use tauri::AppHandle;
+use tauri_plugin_shell::ShellExt;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -63,6 +66,98 @@ fn append_operation_audit(
         truncated: false,
     };
     let _ = append_audit(&result, risk, reason, None, Some(source));
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DaemonControlResult {
+    pub running: bool,
+    pub pid: Option<u32>,
+    pub message: String,
+}
+
+fn daemon_pid_path() -> Result<PathBuf, String> {
+    crate::store::config_dir()
+        .map(|dir| dir.join("daemon.pid"))
+        .map_err(|e| e.to_string())
+}
+
+fn read_daemon_pid() -> Result<Option<u32>, String> {
+    let pid_path = daemon_pid_path()?;
+    if !pid_path.exists() {
+        return Ok(None);
+    }
+    let raw = std::fs::read_to_string(&pid_path).map_err(|e| e.to_string())?;
+    match raw.trim().parse::<u32>() {
+        Ok(pid) => Ok(Some(pid)),
+        Err(_) => {
+            let _ = std::fs::remove_file(pid_path);
+            Ok(None)
+        }
+    }
+}
+
+fn process_is_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        matches!(
+            std::process::Command::new("kill")
+                .arg("-0")
+                .arg(pid.to_string())
+                .status(),
+            Ok(status) if status.success()
+        )
+    }
+
+    #[cfg(windows)]
+    {
+        match std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}")])
+            .output()
+        {
+            Ok(output) if output.status.success() => {
+                String::from_utf8_lossy(&output.stdout).contains(&pid.to_string())
+            }
+            _ => false,
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+fn terminate_process(pid: u32) -> Result<(), String> {
+    #[cfg(unix)]
+    let status = std::process::Command::new("kill")
+        .arg(pid.to_string())
+        .status()
+        .map_err(|e| e.to_string())?;
+
+    #[cfg(windows)]
+    let status = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .status()
+        .map_err(|e| e.to_string())?;
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        return Err("daemon stop is not supported on this platform".into());
+    }
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("failed to terminate daemon process {pid}"))
+    }
+}
+
+fn remove_daemon_pid_file() {
+    if let Ok(pid_path) = daemon_pid_path() {
+        let _ = std::fs::remove_file(pid_path);
+    }
 }
 
 fn split_completed_session_commands(pending: &str, input: &str) -> (Vec<String>, String) {
@@ -729,6 +824,106 @@ pub fn list_daemons() -> Result<Vec<DaemonInfo>, String> {
     list_daemons_core().map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub fn daemon_status() -> Result<DaemonControlResult, String> {
+    match read_daemon_pid()? {
+        Some(pid) if process_is_alive(pid) => Ok(DaemonControlResult {
+            running: true,
+            pid: Some(pid),
+            message: format!("Daemon is running (pid={pid})."),
+        }),
+        Some(pid) => {
+            remove_daemon_pid_file();
+            Ok(DaemonControlResult {
+                running: false,
+                pid: Some(pid),
+                message: format!("Removed stale daemon PID file (pid={pid})."),
+            })
+        }
+        None => Ok(DaemonControlResult {
+            running: false,
+            pid: None,
+            message: "Daemon is not running.".into(),
+        }),
+    }
+}
+
+#[tauri::command]
+pub fn daemon_start(app: AppHandle) -> Result<DaemonControlResult, String> {
+    if let Some(pid) = read_daemon_pid()? {
+        if process_is_alive(pid) {
+            return Ok(DaemonControlResult {
+                running: true,
+                pid: Some(pid),
+                message: format!("Daemon is already running (pid={pid})."),
+            });
+        }
+        remove_daemon_pid_file();
+    }
+
+    let command = app
+        .shell()
+        .sidecar("binaries/agent2ssh-daemon")
+        .map_err(|e| e.to_string())?;
+    let (mut rx, child) = command.spawn().map_err(|e| e.to_string())?;
+    let pid = child.pid();
+    if let Ok(pid_path) = daemon_pid_path() {
+        if let Some(parent) = pid_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(pid_path, pid.to_string());
+    }
+    tauri::async_runtime::spawn(async move {
+        let _child = child;
+        while rx.recv().await.is_some() {}
+    });
+
+    Ok(DaemonControlResult {
+        running: true,
+        pid: Some(pid),
+        message: format!("Daemon started (pid={pid})."),
+    })
+}
+
+#[tauri::command]
+pub fn daemon_stop() -> Result<DaemonControlResult, String> {
+    match read_daemon_pid()? {
+        Some(pid) if process_is_alive(pid) => {
+            terminate_process(pid)?;
+            remove_daemon_pid_file();
+            Ok(DaemonControlResult {
+                running: false,
+                pid: Some(pid),
+                message: format!("Daemon stopped (pid={pid})."),
+            })
+        }
+        Some(pid) => {
+            remove_daemon_pid_file();
+            Ok(DaemonControlResult {
+                running: false,
+                pid: Some(pid),
+                message: format!("Removed stale daemon PID file (pid={pid})."),
+            })
+        }
+        None => Ok(DaemonControlResult {
+            running: false,
+            pid: None,
+            message: "Daemon is not running.".into(),
+        }),
+    }
+}
+
+#[tauri::command]
+pub fn daemon_restart(app: AppHandle) -> Result<DaemonControlResult, String> {
+    if let Some(pid) = read_daemon_pid()? {
+        if process_is_alive(pid) {
+            terminate_process(pid)?;
+        }
+        remove_daemon_pid_file();
+    }
+    daemon_start(app)
+}
+
 // ── SSH Key management ──────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -927,6 +1122,10 @@ pub fn run_tauri() {
             // Daemon helpers
             get_daemon_token,
             list_daemons,
+            daemon_status,
+            daemon_start,
+            daemon_stop,
+            daemon_restart,
             // SSH Keys
             list_keys,
             generate_key,

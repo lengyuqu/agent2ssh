@@ -27,6 +27,8 @@ The desktop Settings menu now provides:
 
 - Local daemon health status with version, PID, and last check time.
 - Manual daemon health refresh using `/health`.
+- Local daemon lifecycle controls for start, stop, and restart using the bundled sidecar.
+- First-run setup wizard daemon start using the same desktop sidecar command.
 - Execution gate status with active, paused, and unavailable states.
 - Manual execution gate refresh.
 - Web Console URL display, open action, and copy action.
@@ -42,9 +44,10 @@ Documentation was synchronized in:
 
 The following were intentionally not implemented during this pass:
 
-- Starting/stopping the daemon from the Settings menu. This requires cross-platform sidecar lifecycle handling and should be validated during R1 cross-platform desktop package testing.
 - Remote daemon switching from the desktop Settings menu. Remote daemon operation already exists in CLI/API surfaces; adding it to Settings should wait for real multi-node dogfood.
 - Full metrics and doctor reports in Settings. The menu should remain an operator summary. Detailed diagnostics belong in CLI/Web Console unless repeated user feedback shows otherwise.
+
+Daemon lifecycle controls have been implemented for the bundled local sidecar. R1 still needs to validate behavior across packaged Windows and Linux builds, especially sidecar process lifetime and PID-file behavior.
 
 ## Validation
 
@@ -59,4 +62,4 @@ The post-implementation regression passed with 161 unit tests, 27 CLI smoke test
 
 ## Next Recommendation
 
-The next research/development step should be R1 cross-platform desktop package validation. In particular, validate whether the Settings menu can eventually own daemon start/stop/restart actions on Windows and Linux without breaking sidecar naming, process lifetime, PTY behavior, or app sandbox assumptions.
+The next research/development step should be R1 cross-platform desktop package validation. In particular, validate whether the Settings menu's daemon start/stop/restart actions behave consistently on Windows and Linux without breaking sidecar naming, process lifetime, PTY behavior, or app sandbox assumptions.
