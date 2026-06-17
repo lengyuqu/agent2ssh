@@ -168,6 +168,8 @@ For first-time external users, follow the [10-minute CLI and MCP setup guide](do
 
 - Desktop host manager, exec panel, audit viewer, approval dialog, key manager, playbooks, tunnels, sessions, and connection status
 - Desktop command and session risk previews include host-level risk overrides before prompting
+- Desktop Settings menu centralizes language, setup, SSH config import, daemon Web Console URL, and execution gate controls
+- Desktop execution gate status is tri-state: active, paused, or unavailable when the local daemon cannot be reached; the menu shows the last status check time and supports manual refresh
 - Live Agent Activity panel for local visibility into daemon session activity, WebSocket exec streams, recent audit records from CLI/MCP/daemon operations, and anomaly alerts
 - Browser console served by the daemon at `/console`
 - Daemon REST API, WebSocket streaming exec endpoint, and authenticated SSE event stream

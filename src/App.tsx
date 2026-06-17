@@ -56,6 +56,7 @@ export default function App() {
   const [connectionStatuses, setConnectionStatuses] = useState<ConnectionStatus[]>([]);
   const [gateStatus, setGateStatus] = useState<ExecutionGateStatus | null>(null);
   const [gateBusy, setGateBusy] = useState(false);
+  const [gateCheckedAt, setGateCheckedAt] = useState<number | null>(null);
   const [showWizard, setShowWizard] = useState(false);
   const [wizardDismissed, setWizardDismissed] = useState(false);
 
@@ -118,6 +119,7 @@ export default function App() {
   const pollGateStatus = useCallback(async () => {
     const status = await api.getGateStatus();
     setGateStatus(status);
+    setGateCheckedAt(Date.now());
   }, []);
 
   useEffect(() => {
@@ -316,6 +318,7 @@ export default function App() {
             <SettingsMenu
               gateStatus={gateStatus}
               gateBusy={gateBusy}
+              gateCheckedAt={gateCheckedAt}
               onGateToggle={handleGateToggle}
               onGateRefresh={pollGateStatus}
               onImportConfig={handleImportConfig}

@@ -376,6 +376,25 @@ select {
   color: #667783;
 }
 
+.settings-metadata {
+  color: #667783;
+  font-size: 12px;
+}
+
+.settings-url {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 1px solid #d8e0e6;
+  border-radius: 6px;
+  background: #f8fafc;
+  color: #526774;
+  padding: 8px 10px;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+}
+
 .settings-action,
 .settings-row-button {
   width: 100%;

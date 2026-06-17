@@ -2,6 +2,8 @@ import {
   Activity,
   CheckCircle2,
   CircleDashed,
+  Clipboard,
+  ExternalLink,
   PauseCircle,
   PlayCircle,
   RefreshCw,
@@ -11,6 +13,7 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { getDaemonUrl } from "../api";
 import { useI18n } from "../i18n";
 import type { ExecutionGateStatus } from "../types";
 import LanguageSwitcher from "./LanguageSwitcher";
@@ -18,6 +21,7 @@ import LanguageSwitcher from "./LanguageSwitcher";
 type Props = {
   gateStatus: ExecutionGateStatus | null;
   gateBusy: boolean;
+  gateCheckedAt: number | null;
   onGateToggle: () => void;
   onGateRefresh: () => void | Promise<void>;
   onImportConfig: () => void;
@@ -27,6 +31,7 @@ type Props = {
 export default function SettingsMenu({
   gateStatus,
   gateBusy,
+  gateCheckedAt,
   onGateToggle,
   onGateRefresh,
   onImportConfig,
@@ -35,9 +40,19 @@ export default function SettingsMenu({
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const [refreshBusy, setRefreshBusy] = useState(false);
+  const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "failed">("idle");
   const menuRef = useRef<HTMLDivElement>(null);
   const gatePaused = gateStatus?.mode === "paused";
   const gateUnavailable = gateStatus === null;
+  const daemonUrl = getDaemonUrl();
+  const consoleUrl = `${daemonUrl}/console`;
+  const checkedAtText = gateCheckedAt
+    ? new Date(gateCheckedAt).toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+      })
+    : t("Never");
 
   useEffect(() => {
     if (!open) return;
@@ -67,6 +82,21 @@ export default function SettingsMenu({
     } finally {
       setRefreshBusy(false);
     }
+  }
+
+  async function copyConsoleUrl() {
+    setCopyStatus("idle");
+    try {
+      await navigator.clipboard.writeText(consoleUrl);
+      setCopyStatus("copied");
+      window.setTimeout(() => setCopyStatus("idle"), 1800);
+    } catch {
+      setCopyStatus("failed");
+    }
+  }
+
+  function openConsole() {
+    window.open(consoleUrl, "_blank", "noopener,noreferrer");
   }
 
   return (
@@ -117,6 +147,9 @@ export default function SettingsMenu({
                 {gateUnavailable ? t("Gate unavailable") : gatePaused ? t("Gate paused") : t("Gate active")}
               </span>
             </div>
+            <div className="settings-metadata">
+              {t("Last checked: {time}", { time: checkedAtText })}
+            </div>
             <button
               type="button"
               className={`settings-action ${gatePaused ? "resume" : "pause"}`}
@@ -145,6 +178,34 @@ export default function SettingsMenu({
           </section>
 
           <section className="settings-section">
+            <div className="settings-section-title">{t("Daemon console")}</div>
+            <div className="settings-url" title={consoleUrl}>{consoleUrl}</div>
+            <button
+              type="button"
+              className="settings-row-button"
+              onClick={openConsole}
+            >
+              <ExternalLink size={16} />
+              <span>{t("Open Web Console")}</span>
+            </button>
+            <button
+              type="button"
+              className="settings-row-button"
+              onClick={copyConsoleUrl}
+            >
+              <Clipboard size={16} />
+              <span>
+                {copyStatus === "copied"
+                  ? t("Copied")
+                  : copyStatus === "failed"
+                    ? t("Copy failed")
+                    : t("Copy console URL")}
+              </span>
+            </button>
+          </section>
+
+          <section className="settings-section">
+            <div className="settings-section-title">{t("Setup")}</div>
             <button
               type="button"
               className="settings-row-button"

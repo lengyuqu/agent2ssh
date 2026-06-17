@@ -28,6 +28,14 @@ http://127.0.0.1:7722/console
 open http://127.0.0.1:7722/console
 ```
 
+也可以从桌面 App 打开：
+
+1. 点击右上角 **Settings**。
+2. 在 **Daemon console** 区域点击 **Open Web Console**。
+3. 如需在其他浏览器或终端中使用，点击 **Copy console URL** 复制地址。
+
+桌面设置菜单显示当前 daemon console URL，默认是 `http://127.0.0.1:7722/console`。如果本地 daemon 不可达，桌面端的 execution gate 会显示为不可用；启动 daemon 后可在设置菜单点击 **Refresh gate status** 重新检查。
+
 ### 认证连接
 
 控制台顶部 Header 区域包含认证控件：
