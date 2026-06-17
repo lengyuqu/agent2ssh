@@ -69,7 +69,7 @@ agent2ssh host add <name> --host <addr> [--user <u>] [--port <p>] [--key <path>]
 | `--port` | 否 | SSH 端口（默认 22） |
 | `--key` | 否 | SSH 私钥路径 |
 | `--jump` | 否 | ProxyJump 跳板机别名 |
-| `--risk-override` | 否 | 覆盖该主机的风险等级（low/medium/high） |
+| `--risk-override` | 否 | 覆盖该主机非 blocked 命令的风险等级（low/medium/high） |
 | `--tags` | 否 | 逗号分隔的标签列表，用于分组 |
 | `--env` | 否 | 环境标签，用于 `host list` 过滤 |
 | `--role` | 否 | 主机角色标签，用于 `host list` 过滤 |
@@ -90,7 +90,7 @@ agent2ssh host list --env prod --role web
 agent2ssh host list --owner platform --tag production --json
 ```
 
-示例 -- 设置风险覆盖（沙箱主机跳过确认）：
+示例 -- 设置风险覆盖（沙箱主机降低非 blocked 命令风险）：
 
 ```bash
 agent2ssh host add sandbox --host 10.0.0.50 --user test --risk-override low
@@ -141,7 +141,7 @@ agent2ssh exec <host> "<command>" [--json] [--force] [--timeout-secs N]
 | `host` | - | 主机别名 |
 | `command` | - | 远程命令 |
 | `--json` | 关 | 以 JSON 格式输出（含 stdout、stderr、exit_code、duration_ms、risk_level） |
-| `--force` | 关 | 执行高风险命令时必须携带 |
+| `--force` | 关 | 在没有 daemon 审批流时执行高风险命令；仍受策略限制 |
 | `--timeout-secs` | 60 | 超时秒数 |
 | `--stdin` | 无 | 将字符串传递到远程命令的 stdin |
 
@@ -160,9 +160,11 @@ agent2ssh exec myserver "long-running-task" --timeout-secs 300
 # 传递 stdin
 agent2ssh exec myserver "cat > /tmp/data.txt" --stdin "hello world"
 
-# 高风险命令需要 --force
+# 高风险命令可在策略允许时使用 --force
 agent2ssh exec myserver "sudo systemctl restart nginx" --force
 ```
+
+如果统一策略命中显式审批规则，本地 CLI 会失败关闭；需要通过 daemon 路由执行并在审批接口或控制台中批准，或调整策略后再执行。
 
 ### 多主机并发执行
 
@@ -176,7 +178,7 @@ agent2ssh exec-multi <h1> <h2> --command "<cmd>" [--force] [--tags <tag>]
 |------|--------|------|
 | `hosts` | - | 一个或多个主机别名 |
 | `--command` | - | 远程命令 |
-| `--force` | 关 | 执行高风险命令时必须携带 |
+| `--force` | 关 | 在没有 daemon 审批流时执行高风险命令；仍受策略限制 |
 | `--tags` | 无 | 按标签筛选主机（逗号分隔） |
 | `--timeout-secs` | 60 | 超时秒数 |
 | `--json` | 关 | JSON 输出 |
@@ -197,6 +199,8 @@ agent2ssh exec-multi web1 web2 --command "uptime" --json
 ---
 
 ## 文件传输 (sftp)
+
+SFTP 操作会写入审计日志；daemon 路由下还会经过 scope、gate、limits、风险和审批检查。用于策略匹配的操作字符串类似 `sftp upload <local> -> <remote>`、`sftp download <remote> -> <local>`、`sftp ls <path>`。
 
 ### 上传文件
 
@@ -396,7 +400,7 @@ agent2ssh policy validate --path ./policy.toml --json
 agent2ssh policy test "terraform destroy -auto-approve" --host prod-db --json
 ```
 
-`policy test` 会同时考虑内置风险规则、统一 policy 中的风险规则、主机标签和审批策略。旧的 `policy list/add/remove/check` 命令仍可用于审批策略管理。
+`policy test` 会同时考虑内置风险规则、统一 policy 中的风险规则、主机标签、主机 `risk_override` 和审批策略。用户风险规则只能升级内置风险；旧的 `policy list/add/remove/check` 命令仍可用于审批策略管理。
 
 ---
 
@@ -457,7 +461,7 @@ agent2ssh --daemon <alias> exec <host> "<command>"
 agent2ssh --daemon <alias> host list
 ```
 
-远程守护进程需要在 `~/.agent2ssh/remotes.toml` 中配置，详见 [配置指南](./configuration-guide.md)。
+远程守护进程需要在 `~/.agent2ssh/remotes.toml` 中配置，详见 [配置指南](./configuration-guide.md)。`remotes.toml` 可为 alias 配置客户端侧 `scope`；远程 daemon 也可用 `daemon_tokens.toml` 对传入 token 做服务端限制。
 
 ---
 
@@ -526,7 +530,7 @@ Agent2SSH 支持通过 daemon CLI 命令进行执行控制管理：
 # 查看当前执行状态（gate 开关、执行限额、异常检测状态等）
 agent2ssh status
 
-# 暂停所有执行（紧急停止，阻止新的执行请求）
+# 暂停非 desktop 来源的 daemon mutation/execution 请求
 agent2ssh pause
 
 # 恢复执行

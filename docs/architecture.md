@@ -21,6 +21,7 @@ Remote hosts
 | File | Role |
 |------|------|
 | `src-tauri/src/core.rs` | SSH exec, ping, exec-multi, SFTP wrappers, risk scoring |
+| `src-tauri/src/execution_control.rs` | Shared execution authorization for scope, effective risk, approval, and rejected audit entries |
 | `src-tauri/src/store.rs` | Host profile persistence and audit log storage under `~/.agent2ssh` |
 | `src-tauri/src/session.rs` | Persistent PTY sessions |
 | `src-tauri/src/forward.rs` | SSH port forward tunnel management |
@@ -50,8 +51,8 @@ Remote hosts
 ```text
                  ┌────────────────────────────────────────────────────┐
                  │                Agent2SSH Core (Rust)               │
-                 │ host CRUD · exec · risk · SFTP · sessions · audit  │
-                 │ forwards · approval · keys · playbooks · remotes   │
+                 │ host CRUD · exec · authz · risk · SFTP · sessions  │
+                 │ forwards · approval · audit · keys · playbooks     │
                  └──────┬──────────────┬──────────────┬──────────────┘
                         │              │              │
                   Tauri IPC       CLI binary       MCP stdio
@@ -77,7 +78,7 @@ MCP PTY sessions route to the local daemon registry by default when the daemon i
 
 ## Safety Model
 
-Every command passes through `classify_risk()` before execution:
+Execution entry points resolve an effective risk before running remote work:
 
 | Level | Examples | Behaviour |
 |-------|----------|-----------|
@@ -86,7 +87,22 @@ Every command passes through `classify_risk()` before execution:
 | `high` | `sudo`, `rm -rf`, `kill -9`, `iptables` | Requires `--force` / `force: true`, or daemon approval flow |
 | `blocked` | `shutdown`, `mkfs`, `rm -rf /`, fork-bomb | Always rejected |
 
-Unified policy files (`policy.toml` / `policy.json`) can define custom risk rules and approval policies in one versionable file. Legacy `risk_rules.toml` and `approval_policies.toml` remain supported when no unified policy file exists. All executions, including blocked attempts, are appended to `~/.agent2ssh/audit.jsonl` with the risk level recorded.
+Effective risk is calculated from the built-in classifier plus user policy rules. User rules from `policy.toml` / `policy.json` or legacy `risk_rules.toml` can only raise the built-in risk. Host and playbook `risk_override` settings are trusted overrides for non-blocked commands, but `blocked` remains unconditional. Approval policies live in the same unified policy file, with legacy `approval_policies.toml` supported when no unified policy file exists.
+
+All executions and rejected attempts are appended to `~/.agent2ssh/audit.jsonl` with the risk level and source recorded. SFTP, PTY session writes/opens, port-forward creation, connection operations, and playbook steps are represented as operation command strings until they gain first-class policy types, so they pass through the same authorization and audit machinery.
+
+## Execution Control Flow
+
+`execution_control.rs` centralizes the common authorization path used by CLI, MCP, Tauri, and daemon surfaces:
+
+1. Resolve the host target, tags, and optional host/playbook `risk_override`.
+2. Enforce daemon or remote-token scope restrictions before approval is requested.
+3. Calculate effective risk from built-in rules, user rules, and trusted overrides.
+4. Reject `blocked` work immediately and write a rejected audit entry.
+5. Enforce approval policy or high-risk approval/force requirements.
+6. Execute the operation and append the final audit entry.
+
+The daemon approval handler creates an approval request and waits for approval, rejection, or timeout. Local CLI/MCP paths without an approval handler fail closed and instruct the caller to use the daemon approval flow or `--force` when policy permits. WebSocket exec streaming uses the same core SSH command builder as non-streaming exec, so password, key, jump-host, and ControlMaster behavior stay aligned.
 
 ## Control Plane
 
@@ -94,12 +110,16 @@ The current control-plane layer is enforced at the daemon/audit boundary rather 
 
 | Capability | Config / entry point | Behaviour |
 |------------|----------------------|-----------|
-| Execution gate | `agent2ssh pause/resume/status`, `execution_gate.toml` | Pauses non-desktop daemon execution and returns HTTP 423 for blocked sources |
-| Execution limits | `execution_limits.toml` | Enforces per-source, per-host, and per-tag execution rate/session concurrency limits; returns HTTP 429 on limit rejection |
+| Execution gate | `agent2ssh pause/resume/status`, `execution_gate.toml` | Pauses non-desktop daemon mutation/execution paths and returns HTTP 423 for blocked sources |
+| Execution limits | `execution_limits.toml` | Enforces per-source, per-host, and per-tag execution rate plus session concurrency limits; returns HTTP 429 on limit rejection |
 | Policy dry-run | `policy.toml` / `policy.json`, `agent2ssh policy validate/test` | Validates policy-as-code and predicts `allow` / `approve` / `block` decisions |
 | Anomaly detection | `anomaly.toml` | Detects source bursts, sensitive command patterns, and after-hours high-risk activity from audit windows |
 
 The daemon event stream exposes `gate_rejected`, `limit_rejected`, and `anomaly_detected`, allowing Live Agent Activity and webhook consumers to react while the activity is still local and recent.
+
+## Persistence And Locking
+
+Host configuration and audit writes use cross-process lock files under `~/.agent2ssh/` plus atomic temp-file writes and rename. This keeps concurrent CLI, MCP, daemon, and desktop access from corrupting `hosts.json` or interleaving audit writes. The internal lock files are `.hosts.lock` and `.audit.lock`.
 
 ## Current Direction
 

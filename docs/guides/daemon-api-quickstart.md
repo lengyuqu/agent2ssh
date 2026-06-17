@@ -29,6 +29,24 @@ AUTH="Authorization: Bearer $TOKEN"
 
 后续所有 curl 示例中均使用 `$AUTH` 变量。`/health` 端点无需认证。
 
+### Scoped Token
+
+默认 `daemon.token` 是 unrestricted admin token。需要给 CI、远程 agent 或只读巡检客户端发放最小权限时，在 `~/.agent2ssh/daemon_tokens.toml` 中添加 scoped token：
+
+```toml
+[[tokens]]
+name = "prod-readonly"
+token_env = "AGENT2SSH_PROD_READONLY_TOKEN"
+
+[tokens.scope]
+allowed_hosts = ["prod-web-1"]
+allowed_tags = ["production"]
+allowed_commands = ["uptime", "df *", "journalctl -n *"]
+denied_commands = ["rm *", "sudo *"]
+```
+
+客户端仍然使用同一个 `Authorization: Bearer <token>` 请求头。scope 会在审批前执行，拒绝项不会进入审批队列。
+
 ---
 
 ## 端点总览
@@ -251,7 +269,7 @@ curl -X POST -H "$AUTH" \
 
 ### Execution Gate
 
-全局 execution gate 可在紧急情况下暂停非 `desktop` 来源的 daemon 执行入口。`paused` 状态下，`/exec`、`/exec-multi`、`/playbooks/run`、session write 和 WebSocket exec 会被拒绝；HTTP 入口返回 423，并写入 `blocked` audit。
+全局 execution gate 可在紧急情况下暂停非 `desktop` 来源的 daemon mutation/execution 入口。`paused` 状态下，`/exec`、`/exec-multi`、`/exec/compare`、`/playbooks/run`、SFTP 操作、session open/write、forward add、connection connect、WebSocket exec 和 `/daemons/localhost/exec` 会被拒绝；HTTP 入口返回 423，并写入 `blocked` audit。
 
 查询状态：
 
@@ -321,7 +339,7 @@ per_minute = 10
 max_sessions = 2
 ```
 
-`per_minute = 0` 或 `max_sessions = 0` 表示该维度不限额。超限时 HTTP 入口返回 429，并写入 `blocked` audit；事件流发布 `limit_rejected`。本地代理执行路径 `/daemons/localhost/exec` 同样受本地 daemon 限额约束。
+`per_minute = 0` 或 `max_sessions = 0` 表示该维度不限额。速率限额覆盖 `/exec`、`/exec-multi`、`/exec/compare`、SFTP 操作、session write、forward add、`/playbooks/run`、WebSocket exec 和 `/daemons/localhost/exec`；session 并发限额覆盖 session open。超限时 HTTP 入口返回 429，并写入 `blocked` audit；事件流发布 `limit_rejected`。本地代理执行路径 `/daemons/localhost/exec` 同样受本地 daemon 限额约束。
 
 ---
 
@@ -390,6 +408,8 @@ wscat -c "ws://127.0.0.1:7722/exec/stream" \
 | `exit` | 命令执行结束，包含退出码和耗时 |
 | `error` | 错误信息（风险拒绝、未知主机等） |
 
+WebSocket exec 使用与普通 `/exec` 相同的 SSH 命令构造逻辑，key、password、jump host 和 ControlMaster 行为保持一致；风险、scope、gate、limits、approval 和 audit 也走同一授权链路。
+
 ---
 
 ## Audit
@@ -421,6 +441,8 @@ curl -H "$AUTH" \
 ---
 
 ## SFTP
+
+SFTP 端点会先执行 scope、gate、limits、风险和审批检查，再进行文件操作。用于策略匹配的操作字符串形如 `sftp upload <local> -> <remote>`、`sftp download <remote> -> <local>`、`sftp ls <path>`。所有 SFTP 成功、失败和拒绝都会写入 audit，并记录请求来源。
 
 ### 上传文件
 
@@ -601,12 +623,12 @@ curl -X POST -H "$AUTH" \
 
 ## Risk Check
 
-检查命令的风险等级（不执行命令）：
+检查命令的风险等级（不执行命令）。传入 `host` 时会同时考虑该主机的 `risk_override`：
 
 ```bash
 curl -X POST -H "$AUTH" \
   -H "Content-Type: application/json" \
-  -d '{"command": "rm -rf /tmp/cache"}' \
+  -d '{"host": "web1", "command": "rm -rf /tmp/cache"}' \
   http://127.0.0.1:7722/risk/check
 ```
 
@@ -616,7 +638,7 @@ curl -X POST -H "$AUTH" \
 {"risk_level": "high", "matched_rule": null}
 ```
 
-匹配用户自定义规则时：
+匹配用户自定义规则时，`matched_rule` 为 `user_rule`。用户规则只能升级内置风险；如果传入了 `host`，非 `blocked` 命令还会应用该主机的 trusted `risk_override`：
 
 ```json
 {"risk_level": "blocked", "matched_rule": "user_rule"}
@@ -724,7 +746,7 @@ curl -X POST -H "$AUTH" \
   http://127.0.0.1:7722/daemons/ci-server/exec
 ```
 
-如果 `alias` 为 `localhost`，在本地执行；否则转发到对应的远程守护进程。
+如果 `alias` 为 `localhost`，在本地执行；否则转发到对应的远程守护进程。代理执行会同时检查请求 token 的 daemon scope 和 `remotes.toml` 中该 alias 的客户端 scope，然后再转发到远程 daemon；远程 daemon 还会按自身 token scope 和策略再次校验。
 
 ---
 
@@ -742,7 +764,7 @@ curl -H "$AUTH" http://127.0.0.1:7722/webhook/config
 curl -X PUT -H "$AUTH" \
   -H "Content-Type: application/json" \
   -d '{
-    "url": "https://hooks.slack.com/services/T.../B.../xxx",
+    "url": "https://example.com/agent2ssh-webhook",
     "events": ["approval_required", "exec_blocked", "exec_completed"],
     "secret": "my-hmac-secret"
   }' \

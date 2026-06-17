@@ -136,12 +136,14 @@ For first-time external users, follow the [10-minute CLI and MCP setup guide](do
 
 ### Safety
 
-- Every command is classified as `low / medium / high / blocked`
-- High-risk commands require `--force` / `force: true`
+- CLI, MCP, Tauri, and daemon entry points share the same execution authorization layer for exec, playbooks, SFTP, sessions, forwards, and connection operations
+- Every command is classified as `low / medium / high / blocked`; user policy rules can only escalate built-in risk
+- High-risk commands require daemon/UI approval or `--force` / `force: true` when policy allows
 - Blocked commands are always rejected
+- Host and playbook `risk_override` can lower or raise non-blocked risk in trusted scopes, but cannot unblock `blocked`
 - Unified policy-as-code in `~/.agent2ssh/policy.toml` / `policy.json`, with compatibility for legacy `risk_rules.toml` and `approval_policies.toml`
 - Approval queue and daemon approval endpoints for high-risk commands
-- Execution audit log with risk level recorded
+- Execution audit log with risk level, initiating source, and rejected attempts recorded
 - Daemon-level execution gate, execution rate/session limits, and audit-window anomaly detection
 
 ### File Transfer (SFTP)
@@ -151,6 +153,7 @@ For first-time external users, follow the [10-minute CLI and MCP setup guide](do
 - Remote directory listing: `sftp ls` / `ssh_sftp_ls`
 - Remote stat: `sftp stat` / `ssh_sftp_stat`
 - Remote mkdir: `sftp mkdir` / `ssh_sftp_mkdir`
+- Daemon SFTP operations pass through the same scope, risk, approval, gate, limit, and audit checks as command execution
 
 ### Sessions And Tunnels
 
@@ -190,6 +193,20 @@ The daemon API contract lives in [docs/api.yaml](docs/api.yaml).
 
 The daemon authenticates requests using a Bearer token stored at `~/.agent2ssh/daemon.token`. The token file is automatically restricted to owner-only permissions (`0600`) on Unix systems. If the daemon detects overly permissive permissions on startup, it will fix them and log a warning.
 
+For least-privilege daemon clients, add scoped tokens in `~/.agent2ssh/daemon_tokens.toml`. The legacy `daemon.token` remains the unrestricted local admin token.
+
+```toml
+[[tokens]]
+name = "prod-readonly"
+token_env = "AGENT2SSH_PROD_READONLY_TOKEN"
+
+[tokens.scope]
+allowed_hosts = ["prod-web-1"]
+allowed_tags = ["production"]
+allowed_commands = ["uptime", "df *", "journalctl -n *"]
+denied_commands = ["rm *", "sudo *"]
+```
+
 ### Remote Daemon Usage
 
 When connecting to remote `agent2ssh-daemon` instances, follow these guidelines:
@@ -200,6 +217,11 @@ When connecting to remote `agent2ssh-daemon` instances, follow these guidelines:
   alias = "prod"
   url = "https://daemon.example.com:7722"
   token_env = "AGENT2SSH_PROD_TOKEN"
+
+  [remotes.scope]
+  allowed_tags = ["production"]
+  allowed_commands = ["uptime", "df *"]
+  denied_commands = ["rm *"]
   ```
   This avoids committing secrets to version-controlled configuration files.
 
@@ -217,7 +239,7 @@ All private keys managed by Agent2SSH (generated or imported) are automatically 
 
 ### Risk Overrides
 
-Host and playbook `risk_override` settings can lower or raise command risk for trusted scopes, but they cannot downgrade commands classified as `blocked`. Built-in or user-defined blocked rules always reject execution.
+User risk rules from `policy.toml` or legacy `risk_rules.toml` can only raise a command's built-in risk. Host and playbook `risk_override` settings are the trusted downgrade/upgrade mechanism for non-blocked commands, but they cannot downgrade commands classified as `blocked`. Built-in or user-defined blocked rules always reject execution.
 
 ### Sensitive Command Redaction
 

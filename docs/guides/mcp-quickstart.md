@@ -123,7 +123,7 @@ MCP 服务器以 `agent2ssh-mcp` 二进制运行，通过标准输入/输出与 
 |------|------|------|
 | `host` | 是 | 主机别名 |
 | `command` | 是 | 远程命令 |
-| `force` | 否 | 高风险命令需要设为 `true` |
+| `force` | 否 | 在没有 daemon 审批流时执行高风险命令；仍受策略限制 |
 | `timeout_secs` | 否 | 超时秒数，默认 60 |
 | `stdin` | 否 | 传递到远程命令 stdin 的字符串 |
 | `max_output_bytes` | 否 | 输出截断阈值，默认 4 MiB |
@@ -338,6 +338,10 @@ MCP 服务器以 `agent2ssh-mcp` 二进制运行，通过标准输入/输出与 
 
 ### 安全与审批
 
+MCP 的 exec、exec-multi、playbook、SFTP、session open/write、forward add、connect 和 disconnect 操作会复用 Agent2SSH 的统一授权路径。daemon 或远程 token scope 会在审批前检查；用户风险规则只能升级内置风险；host/playbook `risk_override` 只能调整非 `blocked` 命令。
+
+高风险命令可通过 daemon 审批流处理。未路由到 daemon、且没有本地审批处理器时，MCP 会失败关闭；此时应改用 daemon 路由，或在策略允许时传入 `force: true`。
+
 **ssh_risk_check** -- 检查命令风险等级（不执行命令）
 
 ```json
@@ -350,7 +354,7 @@ MCP 服务器以 `agent2ssh-mcp` 二进制运行，通过标准输入/输出与 
 }
 ```
 
-返回风险等级和是否匹配了用户自定义规则：
+返回风险等级和是否匹配了用户自定义规则；传入 `host` 时会考虑该主机的 `risk_override`：
 
 ```json
 {
@@ -457,9 +461,9 @@ Playbook 在 `~/.agent2ssh/playbooks.toml` 中定义，详见 [配置指南](./c
 }
 ```
 
-返回本地和远程守护进程的别名、URL 和连接状态。
+返回本地和远程守护进程的别名、URL、连接状态和已配置的客户端 scope。
 
-在 `ssh_exec` 中使用 `daemon_alias` 参数将命令路由到远程守护进程，详见下方 "远程 Daemon 路由" 一节。
+在 `ssh_exec` 中使用 `daemon_alias` 参数将命令路由到远程守护进程，详见下方 "远程 Daemon 路由" 一节。`remotes.toml` 的 scope 会在本地转发前执行，远程 daemon 还可以通过 `daemon_tokens.toml` 再做服务端限制。
 
 ---
 
@@ -485,7 +489,7 @@ Playbook 在 `~/.agent2ssh/playbooks.toml` 中定义，详见 [配置指南](./c
   "name": "ssh_webhook_config",
   "arguments": {
     "action": "set",
-    "url": "https://hooks.slack.com/services/T.../B.../xxx",
+    "url": "https://example.com/agent2ssh-webhook",
     "events": ["approval_required", "exec_blocked", "exec_completed"],
     "secret": "my-hmac-secret"
   }
@@ -504,10 +508,10 @@ Agent2SSH 对每条命令进行风险分级，并根据分级结果决定是否�
 |----------|----------|----------|-----------------|
 | **low** | 直接执行 | 直接执行 | 直接执行 |
 | **medium** | 直接执行 | 直接执行 | 直接执行 |
-| **high** | 需要 `--force` | 需要 `force: true` | 需要 `force: true`，否则进入审批队列 |
-| **blocked** | 拒绝执行 | 拒绝执行 | 拒绝执行，触发 `exec_blocked` Webhook |
+| **high** | 本地执行需要 `--force`；daemon 路由可走审批 | 本地路径需要 `force: true`；daemon 路由可走审批 | 可走审批，或在策略允许时使用 `force: true` |
+| **blocked** | 拒绝执行 | 拒绝执行 | 拒绝执行，并写入 blocked audit |
 
-**MCP 中的处理方式：** MCP 服务器不实现 Daemon 审批队列。在 MCP 层面，高风险命令必须携带 `force: true` 才能执行，否则会返回包含 `risk_level` 的错误信息。
+**MCP 中的处理方式：** MCP 本地路径不持有 Daemon 审批队列。高风险命令未携带 `force: true` 且没有 daemon 审批处理器时会失败关闭；需要审批的场景应通过本地或远程 daemon 路由执行。
 
 **Daemon API 审批流程：**
 
@@ -517,7 +521,7 @@ Agent2SSH 对每条命令进行风险分级，并根据分级结果决定是否�
 4. 管理员通过 API、Web 控制台或 MCP 工具批准或拒绝
 5. 批准后自动执行命令；拒绝后返回 403 错误；超时返回 408 错误
 
-**用户自定义规则：** 推荐在 `~/.agent2ssh/policy.toml` / `policy.json` 的 `[risk.*]` 区块中定义额外规则；旧版 `risk_rules.toml` 仍兼容。详见 [配置指南](./configuration-guide.md)。
+**用户自定义规则：** 推荐在 `~/.agent2ssh/policy.toml` / `policy.json` 的 `[risk.*]` 区块中定义额外规则；旧版 `risk_rules.toml` 仍兼容。用户规则只能升级内置风险，降级非 `blocked` 命令需使用 host/playbook `risk_override`。详见 [配置指南](./configuration-guide.md)。
 
 ---
 

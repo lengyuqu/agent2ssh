@@ -8,8 +8,11 @@ Agent2SSH 的所有配置和数据文件存储在 `~/.agent2ssh/` 目录下。�
 ~/.agent2ssh/
   hosts.json       # 主机配置文件（自动管理）
   daemon.token     # 守护进程认证令牌（自动生成）
+  daemon_tokens.toml # 可选的 scoped Bearer Token
   daemon.pid       # 守护进程 PID（自动管理）
   audit.jsonl      # 执行审计日志（自动追加）
+  .hosts.lock      # hosts.json 跨进程写锁（自动管理）
+  .audit.lock      # audit.jsonl 跨进程追加锁（自动管理）
   policy.toml      # 统一策略文件（推荐）
   risk_rules.toml  # 旧版用户自定义风险规则（兼容）
   approval_policies.toml # 旧版审批策略（兼容）
@@ -94,7 +97,7 @@ JSON 格式，包含一个 `hosts` 数组：
 | `port` | integer | 否 | SSH 端口，默认 22 |
 | `key_path` | string | 否 | SSH 私钥路径 |
 | `jump_host` | string | 否 | ProxyJump 跳板机别名 |
-| `risk_override` | string | 否 | 覆盖该主机的风险等级（low/medium/high） |
+| `risk_override` | string | 否 | 覆盖该主机非 blocked 命令的风险等级（low/medium/high） |
 | `tags` | array | 否 | 标签列表，用于分组和批量执行 |
 | `env` | string | 否 | 环境标签，用于按生产、预发、开发等环境过滤 |
 | `role` | string | 否 | 角色标签，用于按 web、db、worker 等职责过滤 |
@@ -105,8 +108,8 @@ JSON 格式，包含一个 `hosts` 数组：
 - 文件由 Agent2SSH 自动管理，手动编辑后需确保 JSON 格式正确
 - `name` 字段必须唯一
 - `jump_host` 必须引用已存在的主机别名
-- `risk_override` 设置为 `"low"` 可以跳过该主机上所有命令的风险确认
-- `risk_override` 不能降级 `blocked` 命令；内置或用户规则判定为 `blocked` 的命令仍会被拒绝
+- `risk_override` 设置为 `"low"` 可以降低该主机上非 `blocked` 命令的风险等级
+- `risk_override` 不能降级 `blocked` 命令；内置或用户规则判定为 `blocked` 的命令仍会被拒绝；显式审批策略、scope、gate 和限额仍会生效
 - `env`、`role`、`owner` 和 `tags` 可用于桌面端主机视图过滤，也可用于 CLI `host list` 过滤
 
 ---
@@ -161,7 +164,7 @@ JSON Lines 格式，每行一个 JSON 对象：
 
 ### 用途
 
-守护进程 HTTP API 的 Bearer Token 认证令牌。
+守护进程 HTTP API 的默认 Bearer Token 认证令牌。该 token 是本机 unrestricted admin token，拥有守护进程可执行的完整能力。
 
 ### 文件格式
 
@@ -178,6 +181,57 @@ JSON Lines 格式，每行一个 JSON 对象：
 - **不要将此文件提交到版本控制或分享给他人**
 - 如需重新生成，删除文件后重启守护进程即可
 - 如果守护进程检测到权限过于宽松，会自动修复并输出警告
+
+---
+
+## daemon_tokens.toml
+
+### 用途
+
+为 daemon API 配置额外的 scoped Bearer Token。适合给远程 agent、CI 或只读巡检客户端发放最小权限 token。`daemon.token` 仍然是 unrestricted admin token；`daemon_tokens.toml` 中的每个 token 必须配置 `scope`。
+
+### 文件格式
+
+```toml
+[[tokens]]
+name = "prod-readonly"
+token_env = "AGENT2SSH_PROD_READONLY_TOKEN"
+
+[tokens.scope]
+allowed_hosts = ["prod-web-1"]
+allowed_tags = ["production"]
+allowed_commands = ["uptime", "df *", "journalctl -n *"]
+denied_commands = ["rm *", "sudo *"]
+
+[[tokens]]
+name = "ci-deploy"
+token = "replace-with-random-token"
+
+[tokens.scope]
+allowed_tags = ["staging"]
+allowed_commands = ["git *", "systemctl restart app"]
+denied_commands = ["rm -rf *", "mkfs *"]
+```
+
+### 字段说明
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `name` | string | 否 | token 名称；配置时必须唯一 |
+| `token_env` | string | 否 | 从环境变量读取 token（推荐） |
+| `token` | string | 否 | 明文 token |
+| `scope.allowed_hosts` | array | 否 | 允许访问的主机名；空数组表示不限主机 |
+| `scope.allowed_tags` | array | 否 | 允许访问的主机标签；空数组表示不限标签 |
+| `scope.allowed_commands` | array | 否 | 允许执行的命令或操作模式；空数组表示不限命令 |
+| `scope.denied_commands` | array | 否 | 拒绝执行的命令或操作模式；优先于 allowed 规则 |
+
+### 注意事项
+
+- 每个 scoped token 必须配置 `token_env` 或 `token`，并且必须配置 `scope`
+- `token_env` 优先于 `token`
+- scope 会在风险审批之前检查；未命中 scope 的请求不会进入审批队列
+- `allowed_commands` 和 `denied_commands` 使用 glob 风格匹配，`denied_commands` 优先
+- scope 覆盖 exec、playbook、SFTP、session、forward 和 connection 操作；非命令操作会使用类似 `sftp upload a -> b`、`session_open`、`connect` 的操作字符串做匹配
 
 ---
 
@@ -282,7 +336,7 @@ agent2ssh policy validate --path ./policy.toml --json
 agent2ssh policy test "terraform destroy -auto-approve" --host prod-db --json
 ```
 
-`policy test` 会同时考虑内置风险规则、统一 policy 中的 risk rules、主机标签和 approval policies。`blocked` 命令输出 `block`；`high` 风险或命中审批策略输出 `approve`；其他输出 `allow`。
+`policy test` 会同时考虑内置风险规则、统一 policy 中的 risk rules、主机标签、主机 `risk_override` 和 approval policies。`blocked` 命令输出 `block`；`high` 风险或命中审批策略输出 `approve`；其他输出 `allow`。用户风险规则只能把内置风险升级，不能把内置 `high` / `blocked` 降低。
 
 ## risk_rules.toml
 
@@ -290,7 +344,7 @@ agent2ssh policy test "terraform destroy -auto-approve" --host prod-db --json
 
 ### 用途
 
-定义用户自定义的风险规则，扩展或覆盖内置风险分类。
+定义用户自定义的风险规则，用于扩展内置风险分类。用户规则只能升级风险等级，不能降低内置分类。
 
 ### 文件格式
 
@@ -306,7 +360,7 @@ patterns = [
     "mkfs*",
 ]
 
-# 高风险命令（需要 force 确认）
+# 高风险命令（需要 daemon 审批或 force 确认）
 [high]
 patterns = [
     "docker system prune",
@@ -328,7 +382,7 @@ patterns = [
 - **精确匹配**：`"docker system prune"` 匹配包含此字符串的命令
 - **Glob 模式**：`"git push *force*"` 使用 `*` 通配符匹配任意字符序列
 - **大小写不敏感**：匹配时自动转换为小写
-- **优先级**：blocked > high > medium > 内置规则
+- **最终风险**：取内置风险和用户规则命中风险中的较高等级（blocked > high > medium > low）
 
 ### 示例
 
@@ -349,7 +403,8 @@ patterns = ["docker system prune*"]
 ### 注意事项
 
 - 文件修改后立即生效，无需重启守护进程（支持热加载，基于文件修改时间缓存）
-- 用户规则优先于内置规则
+- 用户规则不会覆盖并降低内置规则；例如内置 `high` 命令不会因为只命中用户 `medium` 规则而降级
+- 如需在可信主机或 playbook 中降低非 `blocked` 命令风险，请使用 `risk_override`
 - 文件不存在时，仅使用内置规则
 
 ---
@@ -407,7 +462,7 @@ tags = ["database"]
 | `description` | string | 是 | Playbook 描述 |
 | `steps` | array | 是 | 命令序列，按顺序执行 |
 | `tags` | array | 否 | 标签列表 |
-| `risk_override` | string | 否 | 覆盖所有步骤的风险等级 |
+| `risk_override` | string | 否 | 覆盖所有步骤的非 blocked 风险等级 |
 
 ### 执行行为
 
@@ -415,12 +470,12 @@ tags = ["database"]
 - 任何步骤失败（非零退出码或错误）时停止执行，返回已完成步骤的部分结果
 - 返回 `success` 状态和 `total_duration_ms` 总耗时
 - 使用 MCP 工具 `ssh_playbook_run` 或 Daemon API `POST /playbooks/run` 执行
-- 高风险步骤需要 `force: true` 才能执行
+- 高风险步骤需要 daemon 审批或 `force: true` 才能执行；本地 CLI/MCP 没有可用审批处理器时会失败关闭，并提示改走 daemon 审批流或在策略允许时使用 `--force`
 
 ### 注意事项
 
 - 步骤中的 shell 变量（如 `$(date)`）会在远程主机上展开
-- `risk_override` 可以统一设置所有步骤的风险等级
+- `risk_override` 可以统一设置所有步骤的非 `blocked` 风险等级
 - `risk_override` 不能降级 `blocked` 命令；内置或用户规则判定为 `blocked` 的步骤仍会被拒绝
 - 文件不存在时返回空 Playbook 列表（不会报错）
 
@@ -447,6 +502,11 @@ alias = "prod-cluster"
 url = "https://daemon.example.com:7722"
 token_env = "AGENT2SSH_PROD_TOKEN"
 
+[remotes.scope]
+allowed_tags = ["production"]
+allowed_commands = ["uptime", "df *", "journalctl -n *"]
+denied_commands = ["rm *"]
+
 [[remotes]]
 alias = "staging"
 url = "http://staging.example.com:7722"
@@ -461,11 +521,23 @@ token = "550e8400-e29b-41d4-a716-446655440000"
 | `url` | string | 是 | 守护进程 HTTP/HTTPS 地址 |
 | `token` | string | 否 | 认证令牌（明文） |
 | `token_env` | string | 否 | 认证令牌的环境变量名（推荐） |
+| `scope` | table | 否 | 客户端侧权限范围，字段同 `daemon_tokens.toml` 的 `scope` |
 
 ### Token 解析优先级
 
 1. `token_env`：从环境变量读取（推荐，更安全）
 2. `token`：直接使用明文令牌
+
+### Scope 行为
+
+`remotes.toml` 的 `scope` 是本地客户端路由到远程 daemon 前的额外限制，字段包括：
+
+- `allowed_hosts`：允许访问的主机名，空数组表示不限
+- `allowed_tags`：允许访问的主机标签，空数组表示不限
+- `allowed_commands`：允许执行的命令或操作模式，空数组表示不限
+- `denied_commands`：拒绝执行的命令或操作模式，优先于 allowed 规则
+
+远程 daemon 自身也可以通过 `daemon_tokens.toml` 为传入 token 配置服务端 scope。建议客户端 scope 和服务端 scoped token 同时使用，避免远程配置误用时扩大权限。
 
 ### 使用方式
 
@@ -504,6 +576,7 @@ curl -X POST -H "$AUTH" \
 - `url` 必须以 `http://` 或 `https://` 开头
 - 每个远程守护进程必须配置 `token_env` 或 `token`
 - 推荐使用 `token_env` 而非 `token`，避免在配置文件中明文存储敏感令牌
+- 配置 `scope` 可以限制该远程 daemon alias 允许执行的主机、标签和命令
 - 远程守护进程的健康状态通过 `/health` 端点检测（2 秒超时）
 - 生产环境应使用 HTTPS，并在远程守护进程前放置 TLS 终止反向代理（如 Caddy、nginx）
 
@@ -521,7 +594,7 @@ TOML 格式：
 
 ```toml
 # Webhook URL（Slack、Discord、自定义服务等）
-url = "https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX"
+url = "https://example.com/agent2ssh-webhook"
 
 # 订阅的事件类型
 events = [
@@ -587,7 +660,7 @@ X-Agent2SSH-Signature: sha256=<hex-encoded-signature>
 
 ### 用途
 
-配置 daemon 层的执行速率和 session 并发限额。限额在 daemon 进程内强制执行，覆盖 `/exec`、`/exec-multi`、`/playbooks/run`、session write、session open、WebSocket exec 和 `/daemons/localhost/exec`。
+配置 daemon 层的执行速率和 session 并发限额。限额在 daemon 进程内强制执行，覆盖 `/exec`、`/exec-multi`、`/exec/compare`、SFTP 操作、`/playbooks/run`、session write、session open、forward add、WebSocket exec 和 `/daemons/localhost/exec`。
 
 ### 文件位置
 
@@ -739,12 +812,14 @@ Agent2SSH 自动设置敏感文件的权限：
 | 文件 | 权限 | 说明 |
 |------|------|------|
 | `daemon.token` | 0600 | 仅所有者可读写 |
+| `daemon_tokens.toml` | 0600 | 包含明文 token 时仅所有者可读写；使用 `token_env` 时仍建议限制权限 |
 | `keys/*` (私钥) | 0600 | 仅所有者可读写 |
 
 在 Unix 系统上权限自动设置。手动创建文件时，请确保设置正确权限：
 
 ```bash
 chmod 600 ~/.agent2ssh/daemon.token
+chmod 600 ~/.agent2ssh/daemon_tokens.toml 2>/dev/null || true
 chmod 600 ~/.agent2ssh/keys/my_key
 ```
 
@@ -761,9 +836,12 @@ tar -czf agent2ssh-backup.tar.gz ~/.agent2ssh/
 # 仅备份配置文件（排除运行时文件和审计日志）
 tar -czf agent2ssh-config.tar.gz \
   ~/.agent2ssh/hosts.json \
+  ~/.agent2ssh/policy.toml \
   ~/.agent2ssh/risk_rules.toml \
+  ~/.agent2ssh/approval_policies.toml \
   ~/.agent2ssh/playbooks.toml \
   ~/.agent2ssh/remotes.toml \
+  ~/.agent2ssh/daemon_tokens.toml \
   ~/.agent2ssh/webhook.toml \
   ~/.agent2ssh/keys/
 ```
@@ -788,6 +866,7 @@ agent2ssh daemon start
 
 - **不要备份 `daemon.pid`**（运行时文件）
 - **谨慎处理 `daemon.token`**（包含敏感认证信息）
+- **谨慎处理 `daemon_tokens.toml`**（使用明文 `token` 时同样包含敏感认证信息；优先迁移环境变量）
 - `audit.jsonl` 可能很大，可以选择性备份
 - 迁移后需要更新 `remotes.toml` 中引用的环境变量
 

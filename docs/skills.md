@@ -67,47 +67,60 @@ Commands are classified into four risk levels:
 - **high** — potentially destructive commands (sudo, rm -rf, chmod 777, etc.)
 - **blocked** — unconditionally dangerous commands (mkfs, rm -rf /, shutdown, fork bomb, etc.)
 
-High-risk commands require `force: true` in the MCP call. Blocked commands are always rejected.
+High-risk commands require daemon approval or `force: true` when policy allows. Local MCP paths that do not have an approval handler fail closed and should be routed through the daemon approval flow. Blocked commands are always rejected.
+
+## Execution Authorization
+
+MCP exec, exec-multi, playbook, SFTP, session open/write, forward add, connect, and disconnect operations use the shared Agent2SSH authorization path where applicable:
+
+- daemon or remote-token scope is checked before approval
+- effective risk combines built-in rules and user policy rules
+- user policy rules can only escalate built-in risk
+- host/playbook `risk_override` can lower or raise non-blocked risk
+- rejected attempts are written to the audit log with the MCP source
 
 ## Approval Flow
 
 When the daemon is running, high-risk commands can be routed through an approval gate:
 
-1. MCP `ssh_exec` with a high-risk command creates an approval request
+1. MCP `ssh_exec` or another daemon-routed operation with high-risk work creates an approval request
 2. Query pending approvals with `ssh_approval_list`
 3. Approve or reject with `ssh_approval_respond`
 
 ## Policy-as-Code (Recommended)
 
-Define unified security policies in `~/.agent2ssh/policy.toml`. This file supports execution gate rules, execution limits, and risk rules in a single place:
+Define unified security policies in `~/.agent2ssh/policy.toml`. This file supports risk rules and approval policies in one versionable place. Execution gate, execution limits, and anomaly detection use their own files: `execution_gate.toml`, `execution_limits.toml`, and `anomaly.toml`.
 
 ```toml
-[risk_rules]
-[risk_rules.blocked]
-patterns = ["kubectl delete namespace", "terraform destroy"]
+[risk.blocked]
+patterns = ["kubectl delete namespace*", "terraform destroy*"]
 
-[risk_rules.high]
-patterns = ["docker system prune", "git push --force"]
+[risk.high]
+patterns = ["docker system prune*", "git push *force*"]
 
-[risk_rules.medium]
-patterns = []
+[risk.medium]
+patterns = ["apt install*", "yum install*"]
 
-[gate]
-max_concurrent = 5          # cap concurrent exec-multi tasks
-max_daily_ops = 500         # cap daily operations per host
-emergency_stop = false      # set true to pause all execution
+[[approval.policies]]
+name = "production high risk"
+tags = ["production"]
+min_risk = "high"
+requires_approval = true
+ttl_secs = 300
 
-[anomaly]
-min_threshold = 10          # minimum events to trigger anomaly scoring
+[[approval.policies]]
+name = "sandbox auto approve"
+hosts = ["sandbox"]
+requires_approval = false
 ```
 
-All risk rules support glob patterns with `*`. User rules are checked before built-in rules.
+All risk rules support glob patterns with `*`. User rules are merged with built-in classification and can only raise risk; they cannot downgrade an internally classified high or blocked command.
 
 > Legacy `~/.agent2ssh/risk_rules.toml` is still supported for backward compatibility, but `policy.toml` is the recommended approach for new deployments.
 
 ## Per-Host Risk Override
 
-Set `risk_override` on a host profile to override the risk level for commands on that host. For example, setting `risk_override: "low"` on a sandbox host allows non-blocked commands to run without confirmation. Commands classified as `blocked` by built-in or user-defined rules are never downgraded by overrides.
+Set `risk_override` on a host profile to override the risk level for non-blocked commands on that host. For example, setting `risk_override: "low"` on a sandbox host lowers non-blocked commands before approval checks. Commands classified as `blocked` by built-in or user-defined rules are never downgraded by overrides.
 
 ## SSH Connection Pool (ControlMaster)
 
@@ -124,7 +137,7 @@ Agent2SSH automatically manages SSH ControlMaster connections for faster repeate
 Configure `~/.agent2ssh/webhook.toml` to receive event notifications:
 
 ```toml
-url = "https://hooks.slack.com/services/T.../B.../..."
+url = "https://example.com/agent2ssh-webhook"
 events = ["approval_required", "exec_blocked", "exec_completed"]
 secret = ""  # Optional HMAC-SHA256 signing key
 ```
@@ -158,6 +171,11 @@ Connect to agent2ssh-daemon instances running on other machines via `~/.agent2ss
 alias = "ci-server"
 url = "http://192.168.1.100:7722"
 token_env = "AGENT2SSH_PROD_TOKEN"
+
+[remotes.scope]
+allowed_tags = ["staging"]
+allowed_commands = ["uptime", "df *", "git *"]
+denied_commands = ["rm *"]
 ```
 
-Use `ssh_list_daemons` to see configured daemons with connectivity status. Pass `daemon_alias` to `ssh_exec` to route commands through a remote daemon. The CLI supports `--daemon <alias>` as a global flag.
+Use `ssh_list_daemons` to see configured daemons with connectivity status. Pass `daemon_alias` to `ssh_exec` to route commands through a remote daemon. The CLI supports `--daemon <alias>` as a global flag. `remotes.toml` scope is enforced client-side before forwarding; the remote daemon can also enforce server-side scoped tokens via `daemon_tokens.toml`.

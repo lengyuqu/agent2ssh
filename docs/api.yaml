@@ -16,6 +16,7 @@ components:
       type: http
       scheme: bearer
       bearerFormat: token
+      description: Bearer token from `~/.agent2ssh/daemon.token` or a scoped token configured in `~/.agent2ssh/daemon_tokens.toml`.
 
   schemas:
     HostProfile:
@@ -110,6 +111,56 @@ components:
         batches_executed:  { type: integer }
         total_duration_ms: { type: integer }
 
+    ExecCompareRequest:
+      type: object
+      required: [hosts, command]
+      properties:
+        hosts:
+          type: array
+          items: { type: string }
+        command:      { type: string }
+        force:        { type: boolean, default: false }
+        timeout_secs: { type: integer, nullable: true }
+        tags:
+          type: array
+          nullable: true
+          items: { type: string }
+
+    ExitCodeGroup:
+      type: object
+      properties:
+        exit_code: { type: integer, nullable: true }
+        hosts:
+          type: array
+          items: { type: string }
+
+    OutputDiff:
+      type: object
+      properties:
+        host: { type: string }
+        output_summary: { type: string }
+        differs_from_first: { type: boolean }
+
+    OutputComparison:
+      type: object
+      properties:
+        identical: { type: boolean }
+        common_prefix: { type: string }
+        diffs:
+          type: array
+          items: { $ref: "#/components/schemas/OutputDiff" }
+
+    ExecComparison:
+      type: object
+      properties:
+        hosts_count: { type: integer }
+        exit_code_groups:
+          type: array
+          items: { $ref: "#/components/schemas/ExitCodeGroup" }
+        stdout_comparison: { $ref: "#/components/schemas/OutputComparison" }
+        stderr_comparison: { $ref: "#/components/schemas/OutputComparison" }
+        summary: { type: string }
+
     PingResult:
       type: object
       properties:
@@ -121,6 +172,27 @@ components:
     RiskLevel:
       type: string
       enum: [low, medium, high, blocked]
+
+    DaemonScope:
+      type: object
+      description: Optional least-privilege scope for daemon tokens or remote daemon aliases.
+      properties:
+        allowed_hosts:
+          type: array
+          items: { type: string }
+          description: Allowed host names. Empty means all hosts.
+        allowed_tags:
+          type: array
+          items: { type: string }
+          description: Allowed host tags. Empty means all tags.
+        allowed_commands:
+          type: array
+          items: { type: string }
+          description: Allowed command or operation patterns. Empty means all commands.
+        denied_commands:
+          type: array
+          items: { type: string }
+          description: Denied command or operation patterns, checked before allowed patterns.
 
     AuditEntry:
       type: object
@@ -205,12 +277,14 @@ components:
       required: [host]
       properties:
         host: { type: string }
+        source: { type: string, nullable: true }
 
     SessionWriteRequest:
       type: object
       required: [input]
       properties:
         input: { type: string }
+        source: { type: string, nullable: true }
 
     ForwardAddRequest:
       type: object
@@ -318,6 +392,7 @@ components:
         alias:     { type: string }
         url:       { type: string }
         connected: { type: boolean }
+        scope:     { $ref: "#/components/schemas/DaemonScope", nullable: true }
 
     ExecutionGateStatus:
       type: object
@@ -434,6 +509,7 @@ paths:
   /exec:
     post:
       summary: Execute a command over SSH
+      description: Applies bearer-token scope, execution gate, execution limits, effective risk, and approval policy before running.
       requestBody:
         required: true
         content:
@@ -445,6 +521,16 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ExecResult" }
         "400":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Scope denied or approval rejected
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "408":
+          description: Approval timed out
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -462,6 +548,7 @@ paths:
   /exec-multi:
     post:
       summary: Execute a command on multiple hosts
+      description: Applies bearer-token scope, execution gate, execution limits, effective risk, and approval policy before running.
       requestBody:
         required: true
         content:
@@ -472,6 +559,51 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ExecMultiBatchResult" }
+        "403":
+          description: Scope denied or approval rejected
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "408":
+          description: Approval timed out
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "423":
+          description: Execution gate paused
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Execution limit exceeded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /exec/compare:
+    post:
+      summary: Execute a command on multiple hosts and compare results
+      description: Applies bearer-token scope, execution gate, execution limits, effective risk, and approval policy before running.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ExecCompareRequest" }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExecComparison" }
+        "403":
+          description: Scope denied or approval rejected
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "408":
+          description: Approval timed out
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "423":
           description: Execution gate paused
           content:
@@ -525,6 +657,9 @@ paths:
       summary: WebSocket streaming exec
       description: |
         Upgrade to WebSocket. Send an ExecRequest JSON message.
+        The stream uses the same SSH command construction and authorization
+        path as `/exec`: bearer-token scope, execution gate, execution limits,
+        effective risk, and approval policy are enforced before output streams.
         Server pushes: {"type":"stdout","data":"..."}, {"type":"stderr","data":"..."}, {"type":"exit","code":0,"duration_ms":1234}
       responses:
         "101":
@@ -584,6 +719,7 @@ paths:
   /sftp/upload:
     post:
       summary: Upload a file via SCP
+      description: Applies bearer-token scope, execution gate, execution limits, effective risk, and approval policy using an `sftp upload ...` operation string.
       requestBody:
         required: true
         content:
@@ -594,10 +730,31 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/SftpResult" }
+        "403":
+          description: Scope denied or approval rejected
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "408":
+          description: Approval timed out
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "423":
+          description: Execution gate paused
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Execution limit exceeded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /sftp/download:
     post:
       summary: Download a file via SCP
+      description: Applies bearer-token scope, execution gate, execution limits, effective risk, and approval policy using an `sftp download ...` operation string.
       requestBody:
         required: true
         content:
@@ -608,10 +765,31 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/SftpResult" }
+        "403":
+          description: Scope denied or approval rejected
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "408":
+          description: Approval timed out
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "423":
+          description: Execution gate paused
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Execution limit exceeded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /sftp/ls:
     post:
       summary: List a remote directory
+      description: Applies bearer-token scope, execution gate, execution limits, effective risk, and approval policy using an `sftp ls ...` operation string.
       requestBody:
         required: true
         content:
@@ -627,10 +805,31 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ExecResult" }
+        "403":
+          description: Scope denied or approval rejected
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "408":
+          description: Approval timed out
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "423":
+          description: Execution gate paused
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Execution limit exceeded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /sftp/stat:
     post:
       summary: Stat a remote path
+      description: Applies bearer-token scope, execution gate, execution limits, effective risk, and approval policy using an `sftp stat ...` operation string.
       requestBody:
         required: true
         content:
@@ -646,10 +845,31 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ExecResult" }
+        "403":
+          description: Scope denied or approval rejected
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "408":
+          description: Approval timed out
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "423":
+          description: Execution gate paused
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Execution limit exceeded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /sftp/mkdir:
     post:
       summary: Create a remote directory
+      description: Applies bearer-token scope, execution gate, execution limits, effective risk, and approval policy using an `sftp mkdir ...` operation string.
       requestBody:
         required: true
         content:
@@ -665,10 +885,31 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ExecResult" }
+        "403":
+          description: Scope denied or approval rejected
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "408":
+          description: Approval timed out
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "423":
+          description: Execution gate paused
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Execution limit exceeded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /sessions:
     post:
       summary: Open a persistent PTY session
+      description: Applies bearer-token scope, execution gate, session concurrency limits, effective risk, and approval policy using `session_open`.
       requestBody:
         required: true
         content:
@@ -682,6 +923,21 @@ paths:
                 type: object
                 properties:
                   id: { type: string, format: uuid }
+        "403":
+          description: Scope denied or approval rejected
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "408":
+          description: Approval timed out
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "423":
+          description: Execution gate paused
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "429":
           description: Execution limit exceeded
           content:
@@ -704,6 +960,7 @@ paths:
   /sessions/{id}/write:
     post:
       summary: Write input to a session
+      description: Applies bearer-token scope, execution gate, execution limits, effective risk, and approval policy to the submitted input.
       parameters:
         - name: id
           in: path
@@ -724,6 +981,16 @@ paths:
                   ok: { type: boolean }
         "423":
           description: Execution gate paused
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Scope denied or approval rejected
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "408":
+          description: Approval timed out
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -773,6 +1040,7 @@ paths:
   /forwards:
     post:
       summary: Add a port forward tunnel
+      description: Applies bearer-token scope, execution gate, execution limits, effective risk, and approval policy using a `forward ...` operation string.
       requestBody:
         required: true
         content:
@@ -783,6 +1051,26 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ForwardRule" }
+        "403":
+          description: Scope denied or approval rejected
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "408":
+          description: Approval timed out
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "423":
+          description: Execution gate paused
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Execution limit exceeded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
     get:
       summary: List active tunnels
       responses:
@@ -892,6 +1180,7 @@ paths:
   /connections/{host}/connect:
     post:
       summary: Establish a ControlMaster connection to a host
+      description: Applies bearer-token scope, execution gate, effective risk, and approval policy using `connect`.
       parameters:
         - name: host
           in: path
@@ -905,10 +1194,26 @@ paths:
                 type: object
                 properties:
                   ok: { type: boolean }
+        "403":
+          description: Scope denied or approval rejected
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "408":
+          description: Approval timed out
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "423":
+          description: Execution gate paused
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /connections/{host}/disconnect:
     post:
       summary: Close a ControlMaster connection to a host
+      description: Applies bearer-token scope, effective risk, and approval policy using `disconnect`.
       parameters:
         - name: host
           in: path
@@ -922,6 +1227,16 @@ paths:
                 type: object
                 properties:
                   ok: { type: boolean }
+        "403":
+          description: Scope denied or approval rejected
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "408":
+          description: Approval timed out
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /playbooks:
     get:
@@ -937,6 +1252,7 @@ paths:
   /playbooks/run:
     post:
       summary: Execute a playbook on a host
+      description: Applies bearer-token scope, execution gate, execution limits, effective risk, and approval policy to each step. Playbook `risk_override` can adjust non-blocked step risk.
       requestBody:
         required: true
         content:
@@ -947,6 +1263,16 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/PlaybookRunResult" }
+        "403":
+          description: Scope denied or approval rejected
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "408":
+          description: Approval timed out
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "423":
           description: Execution gate paused
           content:
@@ -972,6 +1298,7 @@ paths:
   /daemons/{alias}/exec:
     post:
       summary: Execute a command through a configured daemon alias
+      description: Applies the caller token scope, local remote-alias scope, execution gate, execution limits, and local authorization before forwarding to a remote daemon. The remote daemon may enforce its own scoped token and policy again.
       parameters:
         - name: alias
           in: path
@@ -987,6 +1314,16 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ExecResult" }
+        "403":
+          description: Scope denied or approval rejected
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "408":
+          description: Approval timed out
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "423":
           description: Execution gate paused
           content:
