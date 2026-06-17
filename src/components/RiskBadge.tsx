@@ -1,4 +1,5 @@
 import type { RiskLevel } from "../types";
+import { useI18n } from "../i18n";
 
 type Props = {
   level: RiskLevel;
@@ -13,7 +14,8 @@ const map: Record<RiskLevel, { label: string; cls: string }> = {
 };
 
 export default function RiskBadge({ level, hideLow }: Props) {
+  const { t } = useI18n();
   if (hideLow && level === "low") return null;
   const { label, cls } = map[level];
-  return <span className={`risk-badge ${cls}`}>{label}</span>;
+  return <span className={`risk-badge ${cls}`}>{t(label)}</span>;
 }

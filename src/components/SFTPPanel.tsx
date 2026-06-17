@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 import { api } from "../api";
+import { useI18n } from "../i18n";
 import type { ExecResult, SftpResult } from "../types";
 
 type Props = {
@@ -14,6 +15,7 @@ type Props = {
 };
 
 export default function SFTPPanel({ selectedHost }: Props) {
+  const { t } = useI18n();
   const [remotePath, setRemotePath] = useState("/tmp");
   const [localPath, setLocalPath] = useState("");
   const [lsResult, setLsResult] = useState<ExecResult | null>(null);
@@ -99,12 +101,12 @@ export default function SFTPPanel({ selectedHost }: Props) {
     <section className="panel sftp-panel">
       <div className="panel-title">
         <FolderOpen size={16} />
-        Files (SFTP)
+        {t("Files (SFTP)")}
       </div>
       {error && <div className="error">{error}</div>}
 
       <label>
-        Remote path
+        {t("Remote path")}
         <input
           value={remotePath}
           onChange={(e) => setRemotePath(e.target.value)}
@@ -112,7 +114,7 @@ export default function SFTPPanel({ selectedHost }: Props) {
         />
       </label>
       <label>
-        Local path (for transfer)
+        {t("Local path (for transfer)")}
         <input
           value={localPath}
           onChange={(e) => setLocalPath(e.target.value)}
@@ -135,11 +137,11 @@ export default function SFTPPanel({ selectedHost }: Props) {
         </button>
         <button className="primary" onClick={upload} disabled={busy || !selectedHost || !localPath}>
           <ArrowUpFromLine size={14} />
-          Upload
+          {t("Upload")}
         </button>
         <button className="primary" onClick={download} disabled={busy || !selectedHost || !localPath}>
           <ArrowDownToLine size={14} />
-          Download
+          {t("Download")}
         </button>
       </div>
 
@@ -148,15 +150,15 @@ export default function SFTPPanel({ selectedHost }: Props) {
           <div className="meta">
             exit={lsResult.exit_code ?? "signal"} {lsResult.duration_ms}ms
           </div>
-          <pre>{lsResult.stdout || lsResult.stderr || "(empty)"}</pre>
+          <pre>{lsResult.stdout || lsResult.stderr || t("(empty)")}</pre>
         </div>
       )}
 
       {transferResult && (
         <div className="transfer-result">
-          {transferResult.direction === "upload" ? "Uploaded" : "Downloaded"}{" "}
+          {transferResult.direction === "upload" ? t("Uploaded") : t("Downloaded")}{" "}
           <code>{transferResult.local_path}</code> ↔{" "}
-          <code>{transferResult.remote_path}</code> in{" "}
+          <code>{transferResult.remote_path}</code> {t("in")}{" "}
           {transferResult.duration_ms}ms
         </div>
       )}

@@ -61,6 +61,55 @@ select {
   gap: 16px;
 }
 
+.module-nav {
+  display: grid;
+  gap: 6px;
+  border: 1px solid #33444f;
+  border-radius: 8px;
+  background: #202d35;
+  padding: 10px;
+}
+
+.module-nav-title {
+  color: #9fb0bd;
+  font-size: 12px;
+  font-weight: 750;
+  letter-spacing: 0;
+  margin: 0 2px 4px;
+}
+
+.module-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #edf4f7;
+  padding: 9px 10px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.module-nav-item:hover {
+  background: #2a3b45;
+}
+
+.module-nav-item.active {
+  background: #0f766e;
+  color: #fff;
+}
+
+.module-nav-item svg {
+  color: #9fb0bd;
+  flex-shrink: 0;
+}
+
+.module-nav-item.active svg {
+  color: #fff;
+}
+
 .brand {
   display: flex;
   align-items: center;
@@ -75,6 +124,17 @@ select {
   line-height: 1.2;
 }
 
+.topbar h2 {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.topbar h2 svg {
+  color: #526774;
+  flex-shrink: 0;
+}
+
 .brand span,
 .topbar p {
   color: #9fb0bd;
@@ -87,6 +147,15 @@ select {
   display: flex;
   flex-direction: column;
   gap: 18px;
+}
+
+.module-stack {
+  display: grid;
+  gap: 18px;
+}
+
+.module-page {
+  min-width: 0;
 }
 
 .topbar {
@@ -105,6 +174,33 @@ select {
   border-radius: 6px;
   padding: 9px 12px;
   color: #41515c;
+}
+
+.language-switcher {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid #c7d2da;
+  background: #fff;
+  border-radius: 6px;
+  padding: 5px 6px;
+  color: #41515c;
+  white-space: nowrap;
+}
+
+.language-switcher button {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  border-radius: 4px;
+  padding: 4px 7px;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.language-switcher button.active {
+  background: #182229;
+  color: #fff;
 }
 
 .topbar-actions {
@@ -171,6 +267,13 @@ select {
   align-items: start;
 }
 
+.host-management-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(340px, 0.6fr);
+  gap: 18px;
+  align-items: start;
+}
+
 .grid-equal {
   grid-template-columns: 1fr 1fr;
 }
@@ -194,6 +297,16 @@ select {
   gap: 8px;
   font-weight: 700;
   margin-bottom: 14px;
+}
+
+.panel-count {
+  margin-left: 4px;
+  border: 1px solid #d4dee5;
+  border-radius: 999px;
+  padding: 3px 8px;
+  color: #667783;
+  font-size: 12px;
+  font-weight: 650;
 }
 
 .icon-button {
@@ -222,56 +335,60 @@ select {
 .host-list {
   display: grid;
   gap: 8px;
+  max-height: 430px;
+  overflow: auto;
+  padding-right: 2px;
 }
 
 .host-filters {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 6px;
-  margin-bottom: 10px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
 }
 
 .host-filters input {
   min-width: 0;
-  padding: 7px 8px;
+  padding: 9px 10px;
   border-radius: 6px;
-  border: 1px solid #40535e;
-  background: #182229;
-  color: #edf4f7;
+  border: 1px solid #c9d4db;
+  background: #fbfdfe;
+  color: #172026;
 }
 
 .host-filters input::placeholder {
-  color: #728491;
+  color: #8a9aa6;
 }
 
 .host-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 38px 38px;
   align-items: stretch;
-  gap: 4px;
-  border: 1px solid #40535e;
+  border: 1px solid #d8e0e6;
   border-radius: 6px;
-  background: #182229;
+  background: #fbfdfe;
+  min-height: 74px;
 }
 
 .host-row.active {
   border-color: #42b883;
-  background: #213c35;
+  background: #f1fbf6;
 }
 
 .host {
-  flex: 1;
+  min-width: 0;
   text-align: left;
   border: 0;
   border-radius: 6px 0 0 6px;
   background: transparent;
-  color: #edf4f7;
+  color: #172026;
   padding: 11px;
   cursor: pointer;
 }
 
 .host span {
   display: block;
-  color: #9fb0bd;
+  color: #667783;
   margin-top: 4px;
   word-break: break-all;
   font-size: 12px;
@@ -286,25 +403,20 @@ select {
 
 .host-meta span {
   margin-top: 0;
-  color: #c8d3da;
+  color: #667783;
   font-size: 10px;
 }
 
 .host-delete {
-  flex-shrink: 0;
-  width: 32px;
+  width: 38px;
   height: auto;
   margin-left: 0;
   border: 0;
-  border-left: 1px solid #40535e;
+  border-left: 1px solid #d8e0e6;
   border-radius: 0 6px 6px 0;
-  color: #9fb0bd;
-  opacity: 0;
-  transition: opacity 0.15s;
-}
-
-.host-row:hover .host-delete {
+  color: #667783;
   opacity: 1;
+  transition: opacity 0.15s;
 }
 
 .host-delete:hover {
@@ -331,20 +443,15 @@ select {
 }
 
 .host-connect {
-  flex-shrink: 0;
-  width: 32px;
+  width: 38px;
   height: auto;
   margin-left: 0;
   border: 0;
-  border-left: 1px solid #40535e;
+  border-left: 1px solid #d8e0e6;
   border-radius: 0;
-  color: #9fb0bd;
-  opacity: 0;
-  transition: opacity 0.15s;
-}
-
-.host-row:hover .host-connect {
+  color: #667783;
   opacity: 1;
+  transition: opacity 0.15s;
 }
 
 .host-connect:hover {
@@ -357,6 +464,13 @@ label {
   gap: 7px;
   color: #41515c;
   font-weight: 650;
+}
+
+.field-hint {
+  color: #667783;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.35;
 }
 
 textarea,

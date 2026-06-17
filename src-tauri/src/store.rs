@@ -804,6 +804,7 @@ mod tests {
     // ── F6-2: Audit export tests ────────────────────────────────────────────
 
     #[test]
+    #[serial_test::serial]
     fn test_export_audit_jsonl_empty() {
         // With a temp config dir (no audit data), JSONL export should be empty
         let config_dir = std::env::temp_dir().join(format!(
@@ -822,6 +823,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_export_audit_csv_headers() {
         // CSV output should always contain the correct header row
         let config_dir = std::env::temp_dir().join(format!(

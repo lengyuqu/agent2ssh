@@ -1,6 +1,14 @@
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
-use std::{process::Stdio, sync::Arc, time::Duration, time::Instant};
+use std::{
+    io::{Read, Write},
+    net::{TcpStream, ToSocketAddrs},
+    path::Path,
+    process::Stdio,
+    sync::Arc,
+    time::Duration,
+    time::Instant,
+};
 use tokio::{io::{AsyncReadExt, AsyncWriteExt}, process::Command, sync::Semaphore, task::JoinSet};
 
 use crate::{
@@ -40,7 +48,7 @@ pub struct ExecPlanTarget {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TeamConfigExport {
-    /// Host profiles with key_path stripped for safe sharing
+    /// Host profiles with key_path/password stripped for safe sharing
     pub hosts: Vec<HostProfile>,
     /// Raw TOML content of risk_rules.toml (if it exists)
     pub risk_rules: Option<String>,
@@ -59,6 +67,7 @@ pub fn export_team_config() -> Result<TeamConfigExport> {
         .into_iter()
         .map(|mut h| {
             h.key_path = None;
+            h.password = None;
             h
         })
         .collect();
@@ -684,6 +693,90 @@ pub async fn exec_ssh_core(request: ExecRequest) -> Result<ExecResult> {
     exec_ssh_core_with_risk_override(request, None).await
 }
 
+fn connect_embedded_ssh(host: &HostProfile, timeout_secs: u64) -> Result<ssh2::Session> {
+    let address = format!("{}:{}", host.host, host.port.unwrap_or(22));
+    let socket_addr = address
+        .to_socket_addrs()
+        .with_context(|| format!("failed to resolve {address}"))?
+        .next()
+        .ok_or_else(|| anyhow!("failed to resolve {address}"))?;
+    let tcp = TcpStream::connect_timeout(&socket_addr, Duration::from_secs(timeout_secs.min(30)))?;
+    tcp.set_read_timeout(Some(Duration::from_secs(timeout_secs)))?;
+    tcp.set_write_timeout(Some(Duration::from_secs(timeout_secs)))?;
+
+    let mut session = ssh2::Session::new()?;
+    session.set_tcp_stream(tcp);
+    session.handshake()?;
+
+    let default_user = std::env::var("USER").unwrap_or_else(|_| "root".to_string());
+    let user = host
+        .user
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(default_user.as_str());
+
+    if let Some(password) = host.password.as_deref().filter(|value| !value.is_empty()) {
+        session.userauth_password(user, password)?;
+    } else if let Some(key_path) = host.key_path.as_deref().filter(|value| !value.trim().is_empty()) {
+        let path = expand_tilde(key_path);
+        session.userauth_pubkey_file(user, None, Path::new(&path), None)?;
+    } else {
+        let mut agent = session.agent()?;
+        agent.connect()?;
+        agent.list_identities()?;
+        let identity = agent
+            .identities()?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("no SSH key_path, password, or ssh-agent identity available"))?;
+        agent.userauth(user, &identity)?;
+    }
+
+    if !session.authenticated() {
+        return Err(anyhow!("SSH authentication failed for '{}'", host.name));
+    }
+
+    Ok(session)
+}
+
+fn exec_ssh_embedded(
+    host: HostProfile,
+    command: String,
+    stdin: Option<String>,
+    timeout_secs: u64,
+    max_bytes: usize,
+) -> Result<(Option<i32>, Vec<u8>, Vec<u8>, bool)> {
+    let session = connect_embedded_ssh(&host, timeout_secs)?;
+    let mut channel = session.channel_session()?;
+    channel.exec(&command)?;
+    if let Some(data) = stdin {
+        channel.write_all(data.as_bytes())?;
+        channel.send_eof()?;
+    }
+
+    let mut stdout = Vec::new();
+    let mut buffer = [0u8; 8192];
+    let mut truncated = false;
+    loop {
+        let read = channel.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        if stdout.len() < max_bytes {
+            let remaining = max_bytes - stdout.len();
+            stdout.extend_from_slice(&buffer[..read.min(remaining)]);
+        }
+        if stdout.len() >= max_bytes {
+            truncated = true;
+        }
+    }
+
+    let mut stderr = Vec::new();
+    channel.stderr().read_to_end(&mut stderr)?;
+    channel.wait_close()?;
+    Ok((Some(channel.exit_status()?), stdout, stderr, truncated))
+}
+
 pub fn apply_risk_override(classified: RiskLevel, override_level: Option<RiskLevel>) -> RiskLevel {
     if classified == RiskLevel::Blocked {
         RiskLevel::Blocked
@@ -734,6 +827,61 @@ pub(crate) async fn exec_ssh_core_with_risk_override(
 
     const DEFAULT_MAX_OUTPUT: usize = 4 * 1024 * 1024; // 4 MiB
     let max_bytes = request.max_output_bytes.unwrap_or(DEFAULT_MAX_OUTPUT);
+
+    if host.jump_host.is_none() {
+        let embedded_host = host.clone();
+        let embedded_command = request.command.clone();
+        let embedded_stdin = request.stdin.clone();
+        let (exit_code, raw_stdout, raw_stderr, truncated) = tokio::time::timeout(
+            Duration::from_secs(timeout_secs),
+            tokio::task::spawn_blocking(move || {
+                exec_ssh_embedded(
+                    embedded_host,
+                    embedded_command,
+                    embedded_stdin,
+                    timeout_secs,
+                    max_bytes,
+                )
+            }),
+        )
+        .await
+        .map_err(|_| anyhow!("SSH command timed out after {timeout_secs}s: '{}'", request.command))?
+        .context("embedded SSH task failed")??;
+
+        let result = ExecResult {
+            host: request.host,
+            command: request.command,
+            exit_code,
+            stdout: String::from_utf8_lossy(&raw_stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&raw_stderr).into_owned(),
+            duration_ms: started.elapsed().as_millis(),
+            risk_level: risk,
+            truncated,
+        };
+        append_audit(
+            &result,
+            risk,
+            request.reason.as_deref(),
+            request.change_id.as_deref(),
+            Some(&source),
+        )?;
+
+        crate::events::publish_event(
+            crate::events::EventType::ExecCompleted,
+            serde_json::json!({
+                "host": result.host,
+                "command": result.command,
+                "exit_code": result.exit_code,
+                "risk_level": format!("{}", result.risk_level),
+                "duration_ms": result.duration_ms,
+                "reason": request.reason,
+                "change_id": request.change_id,
+                "source": source,
+            }),
+        );
+
+        return Ok(result);
+    }
 
     let mut cmd = build_ssh_command(&host);
     // Reuse an existing ControlMaster connection when available
@@ -1303,9 +1451,23 @@ fn longest_common_prefix(strings: &[&str]) -> String {
 }
 
 pub(crate) fn build_ssh_command(host: &HostProfile) -> Command {
-    let mut cmd = Command::new("ssh");
+    let has_password = host
+        .password
+        .as_deref()
+        .map(|password| !password.trim().is_empty())
+        .unwrap_or(false);
+    let mut cmd = if has_password {
+        let mut cmd = Command::new("sshpass");
+        cmd.arg("-e").arg("ssh");
+        if let Some(password) = &host.password {
+            cmd.env("SSHPASS", password);
+        }
+        cmd
+    } else {
+        Command::new("ssh")
+    };
     cmd.arg("-o")
-        .arg("BatchMode=yes")
+        .arg(if has_password { "BatchMode=no" } else { "BatchMode=yes" })
         .arg("-o")
         .arg("StrictHostKeyChecking=accept-new")
         .arg("-p")
@@ -1376,9 +1538,19 @@ fn expand_tilde(path: &str) -> String {
 }
 
 fn scp_base_args(host: &HostProfile) -> Vec<String> {
+    let batch_mode = if host
+        .password
+        .as_deref()
+        .map(|password| !password.trim().is_empty())
+        .unwrap_or(false)
+    {
+        "BatchMode=no"
+    } else {
+        "BatchMode=yes"
+    };
     let mut args = vec![
         "-o".to_string(),
-        "BatchMode=yes".to_string(),
+        batch_mode.to_string(),
         "-o".to_string(),
         "StrictHostKeyChecking=accept-new".to_string(),
         "-P".to_string(),
@@ -1398,9 +1570,50 @@ pub async fn sftp_upload_core(request: SftpUploadRequest) -> Result<SftpResult> 
     let started = Instant::now();
 
     let local = expand_tilde(&request.local_path);
+    if host.jump_host.is_none() {
+        let embedded_host = host.clone();
+        let remote_path = request.remote_path.clone();
+        let local_for_task = local.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let session = connect_embedded_ssh(&embedded_host, 60)?;
+            let sftp = session.sftp()?;
+            let mut local_file = std::fs::File::open(&local_for_task)
+                .with_context(|| format!("failed to open local file {local_for_task}"))?;
+            let mut remote_file = sftp
+                .create(Path::new(&remote_path))
+                .with_context(|| format!("failed to create remote file {remote_path}"))?;
+            std::io::copy(&mut local_file, &mut remote_file)?;
+            Ok(())
+        })
+        .await
+        .context("embedded SFTP upload task failed")??;
+
+        return Ok(SftpResult {
+            host: request.host,
+            local_path: local,
+            remote_path: request.remote_path,
+            direction: SftpDirection::Upload,
+            duration_ms: started.elapsed().as_millis(),
+        });
+    }
+
     let remote = format!("{}:{}", ssh_target(&host), request.remote_path);
 
-    let mut cmd = Command::new("scp");
+    let has_password = host
+        .password
+        .as_deref()
+        .map(|password| !password.trim().is_empty())
+        .unwrap_or(false);
+    let mut cmd = if has_password {
+        let mut cmd = Command::new("sshpass");
+        cmd.arg("-e").arg("scp");
+        if let Some(password) = &host.password {
+            cmd.env("SSHPASS", password);
+        }
+        cmd
+    } else {
+        Command::new("scp")
+    };
     for arg in scp_base_args(&host) {
         cmd.arg(arg);
     }
@@ -1429,10 +1642,51 @@ pub async fn sftp_download_core(request: SftpDownloadRequest) -> Result<SftpResu
     let host = resolve_host(&request.host)?;
     let started = Instant::now();
 
-    let remote = format!("{}:{}", ssh_target(&host), request.remote_path);
     let local = expand_tilde(&request.local_path);
+    if host.jump_host.is_none() {
+        let embedded_host = host.clone();
+        let remote_path = request.remote_path.clone();
+        let local_for_task = local.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let session = connect_embedded_ssh(&embedded_host, 60)?;
+            let sftp = session.sftp()?;
+            let mut remote_file = sftp
+                .open(Path::new(&remote_path))
+                .with_context(|| format!("failed to open remote file {remote_path}"))?;
+            let mut local_file = std::fs::File::create(&local_for_task)
+                .with_context(|| format!("failed to create local file {local_for_task}"))?;
+            std::io::copy(&mut remote_file, &mut local_file)?;
+            Ok(())
+        })
+        .await
+        .context("embedded SFTP download task failed")??;
 
-    let mut cmd = Command::new("scp");
+        return Ok(SftpResult {
+            host: request.host,
+            local_path: local,
+            remote_path: request.remote_path,
+            direction: SftpDirection::Download,
+            duration_ms: started.elapsed().as_millis(),
+        });
+    }
+
+    let remote = format!("{}:{}", ssh_target(&host), request.remote_path);
+
+    let has_password = host
+        .password
+        .as_deref()
+        .map(|password| !password.trim().is_empty())
+        .unwrap_or(false);
+    let mut cmd = if has_password {
+        let mut cmd = Command::new("sshpass");
+        cmd.arg("-e").arg("scp");
+        if let Some(password) = &host.password {
+            cmd.env("SSHPASS", password);
+        }
+        cmd
+    } else {
+        Command::new("scp")
+    };
     for arg in scp_base_args(&host) {
         cmd.arg(arg);
     }
@@ -1561,6 +1815,7 @@ pub fn import_ssh_config_core(path: Option<&str>) -> Result<Vec<HostProfile>> {
             user: u.clone(),
             port: p,
             key_path: id.clone(),
+            password: None,
             jump_host,
             risk_override: None,
             tags: vec![],
@@ -1837,6 +2092,7 @@ fn parse_ssh_config_file(path: &std::path::Path) -> Result<Vec<HostProfile>> {
         out.push(HostProfile {
             name: alias.to_string(), host: hn.to_string(),
             user: u.clone(), port: p, key_path: id.clone(),
+            password: None,
             jump_host, risk_override: None, tags: vec![],
             env: None, role: None, owner: None,
         });
@@ -1979,6 +2235,42 @@ pub async fn ping_hosts_core(host_names: Vec<String>, timeout_secs: Option<u64>)
                 },
                 Some(host) => {
                     let started = Instant::now();
+                    if host.jump_host.is_none() {
+                        let embedded_host = host.clone();
+                        let result = tokio::time::timeout(
+                            Duration::from_secs(timeout + 2),
+                            tokio::task::spawn_blocking(move || {
+                                connect_embedded_ssh(&embedded_host, timeout).map(|_| ())
+                            }),
+                        )
+                        .await;
+                        return match result {
+                            Ok(Ok(Ok(()))) => PingResult {
+                                host: name,
+                                reachable: true,
+                                latency_ms: Some(started.elapsed().as_millis() as u64),
+                                error: None,
+                            },
+                            Ok(Ok(Err(e))) => PingResult {
+                                host: name,
+                                reachable: false,
+                                latency_ms: Some(started.elapsed().as_millis() as u64),
+                                error: Some(e.to_string()),
+                            },
+                            Ok(Err(e)) => PingResult {
+                                host: name,
+                                reachable: false,
+                                latency_ms: None,
+                                error: Some(format!("task panicked: {e}")),
+                            },
+                            Err(_) => PingResult {
+                                host: name,
+                                reachable: false,
+                                latency_ms: None,
+                                error: Some(format!("timed out after {timeout}s")),
+                            },
+                        };
+                    }
                     let target = crate::connection::ssh_target(&host);
                     let mut cmd = build_ssh_command(&host);
                     cmd.arg("-o")
@@ -2115,6 +2407,7 @@ mod tests {
                 user: None,
                 port: None,
                 key_path: None,
+                password: None,
                 jump_host: None,
                 risk_override: None,
                 tags: vec!["blue".into(), "web".into()],
@@ -2128,6 +2421,7 @@ mod tests {
                 user: None,
                 port: None,
                 key_path: None,
+                password: None,
                 jump_host: None,
                 risk_override: None,
                 tags: vec!["db".into()],
@@ -2196,6 +2490,7 @@ mod tests {
             user: Some("ubuntu".to_string()),
             port: Some(22),
             key_path: None,
+            password: None,
             jump_host: None,
             risk_override: None,
             tags: vec![],
@@ -2294,6 +2589,62 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
+    fn test_team_config_export_strips_auth_material() {
+        let config_dir = std::env::temp_dir().join(format!(
+            "agent2ssh-export-auth-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::env::set_var("AGENT2SSH_CONFIG_DIR", &config_dir);
+
+        crate::store::save_config(&AppConfig {
+            hosts: vec![HostProfile {
+                name: "password-host".into(),
+                host: "10.0.0.1".into(),
+                user: Some("ubuntu".into()),
+                port: Some(22),
+                key_path: Some("~/.ssh/id_ed25519".into()),
+                password: Some("secret".into()),
+                jump_host: None,
+                risk_override: None,
+                tags: vec![],
+                env: None,
+                role: None,
+                owner: None,
+            }],
+        })
+        .unwrap();
+
+        let export = export_team_config().unwrap();
+        assert_eq!(export.hosts.len(), 1);
+        assert_eq!(export.hosts[0].key_path, None);
+        assert_eq!(export.hosts[0].password, None);
+    }
+
+    #[test]
+    fn test_preview_exec_multi_scales_to_100_hosts() {
+        let hosts = (1..=100)
+            .map(|i| make_test_host(&format!("scale-{i:03}")))
+            .collect::<Vec<_>>();
+
+        let plan = build_plan_from_profile(hosts, "hostname", Some(5));
+
+        assert_eq!(plan.targets.len(), 100);
+        assert_eq!(plan.overall_risk, RiskLevel::Low);
+        assert!(!plan.requires_approval);
+        assert!(plan.warnings.is_empty());
+        assert!(plan
+            .targets
+            .iter()
+            .all(|target| target.risk_level == RiskLevel::Low
+                && !target.needs_force
+                && !target.blocked
+                && target.timeout_secs == 5));
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn test_preview_team_config_import() {
         let config_dir = std::env::temp_dir().join(format!(
             "agent2ssh-preview-import-{}",
@@ -2310,6 +2661,7 @@ mod tests {
                 user: Some("ubuntu".into()),
                 port: Some(22),
                 key_path: None,
+                password: None,
                 jump_host: None,
                 risk_override: None,
                 tags: vec![],
@@ -2329,6 +2681,7 @@ mod tests {
                     user: None,
                     port: None,
                     key_path: None,
+                    password: None,
                     jump_host: None,
                     risk_override: None,
                     tags: vec![],
@@ -2343,6 +2696,7 @@ mod tests {
                     user: Some("ubuntu".into()),
                     port: Some(22),
                     key_path: None,
+                    password: None,
                     jump_host: None,
                     risk_override: None,
                     tags: vec![],
@@ -2654,13 +3008,14 @@ mod tests {
                 name: "prod-web".into(), host: "10.0.0.1".into(),
                 user: Some("ubuntu".into()), port: Some(22),
                 key_path: Some("~/.ssh/id_rsa".into()),
+                password: None,
                 jump_host: None, risk_override: None, tags: vec!["web".into()],
                 env: Some("prod".into()), role: Some("web".into()), owner: None,
             },
             HostProfile {
                 name: "staging-db".into(), host: "10.0.1.1".into(),
                 user: None, port: Some(2222),
-                key_path: None, jump_host: Some("bastion".into()),
+                key_path: None, password: None, jump_host: Some("bastion".into()),
                 risk_override: None, tags: vec![], env: None, role: None, owner: None,
             },
         ];
@@ -2682,7 +3037,7 @@ mod tests {
     fn test_export_to_ssh_config_format_default_port_omitted() {
         let hosts = vec![HostProfile {
             name: "test".into(), host: "10.0.0.1".into(),
-            user: None, port: Some(22), key_path: None,
+            user: None, port: Some(22), key_path: None, password: None,
             jump_host: None, risk_override: None, tags: vec![],
             env: None, role: None, owner: None,
         }];

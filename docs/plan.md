@@ -75,7 +75,7 @@ P0-P10 已全部完成。当前基线：
 | R | 发布与采用闭环 | 🟨 进行中 | 高 | Codex |
 | G | 观察面升级为控制面 | ✅ 已完成 | 高 | Codex |
 | T | 团队化与多用户 | ⬜ 待认领 | 中 | - |
-| E | 生态与可靠性 | ⬜ 待认领 | 中 | - |
+| E | 生态与可靠性 | ✅ 已完成 | 中 | Codex |
 
 ## 已完成阶段归档
 
@@ -107,7 +107,7 @@ P0-P10 已全部完成。当前基线：
 当前下一步聚焦：
 
 - G 阶段已完成：Live Activity 已从观察面升级为控制面，覆盖 execution gate、执行限额、policy dry-run 和异常检测。
-- R 阶段成为当前优先级：完成 `v0.1.1` 发布动作，等待 CI assets 后回填 Homebrew sha256，并启动首轮外部 dogfood。
+- R 阶段成为当前优先级：`v0.1.1` 发布动作与外部接入剧本已完成，下一步是跨平台真实安装验证和首轮外部 dogfood。
 
 ## 真实测试服务器
 
@@ -316,7 +316,7 @@ P0-P10 已全部完成。当前基线：
 
 S1-S9 与 G 阶段已完成，0.1.1 处于发布就绪状态，Live Activity 已从观察面升级为控制面。下一步聚焦：
 
-1. R 阶段（当前优先级）：完成 0.1.1 发布动作并拿到首个外部用户反馈。
+1. R 阶段（当前优先级）：完成跨平台真实安装验证并拿到首个外部用户反馈。
 2. E 阶段（穿插推进）：多 agent 接入验证、规模与 SSE 稳定性、契约一致性接入 CI。
 3. T 阶段（有真实多人场景后再做）：集中审计聚合、RBAC、审批协作闭环。
 
@@ -379,7 +379,7 @@ S9(0.1.1 已收口)
 |------|------|--------|--------|------|----------|
 | R1 | ⬜ 待认领 | 高 | - | 跨平台桌面包真实验证 | 在 Windows / Linux 实测 sidecar 命名、PTY、`scp`/`ssh` 子进程行为；记录与 macOS 的差异和修复 |
 | R2 | ✅ 已完成 | 高 | Codex | 完成 0.1.1 发布动作 | `v0.1.1` tag 已推送到 GitHub/git233；release CI run `27638444133` 通过并上传 CLI tarballs、checksums、macOS/Linux/Windows 桌面包；`scripts/agent2ssh.rb` 已回填 macOS arm64、macOS x86_64、Linux x86_64 sha256；发布 tarball checksum 校验通过；使用 macOS arm64 release tarball 跑通 `scripts/verify-install.sh`（7 passed, 0 failed） |
-| R3 | ⬜ 待认领 | 中 | - | 外部接入剧本与反馈入口 | "陌生人 10 分钟接入 Claude Code / Codex"最短路径文档；issue 模板与可选匿名遥测开关 |
+| R3 | ✅ 已完成 | 中 | Codex | 外部接入剧本与反馈入口 | 新增 `docs/guides/external-user-10min.md`，覆盖 CLI host import/add、低风险 exec 验证、Codex/Claude-style MCP 配置、反馈脱敏；新增 GitHub bug/adoption issue 模板；明确 `v0.1.1` 默认无自动遥测，匿名反馈为手动 opt-in，未来运行时遥测必须默认关闭且不采集命令/主机/输出/凭据 |
 | R4 | ⬜ 待认领 | 高 | - | 首次外部 dogfood | 1-2 个非本人用户接自己的机器；产出首轮外部 bug backlog（对标 F1） |
 
 ## T · 团队化与多用户
@@ -398,6 +398,6 @@ S9(0.1.1 已收口)
 
 | 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
 |------|------|--------|--------|------|----------|
-| E1 | ⬜ 待认领 | 中 | - | 多 agent 集成验证 | 实测 Codex、opencode、Cursor 等 MCP 接入，不只 Claude Code |
-| E2 | ⬜ 待认领 | 中 | - | 可靠性与规模 | 100+ host、多 daemon 下的连接池、SSE 稳定性与性能 |
-| E3 | ⬜ 待认领 | 中 | - | 契约一致性接入 CI | 把 S3 的文档/OpenAPI/MCP 一致性检查接入 CI，杜绝漂移 |
+| E1 | ✅ 已完成 | 中 | Codex | 多 agent 集成验证 | 新增 `scripts/e1-mcp-client-smoke.py` 和 `docs/e1-multi-agent-integration-report.md`，用 MCP stdio 协议分别模拟 `codex`、`opencode`、`cursor`、`claude-code` source，验证 initialize、51 工具枚举和 `ssh_risk_check` blocked 判定；真实客户端 UI 行为留给 R4 dogfood |
+| E2 | ✅ 已完成 | 中 | Codex | 可靠性与规模 | 新增 `scripts/e2-scale-plan-smoke.py` 和 `docs/e2-scale-reliability-report.md`，在隔离配置中生成 100 个 synthetic host 并跑通 `exec-multi --plan`；新增 100 host plan Rust 回归与 1000 event burst 事件总线回归；真实 100 台 SSH/多 daemon 压测留给后续外部环境 |
+| E3 | ✅ 已完成 | 中 | Codex | 契约一致性接入 CI | `.github/workflows/ci.yml` 新增 `contract-consistency` job，在 PR、push 和 release 入口显式运行 S3 的 `docs/skills.md` vs MCP 工具、OpenAPI/daemon schema fixture、CLI help 参数一致性检查；`build` matrix 和 release-only `tauri-bundle` job 依赖该 job，契约漂移会先于跨平台构建/打包失败 |

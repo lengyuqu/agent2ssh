@@ -1,6 +1,7 @@
 import { History, RefreshCw, SlidersHorizontal } from "lucide-react";
 import { useState } from "react";
 import { api } from "../api";
+import { useI18n } from "../i18n";
 import type { AuditEntry, AuditFilter, RiskLevel } from "../types";
 import RiskBadge from "./RiskBadge";
 
@@ -10,6 +11,7 @@ type Props = {
 };
 
 export default function AuditPanel({ audit, onRefresh }: Props) {
+  const { t } = useI18n();
   const [showFilters, setShowFilters] = useState(false);
   const [hostFilter, setHostFilter] = useState("");
   const [riskFilter, setRiskFilter] = useState<RiskLevel | "">("");
@@ -35,18 +37,18 @@ export default function AuditPanel({ audit, onRefresh }: Props) {
     <section className="panel audit-panel">
       <div className="panel-title">
         <History size={16} />
-        Audit
+        {t("Audit")}
         <button
           className="icon-button"
           onClick={() => setShowFilters(!showFilters)}
-          title="Toggle filters"
+          title={t("Toggle filters")}
         >
           <SlidersHorizontal size={15} />
         </button>
         <button
           className="icon-button"
           onClick={() => onRefresh()}
-          title="Refresh audit"
+          title={t("Refresh audit")}
         >
           <RefreshCw size={15} />
         </button>
@@ -56,30 +58,30 @@ export default function AuditPanel({ audit, onRefresh }: Props) {
         <div className="audit-filters">
           <div className="audit-filter-row">
             <label>
-              Host
+              {t("Host")}
               <input
                 value={hostFilter}
                 onChange={(e) => setHostFilter(e.target.value)}
-                placeholder="all hosts"
+                placeholder={t("all hosts")}
               />
             </label>
             <label>
-              Risk level
+              {t("Risk level")}
               <select
                 value={riskFilter}
                 onChange={(e) =>
                   setRiskFilter(e.target.value as RiskLevel | "")
                 }
               >
-                <option value="">all</option>
-                <option value="low">low</option>
-                <option value="medium">medium</option>
-                <option value="high">high</option>
-                <option value="blocked">blocked</option>
+                <option value="">{t("all")}</option>
+                <option value="low">{t("low")}</option>
+                <option value="medium">{t("medium")}</option>
+                <option value="high">{t("high")}</option>
+                <option value="blocked">{t("blocked")}</option>
               </select>
             </label>
             <label>
-              Limit
+              {t("Limit")}
               <input
                 type="number"
                 min={1}
@@ -90,10 +92,10 @@ export default function AuditPanel({ audit, onRefresh }: Props) {
             </label>
             <div className="audit-filter-actions">
               <button className="primary" onClick={applyFilters}>
-                Apply
+                {t("Apply")}
               </button>
               <button className="secondary" onClick={clearFilters}>
-                Clear
+                {t("Clear")}
               </button>
             </div>
           </div>
@@ -116,7 +118,7 @@ export default function AuditPanel({ audit, onRefresh }: Props) {
           </div>
         ))}
         {audit.length === 0 && (
-          <div className="empty">No commands executed yet</div>
+          <div className="empty">{t("No commands executed yet")}</div>
         )}
       </div>
     </section>

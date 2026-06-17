@@ -383,6 +383,7 @@ async fn handle_request(request: &Value) -> std::result::Result<Value, McpError>
                             "user":      { "type": "string" },
                             "port":      { "type": "integer" },
                             "key_path":  { "type": "string" },
+                            "password":  { "type": "string", "description": "SSH password for password-based authentication. Prefer key_path for production." },
                             "jump_host": { "type": "string", "description": "Host profile alias to use as ProxyJump bastion." },
                             "tags":      { "type": "array", "items": { "type": "string" } },
                             "env":       { "type": "string", "description": "Environment label for grouping hosts." },

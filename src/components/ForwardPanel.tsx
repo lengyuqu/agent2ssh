@@ -1,6 +1,7 @@
 import { ArrowLeftRight, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
+import { useI18n } from "../i18n";
 import type { ForwardDirection, ForwardRule } from "../types";
 
 type Props = {
@@ -8,6 +9,7 @@ type Props = {
 };
 
 export default function ForwardPanel({ selectedHost }: Props) {
+  const { t } = useI18n();
   const [rules, setRules] = useState<ForwardRule[]>([]);
   const [direction, setDirection] = useState<ForwardDirection>("local");
   const [bindPort, setBindPort] = useState(8080);
@@ -62,8 +64,8 @@ export default function ForwardPanel({ selectedHost }: Props) {
     <section className="panel forward-panel">
       <div className="panel-title">
         <ArrowLeftRight size={16} />
-        Port Forwarding
-        <button className="icon-button" onClick={refresh} title="Refresh">
+        {t("Port Forwarding")}
+        <button className="icon-button" onClick={refresh} title={t("Refresh")}>
           <RefreshCw size={15} />
         </button>
       </div>
@@ -72,19 +74,19 @@ export default function ForwardPanel({ selectedHost }: Props) {
       <div className="forward-form">
         <div className="forward-form-row">
           <label>
-            Direction
+            {t("Direction")}
             <select
               value={direction}
               onChange={(e) =>
                 setDirection(e.target.value as ForwardDirection)
               }
             >
-              <option value="local">Local (-L)</option>
-              <option value="remote">Remote (-R)</option>
+              <option value="local">{t("Local (-L)")}</option>
+              <option value="remote">{t("Remote (-R)")}</option>
             </select>
           </label>
           <label>
-            Bind port
+            {t("Bind port")}
             <input
               type="number"
               min={1}
@@ -96,7 +98,7 @@ export default function ForwardPanel({ selectedHost }: Props) {
         </div>
         <div className="forward-form-row">
           <label>
-            Target host
+            {t("Target host")}
             <input
               value={targetHost}
               onChange={(e) => setTargetHost(e.target.value)}
@@ -104,7 +106,7 @@ export default function ForwardPanel({ selectedHost }: Props) {
             />
           </label>
           <label>
-            Target port
+            {t("Target port")}
             <input
               type="number"
               min={1}
@@ -120,7 +122,7 @@ export default function ForwardPanel({ selectedHost }: Props) {
           disabled={busy || !selectedHost}
         >
           <Plus size={14} />
-          {busy ? "Adding..." : "Add tunnel"}
+          {busy ? t("Adding...") : t("Add tunnel")}
         </button>
       </div>
 
@@ -137,14 +139,14 @@ export default function ForwardPanel({ selectedHost }: Props) {
             <button
               className="icon-button"
               onClick={() => removeForward(rule.id)}
-              title="Remove tunnel"
+              title={t("Remove tunnel")}
             >
               <Trash2 size={14} />
             </button>
           </div>
         ))}
         {rules.length === 0 && (
-          <div className="empty">No active tunnels</div>
+          <div className="empty">{t("No active tunnels")}</div>
         )}
       </div>
     </section>

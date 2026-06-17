@@ -40,6 +40,7 @@
   - MCP 工具名与 `docs/skills.md` 交叉比对（`mcp_tools_match_skills_md_documentation`）
   - `/exec`、`/exec-multi`、`/playbooks/run`、`/audit/export` 请求响应 schema fixture 检查
   - CLI `exec`、`exec-multi`、`playbook run` 的 `--help` 与文档参数对齐检查
+- [ ] 确认 CI 的 `Contract consistency` job 通过；该 job 显式运行上述 S3 契约检查，且 `build` matrix 依赖它。
 - [ ] 如需完整本机验收，可运行：
   ```bash
   ./scripts/e2e-local.sh

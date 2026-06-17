@@ -300,6 +300,9 @@ enum HostCommands {
         port: Option<u16>,
         #[arg(long)]
         key: Option<String>,
+        /// SSH password for password-based authentication. Prefer keys for production.
+        #[arg(long)]
+        password: Option<String>,
         /// Host profile alias to use as ProxyJump bastion
         #[arg(long)]
         jump: Option<String>,
@@ -718,6 +721,7 @@ async fn main() -> Result<()> {
                 user,
                 port,
                 key,
+                password,
                 jump,
                 risk_override,
                 tags,
@@ -739,6 +743,7 @@ async fn main() -> Result<()> {
                     user,
                     port,
                     key_path: key,
+                    password: clean_optional(password),
                     jump_host: jump,
                     risk_override,
                     tags: tags.unwrap_or_default(),

@@ -44,6 +44,12 @@ pub struct HostProfile {
     pub user: Option<String>,
     pub port: Option<u16>,
     pub key_path: Option<String>,
+    /// Optional SSH password for password-based hosts.
+    ///
+    /// Stored in local config when provided. Prefer key-based auth for shared
+    /// or production usage.
+    #[serde(default)]
+    pub password: Option<String>,
     /// Another host profile alias to use as a ProxyJump (-J) bastion.
     #[serde(default)]
     pub jump_host: Option<String>,

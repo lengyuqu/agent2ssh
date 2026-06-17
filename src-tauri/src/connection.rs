@@ -69,13 +69,27 @@ async fn socket_alive(socket: &PathBuf, target: &str) -> bool {
 
 async fn create_master(host: &HostProfile, socket: &PathBuf) -> Result<()> {
     let target = ssh_target(host);
-    let mut cmd = Command::new("ssh");
+    let has_password = host
+        .password
+        .as_deref()
+        .map(|password| !password.trim().is_empty())
+        .unwrap_or(false);
+    let mut cmd = if has_password {
+        let mut cmd = Command::new("sshpass");
+        cmd.arg("-e").arg("ssh");
+        if let Some(password) = &host.password {
+            cmd.env("SSHPASS", password);
+        }
+        cmd
+    } else {
+        Command::new("ssh")
+    };
     cmd.arg("-M")
         .arg("-S").arg(socket)
         .arg("-N")
         .arg("-f")
         .arg("-o").arg("ControlPersist=600")
-        .arg("-o").arg("BatchMode=yes")
+        .arg("-o").arg(if has_password { "BatchMode=no" } else { "BatchMode=yes" })
         .arg("-o").arg("StrictHostKeyChecking=accept-new")
         .arg("-p").arg(host.port.unwrap_or(22).to_string());
 
@@ -228,4 +242,3 @@ pub async fn disconnect_host(host_name: &str) -> Result<()> {
 
     Ok(())
 }
-

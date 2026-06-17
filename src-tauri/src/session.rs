@@ -54,10 +54,24 @@ pub async fn session_open_core(host_name: &str) -> Result<Uuid> {
         _ => host.host.clone(),
     };
 
-    let mut cmd = tokio::process::Command::new("ssh");
+    let has_password = host
+        .password
+        .as_deref()
+        .map(|password| !password.trim().is_empty())
+        .unwrap_or(false);
+    let mut cmd = if has_password {
+        let mut cmd = tokio::process::Command::new("sshpass");
+        cmd.arg("-e").arg("ssh");
+        if let Some(password) = &host.password {
+            cmd.env("SSHPASS", password);
+        }
+        cmd
+    } else {
+        tokio::process::Command::new("ssh")
+    };
     cmd.arg("-tt")
         .arg("-o")
-        .arg("BatchMode=yes")
+        .arg(if has_password { "BatchMode=no" } else { "BatchMode=yes" })
         .arg("-o")
         .arg("StrictHostKeyChecking=accept-new")
         .arg("-p")

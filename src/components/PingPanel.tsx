@@ -1,6 +1,7 @@
 import { Radio, Wifi, WifiOff } from "lucide-react";
 import { useState } from "react";
 import { api } from "../api";
+import { useI18n } from "../i18n";
 import type { HostProfile, PingResult } from "../types";
 
 type Props = {
@@ -8,6 +9,7 @@ type Props = {
 };
 
 export default function PingPanel({ hosts }: Props) {
+  const { t } = useI18n();
   const [results, setResults] = useState<PingResult[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -31,12 +33,12 @@ export default function PingPanel({ hosts }: Props) {
     <section className="panel ping-panel">
       <div className="panel-title">
         <Radio size={16} />
-        Connectivity
+        {t("Connectivity")}
         <button
           className="icon-button"
           onClick={pingAll}
           disabled={busy || hosts.length === 0}
-          title="Ping all hosts"
+          title={t("Ping all hosts")}
         >
           {busy ? "..." : <Radio size={15} />}
         </button>
@@ -58,7 +60,7 @@ export default function PingPanel({ hosts }: Props) {
           </div>
         ))}
         {results.length === 0 && (
-          <div className="empty">Click the icon to ping all hosts</div>
+          <div className="empty">{t("Click the icon to ping all hosts")}</div>
         )}
       </div>
     </section>

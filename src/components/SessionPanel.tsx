@@ -1,6 +1,7 @@
 import { Eye, PlugZap, RefreshCw, Send, Terminal, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
+import { useI18n } from "../i18n";
 import type { RiskLevel } from "../types";
 
 type Props = {
@@ -16,6 +17,7 @@ type ManagedSession = {
 };
 
 export default function SessionPanel({ selectedHost }: Props) {
+  const { t } = useI18n();
   const [sessions, setSessions] = useState<ManagedSession[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [activeHost, setActiveHost] = useState<string | null>(null);
@@ -147,7 +149,7 @@ export default function SessionPanel({ selectedHost }: Props) {
   async function sendInput(confirmDanger = false) {
     if (!activeId || !input) return;
     if (readOnly) {
-      setError("Session is attached in read-only mode.");
+      setError(t("Session is attached in read-only mode."));
       return;
     }
     setBusy(true);
@@ -213,16 +215,15 @@ export default function SessionPanel({ selectedHost }: Props) {
     <section className="panel session-panel">
       <div className="panel-title">
         <Terminal size={16} />
-        Session
+        {t("Session")}
         <span className="session-registry-badge">{registryMode}</span>
-        {activeId && <span className="session-active-badge">active</span>}
+        {activeId && <span className="session-active-badge">{t("active")}</span>}
       </div>
       {error && <div className="error">{error}</div>}
 
       {hostMismatch && (
         <div className="session-warning">
-          Session is connected to <strong>{activeHost}</strong>, not the
-          currently selected host.
+          {t("Session is connected to {host}, not the currently selected host.", { host: activeHost })}
         </div>
       )}
 
@@ -238,8 +239,8 @@ export default function SessionPanel({ selectedHost }: Props) {
                   className="secondary session-attach"
                   onClick={() => attachSession(session, false)}
                   disabled={busy}
-                  title="Attach to this session"
-                  aria-label={`Attach to ${session.host} session ${session.id.slice(0, 8)}`}
+                  title={t("Attach to this session")}
+                  aria-label={t("Attach to this session")}
                 >
                   <PlugZap size={14} />
                 </button>
@@ -247,15 +248,15 @@ export default function SessionPanel({ selectedHost }: Props) {
                   className="secondary session-attach"
                   onClick={() => attachSession(session, true)}
                   disabled={busy}
-                  title="Attach read-only"
-                  aria-label={`Attach read-only to ${session.host} session ${session.id.slice(0, 8)}`}
+                  title={t("Attach read-only")}
+                  aria-label={t("Attach read-only")}
                 >
                   <Eye size={14} />
                 </button>
               </div>
             ))}
             {sessions.length === 0 && (
-              <div className="empty">No active sessions</div>
+              <div className="empty">{t("No active sessions")}</div>
             )}
           </div>
           <button
@@ -264,7 +265,7 @@ export default function SessionPanel({ selectedHost }: Props) {
             disabled={busy || !selectedHost}
           >
             <Terminal size={14} />
-            {busy ? "Opening..." : "Open session"}
+            {busy ? t("Opening...") : t("Open session")}
           </button>
         </>
       ) : (
@@ -274,14 +275,14 @@ export default function SessionPanel({ selectedHost }: Props) {
               className="secondary"
               onClick={readOutput}
               disabled={busy}
-              title="Read session output"
-              aria-label="Read session output"
+              title={t("Read session output")}
+              aria-label={t("Read session output")}
             >
               <RefreshCw size={14} />
             </button>
             <button className="secondary" onClick={closeSession}>
               <X size={14} />
-              Close
+              {t("Close")}
             </button>
             <label className="session-toggle">
               <input
@@ -289,7 +290,7 @@ export default function SessionPanel({ selectedHost }: Props) {
                 checked={autoTail}
                 onChange={(e) => setAutoTail(e.target.checked)}
               />
-              Tail
+              {t("Tail")}
             </label>
             <label className="session-toggle">
               <input
@@ -300,7 +301,7 @@ export default function SessionPanel({ selectedHost }: Props) {
                   setPendingDanger(null);
                 }}
               />
-              Read-only
+              {t("Read-only")}
             </label>
             <span className="session-active-meta">
               {activeHost} / {activeBackend} / {activeId.slice(0, 8)}
@@ -309,7 +310,7 @@ export default function SessionPanel({ selectedHost }: Props) {
           {pendingDanger && (
             <div className="session-danger-confirm">
               <span>
-                {pendingDanger.risk} input: <code>{pendingDanger.input}</code>
+                {pendingDanger.risk} {t("input")}: <code>{pendingDanger.input}</code>
               </span>
               <button
                 className="secondary"
@@ -317,19 +318,19 @@ export default function SessionPanel({ selectedHost }: Props) {
                   setPendingDanger(null);
                 }}
               >
-                Cancel
+                {t("Cancel")}
               </button>
               <button
                 className="primary"
                 onClick={() => sendInput(true)}
                 disabled={busy}
               >
-                Send anyway
+                {t("Send anyway")}
               </button>
             </div>
           )}
           <div className="terminal-output session-output">
-            <pre ref={outputRef}>{output || "(no output yet)"}</pre>
+            <pre ref={outputRef}>{output || t("(no output yet)")}</pre>
           </div>
           <div className="session-input-row">
             <input
@@ -344,15 +345,15 @@ export default function SessionPanel({ selectedHost }: Props) {
                   sendInput();
                 }
               }}
-              placeholder="Type command and press Enter..."
+              placeholder={t("Type command and press Enter...")}
               disabled={busy || readOnly}
             />
             <button
               className="primary"
               onClick={() => sendInput()}
               disabled={busy || !input || readOnly}
-              title={readOnly ? "Read-only session" : "Send input"}
-              aria-label={readOnly ? "Read-only session" : "Send input"}
+              title={readOnly ? t("Read-only session") : t("Send input")}
+              aria-label={readOnly ? t("Read-only session") : t("Send input")}
             >
               <Send size={14} />
             </button>

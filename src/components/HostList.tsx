@@ -1,5 +1,6 @@
 import { Plug, PlugZap, RefreshCw, Server, Trash2 } from "lucide-react";
 import { useMemo, useState } from "react";
+import { useI18n } from "../i18n";
 import type { ConnectionStatus, HostProfile } from "../types";
 
 type Props = {
@@ -23,6 +24,7 @@ export default function HostList({
   onConnect,
   onDisconnect,
 }: Props) {
+  const { t } = useI18n();
   const [confirmTarget, setConfirmTarget] = useState<string | null>(null);
   const [filters, setFilters] = useState({ env: "", role: "", owner: "", tag: "" });
 
@@ -49,11 +51,14 @@ export default function HostList({
     <section className="panel">
       <div className="panel-title">
         <Server size={16} />
-        Hosts
+        {t("Hosts")}
+        <span className="panel-count">
+          {t("{shown} of {total} hosts", { shown: filteredHosts.length, total: hosts.length })}
+        </span>
         <button
           className="icon-button"
           onClick={onRefresh}
-          title="Refresh hosts"
+          title={t("Refresh hosts")}
         >
           <RefreshCw size={15} />
         </button>
@@ -62,22 +67,22 @@ export default function HostList({
         <input
           value={filters.env}
           onChange={(e) => setFilters({ ...filters, env: e.target.value })}
-          placeholder="env"
+          placeholder={t("env")}
         />
         <input
           value={filters.role}
           onChange={(e) => setFilters({ ...filters, role: e.target.value })}
-          placeholder="role"
+          placeholder={t("role")}
         />
         <input
           value={filters.owner}
           onChange={(e) => setFilters({ ...filters, owner: e.target.value })}
-          placeholder="owner"
+          placeholder={t("owner")}
         />
         <input
           value={filters.tag}
           onChange={(e) => setFilters({ ...filters, tag: e.target.value })}
-          placeholder="tag"
+          placeholder={t("tag")}
         />
       </div>
       <div className="host-list">
@@ -95,7 +100,7 @@ export default function HostList({
                 <strong>
                   <span
                     className={`status-dot ${connected ? "status-connected" : "status-disconnected"}`}
-                    title={connected ? "Connected" : "Disconnected"}
+                    title={connected ? t("Connected") : t("Disconnected")}
                   />
                   {host.name}
                 </strong>
@@ -121,7 +126,7 @@ export default function HostList({
               </button>
               <button
                 className="icon-button host-connect"
-                title={connected ? `Disconnect ${host.name}` : `Connect ${host.name}`}
+                title={connected ? t("Disconnect {name}", { name: host.name }) : t("Connect {name}", { name: host.name })}
                 onClick={() =>
                   connected ? onDisconnect(host.name) : onConnect(host.name)
                 }
@@ -130,7 +135,7 @@ export default function HostList({
               </button>
               <button
                 className="icon-button host-delete"
-                title={`Remove ${host.name}`}
+                title={t("Remove {name}", { name: host.name })}
                 onClick={() => setConfirmTarget(host.name)}
               >
                 <Trash2 size={14} />
@@ -139,10 +144,10 @@ export default function HostList({
           );
         })}
         {hosts.length === 0 && (
-          <div className="empty">No hosts configured</div>
+          <div className="empty">{t("No hosts configured")}</div>
         )}
         {hosts.length > 0 && filteredHosts.length === 0 && (
-          <div className="empty">No hosts match filters</div>
+          <div className="empty">{t("No hosts match filters")}</div>
         )}
       </div>
 
@@ -150,14 +155,14 @@ export default function HostList({
         <div className="confirm-overlay" onClick={() => setConfirmTarget(null)}>
           <div className="confirm-dialog" onClick={(e) => e.stopPropagation()}>
             <p>
-              Remove host <strong>{confirmTarget}</strong>?
+              {t("Remove host {name}?", { name: confirmTarget })}
             </p>
             <p className="confirm-hint">
-              Any open sessions or forwards to this host will become orphaned.
+              {t("Any open sessions or forwards to this host will become orphaned.")}
             </p>
             <div className="confirm-actions">
               <button className="secondary" onClick={() => setConfirmTarget(null)}>
-                Cancel
+                {t("Cancel")}
               </button>
               <button
                 className="primary confirm-danger"
@@ -166,7 +171,7 @@ export default function HostList({
                   setConfirmTarget(null);
                 }}
               >
-                Remove
+                {t("Remove")}
               </button>
             </div>
           </div>

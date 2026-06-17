@@ -1,6 +1,7 @@
 import { ChevronDown, ChevronUp, Play, ShieldAlert } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api } from "../api";
+import { useI18n } from "../i18n";
 import type { ExecResult, RiskLevel } from "../types";
 import ApprovalDialog from "./ApprovalDialog";
 import RiskBadge from "./RiskBadge";
@@ -11,6 +12,7 @@ type Props = {
 };
 
 export default function ExecPanel({ selectedHost, onExecComplete }: Props) {
+  const { t } = useI18n();
   const [command, setCommand] = useState("uname -a");
   const [force, setForce] = useState(false);
   const [result, setResult] = useState<ExecResult | null>(null);
@@ -81,7 +83,7 @@ export default function ExecPanel({ selectedHost, onExecComplete }: Props) {
       return;
     }
     if (previewRisk === "blocked") {
-      setError("This command is blocked (risk=blocked).");
+      setError(t("This command is blocked (risk=blocked)."));
       return;
     }
     runCommand();
@@ -101,12 +103,12 @@ export default function ExecPanel({ selectedHost, onExecComplete }: Props) {
     <section className="panel command-panel">
       <div className="panel-title">
         <Play size={16} />
-        Execute
+        {t("Execute")}
         {previewRisk && <RiskBadge level={previewRisk} />}
       </div>
       {error && <div className="error">{error}</div>}
       <label>
-        Command
+        {t("Command")}
         <textarea
           value={command}
           onChange={(e) => setCommand(e.target.value)}
@@ -119,13 +121,13 @@ export default function ExecPanel({ selectedHost, onExecComplete }: Props) {
         onClick={() => setShowAdvanced(!showAdvanced)}
       >
         {showAdvanced ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-        Advanced options
+        {t("Advanced options")}
       </button>
 
       {showAdvanced && (
         <div className="advanced-options">
           <label>
-            Stdin (piped to command)
+            {t("Stdin (piped to command)")}
             <textarea
               value={stdin}
               onChange={(e) => setStdin(e.target.value)}
@@ -135,7 +137,7 @@ export default function ExecPanel({ selectedHost, onExecComplete }: Props) {
           </label>
           <div className="two-col">
             <label>
-              Timeout (seconds)
+              {t("Timeout (seconds)")}
               <input
                 type="number"
                 min={1}
@@ -145,7 +147,7 @@ export default function ExecPanel({ selectedHost, onExecComplete }: Props) {
               />
             </label>
             <label>
-              Max output (MiB)
+              {t("Max output (MiB)")}
               <input
                 type="number"
                 min={1}
@@ -165,7 +167,7 @@ export default function ExecPanel({ selectedHost, onExecComplete }: Props) {
           onChange={(e) => setForce(e.target.checked)}
         />
         <ShieldAlert size={14} />
-        Force (allow high-risk commands)
+        {t("Force (allow high-risk commands)")}
       </label>
       <button
         className="primary"
@@ -173,7 +175,7 @@ export default function ExecPanel({ selectedHost, onExecComplete }: Props) {
         disabled={busy || !selectedHost}
       >
         <Play size={16} />
-        {busy ? "Running" : "Run over SSH"}
+        {busy ? t("Running") : t("Run over SSH")}
       </button>
       <div className="terminal-output">
         {result ? (
@@ -182,14 +184,14 @@ export default function ExecPanel({ selectedHost, onExecComplete }: Props) {
               exit={result.exit_code ?? "signal"} duration={result.duration_ms}ms{" "}
               <RiskBadge level={result.risk_level} />
               {result.truncated && (
-                <span className="truncated-badge">output truncated</span>
+                <span className="truncated-badge">{t("output truncated")}</span>
               )}
             </div>
-            <pre>{result.stdout || result.stderr || "(no output)"}</pre>
+            <pre>{result.stdout || result.stderr || t("(no output)")}</pre>
             {result.stderr && <pre className="stderr">{result.stderr}</pre>}
           </>
         ) : (
-          <pre>Command output will appear here.</pre>
+          <pre>{t("Command output will appear here.")}</pre>
         )}
       </div>
 

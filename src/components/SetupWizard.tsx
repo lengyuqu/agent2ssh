@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
+import { useI18n } from "../i18n";
 import type { HostProfile, SshKeyInfo } from "../types";
 
 interface SetupWizardProps {
@@ -18,6 +19,7 @@ const STEP_TITLES = [
 ];
 
 export default function SetupWizard({ onComplete, onSkip }: SetupWizardProps) {
+  const { t } = useI18n();
   const [step, setStep] = useState(0);
   const [importedHosts, setImportedHosts] = useState<HostProfile[]>([]);
   const [importError, setImportError] = useState<string | null>(null);
@@ -71,7 +73,7 @@ export default function SetupWizard({ onComplete, onSkip }: SetupWizardProps) {
 
   async function handleGenerateKey() {
     if (!keyName.trim()) {
-      setKeyError("Please enter a key name.");
+      setKeyError(t("Please enter a key name."));
       return;
     }
     setGeneratingKey(true);
@@ -128,9 +130,9 @@ export default function SetupWizard({ onComplete, onSkip }: SetupWizardProps) {
           <span className="wizard-step-badge">
             {step + 1}/{TOTAL_STEPS}
           </span>
-          <h2>{STEP_TITLES[step]}</h2>
-          <button className="wizard-skip-btn" onClick={onSkip} title="Skip setup">
-            Skip setup
+          <h2>{t(STEP_TITLES[step])}</h2>
+          <button className="wizard-skip-btn" onClick={onSkip} title={t("Skip setup")}>
+            {t("Skip setup")}
           </button>
         </div>
 
@@ -139,37 +141,35 @@ export default function SetupWizard({ onComplete, onSkip }: SetupWizardProps) {
           {step === 0 && (
             <div className="wizard-step">
               <p>
-                Agent2SSH is a local SSH capability layer that lets AI agents
-                and automation tools securely execute commands on remote hosts.
+                {t("Agent2SSH is a local SSH capability layer that lets AI agents and automation tools securely execute commands on remote hosts.")}
               </p>
               <ul className="wizard-feature-list">
-                <li>Import hosts from your existing SSH config</li>
-                <li>Risk-based command classification and approval flow</li>
-                <li>Persistent sessions, port forwarding, and SFTP</li>
-                <li>MCP server for AI agent integration</li>
+                <li>{t("Import hosts from your existing SSH config")}</li>
+                <li>{t("Risk-based command classification and approval flow")}</li>
+                <li>{t("Persistent sessions, port forwarding, and SFTP")}</li>
+                <li>{t("MCP server for AI agent integration")}</li>
               </ul>
-              <p>This wizard will help you get started in a few steps.</p>
+              <p>{t("This wizard will help you get started in a few steps.")}</p>
             </div>
           )}
 
           {step === 1 && (
             <div className="wizard-step">
               <p>
-                Import host profiles from <code>~/.ssh/config</code>. Existing
-                profiles will not be overwritten.
+                {t("Import host profiles from ~/.ssh/config. Existing profiles will not be overwritten.")}
               </p>
               <button
                 className="primary"
                 onClick={handleImport}
                 disabled={importing}
               >
-                {importing ? "Importing..." : "Import from ~/.ssh/config"}
+                {importing ? t("Importing...") : t("Import from ~/.ssh/config")}
               </button>
               {importError && <div className="error">{importError}</div>}
               {importedHosts.length > 0 && (
                 <div className="wizard-preview">
                   <p>
-                    Imported {importedHosts.length} host(s):
+                    {t("Imported {count} host(s):", { count: importedHosts.length })}
                   </p>
                   <ul>
                     {importedHosts.map((h) => (
@@ -184,9 +184,7 @@ export default function SetupWizard({ onComplete, onSkip }: SetupWizardProps) {
               )}
               {!importing && !importError && importedHosts.length === 0 && (
                 <p className="wizard-hint">
-                  No new hosts found. You may not have a{" "}
-                  <code>~/.ssh/config</code> file, or all hosts are already
-                  imported. You can add hosts manually later.
+                  {t("No new hosts found. You may not have a ~/.ssh/config file, or all hosts are already imported. You can add hosts manually later.")}
                 </p>
               )}
             </div>
@@ -195,12 +193,11 @@ export default function SetupWizard({ onComplete, onSkip }: SetupWizardProps) {
           {step === 2 && (
             <div className="wizard-step">
               <p>
-                SSH keys are used for passwordless authentication to remote
-                hosts.
+                {t("SSH keys are used for passwordless authentication to remote hosts.")}
               </p>
               {keys.length > 0 ? (
                 <div className="wizard-preview">
-                  <p>Existing keys:</p>
+                  <p>{t("Existing keys:")}</p>
                   <ul>
                     {keys.map((k) => (
                       <li key={k.name}>
@@ -210,12 +207,12 @@ export default function SetupWizard({ onComplete, onSkip }: SetupWizardProps) {
                   </ul>
                 </div>
               ) : (
-                <p className="wizard-hint">No SSH keys found in Agent2SSH.</p>
+                <p className="wizard-hint">{t("No SSH keys found in Agent2SSH.")}</p>
               )}
               <div className="wizard-inline-form">
                 <input
                   type="text"
-                  placeholder="New key name (e.g. id_ed25519)"
+                  placeholder={t("New key name (e.g. id_ed25519)")}
                   value={keyName}
                   onChange={(e) => setKeyName(e.target.value)}
                 />
@@ -224,7 +221,7 @@ export default function SetupWizard({ onComplete, onSkip }: SetupWizardProps) {
                   onClick={handleGenerateKey}
                   disabled={generatingKey}
                 >
-                  {generatingKey ? "Generating..." : "Generate Key"}
+                  {generatingKey ? t("Generating...") : t("Generate Key")}
                 </button>
               </div>
               {keyError && <div className="error">{keyError}</div>}
@@ -234,17 +231,16 @@ export default function SetupWizard({ onComplete, onSkip }: SetupWizardProps) {
           {step === 3 && (
             <div className="wizard-step">
               <p>
-                The daemon provides the HTTP API and web console. When running,
-                it listens on <code>127.0.0.1:7722</code>.
+                {t("The daemon provides the HTTP API and web console. When running, it listens on 127.0.0.1:7722.")}
               </p>
               <div className="wizard-daemon-status">
                 {daemonRunning ? (
                   <div className="wizard-status-ok">
-                    Daemon is running on http://127.0.0.1:7722
+                    {t("Daemon is running on http://127.0.0.1:7722")}
                   </div>
                 ) : (
                   <div className="wizard-status-warn">
-                    Daemon is not running.
+                    {t("Daemon is not running.")}
                   </div>
                 )}
               </div>
@@ -253,11 +249,11 @@ export default function SetupWizard({ onComplete, onSkip }: SetupWizardProps) {
                 onClick={handleStartDaemon}
                 disabled={daemonLoading}
               >
-                {daemonLoading ? "Checking..." : "Check Daemon Status"}
+                {daemonLoading ? t("Checking...") : t("Check Daemon Status")}
               </button>
               {daemonError && <div className="error">{daemonError}</div>}
               <p className="wizard-hint">
-                You can also start the daemon from a terminal:{" "}
+                {t("You can also start the daemon from a terminal:")}{" "}
                 <code>agent2ssh daemon start</code>
               </p>
             </div>
@@ -266,17 +262,16 @@ export default function SetupWizard({ onComplete, onSkip }: SetupWizardProps) {
           {step === 4 && (
             <div className="wizard-step">
               <p>
-                The web console provides a browser-based interface for managing
-                hosts, executing commands, and viewing audit logs.
+                {t("The web console provides a browser-based interface for managing hosts, executing commands, and viewing audit logs.")}
               </p>
               <div className="wizard-console-link">
                 <code>http://127.0.0.1:7722/console</code>
               </div>
               <button className="primary" onClick={handleOpenConsole}>
-                Open Web Console
+                {t("Open Web Console")}
               </button>
               <p className="wizard-hint">
-                You can also access this from the daemon URL at any time.
+                {t("You can also access this from the daemon URL at any time.")}
               </p>
             </div>
           )}
@@ -289,7 +284,7 @@ export default function SetupWizard({ onComplete, onSkip }: SetupWizardProps) {
             onClick={prev}
             disabled={step === 0}
           >
-            Back
+            {t("Back")}
           </button>
           <div className="wizard-dots">
             {Array.from({ length: TOTAL_STEPS }).map((_, i) => (
@@ -301,11 +296,11 @@ export default function SetupWizard({ onComplete, onSkip }: SetupWizardProps) {
           </div>
           {step < TOTAL_STEPS - 1 ? (
             <button className="primary" onClick={next}>
-              Next
+              {t("Next")}
             </button>
           ) : (
             <button className="primary" onClick={onComplete}>
-              Finish
+              {t("Finish")}
             </button>
           )}
         </div>

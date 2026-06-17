@@ -7,9 +7,9 @@
 # 1. **PR dry-run**: Every pull request triggers the full `build` job matrix,
 #    which compiles all binaries (CLI, MCP, daemon) across 4 target platforms
 #    (x86_64 macOS, aarch64 macOS, x86_64 Linux, x86_64 Windows), runs unit
-#    tests, integration tests, and CLI smoke tests, and builds the frontend.
-#    This acts as a release dry-run — if a PR passes all checks here, the code
-#    is ready to be merged and released.
+#    tests, integration tests, CLI smoke tests, the explicit contract-consistency
+#    gate, and builds the frontend. This acts as a release dry-run — if a PR
+#    passes all checks here, the code is ready to be merged and released.
 #
 # 2. **Release**: When a GitHub release is published, the same build job produces
 #    release binaries and uploads them as assets. The `tauri-bundle` job then
@@ -35,7 +35,48 @@ permissions:
   contents: write
 
 jobs:
+  contract-consistency:
+    name: Contract consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            src-tauri/target/
+          key: ${{ runner.os }}-contract-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+
+      - name: MCP tools match docs/skills.md
+        run: cargo test --no-default-features --test daemon_integration mcp_tools_match_skills_md_documentation
+        working-directory: src-tauri
+
+      - name: OpenAPI and daemon schema contracts
+        run: |
+          cargo test --no-default-features --test daemon_integration exec_request_schema_includes_reason_and_change_id
+          cargo test --no-default-features --test daemon_integration exec_multi_body_schema_matches_contract
+          cargo test --no-default-features --test daemon_integration exec_multi_batch_result_schema_matches_contract
+          cargo test --no-default-features --test daemon_integration playbook_run_body_schema_matches_contract
+          cargo test --no-default-features --test daemon_integration audit_export_response_contract
+        working-directory: src-tauri
+
+      - name: CLI help matches documented flags
+        run: |
+          cargo test --no-default-features --test cli_smoke cli_exec_help_shows_reason_and_change_id
+          cargo test --no-default-features --test cli_smoke cli_exec_multi_help_shows_reason_and_change_id
+          cargo test --no-default-features --test cli_smoke cli_playbook_run_help_shows_reason_and_change_id
+        working-directory: src-tauri
+
   build:
+    needs: contract-consistency
     strategy:
       matrix:
         include:
@@ -163,6 +204,7 @@ jobs:
             dist/CHECKSUMS-SHA256-${{ matrix.target }}.txt
 
   tauri-bundle:
+    needs: contract-consistency
     if: github.event_name == 'release'
     strategy:
       matrix:

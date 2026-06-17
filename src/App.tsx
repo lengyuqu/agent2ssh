@@ -1,4 +1,17 @@
-import { Activity, Loader2, PauseCircle, PlayCircle, Terminal } from "lucide-react";
+import {
+  Activity,
+  ArrowLeftRight,
+  BookOpen,
+  FolderOpen,
+  History,
+  Key,
+  Loader2,
+  PauseCircle,
+  Play,
+  PlayCircle,
+  Server,
+  Terminal,
+} from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import "./styles.css";
 import { api } from "./api";
@@ -9,6 +22,7 @@ import ExecPanel from "./components/ExecPanel";
 import ForwardPanel from "./components/ForwardPanel";
 import HostList from "./components/HostList";
 import KeysPanel from "./components/KeysPanel";
+import LanguageSwitcher from "./components/LanguageSwitcher";
 import LiveActivityPanel from "./components/LiveActivityPanel";
 import MultiExecPanel from "./components/MultiExecPanel";
 import PingPanel from "./components/PingPanel";
@@ -16,13 +30,27 @@ import PlaybooksPanel from "./components/PlaybooksPanel";
 import SFTPPanel from "./components/SFTPPanel";
 import SessionPanel from "./components/SessionPanel";
 import SetupWizard from "./components/SetupWizard";
+import { useI18n } from "./i18n";
 import type { ApprovalRequest, AuditEntry, AuditFilter, ConnectionStatus, ExecutionGateStatus, HostProfile } from "./types";
 
 const APPROVAL_POLL_MS = 2000;
 
+const MODULES = [
+  { id: "hosts", label: "Host Management", icon: Server },
+  { id: "execute", label: "Execution", icon: Play },
+  { id: "files-sessions", label: "Files & Sessions", icon: FolderOpen },
+  { id: "tunnels", label: "Tunnels", icon: ArrowLeftRight },
+  { id: "activity", label: "Activity", icon: Activity },
+  { id: "keys", label: "Keys", icon: Key },
+  { id: "playbooks", label: "Playbooks", icon: BookOpen },
+  { id: "audit", label: "Audit", icon: History },
+] as const;
+
 export default function App() {
+  const { t } = useI18n();
   const [hosts, setHosts] = useState<HostProfile[]>([]);
   const [selectedHost, setSelectedHost] = useState("");
+  const [activeModule, setActiveModule] = useState<(typeof MODULES)[number]["id"]>("hosts");
   const [audit, setAudit] = useState<AuditEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -110,7 +138,7 @@ export default function App() {
           : await api.pauseGate("desktop emergency stop");
       setGateStatus(status);
     } catch (err) {
-      setError(`Failed to update execution gate: ${err}`);
+      setError(t("Failed to update execution gate: {error}", { error: String(err) }));
     } finally {
       setGateBusy(false);
     }
@@ -121,7 +149,7 @@ export default function App() {
       await api.approvalApprove(approval.id);
       setPendingApprovals((prev) => prev.filter((a) => a.id !== approval.id));
     } catch (err) {
-      setError(`Failed to approve: ${err}`);
+      setError(t("Failed to approve: {error}", { error: String(err) }));
     }
   }
 
@@ -130,7 +158,7 @@ export default function App() {
       await api.approvalReject(approval.id);
       setPendingApprovals((prev) => prev.filter((a) => a.id !== approval.id));
     } catch (err) {
-      setError(`Failed to reject: ${err}`);
+      setError(t("Failed to reject: {error}", { error: String(err) }));
     }
   }
 
@@ -155,13 +183,20 @@ export default function App() {
     }
   }
 
+  function openModule(id: (typeof MODULES)[number]["id"]) {
+    setActiveModule(id);
+  }
+
+  const activeModuleMeta = MODULES.find((module) => module.id === activeModule) ?? MODULES[0];
+  const ActiveModuleIcon = activeModuleMeta.icon;
+
   async function handleConnect(name: string) {
     setError(null);
     try {
       await api.sshConnect(name);
       await pollConnections();
     } catch (err) {
-      setError(`Failed to connect: ${err}`);
+      setError(t("Failed to connect: {error}", { error: String(err) }));
     }
   }
 
@@ -171,7 +206,7 @@ export default function App() {
       await api.sshDisconnect(name);
       await pollConnections();
     } catch (err) {
-      setError(`Failed to disconnect: ${err}`);
+      setError(t("Failed to disconnect: {error}", { error: String(err) }));
     }
   }
 
@@ -179,7 +214,7 @@ export default function App() {
     return (
       <main className="app-loading">
         <Loader2 size={32} className="spin" />
-        <span>Loading Agent2SSH...</span>
+        <span>{t("Loading Agent2SSH...")}</span>
       </main>
     );
   }
@@ -220,27 +255,32 @@ export default function App() {
           <Terminal size={24} />
           <div>
             <h1>Agent2SSH</h1>
-            <span>Local SSH capability layer</span>
+            <span>{t("Local SSH capability layer")}</span>
           </div>
         </div>
-        <HostList
-          hosts={hosts}
-          selectedHost={selectedHost}
-          connectionStatuses={connectionStatuses}
-          onSelect={setSelectedHost}
-          onRemove={handleRemoveHost}
-          onRefresh={refresh}
-          onConnect={handleConnect}
-          onDisconnect={handleDisconnect}
-        />
         <button className="secondary import-btn" onClick={handleImportConfig}>
-          Import from ~/.ssh/config
+          {t("Import from ~/.ssh/config")}
         </button>
+        <nav className="module-nav" aria-label={t("Modules")}>
+          <div className="module-nav-title">{t("Modules")}</div>
+          {MODULES.map(({ id, label, icon: Icon }) => (
+            <button
+              key={id}
+              type="button"
+              className={`module-nav-item${activeModule === id ? " active" : ""}`}
+              onClick={() => openModule(id)}
+            >
+              <Icon size={15} />
+              {t(label)}
+            </button>
+          ))}
+        </nav>
         <PingPanel hosts={hosts} />
         {pendingApprovals.length > 0 && (
           <div className="approval-indicator">
             <span className="approval-dot" />
-            {pendingApprovals.length} pending approval{pendingApprovals.length > 1 ? "s" : ""}
+            {pendingApprovals.length}{" "}
+            {t(pendingApprovals.length > 1 ? "pending approvals" : "pending approval")}
           </div>
         )}
       </aside>
@@ -248,58 +288,82 @@ export default function App() {
       <section className="workspace">
         <header className="topbar">
           <div>
-            <h2>{currentHost?.name ?? "No host selected"}</h2>
+            <h2>
+              <ActiveModuleIcon size={20} />
+              {t(activeModuleMeta.label)}
+            </h2>
             <p>
               {currentHost
                 ? `${currentHost.user ? `${currentHost.user}@` : ""}${currentHost.host}:${currentHost.port ?? 22}${currentHost.jump_host ? ` via ${currentHost.jump_host}` : ""}`
-                : "Add a host to start issuing SSH commands"}
+                : t("Add a host to start issuing SSH commands")}
             </p>
           </div>
           <div className="topbar-actions">
             <div className={`gate-pill ${gateStatus?.mode === "paused" ? "paused" : "active"}`}>
               <Activity size={15} />
-              {gateStatus?.mode === "paused" ? "Gate paused" : "Gate active"}
+              {gateStatus?.mode === "paused" ? t("Gate paused") : t("Gate active")}
             </div>
             <button
               type="button"
               className={`gate-action ${gateStatus?.mode === "paused" ? "resume" : "pause"}`}
               onClick={handleGateToggle}
               disabled={gateBusy || gateStatus === null}
-              title={gateStatus?.mode === "paused" ? "Resume execution gate" : "Pause execution gate"}
+              title={gateStatus?.mode === "paused" ? t("Resume execution gate") : t("Pause execution gate")}
             >
               {gateStatus?.mode === "paused" ? <PlayCircle size={16} /> : <PauseCircle size={16} />}
-              {gateStatus?.mode === "paused" ? "Resume" : "Pause"}
+              {gateStatus?.mode === "paused" ? t("Resume") : t("Pause")}
             </button>
+            <LanguageSwitcher />
             <div className="status-pill">
               <Activity size={15} />
-              Local daemon embedded
+              {t("Local daemon embedded")}
             </div>
           </div>
         </header>
 
         {error && <div className="error">{error}</div>}
 
-        <div className="grid">
-          <ExecPanel selectedHost={selectedHost} onExecComplete={refresh} />
-          <AddHostForm hosts={hosts} onSaved={refresh} />
-        </div>
+        <section className="module-page">
+          {activeModule === "hosts" && (
+            <div className="host-management-grid">
+              <HostList
+                hosts={hosts}
+                selectedHost={selectedHost}
+                connectionStatuses={connectionStatuses}
+                onSelect={setSelectedHost}
+                onRemove={handleRemoveHost}
+                onRefresh={refresh}
+                onConnect={handleConnect}
+                onDisconnect={handleDisconnect}
+              />
+              <AddHostForm hosts={hosts} onSaved={refresh} />
+            </div>
+          )}
 
-        <MultiExecPanel hosts={hosts} onExecComplete={refresh} />
+          {activeModule === "execute" && (
+            <div className="module-stack">
+              <ExecPanel selectedHost={selectedHost} onExecComplete={refresh} />
+              <MultiExecPanel hosts={hosts} onExecComplete={refresh} />
+            </div>
+          )}
 
-        <div className="grid grid-equal">
-          <SFTPPanel selectedHost={selectedHost} />
-          <SessionPanel selectedHost={selectedHost} />
-        </div>
+          {activeModule === "files-sessions" && (
+            <div className="grid grid-equal">
+              <SFTPPanel selectedHost={selectedHost} />
+              <SessionPanel selectedHost={selectedHost} />
+            </div>
+          )}
 
-        <ForwardPanel selectedHost={selectedHost} />
+          {activeModule === "tunnels" && <ForwardPanel selectedHost={selectedHost} />}
 
-        <LiveActivityPanel audit={audit} />
+          {activeModule === "activity" && <LiveActivityPanel audit={audit} />}
 
-        <KeysPanel />
+          {activeModule === "keys" && <KeysPanel />}
 
-        <PlaybooksPanel hosts={hosts} />
+          {activeModule === "playbooks" && <PlaybooksPanel hosts={hosts} />}
 
-        <AuditPanel audit={audit} onRefresh={refresh} />
+          {activeModule === "audit" && <AuditPanel audit={audit} onRefresh={refresh} />}
+        </section>
       </section>
     </main>
   );

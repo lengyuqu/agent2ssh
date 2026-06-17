@@ -1,6 +1,7 @@
 import { Play, Server } from "lucide-react";
 import { useState } from "react";
 import { api } from "../api";
+import { useI18n } from "../i18n";
 import type { ExecMultiResult, HostProfile } from "../types";
 import RiskBadge from "./RiskBadge";
 
@@ -10,6 +11,7 @@ type Props = {
 };
 
 export default function MultiExecPanel({ hosts, onExecComplete }: Props) {
+  const { t } = useI18n();
   const [selected, setSelected] = useState<string[]>([]);
   const [command, setCommand] = useState("");
   const [force, setForce] = useState(false);
@@ -52,13 +54,13 @@ export default function MultiExecPanel({ hosts, onExecComplete }: Props) {
     <section className="panel multi-exec-panel">
       <div className="panel-title">
         <Server size={16} />
-        Multi-host Execute
+        {t("Multi-host Execute")}
       </div>
       {error && <div className="error">{error}</div>}
 
       <div className="multi-host-picker">
         <button className="toggle-advanced" onClick={selectAll}>
-          {selected.length === hosts.length ? "Deselect all" : "Select all"}
+          {selected.length === hosts.length ? t("Deselect all") : t("Select all")}
         </button>
         <div className="host-chips">
           {hosts.map((h) => (
@@ -70,12 +72,12 @@ export default function MultiExecPanel({ hosts, onExecComplete }: Props) {
               {h.name}
             </button>
           ))}
-          {hosts.length === 0 && <span className="empty">No hosts</span>}
+          {hosts.length === 0 && <span className="empty">{t("No hosts")}</span>}
         </div>
       </div>
 
       <label>
-        Command
+        {t("Command")}
         <textarea
           value={command}
           onChange={(e) => setCommand(e.target.value)}
@@ -89,10 +91,10 @@ export default function MultiExecPanel({ hosts, onExecComplete }: Props) {
           checked={force}
           onChange={(e) => setForce(e.target.checked)}
         />
-        Force
+        {t("Force")}
       </label>
       <label>
-        Tags (comma-separated, optional)
+        {t("Tags (comma-separated, optional)")}
         <div className="tags-input">
           <input
             value={tags}
@@ -108,8 +110,8 @@ export default function MultiExecPanel({ hosts, onExecComplete }: Props) {
       >
         <Play size={14} />
         {busy
-          ? `Running on ${selected.length} hosts...`
-          : `Run on ${selected.length} host${selected.length !== 1 ? "s" : ""}`}
+          ? t("Running on {count} hosts...", { count: selected.length })
+          : t(selected.length === 1 ? "Run on {count} host" : "Run on {count} hosts", { count: selected.length })}
       </button>
 
       {results.length > 0 && (
@@ -133,7 +135,7 @@ export default function MultiExecPanel({ hosts, onExecComplete }: Props) {
             r.result ? (
               <div key={`${r.host}-output`} className="multi-result-output">
                 <div className="multi-output-header">{r.host}</div>
-                <pre>{r.result.stdout || r.result.stderr || "(no output)"}</pre>
+                <pre>{r.result.stdout || r.result.stderr || t("(no output)")}</pre>
               </div>
             ) : null
           )}

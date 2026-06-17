@@ -1,6 +1,7 @@
 import { Activity, ChevronDown, ChevronRight, RefreshCw, Search, ShieldAlert } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
+import { useI18n } from "../i18n";
 import type { AgentEvent, AuditEntry } from "../types";
 
 const MAX_EVENTS = 80;
@@ -106,6 +107,7 @@ function needsAttention(item: ActivityItem): boolean {
 }
 
 export default function LiveActivityPanel({ audit }: Props) {
+  const { t } = useI18n();
   const [events, setEvents] = useState<AgentEvent[]>([]);
   const [recentAudit, setRecentAudit] = useState<AuditEntry[]>(audit.slice(0, 20));
   const [status, setStatus] = useState<"connecting" | "live" | "offline">("connecting");
@@ -220,14 +222,13 @@ export default function LiveActivityPanel({ audit }: Props) {
     <section className="panel live-activity-panel">
       <div className="panel-title">
         <Activity size={16} />
-        Live Agent Activity
-        <span className={`activity-status ${status}`}>{status}</span>
+        {t("Live Agent Activity")}
+        <span className={`activity-status ${status}`}>{t(status)}</span>
       </div>
 
       <div className="activity-note">
         <ShieldAlert size={14} />
-        Local daemon events stream live. Recent audit records catch CLI/MCP execs
-        that wrote to the same config directory.
+        {t("Local daemon events stream live. Recent audit records catch CLI/MCP execs that wrote to the same config directory.")}
       </div>
 
       {error && <div className="error compact">{error}</div>}
@@ -253,11 +254,11 @@ export default function LiveActivityPanel({ audit }: Props) {
           <input
             value={search}
             onChange={(event) => setSearch(event.target.value)}
-            placeholder="Search activity"
+            placeholder={t("Search activity")}
           />
         </label>
         <select value={sourceFilter} onChange={(event) => setSourceFilter(event.target.value)}>
-          <option value="all">All sources</option>
+          <option value="all">{t("All sources")}</option>
           {sourceOptions.map((source) => (
             <option key={source} value={source}>
               {source}
@@ -265,7 +266,7 @@ export default function LiveActivityPanel({ audit }: Props) {
           ))}
         </select>
         <select value={kindFilter} onChange={(event) => setKindFilter(event.target.value)}>
-          <option value="all">All types</option>
+          <option value="all">{t("All types")}</option>
           {kindOptions.map((kind) => (
             <option key={kind} value={kind}>
               {kind}
@@ -278,7 +279,7 @@ export default function LiveActivityPanel({ audit }: Props) {
         {items.length === 0 && (
           <div className="empty">
             <RefreshCw size={14} />
-            Waiting for SSH activity
+            {t("Waiting for SSH activity")}
           </div>
         )}
         {items.map((item) => (
@@ -292,7 +293,7 @@ export default function LiveActivityPanel({ audit }: Props) {
                   className="activity-toggle"
                   type="button"
                   onClick={() => toggleExpanded(item.id)}
-                  aria-label={expanded.has(item.id) ? "Collapse details" : "Expand details"}
+                  aria-label={expanded.has(item.id) ? t("Collapse details") : t("Expand details")}
                 >
                   {expanded.has(item.id) ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                 </button>
@@ -317,24 +318,24 @@ export default function LiveActivityPanel({ audit }: Props) {
                 <div className="activity-details">
                   <dl>
                     <div>
-                      <dt>time</dt>
+                      <dt>{t("time")}</dt>
                       <dd>{item.ts}</dd>
                     </div>
                     {item.host && (
                       <div>
-                        <dt>host</dt>
+                        <dt>{t("host")}</dt>
                         <dd>{item.host}</dd>
                       </div>
                     )}
                     {item.sessionId && (
                       <div>
-                        <dt>session</dt>
+                        <dt>{t("session")}</dt>
                         <dd>{item.sessionId}</dd>
                       </div>
                     )}
                     {item.changeId && (
                       <div>
-                        <dt>change</dt>
+                        <dt>{t("change")}</dt>
                         <dd>{item.changeId}</dd>
                       </div>
                     )}

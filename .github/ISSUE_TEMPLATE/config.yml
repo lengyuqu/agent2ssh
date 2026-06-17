@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: External user 10-minute setup
+    url: https://github.com/lengyuqu/agent2ssh/blob/main/docs/guides/external-user-10min.md
+    about: Start here before filing first-run adoption feedback.

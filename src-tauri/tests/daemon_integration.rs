@@ -508,6 +508,7 @@ fn test_host_profile_tags_serialization() {
         user: Some("ubuntu".to_string()),
         port: Some(22),
         key_path: None,
+        password: None,
         jump_host: None,
         risk_override: None,
         tags: vec!["production".to_string(), "web".to_string()],

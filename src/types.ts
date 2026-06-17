@@ -39,6 +39,7 @@ export type HostProfile = {
   user?: string | null;
   port?: number | null;
   key_path?: string | null;
+  password?: string | null;
   jump_host?: string | null;
   risk_override?: RiskLevel | null;
   tags?: string[];

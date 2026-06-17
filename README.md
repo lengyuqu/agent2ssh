@@ -127,6 +127,8 @@ Configure Agent2SSH as an MCP server in your agent's config:
 
 See [docs/skills.md](docs/skills.md) for the full list of 51 MCP tools.
 
+For first-time external users, follow the [10-minute CLI and MCP setup guide](docs/guides/external-user-10min.md). It covers host import, low-risk command verification, Codex/Claude-style MCP configuration, and sanitized feedback submission.
+
 ## Implemented Features
 
 ### Host Management
@@ -246,4 +248,4 @@ Webhook notifications are **non-blocking fire-and-forget**: failures (network er
 
 ## Roadmap
 
-The current codebase has completed the original MVP through packaging, tags, keys, playbooks, webhooks, remote daemons, daemon API, web console, and approval gates. The next work should focus on documentation accuracy, release validation, security hardening, and broader end-to-end test coverage. See [docs/plan.md](docs/plan.md).
+The current codebase has completed the original MVP through packaging, tags, keys, playbooks, webhooks, remote daemons, daemon API, web console, and approval gates. The next work focuses on cross-platform validation, external dogfood, ecosystem reliability, and team scenarios when real multi-user demand appears. See [docs/plan.md](docs/plan.md).

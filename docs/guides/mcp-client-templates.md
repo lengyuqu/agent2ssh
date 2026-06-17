@@ -72,7 +72,36 @@ Agent2SSH 作为 MCP (Model Context Protocol) stdio 服务器运行，可与任�
 
 ---
 
-## 3. Codex / OpenAI Agents (Python)
+## 3. Codex
+
+Codex uses TOML-style MCP server entries:
+
+```toml
+[mcp_servers.agent2ssh]
+command = "agent2ssh-mcp"
+args = []
+```
+
+If `agent2ssh-mcp` is not in PATH, use an absolute path:
+
+```toml
+[mcp_servers.agent2ssh]
+command = "/usr/local/bin/agent2ssh-mcp"
+args = []
+```
+
+For isolated testing, set a separate config directory:
+
+```toml
+[mcp_servers.agent2ssh.env]
+AGENT2SSH_CONFIG_DIR = "/tmp/agent2ssh-test"
+```
+
+Restart Codex after editing the config, then ask it to call `ssh_list_hosts`.
+
+---
+
+## 4. OpenAI Agents (Python)
 
 使用 Python MCP SDK 连接 Agent2SSH：
 
@@ -119,7 +148,7 @@ pip install mcp
 
 ---
 
-## 4. 通用 MCP 客户端 (TypeScript)
+## 5. 通用 MCP 客户端 (TypeScript)
 
 使用 `@modelcontextprotocol/sdk` 包：
 
@@ -175,7 +204,7 @@ npm install @modelcontextprotocol/sdk
 
 ---
 
-## 5. Windsurf / Codeium
+## 6. Windsurf / Codeium
 
 配置文件位置：`~/.codeium/windsurf/mcp_config.json`
 
@@ -211,3 +240,5 @@ npm install @modelcontextprotocol/sdk
 ## 可用工具
 
 Agent2SSH 共暴露 51 个 MCP 工具，涵盖主机管理、命令执行、SFTP、会话、端口转发、审计、审批、健康检查、指标、execution gate 和远程 daemon 等。完整列表参见 [MCP Tools Reference](../skills.md)。
+
+第一次给外部用户接入时，建议优先使用 [外部用户 10 分钟接入剧本](external-user-10min.md)，再回到本页查具体客户端模板。

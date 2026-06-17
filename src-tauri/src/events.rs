@@ -113,6 +113,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn test_event_bus_publish_subscribe() {
         let mut rx = subscribe_events();
         publish_event(
@@ -124,6 +125,24 @@ mod tests {
         assert_eq!(event.data["host"], "test-host");
         assert_eq!(event.data["exit_code"], 0);
         assert!(!event.id.is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_event_bus_handles_1000_event_burst() {
+        let mut rx = subscribe_events();
+        for i in 0..1000 {
+            publish_event(
+                EventType::ExecOutput,
+                serde_json::json!({"seq": i, "host": format!("scale-{i:03}")}),
+            );
+        }
+
+        for expected in 0..1000 {
+            let event = rx.recv().await.unwrap();
+            assert_eq!(event.event_type, EventType::ExecOutput);
+            assert_eq!(event.data["seq"], expected);
+        }
     }
 
     #[test]

@@ -1,11 +1,13 @@
 import { Key, Plus, Trash2, Copy, Download, Check } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api } from "../api";
+import { useI18n } from "../i18n";
 import type { SshKeyInfo } from "../types";
 
 type Props = Record<string, never>;
 
 export default function KeysPanel(_props: Props) {
+  const { t } = useI18n();
   const [keys, setKeys] = useState<SshKeyInfo[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [newName, setNewName] = useState("");
@@ -31,7 +33,7 @@ export default function KeysPanel(_props: Props) {
   async function handleGenerate() {
     setError(null);
     if (!newName.trim()) {
-      setError("Key name is required");
+      setError(t("Key name is required"));
       return;
     }
     try {
@@ -48,7 +50,7 @@ export default function KeysPanel(_props: Props) {
   async function handleImport() {
     setError(null);
     if (!importPath.trim()) {
-      setError("Source path is required");
+      setError(t("Source path is required"));
       return;
     }
     try {
@@ -63,7 +65,7 @@ export default function KeysPanel(_props: Props) {
   }
 
   async function handleDelete(name: string) {
-    if (!confirm(`Delete key "${name}"?`)) return;
+    if (!confirm(t("Delete key \"{name}\"?", { name }))) return;
     try {
       await api.deleteKey(name);
       await refresh();
@@ -81,10 +83,10 @@ export default function KeysPanel(_props: Props) {
   return (
     <div className="panel">
       <div className="panel-header">
-        <h3><Key size={16} /> SSH Keys</h3>
+        <h3><Key size={16} /> {t("SSH Keys")}</h3>
         <button className="secondary small" onClick={() => setShowForm(!showForm)}>
           <Plus size={14} />
-          {showForm ? "Cancel" : "Add Key"}
+          {showForm ? t("Cancel") : t("Add Key")}
         </button>
       </div>
 
@@ -97,46 +99,46 @@ export default function KeysPanel(_props: Props) {
               className={mode === "generate" ? "active" : ""}
               onClick={() => setMode("generate")}
             >
-              Generate New
+              {t("Generate New")}
             </button>
             <button
               className={mode === "import" ? "active" : ""}
               onClick={() => setMode("import")}
             >
-              <Download size={12} /> Import
+              <Download size={12} /> {t("Import")}
             </button>
           </div>
 
           {mode === "generate" ? (
             <>
               <input
-                placeholder="Key name (e.g. id-work)"
+                placeholder={t("Key name (e.g. id-work)")}
                 value={newName}
                 onChange={(e) => setNewName(e.target.value)}
               />
               <input
-                placeholder="Comment (optional)"
+                placeholder={t("Comment (optional)")}
                 value={newComment}
                 onChange={(e) => setNewComment(e.target.value)}
               />
               <button className="primary" onClick={handleGenerate}>
-                Generate Ed25519 Key
+                {t("Generate Ed25519 Key")}
               </button>
             </>
           ) : (
             <>
               <input
-                placeholder="Path to private key (e.g. ~/.ssh/id_rsa)"
+                placeholder={t("Path to private key (e.g. ~/.ssh/id_rsa)")}
                 value={importPath}
                 onChange={(e) => setImportPath(e.target.value)}
               />
               <input
-                placeholder="Name (optional, defaults to filename)"
+                placeholder={t("Name (optional, defaults to filename)")}
                 value={importName}
                 onChange={(e) => setImportName(e.target.value)}
               />
               <button className="primary" onClick={handleImport}>
-                Import Key
+                {t("Import Key")}
               </button>
             </>
           )}
@@ -144,16 +146,16 @@ export default function KeysPanel(_props: Props) {
       )}
 
       {keys.length === 0 && !showForm && (
-        <p className="empty">No SSH keys managed. Click "Add Key" to get started.</p>
+        <p className="empty">{t("No SSH keys managed. Click \"Add Key\" to get started.")}</p>
       )}
 
       {keys.length > 0 && (
         <table className="key-table">
           <thead>
             <tr>
-              <th>Name</th>
-              <th>Type</th>
-              <th>Public Key</th>
+              <th>{t("Name")}</th>
+              <th>{t("Type")}</th>
+              <th>{t("Public Key")}</th>
               <th></th>
             </tr>
           </thead>
@@ -170,14 +172,14 @@ export default function KeysPanel(_props: Props) {
                       </code>
                       <button
                         className="icon-button"
-                        title="Copy public key"
+                        title={t("Copy public key")}
                         onClick={() => copyPublicKey(k.public_key, k.name)}
                       >
                         {copiedKey === k.name ? <Check size={12} /> : <Copy size={12} />}
                       </button>
                     </>
                   ) : (
-                    <span className="empty">no public key</span>
+                    <span className="empty">{t("no public key")}</span>
                   )}
                 </td>
                 <td>

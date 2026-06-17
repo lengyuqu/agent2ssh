@@ -27,6 +27,7 @@ components:
         user:      { type: string, nullable: true }
         port:      { type: integer, nullable: true }
         key_path:  { type: string, nullable: true }
+        password:  { type: string, nullable: true }
         jump_host: { type: string, nullable: true }
         risk_override: { $ref: "#/components/schemas/RiskLevel", nullable: true }
         tags:

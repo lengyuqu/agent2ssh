@@ -1,6 +1,7 @@
 import { BookOpen, Play, CheckCircle, XCircle, Loader2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api } from "../api";
+import { useI18n } from "../i18n";
 import type { HostProfile, Playbook, PlaybookRunResult } from "../types";
 
 type Props = {
@@ -8,6 +9,7 @@ type Props = {
 };
 
 export default function PlaybooksPanel({ hosts }: Props) {
+  const { t } = useI18n();
   const [playbooks, setPlaybooks] = useState<Playbook[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -46,7 +48,7 @@ export default function PlaybooksPanel({ hosts }: Props) {
 
   async function handleRun() {
     if (!selectedPlaybook || !selectedHost) {
-      setError("Select a playbook and target host");
+      setError(t("Select a playbook and target host"));
       return;
     }
     setError(null);
@@ -66,8 +68,8 @@ export default function PlaybooksPanel({ hosts }: Props) {
     <div className="panel">
       <div className="panel-title">
         <BookOpen size={16} />
-        Playbooks
-        <button className="icon-button" title="Refresh" onClick={refresh}>
+        {t("Playbooks")}
+        <button className="icon-button" title={t("Refresh")} onClick={refresh}>
           &#8635;
         </button>
       </div>
@@ -76,7 +78,7 @@ export default function PlaybooksPanel({ hosts }: Props) {
 
       {playbooks.length === 0 && (
         <p className="empty">
-          No playbooks configured. Add playbooks to{" "}
+          {t("No playbooks configured. Add playbooks to")}{" "}
           <code>~/.agent2ssh/playbooks.toml</code>.
         </p>
       )}
@@ -119,7 +121,7 @@ export default function PlaybooksPanel({ hosts }: Props) {
                     flexWrap: "wrap",
                   }}
                 >
-                  <span>{pb.steps.length} step{pb.steps.length !== 1 ? "s" : ""}</span>
+                  <span>{pb.steps.length} {t(pb.steps.length === 1 ? "step" : "steps")}</span>
                   {pb.tags.map((t) => (
                     <span key={t} className="tag-badge">
                       {t}
@@ -138,7 +140,7 @@ export default function PlaybooksPanel({ hosts }: Props) {
                 onClick={() => showRunForm(pb.name)}
               >
                 <Play size={13} />
-                Run
+                {t("Run")}
               </button>
             </div>
           ))}
@@ -157,7 +159,7 @@ export default function PlaybooksPanel({ hosts }: Props) {
           }}
         >
           <div style={{ fontWeight: 600, marginBottom: 8 }}>
-            Run: <span className="mono">{selectedPlaybook}</span>
+            {t("Run:")} <span className="mono">{selectedPlaybook}</span>
           </div>
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
             <select
@@ -165,7 +167,7 @@ export default function PlaybooksPanel({ hosts }: Props) {
               onChange={(e) => setSelectedHost(e.target.value)}
               style={{ minWidth: 140 }}
             >
-              {hosts.length === 0 && <option value="">No hosts</option>}
+              {hosts.length === 0 && <option value="">{t("No hosts")}</option>}
               {hosts.map((h) => (
                 <option key={h.name} value={h.name}>
                   {h.name}
@@ -188,7 +190,7 @@ export default function PlaybooksPanel({ hosts }: Props) {
                 onChange={(e) => setForce(e.target.checked)}
                 style={{ width: "auto" }}
               />
-              Force
+              {t("Force")}
             </label>
             <button
               className="primary"
@@ -197,16 +199,16 @@ export default function PlaybooksPanel({ hosts }: Props) {
             >
               {running ? (
                 <>
-                  <Loader2 size={14} className="spin" /> Running...
+                  <Loader2 size={14} className="spin" /> {t("Running...")}
                 </>
               ) : (
                 <>
-                  <Play size={14} /> Execute
+                  <Play size={14} /> {t("Execute")}
                 </>
               )}
             </button>
             <button className="secondary" onClick={hideRunForm}>
-              Cancel
+              {t("Cancel")}
             </button>
           </div>
         </div>
@@ -225,15 +227,15 @@ export default function PlaybooksPanel({ hosts }: Props) {
           >
             {result.success ? (
               <span style={{ color: "#16a34a" }}>
-                <CheckCircle size={16} /> Success
+                <CheckCircle size={16} /> {t("Success")}
               </span>
             ) : (
               <span style={{ color: "#dc2626" }}>
-                <XCircle size={16} /> Failed
+                <XCircle size={16} /> {t("Failed")}
               </span>
             )}
             <span style={{ color: "#64748b", fontSize: 13, marginLeft: "auto" }}>
-              {result.steps_completed.length}/{playbooks.find((p) => p.name === result.playbook)?.steps.length ?? "?"} steps
+              {result.steps_completed.length}/{playbooks.find((p) => p.name === result.playbook)?.steps.length ?? "?"} {t("steps")}
               &nbsp;&middot;&nbsp;
               {result.total_duration_ms < 1000
                 ? `${result.total_duration_ms}ms`
