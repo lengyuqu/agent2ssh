@@ -195,6 +195,12 @@ select {
   color: #a33a3a;
 }
 
+.gate-summary.unknown {
+  border-color: #d8e0e6;
+  background: #f8fafc;
+  color: #667783;
+}
+
 .approval-status {
   border-color: #f3d18a;
   background: #fffbeb;
@@ -364,6 +370,12 @@ select {
   color: #a33a3a;
 }
 
+.settings-status.unknown {
+  border-color: #d8e0e6;
+  background: #f8fafc;
+  color: #667783;
+}
+
 .settings-action,
 .settings-row-button {
   width: 100%;
@@ -389,6 +401,11 @@ select {
 .settings-action.resume:hover {
   border-color: #89c8a8;
   color: #246d4a;
+}
+
+.settings-action.refresh:hover {
+  border-color: #8fa3af;
+  color: #172026;
 }
 
 .settings-action:disabled {

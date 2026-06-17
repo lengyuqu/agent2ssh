@@ -4,6 +4,7 @@ import {
   CircleDashed,
   PauseCircle,
   PlayCircle,
+  RefreshCw,
   Settings,
   Upload,
   Wand2,
@@ -18,6 +19,7 @@ type Props = {
   gateStatus: ExecutionGateStatus | null;
   gateBusy: boolean;
   onGateToggle: () => void;
+  onGateRefresh: () => void | Promise<void>;
   onImportConfig: () => void;
   onOpenSetup: () => void;
 };
@@ -26,13 +28,16 @@ export default function SettingsMenu({
   gateStatus,
   gateBusy,
   onGateToggle,
+  onGateRefresh,
   onImportConfig,
   onOpenSetup,
 }: Props) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
+  const [refreshBusy, setRefreshBusy] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const gatePaused = gateStatus?.mode === "paused";
+  const gateUnavailable = gateStatus === null;
 
   useEffect(() => {
     if (!open) return;
@@ -54,6 +59,15 @@ export default function SettingsMenu({
       document.removeEventListener("keydown", handleKeyDown);
     };
   }, [open]);
+
+  async function handleGateRefresh() {
+    setRefreshBusy(true);
+    try {
+      await onGateRefresh();
+    } finally {
+      setRefreshBusy(false);
+    }
+  }
 
   return (
     <div className="settings-menu" ref={menuRef}>
@@ -91,9 +105,17 @@ export default function SettingsMenu({
               <Activity size={15} />
               {t("Execution gate")}
             </div>
-            <div className={`settings-status ${gatePaused ? "paused" : "active"}`}>
-              {gatePaused ? <CircleDashed size={16} /> : <CheckCircle2 size={16} />}
-              <span>{gatePaused ? t("Gate paused") : t("Gate active")}</span>
+            <div className={`settings-status ${gateUnavailable ? "unknown" : gatePaused ? "paused" : "active"}`}>
+              {gateUnavailable ? (
+                <CircleDashed size={16} />
+              ) : gatePaused ? (
+                <CircleDashed size={16} />
+              ) : (
+                <CheckCircle2 size={16} />
+              )}
+              <span>
+                {gateUnavailable ? t("Gate unavailable") : gatePaused ? t("Gate paused") : t("Gate active")}
+              </span>
             </div>
             <button
               type="button"
@@ -104,6 +126,16 @@ export default function SettingsMenu({
             >
               {gatePaused ? <PlayCircle size={16} /> : <PauseCircle size={16} />}
               {gatePaused ? t("Resume") : t("Pause")}
+            </button>
+            <button
+              type="button"
+              className="settings-action refresh"
+              onClick={handleGateRefresh}
+              disabled={refreshBusy}
+              title={t("Refresh gate status")}
+            >
+              <RefreshCw size={16} className={refreshBusy ? "spin" : ""} />
+              {t("Refresh gate status")}
             </button>
           </section>
 

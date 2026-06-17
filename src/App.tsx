@@ -301,14 +301,23 @@ export default function App() {
                 {t(pendingApprovals.length > 1 ? "pending approvals" : "pending approval")}
               </div>
             )}
-            <div className={`status-pill gate-summary ${gateStatus?.mode === "paused" ? "paused" : "active"}`}>
+            <div
+              className={`status-pill gate-summary ${
+                gateStatus === null ? "unknown" : gateStatus.mode === "paused" ? "paused" : "active"
+              }`}
+            >
               <Activity size={15} />
-              {gateStatus?.mode === "paused" ? t("Gate paused") : t("Gate active")}
+              {gateStatus === null
+                ? t("Gate unavailable")
+                : gateStatus.mode === "paused"
+                  ? t("Gate paused")
+                  : t("Gate active")}
             </div>
             <SettingsMenu
               gateStatus={gateStatus}
               gateBusy={gateBusy}
               onGateToggle={handleGateToggle}
+              onGateRefresh={pollGateStatus}
               onImportConfig={handleImportConfig}
               onOpenSetup={() => {
                 setWizardDismissed(false);
