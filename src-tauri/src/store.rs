@@ -1,10 +1,11 @@
 use anyhow::{Context, Result};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::{
-    fs::{self, OpenOptions},
+    fs::{self, File, OpenOptions},
     io::Write,
     path::PathBuf,
-    sync::{Mutex, OnceLock},
+    sync::{Mutex, MutexGuard, OnceLock},
 };
 
 use crate::types::{AppConfig, AuditEntry, AuditFilter, ExecResult, RiskLevel};
@@ -13,6 +14,45 @@ static STORE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 pub fn hosts_lock() -> &'static Mutex<()> {
     STORE_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+pub struct StoreWriteGuard {
+    _process_guard: MutexGuard<'static, ()>,
+    _file_guard: FileLockGuard,
+}
+
+struct FileLockGuard {
+    _file: File,
+}
+
+pub fn store_write_lock() -> Result<StoreWriteGuard> {
+    let process_guard = hosts_lock()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("store lock poisoned"))?;
+    let file_guard = lock_config_file(".hosts.lock")?;
+    Ok(StoreWriteGuard {
+        _process_guard: process_guard,
+        _file_guard: file_guard,
+    })
+}
+
+fn audit_write_lock() -> Result<FileLockGuard> {
+    lock_config_file(".audit.lock")
+}
+
+fn lock_config_file(name: &str) -> Result<FileLockGuard> {
+    ensure_config_dir()?;
+    let path = config_dir()?.join(name);
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("failed to open lock file {}", path.display()))?;
+    restrict_file_to_owner(&path)?;
+    file.lock_exclusive()
+        .with_context(|| format!("failed to lock {}", path.display()))?;
+    Ok(FileLockGuard { _file: file })
 }
 
 pub fn config_dir() -> Result<PathBuf> {
@@ -69,9 +109,36 @@ pub fn load_config() -> Result<AppConfig> {
 }
 
 pub fn save_config(config: &AppConfig) -> Result<()> {
+    let _guard = store_write_lock()?;
+    save_config_unlocked(config)
+}
+
+pub(crate) fn save_config_unlocked(config: &AppConfig) -> Result<()> {
     ensure_config_dir()?;
     let raw = serde_json::to_string_pretty(config)?;
-    fs::write(config_path()?, raw).context("failed to write hosts config")
+    let path = config_path()?;
+    let tmp_path = path.with_extension(format!("json.tmp.{}", std::process::id()));
+    let write_result = (|| -> Result<()> {
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&tmp_path)
+            .with_context(|| format!("failed to open temp config {}", tmp_path.display()))?;
+        file.write_all(raw.as_bytes())
+            .with_context(|| format!("failed to write temp config {}", tmp_path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("failed to sync temp config {}", tmp_path.display()))?;
+        restrict_file_to_owner(&tmp_path)?;
+        fs::rename(&tmp_path, &path)
+            .with_context(|| format!("failed to replace hosts config {}", path.display()))?;
+        restrict_file_to_owner(&path)?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = fs::remove_file(&tmp_path);
+    }
+    write_result
 }
 
 pub fn append_audit(
@@ -85,7 +152,8 @@ pub fn append_audit(
     use uuid::Uuid;
 
     ensure_config_dir()?;
-    rotate_audit_if_needed(10 * 1024 * 1024)?; // 10 MB default
+    let _guard = audit_write_lock()?;
+    rotate_audit_if_needed_unlocked(10 * 1024 * 1024)?; // 10 MB default
     let entry = AuditEntry {
         id: Uuid::new_v4(),
         ts: Utc::now(),
@@ -135,6 +203,11 @@ fn detect_and_publish_audit_anomalies(entry: &AuditEntry) {
 /// Keeps at most 3 rotated files: `audit.jsonl.1`, `.2`, `.3`.
 /// When rotating, `.2` → `.3`, `.1` → `.2`, current → `.1`.
 pub fn rotate_audit_if_needed(max_size_bytes: u64) -> Result<()> {
+    let _guard = audit_write_lock()?;
+    rotate_audit_if_needed_unlocked(max_size_bytes)
+}
+
+fn rotate_audit_if_needed_unlocked(max_size_bytes: u64) -> Result<()> {
     let path = audit_path()?;
     if !path.exists() {
         return Ok(());

@@ -33,6 +33,16 @@ fn restrict_private_key_permissions(path: impl AsRef<std::path::Path>) -> Result
     restrict_file_to_owner(path)
 }
 
+fn validate_key_name(name: &str) -> Result<()> {
+    if name.trim().is_empty() {
+        return Err(anyhow!("key name is required"));
+    }
+    if name.contains('/') || name.contains('\\') || name.contains("..") {
+        return Err(anyhow!("invalid key name"));
+    }
+    Ok(())
+}
+
 /// List all key pairs in ~/.agent2ssh/keys/
 pub fn list_keys_core() -> Result<Vec<SshKeyInfo>> {
     let dir = keys_dir()?;
@@ -107,12 +117,7 @@ pub fn list_keys_core() -> Result<Vec<SshKeyInfo>> {
 
 /// Generate a new Ed25519 key pair
 pub fn generate_key_core(name: &str, comment: Option<&str>) -> Result<SshKeyInfo> {
-    if name.trim().is_empty() {
-        return Err(anyhow!("key name is required"));
-    }
-    if name.contains('/') || name.contains('\\') || name.contains("..") {
-        return Err(anyhow!("invalid key name"));
-    }
+    validate_key_name(name)?;
 
     let dir = keys_dir()?;
     let private_path = dir.join(name);
@@ -164,6 +169,7 @@ pub fn import_key_core(source_path: &str, name: Option<&str>) -> Result<SshKeyIn
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "imported_key".to_string()),
     };
+    validate_key_name(&key_name)?;
 
     let dir = keys_dir()?;
     let dest = dir.join(&key_name);
@@ -221,10 +227,19 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         assert_eq!(mode, 0o600);
     }
+
+    #[test]
+    fn test_validate_key_name_rejects_path_traversal() {
+        assert!(validate_key_name("../id_ed25519").is_err());
+        assert!(validate_key_name("nested/id_ed25519").is_err());
+        assert!(validate_key_name("nested\\id_ed25519").is_err());
+        assert!(validate_key_name("id_ed25519").is_ok());
+    }
 }
 
 /// Delete a key pair from the keys directory
 pub fn delete_key_core(name: &str) -> Result<()> {
+    validate_key_name(name)?;
     let dir = keys_dir()?;
     let private = dir.join(name);
     let public = dir.join(format!("{}.pub", name));

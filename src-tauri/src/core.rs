@@ -13,7 +13,9 @@ use tokio::{io::{AsyncReadExt, AsyncWriteExt}, process::Command, sync::Semaphore
 
 use crate::{
     connection::{apply_socket, get_or_create_socket},
-    store::{append_audit, hosts_lock, list_audit_raw, load_config, save_config},
+    store::{
+        append_audit, list_audit_raw, load_config, save_config_unlocked, store_write_lock,
+    },
     types::{
         AuditEntry, AuditFilter, BatchStrategy, ExecMultiBatchResult, ExecMultiResult, ExecRequest,
         ExecResult, HostFilter, HostProfile, PingResult, RiskLevel, SftpDirection,
@@ -104,7 +106,7 @@ pub fn export_team_config() -> Result<TeamConfigExport> {
 /// Import team configuration: merge hosts (skip duplicates by name), and
 /// optionally overwrite risk rules and playbooks.
 pub fn import_team_config(export: &TeamConfigExport) -> Result<ImportResult> {
-    let _guard = hosts_lock().lock().unwrap();
+    let _guard = store_write_lock()?;
     let mut config = load_config()?;
 
     let existing_names: std::collections::HashSet<String> =
@@ -121,7 +123,7 @@ pub fn import_team_config(export: &TeamConfigExport) -> Result<ImportResult> {
         }
     }
     config.hosts.sort_by(|a, b| a.name.cmp(&b.name));
-    save_config(&config)?;
+    save_config_unlocked(&config)?;
 
     let config_dir = crate::store::config_dir()?;
 
@@ -297,7 +299,7 @@ fn normalized_filter(value: Option<&str>) -> Option<String> {
 
 pub fn add_host_core(host: HostProfile) -> Result<HostProfile> {
     validate_host(&host)?;
-    let _guard = hosts_lock().lock().unwrap();
+    let _guard = store_write_lock()?;
     let mut config = load_config()?;
     if let Some(existing) = config.hosts.iter_mut().find(|item| item.name == host.name) {
         *existing = host.clone();
@@ -305,19 +307,19 @@ pub fn add_host_core(host: HostProfile) -> Result<HostProfile> {
         config.hosts.push(host.clone());
     }
     config.hosts.sort_by(|a, b| a.name.cmp(&b.name));
-    save_config(&config)?;
+    save_config_unlocked(&config)?;
     Ok(host)
 }
 
 pub fn remove_host_core(name: &str) -> Result<()> {
-    let _guard = hosts_lock().lock().unwrap();
+    let _guard = store_write_lock()?;
     let mut config = load_config()?;
     let before = config.hosts.len();
     config.hosts.retain(|h| h.name != name);
     if config.hosts.len() == before {
         return Err(anyhow!("no host profile named '{name}'"));
     }
-    save_config(&config)
+    save_config_unlocked(&config)
 }
 
 pub fn list_audit_core(filter: AuditFilter) -> Result<Vec<AuditEntry>> {
@@ -481,15 +483,8 @@ pub async fn preview_exec(host: &str, command: &str, timeout_secs: Option<u64>) 
     let timeout = timeout_secs.unwrap_or(60);
     let built_in_risk = classify_risk(command);
 
-    let classified_risk = if let Some(user_risk) = crate::risk_config::classify_with_user_rules(command).await {
-        match (&user_risk, &built_in_risk) {
-            (RiskLevel::Blocked, _) => RiskLevel::Blocked,
-            (RiskLevel::High, RiskLevel::Blocked) => RiskLevel::Blocked,
-            (ur, _) => *ur,
-        }
-    } else {
-        built_in_risk
-    };
+    let classified_risk =
+        crate::risk_config::classify_effective_risk(command, built_in_risk).await;
 
     let risk = if let Some(override_level) = profile.risk_override {
         apply_risk_override(classified_risk, Some(override_level))
@@ -560,15 +555,8 @@ pub async fn preview_exec_multi(
     };
 
     let built_in_risk = classify_risk(command);
-    let classified_risk = if let Some(user_risk) = crate::risk_config::classify_with_user_rules(command).await {
-        match (&user_risk, &built_in_risk) {
-            (RiskLevel::Blocked, _) => RiskLevel::Blocked,
-            (RiskLevel::High, RiskLevel::Blocked) => RiskLevel::Blocked,
-            (ur, _) => *ur,
-        }
-    } else {
-        built_in_risk
-    };
+    let classified_risk =
+        crate::risk_config::classify_effective_risk(command, built_in_risk).await;
 
     let mut targets = Vec::new();
     let mut warnings = Vec::new();
@@ -795,28 +783,29 @@ pub(crate) async fn exec_ssh_core_with_risk_override(
     // Risk overrides are reserved for explicitly trusted scopes such as a host
     // profile or a playbook. They never downgrade a blocked command.
     let built_in_risk = classify_risk(&request.command);
-    let classified_risk = {
-        // Also check user-defined risk rules from risk_rules.toml.
-        if let Some(user_risk) = crate::risk_config::classify_with_user_rules(&request.command).await {
-            // User rules escalate but never de-escalate below built-in.
-            match (&user_risk, &built_in_risk) {
-                (RiskLevel::Blocked, _) => RiskLevel::Blocked,
-                (RiskLevel::High, RiskLevel::Blocked) => RiskLevel::Blocked,
-                (ur, _) => *ur,
-            }
-        } else {
-            built_in_risk
-        }
-    };
+    let classified_risk =
+        crate::risk_config::classify_effective_risk(&request.command, built_in_risk).await;
     let risk = apply_risk_override(classified_risk, request_risk_override.or(host.risk_override));
 
     if risk == RiskLevel::Blocked {
+        append_rejected_exec_audit(
+            &request,
+            risk,
+            &source,
+            "command blocked by risk policy",
+        );
         return Err(anyhow!(
             "command blocked (risk=blocked): '{}' is unconditionally dangerous",
             request.command
         ));
     }
     if risk == RiskLevel::High && !request.force {
+        append_rejected_exec_audit(
+            &request,
+            risk,
+            &source,
+            "command requires force=true",
+        );
         return Err(anyhow!(
             "command requires force=true (risk=high): '{}'",
             request.command
@@ -970,6 +959,26 @@ pub(crate) async fn exec_ssh_core_with_risk_override(
     );
 
     Ok(result)
+}
+
+fn append_rejected_exec_audit(request: &ExecRequest, risk: RiskLevel, source: &str, message: &str) {
+    let result = ExecResult {
+        host: request.host.clone(),
+        command: request.command.clone(),
+        exit_code: None,
+        stdout: String::new(),
+        stderr: message.to_string(),
+        duration_ms: 0,
+        risk_level: risk,
+        truncated: false,
+    };
+    let _ = append_audit(
+        &result,
+        risk,
+        request.reason.as_deref().or(Some(message)),
+        request.change_id.as_deref(),
+        Some(source),
+    );
 }
 
 pub async fn exec_multi_core(
@@ -1498,6 +1507,15 @@ pub(crate) fn build_ssh_command(host: &HostProfile) -> Command {
     cmd
 }
 
+pub async fn build_ssh_exec_command(host: &HostProfile, command: &str) -> Command {
+    let mut cmd = build_ssh_command(host);
+    if let Some(socket) = get_or_create_socket(host).await {
+        apply_socket(&mut cmd, &socket);
+    }
+    cmd.arg(ssh_target(host)).arg(command);
+    cmd
+}
+
 fn validate_host(host: &HostProfile) -> Result<()> {
     if host.name.trim().is_empty() {
         return Err(anyhow!("host alias is required"));
@@ -1566,11 +1584,36 @@ fn scp_base_args(host: &HostProfile) -> Vec<String> {
 }
 
 pub async fn sftp_upload_core(request: SftpUploadRequest) -> Result<SftpResult> {
+    sftp_upload_core_with_source(request, Some(source_from_env("core"))).await
+}
+
+pub async fn sftp_upload_core_with_source(
+    request: SftpUploadRequest,
+    source: Option<String>,
+) -> Result<SftpResult> {
     let host = resolve_host(&request.host)?;
     let started = Instant::now();
+    let source = source.unwrap_or_else(|| source_from_env("core"));
+    let command = format!("sftp upload {} -> {}", request.local_path, request.remote_path);
+    let risk = crate::risk_config::classify_effective_risk(&command, classify_risk(&command)).await;
+    if risk == RiskLevel::Blocked {
+        let message = "sftp upload blocked by risk policy";
+        let result = ExecResult {
+            host: request.host.clone(),
+            command,
+            exit_code: None,
+            stdout: String::new(),
+            stderr: message.to_string(),
+            duration_ms: 0,
+            risk_level: risk,
+            truncated: false,
+        };
+        let _ = append_audit(&result, risk, Some(message), None, Some(&source));
+        return Err(anyhow!(message));
+    }
 
     let local = expand_tilde(&request.local_path);
-    if host.jump_host.is_none() {
+    let transfer_result = if host.jump_host.is_none() {
         let embedded_host = host.clone();
         let remote_path = request.remote_path.clone();
         let local_for_task = local.clone();
@@ -1586,64 +1629,112 @@ pub async fn sftp_upload_core(request: SftpUploadRequest) -> Result<SftpResult> 
             Ok(())
         })
         .await
-        .context("embedded SFTP upload task failed")??;
-
-        return Ok(SftpResult {
-            host: request.host,
-            local_path: local,
-            remote_path: request.remote_path,
-            direction: SftpDirection::Upload,
-            duration_ms: started.elapsed().as_millis(),
-        });
-    }
-
-    let remote = format!("{}:{}", ssh_target(&host), request.remote_path);
-
-    let has_password = host
-        .password
-        .as_deref()
-        .map(|password| !password.trim().is_empty())
-        .unwrap_or(false);
-    let mut cmd = if has_password {
-        let mut cmd = Command::new("sshpass");
-        cmd.arg("-e").arg("scp");
-        if let Some(password) = &host.password {
-            cmd.env("SSHPASS", password);
-        }
-        cmd
+        .context("embedded SFTP upload task failed")?
     } else {
-        Command::new("scp")
+        let remote = format!("{}:{}", ssh_target(&host), request.remote_path);
+
+        let has_password = host
+            .password
+            .as_deref()
+            .map(|password| !password.trim().is_empty())
+            .unwrap_or(false);
+        let mut cmd = if has_password {
+            let mut cmd = Command::new("sshpass");
+            cmd.arg("-e").arg("scp");
+            if let Some(password) = &host.password {
+                cmd.env("SSHPASS", password);
+            }
+            cmd
+        } else {
+            Command::new("scp")
+        };
+        for arg in scp_base_args(&host) {
+            cmd.arg(arg);
+        }
+        cmd.arg(&local)
+            .arg(&remote)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let output = cmd.output().await.context("failed to spawn scp")?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(anyhow!("scp upload failed: {stderr}"))
+        }
     };
-    for arg in scp_base_args(&host) {
-        cmd.arg(arg);
-    }
-    cmd.arg(&local)
-        .arg(&remote)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
 
-    let output = cmd.output().await.context("failed to spawn scp")?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!("scp upload failed: {stderr}"));
+    let duration_ms = started.elapsed().as_millis();
+    if let Err(error) = transfer_result {
+        let message = error.to_string();
+        let result = ExecResult {
+            host: request.host.clone(),
+            command: command.clone(),
+            exit_code: None,
+            stdout: String::new(),
+            stderr: message.clone(),
+            duration_ms,
+            risk_level: risk,
+            truncated: false,
+        };
+        let _ = append_audit(&result, risk, Some(&message), None, Some(&source));
+        return Err(error);
     }
 
-    Ok(SftpResult {
+    let result = SftpResult {
         host: request.host,
         local_path: local,
         remote_path: request.remote_path,
         direction: SftpDirection::Upload,
-        duration_ms: started.elapsed().as_millis(),
-    })
+        duration_ms,
+    };
+    let audit_result = ExecResult {
+        host: result.host.clone(),
+        command,
+        exit_code: Some(0),
+        stdout: String::new(),
+        stderr: String::new(),
+        duration_ms,
+        risk_level: risk,
+        truncated: false,
+    };
+    let _ = append_audit(&audit_result, risk, None, None, Some(&source));
+    Ok(result)
 }
 
 pub async fn sftp_download_core(request: SftpDownloadRequest) -> Result<SftpResult> {
+    sftp_download_core_with_source(request, Some(source_from_env("core"))).await
+}
+
+pub async fn sftp_download_core_with_source(
+    request: SftpDownloadRequest,
+    source: Option<String>,
+) -> Result<SftpResult> {
     let host = resolve_host(&request.host)?;
     let started = Instant::now();
+    let source = source.unwrap_or_else(|| source_from_env("core"));
+    let command = format!("sftp download {} -> {}", request.remote_path, request.local_path);
+    let risk = crate::risk_config::classify_effective_risk(&command, classify_risk(&command)).await;
+    if risk == RiskLevel::Blocked {
+        let message = "sftp download blocked by risk policy";
+        let result = ExecResult {
+            host: request.host.clone(),
+            command,
+            exit_code: None,
+            stdout: String::new(),
+            stderr: message.to_string(),
+            duration_ms: 0,
+            risk_level: risk,
+            truncated: false,
+        };
+        let _ = append_audit(&result, risk, Some(message), None, Some(&source));
+        return Err(anyhow!(message));
+    }
 
     let local = expand_tilde(&request.local_path);
-    if host.jump_host.is_none() {
+    let transfer_result = if host.jump_host.is_none() {
         let embedded_host = host.clone();
         let remote_path = request.remote_path.clone();
         let local_for_task = local.clone();
@@ -1659,61 +1750,93 @@ pub async fn sftp_download_core(request: SftpDownloadRequest) -> Result<SftpResu
             Ok(())
         })
         .await
-        .context("embedded SFTP download task failed")??;
-
-        return Ok(SftpResult {
-            host: request.host,
-            local_path: local,
-            remote_path: request.remote_path,
-            direction: SftpDirection::Download,
-            duration_ms: started.elapsed().as_millis(),
-        });
-    }
-
-    let remote = format!("{}:{}", ssh_target(&host), request.remote_path);
-
-    let has_password = host
-        .password
-        .as_deref()
-        .map(|password| !password.trim().is_empty())
-        .unwrap_or(false);
-    let mut cmd = if has_password {
-        let mut cmd = Command::new("sshpass");
-        cmd.arg("-e").arg("scp");
-        if let Some(password) = &host.password {
-            cmd.env("SSHPASS", password);
-        }
-        cmd
+        .context("embedded SFTP download task failed")?
     } else {
-        Command::new("scp")
+        let remote = format!("{}:{}", ssh_target(&host), request.remote_path);
+
+        let has_password = host
+            .password
+            .as_deref()
+            .map(|password| !password.trim().is_empty())
+            .unwrap_or(false);
+        let mut cmd = if has_password {
+            let mut cmd = Command::new("sshpass");
+            cmd.arg("-e").arg("scp");
+            if let Some(password) = &host.password {
+                cmd.env("SSHPASS", password);
+            }
+            cmd
+        } else {
+            Command::new("scp")
+        };
+        for arg in scp_base_args(&host) {
+            cmd.arg(arg);
+        }
+        cmd.arg(&remote)
+            .arg(&local)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let output = cmd.output().await.context("failed to spawn scp")?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(anyhow!("scp download failed: {stderr}"))
+        }
     };
-    for arg in scp_base_args(&host) {
-        cmd.arg(arg);
-    }
-    cmd.arg(&remote)
-        .arg(&local)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
 
-    let output = cmd.output().await.context("failed to spawn scp")?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!("scp download failed: {stderr}"));
+    let duration_ms = started.elapsed().as_millis();
+    if let Err(error) = transfer_result {
+        let message = error.to_string();
+        let result = ExecResult {
+            host: request.host.clone(),
+            command: command.clone(),
+            exit_code: None,
+            stdout: String::new(),
+            stderr: message.clone(),
+            duration_ms,
+            risk_level: risk,
+            truncated: false,
+        };
+        let _ = append_audit(&result, risk, Some(&message), None, Some(&source));
+        return Err(error);
     }
 
-    Ok(SftpResult {
+    let result = SftpResult {
         host: request.host,
         local_path: local,
         remote_path: request.remote_path,
         direction: SftpDirection::Download,
-        duration_ms: started.elapsed().as_millis(),
-    })
+        duration_ms,
+    };
+    let audit_result = ExecResult {
+        host: result.host.clone(),
+        command,
+        exit_code: Some(0),
+        stdout: String::new(),
+        stderr: String::new(),
+        duration_ms,
+        risk_level: risk,
+        truncated: false,
+    };
+    let _ = append_audit(&audit_result, risk, None, None, Some(&source));
+    Ok(result)
 }
 
 // ── SFTP directory operations (via SSH exec) ──────────────────────────────────
 
 pub async fn sftp_ls_core(host_name: &str, path: &str, timeout_secs: Option<u64>) -> Result<ExecResult> {
+    sftp_ls_core_with_source(host_name, path, timeout_secs, Some(source_from_env("core"))).await
+}
+
+pub async fn sftp_ls_core_with_source(
+    host_name: &str,
+    path: &str,
+    timeout_secs: Option<u64>,
+    source: Option<String>,
+) -> Result<ExecResult> {
     exec_ssh_core(ExecRequest {
         host: host_name.to_string(),
         command: format!("ls -la {}", shell_escape(path)),
@@ -1723,12 +1846,21 @@ pub async fn sftp_ls_core(host_name: &str, path: &str, timeout_secs: Option<u64>
         max_output_bytes: None,
         reason: None,
         change_id: None,
-        source: Some(source_from_env("core")),
+        source: Some(source.unwrap_or_else(|| source_from_env("core"))),
     })
     .await
 }
 
 pub async fn sftp_stat_core(host_name: &str, path: &str, timeout_secs: Option<u64>) -> Result<ExecResult> {
+    sftp_stat_core_with_source(host_name, path, timeout_secs, Some(source_from_env("core"))).await
+}
+
+pub async fn sftp_stat_core_with_source(
+    host_name: &str,
+    path: &str,
+    timeout_secs: Option<u64>,
+    source: Option<String>,
+) -> Result<ExecResult> {
     exec_ssh_core(ExecRequest {
         host: host_name.to_string(),
         command: format!("stat {}", shell_escape(path)),
@@ -1738,12 +1870,21 @@ pub async fn sftp_stat_core(host_name: &str, path: &str, timeout_secs: Option<u6
         max_output_bytes: None,
         reason: None,
         change_id: None,
-        source: Some(source_from_env("core")),
+        source: Some(source.unwrap_or_else(|| source_from_env("core"))),
     })
     .await
 }
 
 pub async fn sftp_mkdir_core(host_name: &str, path: &str, timeout_secs: Option<u64>) -> Result<ExecResult> {
+    sftp_mkdir_core_with_source(host_name, path, timeout_secs, Some(source_from_env("core"))).await
+}
+
+pub async fn sftp_mkdir_core_with_source(
+    host_name: &str,
+    path: &str,
+    timeout_secs: Option<u64>,
+    source: Option<String>,
+) -> Result<ExecResult> {
     exec_ssh_core(ExecRequest {
         host: host_name.to_string(),
         command: format!("mkdir -p {}", shell_escape(path)),
@@ -1753,7 +1894,7 @@ pub async fn sftp_mkdir_core(host_name: &str, path: &str, timeout_secs: Option<u
         max_output_bytes: None,
         reason: None,
         change_id: None,
-        source: Some(source_from_env("core")),
+        source: Some(source.unwrap_or_else(|| source_from_env("core"))),
     })
     .await
 }
@@ -1857,7 +1998,7 @@ pub fn import_ssh_config_core(path: Option<&str>) -> Result<Vec<HostProfile>> {
     flush(&current_alias, &hostname, &user, port, &identity, &proxy_jump, &mut profiles);
 
     // Add only profiles whose name doesn't already exist
-    let _guard = hosts_lock().lock().unwrap();
+    let _guard = store_write_lock()?;
     let mut config = load_config()?;
     let existing: std::collections::HashSet<String> =
         config.hosts.iter().map(|h| h.name.clone()).collect();
@@ -1870,7 +2011,7 @@ pub fn import_ssh_config_core(path: Option<&str>) -> Result<Vec<HostProfile>> {
         }
     }
     config.hosts.sort_by(|a, b| a.name.cmp(&b.name));
-    save_config(&config)?;
+    save_config_unlocked(&config)?;
     Ok(added)
 }
 

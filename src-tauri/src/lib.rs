@@ -3,6 +3,7 @@ pub mod approval;
 pub mod connection;
 pub mod core;
 pub mod events;
+pub mod execution_control;
 pub mod forward;
 pub mod gate;
 pub mod health;
@@ -37,12 +38,20 @@ pub use core::{
     export_team_config, export_to_ssh_config, export_to_ssh_config_format, filter_hosts,
     import_ssh_config_core, import_team_config, list_audit_core, list_hosts_core,
     list_hosts_filtered_core, ping_hosts_core, preview_exec, preview_exec_multi,
-    preview_team_config_import, remove_host_core, sftp_download_core, sftp_ls_core,
-    sftp_mkdir_core, sftp_stat_core, sftp_upload_core, ConfigDiffPreview, ExecComparison, ExecPlan,
-    ExecPlanTarget, ExitCodeGroup, ImportResult, OutputComparison, OutputDiff, SshSyncDiff,
-    SshSyncHostConflict, SshSyncHostDiff, SshSyncStrategy, TeamConfigExport,
+    preview_team_config_import, remove_host_core, sftp_download_core,
+    sftp_download_core_with_source, sftp_ls_core, sftp_ls_core_with_source, sftp_mkdir_core,
+    sftp_mkdir_core_with_source, sftp_stat_core, sftp_stat_core_with_source, sftp_upload_core,
+    sftp_upload_core_with_source, ConfigDiffPreview, ExecComparison, ExecPlan, ExecPlanTarget,
+    ExitCodeGroup, ImportResult, OutputComparison, OutputDiff, SshSyncDiff, SshSyncHostConflict,
+    SshSyncHostDiff, SshSyncStrategy, TeamConfigExport,
 };
 pub use events::{event_bus, publish_event, subscribe_events, Agent2SSHEvent, EventType};
+pub use execution_control::{
+    append_rejected_exec_audit, authorize_command_with_approval, command_authorization_target,
+    effective_command_risk, expand_exec_authorization_targets, expand_exec_targets,
+    ApprovalOutcome, ApprovalPrompt, CommandAuthorization, CommandAuthorizationError,
+    CommandAuthorizationInput, CommandAuthorizationTarget,
+};
 pub use forward::{forward_add_core, forward_list_core, forward_remove_core};
 pub use gate::{
     execution_gate_blocks_source, gate_blocks_source, load_execution_gate, save_execution_gate,

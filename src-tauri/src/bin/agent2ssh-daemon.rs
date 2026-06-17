@@ -4,21 +4,24 @@ use agent2ssh::approval::{
     save_approval_policies, ApprovalPolicy,
 };
 use agent2ssh::approval::{
-    approval_list, approval_request, approval_request_with_context, approval_respond,
+    approval_list, approval_request_with_context, approval_request_with_ttl, approval_respond,
     approval_wait, ApprovalStatus,
 };
 use agent2ssh::connection::{connect_host, disconnect_host, list_active_connections};
 use agent2ssh::core::*;
 use agent2ssh::events::{publish_event, subscribe_events, EventType};
+use agent2ssh::execution_control::{
+    append_rejected_exec_audit, authorize_command_with_approval, command_authorization_target,
+    effective_command_risk, expand_exec_targets, ApprovalOutcome, ApprovalPrompt,
+    CommandAuthorizationError, CommandAuthorizationInput,
+};
 use agent2ssh::forward::*;
 use agent2ssh::gate::{
     gate_blocks_source, load_execution_gate, save_execution_gate, ExecutionGateMode,
     ExecutionGateStatus,
 };
 use agent2ssh::health::{collect_health_snapshot, load_health_snapshot};
-use agent2ssh::limits::{
-    load_execution_limits, ExecutionLimitRejection, ExecutionLimiter,
-};
+use agent2ssh::limits::{load_execution_limits, ExecutionLimitRejection, ExecutionLimiter};
 use agent2ssh::notify::{
     fire_webhook, load_webhook_config, notify_approval_pending, save_webhook_config, WebhookConfig,
     WebhookEvent,
@@ -28,7 +31,9 @@ use agent2ssh::playbook::{
     PlaybookRunResult,
 };
 use agent2ssh::remote::{
-    check_daemon_version, diagnose_daemon, get_daemon, get_daemons_unified_view, list_daemons_core,
+    check_daemon_scope, check_daemon_version, diagnose_daemon, get_daemon_with_scope,
+    get_daemons_unified_view, list_daemons_core, load_scoped_daemon_tokens,
+    resolve_scoped_daemon_token, DaemonScope,
 };
 use agent2ssh::risk_config::classify_with_user_rules;
 use agent2ssh::session::*;
@@ -47,8 +52,8 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
@@ -80,30 +85,55 @@ struct AppState {
     limiter: Arc<Mutex<ExecutionLimiter>>,
 }
 
+#[derive(Clone)]
+struct AuthContext {
+    scope: Option<DaemonScope>,
+}
+
 // ── Auth ─────────────────────────────────────────────────────────────────────
 
-fn check_auth(state: &AppState, headers: &HeaderMap) -> Result<(), (StatusCode, Json<ErrorBody>)> {
+fn check_auth(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<AuthContext, (StatusCode, Json<ErrorBody>)> {
     let token = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or("");
     if token == state.token {
-        Ok(())
-    } else {
-        tracing::warn!("failed authentication attempt");
-        Err((
-            StatusCode::UNAUTHORIZED,
-            Json(ErrorBody {
-                error: "unauthorized".into(),
-            }),
-        ))
+        return Ok(AuthContext { scope: None });
     }
+
+    let scoped_tokens = load_scoped_daemon_tokens().map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to load scoped daemon tokens: {e}"),
+        )
+    })?;
+    for scoped in scoped_tokens {
+        let Some(expected) = resolve_scoped_daemon_token(&scoped) else {
+            continue;
+        };
+        if !expected.trim().is_empty() && token == expected {
+            return Ok(AuthContext {
+                scope: scoped.scope.clone(),
+            });
+        }
+    }
+
+    tracing::warn!("failed authentication attempt");
+    Err((
+        StatusCode::UNAUTHORIZED,
+        Json(ErrorBody {
+            error: "unauthorized".into(),
+        }),
+    ))
 }
 
 // ── Error type ───────────────────────────────────────────────────────────────
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 struct ErrorBody {
     error: String,
 }
@@ -177,17 +207,147 @@ fn reject_if_gate_paused(
 }
 
 fn host_tags(host: &str) -> Vec<String> {
-    load_config()
+    command_authorization_target(host).tags
+}
+
+fn host_risk_override(host: &str) -> Option<RiskLevel> {
+    command_authorization_target(host).risk_override
+}
+
+async fn request_and_wait_for_approval(prompt: ApprovalPrompt) -> Result<ApprovalOutcome, String> {
+    APPROVAL_COUNT.fetch_add(1, Ordering::Relaxed);
+    let approval_ctx = build_approval_context(&prompt.host, &prompt.command, &prompt.source)
         .ok()
-        .and_then(|c| c.hosts.into_iter().find(|h| h.name == host))
-        .map(|h| h.tags)
-        .unwrap_or_default()
+        .map(|mut ctx| {
+            ctx.reason = prompt.reason.clone();
+            ctx.change_id = prompt.change_id.clone();
+            ctx
+        });
+    let approval_id = if let Some(ctx) = approval_ctx {
+        approval_request_with_context(
+            &prompt.host,
+            &prompt.command,
+            prompt.risk,
+            prompt.ttl_secs,
+            ctx,
+        )
+        .await
+    } else {
+        approval_request_with_ttl(
+            &prompt.host,
+            &prompt.command,
+            prompt.risk,
+            prompt.ttl_secs,
+        )
+        .await
+    };
+
+    let host_notify = prompt.host.clone();
+    let cmd_notify = prompt.command.clone();
+    let approval_id_notify = approval_id.to_string();
+    let risk_notify = format!("{:?}", prompt.risk).to_lowercase();
+    let action_url = approval_action_url("http://127.0.0.1:7722", &approval_id_notify);
+    let evt = WebhookEvent {
+        event: "approval_required".into(),
+        host: host_notify.clone(),
+        command: cmd_notify.clone(),
+        approval_id: Some(approval_id_notify.clone()),
+        risk_level: Some(risk_notify.clone()),
+        exit_code: None,
+    };
+    tokio::spawn(async move {
+        if let Err(e) = notify_approval_pending(
+            &approval_id_notify,
+            &host_notify,
+            &cmd_notify,
+            &risk_notify,
+            Some(&action_url),
+        )
+        .await
+        {
+            tracing::error!(error = %e, "approval notification error");
+        }
+        if let Err(e) = fire_webhook(evt).await {
+            tracing::error!(error = %e, "webhook fire error");
+        }
+    });
+
+    match approval_wait(approval_id).await {
+        ApprovalStatus::Approved => Ok(ApprovalOutcome::Approved),
+        ApprovalStatus::Rejected => Ok(ApprovalOutcome::Rejected),
+        ApprovalStatus::TimedOut => Ok(ApprovalOutcome::TimedOut),
+        _ => Err("unexpected approval status".to_string()),
+    }
+}
+
+async fn authorize_command(
+    auth_scope: &Option<DaemonScope>,
+    source: &str,
+    host: &str,
+    tags: &[String],
+    risk_override: Option<RiskLevel>,
+    command: &str,
+    force: bool,
+    reason: Option<String>,
+    change_id: Option<String>,
+) -> Result<(RiskLevel, bool), (StatusCode, Json<ErrorBody>)> {
+    let input = CommandAuthorizationInput {
+        auth_scope,
+        source,
+        host,
+        tags,
+        risk_override: risk_override.or_else(|| host_risk_override(host)),
+        command,
+        force,
+        reason,
+        change_id,
+    };
+
+    match authorize_command_with_approval(input, request_and_wait_for_approval).await {
+        Ok(result) => Ok((result.risk, result.approved)),
+        Err(CommandAuthorizationError::ScopeDenied(message)) => {
+            Err(err(StatusCode::FORBIDDEN, message))
+        }
+        Err(CommandAuthorizationError::Blocked { risk, message }) => {
+            EXEC_BLOCKED_COUNT.fetch_add(1, Ordering::Relaxed);
+            let evt = WebhookEvent {
+                event: "exec_blocked".into(),
+                host: host.to_string(),
+                command: command.to_string(),
+                approval_id: None,
+                risk_level: Some(format!("{risk}")),
+                exit_code: None,
+            };
+            tokio::spawn(async move {
+                if let Err(e) = fire_webhook(evt).await {
+                    tracing::error!(error = %e, "webhook fire error");
+                }
+            });
+            Err(err(StatusCode::BAD_REQUEST, message))
+        }
+        Err(CommandAuthorizationError::ApprovalRejected) => {
+            Err(err(StatusCode::FORBIDDEN, "command rejected by approver"))
+        }
+        Err(CommandAuthorizationError::ApprovalTimedOut) => Err(err(
+            StatusCode::REQUEST_TIMEOUT,
+            "approval request timed out",
+        )),
+        Err(CommandAuthorizationError::Internal(message)) => {
+            Err(err(StatusCode::INTERNAL_SERVER_ERROR, message))
+        }
+    }
 }
 
 fn targets_for_exec_multi(
     hosts: &[String],
     tags: &Option<Vec<String>>,
 ) -> Vec<(String, Vec<String>)> {
+    if let Ok(targets) = expand_exec_targets(hosts, tags) {
+        if !targets.is_empty() {
+            return targets;
+        }
+    }
+
     if hosts.is_empty() {
         return tags
             .clone()
@@ -209,6 +369,72 @@ fn targets_for_exec_multi(
             (host.clone(), all_tags)
         })
         .collect()
+}
+
+fn target_host_label(hosts: &[String], tags: &Option<Vec<String>>) -> String {
+    if !hosts.is_empty() {
+        return hosts.join(",");
+    }
+    let tag_label = tags
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|tag| !tag.trim().is_empty())
+        .map(|tag| format!("tag:{tag}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    if tag_label.is_empty() {
+        "no-targets".to_string()
+    } else {
+        tag_label
+    }
+}
+
+async fn authorize_targets(
+    auth_scope: &Option<DaemonScope>,
+    source: &str,
+    targets: &[(String, Vec<String>)],
+    fallback_host: &str,
+    command: &str,
+    force: bool,
+    reason: Option<String>,
+    change_id: Option<String>,
+) -> Result<bool, (StatusCode, Json<ErrorBody>)> {
+    let mut high_risk_approved = false;
+    if targets.is_empty() {
+        let (risk, approved) = authorize_command(
+            auth_scope,
+            source,
+            fallback_host,
+            &[],
+            None,
+            command,
+            force,
+            reason,
+            change_id,
+        )
+        .await?;
+        return Ok(approved && risk == RiskLevel::High);
+    }
+
+    for (host, tags) in targets {
+        let (risk, approved) = authorize_command(
+            auth_scope,
+            source,
+            host,
+            tags,
+            None,
+            command,
+            force || high_risk_approved,
+            reason.clone(),
+            change_id.clone(),
+        )
+        .await?;
+        if approved && risk == RiskLevel::High {
+            high_risk_approved = true;
+        }
+    }
+    Ok(high_risk_approved)
 }
 
 fn write_limit_rejection_audit(
@@ -234,7 +460,13 @@ fn write_limit_rejection_audit(
         "execution limit exceeded: {} current={} limit={}",
         rejection.scope, rejection.current, rejection.limit
     );
-    let _ = append_audit(&result, RiskLevel::Blocked, Some(&reason), None, Some(source));
+    let _ = append_audit(
+        &result,
+        RiskLevel::Blocked,
+        Some(&reason),
+        None,
+        Some(source),
+    );
     publish_event(
         EventType::LimitRejected,
         serde_json::json!({
@@ -612,7 +844,7 @@ async fn exec(
     Json(mut req): Json<ExecRequest>,
 ) -> Result<Json<ExecResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
+    let auth = check_auth(&s, &headers)?;
     if req.source.is_none() {
         req.source = Some(source_from_env("daemon"));
     }
@@ -624,199 +856,48 @@ async fn exec(
 
     let exec_start = Instant::now();
 
-    // Check user-defined rules first
-    if let Some(user_risk) = classify_with_user_rules(&req.command).await {
-        if user_risk == RiskLevel::Blocked {
-            EXEC_BLOCKED_COUNT.fetch_add(1, Ordering::Relaxed);
-            tracing::warn!(host = %req.host, command = %req.command, "command blocked by user rule");
-            let evt = WebhookEvent {
-                event: "exec_blocked".into(),
-                host: req.host.clone(),
-                command: req.command.clone(),
-                approval_id: None,
-                risk_level: Some("blocked".into()),
-                exit_code: None,
-            };
-            tokio::spawn(async move {
-                if let Err(e) = fire_webhook(evt).await {
-                    tracing::error!(error = %e, "webhook fire error");
-                }
-            });
-            return Err(err(
-                StatusCode::BAD_REQUEST,
-                format!("command blocked by user rule: '{}'", req.command),
-            ));
-        }
+    let tags = targets
+        .first()
+        .map(|(_, tags)| tags.clone())
+        .unwrap_or_default();
+    let (risk, approved) = authorize_command(
+        &auth.scope,
+        &source,
+        &req.host,
+        &tags,
+        None,
+        &req.command,
+        req.force,
+        req.reason.clone(),
+        req.change_id.clone(),
+    )
+    .await?;
+    if approved && risk == RiskLevel::High {
+        req.force = true;
     }
-    // Determine effective risk level
-    let base_risk = classify_risk(&req.command);
-    let effective_risk = if let Some(user_risk) = classify_with_user_rules(&req.command).await {
-        match (&user_risk, &base_risk) {
-            (RiskLevel::Blocked, _) => RiskLevel::Blocked,
-            (RiskLevel::High, RiskLevel::Blocked) => RiskLevel::Blocked,
-            (ur, _) => *ur,
-        }
-    } else {
-        base_risk
+
+    let host_clone = req.host.clone();
+    let cmd_clone = req.command.clone();
+    let result = exec_ssh_core(req).await;
+    EXEC_COUNT.fetch_add(1, Ordering::Relaxed);
+    EXEC_TOTAL_DURATION_MS.fetch_add(exec_start.elapsed().as_millis() as u64, Ordering::Relaxed);
+    let exit_code = result.as_ref().ok().and_then(|r| r.exit_code);
+    let evt = WebhookEvent {
+        event: "exec_completed".into(),
+        host: host_clone,
+        command: cmd_clone,
+        approval_id: None,
+        risk_level: None,
+        exit_code,
     };
-
-    // If high risk and not forced, require approval
-    if effective_risk == RiskLevel::High && !req.force {
-        APPROVAL_COUNT.fetch_add(1, Ordering::Relaxed);
-
-        // Build approval context with host details, history, and risk breakdown
-        let approval_ctx = build_approval_context(&req.host, &req.command, "daemon")
-            .ok()
-            .map(|mut ctx| {
-                ctx.reason = req.reason.clone();
-                ctx.change_id = req.change_id.clone();
-                ctx
-            });
-
-        let approval_id = if let Some(ctx) = approval_ctx {
-            approval_request_with_context(&req.host, &req.command, effective_risk, 300, ctx).await
-        } else {
-            approval_request(&req.host, &req.command, effective_risk).await
-        };
-
-        let host_clone = req.host.clone();
-        let cmd_clone = req.command.clone();
-        let approval_id_str = approval_id.to_string();
-        let risk_str = format!("{:?}", effective_risk).to_lowercase();
-
-        // Build the approval action URL for notification
-        let action_url = approval_action_url("http://127.0.0.1:7722", &approval_id_str);
-
-        // Fire approval_required webhook with approval-specific notification
-        let evt = WebhookEvent {
-            event: "approval_required".into(),
-            host: host_clone.clone(),
-            command: cmd_clone.clone(),
-            approval_id: Some(approval_id_str.clone()),
-            risk_level: Some(risk_str.clone()),
-            exit_code: None,
-        };
-
-        let action_url_clone = action_url.clone();
-        let host_notify = host_clone.clone();
-        let cmd_notify = cmd_clone.clone();
-        let risk_notify = risk_str.clone();
-        let approval_id_notify = approval_id_str.clone();
-        tokio::spawn(async move {
-            // Fire the new approval-specific notification
-            if let Err(e) = notify_approval_pending(
-                &approval_id_notify,
-                &host_notify,
-                &cmd_notify,
-                &risk_notify,
-                Some(&action_url_clone),
-            )
-            .await
-            {
-                tracing::error!(error = %e, "approval notification error");
-            }
-            // Also fire the legacy webhook event
-            if let Err(e) = fire_webhook(evt).await {
-                tracing::error!(error = %e, "webhook fire error");
-            }
-        });
-
-        let status = approval_wait(approval_id).await;
-        match status {
-            ApprovalStatus::Approved => {
-                // Execute with force
-                let mut approved_req = req;
-                approved_req.force = true;
-                let result = exec_ssh_core(approved_req).await;
-                EXEC_COUNT.fetch_add(1, Ordering::Relaxed);
-                EXEC_TOTAL_DURATION_MS
-                    .fetch_add(exec_start.elapsed().as_millis() as u64, Ordering::Relaxed);
-                let exit_code = result.as_ref().ok().and_then(|r| r.exit_code);
-                let evt = WebhookEvent {
-                    event: "exec_completed".into(),
-                    host: host_clone,
-                    command: cmd_clone,
-                    approval_id: Some(approval_id_str),
-                    risk_level: None,
-                    exit_code,
-                };
-                tokio::spawn(async move {
-                    if let Err(e) = fire_webhook(evt).await {
-                        tracing::error!(error = %e, "webhook fire error");
-                    }
-                });
-                result
-                    .map(Json)
-                    .map_err(|e| err(StatusCode::BAD_REQUEST, e))
-            }
-            ApprovalStatus::Rejected => {
-                let evt = WebhookEvent {
-                    event: "exec_completed".into(),
-                    host: host_clone,
-                    command: cmd_clone,
-                    approval_id: Some(approval_id_str),
-                    risk_level: None,
-                    exit_code: None,
-                };
-                tokio::spawn(async move {
-                    if let Err(e) = fire_webhook(evt).await {
-                        tracing::error!(error = %e, "webhook fire error");
-                    }
-                });
-                Err(err(StatusCode::FORBIDDEN, "command rejected by approver"))
-            }
-            ApprovalStatus::TimedOut => {
-                let evt = WebhookEvent {
-                    event: "exec_completed".into(),
-                    host: host_clone,
-                    command: cmd_clone,
-                    approval_id: Some(approval_id_str),
-                    risk_level: None,
-                    exit_code: None,
-                };
-                tokio::spawn(async move {
-                    if let Err(e) = fire_webhook(evt).await {
-                        tracing::error!(error = %e, "webhook fire error");
-                    }
-                });
-                Err(err(
-                    StatusCode::REQUEST_TIMEOUT,
-                    "approval request timed out",
-                ))
-            }
-            _ => {
-                tracing::error!("unexpected approval status");
-                Err(err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "unexpected approval status",
-                ))
-            }
+    tokio::spawn(async move {
+        if let Err(e) = fire_webhook(evt).await {
+            tracing::error!(error = %e, "webhook fire error");
         }
-    } else {
-        let host_clone = req.host.clone();
-        let cmd_clone = req.command.clone();
-        let result = exec_ssh_core(req).await;
-        EXEC_COUNT.fetch_add(1, Ordering::Relaxed);
-        EXEC_TOTAL_DURATION_MS
-            .fetch_add(exec_start.elapsed().as_millis() as u64, Ordering::Relaxed);
-        let exit_code = result.as_ref().ok().and_then(|r| r.exit_code);
-        let evt = WebhookEvent {
-            event: "exec_completed".into(),
-            host: host_clone,
-            command: cmd_clone,
-            approval_id: None,
-            risk_level: None,
-            exit_code,
-        };
-        tokio::spawn(async move {
-            if let Err(e) = fire_webhook(evt).await {
-                tracing::error!(error = %e, "webhook fire error");
-            }
-        });
-        result
-            .map(Json)
-            .map_err(|e| err(StatusCode::BAD_REQUEST, e))
-    }
+    });
+    result
+        .map(Json)
+        .map_err(|e| err(StatusCode::BAD_REQUEST, e))
 }
 
 async fn exec_multi(
@@ -825,17 +906,33 @@ async fn exec_multi(
     Json(body): Json<ExecMultiBody>,
 ) -> Result<Json<ExecMultiBatchResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
+    let auth = check_auth(&s, &headers)?;
     tracing::info!(hosts = ?body.hosts, command = %body.command, "exec-multi handler invoked");
     let source = source_or_env(body.source, "daemon");
     let targets = targets_for_exec_multi(&body.hosts, &body.tags);
-    reject_if_gate_paused(&source, &body.hosts.join(","), &body.command)?;
+    let target_label = target_host_label(&body.hosts, &body.tags);
+    reject_if_gate_paused(&source, &target_label, &body.command)?;
     reject_if_rate_limited(&s, &source, &targets, &body.command).await?;
+    let mut force = body.force;
+    if authorize_targets(
+        &auth.scope,
+        &source,
+        &targets,
+        &target_label,
+        &body.command,
+        force,
+        body.reason.clone(),
+        body.change_id.clone(),
+    )
+    .await?
+    {
+        force = true;
+    }
     Ok(Json(
         exec_multi_with_strategy(
             body.hosts,
             body.command,
-            body.force,
+            force,
             body.timeout_secs,
             body.tags,
             body.strategy,
@@ -853,18 +950,37 @@ async fn exec_compare(
     Json(body): Json<ExecCompareBody>,
 ) -> Result<Json<ExecComparison>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
+    let auth = check_auth(&s, &headers)?;
     tracing::info!(hosts = ?body.hosts, command = %body.command, "exec-compare handler invoked");
-    let source = Some(source_from_env("daemon"));
+    let source = source_from_env("daemon");
+    let targets = targets_for_exec_multi(&body.hosts, &body.tags);
+    let target_label = target_host_label(&body.hosts, &body.tags);
+    reject_if_gate_paused(&source, &target_label, &body.command)?;
+    reject_if_rate_limited(&s, &source, &targets, &body.command).await?;
+    let mut force = body.force;
+    if authorize_targets(
+        &auth.scope,
+        &source,
+        &targets,
+        &target_label,
+        &body.command,
+        force,
+        None,
+        None,
+    )
+    .await?
+    {
+        force = true;
+    }
     let results = exec_multi_core(
         body.hosts,
         body.command,
-        body.force,
+        force,
         body.timeout_secs,
         body.tags,
         None,
         None,
-        source,
+        Some(source),
     )
     .await;
     Ok(Json(compare_exec_results(&results)))
@@ -949,8 +1065,28 @@ async fn sftp_upload(
     Json(req): Json<SftpUploadRequest>,
 ) -> Result<Json<SftpResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
-    sftp_upload_core(req)
+    let auth = check_auth(&s, &headers)?;
+    let source = source_from_env("daemon");
+    let command = format!("sftp upload {} -> {}", req.local_path, req.remote_path);
+    reject_if_gate_paused(&source, &req.host, &command)?;
+    let targets = vec![(req.host.clone(), host_tags(&req.host))];
+    reject_if_rate_limited(&s, &source, &targets, &command).await?;
+    authorize_command(
+        &auth.scope,
+        &source,
+        &req.host,
+        &targets
+            .first()
+            .map(|(_, tags)| tags.clone())
+            .unwrap_or_default(),
+        None,
+        &command,
+        true,
+        None,
+        None,
+    )
+    .await?;
+    sftp_upload_core_with_source(req, Some(source))
         .await
         .map(Json)
         .map_err(|e| err(StatusCode::BAD_REQUEST, e))
@@ -961,8 +1097,28 @@ async fn sftp_download(
     Json(req): Json<SftpDownloadRequest>,
 ) -> Result<Json<SftpResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
-    sftp_download_core(req)
+    let auth = check_auth(&s, &headers)?;
+    let source = source_from_env("daemon");
+    let command = format!("sftp download {} -> {}", req.remote_path, req.local_path);
+    reject_if_gate_paused(&source, &req.host, &command)?;
+    let targets = vec![(req.host.clone(), host_tags(&req.host))];
+    reject_if_rate_limited(&s, &source, &targets, &command).await?;
+    authorize_command(
+        &auth.scope,
+        &source,
+        &req.host,
+        &targets
+            .first()
+            .map(|(_, tags)| tags.clone())
+            .unwrap_or_default(),
+        None,
+        &command,
+        true,
+        None,
+        None,
+    )
+    .await?;
+    sftp_download_core_with_source(req, Some(source))
         .await
         .map(Json)
         .map_err(|e| err(StatusCode::BAD_REQUEST, e))
@@ -973,8 +1129,28 @@ async fn sftp_ls(
     Json(body): Json<SftpDirBody>,
 ) -> Result<Json<ExecResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
-    sftp_ls_core(&body.host, &body.path, None)
+    let auth = check_auth(&s, &headers)?;
+    let source = source_from_env("daemon");
+    let command = format!("sftp ls {}", body.path);
+    reject_if_gate_paused(&source, &body.host, &command)?;
+    let targets = vec![(body.host.clone(), host_tags(&body.host))];
+    reject_if_rate_limited(&s, &source, &targets, &command).await?;
+    authorize_command(
+        &auth.scope,
+        &source,
+        &body.host,
+        &targets
+            .first()
+            .map(|(_, tags)| tags.clone())
+            .unwrap_or_default(),
+        None,
+        &command,
+        true,
+        None,
+        None,
+    )
+    .await?;
+    sftp_ls_core_with_source(&body.host, &body.path, None, Some(source))
         .await
         .map(Json)
         .map_err(|e| err(StatusCode::BAD_REQUEST, e))
@@ -985,8 +1161,28 @@ async fn sftp_stat(
     Json(body): Json<SftpDirBody>,
 ) -> Result<Json<ExecResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
-    sftp_stat_core(&body.host, &body.path, None)
+    let auth = check_auth(&s, &headers)?;
+    let source = source_from_env("daemon");
+    let command = format!("sftp stat {}", body.path);
+    reject_if_gate_paused(&source, &body.host, &command)?;
+    let targets = vec![(body.host.clone(), host_tags(&body.host))];
+    reject_if_rate_limited(&s, &source, &targets, &command).await?;
+    authorize_command(
+        &auth.scope,
+        &source,
+        &body.host,
+        &targets
+            .first()
+            .map(|(_, tags)| tags.clone())
+            .unwrap_or_default(),
+        None,
+        &command,
+        true,
+        None,
+        None,
+    )
+    .await?;
+    sftp_stat_core_with_source(&body.host, &body.path, None, Some(source))
         .await
         .map(Json)
         .map_err(|e| err(StatusCode::BAD_REQUEST, e))
@@ -997,8 +1193,28 @@ async fn sftp_mkdir(
     Json(body): Json<SftpDirBody>,
 ) -> Result<Json<ExecResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
-    sftp_mkdir_core(&body.host, &body.path, None)
+    let auth = check_auth(&s, &headers)?;
+    let source = source_from_env("daemon");
+    let command = format!("sftp mkdir {}", body.path);
+    reject_if_gate_paused(&source, &body.host, &command)?;
+    let targets = vec![(body.host.clone(), host_tags(&body.host))];
+    reject_if_rate_limited(&s, &source, &targets, &command).await?;
+    authorize_command(
+        &auth.scope,
+        &source,
+        &body.host,
+        &targets
+            .first()
+            .map(|(_, tags)| tags.clone())
+            .unwrap_or_default(),
+        None,
+        &command,
+        true,
+        None,
+        None,
+    )
+    .await?;
+    sftp_mkdir_core_with_source(&body.host, &body.path, None, Some(source))
         .await
         .map(Json)
         .map_err(|e| err(StatusCode::BAD_REQUEST, e))
@@ -1012,11 +1228,26 @@ async fn session_open(
     Json(body): Json<SessionOpenBody>,
 ) -> Result<Json<IdBody>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
+    let auth = check_auth(&s, &headers)?;
     tracing::info!(host = %body.host, "session_open invoked");
     let source = body.source.as_deref().unwrap_or("daemon");
     let tags = host_tags(&body.host);
+    reject_if_gate_paused(source, &body.host, "session_open")?;
+    check_daemon_scope(&auth.scope, &body.host, &tags, "session_open")
+        .map_err(|e| err(StatusCode::FORBIDDEN, e))?;
     reject_if_session_limited(&s, source, &body.host, &tags).await?;
+    authorize_command(
+        &auth.scope,
+        source,
+        &body.host,
+        &tags,
+        None,
+        "session_open",
+        true,
+        None,
+        None,
+    )
+    .await?;
     match session_open_core(&body.host).await {
         Ok(id) => {
             s.limiter
@@ -1043,7 +1274,7 @@ async fn session_write(
     Json(body): Json<SessionWriteBody>,
 ) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
+    let auth = check_auth(&s, &headers)?;
     let uuid = Uuid::parse_str(&id).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
     let source = body.source.as_deref().unwrap_or("daemon");
     reject_if_gate_paused(source, &format!("session:{id}"), &body.input)?;
@@ -1055,6 +1286,26 @@ async fn session_write(
         .map(|target| vec![target])
         .unwrap_or_else(|| vec![(format!("session:{id}"), Vec::new())]);
     reject_if_rate_limited(&s, source, &targets, &body.input).await?;
+    let session_host = targets
+        .first()
+        .map(|(host, _)| host.clone())
+        .unwrap_or_else(|| format!("session:{id}"));
+    let session_tags = targets
+        .first()
+        .map(|(_, tags)| tags.clone())
+        .unwrap_or_default();
+    authorize_command(
+        &auth.scope,
+        source,
+        &session_host,
+        &session_tags,
+        None,
+        &body.input,
+        false,
+        None,
+        None,
+    )
+    .await?;
     session_write_core(uuid, &body.input)
         .await
         .map(|_| {
@@ -1078,9 +1329,17 @@ async fn session_read(
     Query(q): Query<ReadQuery>,
 ) -> Result<Json<OutputBody>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
+    let auth = check_auth(&s, &headers)?;
     let uuid = Uuid::parse_str(&id).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
     let source = q.source.as_deref().unwrap_or("daemon");
+    let (session_host, session_tags) = s
+        .limiter
+        .lock()
+        .await
+        .session_target(&uuid)
+        .unwrap_or_else(|| (format!("session:{id}"), Vec::new()));
+    check_daemon_scope(&auth.scope, &session_host, &session_tags, "session_read")
+        .map_err(|e| err(StatusCode::FORBIDDEN, e))?;
     session_read_core(uuid, q.timeout_ms.unwrap_or(2000))
         .await
         .map(|output| {
@@ -1106,9 +1365,17 @@ async fn session_close(
     Query(q): Query<SourceQuery>,
 ) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
+    let auth = check_auth(&s, &headers)?;
     let uuid = Uuid::parse_str(&id).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
     let source = q.source.as_deref().unwrap_or("daemon");
+    let (session_host, session_tags) = s
+        .limiter
+        .lock()
+        .await
+        .session_target(&uuid)
+        .unwrap_or_else(|| (format!("session:{id}"), Vec::new()));
+    check_daemon_scope(&auth.scope, &session_host, &session_tags, "session_close")
+        .map_err(|e| err(StatusCode::FORBIDDEN, e))?;
     session_close_core(uuid)
         .await
         .map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
@@ -1148,7 +1415,30 @@ async fn forward_add(
     Json(req): Json<ForwardRule>,
 ) -> Result<Json<ForwardRule>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
+    let auth = check_auth(&s, &headers)?;
+    let source = source_from_env("daemon");
+    let command = format!(
+        "forward {} {}:{} -> {}:{}",
+        req.direction, req.bind_port, req.target_host, req.host, req.target_port
+    );
+    reject_if_gate_paused(&source, &req.host, &command)?;
+    let targets = vec![(req.host.clone(), host_tags(&req.host))];
+    reject_if_rate_limited(&s, &source, &targets, &command).await?;
+    authorize_command(
+        &auth.scope,
+        &source,
+        &req.host,
+        &targets
+            .first()
+            .map(|(_, tags)| tags.clone())
+            .unwrap_or_default(),
+        None,
+        &command,
+        true,
+        None,
+        None,
+    )
+    .await?;
     forward_add_core(
         &req.host,
         req.direction,
@@ -1174,8 +1464,21 @@ async fn forward_remove(
     Path(id): Path<String>,
 ) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
+    let auth = check_auth(&s, &headers)?;
     let uuid = Uuid::parse_str(&id).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
+    if let Some(rule) = forward_list_core()
+        .await
+        .into_iter()
+        .find(|rule| rule.id == uuid)
+    {
+        let command = format!(
+            "forward remove {} {}:{} -> {}:{}",
+            rule.direction, rule.bind_port, rule.target_host, rule.host, rule.target_port
+        );
+        let tags = host_tags(&rule.host);
+        check_daemon_scope(&auth.scope, &rule.host, &tags, &command)
+            .map_err(|e| err(StatusCode::FORBIDDEN, e))?;
+    }
     forward_remove_core(uuid)
         .await
         .map(|_| Json(OkBody { ok: true }))
@@ -1286,13 +1589,12 @@ async fn approval_check(
 ) -> Result<Json<ApprovalCheckResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
-    let host_tags: Vec<String> = load_config()
-        .ok()
-        .and_then(|c| c.hosts.into_iter().find(|h| h.name == body.host))
-        .map(|h| h.tags)
-        .unwrap_or_default();
-    let risk = classify_risk(&body.command);
-    let result = check_approval_required(&body.host, &host_tags, &body.command, risk)
+    let target = command_authorization_target(&body.host);
+    let risk = apply_risk_override(
+        effective_command_risk(&body.command).await,
+        target.risk_override,
+    );
+    let result = check_approval_required(&body.host, &target.tags, &body.command, risk)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     match result {
         Some(policy) => Ok(Json(ApprovalCheckResult {
@@ -1320,19 +1622,21 @@ async fn risk_check(
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
     let base = classify_risk(&body.command);
-    if let Some(user_risk) = classify_with_user_rules(&body.command).await {
-        let final_risk = match (&user_risk, &base) {
-            (RiskLevel::Blocked, _) => RiskLevel::Blocked,
-            (RiskLevel::High, RiskLevel::Blocked) => RiskLevel::Blocked,
-            (ur, _) => *ur,
-        };
+    let host_override = body
+        .host
+        .as_deref()
+        .and_then(|host| command_authorization_target(host).risk_override);
+    if classify_with_user_rules(&body.command).await.is_some() {
         return Ok(Json(RiskCheckResult {
-            risk_level: final_risk,
+            risk_level: apply_risk_override(
+                effective_command_risk(&body.command).await,
+                host_override,
+            ),
             matched_rule: Some("user_rule".into()),
         }));
     }
     Ok(Json(RiskCheckResult {
-        risk_level: base,
+        risk_level: apply_risk_override(base, host_override),
         matched_rule: None,
     }))
 }
@@ -1380,7 +1684,24 @@ async fn ssh_connect(
     Path(host): Path<String>,
 ) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
+    let auth = check_auth(&s, &headers)?;
+    let source = source_from_env("daemon");
+    let tags = host_tags(&host);
+    reject_if_gate_paused(&source, &host, "connect")?;
+    check_daemon_scope(&auth.scope, &host, &tags, "connect")
+        .map_err(|e| err(StatusCode::FORBIDDEN, e))?;
+    authorize_command(
+        &auth.scope,
+        &source,
+        &host,
+        &tags,
+        None,
+        "connect",
+        true,
+        None,
+        None,
+    )
+    .await?;
     connect_host(&host)
         .await
         .map(|_| Json(OkBody { ok: true }))
@@ -1392,7 +1713,23 @@ async fn ssh_disconnect(
     Path(host): Path<String>,
 ) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
+    let auth = check_auth(&s, &headers)?;
+    let source = source_from_env("daemon");
+    let tags = host_tags(&host);
+    check_daemon_scope(&auth.scope, &host, &tags, "disconnect")
+        .map_err(|e| err(StatusCode::FORBIDDEN, e))?;
+    authorize_command(
+        &auth.scope,
+        &source,
+        &host,
+        &tags,
+        None,
+        "disconnect",
+        true,
+        None,
+        None,
+    )
+    .await?;
     disconnect_host(&host)
         .await
         .map(|_| Json(OkBody { ok: true }))
@@ -1440,15 +1777,71 @@ async fn run_playbook(
     Json(body): Json<PlaybookRunBody>,
 ) -> Result<Json<PlaybookRunResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
+    let auth = check_auth(&s, &headers)?;
     let source = source_or_env(body.source, "daemon");
     reject_if_gate_paused(&source, &body.host, &format!("playbook:{}", body.playbook))?;
     let targets = vec![(body.host.clone(), host_tags(&body.host))];
-    reject_if_rate_limited(&s, &source, &targets, &format!("playbook:{}", body.playbook)).await?;
+    reject_if_rate_limited(
+        &s,
+        &source,
+        &targets,
+        &format!("playbook:{}", body.playbook),
+    )
+    .await?;
+    let params_for_dry_run = body.params.clone().unwrap_or_default();
+    let dry_run = dry_run_playbook(&body.playbook, &params_for_dry_run)
+        .map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
+    let playbook_risk_override = list_playbooks_core().ok().and_then(|playbooks| {
+        playbooks
+            .into_iter()
+            .find(|playbook| playbook.name == body.playbook)
+            .and_then(|playbook| playbook.risk_override)
+    });
+    let mut force = body.force;
+    let tags = targets
+        .first()
+        .map(|(_, tags)| tags.clone())
+        .unwrap_or_default();
+    for step in &dry_run.steps {
+        let base_risk = effective_command_risk(&step.command_resolved).await;
+        let step_risk = apply_risk_override(base_risk, playbook_risk_override);
+        if step_risk == RiskLevel::Blocked {
+            append_rejected_exec_audit(
+                &source,
+                &body.host,
+                &step.command_resolved,
+                step_risk,
+                "playbook step blocked by risk policy",
+                body.change_id.as_deref(),
+            );
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "playbook step blocked by risk policy: '{}'",
+                    step.command_resolved
+                ),
+            ));
+        }
+        let (risk, approved) = authorize_command(
+            &auth.scope,
+            &source,
+            &body.host,
+            &tags,
+            playbook_risk_override,
+            &step.command_resolved,
+            force,
+            body.reason.clone(),
+            body.change_id.clone(),
+        )
+        .await?;
+        if approved && risk == RiskLevel::High {
+            force = true;
+        }
+    }
     run_playbook_core_with_source(
         &body.playbook,
         &body.host,
-        body.force,
+        force,
         body.params.as_ref(),
         body.reason,
         body.change_id,
@@ -1587,26 +1980,35 @@ async fn proxy_exec(
     Json(mut req): Json<ExecRequest>,
 ) -> Result<Json<ExecResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
+    let auth = check_auth(&s, &headers)?;
     if req.source.is_none() {
         req.source = Some(source_from_env("daemon_proxy"));
     }
+    let source = req.source.as_deref().unwrap_or("daemon_proxy").to_string();
 
     // If alias is "localhost", execute locally
     if alias == "localhost" {
-        let source = req.source.as_deref().unwrap_or("daemon_proxy").to_string();
         reject_if_gate_paused(&source, &req.host, &req.command)?;
         let targets = vec![(req.host.clone(), host_tags(&req.host))];
         reject_if_rate_limited(&s, &source, &targets, &req.command).await?;
-        // Apply same user-rule checks as local exec
-        if let Some(user_risk) = classify_with_user_rules(&req.command).await {
-            if user_risk == RiskLevel::Blocked {
-                EXEC_BLOCKED_COUNT.fetch_add(1, Ordering::Relaxed);
-                return Err(err(
-                    StatusCode::BAD_REQUEST,
-                    format!("command blocked by user rule: '{}'", req.command),
-                ));
-            }
+        let tags = targets
+            .first()
+            .map(|(_, tags)| tags.clone())
+            .unwrap_or_default();
+        let (risk, approved) = authorize_command(
+            &auth.scope,
+            &source,
+            &req.host,
+            &tags,
+            None,
+            &req.command,
+            req.force,
+            req.reason.clone(),
+            req.change_id.clone(),
+        )
+        .await?;
+        if approved && risk == RiskLevel::High {
+            req.force = true;
         }
         return exec_ssh_core(req)
             .await
@@ -1615,7 +2017,16 @@ async fn proxy_exec(
     }
 
     // Look up remote daemon
-    let (url, remote_token) = get_daemon(&alias).map_err(|e| err(StatusCode::NOT_FOUND, e))?;
+    let (url, remote_token, scope) =
+        get_daemon_with_scope(&alias).map_err(|e| err(StatusCode::NOT_FOUND, e))?;
+    let tags = host_tags(&req.host);
+    let targets = vec![(req.host.clone(), tags.clone())];
+    reject_if_gate_paused(&source, &req.host, &req.command)?;
+    reject_if_rate_limited(&s, &source, &targets, &req.command).await?;
+    check_daemon_scope(&auth.scope, &req.host, &tags, &req.command)
+        .map_err(|e| err(StatusCode::FORBIDDEN, e))?;
+    check_daemon_scope(&scope, &req.host, &tags, &req.command)
+        .map_err(|e| err(StatusCode::FORBIDDEN, e))?;
     let token = remote_token.ok_or_else(|| {
         err(
             StatusCode::UNAUTHORIZED,
@@ -1772,11 +2183,13 @@ async fn exec_stream(
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
     // Fix-2: Authenticate before WebSocket upgrade
-    if let Err(e) = check_auth(&s, &headers) {
-        return e.into_response();
-    }
+    let auth = match check_auth(&s, &headers) {
+        Ok(auth) => auth,
+        Err(e) => return e.into_response(),
+    };
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     let app_state = s.clone();
+    let auth_scope = auth.scope.clone();
     ws.on_upgrade(|socket| async move {
         use axum::extract::ws::Message;
         use std::sync::Arc;
@@ -1831,13 +2244,44 @@ async fn exec_stream(
             return;
         }
 
-        let risk = classify_risk(&req.command);
-        if risk == RiskLevel::Blocked || (risk == RiskLevel::High && !req.force) {
+        let tags = targets
+            .first()
+            .map(|(_, tags)| tags.clone())
+            .unwrap_or_default();
+        let risk = match authorize_command(
+            &auth_scope,
+            &source,
+            &req.host,
+            &tags,
+            None,
+            &req.command,
+            req.force,
+            req.reason.clone(),
+            req.change_id.clone(),
+        )
+        .await
+        {
+            Ok((risk, approved)) => {
+                if approved && risk == RiskLevel::High {
+                    req.force = true;
+                }
+                risk
+            }
+            Err((_, Json(body))) => {
+                let mut s = socket.lock().await;
+                let _ = s
+                    .send(Message::Text(
+                        serde_json::json!({"type":"error","error":body.error}).to_string(),
+                    ))
+                    .await;
+                return;
+            }
+        };
+        if risk == RiskLevel::High && !req.force {
             let mut s = socket.lock().await;
             let _ = s
                 .send(Message::Text(
-                    serde_json::json!({"type":"error","error":"blocked or force required"})
-                        .to_string(),
+                    serde_json::json!({"type":"error","error":"force required"}).to_string(),
                 ))
                 .await;
             return;
@@ -1873,59 +2317,8 @@ async fn exec_stream(
             }),
         );
 
-        let has_password = host
-            .password
-            .as_deref()
-            .map(|password| !password.trim().is_empty())
-            .unwrap_or(false);
-        let mut cmd = if has_password {
-            let mut cmd = tokio::process::Command::new("sshpass");
-            cmd.arg("-e").arg("ssh");
-            if let Some(password) = &host.password {
-                cmd.env("SSHPASS", password);
-            }
-            cmd
-        } else {
-            tokio::process::Command::new("ssh")
-        };
-        cmd.arg("-o")
-            .arg(if has_password { "BatchMode=no" } else { "BatchMode=yes" })
-            .arg("-o")
-            .arg("StrictHostKeyChecking=accept-new")
-            .arg("-p")
-            .arg(host.port.unwrap_or(22).to_string());
-        if let Some(kp) = &host.key_path {
-            if !kp.trim().is_empty() {
-                cmd.arg("-i").arg(expand_tilde(kp));
-            }
-        }
-        // ProxyJump support
-        if let Some(jump_name) = &host.jump_host {
-            if let Some(jump) = load_config()
-                .ok()
-                .and_then(|c| c.hosts.into_iter().find(|h| h.name == *jump_name))
-            {
-                let jump_target = match &jump.user {
-                    Some(u) if !u.trim().is_empty() => {
-                        format!("{}@{}:{}", u, jump.host, jump.port.unwrap_or(22))
-                    }
-                    _ => format!("{}:{}", jump.host, jump.port.unwrap_or(22)),
-                };
-                cmd.arg("-J").arg(jump_target);
-                if let Some(jkey) = &jump.key_path {
-                    if !jkey.trim().is_empty() {
-                        cmd.arg("-i").arg(expand_tilde(jkey));
-                    }
-                }
-            }
-        }
-        let target = match &host.user {
-            Some(u) if !u.trim().is_empty() => format!("{}@{}", u, host.host),
-            _ => host.host.clone(),
-        };
-        cmd.arg(&target)
-            .arg(&req.command)
-            .stdout(std::process::Stdio::piped())
+        let mut cmd = build_ssh_exec_command(&host, &req.command).await;
+        cmd.stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .stdin(std::process::Stdio::null());
 
@@ -2039,12 +2432,31 @@ async fn exec_stream(
             }
         };
         let duration_ms = started.elapsed().as_millis();
+        let completed_host = req.host.clone();
+        let completed_command = req.command.clone();
+        let audit_result = ExecResult {
+            host: completed_host.clone(),
+            command: completed_command.clone(),
+            exit_code: code,
+            stdout: String::new(),
+            stderr: String::new(),
+            duration_ms,
+            risk_level: risk,
+            truncated: false,
+        };
+        let _ = append_audit(
+            &audit_result,
+            risk,
+            req.reason.as_deref(),
+            req.change_id.as_deref(),
+            Some(&source),
+        );
         publish_event(
             EventType::ExecCompleted,
             serde_json::json!({
                 "source": source,
-                "host": req.host,
-                "command": req.command,
+                "host": completed_host,
+                "command": completed_command,
                 "exit_code": code,
                 "risk_level": format!("{}", risk),
                 "duration_ms": duration_ms,
@@ -2068,20 +2480,6 @@ fn preview_text(value: &str, max_chars: usize) -> String {
         preview.push_str("\n...[truncated]");
     }
     preview
-}
-
-fn expand_tilde(path: &str) -> String {
-    if path == "~" {
-        return dirs::home_dir()
-            .map(|h| h.display().to_string())
-            .unwrap_or_else(|| path.to_string());
-    }
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest).display().to_string();
-        }
-    }
-    path.to_string()
 }
 
 /// Check whether a binary exists on PATH (used by health + doctor).
@@ -2161,10 +2559,8 @@ mod tests {
     fn with_temp_config<T>(f: impl FnOnce() -> T) -> T {
         static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
-        let temp = std::env::temp_dir().join(format!(
-            "agent2ssh-daemon-gate-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let temp =
+            std::env::temp_dir().join(format!("agent2ssh-daemon-gate-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp).unwrap();
         std::env::set_var("AGENT2SSH_CONFIG_DIR", &temp);
         let out = f();
@@ -2228,11 +2624,9 @@ mod tests {
                     ..Default::default()
                 });
                 let targets = vec![("test-host".to_string(), vec![])];
-                assert!(
-                    reject_if_rate_limited(&state, "mcp", &targets, "uptime")
-                        .await
-                        .is_ok()
-                );
+                assert!(reject_if_rate_limited(&state, "mcp", &targets, "uptime")
+                    .await
+                    .is_ok());
                 let err = reject_if_rate_limited(&state, "mcp", &targets, "uptime")
                     .await
                     .unwrap_err();
@@ -2248,13 +2642,11 @@ mod tests {
                 assert_eq!(entry.command, "uptime");
                 assert_eq!(entry.risk_level, RiskLevel::Blocked);
                 assert_eq!(entry.source.as_deref(), Some("mcp"));
-                assert!(
-                    entry
-                        .reason
-                        .as_deref()
-                        .unwrap_or_default()
-                        .contains("source:mcp rate")
-                );
+                assert!(entry
+                    .reason
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("source:mcp rate"));
             })
         });
     }
@@ -2279,6 +2671,79 @@ mod tests {
                     .await
                     .unwrap_err();
                 assert_eq!(err.0, too_many_requests_status());
+            })
+        });
+    }
+
+    #[test]
+    fn scoped_token_auth_restricts_authorized_commands() {
+        with_temp_config(|| {
+            std::fs::write(
+                config_dir().unwrap().join("daemon_tokens.toml"),
+                r#"
+[[tokens]]
+name = "readonly"
+token = "scoped-token"
+
+[tokens.scope]
+allowed_hosts = ["prod"]
+allowed_commands = ["uptime", "ls *"]
+denied_commands = ["rm *"]
+"#,
+            )
+            .unwrap();
+
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                let state = test_state(ExecutionLimitConfig::default());
+                let mut headers = HeaderMap::new();
+                headers.insert("authorization", "Bearer scoped-token".parse().unwrap());
+                let auth = check_auth(&state, &headers).unwrap();
+                assert!(auth.scope.is_some());
+
+                authorize_command(
+                    &auth.scope,
+                    "mcp",
+                    "prod",
+                    &[],
+                    None,
+                    "uptime",
+                    false,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+
+                let denied = authorize_command(
+                    &auth.scope,
+                    "mcp",
+                    "prod",
+                    &[],
+                    None,
+                    "cat /etc/passwd",
+                    false,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap_err();
+                assert_eq!(denied.0, StatusCode::FORBIDDEN);
+
+                let denied_host =
+                    authorize_command(
+                        &auth.scope,
+                        "mcp",
+                        "dev",
+                        &[],
+                        None,
+                        "uptime",
+                        false,
+                        None,
+                        None,
+                    )
+                        .await
+                        .unwrap_err();
+                assert_eq!(denied_host.0, StatusCode::FORBIDDEN);
             })
         });
     }

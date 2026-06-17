@@ -3,21 +3,28 @@ use agent2ssh::approval::{
     save_approval_policies, ApprovalPolicy,
 };
 use agent2ssh::events::subscribe_events;
-use agent2ssh::remote::get_daemon;
+use agent2ssh::execution_control::{
+    append_rejected_exec_audit, authorize_command_with_approval, command_authorization_target,
+    expand_exec_authorization_targets, CommandAuthorizationError, CommandAuthorizationInput,
+};
 use agent2ssh::remote::{
-    check_daemon_version, diagnose_daemon, get_daemons_unified_view, PROTOCOL_VERSION,
+    check_daemon_scope, check_daemon_version, diagnose_daemon, get_daemon, get_daemon_with_scope,
+    get_daemons_unified_view, PROTOCOL_VERSION,
 };
 use agent2ssh::store::{audit_path, compute_metrics_trend, restrict_file_to_owner, TrendPeriod};
 use agent2ssh::{
-    add_host_core, classify_risk, collect_health_snapshot, compare_exec_results, dry_run_playbook,
-    exec_multi_core, exec_multi_with_strategy, exec_ssh_core, export_audit_csv, export_audit_jsonl,
-    export_team_config, filter_hosts, import_ssh_config_core, import_team_config, list_audit_core,
-    list_daemons_core, list_hosts_filtered_core, ping_hosts_core, preview_exec, preview_exec_multi,
-    remove_host_core, run_playbook_core_with_source, sftp_download_core, sftp_ls_core,
-    sftp_mkdir_core, sftp_stat_core, sftp_upload_core, source_from_env, validate_policy_path,
-    AuditFilter, BatchStrategy, ExecComparison, ExecRequest, ExecutionGateStatus,
-    ForwardDirection, ForwardRule, HostFilter, HostProfile, PolicyDecision, PolicyTestResult,
-    RiskLevel, SftpDownloadRequest, SftpUploadRequest, TeamConfigExport,
+    add_host_core, collect_health_snapshot, compare_exec_results,
+    dry_run_playbook, effective_command_risk, exec_multi_core, exec_multi_with_strategy,
+    exec_ssh_core, export_audit_csv, export_audit_jsonl, export_team_config, filter_hosts,
+    import_ssh_config_core, import_team_config, list_audit_core, list_daemons_core,
+    list_playbooks_core,
+    list_hosts_filtered_core, ping_hosts_core, preview_exec, preview_exec_multi, remove_host_core,
+    run_playbook_core_with_source, sftp_download_core_with_source, sftp_ls_core_with_source,
+    sftp_mkdir_core_with_source, sftp_stat_core_with_source, sftp_upload_core_with_source,
+    source_from_env, validate_policy_path, AuditFilter,
+    BatchStrategy, ExecComparison, ExecRequest, ExecutionGateStatus, ForwardDirection,
+    ForwardRule, HostFilter, HostProfile, PolicyDecision, PolicyTestResult, RiskLevel,
+    SftpDownloadRequest, SftpUploadRequest, TeamConfigExport,
 };
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -618,17 +625,8 @@ enum PlaybookCommands {
 }
 
 async fn effective_risk_for_policy(command: &str) -> (RiskLevel, bool) {
-    let base = classify_risk(command);
     let user_risk = agent2ssh::risk_config::classify_with_user_rules(command).await;
-    let risk = if let Some(user_risk) = user_risk {
-        match (&user_risk, &base) {
-            (RiskLevel::Blocked, _) => RiskLevel::Blocked,
-            (RiskLevel::High, RiskLevel::Blocked) => RiskLevel::Blocked,
-            (ur, _) => *ur,
-        }
-    } else {
-        base
-    };
+    let risk = effective_command_risk(command).await;
     (risk, user_risk.is_some())
 }
 
@@ -658,6 +656,210 @@ async fn test_policy_decision(host: &str, command: &str) -> Result<PolicyTestRes
         matched_approval_policy: approval.map(|policy| policy.name),
         matched_user_rule,
     })
+}
+
+fn cli_host_tags(host: &str) -> Vec<String> {
+    list_hosts_filtered_core(&HostFilter::default())
+        .unwrap_or_default()
+        .into_iter()
+        .find(|h| h.name == host)
+        .map(|h| h.tags)
+        .unwrap_or_default()
+}
+
+async fn authorize_local_exec_request(req: &mut ExecRequest) -> Result<RiskLevel> {
+    let target = command_authorization_target(&req.host);
+    let source = req.source.as_deref().unwrap_or("cli").to_string();
+    let auth_scope = None;
+    let result = authorize_command_with_approval(
+        CommandAuthorizationInput {
+            auth_scope: &auth_scope,
+            source: &source,
+            host: &req.host,
+            tags: &target.tags,
+            risk_override: target.risk_override,
+            command: &req.command,
+            force: req.force,
+            reason: req.reason.clone(),
+            change_id: req.change_id.clone(),
+        },
+        |prompt| async move {
+            let message = "approval required but no local approval handler is available";
+            append_rejected_exec_audit(
+                &prompt.source,
+                &prompt.host,
+                &prompt.command,
+                prompt.risk,
+                message,
+                prompt.change_id.as_deref(),
+            );
+            Err(format!(
+                "{message}; run through the daemon approval flow or use --force when policy allows"
+            ))
+        },
+    )
+    .await
+    .map_err(command_authorization_error)?;
+    if result.approved && result.risk == RiskLevel::High {
+        req.force = true;
+    }
+    Ok(result.risk)
+}
+
+async fn authorize_local_exec_targets(
+    hosts: &[String],
+    tags: &Option<Vec<String>>,
+    command: &str,
+    force: bool,
+    reason: Option<String>,
+    change_id: Option<String>,
+    source: &str,
+) -> Result<bool> {
+    let targets = expand_exec_authorization_targets(hosts, tags)?;
+    let auth_scope = None;
+    let mut high_risk_approved = false;
+    for target in targets {
+        let result = authorize_command_with_approval(
+            CommandAuthorizationInput {
+                auth_scope: &auth_scope,
+                source,
+                host: &target.host,
+                tags: &target.tags,
+                risk_override: target.risk_override,
+                command,
+                force: force || high_risk_approved,
+                reason: reason.clone(),
+                change_id: change_id.clone(),
+            },
+            |prompt| async move {
+                let message = "approval required but no local approval handler is available";
+                append_rejected_exec_audit(
+                    &prompt.source,
+                    &prompt.host,
+                    &prompt.command,
+                    prompt.risk,
+                    message,
+                    prompt.change_id.as_deref(),
+                );
+                Err(format!(
+                    "{message}; run through the daemon approval flow or use --force when policy allows"
+                ))
+            },
+        )
+        .await
+        .map_err(command_authorization_error)?;
+        if result.approved && result.risk == RiskLevel::High {
+            high_risk_approved = true;
+        }
+    }
+    Ok(high_risk_approved)
+}
+
+async fn authorize_local_playbook_run(
+    playbook: &str,
+    host: &str,
+    force: bool,
+    params: &HashMap<String, String>,
+    reason: Option<String>,
+    change_id: Option<String>,
+    source: &str,
+) -> Result<bool> {
+    let dry_run = dry_run_playbook(playbook, params)?;
+    let target = command_authorization_target(host);
+    let playbook_risk_override = list_playbooks_core()?
+        .into_iter()
+        .find(|item| item.name == playbook)
+        .and_then(|item| item.risk_override);
+    let risk_override = playbook_risk_override.or(target.risk_override);
+    let auth_scope = None;
+    let mut high_risk_approved = false;
+
+    for step in dry_run.steps {
+        let result = authorize_command_with_approval(
+            CommandAuthorizationInput {
+                auth_scope: &auth_scope,
+                source,
+                host,
+                tags: &target.tags,
+                risk_override,
+                command: &step.command_resolved,
+                force: force || high_risk_approved,
+                reason: reason.clone(),
+                change_id: change_id.clone(),
+            },
+            |prompt| async move {
+                let message = "approval required but no local approval handler is available";
+                append_rejected_exec_audit(
+                    &prompt.source,
+                    &prompt.host,
+                    &prompt.command,
+                    prompt.risk,
+                    message,
+                    prompt.change_id.as_deref(),
+                );
+                Err(format!(
+                    "{message}; run through the daemon approval flow or use --force when policy allows"
+                ))
+            },
+        )
+        .await
+        .map_err(command_authorization_error)?;
+        if result.approved && result.risk == RiskLevel::High {
+            high_risk_approved = true;
+        }
+    }
+
+    Ok(high_risk_approved)
+}
+
+async fn authorize_local_operation(
+    host: &str,
+    command: &str,
+    force: bool,
+    source: &str,
+) -> Result<()> {
+    let target = command_authorization_target(host);
+    let auth_scope = None;
+    authorize_command_with_approval(
+        CommandAuthorizationInput {
+            auth_scope: &auth_scope,
+            source,
+            host,
+            tags: &target.tags,
+            risk_override: target.risk_override,
+            command,
+            force,
+            reason: None,
+            change_id: None,
+        },
+        |prompt| async move {
+            let message = "approval required but no local approval handler is available";
+            append_rejected_exec_audit(
+                &prompt.source,
+                &prompt.host,
+                &prompt.command,
+                prompt.risk,
+                message,
+                prompt.change_id.as_deref(),
+            );
+            Err(format!(
+                "{message}; run through the daemon approval flow or use --force when policy allows"
+            ))
+        },
+    )
+    .await
+    .map_err(command_authorization_error)?;
+    Ok(())
+}
+
+fn command_authorization_error(error: CommandAuthorizationError) -> anyhow::Error {
+    match error {
+        CommandAuthorizationError::ScopeDenied(message) => anyhow::anyhow!(message),
+        CommandAuthorizationError::Blocked { message, .. } => anyhow::anyhow!(message),
+        CommandAuthorizationError::ApprovalRejected => anyhow::anyhow!("command rejected by approver"),
+        CommandAuthorizationError::ApprovalTimedOut => anyhow::anyhow!("approval request timed out"),
+        CommandAuthorizationError::Internal(message) => anyhow::anyhow!(message),
+    }
 }
 
 #[tokio::main]
@@ -804,8 +1006,7 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
 
-            let risk = classify_risk(&command);
-            let req = ExecRequest {
+            let mut req = ExecRequest {
                 host,
                 command,
                 force,
@@ -820,7 +1021,10 @@ async fn main() -> Result<()> {
             // If --daemon is set and remote, forward via HTTP
             if let Some(ref alias) = daemon_alias {
                 if alias != "localhost" {
-                    let (url, token) = get_daemon(alias)?;
+                    let (url, token, scope) = get_daemon_with_scope(alias)?;
+                    let tags = cli_host_tags(&req.host);
+                    check_daemon_scope(&scope, &req.host, &tags, &req.command)
+                        .map_err(anyhow::Error::msg)?;
                     let token_val =
                         token.ok_or_else(|| anyhow::anyhow!("no token for daemon '{alias}'"))?;
                     let client = reqwest::Client::builder()
@@ -852,9 +1056,11 @@ async fn main() -> Result<()> {
             }
 
             if json {
+                authorize_local_exec_request(&mut req).await?;
                 let result = exec_ssh_core(req).await?;
                 println!("{}", serde_json::to_string_pretty(&result)?);
             } else {
+                let risk = authorize_local_exec_request(&mut req).await?;
                 let risk_label = match risk {
                     RiskLevel::Low => "",
                     RiskLevel::Medium => " [risk: medium]",
@@ -902,6 +1108,21 @@ async fn main() -> Result<()> {
                 || max_failures.is_some()
                 || batch_size.is_some()
                 || pause_secs.is_some();
+            let source = source_from_env("cli");
+            let mut force = force;
+            if authorize_local_exec_targets(
+                &hosts,
+                &tags,
+                &command,
+                force,
+                reason.clone(),
+                change_id.clone(),
+                &source,
+            )
+            .await?
+            {
+                force = true;
+            }
 
             if has_strategy {
                 let strategy = BatchStrategy {
@@ -919,7 +1140,7 @@ async fn main() -> Result<()> {
                     Some(strategy),
                     reason,
                     change_id,
-                    Some(source_from_env("cli")),
+                    Some(source),
                 )
                 .await;
                 if json {
@@ -971,7 +1192,7 @@ async fn main() -> Result<()> {
                     tags,
                     reason,
                     change_id,
-                    Some(source_from_env("cli")),
+                    Some(source),
                 )
                 .await;
                 if json {
@@ -1011,11 +1232,14 @@ async fn main() -> Result<()> {
                 remote,
                 json,
             } => {
-                let result = sftp_upload_core(SftpUploadRequest {
+                let source = source_from_env("cli");
+                let command = format!("sftp upload {} -> {}", local, remote);
+                authorize_local_operation(&host, &command, true, &source).await?;
+                let result = sftp_upload_core_with_source(SftpUploadRequest {
                     host,
                     local_path: local,
                     remote_path: remote,
-                })
+                }, Some(source))
                 .await?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&result)?);
@@ -1032,11 +1256,14 @@ async fn main() -> Result<()> {
                 local,
                 json,
             } => {
-                let result = sftp_download_core(SftpDownloadRequest {
+                let source = source_from_env("cli");
+                let command = format!("sftp download {} -> {}", remote, local);
+                authorize_local_operation(&host, &command, true, &source).await?;
+                let result = sftp_download_core_with_source(SftpDownloadRequest {
                     host,
                     remote_path: remote,
                     local_path: local,
-                })
+                }, Some(source))
                 .await?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&result)?);
@@ -1048,7 +1275,10 @@ async fn main() -> Result<()> {
                 }
             }
             SftpCommands::Ls { host, path, json } => {
-                let result = sftp_ls_core(&host, &path, None).await?;
+                let source = source_from_env("cli");
+                let command = format!("sftp ls {}", path);
+                authorize_local_operation(&host, &command, true, &source).await?;
+                let result = sftp_ls_core_with_source(&host, &path, None, Some(source)).await?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&result)?);
                 } else {
@@ -1056,7 +1286,10 @@ async fn main() -> Result<()> {
                 }
             }
             SftpCommands::Stat { host, path, json } => {
-                let result = sftp_stat_core(&host, &path, None).await?;
+                let source = source_from_env("cli");
+                let command = format!("sftp stat {}", path);
+                authorize_local_operation(&host, &command, true, &source).await?;
+                let result = sftp_stat_core_with_source(&host, &path, None, Some(source)).await?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&result)?);
                 } else {
@@ -1064,7 +1297,10 @@ async fn main() -> Result<()> {
                 }
             }
             SftpCommands::Mkdir { host, path, json } => {
-                let result = sftp_mkdir_core(&host, &path, None).await?;
+                let source = source_from_env("cli");
+                let command = format!("sftp mkdir {}", path);
+                authorize_local_operation(&host, &command, true, &source).await?;
+                let result = sftp_mkdir_core_with_source(&host, &path, None, Some(source)).await?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&result)?);
                 } else if result.exit_code == Some(0) {
@@ -1353,10 +1589,18 @@ async fn main() -> Result<()> {
         }
         Commands::Risk {
             command,
-            host: _,
+            host,
             json,
         } => {
-            let risk = classify_risk(&command);
+            let risk = if let Some(host) = host.as_deref() {
+                let target = command_authorization_target(host);
+                agent2ssh::core::apply_risk_override(
+                    effective_command_risk(&command).await,
+                    target.risk_override,
+                )
+            } else {
+                effective_command_risk(&command).await
+            };
             if json {
                 println!(
                     "{}",
@@ -2065,6 +2309,21 @@ async fn main() -> Result<()> {
                 json,
             } => {
                 let params_map = parse_cli_params(params);
+                let source = source_from_env("cli");
+                let mut force = force;
+                if authorize_local_playbook_run(
+                    &name,
+                    &host,
+                    force,
+                    &params_map,
+                    reason.clone(),
+                    change_id.clone(),
+                    &source,
+                )
+                .await?
+                {
+                    force = true;
+                }
                 let result = run_playbook_core_with_source(
                     &name,
                     &host,
@@ -2076,7 +2335,7 @@ async fn main() -> Result<()> {
                     },
                     reason,
                     change_id,
-                    Some(source_from_env("cli")),
+                    Some(source),
                 )
                 .await?;
                 if json {

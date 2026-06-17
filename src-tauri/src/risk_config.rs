@@ -97,6 +97,22 @@ pub async fn classify_with_user_rules(command: &str) -> Option<RiskLevel> {
     None
 }
 
+/// Merge a user-defined risk rule with the built-in classifier.
+///
+/// User rules can escalate risk, but they must not lower the built-in
+/// classifier's severity. Trusted risk downgrades are handled separately by
+/// explicit host/playbook risk overrides.
+pub fn merge_user_risk(built_in: RiskLevel, user_risk: RiskLevel) -> RiskLevel {
+    built_in.max_severity(user_risk)
+}
+
+pub async fn classify_effective_risk(command: &str, built_in: RiskLevel) -> RiskLevel {
+    classify_with_user_rules(command)
+        .await
+        .map(|user_risk| merge_user_risk(built_in, user_risk))
+        .unwrap_or(built_in)
+}
+
 fn matches_pattern(command: &str, pattern: &str) -> bool {
     let pattern = pattern.trim().to_lowercase();
     if pattern.contains('*') {
@@ -160,5 +176,21 @@ mod tests {
     async fn test_classify_with_no_rules() {
         // With no rules file, should return None
         assert_eq!(classify_with_user_rules("ls -la").await, None);
+    }
+
+    #[test]
+    fn test_merge_user_risk_does_not_downgrade_builtin() {
+        assert_eq!(
+            merge_user_risk(RiskLevel::High, RiskLevel::Medium),
+            RiskLevel::High
+        );
+        assert_eq!(
+            merge_user_risk(RiskLevel::Medium, RiskLevel::High),
+            RiskLevel::High
+        );
+        assert_eq!(
+            merge_user_risk(RiskLevel::Blocked, RiskLevel::High),
+            RiskLevel::Blocked
+        );
     }
 }

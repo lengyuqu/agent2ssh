@@ -43,6 +43,28 @@ pub struct RemotesFile {
     pub remotes: Vec<RemoteDaemon>,
 }
 
+/// A scoped bearer token accepted by the daemon server.
+///
+/// These are configured in `~/.agent2ssh/daemon_tokens.toml`. The legacy
+/// `daemon.token` remains the unrestricted local admin token.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScopedDaemonToken {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub token: Option<String>,
+    #[serde(default)]
+    pub token_env: Option<String>,
+    #[serde(default)]
+    pub scope: Option<DaemonScope>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DaemonTokensFile {
+    #[serde(default)]
+    pub tokens: Vec<ScopedDaemonToken>,
+}
+
 /// Daemon info returned to clients (CLI, MCP, Tauri, Web)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonInfo {
@@ -96,6 +118,43 @@ fn validate_remotes(remotes: &[RemoteDaemon]) -> Result<()> {
     Ok(())
 }
 
+pub fn load_scoped_daemon_tokens() -> Result<Vec<ScopedDaemonToken>> {
+    let path = config_dir()?.join("daemon_tokens.toml");
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let raw = std::fs::read_to_string(&path)?;
+    let file: DaemonTokensFile = toml::from_str(&raw)?;
+    validate_scoped_daemon_tokens(&file.tokens)?;
+    Ok(file.tokens)
+}
+
+fn validate_scoped_daemon_tokens(tokens: &[ScopedDaemonToken]) -> Result<()> {
+    let mut names = HashSet::new();
+    for token in tokens {
+        if let Some(name) = token.name.as_deref() {
+            let name = name.trim();
+            if name.is_empty() {
+                return Err(anyhow!("scoped daemon token name cannot be empty"));
+            }
+            if !names.insert(name.to_string()) {
+                return Err(anyhow!("duplicate scoped daemon token name '{}'", name));
+            }
+        }
+        if token.token_env.as_deref().unwrap_or("").trim().is_empty()
+            && token.token.as_deref().unwrap_or("").trim().is_empty()
+        {
+            return Err(anyhow!(
+                "scoped daemon token must set token_env or token"
+            ));
+        }
+        if token.scope.is_none() {
+            return Err(anyhow!("scoped daemon token must define a scope"));
+        }
+    }
+    Ok(())
+}
+
 /// List all configured daemons (localhost + remotes).
 ///
 /// Connectivity is probed by hitting each daemon's /health endpoint
@@ -141,6 +200,14 @@ pub fn resolve_token(remote: &RemoteDaemon) -> Option<String> {
     }
 }
 
+pub fn resolve_scoped_daemon_token(token: &ScopedDaemonToken) -> Option<String> {
+    if let Some(env_var) = &token.token_env {
+        std::env::var(env_var).ok()
+    } else {
+        token.token.clone()
+    }
+}
+
 /// Get daemon URL and token by alias.
 ///
 /// * `"localhost"` -> local daemon URL + token from `~/.agent2ssh/daemon.token`
@@ -154,6 +221,25 @@ pub fn get_daemon(alias: &str) -> Result<(String, Option<String>)> {
     for remote in &remotes {
         if remote.alias == alias {
             return Ok((remote.url.clone(), resolve_token(remote)));
+        }
+    }
+    Err(anyhow!("daemon '{}' not found in remotes", alias))
+}
+
+/// Get daemon URL, token, and locally configured permission scope by alias.
+pub fn get_daemon_with_scope(alias: &str) -> Result<(String, Option<String>, Option<DaemonScope>)> {
+    if alias == "localhost" {
+        let token = read_local_token();
+        return Ok(("http://127.0.0.1:7722".to_string(), token, None));
+    }
+    let remotes = load_remotes()?;
+    for remote in &remotes {
+        if remote.alias == alias {
+            return Ok((
+                remote.url.clone(),
+                resolve_token(remote),
+                remote.scope.clone(),
+            ));
         }
     }
     Err(anyhow!("daemon '{}' not found in remotes", alias))
@@ -1266,5 +1352,42 @@ denied_commands = ["rm -rf *"]
         assert_eq!(scope.allowed_tags, vec!["production"]);
         assert_eq!(scope.allowed_commands, vec!["ls *", "cat *"]);
         assert_eq!(scope.denied_commands, vec!["rm -rf *"]);
+    }
+
+    #[test]
+    fn test_scoped_daemon_token_toml_roundtrip() {
+        let toml_str = r#"
+[[tokens]]
+name = "readonly"
+token_env = "READONLY_TOKEN"
+
+[tokens.scope]
+allowed_hosts = ["prod-web-1"]
+allowed_tags = ["production"]
+allowed_commands = ["ls *", "cat *"]
+denied_commands = ["rm -rf *"]
+"#;
+        let file: DaemonTokensFile = toml::from_str(toml_str).unwrap();
+        assert_eq!(file.tokens.len(), 1);
+        validate_scoped_daemon_tokens(&file.tokens).unwrap();
+        let token = &file.tokens[0];
+        assert_eq!(token.name.as_deref(), Some("readonly"));
+        assert_eq!(token.token_env.as_deref(), Some("READONLY_TOKEN"));
+        let scope = token.scope.as_ref().unwrap();
+        assert_eq!(scope.allowed_hosts, vec!["prod-web-1"]);
+        assert_eq!(scope.allowed_tags, vec!["production"]);
+        assert_eq!(scope.allowed_commands, vec!["ls *", "cat *"]);
+        assert_eq!(scope.denied_commands, vec!["rm -rf *"]);
+    }
+
+    #[test]
+    fn validate_scoped_daemon_tokens_requires_scope() {
+        let token = ScopedDaemonToken {
+            name: Some("missing-scope".to_string()),
+            token: Some("secret".to_string()),
+            token_env: None,
+            scope: None,
+        };
+        assert!(validate_scoped_daemon_tokens(&[token]).is_err());
     }
 }
