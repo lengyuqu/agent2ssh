@@ -1,0 +1,148 @@
+import {
+  Activity,
+  CheckCircle2,
+  CircleDashed,
+  PauseCircle,
+  PlayCircle,
+  Settings,
+  Upload,
+  Wand2,
+  X,
+} from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { useI18n } from "../i18n";
+import type { ExecutionGateStatus } from "../types";
+import LanguageSwitcher from "./LanguageSwitcher";
+
+type Props = {
+  gateStatus: ExecutionGateStatus | null;
+  gateBusy: boolean;
+  onGateToggle: () => void;
+  onImportConfig: () => void;
+  onOpenSetup: () => void;
+};
+
+export default function SettingsMenu({
+  gateStatus,
+  gateBusy,
+  onGateToggle,
+  onImportConfig,
+  onOpenSetup,
+}: Props) {
+  const { t } = useI18n();
+  const [open, setOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const gatePaused = gateStatus?.mode === "paused";
+
+  useEffect(() => {
+    if (!open) return;
+
+    function handlePointerDown(event: PointerEvent) {
+      if (!menuRef.current?.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") setOpen(false);
+    }
+
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [open]);
+
+  return (
+    <div className="settings-menu" ref={menuRef}>
+      <button
+        type="button"
+        className="settings-trigger"
+        onClick={() => setOpen((next) => !next)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title={t("Settings")}
+      >
+        <Settings size={16} />
+        <span>{t("Settings")}</span>
+      </button>
+
+      {open && (
+        <div className="settings-popover" role="menu">
+          <div className="settings-popover-header">
+            <div>
+              <strong>{t("Settings")}</strong>
+              <span>{t("App preferences and safety controls")}</span>
+            </div>
+            <button
+              type="button"
+              className="settings-close"
+              onClick={() => setOpen(false)}
+              title={t("Close")}
+            >
+              <X size={15} />
+            </button>
+          </div>
+
+          <section className="settings-section">
+            <div className="settings-section-title">
+              <Activity size={15} />
+              {t("Execution gate")}
+            </div>
+            <div className={`settings-status ${gatePaused ? "paused" : "active"}`}>
+              {gatePaused ? <CircleDashed size={16} /> : <CheckCircle2 size={16} />}
+              <span>{gatePaused ? t("Gate paused") : t("Gate active")}</span>
+            </div>
+            <button
+              type="button"
+              className={`settings-action ${gatePaused ? "resume" : "pause"}`}
+              onClick={onGateToggle}
+              disabled={gateBusy || gateStatus === null}
+              title={gatePaused ? t("Resume execution gate") : t("Pause execution gate")}
+            >
+              {gatePaused ? <PlayCircle size={16} /> : <PauseCircle size={16} />}
+              {gatePaused ? t("Resume") : t("Pause")}
+            </button>
+          </section>
+
+          <section className="settings-section">
+            <div className="settings-section-title">{t("Language")}</div>
+            <LanguageSwitcher />
+          </section>
+
+          <section className="settings-section">
+            <button
+              type="button"
+              className="settings-row-button"
+              onClick={() => {
+                onImportConfig();
+                setOpen(false);
+              }}
+            >
+              <Upload size={16} />
+              <span>{t("Import from ~/.ssh/config")}</span>
+            </button>
+            <button
+              type="button"
+              className="settings-row-button"
+              onClick={() => {
+                onOpenSetup();
+                setOpen(false);
+              }}
+            >
+              <Wand2 size={16} />
+              <span>{t("Open setup wizard")}</span>
+            </button>
+          </section>
+
+          <div className="settings-daemon">
+            <Activity size={15} />
+            {t("Local daemon embedded")}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

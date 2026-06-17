@@ -6,9 +6,7 @@ import {
   History,
   Key,
   Loader2,
-  PauseCircle,
   Play,
-  PlayCircle,
   Server,
   Terminal,
 } from "lucide-react";
@@ -22,13 +20,13 @@ import ExecPanel from "./components/ExecPanel";
 import ForwardPanel from "./components/ForwardPanel";
 import HostList from "./components/HostList";
 import KeysPanel from "./components/KeysPanel";
-import LanguageSwitcher from "./components/LanguageSwitcher";
 import LiveActivityPanel from "./components/LiveActivityPanel";
 import MultiExecPanel from "./components/MultiExecPanel";
 import PingPanel from "./components/PingPanel";
 import PlaybooksPanel from "./components/PlaybooksPanel";
 import SFTPPanel from "./components/SFTPPanel";
 import SessionPanel from "./components/SessionPanel";
+import SettingsMenu from "./components/SettingsMenu";
 import SetupWizard from "./components/SetupWizard";
 import { useI18n } from "./i18n";
 import type { ApprovalRequest, AuditEntry, AuditFilter, ConnectionStatus, ExecutionGateStatus, HostProfile } from "./types";
@@ -258,9 +256,6 @@ export default function App() {
             <span>{t("Local SSH capability layer")}</span>
           </div>
         </div>
-        <button className="secondary import-btn" onClick={handleImportConfig}>
-          {t("Import from ~/.ssh/config")}
-        </button>
         <nav className="module-nav" aria-label={t("Modules")}>
           <div className="module-nav-title">{t("Modules")}</div>
           {MODULES.map(({ id, label, icon: Icon }) => (
@@ -299,25 +294,27 @@ export default function App() {
             </p>
           </div>
           <div className="topbar-actions">
-            <div className={`gate-pill ${gateStatus?.mode === "paused" ? "paused" : "active"}`}>
+            {pendingApprovals.length > 0 && (
+              <div className="status-pill approval-status">
+                <span className="approval-dot" />
+                {pendingApprovals.length}{" "}
+                {t(pendingApprovals.length > 1 ? "pending approvals" : "pending approval")}
+              </div>
+            )}
+            <div className={`status-pill gate-summary ${gateStatus?.mode === "paused" ? "paused" : "active"}`}>
               <Activity size={15} />
               {gateStatus?.mode === "paused" ? t("Gate paused") : t("Gate active")}
             </div>
-            <button
-              type="button"
-              className={`gate-action ${gateStatus?.mode === "paused" ? "resume" : "pause"}`}
-              onClick={handleGateToggle}
-              disabled={gateBusy || gateStatus === null}
-              title={gateStatus?.mode === "paused" ? t("Resume execution gate") : t("Pause execution gate")}
-            >
-              {gateStatus?.mode === "paused" ? <PlayCircle size={16} /> : <PauseCircle size={16} />}
-              {gateStatus?.mode === "paused" ? t("Resume") : t("Pause")}
-            </button>
-            <LanguageSwitcher />
-            <div className="status-pill">
-              <Activity size={15} />
-              {t("Local daemon embedded")}
-            </div>
+            <SettingsMenu
+              gateStatus={gateStatus}
+              gateBusy={gateBusy}
+              onGateToggle={handleGateToggle}
+              onImportConfig={handleImportConfig}
+              onOpenSetup={() => {
+                setWizardDismissed(false);
+                setShowWizard(true);
+              }}
+            />
           </div>
         </header>
 
