@@ -55,10 +55,11 @@ The implementation was verified with:
 
 ```bash
 npm run build
-cd src-tauri && cargo test
+(cd src-tauri && cargo test)
+npm run tauri:build
 ```
 
-The post-implementation regression passed with 161 unit tests, 27 CLI smoke tests, and 56 daemon integration tests.
+The post-implementation regression was re-run on 2026-06-18. No test bugs were found. `npm run build` passed, `cargo test` passed with 161 unit tests, 27 CLI smoke tests, and 56 daemon integration tests, and `npm run tauri:build` produced the macOS `.app` and `.dmg` bundles.
 
 ## Next Recommendation
 

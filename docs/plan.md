@@ -381,7 +381,7 @@ S9(0.1.1 已收口)
 | R2 | ✅ 已完成 | 高 | Codex | 完成 0.1.1 发布动作 | `v0.1.1` tag 已推送到 GitHub/git233；release CI run `27638444133` 通过并上传 CLI tarballs、checksums、macOS/Linux/Windows 桌面包；`scripts/agent2ssh.rb` 已回填 macOS arm64、macOS x86_64、Linux x86_64 sha256；发布 tarball checksum 校验通过；使用 macOS arm64 release tarball 跑通 `scripts/verify-install.sh`（7 passed, 0 failed） |
 | R3 | ✅ 已完成 | 中 | Codex | 外部接入剧本与反馈入口 | 新增 `docs/guides/external-user-10min.md`，覆盖 CLI host import/add、低风险 exec 验证、Codex/Claude-style MCP 配置、反馈脱敏；新增 GitHub bug/adoption issue 模板；明确 `v0.1.1` 默认无自动遥测，匿名反馈为手动 opt-in，未来运行时遥测必须默认关闭且不采集命令/主机/输出/凭据 |
 | R4 | ⬜ 待认领 | 高 | - | 首次外部 dogfood | 1-2 个非本人用户接自己的机器；产出首轮外部 bug backlog（对标 F1） |
-| R5 | ✅ 已完成 | 中 | Codex | 桌面控制面调研 | 确认 Settings menu 适合作为本地 operator surface；已落地 daemon health、daemon start/stop/restart、setup wizard daemon start、execution gate、Web Console URL 控制闭环；详见 `docs/reports/r5-desktop-control-plane-research-report.md` |
+| R5 | ✅ 已完成 | 中 | Codex | 桌面控制面调研 | 确认 Settings menu 适合作为本地 operator surface；已落地 daemon health、daemon start/stop/restart、setup wizard daemon start、execution gate、Web Console URL 控制闭环；2026-06-18 回归复测通过 `npm run build`、`cargo test`、`npm run tauri:build`；详见 `docs/reports/r5-desktop-control-plane-research-report.md` |
 
 ## T · 团队化与多用户
 
