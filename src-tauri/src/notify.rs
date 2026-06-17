@@ -83,7 +83,13 @@ pub async fn notify_approval_pending(
 
     // Format payload: Slack Block Kit for Slack URLs, plain JSON otherwise
     let payload = if url.contains("hooks.slack.com") {
-        format_slack_approval_notification(approval_id, host, &redacted_command, risk_level, approval_url)
+        format_slack_approval_notification(
+            approval_id,
+            host,
+            &redacted_command,
+            risk_level,
+            approval_url,
+        )
     } else {
         serde_json::json!({
             "event": "approval_required",
@@ -255,11 +261,7 @@ pub async fn fire_webhook(event: WebhookEvent) -> Result<()> {
     match req.body(body).send().await {
         Ok(resp) => {
             if !resp.status().is_success() {
-                eprintln!(
-                    "[webhook] POST {} returned status {}",
-                    url,
-                    resp.status()
-                );
+                eprintln!("[webhook] POST {} returned status {}", url, resp.status());
             }
         }
         Err(e) => {
@@ -457,10 +459,7 @@ mod tests {
         // Should have: header, section, actions
         assert_eq!(blocks.len(), 3);
         assert_eq!(blocks[0]["type"], "header");
-        assert_eq!(
-            blocks[0]["text"]["text"],
-            "Agent2SSH: Approval Required"
-        );
+        assert_eq!(blocks[0]["text"]["text"], "Agent2SSH: Approval Required");
         assert_eq!(blocks[1]["type"], "section");
         assert_eq!(blocks[2]["type"], "actions");
 
@@ -498,11 +497,13 @@ mod tests {
     /// `fire_webhook` picks up the config. Returns the path to the temp dir
     /// (caller must keep it alive for the duration of the test).
     #[cfg(feature = "daemon")]
-    fn setup_webhook_config(url: &str, events: &[&str], secret: Option<&str>) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "agent2ssh-notify-test-{}",
-            uuid::Uuid::new_v4()
-        ));
+    fn setup_webhook_config(
+        url: &str,
+        events: &[&str],
+        secret: Option<&str>,
+    ) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("agent2ssh-notify-test-{}", uuid::Uuid::new_v4()));
         let agent_dir = dir.join(".agent2ssh");
         std::fs::create_dir_all(&agent_dir).unwrap();
 

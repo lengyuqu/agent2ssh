@@ -9,17 +9,20 @@ use std::{
     time::Duration,
     time::Instant,
 };
-use tokio::{io::{AsyncReadExt, AsyncWriteExt}, process::Command, sync::Semaphore, task::JoinSet};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    process::Command,
+    sync::Semaphore,
+    task::JoinSet,
+};
 
 use crate::{
     connection::{apply_socket, get_or_create_socket},
-    store::{
-        append_audit, list_audit_raw, load_config, save_config_unlocked, store_write_lock,
-    },
+    store::{append_audit, list_audit_raw, load_config, save_config_unlocked, store_write_lock},
     types::{
-        AuditEntry, AuditFilter, BatchStrategy, ExecMultiBatchResult, ExecMultiResult, ExecRequest,
-        ExecResult, HostFilter, HostProfile, PingResult, RiskLevel, SftpDirection,
-        SftpDownloadRequest, SftpResult, SftpUploadRequest, source_from_env,
+        source_from_env, AuditEntry, AuditFilter, BatchStrategy, ExecMultiBatchResult,
+        ExecMultiResult, ExecRequest, ExecResult, HostFilter, HostProfile, PingResult, RiskLevel,
+        SftpDirection, SftpDownloadRequest, SftpResult, SftpUploadRequest,
     },
 };
 
@@ -44,6 +47,24 @@ pub struct ExecPlanTarget {
     pub blocked: bool,
     pub jump_host: Option<String>,
     pub timeout_secs: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExecMultiRequest {
+    pub hosts: Vec<String>,
+    pub command: String,
+    pub force: bool,
+    pub timeout_secs: Option<u64>,
+    pub tags: Option<Vec<String>>,
+    pub reason: Option<String>,
+    pub change_id: Option<String>,
+    pub source: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExecMultiBatchRequest {
+    pub request: ExecMultiRequest,
+    pub strategy: Option<BatchStrategy>,
 }
 
 // ── Team Config Export / Import ──────────────────────────────────────────────
@@ -274,7 +295,11 @@ fn host_matches_filter(host: &HostProfile, filter: &HostFilter) -> bool {
         return false;
     }
     if let Some(tag) = normalized_filter(filter.tag.as_deref()) {
-        if !host.tags.iter().any(|item| item.trim().eq_ignore_ascii_case(&tag)) {
+        if !host
+            .tags
+            .iter()
+            .any(|item| item.trim().eq_ignore_ascii_case(&tag))
+        {
             return false;
         }
     }
@@ -350,9 +375,7 @@ pub fn classify_risk(command: &str) -> RiskLevel {
         return RiskLevel::Blocked;
     }
     // direct redirect to block device
-    if lower.contains("> /dev/sd")
-        || lower.contains("> /dev/nvme")
-        || lower.contains("> /dev/xvd")
+    if lower.contains("> /dev/sd") || lower.contains("> /dev/nvme") || lower.contains("> /dev/xvd")
     {
         return RiskLevel::Blocked;
     }
@@ -382,10 +405,8 @@ pub fn classify_risk(command: &str) -> RiskLevel {
         }
     }
     // init 0 / init 6
-    if first == "init" {
-        if matches!(tokens.get(1).copied(), Some("0") | Some("6")) {
-            return RiskLevel::Blocked;
-        }
+    if first == "init" && matches!(tokens.get(1).copied(), Some("0") | Some("6")) {
+        return RiskLevel::Blocked;
     }
 
     // ── HIGH ─────────────────────────────────────────────────────────────────
@@ -407,15 +428,22 @@ pub fn classify_risk(command: &str) -> RiskLevel {
         return RiskLevel::High;
     }
     // firewall teardown
-    if lower.contains("iptables -f") || lower.contains("ufw disable") || lower.contains("ufw reset") {
+    if lower.contains("iptables -f") || lower.contains("ufw disable") || lower.contains("ufw reset")
+    {
         return RiskLevel::High;
     }
     // world-writeable chmod
-    if lower.contains("chmod 777") || lower.contains("chmod -r 777") || lower.contains("chmod a+rwx") {
+    if lower.contains("chmod 777")
+        || lower.contains("chmod -r 777")
+        || lower.contains("chmod a+rwx")
+    {
         return RiskLevel::High;
     }
     // account management
-    if matches!(first, "passwd" | "useradd" | "userdel" | "usermod" | "chpasswd") {
+    if matches!(
+        first,
+        "passwd" | "useradd" | "userdel" | "usermod" | "chpasswd"
+    ) {
         return RiskLevel::High;
     }
     // writing to critical system paths
@@ -448,16 +476,29 @@ pub fn classify_risk(command: &str) -> RiskLevel {
 
     // ── MEDIUM ───────────────────────────────────────────────────────────────
     let medium_contains: &[&str] = &[
-        "apt install", "apt-get install", "yum install", "dnf install",
-        "pip install", "pip3 install", "npm install", "brew install",
-        "systemctl restart", "systemctl enable", "systemctl disable",
+        "apt install",
+        "apt-get install",
+        "yum install",
+        "dnf install",
+        "pip install",
+        "pip3 install",
+        "npm install",
+        "brew install",
+        "systemctl restart",
+        "systemctl enable",
+        "systemctl disable",
         "systemctl start",
         "sed -i",
         "git push",
         "chmod",
         "chown",
-        "unzip", "tar -x", "tar xf", "tar xvf", "tar xzf",
-        "curl -o ", "wget -o ",
+        "unzip",
+        "tar -x",
+        "tar xf",
+        "tar xvf",
+        "tar xzf",
+        "curl -o ",
+        "wget -o ",
         "truncate",
         "mv /",
     ];
@@ -478,13 +519,16 @@ pub fn classify_risk(command: &str) -> RiskLevel {
 }
 
 /// Preview an execution plan for a single host.
-pub async fn preview_exec(host: &str, command: &str, timeout_secs: Option<u64>) -> Result<ExecPlan> {
+pub async fn preview_exec(
+    host: &str,
+    command: &str,
+    timeout_secs: Option<u64>,
+) -> Result<ExecPlan> {
     let profile = resolve_host(host)?;
     let timeout = timeout_secs.unwrap_or(60);
     let built_in_risk = classify_risk(command);
 
-    let classified_risk =
-        crate::risk_config::classify_effective_risk(command, built_in_risk).await;
+    let classified_risk = crate::risk_config::classify_effective_risk(command, built_in_risk).await;
 
     let risk = if let Some(override_level) = profile.risk_override {
         apply_risk_override(classified_risk, Some(override_level))
@@ -525,6 +569,24 @@ pub async fn preview_exec(host: &str, command: &str, timeout_secs: Option<u64>) 
     })
 }
 
+fn expand_hosts_by_tags(hosts: Vec<String>, tags: Option<Vec<String>>) -> Result<Vec<String>> {
+    let Some(tag_list) = tags else {
+        return Ok(hosts);
+    };
+    if tag_list.is_empty() {
+        return Ok(hosts);
+    }
+
+    let config = load_config()?;
+    let mut expanded = hosts;
+    for host in &config.hosts {
+        if host.tags.iter().any(|tag| tag_list.contains(tag)) && !expanded.contains(&host.name) {
+            expanded.push(host.name.clone());
+        }
+    }
+    Ok(expanded)
+}
+
 /// Preview an execution plan for multiple hosts.
 pub async fn preview_exec_multi(
     hosts: Vec<String>,
@@ -534,29 +596,10 @@ pub async fn preview_exec_multi(
 ) -> Result<ExecPlan> {
     let timeout = timeout_secs.unwrap_or(60);
 
-    // Expand tags into host names
-    let resolved_names = if let Some(tag_list) = tags {
-        if !tag_list.is_empty() {
-            let config = load_config()?;
-            let mut expanded = hosts.clone();
-            for h in &config.hosts {
-                if h.tags.iter().any(|t| tag_list.contains(t)) {
-                    if !expanded.contains(&h.name) {
-                        expanded.push(h.name.clone());
-                    }
-                }
-            }
-            expanded
-        } else {
-            hosts
-        }
-    } else {
-        hosts
-    };
+    let resolved_names = expand_hosts_by_tags(hosts, tags)?;
 
     let built_in_risk = classify_risk(command);
-    let classified_risk =
-        crate::risk_config::classify_effective_risk(command, built_in_risk).await;
+    let classified_risk = crate::risk_config::classify_effective_risk(command, built_in_risk).await;
 
     let mut targets = Vec::new();
     let mut warnings = Vec::new();
@@ -577,7 +620,10 @@ pub async fn preview_exec_multi(
             warnings.push(format!("Command is blocked on host '{}'", profile.name));
         }
         if risk == RiskLevel::High {
-            warnings.push(format!("Command requires force=true on host '{}'", profile.name));
+            warnings.push(format!(
+                "Command requires force=true on host '{}'",
+                profile.name
+            ));
         }
         if let Some(ref jh) = profile.jump_host {
             warnings.push(format!("Host '{}' uses jump host {}", profile.name, jh));
@@ -640,7 +686,10 @@ pub fn build_plan_from_profile(
             warnings.push(format!("Command is blocked on host '{}'", profile.name));
         }
         if risk == RiskLevel::High {
-            warnings.push(format!("Command requires force=true on host '{}'", profile.name));
+            warnings.push(format!(
+                "Command requires force=true on host '{}'",
+                profile.name
+            ));
         }
         if let Some(ref jh) = profile.jump_host {
             warnings.push(format!("Host '{}' uses jump host {}", profile.name, jh));
@@ -705,18 +754,21 @@ fn connect_embedded_ssh(host: &HostProfile, timeout_secs: u64) -> Result<ssh2::S
 
     if let Some(password) = host.password.as_deref().filter(|value| !value.is_empty()) {
         session.userauth_password(user, password)?;
-    } else if let Some(key_path) = host.key_path.as_deref().filter(|value| !value.trim().is_empty()) {
+    } else if let Some(key_path) = host
+        .key_path
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
         let path = expand_tilde(key_path);
         session.userauth_pubkey_file(user, None, Path::new(&path), None)?;
     } else {
         let mut agent = session.agent()?;
         agent.connect()?;
         agent.list_identities()?;
-        let identity = agent
-            .identities()?
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow!("no SSH key_path, password, or ssh-agent identity available"))?;
+        let identity =
+            agent.identities()?.into_iter().next().ok_or_else(|| {
+                anyhow!("no SSH key_path, password, or ssh-agent identity available")
+            })?;
         agent.userauth(user, &identity)?;
     }
 
@@ -727,13 +779,20 @@ fn connect_embedded_ssh(host: &HostProfile, timeout_secs: u64) -> Result<ssh2::S
     Ok(session)
 }
 
+struct EmbeddedExecOutput {
+    exit_code: Option<i32>,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    truncated: bool,
+}
+
 fn exec_ssh_embedded(
     host: HostProfile,
     command: String,
     stdin: Option<String>,
     timeout_secs: u64,
     max_bytes: usize,
-) -> Result<(Option<i32>, Vec<u8>, Vec<u8>, bool)> {
+) -> Result<EmbeddedExecOutput> {
     let session = connect_embedded_ssh(&host, timeout_secs)?;
     let mut channel = session.channel_session()?;
     channel.exec(&command)?;
@@ -762,7 +821,12 @@ fn exec_ssh_embedded(
     let mut stderr = Vec::new();
     channel.stderr().read_to_end(&mut stderr)?;
     channel.wait_close()?;
-    Ok((Some(channel.exit_status()?), stdout, stderr, truncated))
+    Ok(EmbeddedExecOutput {
+        exit_code: Some(channel.exit_status()?),
+        stdout,
+        stderr,
+        truncated,
+    })
 }
 
 pub fn apply_risk_override(classified: RiskLevel, override_level: Option<RiskLevel>) -> RiskLevel {
@@ -778,34 +842,30 @@ pub(crate) async fn exec_ssh_core_with_risk_override(
     request_risk_override: Option<RiskLevel>,
 ) -> Result<ExecResult> {
     let host = resolve_host(&request.host)?;
-    let source = request.source.clone().unwrap_or_else(|| source_from_env("core"));
+    let source = request
+        .source
+        .clone()
+        .unwrap_or_else(|| source_from_env("core"));
 
     // Risk overrides are reserved for explicitly trusted scopes such as a host
     // profile or a playbook. They never downgrade a blocked command.
     let built_in_risk = classify_risk(&request.command);
     let classified_risk =
         crate::risk_config::classify_effective_risk(&request.command, built_in_risk).await;
-    let risk = apply_risk_override(classified_risk, request_risk_override.or(host.risk_override));
+    let risk = apply_risk_override(
+        classified_risk,
+        request_risk_override.or(host.risk_override),
+    );
 
     if risk == RiskLevel::Blocked {
-        append_rejected_exec_audit(
-            &request,
-            risk,
-            &source,
-            "command blocked by risk policy",
-        );
+        append_rejected_exec_audit(&request, risk, &source, "command blocked by risk policy");
         return Err(anyhow!(
             "command blocked (risk=blocked): '{}' is unconditionally dangerous",
             request.command
         ));
     }
     if risk == RiskLevel::High && !request.force {
-        append_rejected_exec_audit(
-            &request,
-            risk,
-            &source,
-            "command requires force=true",
-        );
+        append_rejected_exec_audit(&request, risk, &source, "command requires force=true");
         return Err(anyhow!(
             "command requires force=true (risk=high): '{}'",
             request.command
@@ -821,7 +881,7 @@ pub(crate) async fn exec_ssh_core_with_risk_override(
         let embedded_host = host.clone();
         let embedded_command = request.command.clone();
         let embedded_stdin = request.stdin.clone();
-        let (exit_code, raw_stdout, raw_stderr, truncated) = tokio::time::timeout(
+        let embedded_output = tokio::time::timeout(
             Duration::from_secs(timeout_secs),
             tokio::task::spawn_blocking(move || {
                 exec_ssh_embedded(
@@ -834,18 +894,23 @@ pub(crate) async fn exec_ssh_core_with_risk_override(
             }),
         )
         .await
-        .map_err(|_| anyhow!("SSH command timed out after {timeout_secs}s: '{}'", request.command))?
+        .map_err(|_| {
+            anyhow!(
+                "SSH command timed out after {timeout_secs}s: '{}'",
+                request.command
+            )
+        })?
         .context("embedded SSH task failed")??;
 
         let result = ExecResult {
             host: request.host,
             command: request.command,
-            exit_code,
-            stdout: String::from_utf8_lossy(&raw_stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&raw_stderr).into_owned(),
+            exit_code: embedded_output.exit_code,
+            stdout: String::from_utf8_lossy(&embedded_output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&embedded_output.stderr).into_owned(),
             duration_ms: started.elapsed().as_millis(),
             risk_level: risk,
-            truncated,
+            truncated: embedded_output.truncated,
         };
         append_audit(
             &result,
@@ -892,7 +957,10 @@ pub(crate) async fn exec_ssh_core_with_risk_override(
 
     if let Some(data) = &request.stdin {
         if let Some(mut handle) = child.stdin.take() {
-            handle.write_all(data.as_bytes()).await.context("failed to write stdin")?;
+            handle
+                .write_all(data.as_bytes())
+                .await
+                .context("failed to write stdin")?;
         }
     }
 
@@ -900,9 +968,8 @@ pub(crate) async fn exec_ssh_core_with_risk_override(
     let stdout_handle = child.stdout.take().context("no stdout")?;
     let mut stderr_handle = child.stderr.take().context("no stderr")?;
 
-    let (raw_stdout, raw_stderr, status) = tokio::time::timeout(
-        Duration::from_secs(timeout_secs),
-        async {
+    let (raw_stdout, raw_stderr, status) =
+        tokio::time::timeout(Duration::from_secs(timeout_secs), async {
             // AsyncReadExt::take limits stdout to max_bytes before reading to end
             let mut stdout_capped = stdout_handle.take(max_bytes as u64);
             let (out_res, err_res) = tokio::join!(
@@ -917,11 +984,15 @@ pub(crate) async fn exec_ssh_core_with_risk_override(
             );
             let status = child.wait().await?;
             anyhow::Ok((out_res?, err_res?, status))
-        },
-    )
-    .await
-    .map_err(|_| anyhow!("SSH command timed out after {timeout_secs}s: '{}'", request.command))?
-    .context("failed waiting for ssh")?;
+        })
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "SSH command timed out after {timeout_secs}s: '{}'",
+                request.command
+            )
+        })?
+        .context("failed waiting for ssh")?;
 
     // Truncated when stdout hit the cap (take stops at exactly max_bytes)
     let truncated = raw_stdout.len() >= max_bytes;
@@ -981,37 +1052,20 @@ fn append_rejected_exec_audit(request: &ExecRequest, risk: RiskLevel, source: &s
     );
 }
 
-pub async fn exec_multi_core(
-    hosts: Vec<String>,
-    command: String,
-    force: bool,
-    timeout_secs: Option<u64>,
-    tags: Option<Vec<String>>,
-    reason: Option<String>,
-    change_id: Option<String>,
-    source: Option<String>,
-) -> Vec<ExecMultiResult> {
-    // Expand tags into host names
-    let resolved_hosts = if let Some(tag_list) = tags {
-        if !tag_list.is_empty() {
-            let config = match crate::store::load_config() {
-                Ok(c) => c,
-                Err(_) => return vec![],
-            };
-            let mut expanded = hosts.clone();
-            for h in &config.hosts {
-                if h.tags.iter().any(|t| tag_list.contains(t)) {
-                    if !expanded.contains(&h.name) {
-                        expanded.push(h.name.clone());
-                    }
-                }
-            }
-            expanded
-        } else {
-            hosts
-        }
-    } else {
-        hosts
+pub async fn exec_multi_core(request: ExecMultiRequest) -> Vec<ExecMultiResult> {
+    let ExecMultiRequest {
+        hosts,
+        command,
+        force,
+        timeout_secs,
+        tags,
+        reason,
+        change_id,
+        source,
+    } = request;
+    let resolved_hosts = match expand_hosts_by_tags(hosts, tags) {
+        Ok(hosts) => hosts,
+        Err(_) => return vec![],
     };
 
     let mut set = JoinSet::new();
@@ -1034,8 +1088,16 @@ pub async fn exec_multi_core(
                 source: req_source,
             };
             match exec_ssh_core(req).await {
-                Ok(r) => ExecMultiResult { host, result: Some(r), error: None },
-                Err(e) => ExecMultiResult { host, result: None, error: Some(e.to_string()) },
+                Ok(r) => ExecMultiResult {
+                    host,
+                    result: Some(r),
+                    error: None,
+                },
+                Err(e) => ExecMultiResult {
+                    host,
+                    result: None,
+                    error: Some(e.to_string()),
+                },
             }
         });
     }
@@ -1053,51 +1115,34 @@ pub async fn exec_multi_core(
 
 /// Execute a command on multiple hosts with a batch strategy controlling concurrency,
 /// failure thresholds, batched rollout, and pauses between batches.
-pub async fn exec_multi_with_strategy(
-    hosts: Vec<String>,
-    command: String,
-    force: bool,
-    timeout_secs: Option<u64>,
-    tags: Option<Vec<String>>,
-    strategy: Option<BatchStrategy>,
-    reason: Option<String>,
-    change_id: Option<String>,
-    source: Option<String>,
-) -> ExecMultiBatchResult {
+pub async fn exec_multi_with_strategy(request: ExecMultiBatchRequest) -> ExecMultiBatchResult {
+    let ExecMultiBatchRequest { request, strategy } = request;
+    let ExecMultiRequest {
+        hosts,
+        command,
+        force,
+        timeout_secs,
+        tags,
+        reason,
+        change_id,
+        source,
+    } = request;
     let started = Instant::now();
 
-    // Resolve hosts (expand tags)
-    let resolved_hosts = if let Some(tag_list) = tags {
-        if !tag_list.is_empty() {
-            let config = match crate::store::load_config() {
-                Ok(c) => c,
-                Err(_) => {
-                    return ExecMultiBatchResult {
-                        results: vec![],
-                        total_hosts: 0,
-                        successful: 0,
-                        failed: 0,
-                        skipped: 0,
-                        stopped_early: false,
-                        batches_executed: 0,
-                        total_duration_ms: started.elapsed().as_millis(),
-                    };
-                }
+    let resolved_hosts = match expand_hosts_by_tags(hosts, tags) {
+        Ok(hosts) => hosts,
+        Err(_) => {
+            return ExecMultiBatchResult {
+                results: vec![],
+                total_hosts: 0,
+                successful: 0,
+                failed: 0,
+                skipped: 0,
+                stopped_early: false,
+                batches_executed: 0,
+                total_duration_ms: started.elapsed().as_millis(),
             };
-            let mut expanded = hosts.clone();
-            for h in &config.hosts {
-                if h.tags.iter().any(|t| tag_list.contains(t)) {
-                    if !expanded.contains(&h.name) {
-                        expanded.push(h.name.clone());
-                    }
-                }
-            }
-            expanded
-        } else {
-            hosts
         }
-    } else {
-        hosts
     };
 
     let total_hosts = resolved_hosts.len();
@@ -1106,7 +1151,10 @@ pub async fn exec_multi_with_strategy(
     let concurrency = strategy.as_ref().and_then(|s| s.concurrency).unwrap_or(0);
     let max_failures = strategy.as_ref().and_then(|s| s.max_failures).unwrap_or(0);
     let batch_size = strategy.as_ref().and_then(|s| s.batch_size).unwrap_or(0);
-    let pause_secs = strategy.as_ref().and_then(|s| s.pause_between_batches_secs).unwrap_or(0);
+    let pause_secs = strategy
+        .as_ref()
+        .and_then(|s| s.pause_between_batches_secs)
+        .unwrap_or(0);
 
     // If no strategy constraints, run all at once (like exec_multi_core)
     if concurrency == 0 && max_failures == 0 && batch_size == 0 {
@@ -1130,8 +1178,16 @@ pub async fn exec_multi_with_strategy(
                     source: req_source,
                 };
                 match exec_ssh_core(req).await {
-                    Ok(r) => ExecMultiResult { host: h, result: Some(r), error: None },
-                    Err(e) => ExecMultiResult { host: h, result: None, error: Some(e.to_string()) },
+                    Ok(r) => ExecMultiResult {
+                        host: h,
+                        result: Some(r),
+                        error: None,
+                    },
+                    Err(e) => ExecMultiResult {
+                        host: h,
+                        result: None,
+                        error: Some(e.to_string()),
+                    },
                 }
             });
         }
@@ -1158,7 +1214,11 @@ pub async fn exec_multi_with_strategy(
     }
 
     // Build batches
-    let effective_batch_size = if batch_size > 0 { batch_size } else { total_hosts };
+    let effective_batch_size = if batch_size > 0 {
+        batch_size
+    } else {
+        total_hosts
+    };
     let batches: Vec<Vec<String>> = resolved_hosts
         .chunks(effective_batch_size)
         .map(|c| c.to_vec())
@@ -1211,8 +1271,16 @@ pub async fn exec_multi_with_strategy(
                     source: req_source,
                 };
                 match exec_ssh_core(req).await {
-                    Ok(r) => ExecMultiResult { host: h, result: Some(r), error: None },
-                    Err(e) => ExecMultiResult { host: h, result: None, error: Some(e.to_string()) },
+                    Ok(r) => ExecMultiResult {
+                        host: h,
+                        result: Some(r),
+                        error: None,
+                    },
+                    Err(e) => ExecMultiResult {
+                        host: h,
+                        result: None,
+                        error: Some(e.to_string()),
+                    },
                 }
             });
         }
@@ -1352,7 +1420,8 @@ pub fn compare_exec_results(results: &[ExecMultiResult]) -> ExecComparison {
         let code = exit_code_groups[0].exit_code;
         summary_parts.push(format!(
             "All hosts exited with code {}.",
-            code.map(|c| c.to_string()).unwrap_or_else(|| "unknown".into())
+            code.map(|c| c.to_string())
+                .unwrap_or_else(|| "unknown".into())
         ));
     } else {
         summary_parts.push(format!(
@@ -1392,9 +1461,7 @@ fn compare_outputs(
     // Collect (host, output) pairs for results that have a result
     let outputs: Vec<(String, &str)> = results
         .iter()
-        .filter_map(|r| {
-            r.result.as_ref().map(|res| (r.host.clone(), extract(res)))
-        })
+        .filter_map(|r| r.result.as_ref().map(|res| (r.host.clone(), extract(res))))
         .collect();
 
     if outputs.is_empty() {
@@ -1406,9 +1473,7 @@ fn compare_outputs(
     }
 
     // Find longest common prefix
-    let common_prefix = longest_common_prefix(
-        &outputs.iter().map(|(_, s)| *s).collect::<Vec<_>>(),
-    );
+    let common_prefix = longest_common_prefix(&outputs.iter().map(|(_, s)| *s).collect::<Vec<_>>());
 
     // Check if all outputs are identical
     let first_output = outputs[0].1;
@@ -1476,7 +1541,11 @@ pub(crate) fn build_ssh_command(host: &HostProfile) -> Command {
         Command::new("ssh")
     };
     cmd.arg("-o")
-        .arg(if has_password { "BatchMode=no" } else { "BatchMode=yes" })
+        .arg(if has_password {
+            "BatchMode=no"
+        } else {
+            "BatchMode=yes"
+        })
         .arg("-o")
         .arg("StrictHostKeyChecking=accept-new")
         .arg("-p")
@@ -1594,7 +1663,10 @@ pub async fn sftp_upload_core_with_source(
     let host = resolve_host(&request.host)?;
     let started = Instant::now();
     let source = source.unwrap_or_else(|| source_from_env("core"));
-    let command = format!("sftp upload {} -> {}", request.local_path, request.remote_path);
+    let command = format!(
+        "sftp upload {} -> {}",
+        request.local_path, request.remote_path
+    );
     let risk = crate::risk_config::classify_effective_risk(&command, classify_risk(&command)).await;
     if risk == RiskLevel::Blocked {
         let message = "sftp upload blocked by risk policy";
@@ -1715,7 +1787,10 @@ pub async fn sftp_download_core_with_source(
     let host = resolve_host(&request.host)?;
     let started = Instant::now();
     let source = source.unwrap_or_else(|| source_from_env("core"));
-    let command = format!("sftp download {} -> {}", request.remote_path, request.local_path);
+    let command = format!(
+        "sftp download {} -> {}",
+        request.remote_path, request.local_path
+    );
     let risk = crate::risk_config::classify_effective_risk(&command, classify_risk(&command)).await;
     if risk == RiskLevel::Blocked {
         let message = "sftp download blocked by risk policy";
@@ -1827,7 +1902,11 @@ pub async fn sftp_download_core_with_source(
 
 // ── SFTP directory operations (via SSH exec) ──────────────────────────────────
 
-pub async fn sftp_ls_core(host_name: &str, path: &str, timeout_secs: Option<u64>) -> Result<ExecResult> {
+pub async fn sftp_ls_core(
+    host_name: &str,
+    path: &str,
+    timeout_secs: Option<u64>,
+) -> Result<ExecResult> {
     sftp_ls_core_with_source(host_name, path, timeout_secs, Some(source_from_env("core"))).await
 }
 
@@ -1851,7 +1930,11 @@ pub async fn sftp_ls_core_with_source(
     .await
 }
 
-pub async fn sftp_stat_core(host_name: &str, path: &str, timeout_secs: Option<u64>) -> Result<ExecResult> {
+pub async fn sftp_stat_core(
+    host_name: &str,
+    path: &str,
+    timeout_secs: Option<u64>,
+) -> Result<ExecResult> {
     sftp_stat_core_with_source(host_name, path, timeout_secs, Some(source_from_env("core"))).await
 }
 
@@ -1875,7 +1958,11 @@ pub async fn sftp_stat_core_with_source(
     .await
 }
 
-pub async fn sftp_mkdir_core(host_name: &str, path: &str, timeout_secs: Option<u64>) -> Result<ExecResult> {
+pub async fn sftp_mkdir_core(
+    host_name: &str,
+    path: &str,
+    timeout_secs: Option<u64>,
+) -> Result<ExecResult> {
     sftp_mkdir_core_with_source(host_name, path, timeout_secs, Some(source_from_env("core"))).await
 }
 
@@ -1947,7 +2034,7 @@ pub fn import_ssh_config_core(path: Option<&str>) -> Result<Vec<HostProfile>> {
         let jump_host = pj.as_ref().map(|raw| {
             let target = raw.split_whitespace().next().unwrap_or(raw);
             // Strip user@ prefix and :port suffix to get a usable alias hint
-            let no_user = target.split('@').last().unwrap_or(target);
+            let no_user = target.split('@').next_back().unwrap_or(target);
             no_user.split(':').next().unwrap_or(no_user).to_string()
         });
         profiles.push(HostProfile {
@@ -1978,7 +2065,15 @@ pub fn import_ssh_config_core(path: Option<&str>) -> Result<Vec<HostProfile>> {
         match key.as_str() {
             "host" => {
                 // Flush previous entry
-                flush(&current_alias, &hostname, &user, port, &identity, &proxy_jump, &mut profiles);
+                flush(
+                    &current_alias,
+                    &hostname,
+                    &user,
+                    port,
+                    &identity,
+                    &proxy_jump,
+                    &mut profiles,
+                );
                 current_alias = Some(value);
                 hostname = None;
                 user = None;
@@ -1995,7 +2090,15 @@ pub fn import_ssh_config_core(path: Option<&str>) -> Result<Vec<HostProfile>> {
         }
     }
     // Flush last entry
-    flush(&current_alias, &hostname, &user, port, &identity, &proxy_jump, &mut profiles);
+    flush(
+        &current_alias,
+        &hostname,
+        &user,
+        port,
+        &identity,
+        &proxy_jump,
+        &mut profiles,
+    );
 
     // Add only profiles whose name doesn't already exist
     let _guard = store_write_lock()?;
@@ -2065,9 +2168,15 @@ pub struct SshSyncStrategy {
     pub import_missing: bool,
 }
 
-fn default_import_strategy() -> String { "skip_existing".into() }
-fn default_conflict_strategy() -> String { "keep_agent2ssh".into() }
-fn default_true_fn() -> bool { true }
+fn default_import_strategy() -> String {
+    "skip_existing".into()
+}
+fn default_conflict_strategy() -> String {
+    "keep_agent2ssh".into()
+}
+fn default_true_fn() -> bool {
+    true
+}
 
 impl Default for SshSyncStrategy {
     fn default() -> Self {
@@ -2144,7 +2253,8 @@ pub fn compare_ssh_configs(path: Option<&str>) -> Result<SshSyncDiff> {
             let mut host_matches = true;
             if host.host != ssh_host.host {
                 conflicts.push(SshSyncHostConflict {
-                    name: name.clone(), field: "hostname".into(),
+                    name: name.clone(),
+                    field: "hostname".into(),
                     agent2ssh_value: host.host.clone(),
                     ssh_config_value: ssh_host.host.clone(),
                 });
@@ -2152,7 +2262,8 @@ pub fn compare_ssh_configs(path: Option<&str>) -> Result<SshSyncDiff> {
             }
             if host.user != ssh_host.user {
                 conflicts.push(SshSyncHostConflict {
-                    name: name.clone(), field: "user".into(),
+                    name: name.clone(),
+                    field: "user".into(),
                     agent2ssh_value: host.user.clone().unwrap_or_default(),
                     ssh_config_value: ssh_host.user.clone().unwrap_or_default(),
                 });
@@ -2160,7 +2271,8 @@ pub fn compare_ssh_configs(path: Option<&str>) -> Result<SshSyncDiff> {
             }
             if host.port != ssh_host.port {
                 conflicts.push(SshSyncHostConflict {
-                    name: name.clone(), field: "port".into(),
+                    name: name.clone(),
+                    field: "port".into(),
                     agent2ssh_value: host.port.map(|p| p.to_string()).unwrap_or_default(),
                     ssh_config_value: ssh_host.port.map(|p| p.to_string()).unwrap_or_default(),
                 });
@@ -2171,8 +2283,10 @@ pub fn compare_ssh_configs(path: Option<&str>) -> Result<SshSyncDiff> {
             }
         } else {
             only_in_agent2ssh.push(SshSyncHostDiff {
-                name: name.clone(), host: host.host.clone(),
-                user: host.user.clone(), port: host.port,
+                name: name.clone(),
+                host: host.host.clone(),
+                user: host.user.clone(),
+                port: host.port,
             });
         }
     }
@@ -2181,15 +2295,20 @@ pub fn compare_ssh_configs(path: Option<&str>) -> Result<SshSyncDiff> {
     for (name, host) in &ssh_map {
         if !a2s_map.contains_key(name) {
             only_in_ssh_config.push(SshSyncHostDiff {
-                name: name.clone(), host: host.host.clone(),
-                user: host.user.clone(), port: host.port,
+                name: name.clone(),
+                host: host.host.clone(),
+                user: host.user.clone(),
+                port: host.port,
             });
         }
     }
 
     let summary = format!(
         "{} matching, {} only in Agent2SSH, {} only in ~/.ssh/config, {} conflicts",
-        matching.len(), only_in_agent2ssh.len(), only_in_ssh_config.len(), conflicts.len()
+        matching.len(),
+        only_in_agent2ssh.len(),
+        only_in_ssh_config.len(),
+        conflicts.len()
     );
 
     Ok(SshSyncDiff {
@@ -2217,8 +2336,12 @@ fn parse_ssh_config_file(path: &std::path::Path) -> Result<Vec<HostProfile>> {
     let mut identity: Option<String> = None;
     let mut proxy_jump: Option<String> = None;
 
-    let flush = |alias: &Option<String>, hn: &Option<String>, u: &Option<String>,
-                 p: Option<u16>, id: &Option<String>, pj: &Option<String>,
+    let flush = |alias: &Option<String>,
+                 hn: &Option<String>,
+                 u: &Option<String>,
+                 p: Option<u16>,
+                 id: &Option<String>,
+                 pj: &Option<String>,
                  out: &mut Vec<HostProfile>| {
         let alias = alias.as_deref().unwrap_or("");
         let hn = hn.as_deref().unwrap_or("");
@@ -2227,30 +2350,51 @@ fn parse_ssh_config_file(path: &std::path::Path) -> Result<Vec<HostProfile>> {
         }
         let jump_host = pj.as_ref().map(|raw| {
             let target = raw.split_whitespace().next().unwrap_or(raw);
-            let no_user = target.split('@').last().unwrap_or(target);
+            let no_user = target.split('@').next_back().unwrap_or(target);
             no_user.split(':').next().unwrap_or(no_user).to_string()
         });
         out.push(HostProfile {
-            name: alias.to_string(), host: hn.to_string(),
-            user: u.clone(), port: p, key_path: id.clone(),
+            name: alias.to_string(),
+            host: hn.to_string(),
+            user: u.clone(),
+            port: p,
+            key_path: id.clone(),
             password: None,
-            jump_host, risk_override: None, tags: vec![],
-            env: None, role: None, owner: None,
+            jump_host,
+            risk_override: None,
+            tags: vec![],
+            env: None,
+            role: None,
+            owner: None,
         });
     };
 
     for line in raw.lines() {
         let line = line.trim();
-        if line.is_empty() || line.starts_with('#') { continue; }
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
         let (key, value) = match line.split_once(|c: char| c.is_whitespace()) {
             Some(pair) => (pair.0.to_lowercase(), pair.1.trim().to_string()),
             None => continue,
         };
         match key.as_str() {
             "host" => {
-                flush(&current_alias, &hostname, &user, port, &identity, &proxy_jump, &mut profiles);
+                flush(
+                    &current_alias,
+                    &hostname,
+                    &user,
+                    port,
+                    &identity,
+                    &proxy_jump,
+                    &mut profiles,
+                );
                 current_alias = Some(value);
-                hostname = None; user = None; port = None; identity = None; proxy_jump = None;
+                hostname = None;
+                user = None;
+                port = None;
+                identity = None;
+                proxy_jump = None;
             }
             "hostname" => hostname = Some(value),
             "user" => user = Some(value),
@@ -2260,7 +2404,15 @@ fn parse_ssh_config_file(path: &std::path::Path) -> Result<Vec<HostProfile>> {
             _ => {}
         }
     }
-    flush(&current_alias, &hostname, &user, port, &identity, &proxy_jump, &mut profiles);
+    flush(
+        &current_alias,
+        &hostname,
+        &user,
+        port,
+        &identity,
+        &proxy_jump,
+        &mut profiles,
+    );
     Ok(profiles)
 }
 
@@ -2274,9 +2426,15 @@ pub fn export_to_ssh_config_format(hosts: &[HostProfile]) -> String {
         // Tags/env/role as comments for human reference
         if !host.tags.is_empty() || host.env.is_some() || host.role.is_some() {
             let mut meta = Vec::new();
-            if let Some(env) = &host.env { meta.push(format!("env={}", env)); }
-            if let Some(role) = &host.role { meta.push(format!("role={}", role)); }
-            if !host.tags.is_empty() { meta.push(format!("tags={}", host.tags.join(","))); }
+            if let Some(env) = &host.env {
+                meta.push(format!("env={}", env));
+            }
+            if let Some(role) = &host.role {
+                meta.push(format!("role={}", role));
+            }
+            if !host.tags.is_empty() {
+                meta.push(format!("tags={}", host.tags.join(",")));
+            }
             out.push_str(&format!("# agent2ssh: {}\n", meta.join(" ")));
         }
         out.push_str(&format!("Host {}\n", host.name));
@@ -2307,7 +2465,10 @@ pub fn export_to_ssh_config_format(hosts: &[HostProfile]) -> String {
 /// Export Agent2SSH hosts to a file in SSH config format.
 /// If `path` is None, writes to ~/.ssh/config.d/agent2ssh.conf (include-based approach).
 /// Returns the path written to and the number of hosts exported.
-pub fn export_to_ssh_config(path: Option<&str>, strategy: Option<SshSyncStrategy>) -> Result<(String, usize)> {
+pub fn export_to_ssh_config(
+    path: Option<&str>,
+    strategy: Option<SshSyncStrategy>,
+) -> Result<(String, usize)> {
     let config = load_config()?;
     let strategy = strategy.unwrap_or_default();
 
@@ -2323,7 +2484,9 @@ pub fn export_to_ssh_config(path: Option<&str>, strategy: Option<SshSyncStrategy
         let existing = parse_ssh_config_file(&ssh_path)?;
         let existing_names: std::collections::HashSet<String> =
             existing.iter().map(|h| h.name.clone()).collect();
-        let filtered: Vec<HostProfile> = config.hosts.into_iter()
+        let filtered: Vec<HostProfile> = config
+            .hosts
+            .into_iter()
             .filter(|h| existing_names.contains(&h.name))
             .collect();
         let content = export_to_ssh_config_format(&filtered);
@@ -2358,7 +2521,10 @@ fn resolve_ssh_export_path(path: Option<&str>) -> Result<std::path::PathBuf> {
 
 // ── Ping ─────────────────────────────────────────────────────────────────────
 
-pub async fn ping_hosts_core(host_names: Vec<String>, timeout_secs: Option<u64>) -> Vec<PingResult> {
+pub async fn ping_hosts_core(
+    host_names: Vec<String>,
+    timeout_secs: Option<u64>,
+) -> Vec<PingResult> {
     let timeout = timeout_secs.unwrap_or(5);
     let mut set = JoinSet::new();
 
@@ -2421,11 +2587,7 @@ pub async fn ping_hosts_core(host_names: Vec<String>, timeout_secs: Option<u64>)
                         .stdout(Stdio::null())
                         .stderr(Stdio::null());
 
-                    match tokio::time::timeout(
-                        Duration::from_secs(timeout + 2),
-                        cmd.status(),
-                    )
-                    .await
+                    match tokio::time::timeout(Duration::from_secs(timeout + 2), cmd.status()).await
                     {
                         Ok(Ok(status)) if status.success() => PingResult {
                             host: name,
@@ -2508,7 +2670,10 @@ mod tests {
         assert_eq!(classify_risk("systemctl restart nginx"), RiskLevel::Medium);
         assert_eq!(classify_risk("git push origin main"), RiskLevel::Medium);
         assert_eq!(classify_risk("echo hello > /tmp/file"), RiskLevel::Medium);
-        assert_eq!(classify_risk("sed -i 's/foo/bar/' file.txt"), RiskLevel::Medium);
+        assert_eq!(
+            classify_risk("sed -i 's/foo/bar/' file.txt"),
+            RiskLevel::Medium
+        );
     }
 
     #[test]
@@ -2523,8 +2688,14 @@ mod tests {
 
     #[test]
     fn test_classify_risk_dd_blocked() {
-        assert_eq!(classify_risk("dd if=/dev/zero of=/dev/sda bs=1M"), RiskLevel::Blocked);
-        assert_eq!(classify_risk("dd if=/dev/zero of=/dev/nvme0n1 bs=1M"), RiskLevel::Blocked);
+        assert_eq!(
+            classify_risk("dd if=/dev/zero of=/dev/sda bs=1M"),
+            RiskLevel::Blocked
+        );
+        assert_eq!(
+            classify_risk("dd if=/dev/zero of=/dev/nvme0n1 bs=1M"),
+            RiskLevel::Blocked
+        );
     }
 
     #[test]
@@ -2682,10 +2853,7 @@ mod tests {
 
     #[test]
     fn test_preview_exec_multi_risk_aggregation() {
-        let hosts = vec![
-            make_test_host("host-a"),
-            make_test_host("host-b"),
-        ];
+        let hosts = vec![make_test_host("host-a"), make_test_host("host-b")];
         // "sudo whoami" is High risk — both hosts should get High
         let plan = build_plan_from_profile(hosts, "sudo whoami", Some(120));
         assert_eq!(plan.overall_risk, RiskLevel::High);
@@ -2704,7 +2872,10 @@ mod tests {
         host.jump_host = Some("bastion".to_string());
         let plan = build_plan_from_profile(vec![host], "ls -la", None);
         assert_eq!(plan.overall_risk, RiskLevel::Low);
-        assert!(plan.warnings.iter().any(|w| w.contains("jump host bastion")));
+        assert!(plan
+            .warnings
+            .iter()
+            .any(|w| w.contains("jump host bastion")));
     }
 
     #[test]
@@ -2732,10 +2903,8 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn test_team_config_export_strips_auth_material() {
-        let config_dir = std::env::temp_dir().join(format!(
-            "agent2ssh-export-auth-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let config_dir =
+            std::env::temp_dir().join(format!("agent2ssh-export-auth-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&config_dir).unwrap();
         std::env::set_var("AGENT2SSH_CONFIG_DIR", &config_dir);
 
@@ -2787,10 +2956,8 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn test_preview_team_config_import() {
-        let config_dir = std::env::temp_dir().join(format!(
-            "agent2ssh-preview-import-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let config_dir =
+            std::env::temp_dir().join(format!("agent2ssh-preview-import-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&config_dir).unwrap();
         std::env::set_var("AGENT2SSH_CONFIG_DIR", &config_dir);
 
@@ -2947,8 +3114,14 @@ mod tests {
             },
         ];
 
-        let total_failures = simulated_results.iter().filter(|r| r.result.is_none()).count();
-        assert!(total_failures >= max_failures, "Should stop after reaching failure threshold");
+        let total_failures = simulated_results
+            .iter()
+            .filter(|r| r.result.is_none())
+            .count();
+        assert!(
+            total_failures >= max_failures,
+            "Should stop after reaching failure threshold"
+        );
 
         let executed_count = simulated_results.len();
         let skipped = hosts.len() - executed_count;
@@ -2960,11 +3133,12 @@ mod tests {
         // Verify batch splitting: 7 hosts with batch_size=3 -> 3 batches [3,3,1]
         let hosts: Vec<String> = (0..7).map(|i| format!("host-{i}")).collect();
         let batch_size = 3usize;
-        let batches: Vec<Vec<String>> = hosts
-            .chunks(batch_size)
-            .map(|c| c.to_vec())
-            .collect();
-        assert_eq!(batches.len(), 3, "7 hosts with batch_size=3 should produce 3 batches");
+        let batches: Vec<Vec<String>> = hosts.chunks(batch_size).map(|c| c.to_vec()).collect();
+        assert_eq!(
+            batches.len(),
+            3,
+            "7 hosts with batch_size=3 should produce 3 batches"
+        );
         assert_eq!(batches[0].len(), 3);
         assert_eq!(batches[1].len(), 3);
         assert_eq!(batches[2].len(), 1);
@@ -3010,8 +3184,14 @@ mod tests {
         assert_eq!(comparison.exit_code_groups.len(), 1, "All same exit code");
         assert_eq!(comparison.exit_code_groups[0].exit_code, Some(0));
         assert_eq!(comparison.exit_code_groups[0].hosts.len(), 2);
-        assert!(comparison.stdout_comparison.identical, "stdout should be identical");
-        assert!(comparison.stderr_comparison.identical, "stderr should be identical");
+        assert!(
+            comparison.stdout_comparison.identical,
+            "stdout should be identical"
+        );
+        assert!(
+            comparison.stderr_comparison.identical,
+            "stderr should be identical"
+        );
         assert!(comparison.summary.contains("identical"));
     }
 
@@ -3055,15 +3235,31 @@ mod tests {
 
         let comparison = compare_exec_results(&results);
         assert_eq!(comparison.hosts_count, 3);
-        assert_eq!(comparison.exit_code_groups.len(), 3, "3 distinct exit code groups");
+        assert_eq!(
+            comparison.exit_code_groups.len(),
+            3,
+            "3 distinct exit code groups"
+        );
         // exit code 0 -> host-ok
-        let group_0 = comparison.exit_code_groups.iter().find(|g| g.exit_code == Some(0)).unwrap();
+        let group_0 = comparison
+            .exit_code_groups
+            .iter()
+            .find(|g| g.exit_code == Some(0))
+            .unwrap();
         assert_eq!(group_0.hosts, vec!["host-ok"]);
         // exit code 1 -> host-fail
-        let group_1 = comparison.exit_code_groups.iter().find(|g| g.exit_code == Some(1)).unwrap();
+        let group_1 = comparison
+            .exit_code_groups
+            .iter()
+            .find(|g| g.exit_code == Some(1))
+            .unwrap();
         assert_eq!(group_1.hosts, vec!["host-fail"]);
         // exit code None -> host-error
-        let group_none = comparison.exit_code_groups.iter().find(|g| g.exit_code.is_none()).unwrap();
+        let group_none = comparison
+            .exit_code_groups
+            .iter()
+            .find(|g| g.exit_code.is_none())
+            .unwrap();
         assert_eq!(group_none.hosts, vec!["host-error"]);
         assert!(comparison.summary.contains("3 distinct exit code group"));
     }
@@ -3102,7 +3298,10 @@ mod tests {
         ];
 
         let comparison = compare_exec_results(&results);
-        assert!(!comparison.stdout_comparison.identical, "stdout should differ");
+        assert!(
+            !comparison.stdout_comparison.identical,
+            "stdout should differ"
+        );
         assert_eq!(comparison.stdout_comparison.diffs.len(), 2);
         assert!(!comparison.stdout_comparison.diffs[0].differs_from_first);
         assert!(comparison.stdout_comparison.diffs[1].differs_from_first);
@@ -3146,18 +3345,32 @@ mod tests {
     fn test_export_to_ssh_config_format() {
         let hosts = vec![
             HostProfile {
-                name: "prod-web".into(), host: "10.0.0.1".into(),
-                user: Some("ubuntu".into()), port: Some(22),
+                name: "prod-web".into(),
+                host: "10.0.0.1".into(),
+                user: Some("ubuntu".into()),
+                port: Some(22),
                 key_path: Some("~/.ssh/id_rsa".into()),
                 password: None,
-                jump_host: None, risk_override: None, tags: vec!["web".into()],
-                env: Some("prod".into()), role: Some("web".into()), owner: None,
+                jump_host: None,
+                risk_override: None,
+                tags: vec!["web".into()],
+                env: Some("prod".into()),
+                role: Some("web".into()),
+                owner: None,
             },
             HostProfile {
-                name: "staging-db".into(), host: "10.0.1.1".into(),
-                user: None, port: Some(2222),
-                key_path: None, password: None, jump_host: Some("bastion".into()),
-                risk_override: None, tags: vec![], env: None, role: None, owner: None,
+                name: "staging-db".into(),
+                host: "10.0.1.1".into(),
+                user: None,
+                port: Some(2222),
+                key_path: None,
+                password: None,
+                jump_host: Some("bastion".into()),
+                risk_override: None,
+                tags: vec![],
+                env: None,
+                role: None,
+                owner: None,
             },
         ];
         let output = export_to_ssh_config_format(&hosts);
@@ -3177,10 +3390,18 @@ mod tests {
     #[test]
     fn test_export_to_ssh_config_format_default_port_omitted() {
         let hosts = vec![HostProfile {
-            name: "test".into(), host: "10.0.0.1".into(),
-            user: None, port: Some(22), key_path: None, password: None,
-            jump_host: None, risk_override: None, tags: vec![],
-            env: None, role: None, owner: None,
+            name: "test".into(),
+            host: "10.0.0.1".into(),
+            user: None,
+            port: Some(22),
+            key_path: None,
+            password: None,
+            jump_host: None,
+            risk_override: None,
+            tags: vec![],
+            env: None,
+            role: None,
+            owner: None,
         }];
         let output = export_to_ssh_config_format(&hosts);
         // Port 22 should be omitted (it's the default)
@@ -3198,12 +3419,15 @@ mod tests {
     fn test_ssh_sync_diff_serialization() {
         let diff = SshSyncDiff {
             only_in_agent2ssh: vec![SshSyncHostDiff {
-                name: "test".into(), host: "10.0.0.1".into(),
-                user: None, port: None,
+                name: "test".into(),
+                host: "10.0.0.1".into(),
+                user: None,
+                port: None,
             }],
             only_in_ssh_config: vec![],
             conflicts: vec![SshSyncHostConflict {
-                name: "web".into(), field: "hostname".into(),
+                name: "web".into(),
+                field: "hostname".into(),
                 agent2ssh_value: "10.0.0.2".into(),
                 ssh_config_value: "10.0.0.1".into(),
             }],

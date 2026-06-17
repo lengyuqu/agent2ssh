@@ -1,11 +1,7 @@
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::HashMap,
-    path::PathBuf,
-    sync::OnceLock,
-};
+use std::{collections::HashMap, path::PathBuf, sync::OnceLock};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -255,11 +251,17 @@ pub async fn approval_wait(id: Uuid) -> ApprovalStatus {
 
 /// Build an `ApprovalContext` by resolving host profile from config, fetching
 /// recent audit entries for the host, and classifying risk with details.
-pub fn build_approval_context(host_name: &str, command: &str, source: &str) -> Result<ApprovalContext> {
+pub fn build_approval_context(
+    host_name: &str,
+    command: &str,
+    source: &str,
+) -> Result<ApprovalContext> {
     use crate::types::AuditFilter;
 
-    let mut ctx = ApprovalContext::default();
-    ctx.source = Some(source.to_string());
+    let mut ctx = ApprovalContext {
+        source: Some(source.to_string()),
+        ..Default::default()
+    };
 
     // Resolve host profile from config
     let config = crate::store::load_config().unwrap_or_default();
@@ -470,8 +472,7 @@ fn check_approval_required_with(
 
     for policy in policies {
         // Check hosts constraint
-        if !policy.hosts.is_empty()
-            && !policy.hosts.iter().any(|h| h.to_lowercase() == host_lower)
+        if !policy.hosts.is_empty() && !policy.hosts.iter().any(|h| h.to_lowercase() == host_lower)
         {
             continue;
         }
@@ -681,8 +682,7 @@ mod tests {
             policies: policies.clone(),
         };
         let toml_str = toml::to_string_pretty(&file).expect("serialize to TOML");
-        let parsed: ApprovalPolicyFile =
-            toml::from_str(&toml_str).expect("deserialize from TOML");
+        let parsed: ApprovalPolicyFile = toml::from_str(&toml_str).expect("deserialize from TOML");
 
         assert_eq!(parsed.policies.len(), 2);
         assert_eq!(parsed.policies[0].name, "production-high-risk");
@@ -739,14 +739,9 @@ mod tests {
         );
 
         // Low risk should NOT require approval
-        let result = check_approval_required_with(
-            &policies,
-            "any-host",
-            &[],
-            "ls -la",
-            RiskLevel::Low,
-        )
-        .unwrap();
+        let result =
+            check_approval_required_with(&policies, "any-host", &[], "ls -la", RiskLevel::Low)
+                .unwrap();
         assert!(result.is_none(), "Low risk should not match min_risk=high");
 
         // Blocked risk should also match (>= high)
@@ -758,10 +753,7 @@ mod tests {
             RiskLevel::Blocked,
         )
         .unwrap();
-        assert!(
-            result.is_some(),
-            "Blocked risk should match min_risk=high"
-        );
+        assert!(result.is_some(), "Blocked risk should match min_risk=high");
     }
 
     #[test]
@@ -777,39 +769,24 @@ mod tests {
         }];
 
         // Matching host (exact)
-        let result = check_approval_required_with(
-            &policies,
-            "prod-web-1",
-            &[],
-            "ls",
-            RiskLevel::Low,
-        )
-        .unwrap();
+        let result =
+            check_approval_required_with(&policies, "prod-web-1", &[], "ls", RiskLevel::Low)
+                .unwrap();
         assert!(result.is_some(), "prod-web-1 should match");
 
         // Case-insensitive match
-        let result = check_approval_required_with(
-            &policies,
-            "prod-db-1",
-            &[],
-            "ls",
-            RiskLevel::Low,
-        )
-        .unwrap();
+        let result =
+            check_approval_required_with(&policies, "prod-db-1", &[], "ls", RiskLevel::Low)
+                .unwrap();
         assert!(
             result.is_some(),
             "prod-db-1 should match PROD-DB-1 case-insensitively"
         );
 
         // Non-matching host
-        let result = check_approval_required_with(
-            &policies,
-            "staging-1",
-            &[],
-            "ls",
-            RiskLevel::Low,
-        )
-        .unwrap();
+        let result =
+            check_approval_required_with(&policies, "staging-1", &[], "ls", RiskLevel::Low)
+                .unwrap();
         assert!(result.is_none(), "staging-1 should not match");
     }
 
@@ -827,26 +804,16 @@ mod tests {
 
         // Tag match
         let tags = vec!["production".to_string(), "web".to_string()];
-        let result = check_approval_required_with(
-            &policies,
-            "any-host",
-            &tags,
-            "ls",
-            RiskLevel::Low,
-        )
-        .unwrap();
+        let result =
+            check_approval_required_with(&policies, "any-host", &tags, "ls", RiskLevel::Low)
+                .unwrap();
         assert!(result.is_some(), "production tag should match");
 
         // Tag match case-insensitive
         let tags = vec!["PRODUCTION".to_string()];
-        let result = check_approval_required_with(
-            &policies,
-            "any-host",
-            &tags,
-            "ls",
-            RiskLevel::Low,
-        )
-        .unwrap();
+        let result =
+            check_approval_required_with(&policies, "any-host", &tags, "ls", RiskLevel::Low)
+                .unwrap();
         assert!(
             result.is_some(),
             "PRODUCTION tag should match case-insensitively"
@@ -854,25 +821,14 @@ mod tests {
 
         // No matching tag
         let tags = vec!["staging".to_string()];
-        let result = check_approval_required_with(
-            &policies,
-            "any-host",
-            &tags,
-            "ls",
-            RiskLevel::Low,
-        )
-        .unwrap();
+        let result =
+            check_approval_required_with(&policies, "any-host", &tags, "ls", RiskLevel::Low)
+                .unwrap();
         assert!(result.is_none(), "staging tag should not match");
 
         // Empty host tags should not match policy with tags
-        let result = check_approval_required_with(
-            &policies,
-            "any-host",
-            &[],
-            "ls",
-            RiskLevel::Low,
-        )
-        .unwrap();
+        let result =
+            check_approval_required_with(&policies, "any-host", &[], "ls", RiskLevel::Low).unwrap();
         assert!(
             result.is_none(),
             "empty host tags should not match tag policy"
@@ -921,14 +877,9 @@ mod tests {
     fn test_check_approval_not_required() {
         // Empty policies list
         let policies: Vec<ApprovalPolicy> = vec![];
-        let result = check_approval_required_with(
-            &policies,
-            "any-host",
-            &[],
-            "ls -la",
-            RiskLevel::Low,
-        )
-        .unwrap();
+        let result =
+            check_approval_required_with(&policies, "any-host", &[], "ls -la", RiskLevel::Low)
+                .unwrap();
         assert!(result.is_none(), "no policies should return None");
     }
 
@@ -939,7 +890,10 @@ mod tests {
         assert!(!glob_match("hello", "world"));
 
         // Star wildcard
-        assert!(glob_match("kubectl delete *", "kubectl delete namespace default"));
+        assert!(glob_match(
+            "kubectl delete *",
+            "kubectl delete namespace default"
+        ));
         assert!(!glob_match("kubectl delete *", "kubectl get pods"));
         assert!(glob_match("*", "anything at all"));
         assert!(glob_match("sudo *", "sudo apt update"));
@@ -949,11 +903,17 @@ mod tests {
         assert!(!glob_match("rm -r?", "rm -rf /"));
 
         // Combined
-        assert!(glob_match("git push * --force", "git push origin main --force"));
+        assert!(glob_match(
+            "git push * --force",
+            "git push origin main --force"
+        ));
         assert!(glob_match("?udo *", "sudo apt install"));
 
         // Case insensitive
-        assert!(glob_match("KUBECTL DELETE *", "kubectl delete namespace default"));
+        assert!(glob_match(
+            "KUBECTL DELETE *",
+            "kubectl delete namespace default"
+        ));
         assert!(glob_match("kubectl *", "KUBECTL GET PODS"));
     }
 
@@ -1040,14 +1000,9 @@ mod tests {
             change_id: None,
         };
 
-        let id = approval_request_with_context(
-            "ctx-host",
-            "sudo apt update",
-            RiskLevel::High,
-            120,
-            ctx,
-        )
-        .await;
+        let id =
+            approval_request_with_context("ctx-host", "sudo apt update", RiskLevel::High, 120, ctx)
+                .await;
 
         // Verify it's stored with context
         let s = store().lock().await;

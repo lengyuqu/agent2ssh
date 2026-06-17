@@ -71,7 +71,12 @@ pub async fn effective_command_risk(command: &str) -> RiskLevel {
 pub fn command_authorization_target(host: &str) -> CommandAuthorizationTarget {
     load_config()
         .ok()
-        .and_then(|config| config.hosts.into_iter().find(|profile| profile.name == host))
+        .and_then(|config| {
+            config
+                .hosts
+                .into_iter()
+                .find(|profile| profile.name == host)
+        })
         .map(|profile| CommandAuthorizationTarget {
             host: profile.name,
             tags: profile.tags,
@@ -189,9 +194,8 @@ where
         });
     }
 
-    let approval_policy =
-        check_approval_required(input.host, input.tags, input.command, risk)
-            .map_err(|e| CommandAuthorizationError::Internal(e.to_string()))?;
+    let approval_policy = check_approval_required(input.host, input.tags, input.command, risk)
+        .map_err(|e| CommandAuthorizationError::Internal(e.to_string()))?;
     let needs_approval = approval_policy.is_some() || (risk == RiskLevel::High && !input.force);
     if !needs_approval {
         return Ok(CommandAuthorization {

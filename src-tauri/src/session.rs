@@ -71,7 +71,11 @@ pub async fn session_open_core(host_name: &str) -> Result<Uuid> {
     };
     cmd.arg("-tt")
         .arg("-o")
-        .arg(if has_password { "BatchMode=no" } else { "BatchMode=yes" })
+        .arg(if has_password {
+            "BatchMode=no"
+        } else {
+            "BatchMode=yes"
+        })
         .arg("-o")
         .arg("StrictHostKeyChecking=accept-new")
         .arg("-p")

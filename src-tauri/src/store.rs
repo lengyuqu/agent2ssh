@@ -12,6 +12,9 @@ use crate::types::{AppConfig, AuditEntry, AuditFilter, ExecResult, RiskLevel};
 
 static STORE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
+type HostLabelMap =
+    std::collections::HashMap<String, (Option<String>, Option<String>, Option<String>)>;
+
 pub fn hosts_lock() -> &'static Mutex<()> {
     STORE_LOCK.get_or_init(|| Mutex::new(()))
 }
@@ -47,6 +50,7 @@ fn lock_config_file(name: &str) -> Result<FileLockGuard> {
         .create(true)
         .read(true)
         .write(true)
+        .truncate(false)
         .open(&path)
         .with_context(|| format!("failed to open lock file {}", path.display()))?;
     restrict_file_to_owner(&path)?;
@@ -66,7 +70,8 @@ pub fn config_dir() -> Result<PathBuf> {
 }
 
 fn config_dir_override(path: Option<String>) -> Option<PathBuf> {
-    path.filter(|value| !value.trim().is_empty()).map(PathBuf::from)
+    path.filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
 }
 
 fn config_path() -> Result<PathBuf> {
@@ -88,7 +93,10 @@ pub fn restrict_file_to_owner(path: impl AsRef<std::path::Path>) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         let perms = fs::Permissions::from_mode(0o600);
         fs::set_permissions(path.as_ref(), perms).with_context(|| {
-            format!("failed to restrict permissions for {}", path.as_ref().display())
+            format!(
+                "failed to restrict permissions for {}",
+                path.as_ref().display()
+            )
         })?;
     }
     #[cfg(not(unix))]
@@ -105,7 +113,7 @@ pub fn load_config() -> Result<AppConfig> {
         return Ok(AppConfig::default());
     }
     let raw = fs::read_to_string(path).context("failed to read hosts config")?;
-    Ok(serde_json::from_str(&raw).context("failed to parse hosts config")?)
+    serde_json::from_str(&raw).context("failed to parse hosts config")
 }
 
 pub fn save_config(config: &AppConfig) -> Result<()> {
@@ -184,9 +192,7 @@ fn detect_and_publish_audit_anomalies(entry: &AuditEntry) {
         return;
     }
     let filter = AuditFilter {
-        since: Some(
-            (entry.ts - chrono::Duration::seconds(config.window_secs.max(1))).to_rfc3339(),
-        ),
+        since: Some((entry.ts - chrono::Duration::seconds(config.window_secs.max(1))).to_rfc3339()),
         until: Some(entry.ts.to_rfc3339()),
         limit: 1000,
         ..Default::default()
@@ -296,7 +302,7 @@ pub struct HostExecutionCount {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HourlyBucket {
-    pub hour: String,  // ISO-8601 truncated to hour
+    pub hour: String, // ISO-8601 truncated to hour
     pub count: usize,
     pub failures: usize,
 }
@@ -328,9 +334,15 @@ pub fn compute_metrics_trend(period: TrendPeriod) -> Result<MetricsTrend> {
     let entries = list_audit_raw(&filter)?;
 
     let total_executions = entries.len();
-    let failure_count = entries.iter().filter(|e| e.exit_code.map(|c| c != 0).unwrap_or(true)).count();
+    let failure_count = entries
+        .iter()
+        .filter(|e| e.exit_code.map(|c| c != 0).unwrap_or(true))
+        .count();
     let success_count = total_executions.saturating_sub(failure_count);
-    let blocked_count = entries.iter().filter(|e| e.risk_level == RiskLevel::Blocked).count();
+    let blocked_count = entries
+        .iter()
+        .filter(|e| e.risk_level == RiskLevel::Blocked)
+        .count();
 
     let failure_rate = if total_executions > 0 {
         failure_count as f64 / total_executions as f64
@@ -339,10 +351,22 @@ pub fn compute_metrics_trend(period: TrendPeriod) -> Result<MetricsTrend> {
     };
 
     let risk_distribution = RiskDistribution {
-        low: entries.iter().filter(|e| e.risk_level == RiskLevel::Low).count(),
-        medium: entries.iter().filter(|e| e.risk_level == RiskLevel::Medium).count(),
-        high: entries.iter().filter(|e| e.risk_level == RiskLevel::High).count(),
-        blocked: entries.iter().filter(|e| e.risk_level == RiskLevel::Blocked).count(),
+        low: entries
+            .iter()
+            .filter(|e| e.risk_level == RiskLevel::Low)
+            .count(),
+        medium: entries
+            .iter()
+            .filter(|e| e.risk_level == RiskLevel::Medium)
+            .count(),
+        high: entries
+            .iter()
+            .filter(|e| e.risk_level == RiskLevel::High)
+            .count(),
+        blocked: entries
+            .iter()
+            .filter(|e| e.risk_level == RiskLevel::Blocked)
+            .count(),
     };
 
     let avg_duration_ms = if total_executions > 0 {
@@ -352,7 +376,8 @@ pub fn compute_metrics_trend(period: TrendPeriod) -> Result<MetricsTrend> {
     };
 
     // Top 10 hosts by execution count
-    let mut host_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut host_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
     for e in &entries {
         *host_counts.entry(e.host.clone()).or_insert(0) += 1;
     }
@@ -360,11 +385,12 @@ pub fn compute_metrics_trend(period: TrendPeriod) -> Result<MetricsTrend> {
         .into_iter()
         .map(|(host, count)| HostExecutionCount { host, count })
         .collect();
-    top_hosts.sort_by(|a, b| b.count.cmp(&a.count));
+    top_hosts.sort_by_key(|host| std::cmp::Reverse(host.count));
     top_hosts.truncate(10);
 
     // Hourly breakdown
-    let mut hourly: std::collections::BTreeMap<String, (usize, usize)> = std::collections::BTreeMap::new();
+    let mut hourly: std::collections::BTreeMap<String, (usize, usize)> =
+        std::collections::BTreeMap::new();
     for e in &entries {
         let hour_key = e.ts.format("%Y-%m-%dT%H:00:00Z").to_string();
         let entry = hourly.entry(hour_key).or_insert((0, 0));
@@ -375,7 +401,11 @@ pub fn compute_metrics_trend(period: TrendPeriod) -> Result<MetricsTrend> {
     }
     let hourly_breakdown: Vec<HourlyBucket> = hourly
         .into_iter()
-        .map(|(hour, (count, failures))| HourlyBucket { hour, count, failures })
+        .map(|(hour, (count, failures))| HourlyBucket {
+            hour,
+            count,
+            failures,
+        })
         .collect();
 
     Ok(MetricsTrend {
@@ -453,11 +483,17 @@ pub fn list_audit_raw(filter: &AuditFilter) -> Result<Vec<AuditEntry>> {
     }
     let raw = fs::read_to_string(path).context("failed to read audit log")?;
 
-    let since = filter.since.as_deref().and_then(|s| s.parse::<chrono::DateTime<chrono::Utc>>().ok());
-    let until = filter.until.as_deref().and_then(|s| s.parse::<chrono::DateTime<chrono::Utc>>().ok());
+    let since = filter
+        .since
+        .as_deref()
+        .and_then(|s| s.parse::<chrono::DateTime<chrono::Utc>>().ok());
+    let until = filter
+        .until
+        .as_deref()
+        .and_then(|s| s.parse::<chrono::DateTime<chrono::Utc>>().ok());
 
     // Build a lookup map from host name to labels for host group filtering.
-    let host_label_map: Option<std::collections::HashMap<String, (Option<String>, Option<String>, Option<String>)>> =
+    let host_label_map: Option<HostLabelMap> =
         if filter.host_env.is_some() || filter.host_role.is_some() || filter.host_owner.is_some() {
             let config = load_config().unwrap_or_default();
             let mut map = std::collections::HashMap::new();
@@ -477,15 +513,24 @@ pub fn list_audit_raw(filter: &AuditFilter) -> Result<Vec<AuditEntry>> {
         map.into_iter()
             .filter(|(_, (env, role, owner))| {
                 let env_ok = match &filter.host_env {
-                    Some(v) => env.as_deref().map(|e| e.eq_ignore_ascii_case(v)).unwrap_or(false),
+                    Some(v) => env
+                        .as_deref()
+                        .map(|e| e.eq_ignore_ascii_case(v))
+                        .unwrap_or(false),
                     None => true,
                 };
                 let role_ok = match &filter.host_role {
-                    Some(v) => role.as_deref().map(|r| r.eq_ignore_ascii_case(v)).unwrap_or(false),
+                    Some(v) => role
+                        .as_deref()
+                        .map(|r| r.eq_ignore_ascii_case(v))
+                        .unwrap_or(false),
                     None => true,
                 };
                 let owner_ok = match &filter.host_owner {
-                    Some(v) => owner.as_deref().map(|o| o.eq_ignore_ascii_case(v)).unwrap_or(false),
+                    Some(v) => owner
+                        .as_deref()
+                        .map(|o| o.eq_ignore_ascii_case(v))
+                        .unwrap_or(false),
                     None => true,
                 };
                 env_ok && role_ok && owner_ok
@@ -501,25 +546,40 @@ pub fn list_audit_raw(filter: &AuditFilter) -> Result<Vec<AuditEntry>> {
         .filter_map(|line| serde_json::from_str::<AuditEntry>(line).ok())
         .filter(|e| {
             if let Some(h) = &filter.host {
-                if !e.host.eq_ignore_ascii_case(h) { return false; }
+                if !e.host.eq_ignore_ascii_case(h) {
+                    return false;
+                }
             }
             if let Some(r) = filter.risk_level {
-                if e.risk_level != r { return false; }
+                if e.risk_level != r {
+                    return false;
+                }
             }
             if let Some(code) = filter.exit_code {
-                if e.exit_code != Some(code) { return false; }
+                if e.exit_code != Some(code) {
+                    return false;
+                }
             }
             if let Some(since) = since {
-                if e.ts < since { return false; }
+                if e.ts < since {
+                    return false;
+                }
             }
             if let Some(until) = until {
-                if e.ts > until { return false; }
+                if e.ts > until {
+                    return false;
+                }
             }
             // F6-1: full-text search (case-insensitive substring on command and host)
             if let Some(ref needle) = search_lower {
                 if !e.command.to_lowercase().contains(needle)
                     && !e.host.to_lowercase().contains(needle)
-                    && !e.source.as_deref().unwrap_or("").to_lowercase().contains(needle)
+                    && !e
+                        .source
+                        .as_deref()
+                        .unwrap_or("")
+                        .to_lowercase()
+                        .contains(needle)
                 {
                     return false;
                 }
@@ -596,7 +656,9 @@ pub fn export_audit_csv(filter: &AuditFilter) -> Result<String> {
     let entries = list_audit_raw(filter)?;
     let mut output = String::new();
     // Header row
-    output.push_str("id,timestamp,host,command,exit_code,duration_ms,risk_level,reason,change_id,source\n");
+    output.push_str(
+        "id,timestamp,host,command,exit_code,duration_ms,risk_level,reason,change_id,source\n",
+    );
     for entry in &entries {
         output.push_str(&format!(
             "{},{},{},{},{},{},{},{},{},{}\n",
@@ -632,7 +694,8 @@ mod tests {
 
     #[test]
     fn test_config_dir_uses_env_override() {
-        let expected = std::env::temp_dir().join(format!("agent2ssh-config-{}", uuid::Uuid::new_v4()));
+        let expected =
+            std::env::temp_dir().join(format!("agent2ssh-config-{}", uuid::Uuid::new_v4()));
 
         assert_eq!(
             config_dir_override(Some(expected.display().to_string())).unwrap(),
@@ -670,7 +733,9 @@ mod tests {
         let auth = redact_sensitive_text("Authorization: Bearer abc123\ncookie=session-id");
         assert_eq!(auth, "Authorization: [REDACTED] cookie=[REDACTED]");
 
-        let private_key = redact_sensitive_text("-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----");
+        let private_key = redact_sensitive_text(
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----",
+        );
         assert_eq!(private_key, "[REDACTED PRIVATE KEY]");
     }
 
@@ -686,7 +751,10 @@ mod tests {
         assert!(glob_match("sudo *", "sudo rm -rf /"));
         assert!(glob_match("*.sh", "deploy.sh"));
         assert!(!glob_match("*.sh", "deploy.py"));
-        assert!(glob_match("kubectl delete *", "kubectl delete namespace default"));
+        assert!(glob_match(
+            "kubectl delete *",
+            "kubectl delete namespace default"
+        ));
     }
 
     #[test]
@@ -868,10 +936,22 @@ mod tests {
             assert_eq!(*p, de);
         }
         // Verify serialized names
-        assert_eq!(serde_json::to_string(&super::TrendPeriod::Last24h).unwrap(), "\"last24h\"");
-        assert_eq!(serde_json::to_string(&super::TrendPeriod::Last7d).unwrap(), "\"last7d\"");
-        assert_eq!(serde_json::to_string(&super::TrendPeriod::Last30d).unwrap(), "\"last30d\"");
-        assert_eq!(serde_json::to_string(&super::TrendPeriod::All).unwrap(), "\"all\"");
+        assert_eq!(
+            serde_json::to_string(&super::TrendPeriod::Last24h).unwrap(),
+            "\"last24h\""
+        );
+        assert_eq!(
+            serde_json::to_string(&super::TrendPeriod::Last7d).unwrap(),
+            "\"last7d\""
+        );
+        assert_eq!(
+            serde_json::to_string(&super::TrendPeriod::Last30d).unwrap(),
+            "\"last30d\""
+        );
+        assert_eq!(
+            serde_json::to_string(&super::TrendPeriod::All).unwrap(),
+            "\"all\""
+        );
     }
 
     // ── F6-2: Audit export tests ────────────────────────────────────────────
@@ -880,10 +960,8 @@ mod tests {
     #[serial_test::serial]
     fn test_export_audit_jsonl_empty() {
         // With a temp config dir (no audit data), JSONL export should be empty
-        let config_dir = std::env::temp_dir().join(format!(
-            "agent2ssh-export-jsonl-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let config_dir =
+            std::env::temp_dir().join(format!("agent2ssh-export-jsonl-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&config_dir).unwrap();
         std::env::set_var("AGENT2SSH_CONFIG_DIR", &config_dir);
 
@@ -899,16 +977,16 @@ mod tests {
     #[serial_test::serial]
     fn test_export_audit_csv_headers() {
         // CSV output should always contain the correct header row
-        let config_dir = std::env::temp_dir().join(format!(
-            "agent2ssh-export-csv-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let config_dir =
+            std::env::temp_dir().join(format!("agent2ssh-export-csv-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&config_dir).unwrap();
         std::env::set_var("AGENT2SSH_CONFIG_DIR", &config_dir);
 
         let filter = AuditFilter::default();
         let output = super::export_audit_csv(&filter).unwrap();
-        assert!(output.starts_with("id,timestamp,host,command,exit_code,duration_ms,risk_level,reason,change_id,source\n"));
+        assert!(output.starts_with(
+            "id,timestamp,host,command,exit_code,duration_ms,risk_level,reason,change_id,source\n"
+        ));
         // Should only contain the header row (no data)
         assert_eq!(output.lines().count(), 1);
 
@@ -978,7 +1056,9 @@ mod tests {
 
         // Test CSV formatting (same logic as export_audit_csv)
         let mut csv_output = String::new();
-        csv_output.push_str("id,timestamp,host,command,exit_code,duration_ms,risk_level,reason,change_id\n");
+        csv_output.push_str(
+            "id,timestamp,host,command,exit_code,duration_ms,risk_level,reason,change_id\n",
+        );
         for entry in &entries {
             csv_output.push_str(&format!(
                 "{},{},{},{},{},{},{},{},{}\n",
@@ -1050,10 +1130,18 @@ mod tests {
         let mut seen_hosts = Vec::new();
         for line in &jsonl_lines {
             let entry: AuditEntry = serde_json::from_str(line).unwrap();
-            assert_eq!(entry.reason, Some(reason.into()),
-                "audit entry for {} should have reason", entry.host);
-            assert_eq!(entry.change_id, Some(change_id.into()),
-                "audit entry for {} should have change_id", entry.host);
+            assert_eq!(
+                entry.reason,
+                Some(reason.into()),
+                "audit entry for {} should have reason",
+                entry.host
+            );
+            assert_eq!(
+                entry.change_id,
+                Some(change_id.into()),
+                "audit entry for {} should have change_id",
+                entry.host
+            );
             assert_eq!(entry.command, "systemctl restart app");
             assert_eq!(entry.exit_code, Some(0));
             assert_eq!(entry.risk_level, RiskLevel::Medium);
@@ -1061,8 +1149,11 @@ mod tests {
         }
 
         for host in &hosts {
-            assert!(seen_hosts.contains(&host.to_string()),
-                "host {} should appear in audit entries", host);
+            assert!(
+                seen_hosts.contains(&host.to_string()),
+                "host {} should appear in audit entries",
+                host
+            );
         }
     }
 
@@ -1101,26 +1192,36 @@ mod tests {
 
         let entries = vec![
             AuditEntry {
-                id: Uuid::new_v4(), ts: Utc::now(),
-                host: "alpha".into(), command: "uptime".into(),
-                exit_code: Some(0), duration_ms: 50,
+                id: Uuid::new_v4(),
+                ts: Utc::now(),
+                host: "alpha".into(),
+                command: "uptime".into(),
+                exit_code: Some(0),
+                duration_ms: 50,
                 risk_level: RiskLevel::Low,
                 reason: Some("health check".into()),
                 change_id: Some("CHG-100".into()),
                 source: Some("cli".into()),
             },
             AuditEntry {
-                id: Uuid::new_v4(), ts: Utc::now(),
-                host: "beta".into(), command: "df -h".into(),
-                exit_code: Some(0), duration_ms: 80,
+                id: Uuid::new_v4(),
+                ts: Utc::now(),
+                host: "beta".into(),
+                command: "df -h".into(),
+                exit_code: Some(0),
+                duration_ms: 80,
                 risk_level: RiskLevel::Low,
-                reason: None, change_id: None,
+                reason: None,
+                change_id: None,
                 source: None,
             },
             AuditEntry {
-                id: Uuid::new_v4(), ts: Utc::now(),
-                host: "gamma".into(), command: "free -m".into(),
-                exit_code: Some(1), duration_ms: 120,
+                id: Uuid::new_v4(),
+                ts: Utc::now(),
+                host: "gamma".into(),
+                command: "free -m".into(),
+                exit_code: Some(1),
+                duration_ms: 120,
                 risk_level: RiskLevel::Medium,
                 reason: Some("health check".into()),
                 change_id: Some("CHG-100".into()),
@@ -1129,19 +1230,22 @@ mod tests {
         ];
 
         // Write JSONL and read back
-        let jsonl: String = entries.iter()
+        let jsonl: String = entries
+            .iter()
             .map(|e| serde_json::to_string(e).unwrap())
             .collect::<Vec<_>>()
             .join("\n");
 
-        let parsed: Vec<AuditEntry> = jsonl.lines()
+        let parsed: Vec<AuditEntry> = jsonl
+            .lines()
             .map(|l| serde_json::from_str(l).unwrap())
             .collect();
 
         assert_eq!(parsed.len(), 3);
 
         // alpha and gamma share the same change_id
-        let with_change: Vec<_> = parsed.iter()
+        let with_change: Vec<_> = parsed
+            .iter()
             .filter(|e| e.change_id == Some("CHG-100".into()))
             .collect();
         assert_eq!(with_change.len(), 2);
@@ -1154,7 +1258,8 @@ mod tests {
         assert_eq!(beta.change_id, None);
 
         // Search for "health" in reason context identifies the right entries
-        let health_entries: Vec<_> = parsed.iter()
+        let health_entries: Vec<_> = parsed
+            .iter()
             .filter(|e| e.reason.as_deref() == Some("health check"))
             .collect();
         assert_eq!(health_entries.len(), 2);

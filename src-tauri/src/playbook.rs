@@ -98,8 +98,8 @@ pub fn load_playbooks() -> Result<Vec<Playbook>> {
     }
     let raw = std::fs::read_to_string(&path)
         .map_err(|e| anyhow!("failed to read {}: {e}", path.display()))?;
-    let file: PlaybookFile = toml::from_str(&raw)
-        .map_err(|e| anyhow!("failed to parse {}: {e}", path.display()))?;
+    let file: PlaybookFile =
+        toml::from_str(&raw).map_err(|e| anyhow!("failed to parse {}: {e}", path.display()))?;
     Ok(file.playbooks)
 }
 
@@ -234,8 +234,7 @@ pub fn dry_run_playbook(
     let mut dry_steps = Vec::new();
 
     for (idx, (template, param_defs)) in steps.iter().enumerate() {
-        let (resolved, params_used) =
-            resolve_command_template(template, params, param_defs)?;
+        let (resolved, params_used) = resolve_command_template(template, params, param_defs)?;
         dry_steps.push(DryRunStep {
             step: idx,
             command_template: template.clone(),
@@ -536,14 +535,12 @@ description = "Check uptime"
 
         // Test resolution with default
         let params = HashMap::new();
-        let (resolved, _) =
-            resolve_command_template(&steps[0].0, &params, &steps[0].1).unwrap();
+        let (resolved, _) = resolve_command_template(&steps[0].0, &params, &steps[0].1).unwrap();
         assert_eq!(resolved, "echo hello");
 
         // Test resolution with override
         let params = HashMap::from([("message".to_string(), "world".to_string())]);
-        let (resolved, used) =
-            resolve_command_template(&steps[0].0, &params, &steps[0].1).unwrap();
+        let (resolved, used) = resolve_command_template(&steps[0].0, &params, &steps[0].1).unwrap();
         assert_eq!(resolved, "echo world");
         assert!(used.contains(&"message".to_string()));
 
@@ -579,8 +576,7 @@ tags = ["monitoring"]
 
         // Resolving a command with no placeholders should return it unchanged
         let params = HashMap::new();
-        let (resolved, used) =
-            resolve_command_template(&steps[0].0, &params, &steps[0].1).unwrap();
+        let (resolved, used) = resolve_command_template(&steps[0].0, &params, &steps[0].1).unwrap();
         assert_eq!(resolved, "uptime");
         assert!(used.is_empty());
     }
@@ -626,13 +622,13 @@ required = false
 
         let advanced = pb.advanced_steps.as_ref().unwrap();
         assert_eq!(advanced.len(), 2);
-        assert_eq!(advanced[0].command, "deploy --env {{env}} --version {{version}}");
+        assert_eq!(
+            advanced[0].command,
+            "deploy --env {{env}} --version {{version}}"
+        );
         assert_eq!(advanced[0].params.len(), 2);
         assert_eq!(advanced[0].params[0].name, "env");
-        assert_eq!(
-            advanced[0].params[0].default,
-            Some("staging".to_string())
-        );
+        assert_eq!(advanced[0].params[0].default, Some("staging".to_string()));
         assert!(!advanced[0].params[0].required);
         assert_eq!(advanced[0].params[1].name, "version");
         assert!(advanced[0].params[1].required);
@@ -701,10 +697,16 @@ required = false
         // Every step's request should carry the same reason and change_id
         assert_eq!(requests.len(), 3);
         for (i, req) in requests.iter().enumerate() {
-            assert_eq!(req.reason, reason,
-                "step {} should carry the playbook reason", i);
-            assert_eq!(req.change_id, change_id,
-                "step {} should carry the playbook change_id", i);
+            assert_eq!(
+                req.reason, reason,
+                "step {} should carry the playbook reason",
+                i
+            );
+            assert_eq!(
+                req.change_id, change_id,
+                "step {} should carry the playbook change_id",
+                i
+            );
             assert_eq!(req.host, host);
         }
 
@@ -725,7 +727,12 @@ required = false
 
         let reason = "nightly deploy v3.0";
         let change_id = "CHG-NIGHTLY-001";
-        let commands = vec!["git pull", "npm ci", "npm run build", "systemctl restart app"];
+        let commands = vec![
+            "git pull",
+            "npm ci",
+            "npm run build",
+            "systemctl restart app",
+        ];
 
         // Simulate the audit entry construction loop from run_playbook_core
         let mut entries: Vec<AuditEntry> = Vec::new();
@@ -760,26 +767,41 @@ required = false
 
         // All entries should share the same reason and change_id
         for (i, entry) in entries.iter().enumerate() {
-            assert_eq!(entry.reason, Some(reason.into()),
-                "step {} ({}) should have the playbook reason", i, entry.command);
-            assert_eq!(entry.change_id, Some(change_id.into()),
-                "step {} ({}) should have the playbook change_id", i, entry.command);
+            assert_eq!(
+                entry.reason,
+                Some(reason.into()),
+                "step {} ({}) should have the playbook reason",
+                i,
+                entry.command
+            );
+            assert_eq!(
+                entry.change_id,
+                Some(change_id.into()),
+                "step {} ({}) should have the playbook change_id",
+                i,
+                entry.command
+            );
             assert_eq!(entry.host, "prod-web");
             assert_eq!(entry.exit_code, Some(0));
         }
 
         // Verify commands appear in order
         for (i, expected_cmd) in commands.iter().enumerate() {
-            assert_eq!(entries[i].command, *expected_cmd,
-                "step {} command mismatch", i);
+            assert_eq!(
+                entries[i].command, *expected_cmd,
+                "step {} command mismatch",
+                i
+            );
         }
 
         // Verify JSONL round-trip preserves the shared context
-        let jsonl: String = entries.iter()
+        let jsonl: String = entries
+            .iter()
             .map(|e| serde_json::to_string(e).unwrap())
             .collect::<Vec<_>>()
             .join("\n");
-        let parsed: Vec<AuditEntry> = jsonl.lines()
+        let parsed: Vec<AuditEntry> = jsonl
+            .lines()
             .map(|l| serde_json::from_str(l).unwrap())
             .collect();
         assert_eq!(parsed.len(), 4);

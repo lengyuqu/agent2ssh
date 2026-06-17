@@ -151,11 +151,14 @@ pub fn detect_anomalies(
         }
     }
 
-    if is_after_hours(current.ts.hour(), config.after_hours_start, config.after_hours_end)
-        && config
-            .after_hours_risks
-            .iter()
-            .any(|risk| risk == &current.risk_level)
+    if is_after_hours(
+        current.ts.hour(),
+        config.after_hours_start,
+        config.after_hours_end,
+    ) && config
+        .after_hours_risks
+        .iter()
+        .any(|risk| risk == &current.risk_level)
     {
         findings.push(AnomalyFinding {
             kind: AnomalyKind::AfterHours,
@@ -178,7 +181,10 @@ pub fn detect_anomalies(
 
 pub fn publish_anomalies(findings: &[AnomalyFinding]) {
     for finding in findings {
-        publish_event(EventType::AnomalyDetected, serde_json::to_value(finding).unwrap_or_default());
+        publish_event(
+            EventType::AnomalyDetected,
+            serde_json::to_value(finding).unwrap_or_default(),
+        );
         fire_anomaly_webhook(finding.clone());
     }
 }
@@ -340,7 +346,9 @@ mod tests {
         };
         let current = audit("cli", "terraform destroy -auto-approve", RiskLevel::High, 0);
         let findings = detect_anomalies(&[current.clone()], &current, &config);
-        assert!(findings.iter().any(|f| f.kind == AnomalyKind::SensitivePattern));
+        assert!(findings
+            .iter()
+            .any(|f| f.kind == AnomalyKind::SensitivePattern));
     }
 
     #[test]

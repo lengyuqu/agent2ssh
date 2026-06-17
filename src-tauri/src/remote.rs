@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
-use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 use crate::store::{config_dir, glob_match};
 
@@ -144,9 +144,7 @@ fn validate_scoped_daemon_tokens(tokens: &[ScopedDaemonToken]) -> Result<()> {
         if token.token_env.as_deref().unwrap_or("").trim().is_empty()
             && token.token.as_deref().unwrap_or("").trim().is_empty()
         {
-            return Err(anyhow!(
-                "scoped daemon token must set token_env or token"
-            ));
+            return Err(anyhow!("scoped daemon token must set token_env or token"));
         }
         if token.scope.is_none() {
             return Err(anyhow!("scoped daemon token must define a scope"));
@@ -369,14 +367,12 @@ pub async fn get_daemons_unified_view() -> Result<DaemonUnifiedView> {
             let token = if d.alias == "localhost" {
                 read_local_token()
             } else {
-                load_remotes()
-                    .ok()
-                    .and_then(|remotes| {
-                        remotes
-                            .iter()
-                            .find(|r| r.alias == d.alias)
-                            .and_then(|r| resolve_token(r))
-                    })
+                load_remotes().ok().and_then(|remotes| {
+                    remotes
+                        .iter()
+                        .find(|r| r.alias == d.alias)
+                        .and_then(resolve_token)
+                })
             };
 
             // Fetch /health
@@ -388,7 +384,10 @@ pub async fn get_daemons_unified_view() -> Result<DaemonUnifiedView> {
                 if resp.status().is_success() {
                     if let Ok(body) = resp.json::<serde_json::Value>().await {
                         entry.health = Some(DaemonHealthSummary {
-                            version: body.get("version").and_then(|v| v.as_str()).map(String::from),
+                            version: body
+                                .get("version")
+                                .and_then(|v| v.as_str())
+                                .map(String::from),
                             uptime_secs: body.get("uptime_secs").and_then(|v| v.as_u64()),
                             pid: body.get("pid").and_then(|v| v.as_u64()).map(|v| v as u32),
                         });
@@ -407,7 +406,9 @@ pub async fn get_daemons_unified_view() -> Result<DaemonUnifiedView> {
                         entry.metrics = Some(DaemonMetricsSummary {
                             request_count: body.get("requests_total").and_then(|v| v.as_u64()),
                             exec_count: body.get("exec_total").and_then(|v| v.as_u64()),
-                            exec_blocked_count: body.get("exec_blocked_total").and_then(|v| v.as_u64()),
+                            exec_blocked_count: body
+                                .get("exec_blocked_total")
+                                .and_then(|v| v.as_u64()),
                             approval_count: body.get("approvals_total").and_then(|v| v.as_u64()),
                         });
                     }
@@ -629,31 +630,29 @@ pub async fn diagnose_daemon(alias: &str) -> Result<DaemonDiagnostic> {
             .danger_accept_invalid_certs(false)
             .build();
         match client {
-            Ok(c) => {
-                match c.get(&url).send().await {
-                    Ok(_) => {
-                        checks.push(DiagnosticCheck {
-                            name: "TLS handshake".to_string(),
-                            status: DiagnosticStatus::Ok,
-                            message: "TLS handshake succeeded".to_string(),
-                            details: None,
-                        });
-                    }
-                    Err(e) => {
-                        let status = if e.is_connect() {
-                            DiagnosticStatus::Error
-                        } else {
-                            DiagnosticStatus::Warning
-                        };
-                        checks.push(DiagnosticCheck {
-                            name: "TLS handshake".to_string(),
-                            status,
-                            message: format!("TLS issue: {}", e),
-                            details: None,
-                        });
-                    }
+            Ok(c) => match c.get(&url).send().await {
+                Ok(_) => {
+                    checks.push(DiagnosticCheck {
+                        name: "TLS handshake".to_string(),
+                        status: DiagnosticStatus::Ok,
+                        message: "TLS handshake succeeded".to_string(),
+                        details: None,
+                    });
                 }
-            }
+                Err(e) => {
+                    let status = if e.is_connect() {
+                        DiagnosticStatus::Error
+                    } else {
+                        DiagnosticStatus::Warning
+                    };
+                    checks.push(DiagnosticCheck {
+                        name: "TLS handshake".to_string(),
+                        status,
+                        message: format!("TLS issue: {}", e),
+                        details: None,
+                    });
+                }
+            },
             Err(e) => {
                 checks.push(DiagnosticCheck {
                     name: "TLS handshake".to_string(),
@@ -734,7 +733,11 @@ pub async fn diagnose_daemon(alias: &str) -> Result<DaemonDiagnostic> {
                             if let Some(version) = body.get("version").and_then(|v| v.as_str()) {
                                 let compat = check_version_compatibility(Some(version));
                                 let v_status = match compat.compatible {
-                                    true if compat.local_version == compat.remote_version.as_deref().unwrap_or("") => DiagnosticStatus::Ok,
+                                    true if compat.local_version
+                                        == compat.remote_version.as_deref().unwrap_or("") =>
+                                    {
+                                        DiagnosticStatus::Ok
+                                    }
                                     true => DiagnosticStatus::Warning,
                                     false => DiagnosticStatus::Error,
                                 };
@@ -752,7 +755,8 @@ pub async fn diagnose_daemon(alias: &str) -> Result<DaemonDiagnostic> {
                                 checks.push(DiagnosticCheck {
                                     name: "Version".to_string(),
                                     status: DiagnosticStatus::Warning,
-                                    message: "Health response does not contain a version field".to_string(),
+                                    message: "Health response does not contain a version field"
+                                        .to_string(),
                                     details: None,
                                 });
                             }
@@ -987,7 +991,11 @@ mod tests {
 
     #[test]
     fn test_diagnostic_status_serde_roundtrip() {
-        let statuses = vec![DiagnosticStatus::Ok, DiagnosticStatus::Warning, DiagnosticStatus::Error];
+        let statuses = vec![
+            DiagnosticStatus::Ok,
+            DiagnosticStatus::Warning,
+            DiagnosticStatus::Error,
+        ];
         for status in &statuses {
             let json = serde_json::to_string(status).unwrap();
             let deserialized: DiagnosticStatus = serde_json::from_str(&json).unwrap();
@@ -1038,7 +1046,10 @@ mod tests {
         ];
         let overall2 = if checks2.iter().any(|c| c.status == DiagnosticStatus::Error) {
             DiagnosticStatus::Error
-        } else if checks2.iter().any(|c| c.status == DiagnosticStatus::Warning) {
+        } else if checks2
+            .iter()
+            .any(|c| c.status == DiagnosticStatus::Warning)
+        {
             DiagnosticStatus::Warning
         } else {
             DiagnosticStatus::Ok
@@ -1062,7 +1073,10 @@ mod tests {
         ];
         let overall3 = if checks3.iter().any(|c| c.status == DiagnosticStatus::Error) {
             DiagnosticStatus::Error
-        } else if checks3.iter().any(|c| c.status == DiagnosticStatus::Warning) {
+        } else if checks3
+            .iter()
+            .any(|c| c.status == DiagnosticStatus::Warning)
+        {
             DiagnosticStatus::Warning
         } else {
             DiagnosticStatus::Ok
@@ -1084,7 +1098,10 @@ mod tests {
     #[test]
     fn test_version_compatibility_minor_diff() {
         // Use a version with a different minor: local major same, minor+10
-        let local_parts: Vec<u64> = PROTOCOL_VERSION.split('.').filter_map(|s| s.parse().ok()).collect();
+        let local_parts: Vec<u64> = PROTOCOL_VERSION
+            .split('.')
+            .filter_map(|s| s.parse().ok())
+            .collect();
         let local_major = local_parts.first().copied().unwrap_or(0);
         let local_minor = local_parts.get(1).copied().unwrap_or(0);
         let diff_minor = format!("{}.{}.99", local_major, local_minor + 10);
@@ -1096,7 +1113,10 @@ mod tests {
     #[test]
     fn test_version_compatibility_major_diff() {
         // Use a version with a different major: major+10
-        let local_parts: Vec<u64> = PROTOCOL_VERSION.split('.').filter_map(|s| s.parse().ok()).collect();
+        let local_parts: Vec<u64> = PROTOCOL_VERSION
+            .split('.')
+            .filter_map(|s| s.parse().ok())
+            .collect();
         let local_major = local_parts.first().copied().unwrap_or(0);
         let diff_major = format!("{}.0.0", local_major + 10);
         let compat = check_version_compatibility(Some(&diff_major));
@@ -1115,7 +1135,10 @@ mod tests {
     #[test]
     fn test_version_compatibility_patch_diff() {
         // Same major.minor, different patch → still compatible, message contains "match"
-        let local_parts: Vec<u64> = PROTOCOL_VERSION.split('.').filter_map(|s| s.parse().ok()).collect();
+        let local_parts: Vec<u64> = PROTOCOL_VERSION
+            .split('.')
+            .filter_map(|s| s.parse().ok())
+            .collect();
         let local_major = local_parts.first().copied().unwrap_or(0);
         let local_minor = local_parts.get(1).copied().unwrap_or(0);
         let patch_diff = format!("{}.{}.99", local_major, local_minor);
@@ -1194,7 +1217,10 @@ mod tests {
         let json = serde_json::to_string(&entry).unwrap();
         let de: super::DaemonViewEntry = serde_json::from_str(&json).unwrap();
         assert!(de.connected);
-        assert_eq!(de.health.as_ref().unwrap().version.as_deref(), Some("0.1.0"));
+        assert_eq!(
+            de.health.as_ref().unwrap().version.as_deref(),
+            Some("0.1.0")
+        );
         assert_eq!(de.health.as_ref().unwrap().uptime_secs, Some(7200));
         assert_eq!(de.health.as_ref().unwrap().pid, Some(999));
         assert_eq!(de.metrics.as_ref().unwrap().exec_count, Some(100));
@@ -1265,7 +1291,11 @@ mod tests {
     #[test]
     fn test_daemon_scope_allowed_commands() {
         let scope = Some(DaemonScope {
-            allowed_commands: vec!["ls *".to_string(), "cat *".to_string(), "uptime".to_string()],
+            allowed_commands: vec![
+                "ls *".to_string(),
+                "cat *".to_string(),
+                "uptime".to_string(),
+            ],
             ..DaemonScope::default()
         });
 
@@ -1300,7 +1330,9 @@ mod tests {
         // All empty lists = allow everything (same as None scope)
         let scope = Some(DaemonScope::default());
         assert!(check_daemon_scope(&scope, "any-host", &[], "any command").is_ok());
-        assert!(check_daemon_scope(&scope, "any-host", &["any-tag".to_string()], "rm -rf /").is_ok());
+        assert!(
+            check_daemon_scope(&scope, "any-host", &["any-tag".to_string()], "rm -rf /").is_ok()
+        );
     }
 
     #[test]

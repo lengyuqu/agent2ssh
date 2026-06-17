@@ -1,11 +1,15 @@
+use crate::keys::{
+    delete_key_core, generate_key_core, import_key_core, list_keys_core, SshKeyInfo,
+};
+use crate::notify::{load_webhook_config, save_webhook_config, WebhookConfig};
 use crate::{
     connection::{connect_host, disconnect_host, list_active_connections},
     core::{
-        add_host_core, exec_multi_core, exec_ssh_core, export_team_config,
-        import_ssh_config_core, import_team_config, list_audit_core, list_hosts_core,
-        ping_hosts_core, remove_host_core, sftp_download_core_with_source,
-        sftp_ls_core_with_source, sftp_mkdir_core_with_source, sftp_stat_core_with_source,
-        sftp_upload_core_with_source, ImportResult, TeamConfigExport,
+        add_host_core, exec_multi_core, exec_ssh_core, export_team_config, import_ssh_config_core,
+        import_team_config, list_audit_core, list_hosts_core, ping_hosts_core, remove_host_core,
+        sftp_download_core_with_source, sftp_ls_core_with_source, sftp_mkdir_core_with_source,
+        sftp_stat_core_with_source, sftp_upload_core_with_source, ExecMultiRequest, ImportResult,
+        TeamConfigExport,
     },
     execution_control::{
         append_rejected_exec_audit, authorize_command_with_approval, command_authorization_target,
@@ -28,8 +32,6 @@ use crate::{
         SftpDownloadRequest, SftpResult, SftpUploadRequest,
     },
 };
-use crate::keys::{delete_key_core, generate_key_core, import_key_core, list_keys_core, SshKeyInfo};
-use crate::notify::{load_webhook_config, save_webhook_config, WebhookConfig};
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -270,16 +272,16 @@ pub async fn exec_multi(
     if authorize_desktop_exec_targets(&hosts, &tags, &command, force, None, None, &source).await? {
         force = true;
     }
-    Ok(exec_multi_core(
+    Ok(exec_multi_core(ExecMultiRequest {
         hosts,
         command,
         force,
         timeout_secs,
         tags,
-        None,
-        None,
-        Some(source),
-    )
+        reason: None,
+        change_id: None,
+        source: Some(source),
+    })
     .await)
 }
 
@@ -296,7 +298,10 @@ pub async fn ping_hosts(
 #[tauri::command]
 pub async fn sftp_upload(request: SftpUploadRequest) -> Result<SftpResult, String> {
     let source = source_from_env("desktop");
-    let command = format!("sftp upload {} -> {}", request.local_path, request.remote_path);
+    let command = format!(
+        "sftp upload {} -> {}",
+        request.local_path, request.remote_path
+    );
     authorize_desktop_operation(&request.host, &command, true, &source).await?;
     sftp_upload_core_with_source(request, Some(source))
         .await
@@ -306,7 +311,10 @@ pub async fn sftp_upload(request: SftpUploadRequest) -> Result<SftpResult, Strin
 #[tauri::command]
 pub async fn sftp_download(request: SftpDownloadRequest) -> Result<SftpResult, String> {
     let source = source_from_env("desktop");
-    let command = format!("sftp download {} -> {}", request.remote_path, request.local_path);
+    let command = format!(
+        "sftp download {} -> {}",
+        request.remote_path, request.local_path
+    );
     authorize_desktop_operation(&request.host, &command, true, &source).await?;
     sftp_download_core_with_source(request, Some(source))
         .await
@@ -522,7 +530,11 @@ pub fn list_playbooks() -> Result<Vec<Playbook>, String> {
 }
 
 #[tauri::command]
-pub async fn run_playbook(playbook: String, host: String, force: bool) -> Result<PlaybookRunResult, String> {
+pub async fn run_playbook(
+    playbook: String,
+    host: String,
+    force: bool,
+) -> Result<PlaybookRunResult, String> {
     let source = source_from_env("desktop");
     let params = HashMap::new();
     let mut force = force;

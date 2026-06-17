@@ -13,16 +13,15 @@ use agent2ssh::remote::{
 };
 use agent2ssh::store::{audit_path, compute_metrics_trend, restrict_file_to_owner, TrendPeriod};
 use agent2ssh::{
-    add_host_core, collect_health_snapshot, compare_exec_results,
-    dry_run_playbook, effective_command_risk, exec_multi_core, exec_multi_with_strategy,
-    exec_ssh_core, export_audit_csv, export_audit_jsonl, export_team_config, filter_hosts,
-    import_ssh_config_core, import_team_config, list_audit_core, list_daemons_core,
-    list_playbooks_core,
-    list_hosts_filtered_core, ping_hosts_core, preview_exec, preview_exec_multi, remove_host_core,
+    add_host_core, collect_health_snapshot, compare_exec_results, dry_run_playbook,
+    effective_command_risk, exec_multi_core, exec_multi_with_strategy, exec_ssh_core,
+    export_audit_csv, export_audit_jsonl, export_team_config, filter_hosts, import_ssh_config_core,
+    import_team_config, list_audit_core, list_daemons_core, list_hosts_filtered_core,
+    list_playbooks_core, ping_hosts_core, preview_exec, preview_exec_multi, remove_host_core,
     run_playbook_core_with_source, sftp_download_core_with_source, sftp_ls_core_with_source,
     sftp_mkdir_core_with_source, sftp_stat_core_with_source, sftp_upload_core_with_source,
-    source_from_env, validate_policy_path, AuditFilter,
-    BatchStrategy, ExecComparison, ExecRequest, ExecutionGateStatus, ForwardDirection,
+    source_from_env, validate_policy_path, AuditFilter, BatchStrategy, ExecComparison,
+    ExecMultiBatchRequest, ExecMultiRequest, ExecRequest, ExecutionGateStatus, ForwardDirection,
     ForwardRule, HostFilter, HostProfile, PolicyDecision, PolicyTestResult, RiskLevel,
     SftpDownloadRequest, SftpUploadRequest, TeamConfigExport,
 };
@@ -624,22 +623,20 @@ enum PlaybookCommands {
     },
 }
 
-async fn effective_risk_for_policy(command: &str) -> (RiskLevel, bool) {
+async fn effective_risk_for_policy(
+    command: &str,
+    risk_override: Option<RiskLevel>,
+) -> (RiskLevel, bool) {
     let user_risk = agent2ssh::risk_config::classify_with_user_rules(command).await;
-    let risk = effective_command_risk(command).await;
+    let risk =
+        agent2ssh::core::apply_risk_override(effective_command_risk(command).await, risk_override);
     (risk, user_risk.is_some())
 }
 
 async fn test_policy_decision(host: &str, command: &str) -> Result<PolicyTestResult> {
-    let host_tags: Vec<String> = list_hosts_filtered_core(&HostFilter::default())
-        .unwrap_or_default()
-        .iter()
-        .find(|h| h.name == host)
-        .map(|h| h.tags.clone())
-        .unwrap_or_default();
-
-    let (risk, matched_user_rule) = effective_risk_for_policy(command).await;
-    let approval = check_approval_required(host, &host_tags, command, risk)?;
+    let target = command_authorization_target(host);
+    let (risk, matched_user_rule) = effective_risk_for_policy(command, target.risk_override).await;
+    let approval = check_approval_required(host, &target.tags, command, risk)?;
     let decision = if risk == RiskLevel::Blocked {
         PolicyDecision::Block
     } else if risk == RiskLevel::High || approval.is_some() {
@@ -856,8 +853,12 @@ fn command_authorization_error(error: CommandAuthorizationError) -> anyhow::Erro
     match error {
         CommandAuthorizationError::ScopeDenied(message) => anyhow::anyhow!(message),
         CommandAuthorizationError::Blocked { message, .. } => anyhow::anyhow!(message),
-        CommandAuthorizationError::ApprovalRejected => anyhow::anyhow!("command rejected by approver"),
-        CommandAuthorizationError::ApprovalTimedOut => anyhow::anyhow!("approval request timed out"),
+        CommandAuthorizationError::ApprovalRejected => {
+            anyhow::anyhow!("command rejected by approver")
+        }
+        CommandAuthorizationError::ApprovalTimedOut => {
+            anyhow::anyhow!("approval request timed out")
+        }
         CommandAuthorizationError::Internal(message) => anyhow::anyhow!(message),
     }
 }
@@ -1131,17 +1132,19 @@ async fn main() -> Result<()> {
                     batch_size,
                     pause_between_batches_secs: pause_secs,
                 };
-                let batch_result = exec_multi_with_strategy(
-                    hosts,
-                    command,
-                    force,
-                    timeout_secs,
-                    tags,
-                    Some(strategy),
-                    reason,
-                    change_id,
-                    Some(source),
-                )
+                let batch_result = exec_multi_with_strategy(ExecMultiBatchRequest {
+                    request: ExecMultiRequest {
+                        hosts,
+                        command,
+                        force,
+                        timeout_secs,
+                        tags,
+                        reason,
+                        change_id,
+                        source: Some(source),
+                    },
+                    strategy: Some(strategy),
+                })
                 .await;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&batch_result)?);
@@ -1184,7 +1187,7 @@ async fn main() -> Result<()> {
                     }
                 }
             } else {
-                let results = exec_multi_core(
+                let results = exec_multi_core(ExecMultiRequest {
                     hosts,
                     command,
                     force,
@@ -1192,8 +1195,8 @@ async fn main() -> Result<()> {
                     tags,
                     reason,
                     change_id,
-                    Some(source),
-                )
+                    source: Some(source),
+                })
                 .await;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&results)?);
@@ -1235,11 +1238,14 @@ async fn main() -> Result<()> {
                 let source = source_from_env("cli");
                 let command = format!("sftp upload {} -> {}", local, remote);
                 authorize_local_operation(&host, &command, true, &source).await?;
-                let result = sftp_upload_core_with_source(SftpUploadRequest {
-                    host,
-                    local_path: local,
-                    remote_path: remote,
-                }, Some(source))
+                let result = sftp_upload_core_with_source(
+                    SftpUploadRequest {
+                        host,
+                        local_path: local,
+                        remote_path: remote,
+                    },
+                    Some(source),
+                )
                 .await?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&result)?);
@@ -1259,11 +1265,14 @@ async fn main() -> Result<()> {
                 let source = source_from_env("cli");
                 let command = format!("sftp download {} -> {}", remote, local);
                 authorize_local_operation(&host, &command, true, &source).await?;
-                let result = sftp_download_core_with_source(SftpDownloadRequest {
-                    host,
-                    remote_path: remote,
-                    local_path: local,
-                }, Some(source))
+                let result = sftp_download_core_with_source(
+                    SftpDownloadRequest {
+                        host,
+                        remote_path: remote,
+                        local_path: local,
+                    },
+                    Some(source),
+                )
                 .await?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&result)?);
@@ -1628,8 +1637,7 @@ async fn main() -> Result<()> {
                         }
                     }
                     // Start daemon as background process
-                    let exe = std::env::current_exe()?;
-                    let daemon_bin = exe.parent().unwrap().join("agent2ssh-daemon");
+                    let daemon_bin = daemon_binary_path()?;
                     if !daemon_bin.exists() {
                         println!("Daemon binary not found: {}", daemon_bin.display());
                         return Ok(());
@@ -1682,8 +1690,7 @@ async fn main() -> Result<()> {
                         std::thread::sleep(std::time::Duration::from_secs(1));
                     }
                     // Then start
-                    let exe = std::env::current_exe()?;
-                    let daemon_bin = exe.parent().unwrap().join("agent2ssh-daemon");
+                    let daemon_bin = daemon_binary_path()?;
                     std::process::Command::new(&daemon_bin)
                         .spawn()
                         .map_err(|e| anyhow::anyhow!("Failed to start daemon: {}", e))?;
@@ -1974,7 +1981,7 @@ async fn main() -> Result<()> {
             json,
         } => {
             let ssh_path = path.as_deref();
-            if diff || (!diff && !export) {
+            if diff || !export {
                 // Default: show diff
                 let result = agent2ssh::compare_ssh_configs(ssh_path)?;
                 if json {
@@ -2239,16 +2246,10 @@ async fn main() -> Result<()> {
                 command,
                 json,
             } => {
-                // Look up host tags from config
-                let host_tags: Vec<String> = list_hosts_filtered_core(&HostFilter::default())
-                    .unwrap_or_default()
-                    .iter()
-                    .find(|h| h.name == host)
-                    .map(|h| h.tags.clone())
-                    .unwrap_or_default();
-
-                let (risk, _matched_user_rule) = effective_risk_for_policy(&command).await;
-                let result = check_approval_required(&host, &host_tags, &command, risk)?;
+                let target = command_authorization_target(&host);
+                let (risk, _matched_user_rule) =
+                    effective_risk_for_policy(&command, target.risk_override).await;
+                let result = check_approval_required(&host, &target.tags, &command, risk)?;
                 if json {
                     let output = match &result {
                         Some(policy) => serde_json::json!({
@@ -2458,6 +2459,14 @@ fn parse_cli_params(params: Option<Vec<String>>) -> HashMap<String, String> {
         }
     }
     map
+}
+
+fn daemon_binary_path() -> Result<std::path::PathBuf> {
+    let exe = std::env::current_exe()?;
+    let daemon_dir = exe
+        .parent()
+        .context("failed to resolve current executable directory")?;
+    Ok(daemon_dir.join("agent2ssh-daemon"))
 }
 
 fn process_is_alive(pid: &str) -> bool {

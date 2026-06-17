@@ -136,7 +136,11 @@ impl ExecutionLimiter {
             .host_rule(&host_key)
             .max_sessions
             .unwrap_or(self.config.default_host_max_sessions);
-        let host_current = self.sessions.values().filter(|s| s.host == host_key).count();
+        let host_current = self
+            .sessions
+            .values()
+            .filter(|s| s.host == host_key)
+            .count();
         if host_limit > 0 && host_current >= host_limit {
             return Err(ExecutionLimitRejection {
                 scope: format!("host:{host} sessions"),

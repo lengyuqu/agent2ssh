@@ -757,13 +757,60 @@ patterns = ["terraform destroy*"]
     );
 }
 
+#[test]
+fn cli_policy_test_applies_host_risk_override() {
+    let dir = unique_temp_config_dir("policy-host-override");
+    std::fs::create_dir_all(&dir).expect("create temp config dir");
+
+    let add = std::process::Command::new(cli_bin())
+        .env("AGENT2SSH_CONFIG_DIR", &dir)
+        .args([
+            "host",
+            "add",
+            "sandbox",
+            "--host",
+            "127.0.0.1",
+            "--risk-override",
+            "low",
+            "--json",
+        ])
+        .output()
+        .expect("failed to add sandbox host");
+    assert!(
+        add.status.success(),
+        "host add should exit 0, stderr: {}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+
+    let output = std::process::Command::new(cli_bin())
+        .env("AGENT2SSH_CONFIG_DIR", &dir)
+        .args([
+            "policy",
+            "test",
+            "sudo whoami",
+            "--host",
+            "sandbox",
+            "--json",
+        ])
+        .output()
+        .expect("failed to run policy test");
+
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        output.status.success(),
+        "policy test should exit 0, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("policy test should return JSON");
+    assert_eq!(result["risk_level"], "low");
+    assert_eq!(result["decision"], "allow");
+}
+
 fn unique_temp_config_dir(name: &str) -> std::path::PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system time before unix epoch")
         .as_nanos();
-    std::env::temp_dir().join(format!(
-        "agent2ssh-{name}-{}-{nanos}",
-        std::process::id()
-    ))
+    std::env::temp_dir().join(format!("agent2ssh-{name}-{}-{nanos}", std::process::id()))
 }

@@ -64,7 +64,9 @@ pub fn list_keys_core() -> Result<Vec<SshKeyInfo>> {
 
         let pub_path = path.with_extension(format!(
             "{}.pub",
-            path.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default()
+            path.extension()
+                .map(|e| e.to_string_lossy().to_string())
+                .unwrap_or_default()
         ));
         // Handle keys without extension
         let pub_path = if !pub_path.exists() {
@@ -74,7 +76,10 @@ pub fn list_keys_core() -> Result<Vec<SshKeyInfo>> {
         };
 
         let public_key = if pub_path.exists() {
-            std::fs::read_to_string(&pub_path).unwrap_or_default().trim().to_string()
+            std::fs::read_to_string(&pub_path)
+                .unwrap_or_default()
+                .trim()
+                .to_string()
         } else {
             String::new()
         };
@@ -91,7 +96,8 @@ pub fn list_keys_core() -> Result<Vec<SshKeyInfo>> {
             "rsa"
         } else {
             "unknown"
-        }.to_string();
+        }
+        .to_string();
 
         let created_at = std::fs::metadata(&path)
             .ok()
@@ -127,12 +133,16 @@ pub fn generate_key_core(name: &str, comment: Option<&str>) -> Result<SshKeyInfo
         return Err(anyhow!("key '{}' already exists", name));
     }
 
-    let comment = comment.unwrap_or_else(|| "agent2ssh");
+    let comment = comment.unwrap_or("agent2ssh");
     let status = std::process::Command::new("ssh-keygen")
-        .arg("-t").arg("ed25519")
-        .arg("-C").arg(comment)
-        .arg("-f").arg(&private_path)
-        .arg("-N").arg("") // no passphrase
+        .arg("-t")
+        .arg("ed25519")
+        .arg("-C")
+        .arg(comment)
+        .arg("-f")
+        .arg(&private_path)
+        .arg("-N")
+        .arg("") // no passphrase
         .status()
         .map_err(|e| anyhow!("failed to run ssh-keygen: {}", e))?;
 
@@ -165,7 +175,8 @@ pub fn import_key_core(source_path: &str, name: Option<&str>) -> Result<SshKeyIn
 
     let key_name: String = match name {
         Some(n) => n.to_string(),
-        None => source.file_name()
+        None => source
+            .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "imported_key".to_string()),
     };
@@ -175,7 +186,10 @@ pub fn import_key_core(source_path: &str, name: Option<&str>) -> Result<SshKeyIn
     let dest = dir.join(&key_name);
 
     if dest.exists() {
-        return Err(anyhow!("key '{}' already exists in keys directory", key_name));
+        return Err(anyhow!(
+            "key '{}' already exists in keys directory",
+            key_name
+        ));
     }
 
     std::fs::copy(&source, &dest)?;
@@ -189,15 +203,24 @@ pub fn import_key_core(source_path: &str, name: Option<&str>) -> Result<SshKeyIn
     }
 
     let public_key = if dest_pub.exists() {
-        std::fs::read_to_string(&dest_pub).unwrap_or_default().trim().to_string()
+        std::fs::read_to_string(&dest_pub)
+            .unwrap_or_default()
+            .trim()
+            .to_string()
     } else {
         String::new()
     };
 
-    let key_type = if public_key.starts_with("ssh-ed25519") { "ed25519" }
-        else if public_key.starts_with("ssh-rsa") { "rsa" }
-        else if public_key.starts_with("ecdsa") { "ecdsa" }
-        else { "unknown" }.to_string();
+    let key_type = if public_key.starts_with("ssh-ed25519") {
+        "ed25519"
+    } else if public_key.starts_with("ssh-rsa") {
+        "rsa"
+    } else if public_key.starts_with("ecdsa") {
+        "ecdsa"
+    } else {
+        "unknown"
+    }
+    .to_string();
 
     Ok(SshKeyInfo {
         name: key_name,
@@ -218,7 +241,8 @@ mod tests {
     fn test_restrict_private_key_permissions_sets_0600() {
         use std::os::unix::fs::PermissionsExt;
 
-        let path = std::env::temp_dir().join(format!("agent2ssh-key-perms-{}", uuid::Uuid::new_v4()));
+        let path =
+            std::env::temp_dir().join(format!("agent2ssh-key-perms-{}", uuid::Uuid::new_v4()));
         std::fs::write(&path, "private-key").unwrap();
 
         restrict_private_key_permissions(&path).unwrap();
@@ -257,7 +281,9 @@ pub fn delete_key_core(name: &str) -> Result<()> {
 
 fn expand_tilde(path: &str) -> String {
     if path == "~" {
-        return dirs::home_dir().map(|h| h.display().to_string()).unwrap_or_else(|| path.to_string());
+        return dirs::home_dir()
+            .map(|h| h.display().to_string())
+            .unwrap_or_else(|| path.to_string());
     }
     if let Some(rest) = path.strip_prefix("~/") {
         if let Some(home) = dirs::home_dir() {

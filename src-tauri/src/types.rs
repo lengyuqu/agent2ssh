@@ -22,7 +22,11 @@ impl RiskLevel {
                 RiskLevel::Blocked => 3,
             }
         }
-        if rank(self) >= rank(other) { self } else { other }
+        if rank(self) >= rank(other) {
+            self
+        } else {
+            other
+        }
     }
 }
 

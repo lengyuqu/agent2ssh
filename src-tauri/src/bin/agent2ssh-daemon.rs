@@ -58,7 +58,6 @@ use std::time::Instant;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tower_http::cors::{Any, CorsLayer};
-use tracing;
 use uuid::Uuid;
 
 // ── Metrics counters ─────────────────────────────────────────────────────────
@@ -101,7 +100,7 @@ fn check_auth(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or("");
-    if token == state.token {
+    if token_matches(token, &state.token) {
         return Ok(AuthContext { scope: None });
     }
 
@@ -115,7 +114,7 @@ fn check_auth(
         let Some(expected) = resolve_scoped_daemon_token(&scoped) else {
             continue;
         };
-        if !expected.trim().is_empty() && token == expected {
+        if token_matches(token, &expected) {
             return Ok(AuthContext {
                 scope: scoped.scope.clone(),
             });
@@ -129,6 +128,55 @@ fn check_auth(
             error: "unauthorized".into(),
         }),
     ))
+}
+
+fn token_matches(candidate: &str, expected: &str) -> bool {
+    if expected.trim().is_empty() {
+        return false;
+    }
+
+    let candidate = candidate.as_bytes();
+    let expected = expected.as_bytes();
+    let mut diff = candidate.len() ^ expected.len();
+    let max_len = candidate.len().max(expected.len());
+
+    for i in 0..max_len {
+        let candidate_byte = candidate.get(i).copied().unwrap_or(0);
+        let expected_byte = expected.get(i).copied().unwrap_or(0);
+        diff |= (candidate_byte ^ expected_byte) as usize;
+    }
+
+    diff == 0
+}
+
+fn load_or_create_daemon_token(config_dir: &std::path::Path) -> anyhow::Result<String> {
+    let token_path = config_dir.join("daemon.token");
+    if token_path.exists() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(meta) = std::fs::metadata(&token_path) {
+                let mode = meta.permissions().mode() & 0o777;
+                if mode != 0o600 {
+                    tracing::warn!(
+                        mode = format!("{:o}", mode),
+                        "daemon.token had overly permissive mode, fixing to 0600"
+                    );
+                }
+            }
+        }
+        let existing = std::fs::read_to_string(&token_path)?.trim().to_string();
+        if !existing.is_empty() {
+            restrict_file_to_owner(&token_path)?;
+            return Ok(existing);
+        }
+        tracing::warn!("daemon.token was empty, generating a new token");
+    }
+
+    let token = Uuid::new_v4().to_string();
+    std::fs::write(&token_path, &token)?;
+    restrict_file_to_owner(&token_path)?;
+    Ok(token)
 }
 
 // ── Error type ───────────────────────────────────────────────────────────────
@@ -233,13 +281,7 @@ async fn request_and_wait_for_approval(prompt: ApprovalPrompt) -> Result<Approva
         )
         .await
     } else {
-        approval_request_with_ttl(
-            &prompt.host,
-            &prompt.command,
-            prompt.risk,
-            prompt.ttl_secs,
-        )
-        .await
+        approval_request_with_ttl(&prompt.host, &prompt.command, prompt.risk, prompt.ttl_secs).await
     };
 
     let host_notify = prompt.host.clone();
@@ -280,6 +322,7 @@ async fn request_and_wait_for_approval(prompt: ApprovalPrompt) -> Result<Approva
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn authorize_command(
     auth_scope: &Option<DaemonScope>,
     source: &str,
@@ -390,6 +433,7 @@ fn target_host_label(hosts: &[String], tags: &Option<Vec<String>>) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn authorize_targets(
     auth_scope: &Option<DaemonScope>,
     source: &str,
@@ -929,17 +973,19 @@ async fn exec_multi(
         force = true;
     }
     Ok(Json(
-        exec_multi_with_strategy(
-            body.hosts,
-            body.command,
-            force,
-            body.timeout_secs,
-            body.tags,
-            body.strategy,
-            body.reason,
-            body.change_id,
-            Some(source),
-        )
+        exec_multi_with_strategy(ExecMultiBatchRequest {
+            request: ExecMultiRequest {
+                hosts: body.hosts,
+                command: body.command,
+                force,
+                timeout_secs: body.timeout_secs,
+                tags: body.tags,
+                reason: body.reason,
+                change_id: body.change_id,
+                source: Some(source),
+            },
+            strategy: body.strategy,
+        })
         .await,
     ))
 }
@@ -972,16 +1018,16 @@ async fn exec_compare(
     {
         force = true;
     }
-    let results = exec_multi_core(
-        body.hosts,
-        body.command,
+    let results = exec_multi_core(ExecMultiRequest {
+        hosts: body.hosts,
+        command: body.command,
         force,
-        body.timeout_secs,
-        body.tags,
-        None,
-        None,
-        Some(source),
-    )
+        timeout_secs: body.timeout_secs,
+        tags: body.tags,
+        reason: None,
+        change_id: None,
+        source: Some(source),
+    })
     .await;
     Ok(Json(compare_exec_results(&results)))
 }
@@ -1621,23 +1667,17 @@ async fn risk_check(
 ) -> Result<Json<RiskCheckResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     check_auth(&s, &headers)?;
-    let base = classify_risk(&body.command);
     let host_override = body
         .host
         .as_deref()
         .and_then(|host| command_authorization_target(host).risk_override);
-    if classify_with_user_rules(&body.command).await.is_some() {
-        return Ok(Json(RiskCheckResult {
-            risk_level: apply_risk_override(
-                effective_command_risk(&body.command).await,
-                host_override,
-            ),
-            matched_rule: Some("user_rule".into()),
-        }));
-    }
+    let matched_rule = classify_with_user_rules(&body.command)
+        .await
+        .map(|_| "user_rule".to_string());
+    let risk = apply_risk_override(effective_command_risk(&body.command).await, host_override);
     Ok(Json(RiskCheckResult {
-        risk_level: apply_risk_override(base, host_override),
-        matched_rule: None,
+        risk_level: risk,
+        matched_rule,
     }))
 }
 
@@ -2577,6 +2617,49 @@ mod tests {
     }
 
     #[test]
+    fn token_match_requires_exact_non_empty_value() {
+        assert!(token_matches("secret-token", "secret-token"));
+        assert!(!token_matches("secret-token", "secret-tokem"));
+        assert!(!token_matches("secret", "secret-token"));
+        assert!(!token_matches("secret-token-extra", "secret-token"));
+        assert!(!token_matches("", ""));
+        assert!(!token_matches("anything", "   "));
+    }
+
+    #[test]
+    fn daemon_token_loader_preserves_existing_non_empty_token() {
+        let temp =
+            std::env::temp_dir().join(format!("agent2ssh-daemon-token-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp).unwrap();
+        let token_path = temp.join("daemon.token");
+        std::fs::write(&token_path, "existing-token\n").unwrap();
+
+        let token = load_or_create_daemon_token(&temp).unwrap();
+        let stored = std::fs::read_to_string(&token_path).unwrap();
+        let _ = std::fs::remove_dir_all(&temp);
+
+        assert_eq!(token, "existing-token");
+        assert_eq!(stored, "existing-token\n");
+    }
+
+    #[test]
+    fn daemon_token_loader_replaces_empty_token_file() {
+        let temp =
+            std::env::temp_dir().join(format!("agent2ssh-daemon-token-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp).unwrap();
+        let token_path = temp.join("daemon.token");
+        std::fs::write(&token_path, " \n").unwrap();
+
+        let token = load_or_create_daemon_token(&temp).unwrap();
+        let stored = std::fs::read_to_string(&token_path).unwrap();
+        let _ = std::fs::remove_dir_all(&temp);
+
+        assert!(!token.trim().is_empty());
+        assert_eq!(stored.trim(), token);
+        assert!(token_matches(&token, stored.trim()));
+    }
+
+    #[test]
     fn paused_gate_rejects_non_desktop_source_and_writes_audit() {
         with_temp_config(|| {
             save_execution_gate(
@@ -2729,20 +2812,19 @@ denied_commands = ["rm *"]
                 .unwrap_err();
                 assert_eq!(denied.0, StatusCode::FORBIDDEN);
 
-                let denied_host =
-                    authorize_command(
-                        &auth.scope,
-                        "mcp",
-                        "dev",
-                        &[],
-                        None,
-                        "uptime",
-                        false,
-                        None,
-                        None,
-                    )
-                        .await
-                        .unwrap_err();
+                let denied_host = authorize_command(
+                    &auth.scope,
+                    "mcp",
+                    "dev",
+                    &[],
+                    None,
+                    "uptime",
+                    false,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap_err();
                 assert_eq!(denied_host.0, StatusCode::FORBIDDEN);
             })
         });
@@ -2780,31 +2862,7 @@ async fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(&config_dir)?;
 
     // Token
-    let token_path = config_dir.join("daemon.token");
-    let token = if token_path.exists() {
-        // Audit existing token file permissions before fixing
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if let Ok(meta) = std::fs::metadata(&token_path) {
-                let mode = meta.permissions().mode() & 0o777;
-                if mode != 0o600 {
-                    tracing::warn!(
-                        mode = format!("{:o}", mode),
-                        "daemon.token had overly permissive mode, fixing to 0600"
-                    );
-                }
-            }
-        }
-        let existing = std::fs::read_to_string(&token_path)?.trim().to_string();
-        restrict_file_to_owner(&token_path)?;
-        existing
-    } else {
-        let t = Uuid::new_v4().to_string();
-        std::fs::write(&token_path, &t)?;
-        restrict_file_to_owner(&token_path)?;
-        t
-    };
+    let token = load_or_create_daemon_token(&config_dir)?;
 
     // PID
     let pid_path = config_dir.join("daemon.pid");

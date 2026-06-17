@@ -10,8 +10,8 @@ pub mod health;
 pub mod keys;
 pub mod limits;
 pub mod notify;
-pub mod policy;
 pub mod playbook;
+pub mod policy;
 pub mod remote;
 pub mod risk_config;
 pub mod session;
@@ -21,15 +21,15 @@ pub mod types;
 #[cfg(feature = "tauri")]
 pub mod tauri_commands;
 
+pub use anomaly::{
+    detect_anomalies, load_anomaly_config, publish_anomalies, AnomalyConfig, AnomalyFinding,
+    AnomalyKind, AnomalySeverity,
+};
 pub use approval::{
     approval_action_url, approval_request_with_context, build_approval_context,
     check_approval_required, list_approval_policies, load_approval_policies,
     save_approval_policies, ApprovalContext, ApprovalHistoryEntry, ApprovalPolicy,
     ApprovalPolicyFile, RiskDetails,
-};
-pub use anomaly::{
-    detect_anomalies, load_anomaly_config, publish_anomalies, AnomalyConfig, AnomalyFinding,
-    AnomalyKind, AnomalySeverity,
 };
 pub use connection::{connect_host, disconnect_host, list_active_connections};
 pub use core::{
@@ -41,9 +41,10 @@ pub use core::{
     preview_team_config_import, remove_host_core, sftp_download_core,
     sftp_download_core_with_source, sftp_ls_core, sftp_ls_core_with_source, sftp_mkdir_core,
     sftp_mkdir_core_with_source, sftp_stat_core, sftp_stat_core_with_source, sftp_upload_core,
-    sftp_upload_core_with_source, ConfigDiffPreview, ExecComparison, ExecPlan, ExecPlanTarget,
-    ExitCodeGroup, ImportResult, OutputComparison, OutputDiff, SshSyncDiff, SshSyncHostConflict,
-    SshSyncHostDiff, SshSyncStrategy, TeamConfigExport,
+    sftp_upload_core_with_source, ConfigDiffPreview, ExecComparison, ExecMultiBatchRequest,
+    ExecMultiRequest, ExecPlan, ExecPlanTarget, ExitCodeGroup, ImportResult, OutputComparison,
+    OutputDiff, SshSyncDiff, SshSyncHostConflict, SshSyncHostDiff, SshSyncStrategy,
+    TeamConfigExport,
 };
 pub use events::{event_bus, publish_event, subscribe_events, Agent2SSHEvent, EventType};
 pub use execution_control::{

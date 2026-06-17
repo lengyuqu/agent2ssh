@@ -17,18 +17,19 @@ use agent2ssh::remote::{
 use agent2ssh::risk_config::classify_with_user_rules;
 use agent2ssh::store::{audit_path, compute_metrics_trend, TrendPeriod};
 use agent2ssh::{
-    add_host_core, collect_health_snapshot, compare_exec_results,
-    compare_ssh_configs, connect_host, disconnect_host, dry_run_playbook, exec_multi_core,
+    add_host_core, collect_health_snapshot, compare_exec_results, compare_ssh_configs,
+    connect_host, disconnect_host, dry_run_playbook, effective_command_risk, exec_multi_core,
     exec_multi_with_strategy, exec_ssh_core, export_audit_csv, export_audit_jsonl,
-    export_team_config, export_to_ssh_config, effective_command_risk, forward_add_core, forward_list_core,
+    export_team_config, export_to_ssh_config, forward_add_core, forward_list_core,
     forward_remove_core, import_ssh_config_core, import_team_config, list_active_connections,
     list_audit_core, list_hosts_core, list_playbooks_core, ping_hosts_core, preview_exec,
     preview_exec_multi, preview_team_config_import, remove_host_core,
     run_playbook_core_with_source, session_close_core, session_list_core, session_open_core,
     session_read_core, session_write_core, sftp_download_core_with_source,
     sftp_ls_core_with_source, sftp_mkdir_core_with_source, sftp_stat_core_with_source,
-    sftp_upload_core_with_source, AuditFilter, ExecRequest, ForwardDirection, HostProfile,
-    RiskLevel, SftpDownloadRequest, SftpUploadRequest, TeamConfigExport,
+    sftp_upload_core_with_source, AuditFilter, ExecMultiBatchRequest, ExecMultiRequest,
+    ExecRequest, ForwardDirection, HostProfile, RiskLevel, SftpDownloadRequest, SftpUploadRequest,
+    TeamConfigExport,
 };
 use anyhow::{anyhow, Result};
 use serde::Deserialize;
@@ -1168,8 +1169,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
         "ssh_list_hosts" => serde_json::to_value(list_hosts_core().map_err(McpError::from)?)?,
         "ssh_list_daemons" => serde_json::to_value(list_daemons_core().map_err(McpError::from)?)?,
         "ssh_add_host" => {
-            let host: HostProfile =
-                serde_json::from_value(args).map_err(|e| McpError::internal(e))?;
+            let host: HostProfile = serde_json::from_value(args).map_err(McpError::internal)?;
             serde_json::to_value(add_host_core(host).map_err(McpError::from)?)?
         }
         "ssh_remove_host" => {
@@ -1235,7 +1235,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                             request.timeout_secs.unwrap_or(60) + 10,
                         ))
                         .build()
-                        .map_err(|e| McpError::internal(e))?;
+                        .map_err(McpError::internal)?;
 
                     let resp = client
                         .post(format!("{}/exec", url.trim_end_matches('/')))
@@ -1327,17 +1327,19 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 force = true;
             }
 
-            let batch_result = exec_multi_with_strategy(
-                hosts,
-                command,
-                force,
-                timeout_secs,
-                tags,
+            let batch_result = exec_multi_with_strategy(ExecMultiBatchRequest {
+                request: ExecMultiRequest {
+                    hosts,
+                    command,
+                    force,
+                    timeout_secs,
+                    tags,
+                    reason,
+                    change_id,
+                    source: Some(source),
+                },
                 strategy,
-                reason,
-                change_id,
-                Some(source),
-            )
+            })
             .await;
             serde_json::to_value(batch_result)?
         }
@@ -1362,30 +1364,22 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
 
             let source = mcp_source();
             let mut force = force;
-            if authorize_local_mcp_exec_targets(
-                &hosts,
-                &tags,
-                &command,
-                force,
-                None,
-                None,
-                &source,
-            )
-            .await?
+            if authorize_local_mcp_exec_targets(&hosts, &tags, &command, force, None, None, &source)
+                .await?
             {
                 force = true;
             }
 
-            let results = exec_multi_core(
+            let results = exec_multi_core(ExecMultiRequest {
                 hosts,
                 command,
                 force,
                 timeout_secs,
                 tags,
-                None,
-                None,
-                Some(source),
-            )
+                reason: None,
+                change_id: None,
+                source: Some(source),
+            })
             .await;
             let comparison = compare_exec_results(&results);
             serde_json::to_value(comparison)?
@@ -1496,7 +1490,10 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
             let request: SftpUploadRequest =
                 serde_json::from_value(args).map_err(McpError::internal)?;
             let source = mcp_source();
-            let command = format!("sftp upload {} -> {}", request.local_path, request.remote_path);
+            let command = format!(
+                "sftp upload {} -> {}",
+                request.local_path, request.remote_path
+            );
             authorize_local_mcp_operation(&request.host, &command, true, &source).await?;
             serde_json::to_value(
                 sftp_upload_core_with_source(request, Some(source))
@@ -1508,7 +1505,10 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
             let request: SftpDownloadRequest =
                 serde_json::from_value(args).map_err(McpError::internal)?;
             let source = mcp_source();
-            let command = format!("sftp download {} -> {}", request.remote_path, request.local_path);
+            let command = format!(
+                "sftp download {} -> {}",
+                request.remote_path, request.local_path
+            );
             authorize_local_mcp_operation(&request.host, &command, true, &source).await?;
             serde_json::to_value(
                 sftp_download_core_with_source(request, Some(source))
@@ -1712,7 +1712,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                     obj.iter()
                         .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
                         .collect()
-            });
+                });
             let reason = args["reason"].as_str().map(str::to_string);
             let change_id = args["change_id"].as_str().map(str::to_string);
             let source = mcp_source();
@@ -1998,8 +1998,8 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 effective_command_risk(command).await,
                 target.risk_override,
             );
-            let result =
-                check_approval_required(host, &target.tags, command, risk).map_err(McpError::from)?;
+            let result = check_approval_required(host, &target.tags, command, risk)
+                .map_err(McpError::from)?;
 
             // Build approval context for richer response
             let context = build_approval_context(host, command, "mcp").ok();
@@ -2094,11 +2094,8 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
             let mut rx = subscribe_events();
             let mut events = Vec::new();
             // Drain any currently buffered events (non-blocking)
-            loop {
-                match rx.try_recv() {
-                    Ok(event) => events.push(serde_json::to_value(event).unwrap_or_default()),
-                    Err(_) => break,
-                }
+            while let Ok(event) = rx.try_recv() {
+                events.push(serde_json::to_value(event).unwrap_or_default());
             }
             json!({
                 "events": events,

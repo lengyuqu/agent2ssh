@@ -30,7 +30,13 @@ fn socket_path(host: &HostProfile) -> Result<PathBuf> {
     let safe: String = host
         .name
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     Ok(config_dir()?.join(format!("cm_{safe}.sock")))
 }
@@ -56,8 +62,10 @@ async fn socket_alive(socket: &PathBuf, target: &str) -> bool {
         return false;
     }
     Command::new("ssh")
-        .arg("-S").arg(socket)
-        .arg("-O").arg("check")
+        .arg("-S")
+        .arg(socket)
+        .arg("-O")
+        .arg("check")
         .arg(target)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -85,13 +93,22 @@ async fn create_master(host: &HostProfile, socket: &PathBuf) -> Result<()> {
         Command::new("ssh")
     };
     cmd.arg("-M")
-        .arg("-S").arg(socket)
+        .arg("-S")
+        .arg(socket)
         .arg("-N")
         .arg("-f")
-        .arg("-o").arg("ControlPersist=600")
-        .arg("-o").arg(if has_password { "BatchMode=no" } else { "BatchMode=yes" })
-        .arg("-o").arg("StrictHostKeyChecking=accept-new")
-        .arg("-p").arg(host.port.unwrap_or(22).to_string());
+        .arg("-o")
+        .arg("ControlPersist=600")
+        .arg("-o")
+        .arg(if has_password {
+            "BatchMode=no"
+        } else {
+            "BatchMode=yes"
+        })
+        .arg("-o")
+        .arg("StrictHostKeyChecking=accept-new")
+        .arg("-p")
+        .arg(host.port.unwrap_or(22).to_string());
 
     if let Some(key_path) = &host.key_path {
         if !key_path.trim().is_empty() {
@@ -109,7 +126,10 @@ async fn create_master(host: &HostProfile, socket: &PathBuf) -> Result<()> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!("ControlMaster failed for '{}': {stderr}", host.name));
+        return Err(anyhow!(
+            "ControlMaster failed for '{}': {stderr}",
+            host.name
+        ));
     }
     Ok(())
 }
@@ -214,8 +234,10 @@ pub async fn disconnect_host(host_name: &str) -> Result<()> {
 
     let target = ssh_target(&host);
     let output = Command::new("ssh")
-        .arg("-S").arg(&sock)
-        .arg("-O").arg("exit")
+        .arg("-S")
+        .arg(&sock)
+        .arg("-O")
+        .arg("exit")
         .arg(&target)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())

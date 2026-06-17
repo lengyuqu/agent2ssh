@@ -1,10 +1,6 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::{
-    path::PathBuf,
-    sync::OnceLock,
-    time::SystemTime,
-};
+use std::{path::PathBuf, sync::OnceLock, time::SystemTime};
 use tokio::sync::Mutex;
 
 use crate::types::RiskLevel;
@@ -85,13 +81,28 @@ pub async fn classify_with_user_rules(command: &str) -> Option<RiskLevel> {
     let rules = load_risk_rules().await.ok()?;
     let lower = command.trim().to_lowercase();
 
-    if rules.blocked.patterns.iter().any(|p| matches_pattern(&lower, p)) {
+    if rules
+        .blocked
+        .patterns
+        .iter()
+        .any(|p| matches_pattern(&lower, p))
+    {
         return Some(RiskLevel::Blocked);
     }
-    if rules.high.patterns.iter().any(|p| matches_pattern(&lower, p)) {
+    if rules
+        .high
+        .patterns
+        .iter()
+        .any(|p| matches_pattern(&lower, p))
+    {
         return Some(RiskLevel::High);
     }
-    if rules.medium.patterns.iter().any(|p| matches_pattern(&lower, p)) {
+    if rules
+        .medium
+        .patterns
+        .iter()
+        .any(|p| matches_pattern(&lower, p))
+    {
         return Some(RiskLevel::Medium);
     }
     None
@@ -140,21 +151,36 @@ mod tests {
 
     #[test]
     fn test_matches_pattern_exact() {
-        assert!(matches_pattern("docker system prune", "docker system prune"));
-        assert!(!matches_pattern("docker system prune -a", "docker system prune -af"));
+        assert!(matches_pattern(
+            "docker system prune",
+            "docker system prune"
+        ));
+        assert!(!matches_pattern(
+            "docker system prune -a",
+            "docker system prune -af"
+        ));
     }
 
     #[test]
     fn test_matches_pattern_glob() {
-        assert!(matches_pattern("git push --force origin main", "git push *force*"));
-        assert!(matches_pattern("kubectl delete namespace kube-system", "kubectl delete*"));
+        assert!(matches_pattern(
+            "git push --force origin main",
+            "git push *force*"
+        ));
+        assert!(matches_pattern(
+            "kubectl delete namespace kube-system",
+            "kubectl delete*"
+        ));
         assert!(!matches_pattern("kubectl get pods", "kubectl delete*"));
     }
 
     #[test]
     fn test_matches_pattern_contains() {
         assert!(matches_pattern("sudo apt install nginx", "apt install"));
-        assert!(matches_pattern("terraform destroy -auto-approve", "terraform destroy"));
+        assert!(matches_pattern(
+            "terraform destroy -auto-approve",
+            "terraform destroy"
+        ));
     }
 
     #[test]

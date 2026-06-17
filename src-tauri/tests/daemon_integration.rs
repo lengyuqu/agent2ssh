@@ -31,6 +31,7 @@ mod http_helpers {
     use agent2ssh::remote::{list_daemons_core, DaemonInfo};
     use agent2ssh::risk_config::classify_with_user_rules;
     use agent2ssh::types::*;
+    use agent2ssh::{command_authorization_target, effective_command_risk};
     use axum::{
         extract::{Path, State},
         http::{HeaderMap, StatusCode},
@@ -147,21 +148,17 @@ mod http_helpers {
         Json(body): Json<RiskCheckBody>,
     ) -> Result<Json<RiskCheckResult>, (StatusCode, Json<ErrorBody>)> {
         check_auth(&s, &headers)?;
-        let base = classify_risk(&body.command);
-        if let Some(user_risk) = classify_with_user_rules(&body.command).await {
-            let final_risk = match (&user_risk, &base) {
-                (RiskLevel::Blocked, _) => RiskLevel::Blocked,
-                (RiskLevel::High, RiskLevel::Blocked) => RiskLevel::Blocked,
-                (ur, _) => *ur,
-            };
-            return Ok(Json(RiskCheckResult {
-                risk_level: final_risk,
-                matched_rule: Some("user_rule".into()),
-            }));
-        }
+        let risk_override = body
+            .host
+            .as_deref()
+            .and_then(|host| command_authorization_target(host).risk_override);
+        let matched_rule = classify_with_user_rules(&body.command)
+            .await
+            .map(|_| "user_rule".to_string());
+        let risk = apply_risk_override(effective_command_risk(&body.command).await, risk_override);
         Ok(Json(RiskCheckResult {
-            risk_level: base,
-            matched_rule: None,
+            risk_level: risk,
+            matched_rule,
         }))
     }
 
@@ -368,8 +365,12 @@ mod http_helpers {
         Json(body): Json<ApprovalCheckBody>,
     ) -> Result<Json<ApprovalCheckResult>, (StatusCode, Json<ErrorBody>)> {
         check_auth(&s, &headers)?;
-        let risk = classify_risk(&body.command);
-        let result = check_approval_required(&body.host, &[], &body.command, risk)
+        let target = command_authorization_target(&body.host);
+        let risk = apply_risk_override(
+            effective_command_risk(&body.command).await,
+            target.risk_override,
+        );
+        let result = check_approval_required(&body.host, &target.tags, &body.command, risk)
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
         match result {
             Some(policy) => Ok(Json(ApprovalCheckResult {

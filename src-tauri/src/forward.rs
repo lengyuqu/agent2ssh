@@ -1,8 +1,5 @@
 use anyhow::{anyhow, Context, Result};
-use std::{
-    collections::HashMap,
-    sync::OnceLock,
-};
+use std::{collections::HashMap, sync::OnceLock};
 use tokio::{process::Child, sync::Mutex};
 use uuid::Uuid;
 
@@ -80,7 +77,11 @@ pub async fn forward_add_core(
     };
     cmd.arg("-N") // don't execute a remote command
         .arg("-o")
-        .arg(if has_password { "BatchMode=no" } else { "BatchMode=yes" })
+        .arg(if has_password {
+            "BatchMode=no"
+        } else {
+            "BatchMode=yes"
+        })
         .arg("-o")
         .arg("StrictHostKeyChecking=accept-new")
         .arg("-p")
