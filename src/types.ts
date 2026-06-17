@@ -290,6 +290,7 @@ export type TeamConfigExport = {
 export type ImportResult = {
   hosts_added: number;
   hosts_skipped: number;
+  hosts_updated: number;
   risk_rules_imported: boolean;
   playbooks_imported: boolean;
 };

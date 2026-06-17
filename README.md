@@ -136,14 +136,15 @@ For first-time external users, follow the [10-minute CLI and MCP setup guide](do
 
 ### Safety
 
-- CLI, MCP, Tauri, and daemon entry points share the same execution authorization layer for exec, playbooks, SFTP, sessions, forwards, and connection operations
+- CLI, MCP, Tauri, and daemon mutation entry points share the same execution authorization layer for exec, playbooks, SFTP, PTY session open/write/close, forwards, and connection operations
 - Every command is classified as `low / medium / high / blocked`; user policy rules can only escalate built-in risk
 - High-risk commands require daemon/UI approval or `--force` / `force: true` when policy allows
 - Blocked commands are always rejected
 - Host and playbook `risk_override` can lower or raise non-blocked risk in trusted scopes, but cannot unblock `blocked`
 - Unified policy-as-code in `~/.agent2ssh/policy.toml` / `policy.json`, with compatibility for legacy `risk_rules.toml` and `approval_policies.toml`
 - Approval queue and daemon approval endpoints for high-risk commands
-- Execution audit log with risk level, initiating source, and rejected attempts recorded
+- Multi-host and playbook approvals are scoped to the approved host or step; one approval does not automatically force later targets or steps
+- Execution audit log with risk level, initiating source, completed operations, and rejected attempts recorded
 - Daemon-level execution gate, execution rate/session limits, and audit-window anomaly detection
 
 ### File Transfer (SFTP)
@@ -153,7 +154,7 @@ For first-time external users, follow the [10-minute CLI and MCP setup guide](do
 - Remote directory listing: `sftp ls` / `ssh_sftp_ls`
 - Remote stat: `sftp stat` / `ssh_sftp_stat`
 - Remote mkdir: `sftp mkdir` / `ssh_sftp_mkdir`
-- Daemon SFTP operations pass through the same scope, risk, approval, gate, limit, and audit checks as command execution
+- Daemon SFTP operations pass through the same scope, risk, approval, gate, limit, and audit checks as command execution; directory helpers also record an operation-level audit entry in addition to the underlying shell command result
 
 ### Sessions And Tunnels
 
@@ -161,10 +162,12 @@ For first-time external users, follow the [10-minute CLI and MCP setup guide](do
 - Session open/write/read/list/close
 - Local and remote port forwarding
 - Forward list/remove by ID
+- PTY session writes use line-buffered authorization for completed shell input and operation-level audit entries across daemon and desktop-local paths. This is a conservative guard for normal command input, not a full shell parser for arbitrary interactive programs.
 
 ### Desktop And Web UI
 
 - Desktop host manager, exec panel, audit viewer, approval dialog, key manager, playbooks, tunnels, sessions, and connection status
+- Desktop command and session risk previews include host-level risk overrides before prompting
 - Live Agent Activity panel for local visibility into daemon session activity, WebSocket exec streams, recent audit records from CLI/MCP/daemon operations, and anomaly alerts
 - Browser console served by the daemon at `/console`
 - Daemon REST API, WebSocket streaming exec endpoint, and authenticated SSE event stream

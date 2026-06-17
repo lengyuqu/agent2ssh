@@ -54,6 +54,7 @@ pub struct ExecMultiRequest {
     pub hosts: Vec<String>,
     pub command: String,
     pub force: bool,
+    pub approved_hosts: Vec<String>,
     pub timeout_secs: Option<u64>,
     pub tags: Option<Vec<String>>,
     pub reason: Option<String>,
@@ -130,14 +131,30 @@ pub fn import_team_config(export: &TeamConfigExport) -> Result<ImportResult> {
     let _guard = store_write_lock()?;
     let mut config = load_config()?;
 
-    let existing_names: std::collections::HashSet<String> =
-        config.hosts.iter().map(|h| h.name.clone()).collect();
-
     let mut added = 0u32;
     let mut skipped = 0u32;
+    let mut updated = 0u32;
     for host in &export.hosts {
-        if existing_names.contains(&host.name) {
-            skipped += 1;
+        if let Some(existing) = config
+            .hosts
+            .iter_mut()
+            .find(|existing| existing.name == host.name)
+        {
+            if team_host_same(existing, host) {
+                skipped += 1;
+            } else {
+                let key_path = existing.key_path.clone();
+                let password = existing.password.clone();
+                let mut next = host.clone();
+                if next.key_path.is_none() {
+                    next.key_path = key_path;
+                }
+                if next.password.is_none() {
+                    next.password = password;
+                }
+                *existing = next;
+                updated += 1;
+            }
         } else {
             config.hosts.push(host.clone());
             added += 1;
@@ -163,6 +180,7 @@ pub fn import_team_config(export: &TeamConfigExport) -> Result<ImportResult> {
     Ok(ImportResult {
         hosts_added: added,
         hosts_skipped: skipped,
+        hosts_updated: updated,
         risk_rules_imported: export.risk_rules.is_some(),
         playbooks_imported: export.playbooks.is_some(),
     })
@@ -172,6 +190,7 @@ pub fn import_team_config(export: &TeamConfigExport) -> Result<ImportResult> {
 pub struct ImportResult {
     pub hosts_added: u32,
     pub hosts_skipped: u32,
+    pub hosts_updated: u32,
     pub risk_rules_imported: bool,
     pub playbooks_imported: bool,
 }
@@ -208,11 +227,7 @@ pub fn preview_team_config_import(export: &TeamConfigExport) -> Result<ConfigDif
 
     for host in &export.hosts {
         if let Some(existing) = existing_map.get(&host.name) {
-            // Check if anything meaningful differs
-            let same = existing.host == host.host
-                && existing.port == host.port
-                && existing.user == host.user;
-            if same {
+            if team_host_same(existing, host) {
                 hosts_to_skip.push(host.name.clone());
             } else {
                 hosts_to_update.push(host.name.clone());
@@ -267,6 +282,18 @@ pub fn preview_team_config_import(export: &TeamConfigExport) -> Result<ConfigDif
         playbooks_change,
         summary,
     })
+}
+
+fn team_host_same(existing: &HostProfile, incoming: &HostProfile) -> bool {
+    existing.host == incoming.host
+        && existing.user == incoming.user
+        && existing.port == incoming.port
+        && existing.jump_host == incoming.jump_host
+        && existing.risk_override == incoming.risk_override
+        && existing.tags == incoming.tags
+        && existing.env == incoming.env
+        && existing.role == incoming.role
+        && existing.owner == incoming.owner
 }
 
 pub fn list_hosts_core() -> Result<Vec<HostProfile>> {
@@ -1057,6 +1084,7 @@ pub async fn exec_multi_core(request: ExecMultiRequest) -> Vec<ExecMultiResult> 
         hosts,
         command,
         force,
+        approved_hosts,
         timeout_secs,
         tags,
         reason,
@@ -1071,6 +1099,7 @@ pub async fn exec_multi_core(request: ExecMultiRequest) -> Vec<ExecMultiResult> 
     let mut set = JoinSet::new();
 
     for host in resolved_hosts {
+        let force_for_host = force || approved_hosts.iter().any(|approved| approved == &host);
         let cmd = command.clone();
         let req_reason = reason.clone();
         let req_change_id = change_id.clone();
@@ -1079,7 +1108,7 @@ pub async fn exec_multi_core(request: ExecMultiRequest) -> Vec<ExecMultiResult> 
             let req = ExecRequest {
                 host: host.clone(),
                 command: cmd,
-                force,
+                force: force_for_host,
                 timeout_secs,
                 stdin: None,
                 max_output_bytes: None,
@@ -1121,6 +1150,7 @@ pub async fn exec_multi_with_strategy(request: ExecMultiBatchRequest) -> ExecMul
         hosts,
         command,
         force,
+        approved_hosts,
         timeout_secs,
         tags,
         reason,
@@ -1160,6 +1190,7 @@ pub async fn exec_multi_with_strategy(request: ExecMultiBatchRequest) -> ExecMul
     if concurrency == 0 && max_failures == 0 && batch_size == 0 {
         let mut set = JoinSet::new();
         for host in &resolved_hosts {
+            let force_for_host = force || approved_hosts.iter().any(|approved| approved == host);
             let cmd = command.clone();
             let h = host.clone();
             let req_reason = reason.clone();
@@ -1169,7 +1200,7 @@ pub async fn exec_multi_with_strategy(request: ExecMultiBatchRequest) -> ExecMul
                 let req = ExecRequest {
                     host: h.clone(),
                     command: cmd,
-                    force,
+                    force: force_for_host,
                     timeout_secs,
                     stdin: None,
                     max_output_bytes: None,
@@ -1246,6 +1277,7 @@ pub async fn exec_multi_with_strategy(request: ExecMultiBatchRequest) -> ExecMul
 
         let mut set = JoinSet::new();
         for host in batch_hosts {
+            let force_for_host = force || approved_hosts.iter().any(|approved| approved == host);
             let cmd = command.clone();
             let h = host.clone();
             let sem_clone = sem.clone();
@@ -1262,7 +1294,7 @@ pub async fn exec_multi_with_strategy(request: ExecMultiBatchRequest) -> ExecMul
                 let req = ExecRequest {
                     host: h.clone(),
                     command: cmd,
-                    force,
+                    force: force_for_host,
                     timeout_secs,
                     stdin: None,
                     max_output_bytes: None,
@@ -1667,7 +1699,10 @@ pub async fn sftp_upload_core_with_source(
         "sftp upload {} -> {}",
         request.local_path, request.remote_path
     );
-    let risk = crate::risk_config::classify_effective_risk(&command, classify_risk(&command)).await;
+    let risk = apply_risk_override(
+        crate::risk_config::classify_effective_risk(&command, classify_risk(&command)).await,
+        host.risk_override,
+    );
     if risk == RiskLevel::Blocked {
         let message = "sftp upload blocked by risk policy";
         let result = ExecResult {
@@ -1791,7 +1826,10 @@ pub async fn sftp_download_core_with_source(
         "sftp download {} -> {}",
         request.remote_path, request.local_path
     );
-    let risk = crate::risk_config::classify_effective_risk(&command, classify_risk(&command)).await;
+    let risk = apply_risk_override(
+        crate::risk_config::classify_effective_risk(&command, classify_risk(&command)).await,
+        host.risk_override,
+    );
     if risk == RiskLevel::Blocked {
         let message = "sftp download blocked by risk policy";
         let result = ExecResult {
@@ -3024,6 +3062,70 @@ mod tests {
         assert_eq!(preview.risk_rules_change, Some("new".to_string()));
         assert_eq!(preview.playbooks_change, None);
         assert!(preview.summary.contains("1 host(s) to add"));
+
+        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&config_dir);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_import_team_config_updates_existing_hosts_and_preserves_credentials() {
+        let config_dir =
+            std::env::temp_dir().join(format!("agent2ssh-import-update-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::env::set_var("AGENT2SSH_CONFIG_DIR", &config_dir);
+
+        crate::store::save_config(&AppConfig {
+            hosts: vec![HostProfile {
+                name: "existing-host".into(),
+                host: "10.0.0.1".into(),
+                user: Some("ubuntu".into()),
+                port: Some(22),
+                key_path: Some("~/.ssh/id_ed25519".into()),
+                password: Some("local-secret".into()),
+                jump_host: None,
+                risk_override: None,
+                tags: vec!["old".into()],
+                env: Some("dev".into()),
+                role: None,
+                owner: None,
+            }],
+        })
+        .unwrap();
+
+        let export = TeamConfigExport {
+            hosts: vec![HostProfile {
+                name: "existing-host".into(),
+                host: "10.0.0.2".into(),
+                user: Some("admin".into()),
+                port: Some(2222),
+                key_path: None,
+                password: None,
+                jump_host: None,
+                risk_override: Some(RiskLevel::Medium),
+                tags: vec!["new".into()],
+                env: Some("prod".into()),
+                role: Some("web".into()),
+                owner: Some("ops".into()),
+            }],
+            risk_rules: None,
+            playbooks: None,
+        };
+
+        let result = import_team_config(&export).unwrap();
+        assert_eq!(result.hosts_added, 0);
+        assert_eq!(result.hosts_updated, 1);
+        assert_eq!(result.hosts_skipped, 0);
+
+        let mut config = crate::store::load_config().unwrap();
+        let updated = config.hosts.remove(0);
+        assert_eq!(updated.host, "10.0.0.2");
+        assert_eq!(updated.user.as_deref(), Some("admin"));
+        assert_eq!(updated.port, Some(2222));
+        assert_eq!(updated.key_path.as_deref(), Some("~/.ssh/id_ed25519"));
+        assert_eq!(updated.password.as_deref(), Some("local-secret"));
+        assert_eq!(updated.tags, vec!["new"]);
+        assert_eq!(updated.env.as_deref(), Some("prod"));
 
         std::env::remove_var("AGENT2SSH_CONFIG_DIR");
         let _ = std::fs::remove_dir_all(&config_dir);

@@ -89,7 +89,11 @@ Execution entry points resolve an effective risk before running remote work:
 
 Effective risk is calculated from the built-in classifier plus user policy rules. User rules from `policy.toml` / `policy.json` or legacy `risk_rules.toml` can only raise the built-in risk. Host and playbook `risk_override` settings are trusted overrides for non-blocked commands, but `blocked` remains unconditional. Approval policies live in the same unified policy file, with legacy `approval_policies.toml` supported when no unified policy file exists.
 
-All executions and rejected attempts are appended to `~/.agent2ssh/audit.jsonl` with the risk level and source recorded. SFTP, PTY session writes/opens, port-forward creation, connection operations, and playbook steps are represented as operation command strings until they gain first-class policy types, so they pass through the same authorization and audit machinery.
+Executions, completed mutation operations, and rejected attempts are appended to `~/.agent2ssh/audit.jsonl` with the risk level and source recorded. SFTP, PTY session open/write/close, port-forward add/remove, connection operations, and playbook steps are represented as operation command strings until they gain first-class policy types, so mutation paths pass through the same authorization and audit machinery. Read/list-style observation paths remain event/scope controlled and do not create operation audit entries by default.
+
+PTY session writes are authorized at completed-line boundaries by combining any buffered pending input with the new write. Daemon-managed sessions and desktop-local sessions both use this line buffer and append operation-level audit entries for completed input. This blocks normal fragmented shell commands such as splitting `rm -rf /` across multiple writes, but it is not a full shell parser for arbitrary interactive terminal applications.
+
+For multi-host execution and playbooks, high-risk approvals are applied only to the target host or playbook step that received approval. Explicit `force` still applies to the whole requested operation when the caller chooses it and policy permits it.
 
 ## Execution Control Flow
 
@@ -100,9 +104,9 @@ All executions and rejected attempts are appended to `~/.agent2ssh/audit.jsonl` 
 3. Calculate effective risk from built-in rules, user rules, and trusted overrides.
 4. Reject `blocked` work immediately and write a rejected audit entry.
 5. Enforce approval policy or high-risk approval/force requirements.
-6. Execute the operation and append the final audit entry.
+6. Execute the operation with approved-host or approved-step force only where applicable, then append the final audit entry for exec/mutation paths.
 
-The daemon approval handler creates an approval request and waits for approval, rejection, or timeout. Local CLI/MCP paths without an approval handler fail closed and instruct the caller to use the daemon approval flow or `--force` when policy permits. WebSocket exec streaming uses the same core SSH command builder as non-streaming exec, so password, key, jump-host, and ControlMaster behavior stay aligned.
+The daemon approval handler creates an approval request and waits for approval, rejection, or timeout. Local CLI/MCP and desktop-local paths without an approval handler fail closed and instruct the caller to use the daemon approval flow or `--force` when policy permits. WebSocket exec streaming uses the same core SSH command builder as non-streaming exec, so password, key, jump-host, and ControlMaster behavior stay aligned.
 
 ## Control Plane
 
@@ -116,6 +120,8 @@ The current control-plane layer is enforced at the daemon/audit boundary rather 
 | Anomaly detection | `anomaly.toml` | Detects source bursts, sensitive command patterns, and after-hours high-risk activity from audit windows |
 
 The daemon event stream exposes `gate_rejected`, `limit_rejected`, and `anomaly_detected`, allowing Live Agent Activity and webhook consumers to react while the activity is still local and recent.
+
+For remote daemon routing, client-side `remotes.toml` scope is checked before forwarding. Host allowlists and command patterns are local checks; tag-based scope fetches the target host metadata from the remote daemon so multi-node tag decisions use the remote daemon as the source of truth.
 
 ## Persistence And Locking
 

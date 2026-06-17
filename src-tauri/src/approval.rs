@@ -256,6 +256,17 @@ pub fn build_approval_context(
     command: &str,
     source: &str,
 ) -> Result<ApprovalContext> {
+    let built_in_risk = crate::core::classify_risk(command);
+    build_approval_context_with_effective_risk(host_name, command, source, built_in_risk, None)
+}
+
+pub fn build_approval_context_with_effective_risk(
+    host_name: &str,
+    command: &str,
+    source: &str,
+    final_risk: RiskLevel,
+    matched_policy: Option<String>,
+) -> Result<ApprovalContext> {
     use crate::types::AuditFilter;
 
     let mut ctx = ApprovalContext {
@@ -265,10 +276,12 @@ pub fn build_approval_context(
 
     // Resolve host profile from config
     let config = crate::store::load_config().unwrap_or_default();
+    let mut risk_override = None;
     if let Some(profile) = config.hosts.iter().find(|h| h.name == host_name) {
         ctx.host_address = Some(profile.host.clone());
         ctx.host_env = profile.env.clone();
         ctx.host_role = profile.role.clone();
+        risk_override = profile.risk_override;
     }
 
     // Get recent audit entries for this host (last 5)
@@ -293,9 +306,9 @@ pub fn build_approval_context(
     let built_in_risk = crate::core::classify_risk(command);
     let risk_details = RiskDetails {
         built_in_risk,
-        user_risk_override: None, // Resolved at exec time, not available here synchronously
-        final_risk: built_in_risk,
-        matched_policy: None,
+        user_risk_override: risk_override,
+        final_risk,
+        matched_policy,
     };
     ctx.risk_details = Some(risk_details);
 
@@ -985,6 +998,23 @@ mod tests {
         assert!(ctx.risk_details.is_none());
         assert!(ctx.reason.is_none());
         assert!(ctx.change_id.is_none());
+    }
+
+    #[test]
+    fn test_approval_context_uses_effective_risk() {
+        let ctx = build_approval_context_with_effective_risk(
+            "missing-host",
+            "sudo whoami",
+            "daemon",
+            RiskLevel::Low,
+            Some("trusted-maintenance".into()),
+        )
+        .unwrap();
+
+        let risk = ctx.risk_details.expect("risk details should be present");
+        assert_eq!(risk.built_in_risk, RiskLevel::High);
+        assert_eq!(risk.final_risk, RiskLevel::Low);
+        assert_eq!(risk.matched_policy.as_deref(), Some("trusted-maintenance"));
     }
 
     #[tokio::test]

@@ -121,7 +121,7 @@ P0-P10 已全部完成。当前基线：
 | 认证方式 | 用户已提供 root 密码；明文密码保存在本地 gitignored 文件 `.agent2ssh-test.env` 的 `AGENT2SSH_TEST_PASSWORD` 中，测试时建议用它生成临时 SSH key |
 | 测试约束 | 只在 `/tmp/agent2ssh-*` 写入临时文件；测试结束必须清理临时目录和临时 `authorized_keys` 条目 |
 | 已验证能力 | SSH 登录、host add/list、risk、ping、exec、exec-multi（含 reason/change_id）、SFTP upload/download/list/stat、audit（table/jsonl/csv）、audit export、doctor、playbook list/dry-run/run（含 reason/change_id）、health-snapshot、MCP tools/list (51)、MCP ssh_exec_multi/ssh_playbook_run/ssh_audit_export/ssh_doctor/ssh_gate_status、daemon /exec/exec-multi/playbooks/run/audit/audit/export/health-snapshot/gate |
-| 已知限制 | PTY session 首次读取可能先返回登录 banner/prompt，命令输出可能需要后续 read |
+| 已知限制 | PTY session 首次读取可能先返回登录 banner/prompt，命令输出可能需要后续 read；PTY session 写入按完成行做风险授权和审计，不是完整 shell/TTY 语义解析器；批量执行和 playbook 的 daemon 审批按 host/step 粒度生效，显式 force 才会作用于整个请求 |
 
 推荐接入方式：
 

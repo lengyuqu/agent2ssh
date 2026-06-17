@@ -128,10 +128,15 @@ export default function SessionPanel({ selectedHost }: Props) {
       : api.sessionRead(id, timeoutMs);
   }
 
-  async function writeToBackend(id: string, backend: SessionBackend, value: string) {
+  async function writeToBackend(
+    id: string,
+    backend: SessionBackend,
+    value: string,
+    force = false
+  ) {
     return backend === "daemon"
-      ? api.sessionWriteDaemon(id, value)
-      : api.sessionWrite(id, value);
+      ? api.sessionWriteDaemon(id, value, force)
+      : api.sessionWrite(id, value, force);
   }
 
   async function closeFromBackend(id: string, backend: SessionBackend) {
@@ -156,14 +161,14 @@ export default function SessionPanel({ selectedHost }: Props) {
     setError(null);
     try {
       if (!confirmDanger) {
-        const risk = await api.classifyRisk(input);
+        const risk = await api.classifyRisk(input, activeHost);
         if (risk === "high" || risk === "blocked") {
           setPendingDanger({ input, risk });
           return;
         }
       }
       const value = confirmDanger && pendingDanger ? pendingDanger.input : input;
-      await writeToBackend(activeId, activeBackend, value + "\n");
+      await writeToBackend(activeId, activeBackend, value + "\n", confirmDanger);
       setInput("");
       setPendingDanger(null);
       const data = await readFromBackend(activeId, activeBackend, 2000);

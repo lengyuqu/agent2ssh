@@ -1,7 +1,7 @@
 use agent2ssh::approval::ApprovalRequest as ApprovalRequestType;
 use agent2ssh::approval::{
-    approval_action_url, build_approval_context, check_approval_required, list_approval_policies,
-    save_approval_policies, ApprovalPolicy,
+    approval_action_url, build_approval_context_with_effective_risk, check_approval_required,
+    list_approval_policies, save_approval_policies, ApprovalPolicy,
 };
 use agent2ssh::approval::{
     approval_list, approval_request_with_context, approval_request_with_ttl, approval_respond,
@@ -27,13 +27,13 @@ use agent2ssh::notify::{
     WebhookEvent,
 };
 use agent2ssh::playbook::{
-    dry_run_playbook, list_playbooks_core, run_playbook_core_with_source, Playbook, PlaybookDryRun,
-    PlaybookRunResult,
+    dry_run_playbook, list_playbooks_core, run_playbook_core_with_source_and_approved_steps,
+    Playbook, PlaybookDryRun, PlaybookRunResult,
 };
 use agent2ssh::remote::{
     check_daemon_scope, check_daemon_version, diagnose_daemon, get_daemon_with_scope,
     get_daemons_unified_view, list_daemons_core, load_scoped_daemon_tokens,
-    resolve_scoped_daemon_token, DaemonScope,
+    resolve_scoped_daemon_token, tags_for_remote_scope_check, DaemonScope,
 };
 use agent2ssh::risk_config::classify_with_user_rules;
 use agent2ssh::session::*;
@@ -82,6 +82,7 @@ fn uptime_secs() -> u64 {
 struct AppState {
     token: String,
     limiter: Arc<Mutex<ExecutionLimiter>>,
+    session_input_buffers: Arc<Mutex<HashMap<Uuid, String>>>,
 }
 
 #[derive(Clone)]
@@ -262,15 +263,63 @@ fn host_risk_override(host: &str) -> Option<RiskLevel> {
     command_authorization_target(host).risk_override
 }
 
+fn append_operation_audit(
+    source: &str,
+    host: &str,
+    command: &str,
+    risk: RiskLevel,
+    exit_code: Option<i32>,
+    duration_ms: u128,
+    reason: Option<&str>,
+) {
+    let result = ExecResult {
+        host: host.to_string(),
+        command: command.to_string(),
+        exit_code,
+        stdout: String::new(),
+        stderr: reason.unwrap_or_default().to_string(),
+        duration_ms,
+        risk_level: risk,
+        truncated: false,
+    };
+    let _ = append_audit(&result, risk, reason, None, Some(source));
+}
+
+fn split_completed_session_commands(pending: &str, input: &str) -> (Vec<String>, String) {
+    let mut combined = String::with_capacity(pending.len() + input.len());
+    combined.push_str(pending);
+    combined.push_str(input);
+
+    let mut commands = Vec::new();
+    let mut start = 0usize;
+    for (idx, ch) in combined.char_indices() {
+        if ch == '\n' || ch == '\r' {
+            let command = combined[start..idx].trim();
+            if !command.is_empty() {
+                commands.push(command.to_string());
+            }
+            start = idx + ch.len_utf8();
+        }
+    }
+
+    (commands, combined[start..].to_string())
+}
+
 async fn request_and_wait_for_approval(prompt: ApprovalPrompt) -> Result<ApprovalOutcome, String> {
     APPROVAL_COUNT.fetch_add(1, Ordering::Relaxed);
-    let approval_ctx = build_approval_context(&prompt.host, &prompt.command, &prompt.source)
-        .ok()
-        .map(|mut ctx| {
-            ctx.reason = prompt.reason.clone();
-            ctx.change_id = prompt.change_id.clone();
-            ctx
-        });
+    let approval_ctx = build_approval_context_with_effective_risk(
+        &prompt.host,
+        &prompt.command,
+        &prompt.source,
+        prompt.risk,
+        prompt.matched_policy.clone(),
+    )
+    .ok()
+    .map(|mut ctx| {
+        ctx.reason = prompt.reason.clone();
+        ctx.change_id = prompt.change_id.clone();
+        ctx
+    });
     let approval_id = if let Some(ctx) = approval_ctx {
         approval_request_with_context(
             &prompt.host,
@@ -443,8 +492,8 @@ async fn authorize_targets(
     force: bool,
     reason: Option<String>,
     change_id: Option<String>,
-) -> Result<bool, (StatusCode, Json<ErrorBody>)> {
-    let mut high_risk_approved = false;
+) -> Result<Vec<String>, (StatusCode, Json<ErrorBody>)> {
+    let mut approved_hosts = Vec::new();
     if targets.is_empty() {
         let (risk, approved) = authorize_command(
             auth_scope,
@@ -458,7 +507,10 @@ async fn authorize_targets(
             change_id,
         )
         .await?;
-        return Ok(approved && risk == RiskLevel::High);
+        if approved && risk == RiskLevel::High {
+            approved_hosts.push(fallback_host.to_string());
+        }
+        return Ok(approved_hosts);
     }
 
     for (host, tags) in targets {
@@ -469,16 +521,16 @@ async fn authorize_targets(
             tags,
             None,
             command,
-            force || high_risk_approved,
+            force,
             reason.clone(),
             change_id.clone(),
         )
         .await?;
         if approved && risk == RiskLevel::High {
-            high_risk_approved = true;
+            approved_hosts.push(host.clone());
         }
     }
-    Ok(high_risk_approved)
+    Ok(approved_hosts)
 }
 
 fn write_limit_rejection_audit(
@@ -618,6 +670,8 @@ struct SessionOpenBody {
 #[derive(Deserialize)]
 struct SessionWriteBody {
     input: String,
+    #[serde(default)]
+    force: bool,
     #[serde(default)]
     source: Option<String>,
 }
@@ -957,8 +1011,8 @@ async fn exec_multi(
     let target_label = target_host_label(&body.hosts, &body.tags);
     reject_if_gate_paused(&source, &target_label, &body.command)?;
     reject_if_rate_limited(&s, &source, &targets, &body.command).await?;
-    let mut force = body.force;
-    if authorize_targets(
+    let force = body.force;
+    let approved_hosts = authorize_targets(
         &auth.scope,
         &source,
         &targets,
@@ -968,16 +1022,14 @@ async fn exec_multi(
         body.reason.clone(),
         body.change_id.clone(),
     )
-    .await?
-    {
-        force = true;
-    }
+    .await?;
     Ok(Json(
         exec_multi_with_strategy(ExecMultiBatchRequest {
             request: ExecMultiRequest {
                 hosts: body.hosts,
                 command: body.command,
                 force,
+                approved_hosts,
                 timeout_secs: body.timeout_secs,
                 tags: body.tags,
                 reason: body.reason,
@@ -1003,8 +1055,8 @@ async fn exec_compare(
     let target_label = target_host_label(&body.hosts, &body.tags);
     reject_if_gate_paused(&source, &target_label, &body.command)?;
     reject_if_rate_limited(&s, &source, &targets, &body.command).await?;
-    let mut force = body.force;
-    if authorize_targets(
+    let force = body.force;
+    let approved_hosts = authorize_targets(
         &auth.scope,
         &source,
         &targets,
@@ -1014,14 +1066,12 @@ async fn exec_compare(
         None,
         None,
     )
-    .await?
-    {
-        force = true;
-    }
+    .await?;
     let results = exec_multi_core(ExecMultiRequest {
         hosts: body.hosts,
         command: body.command,
         force,
+        approved_hosts,
         timeout_secs: body.timeout_secs,
         tags: body.tags,
         reason: None,
@@ -1127,7 +1177,7 @@ async fn sftp_upload(
             .unwrap_or_default(),
         None,
         &command,
-        true,
+        false,
         None,
         None,
     )
@@ -1159,7 +1209,7 @@ async fn sftp_download(
             .unwrap_or_default(),
         None,
         &command,
-        true,
+        false,
         None,
         None,
     )
@@ -1181,7 +1231,7 @@ async fn sftp_ls(
     reject_if_gate_paused(&source, &body.host, &command)?;
     let targets = vec![(body.host.clone(), host_tags(&body.host))];
     reject_if_rate_limited(&s, &source, &targets, &command).await?;
-    authorize_command(
+    let (risk, _) = authorize_command(
         &auth.scope,
         &source,
         &body.host,
@@ -1191,15 +1241,39 @@ async fn sftp_ls(
             .unwrap_or_default(),
         None,
         &command,
-        true,
+        false,
         None,
         None,
     )
     .await?;
-    sftp_ls_core_with_source(&body.host, &body.path, None, Some(source))
-        .await
-        .map(Json)
-        .map_err(|e| err(StatusCode::BAD_REQUEST, e))
+    let started = Instant::now();
+    match sftp_ls_core_with_source(&body.host, &body.path, None, Some(source.clone())).await {
+        Ok(result) => {
+            append_operation_audit(
+                &source,
+                &body.host,
+                &command,
+                risk,
+                result.exit_code,
+                started.elapsed().as_millis(),
+                None,
+            );
+            Ok(Json(result))
+        }
+        Err(e) => {
+            let message = e.to_string();
+            append_operation_audit(
+                &source,
+                &body.host,
+                &command,
+                risk,
+                None,
+                started.elapsed().as_millis(),
+                Some(&message),
+            );
+            Err(err(StatusCode::BAD_REQUEST, e))
+        }
+    }
 }
 async fn sftp_stat(
     State(s): State<AppState>,
@@ -1213,7 +1287,7 @@ async fn sftp_stat(
     reject_if_gate_paused(&source, &body.host, &command)?;
     let targets = vec![(body.host.clone(), host_tags(&body.host))];
     reject_if_rate_limited(&s, &source, &targets, &command).await?;
-    authorize_command(
+    let (risk, _) = authorize_command(
         &auth.scope,
         &source,
         &body.host,
@@ -1223,15 +1297,39 @@ async fn sftp_stat(
             .unwrap_or_default(),
         None,
         &command,
-        true,
+        false,
         None,
         None,
     )
     .await?;
-    sftp_stat_core_with_source(&body.host, &body.path, None, Some(source))
-        .await
-        .map(Json)
-        .map_err(|e| err(StatusCode::BAD_REQUEST, e))
+    let started = Instant::now();
+    match sftp_stat_core_with_source(&body.host, &body.path, None, Some(source.clone())).await {
+        Ok(result) => {
+            append_operation_audit(
+                &source,
+                &body.host,
+                &command,
+                risk,
+                result.exit_code,
+                started.elapsed().as_millis(),
+                None,
+            );
+            Ok(Json(result))
+        }
+        Err(e) => {
+            let message = e.to_string();
+            append_operation_audit(
+                &source,
+                &body.host,
+                &command,
+                risk,
+                None,
+                started.elapsed().as_millis(),
+                Some(&message),
+            );
+            Err(err(StatusCode::BAD_REQUEST, e))
+        }
+    }
 }
 async fn sftp_mkdir(
     State(s): State<AppState>,
@@ -1245,7 +1343,7 @@ async fn sftp_mkdir(
     reject_if_gate_paused(&source, &body.host, &command)?;
     let targets = vec![(body.host.clone(), host_tags(&body.host))];
     reject_if_rate_limited(&s, &source, &targets, &command).await?;
-    authorize_command(
+    let (risk, _) = authorize_command(
         &auth.scope,
         &source,
         &body.host,
@@ -1255,15 +1353,39 @@ async fn sftp_mkdir(
             .unwrap_or_default(),
         None,
         &command,
-        true,
+        false,
         None,
         None,
     )
     .await?;
-    sftp_mkdir_core_with_source(&body.host, &body.path, None, Some(source))
-        .await
-        .map(Json)
-        .map_err(|e| err(StatusCode::BAD_REQUEST, e))
+    let started = Instant::now();
+    match sftp_mkdir_core_with_source(&body.host, &body.path, None, Some(source.clone())).await {
+        Ok(result) => {
+            append_operation_audit(
+                &source,
+                &body.host,
+                &command,
+                risk,
+                result.exit_code,
+                started.elapsed().as_millis(),
+                None,
+            );
+            Ok(Json(result))
+        }
+        Err(e) => {
+            let message = e.to_string();
+            append_operation_audit(
+                &source,
+                &body.host,
+                &command,
+                risk,
+                None,
+                started.elapsed().as_millis(),
+                Some(&message),
+            );
+            Err(err(StatusCode::BAD_REQUEST, e))
+        }
+    }
 }
 
 // ── Sessions ─────────────────────────────────────────────────────────────────
@@ -1282,24 +1404,38 @@ async fn session_open(
     check_daemon_scope(&auth.scope, &body.host, &tags, "session_open")
         .map_err(|e| err(StatusCode::FORBIDDEN, e))?;
     reject_if_session_limited(&s, source, &body.host, &tags).await?;
-    authorize_command(
+    let (risk, _) = authorize_command(
         &auth.scope,
         source,
         &body.host,
         &tags,
         None,
         "session_open",
-        true,
+        false,
         None,
         None,
     )
     .await?;
+    let started = Instant::now();
     match session_open_core(&body.host).await {
         Ok(id) => {
             s.limiter
                 .lock()
                 .await
                 .register_session(id, source, &body.host, &tags);
+            s.session_input_buffers
+                .lock()
+                .await
+                .insert(id, String::new());
+            append_operation_audit(
+                source,
+                &body.host,
+                "session_open",
+                risk,
+                Some(0),
+                started.elapsed().as_millis(),
+                None,
+            );
             publish_event(
                 EventType::SessionOpened,
                 serde_json::json!({
@@ -1310,7 +1446,19 @@ async fn session_open(
             );
             Ok(Json(IdBody { id: id.to_string() }))
         }
-        Err(e) => Err(err(StatusCode::BAD_REQUEST, e)),
+        Err(e) => {
+            let message = e.to_string();
+            append_operation_audit(
+                source,
+                &body.host,
+                "session_open",
+                risk,
+                None,
+                started.elapsed().as_millis(),
+                Some(&message),
+            );
+            Err(err(StatusCode::BAD_REQUEST, e))
+        }
     }
 }
 async fn session_write(
@@ -1323,7 +1471,6 @@ async fn session_write(
     let auth = check_auth(&s, &headers)?;
     let uuid = Uuid::parse_str(&id).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
     let source = body.source.as_deref().unwrap_or("daemon");
-    reject_if_gate_paused(source, &format!("session:{id}"), &body.input)?;
     let targets = s
         .limiter
         .lock()
@@ -1340,21 +1487,60 @@ async fn session_write(
         .first()
         .map(|(_, tags)| tags.clone())
         .unwrap_or_default();
-    authorize_command(
-        &auth.scope,
-        source,
-        &session_host,
-        &session_tags,
-        None,
-        &body.input,
-        false,
-        None,
-        None,
-    )
-    .await?;
-    session_write_core(uuid, &body.input)
-        .await
-        .map(|_| {
+    reject_if_gate_paused(source, &session_host, &body.input)?;
+    let (completed_commands, next_pending) = {
+        let buffers = s.session_input_buffers.lock().await;
+        let pending = buffers.get(&uuid).cloned().unwrap_or_default();
+        split_completed_session_commands(&pending, &body.input)
+    };
+
+    let mut completed_risks = Vec::new();
+    for command in &completed_commands {
+        let (risk, _) = authorize_command(
+            &auth.scope,
+            source,
+            &session_host,
+            &session_tags,
+            None,
+            command,
+            body.force,
+            None,
+            None,
+        )
+        .await?;
+        completed_risks.push((command.clone(), risk));
+    }
+
+    let started = Instant::now();
+    match session_write_core(uuid, &body.input).await {
+        Ok(()) => {
+            s.session_input_buffers
+                .lock()
+                .await
+                .insert(uuid, next_pending);
+            if completed_risks.is_empty() {
+                append_operation_audit(
+                    source,
+                    &session_host,
+                    &format!("session write {} bytes", body.input.len()),
+                    RiskLevel::Low,
+                    Some(0),
+                    started.elapsed().as_millis(),
+                    None,
+                );
+            } else {
+                for (command, risk) in &completed_risks {
+                    append_operation_audit(
+                        source,
+                        &session_host,
+                        &format!("session command {command}"),
+                        *risk,
+                        Some(0),
+                        started.elapsed().as_millis(),
+                        None,
+                    );
+                }
+            }
             publish_event(
                 EventType::SessionInput,
                 serde_json::json!({
@@ -1364,9 +1550,25 @@ async fn session_write(
                     "input_bytes": body.input.len(),
                 }),
             );
-            Json(OkBody { ok: true })
-        })
-        .map_err(|e| err(StatusCode::BAD_REQUEST, e))
+            Ok(Json(OkBody { ok: true }))
+        }
+        Err(e) => {
+            let message = e.to_string();
+            append_operation_audit(
+                source,
+                &session_host,
+                &format!("session write {} bytes", body.input.len()),
+                completed_risks
+                    .iter()
+                    .map(|(_, risk)| *risk)
+                    .fold(RiskLevel::Low, RiskLevel::max_severity),
+                None,
+                started.elapsed().as_millis(),
+                Some(&message),
+            );
+            Err(err(StatusCode::BAD_REQUEST, e))
+        }
+    }
 }
 async fn session_read(
     State(s): State<AppState>,
@@ -1420,12 +1622,36 @@ async fn session_close(
         .await
         .session_target(&uuid)
         .unwrap_or_else(|| (format!("session:{id}"), Vec::new()));
+    reject_if_gate_paused(source, &session_host, "session_close")?;
     check_daemon_scope(&auth.scope, &session_host, &session_tags, "session_close")
         .map_err(|e| err(StatusCode::FORBIDDEN, e))?;
+    let (risk, _) = authorize_command(
+        &auth.scope,
+        source,
+        &session_host,
+        &session_tags,
+        None,
+        "session_close",
+        false,
+        None,
+        None,
+    )
+    .await?;
+    let started = Instant::now();
     session_close_core(uuid)
         .await
         .map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
     s.limiter.lock().await.unregister_session(&uuid);
+    s.session_input_buffers.lock().await.remove(&uuid);
+    append_operation_audit(
+        source,
+        &session_host,
+        "session_close",
+        risk,
+        Some(0),
+        started.elapsed().as_millis(),
+        None,
+    );
     publish_event(
         EventType::SessionClosed,
         serde_json::json!({
@@ -1470,7 +1696,7 @@ async fn forward_add(
     reject_if_gate_paused(&source, &req.host, &command)?;
     let targets = vec![(req.host.clone(), host_tags(&req.host))];
     reject_if_rate_limited(&s, &source, &targets, &command).await?;
-    authorize_command(
+    let (risk, _) = authorize_command(
         &auth.scope,
         &source,
         &req.host,
@@ -1480,12 +1706,13 @@ async fn forward_add(
             .unwrap_or_default(),
         None,
         &command,
-        true,
+        false,
         None,
         None,
     )
     .await?;
-    forward_add_core(
+    let started = Instant::now();
+    match forward_add_core(
         &req.host,
         req.direction,
         req.bind_port,
@@ -1493,8 +1720,33 @@ async fn forward_add(
         req.target_port,
     )
     .await
-    .map(Json)
-    .map_err(|e| err(StatusCode::BAD_REQUEST, e))
+    {
+        Ok(rule) => {
+            append_operation_audit(
+                &source,
+                &req.host,
+                &command,
+                risk,
+                Some(0),
+                started.elapsed().as_millis(),
+                None,
+            );
+            Ok(Json(rule))
+        }
+        Err(e) => {
+            let message = e.to_string();
+            append_operation_audit(
+                &source,
+                &req.host,
+                &command,
+                risk,
+                None,
+                started.elapsed().as_millis(),
+                Some(&message),
+            );
+            Err(err(StatusCode::BAD_REQUEST, e))
+        }
+    }
 }
 async fn forward_list(
     State(s): State<AppState>,
@@ -1512,6 +1764,7 @@ async fn forward_remove(
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     let auth = check_auth(&s, &headers)?;
     let uuid = Uuid::parse_str(&id).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
+    let source = source_from_env("daemon");
     if let Some(rule) = forward_list_core()
         .await
         .into_iter()
@@ -1522,8 +1775,37 @@ async fn forward_remove(
             rule.direction, rule.bind_port, rule.target_host, rule.host, rule.target_port
         );
         let tags = host_tags(&rule.host);
+        reject_if_gate_paused(&source, &rule.host, &command)?;
+        let targets = vec![(rule.host.clone(), tags.clone())];
+        reject_if_rate_limited(&s, &source, &targets, &command).await?;
         check_daemon_scope(&auth.scope, &rule.host, &tags, &command)
             .map_err(|e| err(StatusCode::FORBIDDEN, e))?;
+        let (risk, _) = authorize_command(
+            &auth.scope,
+            &source,
+            &rule.host,
+            &tags,
+            None,
+            &command,
+            false,
+            None,
+            None,
+        )
+        .await?;
+        let started = Instant::now();
+        forward_remove_core(uuid)
+            .await
+            .map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
+        append_operation_audit(
+            &source,
+            &rule.host,
+            &command,
+            risk,
+            Some(0),
+            started.elapsed().as_millis(),
+            None,
+        );
+        return Ok(Json(OkBody { ok: true }));
     }
     forward_remove_core(uuid)
         .await
@@ -1728,24 +2010,50 @@ async fn ssh_connect(
     let source = source_from_env("daemon");
     let tags = host_tags(&host);
     reject_if_gate_paused(&source, &host, "connect")?;
+    let targets = vec![(host.clone(), tags.clone())];
+    reject_if_rate_limited(&s, &source, &targets, "connect").await?;
     check_daemon_scope(&auth.scope, &host, &tags, "connect")
         .map_err(|e| err(StatusCode::FORBIDDEN, e))?;
-    authorize_command(
+    let (risk, _) = authorize_command(
         &auth.scope,
         &source,
         &host,
         &tags,
         None,
         "connect",
-        true,
+        false,
         None,
         None,
     )
     .await?;
-    connect_host(&host)
-        .await
-        .map(|_| Json(OkBody { ok: true }))
-        .map_err(|e| err(StatusCode::BAD_REQUEST, e))
+    let started = Instant::now();
+    match connect_host(&host).await {
+        Ok(()) => {
+            append_operation_audit(
+                &source,
+                &host,
+                "connect",
+                risk,
+                Some(0),
+                started.elapsed().as_millis(),
+                None,
+            );
+            Ok(Json(OkBody { ok: true }))
+        }
+        Err(e) => {
+            let message = e.to_string();
+            append_operation_audit(
+                &source,
+                &host,
+                "connect",
+                risk,
+                None,
+                started.elapsed().as_millis(),
+                Some(&message),
+            );
+            Err(err(StatusCode::BAD_REQUEST, e))
+        }
+    }
 }
 async fn ssh_disconnect(
     State(s): State<AppState>,
@@ -1756,24 +2064,51 @@ async fn ssh_disconnect(
     let auth = check_auth(&s, &headers)?;
     let source = source_from_env("daemon");
     let tags = host_tags(&host);
+    reject_if_gate_paused(&source, &host, "disconnect")?;
+    let targets = vec![(host.clone(), tags.clone())];
+    reject_if_rate_limited(&s, &source, &targets, "disconnect").await?;
     check_daemon_scope(&auth.scope, &host, &tags, "disconnect")
         .map_err(|e| err(StatusCode::FORBIDDEN, e))?;
-    authorize_command(
+    let (risk, _) = authorize_command(
         &auth.scope,
         &source,
         &host,
         &tags,
         None,
         "disconnect",
-        true,
+        false,
         None,
         None,
     )
     .await?;
-    disconnect_host(&host)
-        .await
-        .map(|_| Json(OkBody { ok: true }))
-        .map_err(|e| err(StatusCode::BAD_REQUEST, e))
+    let started = Instant::now();
+    match disconnect_host(&host).await {
+        Ok(()) => {
+            append_operation_audit(
+                &source,
+                &host,
+                "disconnect",
+                risk,
+                Some(0),
+                started.elapsed().as_millis(),
+                None,
+            );
+            Ok(Json(OkBody { ok: true }))
+        }
+        Err(e) => {
+            let message = e.to_string();
+            append_operation_audit(
+                &source,
+                &host,
+                "disconnect",
+                risk,
+                None,
+                started.elapsed().as_millis(),
+                Some(&message),
+            );
+            Err(err(StatusCode::BAD_REQUEST, e))
+        }
+    }
 }
 
 // ── Webhook config ───────────────────────────────────────────────────────────
@@ -1837,7 +2172,8 @@ async fn run_playbook(
             .find(|playbook| playbook.name == body.playbook)
             .and_then(|playbook| playbook.risk_override)
     });
-    let mut force = body.force;
+    let force = body.force;
+    let mut approved_steps = Vec::new();
     let tags = targets
         .first()
         .map(|(_, tags)| tags.clone())
@@ -1875,10 +2211,10 @@ async fn run_playbook(
         )
         .await?;
         if approved && risk == RiskLevel::High {
-            force = true;
+            approved_steps.push(step.step);
         }
     }
-    run_playbook_core_with_source(
+    run_playbook_core_with_source_and_approved_steps(
         &body.playbook,
         &body.host,
         force,
@@ -1886,6 +2222,7 @@ async fn run_playbook(
         body.reason,
         body.change_id,
         Some(source),
+        &approved_steps,
     )
     .await
     .map(Json)
@@ -2059,13 +2396,11 @@ async fn proxy_exec(
     // Look up remote daemon
     let (url, remote_token, scope) =
         get_daemon_with_scope(&alias).map_err(|e| err(StatusCode::NOT_FOUND, e))?;
-    let tags = host_tags(&req.host);
-    let targets = vec![(req.host.clone(), tags.clone())];
+    let local_tags = host_tags(&req.host);
+    let targets = vec![(req.host.clone(), local_tags.clone())];
     reject_if_gate_paused(&source, &req.host, &req.command)?;
     reject_if_rate_limited(&s, &source, &targets, &req.command).await?;
-    check_daemon_scope(&auth.scope, &req.host, &tags, &req.command)
-        .map_err(|e| err(StatusCode::FORBIDDEN, e))?;
-    check_daemon_scope(&scope, &req.host, &tags, &req.command)
+    check_daemon_scope(&auth.scope, &req.host, &local_tags, &req.command)
         .map_err(|e| err(StatusCode::FORBIDDEN, e))?;
     let token = remote_token.ok_or_else(|| {
         err(
@@ -2073,6 +2408,11 @@ async fn proxy_exec(
             format!("no token configured for daemon '{}'", alias),
         )
     })?;
+    let remote_tags = tags_for_remote_scope_check(&scope, &url, &token, &req.host, local_tags)
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
+    check_daemon_scope(&scope, &req.host, &remote_tags, &req.command)
+        .map_err(|e| err(StatusCode::FORBIDDEN, e))?;
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(
@@ -2613,6 +2953,7 @@ mod tests {
         AppState {
             token: "test-token".into(),
             limiter: Arc::new(tokio::sync::Mutex::new(ExecutionLimiter::new(config))),
+            session_input_buffers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -2759,6 +3100,45 @@ mod tests {
     }
 
     #[test]
+    fn session_input_splitter_authorizes_fragmented_lines() {
+        let (commands, pending) = split_completed_session_commands("rm -rf ", "/\n");
+        assert_eq!(commands, vec!["rm -rf /"]);
+        assert!(pending.is_empty());
+
+        let (commands, pending) =
+            split_completed_session_commands("", "echo one\necho two\rpartial");
+        assert_eq!(commands, vec!["echo one", "echo two"]);
+        assert_eq!(pending, "partial");
+    }
+
+    #[test]
+    fn operation_audit_records_successful_control_operation() {
+        with_temp_config(|| {
+            append_operation_audit(
+                "daemon",
+                "test-host",
+                "session_open",
+                RiskLevel::Low,
+                Some(0),
+                12,
+                None,
+            );
+
+            let audit = list_audit_core(AuditFilter {
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap();
+            let entry = audit.first().expect("operation audit should be written");
+            assert_eq!(entry.host, "test-host");
+            assert_eq!(entry.command, "session_open");
+            assert_eq!(entry.exit_code, Some(0));
+            assert_eq!(entry.risk_level, RiskLevel::Low);
+            assert_eq!(entry.source.as_deref(), Some("daemon"));
+        });
+    }
+
+    #[test]
     fn scoped_token_auth_restricts_authorized_commands() {
         with_temp_config(|| {
             std::fs::write(
@@ -2872,6 +3252,7 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState {
         token: token.clone(),
         limiter: Arc::new(Mutex::new(ExecutionLimiter::new(limits))),
+        session_input_buffers: Arc::new(Mutex::new(HashMap::new())),
     };
 
     let cors = CorsLayer::new()

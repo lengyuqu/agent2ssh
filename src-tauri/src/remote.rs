@@ -2,7 +2,10 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-use crate::store::{config_dir, glob_match};
+use crate::{
+    store::{config_dir, glob_match},
+    types::HostProfile,
+};
 
 /// Permission scope for a remote daemon, controlling which hosts, tags,
 /// and commands the daemon is allowed to execute.
@@ -241,6 +244,44 @@ pub fn get_daemon_with_scope(alias: &str) -> Result<(String, Option<String>, Opt
         }
     }
     Err(anyhow!("daemon '{}' not found in remotes", alias))
+}
+
+pub async fn remote_host_tags(url: &str, token: &str, host_name: &str) -> Result<Vec<String>> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()?;
+    let hosts = client
+        .get(format!("{}/hosts", url.trim_end_matches('/')))
+        .bearer_auth(token)
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Vec<HostProfile>>()
+        .await?;
+
+    hosts
+        .into_iter()
+        .find(|host| host.name.eq_ignore_ascii_case(host_name))
+        .map(|host| host.tags)
+        .ok_or_else(|| anyhow!("host '{}' not found on remote daemon", host_name))
+}
+
+pub async fn tags_for_remote_scope_check(
+    scope: &Option<DaemonScope>,
+    url: &str,
+    token: &str,
+    host_name: &str,
+    fallback_tags: Vec<String>,
+) -> Result<Vec<String>> {
+    let needs_remote_tags = scope
+        .as_ref()
+        .map(|scope| !scope.allowed_tags.is_empty())
+        .unwrap_or(false);
+    if needs_remote_tags {
+        remote_host_tags(url, token, host_name).await
+    } else {
+        Ok(fallback_tags)
+    }
 }
 
 /// Read the local daemon token from ~/.agent2ssh/daemon.token
@@ -1421,5 +1462,25 @@ denied_commands = ["rm -rf *"]
             scope: None,
         };
         assert!(validate_scoped_daemon_tokens(&[token]).is_err());
+    }
+
+    #[tokio::test]
+    async fn remote_scope_tags_use_fallback_when_tag_scope_is_empty() {
+        let scope = Some(DaemonScope {
+            allowed_hosts: vec!["prod".to_string()],
+            allowed_tags: Vec::new(),
+            allowed_commands: Vec::new(),
+            denied_commands: Vec::new(),
+        });
+        let tags = tags_for_remote_scope_check(
+            &scope,
+            "http://127.0.0.1:1",
+            "unused",
+            "prod",
+            vec!["local-tag".to_string()],
+        )
+        .await
+        .unwrap();
+        assert_eq!(tags, vec!["local-tag"]);
     }
 }

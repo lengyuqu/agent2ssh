@@ -27,9 +27,9 @@ pub use anomaly::{
 };
 pub use approval::{
     approval_action_url, approval_request_with_context, build_approval_context,
-    check_approval_required, list_approval_policies, load_approval_policies,
-    save_approval_policies, ApprovalContext, ApprovalHistoryEntry, ApprovalPolicy,
-    ApprovalPolicyFile, RiskDetails,
+    build_approval_context_with_effective_risk, check_approval_required, list_approval_policies,
+    load_approval_policies, save_approval_policies, ApprovalContext, ApprovalHistoryEntry,
+    ApprovalPolicy, ApprovalPolicyFile, RiskDetails,
 };
 pub use connection::{connect_host, disconnect_host, list_active_connections};
 pub use core::{
@@ -67,8 +67,9 @@ pub use limits::{
 };
 pub use playbook::{
     dry_run_playbook, list_playbooks_core, resolve_command_template, run_playbook_core,
-    run_playbook_core_with_source, validate_playbook_params, DryRunStep, Playbook, PlaybookDryRun,
-    PlaybookParam, PlaybookRunResult, PlaybookStep, PlaybookStepResult,
+    run_playbook_core_with_source, run_playbook_core_with_source_and_approved_steps,
+    validate_playbook_params, DryRunStep, Playbook, PlaybookDryRun, PlaybookParam,
+    PlaybookRunResult, PlaybookStep, PlaybookStepResult,
 };
 pub use policy::{
     existing_policy_path, load_policy_file, load_policy_from_path, parse_policy, policy_json_path,
@@ -76,9 +77,10 @@ pub use policy::{
 };
 pub use remote::{
     check_daemon_version, check_version_compatibility, diagnose_daemon, get_daemons_unified_view,
-    list_daemons_core, load_remotes, DaemonDiagnostic, DaemonHealthSummary, DaemonInfo,
-    DaemonMetricsSummary, DaemonUnifiedView, DaemonViewEntry, DiagnosticCheck, DiagnosticStatus,
-    RemoteDaemon, VersionCompatibility, PROTOCOL_VERSION,
+    list_daemons_core, load_remotes, remote_host_tags, tags_for_remote_scope_check,
+    DaemonDiagnostic, DaemonHealthSummary, DaemonInfo, DaemonMetricsSummary, DaemonUnifiedView,
+    DaemonViewEntry, DiagnosticCheck, DiagnosticStatus, RemoteDaemon, VersionCompatibility,
+    PROTOCOL_VERSION,
 };
 pub use session::{
     session_close_core, session_list_core, session_open_core, session_read_core, session_write_core,

@@ -45,14 +45,14 @@ export default function ExecPanel({ selectedHost, onExecComplete }: Props) {
     }
     const timer = setTimeout(async () => {
       try {
-        const level = await api.classifyRisk(command);
+        const level = await api.classifyRisk(command, selectedHost);
         setPreviewRisk(level);
       } catch {
         setPreviewRisk(null);
       }
     }, 300);
     return () => clearTimeout(timer);
-  }, [command]);
+  }, [command, selectedHost]);
 
   async function runCommand(withForce = false) {
     if (!selectedHost || !command.trim()) return;

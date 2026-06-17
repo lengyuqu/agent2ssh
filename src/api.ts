@@ -47,8 +47,10 @@ export const api = {
     invoke<HostProfile[]>("import_ssh_config", { path: path ?? null }),
 
   // Risk classification
-  classifyRisk: (command: string) =>
-    invoke<RiskLevel>("classify_command_risk", { command }),
+  classifyRisk: (command: string, host?: string | null) =>
+    host
+      ? invoke<RiskLevel>("classify_command_risk_for_host", { command, host })
+      : invoke<RiskLevel>("classify_command_risk", { command }),
 
   // Execution
   execSsh: (host: string, command: string, force = false) =>
@@ -105,8 +107,8 @@ export const api = {
 
   // Sessions
   sessionOpen: (host: string) => invoke<string>("session_open", { host }),
-  sessionWrite: (id: string, input: string) =>
-    invoke<void>("session_write", { id, input }),
+  sessionWrite: (id: string, input: string, force = false) =>
+    invoke<void>("session_write", { id, input, force }),
   sessionRead: (id: string, timeoutMs?: number) =>
     invoke<string>("session_read", { id, timeoutMs: timeoutMs ?? 2000 }),
   sessionClose: (id: string) => invoke<void>("session_close", { id }),
@@ -125,7 +127,11 @@ export const api = {
     const body = (await res.json()) as { id: string };
     return body.id;
   },
-  sessionWriteDaemon: async (id: string, input: string): Promise<void> => {
+  sessionWriteDaemon: async (
+    id: string,
+    input: string,
+    force = false
+  ): Promise<void> => {
     const token = await invoke<string>("get_daemon_token");
     const res = await fetch(`${daemonUrl}/sessions/${encodeURIComponent(id)}/write`, {
       method: "POST",
@@ -133,7 +139,7 @@ export const api = {
         Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ input, source: "desktop" }),
+      body: JSON.stringify({ input, force, source: "desktop" }),
     });
     if (!res.ok) throw new Error(`Failed to write daemon session: ${res.status}`);
   },

@@ -293,6 +293,30 @@ pub async fn run_playbook_core_with_source(
     change_id: Option<String>,
     source: Option<String>,
 ) -> Result<PlaybookRunResult> {
+    run_playbook_core_with_source_and_approved_steps(
+        playbook_name,
+        host,
+        force,
+        params,
+        reason,
+        change_id,
+        source,
+        &[],
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn run_playbook_core_with_source_and_approved_steps(
+    playbook_name: &str,
+    host: &str,
+    force: bool,
+    params: Option<&HashMap<String, String>>,
+    reason: Option<String>,
+    change_id: Option<String>,
+    source: Option<String>,
+    approved_steps: &[usize],
+) -> Result<PlaybookRunResult> {
     let playbooks = load_playbooks()?;
     let playbook = playbooks
         .iter()
@@ -315,7 +339,7 @@ pub async fn run_playbook_core_with_source(
         let request = ExecRequest {
             host: host.to_string(),
             command: command.clone(),
-            force,
+            force: force || approved_steps.contains(&idx),
             timeout_secs: None,
             stdin: None,
             max_output_bytes: None,

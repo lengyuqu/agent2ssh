@@ -1,6 +1,6 @@
 #![recursion_limit = "2048"]
 
-use agent2ssh::approval::build_approval_context;
+use agent2ssh::approval::build_approval_context_with_effective_risk;
 use agent2ssh::approval::{
     approval_list, approval_respond, check_approval_required, list_approval_policies,
 };
@@ -12,7 +12,7 @@ use agent2ssh::execution_control::{
 use agent2ssh::notify::{load_webhook_config, save_webhook_config};
 use agent2ssh::remote::{
     check_daemon_scope, check_daemon_version, diagnose_daemon, get_daemon, get_daemon_with_scope,
-    get_daemons_unified_view, list_daemons_core,
+    get_daemons_unified_view, list_daemons_core, tags_for_remote_scope_check,
 };
 use agent2ssh::risk_config::classify_with_user_rules;
 use agent2ssh::store::{audit_path, compute_metrics_trend, TrendPeriod};
@@ -24,8 +24,8 @@ use agent2ssh::{
     forward_remove_core, import_ssh_config_core, import_team_config, list_active_connections,
     list_audit_core, list_hosts_core, list_playbooks_core, ping_hosts_core, preview_exec,
     preview_exec_multi, preview_team_config_import, remove_host_core,
-    run_playbook_core_with_source, session_close_core, session_list_core, session_open_core,
-    session_read_core, session_write_core, sftp_download_core_with_source,
+    run_playbook_core_with_source_and_approved_steps, session_close_core, session_list_core,
+    session_open_core, session_read_core, session_write_core, sftp_download_core_with_source,
     sftp_ls_core_with_source, sftp_mkdir_core_with_source, sftp_stat_core_with_source,
     sftp_upload_core_with_source, AuditFilter, ExecMultiBatchRequest, ExecMultiRequest,
     ExecRequest, ForwardDirection, HostProfile, RiskLevel, SftpDownloadRequest, SftpUploadRequest,
@@ -154,10 +154,10 @@ async fn authorize_local_mcp_exec_targets(
     reason: Option<String>,
     change_id: Option<String>,
     source: &str,
-) -> std::result::Result<bool, McpError> {
+) -> std::result::Result<Vec<String>, McpError> {
     let targets = expand_exec_authorization_targets(hosts, tags).map_err(McpError::from)?;
     let auth_scope = None;
-    let mut high_risk_approved = false;
+    let mut approved_hosts = Vec::new();
     for target in targets {
         let result = authorize_command_with_approval(
             CommandAuthorizationInput {
@@ -167,7 +167,7 @@ async fn authorize_local_mcp_exec_targets(
                 tags: &target.tags,
                 risk_override: target.risk_override,
                 command,
-                force: force || high_risk_approved,
+                force,
                 reason: reason.clone(),
                 change_id: change_id.clone(),
             },
@@ -187,10 +187,10 @@ async fn authorize_local_mcp_exec_targets(
         .await
         .map_err(mcp_authorization_error)?;
         if result.approved && result.risk == RiskLevel::High {
-            high_risk_approved = true;
+            approved_hosts.push(target.host);
         }
     }
-    Ok(high_risk_approved)
+    Ok(approved_hosts)
 }
 
 async fn authorize_local_mcp_playbook_run(
@@ -201,7 +201,7 @@ async fn authorize_local_mcp_playbook_run(
     reason: Option<String>,
     change_id: Option<String>,
     source: &str,
-) -> std::result::Result<bool, McpError> {
+) -> std::result::Result<Vec<usize>, McpError> {
     let dry_run = dry_run_playbook(playbook, params).map_err(McpError::from)?;
     let target = command_authorization_target(host);
     let playbook_risk_override = list_playbooks_core()
@@ -211,7 +211,7 @@ async fn authorize_local_mcp_playbook_run(
         .and_then(|item| item.risk_override);
     let risk_override = playbook_risk_override.or(target.risk_override);
     let auth_scope = None;
-    let mut high_risk_approved = false;
+    let mut approved_steps = Vec::new();
 
     for step in dry_run.steps {
         let result = authorize_command_with_approval(
@@ -222,7 +222,7 @@ async fn authorize_local_mcp_playbook_run(
                 tags: &target.tags,
                 risk_override,
                 command: &step.command_resolved,
-                force: force || high_risk_approved,
+                force,
                 reason: reason.clone(),
                 change_id: change_id.clone(),
             },
@@ -242,11 +242,11 @@ async fn authorize_local_mcp_playbook_run(
         .await
         .map_err(mcp_authorization_error)?;
         if result.approved && result.risk == RiskLevel::High {
-            high_risk_approved = true;
+            approved_steps.push(step.step);
         }
     }
 
-    Ok(high_risk_approved)
+    Ok(approved_steps)
 }
 
 async fn authorize_local_mcp_operation(
@@ -1223,12 +1223,21 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 if alias != "localhost" {
                     let (url, remote_token, scope) = get_daemon_with_scope(alias)
                         .map_err(|e| McpError::internal(format!("daemon lookup failed: {e}")))?;
-                    let tags = mcp_host_tags(&request.host);
-                    check_daemon_scope(&scope, &request.host, &tags, &request.command)
-                        .map_err(McpError::internal)?;
                     let token = remote_token.ok_or_else(|| {
                         McpError::internal(format!("no token configured for daemon '{alias}'"))
                     })?;
+                    let local_tags = mcp_host_tags(&request.host);
+                    let remote_tags = tags_for_remote_scope_check(
+                        &scope,
+                        &url,
+                        &token,
+                        &request.host,
+                        local_tags,
+                    )
+                    .await
+                    .map_err(McpError::internal)?;
+                    check_daemon_scope(&scope, &request.host, &remote_tags, &request.command)
+                        .map_err(McpError::internal)?;
 
                     let client = reqwest::Client::builder()
                         .timeout(std::time::Duration::from_secs(
@@ -1312,8 +1321,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 });
 
             let source = mcp_source();
-            let mut force = force;
-            if authorize_local_mcp_exec_targets(
+            let approved_hosts = authorize_local_mcp_exec_targets(
                 &hosts,
                 &tags,
                 &command,
@@ -1322,16 +1330,14 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 change_id.clone(),
                 &source,
             )
-            .await?
-            {
-                force = true;
-            }
+            .await?;
 
             let batch_result = exec_multi_with_strategy(ExecMultiBatchRequest {
                 request: ExecMultiRequest {
                     hosts,
                     command,
                     force,
+                    approved_hosts,
                     timeout_secs,
                     tags,
                     reason,
@@ -1363,17 +1369,16 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
             });
 
             let source = mcp_source();
-            let mut force = force;
-            if authorize_local_mcp_exec_targets(&hosts, &tags, &command, force, None, None, &source)
-                .await?
-            {
-                force = true;
-            }
+            let approved_hosts = authorize_local_mcp_exec_targets(
+                &hosts, &tags, &command, force, None, None, &source,
+            )
+            .await?;
 
             let results = exec_multi_core(ExecMultiRequest {
                 hosts,
                 command,
                 force,
+                approved_hosts,
                 timeout_secs,
                 tags,
                 reason: None,
@@ -1394,7 +1399,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
             let timeout_secs = args["timeout_secs"].as_u64();
             let source = mcp_source();
             let command = format!("sftp ls {}", path);
-            authorize_local_mcp_operation(host, &command, true, &source).await?;
+            authorize_local_mcp_operation(host, &command, false, &source).await?;
             serde_json::to_value(
                 sftp_ls_core_with_source(host, path, timeout_secs, Some(source))
                     .await
@@ -1411,7 +1416,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
             let timeout_secs = args["timeout_secs"].as_u64();
             let source = mcp_source();
             let command = format!("sftp stat {}", path);
-            authorize_local_mcp_operation(host, &command, true, &source).await?;
+            authorize_local_mcp_operation(host, &command, false, &source).await?;
             serde_json::to_value(
                 sftp_stat_core_with_source(host, path, timeout_secs, Some(source))
                     .await
@@ -1428,7 +1433,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
             let timeout_secs = args["timeout_secs"].as_u64();
             let source = mcp_source();
             let command = format!("sftp mkdir {}", path);
-            authorize_local_mcp_operation(host, &command, true, &source).await?;
+            authorize_local_mcp_operation(host, &command, false, &source).await?;
             serde_json::to_value(
                 sftp_mkdir_core_with_source(host, path, timeout_secs, Some(source))
                     .await
@@ -1494,7 +1499,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 "sftp upload {} -> {}",
                 request.local_path, request.remote_path
             );
-            authorize_local_mcp_operation(&request.host, &command, true, &source).await?;
+            authorize_local_mcp_operation(&request.host, &command, false, &source).await?;
             serde_json::to_value(
                 sftp_upload_core_with_source(request, Some(source))
                     .await
@@ -1509,7 +1514,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 "sftp download {} -> {}",
                 request.remote_path, request.local_path
             );
-            authorize_local_mcp_operation(&request.host, &command, true, &source).await?;
+            authorize_local_mcp_operation(&request.host, &command, false, &source).await?;
             serde_json::to_value(
                 sftp_download_core_with_source(request, Some(source))
                     .await
@@ -1524,7 +1529,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 DaemonAttempt::Handled(value) => value,
                 DaemonAttempt::Fallback => {
                     let source = mcp_source();
-                    authorize_local_mcp_operation(host, "session_open", true, &source).await?;
+                    authorize_local_mcp_operation(host, "session_open", false, &source).await?;
                     let id = session_open_core(host).await.map_err(McpError::from)?;
                     json!({ "session_id": id.to_string(), "host": host, "backend": "process", "source": source })
                 }
@@ -1628,7 +1633,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 "forward {} {}:{} -> {}:{}",
                 direction, bind_port, target_host, host, target_port
             );
-            authorize_local_mcp_operation(host, &command, true, &source).await?;
+            authorize_local_mcp_operation(host, &command, false, &source).await?;
             let rule = forward_add_core(host, direction, bind_port, target_host, target_port)
                 .await
                 .map_err(McpError::from)?;
@@ -1716,10 +1721,9 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
             let reason = args["reason"].as_str().map(str::to_string);
             let change_id = args["change_id"].as_str().map(str::to_string);
             let source = mcp_source();
-            let mut force = force;
             let empty_params = HashMap::new();
             let params_for_auth = params_map.as_ref().unwrap_or(&empty_params);
-            if authorize_local_mcp_playbook_run(
+            let approved_steps = authorize_local_mcp_playbook_run(
                 playbook,
                 host,
                 force,
@@ -1728,11 +1732,8 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 change_id.clone(),
                 &source,
             )
-            .await?
-            {
-                force = true;
-            }
-            let result = run_playbook_core_with_source(
+            .await?;
+            let result = run_playbook_core_with_source_and_approved_steps(
                 playbook,
                 host,
                 force,
@@ -1740,6 +1741,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 reason,
                 change_id,
                 Some(source),
+                &approved_steps,
             )
             .await
             .map_err(McpError::from)?;
@@ -1769,7 +1771,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 .as_str()
                 .ok_or_else(|| McpError::internal("host required"))?;
             let source = mcp_source();
-            authorize_local_mcp_operation(host, "connect", true, &source).await?;
+            authorize_local_mcp_operation(host, "connect", false, &source).await?;
             connect_host(host).await.map_err(McpError::from)?;
             json!({ "ok": true, "host": host })
         }
@@ -1778,7 +1780,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 .as_str()
                 .ok_or_else(|| McpError::internal("host required"))?;
             let source = mcp_source();
-            authorize_local_mcp_operation(host, "disconnect", true, &source).await?;
+            authorize_local_mcp_operation(host, "disconnect", false, &source).await?;
             disconnect_host(host).await.map_err(McpError::from)?;
             json!({ "ok": true, "host": host })
         }
@@ -2002,7 +2004,8 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 .map_err(McpError::from)?;
 
             // Build approval context for richer response
-            let context = build_approval_context(host, command, "mcp").ok();
+            let context =
+                build_approval_context_with_effective_risk(host, command, "mcp", risk, None).ok();
 
             match result {
                 Some(policy) => json!({

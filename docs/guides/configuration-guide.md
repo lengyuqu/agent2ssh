@@ -231,7 +231,8 @@ denied_commands = ["rm -rf *", "mkfs *"]
 - `token_env` 优先于 `token`
 - scope 会在风险审批之前检查；未命中 scope 的请求不会进入审批队列
 - `allowed_commands` 和 `denied_commands` 使用 glob 风格匹配，`denied_commands` 优先
-- scope 覆盖 exec、playbook、SFTP、session、forward 和 connection 操作；非命令操作会使用类似 `sftp upload a -> b`、`session_open`、`connect` 的操作字符串做匹配
+- scope 覆盖 exec、playbook、SFTP、session、forward 和 connection 的 mutation 操作；非命令操作会使用类似 `sftp upload a -> b`、`session_open`、`session_close`、`connect` 的操作字符串做匹配
+- PTY session 写入按已完成的输入行做授权和审计；daemon session 和 desktop 本地 session 都会缓存未完成输入，直到换行后再按完整命令授权；`session_read`、`session_list`、`forward_list` 这类观察操作主要通过 token/scope 和事件流控制，不默认写入 `audit.jsonl`
 
 ---
 
@@ -471,6 +472,7 @@ tags = ["database"]
 - 返回 `success` 状态和 `total_duration_ms` 总耗时
 - 使用 MCP 工具 `ssh_playbook_run` 或 Daemon API `POST /playbooks/run` 执行
 - 高风险步骤需要 daemon 审批或 `force: true` 才能执行；本地 CLI/MCP 没有可用审批处理器时会失败关闭，并提示改走 daemon 审批流或在策略允许时使用 `--force`
+- daemon 审批只对被批准的具体步骤生效；不会因为前一个高风险步骤获批而自动放行后续高风险步骤。显式 `force: true` 仍表示调用方请求放行整个 playbook。
 
 ### 注意事项
 
@@ -538,6 +540,8 @@ token = "550e8400-e29b-41d4-a716-446655440000"
 - `denied_commands`：拒绝执行的命令或操作模式，优先于 allowed 规则
 
 远程 daemon 自身也可以通过 `daemon_tokens.toml` 为传入 token 配置服务端 scope。建议客户端 scope 和服务端 scoped token 同时使用，避免远程配置误用时扩大权限。
+
+当 `remotes.toml` 的 scope 配置了 `allowed_tags` 时，CLI/MCP/daemon proxy 会在转发前读取远程 daemon 的 `/hosts`，用远端 host metadata 中的 tags 判断客户端侧 scope；未配置 `allowed_tags` 时不额外查询远端 tags。
 
 ### 使用方式
 
@@ -928,6 +932,8 @@ agent2ssh-daemon-x86_64-apple-darwin: OK
 ### 团队配置分享验证
 
 使用 `agent2ssh config-export` 导出团队配置时，可通过 SHA256 验证文件完整性：
+
+`config-export` 会移除 host 的 `key_path` 和 `password`。`config-import` 遇到同名 host 时会更新地址、用户、端口、jump host、标签和 env/role/owner/risk_override 等非凭据字段，并保留本机已有的 key/password。
 
 ```bash
 # 导出配置

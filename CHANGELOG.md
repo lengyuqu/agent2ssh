@@ -14,8 +14,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - **Anomaly detection**: Added `anomaly.toml`, source burst detection, sensitive command pattern detection, after-hours high-risk detection, `anomaly_detected` events, webhook support, and Live Activity anomaly highlighting.
 
 ### Changed
+- **Approval scoping**: Multi-host execution and playbook approvals now apply only to the approved host or step. Explicit `force` still applies to the whole requested operation when policy permits.
+- **Mutation authorization and audit semantics**: Non-exec mutation paths now use the normal high-risk approval/force semantics instead of implicitly forcing authorization. PTY session writes use line-buffered authorization for completed shell input, and session/forward/connection operations write operation-level audit entries.
+- **Approval context risk details**: Daemon approval context now carries the effective risk produced by the authorization path, including trusted host overrides and matched approval policy names when available.
+- **Desktop risk previews**: Desktop exec and session input previews now include host-level `risk_override` before prompting.
+- **Remote daemon tag scope**: Client-side `remotes.toml` tag checks now read host tags from the remote daemon before forwarding, so tag-based remote scope decisions use the remote daemon as the source of truth.
+- **Team config import semantics**: `config-import` now updates changed same-name hosts while preserving local key/password material, matching the existing import preview.
 - **Policy compatibility**: Runtime policy loading now prefers unified policy files and falls back to legacy `risk_rules.toml` / `approval_policies.toml` when no unified policy exists.
-- **Documentation**: README, architecture, OpenAPI, configuration, daemon quickstart, and plan docs now describe the completed G-stage control-plane capabilities.
+- **Documentation**: README, architecture, OpenAPI, configuration, daemon quickstart, MCP quickstart, and plan docs now describe the completed G-stage control-plane capabilities and the exact PTY/session audit boundary.
+
+### Fixed
+- **Desktop mutation parity**: Desktop-local SFTP, session, forward, and connection operations now use the same high-risk approval/force semantics as daemon, CLI, and MCP paths.
+- **Desktop operation audit**: Desktop-local session, forward, and connection mutations now append operation-level audit entries for success and failure.
 
 ## [0.1.1] - 2026-06-16
 
