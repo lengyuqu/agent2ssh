@@ -1,6 +1,6 @@
 import { Key, Plus, Trash2, Copy, Download, Check } from "lucide-react";
 import { useEffect, useState } from "react";
-import { api } from "../api";
+import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
 import type { SshKeyInfo } from "../types";
 import { Button } from "./ui/button";
@@ -49,6 +49,7 @@ export default function KeysPanel(_props: Props) {
       await refresh();
     } catch (err) {
       setError(String(err));
+      reportError("keys-panel", "generate key failed", err);
     }
   }
 
@@ -66,6 +67,7 @@ export default function KeysPanel(_props: Props) {
       await refresh();
     } catch (err) {
       setError(String(err));
+      reportError("keys-panel", "import key failed", err);
     }
   }
 
@@ -76,6 +78,7 @@ export default function KeysPanel(_props: Props) {
       await refresh();
     } catch (err) {
       setError(String(err));
+      reportError("keys-panel", "delete key failed", err);
     }
   }
 

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { api } from "../api";
+import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
 import type { HostProfile, SshKeyInfo } from "../types";
 import { Button } from "./ui/button";
@@ -71,6 +71,7 @@ export default function SetupWizard({ onComplete, onSkip }: SetupWizardProps) {
       setImportedHosts(hosts);
     } catch (err) {
       setImportError(String(err));
+      reportError("setup-wizard", "import ssh config failed", err);
     } finally {
       setImporting(false);
     }
@@ -89,6 +90,7 @@ export default function SetupWizard({ onComplete, onSkip }: SetupWizardProps) {
       setKeyName("");
     } catch (err) {
       setKeyError(String(err));
+      reportError("setup-wizard", "generate key failed", err);
     } finally {
       setGeneratingKey(false);
     }
@@ -108,6 +110,7 @@ export default function SetupWizard({ onComplete, onSkip }: SetupWizardProps) {
       }
     } catch (err) {
       setDaemonError(String(err));
+      reportError("setup-wizard", "start daemon failed", err);
     } finally {
       setDaemonLoading(false);
     }

@@ -51,7 +51,7 @@ pub use core::{
 };
 pub use diagnostics::{
     app_log_path, append_diagnostic_log, clear_diagnostic_logs, export_diagnostic_bundle,
-    list_diagnostic_logs, DiagnosticLogEntry,
+    install_panic_hook, list_diagnostic_logs, set_error_sink, DiagnosticLogEntry,
 };
 pub use events::{event_bus, publish_event, subscribe_events, Agent2SSHEvent, EventType};
 pub use execution_control::{

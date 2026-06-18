@@ -139,7 +139,7 @@ pub fn generate_key_core(name: &str, comment: Option<&str>) -> Result<SshKeyInfo
 
     let comment = comment.unwrap_or("agent2ssh");
     let mut seed = [0u8; ssh_key::private::Ed25519PrivateKey::BYTE_SIZE];
-    getrandom::fill(&mut seed).map_err(|e| anyhow!("failed to read system random source: {e}"))?;
+    fill_entropy(&mut seed)?;
     let keypair = Ed25519Keypair::from_seed(&seed);
     let private_key = PrivateKey::new(KeypairData::from(keypair), comment)?;
     let private_pem = private_key.to_openssh(LineEnding::LF)?;
@@ -157,6 +157,95 @@ pub fn generate_key_core(name: &str, comment: Option<&str>) -> Result<SshKeyInfo
         key_type: "ed25519".to_string(),
         created_at: Some(chrono::Utc::now().to_rfc3339()),
     })
+}
+
+fn fill_entropy(seed: &mut [u8]) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        let source = "linux-urandom";
+        use std::io::Read;
+
+        let mut file = std::fs::File::open("/dev/urandom").map_err(|e| {
+            log_entropy_error(source, &e.to_string());
+            anyhow!("failed to open /dev/urandom ({source}): {e}")
+        })?;
+        file.read_exact(seed).map_err(|e| {
+            log_entropy_error(source, &e.to_string());
+            anyhow!("failed to read entropy from /dev/urandom ({source}): {e}")
+        })?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        use std::ffi::c_void;
+
+        unsafe {
+            extern "C" {
+                fn arc4random_buf(buf: *mut c_void, nbytes: usize);
+            }
+
+            arc4random_buf(seed.as_mut_ptr().cast::<c_void>(), seed.len());
+        }
+        return Ok(());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let source = "windows-BCryptGenRandom";
+        use std::ptr::null_mut;
+
+        const BCRYPT_USE_SYSTEM_PREFERRED_RNG: u32 = 0x00000002;
+
+        unsafe {
+            extern "system" {
+                fn BCryptGenRandom(
+                    hAlgorithm: *mut std::ffi::c_void,
+                    pbBuffer: *mut u8,
+                    cbBuffer: u32,
+                    dwFlags: u32,
+                ) -> u32;
+            }
+
+            let status = BCryptGenRandom(
+                null_mut(),
+                seed.as_mut_ptr(),
+                seed.len() as u32,
+                BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+            );
+            if status == 0 {
+                return Ok(());
+            }
+
+            log_entropy_error(source, &format!("BCryptGenRandom status=0x{status:08x}"));
+            return Err(anyhow!(
+                "failed to read entropy via BCryptGenRandom ({source}): status {status:#x}"
+            ));
+        }
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        let source = "fallback-getrandom";
+        getrandom::fill(seed).map_err(|e| {
+            log_entropy_error(source, &e.to_string());
+            anyhow!("failed to read entropy via getrandom ({source}): {e}")
+        })?;
+        return Ok(());
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn log_entropy_error(source: &str, details: &str) {
+    let _ = crate::diagnostics::append_diagnostic_log(
+        "error",
+        "keys",
+        "random source failed",
+        Some(serde_json::json!({
+            "source": source,
+            "details": details,
+        })),
+    );
 }
 
 /// Import an existing private key file into the keys directory
@@ -229,6 +318,26 @@ pub fn import_key_core(source_path: &str, name: Option<&str>) -> Result<SshKeyIn
 mod tests {
     use super::*;
 
+    #[cfg(test)]
+    fn entropy_source_name() -> &'static str {
+        #[cfg(target_os = "linux")]
+        {
+            return "linux-urandom";
+        }
+        #[cfg(target_os = "macos")]
+        {
+            return "macos-arc4random";
+        }
+        #[cfg(target_os = "windows")]
+        {
+            return "windows-BCryptGenRandom";
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+        {
+            return "fallback-getrandom";
+        }
+    }
+
     #[test]
     #[serial_test::serial]
     fn test_generate_key_core_writes_openssh_ed25519_pair() {
@@ -256,6 +365,25 @@ mod tests {
             Some(value) => std::env::set_var("AGENT2SSH_CONFIG_DIR", value),
             None => std::env::remove_var("AGENT2SSH_CONFIG_DIR"),
         }
+    }
+
+    #[test]
+    fn test_entropy_source_is_expected_for_platform() {
+        #[cfg(target_os = "linux")]
+        assert_eq!(entropy_source_name(), "linux-urandom");
+        #[cfg(target_os = "macos")]
+        assert_eq!(entropy_source_name(), "macos-arc4random");
+        #[cfg(target_os = "windows")]
+        assert_eq!(entropy_source_name(), "windows-BCryptGenRandom");
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+        assert_eq!(entropy_source_name(), "fallback-getrandom");
+    }
+
+    #[test]
+    fn test_fill_entropy_populates_nonzero_bytes() {
+        let mut seed = [0u8; 32];
+        fill_entropy(&mut seed).unwrap();
+        assert!(seed.iter().any(|byte| *byte != 0));
     }
 
     #[cfg(unix)]

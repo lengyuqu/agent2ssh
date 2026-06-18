@@ -80,6 +80,17 @@ MCP PTY sessions route to the local daemon registry by default when the daemon i
 
 The daemon also exposes `/terminal` as an authenticated WebSocket endpoint for an interactive terminal. It streams terminal bytes directly, accepts resize control messages, and emits a connection metadata frame containing the host-key SHA256 fingerprint, host-key algorithm, address, username, and server banner before shell output. Completed input lines are checked through the same authorization path as REST session writes before the bytes are forwarded to the remote PTY.
 
+### Diagnostics And Exception Logging
+
+`diagnostics.rs` is the shared structured-log core. `append_diagnostic_log(level, component, message, fields)` writes one redacted JSONL record per line to `~/.agent2ssh/app.log`, rotating inline at 5 MB (3 generations). All four surfaces feed it:
+
+- **Frontend** routes uncaught errors, unhandled promise rejections, and a top-level React `ErrorBoundary` (plus per-panel `catch` blocks via the `reportError` helper in `src/api.ts`) into the backend `write_diagnostic_log` command.
+- **MCP** logs every failed tool dispatch (method + tool name) before returning the JSON-RPC error.
+- **Daemon** composes a `tracing` layer that forwards `WARN`/`ERROR` events whose target starts with `agent2ssh` into `app.log`, so the daemon's structured logs are observable even when its stdout/stderr are not captured. Its redirected stdout/stderr still land in `daemon.log`, which `daemon_control.rs` rotates at (re)start time.
+- **All binaries** install a process-wide panic hook (`install_panic_hook`) that records panics to `app.log` before the default stderr behavior.
+
+Error-level entries also fan out to an optional sink: the daemon registers one via `set_error_sink` that fires the `diagnostic_error` notify webhook (opt-in through the webhook `events` list). The desktop Settings → Diagnostics panel lists, exports (bundle), and clears these logs.
+
 ## Safety Model
 
 Execution entry points resolve an effective risk before running remote work:

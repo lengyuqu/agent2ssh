@@ -1,6 +1,6 @@
 import { Play, Server } from "lucide-react";
 import { useState } from "react";
-import { api } from "../api";
+import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
 import type { ExecMultiResult, HostProfile } from "../types";
 import RiskBadge from "./RiskBadge";
@@ -52,6 +52,7 @@ export default function MultiExecPanel({ hosts, onExecComplete }: Props) {
       onExecComplete();
     } catch (err) {
       setError(String(err));
+      reportError("multi-exec-panel", "multi-host exec failed", err);
     } finally {
       setBusy(false);
     }

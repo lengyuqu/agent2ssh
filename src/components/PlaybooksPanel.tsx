@@ -12,7 +12,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { api } from "../api";
+import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
 import type { HostProfile, Playbook, PlaybookRunResult, RiskLevel } from "../types";
 import RiskBadge from "./RiskBadge";
@@ -166,6 +166,7 @@ export default function PlaybooksPanel({ hosts }: Props) {
       await refresh();
     } catch (err) {
       setError(String(err));
+      reportError("playbooks-panel", "save playbook failed", err);
     } finally {
       setSaving(false);
     }
@@ -183,6 +184,7 @@ export default function PlaybooksPanel({ hosts }: Props) {
       await refresh();
     } catch (err) {
       setError(String(err));
+      reportError("playbooks-panel", "delete playbook failed", err, { name: playbook.name });
     }
   }
 
@@ -212,6 +214,7 @@ export default function PlaybooksPanel({ hosts }: Props) {
       setResult(res);
     } catch (err) {
       setError(String(err));
+      reportError("playbooks-panel", "run playbook failed", err, { playbook: selectedPlaybook, host: selectedHost });
     } finally {
       setRunning(false);
     }
@@ -268,10 +271,10 @@ export default function PlaybooksPanel({ hosts }: Props) {
                 }
               >
                 <option value="">{t("None")}</option>
-                <option value="low">low</option>
-                <option value="medium">medium</option>
-                <option value="high">high</option>
-                <option value="blocked">blocked</option>
+                <option value="low">{t("low")}</option>
+                <option value="medium">{t("medium")}</option>
+                <option value="high">{t("high")}</option>
+                <option value="blocked">{t("blocked")}</option>
               </Select>
             </label>
           </div>

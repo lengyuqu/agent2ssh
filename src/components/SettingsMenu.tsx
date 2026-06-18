@@ -15,10 +15,11 @@ import {
   Trash2,
   Upload,
   Wand2,
+  XCircle,
   X,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { api, getDaemonUrl } from "../api";
+import { api, getDaemonUrl, reportError } from "../api";
 import { useI18n } from "../i18n";
 import type { DaemonHealth, DiagnosticLogEntry, ExecutionGateStatus } from "../types";
 import LanguageSwitcher from "./LanguageSwitcher";
@@ -72,6 +73,7 @@ export default function SettingsMenu({
   );
   const [diagnosticLogs, setDiagnosticLogs] = useState<DiagnosticLogEntry[]>([]);
   const [diagnosticMessage, setDiagnosticMessage] = useState<string | null>(null);
+  const [appActionBusy, setAppActionBusy] = useState<"exit" | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const gatePaused = gateStatus?.mode === "paused";
   const gateUnavailable = gateStatus === null;
@@ -151,6 +153,7 @@ export default function SettingsMenu({
       await onGateRefresh();
     } catch (err) {
       setDaemonActionMessage(String(err));
+      reportError("settings-menu", "daemon action failed", err, { action });
     } finally {
       setDaemonActionBusy(null);
     }
@@ -194,6 +197,7 @@ export default function SettingsMenu({
       await refreshDiagnostics();
     } catch (err) {
       setDiagnosticMessage(String(err));
+      reportError("settings-menu", "export diagnostic bundle failed", err);
     } finally {
       setDiagnosticBusy(null);
     }
@@ -210,6 +214,18 @@ export default function SettingsMenu({
       setDiagnosticMessage(String(err));
     } finally {
       setDiagnosticBusy(null);
+    }
+  }
+
+  async function quitApplication() {
+    setAppActionBusy("exit");
+    try {
+      await api.quitApp();
+    } catch (err) {
+      setDiagnosticMessage(String(err));
+      reportError("settings-menu", "quit application failed", err);
+    } finally {
+      setAppActionBusy(null);
     }
   }
 
@@ -483,6 +499,22 @@ export default function SettingsMenu({
                 {diagnosticLogs.map(formatDiagnosticEntry).join("\n")}
               </pre>
             )}
+          </section>
+
+          <section className="grid gap-2">
+            <div className={sectionTitleCls}>{t("App")}</div>
+            <button
+              type="button"
+              className={cn(rowBtnCls, "justify-center px-2")}
+              onClick={quitApplication}
+              disabled={appActionBusy !== null}
+              title={t("Quit application")}
+            >
+              <XCircle size={16} className={appActionBusy === "exit" ? "animate-pulse" : ""} />
+              <span className="truncate">
+                {appActionBusy === "exit" ? t("Exiting...") : t("Quit application")}
+              </span>
+            </button>
           </section>
 
           <section className="grid gap-2">

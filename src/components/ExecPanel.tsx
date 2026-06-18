@@ -1,6 +1,6 @@
 import { ChevronDown, ChevronUp, Play, ShieldAlert } from "lucide-react";
 import { useEffect, useState } from "react";
-import { api } from "../api";
+import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
 import type { ExecResult, HostProfile, RiskLevel } from "../types";
 import ApprovalDialog from "./ApprovalDialog";
@@ -81,6 +81,7 @@ export default function ExecPanel({ hosts, initialHost = "", onExecComplete }: P
       onExecComplete();
     } catch (err) {
       setError(String(err));
+      reportError("exec-panel", "ssh exec failed", err);
     } finally {
       setBusy(false);
     }

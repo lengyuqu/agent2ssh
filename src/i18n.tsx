@@ -1,4 +1,5 @@
 import { createContext, type ReactNode, useContext, useEffect, useMemo, useState } from "react";
+import { api } from "./api";
 
 export type Language = "en" | "zh";
 
@@ -37,9 +38,12 @@ const zh: Record<string, string> = {
   "Daemon unavailable": "Daemon 不可用",
   "Refresh daemon health": "刷新 Daemon 健康状态",
   "Daemon controls": "Daemon 控制",
+  "App": "应用",
   "Start daemon": "启动 Daemon",
   "Stop daemon": "停止 Daemon",
   "Restart daemon": "重启 Daemon",
+  "Quit application": "退出应用",
+  "Exiting...": "退出中...",
   "Starting...": "启动中...",
   "Stopping...": "停止中...",
   "Restarting...": "重启中...",
@@ -53,6 +57,49 @@ const zh: Record<string, string> = {
   "Refresh diagnostics": "刷新诊断日志",
   "Export diagnostics": "导出诊断包",
   "Export": "导出",
+  "Detected": "已检测",
+  "Not detected": "未检测",
+  "Configured": "已配置",
+  "detected": "已检测",
+  "Configure": "配置",
+  "Configuring...": "配置中...",
+  "Configure MCP": "配置 MCP",
+  "Update MCP config": "更新 MCP 配置",
+  "configured": "已配置",
+  "Update": "更新",
+  "Invalid config": "配置无效",
+  "Copy command": "复制命令",
+  "Copy MCP command": "复制 MCP 命令",
+  "Save": "保存",
+  "Description": "描述",
+  "Risk override": "风险覆盖",
+  "No playbooks configured. Create one here or edit": "尚未配置 playbook。请在这里创建或编辑",
+  "Steps": "步骤",
+  "Step": "步骤",
+  "New": "新建",
+  "Failed to start daemon: {error}": "启动 Daemon 失败：{error}",
+  "Update host": "更新主机",
+  "Group": "分组",
+  "Groups": "分组",
+  "Rename group": "重命名分组",
+  "New group": "新建分组",
+  "Delete group": "删除分组",
+  "Delete group {name}?": "删除分组 {name}？",
+  "Hosts in this group will move to Default.": "该分组中的主机将移动到 Default。",
+  "Add": "添加",
+  "Edit": "编辑",
+  "Edit {name}": "编辑 {name}",
+  "Delete": "删除",
+  "MCP Agents": "MCP Agents",
+  "Edit Host": "编辑主机",
+  "A playbook named {name} already exists": "名为 {name} 的 playbook 已存在",
+  "Playbook name and at least one step are required": "playbook 名称和至少一个步骤是必填项",
+  "Describe what this playbook does": "简要描述 playbook 功能",
+  "Saved playbook: {name}": "已保存 playbook：{name}",
+  "Deleted playbook: {name}": "已删除 playbook：{name}",
+  "Delete playbook {name}?": "删除 playbook {name}？",
+  "Parameterized playbooks can be run, but this editor only supports simple step lists.": "参数化 playbook 可运行，但此编辑器仅支持简单步骤列表。",
+  "Tags": "标签",
   "Clear app log": "清空应用日志",
   "Loaded {count} diagnostic entries": "已加载 {count} 条诊断记录",
   "Diagnostic bundle written: {path}": "诊断包已写入：{path}",
@@ -148,6 +195,8 @@ const zh: Record<string, string> = {
   "in": "耗时",
   "Port Forwarding": "端口转发",
   "Refresh": "刷新",
+  "Open": "打开",
+  "Quit": "退出",
   "Direction": "方向",
   "Local (-L)": "本地（-L）",
   "Remote (-R)": "远程（-R）",
@@ -273,6 +322,7 @@ const zh: Record<string, string> = {
   "New key name (e.g. id_ed25519)": "新密钥名称（例如 id_ed25519）",
   "Generating...": "生成中...",
   "Generate Key": "生成密钥",
+  "中文": "中文",
   "Please enter a key name.": "请输入密钥名称。",
   "The daemon provides the HTTP API and web console. When running, it listens on 127.0.0.1:7722.": "daemon 提供 HTTP API 和 Web 控制台。运行时监听 127.0.0.1:7722。",
   "Daemon is running on http://127.0.0.1:7722": "daemon 正在 http://127.0.0.1:7722 运行",
@@ -309,6 +359,18 @@ export function I18nProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, language);
     document.documentElement.lang = language === "zh" ? "zh-CN" : "en";
+  }, [language]);
+
+  useEffect(() => {
+    const openLabel = language === "zh" ? zh["Open"] : "Open";
+    const quitLabel = language === "zh" ? zh["Quit"] : "Quit";
+    api.setTrayLabels({
+      openLabel,
+      quitLabel,
+      tooltip: "Agent2SSH",
+    }).catch(() => {
+      // Ignore tray label sync failures when running outside tray-capable environment.
+    });
   }, [language]);
 
   const value = useMemo<I18nContextValue>(

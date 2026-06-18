@@ -3590,8 +3590,89 @@ denied_commands = ["rm *"]
 
 // ── Main ─────────────────────────────────────────────────────────────────────
 
+/// Collects an event's `message` and remaining fields into a JSON-ready shape so
+/// the diagnostic bridge can persist them.
+#[derive(Default)]
+struct DiagnosticFieldVisitor {
+    message: String,
+    fields: serde_json::Map<String, serde_json::Value>,
+}
+
+impl tracing::field::Visit for DiagnosticFieldVisitor {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "message" {
+            self.message = value.to_string();
+        } else {
+            self.fields.insert(
+                field.name().to_string(),
+                serde_json::Value::String(value.to_string()),
+            );
+        }
+    }
+
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        let rendered = format!("{value:?}");
+        if field.name() == "message" {
+            self.message = rendered;
+        } else {
+            self.fields.insert(
+                field.name().to_string(),
+                serde_json::Value::String(rendered),
+            );
+        }
+    }
+}
+
+/// A tracing layer that forwards `WARN`/`ERROR` events into the shared
+/// diagnostic log (`app.log`). This unifies the daemon's rich `tracing` output
+/// with the structured diagnostics the desktop UI reads, so warnings/errors are
+/// observable even when the daemon's stdout/stderr are not captured.
+struct DiagnosticBridgeLayer;
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for DiagnosticBridgeLayer {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let level = *event.metadata().level();
+        // In tracing's ordering, ERROR < WARN < INFO, so `<= WARN` keeps exactly
+        // the warning and error levels.
+        if level > tracing::Level::WARN {
+            return;
+        }
+        // Only bridge our own events; dependency noise (hyper/reqwest/…) stays in
+        // the fmt sink and never reaches app.log or the error-alert webhook.
+        if !event.metadata().target().starts_with("agent2ssh") {
+            return;
+        }
+
+        let mut visitor = DiagnosticFieldVisitor::default();
+        event.record(&mut visitor);
+        visitor.fields.insert(
+            "target".to_string(),
+            serde_json::Value::String(event.metadata().target().to_string()),
+        );
+
+        let diag_level = if level == tracing::Level::ERROR {
+            "error"
+        } else {
+            "warn"
+        };
+        let _ = agent2ssh::append_diagnostic_log(
+            diag_level,
+            "daemon",
+            &visitor.message,
+            Some(serde_json::Value::Object(visitor.fields)),
+        );
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
     // ── P9-1: Initialize structured logging ──────────────────────────────────
     let log_level = std::env::var("AGENT2SSH_LOG").unwrap_or_else(|_| "info".to_string());
     let log_format = std::env::var("AGENT2SSH_LOG_FORMAT").unwrap_or_else(|_| "text".to_string());
@@ -3599,16 +3680,38 @@ async fn main() -> anyhow::Result<()> {
     let env_filter = tracing_subscriber::EnvFilter::try_new(&log_level)
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
 
+    // Record panics to app.log so a daemon thread crash is observable even when
+    // stdout/stderr are not being captured (e.g. standalone runs).
+    agent2ssh::install_panic_hook("daemon");
+
+    // Forward error-level diagnostics to the notify webhook (opt-in: only fires
+    // when "diagnostic_error" is in the configured webhook events). Spawned onto
+    // the tokio runtime; skipped if called from a non-runtime thread.
+    agent2ssh::set_error_sink(|entry| {
+        let evt = WebhookEvent {
+            event: "diagnostic_error".into(),
+            host: entry.component.clone(),
+            command: entry.message.clone(),
+            approval_id: None,
+            risk_level: None,
+            exit_code: None,
+        };
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let _ = fire_webhook(evt).await;
+            });
+        }
+    });
+
+    let registry = tracing_subscriber::registry()
+        .with(env_filter)
+        .with(DiagnosticBridgeLayer);
+
     match log_format.as_str() {
-        "json" => {
-            tracing_subscriber::fmt()
-                .json()
-                .with_env_filter(env_filter)
-                .init();
-        }
-        _ => {
-            tracing_subscriber::fmt().with_env_filter(env_filter).init();
-        }
+        "json" => registry
+            .with(tracing_subscriber::fmt::layer().json())
+            .init(),
+        _ => registry.with(tracing_subscriber::fmt::layer()).init(),
     }
 
     // Record start time for uptime calculation

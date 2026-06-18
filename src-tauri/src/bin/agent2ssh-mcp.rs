@@ -17,9 +17,9 @@ use agent2ssh::remote::{
 use agent2ssh::risk_config::classify_with_user_rules;
 use agent2ssh::store::{audit_path, compute_metrics_trend, TrendPeriod};
 use agent2ssh::{
-    add_host_core, collect_health_snapshot, compare_exec_results, compare_ssh_configs,
-    connect_host, disconnect_host, dry_run_playbook, effective_command_risk, exec_multi_core,
-    exec_multi_with_strategy, exec_ssh_core, export_audit_csv, export_audit_jsonl,
+    add_host_core, append_diagnostic_log, collect_health_snapshot, compare_exec_results,
+    compare_ssh_configs, connect_host, disconnect_host, dry_run_playbook, effective_command_risk,
+    exec_multi_core, exec_multi_with_strategy, exec_ssh_core, export_audit_csv, export_audit_jsonl,
     export_team_config, export_to_ssh_config, forward_add_core, forward_list_core,
     forward_remove_core, import_ssh_config_core, import_team_config, list_active_connections,
     list_audit_core, list_hosts_core, list_playbooks_core, ping_hosts_core, preview_exec,
@@ -514,6 +514,7 @@ async fn try_daemon_session_list() -> std::result::Result<DaemonAttempt<Vec<Valu
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    agent2ssh::install_panic_hook("mcp");
     let stdin = io::stdin();
     let mut stdout = io::stdout();
 
@@ -533,11 +534,26 @@ async fn main() -> Result<()> {
 
         let response = match handle_request(&request).await {
             Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
-            Err(err) => json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "error": { "code": err.code, "message": err.message }
-            }),
+            Err(err) => {
+                // Persist the failure so MCP tool errors are observable in app.log
+                // rather than only surfacing as a JSON-RPC error to the caller.
+                let method = request.get("method").and_then(Value::as_str).unwrap_or("");
+                let tool = request
+                    .get("params")
+                    .and_then(|params| params.get("name"))
+                    .and_then(Value::as_str);
+                let _ = append_diagnostic_log(
+                    "error",
+                    "mcp",
+                    &err.message,
+                    Some(json!({ "method": method, "tool": tool, "code": err.code })),
+                );
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": { "code": err.code, "message": err.message }
+                })
+            }
         };
 
         writeln!(stdout, "{}", serde_json::to_string(&response)?)?;

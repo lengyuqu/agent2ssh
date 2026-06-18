@@ -1,6 +1,6 @@
 import { Radio, Wifi, WifiOff } from "lucide-react";
 import { useState } from "react";
-import { api } from "../api";
+import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
 import type { HostProfile, PingResult } from "../types";
 import { cn } from "../lib/utils";
@@ -25,6 +25,7 @@ export default function PingPanel({ hosts }: Props) {
       setResults(res);
     } catch (err) {
       setError(String(err));
+      reportError("ping-panel", "ping hosts failed", err);
     } finally {
       setBusy(false);
     }

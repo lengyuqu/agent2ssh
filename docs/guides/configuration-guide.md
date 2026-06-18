@@ -619,8 +619,9 @@ secret = "my-secret-key"
 | `exec_blocked` | 命令被用户自定义规则阻止时 |
 | `exec_completed` | 命令执行完成时（无论成功或失败） |
 | `anomaly_detected` | audit 滑动窗口检测到异常行为时 |
+| `diagnostic_error` | 任意来源写入 `error` 级诊断日志（`app.log`）时；`host` 字段携带组件名，`command` 字段携带错误消息（已脱敏） |
 
-默认仅订阅 `approval_required` 事件。
+默认仅订阅 `approval_required` 事件。`diagnostic_error` 为可选订阅，启用后每条 `error` 级诊断都会推送一次 webhook，适合接入告警通道。
 
 ### Slack 集成
 

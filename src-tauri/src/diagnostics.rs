@@ -18,6 +18,21 @@ fn diagnostic_lock() -> &'static Mutex<()> {
     DIAGNOSTIC_LOCK.get_or_init(|| Mutex::new(()))
 }
 
+type DiagnosticErrorSink = Box<dyn Fn(&DiagnosticLogEntry) + Send + Sync>;
+static ERROR_SINK: OnceLock<DiagnosticErrorSink> = OnceLock::new();
+
+/// Register a callback invoked once for every `error`-level diagnostic entry,
+/// after it has been written to `app.log` (and after the write lock is
+/// released). Used by the daemon to forward error diagnostics to the notify
+/// webhook for proactive alerting. The sink must not itself log at `error` level
+/// or it risks feeding back into this path. First registration wins.
+pub fn set_error_sink<F>(sink: F)
+where
+    F: Fn(&DiagnosticLogEntry) + Send + Sync + 'static,
+{
+    let _ = ERROR_SINK.set(Box::new(sink));
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiagnosticLogEntry {
     pub id: String,
@@ -104,6 +119,40 @@ fn rotate_app_log_if_needed_unlocked(max_size_bytes: u64) -> Result<()> {
     Ok(())
 }
 
+/// Install a process-wide panic hook that records every panic to the diagnostic
+/// log (`app.log`) before delegating to the previous hook (so the default
+/// stderr/backtrace behavior is preserved). Idempotent per process — call once
+/// at the start of `main`/`run_tauri`. This makes otherwise-silent thread panics
+/// observable across all four surfaces, not just whatever happens to capture
+/// stderr.
+pub fn install_panic_hook(component: &'static str) {
+    static INSTALLED: OnceLock<()> = OnceLock::new();
+    if INSTALLED.set(()).is_err() {
+        return;
+    }
+
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let message = match info.payload().downcast_ref::<&str>() {
+            Some(text) => (*text).to_string(),
+            None => match info.payload().downcast_ref::<String>() {
+                Some(text) => text.clone(),
+                None => "panic with non-string payload".to_string(),
+            },
+        };
+        let location = info
+            .location()
+            .map(|loc| format!("{}:{}:{}", loc.file(), loc.line(), loc.column()));
+        let _ = append_diagnostic_log(
+            "error",
+            component,
+            &format!("panic: {message}"),
+            Some(json!({ "location": location })),
+        );
+        previous(info);
+    }));
+}
+
 pub fn append_diagnostic_log(
     level: &str,
     component: &str,
@@ -132,6 +181,15 @@ pub fn append_diagnostic_log(
         .open(&path)
         .with_context(|| format!("failed to open diagnostic log {}", path.display()))?;
     writeln!(file, "{}", serde_json::to_string(&entry)?)?;
+
+    // Release the write lock before notifying the sink so the callback (which may
+    // log diagnostics of its own) cannot deadlock on the non-reentrant mutex.
+    drop(_guard);
+    if entry.level == "error" {
+        if let Some(sink) = ERROR_SINK.get() {
+            sink(&entry);
+        }
+    }
     Ok(entry)
 }
 
@@ -232,4 +290,58 @@ pub fn export_diagnostic_bundle() -> Result<PathBuf> {
     std::fs::write(&out, body)
         .with_context(|| format!("failed to write diagnostic bundle {}", out.display()))?;
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static SINK_HITS: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    #[serial_test::serial]
+    fn error_sink_fires_only_for_errors_and_redacts() {
+        let config_dir = std::env::temp_dir().join(format!("agent2ssh-diag-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::env::set_var("AGENT2SSH_CONFIG_DIR", &config_dir);
+
+        // OnceLock: first registration wins, so guard against other tests in the
+        // same process already having set a sink.
+        set_error_sink(|_entry| {
+            SINK_HITS.fetch_add(1, Ordering::SeqCst);
+        });
+        assert!(ERROR_SINK.get().is_some(), "a sink must be registered");
+
+        let before = SINK_HITS.load(Ordering::SeqCst);
+        append_diagnostic_log("info", "test", "an info message", None).unwrap();
+        let after_info = SINK_HITS.load(Ordering::SeqCst);
+
+        append_diagnostic_log(
+            "error",
+            "test",
+            "boom",
+            Some(json!({ "password": "hunter2" })),
+        )
+        .unwrap();
+        let after_error = SINK_HITS.load(Ordering::SeqCst);
+
+        // Only the error entry should reach the sink (delta of exactly 1).
+        assert_eq!(after_info, before, "info must not trigger the error sink");
+        assert_eq!(after_error, before + 1, "error must trigger the error sink");
+
+        // Secret fields must be redacted before they ever hit disk.
+        let logs = list_diagnostic_logs(10).unwrap();
+        let entry = logs
+            .iter()
+            .find(|e| e.component == "test" && e.level == "error")
+            .expect("error entry should be persisted");
+        assert_ne!(
+            entry.fields["password"], "hunter2",
+            "password field must be redacted"
+        );
+
+        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&config_dir);
+    }
 }

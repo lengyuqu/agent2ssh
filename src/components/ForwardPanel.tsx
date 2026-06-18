@@ -1,6 +1,6 @@
 import { ArrowLeftRight, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import { api } from "../api";
+import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
 import type { ForwardDirection, ForwardRule, HostProfile } from "../types";
 import { Button } from "./ui/button";
@@ -34,6 +34,7 @@ export default function ForwardPanel({ hosts, initialHost = "" }: Props) {
       setRules(list);
     } catch (err) {
       setError(String(err));
+      reportError("forward-panel", "list forwards failed", err);
     }
   }, []);
 
@@ -50,6 +51,7 @@ export default function ForwardPanel({ hosts, initialHost = "" }: Props) {
       await refresh();
     } catch (err) {
       setError(String(err));
+      reportError("forward-panel", "add forward failed", err, { host: tunnelHost, direction });
     } finally {
       setBusy(false);
     }
@@ -61,6 +63,7 @@ export default function ForwardPanel({ hosts, initialHost = "" }: Props) {
       await refresh();
     } catch (err) {
       setError(String(err));
+      reportError("forward-panel", "remove forward failed", err);
     }
   }
 

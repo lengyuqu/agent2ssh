@@ -34,7 +34,7 @@ import type {
 
 let daemonUrl = "http://127.0.0.1:7722";
 
-function logDiagnostic(
+export function logDiagnostic(
   level: "debug" | "info" | "warn" | "error",
   component: string,
   message: string,
@@ -48,6 +48,25 @@ function logDiagnostic(
   }).catch(() => {
     // Diagnostics must never break the user workflow.
   });
+}
+
+/**
+ * Fire-and-forget error reporter for use inside `catch` blocks across the UI.
+ * Normalizes the caught value (Error → message + stack) and forwards it to the
+ * backend diagnostic log at `error` level. Never throws and never awaits, so it
+ * is safe to call alongside `setError(...)` without affecting the user flow.
+ */
+export function reportError(
+  component: string,
+  message: string,
+  err: unknown,
+  fields?: Record<string, unknown>
+): void {
+  const detail =
+    err instanceof Error
+      ? { error: err.message, stack: err.stack }
+      : { error: String(err) };
+  logDiagnostic("error", component, message, { ...detail, ...(fields ?? {}) });
 }
 
 /** Change the base URL used for direct daemon HTTP calls (e.g. approvals, webhooks). */
@@ -317,6 +336,13 @@ export const api = {
   daemonStart: () => invoke<DaemonControlResult>("daemon_start"),
   daemonStop: () => invoke<DaemonControlResult>("daemon_stop"),
   daemonRestart: () => invoke<DaemonControlResult>("daemon_restart"),
+  quitApp: () => invoke<void>("quit_app"),
+  setTrayLabels: (params: { openLabel: string; quitLabel: string; tooltip?: string | null }) =>
+    invoke<void>("set_tray_labels", {
+      openLabel: params.openLabel,
+      quitLabel: params.quitLabel,
+      tooltip: params.tooltip ?? null,
+    }),
   listMcpAgentConfigs: () => invoke<McpAgentConfigStatus[]>("list_mcp_agent_configs"),
   configureMcpAgent: (agentId: string) =>
     invoke<McpAgentConfigureResult>("configure_mcp_agent", { agentId }),

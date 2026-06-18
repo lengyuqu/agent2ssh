@@ -6,3 +6,4 @@ src-tauri/binaries/*
 .DS_Store
 *.log
 .agent2ssh-test.env
+.workbuddy/

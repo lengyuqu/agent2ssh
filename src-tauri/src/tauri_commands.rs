@@ -49,7 +49,7 @@ use std::{
     sync::OnceLock,
     time::Instant,
 };
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager, WindowEvent};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -149,7 +149,74 @@ fn home_path(relative: &str) -> PathBuf {
         .join(relative)
 }
 
+fn mcp_candidate_paths(legacy_path: &str, platform_path: &str) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+
+    if let Some(config_dir) = dirs::config_dir() {
+        paths.push(config_dir.join(platform_path));
+    }
+    if let Some(local_dir) = dirs::data_local_dir() {
+        paths.push(local_dir.join(platform_path));
+    }
+
+    paths.push(home_path(legacy_path));
+    paths
+}
+
+fn preferred_mcp_path(legacy_path: &str, platform_path: &str) -> PathBuf {
+    mcp_candidate_paths(legacy_path, platform_path)
+        .into_iter()
+        .find(|path| path.exists())
+        .or_else(|| {
+            dirs::config_dir()
+                .map(|config_dir| config_dir.join(platform_path))
+                .or_else(|| dirs::data_local_dir().map(|local_dir| local_dir.join(platform_path)))
+                .or_else(|| Some(home_path(legacy_path)))
+        })
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
 fn mcp_agent_candidates() -> Vec<McpAgentCandidate> {
+    let mut claude_detection_paths = mcp_candidate_paths(
+        "Library/Application Support/Claude",
+        "Claude",
+    );
+    let mut cursor_detection_paths = mcp_candidate_paths(".cursor", "Cursor");
+    let mut codebuddy_detection_paths = mcp_candidate_paths(
+        "Library/Application Support/CodeBuddy",
+        "CodeBuddy",
+    );
+    let mut windsurf_detection_paths =
+        mcp_candidate_paths(".codeium/windsurf", "Codeium/windsurf");
+    let mut workbuddy_detection_paths = mcp_candidate_paths(
+        "Library/Application Support/WorkBuddy",
+        "WorkBuddy",
+    );
+    let mut qoder_work_detection_paths = mcp_candidate_paths(
+        "Library/Application Support/Qoder/SharedClientCache/mcp.json",
+        "Qoder/SharedClientCache/mcp.json",
+    );
+    let mut trae_detection_paths = mcp_candidate_paths(
+        "Library/Application Support/Trae",
+        "Trae",
+    );
+    let mut trae_solo_detection_paths = mcp_candidate_paths(
+        "Library/Application Support/TRAE SOLO",
+        "TRAE SOLO",
+    );
+
+    if cfg!(target_os = "macos") {
+        claude_detection_paths.push(PathBuf::from("/Applications/Claude.app"));
+        cursor_detection_paths.push(PathBuf::from("/Applications/Cursor.app"));
+        codebuddy_detection_paths.push(PathBuf::from("/Applications/CodeBuddy.app"));
+        windsurf_detection_paths.push(PathBuf::from("/Applications/Windsurf.app"));
+        workbuddy_detection_paths.push(PathBuf::from("/Applications/WorkBuddy.app"));
+        qoder_work_detection_paths.push(PathBuf::from("/Applications/QoderWork.app"));
+        qoder_work_detection_paths.push(PathBuf::from("/Applications/Qoder.app"));
+        trae_detection_paths.push(PathBuf::from("/Applications/Trae.app"));
+        trae_solo_detection_paths.push(PathBuf::from("/Applications/TRAE SOLO.app"));
+    }
+
     vec![
         McpAgentCandidate {
             id: "codex",
@@ -163,89 +230,110 @@ fn mcp_agent_candidates() -> Vec<McpAgentCandidate> {
             id: "claude_desktop",
             name: "Claude Desktop",
             source: "claude_desktop",
-            config_path: home_path("Library/Application Support/Claude/claude_desktop_config.json"),
+            config_path: preferred_mcp_path(
+                "Library/Application Support/Claude/claude_desktop_config.json",
+                "Claude/claude_desktop_config.json",
+            ),
             format: McpConfigFormat::Json,
-            detection_paths: vec![
-                home_path("Library/Application Support/Claude"),
-                PathBuf::from("/Applications/Claude.app"),
-            ],
+            detection_paths: claude_detection_paths,
         },
         McpAgentCandidate {
             id: "cursor",
             name: "Cursor",
             source: "cursor",
-            config_path: home_path(".cursor/mcp.json"),
+            config_path: preferred_mcp_path(".cursor/mcp.json", "Cursor/mcp.json"),
             format: McpConfigFormat::Json,
-            detection_paths: vec![
-                home_path(".cursor"),
-                PathBuf::from("/Applications/Cursor.app"),
-            ],
+            detection_paths: cursor_detection_paths,
+        },
+        McpAgentCandidate {
+            id: "codebuddy",
+            name: "CodeBuddy",
+            source: "codebuddy",
+            config_path: preferred_mcp_path(
+                "Library/Application Support/CodeBuddy/mcp.json",
+                "CodeBuddy/mcp.json",
+            ),
+            format: McpConfigFormat::Json,
+            detection_paths: {
+                codebuddy_detection_paths
+                    .into_iter()
+                    .chain([home_path(".codebuddy")])
+                    .collect()
+            },
         },
         McpAgentCandidate {
             id: "windsurf",
             name: "Windsurf",
             source: "windsurf",
-            config_path: home_path(".codeium/windsurf/mcp_config.json"),
+            config_path: preferred_mcp_path(
+                ".codeium/windsurf/mcp_config.json",
+                "Codeium/windsurf/mcp_config.json",
+            ),
             format: McpConfigFormat::Json,
-            detection_paths: vec![
-                home_path(".codeium/windsurf"),
-                PathBuf::from("/Applications/Windsurf.app"),
-            ],
+            detection_paths: windsurf_detection_paths,
         },
         McpAgentCandidate {
             id: "workbuddy",
             name: "WorkBuddy",
             source: "workbuddy",
-            config_path: home_path(".workbuddy/mcp.json"),
+            config_path: preferred_mcp_path(".workbuddy/mcp.json", "WorkBuddy/mcp.json"),
             format: McpConfigFormat::Json,
-            detection_paths: vec![
-                home_path(".workbuddy"),
-                home_path("Library/Application Support/WorkBuddy"),
-                home_path("Library/Application Support/@genie/workbuddy-desktop"),
-                PathBuf::from("/Applications/WorkBuddy.app"),
-            ],
+            detection_paths: {
+                let mut paths = workbuddy_detection_paths;
+                paths.push(home_path(".workbuddy"));
+                paths.push(home_path("Library/Application Support/@genie/workbuddy-desktop"));
+                paths
+            },
         },
         McpAgentCandidate {
             id: "qoder_work",
             name: "Qoder Work",
             source: "qoder_work",
-            config_path: home_path("Library/Application Support/Qoder/SharedClientCache/mcp.json"),
+            config_path: preferred_mcp_path(
+                "Library/Application Support/Qoder/SharedClientCache/mcp.json",
+                "Qoder/SharedClientCache/mcp.json",
+            ),
             format: McpConfigFormat::Json,
-            detection_paths: vec![
-                home_path("Library/Application Support/Qoder/SharedClientCache/mcp.json"),
-                home_path("Library/Application Support/QoderWork"),
-                home_path("Library/Application Support/Qoder"),
-                home_path(".qoderwork"),
-                home_path(".qoder"),
-                PathBuf::from("/Applications/QoderWork.app"),
-                PathBuf::from("/Applications/Qoder.app"),
-            ],
+            detection_paths: {
+                let mut paths = qoder_work_detection_paths;
+                paths.push(home_path("Library/Application Support/QoderWork"));
+                paths.push(home_path("Library/Application Support/Qoder"));
+                paths.push(home_path(".qoderwork"));
+                paths.push(home_path(".qoder"));
+                paths
+            },
         },
         McpAgentCandidate {
             id: "trae",
             name: "Trae",
             source: "trae",
-            config_path: home_path("Library/Application Support/Trae/User/mcp.json"),
+            config_path: preferred_mcp_path(
+                "Library/Application Support/Trae/User/mcp.json",
+                "Trae/User/mcp.json",
+            ),
             format: McpConfigFormat::Json,
-            detection_paths: vec![
-                home_path("Library/Application Support/Trae"),
-                home_path(".trae"),
-                home_path(".trae-cn"),
-                PathBuf::from("/Applications/Trae.app"),
-            ],
+            detection_paths: {
+                trae_detection_paths
+                    .into_iter()
+                    .chain([home_path(".trae"), home_path(".trae-cn")])
+                    .collect()
+            },
         },
         McpAgentCandidate {
             id: "trae_solo",
             name: "Trae Solo",
             source: "trae_solo",
-            config_path: home_path("Library/Application Support/TRAE SOLO/User/mcp.json"),
+            config_path: preferred_mcp_path(
+                "Library/Application Support/TRAE SOLO/User/mcp.json",
+                "TRAE SOLO/User/mcp.json",
+            ),
             format: McpConfigFormat::Json,
-            detection_paths: vec![
-                home_path("Library/Application Support/TRAE SOLO"),
-                home_path(".trae"),
-                home_path(".trae-cn"),
-                PathBuf::from("/Applications/TRAE SOLO.app"),
-            ],
+            detection_paths: {
+                trae_solo_detection_paths
+                    .into_iter()
+                    .chain([home_path(".trae"), home_path(".trae-cn")])
+                    .collect()
+            },
         },
     ]
 }
@@ -1285,6 +1373,12 @@ pub fn daemon_restart(app: AppHandle) -> Result<DaemonControlResult, String> {
 }
 
 #[tauri::command]
+pub fn quit_app(app: AppHandle) {
+    let _ = daemon_stop();
+    app.exit(0);
+}
+
+#[tauri::command]
 pub fn list_mcp_agent_configs() -> Result<Vec<McpAgentConfigStatus>, String> {
     let command = bundled_mcp_binary_path()?.display().to_string();
     Ok(mcp_agent_candidates()
@@ -1319,6 +1413,91 @@ pub fn list_mcp_agent_configs() -> Result<Vec<McpAgentConfigStatus>, String> {
             }
         })
         .collect())
+}
+
+const TRAY_ID: &str = "agent2ssh-tray";
+const TRAY_MENU_OPEN_ID: &str = "tray-open";
+const TRAY_MENU_QUIT_ID: &str = "tray-quit";
+
+fn reveal_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+fn quit_from_tray(app: &AppHandle) {
+    let _ = daemon_stop();
+    app.exit(0);
+}
+
+fn build_system_tray(
+    app: &AppHandle,
+    open_label: &str,
+    quit_label: &str,
+    tooltip: &str,
+) -> Result<(), String> {
+    let tray_menu = tauri::menu::Menu::with_items(
+        app,
+        &[
+            &tauri::menu::MenuItemBuilder::with_id(TRAY_MENU_OPEN_ID, open_label)
+                .build(app)
+                .map_err(|e| e.to_string())?,
+            &tauri::menu::MenuItemBuilder::with_id(TRAY_MENU_QUIT_ID, quit_label)
+                .build(app)
+                .map_err(|e| e.to_string())?,
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+
+    let mut tray_builder = tauri::tray::TrayIconBuilder::with_id(TRAY_ID)
+        .menu(&tray_menu)
+        .tooltip(tooltip)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| {
+            if event.id().as_ref() == TRAY_MENU_OPEN_ID {
+                reveal_main_window(&app.app_handle());
+            }
+
+            if event.id().as_ref() == TRAY_MENU_QUIT_ID {
+                quit_from_tray(&app.app_handle());
+            }
+        })
+        .on_tray_icon_event(|app, event| match event {
+            tauri::tray::TrayIconEvent::Click { button, .. }
+                if button == tauri::tray::MouseButton::Left =>
+            {
+                reveal_main_window(&app.app_handle());
+            }
+            tauri::tray::TrayIconEvent::DoubleClick { .. } => {
+                reveal_main_window(&app.app_handle());
+            }
+            _ => {}
+        });
+
+    if let Some(icon) = app.default_window_icon().cloned() {
+        tray_builder = tray_builder.icon(icon);
+    }
+
+    let _tray = tray_builder.build(app).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_tray_labels(
+    app: AppHandle,
+    open_label: String,
+    quit_label: String,
+    tooltip: Option<String>,
+) {
+    let _ = app.remove_tray_by_id(TRAY_ID);
+    let _ = build_system_tray(
+        &app,
+        &open_label,
+        &quit_label,
+        tooltip.as_deref().unwrap_or("Agent2SSH"),
+    );
 }
 
 #[tauri::command]
@@ -1523,8 +1702,21 @@ pub fn import_team_config_cmd(config: TeamConfigExport) -> Result<ImportResult, 
 // ── Bootstrap ────────────────────────────────────────────────────────────────
 
 pub fn run_tauri() {
+    crate::diagnostics::install_panic_hook("tauri");
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .setup(|app| {
+            build_system_tray(app.handle(), "Open", "Quit", "Agent2SSH")?;
+            Ok(())
+        })
+        .on_window_event(|app, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.minimize();
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             // Host management
             list_hosts,
@@ -1566,6 +1758,8 @@ pub fn run_tauri() {
             daemon_start,
             daemon_stop,
             daemon_restart,
+            quit_app,
+            set_tray_labels,
             list_mcp_agent_configs,
             configure_mcp_agent,
             // Diagnostics

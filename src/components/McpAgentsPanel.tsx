@@ -1,6 +1,6 @@
-import { Bot, CheckCircle2, Clipboard, PlugZap, RefreshCw, ShieldAlert } from "lucide-react";
+import { Bot, BrainCircuit, CheckCircle2, Clipboard, Code2, Globe, Laptop, PlugZap, RefreshCw, Send, ShieldAlert, Users, Wrench } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { api } from "../api";
+import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
 import type { McpAgentConfigStatus } from "../types";
 import { Badge } from "./ui/badge";
@@ -8,6 +8,29 @@ import { Button } from "./ui/button";
 import { Card } from "./ui/card";
 
 const chipCls = "max-w-full truncate rounded bg-muted px-1.5 py-1 text-xs text-muted-foreground";
+
+function agentIconFor(agent: McpAgentConfigStatus) {
+      switch (agent.id) {
+    case "cursor":
+      return Code2;
+    case "codebuddy":
+      return BrainCircuit;
+    case "windsurf":
+      return Send;
+    case "workbuddy":
+      return Users;
+    case "qoder_work":
+      return Laptop;
+    case "trae":
+    case "trae_solo":
+      return Globe;
+    case "claude_desktop":
+      return Wrench;
+    case "codex":
+    default:
+      return Bot;
+  }
+}
 
 export default function McpAgentsPanel() {
   const { t } = useI18n();
@@ -31,6 +54,7 @@ export default function McpAgentsPanel() {
       setAgents(await api.listMcpAgentConfigs());
     } catch (err) {
       setError(String(err));
+      reportError("mcp-agents-panel", "list mcp agent configs failed", err);
     } finally {
       setLoading(false);
     }
@@ -50,6 +74,7 @@ export default function McpAgentsPanel() {
       await refresh();
     } catch (err) {
       setError(String(err));
+      reportError("mcp-agents-panel", "configure mcp agent failed", err, { agent: agent.id });
     } finally {
       setConfiguring(null);
     }
@@ -104,7 +129,10 @@ export default function McpAgentsPanel() {
             >
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-2">
-                  <PlugZap size={16} className="text-muted-foreground" />
+                  {(() => {
+                    const AgentIcon = agentIconFor(agent);
+                    return <AgentIcon size={16} className="text-muted-foreground" />;
+                  })()}
                   <strong>{agent.name}</strong>
                   <Badge
                     variant={agent.configured ? "success" : agent.detected ? "default" : "secondary"}

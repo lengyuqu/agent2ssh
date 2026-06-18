@@ -107,11 +107,35 @@ pub fn wait_for_daemon_health(timeout: Duration) -> bool {
     daemon_health_ok()
 }
 
+/// Rotate daemon.log if it has grown past `max_size_bytes`, keeping two prior
+/// generations (`daemon.log.1`, `daemon.log.2`). The daemon writes via a
+/// redirected stdout/stderr handle that we cannot rotate while it runs, so this
+/// runs at (re)start time — bounding unbounded growth across restarts. Unlike
+/// app.log, which the core rotates inline on every write, daemon.log is only
+/// pruned here.
+fn rotate_daemon_log_if_needed(log_path: &Path, max_size_bytes: u64) {
+    let Ok(metadata) = std::fs::metadata(log_path) else {
+        return;
+    };
+    if metadata.len() <= max_size_bytes {
+        return;
+    }
+    for i in (1..=2).rev() {
+        let src = log_path.with_extension(format!("log.{i}"));
+        let dst = log_path.with_extension(format!("log.{}", i + 1));
+        if src.exists() {
+            let _ = std::fs::rename(&src, &dst);
+        }
+    }
+    let _ = std::fs::rename(log_path, log_path.with_extension("log.1"));
+}
+
 fn append_log_file() -> Result<File> {
     let log_path = daemon_log_path()?;
     if let Some(parent) = log_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    rotate_daemon_log_if_needed(&log_path, 5 * 1024 * 1024);
     OpenOptions::new()
         .create(true)
         .append(true)

@@ -21,7 +21,7 @@ export default function LanguageSwitcher() {
         EN
       </button>
       <button type="button" className={btn(language === "zh")} onClick={() => setLanguage("zh")}>
-        中文
+        {t("中文")}
       </button>
     </div>
   );

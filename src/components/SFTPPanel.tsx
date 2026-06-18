@@ -6,7 +6,7 @@ import {
   Info,
 } from "lucide-react";
 import { useState } from "react";
-import { api } from "../api";
+import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
 import type { ExecResult, HostProfile, SftpResult } from "../types";
 import HostSelector from "./HostSelector";
@@ -40,6 +40,7 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
       setLsResult(result);
     } catch (err) {
       setError(String(err));
+      reportError("sftp-panel", "sftp ls failed", err, { host: targetHost });
     } finally {
       setBusy(false);
     }
@@ -54,6 +55,7 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
       await listDir();
     } catch (err) {
       setError(String(err));
+      reportError("sftp-panel", "sftp mkdir failed", err, { host: targetHost });
     } finally {
       setBusy(false);
     }
@@ -68,6 +70,7 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
       setLsResult(result);
     } catch (err) {
       setError(String(err));
+      reportError("sftp-panel", "sftp stat failed", err, { host: targetHost });
     } finally {
       setBusy(false);
     }
@@ -82,6 +85,7 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
       setTransferResult(result);
     } catch (err) {
       setError(String(err));
+      reportError("sftp-panel", "sftp upload failed", err, { host: targetHost });
     } finally {
       setBusy(false);
     }
@@ -96,6 +100,7 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
       setTransferResult(result);
     } catch (err) {
       setError(String(err));
+      reportError("sftp-panel", "sftp download failed", err, { host: targetHost });
     } finally {
       setBusy(false);
     }
