@@ -116,6 +116,8 @@ The daemon approval handler creates an approval request and waits for approval, 
 
 Command execution, SFTP, ping/health probes, WebSocket exec streaming, the WebSocket terminal, persistent PTY sessions, jump-host proxying, retained connections, and port forwards use the in-process `ssh2` transport in `embedded_ssh.rs`. The embedded transport records connection diagnostics including authentication method, server banner, host-key algorithm, SHA256 host-key fingerprint, and jump-host alias when present. The terminal/session path requests a remote PTY and forwards resize changes through libssh2 rather than relying on a local system PTY process. Jump hosts are implemented by opening an embedded `direct-tcpip` channel through the bastion and using that channel as the transport for the target SSH session.
 
+Runtime SSH transport does not depend on system `ssh`, `scp`, or `sshpass`. The remaining system-tool dependency is local key generation through `ssh-keygen`; doctor/diagnostic commands may report whether `ssh-keygen` is available. SSH config import/export reads and writes local config text, but connection execution remains embedded.
+
 | Path | Current backend |
 |------|-----------------|
 | Exec, exec-multi, ping, and health snapshots | Embedded `ssh2` |
@@ -125,6 +127,7 @@ Command execution, SFTP, ping/health probes, WebSocket exec streaming, the WebSo
 | Jump-host / ProxyJump-style connections | Embedded `direct-tcpip` bastion channel |
 | Connection status/connect/disconnect | Retained embedded `ssh2` sessions |
 | Local and remote port forwards | Embedded `direct-tcpip` forwarding |
+| Local SSH key generation | System `ssh-keygen` |
 
 ## Control Plane
 

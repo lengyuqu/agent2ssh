@@ -208,7 +208,7 @@ export default function AddHostForm({ hosts, groups, initialGroup, editingHost, 
               placeholder={t("Password")}
             />
             <span className="text-xs font-normal leading-snug text-muted-foreground">
-              {t("Password is stored locally in the Agent2SSH config. Direct exec, ping, and SFTP use the embedded SSH client; jump hosts, sessions, and tunnels still use the OpenSSH fallback.")}
+              {t("Password is stored locally in the Agent2SSH config. Exec, ping, SFTP, jump hosts, sessions, terminals, and tunnels use the embedded SSH backend; system ssh/scp/sshpass are not required for SSH transport.")}
             </span>
           </label>
         )}

@@ -141,6 +141,12 @@ For first-time external users, follow the [10-minute CLI and MCP setup guide](do
 - Connectivity check (`ping`) with latency reporting
 - Retained embedded SSH connections for connection status and preconnect workflows
 
+### SSH Backend Boundary
+
+- SSH transport is implemented in the Rust/Tauri backend with the `ssh2` / libssh2 stack.
+- Exec, ping, health probes, SFTP, WebSocket exec streaming, WebSocket terminal, persistent PTY sessions, jump-host / ProxyJump-style bastion channels, retained connections, and local/remote port forwards do not call system `ssh`, `scp`, or `sshpass`.
+- System `ssh-keygen` is still used for local SSH key generation. SSH config import/export and diagnostics may inspect local files or PATH, but they are not the runtime SSH transport.
+
 ### Safety
 
 - CLI, MCP, Tauri, and daemon mutation entry points share the same execution authorization layer for exec, playbooks, SFTP, PTY session open/write/close, forwards, and connection operations

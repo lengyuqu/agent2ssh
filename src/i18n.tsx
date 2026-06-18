@@ -105,7 +105,7 @@ const zh: Record<string, string> = {
   "Password": "密码",
   "Select a key": "选择密钥",
   "SSH Password": "SSH 密码",
-  "Password is stored locally in the Agent2SSH config. Direct exec, ping, and SFTP use the embedded SSH client; jump hosts, sessions, and tunnels still use the OpenSSH fallback.": "密码会保存在本地 Agent2SSH 配置中。直连执行、连通性检测和 SFTP 使用内置 SSH 客户端；跳板机、交互会话和隧道仍使用 OpenSSH 回退。",
+  "Password is stored locally in the Agent2SSH config. Exec, ping, SFTP, jump hosts, sessions, terminals, and tunnels use the embedded SSH backend; system ssh/scp/sshpass are not required for SSH transport.": "密码会保存在本地 Agent2SSH 配置中。执行、连通性检测、SFTP、跳板机、会话、终端和隧道都使用内置 SSH 后端；SSH 传输不需要系统 ssh/scp/sshpass。",
   "None / manual path": "无 / 手动路径",
   "Tags (comma-separated)": "标签（逗号分隔）",
   "Env": "环境",
