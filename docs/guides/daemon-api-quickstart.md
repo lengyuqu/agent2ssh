@@ -409,7 +409,7 @@ wscat -c "ws://127.0.0.1:7722/exec/stream" \
 | `exit` | 命令执行结束，包含退出码和耗时 |
 | `error` | 错误信息（风险拒绝、未知主机等） |
 
-WebSocket exec 使用与普通 `/exec` 相同的 SSH 命令构造逻辑，key、password、jump host 和 ControlMaster 行为保持一致；风险、scope、gate、limits、approval 和 audit 也走同一授权链路。
+WebSocket exec 使用与普通 `/exec` 相同的内置 SSH 传输，key、password、ssh-agent、jump host 和连接指纹行为保持一致；风险、scope、gate、limits、approval 和 audit 也走同一授权链路。
 
 ---
 
@@ -441,7 +441,7 @@ wscat -c "ws://127.0.0.1:7722/terminal?host=web1&token=$TOKEN"
 {"type": "resize", "cols": 120, "rows": 36}
 ```
 
-交互式终端和 `/sessions` 持久会话都使用内置 SSH 传输和远程 PTY，不依赖系统 `ssh` 或 `sshpass` 连接 direct host。终端输入按完成行复用 session write 的风险/审批检查；被拒绝的输入不会转发给远端。jump-host、端口转发和连接池相关路径仍保留系统 `ssh` fallback，属于后续迁移范围。
+交互式终端和 `/sessions` 持久会话都使用内置 SSH 传输和远程 PTY，不依赖系统 `ssh` 或 `sshpass`。终端输入按完成行复用 session write 的风险/审批检查；被拒绝的输入不会转发给远端。jump-host 使用内置 `direct-tcpip` bastion channel，端口转发和连接保留也走内置 SSH。
 
 ---
 
@@ -683,7 +683,7 @@ curl -X POST -H "$AUTH" \
 
 ## Connections
 
-管理 SSH ControlMaster 连接池。
+管理内置 SSH 连接保留。
 
 ### 查看所有连接状态
 

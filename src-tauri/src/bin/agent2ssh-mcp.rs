@@ -768,7 +768,7 @@ async fn handle_request(request: &Value) -> std::result::Result<Value, McpError>
                 },
                 {
                     "name": "ssh_sftp_upload",
-                    "description": "Upload a local file to a remote host via scp.",
+                    "description": "Upload a local file to a remote host via embedded SFTP.",
                     "inputSchema": {
                         "type": "object",
                         "required": ["host", "local_path", "remote_path"],
@@ -781,7 +781,7 @@ async fn handle_request(request: &Value) -> std::result::Result<Value, McpError>
                 },
                 {
                     "name": "ssh_sftp_download",
-                    "description": "Download a file from a remote host via scp.",
+                    "description": "Download a file from a remote host via embedded SFTP.",
                     "inputSchema": {
                         "type": "object",
                         "required": ["host", "remote_path", "local_path"],
@@ -943,12 +943,12 @@ async fn handle_request(request: &Value) -> std::result::Result<Value, McpError>
                 },
                 {
                     "name": "ssh_connection_status",
-                    "description": "List all configured hosts and their current ControlMaster connection status (connected/disconnected, socket path).",
+                    "description": "List all configured hosts and their current embedded SSH connection status.",
                     "inputSchema": { "type": "object", "properties": {} }
                 },
                 {
                     "name": "ssh_connect",
-                    "description": "Manually establish a persistent ControlMaster connection to a specific host.",
+                    "description": "Manually establish and retain an embedded SSH connection to a specific host.",
                     "inputSchema": {
                         "type": "object",
                         "required": ["host"],
@@ -959,7 +959,7 @@ async fn handle_request(request: &Value) -> std::result::Result<Value, McpError>
                 },
                 {
                     "name": "ssh_disconnect",
-                    "description": "Manually close an existing ControlMaster connection to a specific host.",
+                    "description": "Manually close a retained embedded SSH connection to a specific host.",
                     "inputSchema": {
                         "type": "object",
                         "required": ["host"],

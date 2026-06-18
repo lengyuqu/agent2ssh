@@ -17,8 +17,8 @@ Agent2SSH exposes 51 tools via the Model Context Protocol (MCP) stdio server.
 | 9 | `ssh_sftp_ls` | List a remote directory |
 | 10 | `ssh_sftp_stat` | Stat a remote file or directory |
 | 11 | `ssh_sftp_mkdir` | Create a remote directory |
-| 12 | `ssh_sftp_upload` | Upload a local file via scp |
-| 13 | `ssh_sftp_download` | Download a remote file via scp |
+| 12 | `ssh_sftp_upload` | Upload a local file via embedded SFTP |
+| 13 | `ssh_sftp_download` | Download a remote file via embedded SFTP |
 | 14 | `ssh_session_open` | Open a persistent PTY session |
 | 15 | `ssh_session_write` | Send input to an open session |
 | 16 | `ssh_session_read` | Read output from a session |
@@ -31,9 +31,9 @@ Agent2SSH exposes 51 tools via the Model Context Protocol (MCP) stdio server.
 | 23 | `ssh_gate_status` | Read the daemon execution gate status |
 | 24 | `ssh_approval_list` | List pending approval requests |
 | 25 | `ssh_approval_respond` | Approve or reject an approval request |
-| 26 | `ssh_connection_status` | List ControlMaster connection states for all hosts |
-| 27 | `ssh_connect` | Manually establish a ControlMaster connection to a host |
-| 28 | `ssh_disconnect` | Manually close a ControlMaster connection |
+| 26 | `ssh_connection_status` | List retained embedded SSH connection states for all hosts |
+| 27 | `ssh_connect` | Manually establish a retained embedded SSH connection to a host |
+| 28 | `ssh_disconnect` | Manually close a retained embedded SSH connection |
 | 29 | `ssh_webhook_config` | Get or set webhook notification configuration |
 | 30 | `ssh_playbook_list` | List all configured playbooks |
 | 31 | `ssh_playbook_run` | Execute a playbook on a host with optional params, reason, and change ID |
@@ -122,15 +122,13 @@ All risk rules support glob patterns with `*`. User rules are merged with built-
 
 Set `risk_override` on a host profile to override the risk level for non-blocked commands on that host. For example, setting `risk_override: "low"` on a sandbox host lowers non-blocked commands before approval checks. Commands classified as `blocked` by built-in or user-defined rules are never downgraded by overrides.
 
-## SSH Connection Pool (ControlMaster)
+## SSH Connection Retention
 
-Agent2SSH automatically manages SSH ControlMaster connections for faster repeated execution:
+Agent2SSH can retain embedded SSH sessions for faster connection checks and preconnect workflows:
 
-- First command to a host establishes the ControlMaster socket (`~/.agent2ssh/cm_<host>.sock`)
-- Subsequent commands reuse the existing connection, skipping SSH handshake (~500ms → ~10ms)
 - Use `ssh_connection_status` to see which hosts have active connections
 - Use `ssh_connect` to pre-establish a connection, `ssh_disconnect` to tear one down
-- ControlPersist=600 keeps idle connections alive for 10 minutes
+- Jump-host connections use the same embedded direct-tcpip bastion channel as exec, SFTP, terminal, sessions, and forwards
 
 ## Webhook Notifications
 

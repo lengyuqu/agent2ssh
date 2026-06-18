@@ -11,8 +11,8 @@ Agent / IDE / Automation
         v
 Agent2SSH local capability layer
         |
-        | Embedded SSH for direct exec, SFTP, terminal, and sessions;
-        | system ssh/scp remains for jump-host fallback, connection pooling, and forwarding
+        | Embedded SSH for exec, SFTP, terminal, sessions,
+        | jump-host proxying, connection retention, and forwarding
         v
 Remote hosts
 ```
@@ -22,12 +22,12 @@ Remote hosts
 | File | Role |
 |------|------|
 | `src-tauri/src/core.rs` | SSH exec, ping, exec-multi, SFTP wrappers, risk scoring |
-| `src-tauri/src/embedded_ssh.rs` | In-process SSH transport, authentication, host-key fingerprint capture, PTY shell, resize, and direct SFTP/exec helpers |
+| `src-tauri/src/embedded_ssh.rs` | In-process SSH transport, authentication, jump-host direct-tcpip proxying, host-key fingerprint capture, PTY shell, resize, and SFTP/exec helpers |
 | `src-tauri/src/execution_control.rs` | Shared execution authorization for scope, effective risk, approval, and rejected audit entries |
 | `src-tauri/src/store.rs` | Host profile persistence and audit log storage under `~/.agent2ssh` |
 | `src-tauri/src/session.rs` | Persistent PTY sessions |
 | `src-tauri/src/forward.rs` | SSH port forward tunnel management |
-| `src-tauri/src/connection.rs` | SSH ControlMaster management and `~/.ssh/config` parser |
+| `src-tauri/src/connection.rs` | Retained embedded SSH connection management and `~/.ssh/config` parser |
 | `src-tauri/src/approval.rs` | Approval request queue and response handling |
 | `src-tauri/src/policy.rs` | Unified policy-as-code loader for `policy.toml` / `policy.json` |
 | `src-tauri/src/risk_config.rs` | Risk rule compatibility layer for legacy `risk_rules.toml` |
@@ -76,7 +76,7 @@ Agent2SSH is also a local observation surface for agent-driven SSH activity. The
 
 Current live events cover daemon-managed PTY session open/write/read/close, WebSocket exec start/output/exit, approvals, audit rotation, execution gate changes/rejections, execution limit rejections, anomaly detections, and connection/config changes. The panel also polls recent audit records, so completed CLI/MCP execs that write to the same config directory are visible even when they did not originate from the desktop UI.
 
-MCP PTY sessions route to the local daemon registry by default when the daemon is reachable and the local token is available. If the daemon is unavailable, MCP falls back to the process-local session store so basic PTY usage still works. Both daemon-managed and process-local sessions use the embedded SSH terminal worker, so password, key-file, and ssh-agent authentication do not require system `ssh` or `sshpass` for direct hosts. The desktop Session panel also connects to the daemon session registry, so daemon-managed MCP sessions can be listed, attached, tailed, read, written to, and closed from the UI. Read-only attach and high-risk input confirmation provide a conservative default for observing externally created PTY sessions.
+MCP PTY sessions route to the local daemon registry by default when the daemon is reachable and the local token is available. If the daemon is unavailable, MCP falls back to the process-local session store so basic PTY usage still works. Both daemon-managed and process-local sessions use the embedded SSH terminal worker, so password, key-file, ssh-agent, and jump-host authentication do not require system `ssh` or `sshpass`. The desktop Session panel also connects to the daemon session registry, so daemon-managed MCP sessions can be listed, attached, tailed, read, written to, and closed from the UI. Read-only attach and high-risk input confirmation provide a conservative default for observing externally created PTY sessions.
 
 The daemon also exposes `/terminal` as an authenticated WebSocket endpoint for an interactive terminal. It streams terminal bytes directly, accepts resize control messages, and emits a connection metadata frame containing the host-key SHA256 fingerprint, host-key algorithm, address, username, and server banner before shell output. Completed input lines are checked through the same authorization path as REST session writes before the bytes are forwarded to the remote PTY.
 
@@ -110,21 +110,21 @@ For multi-host execution and playbooks, high-risk approvals are applied only to 
 5. Enforce approval policy or high-risk approval/force requirements.
 6. Execute the operation with approved-host or approved-step force only where applicable, then append the final audit entry for exec/mutation paths.
 
-The daemon approval handler creates an approval request and waits for approval, rejection, or timeout. Local CLI/MCP and desktop-local paths without an approval handler fail closed and instruct the caller to use the daemon approval flow or `--force` when policy permits. WebSocket exec streaming uses the same core SSH command builder as non-streaming exec, so password, key, jump-host, and ControlMaster behavior stay aligned.
+The daemon approval handler creates an approval request and waits for approval, rejection, or timeout. Local CLI/MCP and desktop-local paths without an approval handler fail closed and instruct the caller to use the daemon approval flow or `--force` when policy permits. WebSocket exec streaming uses the same embedded SSH transport as non-streaming exec, so password, key, jump-host, and fingerprint behavior stay aligned.
 
 ## SSH Transport Status
 
-Direct-host command execution, non-jump SFTP, the WebSocket terminal, and persistent PTY sessions use the in-process `ssh2` transport in `embedded_ssh.rs`. The embedded transport records connection diagnostics including authentication method, server banner, host-key algorithm, and SHA256 host-key fingerprint. The terminal/session path requests a remote PTY and forwards resize changes through libssh2 rather than relying on a local system PTY process.
-
-Some legacy surfaces still intentionally use system binaries until the next transport migration phase:
+Command execution, SFTP, ping/health probes, WebSocket exec streaming, the WebSocket terminal, persistent PTY sessions, jump-host proxying, retained connections, and port forwards use the in-process `ssh2` transport in `embedded_ssh.rs`. The embedded transport records connection diagnostics including authentication method, server banner, host-key algorithm, SHA256 host-key fingerprint, and jump-host alias when present. The terminal/session path requests a remote PTY and forwards resize changes through libssh2 rather than relying on a local system PTY process. Jump hosts are implemented by opening an embedded `direct-tcpip` channel through the bastion and using that channel as the transport for the target SSH session.
 
 | Path | Current backend |
 |------|-----------------|
-| Direct exec and non-jump SFTP | Embedded `ssh2` |
+| Exec, exec-multi, ping, and health snapshots | Embedded `ssh2` |
+| SFTP list/stat/mkdir/upload/download | Embedded `ssh2` SFTP |
+| WebSocket `/exec/stream` | Embedded `ssh2` exec channel |
 | WebSocket `/terminal` and REST/MCP/Tauri PTY sessions | Embedded `ssh2` terminal worker |
-| Jump-host exec/SFTP fallback | System `ssh`/`scp` |
-| Connection ControlMaster management | System `ssh` |
-| Port forwards | System `ssh`/`sshpass` |
+| Jump-host / ProxyJump-style connections | Embedded `direct-tcpip` bastion channel |
+| Connection status/connect/disconnect | Retained embedded `ssh2` sessions |
+| Local and remote port forwards | Embedded `direct-tcpip` forwarding |
 
 ## Control Plane
 

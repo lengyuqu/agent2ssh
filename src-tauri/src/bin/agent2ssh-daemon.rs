@@ -620,9 +620,19 @@ async fn reject_if_session_limited(
     host: &str,
     tags: &[String],
 ) -> Result<(), (StatusCode, Json<ErrorBody>)> {
+    reject_if_session_limited_for_command(state, source, host, tags, "session_open").await
+}
+
+async fn reject_if_session_limited_for_command(
+    state: &AppState,
+    source: &str,
+    host: &str,
+    tags: &[String],
+    command: &str,
+) -> Result<(), (StatusCode, Json<ErrorBody>)> {
     let limiter = state.limiter.lock().await;
     if let Err(rejection) = limiter.check_session_open(source, host, tags) {
-        write_limit_rejection_audit(&rejection, source, host, "session_open");
+        write_limit_rejection_audit(&rejection, source, host, command);
         return Err(err(
             too_many_requests_status(),
             format!(
@@ -2640,12 +2650,18 @@ async fn terminal_attach(
     if let Err(e) = reject_if_gate_paused(&source, &params.host, "terminal") {
         return e.into_response();
     }
+    if let Err(e) =
+        reject_if_session_limited_for_command(&s, &source, &params.host, &tags, "terminal_open")
+            .await
+    {
+        return e.into_response();
+    }
     let host = match agent2ssh::session::resolve_host(&params.host) {
         Ok(host) => host,
         Err(e) => return err(StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     };
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    ws.on_upgrade(move |socket| handle_terminal(socket, host, auth, tags, source))
+    ws.on_upgrade(move |socket| handle_terminal(socket, host, auth, tags, source, s))
 }
 
 async fn handle_terminal(
@@ -2654,11 +2670,18 @@ async fn handle_terminal(
     auth: AuthContext,
     tags: Vec<String>,
     source: String,
+    state: AppState,
 ) {
     use agent2ssh::embedded_ssh::{spawn_terminal, TerminalCommand, TerminalEvent};
     use axum::extract::ws::Message;
     use futures_util::{SinkExt, StreamExt};
     let host_name = host.name.clone();
+    let terminal_id = Uuid::new_v4();
+    state
+        .limiter
+        .lock()
+        .await
+        .register_session(terminal_id, &source, &host_name, &tags);
     let (terminal_tx, terminal_rx) = spawn_terminal(host.clone(), 80, 24);
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<TerminalEvent>(128);
     let event_task = tokio::task::spawn_blocking(move || {
@@ -2716,6 +2739,16 @@ async fn handle_terminal(
                         let mut authorized_commands = Vec::new();
                         let mut denied = false;
                         for command in &completed_commands {
+                            let targets = vec![(host_name.clone(), tags.clone())];
+                            if let Err((_, Json(error))) =
+                                reject_if_rate_limited(&state, &source, &targets, command).await
+                            {
+                                denied = true;
+                                let _ = ws_tx.send(Message::Text(
+                                    serde_json::json!({"type":"error","error":error.error}).to_string()
+                                )).await;
+                                continue;
+                            }
                             match authorize_command(
                                 &auth.scope,
                                 &source,
@@ -2777,9 +2810,101 @@ async fn handle_terminal(
 
     let _ = terminal_tx.send(TerminalCommand::Close);
     let _ = event_task.await;
+    state.limiter.lock().await.unregister_session(&terminal_id);
 }
 
 // ── WebSocket streaming exec ─────────────────────────────────────────────────
+
+enum EmbeddedExecStreamEvent {
+    Stdout(String),
+    Stderr(String),
+    Exit(Option<i32>),
+    Error(String),
+}
+
+fn spawn_embedded_exec_stream(
+    host: agent2ssh::HostProfile,
+    command: String,
+    stdin: Option<String>,
+    timeout_secs: u64,
+) -> tokio::sync::mpsc::Receiver<EmbeddedExecStreamEvent> {
+    let (tx, rx) = tokio::sync::mpsc::channel(128);
+    std::thread::spawn(move || {
+        use agent2ssh::embedded_ssh::connect_embedded_ssh;
+        use std::io::{ErrorKind, Read, Write};
+        let result = (|| -> anyhow::Result<()> {
+            let session = connect_embedded_ssh(&host, timeout_secs)?;
+            let mut channel = session.channel_session()?;
+            channel.exec(&command)?;
+            if let Some(data) = stdin {
+                channel.write_all(data.as_bytes())?;
+                channel.send_eof()?;
+            }
+            session.set_blocking(false);
+            let deadline =
+                std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs.max(1));
+            let mut stdout_buf = [0u8; 8192];
+            let mut stderr_buf = [0u8; 8192];
+            loop {
+                let mut progressed = false;
+                match channel.read(&mut stdout_buf) {
+                    Ok(0) => {}
+                    Ok(n) => {
+                        progressed = true;
+                        let data = String::from_utf8_lossy(&stdout_buf[..n]).into_owned();
+                        if tx
+                            .blocking_send(EmbeddedExecStreamEvent::Stdout(data))
+                            .is_err()
+                        {
+                            return Ok(());
+                        }
+                    }
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {}
+                    Err(error) => return Err(error.into()),
+                }
+                match channel.stderr().read(&mut stderr_buf) {
+                    Ok(0) => {}
+                    Ok(n) => {
+                        progressed = true;
+                        let data = String::from_utf8_lossy(&stderr_buf[..n]).into_owned();
+                        if tx
+                            .blocking_send(EmbeddedExecStreamEvent::Stderr(data))
+                            .is_err()
+                        {
+                            return Ok(());
+                        }
+                    }
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {}
+                    Err(error) => return Err(error.into()),
+                }
+                if channel.eof() {
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    let _ = channel.close();
+                    let _ = tx.blocking_send(EmbeddedExecStreamEvent::Error(format!(
+                        "SSH command timed out after {timeout_secs}s"
+                    )));
+                    let _ = tx.blocking_send(EmbeddedExecStreamEvent::Exit(None));
+                    return Ok(());
+                }
+                if !progressed {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+            session.set_blocking(true);
+            let _ = channel.wait_close();
+            let code = channel.exit_status().ok();
+            let _ = tx.blocking_send(EmbeddedExecStreamEvent::Exit(code));
+            Ok(())
+        })();
+        if let Err(error) = result {
+            let _ = tx.blocking_send(EmbeddedExecStreamEvent::Error(error.to_string()));
+            let _ = tx.blocking_send(EmbeddedExecStreamEvent::Exit(None));
+        }
+    });
+    rx
+}
 
 async fn exec_stream(
     State(s): State<AppState>,
@@ -2797,7 +2922,6 @@ async fn exec_stream(
     ws.on_upgrade(|socket| async move {
         use axum::extract::ws::Message;
         use std::sync::Arc;
-        use tokio::io::AsyncReadExt;
 
         let socket = Arc::new(tokio::sync::Mutex::new(socket));
 
@@ -2921,120 +3045,69 @@ async fn exec_stream(
             }),
         );
 
-        let mut cmd = build_ssh_exec_command(&host, &req.command).await;
-        cmd.stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .stdin(std::process::Stdio::null());
-
-        let mut child = match cmd.spawn() {
-            Ok(c) => c,
-            Err(e) => {
-                let mut s = socket.lock().await;
-                let _ = s
-                    .send(Message::Text(
-                        serde_json::json!({"type":"error","error":e.to_string()}).to_string(),
+        let mut stream_rx =
+            spawn_embedded_exec_stream(host, req.command.clone(), req.stdin.clone(), timeout_secs);
+        let mut code = None;
+        while let Some(event) = stream_rx.recv().await {
+            match event {
+                EmbeddedExecStreamEvent::Stdout(data) => {
+                    publish_event(
+                        EventType::ExecOutput,
+                        serde_json::json!({
+                            "source": source,
+                            "host": req.host,
+                            "command": req.command,
+                            "stream": "stdout",
+                            "output_preview": preview_text(&data, 4096),
+                            "output_bytes": data.len(),
+                        }),
+                    );
+                    let mut s = socket.lock().await;
+                    if s.send(Message::Text(
+                        serde_json::json!({"type":"stdout","data":data}).to_string(),
                     ))
-                    .await;
-                return;
-            }
-        };
-
-        // Fix-3: Concurrently stream both stdout and stderr
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
-
-        let sock_out = socket.clone();
-        let out_host = req.host.clone();
-        let out_command = req.command.clone();
-        let out_source = source.clone();
-        let stdout_task = tokio::spawn(async move {
-            if let Some(stdout) = stdout {
-                let mut reader = tokio::io::BufReader::new(stdout);
-                let mut buf = [0u8; 4096];
-                loop {
-                    match reader.read(&mut buf).await {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            let data = String::from_utf8_lossy(&buf[..n]).to_string();
-                            publish_event(
-                                EventType::ExecOutput,
-                                serde_json::json!({
-                                    "source": out_source,
-                                    "host": out_host,
-                                    "command": out_command,
-                                    "stream": "stdout",
-                                    "output_preview": preview_text(&data, 4096),
-                                    "output_bytes": data.len(),
-                                }),
-                            );
-                            let mut s = sock_out.lock().await;
-                            if s.send(Message::Text(
-                                serde_json::json!({"type":"stdout","data":data}).to_string(),
-                            ))
-                            .await
-                            .is_err()
-                            {
-                                break;
-                            }
-                        }
+                    .await
+                    .is_err()
+                    {
+                        return;
                     }
                 }
-            }
-        });
-
-        let sock_err = socket.clone();
-        let err_host = req.host.clone();
-        let err_command = req.command.clone();
-        let err_source = source.clone();
-        let stderr_task = tokio::spawn(async move {
-            if let Some(stderr) = stderr {
-                let mut reader = tokio::io::BufReader::new(stderr);
-                let mut buf = [0u8; 4096];
-                loop {
-                    match reader.read(&mut buf).await {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            let data = String::from_utf8_lossy(&buf[..n]).to_string();
-                            publish_event(
-                                EventType::ExecOutput,
-                                serde_json::json!({
-                                    "source": err_source,
-                                    "host": err_host,
-                                    "command": err_command,
-                                    "stream": "stderr",
-                                    "output_preview": preview_text(&data, 4096),
-                                    "output_bytes": data.len(),
-                                }),
-                            );
-                            let mut s = sock_err.lock().await;
-                            if s.send(Message::Text(
-                                serde_json::json!({"type":"stderr","data":data}).to_string(),
-                            ))
-                            .await
-                            .is_err()
-                            {
-                                break;
-                            }
-                        }
+                EmbeddedExecStreamEvent::Stderr(data) => {
+                    publish_event(
+                        EventType::ExecOutput,
+                        serde_json::json!({
+                            "source": source,
+                            "host": req.host,
+                            "command": req.command,
+                            "stream": "stderr",
+                            "output_preview": preview_text(&data, 4096),
+                            "output_bytes": data.len(),
+                        }),
+                    );
+                    let mut s = socket.lock().await;
+                    if s.send(Message::Text(
+                        serde_json::json!({"type":"stderr","data":data}).to_string(),
+                    ))
+                    .await
+                    .is_err()
+                    {
+                        return;
                     }
                 }
+                EmbeddedExecStreamEvent::Error(error) => {
+                    let mut s = socket.lock().await;
+                    let _ = s
+                        .send(Message::Text(
+                            serde_json::json!({"type":"error","error":error}).to_string(),
+                        ))
+                        .await;
+                }
+                EmbeddedExecStreamEvent::Exit(exit_code) => {
+                    code = exit_code;
+                    break;
+                }
             }
-        });
-
-        // Wait for child process with timeout
-        let status =
-            tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), child.wait()).await;
-
-        let _ = tokio::join!(stdout_task, stderr_task);
-
-        let code = match status {
-            Ok(Ok(s)) => s.code(),
-            Ok(Err(_)) => None,
-            Err(_) => {
-                let _ = child.kill().await;
-                None
-            }
-        };
+        }
         let duration_ms = started.elapsed().as_millis();
         let completed_host = req.host.clone();
         let completed_command = req.command.clone();
@@ -3319,6 +3392,45 @@ mod tests {
                     .await
                     .unwrap_err();
                 assert_eq!(err.0, too_many_requests_status());
+            })
+        });
+    }
+
+    #[test]
+    fn terminal_session_limit_uses_terminal_open_audit_command() {
+        with_temp_config(|| {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                let state = test_state(ExecutionLimitConfig {
+                    default_source_max_sessions: 0,
+                    default_host_max_sessions: 1,
+                    default_tag_max_sessions: 0,
+                    ..Default::default()
+                });
+                state.limiter.lock().await.register_session(
+                    Uuid::new_v4(),
+                    "daemon_terminal",
+                    "test-host",
+                    &[],
+                );
+                let err = reject_if_session_limited_for_command(
+                    &state,
+                    "daemon_terminal",
+                    "test-host",
+                    &[],
+                    "terminal_open",
+                )
+                .await
+                .unwrap_err();
+                assert_eq!(err.0, too_many_requests_status());
+
+                let audit = list_audit_core(AuditFilter {
+                    limit: 10,
+                    ..Default::default()
+                })
+                .unwrap();
+                let entry = audit.first().expect("limit rejection should write audit");
+                assert_eq!(entry.command, "terminal_open");
+                assert_eq!(entry.source.as_deref(), Some("daemon_terminal"));
             })
         });
     }

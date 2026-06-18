@@ -4,14 +4,14 @@ use sha2::{Digest, Sha256};
 use ssh2::{HashType, Session};
 use std::{
     io::{ErrorKind, Read, Write},
-    net::{TcpStream, ToSocketAddrs},
+    net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs},
     path::Path,
     sync::mpsc,
     thread,
     time::Duration,
 };
 
-use crate::types::HostProfile;
+use crate::{store::load_config, types::HostProfile};
 
 #[derive(Debug, Clone)]
 pub struct EmbeddedSshConnectionInfo {
@@ -87,18 +87,7 @@ pub fn resolved_username(host: &HostProfile) -> String {
         .unwrap_or_else(default_username)
 }
 
-pub fn connect_embedded_ssh(host: &HostProfile, timeout_secs: u64) -> Result<Session> {
-    if host
-        .jump_host
-        .as_deref()
-        .is_some_and(|value| !value.trim().is_empty())
-    {
-        return Err(anyhow!(
-            "embedded SSH terminal does not yet support ProxyJump host '{}'",
-            host.jump_host.as_deref().unwrap_or_default()
-        ));
-    }
-
+fn connect_tcp(host: &HostProfile, timeout_secs: u64) -> Result<TcpStream> {
     let address = format!("{}:{}", host.host, host.port.unwrap_or(22));
     let socket_addr = address
         .to_socket_addrs()
@@ -108,9 +97,172 @@ pub fn connect_embedded_ssh(host: &HostProfile, timeout_secs: u64) -> Result<Ses
     let tcp = TcpStream::connect_timeout(&socket_addr, Duration::from_secs(timeout_secs.min(30)))?;
     tcp.set_read_timeout(Some(Duration::from_secs(timeout_secs)))?;
     tcp.set_write_timeout(Some(Duration::from_secs(timeout_secs)))?;
+    Ok(tcp)
+}
+
+fn resolve_jump_host(name: &str) -> Result<HostProfile> {
+    load_config()?
+        .hosts
+        .into_iter()
+        .find(|host| host.name == name)
+        .ok_or_else(|| anyhow!("unknown jump host profile: {name}"))
+}
+
+fn auth_method_for_host(host: &HostProfile) -> &'static str {
+    if host
+        .password
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        "password"
+    } else if host
+        .key_path
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        "publickey_file"
+    } else {
+        "agent"
+    }
+}
+
+fn connect_via_jump(host: &HostProfile, timeout_secs: u64, depth: usize) -> Result<TcpStream> {
+    let jump_name = host
+        .jump_host
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("missing jump host profile for '{}'", host.name))?;
+    let jump = resolve_jump_host(jump_name)?;
+    let jump_session = connect_embedded_ssh_inner(&jump, timeout_secs, depth + 1)
+        .with_context(|| format!("failed to connect jump host '{jump_name}'"))?;
+    jump_session.set_blocking(true);
+    let channel = jump_session
+        .channel_direct_tcpip(&host.host, host.port.unwrap_or(22), None)
+        .with_context(|| {
+            format!(
+                "failed to open direct-tcpip channel via '{jump_name}' to {}:{}",
+                host.host,
+                host.port.unwrap_or(22)
+            )
+        })?;
+    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    let local_addr = listener.local_addr()?;
+    let client = TcpStream::connect(local_addr)?;
+    let (server, _) = listener.accept()?;
+    jump_session.set_blocking(false);
+    thread::spawn(move || {
+        let _jump_session = jump_session;
+        if let Err(error) = bridge_tcp_and_channel(server, channel) {
+            let _ = crate::diagnostics::append_diagnostic_log(
+                "warn",
+                "embedded_ssh",
+                "jump host proxy channel closed with error",
+                Some(serde_json::json!({ "error": error.to_string() })),
+            );
+        }
+    });
+    Ok(client)
+}
+
+fn bridge_tcp_and_channel(mut stream: TcpStream, mut channel: ssh2::Channel) -> Result<()> {
+    stream.set_nonblocking(true)?;
+    let mut tcp_closed = false;
+    let mut channel_closed = false;
+    let mut tcp_buf = [0u8; 8192];
+    let mut channel_buf = [0u8; 8192];
+
+    while !tcp_closed || !channel_closed {
+        match stream.read(&mut tcp_buf) {
+            Ok(0) => {
+                tcp_closed = true;
+                let _ = channel.send_eof();
+            }
+            Ok(n) => write_all_channel(&mut channel, &tcp_buf[..n])?,
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {}
+            Err(error) => return Err(error.into()),
+        }
+
+        match channel.read(&mut channel_buf) {
+            Ok(0) => {
+                if channel.eof() {
+                    channel_closed = true;
+                    let _ = stream.shutdown(Shutdown::Write);
+                }
+            }
+            Ok(n) => write_all_tcp(&mut stream, &channel_buf[..n])?,
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {}
+            Err(error) => return Err(error.into()),
+        }
+
+        if tcp_closed && channel_closed {
+            break;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+
+    let _ = channel.close();
+    let _ = channel.wait_close();
+    Ok(())
+}
+
+fn write_all_tcp(stream: &mut TcpStream, mut data: &[u8]) -> Result<()> {
+    while !data.is_empty() {
+        match stream.write(data) {
+            Ok(0) => return Err(anyhow!("tcp stream closed while writing")),
+            Ok(n) => data = &data[n..],
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn write_all_channel(channel: &mut ssh2::Channel, mut data: &[u8]) -> Result<()> {
+    while !data.is_empty() {
+        match channel.write(data) {
+            Ok(0) => return Err(anyhow!("ssh channel closed while writing")),
+            Ok(n) => data = &data[n..],
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let _ = channel.flush();
+    Ok(())
+}
+
+fn connect_embedded_ssh_inner(
+    host: &HostProfile,
+    timeout_secs: u64,
+    depth: usize,
+) -> Result<Session> {
+    if depth > 4 {
+        return Err(anyhow!(
+            "too many nested jump hosts while connecting '{}'",
+            host.name
+        ));
+    }
+
+    let via_jump = host
+        .jump_host
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
 
     let mut session = Session::new()?;
-    session.set_tcp_stream(tcp);
+    if via_jump.is_some() {
+        let tcp = connect_via_jump(host, timeout_secs, depth)?;
+        tcp.set_read_timeout(Some(Duration::from_secs(timeout_secs)))?;
+        tcp.set_write_timeout(Some(Duration::from_secs(timeout_secs)))?;
+        session.set_tcp_stream(tcp);
+    } else {
+        session.set_tcp_stream(connect_tcp(host, timeout_secs)?);
+    }
     session.handshake()?;
 
     let username = resolved_username(host);
@@ -120,21 +272,28 @@ pub fn connect_embedded_ssh(host: &HostProfile, timeout_secs: u64) -> Result<Ses
         return Err(anyhow!("SSH authentication failed for '{}'", host.name));
     }
 
+    let host_address = format!("{}:{}", host.host, host.port.unwrap_or(22));
     let _ = crate::diagnostics::append_diagnostic_log(
         "info",
         "embedded_ssh",
         "ssh connection authenticated",
         Some(serde_json::json!({
             "host": host.name,
-            "address": address,
+            "address": host_address,
             "username": username,
             "auth_method": auth_method,
             "fingerprint_sha256": fingerprint_sha256(&session),
+            "host_key_algorithm": session.host_key().map(|(_, kind)| host_key_algorithm(kind)),
             "server_banner": session.banner().map(ToOwned::to_owned),
+            "jump_host": via_jump,
         })),
     );
 
     Ok(session)
+}
+
+pub fn connect_embedded_ssh(host: &HostProfile, timeout_secs: u64) -> Result<Session> {
+    connect_embedded_ssh_inner(host, timeout_secs, 0)
 }
 
 fn authenticate(session: &Session, host: &HostProfile, username: &str) -> Result<String> {
@@ -220,21 +379,7 @@ fn run_terminal(
 ) -> Result<()> {
     let session = connect_embedded_ssh(&host, 60)?;
     let username = resolved_username(&host);
-    let auth_method = if host
-        .password
-        .as_deref()
-        .is_some_and(|value| !value.trim().is_empty())
-    {
-        "password"
-    } else if host
-        .key_path
-        .as_deref()
-        .is_some_and(|value| !value.trim().is_empty())
-    {
-        "publickey_file"
-    } else {
-        "agent"
-    };
+    let auth_method = auth_method_for_host(&host);
     let info = connection_info(&host, &session, auth_method);
     let _ = event_tx.send(TerminalEvent::Connected(info.clone()));
     let _ = crate::diagnostics::append_diagnostic_log(

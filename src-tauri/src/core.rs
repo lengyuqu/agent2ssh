@@ -3,20 +3,13 @@ use serde::{Deserialize, Serialize};
 use std::{
     io::{Read, Write},
     path::Path,
-    process::Stdio,
     sync::Arc,
     time::Duration,
     time::Instant,
 };
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    process::Command,
-    sync::Semaphore,
-    task::JoinSet,
-};
+use tokio::{sync::Semaphore, task::JoinSet};
 
 use crate::{
-    connection::{apply_socket, get_or_create_socket},
     embedded_ssh::connect_embedded_ssh,
     store::{append_audit, list_audit_raw, load_config, save_config_unlocked, store_write_lock},
     types::{
@@ -957,134 +950,39 @@ pub(crate) async fn exec_ssh_core_with_risk_override(
     const DEFAULT_MAX_OUTPUT: usize = 4 * 1024 * 1024; // 4 MiB
     let max_bytes = request.max_output_bytes.unwrap_or(DEFAULT_MAX_OUTPUT);
 
-    if host.jump_host.is_none() {
-        let embedded_host = host.clone();
-        let embedded_command = request.command.clone();
-        let embedded_stdin = request.stdin.clone();
-        let embedded_output = tokio::time::timeout(
-            Duration::from_secs(timeout_secs),
-            tokio::task::spawn_blocking(move || {
-                exec_ssh_embedded(
-                    embedded_host,
-                    embedded_command,
-                    embedded_stdin,
-                    timeout_secs,
-                    max_bytes,
-                )
-            }),
+    let embedded_host = host.clone();
+    let embedded_command = request.command.clone();
+    let embedded_stdin = request.stdin.clone();
+    let embedded_output = tokio::time::timeout(
+        Duration::from_secs(timeout_secs),
+        tokio::task::spawn_blocking(move || {
+            exec_ssh_embedded(
+                embedded_host,
+                embedded_command,
+                embedded_stdin,
+                timeout_secs,
+                max_bytes,
+            )
+        }),
+    )
+    .await
+    .map_err(|_| {
+        anyhow!(
+            "SSH command timed out after {timeout_secs}s: '{}'",
+            request.command
         )
-        .await
-        .map_err(|_| {
-            anyhow!(
-                "SSH command timed out after {timeout_secs}s: '{}'",
-                request.command
-            )
-        })?
-        .context("embedded SSH task failed")??;
+    })?
+    .context("embedded SSH task failed")??;
 
-        let result = ExecResult {
-            host: request.host,
-            command: request.command,
-            exit_code: embedded_output.exit_code,
-            stdout: String::from_utf8_lossy(&embedded_output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&embedded_output.stderr).into_owned(),
-            duration_ms: started.elapsed().as_millis(),
-            risk_level: risk,
-            truncated: embedded_output.truncated,
-        };
-        append_audit(
-            &result,
-            risk,
-            request.reason.as_deref(),
-            request.change_id.as_deref(),
-            Some(&source),
-        )?;
-
-        crate::events::publish_event(
-            crate::events::EventType::ExecCompleted,
-            serde_json::json!({
-                "host": result.host,
-                "command": result.command,
-                "exit_code": result.exit_code,
-                "risk_level": format!("{}", result.risk_level),
-                "duration_ms": result.duration_ms,
-                "reason": request.reason,
-                "change_id": request.change_id,
-                "source": source,
-            }),
-        );
-
-        return Ok(result);
-    }
-
-    let mut cmd = build_ssh_command(&host);
-    // Reuse an existing ControlMaster connection when available
-    if let Some(socket) = get_or_create_socket(&host).await {
-        apply_socket(&mut cmd, &socket);
-    }
-    cmd.arg(ssh_target(&host)).arg(&request.command);
-
-    if request.stdin.is_some() {
-        cmd.stdin(Stdio::piped());
-    } else {
-        cmd.stdin(Stdio::null());
-    }
-    cmd.stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-
-    let mut child = cmd.spawn().context("failed to spawn ssh")?;
-
-    if let Some(data) = &request.stdin {
-        if let Some(mut handle) = child.stdin.take() {
-            handle
-                .write_all(data.as_bytes())
-                .await
-                .context("failed to write stdin")?;
-        }
-    }
-
-    // Read stdout (capped) and stderr concurrently, then wait for exit status.
-    let stdout_handle = child.stdout.take().context("no stdout")?;
-    let mut stderr_handle = child.stderr.take().context("no stderr")?;
-
-    let (raw_stdout, raw_stderr, status) =
-        tokio::time::timeout(Duration::from_secs(timeout_secs), async {
-            // AsyncReadExt::take limits stdout to max_bytes before reading to end
-            let mut stdout_capped = stdout_handle.take(max_bytes as u64);
-            let (out_res, err_res) = tokio::join!(
-                async {
-                    let mut buf = Vec::new();
-                    stdout_capped.read_to_end(&mut buf).await.map(|_| buf)
-                },
-                async {
-                    let mut buf = Vec::new();
-                    stderr_handle.read_to_end(&mut buf).await.map(|_| buf)
-                },
-            );
-            let status = child.wait().await?;
-            anyhow::Ok((out_res?, err_res?, status))
-        })
-        .await
-        .map_err(|_| {
-            anyhow!(
-                "SSH command timed out after {timeout_secs}s: '{}'",
-                request.command
-            )
-        })?
-        .context("failed waiting for ssh")?;
-
-    // Truncated when stdout hit the cap (take stops at exactly max_bytes)
-    let truncated = raw_stdout.len() >= max_bytes;
     let result = ExecResult {
         host: request.host,
         command: request.command,
-        exit_code: status.code(),
-        stdout: String::from_utf8_lossy(&raw_stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&raw_stderr).into_owned(),
+        exit_code: embedded_output.exit_code,
+        stdout: String::from_utf8_lossy(&embedded_output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&embedded_output.stderr).into_owned(),
         duration_ms: started.elapsed().as_millis(),
         risk_level: risk,
-        truncated,
+        truncated: embedded_output.truncated,
     };
     append_audit(
         &result,
@@ -1609,67 +1507,6 @@ fn longest_common_prefix(strings: &[&str]) -> String {
     first.chars().take(prefix_len).collect()
 }
 
-pub(crate) fn build_ssh_command(host: &HostProfile) -> Command {
-    let has_password = host
-        .password
-        .as_deref()
-        .map(|password| !password.trim().is_empty())
-        .unwrap_or(false);
-    let mut cmd = if has_password {
-        let mut cmd = Command::new("sshpass");
-        cmd.arg("-e").arg("ssh");
-        if let Some(password) = &host.password {
-            cmd.env("SSHPASS", password);
-        }
-        cmd
-    } else {
-        Command::new("ssh")
-    };
-    cmd.arg("-o")
-        .arg(if has_password {
-            "BatchMode=no"
-        } else {
-            "BatchMode=yes"
-        })
-        .arg("-o")
-        .arg("StrictHostKeyChecking=accept-new")
-        .arg("-p")
-        .arg(host.port.unwrap_or(22).to_string());
-    if let Some(key_path) = &host.key_path {
-        if !key_path.trim().is_empty() {
-            cmd.arg("-i").arg(expand_tilde(key_path));
-        }
-    }
-    // ProxyJump: resolve the jump host profile and build a -J argument
-    if let Some(jump_name) = &host.jump_host {
-        if let Ok(jump) = resolve_host(jump_name) {
-            let jump_target = match &jump.user {
-                Some(u) if !u.trim().is_empty() => {
-                    format!("{}@{}:{}", u, jump.host, jump.port.unwrap_or(22))
-                }
-                _ => format!("{}:{}", jump.host, jump.port.unwrap_or(22)),
-            };
-            cmd.arg("-J").arg(jump_target);
-            // Also pass the jump host's key if specified
-            if let Some(jkey) = &jump.key_path {
-                if !jkey.trim().is_empty() {
-                    cmd.arg("-i").arg(expand_tilde(jkey));
-                }
-            }
-        }
-    }
-    cmd
-}
-
-pub async fn build_ssh_exec_command(host: &HostProfile, command: &str) -> Command {
-    let mut cmd = build_ssh_command(host);
-    if let Some(socket) = get_or_create_socket(host).await {
-        apply_socket(&mut cmd, &socket);
-    }
-    cmd.arg(ssh_target(host)).arg(command);
-    cmd
-}
-
 fn validate_host(host: &HostProfile) -> Result<()> {
     if host.name.trim().is_empty() {
         return Err(anyhow!("host alias is required"));
@@ -1709,34 +1546,6 @@ fn expand_tilde(path: &str) -> String {
     path.to_string()
 }
 
-fn scp_base_args(host: &HostProfile) -> Vec<String> {
-    let batch_mode = if host
-        .password
-        .as_deref()
-        .map(|password| !password.trim().is_empty())
-        .unwrap_or(false)
-    {
-        "BatchMode=no"
-    } else {
-        "BatchMode=yes"
-    };
-    let mut args = vec![
-        "-o".to_string(),
-        batch_mode.to_string(),
-        "-o".to_string(),
-        "StrictHostKeyChecking=accept-new".to_string(),
-        "-P".to_string(),
-        host.port.unwrap_or(22).to_string(),
-    ];
-    if let Some(key_path) = &host.key_path {
-        if !key_path.trim().is_empty() {
-            args.push("-i".to_string());
-            args.push(expand_tilde(key_path));
-        }
-    }
-    args
-}
-
 pub async fn sftp_upload_core(request: SftpUploadRequest) -> Result<SftpResult> {
     sftp_upload_core_with_source(request, Some(source_from_env("core"))).await
 }
@@ -1773,58 +1582,22 @@ pub async fn sftp_upload_core_with_source(
     }
 
     let local = expand_tilde(&request.local_path);
-    let transfer_result = if host.jump_host.is_none() {
-        let embedded_host = host.clone();
-        let remote_path = request.remote_path.clone();
-        let local_for_task = local.clone();
-        tokio::task::spawn_blocking(move || -> Result<()> {
-            let session = connect_embedded_ssh(&embedded_host, 60)?;
-            let sftp = session.sftp()?;
-            let mut local_file = std::fs::File::open(&local_for_task)
-                .with_context(|| format!("failed to open local file {local_for_task}"))?;
-            let mut remote_file = sftp
-                .create(Path::new(&remote_path))
-                .with_context(|| format!("failed to create remote file {remote_path}"))?;
-            std::io::copy(&mut local_file, &mut remote_file)?;
-            Ok(())
-        })
-        .await
-        .context("embedded SFTP upload task failed")?
-    } else {
-        let remote = format!("{}:{}", ssh_target(&host), request.remote_path);
-
-        let has_password = host
-            .password
-            .as_deref()
-            .map(|password| !password.trim().is_empty())
-            .unwrap_or(false);
-        let mut cmd = if has_password {
-            let mut cmd = Command::new("sshpass");
-            cmd.arg("-e").arg("scp");
-            if let Some(password) = &host.password {
-                cmd.env("SSHPASS", password);
-            }
-            cmd
-        } else {
-            Command::new("scp")
-        };
-        for arg in scp_base_args(&host) {
-            cmd.arg(arg);
-        }
-        cmd.arg(&local)
-            .arg(&remote)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        let output = cmd.output().await.context("failed to spawn scp")?;
-        if output.status.success() {
-            Ok(())
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(anyhow!("scp upload failed: {stderr}"))
-        }
-    };
+    let embedded_host = host.clone();
+    let remote_path = request.remote_path.clone();
+    let local_for_task = local.clone();
+    let transfer_result = tokio::task::spawn_blocking(move || -> Result<()> {
+        let session = connect_embedded_ssh(&embedded_host, 60)?;
+        let sftp = session.sftp()?;
+        let mut local_file = std::fs::File::open(&local_for_task)
+            .with_context(|| format!("failed to open local file {local_for_task}"))?;
+        let mut remote_file = sftp
+            .create(Path::new(&remote_path))
+            .with_context(|| format!("failed to create remote file {remote_path}"))?;
+        std::io::copy(&mut local_file, &mut remote_file)?;
+        Ok(())
+    })
+    .await
+    .context("embedded SFTP upload task failed")?;
 
     let duration_ms = started.elapsed().as_millis();
     if let Err(error) = transfer_result {
@@ -1900,58 +1673,22 @@ pub async fn sftp_download_core_with_source(
     }
 
     let local = expand_tilde(&request.local_path);
-    let transfer_result = if host.jump_host.is_none() {
-        let embedded_host = host.clone();
-        let remote_path = request.remote_path.clone();
-        let local_for_task = local.clone();
-        tokio::task::spawn_blocking(move || -> Result<()> {
-            let session = connect_embedded_ssh(&embedded_host, 60)?;
-            let sftp = session.sftp()?;
-            let mut remote_file = sftp
-                .open(Path::new(&remote_path))
-                .with_context(|| format!("failed to open remote file {remote_path}"))?;
-            let mut local_file = std::fs::File::create(&local_for_task)
-                .with_context(|| format!("failed to create local file {local_for_task}"))?;
-            std::io::copy(&mut remote_file, &mut local_file)?;
-            Ok(())
-        })
-        .await
-        .context("embedded SFTP download task failed")?
-    } else {
-        let remote = format!("{}:{}", ssh_target(&host), request.remote_path);
-
-        let has_password = host
-            .password
-            .as_deref()
-            .map(|password| !password.trim().is_empty())
-            .unwrap_or(false);
-        let mut cmd = if has_password {
-            let mut cmd = Command::new("sshpass");
-            cmd.arg("-e").arg("scp");
-            if let Some(password) = &host.password {
-                cmd.env("SSHPASS", password);
-            }
-            cmd
-        } else {
-            Command::new("scp")
-        };
-        for arg in scp_base_args(&host) {
-            cmd.arg(arg);
-        }
-        cmd.arg(&remote)
-            .arg(&local)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        let output = cmd.output().await.context("failed to spawn scp")?;
-        if output.status.success() {
-            Ok(())
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(anyhow!("scp download failed: {stderr}"))
-        }
-    };
+    let embedded_host = host.clone();
+    let remote_path = request.remote_path.clone();
+    let local_for_task = local.clone();
+    let transfer_result = tokio::task::spawn_blocking(move || -> Result<()> {
+        let session = connect_embedded_ssh(&embedded_host, 60)?;
+        let sftp = session.sftp()?;
+        let mut remote_file = sftp
+            .open(Path::new(&remote_path))
+            .with_context(|| format!("failed to open remote file {remote_path}"))?;
+        let mut local_file = std::fs::File::create(&local_for_task)
+            .with_context(|| format!("failed to create local file {local_for_task}"))?;
+        std::io::copy(&mut remote_file, &mut local_file)?;
+        Ok(())
+    })
+    .await
+    .context("embedded SFTP download task failed")?;
 
     let duration_ms = started.elapsed().as_millis();
     if let Err(error) = transfer_result {
@@ -2642,70 +2379,32 @@ pub async fn ping_hosts_core(
                 },
                 Some(host) => {
                     let started = Instant::now();
-                    if host.jump_host.is_none() {
-                        let embedded_host = host.clone();
-                        let result = tokio::time::timeout(
-                            Duration::from_secs(timeout + 2),
-                            tokio::task::spawn_blocking(move || {
-                                connect_embedded_ssh(&embedded_host, timeout).map(|_| ())
-                            }),
-                        )
-                        .await;
-                        return match result {
-                            Ok(Ok(Ok(()))) => PingResult {
-                                host: name,
-                                reachable: true,
-                                latency_ms: Some(started.elapsed().as_millis() as u64),
-                                error: None,
-                            },
-                            Ok(Ok(Err(e))) => PingResult {
-                                host: name,
-                                reachable: false,
-                                latency_ms: Some(started.elapsed().as_millis() as u64),
-                                error: Some(e.to_string()),
-                            },
-                            Ok(Err(e)) => PingResult {
-                                host: name,
-                                reachable: false,
-                                latency_ms: None,
-                                error: Some(format!("task panicked: {e}")),
-                            },
-                            Err(_) => PingResult {
-                                host: name,
-                                reachable: false,
-                                latency_ms: None,
-                                error: Some(format!("timed out after {timeout}s")),
-                            },
-                        };
-                    }
-                    let target = crate::connection::ssh_target(&host);
-                    let mut cmd = build_ssh_command(&host);
-                    cmd.arg("-o")
-                        .arg(format!("ConnectTimeout={timeout}"))
-                        .arg(&target)
-                        .arg("true")
-                        .stdout(Stdio::null())
-                        .stderr(Stdio::null());
-
-                    match tokio::time::timeout(Duration::from_secs(timeout + 2), cmd.status()).await
-                    {
-                        Ok(Ok(status)) if status.success() => PingResult {
+                    let embedded_host = host.clone();
+                    let result = tokio::time::timeout(
+                        Duration::from_secs(timeout + 2),
+                        tokio::task::spawn_blocking(move || {
+                            connect_embedded_ssh(&embedded_host, timeout).map(|_| ())
+                        }),
+                    )
+                    .await;
+                    match result {
+                        Ok(Ok(Ok(()))) => PingResult {
                             host: name,
                             reachable: true,
                             latency_ms: Some(started.elapsed().as_millis() as u64),
                             error: None,
                         },
-                        Ok(Ok(_)) => PingResult {
+                        Ok(Ok(Err(e))) => PingResult {
                             host: name,
                             reachable: false,
                             latency_ms: Some(started.elapsed().as_millis() as u64),
-                            error: Some("SSH handshake failed".into()),
+                            error: Some(e.to_string()),
                         },
                         Ok(Err(e)) => PingResult {
                             host: name,
                             reachable: false,
                             latency_ms: None,
-                            error: Some(e.to_string()),
+                            error: Some(format!("task panicked: {e}")),
                         },
                         Err(_) => PingResult {
                             host: name,

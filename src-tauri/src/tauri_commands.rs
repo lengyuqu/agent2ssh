@@ -1372,7 +1372,7 @@ pub fn delete_key(name: String) -> Result<(), String> {
     delete_key_core(&name).map_err(|e| e.to_string())
 }
 
-// ── Connection pool ─────────────────────────────────────────────────────────
+// ── Embedded SSH connection retention ───────────────────────────────────────
 
 #[tauri::command]
 pub async fn connection_status() -> Result<Vec<ConnectionStatus>, String> {
@@ -1578,7 +1578,7 @@ pub fn run_tauri() {
             generate_key,
             import_key,
             delete_key,
-            // Connection pool
+            // Embedded SSH connection retention
             connection_status,
             ssh_connect,
             ssh_disconnect,

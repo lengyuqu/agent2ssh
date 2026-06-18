@@ -110,13 +110,13 @@ Hosts 是默认激活的标签页，分为两个区域。
 | Refresh | 刷新主机列表 |
 | Import SSH Config | 从 `~/.ssh/config` 导入主机 |
 | Ping All | 检测所有主机的连通性 |
-| Refresh Connections | 刷新 ControlMaster 连接状态 |
+| Refresh Connections | 刷新内置 SSH 连接状态 |
 
 主机表格列：
 
 | 列 | 说明 |
 |----|------|
-| Status | ControlMaster 连接状态（已连接/未连接） |
+| Status | 内置 SSH 连接状态（已连接/未连接） |
 | Name | 主机别名 |
 | Host | 主机地址 |
 | User | SSH 用户名 |

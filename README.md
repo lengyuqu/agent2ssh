@@ -134,12 +134,12 @@ For first-time external users, follow the [10-minute CLI and MCP setup guide](do
 ### Command Execution
 
 - Non-interactive SSH exec with JSON output
-- Direct-host exec uses the embedded SSH transport; jump-host execution still falls back to system `ssh`
+- Embedded SSH transport for exec, SFTP, terminal, sessions, jump-host proxying, and port forwards
 - Configurable timeout, stdin piping, and output truncation
 - Multi-host concurrent exec (`exec-multi`)
 - Multi-host execution by tag
 - Connectivity check (`ping`) with latency reporting
-- SSH ControlMaster connection pooling
+- Retained embedded SSH connections for connection status and preconnect workflows
 
 ### Safety
 

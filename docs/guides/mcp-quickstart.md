@@ -348,7 +348,7 @@ MCP 服务器以 `agent2ssh-mcp` 二进制运行，通过标准输入/输出与 
 
 MCP 的 exec、exec-multi、playbook、SFTP、session open/write/close、forward add/remove、connect 和 disconnect 等 mutation 操作会复用 Agent2SSH 的统一授权路径。daemon 或远程 token scope 会在审批前检查；用户风险规则只能升级内置风险；host/playbook `risk_override` 只能调整非 `blocked` 命令。PTY session 写入按完成的输入行做授权和操作审计；session/forward 的 read/list 类观察操作不默认写入 `audit.jsonl`。
 
-Direct host 的 MCP session 工具会通过 daemon 或本地 fallback 使用内置 SSH terminal worker，不依赖系统 `ssh` 或 `sshpass`；jump-host、端口转发和连接池相关路径仍保留系统 ssh fallback。
+MCP 的 exec、SFTP、session、terminal 相关 daemon 路径、jump-host、端口转发和连接保留都使用内置 SSH 传输，不依赖系统 `ssh`、`scp` 或 `sshpass`。
 
 高风险命令可通过 daemon 审批流处理。未路由到 daemon、且没有本地审批处理器时，MCP 会失败关闭；此时应改用 daemon 路由，或在策略允许时传入 `force: true`。
 
@@ -397,9 +397,9 @@ Direct host 的 MCP session 工具会通过 daemon 或本地 fallback 使用内�
 
 ---
 
-### 连接池
+### 连接保留
 
-管理 SSH ControlMaster 连接池，复用 SSH 连接以降低延迟。
+管理内置 SSH 连接保留，提前建立连接并查看当前保留状态。
 
 **ssh_connection_status** -- 查看所有连接状态
 
@@ -410,7 +410,7 @@ Direct host 的 MCP session 工具会通过 daemon 或本地 fallback 使用内�
 }
 ```
 
-**ssh_connect** -- 手动建立 ControlMaster 连接
+**ssh_connect** -- 手动建立内置 SSH 连接
 
 ```json
 {
@@ -419,7 +419,7 @@ Direct host 的 MCP session 工具会通过 daemon 或本地 fallback 使用内�
 }
 ```
 
-**ssh_disconnect** -- 关闭 ControlMaster 连接
+**ssh_disconnect** -- 关闭内置 SSH 连接
 
 ```json
 {
@@ -622,9 +622,9 @@ token_env = "AGENT2SSH_CI_TOKEN"
 | 22 | `ssh_risk_check` | 检查命令风险等级 |
 | 23 | `ssh_approval_list` | 列出审批请求 |
 | 24 | `ssh_approval_respond` | 批准或拒绝审批 |
-| 25 | `ssh_connection_status` | 查看连接池状态 |
-| 26 | `ssh_connect` | 建立 ControlMaster 连接 |
-| 27 | `ssh_disconnect` | 关闭 ControlMaster 连接 |
+| 25 | `ssh_connection_status` | 查看内置连接状态 |
+| 26 | `ssh_connect` | 建立内置 SSH 连接 |
+| 27 | `ssh_disconnect` | 关闭内置 SSH 连接 |
 | 28 | `ssh_webhook_config` | 获取或设置 Webhook 配置 |
 | 29 | `ssh_playbook_list` | 列出 Playbook |
 | 30 | `ssh_playbook_run` | 执行 Playbook |

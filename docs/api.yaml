@@ -681,8 +681,9 @@ paths:
         {"type":"connected","host":"...","address":"...","username":"...","fingerprint_sha256":"SHA256:...","host_key_algorithm":"...","server_banner":"..."}.
         Terminal input/output then streams as binary frames. Resize control is
         sent as a JSON text frame: {"type":"resize","cols":120,"rows":36}.
-        Direct-host terminal connections use the embedded SSH transport and do
-        not require system `ssh` or `sshpass`. Completed input lines are
+        Terminal connections use the embedded SSH transport, including
+        jump-host proxy channels, and do not require system `ssh` or `sshpass`.
+        Completed input lines are
         authorized before bytes are forwarded to the remote PTY; denied input is
         reported as an error frame and dropped.
       parameters:
@@ -1211,7 +1212,7 @@ paths:
 
   /connections:
     get:
-      summary: List SSH ControlMaster connection states
+      summary: List retained embedded SSH connection states
       responses:
         "200":
           content:
@@ -1222,7 +1223,7 @@ paths:
 
   /connections/{host}/connect:
     post:
-      summary: Establish a ControlMaster connection to a host
+      summary: Establish a retained embedded SSH connection to a host
       description: Applies bearer-token scope, execution gate, effective risk, and approval policy using `connect`.
       parameters:
         - name: host
@@ -1255,7 +1256,7 @@ paths:
 
   /connections/{host}/disconnect:
     post:
-      summary: Close a ControlMaster connection to a host
+      summary: Close a retained embedded SSH connection to a host
       description: Applies bearer-token scope, effective risk, and approval policy using `disconnect`.
       parameters:
         - name: host

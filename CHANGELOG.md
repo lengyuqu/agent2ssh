@@ -12,6 +12,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - **Execution limits**: Added `execution_limits.toml` with per-source, per-host, and per-tag rate/session limits, plus 429 rejection auditing and `limit_rejected` events.
 - **Unified policy files**: Added `policy.toml` / `policy.json` support for colocating risk rules and approval policies, with `agent2ssh policy validate` and `agent2ssh policy test`.
 - **Anomaly detection**: Added `anomaly.toml`, source burst detection, sensitive command pattern detection, after-hours high-risk detection, `anomaly_detected` events, webhook support, and Live Activity anomaly highlighting.
+- **Embedded jump-host and forwarding transport**: Added embedded `direct-tcpip` bastion proxy channels plus local/remote forwarding over the in-process SSH transport, removing the remaining system `ssh`/`scp`/`sshpass` runtime dependency from exec, SFTP, terminal, session, connection, health, and forward paths.
+- **Terminal limit coverage**: WebSocket `/terminal` now participates in daemon session concurrency limits and applies execution rate limits to completed terminal input lines.
 
 ### Changed
 - **Approval scoping**: Multi-host execution and playbook approvals now apply only to the approved host or step. Explicit `force` still applies to the whole requested operation when policy permits.
@@ -21,11 +23,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - **Remote daemon tag scope**: Client-side `remotes.toml` tag checks now read host tags from the remote daemon before forwarding, so tag-based remote scope decisions use the remote daemon as the source of truth.
 - **Team config import semantics**: `config-import` now updates changed same-name hosts while preserving local key/password material, matching the existing import preview.
 - **Policy compatibility**: Runtime policy loading now prefers unified policy files and falls back to legacy `risk_rules.toml` / `approval_policies.toml` when no unified policy exists.
+- **Connection management**: Connection status/connect/disconnect now retain embedded SSH sessions instead of creating ControlMaster sockets; `socket_path` remains `null`.
 - **Documentation**: README, architecture, OpenAPI, configuration, daemon quickstart, MCP quickstart, and plan docs now describe the completed G-stage control-plane capabilities and the exact PTY/session audit boundary.
 
 ### Fixed
 - **Desktop mutation parity**: Desktop-local SFTP, session, forward, and connection operations now use the same high-risk approval/force semantics as daemon, CLI, and MCP paths.
 - **Desktop operation audit**: Desktop-local session, forward, and connection mutations now append operation-level audit entries for success and failure.
+- **Vite production chunks**: Production frontend builds now split terminal, React, UI, icon, and runtime vendor chunks without the previous large-chunk warning.
 
 ## [0.1.1] - 2026-06-16
 

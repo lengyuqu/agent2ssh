@@ -8,7 +8,7 @@ P0-P10 已全部完成。当前基线：
 - 核心能力：Host 管理、SSH config 导入、Jump Host、tags、per-host risk override
 - 执行能力：SSH exec、exec-multi、ping、SFTP、PTY sessions、port forwarding、Playbooks
 - 安全能力：风险评分、统一 policy-as-code、审批队列、审批端点、桌面审批弹窗、敏感命令脱敏、execution gate、执行限额、异常检测
-- 运维能力：SSH ControlMaster 连接池、Webhook 通知、remote daemon registry、健康检查、指标、审计轮转
+- 运维能力：内置 SSH 连接保留、Webhook 通知、remote daemon registry、健康检查、指标、审计轮转
 - 生态能力：SSH key 管理、团队配置导入导出、MCP 客户端模板、插件/Skill 分发文档
 - 验收结果：148 单元测试 + 56 集成测试 + 26 CLI smoke 测试 = 230 测试全绿；daemon feature 下为 153 lib 单元测试 + 4 daemon 单元测试 + 56 集成测试 + 26 CLI smoke 测试全绿
 - MCP 工具：51 个，详见 [skills.md](skills.md)
@@ -377,7 +377,7 @@ S9(0.1.1 已收口)
 
 | 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
 |------|------|--------|--------|------|----------|
-| R1 | ⬜ 待认领 | 高 | - | 跨平台桌面包真实验证 | 在 Windows / Linux 实测 sidecar 命名、PTY、`scp`/`ssh` 子进程行为；记录与 macOS 的差异和修复 |
+| R1 | ⬜ 待认领 | 高 | - | 跨平台桌面包真实验证 | 在 Windows / Linux 实测 sidecar 命名、内置 SSH exec/SFTP/PTY/forward 行为；记录与 macOS 的差异和修复 |
 | R2 | ✅ 已完成 | 高 | Codex | 完成 0.1.1 发布动作 | `v0.1.1` tag 已推送到 GitHub/git233；release CI run `27638444133` 通过并上传 CLI tarballs、checksums、macOS/Linux/Windows 桌面包；`scripts/agent2ssh.rb` 已回填 macOS arm64、macOS x86_64、Linux x86_64 sha256；发布 tarball checksum 校验通过；使用 macOS arm64 release tarball 跑通 `scripts/verify-install.sh`（7 passed, 0 failed） |
 | R3 | ✅ 已完成 | 中 | Codex | 外部接入剧本与反馈入口 | 新增 `docs/guides/external-user-10min.md`，覆盖 CLI host import/add、低风险 exec 验证、Codex/Claude-style MCP 配置、反馈脱敏；新增 GitHub bug/adoption issue 模板；明确 `v0.1.1` 默认无自动遥测，匿名反馈为手动 opt-in，未来运行时遥测必须默认关闭且不采集命令/主机/输出/凭据 |
 | R4 | ⬜ 待认领 | 高 | - | 首次外部 dogfood | 1-2 个非本人用户接自己的机器；产出首轮外部 bug backlog（对标 F1） |

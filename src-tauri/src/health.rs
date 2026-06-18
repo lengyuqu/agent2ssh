@@ -1,12 +1,11 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::process::Stdio;
+use std::io::Read;
 use std::time::{Duration, Instant};
 use tokio::task::JoinSet;
 
-use crate::connection::ssh_target;
-use crate::core::build_ssh_command;
+use crate::embedded_ssh::connect_embedded_ssh;
 use crate::store::{config_dir, load_config};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,20 +62,15 @@ pub async fn collect_health_snapshot(
                 }
             };
 
-            let target = ssh_target(&host_profile);
-            let mut cmd = build_ssh_command(&host_profile);
-            cmd.arg("-o")
-                .arg(format!("ConnectTimeout={timeout}"))
-                .arg(&target)
-                .arg(HEALTH_COMMAND)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
-
             let conn_start = Instant::now();
-            match tokio::time::timeout(Duration::from_secs(timeout + 5), cmd.output()).await {
-                Ok(Ok(output)) if output.status.success() => {
+            let result = tokio::time::timeout(
+                Duration::from_secs(timeout + 5),
+                tokio::task::spawn_blocking(move || run_health_command(&host_profile, timeout)),
+            )
+            .await;
+            match result {
+                Ok(Ok(Ok((stdout, _stderr, exit_code)))) if exit_code == Some(0) => {
                     let latency_ms = conn_start.elapsed().as_millis() as u64;
-                    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
                     let parsed = parse_health_output(&stdout);
                     HostHealthSnapshot {
                         host: name,
@@ -90,9 +84,8 @@ pub async fn collect_health_snapshot(
                         error: None,
                     }
                 }
-                Ok(Ok(output)) => {
+                Ok(Ok(Ok((_stdout, stderr, _exit_code)))) => {
                     let latency_ms = conn_start.elapsed().as_millis() as u64;
-                    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
                     HostHealthSnapshot {
                         host: name,
                         reachable: false,
@@ -105,7 +98,7 @@ pub async fn collect_health_snapshot(
                         error: Some(format!("SSH command failed: {}", stderr.trim())),
                     }
                 }
-                Ok(Err(e)) => HostHealthSnapshot {
+                Ok(Ok(Err(e))) => HostHealthSnapshot {
                     host: name,
                     reachable: false,
                     latency_ms: None,
@@ -115,6 +108,17 @@ pub async fn collect_health_snapshot(
                     memory_usage: None,
                     collected_at,
                     error: Some(e.to_string()),
+                },
+                Ok(Err(e)) => HostHealthSnapshot {
+                    host: name,
+                    reachable: false,
+                    latency_ms: None,
+                    uptime: None,
+                    load_avg: None,
+                    disk_usage: None,
+                    memory_usage: None,
+                    collected_at,
+                    error: Some(format!("task panicked: {e}")),
                 },
                 Err(_) => HostHealthSnapshot {
                     host: name,
@@ -162,6 +166,21 @@ pub async fn collect_health_snapshot(
     }
 
     snapshot
+}
+
+fn run_health_command(
+    host: &crate::types::HostProfile,
+    timeout: u64,
+) -> Result<(String, String, Option<i32>)> {
+    let session = connect_embedded_ssh(host, timeout)?;
+    let mut channel = session.channel_session()?;
+    channel.exec(HEALTH_COMMAND)?;
+    let mut stdout = String::new();
+    channel.read_to_string(&mut stdout)?;
+    let mut stderr = String::new();
+    channel.stderr().read_to_string(&mut stderr)?;
+    channel.wait_close()?;
+    Ok((stdout, stderr, Some(channel.exit_status()?)))
 }
 
 /// Load the last persisted health snapshot from disk.

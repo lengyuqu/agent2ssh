@@ -18,7 +18,7 @@ Agent2SSH combines a React/Vite desktop frontend with a Rust/Tauri backend. Fron
 
 ## Coding Style & Naming Conventions
 
-Use TypeScript with React function components and PascalCase component filenames, such as `HostList.tsx`. Keep helpers and modules in lower camel case. Rust uses the 2021 edition, snake_case modules, and focused files by capability, such as `policy.rs`, `session.rs`, and `daemon_control.rs`. Run `cargo fmt --manifest-path src-tauri/Cargo.toml` before Rust changes. Keep UI copy aligned with `src/i18n.tsx`. Direct-host exec, SFTP, terminal, and persistent sessions use the embedded SSH transport; jump-host fallback, connection pooling, and forwarding still have system `ssh` paths, so document backend changes carefully.
+Use TypeScript with React function components and PascalCase component filenames, such as `HostList.tsx`. Keep helpers and modules in lower camel case. Rust uses the 2021 edition, snake_case modules, and focused files by capability, such as `policy.rs`, `session.rs`, and `daemon_control.rs`. Run `cargo fmt --manifest-path src-tauri/Cargo.toml` before Rust changes. Keep UI copy aligned with `src/i18n.tsx`. Exec, SFTP, terminal, persistent sessions, jump-host proxying, connection retention, and port forwarding use the embedded SSH transport, so document backend changes carefully.
 
 ## Testing Guidelines
 
