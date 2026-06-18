@@ -12,7 +12,7 @@ import {
 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useI18n } from "../i18n";
-import type { ConnectionStatus, HostGroup, HostProfile } from "../types";
+import type { ConnectionStatus, HostGroup, HostProfile, ProxyProfile } from "../types";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
@@ -24,6 +24,7 @@ import { cn } from "../lib/utils";
 type Props = {
   hosts: HostProfile[];
   groups: HostGroup[];
+  proxies: ProxyProfile[];
   selectedHost: string;
   selectedGroup: string;
   connectionStatuses: ConnectionStatus[];
@@ -45,6 +46,7 @@ const rowActionCls =
 export default function HostList({
   hosts,
   groups,
+  proxies,
   selectedHost,
   selectedGroup,
   connectionStatuses,
@@ -94,6 +96,13 @@ export default function HostList({
 
   function isConnected(name: string): boolean {
     return connectionStatuses.some((s) => s.host === name && s.connected);
+  }
+
+  function proxyLabel(proxyId?: string | null): string | null {
+    if (!proxyId) return null;
+    const proxy = proxies.find((item) => item.id === proxyId);
+    if (!proxy) return proxyId;
+    return `${proxy.name} (${proxy.protocol})`;
   }
 
   return (
@@ -267,6 +276,7 @@ export default function HostList({
                   {host.user ? `${host.user}@` : ""}
                   {host.host}:{host.port ?? 22}
                   {host.jump_host && ` via ${host.jump_host}`}
+                  {proxyLabel(host.proxy_id) && ` · ${t("proxy")} ${proxyLabel(host.proxy_id)}`}
                 </span>
                 {host.tags && host.tags.length > 0 && (
                   <span className="mt-1.5 flex flex-wrap gap-1">

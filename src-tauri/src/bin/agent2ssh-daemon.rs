@@ -3287,6 +3287,38 @@ mod tests {
     }
 
     #[test]
+    fn public_allowlist_is_exact_and_excludes_authed_siblings() {
+        for path in ["/", "/console", "/health", "/metrics"] {
+            assert!(is_public_path(path), "{path} should be public");
+        }
+        // Authed routes — in particular `/metrics/trend`, which must not be
+        // swept in by a prefix match on `/metrics`.
+        for path in [
+            "/metrics/trend",
+            "/health-snapshot",
+            "/exec",
+            "/hosts",
+            "/sessions",
+            "/console/",
+        ] {
+            assert!(!is_public_path(path), "{path} must require auth");
+        }
+    }
+
+    #[test]
+    fn auth_token_extracted_from_header_and_query() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer secret-abc".parse().unwrap());
+        assert_eq!(bearer_token(&headers).as_deref(), Some("secret-abc"));
+        assert_eq!(bearer_token(&HeaderMap::new()), None);
+
+        let uri: axum::http::Uri = "/terminal?host=web&token=q-tok-123".parse().unwrap();
+        assert_eq!(query_token(&uri).as_deref(), Some("q-tok-123"));
+        let no_token: axum::http::Uri = "/terminal?host=web".parse().unwrap();
+        assert_eq!(query_token(&no_token), None);
+    }
+
+    #[test]
     fn paused_gate_rejects_non_desktop_source_and_writes_audit() {
         with_temp_config(|| {
             save_execution_gate(
@@ -3590,6 +3622,89 @@ denied_commands = ["rm *"]
 
 // ── Main ─────────────────────────────────────────────────────────────────────
 
+tokio::task_local! {
+    /// Per-request correlation id, set by `trace_id_middleware` for the duration
+    /// of each HTTP request. Read synchronously inside `on_event`, so daemon
+    /// `tracing` warnings/errors carry the same id that the response echoes back.
+    static REQUEST_TRACE_ID: String;
+}
+
+const TRACE_ID_HEADER: &str = "x-agent2ssh-trace-id";
+
+/// Axum middleware that binds a correlation id to each request: it reuses an
+/// inbound `X-Agent2SSH-Trace-Id` header when a caller supplies one (so MCP /
+/// desktop requests stay linked to the originating operation) or mints a fresh
+/// one, runs the request inside that task-local scope, and echoes the id on the
+/// response so clients can record it.
+async fn trace_id_middleware(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let trace_id = req
+        .headers()
+        .get(TRACE_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+    let echo = trace_id.clone();
+    let mut response = REQUEST_TRACE_ID.scope(trace_id, next.run(req)).await;
+    if let Ok(value) = axum::http::HeaderValue::from_str(&echo) {
+        response.headers_mut().insert(TRACE_ID_HEADER, value);
+    }
+    response
+}
+
+/// Routes that intentionally require no bearer token: the redirect root, the web
+/// console HTML, and the liveness/metrics probes. Matched exactly so authed
+/// siblings (e.g. `/metrics/trend`) are not accidentally exposed.
+fn is_public_path(path: &str) -> bool {
+    matches!(path, "/" | "/console" | "/health" | "/metrics")
+}
+
+fn bearer_token(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::to_string)
+}
+
+/// Extracts a `token` query parameter, used by browser WebSocket/SSE handshakes
+/// that cannot set an `Authorization` header.
+fn query_token(uri: &axum::http::Uri) -> Option<String> {
+    axum::extract::Query::<std::collections::HashMap<String, String>>::try_from_uri(uri)
+        .ok()
+        .and_then(|query| query.0.get("token").cloned())
+}
+
+/// Central authentication gate. Every request to a non-public route must present
+/// a valid admin or scoped token (via `Authorization: Bearer` or a `?token=`
+/// query parameter); otherwise it is rejected with 401 before reaching any
+/// handler. Enforcing authentication here — rather than relying on each handler
+/// to remember `check_auth` — means a newly added route is protected by default,
+/// so a forgotten check can no longer silently expose an endpoint. Handlers still
+/// call `check_auth`/`authenticate_token` to obtain their `AuthContext` for
+/// per-target scope authorization; this layer is the gate, not the authorizer.
+async fn auth_middleware(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    if is_public_path(request.uri().path()) {
+        return next.run(request).await;
+    }
+    let token = bearer_token(request.headers())
+        .or_else(|| query_token(request.uri()))
+        .unwrap_or_default();
+    match authenticate_token(&state, &token) {
+        Ok(_) => next.run(request).await,
+        Err(rejection) => rejection.into_response(),
+    }
+}
+
 /// Collects an event's `message` and remaining fields into a JSON-ready shape so
 /// the diagnostic bridge can persist them.
 #[derive(Default)]
@@ -3653,6 +3768,13 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for DiagnosticBridgeLa
             "target".to_string(),
             serde_json::Value::String(event.metadata().target().to_string()),
         );
+        // Tag with the current request's correlation id when emitted inside a
+        // request scope, linking daemon log lines to the originating operation.
+        if let Ok(trace_id) = REQUEST_TRACE_ID.try_with(String::clone) {
+            visitor
+                .fields
+                .insert("trace_id".to_string(), serde_json::Value::String(trace_id));
+        }
 
         let diag_level = if level == tracing::Level::ERROR {
             "error"
@@ -3688,6 +3810,7 @@ async fn main() -> anyhow::Result<()> {
     // when "diagnostic_error" is in the configured webhook events). Spawned onto
     // the tokio runtime; skipped if called from a non-runtime thread.
     agent2ssh::set_error_sink(|entry| {
+        // 1) Per-error webhook (opt-in via the "diagnostic_error" event).
         let evt = WebhookEvent {
             event: "diagnostic_error".into(),
             host: entry.component.clone(),
@@ -3701,6 +3824,12 @@ async fn main() -> anyhow::Result<()> {
                 let _ = fire_webhook(evt).await;
             });
         }
+
+        // 2) Aggregate signal: raise an `anomaly_detected` alert when the
+        //    error rate spikes, so a storm yields one alert instead of N.
+        let findings =
+            agent2ssh::anomaly::record_diagnostic_error(&entry.component, &entry.message);
+        agent2ssh::anomaly::publish_anomalies(&findings);
     });
 
     let registry = tracing_subscriber::registry()
@@ -3808,6 +3937,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/events/stream", get(events_stream))
         .route("/ssh-sync/diff", get(ssh_sync_diff))
         .route("/ssh-sync/export", post(ssh_sync_export_handler))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ))
+        .layer(axum::middleware::from_fn(trace_id_middleware))
         .layer(cors)
         .with_state(state);
 

@@ -308,10 +308,17 @@ fn local_daemon_client() -> std::result::Result<Option<(reqwest::Client, String,
     let Some(token) = token else {
         return Ok(None);
     };
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(McpError::internal)?;
+    let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30));
+    // Propagate the MCP process's correlation id so daemon-side logs for forwarded
+    // requests stay linked to the originating agent operation.
+    if let Some(trace_id) = agent2ssh::current_trace_id() {
+        if let Ok(value) = reqwest::header::HeaderValue::from_str(&trace_id) {
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert("x-agent2ssh-trace-id", value);
+            builder = builder.default_headers(headers);
+        }
+    }
+    let client = builder.build().map_err(McpError::internal)?;
     Ok(Some((client, url.trim_end_matches('/').to_string(), token)))
 }
 
@@ -515,6 +522,7 @@ async fn try_daemon_session_list() -> std::result::Result<DaemonAttempt<Vec<Valu
 #[tokio::main]
 async fn main() -> Result<()> {
     agent2ssh::install_panic_hook("mcp");
+    agent2ssh::seed_trace_id_from_env();
     let stdin = io::stdin();
     let mut stdout = io::stdout();
 

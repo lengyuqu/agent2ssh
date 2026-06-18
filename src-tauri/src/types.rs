@@ -57,6 +57,9 @@ pub struct HostProfile {
     /// Another host profile alias to use as a ProxyJump (-J) bastion.
     #[serde(default)]
     pub jump_host: Option<String>,
+    /// Optional proxy profile id used for the SSH TCP connection.
+    #[serde(default)]
+    pub proxy_id: Option<String>,
     /// Override risk level for all commands on this host (e.g. "low" to skip confirmations).
     #[serde(default)]
     pub risk_override: Option<RiskLevel>,
@@ -92,6 +95,35 @@ pub fn default_host_groups() -> Vec<HostGroup> {
         id: default_host_group(),
         name: "Default".into(),
     }]
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProxyProtocol {
+    Http,
+    Socks5,
+}
+
+impl std::fmt::Display for ProxyProtocol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProxyProtocol::Http => write!(f, "http"),
+            ProxyProtocol::Socks5 => write!(f, "socks5"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProxyProfile {
+    pub id: String,
+    pub name: String,
+    pub protocol: ProxyProtocol,
+    pub host: String,
+    pub port: u16,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub password: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -258,6 +290,8 @@ pub struct AppConfig {
     #[serde(default = "default_host_groups")]
     pub groups: Vec<HostGroup>,
     #[serde(default)]
+    pub proxies: Vec<ProxyProfile>,
+    #[serde(default)]
     pub hosts: Vec<HostProfile>,
 }
 
@@ -276,11 +310,27 @@ pub struct SftpDownloadRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SftpExchangeRequest {
+    pub source_host: String,
+    pub source_path: String,
+    pub destination_host: String,
+    pub destination_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SftpResult {
     pub host: String,
     pub local_path: String,
     pub remote_path: String,
     pub direction: SftpDirection,
+    pub duration_ms: u128,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SftpExchangeResult {
+    pub downloaded: SftpResult,
+    pub uploaded: SftpResult,
+    pub local_path: String,
     pub duration_ms: u128,
 }
 

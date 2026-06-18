@@ -11,8 +11,10 @@ Agent2SSH 的所有配置和数据文件存储在 `~/.agent2ssh/` 目录下。�
   daemon_tokens.toml # 可选的 scoped Bearer Token
   daemon.pid       # 守护进程 PID（自动管理）
   audit.jsonl      # 执行审计日志（自动追加）
+  app.log          # 结构化诊断日志（JSONL，自动轮转）
   .hosts.lock      # hosts.json 跨进程写锁（自动管理）
   .audit.lock      # audit.jsonl 跨进程追加锁（自动管理）
+  .app_log.lock    # app.log 跨进程写锁（自动管理）
   policy.toml      # 统一策略文件（推荐）
   risk_rules.toml  # 旧版用户自定义风险规则（兼容）
   approval_policies.toml # 旧版审批策略（兼容）
@@ -35,10 +37,30 @@ Agent2SSH 的所有配置和数据文件存储在 `~/.agent2ssh/` 目录下。�
 
 ### 文件格式
 
-JSON 格式，包含一个 `hosts` 数组：
+JSON 格式，包含 `hosts` 数组，也可以包含由桌面端代理管理页维护的 `proxies` 数组：
 
 ```json
 {
+  "proxies": [
+    {
+      "id": "office-socks",
+      "name": "Office SOCKS",
+      "protocol": "socks5",
+      "host": "127.0.0.1",
+      "port": 1080,
+      "username": null,
+      "password": null
+    },
+    {
+      "id": "corp-http",
+      "name": "Corporate HTTP",
+      "protocol": "http",
+      "host": "proxy.example.com",
+      "port": 8080,
+      "username": "deploy",
+      "password": "local-secret"
+    }
+  ],
   "hosts": [
     {
       "name": "web1",
@@ -47,6 +69,7 @@ JSON 格式，包含一个 `hosts` 数组：
       "port": 22,
       "key_path": "~/.ssh/id_ed25519",
       "jump_host": null,
+      "proxy_id": "office-socks",
       "risk_override": null,
       "tags": ["production", "web"],
       "env": "prod",
@@ -97,6 +120,7 @@ JSON 格式，包含一个 `hosts` 数组：
 | `port` | integer | 否 | SSH 端口，默认 22 |
 | `key_path` | string | 否 | SSH 私钥路径 |
 | `jump_host` | string | 否 | ProxyJump 跳板机别名 |
+| `proxy_id` | string | 否 | 代理配置 ID，用于通过 HTTP CONNECT 或 SOCKS5 建立 SSH TCP 连接 |
 | `risk_override` | string | 否 | 覆盖该主机非 blocked 命令的风险等级（low/medium/high） |
 | `tags` | array | 否 | 标签列表，用于分组和批量执行 |
 | `env` | string | 否 | 环境标签，用于按生产、预发、开发等环境过滤 |
@@ -108,6 +132,9 @@ JSON 格式，包含一个 `hosts` 数组：
 - 文件由 Agent2SSH 自动管理，手动编辑后需确保 JSON 格式正确
 - `name` 字段必须唯一
 - `jump_host` 必须引用已存在的主机别名
+- `proxy_id` 必须引用 `proxies` 中已存在的代理 ID；删除代理时，引用它的主机会自动切换回直连
+- HTTP 代理使用 `CONNECT host:port`；SOCKS5 支持无认证和用户名/密码认证
+- 代理密码与主机密码一样保存在本地 `hosts.json`，该文件由 Agent2SSH 限制为 owner 可读写
 - `risk_override` 设置为 `"low"` 可以降低该主机上非 `blocked` 命令的风险等级
 - `risk_override` 不能降级 `blocked` 命令；内置或用户规则判定为 `blocked` 的命令仍会被拒绝；显式审批策略、scope、gate 和限额仍会生效
 - `env`、`role`、`owner` 和 `tags` 可用于桌面端主机视图过滤，也可用于 CLI `host list` 过滤
@@ -723,6 +750,8 @@ max_sessions = 2
 
 配置 audit 滑动窗口异常检测。每次执行写入 audit 后，Agent2SSH 会检测 source 频率突增、敏感命令模式和非常规时段高危操作；命中后发布 `anomaly_detected` SSE 事件，并可通过 webhook 订阅同名事件。
 
+此外，daemon 会对 `error` 级诊断日志做滑动窗口聚合：当窗口内错误数达到 `diagnostic_error_threshold` 时发布一次 `anomaly_detected`（kind=`diagnostic_error_burst`），并由 `diagnostic_cooldown_secs` 抑制重复告警 —— 即错误风暴只产生一条聚合告警，而非每条错误一次 webhook。
+
 ### 默认行为
 
 | 配置 | 默认值 | 说明 |
@@ -733,6 +762,8 @@ max_sessions = 2
 | `sensitive_threshold` | `1` | 敏感模式命中次数阈值 |
 | `after_hours_start` | `22` | 非常规时段起始小时，UTC |
 | `after_hours_end` | `6` | 非常规时段结束小时，UTC |
+| `diagnostic_error_threshold` | `5` | 窗口内 `error` 级诊断数达到该值触发聚合告警 |
+| `diagnostic_cooldown_secs` | `120` | 两次诊断错误聚合告警之间的最小间隔 |
 
 ### 文件格式
 
@@ -929,7 +960,7 @@ agent2ssh-daemon-x86_64-apple-darwin: OK
 
 使用 `agent2ssh config-export` 导出团队配置时，可通过 SHA256 验证文件完整性：
 
-`config-export` 会移除 host 的 `key_path` 和 `password`。`config-import` 遇到同名 host 时会更新地址、用户、端口、jump host、标签和 env/role/owner/risk_override 等非凭据字段，并保留本机已有的 key/password。
+`config-export` 会移除 host 的 `key_path` 和 `password`。`config-import` 遇到同名 host 时会更新地址、用户、端口、jump host、proxy_id、标签和 env/role/owner/risk_override 等非凭据字段，并保留本机已有的 key/password。
 
 ```bash
 # 导出配置

@@ -7,6 +7,7 @@ import {
   History,
   Key,
   Loader2,
+  Network,
   Play,
   Server,
   Terminal,
@@ -25,19 +26,21 @@ import McpAgentsPanel from "./components/McpAgentsPanel";
 import MultiExecPanel from "./components/MultiExecPanel";
 import PingPanel from "./components/PingPanel";
 import PlaybooksPanel from "./components/PlaybooksPanel";
+import ProxyPanel from "./components/ProxyPanel";
 import SFTPPanel from "./components/SFTPPanel";
 import TerminalPanel from "./components/TerminalPanel";
 import SettingsMenu from "./components/SettingsMenu";
 import SetupWizard from "./components/SetupWizard";
 import { useI18n } from "./i18n";
 import { cn } from "./lib/utils";
-import type { ApprovalRequest, AuditEntry, AuditFilter, ConnectionStatus, DaemonHealth, ExecutionGateStatus, HostGroup, HostProfile } from "./types";
+import type { ApprovalRequest, AuditEntry, AuditFilter, ConnectionStatus, DaemonHealth, ExecutionGateStatus, HostGroup, HostProfile, ProxyProfile } from "./types";
 
 const APPROVAL_POLL_MS = 2000;
 const DAEMON_START_RECHECK_MS = 700;
 
 const MODULES = [
   { id: "hosts", label: "Host Management", icon: Server },
+  { id: "proxies", label: "Proxies", icon: Network },
   { id: "terminal", label: "Terminal", icon: Terminal },
   { id: "execute", label: "Execution", icon: Play },
   { id: "files-sessions", label: "Files", icon: FolderOpen },
@@ -53,6 +56,7 @@ export default function App() {
   const { t } = useI18n();
   const [hosts, setHosts] = useState<HostProfile[]>([]);
   const [groups, setGroups] = useState<HostGroup[]>([{ id: "default", name: "Default" }]);
+  const [proxies, setProxies] = useState<ProxyProfile[]>([]);
   const [selectedHost, setSelectedHost] = useState("");
   const [selectedGroup, setSelectedGroup] = useState("default");
   const [editingHost, setEditingHost] = useState<HostProfile | null>(null);
@@ -75,14 +79,21 @@ export default function App() {
     [hosts, selectedHost]
   );
 
+  const currentHostProxy = useMemo(
+    () => proxies.find((proxy) => proxy.id === currentHost?.proxy_id),
+    [currentHost?.proxy_id, proxies]
+  );
+
   async function refresh(filter?: AuditFilter) {
-    const [hostList, groupList, auditList] = await Promise.all([
+    const [hostList, groupList, proxyList, auditList] = await Promise.all([
       api.listHosts(),
       api.listHostGroups(),
+      api.listProxies(),
       api.listAudit(filter),
     ]);
     setHosts(hostList);
     setGroups(groupList.length > 0 ? groupList : [{ id: "default", name: "Default" }]);
+    setProxies(proxyList);
     setAudit(auditList);
     if (!selectedHost && hostList.length > 0) setSelectedHost(hostList[0].name);
   }
@@ -415,7 +426,7 @@ export default function App() {
             </h2>
             <p className="mt-1 text-sm text-muted-foreground">
               {activeModule === "hosts" && currentHost
-                ? `${currentHost.user ? `${currentHost.user}@` : ""}${currentHost.host}:${currentHost.port ?? 22}${currentHost.jump_host ? ` via ${currentHost.jump_host}` : ""}`
+                ? `${currentHost.user ? `${currentHost.user}@` : ""}${currentHost.host}:${currentHost.port ?? 22}${currentHost.jump_host ? ` via ${currentHost.jump_host}` : ""}${currentHostProxy ? ` · ${t("proxy")} ${currentHostProxy.name}` : ""}`
                 : hosts.length > 0
                   ? t("{count} hosts configured", { count: hosts.length })
                 : t("Add a host to start issuing SSH commands")}
@@ -476,6 +487,7 @@ export default function App() {
               <HostList
                 hosts={hosts}
                 groups={groups}
+                proxies={proxies}
                 selectedHost={selectedHost}
                 selectedGroup={selectedGroup}
                 connectionStatuses={connectionStatuses}
@@ -493,12 +505,17 @@ export default function App() {
               <AddHostForm
                 hosts={hosts}
                 groups={groups}
+                proxies={proxies}
                 initialGroup={selectedGroup}
                 editingHost={editingHost}
                 onCancelEdit={() => setEditingHost(null)}
                 onSaved={refresh}
               />
             </div>
+          )}
+
+          {activeModule === "proxies" && (
+            <ProxyPanel proxies={proxies} hosts={hosts} onChanged={refresh} />
           )}
 
           {activeModule === "terminal" && (

@@ -21,6 +21,39 @@ fn diagnostic_lock() -> &'static Mutex<()> {
 type DiagnosticErrorSink = Box<dyn Fn(&DiagnosticLogEntry) + Send + Sync>;
 static ERROR_SINK: OnceLock<DiagnosticErrorSink> = OnceLock::new();
 
+thread_local! {
+    static CURRENT_TRACE_ID: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Set (or clear with `None`) the correlation id for the current thread.
+/// Diagnostic entries written from this thread are automatically tagged with a
+/// `trace_id` field, so one logical operation can be followed across log lines
+/// and across surfaces. Synchronous surfaces (CLI/MCP/Tauri) use this; the
+/// daemon, being async, propagates its per-request id separately.
+pub fn set_trace_id(trace_id: Option<String>) {
+    CURRENT_TRACE_ID.with(|cell| *cell.borrow_mut() = trace_id);
+}
+
+/// The trace id bound to the current thread, if any.
+pub fn current_trace_id() -> Option<String> {
+    CURRENT_TRACE_ID.with(|cell| cell.borrow().clone())
+}
+
+/// Seed the current thread's trace id from `AGENT2SSH_TRACE_ID`, letting an
+/// upstream caller (e.g. an agent shelling out to the CLI or MCP server)
+/// propagate its own correlation id into Agent2SSH's diagnostics. Returns the
+/// id that was applied, if any.
+pub fn seed_trace_id_from_env() -> Option<String> {
+    let id = std::env::var("AGENT2SSH_TRACE_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    if id.is_some() {
+        set_trace_id(id.clone());
+    }
+    id
+}
+
 /// Register a callback invoked once for every `error`-level diagnostic entry,
 /// after it has been written to `app.log` (and after the write lock is
 /// released). Used by the daemon to forward error diagnostics to the notify
@@ -160,10 +193,23 @@ pub fn append_diagnostic_log(
     fields: Option<Value>,
 ) -> Result<DiagnosticLogEntry> {
     ensure_config_dir()?;
+    // Two-tier lock matching store/audit: a process-local mutex serializes our
+    // own threads, and a cross-process advisory file lock keeps the other
+    // surfaces (CLI/MCP/daemon/desktop) from interleaving appends or racing a
+    // rotation on the shared app.log.
     let _guard = diagnostic_lock()
         .lock()
         .map_err(|_| anyhow::anyhow!("diagnostic log lock poisoned"))?;
+    let _file_lock = crate::store::lock_config_file(".app_log.lock")?;
     rotate_app_log_if_needed_unlocked(5 * 1024 * 1024)?;
+
+    let mut fields = redact_value(fields.unwrap_or_else(|| json!({})));
+    // Tag the entry with the current thread's correlation id (unless the caller
+    // already supplied one explicitly) so an operation can be traced end to end.
+    if let (Some(trace_id), Value::Object(map)) = (current_trace_id(), &mut fields) {
+        map.entry("trace_id".to_string())
+            .or_insert(Value::String(trace_id));
+    }
 
     let entry = DiagnosticLogEntry {
         id: Uuid::new_v4().to_string(),
@@ -171,7 +217,7 @@ pub fn append_diagnostic_log(
         level: normalize_level(level),
         component: component.trim().to_string(),
         message: redact_sensitive_text(message.trim()),
-        fields: redact_value(fields.unwrap_or_else(|| json!({}))),
+        fields,
     };
 
     let path = app_log_path()?;
@@ -182,8 +228,10 @@ pub fn append_diagnostic_log(
         .with_context(|| format!("failed to open diagnostic log {}", path.display()))?;
     writeln!(file, "{}", serde_json::to_string(&entry)?)?;
 
-    // Release the write lock before notifying the sink so the callback (which may
-    // log diagnostics of its own) cannot deadlock on the non-reentrant mutex.
+    // Release both locks before notifying the sink so the callback (which may log
+    // diagnostics of its own) cannot deadlock on the non-reentrant mutex or the
+    // exclusive file lock.
+    drop(_file_lock);
     drop(_guard);
     if entry.level == "error" {
         if let Some(sink) = ERROR_SINK.get() {
@@ -214,6 +262,7 @@ pub fn clear_diagnostic_logs() -> Result<()> {
     let _guard = diagnostic_lock()
         .lock()
         .map_err(|_| anyhow::anyhow!("diagnostic log lock poisoned"))?;
+    let _file_lock = crate::store::lock_config_file(".app_log.lock")?;
     let path = app_log_path()?;
     std::fs::write(&path, "").with_context(|| format!("failed to clear {}", path.display()))?;
     Ok(())

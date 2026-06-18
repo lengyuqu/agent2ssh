@@ -15,8 +15,8 @@ use crate::{
     types::{
         default_host_group, source_from_env, AuditEntry, AuditFilter, BatchStrategy,
         ExecMultiBatchResult, ExecMultiResult, ExecRequest, ExecResult, HostFilter, HostGroup,
-        HostProfile, PingResult, RiskLevel, SftpDirection, SftpDownloadRequest, SftpResult,
-        SftpUploadRequest,
+        HostProfile, PingResult, ProxyProfile, RiskLevel, SftpDirection, SftpDownloadRequest,
+        SftpResult, SftpUploadRequest,
     },
 };
 
@@ -283,6 +283,7 @@ fn team_host_same(existing: &HostProfile, incoming: &HostProfile) -> bool {
         && existing.user == incoming.user
         && existing.port == incoming.port
         && existing.jump_host == incoming.jump_host
+        && existing.proxy_id == incoming.proxy_id
         && existing.risk_override == incoming.risk_override
         && existing.tags == incoming.tags
         && existing.group == incoming.group
@@ -297,6 +298,10 @@ pub fn list_hosts_core() -> Result<Vec<HostProfile>> {
 
 pub fn list_host_groups_core() -> Result<Vec<HostGroup>> {
     Ok(load_config()?.groups)
+}
+
+pub fn list_proxies_core() -> Result<Vec<ProxyProfile>> {
+    Ok(load_config()?.proxies)
 }
 
 pub fn list_hosts_filtered_core(filter: &HostFilter) -> Result<Vec<HostProfile>> {
@@ -397,6 +402,40 @@ pub fn remove_host_core(name: &str) -> Result<()> {
     save_config_unlocked(&config)
 }
 
+pub fn save_proxy_core(proxy: ProxyProfile) -> Result<ProxyProfile> {
+    let proxy = normalize_proxy(proxy)?;
+    let _guard = store_write_lock()?;
+    let mut config = load_config()?;
+    if let Some(existing) = config.proxies.iter_mut().find(|item| item.id == proxy.id) {
+        *existing = proxy.clone();
+    } else {
+        config.proxies.push(proxy.clone());
+    }
+    save_config_unlocked(&config)?;
+    Ok(proxy)
+}
+
+pub fn delete_proxy_core(id: &str) -> Result<bool> {
+    let id = id.trim();
+    if id.is_empty() {
+        return Err(anyhow!("proxy id is required"));
+    }
+    let _guard = store_write_lock()?;
+    let mut config = load_config()?;
+    let before = config.proxies.len();
+    config.proxies.retain(|proxy| proxy.id != id);
+    let removed = config.proxies.len() != before;
+    if removed {
+        for host in &mut config.hosts {
+            if host.proxy_id.as_deref() == Some(id) {
+                host.proxy_id = None;
+            }
+        }
+        save_config_unlocked(&config)?;
+    }
+    Ok(removed)
+}
+
 pub fn save_host_group_core(group: HostGroup) -> Result<HostGroup> {
     let group = normalize_host_group(group)?;
     let _guard = store_write_lock()?;
@@ -456,6 +495,36 @@ fn normalize_host_group(mut group: HostGroup) -> Result<HostGroup> {
         return Err(anyhow!("group name is required"));
     }
     Ok(group)
+}
+
+fn normalize_proxy(mut proxy: ProxyProfile) -> Result<ProxyProfile> {
+    proxy.id = proxy.id.trim().to_string();
+    proxy.name = proxy.name.trim().to_string();
+    proxy.host = proxy.host.trim().to_string();
+    proxy.username = proxy
+        .username
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    proxy.password = proxy
+        .password
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    if proxy.id.is_empty() {
+        return Err(anyhow!("proxy id is required"));
+    }
+    if proxy.name.is_empty() {
+        return Err(anyhow!("proxy name is required"));
+    }
+    if proxy.host.is_empty() {
+        return Err(anyhow!("proxy host is required"));
+    }
+    if proxy.port == 0 {
+        return Err(anyhow!("proxy port is required"));
+    }
+    Ok(proxy)
 }
 
 fn ensure_host_group_exists(config: &mut crate::types::AppConfig, group_id: &str) {
@@ -1514,6 +1583,20 @@ fn validate_host(host: &HostProfile) -> Result<()> {
     if host.host.trim().is_empty() {
         return Err(anyhow!("host address is required"));
     }
+    if let Some(proxy_id) = host
+        .proxy_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if !load_config()?
+            .proxies
+            .iter()
+            .any(|proxy| proxy.id == proxy_id)
+        {
+            return Err(anyhow!("unknown proxy profile: {proxy_id}"));
+        }
+    }
     Ok(())
 }
 
@@ -1873,6 +1956,7 @@ pub fn import_ssh_config_core(path: Option<&str>) -> Result<Vec<HostProfile>> {
             key_path: id.clone(),
             password: None,
             jump_host,
+            proxy_id: None,
             risk_override: None,
             tags: vec![],
             group: default_host_group(),
@@ -2190,6 +2274,7 @@ fn parse_ssh_config_file(path: &std::path::Path) -> Result<Vec<HostProfile>> {
             key_path: id.clone(),
             password: None,
             jump_host,
+            proxy_id: None,
             risk_override: None,
             tags: vec![],
             group: default_host_group(),
@@ -2520,6 +2605,7 @@ mod tests {
                 key_path: None,
                 password: None,
                 jump_host: None,
+                proxy_id: None,
                 risk_override: None,
                 tags: vec!["blue".into(), "web".into()],
                 group: default_host_group(),
@@ -2535,6 +2621,7 @@ mod tests {
                 key_path: None,
                 password: None,
                 jump_host: None,
+                proxy_id: None,
                 risk_override: None,
                 tags: vec!["db".into()],
                 group: default_host_group(),
@@ -2605,6 +2692,7 @@ mod tests {
             key_path: None,
             password: None,
             jump_host: None,
+            proxy_id: None,
             risk_override: None,
             tags: vec![],
             group: default_host_group(),
@@ -2712,6 +2800,7 @@ mod tests {
 
         crate::store::save_config(&AppConfig {
             groups: vec![],
+            proxies: vec![],
             hosts: vec![HostProfile {
                 name: "password-host".into(),
                 host: "10.0.0.1".into(),
@@ -2720,6 +2809,7 @@ mod tests {
                 key_path: Some("~/.ssh/id_ed25519".into()),
                 password: Some("secret".into()),
                 jump_host: None,
+                proxy_id: None,
                 risk_override: None,
                 tags: vec![],
                 group: default_host_group(),
@@ -2734,6 +2824,51 @@ mod tests {
         assert_eq!(export.hosts.len(), 1);
         assert_eq!(export.hosts[0].key_path, None);
         assert_eq!(export.hosts[0].password, None);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_delete_proxy_clears_host_references() {
+        let config_dir =
+            std::env::temp_dir().join(format!("agent2ssh-proxy-delete-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::env::set_var("AGENT2SSH_CONFIG_DIR", &config_dir);
+
+        save_proxy_core(ProxyProfile {
+            id: "corp".into(),
+            name: "Corporate".into(),
+            protocol: crate::types::ProxyProtocol::Http,
+            host: "127.0.0.1".into(),
+            port: 8080,
+            username: None,
+            password: None,
+        })
+        .unwrap();
+        add_host_core(HostProfile {
+            name: "proxied".into(),
+            host: "10.0.0.1".into(),
+            user: None,
+            port: Some(22),
+            key_path: None,
+            password: None,
+            jump_host: None,
+            proxy_id: Some("corp".into()),
+            risk_override: None,
+            tags: vec![],
+            group: default_host_group(),
+            env: None,
+            role: None,
+            owner: None,
+        })
+        .unwrap();
+
+        assert!(delete_proxy_core("corp").unwrap());
+        let host = list_hosts_core()
+            .unwrap()
+            .into_iter()
+            .find(|host| host.name == "proxied")
+            .unwrap();
+        assert_eq!(host.proxy_id, None);
     }
 
     #[test]
@@ -2768,6 +2903,7 @@ mod tests {
         // Set up existing config with one host
         let existing_config = AppConfig {
             groups: vec![],
+            proxies: vec![],
             hosts: vec![HostProfile {
                 name: "existing-host".into(),
                 host: "10.0.0.1".into(),
@@ -2776,6 +2912,7 @@ mod tests {
                 key_path: None,
                 password: None,
                 jump_host: None,
+                proxy_id: None,
                 risk_override: None,
                 tags: vec![],
                 group: default_host_group(),
@@ -2797,6 +2934,7 @@ mod tests {
                     key_path: None,
                     password: None,
                     jump_host: None,
+                    proxy_id: None,
                     risk_override: None,
                     tags: vec![],
                     group: default_host_group(),
@@ -2813,6 +2951,7 @@ mod tests {
                     key_path: None,
                     password: None,
                     jump_host: None,
+                    proxy_id: None,
                     risk_override: None,
                     tags: vec![],
                     group: default_host_group(),
@@ -2847,6 +2986,7 @@ mod tests {
 
         crate::store::save_config(&AppConfig {
             groups: vec![],
+            proxies: vec![],
             hosts: vec![HostProfile {
                 name: "existing-host".into(),
                 host: "10.0.0.1".into(),
@@ -2855,6 +2995,7 @@ mod tests {
                 key_path: Some("~/.ssh/id_ed25519".into()),
                 password: Some("local-secret".into()),
                 jump_host: None,
+                proxy_id: None,
                 risk_override: None,
                 tags: vec!["old".into()],
                 group: default_host_group(),
@@ -2874,6 +3015,7 @@ mod tests {
                 key_path: None,
                 password: None,
                 jump_host: None,
+                proxy_id: None,
                 risk_override: Some(RiskLevel::Medium),
                 tags: vec!["new".into()],
                 group: default_host_group(),
@@ -3227,6 +3369,7 @@ mod tests {
                 key_path: Some("~/.ssh/id_rsa".into()),
                 password: None,
                 jump_host: None,
+                proxy_id: None,
                 risk_override: None,
                 tags: vec!["web".into()],
                 group: default_host_group(),
@@ -3242,6 +3385,7 @@ mod tests {
                 key_path: None,
                 password: None,
                 jump_host: Some("bastion".into()),
+                proxy_id: None,
                 risk_override: None,
                 tags: vec![],
                 group: default_host_group(),
@@ -3274,6 +3418,7 @@ mod tests {
             key_path: None,
             password: None,
             jump_host: None,
+            proxy_id: None,
             risk_override: None,
             tags: vec![],
             group: default_host_group(),

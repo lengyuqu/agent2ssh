@@ -41,6 +41,7 @@ export type HostProfile = {
   key_path?: string | null;
   password?: string | null;
   jump_host?: string | null;
+  proxy_id?: string | null;
   risk_override?: RiskLevel | null;
   tags?: string[];
   group: string;
@@ -52,6 +53,18 @@ export type HostProfile = {
 export type HostGroup = {
   id: string;
   name: string;
+};
+
+export type ProxyProtocol = "http" | "socks5";
+
+export type ProxyProfile = {
+  id: string;
+  name: string;
+  protocol: ProxyProtocol;
+  host: string;
+  port: number;
+  username?: string | null;
+  password?: string | null;
 };
 
 // Rust: types.rs — ExecRequest
@@ -154,6 +167,20 @@ export type SftpResult = {
   local_path: string;
   remote_path: string;
   direction: "upload" | "download";
+  duration_ms: number;
+};
+
+export type SftpExchangeRequest = {
+  source_host: string;
+  source_path: string;
+  destination_host: string;
+  destination_path: string;
+};
+
+export type SftpExchangeResult = {
+  downloaded: SftpResult;
+  uploaded: SftpResult;
+  local_path: string;
   duration_ms: number;
 };
 

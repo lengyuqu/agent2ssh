@@ -2,7 +2,7 @@ import { FileKey, Plus, X } from "lucide-react";
 import { FormEvent, useEffect, useState } from "react";
 import { api } from "../api";
 import { useI18n } from "../i18n";
-import type { HostGroup, HostProfile, SshKeyInfo } from "../types";
+import type { HostGroup, HostProfile, ProxyProfile, SshKeyInfo } from "../types";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
 import { IconButton } from "./ui/icon-button";
@@ -20,6 +20,7 @@ const emptyForm = {
   key_path: "",
   password: "",
   jump_host: "",
+  proxy_id: "",
   tags: "",
   group: "default",
   env: "",
@@ -30,6 +31,7 @@ const emptyForm = {
 type Props = {
   hosts: HostProfile[];
   groups: HostGroup[];
+  proxies: ProxyProfile[];
   initialGroup: string;
   editingHost?: HostProfile | null;
   onCancelEdit?: () => void;
@@ -47,6 +49,7 @@ function formFromHost(host: HostProfile) {
     key_path: host.key_path ?? "",
     password: host.password ?? "",
     jump_host: host.jump_host ?? "",
+    proxy_id: host.proxy_id ?? "",
     tags: (host.tags ?? []).join(", "),
     group: host.group || "default",
     env: host.env ?? "",
@@ -55,7 +58,15 @@ function formFromHost(host: HostProfile) {
   };
 }
 
-export default function AddHostForm({ hosts, groups, initialGroup, editingHost, onCancelEdit, onSaved }: Props) {
+export default function AddHostForm({
+  hosts,
+  groups,
+  proxies,
+  initialGroup,
+  editingHost,
+  onCancelEdit,
+  onSaved,
+}: Props) {
   const { t } = useI18n();
   const [form, setForm] = useState(emptyForm);
   const [keys, setKeys] = useState<SshKeyInfo[]>([]);
@@ -83,6 +94,7 @@ export default function AddHostForm({ hosts, groups, initialGroup, editingHost, 
       key_path: form.auth_mode === "password" ? null : form.key_path.trim() || null,
       password: form.auth_mode === "password" ? form.password || null : null,
       jump_host: form.jump_host.trim() || null,
+      proxy_id: form.proxy_id.trim() || null,
       tags,
       group: form.group || "default",
       env: form.env.trim() || null,
@@ -269,6 +281,20 @@ export default function AddHostForm({ hosts, groups, initialGroup, editingHost, 
             {otherHosts.map((h) => (
               <option key={h.name} value={h.name}>
                 {h.name} ({h.host})
+              </option>
+            ))}
+          </Select>
+        </label>
+        <label className={labelCls}>
+          {t("Proxy")}
+          <Select
+            value={form.proxy_id}
+            onChange={(e) => setForm({ ...form, proxy_id: e.target.value })}
+          >
+            <option value="">{t("Direct connection")}</option>
+            {proxies.map((proxy) => (
+              <option key={proxy.id} value={proxy.id}>
+                {proxy.name} ({proxy.protocol} {proxy.host}:{proxy.port})
               </option>
             ))}
           </Select>

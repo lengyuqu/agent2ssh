@@ -27,7 +27,7 @@ pub struct StoreWriteGuard {
     _file_guard: FileLockGuard,
 }
 
-struct FileLockGuard {
+pub struct FileLockGuard {
     _file: File,
 }
 
@@ -46,7 +46,13 @@ fn audit_write_lock() -> Result<FileLockGuard> {
     lock_config_file(".audit.lock")
 }
 
-fn lock_config_file(name: &str) -> Result<FileLockGuard> {
+/// Acquire an exclusive cross-process advisory lock backed by a dedicated lock
+/// file under the config dir (e.g. `.hosts.lock`, `.audit.lock`, `.app_log.lock`).
+/// Held by the returned guard until it drops. Use this — not only a process-local
+/// `Mutex` — whenever a file under `~/.agent2ssh/` is written by more than one of
+/// the CLI/MCP/daemon/desktop processes, so concurrent writers cannot interleave
+/// or race a rotation.
+pub fn lock_config_file(name: &str) -> Result<FileLockGuard> {
     ensure_config_dir()?;
     let path = config_dir()?.join(name);
     let file = OpenOptions::new()
@@ -188,11 +194,44 @@ fn normalize_config(mut config: AppConfig) -> AppConfig {
     let default_group = default_host_group();
     let valid_groups: std::collections::HashSet<String> =
         config.groups.iter().map(|group| group.id.clone()).collect();
+    for proxy in &mut config.proxies {
+        proxy.id = proxy.id.trim().to_string();
+        proxy.name = proxy.name.trim().to_string();
+        proxy.host = proxy.host.trim().to_string();
+        proxy.username = proxy
+            .username
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
+        proxy.password = proxy
+            .password
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
+    }
+    config.proxies.retain(|proxy| {
+        !proxy.id.is_empty() && !proxy.name.is_empty() && !proxy.host.is_empty() && proxy.port > 0
+    });
+    config
+        .proxies
+        .sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    let valid_proxies: std::collections::HashSet<String> = config
+        .proxies
+        .iter()
+        .map(|proxy| proxy.id.clone())
+        .collect();
     for host in &mut config.hosts {
         host.group = host.group.trim().to_string();
         if host.group.is_empty() || !valid_groups.contains(&host.group) {
             host.group = default_group.clone();
         }
+        host.proxy_id = host
+            .proxy_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && valid_proxies.contains(*value))
+            .map(ToOwned::to_owned);
     }
 
     config

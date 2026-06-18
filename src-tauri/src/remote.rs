@@ -121,15 +121,20 @@ fn validate_remotes(remotes: &[RemoteDaemon]) -> Result<()> {
     Ok(())
 }
 
+static SCOPED_TOKENS_CACHE: crate::config_cache::ConfigCache<Vec<ScopedDaemonToken>> =
+    crate::config_cache::ConfigCache::new();
+
 pub fn load_scoped_daemon_tokens() -> Result<Vec<ScopedDaemonToken>> {
     let path = config_dir()?.join("daemon_tokens.toml");
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let raw = std::fs::read_to_string(&path)?;
-    let file: DaemonTokensFile = toml::from_str(&raw)?;
-    validate_scoped_daemon_tokens(&file.tokens)?;
-    Ok(file.tokens)
+    SCOPED_TOKENS_CACHE.load_with(&path, || {
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let raw = std::fs::read_to_string(&path)?;
+        let file: DaemonTokensFile = toml::from_str(&raw)?;
+        validate_scoped_daemon_tokens(&file.tokens)?;
+        Ok(file.tokens)
+    })
 }
 
 fn validate_scoped_daemon_tokens(tokens: &[ScopedDaemonToken]) -> Result<()> {

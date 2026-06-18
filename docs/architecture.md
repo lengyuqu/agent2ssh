@@ -89,7 +89,9 @@ The daemon also exposes `/terminal` as an authenticated WebSocket endpoint for a
 - **Daemon** composes a `tracing` layer that forwards `WARN`/`ERROR` events whose target starts with `agent2ssh` into `app.log`, so the daemon's structured logs are observable even when its stdout/stderr are not captured. Its redirected stdout/stderr still land in `daemon.log`, which `daemon_control.rs` rotates at (re)start time.
 - **All binaries** install a process-wide panic hook (`install_panic_hook`) that records panics to `app.log` before the default stderr behavior.
 
-Error-level entries also fan out to an optional sink: the daemon registers one via `set_error_sink` that fires the `diagnostic_error` notify webhook (opt-in through the webhook `events` list). The desktop Settings → Diagnostics panel lists, exports (bundle), and clears these logs.
+Error-level entries also fan out to an optional sink: the daemon registers one via `set_error_sink` that (a) fires the `diagnostic_error` notify webhook (opt-in through the webhook `events` list) and (b) feeds `anomaly::record_diagnostic_error`, a sliding-window detector that raises a single aggregate `anomaly_detected` alert when the error rate spikes (`diagnostic_error_threshold` within `window_secs`, gated by `diagnostic_cooldown_secs`) instead of one webhook per error. The desktop Settings → Diagnostics panel lists, exports (bundle), and clears these logs.
+
+**Correlation IDs.** A `trace_id` ties one logical operation across surfaces. Synchronous surfaces (CLI/MCP/Tauri) use a thread-local set via `set_trace_id`/`seed_trace_id_from_env` (`AGENT2SSH_TRACE_ID`), auto-stamped onto each diagnostic entry. The daemon binds a per-request id through `trace_id_middleware` (reusing an inbound `X-Agent2SSH-Trace-Id` header or minting one), carries it in a task-local so the tracing bridge tags daemon log lines, and echoes it on the response. The desktop frontend generates a per-session id, stamps it on every frontend diagnostic, and sends it as `X-Agent2SSH-Trace-Id` on direct daemon calls; the MCP server forwards its id the same way when proxying to the local daemon.
 
 ## Safety Model
 
@@ -125,7 +127,7 @@ The daemon approval handler creates an approval request and waits for approval, 
 
 ## SSH Transport Status
 
-Command execution, SFTP, ping/health probes, WebSocket exec streaming, the WebSocket terminal, persistent PTY sessions, jump-host proxying, retained connections, and port forwards use the in-process `ssh2` transport in `embedded_ssh.rs`. The embedded transport records connection diagnostics including authentication method, server banner, host-key algorithm, SHA256 host-key fingerprint, and jump-host alias when present. The terminal/session path requests a remote PTY and forwards resize changes through libssh2 rather than relying on a local system PTY process. Jump hosts are implemented by opening an embedded `direct-tcpip` channel through the bastion and using that channel as the transport for the target SSH session.
+Command execution, SFTP, ping/health probes, WebSocket exec streaming, the WebSocket terminal, persistent PTY sessions, HTTP/SOCKS5 proxy dialing, jump-host proxying, retained connections, and port forwards use the in-process `ssh2` transport in `embedded_ssh.rs`. The embedded transport records connection diagnostics including authentication method, server banner, host-key algorithm, SHA256 host-key fingerprint, and jump-host alias when present. The terminal/session path requests a remote PTY and forwards resize changes through libssh2 rather than relying on a local system PTY process. HTTP proxies use CONNECT, SOCKS5 proxies support no-auth and username/password authentication, and jump hosts are implemented by opening an embedded `direct-tcpip` channel through the bastion and using that channel as the transport for the target SSH session.
 
 Runtime SSH transport and local Ed25519 key generation do not depend on system `ssh`, `scp`, `sshpass`, or `ssh-keygen`. Key generation is implemented in Rust and reads entropy from the operating system CSPRNG. Daemon lifecycle status/stop checks use Rust process APIs and HTTP clients instead of shelling out to `kill`, `taskkill`, `tasklist`, or `curl`. SSH config import/export reads and writes local config text, but connection execution remains embedded.
 
@@ -135,6 +137,7 @@ Runtime SSH transport and local Ed25519 key generation do not depend on system `
 | SFTP list/stat/mkdir/upload/download | Embedded `ssh2` SFTP |
 | WebSocket `/exec/stream` | Embedded `ssh2` exec channel |
 | WebSocket `/terminal` and REST/MCP/Tauri PTY sessions | Embedded `ssh2` terminal worker |
+| HTTP CONNECT / SOCKS5 proxy connections | Embedded TCP proxy handshake before SSH session handshake |
 | Jump-host / ProxyJump-style connections | Embedded `direct-tcpip` bastion channel |
 | Connection status/connect/disconnect | Retained embedded `ssh2` sessions |
 | Local and remote port forwards | Embedded `direct-tcpip` forwarding |
@@ -142,6 +145,8 @@ Runtime SSH transport and local Ed25519 key generation do not depend on system `
 | Daemon process status/stop and health check | Rust process APIs + Rust HTTP client |
 
 ## Control Plane
+
+Authentication is enforced centrally by an axum middleware (`auth_middleware`) that runs ahead of every handler: requests to non-public routes must carry a valid admin or scoped token via `Authorization: Bearer` (or a `?token=` query parameter for browser WebSocket/SSE handshakes) and are rejected with 401 otherwise. Only `/`, `/console`, `/health`, and `/metrics` are exempt. Because the gate is a layer rather than a per-handler call, a newly added route is authenticated by default — a forgotten check can no longer silently expose an endpoint. Handlers still resolve their `AuthContext` scope for per-target authorization; the middleware is the gate, not the authorizer.
 
 The current control-plane layer is enforced at the daemon/audit boundary rather than only in the desktop UI:
 
@@ -160,7 +165,9 @@ For remote daemon routing, client-side `remotes.toml` scope is checked before fo
 
 ## Persistence And Locking
 
-Host configuration and audit writes use cross-process lock files under `~/.agent2ssh/` plus atomic temp-file writes and rename. This keeps concurrent CLI, MCP, daemon, and desktop access from corrupting `hosts.json` or interleaving audit writes. The internal lock files are `.hosts.lock` and `.audit.lock`.
+Host configuration, audit, and diagnostic-log writes use cross-process lock files under `~/.agent2ssh/` plus atomic temp-file writes and rename. This keeps concurrent CLI, MCP, daemon, and desktop access from corrupting `hosts.json`, interleaving audit writes, or racing an `app.log` append/rotation. The internal lock files are `.hosts.lock`, `.audit.lock`, and `.app_log.lock`; each writer holds a process-local mutex plus the exclusive file lock (`store::lock_config_file`) for the duration of the write/rotation.
+
+Read-heavy config files (`anomaly.toml`, `execution_limits.toml`, `daemon_tokens.toml`, `webhook.toml`) are read on hot paths — per exec, per authenticated request, per fired event/error. Each is wrapped in a `config_cache::ConfigCache`, a single-slot cache keyed by the file's `(mtime, len)` that memoizes the parsed value and only re-reads when the file changes (or after an in-process `save_*` calls `invalidate`). This removes repeated TOML parsing from those paths while still picking up external edits promptly.
 
 ## Current Direction
 

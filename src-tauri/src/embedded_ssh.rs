@@ -1,5 +1,8 @@
 use anyhow::{anyhow, Context, Result};
-use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
+use base64::{
+    engine::general_purpose::{STANDARD, STANDARD_NO_PAD},
+    Engine as _,
+};
 use sha2::{Digest, Sha256};
 use ssh2::{HashType, Session};
 use std::{
@@ -11,7 +14,10 @@ use std::{
     time::Duration,
 };
 
-use crate::{store::load_config, types::HostProfile};
+use crate::{
+    store::load_config,
+    types::{HostProfile, ProxyProfile, ProxyProtocol},
+};
 
 #[derive(Debug, Clone)]
 pub struct EmbeddedSshConnectionInfo {
@@ -87,8 +93,8 @@ pub fn resolved_username(host: &HostProfile) -> String {
         .unwrap_or_else(default_username)
 }
 
-fn connect_tcp(host: &HostProfile, timeout_secs: u64) -> Result<TcpStream> {
-    let address = format!("{}:{}", host.host, host.port.unwrap_or(22));
+fn connect_tcp_address(host: &str, port: u16, timeout_secs: u64) -> Result<TcpStream> {
+    let address = format!("{host}:{port}");
     let socket_addr = address
         .to_socket_addrs()
         .with_context(|| format!("failed to resolve {address}"))?
@@ -100,12 +106,24 @@ fn connect_tcp(host: &HostProfile, timeout_secs: u64) -> Result<TcpStream> {
     Ok(tcp)
 }
 
+fn connect_direct_tcp(host: &HostProfile, timeout_secs: u64) -> Result<TcpStream> {
+    connect_tcp_address(&host.host, host.port.unwrap_or(22), timeout_secs)
+}
+
 fn resolve_jump_host(name: &str) -> Result<HostProfile> {
     load_config()?
         .hosts
         .into_iter()
         .find(|host| host.name == name)
         .ok_or_else(|| anyhow!("unknown jump host profile: {name}"))
+}
+
+fn resolve_proxy(id: &str) -> Result<ProxyProfile> {
+    load_config()?
+        .proxies
+        .into_iter()
+        .find(|proxy| proxy.id == id)
+        .ok_or_else(|| anyhow!("unknown proxy profile: {id}"))
 }
 
 fn auth_method_for_host(host: &HostProfile) -> &'static str {
@@ -126,7 +144,22 @@ fn auth_method_for_host(host: &HostProfile) -> &'static str {
     }
 }
 
-fn connect_via_jump(host: &HostProfile, timeout_secs: u64, depth: usize) -> Result<TcpStream> {
+fn proxy_for_host(host: &HostProfile) -> Result<Option<ProxyProfile>> {
+    host.proxy_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(resolve_proxy)
+        .transpose()
+}
+
+fn connect_via_jump_to(
+    host: &HostProfile,
+    target_host: &str,
+    target_port: u16,
+    timeout_secs: u64,
+    depth: usize,
+) -> Result<TcpStream> {
     let jump_name = host
         .jump_host
         .as_deref()
@@ -138,12 +171,11 @@ fn connect_via_jump(host: &HostProfile, timeout_secs: u64, depth: usize) -> Resu
         .with_context(|| format!("failed to connect jump host '{jump_name}'"))?;
     jump_session.set_blocking(true);
     let channel = jump_session
-        .channel_direct_tcpip(&host.host, host.port.unwrap_or(22), None)
+        .channel_direct_tcpip(target_host, target_port, None)
         .with_context(|| {
             format!(
                 "failed to open direct-tcpip channel via '{jump_name}' to {}:{}",
-                host.host,
-                host.port.unwrap_or(22)
+                target_host, target_port
             )
         })?;
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
@@ -163,6 +195,215 @@ fn connect_via_jump(host: &HostProfile, timeout_secs: u64, depth: usize) -> Resu
         }
     });
     Ok(client)
+}
+
+fn connect_via_jump(host: &HostProfile, timeout_secs: u64, depth: usize) -> Result<TcpStream> {
+    connect_via_jump_to(
+        host,
+        &host.host,
+        host.port.unwrap_or(22),
+        timeout_secs,
+        depth,
+    )
+}
+
+fn connect_proxy_endpoint(
+    host: &HostProfile,
+    proxy: &ProxyProfile,
+    timeout_secs: u64,
+    depth: usize,
+) -> Result<TcpStream> {
+    let mut stream = if host
+        .jump_host
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty())
+    {
+        connect_via_jump_to(host, &proxy.host, proxy.port, timeout_secs, depth)?
+    } else {
+        connect_tcp_address(&proxy.host, proxy.port, timeout_secs)?
+    };
+    match proxy.protocol {
+        ProxyProtocol::Http => connect_http_proxy(&mut stream, proxy, host)?,
+        ProxyProtocol::Socks5 => connect_socks5_proxy(&mut stream, proxy, host)?,
+    }
+    Ok(stream)
+}
+
+fn connect_transport(host: &HostProfile, timeout_secs: u64, depth: usize) -> Result<TcpStream> {
+    if let Some(proxy) = proxy_for_host(host)? {
+        return connect_proxy_endpoint(host, &proxy, timeout_secs, depth).with_context(|| {
+            format!(
+                "failed to connect '{}' through {} proxy '{}'",
+                host.name, proxy.protocol, proxy.name
+            )
+        });
+    }
+    if host
+        .jump_host
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty())
+    {
+        connect_via_jump(host, timeout_secs, depth)
+    } else {
+        connect_direct_tcp(host, timeout_secs)
+    }
+}
+
+fn connect_http_proxy(
+    stream: &mut TcpStream,
+    proxy: &ProxyProfile,
+    host: &HostProfile,
+) -> Result<()> {
+    let target = format!("{}:{}", host.host, host.port.unwrap_or(22));
+    let mut request =
+        format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\nProxy-Connection: Keep-Alive\r\n");
+    if let Some(username) = proxy
+        .username
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let password = proxy.password.as_deref().unwrap_or("");
+        let credentials = STANDARD.encode(format!("{username}:{password}"));
+        request.push_str(&format!("Proxy-Authorization: Basic {credentials}\r\n"));
+    }
+    request.push_str("\r\n");
+    stream.write_all(request.as_bytes())?;
+    stream.flush()?;
+
+    let response = read_http_proxy_response(stream)?;
+    let status_line = response
+        .lines()
+        .next()
+        .ok_or_else(|| anyhow!("empty HTTP proxy response"))?;
+    let mut parts = status_line.split_whitespace();
+    let _version = parts.next();
+    let code = parts
+        .next()
+        .ok_or_else(|| anyhow!("malformed HTTP proxy response: {status_line}"))?;
+    if code != "200" {
+        return Err(anyhow!("HTTP proxy CONNECT failed: {status_line}"));
+    }
+    Ok(())
+}
+
+fn read_http_proxy_response(stream: &mut TcpStream) -> Result<String> {
+    let mut response = Vec::new();
+    let mut buf = [0u8; 1];
+    while response.len() < 16 * 1024 {
+        stream.read_exact(&mut buf)?;
+        response.push(buf[0]);
+        if response.ends_with(b"\r\n\r\n") {
+            return String::from_utf8(response).context("HTTP proxy response is not UTF-8");
+        }
+    }
+    Err(anyhow!("HTTP proxy response header exceeded 16 KiB"))
+}
+
+fn connect_socks5_proxy(
+    stream: &mut TcpStream,
+    proxy: &ProxyProfile,
+    host: &HostProfile,
+) -> Result<()> {
+    let has_auth = proxy
+        .username
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty());
+    if has_auth {
+        stream.write_all(&[0x05, 0x02, 0x00, 0x02])?;
+    } else {
+        stream.write_all(&[0x05, 0x01, 0x00])?;
+    }
+    let mut method = [0u8; 2];
+    stream.read_exact(&mut method)?;
+    if method[0] != 0x05 {
+        return Err(anyhow!("SOCKS5 proxy returned unsupported version"));
+    }
+    match method[1] {
+        0x00 => {}
+        0x02 => authenticate_socks5_proxy(stream, proxy)?,
+        0xff => return Err(anyhow!("SOCKS5 proxy rejected authentication methods")),
+        value => {
+            return Err(anyhow!(
+                "SOCKS5 proxy selected unsupported method {value:#x}"
+            ))
+        }
+    }
+
+    let target_host = host.host.as_bytes();
+    if target_host.len() > u8::MAX as usize {
+        return Err(anyhow!("SOCKS5 target host is too long"));
+    }
+    let target_port = host.port.unwrap_or(22).to_be_bytes();
+    let mut request = Vec::with_capacity(7 + target_host.len());
+    request.extend_from_slice(&[0x05, 0x01, 0x00, 0x03, target_host.len() as u8]);
+    request.extend_from_slice(target_host);
+    request.extend_from_slice(&target_port);
+    stream.write_all(&request)?;
+
+    let mut header = [0u8; 4];
+    stream.read_exact(&mut header)?;
+    if header[0] != 0x05 {
+        return Err(anyhow!("SOCKS5 connect response has unsupported version"));
+    }
+    if header[1] != 0x00 {
+        return Err(anyhow!(
+            "SOCKS5 proxy connect failed with status {:#x}",
+            header[1]
+        ));
+    }
+    match header[3] {
+        0x01 => read_and_discard(stream, 4)?,
+        0x03 => {
+            let mut len = [0u8; 1];
+            stream.read_exact(&mut len)?;
+            read_and_discard(stream, len[0] as usize)?;
+        }
+        0x04 => read_and_discard(stream, 16)?,
+        value => {
+            return Err(anyhow!(
+                "SOCKS5 response has unsupported address type {value:#x}"
+            ))
+        }
+    }
+    read_and_discard(stream, 2)?;
+    Ok(())
+}
+
+fn authenticate_socks5_proxy(stream: &mut TcpStream, proxy: &ProxyProfile) -> Result<()> {
+    let username = proxy
+        .username
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("SOCKS5 proxy requested username/password authentication"))?;
+    let password = proxy.password.as_deref().unwrap_or("");
+    if username.len() > u8::MAX as usize || password.len() > u8::MAX as usize {
+        return Err(anyhow!("SOCKS5 proxy credentials are too long"));
+    }
+    let mut request = Vec::with_capacity(3 + username.len() + password.len());
+    request.push(0x01);
+    request.push(username.len() as u8);
+    request.extend_from_slice(username.as_bytes());
+    request.push(password.len() as u8);
+    request.extend_from_slice(password.as_bytes());
+    stream.write_all(&request)?;
+
+    let mut response = [0u8; 2];
+    stream.read_exact(&mut response)?;
+    if response != [0x01, 0x00] {
+        return Err(anyhow!("SOCKS5 proxy authentication failed"));
+    }
+    Ok(())
+}
+
+fn read_and_discard(stream: &mut TcpStream, len: usize) -> Result<()> {
+    let mut buf = vec![0u8; len];
+    stream.read_exact(&mut buf)?;
+    Ok(())
 }
 
 fn bridge_tcp_and_channel(mut stream: TcpStream, mut channel: ssh2::Channel) -> Result<()> {
@@ -255,14 +496,10 @@ fn connect_embedded_ssh_inner(
         .map(ToOwned::to_owned);
 
     let mut session = Session::new()?;
-    if via_jump.is_some() {
-        let tcp = connect_via_jump(host, timeout_secs, depth)?;
-        tcp.set_read_timeout(Some(Duration::from_secs(timeout_secs)))?;
-        tcp.set_write_timeout(Some(Duration::from_secs(timeout_secs)))?;
-        session.set_tcp_stream(tcp);
-    } else {
-        session.set_tcp_stream(connect_tcp(host, timeout_secs)?);
-    }
+    let tcp = connect_transport(host, timeout_secs, depth)?;
+    tcp.set_read_timeout(Some(Duration::from_secs(timeout_secs)))?;
+    tcp.set_write_timeout(Some(Duration::from_secs(timeout_secs)))?;
+    session.set_tcp_stream(tcp);
     session.handshake()?;
 
     let username = resolved_username(host);
@@ -456,4 +693,112 @@ fn run_terminal(
 
     let _ = channel.wait_close();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_host() -> HostProfile {
+        HostProfile {
+            name: "target".into(),
+            host: "example.internal".into(),
+            user: None,
+            port: Some(22),
+            key_path: None,
+            password: None,
+            jump_host: None,
+            proxy_id: None,
+            risk_override: None,
+            tags: vec![],
+            group: crate::types::default_host_group(),
+            env: None,
+            role: None,
+            owner: None,
+        }
+    }
+
+    fn test_proxy(protocol: ProxyProtocol) -> ProxyProfile {
+        ProxyProfile {
+            id: "proxy".into(),
+            name: "Proxy".into(),
+            protocol,
+            host: "127.0.0.1".into(),
+            port: 8080,
+            username: None,
+            password: None,
+        }
+    }
+
+    #[test]
+    fn http_proxy_connect_handshake_succeeds() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (done_tx, done_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let (mut server, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0u8; 1];
+            while !request.ends_with(b"\r\n\r\n") {
+                server.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            let request = String::from_utf8(request).unwrap();
+            assert!(request.starts_with("CONNECT example.internal:22 HTTP/1.1"));
+            server
+                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                .unwrap();
+            let mut payload = [0u8; 4];
+            server.read_exact(&mut payload).unwrap();
+            assert_eq!(&payload, b"ping");
+            done_tx.send(()).unwrap();
+        });
+
+        let mut stream = TcpStream::connect(addr).unwrap();
+        connect_http_proxy(&mut stream, &test_proxy(ProxyProtocol::Http), &test_host()).unwrap();
+        stream.write_all(b"ping").unwrap();
+        done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    }
+
+    #[test]
+    fn socks5_proxy_connect_handshake_succeeds() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (done_tx, done_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let (mut server, _) = listener.accept().unwrap();
+            let mut greeting = [0u8; 3];
+            server.read_exact(&mut greeting).unwrap();
+            assert_eq!(greeting, [0x05, 0x01, 0x00]);
+            server.write_all(&[0x05, 0x00]).unwrap();
+
+            let mut header = [0u8; 5];
+            server.read_exact(&mut header).unwrap();
+            assert_eq!(&header[..4], &[0x05, 0x01, 0x00, 0x03]);
+            let host_len = header[4] as usize;
+            let mut host = vec![0u8; host_len];
+            server.read_exact(&mut host).unwrap();
+            assert_eq!(String::from_utf8(host).unwrap(), "example.internal");
+            let mut port = [0u8; 2];
+            server.read_exact(&mut port).unwrap();
+            assert_eq!(u16::from_be_bytes(port), 22);
+            server
+                .write_all(&[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0x1f, 0x90])
+                .unwrap();
+            let mut payload = [0u8; 4];
+            server.read_exact(&mut payload).unwrap();
+            assert_eq!(&payload, b"ping");
+            done_tx.send(()).unwrap();
+        });
+
+        let mut stream = TcpStream::connect(addr).unwrap();
+        connect_socks5_proxy(
+            &mut stream,
+            &test_proxy(ProxyProtocol::Socks5),
+            &test_host(),
+        )
+        .unwrap();
+        stream.write_all(b"ping").unwrap();
+        done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    }
 }

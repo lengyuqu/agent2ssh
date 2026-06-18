@@ -870,6 +870,7 @@ fn command_authorization_error(error: CommandAuthorizationError) -> anyhow::Erro
 #[tokio::main]
 async fn main() -> Result<()> {
     agent2ssh::install_panic_hook("cli");
+    agent2ssh::seed_trace_id_from_env();
     let cli = Cli::parse();
     let daemon_alias = cli.daemon.clone();
 
@@ -953,6 +954,7 @@ async fn main() -> Result<()> {
                     key_path: key,
                     password: clean_optional(password),
                     jump_host: jump,
+                    proxy_id: None,
                     risk_override,
                     tags: tags.unwrap_or_default(),
                     group: agent2ssh::default_host_group(),

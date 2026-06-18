@@ -5,10 +5,11 @@ use crate::notify::{load_webhook_config, save_webhook_config, WebhookConfig};
 use crate::{
     connection::{connect_host, disconnect_host, list_active_connections},
     core::{
-        add_host_core, apply_risk_override, delete_host_group_core, exec_multi_core, exec_ssh_core,
-        export_team_config, import_ssh_config_core, import_team_config, list_audit_core,
-        list_host_groups_core, list_hosts_core, ping_hosts_core, remove_host_core,
-        save_host_group_core, sftp_download_core_with_source, sftp_ls_core_with_source,
+        add_host_core, apply_risk_override, delete_host_group_core, delete_proxy_core,
+        exec_multi_core, exec_ssh_core, export_team_config, import_ssh_config_core,
+        import_team_config, list_audit_core, list_host_groups_core, list_hosts_core,
+        list_proxies_core, ping_hosts_core, remove_host_core, save_host_group_core,
+        save_proxy_core, sftp_download_core_with_source, sftp_ls_core_with_source,
         sftp_mkdir_core_with_source, sftp_stat_core_with_source, sftp_upload_core_with_source,
         update_host_core, ExecMultiRequest, ImportResult, TeamConfigExport,
     },
@@ -36,8 +37,9 @@ use crate::{
     store::append_audit,
     types::{
         source_from_env, AuditEntry, AuditFilter, ConnectionStatus, ExecMultiResult, ExecRequest,
-        ExecResult, ForwardDirection, ForwardRule, HostGroup, HostProfile, PingResult, RiskLevel,
-        SftpDownloadRequest, SftpResult, SftpUploadRequest,
+        ExecResult, ForwardDirection, ForwardRule, HostGroup, HostProfile, PingResult,
+        ProxyProfile, RiskLevel, SftpDownloadRequest, SftpExchangeRequest, SftpExchangeResult,
+        SftpResult, SftpUploadRequest,
     },
 };
 use chrono::Utc;
@@ -45,6 +47,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::{
     collections::HashMap,
+    fs,
     path::{Path, PathBuf},
     sync::OnceLock,
     time::Instant,
@@ -177,33 +180,21 @@ fn preferred_mcp_path(legacy_path: &str, platform_path: &str) -> PathBuf {
 }
 
 fn mcp_agent_candidates() -> Vec<McpAgentCandidate> {
-    let mut claude_detection_paths = mcp_candidate_paths(
-        "Library/Application Support/Claude",
-        "Claude",
-    );
+    let mut claude_detection_paths =
+        mcp_candidate_paths("Library/Application Support/Claude", "Claude");
     let mut cursor_detection_paths = mcp_candidate_paths(".cursor", "Cursor");
-    let mut codebuddy_detection_paths = mcp_candidate_paths(
-        "Library/Application Support/CodeBuddy",
-        "CodeBuddy",
-    );
-    let mut windsurf_detection_paths =
-        mcp_candidate_paths(".codeium/windsurf", "Codeium/windsurf");
-    let mut workbuddy_detection_paths = mcp_candidate_paths(
-        "Library/Application Support/WorkBuddy",
-        "WorkBuddy",
-    );
+    let mut codebuddy_detection_paths =
+        mcp_candidate_paths("Library/Application Support/CodeBuddy", "CodeBuddy");
+    let mut windsurf_detection_paths = mcp_candidate_paths(".codeium/windsurf", "Codeium/windsurf");
+    let mut workbuddy_detection_paths =
+        mcp_candidate_paths("Library/Application Support/WorkBuddy", "WorkBuddy");
     let mut qoder_work_detection_paths = mcp_candidate_paths(
         "Library/Application Support/Qoder/SharedClientCache/mcp.json",
         "Qoder/SharedClientCache/mcp.json",
     );
-    let mut trae_detection_paths = mcp_candidate_paths(
-        "Library/Application Support/Trae",
-        "Trae",
-    );
-    let mut trae_solo_detection_paths = mcp_candidate_paths(
-        "Library/Application Support/TRAE SOLO",
-        "TRAE SOLO",
-    );
+    let mut trae_detection_paths = mcp_candidate_paths("Library/Application Support/Trae", "Trae");
+    let mut trae_solo_detection_paths =
+        mcp_candidate_paths("Library/Application Support/TRAE SOLO", "TRAE SOLO");
 
     if cfg!(target_os = "macos") {
         claude_detection_paths.push(PathBuf::from("/Applications/Claude.app"));
@@ -281,7 +272,9 @@ fn mcp_agent_candidates() -> Vec<McpAgentCandidate> {
             detection_paths: {
                 let mut paths = workbuddy_detection_paths;
                 paths.push(home_path(".workbuddy"));
-                paths.push(home_path("Library/Application Support/@genie/workbuddy-desktop"));
+                paths.push(home_path(
+                    "Library/Application Support/@genie/workbuddy-desktop",
+                ));
                 paths
             },
         },
@@ -563,6 +556,21 @@ pub fn delete_host_group(id: String) -> Result<bool, String> {
 }
 
 #[tauri::command]
+pub fn list_proxies() -> Result<Vec<ProxyProfile>, String> {
+    list_proxies_core().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn save_proxy(proxy: ProxyProfile) -> Result<ProxyProfile, String> {
+    save_proxy_core(proxy).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_proxy(id: String) -> Result<bool, String> {
+    delete_proxy_core(&id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn import_ssh_config(path: Option<String>) -> Result<Vec<HostProfile>, String> {
     import_ssh_config_core(path.as_deref()).map_err(|e| e.to_string())
 }
@@ -816,6 +824,36 @@ pub async fn ping_hosts(
     Ok(ping_hosts_core(hosts, timeout_secs).await)
 }
 
+fn build_sftp_exchange_temp_path(source_path: &str) -> String {
+    let source_file_name = Path::new(source_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or("agent2ssh-transfer.bin");
+    let safe_file_name: String = source_file_name
+        .chars()
+        .map(|character| {
+            if matches!(
+                character,
+                '/' | '\\' | '\0' | ':' | '*' | '?' | '"' | '<' | '>' | '|'
+            ) {
+                '_'
+            } else {
+                character
+            }
+        })
+        .collect();
+    let file_name = if safe_file_name.trim().is_empty() {
+        "agent2ssh-transfer.bin".to_string()
+    } else {
+        safe_file_name
+    };
+    std::env::temp_dir()
+        .join(format!("agent2ssh-sftp-{}-{}", Uuid::new_v4(), file_name))
+        .display()
+        .to_string()
+}
+
 // ── SFTP ─────────────────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -842,6 +880,55 @@ pub async fn sftp_download(request: SftpDownloadRequest) -> Result<SftpResult, S
     sftp_download_core_with_source(request, Some(source))
         .await
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn sftp_exchange(request: SftpExchangeRequest) -> Result<SftpExchangeResult, String> {
+    let source = source_from_env("desktop");
+    let local_temp = build_sftp_exchange_temp_path(&request.source_path);
+    let download_command = format!("sftp download {} -> {}", request.source_path, local_temp);
+    authorize_desktop_operation(&request.source_host, &download_command, false, &source).await?;
+
+    let upload_command = format!("sftp upload {} -> {}", local_temp, request.destination_path);
+    authorize_desktop_operation(&request.destination_host, &upload_command, false, &source).await?;
+
+    let started = Instant::now();
+    let downloaded = sftp_download_core_with_source(
+        SftpDownloadRequest {
+            host: request.source_host.clone(),
+            remote_path: request.source_path.clone(),
+            local_path: local_temp.clone(),
+        },
+        Some(source.clone()),
+    )
+    .await
+    .map_err(|e| {
+        let _ = fs::remove_file(&local_temp);
+        e.to_string()
+    })?;
+
+    let uploaded = sftp_upload_core_with_source(
+        SftpUploadRequest {
+            host: request.destination_host,
+            local_path: local_temp.clone(),
+            remote_path: request.destination_path,
+        },
+        Some(source),
+    )
+    .await
+    .map_err(|e| {
+        let _ = fs::remove_file(&local_temp);
+        e.to_string()
+    })?;
+
+    let _ = fs::remove_file(&local_temp);
+
+    Ok(SftpExchangeResult {
+        downloaded,
+        uploaded,
+        local_path: local_temp,
+        duration_ms: started.elapsed().as_millis(),
+    })
 }
 
 #[tauri::command]
@@ -1726,6 +1813,9 @@ pub fn run_tauri() {
             list_host_groups,
             save_host_group,
             delete_host_group,
+            list_proxies,
+            save_proxy,
+            delete_proxy,
             import_ssh_config,
             // Execution
             classify_command_risk,
@@ -1736,6 +1826,7 @@ pub fn run_tauri() {
             // SFTP
             sftp_upload,
             sftp_download,
+            sftp_exchange,
             sftp_ls,
             sftp_stat,
             sftp_mkdir,

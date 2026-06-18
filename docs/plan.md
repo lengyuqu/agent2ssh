@@ -76,6 +76,8 @@ P0-P10 已全部完成。当前基线：
 | G | 观察面升级为控制面 | ✅ 已完成 | 高 | Codex |
 | T | 团队化与多用户 | ⬜ 待认领 | 中 | - |
 | E | 生态与可靠性 | ✅ 已完成 | 中 | Codex |
+| O | 异常监听与鉴权/存储加固 | ✅ 已完成 | 高 | Claude |
+| H | 架构债与加固后续 | ⬜ 待认领 | 中 | - |
 
 ## 已完成阶段归档
 
@@ -314,11 +316,12 @@ P0-P10 已全部完成。当前基线：
 
 ## 近期建议
 
-S1-S9 与 G 阶段已完成，0.1.1 处于发布就绪状态，Live Activity 已从观察面升级为控制面。下一步聚焦：
+S1-S9 与 G 阶段已完成，0.1.1 处于发布就绪状态，Live Activity 已从观察面升级为控制面。O 阶段（异常监听与鉴权/存储加固）已完成。下一步聚焦：
 
 1. R 阶段（当前优先级）：完成跨平台真实安装验证并拿到首个外部用户反馈。
 2. E 阶段（穿插推进）：多 agent 接入验证、规模与 SSE 稳定性、契约一致性接入 CI。
-3. T 阶段（有真实多人场景后再做）：集中审计聚合、RBAC、审批协作闭环。
+3. H 阶段（按收益穿插）：承接 O 的加固后续——鉴权 handler 迁移、巨型文件拆分、MCP schema 派发、跨进程错误聚合、通用脱敏等架构债；安全/数据完整性项优先。
+4. T 阶段（有真实多人场景后再做）：集中审计聚合、RBAC、审批协作闭环。
 
 ## 安全可视化后续
 
@@ -402,3 +405,34 @@ S9(0.1.1 已收口)
 | E1 | ✅ 已完成 | 中 | Codex | 多 agent 集成验证 | 新增 `scripts/e1-mcp-client-smoke.py` 和 `docs/reports/e1-multi-agent-integration-report.md`，用 MCP stdio 协议分别模拟 `codex`、`opencode`、`cursor`、`claude-code` source，验证 initialize、51 工具枚举和 `ssh_risk_check` blocked 判定；真实客户端 UI 行为留给 R4 dogfood |
 | E2 | ✅ 已完成 | 中 | Codex | 可靠性与规模 | 新增 `scripts/e2-scale-plan-smoke.py` 和 `docs/reports/e2-scale-reliability-report.md`，在隔离配置中生成 100 个 synthetic host 并跑通 `exec-multi --plan`；新增 100 host plan Rust 回归与 1000 event burst 事件总线回归；真实 100 台 SSH/多 daemon 压测留给后续外部环境 |
 | E3 | ✅ 已完成 | 中 | Codex | 契约一致性接入 CI | `.github/workflows/ci.yml` 新增 `contract-consistency` job，在 PR、push 和 release 入口显式运行 S3 的 `docs/skills.md` vs MCP 工具、OpenAPI/daemon schema fixture、CLI help 参数一致性检查；`build` matrix 和 release-only `tauri-bundle` job 依赖该 job，契约漂移会先于跨平台构建/打包失败 |
+
+## O · 异常监听与鉴权/存储加固
+
+目标：把前后端异常监听补到“真正能监听到、能告警、能追踪”，并消除守护进程鉴权与共享文件存储上的结构性隐患。本阶段已完成，验收命令：`npm run build`、`npx tsc --noEmit`、`cargo fmt`、两套 `cargo check`、两套 `cargo test`（daemon feature 下 175 lib + 14 daemon-bin + 27 cli_smoke + 56 集成全绿）；详见 `docs/architecture.md` 的 Diagnostics、Control Plane 与 Persistence And Locking 段。
+
+| 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
+|------|------|--------|--------|------|----------|
+| O1-1 | ✅ 已完成 | 高 | Claude | 前端全局异常捕获 | 新增 `ErrorBoundary` + `window.onerror` / `unhandledrejection`，统一经 `api.ts` 的 `reportError` 写入后端 `app.log`；各面板 `catch` 在 `setError` 之外补 `reportError`，带组件名与上下文；`npx tsc --noEmit`、`npm run build` 通过 |
+| O1-2 | ✅ 已完成 | 高 | Claude | 后端 panic hook 与 MCP 错误落盘 | `diagnostics::install_panic_hook` 在 daemon/tauri/cli/mcp 四端安装，panic 以结构化 error 写入 `app.log`；MCP 请求分发失败时记录 method+tool+code |
+| O1-3 | ✅ 已完成 | 中 | Claude | tracing→app.log 桥接与 daemon.log 轮转 | daemon 用 `DiagnosticBridgeLayer` 把 `target` 以 `agent2ssh` 开头的 `WARN`/`ERROR` 转入 `app.log`；`daemon_control` 在重启时按 5MB 轮转 `daemon.log`（保留 2 代） |
+| O1-4 | ✅ 已完成 | 高 | Claude | error 诊断告警与异常聚合 | `set_error_sink` 让 error 级诊断 fan-out：opt-in `diagnostic_error` webhook + `anomaly::record_diagnostic_error` 滑动窗口聚合（`diagnostic_error_threshold`/`diagnostic_cooldown_secs`，新 kind `diagnostic_error_burst`）；含单测 |
+| O1-5 | ✅ 已完成 | 中 | Claude | 跨 surface correlation ID | 核心线程局部 `trace_id`（`set_trace_id`/`seed_trace_id_from_env`）自动打标诊断；daemon 中间件按 `X-Agent2SSH-Trace-Id` 头绑定 task-local 并回显；前端每会话 id 入诊断字段并随 fetch 透传；MCP 转发携带同名头 |
+| O2-1 | ✅ 已完成 | 高 | Claude | 中央鉴权中间件 | daemon `auth_middleware` 对非公开路由强制鉴权（header `Bearer` 或 `?token=`），未通过 401；仅 `/`、`/console`、`/health`、`/metrics` 免鉴权；新增路由默认受保护；56 集成测试（含全部 `*_requires_auth`）通过 |
+| O2-2 | ✅ 已完成 | 高 | Claude | app.log 跨进程锁 | `store::lock_config_file` 提升为可复用原语，`append/clear_diagnostic_log` 采用进程内 Mutex + `.app_log.lock` flock 两层锁，覆盖轮转与写入，与 hosts/audit 对齐 |
+| O2-3 | ✅ 已完成 | 中 | Claude | 配置缓存层 | 新增 `config_cache::ConfigCache`（单槽，`(mtime,len)` 签名失效），应用于 `anomaly.toml`、`execution_limits.toml`、`daemon_tokens.toml`、`webhook.toml` 热路径；`save_webhook_config` 写后 `invalidate`；含单测 |
+
+## H · 架构债与加固后续
+
+目标：承接 O 阶段，把设计评估中识别出的、改动面较大或需独立验证的项落到可认领的 backlog。排序原则不变：安全/数据完整性优先，纯重构按收益排，"等到有人要" 的延后。
+
+| 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
+|------|------|--------|--------|------|----------|
+| H1 | ⬜ 待认领 | 中 | - | 鉴权 handler 迁移到提取器 | 把 daemon 约 59 处手写 `check_auth` 迁移为 `AuthContext` 的 `FromRequestParts` 提取器（中间件注入 extensions），消除门禁+handler 的双重鉴权与 scoped token 双读；集成测试保持全绿 |
+| H2 | ⬜ 待认领 | 中 | - | 拆分巨型文件 | 把 `bin/agent2ssh-daemon.rs`(~3.9k)、`core.rs`(~3.3k)、`bin/agent2ssh-mcp.rs`(~2.1k)、`tauri_commands.rs`(~1.8k) 按职责拆分，使 binary 回归薄适配器、core 不再是 god module；拆分后四套 check/test 不退化 |
+| H3 | ⬜ 待认领 | 中 | - | MCP schema 驱动派发 | 用 schema 驱动替换 `call_tool` 的巨型 `match` + 手写取参，使参数校验与 `tools/list` 的 inputSchema 同源、不漂移；51 工具枚举与契约测试通过 |
+| H4 | ⬜ 待认领 | 中 | - | session/forward 进程本地态共享 | 让 MCP fallback session 与 forward 在进程间可见（统一 registry 或 daemon 汇聚）；与现有 daemon session registry 行为一致，回归覆盖 open/list/write/close |
+| H5 | ⬜ 待认领 | 中 | - | 跨进程错误聚合 | 当前 error sink 仅活在 daemon 进程，CLI/MCP/前端（经 tauri 进程）写入 `app.log` 的 error 不进聚合；改为共享状态（如 daemon 周期扫 `app.log` 或所有诊断经 daemon 汇聚）使聚合覆盖全 surface |
+| H6 | ⬜ 待认领 | 中 | - | 通用密钥脱敏 | 在现有关键字/字段名脱敏之外，增加对疑似高熵串（base64/hex/URL 内联凭据）的通用打码兜底；以正负样本测试覆盖，避免误伤正常输出 |
+| H7 | ⬜ 待认领 | 低 | - | 依赖层日志可选放行 | tracing 桥接当前只转 `agent2ssh` target，依赖层（hyper/reqwest/ssh2）的 warn/error 进不了 `app.log`；提供可配置开关在排查传输层问题时放行，同时保持防噪声/防回环 |
+| H8 | ⬜ 待认领 | 低 | - | daemon 监听地址可配置 | `127.0.0.1:7722` 当前硬编码；改为可配置（env/config），支持端口占用或多实例场景，默认仍绑定回环 |
+| H9 | ⬜ 待认领 | 低 | - | OnceLock 二次注册显式化 | `set_error_sink`/`install_panic_hook`/trace 的二次设置当前被 `.set()` 静默忽略；改为显式语义（覆盖或告警），避免未来多次初始化时无声失效 |

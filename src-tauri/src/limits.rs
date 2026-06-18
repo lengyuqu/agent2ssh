@@ -299,15 +299,20 @@ impl Default for ExecutionLimitConfig {
     }
 }
 
+static LIMITS_CACHE: crate::config_cache::ConfigCache<ExecutionLimitConfig> =
+    crate::config_cache::ConfigCache::new();
+
 pub fn load_execution_limits() -> Result<ExecutionLimitConfig> {
     let path = config_dir()?.join("execution_limits.toml");
-    if !path.exists() {
-        return Ok(ExecutionLimitConfig::default());
-    }
-    let raw = fs::read_to_string(&path)?;
-    let mut config: ExecutionLimitConfig = toml::from_str(&raw)?;
-    normalize_config_keys(&mut config);
-    Ok(config)
+    LIMITS_CACHE.load_with(&path, || {
+        if !path.exists() {
+            return Ok(ExecutionLimitConfig::default());
+        }
+        let raw = fs::read_to_string(&path)?;
+        let mut config: ExecutionLimitConfig = toml::from_str(&raw)?;
+        normalize_config_keys(&mut config);
+        Ok(config)
+    })
 }
 
 fn normalize_config_keys(config: &mut ExecutionLimitConfig) {

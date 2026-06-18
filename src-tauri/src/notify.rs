@@ -31,15 +31,23 @@ fn webhook_config_path() -> Result<PathBuf> {
     Ok(crate::store::config_dir()?.join("webhook.toml"))
 }
 
+static WEBHOOK_CACHE: crate::config_cache::ConfigCache<Option<WebhookConfig>> =
+    crate::config_cache::ConfigCache::new();
+
 /// Load webhook config from ~/.agent2ssh/webhook.toml.
 /// Returns None if the file does not exist or cannot be parsed.
 pub fn load_webhook_config() -> Option<WebhookConfig> {
     let path = webhook_config_path().ok()?;
-    if !path.exists() {
-        return None;
-    }
-    let raw = std::fs::read_to_string(&path).ok()?;
-    toml::from_str(&raw).ok()
+    WEBHOOK_CACHE
+        .load_with(&path, || {
+            if !path.exists() {
+                return Ok(None);
+            }
+            let raw = std::fs::read_to_string(&path)?;
+            // Preserve prior behavior: a parse error degrades to None, not an error.
+            Ok(toml::from_str(&raw).ok())
+        })
+        .unwrap_or(None)
 }
 
 /// Save webhook config to ~/.agent2ssh/webhook.toml.
@@ -48,6 +56,9 @@ pub fn save_webhook_config(config: &WebhookConfig) -> Result<()> {
     crate::store::ensure_config_dir()?;
     let raw = toml::to_string_pretty(config)?;
     std::fs::write(&path, raw)?;
+    // Drop the cached value so this process reads the new config immediately,
+    // independent of filesystem mtime granularity.
+    WEBHOOK_CACHE.invalidate();
     Ok(())
 }
 

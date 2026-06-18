@@ -511,6 +511,7 @@ fn test_host_profile_tags_serialization() {
         key_path: None,
         password: None,
         jump_host: None,
+        proxy_id: None,
         risk_override: None,
         tags: vec!["production".to_string(), "web".to_string()],
         group: default_host_group(),
