@@ -1,9 +1,16 @@
 import { History, RefreshCw, SlidersHorizontal } from "lucide-react";
 import { useState } from "react";
-import { api } from "../api";
 import { useI18n } from "../i18n";
 import type { AuditEntry, AuditFilter, RiskLevel } from "../types";
 import RiskBadge from "./RiskBadge";
+import { Button } from "./ui/button";
+import { Card } from "./ui/card";
+import { IconButton } from "./ui/icon-button";
+import { Input } from "./ui/input";
+import { Select } from "./ui/select";
+import { cn } from "../lib/utils";
+
+const labelCls = "grid gap-1.5 text-sm font-medium text-foreground/90";
 
 type Props = {
   audit: AuditEntry[];
@@ -34,93 +41,91 @@ export default function AuditPanel({ audit, onRefresh }: Props) {
   }
 
   return (
-    <section className="panel audit-panel">
-      <div className="panel-title">
-        <History size={16} />
+    <Card className="space-y-3 p-4">
+      <div className="flex items-center gap-2 font-semibold">
+        <History size={16} className="text-muted-foreground" />
         {t("Audit")}
-        <button
-          className="icon-button"
+        <IconButton
+          className="ml-auto"
           onClick={() => setShowFilters(!showFilters)}
           title={t("Toggle filters")}
         >
           <SlidersHorizontal size={15} />
-        </button>
-        <button
-          className="icon-button"
-          onClick={() => onRefresh()}
-          title={t("Refresh audit")}
-        >
+        </IconButton>
+        <IconButton onClick={() => onRefresh()} title={t("Refresh audit")}>
           <RefreshCw size={15} />
-        </button>
+        </IconButton>
       </div>
 
       {showFilters && (
-        <div className="audit-filters">
-          <div className="audit-filter-row">
-            <label>
-              {t("Host")}
-              <input
-                value={hostFilter}
-                onChange={(e) => setHostFilter(e.target.value)}
-                placeholder={t("all hosts")}
-              />
-            </label>
-            <label>
-              {t("Risk level")}
-              <select
-                value={riskFilter}
-                onChange={(e) =>
-                  setRiskFilter(e.target.value as RiskLevel | "")
-                }
-              >
-                <option value="">{t("all")}</option>
-                <option value="low">{t("low")}</option>
-                <option value="medium">{t("medium")}</option>
-                <option value="high">{t("high")}</option>
-                <option value="blocked">{t("blocked")}</option>
-              </select>
-            </label>
-            <label>
-              {t("Limit")}
-              <input
-                type="number"
-                min={1}
-                max={500}
-                value={limit}
-                onChange={(e) => setLimit(Number(e.target.value))}
-              />
-            </label>
-            <div className="audit-filter-actions">
-              <button className="primary" onClick={applyFilters}>
-                {t("Apply")}
-              </button>
-              <button className="secondary" onClick={clearFilters}>
-                {t("Clear")}
-              </button>
-            </div>
+        <div className="grid grid-cols-[1fr_1fr_100px_auto] items-end gap-2.5 max-md:grid-cols-1">
+          <label className={labelCls}>
+            {t("Host")}
+            <Input
+              value={hostFilter}
+              onChange={(e) => setHostFilter(e.target.value)}
+              placeholder={t("all hosts")}
+            />
+          </label>
+          <label className={labelCls}>
+            {t("Risk level")}
+            <Select
+              value={riskFilter}
+              onChange={(e) => setRiskFilter(e.target.value as RiskLevel | "")}
+            >
+              <option value="">{t("all")}</option>
+              <option value="low">{t("low")}</option>
+              <option value="medium">{t("medium")}</option>
+              <option value="high">{t("high")}</option>
+              <option value="blocked">{t("blocked")}</option>
+            </Select>
+          </label>
+          <label className={labelCls}>
+            {t("Limit")}
+            <Input
+              type="number"
+              min={1}
+              max={500}
+              value={limit}
+              onChange={(e) => setLimit(Number(e.target.value))}
+            />
+          </label>
+          <div className="flex items-end gap-1.5">
+            <Button onClick={applyFilters}>{t("Apply")}</Button>
+            <Button variant="secondary" onClick={clearFilters}>
+              {t("Clear")}
+            </Button>
           </div>
         </div>
       )}
 
-      <div className="audit-list">
+      <div className="grid gap-2">
         {audit.map((entry) => (
           <div
-            className={`audit-row ${entry.risk_level === "high" ? "audit-row--high" : ""}`}
             key={entry.id}
+            className={cn(
+              "grid grid-cols-[180px_110px_minmax(0,1fr)_120px_auto] items-center gap-3 border-t border-border pt-2 max-md:grid-cols-1 max-md:gap-1",
+              entry.risk_level === "high" &&
+                "rounded-md border border-warning/40 bg-warning/10 px-2 py-1.5"
+            )}
           >
-            <span>{new Date(entry.ts).toLocaleString()}</span>
-            <strong>{entry.host}</strong>
-            <code>{entry.command}</code>
-            <em>
+            <span className="text-xs text-muted-foreground">
+              {new Date(entry.ts).toLocaleString()}
+            </span>
+            <strong className="truncate font-semibold">{entry.host}</strong>
+            <code className="truncate font-mono text-sm">{entry.command}</code>
+            <em className="text-xs not-italic text-muted-foreground">
               exit={entry.exit_code ?? "signal"} {entry.duration_ms}ms
             </em>
             <RiskBadge level={entry.risk_level ?? "low"} hideLow />
           </div>
         ))}
         {audit.length === 0 && (
-          <div className="empty">{t("No commands executed yet")}</div>
+          <div className="px-1 py-2 text-sm text-muted-foreground">
+            {t("No commands executed yet")}
+          </div>
         )}
       </div>
-    </section>
+    </Card>
   );
 }

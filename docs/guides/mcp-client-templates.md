@@ -16,7 +16,10 @@ Agent2SSH 作为 MCP (Model Context Protocol) stdio 服务器运行，可与任�
   "mcpServers": {
     "agent2ssh": {
       "command": "agent2ssh-mcp",
-      "args": []
+      "args": [],
+      "env": {
+        "AGENT2SSH_SOURCE": "claude_desktop"
+      }
     }
   }
 }
@@ -29,7 +32,10 @@ Agent2SSH 作为 MCP (Model Context Protocol) stdio 服务器运行，可与任�
   "mcpServers": {
     "agent2ssh": {
       "command": "/usr/local/bin/agent2ssh-mcp",
-      "args": []
+      "args": [],
+      "env": {
+        "AGENT2SSH_SOURCE": "claude_desktop"
+      }
     }
   }
 }
@@ -47,7 +53,10 @@ Agent2SSH 作为 MCP (Model Context Protocol) stdio 服务器运行，可与任�
 {
   "mcpServers": {
     "agent2ssh": {
-      "command": "agent2ssh-mcp"
+      "command": "agent2ssh-mcp",
+      "env": {
+        "AGENT2SSH_SOURCE": "cursor"
+      }
     }
   }
 }
@@ -61,6 +70,7 @@ Agent2SSH 作为 MCP (Model Context Protocol) stdio 服务器运行，可与任�
     "agent2ssh": {
       "command": "agent2ssh-mcp",
       "env": {
+        "AGENT2SSH_SOURCE": "cursor",
         "AGENT2SSH_CONFIG_DIR": "/custom/path/.agent2ssh"
       }
     }
@@ -80,6 +90,9 @@ Codex uses TOML-style MCP server entries:
 [mcp_servers.agent2ssh]
 command = "agent2ssh-mcp"
 args = []
+
+[mcp_servers.agent2ssh.env]
+AGENT2SSH_SOURCE = "codex"
 ```
 
 If `agent2ssh-mcp` is not in PATH, use an absolute path:
@@ -88,12 +101,16 @@ If `agent2ssh-mcp` is not in PATH, use an absolute path:
 [mcp_servers.agent2ssh]
 command = "/usr/local/bin/agent2ssh-mcp"
 args = []
+
+[mcp_servers.agent2ssh.env]
+AGENT2SSH_SOURCE = "codex"
 ```
 
 For isolated testing, set a separate config directory:
 
 ```toml
 [mcp_servers.agent2ssh.env]
+AGENT2SSH_SOURCE = "codex"
 AGENT2SSH_CONFIG_DIR = "/tmp/agent2ssh-test"
 ```
 

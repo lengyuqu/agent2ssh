@@ -3,9 +3,14 @@ import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import { useI18n } from "../i18n";
 import type { AgentEvent, AuditEntry } from "../types";
+import { Card } from "./ui/card";
+import { Select } from "./ui/select";
+import { cn } from "../lib/utils";
 
 const MAX_EVENTS = 80;
 const AUDIT_POLL_MS = 3000;
+const EVENT_RECONNECT_MS = 3000;
+const EVENT_CONNECT_TIMEOUT_MS = 6000;
 
 type ActivityItem = {
   id: string;
@@ -106,6 +111,12 @@ function needsAttention(item: ActivityItem): boolean {
   return item.kind.includes("approval");
 }
 
+const statusCls: Record<string, string> = {
+  live: "bg-success/15 text-success",
+  connecting: "bg-sky-500/15 text-sky-500",
+  offline: "bg-destructive/15 text-destructive",
+};
+
 export default function LiveActivityPanel({ audit }: Props) {
   const { t } = useI18n();
   const [events, setEvents] = useState<AgentEvent[]>([]);
@@ -122,23 +133,75 @@ export default function LiveActivityPanel({ audit }: Props) {
   }, [audit]);
 
   useEffect(() => {
-    const controller = new AbortController();
-    setStatus("connecting");
-    setError(null);
+    let active = true;
+    let controller: AbortController | null = null;
+    let retryTimer: number | null = null;
+    let connectTimer: number | null = null;
 
-    api
-      .subscribeEvents((event) => {
-        setStatus("live");
-        setEvents((prev) => [event, ...prev].slice(0, MAX_EVENTS));
-      }, controller.signal)
-      .catch((err) => {
-        if (!controller.signal.aborted) {
+    function clearConnectTimer() {
+      if (connectTimer !== null) {
+        window.clearTimeout(connectTimer);
+        connectTimer = null;
+      }
+    }
+
+    function scheduleReconnect() {
+      if (!active || retryTimer !== null) return;
+      retryTimer = window.setTimeout(() => {
+        retryTimer = null;
+        connect();
+      }, EVENT_RECONNECT_MS);
+    }
+
+    function connect() {
+      controller?.abort();
+      controller = new AbortController();
+      setStatus("connecting");
+      setError(null);
+
+      connectTimer = window.setTimeout(() => {
+        controller?.abort();
+      }, EVENT_CONNECT_TIMEOUT_MS);
+
+      api
+        .subscribeEvents(
+          (event) => {
+            clearConnectTimer();
+            setStatus("live");
+            setEvents((prev) => [event, ...prev].slice(0, MAX_EVENTS));
+          },
+          controller.signal,
+          () => {
+            clearConnectTimer();
+            setStatus("live");
+          }
+        )
+        .catch((err) => {
+          clearConnectTimer();
+          if (!active) return;
+          if (controller?.signal.aborted) {
+            api.writeDiagnosticLog("warn", "activity", "event stream connect timed out or was aborted").catch(() => {});
+            scheduleReconnect();
+            return;
+          }
           setStatus("offline");
           setError(String(err));
-        }
-      });
+          api
+            .writeDiagnosticLog("error", "activity", "event stream subscription failed", {
+              error: String(err),
+            })
+            .catch(() => {});
+          scheduleReconnect();
+        });
+    }
 
-    return () => controller.abort();
+    connect();
+    return () => {
+      active = false;
+      controller?.abort();
+      clearConnectTimer();
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
+    };
   }, []);
 
   useEffect(() => {
@@ -172,12 +235,12 @@ export default function LiveActivityPanel({ audit }: Props) {
 
   const sourceOptions = useMemo(
     () => [...new Set(allItems.map((item) => item.source).filter(Boolean))].sort(),
-    [allItems],
+    [allItems]
   );
 
   const kindOptions = useMemo(
     () => [...new Set(allItems.map((item) => item.kind).filter(Boolean))].sort(),
-    [allItems],
+    [allItems]
   );
 
   const items = useMemo(() => {
@@ -206,7 +269,7 @@ export default function LiveActivityPanel({ audit }: Props) {
 
   const attentionItem = useMemo(
     () => allItems.find((item) => needsAttention(item)),
-    [allItems],
+    [allItems]
   );
 
   function toggleExpanded(id: string) {
@@ -219,26 +282,37 @@ export default function LiveActivityPanel({ audit }: Props) {
   }
 
   return (
-    <section className="panel live-activity-panel">
-      <div className="panel-title">
-        <Activity size={16} />
+    <Card className="space-y-3 p-4">
+      <div className="flex items-center gap-2 font-semibold">
+        <Activity size={16} className="text-muted-foreground" />
         {t("Live Agent Activity")}
-        <span className={`activity-status ${status}`}>{t(status)}</span>
+        <span
+          className={cn(
+            "ml-auto rounded-full px-2 py-0.5 text-[11px] font-bold uppercase tracking-wide",
+            statusCls[status]
+          )}
+        >
+          {t(status)}
+        </span>
       </div>
 
-      <div className="activity-note">
-        <ShieldAlert size={14} />
+      <div className="flex items-start gap-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning">
+        <ShieldAlert size={14} className="mt-0.5 shrink-0" />
         {t("Local daemon events stream live. Recent audit records catch CLI/MCP execs that wrote to the same config directory.")}
       </div>
 
-      {error && <div className="error compact">{error}</div>}
+      {error && (
+        <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          {error}
+        </div>
+      )}
 
       {attentionItem && (
-        <div className="activity-alert">
-          <ShieldAlert size={15} />
-          <div>
-            <strong>{attentionItem.source}</strong>
-            <span>
+        <div className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2.5 text-destructive">
+          <ShieldAlert size={15} className="mt-0.5 shrink-0" />
+          <div className="grid gap-0.5">
+            <strong className="break-words">{attentionItem.source}</strong>
+            <span className="break-words text-sm">
               {attentionItem.kind}
               {attentionItem.host ? ` on ${attentionItem.host}` : ""}
               {attentionItem.riskLevel ? ` (${attentionItem.riskLevel})` : ""}
@@ -248,49 +322,53 @@ export default function LiveActivityPanel({ audit }: Props) {
         </div>
       )}
 
-      <div className="activity-filters">
-        <label className="activity-search">
-          <Search size={14} />
+      <div className="grid grid-cols-[minmax(0,1fr)_minmax(120px,0.35fr)_minmax(120px,0.35fr)] gap-2 max-sm:grid-cols-1">
+        <label className="flex h-9 items-center gap-1.5 rounded-md border border-input bg-card px-3">
+          <Search size={14} className="shrink-0 text-muted-foreground" />
           <input
+            className="w-full min-w-0 border-0 bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground"
             value={search}
             onChange={(event) => setSearch(event.target.value)}
             placeholder={t("Search activity")}
           />
         </label>
-        <select value={sourceFilter} onChange={(event) => setSourceFilter(event.target.value)}>
+        <Select value={sourceFilter} onChange={(event) => setSourceFilter(event.target.value)}>
           <option value="all">{t("All sources")}</option>
           {sourceOptions.map((source) => (
             <option key={source} value={source}>
               {source}
             </option>
           ))}
-        </select>
-        <select value={kindFilter} onChange={(event) => setKindFilter(event.target.value)}>
+        </Select>
+        <Select value={kindFilter} onChange={(event) => setKindFilter(event.target.value)}>
           <option value="all">{t("All types")}</option>
           {kindOptions.map((kind) => (
             <option key={kind} value={kind}>
               {kind}
             </option>
           ))}
-        </select>
+        </Select>
       </div>
 
-      <div className="activity-list">
+      <div className="grid max-h-[360px] gap-2 overflow-auto">
         {items.length === 0 && (
-          <div className="empty">
+          <div className="flex items-center gap-2 px-1 py-2 text-sm text-muted-foreground">
             <RefreshCw size={14} />
             {t("Waiting for SSH activity")}
           </div>
         )}
         {items.map((item) => (
           <article
-            className={`activity-row ${item.anomalyReason ? "activity-row--anomaly" : ""}`}
+            className={cn(
+              "rounded-lg border bg-card p-3",
+              item.anomalyReason ? "border-warning/50 bg-warning/5" : "border-border"
+            )}
             key={item.id}
           >
-            <div className="activity-main">
-              <div className="activity-meta">
+            <div className="grid gap-1.5">
+              <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
                 <button
-                  className="activity-toggle"
+                  className="inline-flex size-[22px] items-center justify-center rounded-md border border-border bg-card text-muted-foreground transition-colors hover:bg-muted"
                   type="button"
                   onClick={() => toggleExpanded(item.id)}
                   aria-label={expanded.has(item.id) ? t("Collapse details") : t("Expand details")}
@@ -300,53 +378,76 @@ export default function LiveActivityPanel({ audit }: Props) {
                 <span>{formatTime(item.ts)}</span>
                 <span>{item.source}</span>
                 <span>{item.kind}</span>
-                {item.host && <strong>{item.host}</strong>}
+                {item.host && <strong className="font-semibold text-foreground">{item.host}</strong>}
                 {item.sessionId && <span>{item.sessionId.slice(0, 8)}</span>}
                 {item.exitCode !== undefined && (
-                  <span className={item.exitCode === 0 ? "ok" : "fail"}>
+                  <span
+                    className={cn(
+                      "font-semibold",
+                      item.exitCode === 0 ? "text-success" : "text-destructive"
+                    )}
+                  >
                     exit {item.exitCode ?? "?"}
                   </span>
                 )}
                 {item.riskLevel && <span>{item.riskLevel}</span>}
-                {item.severity && <span className="activity-severity">{item.severity}</span>}
+                {item.severity && (
+                  <span className="font-bold uppercase text-orange-600">{item.severity}</span>
+                )}
                 {item.anomalyKind && <span>{item.anomalyKind.split("_").join(" ")}</span>}
                 {item.changeId && <span>{item.changeId}</span>}
               </div>
-              {item.command && <code className="activity-command">{item.command}</code>}
-              {item.detail && <pre>{item.detail}</pre>}
+              {item.command && (
+                <code className="block break-all rounded bg-muted px-2 py-1.5 text-xs text-foreground">
+                  {item.command}
+                </code>
+              )}
+              {item.detail && (
+                <pre className="m-0 max-h-[150px] overflow-auto whitespace-pre-wrap break-words rounded bg-[#0f172a] p-2 text-xs text-slate-200">
+                  {item.detail}
+                </pre>
+              )}
               {expanded.has(item.id) && (
-                <div className="activity-details">
-                  <dl>
-                    <div>
-                      <dt>{t("time")}</dt>
-                      <dd>{item.ts}</dd>
+                <div className="grid gap-2 border-t border-border pt-2">
+                  <dl className="grid gap-1.5">
+                    <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-2">
+                      <dt className="text-[11px] uppercase text-muted-foreground">{t("time")}</dt>
+                      <dd className="m-0 break-words">{item.ts}</dd>
                     </div>
                     {item.host && (
-                      <div>
-                        <dt>{t("host")}</dt>
-                        <dd>{item.host}</dd>
+                      <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-2">
+                        <dt className="text-[11px] uppercase text-muted-foreground">{t("host")}</dt>
+                        <dd className="m-0 break-words">{item.host}</dd>
                       </div>
                     )}
                     {item.sessionId && (
-                      <div>
-                        <dt>{t("session")}</dt>
-                        <dd>{item.sessionId}</dd>
+                      <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-2">
+                        <dt className="text-[11px] uppercase text-muted-foreground">
+                          {t("session")}
+                        </dt>
+                        <dd className="m-0 break-words">{item.sessionId}</dd>
                       </div>
                     )}
                     {item.changeId && (
-                      <div>
-                        <dt>{t("change")}</dt>
-                        <dd>{item.changeId}</dd>
+                      <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-2">
+                        <dt className="text-[11px] uppercase text-muted-foreground">
+                          {t("change")}
+                        </dt>
+                        <dd className="m-0 break-words">{item.changeId}</dd>
                       </div>
                     )}
                   </dl>
-                  {item.raw && <pre>{JSON.stringify(item.raw, null, 2)}</pre>}
+                  {item.raw && (
+                    <pre className="m-0 max-h-[150px] overflow-auto whitespace-pre-wrap break-words rounded bg-[#0f172a] p-2 text-xs text-slate-200">
+                      {JSON.stringify(item.raw, null, 2)}
+                    </pre>
+                  )}
                 </div>
               )}
             </div>
           </article>
         ))}
       </div>
-    </section>
+    </Card>
   );
 }

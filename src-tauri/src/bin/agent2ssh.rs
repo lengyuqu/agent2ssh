@@ -950,6 +950,7 @@ async fn main() -> Result<()> {
                     jump_host: jump,
                     risk_override,
                     tags: tags.unwrap_or_default(),
+                    group: agent2ssh::default_host_group(),
                     env: clean_optional(env),
                     role: clean_optional(role),
                     owner: clean_optional(owner),

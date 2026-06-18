@@ -9,14 +9,18 @@ import type {
   DaemonHealth,
   DaemonSessionInfo,
   DaemonInfo,
+  DiagnosticLogEntry,
   ExecutionGateStatus,
   ExecMultiResult,
   ExecRequest,
   ExecResult,
   ForwardDirection,
   ForwardRule,
+  HostGroup,
   HostProfile,
   ImportResult,
+  McpAgentConfigureResult,
+  McpAgentConfigStatus,
   PingResult,
   Playbook,
   PlaybookRunResult,
@@ -29,6 +33,22 @@ import type {
 } from "./types";
 
 let daemonUrl = "http://127.0.0.1:7722";
+
+function logDiagnostic(
+  level: "debug" | "info" | "warn" | "error",
+  component: string,
+  message: string,
+  fields?: Record<string, unknown>
+): void {
+  invoke("write_diagnostic_log", {
+    level,
+    component,
+    message,
+    fields: fields ?? null,
+  }).catch(() => {
+    // Diagnostics must never break the user workflow.
+  });
+}
 
 /** Change the base URL used for direct daemon HTTP calls (e.g. approvals, webhooks). */
 export function setDaemonUrl(url: string): void {
@@ -44,7 +64,12 @@ export const api = {
   // Host management
   listHosts: () => invoke<HostProfile[]>("list_hosts"),
   addHost: (host: HostProfile) => invoke<HostProfile>("add_host", { host }),
+  updateHost: (originalName: string, host: HostProfile) =>
+    invoke<HostProfile>("update_host", { originalName, host }),
   removeHost: (name: string) => invoke<void>("remove_host", { name }),
+  listHostGroups: () => invoke<HostGroup[]>("list_host_groups"),
+  saveHostGroup: (group: HostGroup) => invoke<HostGroup>("save_host_group", { group }),
+  deleteHostGroup: (id: string) => invoke<boolean>("delete_host_group", { id }),
   importSshConfig: (path?: string) =>
     invoke<HostProfile[]>("import_ssh_config", { path: path ?? null }),
 
@@ -202,6 +227,24 @@ export const api = {
   listAudit: (filter?: AuditFilter) =>
     invoke<AuditEntry[]>("list_audit", { filter: filter ?? null }),
 
+  // Diagnostics
+  listDiagnosticLogs: (limit?: number) =>
+    invoke<DiagnosticLogEntry[]>("list_diagnostic_logs", { limit: limit ?? null }),
+  writeDiagnosticLog: (
+    level: "debug" | "info" | "warn" | "error",
+    component: string,
+    message: string,
+    fields?: Record<string, unknown>
+  ) =>
+    invoke<DiagnosticLogEntry>("write_diagnostic_log", {
+      level,
+      component,
+      message,
+      fields: fields ?? null,
+    }),
+  clearDiagnosticLogs: () => invoke<void>("clear_diagnostic_logs"),
+  exportDiagnosticBundle: () => invoke<string>("export_diagnostic_bundle"),
+
   // SSH Keys
   listKeys: () => invoke<SshKeyInfo[]>("list_keys"),
   generateKey: (name: string, comment?: string) =>
@@ -212,6 +255,9 @@ export const api = {
 
   // Playbooks
   listPlaybooks: () => invoke<Playbook[]>("list_playbooks"),
+  savePlaybook: (playbook: Playbook) =>
+    invoke<Playbook>("save_playbook", { playbook }),
+  deletePlaybook: (name: string) => invoke<boolean>("delete_playbook", { name }),
   runPlaybook: (playbook: string, host: string, force: boolean) =>
     invoke<PlaybookRunResult>("run_playbook", { playbook, host, force }),
 
@@ -234,9 +280,17 @@ export const api = {
       const res = await fetch(`${daemonUrl}/gate`, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      if (!res.ok) return null;
+      if (!res.ok) {
+        logDiagnostic("warn", "frontend", "gate status request returned non-OK", {
+          status: res.status,
+        });
+        return null;
+      }
       return (await res.json()) as ExecutionGateStatus;
-    } catch {
+    } catch (err) {
+      logDiagnostic("warn", "frontend", "gate status request failed", {
+        error: String(err),
+      });
       return null;
     }
   },
@@ -244,9 +298,17 @@ export const api = {
   getDaemonHealth: async (): Promise<DaemonHealth | null> => {
     try {
       const res = await fetch(`${daemonUrl}/health`);
-      if (!res.ok) return null;
+      if (!res.ok) {
+        logDiagnostic("warn", "frontend", "daemon health request returned non-OK", {
+          status: res.status,
+        });
+        return null;
+      }
       return (await res.json()) as DaemonHealth;
-    } catch {
+    } catch (err) {
+      logDiagnostic("warn", "frontend", "daemon health request failed", {
+        error: String(err),
+      });
       return null;
     }
   },
@@ -255,6 +317,9 @@ export const api = {
   daemonStart: () => invoke<DaemonControlResult>("daemon_start"),
   daemonStop: () => invoke<DaemonControlResult>("daemon_stop"),
   daemonRestart: () => invoke<DaemonControlResult>("daemon_restart"),
+  listMcpAgentConfigs: () => invoke<McpAgentConfigStatus[]>("list_mcp_agent_configs"),
+  configureMcpAgent: (agentId: string) =>
+    invoke<McpAgentConfigureResult>("configure_mcp_agent", { agentId }),
 
   pauseGate: async (reason?: string): Promise<ExecutionGateStatus> => {
     const token = await invoke<string>("get_daemon_token");
@@ -352,15 +417,19 @@ export const api = {
   /** Subscribe to the daemon SSE activity stream using Bearer auth. */
   subscribeEvents: async (
     onEvent: (event: AgentEvent) => void,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    onOpen?: () => void
   ): Promise<void> => {
     const token = await invoke<string>("get_daemon_token");
+    logDiagnostic("debug", "frontend", "opening daemon event stream", { daemonUrl });
     const res = await fetch(`${daemonUrl}/events/stream`, {
       headers: { Authorization: `Bearer ${token}` },
       signal,
     });
     if (!res.ok) throw new Error(`Failed to subscribe to events: ${res.status}`);
     if (!res.body) throw new Error("Event stream has no response body");
+    logDiagnostic("info", "frontend", "daemon event stream connected", { daemonUrl });
+    onOpen?.();
 
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
@@ -368,7 +437,10 @@ export const api = {
 
     while (true) {
       const { done, value } = await reader.read();
-      if (done) break;
+      if (done) {
+        logDiagnostic("warn", "frontend", "daemon event stream closed by reader", { daemonUrl });
+        break;
+      }
       buffer += decoder.decode(value, { stream: true });
 
       let boundary = buffer.indexOf("\n\n");

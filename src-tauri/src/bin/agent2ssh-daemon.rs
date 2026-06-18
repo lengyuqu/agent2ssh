@@ -9,7 +9,8 @@ use agent2ssh::approval::{
 };
 use agent2ssh::connection::{connect_host, disconnect_host, list_active_connections};
 use agent2ssh::core::*;
-use agent2ssh::events::{publish_event, subscribe_events, EventType};
+use agent2ssh::diagnostics::append_diagnostic_log;
+use agent2ssh::events::{publish_event, subscribe_events, Agent2SSHEvent, EventType};
 use agent2ssh::execution_control::{
     append_rejected_exec_audit, authorize_command_with_approval, command_authorization_target,
     effective_command_risk, expand_exec_targets, ApprovalOutcome, ApprovalPrompt,
@@ -50,6 +51,8 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
+use chrono::Utc;
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -101,6 +104,16 @@ fn check_auth(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or("");
+    authenticate_token(state, token)
+}
+
+/// Authenticate a raw bearer token (admin or scoped). Used by header-based
+/// `check_auth` and by the WebSocket terminal, which passes the token as a
+/// query parameter because browsers can't set headers on WebSocket handshakes.
+fn authenticate_token(
+    state: &AppState,
+    token: &str,
+) -> Result<AuthContext, (StatusCode, Json<ErrorBody>)> {
     if token_matches(token, &state.token) {
         return Ok(AuthContext { scope: None });
     }
@@ -2503,10 +2516,30 @@ async fn events_stream(
 > {
     check_auth(&s, &headers)?;
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    let _ = append_diagnostic_log(
+        "info",
+        "daemon",
+        "event stream client connected",
+        Some(serde_json::json!({ "endpoint": "/events/stream" })),
+    );
+
+    let connected = Agent2SSHEvent {
+        id: Uuid::new_v4().to_string(),
+        event_type: EventType::StreamConnected,
+        timestamp: Utc::now(),
+        data: serde_json::json!({
+            "message": "event stream connected",
+            "source": "daemon"
+        }),
+    };
+    let initial = futures_util::stream::once(async move {
+        let data = serde_json::to_string(&connected).unwrap_or_default();
+        Ok(Event::default().event("agent2ssh").data(data))
+    });
 
     let rx = subscribe_events();
     let rx = std::sync::Arc::new(tokio::sync::Mutex::new(rx));
-    let stream = futures_util::stream::unfold(rx, move |rx| async move {
+    let live = futures_util::stream::unfold(rx, move |rx| async move {
         let mut guard = rx.lock().await;
         match guard.recv().await {
             Ok(evt) => {
@@ -2517,6 +2550,7 @@ async fn events_stream(
             Err(_) => None,
         }
     });
+    let stream = initial.chain(live);
 
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
@@ -2553,6 +2587,205 @@ async fn ssh_sync_export_handler(
     Ok(Json(
         serde_json::json!({ "path": path, "hosts_exported": count }),
     ))
+}
+
+// ── WebSocket interactive terminal ───────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+struct TerminalParams {
+    host: String,
+    #[serde(default)]
+    token: String,
+}
+
+#[derive(serde::Deserialize)]
+struct TerminalControlMessage {
+    #[serde(rename = "type")]
+    message_type: String,
+    cols: Option<u16>,
+    rows: Option<u16>,
+}
+
+fn terminal_resize_from_message(text: &str) -> Option<(u32, u32)> {
+    let msg: TerminalControlMessage = serde_json::from_str(text).ok()?;
+    if msg.message_type != "resize" {
+        return None;
+    }
+    let cols = msg.cols?;
+    let rows = msg.rows?;
+    if cols == 0 || rows == 0 {
+        return None;
+    }
+    Some((u32::from(cols), u32::from(rows)))
+}
+
+/// Attach an interactive shell to a host over a WebSocket. Unlike the buffered
+/// REST session API, this streams raw bytes in both directions in real time
+/// (ANSI, control chars, TUI programs). The token is read from the query string
+/// because browser WebSocket handshakes can't carry an Authorization header.
+async fn terminal_attach(
+    State(s): State<AppState>,
+    Query(params): Query<TerminalParams>,
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
+    let auth = match authenticate_token(&s, &params.token) {
+        Ok(auth) => auth,
+        Err(e) => return e.into_response(),
+    };
+    let tags = host_tags(&params.host);
+    if let Err(e) = check_daemon_scope(&auth.scope, &params.host, &tags, "terminal") {
+        return e.into_response();
+    }
+    let source = source_from_env("daemon_terminal");
+    if let Err(e) = reject_if_gate_paused(&source, &params.host, "terminal") {
+        return e.into_response();
+    }
+    let host = match agent2ssh::session::resolve_host(&params.host) {
+        Ok(host) => host,
+        Err(e) => return err(StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    };
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    ws.on_upgrade(move |socket| handle_terminal(socket, host, auth, tags, source))
+}
+
+async fn handle_terminal(
+    socket: axum::extract::ws::WebSocket,
+    host: agent2ssh::HostProfile,
+    auth: AuthContext,
+    tags: Vec<String>,
+    source: String,
+) {
+    use agent2ssh::embedded_ssh::{spawn_terminal, TerminalCommand, TerminalEvent};
+    use axum::extract::ws::Message;
+    use futures_util::{SinkExt, StreamExt};
+    let host_name = host.name.clone();
+    let (terminal_tx, terminal_rx) = spawn_terminal(host.clone(), 80, 24);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<TerminalEvent>(128);
+    let event_task = tokio::task::spawn_blocking(move || {
+        while let Ok(event) = terminal_rx.recv() {
+            if event_tx.blocking_send(event).is_err() {
+                break;
+            }
+        }
+    });
+
+    let (mut ws_tx, mut ws_rx) = socket.split();
+    let mut pending_input = String::new();
+
+    loop {
+        tokio::select! {
+            event = event_rx.recv() => {
+                match event {
+                    Some(TerminalEvent::Connected(info)) => {
+                        let _ = ws_tx.send(Message::Text(
+                            serde_json::json!({
+                                "type": "connected",
+                                "host": info.host,
+                                "address": info.address,
+                                "username": info.username,
+                                "fingerprint_sha256": info.fingerprint_sha256,
+                                "host_key_algorithm": info.host_key_algorithm,
+                                "server_banner": info.server_banner,
+                            }).to_string()
+                        )).await;
+                    }
+                    Some(TerminalEvent::Output(data)) => {
+                        if ws_tx.send(Message::Binary(data)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(TerminalEvent::Error(error)) => {
+                        let _ = ws_tx.send(Message::Text(
+                            serde_json::json!({"type":"error","error":error}).to_string()
+                        )).await;
+                        let _ = ws_tx.send(Message::Close(None)).await;
+                        break;
+                    }
+                    Some(TerminalEvent::Closed) | None => {
+                        let _ = ws_tx.send(Message::Close(None)).await;
+                        break;
+                    }
+                }
+            }
+            incoming = ws_rx.next() => {
+                match incoming {
+                    Some(Ok(Message::Binary(data))) => {
+                        let input = String::from_utf8_lossy(&data);
+                        let (completed_commands, next_pending) =
+                            split_completed_session_commands(&pending_input, &input);
+                        let mut authorized_commands = Vec::new();
+                        let mut denied = false;
+                        for command in &completed_commands {
+                            match authorize_command(
+                                &auth.scope,
+                                &source,
+                                &host_name,
+                                &tags,
+                                None,
+                                command,
+                                false,
+                                None,
+                                None,
+                            )
+                            .await
+                            {
+                                Ok((risk, _)) => {
+                                    authorized_commands.push((command.clone(), risk));
+                                }
+                                Err((_, Json(error))) => {
+                                    denied = true;
+                                    append_operation_audit(
+                                        &source,
+                                        &host_name,
+                                        &format!("terminal command {command}"),
+                                        RiskLevel::Blocked,
+                                        None,
+                                        0,
+                                        Some(&error.error),
+                                    );
+                                    let _ = ws_tx.send(Message::Text(
+                                        serde_json::json!({"type":"error","error":error.error}).to_string()
+                                    )).await;
+                                }
+                            }
+                        }
+                        pending_input = next_pending;
+                        if denied {
+                            continue;
+                        }
+                        if terminal_tx.send(TerminalCommand::Input(data)).is_err() {
+                            break;
+                        }
+                        for (command, risk) in authorized_commands {
+                            append_operation_audit(
+                                &source,
+                                &host_name,
+                                &format!("terminal command {command}"),
+                                risk,
+                                Some(0),
+                                0,
+                                None,
+                            );
+                        }
+                    }
+                    Some(Ok(Message::Text(text))) => {
+                        if let Some((cols, rows)) = terminal_resize_from_message(&text) {
+                            let _ = terminal_tx.send(TerminalCommand::Resize {
+                                cols,
+                                rows,
+                            });
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(_)) => {}
+                    Some(Err(_)) => break,
+                }
+            }
+        }
+    }
+
+    let _ = terminal_tx.send(TerminalCommand::Close);
+    let _ = event_task.await;
 }
 
 // ── WebSocket streaming exec ─────────────────────────────────────────────────
@@ -3280,6 +3513,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/exec-multi", post(exec_multi))
         .route("/exec/compare", post(exec_compare))
         .route("/exec/stream", get(exec_stream))
+        .route("/terminal", get(terminal_attach))
         .route("/audit", get(audit))
         .route("/audit/export", get(audit_export))
         .route("/sftp/upload", post(sftp_upload))
@@ -3332,6 +3566,16 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!(addr = %addr, "Agent2SSH daemon listening");
     tracing::info!(url = %format!("http://{addr}/console"), "Web console available");
+    let _ = append_diagnostic_log(
+        "info",
+        "daemon",
+        "daemon listening",
+        Some(serde_json::json!({
+            "addr": addr,
+            "pid": std::process::id(),
+            "console_url": format!("http://{addr}/console"),
+        })),
+    );
     let listener = TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     let _ = std::fs::remove_file(&pid_path);

@@ -513,6 +513,7 @@ fn test_host_profile_tags_serialization() {
         jump_host: None,
         risk_override: None,
         tags: vec!["production".to_string(), "web".to_string()],
+        group: default_host_group(),
         env: Some("prod".to_string()),
         role: Some("web".to_string()),
         owner: Some("platform".to_string()),

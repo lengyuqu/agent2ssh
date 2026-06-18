@@ -3,6 +3,11 @@ import { useEffect, useState } from "react";
 import { api } from "../api";
 import { useI18n } from "../i18n";
 import type { SshKeyInfo } from "../types";
+import { Button } from "./ui/button";
+import { Card } from "./ui/card";
+import { IconButton } from "./ui/icon-button";
+import { Input } from "./ui/input";
+import { cn } from "../lib/utils";
 
 type Props = Record<string, never>;
 
@@ -65,7 +70,7 @@ export default function KeysPanel(_props: Props) {
   }
 
   async function handleDelete(name: string) {
-    if (!confirm(t("Delete key \"{name}\"?", { name }))) return;
+    if (!confirm(t('Delete key "{name}"?', { name }))) return;
     try {
       await api.deleteKey(name);
       await refresh();
@@ -80,118 +85,141 @@ export default function KeysPanel(_props: Props) {
     setTimeout(() => setCopiedKey(null), 2000);
   }
 
+  const tabCls = (active: boolean) =>
+    cn(
+      "flex flex-1 items-center justify-center gap-1 rounded-md border px-3 py-1.5 text-sm transition-colors",
+      active
+        ? "border-primary bg-primary text-primary-foreground"
+        : "border-border bg-card text-foreground hover:bg-muted"
+    );
+
   return (
-    <div className="panel">
-      <div className="panel-header">
-        <h3><Key size={16} /> {t("SSH Keys")}</h3>
-        <button className="secondary small" onClick={() => setShowForm(!showForm)}>
+    <Card className="space-y-3.5 p-4">
+      <div className="flex items-center gap-2">
+        <h3 className="flex items-center gap-2 font-semibold">
+          <Key size={16} className="text-muted-foreground" />
+          {t("SSH Keys")}
+        </h3>
+        <Button
+          variant="secondary"
+          size="sm"
+          className="ml-auto"
+          onClick={() => setShowForm(!showForm)}
+        >
           <Plus size={14} />
           {showForm ? t("Cancel") : t("Add Key")}
-        </button>
+        </Button>
       </div>
 
-      {error && <div className="error">{error}</div>}
+      {error && (
+        <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          {error}
+        </div>
+      )}
 
       {showForm && (
-        <div className="key-form">
-          <div className="key-mode-toggle">
-            <button
-              className={mode === "generate" ? "active" : ""}
-              onClick={() => setMode("generate")}
-            >
+        <div className="grid gap-2 rounded-lg border border-border bg-muted/40 p-3">
+          <div className="flex gap-1">
+            <button className={tabCls(mode === "generate")} onClick={() => setMode("generate")}>
               {t("Generate New")}
             </button>
-            <button
-              className={mode === "import" ? "active" : ""}
-              onClick={() => setMode("import")}
-            >
+            <button className={tabCls(mode === "import")} onClick={() => setMode("import")}>
               <Download size={12} /> {t("Import")}
             </button>
           </div>
 
           {mode === "generate" ? (
             <>
-              <input
+              <Input
                 placeholder={t("Key name (e.g. id-work)")}
                 value={newName}
                 onChange={(e) => setNewName(e.target.value)}
               />
-              <input
+              <Input
                 placeholder={t("Comment (optional)")}
                 value={newComment}
                 onChange={(e) => setNewComment(e.target.value)}
               />
-              <button className="primary" onClick={handleGenerate}>
-                {t("Generate Ed25519 Key")}
-              </button>
+              <Button onClick={handleGenerate}>{t("Generate Ed25519 Key")}</Button>
             </>
           ) : (
             <>
-              <input
+              <Input
                 placeholder={t("Path to private key (e.g. ~/.ssh/id_rsa)")}
                 value={importPath}
                 onChange={(e) => setImportPath(e.target.value)}
               />
-              <input
+              <Input
                 placeholder={t("Name (optional, defaults to filename)")}
                 value={importName}
                 onChange={(e) => setImportName(e.target.value)}
               />
-              <button className="primary" onClick={handleImport}>
-                {t("Import Key")}
-              </button>
+              <Button onClick={handleImport}>{t("Import Key")}</Button>
             </>
           )}
         </div>
       )}
 
       {keys.length === 0 && !showForm && (
-        <p className="empty">{t("No SSH keys managed. Click \"Add Key\" to get started.")}</p>
+        <p className="px-1 py-2 text-sm text-muted-foreground">
+          {t('No SSH keys managed. Click "Add Key" to get started.')}
+        </p>
       )}
 
       {keys.length > 0 && (
-        <table className="key-table">
+        <table className="w-full border-collapse text-sm">
           <thead>
-            <tr>
-              <th>{t("Name")}</th>
-              <th>{t("Type")}</th>
-              <th>{t("Public Key")}</th>
-              <th></th>
+            <tr className="border-b border-border text-left text-muted-foreground">
+              <th className="px-2 py-1.5 font-medium">{t("Name")}</th>
+              <th className="px-2 py-1.5 font-medium">{t("Type")}</th>
+              <th className="px-2 py-1.5 font-medium">{t("Public Key")}</th>
+              <th className="px-2 py-1.5" />
             </tr>
           </thead>
           <tbody>
             {keys.map((k) => (
-              <tr key={k.name}>
-                <td className="mono">{k.name}</td>
-                <td><span className="key-type-badge">{k.key_type}</span></td>
-                <td className="pub-key-cell">
-                  {k.public_key ? (
-                    <>
-                      <code title={k.public_key}>
-                        {k.public_key.length > 50 ? k.public_key.slice(0, 50) + "..." : k.public_key}
-                      </code>
-                      <button
-                        className="icon-button"
-                        title={t("Copy public key")}
-                        onClick={() => copyPublicKey(k.public_key, k.name)}
-                      >
-                        {copiedKey === k.name ? <Check size={12} /> : <Copy size={12} />}
-                      </button>
-                    </>
-                  ) : (
-                    <span className="empty">{t("no public key")}</span>
-                  )}
+              <tr key={k.name} className="border-b border-border">
+                <td className="px-2 py-1.5 font-mono">{k.name}</td>
+                <td className="px-2 py-1.5">
+                  <span className="rounded border border-border bg-muted px-1.5 py-0.5 text-[11px]">
+                    {k.key_type}
+                  </span>
                 </td>
-                <td>
-                  <button className="icon-button danger" onClick={() => handleDelete(k.name)}>
+                <td className="px-2 py-1.5">
+                  <div className="flex max-w-[300px] items-center gap-1">
+                    {k.public_key ? (
+                      <>
+                        <code
+                          className="inline-block max-w-[240px] truncate font-mono text-[11px]"
+                          title={k.public_key}
+                        >
+                          {k.public_key.length > 50
+                            ? k.public_key.slice(0, 50) + "..."
+                            : k.public_key}
+                        </code>
+                        <IconButton
+                          size="sm"
+                          title={t("Copy public key")}
+                          onClick={() => copyPublicKey(k.public_key, k.name)}
+                        >
+                          {copiedKey === k.name ? <Check size={12} /> : <Copy size={12} />}
+                        </IconButton>
+                      </>
+                    ) : (
+                      <span className="text-muted-foreground">{t("no public key")}</span>
+                    )}
+                  </div>
+                </td>
+                <td className="px-2 py-1.5">
+                  <IconButton variant="danger" onClick={() => handleDelete(k.name)}>
                     <Trash2 size={14} />
-                  </button>
+                  </IconButton>
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
       )}
-    </div>
+    </Card>
   );
 }

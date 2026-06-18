@@ -4,6 +4,13 @@ import { api } from "../api";
 import { useI18n } from "../i18n";
 import type { ExecMultiResult, HostProfile } from "../types";
 import RiskBadge from "./RiskBadge";
+import { Button } from "./ui/button";
+import { Card } from "./ui/card";
+import { Input } from "./ui/input";
+import { Textarea } from "./ui/textarea";
+import { cn } from "../lib/utils";
+
+const labelCls = "grid gap-1.5 text-sm font-medium text-foreground/90";
 
 type Props = {
   hosts: HostProfile[];
@@ -39,7 +46,7 @@ export default function MultiExecPanel({ hosts, onExecComplete }: Props) {
     setBusy(true);
     setError(null);
     try {
-      const parsedTags = tags.trim() ? tags.split(",").map(t => t.trim()) : undefined;
+      const parsedTags = tags.trim() ? tags.split(",").map((t) => t.trim()) : undefined;
       const res = await api.execMulti(selected, command, force, undefined, parsedTags);
       setResults(res);
       onExecComplete();
@@ -51,96 +58,119 @@ export default function MultiExecPanel({ hosts, onExecComplete }: Props) {
   }
 
   return (
-    <section className="panel multi-exec-panel">
-      <div className="panel-title">
-        <Server size={16} />
+    <Card className="space-y-3 p-4">
+      <div className="flex items-center gap-2 font-semibold">
+        <Server size={16} className="text-muted-foreground" />
         {t("Multi-host Execute")}
       </div>
-      {error && <div className="error">{error}</div>}
+      {error && (
+        <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2.5 text-sm text-destructive">
+          {error}
+        </div>
+      )}
 
-      <div className="multi-host-picker">
-        <button className="toggle-advanced" onClick={selectAll}>
+      <div className="space-y-2">
+        <button
+          type="button"
+          className="text-sm font-semibold text-primary"
+          onClick={selectAll}
+        >
           {selected.length === hosts.length ? t("Deselect all") : t("Select all")}
         </button>
-        <div className="host-chips">
+        <div className="flex flex-wrap gap-1.5">
           {hosts.map((h) => (
             <button
               key={h.name}
-              className={`host-chip${selected.includes(h.name) ? " active" : ""}`}
+              className={cn(
+                "rounded-full border px-3 py-1 text-sm font-semibold transition-colors",
+                selected.includes(h.name)
+                  ? "border-primary bg-primary text-primary-foreground"
+                  : "border-border bg-card text-muted-foreground hover:bg-muted"
+              )}
               onClick={() => toggleHost(h.name)}
             >
               {h.name}
             </button>
           ))}
-          {hosts.length === 0 && <span className="empty">{t("No hosts")}</span>}
+          {hosts.length === 0 && (
+            <span className="text-sm text-muted-foreground">{t("No hosts")}</span>
+          )}
         </div>
       </div>
 
-      <label>
+      <label className={labelCls}>
         {t("Command")}
-        <textarea
+        <Textarea
           value={command}
           onChange={(e) => setCommand(e.target.value)}
           spellCheck={false}
           placeholder="uname -a"
         />
       </label>
-      <label className="force-row">
+      <label className="flex cursor-pointer select-none items-center gap-2 text-sm font-semibold text-destructive">
         <input
           type="checkbox"
+          className="size-4 accent-destructive"
           checked={force}
           onChange={(e) => setForce(e.target.checked)}
         />
         {t("Force")}
       </label>
-      <label>
+      <label className={labelCls}>
         {t("Tags (comma-separated, optional)")}
-        <div className="tags-input">
-          <input
-            value={tags}
-            onChange={(e) => setTags(e.target.value)}
-            placeholder="web, production"
-          />
-        </div>
+        <Input
+          value={tags}
+          onChange={(e) => setTags(e.target.value)}
+          placeholder="web, production"
+        />
       </label>
-      <button
-        className="primary"
+      <Button
         onClick={runMulti}
         disabled={busy || selected.length === 0 || !command.trim()}
+        className="w-full"
       >
         <Play size={14} />
         {busy
           ? t("Running on {count} hosts...", { count: selected.length })
-          : t(selected.length === 1 ? "Run on {count} host" : "Run on {count} hosts", { count: selected.length })}
-      </button>
+          : t(selected.length === 1 ? "Run on {count} host" : "Run on {count} hosts", {
+              count: selected.length,
+            })}
+      </Button>
 
       {results.length > 0 && (
-        <div className="multi-results">
+        <div className="space-y-2">
           {results.map((r) => (
-            <div key={r.host} className="multi-result-row">
-              <strong>{r.host}</strong>
+            <div
+              key={r.host}
+              className="flex items-center gap-3 rounded-md border border-border bg-muted/40 px-2.5 py-2"
+            >
+              <strong className="font-semibold">{r.host}</strong>
               {r.result ? (
                 <>
-                  <span>
+                  <span className="text-sm text-muted-foreground">
                     exit={r.result.exit_code ?? "signal"} {r.result.duration_ms}ms
                   </span>
                   <RiskBadge level={r.result.risk_level} />
                 </>
               ) : (
-                <span className="multi-error">{r.error}</span>
+                <span className="text-sm text-destructive">{r.error}</span>
               )}
             </div>
           ))}
           {results.map((r) =>
             r.result ? (
-              <div key={`${r.host}-output`} className="multi-result-output">
-                <div className="multi-output-header">{r.host}</div>
-                <pre>{r.result.stdout || r.result.stderr || t("(no output)")}</pre>
+              <div key={`${r.host}-output`} className="overflow-hidden rounded-md bg-[#0e1620]">
+                <div className="bg-white/5 px-3.5 py-1.5 text-xs font-semibold text-[#8fb0c5]">
+                  {r.host}
+                </div>
+                <pre className="m-0 whitespace-pre-wrap break-words px-3.5 py-2.5 font-mono text-[13px] text-[#e6edf3]">
+                  {r.result.stdout || r.result.stderr || t("(no output)")}
+                </pre>
               </div>
             ) : null
           )}
         </div>
       )}
-    </section>
+    </Card>
   );
 }

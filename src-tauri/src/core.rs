@@ -2,7 +2,6 @@ use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
     io::{Read, Write},
-    net::{TcpStream, ToSocketAddrs},
     path::Path,
     process::Stdio,
     sync::Arc,
@@ -18,11 +17,13 @@ use tokio::{
 
 use crate::{
     connection::{apply_socket, get_or_create_socket},
+    embedded_ssh::connect_embedded_ssh,
     store::{append_audit, list_audit_raw, load_config, save_config_unlocked, store_write_lock},
     types::{
-        source_from_env, AuditEntry, AuditFilter, BatchStrategy, ExecMultiBatchResult,
-        ExecMultiResult, ExecRequest, ExecResult, HostFilter, HostProfile, PingResult, RiskLevel,
-        SftpDirection, SftpDownloadRequest, SftpResult, SftpUploadRequest,
+        default_host_group, source_from_env, AuditEntry, AuditFilter, BatchStrategy,
+        ExecMultiBatchResult, ExecMultiResult, ExecRequest, ExecResult, HostFilter, HostGroup,
+        HostProfile, PingResult, RiskLevel, SftpDirection, SftpDownloadRequest, SftpResult,
+        SftpUploadRequest,
     },
 };
 
@@ -291,6 +292,7 @@ fn team_host_same(existing: &HostProfile, incoming: &HostProfile) -> bool {
         && existing.jump_host == incoming.jump_host
         && existing.risk_override == incoming.risk_override
         && existing.tags == incoming.tags
+        && existing.group == incoming.group
         && existing.env == incoming.env
         && existing.role == incoming.role
         && existing.owner == incoming.owner
@@ -298,6 +300,10 @@ fn team_host_same(existing: &HostProfile, incoming: &HostProfile) -> bool {
 
 pub fn list_hosts_core() -> Result<Vec<HostProfile>> {
     Ok(load_config()?.hosts)
+}
+
+pub fn list_host_groups_core() -> Result<Vec<HostGroup>> {
+    Ok(load_config()?.groups)
 }
 
 pub fn list_hosts_filtered_core(filter: &HostFilter) -> Result<Vec<HostProfile>> {
@@ -353,11 +359,35 @@ pub fn add_host_core(host: HostProfile) -> Result<HostProfile> {
     validate_host(&host)?;
     let _guard = store_write_lock()?;
     let mut config = load_config()?;
+    ensure_host_group_exists(&mut config, &host.group);
     if let Some(existing) = config.hosts.iter_mut().find(|item| item.name == host.name) {
         *existing = host.clone();
     } else {
         config.hosts.push(host.clone());
     }
+    config.hosts.sort_by(|a, b| a.name.cmp(&b.name));
+    save_config_unlocked(&config)?;
+    Ok(host)
+}
+
+pub fn update_host_core(original_name: &str, host: HostProfile) -> Result<HostProfile> {
+    validate_host(&host)?;
+    let original_name = original_name.trim();
+    if original_name.is_empty() {
+        return Err(anyhow!("original host name is required"));
+    }
+    let _guard = store_write_lock()?;
+    let mut config = load_config()?;
+    ensure_host_group_exists(&mut config, &host.group);
+    let original_idx = config
+        .hosts
+        .iter()
+        .position(|item| item.name == original_name)
+        .ok_or_else(|| anyhow!("host not found: {original_name}"))?;
+    if original_name != host.name && config.hosts.iter().any(|item| item.name == host.name) {
+        return Err(anyhow!("host already exists: {}", host.name));
+    }
+    config.hosts[original_idx] = host.clone();
     config.hosts.sort_by(|a, b| a.name.cmp(&b.name));
     save_config_unlocked(&config)?;
     Ok(host)
@@ -372,6 +402,78 @@ pub fn remove_host_core(name: &str) -> Result<()> {
         return Err(anyhow!("no host profile named '{name}'"));
     }
     save_config_unlocked(&config)
+}
+
+pub fn save_host_group_core(group: HostGroup) -> Result<HostGroup> {
+    let group = normalize_host_group(group)?;
+    let _guard = store_write_lock()?;
+    let mut config = load_config()?;
+    if let Some(existing) = config.groups.iter_mut().find(|item| item.id == group.id) {
+        existing.name = group.name.clone();
+    } else {
+        config.groups.push(group.clone());
+    }
+    save_config_unlocked(&config)?;
+    Ok(group)
+}
+
+pub fn delete_host_group_core(id: &str) -> Result<bool> {
+    let id = id.trim();
+    if id.is_empty() {
+        return Err(anyhow!("group id is required"));
+    }
+    if id == default_host_group() {
+        return Err(anyhow!("default group cannot be deleted"));
+    }
+    let _guard = store_write_lock()?;
+    let mut config = load_config()?;
+    let target_id = config
+        .groups
+        .iter()
+        .find(|group| group.id == id || group.name == id)
+        .map(|group| group.id.clone());
+    let Some(target_id) = target_id else {
+        return Ok(false);
+    };
+    if target_id == default_host_group() {
+        return Err(anyhow!("default group cannot be deleted"));
+    }
+    let before = config.groups.len();
+    config.groups.retain(|group| group.id != target_id);
+    let removed = config.groups.len() != before;
+    if removed {
+        let default_group = default_host_group();
+        for host in &mut config.hosts {
+            if host.group == target_id {
+                host.group = default_group.clone();
+            }
+        }
+        save_config_unlocked(&config)?;
+    }
+    Ok(removed)
+}
+
+fn normalize_host_group(mut group: HostGroup) -> Result<HostGroup> {
+    group.id = group.id.trim().to_string();
+    group.name = group.name.trim().to_string();
+    if group.id.is_empty() {
+        return Err(anyhow!("group id is required"));
+    }
+    if group.name.is_empty() {
+        return Err(anyhow!("group name is required"));
+    }
+    Ok(group)
+}
+
+fn ensure_host_group_exists(config: &mut crate::types::AppConfig, group_id: &str) {
+    let group_id = group_id.trim();
+    if group_id.is_empty() || config.groups.iter().any(|group| group.id == group_id) {
+        return;
+    }
+    config.groups.push(HostGroup {
+        id: group_id.to_string(),
+        name: group_id.to_string(),
+    });
 }
 
 pub fn list_audit_core(filter: AuditFilter) -> Result<Vec<AuditEntry>> {
@@ -755,55 +857,6 @@ pub fn build_plan_from_profile(
 
 pub async fn exec_ssh_core(request: ExecRequest) -> Result<ExecResult> {
     exec_ssh_core_with_risk_override(request, None).await
-}
-
-fn connect_embedded_ssh(host: &HostProfile, timeout_secs: u64) -> Result<ssh2::Session> {
-    let address = format!("{}:{}", host.host, host.port.unwrap_or(22));
-    let socket_addr = address
-        .to_socket_addrs()
-        .with_context(|| format!("failed to resolve {address}"))?
-        .next()
-        .ok_or_else(|| anyhow!("failed to resolve {address}"))?;
-    let tcp = TcpStream::connect_timeout(&socket_addr, Duration::from_secs(timeout_secs.min(30)))?;
-    tcp.set_read_timeout(Some(Duration::from_secs(timeout_secs)))?;
-    tcp.set_write_timeout(Some(Duration::from_secs(timeout_secs)))?;
-
-    let mut session = ssh2::Session::new()?;
-    session.set_tcp_stream(tcp);
-    session.handshake()?;
-
-    let default_user = std::env::var("USER").unwrap_or_else(|_| "root".to_string());
-    let user = host
-        .user
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or(default_user.as_str());
-
-    if let Some(password) = host.password.as_deref().filter(|value| !value.is_empty()) {
-        session.userauth_password(user, password)?;
-    } else if let Some(key_path) = host
-        .key_path
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-    {
-        let path = expand_tilde(key_path);
-        session.userauth_pubkey_file(user, None, Path::new(&path), None)?;
-    } else {
-        let mut agent = session.agent()?;
-        agent.connect()?;
-        agent.list_identities()?;
-        let identity =
-            agent.identities()?.into_iter().next().ok_or_else(|| {
-                anyhow!("no SSH key_path, password, or ssh-agent identity available")
-            })?;
-        agent.userauth(user, &identity)?;
-    }
-
-    if !session.authenticated() {
-        return Err(anyhow!("SSH authentication failed for '{}'", host.name));
-    }
-
-    Ok(session)
 }
 
 struct EmbeddedExecOutput {
@@ -2085,6 +2138,7 @@ pub fn import_ssh_config_core(path: Option<&str>) -> Result<Vec<HostProfile>> {
             jump_host,
             risk_override: None,
             tags: vec![],
+            group: default_host_group(),
             env: None,
             role: None,
             owner: None,
@@ -2401,6 +2455,7 @@ fn parse_ssh_config_file(path: &std::path::Path) -> Result<Vec<HostProfile>> {
             jump_host,
             risk_override: None,
             tags: vec![],
+            group: default_host_group(),
             env: None,
             role: None,
             owner: None,
@@ -2461,9 +2516,16 @@ pub fn export_to_ssh_config_format(hosts: &[HostProfile]) -> String {
     out.push_str("# Managed hosts are identified by the comment line above each block\n\n");
 
     for host in hosts {
-        // Tags/env/role as comments for human reference
-        if !host.tags.is_empty() || host.env.is_some() || host.role.is_some() {
+        // Tags/group/env/role as comments for human reference
+        if !host.tags.is_empty()
+            || host.group != default_host_group()
+            || host.env.is_some()
+            || host.role.is_some()
+        {
             let mut meta = Vec::new();
+            if host.group != default_host_group() {
+                meta.push(format!("group={}", host.group));
+            }
             if let Some(env) = &host.env {
                 meta.push(format!("env={}", env));
             }
@@ -2761,6 +2823,7 @@ mod tests {
                 jump_host: None,
                 risk_override: None,
                 tags: vec!["blue".into(), "web".into()],
+                group: default_host_group(),
                 env: Some("prod".into()),
                 role: Some("web".into()),
                 owner: Some("platform".into()),
@@ -2775,6 +2838,7 @@ mod tests {
                 jump_host: None,
                 risk_override: None,
                 tags: vec!["db".into()],
+                group: default_host_group(),
                 env: Some("staging".into()),
                 role: Some("db".into()),
                 owner: Some("data".into()),
@@ -2844,6 +2908,7 @@ mod tests {
             jump_host: None,
             risk_override: None,
             tags: vec![],
+            group: default_host_group(),
             env: None,
             role: None,
             owner: None,
@@ -2947,6 +3012,7 @@ mod tests {
         std::env::set_var("AGENT2SSH_CONFIG_DIR", &config_dir);
 
         crate::store::save_config(&AppConfig {
+            groups: vec![],
             hosts: vec![HostProfile {
                 name: "password-host".into(),
                 host: "10.0.0.1".into(),
@@ -2957,6 +3023,7 @@ mod tests {
                 jump_host: None,
                 risk_override: None,
                 tags: vec![],
+                group: default_host_group(),
                 env: None,
                 role: None,
                 owner: None,
@@ -3001,6 +3068,7 @@ mod tests {
 
         // Set up existing config with one host
         let existing_config = AppConfig {
+            groups: vec![],
             hosts: vec![HostProfile {
                 name: "existing-host".into(),
                 host: "10.0.0.1".into(),
@@ -3011,6 +3079,7 @@ mod tests {
                 jump_host: None,
                 risk_override: None,
                 tags: vec![],
+                group: default_host_group(),
                 env: None,
                 role: None,
                 owner: None,
@@ -3031,6 +3100,7 @@ mod tests {
                     jump_host: None,
                     risk_override: None,
                     tags: vec![],
+                    group: default_host_group(),
                     env: None,
                     role: None,
                     owner: None,
@@ -3046,6 +3116,7 @@ mod tests {
                     jump_host: None,
                     risk_override: None,
                     tags: vec![],
+                    group: default_host_group(),
                     env: None,
                     role: None,
                     owner: None,
@@ -3076,6 +3147,7 @@ mod tests {
         std::env::set_var("AGENT2SSH_CONFIG_DIR", &config_dir);
 
         crate::store::save_config(&AppConfig {
+            groups: vec![],
             hosts: vec![HostProfile {
                 name: "existing-host".into(),
                 host: "10.0.0.1".into(),
@@ -3086,6 +3158,7 @@ mod tests {
                 jump_host: None,
                 risk_override: None,
                 tags: vec!["old".into()],
+                group: default_host_group(),
                 env: Some("dev".into()),
                 role: None,
                 owner: None,
@@ -3104,6 +3177,7 @@ mod tests {
                 jump_host: None,
                 risk_override: Some(RiskLevel::Medium),
                 tags: vec!["new".into()],
+                group: default_host_group(),
                 env: Some("prod".into()),
                 role: Some("web".into()),
                 owner: Some("ops".into()),
@@ -3456,6 +3530,7 @@ mod tests {
                 jump_host: None,
                 risk_override: None,
                 tags: vec!["web".into()],
+                group: default_host_group(),
                 env: Some("prod".into()),
                 role: Some("web".into()),
                 owner: None,
@@ -3470,6 +3545,7 @@ mod tests {
                 jump_host: Some("bastion".into()),
                 risk_override: None,
                 tags: vec![],
+                group: default_host_group(),
                 env: None,
                 role: None,
                 owner: None,
@@ -3501,6 +3577,7 @@ mod tests {
             jump_host: None,
             risk_override: None,
             tags: vec![],
+            group: default_host_group(),
             env: None,
             role: None,
             owner: None,

@@ -2,6 +2,9 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
 import { useI18n } from "../i18n";
 import type { HostProfile, SshKeyInfo } from "../types";
+import { Button } from "./ui/button";
+import { Input } from "./ui/input";
+import { cn } from "../lib/utils";
 
 interface SetupWizardProps {
   onComplete: () => void;
@@ -17,6 +20,13 @@ const STEP_TITLES = [
   "Start Daemon",
   "Open Web Console",
 ];
+
+const codeCls = "rounded bg-muted px-1.5 py-0.5 font-mono text-sm text-primary";
+const hintCls = "text-sm text-muted-foreground";
+const stepTextCls = "m-0 leading-relaxed text-foreground/80";
+const previewCls = "rounded-lg border border-border bg-muted/40 p-3.5";
+const errorCls =
+  "rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive";
 
 export default function SetupWizard({ onComplete, onSkip }: SetupWizardProps) {
   const { t } = useI18n();
@@ -118,57 +128,65 @@ export default function SetupWizard({ onComplete, onSkip }: SetupWizardProps) {
   }
 
   return (
-    <div className="wizard-overlay">
-      <div className="wizard-card">
+    <div className="flex min-h-screen items-center justify-center bg-background p-6">
+      <div className="w-full max-w-[560px] overflow-hidden rounded-xl border border-border bg-card shadow-xl">
         {/* Step indicator */}
-        <div className="wizard-header">
-          <span className="wizard-step-badge">
+        <div className="flex items-center gap-3 border-b border-border px-6 py-4">
+          <span className="inline-flex h-7 min-w-9 items-center justify-center rounded-full bg-primary px-2 text-xs font-semibold text-primary-foreground">
             {step + 1}/{TOTAL_STEPS}
           </span>
-          <h2>{t(STEP_TITLES[step])}</h2>
-          <button className="wizard-skip-btn" onClick={onSkip} title={t("Skip setup")}>
+          <h2 className="m-0 flex-1 text-lg font-semibold">{t(STEP_TITLES[step])}</h2>
+          <button
+            className="rounded px-2 py-1 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            onClick={onSkip}
+            title={t("Skip setup")}
+          >
             {t("Skip setup")}
           </button>
         </div>
 
         {/* Step content */}
-        <div className="wizard-body">
+        <div className="min-h-[200px] p-6">
           {step === 0 && (
-            <div className="wizard-step">
-              <p>
+            <div className="flex flex-col gap-3.5">
+              <p className={stepTextCls}>
                 {t("Agent2SSH is a local SSH capability layer that lets AI agents and automation tools securely execute commands on remote hosts.")}
               </p>
-              <ul className="wizard-feature-list">
-                <li>{t("Import hosts from your existing SSH config")}</li>
-                <li>{t("Risk-based command classification and approval flow")}</li>
-                <li>{t("Persistent sessions, port forwarding, and SFTP")}</li>
-                <li>{t("MCP server for AI agent integration")}</li>
+              <ul className="m-0 list-disc pl-5">
+                <li className="leading-relaxed text-foreground/80">
+                  {t("Import hosts from your existing SSH config")}
+                </li>
+                <li className="leading-relaxed text-foreground/80">
+                  {t("Risk-based command classification and approval flow")}
+                </li>
+                <li className="leading-relaxed text-foreground/80">
+                  {t("Persistent sessions, port forwarding, and SFTP")}
+                </li>
+                <li className="leading-relaxed text-foreground/80">
+                  {t("MCP server for AI agent integration")}
+                </li>
               </ul>
-              <p>{t("This wizard will help you get started in a few steps.")}</p>
+              <p className={stepTextCls}>{t("This wizard will help you get started in a few steps.")}</p>
             </div>
           )}
 
           {step === 1 && (
-            <div className="wizard-step">
-              <p>
+            <div className="flex flex-col gap-3.5">
+              <p className={stepTextCls}>
                 {t("Import host profiles from ~/.ssh/config. Existing profiles will not be overwritten.")}
               </p>
-              <button
-                className="primary"
-                onClick={handleImport}
-                disabled={importing}
-              >
+              <Button onClick={handleImport} disabled={importing} className="self-start">
                 {importing ? t("Importing...") : t("Import from ~/.ssh/config")}
-              </button>
-              {importError && <div className="error">{importError}</div>}
+              </Button>
+              {importError && <div className={errorCls}>{importError}</div>}
               {importedHosts.length > 0 && (
-                <div className="wizard-preview">
-                  <p>
+                <div className={previewCls}>
+                  <p className="m-0 mb-2 text-sm font-semibold">
                     {t("Imported {count} host(s):", { count: importedHosts.length })}
                   </p>
-                  <ul>
+                  <ul className="m-0 list-disc pl-[18px]">
                     {importedHosts.map((h) => (
-                      <li key={h.name}>
+                      <li key={h.name} className="text-sm leading-relaxed">
                         <strong>{h.name}</strong> &rarr;{" "}
                         {h.user ? `${h.user}@` : ""}
                         {h.host}:{h.port ?? 22}
@@ -178,7 +196,7 @@ export default function SetupWizard({ onComplete, onSkip }: SetupWizardProps) {
                 </div>
               )}
               {!importing && !importError && importedHosts.length === 0 && (
-                <p className="wizard-hint">
+                <p className={hintCls}>
                   {t("No new hosts found. You may not have a ~/.ssh/config file, or all hosts are already imported. You can add hosts manually later.")}
                 </p>
               )}
@@ -186,90 +204,89 @@ export default function SetupWizard({ onComplete, onSkip }: SetupWizardProps) {
           )}
 
           {step === 2 && (
-            <div className="wizard-step">
-              <p>
+            <div className="flex flex-col gap-3.5">
+              <p className={stepTextCls}>
                 {t("SSH keys are used for passwordless authentication to remote hosts.")}
               </p>
               {keys.length > 0 ? (
-                <div className="wizard-preview">
-                  <p>{t("Existing keys:")}</p>
-                  <ul>
+                <div className={previewCls}>
+                  <p className="m-0 mb-2 text-sm font-semibold">{t("Existing keys:")}</p>
+                  <ul className="m-0 list-disc pl-[18px]">
                     {keys.map((k) => (
-                      <li key={k.name}>
+                      <li key={k.name} className="text-sm leading-relaxed">
                         <strong>{k.name}</strong> ({k.key_type})
                       </li>
                     ))}
                   </ul>
                 </div>
               ) : (
-                <p className="wizard-hint">{t("No SSH keys found in Agent2SSH.")}</p>
+                <p className={hintCls}>{t("No SSH keys found in Agent2SSH.")}</p>
               )}
-              <div className="wizard-inline-form">
-                <input
+              <div className="flex gap-2">
+                <Input
                   type="text"
                   placeholder={t("New key name (e.g. id_ed25519)")}
                   value={keyName}
                   onChange={(e) => setKeyName(e.target.value)}
                 />
-                <button
-                  className="secondary"
+                <Button
+                  variant="secondary"
                   onClick={handleGenerateKey}
                   disabled={generatingKey}
+                  className="shrink-0"
                 >
                   {generatingKey ? t("Generating...") : t("Generate Key")}
-                </button>
+                </Button>
               </div>
-              {keyError && <div className="error">{keyError}</div>}
+              {keyError && <div className={errorCls}>{keyError}</div>}
             </div>
           )}
 
           {step === 3 && (
-            <div className="wizard-step">
-              <p>
+            <div className="flex flex-col gap-3.5">
+              <p className={stepTextCls}>
                 {t("The daemon provides the HTTP API and web console. When running, it listens on 127.0.0.1:7722.")}
               </p>
-              <div className="wizard-daemon-status">
+              <div className="py-1">
                 {daemonRunning ? (
-                  <div className="wizard-status-ok">
+                  <div className="rounded-md bg-success/12 px-3.5 py-2.5 text-sm font-medium text-success">
                     {t("Daemon is running on http://127.0.0.1:7722")}
                   </div>
                 ) : (
-                  <div className="wizard-status-warn">
+                  <div className="rounded-md bg-warning/15 px-3.5 py-2.5 text-sm font-medium text-warning">
                     {t("Daemon is not running.")}
                   </div>
                 )}
               </div>
-              <button
-                className="primary"
-                onClick={handleStartDaemon}
-                disabled={daemonLoading}
-              >
+              <Button onClick={handleStartDaemon} disabled={daemonLoading} className="self-start">
                 {daemonLoading
                   ? t("Checking...")
                   : daemonRunning
                     ? t("Check Daemon Status")
                     : t("Start Daemon")}
-              </button>
-              {daemonError && <div className="error">{daemonError}</div>}
-              <p className="wizard-hint">
+              </Button>
+              {daemonError && <div className={errorCls}>{daemonError}</div>}
+              <p className={hintCls}>
                 {t("You can also manage the daemon from Settings or a terminal:")}{" "}
-                <code>agent2ssh daemon start</code>
+                <code className={codeCls}>agent2ssh daemon start</code>
               </p>
             </div>
           )}
 
           {step === 4 && (
-            <div className="wizard-step">
-              <p>
+            <div className="flex flex-col gap-3.5">
+              <p className={stepTextCls}>
                 {t("The web console provides a browser-based interface for managing hosts, executing commands, and viewing audit logs.")}
               </p>
-              <div className="wizard-console-link">
-                <code>http://127.0.0.1:7722/console</code>
+              <div className="rounded-lg border border-border bg-muted/40 px-4 py-3 text-center">
+                <code className="font-mono text-[15px] text-primary">
+                  http://127.0.0.1:7722/console
+                </code>
               </div>
-              <button className="primary" onClick={handleOpenConsole}>
+              <Button onClick={handleOpenConsole} className="self-start">
                 {t("Open Web Console")}
-              </button>
-              <p className="wizard-hint">
+              </Button>
+              <p className={hintCls}>
                 {t("You can also access this from the daemon URL at any time.")}
               </p>
             </div>
@@ -277,30 +294,22 @@ export default function SetupWizard({ onComplete, onSkip }: SetupWizardProps) {
         </div>
 
         {/* Navigation */}
-        <div className="wizard-footer">
-          <button
-            className="secondary"
-            onClick={prev}
-            disabled={step === 0}
-          >
+        <div className="flex items-center justify-between border-t border-border bg-muted/30 px-6 py-4">
+          <Button variant="secondary" onClick={prev} disabled={step === 0}>
             {t("Back")}
-          </button>
-          <div className="wizard-dots">
+          </Button>
+          <div className="flex gap-1.5">
             {Array.from({ length: TOTAL_STEPS }).map((_, i) => (
               <span
                 key={i}
-                className={`wizard-dot ${i === step ? "active" : ""}`}
+                className={cn("size-2 rounded-full transition-colors", i === step ? "bg-primary" : "bg-border")}
               />
             ))}
           </div>
           {step < TOTAL_STEPS - 1 ? (
-            <button className="primary" onClick={next}>
-              {t("Next")}
-            </button>
+            <Button onClick={next}>{t("Next")}</Button>
           ) : (
-            <button className="primary" onClick={onComplete}>
-              {t("Finish")}
-            </button>
+            <Button onClick={onComplete}>{t("Finish")}</Button>
           )}
         </div>
       </div>

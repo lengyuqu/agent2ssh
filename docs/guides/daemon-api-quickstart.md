@@ -62,6 +62,7 @@ denied_commands = ["rm *", "sudo *"]
 | POST | `/exec` | 执行命令 |
 | POST | `/exec-multi` | 多主机并发执行 |
 | GET | `/exec/stream` | WebSocket 流式执行 |
+| GET | `/terminal` | WebSocket 交互式终端 |
 | GET | `/gate` | 查询全局执行 gate |
 | POST | `/gate/pause` | 暂停非桌面来源执行 |
 | POST | `/gate/resume` | 恢复执行 |
@@ -269,7 +270,7 @@ curl -X POST -H "$AUTH" \
 
 ### Execution Gate
 
-全局 execution gate 可在紧急情况下暂停非 `desktop` 来源的 daemon mutation/execution 入口。`paused` 状态下，`/exec`、`/exec-multi`、`/exec/compare`、`/playbooks/run`、SFTP 操作、session open/write、forward add、connection connect、WebSocket exec 和 `/daemons/localhost/exec` 会被拒绝；HTTP 入口返回 423，并写入 `blocked` audit。
+全局 execution gate 可在紧急情况下暂停非 `desktop` 来源的 daemon mutation/execution 入口。`paused` 状态下，`/exec`、`/exec-multi`、`/exec/compare`、`/playbooks/run`、SFTP 操作、session open/write、forward add、connection connect、WebSocket exec、WebSocket terminal 和 `/daemons/localhost/exec` 会被拒绝；HTTP 入口返回 423，并写入 `blocked` audit。
 
 查询状态：
 
@@ -412,6 +413,38 @@ WebSocket exec 使用与普通 `/exec` 相同的 SSH 命令构造逻辑，key、
 
 ---
 
+## WebSocket Terminal
+
+`/terminal` 提供交互式终端，浏览器连接时通过 query string 传递 token，因为标准 WebSocket 握手不能设置 `Authorization` header。
+
+```bash
+wscat -c "ws://127.0.0.1:7722/terminal?host=web1&token=$TOKEN"
+```
+
+服务端首先发送一个 JSON 文本帧，包含连接元数据：
+
+```json
+{
+  "type": "connected",
+  "host": "web1",
+  "address": "10.0.0.12:22",
+  "username": "ubuntu",
+  "fingerprint_sha256": "SHA256:...",
+  "host_key_algorithm": "ssh-ed25519",
+  "server_banner": "SSH-2.0-OpenSSH_9.6"
+}
+```
+
+随后终端输入输出使用 binary frame 传输原始字节。调整窗口大小时发送文本控制帧：
+
+```json
+{"type": "resize", "cols": 120, "rows": 36}
+```
+
+交互式终端和 `/sessions` 持久会话都使用内置 SSH 传输和远程 PTY，不依赖系统 `ssh` 或 `sshpass` 连接 direct host。终端输入按完成行复用 session write 的风险/审批检查；被拒绝的输入不会转发给远端。jump-host、端口转发和连接池相关路径仍保留系统 `ssh` fallback，属于后续迁移范围。
+
+---
+
 ## Audit
 
 查询执行审计日志：
@@ -500,6 +533,8 @@ curl -X POST -H "$AUTH" \
 ---
 
 ## Sessions
+
+`/sessions` 是带缓冲读取的持久 PTY API，适合 MCP/CLI/HTTP 自动化。会话后端使用同一套内置 SSH terminal worker；`read` 只返回终端输出，不返回 `/terminal` 的连接元数据控制帧。连接认证和主机指纹会写入本地诊断日志。
 
 ### 打开会话
 

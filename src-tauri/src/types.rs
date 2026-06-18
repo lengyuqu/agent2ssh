@@ -63,6 +63,9 @@ pub struct HostProfile {
     /// Tags for grouping hosts (e.g. ["production", "web"])
     #[serde(default)]
     pub tags: Vec<String>,
+    /// UI grouping bucket for host organization.
+    #[serde(default = "default_host_group")]
+    pub group: String,
     /// Environment label for grouping hosts (e.g. "prod", "staging").
     #[serde(default)]
     pub env: Option<String>,
@@ -72,6 +75,23 @@ pub struct HostProfile {
     /// Owner label for grouping hosts by team or person.
     #[serde(default)]
     pub owner: Option<String>,
+}
+
+pub fn default_host_group() -> String {
+    "default".into()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HostGroup {
+    pub id: String,
+    pub name: String,
+}
+
+pub fn default_host_groups() -> Vec<HostGroup> {
+    vec![HostGroup {
+        id: default_host_group(),
+        name: "Default".into(),
+    }]
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -235,6 +255,9 @@ pub fn source_from_env(default_source: &str) -> String {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
+    #[serde(default = "default_host_groups")]
+    pub groups: Vec<HostGroup>,
+    #[serde(default)]
     pub hosts: Vec<HostProfile>,
 }
 

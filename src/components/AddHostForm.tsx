@@ -1,8 +1,15 @@
-import { FileKey, Plus } from "lucide-react";
+import { FileKey, Plus, X } from "lucide-react";
 import { FormEvent, useEffect, useState } from "react";
 import { api } from "../api";
 import { useI18n } from "../i18n";
-import type { HostProfile, SshKeyInfo } from "../types";
+import type { HostGroup, HostProfile, SshKeyInfo } from "../types";
+import { Button } from "./ui/button";
+import { Card } from "./ui/card";
+import { IconButton } from "./ui/icon-button";
+import { Input } from "./ui/input";
+import { Select } from "./ui/select";
+
+const labelCls = "grid gap-1.5 text-sm font-medium text-foreground/90";
 
 const emptyForm = {
   name: "",
@@ -14,6 +21,7 @@ const emptyForm = {
   password: "",
   jump_host: "",
   tags: "",
+  group: "default",
   env: "",
   role: "",
   owner: "",
@@ -21,17 +29,45 @@ const emptyForm = {
 
 type Props = {
   hosts: HostProfile[];
+  groups: HostGroup[];
+  initialGroup: string;
+  editingHost?: HostProfile | null;
+  onCancelEdit?: () => void;
   onSaved: () => void;
 };
 
-export default function AddHostForm({ hosts, onSaved }: Props) {
+function formFromHost(host: HostProfile) {
+  const auth_mode = host.key_path ? "manual_key" : "password";
+  return {
+    name: host.name,
+    host: host.host,
+    user: host.user ?? "",
+    port: host.port ?? 22,
+    auth_mode: auth_mode as "password" | "managed_key" | "manual_key",
+    key_path: host.key_path ?? "",
+    password: host.password ?? "",
+    jump_host: host.jump_host ?? "",
+    tags: (host.tags ?? []).join(", "),
+    group: host.group || "default",
+    env: host.env ?? "",
+    role: host.role ?? "",
+    owner: host.owner ?? "",
+  };
+}
+
+export default function AddHostForm({ hosts, groups, initialGroup, editingHost, onCancelEdit, onSaved }: Props) {
   const { t } = useI18n();
   const [form, setForm] = useState(emptyForm);
   const [keys, setKeys] = useState<SshKeyInfo[]>([]);
+  const isEditing = Boolean(editingHost);
 
   useEffect(() => {
     api.listKeys().then(setKeys).catch(() => setKeys([]));
   }, []);
+
+  useEffect(() => {
+    setForm(editingHost ? formFromHost(editingHost) : { ...emptyForm, group: initialGroup || "default" });
+  }, [editingHost, initialGroup]);
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
@@ -39,7 +75,7 @@ export default function AddHostForm({ hosts, onSaved }: Props) {
       .split(",")
       .map((t) => t.trim())
       .filter(Boolean);
-    await api.addHost({
+    const hostPayload: HostProfile = {
       name: form.name.trim(),
       host: form.host.trim(),
       user: form.user.trim() || null,
@@ -48,66 +84,76 @@ export default function AddHostForm({ hosts, onSaved }: Props) {
       password: form.auth_mode === "password" ? form.password || null : null,
       jump_host: form.jump_host.trim() || null,
       tags,
+      group: form.group || "default",
       env: form.env.trim() || null,
       role: form.role.trim() || null,
       owner: form.owner.trim() || null,
-    });
+    };
+    if (editingHost) {
+      await api.updateHost(editingHost.name, hostPayload);
+    } else {
+      await api.addHost(hostPayload);
+    }
     setForm(emptyForm);
+    onCancelEdit?.();
     onSaved();
   }
 
-  const otherHosts = hosts.filter((h) => h.name !== form.name);
+  const otherHosts = hosts.filter((h) => h.name !== (editingHost?.name ?? form.name));
 
   return (
-    <section className="panel">
-      <div className="panel-title">
-        <Plus size={16} />
-        {t("Add Host")}
+    <Card className="space-y-4 p-4">
+      <div className="flex items-center gap-2 font-semibold">
+        <Plus size={16} className="text-muted-foreground" />
+        {isEditing ? t("Edit Host") : t("Add Host")}
+        {isEditing && (
+          <IconButton className="ml-auto" type="button" title={t("Cancel")} onClick={onCancelEdit}>
+            <X size={14} />
+          </IconButton>
+        )}
       </div>
-      <form className="host-form" onSubmit={handleSubmit}>
-        <label>
+      <form className="grid gap-3.5" onSubmit={handleSubmit}>
+        <label className={labelCls}>
           {t("Alias")}
-          <input
+          <Input
             required
             value={form.name}
             onChange={(e) => setForm({ ...form, name: e.target.value })}
             placeholder="prod"
           />
         </label>
-        <label>
+        <label className={labelCls}>
           {t("Host")}
-          <input
+          <Input
             required
             value={form.host}
             onChange={(e) => setForm({ ...form, host: e.target.value })}
             placeholder="10.0.0.12"
           />
         </label>
-        <div className="two-col">
-          <label>
+        <div className="grid grid-cols-[1fr_110px] gap-2.5">
+          <label className={labelCls}>
             {t("User")}
-            <input
+            <Input
               value={form.user}
               onChange={(e) => setForm({ ...form, user: e.target.value })}
               placeholder="ubuntu"
             />
           </label>
-          <label>
+          <label className={labelCls}>
             {t("Port")}
-            <input
+            <Input
               type="number"
               min={1}
               max={65535}
               value={form.port}
-              onChange={(e) =>
-                setForm({ ...form, port: Number(e.target.value) })
-              }
+              onChange={(e) => setForm({ ...form, port: Number(e.target.value) })}
             />
           </label>
         </div>
-        <label>
+        <label className={labelCls}>
           {t("Authentication")}
-          <select
+          <Select
             value={form.auth_mode}
             onChange={(e) =>
               setForm({
@@ -121,13 +167,13 @@ export default function AddHostForm({ hosts, onSaved }: Props) {
             <option value="password">{t("Password")}</option>
             <option value="managed_key">{t("Managed key")}</option>
             <option value="manual_key">{t("Manual key path")}</option>
-          </select>
+          </Select>
         </label>
 
         {form.auth_mode === "managed_key" && (
-          <label>
+          <label className={labelCls}>
             {t("SSH Key")}
-            <select
+            <Select
               value={form.key_path}
               onChange={(e) => setForm({ ...form, key_path: e.target.value })}
             >
@@ -137,72 +183,85 @@ export default function AddHostForm({ hosts, onSaved }: Props) {
                   {k.name} ({k.key_type})
                 </option>
               ))}
-            </select>
+            </Select>
           </label>
         )}
 
         {form.auth_mode === "manual_key" && (
-          <label>
+          <label className={labelCls}>
             {t("Manual key path")}
-          <input
-            value={form.key_path}
-            onChange={(e) => setForm({ ...form, key_path: e.target.value })}
-            placeholder="~/.ssh/id_ed25519"
-          />
+            <Input
+              value={form.key_path}
+              onChange={(e) => setForm({ ...form, key_path: e.target.value })}
+              placeholder="~/.ssh/id_ed25519"
+            />
           </label>
         )}
 
         {form.auth_mode === "password" && (
-          <label>
+          <label className={labelCls}>
             {t("SSH Password")}
-            <input
+            <Input
               type="password"
               value={form.password}
               onChange={(e) => setForm({ ...form, password: e.target.value })}
               placeholder={t("Password")}
             />
-            <span className="field-hint">
+            <span className="text-xs font-normal leading-snug text-muted-foreground">
               {t("Password is stored locally in the Agent2SSH config. Direct exec, ping, and SFTP use the embedded SSH client; jump hosts, sessions, and tunnels still use the OpenSSH fallback.")}
             </span>
           </label>
         )}
-        <label>
+        <label className={labelCls}>
+          {t("Group")}
+          <Select
+            value={form.group}
+            onChange={(e) => setForm({ ...form, group: e.target.value })}
+          >
+            {groups.map((group) => (
+              <option key={group.id} value={group.id}>
+                {group.name}
+              </option>
+            ))}
+          </Select>
+        </label>
+        <label className={labelCls}>
           {t("Tags (comma-separated)")}
-          <input
+          <Input
             value={form.tags}
             onChange={(e) => setForm({ ...form, tags: e.target.value })}
             placeholder="production, web, staging"
           />
         </label>
-        <div className="three-col">
-          <label>
+        <div className="grid grid-cols-3 gap-2.5">
+          <label className={labelCls}>
             {t("Env")}
-            <input
+            <Input
               value={form.env}
               onChange={(e) => setForm({ ...form, env: e.target.value })}
               placeholder="prod"
             />
           </label>
-          <label>
+          <label className={labelCls}>
             {t("Role")}
-            <input
+            <Input
               value={form.role}
               onChange={(e) => setForm({ ...form, role: e.target.value })}
               placeholder="web"
             />
           </label>
-          <label>
+          <label className={labelCls}>
             {t("Owner")}
-            <input
+            <Input
               value={form.owner}
               onChange={(e) => setForm({ ...form, owner: e.target.value })}
               placeholder="platform"
             />
           </label>
         </div>
-        <label>
+        <label className={labelCls}>
           {t("Jump host (bastion)")}
-          <select
+          <Select
             value={form.jump_host}
             onChange={(e) => setForm({ ...form, jump_host: e.target.value })}
           >
@@ -212,13 +271,13 @@ export default function AddHostForm({ hosts, onSaved }: Props) {
                 {h.name} ({h.host})
               </option>
             ))}
-          </select>
+          </Select>
         </label>
-        <button className="secondary" type="submit">
+        <Button variant="secondary" type="submit" className="w-full">
           <FileKey size={16} />
-          {t("Save host")}
-        </button>
+          {isEditing ? t("Update host") : t("Save host")}
+        </Button>
       </form>
-    </section>
+    </Card>
   );
 }

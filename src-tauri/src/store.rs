@@ -8,7 +8,10 @@ use std::{
     sync::{Mutex, MutexGuard, OnceLock},
 };
 
-use crate::types::{AppConfig, AuditEntry, AuditFilter, ExecResult, RiskLevel};
+use crate::types::{
+    default_host_group, default_host_groups, AppConfig, AuditEntry, AuditFilter, ExecResult,
+    RiskLevel,
+};
 
 static STORE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -110,10 +113,11 @@ pub fn load_config() -> Result<AppConfig> {
     ensure_config_dir()?;
     let path = config_path()?;
     if !path.exists() {
-        return Ok(AppConfig::default());
+        return Ok(normalize_config(AppConfig::default()));
     }
     let raw = fs::read_to_string(path).context("failed to read hosts config")?;
-    serde_json::from_str(&raw).context("failed to parse hosts config")
+    let config: AppConfig = serde_json::from_str(&raw).context("failed to parse hosts config")?;
+    Ok(normalize_config(config))
 }
 
 pub fn save_config(config: &AppConfig) -> Result<()> {
@@ -123,7 +127,8 @@ pub fn save_config(config: &AppConfig) -> Result<()> {
 
 pub(crate) fn save_config_unlocked(config: &AppConfig) -> Result<()> {
     ensure_config_dir()?;
-    let raw = serde_json::to_string_pretty(config)?;
+    let normalized = normalize_config(config.clone());
+    let raw = serde_json::to_string_pretty(&normalized)?;
     let path = config_path()?;
     let tmp_path = path.with_extension(format!("json.tmp.{}", std::process::id()));
     let write_result = (|| -> Result<()> {
@@ -147,6 +152,50 @@ pub(crate) fn save_config_unlocked(config: &AppConfig) -> Result<()> {
         let _ = fs::remove_file(&tmp_path);
     }
     write_result
+}
+
+fn normalize_config(mut config: AppConfig) -> AppConfig {
+    if config.groups.is_empty() {
+        config.groups = default_host_groups();
+    }
+    if !config
+        .groups
+        .iter()
+        .any(|group| group.id == default_host_group())
+    {
+        config.groups.insert(0, default_host_groups().remove(0));
+    }
+    for group in &mut config.groups {
+        group.id = group.id.trim().to_string();
+        group.name = group.name.trim().to_string();
+        if group.id.is_empty() {
+            group.id = default_host_group();
+        }
+        if group.name.is_empty() {
+            group.name = group.id.clone();
+        }
+    }
+    config.groups.sort_by(|a, b| {
+        if a.id == default_host_group() {
+            std::cmp::Ordering::Less
+        } else if b.id == default_host_group() {
+            std::cmp::Ordering::Greater
+        } else {
+            a.name.to_lowercase().cmp(&b.name.to_lowercase())
+        }
+    });
+
+    let default_group = default_host_group();
+    let valid_groups: std::collections::HashSet<String> =
+        config.groups.iter().map(|group| group.id.clone()).collect();
+    for host in &mut config.hosts {
+        host.group = host.group.trim().to_string();
+        if host.group.is_empty() || !valid_groups.contains(&host.group) {
+            host.group = default_group.clone();
+        }
+    }
+
+    config
 }
 
 pub fn append_audit(

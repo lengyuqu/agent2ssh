@@ -11,7 +11,8 @@ Agent / IDE / Automation
         v
 Agent2SSH local capability layer
         |
-        | OpenSSH, then native SSH later
+        | Embedded SSH for direct exec, SFTP, terminal, and sessions;
+        | system ssh/scp remains for jump-host fallback, connection pooling, and forwarding
         v
 Remote hosts
 ```
@@ -21,6 +22,7 @@ Remote hosts
 | File | Role |
 |------|------|
 | `src-tauri/src/core.rs` | SSH exec, ping, exec-multi, SFTP wrappers, risk scoring |
+| `src-tauri/src/embedded_ssh.rs` | In-process SSH transport, authentication, host-key fingerprint capture, PTY shell, resize, and direct SFTP/exec helpers |
 | `src-tauri/src/execution_control.rs` | Shared execution authorization for scope, effective risk, approval, and rejected audit entries |
 | `src-tauri/src/store.rs` | Host profile persistence and audit log storage under `~/.agent2ssh` |
 | `src-tauri/src/session.rs` | Persistent PTY sessions |
@@ -74,7 +76,9 @@ Agent2SSH is also a local observation surface for agent-driven SSH activity. The
 
 Current live events cover daemon-managed PTY session open/write/read/close, WebSocket exec start/output/exit, approvals, audit rotation, execution gate changes/rejections, execution limit rejections, anomaly detections, and connection/config changes. The panel also polls recent audit records, so completed CLI/MCP execs that write to the same config directory are visible even when they did not originate from the desktop UI.
 
-MCP PTY sessions route to the local daemon registry by default when the daemon is reachable and the local token is available. If the daemon is unavailable, MCP falls back to the process-local session store so basic PTY usage still works. The desktop Session panel also connects to the daemon session registry, so daemon-managed MCP sessions can be listed, attached, tailed, read, written to, and closed from the UI. Read-only attach and high-risk input confirmation provide a conservative default for observing externally created PTY sessions.
+MCP PTY sessions route to the local daemon registry by default when the daemon is reachable and the local token is available. If the daemon is unavailable, MCP falls back to the process-local session store so basic PTY usage still works. Both daemon-managed and process-local sessions use the embedded SSH terminal worker, so password, key-file, and ssh-agent authentication do not require system `ssh` or `sshpass` for direct hosts. The desktop Session panel also connects to the daemon session registry, so daemon-managed MCP sessions can be listed, attached, tailed, read, written to, and closed from the UI. Read-only attach and high-risk input confirmation provide a conservative default for observing externally created PTY sessions.
+
+The daemon also exposes `/terminal` as an authenticated WebSocket endpoint for an interactive terminal. It streams terminal bytes directly, accepts resize control messages, and emits a connection metadata frame containing the host-key SHA256 fingerprint, host-key algorithm, address, username, and server banner before shell output. Completed input lines are checked through the same authorization path as REST session writes before the bytes are forwarded to the remote PTY.
 
 ## Safety Model
 
@@ -91,7 +95,7 @@ Effective risk is calculated from the built-in classifier plus user policy rules
 
 Executions, completed mutation operations, and rejected attempts are appended to `~/.agent2ssh/audit.jsonl` with the risk level and source recorded. SFTP, PTY session open/write/close, port-forward add/remove, connection operations, and playbook steps are represented as operation command strings until they gain first-class policy types, so mutation paths pass through the same authorization and audit machinery. Read/list-style observation paths remain event/scope controlled and do not create operation audit entries by default.
 
-PTY session writes are authorized at completed-line boundaries by combining any buffered pending input with the new write. Daemon-managed sessions and desktop-local sessions both use this line buffer and append operation-level audit entries for completed input. This blocks normal fragmented shell commands such as splitting `rm -rf /` across multiple writes, but it is not a full shell parser for arbitrary interactive terminal applications.
+PTY session and WebSocket terminal writes are authorized at completed-line boundaries by combining any buffered pending input with the new write. Daemon-managed sessions and desktop-local sessions both use this line buffer and append operation-level audit entries for completed input. This blocks normal fragmented shell commands such as splitting `rm -rf /` across multiple writes, but it is not a full shell parser for arbitrary interactive terminal applications.
 
 For multi-host execution and playbooks, high-risk approvals are applied only to the target host or playbook step that received approval. Explicit `force` still applies to the whole requested operation when the caller chooses it and policy permits it.
 
@@ -107,6 +111,20 @@ For multi-host execution and playbooks, high-risk approvals are applied only to 
 6. Execute the operation with approved-host or approved-step force only where applicable, then append the final audit entry for exec/mutation paths.
 
 The daemon approval handler creates an approval request and waits for approval, rejection, or timeout. Local CLI/MCP and desktop-local paths without an approval handler fail closed and instruct the caller to use the daemon approval flow or `--force` when policy permits. WebSocket exec streaming uses the same core SSH command builder as non-streaming exec, so password, key, jump-host, and ControlMaster behavior stay aligned.
+
+## SSH Transport Status
+
+Direct-host command execution, non-jump SFTP, the WebSocket terminal, and persistent PTY sessions use the in-process `ssh2` transport in `embedded_ssh.rs`. The embedded transport records connection diagnostics including authentication method, server banner, host-key algorithm, and SHA256 host-key fingerprint. The terminal/session path requests a remote PTY and forwards resize changes through libssh2 rather than relying on a local system PTY process.
+
+Some legacy surfaces still intentionally use system binaries until the next transport migration phase:
+
+| Path | Current backend |
+|------|-----------------|
+| Direct exec and non-jump SFTP | Embedded `ssh2` |
+| WebSocket `/terminal` and REST/MCP/Tauri PTY sessions | Embedded `ssh2` terminal worker |
+| Jump-host exec/SFTP fallback | System `ssh`/`scp` |
+| Connection ControlMaster management | System `ssh` |
+| Port forwards | System `ssh`/`sshpass` |
 
 ## Control Plane
 

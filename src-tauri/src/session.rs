@@ -1,34 +1,41 @@
 use anyhow::{anyhow, Context, Result};
-use std::{collections::HashMap, sync::OnceLock, time::Duration};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt, BufReader},
-    process::{Child, ChildStdin, ChildStdout},
-    sync::Mutex,
+use std::{
+    collections::HashMap,
+    sync::{mpsc, OnceLock},
+    time::{Duration, Instant},
 };
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::{
+    embedded_ssh::{spawn_terminal, TerminalCommand, TerminalEvent},
     store::{ensure_config_dir, load_config},
     types::HostProfile,
 };
 
+const DEFAULT_SESSION_COLS: u32 = 80;
+const DEFAULT_SESSION_ROWS: u32 = 24;
+const SESSION_OPEN_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+const SESSION_READ_QUIET_PERIOD: Duration = Duration::from_millis(200);
+
 pub struct SessionHandle {
     pub id: Uuid,
     pub host: String,
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
-    // kept alive to prevent process exit; killed on session_close
-    _child: Child,
+    tx: mpsc::Sender<TerminalCommand>,
+    rx: mpsc::Receiver<TerminalEvent>,
+    pending_output: Vec<u8>,
+    connected: bool,
+    closed: bool,
 }
 
-// Process-local session store. Meaningful in long-running processes (MCP server).
+// Process-local session store. Meaningful in long-running processes (daemon/MCP/Tauri).
 static SESSIONS: OnceLock<Mutex<HashMap<Uuid, SessionHandle>>> = OnceLock::new();
 
 fn sessions() -> &'static Mutex<HashMap<Uuid, SessionHandle>> {
     SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn resolve_host(name: &str) -> Result<HostProfile> {
+pub fn resolve_host(name: &str) -> Result<HostProfile> {
     load_config()?
         .hosts
         .into_iter()
@@ -36,103 +43,84 @@ fn resolve_host(name: &str) -> Result<HostProfile> {
         .ok_or_else(|| anyhow!("unknown host profile: {name}"))
 }
 
-fn expand_tilde(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest).display().to_string();
+fn apply_session_event(handle: &mut SessionHandle, event: TerminalEvent) -> Result<()> {
+    match event {
+        TerminalEvent::Connected(_) => {
+            handle.connected = true;
+            Ok(())
+        }
+        TerminalEvent::Output(data) => {
+            handle.pending_output.extend_from_slice(&data);
+            Ok(())
+        }
+        TerminalEvent::Error(error) => {
+            handle.closed = true;
+            Err(anyhow!("session error: {error}"))
+        }
+        TerminalEvent::Closed => {
+            handle.closed = true;
+            Ok(())
         }
     }
-    path.to_string()
+}
+
+fn probe_session_open(handle: &mut SessionHandle) -> Result<()> {
+    let deadline = Instant::now() + SESSION_OPEN_PROBE_TIMEOUT;
+    while Instant::now() < deadline && !handle.connected && !handle.closed {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match handle.rx.recv_timeout(remaining) {
+            Ok(event) => apply_session_event(handle, event)?,
+            Err(mpsc::RecvTimeoutError::Timeout) => break,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                handle.closed = true;
+                return Err(anyhow!("session worker disconnected during open"));
+            }
+        }
+    }
+
+    while let Ok(event) = handle.rx.try_recv() {
+        apply_session_event(handle, event)?;
+    }
+
+    if handle.closed && !handle.connected {
+        return Err(anyhow!("session closed during open"));
+    }
+
+    Ok(())
 }
 
 pub async fn session_open_core(host_name: &str) -> Result<Uuid> {
     ensure_config_dir()?;
     let host = resolve_host(host_name)?;
-
-    let target = match &host.user {
-        Some(u) if !u.trim().is_empty() => format!("{}@{}", u, host.host),
-        _ => host.host.clone(),
-    };
-
-    let has_password = host
-        .password
-        .as_deref()
-        .map(|password| !password.trim().is_empty())
-        .unwrap_or(false);
-    let mut cmd = if has_password {
-        let mut cmd = tokio::process::Command::new("sshpass");
-        cmd.arg("-e").arg("ssh");
-        if let Some(password) = &host.password {
-            cmd.env("SSHPASS", password);
-        }
-        cmd
-    } else {
-        tokio::process::Command::new("ssh")
-    };
-    cmd.arg("-tt")
-        .arg("-o")
-        .arg(if has_password {
-            "BatchMode=no"
-        } else {
-            "BatchMode=yes"
-        })
-        .arg("-o")
-        .arg("StrictHostKeyChecking=accept-new")
-        .arg("-p")
-        .arg(host.port.unwrap_or(22).to_string());
-
-    if let Some(key_path) = &host.key_path {
-        if !key_path.trim().is_empty() {
-            cmd.arg("-i").arg(expand_tilde(key_path));
-        }
-    }
-
-    cmd.arg(&target)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-
-    let mut child = cmd.spawn().context("failed to spawn ssh session")?;
-
-    let stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| anyhow!("no stdin on child"))?;
-    let stdout_raw = child
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow!("no stdout on child"))?;
-    let stdout = BufReader::new(stdout_raw);
-
+    let (tx, rx) = spawn_terminal(host, DEFAULT_SESSION_COLS, DEFAULT_SESSION_ROWS);
     let id = Uuid::new_v4();
-    let handle = SessionHandle {
+    let mut handle = SessionHandle {
         id,
         host: host_name.to_string(),
-        stdin,
-        stdout,
-        _child: child,
+        tx,
+        rx,
+        pending_output: Vec::new(),
+        connected: false,
+        closed: false,
     };
 
+    probe_session_open(&mut handle)?;
     sessions().lock().await.insert(id, handle);
     Ok(id)
 }
 
 pub async fn session_write_core(id: Uuid, input: &str) -> Result<()> {
-    let mut store = sessions().lock().await;
+    let store = sessions().lock().await;
     let handle = store
-        .get_mut(&id)
+        .get(&id)
         .ok_or_else(|| anyhow!("unknown session: {id}"))?;
+    if handle.closed {
+        return Err(anyhow!("session is closed: {id}"));
+    }
     handle
-        .stdin
-        .write_all(input.as_bytes())
-        .await
-        .context("failed to write to session stdin")?;
-    // Flush to ensure the command is sent
-    handle
-        .stdin
-        .flush()
-        .await
-        .context("failed to flush session stdin")?;
+        .tx
+        .send(TerminalCommand::Input(input.as_bytes().to_vec()))
+        .context("failed to write to embedded SSH session")?;
     Ok(())
 }
 
@@ -142,22 +130,33 @@ pub async fn session_read_core(id: Uuid, timeout_ms: u64) -> Result<String> {
         .get_mut(&id)
         .ok_or_else(|| anyhow!("unknown session: {id}"))?;
 
-    let mut output = Vec::new();
-    let mut chunk = [0u8; 4096];
-    // Wait up to `timeout_ms` for first data, then use 200ms quiet period
-    let mut remaining_ms = timeout_ms;
+    let mut output = std::mem::take(&mut handle.pending_output);
+    let mut wait = if output.is_empty() {
+        Duration::from_millis(timeout_ms)
+    } else {
+        SESSION_READ_QUIET_PERIOD
+    };
 
     loop {
-        let deadline = Duration::from_millis(remaining_ms);
-        match tokio::time::timeout(deadline, handle.stdout.read(&mut chunk)).await {
-            Ok(Ok(0)) => break, // EOF
-            Ok(Ok(n)) => {
-                output.extend_from_slice(&chunk[..n]);
-                // Use short timeout for subsequent reads (wait for quiet)
-                remaining_ms = 200;
+        match handle.rx.recv_timeout(wait) {
+            Ok(event) => {
+                let had_output = matches!(event, TerminalEvent::Output(_));
+                apply_session_event(handle, event)?;
+                if had_output {
+                    output.extend_from_slice(&handle.pending_output);
+                    handle.pending_output.clear();
+                    wait = SESSION_READ_QUIET_PERIOD;
+                } else if handle.closed {
+                    output.extend_from_slice(&handle.pending_output);
+                    handle.pending_output.clear();
+                    break;
+                }
             }
-            Ok(Err(e)) => return Err(anyhow!("session read error: {e}")),
-            Err(_) => break, // timeout — no more data right now
+            Err(mpsc::RecvTimeoutError::Timeout) => break,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                handle.closed = true;
+                break;
+            }
         }
     }
 
@@ -166,10 +165,10 @@ pub async fn session_read_core(id: Uuid, timeout_ms: u64) -> Result<String> {
 
 pub async fn session_close_core(id: Uuid) -> Result<()> {
     let mut store = sessions().lock().await;
-    if store.remove(&id).is_none() {
-        return Err(anyhow!("unknown session: {id}"));
-    }
-    // SessionHandle drop kills _child via tokio Child Drop impl
+    let handle = store
+        .remove(&id)
+        .ok_or_else(|| anyhow!("unknown session: {id}"))?;
+    let _ = handle.tx.send(TerminalCommand::Close);
     Ok(())
 }
 

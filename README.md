@@ -104,11 +104,17 @@ Configure Agent2SSH as an MCP server in your agent's config:
   "mcpServers": {
     "agent2ssh": {
       "command": "agent2ssh-mcp",
-      "args": []
+      "args": [],
+      "env": {
+        "AGENT2SSH_SOURCE": "workbuddy"
+      }
     }
   }
 }
 ```
+
+Set `AGENT2SSH_SOURCE` to the client label you want to see in Activity, such as
+`workbuddy`, `qoder_work`, `trae`, `codex`, or `claude_desktop`.
 
 See [docs/skills.md](docs/skills.md) for the full list of 51 MCP tools.
 
@@ -128,6 +134,7 @@ For first-time external users, follow the [10-minute CLI and MCP setup guide](do
 ### Command Execution
 
 - Non-interactive SSH exec with JSON output
+- Direct-host exec uses the embedded SSH transport; jump-host execution still falls back to system `ssh`
 - Configurable timeout, stdin piping, and output truncation
 - Multi-host concurrent exec (`exec-multi`)
 - Multi-host execution by tag
@@ -158,8 +165,10 @@ For first-time external users, follow the [10-minute CLI and MCP setup guide](do
 
 ### Sessions And Tunnels
 
-- Persistent PTY sessions
+- Persistent PTY sessions backed by the embedded SSH terminal worker for direct hosts
 - Session open/write/read/list/close
+- Browser/WebSocket interactive terminal with remote PTY resize forwarding
+- Connection diagnostics include authentication method, host-key algorithm, server banner, and SHA256 host-key fingerprint
 - Local and remote port forwarding
 - Forward list/remove by ID
 - PTY session writes use line-buffered authorization for completed shell input and operation-level audit entries across daemon and desktop-local paths. This is a conservative guard for normal command input, not a full shell parser for arbitrary interactive programs.
@@ -175,7 +184,7 @@ For first-time external users, follow the [10-minute CLI and MCP setup guide](do
 - Desktop execution gate status is tri-state: active, paused, or unavailable when the local daemon cannot be reached; the menu shows the last status check time and supports manual refresh
 - Live Agent Activity panel for local visibility into daemon session activity, WebSocket exec streams, recent audit records from CLI/MCP/daemon operations, and anomaly alerts
 - Browser console served by the daemon at `/console`
-- Daemon REST API, WebSocket streaming exec endpoint, and authenticated SSE event stream
+- Daemon REST API, WebSocket streaming exec endpoint, WebSocket interactive terminal endpoint, and authenticated SSE event stream
 
 ### Automation
 

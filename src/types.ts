@@ -43,9 +43,15 @@ export type HostProfile = {
   jump_host?: string | null;
   risk_override?: RiskLevel | null;
   tags?: string[];
+  group: string;
   env?: string | null;
   role?: string | null;
   owner?: string | null;
+};
+
+export type HostGroup = {
+  id: string;
+  name: string;
 };
 
 // Rust: types.rs — ExecRequest
@@ -104,6 +110,37 @@ export type DaemonHealth = {
 export type DaemonControlResult = {
   running: boolean;
   pid?: number | null;
+  message: string;
+};
+
+export type DiagnosticLogEntry = {
+  id: string;
+  ts: string;
+  level: "trace" | "debug" | "info" | "warn" | "error" | string;
+  component: string;
+  message: string;
+  fields: unknown;
+};
+
+export type McpAgentConfigStatus = {
+  id: string;
+  name: string;
+  source: string;
+  config_path: string;
+  detected: boolean;
+  configured: boolean;
+  status: string;
+  command?: string | null;
+  configured_source?: string | null;
+  recommended_command: string;
+};
+
+export type McpAgentConfigureResult = {
+  id: string;
+  config_path: string;
+  backup_path?: string | null;
+  command: string;
+  source: string;
   message: string;
 };
 
@@ -169,6 +206,7 @@ export type AuditEntry = {
 };
 
 export type AgentEventType =
+  | "stream_connected"
   | "exec_started"
   | "exec_output"
   | "exec_completed"
@@ -244,6 +282,20 @@ export type Playbook = {
   steps: string[];
   tags: string[];
   risk_override?: RiskLevel | null;
+  advanced_steps?: PlaybookStepDefinition[] | null;
+};
+
+export type PlaybookParam = {
+  name: string;
+  description?: string | null;
+  default?: string | null;
+  required: boolean;
+};
+
+export type PlaybookStepDefinition = {
+  command: string;
+  description?: string | null;
+  params: PlaybookParam[];
 };
 
 // Rust: playbook.rs — PlaybookStepResult

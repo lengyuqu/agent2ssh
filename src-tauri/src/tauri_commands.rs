@@ -5,11 +5,17 @@ use crate::notify::{load_webhook_config, save_webhook_config, WebhookConfig};
 use crate::{
     connection::{connect_host, disconnect_host, list_active_connections},
     core::{
-        add_host_core, apply_risk_override, exec_multi_core, exec_ssh_core, export_team_config,
-        import_ssh_config_core, import_team_config, list_audit_core, list_hosts_core,
-        ping_hosts_core, remove_host_core, sftp_download_core_with_source,
-        sftp_ls_core_with_source, sftp_mkdir_core_with_source, sftp_stat_core_with_source,
-        sftp_upload_core_with_source, ExecMultiRequest, ImportResult, TeamConfigExport,
+        add_host_core, apply_risk_override, delete_host_group_core, exec_multi_core, exec_ssh_core,
+        export_team_config, import_ssh_config_core, import_team_config, list_audit_core,
+        list_host_groups_core, list_hosts_core, ping_hosts_core, remove_host_core,
+        save_host_group_core, sftp_download_core_with_source, sftp_ls_core_with_source,
+        sftp_mkdir_core_with_source, sftp_stat_core_with_source, sftp_upload_core_with_source,
+        update_host_core, ExecMultiRequest, ImportResult, TeamConfigExport,
+    },
+    diagnostics::{
+        append_diagnostic_log, clear_diagnostic_logs as clear_diagnostic_logs_core,
+        export_diagnostic_bundle as export_diagnostic_bundle_core,
+        list_diagnostic_logs as list_diagnostic_logs_core, DiagnosticLogEntry,
     },
     execution_control::{
         append_rejected_exec_audit, authorize_command_with_approval, command_authorization_target,
@@ -18,8 +24,9 @@ use crate::{
     },
     forward::{forward_add_core, forward_list_core, forward_remove_core},
     playbook::{
-        dry_run_playbook, list_playbooks_core, run_playbook_core_with_source_and_approved_steps,
-        Playbook, PlaybookRunResult,
+        delete_playbook_core, dry_run_playbook, list_playbooks_core,
+        run_playbook_core_with_source_and_approved_steps, save_playbook_core, Playbook,
+        PlaybookRunResult,
     },
     remote::{list_daemons_core, DaemonInfo},
     session::{
@@ -29,14 +36,20 @@ use crate::{
     store::append_audit,
     types::{
         source_from_env, AuditEntry, AuditFilter, ConnectionStatus, ExecMultiResult, ExecRequest,
-        ExecResult, ForwardDirection, ForwardRule, HostProfile, PingResult, RiskLevel,
+        ExecResult, ForwardDirection, ForwardRule, HostGroup, HostProfile, PingResult, RiskLevel,
         SftpDownloadRequest, SftpResult, SftpUploadRequest,
     },
 };
+use chrono::Utc;
 use serde::Serialize;
-use std::{collections::HashMap, path::PathBuf, sync::OnceLock, time::Instant};
+use serde_json::Value;
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::OnceLock,
+    time::Instant,
+};
 use tauri::AppHandle;
-use tauri_plugin_shell::ShellExt;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -75,89 +88,333 @@ pub struct DaemonControlResult {
     pub message: String,
 }
 
-fn daemon_pid_path() -> Result<PathBuf, String> {
-    crate::store::config_dir()
-        .map(|dir| dir.join("daemon.pid"))
-        .map_err(|e| e.to_string())
+fn bundled_daemon_binary_path() -> Result<PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let dir = exe
+        .parent()
+        .ok_or_else(|| "failed to resolve current executable directory".to_string())?;
+    let candidate = dir.join(format!("agent2ssh-daemon{}", std::env::consts::EXE_SUFFIX));
+    if candidate.exists() {
+        return Ok(candidate);
+    }
+    Err(format!(
+        "daemon sidecar not found at {}",
+        candidate.display()
+    ))
 }
 
-fn read_daemon_pid() -> Result<Option<u32>, String> {
-    let pid_path = daemon_pid_path()?;
-    if !pid_path.exists() {
+#[derive(Debug, Clone, Copy)]
+enum McpConfigFormat {
+    Json,
+    Toml,
+}
+
+#[derive(Debug, Clone)]
+struct McpAgentCandidate {
+    id: &'static str,
+    name: &'static str,
+    source: &'static str,
+    config_path: PathBuf,
+    format: McpConfigFormat,
+    detection_paths: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct McpAgentConfigStatus {
+    pub id: String,
+    pub name: String,
+    pub source: String,
+    pub config_path: String,
+    pub detected: bool,
+    pub configured: bool,
+    pub status: String,
+    pub command: Option<String>,
+    pub configured_source: Option<String>,
+    pub recommended_command: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct McpAgentConfigureResult {
+    pub id: String,
+    pub config_path: String,
+    pub backup_path: Option<String>,
+    pub command: String,
+    pub source: String,
+    pub message: String,
+}
+
+fn home_path(relative: &str) -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(relative)
+}
+
+fn mcp_agent_candidates() -> Vec<McpAgentCandidate> {
+    vec![
+        McpAgentCandidate {
+            id: "codex",
+            name: "Codex",
+            source: "codex",
+            config_path: home_path(".codex/config.toml"),
+            format: McpConfigFormat::Toml,
+            detection_paths: vec![home_path(".codex"), home_path(".codex/config.toml")],
+        },
+        McpAgentCandidate {
+            id: "claude_desktop",
+            name: "Claude Desktop",
+            source: "claude_desktop",
+            config_path: home_path("Library/Application Support/Claude/claude_desktop_config.json"),
+            format: McpConfigFormat::Json,
+            detection_paths: vec![
+                home_path("Library/Application Support/Claude"),
+                PathBuf::from("/Applications/Claude.app"),
+            ],
+        },
+        McpAgentCandidate {
+            id: "cursor",
+            name: "Cursor",
+            source: "cursor",
+            config_path: home_path(".cursor/mcp.json"),
+            format: McpConfigFormat::Json,
+            detection_paths: vec![
+                home_path(".cursor"),
+                PathBuf::from("/Applications/Cursor.app"),
+            ],
+        },
+        McpAgentCandidate {
+            id: "windsurf",
+            name: "Windsurf",
+            source: "windsurf",
+            config_path: home_path(".codeium/windsurf/mcp_config.json"),
+            format: McpConfigFormat::Json,
+            detection_paths: vec![
+                home_path(".codeium/windsurf"),
+                PathBuf::from("/Applications/Windsurf.app"),
+            ],
+        },
+        McpAgentCandidate {
+            id: "workbuddy",
+            name: "WorkBuddy",
+            source: "workbuddy",
+            config_path: home_path(".workbuddy/mcp.json"),
+            format: McpConfigFormat::Json,
+            detection_paths: vec![
+                home_path(".workbuddy"),
+                home_path("Library/Application Support/WorkBuddy"),
+                home_path("Library/Application Support/@genie/workbuddy-desktop"),
+                PathBuf::from("/Applications/WorkBuddy.app"),
+            ],
+        },
+        McpAgentCandidate {
+            id: "qoder_work",
+            name: "Qoder Work",
+            source: "qoder_work",
+            config_path: home_path("Library/Application Support/Qoder/SharedClientCache/mcp.json"),
+            format: McpConfigFormat::Json,
+            detection_paths: vec![
+                home_path("Library/Application Support/Qoder/SharedClientCache/mcp.json"),
+                home_path("Library/Application Support/QoderWork"),
+                home_path("Library/Application Support/Qoder"),
+                home_path(".qoderwork"),
+                home_path(".qoder"),
+                PathBuf::from("/Applications/QoderWork.app"),
+                PathBuf::from("/Applications/Qoder.app"),
+            ],
+        },
+        McpAgentCandidate {
+            id: "trae",
+            name: "Trae",
+            source: "trae",
+            config_path: home_path("Library/Application Support/Trae/User/mcp.json"),
+            format: McpConfigFormat::Json,
+            detection_paths: vec![
+                home_path("Library/Application Support/Trae"),
+                home_path(".trae"),
+                home_path(".trae-cn"),
+                PathBuf::from("/Applications/Trae.app"),
+            ],
+        },
+        McpAgentCandidate {
+            id: "trae_solo",
+            name: "Trae Solo",
+            source: "trae_solo",
+            config_path: home_path("Library/Application Support/TRAE SOLO/User/mcp.json"),
+            format: McpConfigFormat::Json,
+            detection_paths: vec![
+                home_path("Library/Application Support/TRAE SOLO"),
+                home_path(".trae"),
+                home_path(".trae-cn"),
+                PathBuf::from("/Applications/TRAE SOLO.app"),
+            ],
+        },
+    ]
+}
+
+fn resolve_path_command(name: &str) -> Option<PathBuf> {
+    std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .map(|dir| dir.join(name))
+            .find(|candidate| candidate.is_file())
+    })
+}
+
+fn bundled_mcp_binary_path() -> Result<PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let dir = exe
+        .parent()
+        .ok_or_else(|| "failed to resolve current executable directory".to_string())?;
+    let candidate = dir.join(format!("agent2ssh-mcp{}", std::env::consts::EXE_SUFFIX));
+    if candidate.exists() {
+        return Ok(candidate);
+    }
+    if let Some(path) = resolve_path_command("agent2ssh-mcp") {
+        return Ok(path);
+    }
+    Err(format!("agent2ssh-mcp not found near {}", exe.display()))
+}
+
+fn agent_detected(candidate: &McpAgentCandidate) -> bool {
+    candidate.config_path.exists() || candidate.detection_paths.iter().any(|path| path.exists())
+}
+
+fn configured_json(path: &Path) -> Result<(bool, Option<String>, Option<String>), String> {
+    if !path.exists() {
+        return Ok((false, None, None));
+    }
+    let raw = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let value: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+    let agent = value
+        .get("mcpServers")
+        .and_then(|servers| servers.get("agent2ssh"));
+    let command = agent
+        .and_then(|server| server.get("command"))
+        .and_then(|command| command.as_str())
+        .map(ToString::to_string);
+    let source = agent
+        .and_then(|server| server.get("env"))
+        .and_then(|env| env.get("AGENT2SSH_SOURCE"))
+        .and_then(|source| source.as_str())
+        .map(ToString::to_string);
+    Ok((command.is_some(), command, source))
+}
+
+fn configured_toml(path: &Path) -> Result<(bool, Option<String>, Option<String>), String> {
+    if !path.exists() {
+        return Ok((false, None, None));
+    }
+    let raw = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let value: toml::Value = toml::from_str(&raw).map_err(|e| e.to_string())?;
+    let agent = value
+        .get("mcp_servers")
+        .and_then(|servers| servers.get("agent2ssh"));
+    let command = agent
+        .and_then(|server| server.get("command"))
+        .and_then(|command| command.as_str())
+        .map(ToString::to_string);
+    let source = agent
+        .and_then(|server| server.get("env"))
+        .and_then(|env| env.get("AGENT2SSH_SOURCE"))
+        .and_then(|source| source.as_str())
+        .map(ToString::to_string);
+    Ok((command.is_some(), command, source))
+}
+
+fn mcp_configured(
+    candidate: &McpAgentCandidate,
+) -> Result<(bool, Option<String>, Option<String>), String> {
+    match candidate.format {
+        McpConfigFormat::Json => configured_json(&candidate.config_path),
+        McpConfigFormat::Toml => configured_toml(&candidate.config_path),
+    }
+}
+
+fn backup_config(path: &Path) -> Result<Option<PathBuf>, String> {
+    if !path.exists() {
         return Ok(None);
     }
-    let raw = std::fs::read_to_string(&pid_path).map_err(|e| e.to_string())?;
-    match raw.trim().parse::<u32>() {
-        Ok(pid) => Ok(Some(pid)),
-        Err(_) => {
-            let _ = std::fs::remove_file(pid_path);
-            Ok(None)
-        }
-    }
+    let stamp = Utc::now().format("%Y%m%d%H%M%S");
+    let backup = path.with_extension(format!(
+        "{}.bak-{stamp}",
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("config")
+    ));
+    std::fs::copy(path, &backup).map_err(|e| e.to_string())?;
+    Ok(Some(backup))
 }
 
-fn process_is_alive(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        matches!(
-            std::process::Command::new("kill")
-                .arg("-0")
-                .arg(pid.to_string())
-                .status(),
-            Ok(status) if status.success()
-        )
-    }
-
-    #[cfg(windows)]
-    {
-        match std::process::Command::new("tasklist")
-            .args(["/FI", &format!("PID eq {pid}")])
-            .output()
-        {
-            Ok(output) if output.status.success() => {
-                String::from_utf8_lossy(&output.stdout).contains(&pid.to_string())
-            }
-            _ => false,
-        }
-    }
-
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = pid;
-        false
-    }
-}
-
-fn terminate_process(pid: u32) -> Result<(), String> {
-    #[cfg(unix)]
-    let status = std::process::Command::new("kill")
-        .arg(pid.to_string())
-        .status()
-        .map_err(|e| e.to_string())?;
-
-    #[cfg(windows)]
-    let status = std::process::Command::new("taskkill")
-        .args(["/PID", &pid.to_string(), "/T", "/F"])
-        .status()
-        .map_err(|e| e.to_string())?;
-
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = pid;
-        return Err("daemon stop is not supported on this platform".into());
-    }
-
-    if status.success() {
-        Ok(())
+fn configure_json(path: &Path, command: &str, source: &str) -> Result<(), String> {
+    let mut value = if path.exists() {
+        let raw = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        serde_json::from_str::<serde_json::Value>(&raw).map_err(|e| e.to_string())?
     } else {
-        Err(format!("failed to terminate daemon process {pid}"))
+        serde_json::json!({})
+    };
+    let Some(root) = value.as_object_mut() else {
+        return Err("config root must be a JSON object".into());
+    };
+    let servers = root
+        .entry("mcpServers")
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(servers) = servers.as_object_mut() else {
+        return Err("mcpServers must be a JSON object".into());
+    };
+    let server = servers
+        .entry("agent2ssh")
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(server) = server.as_object_mut() else {
+        return Err("mcpServers.agent2ssh must be a JSON object".into());
+    };
+    server.insert("command".into(), serde_json::json!(command));
+    server.insert("args".into(), serde_json::json!([]));
+    let env = server.entry("env").or_insert_with(|| serde_json::json!({}));
+    let Some(env) = env.as_object_mut() else {
+        return Err("mcpServers.agent2ssh.env must be a JSON object".into());
+    };
+    env.insert("AGENT2SSH_SOURCE".into(), serde_json::json!(source));
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
+    let raw = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
+    std::fs::write(path, format!("{raw}\n")).map_err(|e| e.to_string())
 }
 
-fn remove_daemon_pid_file() {
-    if let Ok(pid_path) = daemon_pid_path() {
-        let _ = std::fs::remove_file(pid_path);
+fn table_mut<'a>(
+    table: &'a mut toml::map::Map<String, toml::Value>,
+    key: &str,
+) -> Result<&'a mut toml::map::Map<String, toml::Value>, String> {
+    let value = table
+        .entry(key.to_string())
+        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+    value
+        .as_table_mut()
+        .ok_or_else(|| format!("{key} must be a TOML table"))
+}
+
+fn configure_toml(path: &Path, command: &str, source: &str) -> Result<(), String> {
+    let mut value = if path.exists() {
+        let raw = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        toml::from_str::<toml::Value>(&raw).map_err(|e| e.to_string())?
+    } else {
+        toml::Value::Table(toml::map::Map::new())
+    };
+    let Some(root) = value.as_table_mut() else {
+        return Err("config root must be a TOML table".into());
+    };
+    let servers = table_mut(root, "mcp_servers")?;
+    let agent = table_mut(servers, "agent2ssh")?;
+    agent.insert("command".into(), toml::Value::String(command.to_string()));
+    agent.insert("args".into(), toml::Value::Array(Vec::new()));
+    let env = table_mut(agent, "env")?;
+    env.insert(
+        "AGENT2SSH_SOURCE".into(),
+        toml::Value::String(source.to_string()),
+    );
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
+    let raw = toml::to_string_pretty(&value).map_err(|e| e.to_string())?;
+    std::fs::write(path, raw).map_err(|e| e.to_string())
 }
 
 fn split_completed_session_commands(pending: &str, input: &str) -> (Vec<String>, String) {
@@ -193,8 +450,28 @@ pub fn add_host(host: HostProfile) -> Result<HostProfile, String> {
 }
 
 #[tauri::command]
+pub fn update_host(original_name: String, host: HostProfile) -> Result<HostProfile, String> {
+    update_host_core(&original_name, host).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn remove_host(name: String) -> Result<(), String> {
     remove_host_core(&name).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn list_host_groups() -> Result<Vec<HostGroup>, String> {
+    list_host_groups_core().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn save_host_group(group: HostGroup) -> Result<HostGroup, String> {
+    save_host_group_core(group).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_host_group(id: String) -> Result<bool, String> {
+    delete_host_group_core(&id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -825,72 +1102,139 @@ pub fn list_daemons() -> Result<Vec<DaemonInfo>, String> {
 }
 
 #[tauri::command]
+pub fn list_diagnostic_logs(limit: Option<usize>) -> Result<Vec<DiagnosticLogEntry>, String> {
+    list_diagnostic_logs_core(limit.unwrap_or(200)).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn write_diagnostic_log(
+    level: String,
+    component: String,
+    message: String,
+    fields: Option<Value>,
+) -> Result<DiagnosticLogEntry, String> {
+    append_diagnostic_log(&level, &component, &message, fields).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn clear_diagnostic_logs() -> Result<(), String> {
+    clear_diagnostic_logs_core().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn export_diagnostic_bundle() -> Result<String, String> {
+    export_diagnostic_bundle_core()
+        .map(|path| path.display().to_string())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn daemon_status() -> Result<DaemonControlResult, String> {
-    match read_daemon_pid()? {
-        Some(pid) if process_is_alive(pid) => Ok(DaemonControlResult {
-            running: true,
-            pid: Some(pid),
-            message: format!("Daemon is running (pid={pid})."),
-        }),
+    match crate::daemon_control::read_daemon_pid().map_err(|e| e.to_string())? {
+        Some(pid)
+            if crate::daemon_control::process_is_alive(pid)
+                && crate::daemon_control::daemon_health_ok() =>
+        {
+            let _ = append_diagnostic_log(
+                "debug",
+                "tauri",
+                "daemon status healthy",
+                Some(serde_json::json!({ "pid": pid })),
+            );
+            Ok(DaemonControlResult {
+                running: true,
+                pid: Some(pid),
+                message: format!("Daemon is running (pid={pid})."),
+            })
+        }
         Some(pid) => {
-            remove_daemon_pid_file();
+            crate::daemon_control::remove_daemon_pid_file();
+            let _ = append_diagnostic_log(
+                "warn",
+                "tauri",
+                "removed stale daemon pid file",
+                Some(serde_json::json!({ "pid": pid })),
+            );
             Ok(DaemonControlResult {
                 running: false,
                 pid: Some(pid),
                 message: format!("Removed stale daemon PID file (pid={pid})."),
             })
         }
-        None => Ok(DaemonControlResult {
-            running: false,
-            pid: None,
-            message: "Daemon is not running.".into(),
-        }),
+        None => {
+            let _ = append_diagnostic_log("debug", "tauri", "daemon status not running", None);
+            Ok(DaemonControlResult {
+                running: false,
+                pid: None,
+                message: "Daemon is not running.".into(),
+            })
+        }
     }
 }
 
 #[tauri::command]
 pub fn daemon_start(app: AppHandle) -> Result<DaemonControlResult, String> {
-    if let Some(pid) = read_daemon_pid()? {
-        if process_is_alive(pid) {
+    let _ = app;
+    if let Some(pid) = crate::daemon_control::read_daemon_pid().map_err(|e| e.to_string())? {
+        if crate::daemon_control::process_is_alive(pid) && crate::daemon_control::daemon_health_ok()
+        {
+            let _ = append_diagnostic_log(
+                "info",
+                "tauri",
+                "daemon start skipped because daemon is already healthy",
+                Some(serde_json::json!({ "pid": pid })),
+            );
             return Ok(DaemonControlResult {
                 running: true,
                 pid: Some(pid),
                 message: format!("Daemon is already running (pid={pid})."),
             });
         }
-        remove_daemon_pid_file();
+        let _ = append_diagnostic_log(
+            "warn",
+            "tauri",
+            "daemon start removing stale pid",
+            Some(serde_json::json!({ "pid": pid })),
+        );
+        crate::daemon_control::remove_daemon_pid_file();
     }
 
-    let command = app
-        .shell()
-        .sidecar("binaries/agent2ssh-daemon")
-        .map_err(|e| e.to_string())?;
-    let (mut rx, child) = command.spawn().map_err(|e| e.to_string())?;
-    let pid = child.pid();
-    if let Ok(pid_path) = daemon_pid_path() {
-        if let Some(parent) = pid_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::write(pid_path, pid.to_string());
-    }
-    tauri::async_runtime::spawn(async move {
-        let _child = child;
-        while rx.recv().await.is_some() {}
-    });
+    let daemon_bin = bundled_daemon_binary_path()?;
+    let started =
+        crate::daemon_control::start_daemon_background(&daemon_bin).map_err(|e| e.to_string())?;
+    let _ = append_diagnostic_log(
+        "info",
+        "tauri",
+        "daemon start succeeded",
+        Some(serde_json::json!({
+            "pid": started.pid,
+            "log_path": started.log_path.display().to_string(),
+        })),
+    );
 
     Ok(DaemonControlResult {
         running: true,
-        pid: Some(pid),
-        message: format!("Daemon started (pid={pid})."),
+        pid: Some(started.pid),
+        message: format!(
+            "Daemon started (pid={}); log: {}.",
+            started.pid,
+            started.log_path.display()
+        ),
     })
 }
 
 #[tauri::command]
 pub fn daemon_stop() -> Result<DaemonControlResult, String> {
-    match read_daemon_pid()? {
-        Some(pid) if process_is_alive(pid) => {
-            terminate_process(pid)?;
-            remove_daemon_pid_file();
+    match crate::daemon_control::read_daemon_pid().map_err(|e| e.to_string())? {
+        Some(pid) if crate::daemon_control::process_is_alive(pid) => {
+            crate::daemon_control::terminate_process(pid).map_err(|e| e.to_string())?;
+            crate::daemon_control::remove_daemon_pid_file();
+            let _ = append_diagnostic_log(
+                "info",
+                "tauri",
+                "daemon stopped",
+                Some(serde_json::json!({ "pid": pid })),
+            );
             Ok(DaemonControlResult {
                 running: false,
                 pid: Some(pid),
@@ -898,30 +1242,112 @@ pub fn daemon_stop() -> Result<DaemonControlResult, String> {
             })
         }
         Some(pid) => {
-            remove_daemon_pid_file();
+            crate::daemon_control::remove_daemon_pid_file();
+            let _ = append_diagnostic_log(
+                "warn",
+                "tauri",
+                "daemon stop removed stale pid",
+                Some(serde_json::json!({ "pid": pid })),
+            );
             Ok(DaemonControlResult {
                 running: false,
                 pid: Some(pid),
                 message: format!("Removed stale daemon PID file (pid={pid})."),
             })
         }
-        None => Ok(DaemonControlResult {
-            running: false,
-            pid: None,
-            message: "Daemon is not running.".into(),
-        }),
+        None => {
+            let _ =
+                append_diagnostic_log("info", "tauri", "daemon stop skipped; not running", None);
+            Ok(DaemonControlResult {
+                running: false,
+                pid: None,
+                message: "Daemon is not running.".into(),
+            })
+        }
     }
 }
 
 #[tauri::command]
 pub fn daemon_restart(app: AppHandle) -> Result<DaemonControlResult, String> {
-    if let Some(pid) = read_daemon_pid()? {
-        if process_is_alive(pid) {
-            terminate_process(pid)?;
+    if let Some(pid) = crate::daemon_control::read_daemon_pid().map_err(|e| e.to_string())? {
+        if crate::daemon_control::process_is_alive(pid) {
+            crate::daemon_control::terminate_process(pid).map_err(|e| e.to_string())?;
+            let _ = append_diagnostic_log(
+                "info",
+                "tauri",
+                "daemon restart terminated existing process",
+                Some(serde_json::json!({ "pid": pid })),
+            );
         }
-        remove_daemon_pid_file();
+        crate::daemon_control::remove_daemon_pid_file();
     }
     daemon_start(app)
+}
+
+#[tauri::command]
+pub fn list_mcp_agent_configs() -> Result<Vec<McpAgentConfigStatus>, String> {
+    let command = bundled_mcp_binary_path()?.display().to_string();
+    Ok(mcp_agent_candidates()
+        .into_iter()
+        .map(|candidate| {
+            let detected = agent_detected(&candidate);
+            let (configured, existing_command, configured_source, status) =
+                match mcp_configured(&candidate) {
+                    Ok((configured, command, source)) => {
+                        let status = if configured {
+                            "configured"
+                        } else if detected {
+                            "detected"
+                        } else {
+                            "not_detected"
+                        };
+                        (configured, command, source, status.to_string())
+                    }
+                    Err(error) => (false, None, None, format!("invalid_config: {error}")),
+                };
+            McpAgentConfigStatus {
+                id: candidate.id.to_string(),
+                name: candidate.name.to_string(),
+                source: candidate.source.to_string(),
+                config_path: candidate.config_path.display().to_string(),
+                detected,
+                configured,
+                status,
+                command: existing_command,
+                configured_source,
+                recommended_command: command.clone(),
+            }
+        })
+        .collect())
+}
+
+#[tauri::command]
+pub fn configure_mcp_agent(agent_id: String) -> Result<McpAgentConfigureResult, String> {
+    let candidate = mcp_agent_candidates()
+        .into_iter()
+        .find(|candidate| candidate.id == agent_id)
+        .ok_or_else(|| format!("unknown MCP agent: {agent_id}"))?;
+    let command = bundled_mcp_binary_path()?.display().to_string();
+    let backup = backup_config(&candidate.config_path)?;
+    match candidate.format {
+        McpConfigFormat::Json => {
+            configure_json(&candidate.config_path, &command, candidate.source)?
+        }
+        McpConfigFormat::Toml => {
+            configure_toml(&candidate.config_path, &command, candidate.source)?
+        }
+    }
+    Ok(McpAgentConfigureResult {
+        id: candidate.id.to_string(),
+        config_path: candidate.config_path.display().to_string(),
+        backup_path: backup.map(|path| path.display().to_string()),
+        command,
+        source: candidate.source.to_string(),
+        message: format!(
+            "{} MCP config updated with source '{}'. Restart the agent client to load agent2ssh.",
+            candidate.name, candidate.source
+        ),
+    })
 }
 
 // ── SSH Key management ──────────────────────────────────────────────────────
@@ -1029,6 +1455,16 @@ pub fn list_playbooks() -> Result<Vec<Playbook>, String> {
 }
 
 #[tauri::command]
+pub fn save_playbook(playbook: Playbook) -> Result<Playbook, String> {
+    save_playbook_core(playbook).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_playbook(name: String) -> Result<bool, String> {
+    delete_playbook_core(&name).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub async fn run_playbook(
     playbook: String,
     host: String,
@@ -1093,7 +1529,11 @@ pub fn run_tauri() {
             // Host management
             list_hosts,
             add_host,
+            update_host,
             remove_host,
+            list_host_groups,
+            save_host_group,
+            delete_host_group,
             import_ssh_config,
             // Execution
             classify_command_risk,
@@ -1126,6 +1566,13 @@ pub fn run_tauri() {
             daemon_start,
             daemon_stop,
             daemon_restart,
+            list_mcp_agent_configs,
+            configure_mcp_agent,
+            // Diagnostics
+            list_diagnostic_logs,
+            write_diagnostic_log,
+            clear_diagnostic_logs,
+            export_diagnostic_bundle,
             // SSH Keys
             list_keys,
             generate_key,
@@ -1137,6 +1584,8 @@ pub fn run_tauri() {
             ssh_disconnect,
             // Playbooks
             list_playbooks,
+            save_playbook,
+            delete_playbook,
             run_playbook,
             // Webhook config
             get_webhook_config,

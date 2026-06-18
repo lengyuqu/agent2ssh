@@ -670,6 +670,44 @@ paths:
         "101":
           description: Switching Protocols
 
+  /terminal:
+    get:
+      summary: WebSocket interactive terminal
+      description: |
+        Upgrade to WebSocket and attach to an embedded-SSH interactive PTY.
+        Query parameters are `host` and `token`; the token is passed in the
+        query string because browser WebSocket handshakes cannot set an
+        Authorization header. The server first sends a JSON text frame:
+        {"type":"connected","host":"...","address":"...","username":"...","fingerprint_sha256":"SHA256:...","host_key_algorithm":"...","server_banner":"..."}.
+        Terminal input/output then streams as binary frames. Resize control is
+        sent as a JSON text frame: {"type":"resize","cols":120,"rows":36}.
+        Direct-host terminal connections use the embedded SSH transport and do
+        not require system `ssh` or `sshpass`. Completed input lines are
+        authorized before bytes are forwarded to the remote PTY; denied input is
+        reported as an error frame and dropped.
+      parameters:
+        - name: host
+          in: query
+          required: true
+          schema: { type: string }
+        - name: token
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "101":
+          description: Switching Protocols
+        "401":
+          description: Missing or invalid token
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Scope denied
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /events/stream:
     get:
       summary: Subscribe to daemon events
@@ -914,7 +952,7 @@ paths:
   /sessions:
     post:
       summary: Open a persistent PTY session
-      description: Applies bearer-token scope, execution gate, session concurrency limits, effective risk, and approval policy using `session_open`.
+      description: Applies bearer-token scope, execution gate, session concurrency limits, effective risk, and approval policy using `session_open`. Direct-host sessions use the embedded SSH terminal worker and remote PTY; connection diagnostics include host-key fingerprint metadata.
       requestBody:
         required: true
         content:

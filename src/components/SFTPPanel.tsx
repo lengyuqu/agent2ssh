@@ -8,14 +8,22 @@ import {
 import { useState } from "react";
 import { api } from "../api";
 import { useI18n } from "../i18n";
-import type { ExecResult, SftpResult } from "../types";
+import type { ExecResult, HostProfile, SftpResult } from "../types";
+import HostSelector from "./HostSelector";
+import { Button } from "./ui/button";
+import { Card } from "./ui/card";
+import { Input } from "./ui/input";
+
+const labelCls = "grid gap-1.5 text-sm font-medium text-foreground/90";
 
 type Props = {
-  selectedHost: string;
+  hosts: HostProfile[];
+  initialHost?: string;
 };
 
-export default function SFTPPanel({ selectedHost }: Props) {
+export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
   const { t } = useI18n();
+  const [targetHost, setTargetHost] = useState(initialHost);
   const [remotePath, setRemotePath] = useState("/tmp");
   const [localPath, setLocalPath] = useState("");
   const [lsResult, setLsResult] = useState<ExecResult | null>(null);
@@ -24,11 +32,11 @@ export default function SFTPPanel({ selectedHost }: Props) {
   const [error, setError] = useState<string | null>(null);
 
   async function listDir() {
-    if (!selectedHost || !remotePath.trim()) return;
+    if (!targetHost || !remotePath.trim()) return;
     setBusy(true);
     setError(null);
     try {
-      const result = await api.sftpLs(selectedHost, remotePath);
+      const result = await api.sftpLs(targetHost, remotePath);
       setLsResult(result);
     } catch (err) {
       setError(String(err));
@@ -38,11 +46,11 @@ export default function SFTPPanel({ selectedHost }: Props) {
   }
 
   async function makeDir() {
-    if (!selectedHost || !remotePath.trim()) return;
+    if (!targetHost || !remotePath.trim()) return;
     setBusy(true);
     setError(null);
     try {
-      await api.sftpMkdir(selectedHost, remotePath);
+      await api.sftpMkdir(targetHost, remotePath);
       await listDir();
     } catch (err) {
       setError(String(err));
@@ -52,11 +60,11 @@ export default function SFTPPanel({ selectedHost }: Props) {
   }
 
   async function statPath() {
-    if (!selectedHost || !remotePath.trim()) return;
+    if (!targetHost || !remotePath.trim()) return;
     setBusy(true);
     setError(null);
     try {
-      const result = await api.sftpStat(selectedHost, remotePath);
+      const result = await api.sftpStat(targetHost, remotePath);
       setLsResult(result);
     } catch (err) {
       setError(String(err));
@@ -66,11 +74,11 @@ export default function SFTPPanel({ selectedHost }: Props) {
   }
 
   async function upload() {
-    if (!selectedHost || !localPath.trim() || !remotePath.trim()) return;
+    if (!targetHost || !localPath.trim() || !remotePath.trim()) return;
     setBusy(true);
     setError(null);
     try {
-      const result = await api.sftpUpload(selectedHost, localPath, remotePath);
+      const result = await api.sftpUpload(targetHost, localPath, remotePath);
       setTransferResult(result);
     } catch (err) {
       setError(String(err));
@@ -80,15 +88,11 @@ export default function SFTPPanel({ selectedHost }: Props) {
   }
 
   async function download() {
-    if (!selectedHost || !localPath.trim() || !remotePath.trim()) return;
+    if (!targetHost || !localPath.trim() || !remotePath.trim()) return;
     setBusy(true);
     setError(null);
     try {
-      const result = await api.sftpDownload(
-        selectedHost,
-        remotePath,
-        localPath
-      );
+      const result = await api.sftpDownload(targetHost, remotePath, localPath);
       setTransferResult(result);
     } catch (err) {
       setError(String(err));
@@ -98,70 +102,77 @@ export default function SFTPPanel({ selectedHost }: Props) {
   }
 
   return (
-    <section className="panel sftp-panel">
-      <div className="panel-title">
-        <FolderOpen size={16} />
+    <Card className="space-y-3 p-4">
+      <div className="flex items-center gap-2 font-semibold">
+        <FolderOpen size={16} className="text-muted-foreground" />
         {t("Files (SFTP)")}
       </div>
-      {error && <div className="error">{error}</div>}
+      {error && (
+        <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2.5 text-sm text-destructive">
+          {error}
+        </div>
+      )}
+      <HostSelector hosts={hosts} value={targetHost} onChange={setTargetHost} disabled={busy} />
 
-      <label>
+      <label className={labelCls}>
         {t("Remote path")}
-        <input
+        <Input
           value={remotePath}
           onChange={(e) => setRemotePath(e.target.value)}
           placeholder="/home/user"
         />
       </label>
-      <label>
+      <label className={labelCls}>
         {t("Local path (for transfer)")}
-        <input
+        <Input
           value={localPath}
           onChange={(e) => setLocalPath(e.target.value)}
           placeholder="~/Downloads/file.txt"
         />
       </label>
 
-      <div className="sftp-actions">
-        <button className="secondary" onClick={listDir} disabled={busy || !selectedHost}>
+      <div className="flex flex-wrap gap-2 [&>button]:min-w-20 [&>button]:flex-1">
+        <Button variant="secondary" size="sm" onClick={listDir} disabled={busy || !targetHost}>
           <FolderOpen size={14} />
           {busy ? "..." : "ls"}
-        </button>
-        <button className="secondary" onClick={statPath} disabled={busy || !selectedHost}>
+        </Button>
+        <Button variant="secondary" size="sm" onClick={statPath} disabled={busy || !targetHost}>
           <Info size={14} />
           stat
-        </button>
-        <button className="secondary" onClick={makeDir} disabled={busy || !selectedHost}>
+        </Button>
+        <Button variant="secondary" size="sm" onClick={makeDir} disabled={busy || !targetHost}>
           <FolderPlus size={14} />
           mkdir
-        </button>
-        <button className="primary" onClick={upload} disabled={busy || !selectedHost || !localPath}>
+        </Button>
+        <Button size="sm" onClick={upload} disabled={busy || !targetHost || !localPath}>
           <ArrowUpFromLine size={14} />
           {t("Upload")}
-        </button>
-        <button className="primary" onClick={download} disabled={busy || !selectedHost || !localPath}>
+        </Button>
+        <Button size="sm" onClick={download} disabled={busy || !targetHost || !localPath}>
           <ArrowDownToLine size={14} />
           {t("Download")}
-        </button>
+        </Button>
       </div>
 
       {lsResult && (
-        <div className="terminal-output">
-          <div className="meta">
+        <div className="overflow-auto rounded-md bg-[#0e1620] text-[#e6edf3]">
+          <div className="border-b border-white/10 px-3.5 py-2.5 text-[#8fb0c5]">
             exit={lsResult.exit_code ?? "signal"} {lsResult.duration_ms}ms
           </div>
-          <pre>{lsResult.stdout || lsResult.stderr || t("(empty)")}</pre>
+          <pre className="m-0 whitespace-pre-wrap break-words p-3.5 font-mono text-[13px]">
+            {lsResult.stdout || lsResult.stderr || t("(empty)")}
+          </pre>
         </div>
       )}
 
       {transferResult && (
-        <div className="transfer-result">
+        <div className="rounded-md bg-success/12 px-3.5 py-2.5 text-sm text-success">
           {transferResult.direction === "upload" ? t("Uploaded") : t("Downloaded")}{" "}
-          <code>{transferResult.local_path}</code> ↔{" "}
-          <code>{transferResult.remote_path}</code> {t("in")}{" "}
-          {transferResult.duration_ms}ms
+          <code className="rounded bg-black/10 px-1 py-px">{transferResult.local_path}</code> ↔{" "}
+          <code className="rounded bg-black/10 px-1 py-px">{transferResult.remote_path}</code>{" "}
+          {t("in")} {transferResult.duration_ms}ms
         </div>
       )}
-    </section>
+    </Card>
   );
 }

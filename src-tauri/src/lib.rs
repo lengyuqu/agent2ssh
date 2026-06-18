@@ -2,6 +2,9 @@ pub mod anomaly;
 pub mod approval;
 pub mod connection;
 pub mod core;
+pub mod daemon_control;
+pub mod diagnostics;
+pub mod embedded_ssh;
 pub mod events;
 pub mod execution_control;
 pub mod forward;
@@ -34,17 +37,21 @@ pub use approval::{
 pub use connection::{connect_host, disconnect_host, list_active_connections};
 pub use core::{
     add_host_core, build_plan_from_profile, classify_risk, compare_exec_results,
-    compare_ssh_configs, exec_multi_core, exec_multi_with_strategy, exec_ssh_core,
-    export_team_config, export_to_ssh_config, export_to_ssh_config_format, filter_hosts,
-    import_ssh_config_core, import_team_config, list_audit_core, list_hosts_core,
-    list_hosts_filtered_core, ping_hosts_core, preview_exec, preview_exec_multi,
-    preview_team_config_import, remove_host_core, sftp_download_core,
-    sftp_download_core_with_source, sftp_ls_core, sftp_ls_core_with_source, sftp_mkdir_core,
-    sftp_mkdir_core_with_source, sftp_stat_core, sftp_stat_core_with_source, sftp_upload_core,
-    sftp_upload_core_with_source, ConfigDiffPreview, ExecComparison, ExecMultiBatchRequest,
-    ExecMultiRequest, ExecPlan, ExecPlanTarget, ExitCodeGroup, ImportResult, OutputComparison,
-    OutputDiff, SshSyncDiff, SshSyncHostConflict, SshSyncHostDiff, SshSyncStrategy,
-    TeamConfigExport,
+    compare_ssh_configs, delete_host_group_core, exec_multi_core, exec_multi_with_strategy,
+    exec_ssh_core, export_team_config, export_to_ssh_config, export_to_ssh_config_format,
+    filter_hosts, import_ssh_config_core, import_team_config, list_audit_core,
+    list_host_groups_core, list_hosts_core, list_hosts_filtered_core, ping_hosts_core,
+    preview_exec, preview_exec_multi, preview_team_config_import, remove_host_core,
+    save_host_group_core, sftp_download_core, sftp_download_core_with_source, sftp_ls_core,
+    sftp_ls_core_with_source, sftp_mkdir_core, sftp_mkdir_core_with_source, sftp_stat_core,
+    sftp_stat_core_with_source, sftp_upload_core, sftp_upload_core_with_source, update_host_core,
+    ConfigDiffPreview, ExecComparison, ExecMultiBatchRequest, ExecMultiRequest, ExecPlan,
+    ExecPlanTarget, ExitCodeGroup, ImportResult, OutputComparison, OutputDiff, SshSyncDiff,
+    SshSyncHostConflict, SshSyncHostDiff, SshSyncStrategy, TeamConfigExport,
+};
+pub use diagnostics::{
+    app_log_path, append_diagnostic_log, clear_diagnostic_logs, export_diagnostic_bundle,
+    list_diagnostic_logs, DiagnosticLogEntry,
 };
 pub use events::{event_bus, publish_event, subscribe_events, Agent2SSHEvent, EventType};
 pub use execution_control::{
@@ -66,10 +73,11 @@ pub use limits::{
     ExecutionLimiter,
 };
 pub use playbook::{
-    dry_run_playbook, list_playbooks_core, resolve_command_template, run_playbook_core,
-    run_playbook_core_with_source, run_playbook_core_with_source_and_approved_steps,
-    validate_playbook_params, DryRunStep, Playbook, PlaybookDryRun, PlaybookParam,
-    PlaybookRunResult, PlaybookStep, PlaybookStepResult,
+    delete_playbook_core, dry_run_playbook, list_playbooks_core, resolve_command_template,
+    run_playbook_core, run_playbook_core_with_source,
+    run_playbook_core_with_source_and_approved_steps, save_playbook_core, validate_playbook_params,
+    DryRunStep, Playbook, PlaybookDryRun, PlaybookParam, PlaybookRunResult, PlaybookStep,
+    PlaybookStepResult,
 };
 pub use policy::{
     existing_policy_path, load_policy_file, load_policy_from_path, parse_policy, policy_json_path,

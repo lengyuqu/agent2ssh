@@ -1,0 +1,257 @@
+/* ──────────────────────────────────────────────────────────────────────────
+   Design system entry (Tailwind v4 + shadcn-style tokens)
+
+   We import only the `theme` and `utilities` layers plus a small hand-written
+   `base` layer (see bottom of file) instead of Tailwind's full `preflight`
+   reset. Every panel is now built from the tokens/primitives here, so a heavy
+   global reset isn't needed; if you later want stricter normalization you can
+   add `@import "tailwindcss/preflight.css" layer(base);` and re-test the panels.
+   ────────────────────────────────────────────────────────────────────────── */
+@layer theme, base, components, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+
+/* Map semantic tokens → Tailwind color/radius utilities (bg-card, text-muted-foreground, rounded-lg, …) */
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  /* shadcn "accent" = subtle hover surface, mapped to muted (legacy var(--accent) stays = primary) */
+  --color-accent: var(--muted);
+  --color-accent-foreground: var(--foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-border: var(--sidebar-border);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+/* ── Light theme (default) ─────────────────────────────────────────────────── */
+/* "System" = no data-theme attribute (light by default, dark via the media
+   query below). Explicit themes set data-theme on <html>; see src/theme.tsx.
+   Only color tokens vary per theme — radius and the legacy aliases are declared
+   once on :root and resolve var() lazily, so they follow the active theme. */
+:root {
+  --radius: 0.625rem;
+  /* Legacy aliases — the 5 variables referenced by KeysPanel etc. that were
+     never defined (silent styling bug); resolved lazily so they track theme. */
+  --surface: var(--card);
+  --text: var(--foreground);
+  --text-muted: var(--muted-foreground);
+  --accent: var(--primary);
+}
+
+/* ── Light (default + explicit) ────────────────────────────────────────────── */
+:root,
+:root[data-theme="light"] {
+  color-scheme: light;
+  --background: #f5f7f9;
+  --foreground: #0f1b24;
+  --card: #ffffff;
+  --card-foreground: #0f1b24;
+  --popover: #ffffff;
+  --popover-foreground: #0f1b24;
+  --primary: #0d9488;
+  --primary-foreground: #ffffff;
+  --secondary: #eef1f4;
+  --secondary-foreground: #1f2c36;
+  --muted: #eef1f4;
+  --muted-foreground: #5c6b77;
+  --destructive: #dc2626;
+  --destructive-foreground: #ffffff;
+  --success: #16a34a;
+  --warning: #d97706;
+  --border: #dde3e9;
+  --input: #d4dce3;
+  --ring: #0d9488;
+  --sidebar: #14202a;
+  --sidebar-foreground: #dde7ec;
+  --sidebar-accent: #0d9488;
+  --sidebar-border: #243643;
+}
+
+/* ── Dark — soft, GitHub-dark-dimmed inspired (not pure black) ──────────────── */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    color-scheme: dark;
+    --background: #1a1d23;
+    --foreground: #c9d1d9;
+    --card: #22272e;
+    --card-foreground: #c9d1d9;
+    --popover: #2a2f37;
+    --popover-foreground: #c9d1d9;
+    --primary: #2dd4bf;
+    --primary-foreground: #04201d;
+    --secondary: #2d333b;
+    --secondary-foreground: #c9d1d9;
+    --muted: #2d333b;
+    --muted-foreground: #909dab;
+    --destructive: #f47067;
+    --destructive-foreground: #1a1d23;
+    --success: #57ab5a;
+    --warning: #d8a23a;
+    --border: #373e47;
+    --input: #373e47;
+    --ring: #2dd4bf;
+    --sidebar: #15181d;
+    --sidebar-foreground: #c9d1d9;
+    --sidebar-accent: #2dd4bf;
+    --sidebar-border: #2d333b;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --background: #1a1d23;
+  --foreground: #c9d1d9;
+  --card: #22272e;
+  --card-foreground: #c9d1d9;
+  --popover: #2a2f37;
+  --popover-foreground: #c9d1d9;
+  --primary: #2dd4bf;
+  --primary-foreground: #04201d;
+  --secondary: #2d333b;
+  --secondary-foreground: #c9d1d9;
+  --muted: #2d333b;
+  --muted-foreground: #909dab;
+  --destructive: #f47067;
+  --destructive-foreground: #1a1d23;
+  --success: #57ab5a;
+  --warning: #d8a23a;
+  --border: #373e47;
+  --input: #373e47;
+  --ring: #2dd4bf;
+  --sidebar: #15181d;
+  --sidebar-foreground: #c9d1d9;
+  --sidebar-accent: #2dd4bf;
+  --sidebar-border: #2d333b;
+}
+
+/* ── Dracula ───────────────────────────────────────────────────────────────── */
+:root[data-theme="dracula"] {
+  color-scheme: dark;
+  --background: #282a36;
+  --foreground: #f8f8f2;
+  --card: #2f3240;
+  --card-foreground: #f8f8f2;
+  --popover: #343746;
+  --popover-foreground: #f8f8f2;
+  --primary: #bd93f9;
+  --primary-foreground: #21222c;
+  --secondary: #44475a;
+  --secondary-foreground: #f8f8f2;
+  --muted: #3a3d4d;
+  --muted-foreground: #a7abc4;
+  --destructive: #ff5555;
+  --destructive-foreground: #21222c;
+  --success: #50fa7b;
+  --warning: #f1fa8c;
+  --border: #44475a;
+  --input: #44475a;
+  --ring: #bd93f9;
+  --sidebar: #21222c;
+  --sidebar-foreground: #f8f8f2;
+  --sidebar-accent: #bd93f9;
+  --sidebar-border: #3a3d4d;
+}
+
+/* ── Nord ──────────────────────────────────────────────────────────────────── */
+:root[data-theme="nord"] {
+  color-scheme: dark;
+  --background: #2e3440;
+  --foreground: #d8dee9;
+  --card: #353b49;
+  --card-foreground: #d8dee9;
+  --popover: #3b4252;
+  --popover-foreground: #eceff4;
+  --primary: #88c0d0;
+  --primary-foreground: #2e3440;
+  --secondary: #434c5e;
+  --secondary-foreground: #e5e9f0;
+  --muted: #3b4252;
+  --muted-foreground: #9aa5b8;
+  --destructive: #bf616a;
+  --destructive-foreground: #eceff4;
+  --success: #a3be8c;
+  --warning: #ebcb8b;
+  --border: #434c5e;
+  --input: #434c5e;
+  --ring: #88c0d0;
+  --sidebar: #292e39;
+  --sidebar-foreground: #d8dee9;
+  --sidebar-accent: #88c0d0;
+  --sidebar-border: #3b4252;
+}
+
+/* ── Solarized Light ───────────────────────────────────────────────────────── */
+:root[data-theme="solarized-light"] {
+  color-scheme: light;
+  --background: #eee8d5;
+  --foreground: #586e75;
+  --card: #fdf6e3;
+  --card-foreground: #586e75;
+  --popover: #fdf6e3;
+  --popover-foreground: #586e75;
+  --primary: #268bd2;
+  --primary-foreground: #fdf6e3;
+  --secondary: #e4ddc8;
+  --secondary-foreground: #586e75;
+  --muted: #e4ddc8;
+  --muted-foreground: #839496;
+  --destructive: #dc322f;
+  --destructive-foreground: #fdf6e3;
+  --success: #859900;
+  --warning: #b58900;
+  --border: #d9d2bc;
+  --input: #d9d2bc;
+  --ring: #268bd2;
+  --sidebar: #073642;
+  --sidebar-foreground: #93a1a1;
+  --sidebar-accent: #2aa198;
+  --sidebar-border: #0a4856;
+}
+
+/* ── Minimal global base (replaces the old styles.css reset; intentionally
+   lighter than Tailwind preflight to avoid surprising the migrated panels) ── */
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+  html {
+    font-family:
+      Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+      sans-serif;
+    font-size: 14px;
+  }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: var(--background);
+    color: var(--foreground);
+  }
+  button,
+  input,
+  textarea,
+  select {
+    font: inherit;
+  }
+}

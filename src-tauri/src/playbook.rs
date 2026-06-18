@@ -108,6 +108,80 @@ pub fn list_playbooks_core() -> Result<Vec<Playbook>> {
     load_playbooks()
 }
 
+fn save_playbooks(playbooks: &[Playbook]) -> Result<()> {
+    let path = playbooks_path()?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let raw = toml::to_string_pretty(&PlaybookFile {
+        playbooks: playbooks.to_vec(),
+    })?;
+    std::fs::write(&path, raw).map_err(|e| anyhow!("failed to write {}: {e}", path.display()))
+}
+
+fn normalize_playbook(mut playbook: Playbook) -> Result<Playbook> {
+    playbook.name = playbook.name.trim().to_string();
+    playbook.description = playbook.description.trim().to_string();
+    playbook.tags = playbook
+        .tags
+        .into_iter()
+        .map(|tag| tag.trim().to_string())
+        .filter(|tag| !tag.is_empty())
+        .collect();
+    playbook.steps = playbook
+        .steps
+        .into_iter()
+        .map(|step| step.trim().to_string())
+        .filter(|step| !step.is_empty())
+        .collect();
+
+    if playbook.name.is_empty() {
+        return Err(anyhow!("playbook name is required"));
+    }
+    if playbook.description.is_empty() {
+        playbook.description = "No description".into();
+    }
+    let has_advanced_steps = playbook
+        .advanced_steps
+        .as_ref()
+        .is_some_and(|steps| !steps.is_empty());
+    if playbook.steps.is_empty() && !has_advanced_steps {
+        return Err(anyhow!("playbook must contain at least one step"));
+    }
+
+    Ok(playbook)
+}
+
+/// Create or update one playbook in ~/.agent2ssh/playbooks.toml.
+pub fn save_playbook_core(playbook: Playbook) -> Result<Playbook> {
+    let playbook = normalize_playbook(playbook)?;
+    let mut playbooks = load_playbooks()?;
+    if let Some(existing) = playbooks.iter_mut().find(|item| item.name == playbook.name) {
+        *existing = playbook.clone();
+    } else {
+        playbooks.push(playbook.clone());
+    }
+    playbooks.sort_by(|a, b| a.name.cmp(&b.name));
+    save_playbooks(&playbooks)?;
+    Ok(playbook)
+}
+
+/// Delete one playbook by name. Returns true when a playbook was removed.
+pub fn delete_playbook_core(name: &str) -> Result<bool> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(anyhow!("playbook name is required"));
+    }
+    let mut playbooks = load_playbooks()?;
+    let before = playbooks.len();
+    playbooks.retain(|item| item.name != name);
+    let removed = playbooks.len() != before;
+    if removed {
+        save_playbooks(&playbooks)?;
+    }
+    Ok(removed)
+}
+
 // ── Template resolution ─────────────────────────────────────────────────────
 
 /// Resolve `{{param_name}}` placeholders in a command template string.

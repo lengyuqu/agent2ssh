@@ -1,0 +1,176 @@
+import { Bot, CheckCircle2, Clipboard, PlugZap, RefreshCw, ShieldAlert } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { api } from "../api";
+import { useI18n } from "../i18n";
+import type { McpAgentConfigStatus } from "../types";
+import { Badge } from "./ui/badge";
+import { Button } from "./ui/button";
+import { Card } from "./ui/card";
+
+const chipCls = "max-w-full truncate rounded bg-muted px-1.5 py-1 text-xs text-muted-foreground";
+
+export default function McpAgentsPanel() {
+  const { t } = useI18n();
+  const [agents, setAgents] = useState<McpAgentConfigStatus[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [configuring, setConfiguring] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState<string | null>(null);
+
+  const detectedCount = useMemo(() => agents.filter((agent) => agent.detected).length, [agents]);
+  const configuredCount = useMemo(
+    () => agents.filter((agent) => agent.configured).length,
+    [agents]
+  );
+
+  async function refresh() {
+    setLoading(true);
+    setError(null);
+    try {
+      setAgents(await api.listMcpAgentConfigs());
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    refresh();
+  }, []);
+
+  async function configure(agent: McpAgentConfigStatus) {
+    setConfiguring(agent.id);
+    setMessage(null);
+    setError(null);
+    try {
+      const result = await api.configureMcpAgent(agent.id);
+      setMessage(result.message);
+      await refresh();
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setConfiguring(null);
+    }
+  }
+
+  async function copyCommand(agent: McpAgentConfigStatus) {
+    await navigator.clipboard.writeText(agent.recommended_command);
+    setCopied(agent.id);
+    window.setTimeout(() => setCopied(null), 1600);
+  }
+
+  return (
+    <Card className="space-y-3.5 p-4">
+      <div className="flex items-center gap-2">
+        <h3 className="flex items-center gap-2 font-semibold">
+          <Bot size={16} className="text-muted-foreground" />
+          {t("MCP Agents")}
+        </h3>
+        <Button variant="secondary" size="sm" className="ml-auto" onClick={refresh} disabled={loading}>
+          <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
+          {t("Refresh")}
+        </Button>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2.5">
+        <div className="rounded-lg border border-border bg-muted/40 p-3">
+          <strong className="block text-2xl leading-none">{detectedCount}</strong>
+          <span className="mt-1 block text-xs text-muted-foreground">{t("detected")}</span>
+        </div>
+        <div className="rounded-lg border border-border bg-muted/40 p-3">
+          <strong className="block text-2xl leading-none">{configuredCount}</strong>
+          <span className="mt-1 block text-xs text-muted-foreground">{t("configured")}</span>
+        </div>
+      </div>
+
+      {message && (
+        <div className="rounded-md bg-success/12 px-3 py-2 text-sm text-success">{message}</div>
+      )}
+      {error && (
+        <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          {error}
+        </div>
+      )}
+
+      <div className="grid gap-2.5">
+        {agents.map((agent) => {
+          const invalid = agent.status.startsWith("invalid_config");
+          return (
+            <div
+              key={agent.id}
+              className="flex items-center justify-between gap-3.5 rounded-lg border border-border bg-card p-3 max-md:flex-col max-md:items-stretch"
+            >
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <PlugZap size={16} className="text-muted-foreground" />
+                  <strong>{agent.name}</strong>
+                  <Badge
+                    variant={agent.configured ? "success" : agent.detected ? "default" : "secondary"}
+                  >
+                    {agent.configured
+                      ? t("Configured")
+                      : agent.detected
+                        ? t("Detected")
+                        : t("Not detected")}
+                  </Badge>
+                  {invalid && (
+                    <Badge variant="destructive">
+                      <ShieldAlert size={12} />
+                      {t("Invalid config")}
+                    </Badge>
+                  )}
+                </div>
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  <span className={chipCls} title={agent.config_path}>
+                    {agent.config_path}
+                  </span>
+                  {agent.command && (
+                    <code className={chipCls} title={agent.command}>
+                      {agent.command}
+                    </code>
+                  )}
+                  <code
+                    className={chipCls}
+                    title={
+                      agent.configured_source
+                        ? `Configured source: ${agent.configured_source}`
+                        : `Recommended source: ${agent.source}`
+                    }
+                  >
+                    source: {agent.configured_source ?? agent.source}
+                  </code>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 max-md:justify-end">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => copyCommand(agent)}
+                  title={t("Copy MCP command")}
+                >
+                  <Clipboard size={14} />
+                  {copied === agent.id ? t("Copied") : t("Copy command")}
+                </Button>
+                <Button
+                  size="sm"
+                  onClick={() => configure(agent)}
+                  disabled={configuring !== null || invalid}
+                  title={agent.configured ? t("Update MCP config") : t("Configure MCP")}
+                >
+                  {agent.configured ? <CheckCircle2 size={14} /> : <PlugZap size={14} />}
+                  {configuring === agent.id
+                    ? t("Configuring...")
+                    : agent.configured
+                      ? t("Update")
+                      : t("Configure")}
+                </Button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </Card>
+  );
+}
