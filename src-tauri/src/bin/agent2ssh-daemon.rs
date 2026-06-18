@@ -614,24 +614,16 @@ async fn reject_if_rate_limited(
     Ok(())
 }
 
-async fn reject_if_session_limited(
-    state: &AppState,
-    source: &str,
-    host: &str,
-    tags: &[String],
-) -> Result<(), (StatusCode, Json<ErrorBody>)> {
-    reject_if_session_limited_for_command(state, source, host, tags, "session_open").await
-}
-
-async fn reject_if_session_limited_for_command(
+async fn register_limited_session_for_command(
     state: &AppState,
     source: &str,
     host: &str,
     tags: &[String],
     command: &str,
-) -> Result<(), (StatusCode, Json<ErrorBody>)> {
-    let limiter = state.limiter.lock().await;
-    if let Err(rejection) = limiter.check_session_open(source, host, tags) {
+) -> Result<Uuid, (StatusCode, Json<ErrorBody>)> {
+    let id = Uuid::new_v4();
+    let mut limiter = state.limiter.lock().await;
+    if let Err(rejection) = limiter.try_register_session(id, source, host, tags) {
         write_limit_rejection_audit(&rejection, source, host, command);
         return Err(err(
             too_many_requests_status(),
@@ -641,7 +633,7 @@ async fn reject_if_session_limited_for_command(
             ),
         ));
     }
-    Ok(())
+    Ok(id)
 }
 
 // ── Request/Response types ───────────────────────────────────────────────────
@@ -1426,8 +1418,9 @@ async fn session_open(
     reject_if_gate_paused(source, &body.host, "session_open")?;
     check_daemon_scope(&auth.scope, &body.host, &tags, "session_open")
         .map_err(|e| err(StatusCode::FORBIDDEN, e))?;
-    reject_if_session_limited(&s, source, &body.host, &tags).await?;
-    let (risk, _) = authorize_command(
+    let reservation_id =
+        register_limited_session_for_command(&s, source, &body.host, &tags, "session_open").await?;
+    let (risk, _) = match authorize_command(
         &auth.scope,
         source,
         &body.host,
@@ -1438,14 +1431,22 @@ async fn session_open(
         None,
         None,
     )
-    .await?;
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            s.limiter.lock().await.unregister_session(&reservation_id);
+            return Err(error);
+        }
+    };
     let started = Instant::now();
     match session_open_core(&body.host).await {
         Ok(id) => {
-            s.limiter
-                .lock()
-                .await
-                .register_session(id, source, &body.host, &tags);
+            {
+                let mut limiter = s.limiter.lock().await;
+                limiter.unregister_session(&reservation_id);
+                limiter.register_session(id, source, &body.host, &tags);
+            }
             s.session_input_buffers
                 .lock()
                 .await
@@ -1470,6 +1471,7 @@ async fn session_open(
             Ok(Json(IdBody { id: id.to_string() }))
         }
         Err(e) => {
+            s.limiter.lock().await.unregister_session(&reservation_id);
             let message = e.to_string();
             append_operation_audit(
                 source,
@@ -2650,18 +2652,24 @@ async fn terminal_attach(
     if let Err(e) = reject_if_gate_paused(&source, &params.host, "terminal") {
         return e.into_response();
     }
-    if let Err(e) =
-        reject_if_session_limited_for_command(&s, &source, &params.host, &tags, "terminal_open")
-            .await
-    {
-        return e.into_response();
-    }
     let host = match agent2ssh::session::resolve_host(&params.host) {
         Ok(host) => host,
         Err(e) => return err(StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     };
+    let terminal_id = match register_limited_session_for_command(
+        &s,
+        &source,
+        &params.host,
+        &tags,
+        "terminal_open",
+    )
+    .await
+    {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    ws.on_upgrade(move |socket| handle_terminal(socket, host, auth, tags, source, s))
+    ws.on_upgrade(move |socket| handle_terminal(socket, host, auth, tags, source, s, terminal_id))
 }
 
 async fn handle_terminal(
@@ -2671,17 +2679,12 @@ async fn handle_terminal(
     tags: Vec<String>,
     source: String,
     state: AppState,
+    terminal_id: Uuid,
 ) {
     use agent2ssh::embedded_ssh::{spawn_terminal, TerminalCommand, TerminalEvent};
     use axum::extract::ws::Message;
     use futures_util::{SinkExt, StreamExt};
     let host_name = host.name.clone();
-    let terminal_id = Uuid::new_v4();
-    state
-        .limiter
-        .lock()
-        .await
-        .register_session(terminal_id, &source, &host_name, &tags);
     let (terminal_tx, terminal_rx) = spawn_terminal(host.clone(), 80, 24);
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<TerminalEvent>(128);
     let event_task = tokio::task::spawn_blocking(move || {
@@ -3388,9 +3391,15 @@ mod tests {
                     "test-host",
                     &[],
                 );
-                let err = reject_if_session_limited(&state, "cli", "test-host", &[])
-                    .await
-                    .unwrap_err();
+                let err = register_limited_session_for_command(
+                    &state,
+                    "cli",
+                    "test-host",
+                    &[],
+                    "session_open",
+                )
+                .await
+                .unwrap_err();
                 assert_eq!(err.0, too_many_requests_status());
             })
         });
@@ -3412,7 +3421,7 @@ mod tests {
                     "test-host",
                     &[],
                 );
-                let err = reject_if_session_limited_for_command(
+                let err = register_limited_session_for_command(
                     &state,
                     "daemon_terminal",
                     "test-host",
@@ -3431,6 +3440,52 @@ mod tests {
                 let entry = audit.first().expect("limit rejection should write audit");
                 assert_eq!(entry.command, "terminal_open");
                 assert_eq!(entry.source.as_deref(), Some("daemon_terminal"));
+            })
+        });
+    }
+
+    #[test]
+    fn limited_session_registration_reserves_capacity_until_unregistered() {
+        with_temp_config(|| {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                let state = test_state(ExecutionLimitConfig {
+                    default_source_max_sessions: 0,
+                    default_host_max_sessions: 1,
+                    default_tag_max_sessions: 0,
+                    ..Default::default()
+                });
+
+                let id = register_limited_session_for_command(
+                    &state,
+                    "daemon_terminal",
+                    "test-host",
+                    &[],
+                    "terminal_open",
+                )
+                .await
+                .expect("first reservation should fit");
+
+                let err = register_limited_session_for_command(
+                    &state,
+                    "daemon_terminal",
+                    "test-host",
+                    &[],
+                    "terminal_open",
+                )
+                .await
+                .unwrap_err();
+                assert_eq!(err.0, too_many_requests_status());
+
+                state.limiter.lock().await.unregister_session(&id);
+                register_limited_session_for_command(
+                    &state,
+                    "daemon_terminal",
+                    "test-host",
+                    &[],
+                    "terminal_open",
+                )
+                .await
+                .expect("unregister should release capacity");
             })
         });
     }

@@ -340,7 +340,7 @@ per_minute = 10
 max_sessions = 2
 ```
 
-`per_minute = 0` 或 `max_sessions = 0` 表示该维度不限额。速率限额覆盖 `/exec`、`/exec-multi`、`/exec/compare`、SFTP 操作、session write、forward add、`/playbooks/run`、WebSocket exec 和 `/daemons/localhost/exec`；session 并发限额覆盖 session open。超限时 HTTP 入口返回 429，并写入 `blocked` audit；事件流发布 `limit_rejected`。本地代理执行路径 `/daemons/localhost/exec` 同样受本地 daemon 限额约束。
+`per_minute = 0` 或 `max_sessions = 0` 表示该维度不限额。速率限额覆盖 `/exec`、`/exec-multi`、`/exec/compare`、SFTP 操作、session write、forward add、`/playbooks/run`、WebSocket exec、WebSocket terminal completed-line input 和 `/daemons/localhost/exec`；session 并发限额覆盖 session open 和 WebSocket terminal open。超限时 HTTP 入口返回 429，并写入 `blocked` audit；事件流发布 `limit_rejected`。本地代理执行路径 `/daemons/localhost/exec` 同样受本地 daemon 限额约束。
 
 ---
 
@@ -441,7 +441,7 @@ wscat -c "ws://127.0.0.1:7722/terminal?host=web1&token=$TOKEN"
 {"type": "resize", "cols": 120, "rows": 36}
 ```
 
-交互式终端和 `/sessions` 持久会话都使用内置 SSH 传输和远程 PTY，不依赖系统 `ssh` 或 `sshpass`。终端输入按完成行复用 session write 的风险/审批检查；被拒绝的输入不会转发给远端。jump-host 使用内置 `direct-tcpip` bastion channel，端口转发和连接保留也走内置 SSH。
+交互式终端和 `/sessions` 持久会话都使用内置 SSH 传输和远程 PTY，不依赖系统 `ssh` 或 `sshpass`。终端打开会占用 session 并发限额；终端输入按完成行复用 session write 的速率限额、风险和审批检查；被拒绝的输入不会转发给远端。jump-host 使用内置 `direct-tcpip` bastion channel，端口转发和连接保留也走内置 SSH。
 
 ---
 

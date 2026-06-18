@@ -664,7 +664,7 @@ X-Agent2SSH-Signature: sha256=<hex-encoded-signature>
 
 ### 用途
 
-配置 daemon 层的执行速率和 session 并发限额。限额在 daemon 进程内强制执行，覆盖 `/exec`、`/exec-multi`、`/exec/compare`、SFTP 操作、`/playbooks/run`、session write、session open、forward add、WebSocket exec 和 `/daemons/localhost/exec`。
+配置 daemon 层的执行速率和 session 并发限额。限额在 daemon 进程内强制执行，覆盖 `/exec`、`/exec-multi`、`/exec/compare`、SFTP 操作、`/playbooks/run`、session write、session open、forward add、WebSocket exec、WebSocket terminal 和 `/daemons/localhost/exec`。
 
 ### 文件位置
 
@@ -712,7 +712,7 @@ per_minute = 10
 max_sessions = 2
 ```
 
-`per_minute = 0` 或 `max_sessions = 0` 表示该维度不限额。超限请求返回 HTTP 429，写入 `blocked` audit，并发布 `limit_rejected` 事件。
+`per_minute = 0` 或 `max_sessions = 0` 表示该维度不限额。速率限额覆盖 WebSocket terminal 的 completed-line input；session 并发限额覆盖 WebSocket terminal open。超限请求返回 HTTP 429，写入 `blocked` audit，并发布 `limit_rejected` 事件。
 
 ---
 

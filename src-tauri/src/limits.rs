@@ -171,6 +171,18 @@ impl ExecutionLimiter {
         Ok(())
     }
 
+    pub fn try_register_session(
+        &mut self,
+        id: Uuid,
+        source: &str,
+        host: &str,
+        tags: &[String],
+    ) -> std::result::Result<(), ExecutionLimitRejection> {
+        self.check_session_open(source, host, tags)?;
+        self.register_session(id, source, host, tags);
+        Ok(())
+    }
+
     pub fn register_session(&mut self, id: Uuid, source: &str, host: &str, tags: &[String]) {
         self.sessions.insert(
             id,

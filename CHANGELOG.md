@@ -30,6 +30,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - **Desktop mutation parity**: Desktop-local SFTP, session, forward, and connection operations now use the same high-risk approval/force semantics as daemon, CLI, and MCP paths.
 - **Desktop operation audit**: Desktop-local session, forward, and connection mutations now append operation-level audit entries for success and failure.
 - **Vite production chunks**: Production frontend builds now split terminal, React, UI, icon, and runtime vendor chunks without the previous large-chunk warning.
+- **Terminal session-limit race**: WebSocket `/terminal` and REST session open now reserve session-limit capacity atomically before opening the backend PTY, so concurrent opens cannot bypass `max_sessions`.
 
 ## [0.1.1] - 2026-06-16
 
