@@ -48,54 +48,24 @@ pub fn remove_daemon_pid_file() {
 }
 
 pub fn process_is_alive(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        matches!(
-            Command::new("kill").arg("-0").arg(pid.to_string()).status(),
-            Ok(status) if status.success()
-        )
-    }
-
-    #[cfg(windows)]
-    {
-        match Command::new("tasklist")
-            .args(["/FI", &format!("PID eq {pid}")])
-            .output()
-        {
-            Ok(output) if output.status.success() => {
-                String::from_utf8_lossy(&output.stdout).contains(&pid.to_string())
-            }
-            _ => false,
-        }
-    }
-
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = pid;
-        false
-    }
+    let pid = sysinfo::Pid::from_u32(pid);
+    let mut system = sysinfo::System::new();
+    system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+    system.process(pid).is_some()
 }
 
 pub fn terminate_process(pid: u32) -> Result<()> {
-    #[cfg(unix)]
-    let status = Command::new("kill")
-        .arg(pid.to_string())
-        .status()
-        .context("failed to run kill")?;
+    let sys_pid = sysinfo::Pid::from_u32(pid);
+    let mut system = sysinfo::System::new();
+    system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[sys_pid]), true);
+    let Some(process) = system.process(sys_pid) else {
+        return Ok(());
+    };
 
-    #[cfg(windows)]
-    let status = Command::new("taskkill")
-        .args(["/PID", &pid.to_string(), "/T", "/F"])
-        .status()
-        .context("failed to run taskkill")?;
-
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = pid;
-        return Err(anyhow!("daemon stop is not supported on this platform"));
-    }
-
-    if status.success() {
+    let terminated = process
+        .kill_with(sysinfo::Signal::Term)
+        .unwrap_or_else(|| process.kill());
+    if terminated {
         Ok(())
     } else {
         Err(anyhow!("failed to terminate daemon process {pid}"))

@@ -806,13 +806,14 @@ struct OutputBody {
 
 async fn health() -> Json<serde_json::Value> {
     let config_ok = config_dir().map(|d| d.exists()).unwrap_or(false);
-    let ssh_ok = which_binary("ssh").is_some();
     Json(serde_json::json!({
         "ok": true,
         "version": env!("CARGO_PKG_VERSION"),
         "uptime_secs": uptime_secs(),
         "config_dir_available": config_ok,
-        "ssh_available": ssh_ok,
+        "embedded_ssh_available": true,
+        "embedded_keygen_available": true,
+        "ssh_available": true,
         "pid": std::process::id(),
     }))
 }
@@ -3160,21 +3161,6 @@ fn preview_text(value: &str, max_chars: usize) -> String {
         preview.push_str("\n...[truncated]");
     }
     preview
-}
-
-/// Check whether a binary exists on PATH (used by health + doctor).
-pub fn which_binary(name: &str) -> Option<String> {
-    let output = std::process::Command::new("which")
-        .arg(name)
-        .output()
-        .ok()?;
-    if output.status.success() {
-        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path.is_empty() {
-            return Some(path);
-        }
-    }
-    None
 }
 
 // ── Health Snapshot ─────────────────────────────────────────────────────────

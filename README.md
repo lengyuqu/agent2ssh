@@ -145,7 +145,9 @@ For first-time external users, follow the [10-minute CLI and MCP setup guide](do
 
 - SSH transport is implemented in the Rust/Tauri backend with the `ssh2` / libssh2 stack.
 - Exec, ping, health probes, SFTP, WebSocket exec streaming, WebSocket terminal, persistent PTY sessions, jump-host / ProxyJump-style bastion channels, retained connections, and local/remote port forwards do not call system `ssh`, `scp`, or `sshpass`.
-- System `ssh-keygen` is still used for local SSH key generation. SSH config import/export and diagnostics may inspect local files or PATH, but they are not the runtime SSH transport.
+- Local Ed25519 key generation is also implemented in Rust and uses the operating system CSPRNG directly; it does not call system `ssh-keygen`.
+- Daemon process status/stop and health checks use Rust process/HTTP APIs, not shelling out to `kill`, `taskkill`, `tasklist`, or `curl`.
+- SSH config import/export reads and writes local config text, but connection execution remains embedded.
 
 ### Safety
 

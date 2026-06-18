@@ -1,5 +1,9 @@
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
+use ssh_key::{
+    private::{Ed25519Keypair, KeypairData},
+    LineEnding, PrivateKey,
+};
 use std::path::PathBuf;
 
 use crate::store::{config_dir, restrict_file_to_owner};
@@ -134,27 +138,16 @@ pub fn generate_key_core(name: &str, comment: Option<&str>) -> Result<SshKeyInfo
     }
 
     let comment = comment.unwrap_or("agent2ssh");
-    let status = std::process::Command::new("ssh-keygen")
-        .arg("-t")
-        .arg("ed25519")
-        .arg("-C")
-        .arg(comment)
-        .arg("-f")
-        .arg(&private_path)
-        .arg("-N")
-        .arg("") // no passphrase
-        .status()
-        .map_err(|e| anyhow!("failed to run ssh-keygen: {}", e))?;
+    let mut seed = [0u8; ssh_key::private::Ed25519PrivateKey::BYTE_SIZE];
+    getrandom::fill(&mut seed).map_err(|e| anyhow!("failed to read system random source: {e}"))?;
+    let keypair = Ed25519Keypair::from_seed(&seed);
+    let private_key = PrivateKey::new(KeypairData::from(keypair), comment)?;
+    let private_pem = private_key.to_openssh(LineEnding::LF)?;
+    let public_key = private_key.public_key().to_openssh()?;
 
-    if !status.success() {
-        return Err(anyhow!("ssh-keygen failed"));
-    }
+    std::fs::write(&private_path, private_pem.as_bytes())?;
     restrict_private_key_permissions(&private_path)?;
-
-    let public_key = std::fs::read_to_string(&public_path)
-        .unwrap_or_default()
-        .trim()
-        .to_string();
+    std::fs::write(&public_path, format!("{public_key}\n"))?;
 
     Ok(SshKeyInfo {
         name: name.to_string(),
@@ -235,6 +228,35 @@ pub fn import_key_core(source_path: &str, name: Option<&str>) -> Result<SshKeyIn
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[serial_test::serial]
+    fn test_generate_key_core_writes_openssh_ed25519_pair() {
+        let original_config_dir = std::env::var("AGENT2SSH_CONFIG_DIR").ok();
+        let config_dir =
+            std::env::temp_dir().join(format!("agent2ssh-keygen-{}", uuid::Uuid::new_v4()));
+        std::env::set_var("AGENT2SSH_CONFIG_DIR", &config_dir);
+
+        let result = generate_key_core("id_ed25519_test", Some("agent2ssh-test")).unwrap();
+        let private_raw = std::fs::read_to_string(&result.private_path).unwrap();
+        let public_raw = std::fs::read_to_string(&result.public_path).unwrap();
+
+        let private_key = PrivateKey::from_openssh(&private_raw).unwrap();
+        assert_eq!(private_key.algorithm(), ssh_key::Algorithm::Ed25519);
+        assert_eq!(private_key.comment().as_str().unwrap(), "agent2ssh-test");
+        assert!(private_raw.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----"));
+        assert!(public_raw.starts_with("ssh-ed25519 "));
+        assert_eq!(
+            public_raw.trim(),
+            private_key.public_key().to_openssh().unwrap()
+        );
+
+        let _ = std::fs::remove_dir_all(&config_dir);
+        match original_config_dir {
+            Some(value) => std::env::set_var("AGENT2SSH_CONFIG_DIR", value),
+            None => std::env::remove_var("AGENT2SSH_CONFIG_DIR"),
+        }
+    }
 
     #[cfg(unix)]
     #[test]

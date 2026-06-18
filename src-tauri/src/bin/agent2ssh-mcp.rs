@@ -1027,7 +1027,7 @@ async fn handle_request(request: &Value) -> std::result::Result<Value, McpError>
                 },
                 {
                     "name": "ssh_doctor",
-                    "description": "Run diagnostic checks on the agent2ssh environment: verify ssh/ssh-keygen binaries, config directory, hosts.json, daemon.token permissions, daemon health, optional config files, and audit log size.",
+                    "description": "Run diagnostic checks on the agent2ssh environment: verify embedded SSH/keygen capability, config directory, hosts.json, daemon.token permissions, daemon health, optional config files, and audit log size.",
                     "inputSchema": { "type": "object", "properties": {} }
                 },
                 {
@@ -1845,13 +1845,8 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
         "ssh_doctor" => {
             let mut checks: Vec<Value> = Vec::new();
 
-            // ssh binary
-            let ssh_ok = which_check("ssh");
-            checks.push(json!({"name": "ssh binary", "status": if ssh_ok {"pass"} else {"fail"}, "detail": if ssh_ok {"ssh found in PATH"} else {"ssh binary not found"}}));
-
-            // ssh-keygen
-            let keygen_ok = which_check("ssh-keygen");
-            checks.push(json!({"name": "ssh-keygen binary", "status": if keygen_ok {"pass"} else {"warn"}, "detail": if keygen_ok {"ssh-keygen found"} else {"ssh-keygen not found"}}));
+            checks.push(json!({"name": "embedded SSH transport", "status": "pass", "detail": "exec, SFTP, terminal, sessions, jump hosts, connections, and forwards use the Rust backend"}));
+            checks.push(json!({"name": "embedded key generation", "status": "pass", "detail": "Ed25519 keys are generated with the Rust backend and system CSPRNG"}));
 
             // config directory
             let config_dir = agent2ssh::config_dir().map_err(McpError::from)?;
@@ -2124,12 +2119,4 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
         "content": [{ "type": "text", "text": serde_json::to_string_pretty(&payload)? }],
         "structuredContent": payload
     }))
-}
-
-fn which_check(name: &str) -> bool {
-    std::process::Command::new("which")
-        .arg(name)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
 }

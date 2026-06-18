@@ -14,6 +14,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - **Anomaly detection**: Added `anomaly.toml`, source burst detection, sensitive command pattern detection, after-hours high-risk detection, `anomaly_detected` events, webhook support, and Live Activity anomaly highlighting.
 - **Embedded jump-host and forwarding transport**: Added embedded `direct-tcpip` bastion proxy channels plus local/remote forwarding over the in-process SSH transport, removing the remaining system `ssh`/`scp`/`sshpass` runtime dependency from exec, SFTP, terminal, session, connection, health, and forward paths.
 - **Terminal limit coverage**: WebSocket `/terminal` now participates in daemon session concurrency limits and applies execution rate limits to completed terminal input lines.
+- **Embedded SSH key generation**: Local Ed25519 key generation now uses the Rust backend and the operating system CSPRNG instead of shelling out to `ssh-keygen`.
+- **Portable daemon lifecycle control**: Daemon status/stop/restart and health checks now use Rust process and HTTP APIs instead of shelling out to `kill`, `taskkill`, `tasklist`, or `curl`.
 
 ### Changed
 - **Approval scoping**: Multi-host execution and playbook approvals now apply only to the approved host or step. Explicit `force` still applies to the whole requested operation when policy permits.

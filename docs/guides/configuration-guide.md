@@ -779,12 +779,7 @@ events = ["approval_required", "exec_blocked", "exec_completed", "anomaly_detect
 
 **生成新密钥**
 
-通过 Desktop App 的 Keys 标签页生成 Ed25519 密钥对，或手动执行：
-
-```bash
-ssh-keygen -t ed25519 -C "agent2ssh" -f ~/.agent2ssh/keys/my_key -N ""
-chmod 600 ~/.agent2ssh/keys/my_key
-```
+通过 Desktop App 的 Keys 标签页生成 Ed25519 密钥对。生成过程由 Agent2SSH 后端实现，不调用系统 `ssh-keygen`。
 
 **导入现有密钥**
 

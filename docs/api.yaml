@@ -432,7 +432,12 @@ paths:
                   version: { type: string }
                   uptime_secs: { type: integer }
                   config_dir_available: { type: boolean }
-                  ssh_available: { type: boolean }
+                  embedded_ssh_available: { type: boolean }
+                  embedded_keygen_available: { type: boolean }
+                  ssh_available:
+                    type: boolean
+                    deprecated: true
+                    description: Backward-compatible alias; runtime SSH uses the embedded backend.
                   pid: { type: integer }
 
   /hosts:

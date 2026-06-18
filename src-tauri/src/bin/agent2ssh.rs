@@ -2,6 +2,10 @@ use agent2ssh::approval::{
     check_approval_required, list_approval_policies, load_approval_policies,
     save_approval_policies, ApprovalPolicy,
 };
+use agent2ssh::daemon_control::{
+    process_is_alive as daemon_process_is_alive, read_daemon_pid, remove_daemon_pid_file,
+    start_daemon_background, terminate_process,
+};
 use agent2ssh::events::subscribe_events;
 use agent2ssh::execution_control::{
     append_rejected_exec_audit, authorize_command_with_approval, command_authorization_target,
@@ -1628,55 +1632,50 @@ async fn main() -> Result<()> {
         }
         Commands::Daemon { command } => {
             let config_dir = agent2ssh::config_dir()?;
-            let pid_path = config_dir.join("daemon.pid");
             match command {
                 DaemonCommands::Start => {
-                    if pid_path.exists() {
-                        let pid = std::fs::read_to_string(&pid_path)?.trim().to_string();
-                        // Check if process is alive
-                        if process_is_alive(&pid) {
+                    if let Some(pid) = read_daemon_pid()? {
+                        if daemon_process_is_alive(pid) {
                             println!("Daemon is already running (pid={})", pid);
                             return Ok(());
                         }
+                        remove_daemon_pid_file();
                     }
-                    // Start daemon as background process
                     let daemon_bin = daemon_binary_path()?;
-                    if !daemon_bin.exists() {
-                        println!("Daemon binary not found: {}", daemon_bin.display());
-                        return Ok(());
-                    }
-                    std::process::Command::new(&daemon_bin)
-                        .spawn()
-                        .map_err(|e| anyhow::anyhow!("Failed to start daemon: {}", e))?;
-                    println!("Daemon started.");
+                    let started = start_daemon_background(&daemon_bin)?;
+                    println!(
+                        "Daemon started (pid={}). Log: {}",
+                        started.pid,
+                        started.log_path.display()
+                    );
                 }
                 DaemonCommands::Stop => {
-                    if !pid_path.exists() {
+                    let Some(pid) = read_daemon_pid()? else {
                         println!("Daemon is not running (no PID file).");
                         return Ok(());
-                    }
-                    let pid = std::fs::read_to_string(&pid_path)?.trim().to_string();
-                    let _ = std::process::Command::new("kill").arg(&pid).status();
-                    let _ = std::fs::remove_file(&pid_path);
+                    };
+                    terminate_process(pid)?;
+                    remove_daemon_pid_file();
                     println!("Daemon stopped (pid={}).", pid);
                 }
                 DaemonCommands::Status => {
-                    if !pid_path.exists() {
+                    let Some(pid) = read_daemon_pid()? else {
                         println!("Daemon is not running.");
                         return Ok(());
+                    };
+                    if !daemon_process_is_alive(pid) {
+                        println!(
+                            "Daemon PID file exists (pid={}) but process is not running.",
+                            pid
+                        );
+                        return Ok(());
                     }
-                    let pid = std::fs::read_to_string(&pid_path)?.trim().to_string();
-                    // Check health endpoint
-                    let status = std::process::Command::new("curl")
-                        .arg("-s")
-                        .arg("http://127.0.0.1:7722/health")
-                        .output();
-                    match status {
-                        Ok(output) if output.status.success() => {
+                    match daemon_health_body().await {
+                        Ok(body) => {
                             println!("Daemon is running (pid={}).", pid);
-                            println!("{}", String::from_utf8_lossy(&output.stdout));
+                            println!("{body}");
                         }
-                        _ => {
+                        Err(_) => {
                             println!(
                                 "Daemon PID file exists (pid={}) but health check failed.",
                                 pid
@@ -1685,29 +1684,27 @@ async fn main() -> Result<()> {
                     }
                 }
                 DaemonCommands::Restart => {
-                    // Stop first
-                    if pid_path.exists() {
-                        let pid = std::fs::read_to_string(&pid_path)?.trim().to_string();
-                        let _ = std::process::Command::new("kill").arg(&pid).status();
-                        let _ = std::fs::remove_file(&pid_path);
+                    if let Some(pid) = read_daemon_pid()? {
+                        terminate_process(pid)?;
+                        remove_daemon_pid_file();
                         std::thread::sleep(std::time::Duration::from_secs(1));
                     }
-                    // Then start
                     let daemon_bin = daemon_binary_path()?;
-                    std::process::Command::new(&daemon_bin)
-                        .spawn()
-                        .map_err(|e| anyhow::anyhow!("Failed to start daemon: {}", e))?;
-                    println!("Daemon restarted.");
+                    let started = start_daemon_background(&daemon_bin)?;
+                    println!(
+                        "Daemon restarted (pid={}). Log: {}",
+                        started.pid,
+                        started.log_path.display()
+                    );
                 }
                 DaemonCommands::RotateToken { json } => {
-                    if pid_path.exists() {
-                        let pid = std::fs::read_to_string(&pid_path)?.trim().to_string();
-                        if process_is_alive(&pid) {
+                    if let Some(pid) = read_daemon_pid()? {
+                        if daemon_process_is_alive(pid) {
                             anyhow::bail!(
                                 "daemon is running (pid={pid}); stop it before rotating daemon.token"
                             );
                         }
-                        let _ = std::fs::remove_file(&pid_path);
+                        remove_daemon_pid_file();
                     }
                     std::fs::create_dir_all(&config_dir)?;
                     let token_path = config_dir.join("daemon.token");
@@ -2467,22 +2464,11 @@ fn daemon_binary_path() -> Result<std::path::PathBuf> {
     let daemon_dir = exe
         .parent()
         .context("failed to resolve current executable directory")?;
-    Ok(daemon_dir.join("agent2ssh-daemon"))
-}
-
-fn process_is_alive(pid: &str) -> bool {
-    #[cfg(unix)]
-    {
-        matches!(
-            std::process::Command::new("kill").arg("-0").arg(pid).status(),
-            Ok(status) if status.success()
-        )
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-        true
-    }
+    #[cfg(windows)]
+    let daemon_name = "agent2ssh-daemon.exe";
+    #[cfg(not(windows))]
+    let daemon_name = "agent2ssh-daemon";
+    Ok(daemon_dir.join(daemon_name))
 }
 
 // ── Doctor command ───────────────────────────────────────────────────────────
@@ -2497,28 +2483,16 @@ struct DoctorCheck {
 async fn run_doctor(output_json: bool) -> Result<()> {
     let mut checks: Vec<DoctorCheck> = Vec::new();
 
-    // 1. Check `ssh` binary exists
-    let ssh_ok = which_exists("ssh");
     checks.push(DoctorCheck {
-        name: "ssh binary".into(),
-        status: if ssh_ok { "pass" } else { "fail" }.into(),
-        detail: if ssh_ok {
-            "ssh found in PATH".into()
-        } else {
-            "ssh binary not found in PATH".into()
-        },
+        name: "embedded SSH transport".into(),
+        status: "pass".into(),
+        detail: "exec, SFTP, terminal, sessions, jump hosts, connections, and forwards use the Rust backend".into(),
     });
 
-    // 2. Check `ssh-keygen` exists
-    let keygen_ok = which_exists("ssh-keygen");
     checks.push(DoctorCheck {
-        name: "ssh-keygen binary".into(),
-        status: if keygen_ok { "pass" } else { "warn" }.into(),
-        detail: if keygen_ok {
-            "ssh-keygen found in PATH".into()
-        } else {
-            "ssh-keygen not found (key generation unavailable)".into()
-        },
+        name: "embedded key generation".into(),
+        status: "pass".into(),
+        detail: "Ed25519 keys are generated with the Rust backend and system CSPRNG".into(),
     });
 
     // 3. Check ~/.agent2ssh/ directory exists and is writable
@@ -2705,14 +2679,6 @@ async fn run_doctor(output_json: bool) -> Result<()> {
     Ok(())
 }
 
-fn which_exists(name: &str) -> bool {
-    std::process::Command::new("which")
-        .arg(name)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
 // ── Daemon Doctor (F5-1) ────────────────────────────────────────────────────
 
 async fn run_daemon_doctor(alias: &str, output_json: bool) -> Result<()> {
@@ -2885,6 +2851,28 @@ async fn check_daemon_health() -> bool {
     match client.get("http://127.0.0.1:7722/health").send().await {
         Ok(resp) => resp.status().is_success(),
         Err(_) => false,
+    }
+}
+
+async fn daemon_health_body() -> Result<String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+    let response = client
+        .get("http://127.0.0.1:7722/health")
+        .send()
+        .await
+        .context("failed to reach daemon health endpoint")?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .context("failed to read daemon health response")?;
+    if status.is_success() {
+        Ok(body)
+    } else {
+        Err(anyhow::anyhow!("daemon health failed ({status}): {body}"))
     }
 }
 

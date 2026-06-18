@@ -103,6 +103,9 @@ export type DaemonHealth = {
   version?: string | null;
   uptime_secs?: number | null;
   config_dir_available?: boolean | null;
+  embedded_ssh_available?: boolean | null;
+  embedded_keygen_available?: boolean | null;
+  /** @deprecated Use embedded_ssh_available. Kept for older clients. */
   ssh_available?: boolean | null;
   pid?: number | null;
 };
