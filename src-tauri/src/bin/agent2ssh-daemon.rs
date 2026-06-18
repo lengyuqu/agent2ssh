@@ -2734,15 +2734,6 @@ async fn handle_terminal(
                                 }
                                 Err((_, Json(error))) => {
                                     denied = true;
-                                    append_operation_audit(
-                                        &source,
-                                        &host_name,
-                                        &format!("terminal command {command}"),
-                                        RiskLevel::Blocked,
-                                        None,
-                                        0,
-                                        Some(&error.error),
-                                    );
                                     let _ = ws_tx.send(Message::Text(
                                         serde_json::json!({"type":"error","error":error.error}).to_string()
                                     )).await;
