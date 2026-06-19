@@ -5,10 +5,7 @@ use agent2ssh::approval::{
     approval_list, approval_respond, check_approval_required, list_approval_policies,
 };
 use agent2ssh::events::subscribe_events;
-use agent2ssh::execution_control::{
-    append_rejected_exec_audit, authorize_command_with_approval, command_authorization_target,
-    expand_exec_authorization_targets, CommandAuthorizationError, CommandAuthorizationInput,
-};
+use agent2ssh::execution_control::command_authorization_target;
 use agent2ssh::notify::{load_webhook_config, save_webhook_config};
 use agent2ssh::remote::{
     check_daemon_scope, check_daemon_version, diagnose_daemon, get_daemon, get_daemon_with_scope,
@@ -31,12 +28,22 @@ use agent2ssh::{
     ExecRequest, ForwardDirection, HostProfile, RiskLevel, SftpDownloadRequest, SftpUploadRequest,
     TeamConfigExport,
 };
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 
+#[path = "agent2ssh_mcp/auth.rs"]
+mod agent2ssh_mcp_auth;
+#[path = "agent2ssh_mcp/tools.rs"]
+mod agent2ssh_mcp_tools;
+
+use agent2ssh_mcp_auth::{
+    authorize_local_mcp_exec_request, authorize_local_mcp_exec_targets,
+    authorize_local_mcp_operation, authorize_local_mcp_playbook_run,
+};
+use agent2ssh_mcp_tools::{McpTool, ToolCall};
 struct McpError {
     code: i32,
     message: String,
@@ -85,6 +92,16 @@ struct DaemonSessionListItem {
     host: String,
 }
 
+#[derive(Deserialize)]
+struct DaemonForwardRule {
+    id: uuid::Uuid,
+    host: String,
+    direction: ForwardDirection,
+    bind_port: u16,
+    target_host: String,
+    target_port: u16,
+}
+
 enum DaemonAttempt<T> {
     Handled(T),
     Fallback,
@@ -105,200 +122,6 @@ fn mcp_host_tags(host: &str) -> Vec<String> {
         .find(|h| h.name == host)
         .map(|h| h.tags)
         .unwrap_or_default()
-}
-
-async fn authorize_local_mcp_exec_request(
-    request: &mut ExecRequest,
-) -> std::result::Result<RiskLevel, McpError> {
-    let target = command_authorization_target(&request.host);
-    let source = request.source.as_deref().unwrap_or("mcp").to_string();
-    let auth_scope = None;
-    let result = authorize_command_with_approval(
-        CommandAuthorizationInput {
-            auth_scope: &auth_scope,
-            source: &source,
-            host: &request.host,
-            tags: &target.tags,
-            risk_override: target.risk_override,
-            command: &request.command,
-            force: request.force,
-            reason: request.reason.clone(),
-            change_id: request.change_id.clone(),
-        },
-        |prompt| async move {
-            let message = "approval required but no local MCP approval handler is available";
-            append_rejected_exec_audit(
-                &prompt.source,
-                &prompt.host,
-                &prompt.command,
-                prompt.risk,
-                message,
-                prompt.change_id.as_deref(),
-            );
-            Err(format!("{message}; run through the daemon approval flow"))
-        },
-    )
-    .await
-    .map_err(mcp_authorization_error)?;
-    if result.approved && result.risk == RiskLevel::High {
-        request.force = true;
-    }
-    Ok(result.risk)
-}
-
-async fn authorize_local_mcp_exec_targets(
-    hosts: &[String],
-    tags: &Option<Vec<String>>,
-    command: &str,
-    force: bool,
-    reason: Option<String>,
-    change_id: Option<String>,
-    source: &str,
-) -> std::result::Result<Vec<String>, McpError> {
-    let targets = expand_exec_authorization_targets(hosts, tags).map_err(McpError::from)?;
-    let auth_scope = None;
-    let mut approved_hosts = Vec::new();
-    for target in targets {
-        let result = authorize_command_with_approval(
-            CommandAuthorizationInput {
-                auth_scope: &auth_scope,
-                source,
-                host: &target.host,
-                tags: &target.tags,
-                risk_override: target.risk_override,
-                command,
-                force,
-                reason: reason.clone(),
-                change_id: change_id.clone(),
-            },
-            |prompt| async move {
-                let message = "approval required but no local MCP approval handler is available";
-                append_rejected_exec_audit(
-                    &prompt.source,
-                    &prompt.host,
-                    &prompt.command,
-                    prompt.risk,
-                    message,
-                    prompt.change_id.as_deref(),
-                );
-                Err(format!("{message}; run through the daemon approval flow"))
-            },
-        )
-        .await
-        .map_err(mcp_authorization_error)?;
-        if result.approved && result.risk == RiskLevel::High {
-            approved_hosts.push(target.host);
-        }
-    }
-    Ok(approved_hosts)
-}
-
-async fn authorize_local_mcp_playbook_run(
-    playbook: &str,
-    host: &str,
-    force: bool,
-    params: &HashMap<String, String>,
-    reason: Option<String>,
-    change_id: Option<String>,
-    source: &str,
-) -> std::result::Result<Vec<usize>, McpError> {
-    let dry_run = dry_run_playbook(playbook, params).map_err(McpError::from)?;
-    let target = command_authorization_target(host);
-    let playbook_risk_override = list_playbooks_core()
-        .map_err(McpError::from)?
-        .into_iter()
-        .find(|item| item.name == playbook)
-        .and_then(|item| item.risk_override);
-    let risk_override = playbook_risk_override.or(target.risk_override);
-    let auth_scope = None;
-    let mut approved_steps = Vec::new();
-
-    for step in dry_run.steps {
-        let result = authorize_command_with_approval(
-            CommandAuthorizationInput {
-                auth_scope: &auth_scope,
-                source,
-                host,
-                tags: &target.tags,
-                risk_override,
-                command: &step.command_resolved,
-                force,
-                reason: reason.clone(),
-                change_id: change_id.clone(),
-            },
-            |prompt| async move {
-                let message = "approval required but no local MCP approval handler is available";
-                append_rejected_exec_audit(
-                    &prompt.source,
-                    &prompt.host,
-                    &prompt.command,
-                    prompt.risk,
-                    message,
-                    prompt.change_id.as_deref(),
-                );
-                Err(format!("{message}; run through the daemon approval flow"))
-            },
-        )
-        .await
-        .map_err(mcp_authorization_error)?;
-        if result.approved && result.risk == RiskLevel::High {
-            approved_steps.push(step.step);
-        }
-    }
-
-    Ok(approved_steps)
-}
-
-async fn authorize_local_mcp_operation(
-    host: &str,
-    command: &str,
-    force: bool,
-    source: &str,
-) -> std::result::Result<(), McpError> {
-    let target = command_authorization_target(host);
-    let auth_scope = None;
-    authorize_command_with_approval(
-        CommandAuthorizationInput {
-            auth_scope: &auth_scope,
-            source,
-            host,
-            tags: &target.tags,
-            risk_override: target.risk_override,
-            command,
-            force,
-            reason: None,
-            change_id: None,
-        },
-        |prompt| async move {
-            let message = "approval required but no local MCP approval handler is available";
-            append_rejected_exec_audit(
-                &prompt.source,
-                &prompt.host,
-                &prompt.command,
-                prompt.risk,
-                message,
-                prompt.change_id.as_deref(),
-            );
-            Err(format!("{message}; run through the daemon approval flow"))
-        },
-    )
-    .await
-    .map_err(mcp_authorization_error)?;
-    Ok(())
-}
-
-fn mcp_authorization_error(error: CommandAuthorizationError) -> McpError {
-    match error {
-        CommandAuthorizationError::ScopeDenied(message) => McpError::internal(message),
-        CommandAuthorizationError::Blocked { message, .. } => McpError::internal(message),
-        CommandAuthorizationError::ApprovalRejected => {
-            McpError::internal("command rejected by approver")
-        }
-        CommandAuthorizationError::ApprovalTimedOut => {
-            McpError::internal("approval request timed out")
-        }
-        CommandAuthorizationError::Internal(message) => McpError::internal(message),
-    }
 }
 
 fn local_daemon_client() -> std::result::Result<Option<(reqwest::Client, String, String)>, McpError>
@@ -519,6 +342,112 @@ async fn try_daemon_session_list() -> std::result::Result<DaemonAttempt<Vec<Valu
     ))
 }
 
+async fn try_daemon_forward_add(
+    host: &str,
+    direction: ForwardDirection,
+    bind_port: u16,
+    target_host: &str,
+    target_port: u16,
+) -> std::result::Result<DaemonAttempt<Value>, McpError> {
+    let Some((client, base_url, token)) = local_daemon_client()? else {
+        return Ok(DaemonAttempt::Fallback);
+    };
+    let response = match client
+        .post(format!("{base_url}/forwards"))
+        .bearer_auth(token)
+        .json(&json!({
+            "host": host,
+            "direction": direction,
+            "bind_port": bind_port,
+            "target_host": target_host,
+            "target_port": target_port,
+        }))
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(_) => return Ok(DaemonAttempt::Fallback),
+    };
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(daemon_error_body(status, body));
+    }
+    let mut value: Value = response
+        .json()
+        .await
+        .map_err(|e| McpError::internal(format!("invalid daemon forward response: {e}")))?;
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("backend".into(), Value::String("daemon".into()));
+    }
+    Ok(DaemonAttempt::Handled(value))
+}
+
+async fn try_daemon_forward_list() -> std::result::Result<DaemonAttempt<Vec<Value>>, McpError> {
+    let Some((client, base_url, token)) = local_daemon_client()? else {
+        return Ok(DaemonAttempt::Fallback);
+    };
+    let response = match client
+        .get(format!("{base_url}/forwards"))
+        .bearer_auth(token)
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(_) => return Ok(DaemonAttempt::Fallback),
+    };
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(daemon_error_body(status, body));
+    }
+    let rules: Vec<DaemonForwardRule> = response
+        .json()
+        .await
+        .map_err(|e| McpError::internal(format!("invalid daemon forward list response: {e}")))?;
+    Ok(DaemonAttempt::Handled(
+        rules
+            .into_iter()
+            .map(|rule| {
+                json!({
+                    "id": rule.id,
+                    "host": rule.host,
+                    "direction": rule.direction,
+                    "bind_port": rule.bind_port,
+                    "target_host": rule.target_host,
+                    "target_port": rule.target_port,
+                    "backend": "daemon",
+                })
+            })
+            .collect(),
+    ))
+}
+
+async fn try_daemon_forward_remove(
+    id: uuid::Uuid,
+) -> std::result::Result<DaemonAttempt<Value>, McpError> {
+    let Some((client, base_url, token)) = local_daemon_client()? else {
+        return Ok(DaemonAttempt::Fallback);
+    };
+    let response = match client
+        .delete(format!("{base_url}/forwards/{id}"))
+        .bearer_auth(token)
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(_) => return Ok(DaemonAttempt::Fallback),
+    };
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(daemon_error_body(status, body));
+    }
+    Ok(DaemonAttempt::Handled(
+        json!({ "removed": id.to_string(), "backend": "daemon" }),
+    ))
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     agent2ssh::install_panic_hook("mcp");
@@ -583,589 +512,7 @@ async fn handle_request(request: &Value) -> std::result::Result<Value, McpError>
             "capabilities": { "tools": {} },
             "serverInfo": { "name": "agent2ssh-mcp", "version": "0.1.0" }
         })),
-        "tools/list" => Ok(json!({
-            "tools": [
-                {
-                    "name": "ssh_list_hosts",
-                    "description": "List configured SSH host profiles.",
-                    "inputSchema": { "type": "object", "properties": {} }
-                },
-                {
-                    "name": "ssh_list_daemons",
-                    "description": "List all configured daemons (localhost + remote daemons from ~/.agent2ssh/remotes.toml). Returns alias, url, and connected status for each.",
-                    "inputSchema": { "type": "object", "properties": {} }
-                },
-                {
-                    "name": "ssh_import_config",
-                    "description": "Import SSH host profiles from ~/.ssh/config (or a custom path). Skips aliases that already exist.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "path": { "type": "string", "description": "Path to ssh config (default: ~/.ssh/config)." }
-                        }
-                    }
-                },
-                {
-                    "name": "ssh_add_host",
-                    "description": "Create or update an SSH host profile.",
-                    "inputSchema": {
-                        "type": "object",
-                        "required": ["name", "host"],
-                        "properties": {
-                            "name":      { "type": "string" },
-                            "host":      { "type": "string" },
-                            "user":      { "type": "string" },
-                            "port":      { "type": "integer" },
-                            "key_path":  { "type": "string" },
-                            "password":  { "type": "string", "description": "SSH password for password-based authentication. Prefer key_path for production." },
-                            "jump_host": { "type": "string", "description": "Host profile alias to use as ProxyJump bastion." },
-                            "tags":      { "type": "array", "items": { "type": "string" } },
-                            "env":       { "type": "string", "description": "Environment label for grouping hosts." },
-                            "role":      { "type": "string", "description": "Role label for grouping hosts." },
-                            "owner":     { "type": "string", "description": "Owner label for grouping hosts." }
-                        }
-                    }
-                },
-                {
-                    "name": "ssh_remove_host",
-                    "description": "Remove a configured SSH host profile by alias.",
-                    "inputSchema": {
-                        "type": "object",
-                        "required": ["name"],
-                        "properties": {
-                            "name": { "type": "string", "description": "The host alias to remove." }
-                        }
-                    }
-                },
-                {
-                    "name": "ssh_exec",
-                    "description": "Run a non-interactive command over SSH. Returns stdout, stderr, exit code, timing, and risk_level. High-risk commands require force=true; blocked commands always fail. Optionally forward to a remote daemon via daemon_alias.",
-                    "inputSchema": {
-                        "type": "object",
-                        "required": ["host", "command"],
-                        "properties": {
-                            "host":         { "type": "string" },
-                            "command":      { "type": "string" },
-                            "force":        { "type": "boolean", "description": "Set true to run high-risk commands." },
-                            "timeout_secs":     { "type": "integer", "description": "Kill the command after N seconds (default 60)." },
-                            "stdin":            { "type": "string", "description": "Pipe this string into the remote command's stdin." },
-                            "max_output_bytes": { "type": "integer", "description": "Truncate stdout to this many bytes (default 4 MiB)." },
-                            "daemon_alias":     { "type": "string", "description": "Forward this exec to a remote daemon by alias (omit or 'localhost' for local)." },
-                            "reason":           { "type": "string", "description": "Optional reason/note for this operation (audit trail)." },
-                            "change_id":        { "type": "string", "description": "Optional change/ticket ID for this operation (audit trail)." }
-                        }
-                    }
-                },
-                {
-                    "name": "ssh_ping",
-                    "description": "Check SSH reachability of one or more hosts. Returns reachable status and latency for each.",
-                    "inputSchema": {
-                        "type": "object",
-                        "required": ["hosts"],
-                        "properties": {
-                            "hosts":        { "type": "array", "items": { "type": "string" } },
-                            "timeout_secs": { "type": "integer", "default": 5 }
-                        }
-                    }
-                },
-                {
-                    "name": "ssh_exec_multi",
-                    "description": "Run the same command on multiple hosts concurrently. Returns an array of per-host results. Supports optional batch strategy for concurrency limits, failure thresholds, and batched rollout.",
-                    "inputSchema": {
-                        "type": "object",
-                        "required": ["hosts", "command"],
-                        "properties": {
-                            "hosts":        { "type": "array", "items": { "type": "string" }, "description": "List of host profile aliases." },
-                            "command":      { "type": "string" },
-                            "force":        { "type": "boolean" },
-                            "timeout_secs": { "type": "integer" },
-                            "tags":         { "type": "array", "items": { "type": "string" }, "description": "Expand hosts by tag." },
-                            "strategy":     {
-                                "type": "object",
-                                "description": "Optional batch execution strategy.",
-                                "properties": {
-                                    "concurrency":                { "type": "integer", "description": "Max concurrent hosts (0 = unlimited)." },
-                                    "max_failures":               { "type": "integer", "description": "Stop after this many failures (0 = never stop)." },
-                                    "batch_size":                 { "type": "integer", "description": "Execute in batches of this size." },
-                                    "pause_between_batches_secs": { "type": "integer", "description": "Pause between batches (seconds)." }
-                                }
-                            },
-                            "reason":       { "type": "string", "description": "Optional reason/note for this operation (audit trail)." },
-                            "change_id":    { "type": "string", "description": "Optional change/ticket ID for this operation (audit trail)." }
-                        }
-                    }
-                },
-                {
-                    "name": "ssh_exec_compare",
-                    "description": "Compare execution results across multiple hosts. Groups by exit code and highlights stdout/stderr differences. Provide either results directly or run a command on multiple hosts.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "hosts":        { "type": "array", "items": { "type": "string" }, "description": "List of host profile aliases to execute and compare." },
-                            "command":      { "type": "string", "description": "Command to run on all hosts." },
-                            "force":        { "type": "boolean" },
-                            "timeout_secs": { "type": "integer" },
-                            "tags":         { "type": "array", "items": { "type": "string" }, "description": "Expand hosts by tag." }
-                        }
-                    }
-                },
-                {
-                    "name": "ssh_audit",
-                    "description": "Return recent SSH execution audit log entries with optional filtering.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "limit":      { "type": "integer", "default": 20 },
-                            "host":       { "type": "string", "description": "Filter by host alias." },
-                            "risk_level": { "type": "string", "enum": ["low","medium","high","blocked"] },
-                            "exit_code":  { "type": "integer", "description": "Filter by exit code." },
-                            "since":      { "type": "string", "description": "ISO-8601 lower bound." },
-                            "until":      { "type": "string", "description": "ISO-8601 upper bound." },
-                            "search":     { "type": "string", "description": "Full-text search across command and host fields." },
-                            "command_pattern": { "type": "string", "description": "Command pattern (glob-style: *, ?)." },
-                            "host_env":   { "type": "string", "description": "Filter by host environment label." },
-                            "host_role":  { "type": "string", "description": "Filter by host role label." },
-                            "host_owner": { "type": "string", "description": "Filter by host owner label." }
-                        }
-                    }
-                },
-                {
-                    "name": "ssh_audit_export",
-                    "description": "Export audit log entries as JSONL or CSV format with optional filtering. Redaction is applied at write time so exported data preserves redaction.",
-                    "inputSchema": {
-                        "type": "object",
-                        "required": ["format"],
-                        "properties": {
-                            "format":     { "type": "string", "enum": ["jsonl", "csv"], "description": "Export format: jsonl (one JSON per line) or csv." },
-                            "limit":      { "type": "integer", "default": 20 },
-                            "host":       { "type": "string", "description": "Filter by host alias." },
-                            "risk_level": { "type": "string", "enum": ["low","medium","high","blocked"] },
-                            "exit_code":  { "type": "integer", "description": "Filter by exit code." },
-                            "since":      { "type": "string", "description": "ISO-8601 lower bound." },
-                            "until":      { "type": "string", "description": "ISO-8601 upper bound." },
-                            "search":     { "type": "string", "description": "Full-text search across command and host fields." },
-                            "command_pattern": { "type": "string", "description": "Command pattern (glob-style: *, ?)." },
-                            "host_env":   { "type": "string", "description": "Filter by host environment label." },
-                            "host_role":  { "type": "string", "description": "Filter by host role label." },
-                            "host_owner": { "type": "string", "description": "Filter by host owner label." }
-                        }
-                    }
-                },
-                {
-                    "name": "ssh_sftp_ls",
-                    "description": "List a remote directory (runs ls -la on the remote host).",
-                    "inputSchema": {
-                        "type": "object",
-                        "required": ["host", "path"],
-                        "properties": {
-                            "host":         { "type": "string" },
-                            "path":         { "type": "string" },
-                            "timeout_secs": { "type": "integer" }
-                        }
-                    }
-                },
-                {
-                    "name": "ssh_sftp_stat",
-                    "description": "Stat a remote file or directory (runs stat on the remote host).",
-                    "inputSchema": {
-                        "type": "object",
-                        "required": ["host", "path"],
-                        "properties": {
-                            "host":         { "type": "string" },
-                            "path":         { "type": "string" },
-                            "timeout_secs": { "type": "integer" }
-                        }
-                    }
-                },
-                {
-                    "name": "ssh_sftp_mkdir",
-                    "description": "Create a directory on a remote host (runs mkdir -p).",
-                    "inputSchema": {
-                        "type": "object",
-                        "required": ["host", "path"],
-                        "properties": {
-                            "host":         { "type": "string" },
-                            "path":         { "type": "string" },
-                            "timeout_secs": { "type": "integer" }
-                        }
-                    }
-                },
-                {
-                    "name": "ssh_sftp_upload",
-                    "description": "Upload a local file to a remote host via embedded SFTP.",
-                    "inputSchema": {
-                        "type": "object",
-                        "required": ["host", "local_path", "remote_path"],
-                        "properties": {
-                            "host":        { "type": "string", "description": "Host profile alias." },
-                            "local_path":  { "type": "string", "description": "Local file path to upload." },
-                            "remote_path": { "type": "string", "description": "Destination path on the remote host." }
-                        }
-                    }
-                },
-                {
-                    "name": "ssh_sftp_download",
-                    "description": "Download a file from a remote host via embedded SFTP.",
-                    "inputSchema": {
-                        "type": "object",
-                        "required": ["host", "remote_path", "local_path"],
-                        "properties": {
-                            "host":        { "type": "string", "description": "Host profile alias." },
-                            "remote_path": { "type": "string", "description": "Remote file path to download." },
-                            "local_path":  { "type": "string", "description": "Local destination path." }
-                        }
-                    }
-                },
-                {
-                    "name": "ssh_session_open",
-                    "description": "Open a persistent interactive PTY session to a host. Returns a session_id for subsequent write/read/close calls.",
-                    "inputSchema": {
-                        "type": "object",
-                        "required": ["host"],
-                        "properties": {
-                            "host": { "type": "string", "description": "Host profile alias." }
-                        }
-                    }
-                },
-                {
-                    "name": "ssh_session_write",
-                    "description": "Send input to an open PTY session (e.g. a command followed by \\n).",
-                    "inputSchema": {
-                        "type": "object",
-                        "required": ["session_id", "input"],
-                        "properties": {
-                            "session_id": { "type": "string" },
-                            "input":      { "type": "string", "description": "Text to write to session stdin. Include \\n to submit a command." }
-                        }
-                    }
-                },
-                {
-                    "name": "ssh_session_read",
-                    "description": "Read buffered output from a PTY session. Returns whatever arrived since the last read.",
-                    "inputSchema": {
-                        "type": "object",
-                        "required": ["session_id"],
-                        "properties": {
-                            "session_id": { "type": "string" },
-                            "timeout_ms": { "type": "integer", "default": 2000, "description": "How long to wait for output before returning." }
-                        }
-                    }
-                },
-                {
-                    "name": "ssh_session_close",
-                    "description": "Close and terminate a PTY session.",
-                    "inputSchema": {
-                        "type": "object",
-                        "required": ["session_id"],
-                        "properties": {
-                            "session_id": { "type": "string" }
-                        }
-                    }
-                },
-                {
-                    "name": "ssh_session_list",
-                    "description": "List open PTY sessions. Defaults to the local daemon registry and includes MCP process-local fallback sessions when present.",
-                    "inputSchema": { "type": "object", "properties": {} }
-                },
-                {
-                    "name": "ssh_forward_add",
-                    "description": "Start an SSH port forward tunnel (-L local or -R remote). Returns a forward_id.",
-                    "inputSchema": {
-                        "type": "object",
-                        "required": ["host", "bind_port", "target_host", "target_port"],
-                        "properties": {
-                            "host":        { "type": "string" },
-                            "direction":   { "type": "string", "enum": ["local", "remote"], "default": "local" },
-                            "bind_port":   { "type": "integer" },
-                            "target_host": { "type": "string" },
-                            "target_port": { "type": "integer" }
-                        }
-                    }
-                },
-                {
-                    "name": "ssh_forward_list",
-                    "description": "List active SSH port forward tunnels.",
-                    "inputSchema": { "type": "object", "properties": {} }
-                },
-                {
-                    "name": "ssh_forward_remove",
-                    "description": "Stop and remove an SSH port forward by ID.",
-                    "inputSchema": {
-                        "type": "object",
-                        "required": ["forward_id"],
-                        "properties": {
-                            "forward_id": { "type": "string" }
-                        }
-                    }
-                },
-                {
-                    "name": "ssh_risk_check",
-                    "description": "Check the risk level of a command using built-in rules and user-defined risk_rules.toml.",
-                    "inputSchema": {
-                        "type": "object",
-                        "required": ["command"],
-                        "properties": {
-                            "command": { "type": "string", "description": "The command to check." },
-                            "host":    { "type": "string", "description": "Optional host alias to check per-host overrides." }
-                        }
-                    }
-                },
-                {
-                    "name": "ssh_gate_status",
-                    "description": "Read the local daemon execution gate status. When paused, non-desktop daemon execution is rejected until resumed from CLI or desktop.",
-                    "inputSchema": { "type": "object", "properties": {} }
-                },
-                {
-                    "name": "ssh_approval_list",
-                    "description": "List all pending and recent approval requests (for high-risk command authorization).",
-                    "inputSchema": { "type": "object", "properties": {} }
-                },
-                {
-                    "name": "ssh_approval_respond",
-                    "description": "Approve or reject a pending approval request by ID.",
-                    "inputSchema": {
-                        "type": "object",
-                        "required": ["id", "approved"],
-                        "properties": {
-                            "id":       { "type": "string", "description": "The approval request UUID." },
-                            "approved": { "type": "boolean", "description": "true to approve, false to reject." }
-                        }
-                    }
-                },
-                {
-                    "name": "ssh_playbook_list",
-                    "description": "List all configured playbooks (command templates) from ~/.agent2ssh/playbooks.toml.",
-                    "inputSchema": { "type": "object", "properties": {} }
-                },
-                {
-                    "name": "ssh_playbook_run",
-                    "description": "Run a named playbook (sequence of SSH commands) against a target host. Steps execute sequentially; halts on first failure. Supports template parameters via the params object.",
-                    "inputSchema": {
-                        "type": "object",
-                        "required": ["playbook", "host"],
-                        "properties": {
-                            "playbook": { "type": "string", "description": "Name of the playbook to run." },
-                            "host":     { "type": "string", "description": "Target host profile alias." },
-                            "force":    { "type": "boolean", "description": "Set true to allow high-risk steps within the playbook." },
-                            "params":   { "type": "object", "description": "Key-value parameters to substitute into step command templates ({{param_name}} syntax)." },
-                            "reason":   { "type": "string", "description": "Optional reason/note for this operation (audit trail)." },
-                            "change_id": { "type": "string", "description": "Optional change/ticket ID for this operation (audit trail)." }
-                        }
-                    }
-                },
-                {
-                    "name": "ssh_playbook_dry_run",
-                    "description": "Preview a playbook without executing. Resolves template parameters and returns the commands that would be run.",
-                    "inputSchema": {
-                        "type": "object",
-                        "required": ["playbook"],
-                        "properties": {
-                            "playbook": { "type": "string", "description": "Name of the playbook to preview." },
-                            "params":   { "type": "object", "description": "Key-value parameters to substitute into step command templates." }
-                        }
-                    }
-                },
-                {
-                    "name": "ssh_connection_status",
-                    "description": "List all configured hosts and their current embedded SSH connection status.",
-                    "inputSchema": { "type": "object", "properties": {} }
-                },
-                {
-                    "name": "ssh_connect",
-                    "description": "Manually establish and retain an embedded SSH connection to a specific host.",
-                    "inputSchema": {
-                        "type": "object",
-                        "required": ["host"],
-                        "properties": {
-                            "host": { "type": "string", "description": "Host profile alias to connect to." }
-                        }
-                    }
-                },
-                {
-                    "name": "ssh_disconnect",
-                    "description": "Manually close a retained embedded SSH connection to a specific host.",
-                    "inputSchema": {
-                        "type": "object",
-                        "required": ["host"],
-                        "properties": {
-                            "host": { "type": "string", "description": "Host profile alias to disconnect from." }
-                        }
-                    }
-                },
-                {
-                    "name": "ssh_webhook_config",
-                    "description": "Get or set webhook notification configuration. Use action='get' to retrieve current config, or action='set' with url/events/secret to update.",
-                    "inputSchema": {
-                        "type": "object",
-                        "required": ["action"],
-                        "properties": {
-                            "action": { "type": "string", "enum": ["get", "set"], "description": "Use 'get' to read current config or 'set' to update." },
-                            "url":    { "type": "string", "description": "Webhook URL to POST events to." },
-                            "events": { "type": "array", "items": { "type": "string", "enum": ["approval_required", "exec_blocked", "exec_completed"] }, "description": "Event types to subscribe to." },
-                            "secret": { "type": "string", "description": "HMAC-SHA256 signing secret for X-Agent2SSH-Signature header." }
-                        }
-                    }
-                },
-                {
-                    "name": "ssh_config_export",
-                    "description": "Export team configuration (hosts without private key paths, risk rules, and playbooks). Returns a JSON object suitable for sharing within a team.",
-                    "inputSchema": { "type": "object", "properties": {} }
-                },
-                {
-                    "name": "ssh_config_import",
-                    "description": "Import team configuration from a JSON object. Merges hosts (skips duplicates by name), and overwrites risk rules and playbooks if provided.",
-                    "inputSchema": {
-                        "type": "object",
-                        "required": ["config"],
-                        "properties": {
-                            "config": {
-                                "type": "object",
-                                "description": "Team config export object with hosts, risk_rules, and playbooks fields.",
-                                "properties": {
-                                    "hosts":      { "type": "array", "items": { "type": "object" } },
-                                    "risk_rules":  { "type": "string", "description": "Raw TOML content of risk rules." },
-                                    "playbooks":   { "type": "string", "description": "Raw TOML content of playbooks." }
-                                }
-                            }
-                        }
-                    }
-                },
-                {
-                    "name": "ssh_config_import_preview",
-                    "description": "Preview what a team config import will change without actually importing. Shows hosts to add, skip, update, and risk rules/playbook changes.",
-                    "inputSchema": {
-                        "type": "object",
-                        "required": ["config"],
-                        "properties": {
-                            "config": {
-                                "type": "object",
-                                "description": "Team config export object with hosts, risk_rules, and playbooks fields.",
-                                "properties": {
-                                    "hosts":      { "type": "array", "items": { "type": "object" } },
-                                    "risk_rules":  { "type": "string", "description": "Raw TOML content of risk rules." },
-                                    "playbooks":   { "type": "string", "description": "Raw TOML content of playbooks." }
-                                }
-                            }
-                        }
-                    }
-                },
-                {
-                    "name": "ssh_doctor",
-                    "description": "Run diagnostic checks on the agent2ssh environment: verify embedded SSH/keygen capability, config directory, hosts.json, daemon.token permissions, daemon health, optional config files, and audit log size.",
-                    "inputSchema": { "type": "object", "properties": {} }
-                },
-                {
-                    "name": "ssh_metrics",
-                    "description": "Retrieve basic metrics from the local agent2ssh daemon (requests, execs, blocked commands, durations, approvals). Reads from GET /metrics on 127.0.0.1:7722.",
-                    "inputSchema": { "type": "object", "properties": {} }
-                },
-                {
-                    "name": "ssh_preview_exec",
-                    "description": "Preview what an execution will do before running it. Returns target hosts, commands, risk levels, warnings, and whether approval is required. Supports single-host and multi-host preview.",
-                    "inputSchema": {
-                        "type": "object",
-                        "required": ["command"],
-                        "properties": {
-                            "host":         { "type": "string", "description": "Single target host profile alias." },
-                            "hosts":        { "type": "array", "items": { "type": "string" }, "description": "Multiple target host profile aliases (for multi-host preview)." },
-                            "command":      { "type": "string", "description": "The command to preview." },
-                            "timeout_secs": { "type": "integer", "description": "Timeout that would be used for execution (default 60)." },
-                            "tags":         { "type": "array", "items": { "type": "string" }, "description": "Tags to expand into host names for multi-host preview." }
-                        }
-                    }
-                },
-                {
-                    "name": "ssh_approval_policies_list",
-                    "description": "List all configured approval policies. Each policy specifies when approval is required based on host, tags, risk level, and command pattern.",
-                    "inputSchema": { "type": "object", "properties": {} }
-                },
-                {
-                    "name": "ssh_approval_check",
-                    "description": "Check if running a command on a specific host requires approval based on configured policies. Returns the matching policy name and whether approval is needed.",
-                    "inputSchema": {
-                        "type": "object",
-                        "required": ["host", "command"],
-                        "properties": {
-                            "host":    { "type": "string", "description": "Host profile alias." },
-                            "command": { "type": "string", "description": "The command to check." }
-                        }
-                    }
-                },
-                {
-                    "name": "ssh_health_snapshot",
-                    "description": "Collect health snapshot (uptime, disk, memory, load, SSH latency) for configured hosts. Returns per-host health data collected concurrently via SSH.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "hosts":        { "type": "array", "items": { "type": "string" }, "description": "Host aliases to collect health from (default: all configured hosts)." },
-                            "timeout_secs": { "type": "integer", "description": "SSH connection timeout in seconds (default 10)." }
-                        }
-                    }
-                },
-                {
-                    "name": "ssh_daemon_diagnose",
-                    "description": "Run connection diagnostics on a remote daemon: checks TCP connectivity, TLS handshake, token configuration, authentication, version compatibility, and latency. Returns a detailed diagnostic report.",
-                    "inputSchema": {
-                        "type": "object",
-                        "required": ["alias"],
-                        "properties": {
-                            "alias": { "type": "string", "description": "The remote daemon alias from ~/.agent2ssh/remotes.toml (e.g. 'prod')." }
-                        }
-                    }
-                },
-                {
-                    "name": "ssh_daemon_version_check",
-                    "description": "Check version compatibility between this build and a remote daemon. Returns local version, remote version, compatibility status, and a human-readable message.",
-                    "inputSchema": {
-                        "type": "object",
-                        "required": ["alias"],
-                        "properties": {
-                            "alias": { "type": "string", "description": "The remote daemon alias from ~/.agent2ssh/remotes.toml (e.g. 'prod')." }
-                        }
-                    }
-                },
-                {
-                    "name": "ssh_daemons_view",
-                    "description": "Get a unified view of all daemons (localhost + remotes) with their health, metrics, and host counts.",
-                    "inputSchema": { "type": "object", "properties": {} }
-                },
-                {
-                    "name": "ssh_metrics_trend",
-                    "description": "Show execution metrics trends: volume, failure rate, risk distribution, top hosts, and hourly breakdown. Supports period selection.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "period": { "type": "string", "enum": ["24h", "7d", "30d", "all"], "default": "24h", "description": "Time period for the trend report." }
-                        }
-                    }
-                },
-                {
-                    "name": "ssh_events_subscribe",
-                    "description": "Subscribe to the real-time event stream. Returns the latest events from the event bus. Note: for continuous streaming, use the daemon's SSE endpoint GET /events/stream.",
-                    "inputSchema": { "type": "object", "properties": {} }
-                },
-                {
-                    "name": "ssh_sync_diff",
-                    "description": "Compare Agent2SSH hosts with ~/.ssh/config. Shows hosts only in one side and conflicts.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "path": { "type": "string", "description": "Path to SSH config file (default: ~/.ssh/config)" }
-                        }
-                    }
-                },
-                {
-                    "name": "ssh_sync_export",
-                    "description": "Export Agent2SSH hosts to SSH config format file.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "path": { "type": "string", "description": "Path to write SSH config (default: ~/.ssh/config.d/agent2ssh.conf)" }
-                        }
-                    }
-                }
-            ]
-        })),
+        "tools/list" => Ok(json!({ "tools": agent2ssh_mcp_tools::tools_list() })),
         "tools/call" => {
             let params = request
                 .get("params")
@@ -1178,32 +525,36 @@ async fn handle_request(request: &Value) -> std::result::Result<Value, McpError>
                 .get("arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            call_tool(name, args).await
+            let call = agent2ssh_mcp_tools::resolve_tool_call(name, args)?;
+            call_tool(call).await
         }
         other => Err(McpError::method_not_found(other)),
     }
 }
 
-async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpError> {
-    let payload = match name {
-        "ssh_import_config" => {
+async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
+    let args = call.args;
+    let payload = match call.tool {
+        McpTool::SshImportConfig => {
             let path = args["path"].as_str();
             serde_json::to_value(import_ssh_config_core(path).map_err(McpError::from)?)?
         }
-        "ssh_list_hosts" => serde_json::to_value(list_hosts_core().map_err(McpError::from)?)?,
-        "ssh_list_daemons" => serde_json::to_value(list_daemons_core().map_err(McpError::from)?)?,
-        "ssh_add_host" => {
+        McpTool::SshListHosts => serde_json::to_value(list_hosts_core().map_err(McpError::from)?)?,
+        McpTool::SshListDaemons => {
+            serde_json::to_value(list_daemons_core().map_err(McpError::from)?)?
+        }
+        McpTool::SshAddHost => {
             let host: HostProfile = serde_json::from_value(args).map_err(McpError::internal)?;
             serde_json::to_value(add_host_core(host).map_err(McpError::from)?)?
         }
-        "ssh_remove_host" => {
+        McpTool::SshRemoveHost => {
             let host_name = args["name"]
                 .as_str()
                 .ok_or_else(|| McpError::internal("name required"))?;
             remove_host_core(host_name).map_err(McpError::from)?;
             json!({ "removed": host_name })
         }
-        "ssh_ping" => {
+        McpTool::SshPing => {
             let hosts: Vec<String> = args["hosts"]
                 .as_array()
                 .ok_or_else(|| McpError::internal("hosts array required"))?
@@ -1213,7 +564,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
             let timeout_secs = args["timeout_secs"].as_u64();
             serde_json::to_value(ping_hosts_core(hosts, timeout_secs).await)?
         }
-        "ssh_exec" => {
+        McpTool::SshExec => {
             let host = args["host"]
                 .as_str()
                 .ok_or_else(|| McpError::internal("host required"))?
@@ -1302,7 +653,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 serde_json::to_value(result)?
             }
         }
-        "ssh_exec_multi" => {
+        McpTool::SshExecMulti => {
             let hosts: Vec<String> = args["hosts"]
                 .as_array()
                 .ok_or_else(|| McpError::internal("hosts array required"))?
@@ -1373,7 +724,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
             .await;
             serde_json::to_value(batch_result)?
         }
-        "ssh_exec_compare" => {
+        McpTool::SshExecCompare => {
             let hosts: Vec<String> = args["hosts"]
                 .as_array()
                 .ok_or_else(|| McpError::internal("hosts array required"))?
@@ -1413,7 +764,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
             let comparison = compare_exec_results(&results);
             serde_json::to_value(comparison)?
         }
-        "ssh_sftp_ls" => {
+        McpTool::SshSftpLs => {
             let host = args["host"]
                 .as_str()
                 .ok_or_else(|| McpError::internal("host required"))?;
@@ -1430,7 +781,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                     .map_err(McpError::from)?,
             )?
         }
-        "ssh_sftp_stat" => {
+        McpTool::SshSftpStat => {
             let host = args["host"]
                 .as_str()
                 .ok_or_else(|| McpError::internal("host required"))?;
@@ -1447,7 +798,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                     .map_err(McpError::from)?,
             )?
         }
-        "ssh_sftp_mkdir" => {
+        McpTool::SshSftpMkdir => {
             let host = args["host"]
                 .as_str()
                 .ok_or_else(|| McpError::internal("host required"))?;
@@ -1464,7 +815,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                     .map_err(McpError::from)?,
             )?
         }
-        "ssh_audit" => {
+        McpTool::SshAudit => {
             let risk_level = args["risk_level"].as_str().and_then(|s| {
                 serde_json::from_value::<RiskLevel>(serde_json::Value::String(s.to_string())).ok()
             });
@@ -1483,7 +834,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
             };
             serde_json::to_value(list_audit_core(filter).map_err(McpError::from)?)?
         }
-        "ssh_audit_export" => {
+        McpTool::SshAuditExport => {
             let format = args["format"]
                 .as_str()
                 .ok_or_else(|| McpError::internal("format required: 'jsonl' or 'csv'"))?;
@@ -1515,7 +866,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
             };
             json!({ "format": format, "data": exported })
         }
-        "ssh_sftp_upload" => {
+        McpTool::SshSftpUpload => {
             let request: SftpUploadRequest =
                 serde_json::from_value(args).map_err(McpError::internal)?;
             let source = mcp_source();
@@ -1530,7 +881,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                     .map_err(McpError::from)?,
             )?
         }
-        "ssh_sftp_download" => {
+        McpTool::SshSftpDownload => {
             let request: SftpDownloadRequest =
                 serde_json::from_value(args).map_err(McpError::internal)?;
             let source = mcp_source();
@@ -1545,7 +896,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                     .map_err(McpError::from)?,
             )?
         }
-        "ssh_session_open" => {
+        McpTool::SshSessionOpen => {
             let host = args["host"]
                 .as_str()
                 .ok_or_else(|| McpError::internal("host required"))?;
@@ -1559,7 +910,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 }
             }
         }
-        "ssh_session_write" => {
+        McpTool::SshSessionWrite => {
             let session_id = args["session_id"]
                 .as_str()
                 .ok_or_else(|| McpError::internal("session_id required"))?;
@@ -1587,7 +938,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 }
             }
         }
-        "ssh_session_read" => {
+        McpTool::SshSessionRead => {
             let session_id = args["session_id"]
                 .as_str()
                 .ok_or_else(|| McpError::internal("session_id required"))?;
@@ -1605,7 +956,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 }
             }
         }
-        "ssh_session_close" => {
+        McpTool::SshSessionClose => {
             let session_id = args["session_id"]
                 .as_str()
                 .ok_or_else(|| McpError::internal("session_id required"))?;
@@ -1620,7 +971,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 }
             }
         }
-        "ssh_session_list" => {
+        McpTool::SshSessionList => {
             let mut items = match try_daemon_session_list().await? {
                 DaemonAttempt::Handled(items) => items,
                 DaemonAttempt::Fallback => Vec::new(),
@@ -1633,7 +984,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
             );
             json!(items)
         }
-        "ssh_forward_add" => {
+        McpTool::SshForwardAdd => {
             let host = args["host"]
                 .as_str()
                 .ok_or_else(|| McpError::internal("host required"))?;
@@ -1658,22 +1009,56 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 direction, bind_port, target_host, host, target_port
             );
             authorize_local_mcp_operation(host, &command, false, &source).await?;
-            let rule = forward_add_core(host, direction, bind_port, target_host, target_port)
-                .await
-                .map_err(McpError::from)?;
-            serde_json::to_value(rule)?
+            match try_daemon_forward_add(host, direction, bind_port, target_host, target_port)
+                .await?
+            {
+                DaemonAttempt::Handled(value) => value,
+                DaemonAttempt::Fallback => {
+                    let mut value = serde_json::to_value(
+                        forward_add_core(host, direction, bind_port, target_host, target_port)
+                            .await
+                            .map_err(McpError::from)?,
+                    )?;
+                    if let Some(obj) = value.as_object_mut() {
+                        obj.insert("backend".into(), Value::String("process".into()));
+                    }
+                    value
+                }
+            }
         }
-        "ssh_forward_list" => serde_json::to_value(forward_list_core().await)?,
-        "ssh_forward_remove" => {
+        McpTool::SshForwardList => {
+            let mut items = match try_daemon_forward_list().await? {
+                DaemonAttempt::Handled(items) => items,
+                DaemonAttempt::Fallback => Vec::new(),
+            };
+            items.extend(forward_list_core().await.into_iter().map(|rule| {
+                json!({
+                    "id": rule.id,
+                    "host": rule.host,
+                    "direction": rule.direction,
+                    "bind_port": rule.bind_port,
+                    "target_host": rule.target_host,
+                    "target_port": rule.target_port,
+                    "backend": "process",
+                })
+            }));
+            json!(items)
+        }
+        McpTool::SshForwardRemove => {
             let id: uuid::Uuid = args["forward_id"]
                 .as_str()
                 .ok_or_else(|| McpError::internal("forward_id required"))?
                 .parse()
                 .map_err(|e| McpError::internal(format!("invalid forward_id: {e}")))?;
-            forward_remove_core(id).await.map_err(McpError::from)?;
-            json!({ "removed": id.to_string() })
+            match try_daemon_forward_remove(id).await? {
+                DaemonAttempt::Handled(value) => value,
+                DaemonAttempt::Fallback => {
+                    forward_remove_core(id).await.map_err(McpError::from)?;
+                    json!({ "removed": id.to_string(), "backend": "process" })
+                }
+            }
         }
-        "ssh_risk_check" => {
+        McpTool::SshRiskCheck => {
             let command = args["command"]
                 .as_str()
                 .ok_or_else(|| McpError::internal("command required"))?;
@@ -1693,12 +1078,12 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 "matched_user_rule": user_risk.is_some(),
             })
         }
-        "ssh_gate_status" => try_daemon_gate_status().await?,
-        "ssh_approval_list" => {
+        McpTool::SshGateStatus => try_daemon_gate_status().await?,
+        McpTool::SshApprovalList => {
             let approvals = approval_list().await;
             serde_json::to_value(approvals)?
         }
-        "ssh_approval_respond" => {
+        McpTool::SshApprovalRespond => {
             let id = args["id"]
                 .as_str()
                 .ok_or_else(|| McpError::internal("id required"))?;
@@ -1713,7 +1098,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 .map_err(McpError::from)?;
             json!({ "ok": true, "id": id, "approved": approved })
         }
-        "ssh_playbook_list" => {
+        McpTool::SshPlaybookList => {
             let playbooks = list_playbooks_core().map_err(McpError::from)?;
             let summaries: Vec<Value> = playbooks
                 .iter()
@@ -1728,7 +1113,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 .collect();
             serde_json::to_value(summaries)?
         }
-        "ssh_playbook_run" => {
+        McpTool::SshPlaybookRun => {
             let playbook = args["playbook"]
                 .as_str()
                 .ok_or_else(|| McpError::internal("playbook required"))?;
@@ -1771,7 +1156,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
             .map_err(McpError::from)?;
             serde_json::to_value(result)?
         }
-        "ssh_playbook_dry_run" => {
+        McpTool::SshPlaybookDryRun => {
             let playbook = args["playbook"]
                 .as_str()
                 .ok_or_else(|| McpError::internal("playbook required"))?;
@@ -1786,11 +1171,11 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
             let result = dry_run_playbook(playbook, &params_map).map_err(McpError::from)?;
             serde_json::to_value(result)?
         }
-        "ssh_connection_status" => {
+        McpTool::SshConnectionStatus => {
             let statuses = list_active_connections().await;
             serde_json::to_value(statuses)?
         }
-        "ssh_connect" => {
+        McpTool::SshConnect => {
             let host = args["host"]
                 .as_str()
                 .ok_or_else(|| McpError::internal("host required"))?;
@@ -1799,7 +1184,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
             connect_host(host).await.map_err(McpError::from)?;
             json!({ "ok": true, "host": host })
         }
-        "ssh_disconnect" => {
+        McpTool::SshDisconnect => {
             let host = args["host"]
                 .as_str()
                 .ok_or_else(|| McpError::internal("host required"))?;
@@ -1808,7 +1193,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
             disconnect_host(host).await.map_err(McpError::from)?;
             json!({ "ok": true, "host": host })
         }
-        "ssh_webhook_config" => {
+        McpTool::SshWebhookConfig => {
             let action = args["action"]
                 .as_str()
                 .ok_or_else(|| McpError::internal("action required: 'get' or 'set'"))?;
@@ -1844,11 +1229,11 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 }
             }
         }
-        "ssh_config_export" => {
+        McpTool::SshConfigExport => {
             let export = export_team_config().map_err(McpError::from)?;
             serde_json::to_value(export)?
         }
-        "ssh_config_import" => {
+        McpTool::SshConfigImport => {
             let config_value = args
                 .get("config")
                 .ok_or_else(|| McpError::internal("config object required"))?;
@@ -1857,7 +1242,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
             let result = import_team_config(&export).map_err(McpError::from)?;
             serde_json::to_value(result)?
         }
-        "ssh_config_import_preview" => {
+        McpTool::SshConfigImportPreview => {
             let config_value = args
                 .get("config")
                 .ok_or_else(|| McpError::internal("config object required"))?;
@@ -1866,7 +1251,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
             let preview = preview_team_config_import(&export).map_err(McpError::from)?;
             serde_json::to_value(preview)?
         }
-        "ssh_doctor" => {
+        McpTool::SshDoctor => {
             let mut checks: Vec<Value> = Vec::new();
 
             checks.push(json!({"name": "embedded SSH transport", "status": "pass", "detail": "exec, SFTP, terminal, sessions, jump hosts, connections, and forwards use the Rust backend"}));
@@ -1945,7 +1330,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
 
             json!(checks)
         }
-        "ssh_metrics" => {
+        McpTool::SshMetrics => {
             let client = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(3))
                 .build()
@@ -1967,7 +1352,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 .map_err(|e| McpError::internal(format!("invalid JSON from /metrics: {e}")))?;
             metrics
         }
-        "ssh_preview_exec" => {
+        McpTool::SshPreviewExec => {
             let command = args["command"]
                 .as_str()
                 .ok_or_else(|| McpError::internal("command required"))?;
@@ -2001,11 +1386,11 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 serde_json::to_value(plan)?
             }
         }
-        "ssh_approval_policies_list" => {
+        McpTool::SshApprovalPoliciesList => {
             let policies = list_approval_policies().map_err(McpError::from)?;
             serde_json::to_value(policies)?
         }
-        "ssh_approval_check" => {
+        McpTool::SshApprovalCheck => {
             let host = args["host"]
                 .as_str()
                 .ok_or_else(|| McpError::internal("host required"))?;
@@ -2045,7 +1430,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 }),
             }
         }
-        "ssh_health_snapshot" => {
+        McpTool::SshHealthSnapshot => {
             let hosts: Option<Vec<String>> = args["hosts"].as_array().map(|arr| {
                 arr.iter()
                     .filter_map(|v| v.as_str().map(str::to_string))
@@ -2068,7 +1453,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
             let snapshot = collect_health_snapshot(target_hosts, timeout_secs).await;
             serde_json::to_value(snapshot)?
         }
-        "ssh_daemon_diagnose" => {
+        McpTool::SshDaemonDiagnose => {
             let alias = args["alias"]
                 .as_str()
                 .ok_or_else(|| McpError::internal("alias required"))?;
@@ -2077,7 +1462,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 .map_err(|e| McpError::internal(format!("diagnose_daemon failed: {e}")))?;
             serde_json::to_value(diagnostic)?
         }
-        "ssh_daemon_version_check" => {
+        McpTool::SshDaemonVersionCheck => {
             let alias = args["alias"]
                 .as_str()
                 .ok_or_else(|| McpError::internal("alias required"))?;
@@ -2086,13 +1471,13 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 .map_err(|e| McpError::internal(format!("version check failed: {e}")))?;
             serde_json::to_value(compat)?
         }
-        "ssh_daemons_view" => {
+        McpTool::SshDaemonsView => {
             let view = get_daemons_unified_view()
                 .await
                 .map_err(|e| McpError::internal(format!("unified view failed: {e}")))?;
             serde_json::to_value(view)?
         }
-        "ssh_metrics_trend" => {
+        McpTool::SshMetricsTrend => {
             let period_str = args["period"].as_str().unwrap_or("24h");
             let period = match period_str {
                 "24h" | "last24h" => TrendPeriod::Last24h,
@@ -2110,7 +1495,7 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 .map_err(|e| McpError::internal(format!("metrics trend failed: {e}")))?;
             serde_json::to_value(trend)?
         }
-        "ssh_events_subscribe" => {
+        McpTool::SshEventsSubscribe => {
             // Return a snapshot of recent events from the bus.
             // For continuous streaming, use the daemon SSE endpoint.
             let mut rx = subscribe_events();
@@ -2124,19 +1509,18 @@ async fn call_tool(name: &str, args: Value) -> std::result::Result<Value, McpErr
                 "hint": "For real-time streaming, use the daemon SSE endpoint: GET /events/stream"
             })
         }
-        "ssh_sync_diff" => {
+        McpTool::SshSyncDiff => {
             let path = args["path"].as_str();
             let diff = compare_ssh_configs(path)
                 .map_err(|e| McpError::internal(format!("ssh sync diff failed: {e}")))?;
             serde_json::to_value(diff)?
         }
-        "ssh_sync_export" => {
+        McpTool::SshSyncExport => {
             let path = args["path"].as_str();
             let (out_path, count) = export_to_ssh_config(path, None)
                 .map_err(|e| McpError::internal(format!("ssh sync export failed: {e}")))?;
             json!({ "path": out_path, "hosts_exported": count })
         }
-        unknown => return Err(McpError::internal(anyhow!("unknown tool: {unknown}"))),
     };
 
     Ok(json!({

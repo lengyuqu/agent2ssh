@@ -6,7 +6,7 @@ use std::{
     fs::OpenOptions,
     io::Write,
     path::PathBuf,
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock, RwLock},
 };
 use uuid::Uuid;
 
@@ -18,8 +18,13 @@ fn diagnostic_lock() -> &'static Mutex<()> {
     DIAGNOSTIC_LOCK.get_or_init(|| Mutex::new(()))
 }
 
-type DiagnosticErrorSink = Box<dyn Fn(&DiagnosticLogEntry) + Send + Sync>;
-static ERROR_SINK: OnceLock<DiagnosticErrorSink> = OnceLock::new();
+type DiagnosticErrorSink = Arc<dyn Fn(&DiagnosticLogEntry) + Send + Sync>;
+// `RwLock<Option<…>>` (not `OnceLock`) so re-registration has explicit
+// override semantics instead of a silently-ignored second `.set()`. The sink is
+// stored behind an `Arc` so the write path can clone it out under a short read
+// lock and invoke it without holding the lock — keeping the call site free of
+// re-entrancy hazards if the sink itself logs. (H9)
+static ERROR_SINK: RwLock<Option<DiagnosticErrorSink>> = RwLock::new(None);
 
 thread_local! {
     static CURRENT_TRACE_ID: std::cell::RefCell<Option<String>> =
@@ -58,12 +63,34 @@ pub fn seed_trace_id_from_env() -> Option<String> {
 /// after it has been written to `app.log` (and after the write lock is
 /// released). Used by the daemon to forward error diagnostics to the notify
 /// webhook for proactive alerting. The sink must not itself log at `error` level
-/// or it risks feeding back into this path. First registration wins.
+/// or it risks feeding back into this path.
+///
+/// Re-registration has explicit override semantics: the latest sink wins and a
+/// `warn` diagnostic is recorded so a second initialization can never fail
+/// silently. (H9)
 pub fn set_error_sink<F>(sink: F)
 where
     F: Fn(&DiagnosticLogEntry) + Send + Sync + 'static,
 {
-    let _ = ERROR_SINK.set(Box::new(sink));
+    let replaced = {
+        let mut guard = ERROR_SINK
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let replaced = guard.is_some();
+        *guard = Some(Arc::new(sink));
+        replaced
+    };
+    if replaced {
+        // `warn` never re-enters the sink path (that only fires at `error`), so
+        // surfacing the override here cannot loop. Recorded after the lock is
+        // dropped above.
+        let _ = append_diagnostic_log(
+            "warn",
+            "diagnostics",
+            "error sink re-registered; replacing the previously installed sink",
+            None,
+        );
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,6 +111,10 @@ pub fn app_log_path() -> Result<PathBuf> {
 pub fn diagnostic_bundle_path() -> Result<PathBuf> {
     let stamp = Utc::now().format("%Y%m%d-%H%M%S");
     Ok(config_dir()?.join(format!("diagnostics-{stamp}.txt")))
+}
+
+fn diagnostic_error_alert_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join(".diagnostic_error_alert"))
 }
 
 fn normalize_level(level: &str) -> String {
@@ -161,6 +192,15 @@ fn rotate_app_log_if_needed_unlocked(max_size_bytes: u64) -> Result<()> {
 pub fn install_panic_hook(component: &'static str) {
     static INSTALLED: OnceLock<()> = OnceLock::new();
     if INSTALLED.set(()).is_err() {
+        // A hook is already installed; chaining another would double-record every
+        // panic. Make the duplicate call explicit instead of silently ignoring it
+        // so a stray second init is observable. (H9)
+        let _ = append_diagnostic_log(
+            "warn",
+            component,
+            "panic hook already installed; ignoring duplicate install",
+            None,
+        );
         return;
     }
 
@@ -191,6 +231,31 @@ pub fn append_diagnostic_log(
     component: &str,
     message: &str,
     fields: Option<Value>,
+) -> Result<DiagnosticLogEntry> {
+    append_diagnostic_log_inner(level, component, message, fields, true)
+}
+
+/// Like [`append_diagnostic_log`] but never fans the entry out to the error
+/// sink, even at `error` level. Used by the daemon's dependency-layer log bridge
+/// so third-party `hyper`/`reqwest`/`ssh2` warnings/errors stay observable in
+/// `app.log` without re-triggering the error-alert webhook — which itself talks
+/// over `reqwest` and could otherwise loop a transport error back into more
+/// transport errors. (H7 anti-loop)
+pub fn append_diagnostic_log_no_sink(
+    level: &str,
+    component: &str,
+    message: &str,
+    fields: Option<Value>,
+) -> Result<DiagnosticLogEntry> {
+    append_diagnostic_log_inner(level, component, message, fields, false)
+}
+
+fn append_diagnostic_log_inner(
+    level: &str,
+    component: &str,
+    message: &str,
+    fields: Option<Value>,
+    notify_sink: bool,
 ) -> Result<DiagnosticLogEntry> {
     ensure_config_dir()?;
     // Two-tier lock matching store/audit: a process-local mutex serializes our
@@ -227,18 +292,99 @@ pub fn append_diagnostic_log(
         .open(&path)
         .with_context(|| format!("failed to open diagnostic log {}", path.display()))?;
     writeln!(file, "{}", serde_json::to_string(&entry)?)?;
+    let diagnostic_findings = if entry.level == "error" {
+        diagnostic_error_findings_from_app_log(&entry)
+    } else {
+        Vec::new()
+    };
 
     // Release both locks before notifying the sink so the callback (which may log
     // diagnostics of its own) cannot deadlock on the non-reentrant mutex or the
     // exclusive file lock.
     drop(_file_lock);
     drop(_guard);
-    if entry.level == "error" {
-        if let Some(sink) = ERROR_SINK.get() {
+    crate::anomaly::publish_anomalies(&diagnostic_findings);
+    if notify_sink && entry.level == "error" {
+        // Clone the sink out under a short read lock and release it before
+        // invoking, so a sink that logs cannot deadlock against a concurrent
+        // re-registration or recursively read-lock on this thread.
+        let sink = ERROR_SINK.read().ok().and_then(|guard| guard.clone());
+        if let Some(sink) = sink {
             sink(&entry);
         }
     }
     Ok(entry)
+}
+
+fn diagnostic_error_findings_from_app_log(
+    current: &DiagnosticLogEntry,
+) -> Vec<crate::anomaly::AnomalyFinding> {
+    let config = crate::anomaly::load_anomaly_config().unwrap_or_default();
+    if !config.enabled || config.diagnostic_error_threshold == 0 {
+        return Vec::new();
+    }
+    if current.message.to_lowercase().contains("webhook") {
+        return Vec::new();
+    }
+
+    let Ok(current_ts) =
+        chrono::DateTime::parse_from_rfc3339(&current.ts).map(|ts| ts.with_timezone(&chrono::Utc))
+    else {
+        return Vec::new();
+    };
+    let window = chrono::Duration::seconds(config.window_secs.max(1));
+    let since = current_ts - window;
+    let Ok(path) = app_log_path() else {
+        return Vec::new();
+    };
+    let raw = std::fs::read_to_string(&path).unwrap_or_default();
+    let count = raw
+        .lines()
+        .filter_map(|line| serde_json::from_str::<DiagnosticLogEntry>(line).ok())
+        .filter(|entry| entry.level == "error")
+        .filter(|entry| !entry.message.to_lowercase().contains("webhook"))
+        .filter_map(|entry| {
+            chrono::DateTime::parse_from_rfc3339(&entry.ts)
+                .ok()
+                .map(|ts| ts.with_timezone(&chrono::Utc))
+        })
+        .filter(|ts| *ts >= since && *ts <= current_ts)
+        .count();
+    if count < config.diagnostic_error_threshold {
+        return Vec::new();
+    }
+
+    let cooldown = chrono::Duration::seconds(config.diagnostic_cooldown_secs.max(1));
+    let Ok(alert_path) = diagnostic_error_alert_path() else {
+        return Vec::new();
+    };
+    if let Ok(raw) = std::fs::read_to_string(&alert_path) {
+        if let Ok(last) = chrono::DateTime::parse_from_rfc3339(raw.trim())
+            .map(|ts| ts.with_timezone(&chrono::Utc))
+        {
+            if current_ts - last < cooldown {
+                return Vec::new();
+            }
+        }
+    }
+    if std::fs::write(&alert_path, current_ts.to_rfc3339()).is_ok() {
+        let _ = crate::store::restrict_file_to_owner(&alert_path);
+    }
+
+    vec![crate::anomaly::AnomalyFinding {
+        kind: crate::anomaly::AnomalyKind::DiagnosticErrorBurst,
+        severity: crate::anomaly::AnomalySeverity::High,
+        reason: format!(
+            "{count} error-level diagnostics in {}s (latest component: {})",
+            config.window_secs, current.component
+        ),
+        source: current.component.clone(),
+        host: "local".to_string(),
+        command: current.message.chars().take(200).collect(),
+        count,
+        threshold: config.diagnostic_error_threshold,
+        window_secs: config.window_secs,
+    }]
 }
 
 pub fn list_diagnostic_logs(limit: usize) -> Result<Vec<DiagnosticLogEntry>> {
@@ -355,12 +501,15 @@ mod tests {
         std::fs::create_dir_all(&config_dir).unwrap();
         std::env::set_var("AGENT2SSH_CONFIG_DIR", &config_dir);
 
-        // OnceLock: first registration wins, so guard against other tests in the
-        // same process already having set a sink.
+        // Re-registration overrides (H9): this test's sink replaces whatever an
+        // earlier test installed, so the hit counter below reflects only us.
         set_error_sink(|_entry| {
             SINK_HITS.fetch_add(1, Ordering::SeqCst);
         });
-        assert!(ERROR_SINK.get().is_some(), "a sink must be registered");
+        assert!(
+            ERROR_SINK.read().unwrap().is_some(),
+            "a sink must be registered"
+        );
 
         let before = SINK_HITS.load(Ordering::SeqCst);
         append_diagnostic_log("info", "test", "an info message", None).unwrap();
@@ -388,6 +537,79 @@ mod tests {
         assert_ne!(
             entry.fields["password"], "hunter2",
             "password field must be redacted"
+        );
+
+        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&config_dir);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn no_sink_variant_writes_but_never_fans_out() {
+        let config_dir = std::env::temp_dir().join(format!("agent2ssh-diag-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::env::set_var("AGENT2SSH_CONFIG_DIR", &config_dir);
+
+        set_error_sink(|_entry| {
+            SINK_HITS.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let before = SINK_HITS.load(Ordering::SeqCst);
+        // An error written via the no-sink variant must still land in app.log...
+        append_diagnostic_log_no_sink("error", "deps", "transport boom", None).unwrap();
+        let after = SINK_HITS.load(Ordering::SeqCst);
+
+        // ...but must not reach the error sink (H7 anti-loop).
+        assert_eq!(
+            after, before,
+            "no-sink variant must not trigger the error sink"
+        );
+        let logs = list_diagnostic_logs(10).unwrap();
+        assert!(
+            logs.iter()
+                .any(|e| e.component == "deps" && e.level == "error"),
+            "no-sink error entry should still be persisted"
+        );
+
+        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&config_dir);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn diagnostic_error_burst_uses_shared_app_log_window() {
+        let config_dir =
+            std::env::temp_dir().join(format!("agent2ssh-diag-burst-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::env::set_var("AGENT2SSH_CONFIG_DIR", &config_dir);
+        std::fs::write(
+            config_dir.join("anomaly.toml"),
+            r#"
+enabled = true
+window_secs = 60
+diagnostic_error_threshold = 3
+diagnostic_cooldown_secs = 60
+"#,
+        )
+        .unwrap();
+
+        append_diagnostic_log("error", "cli", "cli failed", None).unwrap();
+        append_diagnostic_log("error", "mcp", "mcp failed", None).unwrap();
+        append_diagnostic_log("error", "tauri", "tauri failed", None).unwrap();
+
+        let alert_path = diagnostic_error_alert_path().unwrap();
+        let first_alert = std::fs::read_to_string(&alert_path)
+            .expect("error burst should update shared cooldown marker");
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(first_alert.trim()).is_ok(),
+            "cooldown marker should contain an RFC3339 timestamp"
+        );
+
+        append_diagnostic_log("error", "daemon", "webhook delivery failed", None).unwrap();
+        let after_webhook = std::fs::read_to_string(&alert_path).unwrap();
+        assert_eq!(
+            first_alert, after_webhook,
+            "webhook errors must not refresh diagnostic burst cooldown"
         );
 
         std::env::remove_var("AGENT2SSH_CONFIG_DIR");

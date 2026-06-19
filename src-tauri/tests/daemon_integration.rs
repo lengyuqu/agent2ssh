@@ -959,53 +959,15 @@ async fn http_hosts_list_returns_valid_json_array() {
 // ============================================================================
 
 /// Meta-test: verify the MCP binary declares exactly 51 tools by parsing
-/// the source file and counting `"name":` entries in the tools/list handler.
+/// the schema-driven tool registry and counting `"name":` entries.
 ///
 /// This avoids the need to run the MCP server over stdio JSON-RPC, which
 /// requires a full process lifecycle. Instead we treat the source as the
 /// canonical tool registry and assert on its structure.
 #[test]
 fn mcp_tool_list_contains_exactly_51_tools() {
-    let source = include_str!("../src/bin/agent2ssh-mcp.rs");
-
-    // Extract the tools/list handler block: everything between
-    // `"tools/list" => Ok(json!({` and the closing `})),`
-    let tools_section = source
-        .find("\"tools/list\"")
-        .expect("tools/list handler not found in MCP source");
-
-    // Find the tools array start
-    let array_start = source[tools_section..]
-        .find("\"tools\": [")
-        .expect("tools array not found")
-        + tools_section;
-
-    // Count tool definitions by counting `"name":` occurrences within
-    // the tools array. Each tool object has exactly one "name" field at the
-    // top level, but some input schemas also use "name" as a property key
-    // (e.g. ssh_add_host and ssh_remove_host), so the raw count is
-    // Count only top-level tool names so schema-property names do not matter.
-    let after_array_start = array_start + "\"tools\": [".len();
-    let mut depth = 1;
-    let mut end = after_array_start;
-    for (i, ch) in source[after_array_start..].char_indices() {
-        match ch {
-            '[' => depth += 1,
-            ']' => {
-                depth -= 1;
-                if depth == 0 {
-                    end = after_array_start + i;
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let tools_block = &source[after_array_start..end];
-
-    // Count only top-level tool names (those whose value starts with "ssh_").
-    let tool_count = tools_block.matches("\"name\": \"ssh_").count();
+    let registry = include_str!("../src/bin/agent2ssh_mcp/tools.rs");
+    let tool_count = registry.matches("\"name\": \"ssh_").count();
 
     assert_eq!(
         tool_count, 51,
@@ -1017,7 +979,7 @@ fn mcp_tool_list_contains_exactly_51_tools() {
 /// Verify every expected tool name is present in the MCP tools/list output.
 #[test]
 fn mcp_tool_list_contains_all_expected_names() {
-    let source = include_str!("../src/bin/agent2ssh-mcp.rs");
+    let registry = include_str!("../src/bin/agent2ssh_mcp/tools.rs");
 
     let expected_tools = [
         "ssh_list_hosts",
@@ -1073,20 +1035,10 @@ fn mcp_tool_list_contains_all_expected_names() {
         "ssh_sync_export",
     ];
 
-    // All tool names should appear in the tools/list section of the source
-    let tools_list_start = source
-        .find("\"tools/list\"")
-        .expect("tools/list handler not found");
-    // Find the end of the tools/list json! block by scanning for "tools/call"
-    let tools_call = source
-        .find("\"tools/call\"")
-        .expect("tools/call handler not found");
-    let tools_section = &source[tools_list_start..tools_call];
-
     for tool_name in &expected_tools {
         assert!(
-            tools_section.contains(&format!("\"name\": \"{}\"", tool_name)),
-            "MCP tool '{}' not found in tools/list handler",
+            registry.contains(&format!("\"name\": \"{}\"", tool_name)),
+            "MCP tool '{}' not found in schema registry",
             tool_name
         );
     }
@@ -1158,12 +1110,26 @@ fn mcp_call_tool_handler_covers_all_tools() {
     let call_tool_section = &source[call_tool_start..];
 
     for tool_name in &expected_tools {
+        let variant = mcp_tool_variant_name(tool_name);
         assert!(
-            call_tool_section.contains(&format!("\"{}\"", tool_name)),
-            "Tool '{}' not handled in call_tool match arm",
+            call_tool_section.contains(&format!("McpTool::{variant}")),
+            "Tool '{}' not handled in call_tool enum match arm",
             tool_name
         );
     }
+}
+
+fn mcp_tool_variant_name(tool_name: &str) -> String {
+    tool_name
+        .split('_')
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().chain(chars).collect::<String>(),
+                None => String::new(),
+            }
+        })
+        .collect()
 }
 
 // ============================================================================

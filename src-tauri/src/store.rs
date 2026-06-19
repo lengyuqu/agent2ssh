@@ -541,9 +541,75 @@ pub fn redact_sensitive_text(input: &str) -> String {
             redact_next = true;
             continue;
         }
-        out.push(token.to_string());
+        out.push(redact_token_fallback(token));
     }
     out.join(" ")
+}
+
+fn redact_token_fallback(token: &str) -> String {
+    let url_redacted = redact_url_userinfo(token);
+    if looks_like_high_entropy_secret(&url_redacted) {
+        "[REDACTED]".to_string()
+    } else {
+        url_redacted
+    }
+}
+
+fn redact_url_userinfo(token: &str) -> String {
+    let Some(scheme_end) = token.find("://") else {
+        return token.to_string();
+    };
+    let authority_start = scheme_end + 3;
+    let authority_end = token[authority_start..]
+        .find(['/', '?', '#'])
+        .map(|idx| authority_start + idx)
+        .unwrap_or(token.len());
+    let authority = &token[authority_start..authority_end];
+    let Some(at_idx) = authority.rfind('@') else {
+        return token.to_string();
+    };
+    let host_start = authority_start + at_idx + 1;
+    format!(
+        "{}[REDACTED]@{}",
+        &token[..authority_start],
+        &token[host_start..]
+    )
+}
+
+fn looks_like_high_entropy_secret(token: &str) -> bool {
+    let trimmed = token.trim_matches(|ch: char| {
+        matches!(
+            ch,
+            '"' | '\'' | '`' | ',' | ';' | ')' | '(' | '[' | ']' | '{' | '}' | '<' | '>'
+        )
+    });
+    let value = trimmed
+        .strip_prefix("sha256:")
+        .or_else(|| trimmed.strip_prefix("SHA256:"))
+        .unwrap_or(trimmed);
+    if value.len() >= 32 && value.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return true;
+    }
+    if value.len() < 40 {
+        return false;
+    }
+    let mut has_alpha = false;
+    let mut has_digit = false;
+    let mut has_secret_alphabet = false;
+    let mut valid = true;
+    for ch in value.chars() {
+        if ch.is_ascii_alphabetic() {
+            has_alpha = true;
+        } else if ch.is_ascii_digit() {
+            has_digit = true;
+        } else if matches!(ch, '+' | '/' | '_' | '-' | '=') {
+            has_secret_alphabet = true;
+        } else {
+            valid = false;
+            break;
+        }
+    }
+    valid && has_alpha && has_digit && has_secret_alphabet
 }
 
 fn is_sensitive_key(key: &str) -> bool {
@@ -825,6 +891,22 @@ mod tests {
             "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----",
         );
         assert_eq!(private_key, "[REDACTED PRIVATE KEY]");
+
+        let generic = redact_sensitive_text(
+            "curl https://user:pass@example.com/hook key 0123456789abcdef0123456789abcdef eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9_1234567890",
+        );
+        assert_eq!(
+            generic,
+            "curl https://[REDACTED]@example.com/hook key [REDACTED] [REDACTED]"
+        );
+
+        let safe = redact_sensitive_text(
+            "session 550e8400-e29b-41d4-a716-446655440000 /tmp/agent2ssh-run output.txt",
+        );
+        assert_eq!(
+            safe,
+            "session 550e8400-e29b-41d4-a716-446655440000 /tmp/agent2ssh-run output.txt"
+        );
     }
 
     #[test]

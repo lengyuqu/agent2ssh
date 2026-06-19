@@ -33,8 +33,7 @@ use agent2ssh::playbook::{
 };
 use agent2ssh::remote::{
     check_daemon_scope, check_daemon_version, diagnose_daemon, get_daemon_with_scope,
-    get_daemons_unified_view, list_daemons_core, load_scoped_daemon_tokens,
-    resolve_scoped_daemon_token, tags_for_remote_scope_check, DaemonScope,
+    get_daemons_unified_view, list_daemons_core, tags_for_remote_scope_check, DaemonScope,
 };
 use agent2ssh::risk_config::classify_with_user_rules;
 use agent2ssh::session::*;
@@ -42,8 +41,8 @@ use agent2ssh::store::*;
 use agent2ssh::types::*;
 
 use axum::{
-    extract::{Path, Query, State, WebSocketUpgrade},
-    http::{HeaderMap, StatusCode},
+    extract::{Extension, Path, Query, State, WebSocketUpgrade},
+    http::StatusCode,
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse,
@@ -63,6 +62,18 @@ use tokio::sync::Mutex;
 use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
 
+#[path = "agent2ssh_daemon/auth.rs"]
+mod agent2ssh_daemon_auth;
+#[path = "agent2ssh_daemon/trace.rs"]
+mod agent2ssh_daemon_trace;
+
+use agent2ssh_daemon_auth::{auth_middleware, AuthContext};
+#[cfg(test)]
+use agent2ssh_daemon_auth::{bearer_token, check_auth, is_public_path, query_token, token_matches};
+use agent2ssh_daemon_trace::{trace_id_middleware, DiagnosticBridgeLayer};
+#[cfg(test)]
+use axum::http::HeaderMap;
+
 // ── Metrics counters ─────────────────────────────────────────────────────────
 
 static REQUEST_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -79,6 +90,22 @@ fn uptime_secs() -> u64 {
     START_TIME.get_or_init(Instant::now).elapsed().as_secs()
 }
 
+/// Whether a `host:port` listen address resolves to loopback only. Used to warn
+/// when an operator binds the daemon somewhere reachable off-host. (H8)
+fn is_loopback_addr(addr: &str) -> bool {
+    let host = match addr.rsplit_once(':') {
+        Some((host, _port)) => host,
+        None => addr,
+    };
+    let host = host.trim().trim_start_matches('[').trim_end_matches(']');
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
+}
+
 // ── State ────────────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -86,81 +113,6 @@ struct AppState {
     token: String,
     limiter: Arc<Mutex<ExecutionLimiter>>,
     session_input_buffers: Arc<Mutex<HashMap<Uuid, String>>>,
-}
-
-#[derive(Clone)]
-struct AuthContext {
-    scope: Option<DaemonScope>,
-}
-
-// ── Auth ─────────────────────────────────────────────────────────────────────
-
-fn check_auth(
-    state: &AppState,
-    headers: &HeaderMap,
-) -> Result<AuthContext, (StatusCode, Json<ErrorBody>)> {
-    let token = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .unwrap_or("");
-    authenticate_token(state, token)
-}
-
-/// Authenticate a raw bearer token (admin or scoped). Used by header-based
-/// `check_auth` and by the WebSocket terminal, which passes the token as a
-/// query parameter because browsers can't set headers on WebSocket handshakes.
-fn authenticate_token(
-    state: &AppState,
-    token: &str,
-) -> Result<AuthContext, (StatusCode, Json<ErrorBody>)> {
-    if token_matches(token, &state.token) {
-        return Ok(AuthContext { scope: None });
-    }
-
-    let scoped_tokens = load_scoped_daemon_tokens().map_err(|e| {
-        err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("failed to load scoped daemon tokens: {e}"),
-        )
-    })?;
-    for scoped in scoped_tokens {
-        let Some(expected) = resolve_scoped_daemon_token(&scoped) else {
-            continue;
-        };
-        if token_matches(token, &expected) {
-            return Ok(AuthContext {
-                scope: scoped.scope.clone(),
-            });
-        }
-    }
-
-    tracing::warn!("failed authentication attempt");
-    Err((
-        StatusCode::UNAUTHORIZED,
-        Json(ErrorBody {
-            error: "unauthorized".into(),
-        }),
-    ))
-}
-
-fn token_matches(candidate: &str, expected: &str) -> bool {
-    if expected.trim().is_empty() {
-        return false;
-    }
-
-    let candidate = candidate.as_bytes();
-    let expected = expected.as_bytes();
-    let mut diff = candidate.len() ^ expected.len();
-    let max_len = candidate.len().max(expected.len());
-
-    for i in 0..max_len {
-        let candidate_byte = candidate.get(i).copied().unwrap_or(0);
-        let expected_byte = expected.get(i).copied().unwrap_or(0);
-        diff |= (candidate_byte ^ expected_byte) as usize;
-    }
-
-    diff == 0
 }
 
 fn load_or_create_daemon_token(config_dir: &std::path::Path) -> anyhow::Result<String> {
@@ -829,11 +781,10 @@ async fn metrics() -> Json<serde_json::Value> {
 }
 
 async fn gate_status(
-    State(s): State<AppState>,
-    headers: HeaderMap,
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
 ) -> Result<Json<ExecutionGateStatus>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
     load_execution_gate().map(Json).map_err(|e| {
         err(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -843,12 +794,11 @@ async fn gate_status(
 }
 
 async fn gate_pause(
-    State(s): State<AppState>,
-    headers: HeaderMap,
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
     Json(body): Json<GateUpdateBody>,
 ) -> Result<Json<ExecutionGateStatus>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
     let source = source_or_env(body.source, "daemon");
     let status = save_execution_gate(ExecutionGateMode::Paused, Some(source.clone()), body.reason)
         .map_err(|e| {
@@ -870,12 +820,11 @@ async fn gate_pause(
 }
 
 async fn gate_resume(
-    State(s): State<AppState>,
-    headers: HeaderMap,
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
     Json(body): Json<GateUpdateBody>,
 ) -> Result<Json<ExecutionGateStatus>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
     let source = source_or_env(body.source, "daemon");
     let status = save_execution_gate(ExecutionGateMode::Active, Some(source.clone()), body.reason)
         .map_err(|e| {
@@ -897,68 +846,62 @@ async fn gate_resume(
 }
 
 async fn list_hosts(
-    State(s): State<AppState>,
-    headers: HeaderMap,
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
 ) -> Result<Json<Vec<HostProfile>>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
     list_hosts_core()
         .map(Json)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))
 }
 
 async fn add_host(
-    State(s): State<AppState>,
-    headers: HeaderMap,
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
     Json(host): Json<HostProfile>,
 ) -> Result<Json<HostProfile>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
     add_host_core(host)
         .map(Json)
         .map_err(|e| err(StatusCode::BAD_REQUEST, e))
 }
 
 async fn remove_host(
-    State(s): State<AppState>,
-    headers: HeaderMap,
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
     Path(name): Path<String>,
 ) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
     remove_host_core(&name)
         .map(|_| Json(OkBody { ok: true }))
         .map_err(|e| err(StatusCode::NOT_FOUND, e))
 }
 
 async fn import_config(
-    State(s): State<AppState>,
-    headers: HeaderMap,
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
 ) -> Result<Json<Vec<HostProfile>>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
     import_ssh_config_core(None)
         .map(Json)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))
 }
 
 async fn ping(
-    State(s): State<AppState>,
-    headers: HeaderMap,
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
     Json(body): Json<PingBody>,
 ) -> Result<Json<Vec<PingResult>>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
     Ok(Json(ping_hosts_core(body.hosts, body.timeout_secs).await))
 }
 
 async fn exec(
     State(s): State<AppState>,
-    headers: HeaderMap,
+    Extension(auth): Extension<AuthContext>,
     Json(mut req): Json<ExecRequest>,
 ) -> Result<Json<ExecResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    let auth = check_auth(&s, &headers)?;
     if req.source.is_none() {
         req.source = Some(source_from_env("daemon"));
     }
@@ -1016,11 +959,10 @@ async fn exec(
 
 async fn exec_multi(
     State(s): State<AppState>,
-    headers: HeaderMap,
+    Extension(auth): Extension<AuthContext>,
     Json(body): Json<ExecMultiBody>,
 ) -> Result<Json<ExecMultiBatchResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    let auth = check_auth(&s, &headers)?;
     tracing::info!(hosts = ?body.hosts, command = %body.command, "exec-multi handler invoked");
     let source = source_or_env(body.source, "daemon");
     let targets = targets_for_exec_multi(&body.hosts, &body.tags);
@@ -1060,11 +1002,10 @@ async fn exec_multi(
 
 async fn exec_compare(
     State(s): State<AppState>,
-    headers: HeaderMap,
+    Extension(auth): Extension<AuthContext>,
     Json(body): Json<ExecCompareBody>,
 ) -> Result<Json<ExecComparison>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    let auth = check_auth(&s, &headers)?;
     tracing::info!(hosts = ?body.hosts, command = %body.command, "exec-compare handler invoked");
     let source = source_from_env("daemon");
     let targets = targets_for_exec_multi(&body.hosts, &body.tags);
@@ -1099,12 +1040,11 @@ async fn exec_compare(
 }
 
 async fn audit(
-    State(s): State<AppState>,
-    headers: HeaderMap,
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
     Query(q): Query<AuditQuery>,
 ) -> Result<Json<Vec<AuditEntry>>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
     let filter = AuditFilter {
         host: q.host,
         risk_level: q.risk_level,
@@ -1126,13 +1066,12 @@ async fn audit(
 // ── Audit Export (F6-2) ─────────────────────────────────────────────────────
 
 async fn audit_export(
-    State(s): State<AppState>,
-    headers: HeaderMap,
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
     Query(q): Query<AuditExportQuery>,
 ) -> Result<axum::response::Response, (StatusCode, Json<ErrorBody>)> {
     use axum::response::IntoResponse;
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
     let filter = AuditFilter {
         host: q.host,
         risk_level: q.risk_level,
@@ -1173,11 +1112,10 @@ async fn audit_export(
 
 async fn sftp_upload(
     State(s): State<AppState>,
-    headers: HeaderMap,
+    Extension(auth): Extension<AuthContext>,
     Json(req): Json<SftpUploadRequest>,
 ) -> Result<Json<SftpResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    let auth = check_auth(&s, &headers)?;
     let source = source_from_env("daemon");
     let command = format!("sftp upload {} -> {}", req.local_path, req.remote_path);
     reject_if_gate_paused(&source, &req.host, &command)?;
@@ -1205,11 +1143,10 @@ async fn sftp_upload(
 }
 async fn sftp_download(
     State(s): State<AppState>,
-    headers: HeaderMap,
+    Extension(auth): Extension<AuthContext>,
     Json(req): Json<SftpDownloadRequest>,
 ) -> Result<Json<SftpResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    let auth = check_auth(&s, &headers)?;
     let source = source_from_env("daemon");
     let command = format!("sftp download {} -> {}", req.remote_path, req.local_path);
     reject_if_gate_paused(&source, &req.host, &command)?;
@@ -1237,11 +1174,10 @@ async fn sftp_download(
 }
 async fn sftp_ls(
     State(s): State<AppState>,
-    headers: HeaderMap,
+    Extension(auth): Extension<AuthContext>,
     Json(body): Json<SftpDirBody>,
 ) -> Result<Json<ExecResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    let auth = check_auth(&s, &headers)?;
     let source = source_from_env("daemon");
     let command = format!("sftp ls {}", body.path);
     reject_if_gate_paused(&source, &body.host, &command)?;
@@ -1293,11 +1229,10 @@ async fn sftp_ls(
 }
 async fn sftp_stat(
     State(s): State<AppState>,
-    headers: HeaderMap,
+    Extension(auth): Extension<AuthContext>,
     Json(body): Json<SftpDirBody>,
 ) -> Result<Json<ExecResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    let auth = check_auth(&s, &headers)?;
     let source = source_from_env("daemon");
     let command = format!("sftp stat {}", body.path);
     reject_if_gate_paused(&source, &body.host, &command)?;
@@ -1349,11 +1284,10 @@ async fn sftp_stat(
 }
 async fn sftp_mkdir(
     State(s): State<AppState>,
-    headers: HeaderMap,
+    Extension(auth): Extension<AuthContext>,
     Json(body): Json<SftpDirBody>,
 ) -> Result<Json<ExecResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    let auth = check_auth(&s, &headers)?;
     let source = source_from_env("daemon");
     let command = format!("sftp mkdir {}", body.path);
     reject_if_gate_paused(&source, &body.host, &command)?;
@@ -1408,11 +1342,10 @@ async fn sftp_mkdir(
 
 async fn session_open(
     State(s): State<AppState>,
-    headers: HeaderMap,
+    Extension(auth): Extension<AuthContext>,
     Json(body): Json<SessionOpenBody>,
 ) -> Result<Json<IdBody>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    let auth = check_auth(&s, &headers)?;
     tracing::info!(host = %body.host, "session_open invoked");
     let source = body.source.as_deref().unwrap_or("daemon");
     let tags = host_tags(&body.host);
@@ -1489,12 +1422,11 @@ async fn session_open(
 }
 async fn session_write(
     State(s): State<AppState>,
-    headers: HeaderMap,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
     Json(body): Json<SessionWriteBody>,
 ) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    let auth = check_auth(&s, &headers)?;
     let uuid = Uuid::parse_str(&id).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
     let source = body.source.as_deref().unwrap_or("daemon");
     let targets = s
@@ -1598,12 +1530,11 @@ async fn session_write(
 }
 async fn session_read(
     State(s): State<AppState>,
-    headers: HeaderMap,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
     Query(q): Query<ReadQuery>,
 ) -> Result<Json<OutputBody>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    let auth = check_auth(&s, &headers)?;
     let uuid = Uuid::parse_str(&id).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
     let source = q.source.as_deref().unwrap_or("daemon");
     let (session_host, session_tags) = s
@@ -1634,12 +1565,11 @@ async fn session_read(
 }
 async fn session_close(
     State(s): State<AppState>,
-    headers: HeaderMap,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
     Query(q): Query<SourceQuery>,
 ) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    let auth = check_auth(&s, &headers)?;
     let uuid = Uuid::parse_str(&id).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
     let source = q.source.as_deref().unwrap_or("daemon");
     let (session_host, session_tags) = s
@@ -1688,11 +1618,10 @@ async fn session_close(
     Ok(Json(OkBody { ok: true }))
 }
 async fn session_list(
-    State(s): State<AppState>,
-    headers: HeaderMap,
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
 ) -> Result<Json<Vec<SessionListItem>>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
     Ok(Json(
         session_list_core()
             .await
@@ -1709,11 +1638,10 @@ async fn session_list(
 
 async fn forward_add(
     State(s): State<AppState>,
-    headers: HeaderMap,
+    Extension(auth): Extension<AuthContext>,
     Json(req): Json<ForwardRule>,
 ) -> Result<Json<ForwardRule>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    let auth = check_auth(&s, &headers)?;
     let source = source_from_env("daemon");
     let command = format!(
         "forward {} {}:{} -> {}:{}",
@@ -1775,20 +1703,18 @@ async fn forward_add(
     }
 }
 async fn forward_list(
-    State(s): State<AppState>,
-    headers: HeaderMap,
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
 ) -> Result<Json<Vec<ForwardRule>>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
     Ok(Json(forward_list_core().await))
 }
 async fn forward_remove(
     State(s): State<AppState>,
-    headers: HeaderMap,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    let auth = check_auth(&s, &headers)?;
     let uuid = Uuid::parse_str(&id).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
     let source = source_from_env("daemon");
     if let Some(rule) = forward_list_core()
@@ -1842,20 +1768,18 @@ async fn forward_remove(
 // ── Approvals ────────────────────────────────────────────────────────────────
 
 async fn approvals_list(
-    State(s): State<AppState>,
-    headers: HeaderMap,
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
 ) -> Result<Json<Vec<ApprovalRequestType>>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
     Ok(Json(approval_list().await))
 }
 async fn approval_approve(
-    State(s): State<AppState>,
-    headers: HeaderMap,
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
     let uuid = Uuid::parse_str(&id).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
     approval_respond(uuid, true)
         .await
@@ -1863,12 +1787,11 @@ async fn approval_approve(
         .map_err(|e| err(StatusCode::BAD_REQUEST, e))
 }
 async fn approval_reject(
-    State(s): State<AppState>,
-    headers: HeaderMap,
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
     let uuid = Uuid::parse_str(&id).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
     approval_respond(uuid, false)
         .await
@@ -1884,13 +1807,12 @@ struct ApprovalRespondBody {
 /// Generic approval respond endpoint used by notification action URLs.
 /// Accepts a JSON body with `approved: bool`.
 async fn approval_respond_generic(
-    State(s): State<AppState>,
-    headers: HeaderMap,
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
     Path(id): Path<String>,
     Json(body): Json<ApprovalRespondBody>,
 ) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
     let uuid = Uuid::parse_str(&id).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
     approval_respond(uuid, body.approved)
         .await
@@ -1914,35 +1836,32 @@ struct ApprovalCheckResult {
 }
 
 async fn list_policies(
-    State(s): State<AppState>,
-    headers: HeaderMap,
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
 ) -> Result<Json<Vec<ApprovalPolicy>>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
     list_approval_policies()
         .map(Json)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))
 }
 
 async fn put_policies(
-    State(s): State<AppState>,
-    headers: HeaderMap,
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
     Json(policies): Json<Vec<ApprovalPolicy>>,
 ) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
     save_approval_policies(&policies)
         .map(|_| Json(OkBody { ok: true }))
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))
 }
 
 async fn approval_check(
-    State(s): State<AppState>,
-    headers: HeaderMap,
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
     Json(body): Json<ApprovalCheckBody>,
 ) -> Result<Json<ApprovalCheckResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
     let target = command_authorization_target(&body.host);
     let risk = apply_risk_override(
         effective_command_risk(&body.command).await,
@@ -1969,12 +1888,11 @@ async fn approval_check(
 // ── Risk check ───────────────────────────────────────────────────────────────
 
 async fn risk_check(
-    State(s): State<AppState>,
-    headers: HeaderMap,
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
     Json(body): Json<RiskCheckBody>,
 ) -> Result<Json<RiskCheckResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
     let host_override = body
         .host
         .as_deref()
@@ -1992,12 +1910,11 @@ async fn risk_check(
 // ── Exec Preview ────────────────────────────────────────────────────────────
 
 async fn exec_preview(
-    State(s): State<AppState>,
-    headers: HeaderMap,
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
     Json(body): Json<ExecPreviewBody>,
 ) -> Result<Json<ExecPlan>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
 
     if let Some(hosts) = body.hosts {
         // Multi-host preview
@@ -2019,20 +1936,18 @@ async fn exec_preview(
 // ── Connections ──────────────────────────────────────────────────────────────
 
 async fn connection_status(
-    State(s): State<AppState>,
-    headers: HeaderMap,
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
 ) -> Result<Json<Vec<ConnectionStatus>>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
     Ok(Json(list_active_connections().await))
 }
 async fn ssh_connect(
     State(s): State<AppState>,
-    headers: HeaderMap,
+    Extension(auth): Extension<AuthContext>,
     Path(host): Path<String>,
 ) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    let auth = check_auth(&s, &headers)?;
     let source = source_from_env("daemon");
     let tags = host_tags(&host);
     reject_if_gate_paused(&source, &host, "connect")?;
@@ -2083,11 +1998,10 @@ async fn ssh_connect(
 }
 async fn ssh_disconnect(
     State(s): State<AppState>,
-    headers: HeaderMap,
+    Extension(auth): Extension<AuthContext>,
     Path(host): Path<String>,
 ) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    let auth = check_auth(&s, &headers)?;
     let source = source_from_env("daemon");
     let tags = host_tags(&host);
     reject_if_gate_paused(&source, &host, "disconnect")?;
@@ -2140,21 +2054,19 @@ async fn ssh_disconnect(
 // ── Webhook config ───────────────────────────────────────────────────────────
 
 async fn get_webhook_config(
-    State(s): State<AppState>,
-    headers: HeaderMap,
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
 ) -> Result<Json<WebhookConfig>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
     Ok(Json(load_webhook_config().unwrap_or_default()))
 }
 
 async fn set_webhook_config(
-    State(s): State<AppState>,
-    headers: HeaderMap,
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
     Json(config): Json<WebhookConfig>,
 ) -> Result<Json<WebhookConfig>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
     save_webhook_config(&config).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(config))
 }
@@ -2162,11 +2074,10 @@ async fn set_webhook_config(
 // ── Playbooks ─────────────────────────────────────────────────────────────────
 
 async fn list_playbooks(
-    State(s): State<AppState>,
-    headers: HeaderMap,
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
 ) -> Result<Json<Vec<Playbook>>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
     list_playbooks_core()
         .map(Json)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))
@@ -2174,11 +2085,10 @@ async fn list_playbooks(
 
 async fn run_playbook(
     State(s): State<AppState>,
-    headers: HeaderMap,
+    Extension(auth): Extension<AuthContext>,
     Json(body): Json<PlaybookRunBody>,
 ) -> Result<Json<PlaybookRunResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    let auth = check_auth(&s, &headers)?;
     let source = source_or_env(body.source, "daemon");
     reject_if_gate_paused(&source, &body.host, &format!("playbook:{}", body.playbook))?;
     let targets = vec![(body.host.clone(), host_tags(&body.host))];
@@ -2256,12 +2166,11 @@ async fn run_playbook(
 }
 
 async fn dry_run_playbook_handler(
-    State(s): State<AppState>,
-    headers: HeaderMap,
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
     Json(body): Json<PlaybookDryRunBody>,
 ) -> Result<Json<PlaybookDryRun>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
     let params = body.params.unwrap_or_default();
     dry_run_playbook(&body.playbook, &params)
         .map(Json)
@@ -2271,11 +2180,10 @@ async fn dry_run_playbook_handler(
 // ── Remote daemons ───────────────────────────────────────────────────────────
 
 async fn list_daemons(
-    State(s): State<AppState>,
-    headers: HeaderMap,
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
 ) -> Result<Json<Vec<agent2ssh::remote::DaemonInfo>>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
     list_daemons_core()
         .map(Json)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))
@@ -2284,12 +2192,11 @@ async fn list_daemons(
 // ── Daemon Diagnostics (F5-1) ───────────────────────────────────────────────
 
 async fn diagnose_alias(
-    State(s): State<AppState>,
-    headers: HeaderMap,
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
     Path(alias): Path<String>,
 ) -> Result<Json<agent2ssh::remote::DaemonDiagnostic>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
     diagnose_daemon(&alias)
         .await
         .map(Json)
@@ -2297,11 +2204,10 @@ async fn diagnose_alias(
 }
 
 async fn diagnose_all(
-    State(s): State<AppState>,
-    headers: HeaderMap,
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
 ) -> Result<Json<Vec<agent2ssh::remote::DaemonDiagnostic>>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
     let remotes =
         agent2ssh::remote::load_remotes().map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let mut results = Vec::new();
@@ -2330,12 +2236,11 @@ async fn diagnose_all(
 // ── Daemon Version Check (F5-2) ─────────────────────────────────────────────
 
 async fn version_check_alias(
-    State(s): State<AppState>,
-    headers: HeaderMap,
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
     Path(alias): Path<String>,
 ) -> Result<Json<agent2ssh::remote::VersionCompatibility>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
     check_daemon_version(&alias)
         .await
         .map(Json)
@@ -2345,32 +2250,29 @@ async fn version_check_alias(
 // ── Team Config Export/Import ───────────────────────────────────────────────
 
 async fn config_export(
-    State(s): State<AppState>,
-    headers: HeaderMap,
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
 ) -> Result<Json<TeamConfigExport>, (StatusCode, Json<ErrorBody>)> {
-    check_auth(&s, &headers)?;
     export_team_config()
         .map(Json)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))
 }
 
 async fn config_import(
-    State(s): State<AppState>,
-    headers: HeaderMap,
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
     Json(export): Json<TeamConfigExport>,
 ) -> Result<Json<ImportResult>, (StatusCode, Json<ErrorBody>)> {
-    check_auth(&s, &headers)?;
     import_team_config(&export)
         .map(Json)
         .map_err(|e| err(StatusCode::BAD_REQUEST, e))
 }
 
 async fn config_import_preview(
-    State(s): State<AppState>,
-    headers: HeaderMap,
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
     Json(export): Json<TeamConfigExport>,
 ) -> Result<Json<ConfigDiffPreview>, (StatusCode, Json<ErrorBody>)> {
-    check_auth(&s, &headers)?;
     preview_team_config_import(&export)
         .map(Json)
         .map_err(|e| err(StatusCode::BAD_REQUEST, e))
@@ -2378,12 +2280,11 @@ async fn config_import_preview(
 
 async fn proxy_exec(
     State(s): State<AppState>,
-    headers: HeaderMap,
+    Extension(auth): Extension<AuthContext>,
     Path(alias): Path<String>,
     Json(mut req): Json<ExecRequest>,
 ) -> Result<Json<ExecResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    let auth = check_auth(&s, &headers)?;
     if req.source.is_none() {
         req.source = Some(source_from_env("daemon_proxy"));
     }
@@ -2476,11 +2377,10 @@ async fn proxy_exec(
 // ── Daemons Unified View (F5-4) ─────────────────────────────────────────────
 
 async fn daemons_view(
-    State(s): State<AppState>,
-    headers: HeaderMap,
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
 ) -> Result<Json<agent2ssh::remote::DaemonUnifiedView>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
     get_daemons_unified_view()
         .await
         .map(Json)
@@ -2495,12 +2395,11 @@ struct TrendQuery {
 }
 
 async fn metrics_trend(
-    State(s): State<AppState>,
-    headers: HeaderMap,
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
     Query(q): Query<TrendQuery>,
 ) -> Result<Json<MetricsTrend>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
     let period = match q.period.as_deref().unwrap_or("24h") {
         "24h" | "last24h" => TrendPeriod::Last24h,
         "7d" | "last7d" => TrendPeriod::Last7d,
@@ -2521,13 +2420,12 @@ async fn metrics_trend(
 // ── Event Stream SSE (F6-4) ─────────────────────────────────────────────────
 
 async fn events_stream(
-    State(s): State<AppState>,
-    headers: HeaderMap,
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
 ) -> Result<
     Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>>,
     (StatusCode, Json<ErrorBody>),
 > {
-    check_auth(&s, &headers)?;
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     let _ = append_diagnostic_log(
         "info",
@@ -2571,10 +2469,9 @@ async fn events_stream(
 // ── SSH config sync (F2-4) ───────────────────────────────────────────────────
 
 async fn ssh_sync_diff(
-    State(s): State<AppState>,
-    headers: HeaderMap,
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
-    check_auth(&s, &headers)?;
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     let diff = agent2ssh::compare_ssh_configs(None).map_err(|e| {
         err(
@@ -2586,10 +2483,9 @@ async fn ssh_sync_diff(
 }
 
 async fn ssh_sync_export_handler(
-    State(s): State<AppState>,
-    headers: HeaderMap,
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
-    check_auth(&s, &headers)?;
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     let (path, count) = agent2ssh::export_to_ssh_config(None, None).map_err(|e| {
         err(
@@ -2607,8 +2503,6 @@ async fn ssh_sync_export_handler(
 #[derive(serde::Deserialize)]
 struct TerminalParams {
     host: String,
-    #[serde(default)]
-    token: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -2634,17 +2528,14 @@ fn terminal_resize_from_message(text: &str) -> Option<(u32, u32)> {
 
 /// Attach an interactive shell to a host over a WebSocket. Unlike the buffered
 /// REST session API, this streams raw bytes in both directions in real time
-/// (ANSI, control chars, TUI programs). The token is read from the query string
-/// because browser WebSocket handshakes can't carry an Authorization header.
+/// (ANSI, control chars, TUI programs). Browser WebSocket handshakes use the
+/// middleware's `?token=` support because they cannot set Authorization headers.
 async fn terminal_attach(
     State(s): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     Query(params): Query<TerminalParams>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    let auth = match authenticate_token(&s, &params.token) {
-        Ok(auth) => auth,
-        Err(e) => return e.into_response(),
-    };
     let tags = host_tags(&params.host);
     if let Err(e) = check_daemon_scope(&auth.scope, &params.host, &tags, "terminal") {
         return e.into_response();
@@ -2912,14 +2803,9 @@ fn spawn_embedded_exec_stream(
 
 async fn exec_stream(
     State(s): State<AppState>,
-    headers: HeaderMap,
+    Extension(auth): Extension<AuthContext>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    // Fix-2: Authenticate before WebSocket upgrade
-    let auth = match check_auth(&s, &headers) {
-        Ok(auth) => auth,
-        Err(e) => return e.into_response(),
-    };
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     let app_state = s.clone();
     let auth_scope = auth.scope.clone();
@@ -3166,11 +3052,10 @@ fn preview_text(value: &str, max_chars: usize) -> String {
 // ── Health Snapshot ─────────────────────────────────────────────────────────
 
 async fn get_health_snapshot(
-    State(s): State<AppState>,
-    headers: HeaderMap,
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
     match load_health_snapshot() {
         Ok(snapshot) => Ok(Json(serde_json::to_value(snapshot).unwrap_or_default())),
         Err(_) => Ok(Json(serde_json::json!({
@@ -3181,12 +3066,11 @@ async fn get_health_snapshot(
 }
 
 async fn post_health_snapshot(
-    State(s): State<AppState>,
-    headers: HeaderMap,
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
     body: Option<Json<HealthSnapshotBody>>,
 ) -> Result<Json<agent2ssh::health::HealthSnapshot>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    check_auth(&s, &headers)?;
 
     let (hosts, timeout_secs) = match body {
         Some(Json(b)) => (b.hosts, b.timeout_secs),
@@ -3622,174 +3506,6 @@ denied_commands = ["rm *"]
 
 // ── Main ─────────────────────────────────────────────────────────────────────
 
-tokio::task_local! {
-    /// Per-request correlation id, set by `trace_id_middleware` for the duration
-    /// of each HTTP request. Read synchronously inside `on_event`, so daemon
-    /// `tracing` warnings/errors carry the same id that the response echoes back.
-    static REQUEST_TRACE_ID: String;
-}
-
-const TRACE_ID_HEADER: &str = "x-agent2ssh-trace-id";
-
-/// Axum middleware that binds a correlation id to each request: it reuses an
-/// inbound `X-Agent2SSH-Trace-Id` header when a caller supplies one (so MCP /
-/// desktop requests stay linked to the originating operation) or mints a fresh
-/// one, runs the request inside that task-local scope, and echoes the id on the
-/// response so clients can record it.
-async fn trace_id_middleware(
-    req: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> axum::response::Response {
-    let trace_id = req
-        .headers()
-        .get(TRACE_ID_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-
-    let echo = trace_id.clone();
-    let mut response = REQUEST_TRACE_ID.scope(trace_id, next.run(req)).await;
-    if let Ok(value) = axum::http::HeaderValue::from_str(&echo) {
-        response.headers_mut().insert(TRACE_ID_HEADER, value);
-    }
-    response
-}
-
-/// Routes that intentionally require no bearer token: the redirect root, the web
-/// console HTML, and the liveness/metrics probes. Matched exactly so authed
-/// siblings (e.g. `/metrics/trend`) are not accidentally exposed.
-fn is_public_path(path: &str) -> bool {
-    matches!(path, "/" | "/console" | "/health" | "/metrics")
-}
-
-fn bearer_token(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get("authorization")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .map(str::to_string)
-}
-
-/// Extracts a `token` query parameter, used by browser WebSocket/SSE handshakes
-/// that cannot set an `Authorization` header.
-fn query_token(uri: &axum::http::Uri) -> Option<String> {
-    axum::extract::Query::<std::collections::HashMap<String, String>>::try_from_uri(uri)
-        .ok()
-        .and_then(|query| query.0.get("token").cloned())
-}
-
-/// Central authentication gate. Every request to a non-public route must present
-/// a valid admin or scoped token (via `Authorization: Bearer` or a `?token=`
-/// query parameter); otherwise it is rejected with 401 before reaching any
-/// handler. Enforcing authentication here — rather than relying on each handler
-/// to remember `check_auth` — means a newly added route is protected by default,
-/// so a forgotten check can no longer silently expose an endpoint. Handlers still
-/// call `check_auth`/`authenticate_token` to obtain their `AuthContext` for
-/// per-target scope authorization; this layer is the gate, not the authorizer.
-async fn auth_middleware(
-    State(state): State<AppState>,
-    request: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> axum::response::Response {
-    if is_public_path(request.uri().path()) {
-        return next.run(request).await;
-    }
-    let token = bearer_token(request.headers())
-        .or_else(|| query_token(request.uri()))
-        .unwrap_or_default();
-    match authenticate_token(&state, &token) {
-        Ok(_) => next.run(request).await,
-        Err(rejection) => rejection.into_response(),
-    }
-}
-
-/// Collects an event's `message` and remaining fields into a JSON-ready shape so
-/// the diagnostic bridge can persist them.
-#[derive(Default)]
-struct DiagnosticFieldVisitor {
-    message: String,
-    fields: serde_json::Map<String, serde_json::Value>,
-}
-
-impl tracing::field::Visit for DiagnosticFieldVisitor {
-    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-        if field.name() == "message" {
-            self.message = value.to_string();
-        } else {
-            self.fields.insert(
-                field.name().to_string(),
-                serde_json::Value::String(value.to_string()),
-            );
-        }
-    }
-
-    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        let rendered = format!("{value:?}");
-        if field.name() == "message" {
-            self.message = rendered;
-        } else {
-            self.fields.insert(
-                field.name().to_string(),
-                serde_json::Value::String(rendered),
-            );
-        }
-    }
-}
-
-/// A tracing layer that forwards `WARN`/`ERROR` events into the shared
-/// diagnostic log (`app.log`). This unifies the daemon's rich `tracing` output
-/// with the structured diagnostics the desktop UI reads, so warnings/errors are
-/// observable even when the daemon's stdout/stderr are not captured.
-struct DiagnosticBridgeLayer;
-
-impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for DiagnosticBridgeLayer {
-    fn on_event(
-        &self,
-        event: &tracing::Event<'_>,
-        _ctx: tracing_subscriber::layer::Context<'_, S>,
-    ) {
-        let level = *event.metadata().level();
-        // In tracing's ordering, ERROR < WARN < INFO, so `<= WARN` keeps exactly
-        // the warning and error levels.
-        if level > tracing::Level::WARN {
-            return;
-        }
-        // Only bridge our own events; dependency noise (hyper/reqwest/…) stays in
-        // the fmt sink and never reaches app.log or the error-alert webhook.
-        if !event.metadata().target().starts_with("agent2ssh") {
-            return;
-        }
-
-        let mut visitor = DiagnosticFieldVisitor::default();
-        event.record(&mut visitor);
-        visitor.fields.insert(
-            "target".to_string(),
-            serde_json::Value::String(event.metadata().target().to_string()),
-        );
-        // Tag with the current request's correlation id when emitted inside a
-        // request scope, linking daemon log lines to the originating operation.
-        if let Ok(trace_id) = REQUEST_TRACE_ID.try_with(String::clone) {
-            visitor
-                .fields
-                .insert("trace_id".to_string(), serde_json::Value::String(trace_id));
-        }
-
-        let diag_level = if level == tracing::Level::ERROR {
-            "error"
-        } else {
-            "warn"
-        };
-        let _ = agent2ssh::append_diagnostic_log(
-            diag_level,
-            "daemon",
-            &visitor.message,
-            Some(serde_json::Value::Object(visitor.fields)),
-        );
-    }
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     use tracing_subscriber::layer::SubscriberExt;
@@ -3825,28 +3541,55 @@ async fn main() -> anyhow::Result<()> {
             });
         }
 
-        // 2) Aggregate signal: raise an `anomaly_detected` alert when the
-        //    error rate spikes, so a storm yields one alert instead of N.
-        let findings =
-            agent2ssh::anomaly::record_diagnostic_error(&entry.component, &entry.message);
-        agent2ssh::anomaly::publish_anomalies(&findings);
+        // Aggregate diagnostic-error anomaly detection is handled in the shared
+        // append path so CLI/MCP/Tauri/daemon writes all feed the same app.log
+        // window. The sink only handles daemon-owned per-error delivery.
     });
 
     let registry = tracing_subscriber::registry()
         .with(env_filter)
-        .with(DiagnosticBridgeLayer);
+        .with(DiagnosticBridgeLayer::from_env());
 
-    match log_format.as_str() {
+    // `try_init` instead of `init`: if a global subscriber is somehow already
+    // installed (e.g. a future in-process re-init), make that explicit via a
+    // diagnostic rather than panicking or silently swallowing it. (H9)
+    let trace_init = match log_format.as_str() {
         "json" => registry
             .with(tracing_subscriber::fmt::layer().json())
-            .init(),
-        _ => registry.with(tracing_subscriber::fmt::layer()).init(),
+            .try_init(),
+        _ => registry.with(tracing_subscriber::fmt::layer()).try_init(),
+    };
+    if let Err(err) = trace_init {
+        let _ = agent2ssh::append_diagnostic_log(
+            "warn",
+            "daemon",
+            "tracing subscriber already initialized; keeping the existing global subscriber",
+            Some(serde_json::json!({ "error": err.to_string() })),
+        );
     }
 
     // Record start time for uptime calculation
     START_TIME.get_or_init(Instant::now);
 
-    let addr = "127.0.0.1:7722";
+    // Listen address is configurable (H8); default stays loopback so the daemon
+    // is not exposed unless an operator opts in. Useful for port conflicts or
+    // running multiple instances.
+    let addr = std::env::var("AGENT2SSH_DAEMON_ADDR")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "127.0.0.1:7722".to_string());
+    let addr = addr.as_str();
+    if !is_loopback_addr(addr) {
+        // Binding beyond loopback exposes the control plane to the network; the
+        // bearer-token auth still applies, but make the exposure loud.
+        let _ = agent2ssh::append_diagnostic_log(
+            "warn",
+            "daemon",
+            "daemon bound to a non-loopback address; control plane is reachable off-host",
+            Some(serde_json::json!({ "addr": addr })),
+        );
+    }
     let config_dir = config_dir()?;
     std::fs::create_dir_all(&config_dir)?;
 

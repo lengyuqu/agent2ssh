@@ -52,9 +52,9 @@ pub use core::{
     SshSyncHostDiff, SshSyncStrategy, TeamConfigExport,
 };
 pub use diagnostics::{
-    app_log_path, append_diagnostic_log, clear_diagnostic_logs, current_trace_id,
-    export_diagnostic_bundle, install_panic_hook, list_diagnostic_logs, seed_trace_id_from_env,
-    set_error_sink, set_trace_id, DiagnosticLogEntry,
+    app_log_path, append_diagnostic_log, append_diagnostic_log_no_sink, clear_diagnostic_logs,
+    current_trace_id, export_diagnostic_bundle, install_panic_hook, list_diagnostic_logs,
+    seed_trace_id_from_env, set_error_sink, set_trace_id, DiagnosticLogEntry,
 };
 pub use events::{event_bus, publish_event, subscribe_events, Agent2SSHEvent, EventType};
 pub use execution_control::{

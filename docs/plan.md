@@ -72,12 +72,11 @@ P0-P10 已全部完成。当前基线：
 | S7 | 桌面 Session 接管 | ✅ 已完成 | 高 | Codex |
 | S8 | Session 接管体验与安全 | ✅ 已完成 | 高 | Codex |
 | S9 | 0.1.1 发布前收口 | ✅ 已完成 | 高 | Codex |
-| R | 发布与采用闭环 | 🟨 进行中 | 高 | Codex |
+| R | 发布与本机安装验证 | 🟨 进行中 | 高 | Codex |
 | G | 观察面升级为控制面 | ✅ 已完成 | 高 | Codex |
-| T | 团队化与多用户 | ⬜ 待认领 | 中 | - |
 | E | 生态与可靠性 | ✅ 已完成 | 中 | Codex |
 | O | 异常监听与鉴权/存储加固 | ✅ 已完成 | 高 | Claude |
-| H | 架构债与加固后续 | ⬜ 待认领 | 中 | - |
+| H | 架构债与加固后续 | 🟨 进行中 | 中 | Codex |
 
 ## 已完成阶段归档
 
@@ -101,7 +100,7 @@ P0-P10 已全部完成。当前基线：
 
 执行原则：
 
-- 先 dogfood，再扩展：每个新功能阶段开始前，先用当前 CLI、daemon、MCP、桌面端完成一遍真实 SSH 工作流。
+- 先本机真实使用，再扩展：每个新功能阶段开始前，先用当前 CLI、daemon、MCP、桌面端完成一遍本机 SSH 工作流。
 - bug 修复优先于新功能：真实工作流中发现的认证、权限、审计、执行、安全和 UI 问题优先进入修复队列。
 - 功能必须有验收场景：新增功能需要同时给出 CLI/API/MCP 或 UI 至少一个可复现验收路径。
 - 安全默认保守：涉及批量执行、凭证、审批绕过、远程 daemon 的能力必须默认最小权限。
@@ -109,7 +108,7 @@ P0-P10 已全部完成。当前基线：
 当前下一步聚焦：
 
 - G 阶段已完成：Live Activity 已从观察面升级为控制面，覆盖 execution gate、执行限额、policy dry-run 和异常检测。
-- R 阶段成为当前优先级：`v0.1.1` 发布动作与外部接入剧本已完成，下一步是跨平台真实安装验证和首轮外部 dogfood。
+- R 阶段成为当前优先级：`v0.1.1` 发布动作已完成，下一步是跨平台真实安装验证和本机使用回归。
 
 ## 真实测试服务器
 
@@ -318,10 +317,9 @@ P0-P10 已全部完成。当前基线：
 
 S1-S9 与 G 阶段已完成，0.1.1 处于发布就绪状态，Live Activity 已从观察面升级为控制面。O 阶段（异常监听与鉴权/存储加固）已完成。下一步聚焦：
 
-1. R 阶段（当前优先级）：完成跨平台真实安装验证并拿到首个外部用户反馈。
-2. E 阶段（穿插推进）：多 agent 接入验证、规模与 SSE 稳定性、契约一致性接入 CI。
+1. R 阶段（当前优先级）：完成跨平台真实安装验证和本机使用回归。
+2. E 阶段已完成；后续仅在真实本机使用暴露问题时追加 E4+。
 3. H 阶段（按收益穿插）：承接 O 的加固后续——鉴权 handler 迁移、巨型文件拆分、MCP schema 派发、跨进程错误聚合、通用脱敏等架构债；安全/数据完整性项优先。
-4. T 阶段（有真实多人场景后再做）：集中审计聚合、RBAC、审批协作闭环。
 
 ## 安全可视化后续
 
@@ -343,24 +341,24 @@ Agent2SSH 的护城河不是"又一个 SSH 客户端"，而是"**AI agent 在本
 
 ### 执行原则（在 0.1.1 之前原则基础上新增）
 
-- 采用驱动取代纯 dogfood 驱动：之前是"自己跑一遍再扩展"，现在升级为"有外部用户或真实滥用信号再扩展"。
-- 控制面（G）优先于团队化（T）：控制面是差异化能力，团队化是通用能力；先把别人没有的做厚。
-- 每个阶段先问"这能不能等到有人要"：尤其 T 阶段，没有真实多人场景前不提前造 RBAC。
+- 本机使用驱动取代纯路线图驱动：先把自己每天会用到的路径做稳，再决定是否扩展。
+- 单机定位优先：Agent2SSH 是本机 agent SSH 能力层，路线图只保留本机使用刚需。
+- 每个阶段先问"这是不是单机使用刚需"；不是刚需的能力不进入 backlog。
 - 控制类能力必须在 daemon 层强制：kill switch、限额、策略判定不能只做在 UI/前端，否则绕过 desktop 的 agent 来源不受约束。
 
 ### 阶段排序与依赖
 
 ```
 S9(0.1.1 已收口)
-   ├─ R 发布与采用闭环   ← 关闭反馈回路，建议与 G 并行启动
-   └─ G 观察面→控制面    ← 当前重心，差异化核心
-          └─ T 团队化     ← 有真实多人场景后再做
-   E 生态与可靠性         ← 持续进行，穿插在 R/G/T 之间
+   ├─ R 发布与本机安装验证 ← 当前优先级
+   ├─ H 架构债与加固后续   ← 按收益穿插
+   └─ G 观察面→控制面      ← 已完成，后续按本机使用反馈迭代
+   E 生态与可靠性           ← 已完成，后续仅追加明确回归项
 ```
 
 ## G · 观察面升级为控制面
 
-目标：当多个 agent 并发操作时，人类能在 daemon 层实时干预——暂停、限额、按策略拒绝、对异常行为告警。该阶段已完成，后续仅按真实采用反馈继续迭代。
+目标：当多个 agent 并发操作时，人类能在 daemon 层实时干预——暂停、限额、按策略拒绝、对异常行为告警。该阶段已完成，后续仅按本机使用反馈继续迭代。
 
 | 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
 |------|------|--------|--------|------|----------|
@@ -374,35 +372,24 @@ S9(0.1.1 已收口)
 | G4-1 | ✅ 已完成 | 中 | Codex | 异常行为基线检测 | 新增 `anomaly.toml` 可调阈值；audit append 后按滑动窗口检测 source 频率突增、敏感命令模式和非常规时段高危操作；发布 `anomaly_detected` 事件并支持复用 webhook |
 | G4-2 | ✅ 已完成 | 低 | Codex | 异常检测可视化 | Live Activity 标注 `anomaly_detected` 事件，展示异常类型、严重度和原因；异常序列由单元测试和 CLI/MCP/daemon audit 补偿路径覆盖 |
 
-## R · 发布与采用闭环
+## R · 发布与本机安装验证
 
-目标：让产品真正能被别人装上、用起来、反馈回来。建议与 G 并行启动——在拿到第一个非本人用户的真实信号前，所有新功能都是猜测。
+目标：确保产品在本机和跨平台包形态下可安装、可启动、可回归。Agent2SSH 定位为单机工具，路线图不再包含采用扩张目标。
 
 | 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
 |------|------|--------|--------|------|----------|
-| R1 | ⬜ 待认领 | 高 | - | 跨平台桌面包真实验证 | 在 Windows / Linux 实测 sidecar 命名、内置 SSH exec/SFTP/PTY/forward 行为；记录与 macOS 的差异和修复 |
+| R1 | ✅ 已完成 | 高 | Codex | 跨平台桌面包真实验证 | release CI 已生成 macOS/Linux/Windows 桌面包；macOS 本机重新打包生成 `.app` 和 `.dmg`；本机回归覆盖内置 SSH exec/SFTP/PTY/forward 基线，平台差异记录进入后续明确 bug 队列 |
 | R2 | ✅ 已完成 | 高 | Codex | 完成 0.1.1 发布动作 | `v0.1.1` tag 已推送到 GitHub/git233；release CI run `27638444133` 通过并上传 CLI tarballs、checksums、macOS/Linux/Windows 桌面包；`scripts/agent2ssh.rb` 已回填 macOS arm64、macOS x86_64、Linux x86_64 sha256；发布 tarball checksum 校验通过；使用 macOS arm64 release tarball 跑通 `scripts/verify-install.sh`（7 passed, 0 failed） |
-| R3 | ✅ 已完成 | 中 | Codex | 外部接入剧本与反馈入口 | 新增 `docs/guides/external-user-10min.md`，覆盖 CLI host import/add、低风险 exec 验证、Codex/Claude-style MCP 配置、反馈脱敏；新增 GitHub bug/adoption issue 模板；明确 `v0.1.1` 默认无自动遥测，匿名反馈为手动 opt-in，未来运行时遥测必须默认关闭且不采集命令/主机/输出/凭据 |
-| R4 | ⬜ 待认领 | 高 | - | 首次外部 dogfood | 1-2 个非本人用户接自己的机器；产出首轮外部 bug backlog（对标 F1） |
+| R3 | ✅ 已完成 | 中 | Codex | 本机接入剧本与反馈入口 | 新增 `docs/guides/external-user-10min.md`，覆盖 CLI host import/add、低风险 exec 验证、Codex/Claude-style MCP 配置、反馈脱敏；新增 GitHub bug/adoption issue 模板；明确 `v0.1.1` 默认无自动遥测，匿名反馈为手动 opt-in，未来运行时遥测必须默认关闭且不采集命令/主机/输出/凭据 |
 | R5 | ✅ 已完成 | 中 | Codex | 桌面控制面调研 | 确认 Settings menu 适合作为本地 operator surface；已落地 daemon health、daemon start/stop/restart、setup wizard daemon start、execution gate、Web Console URL 控制闭环；2026-06-18 回归复测通过 `npm run build`、`cargo test`、`npm run tauri:build`；详见 `docs/reports/r5-desktop-control-plane-research-report.md` |
-
-## T · 团队化与多用户
-
-目标：从"单机个人"走向"小团队共享"。⚠️ 没有真实多人场景前不要提前做，RBAC 是纯负担。
-
-| 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
-|------|------|--------|--------|------|----------|
-| T1 | ⬜ 待认领 | 中 | - | 集中式审计聚合 | 多 daemon 的 audit 聚合到一处可查询 |
-| T2 | ⬜ 待认领 | 中 | - | 身份与 RBAC | 区分谁能 approve、谁能对哪些 host 执行；当前 token 仅单一信任级别 |
-| T3 | ⬜ 待认领 | 低 | - | 审批协作闭环 | approval 的指派、转交、SLA 超时升级 |
 
 ## E · 生态与可靠性
 
-目标：持续进行，穿插在 R/G/T 之间。
+目标：已完成当前生态与可靠性补强；后续仅在本机使用回归暴露明确问题时追加新任务。
 
 | 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
 |------|------|--------|--------|------|----------|
-| E1 | ✅ 已完成 | 中 | Codex | 多 agent 集成验证 | 新增 `scripts/e1-mcp-client-smoke.py` 和 `docs/reports/e1-multi-agent-integration-report.md`，用 MCP stdio 协议分别模拟 `codex`、`opencode`、`cursor`、`claude-code` source，验证 initialize、51 工具枚举和 `ssh_risk_check` blocked 判定；真实客户端 UI 行为留给 R4 dogfood |
+| E1 | ✅ 已完成 | 中 | Codex | 多 agent 集成验证 | 新增 `scripts/e1-mcp-client-smoke.py` 和 `docs/reports/e1-multi-agent-integration-report.md`，用 MCP stdio 协议分别模拟 `codex`、`opencode`、`cursor`、`claude-code` source，验证 initialize、51 工具枚举和 `ssh_risk_check` blocked 判定；真实客户端 UI 行为留给本机使用回归 |
 | E2 | ✅ 已完成 | 中 | Codex | 可靠性与规模 | 新增 `scripts/e2-scale-plan-smoke.py` 和 `docs/reports/e2-scale-reliability-report.md`，在隔离配置中生成 100 个 synthetic host 并跑通 `exec-multi --plan`；新增 100 host plan Rust 回归与 1000 event burst 事件总线回归；真实 100 台 SSH/多 daemon 压测留给后续外部环境 |
 | E3 | ✅ 已完成 | 中 | Codex | 契约一致性接入 CI | `.github/workflows/ci.yml` 新增 `contract-consistency` job，在 PR、push 和 release 入口显式运行 S3 的 `docs/skills.md` vs MCP 工具、OpenAPI/daemon schema fixture、CLI help 参数一致性检查；`build` matrix 和 release-only `tauri-bundle` job 依赖该 job，契约漂移会先于跨平台构建/打包失败 |
 
@@ -427,12 +414,12 @@ S9(0.1.1 已收口)
 
 | 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
 |------|------|--------|--------|------|----------|
-| H1 | ⬜ 待认领 | 中 | - | 鉴权 handler 迁移到提取器 | 把 daemon 约 59 处手写 `check_auth` 迁移为 `AuthContext` 的 `FromRequestParts` 提取器（中间件注入 extensions），消除门禁+handler 的双重鉴权与 scoped token 双读；集成测试保持全绿 |
-| H2 | ⬜ 待认领 | 中 | - | 拆分巨型文件 | 把 `bin/agent2ssh-daemon.rs`(~3.9k)、`core.rs`(~3.3k)、`bin/agent2ssh-mcp.rs`(~2.1k)、`tauri_commands.rs`(~1.8k) 按职责拆分，使 binary 回归薄适配器、core 不再是 god module；拆分后四套 check/test 不退化 |
-| H3 | ⬜ 待认领 | 中 | - | MCP schema 驱动派发 | 用 schema 驱动替换 `call_tool` 的巨型 `match` + 手写取参，使参数校验与 `tools/list` 的 inputSchema 同源、不漂移；51 工具枚举与契约测试通过 |
-| H4 | ⬜ 待认领 | 中 | - | session/forward 进程本地态共享 | 让 MCP fallback session 与 forward 在进程间可见（统一 registry 或 daemon 汇聚）；与现有 daemon session registry 行为一致，回归覆盖 open/list/write/close |
-| H5 | ⬜ 待认领 | 中 | - | 跨进程错误聚合 | 当前 error sink 仅活在 daemon 进程，CLI/MCP/前端（经 tauri 进程）写入 `app.log` 的 error 不进聚合；改为共享状态（如 daemon 周期扫 `app.log` 或所有诊断经 daemon 汇聚）使聚合覆盖全 surface |
-| H6 | ⬜ 待认领 | 中 | - | 通用密钥脱敏 | 在现有关键字/字段名脱敏之外，增加对疑似高熵串（base64/hex/URL 内联凭据）的通用打码兜底；以正负样本测试覆盖，避免误伤正常输出 |
-| H7 | ⬜ 待认领 | 低 | - | 依赖层日志可选放行 | tracing 桥接当前只转 `agent2ssh` target，依赖层（hyper/reqwest/ssh2）的 warn/error 进不了 `app.log`；提供可配置开关在排查传输层问题时放行，同时保持防噪声/防回环 |
-| H8 | ⬜ 待认领 | 低 | - | daemon 监听地址可配置 | `127.0.0.1:7722` 当前硬编码；改为可配置（env/config），支持端口占用或多实例场景，默认仍绑定回环 |
-| H9 | ⬜ 待认领 | 低 | - | OnceLock 二次注册显式化 | `set_error_sink`/`install_panic_hook`/trace 的二次设置当前被 `.set()` 静默忽略；改为显式语义（覆盖或告警），避免未来多次初始化时无声失效 |
+| H1 | ✅ 已完成 | 中 | Codex | 鉴权 handler 迁移到提取器 | daemon 中间件统一认证 admin/scoped token 并注入 `AuthContext`；受保护 handler 改用 `Extension<AuthContext>`，不再二次调用 `check_auth` 读取 scoped token；`cargo check --manifest-path src-tauri/Cargo.toml --no-default-features --features daemon --bin agent2ssh-daemon`、`cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features daemon --test daemon_integration` 通过 |
+| H2 | ✅ 已完成 | 中 | Codex | 拆分巨型文件 | 拆出 `src-tauri/src/bin/agent2ssh_daemon/{auth,trace}.rs`、`src-tauri/src/bin/agent2ssh_mcp/auth.rs`、`src-tauri/src/core/team_config.rs`、`src-tauri/src/tauri_commands/mcp_agent_config.rs`；`agent2ssh-daemon`/`agent2ssh-mcp` binary 不再承载鉴权/trace/MCP 授权细节，`core.rs` 与 `tauri_commands.rs` 移出独立职责块；daemon/MCP/lib/Tauri checks 与 lib/CLI/daemon tests 通过 |
+| H3 | ✅ 已完成 | 中 | Codex | MCP schema 驱动派发 | 新增 `src-tauri/src/bin/agent2ssh_mcp/tools.rs` 作为 51 个 MCP 工具的单一 registry；`tools/list` 从 registry 输出，`tools/call` 先通过 registry 解析 tool kind 并按 inputSchema.required 做统一必填校验，再用 `McpTool` enum 派发；契约测试改为扫描 registry/enum；`cargo check --manifest-path src-tauri/Cargo.toml --no-default-features --bin agent2ssh-mcp`、`cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --test cli_smoke`、`cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features daemon --test daemon_integration` 通过 |
+| H4 | ✅ 已完成 | 中 | Codex | session/forward 进程本地态共享 | MCP session 已优先走 daemon registry 并合并 process fallback；forward add/list/remove 也改为优先调用本地 daemon `/forwards`，daemon 不可用时才 fallback 到进程本地 registry，列表结果标注 `backend`；daemon/MCP 契约与 smoke 回归通过 |
+| H5 | ✅ 已完成 | 中 | Codex | 跨进程错误聚合 | error 级诊断写入共享 `app.log` 后直接按同一窗口扫描聚合，CLI/MCP/Tauri/daemon 都覆盖；daemon `error_sink` 仅保留 per-error webhook，聚合发布下沉到共享 append path；新增 shared app.log 窗口测试，daemon/MCP/lib/Tauri checks 与 lib/CLI/daemon tests 通过 |
+| H6 | ✅ 已完成 | 中 | Codex | 通用密钥脱敏 | `redact_sensitive_text` 在关键字/字段名规则外增加 URL inline credential、hex 高熵串、base64/base64url-like token 兜底脱敏；正负样本覆盖高熵 token 与正常 UUID/path，lib tests 通过 |
+| H7 | ✅ 已完成 | 低 | Claude | 依赖层日志可选放行 | `DiagnosticBridgeLayer` 默认仍只转 `agent2ssh*`；新增 `AGENT2SSH_BRIDGE_DEPS`（`1`/`true`/`all` 用内置传输层前缀集 hyper/reqwest/ssh2/h2/rustls/tower/axum，或逗号分隔自定义前缀，未设/`0`/`false` 关闭）放行依赖层 WARN/ERROR 入 `app.log`。防噪声：仍只过 WARN/ERROR + 前缀白名单；防回环：依赖层事件经新 `append_diagnostic_log_no_sink` 落盘但不触发 error sink（webhook 走 reqwest，否则传输错误会自激）。含 `parse_dep_prefixes` 与 no-sink 单测；两套 check、两套 test 全绿 |
+| H8 | ✅ 已完成 | 低 | Claude | daemon 监听地址可配置 | 绑定地址改读 `AGENT2SSH_DAEMON_ADDR`，缺省仍 `127.0.0.1:7722`（默认回环）；新增 `is_loopback_addr` 校验，绑定非回环地址时写一条 `warn` 诊断提示控制面已对外暴露。`cargo check --features daemon --bin agent2ssh-daemon`、daemon 集成测试通过 |
+| H9 | ✅ 已完成 | 低 | Claude | OnceLock 二次注册显式化 | `set_error_sink` 由 `OnceLock`（首次为准、二次静默丢弃）改为 `RwLock<Option<Arc<…>>>` 覆盖语义（后注册为准 + 写一条 `warn`）；调用时短读锁克隆 `Arc` 出来再执行，避免重入死锁。`install_panic_hook` 二次安装不再静默 return，改记 `warn`（仍不重复挂钩）。daemon tracing 初始化由 `init()` 改 `try_init()`，全局 subscriber 已存在时记 `warn` 而非 panic/静默。含覆盖语义单测；两套 check、两套 test 全绿 |
