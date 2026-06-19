@@ -11,7 +11,8 @@ use crate::{
         list_proxies_core, ping_hosts_core, remove_host_core, save_host_group_core,
         save_proxy_core, sftp_download_core_with_source, sftp_ls_core_with_source,
         sftp_mkdir_core_with_source, sftp_stat_core_with_source, sftp_upload_core_with_source,
-        update_host_core, ExecMultiRequest, ImportResult, TeamConfigExport,
+        sftp_walk_core_with_source, update_host_core, ExecMultiRequest, ImportResult,
+        TeamConfigExport,
     },
     diagnostics::{
         append_diagnostic_log, clear_diagnostic_logs as clear_diagnostic_logs_core,
@@ -39,7 +40,7 @@ use crate::{
         source_from_env, AuditEntry, AuditFilter, ConnectionStatus, ExecMultiResult, ExecRequest,
         ExecResult, ForwardDirection, ForwardRule, HostGroup, HostProfile, PingResult,
         ProxyProfile, RiskLevel, SftpDownloadRequest, SftpExchangeRequest, SftpExchangeResult,
-        SftpResult, SftpUploadRequest,
+        SftpResult, SftpUploadRequest, WalkEntry,
     },
 };
 use serde::Serialize;
@@ -683,6 +684,84 @@ fn local_ls_inner(path: Option<String>) -> anyhow::Result<LocalDirListing> {
 #[tauri::command]
 pub async fn local_ls(path: Option<String>) -> Result<LocalDirListing, String> {
     local_ls_inner(path).map_err(|e| e.to_string())
+}
+
+/// Maximum recursion depth for a local directory walk — a hard guard against
+/// symlink loops or pathologically deep trees. (J4)
+const MAX_LOCAL_WALK_DEPTH: usize = 64;
+
+fn local_walk_inner(
+    root: &Path,
+    rel_prefix: &str,
+    depth: usize,
+    out: &mut Vec<WalkEntry>,
+) -> std::io::Result<()> {
+    if depth >= MAX_LOCAL_WALK_DEPTH {
+        return Ok(());
+    }
+    let mut entries: Vec<_> = fs::read_dir(root)?.filter_map(|e| e.ok()).collect();
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        // Skip symlinks: avoids loops and "open a link-to-dir as a file" errors.
+        if file_type.is_symlink() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let rel = if rel_prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{rel_prefix}/{name}")
+        };
+        let is_dir = file_type.is_dir();
+        let size = if is_dir {
+            0
+        } else {
+            entry.metadata().map(|m| m.len()).unwrap_or(0)
+        };
+        out.push(WalkEntry {
+            rel_path: rel.clone(),
+            is_dir,
+            size,
+        });
+        if is_dir {
+            local_walk_inner(&entry.path(), &rel, depth + 1, out)?;
+        }
+    }
+    Ok(())
+}
+
+/// Recursively enumerate a local directory tree for the file-transfer panel
+/// (J4). Returns descendants as `/`-joined paths relative to `root`, parents
+/// before children, so the same layout can be recreated on a remote host.
+#[tauri::command]
+pub async fn local_walk(root: String) -> Result<Vec<WalkEntry>, String> {
+    let path = expand_local_path(Some(root));
+    let mut out = Vec::new();
+    local_walk_inner(&path, "", 0, &mut out).map_err(|e| e.to_string())?;
+    Ok(out)
+}
+
+/// Create a local directory (and parents) — used when recreating a remote
+/// directory tree under a local download target. (J4)
+#[tauri::command]
+pub async fn local_mkdir(path: String) -> Result<(), String> {
+    let path = expand_local_path(Some(path));
+    fs::create_dir_all(&path).map_err(|e| e.to_string())
+}
+
+/// Recursively enumerate a remote directory tree over SFTP. (J4)
+#[tauri::command]
+pub async fn sftp_walk(host: String, root: String) -> Result<Vec<WalkEntry>, String> {
+    let source = source_from_env("desktop");
+    let command = format!("sftp walk {root}");
+    authorize_desktop_operation(&host, &command, false, &source).await?;
+    sftp_walk_core_with_source(&host, &root, None, Some(source))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 // ── Sessions ─────────────────────────────────────────────────────────────────
@@ -1478,6 +1557,9 @@ pub fn run_tauri() {
             sftp_stat,
             sftp_mkdir,
             local_ls,
+            local_walk,
+            local_mkdir,
+            sftp_walk,
             // Sessions
             session_open,
             session_write,
@@ -1566,6 +1648,43 @@ mod tests {
         assert!(file.modified_unix.is_some());
         assert!(listing.parent.is_some());
         assert!(!listing.home.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn local_walk_inner_enumerates_tree_parents_first() {
+        let dir = std::env::temp_dir().join(format!("a2s-walk-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("sub/deep")).unwrap();
+        std::fs::write(dir.join("root.txt"), b"abc").unwrap();
+        std::fs::write(dir.join("sub/inner.txt"), b"hello").unwrap();
+        std::fs::write(dir.join("sub/deep/leaf.txt"), b"xy").unwrap();
+
+        let mut out = Vec::new();
+        local_walk_inner(&dir, "", 0, &mut out).unwrap();
+        let rels: Vec<&str> = out.iter().map(|e| e.rel_path.as_str()).collect();
+
+        // Files and dirs present with `/`-joined relative paths.
+        assert!(rels.contains(&"root.txt"));
+        assert!(rels.contains(&"sub"));
+        assert!(rels.contains(&"sub/inner.txt"));
+        assert!(rels.contains(&"sub/deep"));
+        assert!(rels.contains(&"sub/deep/leaf.txt"));
+
+        // A parent directory always appears before its children.
+        let pos = |p: &str| rels.iter().position(|r| *r == p).unwrap();
+        assert!(pos("sub") < pos("sub/inner.txt"));
+        assert!(pos("sub") < pos("sub/deep"));
+        assert!(pos("sub/deep") < pos("sub/deep/leaf.txt"));
+
+        // Sizes are reported for files; directories report 0.
+        let leaf = out
+            .iter()
+            .find(|e| e.rel_path == "sub/deep/leaf.txt")
+            .unwrap();
+        assert_eq!(leaf.size, 2);
+        assert!(!leaf.is_dir);
+        assert!(out.iter().find(|e| e.rel_path == "sub").unwrap().is_dir);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

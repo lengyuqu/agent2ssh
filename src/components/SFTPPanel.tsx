@@ -2,6 +2,7 @@ import {
   ArrowDownUp,
   ArrowLeft,
   ArrowRight,
+  CheckSquare,
   ChevronUp,
   File,
   Folder,
@@ -11,6 +12,7 @@ import {
   Loader2,
   RefreshCw,
   Server,
+  Square,
   X,
 } from "lucide-react";
 import { useState } from "react";
@@ -332,20 +334,24 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
     else void loadLocal(side, path);
   }
 
-  function openEntry(side: Side, entry: FileEntry) {
-    const s = getSide(side);
-    if (entry.isDir) {
-      navigateTo(side, joinForKind(s.kind, s.path, entry.name));
-      return;
-    }
-    // Toggle file selection (multi-select).
-    const full = joinForKind(s.kind, s.path, entry.name);
+  function toggleSelect(side: Side, full: string) {
     setSide(side, (prev) => ({
       ...prev,
       selected: prev.selected.includes(full)
         ? prev.selected.filter((p) => p !== full)
         : [...prev.selected, full],
     }));
+  }
+
+  function openEntry(side: Side, entry: FileEntry) {
+    const s = getSide(side);
+    // Row body: folders navigate, files toggle selection. Either can also be
+    // selected for transfer via the leading checkbox (J4 covers folders).
+    if (entry.isDir) {
+      navigateTo(side, joinForKind(s.kind, s.path, entry.name));
+      return;
+    }
+    toggleSelect(side, joinForKind(s.kind, s.path, entry.name));
   }
 
   function goUp(side: Side) {
@@ -397,10 +403,7 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
         if (!s.host) return;
         await api.sftpMkdir(s.host, target);
       } else {
-        // Local mkdir reuses sftp-style path through the OS via a tiny upload? Not
-        // available; local folder creation is out of scope, so guide the user.
-        setError(t("Create local folders in your file manager"));
-        return;
+        await api.localMkdir(target);
       }
       await refreshSide(side);
     } catch (err) {
@@ -452,35 +455,74 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
     void executeTransfer(plan);
   }
 
+  // Expand the selection into concrete destination dirs to create and files to
+  // transfer. Selected directories are walked recursively (J4); selected files
+  // map straight through. `rel_path` from a walk is "/"-joined on both sides.
+  async function buildTransferUnits(
+    sourceSide: Side,
+    destSide: Side,
+    paths: string[]
+  ): Promise<{ dirs: string[]; files: Array<{ src: string; dest: string; size: number }> }> {
+    const s = getSide(sourceSide);
+    const d = getSide(destSide);
+    const entryByName = new Map(s.entries.map((e) => [e.name, e]));
+    const dirs: string[] = [];
+    const files: Array<{ src: string; dest: string; size: number }> = [];
+
+    for (const path of paths) {
+      const name = basenameOf(path);
+      const entry = entryByName.get(name);
+      if (!entry?.isDir) {
+        files.push({ src: path, dest: joinForKind(d.kind, d.path, name), size: entry?.size ?? 0 });
+        continue;
+      }
+      // Directory: enumerate its tree and recreate it under dest/<name>.
+      const walk = s.kind === "local" ? await api.localWalk(path) : await api.sftpWalk(s.host, path);
+      const destRoot = joinForKind(d.kind, d.path, name);
+      dirs.push(destRoot);
+      for (const w of walk) {
+        const dest = joinForKind(d.kind, destRoot, w.rel_path);
+        if (w.is_dir) dirs.push(dest);
+        else files.push({ src: joinForKind(s.kind, path, w.rel_path), dest, size: w.size });
+      }
+    }
+    return { dirs, files };
+  }
+
   async function executeTransfer(plan: PendingTransfer) {
     const s = getSide(plan.sourceSide);
     const d = getSide(plan.destSide);
     const started = performance.now();
     setError(null);
-    // Best-effort total from known source sizes (files added via the native
-    // dialog aren't in the listing, so they contribute 0 until transferred).
-    const sizeByName = new Map(s.entries.filter((e) => !e.isDir).map((e) => [e.name, e.size ?? 0]));
-    const bytesTotal = plan.paths.reduce((sum, p) => sum + (sizeByName.get(basenameOf(p)) ?? 0), 0);
-    setTransfer({ total: plan.paths.length, done: 0, current: "", bytesDone: 0, bytesTotal });
+    setTransfer({ total: 0, done: 0, current: t("Preparing…"), bytesDone: 0, bytesTotal: 0 });
     try {
-      for (const path of plan.paths) {
-        const name = basenameOf(path);
-        setTransfer((prev) => (prev ? { ...prev, current: name } : prev));
-        const destPath = joinForKind(d.kind, d.path, name);
+      const { dirs, files } = await buildTransferUnits(plan.sourceSide, plan.destSide, plan.paths);
+      const bytesTotal = files.reduce((sum, f) => sum + f.size, 0);
+      setTransfer({ total: files.length, done: 0, current: "", bytesDone: 0, bytesTotal });
+
+      // Create destination directories first (the walk lists parents before
+      // children; mkdir is `-p`/create_dir_all so order and repeats are safe).
+      for (const dir of dirs) {
+        if (d.kind === "remote") await api.sftpMkdir(d.host, dir);
+        else await api.localMkdir(dir);
+      }
+
+      for (const f of files) {
+        setTransfer((prev) => (prev ? { ...prev, current: basenameOf(f.src) } : prev));
         let bytes = 0;
         if (s.kind === "local" && d.kind === "remote") {
-          bytes = (await api.sftpUpload(d.host, path, destPath)).bytes;
+          bytes = (await api.sftpUpload(d.host, f.src, f.dest)).bytes;
         } else if (s.kind === "remote" && d.kind === "local") {
-          bytes = (await api.sftpDownload(s.host, path, destPath)).bytes;
+          bytes = (await api.sftpDownload(s.host, f.src, f.dest)).bytes;
         } else if (s.kind === "remote" && d.kind === "remote") {
-          bytes = (await api.sftpExchange(s.host, path, d.host, destPath)).uploaded.bytes;
+          bytes = (await api.sftpExchange(s.host, f.src, d.host, f.dest)).uploaded.bytes;
         }
         setTransfer((prev) =>
           prev ? { ...prev, done: prev.done + 1, bytesDone: prev.bytesDone + bytes } : prev
         );
       }
       setLastResult({
-        count: plan.paths.length,
+        count: files.length,
         dest: d.path,
         ms: Math.round(performance.now() - started),
       });
@@ -787,7 +829,7 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
                 return (
                   <div
                     key={`${entry.name}-${entry.isDir}`}
-                    draggable={!entry.isDir && !isTransferring}
+                    draggable={!isTransferring}
                     onDragStart={(e) => onEntryDragStart(side, entry, e)}
                     onClick={() => openEntry(side, entry)}
                     title={full}
@@ -795,6 +837,21 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
                       selected ? "bg-primary/12 text-primary" : ""
                     }`}
                   >
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleSelect(side, full);
+                      }}
+                      title={t("Select for transfer")}
+                      className="shrink-0 text-muted-foreground hover:text-foreground"
+                    >
+                      {selected ? (
+                        <CheckSquare size={15} className="text-primary" />
+                      ) : (
+                        <Square size={15} />
+                      )}
+                    </button>
                     {entry.isDir ? (
                       <Folder size={15} className="shrink-0 text-warning" />
                     ) : (

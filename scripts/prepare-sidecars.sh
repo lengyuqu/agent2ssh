@@ -70,6 +70,20 @@ for pair in "${BINS[@]}"; do
   cp "$src" "$dst"
   chmod +x "$dst"
   echo "    $src -> $dst"
+
+  # Tauri's macOS bundler may normalize Cargo binary names with dashes to
+  # underscores while copying companion binaries from target/release.
+  if [[ "$src_name" == *"-"* ]]; then
+    alias_src="$RELEASE_DIR/${src_name//-/_}${EXT}"
+    cp "$src" "$alias_src"
+    chmod +x "$alias_src"
+
+    host_release_dir="$TAURI_DIR/target/release"
+    mkdir -p "$host_release_dir"
+    host_alias_src="$host_release_dir/${src_name//-/_}${EXT}"
+    cp "$src" "$host_alias_src"
+    chmod +x "$host_alias_src"
+  fi
 done
 
 echo ""

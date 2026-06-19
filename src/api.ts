@@ -20,6 +20,7 @@ import type {
   HostProfile,
   ImportResult,
   LocalDirListing,
+  WalkEntry,
   McpAgentConfigureResult,
   McpAgentConfigStatus,
   PingResult,
@@ -197,6 +198,10 @@ export const api = {
     }),
   localLs: (path?: string | null) =>
     invoke<LocalDirListing>("local_ls", { path: path ?? null }),
+  localWalk: (root: string) => invoke<WalkEntry[]>("local_walk", { root }),
+  localMkdir: (path: string) => invoke<void>("local_mkdir", { path }),
+  sftpWalk: (host: string, root: string) =>
+    invoke<WalkEntry[]>("sftp_walk", { host, root }),
 
   // Sessions
   sessionOpen: (host: string) => invoke<string>("session_open", { host }),

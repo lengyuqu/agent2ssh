@@ -200,6 +200,13 @@ export type LocalDirListing = {
   entries: LocalDirEntry[];
 };
 
+// Rust: types.rs — WalkEntry (recursive directory walk, J4)
+export type WalkEntry = {
+  rel_path: string;
+  is_dir: boolean;
+  size: number;
+};
+
 // Rust: session_list_core() returns Vec<(Uuid, String)> which serializes as
 // an array of two-element arrays: [id_string, host_string].
 export type SessionInfo = [string, string]; // [id, host]

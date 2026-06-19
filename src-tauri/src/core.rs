@@ -19,7 +19,7 @@ use crate::{
         default_host_group, source_from_env, AuditEntry, AuditFilter, BatchStrategy,
         ExecMultiBatchResult, ExecMultiResult, ExecRequest, ExecResult, HostFilter, HostGroup,
         HostProfile, PingResult, ProxyProfile, RiskLevel, SftpDirection, SftpDownloadRequest,
-        SftpResult, SftpUploadRequest,
+        SftpResult, SftpUploadRequest, WalkEntry,
     },
 };
 
@@ -1923,6 +1923,85 @@ pub async fn sftp_mkdir_core_with_source(
         },
     )
     .await
+}
+
+/// Maximum recursion depth for a remote directory walk — a hard guard against
+/// symlink loops or pathologically deep trees. (J4)
+const MAX_WALK_DEPTH: usize = 64;
+
+fn sftp_is_symlink(stat: &ssh2::FileStat) -> bool {
+    stat.perm
+        .map(|perm| (perm & SFTP_FILE_TYPE_MASK) == SFTP_FILE_TYPE_SYMLINK)
+        .unwrap_or(false)
+}
+
+fn walk_remote_dir(
+    sftp: &ssh2::Sftp,
+    abs_dir: &str,
+    rel_prefix: &str,
+    depth: usize,
+    out: &mut Vec<WalkEntry>,
+) -> Result<()> {
+    if depth >= MAX_WALK_DEPTH {
+        return Ok(());
+    }
+    let mut entries = sftp
+        .readdir(Path::new(abs_dir))
+        .with_context(|| format!("failed to list remote directory {abs_dir}"))?;
+    entries.sort_by(|(left, _), (right, _)| sftp_entry_name(left).cmp(&sftp_entry_name(right)));
+    for (entry_path, stat) in entries {
+        let name = sftp_entry_name(&entry_path);
+        if name == "." || name == ".." {
+            continue;
+        }
+        // Skip symlinks entirely: avoids loops and "open a link-to-dir as a file"
+        // errors during the per-file transfer. MAX_WALK_DEPTH bounds the rest.
+        if sftp_is_symlink(&stat) {
+            continue;
+        }
+        let rel = if rel_prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{rel_prefix}/{name}")
+        };
+        let abs = format!("{}/{}", abs_dir.trim_end_matches('/'), name);
+        let is_dir = sftp_is_directory(&stat);
+        // Push the node before recursing so parents precede their children.
+        out.push(WalkEntry {
+            rel_path: rel.clone(),
+            is_dir,
+            size: stat.size.unwrap_or(0),
+        });
+        if is_dir {
+            walk_remote_dir(sftp, &abs, &rel, depth + 1, out)?;
+        }
+    }
+    Ok(())
+}
+
+/// Recursively enumerate a remote directory tree (J4). Returns every descendant
+/// as a [`WalkEntry`] with a `/`-joined path relative to `root`, parents before
+/// children. Read-only; the per-file transfers that follow go through the
+/// authorized upload/download/exchange paths.
+pub async fn sftp_walk_core_with_source(
+    host_name: &str,
+    root: &str,
+    timeout_secs: Option<u64>,
+    _source: Option<String>,
+) -> Result<Vec<WalkEntry>> {
+    let host = resolve_host(host_name)?;
+    let root = root.to_string();
+    let timeout = timeout_secs.unwrap_or(60);
+    let entries = tokio::task::spawn_blocking(move || -> Result<Vec<WalkEntry>> {
+        let session = connect_embedded_ssh(&host, timeout)?;
+        let sftp = session.sftp()?;
+        let mut out = Vec::new();
+        walk_remote_dir(&sftp, &root, "", 0, &mut out)?;
+        Ok(out)
+    })
+    .await
+    .context("embedded SFTP walk task failed")??;
+    Ok(entries)
 }
 
 // ── SSH config import ─────────────────────────────────────────────────────────

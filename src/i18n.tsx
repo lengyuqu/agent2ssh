@@ -270,6 +270,8 @@ const zh: Record<string, string> = {
     "目标位置已存在 {count} 个同名文件，将被替换：",
   "Overwrite": "覆盖",
   "Show more ({count} hidden)": "显示更多（还有 {count} 项）",
+  "Select for transfer": "选择以传输",
+  "Preparing…": "准备中…",
   "Select a source file": "请选择左侧文件",
   "Select a file on the right": "请选择右侧文件",
   "(empty)": "（空）",

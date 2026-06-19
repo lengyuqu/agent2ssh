@@ -330,6 +330,18 @@ pub struct SftpResult {
     pub bytes: u64,
 }
 
+/// One node in a recursive directory walk (J4), relative to the walked root.
+/// Parents always precede their children so a consumer can `mkdir` in order.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalkEntry {
+    /// Path relative to the walk root, joined with `/` (POSIX-style) on both
+    /// local and remote so the same relative layout can be recreated on the
+    /// other side.
+    pub rel_path: String,
+    pub is_dir: bool,
+    pub size: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SftpExchangeResult {
     pub downloaded: SftpResult,
