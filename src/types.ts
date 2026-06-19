@@ -168,6 +168,7 @@ export type SftpResult = {
   remote_path: string;
   direction: "upload" | "download";
   duration_ms: number;
+  bytes: number;
 };
 
 export type SftpExchangeRequest = {

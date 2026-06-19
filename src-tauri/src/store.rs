@@ -710,67 +710,87 @@ pub fn list_audit_raw(filter: &AuditFilter) -> Result<Vec<AuditEntry>> {
 
     let search_lower = filter.search.as_deref().map(|s| s.to_lowercase());
 
-    let mut entries: Vec<AuditEntry> = raw
-        .lines()
-        .filter_map(|line| serde_json::from_str::<AuditEntry>(line).ok())
-        .filter(|e| {
-            if let Some(h) = &filter.host {
-                if !e.host.eq_ignore_ascii_case(h) {
-                    return false;
-                }
+    let matches = |e: &AuditEntry| -> bool {
+        if let Some(h) = &filter.host {
+            if !e.host.eq_ignore_ascii_case(h) {
+                return false;
             }
-            if let Some(r) = filter.risk_level {
-                if e.risk_level != r {
-                    return false;
-                }
+        }
+        if let Some(r) = filter.risk_level {
+            if e.risk_level != r {
+                return false;
             }
-            if let Some(code) = filter.exit_code {
-                if e.exit_code != Some(code) {
-                    return false;
-                }
+        }
+        if let Some(code) = filter.exit_code {
+            if e.exit_code != Some(code) {
+                return false;
             }
-            if let Some(since) = since {
-                if e.ts < since {
-                    return false;
-                }
+        }
+        if let Some(since) = since {
+            if e.ts < since {
+                return false;
             }
-            if let Some(until) = until {
-                if e.ts > until {
-                    return false;
-                }
+        }
+        if let Some(until) = until {
+            if e.ts > until {
+                return false;
             }
-            // F6-1: full-text search (case-insensitive substring on command and host)
-            if let Some(ref needle) = search_lower {
-                if !e.command.to_lowercase().contains(needle)
-                    && !e.host.to_lowercase().contains(needle)
-                    && !e
-                        .source
-                        .as_deref()
-                        .unwrap_or("")
-                        .to_lowercase()
-                        .contains(needle)
-                {
-                    return false;
-                }
+        }
+        // F6-1: full-text search (case-insensitive substring on command and host)
+        if let Some(ref needle) = search_lower {
+            if !e.command.to_lowercase().contains(needle)
+                && !e.host.to_lowercase().contains(needle)
+                && !e
+                    .source
+                    .as_deref()
+                    .unwrap_or("")
+                    .to_lowercase()
+                    .contains(needle)
+            {
+                return false;
             }
-            // F6-1: command pattern (glob-style match)
-            if let Some(ref pattern) = filter.command_pattern {
-                if !glob_match(pattern, &e.command) {
-                    return false;
-                }
+        }
+        // F6-1: command pattern (glob-style match)
+        if let Some(ref pattern) = filter.command_pattern {
+            if !glob_match(pattern, &e.command) {
+                return false;
             }
-            // F6-1: host group filtering
-            if let Some(ref hosts_set) = matching_hosts {
-                if !hosts_set.contains(&e.host) {
-                    return false;
-                }
+        }
+        // F6-1: host group filtering
+        if let Some(ref hosts_set) = matching_hosts {
+            if !hosts_set.contains(&e.host) {
+                return false;
             }
-            true
-        })
-        .collect();
+        }
+        true
+    };
 
-    entries.reverse();
-    entries.truncate(filter.limit);
+    // J2: scan newest-first and stop early. The result is the newest `limit`
+    // matching entries (newest-first), identical to the previous
+    // collect-all → reverse → truncate, but without parsing the whole file in
+    // the common "recent N" case.
+    let mut entries: Vec<AuditEntry> = Vec::new();
+    for line in raw.lines().rev() {
+        if entries.len() >= filter.limit {
+            break;
+        }
+        let Ok(entry) = serde_json::from_str::<AuditEntry>(line) else {
+            continue;
+        };
+        // Entries are appended with `ts = Utc::now()`, so file order is
+        // non-decreasing in time. Reading backward, once we pass `since` every
+        // earlier line is older too — bounding metrics/trend (since-window)
+        // scans without parsing ancient history. `matches` still rechecks the
+        // bound, so this only ever stops work earlier, never changes the result.
+        if let Some(since) = since {
+            if entry.ts < since {
+                break;
+            }
+        }
+        if matches(&entry) {
+            entries.push(entry);
+        }
+    }
     Ok(entries)
 }
 
@@ -1177,6 +1197,78 @@ mod tests {
 
         std::env::remove_var("AGENT2SSH_CONFIG_DIR");
         let _ = std::fs::remove_dir_all(&config_dir);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn list_audit_raw_reverse_early_stop_is_correct() {
+        // J2: the reverse early-stop scan must return the same newest-first,
+        // limit-bounded results as the previous full parse, including under
+        // host and since filters.
+        let dir =
+            std::env::temp_dir().join(format!("agent2ssh-auditscan-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("AGENT2SSH_CONFIG_DIR", &dir);
+
+        let n: usize = 5000;
+        let base = chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_000, 0).unwrap();
+        let mut body = String::new();
+        for i in 0..n {
+            let entry = super::AuditEntry {
+                id: uuid::Uuid::new_v4(),
+                ts: base + chrono::Duration::seconds(i as i64),
+                host: if i % 2 == 0 {
+                    "alpha".into()
+                } else {
+                    "beta".into()
+                },
+                command: format!("cmd {i}"),
+                exit_code: Some(0),
+                duration_ms: 1,
+                risk_level: super::RiskLevel::Low,
+                reason: None,
+                change_id: None,
+                source: None,
+            };
+            body.push_str(&serde_json::to_string(&entry).unwrap());
+            body.push('\n');
+        }
+        std::fs::write(super::audit_path().unwrap(), body).unwrap();
+
+        let commands = |filter: &AuditFilter| -> Vec<String> {
+            super::list_audit_raw(filter)
+                .unwrap()
+                .into_iter()
+                .map(|e| e.command)
+                .collect()
+        };
+
+        // Newest 3, no filter -> highest indices, newest first.
+        let recent = commands(&AuditFilter {
+            limit: 3,
+            ..Default::default()
+        });
+        assert_eq!(recent, vec!["cmd 4999", "cmd 4998", "cmd 4997"]);
+
+        // Host filter: only even indices are "alpha".
+        let alpha = commands(&AuditFilter {
+            host: Some("alpha".into()),
+            limit: 3,
+            ..Default::default()
+        });
+        assert_eq!(alpha, vec!["cmd 4998", "cmd 4996", "cmd 4994"]);
+
+        // Since window: entries with ts >= base+4997s -> indices 4997..4999.
+        let since = (base + chrono::Duration::seconds(4997)).to_rfc3339();
+        let windowed = commands(&AuditFilter {
+            since: Some(since),
+            limit: usize::MAX,
+            ..Default::default()
+        });
+        assert_eq!(windowed, vec!["cmd 4999", "cmd 4998", "cmd 4997"]);
+
+        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -435,3 +435,15 @@ S9(0.1.1 已收口)
 | I3 | ✅ 已完成 | 低 | Claude | 环境变量集中文档 | `configuration-guide.md` 新增「环境变量」表，列全量内置 `AGENT2SSH_*`（`CONFIG_DIR`/`SOURCE`/`DAEMON_ADDR`/`TRACE_ID`/`LOG`/`LOG_FORMAT`/`BRIDGE_DEPS`，含作用域/默认值/说明），并澄清 `token_env` 引用的是用户自定义变量（非内置）；`architecture.md` 的 Diagnostics 段补 `AGENT2SSH_BRIDGE_DEPS`、Control Plane 段补 `AGENT2SSH_DAEMON_ADDR` 解析与优雅退出 |
 | I4 | ✅ 已完成 | 低 | Claude | 监听地址端到端回归 | 新增 `daemon_honors_configured_listen_address_end_to_end`（`daemon_integration.rs`）：预留随机空闲端口写入 `AGENT2SSH_DAEMON_ADDR`，起真实 axum `/health` 服务绑到 `local_daemon_addr()`，再经 `daemon_health_ok()`（走 I1 resolver）跑通，断言 resolver/URL 一致；非回环 warn 决策由 lib 化的 `is_loopback_addr` 单测覆盖。daemon feature 下测试通过 |
 | I5 | ✅ 已完成 | 中 | Claude | 配置热加载一致性审计 | 产出 `docs/reports/i5-config-cache-audit.md`：盘点 11 个配置文件的读热度/写入方/失效语义，给出纳入/保持读盘的结论（含 `execution_gate` 保持读盘以优先急停新鲜度的判断）。落地 `hosts.json` 接入 `ConfigCache`——`load_config` 走缓存、`save_config_unlocked`（全部写入唯一漏斗）成功后 `invalidate`，新增 `load_config_reflects_saved_hosts_via_cache` 单测验证写后不返回陈旧值。两套 check、两套 test 全绿 |
+
+## J · 性能与效率优化
+
+目标：在功能基本铺齐后，针对随数据量增长会变慢的热路径做一轮效率优化——配置/审计的重复读盘解析、前端大列表的全量渲染、以及刚落地的 SFTP 面板里"只能传文件、进度只数文件个数"的粗糙处。排序原则：每次操作都走的热路径优先，前端可感知卡顿次之，功能补全垫后。每项都要带量化或回归验收，避免"优化"引入正确性回退。
+
+| 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
+|------|------|--------|--------|------|----------|
+| J1 | ✅ 已完成 | 中 | Claude | policy.toml 热路径缓存 | `load_policy_file` 接入 `ConfigCache`（按解析后的 `policy.toml`/`policy.json` 路径为键，无文件时回退 `policy.toml` 路径键，使"无 policy"探测也被记忆化），`save_policy_approval_policies` 写后 `invalidate`；"policy 只升级风险"语义不变。新增 `load_policy_file_reflects_saves_via_cache`（无→建→存三段验证写后不陈旧）。两套 check、两套 test 全绿 |
+| J2 | ✅ 已完成 | 中 | Claude | 审计日志按需读取 | `list_audit_raw` 改为反向（newest-first）扫描 + 早停：到达 `filter.limit` 即停（与旧"全解析→reverse→truncate"等价，但常见"最近 N 条"不再解析整文件）；并利用审计 append 即 `ts=now()` 的时间有序性，遇到 `ts<since` 即停（`compute_metrics_trend` 的 since 窗口因此也有界）。`matches` 仍复核所有条件，早停只提前停止、不改结果。新增 5000 行合成日志回归（limit/host/since 三种过滤断言结果精确一致）。两套 test 全绿 |
+| J3 | ✅ 已完成 | 中 | Claude | 前端大列表渲染优化 | SFTP 列表是真正无界的来源（远端目录可上万条），加 `viewCap`（每侧每次最多挂载 400 行 + "显示更多"，导航/刷新重置）；`AuditPanel` 加 `renderCap`（200 + 显示更多）兜住 limit 被调大的情况。`DiagnosticsPanel` 不存在（诊断日志在 `SettingsMenu`，后端硬上限 1000，已有界，未改）。`tsc --noEmit`、`npm run build` 通过 |
+| J4 | ⬜ 待认领 | 中 | - | SFTP 目录递归传输 | 新版 SFTP 面板只能传文件（`draggable={!entry.isDir}`，文件夹不可选/不可拖）。补齐目录递归传输：遍历源目录树、在目标侧 `mkdir`、逐文件 upload/download/exchange，并把覆盖确认/进度 UX 扩展到目录场景。后端加遍历/递归 helper + 单测；`tsc`、`npm build`、两套 cargo test 全绿。**（暂缓：需要文件夹选择交互改造 + 远端递归 readdir 走真实主机才能验证，含 symlink 环路等风险；建议作为独立改动带真机 smoke 落地，不在本批一口气盲做）** |
+| J5 | ✅ 已完成 | 低 | Claude | SFTP 真实字节进度 | `SftpResult` 新增 `bytes`（`#[serde(default)]`），upload/download core 从 `std::io::copy` 返回值取已传字节；exchange 取 `uploaded.bytes`。前端进度条改为：选区已知大小求和得 `bytesTotal`，逐文件累加 `bytesDone`，有总量时进度按字节推进并显示 `X / Y`，否则回退按文件个数。`tsc`/`npm build`/两套 check/两套 test 通过（字节值源自 `io::copy`，真机数值留待手测） |

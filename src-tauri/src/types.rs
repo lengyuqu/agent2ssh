@@ -324,6 +324,10 @@ pub struct SftpResult {
     pub remote_path: String,
     pub direction: SftpDirection,
     pub duration_ms: u128,
+    /// Number of bytes transferred, so callers (e.g. the desktop transfer
+    /// progress bar) can report data volume, not just file count. (J5)
+    #[serde(default)]
+    pub bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

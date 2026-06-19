@@ -1441,7 +1441,7 @@ pub async fn sftp_upload_core_with_source(
     let embedded_host = host.clone();
     let remote_path = request.remote_path.clone();
     let local_for_task = local.clone();
-    let transfer_result = tokio::task::spawn_blocking(move || -> Result<()> {
+    let transfer_result = tokio::task::spawn_blocking(move || -> Result<u64> {
         let session = connect_embedded_ssh(&embedded_host, 60)?;
         let sftp = session.sftp()?;
         let mut local_file = std::fs::File::open(&local_for_task)
@@ -1449,28 +1449,31 @@ pub async fn sftp_upload_core_with_source(
         let mut remote_file = sftp
             .create(Path::new(&remote_path))
             .with_context(|| format!("failed to create remote file {remote_path}"))?;
-        std::io::copy(&mut local_file, &mut remote_file)?;
-        Ok(())
+        let copied = std::io::copy(&mut local_file, &mut remote_file)?;
+        Ok(copied)
     })
     .await
     .context("embedded SFTP upload task failed")?;
 
     let duration_ms = started.elapsed().as_millis();
-    if let Err(error) = transfer_result {
-        let message = error.to_string();
-        let result = ExecResult {
-            host: request.host.clone(),
-            command: command.clone(),
-            exit_code: None,
-            stdout: String::new(),
-            stderr: message.clone(),
-            duration_ms,
-            risk_level: risk,
-            truncated: false,
-        };
-        let _ = append_audit(&result, risk, Some(&message), None, Some(&source));
-        return Err(error);
-    }
+    let bytes = match transfer_result {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            let message = error.to_string();
+            let result = ExecResult {
+                host: request.host.clone(),
+                command: command.clone(),
+                exit_code: None,
+                stdout: String::new(),
+                stderr: message.clone(),
+                duration_ms,
+                risk_level: risk,
+                truncated: false,
+            };
+            let _ = append_audit(&result, risk, Some(&message), None, Some(&source));
+            return Err(error);
+        }
+    };
 
     let result = SftpResult {
         host: request.host,
@@ -1478,6 +1481,7 @@ pub async fn sftp_upload_core_with_source(
         remote_path: request.remote_path,
         direction: SftpDirection::Upload,
         duration_ms,
+        bytes,
     };
     let audit_result = ExecResult {
         host: result.host.clone(),
@@ -1532,7 +1536,7 @@ pub async fn sftp_download_core_with_source(
     let embedded_host = host.clone();
     let remote_path = request.remote_path.clone();
     let local_for_task = local.clone();
-    let transfer_result = tokio::task::spawn_blocking(move || -> Result<()> {
+    let transfer_result = tokio::task::spawn_blocking(move || -> Result<u64> {
         let session = connect_embedded_ssh(&embedded_host, 60)?;
         let sftp = session.sftp()?;
         let mut remote_file = sftp
@@ -1540,28 +1544,31 @@ pub async fn sftp_download_core_with_source(
             .with_context(|| format!("failed to open remote file {remote_path}"))?;
         let mut local_file = std::fs::File::create(&local_for_task)
             .with_context(|| format!("failed to create local file {local_for_task}"))?;
-        std::io::copy(&mut remote_file, &mut local_file)?;
-        Ok(())
+        let copied = std::io::copy(&mut remote_file, &mut local_file)?;
+        Ok(copied)
     })
     .await
     .context("embedded SFTP download task failed")?;
 
     let duration_ms = started.elapsed().as_millis();
-    if let Err(error) = transfer_result {
-        let message = error.to_string();
-        let result = ExecResult {
-            host: request.host.clone(),
-            command: command.clone(),
-            exit_code: None,
-            stdout: String::new(),
-            stderr: message.clone(),
-            duration_ms,
-            risk_level: risk,
-            truncated: false,
-        };
-        let _ = append_audit(&result, risk, Some(&message), None, Some(&source));
-        return Err(error);
-    }
+    let bytes = match transfer_result {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            let message = error.to_string();
+            let result = ExecResult {
+                host: request.host.clone(),
+                command: command.clone(),
+                exit_code: None,
+                stdout: String::new(),
+                stderr: message.clone(),
+                duration_ms,
+                risk_level: risk,
+                truncated: false,
+            };
+            let _ = append_audit(&result, risk, Some(&message), None, Some(&source));
+            return Err(error);
+        }
+    };
 
     let result = SftpResult {
         host: request.host,
@@ -1569,6 +1576,7 @@ pub async fn sftp_download_core_with_source(
         remote_path: request.remote_path,
         direction: SftpDirection::Download,
         duration_ms,
+        bytes,
     };
     let audit_result = ExecResult {
         host: result.host.clone(),

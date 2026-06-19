@@ -63,10 +63,24 @@ pub fn existing_policy_path() -> Result<Option<PathBuf>> {
     Ok(None)
 }
 
+/// Cache for the parsed unified policy file (J1). `load_policy_file` is on a hot
+/// path — every risk classification / authorization consults it — yet the file
+/// changes rarely. The `(mtime, len)` signature picks up external edits, and
+/// `save_policy_approval_policies` invalidates after an in-process write. When no
+/// policy file exists the cache is keyed by the canonical `policy.toml` path so
+/// repeated "no policy" probes are also memoized.
+static POLICY_CACHE: crate::config_cache::ConfigCache<Option<AgentPolicyFile>> =
+    crate::config_cache::ConfigCache::new();
+
 pub fn load_policy_file() -> Result<Option<AgentPolicyFile>> {
-    existing_policy_path()?
-        .map(|path| load_policy_from_path(&path))
-        .transpose()
+    let resolved = existing_policy_path()?;
+    let key = match &resolved {
+        Some(path) => path.clone(),
+        None => policy_toml_path()?,
+    };
+    POLICY_CACHE.load_with(&key, || {
+        resolved.as_deref().map(load_policy_from_path).transpose()
+    })
 }
 
 pub fn load_policy_from_path(path: &Path) -> Result<AgentPolicyFile> {
@@ -111,6 +125,9 @@ pub fn save_policy_approval_policies(policies: &[ApprovalPolicy]) -> Result<bool
     let mut policy = load_policy_from_path(&path)?;
     policy.approval.policies = policies.to_vec();
     save_policy_to_path(&path, &policy)?;
+    // Drop the cached parse so this process reads the new policy immediately,
+    // independent of filesystem mtime granularity. (J1)
+    POLICY_CACHE.invalidate();
     Ok(true)
 }
 
@@ -159,5 +176,38 @@ requires_approval = true
             policy.risk.medium.patterns,
             vec!["apt install*".to_string()]
         );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_policy_file_reflects_saves_via_cache() {
+        let dir = std::env::temp_dir().join(format!("a2s-policy-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("AGENT2SSH_CONFIG_DIR", &dir);
+        POLICY_CACHE.invalidate();
+
+        // No policy file yet -> None (also populates the cache).
+        assert!(load_policy_file().unwrap().is_none());
+
+        // Creating the file is picked up via the (mtime, len) signature change.
+        std::fs::write(
+            dir.join("policy.toml"),
+            "[[approval.policies]]\nname = \"p1\"\nmin_risk = \"high\"\nrequires_approval = true\n",
+        )
+        .unwrap();
+        let loaded = load_policy_file().unwrap().unwrap();
+        assert_eq!(loaded.approval.policies.len(), 1);
+
+        // An in-process save must invalidate so the next load is not stale.
+        assert!(save_policy_approval_policies(&[]).unwrap());
+        assert!(load_policy_file()
+            .unwrap()
+            .unwrap()
+            .approval
+            .policies
+            .is_empty());
+
+        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -54,12 +54,19 @@ type SideState = {
   filter: LsFilter;
   sortKey: SortKey;
   sortDir: SortDir;
+  /** Render cap (J3): a directory can have thousands of entries; only this many
+   * rows are mounted at once, with a "show more" control to reveal the rest. */
+  viewCap: number;
 };
+
+const VIEW_CAP_STEP = 400;
 
 type TransferProgress = {
   total: number;
   done: number;
   current: string;
+  bytesDone: number;
+  bytesTotal: number;
 };
 
 type PendingTransfer = {
@@ -89,6 +96,7 @@ function makeSide(kind: LocationKind, host: string): SideState {
     filter: "all",
     sortKey: "name",
     sortDir: "asc",
+    viewCap: VIEW_CAP_STEP,
   };
 }
 
@@ -277,6 +285,7 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
         loading: false,
         loaded: true,
         selected: [],
+        viewCap: VIEW_CAP_STEP,
         error: result.exit_code === 0 ? null : result.stderr || t("Could not read this folder"),
       });
     } catch (err) {
@@ -297,6 +306,7 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
         loading: false,
         loaded: true,
         selected: [],
+        viewCap: VIEW_CAP_STEP,
         error: null,
       });
     } catch (err) {
@@ -447,20 +457,27 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
     const d = getSide(plan.destSide);
     const started = performance.now();
     setError(null);
-    setTransfer({ total: plan.paths.length, done: 0, current: "" });
+    // Best-effort total from known source sizes (files added via the native
+    // dialog aren't in the listing, so they contribute 0 until transferred).
+    const sizeByName = new Map(s.entries.filter((e) => !e.isDir).map((e) => [e.name, e.size ?? 0]));
+    const bytesTotal = plan.paths.reduce((sum, p) => sum + (sizeByName.get(basenameOf(p)) ?? 0), 0);
+    setTransfer({ total: plan.paths.length, done: 0, current: "", bytesDone: 0, bytesTotal });
     try {
       for (const path of plan.paths) {
         const name = basenameOf(path);
         setTransfer((prev) => (prev ? { ...prev, current: name } : prev));
         const destPath = joinForKind(d.kind, d.path, name);
+        let bytes = 0;
         if (s.kind === "local" && d.kind === "remote") {
-          await api.sftpUpload(d.host, path, destPath);
+          bytes = (await api.sftpUpload(d.host, path, destPath)).bytes;
         } else if (s.kind === "remote" && d.kind === "local") {
-          await api.sftpDownload(s.host, path, destPath);
+          bytes = (await api.sftpDownload(s.host, path, destPath)).bytes;
         } else if (s.kind === "remote" && d.kind === "remote") {
-          await api.sftpExchange(s.host, path, d.host, destPath);
+          bytes = (await api.sftpExchange(s.host, path, d.host, destPath)).uploaded.bytes;
         }
-        setTransfer((prev) => (prev ? { ...prev, done: prev.done + 1 } : prev));
+        setTransfer((prev) =>
+          prev ? { ...prev, done: prev.done + 1, bytesDone: prev.bytesDone + bytes } : prev
+        );
       }
       setLastResult({
         count: plan.paths.length,
@@ -763,7 +780,8 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
             ) : visible.length === 0 ? (
               <div className="p-6 text-center text-sm text-muted-foreground">{t("(empty)")}</div>
             ) : (
-              visible.map((entry) => {
+              <>
+                {visible.slice(0, s.viewCap).map((entry) => {
                 const full = joinForKind(s.kind, s.path, entry.name);
                 const selected = s.selected.includes(full);
                 return (
@@ -791,7 +809,17 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
                     </span>
                   </div>
                 );
-              })
+                })}
+                {visible.length > s.viewCap && (
+                  <button
+                    type="button"
+                    onClick={() => patchSide(side, { viewCap: s.viewCap + VIEW_CAP_STEP })}
+                    className="mt-1 w-full rounded-md px-2 py-1.5 text-center text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
+                  >
+                    {t("Show more ({count} hidden)", { count: visible.length - s.viewCap })}
+                  </button>
+                )}
+              </>
             )}
           </div>
         </div>
@@ -860,12 +888,25 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
           <div className="flex items-center gap-2">
             <Loader2 size={14} className="animate-spin" />
             {t("Transferring {done}/{total}", { done: transfer.done, total: transfer.total })}
+            {transfer.bytesTotal > 0 && (
+              <span className="text-primary/80">
+                · {humanSize(transfer.bytesDone)} / {humanSize(transfer.bytesTotal)}
+              </span>
+            )}
             {transfer.current && <span className="truncate text-primary/80">· {transfer.current}</span>}
           </div>
           <div className="mt-1.5 h-1.5 overflow-hidden rounded bg-primary/20">
             <div
               className="h-full rounded bg-primary transition-all"
-              style={{ width: `${transfer.total ? (transfer.done / transfer.total) * 100 : 0}%` }}
+              style={{
+                width: `${
+                  transfer.bytesTotal > 0
+                    ? (transfer.bytesDone / transfer.bytesTotal) * 100
+                    : transfer.total
+                      ? (transfer.done / transfer.total) * 100
+                      : 0
+                }%`,
+              }}
             />
           </div>
         </div>

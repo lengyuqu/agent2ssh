@@ -12,6 +12,9 @@ import { cn } from "../lib/utils";
 
 const labelCls = "grid gap-1.5 text-sm font-medium text-foreground/90";
 
+// J3: cap mounted rows so a large `limit` query never renders thousands of nodes.
+const RENDER_CAP_STEP = 200;
+
 type Props = {
   audit: AuditEntry[];
   onRefresh: (filter?: AuditFilter) => void;
@@ -23,6 +26,7 @@ export default function AuditPanel({ audit, onRefresh }: Props) {
   const [hostFilter, setHostFilter] = useState("");
   const [riskFilter, setRiskFilter] = useState<RiskLevel | "">("");
   const [limit, setLimit] = useState(50);
+  const [renderCap, setRenderCap] = useState(RENDER_CAP_STEP);
 
   function applyFilters() {
     const filter: AuditFilter = {
@@ -100,7 +104,7 @@ export default function AuditPanel({ audit, onRefresh }: Props) {
       )}
 
       <div className="grid gap-2">
-        {audit.map((entry) => (
+        {audit.slice(0, renderCap).map((entry) => (
           <div
             key={entry.id}
             className={cn(
@@ -120,6 +124,15 @@ export default function AuditPanel({ audit, onRefresh }: Props) {
             <RiskBadge level={entry.risk_level ?? "low"} hideLow />
           </div>
         ))}
+        {audit.length > renderCap && (
+          <button
+            type="button"
+            onClick={() => setRenderCap((c) => c + RENDER_CAP_STEP)}
+            className="border-t border-border pt-2 text-center text-xs text-muted-foreground hover:text-foreground"
+          >
+            {t("Show more ({count} hidden)", { count: audit.length - renderCap })}
+          </button>
+        )}
         {audit.length === 0 && (
           <div className="px-1 py-2 text-sm text-muted-foreground">
             {t("No commands executed yet")}
