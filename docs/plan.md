@@ -447,3 +447,20 @@ S9(0.1.1 已收口)
 | J3 | ✅ 已完成 | 中 | Claude | 前端大列表渲染优化 | SFTP 列表是真正无界的来源（远端目录可上万条），加 `viewCap`（每侧每次最多挂载 400 行 + "显示更多"，导航/刷新重置）；`AuditPanel` 加 `renderCap`（200 + 显示更多）兜住 limit 被调大的情况。`DiagnosticsPanel` 不存在（诊断日志在 `SettingsMenu`，后端硬上限 1000，已有界，未改）。`tsc --noEmit`、`npm run build` 通过 |
 | J4 | ✅ 已完成 | 中 | Claude | SFTP 目录递归传输 | 后端新增 `sftp_walk_core`（远端递归 readdir，跳过 symlink + 深度上限 64 防环路，parents-before-children）与 `local_walk`/`local_mkdir`（本地遍历/建目录，含 `local_walk_inner` 单测）。前端每行加勾选框（文件夹也可选/可拖），传输前 `buildTransferUnits` 把选中目录递归展开为「目标侧待建目录 + 逐文件单元」，先 `mkdir -p` 再逐文件 upload/download/exchange，三方向通吃；进度/字节统计/覆盖确认沿用。`local mkdir` 也接通（原"去文件管理器建"提示移除）。`tsc`/`npm build`/fmt/两套 check/三套 test（tauri lib 185）全绿。**注：远端递归 readdir 与勾选/拖拽为运行时行为，构建+本地遍历单测已过，真机 smoke 待用户验证** |
 | J5 | ✅ 已完成 | 低 | Claude | SFTP 真实字节进度 | `SftpResult` 新增 `bytes`（`#[serde(default)]`），upload/download core 从 `std::io::copy` 返回值取已传字节；exchange 取 `uploaded.bytes`。前端进度条改为：选区已知大小求和得 `bytesTotal`，逐文件累加 `bytesDone`，有总量时进度按字节推进并显示 `X / Y`，否则回退按文件个数。`tsc`/`npm build`/两套 check/两套 test 通过（字节值源自 `io::copy`，真机数值留待手测） |
+
+## K · 产品化与上线门槛
+
+目标：功能广度已基本齐全，本阶段收口"能不能作为产品发给真人用"的硬门槛——凭据安全、发布信任链、跨平台完整性、真机验证，以及可靠性/体验打磨。来源是一次架构缺口评估（按"距离功能健全产品还缺什么"盘点，均已对照代码核实）。排序原则：决定"能否上线/能否信任"的安全与分发优先，跨平台与真机测试次之，体验/运维打磨垫后。
+
+| 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
+|------|------|--------|--------|------|----------|
+| K1 | ⬜ 待认领 | 高 | - | 凭据接入 OS 钥匙串 | `HostProfile.password` 与代理 `password` 当前以**明文**存 `hosts.json`（`types.rs:56,126`），仅靠 Unix `0600`。接入 `keyring` crate（macOS Keychain / Windows Credential Manager / Linux Secret Service），磁盘只存引用句柄，运行时按需取回；`config-export` 不带密码的行为保持。验收：新建/编辑/连接走钥匙串，明文不再落盘，迁移旧明文配置有平滑路径，含单测 |
+| K2 | ⬜ 待认领 | 高 | - | Windows 文件权限加固 | `restrict_file_to_owner` 为 `#[cfg(unix)]`（`store.rs:108`），Windows 上 `daemon.token`、`keys/`、`hosts.json` 无任何 ACL 保护，任意进程可读。为 Windows 实现 owner-only ACL（如 `windows-acl`/`icacls`），与 Unix `0600` 对齐。验收：Windows 下敏感文件仅当前用户可读写，回归覆盖 |
+| K3 | ⬜ 待认领 | 高 | - | 代码签名/公证 + 自动更新 | `tauri.conf.json` 无签名/公证配置，无 `tauri-plugin-updater`。配置 macOS 签名+notarization、Windows 签名，接入 updater（签名校验 + 版本检查 + 灰度），CI 出已签名 DMG/MSI。验收：安装包过 Gatekeeper/SmartScreen，App 能检测并应用更新 |
+| K4 | ⬜ 待认领 | 高 | - | 真机 SSH E2E（容器化 sshd） | `scripts/` 的 e1/e2/e2e 全是 mock/embedded，无真实 sshd。CI 加 dockerized openssh-server，跑真实 exec / SFTP 往返 / PTY / 端口转发 / **J4 目录递归传输** 的端到端，收口近期"运行时未验"（原生对话框、递归传输、拖拽）。验收：CI 真机 E2E job 绿，覆盖核心传输路径 |
+| K5 | ⬜ 待认领 | 中 | - | 连接自愈 | `connection.rs` 的 retained connection 无 keepalive / 健康探测 / 断线重连，断了即不可用。加周期 keepalive + 健康检查 + 失败自动重连（带退避），状态对前端可见。验收：模拟断连后连接自动恢复，回归覆盖 |
+| K6 | ⬜ 待认领 | 中 | - | SFTP 传输健壮性 | 传输无断点续传、无取消、串行；大文件中断即从头再来。加 resume（远端 `seek`/续写）、取消信号、可选并发；`session.rs`/`forward.rs` 进程本地态在 daemon 重启后丢失，需持久化或明确告知并恢复。验收：中断后续传成功、可取消，回归覆盖 |
+| K7 | ⬜ 待认领 | 中 | - | 跨平台路径与行为打磨 | SFTP 本地路径拼接用 `/`（J4 同），Windows 反斜杠未处理；信号/loopback 等已部分处理需通盘过一遍。统一路径处理，按 surface 做 Windows 冒烟。验收：Windows 上本地浏览/传输路径正确，关键路径回归 |
+| K8 | ⬜ 待认领 | 低 | - | 配置版本化/迁移/自动备份 | `hosts.json` 等无 `schema_version` 与升级迁移（`store.rs` 无 version 字段），格式演进易破坏老配置；有 `config-export` 但无自动备份。加 schema 版本号 + 向前兼容迁移 + 写前自动备份/回滚。验收：旧版配置可平滑升级，损坏可回滚，含迁移单测 |
+| K9 | ⬜ 待认领 | 低 | - | 鉴权侧信道核查 | daemon token 比较未见恒定时间实现（无 `subtle`/`ct_eq`），存在计时侧信道风险。改用恒定时间比较（`subtle::ConstantTimeEq`），并复核 scoped token 路径。验收：token 比较恒定时间，含针对性单测 |
+| K10 | ⬜ 待认领 | 低 | - | 体验与运维打磨 | i18n 仅 en/zh 且有缺译；无 a11y/键盘导航/快捷键体系；无 opt-in 崩溃上报/用量遥测（诊断/指标已全，缺开发者侧崩溃聚合）。补齐缺译、键盘可达性、可选遥测。验收：键盘可完成核心流程，缺译清零，遥测可关 |
