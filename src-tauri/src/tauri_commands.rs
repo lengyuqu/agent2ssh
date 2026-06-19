@@ -585,6 +585,106 @@ pub async fn sftp_mkdir(
         .map_err(|e| e.to_string())
 }
 
+/// One entry in a local filesystem directory listing for the desktop file
+/// transfer panel.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LocalDirEntry {
+    pub name: String,
+    pub is_dir: bool,
+    pub size: u64,
+    /// Last-modified time as a Unix epoch second, when available.
+    pub modified_unix: Option<u64>,
+}
+
+/// A resolved local directory listing: the canonical path that was listed, its
+/// parent (if any), the user's home directory (for a default/home shortcut), and
+/// the sorted entries.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LocalDirListing {
+    pub path: String,
+    pub parent: Option<String>,
+    pub home: String,
+    pub entries: Vec<LocalDirEntry>,
+}
+
+fn expand_local_path(path: Option<String>) -> std::path::PathBuf {
+    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
+    let raw = path.unwrap_or_default();
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return home;
+    }
+    if trimmed == "~" {
+        return home;
+    }
+    if let Some(rest) = trimmed.strip_prefix("~/") {
+        return home.join(rest);
+    }
+    std::path::PathBuf::from(trimmed)
+}
+
+fn local_ls_inner(path: Option<String>) -> anyhow::Result<LocalDirListing> {
+    let requested = expand_local_path(path);
+    // Canonicalize so the displayed path and parent navigation are stable; fall
+    // back to the requested path if canonicalization fails (e.g. permissions).
+    let dir = std::fs::canonicalize(&requested).unwrap_or(requested);
+    let metadata = std::fs::metadata(&dir)
+        .map_err(|e| anyhow::anyhow!("cannot access {}: {e}", dir.display()))?;
+    if !metadata.is_dir() {
+        return Err(anyhow::anyhow!("{} is not a directory", dir.display()));
+    }
+
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(&dir)
+        .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", dir.display()))?
+    {
+        let Ok(entry) = entry else { continue };
+        let name = entry.file_name().to_string_lossy().to_string();
+        // file_type() avoids following symlinks for the dir flag; size/mtime come
+        // from metadata when reachable.
+        let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
+        let (size, modified_unix) = match entry.metadata() {
+            Ok(meta) => (
+                meta.len(),
+                meta.modified().ok().and_then(|t| {
+                    t.duration_since(std::time::UNIX_EPOCH)
+                        .ok()
+                        .map(|d| d.as_secs())
+                }),
+            ),
+            Err(_) => (0, None),
+        };
+        entries.push(LocalDirEntry {
+            name,
+            is_dir,
+            size,
+            modified_unix,
+        });
+    }
+    entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+    });
+
+    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
+    Ok(LocalDirListing {
+        parent: dir.parent().map(|p| p.to_string_lossy().to_string()),
+        path: dir.to_string_lossy().to_string(),
+        home: home.to_string_lossy().to_string(),
+        entries,
+    })
+}
+
+/// List a local directory for the desktop file-transfer panel. `path` may use a
+/// leading `~`; an empty/None path defaults to the user's home directory. This
+/// makes the "this computer" side of the panel browsable just like a remote
+/// host, so upload/download targets can be chosen by clicking instead of typing.
+#[tauri::command]
+pub async fn local_ls(path: Option<String>) -> Result<LocalDirListing, String> {
+    local_ls_inner(path).map_err(|e| e.to_string())
+}
+
 // ── Sessions ─────────────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -1338,6 +1438,7 @@ pub fn run_tauri() {
     crate::diagnostics::install_panic_hook("tauri");
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             build_system_tray(app.handle(), "Open", "Quit", "Agent2SSH")?;
             Ok(())
@@ -1376,6 +1477,7 @@ pub fn run_tauri() {
             sftp_ls,
             sftp_stat,
             sftp_mkdir,
+            local_ls,
             // Sessions
             session_open,
             session_write,
@@ -1429,4 +1531,52 @@ pub fn run_tauri() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expand_local_path_handles_tilde_and_empty() {
+        let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
+        assert_eq!(expand_local_path(None), home);
+        assert_eq!(expand_local_path(Some("  ".into())), home);
+        assert_eq!(expand_local_path(Some("~".into())), home);
+        assert_eq!(expand_local_path(Some("~/sub".into())), home.join("sub"));
+        assert_eq!(
+            expand_local_path(Some("/etc".into())),
+            std::path::PathBuf::from("/etc")
+        );
+    }
+
+    #[test]
+    fn local_ls_inner_lists_dirs_first_with_metadata() {
+        let dir = std::env::temp_dir().join(format!("a2s-localls-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("zsub")).unwrap();
+        std::fs::write(dir.join("afile.txt"), b"hello").unwrap();
+
+        let listing = local_ls_inner(Some(dir.to_string_lossy().to_string())).unwrap();
+        // Directory is sorted ahead of the file even though its name sorts later.
+        assert_eq!(listing.entries.len(), 2);
+        assert!(listing.entries[0].is_dir && listing.entries[0].name == "zsub");
+        let file = &listing.entries[1];
+        assert!(!file.is_dir && file.name == "afile.txt");
+        assert_eq!(file.size, 5);
+        assert!(file.modified_unix.is_some());
+        assert!(listing.parent.is_some());
+        assert!(!listing.home.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn local_ls_inner_rejects_a_file_path() {
+        let dir = std::env::temp_dir().join(format!("a2s-localls-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("f.txt");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(local_ls_inner(Some(file.to_string_lossy().to_string())).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

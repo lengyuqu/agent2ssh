@@ -184,6 +184,21 @@ export type SftpExchangeResult = {
   duration_ms: number;
 };
 
+// Rust: tauri_commands.rs — LocalDirEntry / LocalDirListing (local_ls command)
+export type LocalDirEntry = {
+  name: string;
+  is_dir: boolean;
+  size: number;
+  modified_unix: number | null;
+};
+
+export type LocalDirListing = {
+  path: string;
+  parent: string | null;
+  home: string;
+  entries: LocalDirEntry[];
+};
+
 // Rust: session_list_core() returns Vec<(Uuid, String)> which serializes as
 // an array of two-element arrays: [id_string, host_string].
 export type SessionInfo = [string, string]; // [id, host]

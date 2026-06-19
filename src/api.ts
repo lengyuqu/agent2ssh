@@ -19,6 +19,7 @@ import type {
   HostGroup,
   HostProfile,
   ImportResult,
+  LocalDirListing,
   McpAgentConfigureResult,
   McpAgentConfigStatus,
   PingResult,
@@ -194,6 +195,8 @@ export const api = {
       path,
       timeoutSecs: timeoutSecs ?? null,
     }),
+  localLs: (path?: string | null) =>
+    invoke<LocalDirListing>("local_ls", { path: path ?? null }),
 
   // Sessions
   sessionOpen: (host: string) => invoke<string>("session_open", { host }),
