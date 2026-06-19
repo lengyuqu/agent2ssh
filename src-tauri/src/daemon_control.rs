@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use std::{
     fs::{File, OpenOptions},
     io::{Read, Write},
-    net::TcpStream,
+    net::{TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
@@ -10,6 +10,9 @@ use std::{
 };
 
 use crate::store::config_dir;
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 #[derive(Debug, Clone)]
 pub struct DaemonStartResult {
@@ -73,10 +76,16 @@ pub fn terminate_process(pid: u32) -> Result<()> {
 }
 
 pub fn daemon_health_ok() -> bool {
-    let Ok(mut stream) = TcpStream::connect_timeout(
-        &"127.0.0.1:7722".parse().expect("valid daemon address"),
-        Duration::from_millis(500),
-    ) else {
+    // Resolve the configured local daemon address (honors AGENT2SSH_DAEMON_ADDR,
+    // mapping a wildcard bind back to loopback) into a concrete socket address.
+    let Some(addr) = crate::local_daemon_connect_addr()
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut addrs| addrs.next())
+    else {
+        return false;
+    };
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(500)) else {
         return false;
     };
     let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
@@ -174,10 +183,17 @@ pub fn start_daemon_background(daemon_bin: &Path) -> Result<DaemonStartResult> {
     let err_log = log
         .try_clone()
         .context("failed to clone daemon.log handle")?;
-    let child = Command::new(daemon_bin)
+    let mut command = Command::new(daemon_bin);
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
-        .stderr(Stdio::from(err_log))
+        .stderr(Stdio::from(err_log));
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let child = command
         .spawn()
         .with_context(|| format!("failed to start daemon: {}", daemon_bin.display()))?;
 

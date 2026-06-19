@@ -7,6 +7,80 @@ use crate::{
     types::HostProfile,
 };
 
+/// The local daemon's default listen address. Single source of truth shared by
+/// the daemon (what it binds to) and every client surface (what they dial).
+pub const DEFAULT_DAEMON_ADDR: &str = "127.0.0.1:7722";
+
+/// The local daemon's configured listen address (`host:port`), honoring
+/// `AGENT2SSH_DAEMON_ADDR`; defaults to [`DEFAULT_DAEMON_ADDR`]. This is the raw
+/// bind address — it may be an unspecified host like `0.0.0.0`/`::` — so the
+/// daemon binds exactly here. Clients should use [`local_daemon_url`] /
+/// [`local_daemon_connect_addr`] instead, which map a wildcard back to loopback.
+pub fn local_daemon_addr() -> String {
+    std::env::var("AGENT2SSH_DAEMON_ADDR")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_DAEMON_ADDR.to_string())
+}
+
+/// The `host:port` a *client* should dial to reach the local daemon. Identical
+/// to [`local_daemon_addr`], except an unspecified bind host (`0.0.0.0` / `::`)
+/// is mapped to loopback — you cannot connect to the wildcard address. IPv6
+/// hosts keep their brackets so the result parses as a `SocketAddr` and embeds
+/// cleanly in a URL.
+pub fn local_daemon_connect_addr() -> String {
+    normalize_connect_addr(&local_daemon_addr())
+}
+
+/// The base URL (`http://host:port`, no trailing slash) for the local daemon,
+/// derived from [`local_daemon_connect_addr`]. Use this everywhere a client
+/// surface (CLI/MCP/Tauri/webhook links) needs to reach the local daemon so a
+/// non-default `AGENT2SSH_DAEMON_ADDR` stays reachable end to end.
+pub fn local_daemon_url() -> String {
+    format!("http://{}", local_daemon_connect_addr())
+}
+
+/// Whether a `host:port` listen address resolves to loopback only. The daemon
+/// uses this to warn when an operator binds it somewhere reachable off-host.
+pub fn is_loopback_addr(addr: &str) -> bool {
+    let host = match addr.rsplit_once(':') {
+        Some((host, _port)) => host,
+        None => addr,
+    };
+    let host = host.trim().trim_start_matches('[').trim_end_matches(']');
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
+}
+
+fn normalize_connect_addr(addr: &str) -> String {
+    let (host, port) = match addr.rsplit_once(':') {
+        Some((host, port)) => (host.trim(), port.trim()),
+        None => (addr.trim(), "7722"),
+    };
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    match bare.parse::<std::net::IpAddr>() {
+        // Wildcard bind address: a client must dial loopback instead.
+        Ok(ip) if ip.is_unspecified() => {
+            if ip.is_ipv6() {
+                format!("[::1]:{port}")
+            } else {
+                format!("127.0.0.1:{port}")
+            }
+        }
+        // Concrete IPv6 literal: keep it bracketed for URL/SocketAddr use.
+        Ok(std::net::IpAddr::V6(v6)) => format!("[{v6}]:{port}"),
+        // Concrete IPv4 literal.
+        Ok(_) => format!("{bare}:{port}"),
+        // Hostname (e.g. "localhost"): pass through untouched.
+        Err(_) => format!("{host}:{port}"),
+    }
+}
+
 /// Permission scope for a remote daemon, controlling which hosts, tags,
 /// and commands the daemon is allowed to execute.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -171,7 +245,7 @@ pub fn list_daemons_core() -> Result<Vec<DaemonInfo>> {
     let mut daemons = Vec::new();
 
     // Always include localhost as first entry
-    let local_url = "http://127.0.0.1:7722".to_string();
+    let local_url = local_daemon_url();
     let local_connected = check_health_blocking(&local_url);
     daemons.push(DaemonInfo {
         alias: "localhost".to_string(),
@@ -221,7 +295,7 @@ pub fn resolve_scoped_daemon_token(token: &ScopedDaemonToken) -> Option<String> 
 pub fn get_daemon(alias: &str) -> Result<(String, Option<String>)> {
     if alias == "localhost" {
         let token = read_local_token();
-        return Ok(("http://127.0.0.1:7722".to_string(), token));
+        return Ok((local_daemon_url(), token));
     }
     let remotes = load_remotes()?;
     for remote in &remotes {
@@ -236,7 +310,7 @@ pub fn get_daemon(alias: &str) -> Result<(String, Option<String>)> {
 pub fn get_daemon_with_scope(alias: &str) -> Result<(String, Option<String>, Option<DaemonScope>)> {
     if alias == "localhost" {
         let token = read_local_token();
-        return Ok(("http://127.0.0.1:7722".to_string(), token, None));
+        return Ok((local_daemon_url(), token, None));
     }
     let remotes = load_remotes()?;
     for remote in &remotes {
@@ -318,8 +392,8 @@ fn check_health_blocking(url: &str) -> bool {
 
             let stream = match TcpStream::connect_timeout(
                 &host_port.parse().unwrap_or_else(|_| {
-                    // Fallback: try resolving as-is
-                    "127.0.0.1:7722".parse().unwrap()
+                    // Fallback: dial the default loopback daemon address.
+                    DEFAULT_DAEMON_ADDR.parse().unwrap()
                 }),
                 Duration::from_secs(2),
             ) {
@@ -984,6 +1058,50 @@ mod tests {
     #[test]
     fn validate_remotes_accepts_valid_remote() {
         assert!(validate_remotes(&[remote("prod")]).is_ok());
+    }
+
+    #[test]
+    fn normalize_connect_addr_maps_wildcard_and_brackets_ipv6() {
+        // Loopback / concrete addresses pass through unchanged.
+        assert_eq!(normalize_connect_addr("127.0.0.1:7722"), "127.0.0.1:7722");
+        assert_eq!(
+            normalize_connect_addr("192.168.1.5:9000"),
+            "192.168.1.5:9000"
+        );
+        // Wildcard bind hosts are remapped to loopback for a client to dial.
+        assert_eq!(normalize_connect_addr("0.0.0.0:7722"), "127.0.0.1:7722");
+        assert_eq!(normalize_connect_addr("[::]:7722"), "[::1]:7722");
+        // Concrete IPv6 keeps brackets; hostnames pass through.
+        assert_eq!(normalize_connect_addr("[::1]:7722"), "[::1]:7722");
+        assert_eq!(normalize_connect_addr("localhost:7722"), "localhost:7722");
+        // A normalized address is always a valid SocketAddr (when host is an IP).
+        assert!("127.0.0.1:7722".parse::<std::net::SocketAddr>().is_ok());
+        assert!("[::1]:7722".parse::<std::net::SocketAddr>().is_ok());
+    }
+
+    #[test]
+    fn is_loopback_addr_classifies_hosts() {
+        assert!(is_loopback_addr("127.0.0.1:7722"));
+        assert!(is_loopback_addr("localhost:7722"));
+        assert!(is_loopback_addr("[::1]:7722"));
+        assert!(!is_loopback_addr("0.0.0.0:7722"));
+        assert!(!is_loopback_addr("192.168.1.5:7722"));
+        assert!(!is_loopback_addr("[::]:7722"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn local_daemon_url_honors_env_override() {
+        std::env::remove_var("AGENT2SSH_DAEMON_ADDR");
+        assert_eq!(local_daemon_addr(), DEFAULT_DAEMON_ADDR);
+        assert_eq!(local_daemon_url(), "http://127.0.0.1:7722");
+
+        std::env::set_var("AGENT2SSH_DAEMON_ADDR", "0.0.0.0:9001");
+        // The daemon binds to the wildcard, but clients dial loopback.
+        assert_eq!(local_daemon_addr(), "0.0.0.0:9001");
+        assert_eq!(local_daemon_url(), "http://127.0.0.1:9001");
+
+        std::env::remove_var("AGENT2SSH_DAEMON_ADDR");
     }
 
     #[test]

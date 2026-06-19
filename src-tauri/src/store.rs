@@ -87,6 +87,14 @@ fn config_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("hosts.json"))
 }
 
+/// Cache for the parsed `hosts.json` (I5). `load_config` is on a hot path — every
+/// host lookup for exec/list/SFTP/sessions resolves through it — yet the file
+/// changes only on explicit host edits. The `(mtime, len)` signature picks up
+/// cross-process edits (CLI/desktop) automatically, and `save_config_unlocked`
+/// invalidates after every in-process write so a save is observed immediately.
+static HOSTS_CACHE: crate::config_cache::ConfigCache<AppConfig> =
+    crate::config_cache::ConfigCache::new();
+
 pub fn audit_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("audit.jsonl"))
 }
@@ -118,12 +126,15 @@ pub fn restrict_file_to_owner(path: impl AsRef<std::path::Path>) -> Result<()> {
 pub fn load_config() -> Result<AppConfig> {
     ensure_config_dir()?;
     let path = config_path()?;
-    if !path.exists() {
-        return Ok(normalize_config(AppConfig::default()));
-    }
-    let raw = fs::read_to_string(path).context("failed to read hosts config")?;
-    let config: AppConfig = serde_json::from_str(&raw).context("failed to parse hosts config")?;
-    Ok(normalize_config(config))
+    HOSTS_CACHE.load_with(&path, || {
+        if !path.exists() {
+            return Ok(normalize_config(AppConfig::default()));
+        }
+        let raw = fs::read_to_string(&path).context("failed to read hosts config")?;
+        let config: AppConfig =
+            serde_json::from_str(&raw).context("failed to parse hosts config")?;
+        Ok(normalize_config(config))
+    })
 }
 
 pub fn save_config(config: &AppConfig) -> Result<()> {
@@ -156,6 +167,10 @@ pub(crate) fn save_config_unlocked(config: &AppConfig) -> Result<()> {
     })();
     if write_result.is_err() {
         let _ = fs::remove_file(&tmp_path);
+    } else {
+        // Drop the cached value so this process reads the new hosts immediately,
+        // independent of filesystem mtime granularity. (I5)
+        HOSTS_CACHE.invalidate();
     }
     write_result
 }
@@ -1159,6 +1174,44 @@ mod tests {
         ));
         // Should only contain the header row (no data)
         assert_eq!(output.lines().count(), 1);
+
+        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&config_dir);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_config_reflects_saved_hosts_via_cache() {
+        // I5: load_config is cached, but a save must invalidate it so the write
+        // is never served stale within the same process.
+        let config_dir =
+            std::env::temp_dir().join(format!("agent2ssh-hostscache-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::env::set_var("AGENT2SSH_CONFIG_DIR", &config_dir);
+
+        // Drop any cache state leaked from an earlier test in this process.
+        super::HOSTS_CACHE.invalidate();
+
+        // Fresh dir: no hosts. This also populates the cache with the default.
+        assert!(super::load_config().unwrap().hosts.is_empty());
+
+        // Saving a host must be visible to the very next load (cache invalidated).
+        let cfg: AppConfig = serde_json::from_value(serde_json::json!({
+            "hosts": [{ "name": "alpha", "host": "10.0.0.1" }]
+        }))
+        .unwrap();
+        super::save_config(&cfg).unwrap();
+
+        let after_add = super::load_config().unwrap();
+        assert_eq!(after_add.hosts.len(), 1, "saved host must be observed");
+        assert_eq!(after_add.hosts[0].name, "alpha");
+
+        // Removing it again must also be reflected immediately.
+        super::save_config(&AppConfig::default()).unwrap();
+        assert!(
+            super::load_config().unwrap().hosts.is_empty(),
+            "removal must invalidate the cache too"
+        );
 
         std::env::remove_var("AGENT2SSH_CONFIG_DIR");
         let _ = std::fs::remove_dir_all(&config_dir);

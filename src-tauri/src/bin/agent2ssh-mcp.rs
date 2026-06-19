@@ -29,7 +29,7 @@ use agent2ssh::{
     TeamConfigExport,
 };
 use anyhow::Result;
-use serde::Deserialize;
+use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
@@ -44,6 +44,10 @@ use agent2ssh_mcp_auth::{
     authorize_local_mcp_operation, authorize_local_mcp_playbook_run,
 };
 use agent2ssh_mcp_tools::{McpTool, ToolCall};
+
+const MCP_SERVER_NAME: &str = "agent2ssh-mcp";
+const MCP_SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 struct McpError {
     code: i32,
     message: String,
@@ -145,8 +149,87 @@ fn local_daemon_client() -> std::result::Result<Option<(reqwest::Client, String,
     Ok(Some((client, url.trim_end_matches('/').to_string(), token)))
 }
 
-fn daemon_error_body(status: reqwest::StatusCode, body: String) -> McpError {
-    McpError::internal(format!("local daemon request failed ({status}): {body}"))
+fn response_preview(body: &str) -> String {
+    let normalized = body
+        .chars()
+        .map(|ch| {
+            if ch.is_control() && ch != '\n' && ch != '\t' {
+                ' '
+            } else {
+                ch
+            }
+        })
+        .collect::<String>()
+        .trim()
+        .to_string();
+    const LIMIT: usize = 2048;
+    if normalized.chars().count() <= LIMIT {
+        return normalized;
+    }
+    let mut out = normalized.chars().take(LIMIT).collect::<String>();
+    out.push_str("...");
+    out
+}
+
+fn response_error(context: &str, status: reqwest::StatusCode, body: &str) -> McpError {
+    let preview = response_preview(body);
+    let remote_message = serde_json::from_str::<Value>(body).ok().and_then(|value| {
+        value
+            .get("error")
+            .and_then(Value::as_str)
+            .or_else(|| value.get("message").and_then(Value::as_str))
+            .map(str::to_string)
+    });
+    let detail = remote_message
+        .filter(|message| !message.trim().is_empty())
+        .unwrap_or_else(|| {
+            if preview.is_empty() {
+                "<empty response body>".to_string()
+            } else {
+                preview
+            }
+        });
+    McpError::internal(format!("{context} returned HTTP {status}: {detail}"))
+}
+
+async fn response_text(
+    response: reqwest::Response,
+    context: &str,
+) -> std::result::Result<String, McpError> {
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|e| McpError::internal(format!("{context} response body read failed: {e}")))?;
+    if !status.is_success() {
+        return Err(response_error(context, status, &body));
+    }
+    Ok(body)
+}
+
+async fn response_json<T: DeserializeOwned>(
+    response: reqwest::Response,
+    context: &str,
+) -> std::result::Result<T, McpError> {
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|e| McpError::internal(format!("{context} response body read failed: {e}")))?;
+    if !status.is_success() {
+        return Err(response_error(context, status, &body));
+    }
+    serde_json::from_str(&body).map_err(|e| {
+        let preview = response_preview(&body);
+        let detail = if preview.is_empty() {
+            "<empty response body>".to_string()
+        } else {
+            preview
+        };
+        McpError::internal(format!(
+            "{context} returned invalid JSON (HTTP {status}): {e}; body: {detail}"
+        ))
+    })
 }
 
 fn can_fallback_session_error(body: &str) -> bool {
@@ -170,15 +253,7 @@ async fn try_daemon_session_open(
         Ok(response) => response,
         Err(_) => return Ok(DaemonAttempt::Fallback),
     };
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        return Err(daemon_error_body(status, body));
-    }
-    let body: DaemonIdBody = response
-        .json()
-        .await
-        .map_err(|e| McpError::internal(format!("invalid daemon session response: {e}")))?;
+    let body: DaemonIdBody = response_json(response, "local daemon /sessions").await?;
     Ok(DaemonAttempt::Handled(json!({
         "session_id": body.id,
         "host": host,
@@ -201,12 +276,7 @@ async fn try_daemon_gate_status() -> std::result::Result<Value, McpError> {
         .send()
         .await
         .map_err(|e| McpError::internal(format!("local daemon gate status failed: {e}")))?;
-    let status = response.status();
-    let body = response.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return Err(daemon_error_body(status, body));
-    }
-    let mut value: Value = serde_json::from_str(&body).map_err(McpError::internal)?;
+    let mut value: Value = response_json(response, "local daemon /gate").await?;
     if let Some(obj) = value.as_object_mut() {
         obj.insert("reachable".into(), Value::Bool(true));
     }
@@ -231,14 +301,19 @@ async fn try_daemon_session_write(
         Ok(response) => response,
         Err(_) => return Ok(DaemonAttempt::Fallback),
     };
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.map_err(|e| {
+            McpError::internal(format!(
+                "local daemon session write response body read failed: {e}"
+            ))
+        })?;
         if can_fallback_session_error(&body) {
             return Ok(DaemonAttempt::Fallback);
         }
-        return Err(daemon_error_body(status, body));
+        return Err(response_error("local daemon session write", status, &body));
     }
+    let _ = response_text(response, "local daemon session write").await?;
     Ok(DaemonAttempt::Handled(
         json!({ "ok": true, "backend": "daemon", "source": source }),
     ))
@@ -265,18 +340,19 @@ async fn try_daemon_session_read(
         Ok(response) => response,
         Err(_) => return Ok(DaemonAttempt::Fallback),
     };
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.map_err(|e| {
+            McpError::internal(format!(
+                "local daemon session read response body read failed: {e}"
+            ))
+        })?;
         if can_fallback_session_error(&body) {
             return Ok(DaemonAttempt::Fallback);
         }
-        return Err(daemon_error_body(status, body));
+        return Err(response_error("local daemon session read", status, &body));
     }
-    let body: DaemonOutputBody = response
-        .json()
-        .await
-        .map_err(|e| McpError::internal(format!("invalid daemon session output response: {e}")))?;
+    let body: DaemonOutputBody = response_json(response, "local daemon session read").await?;
     Ok(DaemonAttempt::Handled(
         json!({ "output": body.output, "backend": "daemon", "source": source }),
     ))
@@ -299,14 +375,19 @@ async fn try_daemon_session_close(
         Ok(response) => response,
         Err(_) => return Ok(DaemonAttempt::Fallback),
     };
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.map_err(|e| {
+            McpError::internal(format!(
+                "local daemon session close response body read failed: {e}"
+            ))
+        })?;
         if can_fallback_session_error(&body) {
             return Ok(DaemonAttempt::Fallback);
         }
-        return Err(daemon_error_body(status, body));
+        return Err(response_error("local daemon session close", status, &body));
     }
+    let _ = response_text(response, "local daemon session close").await?;
     Ok(DaemonAttempt::Handled(
         json!({ "closed": session_id, "backend": "daemon", "source": source }),
     ))
@@ -325,15 +406,8 @@ async fn try_daemon_session_list() -> std::result::Result<DaemonAttempt<Vec<Valu
         Ok(response) => response,
         Err(_) => return Ok(DaemonAttempt::Fallback),
     };
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        return Err(daemon_error_body(status, body));
-    }
-    let sessions: Vec<DaemonSessionListItem> = response
-        .json()
-        .await
-        .map_err(|e| McpError::internal(format!("invalid daemon session list response: {e}")))?;
+    let sessions: Vec<DaemonSessionListItem> =
+        response_json(response, "local daemon /sessions").await?;
     Ok(DaemonAttempt::Handled(
         sessions
             .into_iter()
@@ -368,15 +442,7 @@ async fn try_daemon_forward_add(
         Ok(response) => response,
         Err(_) => return Ok(DaemonAttempt::Fallback),
     };
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        return Err(daemon_error_body(status, body));
-    }
-    let mut value: Value = response
-        .json()
-        .await
-        .map_err(|e| McpError::internal(format!("invalid daemon forward response: {e}")))?;
+    let mut value: Value = response_json(response, "local daemon /forwards").await?;
     if let Some(obj) = value.as_object_mut() {
         obj.insert("backend".into(), Value::String("daemon".into()));
     }
@@ -396,15 +462,7 @@ async fn try_daemon_forward_list() -> std::result::Result<DaemonAttempt<Vec<Valu
         Ok(response) => response,
         Err(_) => return Ok(DaemonAttempt::Fallback),
     };
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        return Err(daemon_error_body(status, body));
-    }
-    let rules: Vec<DaemonForwardRule> = response
-        .json()
-        .await
-        .map_err(|e| McpError::internal(format!("invalid daemon forward list response: {e}")))?;
+    let rules: Vec<DaemonForwardRule> = response_json(response, "local daemon /forwards").await?;
     Ok(DaemonAttempt::Handled(
         rules
             .into_iter()
@@ -438,11 +496,7 @@ async fn try_daemon_forward_remove(
         Ok(response) => response,
         Err(_) => return Ok(DaemonAttempt::Fallback),
     };
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        return Err(daemon_error_body(status, body));
-    }
+    let _ = response_text(response, "local daemon forward remove").await?;
     Ok(DaemonAttempt::Handled(
         json!({ "removed": id.to_string(), "backend": "daemon" }),
     ))
@@ -452,6 +506,33 @@ async fn try_daemon_forward_remove(
 async fn main() -> Result<()> {
     agent2ssh::install_panic_hook("mcp");
     agent2ssh::seed_trace_id_from_env();
+
+    let mut args = std::env::args().skip(1);
+    if let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-V" | "--version" => {
+                println!("{MCP_SERVER_NAME} {MCP_SERVER_VERSION}");
+                return Ok(());
+            }
+            "-h" | "--help" => {
+                println!("{MCP_SERVER_NAME} {MCP_SERVER_VERSION}");
+                println!("Agent2SSH MCP stdio server");
+                println!();
+                println!("Usage: {MCP_SERVER_NAME}");
+                println!();
+                println!("Configure this binary as an MCP stdio server in your agent client.");
+                println!("It reads newline-delimited JSON-RPC requests from stdin and writes responses to stdout.");
+                println!("Use tools/list after initialize to discover available ssh_* tools.");
+                return Ok(());
+            }
+            other => {
+                eprintln!("unknown argument: {other}");
+                eprintln!("Run '{MCP_SERVER_NAME} --help' for usage.");
+                std::process::exit(2);
+            }
+        }
+    }
+
     let stdin = io::stdin();
     let mut stdout = io::stdout();
 
@@ -510,7 +591,7 @@ async fn handle_request(request: &Value) -> std::result::Result<Value, McpError>
         "initialize" => Ok(json!({
             "protocolVersion": "2024-11-05",
             "capabilities": { "tools": {} },
-            "serverInfo": { "name": "agent2ssh-mcp", "version": "0.1.0" }
+            "serverInfo": { "name": MCP_SERVER_NAME, "version": MCP_SERVER_VERSION }
         })),
         "tools/list" => Ok(json!({ "tools": agent2ssh_mcp_tools::tools_list() })),
         "tools/call" => {
@@ -629,14 +710,9 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
                         .await
                         .map_err(|e| McpError::internal(format!("remote exec failed: {e}")))?;
 
-                    if !resp.status().is_success() {
-                        let body = resp.text().await.unwrap_or_default();
-                        return Err(McpError::internal(format!("remote daemon error: {body}")));
-                    }
-
-                    let result: agent2ssh::types::ExecResult = resp.json().await.map_err(|e| {
-                        McpError::internal(format!("invalid response from remote: {e}"))
-                    })?;
+                    let context = format!("remote daemon '{alias}' /exec");
+                    let result: agent2ssh::types::ExecResult =
+                        response_json(resp, &context).await?;
                     serde_json::to_value(result)?
                 } else {
                     let risk = authorize_local_mcp_exec_request(&mut request).await?;
@@ -1298,7 +1374,11 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
                 .timeout(std::time::Duration::from_secs(2))
                 .build()
             {
-                Ok(client) => match client.get("http://127.0.0.1:7722/health").send().await {
+                Ok(client) => match client
+                    .get(format!("{}/health", agent2ssh::local_daemon_url()))
+                    .send()
+                    .await
+                {
                     Ok(resp) => resp.status().is_success(),
                     Err(_) => false,
                 },
@@ -1336,20 +1416,11 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
                 .build()
                 .map_err(|e| McpError::internal(format!("client build failed: {e}")))?;
             let resp = client
-                .get("http://127.0.0.1:7722/metrics")
+                .get(format!("{}/metrics", agent2ssh::local_daemon_url()))
                 .send()
                 .await
                 .map_err(|e| McpError::internal(format!("daemon /metrics unreachable: {e}")))?;
-            if !resp.status().is_success() {
-                return Err(McpError::internal(format!(
-                    "daemon returned status {}",
-                    resp.status()
-                )));
-            }
-            let metrics: Value = resp
-                .json()
-                .await
-                .map_err(|e| McpError::internal(format!("invalid JSON from /metrics: {e}")))?;
+            let metrics: Value = response_json(resp, "local daemon /metrics").await?;
             metrics
         }
         McpTool::SshPreviewExec => {

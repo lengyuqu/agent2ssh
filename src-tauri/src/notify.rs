@@ -343,7 +343,11 @@ fn format_slack_message(event: &WebhookEvent) -> serde_json::Value {
                         "type": "button",
                         "text": { "type": "plain_text", "text": "Open Approvals" },
                         "style": "primary",
-                        "url": format!("http://127.0.0.1:7722/console#approvals-{}", approval_id),
+                        "url": format!(
+                            "{}/console#approvals-{}",
+                            crate::local_daemon_url(),
+                            approval_id
+                        ),
                     }
                 ]
             }));

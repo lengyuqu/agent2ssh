@@ -423,3 +423,15 @@ S9(0.1.1 已收口)
 | H7 | ✅ 已完成 | 低 | Claude | 依赖层日志可选放行 | `DiagnosticBridgeLayer` 默认仍只转 `agent2ssh*`；新增 `AGENT2SSH_BRIDGE_DEPS`（`1`/`true`/`all` 用内置传输层前缀集 hyper/reqwest/ssh2/h2/rustls/tower/axum，或逗号分隔自定义前缀，未设/`0`/`false` 关闭）放行依赖层 WARN/ERROR 入 `app.log`。防噪声：仍只过 WARN/ERROR + 前缀白名单；防回环：依赖层事件经新 `append_diagnostic_log_no_sink` 落盘但不触发 error sink（webhook 走 reqwest，否则传输错误会自激）。含 `parse_dep_prefixes` 与 no-sink 单测；两套 check、两套 test 全绿 |
 | H8 | ✅ 已完成 | 低 | Claude | daemon 监听地址可配置 | 绑定地址改读 `AGENT2SSH_DAEMON_ADDR`，缺省仍 `127.0.0.1:7722`（默认回环）；新增 `is_loopback_addr` 校验，绑定非回环地址时写一条 `warn` 诊断提示控制面已对外暴露。`cargo check --features daemon --bin agent2ssh-daemon`、daemon 集成测试通过 |
 | H9 | ✅ 已完成 | 低 | Claude | OnceLock 二次注册显式化 | `set_error_sink` 由 `OnceLock`（首次为准、二次静默丢弃）改为 `RwLock<Option<Arc<…>>>` 覆盖语义（后注册为准 + 写一条 `warn`）；调用时短读锁克隆 `Arc` 出来再执行，避免重入死锁。`install_panic_hook` 二次安装不再静默 return，改记 `warn`（仍不重复挂钩）。daemon tracing 初始化由 `init()` 改 `try_init()`，全局 subscriber 已存在时记 `warn` 而非 panic/静默。含覆盖语义单测；两套 check、两套 test 全绿 |
+
+## I · 配置面收口与运行时韧性
+
+目标：H 阶段把 daemon 监听地址、依赖层日志、错误聚合等做成可配置/可观测后，暴露出"配置只改了一半"和"运行时收尾缺失"两类缺口——bind 侧可配但 client 侧仍硬编码、新增 env 无集中文档、daemon 无优雅退出导致 stale pid。本阶段把这些收口，让 H 的可配置项端到端可用、可运维、可回归。排序原则不变：可达性/可运维优先，文档与回归补齐，审计类延后。
+
+| 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
+|------|------|--------|--------|------|----------|
+| I1 | ✅ 已完成 | 中 | Claude | 本地 daemon URL 解析统一 | 新增核心 helper `local_daemon_addr`/`local_daemon_connect_addr`/`local_daemon_url`（`remote.rs`，读 `AGENT2SSH_DAEMON_ADDR`、缺省 `127.0.0.1:7722`，通配 `0.0.0.0`/`::` 自动回退回环、IPv6 加括号）。CLI（doctor/health）、MCP（health/metrics）、`remote.rs`（`list_daemons`/`get_daemon`）、`daemon_control`（health 探测改 `to_socket_addrs`）、`notify`（console 链接）、daemon（自身 action_url + bind 复用 `local_daemon_addr`）全部改用 helper。含 `normalize_connect_addr`/env override 单测；契约/smoke/集成回归通过 |
+| I2 | ✅ 已完成 | 中 | Claude | daemon 优雅退出与 PID 清理 | `axum::serve(...).with_graceful_shutdown(shutdown_signal())`：`shutdown_signal` 监听 `ctrl_c` + unix `SIGTERM`（Windows 仅 `ctrl_c`，`tokio` 新增 `signal` feature），退出时移除 `daemon.pid` 并记一条 info 诊断，不再因被信号杀死而残留 stale pid。daemon check + 集成回归通过 |
+| I3 | ✅ 已完成 | 低 | Claude | 环境变量集中文档 | `configuration-guide.md` 新增「环境变量」表，列全量内置 `AGENT2SSH_*`（`CONFIG_DIR`/`SOURCE`/`DAEMON_ADDR`/`TRACE_ID`/`LOG`/`LOG_FORMAT`/`BRIDGE_DEPS`，含作用域/默认值/说明），并澄清 `token_env` 引用的是用户自定义变量（非内置）；`architecture.md` 的 Diagnostics 段补 `AGENT2SSH_BRIDGE_DEPS`、Control Plane 段补 `AGENT2SSH_DAEMON_ADDR` 解析与优雅退出 |
+| I4 | ✅ 已完成 | 低 | Claude | 监听地址端到端回归 | 新增 `daemon_honors_configured_listen_address_end_to_end`（`daemon_integration.rs`）：预留随机空闲端口写入 `AGENT2SSH_DAEMON_ADDR`，起真实 axum `/health` 服务绑到 `local_daemon_addr()`，再经 `daemon_health_ok()`（走 I1 resolver）跑通，断言 resolver/URL 一致；非回环 warn 决策由 lib 化的 `is_loopback_addr` 单测覆盖。daemon feature 下测试通过 |
+| I5 | ✅ 已完成 | 中 | Claude | 配置热加载一致性审计 | 产出 `docs/reports/i5-config-cache-audit.md`：盘点 11 个配置文件的读热度/写入方/失效语义，给出纳入/保持读盘的结论（含 `execution_gate` 保持读盘以优先急停新鲜度的判断）。落地 `hosts.json` 接入 `ConfigCache`——`load_config` 走缓存、`save_config_unlocked`（全部写入唯一漏斗）成功后 `invalidate`，新增 `load_config_reflects_saved_hosts_via_cache` 单测验证写后不返回陈旧值。两套 check、两套 test 全绿 |

@@ -2003,3 +2003,58 @@ fn audit_export_response_contract() {
     assert!(csv_header.contains("change_id"));
     assert!(csv_line.contains("CHG-001"));
 }
+
+// ── Configurable listen address (I4) ────────────────────────────────────────
+
+/// End-to-end check that the daemon honors `AGENT2SSH_DAEMON_ADDR`: a server
+/// bound to a configured non-default port is reachable through the same shared
+/// resolver (I1) that clients use, proving the bind side and client side agree.
+#[tokio::test]
+#[serial_test::serial]
+async fn daemon_honors_configured_listen_address_end_to_end() {
+    use axum::{routing::get, Json, Router};
+
+    // Reserve a free loopback port, then advertise it the way an operator would.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let addr = format!("127.0.0.1:{port}");
+    std::env::set_var("AGENT2SSH_DAEMON_ADDR", &addr);
+
+    // The shared resolver must agree with the configured bind address, and a
+    // client must derive the matching loopback URL.
+    assert_eq!(agent2ssh::local_daemon_addr(), addr);
+    assert_eq!(
+        agent2ssh::local_daemon_url(),
+        format!("http://127.0.0.1:{port}")
+    );
+
+    // Boot a real server bound to the configured address with a /health route
+    // shaped like the daemon's (the raw probe looks for an {"ok":true} body).
+    let app = Router::new().route(
+        "/health",
+        get(|| async { Json(serde_json::json!({ "ok": true })) }),
+    );
+    let listener = tokio::net::TcpListener::bind(agent2ssh::local_daemon_addr())
+        .await
+        .expect("bind configured daemon address");
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    // The blocking health probe resolves the same configured address end to end.
+    // Run it off-runtime so the spawned server can make progress.
+    let healthy = tokio::task::spawn_blocking(agent2ssh::daemon_control::daemon_health_ok)
+        .await
+        .unwrap();
+
+    server.abort();
+    std::env::remove_var("AGENT2SSH_DAEMON_ADDR");
+
+    assert!(
+        healthy,
+        "daemon_health_ok should reach a server bound to the configured AGENT2SSH_DAEMON_ADDR"
+    );
+}

@@ -88,10 +88,11 @@ pub use policy::{
 };
 pub use remote::{
     check_daemon_version, check_version_compatibility, diagnose_daemon, get_daemons_unified_view,
-    list_daemons_core, load_remotes, remote_host_tags, tags_for_remote_scope_check,
+    is_loopback_addr, list_daemons_core, load_remotes, local_daemon_addr,
+    local_daemon_connect_addr, local_daemon_url, remote_host_tags, tags_for_remote_scope_check,
     DaemonDiagnostic, DaemonHealthSummary, DaemonInfo, DaemonMetricsSummary, DaemonUnifiedView,
     DaemonViewEntry, DiagnosticCheck, DiagnosticStatus, RemoteDaemon, VersionCompatibility,
-    PROTOCOL_VERSION,
+    DEFAULT_DAEMON_ADDR, PROTOCOL_VERSION,
 };
 pub use session::{
     session_close_core, session_list_core, session_open_core, session_read_core, session_write_core,

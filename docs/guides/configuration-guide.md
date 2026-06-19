@@ -972,3 +972,21 @@ shasum -a 256 team-config.json
 # 分享给团队成员后，他们可验证
 shasum -a 256 -c <checksum> team-config.json
 ```
+
+---
+
+## 环境变量
+
+除上述配置文件外，以下环境变量可调整 Agent2SSH 各 surface（桌面 App / CLI / MCP / daemon）的运行时行为。环境变量优先级高于默认值；除 `AGENT2SSH_CONFIG_DIR` 外都有安全的内置缺省，通常无需设置。
+
+| 变量 | 作用域 | 默认值 | 说明 |
+|------|--------|--------|------|
+| `AGENT2SSH_CONFIG_DIR` | 全部 | `~/.agent2ssh` | 覆盖配置与数据目录（`hosts.json`、`audit.jsonl`、`keys/`、`app.log` 等）。测试与多实例隔离常用。 |
+| `AGENT2SSH_SOURCE` | CLI / MCP / Tauri | 各 surface 自带标签（如 `cli`、`mcp`、`desktop`） | 覆盖审计与 Live Activity 中的来源标签，用于区分是哪个 agent/客户端发起的操作。 |
+| `AGENT2SSH_DAEMON_ADDR` | daemon（绑定）+ 全部 client（拨号） | `127.0.0.1:7722` | 本地 daemon 的监听地址。daemon 按此绑定；CLI/MCP/Tauri/Webhook 链接经同一解析器拨号，绑定到通配地址（`0.0.0.0`/`::`）时 client 自动回退到回环。绑定非回环地址会写一条 `warn` 诊断提示对外暴露。 |
+| `AGENT2SSH_TRACE_ID` | CLI / MCP | 自动生成 | 由上游调用方（如 agent）注入的关联 ID，写入诊断 `trace_id` 字段并随转发请求透传，便于跨 surface 串联一次操作。 |
+| `AGENT2SSH_LOG` | daemon | `info` | daemon `tracing` 的 `EnvFilter` 级别（如 `debug`、`agent2ssh=debug,info`）。 |
+| `AGENT2SSH_LOG_FORMAT` | daemon | `text` | daemon 控制台日志格式：`text` 或 `json`。 |
+| `AGENT2SSH_BRIDGE_DEPS` | daemon | 关闭（仅转 `agent2ssh*`） | 是否把依赖层（hyper/reqwest/ssh2/…）的 `WARN`/`ERROR` 也桥接进 `app.log`：`1`/`true`/`all` 用内置传输层前缀集，逗号分隔则自定义前缀，未设/`0`/`false` 关闭。依赖层事件不触发 error 告警（防回环），仅落盘排查传输问题用。 |
+
+> 说明：`remotes.toml` 与 `daemon_tokens.toml` 中的 `token_env` 字段引用的是**用户自定义**的环境变量名（如示例中的 `AGENT2SSH_PROD_TOKEN`），由你自行设置，不属于上表的内置变量。

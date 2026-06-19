@@ -90,20 +90,32 @@ fn uptime_secs() -> u64 {
     START_TIME.get_or_init(Instant::now).elapsed().as_secs()
 }
 
-/// Whether a `host:port` listen address resolves to loopback only. Used to warn
-/// when an operator binds the daemon somewhere reachable off-host. (H8)
-fn is_loopback_addr(addr: &str) -> bool {
-    let host = match addr.rsplit_once(':') {
-        Some((host, _port)) => host,
-        None => addr,
+/// Resolve once a shutdown signal arrives: Ctrl-C on every platform, plus
+/// `SIGTERM` on Unix (how service managers and `kill` stop the daemon). Used to
+/// drive `axum`'s graceful shutdown so the PID file is cleaned up instead of left
+/// stale. (I2)
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
     };
-    let host = host.trim().trim_start_matches('[').trim_end_matches(']');
-    if host.eq_ignore_ascii_case("localhost") {
-        return true;
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            // If the handler can't be installed, never resolve via this arm.
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
     }
-    host.parse::<std::net::IpAddr>()
-        .map(|ip| ip.is_loopback())
-        .unwrap_or(false)
 }
 
 // ── State ────────────────────────────────────────────────────────────────────
@@ -302,7 +314,7 @@ async fn request_and_wait_for_approval(prompt: ApprovalPrompt) -> Result<Approva
     let cmd_notify = prompt.command.clone();
     let approval_id_notify = approval_id.to_string();
     let risk_notify = format!("{:?}", prompt.risk).to_lowercase();
-    let action_url = approval_action_url("http://127.0.0.1:7722", &approval_id_notify);
+    let action_url = approval_action_url(&agent2ssh::local_daemon_url(), &approval_id_notify);
     let evt = WebhookEvent {
         event: "approval_required".into(),
         host: host_notify.clone(),
@@ -3571,16 +3583,13 @@ async fn main() -> anyhow::Result<()> {
     // Record start time for uptime calculation
     START_TIME.get_or_init(Instant::now);
 
-    // Listen address is configurable (H8); default stays loopback so the daemon
-    // is not exposed unless an operator opts in. Useful for port conflicts or
-    // running multiple instances.
-    let addr = std::env::var("AGENT2SSH_DAEMON_ADDR")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "127.0.0.1:7722".to_string());
+    // Listen address is configurable (H8) via AGENT2SSH_DAEMON_ADDR, resolved by
+    // the shared core helper so clients (CLI/MCP/Tauri) dial the same place (I1);
+    // default stays loopback so the daemon is not exposed unless an operator opts
+    // in. Useful for port conflicts or running multiple instances.
+    let addr = agent2ssh::local_daemon_addr();
     let addr = addr.as_str();
-    if !is_loopback_addr(addr) {
+    if !agent2ssh::is_loopback_addr(addr) {
         // Binding beyond loopback exposes the control plane to the network; the
         // bearer-token auth still applies, but make the exposure loud.
         let _ = agent2ssh::append_diagnostic_log(
@@ -3701,7 +3710,19 @@ async fn main() -> anyhow::Result<()> {
         })),
     );
     let listener = TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    // Graceful shutdown (I2): on Ctrl-C / SIGTERM, stop accepting and let in-flight
+    // requests drain, then fall through to clean up the PID file. Previously the
+    // cleanup only ran if `serve` returned, so a signalled daemon left a stale
+    // `daemon.pid` that misled health checks.
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
     let _ = std::fs::remove_file(&pid_path);
+    let _ = append_diagnostic_log(
+        "info",
+        "daemon",
+        "daemon shut down; pid file removed",
+        Some(serde_json::json!({ "pid": std::process::id() })),
+    );
     Ok(())
 }

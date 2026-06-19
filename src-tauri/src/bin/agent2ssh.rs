@@ -2605,7 +2605,7 @@ async fn run_doctor(output_json: bool) -> Result<()> {
         detail: if daemon_running {
             "GET /health returned 200".into()
         } else {
-            "daemon not reachable on 127.0.0.1:7722".into()
+            format!("daemon not reachable on {}", agent2ssh::local_daemon_url())
         },
     });
 
@@ -2851,7 +2851,11 @@ async fn check_daemon_health() -> bool {
         .timeout(std::time::Duration::from_secs(2))
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
-    match client.get("http://127.0.0.1:7722/health").send().await {
+    match client
+        .get(format!("{}/health", agent2ssh::local_daemon_url()))
+        .send()
+        .await
+    {
         Ok(resp) => resp.status().is_success(),
         Err(_) => false,
     }
@@ -2863,7 +2867,7 @@ async fn daemon_health_body() -> Result<String> {
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
     let response = client
-        .get("http://127.0.0.1:7722/health")
+        .get(format!("{}/health", agent2ssh::local_daemon_url()))
         .send()
         .await
         .context("failed to reach daemon health endpoint")?;
