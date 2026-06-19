@@ -1,7 +1,15 @@
 import { Plus, TerminalSquare, X } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useI18n } from "../i18n";
 import type { HostProfile } from "../types";
+import {
+  isTerminalThemeId,
+  TERMINAL_THEME_OPTIONS,
+  TERMINAL_THEME_STORAGE_KEY,
+  terminalThemeBackground,
+  type TerminalThemeId,
+} from "../terminalThemes";
+import { useTheme, type Theme as AppTheme } from "../theme";
 import TerminalView from "./TerminalView";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
@@ -21,11 +29,51 @@ function nextId(): string {
   return `term-${counter}-${Date.now()}`;
 }
 
+function initialTerminalTheme(): TerminalThemeId {
+  try {
+    const saved = localStorage.getItem(TERMINAL_THEME_STORAGE_KEY);
+    if (saved && isTerminalThemeId(saved)) return saved;
+  } catch {
+    // localStorage may be unavailable
+  }
+  return "app";
+}
+
+function systemTheme(): AppTheme {
+  if (typeof window === "undefined") return "dark";
+  return window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+}
+
 export default function TerminalPanel({ hosts, initialHost = "" }: Props) {
   const { t } = useI18n();
+  const { theme: appTheme } = useTheme();
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [newHost, setNewHost] = useState(initialHost || hosts[0]?.name || "");
+  const [terminalTheme, setTerminalTheme] = useState<TerminalThemeId>(() => initialTerminalTheme());
+  const [resolvedSystemTheme, setResolvedSystemTheme] = useState<AppTheme>(() => systemTheme());
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(TERMINAL_THEME_STORAGE_KEY, terminalTheme);
+    } catch {
+      // ignore persistence failures
+    }
+  }, [terminalTheme]);
+
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-color-scheme: light)");
+    const update = () => setResolvedSystemTheme(systemTheme());
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+
+  const effectiveAppTheme = appTheme === "system" ? resolvedSystemTheme : appTheme;
+  const terminalBackground = useMemo(
+    () => terminalThemeBackground(terminalTheme, effectiveAppTheme),
+    [effectiveAppTheme, terminalTheme]
+  );
 
   function openTab() {
     if (!newHost) return;
@@ -75,6 +123,23 @@ export default function TerminalPanel({ hosts, initialHost = "" }: Props) {
           </button>
         ))}
         <div className="ml-auto flex shrink-0 items-center gap-1.5">
+          <label className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+            <span>{t("Terminal theme")}</span>
+            <Select
+              value={terminalTheme}
+              onChange={(e) => {
+                const next = e.target.value;
+                if (isTerminalThemeId(next)) setTerminalTheme(next);
+              }}
+              className="h-7 w-[170px] text-xs"
+            >
+              {TERMINAL_THEME_OPTIONS.map((option) => (
+                <option key={option.id} value={option.id}>
+                  {t(option.label)}
+                </option>
+              ))}
+            </Select>
+          </label>
           <Select
             value={newHost}
             onChange={(e) => setNewHost(e.target.value)}
@@ -94,9 +159,9 @@ export default function TerminalPanel({ hosts, initialHost = "" }: Props) {
         </div>
       </div>
 
-      <div className="relative flex-1 bg-[#0e1620]">
+      <div className="relative flex-1" style={{ backgroundColor: terminalBackground }}>
         {tabs.length === 0 && (
-          <div className="absolute inset-0 flex items-center justify-center text-sm text-[#8fb0c5]">
+          <div className="absolute inset-0 flex items-center justify-center text-sm text-white/60">
             {t("Open a terminal to a host to get started.")}
           </div>
         )}
@@ -109,7 +174,11 @@ export default function TerminalPanel({ hosts, initialHost = "" }: Props) {
               zIndex: tab.id === activeId ? 1 : 0,
             }}
           >
-            <TerminalView host={tab.host} />
+            <TerminalView
+              host={tab.host}
+              terminalTheme={terminalTheme}
+              appTheme={effectiveAppTheme}
+            />
           </div>
         ))}
       </div>

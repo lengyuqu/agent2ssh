@@ -3,19 +3,21 @@ use base64::{
     engine::general_purpose::{STANDARD, STANDARD_NO_PAD},
     Engine as _,
 };
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use ssh2::{HashType, Session};
 use std::{
+    collections::HashMap,
     io::{ErrorKind, Read, Write},
     net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs},
     path::Path,
     sync::mpsc,
     thread,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use crate::{
-    store::load_config,
+    store::{config_dir, ensure_config_dir, load_config, restrict_file_to_owner},
     types::{HostProfile, ProxyProfile, ProxyProtocol},
 };
 
@@ -43,6 +45,16 @@ pub enum TerminalEvent {
     Output(Vec<u8>),
     Error(String),
     Closed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TrustedHostFingerprint {
+    host: String,
+    address: String,
+    host_key_algorithm: String,
+    fingerprint_sha256: String,
+    first_seen_unix: u64,
+    last_seen_unix: u64,
 }
 
 fn expand_tilde(path: &str) -> String {
@@ -78,6 +90,94 @@ fn fingerprint_sha256(session: &Session) -> Option<String> {
     let (key, _) = session.host_key()?;
     let digest = Sha256::digest(key);
     Some(format!("SHA256:{}", STANDARD_NO_PAD.encode(digest)))
+}
+
+fn known_hosts_path() -> Result<std::path::PathBuf> {
+    Ok(config_dir()?.join("known_hosts.json"))
+}
+
+fn now_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn known_host_identity(host: &HostProfile) -> String {
+    format!("{}:{}", host.host.trim(), host.port.unwrap_or(22))
+}
+
+fn load_known_host_fingerprints_unlocked() -> Result<HashMap<String, TrustedHostFingerprint>> {
+    let path = known_hosts_path()?;
+    if !path.exists() {
+        return Ok(HashMap::new());
+    }
+    let raw = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read known host fingerprints {}", path.display()))?;
+    if raw.trim().is_empty() {
+        return Ok(HashMap::new());
+    }
+    serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse known host fingerprints {}", path.display()))
+}
+
+fn save_known_host_fingerprints_unlocked(
+    fingerprints: &HashMap<String, TrustedHostFingerprint>,
+) -> Result<()> {
+    ensure_config_dir()?;
+    let path = known_hosts_path()?;
+    let raw = serde_json::to_string_pretty(fingerprints)?;
+    std::fs::write(&path, raw)
+        .with_context(|| format!("failed to write known host fingerprints {}", path.display()))?;
+    restrict_file_to_owner(&path)?;
+    Ok(())
+}
+
+fn trust_or_verify_host_fingerprint(
+    host: &HostProfile,
+    address: &str,
+    host_key_algorithm: &str,
+    fingerprint_sha256: &str,
+) -> Result<()> {
+    ensure_config_dir()?;
+    let _guard = crate::store::lock_config_file(".known_hosts.lock")?;
+    let mut trusted = load_known_host_fingerprints_unlocked()?;
+    let identity = known_host_identity(host);
+    let now = now_unix_secs();
+
+    if let Some(existing) = trusted.get_mut(&identity) {
+        if existing.fingerprint_sha256 != fingerprint_sha256
+            || existing.host_key_algorithm != host_key_algorithm
+        {
+            return Err(anyhow!(
+                "SSH host fingerprint changed for {} ({}): expected {} {}, got {} {}",
+                host.name,
+                identity,
+                existing.host_key_algorithm,
+                existing.fingerprint_sha256,
+                host_key_algorithm,
+                fingerprint_sha256
+            ));
+        }
+        existing.host = host.name.clone();
+        existing.address = address.to_string();
+        existing.last_seen_unix = now;
+        save_known_host_fingerprints_unlocked(&trusted)?;
+        return Ok(());
+    }
+
+    trusted.insert(
+        identity,
+        TrustedHostFingerprint {
+            host: host.name.clone(),
+            address: address.to_string(),
+            host_key_algorithm: host_key_algorithm.to_string(),
+            fingerprint_sha256: fingerprint_sha256.to_string(),
+            first_seen_unix: now,
+            last_seen_unix: now,
+        },
+    );
+    save_known_host_fingerprints_unlocked(&trusted)
 }
 
 fn default_username() -> String {
@@ -502,6 +602,22 @@ fn connect_embedded_ssh_inner(
     session.set_tcp_stream(tcp);
     session.handshake()?;
 
+    let host_address = format!("{}:{}", host.host, host.port.unwrap_or(22));
+    let (host_key_algorithm, host_key_fingerprint) = match session.host_key() {
+        Some((_, kind)) => (
+            host_key_algorithm(kind).to_string(),
+            fingerprint_sha256(&session)
+                .ok_or_else(|| anyhow!("failed to calculate SSH host fingerprint"))?,
+        ),
+        None => return Err(anyhow!("SSH server did not provide a host key")),
+    };
+    trust_or_verify_host_fingerprint(
+        host,
+        &host_address,
+        &host_key_algorithm,
+        &host_key_fingerprint,
+    )?;
+
     let username = resolved_username(host);
     let auth_method = authenticate(&session, host, &username)?;
 
@@ -509,7 +625,6 @@ fn connect_embedded_ssh_inner(
         return Err(anyhow!("SSH authentication failed for '{}'", host.name));
     }
 
-    let host_address = format!("{}:{}", host.host, host.port.unwrap_or(22));
     let _ = crate::diagnostics::append_diagnostic_log(
         "info",
         "embedded_ssh",
@@ -519,8 +634,8 @@ fn connect_embedded_ssh_inner(
             "address": host_address,
             "username": username,
             "auth_method": auth_method,
-            "fingerprint_sha256": fingerprint_sha256(&session),
-            "host_key_algorithm": session.host_key().map(|(_, kind)| host_key_algorithm(kind)),
+            "fingerprint_sha256": host_key_fingerprint,
+            "host_key_algorithm": host_key_algorithm,
             "server_banner": session.banner().map(ToOwned::to_owned),
             "jump_host": via_jump,
         })),
@@ -728,6 +843,52 @@ mod tests {
             username: None,
             password: None,
         }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn host_fingerprint_is_auto_trusted_then_verified() {
+        let config_dir =
+            std::env::temp_dir().join(format!("agent2ssh-known-hosts-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::env::set_var("AGENT2SSH_CONFIG_DIR", &config_dir);
+        let host = test_host();
+
+        trust_or_verify_host_fingerprint(
+            &host,
+            "example.internal:22",
+            "ssh-ed25519",
+            "SHA256:first",
+        )
+        .unwrap();
+        let trusted = load_known_host_fingerprints_unlocked().unwrap();
+        let entry = trusted.get("example.internal:22").unwrap();
+        assert_eq!(entry.fingerprint_sha256, "SHA256:first");
+        assert_eq!(entry.host_key_algorithm, "ssh-ed25519");
+
+        trust_or_verify_host_fingerprint(
+            &host,
+            "example.internal:22",
+            "ssh-ed25519",
+            "SHA256:first",
+        )
+        .unwrap();
+
+        let mismatch = trust_or_verify_host_fingerprint(
+            &host,
+            "example.internal:22",
+            "ssh-ed25519",
+            "SHA256:changed",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            mismatch.contains("SSH host fingerprint changed"),
+            "unexpected mismatch error: {mismatch}"
+        );
+
+        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&config_dir);
     }
 
     #[test]

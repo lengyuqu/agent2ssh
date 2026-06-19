@@ -12,9 +12,11 @@ Agent2SSH 的所有配置和数据文件存储在 `~/.agent2ssh/` 目录下。�
   daemon.pid       # 守护进程 PID（自动管理）
   audit.jsonl      # 执行审计日志（自动追加）
   app.log          # 结构化诊断日志（JSONL，自动轮转）
+  known_hosts.json # SSH 主机指纹信任记录（自动管理）
   .hosts.lock      # hosts.json 跨进程写锁（自动管理）
   .audit.lock      # audit.jsonl 跨进程追加锁（自动管理）
   .app_log.lock    # app.log 跨进程写锁（自动管理）
+  .known_hosts.lock # known_hosts.json 跨进程写锁（自动管理）
   policy.toml      # 统一策略文件（推荐）
   risk_rules.toml  # 旧版用户自定义风险规则（兼容）
   approval_policies.toml # 旧版审批策略（兼容）
@@ -135,9 +137,42 @@ JSON 格式，包含 `hosts` 数组，也可以包含由桌面端代理管理页
 - `proxy_id` 必须引用 `proxies` 中已存在的代理 ID；删除代理时，引用它的主机会自动切换回直连
 - HTTP 代理使用 `CONNECT host:port`；SOCKS5 支持无认证和用户名/密码认证
 - 代理密码与主机密码一样保存在本地 `hosts.json`，该文件由 Agent2SSH 限制为 owner 可读写
+- CLI `host add` 当前不提供代理参数；请通过桌面端 **Proxies** 页面和主机编辑表单维护代理，或在 `hosts.json` 中手动写入 `proxies` 与主机 `proxy_id`
 - `risk_override` 设置为 `"low"` 可以降低该主机上非 `blocked` 命令的风险等级
 - `risk_override` 不能降级 `blocked` 命令；内置或用户规则判定为 `blocked` 的命令仍会被拒绝；显式审批策略、scope、gate 和限额仍会生效
 - `env`、`role`、`owner` 和 `tags` 可用于桌面端主机视图过滤，也可用于 CLI `host list` 过滤
+
+---
+
+## known_hosts.json
+
+### 用途
+
+记录 Agent2SSH 已信任的 SSH 主机指纹。首次连接某个主机时，后端会自动写入该文件；再次连接时会校验保存的 SHA256 指纹。如果同一主机的指纹发生变化，连接会被拒绝。
+
+### 文件格式
+
+JSON 对象，键为 `host:port` 形式的连接身份，值包含主机别名、解析后的地址、host key 算法、SHA256 指纹和 Unix 秒级时间戳：
+
+```json
+{
+  "192.168.1.10:22": {
+    "host": "web1",
+    "address": "192.168.1.10",
+    "host_key_algorithm": "ssh-ed25519",
+    "fingerprint_sha256": "SHA256:abc123...",
+    "first_seen_unix": 1781836215,
+    "last_seen_unix": 1781836215
+  }
+}
+```
+
+### 注意事项
+
+- 该文件自动管理，不需要人工确认主机指纹
+- `.known_hosts.lock` 用于跨进程写锁，避免 CLI、daemon 和桌面端并发写入冲突
+- 如果你确认远端主机重装或 SSH host key 合法轮换，可以删除对应条目后重新连接
+- 不要把该文件提交到版本控制；它反映了本机信任状态
 
 ---
 

@@ -326,7 +326,7 @@ fn tool_definitions() -> Vec<Value> {
                 },
                 {
                     "name": "ssh_sftp_ls",
-                    "description": "List a remote directory (runs ls -la on the remote host).",
+                    "description": "List a remote directory via embedded SFTP.",
                     "inputSchema": {
                         "type": "object",
                         "required": ["host", "path"],
@@ -339,7 +339,7 @@ fn tool_definitions() -> Vec<Value> {
                 },
                 {
                     "name": "ssh_sftp_stat",
-                    "description": "Stat a remote file or directory (runs stat on the remote host).",
+                    "description": "Stat a remote file or directory via embedded SFTP.",
                     "inputSchema": {
                         "type": "object",
                         "required": ["host", "path"],
@@ -352,7 +352,7 @@ fn tool_definitions() -> Vec<Value> {
                 },
                 {
                     "name": "ssh_sftp_mkdir",
-                    "description": "Create a directory on a remote host (runs mkdir -p).",
+                    "description": "Create a remote directory recursively via embedded SFTP.",
                     "inputSchema": {
                         "type": "object",
                         "required": ["host", "path"],

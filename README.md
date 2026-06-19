@@ -95,6 +95,10 @@ Authenticated requests use the bearer token stored at `~/.agent2ssh/daemon.token
 
 Local data is stored under `~/.agent2ssh/`. See [docs/guides/configuration-guide.md](docs/guides/configuration-guide.md) for the full file layout, configuration format, and storage details.
 
+## Documentation
+
+Start with the [help overview](docs/guides/help.md) for desktop areas, common commands, and safety notes. First-time users can also follow the [CLI quickstart](docs/guides/cli-quickstart.md), [MCP quickstart](docs/guides/mcp-quickstart.md), or [10-minute CLI and MCP setup guide](docs/guides/external-user-10min.md).
+
 ## MCP Integration
 
 Configure Agent2SSH as an MCP server in your agent's config:
@@ -127,6 +131,7 @@ For first-time external users, follow the [10-minute CLI and MCP setup guide](do
 - Host profile CRUD (`host add / list / rm`)
 - Import from `~/.ssh/config` (`host import-config`)
 - Jump host / ProxyJump support
+- HTTP CONNECT and SOCKS5 proxy profiles for SSH connections, managed from the desktop Proxies page or `hosts.json`
 - Per-host risk override
 - Host tags for grouping and bulk execution
 - SSH key association
@@ -144,7 +149,7 @@ For first-time external users, follow the [10-minute CLI and MCP setup guide](do
 ### SSH Backend Boundary
 
 - SSH transport is implemented in the Rust/Tauri backend with the `ssh2` / libssh2 stack.
-- Exec, ping, health probes, SFTP, WebSocket exec streaming, WebSocket terminal, persistent PTY sessions, jump-host / ProxyJump-style bastion channels, retained connections, and local/remote port forwards do not call system `ssh`, `scp`, or `sshpass`.
+- Exec, ping, health probes, SFTP, WebSocket exec streaming, WebSocket terminal, persistent PTY sessions, HTTP/SOCKS5 proxy dialing, jump-host / ProxyJump-style bastion channels, retained connections, and local/remote port forwards do not call system `ssh`, `scp`, or `sshpass`.
 - Local Ed25519 key generation is also implemented in Rust and uses the operating system CSPRNG directly; it does not call system `ssh-keygen`.
 - Daemon process status/stop and health checks use Rust process/HTTP APIs, not shelling out to `kill`, `taskkill`, `tasklist`, or `curl`.
 - SSH config import/export reads and writes local config text, but connection execution remains embedded.
@@ -161,6 +166,7 @@ For first-time external users, follow the [10-minute CLI and MCP setup guide](do
 - Multi-host and playbook approvals are scoped to the approved host or step; one approval does not automatically force later targets or steps
 - Execution audit log with risk level, initiating source, completed operations, and rejected attempts recorded
 - Daemon-level execution gate, execution rate/session limits, and audit-window anomaly detection
+- SSH host fingerprints are trusted automatically on first use in `~/.agent2ssh/known_hosts.json`; later fingerprint changes are rejected
 
 ### File Transfer (SFTP)
 
@@ -169,6 +175,7 @@ For first-time external users, follow the [10-minute CLI and MCP setup guide](do
 - Remote directory listing: `sftp ls` / `ssh_sftp_ls`
 - Remote stat: `sftp stat` / `ssh_sftp_stat`
 - Remote mkdir: `sftp mkdir` / `ssh_sftp_mkdir`
+- Desktop Files page provides a two-pane SFTP file manager with path shortcuts, folder navigation, file selection, directory creation, and copy-left/copy-right transfer actions
 - Daemon SFTP operations pass through the same scope, risk, approval, gate, limit, and audit checks as command execution; directory helpers also record an operation-level audit entry in addition to the underlying shell command result
 
 ### Sessions And Tunnels
@@ -177,19 +184,23 @@ For first-time external users, follow the [10-minute CLI and MCP setup guide](do
 - Session open/write/read/list/close
 - Browser/WebSocket interactive terminal with remote PTY resize forwarding
 - Connection diagnostics include authentication method, host-key algorithm, server banner, and SHA256 host-key fingerprint
-- Local and remote port forwarding
+- Local and remote port forwarding with desktop tunnel creation, active tunnel list, host counts, and removal controls
 - Forward list/remove by ID
 - PTY session writes use line-buffered authorization for completed shell input and operation-level audit entries across daemon and desktop-local paths. This is a conservative guard for normal command input, not a full shell parser for arbitrary interactive programs.
 
 ### Desktop And Web UI
 
 - Desktop host manager, exec panel, audit viewer, approval dialog, key manager, playbooks, tunnels, sessions, and connection status
+- Desktop Proxies page for HTTP CONNECT and SOCKS5 proxy profiles, including optional username/password authentication
+- Desktop Terminal supports selectable terminal themes including app-matched, GitHub Dark, Tokyo Night, Dracula, Nord, Solarized Light, High Contrast, and Amber
+- Desktop Help page links bundled guides and shows first-run checklist, useful commands, and safety notes
 - Desktop command and session risk previews include host-level risk overrides before prompting
 - Desktop Settings menu centralizes language, setup, SSH config import, daemon Web Console URL, and execution gate controls
 - Desktop Settings menu shows local daemon health, version, PID, and last health check time using the daemon `/health` endpoint
 - Desktop Settings menu can start, stop, and restart the bundled local daemon sidecar
 - Desktop setup wizard can start the bundled local daemon during first-run setup
 - Desktop execution gate status is tri-state: active, paused, or unavailable when the local daemon cannot be reached; the menu shows the last status check time and supports manual refresh
+- Windows release builds run as GUI apps without opening an extra console window
 - Live Agent Activity panel for local visibility into daemon session activity, WebSocket exec streams, recent audit records from CLI/MCP/daemon operations, and anomaly alerts
 - Browser console served by the daemon at `/console`
 - Daemon REST API, WebSocket streaming exec endpoint, WebSocket interactive terminal endpoint, and authenticated SSE event stream

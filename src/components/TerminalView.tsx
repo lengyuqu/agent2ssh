@@ -3,14 +3,19 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { api, getDaemonUrl } from "../api";
+import type { TerminalThemeId } from "../terminalThemes";
+import { resolveTerminalTheme } from "../terminalThemes";
+import type { Theme as AppTheme } from "../theme";
 
 type Props = {
   host: string;
+  terminalTheme: TerminalThemeId;
+  appTheme: AppTheme;
 };
 
 /** A live interactive terminal to a host, streamed over the daemon's
  *  /terminal WebSocket (raw bytes both ways: ANSI, control chars, TUIs). */
-export default function TerminalView({ host }: Props) {
+export default function TerminalView({ host, terminalTheme, appTheme }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -20,13 +25,16 @@ export default function TerminalView({ host }: Props) {
     const term = new Terminal({
       fontFamily: '"SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace',
       fontSize: 13,
+      fontWeight: 450,
+      fontWeightBold: 700,
+      lineHeight: 1.18,
+      letterSpacing: 0,
       cursorBlink: true,
-      theme: {
-        background: "#0e1620",
-        foreground: "#e6edf3",
-        cursor: "#e6edf3",
-        selectionBackground: "#2d4250",
-      },
+      cursorStyle: "block",
+      scrollback: 8000,
+      smoothScrollDuration: 80,
+      allowTransparency: false,
+      theme: resolveTerminalTheme(terminalTheme, appTheme),
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
@@ -131,7 +139,7 @@ export default function TerminalView({ host }: Props) {
       ws?.close();
       term.dispose();
     };
-  }, [host]);
+  }, [appTheme, host, terminalTheme]);
 
-  return <div ref={containerRef} className="h-full w-full p-1.5" />;
+  return <div ref={containerRef} className="terminal-surface h-full w-full p-2" />;
 }

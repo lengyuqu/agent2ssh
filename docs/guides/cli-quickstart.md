@@ -2,6 +2,8 @@
 
 Agent2SSH 提供命令行工具 `agent2ssh`，用于管理 SSH 主机、执行远程命令、传输文件、管理会话和端口转发等操作。
 
+桌面端提供同一套能力的可视化入口，包括主机管理、HTTP/SOCKS5 代理、终端主题、SFTP 双栏文件管理、隧道列表和帮助页。CLI 适合脚本和自动化；需要维护代理配置时，优先使用桌面端 **Proxies** 页面或直接编辑 `~/.agent2ssh/hosts.json`。
+
 ## 安装验证
 
 安装完成后，验证 CLI 是否可用：
@@ -75,6 +77,8 @@ agent2ssh host add <name> --host <addr> [--user <u>] [--port <p>] [--key <path>]
 | `--role` | 否 | 主机角色标签，用于 `host list` 过滤 |
 | `--owner` | 否 | 负责人或团队标签，用于 `host list` 过滤 |
 | `--json` | 否 | 以 JSON 格式输出结果 |
+
+`agent2ssh host add` 当前不会创建或绑定 HTTP/SOCKS5 代理。代理配置保存在 `hosts.json` 的 `proxies` 数组中，主机通过 `proxy_id` 引用；可在桌面端 **Proxies** 页面维护。
 
 示例 -- 添加带跳板机的主机：
 
@@ -202,6 +206,8 @@ agent2ssh exec-multi web1 web2 --command "uptime" --json
 
 SFTP 操作会写入审计日志；daemon 路由下还会经过 scope、gate、limits、风险和审批检查。用于策略匹配的操作字符串类似 `sftp upload <local> -> <remote>`、`sftp download <remote> -> <local>`、`sftp ls <path>`。
 
+桌面端 **Files** 页面提供左右双栏文件管理器，可浏览远程目录、点击文件夹进入、点击文件选择、新建目录，并通过 **Copy to right** / **Copy to left** 做双向传输。
+
 ### 上传文件
 
 ```bash
@@ -313,6 +319,8 @@ agent2ssh forward add <host> --direction <local|remote> --bind-port <N> --target
 agent2ssh forward list [--json]
 ```
 
+桌面端 **Tunnels** 页面会展示同一批 daemon 管理的活跃隧道，并按主机统计数量，适合手动排查和移除。
+
 ### 删除转发
 
 ```bash
@@ -337,6 +345,14 @@ agent2ssh ping <hosts...> [--timeout-secs N] [--json]
 agent2ssh ping web1 web2 web3
 agent2ssh ping web1 --timeout-secs 3 --json
 ```
+
+---
+
+## SSH 主机指纹
+
+Agent2SSH 首次连接主机时会自动信任 SSH host key，并保存到 `~/.agent2ssh/known_hosts.json`。后续连接会校验保存的 SHA256 指纹；如果指纹变化，连接会失败并提示主机指纹已改变。
+
+如果你确认远端主机重装或合法轮换了 SSH host key，可以删除 `known_hosts.json` 中对应条目后重新连接。不要共享或提交该文件，它是本机信任状态。
 
 ---
 

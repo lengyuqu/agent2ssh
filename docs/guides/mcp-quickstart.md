@@ -348,7 +348,7 @@ MCP 服务器以 `agent2ssh-mcp` 二进制运行，通过标准输入/输出与 
 
 MCP 的 exec、exec-multi、playbook、SFTP、session open/write/close、forward add/remove、connect 和 disconnect 等 mutation 操作会复用 Agent2SSH 的统一授权路径。daemon 或远程 token scope 会在审批前检查；用户风险规则只能升级内置风险；host/playbook `risk_override` 只能调整非 `blocked` 命令。PTY session 写入按完成的输入行做授权和操作审计；session/forward 的 read/list 类观察操作不默认写入 `audit.jsonl`。
 
-MCP 的 exec、SFTP、session、terminal 相关 daemon 路径、jump-host、端口转发和连接保留都使用内置 SSH 传输，不依赖系统 `ssh`、`scp` 或 `sshpass`。
+MCP 的 exec、SFTP、session、terminal 相关 daemon 路径、jump-host、端口转发和连接保留都使用内置 SSH 传输，不依赖系统 `ssh`、`scp` 或 `sshpass`。SSH 主机指纹首次连接时会自动写入 `~/.agent2ssh/known_hosts.json`，后续算法或指纹变化会被拒绝。
 
 高风险命令可通过 daemon 审批流处理。未路由到 daemon、且没有本地审批处理器时，MCP 会失败关闭；此时应改用 daemon 路由，或在策略允许时传入 `force: true`。
 

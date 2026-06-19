@@ -2,6 +2,28 @@
 
 Use this skill when you need to operate remote machines through Agent2SSH.
 
+## Discovery Checklist
+
+Before using Agent2SSH from an agent, discover the available local entry point:
+
+```bash
+command -v agent2ssh
+command -v agent2ssh-mcp
+```
+
+If the binaries are not in `PATH` but the agent is running inside an Agent2SSH
+source checkout, prefer the local debug binaries after a build:
+
+```bash
+test -x src-tauri/target/debug/agent2ssh && src-tauri/target/debug/agent2ssh --version
+test -x src-tauri/target/debug/agent2ssh-mcp && src-tauri/target/debug/agent2ssh-mcp --version
+```
+
+For MCP clients, configure `agent2ssh-mcp` as a stdio server, then call
+`tools/list` and look for `ssh_list_hosts`, `ssh_exec`, `ssh_sftp_ls`, and
+`ssh_risk_check`. If `agent2ssh-mcp` is not in `PATH`, use its absolute path in
+the client config.
+
 ## Quick Reference
 
 | Need | Command / MCP tool |

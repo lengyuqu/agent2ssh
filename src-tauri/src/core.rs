@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
     io::{Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
     time::Instant,
@@ -1584,7 +1584,233 @@ pub async fn sftp_download_core_with_source(
     Ok(result)
 }
 
-// ── SFTP directory operations (via SSH exec) ──────────────────────────────────
+// ── SFTP directory operations ─────────────────────────────────────────────────
+
+const SFTP_FILE_TYPE_MASK: u32 = 0o170000;
+const SFTP_FILE_TYPE_REGULAR: u32 = 0o100000;
+const SFTP_FILE_TYPE_DIRECTORY: u32 = 0o040000;
+const SFTP_FILE_TYPE_SYMLINK: u32 = 0o120000;
+
+fn sftp_operation_command(operation: &str, path: &str) -> String {
+    format!("sftp {operation} {path}")
+}
+
+fn sftp_file_type_char(stat: &ssh2::FileStat) -> char {
+    match stat.perm.map(|perm| perm & SFTP_FILE_TYPE_MASK) {
+        Some(SFTP_FILE_TYPE_DIRECTORY) => 'd',
+        Some(SFTP_FILE_TYPE_SYMLINK) => 'l',
+        Some(SFTP_FILE_TYPE_REGULAR) => '-',
+        _ => '-',
+    }
+}
+
+fn sftp_is_directory(stat: &ssh2::FileStat) -> bool {
+    stat.perm
+        .map(|perm| (perm & SFTP_FILE_TYPE_MASK) == SFTP_FILE_TYPE_DIRECTORY)
+        .unwrap_or(false)
+}
+
+fn sftp_permission_string(stat: &ssh2::FileStat) -> String {
+    let Some(perm) = stat.perm else {
+        return format!("{}?????????", sftp_file_type_char(stat));
+    };
+    let mut out = String::with_capacity(10);
+    out.push(sftp_file_type_char(stat));
+    for bit in [
+        0o400, 0o200, 0o100, 0o040, 0o020, 0o010, 0o004, 0o002, 0o001,
+    ] {
+        out.push(match bit {
+            0o400 | 0o040 | 0o004 => {
+                if perm & bit != 0 {
+                    'r'
+                } else {
+                    '-'
+                }
+            }
+            0o200 | 0o020 | 0o002 => {
+                if perm & bit != 0 {
+                    'w'
+                } else {
+                    '-'
+                }
+            }
+            _ => {
+                if perm & bit != 0 {
+                    'x'
+                } else {
+                    '-'
+                }
+            }
+        });
+    }
+    out
+}
+
+fn sftp_entry_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+fn format_sftp_ls_entry(path: &Path, stat: &ssh2::FileStat) -> String {
+    format!(
+        "{} 1 {} {} {:>8} Jan 01 00:00 {}\n",
+        sftp_permission_string(stat),
+        stat.uid.unwrap_or(0),
+        stat.gid.unwrap_or(0),
+        stat.size.unwrap_or(0),
+        sftp_entry_name(path)
+    )
+}
+
+fn format_sftp_stat(path: &str, stat: &ssh2::FileStat) -> String {
+    let file_type = match sftp_file_type_char(stat) {
+        'd' => "directory",
+        'l' => "symlink",
+        '-' => "file",
+        _ => "unknown",
+    };
+    format!(
+        "Path: {path}\nType: {file_type}\nSize: {}\nPermissions: {}\nUid: {}\nGid: {}\nAtime: {}\nMtime: {}\n",
+        stat.size.unwrap_or(0),
+        sftp_permission_string(stat),
+        stat.uid
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unknown".into()),
+        stat.gid
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unknown".into()),
+        stat.atime
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unknown".into()),
+        stat.mtime
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unknown".into())
+    )
+}
+
+fn sftp_parent_paths(path: &str) -> Vec<PathBuf> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() || trimmed == "/" || trimmed == "." {
+        return Vec::new();
+    }
+
+    let absolute = trimmed.starts_with('/');
+    let mut current = if absolute {
+        PathBuf::from("/")
+    } else {
+        PathBuf::new()
+    };
+    let mut out = Vec::new();
+    for part in trimmed
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+    {
+        if part == ".." {
+            current.push(part);
+        } else {
+            current.push(part);
+        }
+        out.push(current.clone());
+    }
+    out
+}
+
+fn create_sftp_dir_all(sftp: &ssh2::Sftp, path: &str) -> Result<()> {
+    for next in sftp_parent_paths(path) {
+        match sftp.stat(&next) {
+            Ok(stat) if sftp_is_directory(&stat) => continue,
+            Ok(_) => {
+                return Err(anyhow!(
+                    "remote path is not a directory: {}",
+                    next.display()
+                ))
+            }
+            Err(_) => {
+                sftp.mkdir(&next, 0o755).with_context(|| {
+                    format!("failed to create remote directory {}", next.display())
+                })?;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn sftp_dir_operation_core<F>(
+    host_name: &str,
+    path: &str,
+    timeout_secs: Option<u64>,
+    operation: &str,
+    source: Option<String>,
+    task: F,
+) -> Result<ExecResult>
+where
+    F: FnOnce(HostProfile, String, u64) -> Result<String> + Send + 'static,
+{
+    let host = resolve_host(host_name)?;
+    let source = source.unwrap_or_else(|| source_from_env("core"));
+    let command = sftp_operation_command(operation, path);
+    let risk = apply_risk_override(
+        crate::risk_config::classify_effective_risk(&command, classify_risk(&command)).await,
+        host.risk_override,
+    );
+    if risk == RiskLevel::Blocked {
+        let message = format!("sftp {operation} blocked by risk policy");
+        let result = ExecResult {
+            host: host_name.to_string(),
+            command,
+            exit_code: None,
+            stdout: String::new(),
+            stderr: message.clone(),
+            duration_ms: 0,
+            risk_level: risk,
+            truncated: false,
+        };
+        let _ = append_audit(&result, risk, Some(&message), None, Some(&source));
+        return Err(anyhow!(message));
+    }
+
+    let started = Instant::now();
+    let remote_path = path.to_string();
+    let timeout = timeout_secs.unwrap_or(60);
+    let task_result = tokio::task::spawn_blocking(move || task(host, remote_path, timeout))
+        .await
+        .context("embedded SFTP directory task failed")?;
+    let duration_ms = started.elapsed().as_millis();
+
+    match task_result {
+        Ok(stdout) => {
+            let result = ExecResult {
+                host: host_name.to_string(),
+                command,
+                exit_code: Some(0),
+                stdout,
+                stderr: String::new(),
+                duration_ms,
+                risk_level: risk,
+                truncated: false,
+            };
+            let _ = append_audit(&result, risk, None, None, Some(&source));
+            Ok(result)
+        }
+        Err(error) => {
+            let message = error.to_string();
+            let result = ExecResult {
+                host: host_name.to_string(),
+                command,
+                exit_code: None,
+                stdout: String::new(),
+                stderr: message.clone(),
+                duration_ms,
+                risk_level: risk,
+                truncated: false,
+            };
+            let _ = append_audit(&result, risk, Some(&message), None, Some(&source));
+            Err(error)
+        }
+    }
+}
 
 pub async fn sftp_ls_core(
     host_name: &str,
@@ -1600,17 +1826,32 @@ pub async fn sftp_ls_core_with_source(
     timeout_secs: Option<u64>,
     source: Option<String>,
 ) -> Result<ExecResult> {
-    exec_ssh_core(ExecRequest {
-        host: host_name.to_string(),
-        command: format!("ls -la {}", shell_escape(path)),
-        force: false,
+    sftp_dir_operation_core(
+        host_name,
+        path,
         timeout_secs,
-        stdin: None,
-        max_output_bytes: None,
-        reason: None,
-        change_id: None,
-        source: Some(source.unwrap_or_else(|| source_from_env("core"))),
-    })
+        "ls",
+        source,
+        |host, path, timeout| {
+            let session = connect_embedded_ssh(&host, timeout)?;
+            let sftp = session.sftp()?;
+            let mut entries = sftp
+                .readdir(Path::new(&path))
+                .with_context(|| format!("failed to list remote directory {path}"))?;
+            entries.sort_by(|(left, left_stat), (right, right_stat)| {
+                let left_dir = sftp_is_directory(left_stat);
+                let right_dir = sftp_is_directory(right_stat);
+                right_dir
+                    .cmp(&left_dir)
+                    .then_with(|| sftp_entry_name(left).cmp(&sftp_entry_name(right)))
+            });
+            Ok(entries
+                .into_iter()
+                .map(|(entry_path, stat)| format_sftp_ls_entry(&entry_path, &stat))
+                .collect::<Vec<_>>()
+                .join(""))
+        },
+    )
     .await
 }
 
@@ -1628,17 +1869,21 @@ pub async fn sftp_stat_core_with_source(
     timeout_secs: Option<u64>,
     source: Option<String>,
 ) -> Result<ExecResult> {
-    exec_ssh_core(ExecRequest {
-        host: host_name.to_string(),
-        command: format!("stat {}", shell_escape(path)),
-        force: false,
+    sftp_dir_operation_core(
+        host_name,
+        path,
         timeout_secs,
-        stdin: None,
-        max_output_bytes: None,
-        reason: None,
-        change_id: None,
-        source: Some(source.unwrap_or_else(|| source_from_env("core"))),
-    })
+        "stat",
+        source,
+        |host, path, timeout| {
+            let session = connect_embedded_ssh(&host, timeout)?;
+            let sftp = session.sftp()?;
+            let stat = sftp
+                .stat(Path::new(&path))
+                .with_context(|| format!("failed to stat remote path {path}"))?;
+            Ok(format_sftp_stat(&path, &stat))
+        },
+    )
     .await
 }
 
@@ -1656,23 +1901,20 @@ pub async fn sftp_mkdir_core_with_source(
     timeout_secs: Option<u64>,
     source: Option<String>,
 ) -> Result<ExecResult> {
-    exec_ssh_core(ExecRequest {
-        host: host_name.to_string(),
-        command: format!("mkdir -p {}", shell_escape(path)),
-        force: false,
+    sftp_dir_operation_core(
+        host_name,
+        path,
         timeout_secs,
-        stdin: None,
-        max_output_bytes: None,
-        reason: None,
-        change_id: None,
-        source: Some(source.unwrap_or_else(|| source_from_env("core"))),
-    })
+        "mkdir",
+        source,
+        |host, path, timeout| {
+            let session = connect_embedded_ssh(&host, timeout)?;
+            let sftp = session.sftp()?;
+            create_sftp_dir_all(&sftp, &path)?;
+            Ok(format!("created directory {path}\n"))
+        },
+    )
     .await
-}
-
-/// Wraps a path in single quotes and escapes any embedded single quotes.
-fn shell_escape(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 // ── SSH config import ─────────────────────────────────────────────────────────
@@ -2449,9 +2691,42 @@ mod tests {
     }
 
     #[test]
-    fn test_shell_escape() {
-        assert_eq!(shell_escape("/tmp/file"), "'/tmp/file'");
-        assert_eq!(shell_escape("it's a test"), "'it'\\''s a test'");
+    fn test_sftp_operation_command_is_not_shell_command() {
+        let command = sftp_operation_command("ls", "/tmp/a; rm -rf /");
+        assert_eq!(command, "sftp ls /tmp/a; rm -rf /");
+        assert!(!command.starts_with("ls -la "));
+        assert!(!command.starts_with("stat "));
+        assert!(!command.starts_with("mkdir -p "));
+    }
+
+    #[test]
+    fn test_format_sftp_ls_entry_preserves_name_without_shell_prefix() {
+        let stat = ssh2::FileStat {
+            size: Some(12),
+            uid: Some(1000),
+            gid: Some(1000),
+            perm: Some(0o100644),
+            atime: None,
+            mtime: None,
+        };
+        let line = format_sftp_ls_entry(Path::new("/tmp/a; rm -rf /payload.txt"), &stat);
+        assert!(line.starts_with("-rw-r--r-- "));
+        assert!(line.ends_with("payload.txt\n"));
+        assert!(!line.contains("ls -la"));
+        assert!(!line.contains("mkdir -p"));
+    }
+
+    #[test]
+    fn test_sftp_parent_paths_support_recursive_absolute_mkdir() {
+        let paths = sftp_parent_paths("/tmp/agent2ssh/nested");
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("/tmp"),
+                PathBuf::from("/tmp/agent2ssh"),
+                PathBuf::from("/tmp/agent2ssh/nested"),
+            ]
+        );
     }
 
     // ── ExecPlan preview tests (using build_plan_from_profile) ───────────────

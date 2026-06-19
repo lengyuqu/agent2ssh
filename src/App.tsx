@@ -4,6 +4,7 @@ import {
   Bot,
   BookOpen,
   FolderOpen,
+  HelpCircle,
   History,
   Key,
   Loader2,
@@ -19,6 +20,7 @@ import ApprovalDialog from "./components/ApprovalDialog";
 import AuditPanel from "./components/AuditPanel";
 import ExecPanel from "./components/ExecPanel";
 import ForwardPanel from "./components/ForwardPanel";
+import HelpPanel from "./components/HelpPanel";
 import HostList from "./components/HostList";
 import KeysPanel from "./components/KeysPanel";
 import LiveActivityPanel from "./components/LiveActivityPanel";
@@ -50,6 +52,7 @@ const MODULES = [
   { id: "keys", label: "Keys", icon: Key },
   { id: "playbooks", label: "Playbooks", icon: BookOpen },
   { id: "audit", label: "Audit", icon: History },
+  { id: "help", label: "Help", icon: HelpCircle },
 ] as const;
 
 export default function App() {
@@ -544,6 +547,8 @@ export default function App() {
           {activeModule === "playbooks" && <PlaybooksPanel hosts={hosts} />}
 
           {activeModule === "audit" && <AuditPanel audit={audit} onRefresh={refresh} />}
+
+          {activeModule === "help" && <HelpPanel />}
         </section>
       </section>
     </main>

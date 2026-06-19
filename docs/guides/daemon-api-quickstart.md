@@ -409,7 +409,7 @@ wscat -c "ws://127.0.0.1:7722/exec/stream" \
 | `exit` | 命令执行结束，包含退出码和耗时 |
 | `error` | 错误信息（风险拒绝、未知主机等） |
 
-WebSocket exec 使用与普通 `/exec` 相同的内置 SSH 传输，key、password、ssh-agent、jump host 和连接指纹行为保持一致；风险、scope、gate、limits、approval 和 audit 也走同一授权链路。
+WebSocket exec 使用与普通 `/exec` 相同的内置 SSH 传输，key、password、ssh-agent、jump host 和连接指纹行为保持一致；风险、scope、gate、limits、approval 和 audit 也走同一授权链路。SSH 主机指纹首次连接时会自动信任并保存到 `~/.agent2ssh/known_hosts.json`，后续算法或指纹变化会被拒绝。
 
 ---
 

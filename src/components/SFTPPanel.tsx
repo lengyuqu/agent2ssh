@@ -1,10 +1,15 @@
 import {
-  ArrowLeftRight,
+  ArrowLeft,
+  ArrowRight,
+  CheckCircle2,
+  ChevronUp,
   File,
   Folder,
   FolderOpen,
   FolderPlus,
   Info,
+  RefreshCw,
+  X,
 } from "lucide-react";
 import { useState } from "react";
 import { api, reportError } from "../api";
@@ -163,6 +168,39 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
 
   const isBusy = busyAction !== "idle";
 
+  function clearSideState(side: Side) {
+    if (side === "left") {
+      setLeftLsResult(null);
+      setLeftEntries([]);
+      setLeftSelectedFile(null);
+      setLeftFilter("all");
+    } else {
+      setRightLsResult(null);
+      setRightEntries([]);
+      setRightSelectedFile(null);
+      setRightFilter("all");
+    }
+  }
+
+  function updateHost(side: Side, host: string) {
+    if (side === "left") {
+      setLeftHost(host);
+    } else {
+      setRightHost(host);
+    }
+    clearSideState(side);
+  }
+
+  function updatePath(side: Side, path: string) {
+    if (side === "left") {
+      setLeftPath(path);
+      setLeftSelectedFile(null);
+    } else {
+      setRightPath(path);
+      setRightSelectedFile(null);
+    }
+  }
+
   async function withBusy(action: BusyAction, fn: () => Promise<unknown>, detail?: string) {
     if (isBusy) return;
     return (async () => {
@@ -264,24 +302,6 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
     }, "create directory");
   }
 
-  function navigateToDirectory(side: Side, entry: ParsedLsEntry) {
-    const fromLeft = side === "left";
-    const source = trimRemotePath(fromLeft ? leftPath : rightPath);
-    const nextPath = entry.isParent || entry.name === ".." ? parentRemotePath(source) : joinRemotePath(source, entry.name);
-
-    if (fromLeft) {
-      setLeftPath(nextPath);
-      setLeftFilter("all");
-      setLeftSelectedFile(null);
-      void listDir("left", nextPath);
-    } else {
-      setRightPath(nextPath);
-      setRightFilter("all");
-      setRightSelectedFile(null);
-      void listDir("right", nextPath);
-    }
-  }
-
   function jumpToPath(side: Side, path: string) {
     const target = trimRemotePath(path);
     if (side === "left") {
@@ -306,6 +326,8 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
         const nextPath = entry.isParent || entry.name === ".." ? parentRemotePath(source) : joinRemotePath(source, entry.name);
         setLeftPath(nextPath);
         setLeftSelectedFile(null);
+        setLeftFilter("all");
+        void listDir("left", nextPath);
         return;
       }
 
@@ -315,6 +337,8 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
         const nextPath = entry.isParent || entry.name === ".." ? parentRemotePath(source) : joinRemotePath(source, entry.name);
         setRightPath(nextPath);
         setRightSelectedFile(null);
+        setRightFilter("all");
+        void listDir("right", nextPath);
         return;
       }
 
@@ -421,29 +445,74 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
       : () => setRightSelectedFile(null);
 
     return (
-      <div className="space-y-2 rounded-lg border border-border/70 p-3">
-        <div className="text-sm font-semibold text-foreground/90">{title}</div>
+      <div className="flex min-h-[560px] flex-col gap-3 rounded-lg border border-border/70 bg-card/70 p-3">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-foreground/90">{title}</div>
+            <div className="mt-0.5 text-xs text-muted-foreground">
+              {entries.length > 0
+                ? t("{count} items", { count: visibleEntries.length })
+                : t("Choose a host and refresh a folder")}
+            </div>
+          </div>
+          {result?.exit_code === 0 && (
+            <span className="inline-flex items-center gap-1 rounded-md bg-success/10 px-2 py-1 text-xs font-medium text-success">
+              <CheckCircle2 size={13} />
+              {t("Ready")}
+            </span>
+          )}
+        </div>
         <HostSelector
           hosts={hosts}
           value={host}
-          onChange={isLeft ? setLeftHost : setRightHost}
+          onChange={(nextHost) => updateHost(side, nextHost)}
           label={title}
           disabled={isBusy}
         />
 
         <label className={labelCls}>
           {t("Remote path")}
+          <div className="flex gap-2">
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              onClick={() => jumpToPath(side, parentRemotePath(path))}
+              disabled={actionBusy || !host || !normalizedPath || normalizedPath === "/"}
+              title={t("Parent folder")}
+              className="shrink-0"
+            >
+              <ChevronUp size={14} />
+            </Button>
             <Input
             value={path}
-            onChange={(event) =>
-              isLeft
-                ? (setLeftPath(event.target.value), setLeftSelectedFile(null))
-                : (setRightPath(event.target.value), setRightSelectedFile(null))
-            }
+            onChange={(event) => updatePath(side, event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                void listDir(side);
+              }
+            }}
             placeholder="/home/user"
             disabled={isBusy}
           />
+          </div>
         </label>
+
+        <div className="flex flex-wrap gap-1.5">
+          {["/", "/tmp"].map((preset) => (
+            <Button
+              key={preset}
+              variant={normalizedPath === preset ? "default" : "outline"}
+              size="sm"
+              onClick={() => jumpToPath(side, preset)}
+              disabled={actionBusy || !host}
+              className="h-7 px-2 text-xs"
+            >
+              {preset}
+            </Button>
+          ))}
+        </div>
 
         <div className="min-h-5 text-xs text-muted-foreground">
           {selectedFile ? (
@@ -457,6 +526,7 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
                 onClick={clearSelection}
                 className="h-auto px-2 py-0.5 text-xs"
               >
+                <X size={12} />
                 {t("Clear")}
               </Button>
             </div>
@@ -465,14 +535,15 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
           )}
         </div>
 
-      <div className="flex flex-wrap gap-2 [&>button]:min-w-20 [&>button]:flex-1">
+        <div className="grid grid-cols-3 gap-2">
           <Button
             variant="secondary"
             size="sm"
             onClick={() => listDir(side)}
             disabled={actionBusy || !host || !normalizedPath}
           >
-            {listBusy ? "..." : "ls"}
+            <RefreshCw size={14} className={listBusy ? "animate-spin" : ""} />
+            {listBusy ? t("Loading...") : t("Refresh")}
           </Button>
           <Button
             variant="secondary"
@@ -481,7 +552,7 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
             disabled={actionBusy || !host || !normalizedPath}
           >
             <Info size={14} />
-            {statBusy ? "..." : "stat"}
+            {statBusy ? t("Loading...") : t("Details")}
           </Button>
           <Button
             variant="secondary"
@@ -490,11 +561,11 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
             disabled={actionBusy || !host || !normalizedPath}
           >
             <FolderPlus size={14} />
-            {mkdirBusy ? "..." : "mkdir"}
+            {mkdirBusy ? t("Creating...") : t("New folder")}
           </Button>
         </div>
 
-        <div className="mt-1 flex flex-wrap items-center gap-2 text-xs">
+        <div className="flex flex-wrap items-center gap-2 text-xs">
           <span className="text-muted-foreground">{t("Filter")}:</span>
           <Button
             variant={filter === "all" ? "default" : "outline"}
@@ -522,21 +593,23 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
           </Button>
         </div>
 
-        {result && (
-          <div className="overflow-auto rounded-md bg-[#0e1620] text-[#e6edf3]">
-            <div className="border-b border-white/10 px-3.5 py-2.5 text-[#8fb0c5]">
-              {result.command}
-              {" · "}
-              {typeof result.exit_code === "number" ? `exit ${result.exit_code}` : t("N/A")}
-            </div>
+        <div className="min-h-0 flex-1 overflow-hidden rounded-md border border-border bg-background/70">
+          {result ? (
+            <div className="flex h-full min-h-[280px] flex-col">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border bg-muted/45 px-3.5 py-2 text-xs text-muted-foreground">
+                <span className="truncate font-mono" title={result.command}>
+                  {result.command}
+                </span>
+                <span>{typeof result.exit_code === "number" ? `exit ${result.exit_code}` : t("N/A")}</span>
+              </div>
 
-            <div className="flex flex-wrap gap-1 border-b border-white/10 px-3 py-1.5">
+            <div className="flex flex-wrap gap-1 border-b border-border bg-card px-3 py-1.5">
               {buildPathBreadcrumbs(normalizedPath).map((crumb) => (
                 <button
                   key={crumb.path}
                   type="button"
                   onClick={() => jumpToPath(side, crumb.path)}
-                  className="rounded px-1.5 py-0.5 text-xs text-[#8fb0c5] hover:bg-white/10"
+                  className="rounded px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
                   title={crumb.path}
                 >
                   {crumb.label === "/" ? "⌂" : crumb.label}
@@ -545,7 +618,7 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
             </div>
 
             {hasDirectoryOutput && entries.length > 0 ? (
-              <div className="space-y-1 p-2">
+              <div className="min-h-0 flex-1 space-y-1 overflow-auto p-2">
                 {(normalizedPath !== "/" && normalizedPath !== "." ? [{ name: "..", isDirectory: true, raw: "../", isParent: true }, ...visibleEntries.filter((entry) => entry.name !== "..")] : visibleEntries).map((entry) => {
                   const isDir = entry.isDirectory;
                   const entryPath = entry.name === ".." ? parentRemotePath(normalizedPath) : joinRemotePath(normalizedPath, entry.name);
@@ -554,31 +627,42 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
                   type="button"
                   key={`${entry.name}-${entry.raw}`}
                   onClick={() => pickEntry(side, entry)}
-                  onDoubleClick={() => {
-                        if (isDir) {
-                          navigateToDirectory(side, entry);
-                        }
-                  }}
-                  className={`group flex w-full min-w-0 items-center gap-2 rounded px-2 py-1 text-left text-sm hover:bg-white/5 ${
+                  className={`group flex w-full min-w-0 items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-sm transition-colors hover:bg-muted ${
                     entryPath === (isLeft ? leftSelectedFile : rightSelectedFile)
-                      ? "bg-sky-600/25"
+                      ? "bg-primary/12 text-primary"
                       : ""
                   }`}
                   title={entryPath}
                 >
-                      {isDir ? <Folder size={14} className="shrink-0 text-amber-300" /> : <File size={14} className="shrink-0 text-sky-300" />}
-                      <span className="truncate text-xs">{entry.name}</span>
+                      {isDir ? (
+                        <Folder size={15} className="shrink-0 text-warning" />
+                      ) : (
+                        <File size={15} className="shrink-0 text-primary" />
+                      )}
+                      <span className="truncate text-sm">{entry.name}</span>
+                      {isDir ? (
+                        <span className="ml-auto text-xs text-muted-foreground">{t("Open")}</span>
+                      ) : (
+                        <span className="ml-auto text-xs text-muted-foreground">{t("Select")}</span>
+                      )}
                     </button>
                   );
                 })}
               </div>
             ) : (
-              <pre className="m-0 whitespace-pre-wrap break-words p-3.5 font-mono text-[13px]">
+              <pre className="m-0 min-h-[240px] overflow-auto whitespace-pre-wrap break-words p-3.5 font-mono text-[13px] text-foreground">
                 {result.stdout || result.stderr || t("(empty)")}
               </pre>
             )}
+            </div>
+          ) : (
+            <div className="flex min-h-[280px] flex-col items-center justify-center gap-2 px-4 text-center text-sm text-muted-foreground">
+              <FolderOpen size={28} />
+              <div>{t("Choose a host and refresh a folder")}</div>
+              <div className="text-xs">{t("Click a folder to open it, or click a file to select it for transfer.")}</div>
+            </div>
+          )}
           </div>
-        )}
       </div>
     );
   }
@@ -611,38 +695,57 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
         {renderSidePanel("left")}
 
         <div className="flex items-center justify-center">
-          <div className="flex flex-col gap-2">
+          <div className="grid w-full gap-3 rounded-lg border border-border/70 bg-muted/30 p-3 xl:w-48">
             <Button
               size="sm"
               onClick={() => exchange("left-right")}
               disabled={!canExchangeLeftRight}
+              className="w-full justify-center"
             >
-              <ArrowLeftRight size={14} />
-              {t("Exchange to right")}
+              <ArrowRight size={14} />
+              {t("Copy to right")}
             </Button>
             {leftToRightSource ? (
-              <div className="max-w-40 truncate text-xs text-muted-foreground" title={leftToRightSource}>
-                {leftToRightSource}
-                <span className="text-foreground/80"> → </span>
-                {leftToRightDestination ?? t("Destination path is required")}
+              <div
+                className="rounded-md border border-border bg-card px-2 py-1.5 text-xs text-muted-foreground"
+                title={`${leftToRightSource} -> ${leftToRightDestination ?? ""}`}
+              >
+                <div className="truncate">{leftToRightSource}</div>
+                <div className="truncate text-foreground/80">
+                  → {leftToRightDestination ?? t("Destination path is required")}
+                </div>
               </div>
-            ) : null}
+            ) : (
+              <div className="rounded-md border border-dashed border-border px-2 py-1.5 text-xs text-muted-foreground">
+                {t("Select a source file")}
+              </div>
+            )}
 
             <Button
+              variant="secondary"
               size="sm"
               onClick={() => exchange("right-left")}
               disabled={!canExchangeRightLeft}
+              className="w-full justify-center"
             >
-              <ArrowLeftRight size={14} />
-              {t("Exchange to left")}
+              <ArrowLeft size={14} />
+              {t("Copy to left")}
             </Button>
             {rightToLeftSource ? (
-              <div className="max-w-40 truncate text-xs text-muted-foreground" title={rightToLeftSource}>
-                {rightToLeftSource}
-                <span className="text-foreground/80"> → </span>
-                {rightToLeftDestination ?? t("Destination path is required")}
+              <div
+                className="rounded-md border border-border bg-card px-2 py-1.5 text-xs text-muted-foreground"
+                title={`${rightToLeftSource} -> ${rightToLeftDestination ?? ""}`}
+              >
+                <div className="truncate">{rightToLeftSource}</div>
+                <div className="truncate text-foreground/80">
+                  → {rightToLeftDestination ?? t("Destination path is required")}
+                </div>
               </div>
-            ) : null}
+            ) : (
+              <div className="rounded-md border border-dashed border-border px-2 py-1.5 text-xs text-muted-foreground">
+                {t("Select a file on the right")}
+              </div>
+            )}
           </div>
         </div>
 

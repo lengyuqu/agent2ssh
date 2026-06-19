@@ -147,6 +147,105 @@ async fn mcp_stdio_end_to_end_initialize_tools_and_risk() {
     assert!(status.success());
 }
 
+#[tokio::test]
+async fn mcp_remote_daemon_invalid_json_returns_contextual_error() {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::TcpListener;
+    use tokio::process::Command;
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock daemon");
+    let addr = listener.local_addr().expect("mock daemon addr");
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept mock request");
+        let mut buf = [0u8; 4096];
+        let _ = stream.read(&mut buf).await.expect("read mock request");
+        let body = "not-json";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .expect("write mock response");
+    });
+
+    let config_dir = std::env::temp_dir().join(format!(
+        "agent2ssh-mcp-bad-response-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&config_dir).expect("create temp config dir");
+    std::fs::write(
+        config_dir.join("remotes.toml"),
+        format!(
+            r#"
+[[remotes]]
+alias = "bad"
+url = "http://{addr}"
+token = "tok"
+"#
+        ),
+    )
+    .expect("write remotes.toml");
+
+    let mut child = Command::new(mcp_bin())
+        .env("AGENT2SSH_CONFIG_DIR", &config_dir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to start MCP binary");
+
+    let mut stdin = child.stdin.take().expect("missing MCP stdin");
+    let stdout = child.stdout.take().expect("missing MCP stdout");
+    let mut lines = BufReader::new(stdout).lines();
+
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "ssh_exec",
+            "arguments": {
+                "daemon_alias": "bad",
+                "host": "web1",
+                "command": "uptime"
+            }
+        }
+    });
+    stdin.write_all(req.to_string().as_bytes()).await.unwrap();
+    stdin.write_all(b"\n").await.unwrap();
+    drop(stdin);
+
+    let response: serde_json::Value = serde_json::from_str(
+        &lines
+            .next_line()
+            .await
+            .unwrap()
+            .expect("missing MCP response"),
+    )
+    .unwrap();
+    let message = response["error"]["message"]
+        .as_str()
+        .expect("missing error message");
+    assert!(
+        message.contains("remote daemon 'bad' /exec returned invalid JSON"),
+        "unexpected error message: {message}"
+    );
+    assert!(
+        message.contains("body: not-json"),
+        "error should include response body preview: {message}"
+    );
+
+    let status = child.wait().await.expect("failed waiting for MCP process");
+    assert!(status.success());
+    server.await.expect("mock server task");
+    let _ = std::fs::remove_dir_all(config_dir);
+}
+
 // ── Read-only commands ──────────────────────────────────────────────────────
 
 #[tokio::test]

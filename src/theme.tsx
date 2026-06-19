@@ -4,12 +4,12 @@ export type Theme = "system" | "light" | "dark" | "dracula" | "nord" | "solarize
 
 /** Theme options shown in the picker. `swatch` is a representative color dot. */
 export const THEMES: { id: Theme; label: string; swatch: string }[] = [
-  { id: "system", label: "System", swatch: "linear-gradient(135deg, #f5f7f9 0 50%, #1a1d23 50% 100%)" },
-  { id: "light", label: "Light", swatch: "#ffffff" },
-  { id: "dark", label: "Dark", swatch: "#22272e" },
+  { id: "system", label: "System", swatch: "linear-gradient(135deg, #f7f8f6 0 50%, #1f2329 50% 100%)" },
+  { id: "light", label: "Light", swatch: "#17857c" },
+  { id: "dark", label: "Dark", swatch: "#5ac8a6" },
   { id: "dracula", label: "Dracula", swatch: "#bd93f9" },
   { id: "nord", label: "Nord", swatch: "#88c0d0" },
-  { id: "solarized-light", label: "Solarized Light", swatch: "#268bd2" },
+  { id: "solarized-light", label: "Solarized Light", swatch: "#2a7fb8" },
 ];
 
 const STORAGE_KEY = "agent2ssh.theme";
