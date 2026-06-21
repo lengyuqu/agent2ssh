@@ -125,8 +125,11 @@ async fn mcp_stdio_end_to_end_initialize_tools_and_risk() {
 
     let requests = [
         r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
-        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
-        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"ssh_risk_check","arguments":{"command":"rm -rf /"}}}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"ping","params":{}}"#,
+        r#"{"jsonrpc":"2.0","id":3,"method":"resources/list","params":{}}"#,
+        r#"{"jsonrpc":"2.0","id":4,"method":"resources/templates/list","params":{}}"#,
+        r#"{"jsonrpc":"2.0","id":5,"method":"tools/list","params":{}}"#,
+        r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"ssh_risk_check","arguments":{"command":"rm -rf /"}}}"#,
     ];
 
     for req in requests {
@@ -144,6 +147,46 @@ async fn mcp_stdio_end_to_end_initialize_tools_and_risk() {
     )
     .unwrap();
     assert_eq!(init["result"]["serverInfo"]["name"], "agent2ssh-mcp");
+    assert!(init["result"]["capabilities"]["resources"].is_object());
+
+    let ping: serde_json::Value = serde_json::from_str(
+        &lines
+            .next_line()
+            .await
+            .unwrap()
+            .expect("missing ping response"),
+    )
+    .unwrap();
+    assert!(ping["result"].as_object().unwrap().is_empty());
+
+    let resources: serde_json::Value = serde_json::from_str(
+        &lines
+            .next_line()
+            .await
+            .unwrap()
+            .expect("missing resources response"),
+    )
+    .unwrap();
+    assert_eq!(
+        resources["result"]["resources"].as_array().unwrap().len(),
+        0
+    );
+
+    let resource_templates: serde_json::Value = serde_json::from_str(
+        &lines
+            .next_line()
+            .await
+            .unwrap()
+            .expect("missing resource templates response"),
+    )
+    .unwrap();
+    assert_eq!(
+        resource_templates["result"]["resourceTemplates"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
 
     let tools: serde_json::Value = serde_json::from_str(
         &lines

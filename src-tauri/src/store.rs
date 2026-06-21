@@ -229,11 +229,16 @@ pub fn load_config() -> Result<AppConfig> {
 /// password. When **locked**, the marker is left in place (not blanked to
 /// `None`), so a later save preserves the encrypted secret rather than orphaning
 /// it; `embedded_ssh` treats a bare marker as "no usable password".
+///
+/// Legacy `$agent2ssh-keyring$` references are also left intact. They point at
+/// the removed OS-keyring storage path, so they are not resolvable here; keeping
+/// the marker prevents an unrelated save from destroying the only migration
+/// signal.
 fn internalize_secrets(config: &mut AppConfig) {
     let unlocked = crate::secrets::is_unlocked() || crate::secrets::try_unlock_from_env();
     for host in &mut config.hosts {
         if let Some(pw) = &host.password {
-            if crate::secrets::is_secret_ref(pw) {
+            if crate::secrets::is_current_secret_ref(pw) {
                 if let Some(real) =
                     crate::secrets::get_secret(&crate::secrets::host_account(&host.name))
                 {
@@ -248,7 +253,7 @@ fn internalize_secrets(config: &mut AppConfig) {
     }
     for proxy in &mut config.proxies {
         if let Some(pw) = &proxy.password {
-            if crate::secrets::is_secret_ref(pw) {
+            if crate::secrets::is_current_secret_ref(pw) {
                 if let Some(real) =
                     crate::secrets::get_secret(&crate::secrets::proxy_account(&proxy.id))
                 {
@@ -1309,6 +1314,41 @@ mod tests {
         // The secret is still resolvable.
         let loaded = load_config().unwrap();
         assert_eq!(loaded.hosts[0].password.as_deref(), Some("plain-pw"));
+
+        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn legacy_keyring_marker_is_preserved_and_not_migrated_as_plaintext() {
+        let dir =
+            std::env::temp_dir().join(format!("agent2ssh-legacy-kc-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("AGENT2SSH_CONFIG_DIR", &dir);
+
+        let legacy = format!(
+            r#"{{
+            "schema_version": 0,
+            "groups": [],
+            "proxies": [],
+            "hosts": [{{"name":"legacy","host":"1.2.3.4","password":"{}","group":"default","tags":[]}}]
+        }}"#,
+            crate::secrets::LEGACY_KEYRING_REF
+        );
+        fs::write(dir.join("hosts.json"), legacy).unwrap();
+
+        assert_eq!(migrate_plaintext_secrets().unwrap(), 0);
+        let loaded = load_config().unwrap();
+        assert_eq!(
+            loaded.hosts[0].password.as_deref(),
+            Some(crate::secrets::LEGACY_KEYRING_REF)
+        );
+
+        save_config(&loaded).unwrap();
+        let raw = fs::read_to_string(dir.join("hosts.json")).unwrap();
+        assert!(raw.contains(crate::secrets::LEGACY_KEYRING_REF));
+        assert!(!raw.contains(crate::secrets::SECRET_REF));
 
         std::env::remove_var("AGENT2SSH_CONFIG_DIR");
         let _ = fs::remove_dir_all(&dir);

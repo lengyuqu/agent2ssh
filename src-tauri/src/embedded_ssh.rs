@@ -5,7 +5,7 @@ use base64::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use ssh2::{HashType, Session};
+use ssh2::{HashType, KeyboardInteractivePrompt, Prompt, Session};
 use std::{
     collections::HashMap,
     io::{ErrorKind, Read, Write},
@@ -648,18 +648,96 @@ pub fn connect_embedded_ssh(host: &HostProfile, timeout_secs: u64) -> Result<Ses
     connect_embedded_ssh_inner(host, timeout_secs, 0)
 }
 
+struct PasswordPrompter<'a> {
+    password: &'a str,
+}
+
+impl KeyboardInteractivePrompt for PasswordPrompter<'_> {
+    fn prompt<'a>(
+        &mut self,
+        _username: &str,
+        _instructions: &str,
+        prompts: &[Prompt<'a>],
+    ) -> Vec<String> {
+        prompts.iter().map(|_| self.password.to_string()).collect()
+    }
+}
+
 fn authenticate(session: &Session, host: &HostProfile, username: &str) -> Result<String> {
+    let auth_methods = session.auth_methods(username).unwrap_or("").to_string();
+    let _ = crate::diagnostics::append_diagnostic_log(
+        "info",
+        "embedded_ssh",
+        "ssh auth methods advertised",
+        Some(serde_json::json!({
+            "host": host.name,
+            "username": username,
+            "auth_methods": auth_methods,
+        })),
+    );
+
+    if let Some(marker) = host
+        .password
+        .as_deref()
+        .filter(|value| crate::secrets::is_secret_ref(value))
+    {
+        let guidance = if crate::secrets::is_legacy_keyring_ref(marker) {
+            "legacy OS keyring reference; re-enter the password so it can be stored in secrets.enc"
+        } else {
+            "locked app-managed secret reference; unlock the credential store with the master password"
+        };
+        return Err(anyhow!("SSH password for '{}' is a {guidance}", host.name));
+    }
+
     if let Some(password) = host
         .password
         .as_deref()
         .filter(|value| !value.trim().is_empty())
-        // K1: a bare SECRET_REF marker means the credential store is locked (no
-        // master password available); treat it as "no usable password" and fall
-        // through to key/agent auth rather than authenticating with the marker.
-        .filter(|value| !crate::secrets::is_secret_ref(value))
     {
-        session.userauth_password(username, password)?;
-        return Ok("password".into());
+        let methods = auth_methods
+            .split(',')
+            .map(str::trim)
+            .collect::<std::collections::HashSet<_>>();
+        let mut failures = Vec::new();
+        let password_advertised = auth_methods.is_empty() || methods.contains("password");
+
+        if password_advertised {
+            match session.userauth_password(username, password) {
+                Ok(()) if session.authenticated() => return Ok("password".into()),
+                Ok(()) => failures.push("password returned without authenticating".to_string()),
+                Err(error) => failures.push(format!("password: {error}")),
+            }
+        }
+
+        if !session.authenticated() {
+            let mut prompter = PasswordPrompter { password };
+            match session.userauth_keyboard_interactive(username, &mut prompter) {
+                Ok(()) if session.authenticated() => return Ok("keyboard-interactive".into()),
+                Ok(()) => failures
+                    .push("keyboard-interactive returned without authenticating".to_string()),
+                Err(error) => {
+                    let label = if methods.contains("keyboard-interactive") {
+                        "keyboard-interactive"
+                    } else {
+                        "keyboard-interactive fallback"
+                    };
+                    failures.push(format!("{label}: {error}"));
+                }
+            }
+        }
+
+        if !failures.is_empty() {
+            return Err(anyhow!(
+                "SSH password authentication failed for '{}' using advertised methods [{}]: {}",
+                host.name,
+                if auth_methods.is_empty() {
+                    "unknown"
+                } else {
+                    auth_methods.as_str()
+                },
+                failures.join("; ")
+            ));
+        }
     }
 
     if let Some(key_path) = host

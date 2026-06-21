@@ -594,9 +594,12 @@ async fn handle_request(request: &Value) -> std::result::Result<Value, McpError>
     match method {
         "initialize" => Ok(json!({
             "protocolVersion": "2024-11-05",
-            "capabilities": { "tools": {} },
+            "capabilities": { "tools": {}, "resources": {} },
             "serverInfo": { "name": MCP_SERVER_NAME, "version": MCP_SERVER_VERSION }
         })),
+        "ping" => Ok(json!({})),
+        "resources/list" => Ok(json!({ "resources": [] })),
+        "resources/templates/list" => Ok(json!({ "resourceTemplates": [] })),
         "tools/list" => Ok(json!({ "tools": agent2ssh_mcp_tools::tools_list() })),
         "tools/call" => {
             let params = request

@@ -36,10 +36,25 @@ const SECRETS_FILE: &str = "secrets.enc";
 /// in `secrets.enc` under the account derived from the host/proxy identity.
 pub const SECRET_REF: &str = "$agent2ssh-secret$";
 
-/// True if `value` is the encrypted-secret reference marker rather than a real
-/// secret (or the empty string).
+/// Legacy marker used by the unfinished OS-keyring-backed storage path. New
+/// builds must never treat it as an SSH password.
+pub const LEGACY_KEYRING_REF: &str = "$agent2ssh-keyring$";
+
+/// True if `value` is a credential reference marker rather than a real secret
+/// (or the empty string).
 pub fn is_secret_ref(value: &str) -> bool {
+    value == SECRET_REF || value == LEGACY_KEYRING_REF
+}
+
+/// True only for the current app-managed encrypted-store marker.
+pub fn is_current_secret_ref(value: &str) -> bool {
     value == SECRET_REF
+}
+
+/// True for the legacy OS-keyring marker. This is preserved on disk until the
+/// user re-enters or explicitly migrates the password into `secrets.enc`.
+pub fn is_legacy_keyring_ref(value: &str) -> bool {
+    value == LEGACY_KEYRING_REF
 }
 
 /// Stable account name for a host profile's encrypted password.
@@ -402,6 +417,11 @@ mod tests {
     #[test]
     fn ref_marker_detection() {
         assert!(is_secret_ref(SECRET_REF));
+        assert!(is_secret_ref(LEGACY_KEYRING_REF));
+        assert!(is_current_secret_ref(SECRET_REF));
+        assert!(!is_current_secret_ref(LEGACY_KEYRING_REF));
+        assert!(is_legacy_keyring_ref(LEGACY_KEYRING_REF));
+        assert!(!is_legacy_keyring_ref(SECRET_REF));
         assert!(!is_secret_ref("hunter2"));
         assert!(!is_secret_ref(""));
     }

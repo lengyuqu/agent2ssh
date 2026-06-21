@@ -118,6 +118,29 @@ async fn shutdown_signal() {
     }
 }
 
+#[cfg(unix)]
+fn install_hangup_handler() {
+    tokio::spawn(async {
+        let Ok(mut sig) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+        else {
+            return;
+        };
+
+        while sig.recv().await.is_some() {
+            tracing::warn!("ignored SIGHUP; daemon remains running");
+            let _ = agent2ssh::append_diagnostic_log(
+                "warn",
+                "daemon",
+                "ignored SIGHUP; daemon remains running",
+                Some(serde_json::json!({ "pid": std::process::id() })),
+            );
+        }
+    });
+}
+
+#[cfg(not(unix))]
+fn install_hangup_handler() {}
+
 // ── State ────────────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -3595,6 +3618,7 @@ async fn main() -> anyhow::Result<()> {
             Some(serde_json::json!({ "error": err.to_string() })),
         );
     }
+    install_hangup_handler();
 
     // Record start time for uptime calculation
     START_TIME.get_or_init(Instant::now);

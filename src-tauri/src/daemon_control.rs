@@ -193,6 +193,26 @@ pub fn start_daemon_background(daemon_bin: &Path) -> Result<DaemonStartResult> {
         use std::os::windows::process::CommandExt;
         command.creation_flags(CREATE_NO_WINDOW);
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+
+        unsafe extern "C" {
+            fn setsid() -> i32;
+        }
+
+        // Start the daemon in a new session so it does not inherit the CLI or
+        // desktop helper process group. Without this, closing the launching
+        // process can deliver SIGHUP and leave a stale daemon.pid behind.
+        unsafe {
+            command.pre_exec(|| {
+                if setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
     let child = command
         .spawn()
         .with_context(|| format!("failed to start daemon: {}", daemon_bin.display()))?;
