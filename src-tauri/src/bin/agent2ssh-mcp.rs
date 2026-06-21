@@ -506,6 +506,10 @@ async fn try_daemon_forward_remove(
 async fn main() -> Result<()> {
     agent2ssh::install_panic_hook("mcp");
     agent2ssh::seed_trace_id_from_env();
+    // K1: migrate any legacy plaintext passwords into the app-managed encrypted store (no-op once clean).
+    if let Err(e) = agent2ssh::migrate_plaintext_secrets() {
+        eprintln!("warning: secret migration skipped: {e}");
+    }
 
     let mut args = std::env::args().skip(1);
     if let Some(arg) = args.next() {

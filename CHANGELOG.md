@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-06-21
+
+### Added
+- **App-managed credential encryption**: Added a master-password credential store backed by Argon2id and AES-256-GCM in `~/.agent2ssh/secrets.enc`. `hosts.json` now keeps only `$agent2ssh-secret$` references after migration.
+- **Credential unlock surfaces**: Added desktop unlock/change-password commands and CLI `secrets status` / `secrets set-password`, with `AGENT2SSH_MASTER_PASSWORD` support for headless CLI/MCP/daemon use.
+- **WebDAV config sync**: Added `agent2ssh webdav push|pull|status` for syncing portable config plus encrypted `secrets.enc`, with local pre-sync backups and a global `sync_version.json` marker on every sync.
+
+### Changed
+- **Credential storage model**: SSH host and proxy passwords no longer rely on system key management. Secrets are managed by Agent2SSH encryption and remain unavailable while the store is locked.
+- **Build defaults**: Local Tauri bundles no longer create updater signing artifacts by default, so builds do not require `TAURI_SIGNING_PRIVATE_KEY` unless release signing is explicitly enabled.
+
 ### Added
 - **Control-plane safety layer**: Added daemon-level execution gate controls, execution rate/session limits, unified policy-as-code validation, and audit-window anomaly detection.
 - **Execution gate**: Added `agent2ssh pause/resume/status`, daemon 423 rejection for paused non-desktop sources, gate audit entries, and `gate_rejected` / `gate_changed` events.

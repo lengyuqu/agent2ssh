@@ -60,6 +60,29 @@ async fn cli_host_help_exits_zero() {
 }
 
 #[tokio::test]
+async fn cli_webdav_help_exits_zero() {
+    let output = tokio::process::Command::new(cli_bin())
+        .args(["webdav", "--help"])
+        .output()
+        .await
+        .expect("failed to run CLI binary");
+
+    assert!(
+        output.status.success(),
+        "agent2ssh webdav --help should exit 0, got: {:?}",
+        output.status.code()
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("push"), "webdav help should mention push");
+    assert!(stdout.contains("pull"), "webdav help should mention pull");
+    assert!(
+        stdout.contains("status"),
+        "webdav help should mention status"
+    );
+}
+
+#[tokio::test]
 async fn cli_exec_help_exits_zero() {
     let output = tokio::process::Command::new(cli_bin())
         .args(["exec", "--help"])

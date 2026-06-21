@@ -87,6 +87,37 @@ fn config_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("hosts.json"))
 }
 
+/// Current `hosts.json` schema version. Bump this whenever the on-disk shape
+/// changes in a way that needs an explicit migration step in [`migrate_config`].
+/// Version 0 means "legacy / unversioned" (files written before K8). Version 1
+/// is the first explicitly-versioned schema.
+pub const CONFIG_SCHEMA_VERSION: u32 = 1;
+
+/// Upgrade a freshly-parsed config from its persisted `schema_version` up to the
+/// current one. Migrations run in order and must be idempotent; a config already
+/// at (or ahead of) the current version is left untouched so a newer app's file
+/// is never silently downgraded. The version is *not* stamped here — that happens
+/// in [`normalize_config`] on save — so loading alone never rewrites the file.
+fn migrate_config(mut config: AppConfig) -> AppConfig {
+    // Forward-compat: a file written by a newer build (version > current) is left
+    // as-is. We still serve it; on next save we keep its higher version number so
+    // we don't advertise a downgrade.
+    if config.schema_version >= CONFIG_SCHEMA_VERSION {
+        return config;
+    }
+
+    // 0 -> 1: baseline. Pre-K8 files had no `schema_version`. There is no field
+    // rename to perform (legacy defaults were already handled by serde + the
+    // structural fix-ups in `normalize_config`), so this step only advances the
+    // version marker. Future steps slot in here as additional
+    // `if config.schema_version < N { ... }` blocks.
+    if config.schema_version < 1 {
+        config.schema_version = 1;
+    }
+
+    config
+}
+
 /// Cache for the parsed `hosts.json` (I5). `load_config` is on a hot path — every
 /// host lookup for exec/list/SFTP/sessions resolves through it — yet the file
 /// changes only on explicit host edits. The `(mtime, len)` signature picks up
@@ -103,7 +134,13 @@ pub fn ensure_config_dir() -> Result<()> {
     fs::create_dir_all(config_dir()?).context("failed to create ~/.agent2ssh")
 }
 
-/// Restrict a sensitive file to owner read/write on Unix.
+/// Restrict a sensitive file (tokens, keys, host config) to owner-only access.
+///
+/// On Unix this sets mode `0600`. On Windows it strips inherited ACEs and grants
+/// the current user sole Full control via `icacls`, so other local accounts —
+/// which would otherwise inherit read access from the parent directory — cannot
+/// read `daemon.token`, `keys/`, or `hosts.json`. Without this, Windows had no
+/// protection at all (the old code was `#[cfg(unix)]`-only).
 pub fn restrict_file_to_owner(path: impl AsRef<std::path::Path>) -> Result<()> {
     #[cfg(unix)]
     {
@@ -116,9 +153,55 @@ pub fn restrict_file_to_owner(path: impl AsRef<std::path::Path>) -> Result<()> {
             )
         })?;
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        restrict_file_to_owner_windows(path.as_ref())?;
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = path;
+    }
+    Ok(())
+}
+
+/// Windows owner-only ACL via `icacls`. We `/reset` then disable inheritance with
+/// `/inheritance:r` (drops all inherited ACEs) and `/grant:r` Full control to the
+/// current user only. The user principal is resolved from the `USERNAME`
+/// environment variable (qualified with `USERDOMAIN` when present); if it is
+/// unavailable we fall back to `%USERNAME%` so icacls expands it. Mirrors Unix
+/// `0600` (owner read/write, no group/other access).
+#[cfg(windows)]
+fn restrict_file_to_owner_windows(path: &std::path::Path) -> Result<()> {
+    use std::process::Command;
+
+    let user = match (std::env::var("USERDOMAIN"), std::env::var("USERNAME")) {
+        (Ok(domain), Ok(name)) if !domain.is_empty() && !name.is_empty() => {
+            format!("{domain}\\{name}")
+        }
+        (_, Ok(name)) if !name.is_empty() => name,
+        _ => "%USERNAME%".to_string(),
+    };
+
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("path is not valid UTF-8: {}", path.display()))?;
+
+    let output = Command::new("icacls")
+        .arg(path_str)
+        .arg("/inheritance:r")
+        .arg("/grant:r")
+        .arg(format!("{user}:(F)"))
+        .output()
+        .with_context(|| format!("failed to invoke icacls for {}", path.display()))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "icacls failed to restrict {} ({}): {}",
+            path.display(),
+            output.status,
+            stderr.trim()
+        );
     }
     Ok(())
 }
@@ -133,8 +216,127 @@ pub fn load_config() -> Result<AppConfig> {
         let raw = fs::read_to_string(&path).context("failed to read hosts config")?;
         let config: AppConfig =
             serde_json::from_str(&raw).context("failed to parse hosts config")?;
-        Ok(normalize_config(config))
+        let mut config = normalize_config(migrate_config(config));
+        internalize_secrets(&mut config);
+        Ok(config)
     })
+}
+
+/// Resolve encrypted-secret references back into real passwords after loading
+/// (K1). On disk a stored password is the [`crate::secrets::SECRET_REF`] marker;
+/// when the credential store is **unlocked** we decrypt the real secret so every
+/// downstream consumer keeps reading `HostProfile.password` as the actual
+/// password. When **locked**, the marker is left in place (not blanked to
+/// `None`), so a later save preserves the encrypted secret rather than orphaning
+/// it; `embedded_ssh` treats a bare marker as "no usable password".
+fn internalize_secrets(config: &mut AppConfig) {
+    let unlocked = crate::secrets::is_unlocked() || crate::secrets::try_unlock_from_env();
+    for host in &mut config.hosts {
+        if let Some(pw) = &host.password {
+            if crate::secrets::is_secret_ref(pw) {
+                if let Some(real) =
+                    crate::secrets::get_secret(&crate::secrets::host_account(&host.name))
+                {
+                    host.password = Some(real);
+                } else if unlocked {
+                    // Genuinely missing (entry deleted) — don't leak the marker.
+                    host.password = None;
+                }
+                // else: locked — keep the marker so save preserves the ref.
+            }
+        }
+    }
+    for proxy in &mut config.proxies {
+        if let Some(pw) = &proxy.password {
+            if crate::secrets::is_secret_ref(pw) {
+                if let Some(real) =
+                    crate::secrets::get_secret(&crate::secrets::proxy_account(&proxy.id))
+                {
+                    proxy.password = Some(real);
+                } else if unlocked {
+                    proxy.password = None;
+                }
+            }
+        }
+    }
+}
+
+/// Encrypt real passwords into the app-managed store before persisting (K1),
+/// replacing each with the [`crate::secrets::SECRET_REF`] marker on disk. An
+/// already-marker password is left untouched (preserving the existing encrypted
+/// secret). If the store is **locked** (no master password available) a real
+/// password cannot be encrypted; rather than fail an unrelated save, we leave it
+/// as plaintext and warn — it gets encrypted on the next save once unlocked.
+fn externalize_secrets(config: &mut AppConfig) {
+    use crate::secrets::{host_account, is_secret_ref, proxy_account, store_secret, SECRET_REF};
+
+    for host in &mut config.hosts {
+        if let Some(pw) = &host.password {
+            if pw.is_empty() || is_secret_ref(pw) {
+                continue;
+            }
+            match store_secret(&host_account(&host.name), pw) {
+                Ok(()) => host.password = Some(SECRET_REF.to_string()),
+                Err(e) => eprintln!(
+                    "warning: could not encrypt password for host '{}' ({e}); left as plaintext until the credential store is unlocked",
+                    host.name
+                ),
+            }
+        }
+    }
+    for proxy in &mut config.proxies {
+        if let Some(pw) = &proxy.password {
+            if pw.is_empty() || is_secret_ref(pw) {
+                continue;
+            }
+            match store_secret(&proxy_account(&proxy.id), pw) {
+                Ok(()) => proxy.password = Some(SECRET_REF.to_string()),
+                Err(e) => eprintln!(
+                    "warning: could not encrypt password for proxy '{}' ({e}); left as plaintext until the credential store is unlocked",
+                    proxy.id
+                ),
+            }
+        }
+    }
+}
+
+/// Encrypt any plaintext passwords still living in `hosts.json` into the
+/// app-managed store (K1 migration). Safe to call repeatedly and at startup. Only
+/// runs when the store is unlocked (directly or via `AGENT2SSH_MASTER_PASSWORD`);
+/// when locked it is a no-op so plaintext is left intact until a master password
+/// is available. Returns the number of hosts/proxies migrated this call.
+pub fn migrate_plaintext_secrets() -> Result<usize> {
+    let path = config_path()?;
+    if !path.exists() {
+        return Ok(0);
+    }
+    // Count plaintext secrets present on disk *before* migration.
+    let raw = fs::read_to_string(&path).context("failed to read hosts config")?;
+    let on_disk: AppConfig = serde_json::from_str(&raw).context("failed to parse hosts config")?;
+    let plaintext_count = on_disk
+        .hosts
+        .iter()
+        .filter_map(|h| h.password.as_deref())
+        .filter(|pw| !pw.is_empty() && !crate::secrets::is_secret_ref(pw))
+        .count()
+        + on_disk
+            .proxies
+            .iter()
+            .filter_map(|p| p.password.as_deref())
+            .filter(|pw| !pw.is_empty() && !crate::secrets::is_secret_ref(pw))
+            .count();
+
+    if plaintext_count == 0 {
+        return Ok(0);
+    }
+    // Need the store unlocked to encrypt; otherwise leave plaintext for now.
+    if !crate::secrets::is_unlocked() && !crate::secrets::try_unlock_from_env() {
+        return Ok(0);
+    }
+
+    let config = load_config()?;
+    save_config(&config)?;
+    Ok(plaintext_count)
 }
 
 pub fn save_config(config: &AppConfig) -> Result<()> {
@@ -144,7 +346,11 @@ pub fn save_config(config: &AppConfig) -> Result<()> {
 
 pub(crate) fn save_config_unlocked(config: &AppConfig) -> Result<()> {
     ensure_config_dir()?;
-    let normalized = normalize_config(config.clone());
+    let mut normalized = normalize_config(config.clone());
+    // K1: encrypt real passwords into the app-managed store, leaving only a
+    // reference marker on disk. Operates on the clone, so the caller's `config`
+    // (and any value it shares with the in-memory cache) keeps the real secrets.
+    externalize_secrets(&mut normalized);
     let raw = serde_json::to_string_pretty(&normalized)?;
     let path = config_path()?;
     let tmp_path = path.with_extension(format!("json.tmp.{}", std::process::id()));
@@ -160,6 +366,22 @@ pub(crate) fn save_config_unlocked(config: &AppConfig) -> Result<()> {
         file.sync_all()
             .with_context(|| format!("failed to sync temp config {}", tmp_path.display()))?;
         restrict_file_to_owner(&tmp_path)?;
+        // Write-before backup: snapshot the last-good file so a bad write (or a
+        // hand-edit gone wrong) can be rolled back from `hosts.json.bak`. The
+        // rename below is already atomic, so this protects against bad *content*,
+        // not torn writes. Backup failures are non-fatal — we don't block a save
+        // because the previous file couldn't be copied.
+        if path.exists() {
+            let backup = path.with_extension("json.bak");
+            if let Err(e) = fs::copy(&path, &backup) {
+                eprintln!(
+                    "warning: failed to back up {} before save: {e}",
+                    path.display()
+                );
+            } else {
+                let _ = restrict_file_to_owner(&backup);
+            }
+        }
         fs::rename(&tmp_path, &path)
             .with_context(|| format!("failed to replace hosts config {}", path.display()))?;
         restrict_file_to_owner(&path)?;
@@ -176,6 +398,10 @@ pub(crate) fn save_config_unlocked(config: &AppConfig) -> Result<()> {
 }
 
 fn normalize_config(mut config: AppConfig) -> AppConfig {
+    // Stamp the schema version. Never downgrade: if a newer build wrote a higher
+    // version, preserve it (forward-compat) rather than claiming this build's
+    // older schema.
+    config.schema_version = config.schema_version.max(CONFIG_SCHEMA_VERSION);
     if config.groups.is_empty() {
         config.groups = default_host_groups();
     }
@@ -907,6 +1133,185 @@ mod tests {
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         let _ = fs::remove_file(&path);
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn migrate_config_stamps_legacy_version() {
+        // A legacy file has no `schema_version`, so serde defaults it to 0.
+        let legacy: AppConfig =
+            serde_json::from_str(r#"{"hosts":[],"proxies":[],"groups":[]}"#).unwrap();
+        assert_eq!(legacy.schema_version, 0);
+
+        let migrated = migrate_config(legacy);
+        assert_eq!(migrated.schema_version, CONFIG_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migrate_config_is_idempotent_and_does_not_downgrade() {
+        // Already-current config is unchanged.
+        let mut current = AppConfig {
+            schema_version: CONFIG_SCHEMA_VERSION,
+            ..Default::default()
+        };
+        current = migrate_config(current);
+        assert_eq!(current.schema_version, CONFIG_SCHEMA_VERSION);
+
+        // A file written by a hypothetical newer build is never downgraded.
+        let future = AppConfig {
+            schema_version: CONFIG_SCHEMA_VERSION + 5,
+            ..Default::default()
+        };
+        let preserved = migrate_config(future);
+        assert_eq!(preserved.schema_version, CONFIG_SCHEMA_VERSION + 5);
+    }
+
+    #[test]
+    fn normalize_stamps_current_version_and_preserves_future() {
+        // normalize bumps a legacy/zero version up to current...
+        let stamped = normalize_config(AppConfig::default());
+        assert_eq!(stamped.schema_version, CONFIG_SCHEMA_VERSION);
+
+        // ...but never below an existing higher version.
+        let future = AppConfig {
+            schema_version: CONFIG_SCHEMA_VERSION + 2,
+            ..Default::default()
+        };
+        let normalized = normalize_config(future);
+        assert_eq!(normalized.schema_version, CONFIG_SCHEMA_VERSION + 2);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn save_config_writes_backup_of_previous_file() {
+        // Isolate the config dir for this test process.
+        let dir = std::env::temp_dir().join(format!("agent2ssh-bak-{}", uuid::Uuid::new_v4()));
+        std::env::set_var("AGENT2SSH_CONFIG_DIR", &dir);
+
+        let first = AppConfig {
+            hosts: vec![crate::types::HostProfile {
+                name: "alpha".into(),
+                host: "alpha.example".into(),
+                user: None,
+                port: None,
+                key_path: None,
+                password: None,
+                jump_host: None,
+                proxy_id: None,
+                risk_override: None,
+                tags: vec![],
+                group: default_host_group(),
+                env: None,
+                role: None,
+                owner: None,
+            }],
+            ..Default::default()
+        };
+        save_config(&first).unwrap();
+        assert!(
+            !dir.join("hosts.json.bak").exists(),
+            "no backup on first write"
+        );
+
+        // Second save snapshots the first file into hosts.json.bak.
+        let mut second = first.clone();
+        second.hosts[0].host = "beta.example".into();
+        save_config(&second).unwrap();
+
+        let backup = dir.join("hosts.json.bak");
+        assert!(backup.exists(), "backup created on overwrite");
+        let backup_raw = fs::read_to_string(&backup).unwrap();
+        assert!(
+            backup_raw.contains("alpha.example"),
+            "backup holds the previous version, got: {backup_raw}"
+        );
+
+        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn passwords_persist_as_marker_not_plaintext() {
+        // cfg(test) routes secrets to the in-memory backend.
+        let dir = std::env::temp_dir().join(format!("agent2ssh-kc-{}", uuid::Uuid::new_v4()));
+        std::env::set_var("AGENT2SSH_CONFIG_DIR", &dir);
+
+        let host = crate::types::HostProfile {
+            name: "kc-host".into(),
+            host: "10.0.0.9".into(),
+            user: Some("root".into()),
+            port: Some(22),
+            key_path: None,
+            password: Some("super-secret".into()),
+            jump_host: None,
+            proxy_id: None,
+            risk_override: None,
+            tags: vec![],
+            group: default_host_group(),
+            env: None,
+            role: None,
+            owner: None,
+        };
+        save_config(&AppConfig {
+            hosts: vec![host],
+            ..Default::default()
+        })
+        .unwrap();
+
+        // On disk: the marker, never the plaintext.
+        let raw = fs::read_to_string(dir.join("hosts.json")).unwrap();
+        assert!(
+            !raw.contains("super-secret"),
+            "plaintext password must not be on disk: {raw}"
+        );
+        assert!(
+            raw.contains(crate::secrets::SECRET_REF),
+            "on-disk password must be the reference marker: {raw}"
+        );
+
+        // On load: the real password is resolved back from the store.
+        let loaded = load_config().unwrap();
+        assert_eq!(loaded.hosts[0].password.as_deref(), Some("super-secret"));
+
+        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn migrate_secrets_moves_legacy_plaintext() {
+        let dir = std::env::temp_dir().join(format!("agent2ssh-kc-mig-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("AGENT2SSH_CONFIG_DIR", &dir);
+
+        // Hand-write a legacy config with a plaintext password (as pre-K1 builds did).
+        let legacy = r#"{
+            "schema_version": 0,
+            "groups": [],
+            "proxies": [],
+            "hosts": [{"name":"legacy","host":"1.2.3.4","password":"plain-pw","group":"default","tags":[]}]
+        }"#;
+        fs::write(dir.join("hosts.json"), legacy).unwrap();
+
+        let migrated = migrate_plaintext_secrets().unwrap();
+        assert_eq!(migrated, 1);
+
+        let raw = fs::read_to_string(dir.join("hosts.json")).unwrap();
+        assert!(
+            !raw.contains("plain-pw"),
+            "plaintext gone after migration: {raw}"
+        );
+        assert!(raw.contains(crate::secrets::SECRET_REF));
+
+        // Idempotent: a second run finds nothing to migrate.
+        assert_eq!(migrate_plaintext_secrets().unwrap(), 0);
+
+        // The secret is still resolvable.
+        let loaded = load_config().unwrap();
+        assert_eq!(loaded.hosts[0].password.as_deref(), Some("plain-pw"));
+
+        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

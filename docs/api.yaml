@@ -1,7 +1,7 @@
 openapi: "3.1.0"
 info:
   title: Agent2SSH Daemon API
-  version: "0.1.1"
+  version: "0.2.1"
   description: Local HTTP API for the Agent2SSH capability layer.
 servers:
   - url: http://127.0.0.1:7722
@@ -312,6 +312,10 @@ components:
         host:        { type: string }
         connected:   { type: boolean }
         socket_path: { type: string, nullable: true }
+        # K5 connection self-healing: liveness/reconnect state from the supervisor.
+        healthy:      { type: boolean, description: "Last keepalive probe succeeded (distinct from connected)." }
+        reconnecting: { type: boolean, description: "Supervisor is re-establishing a dropped connection." }
+        last_error:   { type: string, nullable: true, description: "Last keepalive/reconnect error." }
 
     ApprovalRequest:
       type: object

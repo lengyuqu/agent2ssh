@@ -84,7 +84,7 @@ Safety pipeline (the modules that authorization composes):
 - `anomaly.rs` — audit-window anomaly detection → alerts.
 - Host/playbook `risk_override` is the only trusted **downgrade** mechanism, and it still cannot unblock `blocked`.
 
-Other core modules: `store.rs` (config + JSONL audit persistence under `~/.agent2ssh/`, write-locked), `embedded_ssh.rs` (in-process SSH transport, exec/SFTP, jump-host direct-tcpip proxying, PTY terminal worker, host-key fingerprints), `connection.rs` (retained embedded SSH connections), `session.rs` (process-local PTY session registry backed by embedded SSH), `forward.rs` (process-local embedded SSH direct-tcpip port forwards), `keys.rs` (SSH key mgmt, `0600`), `notify.rs` (fire-and-forget HMAC-signed webhooks), `remote.rs` (remote daemon registry + version compat, `PROTOCOL_VERSION`), `events.rs` (in-process event bus feeding daemon SSE/WS and the desktop activity panel), `health.rs`, `daemon_control.rs` (start/stop/restart the bundled daemon sidecar).
+Other core modules: `store.rs` (config + JSONL audit persistence under `~/.agent2ssh/`, write-locked), `embedded_ssh.rs` (in-process SSH transport, exec/SFTP, jump-host direct-tcpip proxying, PTY terminal worker, host-key fingerprints), `connection.rs` (retained embedded SSH connections with a keepalive/health/auto-reconnect supervisor — K5), `secrets.rs` (app-managed encrypted credential store — K1: Argon2id master-password KDF + AES-256-GCM in `~/.agent2ssh/secrets.enc`, no OS keychain; disk holds only a `$agent2ssh-secret$` reference; unlock via desktop dialog or `AGENT2SSH_MASTER_PASSWORD`; `AGENT2SSH_SECRETS_BACKEND=memory` for tests), `sftp_transfer.rs` (SFTP cancel registry + cancellable copy + resume offsets — K6), `telemetry.rs` (opt-in, local-only crash/usage telemetry, off by default — K10), `session.rs` (process-local PTY session registry backed by embedded SSH), `forward.rs` (process-local embedded SSH direct-tcpip port forwards), `keys.rs` (SSH key mgmt, `0600`), `notify.rs` (fire-and-forget HMAC-signed webhooks), `remote.rs` (remote daemon registry + version compat, `PROTOCOL_VERSION`), `events.rs` (in-process event bus feeding daemon SSE/WS and the desktop activity panel), `health.rs`, `daemon_control.rs` (start/stop/restart the bundled daemon sidecar).
 
 Note: `session.rs` and `forward.rs` state is **process-local**. MCP routes sessions through the local daemon when it is reachable, so those sessions are visible in the daemon registry and desktop; if MCP falls back to local mode, its sessions remain local to that MCP process. Forwards are still process-local.
 
@@ -92,7 +92,7 @@ SSH transport is embedded-first. Exec, SFTP, WebSocket `/terminal`, persistent P
 
 ## Data & config layout
 
-All runtime state is under `~/.agent2ssh/`: `hosts.json`, `audit.jsonl`, `policy.toml`/`.json`, `playbooks.toml`, `remotes.toml`, `webhook.toml`, `daemon.token` (admin bearer, auto-`0600`), `daemon_tokens.toml` (scoped tokens), `keys/` (`0600`). See `docs/guides/configuration-guide.md` for the full format.
+All runtime state is under `~/.agent2ssh/`: `hosts.json`, `audit.jsonl`, `policy.toml`/`.json`, `playbooks.toml`, `remotes.toml`, `webhook.toml`, `daemon.token` (admin bearer, auto-`0600`), `daemon_tokens.toml` (scoped tokens), `secrets.enc` (K1 app-managed encrypted credential store, `0600`), `keys/` (`0600`). See `docs/guides/configuration-guide.md` for the full format.
 
 ## Docs worth reading before changing related code
 

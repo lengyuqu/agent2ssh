@@ -5,6 +5,7 @@ use axum::{
     response::IntoResponse,
     Json,
 };
+use subtle::ConstantTimeEq;
 
 use super::{err, AppState, ErrorBody};
 
@@ -63,23 +64,22 @@ fn authenticate_token(
     ))
 }
 
+/// Compare a presented token against the expected secret in constant time.
+///
+/// Uses `subtle::ConstantTimeEq` so the comparison does not short-circuit on the
+/// first differing byte, removing the timing side channel that a naive `==`
+/// (or `String`/`&str` equality) would expose to an attacker who can measure
+/// response latency. An empty/whitespace-only `expected` never matches (an
+/// unconfigured token must not be guessable with an empty bearer).
 pub(super) fn token_matches(candidate: &str, expected: &str) -> bool {
     if expected.trim().is_empty() {
         return false;
     }
-
-    let candidate = candidate.as_bytes();
-    let expected = expected.as_bytes();
-    let mut diff = candidate.len() ^ expected.len();
-    let max_len = candidate.len().max(expected.len());
-
-    for i in 0..max_len {
-        let candidate_byte = candidate.get(i).copied().unwrap_or(0);
-        let expected_byte = expected.get(i).copied().unwrap_or(0);
-        diff |= (candidate_byte ^ expected_byte) as usize;
-    }
-
-    diff == 0
+    // `ConstantTimeEq` for byte slices returns 0 when the lengths differ; the
+    // length check itself is not secret-dependent (the attacker controls the
+    // candidate length), so the only data-dependent work — the byte compare —
+    // stays constant time.
+    candidate.as_bytes().ct_eq(expected.as_bytes()).unwrap_u8() == 1
 }
 
 /// Routes that intentionally require no bearer token: the redirect root, the web
@@ -129,5 +129,32 @@ pub(super) async fn auth_middleware(
             next.run(request).await
         }
         Err(rejection) => rejection.into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::token_matches;
+
+    #[test]
+    fn token_matches_exact() {
+        assert!(token_matches("s3cret-token", "s3cret-token"));
+    }
+
+    #[test]
+    fn token_matches_rejects_wrong() {
+        assert!(!token_matches("s3cret-tokeX", "s3cret-token"));
+        assert!(!token_matches("s3cret-toke", "s3cret-token")); // prefix, shorter
+        assert!(!token_matches("s3cret-token-extra", "s3cret-token")); // longer
+        assert!(!token_matches("", "s3cret-token"));
+    }
+
+    #[test]
+    fn token_matches_empty_expected_never_matches() {
+        // An unconfigured/whitespace-only token must not be guessable, including
+        // with an empty bearer.
+        assert!(!token_matches("", ""));
+        assert!(!token_matches("   ", "   "));
+        assert!(!token_matches("anything", ""));
     }
 }

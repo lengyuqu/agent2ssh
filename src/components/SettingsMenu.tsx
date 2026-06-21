@@ -6,6 +6,7 @@ import {
   Download,
   ExternalLink,
   FileText,
+  Lock,
   PauseCircle,
   PlayCircle,
   Power,
@@ -74,6 +75,17 @@ export default function SettingsMenu({
   const [diagnosticLogs, setDiagnosticLogs] = useState<DiagnosticLogEntry[]>([]);
   const [diagnosticMessage, setDiagnosticMessage] = useState<string | null>(null);
   const [appActionBusy, setAppActionBusy] = useState<"exit" | null>(null);
+  // K3: in-app updater state.
+  const [updateBusy, setUpdateBusy] = useState<"check" | "install" | null>(null);
+  const [updateMessage, setUpdateMessage] = useState<string | null>(null);
+  const [updateAvailable, setUpdateAvailable] = useState<string | null>(null);
+  // K10: opt-in telemetry state.
+  const [telemetryEnabled, setTelemetryEnabled] = useState(false);
+  // K1: credential-store master password state.
+  const [secretsInitialized, setSecretsInitialized] = useState(false);
+  const [masterPassword, setMasterPassword] = useState("");
+  const [secretsBusy, setSecretsBusy] = useState(false);
+  const [secretsMessage, setSecretsMessage] = useState<string | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const gatePaused = gateStatus?.mode === "paused";
   const gateUnavailable = gateStatus === null;
@@ -116,6 +128,54 @@ export default function SettingsMenu({
       document.removeEventListener("keydown", handleKeyDown);
     };
   }, [open]);
+
+  // K10: load the telemetry opt-in state when the menu opens.
+  useEffect(() => {
+    if (!open) return;
+    void api
+      .getTelemetryEnabled()
+      .then(setTelemetryEnabled)
+      .catch(() => setTelemetryEnabled(false));
+    // K1: load credential-store status.
+    void api
+      .secretsStatus()
+      .then((s) => setSecretsInitialized(s.initialized))
+      .catch(() => setSecretsInitialized(false));
+  }, [open]);
+
+  // K1: set the master password (first time) or change it. Setting it for the
+  // first time also encrypts any existing plaintext credentials.
+  async function submitMasterPassword() {
+    if (!masterPassword || secretsBusy) return;
+    setSecretsBusy(true);
+    setSecretsMessage(null);
+    try {
+      if (secretsInitialized) {
+        await api.secretsChangePassword(masterPassword);
+        setSecretsMessage(t("Master password changed"));
+      } else {
+        await api.secretsUnlock(masterPassword); // initializes + migrates plaintext
+        setSecretsInitialized(true);
+        setSecretsMessage(t("Master password set"));
+      }
+      setMasterPassword("");
+    } catch (err) {
+      setSecretsMessage(String(err));
+    } finally {
+      setSecretsBusy(false);
+    }
+  }
+
+  async function toggleTelemetry() {
+    const next = !telemetryEnabled;
+    setTelemetryEnabled(next);
+    try {
+      await api.setTelemetryEnabled(next);
+    } catch (err) {
+      setTelemetryEnabled(!next); // revert on failure
+      reportError("settings-menu", "toggle telemetry failed", err);
+    }
+  }
 
   async function handleGateRefresh() {
     setRefreshBusy(true);
@@ -185,6 +245,49 @@ export default function SettingsMenu({
       setDiagnosticMessage(String(err));
     } finally {
       setDiagnosticBusy(null);
+    }
+  }
+
+  // K3: check the release endpoint for a signed update.
+  async function handleCheckForUpdate() {
+    setUpdateBusy("check");
+    setUpdateMessage(null);
+    setUpdateAvailable(null);
+    try {
+      const { checkForUpdate } = await import("../lib/updater");
+      const result = await checkForUpdate();
+      if (result.status === "available") {
+        setUpdateAvailable(result.version);
+        setUpdateMessage(t("Update available: {version}", { version: result.version }));
+      } else if (result.status === "up-to-date") {
+        setUpdateMessage(t("You're on the latest version"));
+      } else {
+        setUpdateMessage(result.error);
+      }
+    } catch (err) {
+      setUpdateMessage(String(err));
+    } finally {
+      setUpdateBusy(null);
+    }
+  }
+
+  // K3: download + install the pending signed update, then relaunch.
+  async function handleInstallUpdate() {
+    setUpdateBusy("install");
+    try {
+      const { downloadAndInstallUpdate } = await import("../lib/updater");
+      await downloadAndInstallUpdate((downloaded, total) => {
+        setUpdateMessage(
+          total
+            ? t("Downloading update: {pct}%", {
+                pct: Math.round((downloaded / total) * 100),
+              })
+            : t("Downloading update…")
+        );
+      });
+    } catch (err) {
+      setUpdateMessage(String(err));
+      setUpdateBusy(null);
     }
   }
 
@@ -352,6 +455,89 @@ export default function SettingsMenu({
               <RefreshCw size={16} className={healthBusy ? "animate-spin" : ""} />
               {t("Refresh daemon health")}
             </button>
+          </section>
+
+          <section className="grid gap-2">
+            <div className={sectionTitleCls}>
+              <Download size={15} />
+              {t("Updates")}
+            </div>
+            {updateMessage && (
+              <div className="text-xs text-muted-foreground">{updateMessage}</div>
+            )}
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                className={actionBtnCls}
+                onClick={handleCheckForUpdate}
+                disabled={updateBusy !== null}
+                title={t("Check for updates")}
+              >
+                <RefreshCw size={16} className={updateBusy === "check" ? "animate-spin" : ""} />
+                {t("Check for updates")}
+              </button>
+              <button
+                type="button"
+                className={actionBtnCls}
+                onClick={handleInstallUpdate}
+                disabled={updateBusy !== null || !updateAvailable}
+                title={t("Install update")}
+              >
+                <Download size={16} className={updateBusy === "install" ? "animate-pulse" : ""} />
+                {t("Install update")}
+              </button>
+            </div>
+          </section>
+
+          <section className="grid gap-2">
+            <div className={sectionTitleCls}>
+              <Lock size={15} />
+              {t("Credential encryption")}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {secretsInitialized
+                ? t("Encrypted at rest with your master password (Argon2id + AES-256-GCM).")
+                : t(
+                    "Encrypted at rest with a master password (Argon2id + AES-256-GCM). Not yet set — credentials are stored in plaintext until you set one."
+                  )}
+            </p>
+            {secretsMessage && (
+              <div className="text-xs text-muted-foreground">{secretsMessage}</div>
+            )}
+            <div className="flex gap-2">
+              <input
+                type="password"
+                value={masterPassword}
+                onChange={(e) => setMasterPassword(e.target.value)}
+                placeholder={secretsInitialized ? t("New master password") : t("Master password")}
+                className="h-9 flex-1 rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+              />
+              <button
+                type="button"
+                className={cn(actionBtnCls, "w-auto px-3")}
+                onClick={submitMasterPassword}
+                disabled={!masterPassword || secretsBusy}
+              >
+                {secretsInitialized ? t("Change master password") : t("Set master password")}
+              </button>
+            </div>
+          </section>
+
+          <section className="grid gap-2">
+            <div className={sectionTitleCls}>{t("Telemetry")}</div>
+            <label className="flex items-start gap-2.5 text-sm">
+              <input
+                type="checkbox"
+                checked={telemetryEnabled}
+                onChange={toggleTelemetry}
+                className="mt-0.5 size-4 shrink-0 accent-primary"
+              />
+              <span className="text-muted-foreground">
+                {t(
+                  "Collect anonymous crash and usage data locally. Off by default; nothing leaves your machine until you export it."
+                )}
+              </span>
+            </label>
           </section>
 
           <section className="grid gap-2">

@@ -30,7 +30,7 @@ use agent2ssh::{
     PolicyTestResult, RiskLevel, SftpDownloadRequest, SftpUploadRequest, TeamConfigExport,
 };
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -127,6 +127,11 @@ enum Commands {
     Forward {
         #[command(subcommand)]
         command: ForwardCommands,
+    },
+    /// Manage the app-managed encrypted credential store (master password)
+    Secrets {
+        #[command(subcommand)]
+        command: SecretsCommands,
     },
     /// Check SSH reachability of one or more hosts
     Ping {
@@ -245,6 +250,11 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Sync portable Agent2SSH config through a WebDAV collection
+    Webdav {
+        #[command(subcommand)]
+        command: WebDavCommands,
+    },
     /// Run diagnostic checks on the agent2ssh environment
     Doctor {
         /// Output results as JSON
@@ -356,6 +366,9 @@ enum SftpCommands {
         host: String,
         local: String,
         remote: String,
+        /// Resume an interrupted upload by appending from the remote file's length (K6)
+        #[arg(long)]
+        resume: bool,
         #[arg(long)]
         json: bool,
     },
@@ -364,6 +377,9 @@ enum SftpCommands {
         host: String,
         remote: String,
         local: String,
+        /// Resume an interrupted download by appending from the local file's length (K6)
+        #[arg(long)]
+        resume: bool,
         #[arg(long)]
         json: bool,
     },
@@ -448,6 +464,75 @@ enum ForwardCommands {
         id: String,
         #[arg(long)]
         json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SecretsCommands {
+    /// Show whether the credential store is initialized and unlocked
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Set (first time) or change the master password, re-encrypting stored
+    /// credentials. Reads the password from --password, else AGENT2SSH_MASTER_PASSWORD,
+    /// else a prompt on stdin.
+    SetPassword {
+        #[arg(long)]
+        password: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Args)]
+struct WebDavCliOptions {
+    /// WebDAV collection URL. Also read from AGENT2SSH_WEBDAV_URL or webdav.toml.
+    #[arg(long)]
+    url: Option<String>,
+    /// WebDAV username. Also read from AGENT2SSH_WEBDAV_USERNAME or webdav.toml.
+    #[arg(long)]
+    username: Option<String>,
+    /// WebDAV password. Prefer --password-env or AGENT2SSH_WEBDAV_PASSWORD.
+    #[arg(long)]
+    password: Option<String>,
+    /// Environment variable holding the WebDAV password.
+    #[arg(long)]
+    password_env: Option<String>,
+    /// Path to a WebDAV config TOML file (default: ~/.agent2ssh/webdav.toml).
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Output as JSON
+    #[arg(long)]
+    json: bool,
+}
+
+impl WebDavCliOptions {
+    fn into_sync_options(self) -> agent2ssh::WebDavSyncOptions {
+        agent2ssh::WebDavSyncOptions {
+            url: self.url,
+            username: self.username,
+            password: self.password,
+            password_env: self.password_env,
+            config_path: self.config,
+        }
+    }
+}
+
+#[derive(Debug, Subcommand)]
+enum WebDavCommands {
+    /// Upload local syncable config to WebDAV and increment the global version
+    Push {
+        #[command(flatten)]
+        options: WebDavCliOptions,
+    },
+    /// Download the latest WebDAV version after creating a local backup
+    Pull {
+        #[command(flatten)]
+        options: WebDavCliOptions,
+    },
+    /// Show local and remote sync version markers
+    Status {
+        #[command(flatten)]
+        options: WebDavCliOptions,
     },
 }
 
@@ -871,6 +956,12 @@ fn command_authorization_error(error: CommandAuthorizationError) -> anyhow::Erro
 async fn main() -> Result<()> {
     agent2ssh::install_panic_hook("cli");
     agent2ssh::seed_trace_id_from_env();
+    // K1: best-effort one-shot migration of any legacy plaintext passwords into
+    // the app-managed encrypted store. No-op once clean; never blocks startup
+    // on failure.
+    if let Err(e) = agent2ssh::migrate_plaintext_secrets() {
+        eprintln!("warning: secret migration skipped: {e}");
+    }
     let cli = Cli::parse();
     let daemon_alias = cli.daemon.clone();
 
@@ -1243,6 +1334,7 @@ async fn main() -> Result<()> {
                 host,
                 local,
                 remote,
+                resume,
                 json,
             } => {
                 let source = source_from_env("cli");
@@ -1253,6 +1345,8 @@ async fn main() -> Result<()> {
                         host,
                         local_path: local,
                         remote_path: remote,
+                        resume,
+                        transfer_id: None,
                     },
                     Some(source),
                 )
@@ -1270,6 +1364,7 @@ async fn main() -> Result<()> {
                 host,
                 remote,
                 local,
+                resume,
                 json,
             } => {
                 let source = source_from_env("cli");
@@ -1280,6 +1375,8 @@ async fn main() -> Result<()> {
                         host,
                         remote_path: remote,
                         local_path: local,
+                        resume,
+                        transfer_id: None,
                     },
                     Some(source),
                 )
@@ -1512,6 +1609,73 @@ async fn main() -> Result<()> {
                     );
                 } else {
                     println!("Forward {id} removed.");
+                }
+            }
+        },
+        Commands::Secrets { command } => match command {
+            SecretsCommands::Status { json } => {
+                let initialized = agent2ssh::secrets::is_initialized();
+                let unlocked =
+                    agent2ssh::secrets::is_unlocked() || agent2ssh::secrets::try_unlock_from_env();
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "initialized": initialized,
+                            "unlocked": unlocked,
+                        }))?
+                    );
+                } else {
+                    println!(
+                        "credential store: {} / {}",
+                        if initialized {
+                            "initialized"
+                        } else {
+                            "not set"
+                        },
+                        if unlocked { "unlocked" } else { "locked" }
+                    );
+                }
+            }
+            SecretsCommands::SetPassword { password } => {
+                let password =
+                    match password.or_else(|| std::env::var("AGENT2SSH_MASTER_PASSWORD").ok()) {
+                        Some(p) if !p.is_empty() => p,
+                        _ => {
+                            eprint!("New master password: ");
+                            use std::io::Write as _;
+                            std::io::stderr().flush().ok();
+                            let mut line = String::new();
+                            std::io::stdin().read_line(&mut line)?;
+                            line.trim_end_matches(['\n', '\r']).to_string()
+                        }
+                    };
+                if password.is_empty() {
+                    return Err(anyhow::anyhow!("master password must not be empty"));
+                }
+                let initialized = agent2ssh::secrets::is_initialized();
+                if initialized {
+                    // Changing requires the store to be unlocked first.
+                    if !agent2ssh::secrets::is_unlocked()
+                        && !agent2ssh::secrets::try_unlock_from_env()
+                    {
+                        return Err(anyhow::anyhow!(
+                            "store is locked; set AGENT2SSH_MASTER_PASSWORD to the current password before changing it"
+                        ));
+                    }
+                    agent2ssh::secrets::change_master_password(&password)?;
+                    println!("Master password changed; credentials re-encrypted.");
+                } else {
+                    agent2ssh::secrets::unlock_or_init(&password)?;
+                    let migrated = agent2ssh::migrate_plaintext_secrets().unwrap_or(0);
+                    println!(
+                        "Master password set.{}",
+                        if migrated > 0 {
+                            format!(" Encrypted {migrated} existing plaintext credential(s).")
+                        } else {
+                            String::new()
+                        }
+                    );
                 }
             }
         },
@@ -2030,6 +2194,35 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Commands::Webdav { command } => match command {
+            WebDavCommands::Push { options } => {
+                let json = options.json;
+                let result = agent2ssh::webdav_push(options.into_sync_options()).await?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                } else {
+                    print_webdav_result(&result);
+                }
+            }
+            WebDavCommands::Pull { options } => {
+                let json = options.json;
+                let result = agent2ssh::webdav_pull(options.into_sync_options()).await?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                } else {
+                    print_webdav_result(&result);
+                }
+            }
+            WebDavCommands::Status { options } => {
+                let json = options.json;
+                let status = agent2ssh::webdav_status(options.into_sync_options()).await?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&status)?);
+                } else {
+                    print_webdav_status(&status);
+                }
+            }
+        },
         Commands::Doctor {
             json: output_json,
             daemon,
@@ -2844,6 +3037,41 @@ fn print_comparison(comparison: &ExecComparison) {
         }
     }
     println!("\nSummary: {}", comparison.summary);
+}
+
+fn print_webdav_result(result: &agent2ssh::WebDavSyncResult) {
+    println!(
+        "WebDAV {} complete: global_version={} sync_id={}",
+        result.direction, result.global_version, result.sync_id
+    );
+    println!("Local backup: {}", result.backup_path);
+    println!("Local marker: {}", result.marker_path);
+    if result.files.is_empty() {
+        println!("Files: none");
+    } else {
+        println!("Files:");
+        for file in &result.files {
+            println!("  {}\t{} bytes\t{}", file.path, file.bytes, file.sha256);
+        }
+    }
+}
+
+fn print_webdav_status(status: &agent2ssh::WebDavSyncStatus) {
+    fn print_marker(label: &str, marker: &Option<agent2ssh::WebDavSyncMarker>) {
+        match marker {
+            Some(marker) => {
+                println!(
+                    "{label}: global_version={} direction={} updated_at={} sync_id={}",
+                    marker.global_version, marker.direction, marker.updated_at, marker.sync_id
+                );
+                println!("  files: {}", marker.files.len());
+            }
+            None => println!("{label}: not initialized"),
+        }
+    }
+
+    print_marker("Local", &status.local);
+    print_marker("Remote", &status.remote);
 }
 
 async fn check_daemon_health() -> bool {

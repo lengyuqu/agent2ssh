@@ -156,10 +156,24 @@ export const api = {
     }),
 
   // SFTP
-  sftpUpload: (host: string, localPath: string, remotePath: string) =>
+  sftpUpload: (
+    host: string,
+    localPath: string,
+    remotePath: string,
+    opts?: { resume?: boolean; transferId?: string }
+  ) =>
     invoke<SftpResult>("sftp_upload", {
-      request: { host, local_path: localPath, remote_path: remotePath },
+      request: {
+        host,
+        local_path: localPath,
+        remote_path: remotePath,
+        resume: opts?.resume ?? false,
+        transfer_id: opts?.transferId ?? null,
+      },
     }),
+  // K6: cancel an in-flight transfer by its id.
+  sftpCancel: (transferId: string) =>
+    invoke<boolean>("sftp_cancel", { transferId }),
   sftpExchange: (
     sourceHost: string,
     sourcePath: string,
@@ -174,9 +188,20 @@ export const api = {
         destination_path: destinationPath,
       } as SftpExchangeRequest,
     }),
-  sftpDownload: (host: string, remotePath: string, localPath: string) =>
+  sftpDownload: (
+    host: string,
+    remotePath: string,
+    localPath: string,
+    opts?: { resume?: boolean; transferId?: string }
+  ) =>
     invoke<SftpResult>("sftp_download", {
-      request: { host, remote_path: remotePath, local_path: localPath },
+      request: {
+        host,
+        remote_path: remotePath,
+        local_path: localPath,
+        resume: opts?.resume ?? false,
+        transfer_id: opts?.transferId ?? null,
+      },
     }),
   sftpLs: (host: string, path: string, timeoutSecs?: number) =>
     invoke<ExecResult>("sftp_ls", {
@@ -315,6 +340,17 @@ export const api = {
     }),
   clearDiagnosticLogs: () => invoke<void>("clear_diagnostic_logs"),
   exportDiagnosticBundle: () => invoke<string>("export_diagnostic_bundle"),
+
+  // K10: opt-in, local-only telemetry toggle.
+  getTelemetryEnabled: () => invoke<boolean>("get_telemetry_enabled"),
+  setTelemetryEnabled: (enabled: boolean) =>
+    invoke<void>("set_telemetry_enabled", { enabled }),
+
+  // K1: app-managed credential store (master password).
+  secretsStatus: () => invoke<{ initialized: boolean; unlocked: boolean }>("secrets_status"),
+  secretsUnlock: (password: string) => invoke<void>("secrets_unlock", { password }),
+  secretsChangePassword: (newPassword: string) =>
+    invoke<void>("secrets_change_password", { newPassword }),
 
   // SSH Keys
   listKeys: () => invoke<SshKeyInfo[]>("list_keys"),

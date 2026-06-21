@@ -158,9 +158,25 @@ pub fn update_host_core(original_name: &str, host: HostProfile) -> Result<HostPr
     if original_name != host.name && config.hosts.iter().any(|item| item.name == host.name) {
         return Err(anyhow!("host already exists: {}", host.name));
     }
+    let renamed = original_name != host.name;
     config.hosts[original_idx] = host.clone();
     config.hosts.sort_by(|a, b| a.name.cmp(&b.name));
     save_config_unlocked(&config)?;
+    // K1: the encrypted secret account is keyed by host name. On a rename,
+    // `save_config` has already re-stored the secret under the new name (the
+    // edit form resends the password), so the old `host:<original_name>` entry
+    // is now an orphan. If the new account has no secret but the old one does,
+    // carry it over first so a rename never loses the password.
+    if renamed {
+        let old_acct = crate::secrets::host_account(original_name);
+        let new_acct = crate::secrets::host_account(&host.name);
+        if crate::secrets::get_secret(&new_acct).is_none() {
+            if let Some(secret) = crate::secrets::get_secret(&old_acct) {
+                let _ = crate::secrets::store_secret(&new_acct, &secret);
+            }
+        }
+        crate::secrets::delete_secret(&old_acct);
+    }
     Ok(host)
 }
 
@@ -172,7 +188,11 @@ pub fn remove_host_core(name: &str) -> Result<()> {
     if config.hosts.len() == before {
         return Err(anyhow!("no host profile named '{name}'"));
     }
-    save_config_unlocked(&config)
+    save_config_unlocked(&config)?;
+    // K1: drop the host's encrypted secret so removed hosts don't leave orphaned
+    // entries behind.
+    crate::secrets::delete_secret(&crate::secrets::host_account(name));
+    Ok(())
 }
 
 pub fn save_proxy_core(proxy: ProxyProfile) -> Result<ProxyProfile> {
@@ -205,6 +225,9 @@ pub fn delete_proxy_core(id: &str) -> Result<bool> {
             }
         }
         save_config_unlocked(&config)?;
+        // K1: drop the proxy's encrypted secret so removed proxies don't leave
+        // orphaned entries behind.
+        crate::secrets::delete_secret(&crate::secrets::proxy_account(id));
     }
     Ok(removed)
 }
@@ -1441,16 +1464,48 @@ pub async fn sftp_upload_core_with_source(
     let embedded_host = host.clone();
     let remote_path = request.remote_path.clone();
     let local_for_task = local.clone();
+    let resume = request.resume;
+    let transfer_id = request.transfer_id.clone();
     let transfer_result = tokio::task::spawn_blocking(move || -> Result<u64> {
-        let session = connect_embedded_ssh(&embedded_host, 60)?;
-        let sftp = session.sftp()?;
-        let mut local_file = std::fs::File::open(&local_for_task)
-            .with_context(|| format!("failed to open local file {local_for_task}"))?;
-        let mut remote_file = sftp
-            .create(Path::new(&remote_path))
-            .with_context(|| format!("failed to create remote file {remote_path}"))?;
-        let copied = std::io::copy(&mut local_file, &mut remote_file)?;
-        Ok(copied)
+        use std::io::{Seek, SeekFrom};
+        let cancel = match &transfer_id {
+            Some(id) => crate::sftp_transfer::register(id),
+            None => std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let outcome = (|| -> Result<u64> {
+            let session = connect_embedded_ssh(&embedded_host, 60)?;
+            let sftp = session.sftp()?;
+            let mut local_file = std::fs::File::open(&local_for_task)
+                .with_context(|| format!("failed to open local file {local_for_task}"))?;
+            let local_len = local_file.metadata().ok().map(|m| m.len());
+            // K6: resume appends from the remote file's current length.
+            let existing = sftp
+                .stat(Path::new(&remote_path))
+                .ok()
+                .and_then(|s| s.size)
+                .unwrap_or(0);
+            let offset = crate::sftp_transfer::resume_offset(resume, existing, local_len);
+            let mut remote_file = if offset > 0 {
+                local_file.seek(SeekFrom::Start(offset))?;
+                sftp.open_mode(
+                    Path::new(&remote_path),
+                    ssh2::OpenFlags::WRITE | ssh2::OpenFlags::APPEND,
+                    0o644,
+                    ssh2::OpenType::File,
+                )
+                .with_context(|| format!("failed to open remote file for resume {remote_path}"))?
+            } else {
+                sftp.create(Path::new(&remote_path))
+                    .with_context(|| format!("failed to create remote file {remote_path}"))?
+            };
+            let copied =
+                crate::sftp_transfer::copy_cancellable(&mut local_file, &mut remote_file, &cancel)?;
+            Ok(offset + copied)
+        })();
+        if let Some(id) = &transfer_id {
+            crate::sftp_transfer::unregister(id);
+        }
+        outcome
     })
     .await
     .context("embedded SFTP upload task failed")?;
@@ -1536,16 +1591,46 @@ pub async fn sftp_download_core_with_source(
     let embedded_host = host.clone();
     let remote_path = request.remote_path.clone();
     let local_for_task = local.clone();
+    let resume = request.resume;
+    let transfer_id = request.transfer_id.clone();
     let transfer_result = tokio::task::spawn_blocking(move || -> Result<u64> {
-        let session = connect_embedded_ssh(&embedded_host, 60)?;
-        let sftp = session.sftp()?;
-        let mut remote_file = sftp
-            .open(Path::new(&remote_path))
-            .with_context(|| format!("failed to open remote file {remote_path}"))?;
-        let mut local_file = std::fs::File::create(&local_for_task)
-            .with_context(|| format!("failed to create local file {local_for_task}"))?;
-        let copied = std::io::copy(&mut remote_file, &mut local_file)?;
-        Ok(copied)
+        use std::io::{Seek, SeekFrom};
+        let cancel = match &transfer_id {
+            Some(id) => crate::sftp_transfer::register(id),
+            None => std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let outcome = (|| -> Result<u64> {
+            let session = connect_embedded_ssh(&embedded_host, 60)?;
+            let sftp = session.sftp()?;
+            let mut remote_file = sftp
+                .open(Path::new(&remote_path))
+                .with_context(|| format!("failed to open remote file {remote_path}"))?;
+            let remote_size = remote_file.stat().ok().and_then(|s| s.size);
+            // K6: resume appends from the local file's current length.
+            let existing = std::fs::metadata(&local_for_task)
+                .map(|m| m.len())
+                .unwrap_or(0);
+            let offset = crate::sftp_transfer::resume_offset(resume, existing, remote_size);
+            let mut local_file = if offset > 0 {
+                remote_file.seek(SeekFrom::Start(offset))?;
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&local_for_task)
+                    .with_context(|| {
+                        format!("failed to open local file for resume {local_for_task}")
+                    })?
+            } else {
+                std::fs::File::create(&local_for_task)
+                    .with_context(|| format!("failed to create local file {local_for_task}"))?
+            };
+            let copied =
+                crate::sftp_transfer::copy_cancellable(&mut remote_file, &mut local_file, &cancel)?;
+            Ok(offset + copied)
+        })();
+        if let Some(id) = &transfer_id {
+            crate::sftp_transfer::unregister(id);
+        }
+        outcome
     })
     .await
     .context("embedded SFTP download task failed")?;
@@ -2934,6 +3019,7 @@ mod tests {
         std::env::set_var("AGENT2SSH_CONFIG_DIR", &config_dir);
 
         crate::store::save_config(&AppConfig {
+            schema_version: 0,
             groups: vec![],
             proxies: vec![],
             hosts: vec![HostProfile {
@@ -3037,6 +3123,7 @@ mod tests {
 
         // Set up existing config with one host
         let existing_config = AppConfig {
+            schema_version: 0,
             groups: vec![],
             proxies: vec![],
             hosts: vec![HostProfile {
@@ -3120,6 +3207,7 @@ mod tests {
         std::env::set_var("AGENT2SSH_CONFIG_DIR", &config_dir);
 
         crate::store::save_config(&AppConfig {
+            schema_version: 0,
             groups: vec![],
             proxies: vec![],
             hosts: vec![HostProfile {
@@ -3176,6 +3264,48 @@ mod tests {
         assert_eq!(updated.password.as_deref(), Some("local-secret"));
         assert_eq!(updated.tags, vec!["new"]);
         assert_eq!(updated.env.as_deref(), Some("prod"));
+
+        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&config_dir);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_update_host_rename_moves_encrypted_secret_and_drops_orphan() {
+        // cfg(test) routes secrets to the in-memory backend, so this never
+        // touches the encrypted file.
+        let config_dir =
+            std::env::temp_dir().join(format!("agent2ssh-rename-kc-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::env::set_var("AGENT2SSH_CONFIG_DIR", &config_dir);
+
+        // Create a password host "alpha"; the secret lands under host:alpha.
+        let mut host = make_test_host("alpha");
+        host.password = Some("rename-secret".into());
+        add_host_core(host).unwrap();
+        assert_eq!(
+            crate::secrets::get_secret(&crate::secrets::host_account("alpha")).as_deref(),
+            Some("rename-secret")
+        );
+
+        // Rename alpha -> beta, resending the (real) password like the edit form does.
+        let mut renamed = make_test_host("beta");
+        renamed.password = Some("rename-secret".into());
+        update_host_core("alpha", renamed).unwrap();
+
+        // New account holds the secret; the old one is gone (no orphan).
+        assert_eq!(
+            crate::secrets::get_secret(&crate::secrets::host_account("beta")).as_deref(),
+            Some("rename-secret")
+        );
+        assert_eq!(
+            crate::secrets::get_secret(&crate::secrets::host_account("alpha")),
+            None
+        );
+        // And the host still resolves its password through load_config.
+        let config = crate::store::load_config().unwrap();
+        let beta = config.hosts.iter().find(|h| h.name == "beta").unwrap();
+        assert_eq!(beta.password.as_deref(), Some("rename-secret"));
 
         std::env::remove_var("AGENT2SSH_CONFIG_DIR");
         let _ = std::fs::remove_dir_all(&config_dir);

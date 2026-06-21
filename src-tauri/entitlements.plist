@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  K3: Hardened-runtime entitlements for notarized macOS builds.
+
+  Agent2SSH is NOT App-Sandboxed (it spawns local sidecar binaries — the daemon,
+  CLI, and MCP server — and opens outbound SSH/HTTP connections), so we declare
+  only the hardened-runtime exceptions those operations need. The keychain
+  integration (K1) uses the login keychain and needs no extra entitlement.
+-->
+<plist version="1.0">
+<dict>
+  <!-- Allow the app to make outbound network connections (SSH, daemon HTTP). -->
+  <key>com.apple.security.network.client</key>
+  <true/>
+  <!-- Allow launching the bundled sidecar binaries (Tauri externalBin). -->
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+  <!-- Permit dynamically-linked libraries from the bundle (ssh2/libssh2). -->
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+</dict>
+</plist>

@@ -31,6 +31,7 @@ import PlaybooksPanel from "./components/PlaybooksPanel";
 import ProxyPanel from "./components/ProxyPanel";
 import SFTPPanel from "./components/SFTPPanel";
 import TerminalPanel from "./components/TerminalPanel";
+import SecretsUnlock from "./components/SecretsUnlock";
 import SettingsMenu from "./components/SettingsMenu";
 import SetupWizard from "./components/SetupWizard";
 import { useI18n } from "./i18n";
@@ -69,6 +70,9 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [pendingApprovals, setPendingApprovals] = useState<ApprovalRequest[]>([]);
   const [connectionStatuses, setConnectionStatuses] = useState<ConnectionStatus[]>([]);
+  // K1: true when the app-managed credential store is initialized but locked,
+  // gating the UI behind a master-password unlock dialog at startup.
+  const [secretsLocked, setSecretsLocked] = useState(false);
   const [gateStatus, setGateStatus] = useState<ExecutionGateStatus | null>(null);
   const [gateBusy, setGateBusy] = useState(false);
   const [gateCheckedAt, setGateCheckedAt] = useState<number | null>(null);
@@ -157,6 +161,15 @@ export default function App() {
     refresh()
       .catch((err) => setError(String(err)))
       .finally(() => setLoading(false));
+  }, []);
+
+  // K1: gate the UI behind a master-password unlock when the credential store is
+  // initialized but locked, so saved SSH passwords can be decrypted.
+  useEffect(() => {
+    api
+      .secretsStatus()
+      .then((status) => setSecretsLocked(status.initialized && !status.unlocked))
+      .catch(() => setSecretsLocked(false));
   }, []);
 
   // Show wizard when no hosts are configured and user hasn't dismissed it
@@ -361,6 +374,16 @@ export default function App() {
 
   return (
     <main className="flex min-h-screen bg-background text-foreground max-lg:flex-col">
+      {/* K1: master-password unlock gate. Reloads hosts after unlock so resolved
+          passwords are reflected. */}
+      {secretsLocked && (
+        <SecretsUnlock
+          onUnlocked={() => {
+            setSecretsLocked(false);
+            void refresh().catch((err) => setError(String(err)));
+          }}
+        />
+      )}
       {/* Approval dialog overlay (Fix-1) */}
       {currentApproval && (
         <ApprovalDialog

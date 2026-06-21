@@ -98,6 +98,35 @@ export default function HostList({
     return connectionStatuses.some((s) => s.host === name && s.connected);
   }
 
+  // K5: surface the supervisor's liveness/reconnect state, not just presence.
+  function connectionState(name: string): {
+    connected: boolean;
+    dotClass: string;
+    label: string;
+  } {
+    const status = connectionStatuses.find((s) => s.host === name);
+    if (!status || !status.connected) {
+      return { connected: false, dotClass: "bg-muted-foreground/40", label: t("Disconnected") };
+    }
+    if (status.reconnecting) {
+      return {
+        connected: true,
+        dotClass: "bg-warning animate-pulse",
+        label: status.last_error
+          ? `${t("Reconnecting")}: ${status.last_error}`
+          : t("Reconnecting"),
+      };
+    }
+    if (status.healthy === false) {
+      return {
+        connected: true,
+        dotClass: "bg-destructive",
+        label: status.last_error ? `${t("Stale")}: ${status.last_error}` : t("Stale"),
+      };
+    }
+    return { connected: true, dotClass: "bg-success", label: t("Connected") };
+  }
+
   function proxyLabel(proxyId?: string | null): string | null {
     if (!proxyId) return null;
     const proxy = proxies.find((item) => item.id === proxyId);
@@ -251,6 +280,7 @@ export default function HostList({
       <div className="grid max-h-[430px] gap-2 overflow-auto pr-0.5">
         {filteredHosts.map((host) => {
           const connected = isConnected(host.name);
+          const connState = connectionState(host.name);
           return (
             <div
               key={host.name}
@@ -264,11 +294,8 @@ export default function HostList({
               <button className="min-w-0 px-3 py-2.5 text-left" onClick={() => onSelect(host.name)}>
                 <strong className="flex items-center gap-2 font-semibold">
                   <span
-                    className={cn(
-                      "size-2 shrink-0 rounded-full",
-                      connected ? "bg-success" : "bg-muted-foreground/40"
-                    )}
-                    title={connected ? t("Connected") : t("Disconnected")}
+                    className={cn("size-2 shrink-0 rounded-full", connState.dotClass)}
+                    title={connState.label}
                   />
                   <span className="truncate">{host.name}</span>
                 </strong>

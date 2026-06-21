@@ -495,6 +495,14 @@ pub async fn sftp_download(request: SftpDownloadRequest) -> Result<SftpResult, S
         .map_err(|e| e.to_string())
 }
 
+/// K6: request cancellation of an in-flight SFTP transfer by its id. Returns
+/// true if a matching transfer was registered (false if it already finished or
+/// the id is unknown).
+#[tauri::command]
+pub async fn sftp_cancel(transfer_id: String) -> Result<bool, String> {
+    Ok(crate::sftp_transfer::cancel_transfer(&transfer_id))
+}
+
 #[tauri::command]
 pub async fn sftp_exchange(request: SftpExchangeRequest) -> Result<SftpExchangeResult, String> {
     let source = source_from_env("desktop");
@@ -511,6 +519,8 @@ pub async fn sftp_exchange(request: SftpExchangeRequest) -> Result<SftpExchangeR
             host: request.source_host.clone(),
             remote_path: request.source_path.clone(),
             local_path: local_temp.clone(),
+            resume: false,
+            transfer_id: None,
         },
         Some(source.clone()),
     )
@@ -525,6 +535,8 @@ pub async fn sftp_exchange(request: SftpExchangeRequest) -> Result<SftpExchangeR
             host: request.destination_host,
             local_path: local_temp.clone(),
             remote_path: request.destination_path,
+            resume: false,
+            transfer_id: None,
         },
         Some(source),
     )
@@ -618,7 +630,11 @@ fn expand_local_path(path: Option<String>) -> std::path::PathBuf {
     if trimmed == "~" {
         return home;
     }
-    if let Some(rest) = trimmed.strip_prefix("~/") {
+    // K7: accept both POSIX (`~/`) and Windows (`~\`) home-relative prefixes.
+    if let Some(rest) = trimmed
+        .strip_prefix("~/")
+        .or_else(|| trimmed.strip_prefix("~\\"))
+    {
         return home.join(rest);
     }
     std::path::PathBuf::from(trimmed)
@@ -1370,6 +1386,57 @@ pub async fn connection_status() -> Result<Vec<ConnectionStatus>, String> {
     Ok(list_active_connections().await)
 }
 
+/// K10: read the opt-in telemetry setting (off by default, local-only).
+#[tauri::command]
+pub async fn get_telemetry_enabled() -> Result<bool, String> {
+    Ok(crate::telemetry::telemetry_enabled())
+}
+
+/// K10: toggle the opt-in telemetry setting.
+#[tauri::command]
+pub async fn set_telemetry_enabled(enabled: bool) -> Result<(), String> {
+    crate::telemetry::save_telemetry_config(enabled).map_err(|e| e.to_string())
+}
+
+/// K1: state of the app-managed credential store for the desktop unlock flow.
+#[derive(Serialize)]
+pub struct SecretsStatus {
+    /// A master password has been set (the encrypted store exists).
+    pub initialized: bool,
+    /// The store is unlocked in this process.
+    pub unlocked: bool,
+}
+
+/// K1: report whether the credential store is initialized/unlocked, so the
+/// desktop knows whether to show an unlock dialog, a "set master password"
+/// prompt, or nothing.
+#[tauri::command]
+pub async fn secrets_status() -> Result<SecretsStatus, String> {
+    Ok(SecretsStatus {
+        initialized: crate::secrets::is_initialized(),
+        unlocked: crate::secrets::is_unlocked(),
+    })
+}
+
+/// K1: unlock the credential store (or initialize it with `password` if no master
+/// password has been set yet), then migrate any leftover plaintext into it.
+#[tauri::command]
+pub async fn secrets_unlock(password: String) -> Result<(), String> {
+    crate::secrets::unlock_or_init(&password).map_err(|e| e.to_string())?;
+    // Now that we have a key, encrypt any plaintext passwords still on disk.
+    if let Err(e) = crate::store::migrate_plaintext_secrets() {
+        eprintln!("warning: secret migration after unlock failed: {e}");
+    }
+    Ok(())
+}
+
+/// K1: change the master password (re-encrypt the store under a new key).
+/// Requires the store to be unlocked.
+#[tauri::command]
+pub async fn secrets_change_password(new_password: String) -> Result<(), String> {
+    crate::secrets::change_master_password(&new_password).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn ssh_connect(host: String) -> Result<(), String> {
     let source = source_from_env("desktop");
@@ -1515,9 +1582,17 @@ pub fn import_team_config_cmd(config: TeamConfigExport) -> Result<ImportResult, 
 
 pub fn run_tauri() {
     crate::diagnostics::install_panic_hook("tauri");
+    // K1: migrate any legacy plaintext passwords into the app-managed encrypted store (no-op once clean).
+    if let Err(e) = crate::store::migrate_plaintext_secrets() {
+        eprintln!("warning: secret migration skipped: {e}");
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
+        // K3: in-app updater (signature-verified). Endpoints + pubkey come from
+        // tauri.conf.json; the JS `@tauri-apps/plugin-updater` API drives the
+        // check/download/install flow from Settings.
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             build_system_tray(app.handle(), "Open", "Quit", "Agent2SSH")?;
             Ok(())
@@ -1552,6 +1627,7 @@ pub fn run_tauri() {
             // SFTP
             sftp_upload,
             sftp_download,
+            sftp_cancel,
             sftp_exchange,
             sftp_ls,
             sftp_stat,
@@ -1597,6 +1673,13 @@ pub fn run_tauri() {
             connection_status,
             ssh_connect,
             ssh_disconnect,
+            // Opt-in telemetry (K10)
+            get_telemetry_enabled,
+            set_telemetry_enabled,
+            // App-managed credential store (K1)
+            secrets_status,
+            secrets_unlock,
+            secrets_change_password,
             // Playbooks
             list_playbooks,
             save_playbook,

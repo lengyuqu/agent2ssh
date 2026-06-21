@@ -15,7 +15,7 @@ import {
   Square,
   X,
 } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
@@ -62,6 +62,9 @@ type SideState = {
 };
 
 const VIEW_CAP_STEP = 400;
+// K6: how many files transfer at once when parallel mode is enabled. Bounded so
+// we don't open an unbounded number of SSH connections.
+const PARALLEL_TRANSFERS = 4;
 
 type TransferProgress = {
   total: number;
@@ -69,6 +72,9 @@ type TransferProgress = {
   current: string;
   bytesDone: number;
   bytesTotal: number;
+  // K6: id of the file currently transferring, so a Cancel button can abort it.
+  transferId?: string | null;
+  cancelling?: boolean;
 };
 
 type PendingTransfer = {
@@ -129,9 +135,17 @@ function remoteJoin(base: string, child: string): string {
   return `${normalized}/${child}`;
 }
 
+// K7: join a local base with a `/`-joined relative child, using the local
+// platform's separator. A base that looks like a Windows path (contains a
+// backslash or a drive letter) joins with `\` and converts the child's `/`
+// separators to `\`, so reconstructed download paths aren't mixed-separator.
 function localJoin(base: string, child: string): string {
-  const normalized = trimPath(base).replace(/\/+$/, "");
+  const normalized = trimPath(base).replace(/[\\/]+$/, "");
   if (!normalized) return child;
+  const isWindows = /\\/.test(normalized) || /^[A-Za-z]:/.test(normalized);
+  if (isWindows) {
+    return `${normalized}\\${child.replace(/\//g, "\\")}`;
+  }
   return `${normalized}/${child}`;
 }
 
@@ -251,6 +265,12 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
   const [right, setRight] = useState<SideState>(() => makeSide("local", ""));
   const [error, setError] = useState<string | null>(null);
   const [transfer, setTransfer] = useState<TransferProgress | null>(null);
+  // K6: optional parallel transfers. Off by default (each transfer opens its own
+  // SSH connection, so concurrency trades connection load for wall-clock time).
+  const [parallel, setParallel] = useState(false);
+  // K6: ids of all in-flight transfers, so Cancel aborts every running file —
+  // not just one — when running in parallel.
+  const activeTransferIds = useRef<Set<string>>(new Set());
   const [pending, setPending] = useState<PendingTransfer | null>(null);
   const [lastResult, setLastResult] = useState<{ count: number; dest: string; ms: number } | null>(null);
 
@@ -489,6 +509,45 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
     return { dirs, files };
   }
 
+  // K6: ask the backend to abort every in-flight transfer. The awaited calls in
+  // the transfer workers then reject, surfacing through the catch in executeTransfer.
+  async function cancelTransfer() {
+    const ids = [...activeTransferIds.current];
+    if (ids.length === 0) return;
+    setTransfer((prev) => (prev ? { ...prev, cancelling: true } : prev));
+    try {
+      await Promise.all(ids.map((id) => api.sftpCancel(id).catch(() => false)));
+    } catch (err) {
+      setError(String(err));
+    }
+  }
+
+  // K6: transfer one file, registering its id so Cancel can abort it. Returns the
+  // bytes moved so the caller can advance progress.
+  async function transferOneFile(
+    s: SideState,
+    d: SideState,
+    f: { src: string; dest: string; size: number }
+  ): Promise<number> {
+    const transferId = `sftp-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    activeTransferIds.current.add(transferId);
+    setTransfer((prev) => (prev ? { ...prev, current: basenameOf(f.src), transferId } : prev));
+    try {
+      if (s.kind === "local" && d.kind === "remote") {
+        return (await api.sftpUpload(d.host, f.src, f.dest, { transferId })).bytes;
+      }
+      if (s.kind === "remote" && d.kind === "local") {
+        return (await api.sftpDownload(s.host, f.src, f.dest, { transferId })).bytes;
+      }
+      if (s.kind === "remote" && d.kind === "remote") {
+        return (await api.sftpExchange(s.host, f.src, d.host, f.dest)).uploaded.bytes;
+      }
+      return 0;
+    } finally {
+      activeTransferIds.current.delete(transferId);
+    }
+  }
+
   async function executeTransfer(plan: PendingTransfer) {
     const s = getSide(plan.sourceSide);
     const d = getSide(plan.destSide);
@@ -507,20 +566,30 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
         else await api.localMkdir(dir);
       }
 
-      for (const f of files) {
-        setTransfer((prev) => (prev ? { ...prev, current: basenameOf(f.src) } : prev));
-        let bytes = 0;
-        if (s.kind === "local" && d.kind === "remote") {
-          bytes = (await api.sftpUpload(d.host, f.src, f.dest)).bytes;
-        } else if (s.kind === "remote" && d.kind === "local") {
-          bytes = (await api.sftpDownload(s.host, f.src, f.dest)).bytes;
-        } else if (s.kind === "remote" && d.kind === "remote") {
-          bytes = (await api.sftpExchange(s.host, f.src, d.host, f.dest)).uploaded.bytes;
+      // K6: transfer files through a bounded worker pool. Concurrency is 1 when
+      // parallel mode is off (preserving the old serial behavior) and
+      // PARALLEL_TRANSFERS otherwise. `aborted` makes the first failure (e.g. a
+      // cancel) stop idle workers from pulling new files.
+      activeTransferIds.current.clear();
+      const concurrency = parallel ? Math.min(PARALLEL_TRANSFERS, files.length) : 1;
+      let next = 0;
+      let aborted = false;
+      const worker = async () => {
+        while (!aborted) {
+          const i = next++;
+          if (i >= files.length) return;
+          try {
+            const bytes = await transferOneFile(s, d, files[i]);
+            setTransfer((prev) =>
+              prev ? { ...prev, done: prev.done + 1, bytesDone: prev.bytesDone + bytes } : prev
+            );
+          } catch (err) {
+            aborted = true;
+            throw err;
+          }
         }
-        setTransfer((prev) =>
-          prev ? { ...prev, done: prev.done + 1, bytesDone: prev.bytesDone + bytes } : prev
-        );
-      }
+      };
+      await Promise.all(Array.from({ length: Math.max(1, concurrency) }, worker));
       setLastResult({
         count: files.length,
         dest: d.path,
@@ -951,6 +1020,16 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
               </span>
             )}
             {transfer.current && <span className="truncate text-primary/80">· {transfer.current}</span>}
+            {transfer.transferId && (
+              <button
+                type="button"
+                className="ml-auto shrink-0 rounded border border-primary/40 px-2 py-0.5 text-xs font-medium text-primary hover:bg-primary/15 disabled:opacity-50"
+                disabled={transfer.cancelling}
+                onClick={() => void cancelTransfer()}
+              >
+                {transfer.cancelling ? t("Cancelling…") : t("Cancel")}
+              </button>
+            )}
           </div>
           <div className="mt-1.5 h-1.5 overflow-hidden rounded bg-primary/20">
             <div
@@ -986,6 +1065,16 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
           <div className="grid w-full gap-3 rounded-lg border border-border/70 bg-muted/30 p-3 xl:w-44">
             {renderTransferButton("left", "right", <ArrowRight size={14} />, t("To right"))}
             {renderTransferButton("right", "left", <ArrowLeft size={14} />, t("To left"))}
+            <label className="flex items-center gap-2 text-xs text-muted-foreground">
+              <input
+                type="checkbox"
+                checked={parallel}
+                onChange={(e) => setParallel(e.target.checked)}
+                disabled={transfer !== null}
+                className="size-3.5 shrink-0 accent-primary"
+              />
+              {t("Parallel transfers")}
+            </label>
           </div>
         </div>
 

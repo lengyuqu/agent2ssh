@@ -222,6 +222,11 @@ pub fn install_panic_hook(component: &'static str) {
             &format!("panic: {message}"),
             Some(json!({ "location": location })),
         );
+        // K10: opt-in crash aggregation (no-op unless the user enabled telemetry).
+        crate::telemetry::record_event(
+            "crash",
+            json!({ "component": component, "message": message, "location": location }),
+        );
         previous(info);
     }));
 }

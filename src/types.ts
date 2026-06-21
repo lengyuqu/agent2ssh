@@ -325,6 +325,10 @@ export type ConnectionStatus = {
   host: string;
   connected: boolean;
   socket_path?: string | null;
+  // K5: liveness/reconnect state from the connection supervisor.
+  healthy?: boolean;
+  reconnecting?: boolean;
+  last_error?: string | null;
 };
 
 // Rust: playbook.rs — Playbook

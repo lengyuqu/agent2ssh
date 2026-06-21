@@ -12,11 +12,13 @@ Agent2SSH 的所有配置和数据文件存储在 `~/.agent2ssh/` 目录下。�
   daemon.pid       # 守护进程 PID（自动管理）
   audit.jsonl      # 执行审计日志（自动追加）
   app.log          # 结构化诊断日志（JSONL，自动轮转）
+  secrets.enc      # App 自建加密凭据库（主密码派生密钥，自动管理）
   known_hosts.json # SSH 主机指纹信任记录（自动管理）
   .hosts.lock      # hosts.json 跨进程写锁（自动管理）
   .audit.lock      # audit.jsonl 跨进程追加锁（自动管理）
   .app_log.lock    # app.log 跨进程写锁（自动管理）
   .known_hosts.lock # known_hosts.json 跨进程写锁（自动管理）
+  .sync.lock       # WebDAV 同步跨进程锁（自动管理）
   policy.toml      # 统一策略文件（推荐）
   risk_rules.toml  # 旧版用户自定义风险规则（兼容）
   approval_policies.toml # 旧版审批策略（兼容）
@@ -26,6 +28,9 @@ Agent2SSH 的所有配置和数据文件存储在 `~/.agent2ssh/` 目录下。�
   playbooks.toml   # Playbook 命令模板定义
   remotes.toml     # 远程守护进程注册表
   webhook.toml     # Webhook 通知配置
+  webdav.toml      # 可选 WebDAV 同步配置
+  sync_version.json # 最近一次 WebDAV 同步应用的全局版本标记
+  backups/         # 同步/写入前的本地版本备份
   keys/            # SSH 密钥存储目录
 ```
 
@@ -136,7 +141,7 @@ JSON 格式，包含 `hosts` 数组，也可以包含由桌面端代理管理页
 - `jump_host` 必须引用已存在的主机别名
 - `proxy_id` 必须引用 `proxies` 中已存在的代理 ID；删除代理时，引用它的主机会自动切换回直连
 - HTTP 代理使用 `CONNECT host:port`；SOCKS5 支持无认证和用户名/密码认证
-- 代理密码与主机密码一样保存在本地 `hosts.json`，该文件由 Agent2SSH 限制为 owner 可读写
+- 设置主密码后，代理密码与主机密码会加密存入 `secrets.enc`，`hosts.json` 中只保留 `$agent2ssh-secret$` 引用句柄；未设置主密码前，历史明文会在解锁/设置主密码后迁移
 - CLI `host add` 当前不提供代理参数；请通过桌面端 **Proxies** 页面和主机编辑表单维护代理，或在 `hosts.json` 中手动写入 `proxies` 与主机 `proxy_id`
 - `risk_override` 设置为 `"low"` 可以降低该主机上非 `blocked` 命令的风险等级
 - `risk_override` 不能降级 `blocked` 命令；内置或用户规则判定为 `blocked` 的命令仍会被拒绝；显式审批策略、scope、gate 和限额仍会生效
@@ -891,6 +896,52 @@ chmod 600 ~/.agent2ssh/keys/my_key
 
 ---
 
+## WebDAV 同步
+
+Agent2SSH 可以把可迁移配置同步到一个 WebDAV collection。同步范围是保守的：包含 `hosts.json`、`secrets.enc`、`known_hosts.json`、策略文件、执行限额、异常检测和 playbook；不包含 `daemon.token`、`daemon_tokens.toml`、`remotes.toml`、`webhook.toml`、`audit.jsonl`、`app.log`、`keys/` 私钥目录等本机敏感或运行时文件。
+
+### 配置
+
+可以使用环境变量：
+
+```bash
+export AGENT2SSH_WEBDAV_URL="https://dav.example.com/agent2ssh"
+export AGENT2SSH_WEBDAV_USERNAME="alice"
+export AGENT2SSH_WEBDAV_PASSWORD="app-password"
+```
+
+也可以写入 `~/.agent2ssh/webdav.toml`：
+
+```toml
+url = "https://dav.example.com/agent2ssh"
+username = "alice"
+password_env = "AGENT2SSH_WEBDAV_PASSWORD"
+```
+
+### 命令
+
+```bash
+# 上传本地可同步配置。成功后远端 sync_version.json 的 global_version +1。
+agent2ssh webdav push
+
+# 拉取远端版本。拉取前会先创建本地备份。
+agent2ssh webdav pull
+
+# 查看本地和远端的全局版本标记。
+agent2ssh webdav status
+```
+
+三个命令都支持 `--url`、`--username`、`--password`、`--password-env`、`--config` 和 `--json`。
+
+### 备份与版本标记
+
+- 每次 `push` 或 `pull` 前都会在 `~/.agent2ssh/backups/sync-<timestamp>-<id>/` 创建本地版本备份。
+- `push` 会读取本地/远端已有标记，取较大的 `global_version` 并加 1，然后上传 `files/` 下的配置文件和远端 `sync_version.json`。
+- `pull` 会校验远端 manifest 中每个文件的 SHA-256，覆盖本地文件后写入本地 `sync_version.json`，表示本机已应用该全局版本。
+- 如果远端 manifest 中缺少某个可同步文件，`pull` 会在备份后删除本地对应文件，使本机状态与远端版本一致。
+
+---
+
 ## 备份和迁移
 
 ### 备份
@@ -1023,5 +1074,10 @@ shasum -a 256 -c <checksum> team-config.json
 | `AGENT2SSH_LOG` | daemon | `info` | daemon `tracing` 的 `EnvFilter` 级别（如 `debug`、`agent2ssh=debug,info`）。 |
 | `AGENT2SSH_LOG_FORMAT` | daemon | `text` | daemon 控制台日志格式：`text` 或 `json`。 |
 | `AGENT2SSH_BRIDGE_DEPS` | daemon | 关闭（仅转 `agent2ssh*`） | 是否把依赖层（hyper/reqwest/ssh2/…）的 `WARN`/`ERROR` 也桥接进 `app.log`：`1`/`true`/`all` 用内置传输层前缀集，逗号分隔则自定义前缀，未设/`0`/`false` 关闭。依赖层事件不触发 error 告警（防回环），仅落盘排查传输问题用。 |
+| `AGENT2SSH_MASTER_PASSWORD` | CLI / MCP / daemon | 无 | 解锁 App 自建加密凭据库（`secrets.enc`，Argon2id + AES-256-GCM）的主密码（K1）。设置后这些无界面 surface 才能解密密码型主机的 SSH 密码；未设置时密码型主机不可用（密钥型/agent 认证不受影响）。桌面端改用启动解锁对话框，不读此变量。首次写入凭据时若已设此变量会用它初始化库。 |
+| `AGENT2SSH_SECRETS_BACKEND` | 全部 | 生产 `encrypted`，测试 `memory` | 凭据库后端：`encrypted` 用真实加密库，`memory` 用进程内内存库（仅测试/无界面隔离用，重启即丢）。一般无需设置。 |
+| `AGENT2SSH_WEBDAV_URL` | CLI | 无 | WebDAV 同步 collection URL。也可写入 `webdav.toml` 或用 `agent2ssh webdav * --url` 传入。 |
+| `AGENT2SSH_WEBDAV_USERNAME` | CLI | 无 | WebDAV Basic Auth 用户名。 |
+| `AGENT2SSH_WEBDAV_PASSWORD` | CLI | 无 | WebDAV Basic Auth 密码。也可在 `webdav.toml` 中用 `password_env` 指向自定义环境变量。 |
 
 > 说明：`remotes.toml` 与 `daemon_tokens.toml` 中的 `token_env` 字段引用的是**用户自定义**的环境变量名（如示例中的 `AGENT2SSH_PROD_TOKEN`），由你自行设置，不属于上表的内置变量。

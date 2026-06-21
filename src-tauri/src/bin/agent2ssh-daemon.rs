@@ -3534,6 +3534,22 @@ async fn main() -> anyhow::Result<()> {
     // stdout/stderr are not being captured (e.g. standalone runs).
     agent2ssh::install_panic_hook("daemon");
 
+    // K1: migrate any legacy plaintext passwords into the app-managed encrypted store (no-op once clean).
+    if let Err(e) = agent2ssh::migrate_plaintext_secrets() {
+        eprintln!("warning: secret migration skipped: {e}");
+    }
+
+    // K6: PTY sessions, port forwards, and in-flight SFTP transfers are
+    // process-local — a daemon restart drops them. Make that explicit at startup
+    // so operators (and the desktop reconnect logic) know prior sessions/forwards
+    // must be re-opened rather than silently assumed alive.
+    let _ = agent2ssh::append_diagnostic_log(
+        "info",
+        "daemon_startup",
+        "PTY sessions, port forwards, and in-flight SFTP transfers do not survive a daemon restart; re-open as needed",
+        None,
+    );
+
     // Forward error-level diagnostics to the notify webhook (opt-in: only fires
     // when "diagnostic_error" is in the configured webhook events). Spawned onto
     // the tokio runtime; skipped if called from a non-runtime thread.

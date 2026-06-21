@@ -18,9 +18,13 @@ pub mod playbook;
 pub mod policy;
 pub mod remote;
 pub mod risk_config;
+pub mod secrets;
 pub mod session;
+pub mod sftp_transfer;
 pub mod store;
+pub mod telemetry;
 pub mod types;
+pub mod webdav_sync;
 
 #[cfg(feature = "tauri")]
 pub mod tauri_commands;
@@ -98,10 +102,19 @@ pub use session::{
     session_close_core, session_list_core, session_open_core, session_read_core, session_write_core,
 };
 pub use store::{
-    compute_metrics_trend, config_dir, export_audit_csv, export_audit_jsonl, HostExecutionCount,
-    HourlyBucket, MetricsTrend, RiskDistribution, TrendPeriod,
+    compute_metrics_trend, config_dir, export_audit_csv, export_audit_jsonl,
+    migrate_plaintext_secrets, HostExecutionCount, HourlyBucket, MetricsTrend, RiskDistribution,
+    TrendPeriod,
+};
+pub use telemetry::{
+    load_telemetry_config, record_event, save_telemetry_config, telemetry_enabled, TelemetryConfig,
 };
 pub use types::*;
+pub use webdav_sync::{
+    collect_sync_files, create_sync_backup, load_local_sync_marker, webdav_pull, webdav_push,
+    webdav_status, WebDavSyncFile, WebDavSyncMarker, WebDavSyncOptions, WebDavSyncResult,
+    WebDavSyncStatus, SYNCABLE_FILES,
+};
 
 #[cfg(feature = "tauri")]
 pub use tauri_commands::run_tauri;

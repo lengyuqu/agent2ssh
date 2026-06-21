@@ -653,6 +653,10 @@ fn authenticate(session: &Session, host: &HostProfile, username: &str) -> Result
         .password
         .as_deref()
         .filter(|value| !value.trim().is_empty())
+        // K1: a bare SECRET_REF marker means the credential store is locked (no
+        // master password available); treat it as "no usable password" and fall
+        // through to key/agent auth rather than authenticating with the marker.
+        .filter(|value| !crate::secrets::is_secret_ref(value))
     {
         session.userauth_password(username, password)?;
         return Ok("password".into());

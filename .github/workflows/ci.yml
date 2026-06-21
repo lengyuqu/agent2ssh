@@ -268,11 +268,54 @@ jobs:
       - name: Frontend build
         run: npm run build
 
+      # K3: import the Apple Developer ID certificate into a temporary keychain so
+      # macOS bundles can be Developer ID-signed (a prerequisite for notarization).
+      # No-op when the secret is unset (e.g. fork PRs) so the workflow still runs.
+      - name: Import Apple code-signing certificate
+        if: matrix.os == 'macos-latest'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          if [ -z "$APPLE_CERTIFICATE" ]; then
+            echo "APPLE_CERTIFICATE not set — skipping signing import (ad-hoc build)."
+            exit 0
+          fi
+          KEYCHAIN=build.keychain
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 24)
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          echo "$APPLE_CERTIFICATE" | base64 --decode > certificate.p12
+          security import certificate.p12 -k "$KEYCHAIN" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain
+          rm -f certificate.p12
+
       - name: Tauri bundle
         run: npx @tauri-apps/cli build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
         env:
+          # Updater signing (signs the artifacts the in-app updater verifies).
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # macOS Developer ID signing + notarization. When these are empty the
+          # config's ad-hoc identity ("-") is used and notarization is skipped.
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Windows Authenticode signing (set bundle.windows.certificateThumbprint
+          # in tauri.conf.json, or use Azure Trusted Signing via these vars).
+          WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.WINDOWS_CERTIFICATE_THUMBPRINT }}
+
+      # K3: publish the updater manifest (latest.json) and signatures so the
+      # in-app updater endpoint can serve them.
+      - name: Upload updater manifest
+        if: matrix.os == 'macos-latest'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz.sig
 
       - name: Upload macOS bundle
         if: matrix.os == 'macos-latest'
@@ -296,3 +339,33 @@ jobs:
         with:
           files: |
             src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.exe*
+
+  # K4: real-SSH end-to-end against a containerized OpenSSH server. Runs on every
+  # push/PR (Linux runners ship Docker) to close the "runtime-unverified" gaps in
+  # the native transport: real exec, SFTP round-trip, recursive transfer (J4),
+  # and resume (K6).
+  real-ssh-e2e:
+    needs: contract-consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            src-tauri/target/
+          key: ${{ runner.os }}-e2e-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+
+      - name: Build release CLI
+        run: cargo build --release --no-default-features --bin agent2ssh
+        working-directory: src-tauri
+
+      - name: Run dockerized SSH E2E
+        run: scripts/e2e-docker.sh

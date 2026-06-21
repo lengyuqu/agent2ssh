@@ -287,6 +287,12 @@ pub fn source_from_env(default_source: &str) -> String {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
+    /// Schema version of the persisted `hosts.json`. Absent in legacy files
+    /// (defaults to 0); `migrate_config` upgrades older configs forward and the
+    /// save path stamps the current version. Kept first so it is visible at the
+    /// top of the file.
+    #[serde(default)]
+    pub schema_version: u32,
     #[serde(default = "default_host_groups")]
     pub groups: Vec<HostGroup>,
     #[serde(default)]
@@ -300,6 +306,14 @@ pub struct SftpUploadRequest {
     pub host: String,
     pub local_path: String,
     pub remote_path: String,
+    /// K6: resume an interrupted upload by appending from the remote file's
+    /// current length instead of re-sending from byte 0.
+    #[serde(default)]
+    pub resume: bool,
+    /// K6: opaque id so a caller can cancel this in-flight transfer via
+    /// `sftp_cancel`. Optional; uncancellable when absent.
+    #[serde(default)]
+    pub transfer_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -307,6 +321,14 @@ pub struct SftpDownloadRequest {
     pub host: String,
     pub remote_path: String,
     pub local_path: String,
+    /// K6: resume an interrupted download by appending from the local file's
+    /// current length instead of re-fetching from byte 0.
+    #[serde(default)]
+    pub resume: bool,
+    /// K6: opaque id so a caller can cancel this in-flight transfer via
+    /// `sftp_cancel`.
+    #[serde(default)]
+    pub transfer_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -388,4 +410,17 @@ pub struct ConnectionStatus {
     pub host: String,
     pub connected: bool,
     pub socket_path: Option<String>,
+    /// True when the last keepalive probe succeeded (K5). Distinct from
+    /// `connected`: a retained connection can be present-but-stale (TCP dropped)
+    /// while the supervisor works to re-establish it.
+    #[serde(default)]
+    pub healthy: bool,
+    /// True while the supervisor is actively trying to re-establish a dropped
+    /// connection (K5).
+    #[serde(default)]
+    pub reconnecting: bool,
+    /// Last keepalive/reconnect error, surfaced so the UI can explain an
+    /// unhealthy connection (K5).
+    #[serde(default)]
+    pub last_error: Option<String>,
 }

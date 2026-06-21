@@ -27,7 +27,10 @@ Remote hosts
 | `src-tauri/src/store.rs` | Host profile persistence and audit log storage under `~/.agent2ssh` |
 | `src-tauri/src/session.rs` | Persistent PTY sessions |
 | `src-tauri/src/forward.rs` | SSH port forward tunnel management |
-| `src-tauri/src/connection.rs` | Retained embedded SSH connection management and `~/.ssh/config` parser |
+| `src-tauri/src/connection.rs` | Retained embedded SSH connection management with keepalive/health/auto-reconnect supervisor (K5) and `~/.ssh/config` parser |
+| `src-tauri/src/secrets.rs` | App-managed encrypted credential store (K1): Argon2id master-password KDF + AES-256-GCM in `secrets.enc`; disk holds only a reference marker, no OS keychain |
+| `src-tauri/src/sftp_transfer.rs` | SFTP transfer cancellation registry + cancellable copy + resume-offset logic (K6) |
+| `src-tauri/src/telemetry.rs` | Opt-in, local-only crash/usage telemetry, off by default (K10) |
 | `src-tauri/src/approval.rs` | Approval request queue and response handling |
 | `src-tauri/src/policy.rs` | Unified policy-as-code loader for `policy.toml` / `policy.json` |
 | `src-tauri/src/risk_config.rs` | Risk rule compatibility layer for legacy `risk_rules.toml` |
