@@ -9,9 +9,11 @@ import { IconButton } from "./ui/icon-button";
 import { Input } from "./ui/input";
 import { cn } from "../lib/utils";
 
-type Props = Record<string, never>;
+type Props = {
+  onChanged?: () => void | Promise<void>;
+};
 
-export default function KeysPanel(_props: Props) {
+export default function KeysPanel({ onChanged }: Props) {
   const { t } = useI18n();
   const [keys, setKeys] = useState<SshKeyInfo[]>([]);
   const [showForm, setShowForm] = useState(false);
@@ -47,6 +49,7 @@ export default function KeysPanel(_props: Props) {
       setNewComment("");
       setShowForm(false);
       await refresh();
+      await onChanged?.();
     } catch (err) {
       setError(String(err));
       reportError("keys-panel", "generate key failed", err);
@@ -65,6 +68,7 @@ export default function KeysPanel(_props: Props) {
       setImportName("");
       setShowForm(false);
       await refresh();
+      await onChanged?.();
     } catch (err) {
       setError(String(err));
       reportError("keys-panel", "import key failed", err);
@@ -76,6 +80,7 @@ export default function KeysPanel(_props: Props) {
     try {
       await api.deleteKey(name);
       await refresh();
+      await onChanged?.();
     } catch (err) {
       setError(String(err));
       reportError("keys-panel", "delete key failed", err);

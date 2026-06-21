@@ -3,6 +3,7 @@ import {
   ArrowLeftRight,
   Bot,
   BookOpen,
+  Cloud,
   FolderOpen,
   HelpCircle,
   History,
@@ -12,9 +13,10 @@ import {
   Play,
   Server,
   Terminal,
+  X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { api } from "./api";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { api, reportError } from "./api";
 import AddHostForm from "./components/AddHostForm";
 import ApprovalDialog from "./components/ApprovalDialog";
 import AuditPanel from "./components/AuditPanel";
@@ -34,12 +36,25 @@ import TerminalPanel from "./components/TerminalPanel";
 import SecretsUnlock from "./components/SecretsUnlock";
 import SettingsMenu from "./components/SettingsMenu";
 import SetupWizard from "./components/SetupWizard";
+import SyncPanel from "./components/SyncPanel";
+import { Button } from "./components/ui/button";
+import { Dialog } from "./components/ui/dialog";
 import { useI18n } from "./i18n";
 import { cn } from "./lib/utils";
-import type { ApprovalRequest, AuditEntry, AuditFilter, ConnectionStatus, DaemonHealth, ExecutionGateStatus, HostGroup, HostProfile, ProxyProfile } from "./types";
+import type { ApprovalRequest, AuditEntry, AuditFilter, ConnectionStatus, DaemonHealth, ExecutionGateStatus, HostFingerprintStatus, HostGroup, HostProfile, ProxyProfile } from "./types";
 
 const APPROVAL_POLL_MS = 2000;
 const DAEMON_START_RECHECK_MS = 700;
+const WEBDAV_AUTO_SYNC_MS = 10 * 60 * 1000;
+
+type ConnectionProgress = {
+  host: string;
+  title: string;
+  message: string;
+  percent: number;
+  busy: boolean;
+  variant?: "active" | "success" | "error";
+};
 
 const MODULES = [
   { id: "hosts", label: "Host Management", icon: Server },
@@ -50,6 +65,7 @@ const MODULES = [
   { id: "tunnels", label: "Tunnels", icon: ArrowLeftRight },
   { id: "activity", label: "Activity", icon: Activity },
   { id: "mcp-agents", label: "MCP Agents", icon: Bot },
+  { id: "sync", label: "Sync", icon: Cloud },
   { id: "keys", label: "Keys", icon: Key },
   { id: "playbooks", label: "Playbooks", icon: BookOpen },
   { id: "audit", label: "Audit", icon: History },
@@ -80,6 +96,13 @@ export default function App() {
   const [daemonHealthCheckedAt, setDaemonHealthCheckedAt] = useState<number | null>(null);
   const [showWizard, setShowWizard] = useState(false);
   const [wizardDismissed, setWizardDismissed] = useState(false);
+  const [fingerprintPrompt, setFingerprintPrompt] = useState<{
+    host: string;
+    status: HostFingerprintStatus;
+  } | null>(null);
+  const [fingerprintBusy, setFingerprintBusy] = useState(false);
+  const [connectionProgress, setConnectionProgress] = useState<ConnectionProgress | null>(null);
+  const webDavSyncInFlight = useRef(false);
 
   const currentHost = useMemo(
     () => hosts.find((h) => h.name === selectedHost),
@@ -103,6 +126,40 @@ export default function App() {
     setProxies(proxyList);
     setAudit(auditList);
     if (!selectedHost && hostList.length > 0) setSelectedHost(hostList[0].name);
+  }
+
+  const runAutoWebDavSync = useCallback(async (reason: string) => {
+    if (webDavSyncInFlight.current) return;
+    webDavSyncInFlight.current = true;
+    try {
+      const config = await api.getWebDavSyncConfig();
+      if (!config.enabled || !config.url.trim() || !config.remotePath.trim()) {
+        return;
+      }
+      await api.pushWebDavSync();
+    } catch (err) {
+      reportError("webdav-auto-sync", "automatic webdav sync failed", err, { reason });
+    } finally {
+      webDavSyncInFlight.current = false;
+    }
+  }, []);
+
+  async function handleHostSaved() {
+    await refresh();
+    void runAutoWebDavSync("host_saved");
+  }
+
+  async function handleProxyChanged() {
+    await refresh();
+    void runAutoWebDavSync("proxy_changed");
+  }
+
+  function handleForwardChanged() {
+    void runAutoWebDavSync("forward_changed");
+  }
+
+  function handleKeyChanged() {
+    void runAutoWebDavSync("key_changed");
   }
 
   function groupIdFromName(name: string): string {
@@ -171,6 +228,13 @@ export default function App() {
       .then((status) => setSecretsLocked(status.initialized && !status.unlocked))
       .catch(() => setSecretsLocked(false));
   }, []);
+
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      void runAutoWebDavSync("interval");
+    }, WEBDAV_AUTO_SYNC_MS);
+    return () => window.clearInterval(id);
+  }, [runAutoWebDavSync]);
 
   // Show wizard when no hosts are configured and user hasn't dismissed it
   useEffect(() => {
@@ -324,13 +388,133 @@ export default function App() {
   const activeModuleMeta = MODULES.find((module) => module.id === activeModule) ?? MODULES[0];
   const ActiveModuleIcon = activeModuleMeta.icon;
 
+  function updateConnectionProgress(next: ConnectionProgress | null) {
+    setConnectionProgress(next);
+  }
+
+  function showConnectionProgress(
+    host: string,
+    message: string,
+    percent: number,
+    title = t("Connecting to {host}", { host })
+  ) {
+    updateConnectionProgress({
+      host,
+      title,
+      message,
+      percent,
+      busy: true,
+      variant: "active",
+    });
+  }
+
+  function completeConnectionProgress(host: string, message: string) {
+    updateConnectionProgress({
+      host,
+      title: t("Connection complete"),
+      message,
+      percent: 100,
+      busy: false,
+      variant: "success",
+    });
+    window.setTimeout(() => {
+      setConnectionProgress((current) =>
+        current?.host === host && current.variant === "success" ? null : current
+      );
+    }, 900);
+  }
+
+  function failConnectionProgress(host: string, message: string) {
+    updateConnectionProgress({
+      host,
+      title: t("Connection failed"),
+      message,
+      percent: 100,
+      busy: false,
+      variant: "error",
+    });
+  }
+
   async function handleConnect(name: string) {
     setError(null);
+    showConnectionProgress(name, t("Checking SSH fingerprint..."), 15);
     try {
+      const status = await api.getHostFingerprintStatus(name);
+      if (status.expectedFingerprintSha256 && !status.trusted) {
+        updateConnectionProgress(null);
+        setFingerprintPrompt({ host: name, status });
+        return;
+      }
+      showConnectionProgress(name, t("Opening SSH connection..."), 60);
       await api.sshConnect(name);
+      showConnectionProgress(name, t("Refreshing connection status..."), 90);
       await pollConnections();
+      completeConnectionProgress(name, t("Connected to {host}", { host: name }));
     } catch (err) {
-      setError(t("Failed to connect: {error}", { error: String(err) }));
+      const message = String(err);
+      if (message.includes("SSH host fingerprint changed")) {
+        try {
+          showConnectionProgress(name, t("Verifying changed SSH fingerprint..."), 35);
+          const status = await api.getHostFingerprintStatus(name);
+          if (status.trusted) {
+            showConnectionProgress(name, t("Opening SSH connection..."), 60);
+            await api.sshConnect(name);
+            showConnectionProgress(name, t("Refreshing connection status..."), 90);
+            await pollConnections();
+            completeConnectionProgress(name, t("Connected to {host}", { host: name }));
+            return;
+          }
+          updateConnectionProgress(null);
+          setFingerprintPrompt({ host: name, status });
+          return;
+        } catch (probeErr) {
+          const errorMessage = t("Failed to verify host fingerprint: {error}", {
+            error: String(probeErr),
+          });
+          failConnectionProgress(name, errorMessage);
+          setError(errorMessage);
+          return;
+        }
+      }
+      const errorMessage = t("Failed to connect: {error}", { error: message });
+      failConnectionProgress(name, errorMessage);
+      setError(errorMessage);
+    }
+  }
+
+  async function handleTrustFingerprintAndReconnect() {
+    if (!fingerprintPrompt) return;
+    setFingerprintBusy(true);
+    setError(null);
+    const progressHost = fingerprintPrompt.host;
+    showConnectionProgress(
+      progressHost,
+      t("Updating trusted SSH fingerprint..."),
+      30,
+      t("Updating SSH fingerprint")
+    );
+    try {
+      const { host, status } = fingerprintPrompt;
+      await api.trustHostFingerprint({
+        host,
+        expectedFingerprintSha256: status.expectedFingerprintSha256 ?? null,
+        hostKeyAlgorithm: status.hostKeyAlgorithm,
+        fingerprintSha256: status.fingerprintSha256,
+      });
+      showConnectionProgress(host, t("Reconnecting with updated fingerprint..."), 65);
+      setFingerprintPrompt(null);
+      await api.sshConnect(host);
+      showConnectionProgress(host, t("Refreshing connection status..."), 90);
+      await pollConnections();
+      completeConnectionProgress(host, t("Connected to {host}", { host }));
+    } catch (err) {
+      const errorMessage = t("Failed to update host fingerprint: {error}", {
+        error: String(err),
+      });
+      failConnectionProgress(progressHost, errorMessage);
+      setError(errorMessage);
+    } finally {
+      setFingerprintBusy(false);
     }
   }
 
@@ -392,6 +576,140 @@ export default function App() {
           onConfirm={() => handleApprove(currentApproval)}
           onCancel={() => handleReject(currentApproval)}
         />
+      )}
+
+      {fingerprintPrompt && (
+        <Dialog
+          onClose={fingerprintBusy ? undefined : () => setFingerprintPrompt(null)}
+          className="max-w-lg"
+        >
+          <div className="flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <h3 className="text-lg font-bold">{t("SSH host fingerprint changed")}</h3>
+              <p className="mt-1 text-sm text-muted-foreground">
+                {t(
+                  "The saved SSH fingerprint for this host does not match the server currently reached."
+                )}
+              </p>
+            </div>
+            <button
+              type="button"
+              className="rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
+              onClick={() => setFingerprintPrompt(null)}
+              disabled={fingerprintBusy}
+              title={t("Cancel")}
+            >
+              <X size={18} />
+            </button>
+          </div>
+          <div className="mt-5 grid gap-3 text-sm">
+            <div>
+              <div className="text-xs font-semibold uppercase text-muted-foreground">
+                {t("Host")}
+              </div>
+              <div className="mt-1 font-mono text-xs text-foreground">
+                {fingerprintPrompt.host} ({fingerprintPrompt.status.address})
+              </div>
+            </div>
+            <div>
+              <div className="text-xs font-semibold uppercase text-muted-foreground">
+                {t("Saved fingerprint")}
+              </div>
+              <div className="mt-1 break-all rounded-md border border-border bg-muted px-3 py-2 font-mono text-xs">
+                {fingerprintPrompt.status.expectedHostKeyAlgorithm ?? t("Unknown")}{" "}
+                {fingerprintPrompt.status.expectedFingerprintSha256 ?? t("Not recorded")}
+              </div>
+            </div>
+            <div>
+              <div className="text-xs font-semibold uppercase text-muted-foreground">
+                {t("Current fingerprint")}
+              </div>
+              <div className="mt-1 break-all rounded-md border border-warning/40 bg-warning/10 px-3 py-2 font-mono text-xs text-foreground">
+                {fingerprintPrompt.status.hostKeyAlgorithm}{" "}
+                {fingerprintPrompt.status.fingerprintSha256}
+              </div>
+            </div>
+          </div>
+          <div className="mt-5 flex justify-end gap-2">
+            <Button
+              variant="secondary"
+              onClick={() => setFingerprintPrompt(null)}
+              disabled={fingerprintBusy}
+            >
+              {t("Cancel")}
+            </Button>
+            <Button onClick={handleTrustFingerprintAndReconnect} disabled={fingerprintBusy}>
+              {fingerprintBusy ? t("Updating...") : t("Trust and reconnect")}
+            </Button>
+          </div>
+        </Dialog>
+      )}
+
+      {connectionProgress && (
+        <Dialog
+          onClose={
+            connectionProgress.busy ? undefined : () => setConnectionProgress(null)
+          }
+          className="max-w-md"
+        >
+          <div className="flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <h3 className="text-lg font-bold">{connectionProgress.title}</h3>
+              <p className="mt-1 break-words text-sm text-muted-foreground">
+                {connectionProgress.message}
+              </p>
+            </div>
+            <button
+              type="button"
+              className="rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
+              onClick={() => setConnectionProgress(null)}
+              disabled={connectionProgress.busy}
+              title={t("Close")}
+            >
+              <X size={18} />
+            </button>
+          </div>
+
+          <div className="mt-5 rounded-lg border border-border bg-muted/50 px-3 py-3">
+            <div className="flex items-center gap-2 text-sm font-medium">
+              {connectionProgress.busy && <Loader2 size={15} className="animate-spin" />}
+              <span className="truncate">{connectionProgress.host}</span>
+              <span className="ml-auto tabular-nums text-muted-foreground">
+                {Math.round(connectionProgress.percent)}%
+              </span>
+            </div>
+            <div className="mt-2 h-2 overflow-hidden rounded bg-border">
+              <div
+                className={cn(
+                  "h-full rounded transition-all duration-300",
+                  connectionProgress.variant === "error"
+                    ? "bg-destructive"
+                    : connectionProgress.variant === "success"
+                      ? "bg-success"
+                      : "bg-primary"
+                )}
+                style={{
+                  width: `${Math.max(5, Math.min(100, connectionProgress.percent))}%`,
+                }}
+              />
+            </div>
+            <div className="mt-2 text-xs leading-snug text-muted-foreground">
+              {connectionProgress.busy
+                ? t("Please wait. The app is still responsive while SSH connects.")
+                : connectionProgress.variant === "success"
+                  ? t("Connection status updated.")
+                  : t("You can close this dialog and retry from Host Management.")}
+            </div>
+          </div>
+
+          {!connectionProgress.busy && (
+            <div className="mt-5 flex justify-end">
+              <Button variant="secondary" onClick={() => setConnectionProgress(null)}>
+                {t("Close")}
+              </Button>
+            </div>
+          )}
+        </Dialog>
       )}
 
       <aside className="flex shrink-0 flex-col gap-5 bg-sidebar p-5 text-sidebar-foreground lg:w-[280px] max-lg:w-full">
@@ -535,13 +853,13 @@ export default function App() {
                 initialGroup={selectedGroup}
                 editingHost={editingHost}
                 onCancelEdit={() => setEditingHost(null)}
-                onSaved={refresh}
+                onSaved={handleHostSaved}
               />
             </div>
           )}
 
           {activeModule === "proxies" && (
-            <ProxyPanel proxies={proxies} hosts={hosts} onChanged={refresh} />
+            <ProxyPanel proxies={proxies} hosts={hosts} onChanged={handleProxyChanged} />
           )}
 
           {activeModule === "terminal" && (
@@ -559,13 +877,21 @@ export default function App() {
             <SFTPPanel hosts={hosts} initialHost={selectedHost} />
           )}
 
-          {activeModule === "tunnels" && <ForwardPanel hosts={hosts} initialHost={selectedHost} />}
+          {activeModule === "tunnels" && (
+            <ForwardPanel
+              hosts={hosts}
+              initialHost={selectedHost}
+              onChanged={handleForwardChanged}
+            />
+          )}
 
           {activeModule === "activity" && <LiveActivityPanel audit={audit} />}
 
           {activeModule === "mcp-agents" && <McpAgentsPanel />}
 
-          {activeModule === "keys" && <KeysPanel />}
+          {activeModule === "sync" && <SyncPanel />}
+
+          {activeModule === "keys" && <KeysPanel onChanged={handleKeyChanged} />}
 
           {activeModule === "playbooks" && <PlaybooksPanel hosts={hosts} />}
 

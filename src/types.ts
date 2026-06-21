@@ -31,8 +31,31 @@
 // Rust: types.rs — RiskLevel (rename_all = "lowercase")
 export type RiskLevel = "low" | "medium" | "high" | "blocked";
 
+export type CloseWindowAction = "minimize_to_tray" | "quit_application";
+
+export type AppPreferences = {
+  closeWindowAction: CloseWindowAction;
+};
+
 // Rust: types.rs — HostProfile
 // Tags field uses #[serde(default)] so it may be absent (defaults to []).
+export type HostFingerprintStatus = {
+  host: string;
+  address: string;
+  hostKeyAlgorithm: string;
+  fingerprintSha256: string;
+  trusted: boolean;
+  expectedHostKeyAlgorithm?: string | null;
+  expectedFingerprintSha256?: string | null;
+};
+
+export type TrustHostFingerprintRequest = {
+  host: string;
+  expectedFingerprintSha256?: string | null;
+  hostKeyAlgorithm: string;
+  fingerprintSha256: string;
+};
+
 export type HostProfile = {
   name: string;
   host: string;
@@ -129,6 +152,45 @@ export type DaemonControlResult = {
   message: string;
 };
 
+export type CliPathStatus = {
+  cliDir: string;
+  cliPath: string;
+  mcpPath: string;
+  cliExists: boolean;
+  mcpExists: boolean;
+  inProcessPath: boolean;
+  inUserPath: boolean;
+  installed: boolean;
+  message: string;
+};
+
+export type WebDavSyncConfig = {
+  enabled: boolean;
+  url: string;
+  username?: string | null;
+  remotePath: string;
+  passwordConfigured: boolean;
+};
+
+export type WebDavSyncSaveRequest = {
+  enabled: boolean;
+  url: string;
+  username?: string | null;
+  password?: string | null;
+  remotePath: string;
+};
+
+export type WebDavSyncStatus = {
+  configured: boolean;
+  enabled: boolean;
+  lastAction?: string | null;
+  lastSuccess?: boolean | null;
+  lastMessage?: string | null;
+  lastSyncAt?: string | null;
+  lastUploadedBytes?: number | null;
+  lastRemotePath?: string | null;
+};
+
 export type DiagnosticLogEntry = {
   id: string;
   ts: string;
@@ -157,6 +219,14 @@ export type McpAgentConfigureResult = {
   backup_path?: string | null;
   command: string;
   source: string;
+  message: string;
+};
+
+export type McpAgentUninstallResult = {
+  id: string;
+  config_path: string;
+  backup_path?: string | null;
+  removed: boolean;
   message: string;
 };
 

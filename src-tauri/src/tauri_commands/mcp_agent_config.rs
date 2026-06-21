@@ -42,6 +42,15 @@ pub struct McpAgentConfigureResult {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct McpAgentUninstallResult {
+    pub id: String,
+    pub config_path: String,
+    pub backup_path: Option<String>,
+    pub removed: bool,
+    pub message: String,
+}
+
 fn home_path(relative: &str) -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -356,6 +365,29 @@ fn configure_json(path: &Path, command: &str, source: &str) -> Result<(), String
     std::fs::write(path, format!("{raw}\n")).map_err(|e| e.to_string())
 }
 
+fn uninstall_json(path: &Path) -> Result<bool, String> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let raw = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let mut value: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+    let Some(root) = value.as_object_mut() else {
+        return Err("config root must be a JSON object".into());
+    };
+    let Some(servers) = root.get_mut("mcpServers") else {
+        return Ok(false);
+    };
+    let Some(servers) = servers.as_object_mut() else {
+        return Err("mcpServers must be a JSON object".into());
+    };
+    let removed = servers.remove("agent2ssh").is_some();
+    if removed {
+        let raw = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
+        std::fs::write(path, format!("{raw}\n")).map_err(|e| e.to_string())?;
+    }
+    Ok(removed)
+}
+
 fn table_mut<'a>(
     table: &'a mut toml::map::Map<String, toml::Value>,
     key: &str,
@@ -392,6 +424,29 @@ fn configure_toml(path: &Path, command: &str, source: &str) -> Result<(), String
     }
     let raw = toml::to_string_pretty(&value).map_err(|e| e.to_string())?;
     std::fs::write(path, raw).map_err(|e| e.to_string())
+}
+
+fn uninstall_toml(path: &Path) -> Result<bool, String> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let raw = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let mut value: toml::Value = toml::from_str(&raw).map_err(|e| e.to_string())?;
+    let Some(root) = value.as_table_mut() else {
+        return Err("config root must be a TOML table".into());
+    };
+    let Some(servers) = root.get_mut("mcp_servers") else {
+        return Ok(false);
+    };
+    let Some(servers) = servers.as_table_mut() else {
+        return Err("mcp_servers must be a TOML table".into());
+    };
+    let removed = servers.remove("agent2ssh").is_some();
+    if removed {
+        let raw = toml::to_string_pretty(&value).map_err(|e| e.to_string())?;
+        std::fs::write(path, raw).map_err(|e| e.to_string())?;
+    }
+    Ok(removed)
 }
 
 #[tauri::command]
@@ -457,5 +512,33 @@ pub fn configure_mcp_agent(agent_id: String) -> Result<McpAgentConfigureResult, 
             "{} MCP config updated with source '{}'. Restart the agent client to load agent2ssh.",
             candidate.name, candidate.source
         ),
+    })
+}
+
+#[tauri::command]
+pub fn uninstall_mcp_agent(agent_id: String) -> Result<McpAgentUninstallResult, String> {
+    let candidate = mcp_agent_candidates()
+        .into_iter()
+        .find(|candidate| candidate.id == agent_id)
+        .ok_or_else(|| format!("unknown MCP agent: {agent_id}"))?;
+    let backup = backup_config(&candidate.config_path)?;
+    let removed = match candidate.format {
+        McpConfigFormat::Json => uninstall_json(&candidate.config_path)?,
+        McpConfigFormat::Toml => uninstall_toml(&candidate.config_path)?,
+    };
+    let message = if removed {
+        format!(
+            "{} MCP binding removed. Restart the agent client to release the old agent2ssh process.",
+            candidate.name
+        )
+    } else {
+        format!("{} MCP binding was not present.", candidate.name)
+    };
+    Ok(McpAgentUninstallResult {
+        id: candidate.id.to_string(),
+        config_path: candidate.config_path.display().to_string(),
+        backup_path: backup.map(|path| path.display().to_string()),
+        removed,
+        message,
     })
 }

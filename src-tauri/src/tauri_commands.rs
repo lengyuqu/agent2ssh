@@ -19,6 +19,9 @@ use crate::{
         export_diagnostic_bundle as export_diagnostic_bundle_core,
         list_diagnostic_logs as list_diagnostic_logs_core, DiagnosticLogEntry,
     },
+    embedded_ssh::{
+        get_host_fingerprint_status_core, trust_host_fingerprint_core, HostFingerprintStatus,
+    },
     execution_control::{
         append_rejected_exec_audit, authorize_command_with_approval, command_authorization_target,
         effective_command_risk, expand_exec_authorization_targets, CommandAuthorizationError,
@@ -35,7 +38,7 @@ use crate::{
         session_close_core, session_list_core, session_open_core, session_read_core,
         session_write_core,
     },
-    store::append_audit,
+    store::{append_audit, config_dir, lock_config_file, restrict_file_to_owner},
     types::{
         source_from_env, AuditEntry, AuditFilter, ConnectionStatus, ExecMultiResult, ExecRequest,
         ExecResult, ForwardDirection, ForwardRule, HostGroup, HostProfile, PingResult,
@@ -43,12 +46,13 @@ use crate::{
         SftpResult, SftpUploadRequest, WalkEntry,
     },
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
+    process::Command,
     sync::OnceLock,
     time::Instant,
 };
@@ -58,7 +62,8 @@ use uuid::Uuid;
 
 mod mcp_agent_config;
 pub use mcp_agent_config::{
-    configure_mcp_agent, list_mcp_agent_configs, McpAgentConfigStatus, McpAgentConfigureResult,
+    configure_mcp_agent, list_mcp_agent_configs, uninstall_mcp_agent, McpAgentConfigStatus,
+    McpAgentConfigureResult, McpAgentUninstallResult,
 };
 
 static DESKTOP_SESSION_INPUT_BUFFERS: OnceLock<Mutex<HashMap<Uuid, String>>> = OnceLock::new();
@@ -96,6 +101,20 @@ pub struct DaemonControlResult {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CliPathStatus {
+    pub cli_dir: String,
+    pub cli_path: String,
+    pub mcp_path: String,
+    pub cli_exists: bool,
+    pub mcp_exists: bool,
+    pub in_process_path: bool,
+    pub in_user_path: bool,
+    pub installed: bool,
+    pub message: String,
+}
+
 fn bundled_daemon_binary_path() -> Result<PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let dir = exe
@@ -109,6 +128,153 @@ fn bundled_daemon_binary_path() -> Result<PathBuf, String> {
         "daemon sidecar not found at {}",
         candidate.display()
     ))
+}
+
+fn bundled_cli_dir() -> Result<PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let dir = exe
+        .parent()
+        .ok_or_else(|| "failed to resolve current executable directory".to_string())?;
+    let cli = dir.join(format!("agent2ssh{}", std::env::consts::EXE_SUFFIX));
+    let mcp = dir.join(format!("agent2ssh-mcp{}", std::env::consts::EXE_SUFFIX));
+    if cli.exists() || mcp.exists() {
+        return Ok(dir.to_path_buf());
+    }
+    Err(format!(
+        "agent2ssh CLI binaries not found near {}",
+        exe.display()
+    ))
+}
+
+fn normalize_path_segment(path: &Path) -> String {
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    path.to_string_lossy()
+        .trim()
+        .trim_end_matches(['\\', '/'])
+        .to_ascii_lowercase()
+}
+
+fn path_contains_dir(raw_path: &str, dir: &Path) -> bool {
+    let expected = normalize_path_segment(dir);
+    raw_path
+        .split(';')
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .any(|segment| normalize_path_segment(Path::new(segment)) == expected)
+}
+
+fn current_process_path_contains(dir: &Path) -> bool {
+    std::env::var("PATH")
+        .map(|path| path_contains_dir(&path, dir))
+        .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn read_user_path_value() -> Result<String, String> {
+    let output = Command::new("reg.exe")
+        .args(["query", "HKCU\\Environment", "/v", "Path"])
+        .output()
+        .map_err(|e| format!("failed to query user PATH: {e}"))?;
+    if !output.status.success() {
+        return Ok(String::new());
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        let trimmed = line.trim_start();
+        if !trimmed
+            .get(..4)
+            .map(|prefix| prefix.eq_ignore_ascii_case("Path"))
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let mut parts = trimmed
+            .splitn(3, char::is_whitespace)
+            .filter(|part| !part.is_empty());
+        let _name = parts.next();
+        let value_type = parts.next();
+        let value = parts.next();
+        if matches!(value_type, Some("REG_SZ") | Some("REG_EXPAND_SZ")) {
+            return Ok(value.unwrap_or_default().trim().to_string());
+        }
+    }
+    Ok(String::new())
+}
+
+#[cfg(not(windows))]
+fn read_user_path_value() -> Result<String, String> {
+    Err("CLI PATH injection is currently implemented for Windows only".to_string())
+}
+
+#[cfg(windows)]
+fn write_user_path_value(path_value: &str) -> Result<(), String> {
+    let status = Command::new("reg.exe")
+        .args([
+            "add",
+            "HKCU\\Environment",
+            "/v",
+            "Path",
+            "/t",
+            "REG_EXPAND_SZ",
+            "/d",
+            path_value,
+            "/f",
+        ])
+        .status()
+        .map_err(|e| format!("failed to write user PATH: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("reg.exe failed to write user PATH: {status}"))
+    }
+}
+
+#[cfg(not(windows))]
+fn write_user_path_value(_path_value: &str) -> Result<(), String> {
+    Err("CLI PATH injection is currently implemented for Windows only".to_string())
+}
+
+fn append_user_path_dir(path_value: &str, dir: &Path) -> String {
+    let dir = dir.to_string_lossy();
+    let trimmed = path_value.trim().trim_end_matches(';');
+    if trimmed.is_empty() {
+        dir.to_string()
+    } else {
+        format!("{trimmed};{dir}")
+    }
+}
+
+fn remove_user_path_dir(path_value: &str, dir: &Path) -> String {
+    let expected = normalize_path_segment(dir);
+    path_value
+        .split(';')
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .filter(|segment| normalize_path_segment(Path::new(segment)) != expected)
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+fn cli_path_status_with_message(message: String) -> Result<CliPathStatus, String> {
+    let cli_dir = bundled_cli_dir()?;
+    let cli_path = cli_dir.join(format!("agent2ssh{}", std::env::consts::EXE_SUFFIX));
+    let mcp_path = cli_dir.join(format!("agent2ssh-mcp{}", std::env::consts::EXE_SUFFIX));
+    let user_path = read_user_path_value()?;
+    let in_user_path = path_contains_dir(&user_path, &cli_dir);
+    let in_process_path = current_process_path_contains(&cli_dir);
+    let cli_exists = cli_path.exists();
+    let mcp_exists = mcp_path.exists();
+    Ok(CliPathStatus {
+        cli_dir: cli_dir.display().to_string(),
+        cli_path: cli_path.display().to_string(),
+        mcp_path: mcp_path.display().to_string(),
+        cli_exists,
+        mcp_exists,
+        in_process_path,
+        in_user_path,
+        installed: cli_exists && mcp_exists && in_user_path,
+        message,
+    })
 }
 
 fn split_completed_session_commands(pending: &str, input: &str) -> (Vec<String>, String) {
@@ -1272,6 +1438,603 @@ pub fn quit_app(app: AppHandle) {
     app.exit(0);
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CloseWindowAction {
+    MinimizeToTray,
+    QuitApplication,
+}
+
+fn default_close_window_action() -> CloseWindowAction {
+    CloseWindowAction::MinimizeToTray
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppPreferences {
+    #[serde(default = "default_close_window_action")]
+    pub close_window_action: CloseWindowAction,
+}
+
+impl Default for AppPreferences {
+    fn default() -> Self {
+        Self {
+            close_window_action: default_close_window_action(),
+        }
+    }
+}
+
+fn app_preferences_path() -> Result<PathBuf, String> {
+    config_dir()
+        .map(|dir| dir.join("app_preferences.json"))
+        .map_err(|e| e.to_string())
+}
+
+fn load_app_preferences_core() -> AppPreferences {
+    let Ok(path) = app_preferences_path() else {
+        return AppPreferences::default();
+    };
+    let Ok(raw) = fs::read_to_string(path) else {
+        return AppPreferences::default();
+    };
+    serde_json::from_str(&raw).unwrap_or_default()
+}
+
+fn save_app_preferences_core(preferences: &AppPreferences) -> Result<(), String> {
+    let path = app_preferences_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let raw = serde_json::to_string_pretty(preferences).map_err(|e| e.to_string())?;
+    fs::write(path, raw).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_app_preferences() -> AppPreferences {
+    load_app_preferences_core()
+}
+
+#[tauri::command]
+pub fn set_app_preferences(preferences: AppPreferences) -> Result<AppPreferences, String> {
+    save_app_preferences_core(&preferences)?;
+    Ok(preferences)
+}
+
+#[tauri::command]
+pub fn get_cli_path_status() -> Result<CliPathStatus, String> {
+    cli_path_status_with_message("CLI PATH status loaded.".to_string())
+}
+
+#[tauri::command]
+pub fn install_cli_to_path() -> Result<CliPathStatus, String> {
+    let cli_dir = bundled_cli_dir()?;
+    let user_path = read_user_path_value()?;
+    if path_contains_dir(&user_path, &cli_dir) {
+        return cli_path_status_with_message("Agent2SSH CLI is already in user PATH.".to_string());
+    }
+    let next_path = append_user_path_dir(&user_path, &cli_dir);
+    write_user_path_value(&next_path)?;
+    cli_path_status_with_message(
+        "Agent2SSH CLI added to user PATH. Restart terminals or Codex sessions to pick it up."
+            .to_string(),
+    )
+}
+
+#[tauri::command]
+pub fn remove_cli_from_path() -> Result<CliPathStatus, String> {
+    let cli_dir = bundled_cli_dir()?;
+    let user_path = read_user_path_value()?;
+    if !path_contains_dir(&user_path, &cli_dir) {
+        return cli_path_status_with_message("Agent2SSH CLI is not in user PATH.".to_string());
+    }
+    let next_path = remove_user_path_dir(&user_path, &cli_dir);
+    write_user_path_value(&next_path)?;
+    cli_path_status_with_message(
+        "Agent2SSH CLI removed from user PATH. Restart terminals or Codex sessions to pick it up."
+            .to_string(),
+    )
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebDavSyncConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub url: String,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    #[serde(default = "default_webdav_remote_path")]
+    pub remote_path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebDavSyncConfigView {
+    pub enabled: bool,
+    pub url: String,
+    pub username: Option<String>,
+    pub remote_path: String,
+    pub password_configured: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebDavSyncSaveRequest {
+    pub enabled: bool,
+    pub url: String,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub remote_path: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebDavSyncStatus {
+    pub configured: bool,
+    pub enabled: bool,
+    pub last_action: Option<String>,
+    pub last_success: Option<bool>,
+    pub last_message: Option<String>,
+    pub last_sync_at: Option<String>,
+    pub last_uploaded_bytes: Option<u64>,
+    pub last_remote_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebDavSyncFile {
+    path: String,
+    content: String,
+    bytes: u64,
+}
+
+const WEBDAV_SYNC_FILES: &[&str] = &[
+    "hosts.json",
+    "known_hosts.json",
+    "playbooks.toml",
+    "risk_rules.toml",
+    "policy.toml",
+    "policy.json",
+    "execution_limits.toml",
+    "anomaly.toml",
+    "webhook.toml",
+    "app_preferences.json",
+];
+
+fn default_webdav_remote_path() -> String {
+    "agent2ssh/agent2ssh-sync.json".to_string()
+}
+
+impl Default for WebDavSyncConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            url: String::new(),
+            username: None,
+            password: None,
+            remote_path: default_webdav_remote_path(),
+        }
+    }
+}
+
+impl WebDavSyncConfig {
+    fn configured(&self) -> bool {
+        !self.url.trim().is_empty() && !self.remote_path.trim().is_empty()
+    }
+
+    fn view(&self) -> WebDavSyncConfigView {
+        WebDavSyncConfigView {
+            enabled: self.enabled,
+            url: self.url.clone(),
+            username: self.username.clone(),
+            remote_path: self.remote_path.clone(),
+            password_configured: self
+                .password
+                .as_deref()
+                .map(|value| !value.is_empty())
+                .unwrap_or(false),
+        }
+    }
+}
+
+impl WebDavSyncStatus {
+    fn from_config(config: &WebDavSyncConfig) -> Self {
+        Self {
+            configured: config.configured(),
+            enabled: config.enabled,
+            last_action: None,
+            last_success: None,
+            last_message: None,
+            last_sync_at: None,
+            last_uploaded_bytes: None,
+            last_remote_path: Some(config.remote_path.clone()),
+        }
+    }
+}
+
+fn webdav_sync_config_path() -> Result<PathBuf, String> {
+    config_dir()
+        .map(|dir| dir.join("webdav_sync.json"))
+        .map_err(|e| e.to_string())
+}
+
+fn webdav_sync_status_path() -> Result<PathBuf, String> {
+    config_dir()
+        .map(|dir| dir.join("webdav_sync_status.json"))
+        .map_err(|e| e.to_string())
+}
+
+fn normalize_optional_field(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn normalize_remote_path(value: &str) -> String {
+    let trimmed = value.trim().trim_matches('/').replace('\\', "/");
+    if trimmed.is_empty() {
+        default_webdav_remote_path()
+    } else {
+        trimmed
+    }
+}
+
+fn validate_remote_path(remote_path: &str) -> Result<(), String> {
+    if remote_path
+        .split('/')
+        .any(|segment| segment == "." || segment == "..")
+    {
+        return Err("WebDAV remote path cannot contain . or .. segments".to_string());
+    }
+    Ok(())
+}
+
+fn load_webdav_sync_config_core() -> WebDavSyncConfig {
+    let Ok(path) = webdav_sync_config_path() else {
+        return WebDavSyncConfig::default();
+    };
+    let Ok(raw) = fs::read_to_string(path) else {
+        return WebDavSyncConfig::default();
+    };
+    serde_json::from_str(&raw).unwrap_or_default()
+}
+
+fn save_webdav_sync_config_core(config: &WebDavSyncConfig) -> Result<(), String> {
+    let _guard = lock_config_file(".webdav_sync.lock").map_err(|e| e.to_string())?;
+    let path = webdav_sync_config_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let raw = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
+    fs::write(&path, raw).map_err(|e| e.to_string())?;
+    restrict_file_to_owner(&path).map_err(|e| e.to_string())
+}
+
+fn load_webdav_sync_status_core(config: &WebDavSyncConfig) -> WebDavSyncStatus {
+    let Ok(path) = webdav_sync_status_path() else {
+        return WebDavSyncStatus::from_config(config);
+    };
+    let Ok(raw) = fs::read_to_string(path) else {
+        return WebDavSyncStatus::from_config(config);
+    };
+    let mut status: WebDavSyncStatus =
+        serde_json::from_str(&raw).unwrap_or_else(|_| WebDavSyncStatus::from_config(config));
+    status.configured = config.configured();
+    status.enabled = config.enabled;
+    status
+}
+
+fn save_webdav_sync_status_core(status: &WebDavSyncStatus) -> Result<(), String> {
+    let _guard = lock_config_file(".webdav_sync_status.lock").map_err(|e| e.to_string())?;
+    let path = webdav_sync_status_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let raw = serde_json::to_string_pretty(status).map_err(|e| e.to_string())?;
+    fs::write(&path, raw).map_err(|e| e.to_string())?;
+    restrict_file_to_owner(&path).map_err(|e| e.to_string())
+}
+
+fn webdav_failure_status(
+    config: &WebDavSyncConfig,
+    action: &str,
+    message: String,
+) -> WebDavSyncStatus {
+    WebDavSyncStatus {
+        configured: config.configured(),
+        enabled: config.enabled,
+        last_action: Some(action.to_string()),
+        last_success: Some(false),
+        last_message: Some(message),
+        last_sync_at: Some(chrono::Utc::now().to_rfc3339()),
+        last_uploaded_bytes: None,
+        last_remote_path: Some(config.remote_path.clone()),
+    }
+}
+
+fn require_webdav_config(config: &WebDavSyncConfig, require_enabled: bool) -> Result<(), String> {
+    if require_enabled && !config.enabled {
+        return Err("WebDAV sync is disabled".to_string());
+    }
+    if config.url.trim().is_empty() {
+        return Err("WebDAV URL is required".to_string());
+    }
+    if config.remote_path.trim().is_empty() {
+        return Err("WebDAV remote path is required".to_string());
+    }
+    validate_remote_path(&config.remote_path)
+}
+
+fn webdav_base_url(config: &WebDavSyncConfig) -> Result<reqwest::Url, String> {
+    let mut raw = config.url.trim().trim_end_matches('/').to_string();
+    raw.push('/');
+    reqwest::Url::parse(&raw).map_err(|e| format!("invalid WebDAV URL: {e}"))
+}
+
+fn webdav_target_url(config: &WebDavSyncConfig) -> Result<reqwest::Url, String> {
+    let base = webdav_base_url(config)?;
+    base.join(config.remote_path.trim_start_matches('/'))
+        .map_err(|e| format!("invalid WebDAV remote path: {e}"))
+}
+
+fn webdav_parent_collections(
+    config: &WebDavSyncConfig,
+) -> Result<Vec<(String, reqwest::Url)>, String> {
+    let base = webdav_base_url(config)?;
+    let segments: Vec<&str> = config
+        .remote_path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    let mut collections = Vec::new();
+    if segments.len() <= 1 {
+        return Ok(collections);
+    }
+    for index in 0..(segments.len() - 1) {
+        let path = segments[..=index].join("/");
+        let url = base
+            .join(&format!("{path}/"))
+            .map_err(|e| format!("invalid WebDAV collection path: {e}"))?;
+        collections.push((path, url));
+    }
+    Ok(collections)
+}
+
+fn webdav_request_auth(
+    request: reqwest::RequestBuilder,
+    config: &WebDavSyncConfig,
+) -> reqwest::RequestBuilder {
+    if let Some(username) = config.username.as_deref() {
+        request.basic_auth(username, config.password.clone())
+    } else {
+        request
+    }
+}
+
+async fn ensure_webdav_collections(
+    client: &reqwest::Client,
+    config: &WebDavSyncConfig,
+) -> Result<(), String> {
+    let mkcol = reqwest::Method::from_bytes(b"MKCOL").map_err(|e| e.to_string())?;
+    for (path, url) in webdav_parent_collections(config)? {
+        let response = webdav_request_auth(client.request(mkcol.clone(), url.clone()), config)
+            .send()
+            .await
+            .map_err(|e| format!("failed to create WebDAV collection {path}: {e}"))?;
+        let status = response.status();
+        if status.is_success() || status.as_u16() == 405 {
+            continue;
+        }
+        return Err(format!(
+            "failed to create WebDAV collection {path}: HTTP {status}"
+        ));
+    }
+    Ok(())
+}
+
+async fn propfind_webdav_parent(
+    client: &reqwest::Client,
+    config: &WebDavSyncConfig,
+) -> Result<(), String> {
+    let propfind = reqwest::Method::from_bytes(b"PROPFIND").map_err(|e| e.to_string())?;
+    let url = webdav_parent_collections(config)?
+        .last()
+        .map(|(_, url)| url.clone())
+        .unwrap_or(webdav_base_url(config)?);
+    let response = webdav_request_auth(client.request(propfind, url.clone()), config)
+        .header("Depth", "0")
+        .send()
+        .await
+        .map_err(|e| format!("WebDAV test request failed: {e}"))?;
+    let status = response.status();
+    if status.is_success() {
+        Ok(())
+    } else {
+        Err(format!("WebDAV test failed: HTTP {status} at {url}"))
+    }
+}
+
+async fn build_webdav_sync_payload() -> Result<(Vec<u8>, usize), String> {
+    let dir = config_dir().map_err(|e| e.to_string())?;
+    let mut files = Vec::new();
+    for name in WEBDAV_SYNC_FILES {
+        let path = dir.join(name);
+        if !path.is_file() {
+            continue;
+        }
+        let content = fs::read_to_string(&path)
+            .map_err(|e| format!("failed to read sync file {name}: {e}"))?;
+        files.push(WebDavSyncFile {
+            path: (*name).to_string(),
+            bytes: content.len() as u64,
+            content,
+        });
+    }
+    let keys_dir = dir.join("keys");
+    if keys_dir.is_dir() {
+        for entry in fs::read_dir(&keys_dir).map_err(|e| format!("failed to read keys dir: {e}"))? {
+            let entry = entry.map_err(|e| format!("failed to read key entry: {e}"))?;
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if name.starts_with('.') {
+                continue;
+            }
+            let content = fs::read_to_string(&path)
+                .map_err(|e| format!("failed to read sync key file {name}: {e}"))?;
+            files.push(WebDavSyncFile {
+                path: format!("keys/{name}"),
+                bytes: content.len() as u64,
+                content,
+            });
+        }
+    }
+    let forwards = forward_list_core().await;
+    let content = serde_json::to_string_pretty(&forwards).map_err(|e| e.to_string())?;
+    files.push(WebDavSyncFile {
+        path: "active_forwards.json".to_string(),
+        bytes: content.len() as u64,
+        content,
+    });
+    if files.is_empty() {
+        return Err("no Agent2SSH configuration files are available to sync".to_string());
+    }
+    let file_count = files.len();
+    let payload = serde_json::json!({
+        "version": 1,
+        "exportedAt": chrono::Utc::now().to_rfc3339(),
+        "files": files,
+    });
+    let bytes = serde_json::to_vec_pretty(&payload).map_err(|e| e.to_string())?;
+    Ok((bytes, file_count))
+}
+
+async fn test_webdav_sync_inner(config: &WebDavSyncConfig) -> Result<WebDavSyncStatus, String> {
+    require_webdav_config(config, false)?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|e| e.to_string())?;
+    ensure_webdav_collections(&client, config).await?;
+    propfind_webdav_parent(&client, config).await?;
+    Ok(WebDavSyncStatus {
+        configured: config.configured(),
+        enabled: config.enabled,
+        last_action: Some("test".to_string()),
+        last_success: Some(true),
+        last_message: Some("WebDAV connection test succeeded.".to_string()),
+        last_sync_at: Some(chrono::Utc::now().to_rfc3339()),
+        last_uploaded_bytes: None,
+        last_remote_path: Some(config.remote_path.clone()),
+    })
+}
+
+async fn push_webdav_sync_inner(config: &WebDavSyncConfig) -> Result<WebDavSyncStatus, String> {
+    require_webdav_config(config, true)?;
+    let (payload, file_count) = build_webdav_sync_payload().await?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(45))
+        .build()
+        .map_err(|e| e.to_string())?;
+    ensure_webdav_collections(&client, config).await?;
+    let target_url = webdav_target_url(config)?;
+    let uploaded_bytes = payload.len() as u64;
+    let response = webdav_request_auth(client.put(target_url.clone()), config)
+        .header("Content-Type", "application/json")
+        .body(payload)
+        .send()
+        .await
+        .map_err(|e| format!("WebDAV upload failed: {e}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!(
+            "WebDAV upload failed: HTTP {status} at {target_url}"
+        ));
+    }
+    Ok(WebDavSyncStatus {
+        configured: config.configured(),
+        enabled: config.enabled,
+        last_action: Some("upload".to_string()),
+        last_success: Some(true),
+        last_message: Some(format!(
+            "Uploaded {file_count} configuration files to WebDAV."
+        )),
+        last_sync_at: Some(chrono::Utc::now().to_rfc3339()),
+        last_uploaded_bytes: Some(uploaded_bytes),
+        last_remote_path: Some(config.remote_path.clone()),
+    })
+}
+
+#[tauri::command]
+pub fn get_webdav_sync_config() -> WebDavSyncConfigView {
+    load_webdav_sync_config_core().view()
+}
+
+#[tauri::command]
+pub fn set_webdav_sync_config(
+    config: WebDavSyncSaveRequest,
+) -> Result<WebDavSyncConfigView, String> {
+    let existing = load_webdav_sync_config_core();
+    let password = match normalize_optional_field(config.password) {
+        Some(password) => Some(password),
+        None => existing.password,
+    };
+    let next = WebDavSyncConfig {
+        enabled: config.enabled,
+        url: config.url.trim().trim_end_matches('/').to_string(),
+        username: normalize_optional_field(config.username),
+        password,
+        remote_path: normalize_remote_path(&config.remote_path),
+    };
+    if next.enabled {
+        require_webdav_config(&next, false)?;
+    } else {
+        validate_remote_path(&next.remote_path)?;
+    }
+    save_webdav_sync_config_core(&next)?;
+    let mut status = load_webdav_sync_status_core(&next);
+    status.configured = next.configured();
+    status.enabled = next.enabled;
+    if status.last_remote_path.is_none() {
+        status.last_remote_path = Some(next.remote_path.clone());
+    }
+    let _ = save_webdav_sync_status_core(&status);
+    Ok(next.view())
+}
+
+#[tauri::command]
+pub fn get_webdav_sync_status() -> WebDavSyncStatus {
+    let config = load_webdav_sync_config_core();
+    load_webdav_sync_status_core(&config)
+}
+
+#[tauri::command]
+pub async fn test_webdav_sync() -> Result<WebDavSyncStatus, String> {
+    let config = load_webdav_sync_config_core();
+    let status = match test_webdav_sync_inner(&config).await {
+        Ok(status) => status,
+        Err(err) => webdav_failure_status(&config, "test", err),
+    };
+    save_webdav_sync_status_core(&status)?;
+    Ok(status)
+}
+
+#[tauri::command]
+pub async fn push_webdav_sync() -> Result<WebDavSyncStatus, String> {
+    let config = load_webdav_sync_config_core();
+    let status = match push_webdav_sync_inner(&config).await {
+        Ok(status) => status,
+        Err(err) => webdav_failure_status(&config, "upload", err),
+    };
+    save_webdav_sync_status_core(&status)?;
+    Ok(status)
+}
+
 const TRAY_ID: &str = "agent2ssh-tray";
 const TRAY_MENU_OPEN_ID: &str = "tray-open";
 const TRAY_MENU_QUIT_ID: &str = "tray-quit";
@@ -1508,6 +2271,32 @@ pub async fn ssh_disconnect(host: String) -> Result<(), String> {
 // ── Playbooks ────────────────────────────────────────────────────────────────
 
 #[tauri::command]
+pub fn get_host_fingerprint_status(host: String) -> Result<HostFingerprintStatus, String> {
+    get_host_fingerprint_status_core(&host, 30).map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrustHostFingerprintRequest {
+    pub host: String,
+    pub expected_fingerprint_sha256: Option<String>,
+    pub host_key_algorithm: String,
+    pub fingerprint_sha256: String,
+}
+
+#[tauri::command]
+pub fn trust_host_fingerprint(request: TrustHostFingerprintRequest) -> Result<(), String> {
+    trust_host_fingerprint_core(
+        &request.host,
+        request.expected_fingerprint_sha256.as_deref(),
+        &request.host_key_algorithm,
+        &request.fingerprint_sha256,
+        30,
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn list_playbooks() -> Result<Vec<Playbook>, String> {
     list_playbooks_core().map_err(|e| e.to_string())
 }
@@ -1587,6 +2376,9 @@ pub fn run_tauri() {
         eprintln!("warning: secret migration skipped: {e}");
     }
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            reveal_main_window(app);
+        }))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         // K3: in-app updater (signature-verified). Endpoints + pubkey come from
@@ -1599,9 +2391,16 @@ pub fn run_tauri() {
         })
         .on_window_event(|app, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.minimize();
+                match load_app_preferences_core().close_window_action {
+                    CloseWindowAction::MinimizeToTray => {
+                        api.prevent_close();
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.hide();
+                        }
+                    }
+                    CloseWindowAction::QuitApplication => {
+                        let _ = daemon_stop();
+                    }
                 }
             }
         })
@@ -1618,6 +2417,11 @@ pub fn run_tauri() {
             save_proxy,
             delete_proxy,
             import_ssh_config,
+            get_webdav_sync_config,
+            set_webdav_sync_config,
+            get_webdav_sync_status,
+            test_webdav_sync,
+            push_webdav_sync,
             // Execution
             classify_command_risk,
             classify_command_risk_for_host,
@@ -1656,9 +2460,15 @@ pub fn run_tauri() {
             daemon_stop,
             daemon_restart,
             quit_app,
+            get_app_preferences,
+            set_app_preferences,
+            get_cli_path_status,
+            install_cli_to_path,
+            remove_cli_from_path,
             set_tray_labels,
             mcp_agent_config::list_mcp_agent_configs,
             mcp_agent_config::configure_mcp_agent,
+            mcp_agent_config::uninstall_mcp_agent,
             // Diagnostics
             list_diagnostic_logs,
             write_diagnostic_log,
@@ -1680,6 +2490,8 @@ pub fn run_tauri() {
             secrets_status,
             secrets_unlock,
             secrets_change_password,
+            get_host_fingerprint_status,
+            trust_host_fingerprint,
             // Playbooks
             list_playbooks,
             save_playbook,

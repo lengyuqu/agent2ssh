@@ -1,4 +1,4 @@
-import { Bot, BrainCircuit, CheckCircle2, Clipboard, Code2, Globe, Laptop, PlugZap, RefreshCw, Send, ShieldAlert, Users, Wrench } from "lucide-react";
+import { Bot, BrainCircuit, CheckCircle2, Clipboard, Code2, Globe, Laptop, PlugZap, RefreshCw, Send, ShieldAlert, Trash2, Users, Wrench } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
@@ -10,7 +10,7 @@ import { Card } from "./ui/card";
 const chipCls = "max-w-full truncate rounded bg-muted px-1.5 py-1 text-xs text-muted-foreground";
 
 function agentIconFor(agent: McpAgentConfigStatus) {
-      switch (agent.id) {
+  switch (agent.id) {
     case "cursor":
       return Code2;
     case "codebuddy":
@@ -37,6 +37,7 @@ export default function McpAgentsPanel() {
   const [agents, setAgents] = useState<McpAgentConfigStatus[]>([]);
   const [loading, setLoading] = useState(false);
   const [configuring, setConfiguring] = useState<string | null>(null);
+  const [uninstalling, setUninstalling] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
@@ -77,6 +78,28 @@ export default function McpAgentsPanel() {
       reportError("mcp-agents-panel", "configure mcp agent failed", err, { agent: agent.id });
     } finally {
       setConfiguring(null);
+    }
+  }
+
+  async function uninstall(agent: McpAgentConfigStatus) {
+    const confirmed = window.confirm(
+      t("Remove the Agent2SSH MCP binding from {name}? Restart that agent client afterward.", {
+        name: agent.name,
+      })
+    );
+    if (!confirmed) return;
+    setUninstalling(agent.id);
+    setMessage(null);
+    setError(null);
+    try {
+      const result = await api.uninstallMcpAgent(agent.id);
+      setMessage(result.message);
+      await refresh();
+    } catch (err) {
+      setError(String(err));
+      reportError("mcp-agents-panel", "uninstall mcp agent failed", err, { agent: agent.id });
+    } finally {
+      setUninstalling(null);
     }
   }
 
@@ -122,6 +145,7 @@ export default function McpAgentsPanel() {
       <div className="grid gap-2.5">
         {agents.map((agent) => {
           const invalid = agent.status.startsWith("invalid_config");
+          const busy = configuring !== null || uninstalling !== null;
           return (
             <div
               key={agent.id}
@@ -176,6 +200,7 @@ export default function McpAgentsPanel() {
                   variant="secondary"
                   size="sm"
                   onClick={() => copyCommand(agent)}
+                  disabled={busy}
                   title={t("Copy MCP command")}
                 >
                   <Clipboard size={14} />
@@ -184,7 +209,7 @@ export default function McpAgentsPanel() {
                 <Button
                   size="sm"
                   onClick={() => configure(agent)}
-                  disabled={configuring !== null || invalid}
+                  disabled={busy || invalid}
                   title={agent.configured ? t("Update MCP config") : t("Configure MCP")}
                 >
                   {agent.configured ? <CheckCircle2 size={14} /> : <PlugZap size={14} />}
@@ -193,6 +218,16 @@ export default function McpAgentsPanel() {
                     : agent.configured
                       ? t("Update")
                       : t("Configure")}
+                </Button>
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  onClick={() => uninstall(agent)}
+                  disabled={busy || !agent.configured || invalid}
+                  title={t("Uninstall MCP binding")}
+                >
+                  <Trash2 size={14} />
+                  {uninstalling === agent.id ? t("Uninstalling...") : t("Uninstall")}
                 </Button>
               </div>
             </div>

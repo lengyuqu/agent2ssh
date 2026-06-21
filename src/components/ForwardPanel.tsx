@@ -16,9 +16,10 @@ const labelCls = "grid gap-1.5 text-sm font-medium text-foreground/90";
 type Props = {
   hosts: HostProfile[];
   initialHost?: string;
+  onChanged?: () => void | Promise<void>;
 };
 
-export default function ForwardPanel({ hosts, initialHost = "" }: Props) {
+export default function ForwardPanel({ hosts, initialHost = "", onChanged }: Props) {
   const { t } = useI18n();
   const [tunnelHost, setTunnelHost] = useState(initialHost);
   const [rules, setRules] = useState<ForwardRule[]>([]);
@@ -61,6 +62,7 @@ export default function ForwardPanel({ hosts, initialHost = "" }: Props) {
     try {
       await api.forwardAdd(tunnelHost, direction, bindPort, destinationHost, targetPort);
       await refresh();
+      await onChanged?.();
     } catch (err) {
       setError(String(err));
       reportError("forward-panel", "add forward failed", err, { host: tunnelHost, direction });
@@ -75,6 +77,7 @@ export default function ForwardPanel({ hosts, initialHost = "" }: Props) {
     try {
       await api.forwardRemove(id);
       await refresh();
+      await onChanged?.();
     } catch (err) {
       setError(String(err));
       reportError("forward-panel", "remove forward failed", err);

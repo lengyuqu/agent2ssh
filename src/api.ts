@@ -4,6 +4,8 @@ import type {
   AuditEntry,
   AuditFilter,
   AgentEvent,
+  AppPreferences,
+  CliPathStatus,
   ConnectionStatus,
   DaemonControlResult,
   DaemonHealth,
@@ -16,6 +18,7 @@ import type {
   ExecResult,
   ForwardDirection,
   ForwardRule,
+  HostFingerprintStatus,
   HostGroup,
   HostProfile,
   ImportResult,
@@ -23,6 +26,7 @@ import type {
   WalkEntry,
   McpAgentConfigureResult,
   McpAgentConfigStatus,
+  McpAgentUninstallResult,
   PingResult,
   Playbook,
   PlaybookRunResult,
@@ -34,6 +38,10 @@ import type {
   SftpResult,
   SshKeyInfo,
   TeamConfigExport,
+  TrustHostFingerprintRequest,
+  WebDavSyncConfig,
+  WebDavSyncSaveRequest,
+  WebDavSyncStatus,
   WebhookConfig,
 } from "./types";
 
@@ -123,6 +131,14 @@ export const api = {
   deleteProxy: (id: string) => invoke<boolean>("delete_proxy", { id }),
   importSshConfig: (path?: string) =>
     invoke<HostProfile[]>("import_ssh_config", { path: path ?? null }),
+
+  // WebDAV sync
+  getWebDavSyncConfig: () => invoke<WebDavSyncConfig>("get_webdav_sync_config"),
+  setWebDavSyncConfig: (config: WebDavSyncSaveRequest) =>
+    invoke<WebDavSyncConfig>("set_webdav_sync_config", { config }),
+  getWebDavSyncStatus: () => invoke<WebDavSyncStatus>("get_webdav_sync_status"),
+  testWebDavSync: () => invoke<WebDavSyncStatus>("test_webdav_sync"),
+  pushWebDavSync: () => invoke<WebDavSyncStatus>("push_webdav_sync"),
 
   // Risk classification
   classifyRisk: (command: string, host?: string | null) =>
@@ -372,6 +388,10 @@ export const api = {
   connectionStatus: () => invoke<ConnectionStatus[]>("connection_status"),
   sshConnect: (host: string) => invoke<void>("ssh_connect", { host }),
   sshDisconnect: (host: string) => invoke<void>("ssh_disconnect", { host }),
+  getHostFingerprintStatus: (host: string) =>
+    invoke<HostFingerprintStatus>("get_host_fingerprint_status", { host }),
+  trustHostFingerprint: (request: TrustHostFingerprintRequest) =>
+    invoke<void>("trust_host_fingerprint", { request }),
 
   // Webhook config
   getWebhookConfig: () => invoke<WebhookConfig>("get_webhook_config"),
@@ -425,6 +445,12 @@ export const api = {
   daemonStop: () => invoke<DaemonControlResult>("daemon_stop"),
   daemonRestart: () => invoke<DaemonControlResult>("daemon_restart"),
   quitApp: () => invoke<void>("quit_app"),
+  getAppPreferences: () => invoke<AppPreferences>("get_app_preferences"),
+  setAppPreferences: (preferences: AppPreferences) =>
+    invoke<AppPreferences>("set_app_preferences", { preferences }),
+  getCliPathStatus: () => invoke<CliPathStatus>("get_cli_path_status"),
+  installCliToPath: () => invoke<CliPathStatus>("install_cli_to_path"),
+  removeCliFromPath: () => invoke<CliPathStatus>("remove_cli_from_path"),
   setTrayLabels: (params: { openLabel: string; quitLabel: string; tooltip?: string | null }) =>
     invoke<void>("set_tray_labels", {
       openLabel: params.openLabel,
@@ -434,6 +460,8 @@ export const api = {
   listMcpAgentConfigs: () => invoke<McpAgentConfigStatus[]>("list_mcp_agent_configs"),
   configureMcpAgent: (agentId: string) =>
     invoke<McpAgentConfigureResult>("configure_mcp_agent", { agentId }),
+  uninstallMcpAgent: (agentId: string) =>
+    invoke<McpAgentUninstallResult>("uninstall_mcp_agent", { agentId }),
 
   pauseGate: async (reason?: string): Promise<ExecutionGateStatus> => {
     const token = await invoke<string>("get_daemon_token");
