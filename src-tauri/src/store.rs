@@ -3,8 +3,8 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File, OpenOptions},
-    io::Write,
-    path::PathBuf,
+    io::{Read, Seek, SeekFrom, Write},
+    path::{Path, PathBuf},
     sync::{Mutex, MutexGuard, OnceLock},
 };
 
@@ -881,7 +881,9 @@ pub fn list_audit_raw(filter: &AuditFilter) -> Result<Vec<AuditEntry>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let raw = fs::read_to_string(path).context("failed to read audit log")?;
+    if filter.limit == 0 {
+        return Ok(Vec::new());
+    }
 
     let since = filter
         .since
@@ -1001,12 +1003,12 @@ pub fn list_audit_raw(filter: &AuditFilter) -> Result<Vec<AuditEntry>> {
     // collect-all → reverse → truncate, but without parsing the whole file in
     // the common "recent N" case.
     let mut entries: Vec<AuditEntry> = Vec::new();
-    for line in raw.lines().rev() {
+    visit_lines_reverse(&path, |line| {
         if entries.len() >= filter.limit {
-            break;
+            return Ok(false);
         }
         let Ok(entry) = serde_json::from_str::<AuditEntry>(line) else {
-            continue;
+            return Ok(true);
         };
         // Entries are appended with `ts = Utc::now()`, so file order is
         // non-decreasing in time. Reading backward, once we pass `since` every
@@ -1015,14 +1017,59 @@ pub fn list_audit_raw(filter: &AuditFilter) -> Result<Vec<AuditEntry>> {
         // bound, so this only ever stops work earlier, never changes the result.
         if let Some(since) = since {
             if entry.ts < since {
-                break;
+                return Ok(false);
             }
         }
         if matches(&entry) {
             entries.push(entry);
         }
-    }
+        Ok(true)
+    })?;
     Ok(entries)
+}
+
+fn visit_lines_reverse(path: &Path, mut visit: impl FnMut(&str) -> Result<bool>) -> Result<()> {
+    const CHUNK_SIZE: u64 = 64 * 1024;
+
+    let mut file =
+        File::open(path).with_context(|| format!("failed to open audit log {}", path.display()))?;
+    let mut pos = file
+        .seek(SeekFrom::End(0))
+        .with_context(|| format!("failed to seek audit log {}", path.display()))?;
+    let mut carry: Vec<u8> = Vec::new();
+
+    while pos > 0 {
+        let read_len = CHUNK_SIZE.min(pos) as usize;
+        pos -= read_len as u64;
+        file.seek(SeekFrom::Start(pos))
+            .with_context(|| format!("failed to seek audit log {}", path.display()))?;
+        let mut buf = vec![0; read_len];
+        file.read_exact(&mut buf)
+            .with_context(|| format!("failed to read audit log {}", path.display()))?;
+        buf.extend_from_slice(&carry);
+
+        let mut end = buf.len();
+        while let Some(idx) = buf[..end].iter().rposition(|byte| *byte == b'\n') {
+            let line = &buf[idx + 1..end];
+            if !line.is_empty() {
+                let line = std::str::from_utf8(line)
+                    .with_context(|| format!("audit log is not valid UTF-8: {}", path.display()))?;
+                if !visit(line)? {
+                    return Ok(());
+                }
+            }
+            end = idx;
+        }
+        carry = buf[..end].to_vec();
+    }
+
+    if !carry.is_empty() {
+        let line = std::str::from_utf8(&carry)
+            .with_context(|| format!("audit log is not valid UTF-8: {}", path.display()))?;
+        let _ = visit(line)?;
+    }
+
+    Ok(())
 }
 
 /// Simple glob-style pattern matching supporting `*` (any sequence) and `?` (any single char).

@@ -47,7 +47,7 @@ The following were intentionally not implemented during this pass:
 - Remote daemon switching from the desktop Settings menu. Remote daemon operation already exists in CLI/API surfaces; adding it to Settings should wait for real multi-node dogfood.
 - Full metrics and doctor reports in Settings. The menu should remain an operator summary. Detailed diagnostics belong in CLI/Web Console unless repeated user feedback shows otherwise.
 
-Daemon lifecycle controls have been implemented for the bundled local sidecar. R1 still needs to validate behavior across packaged Windows and Linux builds, especially sidecar process lifetime and PID-file behavior.
+Daemon lifecycle controls have been implemented for the bundled local sidecar. R1 package validation has since been updated in `docs/plan.md`; Windows packaged behavior was confirmed by user testing on 2026-06-22. New platform differences should now be tracked as explicit bug reports rather than broad validation debt.
 
 ## Validation
 
@@ -61,6 +61,8 @@ npm run tauri:build
 
 The post-implementation regression was re-run on 2026-06-18. No test bugs were found. `npm run build` passed, `cargo test` passed with 161 unit tests, 27 CLI smoke tests, and 56 daemon integration tests, and `npm run tauri:build` produced the macOS `.app` and `.dmg` bundles.
 
+Follow-up validation on 2026-06-22 confirmed the current closure baseline: Windows runtime smoke was user-confirmed, frontend/backend performance work completed, desktop i18n static audit reported 442 checked keys with 0 missing translations and 0 placeholder mismatches, and `npm run tauri:build` regenerated the macOS `.app` and `.dmg` bundles.
+
 ## Next Recommendation
 
-The next research/development step should be R1 cross-platform desktop package validation. In particular, validate whether the Settings menu's daemon start/stop/restart actions behave consistently on Windows and Linux without breaking sidecar naming, process lifetime, PTY behavior, or app sandbox assumptions.
+No broad R5 follow-up remains. Cross-platform, performance, and desktop-control-plane follow-up should be limited to concrete bugs or regressions found during normal use.

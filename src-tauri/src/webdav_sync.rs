@@ -18,12 +18,11 @@ const BACKUP_DIR: &str = "backups";
 const REMOTE_FILES_DIR: &str = "files";
 
 /// Files that are safe and useful to move across machines. This intentionally
-/// excludes local daemon tokens, audit/log data, private SSH keys, and remote
-/// daemon token registries.
+/// excludes local SSH trust state, daemon tokens, audit/log data, private SSH
+/// keys, and remote daemon token registries.
 pub const SYNCABLE_FILES: &[&str] = &[
     "hosts.json",
     "secrets.enc",
-    "known_hosts.json",
     "policy.toml",
     "policy.json",
     "risk_rules.toml",
@@ -32,6 +31,8 @@ pub const SYNCABLE_FILES: &[&str] = &[
     "anomaly.toml",
     "playbooks.toml",
 ];
+
+const LEGACY_UNSYNCABLE_REMOTE_FILES: &[&str] = &["known_hosts.json"];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebDavSyncFile {
@@ -264,13 +265,19 @@ pub fn collect_sync_files() -> Result<Vec<WebDavSyncFile>> {
 }
 
 fn validate_remote_file(path: &str) -> Result<()> {
-    if SYNCABLE_FILES.iter().any(|item| *item == path) {
+    if SYNCABLE_FILES.iter().any(|item| *item == path) || is_legacy_unsyncable_remote_file(path) {
         Ok(())
     } else {
         Err(anyhow!(
             "remote marker contains unsupported sync file: {path}"
         ))
     }
+}
+
+fn is_legacy_unsyncable_remote_file(path: &str) -> bool {
+    LEGACY_UNSYNCABLE_REMOTE_FILES
+        .iter()
+        .any(|item| *item == path)
 }
 
 pub fn create_sync_backup() -> Result<PathBuf> {
@@ -437,16 +444,19 @@ pub async fn webdav_pull(options: WebDavSyncOptions) -> Result<WebDavSyncResult>
     for file in &remote_marker.files {
         validate_remote_file(&file.path)?;
     }
+    let applied_files: Vec<WebDavSyncFile> = remote_marker
+        .files
+        .iter()
+        .filter(|file| !is_legacy_unsyncable_remote_file(&file.path))
+        .cloned()
+        .collect();
 
     let backup = create_sync_backup()?;
     let dir = config_dir()?;
-    let remote_paths: HashSet<String> = remote_marker
-        .files
-        .iter()
-        .map(|file| file.path.clone())
-        .collect();
+    let remote_paths: HashSet<String> =
+        applied_files.iter().map(|file| file.path.clone()).collect();
 
-    for file in &remote_marker.files {
+    for file in &applied_files {
         let url = join_url(&join_url(&config.url, REMOTE_FILES_DIR), &file.path);
         let bytes = get_bytes(&client, &config, &url).await?;
         let sha256 = hash_bytes(&bytes);
@@ -483,6 +493,7 @@ pub async fn webdav_pull(options: WebDavSyncOptions) -> Result<WebDavSyncResult>
         sync_id: uuid::Uuid::new_v4().to_string(),
         updated_at: Utc::now(),
         app_version: env!("CARGO_PKG_VERSION").to_string(),
+        files: applied_files.clone(),
         ..remote_marker.clone()
     };
     let marker_path = write_local_marker(&local_marker)?;
@@ -491,7 +502,7 @@ pub async fn webdav_pull(options: WebDavSyncOptions) -> Result<WebDavSyncResult>
         direction: "pull".into(),
         global_version: remote_marker.global_version,
         sync_id: local_marker.sync_id,
-        files: remote_marker.files,
+        files: applied_files,
         backup_path: backup.display().to_string(),
         marker_path: marker_path.display().to_string(),
     })
@@ -517,6 +528,7 @@ mod tests {
         std::env::set_var("AGENT2SSH_CONFIG_DIR", &dir);
         fs::write(dir.join("hosts.json"), "{}").unwrap();
         fs::write(dir.join("secrets.enc"), "encrypted").unwrap();
+        fs::write(dir.join("known_hosts.json"), "{}").unwrap();
         fs::write(dir.join("daemon.token"), "local-token").unwrap();
         fs::write(dir.join("audit.jsonl"), "{}\n").unwrap();
         fs::write(dir.join("keys").join("id_ed25519"), "private-key").unwrap();
@@ -525,6 +537,7 @@ mod tests {
         let names: Vec<_> = files.iter().map(|file| file.path.as_str()).collect();
         assert!(names.contains(&"hosts.json"));
         assert!(names.contains(&"secrets.enc"));
+        assert!(!names.contains(&"known_hosts.json"));
         assert!(!names.contains(&"daemon.token"));
         assert!(!names.contains(&"audit.jsonl"));
         assert!(!names.contains(&"keys/id_ed25519"));
@@ -541,11 +554,13 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         std::env::set_var("AGENT2SSH_CONFIG_DIR", &dir);
         fs::write(dir.join("hosts.json"), "{}").unwrap();
+        fs::write(dir.join("known_hosts.json"), "{}").unwrap();
         fs::write(dir.join(SYNC_VERSION_FILE), "{}").unwrap();
         fs::write(dir.join("daemon.token"), "local-token").unwrap();
 
         let backup = create_sync_backup().unwrap();
         assert!(backup.join("hosts.json").exists());
+        assert!(!backup.join("known_hosts.json").exists());
         assert!(backup.join(SYNC_VERSION_FILE).exists());
         assert!(!backup.join("daemon.token").exists());
         assert!(backup.join("backup_manifest.json").exists());
@@ -561,5 +576,12 @@ mod tests {
         assert_eq!(next_global_version(Some(&remote), Some(&local)), 13);
         assert_eq!(next_global_version(None, Some(&local)), 8);
         assert_eq!(next_global_version(None, None), 1);
+    }
+
+    #[test]
+    fn remote_validation_allows_legacy_known_hosts_but_rejects_unknown_files() {
+        validate_remote_file("known_hosts.json").unwrap();
+        validate_remote_file("hosts.json").unwrap();
+        assert!(validate_remote_file("daemon.token").is_err());
     }
 }

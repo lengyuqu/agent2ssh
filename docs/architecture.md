@@ -176,7 +176,7 @@ Read-heavy config files (`anomaly.toml`, `execution_limits.toml`, `daemon_tokens
 
 ## Current Direction
 
-The original daemon, approval, risk configuration, web console, Live Activity, session takeover, and G-stage control-plane milestones are implemented. R5 confirmed the desktop Settings menu as the local operator surface for daemon health, daemon lifecycle control, gate recovery, and console handoff. The next phase is release/adoption closure, cross-platform validation, and broader end-to-end testing.
+The original daemon, approval, risk configuration, web console, Live Activity, session takeover, G-stage control-plane milestones, release/adoption closure, cross-platform validation, Windows runtime smoke, and the current frontend/backend performance pass are implemented. R5 confirmed the desktop Settings menu as the local operator surface for daemon health, daemon lifecycle control, gate recovery, and console handoff. The roadmap is currently closed; follow-up work should be limited to concrete bugs, performance regressions, or release operations found during normal use.
 
 ```text
 Desktop App (Windows / Linux / macOS)  →  local HTTP/WebSocket daemon

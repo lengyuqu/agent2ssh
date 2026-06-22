@@ -17,7 +17,7 @@ const RENDER_CAP_STEP = 200;
 
 type Props = {
   audit: AuditEntry[];
-  onRefresh: (filter?: AuditFilter) => void;
+  onRefresh: (filter?: AuditFilter) => void | Promise<void>;
 };
 
 export default function AuditPanel({ audit, onRefresh }: Props) {
@@ -29,6 +29,7 @@ export default function AuditPanel({ audit, onRefresh }: Props) {
   const [renderCap, setRenderCap] = useState(RENDER_CAP_STEP);
 
   function applyFilters() {
+    setRenderCap(RENDER_CAP_STEP);
     const filter: AuditFilter = {
       limit,
       host: hostFilter.trim() || null,
@@ -41,6 +42,7 @@ export default function AuditPanel({ audit, onRefresh }: Props) {
     setHostFilter("");
     setRiskFilter("");
     setLimit(50);
+    setRenderCap(RENDER_CAP_STEP);
     onRefresh();
   }
 

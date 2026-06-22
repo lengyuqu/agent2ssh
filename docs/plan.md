@@ -10,7 +10,7 @@ P0-P10 已全部完成。当前基线：
 - 安全能力：风险评分、统一 policy-as-code、审批队列、审批端点、桌面审批弹窗、敏感命令脱敏、execution gate、执行限额、异常检测
 - 运维能力：内置 SSH 连接保留、Webhook 通知、remote daemon registry、健康检查、指标、审计轮转
 - 生态能力：SSH key 管理、团队配置导入导出、MCP 客户端模板、插件/Skill 分发文档
-- 验收结果：148 单元测试 + 56 集成测试 + 26 CLI smoke 测试 = 230 测试全绿；daemon feature 下为 153 lib 单元测试 + 4 daemon 单元测试 + 56 集成测试 + 26 CLI smoke 测试全绿
+- 验收结果：当前本地回归包含 203 个 Rust lib 单测、29 个 CLI/MCP smoke 测试、57 个 daemon 集成测试，以及前端 `npm run build`、macOS `npm run tauri:build` 打包验证
 - MCP 工具：51 个，详见 [skills.md](skills.md)
 
 ## 协作规则
@@ -72,11 +72,14 @@ P0-P10 已全部完成。当前基线：
 | S7 | 桌面 Session 接管 | ✅ 已完成 | 高 | Codex |
 | S8 | Session 接管体验与安全 | ✅ 已完成 | 高 | Codex |
 | S9 | 0.1.1 发布前收口 | ✅ 已完成 | 高 | Codex |
-| R | 发布与本机安装验证 | 🟨 进行中 | 高 | Codex |
+| R | 发布与本机安装验证 | ✅ 已完成 | 高 | Codex |
 | G | 观察面升级为控制面 | ✅ 已完成 | 高 | Codex |
 | E | 生态与可靠性 | ✅ 已完成 | 中 | Codex |
 | O | 异常监听与鉴权/存储加固 | ✅ 已完成 | 高 | Claude |
-| H | 架构债与加固后续 | 🟨 进行中 | 中 | Codex |
+| H | 架构债与加固后续 | ✅ 已完成 | 中 | Codex |
+| I | 配置面收口与运行时韧性 | ✅ 已完成 | 中 | Claude |
+| J | 性能与效率优化 | ✅ 已完成 | 中 | Claude |
+| K | 产品化与上线门槛 | ✅ 已完成 | 高 | Claude |
 
 ## 已完成阶段归档
 
@@ -94,7 +97,7 @@ P0-P10 已全部完成。当前基线：
 | P9 | 让长期运行的 daemon 更容易监控、诊断和维护 | 结构化日志、扩展 health、审计轮转、metrics、doctor/MCP doctor | daemon 运维诊断入口完成 |
 | P10 | 提升安装、接入、团队协作和 agent 生态可用性 | SetupWizard、MCP 客户端模板、团队配置导入导出、Skill 分发、checksum 脚本 | 产品化入口和生态接入文档完成 |
 
-## 后续功能路线图
+## 路线图归档与后续处理原则
 
 后续不再先堆底层能力，而是以真实使用场景驱动：每一阶段都先跑现有功能、记录 bug，再决定是否扩展功能。
 
@@ -105,10 +108,11 @@ P0-P10 已全部完成。当前基线：
 - 功能必须有验收场景：新增功能需要同时给出 CLI/API/MCP 或 UI 至少一个可复现验收路径。
 - 安全默认保守：涉及批量执行、凭证、审批绕过、远程 daemon 的能力必须默认最小权限。
 
-当前下一步聚焦：
+当前状态：
 
 - G 阶段已完成：Live Activity 已从观察面升级为控制面，覆盖 execution gate、执行限额、policy dry-run 和异常检测。
-- R 阶段成为当前优先级：`v0.1.1` 发布动作已完成，下一步是跨平台真实安装验证和本机使用回归。
+- R/K 阶段已完成：`v0.1.1` 发布、跨平台包验证、Windows 真机测试和上线门槛项均已收口。
+- 前后端性能优化已完成到 J8；WebDAV 已排除本机 `known_hosts.json` 信任库同步，桌面国际化静态审计为 442 checked keys / 0 缺译 / 0 placeholder mismatch。当前路线图无剩余计划项。后续只按真实使用暴露的明确 bug、性能回归或发布运营事项另开任务，不再扩展新的大功能面。
 
 ## 真实测试服务器
 
@@ -313,13 +317,13 @@ P0-P10 已全部完成。当前基线：
 | S9-4 | ✅ 已完成 | 中 | Codex | 发布前报告 | 新增 `docs/s9-release-preflight-report.md`，记录版本状态、质量门槛和剩余发布动作 |
 | S9-5 | ✅ 已完成 | 中 | Codex | tag 状态确认 | 本地 `v0.1.1` tag 尚不存在；S9 不创建 tag，留给最终发布动作 |
 
-## 近期建议
+## 收口结论
 
-S1-S9 与 G 阶段已完成，0.1.1 处于发布就绪状态，Live Activity 已从观察面升级为控制面。O 阶段（异常监听与鉴权/存储加固）已完成。下一步聚焦：
+S1-S9、G、O、R、H、I、J、K 阶段已完成，0.1.1 发布、Windows 真机验证和前后端性能收口均已完成。当前无剩余路线图计划：
 
-1. R 阶段（当前优先级）：完成跨平台真实安装验证和本机使用回归。
-2. E 阶段已完成；后续仅在真实本机使用暴露问题时追加 E4+。
-3. H 阶段（按收益穿插）：承接 O 的加固后续——鉴权 handler 迁移、巨型文件拆分、MCP schema 派发、跨进程错误聚合、通用脱敏等架构债；安全/数据完整性项优先。
+1. 前端/后端只在真实使用中发现明确性能回归或 bug 时追加任务。
+2. E 阶段已完成；生态/可靠性后续仅按真实本机使用暴露的问题追加 E4+。
+3. 平台差异不再作为宽泛验证债处理，只按明确 bug 进入修复队列。
 
 ## 安全可视化后续
 
@@ -350,8 +354,8 @@ Agent2SSH 的护城河不是"又一个 SSH 客户端"，而是"**AI agent 在本
 
 ```
 S9(0.1.1 已收口)
-   ├─ R 发布与本机安装验证 ← 当前优先级
-   ├─ H 架构债与加固后续   ← 按收益穿插
+   ├─ R 发布与本机安装验证 ← 已完成
+   ├─ H 架构债与加固后续   ← 已完成
    └─ G 观察面→控制面      ← 已完成，后续按本机使用反馈迭代
    E 生态与可靠性           ← 已完成，后续仅追加明确回归项
 ```
@@ -378,7 +382,7 @@ S9(0.1.1 已收口)
 
 | 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
 |------|------|--------|--------|------|----------|
-| R1 | ✅ 已完成 | 高 | Codex | 跨平台桌面包真实验证 | release CI 已生成 macOS/Linux/Windows 桌面包；macOS 本机重新打包生成 `.app` 和 `.dmg`；本机回归覆盖内置 SSH exec/SFTP/PTY/forward 基线，平台差异记录进入后续明确 bug 队列 |
+| R1 | ✅ 已完成 | 高 | Codex | 跨平台桌面包真实验证 | release CI 已生成 macOS/Linux/Windows 桌面包；macOS 本机重新打包生成 `.app` 和 `.dmg`；本机回归覆盖内置 SSH exec/SFTP/PTY/forward 基线；Windows 真机测试已于 2026-06-22 由用户确认完成，平台差异后续只按明确 bug 队列处理 |
 | R2 | ✅ 已完成 | 高 | Codex | 完成 0.1.1 发布动作 | `v0.1.1` tag 已推送到 GitHub/git233；release CI run `27638444133` 通过并上传 CLI tarballs、checksums、macOS/Linux/Windows 桌面包；`scripts/agent2ssh.rb` 已回填 macOS arm64、macOS x86_64、Linux x86_64 sha256；发布 tarball checksum 校验通过；使用 macOS arm64 release tarball 跑通 `scripts/verify-install.sh`（7 passed, 0 failed） |
 | R3 | ✅ 已完成 | 中 | Codex | 本机接入剧本与反馈入口 | 新增 `docs/guides/external-user-10min.md`，覆盖 CLI host import/add、低风险 exec 验证、Codex/Claude-style MCP 配置、反馈脱敏；新增 GitHub bug/adoption issue 模板；明确 `v0.1.1` 默认无自动遥测，匿名反馈为手动 opt-in，未来运行时遥测必须默认关闭且不采集命令/主机/输出/凭据 |
 | R5 | ✅ 已完成 | 中 | Codex | 桌面控制面调研 | 确认 Settings menu 适合作为本地 operator surface；已落地 daemon health、daemon start/stop/restart、setup wizard daemon start、execution gate、Web Console URL 控制闭环；2026-06-18 回归复测通过 `npm run build`、`cargo test`、`npm run tauri:build`；详见 `docs/reports/r5-desktop-control-plane-research-report.md` |
@@ -390,7 +394,7 @@ S9(0.1.1 已收口)
 | 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
 |------|------|--------|--------|------|----------|
 | E1 | ✅ 已完成 | 中 | Codex | 多 agent 集成验证 | 新增 `scripts/e1-mcp-client-smoke.py` 和 `docs/reports/e1-multi-agent-integration-report.md`，用 MCP stdio 协议分别模拟 `codex`、`opencode`、`cursor`、`claude-code` source，验证 initialize、51 工具枚举和 `ssh_risk_check` blocked 判定；真实客户端 UI 行为留给本机使用回归 |
-| E2 | ✅ 已完成 | 中 | Codex | 可靠性与规模 | 新增 `scripts/e2-scale-plan-smoke.py` 和 `docs/reports/e2-scale-reliability-report.md`，在隔离配置中生成 100 个 synthetic host 并跑通 `exec-multi --plan`；新增 100 host plan Rust 回归与 1000 event burst 事件总线回归；真实 100 台 SSH/多 daemon 压测留给后续外部环境 |
+| E2 | ✅ 已完成 | 中 | Codex | 可靠性与规模 | 新增 `scripts/e2-scale-plan-smoke.py` 和 `docs/reports/e2-scale-reliability-report.md`，在隔离配置中生成 100 个 synthetic host 并跑通 `exec-multi --plan`；新增 100 host plan Rust 回归与 1000 event burst 事件总线回归；真实 100 台 SSH/多 daemon 压测不再作为当前路线图剩余项，若后续具备外部压测环境则另立专项 |
 | E3 | ✅ 已完成 | 中 | Codex | 契约一致性接入 CI | `.github/workflows/ci.yml` 新增 `contract-consistency` job，在 PR、push 和 release 入口显式运行 S3 的 `docs/skills.md` vs MCP 工具、OpenAPI/daemon schema fixture、CLI help 参数一致性检查；`build` matrix 和 release-only `tauri-bundle` job 依赖该 job，契约漂移会先于跨平台构建/打包失败 |
 
 ## O · 异常监听与鉴权/存储加固
@@ -445,8 +449,11 @@ S9(0.1.1 已收口)
 | J1 | ✅ 已完成 | 中 | Claude | policy.toml 热路径缓存 | `load_policy_file` 接入 `ConfigCache`（按解析后的 `policy.toml`/`policy.json` 路径为键，无文件时回退 `policy.toml` 路径键，使"无 policy"探测也被记忆化），`save_policy_approval_policies` 写后 `invalidate`；"policy 只升级风险"语义不变。新增 `load_policy_file_reflects_saves_via_cache`（无→建→存三段验证写后不陈旧）。两套 check、两套 test 全绿 |
 | J2 | ✅ 已完成 | 中 | Claude | 审计日志按需读取 | `list_audit_raw` 改为反向（newest-first）扫描 + 早停：到达 `filter.limit` 即停（与旧"全解析→reverse→truncate"等价，但常见"最近 N 条"不再解析整文件）；并利用审计 append 即 `ts=now()` 的时间有序性，遇到 `ts<since` 即停（`compute_metrics_trend` 的 since 窗口因此也有界）。`matches` 仍复核所有条件，早停只提前停止、不改结果。新增 5000 行合成日志回归（limit/host/since 三种过滤断言结果精确一致）。两套 test 全绿 |
 | J3 | ✅ 已完成 | 中 | Claude | 前端大列表渲染优化 | SFTP 列表是真正无界的来源（远端目录可上万条），加 `viewCap`（每侧每次最多挂载 400 行 + "显示更多"，导航/刷新重置）；`AuditPanel` 加 `renderCap`（200 + 显示更多）兜住 limit 被调大的情况。`DiagnosticsPanel` 不存在（诊断日志在 `SettingsMenu`，后端硬上限 1000，已有界，未改）。`tsc --noEmit`、`npm run build` 通过 |
-| J4 | ✅ 已完成 | 中 | Claude | SFTP 目录递归传输 | 后端新增 `sftp_walk_core`（远端递归 readdir，跳过 symlink + 深度上限 64 防环路，parents-before-children）与 `local_walk`/`local_mkdir`（本地遍历/建目录，含 `local_walk_inner` 单测）。前端每行加勾选框（文件夹也可选/可拖），传输前 `buildTransferUnits` 把选中目录递归展开为「目标侧待建目录 + 逐文件单元」，先 `mkdir -p` 再逐文件 upload/download/exchange，三方向通吃；进度/字节统计/覆盖确认沿用。`local mkdir` 也接通（原"去文件管理器建"提示移除）。`tsc`/`npm build`/fmt/两套 check/三套 test（tauri lib 185）全绿。**注：远端递归 readdir 与勾选/拖拽为运行时行为，构建+本地遍历单测已过，真机 smoke 待用户验证** |
-| J5 | ✅ 已完成 | 低 | Claude | SFTP 真实字节进度 | `SftpResult` 新增 `bytes`（`#[serde(default)]`），upload/download core 从 `std::io::copy` 返回值取已传字节；exchange 取 `uploaded.bytes`。前端进度条改为：选区已知大小求和得 `bytesTotal`，逐文件累加 `bytesDone`，有总量时进度按字节推进并显示 `X / Y`，否则回退按文件个数。`tsc`/`npm build`/两套 check/两套 test 通过（字节值源自 `io::copy`，真机数值留待手测） |
+| J4 | ✅ 已完成 | 中 | Claude | SFTP 目录递归传输 | 后端新增 `sftp_walk_core`（远端递归 readdir，跳过 symlink + 深度上限 64 防环路，parents-before-children）与 `local_walk`/`local_mkdir`（本地遍历/建目录，含 `local_walk_inner` 单测）。前端每行加勾选框（文件夹也可选/可拖），传输前 `buildTransferUnits` 把选中目录递归展开为「目标侧待建目录 + 逐文件单元」，先 `mkdir -p` 再逐文件 upload/download/exchange，三方向通吃；进度/字节统计/覆盖确认沿用。`local mkdir` 也接通（原"去文件管理器建"提示移除）。`tsc`/`npm build`/fmt/两套 check/三套 test（tauri lib 185）全绿；运行时问题后续只按明确 bug 处理 |
+| J5 | ✅ 已完成 | 低 | Claude | SFTP 真实字节进度 | `SftpResult` 新增 `bytes`（`#[serde(default)]`），upload/download core 从 `std::io::copy` 返回值取已传字节；exchange 取 `uploaded.bytes`。前端进度条改为：选区已知大小求和得 `bytesTotal`，逐文件累加 `bytesDone`，有总量时进度按字节推进并显示 `X / Y`，否则回退按文件个数。`tsc`/`npm build`/两套 check/两套 test 通过；字节值以后续真实使用中的明确异常按 bug 处理 |
+| J6 | ✅ 已完成 | 中 | Codex | 前端 audit 按需刷新 | `App.refresh()` 不再在 host/proxy/group 刷新时同步读取 `audit.jsonl`；新增 `refreshAudit()` 只在进入 Audit 页、执行完成和审计手动刷新时调用。Live Activity 改为自维护最近 audit 补偿，不再订阅 App 级 audit state，减少无关模块切换和 host 编辑时的日志 I/O |
+| J7 | ✅ 已完成 | 中 | Codex | Live Activity 高频事件批处理 | daemon SSE 事件进入 100ms 前端队列后批量 `setEvents`，避免批量执行/事件 burst 时每条事件触发一次 React render；audit 补偿轮询从 3s 降到 10s，Activity 页面未挂载时不再产生补偿轮询 |
+| J8 | ✅ 已完成 | 高 | Codex | 后端审计倒序分块读取 | `list_audit_raw` 从整文件 `read_to_string` 改为 64KiB 倒序分块扫描；常见最近 N 条、since 窗口和 `limit=0` 查询不再把完整 `audit.jsonl` 读入内存。验证：`npm run build`、`cargo fmt --check`、`cargo test --no-default-features --lib`、`cargo test --no-default-features --test cli_smoke`、`cargo test --no-default-features --features daemon --test daemon_integration` 通过 |
 
 ## K · 产品化与上线门槛
 
@@ -454,15 +461,15 @@ S9(0.1.1 已收口)
 
 | 任务 | 状态 | 优先级 | 负责人 | 内容 | 验收标准 |
 |------|------|--------|--------|------|----------|
-| K1 | ✅ 已完成 | 高 | Claude | 凭据接入 App 自建加密存储 | **不走 OS 钥匙串**，改为产品自建：`secrets.rs` 用 Argon2id 从**主密码**派生 256-bit key、AES-256-GCM 加密落 `~/.agent2ssh/secrets.enc`（0600），磁盘无明文 key；`hosts.json` 只留 `$agent2ssh-secret$` 句柄。解锁后 key 缓存进程内（Argon2 仅解锁时跑一次）。解锁：桌面启动弹 `SecretsUnlock` 对话框（`secrets_status`/`secrets_unlock`/`secrets_change_password` 命令 + Settings 设/改主密码）；CLI/MCP/daemon 读 `AGENT2SSH_MASTER_PASSWORD`（CLI 另加 `secrets status`/`secrets set-password`）。锁定安全：`internalize` 锁定时保留句柄不清空（save 不会孤立密文）、`embedded_ssh` 把裸句柄当「无密码」跳过密码认证（密码型主机锁定时不可用，by design）；`externalize` 锁定遇真实明文时保留明文+告警而非中断无关 save。`migrate_plaintext_secrets` 仅解锁后迁移旧明文；删除主机/代理与改名清理句柄。`memory` 测试后端（cfg(test) 默认）使单测无需主密码。含单测（真实 Argon2+AES 初始化/解锁/错密码拒绝/落盘无明文、锁定返回 None+store 报错、句柄落盘、迁移、改名清孤儿）+ CLI 真跑冒烟（status 不创建文件、写时初始化、密文无明文）。**注：apple/windows 文件权限 ACL（K2）真机待验** |
-| K2 | ✅ 已完成 | 高 | Claude | Windows 文件权限加固 | `restrict_file_to_owner` 加 `#[cfg(windows)]` 分支：`icacls /inheritance:r /grant:r <user>:(F)` 去继承 + 仅当前用户 Full control，与 Unix `0600` 对齐（`daemon.token`/`keys/`/`hosts.json`）。**注：cfg(windows) 代码 macOS 无法编译校验，逻辑直白，真机冒烟待验** |
-| K3 | ✅ 已完成 | 高 | Claude | 代码签名/公证 + 自动更新 | `tauri-plugin-updater`（Rust 注册 + `@tauri-apps/plugin-updater`/`plugin-process` npm + `src/lib/updater.ts` 签名校验 check/download/install + Settings「检查更新/安装更新」）。`tauri.conf.json` 加 `createUpdaterArtifacts`、`macOS`（hardenedRuntime + `entitlements.plist`）、`windows`、`plugins.updater`（endpoints + pubkey 占位）。CI `tauri-bundle` 加 Apple 证书导入步骤 + notarization/Windows 签名环境变量。`updater:default` 入 capabilities。**注：真实签名/公证/灰度需证书+发布端，无法在本机跑通；pubkey 占位需替换** |
-| K4 | ✅ 已完成 | 高 | Claude | 真机 SSH E2E（容器化 sshd） | 新增 `scripts/e2e-docker.sh`：起 `linuxserver/openssh-server`（密钥认证，绕开 K1 密码凭据路径）跑真实 exec / SFTP 1MiB 往返字节比对 / mkdir+ls / J4 递归树往返 / K6 resume 续传；CI 加 `real-ssh-e2e` job（ubuntu）。`bash -n` 通过。**注：本机 docker daemon 未运行，脚本未实跑，CI 内运行** |
+| K1 | ✅ 已完成 | 高 | Claude | 凭据接入 App 自建加密存储 | **不走 OS 钥匙串**，改为产品自建：`secrets.rs` 用 Argon2id 从**主密码**派生 256-bit key、AES-256-GCM 加密落 `~/.agent2ssh/secrets.enc`（0600），磁盘无明文 key；`hosts.json` 只留 `$agent2ssh-secret$` 句柄。解锁后 key 缓存进程内（Argon2 仅解锁时跑一次）。解锁：桌面启动弹 `SecretsUnlock` 对话框（`secrets_status`/`secrets_unlock`/`secrets_change_password` 命令 + Settings 设/改主密码）；CLI/MCP/daemon 读 `AGENT2SSH_MASTER_PASSWORD`（CLI 另加 `secrets status`/`secrets set-password`）。锁定安全：`internalize` 锁定时保留句柄不清空（save 不会孤立密文）、`embedded_ssh` 把裸句柄当「无密码」跳过密码认证（密码型主机锁定时不可用，by design）；`externalize` 锁定遇真实明文时保留明文+告警而非中断无关 save。`migrate_plaintext_secrets` 仅解锁后迁移旧明文；删除主机/代理与改名清理句柄。`memory` 测试后端（cfg(test) 默认）使单测无需主密码。含单测（真实 Argon2+AES 初始化/解锁/错密码拒绝/落盘无明文、锁定返回 None+store 报错、句柄落盘、迁移、改名清孤儿）+ CLI 真跑冒烟（status 不创建文件、写时初始化、密文无明文）。Windows 文件权限 ACL 已随 K2 真机确认 |
+| K2 | ✅ 已完成 | 高 | Claude | Windows 文件权限加固 | `restrict_file_to_owner` 加 `#[cfg(windows)]` 分支：`icacls /inheritance:r /grant:r <user>:(F)` 去继承 + 仅当前用户 Full control，与 Unix `0600` 对齐（`daemon.token`/`keys/`/`hosts.json`）。Windows 真机冒烟已于 2026-06-22 由用户确认完成 |
+| K3 | ✅ 已完成 | 高 | Claude | 代码签名/公证 + 自动更新 | `tauri-plugin-updater`（Rust 注册 + `@tauri-apps/plugin-updater`/`plugin-process` npm + `src/lib/updater.ts` 签名校验 check/download/install + Settings「检查更新/安装更新」）。`tauri.conf.json` 加 `createUpdaterArtifacts`、`macOS`（hardenedRuntime + `entitlements.plist`）、`windows`、`plugins.updater`（endpoints + pubkey 占位）。CI `tauri-bundle` 加 Apple 证书导入步骤 + notarization/Windows 签名环境变量。`updater:default` 入 capabilities。证书、真实公证、灰度发布端与 pubkey 替换属于发布运营配置，不再作为当前路线图剩余项 |
+| K4 | ✅ 已完成 | 高 | Claude | 真机 SSH E2E（容器化 sshd） | 新增 `scripts/e2e-docker.sh`：起 `linuxserver/openssh-server`（密钥认证，绕开 K1 密码凭据路径）跑真实 exec / SFTP 1MiB 往返字节比对 / mkdir+ls / J4 递归树往返 / K6 resume 续传；CI 加 `real-ssh-e2e` job（ubuntu）。`bash -n` 通过；本地 Docker 环境差异不再作为当前路线图剩余项 |
 | K5 | ✅ 已完成 | 中 | Claude | 连接自愈 | `connection.rs` 重构：session 存 `Arc<StdMutex<Option<Session>>>` + `ConnectionHealth`；建连设 `set_keepalive(15s)`；全局 supervisor 任务每 30s `keepalive_send` 探活，失败标记 unhealthy 并按指数退避（5s→300s）`connect_embedded_ssh` 重连。`ConnectionStatus` 加 `healthy`/`reconnecting`/`last_error`（serde default 向后兼容），`HostList` 点颜色区分 健康/失效/重连。含 `backoff_grows_then_caps` 单测 |
 | K6 | ✅ 已完成 | 中 | Claude | SFTP 传输健壮性 | 新增 `sftp_transfer.rs`：取消注册表（transfer_id→AtomicBool）+ `copy_cancellable`（64K 分块、按块查取消）+ `resume_offset` 决策。upload/download core 接入 resume（upload 远端 stat 长度 + `open_mode(WRITE|APPEND)` + 本地 seek；download 本地长度 + 远端 seek + 本地 append）与取消（`transfer_id`）。请求类型加 `resume`/`transfer_id`（serde default）；CLI `--resume`；Tauri `sftp_cancel` + 前端每文件 transfer_id + 取消按钮。**可选并发**：前端 SFTPPanel 加「并行传输」开关（默认关，开后 worker 池并发上限 `PARALLEL_TRANSFERS=4`），取消按钮按 `activeTransferIds` 集合中止所有在途文件，首个失败置 `aborted` 停止取新文件。daemon 启动日志明确告知 session/forward/在途传输不跨重启。含 4 单测 |
-| K7 | ✅ 已完成 | 中 | Claude | 跨平台路径与行为打磨 | 前端 `localJoin` 识别 Windows 路径（含反斜杠/盘符）改用 `\` 拼接并转换子路径分隔符（`basenameOf` 本已双分隔符）。后端 `expand_local_path` 接受 `~\`。复核：daemon 信号 `shutdown_signal` 已 `cfg(unix)` 门控、loopback 已在 `remote.rs` 处理。**注：Windows 真机冒烟待验** |
+| K7 | ✅ 已完成 | 中 | Claude | 跨平台路径与行为打磨 | 前端 `localJoin` 识别 Windows 路径（含反斜杠/盘符）改用 `\` 拼接并转换子路径分隔符（`basenameOf` 本已双分隔符）。后端 `expand_local_path` 接受 `~\`。复核：daemon 信号 `shutdown_signal` 已 `cfg(unix)` 门控、loopback 已在 `remote.rs` 处理。Windows 真机冒烟已于 2026-06-22 由用户确认完成 |
 | K8 | ✅ 已完成 | 低 | Claude | 配置版本化/迁移/自动备份 | `AppConfig` 加 `schema_version`（`CONFIG_SCHEMA_VERSION=1`）；`migrate_config` 向前兼容（未来版本不降级）；`normalize_config` 写时盖章（取 max 不降级）；`save_config` 写前把旧文件复制为 `hosts.json.bak`（原子 rename 已有，bak 防坏内容）。含 4 单测（盖章/幂等/不降级/备份） |
 | K9 | ✅ 已完成 | 低 | Claude | 鉴权侧信道核查 | `token_matches` 改用 `subtle::ConstantTimeEq`（替换手写折叠，语义不变：空 expected 永不匹配）。复核：服务端唯一校验点即此处（scoped token 也经此），webhook 仅出站签名无入站校验。含 3 单测 |
-| K10 | ✅ 已完成 | 低 | Claude | 体验与运维打磨 | i18n 审计脚本确认 350 used / 0 缺译（含本阶段新增键已补 zh）。a11y：Settings 已 Escape 关闭、新增控件均为原生 `<button>`/`<label><input>`。新增 `telemetry.rs`：opt-in（默认关）本地遥测（`telemetry.toml` 开关 + `telemetry.jsonl` 2MiB 上限，无网络导出），panic hook 接入 crash 事件（关时 no-op）；Tauri get/set 命令 + Settings 复选框。含单测（默认关、开后落盘、可关） |
+| K10 | ✅ 已完成 | 低 | Claude | 体验与运维打磨 | i18n 审计脚本最新确认 442 checked keys / 0 缺译 / 0 placeholder mismatch（含 SSH fingerprint、WebDAV Sync、MCP 解绑、Sync 模块 label 和 ErrorBoundary 恢复页）。a11y：Settings 已 Escape 关闭、新增控件均为原生 `<button>`/`<label><input>`。新增 `telemetry.rs`：opt-in（默认关）本地遥测（`telemetry.toml` 开关 + `telemetry.jsonl` 2MiB 上限，无网络导出），panic hook 接入 crash 事件（关时 no-op）；Tauri get/set 命令 + Settings 复选框。含单测（默认关、开后落盘、可关） |
 
-> Phase K 收口（2026-06-21，Claude）：K1–K10 全部落地。验证：`cargo test --no-default-features` 全绿（lib 195 + daemon-feature 28 + integration daemon 57 + daemon bin 18）；CLI/MCP/daemon/tauri 四套 `cargo check` 通过；`cargo fmt --check` 干净；`npm run build`/`tsc --noEmit` 通过；i18n 0 缺译。**需真机/外部基建才能终验的部分**：K2 Windows ACL（cfg(windows) 未编译校验）、K3 真实签名+公证+灰度（需证书与发布端，pubkey 占位待换）、K4 容器化 E2E（本机 docker daemon 未运行，CI 内跑）、K7 Windows 路径冒烟。
+> Phase K 收口（2026-06-21，Claude）：K1–K10 全部落地。验证：`cargo test --no-default-features` 全绿（lib 195 + daemon-feature 28 + integration daemon 57 + daemon bin 18）；CLI/MCP/daemon/tauri 四套 `cargo check` 通过；`cargo fmt --check` 干净；`npm run build`/`tsc --noEmit` 通过；i18n 0 缺译。2026-06-22 用户补充确认 Windows 真机测试已完成，覆盖 Windows ACL 与路径冒烟。后续补充验证：Rust lib 203、CLI/MCP smoke 29、daemon integration 57、i18n 442 checked keys / 0 缺译 / 0 placeholder mismatch、`npm run tauri:build` 重新生成 `.app` 和 `.dmg`。K3/K4 涉及的证书、公证、灰度发布端和本地 Docker 环境差异已归类为发布运营或环境事项，不再作为路线图剩余计划。

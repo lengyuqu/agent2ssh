@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+- **WebDAV sync trust boundary**: `known_hosts.json` is no longer part of WebDAV sync payloads. Pulls from older remote manifests tolerate and skip legacy `known_hosts.json` entries so local SSH host-key trust state is not overwritten across machines.
+- **Desktop internationalization coverage**: Completed Chinese translations for the current desktop surface, including SSH fingerprint confirmation, connection progress, WebDAV Sync, MCP binding removal, the Sync module label, and the React error recovery screen.
+
+### Fixed
+- **Tauri bundle build**: Added the missing single-instance plugin dependency for default desktop builds and restored the fingerprint confirmation commands used by the desktop connection flow.
+- **Icon packaging**: Regenerated the v3 32px app icons as RGBA PNGs so Tauri bundle generation accepts the icon set.
+
+### Verified
+- `cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib`
+- `npm run build`
+- `git diff --check`
+- `npm run tauri:build`
+- Desktop i18n static audit: 442 checked keys, 0 missing translations, 0 placeholder mismatches
+
 ## [0.2.1] - 2026-06-21
 
 ### Added

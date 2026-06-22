@@ -114,19 +114,22 @@ export default function App() {
     [currentHost?.proxy_id, proxies]
   );
 
-  async function refresh(filter?: AuditFilter) {
-    const [hostList, groupList, proxyList, auditList] = await Promise.all([
+  async function refresh() {
+    const [hostList, groupList, proxyList] = await Promise.all([
       api.listHosts(),
       api.listHostGroups(),
       api.listProxies(),
-      api.listAudit(filter),
     ]);
     setHosts(hostList);
     setGroups(groupList.length > 0 ? groupList : [{ id: "default", name: "Default" }]);
     setProxies(proxyList);
-    setAudit(auditList);
     if (!selectedHost && hostList.length > 0) setSelectedHost(hostList[0].name);
   }
+
+  const refreshAudit = useCallback(async (filter?: AuditFilter) => {
+    const auditList = await api.listAudit(filter);
+    setAudit(auditList);
+  }, []);
 
   const runAutoWebDavSync = useCallback(async (reason: string) => {
     if (webDavSyncInFlight.current) return;
@@ -219,6 +222,11 @@ export default function App() {
       .catch((err) => setError(String(err)))
       .finally(() => setLoading(false));
   }, []);
+
+  useEffect(() => {
+    if (activeModule !== "audit") return;
+    refreshAudit().catch((err) => setError(String(err)));
+  }, [activeModule, refreshAudit]);
 
   // K1: gate the UI behind a master-password unlock when the credential store is
   // initialized but locked, so saved SSH passwords can be decrypted.
@@ -868,8 +876,8 @@ export default function App() {
 
           {activeModule === "execute" && (
             <div className="grid gap-[18px]">
-              <ExecPanel hosts={hosts} initialHost={selectedHost} onExecComplete={refresh} />
-              <MultiExecPanel hosts={hosts} onExecComplete={refresh} />
+              <ExecPanel hosts={hosts} initialHost={selectedHost} onExecComplete={refreshAudit} />
+              <MultiExecPanel hosts={hosts} onExecComplete={refreshAudit} />
             </div>
           )}
 
@@ -885,7 +893,7 @@ export default function App() {
             />
           )}
 
-          {activeModule === "activity" && <LiveActivityPanel audit={audit} />}
+          {activeModule === "activity" && <LiveActivityPanel />}
 
           {activeModule === "mcp-agents" && <McpAgentsPanel />}
 
@@ -895,7 +903,7 @@ export default function App() {
 
           {activeModule === "playbooks" && <PlaybooksPanel hosts={hosts} />}
 
-          {activeModule === "audit" && <AuditPanel audit={audit} onRefresh={refresh} />}
+          {activeModule === "audit" && <AuditPanel audit={audit} onRefresh={refreshAudit} />}
 
           {activeModule === "help" && <HelpPanel />}
         </section>

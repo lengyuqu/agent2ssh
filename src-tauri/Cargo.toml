@@ -32,7 +32,7 @@ required-features = ["daemon"]
 
 [features]
 default = ["tauri"]
-tauri = ["dep:tauri", "dep:tauri-plugin-shell", "dep:tauri-plugin-dialog", "dep:tauri-plugin-updater", "dep:tauri-build"]
+tauri = ["dep:tauri", "dep:tauri-plugin-shell", "dep:tauri-plugin-dialog", "dep:tauri-plugin-updater", "dep:tauri-plugin-single-instance", "dep:tauri-build"]
 daemon = ["dep:axum", "dep:tower", "dep:tower-http", "dep:futures-util", "dep:tracing", "dep:tracing-subscriber"]
 
 [build-dependencies]
@@ -50,6 +50,7 @@ tauri = { version = "2", features = ["tray-icon"], optional = true }
 tauri-plugin-shell = { version = "2", optional = true }
 tauri-plugin-dialog = { version = "2", optional = true }
 tauri-plugin-updater = { version = "2", optional = true }
+tauri-plugin-single-instance = { version = "2", optional = true }
 tokio = { version = "1", features = ["macros", "process", "rt-multi-thread", "time", "io-util", "sync", "signal"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 axum = { version = "0.7", features = ["ws"], optional = true }

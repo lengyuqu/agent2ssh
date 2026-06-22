@@ -40,6 +40,9 @@
   - MCP 工具名与 `docs/skills.md` 交叉比对（`mcp_tools_match_skills_md_documentation`）
   - `/exec`、`/exec-multi`、`/playbooks/run`、`/audit/export` 请求响应 schema fixture 检查
   - CLI `exec`、`exec-multi`、`playbook run` 的 `--help` 与文档参数对齐检查
+- [ ] 桌面国际化静态检查：
+  - 抽取前端 `t("...")` 字面量和动态模块 label，确认中文表无缺译
+  - 检查翻译前后 `{placeholder}` 集合一致
 - [ ] 确认 CI 的 `Contract consistency` job 通过；该 job 显式运行上述 S3 契约检查，且 `build` matrix 依赖它。
 - [ ] 如需完整本机验收，可运行：
   ```bash
@@ -124,5 +127,6 @@ sha256sum -c CHECKSUMS-SHA256.txt --ignore-missing
 
 - PTY session 首次读取可能返回 SSH 登录 banner/prompt，命令输出可能需要后续 read
 - `agent2ssh-daemon` 和 `agent2ssh-mcp` 运行即启动服务；安装验证脚本只检查二进制存在和可执行权限，避免阻塞在服务进程上
-- Windows 仅支持构建，运行时测试仅在 macOS 和 Debian Linux 验证过
+- Windows 运行时已由 2026-06-22 真机测试确认；后续平台差异按明确 bug 处理
 - Webhook 出站使用非阻塞 fire，远端慢时通知可能超时且无自动重试
+- macOS 本地打包未配置 Apple notarization 环境变量时会跳过公证；正式发布需配置 Apple ID/API key 与 Team ID 后再发布

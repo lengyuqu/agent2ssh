@@ -57,6 +57,18 @@ struct TrustedHostFingerprint {
     last_seen_unix: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostFingerprintStatus {
+    pub host: String,
+    pub address: String,
+    pub host_key_algorithm: String,
+    pub fingerprint_sha256: String,
+    pub trusted: bool,
+    pub expected_host_key_algorithm: Option<String>,
+    pub expected_fingerprint_sha256: Option<String>,
+}
+
 fn expand_tilde(path: &str) -> String {
     if path == "~" {
         return dirs::home_dir()
@@ -174,6 +186,113 @@ fn trust_or_verify_host_fingerprint(
             host_key_algorithm: host_key_algorithm.to_string(),
             fingerprint_sha256: fingerprint_sha256.to_string(),
             first_seen_unix: now,
+            last_seen_unix: now,
+        },
+    );
+    save_known_host_fingerprints_unlocked(&trusted)
+}
+
+fn resolve_host_profile(name: &str) -> Result<HostProfile> {
+    load_config()?
+        .hosts
+        .into_iter()
+        .find(|host| host.name == name)
+        .ok_or_else(|| anyhow!("unknown host profile: {name}"))
+}
+
+fn probe_host_fingerprint(host: &HostProfile, timeout_secs: u64) -> Result<(String, String)> {
+    let mut session = Session::new()?;
+    let tcp = connect_transport(host, timeout_secs, 0)?;
+    tcp.set_read_timeout(Some(Duration::from_secs(timeout_secs)))?;
+    tcp.set_write_timeout(Some(Duration::from_secs(timeout_secs)))?;
+    session.set_tcp_stream(tcp);
+    session.handshake()?;
+    match session.host_key() {
+        Some((_, kind)) => Ok((
+            host_key_algorithm(kind).to_string(),
+            fingerprint_sha256(&session)
+                .ok_or_else(|| anyhow!("failed to calculate SSH host fingerprint"))?,
+        )),
+        None => Err(anyhow!("SSH server did not provide a host key")),
+    }
+}
+
+pub fn get_host_fingerprint_status_core(
+    host_name: &str,
+    timeout_secs: u64,
+) -> Result<HostFingerprintStatus> {
+    let host = resolve_host_profile(host_name)?;
+    let address = format!("{}:{}", host.host, host.port.unwrap_or(22));
+    let (host_key_algorithm, fingerprint_sha256) = probe_host_fingerprint(&host, timeout_secs)?;
+    let _guard = crate::store::lock_config_file(".known_hosts.lock")?;
+    let trusted = load_known_host_fingerprints_unlocked()?;
+    let existing = trusted.get(&known_host_identity(&host));
+    let expected_host_key_algorithm = existing.map(|entry| entry.host_key_algorithm.clone());
+    let expected_fingerprint_sha256 = existing.map(|entry| entry.fingerprint_sha256.clone());
+    let trusted = existing.is_some_and(|entry| {
+        entry.host_key_algorithm == host_key_algorithm
+            && entry.fingerprint_sha256 == fingerprint_sha256
+    });
+
+    Ok(HostFingerprintStatus {
+        host: host.name,
+        address,
+        host_key_algorithm,
+        fingerprint_sha256,
+        trusted,
+        expected_host_key_algorithm,
+        expected_fingerprint_sha256,
+    })
+}
+
+pub fn trust_host_fingerprint_core(
+    host_name: &str,
+    expected_fingerprint_sha256: Option<&str>,
+    host_key_algorithm: &str,
+    fingerprint_sha256: &str,
+    timeout_secs: u64,
+) -> Result<()> {
+    let host = resolve_host_profile(host_name)?;
+    let address = format!("{}:{}", host.host, host.port.unwrap_or(22));
+    let (current_algorithm, current_fingerprint) = probe_host_fingerprint(&host, timeout_secs)?;
+    if current_algorithm != host_key_algorithm || current_fingerprint != fingerprint_sha256 {
+        return Err(anyhow!(
+            "SSH host fingerprint changed while confirming {}: expected {} {}, got {} {}",
+            host.name,
+            host_key_algorithm,
+            fingerprint_sha256,
+            current_algorithm,
+            current_fingerprint
+        ));
+    }
+
+    ensure_config_dir()?;
+    let _guard = crate::store::lock_config_file(".known_hosts.lock")?;
+    let mut trusted = load_known_host_fingerprints_unlocked()?;
+    let identity = known_host_identity(&host);
+    if let (Some(expected), Some(existing)) = (expected_fingerprint_sha256, trusted.get(&identity))
+    {
+        if existing.fingerprint_sha256 != expected {
+            return Err(anyhow!(
+                "saved SSH host fingerprint for {} changed before confirmation",
+                host.name
+            ));
+        }
+    }
+
+    let now = now_unix_secs();
+    let first_seen_unix = trusted
+        .get(&identity)
+        .map(|entry| entry.first_seen_unix)
+        .unwrap_or(now);
+    trusted.insert(
+        identity,
+        TrustedHostFingerprint {
+            host: host.name,
+            address,
+            host_key_algorithm: current_algorithm,
+            fingerprint_sha256: current_fingerprint,
+            first_seen_unix,
             last_seen_unix: now,
         },
     );

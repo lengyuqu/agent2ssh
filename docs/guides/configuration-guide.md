@@ -898,7 +898,7 @@ chmod 600 ~/.agent2ssh/keys/my_key
 
 ## WebDAV 同步
 
-Agent2SSH 可以把可迁移配置同步到一个 WebDAV collection。同步范围是保守的：包含 `hosts.json`、`secrets.enc`、`known_hosts.json`、策略文件、执行限额、异常检测和 playbook；不包含 `daemon.token`、`daemon_tokens.toml`、`remotes.toml`、`webhook.toml`、`audit.jsonl`、`app.log`、`keys/` 私钥目录等本机敏感或运行时文件。
+Agent2SSH 可以把可迁移配置同步到一个 WebDAV collection。同步范围是保守的：包含 `hosts.json`、`secrets.enc`、策略文件、执行限额、异常检测和 playbook；不包含 `known_hosts.json`、`daemon.token`、`daemon_tokens.toml`、`remotes.toml`、`webhook.toml`、`audit.jsonl`、`app.log`、`keys/` 私钥目录等本机敏感或运行时文件。
 
 ### 配置
 
@@ -938,6 +938,7 @@ agent2ssh webdav status
 - 每次 `push` 或 `pull` 前都会在 `~/.agent2ssh/backups/sync-<timestamp>-<id>/` 创建本地版本备份。
 - `push` 会读取本地/远端已有标记，取较大的 `global_version` 并加 1，然后上传 `files/` 下的配置文件和远端 `sync_version.json`。
 - `pull` 会校验远端 manifest 中每个文件的 SHA-256，覆盖本地文件后写入本地 `sync_version.json`，表示本机已应用该全局版本。
+- `pull` 兼容旧版本远端 manifest 中的 `known_hosts.json`，但会跳过该文件，不会覆盖本机 SSH 主机指纹信任库。
 - 如果远端 manifest 中缺少某个可同步文件，`pull` 会在备份后删除本地对应文件，使本机状态与远端版本一致。
 
 ---

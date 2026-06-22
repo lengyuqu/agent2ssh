@@ -52,7 +52,6 @@ use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
-    process::Command,
     sync::OnceLock,
     time::Instant,
 };
@@ -1591,7 +1590,6 @@ struct WebDavSyncFile {
 
 const WEBDAV_SYNC_FILES: &[&str] = &[
     "hosts.json",
-    "known_hosts.json",
     "playbooks.toml",
     "risk_rules.toml",
     "policy.toml",

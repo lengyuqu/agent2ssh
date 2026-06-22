@@ -1,5 +1,5 @@
 import { Activity, ChevronDown, ChevronRight, RefreshCw, Search, ShieldAlert } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { useI18n } from "../i18n";
 import type { AgentEvent, AuditEntry } from "../types";
@@ -8,9 +8,10 @@ import { Select } from "./ui/select";
 import { cn } from "../lib/utils";
 
 const MAX_EVENTS = 80;
-const AUDIT_POLL_MS = 3000;
+const AUDIT_POLL_MS = 10000;
 const EVENT_RECONNECT_MS = 3000;
 const EVENT_CONNECT_TIMEOUT_MS = 6000;
+const EVENT_BATCH_MS = 100;
 
 type ActivityItem = {
   id: string;
@@ -28,10 +29,6 @@ type ActivityItem = {
   anomalyReason?: string;
   severity?: string;
   raw?: Record<string, unknown>;
-};
-
-type Props = {
-  audit: AuditEntry[];
 };
 
 function asString(value: unknown): string | undefined {
@@ -117,26 +114,39 @@ const statusCls: Record<string, string> = {
   offline: "bg-destructive/15 text-destructive",
 };
 
-export default function LiveActivityPanel({ audit }: Props) {
+export default function LiveActivityPanel() {
   const { t } = useI18n();
   const [events, setEvents] = useState<AgentEvent[]>([]);
-  const [recentAudit, setRecentAudit] = useState<AuditEntry[]>(audit.slice(0, 20));
+  const [recentAudit, setRecentAudit] = useState<AuditEntry[]>([]);
   const [status, setStatus] = useState<"connecting" | "live" | "offline">("connecting");
   const [error, setError] = useState<string | null>(null);
   const [sourceFilter, setSourceFilter] = useState("all");
   const [kindFilter, setKindFilter] = useState("all");
   const [search, setSearch] = useState("");
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
-
-  useEffect(() => {
-    setRecentAudit(audit.slice(0, 20));
-  }, [audit]);
+  const eventQueueRef = useRef<AgentEvent[]>([]);
+  const flushTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     let active = true;
     let controller: AbortController | null = null;
     let retryTimer: number | null = null;
     let connectTimer: number | null = null;
+
+    function flushEvents() {
+      flushTimerRef.current = null;
+      const queued = eventQueueRef.current;
+      if (queued.length === 0) return;
+      eventQueueRef.current = [];
+      const newestFirst = queued.slice().reverse();
+      setEvents((prev) => [...newestFirst, ...prev].slice(0, MAX_EVENTS));
+    }
+
+    function queueEvent(event: AgentEvent) {
+      eventQueueRef.current.push(event);
+      if (flushTimerRef.current !== null) return;
+      flushTimerRef.current = window.setTimeout(flushEvents, EVENT_BATCH_MS);
+    }
 
     function clearConnectTimer() {
       if (connectTimer !== null) {
@@ -168,7 +178,7 @@ export default function LiveActivityPanel({ audit }: Props) {
           (event) => {
             clearConnectTimer();
             setStatus("live");
-            setEvents((prev) => [event, ...prev].slice(0, MAX_EVENTS));
+            queueEvent(event);
           },
           controller.signal,
           () => {
@@ -201,6 +211,8 @@ export default function LiveActivityPanel({ audit }: Props) {
       controller?.abort();
       clearConnectTimer();
       if (retryTimer !== null) window.clearTimeout(retryTimer);
+      if (flushTimerRef.current !== null) window.clearTimeout(flushTimerRef.current);
+      eventQueueRef.current = [];
     };
   }, []);
 
