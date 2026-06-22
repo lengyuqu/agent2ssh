@@ -1,3 +1,4 @@
+use crate::mcp_binding::{create_mcp_binding_key, mcp_binding_key_is_valid, MCP_BINDING_KEY_ENV};
 use chrono::Utc;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -29,6 +30,7 @@ pub struct McpAgentConfigStatus {
     pub status: String,
     pub command: Option<String>,
     pub configured_source: Option<String>,
+    pub binding_authenticated: bool,
     pub recommended_command: String,
 }
 
@@ -263,9 +265,11 @@ fn agent_detected(candidate: &McpAgentCandidate) -> bool {
     candidate.config_path.exists() || candidate.detection_paths.iter().any(|path| path.exists())
 }
 
-fn configured_json(path: &Path) -> Result<(bool, Option<String>, Option<String>), String> {
+fn configured_json(
+    path: &Path,
+) -> Result<(bool, Option<String>, Option<String>, Option<String>), String> {
     if !path.exists() {
-        return Ok((false, None, None));
+        return Ok((false, None, None, None));
     }
     let raw = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let value: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
@@ -281,12 +285,19 @@ fn configured_json(path: &Path) -> Result<(bool, Option<String>, Option<String>)
         .and_then(|env| env.get("AGENT2SSH_SOURCE"))
         .and_then(|source| source.as_str())
         .map(ToString::to_string);
-    Ok((command.is_some(), command, source))
+    let binding_key = agent
+        .and_then(|server| server.get("env"))
+        .and_then(|env| env.get(MCP_BINDING_KEY_ENV))
+        .and_then(|key| key.as_str())
+        .map(ToString::to_string);
+    Ok((command.is_some(), command, source, binding_key))
 }
 
-fn configured_toml(path: &Path) -> Result<(bool, Option<String>, Option<String>), String> {
+fn configured_toml(
+    path: &Path,
+) -> Result<(bool, Option<String>, Option<String>, Option<String>), String> {
     if !path.exists() {
-        return Ok((false, None, None));
+        return Ok((false, None, None, None));
     }
     let raw = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let value: toml::Value = toml::from_str(&raw).map_err(|e| e.to_string())?;
@@ -302,12 +313,17 @@ fn configured_toml(path: &Path) -> Result<(bool, Option<String>, Option<String>)
         .and_then(|env| env.get("AGENT2SSH_SOURCE"))
         .and_then(|source| source.as_str())
         .map(ToString::to_string);
-    Ok((command.is_some(), command, source))
+    let binding_key = agent
+        .and_then(|server| server.get("env"))
+        .and_then(|env| env.get(MCP_BINDING_KEY_ENV))
+        .and_then(|key| key.as_str())
+        .map(ToString::to_string);
+    Ok((command.is_some(), command, source, binding_key))
 }
 
 fn mcp_configured(
     candidate: &McpAgentCandidate,
-) -> Result<(bool, Option<String>, Option<String>), String> {
+) -> Result<(bool, Option<String>, Option<String>, Option<String>), String> {
     match candidate.format {
         McpConfigFormat::Json => configured_json(&candidate.config_path),
         McpConfigFormat::Toml => configured_toml(&candidate.config_path),
@@ -329,7 +345,12 @@ fn backup_config(path: &Path) -> Result<Option<PathBuf>, String> {
     Ok(Some(backup))
 }
 
-fn configure_json(path: &Path, command: &str, source: &str) -> Result<(), String> {
+fn configure_json(
+    path: &Path,
+    command: &str,
+    source: &str,
+    binding_key: &str,
+) -> Result<(), String> {
     let mut value = if path.exists() {
         let raw = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
         serde_json::from_str::<serde_json::Value>(&raw).map_err(|e| e.to_string())?
@@ -358,6 +379,7 @@ fn configure_json(path: &Path, command: &str, source: &str) -> Result<(), String
         return Err("mcpServers.agent2ssh.env must be a JSON object".into());
     };
     env.insert("AGENT2SSH_SOURCE".into(), serde_json::json!(source));
+    env.insert(MCP_BINDING_KEY_ENV.into(), serde_json::json!(binding_key));
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -400,7 +422,12 @@ fn table_mut<'a>(
         .ok_or_else(|| format!("{key} must be a TOML table"))
 }
 
-fn configure_toml(path: &Path, command: &str, source: &str) -> Result<(), String> {
+fn configure_toml(
+    path: &Path,
+    command: &str,
+    source: &str,
+    binding_key: &str,
+) -> Result<(), String> {
     let mut value = if path.exists() {
         let raw = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
         toml::from_str::<toml::Value>(&raw).map_err(|e| e.to_string())?
@@ -418,6 +445,10 @@ fn configure_toml(path: &Path, command: &str, source: &str) -> Result<(), String
     env.insert(
         "AGENT2SSH_SOURCE".into(),
         toml::Value::String(source.to_string()),
+    );
+    env.insert(
+        MCP_BINDING_KEY_ENV.into(),
+        toml::Value::String(binding_key.to_string()),
     );
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -456,19 +487,35 @@ pub fn list_mcp_agent_configs() -> Result<Vec<McpAgentConfigStatus>, String> {
         .into_iter()
         .map(|candidate| {
             let detected = agent_detected(&candidate);
-            let (configured, existing_command, configured_source, status) =
+            let (configured, existing_command, configured_source, binding_authenticated, status) =
                 match mcp_configured(&candidate) {
-                    Ok((configured, command, source)) => {
+                    Ok((has_command, command, source, binding_key)) => {
+                        let binding_authenticated =
+                            match (source.as_deref(), binding_key.as_deref()) {
+                                (Some(source), Some(key)) => {
+                                    mcp_binding_key_is_valid(source, key).unwrap_or(false)
+                                }
+                                _ => false,
+                            };
+                        let configured = has_command && binding_authenticated;
                         let status = if configured {
                             "configured"
+                        } else if has_command {
+                            "needs_rebind"
                         } else if detected {
                             "detected"
                         } else {
                             "not_detected"
                         };
-                        (configured, command, source, status.to_string())
+                        (
+                            configured,
+                            command,
+                            source,
+                            binding_authenticated,
+                            status.to_string(),
+                        )
                     }
-                    Err(error) => (false, None, None, format!("invalid_config: {error}")),
+                    Err(error) => (false, None, None, false, format!("invalid_config: {error}")),
                 };
             McpAgentConfigStatus {
                 id: candidate.id.to_string(),
@@ -480,6 +527,7 @@ pub fn list_mcp_agent_configs() -> Result<Vec<McpAgentConfigStatus>, String> {
                 status,
                 command: existing_command,
                 configured_source,
+                binding_authenticated,
                 recommended_command: command.clone(),
             }
         })
@@ -493,14 +541,21 @@ pub fn configure_mcp_agent(agent_id: String) -> Result<McpAgentConfigureResult, 
         .find(|candidate| candidate.id == agent_id)
         .ok_or_else(|| format!("unknown MCP agent: {agent_id}"))?;
     let command = bundled_mcp_binary_path()?.display().to_string();
+    let binding_key = create_mcp_binding_key(candidate.source).map_err(|e| e.to_string())?;
     let backup = backup_config(&candidate.config_path)?;
     match candidate.format {
-        McpConfigFormat::Json => {
-            configure_json(&candidate.config_path, &command, candidate.source)?
-        }
-        McpConfigFormat::Toml => {
-            configure_toml(&candidate.config_path, &command, candidate.source)?
-        }
+        McpConfigFormat::Json => configure_json(
+            &candidate.config_path,
+            &command,
+            candidate.source,
+            &binding_key,
+        )?,
+        McpConfigFormat::Toml => configure_toml(
+            &candidate.config_path,
+            &command,
+            candidate.source,
+            &binding_key,
+        )?,
     }
     Ok(McpAgentConfigureResult {
         id: candidate.id.to_string(),
@@ -509,7 +564,7 @@ pub fn configure_mcp_agent(agent_id: String) -> Result<McpAgentConfigureResult, 
         command,
         source: candidate.source.to_string(),
         message: format!(
-            "{} MCP config updated with source '{}'. Restart the agent client to load agent2ssh.",
+            "{} MCP config updated with a bound source '{}'. Restart the agent client to load agent2ssh.",
             candidate.name, candidate.source
         ),
     })

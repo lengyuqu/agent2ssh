@@ -540,14 +540,15 @@ fn detect_and_publish_audit_anomalies(entry: &AuditEntry) {
 
 /// Rotate audit log if it exceeds `max_size_bytes`.
 ///
-/// Keeps at most 3 rotated files: `audit.jsonl.1`, `.2`, `.3`.
-/// When rotating, `.2` → `.3`, `.1` → `.2`, current → `.1`.
+/// Keeps a bounded number of rotated files (`audit.jsonl.1...`), so high-volume
+/// operations retain more history before dropping the oldest entry.
 pub fn rotate_audit_if_needed(max_size_bytes: u64) -> Result<()> {
     let _guard = audit_write_lock()?;
     rotate_audit_if_needed_unlocked(max_size_bytes)
 }
 
 fn rotate_audit_if_needed_unlocked(max_size_bytes: u64) -> Result<()> {
+    const AUDIT_ROTATION_COUNT: usize = 10;
     let path = audit_path()?;
     if !path.exists() {
         return Ok(());
@@ -557,8 +558,8 @@ fn rotate_audit_if_needed_unlocked(max_size_bytes: u64) -> Result<()> {
         return Ok(());
     }
 
-    // Shift existing rotations: .2 → .3, .1 → .2
-    for i in (2..=3).rev() {
+    // Shift existing rotations: `.n-1` -> `.n`, dropping the oldest if needed.
+    for i in (2..=AUDIT_ROTATION_COUNT).rev() {
         let src = path.with_extension(format!("jsonl.{}", i - 1));
         let dst = path.with_extension(format!("jsonl.{i}"));
         if src.exists() {
@@ -568,8 +569,8 @@ fn rotate_audit_if_needed_unlocked(max_size_bytes: u64) -> Result<()> {
             std::fs::rename(&src, &dst)?;
         }
     }
-    // Remove .3 if it would be pushed beyond limit (we only keep 3 rotations)
-    let overflow = path.with_extension("jsonl.4");
+    // Remove the overflow file when it would exceed the configured rotation count.
+    let overflow = path.with_extension(format!("jsonl.{}", AUDIT_ROTATION_COUNT + 1));
     if overflow.exists() {
         let _ = std::fs::remove_file(&overflow);
     }
@@ -1077,29 +1078,24 @@ fn visit_lines_reverse(path: &Path, mut visit: impl FnMut(&str) -> Result<bool>)
 pub fn glob_match(pattern: &str, text: &str) -> bool {
     let pat: Vec<char> = pattern.to_lowercase().chars().collect();
     let txt: Vec<char> = text.to_lowercase().chars().collect();
-    glob_match_inner(&pat, &txt)
-}
+    let mut prev = vec![false; txt.len() + 1];
+    prev[0] = true;
 
-fn glob_match_inner(pat: &[char], txt: &[char]) -> bool {
-    if pat.is_empty() {
-        return txt.is_empty();
-    }
-    if pat[0] == '*' {
-        // Try matching * with 0..n chars
-        for i in 0..=txt.len() {
-            if glob_match_inner(&pat[1..], &txt[i..]) {
-                return true;
+    for pattern_char in pat {
+        let mut next = vec![false; txt.len() + 1];
+        if pattern_char == '*' {
+            next[0] = prev[0];
+            for i in 1..=txt.len() {
+                next[i] = prev[i] || next[i - 1];
+            }
+        } else {
+            for i in 1..=txt.len() {
+                next[i] = prev[i - 1] && (pattern_char == '?' || pattern_char == txt[i - 1]);
             }
         }
-        return false;
+        prev = next;
     }
-    if txt.is_empty() {
-        return false;
-    }
-    if pat[0] == '?' || pat[0] == txt[0] {
-        return glob_match_inner(&pat[1..], &txt[1..]);
-    }
-    false
+    prev[txt.len()]
 }
 
 // ── Audit Export (F6-2) ─────────────────────────────────────────────────────
@@ -1465,6 +1461,12 @@ mod tests {
     fn test_glob_match_case_insensitive() {
         assert!(glob_match("SUDO *", "sudo whoami"));
         assert!(glob_match("sudo *", "SUDO REBOOT"));
+    }
+
+    #[test]
+    fn test_glob_match_many_stars_is_linear_safe() {
+        let pattern = format!("{}z", "*a".repeat(128));
+        assert!(!glob_match(&pattern, &"a".repeat(128)));
     }
 
     #[test]

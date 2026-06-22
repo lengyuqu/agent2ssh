@@ -537,6 +537,13 @@ async fn main() -> Result<()> {
         }
     }
 
+    if let Err(e) = agent2ssh::verify_mcp_binding_from_env() {
+        let message = format!("MCP binding authentication failed: {e}");
+        let _ = append_diagnostic_log("error", "mcp", &message, None);
+        eprintln!("{message}");
+        std::process::exit(1);
+    }
+
     let stdin = io::stdin();
     let mut stdout = io::stdout();
 

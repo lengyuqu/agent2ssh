@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use std::{
     collections::HashMap,
-    sync::{mpsc, OnceLock},
+    sync::{mpsc, Arc, Mutex as StdMutex, OnceLock},
     time::{Duration, Instant},
 };
 use tokio::sync::Mutex;
@@ -29,9 +29,9 @@ pub struct SessionHandle {
 }
 
 // Process-local session store. Meaningful in long-running processes (daemon/MCP/Tauri).
-static SESSIONS: OnceLock<Mutex<HashMap<Uuid, SessionHandle>>> = OnceLock::new();
+static SESSIONS: OnceLock<Mutex<HashMap<Uuid, Arc<StdMutex<SessionHandle>>>>> = OnceLock::new();
 
-fn sessions() -> &'static Mutex<HashMap<Uuid, SessionHandle>> {
+fn sessions() -> &'static Mutex<HashMap<Uuid, Arc<StdMutex<SessionHandle>>>> {
     SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -105,15 +105,23 @@ pub async fn session_open_core(host_name: &str) -> Result<Uuid> {
     };
 
     probe_session_open(&mut handle)?;
-    sessions().lock().await.insert(id, handle);
+    sessions()
+        .lock()
+        .await
+        .insert(id, Arc::new(StdMutex::new(handle)));
     Ok(id)
 }
 
 pub async fn session_write_core(id: Uuid, input: &str) -> Result<()> {
-    let store = sessions().lock().await;
-    let handle = store
+    let handle = sessions()
+        .lock()
+        .await
         .get(&id)
+        .cloned()
         .ok_or_else(|| anyhow!("unknown session: {id}"))?;
+    let handle = handle
+        .lock()
+        .map_err(|_| anyhow!("session lock poisoned: {id}"))?;
     if handle.closed {
         return Err(anyhow!("session is closed: {id}"));
     }
@@ -125,10 +133,26 @@ pub async fn session_write_core(id: Uuid, input: &str) -> Result<()> {
 }
 
 pub async fn session_read_core(id: Uuid, timeout_ms: u64) -> Result<String> {
-    let mut store = sessions().lock().await;
-    let handle = store
-        .get_mut(&id)
+    let handle = sessions()
+        .lock()
+        .await
+        .get(&id)
+        .cloned()
         .ok_or_else(|| anyhow!("unknown session: {id}"))?;
+
+    tokio::task::spawn_blocking(move || read_session_handle(id, handle, timeout_ms))
+        .await
+        .map_err(|e| anyhow!("session read task failed: {e}"))?
+}
+
+fn read_session_handle(
+    id: Uuid,
+    handle: Arc<StdMutex<SessionHandle>>,
+    timeout_ms: u64,
+) -> Result<String> {
+    let mut handle = handle
+        .lock()
+        .map_err(|_| anyhow!("session lock poisoned: {id}"))?;
 
     let mut output = std::mem::take(&mut handle.pending_output);
     let mut wait = if output.is_empty() {
@@ -141,7 +165,7 @@ pub async fn session_read_core(id: Uuid, timeout_ms: u64) -> Result<String> {
         match handle.rx.recv_timeout(wait) {
             Ok(event) => {
                 let had_output = matches!(event, TerminalEvent::Output(_));
-                apply_session_event(handle, event)?;
+                apply_session_event(&mut handle, event)?;
                 if had_output {
                     output.extend_from_slice(&handle.pending_output);
                     handle.pending_output.clear();
@@ -168,6 +192,9 @@ pub async fn session_close_core(id: Uuid) -> Result<()> {
     let handle = store
         .remove(&id)
         .ok_or_else(|| anyhow!("unknown session: {id}"))?;
+    let handle = handle
+        .lock()
+        .map_err(|_| anyhow!("session lock poisoned: {id}"))?;
     let _ = handle.tx.send(TerminalCommand::Close);
     Ok(())
 }
@@ -177,6 +204,6 @@ pub async fn session_list_core() -> Vec<(Uuid, String)> {
         .lock()
         .await
         .values()
-        .map(|h| (h.id, h.host.clone()))
+        .filter_map(|h| h.lock().ok().map(|handle| (handle.id, handle.host.clone())))
         .collect()
 }

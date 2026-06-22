@@ -116,6 +116,20 @@ export function getDaemonUrl(): string {
   return daemonUrl;
 }
 
+function objectValue(value: unknown, context: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(`${context} returned an invalid response`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function stringField(value: unknown, field: string, context: string): string {
+  if (typeof value !== "string") {
+    throw new Error(`${context} response missing string field '${field}'`);
+  }
+  return value;
+}
+
 export const api = {
   // Host management
   listHosts: () => invoke<HostProfile[]>("list_hosts"),
@@ -263,8 +277,8 @@ export const api = {
       body: JSON.stringify({ host, source: "desktop" }),
     });
     if (!res.ok) throw new Error(`Failed to open daemon session: ${res.status}`);
-    const body = (await res.json()) as { id: string };
-    return body.id;
+    const body = objectValue(await res.json(), "Open daemon session");
+    return stringField(body.id, "id", "Open daemon session");
   },
   sessionWriteDaemon: async (
     id: string,
@@ -293,8 +307,8 @@ export const api = {
       { headers: { Authorization: `Bearer ${token}`, [TRACE_ID_HEADER]: SESSION_TRACE_ID } }
     );
     if (!res.ok) throw new Error(`Failed to read daemon session: ${res.status}`);
-    const body = (await res.json()) as { output: string };
-    return body.output;
+    const body = objectValue(await res.json(), "Read daemon session");
+    return stringField(body.output, "output", "Read daemon session");
   },
   sessionCloseDaemon: async (id: string): Promise<void> => {
     const token = await invoke<string>("get_daemon_token");
@@ -516,19 +530,21 @@ export const api = {
   /** Approve a pending approval request via the daemon. */
   approvalApprove: async (id: string): Promise<void> => {
     const token = await invoke<string>("get_daemon_token");
-    await fetch(`${daemonUrl}/approvals/${id}/approve`, {
+    const res = await fetch(`${daemonUrl}/approvals/${id}/approve`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, [TRACE_ID_HEADER]: SESSION_TRACE_ID },
     });
+    if (!res.ok) throw new Error(`Failed to approve request: ${res.status}`);
   },
 
   /** Reject a pending approval request via the daemon. */
   approvalReject: async (id: string): Promise<void> => {
     const token = await invoke<string>("get_daemon_token");
-    await fetch(`${daemonUrl}/approvals/${id}/reject`, {
+    const res = await fetch(`${daemonUrl}/approvals/${id}/reject`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, [TRACE_ID_HEADER]: SESSION_TRACE_ID },
     });
+    if (!res.ok) throw new Error(`Failed to reject request: ${res.status}`);
   },
 
   /** Fetch webhook config from the running daemon. */
@@ -595,7 +611,13 @@ export const api = {
           .map((line) => line.slice(5).trimStart())
           .join("\n");
         if (data) {
-          onEvent(JSON.parse(data) as AgentEvent);
+          try {
+            onEvent(JSON.parse(data) as AgentEvent);
+          } catch (err) {
+            reportError("frontend", "failed to parse daemon event frame", err, {
+              preview: data.slice(0, 512),
+            });
+          }
         }
         boundary = buffer.indexOf("\n\n");
       }

@@ -13,6 +13,7 @@ pub mod gate;
 pub mod health;
 pub mod keys;
 pub mod limits;
+pub mod mcp_binding;
 pub mod notify;
 pub mod playbook;
 pub mod policy;
@@ -78,6 +79,10 @@ pub use health::{
 pub use limits::{
     load_execution_limits, ExecutionLimitConfig, ExecutionLimitRejection, ExecutionLimitRule,
     ExecutionLimiter,
+};
+pub use mcp_binding::{
+    create_mcp_binding_key, mcp_binding_key_is_valid, verify_mcp_binding_from_env,
+    MCP_BINDING_KEY_ENV, MCP_SOURCE_ENV,
 };
 pub use playbook::{
     delete_playbook_core, dry_run_playbook, list_playbooks_core, resolve_command_template,

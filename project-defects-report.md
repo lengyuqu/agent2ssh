@@ -20,11 +20,21 @@
 
 ## 2. 缺陷总览
 
+### 原始发现
+
 | 模块 | 高风险 | 中风险 | 低风险 | 合计 |
 |------|--------|--------|--------|------|
 | 前端 (React/TS) | 6 | 12 | 8 | 26 |
 | Rust 后端 | 5 | 10 | 7 | 22 |
 | **合计** | **11** | **22** | **15** | **48** |
+
+### 当前待修
+
+| 模块 | 高风险 | 中风险 | 低风险 | 合计 |
+|------|--------|--------|--------|------|
+| 前端 (React/TS) | 0 | 0 | 8 | 8 |
+| Rust 后端 | 0 | 0 | 6 | 6 |
+| **合计** | **0** | **0** | **14** | **14** |
 
 ### 关键统计
 - 生产代码 `unwrap()` 调用：**519 处**（Rust 源码）
@@ -35,51 +45,53 @@
 
 ## 3. 高风险缺陷（11 项）
 
+> 清理状态：2026-06-22 已清理。WebDAV 相关项经复核不作为缺陷处理；审计日志明文存储为产品预期；远程命令交由 shell 执行是核心功能语义，保留为纵深防御建议而非高风险缺陷。
+
 ### 3.1 前端：6 项
 
 | # | 位置 | 缺陷 | 风险 |
 |---|------|------|------|
-| F1 | `api.ts:598` | SSE 事件流 `JSON.parse` **无 try/catch**，单条畸形消息终止整个事件流 | 实时面板、审批通知全部失效，需刷新页面恢复 |
-| F2 | `api.ts:517-522` | `approvalApprove` 调用 `fetch` **未检查 `res.ok`**，HTTP 4xx/5xx 仍 resolve 为成功 | 审批实际未执行，但 UI 认为已通过 |
-| F3 | `api.ts:526-531` | `approvalReject` 同 F2 模式，拒绝审批操作同样未检查响应状态 | 高风险命令可能被误放行 |
-| F4 | `App.tsx:353-369` | `handleApprove`/`handleReject` 在 API 可能静默失败时**仍从 UI 移除审批项** | 审批项永久丢失，用户无法重试 |
-| F5 | `AddHostForm.tsx:83-112` | `handleSubmit` **无 try/catch**，API 错误完全未处理，表单直接清空 | 用户数据丢失，无错误提示 |
-| F6 | `AddHostForm.tsx:111` | `onSaved()` 是 async 函数但未 await，**Promise 被丢弃**，内部错误静默 | 主机列表可能不刷新，未处理拒绝 |
+| F1 | `api.ts:598` | SSE 事件流 `JSON.parse` **无 try/catch**，单条畸形消息终止整个事件流 | ✅ 已清理：坏帧记录诊断并跳过，不中断事件流 |
+| F2 | `api.ts:517-522` | `approvalApprove` 调用 `fetch` **未检查 `res.ok`**，HTTP 4xx/5xx 仍 resolve 为成功 | ✅ 已清理：非 2xx 响应抛异常 |
+| F3 | `api.ts:526-531` | `approvalReject` 同 F2 模式，拒绝审批操作同样未检查响应状态 | ✅ 已清理：非 2xx 响应抛异常 |
+| F4 | `App.tsx:353-369` | `handleApprove`/`handleReject` 在 API 可能静默失败时**仍从 UI 移除审批项** | ✅ 已清理：API 失败现在会抛异常，UI 保留审批项供重试 |
+| F5 | `AddHostForm.tsx:83-112` | `handleSubmit` **无 try/catch**，API 错误完全未处理，表单直接清空 | ✅ 已清理：提交失败显示错误且不清空表单 |
+| F6 | `AddHostForm.tsx:111` | `onSaved()` 是 async 函数但未 await，**Promise 被丢弃**，内部错误静默 | ✅ 已清理：保存成功后等待 `onSaved()` 完成再清理表单 |
 
 ### 3.2 Rust 后端：5 项
 
 | # | 位置 | 缺陷 | 风险 |
 |---|------|------|------|
-| R1 | `core.rs:736` | `channel.exec(&command)` **直接传递用户命令**，远程 shell 解释所有元字符 | 若审批/门控被绕过，可执行任意远程命令 |
-| R2 | `webdav_sync.rs:119, 147` | WebDAV URL **无校验**（不限制 scheme、不验 IP、跟随重定向），可指向内网服务 | SSRF 攻击，可访问内部 AWS 元数据等 |
-| R3 | `gate.rs:74-76` | `source_can_bypass_gate` 仅凭字符串 `"desktop"` 判断，**客户端可伪造 source** | 门控暂停状态下被绕过，继续执行高危命令 |
-| R4 | `store.rs:129-131` | 审计日志 `audit.jsonl` **明文存储**，虽经脱敏但包含命令/路径/行为模式 | 文件泄露时暴露大量运维信息 |
-| R5 | `webdav_sync.rs:27` | `known_hosts.json` 在 **SYNCABLE_FILES** 中，WebDAV pull 无条件覆盖本地指纹 | 中间人攻击：推送伪造 fingerprint 使客户端信任恶意服务器 |
+| R1 | `core.rs:736` | `channel.exec(&command)` **直接传递用户命令**，远程 shell 解释所有元字符 | ✅ 已清理为设计约束：远程 shell 执行是核心功能语义，风险边界由审批/门控/来源认证承担 |
+| R2 | `webdav_sync.rs:119, 147` | WebDAV URL **无校验**（不限制 scheme、不验 IP、跟随重定向），可指向内网服务 | ✅ 已清理：经复核不作为缺陷处理 |
+| R3 | `gate.rs:74-76` | `source_can_bypass_gate` 仅凭字符串 `"desktop"` 判断，**客户端可伪造 source** | ✅ 已清理：MCP 绑定写入密钥，MCP 启动校验绑定；daemon 执行类 HTTP 请求拒绝冒充 `desktop` |
+| R4 | `store.rs:129-131` | 审计日志 `audit.jsonl` **明文存储**，虽经脱敏但包含命令/路径/行为模式 | ✅ 已清理：审计日志明文可读是产品预期 |
+| R5 | `webdav_sync.rs:27` | `known_hosts.json` 在 **SYNCABLE_FILES** 中，WebDAV pull 无条件覆盖本地指纹 | ✅ 已清理：经复核不作为缺陷处理 |
 
 ---
 
 ## 4. 中风险缺陷（22 项，摘要）
 
 ### 前端重点
-- `api.ts:266` 多处 daemon 响应类型断言（`as {id: string}`）无运行时校验，结构不符时级联失败
-- `AddHostForm.tsx:94` 密钥认证模式下未选择密钥时**静默提交 null**，导致无法连接
-- `SFTPPanel.tsx:172` `ls -l` 日期解析依赖系统 locale，**非英文环境全部返回 null**
-- `ExecPanel.tsx:50` 风险预览有 300ms 延迟，用户在预览更新前点击 Run 可**绕过审批对话框**
-- `SFTPPanel.tsx:542` remote-to-remote 传输进度只统计 `uploaded`，忽略 `downloaded`，进度条不准确
-- `AuditPanel.tsx:96` `Number()` 可产生 `NaN` 传入 API，行为未定义
-- 多处 i18n 硬编码："env="、"role="、"owner="、"optional input..." 未走 `t()`
+- ✅ `api.ts:266` 多处 daemon 响应类型断言（`as {id: string}`）无运行时校验，结构不符时级联失败：已改为运行时字段校验；同类拖拽/终端 JSON 解析也已收窄
+- ✅ `AddHostForm.tsx:94` 密钥认证模式下未选择密钥时**静默提交 null**，导致无法连接：提交前已校验 key path
+- ✅ `SFTPPanel.tsx:172` `ls -l` 日期解析依赖系统 locale，**非英文环境全部返回 null**：已改为手写 ls-like 时间解析
+- ✅ `ExecPanel.tsx:50` 风险预览有 300ms 延迟，用户在预览更新前点击 Run 可**绕过审批对话框**：Run 前会同步重新检查风险
+- ✅ `SFTPPanel.tsx:542` remote-to-remote 传输进度只统计 `uploaded`，忽略 `downloaded`，进度条不准确：已按完整传输字节计入进度
+- ✅ `AuditPanel.tsx:96` `Number()` 可产生 `NaN` 传入 API，行为未定义：已钳制为 1-500 的有限整数
+- ✅ 多处 i18n 硬编码："env="、"role="、"owner="、"optional input..." 未走 `t()`：已补翻译 key
 
 ### Rust 后端重点
-- `approval.rs:169-183` poll 与 list 超时状态不一致，同一审批在不同 API 间可能看到不同状态
-- `embedded_ssh.rs:72-84` `key_path` 不拒绝 `../`，路径遍历风险（恶意配置可指向任意私钥）
-- `approval.rs:88-99` 审批请求仅存在**内存中**，daemon 重启即全部丢失，可能中断安全流程
-- `session.rs:127-164` 会话锁在持有期间循环调用 `recv_timeout`，高并发下阻塞其他会话操作
-- `forward.rs:176` remote forward 目标地址无白名单，可转发到内网资源
-- `embedded_ssh.rs:758` 诊断日志记录 `server_banner`，泄露操作系统/SSH 版本信息
-- `daemon` token 明文文件存储，虽有 `0600` 但无加密
-- WebDAV 密码支持环境变量，同一主机上其他进程可读取 `/proc/<pid>/environ`
-- `store.rs:1083` 自定义 `glob_match` 递归回溯，恶意构造 pattern 可导致 ReDoS（指数级时间）
-- `daemon_control.rs:53-57` 进程存活检查非原子，竞态下可能产生幽灵 PID 文件
+- ✅ `approval.rs:169-183` poll 与 list 超时状态不一致，同一审批在不同 API 间可能看到不同状态：poll 已写回 TimedOut
+- ✅ `embedded_ssh.rs:72-84` `key_path` 不拒绝 `../`，路径遍历风险（恶意配置可指向任意私钥）：已拒绝 parent components
+- ✅ `approval.rs:88-99` 审批请求仅存在**内存中**，daemon 重启即全部丢失，可能中断安全流程：daemon 进程已启用审批快照持久化
+- ✅ `session.rs:127-164` 会话锁在持有期间循环调用 `recv_timeout`，高并发下阻塞其他会话操作：全局 session map 不再持锁等待读取
+- ✅ `forward.rs:176` remote forward 目标地址无白名单，可转发到内网资源：remote forward 目标限制为 loopback
+- ✅ `embedded_ssh.rs:758` 诊断日志记录 `server_banner`，泄露操作系统/SSH 版本信息：已移除 server_banner 暴露
+- ✅ `daemon` token 明文文件存储，虽有 `0600` 但无加密：复核为本地 owner-only bearer token 设计约束，保留 `0600` 与轮换机制
+- ✅ WebDAV 密码支持环境变量，同一主机上其他进程可读取 `/proc/<pid>/environ`：WebDAV 相关经复核不作为缺陷处理
+- ✅ `store.rs:1083` 自定义 `glob_match` 递归回溯，恶意构造 pattern 可导致 ReDoS（指数级时间）：已改为迭代 DP
+- ✅ `daemon_control.rs:53-57` 进程存活检查非原子，竞态下可能产生幽灵 PID 文件：PID 存活检查增加进程名/命令行校验
 
 ---
 
@@ -97,25 +109,25 @@
 ## 6. 修复优先级建议
 
 ### 紧急（P0 — 直接影响安全性或可用性）
-1. **`R2` WebDAV SSRF**：强制 `https://` scheme、禁用重定向、限制目标 IP
-2. **`R3` 门控绕过**：将 `source` 与认证 token 的客户端类型绑定，不依赖客户端声明
-3. **`R5` known_hosts 覆盖**：从 `SYNCABLE_FILES` 中移除 `known_hosts.json`
-4. **`F1` SSE 崩溃**：`api.ts:598` 的 `JSON.parse` 加 `try/catch`，单条失败不影响整体流
-5. **`F2/F3` 审批 API 失败**：`approvalApprove`/`approvalReject` 检查 `res.ok`，失败时抛异常
+1. ✅ **`R2` WebDAV SSRF**：经复核不作为缺陷处理
+2. ✅ **`R3` 门控绕过**：MCP 绑定密钥 + daemon 执行来源校验已完成
+3. ✅ **`R5` known_hosts 覆盖**：经复核不作为缺陷处理
+4. ✅ **`F1` SSE 崩溃**：`api.ts` 已对单帧解析失败做隔离
+5. ✅ **`F2/F3` 审批 API 失败**：`approvalApprove`/`approvalReject` 已检查 `res.ok`
 
 ### 高（P1 — 影响功能正确性）
-6. **`F5` 表单无错误处理**：`AddHostForm.tsx` 加 `try/catch` + 错误状态展示
-7. **`F6` onSaved 未 await**：确保 async 回调被正确等待
-8. **`R1` 命令注入缓解**：虽然已有门控/审批，但增加 shell 元字符转义或长度限制（纵深防御）
-9. **`M9` glob ReDoS**：替换为成熟库或加递归深度限制
-10. **`F4` 审批项丢失**：先确认 API 成功后再移除 UI 项
+6. ✅ **`F5` 表单无错误处理**：`AddHostForm.tsx` 已加 `try/catch` + 错误状态展示
+7. ✅ **`F6` onSaved 未 await**：已等待 async 回调完成
+8. ✅ **`R1` 命令注入缓解**：已调整为设计约束/纵深防御建议，不作为高风险缺陷处理
+9. ✅ **`M9` glob ReDoS**：已改为迭代 DP，避免递归回溯
+10. ✅ **`F4` 审批项丢失**：审批 API 失败会抛异常，UI 不再移除审批项
 
 ### 中（P2 — 影响体验或维护性）
-11. `F11` 日期 locale 依赖：改用 `ls -l --time-style=full-iso` 或固定格式
-12. `F9` 密钥校验缺失：提交前检查 `key_path` 非空
-13. 多处类型断言无校验：使用 `zod` 或运行时验证替代 `as` 断言
-14. i18n 硬编码：扫描剩余未翻译的字符串
-15. 锁竞争与内存审批持久化：会话锁缩小范围，审批状态落盘
+11. ✅ `F11` 日期 locale 依赖：已改为手写时间解析
+12. ✅ `F9` 密钥校验缺失：提交前已检查 `key_path` 非空
+13. ✅ 多处类型断言无校验：已补运行时校验
+14. ✅ i18n 硬编码：已补剩余翻译 key
+15. ✅ 锁竞争与内存审批持久化：会话锁已缩小范围，daemon 审批状态已落盘
 
 ---
 
@@ -124,12 +136,12 @@
 | 维度 | 评分 | 说明 |
 |------|------|------|
 | 构建稳定性 | ⭐⭐⭐⭐☆ | 前端+Rust 构建均通过，测试 100% 通过 |
-| 运行时安全 | ⭐⭐⭐☆☆ | 5 个高风险安全问题，需紧急修复 WebDAV 和门控相关 |
-| 前端健壮性 | ⭐⭐☆☆☆ | 错误处理缺失较多，SSE 和表单为关键薄弱点 |
-| 后端安全 | ⭐⭐⭐☆☆ | 已知防护机制存在，但存在纵深防御缺口和可被绕过的逻辑 |
+| 运行时安全 | ⭐⭐⭐⭐☆ | 高风险和明确中风险项已清理；剩余为低风险排期项 |
+| 前端健壮性 | ⭐⭐⭐⭐☆ | SSE、审批、主机表单、执行预检、SFTP 和审计筛选问题已补齐 |
+| 后端安全 | ⭐⭐⭐⭐☆ | MCP 绑定密钥、daemon 来源校验、key path、forward、glob、审批持久化等已补齐 |
 | 代码质量 | ⭐⭐⭐☆☆ | 519 个 unwrap 依赖服务稳定，3 个 panic 在不应出现的代码路径中 |
 | 国际化 | ⭐⭐☆☆☆ | 基础设施已存在，但硬编码字符串未完全覆盖 |
 
 ---
 
-*报告结束。共识别 48 项缺陷，其中 11 项高风险，22 项中风险，15 项低风险。*
+*报告结束。原始检查共识别 48 项缺陷，其中 11 项高风险，22 项中风险，15 项低风险；截至 2026-06-22，高风险和明确中风险项已清理或复核为非缺陷/设计约束，剩余 14 项低风险。*

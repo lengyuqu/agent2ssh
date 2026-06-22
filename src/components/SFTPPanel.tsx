@@ -169,6 +169,42 @@ function buildBreadcrumbs(path: string): Array<{ label: string; path: string }> 
 
 // ── Listing parse / format ───────────────────────────────────────────────────
 
+const LS_MONTHS: Record<string, number> = {
+  jan: 0,
+  feb: 1,
+  mar: 2,
+  apr: 3,
+  may: 4,
+  jun: 5,
+  jul: 6,
+  aug: 7,
+  sep: 8,
+  oct: 9,
+  nov: 10,
+  dec: 11,
+};
+
+function parseLsMtime(month: string, day: string, timeOrYear: string): number | null {
+  const monthIndex = LS_MONTHS[month.toLowerCase()];
+  const dayOfMonth = Number.parseInt(day, 10);
+  if (monthIndex === undefined || !Number.isFinite(dayOfMonth)) return null;
+  const now = new Date();
+  if (/^\d{4}$/.test(timeOrYear)) {
+    return Math.floor(Date.UTC(Number(timeOrYear), monthIndex, dayOfMonth) / 1000);
+  }
+  const match = /^(\d{1,2}):(\d{2})$/.exec(timeOrYear);
+  if (!match) return null;
+  return Math.floor(
+    Date.UTC(
+      now.getUTCFullYear(),
+      monthIndex,
+      dayOfMonth,
+      Number(match[1]),
+      Number(match[2])
+    ) / 1000
+  );
+}
+
 function parseLsEntries(stdout: string): FileEntry[] {
   const parsed: FileEntry[] = [];
   for (const line of stdout.split("\n")) {
@@ -185,12 +221,12 @@ function parseLsEntries(stdout: string): FileEntry[] {
       if (!name || name === "." || name === "..") continue;
 
       const size = Number.parseInt(fields[4], 10);
-      const parsedDate = Date.parse(`${fields[5]} ${fields[6]} ${fields[7]}`);
+      const parsedDate = parseLsMtime(fields[5], fields[6], fields[7]);
       parsed.push({
         name,
         isDir: mode.startsWith("d"),
         size: Number.isNaN(size) ? null : size,
-        mtime: Number.isNaN(parsedDate) ? null : Math.floor(parsedDate / 1000),
+        mtime: parsedDate,
       });
       continue;
     }
@@ -271,6 +307,7 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
   // K6: ids of all in-flight transfers, so Cancel aborts every running file —
   // not just one — when running in parallel.
   const activeTransferIds = useRef<Set<string>>(new Set());
+  const transferCancelRequested = useRef(false);
   const [pending, setPending] = useState<PendingTransfer | null>(null);
   const [lastResult, setLastResult] = useState<{ count: number; dest: string; ms: number } | null>(null);
 
@@ -514,6 +551,7 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
   async function cancelTransfer() {
     const ids = [...activeTransferIds.current];
     if (ids.length === 0) return;
+    transferCancelRequested.current = true;
     setTransfer((prev) => (prev ? { ...prev, cancelling: true } : prev));
     try {
       await Promise.all(ids.map((id) => api.sftpCancel(id).catch(() => false)));
@@ -529,6 +567,7 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
     d: SideState,
     f: { src: string; dest: string; size: number }
   ): Promise<number> {
+    if (transferCancelRequested.current) return 0;
     const transferId = `sftp-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     activeTransferIds.current.add(transferId);
     setTransfer((prev) => (prev ? { ...prev, current: basenameOf(f.src), transferId } : prev));
@@ -540,7 +579,8 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
         return (await api.sftpDownload(s.host, f.src, f.dest, { transferId })).bytes;
       }
       if (s.kind === "remote" && d.kind === "remote") {
-        return (await api.sftpExchange(s.host, f.src, d.host, f.dest)).uploaded.bytes;
+        const result = await api.sftpExchange(s.host, f.src, d.host, f.dest);
+        return result.uploaded.bytes || result.downloaded.bytes || f.size;
       }
       return 0;
     } finally {
@@ -553,6 +593,7 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
     const d = getSide(plan.destSide);
     const started = performance.now();
     setError(null);
+    transferCancelRequested.current = false;
     setTransfer({ total: 0, done: 0, current: t("Preparing…"), bytesDone: 0, bytesTotal: 0 });
     try {
       const { dirs, files } = await buildTransferUnits(plan.sourceSide, plan.destSide, plan.paths);
@@ -576,6 +617,7 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
       let aborted = false;
       const worker = async () => {
         while (!aborted) {
+          if (transferCancelRequested.current) return;
           const i = next++;
           if (i >= files.length) return;
           try {
@@ -584,6 +626,7 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
               prev ? { ...prev, done: prev.done + 1, bytesDone: prev.bytesDone + bytes } : prev
             );
           } catch (err) {
+            if (transferCancelRequested.current) return;
             aborted = true;
             throw err;
           }
@@ -607,6 +650,7 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
         destHost: d.host,
       });
     } finally {
+      transferCancelRequested.current = false;
       setTransfer(null);
     }
   }
@@ -627,12 +671,22 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
     const raw = event.dataTransfer.getData(DRAG_MIME);
     if (!raw) return;
     try {
-      const payload = JSON.parse(raw) as { side: Side; paths: string[] };
+      const payload = JSON.parse(raw);
+      if (
+        typeof payload !== "object" ||
+        payload === null ||
+        (payload.side !== "left" && payload.side !== "right") ||
+        !Array.isArray(payload.paths) ||
+        !payload.paths.every((path: unknown) => typeof path === "string")
+      ) {
+        return;
+      }
+      const paths = payload.paths as string[];
       if (payload.side === destSide) return;
       if (isTransferring) return;
       const sourceSide = payload.side;
       // Reflect the dragged paths as the source selection, then run the normal plan.
-      patchSide(sourceSide, { selected: payload.paths });
+      patchSide(sourceSide, { selected: paths });
       const d = getSide(destSide);
       const unsupported = transferableLabel(sourceSide, destSide);
       if (unsupported) {
@@ -644,8 +698,8 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
         return;
       }
       const destNames = new Set(d.entries.map((e) => e.name));
-      const conflicts = payload.paths.map(basenameOf).filter((name) => destNames.has(name));
-      const plan: PendingTransfer = { sourceSide, destSide, paths: payload.paths, conflicts };
+      const conflicts = paths.map(basenameOf).filter((name) => destNames.has(name));
+      const plan: PendingTransfer = { sourceSide, destSide, paths, conflicts };
       if (conflicts.length > 0) setPending(plan);
       else void executeTransfer(plan);
     } catch (err) {

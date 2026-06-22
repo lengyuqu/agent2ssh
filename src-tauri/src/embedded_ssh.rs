@@ -10,7 +10,7 @@ use std::{
     collections::HashMap,
     io::{ErrorKind, Read, Write},
     net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs},
-    path::Path,
+    path::{Component, Path},
     sync::mpsc,
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -29,7 +29,6 @@ pub struct EmbeddedSshConnectionInfo {
     pub fingerprint_sha256: Option<String>,
     pub host_key_algorithm: Option<String>,
     pub auth_method: String,
-    pub server_banner: Option<String>,
 }
 
 #[derive(Debug)]
@@ -81,6 +80,20 @@ fn expand_tilde(path: &str) -> String {
         }
     }
     path.to_string()
+}
+
+fn validate_key_path(path: &str) -> Result<()> {
+    let raw = path.trim();
+    if raw.is_empty() {
+        return Err(anyhow!("SSH key_path cannot be empty"));
+    }
+    if Path::new(raw)
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(anyhow!("SSH key_path must not contain '..' components"));
+    }
+    Ok(())
 }
 
 fn host_key_algorithm(kind: ssh2::HostKeyType) -> &'static str {
@@ -755,7 +768,6 @@ fn connect_embedded_ssh_inner(
             "auth_method": auth_method,
             "fingerprint_sha256": host_key_fingerprint,
             "host_key_algorithm": host_key_algorithm,
-            "server_banner": session.banner().map(ToOwned::to_owned),
             "jump_host": via_jump,
         })),
     );
@@ -864,6 +876,7 @@ fn authenticate(session: &Session, host: &HostProfile, username: &str) -> Result
         .as_deref()
         .filter(|value| !value.trim().is_empty())
     {
+        validate_key_path(key_path)?;
         let path = expand_tilde(key_path);
         session.userauth_pubkey_file(username, None, Path::new(&path), None)?;
         return Ok("publickey_file".into());
@@ -901,7 +914,6 @@ fn connection_info(
         fingerprint_sha256,
         host_key_algorithm,
         auth_method: auth_method.to_string(),
-        server_banner: session.banner().map(ToOwned::to_owned),
     }
 }
 
@@ -946,7 +958,6 @@ fn run_terminal(
             "fingerprint_sha256": info.fingerprint_sha256,
             "host_key_algorithm": info.host_key_algorithm,
             "auth_method": info.auth_method,
-            "server_banner": info.server_banner,
         })),
     );
 
@@ -1090,6 +1101,13 @@ mod tests {
 
         std::env::remove_var("AGENT2SSH_CONFIG_DIR");
         let _ = std::fs::remove_dir_all(&config_dir);
+    }
+
+    #[test]
+    fn key_path_rejects_parent_components() {
+        assert!(validate_key_path("~/.ssh/id_ed25519").is_ok());
+        assert!(validate_key_path("/tmp/../secret_key").is_err());
+        assert!(validate_key_path("../secret_key").is_err());
     }
 
     #[test]

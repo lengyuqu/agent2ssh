@@ -23,6 +23,19 @@ use crate::{
     },
 };
 
+pub const MAX_COMMAND_BYTES: usize = 16 * 1024;
+
+pub fn validate_command_length(command: &str) -> Result<()> {
+    if command.len() > MAX_COMMAND_BYTES {
+        Err(anyhow!(
+            "command too long: max {} bytes allowed",
+            MAX_COMMAND_BYTES
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 // ── Execution Plan Preview ──────────────────────────────────────────────────
 
 /// Preview of what an execution will do before actually running it.
@@ -511,6 +524,7 @@ pub async fn preview_exec(
     command: &str,
     timeout_secs: Option<u64>,
 ) -> Result<ExecPlan> {
+    validate_command_length(command)?;
     let profile = resolve_host(host)?;
     let timeout = timeout_secs.unwrap_or(60);
     let built_in_risk = classify_risk(command);
@@ -581,6 +595,7 @@ pub async fn preview_exec_multi(
     tags: Option<Vec<String>>,
     timeout_secs: Option<u64>,
 ) -> Result<ExecPlan> {
+    validate_command_length(command)?;
     let timeout = timeout_secs.unwrap_or(60);
 
     let resolved_names = expand_hosts_by_tags(hosts, tags)?;
@@ -779,6 +794,7 @@ pub(crate) async fn exec_ssh_core_with_risk_override(
     request: ExecRequest,
     request_risk_override: Option<RiskLevel>,
 ) -> Result<ExecResult> {
+    validate_command_length(&request.command)?;
     let host = resolve_host(&request.host)?;
     let source = request
         .source

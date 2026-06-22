@@ -18,8 +18,8 @@ use agent2ssh::execution_control::{
 };
 use agent2ssh::forward::*;
 use agent2ssh::gate::{
-    gate_blocks_source, load_execution_gate, save_execution_gate, ExecutionGateMode,
-    ExecutionGateStatus,
+    gate_blocks_source, load_execution_gate, save_execution_gate, source_can_bypass_gate,
+    ExecutionGateMode, ExecutionGateStatus,
 };
 use agent2ssh::health::{collect_health_snapshot, load_health_snapshot};
 use agent2ssh::limits::{load_execution_limits, ExecutionLimitRejection, ExecutionLimiter};
@@ -208,6 +208,30 @@ fn source_or_env(source: Option<String>, default_source: &str) -> String {
     source
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| source_from_env(default_source))
+}
+
+fn source_or_env_for_request(
+    source: Option<String>,
+    default_source: &str,
+) -> Result<String, (StatusCode, Json<ErrorBody>)> {
+    let source = source_or_env(source, default_source);
+    if default_source != "desktop" && source_can_bypass_gate(&source) {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "remote requests cannot claim the desktop execution source",
+        ));
+    }
+    Ok(source)
+}
+
+fn ensure_command_length(command: &str) -> Result<(), (StatusCode, Json<ErrorBody>)> {
+    validate_command_length(command).map_err(|_| {
+        err(
+            StatusCode::BAD_REQUEST,
+            format!("command length exceeds maximum of {MAX_COMMAND_BYTES} bytes"),
+        )
+    })?;
+    Ok(())
 }
 
 fn reject_if_gate_paused(
@@ -937,10 +961,9 @@ async fn exec(
     Json(mut req): Json<ExecRequest>,
 ) -> Result<Json<ExecResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    if req.source.is_none() {
-        req.source = Some(source_from_env("daemon"));
-    }
-    let source = req.source.as_deref().unwrap_or("daemon").to_string();
+    let source = source_or_env_for_request(req.source.clone(), "daemon")?;
+    req.source = Some(source.clone());
+    ensure_command_length(&req.command)?;
     reject_if_gate_paused(&source, &req.host, &req.command)?;
     let targets = vec![(req.host.clone(), host_tags(&req.host))];
     reject_if_rate_limited(&s, &source, &targets, &req.command).await?;
@@ -999,7 +1022,8 @@ async fn exec_multi(
 ) -> Result<Json<ExecMultiBatchResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     tracing::info!(hosts = ?body.hosts, command = %body.command, "exec-multi handler invoked");
-    let source = source_or_env(body.source, "daemon");
+    let source = source_or_env_for_request(body.source, "daemon")?;
+    ensure_command_length(&body.command)?;
     let targets = targets_for_exec_multi(&body.hosts, &body.tags);
     let target_label = target_host_label(&body.hosts, &body.tags);
     reject_if_gate_paused(&source, &target_label, &body.command)?;
@@ -1042,6 +1066,7 @@ async fn exec_compare(
 ) -> Result<Json<ExecComparison>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     tracing::info!(hosts = ?body.hosts, command = %body.command, "exec-compare handler invoked");
+    ensure_command_length(&body.command)?;
     let source = source_from_env("daemon");
     let targets = targets_for_exec_multi(&body.hosts, &body.tags);
     let target_label = target_host_label(&body.hosts, &body.tags);
@@ -1382,16 +1407,17 @@ async fn session_open(
 ) -> Result<Json<IdBody>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     tracing::info!(host = %body.host, "session_open invoked");
-    let source = body.source.as_deref().unwrap_or("daemon");
+    let source = source_or_env_for_request(body.source, "daemon")?;
     let tags = host_tags(&body.host);
-    reject_if_gate_paused(source, &body.host, "session_open")?;
+    reject_if_gate_paused(&source, &body.host, "session_open")?;
     check_daemon_scope(&auth.scope, &body.host, &tags, "session_open")
         .map_err(|e| err(StatusCode::FORBIDDEN, e))?;
     let reservation_id =
-        register_limited_session_for_command(&s, source, &body.host, &tags, "session_open").await?;
+        register_limited_session_for_command(&s, &source, &body.host, &tags, "session_open")
+            .await?;
     let (risk, _) = match authorize_command(
         &auth.scope,
-        source,
+        &source,
         &body.host,
         &tags,
         None,
@@ -1414,14 +1440,14 @@ async fn session_open(
             {
                 let mut limiter = s.limiter.lock().await;
                 limiter.unregister_session(&reservation_id);
-                limiter.register_session(id, source, &body.host, &tags);
+                limiter.register_session(id, &source, &body.host, &tags);
             }
             s.session_input_buffers
                 .lock()
                 .await
                 .insert(id, String::new());
             append_operation_audit(
-                source,
+                &source,
                 &body.host,
                 "session_open",
                 risk,
@@ -1443,7 +1469,7 @@ async fn session_open(
             s.limiter.lock().await.unregister_session(&reservation_id);
             let message = e.to_string();
             append_operation_audit(
-                source,
+                &source,
                 &body.host,
                 "session_open",
                 risk,
@@ -1463,7 +1489,7 @@ async fn session_write(
 ) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     let uuid = Uuid::parse_str(&id).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
-    let source = body.source.as_deref().unwrap_or("daemon");
+    let source = source_or_env_for_request(body.source, "daemon")?;
     let targets = s
         .limiter
         .lock()
@@ -1471,7 +1497,7 @@ async fn session_write(
         .session_target(&uuid)
         .map(|target| vec![target])
         .unwrap_or_else(|| vec![(format!("session:{id}"), Vec::new())]);
-    reject_if_rate_limited(&s, source, &targets, &body.input).await?;
+    reject_if_rate_limited(&s, &source, &targets, &body.input).await?;
     let session_host = targets
         .first()
         .map(|(host, _)| host.clone())
@@ -1480,7 +1506,7 @@ async fn session_write(
         .first()
         .map(|(_, tags)| tags.clone())
         .unwrap_or_default();
-    reject_if_gate_paused(source, &session_host, &body.input)?;
+    reject_if_gate_paused(&source, &session_host, &body.input)?;
     let (completed_commands, next_pending) = {
         let buffers = s.session_input_buffers.lock().await;
         let pending = buffers.get(&uuid).cloned().unwrap_or_default();
@@ -1491,7 +1517,7 @@ async fn session_write(
     for command in &completed_commands {
         let (risk, _) = authorize_command(
             &auth.scope,
-            source,
+            &source,
             &session_host,
             &session_tags,
             None,
@@ -1513,7 +1539,7 @@ async fn session_write(
                 .insert(uuid, next_pending);
             if completed_risks.is_empty() {
                 append_operation_audit(
-                    source,
+                    &source,
                     &session_host,
                     &format!("session write {} bytes", body.input.len()),
                     RiskLevel::Low,
@@ -1524,7 +1550,7 @@ async fn session_write(
             } else {
                 for (command, risk) in &completed_risks {
                     append_operation_audit(
-                        source,
+                        &source,
                         &session_host,
                         &format!("session command {command}"),
                         *risk,
@@ -1548,7 +1574,7 @@ async fn session_write(
         Err(e) => {
             let message = e.to_string();
             append_operation_audit(
-                source,
+                &source,
                 &session_host,
                 &format!("session write {} bytes", body.input.len()),
                 completed_risks
@@ -1571,7 +1597,7 @@ async fn session_read(
 ) -> Result<Json<OutputBody>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     let uuid = Uuid::parse_str(&id).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
-    let source = q.source.as_deref().unwrap_or("daemon");
+    let source = source_or_env_for_request(q.source, "daemon")?;
     let (session_host, session_tags) = s
         .limiter
         .lock()
@@ -1606,19 +1632,19 @@ async fn session_close(
 ) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     let uuid = Uuid::parse_str(&id).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
-    let source = q.source.as_deref().unwrap_or("daemon");
+    let source = source_or_env_for_request(q.source, "daemon")?;
     let (session_host, session_tags) = s
         .limiter
         .lock()
         .await
         .session_target(&uuid)
         .unwrap_or_else(|| (format!("session:{id}"), Vec::new()));
-    reject_if_gate_paused(source, &session_host, "session_close")?;
+    reject_if_gate_paused(&source, &session_host, "session_close")?;
     check_daemon_scope(&auth.scope, &session_host, &session_tags, "session_close")
         .map_err(|e| err(StatusCode::FORBIDDEN, e))?;
     let (risk, _) = authorize_command(
         &auth.scope,
-        source,
+        &source,
         &session_host,
         &session_tags,
         None,
@@ -1635,7 +1661,7 @@ async fn session_close(
     s.limiter.lock().await.unregister_session(&uuid);
     s.session_input_buffers.lock().await.remove(&uuid);
     append_operation_audit(
-        source,
+        &source,
         &session_host,
         "session_close",
         risk,
@@ -1897,6 +1923,7 @@ async fn approval_check(
     Json(body): Json<ApprovalCheckBody>,
 ) -> Result<Json<ApprovalCheckResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    ensure_command_length(&body.command)?;
     let target = command_authorization_target(&body.host);
     let risk = apply_risk_override(
         effective_command_risk(&body.command).await,
@@ -1928,6 +1955,7 @@ async fn risk_check(
     Json(body): Json<RiskCheckBody>,
 ) -> Result<Json<RiskCheckResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    ensure_command_length(&body.command)?;
     let host_override = body
         .host
         .as_deref()
@@ -2124,7 +2152,7 @@ async fn run_playbook(
     Json(body): Json<PlaybookRunBody>,
 ) -> Result<Json<PlaybookRunResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    let source = source_or_env(body.source, "daemon");
+    let source = source_or_env_for_request(body.source, "daemon")?;
     reject_if_gate_paused(&source, &body.host, &format!("playbook:{}", body.playbook))?;
     let targets = vec![(body.host.clone(), host_tags(&body.host))];
     reject_if_rate_limited(
@@ -2320,10 +2348,8 @@ async fn proxy_exec(
     Json(mut req): Json<ExecRequest>,
 ) -> Result<Json<ExecResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    if req.source.is_none() {
-        req.source = Some(source_from_env("daemon_proxy"));
-    }
-    let source = req.source.as_deref().unwrap_or("daemon_proxy").to_string();
+    let source = source_or_env_for_request(req.source.clone(), "daemon_proxy")?;
+    req.source = Some(source.clone());
 
     // If alias is "localhost", execute locally
     if alias == "localhost" {
@@ -2638,7 +2664,6 @@ async fn handle_terminal(
                                 "username": info.username,
                                 "fingerprint_sha256": info.fingerprint_sha256,
                                 "host_key_algorithm": info.host_key_algorithm,
-                                "server_banner": info.server_banner,
                             }).to_string()
                         )).await;
                     }
@@ -2870,11 +2895,28 @@ async fn exec_stream(
                 return;
             }
         };
-        let source = req
-            .source
-            .clone()
-            .unwrap_or_else(|| source_from_env("daemon_ws"));
+        let source = match source_or_env_for_request(req.source.clone(), "daemon_ws") {
+            Ok(source) => source,
+            Err((_, Json(body))) => {
+                let mut s = socket.lock().await;
+                let _ = s
+                    .send(Message::Text(
+                        serde_json::json!({"type":"error","error":body.error}).to_string(),
+                    ))
+                    .await;
+                return;
+            }
+        };
         req.source = Some(source.clone());
+        if let Err((_, Json(body))) = ensure_command_length(&req.command) {
+            let mut s = socket.lock().await;
+            let _ = s
+                .send(Message::Text(
+                    serde_json::json!({"type":"error","error":body.error}).to_string(),
+                ))
+                .await;
+            return;
+        }
         if reject_if_gate_paused(&source, &req.host, &req.command).is_err() {
             let mut s = socket.lock().await;
             let _ = s
@@ -3170,6 +3212,17 @@ mod tests {
         assert!(!token_matches("secret-token-extra", "secret-token"));
         assert!(!token_matches("", ""));
         assert!(!token_matches("anything", "   "));
+    }
+
+    #[test]
+    fn remote_request_source_cannot_claim_desktop() {
+        assert_eq!(
+            source_or_env_for_request(Some("mcp".into()), "daemon").unwrap(),
+            "mcp"
+        );
+
+        let rejection = source_or_env_for_request(Some("desktop".into()), "daemon").unwrap_err();
+        assert_eq!(rejection.0, StatusCode::FORBIDDEN);
     }
 
     #[test]
@@ -3543,6 +3596,7 @@ denied_commands = ["rm *"]
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    std::env::set_var("AGENT2SSH_APPROVAL_PERSIST", "1");
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 

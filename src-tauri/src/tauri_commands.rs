@@ -12,7 +12,7 @@ use crate::{
         save_proxy_core, sftp_download_core_with_source, sftp_ls_core_with_source,
         sftp_mkdir_core_with_source, sftp_stat_core_with_source, sftp_upload_core_with_source,
         sftp_walk_core_with_source, update_host_core, ExecMultiRequest, ImportResult,
-        TeamConfigExport,
+        TeamConfigExport, validate_command_length, MAX_COMMAND_BYTES,
     },
     diagnostics::{
         append_diagnostic_log, clear_diagnostic_logs as clear_diagnostic_logs_core,
@@ -69,6 +69,12 @@ static DESKTOP_SESSION_INPUT_BUFFERS: OnceLock<Mutex<HashMap<Uuid, String>>> = O
 
 fn desktop_session_input_buffers() -> &'static Mutex<HashMap<Uuid, String>> {
     DESKTOP_SESSION_INPUT_BUFFERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn ensure_command_length(command: &str) -> Result<(), String> {
+    validate_command_length(command)
+        .map_err(|_| format!("command length exceeds maximum of {MAX_COMMAND_BYTES} bytes"))?;
+    Ok(())
 }
 
 fn append_operation_audit(
@@ -357,6 +363,7 @@ pub fn import_ssh_config(path: Option<String>) -> Result<Vec<HostProfile>, Strin
 
 #[tauri::command]
 pub async fn classify_command_risk(command: String) -> Result<RiskLevel, String> {
+    ensure_command_length(&command)?;
     Ok(effective_command_risk(&command).await)
 }
 
@@ -365,6 +372,7 @@ pub async fn classify_command_risk_for_host(
     command: String,
     host: Option<String>,
 ) -> Result<RiskLevel, String> {
+    ensure_command_length(&command)?;
     let host_override = host
         .as_deref()
         .and_then(|host| command_authorization_target(host).risk_override);
@@ -379,6 +387,7 @@ pub async fn exec_ssh(mut request: ExecRequest) -> Result<ExecResult, String> {
     if request.source.is_none() {
         request.source = Some(source_from_env("desktop"));
     }
+    ensure_command_length(&request.command)?;
     authorize_desktop_exec_request(&mut request).await?;
     exec_ssh_core(request).await.map_err(|e| e.to_string())
 }
@@ -577,6 +586,7 @@ pub async fn exec_multi(
     timeout_secs: Option<u64>,
     tags: Option<Vec<String>>,
 ) -> Result<Vec<ExecMultiResult>, String> {
+    ensure_command_length(&command)?;
     let source = source_from_env("desktop");
     let approved_hosts =
         authorize_desktop_exec_targets(&hosts, &tags, &command, force, None, None, &source).await?;

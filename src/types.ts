@@ -210,6 +210,7 @@ export type McpAgentConfigStatus = {
   status: string;
   command?: string | null;
   configured_source?: string | null;
+  binding_authenticated: boolean;
   recommended_command: string;
 };
 

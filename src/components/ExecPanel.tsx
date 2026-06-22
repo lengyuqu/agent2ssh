@@ -87,15 +87,27 @@ export default function ExecPanel({ hosts, initialHost = "", onExecComplete }: P
     }
   }
 
-  function handleRun() {
-    if (previewRisk === "high" && !force) {
-      setPendingApproval(true);
-      return;
+  async function handleRun() {
+    if (!targetHost || !command.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const currentRisk = await api.classifyRisk(command, targetHost);
+      setPreviewRisk(currentRisk);
+      if (currentRisk === "blocked") {
+        setError(t("This command is blocked (risk=blocked)."));
+        return;
+      }
+      if (currentRisk === "high" && !force) {
+        setPendingApproval(true);
+        return;
+      }
+    } catch (err) {
+      reportError("exec-panel", "risk check failed before run", err);
+    } finally {
+      setBusy(false);
     }
-    if (previewRisk === "blocked") {
-      setError(t("This command is blocked (risk=blocked)."));
-      return;
-    }
+
     runCommand();
   }
 
@@ -144,7 +156,7 @@ export default function ExecPanel({ hosts, initialHost = "", onExecComplete }: P
               className="min-h-16"
               value={stdin}
               onChange={(e) => setStdin(e.target.value)}
-              placeholder="optional input..."
+              placeholder={t("optional input...")}
             />
           </label>
           <div className="grid grid-cols-2 gap-2.5">

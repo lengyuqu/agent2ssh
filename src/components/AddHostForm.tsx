@@ -1,6 +1,6 @@
 import { FileKey, Plus, X } from "lucide-react";
 import { FormEvent, useEffect, useState } from "react";
-import { api } from "../api";
+import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
 import type { HostGroup, HostProfile, ProxyProfile, SshKeyInfo } from "../types";
 import { Button } from "./ui/button";
@@ -35,7 +35,7 @@ type Props = {
   initialGroup: string;
   editingHost?: HostProfile | null;
   onCancelEdit?: () => void;
-  onSaved: () => void;
+  onSaved: () => void | Promise<void>;
 };
 
 function formFromHost(host: HostProfile) {
@@ -70,6 +70,8 @@ export default function AddHostForm({
   const { t } = useI18n();
   const [form, setForm] = useState(emptyForm);
   const [keys, setKeys] = useState<SshKeyInfo[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
   const isEditing = Boolean(editingHost);
 
   useEffect(() => {
@@ -78,10 +80,17 @@ export default function AddHostForm({
 
   useEffect(() => {
     setForm(editingHost ? formFromHost(editingHost) : { ...emptyForm, group: initialGroup || "default" });
+    setError(null);
   }, [editingHost, initialGroup]);
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
+    setError(null);
+    const keyPath = form.key_path.trim();
+    if (form.auth_mode !== "password" && !keyPath) {
+      setError(t("Select or enter an SSH key before saving this host."));
+      return;
+    }
     const tags = form.tags
       .split(",")
       .map((t) => t.trim())
@@ -91,7 +100,7 @@ export default function AddHostForm({
       host: form.host.trim(),
       user: form.user.trim() || null,
       port: form.port || null,
-      key_path: form.auth_mode === "password" ? null : form.key_path.trim() || null,
+      key_path: form.auth_mode === "password" ? null : keyPath,
       password: form.auth_mode === "password" ? form.password || null : null,
       jump_host: form.jump_host.trim() || null,
       proxy_id: form.proxy_id.trim() || null,
@@ -101,14 +110,25 @@ export default function AddHostForm({
       role: form.role.trim() || null,
       owner: form.owner.trim() || null,
     };
-    if (editingHost) {
-      await api.updateHost(editingHost.name, hostPayload);
-    } else {
-      await api.addHost(hostPayload);
+    setSaving(true);
+    try {
+      if (editingHost) {
+        await api.updateHost(editingHost.name, hostPayload);
+      } else {
+        await api.addHost(hostPayload);
+      }
+      await onSaved();
+      setForm(emptyForm);
+      onCancelEdit?.();
+    } catch (err) {
+      setError(t("Failed to save host: {error}", { error: String(err) }));
+      reportError("add-host-form", "save host failed", err, {
+        name: hostPayload.name,
+        editing: Boolean(editingHost),
+      });
+    } finally {
+      setSaving(false);
     }
-    setForm(emptyForm);
-    onCancelEdit?.();
-    onSaved();
   }
 
   const otherHosts = hosts.filter((h) => h.name !== (editingHost?.name ?? form.name));
@@ -125,6 +145,11 @@ export default function AddHostForm({
         )}
       </div>
       <form className="grid gap-3.5" onSubmit={handleSubmit}>
+        {error && (
+          <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+            {error}
+          </div>
+        )}
         <label className={labelCls}>
           {t("Alias")}
           <Input
@@ -299,9 +324,9 @@ export default function AddHostForm({
             ))}
           </Select>
         </label>
-        <Button variant="secondary" type="submit" className="w-full">
+        <Button variant="secondary" type="submit" className="w-full" disabled={saving}>
           <FileKey size={16} />
-          {isEditing ? t("Update host") : t("Save host")}
+          {saving ? t("Saving...") : isEditing ? t("Update host") : t("Save host")}
         </Button>
       </form>
     </Card>

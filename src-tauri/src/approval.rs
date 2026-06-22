@@ -93,10 +93,65 @@ static APPROVALS: OnceLock<Mutex<ApprovalStore>> = OnceLock::new();
 
 fn store() -> &'static Mutex<ApprovalStore> {
     APPROVALS.get_or_init(|| {
-        Mutex::new(ApprovalStore {
-            requests: HashMap::new(),
-        })
+        Mutex::new(
+            load_persisted_approval_store().unwrap_or_else(|_| ApprovalStore {
+                requests: HashMap::new(),
+            }),
+        )
     })
+}
+
+fn approval_persistence_enabled() -> bool {
+    std::env::var("AGENT2SSH_APPROVAL_PERSIST").as_deref() == Ok("1")
+}
+
+fn approval_store_path() -> Result<PathBuf> {
+    Ok(crate::store::config_dir()?.join("approvals.json"))
+}
+
+fn load_persisted_approval_store() -> Result<ApprovalStore> {
+    if !approval_persistence_enabled() {
+        return Ok(ApprovalStore {
+            requests: HashMap::new(),
+        });
+    }
+    let path = approval_store_path()?;
+    if !path.exists() {
+        return Ok(ApprovalStore {
+            requests: HashMap::new(),
+        });
+    }
+    let raw = std::fs::read_to_string(&path)?;
+    let requests: Vec<ApprovalRequest> = serde_json::from_str(&raw)?;
+    Ok(ApprovalStore {
+        requests: requests
+            .into_iter()
+            .map(|request| (request.id, request))
+            .collect(),
+    })
+}
+
+fn persist_approval_store(store: &ApprovalStore) {
+    if !approval_persistence_enabled() {
+        return;
+    }
+    let result = (|| -> Result<()> {
+        crate::store::ensure_config_dir()?;
+        let path = approval_store_path()?;
+        let mut requests = store.requests.values().cloned().collect::<Vec<_>>();
+        requests.sort_by_key(|request| request.requested_at);
+        std::fs::write(&path, serde_json::to_string_pretty(&requests)?)?;
+        crate::store::restrict_file_to_owner(&path)?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        let _ = crate::diagnostics::append_diagnostic_log(
+            "warn",
+            "approval",
+            "failed to persist approval store",
+            Some(serde_json::json!({ "error": error.to_string() })),
+        );
+    }
 }
 
 pub async fn approval_request(host: &str, command: &str, risk_level: RiskLevel) -> Uuid {
@@ -121,7 +176,11 @@ pub async fn approval_request_with_ttl(
         status: ApprovalStatus::Pending,
         context: None,
     };
-    store().lock().await.requests.insert(id, req);
+    {
+        let mut s = store().lock().await;
+        s.requests.insert(id, req);
+        persist_approval_store(&s);
+    }
     crate::events::publish_event(
         crate::events::EventType::ApprovalRequested,
         serde_json::json!({
@@ -153,7 +212,11 @@ pub async fn approval_request_with_context(
         status: ApprovalStatus::Pending,
         context: Some(context),
     };
-    store().lock().await.requests.insert(id, req);
+    {
+        let mut s = store().lock().await;
+        s.requests.insert(id, req);
+        persist_approval_store(&s);
+    }
     crate::events::publish_event(
         crate::events::EventType::ApprovalRequested,
         serde_json::json!({
@@ -167,52 +230,60 @@ pub async fn approval_request_with_context(
 }
 
 pub async fn approval_poll(id: Uuid) -> Option<ApprovalStatus> {
-    let s = store().lock().await;
-    s.requests.get(&id).map(|r| {
+    let mut s = store().lock().await;
+    let mut changed = false;
+    let status = s.requests.get_mut(&id).map(|r| {
         if r.status == ApprovalStatus::Pending {
             let elapsed = Utc::now().signed_duration_since(r.requested_at);
             if elapsed.num_seconds() as u64 > r.ttl_secs {
-                ApprovalStatus::TimedOut
-            } else {
-                ApprovalStatus::Pending
+                r.status = ApprovalStatus::TimedOut;
+                changed = true;
             }
-        } else {
-            r.status
         }
-    })
+        r.status
+    });
+    if changed {
+        persist_approval_store(&s);
+    }
+    status
 }
 
 pub async fn approval_respond(id: Uuid, approved: bool) -> Result<()> {
     let mut s = store().lock().await;
-    let req = s
-        .requests
-        .get_mut(&id)
-        .ok_or_else(|| anyhow!("unknown approval: {id}"))?;
+    let status = {
+        let req = s
+            .requests
+            .get_mut(&id)
+            .ok_or_else(|| anyhow!("unknown approval: {id}"))?;
 
-    // Check TTL expiration first, regardless of current status
-    let elapsed = Utc::now().signed_duration_since(req.requested_at);
-    if elapsed.num_seconds() as u64 > req.ttl_secs {
-        if req.status == ApprovalStatus::Pending {
-            req.status = ApprovalStatus::TimedOut;
+        // Check TTL expiration first, regardless of current status
+        let elapsed = Utc::now().signed_duration_since(req.requested_at);
+        if elapsed.num_seconds() as u64 > req.ttl_secs {
+            if req.status == ApprovalStatus::Pending {
+                req.status = ApprovalStatus::TimedOut;
+            }
+            return Err(anyhow!("approval {id} has timed out"));
         }
-        return Err(anyhow!("approval {id} has timed out"));
-    }
 
-    if req.status != ApprovalStatus::Pending {
-        return Err(anyhow!("approval {id} already {:?}", req.status));
-    }
+        if req.status != ApprovalStatus::Pending {
+            return Err(anyhow!("approval {id} already {:?}", req.status));
+        }
 
-    req.status = if approved {
-        ApprovalStatus::Approved
-    } else {
-        ApprovalStatus::Rejected
+        let status = if approved {
+            ApprovalStatus::Approved
+        } else {
+            ApprovalStatus::Rejected
+        };
+        req.status = status;
+        status
     };
+    persist_approval_store(&s);
     crate::events::publish_event(
         crate::events::EventType::ApprovalResponded,
         serde_json::json!({
             "id": id.to_string(),
             "approved": approved,
-            "status": format!("{:?}", req.status),
+            "status": format!("{:?}", status),
         }),
     );
     Ok(())
@@ -229,6 +300,7 @@ pub async fn approval_list() -> Vec<ApprovalRequest> {
             }
         }
     }
+    persist_approval_store(&s);
     s.requests.values().cloned().collect()
 }
 

@@ -82,24 +82,29 @@ export default function TerminalView({ host, terminalTheme, appTheme }: Props) {
       ws.onmessage = (ev) => {
         if (typeof ev.data === "string") {
           try {
-            const message = JSON.parse(ev.data) as {
-              type?: string;
-              error?: string;
-              host?: string;
-              username?: string;
-              fingerprint_sha256?: string;
-              host_key_algorithm?: string;
-            };
+            const parsed = JSON.parse(ev.data);
+            if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+              term.write(ev.data);
+              return;
+            }
+            const message = parsed as Record<string, unknown>;
             if (message.type === "error" && message.error) {
-              term.writeln(`\r\n\x1b[31m${message.error}\x1b[0m`);
+              term.writeln(`\r\n\x1b[31m${String(message.error)}\x1b[0m`);
               return;
             }
             if (message.type === "connected") {
-              const fingerprint = message.fingerprint_sha256
-                ? ` ${message.host_key_algorithm ?? "host-key"} ${message.fingerprint_sha256}`
+              const fingerprint =
+                typeof message.fingerprint_sha256 === "string"
+                  ? ` ${
+                      typeof message.host_key_algorithm === "string"
+                        ? message.host_key_algorithm
+                        : "host-key"
+                    } ${message.fingerprint_sha256}`
                 : "";
               term.writeln(
-                `\x1b[2m— connected to ${message.username ?? "user"}@${message.host ?? host}${fingerprint} —\x1b[0m`
+                `\x1b[2m— connected to ${
+                  typeof message.username === "string" ? message.username : "user"
+                }@${typeof message.host === "string" ? message.host : host}${fingerprint} —\x1b[0m`
               );
               return;
             }

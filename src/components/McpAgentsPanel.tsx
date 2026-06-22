@@ -145,6 +145,7 @@ export default function McpAgentsPanel() {
       <div className="grid gap-2.5">
         {agents.map((agent) => {
           const invalid = agent.status.startsWith("invalid_config");
+          const needsRebind = agent.status === "needs_rebind";
           const busy = configuring !== null || uninstalling !== null;
           return (
             <div
@@ -159,11 +160,15 @@ export default function McpAgentsPanel() {
                   })()}
                   <strong>{agent.name}</strong>
                   <Badge
-                    variant={agent.configured ? "success" : agent.detected ? "default" : "secondary"}
+                    variant={
+                      agent.configured ? "success" : needsRebind ? "destructive" : agent.detected ? "default" : "secondary"
+                    }
                   >
                     {agent.configured
                       ? t("Configured")
-                      : agent.detected
+                      : needsRebind
+                        ? t("Rebind required")
+                        : agent.detected
                         ? t("Detected")
                         : t("Not detected")}
                   </Badge>
@@ -217,13 +222,15 @@ export default function McpAgentsPanel() {
                     ? t("Configuring...")
                     : agent.configured
                       ? t("Update")
+                      : needsRebind
+                        ? t("Rebind")
                       : t("Configure")}
                 </Button>
                 <Button
                   variant="destructive"
                   size="sm"
                   onClick={() => uninstall(agent)}
-                  disabled={busy || !agent.configured || invalid}
+                  disabled={busy || (!agent.configured && !agent.command) || invalid}
                   title={t("Uninstall MCP binding")}
                 >
                   <Trash2 size={14} />

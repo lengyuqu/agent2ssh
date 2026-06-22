@@ -16,6 +16,7 @@ use crate::store::{
 const SYNC_VERSION_FILE: &str = "sync_version.json";
 const BACKUP_DIR: &str = "backups";
 const REMOTE_FILES_DIR: &str = "files";
+const SYNC_MARKER_CLIENT_VERSION: &str = "redacted";
 
 /// Files that are safe and useful to move across machines. This intentionally
 /// excludes local SSH trust state, daemon tokens, audit/log data, private SSH
@@ -348,7 +349,7 @@ fn marker(global_version: u64, direction: &str, files: Vec<WebDavSyncFile>) -> W
         global_version,
         sync_id: uuid::Uuid::new_v4().to_string(),
         updated_at: Utc::now(),
-        app_version: env!("CARGO_PKG_VERSION").to_string(),
+        app_version: SYNC_MARKER_CLIENT_VERSION.to_string(),
         direction: direction.to_string(),
         files,
     }
@@ -492,7 +493,7 @@ pub async fn webdav_pull(options: WebDavSyncOptions) -> Result<WebDavSyncResult>
         direction: "pull".into(),
         sync_id: uuid::Uuid::new_v4().to_string(),
         updated_at: Utc::now(),
-        app_version: env!("CARGO_PKG_VERSION").to_string(),
+        app_version: SYNC_MARKER_CLIENT_VERSION.to_string(),
         files: applied_files.clone(),
         ..remote_marker.clone()
     };

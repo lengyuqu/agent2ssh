@@ -23,10 +23,17 @@ type Props = {
 
 type Tab = { id: string; host: string };
 
-let counter = 0;
+type WindowWithTerminalSeq = Window & {
+  __agent2sshTerminalSeq?: number;
+};
+
 function nextId(): string {
-  counter += 1;
-  return `term-${counter}-${Date.now()}`;
+  if (typeof window === "undefined") {
+    return `term-${Date.now()}`;
+  }
+  const next = ((window as WindowWithTerminalSeq).__agent2sshTerminalSeq ?? 0) + 1;
+  (window as WindowWithTerminalSeq).__agent2sshTerminalSeq = next;
+  return `term-${next}-${Date.now()}`;
 }
 
 function initialTerminalTheme(): TerminalThemeId {

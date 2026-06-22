@@ -14,6 +14,15 @@ fn mcp_bin() -> std::path::PathBuf {
     env!("CARGO_BIN_EXE_agent2ssh-mcp").into()
 }
 
+fn write_mcp_test_binding(config_dir: &std::path::Path, source: &str, key: &str) {
+    std::fs::create_dir_all(config_dir).expect("create MCP test config dir");
+    std::fs::write(
+        config_dir.join("mcp_bindings.json"),
+        serde_json::json!({ "keys": { source: key } }).to_string(),
+    )
+    .expect("write MCP binding file");
+}
+
 // ── Help flags ────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -112,7 +121,16 @@ async fn mcp_stdio_end_to_end_initialize_tools_and_risk() {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::process::Command;
 
+    let config_dir =
+        std::env::temp_dir().join(format!("agent2ssh-mcp-stdio-{}", uuid::Uuid::new_v4()));
+    let source = "cli_smoke";
+    let binding_key = "test-binding-key";
+    write_mcp_test_binding(&config_dir, source, binding_key);
+
     let mut child = Command::new(mcp_bin())
+        .env("AGENT2SSH_CONFIG_DIR", &config_dir)
+        .env("AGENT2SSH_SOURCE", source)
+        .env("AGENT2SSH_BINDING_KEY", binding_key)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -211,6 +229,7 @@ async fn mcp_stdio_end_to_end_initialize_tools_and_risk() {
 
     let status = child.wait().await.expect("failed waiting for MCP process");
     assert!(status.success());
+    let _ = std::fs::remove_dir_all(config_dir);
 }
 
 #[tokio::test]
@@ -244,6 +263,9 @@ async fn mcp_remote_daemon_invalid_json_returns_contextual_error() {
         uuid::Uuid::new_v4()
     ));
     std::fs::create_dir_all(&config_dir).expect("create temp config dir");
+    let source = "cli_smoke";
+    let binding_key = "test-binding-key";
+    write_mcp_test_binding(&config_dir, source, binding_key);
     std::fs::write(
         config_dir.join("remotes.toml"),
         format!(
@@ -259,6 +281,8 @@ token = "tok"
 
     let mut child = Command::new(mcp_bin())
         .env("AGENT2SSH_CONFIG_DIR", &config_dir)
+        .env("AGENT2SSH_SOURCE", source)
+        .env("AGENT2SSH_BINDING_KEY", binding_key)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

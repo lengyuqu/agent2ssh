@@ -28,10 +28,16 @@ export default function AuditPanel({ audit, onRefresh }: Props) {
   const [limit, setLimit] = useState(50);
   const [renderCap, setRenderCap] = useState(RENDER_CAP_STEP);
 
+  function parseLimit(value: string): number {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return 50;
+    return Math.min(500, Math.max(1, Math.trunc(parsed)));
+  }
+
   function applyFilters() {
     setRenderCap(RENDER_CAP_STEP);
     const filter: AuditFilter = {
-      limit,
+      limit: parseLimit(String(limit)),
       host: hostFilter.trim() || null,
       risk_level: riskFilter || null,
     };
@@ -93,7 +99,7 @@ export default function AuditPanel({ audit, onRefresh }: Props) {
               min={1}
               max={500}
               value={limit}
-              onChange={(e) => setLimit(Number(e.target.value))}
+              onChange={(e) => setLimit(parseLimit(e.target.value))}
             />
           </label>
           <div className="flex items-end gap-1.5">

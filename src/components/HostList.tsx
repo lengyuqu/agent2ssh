@@ -319,9 +319,9 @@ export default function HostList({
                 )}
                 {(host.env || host.role || host.owner) && (
                   <span className="mt-1 flex flex-wrap gap-1.5 text-[10px] text-muted-foreground">
-                    {host.env && <span>env={host.env}</span>}
-                    {host.role && <span>role={host.role}</span>}
-                    {host.owner && <span>owner={host.owner}</span>}
+                    {host.env && <span>{t("env={value}", { value: host.env })}</span>}
+                    {host.role && <span>{t("role={value}", { value: host.role })}</span>}
+                    {host.owner && <span>{t("owner={value}", { value: host.owner })}</span>}
                   </span>
                 )}
               </button>

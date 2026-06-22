@@ -114,7 +114,7 @@ export default function App() {
     [currentHost?.proxy_id, proxies]
   );
 
-  async function refresh() {
+  const refresh = useCallback(async () => {
     const [hostList, groupList, proxyList] = await Promise.all([
       api.listHosts(),
       api.listHostGroups(),
@@ -123,8 +123,13 @@ export default function App() {
     setHosts(hostList);
     setGroups(groupList.length > 0 ? groupList : [{ id: "default", name: "Default" }]);
     setProxies(proxyList);
-    if (!selectedHost && hostList.length > 0) setSelectedHost(hostList[0].name);
-  }
+    setSelectedHost((current) => {
+      if (current && hostList.some((host) => host.name === current)) {
+        return current;
+      }
+      return hostList[0]?.name ?? "";
+    });
+  }, []);
 
   const refreshAudit = useCallback(async (filter?: AuditFilter) => {
     const auditList = await api.listAudit(filter);
@@ -221,7 +226,7 @@ export default function App() {
     refresh()
       .catch((err) => setError(String(err)))
       .finally(() => setLoading(false));
-  }, []);
+  }, [refresh]);
 
   useEffect(() => {
     if (activeModule !== "audit") return;

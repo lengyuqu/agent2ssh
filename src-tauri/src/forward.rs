@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use std::{
     collections::HashMap,
     io::{ErrorKind, Read, Write},
-    net::{Shutdown, TcpListener, TcpStream},
+    net::{IpAddr, Shutdown, TcpListener, TcpStream},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, OnceLock,
@@ -48,6 +48,15 @@ fn resolve_host(name: &str) -> Result<HostProfile> {
         .ok_or_else(|| anyhow!("unknown host profile: {name}"))
 }
 
+fn remote_forward_target_allowed(target_host: &str) -> bool {
+    let normalized = target_host.trim().trim_matches(['[', ']']);
+    normalized.eq_ignore_ascii_case("localhost")
+        || normalized
+            .parse::<IpAddr>()
+            .map(|addr| addr.is_loopback())
+            .unwrap_or(false)
+}
+
 pub async fn forward_add_core(
     host_name: &str,
     direction: ForwardDirection,
@@ -56,6 +65,12 @@ pub async fn forward_add_core(
     target_port: u16,
 ) -> Result<ForwardRule> {
     let host = resolve_host(host_name)?;
+    if direction == ForwardDirection::Remote && !remote_forward_target_allowed(target_host) {
+        return Err(anyhow!(
+            "remote forward target_host must be loopback; got '{}'",
+            target_host
+        ));
+    }
     let rule = ForwardRule {
         id: Uuid::new_v4(),
         host: host_name.to_string(),
@@ -297,4 +312,21 @@ pub async fn forward_remove_core(id: Uuid) -> Result<()> {
         return Err(anyhow!("unknown forward: {id}"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::remote_forward_target_allowed;
+
+    #[test]
+    fn remote_forward_target_allows_only_loopback() {
+        assert!(remote_forward_target_allowed("localhost"));
+        assert!(remote_forward_target_allowed("127.0.0.1"));
+        assert!(remote_forward_target_allowed("::1"));
+        assert!(remote_forward_target_allowed("[::1]"));
+
+        assert!(!remote_forward_target_allowed("10.0.0.5"));
+        assert!(!remote_forward_target_allowed("metadata.google.internal"));
+        assert!(!remote_forward_target_allowed("example.com"));
+    }
 }

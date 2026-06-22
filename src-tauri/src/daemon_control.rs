@@ -54,7 +54,21 @@ pub fn process_is_alive(pid: u32) -> bool {
     let pid = sysinfo::Pid::from_u32(pid);
     let mut system = sysinfo::System::new();
     system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
-    system.process(pid).is_some()
+    system
+        .process(pid)
+        .map(process_looks_like_daemon)
+        .unwrap_or(false)
+}
+
+fn process_looks_like_daemon(process: &sysinfo::Process) -> bool {
+    let name = process.name().to_string_lossy();
+    if name.contains("agent2ssh-daemon") {
+        return true;
+    }
+    process
+        .cmd()
+        .iter()
+        .any(|part| part.to_string_lossy().contains("agent2ssh-daemon"))
 }
 
 pub fn terminate_process(pid: u32) -> Result<()> {
