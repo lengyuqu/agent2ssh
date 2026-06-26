@@ -437,7 +437,7 @@ mod tests {
             ..Default::default()
         };
         let current = audit("cli", "terraform destroy -auto-approve", RiskLevel::High, 0);
-        let findings = detect_anomalies(&[current.clone()], &current, &config);
+        let findings = detect_anomalies(std::slice::from_ref(&current), &current, &config);
         assert!(findings
             .iter()
             .any(|f| f.kind == AnomalyKind::SensitivePattern));

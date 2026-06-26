@@ -1170,7 +1170,7 @@ mod tests {
     #[test]
     fn test_diagnostic_overall_status_aggregation() {
         // All ok → overall ok
-        let checks = vec![
+        let checks = [
             DiagnosticCheck {
                 name: "a".into(),
                 status: DiagnosticStatus::Ok,
@@ -1194,7 +1194,7 @@ mod tests {
         assert_eq!(overall, DiagnosticStatus::Ok);
 
         // Any warning → overall warning
-        let checks2 = vec![
+        let checks2 = [
             DiagnosticCheck {
                 name: "a".into(),
                 status: DiagnosticStatus::Ok,
@@ -1221,7 +1221,7 @@ mod tests {
         assert_eq!(overall2, DiagnosticStatus::Warning);
 
         // Any error → overall error
-        let checks3 = vec![
+        let checks3 = [
             DiagnosticCheck {
                 name: "a".into(),
                 status: DiagnosticStatus::Warning,

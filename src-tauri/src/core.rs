@@ -1816,11 +1816,7 @@ fn sftp_parent_paths(path: &str) -> Vec<PathBuf> {
         .split('/')
         .filter(|part| !part.is_empty() && *part != ".")
     {
-        if part == ".." {
-            current.push(part);
-        } else {
-            current.push(part);
-        }
+        current.push(part);
         out.push(current.clone());
     }
     out
@@ -2049,7 +2045,7 @@ fn walk_remote_dir(
     let mut entries = sftp
         .readdir(Path::new(abs_dir))
         .with_context(|| format!("failed to list remote directory {abs_dir}"))?;
-    entries.sort_by(|(left, _), (right, _)| sftp_entry_name(left).cmp(&sftp_entry_name(right)));
+    entries.sort_by_key(|(entry, _)| sftp_entry_name(entry));
     for (entry_path, stat) in entries {
         let name = sftp_entry_name(&entry_path);
         if name == "." || name == ".." {
@@ -3395,7 +3391,7 @@ mod tests {
     #[test]
     fn test_batch_strategy_max_failures_stops_early() {
         // Simulate: 5 hosts, max_failures=2, after 2 failures remaining hosts skipped
-        let hosts = vec!["h1", "h2", "h3", "h4", "h5"];
+        let hosts = ["h1", "h2", "h3", "h4", "h5"];
         let max_failures = 2usize;
 
         // Simulate results: h1=error, h2=error -> 2 failures, stop

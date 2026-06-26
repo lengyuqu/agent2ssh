@@ -3,6 +3,7 @@ use serde_json::{json, Value};
 use super::McpError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)]
 pub(super) enum McpTool {
     SshListHosts,
     SshListDaemons,

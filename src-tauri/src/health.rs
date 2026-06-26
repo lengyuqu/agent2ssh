@@ -69,7 +69,7 @@ pub async fn collect_health_snapshot(
             )
             .await;
             match result {
-                Ok(Ok(Ok((stdout, _stderr, exit_code)))) if exit_code == Some(0) => {
+                Ok(Ok(Ok((stdout, _stderr, Some(0))))) => {
                     let latency_ms = conn_start.elapsed().as_millis() as u64;
                     let parsed = parse_health_output(&stdout);
                     HostHealthSnapshot {

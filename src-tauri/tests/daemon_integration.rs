@@ -1962,7 +1962,7 @@ fn audit_export_response_contract() {
     use chrono::Utc;
     use uuid::Uuid;
 
-    let entries = vec![AuditEntry {
+    let entries = [AuditEntry {
         id: Uuid::new_v4(),
         ts: Utc::now(),
         host: "test".into(),

@@ -266,7 +266,7 @@ pub fn collect_sync_files() -> Result<Vec<WebDavSyncFile>> {
 }
 
 fn validate_remote_file(path: &str) -> Result<()> {
-    if SYNCABLE_FILES.iter().any(|item| *item == path) || is_legacy_unsyncable_remote_file(path) {
+    if SYNCABLE_FILES.contains(&path) || is_legacy_unsyncable_remote_file(path) {
         Ok(())
     } else {
         Err(anyhow!(
@@ -276,9 +276,7 @@ fn validate_remote_file(path: &str) -> Result<()> {
 }
 
 fn is_legacy_unsyncable_remote_file(path: &str) -> bool {
-    LEGACY_UNSYNCABLE_REMOTE_FILES
-        .iter()
-        .any(|item| *item == path)
+    LEGACY_UNSYNCABLE_REMOTE_FILES.contains(&path)
 }
 
 pub fn create_sync_backup() -> Result<PathBuf> {

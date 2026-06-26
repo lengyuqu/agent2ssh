@@ -92,7 +92,7 @@ pub fn verify_mcp_binding_from_env() -> Result<String> {
             "MCP binding key is invalid; reconfigure the MCP binding"
         ));
     }
-    Ok(normalize_source(&source)?)
+    normalize_source(&source)
 }
 
 #[cfg(test)]

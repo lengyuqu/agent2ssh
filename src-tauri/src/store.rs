@@ -461,7 +461,7 @@ fn normalize_config(mut config: AppConfig) -> AppConfig {
     });
     config
         .proxies
-        .sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        .sort_by_key(|proxy| proxy.name.to_lowercase());
     let valid_proxies: std::collections::HashSet<String> = config
         .proxies
         .iter()
@@ -1999,7 +1999,7 @@ mod tests {
         use chrono::Utc;
         use uuid::Uuid;
 
-        let entries = vec![
+        let entries = [
             AuditEntry {
                 id: Uuid::new_v4(),
                 ts: Utc::now(),

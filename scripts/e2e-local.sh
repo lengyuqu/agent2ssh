@@ -7,6 +7,12 @@ cd "$ROOT"
 echo "==> Frontend build"
 npm run build
 
+echo "==> Rust format check"
+cargo fmt --manifest-path src-tauri/Cargo.toml --check
+
+echo "==> Rust Clippy"
+cargo clippy --manifest-path src-tauri/Cargo.toml --no-default-features --all-targets -- -D warnings
+
 echo "==> Rust library tests"
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib
 
@@ -27,5 +33,8 @@ TARGET="$(rustc -vV | sed -n 's/^host: //p')"
 cargo build --manifest-path src-tauri/Cargo.toml --release --target "$TARGET" --no-default-features --bin agent2ssh --bin agent2ssh-mcp
 cargo build --manifest-path src-tauri/Cargo.toml --release --target "$TARGET" --no-default-features --features daemon --bin agent2ssh-daemon
 ./scripts/prepare-sidecars.sh "$TARGET"
+
+echo "==> Git diff whitespace check"
+git diff --check
 
 echo "==> Done"

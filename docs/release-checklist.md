@@ -21,6 +21,12 @@
   ```bash
   npm run build
   ```
+- [ ] 本地运行格式、Clippy 和 diff 卫生检查，确保无 warning / whitespace error：
+  ```bash
+  cargo fmt --manifest-path src-tauri/Cargo.toml --check
+  cargo clippy --manifest-path src-tauri/Cargo.toml --no-default-features --all-targets -- -D warnings
+  git diff --check
+  ```
 - [ ] 本地运行 Rust 测试，确保全部通过（两套配置均需零 warning）：
   ```bash
   cargo test --manifest-path src-tauri/Cargo.toml --no-default-features

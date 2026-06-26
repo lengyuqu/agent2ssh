@@ -47,6 +47,12 @@ struct RetainedConnection {
     health: Arc<StdMutex<ConnectionHealth>>,
 }
 
+type ConnectionHandleSnapshot = (
+    String,
+    Arc<StdMutex<Option<Session>>>,
+    Arc<StdMutex<ConnectionHealth>>,
+);
+
 static CONNECTIONS: OnceLock<Mutex<HashMap<String, RetainedConnection>>> = OnceLock::new();
 static HOST_LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
 static SUPERVISOR_STARTED: AtomicBool = AtomicBool::new(false);
@@ -171,11 +177,7 @@ fn ensure_supervisor_running() {
 /// One supervision pass over all retained connections.
 async fn supervise_all() {
     // Snapshot host names + handles so we don't hold the map lock across awaits.
-    let handles: Vec<(
-        String,
-        Arc<StdMutex<Option<Session>>>,
-        Arc<StdMutex<ConnectionHealth>>,
-    )> = {
+    let handles: Vec<ConnectionHandleSnapshot> = {
         let store = connections().lock().await;
         store
             .iter()

@@ -187,7 +187,7 @@ fn fill_entropy(seed: &mut [u8]) -> Result<()> {
 
             arc4random_buf(seed.as_mut_ptr().cast::<c_void>(), seed.len());
         }
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(target_os = "windows")]
@@ -314,6 +314,38 @@ pub fn import_key_core(source_path: &str, name: Option<&str>) -> Result<SshKeyIn
     })
 }
 
+/// Delete a key pair from the keys directory
+pub fn delete_key_core(name: &str) -> Result<()> {
+    validate_key_name(name)?;
+    let dir = keys_dir()?;
+    let private = dir.join(name);
+    let public = dir.join(format!("{}.pub", name));
+
+    if !private.exists() {
+        return Err(anyhow!("key '{}' not found", name));
+    }
+
+    std::fs::remove_file(&private)?;
+    if public.exists() {
+        let _ = std::fs::remove_file(&public);
+    }
+    Ok(())
+}
+
+fn expand_tilde(path: &str) -> String {
+    if path == "~" {
+        return dirs::home_dir()
+            .map(|h| h.display().to_string())
+            .unwrap_or_else(|| path.to_string());
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest).display().to_string();
+        }
+    }
+    path.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,19 +354,19 @@ mod tests {
     fn entropy_source_name() -> &'static str {
         #[cfg(target_os = "linux")]
         {
-            return "linux-urandom";
+            "linux-urandom"
         }
         #[cfg(target_os = "macos")]
         {
-            return "macos-arc4random";
+            "macos-arc4random"
         }
         #[cfg(target_os = "windows")]
         {
-            return "windows-BCryptGenRandom";
+            "windows-BCryptGenRandom"
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
         {
-            return "fallback-getrandom";
+            "fallback-getrandom"
         }
     }
 
@@ -409,36 +441,4 @@ mod tests {
         assert!(validate_key_name("nested\\id_ed25519").is_err());
         assert!(validate_key_name("id_ed25519").is_ok());
     }
-}
-
-/// Delete a key pair from the keys directory
-pub fn delete_key_core(name: &str) -> Result<()> {
-    validate_key_name(name)?;
-    let dir = keys_dir()?;
-    let private = dir.join(name);
-    let public = dir.join(format!("{}.pub", name));
-
-    if !private.exists() {
-        return Err(anyhow!("key '{}' not found", name));
-    }
-
-    std::fs::remove_file(&private)?;
-    if public.exists() {
-        let _ = std::fs::remove_file(&public);
-    }
-    Ok(())
-}
-
-fn expand_tilde(path: &str) -> String {
-    if path == "~" {
-        return dirs::home_dir()
-            .map(|h| h.display().to_string())
-            .unwrap_or_else(|| path.to_string());
-    }
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest).display().to_string();
-        }
-    }
-    path.to_string()
 }
