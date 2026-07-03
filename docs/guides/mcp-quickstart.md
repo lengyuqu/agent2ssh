@@ -594,38 +594,40 @@ token_env = "AGENT2SSH_CI_TOKEN"
 
 ## 常用工具摘录
 
-完整 51 个工具列表以 [MCP Tools Reference](../skills.md) 为准。下表只列出最常用的基础入口。
+完整 51 个工具列表与权威描述以 [MCP Tools Reference](../skills.md) 为准。下表只列出最常用的基础入口，编号对应 `tools/list` 返回顺序的前 31 个。
 
 | # | 工具名称 | 说明 |
 |---|----------|------|
 | 1 | `ssh_list_hosts` | 列出已配置的 SSH 主机 |
-| 2 | `ssh_add_host` | 创建或更新主机配置 |
-| 3 | `ssh_remove_host` | 删除主机配置 |
-| 4 | `ssh_import_config` | 从 `~/.ssh/config` 导入 |
-| 5 | `ssh_exec` | 执行远程命令（支持 daemon 路由） |
-| 6 | `ssh_exec_multi` | 多主机并发执行 |
+| 2 | `ssh_list_daemons` | 列出本地 + 远程守护进程（含连通性） |
+| 3 | `ssh_import_config` | 从 `~/.ssh/config` 导入 |
+| 4 | `ssh_add_host` | 创建或更新主机配置 |
+| 5 | `ssh_remove_host` | 删除主机配置 |
+| 6 | `ssh_exec` | 执行远程命令（支持 `daemon_alias` 路由到远程 daemon） |
 | 7 | `ssh_ping` | 检测连通性和延迟 |
-| 8 | `ssh_audit` | 查询审计日志 |
-| 9 | `ssh_sftp_ls` | 列出远程目录 |
-| 10 | `ssh_sftp_stat` | 查看远程文件信息 |
-| 11 | `ssh_sftp_mkdir` | 创建远程目录 |
-| 12 | `ssh_sftp_upload` | 上传文件 |
-| 13 | `ssh_sftp_download` | 下载文件 |
-| 14 | `ssh_session_open` | 打开 PTY 会话 |
-| 15 | `ssh_session_write` | 向会话写入输入 |
-| 16 | `ssh_session_read` | 读取会话输出 |
-| 17 | `ssh_session_close` | 关闭会话 |
-| 18 | `ssh_session_list` | 列出所有会话 |
-| 19 | `ssh_forward_add` | 添加端口转发 |
-| 20 | `ssh_forward_list` | 列出转发隧道 |
-| 21 | `ssh_forward_remove` | 删除转发隧道 |
-| 22 | `ssh_risk_check` | 检查命令风险等级 |
-| 23 | `ssh_approval_list` | 列出审批请求 |
-| 24 | `ssh_approval_respond` | 批准或拒绝审批 |
-| 25 | `ssh_connection_status` | 查看内置连接状态 |
-| 26 | `ssh_connect` | 建立内置 SSH 连接 |
-| 27 | `ssh_disconnect` | 关闭内置 SSH 连接 |
-| 28 | `ssh_webhook_config` | 获取或设置 Webhook 配置 |
+| 8 | `ssh_exec_multi` | 多主机并发执行（支持批量策略） |
+| 9 | `ssh_exec_compare` | 跨主机比较执行结果 |
+| 10 | `ssh_audit` | 查询审计日志 |
+| 11 | `ssh_audit_export` | 导出审计日志（JSONL / CSV） |
+| 12 | `ssh_sftp_ls` | 列出远程目录 |
+| 13 | `ssh_sftp_stat` | 查看远程文件信息 |
+| 14 | `ssh_sftp_mkdir` | 创建远程目录 |
+| 15 | `ssh_sftp_upload` | 上传文件 |
+| 16 | `ssh_sftp_download` | 下载文件 |
+| 17 | `ssh_session_open` | 打开 PTY 会话 |
+| 18 | `ssh_session_write` | 向会话写入输入 |
+| 19 | `ssh_session_read` | 读取会话输出 |
+| 20 | `ssh_session_close` | 关闭会话 |
+| 21 | `ssh_session_list` | 列出所有会话 |
+| 22 | `ssh_forward_add` | 添加端口转发 |
+| 23 | `ssh_forward_list` | 列出转发隧道 |
+| 24 | `ssh_forward_remove` | 删除端口转发 |
+| 25 | `ssh_risk_check` | 检查命令风险等级 |
+| 26 | `ssh_gate_status` | 读取本地 daemon 执行门状态（active / paused） |
+| 27 | `ssh_approval_list` | 列出审批请求 |
+| 28 | `ssh_approval_respond` | 批准或拒绝审批 |
 | 29 | `ssh_playbook_list` | 列出 Playbook |
 | 30 | `ssh_playbook_run` | 执行 Playbook |
-| 31 | `ssh_list_daemons` | 列出守护进程实例 |
+| 31 | `ssh_playbook_dry_run` | 预览 Playbook 步骤（不执行） |
+
+其余 20 个工具（`ssh_connection_status` 到 `ssh_sync_export`）涵盖连接保留、Webhook、配置导入/导出/预览、Doctor、Metrics、Preview、审批策略、健康快照、远程 Daemon 诊断、Metrics 趋势、事件订阅、与 `~/.ssh/config` 同步等。请直接阅读 [MCP Tools Reference](../skills.md) 了解参数与返回。

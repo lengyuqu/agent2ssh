@@ -5,6 +5,7 @@ import ErrorBoundary from "./components/ErrorBoundary";
 import { logDiagnostic } from "./api";
 import { I18nProvider } from "./i18n";
 import { ThemeProvider } from "./theme";
+import { ToastProvider } from "./components/ui/toast";
 import "./index.css";
 
 // Global capture for uncaught errors and unhandled promise rejections that
@@ -34,9 +35,11 @@ createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
     <ThemeProvider>
       <I18nProvider>
-        <ErrorBoundary>
-          <App />
-        </ErrorBoundary>
+        <ToastProvider>
+          <ErrorBoundary>
+            <App />
+          </ErrorBoundary>
+        </ToastProvider>
       </I18nProvider>
     </ThemeProvider>
   </React.StrictMode>

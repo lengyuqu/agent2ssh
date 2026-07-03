@@ -2,6 +2,14 @@
 
 Date: 2026-06-16
 
+> **Archive note**: This report is the preflight for the `v0.1.1` cut. The
+> current shipped preflight is `v0.2.1` and is documented in
+> [`plan2-q1-q2-execution-report.md`](plan2-q1-q2-execution-report.md), which
+> covers the Q1 quality-gate closure and the Q2 WebDAV / master-password
+> regression pass against the `v0.2.1` bundle
+> (`Agent2SSH_0.2.1_aarch64.dmg`). Treat this S9 file as a historical
+> artefact only.
+
 ## Scope
 
 S9 completed the local pre-release closure for `v0.1.1` after the S5-S8 Live Activity and desktop session takeover work. This preflight did not create or push the `v0.1.1` tag; it verified that the main branch is ready for that release action.

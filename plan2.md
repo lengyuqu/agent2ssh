@@ -1,126 +1,137 @@
-# Agent2SSH Plan 2 建议稿
+# Agent2SSH Plan 2 — 功能与 UI 演进计划
 
-> 日期：2026-06-26  
-> 范围：基于当前 `docs/plan.md`、`CHANGELOG.md`、`project-defects-report.md`、架构文档和现有回归报告提出的新一轮建议。  
-> 定位：不是继续扩大功能面，而是把 0.2.x 之后的发布可信度、真实使用闭环、低风险债务和维护自动化收紧。
+> 日期：2026-07
+> 定位：0.2.1 质量收口已完成，项目从"质量闭环"转入"功能+UI 演进"阶段。本计划覆盖旧 plan2.md Q1 ✅ 和 Q2 剩余项，并扩展为体验驱动的多阶段演进路线。
 
 ## 1. 当前判断
 
-当前项目已经不是 MVP 状态。桌面端、CLI、MCP、daemon、Web Console、审批、审计、gate、limits、异常检测、加密凭据、WebDAV 同步、真实服务器回归和跨平台验证都已进入可用基线。
+项目已完成 P0-P10、F1-F6、S1-S9、G、E、O、H、I、J、K 全部阶段，0.2.1 已发布。基线数据：203 Rust lib tests、29 CLI/MCP smoke、57 daemon integration、442 i18n keys / 0 缺译、14 low-risk defects（8 FE + 6 Rust）。
 
-因此下一轮不建议继续开“大功能阶段”。更合适的方向是：
+旧 plan2.md 的定位是"质量收口"，Q1（发布可信度）已完成，Q2（凭据/WebDAV 回归）部分完成。后续不再继续质量收口路线，而是进入功能+UI 演进——让桌面端从"可用的 SSH 能力层"升级为"高效、直观、可操作的 SSH 操作面"。
 
-- 把 0.2.1 之后新增的凭据加密、WebDAV、i18n、打包修复纳入正式发布回归。
-- 把缺陷报告中剩余的低风险债务做成小批量可验收任务。
-- 把未运行或未自动化的质量门槛补齐，例如 Clippy、前端 lint、依赖审计、发布资产校验。
-- 用真实用户或真实 agent 接入反馈决定是否继续扩展，而不是预先设计团队版或云端版。
+**与旧 plan2.md 的关系**：
+- Q1 ✅ 全部纳入，不再重复
+- Q2 剩余项（真 WebDAV push/pull、网络故障恢复、跨设备流程、SecretsUnlock UI、密码主密码 SSH 主机端到端）保留为 Q2' 子阶段
+- Q3-Q6 原定位（真实接入、债务、诊断、性能）不再作为独立阶段，其有价值的子项已分散到 V 阶段的验收标准中
 
-## 2. 优先级建议
+**技术栈现状（写 V 阶段任务前核对过代码，避免任务描述与实际栈脱节）**：
+- 前端是 **Tailwind v4 + shadcn 风格 token/primitive 体系**（`src/index.css` + `src/components/ui/`），**没有 MUI 依赖**（`package.json` 无 `@mui/*`）。下文所有任务描述已按此纠正，不再出现"MUI Snackbar / MUI ThemeProvider / MUI DataGrid"字样——新增交互一律基于现有 `ui/` primitives 或轻量 headless 库（如 TanStack Table），避免引入第二套设计系统。
+- **主题系统已经上线**，不是待办项：`src/theme.tsx` + `src/index.css` 已实现 6 套主题（system/light/dark/dracula/nord/solarized-light），通过 `<html data-theme>` + CSS 变量切换，`SettingsMenu` 里已有选择器。原 V2-4"暗色模式"任务已按此改写为覆盖度审查，而不是从零实现。
+- Recharts / Monaco / TanStack Table / D3-force-graph / react-diff-viewer 目前均未引入，V2-V4 中提到它们时确实是新增依赖，评审时按"新依赖引入"对待（打包体积、许可证、维护成本）。
 
-| 优先级 | 建议主题 | 原因 |
-|--------|----------|------|
-| P0 | 发布可信度与回归自动化 | 当前能力面已经大，下一次发布最大风险是构建、包、文档、契约或平台行为漂移 |
-| P1 | 凭据加密与 WebDAV 同步真实场景回归 | 这是 0.2.1 后最敏感的用户数据路径，涉及迁移、锁定、跨设备和恢复 |
-| P1 | 真实接入反馈闭环 | 现有路线图已关闭，新方向应来自实际 dogfood 和外部使用 |
-| P2 | 低风险债务收口 | 已无高/中风险待修，但剩余小问题会影响长期可维护性 |
-| P2 | 可观测与诊断体验打磨 | 现有诊断能力丰富，但需要确认用户能从错误恢复，而不只是记录错误 |
-| P3 | 性能和规模专项 | 只有在真实使用出现规模压力时再深化，不建议抢在 P0/P1 前面 |
+## 2. 优先级总览
 
-## 3. 建议阶段
+| 阶段 | 主题 | 项数 | 预估周期 |
+|------|------|------|----------|
+| Q2' | 凭据/WebDAV 回归收尾 | 5 | 1-2 周（并行于 V1） |
+| V1 | 基础体验骨架 | 5 | 2-3 周 |
+| V2 | 核心交互升级 | 5 | 3-4 周 |
+| V3 | 效率工具链 | 4 | 3-4 周 |
+| V4 | 高级可视化与自动化 | 6 | 4-5 周 |
 
-### Q1 · 0.2.x 发布可信度收口
+## 3. Q2' · 凭据/WebDAV 回归收尾
 
-目标：让下一次发布不依赖人工记忆，发布前检查可以稳定复现。
-
-| 任务 | 优先级 | 内容 | 验收标准 |
-|------|--------|------|----------|
-| Q1-1 | 高 | 固化完整本地质量门槛 | `npm run build`、两套 Rust test、CLI smoke、daemon integration、`git diff --check` 全部通过并记录到发布报告 |
-| Q1-2 | 高 | 补齐 Clippy 检查 | 明确可接受的 clippy profile；至少运行 `cargo clippy --manifest-path src-tauri/Cargo.toml --no-default-features --all-targets -- -D warnings`，必要豁免写入源码或计划 |
-| Q1-3 | 中 | 补齐前端 lint 或等价静态检查 | 如果引入 ESLint，纳入 `package.json` 脚本；如果暂不引入，记录原因和替代检查 |
-| Q1-4 | 高 | 发布资产验证 | 在 macOS 本机完成 `.app` / `.dmg` 打包、sidecar 文件名、主程序入口、图标、版本号同步和 checksum 验证 |
-| Q1-5 | 中 | CI 与 release checklist 对齐 | 确认 `.github/workflows/ci.yml` 覆盖文档契约、构建矩阵、Tauri bundle 和 release asset 生成；缺口直接进入 checklist |
-
-### Q2 · 凭据加密与 WebDAV 同步回归
-
-目标：把最敏感的数据路径从“单测证明”提升到“真实迁移和失败恢复证明”。
+目标：完成旧 plan2 Q2 的 5 项真实环境验证，在 V1 启动同时并行推进。
 
 | 任务 | 优先级 | 内容 | 验收标准 |
 |------|--------|------|----------|
-| Q2-1 | 高 | 主密码全入口回归 | 桌面解锁、CLI `secrets status/set-password`、MCP/daemon 使用 `AGENT2SSH_MASTER_PASSWORD` 都能访问密码型 host；锁定时失败信息明确 |
-| Q2-2 | 高 | 明文凭据迁移回归 | 从旧 `hosts.json` 明文密码迁移到 `$agent2ssh-secret$` 句柄；确认 `secrets.enc` 不含明文，未解锁时不会误清空句柄 |
-| Q2-3 | 高 | WebDAV 同步安全边界回归 | push/pull 覆盖 `hosts.json`、`secrets.enc`、policy、limits、anomaly、playbooks；确认不同步 `known_hosts.json`、tokens、audit、logs、私钥 |
-| Q2-4 | 中 | WebDAV 失败恢复 | 模拟远端旧 manifest、未知文件、网络失败、认证失败、本地备份恢复；错误提示包含下一步动作 |
-| Q2-5 | 中 | 跨设备使用文档 | 在配置指南中补一条“新设备拉取后如何解锁、验证 host-key、避免覆盖本地信任库”的短流程 |
+| Q2'-1 | 高 | 真 WebDAV push/pull 回归 | 对真实 WebDAV 服务完成 push/pull，覆盖 hosts.json、secrets.enc、policy、limits、playbooks 同步；确认不同步 known_hosts.json、tokens、audit、logs、私钥 |
+| Q2'-2 | 高 | WebDAV 网络故障恢复 | 模拟远端旧 manifest、未知文件、网络失败、认证失败；错误提示包含下一步动作 |
+| Q2'-3 | 中 | 跨设备拉取后流程文档 | 配置指南补"新设备 pull → 解锁 → 验证 host-key → 避免覆盖本地信任库"短流程 |
+| Q2'-4 | 中 | SecretsUnlock 桌面 UI walkthrough | 手动走一遍桌面启动 → 输入主密码 → 解锁 → 锁定 → 改密码 → 错密码拒绝 |
+| Q2'-5 | 中 | 密码型 SSH 主机端到端 | 用主密码解锁后，对密码认证 SSH 主机完成 exec/SFTP 全链路 |
 
-### Q3 · 真实接入与反馈闭环
+验收命令：`cargo test --no-default-features secrets::tests webdav_sync::tests` + `npm run build`
 
-目标：让后续路线来自真实用户证据，而不是继续在本地闭环里堆能力。
+## 4. V1 · 基础体验骨架
 
-| 任务 | 优先级 | 内容 | 验收标准 |
-|------|--------|------|----------|
-| Q3-1 | 高 | 外部接入脚本化记录 | 基于 `.github/ISSUE_TEMPLATE/external_adoption_report.md` 收集至少 3 次接入记录，覆盖安装、配置 host、执行命令、查看 audit、MCP 接入 |
-| Q3-2 | 高 | Agent 客户端接入复测 | 至少复测 Codex/Claude/Cursor/OpenCode 中两个 MCP 客户端的 `tools/list`、`ssh_exec`、session 或 audit 路径 |
-| Q3-3 | 中 | Windows/Linux/macOS 安装 smoke | 每个平台运行 `scripts/verify-install.sh`，并记录 CLI、daemon、MCP server 启动结果 |
-| Q3-4 | 中 | 真实服务器回归轻量化 | 复用 `107.174.36.91` fixture 或替代环境，形成只覆盖高频路径的 10 分钟 smoke，不每次跑全量 e2e |
-| Q3-5 | 中 | 反馈分级规则 | 新反馈按数据丢失、安全绕过、执行失败、平台阻塞、体验问题分级；只有 P0/P1 反馈可以打开新功能阶段 |
+目标：建立桌面端操作入口的骨架——首页总览、全局状态、快速搜索和统一反馈，让用户打开 App 后 3 秒内知道系统状态、5 秒内找到任何功能入口。
 
-### Q4 · 低风险债务收口
+| 任务 | 状态 | 优先级 | 复杂度 | 内容 | 验收标准 |
+|------|------|--------|--------|------|----------|
+| V1-1 | ✅ 已完成 | P0 | 中 | Dashboard / 健康总览页 | `src/components/Dashboard.tsx`：新增首页模块（Ctrl+K/侧栏第一项），聚合 6 张卡片——主机健康(connectionStatuses)、审批待办数(pendingApprovals)、异常告警数(SSE `anomaly_detected` 事件的会话内计数，非历史总量——anomaly.rs 本身是 fire-and-forget 事件，没有持久化的历史计数可查，已在卡片 hint 里注明"自打开仪表盘起")、24h 执行量(复用既有 `list_audit` 命令按 `since` 过滤计数)、凭据锁定状态、daemon 运行状态；Host/24h 卡片可点击跳转 Host Management / Audit；`npm run build` 通过，Playwright 截图验证 light/dark 下 6 卡片数据渲染正确 |
+| V1-2 | ✅ 已完成 | P0 | 低 | 全局状态栏 Footbar | `src/components/Footbar.tsx`：底部固定栏显示 daemon 状态(green/red)、gate 状态、凭据(locked/unlocked)、活跃连接数、版本号（从 `package.json` 读取）；`npm run build` 通过，Playwright 截图验证 light/dark 主题下渲染正常，各状态字段随 mock 数据正确切换 |
+| V1-3 | ✅ 已完成 | P0 | 低 | 命令面板 Ctrl+K | `src/components/CommandPalette.tsx`：全局模态搜索框，索引 Modules + Hosts（按 name/host/user/group/role/owner/tags 匹配）；Ctrl+K/Cmd+K 打开、Esc 关闭、↑↓ 选择、Enter 跳转（模块直接切换，主机跳转到 Host Management 并选中）；`npm run build` 通过，Playwright 验证搜索过滤、键盘导航、跳转后状态正确。范围收敛：未索引"命令/审批"关键词，因为目前没有独立的审批列表页可跳转（审批走既有的 ApprovalDialog 弹层），留给后续评估是否需要 |
+| V1-4 | 🟡 部分完成 | P1 | 低 | Toast / 通知条统一 | `src/components/ui/toast.tsx`：`ToastProvider` + `useToast()`，success/error/warning 三种，5s 自动消失+手动关闭，基于现有 `ui/` primitives（未引入 MUI）；已接入 `main.tsx`（包住整个 App）；**App.tsx 已全量转换**（26 处 `setError`/banner 全部改为 `showToast` 或依赖既有的连接进度弹窗，移除了顶层 `error` state 和常驻 banner）。**剩余**：AddHostForm/ExecPanel/SFTPPanel 等其余 12 个面板内部的局部 `setError` 尚未替换——这些是每个面板自己的 local state，需要逐个文件过一遍（机械但要小心不误伤真正的表单校验态），留作后续任务 |
+| V1-5 | 🟡 部分完成 | P1 | 低 | 空态/加载态/错误态一致性 | `src/components/ui/state.tsx`：`EmptyState`/`LoadingState`/`ErrorState` 三个共享组件（统一图标+文案+可选操作按钮）。**已接入**：AuditPanel（空态）、HostList（两处空态）、SFTPPanel（error/loading/empty 三态一次性覆盖，示范了三个组件的典型用法）。**剩余**：ExecPanel/Session/Approval 等其余面板尚未替换，留作后续任务 |
 
-目标：处理已知但不紧急的小问题，降低长期维护成本。
+验收命令：`npm run build` + `cargo test --no-default-features --lib` + `cargo test --no-default-features --test cli_smoke`
 
-| 任务 | 优先级 | 内容 | 验收标准 |
-|------|--------|------|----------|
-| Q4-1 | 中 | 生产 `unwrap()` / `panic!` 审计 | 不要求一次清零；先列出非测试路径中的真实风险点，优先替换 I/O、锁、解析、网络边界上的 panic |
-| Q4-2 | 中 | 命令长度与输入上限 | 为 exec/session/playbook 参数设定合理上限，超限返回可读错误并写 rejected audit |
-| Q4-3 | 中 | 审计保留策略可配置 | 当前审计轮转较保守；增加或确认可配置保留大小/代数，文档说明高频场景风险 |
-| Q4-4 | 低 | SFTP 取消语义 | 明确取消是否立即中断当前文件；如果实现代价低，补立即中断；否则在 UI 和文档中说明 |
-| Q4-5 | 低 | 开发体验小债 | 例如 HMR 计数器、useEffect 依赖、非关键 copy 问题，统一按低优先级批处理 |
+## 5. V2 · 核心交互升级
 
-### Q5 · 诊断、错误恢复与用户可解释性
+目标：让审批、审计和通知从"可看"升级为"可操作、可分析、可实时感知"；主题系统已上线（见第 1 节），本阶段只做覆盖度审查，不重建。
 
-目标：确认出错时用户知道发生了什么，以及下一步该做什么。
+| 任务 | 优先级 | 复杂度 | 内容 | 验收标准 |
+|------|--------|--------|------|----------|
+| V2-1 | P0 | 中 | 实时桌面通知系统 | 基于 SSE + events_subscribe 构建统一通知层：审批通知可操作（内嵌批准/拒绝按钮）、异常告警只读、连接状态变更；通知弹窗 ≤3s 到达；`npm run build` 通过 |
+| V2-2 | P1 | 中 | 审批时间线视图+批量操作 | 竖向时间轴展示审批历史；每条显示风险评分色标；勾选多条后批量批准；批量操作结果写入 audit；`npm run build` 通过，时间轴渲染 ≥20 条无卡顿 |
+| V2-3 | P1 | 中 | 审计可视化图表 | 引入 Recharts：执行量趋势折线图（24h/7d/30d）、风险分布直方图、来源饼图、主机热力图；图表数据从 audit.jsonl 实时聚合；`npm run build` 通过，折线图渲染 ≤500ms，且在 6 套主题下颜色不冲突 |
+| V2-4 | P2 | 低 | 主题系统覆盖度审查（原"暗色模式"，已上线不必重做） | 逐页核对 V1/V2 新增组件（Dashboard/Footbar/命令面板/Toast/时间线/图表）是否只用 token 类（`bg-card`/`text-muted-foreground`/…），未出现硬编码 hex；在 dark/dracula/nord/solarized-light 下人工过一遍 Host/Audit/Exec/SFTP/Session/Settings/Approval；发现的硬编码颜色改为 token 并在 `docs/architecture.md` 或组件注释处标注例外（如终端面板固定深色） |
+| V2-5 | P1 | 低 | 键盘快捷键体系 | Ctrl+1~9 模块切换、Ctrl+K 面板、Ctrl+Enter 执行、Ctrl+Shift+A 审批；快捷键列表在 Settings 可查看；冲突检测避免浏览器内置覆盖；`npm run build` 通过 |
 
-| 任务 | 优先级 | 内容 | 验收标准 |
-|------|--------|------|----------|
-| Q5-1 | 中 | 错误消息分层 | 将认证失败、主密码锁定、host-key 变化、daemon token、approval timeout、WebDAV 失败分成可识别错误类型 |
-| Q5-2 | 中 | Diagnostics 导出可读性 | 导出的 bundle 能关联 trace_id、daemon.log、app.log、audit 片段，并默认脱敏敏感字段 |
-| Q5-3 | 中 | 桌面错误恢复路径 | 对 SecretsUnlock、Settings、Sync、Terminal、SFTP、Exec 的失败态做一次人工 walkthrough |
-| Q5-4 | 低 | Webhook 重试策略评估 | 当前 webhook 是非阻塞 fire；先判断真实使用是否需要重试、退避和死信记录，不建议默认复杂化 |
+验收命令：`npm run build` + `cargo test --no-default-features --lib` + `cargo test --no-default-features --features daemon --test daemon_integration`
 
-### Q6 · 性能与规模专项
+## 6. V3 · 效率工具链
 
-目标：只在可复现压力场景下推进，避免为了规模假设增加复杂度。
+目标：让 SFTP 和终端从"基本可用"升级为"日常效率工具"——文件预览省去下载、分屏覆盖多主机场景、表格交互减少查找时间。
 
-| 任务 | 优先级 | 内容 | 验收标准 |
-|------|--------|------|----------|
-| Q6-1 | 中 | 500/1000 host plan smoke | 扩展现有 `scripts/e2-scale-plan-smoke.py`，观察计划生成时间、内存和输出体积 |
-| Q6-2 | 中 | 审计查询高容量测试 | 构造大 audit.jsonl，测试筛选、导出、桌面渲染和轮转行为 |
-| Q6-3 | 低 | 多 session / forward 压测 | 在本机 fixture 下验证 limits、清理、事件流和 UI 状态一致性 |
-| Q6-4 | 低 | SFTP 大文件与中断恢复 | 覆盖上传、下载、取消、恢复偏移和失败清理 |
+| 任务 | 优先级 | 复杂度 | 内容 | 验收标准 |
+|------|--------|--------|------|----------|
+| V3-1 | P1 | 低/中 | SFTP 文件预览+面包屑导航 | 文本文件 ≤1MB 用 Monaco 内嵌预览（语法高亮）；路径面包屑组件（点击跳转目录）；二进制/超大文件显示元信息卡片；`npm run build` 通过，1MB 文本预览 ≤1s 加载 |
+| V3-2 | P1 | 高 | 终端分屏+Session 分组 | 水平/垂直分屏最多 4 面板；树形 Session 分组（按主机/来源）；命令历史 Ctrl+R 搜索；面板可拖拽调整尺寸；`npm run build` 通过，4 面板同步渲染无崩溃 |
+| V3-3 | P1 | 中 | 表格/列表交互增强 | 引入 TanStack Table（headless，样式沿用现有 token/primitive，不引入 MUI）：列排序、列选择隐藏、行勾选批量操作；Host 列表和 Audit 列表首批替换；`npm run build` 通过，1000 行渲染 ≤300ms |
+| V3-4 | P1 | 中 | 模块间 Breadcrumb 导航 | 每模块顶部面包屑显示当前位置+可跳转上级/关联模块（Host→Exec、Host→Audit、Approval→Exec）；网状导航而非线性 Tab；`npm run build` 通过 |
 
-## 4. 不建议现在做的事
+验收命令：`npm run build` + `cargo test --no-default-features --lib` + `cargo fmt --check` + `git diff --check`
 
-- 不建议启动云端控制台、账号体系、组织 RBAC 或 SaaS 化，除非真实用户明确需要。
-- 不建议继续增加 MCP 工具数量，除非能指向具体工作流缺口。
-- 不建议把桌面端改成大型运维平台；当前更适合作为本地 operator surface。
-- 不建议把 WebDAV 变成通用同步系统；它应保持保守同步范围，避免跨设备传播本机信任和运行时状态。
-- 不建议在未完成 Q1/Q2 前做大规模 UI 重构。
+## 7. V4 · 高级可视化与自动化
 
-## 5. 推荐下一步执行顺序
+目标：补上拓扑感知、自动化编排和视觉一致性——让多主机运维从"逐台操作"升级为"全局视角+模板驱动"。
 
-1. 先做 Q1：补齐发布检查，把下一次发布的失败概率降下来。
-2. 并行做 Q2 的回归清单：凭据和同步路径优先，因为它们关系到用户数据。
-3. 用 Q3 收集真实反馈，决定是否开启新的功能阶段。
-4. Q4/Q5 作为小批量维护任务穿插处理。
-5. Q6 等出现真实规模压力或发布前需要性能证明时再启动。
+| 任务 | 优先级 | 复杂度 | 内容 | 验收标准 |
+|------|--------|--------|------|----------|
+| V4-1 | P2 | 高 | 连接拓扑可视化 | D3.js / react-force-graph 力导向图渲染：主机→daemon→proxy→tunnel 链路；节点颜色按健康/风险着色；点击节点跳转 Host 详情；`npm run build` 通过，30 节点渲染 ≤1s |
+| V4-2 | P2 | 高 | Playbook 可视化创建/编辑 | 步骤编排器拖拽排序；条件分支可视化（if/else 节点）；YAML 双向同步生成；保存后 playbook run 可执行；`npm run build` 通过 |
+| V4-3 | P2 | 中 | 配置模板+一键快照恢复 | 内置 3-5 模板（基础安全、开发环境、生产运维）；快照保存当前 hosts+policy+limits 配置；一键回滚到历史快照；`npm run build` 通过 |
+| V4-4 | P2 | 低 | 跨主机比较 UX 增强 | react-diff-viewer Diff 视图：红绿高亮多主机执行结果差异；统计摘要卡片（相同/不同/缺失行数）；`npm run build` 通过 |
+| V4-5 | P2 | 中 | 响应式布局优化 | 最小宽度 800px；侧栏可折叠为 icon-only；SFTP 上下分栏自适应；窄屏命令面板全屏覆盖；`npm run build` 通过，800px 窗口所有模块可操作 |
+| V4-6 | P2 | 低/中 | 图标/配色系统统一（沿用现有 token，不新建） | 现有 6 主题已各自定义 `--primary`/灰阶/语义色（如 light 主题 `--primary: #17857c`），本任务不重新定义颜色，只做统一：给每个模块固定一个 lucide-react 图标（当前 `MODULES` 常量已有雏形，需扩展到 V1-V4 新增的 Dashboard/审批时间线/拓扑图等）；检查 V1-V4 新组件是否都复用了 `--success`/`--warning`/`--destructive` 语义色而非临时新增颜色；`npm run build` 通过 |
 
-## 6. 最小验收命令建议
+验收命令：`npm run build` + `cargo test --no-default-features --lib` + `cargo test --no-default-features --features daemon --test daemon_integration` + `npm run tauri:build`
 
-下一轮每个合并或发布候选至少跑：
+## 8. 不建议现在做的事
+
+以下方向不在本计划范围内，旧 plan2.md 已排除，新 plan2 继续排除：
+
+- ❌ Cloud Console 独立产品化（当前定位是本机操作面，不是云端控制台）
+- ❌ 账号体系与用户认证（单机工具，无多用户需求）
+- ❌ 组织 RBAC 与团队权限（单机定位，团队协作靠 WebDAV 配置同步 + 审批流）
+- ❌ SaaS 化与多租户（无真实用户需求驱动）
+- ❌ 继续增加 MCP 工具数量（51 工具已覆盖核心工作流，除非有明确缺口）
+- ❌ 把桌面端改成大型运维平台（更适合作为本地 operator surface）
+
+## 9. 推荐执行顺序
+
+```
+Q2' ── 并行于 V1 ──→ V1 ──→ V2 ──→ V3 ──→ V4
+(1-2周)            (2-3周)  (3-4周)  (3-4周)  (4-5周)
+```
+
+- **Q2' 并行于 V1**：凭据/WebDAV 回归可与 V1 前端骨架同步推进，无依赖冲突
+- **V1 → V2**：V2 通知系统依赖 V1 的 Toast 组件；V2 审批时间线/图表依赖 V1 的空态/加载态共享组件
+- **V2 → V3**：V3 的表格/面包屑是新增交互面，建议排在 V2 通知与批量操作之后，避免同一批面板的交互模式被改两次；不依赖主题系统（token 体系已在 V 阶段启动前就存在）
+- **V3 → V4**：V4 拓扑/Playbook 可独立开发，但建议在 V3 表格交互稳定后进入，避免 UI 层同时大改
+
+每个阶段完成后跑该阶段验收命令 + `scripts/e2e-local.sh`，确保新 UI 不破坏现有后端基线。
+
+## 10. 最小验收命令
+
+每阶段合并或发布候选至少跑：
 
 ```bash
 npm run build
 cargo fmt --manifest-path src-tauri/Cargo.toml --check
+cargo clippy --manifest-path src-tauri/Cargo.toml --no-default-features --all-targets -- -D warnings
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --test cli_smoke
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features daemon --test daemon_integration
@@ -133,8 +144,7 @@ git diff --check
 cargo check --manifest-path src-tauri/Cargo.toml --no-default-features --bin agent2ssh --bin agent2ssh-mcp
 cargo check --manifest-path src-tauri/Cargo.toml --no-default-features --features daemon --bin agent2ssh-daemon
 npm run tauri:build
-./scripts/verify-install.sh
+./scripts/e2e-local.sh
 ```
 
-Clippy 和前端 lint 建议作为 Q1 的新增门槛确定下来；在规则稳定前先不要阻塞所有开发分支。
-
+V4 发布候选额外验证桌面端视觉一致性：macOS `.app` 启动后逐一检查暗色/亮色模式、Footbar、命令面板、面包屑在各模块的渲染稳定性。

@@ -8,6 +8,7 @@ import { Card } from "./ui/card";
 import { IconButton } from "./ui/icon-button";
 import { Input } from "./ui/input";
 import { Select } from "./ui/select";
+import { EmptyState } from "./ui/state";
 import { cn } from "../lib/utils";
 
 const labelCls = "grid gap-1.5 text-sm font-medium text-foreground/90";
@@ -142,9 +143,7 @@ export default function AuditPanel({ audit, onRefresh }: Props) {
           </button>
         )}
         {audit.length === 0 && (
-          <div className="px-1 py-2 text-sm text-muted-foreground">
-            {t("No commands executed yet")}
-          </div>
+          <EmptyState icon={History} title={t("No commands executed yet")} />
         )}
       </div>
     </Card>

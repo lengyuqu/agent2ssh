@@ -555,6 +555,32 @@ const zh: Record<string, string> = {
   "Something went wrong": "界面出现异常",
   "The interface hit an unexpected error and stopped rendering. The details were written to the diagnostic log (Settings → Diagnostics).": "界面遇到意外错误并停止渲染。详细信息已写入诊断日志（设置 → 诊断日志）。",
   "Reload": "重新加载",
+  // V1-2: Footbar
+  "Local daemon health": "本地 Daemon 健康状态",
+  "Daemon running": "Daemon 运行中",
+  "Daemon offline": "Daemon 离线",
+  "Credential store": "凭据存储",
+  "Credentials locked": "凭据已锁定",
+  "Credentials unlocked": "凭据已解锁",
+  "Active embedded SSH connections": "活跃的内置 SSH 连接",
+  "{count} active connections": "{count} 个活跃连接",
+  // V1-3: Command palette
+  "Search modules, hosts, tags...": "搜索模块、主机、标签...",
+  "No matches": "没有匹配结果",
+  "Module": "模块",
+  "Open command palette": "打开命令面板",
+  // V1-1: Dashboard
+  "Dashboard": "仪表盘",
+  "Host health": "主机健康",
+  "connected": "已连接",
+  "Pending approvals": "待处理审批",
+  "Anomaly alerts": "异常告警",
+  "since dashboard opened": "自打开仪表盘起",
+  "stream offline": "事件流离线",
+  "24h executions": "24 小时执行量",
+  "Locked": "已锁定",
+  "Unlocked": "已解锁",
+  "Local daemon": "本地 Daemon",
 };
 
 const I18nContext = createContext<I18nContextValue | null>(null);

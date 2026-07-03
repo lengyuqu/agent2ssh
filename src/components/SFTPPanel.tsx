@@ -25,6 +25,7 @@ import { Button } from "./ui/button";
 import { Card } from "./ui/card";
 import { Dialog } from "./ui/dialog";
 import { Input } from "./ui/input";
+import { EmptyState, ErrorState, LoadingState } from "./ui/state";
 
 const labelCls = "grid gap-1.5 text-sm font-medium text-foreground/90";
 
@@ -929,21 +930,18 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
 
           <div className="min-h-0 flex-1 overflow-auto p-1">
             {s.error ? (
-              <div className="p-3 text-sm text-destructive">{s.error}</div>
+              <ErrorState message={s.error} />
             ) : s.loading ? (
-              <div className="flex items-center justify-center gap-2 p-6 text-sm text-muted-foreground">
-                <Loader2 size={16} className="animate-spin" />
-                {t("Loading...")}
-              </div>
+              <LoadingState label={t("Loading...")} />
             ) : !s.loaded ? (
-              <div className="flex flex-col items-center justify-center gap-2 p-6 text-center text-sm text-muted-foreground">
-                <FolderOpen size={26} />
-                <div>
-                  {s.kind === "remote" ? t("Choose a host and open a folder") : t("Open a local folder")}
-                </div>
-              </div>
+              <EmptyState
+                icon={FolderOpen}
+                title={
+                  s.kind === "remote" ? t("Choose a host and open a folder") : t("Open a local folder")
+                }
+              />
             ) : visible.length === 0 ? (
-              <div className="p-6 text-center text-sm text-muted-foreground">{t("(empty)")}</div>
+              <EmptyState title={t("(empty)")} />
             ) : (
               <>
                 {visible.slice(0, s.viewCap).map((entry) => {

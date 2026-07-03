@@ -8,6 +8,7 @@ import {
   HelpCircle,
   History,
   Key,
+  LayoutDashboard,
   Loader2,
   Network,
   Play,
@@ -20,7 +21,10 @@ import { api, reportError } from "./api";
 import AddHostForm from "./components/AddHostForm";
 import ApprovalDialog from "./components/ApprovalDialog";
 import AuditPanel from "./components/AuditPanel";
+import CommandPalette, { type CommandPaletteModule } from "./components/CommandPalette";
+import Dashboard from "./components/Dashboard";
 import ExecPanel from "./components/ExecPanel";
+import Footbar from "./components/Footbar";
 import ForwardPanel from "./components/ForwardPanel";
 import HelpPanel from "./components/HelpPanel";
 import HostList from "./components/HostList";
@@ -39,6 +43,7 @@ import SetupWizard from "./components/SetupWizard";
 import SyncPanel from "./components/SyncPanel";
 import { Button } from "./components/ui/button";
 import { Dialog } from "./components/ui/dialog";
+import { useToast } from "./components/ui/toast";
 import { useI18n } from "./i18n";
 import { cn } from "./lib/utils";
 import type { ApprovalRequest, AuditEntry, AuditFilter, ConnectionStatus, DaemonHealth, ExecutionGateStatus, HostFingerprintStatus, HostGroup, HostProfile, ProxyProfile } from "./types";
@@ -57,6 +62,7 @@ type ConnectionProgress = {
 };
 
 const MODULES = [
+  { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
   { id: "hosts", label: "Host Management", icon: Server },
   { id: "proxies", label: "Proxies", icon: Network },
   { id: "terminal", label: "Terminal", icon: Terminal },
@@ -74,15 +80,15 @@ const MODULES = [
 
 export default function App() {
   const { t } = useI18n();
+  const { showToast } = useToast();
   const [hosts, setHosts] = useState<HostProfile[]>([]);
   const [groups, setGroups] = useState<HostGroup[]>([{ id: "default", name: "Default" }]);
   const [proxies, setProxies] = useState<ProxyProfile[]>([]);
   const [selectedHost, setSelectedHost] = useState("");
   const [selectedGroup, setSelectedGroup] = useState("default");
   const [editingHost, setEditingHost] = useState<HostProfile | null>(null);
-  const [activeModule, setActiveModule] = useState<(typeof MODULES)[number]["id"]>("hosts");
+  const [activeModule, setActiveModule] = useState<(typeof MODULES)[number]["id"]>("dashboard");
   const [audit, setAudit] = useState<AuditEntry[]>([]);
-  const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [pendingApprovals, setPendingApprovals] = useState<ApprovalRequest[]>([]);
   const [connectionStatuses, setConnectionStatuses] = useState<ConnectionStatus[]>([]);
@@ -102,6 +108,7 @@ export default function App() {
   } | null>(null);
   const [fingerprintBusy, setFingerprintBusy] = useState(false);
   const [connectionProgress, setConnectionProgress] = useState<ConnectionProgress | null>(null);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const webDavSyncInFlight = useRef(false);
 
   const currentHost = useMemo(
@@ -182,7 +189,6 @@ export default function App() {
   async function handleCreateGroup(name: string) {
     const trimmed = name.trim();
     if (!trimmed) return;
-    setError(null);
     try {
       let id = groupIdFromName(trimmed);
       let suffix = 2;
@@ -194,43 +200,41 @@ export default function App() {
       setSelectedGroup(id);
       await refresh();
     } catch (err) {
-      setError(String(err));
+      showToast("error", String(err));
     }
   }
 
   async function handleRenameGroup(id: string, name: string) {
     const trimmed = name.trim();
     if (!trimmed) return;
-    setError(null);
     try {
       await api.saveHostGroup({ id, name: trimmed });
       await refresh();
     } catch (err) {
-      setError(String(err));
+      showToast("error", String(err));
     }
   }
 
   async function handleDeleteGroup(id: string) {
     if (id === "default") return;
-    setError(null);
     try {
       await api.deleteHostGroup(id);
       if (selectedGroup === id) setSelectedGroup("default");
       await refresh();
     } catch (err) {
-      setError(String(err));
+      showToast("error", String(err));
     }
   }
 
   useEffect(() => {
     refresh()
-      .catch((err) => setError(String(err)))
+      .catch((err) => showToast("error", String(err)))
       .finally(() => setLoading(false));
   }, [refresh]);
 
   useEffect(() => {
     if (activeModule !== "audit") return;
-    refreshAudit().catch((err) => setError(String(err)));
+    refreshAudit().catch((err) => showToast("error", String(err)));
   }, [activeModule, refreshAudit]);
 
   // K1: gate the UI behind a master-password unlock when the credential store is
@@ -318,7 +322,7 @@ export default function App() {
             error: String(err),
           })
           .catch(() => {});
-        setError(t("Failed to start daemon: {error}", { error: String(err) }));
+        showToast("error", t("Failed to start daemon: {error}", { error: String(err) }));
       }
     }
 
@@ -336,11 +340,22 @@ export default function App() {
   }, [pollDaemonHealth]);
 
   useEffect(() => {
-    ensureLocalDaemon().catch((err) => setError(String(err)));
+    ensureLocalDaemon().catch((err) => showToast("error", String(err)));
   }, [ensureLocalDaemon]);
 
+  // V1-3: global Ctrl+K / Cmd+K opens the command palette from anywhere in the app.
+  useEffect(() => {
+    function handleGlobalKeyDown(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setCommandPaletteOpen(true);
+      }
+    }
+    window.addEventListener("keydown", handleGlobalKeyDown);
+    return () => window.removeEventListener("keydown", handleGlobalKeyDown);
+  }, []);
+
   async function handleGateToggle() {
-    setError(null);
     setGateBusy(true);
     try {
       const status =
@@ -349,7 +364,7 @@ export default function App() {
           : await api.pauseGate("desktop emergency stop");
       setGateStatus(status);
     } catch (err) {
-      setError(t("Failed to update execution gate: {error}", { error: String(err) }));
+      showToast("error", t("Failed to update execution gate: {error}", { error: String(err) }));
     } finally {
       setGateBusy(false);
     }
@@ -360,7 +375,7 @@ export default function App() {
       await api.approvalApprove(approval.id);
       setPendingApprovals((prev) => prev.filter((a) => a.id !== approval.id));
     } catch (err) {
-      setError(t("Failed to approve: {error}", { error: String(err) }));
+      showToast("error", t("Failed to approve: {error}", { error: String(err) }));
     }
   }
 
@@ -369,28 +384,26 @@ export default function App() {
       await api.approvalReject(approval.id);
       setPendingApprovals((prev) => prev.filter((a) => a.id !== approval.id));
     } catch (err) {
-      setError(t("Failed to reject: {error}", { error: String(err) }));
+      showToast("error", t("Failed to reject: {error}", { error: String(err) }));
     }
   }
 
   async function handleRemoveHost(name: string) {
-    setError(null);
     try {
       await api.removeHost(name);
       if (selectedHost === name) setSelectedHost("");
       await refresh();
     } catch (err) {
-      setError(String(err));
+      showToast("error", String(err));
     }
   }
 
   async function handleImportConfig() {
-    setError(null);
     try {
       await api.importSshConfig();
       await refresh();
     } catch (err) {
-      setError(String(err));
+      showToast("error", String(err));
     }
   }
 
@@ -449,7 +462,6 @@ export default function App() {
   }
 
   async function handleConnect(name: string) {
-    setError(null);
     showConnectionProgress(name, t("Checking SSH fingerprint..."), 15);
     try {
       const status = await api.getHostFingerprintStatus(name);
@@ -485,20 +497,17 @@ export default function App() {
             error: String(probeErr),
           });
           failConnectionProgress(name, errorMessage);
-          setError(errorMessage);
           return;
         }
       }
       const errorMessage = t("Failed to connect: {error}", { error: message });
       failConnectionProgress(name, errorMessage);
-      setError(errorMessage);
     }
   }
 
   async function handleTrustFingerprintAndReconnect() {
     if (!fingerprintPrompt) return;
     setFingerprintBusy(true);
-    setError(null);
     const progressHost = fingerprintPrompt.host;
     showConnectionProgress(
       progressHost,
@@ -525,19 +534,17 @@ export default function App() {
         error: String(err),
       });
       failConnectionProgress(progressHost, errorMessage);
-      setError(errorMessage);
     } finally {
       setFingerprintBusy(false);
     }
   }
 
   async function handleDisconnect(name: string) {
-    setError(null);
     try {
       await api.sshDisconnect(name);
       await pollConnections();
     } catch (err) {
-      setError(t("Failed to disconnect: {error}", { error: String(err) }));
+      showToast("error", t("Failed to disconnect: {error}", { error: String(err) }));
     }
   }
 
@@ -559,7 +566,7 @@ export default function App() {
         onComplete={() => {
           setShowWizard(false);
           setWizardDismissed(true);
-          refresh().catch((err) => setError(String(err)));
+          refresh().catch((err) => showToast("error", String(err)));
         }}
         onSkip={() => {
           setShowWizard(false);
@@ -570,17 +577,27 @@ export default function App() {
   }
 
   return (
-    <main className="flex min-h-screen bg-background text-foreground max-lg:flex-col">
+    <div className="flex h-screen flex-col bg-background text-foreground">
       {/* K1: master-password unlock gate. Reloads hosts after unlock so resolved
           passwords are reflected. */}
       {secretsLocked && (
         <SecretsUnlock
           onUnlocked={() => {
             setSecretsLocked(false);
-            void refresh().catch((err) => setError(String(err)));
+            void refresh().catch((err) => showToast("error", String(err)));
           }}
         />
       )}
+
+      <CommandPalette
+        open={commandPaletteOpen}
+        onClose={() => setCommandPaletteOpen(false)}
+        modules={MODULES}
+        hosts={hosts}
+        onNavigateModule={(id) => openModule(id as (typeof MODULES)[number]["id"])}
+        onSelectHost={setSelectedHost}
+      />
+
       {/* Approval dialog overlay (Fix-1) */}
       {currentApproval && (
         <ApprovalDialog
@@ -725,7 +742,8 @@ export default function App() {
         </Dialog>
       )}
 
-      <aside className="flex shrink-0 flex-col gap-5 bg-sidebar p-5 text-sidebar-foreground lg:w-[280px] max-lg:w-full">
+      <main className="flex min-h-0 flex-1 max-lg:flex-col max-lg:overflow-y-auto">
+      <aside className="flex shrink-0 flex-col gap-5 overflow-y-auto bg-sidebar p-5 text-sidebar-foreground lg:w-[280px] max-lg:w-full max-lg:overflow-visible">
         <div className="flex items-center gap-3">
           <div className="flex size-9 items-center justify-center rounded-lg bg-sidebar-accent/15 text-sidebar-accent">
             <Terminal size={20} />
@@ -774,7 +792,7 @@ export default function App() {
         )}
       </aside>
 
-      <section className="flex min-w-0 flex-1 flex-col gap-5 p-6">
+      <section className="flex min-h-0 min-w-0 flex-1 flex-col gap-5 overflow-y-auto p-6 max-lg:overflow-visible">
         <header className="flex items-start justify-between gap-4 max-md:flex-col">
           <div className="min-w-0">
             <h2 className="flex items-center gap-2 text-xl font-bold">
@@ -832,13 +850,18 @@ export default function App() {
           </div>
         </header>
 
-        {error && (
-          <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
-            {error}
-          </div>
-        )}
-
         <section className="module-page">
+          {activeModule === "dashboard" && (
+            <Dashboard
+              hosts={hosts}
+              connectionStatuses={connectionStatuses}
+              pendingApprovalsCount={pendingApprovals.length}
+              secretsLocked={secretsLocked}
+              daemonHealth={daemonHealth}
+              onNavigateModule={(id) => openModule(id as (typeof MODULES)[number]["id"])}
+            />
+          )}
+
           {activeModule === "hosts" && (
             <div className="grid grid-cols-[minmax(0,1.4fr)_minmax(340px,0.6fr)] items-start gap-[18px] max-lg:grid-cols-1">
               <HostList
@@ -913,6 +936,14 @@ export default function App() {
           {activeModule === "help" && <HelpPanel />}
         </section>
       </section>
-    </main>
+      </main>
+
+      <Footbar
+        daemonHealth={daemonHealth}
+        gateStatus={gateStatus}
+        secretsLocked={secretsLocked}
+        connectionStatuses={connectionStatuses}
+      />
+    </div>
   );
 }

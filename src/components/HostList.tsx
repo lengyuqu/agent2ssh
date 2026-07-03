@@ -19,6 +19,7 @@ import { Card } from "./ui/card";
 import { Dialog } from "./ui/dialog";
 import { IconButton } from "./ui/icon-button";
 import { Input } from "./ui/input";
+import { EmptyState } from "./ui/state";
 import { cn } from "../lib/utils";
 
 type Props = {
@@ -353,15 +354,9 @@ export default function HostList({
             </div>
           );
         })}
-        {hosts.length === 0 && (
-          <div className="px-3 py-3 text-sm text-muted-foreground">
-            {t("No hosts configured")}
-          </div>
-        )}
+        {hosts.length === 0 && <EmptyState icon={Server} title={t("No hosts configured")} />}
         {hosts.length > 0 && filteredHosts.length === 0 && (
-          <div className="px-3 py-3 text-sm text-muted-foreground">
-            {t("No hosts match filters")}
-          </div>
+          <EmptyState icon={Server} title={t("No hosts match filters")} />
         )}
       </div>
 

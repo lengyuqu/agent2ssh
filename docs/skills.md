@@ -4,59 +4,63 @@ Agent2SSH exposes 51 tools via the Model Context Protocol (MCP) stdio server.
 
 ## Tool List
 
+The numbering below matches the order returned by `tools/list` in
+`src-tauri/src/bin/agent2ssh_mcp/tools.rs`, which is the contract enforced by
+the `mcp_tools_match_skills_md_documentation` integration test.
+
 | # | Tool | Description |
 |---|------|-------------|
-| 1 | `ssh_list_hosts` | List configured SSH host profiles |
-| 2 | `ssh_add_host` | Create or update an SSH host profile |
-| 3 | `ssh_remove_host` | Remove a host profile by alias |
-| 4 | `ssh_import_config` | Import hosts from ~/.ssh/config |
-| 5 | `ssh_exec` | Run a non-interactive command over SSH (supports `daemon_alias` for remote routing) |
-| 6 | `ssh_exec_multi` | Run the same command on multiple hosts concurrently |
-| 7 | `ssh_ping` | Check SSH reachability of hosts |
-| 8 | `ssh_audit` | Query execution audit log entries |
-| 9 | `ssh_sftp_ls` | List a remote directory |
-| 10 | `ssh_sftp_stat` | Stat a remote file or directory |
-| 11 | `ssh_sftp_mkdir` | Create a remote directory |
-| 12 | `ssh_sftp_upload` | Upload a local file via embedded SFTP |
-| 13 | `ssh_sftp_download` | Download a remote file via embedded SFTP |
-| 14 | `ssh_session_open` | Open a persistent PTY session |
-| 15 | `ssh_session_write` | Send input to an open session |
-| 16 | `ssh_session_read` | Read output from a session |
-| 17 | `ssh_session_close` | Close a PTY session |
-| 18 | `ssh_session_list` | List open PTY sessions |
-| 19 | `ssh_forward_add` | Start a port forward tunnel |
-| 20 | `ssh_forward_list` | List active port forwards |
-| 21 | `ssh_forward_remove` | Stop a port forward |
-| 22 | `ssh_risk_check` | Check risk level of a command |
-| 23 | `ssh_gate_status` | Read the daemon execution gate status |
-| 24 | `ssh_approval_list` | List pending approval requests |
-| 25 | `ssh_approval_respond` | Approve or reject an approval request |
-| 26 | `ssh_connection_status` | List retained embedded SSH connection states for all hosts |
-| 27 | `ssh_connect` | Manually establish a retained embedded SSH connection to a host |
-| 28 | `ssh_disconnect` | Manually close a retained embedded SSH connection |
-| 29 | `ssh_webhook_config` | Get or set webhook notification configuration |
-| 30 | `ssh_playbook_list` | List all configured playbooks |
-| 31 | `ssh_playbook_run` | Execute a playbook on a host with optional params, reason, and change ID |
-| 32 | `ssh_list_daemons` | List configured daemon instances with connectivity status |
-| 33 | `ssh_config_export` | Export team config (hosts without keys, risk rules, playbooks) |
-| 34 | `ssh_config_import` | Import team config from JSON |
-| 35 | `ssh_doctor` | Run diagnostic checks on SSH, config, and daemon |
-| 36 | `ssh_metrics` | Get daemon request/execution/approval counters |
-| 37 | `ssh_health_snapshot` | Collect host health data (uptime, disk, memory, load) |
-| 38 | `ssh_playbook_dry_run` | Preview playbook steps with resolved parameters |
-| 39 | `ssh_preview_exec` | Preview execution plan before running (risk, warnings) |
-| 40 | `ssh_approval_policies_list` | List all approval policy rules |
-| 41 | `ssh_approval_check` | Check if a host+command requires approval |
-| 42 | `ssh_config_import_preview` | Preview team config import diff |
-| 43 | `ssh_exec_compare` | Compare execution results across multiple hosts |
-| 44 | `ssh_daemon_diagnose` | Run diagnostic checks on a remote daemon |
-| 45 | `ssh_daemon_version_check` | Check version compatibility with a remote daemon |
-| 46 | `ssh_audit_export` | Export audit log as JSONL or CSV |
-| 47 | `ssh_daemons_view` | Unified view of all daemons with health and metrics |
-| 48 | `ssh_metrics_trend` | Compute execution trends (24h, 7d, 30d, all) |
-| 49 | `ssh_events_subscribe` | Subscribe to the real-time event stream |
-| 50 | `ssh_sync_diff` | Compare Agent2SSH hosts with ~/.ssh/config |
-| 51 | `ssh_sync_export` | Export Agent2SSH hosts to SSH config format |
+| 1 | `ssh_list_hosts` | List configured SSH host profiles. |
+| 2 | `ssh_list_daemons` | List all configured daemons (localhost + remote daemons from `~/.agent2ssh/remotes.toml`). Returns alias, URL, and connected status. |
+| 3 | `ssh_import_config` | Import SSH host profiles from `~/.ssh/config` (or a custom path). Skips aliases that already exist. |
+| 4 | `ssh_add_host` | Create or update an SSH host profile. |
+| 5 | `ssh_remove_host` | Remove a configured SSH host profile by alias. |
+| 6 | `ssh_exec` | Run a non-interactive command over SSH. Returns stdout, stderr, exit code, timing, and risk level. High-risk commands require `force: true`; blocked commands always fail. Optionally forward to a remote daemon via `daemon_alias`. |
+| 7 | `ssh_ping` | Check SSH reachability of one or more hosts. Returns reachable status and latency for each. |
+| 8 | `ssh_exec_multi` | Run the same command on multiple hosts concurrently. Returns an array of per-host results. Supports optional batch strategy for concurrency limits, failure thresholds, and batched rollout. |
+| 9 | `ssh_exec_compare` | Compare execution results across multiple hosts. Groups by exit code and highlights stdout/stderr differences. Provide either results directly or run a command on multiple hosts. |
+| 10 | `ssh_audit` | Return recent SSH execution audit log entries with optional filtering. |
+| 11 | `ssh_audit_export` | Export audit log entries as JSONL or CSV with optional filtering. Redaction is applied at write time so exported data preserves redaction. |
+| 12 | `ssh_sftp_ls` | List a remote directory via embedded SFTP. |
+| 13 | `ssh_sftp_stat` | Stat a remote file or directory via embedded SFTP. |
+| 14 | `ssh_sftp_mkdir` | Create a remote directory recursively via embedded SFTP. |
+| 15 | `ssh_sftp_upload` | Upload a local file to a remote host via embedded SFTP. |
+| 16 | `ssh_sftp_download` | Download a file from a remote host via embedded SFTP. |
+| 17 | `ssh_session_open` | Open a persistent interactive PTY session. Returns a `session_id` for subsequent write/read/close calls. |
+| 18 | `ssh_session_write` | Send input to an open PTY session (e.g. a command followed by `\n`). |
+| 19 | `ssh_session_read` | Read buffered output from a PTY session. Returns whatever arrived since the last read. |
+| 20 | `ssh_session_close` | Close and terminate a PTY session. |
+| 21 | `ssh_session_list` | List open PTY sessions. Defaults to the local daemon registry and includes MCP process-local fallback sessions when present. |
+| 22 | `ssh_forward_add` | Start an SSH port forward tunnel (`-L` local or `-R` remote). Returns a `forward_id`. |
+| 23 | `ssh_forward_list` | List active SSH port forward tunnels. |
+| 24 | `ssh_forward_remove` | Stop and remove an SSH port forward by ID. |
+| 25 | `ssh_risk_check` | Check the risk level of a command using built-in rules and user-defined `risk_rules.toml`. |
+| 26 | `ssh_gate_status` | Read the local daemon execution gate status. When paused, non-desktop daemon execution is rejected until resumed from CLI or desktop. |
+| 27 | `ssh_approval_list` | List all pending and recent approval requests (for high-risk command authorization). |
+| 28 | `ssh_approval_respond` | Approve or reject a pending approval request by ID. |
+| 29 | `ssh_playbook_list` | List all configured playbooks from `~/.agent2ssh/playbooks.toml`. |
+| 30 | `ssh_playbook_run` | Run a named playbook (sequence of SSH commands) against a target host. Steps execute sequentially; halts on first failure. Supports template parameters via the `params` object. |
+| 31 | `ssh_playbook_dry_run` | Preview a playbook without executing. Resolves template parameters and returns the commands that would be run. |
+| 32 | `ssh_connection_status` | List all configured hosts and their current embedded SSH connection status. |
+| 33 | `ssh_connect` | Manually establish and retain an embedded SSH connection to a specific host. |
+| 34 | `ssh_disconnect` | Manually close a retained embedded SSH connection to a specific host. |
+| 35 | `ssh_webhook_config` | Get or set webhook notification configuration. Use `action: "get"` to retrieve current config, or `action: "set"` with `url`/`events`/`secret` to update. |
+| 36 | `ssh_config_export` | Export team configuration (hosts without private key paths, risk rules, and playbooks). Returns a JSON object suitable for sharing within a team. |
+| 37 | `ssh_config_import` | Import team configuration from a JSON object. Merges hosts (skips duplicates by name), and overwrites risk rules and playbooks if provided. |
+| 38 | `ssh_config_import_preview` | Preview what a team config import will change without actually importing. Shows hosts to add, skip, update, and risk rules/playbook changes. |
+| 39 | `ssh_doctor` | Run diagnostic checks on the agent2ssh environment: embedded SSH/keygen capability, config directory, `hosts.json`, daemon token permissions, daemon health, optional config files, and audit log size. |
+| 40 | `ssh_metrics` | Retrieve basic metrics from the local agent2ssh daemon (requests, execs, blocked commands, durations, approvals). Reads from `GET /metrics` on `127.0.0.1:7722`. |
+| 41 | `ssh_preview_exec` | Preview what an execution will do before running it. Returns target hosts, commands, risk levels, warnings, and whether approval is required. Supports single-host and multi-host preview. |
+| 42 | `ssh_approval_policies_list` | List all configured approval policies. Each policy specifies when approval is required based on host, tags, risk level, and command pattern. |
+| 43 | `ssh_approval_check` | Check whether running a command on a specific host requires approval based on configured policies. Returns the matching policy name and whether approval is needed. |
+| 44 | `ssh_health_snapshot` | Collect a health snapshot (uptime, disk, memory, load, SSH latency) for configured hosts. Returns per-host data collected concurrently via SSH. |
+| 45 | `ssh_daemon_diagnose` | Run connection diagnostics on a remote daemon: TCP connectivity, TLS handshake, token configuration, authentication, version compatibility, latency. Returns a detailed report. |
+| 46 | `ssh_daemon_version_check` | Check version compatibility between this build and a remote daemon. Returns local version, remote version, compatibility status, and a human-readable message. |
+| 47 | `ssh_daemons_view` | Get a unified view of all daemons (localhost + remotes) with their health, metrics, and host counts. |
+| 48 | `ssh_metrics_trend` | Show execution metrics trends: volume, failure rate, risk distribution, top hosts, hourly breakdown. Supports `24h` / `7d` / `30d` / `all` period selection. |
+| 49 | `ssh_events_subscribe` | Subscribe to the real-time event stream. Returns the latest events from the event bus. For continuous streaming, use the daemon's SSE endpoint `GET /events/stream`. |
+| 50 | `ssh_sync_diff` | Compare Agent2SSH hosts with `~/.ssh/config`. Shows hosts only on one side and conflicts. |
+| 51 | `ssh_sync_export` | Export Agent2SSH hosts to SSH config format file (default `~/.ssh/config.d/agent2ssh.conf`). |
 
 ## Risk Levels
 
