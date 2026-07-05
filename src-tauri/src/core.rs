@@ -2022,6 +2022,46 @@ pub async fn sftp_mkdir_core_with_source(
     .await
 }
 
+// V3-1: SFTP text preview. Bounded at one byte over the desktop's 1MB preview
+// threshold so an oversized/binary file reads as an error (→ metadata card in
+// the UI) instead of silently handing back a half-file that looks complete.
+const SFTP_PREVIEW_MAX_BYTES: u64 = 1_048_577;
+
+pub async fn sftp_read_text_core_with_source(
+    host_name: &str,
+    path: &str,
+    timeout_secs: Option<u64>,
+    source: Option<String>,
+) -> Result<ExecResult> {
+    sftp_dir_operation_core(
+        host_name,
+        path,
+        timeout_secs,
+        "read",
+        source,
+        |host, path, timeout| {
+            use std::io::Read;
+            let session = connect_embedded_ssh(&host, timeout)?;
+            let sftp = session.sftp()?;
+            let mut remote_file = sftp
+                .open(Path::new(&path))
+                .with_context(|| format!("failed to open remote file {path}"))?;
+            let mut buf = Vec::new();
+            (&mut remote_file)
+                .take(SFTP_PREVIEW_MAX_BYTES)
+                .read_to_end(&mut buf)
+                .with_context(|| format!("failed to read remote file {path}"))?;
+            if buf.len() as u64 >= SFTP_PREVIEW_MAX_BYTES {
+                return Err(anyhow!(
+                    "file exceeds the {SFTP_PREVIEW_MAX_BYTES}-byte preview limit"
+                ));
+            }
+            String::from_utf8(buf).map_err(|_| anyhow!("file is not valid UTF-8 text"))
+        },
+    )
+    .await
+}
+
 /// Maximum recursion depth for a remote directory walk — a hard guard against
 /// symlink loops or pathologically deep trees. (J4)
 const MAX_WALK_DEPTH: usize = 64;

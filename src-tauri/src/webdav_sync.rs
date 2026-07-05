@@ -279,7 +279,10 @@ fn is_legacy_unsyncable_remote_file(path: &str) -> bool {
     LEGACY_UNSYNCABLE_REMOTE_FILES.contains(&path)
 }
 
-pub fn create_sync_backup() -> Result<PathBuf> {
+/// `label` is a free-form note for humans browsing the backups directory (e.g.
+/// "pre-restore" or a user-supplied snapshot name, V4-3); it does not affect
+/// which files get backed up.
+pub fn create_sync_backup(label: Option<&str>) -> Result<PathBuf> {
     ensure_config_dir()?;
     let dir = config_dir()?;
     let sync_id = uuid::Uuid::new_v4().simple().to_string();
@@ -317,6 +320,7 @@ pub fn create_sync_backup() -> Result<PathBuf> {
         "created_at": Utc::now(),
         "source": dir,
         "files": copied,
+        "label": label,
     });
     let manifest_path = backup.join("backup_manifest.json");
     fs::write(
@@ -325,6 +329,145 @@ pub fn create_sync_backup() -> Result<PathBuf> {
     )?;
     restrict_file_to_owner(&manifest_path)?;
     Ok(backup)
+}
+
+/// V4-3: metadata for a config backup/snapshot, read back from the
+/// `backup_manifest.json` that `create_sync_backup` already writes.
+#[derive(Debug, Clone, Serialize)]
+pub struct ConfigSnapshotInfo {
+    pub id: String,
+    pub label: Option<String>,
+    pub created_at: Option<DateTime<Utc>>,
+    pub files: Vec<String>,
+}
+
+fn read_backup_manifest(dir: &Path) -> Result<ConfigSnapshotInfo> {
+    let manifest_path = dir.join("backup_manifest.json");
+    let raw = fs::read_to_string(&manifest_path)
+        .with_context(|| format!("failed to read {}", manifest_path.display()))?;
+    let value: serde_json::Value = serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
+    let id = dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_string();
+    Ok(ConfigSnapshotInfo {
+        id,
+        label: value
+            .get("label")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        created_at: value
+            .get("created_at")
+            .and_then(|v| v.as_str())
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.with_timezone(&Utc)),
+        files: value
+            .get("files")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|f| f.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    })
+}
+
+/// V4-3: list config snapshots under `~/.agent2ssh/backups/`, newest first.
+/// Every push/pull sync already lands a backup here (see `create_sync_backup`
+/// call sites); this just makes that directory browsable/restorable from the
+/// desktop UI instead of being a purely internal safety net.
+pub fn list_config_snapshots() -> Result<Vec<ConfigSnapshotInfo>> {
+    let dir = config_dir()?.join(BACKUP_DIR);
+    if !dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut snapshots = Vec::new();
+    for entry in fs::read_dir(&dir).with_context(|| format!("failed to read {}", dir.display()))? {
+        let entry = entry?;
+        if !entry.path().is_dir() {
+            continue;
+        }
+        if let Ok(info) = read_backup_manifest(&entry.path()) {
+            snapshots.push(info);
+        }
+    }
+    snapshots.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    Ok(snapshots)
+}
+
+fn backup_dir_for_id(id: &str) -> Result<PathBuf> {
+    // `id` becomes a path component below — reject traversal/separators
+    // instead of trusting it, since it comes from the frontend.
+    if id.is_empty() || id.contains(['/', '\\']) || id.contains("..") {
+        return Err(anyhow!("invalid snapshot id"));
+    }
+    Ok(config_dir()?.join(BACKUP_DIR).join(id))
+}
+
+/// V4-3: create a labeled, on-demand snapshot (as opposed to the automatic
+/// pre-sync/pre-restore/pre-template ones).
+pub fn create_named_snapshot(label: &str) -> Result<ConfigSnapshotInfo> {
+    let dir = create_sync_backup(Some(label))?;
+    read_backup_manifest(&dir)
+}
+
+/// V4-3: restore a config snapshot. Takes a fresh "pre-restore" safety
+/// snapshot of the CURRENT state first (so restoring is itself undoable), then
+/// copies back only the files the target snapshot actually captured.
+pub fn restore_config_snapshot(id: &str) -> Result<ConfigSnapshotInfo> {
+    let source_dir = backup_dir_for_id(id)?;
+    let info = read_backup_manifest(&source_dir)?;
+    create_sync_backup(Some("pre-restore"))?;
+    let dest_dir = config_dir()?;
+    for rel in &info.files {
+        let source = source_dir.join(rel);
+        if !source.is_file() {
+            continue;
+        }
+        let dest = dest_dir.join(rel);
+        fs::copy(&source, &dest).with_context(|| {
+            format!(
+                "failed to restore {} to {}",
+                source.display(),
+                dest.display()
+            )
+        })?;
+        restrict_file_to_owner(&dest)?;
+    }
+    Ok(info)
+}
+
+pub fn delete_config_snapshot(id: &str) -> Result<()> {
+    let dir = backup_dir_for_id(id)?;
+    if dir.is_dir() {
+        fs::remove_dir_all(&dir).with_context(|| format!("failed to delete {}", dir.display()))?;
+    }
+    Ok(())
+}
+
+/// V4-3: apply a config template — write a fixed set of known-safe files
+/// (must already be in `SYNCABLE_FILES`) directly into the config dir, after
+/// taking a safety snapshot so the change is undoable via snapshot restore.
+pub fn apply_config_template(files: &[(String, String)]) -> Result<ConfigSnapshotInfo> {
+    for (name, _) in files {
+        if !SYNCABLE_FILES.contains(&name.as_str()) {
+            return Err(anyhow!(
+                "refusing to write non-syncable config file: {name}"
+            ));
+        }
+    }
+    let pre_apply = create_named_snapshot("pre-template")?;
+    ensure_config_dir()?;
+    let dir = config_dir()?;
+    for (name, content) in files {
+        let dest = dir.join(name);
+        fs::write(&dest, content).with_context(|| format!("failed to write {}", dest.display()))?;
+        restrict_file_to_owner(&dest)?;
+    }
+    Ok(pre_apply)
 }
 
 fn sync_lock() -> Result<FileLockGuard> {
@@ -397,7 +540,7 @@ pub async fn webdav_push(options: WebDavSyncOptions) -> Result<WebDavSyncResult>
     ensure_collection(&client, &config, &config.url).await?;
     ensure_collection(&client, &config, &join_url(&config.url, REMOTE_FILES_DIR)).await?;
 
-    let backup = create_sync_backup()?;
+    let backup = create_sync_backup(None)?;
     let remote_marker = get_remote_marker(&client, &config).await?;
     let local_marker = load_local_sync_marker()?;
     let files = collect_sync_files()?;
@@ -450,7 +593,7 @@ pub async fn webdav_pull(options: WebDavSyncOptions) -> Result<WebDavSyncResult>
         .cloned()
         .collect();
 
-    let backup = create_sync_backup()?;
+    let backup = create_sync_backup(None)?;
     let dir = config_dir()?;
     let remote_paths: HashSet<String> =
         applied_files.iter().map(|file| file.path.clone()).collect();
@@ -557,7 +700,7 @@ mod tests {
         fs::write(dir.join(SYNC_VERSION_FILE), "{}").unwrap();
         fs::write(dir.join("daemon.token"), "local-token").unwrap();
 
-        let backup = create_sync_backup().unwrap();
+        let backup = create_sync_backup(None).unwrap();
         assert!(backup.join("hosts.json").exists());
         assert!(!backup.join("known_hosts.json").exists());
         assert!(backup.join(SYNC_VERSION_FILE).exists());
@@ -582,5 +725,72 @@ mod tests {
         validate_remote_file("known_hosts.json").unwrap();
         validate_remote_file("hosts.json").unwrap();
         assert!(validate_remote_file("daemon.token").is_err());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn named_snapshot_round_trips_through_list_and_restore() {
+        let dir = std::env::temp_dir().join(format!("agent2ssh-snap-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("AGENT2SSH_CONFIG_DIR", &dir);
+        fs::write(dir.join("hosts.json"), r#"{"v":1}"#).unwrap();
+
+        let created = create_named_snapshot("before-change").unwrap();
+        assert_eq!(created.label.as_deref(), Some("before-change"));
+        assert!(created.files.contains(&"hosts.json".to_string()));
+
+        let listed = list_config_snapshots().unwrap();
+        assert!(listed.iter().any(|s| s.id == created.id));
+
+        // Mutate the live file, then restore the snapshot and confirm it's back.
+        fs::write(dir.join("hosts.json"), r#"{"v":2}"#).unwrap();
+        restore_config_snapshot(&created.id).unwrap();
+        let restored = fs::read_to_string(dir.join("hosts.json")).unwrap();
+        assert_eq!(restored, r#"{"v":1}"#);
+
+        // Restoring itself must have taken a pre-restore safety snapshot.
+        let after_restore = list_config_snapshots().unwrap();
+        assert!(after_restore
+            .iter()
+            .any(|s| s.label.as_deref() == Some("pre-restore")));
+
+        delete_config_snapshot(&created.id).unwrap();
+        let after_delete = list_config_snapshots().unwrap();
+        assert!(!after_delete.iter().any(|s| s.id == created.id));
+
+        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn apply_config_template_rejects_non_syncable_files() {
+        let dir = std::env::temp_dir().join(format!("agent2ssh-tmpl-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("AGENT2SSH_CONFIG_DIR", &dir);
+
+        let result = apply_config_template(&[("daemon.token".to_string(), "x".to_string())]);
+        assert!(result.is_err());
+        assert!(!dir.join("daemon.token").exists());
+
+        let ok = apply_config_template(&[(
+            "execution_limits.toml".to_string(),
+            "enabled = true\n".to_string(),
+        )]);
+        assert!(ok.is_ok());
+        assert_eq!(
+            fs::read_to_string(dir.join("execution_limits.toml")).unwrap(),
+            "enabled = true\n"
+        );
+
+        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn backup_dir_for_id_rejects_traversal() {
+        assert!(backup_dir_for_id("../etc").is_err());
+        assert!(backup_dir_for_id("a/b").is_err());
+        assert!(backup_dir_for_id("").is_err());
     }
 }

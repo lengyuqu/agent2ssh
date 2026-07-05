@@ -10,9 +10,10 @@ use crate::{
         import_team_config, list_audit_core, list_host_groups_core, list_hosts_core,
         list_proxies_core, ping_hosts_core, remove_host_core, save_host_group_core,
         save_proxy_core, sftp_download_core_with_source, sftp_ls_core_with_source,
-        sftp_mkdir_core_with_source, sftp_stat_core_with_source, sftp_upload_core_with_source,
-        sftp_walk_core_with_source, update_host_core, validate_command_length, ExecMultiRequest,
-        ImportResult, TeamConfigExport, MAX_COMMAND_BYTES,
+        sftp_mkdir_core_with_source, sftp_read_text_core_with_source, sftp_stat_core_with_source,
+        sftp_upload_core_with_source, sftp_walk_core_with_source, update_host_core,
+        validate_command_length, ExecMultiRequest, ImportResult, TeamConfigExport,
+        MAX_COMMAND_BYTES,
     },
     diagnostics::{
         append_diagnostic_log, clear_diagnostic_logs as clear_diagnostic_logs_core,
@@ -44,6 +45,10 @@ use crate::{
         ExecResult, ForwardDirection, ForwardRule, HostGroup, HostProfile, PingResult,
         ProxyProfile, RiskLevel, SftpDownloadRequest, SftpExchangeRequest, SftpExchangeResult,
         SftpResult, SftpUploadRequest, WalkEntry,
+    },
+    webdav_sync::{
+        apply_config_template, create_named_snapshot, delete_config_snapshot,
+        list_config_snapshots, restore_config_snapshot, ConfigSnapshotInfo,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -759,6 +764,25 @@ pub async fn sftp_stat(
         .map_err(|e| e.to_string())
 }
 
+/// V3-1: read a remote file's content for the SFTP panel's inline text preview.
+/// Callers gate this to files already known (from the directory listing) to be
+/// small; the core function still enforces its own byte cap and rejects
+/// non-UTF-8 content so a preview attempt on a binary/oversized file fails
+/// cleanly instead of returning junk.
+#[tauri::command]
+pub async fn sftp_read_text(
+    host: String,
+    path: String,
+    timeout_secs: Option<u64>,
+) -> Result<ExecResult, String> {
+    let source = source_from_env("desktop");
+    let command = format!("sftp read {}", path);
+    authorize_desktop_operation(&host, &command, false, &source).await?;
+    sftp_read_text_core_with_source(&host, &path, timeout_secs, Some(source))
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn sftp_mkdir(
     host: String,
@@ -934,6 +958,34 @@ pub async fn local_walk(root: String) -> Result<Vec<WalkEntry>, String> {
     let mut out = Vec::new();
     local_walk_inner(&path, "", 0, &mut out).map_err(|e| e.to_string())?;
     Ok(out)
+}
+
+// V3-1: same bound as the remote SFTP preview (core.rs::SFTP_PREVIEW_MAX_BYTES) —
+// kept as a separate local constant since local reads don't go through core.rs.
+const LOCAL_PREVIEW_MAX_BYTES: u64 = 1_048_577;
+
+fn local_read_text_inner(path: String) -> anyhow::Result<String> {
+    use std::io::Read;
+    let resolved = expand_local_path(Some(path));
+    let file = fs::File::open(&resolved)
+        .map_err(|e| anyhow::anyhow!("cannot open {}: {e}", resolved.display()))?;
+    let mut buf = Vec::new();
+    file.take(LOCAL_PREVIEW_MAX_BYTES)
+        .read_to_end(&mut buf)
+        .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", resolved.display()))?;
+    if buf.len() as u64 >= LOCAL_PREVIEW_MAX_BYTES {
+        return Err(anyhow::anyhow!(
+            "file exceeds the {LOCAL_PREVIEW_MAX_BYTES}-byte preview limit"
+        ));
+    }
+    String::from_utf8(buf).map_err(|_| anyhow::anyhow!("file is not valid UTF-8 text"))
+}
+
+/// V3-1: read a local file's content for the SFTP panel's inline text preview.
+/// See `local_read_text_inner` for the size/UTF-8 gating.
+#[tauri::command]
+pub async fn local_read_text(path: String) -> Result<String, String> {
+    local_read_text_inner(path).map_err(|e| e.to_string())
 }
 
 /// Create a local directory (and parents) — used when recreating a remote
@@ -2043,6 +2095,47 @@ pub async fn push_webdav_sync() -> Result<WebDavSyncStatus, String> {
     Ok(status)
 }
 
+// ── Config snapshots (V4-3) ─────────────────────────────────────────────────
+// Reuses the backup-directory mechanism `crate::webdav_sync` already builds
+// for pre-sync safety nets (`create_sync_backup`, `SYNCABLE_FILES`) — this is
+// a separate, independent capability from the desktop's own JSON-blob WebDAV
+// sync above; a user never needs WebDAV configured to save/restore snapshots.
+
+#[tauri::command]
+pub fn list_config_snapshots_cmd() -> Result<Vec<ConfigSnapshotInfo>, String> {
+    list_config_snapshots().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn create_config_snapshot(label: String) -> Result<ConfigSnapshotInfo, String> {
+    let label = if label.trim().is_empty() {
+        "manual".to_string()
+    } else {
+        label.trim().to_string()
+    };
+    create_named_snapshot(&label).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn restore_config_snapshot_cmd(id: String) -> Result<ConfigSnapshotInfo, String> {
+    restore_config_snapshot(&id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_config_snapshot_cmd(id: String) -> Result<(), String> {
+    delete_config_snapshot(&id).map_err(|e| e.to_string())
+}
+
+/// `files` is `[(relative filename, content)]`, e.g. `[("policy.toml", "...")]`.
+/// Rejects anything outside `SYNCABLE_FILES`; returns the pre-apply snapshot so
+/// the caller can tell the user how to undo it.
+#[tauri::command]
+pub fn apply_config_template_cmd(
+    files: Vec<(String, String)>,
+) -> Result<ConfigSnapshotInfo, String> {
+    apply_config_template(&files).map_err(|e| e.to_string())
+}
+
 const TRAY_ID: &str = "agent2ssh-tray";
 const TRAY_MENU_OPEN_ID: &str = "tray-open";
 const TRAY_MENU_QUIT_ID: &str = "tray-quit";
@@ -2430,6 +2523,11 @@ pub fn run_tauri() {
             get_webdav_sync_status,
             test_webdav_sync,
             push_webdav_sync,
+            list_config_snapshots_cmd,
+            create_config_snapshot,
+            restore_config_snapshot_cmd,
+            delete_config_snapshot_cmd,
+            apply_config_template_cmd,
             // Execution
             classify_command_risk,
             classify_command_risk_for_host,
@@ -2444,9 +2542,11 @@ pub fn run_tauri() {
             sftp_ls,
             sftp_stat,
             sftp_mkdir,
+            sftp_read_text,
             local_ls,
             local_walk,
             local_mkdir,
+            local_read_text,
             sftp_walk,
             // Sessions
             session_open,
@@ -2599,6 +2699,43 @@ mod tests {
         let file = dir.join("f.txt");
         std::fs::write(&file, b"x").unwrap();
         assert!(local_ls_inner(Some(file.to_string_lossy().to_string())).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn local_read_text_inner_reads_small_text_file() {
+        let dir = std::env::temp_dir().join(format!("a2s-readtext-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("note.txt");
+        std::fs::write(&file, "hello world\n").unwrap();
+
+        let content = local_read_text_inner(file.to_string_lossy().to_string()).unwrap();
+        assert_eq!(content, "hello world\n");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn local_read_text_inner_rejects_oversized_file() {
+        let dir = std::env::temp_dir().join(format!("a2s-readtext-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("big.txt");
+        std::fs::write(&file, vec![b'a'; LOCAL_PREVIEW_MAX_BYTES as usize]).unwrap();
+
+        assert!(local_read_text_inner(file.to_string_lossy().to_string()).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn local_read_text_inner_rejects_binary_content() {
+        let dir = std::env::temp_dir().join(format!("a2s-readtext-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("bin.dat");
+        std::fs::write(&file, [0xff_u8, 0xfe, 0x00, 0x01, 0x02]).unwrap();
+
+        assert!(local_read_text_inner(file.to_string_lossy().to_string()).is_err());
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
