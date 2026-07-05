@@ -378,6 +378,33 @@ mod tests {
         ExecutionLimiter::new(config)
     }
 
+    // V4-3: same rationale as the policy.rs template tests — parse the desktop's
+    // built-in execution_limits.toml template content against the real schema.
+    #[test]
+    fn baseline_template_limits_parses() {
+        let raw = "enabled = true\nwindow_secs = 60\ndefault_source_per_minute = 30\ndefault_host_per_minute = 20\ndefault_tag_per_minute = 20\ndefault_source_max_sessions = 5\ndefault_host_max_sessions = 3\ndefault_tag_max_sessions = 3\n";
+        let config: ExecutionLimitConfig = toml::from_str(raw).unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.default_source_per_minute, 30);
+        assert_eq!(config.default_host_max_sessions, 3);
+    }
+
+    #[test]
+    fn development_template_limits_parses() {
+        let raw = "enabled = true\nwindow_secs = 60\ndefault_source_per_minute = 120\ndefault_host_per_minute = 60\ndefault_tag_per_minute = 60\ndefault_source_max_sessions = 10\ndefault_host_max_sessions = 6\ndefault_tag_max_sessions = 6\n";
+        let config: ExecutionLimitConfig = toml::from_str(raw).unwrap();
+        assert_eq!(config.default_source_per_minute, 120);
+        assert_eq!(config.default_source_max_sessions, 10);
+    }
+
+    #[test]
+    fn production_template_limits_parses() {
+        let raw = "enabled = true\nwindow_secs = 60\ndefault_source_per_minute = 10\ndefault_host_per_minute = 8\ndefault_tag_per_minute = 8\ndefault_source_max_sessions = 2\ndefault_host_max_sessions = 2\ndefault_tag_max_sessions = 2\n";
+        let config: ExecutionLimitConfig = toml::from_str(raw).unwrap();
+        assert_eq!(config.default_source_per_minute, 10);
+        assert_eq!(config.default_tag_max_sessions, 2);
+    }
+
     #[test]
     fn config_rule_keys_are_normalized() {
         let mut config = ExecutionLimitConfig::default();

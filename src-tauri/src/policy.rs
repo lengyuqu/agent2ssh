@@ -178,6 +178,73 @@ requires_approval = true
         );
     }
 
+    // V4-3: the desktop's built-in config templates (src/lib/configTemplates.ts)
+    // ship hand-authored policy.toml content. These tests parse the exact same
+    // strings against the real schema so a template can't silently ship invalid
+    // TOML — copy any edit to the TS templates back into these literals too.
+    #[test]
+    fn baseline_template_policy_parses() {
+        let raw = r#"[risk.high]
+patterns = ["systemctl stop *", "systemctl disable *", "docker rm *", "docker rmi *", "kill -9 *"]
+
+[risk.medium]
+patterns = ["apt-get remove *", "npm uninstall -g *", "pip uninstall *"]
+
+[[approval.policies]]
+name = "Baseline: approve high risk and above"
+hosts = []
+tags = []
+min_risk = "high"
+command_pattern = "*"
+requires_approval = true
+ttl_secs = 600
+"#;
+        let policy = parse_policy(Path::new("policy.toml"), raw).unwrap();
+        assert_eq!(policy.risk.high.patterns.len(), 5);
+        assert_eq!(policy.risk.medium.patterns.len(), 3);
+        assert_eq!(policy.approval.policies.len(), 1);
+        assert_eq!(policy.approval.policies[0].min_risk, Some(RiskLevel::High));
+        assert!(policy.approval.policies[0].requires_approval);
+        assert_eq!(policy.approval.policies[0].ttl_secs, Some(600));
+    }
+
+    #[test]
+    fn development_template_policy_parses() {
+        let raw = r#"[risk.high]
+patterns = []
+
+[risk.medium]
+patterns = []
+"#;
+        let policy = parse_policy(Path::new("policy.toml"), raw).unwrap();
+        assert!(policy.risk.high.patterns.is_empty());
+        assert!(policy.risk.medium.patterns.is_empty());
+        assert!(policy.approval.policies.is_empty());
+    }
+
+    #[test]
+    fn production_template_policy_parses() {
+        let raw = r#"[risk.high]
+patterns = ["systemctl *", "service *", "docker *", "kubectl delete *", "kubectl apply *", "iptables *", "ufw *", "useradd *", "userdel *", "usermod *", "passwd *", "crontab *", "mount *", "umount *"]
+
+[risk.medium]
+patterns = ["apt-get *", "yum *", "npm install *", "pip install *"]
+
+[[approval.policies]]
+name = "Production: approve high risk and above"
+hosts = []
+tags = []
+min_risk = "high"
+command_pattern = "*"
+requires_approval = true
+ttl_secs = 300
+"#;
+        let policy = parse_policy(Path::new("policy.toml"), raw).unwrap();
+        assert_eq!(policy.risk.high.patterns.len(), 14);
+        assert_eq!(policy.risk.medium.patterns.len(), 4);
+        assert_eq!(policy.approval.policies[0].ttl_secs, Some(300));
+    }
+
     #[test]
     #[serial_test::serial]
     fn load_policy_file_reflects_saves_via_cache() {
