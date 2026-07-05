@@ -763,8 +763,12 @@ struct PlaybookRunBody {
     source: Option<String>,
 }
 #[derive(Deserialize)]
+#[derive(Default)]
 struct PlaybookDryRunBody {
-    playbook: String,
+    /// Legacy: older clients sent the playbook name in the body even though
+    /// the route carries it in the path. Accepted only when it matches.
+    #[serde(default)]
+    playbook: Option<String>,
     #[serde(default)]
     params: Option<HashMap<String, String>>,
 }
@@ -2231,11 +2235,21 @@ async fn run_playbook(
 async fn dry_run_playbook_handler(
     State(_s): State<AppState>,
     Extension(_auth): Extension<AuthContext>,
-    Json(body): Json<PlaybookDryRunBody>,
+    Path(name): Path<String>,
+    body: Option<Json<PlaybookDryRunBody>>,
 ) -> Result<Json<PlaybookDryRun>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    let body = body.map(|Json(b)| b).unwrap_or_default();
+    if let Some(body_name) = body.playbook.as_deref() {
+        if body_name != name {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                format!("path playbook '{name}' does not match body playbook '{body_name}'"),
+            ));
+        }
+    }
     let params = body.params.unwrap_or_default();
-    dry_run_playbook(&body.playbook, &params)
+    dry_run_playbook(&name, &params)
         .map(Json)
         .map_err(|e| err(StatusCode::BAD_REQUEST, e))
 }
@@ -2273,15 +2287,18 @@ async fn diagnose_all(
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     let remotes =
         agent2ssh::remote::load_remotes().map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let mut results = Vec::new();
-    for remote in &remotes {
-        match diagnose_daemon(&remote.alias).await {
-            Ok(diag) => results.push(diag),
-            Err(e) => {
+    // Each diagnostic is a network round-trip; probe the remotes concurrently
+    // (join_all preserves the remotes.toml ordering in the response).
+    let results = futures_util::future::join_all(remotes.iter().map(|remote| {
+        let alias = remote.alias.clone();
+        let url = remote.url.clone();
+        async move {
+            match diagnose_daemon(&alias).await {
+                Ok(diag) => diag,
                 // Still include failed diagnostics for reporting
-                results.push(agent2ssh::remote::DaemonDiagnostic {
-                    alias: remote.alias.clone(),
-                    url: remote.url.clone(),
+                Err(e) => agent2ssh::remote::DaemonDiagnostic {
+                    alias,
+                    url,
                     checks: vec![agent2ssh::remote::DiagnosticCheck {
                         name: "diagnostic".to_string(),
                         status: agent2ssh::remote::DiagnosticStatus::Error,
@@ -2289,10 +2306,11 @@ async fn diagnose_all(
                         details: None,
                     }],
                     overall_status: agent2ssh::remote::DiagnosticStatus::Error,
-                });
+                },
             }
         }
-    }
+    }))
+    .await;
     Ok(Json(results))
 }
 

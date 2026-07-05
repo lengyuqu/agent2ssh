@@ -77,6 +77,15 @@ export function EventsProvider({ children }: { children: ReactNode }) {
             setStatus("live");
           }
         )
+        .then(() => {
+          // The stream ended without an error (e.g. the daemon restarted and
+          // closed the connection cleanly). Treat it like a drop: go offline
+          // and reconnect, otherwise the bus would stay "live" but dead.
+          clearConnectTimer();
+          if (!active) return;
+          setStatus("offline");
+          scheduleReconnect();
+        })
         .catch((err) => {
           clearConnectTimer();
           if (!active) return;

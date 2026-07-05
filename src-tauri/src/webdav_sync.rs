@@ -394,7 +394,7 @@ pub fn list_config_snapshots() -> Result<Vec<ConfigSnapshotInfo>> {
             snapshots.push(info);
         }
     }
-    snapshots.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    snapshots.sort_by_key(|snapshot| std::cmp::Reverse(snapshot.created_at));
     Ok(snapshots)
 }
 

@@ -1694,14 +1694,16 @@ paths:
           required: true
           schema: { type: string }
       requestBody:
-        required: true
+        required: false
         content:
           application/json:
             schema:
               type: object
-              required: [playbook]
               properties:
-                playbook: { type: string }
+                playbook:
+                  type: string
+                  deprecated: true
+                  description: Legacy duplicate of the path parameter; rejected with 400 if it does not match.
                 params:
                   type: object
                   additionalProperties: { type: string }

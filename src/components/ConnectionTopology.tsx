@@ -23,7 +23,6 @@ type GraphNode = SimulationNodeDatum & {
   id: string;
   kind: NodeKind;
   label: string;
-  tone: Tone;
   detail?: string;
 };
 
@@ -53,8 +52,7 @@ type Props = {
   onNavigateModule: (id: string) => void;
 };
 
-function hostTone(name: string, statuses: ConnectionStatus[]): Tone {
-  const status = statuses.find((s) => s.host === name);
+function hostTone(status: ConnectionStatus | undefined): Tone {
   if (!status || !status.connected) return "muted";
   if (status.reconnecting) return "warning";
   if (status.healthy === false) return "destructive";
@@ -104,13 +102,14 @@ export default function ConnectionTopology({
     return () => observer.disconnect();
   }, []);
 
+  // Layout structure only — tones live in `toneById` below so a status-poll
+  // color change repaints the SVG without recreating the force simulation.
   const { nodes, links } = useMemo<{ nodes: GraphNode[]; links: GraphLink[] }>(() => {
     const nodeList: GraphNode[] = [
       {
         id: "daemon",
         kind: "daemon",
         label: t("Local daemon"),
-        tone: daemonHealth?.ok ? "success" : "destructive",
       },
     ];
     const linkList: GraphLink[] = [];
@@ -121,7 +120,6 @@ export default function ConnectionTopology({
         id: `host:${host.name}`,
         kind: "host",
         label: host.name,
-        tone: hostTone(host.name, connectionStatuses),
         detail: host.host,
       });
       linkList.push({ source: "daemon", target: `host:${host.name}` });
@@ -143,7 +141,6 @@ export default function ConnectionTopology({
         id: `proxy:${proxy.id}`,
         kind: "proxy",
         label: proxy.name,
-        tone: "primary",
         detail: `${proxy.protocol} ${proxy.host}:${proxy.port}`,
       });
     }
@@ -157,7 +154,6 @@ export default function ConnectionTopology({
           id: endpointId,
           kind: "endpoint",
           label: `${rule.target_host}:${rule.target_port}`,
-          tone: "muted",
         });
       }
       linkList.push({ source: `host:${rule.host}`, target: endpointId, dashed: true });
@@ -166,7 +162,16 @@ export default function ConnectionTopology({
     // Drop links whose endpoints don't exist (e.g. a forward's host was removed).
     const nodeIds = new Set(nodeList.map((n) => n.id));
     return { nodes: nodeList, links: linkList.filter((l) => nodeIds.has(l.source) && nodeIds.has(l.target)) };
-  }, [hosts, proxies, forwards, connectionStatuses, daemonHealth, t]);
+  }, [hosts, proxies, forwards, t]);
+
+  const toneById = useMemo<Map<string, Tone>>(() => {
+    const statusByHost = new Map(connectionStatuses.map((s) => [s.host, s]));
+    const map = new Map<string, Tone>();
+    map.set("daemon", daemonHealth?.ok ? "success" : "destructive");
+    for (const host of hosts) map.set(`host:${host.name}`, hostTone(statusByHost.get(host.name)));
+    for (const proxy of proxies) map.set(`proxy:${proxy.id}`, "primary");
+    return map;
+  }, [hosts, proxies, connectionStatuses, daemonHealth]);
 
   useEffect(() => {
     if (nodes.length === 0) return;
@@ -179,11 +184,15 @@ export default function ConnectionTopology({
       const prior = previous.get(n.id);
       return prior ? { ...n, x: prior.x, y: prior.y, vx: prior.vx, vy: prior.vy } : n;
     });
+    // Hand d3 its own copies: forceLink mutates source/target from id strings
+    // into node references, and those must point at *this* run's nodes — not
+    // leak into (or reuse stale references from) the memoized `links` array.
+    const liveLinks = links.map((link) => ({ ...link }));
 
     const simulation = forceSimulation<GraphNode>(liveNodes)
       .force(
         "link",
-        forceLink<GraphNode, GraphLink>(links)
+        forceLink<GraphNode, GraphLink>(liveLinks)
           .id((n) => n.id)
           .distance(80)
       )
@@ -196,17 +205,17 @@ export default function ConnectionTopology({
         const el = nodeElRefs.current.get(node.id);
         if (el) el.setAttribute("transform", `translate(${node.x ?? 0}, ${node.y ?? 0})`);
       }
-      links.forEach((link, index) => {
+      liveLinks.forEach((link, index) => {
         const el = linkElRefs.current.get(index);
         if (!el) return;
-        const source = liveNodes.find((n) => n.id === link.source || n.id === (link.source as unknown as GraphNode).id);
-        const target = liveNodes.find((n) => n.id === link.target || n.id === (link.target as unknown as GraphNode).id);
-        if (source && target) {
-          el.setAttribute("x1", String(source.x ?? 0));
-          el.setAttribute("y1", String(source.y ?? 0));
-          el.setAttribute("x2", String(target.x ?? 0));
-          el.setAttribute("y2", String(target.y ?? 0));
-        }
+        // By the first tick, forceLink has replaced the id strings with
+        // references to this run's nodes.
+        const source = link.source as unknown as GraphNode;
+        const target = link.target as unknown as GraphNode;
+        el.setAttribute("x1", String(source.x ?? 0));
+        el.setAttribute("y1", String(source.y ?? 0));
+        el.setAttribute("x2", String(target.x ?? 0));
+        el.setAttribute("y2", String(target.y ?? 0));
       });
     });
 
@@ -272,6 +281,7 @@ export default function ConnectionTopology({
               {nodes.map((node) => {
                 const isHost = node.kind === "host";
                 const hostName = isHost ? node.label : null;
+                const tone = toneById.get(node.id) ?? "muted";
                 return (
                   <g
                     key={node.id}
@@ -293,9 +303,9 @@ export default function ConnectionTopology({
                   >
                     <circle
                       r={RADIUS[node.kind]}
-                      fill={TONE_VAR[node.tone]}
+                      fill={TONE_VAR[tone]}
                       fillOpacity={node.kind === "daemon" || node.kind === "host" ? 0.85 : 0.35}
-                      stroke={TONE_VAR[node.tone]}
+                      stroke={TONE_VAR[tone]}
                       strokeWidth={hoveredHost === node.label ? 3 : 1.5}
                     />
                     <text

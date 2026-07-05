@@ -1,5 +1,5 @@
 import { Activity, BarChart3, Flame, Radar } from "lucide-react";
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import {
   Area,
   AreaChart,
@@ -104,9 +104,22 @@ export default function AuditCharts() {
 
   // Nudge a refresh when a new exec lands so the trend line keeps pace with
   // live activity instead of only updating when the module is re-entered.
+  // Coalesced: a multi-host exec fires one completion event per host, and each
+  // reload pulls up to FETCH_LIMIT rows, so bursts collapse into one fetch.
+  const reloadTimer = useRef<number | null>(null);
   useAgentEvents((event) => {
-    if (event.event_type === "exec_completed") load();
+    if (event.event_type !== "exec_completed" || reloadTimer.current !== null) return;
+    reloadTimer.current = window.setTimeout(() => {
+      reloadTimer.current = null;
+      load();
+    }, 1500);
   });
+  useEffect(
+    () => () => {
+      if (reloadTimer.current !== null) window.clearTimeout(reloadTimer.current);
+    },
+    []
+  );
 
   const windowed = useMemo(() => {
     const cutoff = Date.now() - RANGE_MS[range];
@@ -139,15 +152,15 @@ export default function AuditCharts() {
     return keys.map((label) => ({ label, count: buckets.get(label) ?? 0 }));
   }, [windowed, range]);
 
-  const riskDistribution = useMemo(
-    () =>
-      RISK_ORDER.map((level) => ({
-        level: t(level),
-        count: windowed.filter((entry) => entry.risk_level === level).length,
-        fill: RISK_COLOR[level],
-      })),
-    [windowed, t]
-  );
+  const riskDistribution = useMemo(() => {
+    const counts = new Map<RiskLevel, number>();
+    for (const entry of windowed) counts.set(entry.risk_level, (counts.get(entry.risk_level) ?? 0) + 1);
+    return RISK_ORDER.map((level) => ({
+      level: t(level),
+      count: counts.get(level) ?? 0,
+      fill: RISK_COLOR[level],
+    }));
+  }, [windowed, t]);
 
   const sourceRanking = useMemo(() => {
     const counts = new Map<string, number>();
@@ -168,11 +181,12 @@ export default function AuditCharts() {
       .sort((a, b) => b[1] - a[1])
       .slice(0, HEATMAP_TOP_HOSTS)
       .map(([host]) => host);
+    const topHostSet = new Set(topHosts);
 
     const grid = new Map<string, number>();
     let max = 0;
     for (const entry of windowed) {
-      if (!topHosts.includes(entry.host)) continue;
+      if (!topHostSet.has(entry.host)) continue;
       const hour = new Date(entry.ts).getHours();
       const key = `${entry.host}:${hour}`;
       const next = (grid.get(key) ?? 0) + 1;

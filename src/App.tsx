@@ -56,6 +56,7 @@ import { Button } from "./components/ui/button";
 import { Dialog } from "./components/ui/dialog";
 import { IconButton } from "./components/ui/icon-button";
 import { useToast } from "./components/ui/toast";
+import { useAgentEvents } from "./eventsBus";
 import { useI18n } from "./i18n";
 import { cn } from "./lib/utils";
 import type { ApprovalRequest, AuditEntry, AuditFilter, ConnectionStatus, DaemonHealth, ExecutionGateStatus, HostFingerprintStatus, HostGroup, HostProfile, ProxyProfile } from "./types";
@@ -63,6 +64,14 @@ import type { ApprovalRequest, AuditEntry, AuditFilter, ConnectionStatus, Daemon
 const APPROVAL_POLL_MS = 2000;
 const DAEMON_START_RECHECK_MS = 700;
 const WEBDAV_AUTO_SYNC_MS = 10 * 60 * 1000;
+
+// Poll setState guard: keep the previous state object when a fresh poll
+// result is structurally identical, so the 2s/5s/10s polls only re-render
+// the app (and re-trigger downstream memos/effects, e.g. the topology force
+// simulation) when something actually changed.
+function keepIfEqual<T>(prev: T, next: T): T {
+  return JSON.stringify(prev) === JSON.stringify(next) ? prev : next;
+}
 
 type ConnectionProgress = {
   host: string;
@@ -322,7 +331,8 @@ export default function App() {
   // Fix-1: Poll daemon for pending approvals every 2 seconds
   const pollApprovals = useCallback(async () => {
     const approvals = await api.fetchApprovals();
-    setPendingApprovals(approvals.filter((a) => a.status === "pending"));
+    const pending = approvals.filter((a) => a.status === "pending");
+    setPendingApprovals((prev) => keepIfEqual(prev, pending));
   }, []);
 
   useEffect(() => {
@@ -330,6 +340,14 @@ export default function App() {
     pollApprovals(); // immediate first poll
     return () => clearInterval(id);
   }, [pollApprovals]);
+
+  // The interval above is the fallback; when the SSE bus is live, approval
+  // events land instantly, so refresh the pending list right away.
+  useAgentEvents((event) => {
+    if (event.event_type === "approval_requested" || event.event_type === "approval_responded") {
+      pollApprovals().catch(() => {});
+    }
+  });
 
   useEffect(() => {
     pendingApprovalsRef.current = pendingApprovals;
@@ -339,7 +357,7 @@ export default function App() {
   const pollConnections = useCallback(async () => {
     try {
       const statuses = await api.connectionStatus();
-      setConnectionStatuses(statuses);
+      setConnectionStatuses((prev) => keepIfEqual(prev, statuses));
       const prev = prevConnectedRef.current;
       if (prev) {
         for (const status of statuses) {
@@ -366,7 +384,7 @@ export default function App() {
 
   const pollGateStatus = useCallback(async () => {
     const status = await api.getGateStatus();
-    setGateStatus(status);
+    setGateStatus((prev) => keepIfEqual(prev, status));
     setGateCheckedAt(Date.now());
   }, []);
 
@@ -378,7 +396,7 @@ export default function App() {
 
   const pollDaemonHealth = useCallback(async () => {
     const health = await api.getDaemonHealth();
-    setDaemonHealth(health);
+    setDaemonHealth((prev) => keepIfEqual(prev, health));
     setDaemonHealthCheckedAt(Date.now());
   }, []);
 
