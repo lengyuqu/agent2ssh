@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import App from "./App";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { logDiagnostic } from "./api";
+import { EventsProvider } from "./eventsBus";
 import { I18nProvider } from "./i18n";
 import { ThemeProvider } from "./theme";
 import { ToastProvider } from "./components/ui/toast";
@@ -36,9 +37,11 @@ createRoot(document.getElementById("root") as HTMLElement).render(
     <ThemeProvider>
       <I18nProvider>
         <ToastProvider>
-          <ErrorBoundary>
-            <App />
-          </ErrorBoundary>
+          <EventsProvider>
+            <ErrorBoundary>
+              <App />
+            </ErrorBoundary>
+          </EventsProvider>
         </ToastProvider>
       </I18nProvider>
     </ThemeProvider>

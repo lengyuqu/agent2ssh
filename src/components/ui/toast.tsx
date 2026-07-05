@@ -9,17 +9,35 @@ import {
   useState,
 } from "react";
 import { cn } from "../../lib/utils";
+import { Button } from "./button";
 
 export type ToastVariant = "success" | "error" | "warning";
+
+export type ToastAction = {
+  label: string;
+  onClick: () => void;
+};
+
+export type ToastOptions = {
+  title?: string;
+  actions?: ToastAction[];
+  /** ms until auto-dismiss; `null` means sticky (manual dismiss / actions only). */
+  durationMs?: number | null;
+};
 
 type ToastItem = {
   id: number;
   variant: ToastVariant;
   message: string;
+  title?: string;
+  actions?: ToastAction[];
 };
 
 type ToastContextValue = {
-  showToast: (variant: ToastVariant, message: string) => void;
+  /** Returns the toast id so callers can `dismissToast` it later (e.g. once the
+   * underlying event it represents — an approval, say — resolves elsewhere). */
+  showToast: (variant: ToastVariant, message: string, options?: ToastOptions) => number;
+  dismissToast: (id: number) => void;
 };
 
 const ToastContext = createContext<ToastContextValue | null>(null);
@@ -54,16 +72,23 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const showToast = useCallback(
-    (variant: ToastVariant, message: string) => {
+    (variant: ToastVariant, message: string, options?: ToastOptions) => {
       const id = ++idRef.current;
-      setToasts((prev) => [...prev, { id, variant, message }]);
-      const timer = window.setTimeout(() => dismiss(id), AUTO_DISMISS_MS);
-      timersRef.current.set(id, timer);
+      setToasts((prev) => [...prev, { id, variant, message, title: options?.title, actions: options?.actions }]);
+      const duration = options?.durationMs === undefined ? AUTO_DISMISS_MS : options.durationMs;
+      if (duration !== null) {
+        const timer = window.setTimeout(() => dismiss(id), duration);
+        timersRef.current.set(id, timer);
+      }
+      return id;
     },
     [dismiss]
   );
 
-  const value = useMemo<ToastContextValue>(() => ({ showToast }), [showToast]);
+  const value = useMemo<ToastContextValue>(
+    () => ({ showToast, dismissToast: dismiss }),
+    [showToast, dismiss]
+  );
 
   return (
     <ToastContext.Provider value={value}>
@@ -76,19 +101,41 @@ export function ToastProvider({ children }: { children: ReactNode }) {
               key={item.id}
               role="status"
               className={cn(
-                "pointer-events-auto flex w-full max-w-md items-start gap-2 rounded-lg border bg-card/95 px-3 py-2 text-sm text-foreground shadow-lg backdrop-blur-sm",
+                "pointer-events-auto grid w-full max-w-md gap-1.5 rounded-lg border bg-card/95 px-3 py-2 text-sm text-foreground shadow-lg backdrop-blur-sm",
                 VARIANT_STYLES[item.variant]
               )}
             >
-              <Icon size={16} className="mt-0.5 shrink-0" />
-              <span className="flex-1 break-words">{item.message}</span>
-              <button
-                type="button"
-                className="shrink-0 rounded p-0.5 text-muted-foreground hover:text-foreground"
-                onClick={() => dismiss(item.id)}
-              >
-                <X size={13} />
-              </button>
+              <div className="flex items-start gap-2">
+                <Icon size={16} className="mt-0.5 shrink-0" />
+                <div className="min-w-0 flex-1">
+                  {item.title && <div className="font-semibold">{item.title}</div>}
+                  <span className="break-words text-foreground/90">{item.message}</span>
+                </div>
+                <button
+                  type="button"
+                  className="shrink-0 rounded p-0.5 text-muted-foreground hover:text-foreground"
+                  onClick={() => dismiss(item.id)}
+                >
+                  <X size={13} />
+                </button>
+              </div>
+              {item.actions && item.actions.length > 0 && (
+                <div className="flex justify-end gap-1.5 pl-6">
+                  {item.actions.map((action) => (
+                    <Button
+                      key={action.label}
+                      size="sm"
+                      variant="secondary"
+                      onClick={() => {
+                        action.onClick();
+                        dismiss(item.id);
+                      }}
+                    >
+                      {action.label}
+                    </Button>
+                  ))}
+                </div>
+              )}
             </div>
           );
         })}

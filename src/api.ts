@@ -6,6 +6,7 @@ import type {
   AgentEvent,
   AppPreferences,
   CliPathStatus,
+  ConfigSnapshotInfo,
   ConnectionStatus,
   DaemonControlResult,
   DaemonHealth,
@@ -154,6 +155,18 @@ export const api = {
   testWebDavSync: () => invoke<WebDavSyncStatus>("test_webdav_sync"),
   pushWebDavSync: () => invoke<WebDavSyncStatus>("push_webdav_sync"),
 
+  // V4-3: config snapshots + templates (independent of WebDAV sync above —
+  // reuses the same backup-directory mechanism, but works with no WebDAV
+  // configured at all).
+  listConfigSnapshots: () => invoke<ConfigSnapshotInfo[]>("list_config_snapshots_cmd"),
+  createConfigSnapshot: (label: string) =>
+    invoke<ConfigSnapshotInfo>("create_config_snapshot", { label }),
+  restoreConfigSnapshot: (id: string) =>
+    invoke<ConfigSnapshotInfo>("restore_config_snapshot_cmd", { id }),
+  deleteConfigSnapshot: (id: string) => invoke<void>("delete_config_snapshot_cmd", { id }),
+  applyConfigTemplate: (files: Array<[string, string]>) =>
+    invoke<ConfigSnapshotInfo>("apply_config_template_cmd", { files }),
+
   // Risk classification
   classifyRisk: (command: string, host?: string | null) =>
     host
@@ -251,10 +264,20 @@ export const api = {
       path,
       timeoutSecs: timeoutSecs ?? null,
     }),
+  /** V3-1: SFTP panel text preview. Throws for files over ~1MB or that aren't
+   * valid UTF-8 — callers fall back to a metadata card in that case. */
+  sftpReadText: (host: string, path: string, timeoutSecs?: number) =>
+    invoke<ExecResult>("sftp_read_text", {
+      host,
+      path,
+      timeoutSecs: timeoutSecs ?? null,
+    }),
   localLs: (path?: string | null) =>
     invoke<LocalDirListing>("local_ls", { path: path ?? null }),
   localWalk: (root: string) => invoke<WalkEntry[]>("local_walk", { root }),
   localMkdir: (path: string) => invoke<void>("local_mkdir", { path }),
+  /** V3-1: local counterpart of sftpReadText for the "This computer" side. */
+  localReadText: (path: string) => invoke<string>("local_read_text", { path }),
   sftpWalk: (host: string, root: string) =>
     invoke<WalkEntry[]>("sftp_walk", { host, root }),
 

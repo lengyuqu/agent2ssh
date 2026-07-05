@@ -33,6 +33,22 @@ export default defineConfig({
             return "vendor-tauri";
           }
           if (
+            id.includes("/recharts/") ||
+            id.includes("/d3-") ||
+            id.includes("/victory-vendor/") ||
+            id.includes("/react-smooth/") ||
+            id.includes("/react-transition-group/") ||
+            id.includes("/decimal.js-light/")
+          ) {
+            return "vendor-charts";
+          }
+          if (id.includes("/@tanstack/")) {
+            return "vendor-table";
+          }
+          if (id.includes("/monaco-editor/") || id.includes("/@monaco-editor/")) {
+            return "vendor-monaco";
+          }
+          if (
             id.includes("/class-variance-authority/") ||
             id.includes("/clsx/") ||
             id.includes("/tailwind-merge/")

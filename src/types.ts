@@ -191,6 +191,14 @@ export type WebDavSyncStatus = {
   lastRemotePath?: string | null;
 };
 
+// Rust: webdav_sync.rs — ConfigSnapshotInfo (V4-3)
+export type ConfigSnapshotInfo = {
+  id: string;
+  label?: string | null;
+  created_at?: string | null;
+  files: string[];
+};
+
 export type DiagnosticLogEntry = {
   id: string;
   ts: string;
