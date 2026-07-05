@@ -42,6 +42,12 @@ Remote hosts
 | `src-tauri/src/notify.rs` | Webhook configuration and delivery |
 | `src-tauri/src/events.rs` | Local event bus for daemon SSE, activity monitoring, approvals, audit rotation, and SSH operation events |
 | `src-tauri/src/remote.rs` | Remote daemon registry and health probing |
+| `src-tauri/src/health.rs` | Concurrent host health snapshots over embedded SSH |
+| `src-tauri/src/diagnostics.rs` | Shared structured JSONL logging (`app.log`), redaction, rotation, error sink, panic hook, trace-id correlation |
+| `src-tauri/src/config_cache.rs` | `(mtime, len)`-keyed single-slot cache for hot-path config file reads |
+| `src-tauri/src/daemon_control.rs` | Start/stop/restart and health-check the bundled local daemon sidecar |
+| `src-tauri/src/webdav_sync.rs` | WebDAV config sync plus local config snapshots/templates under `~/.agent2ssh/backups/` (V4) |
+| `src-tauri/src/mcp_binding.rs` | MCP agent identity binding (source label + binding key verification) |
 | `src-tauri/src/types.rs` | Shared types: `HostProfile`, `ExecRequest`, `ExecResult`, `RiskLevel`, etc. |
 | `src-tauri/src/tauri_commands.rs` | Tauri IPC commands wrapping the core |
 | `src-tauri/src/bin/agent2ssh.rs` | CLI binary |

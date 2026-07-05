@@ -414,6 +414,32 @@ components:
         source: { type: string, nullable: true }
         reason: { type: string, nullable: true }
 
+    DaemonDiagnostic:
+      type: object
+      properties:
+        alias: { type: string }
+        url:   { type: string }
+        checks:
+          type: array
+          items:
+            type: object
+            properties:
+              name:    { type: string }
+              status:  { type: string, enum: [ok, warning, error] }
+              message: { type: string }
+              details: { type: string, nullable: true }
+        overall_status: { type: string, enum: [ok, warning, error] }
+
+    TeamConfigExport:
+      type: object
+      description: Shareable configuration bundle. Host profiles are exported with `key_path` and `password` stripped.
+      properties:
+        hosts:
+          type: array
+          items: { $ref: "#/components/schemas/HostProfile" }
+        risk_rules: { type: string, nullable: true, description: "Raw risk_rules.toml content" }
+        playbooks:  { type: string, nullable: true, description: "Raw playbooks.toml content" }
+
     Error:
       type: object
       properties:
@@ -761,6 +787,22 @@ paths:
         - name: limit
           in: query
           schema: { type: integer, default: 20 }
+        - name: search
+          in: query
+          description: Substring match against command / host / source
+          schema: { type: string }
+        - name: command_pattern
+          in: query
+          schema: { type: string }
+        - name: host_env
+          in: query
+          schema: { type: string }
+        - name: host_role
+          in: query
+          schema: { type: string }
+        - name: host_owner
+          in: query
+          schema: { type: string }
       responses:
         "200":
           content:
@@ -768,6 +810,60 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/AuditEntry" }
+
+  /audit/export:
+    get:
+      summary: Export filtered audit records as JSONL or CSV
+      parameters:
+        - name: format
+          in: query
+          description: "`jsonl` (default) or `csv`"
+          schema: { type: string, enum: [jsonl, csv], default: jsonl }
+        - name: host
+          in: query
+          schema: { type: string }
+        - name: risk_level
+          in: query
+          schema: { $ref: "#/components/schemas/RiskLevel" }
+        - name: exit_code
+          in: query
+          schema: { type: integer }
+        - name: since
+          in: query
+          schema: { type: string, format: date-time }
+        - name: until
+          in: query
+          schema: { type: string, format: date-time }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 20 }
+        - name: search
+          in: query
+          schema: { type: string }
+        - name: command_pattern
+          in: query
+          schema: { type: string }
+        - name: host_env
+          in: query
+          schema: { type: string }
+        - name: host_role
+          in: query
+          schema: { type: string }
+        - name: host_owner
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          content:
+            application/x-ndjson:
+              schema: { type: string }
+            text/csv:
+              schema: { type: string }
+        "400":
+          description: Unsupported format
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /sftp/upload:
     post:
@@ -1408,3 +1504,353 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/WebhookConfig" }
+
+  /metrics:
+    get:
+      summary: Daemon counters (public, no auth required)
+      security: []
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  requests_total:         { type: integer }
+                  exec_total:             { type: integer }
+                  exec_blocked_total:     { type: integer }
+                  exec_total_duration_ms: { type: integer }
+                  approvals_total:        { type: integer }
+
+  /metrics/trend:
+    get:
+      summary: Aggregated execution trend computed from the audit log
+      parameters:
+        - name: period
+          in: query
+          schema: { type: string, enum: [24h, 7d, 30d, all], default: 24h }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  period:            { type: string }
+                  total_executions:  { type: integer }
+                  success_count:     { type: integer }
+                  failure_count:     { type: integer }
+                  blocked_count:     { type: integer }
+                  failure_rate:      { type: number }
+                  risk_distribution: { type: object }
+                  avg_duration_ms:   { type: number }
+                  top_hosts:
+                    type: array
+                    items: { type: object }
+                  hourly_breakdown:
+                    type: array
+                    items: { type: object }
+        "400":
+          description: Unknown period
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /exec/preview:
+    post:
+      summary: Preview effective risk and approval requirements without executing
+      description: Returns the execution plan (per-target effective risk, overall risk, approval requirement, warnings) for a single host or a multi-host/tag selection.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [command]
+              properties:
+                host:         { type: string, nullable: true }
+                hosts:
+                  type: array
+                  items: { type: string }
+                  nullable: true
+                command:      { type: string }
+                timeout_secs: { type: integer, nullable: true }
+                tags:
+                  type: array
+                  items: { type: string }
+                  nullable: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  targets:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        host:         { type: string }
+                        host_address: { type: string }
+                        command:      { type: string }
+                        risk_level:   { $ref: "#/components/schemas/RiskLevel" }
+                  overall_risk:      { $ref: "#/components/schemas/RiskLevel" }
+                  requires_approval: { type: boolean }
+                  warnings:
+                    type: array
+                    items: { type: string }
+        "400":
+          description: Missing host/hosts or unknown target
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /approval/check:
+    post:
+      summary: Check whether a command on a host would require approval
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [host, command]
+              properties:
+                host:    { type: string }
+                command: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  requires_approval: { type: boolean }
+                  matched_policy:    { type: string, nullable: true }
+                  risk_level:        { $ref: "#/components/schemas/RiskLevel" }
+                  ttl_secs:          { type: integer, nullable: true }
+
+  /approval/policies:
+    get:
+      summary: List approval policies
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: object }
+    put:
+      summary: Replace approval policies
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items: { type: object }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+
+  /approval/{id}/respond:
+    post:
+      summary: Respond to a pending approval (used by notification action URLs)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [approved]
+              properties:
+                approved: { type: boolean }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+
+  /playbooks/{name}/dry-run:
+    post:
+      summary: Resolve playbook step templates against params without executing
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [playbook]
+              properties:
+                playbook: { type: string }
+                params:
+                  type: object
+                  additionalProperties: { type: string }
+                  nullable: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  playbook: { type: string }
+                  steps:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        step:             { type: integer }
+                        command_template: { type: string }
+                        command_resolved: { type: string }
+                        params_used:
+                          type: array
+                          items: { type: string }
+
+  /daemons/view:
+    get:
+      summary: Unified view of the local daemon and all configured remote daemons
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { type: object }
+
+  /diagnostics:
+    get:
+      summary: Run connectivity/auth/version diagnostics against all configured remote daemons
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/DaemonDiagnostic" }
+
+  /diagnostics/{alias}:
+    get:
+      summary: Run diagnostics against one configured remote daemon
+      parameters:
+        - name: alias
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DaemonDiagnostic" }
+
+  /version-check/{alias}:
+    get:
+      summary: Check protocol/version compatibility with a configured remote daemon
+      parameters:
+        - name: alias
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { type: object }
+
+  /config/export:
+    get:
+      summary: Export shareable team configuration
+      description: Hosts are exported with `key_path` and `password` stripped; includes raw `risk_rules.toml` and `playbooks.toml` content when present.
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TeamConfigExport" }
+
+  /config/import:
+    post:
+      summary: Import a team configuration export
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TeamConfigExport" }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  hosts_added:         { type: integer }
+                  hosts_skipped:       { type: integer }
+                  hosts_updated:       { type: integer }
+                  risk_rules_imported: { type: boolean }
+                  playbooks_imported:  { type: boolean }
+
+  /config/import/preview:
+    post:
+      summary: Preview what a team configuration import would change
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TeamConfigExport" }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  hosts_to_add:
+                    type: array
+                    items: { type: string }
+                  hosts_to_skip:
+                    type: array
+                    items: { type: string }
+                  hosts_to_update:
+                    type: array
+                    items: { type: string }
+                  risk_rules_change: { type: string, nullable: true }
+                  playbooks_change:  { type: string, nullable: true }
+                  summary:           { type: string }
+
+  /ssh-sync/diff:
+    get:
+      summary: Compare Agent2SSH hosts against `~/.ssh/config`
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { type: object }
+
+  /ssh-sync/export:
+    post:
+      summary: Export Agent2SSH hosts to an SSH config include file
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  path:           { type: string }
+                  hosts_exported: { type: integer }
