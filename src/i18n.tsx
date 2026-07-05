@@ -581,6 +581,108 @@ const zh: Record<string, string> = {
   "Locked": "已锁定",
   "Unlocked": "已解锁",
   "Local daemon": "本地 Daemon",
+  // V2-5: keyboard shortcuts
+  "No pending approvals": "没有待处理的审批",
+  "Keyboard shortcuts": "键盘快捷键",
+  "Switch to module": "切换到模块",
+  "Run command": "执行命令",
+  "Jump to pending approval": "跳转到待处理审批",
+  // V2-1: real-time notifications
+  "Approve": "批准",
+  "Reject": "拒绝",
+  "Approval requested": "有新的审批请求",
+  "Anomaly detected": "检测到异常",
+  "Anomaly: {kind}": "异常：{kind}",
+  "{host} connected": "{host} 已连接",
+  "{host} disconnected": "{host} 已断开",
+  // V2-2: approval timeline + batch operations
+  "Approvals": "审批",
+  "{count} pending": "{count} 个待处理",
+  "Select all pending": "全选待处理项",
+  "Approve selected": "批准所选",
+  "Reject selected": "拒绝所选",
+  "No approval history yet": "尚无审批记录",
+  "pending": "待处理",
+  "approved": "已批准",
+  "rejected": "已拒绝",
+  "timed_out": "已超时",
+  // V2-3: audit visualization charts
+  "Audit trends": "审计趋势",
+  "No executions in this range": "该时间范围内没有执行记录",
+  "Execution volume": "执行量趋势",
+  "Risk distribution": "风险分布",
+  "Executions by source": "按来源统计",
+  "unknown": "未知",
+  "Host activity by hour": "主机活跃时段",
+  "No host activity in this range": "该时间范围内没有主机活动",
+  "{count} executions": "{count} 次执行",
+  // V3-4: breadcrumb navigation
+  "Related modules": "相关模块",
+  // V3-3: TanStack Table (Host list + Audit list)
+  "Toggle columns": "显示/隐藏列",
+  "Remove selected": "删除所选",
+  "Remove {count} selected hosts?": "删除所选的 {count} 台主机？",
+  "Any open sessions or forwards to these hosts will become orphaned.": "这些主机上的会话或转发会变成孤立资源。",
+  "Duration": "耗时",
+  "Copy selected as JSON": "复制所选为 JSON",
+  "Copied {count} entries to clipboard": "已复制 {count} 条记录到剪贴板",
+  // V3-1: SFTP file preview
+  "File too large to preview": "文件过大，无法预览",
+  "Cannot preview this file": "无法预览该文件",
+  // V3-2: terminal split-screen + session grouping + history search
+  "Split view": "分屏",
+  "Single pane": "单窗格",
+  "Split horizontally": "水平分屏",
+  "Split vertically": "垂直分屏",
+  "Split into 4": "四宫格分屏",
+  "Sessions": "会话",
+  "Select a session": "选择会话",
+  "Search command history": "搜索命令历史",
+  "Pick a session above": "请在上方选择会话",
+  // V4-3: config templates + snapshots
+  "Config Snapshots": "配置快照",
+  "Config templates": "配置模板",
+  "Applying a template overwrites policy.toml and execution_limits.toml. Policy changes take effect immediately; limit changes need a daemon restart.":
+    "应用模板会覆盖 policy.toml 和 execution_limits.toml。策略变更立即生效；限流变更需要重启 daemon。",
+  "Apply template": "应用模板",
+  "Config snapshots": "配置快照",
+  "Snapshot label (optional)": "快照标签（可选）",
+  "Save snapshot": "保存快照",
+  "No snapshots yet": "尚无快照",
+  "{count} files": "{count} 个文件",
+  "(unlabeled)": "（未命名）",
+  "Snapshot saved": "快照已保存",
+  "Restored. A backup of the previous state was saved automatically.": "已恢复。之前的状态已自动备份。",
+  "Applied {name}. A snapshot of the previous config was saved automatically.": "已应用 {name}。之前的配置已自动保存为快照。",
+  "Apply the {name} template?": "应用 {name} 模板？",
+  "This overwrites policy.toml and execution_limits.toml. A snapshot is saved first.": "这会覆盖 policy.toml 和 execution_limits.toml。会先自动保存一份快照。",
+  "Restore snapshot {label}?": "恢复快照 {label}？",
+  "This overwrites your current config with the snapshot's files. A backup of the current state is saved first.": "这会用快照中的文件覆盖当前配置。会先自动备份当前状态。",
+  "Delete snapshot {label}?": "删除快照 {label}？",
+  "Baseline security": "基础安全",
+  "A sane default for most setups: escalates common service/package removal commands to high risk and requires approval above that.":
+    "适合大多数场景的默认配置：将常见的服务/软件包删除类命令升级为高风险，并要求高风险以上命令审批。",
+  "Development": "开发环境",
+  "Minimal extra rules on top of the built-in classifier, no mandatory approval, generous rate limits — for a sandbox/dev fleet.":
+    "在内置分类器基础上几乎不加额外规则，不强制审批，限流宽松——适合沙箱/开发环境。",
+  "Production operations": "生产运维",
+  "Broad escalation for service/container/user/network-management commands, mandatory approval with a short TTL, and tight rate limits.":
+    "对服务/容器/用户/网络管理类命令做广泛升级，强制审批且有效期较短，限流严格。",
+  // V4-1: connection topology
+  "Topology": "拓扑",
+  "Connection topology": "连接拓扑",
+  // V4-4: cross-host diff viewer
+  "Compare hosts": "对比主机",
+  "{count} identical lines": "{count} 行相同",
+  "{count} only in {host}": "{count} 行仅存在于 {host}",
+  // V4-5: responsive layout
+  "Expand sidebar": "展开侧栏",
+  "Collapse sidebar": "收起侧栏",
+  // V4-2: playbook step reorder + YAML sync
+  "Drag to reorder": "拖动以排序",
+  "Remove step": "删除步骤",
+  "Add step": "添加步骤",
+  "Apply YAML to step editor": "将 YAML 应用到步骤编辑器",
 };
 
 const I18nContext = createContext<I18nContextValue | null>(null);

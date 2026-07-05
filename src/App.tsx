@@ -3,6 +3,7 @@ import {
   ArrowLeftRight,
   Bot,
   BookOpen,
+  Camera,
   Cloud,
   FolderOpen,
   HelpCircle,
@@ -11,16 +12,25 @@ import {
   LayoutDashboard,
   Loader2,
   Network,
+  PanelLeftClose,
+  PanelLeftOpen,
   Play,
   Server,
+  ShieldCheck,
   Terminal,
+  Waypoints,
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, reportError } from "./api";
 import AddHostForm from "./components/AddHostForm";
 import ApprovalDialog from "./components/ApprovalDialog";
+import ApprovalTimeline from "./components/ApprovalTimeline";
+import AuditCharts from "./components/AuditCharts";
 import AuditPanel from "./components/AuditPanel";
+import Breadcrumb from "./components/Breadcrumb";
+import ConfigSnapshotsPanel from "./components/ConfigSnapshotsPanel";
+import ConnectionTopology from "./components/ConnectionTopology";
 import CommandPalette, { type CommandPaletteModule } from "./components/CommandPalette";
 import Dashboard from "./components/Dashboard";
 import ExecPanel from "./components/ExecPanel";
@@ -32,6 +42,7 @@ import KeysPanel from "./components/KeysPanel";
 import LiveActivityPanel from "./components/LiveActivityPanel";
 import McpAgentsPanel from "./components/McpAgentsPanel";
 import MultiExecPanel from "./components/MultiExecPanel";
+import NotificationCenter from "./components/NotificationCenter";
 import PingPanel from "./components/PingPanel";
 import PlaybooksPanel from "./components/PlaybooksPanel";
 import ProxyPanel from "./components/ProxyPanel";
@@ -43,6 +54,7 @@ import SetupWizard from "./components/SetupWizard";
 import SyncPanel from "./components/SyncPanel";
 import { Button } from "./components/ui/button";
 import { Dialog } from "./components/ui/dialog";
+import { IconButton } from "./components/ui/icon-button";
 import { useToast } from "./components/ui/toast";
 import { useI18n } from "./i18n";
 import { cn } from "./lib/utils";
@@ -76,7 +88,31 @@ const MODULES = [
   { id: "playbooks", label: "Playbooks", icon: BookOpen },
   { id: "audit", label: "Audit", icon: History },
   { id: "help", label: "Help", icon: HelpCircle },
+  // V2-2/V4-3: appended (not inserted) so the existing Ctrl/⌘+1..9 module
+  // shortcuts (V2-5) keep pointing at the same modules.
+  { id: "approvals", label: "Approvals", icon: ShieldCheck },
+  { id: "config", label: "Config Snapshots", icon: Camera },
+  { id: "topology", label: "Topology", icon: Waypoints },
 ] as const;
+
+// V3-4: mesh navigation, not a tab trail — each module lists a handful of the
+// other modules an operator is likely to jump to from here.
+const RELATED_MODULES: Partial<Record<(typeof MODULES)[number]["id"], Array<(typeof MODULES)[number]["id"]>>> = {
+  hosts: ["execute", "files-sessions", "tunnels", "terminal", "audit", "topology"],
+  topology: ["hosts", "tunnels"],
+  proxies: ["hosts"],
+  terminal: ["hosts"],
+  execute: ["hosts", "audit"],
+  "files-sessions": ["hosts"],
+  tunnels: ["hosts"],
+  activity: ["audit"],
+  keys: ["hosts"],
+  playbooks: ["hosts", "execute"],
+  audit: ["hosts", "approvals"],
+  approvals: ["execute", "audit"],
+  sync: ["config"],
+  config: ["sync"],
+};
 
 export default function App() {
   const { t } = useI18n();
@@ -109,7 +145,22 @@ export default function App() {
   const [fingerprintBusy, setFingerprintBusy] = useState(false);
   const [connectionProgress, setConnectionProgress] = useState<ConnectionProgress | null>(null);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  // V4-5: icon-only sidebar, independent of the existing max-lg full-stack
+  // fallback for genuinely narrow/mobile-style widths.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem("agent2ssh.sidebarCollapsed") === "1";
+    } catch {
+      return false;
+    }
+  });
   const webDavSyncInFlight = useRef(false);
+  const pendingApprovalsRef = useRef<ApprovalRequest[]>([]);
+  // V2-1: previous connection-status snapshot, used to detect connect/disconnect
+  // transitions for the connection-status notification. No backend SSE event
+  // exists for this today (host_connected/host_disconnected are defined but
+  // never published), so it is derived from the existing 5s poll instead.
+  const prevConnectedRef = useRef<Map<string, boolean> | null>(null);
 
   const currentHost = useMemo(
     () => hosts.find((h) => h.name === selectedHost),
@@ -233,6 +284,14 @@ export default function App() {
   }, [refresh]);
 
   useEffect(() => {
+    try {
+      localStorage.setItem("agent2ssh.sidebarCollapsed", sidebarCollapsed ? "1" : "0");
+    } catch {
+      // ignore persistence failures
+    }
+  }, [sidebarCollapsed]);
+
+  useEffect(() => {
     if (activeModule !== "audit") return;
     refreshAudit().catch((err) => showToast("error", String(err)));
   }, [activeModule, refreshAudit]);
@@ -272,15 +331,32 @@ export default function App() {
     return () => clearInterval(id);
   }, [pollApprovals]);
 
+  useEffect(() => {
+    pendingApprovalsRef.current = pendingApprovals;
+  }, [pendingApprovals]);
+
   // Poll connection status every 5 seconds
   const pollConnections = useCallback(async () => {
     try {
       const statuses = await api.connectionStatus();
       setConnectionStatuses(statuses);
+      const prev = prevConnectedRef.current;
+      if (prev) {
+        for (const status of statuses) {
+          const before = prev.get(status.host);
+          if (before !== undefined && before !== status.connected) {
+            showToast(
+              status.connected ? "success" : "warning",
+              t(status.connected ? "{host} connected" : "{host} disconnected", { host: status.host })
+            );
+          }
+        }
+      }
+      prevConnectedRef.current = new Map(statuses.map((status) => [status.host, status.connected]));
     } catch {
       // silent
     }
-  }, []);
+  }, [showToast, t]);
 
   useEffect(() => {
     const id = setInterval(pollConnections, 5000);
@@ -343,17 +419,44 @@ export default function App() {
     ensureLocalDaemon().catch((err) => showToast("error", String(err)));
   }, [ensureLocalDaemon]);
 
-  // V1-3: global Ctrl+K / Cmd+K opens the command palette from anywhere in the app.
+  // V2-5: global keyboard shortcuts. Ctrl/Cmd+K opens the command palette,
+  // Ctrl/Cmd+1..9 jumps straight to a module, Ctrl/Cmd+Shift+A surfaces the
+  // pending approval dialog (or reports there is none to act on).
   useEffect(() => {
     function handleGlobalKeyDown(e: KeyboardEvent) {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+      const mod = e.metaKey || e.ctrlKey;
+      if (!mod) return;
+      const key = e.key.toLowerCase();
+
+      if (key === "k") {
         e.preventDefault();
         setCommandPaletteOpen(true);
+        return;
+      }
+
+      if (e.shiftKey && key === "a") {
+        e.preventDefault();
+        const approval = pendingApprovalsRef.current[0];
+        if (approval) {
+          document.getElementById("approval-dialog-cancel")?.focus();
+        } else {
+          showToast("success", t("No pending approvals"));
+        }
+        return;
+      }
+
+      if (!e.shiftKey && key >= "1" && key <= "9") {
+        const index = Number(key) - 1;
+        const module = MODULES[index];
+        if (module) {
+          e.preventDefault();
+          setActiveModule(module.id);
+        }
       }
     }
     window.addEventListener("keydown", handleGlobalKeyDown);
     return () => window.removeEventListener("keydown", handleGlobalKeyDown);
-  }, []);
+  }, [showToast, t]);
 
   async function handleGateToggle() {
     setGateBusy(true);
@@ -398,6 +501,17 @@ export default function App() {
     }
   }
 
+  // V3-3: batch remove from the Host table's row-selection action bar.
+  async function handleBatchRemoveHosts(names: string[]) {
+    try {
+      await Promise.all(names.map((name) => api.removeHost(name)));
+      if (names.includes(selectedHost)) setSelectedHost("");
+      await refresh();
+    } catch (err) {
+      showToast("error", String(err));
+    }
+  }
+
   async function handleImportConfig() {
     try {
       await api.importSshConfig();
@@ -413,6 +527,9 @@ export default function App() {
 
   const activeModuleMeta = MODULES.find((module) => module.id === activeModule) ?? MODULES[0];
   const ActiveModuleIcon = activeModuleMeta.icon;
+  const relatedModules = (RELATED_MODULES[activeModule] ?? [])
+    .map((id) => MODULES.find((module) => module.id === id))
+    .filter((module): module is (typeof MODULES)[number] => Boolean(module));
 
   function updateConnectionProgress(next: ConnectionProgress | null) {
     setConnectionProgress(next);
@@ -589,6 +706,8 @@ export default function App() {
         />
       )}
 
+      <NotificationCenter />
+
       <CommandPalette
         open={commandPaletteOpen}
         onClose={() => setCommandPaletteOpen(false)}
@@ -742,49 +861,89 @@ export default function App() {
         </Dialog>
       )}
 
-      <main className="flex min-h-0 flex-1 max-lg:flex-col max-lg:overflow-y-auto">
-      <aside className="flex shrink-0 flex-col gap-5 overflow-y-auto bg-sidebar p-5 text-sidebar-foreground lg:w-[280px] max-lg:w-full max-lg:overflow-visible">
-        <div className="flex items-center gap-3">
-          <div className="flex size-9 items-center justify-center rounded-lg bg-sidebar-accent/15 text-sidebar-accent">
+      <main className={cn("flex min-h-0 flex-1 overflow-hidden", !sidebarCollapsed && "max-lg:flex-col max-lg:overflow-y-auto")}>
+      <aside
+        className={cn(
+          "flex shrink-0 flex-col gap-5 overflow-y-auto bg-sidebar p-5 text-sidebar-foreground",
+          sidebarCollapsed
+            ? "w-[76px] items-center p-3"
+            : "lg:w-[280px] max-lg:w-full max-lg:overflow-visible"
+        )}
+      >
+        <div className={cn("flex items-center gap-3", sidebarCollapsed && "flex-col gap-2")}>
+          <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-sidebar-accent/15 text-sidebar-accent">
             <Terminal size={20} />
           </div>
-          <div className="min-w-0">
+          <div className={cn("min-w-0", sidebarCollapsed && "hidden")}>
             <h1 className="text-lg font-bold leading-tight">Agent2SSH</h1>
             <span className="block text-xs text-sidebar-foreground/55">
               {t("Local SSH capability layer")}
             </span>
           </div>
+          <IconButton
+            className={cn(
+              "ml-auto shrink-0 border-white/15 bg-transparent text-sidebar-foreground/70 hover:bg-white/10 hover:text-sidebar-foreground",
+              sidebarCollapsed && "ml-0"
+            )}
+            onClick={() => setSidebarCollapsed((value) => !value)}
+            title={sidebarCollapsed ? t("Expand sidebar") : t("Collapse sidebar")}
+          >
+            {sidebarCollapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
+          </IconButton>
         </div>
         <nav
-          className="flex flex-col gap-1 max-lg:flex-row max-lg:flex-wrap"
+          className={cn("flex flex-col gap-1", !sidebarCollapsed && "max-lg:flex-row max-lg:flex-wrap")}
           aria-label={t("Modules")}
         >
-          <div className="px-2 pb-1 text-[11px] font-bold uppercase tracking-wider text-sidebar-foreground/45 max-lg:hidden">
+          <div
+            className={cn(
+              "px-2 pb-1 text-[11px] font-bold uppercase tracking-wider text-sidebar-foreground/45",
+              sidebarCollapsed ? "hidden" : "max-lg:hidden"
+            )}
+          >
             {t("Modules")}
           </div>
           {MODULES.map(({ id, label, icon: Icon }) => {
             const active = activeModule === id;
+            const showBadge = id === "approvals" && pendingApprovals.length > 0;
             return (
               <button
                 key={id}
                 type="button"
+                title={sidebarCollapsed ? t(label) : undefined}
                 className={cn(
-                  "flex items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm font-medium transition-colors",
+                  "relative flex items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm font-medium transition-colors",
+                  sidebarCollapsed && "justify-center px-2",
                   active
                     ? "bg-sidebar-accent text-white shadow-sm"
                     : "text-sidebar-foreground/80 hover:bg-white/5 hover:text-sidebar-foreground"
                 )}
                 onClick={() => openModule(id)}
               >
-                <Icon size={15} className={active ? undefined : "opacity-70"} />
-                {t(label)}
+                <Icon size={15} className={active ? "shrink-0" : "shrink-0 opacity-70"} />
+                <span className={cn(sidebarCollapsed && "hidden")}>{t(label)}</span>
+                {showBadge && (
+                  <span
+                    className={cn(
+                      "size-2 rounded-full bg-warning",
+                      sidebarCollapsed ? "absolute right-1.5 top-1.5" : "ml-auto"
+                    )}
+                  />
+                )}
               </button>
             );
           })}
         </nav>
-        <PingPanel hosts={hosts} />
+        <div className={cn("w-full", sidebarCollapsed && "hidden")}>
+          <PingPanel hosts={hosts} />
+        </div>
         {pendingApprovals.length > 0 && (
-          <div className="flex items-center gap-2 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-sm font-medium text-warning">
+          <div
+            className={cn(
+              "flex items-center gap-2 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-sm font-medium text-warning",
+              sidebarCollapsed && "hidden"
+            )}
+          >
             <span className="size-2 animate-pulse rounded-full bg-warning" />
             {pendingApprovals.length}{" "}
             {t(pendingApprovals.length > 1 ? "pending approvals" : "pending approval")}
@@ -792,7 +951,12 @@ export default function App() {
         )}
       </aside>
 
-      <section className="flex min-h-0 min-w-0 flex-1 flex-col gap-5 overflow-y-auto p-6 max-lg:overflow-visible">
+      <section
+        className={cn(
+          "flex min-h-0 min-w-0 flex-1 flex-col gap-5 overflow-y-auto p-6",
+          !sidebarCollapsed && "max-lg:overflow-visible"
+        )}
+      >
         <header className="flex items-start justify-between gap-4 max-md:flex-col">
           <div className="min-w-0">
             <h2 className="flex items-center gap-2 text-xl font-bold">
@@ -850,6 +1014,14 @@ export default function App() {
           </div>
         </header>
 
+        {relatedModules.length > 0 && (
+          <Breadcrumb
+            current={activeModuleMeta}
+            related={relatedModules}
+            onNavigate={(id) => openModule(id as (typeof MODULES)[number]["id"])}
+          />
+        )}
+
         <section className="module-page">
           {activeModule === "dashboard" && (
             <Dashboard
@@ -878,6 +1050,7 @@ export default function App() {
                 onDeleteGroup={handleDeleteGroup}
                 onEdit={setEditingHost}
                 onRemove={handleRemoveHost}
+                onBatchRemove={handleBatchRemoveHosts}
                 onRefresh={refresh}
                 onConnect={handleConnect}
                 onDisconnect={handleDisconnect}
@@ -931,9 +1104,29 @@ export default function App() {
 
           {activeModule === "playbooks" && <PlaybooksPanel hosts={hosts} />}
 
-          {activeModule === "audit" && <AuditPanel audit={audit} onRefresh={refreshAudit} />}
+          {activeModule === "audit" && (
+            <div className="grid gap-[18px]">
+              <AuditCharts />
+              <AuditPanel audit={audit} onRefresh={refreshAudit} />
+            </div>
+          )}
 
           {activeModule === "help" && <HelpPanel />}
+
+          {activeModule === "approvals" && <ApprovalTimeline />}
+
+          {activeModule === "config" && <ConfigSnapshotsPanel />}
+
+          {activeModule === "topology" && (
+            <ConnectionTopology
+              hosts={hosts}
+              proxies={proxies}
+              connectionStatuses={connectionStatuses}
+              daemonHealth={daemonHealth}
+              onSelectHost={setSelectedHost}
+              onNavigateModule={(id) => openModule(id as (typeof MODULES)[number]["id"])}
+            />
+          )}
         </section>
       </section>
       </main>
