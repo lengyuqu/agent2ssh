@@ -11,6 +11,7 @@ pub mod execution_control;
 pub mod forward;
 pub mod gate;
 pub mod health;
+pub mod integrate;
 pub mod keys;
 pub mod limits;
 pub mod mcp_binding;

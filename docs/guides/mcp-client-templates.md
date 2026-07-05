@@ -2,6 +2,17 @@
 
 Agent2SSH 作为 MCP (Model Context Protocol) stdio 服务器运行，可与任何支持 MCP 协议的 AI 客户端集成。以下是常见客户端的配置模板。
 
+> **推荐：一条命令自动注册。** CLI 提供 `agent2ssh integrate` 子命令，可自动探测已安装的客户端并写入（带备份的）MCP 配置，无需手动编辑下面的模板：
+>
+> ```bash
+> agent2ssh integrate list                # 查看各客户端的探测/注册状态
+> agent2ssh integrate add claude_code     # 注册（支持 claude_code / claude_desktop / cursor / codex / gemini_cli / windsurf 等）
+> agent2ssh integrate rm claude_code      # 移除注册（保留备份）
+> agent2ssh integrate skill install       # 将 Agent Skill 安装到 ~/.claude/skills/agent2ssh
+> ```
+>
+> 桌面端的 MCP Agents 面板提供同样的能力（含 Agent Skill 的安装/更新/卸载）。以下手动模板适用于未被 `integrate` 覆盖的客户端或自定义场景。
+
 ---
 
 ## 1. Claude Desktop

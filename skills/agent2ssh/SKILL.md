@@ -1,3 +1,9 @@
+---
+name: agent2ssh
+description: Operate remote machines over SSH through Agent2SSH — host management, command execution with risk classification and approvals, SFTP transfers, persistent PTY sessions, port forwards, playbooks, and audit. Use when asked to run commands on remote servers, transfer files, manage SSH hosts or tunnels, or automate multi-host operations via the agent2ssh CLI or its MCP tools.
+version: 0.2.1
+---
+
 # Agent2SSH Skill
 
 Use this skill when you need to operate remote machines through Agent2SSH.

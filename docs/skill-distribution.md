@@ -16,6 +16,21 @@ Agent2SSH 以 `agent2ssh-mcp` 二进制形式暴露 MCP stdio 服务器，将 SS
 
 无需额外服务器——MCP server 与 AI 客户端运行在同一台机器上。
 
+除 MCP 工具外，仓库还内置一份标准 **Agent Skill**（`skills/agent2ssh/SKILL.md`，带 `name`/`description`/`version` frontmatter），为 agent 提供 CLI/MCP 的使用惯例（风险分级、审批流、`--force` 语义、常见工作流）。它随二进制一起编译内嵌，可通过以下任一方式安装：
+
+```bash
+# CLI：安装 / 查看状态 / 卸载（默认目录 ~/.claude/skills/agent2ssh，可用 --dir 覆盖）
+agent2ssh integrate skill install
+agent2ssh integrate skill status
+agent2ssh integrate skill uninstall
+
+# MCP 客户端注册也有对应的一条命令：
+agent2ssh integrate list
+agent2ssh integrate add claude_code   # 或 claude_desktop / cursor / codex / gemini_cli / windsurf 等
+```
+
+桌面端 **MCP Agents 面板**提供同样的图形化操作：客户端探测与 MCP 注册/更新/卸载，以及 Agent Skill 的安装/更新（内置版本高于已装版本时提示）/卸载。
+
 ---
 
 ## 安装前提

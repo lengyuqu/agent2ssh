@@ -1,8 +1,8 @@
-import { Bot, BrainCircuit, CheckCircle2, Clipboard, Code2, Globe, Laptop, PlugZap, RefreshCw, Send, ShieldAlert, Trash2, Users, Wrench } from "lucide-react";
+import { ArrowUpCircle, BookOpen, Bot, BrainCircuit, CheckCircle2, Clipboard, Code2, Globe, Laptop, PlugZap, RefreshCw, Send, ShieldAlert, Trash2, Users, Wrench } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
-import type { McpAgentConfigStatus } from "../types";
+import type { AgentSkillStatus, McpAgentConfigStatus } from "../types";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
@@ -41,6 +41,8 @@ export default function McpAgentsPanel() {
   const [configuring, setConfiguring] = useState<string | null>(null);
   const [uninstalling, setUninstalling] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
+  const [skill, setSkill] = useState<AgentSkillStatus | null>(null);
+  const [skillBusy, setSkillBusy] = useState(false);
 
   const detectedCount = useMemo(() => agents.filter((agent) => agent.detected).length, [agents]);
   const configuredCount = useMemo(
@@ -57,6 +59,40 @@ export default function McpAgentsPanel() {
       reportError("mcp-agents-panel", "list mcp agent configs failed", err);
     } finally {
       setLoading(false);
+    }
+    try {
+      setSkill(await api.agentSkillStatus());
+    } catch (err) {
+      reportError("mcp-agents-panel", "agent skill status failed", err);
+    }
+  }
+
+  async function installSkill() {
+    setSkillBusy(true);
+    try {
+      const status = await api.installAgentSkill();
+      setSkill(status);
+      showToast("success", t("Agent skill installed to {path}", { path: status.path }));
+    } catch (err) {
+      showToast("error", String(err));
+      reportError("mcp-agents-panel", "install agent skill failed", err);
+    } finally {
+      setSkillBusy(false);
+    }
+  }
+
+  async function uninstallSkill() {
+    if (!window.confirm(t("Remove the installed agent skill?"))) return;
+    setSkillBusy(true);
+    try {
+      const status = await api.uninstallAgentSkill();
+      setSkill(status);
+      showToast("success", t("Agent skill removed"));
+    } catch (err) {
+      showToast("error", String(err));
+      reportError("mcp-agents-panel", "uninstall agent skill failed", err);
+    } finally {
+      setSkillBusy(false);
     }
   }
 
@@ -127,6 +163,68 @@ export default function McpAgentsPanel() {
           <span className="mt-1 block text-xs text-muted-foreground">{t("configured")}</span>
         </div>
       </div>
+
+      {skill && (
+        <div className="flex items-center justify-between gap-3.5 rounded-lg border border-border bg-card p-3 max-md:flex-col max-md:items-stretch">
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <BookOpen size={16} className="text-muted-foreground" />
+              <strong>{t("Agent Skill")}</strong>
+              <Badge
+                variant={
+                  !skill.installed ? "secondary" : skill.update_available ? "warning" : "success"
+                }
+              >
+                {!skill.installed
+                  ? t("Not installed")
+                  : skill.update_available
+                    ? t("Update available")
+                    : t("Installed")}
+              </Badge>
+              {skill.installed && skill.installed_version && (
+                <Badge variant="outline">v{skill.installed_version}</Badge>
+              )}
+            </div>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              <span className={chipCls} title={skill.path}>
+                {skill.dir}
+              </span>
+              {skill.available_version && (
+                <code className={chipCls}>
+                  {t("bundled: v{version}", { version: skill.available_version })}
+                </code>
+              )}
+            </div>
+            <p className="mt-1.5 text-xs text-muted-foreground">
+              {t(
+                "Installs the Agent2SSH SKILL.md into the Claude Code skills directory so skill-capable agents pick up CLI/MCP usage guidance automatically."
+              )}
+            </p>
+          </div>
+          <div className="flex items-center gap-2 max-md:justify-end">
+            <Button size="sm" onClick={installSkill} disabled={skillBusy}>
+              {skill.update_available ? <ArrowUpCircle size={14} /> : <BookOpen size={14} />}
+              {skillBusy
+                ? t("Working...")
+                : skill.update_available
+                  ? t("Update")
+                  : skill.installed
+                    ? t("Reinstall")
+                    : t("Install")}
+            </Button>
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={uninstallSkill}
+              disabled={skillBusy || !skill.installed}
+              title={t("Remove the installed agent skill")}
+            >
+              <Trash2 size={14} />
+              {t("Uninstall")}
+            </Button>
+          </div>
+        </div>
+      )}
 
       <div className="grid gap-2.5">
         {agents.map((agent) => {

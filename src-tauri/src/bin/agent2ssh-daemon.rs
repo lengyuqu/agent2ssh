@@ -762,8 +762,7 @@ struct PlaybookRunBody {
     #[serde(default)]
     source: Option<String>,
 }
-#[derive(Deserialize)]
-#[derive(Default)]
+#[derive(Deserialize, Default)]
 struct PlaybookDryRunBody {
     /// Legacy: older clients sent the playbook name in the body even though
     /// the route carries it in the path. Accepted only when it matches.

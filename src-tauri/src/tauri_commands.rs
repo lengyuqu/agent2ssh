@@ -66,7 +66,8 @@ use uuid::Uuid;
 
 mod mcp_agent_config;
 pub use mcp_agent_config::{
-    configure_mcp_agent, list_mcp_agent_configs, uninstall_mcp_agent, McpAgentConfigStatus,
+    agent_skill_status, configure_mcp_agent, install_agent_skill, list_mcp_agent_configs,
+    uninstall_agent_skill, uninstall_mcp_agent, AgentSkillStatus, McpAgentConfigStatus,
     McpAgentConfigureResult, McpAgentUninstallResult,
 };
 
@@ -2577,6 +2578,9 @@ pub fn run_tauri() {
             mcp_agent_config::list_mcp_agent_configs,
             mcp_agent_config::configure_mcp_agent,
             mcp_agent_config::uninstall_mcp_agent,
+            mcp_agent_config::agent_skill_status,
+            mcp_agent_config::install_agent_skill,
+            mcp_agent_config::uninstall_agent_skill,
             // Diagnostics
             list_diagnostic_logs,
             write_diagnostic_log,

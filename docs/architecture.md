@@ -48,6 +48,7 @@ Remote hosts
 | `src-tauri/src/daemon_control.rs` | Start/stop/restart and health-check the bundled local daemon sidecar |
 | `src-tauri/src/webdav_sync.rs` | WebDAV config sync plus local config snapshots/templates under `~/.agent2ssh/backups/` (V4) |
 | `src-tauri/src/mcp_binding.rs` | MCP agent identity binding (source label + binding key verification) |
+| `src-tauri/src/integrate.rs` | Agent-client integration: MCP server registration into local AI clients (Claude Code, Claude Desktop, Cursor, Codex, Gemini CLI, …) and Agent Skill install/update/uninstall; shared by the CLI `integrate` command and the desktop MCP Agents panel |
 | `src-tauri/src/types.rs` | Shared types: `HostProfile`, `ExecRequest`, `ExecResult`, `RiskLevel`, etc. |
 | `src-tauri/src/tauri_commands.rs` | Tauri IPC commands wrapping the core |
 | `src-tauri/src/bin/agent2ssh.rs` | CLI binary |

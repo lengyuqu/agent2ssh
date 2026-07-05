@@ -294,6 +294,73 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Register agent2ssh with local AI agent clients (MCP config + Agent Skill)
+    Integrate {
+        #[command(subcommand)]
+        command: IntegrateCommands,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum IntegrateCommands {
+    /// Show detection and registration status for all known agent clients
+    List {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Register the agent2ssh MCP server in a client's config (with backup)
+    Add {
+        /// Client id from `integrate list` (e.g. claude_code, cursor, codex)
+        client: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove the agent2ssh MCP server entry from a client's config (with backup)
+    Rm {
+        /// Client id from `integrate list`
+        client: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Manage the bundled Agent Skill (SKILL.md)
+    Skill {
+        #[command(subcommand)]
+        command: IntegrateSkillCommands,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum IntegrateSkillCommands {
+    /// Show installed vs bundled skill version
+    Status {
+        /// Skill directory (default: ~/.claude/skills/agent2ssh)
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Install or update the bundled skill (same operation)
+    Install {
+        /// Skill directory (default: ~/.claude/skills/agent2ssh)
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove the installed skill
+    Uninstall {
+        /// Skill directory (default: ~/.claude/skills/agent2ssh)
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -2636,8 +2703,122 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Commands::Integrate { command } => run_integrate_command(command)?,
     }
 
+    Ok(())
+}
+
+// ── Integrate command ────────────────────────────────────────────────────────
+
+fn integrate_skill_dir(dir: Option<PathBuf>) -> Result<PathBuf> {
+    match dir {
+        Some(dir) => Ok(dir),
+        None => agent2ssh::integrate::default_skill_dir(),
+    }
+}
+
+fn print_skill_status(status: &agent2ssh::integrate::AgentSkillStatus, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(status)?);
+        return Ok(());
+    }
+    println!("Skill directory: {}", status.dir);
+    if status.installed {
+        println!(
+            "Installed:       yes (version {})",
+            status.installed_version.as_deref().unwrap_or("unknown")
+        );
+    } else {
+        println!("Installed:       no");
+    }
+    println!(
+        "Bundled version: {}",
+        status.available_version.as_deref().unwrap_or("unknown")
+    );
+    if status.update_available {
+        println!("Update available — run `agent2ssh integrate skill install` to update.");
+    }
+    Ok(())
+}
+
+fn run_integrate_command(command: IntegrateCommands) -> Result<()> {
+    match command {
+        IntegrateCommands::List { json } => {
+            let statuses = agent2ssh::integrate::list_mcp_client_configs()?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&statuses)?);
+            } else {
+                println!("{:<16} {:<16} {:<14} CONFIG", "CLIENT", "NAME", "STATUS");
+                println!("{:-<70}", "");
+                for status in &statuses {
+                    println!(
+                        "{:<16} {:<16} {:<14} {}",
+                        status.id, status.name, status.status, status.config_path
+                    );
+                }
+                println!();
+                println!("Register a client:   agent2ssh integrate add <client>");
+                println!("Install the skill:   agent2ssh integrate skill install");
+            }
+        }
+        IntegrateCommands::Add { client, json } => {
+            let result = agent2ssh::integrate::configure_mcp_client(&client)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                println!("{}", result.message);
+                println!("Config:  {}", result.config_path);
+                if let Some(backup) = &result.backup_path {
+                    println!("Backup:  {}", backup);
+                }
+                println!("Command: {}", result.command);
+            }
+        }
+        IntegrateCommands::Rm { client, json } => {
+            let result = agent2ssh::integrate::uninstall_mcp_client(&client)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                println!("{}", result.message);
+                if let Some(backup) = &result.backup_path {
+                    println!("Backup: {}", backup);
+                }
+            }
+        }
+        IntegrateCommands::Skill { command } => match command {
+            IntegrateSkillCommands::Status { dir, json } => {
+                let dir = integrate_skill_dir(dir)?;
+                let status = agent2ssh::integrate::agent_skill_status_at(&dir);
+                print_skill_status(&status, json)?;
+            }
+            IntegrateSkillCommands::Install { dir, json } => {
+                let dir = integrate_skill_dir(dir)?;
+                let status = agent2ssh::integrate::install_agent_skill_at(&dir)?;
+                if !json {
+                    println!("Skill installed to {}", status.path);
+                }
+                print_skill_status(&status, json)?;
+            }
+            IntegrateSkillCommands::Uninstall { dir, json } => {
+                let dir = integrate_skill_dir(dir)?;
+                let removed = agent2ssh::integrate::uninstall_agent_skill_at(&dir)?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "dir": dir.display().to_string(),
+                            "removed": removed,
+                        }))?
+                    );
+                } else if removed {
+                    println!("Skill removed from {}", dir.display());
+                } else {
+                    println!("No skill installed at {}", dir.display());
+                }
+            }
+        },
+    }
     Ok(())
 }
 

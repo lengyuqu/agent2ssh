@@ -25,6 +25,7 @@ import type {
   ImportResult,
   LocalDirListing,
   WalkEntry,
+  AgentSkillStatus,
   McpAgentConfigureResult,
   McpAgentConfigStatus,
   McpAgentUninstallResult,
@@ -499,6 +500,9 @@ export const api = {
     invoke<McpAgentConfigureResult>("configure_mcp_agent", { agentId }),
   uninstallMcpAgent: (agentId: string) =>
     invoke<McpAgentUninstallResult>("uninstall_mcp_agent", { agentId }),
+  agentSkillStatus: () => invoke<AgentSkillStatus>("agent_skill_status"),
+  installAgentSkill: () => invoke<AgentSkillStatus>("install_agent_skill"),
+  uninstallAgentSkill: () => invoke<AgentSkillStatus>("uninstall_agent_skill"),
 
   pauseGate: async (reason?: string): Promise<ExecutionGateStatus> => {
     const token = await invoke<string>("get_daemon_token");
