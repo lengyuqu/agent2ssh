@@ -31,8 +31,8 @@ export default function ApprovalDialog({ command, riskLevel, onConfirm, onCancel
         </p>
         <RiskBadge level={riskLevel} />
 
-        <div className="rounded-md bg-[#1e293b] px-3.5 py-3">
-          <code className="break-all font-mono text-sm text-slate-100">{command}</code>
+        <div className="rounded-md bg-muted px-3.5 py-3">
+          <code className="break-all font-mono text-sm text-foreground">{command}</code>
         </div>
 
         <p className="text-sm text-muted-foreground">
@@ -41,7 +41,7 @@ export default function ApprovalDialog({ command, riskLevel, onConfirm, onCancel
       </div>
 
       <div className="flex justify-end gap-2.5">
-        <Button variant="secondary" onClick={onCancel}>
+        <Button id="approval-dialog-cancel" variant="secondary" onClick={onCancel}>
           {t("Cancel")}
         </Button>
         <Button variant="destructive" onClick={onConfirm}>

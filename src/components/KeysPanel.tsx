@@ -7,6 +7,8 @@ import { Button } from "./ui/button";
 import { Card } from "./ui/card";
 import { IconButton } from "./ui/icon-button";
 import { Input } from "./ui/input";
+import { EmptyState } from "./ui/state";
+import { useToast } from "./ui/toast";
 import { cn } from "../lib/utils";
 
 type Props = {
@@ -15,6 +17,7 @@ type Props = {
 
 export default function KeysPanel({ onChanged }: Props) {
   const { t } = useI18n();
+  const { showToast } = useToast();
   const [keys, setKeys] = useState<SshKeyInfo[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [newName, setNewName] = useState("");
@@ -22,7 +25,6 @@ export default function KeysPanel({ onChanged }: Props) {
   const [importPath, setImportPath] = useState("");
   const [importName, setImportName] = useState("");
   const [mode, setMode] = useState<"generate" | "import">("generate");
-  const [error, setError] = useState<string | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
   async function refresh() {
@@ -38,9 +40,8 @@ export default function KeysPanel({ onChanged }: Props) {
   }, []);
 
   async function handleGenerate() {
-    setError(null);
     if (!newName.trim()) {
-      setError(t("Key name is required"));
+      showToast("error", t("Key name is required"));
       return;
     }
     try {
@@ -51,15 +52,14 @@ export default function KeysPanel({ onChanged }: Props) {
       await refresh();
       await onChanged?.();
     } catch (err) {
-      setError(String(err));
+      showToast("error", String(err));
       reportError("keys-panel", "generate key failed", err);
     }
   }
 
   async function handleImport() {
-    setError(null);
     if (!importPath.trim()) {
-      setError(t("Source path is required"));
+      showToast("error", t("Source path is required"));
       return;
     }
     try {
@@ -70,7 +70,7 @@ export default function KeysPanel({ onChanged }: Props) {
       await refresh();
       await onChanged?.();
     } catch (err) {
-      setError(String(err));
+      showToast("error", String(err));
       reportError("keys-panel", "import key failed", err);
     }
   }
@@ -82,7 +82,7 @@ export default function KeysPanel({ onChanged }: Props) {
       await refresh();
       await onChanged?.();
     } catch (err) {
-      setError(String(err));
+      showToast("error", String(err));
       reportError("keys-panel", "delete key failed", err);
     }
   }
@@ -118,12 +118,6 @@ export default function KeysPanel({ onChanged }: Props) {
           {showForm ? t("Cancel") : t("Add Key")}
         </Button>
       </div>
-
-      {error && (
-        <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-          {error}
-        </div>
-      )}
 
       {showForm && (
         <div className="grid gap-2 rounded-lg border border-border bg-muted/40 p-3">
@@ -169,9 +163,7 @@ export default function KeysPanel({ onChanged }: Props) {
       )}
 
       {keys.length === 0 && !showForm && (
-        <p className="px-1 py-2 text-sm text-muted-foreground">
-          {t('No SSH keys managed. Click "Add Key" to get started.')}
-        </p>
+        <EmptyState icon={Key} title={t('No SSH keys managed. Click "Add Key" to get started.')} />
       )}
 
       {keys.length > 0 && (

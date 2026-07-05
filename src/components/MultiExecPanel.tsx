@@ -3,11 +3,13 @@ import { useState } from "react";
 import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
 import type { ExecMultiResult, HostProfile } from "../types";
+import HostDiffView from "./HostDiffView";
 import RiskBadge from "./RiskBadge";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
 import { Input } from "./ui/input";
 import { Textarea } from "./ui/textarea";
+import { useToast } from "./ui/toast";
 import { cn } from "../lib/utils";
 
 const labelCls = "grid gap-1.5 text-sm font-medium text-foreground/90";
@@ -19,13 +21,13 @@ type Props = {
 
 export default function MultiExecPanel({ hosts, onExecComplete }: Props) {
   const { t } = useI18n();
+  const { showToast } = useToast();
   const [selected, setSelected] = useState<string[]>([]);
   const [command, setCommand] = useState("");
   const [force, setForce] = useState(false);
   const [tags, setTags] = useState("");
   const [results, setResults] = useState<ExecMultiResult[]>([]);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
   function toggleHost(name: string) {
     setSelected((prev) =>
@@ -44,14 +46,13 @@ export default function MultiExecPanel({ hosts, onExecComplete }: Props) {
   async function runMulti() {
     if (selected.length === 0 || !command.trim()) return;
     setBusy(true);
-    setError(null);
     try {
       const parsedTags = tags.trim() ? tags.split(",").map((t) => t.trim()) : undefined;
       const res = await api.execMulti(selected, command, force, undefined, parsedTags);
       setResults(res);
       onExecComplete();
     } catch (err) {
-      setError(String(err));
+      showToast("error", String(err));
       reportError("multi-exec-panel", "multi-host exec failed", err);
     } finally {
       setBusy(false);
@@ -64,11 +65,6 @@ export default function MultiExecPanel({ hosts, onExecComplete }: Props) {
         <Server size={16} className="text-muted-foreground" />
         {t("Multi-host Execute")}
       </div>
-      {error && (
-        <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2.5 text-sm text-destructive">
-          {error}
-        </div>
-      )}
 
       <div className="space-y-2">
         <button
@@ -106,6 +102,12 @@ export default function MultiExecPanel({ hosts, onExecComplete }: Props) {
           onChange={(e) => setCommand(e.target.value)}
           spellCheck={false}
           placeholder="uname -a"
+          onKeyDown={(e) => {
+            if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+              e.preventDefault();
+              if (!busy && selected.length > 0 && command.trim()) runMulti();
+            }
+          }}
         />
       </label>
       <label className="flex cursor-pointer select-none items-center gap-2 text-sm font-semibold text-destructive">
@@ -172,6 +174,8 @@ export default function MultiExecPanel({ hosts, onExecComplete }: Props) {
           )}
         </div>
       )}
+
+      {results.length > 0 && <HostDiffView results={results} />}
     </Card>
   );
 }

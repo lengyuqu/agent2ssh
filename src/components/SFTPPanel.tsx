@@ -15,7 +15,7 @@ import {
   Square,
   X,
 } from "lucide-react";
-import { useRef, useState } from "react";
+import { lazy, Suspense, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
@@ -26,6 +26,11 @@ import { Card } from "./ui/card";
 import { Dialog } from "./ui/dialog";
 import { Input } from "./ui/input";
 import { EmptyState, ErrorState, LoadingState } from "./ui/state";
+import { useToast } from "./ui/toast";
+
+// V3-1: Monaco is a large dependency (see src/lib/monacoSetup.ts) — deferred
+// to its own chunk and only fetched the first time a preview is opened.
+const FilePreview = lazy(() => import("./FilePreview"));
 
 const labelCls = "grid gap-1.5 text-sm font-medium text-foreground/90";
 
@@ -298,9 +303,9 @@ const DRAG_MIME = "application/x-agent2ssh-sftp";
 
 export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
   const { t } = useI18n();
+  const { showToast } = useToast();
   const [left, setLeft] = useState<SideState>(() => makeSide("remote", initialHost));
   const [right, setRight] = useState<SideState>(() => makeSide("local", ""));
-  const [error, setError] = useState<string | null>(null);
   const [transfer, setTransfer] = useState<TransferProgress | null>(null);
   // K6: optional parallel transfers. Off by default (each transfer opens its own
   // SSH connection, so concurrency trades connection load for wall-clock time).
@@ -311,6 +316,8 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
   const transferCancelRequested = useRef(false);
   const [pending, setPending] = useState<PendingTransfer | null>(null);
   const [lastResult, setLastResult] = useState<{ count: number; dest: string; ms: number } | null>(null);
+  // V3-1: double-click a file row to preview it (Monaco for text, metadata card otherwise).
+  const [preview, setPreview] = useState<{ side: Side; entry: FileEntry } | null>(null);
 
   const isTransferring = transfer !== null;
 
@@ -412,6 +419,11 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
     toggleSelect(side, joinForKind(s.kind, s.path, entry.name));
   }
 
+  function openPreview(side: Side, entry: FileEntry) {
+    if (entry.isDir) return;
+    setPreview({ side, entry });
+  }
+
   function goUp(side: Side) {
     const s = getSide(side);
     if (s.kind === "remote") navigateTo(side, remoteParent(s.path));
@@ -465,7 +477,7 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
       }
       await refreshSide(side);
     } catch (err) {
-      setError(String(err));
+      showToast("error", String(err));
       reportFailure("mkdir failed", err, { side, target });
     }
   }
@@ -483,16 +495,16 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
     const s = getSide(sourceSide);
     const d = getSide(destSide);
     if (s.selected.length === 0) {
-      setError(t("Select one or more files to transfer"));
+      showToast("error", t("Select one or more files to transfer"));
       return null;
     }
     if (d.kind === "remote" && !d.host) {
-      setError(t("Choose a destination host first"));
+      showToast("error", t("Choose a destination host first"));
       return null;
     }
     const unsupported = transferableLabel(sourceSide, destSide);
     if (unsupported) {
-      setError(unsupported);
+      showToast("error", unsupported);
       return null;
     }
     const destNames = new Set(d.entries.map((e) => e.name));
@@ -502,7 +514,6 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
 
   function startTransfer(sourceSide: Side, destSide: Side) {
     if (isTransferring) return;
-    setError(null);
     setLastResult(null);
     const plan = planTransfer(sourceSide, destSide);
     if (!plan) return;
@@ -557,7 +568,7 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
     try {
       await Promise.all(ids.map((id) => api.sftpCancel(id).catch(() => false)));
     } catch (err) {
-      setError(String(err));
+      showToast("error", String(err));
     }
   }
 
@@ -593,7 +604,6 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
     const s = getSide(plan.sourceSide);
     const d = getSide(plan.destSide);
     const started = performance.now();
-    setError(null);
     transferCancelRequested.current = false;
     setTransfer({ total: 0, done: 0, current: t("Preparing…"), bytesDone: 0, bytesTotal: 0 });
     try {
@@ -643,7 +653,7 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
       patchSide(plan.sourceSide, { selected: [] });
       await refreshSide(plan.destSide);
     } catch (err) {
-      setError(String(err));
+      showToast("error", String(err));
       reportFailure("transfer failed", err, {
         sourceKind: s.kind,
         destKind: d.kind,
@@ -691,11 +701,11 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
       const d = getSide(destSide);
       const unsupported = transferableLabel(sourceSide, destSide);
       if (unsupported) {
-        setError(unsupported);
+        showToast("error", unsupported);
         return;
       }
       if (d.kind === "remote" && !d.host) {
-        setError(t("Choose a destination host first"));
+        showToast("error", t("Choose a destination host first"));
         return;
       }
       const destNames = new Set(d.entries.map((e) => e.name));
@@ -953,6 +963,7 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
                     draggable={!isTransferring}
                     onDragStart={(e) => onEntryDragStart(side, entry, e)}
                     onClick={() => openEntry(side, entry)}
+                    onDoubleClick={() => openPreview(side, entry)}
                     title={full}
                     className={`group flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 text-sm transition-colors hover:bg-muted ${
                       selected ? "bg-primary/12 text-primary" : ""
@@ -1054,12 +1065,6 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
         <ArrowDownUp size={16} className="text-muted-foreground" />
         {t("Files (SFTP)")}
       </div>
-
-      {error && (
-        <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2.5 text-sm text-destructive">
-          {error}
-        </div>
-      )}
 
       {transfer && (
         <div className="rounded-lg border border-primary/30 bg-primary/10 px-3 py-2.5 text-sm text-primary">
@@ -1166,6 +1171,20 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
             </div>
           </div>
         </Dialog>
+      )}
+
+      {preview && (
+        <Suspense fallback={<Dialog><LoadingState label={t("Loading...")} /></Dialog>}>
+          <FilePreview
+            onClose={() => setPreview(null)}
+            name={preview.entry.name}
+            path={joinForKind(getSide(preview.side).kind, getSide(preview.side).path, preview.entry.name)}
+            size={preview.entry.size}
+            mtime={preview.entry.mtime}
+            kind={getSide(preview.side).kind}
+            host={getSide(preview.side).host}
+          />
+        </Suspense>
       )}
     </Card>
   );

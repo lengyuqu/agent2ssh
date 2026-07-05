@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
@@ -11,12 +11,51 @@ type Props = {
   host: string;
   terminalTheme: TerminalThemeId;
   appTheme: AppTheme;
+  /** V3-2: fires once per completed input line the user typed (Enter-terminated),
+   *  best-effort — used for the Ctrl+R history search, not a shell parser. */
+  onLineTyped?: (line: string) => void;
+  /** V3-2: Ctrl+R is intercepted (not forwarded to the remote shell) to open the
+   *  app's own history search instead of the shell's native reverse-i-search. */
+  onHistoryRequest?: () => void;
+};
+
+export type TerminalViewHandle = {
+  /** Inject text as if typed, without a trailing Enter — used by history search
+   *  so the user can review/edit a past line before running it. */
+  sendText: (text: string) => void;
+  focus: () => void;
 };
 
 /** A live interactive terminal to a host, streamed over the daemon's
  *  /terminal WebSocket (raw bytes both ways: ANSI, control chars, TUIs). */
-export default function TerminalView({ host, terminalTheme, appTheme }: Props) {
+const TerminalView = forwardRef<TerminalViewHandle, Props>(function TerminalView(
+  { host, terminalTheme, appTheme, onLineTyped, onHistoryRequest },
+  ref
+) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+  const termRef = useRef<Terminal | null>(null);
+  const encoderRef = useRef(new TextEncoder());
+  const lineBufferRef = useRef("");
+  const onLineTypedRef = useRef(onLineTyped);
+  onLineTypedRef.current = onLineTyped;
+  const onHistoryRequestRef = useRef(onHistoryRequest);
+  onHistoryRequestRef.current = onHistoryRequest;
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      sendText: (text: string) => {
+        const ws = wsRef.current;
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(encoderRef.current.encode(text));
+        }
+        lineBufferRef.current += text;
+      },
+      focus: () => termRef.current?.focus(),
+    }),
+    []
+  );
 
   useEffect(() => {
     const container = containerRef.current;
@@ -36,6 +75,7 @@ export default function TerminalView({ host, terminalTheme, appTheme }: Props) {
       allowTransparency: false,
       theme: resolveTerminalTheme(terminalTheme, appTheme),
     });
+    termRef.current = term;
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(container);
@@ -47,7 +87,8 @@ export default function TerminalView({ host, terminalTheme, appTheme }: Props) {
 
     let ws: WebSocket | null = null;
     let disposed = false;
-    const encoder = new TextEncoder();
+    const encoder = encoderRef.current;
+    lineBufferRef.current = "";
 
     function sendResize() {
       if (ws && ws.readyState === WebSocket.OPEN) {
@@ -55,10 +96,37 @@ export default function TerminalView({ host, terminalTheme, appTheme }: Props) {
       }
     }
 
-    // Keyboard / paste → PTY (as binary frames).
+    // V3-2: Ctrl+R normally reaches the remote shell (bash's own reverse-i-search).
+    // Grab it before xterm forwards it so the app's history search can take over;
+    // every other key passes through unchanged.
+    term.attachCustomKeyEventHandler((event) => {
+      if (event.type === "keydown" && event.ctrlKey && event.key.toLowerCase() === "r") {
+        onHistoryRequestRef.current?.();
+        return false;
+      }
+      return true;
+    });
+
+    // Keyboard / paste → PTY (as binary frames). Also feeds a best-effort
+    // completed-line buffer for the history search — mirrors the line
+    // buffering the backend already does for input authorization (see
+    // docs/architecture.md), not a real shell parser.
     const dataSub = term.onData((data) => {
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(encoder.encode(data));
+      }
+      for (const ch of data) {
+        if (ch === "\r" || ch === "\n") {
+          const line = lineBufferRef.current.trim();
+          lineBufferRef.current = "";
+          if (line) onLineTypedRef.current?.(line);
+        } else if (ch === "\x7f" || ch === "\b") {
+          lineBufferRef.current = lineBufferRef.current.slice(0, -1);
+        } else if (ch === "\x15" || ch === "\x03") {
+          lineBufferRef.current = "";
+        } else if (ch >= " ") {
+          lineBufferRef.current += ch;
+        }
       }
     });
 
@@ -75,6 +143,7 @@ export default function TerminalView({ host, terminalTheme, appTheme }: Props) {
       const base = getDaemonUrl().replace(/^http/, "ws");
       const url = `${base}/terminal?host=${encodeURIComponent(host)}&token=${encodeURIComponent(token)}`;
       ws = new WebSocket(url);
+      wsRef.current = ws;
       ws.binaryType = "arraybuffer";
       ws.onopen = () => {
         sendResize();
@@ -142,9 +211,13 @@ export default function TerminalView({ host, terminalTheme, appTheme }: Props) {
       window.removeEventListener("resize", onResize);
       dataSub.dispose();
       ws?.close();
+      wsRef.current = null;
+      termRef.current = null;
       term.dispose();
     };
   }, [appTheme, host, terminalTheme]);
 
   return <div ref={containerRef} className="terminal-surface h-full w-full p-2" />;
-}
+});
+
+export default TerminalView;

@@ -2,6 +2,8 @@ import {
   BookOpen,
   CheckCircle,
   Edit3,
+  FileCode,
+  GripVertical,
   Loader2,
   Play,
   Plus,
@@ -11,7 +13,8 @@ import {
   X,
   XCircle,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { dump as dumpYaml, load as loadYaml } from "js-yaml";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
 import type { HostProfile, Playbook, PlaybookRunResult, RiskLevel } from "../types";
@@ -22,6 +25,8 @@ import { IconButton } from "./ui/icon-button";
 import { Input } from "./ui/input";
 import { Select } from "./ui/select";
 import { Textarea } from "./ui/textarea";
+import { EmptyState } from "./ui/state";
+import { useToast } from "./ui/toast";
 import { cn } from "../lib/utils";
 
 type Props = {
@@ -33,7 +38,7 @@ type PlaybookForm = {
   description: string;
   tags: string;
   risk_override: "" | RiskLevel;
-  stepsText: string;
+  steps: string[];
 };
 
 const emptyForm: PlaybookForm = {
@@ -41,7 +46,7 @@ const emptyForm: PlaybookForm = {
   description: "",
   tags: "",
   risk_override: "",
-  stepsText: "",
+  steps: [""],
 };
 
 const fieldCls = "grid gap-1.5 text-xs font-bold text-muted-foreground";
@@ -52,7 +57,7 @@ function formFromPlaybook(playbook: Playbook): PlaybookForm {
     description: playbook.description,
     tags: playbook.tags.join(", "),
     risk_override: playbook.risk_override ?? "",
-    stepsText: playbook.steps.join("\n"),
+    steps: playbook.steps.length > 0 ? [...playbook.steps] : [""],
   };
 }
 
@@ -65,11 +70,61 @@ function playbookFromForm(form: PlaybookForm): Playbook {
       .map((tag) => tag.trim())
       .filter(Boolean),
     risk_override: form.risk_override || null,
-    steps: form.stepsText
-      .split("\n")
-      .map((step) => step.trim())
-      .filter(Boolean),
+    steps: form.steps.map((step) => step.trim()).filter(Boolean),
     advanced_steps: null,
+  };
+}
+
+// V4-2: the visual step editor is the source of truth; this YAML view is a
+// bidirectional alternate representation for the same fields — editing it and
+// applying re-parses back into `steps`/`tags`/etc., it isn't a separate format
+// the backend understands (playbooks persist as TOML either way).
+type PlaybookYamlShape = {
+  name?: unknown;
+  description?: unknown;
+  tags?: unknown;
+  risk_override?: unknown;
+  steps?: unknown;
+};
+
+function yamlFromForm(form: PlaybookForm): string {
+  const doc: Record<string, unknown> = {
+    name: form.name,
+    description: form.description,
+    tags: form.tags
+      .split(",")
+      .map((tag) => tag.trim())
+      .filter(Boolean),
+    steps: form.steps.map((step) => step.trim()).filter(Boolean),
+  };
+  if (form.risk_override) doc.risk_override = form.risk_override;
+  return dumpYaml(doc, { lineWidth: -1 });
+}
+
+const RISK_LEVELS = new Set(["low", "medium", "high", "blocked"]);
+
+function formFromYaml(text: string): PlaybookForm {
+  const parsed = loadYaml(text);
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("Expected a YAML mapping with name/description/tags/steps.");
+  }
+  const shape = parsed as PlaybookYamlShape;
+  const steps = Array.isArray(shape.steps)
+    ? shape.steps.filter((s): s is string => typeof s === "string")
+    : [];
+  const tags = Array.isArray(shape.tags)
+    ? shape.tags.filter((t): t is string => typeof t === "string")
+    : [];
+  const riskOverride =
+    typeof shape.risk_override === "string" && RISK_LEVELS.has(shape.risk_override)
+      ? (shape.risk_override as RiskLevel)
+      : "";
+  return {
+    name: typeof shape.name === "string" ? shape.name : "",
+    description: typeof shape.description === "string" ? shape.description : "",
+    tags: tags.join(", "),
+    risk_override: riskOverride,
+    steps: steps.length > 0 ? steps : [""],
   };
 }
 
@@ -79,9 +134,8 @@ function stepCount(playbook: Playbook): number {
 
 export default function PlaybooksPanel({ hosts }: Props) {
   const { t } = useI18n();
+  const { showToast } = useToast();
   const [playbooks, setPlaybooks] = useState<Playbook[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [editingOriginalName, setEditingOriginalName] = useState<string | null>(null);
@@ -91,6 +145,12 @@ export default function PlaybooksPanel({ hosts }: Props) {
   const [force, setForce] = useState(false);
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<PlaybookRunResult | null>(null);
+  // V4-2: visual step editor (drag-reorder) is the primary UI; YAML is a
+  // bidirectional alternate view of the same fields.
+  const [editorMode, setEditorMode] = useState<"visual" | "yaml">("visual");
+  const [yamlText, setYamlText] = useState("");
+  const [yamlError, setYamlError] = useState<string | null>(null);
+  const dragIndexRef = useRef<number | null>(null);
 
   const editing = editingOriginalName !== null;
   const selectedPlaybookDef = useMemo(
@@ -117,21 +177,22 @@ export default function PlaybooksPanel({ hosts }: Props) {
   function startCreate() {
     setEditingOriginalName("");
     setForm(emptyForm);
-    setMessage(null);
-    setError(null);
+    setEditorMode("visual");
+    setYamlError(null);
   }
 
   function startEdit(playbook: Playbook) {
     if (playbook.advanced_steps?.length) {
-      setError(
+      showToast(
+        "error",
         t("Parameterized playbooks can be run, but this editor only supports simple step lists.")
       );
       return;
     }
     setEditingOriginalName(playbook.name);
     setForm(formFromPlaybook(playbook));
-    setMessage(null);
-    setError(null);
+    setEditorMode("visual");
+    setYamlError(null);
   }
 
   function cancelEdit() {
@@ -139,15 +200,61 @@ export default function PlaybooksPanel({ hosts }: Props) {
     setForm(emptyForm);
   }
 
+  function updateStep(index: number, value: string) {
+    setForm((prev) => ({ ...prev, steps: prev.steps.map((s, i) => (i === index ? value : s)) }));
+  }
+
+  function addStep() {
+    setForm((prev) => ({ ...prev, steps: [...prev.steps, ""] }));
+  }
+
+  function removeStep(index: number) {
+    setForm((prev) => ({
+      ...prev,
+      steps: prev.steps.length > 1 ? prev.steps.filter((_, i) => i !== index) : [""],
+    }));
+  }
+
+  function reorderSteps(from: number, to: number) {
+    setForm((prev) => {
+      const steps = [...prev.steps];
+      const [moved] = steps.splice(from, 1);
+      steps.splice(to, 0, moved);
+      return { ...prev, steps };
+    });
+  }
+
+  function switchToYaml() {
+    setYamlText(yamlFromForm(form));
+    setYamlError(null);
+    setEditorMode("yaml");
+  }
+
+  function applyYamlToForm(): boolean {
+    try {
+      setForm(formFromYaml(yamlText));
+      setYamlError(null);
+      return true;
+    } catch (err) {
+      setYamlError(String(err instanceof Error ? err.message : err));
+      return false;
+    }
+  }
+
+  function switchToVisual() {
+    if (applyYamlToForm()) setEditorMode("visual");
+  }
+
   async function handleSave() {
-    const next = playbookFromForm(form);
+    // In YAML mode, the visual `form` state is stale until applied — parse the
+    // textarea one more time so Save always persists what's on screen.
+    if (editorMode === "yaml" && !applyYamlToForm()) return;
+    const next = playbookFromForm(editorMode === "yaml" ? formFromYaml(yamlText) : form);
     if (!next.name || next.steps.length === 0) {
-      setError(t("Playbook name and at least one step are required"));
+      showToast("error", t("Playbook name and at least one step are required"));
       return;
     }
     setSaving(true);
-    setError(null);
-    setMessage(null);
     try {
       if (
         editingOriginalName &&
@@ -160,12 +267,13 @@ export default function PlaybooksPanel({ hosts }: Props) {
       if (editingOriginalName && editingOriginalName !== next.name) {
         await api.deletePlaybook(editingOriginalName);
       }
-      setMessage(t("Saved playbook: {name}", { name: saved.name }));
+      showToast("success", t("Saved playbook: {name}", { name: saved.name }));
       setEditingOriginalName(null);
       setForm(emptyForm);
+      setEditorMode("visual");
       await refresh();
     } catch (err) {
-      setError(String(err));
+      showToast("error", String(err));
       reportError("playbooks-panel", "save playbook failed", err);
     } finally {
       setSaving(false);
@@ -174,16 +282,14 @@ export default function PlaybooksPanel({ hosts }: Props) {
 
   async function handleDelete(playbook: Playbook) {
     if (!window.confirm(t("Delete playbook {name}?", { name: playbook.name }))) return;
-    setError(null);
-    setMessage(null);
     try {
       await api.deletePlaybook(playbook.name);
       if (selectedPlaybook === playbook.name) setSelectedPlaybook(null);
       if (editingOriginalName === playbook.name) cancelEdit();
-      setMessage(t("Deleted playbook: {name}", { name: playbook.name }));
+      showToast("success", t("Deleted playbook: {name}", { name: playbook.name }));
       await refresh();
     } catch (err) {
-      setError(String(err));
+      showToast("error", String(err));
       reportError("playbooks-panel", "delete playbook failed", err, { name: playbook.name });
     }
   }
@@ -203,17 +309,16 @@ export default function PlaybooksPanel({ hosts }: Props) {
 
   async function handleRun() {
     if (!selectedPlaybook || !selectedHost) {
-      setError(t("Select a playbook and target host"));
+      showToast("error", t("Select a playbook and target host"));
       return;
     }
-    setError(null);
     setRunning(true);
     setResult(null);
     try {
       const res = await api.runPlaybook(selectedPlaybook, selectedHost, force);
       setResult(res);
     } catch (err) {
-      setError(String(err));
+      showToast("error", String(err));
       reportError("playbooks-panel", "run playbook failed", err, { playbook: selectedPlaybook, host: selectedHost });
     } finally {
       setRunning(false);
@@ -238,15 +343,6 @@ export default function PlaybooksPanel({ hosts }: Props) {
           {t("New")}
         </Button>
       </div>
-
-      {message && (
-        <div className="rounded-md bg-success/12 px-3 py-2 text-sm text-success">{message}</div>
-      )}
-      {error && (
-        <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-          {error}
-        </div>
-      )}
 
       {editing && (
         <div className="grid gap-3 rounded-lg border border-border bg-muted/40 p-3">
@@ -296,18 +392,103 @@ export default function PlaybooksPanel({ hosts }: Props) {
               placeholder="ops, diagnostics"
             />
           </label>
-          <label className={fieldCls}>
-            <span>{t("Steps")}</span>
-            <Textarea
-              className="min-h-[150px]"
-              value={form.stepsText}
-              onChange={(event) =>
-                setForm((prev) => ({ ...prev, stepsText: event.target.value }))
-              }
-              placeholder={"uname -a\ndf -h\nsystemctl status nginx --no-pager"}
-              rows={7}
-            />
-          </label>
+          <div className="grid gap-1.5">
+            <div className="flex items-center justify-between">
+              <span className={cn(fieldCls, "text-xs")}>{t("Steps")}</span>
+              <div className="inline-flex overflow-hidden rounded-md border border-border">
+                <button
+                  type="button"
+                  onClick={() => setEditorMode("visual")}
+                  className={cn(
+                    "px-2 py-1 text-xs font-semibold",
+                    editorMode === "visual"
+                      ? "bg-primary text-primary-foreground"
+                      : "bg-card text-muted-foreground hover:text-foreground"
+                  )}
+                >
+                  {t("Steps")}
+                </button>
+                <button
+                  type="button"
+                  onClick={switchToYaml}
+                  className={cn(
+                    "inline-flex items-center gap-1 px-2 py-1 text-xs font-semibold",
+                    editorMode === "yaml"
+                      ? "bg-primary text-primary-foreground"
+                      : "bg-card text-muted-foreground hover:text-foreground"
+                  )}
+                >
+                  <FileCode size={12} />
+                  YAML
+                </button>
+              </div>
+            </div>
+
+            {editorMode === "visual" ? (
+              <div className="grid gap-1.5">
+                {form.steps.map((step, index) => (
+                  <div
+                    key={index}
+                    draggable
+                    onDragStart={() => {
+                      dragIndexRef.current = index;
+                    }}
+                    onDragOver={(event) => event.preventDefault()}
+                    onDrop={(event) => {
+                      event.preventDefault();
+                      if (dragIndexRef.current !== null && dragIndexRef.current !== index) {
+                        reorderSteps(dragIndexRef.current, index);
+                      }
+                      dragIndexRef.current = null;
+                    }}
+                    className="flex items-center gap-1.5 rounded-md border border-border bg-card px-1.5 py-1"
+                  >
+                    <span className="cursor-grab text-muted-foreground/60" title={t("Drag to reorder")}>
+                      <GripVertical size={14} />
+                    </span>
+                    <span className="w-5 shrink-0 text-center text-xs text-muted-foreground">
+                      {index + 1}
+                    </span>
+                    <Input
+                      value={step}
+                      onChange={(event) => updateStep(index, event.target.value)}
+                      placeholder="uname -a"
+                      className="h-8 border-none bg-transparent px-1 shadow-none focus-visible:ring-0"
+                    />
+                    <IconButton
+                      size="sm"
+                      title={t("Remove step")}
+                      onClick={() => removeStep(index)}
+                      disabled={form.steps.length === 1 && !step}
+                    >
+                      <X size={13} />
+                    </IconButton>
+                  </div>
+                ))}
+                <Button variant="outline" size="sm" onClick={addStep} className="justify-center">
+                  <Plus size={13} />
+                  {t("Add step")}
+                </Button>
+              </div>
+            ) : (
+              <div className="grid gap-1.5">
+                <Textarea
+                  className="min-h-[180px] font-mono text-xs"
+                  value={yamlText}
+                  onChange={(event) => {
+                    setYamlText(event.target.value);
+                    setYamlError(null);
+                  }}
+                  spellCheck={false}
+                  rows={10}
+                />
+                {yamlError && <div className="text-xs text-destructive">{yamlError}</div>}
+                <Button variant="secondary" size="sm" onClick={switchToVisual} className="justify-center">
+                  {t("Apply YAML to step editor")}
+                </Button>
+              </div>
+            )}
+          </div>
           <div className="flex items-center gap-2">
             <Button onClick={handleSave} disabled={saving}>
               {saving ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
@@ -322,13 +503,11 @@ export default function PlaybooksPanel({ hosts }: Props) {
       )}
 
       {playbooks.length === 0 && !editing && (
-        <p className="px-1 py-2 text-sm text-muted-foreground">
-          {t("No playbooks configured. Create one here or edit")}{" "}
-          <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">
-            ~/.agent2ssh/playbooks.toml
-          </code>
-          .
-        </p>
+        <EmptyState
+          icon={BookOpen}
+          title={t("No playbooks configured")}
+          description={t("Create one here or edit ~/.agent2ssh/playbooks.toml directly.")}
+        />
       )}
 
       {playbooks.length > 0 && (
@@ -476,12 +655,12 @@ export default function PlaybooksPanel({ hosts }: Props) {
                     )}
                   </div>
                   {step.result?.stdout && (
-                    <pre className="m-0 mt-1.5 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-black/5 p-1.5 font-mono text-xs dark:bg-white/5">
+                    <pre className="m-0 mt-1.5 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-foreground/5 p-1.5 font-mono text-xs">
                       {step.result.stdout}
                     </pre>
                   )}
                   {step.result?.stderr && (
-                    <pre className="m-0 mt-1.5 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-black/5 p-1.5 font-mono text-xs text-destructive dark:bg-white/5">
+                    <pre className="m-0 mt-1.5 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-foreground/5 p-1.5 font-mono text-xs text-destructive">
                       {step.result.stderr}
                     </pre>
                   )}

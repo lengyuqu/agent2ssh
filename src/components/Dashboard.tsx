@@ -10,12 +10,12 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
+import { useAgentEvents, useEventsStatus } from "../eventsBus";
 import { useI18n } from "../i18n";
 import { cn } from "../lib/utils";
 import type { ConnectionStatus, DaemonHealth, HostProfile } from "../types";
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
 
-const ANOMALY_RECONNECT_MS = 4000;
 const EXEC_COUNT_REFRESH_MS = 60_000;
 
 type DashboardProps = {
@@ -85,10 +85,16 @@ export default function Dashboard({
   const { t } = useI18n();
   const [execCount24h, setExecCount24h] = useState<number | null>(null);
   const [anomalyCount, setAnomalyCount] = useState(0);
-  const [anomalyStreamStatus, setAnomalyStreamStatus] = useState<"connecting" | "live" | "offline">(
-    "connecting"
-  );
+  // V2-1: shared event bus (single SSE connection) instead of a dashboard-local
+  // subscription — LiveActivityPanel and NotificationCenter use the same one.
+  const anomalyStreamStatus = useEventsStatus();
   const mountedAtRef = useRef(Date.now());
+
+  useAgentEvents((event) => {
+    if (event.event_type === "anomaly_detected") {
+      setAnomalyCount((count) => count + 1);
+    }
+  });
 
   useEffect(() => {
     let active = true;
@@ -106,53 +112,6 @@ export default function Dashboard({
     return () => {
       active = false;
       window.clearInterval(id);
-    };
-  }, []);
-
-  // Live session count of anomaly_detected events — anomaly detection is
-  // fire-and-forget over the event bus (see anomaly.rs), there is no
-  // persisted historical count to query, so this reflects activity since
-  // the dashboard was opened rather than an all-time total.
-  useEffect(() => {
-    let active = true;
-    let controller: AbortController | null = null;
-    let retryTimer: number | null = null;
-
-    function scheduleReconnect() {
-      if (!active || retryTimer !== null) return;
-      retryTimer = window.setTimeout(() => {
-        retryTimer = null;
-        connect();
-      }, ANOMALY_RECONNECT_MS);
-    }
-
-    function connect() {
-      controller?.abort();
-      controller = new AbortController();
-      setAnomalyStreamStatus("connecting");
-      api
-        .subscribeEvents(
-          (event) => {
-            setAnomalyStreamStatus("live");
-            if (event.event_type === "anomaly_detected") {
-              setAnomalyCount((count) => count + 1);
-            }
-          },
-          controller.signal,
-          () => setAnomalyStreamStatus("live")
-        )
-        .catch(() => {
-          if (!active) return;
-          setAnomalyStreamStatus("offline");
-          scheduleReconnect();
-        });
-    }
-
-    connect();
-    return () => {
-      active = false;
-      controller?.abort();
-      if (retryTimer !== null) window.clearTimeout(retryTimer);
     };
   }, []);
 
@@ -175,6 +134,7 @@ export default function Dashboard({
           label={t("Pending approvals")}
           value={pendingApprovalsCount}
           tone={pendingApprovalsCount > 0 ? "warning" : "success"}
+          onClick={() => onNavigateModule("approvals")}
         />
         <StatCard
           icon={<AlertTriangle size={13} />}

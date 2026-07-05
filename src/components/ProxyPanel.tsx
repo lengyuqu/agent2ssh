@@ -10,6 +10,8 @@ import { Dialog } from "./ui/dialog";
 import { IconButton } from "./ui/icon-button";
 import { Input } from "./ui/input";
 import { Select } from "./ui/select";
+import { EmptyState } from "./ui/state";
+import { useToast } from "./ui/toast";
 
 const labelCls = "grid gap-1.5 text-sm font-medium text-foreground/90";
 
@@ -52,10 +54,10 @@ function formFromProxy(proxy: ProxyProfile) {
 
 export default function ProxyPanel({ proxies, hosts, onChanged }: Props) {
   const { t } = useI18n();
+  const { showToast } = useToast();
   const [form, setForm] = useState(emptyForm);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<ProxyProfile | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   const hostsByProxy = useMemo(() => {
@@ -71,12 +73,10 @@ export default function ProxyPanel({ proxies, hosts, onChanged }: Props) {
   function resetForm() {
     setForm(emptyForm);
     setEditingId(null);
-    setError(null);
   }
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
-    setError(null);
     setSaving(true);
     try {
       const id = editingId ?? proxyIdFromName(form.id || form.name);
@@ -93,21 +93,20 @@ export default function ProxyPanel({ proxies, hosts, onChanged }: Props) {
       resetForm();
       await onChanged();
     } catch (err) {
-      setError(String(err));
+      showToast("error", String(err));
     } finally {
       setSaving(false);
     }
   }
 
   async function handleDelete(proxy: ProxyProfile) {
-    setError(null);
     try {
       await api.deleteProxy(proxy.id);
       if (editingId === proxy.id) resetForm();
       setConfirmDelete(null);
       await onChanged();
     } catch (err) {
-      setError(String(err));
+      showToast("error", String(err));
     }
   }
 
@@ -151,7 +150,6 @@ export default function ProxyPanel({ proxies, hosts, onChanged }: Props) {
                   onClick={() => {
                     setEditingId(proxy.id);
                     setForm(formFromProxy(proxy));
-                    setError(null);
                   }}
                 >
                   <Edit3 size={14} />
@@ -166,11 +164,7 @@ export default function ProxyPanel({ proxies, hosts, onChanged }: Props) {
               </div>
             );
           })}
-          {proxies.length === 0 && (
-            <div className="px-3 py-3 text-sm text-muted-foreground">
-              {t("No proxy profiles configured")}
-            </div>
-          )}
+          {proxies.length === 0 && <EmptyState icon={Network} title={t("No proxy profiles configured")} />}
         </div>
       </Card>
 
@@ -184,12 +178,6 @@ export default function ProxyPanel({ proxies, hosts, onChanged }: Props) {
             </IconButton>
           )}
         </div>
-
-        {error && (
-          <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-            {error}
-          </div>
-        )}
 
         <form className="grid gap-3.5" onSubmit={handleSubmit}>
           <label className={labelCls}>

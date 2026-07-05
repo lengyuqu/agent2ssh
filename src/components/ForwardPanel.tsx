@@ -10,6 +10,8 @@ import HostSelector from "./HostSelector";
 import { IconButton } from "./ui/icon-button";
 import { Input } from "./ui/input";
 import { Select } from "./ui/select";
+import { EmptyState } from "./ui/state";
+import { useToast } from "./ui/toast";
 
 const labelCls = "grid gap-1.5 text-sm font-medium text-foreground/90";
 
@@ -21,6 +23,7 @@ type Props = {
 
 export default function ForwardPanel({ hosts, initialHost = "", onChanged }: Props) {
   const { t } = useI18n();
+  const { showToast } = useToast();
   const [tunnelHost, setTunnelHost] = useState(initialHost);
   const [rules, setRules] = useState<ForwardRule[]>([]);
   const [direction, setDirection] = useState<ForwardDirection>("local");
@@ -29,7 +32,6 @@ export default function ForwardPanel({ hosts, initialHost = "", onChanged }: Pro
   const [targetPort, setTargetPort] = useState(80);
   const [busy, setBusy] = useState(false);
   const [removingId, setRemovingId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
 
   const canAdd = Boolean(tunnelHost) && isValidPort(bindPort) && isValidPort(targetPort);
 
@@ -40,10 +42,10 @@ export default function ForwardPanel({ hosts, initialHost = "", onChanged }: Pro
       const list = await api.forwardList();
       setRules(list);
     } catch (err) {
-      setError(String(err));
+      showToast("error", String(err));
       reportError("forward-panel", "list forwards failed", err);
     }
-  }, []);
+  }, [showToast]);
 
   useEffect(() => {
     refresh();
@@ -58,13 +60,12 @@ export default function ForwardPanel({ hosts, initialHost = "", onChanged }: Pro
   async function addForward() {
     if (!canAdd) return;
     setBusy(true);
-    setError(null);
     try {
       await api.forwardAdd(tunnelHost, direction, bindPort, destinationHost, targetPort);
       await refresh();
       await onChanged?.();
     } catch (err) {
-      setError(String(err));
+      showToast("error", String(err));
       reportError("forward-panel", "add forward failed", err, { host: tunnelHost, direction });
     } finally {
       setBusy(false);
@@ -73,13 +74,12 @@ export default function ForwardPanel({ hosts, initialHost = "", onChanged }: Pro
 
   async function removeForward(id: string) {
     setRemovingId(id);
-    setError(null);
     try {
       await api.forwardRemove(id);
       await refresh();
       await onChanged?.();
     } catch (err) {
-      setError(String(err));
+      showToast("error", String(err));
       reportError("forward-panel", "remove forward failed", err);
     } finally {
       setRemovingId(null);
@@ -158,12 +158,6 @@ export default function ForwardPanel({ hosts, initialHost = "", onChanged }: Pro
           </IconButton>
         </div>
 
-        {error && (
-          <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2.5 text-sm text-destructive">
-            {error}
-          </div>
-        )}
-
         <div className="grid gap-2">
           {rules.map((rule) => {
             const removing = removingId === rule.id;
@@ -205,11 +199,7 @@ export default function ForwardPanel({ hosts, initialHost = "", onChanged }: Pro
               </div>
             );
           })}
-          {rules.length === 0 && (
-            <div className="rounded-lg border border-dashed border-border bg-muted/30 px-3 py-6 text-center text-sm text-muted-foreground">
-              {t("No active tunnels")}
-            </div>
-          )}
+          {rules.length === 0 && <EmptyState icon={ArrowLeftRight} title={t("No active tunnels")} />}
         </div>
 
         {activeHostNames.size > 0 && (

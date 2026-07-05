@@ -6,6 +6,7 @@ import {
   Download,
   ExternalLink,
   FileText,
+  Keyboard,
   Lock,
   PauseCircle,
   PlayCircle,
@@ -46,6 +47,16 @@ const actionBtnCls =
   "inline-flex h-9 w-full items-center justify-center gap-2 rounded-md border border-input bg-card text-sm font-bold transition-colors hover:bg-muted disabled:pointer-events-none disabled:opacity-55";
 const rowBtnCls =
   "inline-flex h-9 w-full items-center gap-2 rounded-md border border-input bg-card px-2.5 text-left text-sm font-bold transition-colors hover:bg-muted disabled:pointer-events-none disabled:opacity-55";
+const kbdCls = "rounded border border-border bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground";
+
+// V2-5: static reference list for the global shortcuts wired up in App.tsx /
+// ExecPanel / MultiExecPanel. Keep in sync when shortcuts change.
+const SHORTCUTS: Array<{ keys: string[]; label: string }> = [
+  { keys: ["Ctrl/⌘", "K"], label: "Open command palette" },
+  { keys: ["Ctrl/⌘", "1-9"], label: "Switch to module" },
+  { keys: ["Ctrl/⌘", "Enter"], label: "Run command" },
+  { keys: ["Ctrl/⌘", "Shift", "A"], label: "Jump to pending approval" },
+];
 
 export default function SettingsMenu({
   gateStatus,
@@ -612,6 +623,31 @@ export default function SettingsMenu({
           <section className="grid gap-2">
             <div className={sectionTitleCls}>{t("Language")}</div>
             <LanguageSwitcher />
+          </section>
+
+          <section className="grid gap-2">
+            <div className={sectionTitleCls}>
+              <Keyboard size={15} />
+              {t("Keyboard shortcuts")}
+            </div>
+            <div className="grid gap-1.5">
+              {SHORTCUTS.map((shortcut) => (
+                <div
+                  key={shortcut.label}
+                  className="flex items-center justify-between gap-3 rounded-md border border-border bg-muted/35 px-2.5 py-1.5"
+                >
+                  <span className="text-sm text-foreground/85">{t(shortcut.label)}</span>
+                  <span className="flex shrink-0 items-center gap-1">
+                    {shortcut.keys.map((key, index) => (
+                      <span key={key} className="flex items-center gap-1">
+                        {index > 0 && <span className="text-[10px] text-muted-foreground">+</span>}
+                        <kbd className={kbdCls}>{key}</kbd>
+                      </span>
+                    ))}
+                  </span>
+                </div>
+              ))}
+            </div>
           </section>
 
           <section className="grid gap-2">

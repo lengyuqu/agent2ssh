@@ -105,11 +105,11 @@ export default function CommandPalette({
 
   return (
     <div
-      className="fixed inset-0 z-[1200] flex items-start justify-center bg-black/50 p-4 pt-[12vh]"
+      className="fixed inset-0 z-[1200] flex items-start justify-center bg-black/50 p-4 pt-[12vh] max-sm:items-stretch max-sm:p-0"
       onClick={onClose}
     >
       <div
-        className="w-full max-w-lg overflow-hidden rounded-xl border border-border bg-card text-card-foreground shadow-2xl"
+        className="w-full max-w-lg overflow-hidden rounded-xl border border-border bg-card text-card-foreground shadow-2xl max-sm:h-full max-sm:max-w-full max-sm:rounded-none max-sm:border-none"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center gap-2 border-b border-border px-4 py-3">
@@ -126,7 +126,7 @@ export default function CommandPalette({
             Esc
           </kbd>
         </div>
-        <div className="max-h-[50vh] overflow-y-auto py-1">
+        <div className="max-h-[50vh] overflow-y-auto py-1 max-sm:max-h-[calc(100%-53px)]">
           {results.length === 0 && (
             <div className="px-4 py-6 text-center text-sm text-muted-foreground">
               {t("No matches")}

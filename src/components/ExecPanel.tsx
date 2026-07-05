@@ -10,6 +10,7 @@ import { Button } from "./ui/button";
 import { Card } from "./ui/card";
 import { Input } from "./ui/input";
 import { Textarea } from "./ui/textarea";
+import { useToast } from "./ui/toast";
 
 const labelCls = "grid gap-1.5 text-sm font-medium text-foreground/90";
 
@@ -21,12 +22,12 @@ type Props = {
 
 export default function ExecPanel({ hosts, initialHost = "", onExecComplete }: Props) {
   const { t } = useI18n();
+  const { showToast } = useToast();
   const [targetHost, setTargetHost] = useState(initialHost);
   const [command, setCommand] = useState("uname -a");
   const [force, setForce] = useState(false);
   const [result, setResult] = useState<ExecResult | null>(null);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [pendingApproval, setPendingApproval] = useState(false);
 
   // Advanced options
@@ -41,7 +42,6 @@ export default function ExecPanel({ hosts, initialHost = "", onExecComplete }: P
   useEffect(() => {
     // Reset result when target host changes
     setResult(null);
-    setError(null);
     setPendingApproval(false);
     setPreviewRisk(null);
   }, [targetHost]);
@@ -66,7 +66,6 @@ export default function ExecPanel({ hosts, initialHost = "", onExecComplete }: P
   async function runCommand(withForce = false) {
     if (!targetHost || !command.trim()) return;
     setBusy(true);
-    setError(null);
     setPendingApproval(false);
     try {
       const next = await api.execSshFull({
@@ -80,7 +79,7 @@ export default function ExecPanel({ hosts, initialHost = "", onExecComplete }: P
       setResult(next);
       onExecComplete();
     } catch (err) {
-      setError(String(err));
+      showToast("error", String(err));
       reportError("exec-panel", "ssh exec failed", err);
     } finally {
       setBusy(false);
@@ -90,12 +89,11 @@ export default function ExecPanel({ hosts, initialHost = "", onExecComplete }: P
   async function handleRun() {
     if (!targetHost || !command.trim()) return;
     setBusy(true);
-    setError(null);
     try {
       const currentRisk = await api.classifyRisk(command, targetHost);
       setPreviewRisk(currentRisk);
       if (currentRisk === "blocked") {
-        setError(t("This command is blocked (risk=blocked)."));
+        showToast("error", t("This command is blocked (risk=blocked)."));
         return;
       }
       if (currentRisk === "high" && !force) {
@@ -128,15 +126,20 @@ export default function ExecPanel({ hosts, initialHost = "", onExecComplete }: P
         {t("Execute")}
         {previewRisk && <RiskBadge level={previewRisk} />}
       </div>
-      {error && (
-        <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2.5 text-sm text-destructive">
-          {error}
-        </div>
-      )}
       <HostSelector hosts={hosts} value={targetHost} onChange={setTargetHost} disabled={busy} />
       <label className={labelCls}>
         {t("Command")}
-        <Textarea value={command} onChange={(e) => setCommand(e.target.value)} spellCheck={false} />
+        <Textarea
+          value={command}
+          onChange={(e) => setCommand(e.target.value)}
+          spellCheck={false}
+          onKeyDown={(e) => {
+            if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+              e.preventDefault();
+              if (!busy && targetHost && command.trim()) handleRun();
+            }
+          }}
+        />
       </label>
 
       <button

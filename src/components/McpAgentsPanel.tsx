@@ -6,6 +6,7 @@ import type { McpAgentConfigStatus } from "../types";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
+import { useToast } from "./ui/toast";
 
 const chipCls = "max-w-full truncate rounded bg-muted px-1.5 py-1 text-xs text-muted-foreground";
 
@@ -34,12 +35,11 @@ function agentIconFor(agent: McpAgentConfigStatus) {
 
 export default function McpAgentsPanel() {
   const { t } = useI18n();
+  const { showToast } = useToast();
   const [agents, setAgents] = useState<McpAgentConfigStatus[]>([]);
   const [loading, setLoading] = useState(false);
   const [configuring, setConfiguring] = useState<string | null>(null);
   const [uninstalling, setUninstalling] = useState<string | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
 
   const detectedCount = useMemo(() => agents.filter((agent) => agent.detected).length, [agents]);
@@ -50,11 +50,10 @@ export default function McpAgentsPanel() {
 
   async function refresh() {
     setLoading(true);
-    setError(null);
     try {
       setAgents(await api.listMcpAgentConfigs());
     } catch (err) {
-      setError(String(err));
+      showToast("error", String(err));
       reportError("mcp-agents-panel", "list mcp agent configs failed", err);
     } finally {
       setLoading(false);
@@ -67,14 +66,12 @@ export default function McpAgentsPanel() {
 
   async function configure(agent: McpAgentConfigStatus) {
     setConfiguring(agent.id);
-    setMessage(null);
-    setError(null);
     try {
       const result = await api.configureMcpAgent(agent.id);
-      setMessage(result.message);
+      showToast("success", result.message);
       await refresh();
     } catch (err) {
-      setError(String(err));
+      showToast("error", String(err));
       reportError("mcp-agents-panel", "configure mcp agent failed", err, { agent: agent.id });
     } finally {
       setConfiguring(null);
@@ -89,14 +86,12 @@ export default function McpAgentsPanel() {
     );
     if (!confirmed) return;
     setUninstalling(agent.id);
-    setMessage(null);
-    setError(null);
     try {
       const result = await api.uninstallMcpAgent(agent.id);
-      setMessage(result.message);
+      showToast("success", result.message);
       await refresh();
     } catch (err) {
-      setError(String(err));
+      showToast("error", String(err));
       reportError("mcp-agents-panel", "uninstall mcp agent failed", err, { agent: agent.id });
     } finally {
       setUninstalling(null);
@@ -132,15 +127,6 @@ export default function McpAgentsPanel() {
           <span className="mt-1 block text-xs text-muted-foreground">{t("configured")}</span>
         </div>
       </div>
-
-      {message && (
-        <div className="rounded-md bg-success/12 px-3 py-2 text-sm text-success">{message}</div>
-      )}
-      {error && (
-        <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-          {error}
-        </div>
-      )}
 
       <div className="grid gap-2.5">
         {agents.map((agent) => {

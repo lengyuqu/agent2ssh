@@ -3,6 +3,7 @@ import { useState } from "react";
 import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
 import type { HostProfile, PingResult } from "../types";
+import { useToast } from "./ui/toast";
 import { cn } from "../lib/utils";
 
 type Props = {
@@ -11,20 +12,19 @@ type Props = {
 
 export default function PingPanel({ hosts }: Props) {
   const { t } = useI18n();
+  const { showToast } = useToast();
   const [results, setResults] = useState<PingResult[]>([]);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
   async function pingAll() {
     if (hosts.length === 0) return;
     setBusy(true);
-    setError(null);
     try {
       const names = hosts.map((h) => h.name);
       const res = await api.pingHosts(names);
       setResults(res);
     } catch (err) {
-      setError(String(err));
+      showToast("error", String(err));
       reportError("ping-panel", "ping hosts failed", err);
     } finally {
       setBusy(false);
@@ -45,11 +45,6 @@ export default function PingPanel({ hosts }: Props) {
           {busy ? "..." : <Radio size={14} />}
         </button>
       </div>
-      {error && (
-        <div className="mt-2 rounded-md bg-red-500/20 px-2.5 py-1.5 text-xs text-red-200">
-          {error}
-        </div>
-      )}
 
       <div className="mt-2 grid gap-1.5">
         {results.map((r) => (

@@ -16,6 +16,7 @@ import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
 import { Input } from "./ui/input";
+import { useToast } from "./ui/toast";
 
 type SyncAction = "load" | "save" | "test" | "push" | "refresh";
 
@@ -43,12 +44,11 @@ function formatBytes(value?: number | null): string {
 
 export default function SyncPanel() {
   const { t } = useI18n();
+  const { showToast } = useToast();
   const [form, setForm] = useState<WebDavSyncConfig>(defaultForm);
   const [password, setPassword] = useState("");
   const [status, setStatus] = useState<WebDavSyncStatus | null>(null);
   const [busy, setBusy] = useState<SyncAction | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
 
   const isBusy = busy !== null;
   const canTest = useMemo(
@@ -59,7 +59,6 @@ export default function SyncPanel() {
 
   async function load() {
     setBusy("load");
-    setError(null);
     try {
       const [config, nextStatus] = await Promise.all([
         api.getWebDavSyncConfig(),
@@ -69,7 +68,7 @@ export default function SyncPanel() {
       setPassword("");
       setStatus(nextStatus);
     } catch (err) {
-      setError(String(err));
+      showToast("error", String(err));
       reportError("sync-panel", "load webdav sync config failed", err);
     } finally {
       setBusy(null);
@@ -82,11 +81,10 @@ export default function SyncPanel() {
 
   async function refreshStatus() {
     setBusy("refresh");
-    setError(null);
     try {
       setStatus(await api.getWebDavSyncStatus());
     } catch (err) {
-      setError(String(err));
+      showToast("error", String(err));
       reportError("sync-panel", "refresh webdav sync status failed", err);
     } finally {
       setBusy(null);
@@ -96,8 +94,6 @@ export default function SyncPanel() {
   async function save(event?: FormEvent) {
     event?.preventDefault();
     setBusy("save");
-    setMessage(null);
-    setError(null);
     try {
       const saved = await api.setWebDavSyncConfig({
         enabled: form.enabled,
@@ -109,9 +105,9 @@ export default function SyncPanel() {
       setForm(saved);
       setPassword("");
       setStatus(await api.getWebDavSyncStatus());
-      setMessage(t("WebDAV sync settings saved."));
+      showToast("success", t("WebDAV sync settings saved."));
     } catch (err) {
-      setError(String(err));
+      showToast("error", String(err));
       reportError("sync-panel", "save webdav sync config failed", err);
     } finally {
       setBusy(null);
@@ -120,14 +116,12 @@ export default function SyncPanel() {
 
   async function testConnection() {
     setBusy("test");
-    setMessage(null);
-    setError(null);
     try {
       const nextStatus = await api.testWebDavSync();
       setStatus(nextStatus);
-      setMessage(nextStatus.lastMessage ?? t("WebDAV connection test completed."));
+      showToast("success", nextStatus.lastMessage ?? t("WebDAV connection test completed."));
     } catch (err) {
-      setError(String(err));
+      showToast("error", String(err));
       reportError("sync-panel", "test webdav sync failed", err);
     } finally {
       setBusy(null);
@@ -136,14 +130,12 @@ export default function SyncPanel() {
 
   async function pushNow() {
     setBusy("push");
-    setMessage(null);
-    setError(null);
     try {
       const nextStatus = await api.pushWebDavSync();
       setStatus(nextStatus);
-      setMessage(nextStatus.lastMessage ?? t("WebDAV sync upload completed."));
+      showToast("success", nextStatus.lastMessage ?? t("WebDAV sync upload completed."));
     } catch (err) {
-      setError(String(err));
+      showToast("error", String(err));
       reportError("sync-panel", "push webdav sync failed", err);
     } finally {
       setBusy(null);
@@ -256,17 +248,6 @@ export default function SyncPanel() {
               </div>
             </div>
           </div>
-
-          {message && (
-            <div className="rounded-md bg-success/12 px-3 py-2 text-sm text-success">
-              {message}
-            </div>
-          )}
-          {error && (
-            <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-              {error}
-            </div>
-          )}
 
           <div className="flex flex-wrap justify-end gap-2">
             <Button type="submit" disabled={isBusy}>

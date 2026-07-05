@@ -8,6 +8,7 @@ import { Card } from "./ui/card";
 import { IconButton } from "./ui/icon-button";
 import { Input } from "./ui/input";
 import { Select } from "./ui/select";
+import { useToast } from "./ui/toast";
 
 const labelCls = "grid gap-1.5 text-sm font-medium text-foreground/90";
 
@@ -68,9 +69,9 @@ export default function AddHostForm({
   onSaved,
 }: Props) {
   const { t } = useI18n();
+  const { showToast } = useToast();
   const [form, setForm] = useState(emptyForm);
   const [keys, setKeys] = useState<SshKeyInfo[]>([]);
-  const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const isEditing = Boolean(editingHost);
 
@@ -80,15 +81,13 @@ export default function AddHostForm({
 
   useEffect(() => {
     setForm(editingHost ? formFromHost(editingHost) : { ...emptyForm, group: initialGroup || "default" });
-    setError(null);
   }, [editingHost, initialGroup]);
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
-    setError(null);
     const keyPath = form.key_path.trim();
     if (form.auth_mode !== "password" && !keyPath) {
-      setError(t("Select or enter an SSH key before saving this host."));
+      showToast("error", t("Select or enter an SSH key before saving this host."));
       return;
     }
     const tags = form.tags
@@ -121,7 +120,7 @@ export default function AddHostForm({
       setForm(emptyForm);
       onCancelEdit?.();
     } catch (err) {
-      setError(t("Failed to save host: {error}", { error: String(err) }));
+      showToast("error", t("Failed to save host: {error}", { error: String(err) }));
       reportError("add-host-form", "save host failed", err, {
         name: hostPayload.name,
         editing: Boolean(editingHost),
@@ -145,11 +144,6 @@ export default function AddHostForm({
         )}
       </div>
       <form className="grid gap-3.5" onSubmit={handleSubmit}>
-        {error && (
-          <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-            {error}
-          </div>
-        )}
         <label className={labelCls}>
           {t("Alias")}
           <Input

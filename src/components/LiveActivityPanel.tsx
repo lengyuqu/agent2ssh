@@ -1,16 +1,16 @@
 import { Activity, ChevronDown, ChevronRight, RefreshCw, Search, ShieldAlert } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
+import { useAgentEvents, useEventsStatus } from "../eventsBus";
 import { useI18n } from "../i18n";
 import type { AgentEvent, AuditEntry } from "../types";
 import { Card } from "./ui/card";
 import { Select } from "./ui/select";
+import { EmptyState } from "./ui/state";
 import { cn } from "../lib/utils";
 
 const MAX_EVENTS = 80;
 const AUDIT_POLL_MS = 10000;
-const EVENT_RECONNECT_MS = 3000;
-const EVENT_CONNECT_TIMEOUT_MS = 6000;
 const EVENT_BATCH_MS = 100;
 
 type ActivityItem = {
@@ -110,16 +110,15 @@ function needsAttention(item: ActivityItem): boolean {
 
 const statusCls: Record<string, string> = {
   live: "bg-success/15 text-success",
-  connecting: "bg-sky-500/15 text-sky-500",
+  connecting: "bg-primary/15 text-primary",
   offline: "bg-destructive/15 text-destructive",
 };
 
 export default function LiveActivityPanel() {
   const { t } = useI18n();
+  const status = useEventsStatus();
   const [events, setEvents] = useState<AgentEvent[]>([]);
   const [recentAudit, setRecentAudit] = useState<AuditEntry[]>([]);
-  const [status, setStatus] = useState<"connecting" | "live" | "offline">("connecting");
-  const [error, setError] = useState<string | null>(null);
   const [sourceFilter, setSourceFilter] = useState("all");
   const [kindFilter, setKindFilter] = useState("all");
   const [search, setSearch] = useState("");
@@ -127,90 +126,21 @@ export default function LiveActivityPanel() {
   const eventQueueRef = useRef<AgentEvent[]>([]);
   const flushTimerRef = useRef<number | null>(null);
 
-  useEffect(() => {
-    let active = true;
-    let controller: AbortController | null = null;
-    let retryTimer: number | null = null;
-    let connectTimer: number | null = null;
-
-    function flushEvents() {
+  useAgentEvents((event) => {
+    eventQueueRef.current.push(event);
+    if (flushTimerRef.current !== null) return;
+    flushTimerRef.current = window.setTimeout(() => {
       flushTimerRef.current = null;
       const queued = eventQueueRef.current;
       if (queued.length === 0) return;
       eventQueueRef.current = [];
       const newestFirst = queued.slice().reverse();
       setEvents((prev) => [...newestFirst, ...prev].slice(0, MAX_EVENTS));
-    }
+    }, EVENT_BATCH_MS);
+  });
 
-    function queueEvent(event: AgentEvent) {
-      eventQueueRef.current.push(event);
-      if (flushTimerRef.current !== null) return;
-      flushTimerRef.current = window.setTimeout(flushEvents, EVENT_BATCH_MS);
-    }
-
-    function clearConnectTimer() {
-      if (connectTimer !== null) {
-        window.clearTimeout(connectTimer);
-        connectTimer = null;
-      }
-    }
-
-    function scheduleReconnect() {
-      if (!active || retryTimer !== null) return;
-      retryTimer = window.setTimeout(() => {
-        retryTimer = null;
-        connect();
-      }, EVENT_RECONNECT_MS);
-    }
-
-    function connect() {
-      controller?.abort();
-      controller = new AbortController();
-      setStatus("connecting");
-      setError(null);
-
-      connectTimer = window.setTimeout(() => {
-        controller?.abort();
-      }, EVENT_CONNECT_TIMEOUT_MS);
-
-      api
-        .subscribeEvents(
-          (event) => {
-            clearConnectTimer();
-            setStatus("live");
-            queueEvent(event);
-          },
-          controller.signal,
-          () => {
-            clearConnectTimer();
-            setStatus("live");
-          }
-        )
-        .catch((err) => {
-          clearConnectTimer();
-          if (!active) return;
-          if (controller?.signal.aborted) {
-            api.writeDiagnosticLog("warn", "activity", "event stream connect timed out or was aborted").catch(() => {});
-            scheduleReconnect();
-            return;
-          }
-          setStatus("offline");
-          setError(String(err));
-          api
-            .writeDiagnosticLog("error", "activity", "event stream subscription failed", {
-              error: String(err),
-            })
-            .catch(() => {});
-          scheduleReconnect();
-        });
-    }
-
-    connect();
+  useEffect(() => {
     return () => {
-      active = false;
-      controller?.abort();
-      clearConnectTimer();
-      if (retryTimer !== null) window.clearTimeout(retryTimer);
       if (flushTimerRef.current !== null) window.clearTimeout(flushTimerRef.current);
       eventQueueRef.current = [];
     };
@@ -313,12 +243,6 @@ export default function LiveActivityPanel() {
         {t("Local daemon events stream live. Recent audit records catch CLI/MCP execs that wrote to the same config directory.")}
       </div>
 
-      {error && (
-        <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-          {error}
-        </div>
-      )}
-
       {attentionItem && (
         <div className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2.5 text-destructive">
           <ShieldAlert size={15} className="mt-0.5 shrink-0" />
@@ -363,12 +287,7 @@ export default function LiveActivityPanel() {
       </div>
 
       <div className="grid max-h-[360px] gap-2 overflow-auto">
-        {items.length === 0 && (
-          <div className="flex items-center gap-2 px-1 py-2 text-sm text-muted-foreground">
-            <RefreshCw size={14} />
-            {t("Waiting for SSH activity")}
-          </div>
-        )}
+        {items.length === 0 && <EmptyState icon={RefreshCw} title={t("Waiting for SSH activity")} />}
         {items.map((item) => (
           <article
             className={cn(
@@ -404,7 +323,7 @@ export default function LiveActivityPanel() {
                 )}
                 {item.riskLevel && <span>{item.riskLevel}</span>}
                 {item.severity && (
-                  <span className="font-bold uppercase text-orange-600">{item.severity}</span>
+                  <span className="font-bold uppercase text-warning">{item.severity}</span>
                 )}
                 {item.anomalyKind && <span>{item.anomalyKind.split("_").join(" ")}</span>}
                 {item.changeId && <span>{item.changeId}</span>}
@@ -415,7 +334,7 @@ export default function LiveActivityPanel() {
                 </code>
               )}
               {item.detail && (
-                <pre className="m-0 max-h-[150px] overflow-auto whitespace-pre-wrap break-words rounded bg-[#0f172a] p-2 text-xs text-slate-200">
+                <pre className="m-0 max-h-[150px] overflow-auto whitespace-pre-wrap break-words rounded bg-muted p-2 text-xs text-foreground">
                   {item.detail}
                 </pre>
               )}
@@ -450,7 +369,7 @@ export default function LiveActivityPanel() {
                     )}
                   </dl>
                   {item.raw && (
-                    <pre className="m-0 max-h-[150px] overflow-auto whitespace-pre-wrap break-words rounded bg-[#0f172a] p-2 text-xs text-slate-200">
+                    <pre className="m-0 max-h-[150px] overflow-auto whitespace-pre-wrap break-words rounded bg-muted p-2 text-xs text-foreground">
                       {JSON.stringify(item.raw, null, 2)}
                     </pre>
                   )}
