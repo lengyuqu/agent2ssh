@@ -57,3 +57,15 @@ SSH 主机指纹不再要求人工确认。首次连接时会自动信任并写�
 - [Web 控制台指南](./web-console-guide.md)
 - [Daemon API 快速入门](./daemon-api-quickstart.md)
 - [MCP 客户端模板](./mcp-client-templates.md)
+
+## 项目与开发文档
+
+面向贡献者与维护者的规划、发布与质量文档：
+
+- [Agent2SSH 计划（合并版）](../PLAN.md) — 唯一规划源（活跃 Plan 2 + 历史归档）
+- [发布与版本](../RELEASE.md) — 版本策略与发布清单
+- [架构说明](../architecture.md) — 组件、安全模型与控制面
+- [MCP Tools Reference](../skills.md) — 51 个 MCP 工具定义
+- [Skill 分发指南](../skill-distribution.md) — 安装、权限与更新
+- [缺陷检查报告](../DEFECTS.md) — 测试状态与缺陷清理
+- [回归与研究报告](../reports/REGRESSION-LOG.md) — 历史回归/研究证据合集

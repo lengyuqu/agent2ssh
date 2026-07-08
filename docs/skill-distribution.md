@@ -77,7 +77,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":
 
 ## 版本匹配
 
-Agent2SSH 的所有组件（CLI、MCP server、daemon、Tauri 桌面应用）共享同一版本号，遵循 [语义化版本](versioning.md)。
+Agent2SSH 的所有组件（CLI、MCP server、daemon、Tauri 桌面应用）共享同一版本号，遵循 [语义化版本](RELEASE.md)。
 
 | Skill 版本 | Agent2SSH 版本 | 兼容性 |
 |-----------|---------------|--------|

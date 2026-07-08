@@ -291,4 +291,4 @@ Webhook notifications are **non-blocking fire-and-forget**: failures (network er
 
 ## Roadmap
 
-The current codebase has completed the original MVP through packaging, tags, keys, playbooks, webhooks, remote daemons, daemon API, web console, and approval gates. The next work focuses on cross-platform validation, external dogfood, ecosystem reliability, and team scenarios when real multi-user demand appears. See [docs/plan.md](docs/plan.md).
+The current codebase has completed the original MVP through packaging, tags, keys, playbooks, webhooks, remote daemons, daemon API, web console, and approval gates. The next work focuses on cross-platform validation, external dogfood, ecosystem reliability, and team scenarios when real multi-user demand appears. See [docs/PLAN.md](docs/PLAN.md).

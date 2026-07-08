@@ -1,12 +1,61 @@
-# 发布清单（Release Checklist）
+# 发布与版本（Release & Versioning）
 
-本文件描述 agent2ssh 每次发布新版本时需要执行的完整流程。
+本文件合并了原 `versioning.md`（版本策略）与 `release-checklist.md`（发布清单），是当前发布的唯一参考。
 
 当前发布收口版本：`v0.2.1`。
 
 ---
 
-## 1. 发布前（Pre-release）
+## 1. 版本策略
+
+- 所有组件（CLI、MCP server、daemon、桌面 App）共享同一版本号，来源于 `src-tauri/Cargo.toml` 的 `version` 字段
+- 遵循 [Semantic Versioning 2.0](https://semver.org/)：`MAJOR.MINOR.PATCH`
+- **MAJOR**：破坏性 API/协议变更（MCP tool 删除/重命名、daemon API 字段删除）
+- **MINOR**：新功能，向后兼容（新增 MCP tool、新增 daemon 端点）
+- **PATCH**：仅修复 bug
+
+### MCP 协议版本
+
+- MCP 协议版本独立于应用版本（当前 `2024-11-05`）
+- 协议版本变更不影响应用版本号
+
+### Daemon API 版本
+
+- daemon HTTP API 跟随应用版本
+- 破坏性变更需在 CHANGELOG 中标注
+
+### 版本号同步位置
+
+| 文件                          | 字段                          |
+|-------------------------------|-------------------------------|
+| `src-tauri/Cargo.toml`        | `version`                     |
+| `src-tauri/tauri.conf.json`   | `version`                     |
+| `package.json`                | `version`                     |
+| `package-lock.json`           | root package `"version"`      |
+| `docs/api.yaml`               | `info.version = "X.Y.Z"`      |
+| `scripts/agent2ssh.rb`        | Homebrew formula version      |
+
+### 预发布版本
+
+在正式发布前可使用预发布标识：
+
+- Alpha：`0.1.0-alpha.1`
+- Beta：`0.1.0-beta.1`
+- Release Candidate：`0.1.0-rc.1`
+
+预发布版本仅发布到 GitHub Releases（标记为 Pre-release），不推送至 Homebrew 或正式渠道。
+
+### 版本号更新流程
+
+详细操作步骤见下方「发布清单」第 1 节（发布前版本号同步修改）。
+
+---
+
+## 2. 发布清单（Release Checklist）
+
+每次发布新版本时需要执行的完整流程。
+
+### 2.1 发布前（Pre-release）
 
 - [ ] 确认 `main` 分支 CI 全绿（`build` job + `tauri-bundle` job）
 - [ ] 更新 `CHANGELOG.md`
@@ -62,9 +111,7 @@
   ./scripts/prepare-sidecars.sh "$TARGET"
   ```
 
----
-
-## 2. 打标签并推送（Tag and Push）
+### 2.2 打标签并推送（Tag and Push）
 
 ```bash
 git tag -a vX.Y.Z -m "Release vX.Y.Z"
@@ -74,18 +121,14 @@ git push git233 main --tags
 
 > **说明**：`github` 和 `git233` 是两个远程仓库，均需推送标签以触发 CI 和备份。
 
----
-
-## 3. CI 构建（CI Builds）
+### 2.3 CI 构建（CI Builds）
 
 - [ ] 确认 `build` job 已通过（4 平台编译：macOS x86_64 / aarch64、Linux x86_64、Windows x86_64）
 - [ ] 确认 `tauri-bundle` job 已产出安装包（`.dmg` / `.AppImage` / `.msi`）
 - [ ] 检查 GitHub Releases 页面，确认所有构建资产完整
 - [ ] 确认每个平台的 `CHECKSUMS-SHA256.txt` 已上传为 release asset
 
----
-
-## 3.5 校验和验证（Checksum Verification）
+### 2.4 校验和验证（Checksum Verification）
 
 - [ ] 下载 release 资产和对应的 `CHECKSUMS-SHA256.txt`
 - [ ] 验证下载文件的 SHA256 校验和：
@@ -101,9 +144,7 @@ sha256sum -c CHECKSUMS-SHA256.txt --ignore-missing
 
 > **用户提示**：在 README 和安装文档中建议用户在安装前验证校验和。详见 [配置指南 - 校验和验证](guides/configuration-guide.md#校验和验证)。
 
----
-
-## 4. 发布后（Post-release）
+### 2.5 发布后（Post-release）
 
 - [ ] 更新 Homebrew formula（`scripts/agent2ssh.rb`）的 `version` 和 `sha256`
 - [ ] 在 macOS / Linux / Windows 各执行 `scripts/verify-install.sh`
@@ -114,7 +155,7 @@ sha256sum -c CHECKSUMS-SHA256.txt --ignore-missing
 
 ---
 
-## 快速参考
+## 3. 快速参考
 
 | 文件                        | 字段                          |
 |-----------------------------|-------------------------------|
@@ -125,11 +166,11 @@ sha256sum -c CHECKSUMS-SHA256.txt --ignore-missing
 | `docs/api.yaml`             | `info.version = "X.Y.Z"`      |
 | `scripts/agent2ssh.rb`      | `version "X.Y.Z"`             |
 
-版本号策略详见 [docs/versioning.md](versioning.md)。
+版本号策略详见本文档第 1 节。
 
 ---
 
-## 已知限制
+## 4. 已知限制
 
 - PTY session 首次读取可能返回 SSH 登录 banner/prompt，命令输出可能需要后续 read
 - `agent2ssh-daemon` 和 `agent2ssh-mcp` 运行即启动服务；安装验证脚本只检查二进制存在和可执行权限，避免阻塞在服务进程上

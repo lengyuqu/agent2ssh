@@ -13,32 +13,16 @@ Agent2SSH is a local SSH capability layer for general-purpose agents. One Rust c
 
 ## Build / check / test
 
-The frontend must be built before any Tauri build (`tauri.conf.json` expects `dist/`).
+Canonical build/test/dev commands are in [AGENTS.md](AGENTS.md). Key repo-specific context:
 
 ```bash
-npm install
-npm run build            # tsc + vite build → dist/
-
-cd src-tauri
 # Each binary compiles under a different Cargo feature set — check them separately:
 cargo check --no-default-features --bin agent2ssh --bin agent2ssh-mcp   # CLI + MCP: no features
 cargo check --no-default-features --features daemon --bin agent2ssh-daemon
 cargo check                                                              # default = "tauri" feature → agent2ssh-app
-
-cargo test --no-default-features                       # run the Rust unit tests (tests live in #[cfg(test)] modules)
-cargo test --no-default-features classify_risk         # run a single test / filter by name
 ```
 
-Run a surface during development:
-
-```bash
-npm run tauri:dev                                                       # desktop app
-cd src-tauri && cargo run --no-default-features --bin agent2ssh -- host list --json
-cd src-tauri && cargo run --no-default-features --bin agent2ssh-mcp     # speaks MCP over stdio
-cd src-tauri && cargo run --no-default-features --features daemon --bin agent2ssh-daemon
-```
-
-End-to-end / smoke scripts live in `scripts/` (`e2e-local.sh`, `e1-mcp-client-smoke.py`, `e2-scale-plan-smoke.py`, `verify-install.sh`).
+E2E / smoke: `scripts/e2e-local.sh`, `scripts/e1-mcp-client-smoke.py`, `scripts/e2-scale-plan-smoke.py`.
 
 ## Frontend (design system)
 
@@ -102,4 +86,4 @@ All runtime state is under `~/.agent2ssh/`: `hosts.json`, `audit.jsonl`, `policy
 - `docs/architecture.md` — system design
 - `docs/api.yaml` — daemon REST/WS contract (keep in sync when changing daemon routes)
 - `docs/skills.md` — full reference for the 51 MCP tools (keep in sync when adding/changing MCP tools)
-- `docs/plan.md` — roadmap / milestones
+- [PLAN.md](docs/PLAN.md) — 单一规划源（活跃 Plan 2 + 历史归档）

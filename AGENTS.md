@@ -13,6 +13,9 @@ Agent2SSH combines a React/Vite desktop frontend with a Rust/Tauri backend. Fron
 - `npm run tauri:build`: build sidecar binaries, frontend, and the packaged Tauri app.
 - `cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib`: run Rust library tests.
 - `cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --test cli_smoke`: run CLI/MCP smoke tests.
+- `cargo check --manifest-path src-tauri/Cargo.toml --no-default-features --bin agent2ssh --bin agent2ssh-mcp`: CLI/MCP compile check (no features).
+- `cargo check --manifest-path src-tauri/Cargo.toml --no-default-features --features daemon --bin agent2ssh-daemon`: daemon compile check.
+- `cargo check --manifest-path src-tauri/Cargo.toml`: Tauri app compile check (default feature).
 - `cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features daemon --test daemon_integration`: run daemon integration tests.
 - `./scripts/e2e-local.sh`: run local preflight builds, tests, smoke checks, and sidecar preparation.
 
