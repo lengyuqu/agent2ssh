@@ -736,7 +736,8 @@ mod tests {
     fn embedded_skill_has_frontmatter_version() {
         let version = embedded_skill_version().expect("SKILL.md frontmatter must carry a version");
         assert!(!version.is_empty());
-        assert!(EMBEDDED_SKILL_MD.starts_with("---\n"));
+        let normalized = EMBEDDED_SKILL_MD.replace("\r\n", "\n");
+        assert!(normalized.starts_with("---\n"));
         assert!(EMBEDDED_SKILL_MD.contains("name: agent2ssh"));
         assert!(EMBEDDED_SKILL_MD.contains("description:"));
     }
