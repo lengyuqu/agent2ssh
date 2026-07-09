@@ -8,6 +8,53 @@ Agent2SSH is a local SSH capability layer for general-purpose agents. It exposes
 - an `agent2ssh-mcp` stdio MCP server
 - a Codex/agent skill prompt in `skills/agent2ssh/SKILL.md`
 
+## 中文说明
+
+Agent2SSH 是一个面向通用 Agent 的本地 SSH 能力层。它把 SSH 主机管理、命令执行、SFTP、交互式终端、端口转发、审批和审计统一在同一个 Rust/Tauri 核心里，并通过桌面应用、CLI、HTTP daemon 和 MCP server 暴露给本地自动化工具使用。
+
+### 适用场景
+
+- 为 Codex、Claude Desktop 或其他支持 MCP 的 Agent 提供本地 SSH 工具能力
+- 在本机集中管理 SSH 主机、密钥、代理、跳板机和远端 daemon
+- 对高风险命令、SFTP、终端会话和端口转发做统一审批、限流、暂停和审计
+- 在桌面端观察 Agent 活动、审批请求、审计记录、异常告警和持久会话
+
+### 安装
+
+macOS 用户可以通过 Homebrew 安装：
+
+```bash
+brew tap lengyuqu/agent2ssh
+brew install agent2ssh
+```
+
+也可以从 [GitHub Releases](https://github.com/lengyuqu/agent2ssh/releases) 下载预编译二进制或桌面安装包。源码构建方式见下方英文的 Installation 与 Development 小节。
+
+### 快速开发与运行
+
+```bash
+npm install
+npm run build
+npm run tauri:dev
+```
+
+CLI、MCP server 和 HTTP daemon 的本地运行示例：
+
+```bash
+cd src-tauri
+cargo run --no-default-features --bin agent2ssh -- host list --json
+cargo run --no-default-features --bin agent2ssh-mcp
+cargo run --no-default-features --features daemon --bin agent2ssh-daemon
+```
+
+### MCP 集成
+
+在支持 MCP 的客户端中，将 `agent2ssh-mcp` 配置为 stdio MCP server。建议设置 `AGENT2SSH_SOURCE`，方便在桌面 Live Activity 和审计日志中区分调用来源，例如 `codex`、`claude_desktop` 或团队内部工具名。完整工具列表见 [docs/skills.md](docs/skills.md)。
+
+### 安全与数据位置
+
+Agent2SSH 的本地数据默认保存在 `~/.agent2ssh/`。高风险命令、突变类 SFTP/终端/转发操作会经过统一授权层；被阻止的命令始终拒绝执行。daemon 使用 `~/.agent2ssh/daemon.token` 中的 Bearer token 进行认证。配置、策略、令牌和存储细节见 [docs/guides/configuration-guide.md](docs/guides/configuration-guide.md)。
+
 ## Development
 
 ```bash
