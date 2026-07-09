@@ -53,6 +53,8 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+#[cfg(windows)]
+use std::process::Command;
 use std::{
     collections::HashMap,
     fs,
