@@ -272,7 +272,7 @@ jobs:
       # macOS bundles can be Developer ID-signed (a prerequisite for notarization).
       # No-op when the secret is unset (e.g. fork PRs) so the workflow still runs.
       - name: Import Apple code-signing certificate
-        if: matrix.os == 'macos-latest'
+        if: contains(matrix.target, 'apple-darwin')
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -300,7 +300,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           # macOS Developer ID signing + notarization. When these are empty the
           # config's ad-hoc identity ("-") is used and notarization is skipped.
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '-' }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -311,14 +311,14 @@ jobs:
       # K3: publish the updater manifest (latest.json) and signatures so the
       # in-app updater endpoint can serve them.
       - name: Upload updater manifest
-        if: matrix.os == 'macos-latest'
+        if: contains(matrix.target, 'apple-darwin')
         uses: softprops/action-gh-release@v2
         with:
           files: |
             src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz.sig
 
       - name: Upload macOS bundle
-        if: matrix.os == 'macos-latest'
+        if: contains(matrix.target, 'apple-darwin')
         uses: softprops/action-gh-release@v2
         with:
           files: |
