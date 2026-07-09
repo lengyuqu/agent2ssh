@@ -97,6 +97,10 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Add Rust cargo to PATH
+        if: contains(matrix.target, 'apple-darwin')
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:
@@ -230,6 +234,10 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Add Rust cargo to PATH
+        if: contains(matrix.target, 'apple-darwin')
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:
@@ -293,20 +301,41 @@ jobs:
           rm -f certificate.p12
 
       - name: Tauri bundle
-        run: npx @tauri-apps/cli build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+        shell: bash
+        run: |
+          if [ -n "$A2S_TAURI_SIGNING_PRIVATE_KEY" ]; then
+            export TAURI_SIGNING_PRIVATE_KEY="$A2S_TAURI_SIGNING_PRIVATE_KEY"
+          fi
+          if [ -n "$A2S_TAURI_SIGNING_PRIVATE_KEY_PASSWORD" ]; then
+            export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$A2S_TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
+          fi
+          if [ -n "$A2S_APPLE_SIGNING_IDENTITY" ]; then
+            export APPLE_SIGNING_IDENTITY="$A2S_APPLE_SIGNING_IDENTITY"
+          elif [[ "${{ matrix.target }}" == *apple-darwin ]]; then
+            export APPLE_SIGNING_IDENTITY="-"
+          fi
+          if [ -n "$A2S_APPLE_ID" ] && [ -n "$A2S_APPLE_PASSWORD" ] && [ -n "$A2S_APPLE_TEAM_ID" ]; then
+            export APPLE_ID="$A2S_APPLE_ID"
+            export APPLE_PASSWORD="$A2S_APPLE_PASSWORD"
+            export APPLE_TEAM_ID="$A2S_APPLE_TEAM_ID"
+          fi
+          if [ -n "$A2S_WINDOWS_CERTIFICATE_THUMBPRINT" ]; then
+            export WINDOWS_CERTIFICATE_THUMBPRINT="$A2S_WINDOWS_CERTIFICATE_THUMBPRINT"
+          fi
+          npx @tauri-apps/cli build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
         env:
           # Updater signing (signs the artifacts the in-app updater verifies).
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          A2S_TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          A2S_TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           # macOS Developer ID signing + notarization. When these are empty the
           # config's ad-hoc identity ("-") is used and notarization is skipped.
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '-' }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          A2S_APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          A2S_APPLE_ID: ${{ secrets.APPLE_ID }}
+          A2S_APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          A2S_APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           # Windows Authenticode signing (set bundle.windows.certificateThumbprint
           # in tauri.conf.json, or use Azure Trusted Signing via these vars).
-          WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.WINDOWS_CERTIFICATE_THUMBPRINT }}
+          A2S_WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.WINDOWS_CERTIFICATE_THUMBPRINT }}
 
       # K3: publish the updater manifest (latest.json) and signatures so the
       # in-app updater endpoint can serve them.
