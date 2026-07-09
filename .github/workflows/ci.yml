@@ -48,12 +48,11 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            ~/.cargo/bin/
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             src-tauri/target/
-          key: ${{ runner.os }}-contract-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          key: ${{ runner.os }}-contract-cargo-v2-${{ hashFiles('src-tauri/Cargo.lock') }}
 
       - name: MCP tools match docs/skills.md
         run: cargo test --no-default-features --test daemon_integration mcp_tools_match_skills_md_documentation
@@ -110,12 +109,11 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            ~/.cargo/bin/
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             src-tauri/target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-v2-${{ hashFiles('src-tauri/Cargo.lock') }}
 
       - name: Install npm deps
         run: npm install
@@ -247,12 +245,11 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            ~/.cargo/bin/
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             src-tauri/target/
-          key: ${{ runner.os }}-tauri-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          key: ${{ runner.os }}-tauri-cargo-v2-${{ hashFiles('src-tauri/Cargo.lock') }}
 
       - name: Install npm deps
         run: npm install
@@ -390,7 +387,7 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             src-tauri/target/
-          key: ${{ runner.os }}-e2e-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          key: ${{ runner.os }}-e2e-cargo-v2-${{ hashFiles('src-tauri/Cargo.lock') }}
 
       - name: Build release CLI
         run: cargo build --release --no-default-features --bin agent2ssh
