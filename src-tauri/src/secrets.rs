@@ -404,6 +404,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[serial_test::serial]
     fn memory_backend_roundtrip() {
         std::env::set_var("AGENT2SSH_SECRETS_BACKEND", "memory");
         let account = host_account("secrets-roundtrip");

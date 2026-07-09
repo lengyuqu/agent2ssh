@@ -117,11 +117,21 @@ mod tests {
     #[serial_test::serial]
     async fn test_event_bus_publish_subscribe() {
         let mut rx = subscribe_events();
+        let run_id = uuid::Uuid::new_v4().to_string();
         publish_event(
             EventType::ExecCompleted,
-            serde_json::json!({"host": "test-host", "exit_code": 0}),
+            serde_json::json!({"run_id": run_id, "host": "test-host", "exit_code": 0}),
         );
-        let event = rx.recv().await.unwrap();
+
+        let event = loop {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if event.data["run_id"] == run_id {
+                break event;
+            }
+        };
         assert_eq!(event.event_type, EventType::ExecCompleted);
         assert_eq!(event.data["host"], "test-host");
         assert_eq!(event.data["exit_code"], 0);
@@ -132,17 +142,26 @@ mod tests {
     #[serial_test::serial]
     async fn test_event_bus_handles_1000_event_burst() {
         let mut rx = subscribe_events();
+        let run_id = uuid::Uuid::new_v4().to_string();
         for i in 0..1000 {
             publish_event(
                 EventType::ExecOutput,
-                serde_json::json!({"seq": i, "host": format!("scale-{i:03}")}),
+                serde_json::json!({"run_id": run_id, "seq": i, "host": format!("scale-{i:03}")}),
             );
         }
 
-        for expected in 0..1000 {
-            let event = rx.recv().await.unwrap();
+        let mut expected = 0;
+        while expected < 1000 {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if event.data["run_id"] != run_id {
+                continue;
+            }
             assert_eq!(event.event_type, EventType::ExecOutput);
             assert_eq!(event.data["seq"], expected);
+            expected += 1;
         }
     }
 
