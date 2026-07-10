@@ -1856,3 +1856,65 @@ paths:
                 properties:
                   path:           { type: string }
                   hosts_exported: { type: integer }
+
+  /health-snapshot:
+    get:
+      summary: Get health snapshot for configured hosts
+      description: Collects health data (uptime, disk, memory, load, SSH latency) for all or specified hosts concurrently via embedded SSH.
+      parameters:
+        - name: hosts
+          in: query
+          schema:
+            type: array
+            items: { type: string }
+          description: Host aliases to collect health from (default: all configured hosts).
+        - name: timeout_secs
+          in: query
+          schema: { type: integer, default: 10 }
+          description: SSH connection timeout in seconds.
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    host:        { type: string }
+                    reachable:   { type: boolean }
+                    uptime:      { type: string, nullable: true }
+                    disk:        { type: string, nullable: true }
+                    memory:      { type: string, nullable: true }
+                    load:        { type: string, nullable: true }
+                    latency_ms:  { type: integer, nullable: true }
+                    error:       { type: string, nullable: true }
+    post:
+      summary: Collect health snapshot for specified hosts
+      description: Triggers a concurrent health collection for the given hosts (or all configured hosts if omitted).
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                hosts:        { type: array, items: { type: string }, description: "Host aliases (default: all configured hosts)." }
+                timeout_secs: { type: integer, default: 10 }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    host:        { type: string }
+                    reachable:   { type: boolean }
+                    uptime:      { type: string, nullable: true }
+                    disk:        { type: string, nullable: true }
+                    memory:      { type: string, nullable: true }
+                    load:        { type: string, nullable: true }
+                    latency_ms:  { type: integer, nullable: true }
+                    error:       { type: string, nullable: true }

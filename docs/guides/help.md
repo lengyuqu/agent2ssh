@@ -53,6 +53,7 @@ SSH 主机指纹不再要求人工确认。首次连接时会自动信任并写�
 
 - [CLI 快速入门](./cli-quickstart.md)
 - [MCP 快速入门](./mcp-quickstart.md)
+- [10 分钟接入剧本](./external-user-10min.md)
 - [配置指南](./configuration-guide.md)
 - [Web 控制台指南](./web-console-guide.md)
 - [Daemon API 快速入门](./daemon-api-quickstart.md)

@@ -10,7 +10,7 @@ Agent2SSH 提供命令行工具 `agent2ssh`，用于管理 SSH 主机、执行�
 
 ```bash
 agent2ssh --version
-# agent2ssh 0.1.1
+# agent2ssh 0.2.1
 ```
 
 ### 安装方式
@@ -148,6 +148,9 @@ agent2ssh exec <host> "<command>" [--json] [--force] [--timeout-secs N]
 | `--force` | 关 | 在没有 daemon 审批流时执行高风险命令；仍受策略限制 |
 | `--timeout-secs` | 60 | 超时秒数 |
 | `--stdin` | 无 | 将字符串传递到远程命令的 stdin |
+| `--plan` | 关 | 显示执行计划而不实际运行命令 |
+| `--reason` | 无 | 操作原因/备注（写入审计日志） |
+| `--change-id` | 无 | 变更/工单 ID（写入审计日志） |
 
 示例：
 
@@ -186,6 +189,14 @@ agent2ssh exec-multi <h1> <h2> --command "<cmd>" [--force] [--tags <tag>]
 | `--tags` | 无 | 按标签筛选主机（逗号分隔） |
 | `--timeout-secs` | 60 | 超时秒数 |
 | `--json` | 关 | JSON 输出 |
+| `--plan` | 关 | 显示执行计划而不实际运行命令 |
+| `--concurrency` | 0 | 最大并发主机数（0 = 不限） |
+| `--max-failures` | 0 | 失败多少次后停止（0 = 永不停止） |
+| `--batch-size` | 无 | 按批次执行，每批 N 台主机 |
+| `--pause-secs` | 0 | 批次间暂停秒数 |
+| `--compare` | 关 | 显示多主机结果对比 |
+| `--reason` | 无 | 操作原因/备注（写入审计日志） |
+| `--change-id` | 无 | 变更/工单 ID（写入审计日志） |
 
 示例：
 

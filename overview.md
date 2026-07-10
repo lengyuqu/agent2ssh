@@ -30,7 +30,7 @@ docs/
 
 - **保留参考类文件名不变**（`skills.md`、`architecture.md`、`skill-distribution.md`、`guides/*` 维持原名），仅合并"综合"文档，避免破坏既有链接。
 - 原大计划 `docs/plan.md` 里详尽的逐任务验收表**未逐字搬运**进 PLAN.md，而是压缩为阶段速览；完整内容仍可在 git 历史中找回。
-- 已用 grep 全量校验：**无悬空链接**；`docs/api.yaml` 仍有效。
+- 已用 grep 全量校验：`docs/api.yaml` 仍有效；文档间交叉链接指向正确（`architecture.md` 中 r5 引用已更新为 `REGRESSION-LOG.md` 锚点）。
 
 ## 验证
 

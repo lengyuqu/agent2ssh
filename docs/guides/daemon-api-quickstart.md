@@ -54,6 +54,8 @@ denied_commands = ["rm *", "sudo *"]
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/health` | 健康检查（无需认证） |
+| GET | `/metrics` | 基础指标（无需认证） |
+| GET | `/metrics/trend` | 执行指标趋势 |
 | GET | `/hosts` | 列出主机 |
 | POST | `/hosts` | 添加主机 |
 | POST | `/hosts/import` | 导入 SSH 配置 |
@@ -61,12 +63,15 @@ denied_commands = ["rm *", "sudo *"]
 | POST | `/ping` | 检测连通性 |
 | POST | `/exec` | 执行命令 |
 | POST | `/exec-multi` | 多主机并发执行 |
+| POST | `/exec/compare` | 多主机执行结果对比 |
+| POST | `/exec/preview` | 执行预览（不实际执行） |
 | GET | `/exec/stream` | WebSocket 流式执行 |
 | GET | `/terminal` | WebSocket 交互式终端 |
 | GET | `/gate` | 查询全局执行 gate |
 | POST | `/gate/pause` | 暂停非桌面来源执行 |
 | POST | `/gate/resume` | 恢复执行 |
 | GET | `/audit` | 查询审计日志 |
+| GET | `/audit/export` | 导出审计日志（JSONL/CSV） |
 | POST | `/sftp/upload` | 上传文件 |
 | POST | `/sftp/download` | 下载文件 |
 | POST | `/sftp/ls` | 列出远程目录 |
@@ -83,16 +88,33 @@ denied_commands = ["rm *", "sudo *"]
 | GET | `/approvals` | 列出审批请求 |
 | POST | `/approvals/:id/approve` | 批准审批 |
 | POST | `/approvals/:id/reject` | 拒绝审批 |
+| POST | `/approval/:id/respond` | 通用审批响应 |
+| GET | `/approval/policies` | 列出审批策略 |
+| PUT | `/approval/policies` | 更新审批策略 |
+| POST | `/approval/check` | 检查是否需要审批 |
 | POST | `/risk/check` | 风险检查 |
 | GET | `/connections` | 连接状态 |
 | POST | `/connections/:host/connect` | 建立连接 |
 | POST | `/connections/:host/disconnect` | 关闭连接 |
 | GET | `/playbooks` | 列出 Playbook |
 | POST | `/playbooks/run` | 执行 Playbook |
+| POST | `/playbooks/:name/dry-run` | 预览 Playbook |
 | GET | `/daemons` | 列出守护进程 |
+| GET | `/daemons/view` | 守护进程统一视图 |
 | POST | `/daemons/:alias/exec` | 代理执行 |
+| GET | `/diagnostics` | 全部诊断 |
+| GET | `/diagnostics/:alias` | 远程守护进程诊断 |
+| GET | `/version-check/:alias` | 远程守护进程版本检查 |
+| GET | `/config/export` | 导出团队配置 |
+| POST | `/config/import` | 导入团队配置 |
+| POST | `/config/import/preview` | 预览团队配置导入 |
+| GET | `/health-snapshot` | 主机健康快照 |
+| POST | `/health-snapshot` | 收集主机健康快照 |
 | GET | `/webhook/config` | 获取 Webhook 配置 |
 | PUT | `/webhook/config` | 更新 Webhook 配置 |
+| GET | `/events/stream` | SSE 实时事件流 |
+| GET | `/ssh-sync/diff` | 与 `~/.ssh/config` 对比 |
+| POST | `/ssh-sync/export` | 导出到 SSH 配置文件 |
 | GET | `/console` | Web 控制台 |
 
 ---

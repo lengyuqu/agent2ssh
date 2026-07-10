@@ -82,6 +82,7 @@ Agent2SSH 的所有组件（CLI、MCP server、daemon、Tauri 桌面应用）共
 | Skill 版本 | Agent2SSH 版本 | 兼容性 |
 |-----------|---------------|--------|
 | 0.1.x | 0.1.x | 完全兼容 |
+| 0.2.x | 0.2.x | 完全兼容 |
 
 **建议**：始终保持 MCP server 与 CLI/daemon 版本一致。工具集在次版本（minor）之间向后兼容，补丁版本（patch）之间完全兼容。
 
@@ -98,12 +99,20 @@ Agent2SSH 的所有组件（CLI、MCP server、daemon、Tauri 桌面应用）共
 ```
 ssh_list_hosts          ssh_list_daemons
 ssh_ping                ssh_audit
-ssh_sftp_ls             ssh_sftp_stat
-ssh_session_list        ssh_session_read
-ssh_forward_list        ssh_risk_check
-ssh_approval_list       ssh_connection_status
-ssh_playbook_list       ssh_config_export
-ssh_webhook_config (get)
+ssh_audit_export        ssh_sftp_ls
+ssh_sftp_stat           ssh_session_list
+ssh_session_read        ssh_forward_list
+ssh_risk_check          ssh_approval_list
+ssh_approval_policies_list  ssh_approval_check
+ssh_connection_status   ssh_playbook_list
+ssh_playbook_dry_run    ssh_config_export
+ssh_config_import_preview   ssh_webhook_config (get)
+ssh_doctor              ssh_metrics
+ssh_metrics_trend       ssh_preview_exec
+ssh_health_snapshot     ssh_gate_status
+ssh_daemon_diagnose     ssh_daemon_version_check
+ssh_daemons_view        ssh_events_subscribe
+ssh_sync_diff           ssh_sync_export
 ```
 
 ### 写入类（Write/Mutate）
@@ -112,15 +121,15 @@ ssh_webhook_config (get)
 
 ```
 ssh_exec                ssh_exec_multi
-ssh_session_open        ssh_session_write
-ssh_session_close       ssh_sftp_upload
-ssh_sftp_download       ssh_sftp_mkdir
-ssh_forward_add         ssh_forward_remove
-ssh_add_host            ssh_remove_host
-ssh_import_config       ssh_connect
-ssh_disconnect          ssh_approval_respond
-ssh_playbook_run        ssh_webhook_config (set)
-ssh_config_import
+ssh_exec_compare        ssh_session_open
+ssh_session_write       ssh_session_close
+ssh_sftp_upload         ssh_sftp_download
+ssh_sftp_mkdir          ssh_forward_add
+ssh_forward_remove      ssh_add_host
+ssh_remove_host         ssh_import_config
+ssh_connect             ssh_disconnect
+ssh_approval_respond    ssh_playbook_run
+ssh_webhook_config (set)  ssh_config_import
 ```
 
 ---
@@ -157,7 +166,7 @@ brew upgrade agent2ssh
 ```toml
 # 在 CI/CD 中固定版本
 [agent2ssh]
-version = "=0.1.1"
+version = "=0.2.1"
 ```
 
 ### 变更日志
