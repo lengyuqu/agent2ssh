@@ -3185,7 +3185,7 @@ fn print_comparison(comparison: &ExecComparison) {
         if !comparison.stdout_comparison.common_prefix.is_empty() {
             println!(
                 "  Common prefix: {:?}...",
-                &comparison.stdout_comparison.common_prefix
+                comparison.stdout_comparison.common_prefix
             );
         }
         for diff in &comparison.stdout_comparison.diffs {

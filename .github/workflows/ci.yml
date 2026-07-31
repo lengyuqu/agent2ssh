@@ -43,6 +43,8 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -53,6 +55,33 @@ jobs:
             ~/.cargo/git/db/
             src-tauri/target/
           key: ${{ runner.os }}-contract-cargo-v2-${{ hashFiles('src-tauri/Cargo.lock') }}
+
+      # ── Lint checks ────────────────────────────────────────────────────────
+
+      - name: Rust format check
+        run: cargo fmt --check
+        working-directory: src-tauri
+
+      - name: Rust clippy (CLI + MCP)
+        run: cargo clippy --no-default-features --bin agent2ssh --bin agent2ssh-mcp -- -D warnings
+        working-directory: src-tauri
+
+      - name: Rust clippy (daemon)
+        run: cargo clippy --no-default-features --features daemon --bin agent2ssh-daemon -- -D warnings
+        working-directory: src-tauri
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install npm deps
+        run: npm install
+
+      - name: Frontend lint (biome)
+        run: npx @biomejs/biome check src/
+
+      # ── Contract checks ────────────────────────────────────────────────────
 
       - name: MCP tools match docs/skills.md
         run: cargo test --no-default-features --test daemon_integration mcp_tools_match_skills_md_documentation
@@ -119,6 +148,9 @@ jobs:
         run: npm install
 
       # ── Test suite (runs on every push/PR, not just releases) ────────────
+
+      - name: Frontend tests
+        run: npm test
 
       - name: Rust unit tests
         run: cargo test --no-default-features --lib

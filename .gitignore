@@ -7,3 +7,5 @@ src-tauri/binaries/*
 *.log
 .agent2ssh-test.env
 .workbuddy/
+.qoder/
+.tmp-sync/

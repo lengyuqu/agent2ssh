@@ -1,0 +1,29 @@
+# =============================================================================
+# CODEOWNERS — Agent2SSH
+# =============================================================================
+# 定义各路径的代码所有者。PR 修改匹配路径时，GitHub 自动请求对应所有者审查。
+# 语法参考：https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+# =============================================================================
+
+# 默认所有者：仓库维护者
+*                           @lengyuqu
+
+# Rust 后端核心
+/src-tauri/src/             @lengyuqu
+/src-tauri/Cargo.toml       @lengyuqu
+/src-tauri/Cargo.lock       @lengyuqu
+
+# 前端
+/src/                       @lengyuqu
+
+# CI / 发布 / 构建脚本
+/.github/workflows/         @lengyuqu
+/scripts/                   @lengyuqu
+
+# 文档
+/docs/                      @lengyuqu
+
+# 项目配置
+/package.json               @lengyuqu
+/tsconfig.json              @lengyuqu
+/vite.config.ts             @lengyuqu

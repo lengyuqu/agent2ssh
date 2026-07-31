@@ -9,6 +9,8 @@ Agent2SSH combines a React/Vite desktop frontend with a Rust/Tauri backend. Fron
 - `npm install`: install frontend and Tauri dependencies.
 - `npm run dev`: run the Vite frontend.
 - `npm run build`: type-check and build the frontend.
+- `npm test`: run frontend behavior tests with Vitest (jsdom + Testing Library).
+- `npm run test:watch`: run frontend tests in watch mode.
 - `npm run tauri:dev`: launch the desktop app in development mode.
 - `npm run tauri:build`: build sidecar binaries, frontend, and the packaged Tauri app.
 - `cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib`: run Rust library tests.
@@ -25,7 +27,7 @@ Use TypeScript with React function components and PascalCase component filenames
 
 ## Testing Guidelines
 
-Place Rust integration tests in `src-tauri/tests/` and name them by behavior or surface, for example `cli_smoke.rs` or `daemon_integration.rs`. Prefer targeted tests for policy, risk, approval, daemon, and command execution changes. For frontend changes, run `npm run build`; add manual desktop checks with `npm run tauri:dev` when UI behavior changes.
+Place Rust integration tests in `src-tauri/tests/` and name them by behavior or surface, for example `cli_smoke.rs` or `daemon_integration.rs`. Prefer targeted tests for policy, risk, approval, daemon, and command execution changes. Frontend behavior tests live next to components as `src/**/*.test.tsx` (for example `src/components/HostList.test.tsx`) and run with `npm test` (Vitest + jsdom + Testing Library, configured in `vite.config.ts` with setup in `src/test-setup.ts`); mock `src/api.ts` in tests so they never touch the Tauri bridge. For frontend changes, run `npm test` and `npm run build`; add manual desktop checks with `npm run tauri:dev` when UI behavior changes.
 
 ## Commit & Pull Request Guidelines
 

@@ -58,6 +58,7 @@ SSH 主机指纹不再要求人工确认。首次连接时会自动信任并写�
 - [Web 控制台指南](./web-console-guide.md)
 - [Daemon API 快速入门](./daemon-api-quickstart.md)
 - [MCP 客户端模板](./mcp-client-templates.md)
+- [分支保护策略](./branch-protection.md)
 
 ## 项目与开发文档
 
