@@ -75,6 +75,15 @@ pub struct ApprovalRequest {
     /// Optional rich context for the approval request.
     #[serde(default)]
     pub context: Option<ApprovalContext>,
+    /// T2-14: Timestamp when the approval was revoked (if applicable).
+    #[serde(default)]
+    pub revoked_at: Option<DateTime<Utc>>,
+    /// T2-14: Command snapshot taken at approval time. This captures the
+    /// exact command text that was approved, so if the original `command`
+    /// field is later modified (e.g. by a concurrent request), we can still
+    /// verify what was actually approved.
+    #[serde(default)]
+    pub approved_command_snapshot: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,6 +93,8 @@ pub enum ApprovalStatus {
     Approved,
     Rejected,
     TimedOut,
+    /// T2-14: Approval was revoked after being approved.
+    Revoked,
 }
 
 pub struct ApprovalStore {
@@ -168,6 +179,8 @@ pub async fn approval_request_with_ttl(
         ttl_secs,
         status: ApprovalStatus::Pending,
         context: None,
+        revoked_at: None,
+        approved_command_snapshot: None,
     };
     {
         let mut s = store().lock().await;
@@ -204,6 +217,8 @@ pub async fn approval_request_with_context(
         ttl_secs,
         status: ApprovalStatus::Pending,
         context: Some(context),
+        revoked_at: None,
+        approved_command_snapshot: None,
     };
     {
         let mut s = store().lock().await;
@@ -263,6 +278,8 @@ pub async fn approval_respond(id: Uuid, approved: bool) -> Result<()> {
         }
 
         let status = if approved {
+            // T2-14: Save command snapshot at approval time
+            req.approved_command_snapshot = Some(req.command.clone());
             ApprovalStatus::Approved
         } else {
             ApprovalStatus::Rejected
@@ -280,6 +297,56 @@ pub async fn approval_respond(id: Uuid, approved: bool) -> Result<()> {
         }),
     );
     Ok(())
+}
+
+/// T2-14: Revoke a previously approved command.
+///
+/// This transitions an `Approved` approval to `Revoked`, recording the
+/// revocation timestamp. The command snapshot is preserved so auditors
+/// can verify what was approved before revocation.
+///
+/// Only `Approved` approvals can be revoked. Pending, Rejected, TimedOut,
+/// or already Revoked approvals cannot be revoked.
+pub async fn revoke_approval(id: Uuid) -> Result<()> {
+    let mut s = store().lock().await;
+    {
+        let req = s
+            .requests
+            .get_mut(&id)
+            .ok_or_else(|| anyhow!("unknown approval: {id}"))?;
+
+        if req.status != ApprovalStatus::Approved {
+            return Err(anyhow!(
+                "approval {id} cannot be revoked: current status is {:?}",
+                req.status
+            ));
+        }
+
+        req.status = ApprovalStatus::Revoked;
+        req.revoked_at = Some(Utc::now());
+    }
+    persist_approval_store(&s);
+    crate::events::publish_event(
+        crate::events::EventType::ApprovalResponded,
+        serde_json::json!({
+            "id": id.to_string(),
+            "approved": false,
+            "status": "revoked",
+        }),
+    );
+    Ok(())
+}
+
+/// T2-14: Get the command snapshot from an approved request.
+///
+/// Returns `None` if the approval was never approved or if no snapshot
+/// was taken. This is used to verify that the command being executed
+/// matches what was actually approved.
+pub async fn get_approved_command_snapshot(id: Uuid) -> Option<String> {
+    let s = store().lock().await;
+    s.requests
+        .get(&id)
+        .and_then(|req| req.approved_command_snapshot.clone())
 }
 
 pub async fn approval_list() -> Vec<ApprovalRequest> {
@@ -1121,5 +1188,76 @@ mod tests {
         // Trailing slash should be trimmed
         let url = approval_action_url("http://127.0.0.1:7722/", "xyz-456");
         assert_eq!(url, "http://127.0.0.1:7722/approval/xyz-456/respond");
+    }
+
+    // ── T2-14: Command snapshot + revoke tests ────────────────────────────
+
+    #[tokio::test]
+    async fn t2_14_approved_command_snapshot_is_saved() {
+        let id = approval_request("snap-host", "sudo reboot", RiskLevel::High).await;
+        approval_respond(id, true).await.unwrap();
+
+        // Snapshot should be saved
+        let snapshot = get_approved_command_snapshot(id).await;
+        assert_eq!(snapshot.as_deref(), Some("sudo reboot"));
+
+        // Verify it's stored on the request
+        let s = store().lock().await;
+        let req = s.requests.get(&id).unwrap();
+        assert!(req.approved_command_snapshot.is_some());
+        assert_eq!(
+            req.approved_command_snapshot.as_deref(),
+            Some("sudo reboot")
+        );
+    }
+
+    #[tokio::test]
+    async fn t2_14_rejected_request_has_no_snapshot() {
+        let id = approval_request("rej-host", "rm -rf /", RiskLevel::High).await;
+        approval_respond(id, false).await.unwrap();
+
+        let snapshot = get_approved_command_snapshot(id).await;
+        assert!(snapshot.is_none(), "rejected request should have no snapshot");
+    }
+
+    #[tokio::test]
+    async fn t2_14_revoke_approved_approval() {
+        let id = approval_request("rev-host", "shutdown -h now", RiskLevel::High).await;
+        approval_respond(id, true).await.unwrap();
+        assert_eq!(approval_poll(id).await, Some(ApprovalStatus::Approved));
+
+        // Revoke it
+        revoke_approval(id).await.unwrap();
+        assert_eq!(approval_poll(id).await, Some(ApprovalStatus::Revoked));
+
+        // Verify revoked_at is set
+        let s = store().lock().await;
+        let req = s.requests.get(&id).unwrap();
+        assert!(req.revoked_at.is_some());
+        // Snapshot should still be preserved
+        assert_eq!(
+            req.approved_command_snapshot.as_deref(),
+            Some("shutdown -h now")
+        );
+    }
+
+    #[tokio::test]
+    async fn t2_14_revoke_non_approved_fails() {
+        let id = approval_request("pend-host", "ls", RiskLevel::Medium).await;
+        // Try to revoke a pending approval — should fail
+        let result = revoke_approval(id).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("cannot be revoked"));
+    }
+
+    #[tokio::test]
+    async fn t2_14_revoke_already_revoked_fails() {
+        let id = approval_request("dblrev-host", "reboot", RiskLevel::High).await;
+        approval_respond(id, true).await.unwrap();
+        revoke_approval(id).await.unwrap();
+
+        // Second revoke should fail
+        let result = revoke_approval(id).await;
+        assert!(result.is_err());
     }
 }

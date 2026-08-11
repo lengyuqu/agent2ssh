@@ -218,7 +218,23 @@ fn run_local_forward(host: HostProfile, rule: ForwardRule, stop: Arc<AtomicBool>
             Err(error) if error.kind() == ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(50));
             }
-            Err(error) => return Err(error.into()),
+            // T1-5: Accept-error resilient recovery — log + backoff + continue
+            // instead of killing the entire forward. Accept can fail transiently
+            // due to fd exhaustion or kernel pressure; aborting would drop all
+            // active connections through this tunnel.
+            Err(error) => {
+                let _ = crate::diagnostics::append_diagnostic_log(
+                    "warn",
+                    "embedded_ssh_forward",
+                    "local forward accept error; backing off",
+                    Some(serde_json::json!({
+                        "host": rule.host,
+                        "bind_port": rule.bind_port,
+                        "error": error.to_string(),
+                    })),
+                );
+                thread::sleep(Duration::from_millis(100));
+            }
         }
     }
     Ok(())
@@ -293,7 +309,21 @@ fn run_remote_forward(
             Err(error) if ssh_error_is_would_block(&error) => {
                 thread::sleep(Duration::from_millis(50));
             }
-            Err(error) => return Err(error.into()),
+            // T1-5: Accept-error resilient recovery — log + backoff + continue
+            // instead of killing the entire forward.
+            Err(error) => {
+                let _ = crate::diagnostics::append_diagnostic_log(
+                    "warn",
+                    "embedded_ssh_forward",
+                    "remote forward accept error; backing off",
+                    Some(serde_json::json!({
+                        "host": rule.host,
+                        "bind_port": rule.bind_port,
+                        "error": error.to_string(),
+                    })),
+                );
+                thread::sleep(Duration::from_millis(100));
+            }
         }
     }
     Ok(())

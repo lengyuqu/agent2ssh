@@ -247,6 +247,27 @@ impl AnyhowToCodedExt for anyhow::Error {
     }
 }
 
+/// Walk the full error chain and join each level's `Display` output with
+/// `: `. Mirrors rssh's `error_chain()` so the root cause (e.g.
+/// "certificate verify failed") is not lost when wrapping errors.
+///
+/// Example: `error_chain(&anyhow::Error::msg("outer").context("inner"))`
+/// → `"inner: outer"`
+pub fn error_chain(err: &dyn std::error::Error) -> String {
+    let mut parts = Vec::new();
+    let mut current: Option<&dyn std::error::Error> = Some(err);
+    while let Some(e) = current {
+        parts.push(format!("{e}"));
+        current = e.source();
+    }
+    parts.join(": ")
+}
+
+/// Same as `error_chain` but takes `anyhow::Error`.
+pub fn error_chain_anyhow(err: &anyhow::Error) -> String {
+    error_chain(err.as_ref())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -367,5 +388,103 @@ mod tests {
         let e = CodedError::empty(ErrorCode::Internal);
         assert!(is_coded_error(&e.to_string()));
         assert!(!is_coded_error("plain error"));
+    }
+
+    // ── Wire format byte-level pinning ────────────────────────────────
+    // These tests pin the exact wire-format bytes so that changes to serde,
+    // Display, or field ordering are caught immediately rather than causing
+    // silent frontend/backend protocol drift.
+
+    #[test]
+    fn wire_format_exact_bytes_ssh_connect_failed() {
+        let e = CodedError::ssh_connect_failed("web-1", "timeout");
+        let s = e.to_string();
+        // Exact expected string — every byte matters.
+        let expected = r#"__agent2ssh_err__|{"code":"ssh_connect_failed","params":{"err":"timeout","host":"web-1"}}"#;
+        assert_eq!(s, expected);
+    }
+
+    #[test]
+    fn wire_format_exact_bytes_empty_params() {
+        let e = CodedError::empty(ErrorCode::SshSessionTimeout);
+        let s = e.to_string();
+        let expected = r#"__agent2ssh_err__|{"code":"ssh_session_timeout","params":{}}"#;
+        assert_eq!(s, expected);
+    }
+
+    #[test]
+    fn wire_format_exact_bytes_command_blocked() {
+        let e = CodedError::command_blocked("rm -rf /", "blocked");
+        let s = e.to_string();
+        let expected = r#"__agent2ssh_err__|{"code":"command_blocked","params":{"command":"rm -rf /","risk":"blocked"}}"#;
+        assert_eq!(s, expected);
+    }
+
+    #[test]
+    fn wire_format_exact_bytes_host_not_found() {
+        let e = CodedError::host_not_found("missing");
+        let s = e.to_string();
+        let expected = r#"__agent2ssh_err__|{"code":"host_not_found","params":{"name":"missing"}}"#;
+        assert_eq!(s, expected);
+    }
+
+    #[test]
+    fn wire_prefix_constant_is_stable() {
+        assert_eq!(WIRE_PREFIX, "__agent2ssh_err__");
+        assert_eq!(WIRE_PREFIX.len(), 17);
+    }
+
+    #[test]
+    fn wire_format_json_field_order_is_code_then_params() {
+        // Ensure "code" always precedes "params" in the JSON payload.
+        // Frontend parsers depend on this ordering for fast-path detection.
+        let e = CodedError::ssh_auth_failed("host", "password");
+        let s = e.to_string();
+        let json_part = s.strip_prefix("__agent2ssh_err__|").unwrap();
+        let code_pos = json_part.find(r#""code":"#).unwrap();
+        let params_pos = json_part.find(r#""params":"#).unwrap();
+        assert!(
+            code_pos < params_pos,
+            "code must precede params in wire format"
+        );
+    }
+
+    // ── error_chain ─────────────────────────────────────────────────────
+
+    #[test]
+    fn error_chain_joins_nested_sources() {
+        use thiserror::Error;
+        #[derive(Debug, Error)]
+        #[error("root cause: connection refused")]
+        struct Root;
+
+        #[derive(Debug, Error)]
+        #[error("ssh connect failed")]
+        struct Middle {
+            #[source]
+            inner: Root,
+        }
+
+        let err = Middle { inner: Root };
+        let chain = error_chain(&err);
+        assert_eq!(chain, "ssh connect failed: root cause: connection refused");
+    }
+
+    #[test]
+    fn error_chain_single_error_no_join() {
+        let err = anyhow::anyhow!("standalone error");
+        let chain = error_chain_anyhow(&err);
+        assert_eq!(chain, "standalone error");
+    }
+
+    #[test]
+    fn error_chain_anyhow_with_context() {
+        let err = anyhow::anyhow!("tcp timeout")
+            .context("failed to connect to host")
+            .context("ssh session setup failed");
+        let chain = error_chain_anyhow(&err);
+        assert!(chain.contains("ssh session setup failed"));
+        assert!(chain.contains("failed to connect to host"));
+        assert!(chain.contains("tcp timeout"));
     }
 }

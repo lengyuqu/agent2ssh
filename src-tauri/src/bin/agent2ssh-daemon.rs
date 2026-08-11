@@ -94,7 +94,10 @@ fn uptime_secs() -> u64 {
 /// `SIGTERM` on Unix (how service managers and `kill` stop the daemon). Used to
 /// drive `axum`'s graceful shutdown so the PID file is cleaned up instead of left
 /// stale. (I2)
-async fn shutdown_signal() {
+/// T2-15: Modified shutdown signal that triggers the ShutdownToken.
+/// This propagates cancellation to all active WS handlers so they can
+/// drain pending messages before closing.
+async fn shutdown_signal(shutdown_token: agent2ssh::ws_drain::ShutdownToken) {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
     };
@@ -116,6 +119,10 @@ async fn shutdown_signal() {
         _ = ctrl_c => {}
         _ = terminate => {}
     }
+
+    // T2-15: Broadcast shutdown to all WS handlers
+    shutdown_token.cancel().await;
+    tracing::info!("shutdown signal received, draining WS connections...");
 }
 
 #[cfg(unix)]
@@ -148,6 +155,12 @@ struct AppState {
     token: String,
     limiter: Arc<Mutex<ExecutionLimiter>>,
     session_input_buffers: Arc<Mutex<HashMap<Uuid, String>>>,
+    /// T2-15: Shutdown token for propagating graceful shutdown to WS handlers.
+    shutdown: agent2ssh::ws_drain::ShutdownToken,
+    /// T2-15: Registry for draining active WS connections on shutdown.
+    drain_registry: agent2ssh::ws_drain::DrainRegistry,
+    /// T2-16: Prompt waiter for 2FA/OTP keyboard-interactive responses.
+    prompt_waiter: agent2ssh::prompt_waiter::PromptWaiter,
 }
 
 fn load_or_create_daemon_token(config_dir: &std::path::Path) -> anyhow::Result<String> {
@@ -2576,6 +2589,58 @@ async fn ssh_sync_export_handler(
     ))
 }
 
+// ── T2-16: Prompt waiter endpoints ───────────────────────────────────────────
+
+/// T2-16: List all pending 2FA/OTP prompts that are waiting for external responses.
+async fn get_pending_prompts(
+    State(s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    let nonces = s.prompt_waiter.pending_nonces_blocking();
+    let prompts: Vec<serde_json::Value> = nonces
+        .iter()
+        .map(|nonce| {
+            let text = s.prompt_waiter.prompt_text_blocking(nonce).unwrap_or_default();
+            serde_json::json!({
+                "nonce": nonce,
+                "prompt_text": text,
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({
+        "pending": prompts,
+        "count": prompts.len(),
+    })))
+}
+
+/// T2-16: Respond to a pending 2FA/OTP prompt by nonce.
+#[derive(serde::Deserialize)]
+struct RespondPromptRequest {
+    nonce: String,
+    answer: String,
+}
+
+async fn post_respond_prompt(
+    State(s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
+    Json(req): Json<RespondPromptRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    s.prompt_waiter
+        .respond_blocking(&req.nonce, req.answer)
+        .map_err(|e| {
+            err(
+                StatusCode::NOT_FOUND,
+                format!("failed to respond to prompt: {e}"),
+            )
+        })?;
+    Ok(Json(serde_json::json!({
+        "status": "responded",
+        "nonce": req.nonce,
+    })))
+}
+
 // ── WebSocket interactive terminal ───────────────────────────────────────────
 
 #[derive(serde::Deserialize)]
@@ -2665,11 +2730,42 @@ async fn handle_terminal(
         }
     });
 
+    // T2-15: Register this WS connection for drain tracking
+    let drain_handle = state.drain_registry.register().await;
+    let shutdown_token = state.shutdown.clone();
+
     let (mut ws_tx, mut ws_rx) = socket.split();
     let mut pending_input = String::new();
 
     loop {
         tokio::select! {
+            // T2-15: Listen for shutdown signal — enter drain mode
+            _ = shutdown_token.cancelled() => {
+                // Stop accepting new input, flush pending output, then close
+                // Any pending WS sends are tracked by drain_handle
+                let _ = ws_tx.send(Message::Text(
+                    serde_json::json!({"type":"shutdown","message":"server shutting down"}).to_string()
+                )).await;
+                // Drain: wait briefly for any in-flight terminal events
+                while let Ok(Some(event)) = tokio::time::timeout(
+                    std::time::Duration::from_millis(500),
+                    event_rx.recv(),
+                ).await {
+                    match event {
+                        TerminalEvent::Output(data) => {
+                            drain_handle.begin_send().await;
+                            if ws_tx.send(Message::Binary(data)).await.is_err() {
+                                break;
+                            }
+                            drain_handle.end_send().await;
+                        }
+                        TerminalEvent::Error(_) | TerminalEvent::Closed => break,
+                        _ => {}
+                    }
+                }
+                let _ = ws_tx.send(Message::Close(None)).await;
+                break;
+            }
             event = event_rx.recv() => {
                 match event {
                     Some(TerminalEvent::Connected(info)) => {
@@ -2685,9 +2781,12 @@ async fn handle_terminal(
                         )).await;
                     }
                     Some(TerminalEvent::Output(data)) => {
+                        drain_handle.begin_send().await;
                         if ws_tx.send(Message::Binary(data)).await.is_err() {
+                            drain_handle.end_send().await;
                             break;
                         }
+                        drain_handle.end_send().await;
                     }
                     Some(TerminalEvent::Error(error)) => {
                         let _ = ws_tx.send(Message::Text(
@@ -2782,6 +2881,8 @@ async fn handle_terminal(
 
     let _ = terminal_tx.send(TerminalCommand::Close);
     let _ = event_task.await;
+    // T2-15: Unregister from drain registry (connection closed normally)
+    drain_handle.unregister().await;
     state.limiter.lock().await.unregister_session(&terminal_id);
 }
 
@@ -3032,8 +3133,54 @@ async fn exec_stream(
         let mut stream_rx =
             spawn_embedded_exec_stream(host, req.command.clone(), req.stdin.clone(), timeout_secs);
         let mut code = None;
-        while let Some(event) = stream_rx.recv().await {
-            match event {
+
+        // T2-15: Register this WS connection for graceful drain on shutdown
+        let drain_handle = app_state.drain_registry.register().await;
+        let shutdown_token = app_state.shutdown.clone();
+
+        loop {
+            tokio::select! {
+                // T2-15: On shutdown, drain remaining output then close
+                _ = shutdown_token.cancelled() => {
+                    let mut s = socket.lock().await;
+                    let _ = s.send(Message::Text(
+                        serde_json::json!({"type":"shutdown"}).to_string(),
+                    )).await;
+                    // Drain remaining events with 500ms timeout
+                    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(500);
+                    while let Ok(Some(event)) = tokio::time::timeout_at(deadline, stream_rx.recv()).await {
+                        match event {
+                            EmbeddedExecStreamEvent::Stdout(data) => {
+                                drain_handle.begin_send().await;
+                                let mut s = socket.lock().await;
+                                let _ = s.send(Message::Text(
+                                    serde_json::json!({"type":"stdout","data":data}).to_string(),
+                                )).await;
+                                drain_handle.end_send().await;
+                            }
+                            EmbeddedExecStreamEvent::Stderr(data) => {
+                                drain_handle.begin_send().await;
+                                let mut s = socket.lock().await;
+                                let _ = s.send(Message::Text(
+                                    serde_json::json!({"type":"stderr","data":data}).to_string(),
+                                )).await;
+                                drain_handle.end_send().await;
+                            }
+                            EmbeddedExecStreamEvent::Exit(exit_code) => {
+                                code = exit_code;
+                            }
+                            _ => {}
+                        }
+                    }
+                    let _ = socket.lock().await.send(Message::Close(None)).await;
+                    break;
+                }
+                event = stream_rx.recv() => {
+                    let event = match event {
+                        Some(e) => e,
+                        None => break,
+                    };
+                    match event {
                 EmbeddedExecStreamEvent::Stdout(data) => {
                     publish_event(
                         EventType::ExecOutput,
@@ -3046,6 +3193,7 @@ async fn exec_stream(
                             "output_bytes": data.len(),
                         }),
                     );
+                    drain_handle.begin_send().await;
                     let mut s = socket.lock().await;
                     if s.send(Message::Text(
                         serde_json::json!({"type":"stdout","data":data}).to_string(),
@@ -3053,8 +3201,11 @@ async fn exec_stream(
                     .await
                     .is_err()
                     {
+                        drain_handle.end_send().await;
+                        drain_handle.unregister().await;
                         return;
                     }
+                    drain_handle.end_send().await;
                 }
                 EmbeddedExecStreamEvent::Stderr(data) => {
                     publish_event(
@@ -3068,6 +3219,7 @@ async fn exec_stream(
                             "output_bytes": data.len(),
                         }),
                     );
+                    drain_handle.begin_send().await;
                     let mut s = socket.lock().await;
                     if s.send(Message::Text(
                         serde_json::json!({"type":"stderr","data":data}).to_string(),
@@ -3075,23 +3227,31 @@ async fn exec_stream(
                     .await
                     .is_err()
                     {
+                        drain_handle.end_send().await;
+                        drain_handle.unregister().await;
                         return;
                     }
+                    drain_handle.end_send().await;
                 }
                 EmbeddedExecStreamEvent::Error(error) => {
+                    drain_handle.begin_send().await;
                     let mut s = socket.lock().await;
                     let _ = s
                         .send(Message::Text(
                             serde_json::json!({"type":"error","error":error}).to_string(),
                         ))
                         .await;
+                    drain_handle.end_send().await;
                 }
                 EmbeddedExecStreamEvent::Exit(exit_code) => {
                     code = exit_code;
                     break;
                 }
+                    }
+                }
             }
         }
+        drain_handle.unregister().await;
         let duration_ms = started.elapsed().as_millis();
         let completed_host = req.host.clone();
         let completed_command = req.command.clone();
@@ -3218,6 +3378,9 @@ mod tests {
             token: "test-token".into(),
             limiter: Arc::new(tokio::sync::Mutex::new(ExecutionLimiter::new(config))),
             session_input_buffers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            shutdown: agent2ssh::ws_drain::ShutdownToken::new(),
+            drain_registry: agent2ssh::ws_drain::DrainRegistry::new(),
+            prompt_waiter: agent2ssh::prompt_waiter::PromptWaiter::new(),
         }
     }
 
@@ -3726,11 +3889,21 @@ async fn main() -> anyhow::Result<()> {
     std::fs::write(&pid_path, std::process::id().to_string())?;
 
     let limits = load_execution_limits()?;
+    // T2-16: Initialize the global prompt waiter for 2FA/OTP keyboard-interactive prompts
+    let prompt_waiter = agent2ssh::prompt_waiter::PromptWaiter::new();
+    agent2ssh::embedded_ssh::set_prompt_waiter(prompt_waiter.clone());
     let state = AppState {
         token: token.clone(),
         limiter: Arc::new(Mutex::new(ExecutionLimiter::new(limits))),
         session_input_buffers: Arc::new(Mutex::new(HashMap::new())),
+        shutdown: agent2ssh::ws_drain::ShutdownToken::new(),
+        drain_registry: agent2ssh::ws_drain::DrainRegistry::new(),
+        prompt_waiter,
     };
+
+    // T2-15: Clone shutdown token & drain registry before state is moved into axum Router
+    let shutdown_clone = state.shutdown.clone();
+    let drain_registry = state.drain_registry.clone();
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -3805,6 +3978,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/events/stream", get(events_stream))
         .route("/ssh-sync/diff", get(ssh_sync_diff))
         .route("/ssh-sync/export", post(ssh_sync_export_handler))
+        // T2-16: Prompt waiter endpoints for 2FA/OTP responses
+        .route("/prompts/pending", get(get_pending_prompts))
+        .route("/prompts/respond", post(post_respond_prompt))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
@@ -3826,13 +4002,22 @@ async fn main() -> anyhow::Result<()> {
         })),
     );
     let listener = TcpListener::bind(addr).await?;
-    // Graceful shutdown (I2): on Ctrl-C / SIGTERM, stop accepting and let in-flight
-    // requests drain, then fall through to clean up the PID file. Previously the
-    // cleanup only ran if `serve` returned, so a signalled daemon left a stale
-    // `daemon.pid` that misled health checks.
+    // T2-15: Graceful shutdown with WS drain: on Ctrl-C / SIGTERM,
+    // 1. Stop accepting new HTTP connections (axum graceful shutdown)
+    // 2. Broadcast shutdown to all active WS handlers (ShutdownToken)
+    // 3. WS handlers drain pending messages, then send Close frames
+    // 4. DrainRegistry waits for all connections to finish draining
+    // 5. PID file cleaned up
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown_signal(shutdown_clone))
         .await?;
+
+    // T2-15: Wait for active WS connections to drain (max 5 seconds)
+    let drained = drain_registry.drain_all(std::time::Duration::from_secs(5)).await;
+    if drained > 0 {
+        tracing::info!("drained {} WS connections", drained);
+    }
+
     let _ = std::fs::remove_file(&pid_path);
     let _ = append_diagnostic_log(
         "info",

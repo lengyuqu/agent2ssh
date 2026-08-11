@@ -278,6 +278,20 @@ pub fn collect_sync_files() -> Result<Vec<WebDavSyncFile>> {
         if !path.is_file() {
             continue;
         }
+
+        // T1-4: Use CiphertextStore for secrets.enc to enforce read-only access
+        // at the type level — the sync fingerprint path must never write secrets.
+        if *rel == "secrets.enc" {
+            let store = crate::secrets::CiphertextStore::load()?;
+            let bytes = store.raw_bytes();
+            files.push(WebDavSyncFile {
+                path: (*rel).to_string(),
+                bytes: bytes.len() as u64,
+                sha256: hash_bytes(bytes),
+            });
+            continue;
+        }
+
         let bytes =
             fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
         files.push(WebDavSyncFile {

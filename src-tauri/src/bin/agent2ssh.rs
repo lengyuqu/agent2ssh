@@ -408,6 +408,9 @@ enum HostCommands {
         /// Owner label for grouping hosts
         #[arg(long)]
         owner: Option<String>,
+        /// Command to execute on the remote shell immediately after connect
+        #[arg(long)]
+        init_command: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -1104,6 +1107,7 @@ async fn main() -> Result<()> {
                 env,
                 role,
                 owner,
+                init_command,
                 json,
             } => {
                 let risk_override = risk_override.and_then(|s| match s.to_lowercase().as_str() {
@@ -1128,6 +1132,7 @@ async fn main() -> Result<()> {
                     env: clean_optional(env),
                     role: clean_optional(role),
                     owner: clean_optional(owner),
+                    init_command: clean_optional(init_command),
                 })?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&profile)?);

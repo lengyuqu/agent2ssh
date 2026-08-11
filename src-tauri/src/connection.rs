@@ -8,7 +8,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tokio::sync::Mutex;
+use tokio::sync::{watch, Mutex};
 use uuid::Uuid;
 
 use crate::{
@@ -29,6 +29,13 @@ const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(300);
 /// Timeout (seconds) for a reconnect attempt.
 const RECONNECT_TIMEOUT_SECS: u64 = 30;
 
+/// T2-11: Connection drop signal.
+/// When a connection is dropped, the watch channel sends `false` to all
+/// subscribers, allowing blocking tasks (exec, SFTP, terminal) to cancel
+/// their pending operations on that connection.
+pub type DropSignal = watch::Sender<bool>;
+pub type DropReceiver = watch::Receiver<bool>;
+
 /// Health/liveness bookkeeping for one retained connection (K5).
 #[derive(Default)]
 struct ConnectionHealth {
@@ -47,13 +54,26 @@ struct ConnectionHealth {
 pub struct RetainedConnection {
     session: Arc<StdMutex<Option<Session>>>,
     health: Arc<StdMutex<ConnectionHealth>>,
+    /// T2-11: Drop signal — sends `false` when connection drops.
+    /// Blocking tasks subscribe to this to cancel their pending operations.
+    drop_tx: DropSignal,
 }
 
 type ConnectionHandleSnapshot = (
     String,
     Arc<StdMutex<Option<Session>>>,
     Arc<StdMutex<ConnectionHealth>>,
+    DropSignal,
 );
+
+/// T2-11: Get a drop receiver for a specific host.
+/// Returns `None` if no retained connection exists.
+/// The receiver yields `false` when the connection drops, allowing
+/// blocking tasks to cancel their pending operations.
+pub async fn subscribe_drop(host_name: &str) -> Option<DropReceiver> {
+    let store = connections().lock().await;
+    store.get(host_name).map(|conn| conn.drop_tx.subscribe())
+}
 
 // Process-local connection stores, delegated to AppState (P2 #5).
 static SUPERVISOR_STARTED: AtomicBool = AtomicBool::new(false);
@@ -154,6 +174,9 @@ pub async fn connect_host(host_name: &str) -> Result<()> {
         .activate()
         .map_err(|e| anyhow!("lifecycle activate failed: {e}"))?;
 
+    // T2-11: Create drop signal channel (true = connected, false = dropped)
+    let (drop_tx, _drop_rx) = watch::channel(true);
+
     connections().lock().await.insert(
         host.name.clone(),
         RetainedConnection {
@@ -162,6 +185,7 @@ pub async fn connect_host(host_name: &str) -> Result<()> {
                 healthy: true,
                 ..Default::default()
             })),
+            drop_tx,
         },
     );
 
@@ -202,12 +226,14 @@ async fn supervise_all() {
         let store = connections().lock().await;
         store
             .iter()
-            .map(|(name, conn)| (name.clone(), conn.session.clone(), conn.health.clone()))
+            .map(|(name, conn)| {
+                (name.clone(), conn.session.clone(), conn.health.clone(), conn.drop_tx.clone())
+            })
             .collect()
     };
 
-    for (name, session, health) in handles {
-        supervise_one(&name, session, health).await;
+    for (name, session, health, drop_tx) in handles {
+        supervise_one(&name, session, health, drop_tx).await;
     }
 }
 
@@ -215,6 +241,7 @@ async fn supervise_one(
     name: &str,
     session: Arc<StdMutex<Option<Session>>>,
     health: Arc<StdMutex<ConnectionHealth>>,
+    drop_tx: DropSignal,
 ) {
     // Probe liveness with a keepalive in a blocking task.
     let probe_session = session.clone();
@@ -247,6 +274,8 @@ async fn supervise_one(
         Err(e) => format!("probe task failed: {e}"),
         Ok(Ok(())) => unreachable!(),
     };
+    // T2-11: Broadcast connection drop to all subscribers
+    let _ = drop_tx.send(false);
     let attempt_due = {
         let Ok(mut h) = health.lock() else { return };
         h.healthy = false;
@@ -281,6 +310,8 @@ async fn supervise_one(
             if let Ok(mut guard) = session.lock() {
                 *guard = Some(s);
             }
+            // T2-11: Broadcast connection restored
+            let _ = drop_tx.send(true);
             finish_reconnect(&health, Ok(()));
         }
         Ok(Err(e)) => finish_reconnect(&health, Err(e.to_string())),
@@ -333,5 +364,26 @@ mod tests {
         assert_eq!(backoff_delay(3), RECONNECT_BACKOFF_BASE * 4);
         // Far out, it saturates at the max rather than overflowing.
         assert_eq!(backoff_delay(60), RECONNECT_BACKOFF_MAX);
+    }
+
+    #[tokio::test]
+    async fn t2_11_drop_signal_propagates() {
+        // T2-11: Verify that a watch channel can broadcast drop and restore
+        let (tx, mut rx) = watch::channel(true);
+        assert_eq!(*rx.borrow(), true, "initial state should be connected");
+
+        // Simulate connection drop
+        let _ = tx.send(false);
+        assert_eq!(*rx.borrow(), false, "should reflect drop after send(false)");
+
+        // Simulate reconnection
+        let _ = tx.send(true);
+        assert_eq!(*rx.borrow(), true, "should reflect restore after send(true)");
+    }
+
+    #[tokio::test]
+    async fn t2_11_subscribe_drop_returns_none_for_unknown_host() {
+        let receiver = subscribe_drop("nonexistent-host-xyz").await;
+        assert!(receiver.is_none(), "should return None for unknown host");
     }
 }

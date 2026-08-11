@@ -518,6 +518,7 @@ fn test_host_profile_tags_serialization() {
         env: Some("prod".to_string()),
         role: Some("web".to_string()),
         owner: Some("platform".to_string()),
+        init_command: None,
     };
 
     let json = serde_json::to_string(&host).unwrap();

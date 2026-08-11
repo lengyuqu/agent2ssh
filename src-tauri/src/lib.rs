@@ -15,6 +15,7 @@ pub mod forward;
 pub mod gate;
 pub mod health;
 pub mod integrate;
+pub mod jump_chain;
 pub mod keys;
 pub mod lifecycle;
 pub mod limits;
@@ -33,6 +34,8 @@ pub mod store;
 pub mod telemetry;
 pub mod types;
 pub mod webdav_sync;
+pub mod ws_drain;
+pub mod prompt_waiter;
 
 #[cfg(feature = "tauri")]
 pub mod tauri_commands;

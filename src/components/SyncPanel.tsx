@@ -8,7 +8,7 @@ import {
   UploadCloud,
   XCircle,
 } from "lucide-react";
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
 import type { WebDavSyncConfig, WebDavSyncStatus } from "../types";
@@ -50,6 +50,19 @@ export default function SyncPanel() {
   const [status, setStatus] = useState<WebDavSyncStatus | null>(null);
   const [busy, setBusy] = useState<SyncAction | null>(null);
 
+  // T1-7: _setLocally tracks whether the form was edited locally and not
+  // yet confirmed by the server. If the component re-mounts and fetches
+  // stale data before the save completes, we discard the stale data to
+  // prevent overwriting the user's unsaved edits.
+  const formDirtyRef = useRef(false);
+  const savingRef = useRef(false);
+
+  // T1-6: Sync check request coalescing — multiple rapid refreshStatus()
+  // calls (e.g. from useEffect + button + auto-sync) are merged into at most
+  // one in-flight request. On network error, the previous status is retained
+  // instead of being cleared, preventing UI flicker.
+  const statusPromiseRef = useRef<Promise<WebDavSyncStatus> | null>(null);
+
   const isBusy = busy !== null;
   const canTest = useMemo(
     () => form.url.trim().length > 0 && form.remotePath.trim().length > 0,
@@ -64,8 +77,12 @@ export default function SyncPanel() {
         api.getWebDavSyncConfig(),
         api.getWebDavSyncStatus(),
       ]);
-      setForm(config);
-      setPassword("");
+      // T1-7: Only apply server config if we're not in the middle of saving
+      // or if the form hasn't been locally edited.
+      if (!savingRef.current && !formDirtyRef.current) {
+        setForm(config);
+        setPassword("");
+      }
       setStatus(nextStatus);
     } catch (err) {
       showToast("error", String(err));
@@ -79,11 +96,24 @@ export default function SyncPanel() {
     load();
   }, []);
 
+  // T1-6: Coalesced status refresh — N rapid calls collapse into one request.
   async function refreshStatus() {
-    setBusy("refresh");
+    // If a refresh is already in flight, piggyback on it instead of firing a new request.
+    if (statusPromiseRef.current) {
+      return statusPromiseRef.current;
+    }
+    setBusy((prev) => prev ?? "refresh");
+    const promise = api.getWebDavSyncStatus().finally(() => {
+      statusPromiseRef.current = null;
+    });
+    statusPromiseRef.current = promise;
     try {
-      setStatus(await api.getWebDavSyncStatus());
+      const nextStatus = await promise;
+      // T1-6: On success, update status.
+      setStatus(nextStatus);
     } catch (err) {
+      // T1-6: On network error, retain previous status — don't clear it.
+      // Only show toast; the stale status is better than no status.
       showToast("error", String(err));
       reportError("sync-panel", "refresh webdav sync status failed", err);
     } finally {
@@ -94,6 +124,8 @@ export default function SyncPanel() {
   async function save(event?: FormEvent) {
     event?.preventDefault();
     setBusy("save");
+    savingRef.current = true;
+    formDirtyRef.current = false;
     try {
       const saved = await api.setWebDavSyncConfig({
         enabled: form.enabled,
@@ -107,9 +139,13 @@ export default function SyncPanel() {
       setStatus(await api.getWebDavSyncStatus());
       showToast("success", t("WebDAV sync settings saved."));
     } catch (err) {
+      // T1-7: On save failure, mark the form as dirty so a subsequent
+      // load doesn't overwrite the user's edits.
+      formDirtyRef.current = true;
       showToast("error", String(err));
       reportError("sync-panel", "save webdav sync config failed", err);
     } finally {
+      savingRef.current = false;
       setBusy(null);
     }
   }
@@ -142,6 +178,12 @@ export default function SyncPanel() {
     }
   }
 
+  // T1-7: Mark form as dirty when user edits any field.
+  function updateForm(updater: (current: WebDavSyncConfig) => WebDavSyncConfig) {
+    formDirtyRef.current = true;
+    setForm(updater);
+  }
+
   const statusSuccess = status?.lastSuccess;
 
   return (
@@ -164,7 +206,7 @@ export default function SyncPanel() {
               className="size-4 accent-primary"
               checked={form.enabled}
               onChange={(event) =>
-                setForm((current) => ({ ...current, enabled: event.target.checked }))
+                updateForm((current) => ({ ...current, enabled: event.target.checked }))
               }
             />
             <span className="font-medium">{t("Enable WebDAV sync")}</span>
@@ -178,7 +220,7 @@ export default function SyncPanel() {
               <Input
                 value={form.url}
                 onChange={(event) =>
-                  setForm((current) => ({ ...current, url: event.target.value }))
+                  updateForm((current) => ({ ...current, url: event.target.value }))
                 }
                 placeholder="https://example.com/dav"
                 disabled={isBusy}
@@ -192,7 +234,7 @@ export default function SyncPanel() {
               <Input
                 value={form.username ?? ""}
                 onChange={(event) =>
-                  setForm((current) => ({ ...current, username: event.target.value }))
+                  updateForm((current) => ({ ...current, username: event.target.value }))
                 }
                 placeholder={t("Optional")}
                 disabled={isBusy}
@@ -223,7 +265,7 @@ export default function SyncPanel() {
               <Input
                 value={form.remotePath}
                 onChange={(event) =>
-                  setForm((current) => ({ ...current, remotePath: event.target.value }))
+                  updateForm((current) => ({ ...current, remotePath: event.target.value }))
                 }
                 placeholder="agent2ssh/agent2ssh-sync.json"
                 disabled={isBusy}

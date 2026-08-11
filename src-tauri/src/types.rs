@@ -78,6 +78,11 @@ pub struct HostProfile {
     /// Owner label for grouping hosts by team or person.
     #[serde(default)]
     pub owner: Option<String>,
+    /// Optional command to execute on the remote shell immediately after
+    /// connect (e.g. `cd /app && source env.sh`). Mirrors OpenSSH's
+    /// `RemoteCommand` / rssh's `init_command`.
+    #[serde(default)]
+    pub init_command: Option<String>,
 }
 
 pub fn default_host_group() -> String {

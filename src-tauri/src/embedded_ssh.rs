@@ -47,7 +47,7 @@ pub enum TerminalEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct TrustedHostFingerprint {
+pub struct TrustedHostFingerprint {
     host: String,
     address: String,
     host_key_algorithm: String,
@@ -310,6 +310,38 @@ pub fn trust_host_fingerprint_core(
         },
     );
     save_known_host_fingerprints_unlocked(&trusted)
+}
+
+/// T2-13: Remove a known_hosts entry by host profile name or address.
+///
+/// Removes the trusted fingerprint entry matching the given host. The `host_name`
+/// can be either a profile name or a `host:port` identity string.
+/// Returns `true` if an entry was removed, `false` if no matching entry was found.
+pub fn remove_known_host_core(host_name_or_identity: &str) -> Result<bool> {
+    ensure_config_dir()?;
+    let _guard = crate::store::lock_config_file(".known_hosts.lock")?;
+
+    // Try to resolve as a host profile name first — if found, use its identity
+    let identity = match resolve_host_profile(host_name_or_identity) {
+        Ok(host) => known_host_identity(&host),
+        Err(_) => {
+            // Not a profile name — treat the input as a raw identity (host:port)
+            host_name_or_identity.to_string()
+        }
+    };
+
+    let mut trusted = load_known_host_fingerprints_unlocked()?;
+    let removed = trusted.remove(&identity).is_some();
+    if removed {
+        save_known_host_fingerprints_unlocked(&trusted)?;
+    }
+    Ok(removed)
+}
+
+/// T2-13: List all known_hosts entries.
+pub fn list_known_hosts_core() -> Result<Vec<TrustedHostFingerprint>> {
+    let trusted = load_known_host_fingerprints_unlocked()?;
+    Ok(trusted.into_values().collect())
 }
 
 fn default_username() -> String {
@@ -720,6 +752,15 @@ fn connect_embedded_ssh_inner(
         ));
     }
 
+    // T2-12: Resolve jump chain and detect cycles before connecting.
+    // Only check at the top-level call (depth 0) to avoid redundant checks
+    // for each recursive jump hop — the chain is validated once upfront.
+    if depth == 0 {
+        if let Err(e) = crate::jump_chain::resolve_jump_chain(host) {
+            return Err(anyhow!("jump chain validation failed: {e}"));
+        }
+    }
+
     let via_jump = host
         .jump_host
         .as_deref()
@@ -779,18 +820,106 @@ pub fn connect_embedded_ssh(host: &HostProfile, timeout_secs: u64) -> Result<Ses
     connect_embedded_ssh_inner(host, timeout_secs, 0)
 }
 
-struct PasswordPrompter<'a> {
-    password: &'a str,
+/// T2-10: Multi-round keyboard-interactive prompter for 2FA chain challenges.
+///
+/// The server may send multiple rounds of challenges — e.g. first a password
+/// prompt, then a TOTP/OTP prompt. The `KeyboardInteractivePrompter` handles
+/// this by distinguishing password-like prompts from token/OTP prompts and
+/// cycling through a list of candidate responses.
+/// T2-16: Optional prompt waiter for external 2FA/OTP responses.
+///
+/// When set, the prompter will register non-password prompts with the waiter
+/// and block until an external responder supplies the answer via the daemon
+/// HTTP API. This allows interactive 2FA challenges to be surfaced to the user.
+static PROMPT_WAITER: std::sync::OnceLock<crate::prompt_waiter::PromptWaiter> =
+    std::sync::OnceLock::new();
+
+/// T2-16: Set the global prompt waiter (called during daemon initialization).
+pub fn set_prompt_waiter(waiter: crate::prompt_waiter::PromptWaiter) {
+    let _ = PROMPT_WAITER.set(waiter);
 }
 
-impl KeyboardInteractivePrompt for PasswordPrompter<'_> {
+struct KeyboardInteractivePrompter<'a> {
+    password: &'a str,
+    /// Additional credentials for 2FA rounds (e.g. TOTP token, OTP backup code).
+    /// These are tried in order for non-password prompts.
+    extra_credentials: &'a [String],
+    /// Round counter — incremented each time `prompt` is called.
+    round: u32,
+}
+
+impl KeyboardInteractivePrompt for KeyboardInteractivePrompter<'_> {
     fn prompt<'a>(
         &mut self,
         _username: &str,
         _instructions: &str,
         prompts: &[Prompt<'a>],
     ) -> Vec<String> {
-        prompts.iter().map(|_| self.password.to_string()).collect()
+        self.round += 1;
+        prompts
+            .iter()
+            .map(|p| {
+                let prompt_text = p.text.to_lowercase();
+                // Detect password-like prompts (password, passphrase, etc.)
+                if prompt_text.contains("password") || prompt_text.contains("passphrase") {
+                    return self.password.to_string();
+                }
+
+                // T2-16: If a global PromptWaiter is registered, try to
+                // surface non-password prompts (OTP, TOTP, token, etc.)
+                // to an external responder via the blocking channel.
+                if let Some(waiter) = PROMPT_WAITER.get() {
+                    if let Ok((guard, rx)) = waiter.register_blocking(p.text.as_ref()) {
+                        let _ = crate::diagnostics::append_diagnostic_log(
+                            "info",
+                            "embedded_ssh",
+                            "keyboard-interactive prompt registered",
+                            Some(serde_json::json!({
+                                "nonce": guard.nonce(),
+                                "prompt_text": p.text,
+                                "round": self.round,
+                            })),
+                        );
+                        // Block for up to 120 seconds for an external response
+                        match rx.recv_timeout(std::time::Duration::from_secs(120)) {
+                            Ok(answer) => {
+                                let _ = crate::diagnostics::append_diagnostic_log(
+                                    "info",
+                                    "embedded_ssh",
+                                    "keyboard-interactive prompt answered",
+                                    Some(serde_json::json!({
+                                        "nonce": guard.nonce(),
+                                        "answer_length": answer.len(),
+                                    })),
+                                );
+                                return answer;
+                            }
+                            Err(_) => {
+                                let _ = crate::diagnostics::append_diagnostic_log(
+                                    "warn",
+                                    "embedded_ssh",
+                                    "keyboard-interactive prompt timed out",
+                                    Some(serde_json::json!({
+                                        "nonce": guard.nonce(),
+                                        "timeout_secs": 120,
+                                    })),
+                                );
+                                // Fall through to extra_credentials fallback
+                            }
+                        }
+                    }
+                }
+
+                // For non-password prompts (OTP, token, code, etc.), try extra credentials
+                // Round 1 non-password -> first extra credential, round 2 -> second, etc.
+                let extra_idx = (self.round as usize).saturating_sub(1);
+                if extra_idx < self.extra_credentials.len() {
+                    return self.extra_credentials[extra_idx].clone();
+                }
+                // If no extra credential available for this round, return empty
+                String::new()
+            })
+            .collect()
     }
 }
 
@@ -841,18 +970,38 @@ fn authenticate(session: &Session, host: &HostProfile, username: &str) -> Result
         }
 
         if !session.authenticated() {
-            let mut prompter = PasswordPrompter { password };
-            match session.userauth_keyboard_interactive(username, &mut prompter) {
-                Ok(()) if session.authenticated() => return Ok("keyboard-interactive".into()),
-                Ok(()) => failures
-                    .push("keyboard-interactive returned without authenticating".to_string()),
-                Err(error) => {
-                    let label = if methods.contains("keyboard-interactive") {
-                        "keyboard-interactive"
-                    } else {
-                        "keyboard-interactive fallback"
-                    };
-                    failures.push(format!("{label}: {error}"));
+            // T2-10: Use multi-round keyboard-interactive prompter for 2FA support
+            let extra_creds: Vec<String> = Vec::new(); // Future: could be populated from host config
+            let mut prompter = KeyboardInteractivePrompter {
+                password,
+                extra_credentials: &extra_creds,
+                round: 0,
+            };
+            // T2-10: Loop to handle multi-round keyboard-interactive (2FA chains)
+            loop {
+                match session.userauth_keyboard_interactive(username, &mut prompter) {
+                    Ok(()) if session.authenticated() => return Ok("keyboard-interactive".into()),
+                    Ok(()) => {
+                        // Not yet authenticated — might need more rounds
+                        if prompter.round >= 5 {
+                            failures.push(
+                                "keyboard-interactive: exceeded 5 rounds without authentication"
+                                    .to_string(),
+                            );
+                            break;
+                        }
+                        // Try again if the server hasn't finished the challenge chain
+                        continue;
+                    }
+                    Err(error) => {
+                        let label = if methods.contains("keyboard-interactive") {
+                            "keyboard-interactive"
+                        } else {
+                            "keyboard-interactive fallback"
+                        };
+                        failures.push(format!("{label}: {error}"));
+                        break;
+                    }
                 }
             }
         }
@@ -882,16 +1031,43 @@ fn authenticate(session: &Session, host: &HostProfile, username: &str) -> Result
         return Ok("publickey_file".into());
     }
 
-    let mut agent = session.agent()?;
-    agent.connect()?;
-    agent.list_identities()?;
-    let identity = agent
-        .identities()?
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow!("no SSH key_path, password, or ssh-agent identity available"))?;
-    agent.userauth(username, &identity)?;
-    Ok("agent".into())
+    // T2-9: Try SSH agent first (includes Windows Pageant via ssh2's agent connector)
+    if let Ok(mut agent) = session.agent() {
+        if agent.connect().is_ok() && agent.list_identities().is_ok() {
+            if let Some(identity) = agent.identities().ok().into_iter().flatten().next() {
+                if agent.userauth(username, &identity).is_ok() && session.authenticated() {
+                    return Ok("agent".into());
+                }
+            }
+        }
+    }
+
+    // T2-9: Fallback to default key files (~/.ssh/id_rsa, id_ed25519, id_ecdsa)
+    if let Some(home) = dirs::home_dir() {
+        let ssh_dir = home.join(".ssh");
+        let default_keys = [
+            ("id_ed25519", "publickey_default_ed25519"),
+            ("id_rsa", "publickey_default_rsa"),
+            ("id_ecdsa", "publickey_default_ecdsa"),
+        ];
+        for (filename, label) in &default_keys {
+            let key_file = ssh_dir.join(filename);
+            if key_file.exists() {
+                if session
+                    .userauth_pubkey_file(username, None, &key_file, None)
+                    .is_ok()
+                    && session.authenticated()
+                {
+                    return Ok((*label).into());
+                }
+            }
+        }
+    }
+
+    Err(anyhow!(
+        "SSH authentication failed for '{}': no key_path, password, ssh-agent identity, or default key (~/.ssh/id_rsa, id_ed25519, id_ecdsa) succeeded",
+        host.name
+    ))
 }
 
 fn connection_info(
@@ -968,6 +1144,28 @@ fn run_terminal(
         Some((initial_cols.max(1), initial_rows.max(1), 0, 0)),
     )?;
     channel.shell()?;
+
+    // T1-1: execute init_command on the remote shell right after connect.
+    if let Some(init_cmd) = host
+        .init_command
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let _ = crate::diagnostics::append_diagnostic_log(
+            "info",
+            "embedded_ssh_terminal",
+            "executing init_command",
+            Some(serde_json::json!({
+                "host": host.name,
+                "init_command": init_cmd,
+            })),
+        );
+        let line = format!("{}\n", init_cmd);
+        let _ = channel.write_all(line.as_bytes());
+        let _ = channel.flush();
+    }
+
     session.set_blocking(false);
 
     let mut buffer = [0u8; 8192];
@@ -1042,6 +1240,7 @@ mod tests {
             env: None,
             role: None,
             owner: None,
+            init_command: None,
         }
     }
 
@@ -1180,5 +1379,62 @@ mod tests {
         .unwrap();
         stream.write_all(b"ping").unwrap();
         done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn t2_13_remove_known_host_by_identity() {
+        let config_dir =
+            std::env::temp_dir().join(format!("agent2ssh-known-hosts-rm-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::env::set_var("AGENT2SSH_CONFIG_DIR", &config_dir);
+
+        let host = test_host();
+        trust_or_verify_host_fingerprint(&host, "example.internal:22", "ssh-ed25519", "SHA256:abc")
+            .unwrap();
+
+        // Verify it exists
+        let trusted = load_known_host_fingerprints_unlocked().unwrap();
+        assert!(trusted.contains_key("example.internal:22"));
+
+        // T2-13: Remove by identity string
+        let removed = remove_known_host_core("example.internal:22").unwrap();
+        assert!(removed, "should return true when entry was removed");
+
+        // Verify it's gone
+        let trusted = load_known_host_fingerprints_unlocked().unwrap();
+        assert!(!trusted.contains_key("example.internal:22"));
+
+        // Removing again returns false
+        let removed_again = remove_known_host_core("example.internal:22").unwrap();
+        assert!(
+            !removed_again,
+            "should return false when no entry was found"
+        );
+
+        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&config_dir);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn t2_13_list_known_hosts() {
+        let config_dir = std::env::temp_dir().join(format!(
+            "agent2ssh-known-hosts-list-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::env::set_var("AGENT2SSH_CONFIG_DIR", &config_dir);
+
+        let host = test_host();
+        trust_or_verify_host_fingerprint(&host, "example.internal:22", "ssh-ed25519", "SHA256:xyz")
+            .unwrap();
+
+        let entries = list_known_hosts_core().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].fingerprint_sha256, "SHA256:xyz");
+
+        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&config_dir);
     }
 }

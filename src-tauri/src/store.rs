@@ -1256,6 +1256,7 @@ mod tests {
                 env: None,
                 role: None,
                 owner: None,
+                init_command: None,
             }],
             ..Default::default()
         };
@@ -1304,6 +1305,7 @@ mod tests {
             env: None,
             role: None,
             owner: None,
+            init_command: None,
         };
         save_config(&AppConfig {
             hosts: vec![host],

@@ -67,6 +67,52 @@ pub fn is_legacy_keyring_ref(value: &str) -> bool {
     value == LEGACY_KEYRING_REF
 }
 
+/// Read-only adapter over the encrypted secrets file.
+///
+/// Provides safe read-only access to the raw ciphertext bytes for sync
+/// fingerprint computation — the hash in `collect_sync_files()` only needs
+/// to detect whether the file changed, not decrypt it. By wrapping access
+/// in a type that has **no write method**, the compiler enforces that the
+/// sync fingerprint path can never accidentally mutate secrets.
+///
+/// Mirrors rssh's `CiphertextStore` pattern from `sync/metadata.rs`.
+pub struct CiphertextStore {
+    bytes: Vec<u8>,
+}
+
+impl CiphertextStore {
+    /// Load the raw encrypted bytes from disk. Does NOT decrypt — just reads
+    /// the file as-is so a SHA-256 fingerprint can be computed.
+    pub fn load() -> Result<Self> {
+        let path = secrets_path()?;
+        let bytes = if path.exists() {
+            std::fs::read(&path)
+                .with_context(|| format!("failed to read secrets file {}", path.display()))?
+        } else {
+            Vec::new()
+        };
+        Ok(Self { bytes })
+    }
+
+    /// Return the raw ciphertext bytes (may be empty if the file doesn't exist).
+    pub fn raw_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Compute a SHA-256 hex fingerprint of the ciphertext.
+    pub fn fingerprint(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(&self.bytes);
+        hex::encode(hasher.finalize())
+    }
+
+    /// Whether the secrets file exists on disk.
+    pub fn exists(&self) -> bool {
+        !self.bytes.is_empty()
+    }
+}
+
 /// Stable account name for a host profile's encrypted password.
 pub fn host_account(host_name: &str) -> String {
     format!("host:{host_name}")
@@ -762,6 +808,56 @@ mod tests {
 
         lock();
         std::env::remove_var("AGENT2SSH_SECRETS_BACKEND");
+        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── CiphertextStore read-only adapter ───────────────────────────────
+
+    #[test]
+    #[serial_test::serial]
+    fn ciphertext_store_loads_and_fingerprints_existing_file() {
+        let dir = std::env::temp_dir().join(format!("agent2ssh-cts-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("AGENT2SSH_CONFIG_DIR", &dir);
+
+        // No file yet — load succeeds with empty bytes.
+        let store = CiphertextStore::load().unwrap();
+        assert!(!store.exists());
+        assert!(store.raw_bytes().is_empty());
+        assert!(!store.fingerprint().is_empty());
+
+        // Write a file and reload.
+        std::fs::write(dir.join(SECRETS_FILE), b"fake-ciphertext").unwrap();
+        let store = CiphertextStore::load().unwrap();
+        assert!(store.exists());
+        assert_eq!(store.raw_bytes(), b"fake-ciphertext");
+
+        // Fingerprint is a stable SHA-256 hex string.
+        let fp = store.fingerprint();
+        assert_eq!(fp.len(), 64);
+        let fp2 = store.fingerprint();
+        assert_eq!(fp, fp2, "fingerprint must be deterministic");
+
+        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn ciphertext_store_fingerprint_changes_when_file_changes() {
+        let dir = std::env::temp_dir().join(format!("agent2ssh-cts2-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("AGENT2SSH_CONFIG_DIR", &dir);
+
+        std::fs::write(dir.join(SECRETS_FILE), b"content-a").unwrap();
+        let fp_a = CiphertextStore::load().unwrap().fingerprint();
+
+        std::fs::write(dir.join(SECRETS_FILE), b"content-b").unwrap();
+        let fp_b = CiphertextStore::load().unwrap().fingerprint();
+
+        assert_ne!(fp_a, fp_b, "fingerprint must change when content changes");
+
         std::env::remove_var("AGENT2SSH_CONFIG_DIR");
         let _ = std::fs::remove_dir_all(&dir);
     }

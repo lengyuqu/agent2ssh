@@ -2218,6 +2218,7 @@ pub fn import_ssh_config_core(path: Option<&str>) -> Result<Vec<HostProfile>> {
             env: None,
             role: None,
             owner: None,
+            init_command: None,
         });
     };
 
@@ -2536,6 +2537,7 @@ fn parse_ssh_config_file(path: &std::path::Path) -> Result<Vec<HostProfile>> {
             env: None,
             role: None,
             owner: None,
+            init_command: None,
         });
     };
 
@@ -2867,6 +2869,7 @@ mod tests {
                 env: Some("prod".into()),
                 role: Some("web".into()),
                 owner: Some("platform".into()),
+                init_command: None,
             },
             HostProfile {
                 name: "stage-db-1".into(),
@@ -2883,6 +2886,7 @@ mod tests {
                 env: Some("staging".into()),
                 role: Some("db".into()),
                 owner: Some("data".into()),
+                init_command: None,
             },
         ];
 
@@ -3033,6 +3037,7 @@ mod tests {
             env: None,
             role: None,
             owner: None,
+            init_command: None,
         }
     }
 
@@ -3151,6 +3156,7 @@ mod tests {
                 env: None,
                 role: None,
                 owner: None,
+            init_command: None,
             }],
         })
         .unwrap();
@@ -3194,6 +3200,7 @@ mod tests {
             env: None,
             role: None,
             owner: None,
+            init_command: None,
         })
         .unwrap();
 
@@ -3255,6 +3262,7 @@ mod tests {
                 env: None,
                 role: None,
                 owner: None,
+            init_command: None,
             }],
         };
         crate::store::save_config(&existing_config).unwrap();
@@ -3277,6 +3285,7 @@ mod tests {
                     env: None,
                     role: None,
                     owner: None,
+            init_command: None,
                 },
                 // Duplicate (same name, same host/port/user)
                 HostProfile {
@@ -3294,6 +3303,7 @@ mod tests {
                     env: None,
                     role: None,
                     owner: None,
+            init_command: None,
                 },
             ],
             risk_rules: Some("[rules]\n".into()),
@@ -3339,6 +3349,7 @@ mod tests {
                 env: Some("dev".into()),
                 role: None,
                 owner: None,
+            init_command: None,
             }],
         })
         .unwrap();
@@ -3359,6 +3370,7 @@ mod tests {
                 env: Some("prod".into()),
                 role: Some("web".into()),
                 owner: Some("ops".into()),
+                init_command: None,
             }],
             risk_rules: None,
             playbooks: None,
@@ -3755,6 +3767,7 @@ mod tests {
                 env: Some("prod".into()),
                 role: Some("web".into()),
                 owner: None,
+            init_command: None,
             },
             HostProfile {
                 name: "staging-db".into(),
@@ -3771,6 +3784,7 @@ mod tests {
                 env: None,
                 role: None,
                 owner: None,
+            init_command: None,
             },
         ];
         let output = export_to_ssh_config_format(&hosts);
@@ -3804,6 +3818,7 @@ mod tests {
             env: None,
             role: None,
             owner: None,
+            init_command: None,
         }];
         let output = export_to_ssh_config_format(&hosts);
         // Port 22 should be omitted (it's the default)
