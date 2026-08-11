@@ -1,10 +1,11 @@
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, path::PathBuf, sync::OnceLock};
+use std::{collections::HashMap, path::PathBuf};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+use crate::app_state::app_state;
 use crate::types::RiskLevel;
 
 /// Default TTL for approval requests in seconds (5 minutes).
@@ -85,20 +86,12 @@ pub enum ApprovalStatus {
     TimedOut,
 }
 
-struct ApprovalStore {
-    requests: HashMap<Uuid, ApprovalRequest>,
+pub struct ApprovalStore {
+    pub requests: HashMap<Uuid, ApprovalRequest>,
 }
 
-static APPROVALS: OnceLock<Mutex<ApprovalStore>> = OnceLock::new();
-
 fn store() -> &'static Mutex<ApprovalStore> {
-    APPROVALS.get_or_init(|| {
-        Mutex::new(
-            load_persisted_approval_store().unwrap_or_else(|_| ApprovalStore {
-                requests: HashMap::new(),
-            }),
-        )
-    })
+    &app_state().approvals
 }
 
 fn approval_persistence_enabled() -> bool {
@@ -109,7 +102,7 @@ fn approval_store_path() -> Result<PathBuf> {
     Ok(crate::store::config_dir()?.join("approvals.json"))
 }
 
-fn load_persisted_approval_store() -> Result<ApprovalStore> {
+pub fn load_persisted_approval_store() -> Result<ApprovalStore> {
     if !approval_persistence_enabled() {
         return Ok(ApprovalStore {
             requests: HashMap::new(),

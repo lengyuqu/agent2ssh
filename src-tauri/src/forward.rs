@@ -5,39 +5,90 @@ use std::{
     net::{IpAddr, Shutdown, TcpListener, TcpStream},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, OnceLock,
+        Arc, Mutex,
     },
     thread,
     time::Duration,
 };
-use tokio::sync::Mutex;
+use tokio::sync::Mutex as TokioMutex;
 use uuid::Uuid;
 
 use crate::{
+    app_state::app_state,
     embedded_ssh::connect_embedded_ssh,
     store::load_config,
     types::{ForwardDirection, ForwardRule, HostProfile},
 };
 
-struct ForwardHandle {
+/// Duration to wait for the worker thread to finish after signaling stop.
+/// If the worker doesn't join within this period, we proceed with forced
+/// cleanup to avoid hanging the caller.
+const DROP_GRACE_PERIOD: Duration = Duration::from_secs(2);
+
+pub struct ForwardHandle {
     rule: ForwardRule,
     stop: Arc<AtomicBool>,
+    /// For remote forwards, the worker holds a long-lived SSH session.
+    /// Storing it here allows Drop to call `session.disconnect()` before
+    /// joining the worker, sending SSH_MSG_DISCONNECT to the server so
+    /// it can clean up immediately rather than leaking a half-open session.
+    session: Arc<Mutex<Option<ssh2::Session>>>,
     worker: Option<thread::JoinHandle<()>>,
 }
 
 impl Drop for ForwardHandle {
     fn drop(&mut self) {
+        // 1. Signal the worker to stop accepting new connections.
         self.stop.store(true, Ordering::SeqCst);
+
+        // 2. Attempt graceful SSH disconnect before joining.
+        //    This sends SSH_MSG_DISCONNECT to the server, allowing it to
+        //    clean up the session immediately instead of waiting for TCP
+        //    keepalive timeout (which can be minutes).
+        if let Ok(mut guard) = self.session.lock() {
+            if let Some(session) = guard.take() {
+                // Set a short timeout for the disconnect call so we don't
+                // block indefinitely if the network is unreachable.
+                session.set_timeout(500);
+                let _ = session.disconnect(None, "forward closed", None);
+            }
+        }
+
+        // 3. Join the worker thread with a grace period.
+        //    If the worker doesn't finish within DROP_GRACE_PERIOD, we
+        //    proceed anyway — the thread will eventually exit on its own
+        //    when it notices the stop flag.
         if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+            let _ = worker.join_timeout(DROP_GRACE_PERIOD);
         }
     }
 }
 
-static FORWARDS: OnceLock<Mutex<HashMap<Uuid, ForwardHandle>>> = OnceLock::new();
+/// Extension trait to join a thread with a timeout.
+/// std::thread::JoinHandle doesn't have a built-in join_timeout, so we
+/// implement it by parking a helper thread.
+trait JoinHandleExt {
+    fn join_timeout(self, timeout: Duration);
+}
 
-fn forwards() -> &'static Mutex<HashMap<Uuid, ForwardHandle>> {
-    FORWARDS.get_or_init(|| Mutex::new(HashMap::new()))
+impl JoinHandleExt for thread::JoinHandle<()> {
+    fn join_timeout(self, timeout: Duration) {
+        // Use a channel to implement the timeout. If the worker doesn't
+        // finish within the timeout, we just drop the handle — the thread
+        // will continue running in the background and eventually exit when
+        // it checks the stop flag.
+        let (tx, rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let _ = self.join();
+            let _ = tx.send(());
+        });
+        let _ = rx.recv_timeout(timeout);
+    }
+}
+
+// Process-local forward store, delegated to AppState (P2 #5).
+fn forwards() -> &'static TokioMutex<HashMap<Uuid, ForwardHandle>> {
+    &app_state().forwards
 }
 
 fn resolve_host(name: &str) -> Result<HostProfile> {
@@ -80,13 +131,27 @@ pub async fn forward_add_core(
         target_port,
     };
 
+    // Reserve a lifecycle entry for this forward.
+    let lifecycle = crate::app_state::lifecycle();
+    let reservation = crate::lifecycle::LifecycleRegistry::reserve(
+        &lifecycle,
+        &rule.id.to_string(),
+        crate::app_state::ResourceKind::Forward,
+        crate::app_state::ResourceOwner::Headless(uuid::Uuid::new_v4()),
+    )
+    .map_err(|e| anyhow!("lifecycle reserve failed: {e}"))?;
+
     let stop = Arc::new(AtomicBool::new(false));
+    let session_slot: Arc<Mutex<Option<ssh2::Session>>> = Arc::new(Mutex::new(None));
     let worker_stop = stop.clone();
+    let worker_session_slot = session_slot.clone();
     let worker_rule = rule.clone();
     let worker = thread::spawn(move || {
         let result = match worker_rule.direction {
             ForwardDirection::Local => run_local_forward(host, worker_rule, worker_stop),
-            ForwardDirection::Remote => run_remote_forward(host, worker_rule, worker_stop),
+            ForwardDirection::Remote => {
+                run_remote_forward(host, worker_rule, worker_stop, worker_session_slot)
+            }
         };
         if let Err(error) = result {
             let _ = crate::diagnostics::append_diagnostic_log(
@@ -98,11 +163,17 @@ pub async fn forward_add_core(
         }
     });
 
+    // Forward is ready — activate the lifecycle entry.
+    reservation
+        .activate()
+        .map_err(|e| anyhow!("lifecycle activate failed: {e}"))?;
+
     forwards().lock().await.insert(
         rule.id,
         ForwardHandle {
             rule: rule.clone(),
             stop,
+            session: session_slot,
             worker: Some(worker),
         },
     );
@@ -165,9 +236,18 @@ fn handle_local_connection(
     bridge_tcp_and_channel(stream, channel)
 }
 
-fn run_remote_forward(host: HostProfile, rule: ForwardRule, stop: Arc<AtomicBool>) -> Result<()> {
+fn run_remote_forward(
+    host: HostProfile,
+    rule: ForwardRule,
+    stop: Arc<AtomicBool>,
+    session_slot: Arc<Mutex<Option<ssh2::Session>>>,
+) -> Result<()> {
     let session = connect_embedded_ssh(&host, 60)?;
     session.set_blocking(false);
+    // Store the session so Drop can call disconnect() on it.
+    if let Ok(mut guard) = session_slot.lock() {
+        *guard = Some(session.clone());
+    }
     let (mut listener, bound_port) =
         session.channel_forward_listen(rule.bind_port, None, Some(16))?;
     let _ = crate::diagnostics::append_diagnostic_log(
@@ -311,6 +391,11 @@ pub async fn forward_remove_core(id: Uuid) -> Result<()> {
     if store.remove(&id).is_none() {
         return Err(anyhow!("unknown forward: {id}"));
     }
+    // Mark the lifecycle entry as Closed.
+    let _ = crate::app_state::lifecycle()
+        .lock()
+        .unwrap()
+        .close(&id.to_string(), None);
     Ok(())
 }
 

@@ -61,6 +61,7 @@ reqwest = { version = "0.12", features = ["json"] }
 ssh2 = "0.9"
 ssh-key = { version = "0.7.0-rc.10", features = ["ed25519"] }
 getrandom = "0.4"
+rand = "0.8"
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
@@ -74,6 +75,17 @@ sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 # AES-256-GCM. No OS keychain, no plaintext key on disk.
 aes-gcm = "0.10"
 argon2 = "0.5"
+# AST-based command analysis for risk classification (P0-2): tree-sitter-bash
+# parses shell commands into a syntax tree, allowing canonical command head
+# extraction that is resilient to flag reordering, wrapper stacking, and
+# alias variation — unlike glob/substring matching which can be trivially
+# bypassed (e.g. "docker system prune -a" != "docker system prune -af").
+tree-sitter = "0.25"
+tree-sitter-bash = "0.25"
+# Structured error handling (P1 #4): thiserror for ergonomic error enums,
+# regex for redaction pattern validation and NoExpand (P1 #7).
+thiserror = "2"
+regex = "1"
 
 [dev-dependencies]
 axum = "0.7"

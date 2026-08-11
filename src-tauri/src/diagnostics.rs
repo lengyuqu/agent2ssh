@@ -6,25 +6,27 @@ use std::{
     fs::OpenOptions,
     io::Write,
     path::PathBuf,
-    sync::{Arc, Mutex, OnceLock, RwLock},
+    sync::{Arc, Mutex, OnceLock},
 };
 use uuid::Uuid;
 
+use crate::app_state::app_state;
 use crate::store::{config_dir, ensure_config_dir, redact_sensitive_text};
 
-static DIAGNOSTIC_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
 fn diagnostic_lock() -> &'static Mutex<()> {
-    DIAGNOSTIC_LOCK.get_or_init(|| Mutex::new(()))
+    &app_state().diagnostic_lock
 }
 
 type DiagnosticErrorSink = Arc<dyn Fn(&DiagnosticLogEntry) + Send + Sync>;
-// `RwLock<Option<…>>` (not `OnceLock`) so re-registration has explicit
-// override semantics instead of a silently-ignored second `.set()`. The sink is
-// stored behind an `Arc` so the write path can clone it out under a short read
-// lock and invoke it without holding the lock — keeping the call site free of
+// The error sink now lives in `AppState.error_sink` (RwLock<Option<Arc<...>>>)
+// so it's co-located with all other process-wide state. The sink is stored
+// behind an `Arc` so the write path can clone it out under a short read lock
+// and invoke it without holding the lock — keeping the call site free of
 // re-entrancy hazards if the sink itself logs. (H9)
-static ERROR_SINK: RwLock<Option<DiagnosticErrorSink>> = RwLock::new(None);
+
+fn error_sink() -> &'static std::sync::RwLock<Option<DiagnosticErrorSink>> {
+    &app_state().error_sink
+}
 
 thread_local! {
     static CURRENT_TRACE_ID: std::cell::RefCell<Option<String>> =
@@ -73,7 +75,7 @@ where
     F: Fn(&DiagnosticLogEntry) + Send + Sync + 'static,
 {
     let replaced = {
-        let mut guard = ERROR_SINK
+        let mut guard = error_sink()
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let replaced = guard.is_some();
@@ -313,7 +315,7 @@ fn append_diagnostic_log_inner(
         // Clone the sink out under a short read lock and release it before
         // invoking, so a sink that logs cannot deadlock against a concurrent
         // re-registration or recursively read-lock on this thread.
-        let sink = ERROR_SINK.read().ok().and_then(|guard| guard.clone());
+        let sink = error_sink().read().ok().and_then(|guard| guard.clone());
         if let Some(sink) = sink {
             sink(&entry);
         }
@@ -512,7 +514,7 @@ mod tests {
             SINK_HITS.fetch_add(1, Ordering::SeqCst);
         });
         assert!(
-            ERROR_SINK.read().unwrap().is_some(),
+            error_sink().read().unwrap().is_some(),
             "a sink must be registered"
         );
 

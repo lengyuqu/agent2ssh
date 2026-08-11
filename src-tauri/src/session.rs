@@ -1,13 +1,14 @@
 use anyhow::{anyhow, Context, Result};
 use std::{
     collections::HashMap,
-    sync::{mpsc, Arc, Mutex as StdMutex, OnceLock},
+    sync::{mpsc, Arc, Mutex as StdMutex},
     time::{Duration, Instant},
 };
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::{
+    app_state::app_state,
     embedded_ssh::{spawn_terminal, TerminalCommand, TerminalEvent},
     store::{ensure_config_dir, load_config},
     types::HostProfile,
@@ -21,18 +22,19 @@ const SESSION_READ_QUIET_PERIOD: Duration = Duration::from_millis(200);
 pub struct SessionHandle {
     pub id: Uuid,
     pub host: String,
-    tx: mpsc::Sender<TerminalCommand>,
-    rx: mpsc::Receiver<TerminalEvent>,
-    pending_output: Vec<u8>,
-    connected: bool,
-    closed: bool,
+    pub tx: mpsc::Sender<TerminalCommand>,
+    pub rx: mpsc::Receiver<TerminalEvent>,
+    pub pending_output: Vec<u8>,
+    pub connected: bool,
+    pub closed: bool,
 }
 
-// Process-local session store. Meaningful in long-running processes (daemon/MCP/Tauri).
-static SESSIONS: OnceLock<Mutex<HashMap<Uuid, Arc<StdMutex<SessionHandle>>>>> = OnceLock::new();
-
+// Process-local session store, now delegated to the centralized AppState
+// (P2 #5). The accessor function remains for backward compatibility — it
+// returns a reference to the Mutex inside AppState, which is stable for the
+// process lifetime since AppState is held in a OnceLock.
 fn sessions() -> &'static Mutex<HashMap<Uuid, Arc<StdMutex<SessionHandle>>>> {
-    SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
+    &app_state().sessions
 }
 
 pub fn resolve_host(name: &str) -> Result<HostProfile> {
@@ -94,6 +96,19 @@ pub async fn session_open_core(host_name: &str) -> Result<Uuid> {
     let host = resolve_host(host_name)?;
     let (tx, rx) = spawn_terminal(host, DEFAULT_SESSION_COLS, DEFAULT_SESSION_ROWS);
     let id = Uuid::new_v4();
+
+    // Reserve a lifecycle entry before creating the resource. If
+    // anything fails before activation, the reservation's Drop impl
+    // marks it Closed, preventing orphaned Pending entries.
+    let lifecycle = crate::app_state::lifecycle();
+    let reservation = crate::lifecycle::LifecycleRegistry::reserve(
+        &lifecycle,
+        &id.to_string(),
+        crate::app_state::ResourceKind::SshSession,
+        crate::app_state::ResourceOwner::Headless(uuid::Uuid::new_v4()),
+    )
+    .map_err(|e| anyhow!("lifecycle reserve failed: {e}"))?;
+
     let mut handle = SessionHandle {
         id,
         host: host_name.to_string(),
@@ -104,7 +119,20 @@ pub async fn session_open_core(host_name: &str) -> Result<Uuid> {
         closed: false,
     };
 
-    probe_session_open(&mut handle)?;
+    probe_session_open(&mut handle).inspect_err(|_| {
+        // probe failed — reservation will be dropped, marking the
+        // lifecycle entry as Closed automatically.
+        let _ = lifecycle
+            .lock()
+            .unwrap()
+            .close(&id.to_string(), None);
+    })?;
+
+    // Session is ready — activate the lifecycle entry.
+    reservation
+        .activate()
+        .map_err(|e| anyhow!("lifecycle activate failed: {e}"))?;
+
     sessions()
         .lock()
         .await
@@ -196,6 +224,11 @@ pub async fn session_close_core(id: Uuid) -> Result<()> {
         .lock()
         .map_err(|_| anyhow!("session lock poisoned: {id}"))?;
     let _ = handle.tx.send(TerminalCommand::Close);
+    // Mark the lifecycle entry as Closed.
+    let _ = crate::app_state::lifecycle()
+        .lock()
+        .unwrap()
+        .close(&id.to_string(), None);
     Ok(())
 }
 

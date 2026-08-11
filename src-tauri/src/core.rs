@@ -14,6 +14,7 @@ pub use team_config::*;
 
 use crate::{
     embedded_ssh::connect_embedded_ssh,
+    sanitize::analyze_command,
     store::{append_audit, list_audit_raw, load_config, save_config_unlocked, store_write_lock},
     types::{
         default_host_group, source_from_env, AuditEntry, AuditFilter, BatchStrategy,
@@ -354,7 +355,22 @@ pub fn list_audit_core(filter: AuditFilter) -> Result<Vec<AuditEntry>> {
 pub fn classify_risk(command: &str) -> RiskLevel {
     let lower = command.trim().to_lowercase();
     let tokens: Vec<&str> = lower.split_whitespace().collect();
-    let first = tokens.first().copied().unwrap_or("");
+
+    // ── AST-based canonical head extraction ──────────────────────────────────
+    // Use tree-sitter-bash to parse the command and extract the real command
+    // name after stripping wrappers (sudo, env, timeout, ...) and normalizing
+    // aliases (gcp -> cp, gawk -> awk, /usr/bin/rm -> rm).
+    //
+    // fail-closed: if parsing fails (None), we treat the command as high-risk.
+    let analysis = analyze_command(command);
+    let canonical = analysis.canonical_head.as_deref().unwrap_or("");
+    let head = canonical; // already lowercased by normalize_name()
+
+    // If the parser produced errors AND we couldn't extract a head at all,
+    // fail-closed: treat as High risk.
+    if analysis.had_parse_errors && canonical.is_empty() {
+        return RiskLevel::High;
+    }
 
     // ── BLOCKED ──────────────────────────────────────────────────────────────
     // mkfs destroys filesystems
@@ -366,7 +382,7 @@ pub fn classify_risk(command: &str) -> RiskLevel {
         return RiskLevel::Blocked;
     }
     // dd writing to raw block device
-    if first == "dd"
+    if head == "dd"
         && (lower.contains("of=/dev/sd")
             || lower.contains("of=/dev/nvme")
             || lower.contains("of=/dev/xvd")
@@ -380,7 +396,9 @@ pub fn classify_risk(command: &str) -> RiskLevel {
         return RiskLevel::Blocked;
     }
     // rm -rf / or rm -rf /* (filesystem wipe)
-    if first == "rm" || (first == "sudo" && tokens.get(1).copied() == Some("rm")) {
+    // The canonical head handles `sudo rm`, `sudo env VAR=x rm`, etc.
+    // so we only need to check the canonical head == "rm".
+    if head == "rm" {
         let is_recursive = lower.contains("-rf")
             || lower.contains("-fr")
             || lower.contains("-r -f")
@@ -393,29 +411,26 @@ pub fn classify_risk(command: &str) -> RiskLevel {
         }
     }
     // halt / shutdown / poweroff / reboot
+    // canonical head already strips `sudo`, so `sudo shutdown` -> "shutdown".
     let shutdown_cmds = ["shutdown", "halt", "poweroff", "reboot"];
-    if shutdown_cmds.contains(&first) {
+    if shutdown_cmds.contains(&head) {
         return RiskLevel::Blocked;
     }
-    if first == "sudo" {
-        if let Some(second) = tokens.get(1) {
-            if shutdown_cmds.contains(second) {
-                return RiskLevel::Blocked;
-            }
-        }
-    }
-    // init 0 / init 6
-    if first == "init" && matches!(tokens.get(1).copied(), Some("0") | Some("6")) {
+    // init 0 / init 6 — the canonical head handles `sudo init`, so we just
+    // check if the canonical head is "init" and the command contains 0 or 6.
+    if head == "init" && (lower.contains("init 0") || lower.contains("init 6")) {
         return RiskLevel::Blocked;
     }
 
     // ── HIGH ─────────────────────────────────────────────────────────────────
-    // sudo elevates anything
-    if lower.contains("sudo ") {
+    // sudo elevates anything — canonical head already stripped sudo, so if the
+    // original command starts with sudo (and the real command isn't a blocked
+    // shutdown), it's High.
+    if lower.starts_with("sudo ") || lower.starts_with("doas ") {
         return RiskLevel::High;
     }
     // rm -r / rm -rf (not root, but still dangerous)
-    if first == "rm"
+    if head == "rm"
         && (lower.contains("-rf")
             || lower.contains("-fr")
             || lower.contains(" -r ")
@@ -439,9 +454,9 @@ pub fn classify_risk(command: &str) -> RiskLevel {
     {
         return RiskLevel::High;
     }
-    // account management
+    // account management — use canonical head instead of raw first token
     if matches!(
-        first,
+        head,
         "passwd" | "useradd" | "userdel" | "usermod" | "chpasswd"
     ) {
         return RiskLevel::High;
@@ -469,8 +484,8 @@ pub fn classify_risk(command: &str) -> RiskLevel {
     {
         return RiskLevel::High;
     }
-    // recursive chown
-    if (first == "chown") && (lower.contains("-r") || lower.contains("--recursive")) {
+    // recursive chown — use canonical head
+    if head == "chown" && (lower.contains("-r") || lower.contains("--recursive")) {
         return RiskLevel::High;
     }
 
@@ -511,7 +526,8 @@ pub fn classify_risk(command: &str) -> RiskLevel {
     if lower.contains(" > ") {
         return RiskLevel::Medium;
     }
-    if matches!(first, "service") {
+    // Use canonical head for service command
+    if head == "service" {
         return RiskLevel::Medium;
     }
 
@@ -2912,6 +2928,52 @@ mod tests {
         assert_eq!(classify_risk("SUDO whoami"), RiskLevel::High);
         assert_eq!(classify_risk("MKFS /dev/sda"), RiskLevel::Blocked);
         assert_eq!(classify_risk("SHUTDOWN"), RiskLevel::Blocked);
+    }
+
+    #[test]
+    fn test_classify_risk_ast_wrapper_stripping() {
+        // sudo with env wrapper
+        assert_eq!(classify_risk("sudo env VAR=x rm -rf /"), RiskLevel::Blocked);
+        assert_eq!(classify_risk("sudo env VAR=x shutdown"), RiskLevel::Blocked);
+        // sudo with timeout wrapper
+        assert_eq!(
+            classify_risk("sudo timeout 30 shutdown -h now"),
+            RiskLevel::Blocked
+        );
+        // sudo with -u flag
+        assert_eq!(
+            classify_risk("sudo -u root rm -rf /"),
+            RiskLevel::Blocked
+        );
+        assert_eq!(
+            classify_risk("sudo --user=root reboot"),
+            RiskLevel::Blocked
+        );
+    }
+
+    #[test]
+    fn test_classify_risk_ast_path_normalization() {
+        // /usr/bin/rm should be normalized to rm
+        assert_eq!(classify_risk("/usr/bin/rm -rf /"), RiskLevel::Blocked);
+        assert_eq!(classify_risk("/bin/dd if=/dev/zero of=/dev/sda"), RiskLevel::Blocked);
+    }
+
+    #[test]
+    fn test_classify_risk_ast_brew_prefix() {
+        // macOS brew coreutils: gcp -> cp, gchmod -> chmod
+        assert_eq!(classify_risk("gchmod 777 /etc/passwd"), RiskLevel::High);
+    }
+
+    #[test]
+    fn test_classify_risk_ansi_c_obfuscation() {
+        // $'\x72\x6d' decodes to "rm"
+        assert_eq!(classify_risk("$'\\x72\\x6d' -rf /"), RiskLevel::Blocked);
+    }
+
+    #[test]
+    fn test_classify_risk_fail_closed_on_unparseable() {
+        // Completely unparseable commands should be High (fail-closed)
+        assert_eq!(classify_risk(")))((("), RiskLevel::High);
     }
 
     #[test]

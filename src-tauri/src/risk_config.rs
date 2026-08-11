@@ -1,8 +1,9 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::{path::PathBuf, sync::OnceLock, time::SystemTime};
+use std::{path::PathBuf, time::SystemTime};
 use tokio::sync::Mutex;
 
+use crate::app_state::app_state;
 use crate::types::RiskLevel;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -21,20 +22,13 @@ pub struct RuleGroup {
     pub patterns: Vec<String>,
 }
 
-struct CachedRules {
-    rules: RiskRules,
-    modified: Option<SystemTime>,
+pub struct CachedRules {
+    pub rules: RiskRules,
+    pub modified: Option<SystemTime>,
 }
 
-static RULES_CACHE: OnceLock<Mutex<CachedRules>> = OnceLock::new();
-
 fn cache() -> &'static Mutex<CachedRules> {
-    RULES_CACHE.get_or_init(|| {
-        Mutex::new(CachedRules {
-            rules: RiskRules::default(),
-            modified: None,
-        })
-    })
+    &app_state().risk_rules_cache
 }
 
 pub fn risk_rules_path() -> PathBuf {

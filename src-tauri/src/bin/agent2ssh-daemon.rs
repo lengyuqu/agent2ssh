@@ -1070,7 +1070,7 @@ async fn exec_compare(
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     tracing::info!(hosts = ?body.hosts, command = %body.command, "exec-compare handler invoked");
     ensure_command_length(&body.command)?;
-    let source = source_from_env("daemon");
+    let source = source_from_transport();
     let targets = targets_for_exec_multi(&body.hosts, &body.tags);
     let target_label = target_host_label(&body.hosts, &body.tags);
     reject_if_gate_paused(&source, &target_label, &body.command)?;
@@ -1179,7 +1179,7 @@ async fn sftp_upload(
     Json(req): Json<SftpUploadRequest>,
 ) -> Result<Json<SftpResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    let source = source_from_env("daemon");
+    let source = source_from_transport();
     let command = format!("sftp upload {} -> {}", req.local_path, req.remote_path);
     reject_if_gate_paused(&source, &req.host, &command)?;
     let targets = vec![(req.host.clone(), host_tags(&req.host))];
@@ -1210,7 +1210,7 @@ async fn sftp_download(
     Json(req): Json<SftpDownloadRequest>,
 ) -> Result<Json<SftpResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    let source = source_from_env("daemon");
+    let source = source_from_transport();
     let command = format!("sftp download {} -> {}", req.remote_path, req.local_path);
     reject_if_gate_paused(&source, &req.host, &command)?;
     let targets = vec![(req.host.clone(), host_tags(&req.host))];
@@ -1241,7 +1241,7 @@ async fn sftp_ls(
     Json(body): Json<SftpDirBody>,
 ) -> Result<Json<ExecResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    let source = source_from_env("daemon");
+    let source = source_from_transport();
     let command = format!("sftp ls {}", body.path);
     reject_if_gate_paused(&source, &body.host, &command)?;
     let targets = vec![(body.host.clone(), host_tags(&body.host))];
@@ -1296,7 +1296,7 @@ async fn sftp_stat(
     Json(body): Json<SftpDirBody>,
 ) -> Result<Json<ExecResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    let source = source_from_env("daemon");
+    let source = source_from_transport();
     let command = format!("sftp stat {}", body.path);
     reject_if_gate_paused(&source, &body.host, &command)?;
     let targets = vec![(body.host.clone(), host_tags(&body.host))];
@@ -1351,7 +1351,7 @@ async fn sftp_mkdir(
     Json(body): Json<SftpDirBody>,
 ) -> Result<Json<ExecResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    let source = source_from_env("daemon");
+    let source = source_from_transport();
     let command = format!("sftp mkdir {}", body.path);
     reject_if_gate_paused(&source, &body.host, &command)?;
     let targets = vec![(body.host.clone(), host_tags(&body.host))];
@@ -1706,7 +1706,7 @@ async fn forward_add(
     Json(req): Json<ForwardRule>,
 ) -> Result<Json<ForwardRule>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    let source = source_from_env("daemon");
+    let source = source_from_transport();
     let command = format!(
         "forward {} {}:{} -> {}:{}",
         req.direction, req.bind_port, req.target_host, req.host, req.target_port
@@ -1780,7 +1780,7 @@ async fn forward_remove(
 ) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     let uuid = Uuid::parse_str(&id).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
-    let source = source_from_env("daemon");
+    let source = source_from_transport();
     if let Some(rule) = forward_list_core()
         .await
         .into_iter()
@@ -2014,7 +2014,7 @@ async fn ssh_connect(
     Path(host): Path<String>,
 ) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    let source = source_from_env("daemon");
+    let source = source_from_transport();
     let tags = host_tags(&host);
     reject_if_gate_paused(&source, &host, "connect")?;
     let targets = vec![(host.clone(), tags.clone())];
@@ -2068,7 +2068,7 @@ async fn ssh_disconnect(
     Path(host): Path<String>,
 ) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    let source = source_from_env("daemon");
+    let source = source_from_transport();
     let tags = host_tags(&host);
     reject_if_gate_paused(&source, &host, "disconnect")?;
     let targets = vec![(host.clone(), tags.clone())];
@@ -3690,6 +3690,11 @@ async fn main() -> anyhow::Result<()> {
         );
     }
     install_hangup_handler();
+
+    // Set the transport to Headless — the daemon serves via HTTP/SSE/WS.
+    let _ = agent2ssh::set_host(agent2ssh::Host::Headless {
+        sink: std::sync::Arc::new(|_event, _payload| true),
+    });
 
     // Record start time for uptime calculation
     START_TIME.get_or_init(Instant::now);

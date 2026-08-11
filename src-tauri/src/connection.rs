@@ -4,13 +4,15 @@ use std::{
     collections::HashMap,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex as StdMutex, OnceLock,
+        Arc, Mutex as StdMutex,
     },
     time::{Duration, Instant},
 };
 use tokio::sync::Mutex;
+use uuid::Uuid;
 
 use crate::{
+    app_state::app_state,
     embedded_ssh::connect_embedded_ssh,
     store::load_config,
     types::{ConnectionStatus, HostProfile},
@@ -42,7 +44,7 @@ struct ConnectionHealth {
 /// behind a `std` mutex so the blocking supervisor (keepalive probe / reconnect)
 /// can touch it inside `spawn_blocking` without holding a tokio lock across an
 /// `.await`.
-struct RetainedConnection {
+pub struct RetainedConnection {
     session: Arc<StdMutex<Option<Session>>>,
     health: Arc<StdMutex<ConnectionHealth>>,
 }
@@ -53,16 +55,15 @@ type ConnectionHandleSnapshot = (
     Arc<StdMutex<ConnectionHealth>>,
 );
 
-static CONNECTIONS: OnceLock<Mutex<HashMap<String, RetainedConnection>>> = OnceLock::new();
-static HOST_LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
+// Process-local connection stores, delegated to AppState (P2 #5).
 static SUPERVISOR_STARTED: AtomicBool = AtomicBool::new(false);
 
 fn connections() -> &'static Mutex<HashMap<String, RetainedConnection>> {
-    CONNECTIONS.get_or_init(|| Mutex::new(HashMap::new()))
+    &app_state().connections
 }
 
 fn host_locks() -> &'static Mutex<HashMap<String, Arc<Mutex<()>>>> {
-    HOST_LOCKS.get_or_init(|| Mutex::new(HashMap::new()))
+    &app_state().host_locks
 }
 
 async fn per_host_lock(host_name: &str) -> Arc<Mutex<()>> {
@@ -132,11 +133,26 @@ pub async fn connect_host(host_name: &str) -> Result<()> {
         return Ok(());
     }
 
+    // Reserve a lifecycle entry for this connection.
+    let lifecycle = crate::app_state::lifecycle();
+    let reservation = crate::lifecycle::LifecycleRegistry::reserve(
+        &lifecycle,
+        &host.name,
+        crate::app_state::ResourceKind::Connection,
+        crate::app_state::ResourceOwner::Headless(Uuid::new_v4()),
+    )
+    .map_err(|e| anyhow!("lifecycle reserve failed: {e}"))?;
+
     let host_for_task = host.clone();
     let session = tokio::task::spawn_blocking(move || connect_embedded_ssh(&host_for_task, 60))
         .await
         .map_err(|e| anyhow!("embedded connection task failed: {e}"))??;
     configure_keepalive(&session);
+
+    // Connection is ready — activate the lifecycle entry.
+    reservation
+        .activate()
+        .map_err(|e| anyhow!("lifecycle activate failed: {e}"))?;
 
     connections().lock().await.insert(
         host.name.clone(),
@@ -157,6 +173,11 @@ pub async fn connect_host(host_name: &str) -> Result<()> {
 pub async fn disconnect_host(host_name: &str) -> Result<()> {
     resolve_host(host_name)?;
     connections().lock().await.remove(host_name);
+    // Mark the lifecycle entry as Closed.
+    let _ = crate::app_state::lifecycle()
+        .lock()
+        .unwrap()
+        .close(host_name, None);
     Ok(())
 }
 

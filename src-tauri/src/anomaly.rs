@@ -194,10 +194,15 @@ pub fn detect_anomalies(
 use std::collections::VecDeque;
 use std::sync::Mutex as StdMutex;
 
-static ERROR_TIMES: std::sync::OnceLock<StdMutex<VecDeque<chrono::DateTime<chrono::Utc>>>> =
-    std::sync::OnceLock::new();
-static LAST_ERROR_ALERT: std::sync::OnceLock<StdMutex<Option<chrono::DateTime<chrono::Utc>>>> =
-    std::sync::OnceLock::new();
+use crate::app_state::app_state;
+
+fn error_times() -> &'static StdMutex<VecDeque<chrono::DateTime<chrono::Utc>>> {
+    &app_state().error_times
+}
+
+fn last_error_alert() -> &'static StdMutex<Option<chrono::DateTime<chrono::Utc>>> {
+    &app_state().last_error_alert
+}
 
 /// Feed one `error`-level diagnostic into a process-local sliding window and
 /// return an [`AnomalyFinding`] when the error rate crosses
@@ -218,7 +223,7 @@ pub fn record_diagnostic_error(component: &str, message: &str) -> Vec<AnomalyFin
 
     let now = chrono::Utc::now();
     let window = chrono::Duration::seconds(config.window_secs.max(1));
-    let times = ERROR_TIMES.get_or_init(|| StdMutex::new(VecDeque::new()));
+    let times = error_times();
     let count = {
         let mut times = times.lock().unwrap_or_else(|p| p.into_inner());
         times.push_back(now);
@@ -232,7 +237,7 @@ pub fn record_diagnostic_error(component: &str, message: &str) -> Vec<AnomalyFin
     }
 
     // Cooldown: one alert per burst, not one per error over the threshold.
-    let last_alert = LAST_ERROR_ALERT.get_or_init(|| StdMutex::new(None));
+    let last_alert = last_error_alert();
     {
         let mut last = last_alert.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(prev) = *last {
@@ -459,12 +464,8 @@ mod tests {
         std::env::set_var("AGENT2SSH_CONFIG_DIR", &config_dir);
 
         // Reset the shared sliding-window state so prior tests don't bleed in.
-        if let Some(times) = ERROR_TIMES.get() {
-            times.lock().unwrap().clear();
-        }
-        if let Some(last) = LAST_ERROR_ALERT.get() {
-            *last.lock().unwrap() = None;
-        }
+        error_times().lock().unwrap().clear();
+        *last_error_alert().lock().unwrap() = None;
 
         // First four errors stay under the default threshold of 5.
         for _ in 0..4 {

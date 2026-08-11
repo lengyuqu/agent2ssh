@@ -1,11 +1,14 @@
 pub mod anomaly;
+pub mod app_state;
 pub mod approval;
+pub mod backup_crypto;
 pub mod config_cache;
 pub mod connection;
 pub mod core;
 pub mod daemon_control;
 pub mod diagnostics;
 pub mod embedded_ssh;
+pub mod error_codes;
 pub mod events;
 pub mod execution_control;
 pub mod forward;
@@ -13,13 +16,16 @@ pub mod gate;
 pub mod health;
 pub mod integrate;
 pub mod keys;
+pub mod lifecycle;
 pub mod limits;
 pub mod mcp_binding;
 pub mod notify;
 pub mod playbook;
 pub mod policy;
+pub mod redaction;
 pub mod remote;
 pub mod risk_config;
+pub mod sanitize;
 pub mod secrets;
 pub mod session;
 pub mod sftp_transfer;
@@ -69,6 +75,10 @@ pub use execution_control::{
     ApprovalOutcome, ApprovalPrompt, CommandAuthorization, CommandAuthorizationError,
     CommandAuthorizationInput, CommandAuthorizationTarget,
 };
+pub use error_codes::{
+    is_coded_error, parse_coded_error, AnyhowToCodedExt, CodedError, CodedResult, ErrorCode,
+    WIRE_PREFIX as ERROR_WIRE_PREFIX,
+};
 pub use forward::{forward_add_core, forward_list_core, forward_remove_core};
 pub use gate::{
     execution_gate_blocks_source, gate_blocks_source, load_execution_gate, save_execution_gate,
@@ -96,6 +106,10 @@ pub use policy::{
     existing_policy_path, load_policy_file, load_policy_from_path, parse_policy, policy_json_path,
     policy_toml_path, validate_policy_path, AgentPolicyFile, PolicyDecision, PolicyTestResult,
 };
+pub use redaction::{
+    default_rules, load_rules_from_json, redact_default, redact_with_defaults, redact_with_rules,
+    validate_pattern, RedactRule, RedactRuleConfig, RedactRuleError,
+};
 pub use remote::{
     check_daemon_version, check_version_compatibility, diagnose_daemon, get_daemons_unified_view,
     is_loopback_addr, list_daemons_core, load_remotes, local_daemon_addr,
@@ -120,6 +134,17 @@ pub use webdav_sync::{
     collect_sync_files, create_sync_backup, load_local_sync_marker, webdav_pull, webdav_push,
     webdav_status, WebDavSyncFile, WebDavSyncMarker, WebDavSyncOptions, WebDavSyncResult,
     WebDavSyncStatus, SYNCABLE_FILES,
+};
+
+pub use app_state::{
+    app_state, host, lifecycle, set_host, AppState, Host, ResourceKind, ResourceOwner,
+    ResourcePhase, ResourceRecord,
+};
+pub use lifecycle::{
+    LifecycleError, LifecycleRegistry, ResourceReservation,
+};
+pub use backup_crypto::{
+    decrypt_backup, encrypt_backup, is_encrypted_backup, ENCRYPTED_MAGIC,
 };
 
 #[cfg(feature = "tauri")]

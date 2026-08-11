@@ -24,7 +24,7 @@ use agent2ssh::{
     list_playbooks_core, ping_hosts_core, preview_exec, preview_exec_multi, remove_host_core,
     run_playbook_core_with_source_and_approved_steps, sftp_download_core_with_source,
     sftp_ls_core_with_source, sftp_mkdir_core_with_source, sftp_stat_core_with_source,
-    sftp_upload_core_with_source, source_from_env, validate_policy_path, AuditFilter,
+    sftp_upload_core_with_source, source_from_transport, validate_policy_path, AuditFilter,
     BatchStrategy, ExecComparison, ExecMultiBatchRequest, ExecMultiRequest, ExecRequest,
     ExecutionGateStatus, ForwardDirection, ForwardRule, HostFilter, HostProfile, PolicyDecision,
     PolicyTestResult, RiskLevel, SftpDownloadRequest, SftpUploadRequest, TeamConfigExport,
@@ -567,6 +567,13 @@ struct WebDavCliOptions {
     /// Path to a WebDAV config TOML file (default: ~/.agent2ssh/webdav.toml).
     #[arg(long)]
     config: Option<PathBuf>,
+    /// Password for encrypting sync backups (AES-256-GCM + Argon2id).
+    /// Also read from AGENT2SSH_SYNC_PASSWORD or webdav.toml.
+    #[arg(long)]
+    sync_password: Option<String>,
+    /// Environment variable holding the sync encryption password.
+    #[arg(long)]
+    sync_password_env: Option<String>,
     /// Output as JSON
     #[arg(long)]
     json: bool,
@@ -580,6 +587,8 @@ impl WebDavCliOptions {
             password: self.password,
             password_env: self.password_env,
             config_path: self.config,
+            sync_password: self.sync_password,
+            sync_password_env: self.sync_password_env,
         }
     }
 }
@@ -1182,7 +1191,7 @@ async fn main() -> Result<()> {
                 max_output_bytes: None,
                 reason,
                 change_id,
-                source: Some(source_from_env("cli")),
+                source: Some(source_from_transport()),
             };
 
             // If --daemon is set and remote, forward via HTTP
@@ -1279,7 +1288,7 @@ async fn main() -> Result<()> {
                 || max_failures.is_some()
                 || batch_size.is_some()
                 || pause_secs.is_some();
-            let source = source_from_env("cli");
+            let source = source_from_transport();
             let approved_hosts = authorize_local_exec_targets(
                 &hosts,
                 &tags,
@@ -1404,7 +1413,7 @@ async fn main() -> Result<()> {
                 resume,
                 json,
             } => {
-                let source = source_from_env("cli");
+                let source = source_from_transport();
                 let command = format!("sftp upload {} -> {}", local, remote);
                 authorize_local_operation(&host, &command, false, &source).await?;
                 let result = sftp_upload_core_with_source(
@@ -1434,7 +1443,7 @@ async fn main() -> Result<()> {
                 resume,
                 json,
             } => {
-                let source = source_from_env("cli");
+                let source = source_from_transport();
                 let command = format!("sftp download {} -> {}", remote, local);
                 authorize_local_operation(&host, &command, false, &source).await?;
                 let result = sftp_download_core_with_source(
@@ -1458,7 +1467,7 @@ async fn main() -> Result<()> {
                 }
             }
             SftpCommands::Ls { host, path, json } => {
-                let source = source_from_env("cli");
+                let source = source_from_transport();
                 let command = format!("sftp ls {}", path);
                 authorize_local_operation(&host, &command, false, &source).await?;
                 let result = sftp_ls_core_with_source(&host, &path, None, Some(source)).await?;
@@ -1469,7 +1478,7 @@ async fn main() -> Result<()> {
                 }
             }
             SftpCommands::Stat { host, path, json } => {
-                let source = source_from_env("cli");
+                let source = source_from_transport();
                 let command = format!("sftp stat {}", path);
                 authorize_local_operation(&host, &command, false, &source).await?;
                 let result = sftp_stat_core_with_source(&host, &path, None, Some(source)).await?;
@@ -1480,7 +1489,7 @@ async fn main() -> Result<()> {
                 }
             }
             SftpCommands::Mkdir { host, path, json } => {
-                let source = source_from_env("cli");
+                let source = source_from_transport();
                 let command = format!("sftp mkdir {}", path);
                 authorize_local_operation(&host, &command, false, &source).await?;
                 let result = sftp_mkdir_core_with_source(&host, &path, None, Some(source)).await?;
@@ -1523,7 +1532,7 @@ async fn main() -> Result<()> {
                         .bearer_auth(token)
                         .json(&SessionWriteRequest {
                             input,
-                            source: source_from_env("cli"),
+                            source: source_from_transport(),
                         }),
                 )
                 .await?;
@@ -2574,7 +2583,7 @@ async fn main() -> Result<()> {
                 json,
             } => {
                 let params_map = parse_cli_params(params);
-                let source = source_from_env("cli");
+                let source = source_from_transport();
                 let approved_steps = authorize_local_playbook_run(
                     &name,
                     &host,
@@ -3303,7 +3312,7 @@ async fn update_gate(
             .post(format!("{base_url}/gate/{action}"))
             .bearer_auth(token)
             .json(&GateUpdateRequest {
-                source: source_from_env("cli"),
+                source: source_from_transport(),
                 reason,
             }),
     )

@@ -41,10 +41,10 @@ use crate::{
     },
     store::{append_audit, config_dir, lock_config_file, restrict_file_to_owner},
     types::{
-        source_from_env, AuditEntry, AuditFilter, ConnectionStatus, ExecMultiResult, ExecRequest,
-        ExecResult, ForwardDirection, ForwardRule, HostGroup, HostProfile, PingResult,
-        ProxyProfile, RiskLevel, SftpDownloadRequest, SftpExchangeRequest, SftpExchangeResult,
-        SftpResult, SftpUploadRequest, WalkEntry,
+        source_from_transport, AuditEntry, AuditFilter, ConnectionStatus, ExecMultiResult,
+        ExecRequest, ExecResult, ForwardDirection, ForwardRule, HostGroup, HostProfile,
+        PingResult, ProxyProfile, RiskLevel, SftpDownloadRequest, SftpExchangeRequest,
+        SftpExchangeResult, SftpResult, SftpUploadRequest, WalkEntry,
     },
     webdav_sync::{
         apply_config_template, create_named_snapshot, delete_config_snapshot,
@@ -59,12 +59,13 @@ use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
-    sync::OnceLock,
     time::Instant,
 };
 use tauri::{AppHandle, Manager, WindowEvent};
 use tokio::sync::Mutex;
 use uuid::Uuid;
+
+use crate::app_state::app_state;
 
 mod mcp_agent_config;
 pub use mcp_agent_config::{
@@ -73,10 +74,8 @@ pub use mcp_agent_config::{
     McpAgentConfigureResult, McpAgentUninstallResult,
 };
 
-static DESKTOP_SESSION_INPUT_BUFFERS: OnceLock<Mutex<HashMap<Uuid, String>>> = OnceLock::new();
-
 fn desktop_session_input_buffers() -> &'static Mutex<HashMap<Uuid, String>> {
-    DESKTOP_SESSION_INPUT_BUFFERS.get_or_init(|| Mutex::new(HashMap::new()))
+    &app_state().desktop_session_buffers
 }
 
 fn ensure_command_length(command: &str) -> Result<(), String> {
@@ -393,7 +392,7 @@ pub async fn classify_command_risk_for_host(
 #[tauri::command]
 pub async fn exec_ssh(mut request: ExecRequest) -> Result<ExecResult, String> {
     if request.source.is_none() {
-        request.source = Some(source_from_env("desktop"));
+        request.source = Some(source_from_transport());
     }
     ensure_command_length(&request.command)?;
     authorize_desktop_exec_request(&mut request).await?;
@@ -595,7 +594,7 @@ pub async fn exec_multi(
     tags: Option<Vec<String>>,
 ) -> Result<Vec<ExecMultiResult>, String> {
     ensure_command_length(&command)?;
-    let source = source_from_env("desktop");
+    let source = source_from_transport();
     let approved_hosts =
         authorize_desktop_exec_targets(&hosts, &tags, &command, force, None, None, &source).await?;
     Ok(exec_multi_core(ExecMultiRequest {
@@ -654,7 +653,7 @@ fn build_sftp_exchange_temp_path(source_path: &str) -> String {
 
 #[tauri::command]
 pub async fn sftp_upload(request: SftpUploadRequest) -> Result<SftpResult, String> {
-    let source = source_from_env("desktop");
+    let source = source_from_transport();
     let command = format!(
         "sftp upload {} -> {}",
         request.local_path, request.remote_path
@@ -667,7 +666,7 @@ pub async fn sftp_upload(request: SftpUploadRequest) -> Result<SftpResult, Strin
 
 #[tauri::command]
 pub async fn sftp_download(request: SftpDownloadRequest) -> Result<SftpResult, String> {
-    let source = source_from_env("desktop");
+    let source = source_from_transport();
     let command = format!(
         "sftp download {} -> {}",
         request.remote_path, request.local_path
@@ -688,7 +687,7 @@ pub async fn sftp_cancel(transfer_id: String) -> Result<bool, String> {
 
 #[tauri::command]
 pub async fn sftp_exchange(request: SftpExchangeRequest) -> Result<SftpExchangeResult, String> {
-    let source = source_from_env("desktop");
+    let source = source_from_transport();
     let local_temp = build_sftp_exchange_temp_path(&request.source_path);
     let download_command = format!("sftp download {} -> {}", request.source_path, local_temp);
     authorize_desktop_operation(&request.source_host, &download_command, false, &source).await?;
@@ -745,7 +744,7 @@ pub async fn sftp_ls(
     path: String,
     timeout_secs: Option<u64>,
 ) -> Result<ExecResult, String> {
-    let source = source_from_env("desktop");
+    let source = source_from_transport();
     let command = format!("sftp ls {}", path);
     authorize_desktop_operation(&host, &command, false, &source).await?;
     sftp_ls_core_with_source(&host, &path, timeout_secs, Some(source))
@@ -759,7 +758,7 @@ pub async fn sftp_stat(
     path: String,
     timeout_secs: Option<u64>,
 ) -> Result<ExecResult, String> {
-    let source = source_from_env("desktop");
+    let source = source_from_transport();
     let command = format!("sftp stat {}", path);
     authorize_desktop_operation(&host, &command, false, &source).await?;
     sftp_stat_core_with_source(&host, &path, timeout_secs, Some(source))
@@ -778,7 +777,7 @@ pub async fn sftp_read_text(
     path: String,
     timeout_secs: Option<u64>,
 ) -> Result<ExecResult, String> {
-    let source = source_from_env("desktop");
+    let source = source_from_transport();
     let command = format!("sftp read {}", path);
     authorize_desktop_operation(&host, &command, false, &source).await?;
     sftp_read_text_core_with_source(&host, &path, timeout_secs, Some(source))
@@ -792,7 +791,7 @@ pub async fn sftp_mkdir(
     path: String,
     timeout_secs: Option<u64>,
 ) -> Result<ExecResult, String> {
-    let source = source_from_env("desktop");
+    let source = source_from_transport();
     let command = format!("sftp mkdir {}", path);
     authorize_desktop_operation(&host, &command, false, &source).await?;
     sftp_mkdir_core_with_source(&host, &path, timeout_secs, Some(source))
@@ -1002,7 +1001,7 @@ pub async fn local_mkdir(path: String) -> Result<(), String> {
 /// Recursively enumerate a remote directory tree over SFTP. (J4)
 #[tauri::command]
 pub async fn sftp_walk(host: String, root: String) -> Result<Vec<WalkEntry>, String> {
-    let source = source_from_env("desktop");
+    let source = source_from_transport();
     let command = format!("sftp walk {root}");
     authorize_desktop_operation(&host, &command, false, &source).await?;
     sftp_walk_core_with_source(&host, &root, None, Some(source))
@@ -1014,7 +1013,7 @@ pub async fn sftp_walk(host: String, root: String) -> Result<Vec<WalkEntry>, Str
 
 #[tauri::command]
 pub async fn session_open(host: String) -> Result<String, String> {
-    let source = source_from_env("desktop");
+    let source = source_from_transport();
     let risk = authorize_desktop_operation(&host, "session_open", false, &source).await?;
     let started = Instant::now();
     match session_open_core(&host).await {
@@ -1053,7 +1052,7 @@ pub async fn session_open(host: String) -> Result<String, String> {
 #[tauri::command]
 pub async fn session_write(id: String, input: String, force: Option<bool>) -> Result<(), String> {
     let uuid = Uuid::parse_str(&id).map_err(|e| e.to_string())?;
-    let source = source_from_env("desktop");
+    let source = source_from_transport();
     let host = session_list_core()
         .await
         .into_iter()
@@ -1135,7 +1134,7 @@ pub async fn session_read(id: String, timeout_ms: Option<u64>) -> Result<String,
 #[tauri::command]
 pub async fn session_close(id: String) -> Result<(), String> {
     let uuid = Uuid::parse_str(&id).map_err(|e| e.to_string())?;
-    let source = source_from_env("desktop");
+    let source = source_from_transport();
     let host = session_list_core()
         .await
         .into_iter()
@@ -1193,7 +1192,7 @@ pub async fn forward_add(
     target_host: String,
     target_port: u16,
 ) -> Result<ForwardRule, String> {
-    let source = source_from_env("desktop");
+    let source = source_from_transport();
     let command = format!(
         "forward {} {}:{} -> {}:{}",
         direction, bind_port, target_host, host, target_port
@@ -1237,7 +1236,7 @@ pub async fn forward_list() -> Result<Vec<ForwardRule>, String> {
 #[tauri::command]
 pub async fn forward_remove(id: String) -> Result<(), String> {
     let uuid = Uuid::parse_str(&id).map_err(|e| e.to_string())?;
-    let source = source_from_env("desktop");
+    let source = source_from_transport();
     if let Some(rule) = forward_list_core()
         .await
         .into_iter()
@@ -2306,7 +2305,7 @@ pub async fn secrets_change_password(new_password: String) -> Result<(), String>
 
 #[tauri::command]
 pub async fn ssh_connect(host: String) -> Result<(), String> {
-    let source = source_from_env("desktop");
+    let source = source_from_transport();
     let risk = authorize_desktop_operation(&host, "connect", false, &source).await?;
     let started = Instant::now();
     match connect_host(&host).await {
@@ -2340,7 +2339,7 @@ pub async fn ssh_connect(host: String) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn ssh_disconnect(host: String) -> Result<(), String> {
-    let source = source_from_env("desktop");
+    let source = source_from_transport();
     let risk = authorize_desktop_operation(&host, "disconnect", false, &source).await?;
     let started = Instant::now();
     match disconnect_host(&host).await {
@@ -2421,7 +2420,7 @@ pub async fn run_playbook(
     host: String,
     force: bool,
 ) -> Result<PlaybookRunResult, String> {
-    let source = source_from_env("desktop");
+    let source = source_from_transport();
     let params = HashMap::new();
     let approved_steps =
         authorize_desktop_playbook_run(&playbook, &host, force, &params, &source).await?;
@@ -2479,6 +2478,10 @@ pub fn run_tauri() {
     if let Err(e) = crate::store::migrate_plaintext_secrets() {
         eprintln!("warning: secret migration skipped: {e}");
     }
+    // The transport is implicitly Tauri when the `tauri` feature is compiled
+    // in (is_desktop() returns true under #[cfg(feature = "tauri")]). The
+    // global Host stays at Host::Cli (the default) since per-command AppHandle
+    // instances are passed directly to each Tauri command handler.
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             reveal_main_window(app);

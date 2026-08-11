@@ -7,6 +7,12 @@
 //! the only way to decrypt is to supply the master password, which unlocks the
 //! store for the process lifetime.
 //!
+//! **Per-entry encryption with AAD binding (v2).** Each secret is independently
+//! encrypted with its own random nonce, and the **account name** (e.g.
+//! `host:myhost`) is bound as AEAD associated data (AAD). This prevents
+//! cut-and-paste attacks: if an attacker copies the ciphertext from account A
+//! to account B, the AEAD tag verification fails because the AAD differs.
+//!
 //! On disk, `hosts.json` holds only the [`SECRET_REF`] marker in place of a
 //! password; the real secret lives (encrypted) in `secrets.enc`. The persistence
 //! boundary in [`crate::store`] resolves the marker back into the real password
@@ -20,12 +26,16 @@
 //! Locked behavior is safe: a locked load leaves the marker in place (it is not
 //! decrypted to `None`), so an unrelated save never clobbers the encrypted
 //! secret, and `embedded_ssh` treats the bare marker as "no usable password".
+//!
+//! **Backward compatibility:** v1 files (single ciphertext for the whole map)
+//! are transparently read and migrated to v2 on the next save.
 
 use anyhow::{anyhow, Context, Result};
 use base64::Engine as _;
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock, RwLock};
+use std::sync::{Mutex, RwLock};
 
+use crate::app_state::app_state;
 use crate::store::{config_dir, ensure_config_dir, restrict_file_to_owner};
 
 /// Encrypted credential file under the config dir.
@@ -72,8 +82,7 @@ pub fn proxy_account(proxy_id: &str) -> String {
 /// The derived 256-bit key, cached for the process lifetime once unlocked. `None`
 /// means locked. Argon2 runs only at unlock time, not per secret operation.
 fn key_cell() -> &'static RwLock<Option<[u8; 32]>> {
-    static KEY: OnceLock<RwLock<Option<[u8; 32]>>> = OnceLock::new();
-    KEY.get_or_init(|| RwLock::new(None))
+    &app_state().secrets_key
 }
 
 fn cached_key() -> Option<[u8; 32]> {
@@ -98,21 +107,46 @@ fn backend_is_memory() -> bool {
 }
 
 fn memory_store() -> &'static Mutex<HashMap<String, String>> {
-    static STORE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
-    STORE.get_or_init(|| Mutex::new(HashMap::new()))
+    &app_state().secrets_memory
 }
 
 // ── On-disk encrypted file ────────────────────────────────────────────────────
 
+/// One encrypted secret entry. The account name is NOT stored here in
+/// plaintext — it is used as AEAD AAD during encryption/decryption, so the
+/// ciphertext is cryptographically bound to its account. The account→entry
+/// mapping is stored in the outer `EncryptedStoreV2.entries` map.
 #[derive(serde::Serialize, serde::Deserialize)]
-struct EncryptedStore {
+struct EncryptedEntry {
+    /// base64 AES-GCM nonce (12 bytes) — unique per entry per save.
+    nonce: String,
+    /// base64 AES-256-GCM ciphertext (includes the 16-byte AEAD tag).
+    ciphertext: String,
+}
+
+/// v2 on-disk format: per-entry encryption with AAD binding to account name.
+///
+/// Each entry in `entries` is independently encrypted with its own nonce.
+/// The account name is used as AAD, so moving a ciphertext from one account
+/// to another causes tag verification failure.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct EncryptedStoreV2 {
     version: u32,
     kdf: String,
-    /// base64 Argon2 salt.
+    /// base64 Argon2 salt (16 bytes).
     salt: String,
-    /// base64 AES-GCM nonce (12 bytes).
+    /// Per-account encrypted entries. Key = account name (e.g. "host:myhost").
+    entries: HashMap<String, EncryptedEntry>,
+}
+
+/// v1 on-disk format (legacy): the whole map encrypted as a single blob.
+/// Kept for backward-compatible reading; new writes always use v2.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct EncryptedStoreV1 {
+    version: u32,
+    kdf: String,
+    salt: String,
     nonce: String,
-    /// base64 AES-256-GCM ciphertext of the JSON-encoded `HashMap<String,String>`.
     ciphertext: String,
 }
 
@@ -157,19 +191,165 @@ fn derive_key(password: &str, salt: &[u8]) -> Result<[u8; 32]> {
     Ok(key)
 }
 
-fn encrypt_map(key: &[u8; 32], map: &HashMap<String, String>) -> Result<(Vec<u8>, Vec<u8>)> {
-    use aes_gcm::aead::{Aead, KeyInit};
+/// Encrypt a single secret, binding the account name as AEAD AAD.
+///
+/// Returns (nonce, ciphertext) where nonce is 12 bytes and ciphertext includes
+/// the 16-byte AEAD tag. The account name is fed as associated data, so a
+/// ciphertext encrypted for account "host:A" will fail to decrypt under account
+/// "host:B" — preventing cut-and-paste attacks.
+fn encrypt_entry(key: &[u8; 32], account: &str, plaintext: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
+    use aes_gcm::aead::{Aead, KeyInit, Payload};
     use aes_gcm::{Aes256Gcm, Nonce};
-    let plaintext = serde_json::to_vec(map)?;
     let nonce_bytes = random_bytes::<12>()?;
     let cipher = Aes256Gcm::new(key.into());
+    let payload = Payload {
+        msg: plaintext,
+        aad: account.as_bytes(),
+    };
     let ciphertext = cipher
-        .encrypt(Nonce::from_slice(&nonce_bytes), plaintext.as_ref())
+        .encrypt(Nonce::from_slice(&nonce_bytes), payload)
         .map_err(|e| anyhow!("encryption failed: {e}"))?;
     Ok((nonce_bytes.to_vec(), ciphertext))
 }
 
-fn decrypt_map(key: &[u8; 32], nonce: &[u8], ciphertext: &[u8]) -> Result<HashMap<String, String>> {
+/// Decrypt a single entry, verifying the AEAD tag against the account name.
+///
+/// Returns `Err` if the key is wrong, the account name doesn't match the AAD
+/// used during encryption, or the ciphertext was tampered with.
+fn decrypt_entry(
+    key: &[u8; 32],
+    account: &str,
+    nonce: &[u8],
+    ciphertext: &[u8],
+) -> Result<Vec<u8>> {
+    use aes_gcm::aead::{Aead, KeyInit, Payload};
+    use aes_gcm::{Aes256Gcm, Nonce};
+    let cipher = Aes256Gcm::new(key.into());
+    let payload = Payload {
+        msg: ciphertext,
+        aad: account.as_bytes(),
+    };
+    let plaintext = cipher
+        .decrypt(Nonce::from_slice(nonce), payload)
+        .map_err(|_| {
+            anyhow!("decryption failed (wrong master password, corrupt entry, or account mismatch)")
+        })?;
+    Ok(plaintext)
+}
+
+/// Read + decrypt the whole secret map using the cached key. Returns an error if
+/// the store is locked.
+///
+/// Handles both v1 (single-blob) and v2 (per-entry with AAD) formats. v1 files
+/// are transparently read — the next `save_map` will migrate them to v2.
+fn load_map() -> Result<HashMap<String, String>> {
+    let key = cached_key().ok_or_else(|| anyhow!("credential store is locked"))?;
+    let path = secrets_path()?;
+    if !path.exists() {
+        return Ok(HashMap::new());
+    }
+    let raw = std::fs::read_to_string(&path).context("failed to read secrets store")?;
+    // Probe the version field to decide the format.
+    let version_probe: serde_json::Value =
+        serde_json::from_str(&raw).context("failed to parse secrets store")?;
+    let version = version_probe
+        .get("version")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1) as u32;
+
+    if version >= 2 {
+        // v2: per-entry encryption with AAD.
+        let store: EncryptedStoreV2 =
+            serde_json::from_str(&raw).context("failed to parse secrets store (v2)")?;
+        let mut map = HashMap::with_capacity(store.entries.len());
+        for (account, entry) in &store.entries {
+            let nonce = b64()
+                .decode(entry.nonce.as_bytes())
+                .context("bad nonce encoding in entry")?;
+            let ciphertext = b64()
+                .decode(entry.ciphertext.as_bytes())
+                .context("bad ciphertext encoding in entry")?;
+            let plaintext = decrypt_entry(&key, account, &nonce, &ciphertext)?;
+            let secret = String::from_utf8(plaintext)
+                .map_err(|e| anyhow!("secret for '{account}' is not valid UTF-8: {e}"))?;
+            map.insert(account.clone(), secret);
+        }
+        Ok(map)
+    } else {
+        // v1: single-blob encryption (legacy). Read and return; migration
+        // happens automatically on the next save_map.
+        let store: EncryptedStoreV1 =
+            serde_json::from_str(&raw).context("failed to parse secrets store (v1)")?;
+        let nonce = b64()
+            .decode(store.nonce.as_bytes())
+            .context("bad nonce encoding")?;
+        let ciphertext = b64()
+            .decode(store.ciphertext.as_bytes())
+            .context("bad ciphertext encoding")?;
+        decrypt_v1_map(&key, &nonce, &ciphertext)
+    }
+}
+
+/// Encrypt + write the whole secret map in v2 format (per-entry with AAD).
+/// Reuses the stored Argon2 salt so the cached key stays valid; each entry gets
+/// its own fresh nonce.
+fn save_map(map: &HashMap<String, String>) -> Result<()> {
+    let key = cached_key().ok_or_else(|| anyhow!("credential store is locked"))?;
+    ensure_config_dir()?;
+    let path = secrets_path()?;
+
+    // Preserve the existing salt (the cached key was derived from it). On first
+    // write the salt must already have been chosen by `unlock_or_init`.
+    let salt = read_salt()?.ok_or_else(|| anyhow!("secrets store salt missing"))?;
+
+    let mut entries = HashMap::with_capacity(map.len());
+    for (account, secret) in map {
+        let (nonce, ciphertext) = encrypt_entry(&key, account, secret.as_bytes())?;
+        entries.insert(
+            account.clone(),
+            EncryptedEntry {
+                nonce: b64().encode(&nonce),
+                ciphertext: b64().encode(&ciphertext),
+            },
+        );
+    }
+    let store = EncryptedStoreV2 {
+        version: 2,
+        kdf: "argon2id".into(),
+        salt: b64().encode(&salt),
+        entries,
+    };
+    let raw = serde_json::to_string_pretty(&store)?;
+    std::fs::write(&path, raw).context("failed to write secrets store")?;
+    restrict_file_to_owner(&path)?;
+    Ok(())
+}
+
+/// Read the stored Argon2 salt, if the file exists. Works with both v1 and v2
+/// formats — both store the salt as a base64 string field.
+fn read_salt() -> Result<Option<Vec<u8>>> {
+    let path = secrets_path()?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = std::fs::read_to_string(&path)?;
+    // Parse as a generic JSON value to extract the salt without needing to
+    // know the version.
+    let probe: serde_json::Value = serde_json::from_str(&raw)?;
+    let salt_str = probe
+        .get("salt")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("secrets store missing salt field"))?;
+    Ok(Some(b64().decode(salt_str.as_bytes())?))
+}
+
+/// Decrypt a v1 single-blob encrypted map (legacy format). Used only for
+/// backward-compatible reading; the next save will migrate to v2.
+fn decrypt_v1_map(
+    key: &[u8; 32],
+    nonce: &[u8],
+    ciphertext: &[u8],
+) -> Result<HashMap<String, String>> {
     use aes_gcm::aead::{Aead, KeyInit};
     use aes_gcm::{Aes256Gcm, Nonce};
     let cipher = Aes256Gcm::new(key.into());
@@ -179,67 +359,13 @@ fn decrypt_map(key: &[u8; 32], nonce: &[u8], ciphertext: &[u8]) -> Result<HashMa
     Ok(serde_json::from_slice(&plaintext)?)
 }
 
-/// Read + decrypt the whole secret map using the cached key. Returns an error if
-/// the store is locked.
-fn load_map() -> Result<HashMap<String, String>> {
-    let key = cached_key().ok_or_else(|| anyhow!("credential store is locked"))?;
-    let path = secrets_path()?;
-    if !path.exists() {
-        return Ok(HashMap::new());
-    }
-    let raw = std::fs::read_to_string(&path).context("failed to read secrets store")?;
-    let store: EncryptedStore =
-        serde_json::from_str(&raw).context("failed to parse secrets store")?;
-    let nonce = b64()
-        .decode(store.nonce.as_bytes())
-        .context("bad nonce encoding")?;
-    let ciphertext = b64()
-        .decode(store.ciphertext.as_bytes())
-        .context("bad ciphertext encoding")?;
-    decrypt_map(&key, &nonce, &ciphertext)
-}
-
-/// Encrypt + write the whole secret map. Reuses the stored Argon2 salt so the
-/// cached key stays valid; only the nonce + ciphertext change.
-fn save_map(map: &HashMap<String, String>) -> Result<()> {
-    let key = cached_key().ok_or_else(|| anyhow!("credential store is locked"))?;
-    ensure_config_dir()?;
-    let path = secrets_path()?;
-
-    // Preserve the existing salt (the cached key was derived from it). On first
-    // write the salt must already have been chosen by `unlock_or_init`.
-    let salt = read_salt()?.ok_or_else(|| anyhow!("secrets store salt missing"))?;
-    let (nonce, ciphertext) = encrypt_map(&key, map)?;
-    let store = EncryptedStore {
-        version: 1,
-        kdf: "argon2id".into(),
-        salt: b64().encode(salt),
-        nonce: b64().encode(nonce),
-        ciphertext: b64().encode(ciphertext),
-    };
-    let raw = serde_json::to_string_pretty(&store)?;
-    std::fs::write(&path, raw).context("failed to write secrets store")?;
-    restrict_file_to_owner(&path)?;
-    Ok(())
-}
-
-/// Read the stored Argon2 salt, if the file exists.
-fn read_salt() -> Result<Option<Vec<u8>>> {
-    let path = secrets_path()?;
-    if !path.exists() {
-        return Ok(None);
-    }
-    let raw = std::fs::read_to_string(&path)?;
-    let store: EncryptedStore = serde_json::from_str(&raw)?;
-    Ok(Some(b64().decode(store.salt.as_bytes())?))
-}
-
 // ── Unlock / init / lock ──────────────────────────────────────────────────────
 
 /// Unlock an existing store, or initialize a new one, with `password`.
 ///
 /// - If `secrets.enc` exists: derive the key from the stored salt and verify it
-///   by decrypting; a wrong password returns an error.
+///   by decrypting; a wrong password returns an error. Handles both v1 (single
+///   blob) and v2 (per-entry with AAD) formats.
 /// - If it does not exist: choose a fresh salt, derive the key, and write an
 ///   empty encrypted store (this *sets* the master password).
 ///
@@ -257,24 +383,36 @@ pub fn unlock_or_init(password: &str) -> Result<()> {
     if path.exists() {
         let salt = read_salt()?.ok_or_else(|| anyhow!("secrets store salt missing"))?;
         let key = derive_key(password, &salt)?;
-        // Verify by decrypting the existing ciphertext.
+        // Verify by decrypting the existing ciphertext. Supports both v1 and v2.
         let raw = std::fs::read_to_string(&path)?;
-        let store: EncryptedStore = serde_json::from_str(&raw)?;
-        let nonce = b64().decode(store.nonce.as_bytes())?;
-        let ciphertext = b64().decode(store.ciphertext.as_bytes())?;
-        decrypt_map(&key, &nonce, &ciphertext)?; // errors on wrong password
+        let probe: serde_json::Value = serde_json::from_str(&raw)?;
+        let version = probe.get("version").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
+
+        if version >= 2 {
+            // v2: verify by decrypting one entry (or succeed if empty).
+            let store: EncryptedStoreV2 = serde_json::from_str(&raw)?;
+            if let Some((account, entry)) = store.entries.iter().next() {
+                let nonce = b64().decode(entry.nonce.as_bytes())?;
+                let ciphertext = b64().decode(entry.ciphertext.as_bytes())?;
+                decrypt_entry(&key, account, &nonce, &ciphertext)?;
+            }
+        } else {
+            // v1: verify by decrypting the single blob.
+            let store: EncryptedStoreV1 = serde_json::from_str(&raw)?;
+            let nonce = b64().decode(store.nonce.as_bytes())?;
+            let ciphertext = b64().decode(store.ciphertext.as_bytes())?;
+            decrypt_v1_map(&key, &nonce, &ciphertext)?;
+        }
         set_cached_key(Some(key));
     } else {
         let salt = random_bytes::<16>()?;
         let key = derive_key(password, &salt)?;
-        // Write an empty store under the new salt, then cache the key.
-        let (nonce, ciphertext) = encrypt_map(&key, &HashMap::new())?;
-        let store = EncryptedStore {
-            version: 1,
+        // Write an empty v2 store under the new salt, then cache the key.
+        let store = EncryptedStoreV2 {
+            version: 2,
             kdf: "argon2id".into(),
-            salt: b64().encode(salt),
-            nonce: b64().encode(nonce),
-            ciphertext: b64().encode(ciphertext),
+            salt: b64().encode(&salt),
+            entries: HashMap::new(),
         };
         std::fs::write(&path, serde_json::to_string_pretty(&store)?)?;
         restrict_file_to_owner(&path)?;
@@ -292,16 +430,27 @@ pub fn change_master_password(new_password: &str) -> Result<()> {
     if new_password.is_empty() {
         return Err(anyhow!("master password must not be empty"));
     }
-    let map = load_map()?; // requires unlocked
+    let map = load_map()?; // requires unlocked (loads v1 or v2 transparently)
     let salt = random_bytes::<16>()?;
     let key = derive_key(new_password, &salt)?;
-    let (nonce, ciphertext) = encrypt_map(&key, &map)?;
-    let store = EncryptedStore {
-        version: 1,
+
+    // Save in v2 format with the new key.
+    let mut entries = HashMap::with_capacity(map.len());
+    for (account, secret) in &map {
+        let (nonce, ciphertext) = encrypt_entry(&key, account, secret.as_bytes())?;
+        entries.insert(
+            account.clone(),
+            EncryptedEntry {
+                nonce: b64().encode(&nonce),
+                ciphertext: b64().encode(&ciphertext),
+            },
+        );
+    }
+    let store = EncryptedStoreV2 {
+        version: 2,
         kdf: "argon2id".into(),
-        salt: b64().encode(salt),
-        nonce: b64().encode(nonce),
-        ciphertext: b64().encode(ciphertext),
+        salt: b64().encode(&salt),
+        entries,
     };
     std::fs::write(secrets_path()?, serde_json::to_string_pretty(&store)?)?;
     restrict_file_to_owner(&secrets_path()?)?;
@@ -482,6 +631,136 @@ mod tests {
         assert_eq!(get_secret(&host_account("x")), None);
         assert!(store_secret(&host_account("x"), "pw").is_err());
 
+        std::env::remove_var("AGENT2SSH_SECRETS_BACKEND");
+        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn aad_binding_prevents_cut_and_paste() {
+        // Verify that a ciphertext encrypted for account A cannot be decrypted
+        // under account B — the AEAD tag verification must fail.
+        let dir = std::env::temp_dir().join(format!("agent2ssh-enc-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("AGENT2SSH_CONFIG_DIR", &dir);
+        std::env::set_var("AGENT2SSH_SECRETS_BACKEND", "encrypted");
+        lock();
+
+        unlock_or_init("correct horse battery staple").unwrap();
+
+        let acct_a = host_account("host-a");
+        let acct_b = host_account("host-b");
+        store_secret(&acct_a, "secret-for-a").unwrap();
+        assert_eq!(get_secret(&acct_a).as_deref(), Some("secret-for-a"));
+
+        // Read the raw file, extract account A's entry, and try to decrypt it
+        // under account B's name — this must fail.
+        let key = cached_key().expect("key must be cached after unlock");
+        let raw = std::fs::read_to_string(dir.join(SECRETS_FILE)).unwrap();
+        let store: EncryptedStoreV2 = serde_json::from_str(&raw).unwrap();
+        let entry_a = store
+            .entries
+            .get(&acct_a)
+            .expect("entry for host-a must exist");
+        let nonce = b64().decode(entry_a.nonce.as_bytes()).unwrap();
+        let ciphertext = b64().decode(entry_a.ciphertext.as_bytes()).unwrap();
+
+        // Decrypting under the correct account works.
+        let plaintext = decrypt_entry(&key, &acct_a, &nonce, &ciphertext);
+        assert!(plaintext.is_ok());
+        assert_eq!(
+            String::from_utf8(plaintext.unwrap()).unwrap(),
+            "secret-for-a"
+        );
+
+        // Decrypting under a different account name must fail (AAD mismatch).
+        let result = decrypt_entry(&key, &acct_b, &nonce, &ciphertext);
+        assert!(
+            result.is_err(),
+            "cut-and-paste attack must fail: AAD mismatch should cause tag verification failure"
+        );
+
+        lock();
+        std::env::remove_var("AGENT2SSH_SECRETS_BACKEND");
+        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn v1_to_v2_migration_on_save() {
+        // Write a v1 format file manually, then verify it's read correctly and
+        // migrated to v2 on the next save.
+        let dir = std::env::temp_dir().join(format!("agent2ssh-enc-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("AGENT2SSH_CONFIG_DIR", &dir);
+        std::env::set_var("AGENT2SSH_SECRETS_BACKEND", "encrypted");
+        lock();
+
+        // Create a v1 store manually.
+        let salt = random_bytes::<16>().unwrap();
+        let password = "migration-test-pw";
+        let key = derive_key(password, &salt).unwrap();
+        let mut map = HashMap::new();
+        map.insert(host_account("mig-host"), "mig-secret".to_string());
+        let (nonce, ciphertext) = {
+            use aes_gcm::aead::{Aead, KeyInit};
+            use aes_gcm::{Aes256Gcm, Nonce};
+            let plaintext = serde_json::to_vec(&map).unwrap();
+            let nonce_bytes = random_bytes::<12>().unwrap();
+            let cipher = Aes256Gcm::new((&key).into());
+            let ct = cipher
+                .encrypt(Nonce::from_slice(&nonce_bytes), plaintext.as_ref())
+                .unwrap();
+            (nonce_bytes.to_vec(), ct)
+        };
+        let v1_store = serde_json::json!({
+            "version": 1u32,
+            "kdf": "argon2id",
+            "salt": b64().encode(&salt),
+            "nonce": b64().encode(&nonce),
+            "ciphertext": b64().encode(&ciphertext),
+        });
+        std::fs::write(
+            dir.join(SECRETS_FILE),
+            serde_json::to_string_pretty(&v1_store).unwrap(),
+        )
+        .unwrap();
+
+        // Unlock with the v1 password — should succeed and read v1 format.
+        unlock_or_init(password).unwrap();
+        assert_eq!(
+            get_secret(&host_account("mig-host")).as_deref(),
+            Some("mig-secret"),
+            "v1 store must be readable"
+        );
+
+        // Now store a new secret — this triggers save_map which writes v2.
+        store_secret(&host_account("mig-host-2"), "mig-secret-2").unwrap();
+
+        // Verify the file is now v2.
+        let raw = std::fs::read_to_string(dir.join(SECRETS_FILE)).unwrap();
+        let probe: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            probe["version"].as_u64(),
+            Some(2),
+            "file must be migrated to v2"
+        );
+
+        // Both secrets must be readable after migration.
+        assert_eq!(
+            get_secret(&host_account("mig-host")).as_deref(),
+            Some("mig-secret"),
+            "original secret must survive migration"
+        );
+        assert_eq!(
+            get_secret(&host_account("mig-host-2")).as_deref(),
+            Some("mig-secret-2"),
+            "new secret must be readable after migration"
+        );
+
+        lock();
         std::env::remove_var("AGENT2SSH_SECRETS_BACKEND");
         std::env::remove_var("AGENT2SSH_CONFIG_DIR");
         let _ = std::fs::remove_dir_all(&dir);

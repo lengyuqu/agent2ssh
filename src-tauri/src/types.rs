@@ -285,6 +285,16 @@ pub fn source_from_env(default_source: &str) -> String {
         .unwrap_or_else(|| default_source.to_string())
 }
 
+/// Determine the source identifier using the active transport.
+/// Uses `Host::transport_name()` as the default, which reflects the
+/// actual binary context (daemon → "daemon", Tauri → "desktop", CLI → "cli")
+/// rather than a hardcoded string. Can still be overridden via
+/// `AGENT2SSH_SOURCE` env var.
+pub fn source_from_transport() -> String {
+    let host = crate::app_state::host();
+    source_from_env(host.transport_name())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
     /// Schema version of the persisted `hosts.json`. Absent in legacy files

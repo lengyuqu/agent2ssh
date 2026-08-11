@@ -76,6 +76,12 @@ pub struct WebDavSyncOptions {
     pub password: Option<String>,
     pub password_env: Option<String>,
     pub config_path: Option<PathBuf>,
+    /// Password for encrypting the sync backup before upload.
+    /// If set, each file is encrypted with AES-256-GCM before being
+    /// sent to the WebDAV server, and decrypted after download.
+    /// If None, files are uploaded as plaintext (backward compatible).
+    pub sync_password: Option<String>,
+    pub sync_password_env: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -84,6 +90,10 @@ struct WebDavConfigFile {
     username: Option<String>,
     password: Option<String>,
     password_env: Option<String>,
+    #[serde(default)]
+    sync_password: Option<String>,
+    #[serde(default)]
+    sync_password_env: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -91,6 +101,7 @@ struct ResolvedWebDavConfig {
     url: String,
     username: Option<String>,
     password: Option<String>,
+    sync_password: Option<String>,
 }
 
 fn default_config_path() -> Result<PathBuf> {
@@ -138,10 +149,24 @@ fn resolve_config(options: &WebDavSyncOptions) -> Result<ResolvedWebDavConfig> {
         .or_else(|| password_env.and_then(|name| std::env::var(name).ok()))
         .filter(|value| !value.is_empty());
 
+    let sync_password_env = options
+        .sync_password_env
+        .clone()
+        .or(file.sync_password_env)
+        .filter(|value| !value.trim().is_empty());
+    let sync_password = options
+        .sync_password
+        .clone()
+        .or_else(|| std::env::var("AGENT2SSH_SYNC_PASSWORD").ok())
+        .or(file.sync_password)
+        .or_else(|| sync_password_env.and_then(|name| std::env::var(name).ok()))
+        .filter(|value| !value.is_empty());
+
     Ok(ResolvedWebDavConfig {
         url: url.trim_end_matches('/').to_string(),
         username,
         password,
+        sync_password,
     })
 }
 
@@ -554,7 +579,13 @@ pub async fn webdav_push(options: WebDavSyncOptions) -> Result<WebDavSyncResult>
     for file in &files {
         let bytes = fs::read(dir.join(&file.path))?;
         let url = join_url(&join_url(&config.url, REMOTE_FILES_DIR), &file.path);
-        put_bytes(&client, &config, &url, bytes).await?;
+        let upload_bytes = if let Some(ref pw) = config.sync_password {
+            crate::backup_crypto::encrypt_backup(pw.as_bytes(), &bytes)
+                .with_context(|| format!("failed to encrypt {}", file.path))?
+        } else {
+            bytes
+        };
+        put_bytes(&client, &config, &url, upload_bytes).await?;
     }
     let marker_bytes = serde_json::to_vec_pretty(&marker)?;
     put_bytes(
@@ -601,7 +632,18 @@ pub async fn webdav_pull(options: WebDavSyncOptions) -> Result<WebDavSyncResult>
     for file in &applied_files {
         let url = join_url(&join_url(&config.url, REMOTE_FILES_DIR), &file.path);
         let bytes = get_bytes(&client, &config, &url).await?;
-        let sha256 = hash_bytes(&bytes);
+        let plaintext = if let Some(ref pw) = config.sync_password {
+            if crate::backup_crypto::is_encrypted_backup(&bytes) {
+                crate::backup_crypto::decrypt_backup(pw.as_bytes(), &bytes)
+                    .with_context(|| format!("failed to decrypt {}", file.path))?
+            } else {
+                // Backward compat: file was pushed before encryption was enabled
+                bytes
+            }
+        } else {
+            bytes
+        };
+        let sha256 = hash_bytes(&plaintext);
         if sha256 != file.sha256 {
             return Err(anyhow!(
                 "checksum mismatch for {} (expected {}, got {})",
@@ -612,7 +654,8 @@ pub async fn webdav_pull(options: WebDavSyncOptions) -> Result<WebDavSyncResult>
         }
         let dest = dir.join(&file.path);
         let tmp = dest.with_extension(format!("tmp.{}", std::process::id()));
-        fs::write(&tmp, bytes).with_context(|| format!("failed to write {}", tmp.display()))?;
+        fs::write(&tmp, plaintext)
+            .with_context(|| format!("failed to write {}", tmp.display()))?;
         restrict_file_to_owner(&tmp)?;
         fs::rename(&tmp, &dest).with_context(|| format!("failed to replace {}", dest.display()))?;
         restrict_file_to_owner(&dest)?;

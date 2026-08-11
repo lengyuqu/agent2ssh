@@ -16,15 +16,18 @@
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
+
+use uuid::Uuid;
+
+use crate::app_state::app_state;
 
 /// Chunk size for cancellable copies. Large enough to keep throughput high,
 /// small enough that a cancel is observed within a few hundred KB.
 const COPY_CHUNK: usize = 64 * 1024;
 
 fn registry() -> &'static Mutex<HashMap<String, Arc<AtomicBool>>> {
-    static REG: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
-    REG.get_or_init(|| Mutex::new(HashMap::new()))
+    &app_state().transfer_cancels
 }
 
 /// Register a cancellable transfer, returning its shared cancel flag. The copy
@@ -35,12 +38,30 @@ pub fn register(transfer_id: &str) -> Arc<AtomicBool> {
         .lock()
         .unwrap()
         .insert(transfer_id.to_string(), flag.clone());
+
+    // Reserve + activate a lifecycle entry so this transfer is tracked.
+    let lifecycle = crate::app_state::lifecycle();
+    if let Ok(reservation) = crate::lifecycle::LifecycleRegistry::reserve(
+        &lifecycle,
+        transfer_id,
+        crate::app_state::ResourceKind::Transfer,
+        crate::app_state::ResourceOwner::Headless(Uuid::new_v4()),
+    ) {
+        let _ = reservation.activate();
+    }
+
     flag
 }
 
 /// Remove a transfer from the registry once it finishes (success or failure).
 pub fn unregister(transfer_id: &str) {
     registry().lock().unwrap().remove(transfer_id);
+
+    // Mark the lifecycle entry as Closed.
+    let _ = crate::app_state::lifecycle()
+        .lock()
+        .unwrap()
+        .close(transfer_id, None);
 }
 
 /// Request cancellation of an in-flight transfer. Returns true if a transfer

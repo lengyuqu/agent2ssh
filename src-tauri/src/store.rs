@@ -5,22 +5,22 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    sync::{Mutex, MutexGuard, OnceLock},
+    sync::{Mutex, MutexGuard},
 };
 
+use crate::app_state::app_state;
 use crate::types::{
     default_host_group, default_host_groups, AppConfig, AuditEntry, AuditFilter, ExecResult,
     RiskLevel,
 };
 
-static STORE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+// Process-local config file write lock, delegated to AppState (P2 #5).
+pub fn hosts_lock() -> &'static Mutex<()> {
+    &app_state().store_lock
+}
 
 type HostLabelMap =
     std::collections::HashMap<String, (Option<String>, Option<String>, Option<String>)>;
-
-pub fn hosts_lock() -> &'static Mutex<()> {
-    STORE_LOCK.get_or_init(|| Mutex::new(()))
-}
 
 pub struct StoreWriteGuard {
     _process_guard: MutexGuard<'static, ()>,
@@ -758,14 +758,19 @@ pub fn compute_metrics_trend(period: TrendPeriod) -> Result<MetricsTrend> {
 }
 
 pub fn redact_sensitive_text(input: &str) -> String {
-    let upper = input.to_ascii_uppercase();
+    // First pass: regex-based default rules (IP, API keys, JWT, hex blobs).
+    let regex_redacted = crate::redaction::redact_default(input);
+
+    // Second pass: existing token-based heuristics (keyword=value, bearer,
+    // private keys, high-entropy strings).
+    let upper = regex_redacted.to_ascii_uppercase();
     if upper.contains("BEGIN ") && upper.contains("PRIVATE KEY") {
         return "[REDACTED PRIVATE KEY]".to_string();
     }
 
     let mut out = Vec::new();
     let mut redact_next = false;
-    for token in input.split_whitespace() {
+    for token in regex_redacted.split_whitespace() {
         let lower = token.to_ascii_lowercase();
         if redact_next {
             if matches!(lower.as_str(), "bearer" | "basic") {
@@ -1420,7 +1425,7 @@ mod tests {
         );
         assert_eq!(
             generic,
-            "curl https://[REDACTED]@example.com/hook key [REDACTED] [REDACTED]"
+            "curl https://[REDACTED]@example.com/hook key <REDACTED:hex> [REDACTED]"
         );
 
         let safe = redact_sensitive_text(

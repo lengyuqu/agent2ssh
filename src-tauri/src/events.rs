@@ -1,7 +1,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::sync::OnceLock;
 use tokio::sync::broadcast;
+
+use crate::app_state::app_state;
 
 /// Represents an event emitted by the agent2ssh system.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,14 +41,9 @@ pub enum EventType {
     AnomalyDetected,
 }
 
-static EVENT_BUS: OnceLock<broadcast::Sender<Agent2SSHEvent>> = OnceLock::new();
-
 /// Get the global event bus sender.
 pub fn event_bus() -> &'static broadcast::Sender<Agent2SSHEvent> {
-    EVENT_BUS.get_or_init(|| {
-        let (tx, _) = broadcast::channel(1024);
-        tx
-    })
+    &app_state().event_tx
 }
 
 /// Publish an event to the event bus.
