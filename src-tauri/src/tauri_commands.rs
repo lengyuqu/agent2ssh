@@ -42,6 +42,7 @@ use crate::{
         session_close_core, session_list_core, session_open_core, session_read_core,
         session_write_core,
     },
+    snippets::{add_snippet, load_snippets, remove_snippet, Snippet},
     store::{append_audit, config_dir, lock_config_file, restrict_file_to_owner},
     types::{
         source_from_transport, AuditEntry, AuditFilter, ConnectionStatus, ExecMultiResult,
@@ -2776,6 +2777,28 @@ fn apply_wayland_compat() {
 #[cfg(not(target_os = "linux"))]
 fn apply_wayland_compat() {}
 
+// ── Command snippets ────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn list_snippets_command() -> Result<Vec<Snippet>, String> {
+    load_snippets().map_err(|error| format!("failed to load snippets: {error}"))
+}
+
+#[tauri::command]
+pub fn save_snippet_command(snippet: Snippet) -> Result<Vec<Snippet>, String> {
+    add_snippet(
+        &snippet.name,
+        &snippet.command,
+        snippet.description.as_deref(),
+    )
+    .map_err(|error| format!("failed to save snippet: {error}"))
+}
+
+#[tauri::command]
+pub fn delete_snippet_command(name: String) -> Result<bool, String> {
+    remove_snippet(&name).map_err(|error| format!("failed to delete snippet: {error}"))
+}
+
 // ── Bootstrap ────────────────────────────────────────────────────────────────
 
 pub fn run_tauri() {
@@ -2842,6 +2865,10 @@ pub fn run_tauri() {
             restore_config_snapshot_cmd,
             delete_config_snapshot_cmd,
             apply_config_template_cmd,
+            // Command snippets
+            list_snippets_command,
+            save_snippet_command,
+            delete_snippet_command,
             // Execution
             classify_command_risk,
             classify_command_risk_for_host,

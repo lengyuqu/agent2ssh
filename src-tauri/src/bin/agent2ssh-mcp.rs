@@ -14,13 +14,14 @@ use agent2ssh::remote::{
 use agent2ssh::risk_config::classify_with_user_rules;
 use agent2ssh::store::{audit_path, compute_metrics_trend, TrendPeriod};
 use agent2ssh::{
-    add_host_core, append_diagnostic_log, collect_health_snapshot, compare_exec_results,
-    compare_ssh_configs, connect_host, disconnect_host, dry_run_playbook, effective_command_risk,
-    exec_multi_core, exec_multi_with_strategy, exec_ssh_core, export_audit_csv, export_audit_jsonl,
-    export_team_config, export_to_ssh_config, forward_add_core, forward_list_core,
-    forward_remove_core, import_ssh_config_core, import_team_config, list_active_connections,
-    list_audit_core, list_hosts_core, list_playbooks_core, ping_hosts_core, preview_exec,
-    preview_exec_multi, preview_team_config_import, remove_host_core,
+    add_host_core, add_snippet, append_diagnostic_log, collect_health_snapshot,
+    compare_exec_results, compare_ssh_configs, connect_host, disconnect_host, dry_run_playbook,
+    effective_command_risk, exec_multi_core, exec_multi_with_strategy, exec_ssh_core,
+    export_audit_csv, export_audit_jsonl, export_team_config, export_to_ssh_config,
+    forward_add_core, forward_list_core, forward_remove_core, import_ssh_config_core,
+    import_team_config, list_active_connections, list_audit_core, list_hosts_core,
+    list_playbooks_core, load_snippets, ping_hosts_core, preview_exec, preview_exec_multi,
+    preview_team_config_import, remove_host_core, remove_snippet,
     run_playbook_core_with_source_and_approved_steps, session_close_core, session_list_core,
     session_open_core, session_read_core, session_write_core, sftp_download_core_with_source,
     sftp_ls_core_with_source, sftp_mkdir_core_with_source, sftp_stat_core_with_source,
@@ -1270,6 +1271,24 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
                 .unwrap_or_default();
             let result = dry_run_playbook(playbook, &params_map).map_err(McpError::from)?;
             serde_json::to_value(result)?
+        }
+        McpTool::SshSnippetList => serde_json::to_value(load_snippets().map_err(McpError::from)?)?,
+        McpTool::SshSnippetSave => {
+            let name = args["name"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("name required"))?;
+            let command = args["command"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("command required"))?;
+            let description = args["description"].as_str();
+            serde_json::to_value(add_snippet(name, command, description).map_err(McpError::from)?)?
+        }
+        McpTool::SshSnippetDelete => {
+            let name = args["name"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("name required"))?;
+            let removed = remove_snippet(name).map_err(McpError::from)?;
+            json!({ "removed": removed, "name": name })
         }
         McpTool::SshConnectionStatus => {
             let statuses = list_active_connections().await;

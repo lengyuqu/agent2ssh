@@ -20,7 +20,7 @@
 - [配置指南](guides/configuration-guide.md) — `~/.agent2ssh/` 全部文件布局与字段说明
 - [MCP 客户端模板](guides/mcp-client-templates.md) — Claude/Cursor/Codex/Windsurf 等配置
 - [架构说明](architecture.md) — 组件、安全模型、控制面与持久化
-- [MCP Tools Reference](skills.md) — 51 个 MCP 工具完整定义
+- [MCP Tools Reference](skills.md) — 54 个 MCP 工具完整定义
 - [Skill 分发指南](skill-distribution.md) — 安装方式、权限分级与更新策略
 - [API 契约](api.yaml) — OpenAPI 规范（daemon HTTP/WS 端点）
 

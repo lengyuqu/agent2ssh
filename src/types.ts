@@ -527,3 +527,11 @@ export type HighlightRule = {
   is_regex: boolean;
   is_case_sensitive: boolean;
 };
+
+// Rust: snippets.rs — Snippet
+// description is omitted when the backend value is None.
+export type Snippet = {
+  name: string;
+  command: string;
+  description?: string | null;
+};

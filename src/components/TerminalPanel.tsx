@@ -1,4 +1,5 @@
 import {
+  BookMarked,
   ChevronDown,
   ChevronRight,
   Columns2,
@@ -10,7 +11,7 @@ import {
   TerminalSquare,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "../i18n";
 import type { HostProfile } from "../types";
 import {
@@ -22,6 +23,7 @@ import {
 } from "../terminalThemes";
 import { useTheme, type Theme as AppTheme } from "../theme";
 import TerminalView, { type TerminalViewHandle } from "./TerminalView";
+import SnippetsDialog from "./SnippetsDialog";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
 import { IconButton } from "./ui/icon-button";
@@ -121,10 +123,24 @@ export default function TerminalPanel({ hosts, initialHost = "" }: Props) {
   // handles used to inject a picked entry back into the right pane.
   const historyRef = useRef<Map<string, string[]>>(new Map());
   const terminalRefs = useRef<Map<string, TerminalViewHandle>>(new Map());
+  const focusedTabIdRef = useRef<string | null>(null);
   const [historySearch, setHistorySearch] = useState<{ paneIndex: number; query: string } | null>(
     null
   );
   const [collapsedHosts, setCollapsedHosts] = useState<Set<string>>(() => new Set());
+  const [snippetsOpen, setSnippetsOpen] = useState(false);
+
+  focusedTabIdRef.current = paneTabIds[focusedPane] ?? null;
+
+  const insertSnippet = useCallback((command: string) => {
+    const tabId = focusedTabIdRef.current;
+    if (!tabId) return;
+    const terminal = terminalRefs.current.get(tabId);
+    if (!terminal) return;
+    terminal.sendText(command);
+    terminal.focus();
+    setSnippetsOpen(false);
+  }, []);
 
   useEffect(() => {
     try {
@@ -308,6 +324,15 @@ export default function TerminalPanel({ hosts, initialHost = "" }: Props) {
           <Button size="sm" onClick={() => openTab(newHost)} disabled={!newHost} className="h-8">
             <Plus size={13} />
             {t("New terminal")}
+          </Button>
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={() => setSnippetsOpen(true)}
+            className="h-8"
+          >
+            <BookMarked size={13} />
+            {t("Command snippets")}
           </Button>
         </div>
 
@@ -564,6 +589,12 @@ export default function TerminalPanel({ hosts, initialHost = "" }: Props) {
           </div>
         )}
       </div>
+      <SnippetsDialog
+        open={snippetsOpen}
+        canInsert={Boolean(paneTabIds[focusedPane])}
+        onClose={() => setSnippetsOpen(false)}
+        onInsert={insertSnippet}
+      />
     </Card>
   );
 }

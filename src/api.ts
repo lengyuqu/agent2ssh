@@ -38,6 +38,7 @@ import type {
   SftpExchangeRequest,
   SftpExchangeResult,
   SessionInfo,
+  Snippet,
   SftpResult,
   SshKeyInfo,
   TeamConfigExport,
@@ -299,6 +300,13 @@ export const api = {
   updateHighlight: (oldKeyword: string, rule: HighlightRule) =>
     invoke<HighlightRule[]>("update_highlight", { oldKeyword, rule }),
   resetHighlights: () => invoke<HighlightRule[]>("reset_highlights"),
+
+  // Command snippets
+  listSnippets: () => invoke<Snippet[]>("list_snippets_command"),
+  saveSnippet: (snippet: Snippet) =>
+    invoke<Snippet[]>("save_snippet_command", { snippet }),
+  deleteSnippet: (name: string) =>
+    invoke<boolean>("delete_snippet_command", { name }),
   sessionOpenDaemon: async (host: string): Promise<string> => {
     const token = await invoke<string>("get_daemon_token");
     const res = await fetch(`${daemonUrl}/sessions`, {

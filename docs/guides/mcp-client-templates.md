@@ -267,6 +267,6 @@ npm install @modelcontextprotocol/sdk
 
 ## 可用工具
 
-Agent2SSH 共暴露 51 个 MCP 工具，涵盖主机管理、命令执行、SFTP、会话、端口转发、审计、审批、健康检查、指标、execution gate 和远程 daemon 等。完整列表参见 [MCP Tools Reference](../skills.md)。
+Agent2SSH 共暴露 54 个 MCP 工具，涵盖主机管理、命令片段、命令执行、SFTP、会话、端口转发、审计、审批、健康检查、指标、execution gate 和远程 daemon 等。完整列表参见 [MCP Tools Reference](../skills.md)。
 
 第一次给外部用户接入时，建议优先使用 [外部用户 10 分钟接入剧本](external-user-10min.md)，再回到本页查具体客户端模板。

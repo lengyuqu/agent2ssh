@@ -143,6 +143,38 @@ async fn b39_webdav_help_lists_push_pull_status() {
     assert!(stdout.contains("status"), "webdav help must mention status");
 }
 
+#[tokio::test]
+async fn snippet_help_and_local_crud_contract() {
+    let (stdout, _stderr, code) = run_cli(&["snippet", "--help"]).await;
+    assert_eq!(code, Some(0));
+    for command in ["list", "save", "delete"] {
+        assert!(
+            stdout.contains(command),
+            "snippet help must mention {command}"
+        );
+    }
+
+    let dir = unique_temp_dir("snippet-crud");
+    let (_, stderr, code) =
+        run_cli_in_dir(&dir, &["snippet", "save", "health", "uptime", "--json"]).await;
+    assert_eq!(code, Some(0), "save failed: {stderr}");
+
+    let (stdout, stderr, code) = run_cli_in_dir(&dir, &["snippet", "list", "--json"]).await;
+    assert_eq!(code, Some(0), "list failed: {stderr}");
+    let snippets: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(snippets[0]["name"], "health");
+    assert_eq!(snippets[0]["command"], "uptime");
+
+    let (stdout, stderr, code) =
+        run_cli_in_dir(&dir, &["snippet", "delete", "health", "--json"]).await;
+    assert_eq!(code, Some(0), "delete failed: {stderr}");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&stdout).unwrap()["removed"],
+        true
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 // ── Version contract ───────────────────────────────────────────────────────
 
 #[tokio::test]

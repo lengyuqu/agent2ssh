@@ -17,17 +17,18 @@ use agent2ssh::remote::{
 };
 use agent2ssh::store::{audit_path, compute_metrics_trend, restrict_file_to_owner, TrendPeriod};
 use agent2ssh::{
-    add_host_core, collect_health_snapshot, compare_exec_results, dry_run_playbook,
+    add_host_core, add_snippet, collect_health_snapshot, compare_exec_results, dry_run_playbook,
     effective_command_risk, exec_multi_core, exec_multi_with_strategy, exec_ssh_core,
     export_audit_csv, export_audit_jsonl, export_team_config, filter_hosts, import_ssh_config_core,
     import_team_config, list_audit_core, list_daemons_core, list_hosts_filtered_core,
-    list_playbooks_core, ping_hosts_core, preview_exec, preview_exec_multi, remove_host_core,
-    run_playbook_core_with_source_and_approved_steps, sftp_download_core_with_source,
-    sftp_ls_core_with_source, sftp_mkdir_core_with_source, sftp_stat_core_with_source,
-    sftp_upload_core_with_source, source_from_transport, validate_policy_path, AuditFilter,
-    BatchStrategy, ExecComparison, ExecMultiBatchRequest, ExecMultiRequest, ExecRequest,
-    ExecutionGateStatus, ForwardDirection, ForwardRule, HostFilter, HostProfile, PolicyDecision,
-    PolicyTestResult, RiskLevel, SftpDownloadRequest, SftpUploadRequest, TeamConfigExport,
+    list_playbooks_core, load_snippets, ping_hosts_core, preview_exec, preview_exec_multi,
+    remove_host_core, remove_snippet, run_playbook_core_with_source_and_approved_steps,
+    sftp_download_core_with_source, sftp_ls_core_with_source, sftp_mkdir_core_with_source,
+    sftp_stat_core_with_source, sftp_upload_core_with_source, source_from_transport,
+    validate_policy_path, AuditFilter, BatchStrategy, ExecComparison, ExecMultiBatchRequest,
+    ExecMultiRequest, ExecRequest, ExecutionGateStatus, ForwardDirection, ForwardRule, HostFilter,
+    HostProfile, PolicyDecision, PolicyTestResult, RiskLevel, SftpDownloadRequest,
+    SftpUploadRequest, Snippet, TeamConfigExport,
 };
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -254,6 +255,11 @@ enum Commands {
     Webdav {
         #[command(subcommand)]
         command: WebDavCommands,
+    },
+    /// Manage reusable command snippets
+    Snippet {
+        #[command(subcommand)]
+        command: SnippetCommands,
     },
     /// Run diagnostic checks on the agent2ssh environment
     Doctor {
@@ -817,6 +823,30 @@ enum PlaybookCommands {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum SnippetCommands {
+    /// List saved command snippets
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create or replace a command snippet
+    Save {
+        name: String,
+        command: String,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delete a command snippet by name
+    Delete {
+        name: String,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 async fn effective_risk_for_policy(
     command: &str,
     risk_override: Option<RiskLevel>,
@@ -1055,6 +1085,61 @@ fn command_authorization_error(error: CommandAuthorizationError) -> anyhow::Erro
         }
         CommandAuthorizationError::Internal(message) => anyhow::anyhow!(message),
     }
+}
+
+async fn remote_snippet_list(alias: &str) -> Result<Vec<Snippet>> {
+    let (url, token) = get_daemon(alias)?;
+    let client = reqwest::Client::new();
+    let mut request = client.get(format!("{}/snippets", url.trim_end_matches('/')));
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    request
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await
+        .context("failed to decode daemon snippets response")
+}
+
+async fn remote_snippet_save(alias: &str, snippet: &Snippet) -> Result<Vec<Snippet>> {
+    let (url, token) = get_daemon(alias)?;
+    let client = reqwest::Client::new();
+    let mut request = client
+        .post(format!("{}/snippets", url.trim_end_matches('/')))
+        .json(snippet);
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    request
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await
+        .context("failed to decode daemon snippet save response")
+}
+
+async fn remote_snippet_delete(alias: &str, name: &str) -> Result<bool> {
+    let (url, token) = get_daemon(alias)?;
+    let mut endpoint = reqwest::Url::parse(&format!("{}/snippets/", url.trim_end_matches('/')))?;
+    endpoint
+        .path_segments_mut()
+        .map_err(|_| anyhow::anyhow!("daemon URL cannot be used as a base URL"))?
+        .push(name);
+    let client = reqwest::Client::new();
+    let mut request = client.delete(endpoint);
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    request
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await
+        .context("failed to decode daemon snippet delete response")
 }
 
 fn main() -> Result<()> {
@@ -2690,6 +2775,84 @@ async fn async_main() -> Result<()> {
                             );
                         }
                     }
+                }
+            }
+        },
+        Commands::Snippet { command } => match command {
+            SnippetCommands::List { json } => {
+                let snippets = if let Some(alias) = daemon_alias.as_deref() {
+                    if alias != "localhost" {
+                        remote_snippet_list(alias).await?
+                    } else {
+                        load_snippets()?
+                    }
+                } else {
+                    load_snippets()?
+                };
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&snippets)?);
+                } else if snippets.is_empty() {
+                    println!("No snippets configured.");
+                } else {
+                    for snippet in snippets {
+                        let description = snippet.description.as_deref().unwrap_or("");
+                        println!("{}\t{}\t{}", snippet.name, snippet.command, description);
+                    }
+                }
+            }
+            SnippetCommands::Save {
+                name,
+                command,
+                description,
+                json,
+            } => {
+                let snippet = Snippet {
+                    name,
+                    command,
+                    description,
+                };
+                let snippets = if let Some(alias) = daemon_alias.as_deref() {
+                    if alias != "localhost" {
+                        remote_snippet_save(alias, &snippet).await?
+                    } else {
+                        add_snippet(
+                            &snippet.name,
+                            &snippet.command,
+                            snippet.description.as_deref(),
+                        )?
+                    }
+                } else {
+                    add_snippet(
+                        &snippet.name,
+                        &snippet.command,
+                        snippet.description.as_deref(),
+                    )?
+                };
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&snippets)?);
+                } else {
+                    println!("Saved snippet '{}'.", snippet.name.trim());
+                }
+            }
+            SnippetCommands::Delete { name, json } => {
+                let removed = if let Some(alias) = daemon_alias.as_deref() {
+                    if alias != "localhost" {
+                        remote_snippet_delete(alias, &name).await?
+                    } else {
+                        remove_snippet(&name)?
+                    }
+                } else {
+                    remove_snippet(&name)?
+                };
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({ "removed": removed, "name": name })
+                    );
+                } else if removed {
+                    println!("Deleted snippet '{}'.", name.trim());
+                } else {
+                    println!("Snippet '{}' was not found.", name.trim());
                 }
             }
         },

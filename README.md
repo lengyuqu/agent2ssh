@@ -167,7 +167,7 @@ Configure Agent2SSH as an MCP server in your agent's config:
 Set `AGENT2SSH_SOURCE` to the client label you want to see in Activity, such as
 `workbuddy`, `qoder_work`, `trae`, `codex`, or `claude_desktop`.
 
-See [docs/skills.md](docs/skills.md) for the full list of 51 MCP tools.
+See [docs/skills.md](docs/skills.md) for the full list of 54 MCP tools.
 
 For first-time external users, follow the [10-minute CLI and MCP setup guide](docs/guides/external-user-10min.md). It covers host import, low-risk command verification, Codex/Claude-style MCP configuration, and sanitized feedback submission.
 
@@ -260,9 +260,9 @@ For first-time external users, follow the [10-minute CLI and MCP setup guide](do
 - MCP tools for local and remote operation
 - Bounded event previews for session input/output and streaming exec output, suitable for local agent activity monitoring
 
-## MCP Tools (51)
+## MCP Tools (54)
 
-Agent2SSH exposes **51 MCP tools** covering host management, command execution, SFTP, persistent sessions, port forwarding, playbooks, audit, approval workflows, execution gate visibility, daemon management, and more.
+Agent2SSH exposes **54 MCP tools** covering host management, command snippets, command execution, SFTP, persistent sessions, port forwarding, playbooks, audit, approval workflows, execution gate visibility, daemon management, and more.
 
 For the complete tool reference with descriptions and parameters, see [docs/skills.md](docs/skills.md).
 

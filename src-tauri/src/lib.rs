@@ -167,7 +167,9 @@ pub use lifecycle::{LifecycleError, LifecycleRegistry, ResourceReservation};
 pub use osc_ipc::{emit_osc_forward, emit_osc_open, AGENT2SSH_APP_ENV};
 pub use path_resolver::resolve_executable_in;
 pub use sftp_transfer::walk_local_dir;
-pub use snippets::{load_snippets, save_snippets, Snippet};
+pub use snippets::{
+    add_snippet, load_snippets, remove_snippet, save_snippets, validate_snippet, Snippet,
+};
 pub use url_safety::{open_external_url, strip_ansi_escapes, validate_url_scheme};
 
 #[cfg(feature = "tauri")]

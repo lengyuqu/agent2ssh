@@ -16,7 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - **Prompt waiter**: Interactive prompt detection and waiting (`prompt_waiter.rs`) for password/OTP/confirmation prompts inside PTY sessions.
 - **Container discovery**: Container/platform discovery module (`container_discovery.rs`) for SSH targets inside containers.
 - **SSH algorithm management**: Explicit SSH algorithm/curve control (`ssh_algo.rs`), URL safety validation (`url_safety.rs`), path resolution guardrails (`path_resolver.rs`), WebSocket drain handling (`ws_drain.rs`), and OSC/IPC bridging (`osc_ipc.rs`).
-- **Snippets**: Reusable command snippet storage and loading (`snippets.rs`).
+- **Snippets**: Reusable command snippet storage with validated CRUD across desktop, CLI, daemon HTTP, and MCP, plus WebDAV synchronization (`snippets.rs`).
 - **Encrypted backup crypto**: Key derivation and backup encryption primitives (`backup_crypto.rs`) used by the encrypted sync path.
 - **CI lint checks**: Added Biome config (`biome.json`), frontend test infrastructure (Vitest + Testing Library), and CI lint gates.
 - **Branch protection**: Documented branch protection policy (`docs/guides/branch-protection.md`) and added `.github/CODEOWNERS`.

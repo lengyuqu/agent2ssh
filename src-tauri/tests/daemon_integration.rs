@@ -960,20 +960,20 @@ async fn http_hosts_list_returns_valid_json_array() {
 // Part 3: MCP tool enumeration test (P4-1)
 // ============================================================================
 
-/// Meta-test: verify the MCP binary declares exactly 51 tools by parsing
+/// Meta-test: verify the MCP binary declares exactly 54 tools by parsing
 /// the schema-driven tool registry and counting `"name":` entries.
 ///
 /// This avoids the need to run the MCP server over stdio JSON-RPC, which
 /// requires a full process lifecycle. Instead we treat the source as the
 /// canonical tool registry and assert on its structure.
 #[test]
-fn mcp_tool_list_contains_exactly_51_tools() {
+fn mcp_tool_list_contains_exactly_54_tools() {
     let registry = include_str!("../src/bin/agent2ssh_mcp/tools.rs");
     let tool_count = registry.matches("\"name\": \"ssh_").count();
 
     assert_eq!(
-        tool_count, 51,
-        "Expected exactly 51 MCP tools, found {tool_count}. \
+        tool_count, 54,
+        "Expected exactly 54 MCP tools, found {tool_count}. \
          If you added or removed a tool, update this count and the expected list below."
     );
 }
@@ -1015,6 +1015,9 @@ fn mcp_tool_list_contains_all_expected_names() {
         "ssh_playbook_list",
         "ssh_playbook_run",
         "ssh_playbook_dry_run",
+        "ssh_snippet_list",
+        "ssh_snippet_save",
+        "ssh_snippet_delete",
         "ssh_connection_status",
         "ssh_connect",
         "ssh_disconnect",
@@ -1083,6 +1086,9 @@ fn mcp_call_tool_handler_covers_all_tools() {
         "ssh_playbook_list",
         "ssh_playbook_run",
         "ssh_playbook_dry_run",
+        "ssh_snippet_list",
+        "ssh_snippet_save",
+        "ssh_snippet_delete",
         "ssh_connection_status",
         "ssh_connect",
         "ssh_disconnect",
@@ -1730,6 +1736,9 @@ fn mcp_tools_match_skills_md_documentation() {
         "ssh_playbook_list",
         "ssh_playbook_run",
         "ssh_playbook_dry_run",
+        "ssh_snippet_list",
+        "ssh_snippet_save",
+        "ssh_snippet_delete",
         "ssh_connection_status",
         "ssh_connect",
         "ssh_disconnect",

@@ -723,6 +723,24 @@ const zh: Record<string, string> = {
   "Remove step": "删除步骤",
   "Add step": "添加步骤",
   "Apply YAML to step editor": "将 YAML 应用到步骤编辑器",
+  // Command snippets
+  "Command snippets": "命令片段",
+  "Search snippets": "搜索命令片段",
+  "No snippets yet": "暂无命令片段",
+  "No matching snippets": "没有匹配的命令片段",
+  "What this command is for": "此命令的用途",
+  "Insert": "插入",
+  "Insert into focused terminal": "插入到当前聚焦的终端",
+  "Open and focus a terminal before inserting": "请先打开并聚焦一个终端",
+  "Open and focus a terminal before inserting a snippet.": "请先打开并聚焦一个终端，再插入命令片段。",
+  "Snippet name and command are required": "命令片段的名称和命令不能为空",
+  "A snippet named {name} already exists": "名为 {name} 的命令片段已存在",
+  "Saved snippet: {name}": "已保存命令片段：{name}",
+  "Deleted snippet: {name}": "已删除命令片段：{name}",
+  "Delete snippet {name}?": "删除命令片段 {name}？",
+  "Failed to load snippets: {error}": "加载命令片段失败：{error}",
+  "Failed to save snippet: {error}": "保存命令片段失败：{error}",
+  "Failed to delete snippet: {error}": "删除命令片段失败：{error}",
 };
 
 const I18nContext = createContext<I18nContextValue | null>(null);

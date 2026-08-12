@@ -31,6 +31,7 @@ pub const SYNCABLE_FILES: &[&str] = &[
     "execution_limits.toml",
     "anomaly.toml",
     "playbooks.toml",
+    "snippets.json",
 ];
 
 const LEGACY_UNSYNCABLE_REMOTE_FILES: &[&str] = &["known_hosts.json"];

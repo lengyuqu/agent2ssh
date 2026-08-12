@@ -36,6 +36,9 @@ pub(super) enum McpTool {
     SshPlaybookList,
     SshPlaybookRun,
     SshPlaybookDryRun,
+    SshSnippetList,
+    SshSnippetSave,
+    SshSnippetDelete,
     SshConnectionStatus,
     SshConnect,
     SshDisconnect,
@@ -111,6 +114,9 @@ fn tool_kind(name: &str) -> Option<McpTool> {
         "ssh_playbook_list" => Some(McpTool::SshPlaybookList),
         "ssh_playbook_run" => Some(McpTool::SshPlaybookRun),
         "ssh_playbook_dry_run" => Some(McpTool::SshPlaybookDryRun),
+        "ssh_snippet_list" => Some(McpTool::SshSnippetList),
+        "ssh_snippet_save" => Some(McpTool::SshSnippetSave),
+        "ssh_snippet_delete" => Some(McpTool::SshSnippetDelete),
         "ssh_connection_status" => Some(McpTool::SshConnectionStatus),
         "ssh_connect" => Some(McpTool::SshConnect),
         "ssh_disconnect" => Some(McpTool::SshDisconnect),
@@ -536,6 +542,35 @@ fn tool_definitions() -> Vec<Value> {
                         "properties": {
                             "playbook": { "type": "string", "description": "Name of the playbook to preview." },
                             "params":   { "type": "object", "description": "Key-value parameters to substitute into step command templates." }
+                        }
+                    }
+                },
+                {
+                    "name": "ssh_snippet_list",
+                    "description": "List reusable command snippets from ~/.agent2ssh/snippets.json.",
+                    "inputSchema": { "type": "object", "properties": {} }
+                },
+                {
+                    "name": "ssh_snippet_save",
+                    "description": "Create or replace a reusable command snippet. Names are unique and commands are stored locally; this does not execute the command.",
+                    "inputSchema": {
+                        "type": "object",
+                        "required": ["name", "command"],
+                        "properties": {
+                            "name": { "type": "string", "description": "Unique snippet name (maximum 128 characters)." },
+                            "command": { "type": "string", "description": "Command text to save; it is not executed." },
+                            "description": { "type": "string", "description": "Optional human-readable note." }
+                        }
+                    }
+                },
+                {
+                    "name": "ssh_snippet_delete",
+                    "description": "Delete a reusable command snippet by name. This does not execute the saved command.",
+                    "inputSchema": {
+                        "type": "object",
+                        "required": ["name"],
+                        "properties": {
+                            "name": { "type": "string", "description": "Snippet name to delete." }
                         }
                     }
                 },

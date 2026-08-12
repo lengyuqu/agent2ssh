@@ -8,79 +8,8 @@ import { resolveTerminalTheme } from "../terminalThemes";
 import type { Theme as AppTheme } from "../theme";
 import { compileHighlightRules } from "../lib/terminal/highlight";
 import { TerminalHighlightDecorations } from "../lib/terminal/highlight-decorations";
-
-/**
- * T1-8: Parse and handle OSC 52 clipboard sequences from terminal output.
- *
- * OSC 52 format: ESC ] 52 ; <clipboard> ; <base64-data> ST
- *   - clipboard: 'c' for system clipboard, 'p' for primary (X11)
- *   - ST: either BEL (0x07) or ESC \ (0x1b 0x5c)
- *
- * When a valid OSC 52 sequence is found, the base64 payload is decoded and
- * written to the system clipboard via `navigator.clipboard.writeText()`.
- * Empty payloads clear the clipboard.
- *
- * This is a standard SSH client feature — remote programs like vim, tmux,
- * and pbcopy-on-Linux use it to write to the user's local clipboard.
- */
-function extractOsc52(data: string): { clipboard: string; rest: string } | null {
-  const osc52Start = data.indexOf("\x1b]52;");
-  if (osc52Start === -1) return null;
-
-  const afterStart = data.slice(osc52Start + 4); // skip ESC ] 5 2 ;
-  // Parse clipboard target + semicolon
-  const semiIdx = afterStart.indexOf(";");
-  if (semiIdx === -1 || semiIdx > 2) return null;
-
-  const clipboardTarget = afterStart.slice(0, semiIdx);
-  if (!["c", "p", "s", "0", "1", "2"].includes(clipboardTarget)) return null;
-
-  const payloadStart = semiIdx + 1;
-  // Find the terminator: BEL (0x07) or ESC \ (0x1b 0x5c)
-  let endIdx = -1;
-  let terminatorLen = 0;
-  for (let i = payloadStart; i < afterStart.length; i++) {
-    if (afterStart[i] === "\x07") {
-      endIdx = i;
-      terminatorLen = 1;
-      break;
-    }
-    if (afterStart[i] === "\x1b" && i + 1 < afterStart.length && afterStart[i + 1] === "\\") {
-      endIdx = i;
-      terminatorLen = 2;
-      break;
-    }
-  }
-  if (endIdx === -1) return null;
-
-  const base64Payload = afterStart.slice(payloadStart, endIdx);
-  return {
-    clipboard: base64Payload,
-    rest: data.slice(0, osc52Start) + data.slice(osc52Start + 4 + afterStart.length),
-  };
-}
-
-/** Decode a base64 OSC 52 payload and write to the system clipboard. */
-async function handleOsc52(base64Payload: string): Promise<void> {
-  try {
-    if (base64Payload.length === 0) {
-      // Empty payload = clear clipboard
-      await navigator.clipboard.writeText("");
-      return;
-    }
-    // Decode base64 to binary string, then to UTF-8 text
-    const binary = atob(base64Payload);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) {
-      bytes[i] = binary.charCodeAt(i);
-    }
-    const text = new TextDecoder().decode(bytes);
-    await navigator.clipboard.writeText(text);
-  } catch {
-    // clipboard.writeText may throw if permissions are denied or the context
-    // is not secure (HTTP). Silently ignore — the sequence still passes through.
-  }
-}
+import { registerClipboardOscHandler } from "../lib/terminal/osc52";
+import { createPaintScheduler } from "../lib/terminal/paint-scheduler";
 
 type Props = {
   host: string;
@@ -166,11 +95,20 @@ const TerminalView = forwardRef<TerminalViewHandle, Props>(function TerminalView
     const encoder = encoderRef.current;
     lineBufferRef.current = "";
 
+    const highlightPaint = createPaintScheduler({
+      shouldPaint: () => !disposed,
+      paint: () => highlighter.refresh(),
+    });
+    const writeParsedSub = term.onWriteParsed(() => highlightPaint.schedule());
+    const clipboardOscSub = registerClipboardOscHandler(term.parser, {
+      writeText: (text) => navigator.clipboard?.writeText(text),
+    });
+
     const writeTerminal = (data: string | Uint8Array) => {
-      term.write(data, () => highlighter.refresh());
+      term.write(data);
     };
     const writeTerminalLine = (data: string) => {
-      term.writeln(data, () => highlighter.refresh());
+      term.writeln(data);
     };
 
     const refreshHighlightRules = () => {
@@ -181,7 +119,7 @@ const TerminalView = forwardRef<TerminalViewHandle, Props>(function TerminalView
     };
     refreshHighlightRules();
     window.addEventListener("agent2ssh:highlights-changed", refreshHighlightRules);
-    const scrollSub = term.onScroll(() => highlighter.refresh());
+    const scrollSub = term.onScroll(() => highlightPaint.schedule());
 
     function sendResize() {
       if (ws && ws.readyState === WebSocket.OPEN) {
@@ -229,7 +167,9 @@ const TerminalView = forwardRef<TerminalViewHandle, Props>(function TerminalView
         await api.daemonStart();
         token = await api.getDaemonToken();
       } catch (err) {
-        writeTerminalLine(`\x1b[31mFailed to start daemon: ${String(err)}\x1b[0m`);
+        if (!disposed) {
+          writeTerminalLine(`\x1b[31mFailed to start daemon: ${String(err)}\x1b[0m`);
+        }
         return;
       }
       if (disposed) return;
@@ -273,23 +213,9 @@ const TerminalView = forwardRef<TerminalViewHandle, Props>(function TerminalView
           } catch {
             // Not a control message; write it as terminal output.
           }
-          // T1-8: Intercept OSC 52 clipboard sequences before writing to terminal
-          const osc52 = extractOsc52(ev.data);
-          if (osc52) {
-            void handleOsc52(osc52.clipboard);
-            if (osc52.rest) writeTerminal(osc52.rest);
-            return;
-          }
           writeTerminal(ev.data);
         } else {
           const uint8 = new Uint8Array(ev.data as ArrayBuffer);
-          const text = new TextDecoder().decode(uint8);
-          const osc52b = extractOsc52(text);
-          if (osc52b) {
-            void handleOsc52(osc52b.clipboard);
-            if (osc52b.rest) writeTerminal(osc52b.rest);
-            return;
-          }
           writeTerminal(uint8);
         }
       };
@@ -305,7 +231,7 @@ const TerminalView = forwardRef<TerminalViewHandle, Props>(function TerminalView
       try {
         fit.fit();
         sendResize();
-        highlighter.refresh();
+        highlightPaint.schedule();
       } catch {
         // ignore transient measure errors
       }
@@ -321,8 +247,17 @@ const TerminalView = forwardRef<TerminalViewHandle, Props>(function TerminalView
       window.removeEventListener("agent2ssh:highlights-changed", refreshHighlightRules);
       dataSub.dispose();
       scrollSub.dispose();
+      writeParsedSub.dispose();
+      clipboardOscSub.dispose();
+      highlightPaint.dispose();
       highlighter.dispose();
-      ws?.close();
+      if (ws) {
+        ws.onopen = null;
+        ws.onmessage = null;
+        ws.onerror = null;
+        ws.onclose = null;
+        ws.close();
+      }
       wsRef.current = null;
       termRef.current = null;
       term.dispose();

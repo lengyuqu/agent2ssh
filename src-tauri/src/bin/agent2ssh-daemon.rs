@@ -37,6 +37,7 @@ use agent2ssh::remote::{
 };
 use agent2ssh::risk_config::classify_with_user_rules;
 use agent2ssh::session::*;
+use agent2ssh::snippets::{add_snippet, load_snippets, remove_snippet, Snippet};
 use agent2ssh::store::*;
 use agent2ssh::types::*;
 
@@ -967,6 +968,55 @@ async fn import_config(
     import_ssh_config_core(None)
         .map(Json)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))
+}
+
+// ── Command snippets ────────────────────────────────────────────────────────
+
+async fn list_snippets(
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
+) -> Result<Json<Vec<Snippet>>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    load_snippets().map(Json).map_err(|error| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to load snippets: {error}"),
+        )
+    })
+}
+
+async fn save_snippet(
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
+    Json(snippet): Json<Snippet>,
+) -> Result<Json<Vec<Snippet>>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    add_snippet(
+        &snippet.name,
+        &snippet.command,
+        snippet.description.as_deref(),
+    )
+    .map(Json)
+    .map_err(|error| {
+        err(
+            StatusCode::BAD_REQUEST,
+            format!("failed to save snippet: {error}"),
+        )
+    })
+}
+
+async fn delete_snippet(
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
+    Path(name): Path<String>,
+) -> Result<Json<bool>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    remove_snippet(&name).map(Json).map_err(|error| {
+        err(
+            StatusCode::BAD_REQUEST,
+            format!("failed to delete snippet: {error}"),
+        )
+    })
 }
 
 async fn ping(
@@ -4092,6 +4142,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/hosts", get(list_hosts).post(add_host))
         .route("/hosts/import", post(import_config))
         .route("/hosts/:name", delete(remove_host))
+        .route("/snippets", get(list_snippets).post(save_snippet))
+        .route("/snippets/:name", delete(delete_snippet))
         .route("/ping", post(ping))
         .route("/exec", post(exec))
         .route("/exec-multi", post(exec_multi))
