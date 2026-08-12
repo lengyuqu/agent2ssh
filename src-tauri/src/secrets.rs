@@ -736,7 +736,8 @@ pub fn unlock_or_init(password: &str) -> Result<()> {
             Err(e) if e.kind() == ErrorKind::AlreadyExists => {
                 // Another process won the race. Re-read and verify our
                 // password against the file they wrote.
-                let salt = read_salt()?.ok_or_else(|| anyhow!("secrets store salt missing after race"))?;
+                let salt =
+                    read_salt()?.ok_or_else(|| anyhow!("secrets store salt missing after race"))?;
                 let key = derive_key(password, &salt)?;
                 let raw = std::fs::read_to_string(&path)?;
                 let probe: serde_json::Value = serde_json::from_str(&raw)?;
@@ -1039,8 +1040,15 @@ mod tests {
 
         // Both the pre-existing record and the new one must be present.
         let ledger = MigrationLedger::load().unwrap();
-        assert_eq!(ledger.completed.len(), 2, "pre-existing record must be preserved");
-        assert!(ledger.is_done("some_future_migration"), "old record preserved");
+        assert_eq!(
+            ledger.completed.len(),
+            2,
+            "pre-existing record must be preserved"
+        );
+        assert!(
+            ledger.is_done("some_future_migration"),
+            "old record preserved"
+        );
         assert!(ledger.is_done(MIGRATION_V1_TO_V2), "new record appended");
 
         lock();
@@ -1195,8 +1203,14 @@ mod tests {
             .unwrap();
 
         assert!(!ledger.is_done(MIGRATION_V1_TO_V2), "skipped is not done");
-        assert!(ledger.is_skipped(MIGRATION_V1_TO_V2), "must be marked skipped");
-        assert!(ledger.is_resolved(MIGRATION_V1_TO_V2), "skipped is resolved");
+        assert!(
+            ledger.is_skipped(MIGRATION_V1_TO_V2),
+            "must be marked skipped"
+        );
+        assert!(
+            ledger.is_resolved(MIGRATION_V1_TO_V2),
+            "skipped is resolved"
+        );
 
         crate::store::clear_test_config_dir();
         let _ = std::fs::remove_dir_all(&dir);
@@ -1211,13 +1225,15 @@ mod tests {
 
         let mut ledger = MigrationLedger::default();
         // First: mark as completed.
-        ledger.append_and_save(MigrationRecord {
-            id: MIGRATION_V1_TO_V2.to_string(),
-            completed_at: 100,
-            file_sha256: "abc".to_string(),
-            status: MigrationStatus::Completed,
-            skip_reason: None,
-        }).unwrap();
+        ledger
+            .append_and_save(MigrationRecord {
+                id: MIGRATION_V1_TO_V2.to_string(),
+                completed_at: 100,
+                file_sha256: "abc".to_string(),
+                status: MigrationStatus::Completed,
+                skip_reason: None,
+            })
+            .unwrap();
         assert!(ledger.is_done(MIGRATION_V1_TO_V2));
         assert_eq!(ledger.completed.len(), 1);
 
@@ -1225,8 +1241,15 @@ mod tests {
         ledger
             .append_skipped(MIGRATION_V1_TO_V2, "should not happen")
             .unwrap();
-        assert_eq!(ledger.completed.len(), 1, "must not duplicate when already resolved");
-        assert!(ledger.is_done(MIGRATION_V1_TO_V2), "still done, not overwritten to skipped");
+        assert_eq!(
+            ledger.completed.len(),
+            1,
+            "must not duplicate when already resolved"
+        );
+        assert!(
+            ledger.is_done(MIGRATION_V1_TO_V2),
+            "still done, not overwritten to skipped"
+        );
 
         crate::store::clear_test_config_dir();
         let _ = std::fs::remove_dir_all(&dir);
@@ -1241,10 +1264,17 @@ mod tests {
 
         let mut ledger = MigrationLedger::default();
         ledger
-            .append_skipped("future_migration", "precondition not met: keyring unavailable")
+            .append_skipped(
+                "future_migration",
+                "precondition not met: keyring unavailable",
+            )
             .unwrap();
 
-        let record = ledger.completed.iter().find(|r| r.id == "future_migration").unwrap();
+        let record = ledger
+            .completed
+            .iter()
+            .find(|r| r.id == "future_migration")
+            .unwrap();
         assert_eq!(record.status, MigrationStatus::Skipped);
         assert_eq!(
             record.skip_reason.as_deref(),
@@ -1271,7 +1301,9 @@ mod tests {
 
         // Manually mark a future migration as skipped — load should still work.
         let mut ledger = MigrationLedger::load().unwrap();
-        ledger.append_skipped("some_future_migration", "not applicable").unwrap();
+        ledger
+            .append_skipped("some_future_migration", "not applicable")
+            .unwrap();
         assert!(ledger.is_skipped("some_future_migration"));
         assert!(ledger.is_resolved("some_future_migration"));
 
@@ -1361,8 +1393,15 @@ mod tests {
         assert_eq!(ledger.completed.len(), 1);
         let record = &ledger.completed[0];
         assert_eq!(record.id, MIGRATION_V1_TO_V2);
-        assert!(!record.file_sha256.is_empty(), "file_sha256 must be recorded");
-        assert_eq!(record.file_sha256.len(), 64, "SHA-256 hex digest is 64 chars");
+        assert!(
+            !record.file_sha256.is_empty(),
+            "file_sha256 must be recorded"
+        );
+        assert_eq!(
+            record.file_sha256.len(),
+            64,
+            "SHA-256 hex digest is 64 chars"
+        );
 
         lock();
         clear_test_backend();
@@ -1382,7 +1421,10 @@ mod tests {
         // Init a v2 store directly (no v1).
         unlock_or_init("skip-probe-pw").unwrap();
         store_secret(&host_account("skip-probe-host"), "skip-probe-secret").unwrap();
-        assert!(is_v1_to_v2_migration_done(), "marker written on first v2 save");
+        assert!(
+            is_v1_to_v2_migration_done(),
+            "marker written on first v2 save"
+        );
 
         // Lock and re-unlock: load_map should use the v2 fast path.
         lock();

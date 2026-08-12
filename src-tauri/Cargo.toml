@@ -75,6 +75,9 @@ sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 # AES-256-GCM. No OS keychain, no plaintext key on disk.
 aes-gcm = "0.10"
 argon2 = "0.5"
+# B43: In-memory passphrase cache — Zeroizing<String> wipes bytes on drop,
+# reducing plaintext exposure in memory dumps / swap.
+zeroize = { version = "1", features = ["derive"] }
 # AST-based command analysis for risk classification (P0-2): tree-sitter-bash
 # parses shell commands into a syntax tree, allowing canonical command head
 # extraction that is resilient to flag reordering, wrapper stacking, and
@@ -93,3 +96,4 @@ tower = { version = "0.4", features = ["util"] }
 http-body-util = "0.1"
 serde_json = "1"
 serial_test = "3"
+tempfile = "3"

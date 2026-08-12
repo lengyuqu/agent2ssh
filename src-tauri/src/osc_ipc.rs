@@ -69,7 +69,9 @@ pub fn emit_osc_forward(name: &str) -> Result<()> {
 
 /// Check whether the CLI is running inside the desktop app's terminal.
 pub fn is_inside_desktop() -> bool {
-    std::env::var(AGENT2SSH_APP_ENV).map(|v| !v.is_empty()).unwrap_or(false)
+    std::env::var(AGENT2SSH_APP_ENV)
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
 }
 
 /// Build the raw OSC 7337 bytes for a given action and name.

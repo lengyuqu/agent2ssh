@@ -4,6 +4,8 @@ pub mod approval;
 pub mod backup_crypto;
 pub mod config_cache;
 pub mod connection;
+pub mod container_discovery;
+pub mod copy_redact;
 pub mod core;
 pub mod daemon_control;
 pub mod diagnostics;
@@ -14,6 +16,7 @@ pub mod execution_control;
 pub mod forward;
 pub mod gate;
 pub mod health;
+pub mod highlight;
 pub mod integrate;
 pub mod jump_chain;
 pub mod keys;
@@ -21,9 +24,11 @@ pub mod lifecycle;
 pub mod limits;
 pub mod mcp_binding;
 pub mod notify;
+pub mod osc_ipc;
 pub mod path_resolver;
 pub mod playbook;
 pub mod policy;
+pub mod prompt_waiter;
 pub mod redaction;
 pub mod remote;
 pub mod risk_config;
@@ -31,18 +36,15 @@ pub mod sanitize;
 pub mod secrets;
 pub mod session;
 pub mod sftp_transfer;
+pub mod snippets;
 pub mod ssh_algo;
+pub mod ssh_config;
 pub mod store;
 pub mod telemetry;
 pub mod types;
+pub mod url_safety;
 pub mod webdav_sync;
 pub mod ws_drain;
-pub mod prompt_waiter;
-pub mod url_safety;
-pub mod snippets;
-pub mod container_discovery;
-pub mod osc_ipc;
-pub mod copy_redact;
 
 #[cfg(feature = "tauri")]
 pub mod tauri_commands;
@@ -78,6 +80,10 @@ pub use diagnostics::{
     current_trace_id, export_diagnostic_bundle, install_panic_hook, list_diagnostic_logs,
     seed_trace_id_from_env, set_error_sink, set_trace_id, DiagnosticLogEntry,
 };
+pub use error_codes::{
+    is_coded_error, parse_coded_error, AnyhowToCodedExt, CodedError, CodedResult, ErrorCode,
+    WIRE_PREFIX as ERROR_WIRE_PREFIX,
+};
 pub use events::{event_bus, publish_event, subscribe_events, Agent2SSHEvent, EventType};
 pub use execution_control::{
     append_rejected_exec_audit, authorize_command_with_approval, command_authorization_target,
@@ -85,11 +91,11 @@ pub use execution_control::{
     ApprovalOutcome, ApprovalPrompt, CommandAuthorization, CommandAuthorizationError,
     CommandAuthorizationInput, CommandAuthorizationTarget,
 };
-pub use error_codes::{
-    is_coded_error, parse_coded_error, AnyhowToCodedExt, CodedError, CodedResult, ErrorCode,
-    WIRE_PREFIX as ERROR_WIRE_PREFIX,
+pub use forward::{
+    forward_add_core, forward_add_core_via, forward_add_multi_core, forward_add_multi_core_via,
+    forward_list_core, forward_remove_core, forward_stats_core, MultiForwardResult,
+    MultiForwardRule,
 };
-pub use forward::{forward_add_core, forward_list_core, forward_remove_core, forward_stats_core};
 pub use gate::{
     execution_gate_blocks_source, gate_blocks_source, load_execution_gate, save_execution_gate,
     source_can_bypass_gate, ExecutionGateMode, ExecutionGateStatus,
@@ -150,19 +156,17 @@ pub use app_state::{
     app_state, host, lifecycle, set_host, AppState, Host, ResourceKind, ResourceOwner,
     ResourcePhase, ResourceRecord,
 };
-pub use lifecycle::{
-    LifecycleError, LifecycleRegistry, ResourceReservation,
+pub use backup_crypto::{decrypt_backup, encrypt_backup, is_encrypted_backup, ENCRYPTED_MAGIC};
+pub use container_discovery::{discover_containers, ContainerDiscoveryTarget, ContainerPlatform};
+pub use copy_redact::{
+    load_copy_redact_rules, redact_for_clipboard, save_copy_redact_rules, CopyRedactRule,
 };
-pub use backup_crypto::{
-    decrypt_backup, encrypt_backup, is_encrypted_backup, ENCRYPTED_MAGIC,
-};
+pub use lifecycle::{LifecycleError, LifecycleRegistry, ResourceReservation};
+pub use osc_ipc::{emit_osc_forward, emit_osc_open, AGENT2SSH_APP_ENV};
 pub use path_resolver::resolve_executable_in;
 pub use sftp_transfer::walk_local_dir;
-pub use url_safety::{validate_url_scheme, open_external_url, strip_ansi_escapes};
 pub use snippets::{load_snippets, save_snippets, Snippet};
-pub use container_discovery::{discover_containers, ContainerDiscoveryTarget, ContainerPlatform};
-pub use osc_ipc::{emit_osc_open, emit_osc_forward, AGENT2SSH_APP_ENV};
-pub use copy_redact::{redact_for_clipboard, load_copy_redact_rules, save_copy_redact_rules, CopyRedactRule};
+pub use url_safety::{open_external_url, strip_ansi_escapes, validate_url_scheme};
 
 #[cfg(feature = "tauri")]
 pub use tauri_commands::run_tauri;

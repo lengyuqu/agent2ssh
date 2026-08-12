@@ -208,12 +208,7 @@ impl PromptWaiter {
 
     /// List all pending prompt nonces (for debugging/inspection).
     pub async fn pending_nonces(&self) -> Vec<String> {
-        self.registry
-            .lock()
-            .unwrap()
-            .keys()
-            .cloned()
-            .collect()
+        self.registry.lock().unwrap().keys().cloned().collect()
     }
 
     /// Get the prompt text for a given nonce.
@@ -303,12 +298,7 @@ impl PromptWaiter {
 
     /// T2-16: Synchronous variant of `pending_nonces` for non-async callers.
     pub fn pending_nonces_blocking(&self) -> Vec<String> {
-        self.registry
-            .lock()
-            .unwrap()
-            .keys()
-            .cloned()
-            .collect()
+        self.registry.lock().unwrap().keys().cloned().collect()
     }
 
     /// T2-16: Synchronous variant of `cancel` for non-async callers.
@@ -336,19 +326,13 @@ mod tests {
     #[tokio::test]
     async fn register_and_respond_delivers_answer() {
         let waiter = PromptWaiter::new();
-        let (guard, rx) = waiter
-            .register_and_wait("Enter TOTP: ")
-            .await
-            .unwrap();
+        let (guard, rx) = waiter.register_and_wait("Enter TOTP: ").await.unwrap();
 
         let nonce = guard.nonce().to_string();
         assert_eq!(waiter.pending_count().await, 1);
 
         // Respond from another "task"
-        waiter
-            .respond(&nonce, "123456".to_string())
-            .await
-            .unwrap();
+        waiter.respond(&nonce, "123456".to_string()).await.unwrap();
 
         // Wait for the response
         let answer = tokio::time::timeout(Duration::from_secs(1), rx)
@@ -366,10 +350,7 @@ mod tests {
     async fn guard_cleanup_on_drop() {
         let waiter = PromptWaiter::new();
         {
-            let (_guard, _rx) = waiter
-                .register_and_wait("Enter password: ")
-                .await
-                .unwrap();
+            let (_guard, _rx) = waiter.register_and_wait("Enter password: ").await.unwrap();
             assert_eq!(waiter.pending_count().await, 1);
             // Guard goes out of scope here — should auto-cleanup
         }
@@ -391,32 +372,21 @@ mod tests {
     #[tokio::test]
     async fn double_respond_fails() {
         let waiter = PromptWaiter::new();
-        let (guard, _rx) = waiter
-            .register_and_wait("Enter code: ")
-            .await
-            .unwrap();
+        let (guard, _rx) = waiter.register_and_wait("Enter code: ").await.unwrap();
         let nonce = guard.nonce().to_string();
 
         // First respond succeeds
-        waiter
-            .respond(&nonce, "first".to_string())
-            .await
-            .unwrap();
+        waiter.respond(&nonce, "first".to_string()).await.unwrap();
 
         // Second respond fails — nonce already removed
-        let result = waiter
-            .respond(&nonce, "second".to_string())
-            .await;
+        let result = waiter.respond(&nonce, "second".to_string()).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn cancel_removes_prompt() {
         let waiter = PromptWaiter::new();
-        let (guard, _rx) = waiter
-            .register_and_wait("Enter OTP: ")
-            .await
-            .unwrap();
+        let (guard, _rx) = waiter.register_and_wait("Enter OTP: ").await.unwrap();
         let nonce = guard.nonce().to_string();
 
         assert_eq!(waiter.pending_count().await, 1);
@@ -444,10 +414,7 @@ mod tests {
     #[tokio::test]
     async fn prompt_text_lookup() {
         let waiter = PromptWaiter::new();
-        let (guard, _rx) = waiter
-            .register_and_wait("Enter your PIN: ")
-            .await
-            .unwrap();
+        let (guard, _rx) = waiter.register_and_wait("Enter your PIN: ").await.unwrap();
         let nonce = guard.nonce().to_string();
 
         let text = waiter.prompt_text(&nonce).await;
@@ -504,9 +471,7 @@ mod tests {
     #[test]
     fn register_blocking_and_respond_blocking_delivers_answer() {
         let waiter = PromptWaiter::new();
-        let (guard, rx) = waiter
-            .register_blocking("Enter TOTP: ")
-            .unwrap();
+        let (guard, rx) = waiter.register_blocking("Enter TOTP: ").unwrap();
 
         let nonce = guard.nonce().to_string();
         assert_eq!(waiter.pending_count_blocking(), 1);
@@ -528,9 +493,7 @@ mod tests {
     fn blocking_guard_cleanup_on_drop() {
         let waiter = PromptWaiter::new();
         {
-            let (_guard, _rx) = waiter
-                .register_blocking("Enter password: ")
-                .unwrap();
+            let (_guard, _rx) = waiter.register_blocking("Enter password: ").unwrap();
             assert_eq!(waiter.pending_count_blocking(), 1);
             // Guard goes out of scope here — should auto-cleanup
         }
@@ -547,9 +510,7 @@ mod tests {
     #[test]
     fn double_respond_blocking_fails() {
         let waiter = PromptWaiter::new();
-        let (guard, _rx) = waiter
-            .register_blocking("Enter code: ")
-            .unwrap();
+        let (guard, _rx) = waiter.register_blocking("Enter code: ").unwrap();
         let nonce = guard.nonce().to_string();
 
         waiter
@@ -563,9 +524,7 @@ mod tests {
     #[test]
     fn cancel_blocking_removes_prompt() {
         let waiter = PromptWaiter::new();
-        let (guard, _rx) = waiter
-            .register_blocking("Enter OTP: ")
-            .unwrap();
+        let (guard, _rx) = waiter.register_blocking("Enter OTP: ").unwrap();
         let nonce = guard.nonce().to_string();
 
         assert_eq!(waiter.pending_count_blocking(), 1);
@@ -576,9 +535,7 @@ mod tests {
     #[test]
     fn blocking_prompt_text_lookup() {
         let waiter = PromptWaiter::new();
-        let (guard, _rx) = waiter
-            .register_blocking("Enter your PIN: ")
-            .unwrap();
+        let (guard, _rx) = waiter.register_blocking("Enter your PIN: ").unwrap();
         let nonce = guard.nonce().to_string();
 
         let text = waiter.prompt_text_blocking(&nonce);
@@ -591,14 +548,13 @@ mod tests {
     fn cross_respond_async_to_blocking_works() {
         // An async respond() should be able to answer a blocking registration
         let waiter = PromptWaiter::new();
-        let (guard, rx) = waiter
-            .register_blocking("Enter TOTP: ")
-            .unwrap();
+        let (guard, rx) = waiter.register_blocking("Enter TOTP: ").unwrap();
         let nonce = guard.nonce().to_string();
 
         // Use the async respond from a blocking context via block_on
         let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(waiter.respond(&nonce, "999999".to_string())).unwrap();
+        rt.block_on(waiter.respond(&nonce, "999999".to_string()))
+            .unwrap();
 
         let answer = rx.recv_timeout(Duration::from_secs(1)).unwrap();
         assert_eq!(answer, "999999");
@@ -608,14 +564,13 @@ mod tests {
     async fn cross_respond_blocking_to_async_works() {
         // A blocking respond_blocking should be able to answer an async registration
         let waiter = PromptWaiter::new();
-        let (guard, rx) = waiter
-            .register_and_wait("Enter OTP: ")
-            .await
-            .unwrap();
+        let (guard, rx) = waiter.register_and_wait("Enter OTP: ").await.unwrap();
         let nonce = guard.nonce().to_string();
 
         // respond_blocking is sync and should work from async context
-        waiter.respond_blocking(&nonce, "888888".to_string()).unwrap();
+        waiter
+            .respond_blocking(&nonce, "888888".to_string())
+            .unwrap();
 
         let answer = tokio::time::timeout(Duration::from_secs(1), rx)
             .await

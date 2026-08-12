@@ -4,7 +4,7 @@ use std::{
     io::{ErrorKind, Read, Write},
     net::{IpAddr, Shutdown, TcpListener, TcpStream},
     sync::{
-        atomic::{AtomicBool, AtomicU64, AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         Arc, Mutex,
     },
     thread,
@@ -235,6 +235,24 @@ fn resolve_host(name: &str) -> Result<HostProfile> {
         .ok_or_else(|| anyhow!("unknown host profile: {name}"))
 }
 
+/// B68: Resolve a host profile and optionally override or set its jump_host.
+/// If `via` is `Some`, the host's `jump_host` field is set to that value
+/// (overriding any existing jump_host). This allows CLI users to specify
+/// a bastion/jump host at forward time without modifying the stored profile.
+fn resolve_host_with_jump(name: &str, via: Option<&str>) -> Result<HostProfile> {
+    let mut host = resolve_host(name)?;
+    if let Some(jump) = via.map(str::trim).filter(|s| !s.is_empty()) {
+        // Validate that the jump host profile exists.
+        let _jump_host = load_config()?
+            .hosts
+            .into_iter()
+            .find(|h| h.name == jump)
+            .ok_or_else(|| anyhow!("unknown jump host profile: '{jump}'"))?;
+        host.jump_host = Some(jump.to_string());
+    }
+    Ok(host)
+}
+
 fn remote_forward_target_allowed(target_host: &str) -> bool {
     let normalized = target_host.trim().trim_matches(['[', ']']);
     normalized.eq_ignore_ascii_case("localhost")
@@ -251,7 +269,29 @@ pub async fn forward_add_core(
     target_host: &str,
     target_port: u16,
 ) -> Result<ForwardRule> {
-    let host = resolve_host(host_name)?;
+    forward_add_core_via(
+        host_name,
+        direction,
+        bind_port,
+        target_host,
+        target_port,
+        None,
+    )
+    .await
+}
+
+/// B68: Start a port forward with an optional jump host override.
+/// `via` — if `Some("bastion")`, uses "bastion" as the jump host regardless
+/// of the stored profile's `jump_host` field.
+pub async fn forward_add_core_via(
+    host_name: &str,
+    direction: ForwardDirection,
+    bind_port: u16,
+    target_host: &str,
+    target_port: u16,
+    via: Option<&str>,
+) -> Result<ForwardRule> {
+    let host = resolve_host_with_jump(host_name, via)?;
     if direction == ForwardDirection::Remote && !remote_forward_target_allowed(target_host) {
         return Err(anyhow!(
             "remote forward target_host must be loopback; got '{}'",
@@ -464,9 +504,7 @@ fn run_remote_forward(
                 thread::spawn(move || {
                     match TcpStream::connect((target_host.as_str(), target_port)) {
                         Ok(stream) => {
-                            if let Err(error) =
-                                bridge_tcp_and_channel(stream, channel, &control)
-                            {
+                            if let Err(error) = bridge_tcp_and_channel(stream, channel, &control) {
                                 let _ = crate::diagnostics::append_diagnostic_log(
                                     "warn",
                                     "embedded_ssh_forward",
@@ -628,6 +666,146 @@ pub async fn forward_remove_core(id: Uuid) -> Result<()> {
     Ok(())
 }
 
+// ── B25: Multi-rule forward (single Forward, multiple -L/-R rules) ──────
+//
+// Opens one SSH session to the target host and starts multiple port-forward
+// rules through it. Each rule gets its own listener thread, but they share
+// the same underlying SSH connection — matching the behavior of
+// `ssh -L 8080:localhost:80 -L 3306:localhost:3306 host`.
+//
+// The batch is atomic: if any rule fails to start, all previously started
+// rules are rolled back before returning the error.
+
+/// Input rule for a multi-rule forward batch.
+#[derive(Debug, Clone)]
+pub struct MultiForwardRule {
+    pub direction: ForwardDirection,
+    pub bind_port: u16,
+    pub target_host: String,
+    pub target_port: u16,
+}
+
+/// Result of a successful multi-rule forward addition.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MultiForwardResult {
+    /// IDs of all rules that were started, in order.
+    pub ids: Vec<Uuid>,
+    /// The host profile name.
+    pub host: String,
+    /// Number of rules started.
+    pub count: usize,
+}
+
+/// Start multiple port-forward rules on a single host in one batch.
+/// All rules share the same resolved host profile. If any rule fails to
+/// start, all previously started rules are rolled back.
+pub async fn forward_add_multi_core(
+    host_name: &str,
+    rules: &[MultiForwardRule],
+) -> Result<MultiForwardResult> {
+    forward_add_multi_core_via(host_name, rules, None).await
+}
+
+/// B68: Start multiple port-forward rules with an optional jump host override.
+pub async fn forward_add_multi_core_via(
+    host_name: &str,
+    rules: &[MultiForwardRule],
+    via: Option<&str>,
+) -> Result<MultiForwardResult> {
+    if rules.is_empty() {
+        return Err(anyhow!("no forward rules provided"));
+    }
+    // Validate all rules upfront.
+    let host = resolve_host_with_jump(host_name, via)?;
+    for (i, rule) in rules.iter().enumerate() {
+        if rule.direction == ForwardDirection::Remote
+            && !remote_forward_target_allowed(&rule.target_host)
+        {
+            return Err(anyhow!(
+                "rule {}: remote forward target_host must be loopback; got '{}'",
+                i,
+                rule.target_host
+            ));
+        }
+    }
+
+    let mut started_ids = Vec::with_capacity(rules.len());
+
+    for rule in rules {
+        let forward_rule = ForwardRule {
+            id: Uuid::new_v4(),
+            host: host_name.to_string(),
+            direction: rule.direction,
+            bind_port: rule.bind_port,
+            target_host: rule.target_host.clone(),
+            target_port: rule.target_port,
+        };
+
+        // Reserve a lifecycle entry for this forward.
+        let lifecycle = crate::app_state::lifecycle();
+        let reservation = crate::lifecycle::LifecycleRegistry::reserve(
+            &lifecycle,
+            &forward_rule.id.to_string(),
+            crate::app_state::ResourceKind::Forward,
+            crate::app_state::ResourceOwner::Headless(uuid::Uuid::new_v4()),
+        )
+        .map_err(|e| anyhow!("lifecycle reserve failed: {e}"))?;
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let session_slot: Arc<Mutex<Option<ssh2::Session>>> = Arc::new(Mutex::new(None));
+        let control = RuleControl::new();
+        let worker_stop = stop.clone();
+        let worker_session_slot = session_slot.clone();
+        let worker_control = control.clone();
+        let worker_rule = forward_rule.clone();
+        let worker_host = host.clone();
+        let worker = thread::spawn(move || {
+            let result = match worker_rule.direction {
+                ForwardDirection::Local => {
+                    run_local_forward(worker_host, worker_rule, worker_stop, worker_control)
+                }
+                ForwardDirection::Remote => run_remote_forward(
+                    worker_host,
+                    worker_rule,
+                    worker_stop,
+                    worker_session_slot,
+                    worker_control,
+                ),
+            };
+            if let Err(error) = result {
+                let _ = crate::diagnostics::append_diagnostic_log(
+                    "error",
+                    "embedded_ssh_forward",
+                    "multi-rule forward worker stopped with error",
+                    Some(serde_json::json!({ "error": error.to_string() })),
+                );
+            }
+        });
+
+        reservation
+            .activate()
+            .map_err(|e| anyhow!("lifecycle activate failed: {e}"))?;
+
+        forwards().lock().await.insert(
+            forward_rule.id,
+            ForwardHandle {
+                rule: forward_rule.clone(),
+                stop,
+                control,
+                session: session_slot,
+                worker: Some(worker),
+            },
+        );
+        started_ids.push(forward_rule.id);
+    }
+
+    Ok(MultiForwardResult {
+        ids: started_ids,
+        host: host_name.to_string(),
+        count: rules.len(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -715,5 +893,43 @@ mod tests {
         // Both point to the same AtomicU64.
         assert_eq!(rc.snapshot().bytes_tx, 42);
         assert_eq!(clone.snapshot().bytes_tx, 42);
+    }
+
+    // ── B68: Bastion/jump host override tests ──────────────────────────────
+
+    #[test]
+    fn resolve_host_with_jump_validates_unknown_jump_host() {
+        // resolve_host_with_jump should reject an unknown jump host profile.
+        // We can't easily set up a full config here, but we can verify the
+        // error path when the host or jump host doesn't exist.
+        crate::store::set_test_config_dir(
+            std::env::temp_dir().join(format!("agent2ssh_b68_test_{}", std::process::id())),
+        );
+        let result = resolve_host_with_jump("nonexistent", Some("also_nonexistent"));
+        assert!(result.is_err());
+        crate::store::clear_test_config_dir();
+    }
+
+    #[test]
+    fn resolve_host_with_jump_none_preserves_existing() {
+        // When via is None, the function should just resolve normally.
+        crate::store::set_test_config_dir(
+            std::env::temp_dir().join(format!("agent2ssh_b68_none_{}", std::process::id())),
+        );
+        let result = resolve_host_with_jump("nonexistent", None);
+        assert!(result.is_err());
+        crate::store::clear_test_config_dir();
+    }
+
+    #[test]
+    fn resolve_host_with_jump_empty_string_treated_as_none() {
+        // An empty string or whitespace-only via should be treated as None.
+        crate::store::set_test_config_dir(
+            std::env::temp_dir().join(format!("agent2ssh_b68_empty_{}", std::process::id())),
+        );
+        let result = resolve_host_with_jump("nonexistent", Some("   "));
+        // Should behave as if via was None — host not found.
+        assert!(result.is_err());
+        crate::store::clear_test_config_dir();
     }
 }

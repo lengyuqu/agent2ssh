@@ -674,8 +674,7 @@ pub async fn webdav_pull(options: WebDavSyncOptions) -> Result<WebDavSyncResult>
         }
         let dest = dir.join(&file.path);
         let tmp = dest.with_extension(format!("tmp.{}", std::process::id()));
-        fs::write(&tmp, plaintext)
-            .with_context(|| format!("failed to write {}", tmp.display()))?;
+        fs::write(&tmp, plaintext).with_context(|| format!("failed to write {}", tmp.display()))?;
         restrict_file_to_owner(&tmp)?;
         fs::rename(&tmp, &dest).with_context(|| format!("failed to replace {}", dest.display()))?;
         restrict_file_to_owner(&dest)?;

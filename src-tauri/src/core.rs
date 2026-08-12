@@ -2172,8 +2172,18 @@ pub fn import_ssh_config_core(path: Option<&str>) -> Result<Vec<HostProfile>> {
         return Ok(Vec::new());
     }
 
-    let raw = std::fs::read_to_string(&config_path)
-        .with_context(|| format!("failed to read {}", config_path.display()))?;
+    let raw = if let Some(parent) = config_path.parent() {
+        // B38: Expand Include directives before parsing.
+        crate::ssh_config::load_with_includes(&config_path, parent).unwrap_or_else(|_| {
+            // Fallback to raw read if Include expansion fails
+            std::fs::read_to_string(&config_path)
+                .with_context(|| format!("failed to read {}", config_path.display()))
+                .unwrap_or_default()
+        })
+    } else {
+        std::fs::read_to_string(&config_path)
+            .with_context(|| format!("failed to read {}", config_path.display()))?
+    };
 
     let mut profiles: Vec<HostProfile> = Vec::new();
     let mut current_alias: Option<String> = None;
@@ -2219,6 +2229,7 @@ pub fn import_ssh_config_core(path: Option<&str>) -> Result<Vec<HostProfile>> {
             role: None,
             owner: None,
             init_command: None,
+            passphrase: None,
         });
     };
 
@@ -2494,8 +2505,17 @@ fn parse_ssh_config_file(path: &std::path::Path) -> Result<Vec<HostProfile>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
+    let raw = if let Some(parent) = path.parent() {
+        // B38: Expand Include directives before parsing.
+        crate::ssh_config::load_with_includes(path, parent).unwrap_or_else(|_| {
+            std::fs::read_to_string(path)
+                .with_context(|| format!("failed to read {}", path.display()))
+                .unwrap_or_default()
+        })
+    } else {
+        std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?
+    };
 
     let mut profiles: Vec<HostProfile> = Vec::new();
     let mut current_alias: Option<String> = None;
@@ -2538,6 +2558,7 @@ fn parse_ssh_config_file(path: &std::path::Path) -> Result<Vec<HostProfile>> {
             role: None,
             owner: None,
             init_command: None,
+            passphrase: None,
         });
     };
 
@@ -2870,6 +2891,7 @@ mod tests {
                 role: Some("web".into()),
                 owner: Some("platform".into()),
                 init_command: None,
+                passphrase: None,
             },
             HostProfile {
                 name: "stage-db-1".into(),
@@ -2887,6 +2909,7 @@ mod tests {
                 role: Some("db".into()),
                 owner: Some("data".into()),
                 init_command: None,
+                passphrase: None,
             },
         ];
 
@@ -2945,21 +2968,18 @@ mod tests {
             RiskLevel::Blocked
         );
         // sudo with -u flag
-        assert_eq!(
-            classify_risk("sudo -u root rm -rf /"),
-            RiskLevel::Blocked
-        );
-        assert_eq!(
-            classify_risk("sudo --user=root reboot"),
-            RiskLevel::Blocked
-        );
+        assert_eq!(classify_risk("sudo -u root rm -rf /"), RiskLevel::Blocked);
+        assert_eq!(classify_risk("sudo --user=root reboot"), RiskLevel::Blocked);
     }
 
     #[test]
     fn test_classify_risk_ast_path_normalization() {
         // /usr/bin/rm should be normalized to rm
         assert_eq!(classify_risk("/usr/bin/rm -rf /"), RiskLevel::Blocked);
-        assert_eq!(classify_risk("/bin/dd if=/dev/zero of=/dev/sda"), RiskLevel::Blocked);
+        assert_eq!(
+            classify_risk("/bin/dd if=/dev/zero of=/dev/sda"),
+            RiskLevel::Blocked
+        );
     }
 
     #[test]
@@ -3038,6 +3058,7 @@ mod tests {
             role: None,
             owner: None,
             init_command: None,
+            passphrase: None,
         }
     }
 
@@ -3156,7 +3177,8 @@ mod tests {
                 env: None,
                 role: None,
                 owner: None,
-            init_command: None,
+                init_command: None,
+                passphrase: None,
             }],
         })
         .unwrap();
@@ -3201,6 +3223,7 @@ mod tests {
             role: None,
             owner: None,
             init_command: None,
+            passphrase: None,
         })
         .unwrap();
 
@@ -3262,7 +3285,8 @@ mod tests {
                 env: None,
                 role: None,
                 owner: None,
-            init_command: None,
+                init_command: None,
+                passphrase: None,
             }],
         };
         crate::store::save_config(&existing_config).unwrap();
@@ -3285,7 +3309,8 @@ mod tests {
                     env: None,
                     role: None,
                     owner: None,
-            init_command: None,
+                    init_command: None,
+                    passphrase: None,
                 },
                 // Duplicate (same name, same host/port/user)
                 HostProfile {
@@ -3303,7 +3328,8 @@ mod tests {
                     env: None,
                     role: None,
                     owner: None,
-            init_command: None,
+                    init_command: None,
+                    passphrase: None,
                 },
             ],
             risk_rules: Some("[rules]\n".into()),
@@ -3349,7 +3375,8 @@ mod tests {
                 env: Some("dev".into()),
                 role: None,
                 owner: None,
-            init_command: None,
+                init_command: None,
+                passphrase: None,
             }],
         })
         .unwrap();
@@ -3371,6 +3398,7 @@ mod tests {
                 role: Some("web".into()),
                 owner: Some("ops".into()),
                 init_command: None,
+                passphrase: None,
             }],
             risk_rules: None,
             playbooks: None,
@@ -3767,7 +3795,8 @@ mod tests {
                 env: Some("prod".into()),
                 role: Some("web".into()),
                 owner: None,
-            init_command: None,
+                init_command: None,
+                passphrase: None,
             },
             HostProfile {
                 name: "staging-db".into(),
@@ -3784,7 +3813,8 @@ mod tests {
                 env: None,
                 role: None,
                 owner: None,
-            init_command: None,
+                init_command: None,
+                passphrase: None,
             },
         ];
         let output = export_to_ssh_config_format(&hosts);
@@ -3819,6 +3849,7 @@ mod tests {
             role: None,
             owner: None,
             init_command: None,
+            passphrase: None,
         }];
         let output = export_to_ssh_config_format(&hosts);
         // Port 22 should be omitted (it's the default)

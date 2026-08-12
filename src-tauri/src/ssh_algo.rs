@@ -165,11 +165,23 @@ mod tests {
         // DSA host keys must not appear.
         assert!(!d.hostkey.contains("ssh-dss"), "ssh-dss must be excluded");
         // 3DES-CBC must not appear.
-        assert!(!d.cipher_cs.contains("3des-cbc"), "3des-cbc must be excluded");
-        assert!(!d.cipher_sc.contains("3des-cbc"), "3des-cbc must be excluded");
+        assert!(
+            !d.cipher_cs.contains("3des-cbc"),
+            "3des-cbc must be excluded"
+        );
+        assert!(
+            !d.cipher_sc.contains("3des-cbc"),
+            "3des-cbc must be excluded"
+        );
         // hmac-sha1-96 must not appear.
-        assert!(!d.mac_cs.contains("hmac-sha1-96"), "hmac-sha1-96 must be excluded");
-        assert!(!d.mac_sc.contains("hmac-sha1-96"), "hmac-sha1-96 must be excluded");
+        assert!(
+            !d.mac_cs.contains("hmac-sha1-96"),
+            "hmac-sha1-96 must be excluded"
+        );
+        assert!(
+            !d.mac_sc.contains("hmac-sha1-96"),
+            "hmac-sha1-96 must be excluded"
+        );
     }
 
     #[test]

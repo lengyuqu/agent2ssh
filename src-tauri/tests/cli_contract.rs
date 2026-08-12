@@ -47,11 +47,8 @@ async fn run_cli_in_dir(
 }
 
 fn unique_temp_dir(label: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "agent2ssh-b39-{}-{}",
-        label,
-        uuid::Uuid::new_v4()
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("agent2ssh-b39-{}-{}", label, uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).expect("create temp dir");
     dir
 }
@@ -75,8 +72,7 @@ async fn b39_root_help_lists_top_level_subcommands() {
 
     // The help output must mention all top-level subcommand families.
     for cmd in &[
-        "host", "exec", "sftp", "session", "forward", "secrets", "ping",
-        "audit", "risk", "daemon",
+        "host", "exec", "sftp", "session", "forward", "secrets", "ping", "audit", "risk", "daemon",
     ] {
         assert!(
             stdout.to_lowercase().contains(cmd),
@@ -132,7 +128,10 @@ async fn b39_audit_help_shows_filters() {
 async fn b39_risk_help_exits_zero() {
     let (stdout, _stderr, code) = run_cli(&["risk", "--help"]).await;
     assert_eq!(code, Some(0));
-    assert!(stdout.contains("command"), "risk help must mention command arg");
+    assert!(
+        stdout.contains("command"),
+        "risk help must mention command arg"
+    );
 }
 
 #[tokio::test]
@@ -162,11 +161,7 @@ async fn b39_version_exits_zero() {
 #[tokio::test]
 async fn b39_unknown_subcommand_exits_nonzero() {
     let (_stdout, stderr, code) = run_cli(&["nonexistent-command"]).await;
-    assert_ne!(
-        code,
-        Some(0),
-        "unknown subcommand must exit non-zero"
-    );
+    assert_ne!(code, Some(0), "unknown subcommand must exit non-zero");
     // clap prints usage to stderr on error.
     assert!(
         !stderr.is_empty(),
@@ -202,7 +197,8 @@ async fn b39_host_list_empty_store_prints_nothing_or_empty() {
     assert_eq!(code, Some(0), "host list on empty store must exit 0");
 
     // JSON output should be a valid JSON array (possibly empty).
-    let result: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or(serde_json::Value::Null);
+    let result: serde_json::Value =
+        serde_json::from_str(stdout.trim()).unwrap_or(serde_json::Value::Null);
     assert!(
         result.is_array(),
         "host list --json must output a JSON array"
@@ -279,7 +275,8 @@ async fn b39_risk_low_risk_command_classified() {
 
 #[tokio::test]
 async fn b39_ping_nonexistent_host_exits_nonzero() {
-    let (_stdout, _stderr, code) = run_cli(&["ping", "nonexistent.invalid", "--timeout-secs", "1"]).await;
+    let (_stdout, _stderr, code) =
+        run_cli(&["ping", "nonexistent.invalid", "--timeout-secs", "1"]).await;
     // Ping should fail for a non-existent host (non-zero exit).
     // Note: timeout_secs may not be a valid arg depending on the CLI structure.
     // The key contract: ping with an unreachable host does not hang forever.
@@ -322,7 +319,10 @@ async fn b39_playbook_help_lists_subcommands() {
 async fn b39_integrate_help_lists_subcommands() {
     let (stdout, _stderr, code) = run_cli(&["integrate", "--help"]).await;
     assert_eq!(code, Some(0));
-    assert!(stdout.contains("list"), "integrate help must mention 'list'");
+    assert!(
+        stdout.contains("list"),
+        "integrate help must mention 'list'"
+    );
     assert!(stdout.contains("add"), "integrate help must mention 'add'");
 }
 

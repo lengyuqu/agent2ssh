@@ -283,11 +283,8 @@ mod tests {
         let registry_clone = DrainRegistry {
             connections: registry.connections.clone(),
         };
-        let drain_task = tokio::spawn(async move {
-            registry_clone
-                .drain_all(Duration::from_secs(2))
-                .await
-        });
+        let drain_task =
+            tokio::spawn(async move { registry_clone.drain_all(Duration::from_secs(2)).await });
 
         // Give drain task time to start waiting
         tokio::time::sleep(Duration::from_millis(50)).await;

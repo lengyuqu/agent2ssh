@@ -508,3 +508,14 @@ export type ImportResult = {
   risk_rules_imported: boolean;
   playbooks_imported: boolean;
 };
+
+// Rust: types.rs — HighlightRule
+// B24: Terminal highlight rule for regex-based output decoration.
+export type HighlightRule = {
+  keyword: string;
+  name: string;
+  color: string;
+  enabled: boolean;
+  is_regex: boolean;
+  is_case_sensitive: boolean;
+};

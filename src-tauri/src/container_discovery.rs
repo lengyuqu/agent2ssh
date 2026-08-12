@@ -181,10 +181,7 @@ fn discover_docker_targets(binary: &std::path::Path) -> Result<Vec<ContainerDisc
     let mut targets = Vec::new();
 
     for ctx in &contexts {
-        let raw = match run_capture(
-            binary,
-            &["--context", ctx, "ps", "--format", "{{json .}}"],
-        ) {
+        let raw = match run_capture(binary, &["--context", ctx, "ps", "--format", "{{json .}}"]) {
             Ok(s) => s,
             Err(_) => continue, // Skip contexts that can't be reached.
         };
@@ -270,7 +267,13 @@ fn discover_k8s_targets(binary: &std::path::Path) -> Result<Vec<ContainerDiscove
                 .container_statuses
                 .as_ref()
                 .map(|cs| cs.iter().map(|c| c.name.as_str()).collect())
-                .unwrap_or_else(|| pod.spec.containers.iter().map(|c| c.name.as_str()).collect());
+                .unwrap_or_else(|| {
+                    pod.spec
+                        .containers
+                        .iter()
+                        .map(|c| c.name.as_str())
+                        .collect()
+                });
 
             for container_name in &containers {
                 let target = ContainerDiscoveryTarget {
@@ -406,7 +409,12 @@ mod tests {
             container_id: "abc123".into(),
             container_name: "web".into(),
             status: "Up 2 hours".into(),
-            exec_args: vec!["exec".into(), "-it".into(), "abc123".into(), "/bin/sh".into()],
+            exec_args: vec![
+                "exec".into(),
+                "-it".into(),
+                "abc123".into(),
+                "/bin/sh".into(),
+            ],
             exec_binary: "/usr/local/bin/docker".into(),
             namespace: None,
         };

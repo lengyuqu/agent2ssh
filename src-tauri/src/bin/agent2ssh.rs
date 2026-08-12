@@ -299,6 +299,15 @@ enum Commands {
         #[command(subcommand)]
         command: IntegrateCommands,
     },
+    /// B52: Check for app updates by querying GitHub releases
+    VersionCheck {
+        /// GitHub repo in owner/name format (default: agent2ssh/agent2ssh)
+        #[arg(long)]
+        repo: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -521,6 +530,23 @@ enum ForwardCommands {
         target_host: String,
         #[arg(long)]
         target_port: u16,
+        /// B68: Jump host (bastion) profile name to route the tunnel through.
+        #[arg(long)]
+        via: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Start multiple port forwards on a single host in one batch (B25)
+    AddMulti {
+        host: String,
+        /// Repeatable: each occurrence adds one rule.
+        /// Format: "direction:bind_port:target_host:target_port"
+        /// direction is "local" or "remote"
+        #[arg(long = "rule", num_args = 1)]
+        rules: Vec<String>,
+        /// B68: Jump host (bastion) profile name to route the tunnel through.
+        #[arg(long)]
+        via: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -1031,8 +1057,17 @@ fn command_authorization_error(error: CommandAuthorizationError) -> anyhow::Erro
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    // Use a larger stack size to avoid stack overflow in debug builds where
+    // clap's derive-generated parsing code has large unoptimized stack frames.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(8 * 1024 * 1024) // 8 MB
+        .build()?;
+    runtime.block_on(async_main())
+}
+
+async fn async_main() -> Result<()> {
     agent2ssh::install_panic_hook("cli");
     agent2ssh::seed_trace_id_from_env();
     // K1: best-effort one-shot migration of any legacy plaintext passwords into
@@ -1133,6 +1168,7 @@ async fn main() -> Result<()> {
                     role: clean_optional(role),
                     owner: clean_optional(owner),
                     init_command: clean_optional(init_command),
+                    passphrase: None,
                 })?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&profile)?);
@@ -1613,6 +1649,7 @@ async fn main() -> Result<()> {
                 bind_port,
                 target_host,
                 target_port,
+                via,
                 json,
             } => {
                 let dir = match direction.as_str() {
@@ -1620,20 +1657,21 @@ async fn main() -> Result<()> {
                     _ => ForwardDirection::Local,
                 };
                 let (client, base_url, token) = daemon_client(daemon_alias.as_deref())?;
-                let rule: ForwardRule = daemon_json(
-                    client
-                        .post(format!("{base_url}/forwards"))
-                        .bearer_auth(token)
-                        .json(&ForwardRule {
-                            id: uuid::Uuid::new_v4(),
-                            host,
-                            direction: dir,
-                            bind_port,
-                            target_host,
-                            target_port,
-                        }),
-                )
-                .await?;
+                let url = if let Some(ref v) = via {
+                    format!("{base_url}/forwards?via={}", v)
+                } else {
+                    format!("{base_url}/forwards")
+                };
+                let rule: ForwardRule =
+                    daemon_json(client.post(url).bearer_auth(token).json(&ForwardRule {
+                        id: uuid::Uuid::new_v4(),
+                        host,
+                        direction: dir,
+                        bind_port,
+                        target_host,
+                        target_port,
+                    }))
+                    .await?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&rule)?);
                 } else {
@@ -1646,6 +1684,84 @@ async fn main() -> Result<()> {
                         rule.target_port,
                         rule.id
                     );
+                }
+            }
+            ForwardCommands::AddMulti {
+                host,
+                rules,
+                via,
+                json,
+            } => {
+                // B25: Parse "direction:bind_port:target_host:target_port" strings.
+                let mut parsed_rules = Vec::new();
+                for (i, raw) in rules.iter().enumerate() {
+                    let parts: Vec<&str> = raw.splitn(4, ':').collect();
+                    if parts.len() != 4 {
+                        return Err(anyhow::anyhow!(
+                            "rule {}: expected format 'direction:bind_port:target_host:target_port', got '{}'",
+                            i, raw
+                        ));
+                    }
+                    let direction = match parts[0].to_lowercase().as_str() {
+                        "remote" => ForwardDirection::Remote,
+                        "local" => ForwardDirection::Local,
+                        other => {
+                            return Err(anyhow::anyhow!(
+                                "rule {}: direction must be 'local' or 'remote', got '{}'",
+                                i,
+                                other
+                            ))
+                        }
+                    };
+                    let bind_port: u16 = parts[1].parse().map_err(|e| {
+                        anyhow::anyhow!("rule {}: invalid bind_port '{}': {}", i, parts[1], e)
+                    })?;
+                    let target_host = parts[2].to_string();
+                    let target_port: u16 = parts[3].parse().map_err(|e| {
+                        anyhow::anyhow!("rule {}: invalid target_port '{}': {}", i, parts[3], e)
+                    })?;
+                    parsed_rules.push(agent2ssh::MultiForwardRule {
+                        direction,
+                        bind_port,
+                        target_host,
+                        target_port,
+                    });
+                }
+
+                let (client, base_url, token) = daemon_client(daemon_alias.as_deref())?;
+                let url = if let Some(ref v) = via {
+                    format!("{base_url}/forwards/multi?via={}", v)
+                } else {
+                    format!("{base_url}/forwards/multi")
+                };
+                let result: agent2ssh::MultiForwardResult = daemon_json(
+                    client
+                        .post(url)
+                        .bearer_auth(token)
+                        .json(&serde_json::json!({
+                            "host": &host,
+                            "rules": parsed_rules.iter().map(|r| {
+                                serde_json::json!({
+                                    "direction": match r.direction {
+                                        ForwardDirection::Local => "local",
+                                        ForwardDirection::Remote => "remote",
+                                    },
+                                    "bind_port": r.bind_port,
+                                    "target_host": &r.target_host,
+                                    "target_port": r.target_port,
+                                })
+                            }).collect::<Vec<_>>()
+                        })),
+                )
+                .await?;
+
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                } else {
+                    println!("Started {} forward(s) on '{}':", result.count, result.host);
+                    for id in &result.ids {
+                        println!("  id={}", id);
+                    }
                 }
             }
             ForwardCommands::List { json } => {
@@ -2718,6 +2834,80 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Integrate { command } => run_integrate_command(command)?,
+        Commands::VersionCheck { repo, json } => {
+            let repo = repo.as_deref().unwrap_or("agent2ssh/agent2ssh");
+            // Validate repo format
+            if !repo.contains('/') || repo.chars().any(|c| c.is_whitespace()) {
+                return Err(anyhow::anyhow!(
+                    "invalid repo format '{}': expected 'owner/name'",
+                    repo
+                ));
+            }
+            let local_version = env!("CARGO_PKG_VERSION");
+            let client = reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .user_agent(format!("agent2ssh/{local_version}"))
+                .timeout(std::time::Duration::from_secs(10))
+                .build()?;
+            let url = format!("https://github.com/{}/releases/latest", repo);
+            let resp = client.get(&url).send().await?;
+            if !resp.status().is_redirection() {
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "error": format!("expected redirect from GitHub, got status {}", resp.status()),
+                            "url": url,
+                        })
+                    );
+                } else {
+                    eprintln!(
+                        "error: GitHub returned status {} (expected redirect)",
+                        resp.status()
+                    );
+                }
+                return Ok(());
+            }
+            let location = resp
+                .headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            let latest_tag = location
+                .rsplit("/releases/tag/")
+                .next()
+                .unwrap_or("")
+                .trim_end_matches('/');
+            if latest_tag.is_empty() {
+                return Err(anyhow::anyhow!(
+                    "could not parse release tag from redirect: {}",
+                    location
+                ));
+            }
+            let compat = agent2ssh::remote::check_version_compatibility(Some(latest_tag));
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "local_version": local_version,
+                        "latest_version": latest_tag,
+                        "compatible": compat.compatible,
+                        "message": compat.message,
+                        "repo": repo,
+                    }))?
+                );
+            } else {
+                println!("Local version:  {}", local_version);
+                println!("Latest version: {}", latest_tag);
+                println!("Status:         {}", compat.message);
+                if latest_tag.trim_start_matches('v') != local_version {
+                    println!(
+                        "URL:            https://github.com/{}/releases/tag/{}",
+                        repo, latest_tag
+                    );
+                }
+            }
+        }
     }
 
     Ok(())

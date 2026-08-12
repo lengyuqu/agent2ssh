@@ -925,6 +925,57 @@ impl KeyboardInteractivePrompt for KeyboardInteractivePrompter<'_> {
     }
 }
 
+/// B43: Retrieve a cached passphrase from the in-memory store.
+/// Returns `None` if no passphrase is cached for the given key.
+pub fn passphrase_cache_get(cache_key: &str) -> Option<zeroize::Zeroizing<String>> {
+    let state = crate::app_state::app_state();
+    state
+        .passphrase_cache
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(cache_key).cloned())
+}
+
+/// B43: Store a passphrase in the in-memory cache. The value is wrapped in
+/// `Zeroizing<String>` so it is wiped from memory when evicted.
+pub fn passphrase_cache_set(cache_key: &str, passphrase: &str) {
+    if let Ok(mut cache) = crate::app_state::app_state().passphrase_cache.lock() {
+        cache.insert(
+            cache_key.to_string(),
+            zeroize::Zeroizing::new(passphrase.to_string()),
+        );
+    }
+}
+
+/// B43: Evict a single passphrase from the cache (e.g. on auth failure
+/// indicating the cached value is stale).
+pub fn passphrase_cache_evict(cache_key: &str) {
+    if let Ok(mut cache) = crate::app_state::app_state().passphrase_cache.lock() {
+        cache.remove(cache_key);
+    }
+}
+
+/// B43: Clear the entire passphrase cache. Called when the secrets store is
+/// locked (master password lock) to prevent stale passphrases from being
+/// used after a lock event.
+pub fn passphrase_cache_clear() {
+    if let Ok(mut cache) = crate::app_state::app_state().passphrase_cache.lock() {
+        cache.clear();
+    }
+}
+
+/// B43: Resolve the effective passphrase for a given cache key.
+/// Checks the in-memory cache first; falls back to the host config value
+/// if provided. Returns `None` if no passphrase is available.
+fn passphrase_for_host(cache_key: &str, config_passphrase: Option<&str>) -> Option<String> {
+    // 1. Check in-memory cache
+    if let Some(cached) = passphrase_cache_get(cache_key) {
+        return Some((*cached).clone());
+    }
+    // 2. Fall back to host config passphrase (first use)
+    config_passphrase.map(|s| s.to_string())
+}
+
 fn authenticate(session: &Session, host: &HostProfile, username: &str) -> Result<String> {
     let auth_methods = session.auth_methods(username).unwrap_or("").to_string();
     let _ = crate::diagnostics::append_diagnostic_log(
@@ -1029,8 +1080,34 @@ fn authenticate(session: &Session, host: &HostProfile, username: &str) -> Result
     {
         validate_key_path(key_path)?;
         let path = expand_tilde(key_path);
-        session.userauth_pubkey_file(username, None, Path::new(&path), None)?;
-        return Ok("publickey_file".into());
+        let cache_key = format!("host:{}", host.name);
+        let passphrase = passphrase_for_host(&cache_key, host.passphrase.as_deref());
+        match session.userauth_pubkey_file(username, None, Path::new(&path), passphrase.as_deref())
+        {
+            Ok(()) => {
+                if let Some(pw) = passphrase {
+                    passphrase_cache_set(&cache_key, &pw);
+                }
+                return Ok("publickey_file".into());
+            }
+            Err(e) => {
+                // If the key is encrypted and no passphrase was provided,
+                // try the host.passphrase directly (first-use cache miss).
+                if passphrase.is_none() {
+                    if let Some(pw) = host.passphrase.as_deref() {
+                        if session
+                            .userauth_pubkey_file(username, None, Path::new(&path), Some(pw))
+                            .is_ok()
+                            && session.authenticated()
+                        {
+                            passphrase_cache_set(&cache_key, pw);
+                            return Ok("publickey_file".into());
+                        }
+                    }
+                }
+                return Err(e.into());
+            }
+        }
     }
 
     // T2-9: Try SSH agent first (includes Windows Pageant via ssh2's agent connector)
@@ -1055,11 +1132,16 @@ fn authenticate(session: &Session, host: &HostProfile, username: &str) -> Result
         for (filename, label) in &default_keys {
             let key_file = ssh_dir.join(filename);
             if key_file.exists() {
+                let cache_key = key_file.to_string_lossy().into_owned();
+                let passphrase = passphrase_for_host(&cache_key, host.passphrase.as_deref());
                 if session
-                    .userauth_pubkey_file(username, None, &key_file, None)
+                    .userauth_pubkey_file(username, None, &key_file, passphrase.as_deref())
                     .is_ok()
                     && session.authenticated()
                 {
+                    if let Some(pw) = passphrase {
+                        passphrase_cache_set(&cache_key, &pw);
+                    }
                     return Ok((*label).into());
                 }
             }
@@ -1243,6 +1325,7 @@ mod tests {
             role: None,
             owner: None,
             init_command: None,
+            passphrase: None,
         }
     }
 

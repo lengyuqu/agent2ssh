@@ -494,6 +494,127 @@ pub fn export_diagnostic_bundle() -> Result<PathBuf> {
     Ok(out)
 }
 
+// ── B56: Structured Backend System Report ───────────────────────────────────
+
+/// Generate a structured JSON system report combining local system metrics,
+/// application state, config overview, and health snapshot data.
+pub fn generate_system_report() -> Result<serde_json::Value> {
+    let config_dir = config_dir()?;
+
+    // 1. Local system metrics via sysinfo
+    let mut sys = sysinfo::System::new_all();
+    sys.refresh_all();
+
+    let total_memory_gb = sys.total_memory() as f64 / 1_073_741_824.0;
+    let used_memory_gb = sys.used_memory() as f64 / 1_073_741_824.0;
+    let available_memory_gb = sys.available_memory() as f64 / 1_073_741_824.0;
+
+    let cpus: Vec<serde_json::Value> = sys
+        .cpus()
+        .iter()
+        .take(4) // limit to first 4 cores to keep report compact
+        .map(|cpu| {
+            json!({
+                "name": cpu.name().to_string(),
+                "usage_pct": cpu.cpu_usage(),
+                "frequency_mhz": cpu.frequency(),
+            })
+        })
+        .collect();
+
+    // 2. Application state
+    let host = crate::app_state::host();
+    let transport = host.transport_name().to_string();
+    let is_desktop = host.is_desktop();
+    drop(host);
+
+    // 3. Lifecycle resources
+    let lifecycle = crate::app_state::lifecycle();
+    let lifecycle_summary = lifecycle
+        .lock()
+        .map(|reg| {
+            let ready_list = reg.list_by_phase(crate::app_state::ResourcePhase::Ready);
+            let pending_list = reg.list_by_phase(crate::app_state::ResourcePhase::Pending);
+            json!({
+                "active_resources": ready_list.len() + pending_list.len(),
+                "ready": ready_list.len(),
+                "pending": pending_list.len(),
+            })
+        })
+        .unwrap_or_else(|_| json!({}));
+
+    // 4. Config overview
+    let config_overview = match crate::store::load_config() {
+        Ok(config) => {
+            json!({
+                "host_count": config.hosts.len(),
+                "proxy_count": config.proxies.len(),
+                "host_groups": config.groups.len(),
+            })
+        }
+        Err(e) => json!({ "error": e.to_string() }),
+    };
+
+    // 5. Daemon status
+    let daemon_pid = crate::daemon_control::read_daemon_pid().ok().flatten();
+    let daemon_alive = daemon_pid.map(crate::daemon_control::process_is_alive);
+    let daemon_health_ok = crate::daemon_control::daemon_health_ok();
+
+    // 6. Health snapshot
+    let health_snapshot = crate::health::load_health_snapshot()
+        .map(|h| serde_json::to_value(&h).unwrap_or(json!(null)))
+        .unwrap_or(json!(null));
+
+    // 7. Recent diagnostic log entries
+    let recent_logs = list_diagnostic_logs(20).unwrap_or_default();
+    let log_entries: Vec<serde_json::Value> = recent_logs
+        .iter()
+        .map(|entry| {
+            json!({
+                "ts": entry.ts,
+                "level": entry.level,
+                "component": entry.component,
+                "message": entry.message,
+            })
+        })
+        .collect();
+
+    Ok(json!({
+        "generated_at": Utc::now().to_rfc3339(),
+        "version": crate::remote::PROTOCOL_VERSION,
+        "transport": transport,
+        "is_desktop": is_desktop,
+        "system": {
+            "platform": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+            "hostname": sysinfo::System::host_name().unwrap_or_default(),
+            "uptime_secs": sysinfo::System::uptime(),
+            "cpu": {
+                "core_count": sys.cpus().len(),
+                "global_usage_pct": sys.global_cpu_usage(),
+                "cores": cpus,
+            },
+            "memory": {
+                "total_gb": (total_memory_gb * 100.0).round() / 100.0,
+                "used_gb": (used_memory_gb * 100.0).round() / 100.0,
+                "available_gb": (available_memory_gb * 100.0).round() / 100.0,
+            },
+        },
+        "application": {
+            "config_dir": config_dir.display().to_string(),
+            "config": config_overview,
+            "lifecycle": lifecycle_summary,
+        },
+        "daemon": {
+            "pid": daemon_pid,
+            "process_alive": daemon_alive,
+            "health_ok": daemon_health_ok,
+        },
+        "health_snapshot": health_snapshot,
+        "recent_logs": log_entries,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

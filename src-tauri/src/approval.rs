@@ -1217,7 +1217,10 @@ mod tests {
         approval_respond(id, false).await.unwrap();
 
         let snapshot = get_approved_command_snapshot(id).await;
-        assert!(snapshot.is_none(), "rejected request should have no snapshot");
+        assert!(
+            snapshot.is_none(),
+            "rejected request should have no snapshot"
+        );
     }
 
     #[tokio::test]
@@ -1247,7 +1250,10 @@ mod tests {
         // Try to revoke a pending approval — should fail
         let result = revoke_approval(id).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("cannot be revoked"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("cannot be revoked"));
     }
 
     #[tokio::test]

@@ -227,7 +227,12 @@ async fn supervise_all() {
         store
             .iter()
             .map(|(name, conn)| {
-                (name.clone(), conn.session.clone(), conn.health.clone(), conn.drop_tx.clone())
+                (
+                    name.clone(),
+                    conn.session.clone(),
+                    conn.health.clone(),
+                    conn.drop_tx.clone(),
+                )
             })
             .collect()
     };
@@ -378,7 +383,11 @@ mod tests {
 
         // Simulate reconnection
         let _ = tx.send(true);
-        assert_eq!(*rx.borrow(), true, "should reflect restore after send(true)");
+        assert_eq!(
+            *rx.borrow(),
+            true,
+            "should reflect restore after send(true)"
+        );
     }
 
     #[tokio::test]

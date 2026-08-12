@@ -41,7 +41,7 @@ impl std::fmt::Display for RiskLevel {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct HostProfile {
     pub name: String,
     pub host: String,
@@ -83,6 +83,11 @@ pub struct HostProfile {
     /// `RemoteCommand` / rssh's `init_command`.
     #[serde(default)]
     pub init_command: Option<String>,
+    /// B43: Passphrase for encrypted SSH private keys. Stored in config for
+    /// convenience; loaded into the in-memory passphrase cache on first use.
+    /// For keys without a passphrase, leave as `None`.
+    #[serde(default)]
+    pub passphrase: Option<String>,
 }
 
 pub fn default_host_group() -> String {
@@ -438,4 +443,29 @@ pub struct ConnectionStatus {
     /// unhealthy connection (K5).
     #[serde(default)]
     pub last_error: Option<String>,
+}
+
+/// B24: Terminal highlight rule. Each rule defines a regex pattern to match
+/// in terminal output and a color to decorate matches with.
+///
+/// Rules are persisted in `highlight_rules.json` (seed-once pattern matching
+/// `redact_rules.json`). The keyword field IS the regex source string and
+/// also serves as the identity key for CRUD operations.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HighlightRule {
+    /// Regex source string. Also the identity key.
+    pub keyword: String,
+    /// Human-readable label (max 100 chars).
+    #[serde(default)]
+    pub name: String,
+    /// Hex color, e.g. "#FF6B6B".
+    pub color: String,
+    /// Whether the rule is active.
+    pub enabled: bool,
+    /// Always true after migration (legacy plain-text rules are escaped).
+    #[serde(default)]
+    pub is_regex: bool,
+    /// Case-sensitive matching.
+    #[serde(default)]
+    pub is_case_sensitive: bool,
 }

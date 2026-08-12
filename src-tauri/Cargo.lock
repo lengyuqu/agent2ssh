@@ -82,7 +82,7 @@ dependencies = [
 
 [[package]]
 name = "agent2ssh-app"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "aes-gcm 0.10.3",
  "anyhow",
@@ -115,6 +115,7 @@ dependencies = [
  "tauri-plugin-shell",
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "toml 0.8.2",
@@ -125,6 +126,7 @@ dependencies = [
  "tree-sitter",
  "tree-sitter-bash",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -7066,6 +7068,20 @@ name = "zeroize"
 version = "1.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b97154e67e32c85465826e8bcc1c59429aaaf107c1e4a9e53c8d8ccd5eff88d0"
+dependencies = [
+ "zeroize_derive",
+]
+
+[[package]]
+name = "zeroize_derive"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c50655cbb0fe3fc43170059e702f1ce5e19b84cec58dc87b037a09935c2f328"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
 
 [[package]]
 name = "zerotrie"

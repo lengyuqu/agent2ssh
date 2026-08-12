@@ -19,6 +19,7 @@ import type {
   ExecResult,
   ForwardDirection,
   ForwardRule,
+  HighlightRule,
   HostFingerprintStatus,
   HostGroup,
   HostProfile,
@@ -290,6 +291,14 @@ export const api = {
     invoke<string>("session_read", { id, timeoutMs: timeoutMs ?? 2000 }),
   sessionClose: (id: string) => invoke<void>("session_close", { id }),
   sessionList: () => invoke<SessionInfo[]>("session_list"),
+
+  // B24: Terminal Highlight rules
+  listHighlights: () => invoke<HighlightRule[]>("list_highlights"),
+  addHighlight: (rule: HighlightRule) => invoke<HighlightRule[]>("add_highlight", { rule }),
+  removeHighlight: (keyword: string) => invoke<HighlightRule[]>("remove_highlight", { keyword }),
+  updateHighlight: (oldKeyword: string, rule: HighlightRule) =>
+    invoke<HighlightRule[]>("update_highlight", { oldKeyword, rule }),
+  resetHighlights: () => invoke<HighlightRule[]>("reset_highlights"),
   sessionOpenDaemon: async (host: string): Promise<string> => {
     const token = await invoke<string>("get_daemon_token");
     const res = await fetch(`${daemonUrl}/sessions`, {

@@ -122,10 +122,7 @@ pub async fn session_open_core(host_name: &str) -> Result<Uuid> {
     probe_session_open(&mut handle).inspect_err(|_| {
         // probe failed — reservation will be dropped, marking the
         // lifecycle entry as Closed automatically.
-        let _ = lifecycle
-            .lock()
-            .unwrap()
-            .close(&id.to_string(), None);
+        let _ = lifecycle.lock().unwrap().close(&id.to_string(), None);
     })?;
 
     // Session is ready — activate the lifecycle entry.

@@ -18,6 +18,7 @@ use crate::{
     diagnostics::{
         append_diagnostic_log, clear_diagnostic_logs as clear_diagnostic_logs_core,
         export_diagnostic_bundle as export_diagnostic_bundle_core,
+        generate_system_report as generate_system_report_core,
         list_diagnostic_logs as list_diagnostic_logs_core, DiagnosticLogEntry,
     },
     embedded_ssh::{
@@ -42,9 +43,9 @@ use crate::{
     store::{append_audit, config_dir, lock_config_file, restrict_file_to_owner},
     types::{
         source_from_transport, AuditEntry, AuditFilter, ConnectionStatus, ExecMultiResult,
-        ExecRequest, ExecResult, ForwardDirection, ForwardRule, HostGroup, HostProfile,
-        PingResult, ProxyProfile, RiskLevel, SftpDownloadRequest, SftpExchangeRequest,
-        SftpExchangeResult, SftpResult, SftpUploadRequest, WalkEntry,
+        ExecRequest, ExecResult, ForwardDirection, ForwardRule, HostGroup, HostProfile, PingResult,
+        ProxyProfile, RiskLevel, SftpDownloadRequest, SftpExchangeRequest, SftpExchangeResult,
+        SftpResult, SftpUploadRequest, WalkEntry,
     },
     webdav_sync::{
         apply_config_template, create_named_snapshot, delete_config_snapshot,
@@ -215,7 +216,20 @@ fn read_user_path_value() -> Result<String, String> {
 
 #[cfg(not(windows))]
 fn read_user_path_value() -> Result<String, String> {
-    Err("CLI PATH injection is currently implemented for Windows only".to_string())
+    // B51: On Linux/macOS, the "user PATH" is assembled from shell profile files.
+    // We read the current process PATH as a baseline, which reflects the
+    // effective PATH after all profile scripts have run.
+    Ok(std::env::var("PATH").unwrap_or_default())
+}
+
+#[cfg(not(windows))]
+fn write_user_path_value(_path_value: &str) -> Result<(), String> {
+    // B51: On non-Windows, we don't write a single PATH string to a registry.
+    // Instead, install_cli_to_path / remove_cli_from_path use shell profile
+    // modification directly via append_shell_profile_entry / remove_shell_profile_entry.
+    // This function is kept for API compatibility but should not be called
+    // on non-Windows. If it is, return an informative error.
+    Err("Use install_cli_to_path / remove_cli_from_path on non-Windows".to_string())
 }
 
 #[cfg(windows)]
@@ -243,7 +257,10 @@ fn write_user_path_value(path_value: &str) -> Result<(), String> {
 
 #[cfg(not(windows))]
 fn write_user_path_value(_path_value: &str) -> Result<(), String> {
-    Err("CLI PATH injection is currently implemented for Windows only".to_string())
+    // B51: On non-Windows, we don't write a single PATH string to a registry.
+    // Instead, install_cli_to_path / remove_cli_from_path use shell profile
+    // modification directly via append_shell_profile_entry / remove_shell_profile_entry.
+    Err("Use install_cli_to_path / remove_cli_from_path on non-Windows".to_string())
 }
 
 fn append_user_path_dir(path_value: &str, dir: &Path) -> String {
@@ -276,6 +293,15 @@ fn cli_path_status_with_message(message: String) -> Result<CliPathStatus, String
     let in_process_path = current_process_path_contains(&cli_dir);
     let cli_exists = cli_path.exists();
     let mcp_exists = mcp_path.exists();
+
+    // B51: On non-Windows, also check if the shell profile has the entry,
+    // since the process PATH may not reflect newly added profile lines.
+    #[cfg(not(windows))]
+    let installed =
+        cli_exists && mcp_exists && (in_user_path || in_process_path || shell_profile_has_entry());
+    #[cfg(windows)]
+    let installed = cli_exists && mcp_exists && in_user_path;
+
     Ok(CliPathStatus {
         cli_dir: cli_dir.display().to_string(),
         cli_path: cli_path.display().to_string(),
@@ -284,7 +310,7 @@ fn cli_path_status_with_message(message: String) -> Result<CliPathStatus, String
         mcp_exists,
         in_process_path,
         in_user_path,
-        installed: cli_exists && mcp_exists && in_user_path,
+        installed,
         message,
     })
 }
@@ -1340,6 +1366,69 @@ pub fn export_diagnostic_bundle() -> Result<String, String> {
 }
 
 #[tauri::command]
+pub fn generate_system_report() -> Result<serde_json::Value, String> {
+    generate_system_report_core().map_err(|e| e.to_string())
+}
+
+/// B43: Store a passphrase in the in-memory cache for a host.
+#[tauri::command]
+pub fn passphrase_cache_set(host_name: String, passphrase: String) -> Result<(), String> {
+    let cache_key = format!("host:{host_name}");
+    crate::embedded_ssh::passphrase_cache_set(&cache_key, &passphrase);
+    Ok(())
+}
+
+/// B43: Evict a single host's passphrase from the cache.
+#[tauri::command]
+pub fn passphrase_cache_evict(host_name: String) -> Result<(), String> {
+    let cache_key = format!("host:{host_name}");
+    crate::embedded_ssh::passphrase_cache_evict(&cache_key);
+    Ok(())
+}
+
+/// B43: Clear the entire passphrase cache (called on secrets lock).
+#[tauri::command]
+pub fn passphrase_cache_clear() -> Result<(), String> {
+    crate::embedded_ssh::passphrase_cache_clear();
+    Ok(())
+}
+
+/// B24: List all terminal highlight rules.
+#[tauri::command]
+pub fn list_highlights() -> Result<Vec<crate::types::HighlightRule>, String> {
+    Ok(crate::highlight::list_rules())
+}
+
+/// B24: Add a new highlight rule.
+#[tauri::command]
+pub fn add_highlight(
+    rule: crate::types::HighlightRule,
+) -> Result<Vec<crate::types::HighlightRule>, String> {
+    crate::highlight::insert_rule(rule).map_err(|e| e.to_string())
+}
+
+/// B24: Remove a highlight rule by keyword.
+#[tauri::command]
+pub fn remove_highlight(keyword: String) -> Result<Vec<crate::types::HighlightRule>, String> {
+    crate::highlight::delete_rule(&keyword).map_err(|e| e.to_string())
+}
+
+/// B24: Update an existing highlight rule. `old_keyword` identifies the rule.
+#[tauri::command]
+pub fn update_highlight(
+    old_keyword: String,
+    rule: crate::types::HighlightRule,
+) -> Result<Vec<crate::types::HighlightRule>, String> {
+    crate::highlight::update_rule(&old_keyword, rule).map_err(|e| e.to_string())
+}
+
+/// B24: Reset all highlight rules to defaults.
+#[tauri::command]
+pub fn reset_highlights() -> Result<Vec<crate::types::HighlightRule>, String> {
+    crate::highlight::reset_defaults().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn daemon_status() -> Result<DaemonControlResult, String> {
     match crate::daemon_control::read_daemon_pid().map_err(|e| e.to_string())? {
         Some(pid)
@@ -1568,17 +1657,159 @@ pub fn get_cli_path_status() -> Result<CliPathStatus, String> {
     cli_path_status_with_message("CLI PATH status loaded.".to_string())
 }
 
+// ── B51: Cross-platform CLI install (Linux/macOS shell profile) ─────────────
+// On Windows, PATH is managed via the registry (HKCU\Environment\Path).
+// On Linux/macOS, we modify the user's shell profile to add/remove an
+// `export PATH=...` line tagged with a sentinel comment.
+
+/// Sentinel comment that marks agent2ssh-managed PATH entries in shell profiles.
+const SHELL_PROFILE_SENTINEL: &str = "# agent2ssh-cli-path";
+
+#[cfg(not(windows))]
+fn detect_shell_profiles() -> Vec<std::path::PathBuf> {
+    use std::path::PathBuf;
+    let home = std::env::var("HOME").unwrap_or_default();
+    if home.is_empty() {
+        return Vec::new();
+    }
+    let home = PathBuf::from(home);
+
+    let mut profiles = Vec::new();
+
+    // Bash: ~/.bashrc (Linux), ~/.bash_profile (macOS login shell)
+    profiles.push(home.join(".bashrc"));
+    profiles.push(home.join(".bash_profile"));
+
+    // Zsh: ~/.zshrc (most common on macOS)
+    profiles.push(home.join(".zshrc"));
+
+    // Fish: ~/.config/fish/config.fish
+    let fish_config = home.join(".config").join("fish").join("config.fish");
+    profiles.push(fish_config);
+
+    // Filter to only existing files
+    profiles.into_iter().filter(|p| p.exists()).collect()
+}
+
+#[cfg(not(windows))]
+fn build_shell_profile_line(dir: &Path) -> String {
+    format!(
+        "export PATH=\"$PATH:{}\"  {}",
+        dir.to_string_lossy(),
+        SHELL_PROFILE_SENTINEL
+    )
+}
+
+#[cfg(not(windows))]
+fn append_shell_profile_entry(dir: &Path) -> Result<usize, String> {
+    let profiles = detect_shell_profiles();
+    if profiles.is_empty() {
+        return Err(
+            "No shell profile files found (~/.bashrc, ~/.zshrc, ~/.config/fish/config.fish). \
+             Please add the CLI directory to your PATH manually."
+                .to_string(),
+        );
+    }
+    let line = build_shell_profile_line(dir);
+    let mut modified = 0;
+    for profile in &profiles {
+        let content = std::fs::read_to_string(profile)
+            .map_err(|e| format!("failed to read {}: {e}", profile.display()))?;
+
+        // Check if already present
+        if content.lines().any(|l| l.contains(SHELL_PROFILE_SENTINEL)) {
+            continue;
+        }
+
+        // Append the PATH export line
+        let new_content = if content.is_empty() || content.ends_with('\n') {
+            format!("{content}{line}\n")
+        } else {
+            format!("{content}\n{line}\n")
+        };
+
+        std::fs::write(profile, new_content)
+            .map_err(|e| format!("failed to write {}: {e}", profile.display()))?;
+        modified += 1;
+    }
+    Ok(modified)
+}
+
+#[cfg(not(windows))]
+fn remove_shell_profile_entry(_dir: &Path) -> Result<usize, String> {
+    let profiles = detect_shell_profiles();
+    if profiles.is_empty() {
+        return Err("No shell profile files found.".to_string());
+    }
+    let mut modified = 0;
+    for profile in &profiles {
+        let content = std::fs::read_to_string(profile)
+            .map_err(|e| format!("failed to read {}: {e}", profile.display()))?;
+
+        // Remove lines containing the sentinel
+        let new_content: String = content
+            .lines()
+            .filter(|line| !line.contains(SHELL_PROFILE_SENTINEL))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Add trailing newline if we have content
+        let new_content = if new_content.is_empty() {
+            new_content
+        } else {
+            format!("{new_content}\n")
+        };
+
+        if new_content != content {
+            std::fs::write(profile, new_content)
+                .map_err(|e| format!("failed to write {}: {e}", profile.display()))?;
+            modified += 1;
+        }
+    }
+    Ok(modified)
+}
+
+#[cfg(not(windows))]
+fn shell_profile_has_entry() -> bool {
+    let profiles = detect_shell_profiles();
+    profiles.iter().any(|profile| {
+        std::fs::read_to_string(profile)
+            .map(|content| content.contains(SHELL_PROFILE_SENTINEL))
+            .unwrap_or(false)
+    })
+}
+
 #[tauri::command]
 pub fn install_cli_to_path() -> Result<CliPathStatus, String> {
     let cli_dir = bundled_cli_dir()?;
-    let user_path = read_user_path_value()?;
-    if path_contains_dir(&user_path, &cli_dir) {
-        return cli_path_status_with_message("Agent2SSH CLI is already in user PATH.".to_string());
+
+    #[cfg(windows)]
+    {
+        let user_path = read_user_path_value()?;
+        if path_contains_dir(&user_path, &cli_dir) {
+            return cli_path_status_with_message(
+                "Agent2SSH CLI is already in user PATH.".to_string(),
+            );
+        }
+        let next_path = append_user_path_dir(&user_path, &cli_dir);
+        write_user_path_value(&next_path)?;
     }
-    let next_path = append_user_path_dir(&user_path, &cli_dir);
-    write_user_path_value(&next_path)?;
+
+    #[cfg(not(windows))]
+    {
+        if shell_profile_has_entry() {
+            return cli_path_status_with_message(
+                "Agent2SSH CLI is already in shell profile PATH.".to_string(),
+            );
+        }
+        let modified = append_shell_profile_entry(&cli_dir)?;
+        if modified == 0 {
+            return Err("Failed to modify any shell profile files.".to_string());
+        }
+    }
+
     cli_path_status_with_message(
-        "Agent2SSH CLI added to user PATH. Restart terminals or Codex sessions to pick it up."
+        "Agent2SSH CLI added to PATH. Restart terminals or Codex sessions to pick it up."
             .to_string(),
     )
 }
@@ -1586,14 +1817,29 @@ pub fn install_cli_to_path() -> Result<CliPathStatus, String> {
 #[tauri::command]
 pub fn remove_cli_from_path() -> Result<CliPathStatus, String> {
     let cli_dir = bundled_cli_dir()?;
-    let user_path = read_user_path_value()?;
-    if !path_contains_dir(&user_path, &cli_dir) {
-        return cli_path_status_with_message("Agent2SSH CLI is not in user PATH.".to_string());
+
+    #[cfg(windows)]
+    {
+        let user_path = read_user_path_value()?;
+        if !path_contains_dir(&user_path, &cli_dir) {
+            return cli_path_status_with_message("Agent2SSH CLI is not in user PATH.".to_string());
+        }
+        let next_path = remove_user_path_dir(&user_path, &cli_dir);
+        write_user_path_value(&next_path)?;
     }
-    let next_path = remove_user_path_dir(&user_path, &cli_dir);
-    write_user_path_value(&next_path)?;
+
+    #[cfg(not(windows))]
+    {
+        if !shell_profile_has_entry() {
+            return cli_path_status_with_message(
+                "Agent2SSH CLI is not in shell profile PATH.".to_string(),
+            );
+        }
+        let _ = remove_shell_profile_entry(&cli_dir)?;
+    }
+
     cli_path_status_with_message(
-        "Agent2SSH CLI removed from user PATH. Restart terminals or Codex sessions to pick it up."
+        "Agent2SSH CLI removed from PATH. Restart terminals or Codex sessions to pick it up."
             .to_string(),
     )
 }
@@ -2470,10 +2716,55 @@ pub fn import_team_config_cmd(config: TeamConfigExport) -> Result<ImportResult, 
     import_team_config(&config).map_err(|e| e.to_string())
 }
 
+// ── B58: Wayland Compatibility ───────────────────────────────────────────────
+// WebKitGTK (used by Tauri on Linux) has rendering issues on some Wayland
+// compositors (NVIDIA/wlroots/Hyprland). These patches are applied before
+// the Tauri builder runs and can be opted out via AGENT2SSH_DISABLE_WAYLAND_COMPAT.
+
+#[cfg(target_os = "linux")]
+fn apply_wayland_compat() {
+    // Allow users to opt out entirely.
+    if std::env::var_os("AGENT2SSH_DISABLE_WAYLAND_COMPAT").is_some() {
+        return;
+    }
+
+    // Detect a Wayland session.
+    let wayland_session = std::env::var_os("WAYLAND_DISPLAY").is_some()
+        || std::env::var("XDG_SESSION_TYPE")
+            .map(|v| v.eq_ignore_ascii_case("wayland"))
+            .unwrap_or(false);
+    if !wayland_session {
+        return;
+    }
+
+    // 1. Disable DMABUF renderer — crashes on NVIDIA/wlroots before window creation.
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
+
+    // 2. Remove GBM_BACKEND — NVIDIA GBM causes "Failed to create GBM buffer"
+    //    on Hyprland. Allow users to keep it via AGENT2SSH_KEEP_GBM_BACKEND.
+    if std::env::var_os("AGENT2SSH_KEEP_GBM_BACKEND").is_none() {
+        std::env::remove_var("GBM_BACKEND");
+    }
+
+    let _ = crate::diagnostics::append_diagnostic_log(
+        "info",
+        "wayland_compat",
+        "applied wayland compatibility patches",
+        None,
+    );
+}
+
+#[cfg(not(target_os = "linux"))]
+fn apply_wayland_compat() {}
+
 // ── Bootstrap ────────────────────────────────────────────────────────────────
 
 pub fn run_tauri() {
     crate::diagnostics::install_panic_hook("tauri");
+    // B58: Apply Wayland compatibility patches on Linux before Tauri builder.
+    apply_wayland_compat();
     // K1: migrate any legacy plaintext passwords into the app-managed encrypted store (no-op once clean).
     if let Err(e) = crate::store::migrate_plaintext_secrets() {
         eprintln!("warning: secret migration skipped: {e}");
@@ -2591,6 +2882,16 @@ pub fn run_tauri() {
             write_diagnostic_log,
             clear_diagnostic_logs,
             export_diagnostic_bundle,
+            generate_system_report,
+            passphrase_cache_set,
+            passphrase_cache_evict,
+            passphrase_cache_clear,
+            // B24: Terminal Highlight
+            list_highlights,
+            add_highlight,
+            remove_highlight,
+            update_highlight,
+            reset_highlights,
             // SSH Keys
             list_keys,
             generate_key,

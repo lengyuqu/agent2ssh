@@ -111,6 +111,7 @@ mod tests {
             role: None,
             owner: None,
             init_command: None,
+            passphrase: None,
         }
     }
 

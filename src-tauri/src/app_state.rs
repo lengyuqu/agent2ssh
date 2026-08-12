@@ -108,6 +108,12 @@ pub struct AppState {
     // secrets.rs — in-memory store for tests / memory backend
     pub secrets_memory: Mutex<HashMap<String, String>>,
 
+    // B43: In-memory passphrase cache for SSH private keys.
+    // Key: credential identifier (host name or key file path).
+    // Value: Zeroizing<String> — wiped on drop, never persisted to disk.
+    // TTL: process lifetime (no expiry). Cleared on lock / app exit.
+    pub passphrase_cache: Mutex<HashMap<String, zeroize::Zeroizing<String>>>,
+
     // ── P2 #9: Lifecycle registry ────────────────────────────────────────
     /// Central lifecycle registry. Every resource (session, forward,
     /// connection, transfer) must be reserved before creation and activated
@@ -155,6 +161,7 @@ impl AppState {
             }),
             secrets_key: RwLock::new(None),
             secrets_memory: Mutex::new(HashMap::new()),
+            passphrase_cache: Mutex::new(HashMap::new()),
             lifecycle: Arc::new(Mutex::new(crate::lifecycle::LifecycleRegistry::new())),
             host: RwLock::new(Host::Cli),
         }

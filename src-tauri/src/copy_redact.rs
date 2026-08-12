@@ -217,7 +217,10 @@ mod tests {
         let dir = unique_dir("ip");
         let result = redact_for_clipboard("connect to 10.0.0.5");
         // IPs are NOT redacted in copy mode (unlike log mode).
-        assert!(result.contains("10.0.0.5"), "IPs should be visible in clipboard content");
+        assert!(
+            result.contains("10.0.0.5"),
+            "IPs should be visible in clipboard content"
+        );
         cleanup(&dir);
     }
 
@@ -321,7 +324,10 @@ mod tests {
         save_copy_redact_rules(&custom).unwrap();
 
         let result = redact_for_clipboard("key=sk-abc123def456ghi789jkl012mno345");
-        assert_eq!(result, "key=$1", "NoExpand must prevent capture group expansion");
+        assert_eq!(
+            result, "key=$1",
+            "NoExpand must prevent capture group expansion"
+        );
 
         cleanup(&dir);
     }

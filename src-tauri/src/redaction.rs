@@ -237,7 +237,9 @@ const REDACT_RULES_FILE: &str = "redact_rules.json";
 
 /// Path to the user-editable redaction rules file.
 fn redact_rules_path() -> Option<std::path::PathBuf> {
-    crate::store::config_dir().ok().map(|d| d.join(REDACT_RULES_FILE))
+    crate::store::config_dir()
+        .ok()
+        .map(|d| d.join(REDACT_RULES_FILE))
 }
 
 /// A24: Seed the default rules to a JSON file **only if the file does not
@@ -247,9 +249,8 @@ fn redact_rules_path() -> Option<std::path::PathBuf> {
 /// Returns the path to the file. This function is idempotent: if the file
 /// already exists, it does nothing.
 pub fn seed_default_rules() -> Result<(), RedactRuleError> {
-    let path = redact_rules_path().ok_or_else(|| {
-        RedactRuleError::InvalidRegex("cannot determine config directory".into())
-    })?;
+    let path = redact_rules_path()
+        .ok_or_else(|| RedactRuleError::InvalidRegex("cannot determine config directory".into()))?;
     if path.exists() {
         // Already seeded — user may have customized it. Do not overwrite.
         return Ok(());
@@ -286,9 +287,8 @@ pub fn load_user_rules() -> Vec<RedactRule> {
 /// A24: Reset the rules file to the hardcoded defaults, discarding any user
 /// customizations. This is the only way to restore a rule the user deleted.
 pub fn reset_default_rules() -> Result<(), RedactRuleError> {
-    let path = redact_rules_path().ok_or_else(|| {
-        RedactRuleError::InvalidRegex("cannot determine config directory".into())
-    })?;
+    let path = redact_rules_path()
+        .ok_or_else(|| RedactRuleError::InvalidRegex("cannot determine config directory".into()))?;
     let rules = default_rules();
     let configs: Vec<RedactRuleConfig> = rules.iter().map(Into::into).collect();
     let json = serde_json::to_string_pretty(&configs)
@@ -609,7 +609,11 @@ mod tests {
         // The seeded file must contain valid rules matching defaults.
         let rules = load_user_rules();
         assert!(!rules.is_empty(), "seeded rules must not be empty");
-        assert_eq!(rules.len(), default_rules().len(), "seeded rules must match defaults");
+        assert_eq!(
+            rules.len(),
+            default_rules().len(),
+            "seeded rules must match defaults"
+        );
 
         crate::store::clear_test_config_dir();
         let _ = std::fs::remove_dir_all(&dir);
@@ -626,11 +630,16 @@ mod tests {
 
         // Modify the file — delete one rule.
         let rules_path = dir.join(REDACT_RULES_FILE);
-        let mut rules = load_rules_from_json(&std::fs::read_to_string(&rules_path).unwrap()).unwrap();
+        let mut rules =
+            load_rules_from_json(&std::fs::read_to_string(&rules_path).unwrap()).unwrap();
         rules.pop();
         let json = serde_json::to_string_pretty(
-            &rules.iter().map(|r| RedactRuleConfig::from(r)).collect::<Vec<_>>()
-        ).unwrap();
+            &rules
+                .iter()
+                .map(|r| RedactRuleConfig::from(r))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
         std::fs::write(&rules_path, json).unwrap();
 
         // Seed again — must NOT overwrite the user's modified file.
@@ -697,7 +706,9 @@ mod tests {
         crate::store::set_test_config_dir(&dir);
 
         seed_default_rules().unwrap();
-        let result = redact_with_user_rules("connect to 10.0.0.1 with Bearer abc123def456ghi789jkl012mno345pqr");
+        let result = redact_with_user_rules(
+            "connect to 10.0.0.1 with Bearer abc123def456ghi789jkl012mno345pqr",
+        );
         assert!(result.contains("<REDACTED:ip>"), "must redact IP");
         assert!(result.contains("<REDACTED:bearer>"), "must redact bearer");
 

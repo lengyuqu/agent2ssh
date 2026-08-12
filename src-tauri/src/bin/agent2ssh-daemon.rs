@@ -1716,13 +1716,20 @@ async fn session_list(
 async fn forward_add(
     State(s): State<AppState>,
     Extension(auth): Extension<AuthContext>,
+    Query(params): Query<HashMap<String, String>>,
     Json(req): Json<ForwardRule>,
 ) -> Result<Json<ForwardRule>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     let source = source_from_transport();
+    let via = params.get("via").map(String::as_str);
     let command = format!(
-        "forward {} {}:{} -> {}:{}",
-        req.direction, req.bind_port, req.target_host, req.host, req.target_port
+        "forward {} {}:{} -> {}:{}{}",
+        req.direction,
+        req.bind_port,
+        req.target_host,
+        req.host,
+        req.target_port,
+        via.map(|v| format!(" via {v}")).unwrap_or_default()
     );
     reject_if_gate_paused(&source, &req.host, &command)?;
     let targets = vec![(req.host.clone(), host_tags(&req.host))];
@@ -1743,12 +1750,13 @@ async fn forward_add(
     )
     .await?;
     let started = Instant::now();
-    match forward_add_core(
+    match forward_add_core_via(
         &req.host,
         req.direction,
         req.bind_port,
         &req.target_host,
         req.target_port,
+        via,
     )
     .await
     {
@@ -1840,6 +1848,98 @@ async fn forward_remove(
         .await
         .map(|_| Json(OkBody { ok: true }))
         .map_err(|e| err(StatusCode::BAD_REQUEST, e))
+}
+
+// ── B25: Multi-rule forward ──────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct MultiForwardRequest {
+    host: String,
+    rules: Vec<MultiForwardRuleDto>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MultiForwardRuleDto {
+    direction: String,
+    bind_port: u16,
+    target_host: String,
+    target_port: u16,
+}
+
+async fn forward_add_multi(
+    State(s): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Query(params): Query<HashMap<String, String>>,
+    Json(req): Json<MultiForwardRequest>,
+) -> Result<Json<agent2ssh::MultiForwardResult>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    let source = source_from_transport();
+    let via = params.get("via").map(String::as_str);
+    let command = format!(
+        "forward multi {} ({} rules){}",
+        req.host,
+        req.rules.len(),
+        via.map(|v| format!(" via {v}")).unwrap_or_default()
+    );
+    reject_if_gate_paused(&source, &req.host, &command)?;
+    let targets = vec![(req.host.clone(), host_tags(&req.host))];
+    reject_if_rate_limited(&s, &source, &targets, &command).await?;
+    let (risk, _) = authorize_command(
+        &auth.scope,
+        &source,
+        &req.host,
+        &targets
+            .first()
+            .map(|(_, tags)| tags.clone())
+            .unwrap_or_default(),
+        None,
+        &command,
+        false,
+        None,
+        None,
+    )
+    .await?;
+    let started = Instant::now();
+    let rules: Vec<agent2ssh::MultiForwardRule> = req
+        .rules
+        .iter()
+        .map(|r| agent2ssh::MultiForwardRule {
+            direction: match r.direction.as_str() {
+                "remote" => ForwardDirection::Remote,
+                _ => ForwardDirection::Local,
+            },
+            bind_port: r.bind_port,
+            target_host: r.target_host.clone(),
+            target_port: r.target_port,
+        })
+        .collect();
+    match forward_add_multi_core_via(&req.host, &rules, via).await {
+        Ok(result) => {
+            append_operation_audit(
+                &source,
+                &req.host,
+                &command,
+                risk,
+                Some(0),
+                started.elapsed().as_millis(),
+                None,
+            );
+            Ok(Json(result))
+        }
+        Err(e) => {
+            let message = e.to_string();
+            append_operation_audit(
+                &source,
+                &req.host,
+                &command,
+                risk,
+                None,
+                started.elapsed().as_millis(),
+                Some(&message),
+            );
+            Err(err(StatusCode::BAD_REQUEST, e))
+        }
+    }
 }
 
 // ── Approvals ────────────────────────────────────────────────────────────────
@@ -2601,7 +2701,10 @@ async fn get_pending_prompts(
     let prompts: Vec<serde_json::Value> = nonces
         .iter()
         .map(|nonce| {
-            let text = s.prompt_waiter.prompt_text_blocking(nonce).unwrap_or_default();
+            let text = s
+                .prompt_waiter
+                .prompt_text_blocking(nonce)
+                .unwrap_or_default();
             serde_json::json!({
                 "nonce": nonce,
                 "prompt_text": text,
@@ -3990,6 +4093,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/sessions/:id/read", get(session_read))
         .route("/sessions/:id", delete(session_close))
         .route("/forwards", post(forward_add).get(forward_list))
+        .route("/forwards/multi", post(forward_add_multi))
         .route("/forwards/:id", delete(forward_remove))
         .route("/approvals", get(approvals_list))
         .route("/approvals/:id/approve", post(approval_approve))
@@ -4060,7 +4164,9 @@ async fn main() -> anyhow::Result<()> {
         .await?;
 
     // T2-15: Wait for active WS connections to drain (max 5 seconds)
-    let drained = drain_registry.drain_all(std::time::Duration::from_secs(5)).await;
+    let drained = drain_registry
+        .drain_all(std::time::Duration::from_secs(5))
+        .await;
     if drained > 0 {
         tracing::info!("drained {} WS connections", drained);
     }

@@ -107,11 +107,8 @@ mod tests {
     use super::*;
 
     fn unique_dir(label: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "agent2ssh-snip-{}-{}",
-            label,
-            uuid::Uuid::new_v4()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("agent2ssh-snip-{}-{}", label, uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         crate::store::set_test_config_dir(&dir);
         dir
@@ -212,7 +209,10 @@ mod tests {
         std::fs::write(&path, "{{corrupt").unwrap();
 
         let result = load_snippets();
-        assert!(result.is_err(), "corrupt JSON must fail, not silently clear");
+        assert!(
+            result.is_err(),
+            "corrupt JSON must fail, not silently clear"
+        );
 
         cleanup(&dir);
     }
@@ -266,7 +266,9 @@ mod tests {
         let merged = merge_snippets(&local, &incoming);
         assert_eq!(merged.len(), 2);
         assert!(merged.iter().any(|s| s.name == "local-only"));
-        assert!(merged.iter().any(|s| s.name == "shared" && s.command == "new"));
+        assert!(merged
+            .iter()
+            .any(|s| s.name == "shared" && s.command == "new"));
     }
 
     #[test]
@@ -291,6 +293,9 @@ mod tests {
             description: None,
         };
         let json = serde_json::to_string(&s).unwrap();
-        assert!(!json.contains("description"), "None description must be skipped");
+        assert!(
+            !json.contains("description"),
+            "None description must be skipped"
+        );
     }
 }
