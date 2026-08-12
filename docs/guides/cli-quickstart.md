@@ -10,7 +10,7 @@ Agent2SSH 提供命令行工具 `agent2ssh`，用于管理 SSH 主机、执行�
 
 ```bash
 agent2ssh --version
-# agent2ssh 0.2.1
+# agent2ssh 0.3.0
 ```
 
 ### 安装方式

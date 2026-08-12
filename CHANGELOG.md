@@ -4,11 +4,26 @@ All notable changes to Agent2SSH are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [0.3.0] - 2026-08-12
+
+### Added
+- **Secrets vault**: Encrypted backup/sync of `secrets.enc` with Argon2id and AES-256-GCM, lifecycle registry for daemon/managed processes, and structured error codes across the Rust backend.
+- **Redaction and sanitization pipeline**: Centralized output redaction (`redaction.rs`, `sanitize.rs`, `copy_redact.rs`) applied consistently across exec, audit, export, and terminal surfaces; secrets never leak into logs or audit exports.
+- **Embedded SSH forwarding**: Full local/remote port-forward support over the in-process SSH transport (`forward.rs`), replacing remaining system `ssh` runtime dependencies.
+- **Jump-host chain**: Bastion/proxy chain support (`jump_chain.rs`) for multi-hop connections over embedded `direct-tcpip`.
+- **Prompt waiter**: Interactive prompt detection and waiting (`prompt_waiter.rs`) for password/OTP/confirmation prompts inside PTY sessions.
+- **Container discovery**: Container/platform discovery module (`container_discovery.rs`) for SSH targets inside containers.
+- **SSH algorithm management**: Explicit SSH algorithm/curve control (`ssh_algo.rs`), URL safety validation (`url_safety.rs`), path resolution guardrails (`path_resolver.rs`), WebSocket drain handling (`ws_drain.rs`), and OSC/IPC bridging (`osc_ipc.rs`).
+- **Snippets**: Reusable command snippet storage and loading (`snippets.rs`).
+- **Encrypted backup crypto**: Key derivation and backup encryption primitives (`backup_crypto.rs`) used by the encrypted sync path.
+- **CI lint checks**: Added Biome config (`biome.json`), frontend test infrastructure (Vitest + Testing Library), and CI lint gates.
+- **Branch protection**: Documented branch protection policy (`docs/guides/branch-protection.md`) and added `.github/CODEOWNERS`.
 
 ### Changed
 - **WebDAV sync trust boundary**: `known_hosts.json` is no longer part of WebDAV sync payloads. Pulls from older remote manifests tolerate and skip legacy `known_hosts.json` entries so local SSH host-key trust state is not overwritten across machines.
 - **Desktop internationalization coverage**: Completed Chinese translations for the current desktop surface, including SSH fingerprint confirmation, connection progress, WebDAV Sync, MCP binding removal, the Sync module label, and the React error recovery screen.
+- **CI release runners**: Use Intel macOS runners for x86 builds; release workflow portability and macOS runner environment fixes; stop caching Rust toolchain binaries.
+- **Windows Tauri command import**: Fixed the Windows Tauri command import in `tauri_commands.rs`.
 
 ### Fixed
 - **Tauri bundle build**: Added the missing single-instance plugin dependency for default desktop builds and restored the fingerprint confirmation commands used by the desktop connection flow.

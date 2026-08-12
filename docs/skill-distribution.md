@@ -166,7 +166,7 @@ brew upgrade agent2ssh
 ```toml
 # 在 CI/CD 中固定版本
 [agent2ssh]
-version = "=0.2.1"
+version = "=0.3.0"
 ```
 
 ### 变更日志
