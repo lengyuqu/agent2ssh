@@ -1951,6 +1951,9 @@ pub struct WebDavSyncStatus {
     pub last_sync_at: Option<String>,
     pub last_uploaded_bytes: Option<u64>,
     pub last_remote_path: Option<String>,
+    pub portable_digest: Option<String>,
+    pub sync_state: String,
+    pub sync_summary: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2011,6 +2014,7 @@ impl WebDavSyncConfig {
 
 impl WebDavSyncStatus {
     fn from_config(config: &WebDavSyncConfig) -> Self {
+        let (portable_digest, sync_state, sync_summary) = portable_sync_summary();
         Self {
             configured: config.configured(),
             enabled: config.enabled,
@@ -2020,7 +2024,43 @@ impl WebDavSyncStatus {
             last_sync_at: None,
             last_uploaded_bytes: None,
             last_remote_path: Some(config.remote_path.clone()),
+            portable_digest,
+            sync_state,
+            sync_summary,
         }
+    }
+}
+
+fn portable_sync_summary() -> (Option<String>, String, String) {
+    match crate::webdav_sync::current_portable_config_digest() {
+        Ok(current) => match crate::webdav_sync::load_local_sync_marker() {
+            Ok(Some(marker)) if crate::webdav_sync::sync_marker_digest(&marker) == current => (
+                Some(current),
+                "in_sync".to_string(),
+                "Portable configuration matches the last applied sync snapshot.".to_string(),
+            ),
+            Ok(Some(_)) => (
+                Some(current),
+                "local_ahead".to_string(),
+                "Portable configuration has local changes since the last sync.".to_string(),
+            ),
+            Ok(None) => (
+                Some(current),
+                "unknown".to_string(),
+                "Portable configuration has not been synchronized by the versioned sync engine."
+                    .to_string(),
+            ),
+            Err(error) => (
+                Some(current),
+                "unknown".to_string(),
+                format!("Portable sync metadata is unreadable: {error}"),
+            ),
+        },
+        Err(error) => (
+            None,
+            "unknown".to_string(),
+            format!("Portable configuration digest is unavailable: {error}"),
+        ),
     }
 }
 
@@ -2112,6 +2152,7 @@ fn webdav_failure_status(
     action: &str,
     message: String,
 ) -> WebDavSyncStatus {
+    let (portable_digest, sync_state, sync_summary) = portable_sync_summary();
     WebDavSyncStatus {
         configured: config.configured(),
         enabled: config.enabled,
@@ -2121,6 +2162,9 @@ fn webdav_failure_status(
         last_sync_at: Some(chrono::Utc::now().to_rfc3339()),
         last_uploaded_bytes: None,
         last_remote_path: Some(config.remote_path.clone()),
+        portable_digest,
+        sync_state,
+        sync_summary,
     }
 }
 
@@ -2293,6 +2337,7 @@ async fn test_webdav_sync_inner(config: &WebDavSyncConfig) -> Result<WebDavSyncS
         .map_err(|e| e.to_string())?;
     ensure_webdav_collections(&client, config).await?;
     propfind_webdav_parent(&client, config).await?;
+    let (portable_digest, sync_state, sync_summary) = portable_sync_summary();
     Ok(WebDavSyncStatus {
         configured: config.configured(),
         enabled: config.enabled,
@@ -2302,6 +2347,9 @@ async fn test_webdav_sync_inner(config: &WebDavSyncConfig) -> Result<WebDavSyncS
         last_sync_at: Some(chrono::Utc::now().to_rfc3339()),
         last_uploaded_bytes: None,
         last_remote_path: Some(config.remote_path.clone()),
+        portable_digest,
+        sync_state,
+        sync_summary,
     })
 }
 
@@ -2327,6 +2375,7 @@ async fn push_webdav_sync_inner(config: &WebDavSyncConfig) -> Result<WebDavSyncS
             "WebDAV upload failed: HTTP {status} at {target_url}"
         ));
     }
+    let (portable_digest, sync_state, sync_summary) = portable_sync_summary();
     Ok(WebDavSyncStatus {
         configured: config.configured(),
         enabled: config.enabled,
@@ -2338,6 +2387,9 @@ async fn push_webdav_sync_inner(config: &WebDavSyncConfig) -> Result<WebDavSyncS
         last_sync_at: Some(chrono::Utc::now().to_rfc3339()),
         last_uploaded_bytes: Some(uploaded_bytes),
         last_remote_path: Some(config.remote_path.clone()),
+        portable_digest,
+        sync_state,
+        sync_summary,
     })
 }
 

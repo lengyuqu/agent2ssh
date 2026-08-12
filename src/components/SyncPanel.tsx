@@ -346,6 +346,30 @@ export default function SyncPanel() {
               {status?.configured ? t("Yes") : t("No")}
             </Badge>
           </div>
+          <div className="rounded-lg border border-border bg-muted/35 px-3 py-2">
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-muted-foreground">{t("Portable config state")}</span>
+              <Badge
+                variant={
+                  status?.syncState === "in_sync"
+                    ? "success"
+                    : status?.syncState === "diverged"
+                      ? "destructive"
+                      : "secondary"
+                }
+              >
+                {t((status?.syncState ?? "unknown").replace(/_/g, " "))}
+              </Badge>
+            </div>
+            <div className="mt-2 text-xs text-muted-foreground">
+              {t(status?.syncSummary ?? "Portable sync status is unavailable.")}
+            </div>
+            {status?.portableDigest ? (
+              <div className="mt-2 break-all font-mono text-[11px]" title={status.portableDigest}>
+                SHA-256 {status.portableDigest}
+              </div>
+            ) : null}
+          </div>
           <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-muted/35 px-3 py-2">
             <span className="text-muted-foreground">{t("Last result")}</span>
             <span className="inline-flex items-center gap-1.5 font-medium">

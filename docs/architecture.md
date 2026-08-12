@@ -90,6 +90,8 @@ MCP PTY sessions route to the local daemon registry by default when the daemon i
 
 The daemon also exposes `/terminal` as an authenticated WebSocket endpoint for an interactive terminal. It streams terminal bytes directly, accepts resize control messages, and emits a connection metadata frame containing the host-key SHA256 fingerprint, host-key algorithm, address, username, and server banner before shell output. Completed input lines are checked through the same authorization path as REST session writes before the bytes are forwarded to the remote PTY.
 
+Connected WebSocket terminals receive an ephemeral `terminal_id`. The desktop can preview and run a multi-terminal broadcast through `/terminal/broadcast/preview` and `/terminal/broadcast`. The registry binds each ID to the exact authenticated token and connection lifetime. The daemon freezes and deduplicates explicit targets, performs scope/gate/risk/rate-limit/approval checks for every target before any enqueue, rejects control characters, appends Enter server-side, and audits every target with a shared broadcast ID. The default is authorization all-or-nothing; remote shells are independent, so enqueue and remote execution are not transactional.
+
 ### Diagnostics And Exception Logging
 
 `diagnostics.rs` is the shared structured-log core. `append_diagnostic_log(level, component, message, fields)` writes one redacted JSONL record per line to `~/.agent2ssh/app.log`, rotating inline at 5 MB (3 generations). All four surfaces feed it:

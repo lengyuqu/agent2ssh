@@ -67,6 +67,8 @@ denied_commands = ["rm *", "sudo *"]
 | POST | `/exec/preview` | 执行预览（不实际执行） |
 | GET | `/exec/stream` | WebSocket 流式执行 |
 | GET | `/terminal` | WebSocket 交互式终端 |
+| POST | `/terminal/broadcast/preview` | 预览多终端广播的逐目标风险与审批要求 |
+| POST | `/terminal/broadcast` | 全部授权后向已连接终端广播并执行单条命令 |
 | GET | `/recordings/config` | 获取终端录制开关 |
 | PUT | `/recordings/config` | 更新终端录制开关（仅影响新会话） |
 | GET | `/recordings` | 列出本地终端录制 |

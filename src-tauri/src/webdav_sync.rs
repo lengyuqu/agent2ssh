@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::HashSet,
     fs,
+    future::Future,
     path::{Path, PathBuf},
 };
 
@@ -16,7 +17,9 @@ use crate::store::{
 const SYNC_VERSION_FILE: &str = "sync_version.json";
 const BACKUP_DIR: &str = "backups";
 const REMOTE_FILES_DIR: &str = "files";
+const REMOTE_VERSIONS_DIR: &str = "versions";
 const SYNC_MARKER_CLIENT_VERSION: &str = "redacted";
+const CURRENT_SYNC_SCHEMA: u32 = 2;
 
 /// Files that are safe and useful to move across machines. This intentionally
 /// excludes local SSH trust state, daemon tokens, audit/log data, private SSH
@@ -52,6 +55,15 @@ pub struct WebDavSyncMarker {
     pub app_version: String,
     pub direction: String,
     pub files: Vec<WebDavSyncFile>,
+    /// Stable digest of the portable configuration represented by `files`.
+    /// Older markers did not include this field; their digest is derived from
+    /// the file manifest when read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
+    /// Prefix for immutable version objects. Schema v1 omitted this and used
+    /// the mutable `files/` directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object_prefix: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -68,6 +80,22 @@ pub struct WebDavSyncResult {
 pub struct WebDavSyncStatus {
     pub local: Option<WebDavSyncMarker>,
     pub remote: Option<WebDavSyncMarker>,
+    pub state: SyncState,
+    pub local_digest: Option<String>,
+    pub remote_digest: Option<String>,
+    pub base_digest: Option<String>,
+    pub summary: String,
+    pub metadata_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncState {
+    InSync,
+    LocalAhead,
+    RemoteAhead,
+    Diverged,
+    Unknown,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -83,6 +111,37 @@ pub struct WebDavSyncOptions {
     /// If None, files are uploaded as plaintext (backward compatible).
     pub sync_password: Option<String>,
     pub sync_password_env: Option<String>,
+    /// Explicitly allow overwriting configuration when the remote and local
+    /// sides no longer share the same last-applied digest.
+    pub force: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoteObject {
+    pub bytes: Vec<u8>,
+    /// Opaque backend version (an ETag for WebDAV).
+    pub version: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum RemoteWriteCondition {
+    Any,
+    Missing,
+    Version(String),
+}
+
+/// Transport boundary for portable configuration synchronization. The sync
+/// algorithm deliberately knows nothing about WebDAV URLs or authentication,
+/// which makes additional backends and deterministic conflict tests possible.
+pub trait SyncRemote {
+    fn ensure_layout(&self) -> impl Future<Output = Result<()>> + Send;
+    fn read(&self, path: &str) -> impl Future<Output = Result<Option<RemoteObject>>> + Send;
+    fn write(
+        &self,
+        path: &str,
+        bytes: Vec<u8>,
+        condition: RemoteWriteCondition,
+    ) -> impl Future<Output = Result<()>> + Send;
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -216,28 +275,101 @@ async fn ensure_collection(
     }
 }
 
-async fn get_remote_marker(
-    client: &Client,
-    config: &ResolvedWebDavConfig,
-) -> Result<Option<WebDavSyncMarker>> {
-    let url = join_url(&config.url, SYNC_VERSION_FILE);
-    let response = with_auth(client.get(url.clone()), config)
-        .send()
-        .await
-        .with_context(|| format!("failed to fetch remote marker {url}"))?;
-    if response.status() == StatusCode::NOT_FOUND {
+#[derive(Clone)]
+struct WebDavRemote {
+    client: Client,
+    config: ResolvedWebDavConfig,
+}
+
+impl WebDavRemote {
+    fn url(&self, path: &str) -> String {
+        join_url(&self.config.url, path)
+    }
+}
+
+impl SyncRemote for WebDavRemote {
+    async fn ensure_layout(&self) -> Result<()> {
+        ensure_collection(&self.client, &self.config, &self.config.url).await?;
+        ensure_collection(&self.client, &self.config, &self.url(REMOTE_FILES_DIR)).await?;
+        ensure_collection(&self.client, &self.config, &self.url(REMOTE_VERSIONS_DIR)).await
+    }
+
+    async fn read(&self, path: &str) -> Result<Option<RemoteObject>> {
+        let url = self.url(path);
+        let response = with_auth(self.client.get(url.clone()), &self.config)
+            .send()
+            .await
+            .with_context(|| format!("failed to fetch remote object {url}"))?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "WebDAV GET failed for {url}: {status} {}",
+                body.trim()
+            ));
+        }
+        let version = response
+            .headers()
+            .get(reqwest::header::ETAG)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        Ok(Some(RemoteObject {
+            bytes: response.bytes().await?.to_vec(),
+            version,
+        }))
+    }
+
+    async fn write(
+        &self,
+        path: &str,
+        bytes: Vec<u8>,
+        condition: RemoteWriteCondition,
+    ) -> Result<()> {
+        let url = self.url(path);
+        let mut request = with_auth(self.client.put(url.clone()).body(bytes), &self.config);
+        request = match condition {
+            RemoteWriteCondition::Any => request,
+            RemoteWriteCondition::Missing => request.header(reqwest::header::IF_NONE_MATCH, "*"),
+            RemoteWriteCondition::Version(version) => {
+                request.header(reqwest::header::IF_MATCH, version)
+            }
+        };
+        let response = request
+            .send()
+            .await
+            .with_context(|| format!("failed to upload {url}"))?;
+        if response.status() == StatusCode::PRECONDITION_FAILED
+            || response.status() == StatusCode::CONFLICT
+        {
+            return Err(anyhow!(
+                "sync conflict: remote object changed concurrently while writing {path}"
+            ));
+        }
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "WebDAV PUT failed for {url}: {status} {}",
+                body.trim()
+            ));
+        }
+        Ok(())
+    }
+}
+
+async fn get_remote_marker<R: SyncRemote>(
+    remote: &R,
+) -> Result<Option<(WebDavSyncMarker, Option<String>)>> {
+    let Some(object) = remote.read(SYNC_VERSION_FILE).await? else {
         return Ok(None);
-    }
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(anyhow!(
-            "WebDAV GET marker failed: {status} {}",
-            body.trim()
-        ));
-    }
-    let bytes = response.bytes().await?;
-    serde_json::from_slice(&bytes).context("failed to parse remote sync marker")
+    };
+    let marker =
+        serde_json::from_slice(&object.bytes).context("failed to parse remote sync marker")?;
+    validate_marker_schema(&marker)?;
+    Ok(Some((marker, object.version)))
 }
 
 fn local_marker_path() -> Result<PathBuf> {
@@ -269,6 +401,81 @@ fn hash_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     hex::encode(hasher.finalize())
+}
+
+/// Return a stable, order-independent SHA-256 digest for a portable config
+/// manifest. Timestamps, sync ids, and backend metadata are intentionally not
+/// included, so identical configuration has the same digest on every device.
+pub fn portable_config_digest(files: &[WebDavSyncFile]) -> String {
+    let mut ordered = files.to_vec();
+    ordered.sort_by(|a, b| a.path.cmp(&b.path));
+    let mut hasher = Sha256::new();
+    hasher.update(b"agent2ssh-portable-config-v1\0");
+    for file in ordered {
+        hasher.update(file.path.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(file.sha256.as_bytes());
+        hasher.update(b"\0");
+    }
+    hex::encode(hasher.finalize())
+}
+
+pub fn current_portable_config_digest() -> Result<String> {
+    Ok(portable_config_digest(&collect_sync_files()?))
+}
+
+pub fn sync_marker_digest(marker: &WebDavSyncMarker) -> String {
+    marker
+        .digest
+        .clone()
+        .unwrap_or_else(|| portable_config_digest(&marker.files))
+}
+
+fn classify_sync_state(
+    local_digest: &str,
+    local_marker: Option<&WebDavSyncMarker>,
+    remote_marker: Option<&WebDavSyncMarker>,
+) -> SyncState {
+    let Some(remote) = remote_marker else {
+        return SyncState::LocalAhead;
+    };
+    let remote_digest = sync_marker_digest(remote);
+    if remote_digest == local_digest {
+        return SyncState::InSync;
+    }
+    let Some(local) = local_marker else {
+        return if local_digest == portable_config_digest(&[]) {
+            SyncState::RemoteAhead
+        } else {
+            SyncState::Unknown
+        };
+    };
+    let base_digest = sync_marker_digest(local);
+    if local_digest == base_digest {
+        if remote.global_version > local.global_version {
+            SyncState::RemoteAhead
+        } else {
+            // The remote regressed or was replaced at the same version. Do
+            // not silently bless either side as newer.
+            SyncState::Diverged
+        }
+    } else if remote_digest == base_digest {
+        SyncState::LocalAhead
+    } else {
+        SyncState::Diverged
+    }
+}
+
+fn sync_summary(state: SyncState) -> &'static str {
+    match state {
+        SyncState::InSync => "Local and remote portable configuration are in sync.",
+        SyncState::LocalAhead => "Local portable configuration has changes not present remotely.",
+        SyncState::RemoteAhead => "Remote portable configuration has changes not applied locally.",
+        SyncState::Diverged => "Local and remote portable configuration have diverged.",
+        SyncState::Unknown => {
+            "Sync relationship is unknown because no trustworthy common metadata is available."
+        }
+    }
 }
 
 pub fn collect_sync_files() -> Result<Vec<WebDavSyncFile>> {
@@ -531,67 +738,77 @@ fn next_global_version(remote: Option<&WebDavSyncMarker>, local: Option<&WebDavS
 }
 
 fn marker(global_version: u64, direction: &str, files: Vec<WebDavSyncFile>) -> WebDavSyncMarker {
+    let digest = portable_config_digest(&files);
+    let sync_id = uuid::Uuid::new_v4().to_string();
     WebDavSyncMarker {
-        schema_version: 1,
+        schema_version: CURRENT_SYNC_SCHEMA,
         global_version,
-        sync_id: uuid::Uuid::new_v4().to_string(),
+        object_prefix: Some(format!("{REMOTE_VERSIONS_DIR}/{sync_id}-")),
+        sync_id,
         updated_at: Utc::now(),
         app_version: SYNC_MARKER_CLIENT_VERSION.to_string(),
         direction: direction.to_string(),
         files,
+        digest: Some(digest),
     }
 }
 
-async fn put_bytes(
-    client: &Client,
-    config: &ResolvedWebDavConfig,
-    url: &str,
-    bytes: Vec<u8>,
-) -> Result<()> {
-    let response = with_auth(client.put(url.to_string()).body(bytes), config)
-        .send()
-        .await
-        .with_context(|| format!("failed to upload {url}"))?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
+fn validate_marker_schema(marker: &WebDavSyncMarker) -> Result<()> {
+    if marker.schema_version == 0 || marker.schema_version > CURRENT_SYNC_SCHEMA {
         return Err(anyhow!(
-            "WebDAV PUT failed for {url}: {status} {}",
-            body.trim()
+            "unsupported sync marker schema {} (this client supports up to {})",
+            marker.schema_version,
+            CURRENT_SYNC_SCHEMA
         ));
     }
     Ok(())
 }
 
-async fn get_bytes(client: &Client, config: &ResolvedWebDavConfig, url: &str) -> Result<Vec<u8>> {
-    let response = with_auth(client.get(url.to_string()), config)
-        .send()
-        .await
-        .with_context(|| format!("failed to download {url}"))?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(anyhow!(
-            "WebDAV GET failed for {url}: {status} {}",
-            body.trim()
-        ));
-    }
-    Ok(response.bytes().await?.to_vec())
+fn remote_object_path(marker: &WebDavSyncMarker, file: &WebDavSyncFile) -> String {
+    marker
+        .object_prefix
+        .as_ref()
+        .map(|prefix| format!("{prefix}{}", file.path))
+        .unwrap_or_else(|| format!("{REMOTE_FILES_DIR}/{}", file.path))
 }
 
 pub async fn webdav_push(options: WebDavSyncOptions) -> Result<WebDavSyncResult> {
     let _guard = sync_lock()?;
     let config = resolve_config(&options)?;
-    let client = client()?;
-    ensure_collection(&client, &config, &config.url).await?;
-    ensure_collection(&client, &config, &join_url(&config.url, REMOTE_FILES_DIR)).await?;
+    let remote = WebDavRemote {
+        client: client()?,
+        config: config.clone(),
+    };
+    sync_push(&remote, config.sync_password.as_deref(), options.force).await
+}
 
-    let backup = create_sync_backup(None)?;
-    let remote_marker = get_remote_marker(&client, &config).await?;
+async fn sync_push<R: SyncRemote>(
+    remote: &R,
+    sync_password: Option<&str>,
+    force: bool,
+) -> Result<WebDavSyncResult> {
+    remote.ensure_layout().await?;
+
+    let remote_info = get_remote_marker(remote).await?;
+    let remote_marker = remote_info.as_ref().map(|(marker, _)| marker);
     let local_marker = load_local_sync_marker()?;
     let files = collect_sync_files()?;
-    let marker = marker(
-        next_global_version(remote_marker.as_ref(), local_marker.as_ref()),
+    let local_digest = portable_config_digest(&files);
+    let state = classify_sync_state(&local_digest, local_marker.as_ref(), remote_marker);
+    if !force
+        && matches!(
+            state,
+            SyncState::RemoteAhead | SyncState::Diverged | SyncState::Unknown
+        )
+    {
+        return Err(anyhow!(
+            "sync conflict ({state:?}): refusing to overwrite remote configuration; inspect status and retry with --force"
+        ));
+    }
+
+    let backup = create_sync_backup(None)?;
+    let new_marker = marker(
+        next_global_version(remote_marker, local_marker.as_ref()),
         "push",
         files.clone(),
     );
@@ -599,29 +816,54 @@ pub async fn webdav_push(options: WebDavSyncOptions) -> Result<WebDavSyncResult>
     let dir = config_dir()?;
     for file in &files {
         let bytes = fs::read(dir.join(&file.path))?;
-        let url = join_url(&join_url(&config.url, REMOTE_FILES_DIR), &file.path);
-        let upload_bytes = if let Some(ref pw) = config.sync_password {
+        let upload_bytes = if let Some(pw) = sync_password {
             crate::backup_crypto::encrypt_backup(pw.as_bytes(), &bytes)
                 .with_context(|| format!("failed to encrypt {}", file.path))?
         } else {
             bytes
         };
-        put_bytes(&client, &config, &url, upload_bytes).await?;
+        remote
+            .write(
+                &remote_object_path(&new_marker, file),
+                upload_bytes,
+                RemoteWriteCondition::Missing,
+            )
+            .await?;
     }
-    let marker_bytes = serde_json::to_vec_pretty(&marker)?;
-    put_bytes(
-        &client,
-        &config,
-        &join_url(&config.url, SYNC_VERSION_FILE),
-        marker_bytes,
-    )
-    .await?;
-    let marker_path = write_local_marker(&marker)?;
+    let condition = match remote_info {
+        None => RemoteWriteCondition::Missing,
+        Some((expected, Some(version))) => {
+            let _ = expected;
+            RemoteWriteCondition::Version(version)
+        }
+        Some((expected, None)) => {
+            // Some older WebDAV servers omit ETags. Re-read immediately before
+            // committing the marker and reject a detectable concurrent update.
+            let current = get_remote_marker(remote)
+                .await?
+                .ok_or_else(|| anyhow!("sync conflict: remote marker disappeared"))?;
+            if current.0.sync_id != expected.sync_id
+                || current.0.global_version != expected.global_version
+                || sync_marker_digest(&current.0) != sync_marker_digest(&expected)
+            {
+                return Err(anyhow!("sync conflict: remote marker changed concurrently"));
+            }
+            RemoteWriteCondition::Any
+        }
+    };
+    remote
+        .write(
+            SYNC_VERSION_FILE,
+            serde_json::to_vec_pretty(&new_marker)?,
+            condition,
+        )
+        .await?;
+    let marker_path = write_local_marker(&new_marker)?;
 
     Ok(WebDavSyncResult {
         direction: "push".into(),
-        global_version: marker.global_version,
-        sync_id: marker.sync_id,
+        global_version: new_marker.global_version,
+        sync_id: new_marker.sync_id,
         files,
         backup_path: backup.display().to_string(),
         marker_path: marker_path.display().to_string(),
@@ -631,10 +873,21 @@ pub async fn webdav_push(options: WebDavSyncOptions) -> Result<WebDavSyncResult>
 pub async fn webdav_pull(options: WebDavSyncOptions) -> Result<WebDavSyncResult> {
     let _guard = sync_lock()?;
     let config = resolve_config(&options)?;
-    let client = client()?;
-    let remote_marker = get_remote_marker(&client, &config)
+    let remote = WebDavRemote {
+        client: client()?,
+        config: config.clone(),
+    };
+    sync_pull(&remote, config.sync_password.as_deref(), options.force).await
+}
+
+async fn sync_pull<R: SyncRemote>(
+    remote: &R,
+    sync_password: Option<&str>,
+    force: bool,
+) -> Result<WebDavSyncResult> {
+    let (remote_marker, _) = get_remote_marker(remote)
         .await?
-        .ok_or_else(|| anyhow!("remote WebDAV sync marker does not exist; run push first"))?;
+        .ok_or_else(|| anyhow!("remote sync marker does not exist; run push first"))?;
     for file in &remote_marker.files {
         validate_remote_file(&file.path)?;
     }
@@ -645,24 +898,36 @@ pub async fn webdav_pull(options: WebDavSyncOptions) -> Result<WebDavSyncResult>
         .cloned()
         .collect();
 
-    let backup = create_sync_backup(None)?;
-    let dir = config_dir()?;
-    let remote_paths: HashSet<String> =
-        applied_files.iter().map(|file| file.path.clone()).collect();
+    let local_marker = load_local_sync_marker()?;
+    let local_digest = current_portable_config_digest()?;
+    let state = classify_sync_state(&local_digest, local_marker.as_ref(), Some(&remote_marker));
+    if !force
+        && matches!(
+            state,
+            SyncState::LocalAhead | SyncState::Diverged | SyncState::Unknown
+        )
+    {
+        return Err(anyhow!(
+            "sync conflict ({state:?}): refusing to overwrite local configuration; inspect status and retry with --force"
+        ));
+    }
 
+    // Download and verify the complete snapshot before touching local files.
+    let mut downloaded = Vec::with_capacity(applied_files.len());
     for file in &applied_files {
-        let url = join_url(&join_url(&config.url, REMOTE_FILES_DIR), &file.path);
-        let bytes = get_bytes(&client, &config, &url).await?;
-        let plaintext = if let Some(ref pw) = config.sync_password {
-            if crate::backup_crypto::is_encrypted_backup(&bytes) {
-                crate::backup_crypto::decrypt_backup(pw.as_bytes(), &bytes)
+        let object = remote
+            .read(&remote_object_path(&remote_marker, file))
+            .await?
+            .ok_or_else(|| anyhow!("remote sync file is missing: {}", file.path))?;
+        let plaintext = if let Some(pw) = sync_password {
+            if crate::backup_crypto::is_encrypted_backup(&object.bytes) {
+                crate::backup_crypto::decrypt_backup(pw.as_bytes(), &object.bytes)
                     .with_context(|| format!("failed to decrypt {}", file.path))?
             } else {
-                // Backward compat: file was pushed before encryption was enabled
-                bytes
+                object.bytes
             }
         } else {
-            bytes
+            object.bytes
         };
         let sha256 = hash_bytes(&plaintext);
         if sha256 != file.sha256 {
@@ -673,7 +938,26 @@ pub async fn webdav_pull(options: WebDavSyncOptions) -> Result<WebDavSyncResult>
                 sha256
             ));
         }
-        let dest = dir.join(&file.path);
+        downloaded.push((file.path.clone(), plaintext));
+    }
+
+    let latest = get_remote_marker(remote)
+        .await?
+        .ok_or_else(|| anyhow!("sync conflict: remote marker disappeared"))?;
+    if latest.0.sync_id != remote_marker.sync_id
+        || latest.0.global_version != remote_marker.global_version
+        || sync_marker_digest(&latest.0) != sync_marker_digest(&remote_marker)
+    {
+        return Err(anyhow!("sync conflict: remote marker changed during pull"));
+    }
+
+    let backup = create_sync_backup(None)?;
+    let dir = config_dir()?;
+    let remote_paths: HashSet<String> =
+        applied_files.iter().map(|file| file.path.clone()).collect();
+
+    for (path, plaintext) in downloaded {
+        let dest = dir.join(&path);
         let tmp = dest.with_extension(format!("tmp.{}", std::process::id()));
         fs::write(&tmp, plaintext).with_context(|| format!("failed to write {}", tmp.display()))?;
         restrict_file_to_owner(&tmp)?;
@@ -682,6 +966,11 @@ pub async fn webdav_pull(options: WebDavSyncOptions) -> Result<WebDavSyncResult>
     }
 
     for rel in SYNCABLE_FILES {
+        // Schema v1 predates snippets. Absence in an old manifest means the
+        // old client did not know about the file, not that the user deleted it.
+        if remote_marker.schema_version == 1 && *rel == "snippets.json" {
+            continue;
+        }
         if remote_paths.contains(*rel) {
             continue;
         }
@@ -694,11 +983,14 @@ pub async fn webdav_pull(options: WebDavSyncOptions) -> Result<WebDavSyncResult>
     }
 
     let local_marker = WebDavSyncMarker {
+        schema_version: remote_marker.schema_version.max(2),
         direction: "pull".into(),
         sync_id: uuid::Uuid::new_v4().to_string(),
         updated_at: Utc::now(),
         app_version: SYNC_MARKER_CLIENT_VERSION.to_string(),
         files: applied_files.clone(),
+        digest: Some(portable_config_digest(&applied_files)),
+        object_prefix: remote_marker.object_prefix.clone(),
         ..remote_marker.clone()
     };
     let marker_path = write_local_marker(&local_marker)?;
@@ -715,15 +1007,322 @@ pub async fn webdav_pull(options: WebDavSyncOptions) -> Result<WebDavSyncResult>
 
 pub async fn webdav_status(options: WebDavSyncOptions) -> Result<WebDavSyncStatus> {
     let config = resolve_config(&options)?;
-    let client = client()?;
-    let local = load_local_sync_marker()?;
-    let remote = get_remote_marker(&client, &config).await?;
-    Ok(WebDavSyncStatus { local, remote })
+    let remote_transport = WebDavRemote {
+        client: client()?,
+        config,
+    };
+    sync_status(&remote_transport).await
+}
+
+async fn sync_status<R: SyncRemote>(remote_transport: &R) -> Result<WebDavSyncStatus> {
+    let mut metadata_errors = Vec::new();
+    let local = match load_local_sync_marker() {
+        Ok(marker) => marker,
+        Err(error) => {
+            metadata_errors.push(format!("local metadata: {error}"));
+            None
+        }
+    };
+    let remote_object = remote_transport.read(SYNC_VERSION_FILE).await?;
+    let remote = match remote_object {
+        Some(object) => match serde_json::from_slice::<WebDavSyncMarker>(&object.bytes) {
+            Ok(marker) if validate_marker_schema(&marker).is_ok() => Some(marker),
+            Ok(marker) => {
+                metadata_errors.push(format!(
+                    "remote metadata: unsupported schema {}",
+                    marker.schema_version
+                ));
+                None
+            }
+            Err(error) => {
+                metadata_errors.push(format!("remote metadata: {error}"));
+                None
+            }
+        },
+        None => None,
+    };
+    let local_digest = current_portable_config_digest()?;
+    let state = if metadata_errors.is_empty() {
+        classify_sync_state(&local_digest, local.as_ref(), remote.as_ref())
+    } else {
+        SyncState::Unknown
+    };
+    let remote_digest = remote.as_ref().map(sync_marker_digest);
+    let base_digest = local.as_ref().map(sync_marker_digest);
+    let summary = if metadata_errors.is_empty() {
+        sync_summary(state).to_string()
+    } else {
+        format!("{} {}", sync_summary(state), metadata_errors.join("; "))
+    };
+    Ok(WebDavSyncStatus {
+        local,
+        remote,
+        state,
+        local_digest: Some(local_digest),
+        remote_digest,
+        base_digest,
+        summary,
+        metadata_error: (!metadata_errors.is_empty()).then(|| metadata_errors.join("; ")),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct FakeRemote {
+        objects: Mutex<HashMap<String, (Vec<u8>, u64)>>,
+        mutate_marker_on_file_write: bool,
+    }
+
+    impl FakeRemote {
+        fn insert(&self, path: &str, bytes: Vec<u8>) {
+            self.objects
+                .lock()
+                .unwrap()
+                .insert(path.to_string(), (bytes, 1));
+        }
+    }
+
+    impl SyncRemote for FakeRemote {
+        async fn ensure_layout(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn read(&self, path: &str) -> Result<Option<RemoteObject>> {
+            Ok(self
+                .objects
+                .lock()
+                .unwrap()
+                .get(path)
+                .map(|(bytes, version)| RemoteObject {
+                    bytes: bytes.clone(),
+                    version: Some(version.to_string()),
+                }))
+        }
+
+        async fn write(
+            &self,
+            path: &str,
+            bytes: Vec<u8>,
+            condition: RemoteWriteCondition,
+        ) -> Result<()> {
+            let mut objects = self.objects.lock().unwrap();
+            let current = objects.get(path).map(|(_, version)| *version);
+            let condition_matches = match condition {
+                RemoteWriteCondition::Any => true,
+                RemoteWriteCondition::Missing => current.is_none(),
+                RemoteWriteCondition::Version(expected) => {
+                    current.map(|v| v.to_string()).as_deref() == Some(expected.as_str())
+                }
+            };
+            if !condition_matches {
+                return Err(anyhow!("sync conflict: fake remote version changed"));
+            }
+            objects.insert(path.to_string(), (bytes, current.unwrap_or(0) + 1));
+            if self.mutate_marker_on_file_write
+                && (path.starts_with("files/") || path.starts_with("versions/"))
+            {
+                if let Some((_, version)) = objects.get_mut(SYNC_VERSION_FILE) {
+                    *version += 1;
+                }
+            }
+            Ok(())
+        }
+    }
+
+    fn file(path: &str, content: &[u8]) -> WebDavSyncFile {
+        WebDavSyncFile {
+            path: path.to_string(),
+            bytes: content.len() as u64,
+            sha256: hash_bytes(content),
+        }
+    }
+
+    #[test]
+    fn portable_digest_is_stable_across_manifest_order_and_metadata() {
+        let first = file("hosts.json", b"hosts");
+        let mut second = file("policy.toml", b"policy");
+        let digest = portable_config_digest(&[first.clone(), second.clone()]);
+        second.bytes = 999;
+        assert_eq!(
+            digest,
+            portable_config_digest(&[second.clone(), first.clone()])
+        );
+        second.sha256 = hash_bytes(b"changed");
+        assert_ne!(digest, portable_config_digest(&[first, second]));
+    }
+
+    #[test]
+    fn old_remote_marker_without_digest_remains_compatible() {
+        let raw = r#"{
+          "schema_version":1,"global_version":3,"sync_id":"old",
+          "updated_at":"2026-01-01T00:00:00Z","app_version":"old",
+          "direction":"push","files":[]
+        }"#;
+        let parsed: WebDavSyncMarker = serde_json::from_str(raw).unwrap();
+        assert!(parsed.digest.is_none());
+        assert_eq!(sync_marker_digest(&parsed), portable_config_digest(&[]));
+    }
+
+    #[test]
+    fn sync_state_distinguishes_ahead_and_diverged_snapshots() {
+        let base_files = vec![file("hosts.json", b"base")];
+        let local_files = vec![file("hosts.json", b"local")];
+        let remote_files = vec![file("hosts.json", b"remote")];
+        let base = marker(4, "pull", base_files.clone());
+        let remote_new = marker(5, "push", remote_files.clone());
+        assert_eq!(
+            classify_sync_state(
+                &portable_config_digest(&base_files),
+                Some(&base),
+                Some(&remote_new)
+            ),
+            SyncState::RemoteAhead
+        );
+        assert_eq!(
+            classify_sync_state(
+                &portable_config_digest(&local_files),
+                Some(&base),
+                Some(&base)
+            ),
+            SyncState::LocalAhead
+        );
+        assert_eq!(
+            classify_sync_state(
+                &portable_config_digest(&local_files),
+                Some(&base),
+                Some(&remote_new)
+            ),
+            SyncState::Diverged
+        );
+        assert_eq!(
+            classify_sync_state(
+                &portable_config_digest(&remote_files),
+                Some(&base),
+                Some(&remote_new)
+            ),
+            SyncState::InSync
+        );
+        assert_eq!(
+            classify_sync_state(
+                &portable_config_digest(&local_files),
+                None,
+                Some(&remote_new)
+            ),
+            SyncState::Unknown
+        );
+        assert_eq!(
+            classify_sync_state(&portable_config_digest(&[]), None, Some(&remote_new)),
+            SyncState::RemoteAhead
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn status_degrades_corrupt_metadata_to_unknown() {
+        let dir = std::env::temp_dir().join(format!("agent2ssh-sync-bad-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("AGENT2SSH_CONFIG_DIR", &dir);
+        fs::write(dir.join("hosts.json"), "{}").unwrap();
+        fs::write(dir.join(SYNC_VERSION_FILE), "not-json").unwrap();
+        let remote = FakeRemote::default();
+        remote.insert(SYNC_VERSION_FILE, b"also-not-json".to_vec());
+
+        let status = sync_status(&remote).await.unwrap();
+        assert_eq!(status.state, SyncState::Unknown);
+        assert!(status.metadata_error.unwrap().contains("metadata"));
+
+        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn push_rejects_concurrent_remote_marker_change() {
+        let dir =
+            std::env::temp_dir().join(format!("agent2ssh-sync-race-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("AGENT2SSH_CONFIG_DIR", &dir);
+        let base = marker(1, "push", vec![file("hosts.json", b"base")]);
+        write_local_marker(&base).unwrap();
+        fs::write(dir.join("hosts.json"), b"local change").unwrap();
+
+        let remote = FakeRemote {
+            mutate_marker_on_file_write: true,
+            ..FakeRemote::default()
+        };
+        remote.insert(SYNC_VERSION_FILE, serde_json::to_vec(&base).unwrap());
+        let result = sync_push(&remote, None, false).await;
+        assert!(result.unwrap_err().to_string().contains("conflict"));
+
+        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn legacy_pull_preserves_snippets_missing_from_old_manifest() {
+        let dir = std::env::temp_dir().join(format!(
+            "agent2ssh-sync-legacy-pull-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("AGENT2SSH_CONFIG_DIR", &dir);
+        fs::write(dir.join("snippets.json"), r#"[{"name":"keep"}]"#).unwrap();
+
+        let host_bytes = b"{\"hosts\":[]}".to_vec();
+        let legacy = WebDavSyncMarker {
+            schema_version: 1,
+            global_version: 1,
+            sync_id: "legacy".to_string(),
+            updated_at: Utc::now(),
+            app_version: "old".to_string(),
+            direction: "push".to_string(),
+            files: vec![file("hosts.json", &host_bytes)],
+            digest: None,
+            object_prefix: None,
+        };
+        let remote = FakeRemote::default();
+        remote.insert(SYNC_VERSION_FILE, serde_json::to_vec(&legacy).unwrap());
+        remote.insert("files/hosts.json", host_bytes);
+
+        sync_pull(&remote, None, true).await.unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.join("snippets.json")).unwrap(),
+            r#"[{"name":"keep"}]"#
+        );
+
+        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn future_schema_is_rejected_before_push_writes() {
+        let dir =
+            std::env::temp_dir().join(format!("agent2ssh-sync-future-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("AGENT2SSH_CONFIG_DIR", &dir);
+        fs::write(dir.join("hosts.json"), "{}").unwrap();
+        let mut future = marker(9, "push", vec![]);
+        future.schema_version = CURRENT_SYNC_SCHEMA + 1;
+        let remote = FakeRemote::default();
+        remote.insert(SYNC_VERSION_FILE, serde_json::to_vec(&future).unwrap());
+
+        let result = sync_push(&remote, None, true).await;
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported sync marker schema"));
+        assert_eq!(remote.objects.lock().unwrap().len(), 1);
+
+        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     #[serial_test::serial]

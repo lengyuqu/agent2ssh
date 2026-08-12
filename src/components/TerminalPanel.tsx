@@ -8,6 +8,7 @@ import {
   LayoutGrid,
   Plus,
   Rows2,
+  RadioTower,
   Search,
   Square,
   TerminalSquare,
@@ -15,7 +16,8 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "../i18n";
-import type { HostProfile } from "../types";
+import { api } from "../api";
+import type { HostProfile, TerminalBroadcastResponse } from "../types";
 import {
   isTerminalThemeId,
   TERMINAL_THEME_OPTIONS,
@@ -31,6 +33,9 @@ import { Card } from "./ui/card";
 import { IconButton } from "./ui/icon-button";
 import { Input } from "./ui/input";
 import { Select } from "./ui/select";
+import { Textarea } from "./ui/textarea";
+import { Dialog } from "./ui/dialog";
+import RiskBadge from "./RiskBadge";
 import { cn } from "../lib/utils";
 import type { CommandBlockMetadata } from "../lib/terminal/block-content";
 
@@ -142,6 +147,14 @@ export default function TerminalPanel({ hosts, initialHost = "" }: Props) {
     block: CommandBlockMetadata;
   } | null>(null);
   const [blockCopyStatus, setBlockCopyStatus] = useState<"idle" | "copied" | "failed">("idle");
+  const [terminalConnections, setTerminalConnections] = useState<Map<string, string>>(() => new Map());
+  const [broadcastOpen, setBroadcastOpen] = useState(false);
+  const [broadcastTargets, setBroadcastTargets] = useState<Set<string>>(() => new Set());
+  const [broadcastCommand, setBroadcastCommand] = useState("");
+  const [broadcastForce, setBroadcastForce] = useState(false);
+  const [broadcastPreview, setBroadcastPreview] = useState<TerminalBroadcastResponse | null>(null);
+  const [broadcastBusy, setBroadcastBusy] = useState(false);
+  const [broadcastError, setBroadcastError] = useState<string | null>(null);
 
   focusedTabIdRef.current = paneTabIds[focusedPane] ?? null;
 
@@ -205,12 +218,76 @@ export default function TerminalPanel({ hosts, initialHost = "" }: Props) {
     setPaneTabIds((prev) => prev.map((tabId) => (tabId === id ? null : tabId)));
     historyRef.current.delete(id);
     terminalRefs.current.delete(id);
+    setTerminalConnections((previous) => {
+      const next = new Map(previous);
+      next.delete(id);
+      return next;
+    });
+    setBroadcastTargets((previous) => {
+      const next = new Set(previous);
+      next.delete(id);
+      return next;
+    });
     setBlocksByTab((previous) => {
       const next = new Map(previous);
       next.delete(id);
       return next;
     });
     setSelectedBlock((previous) => (previous?.tabId === id ? null : previous));
+  }
+
+  function openBroadcast() {
+    const connected = tabs.filter((tab) => terminalConnections.has(tab.id));
+    setBroadcastTargets(new Set(connected.map((tab) => tab.id)));
+    const selection = focusedTabId ? terminalRefs.current.get(focusedTabId)?.getSelection().trim() : "";
+    setBroadcastCommand(selection && !selection.includes("\n") ? selection : "");
+    setBroadcastForce(false);
+    setBroadcastPreview(null);
+    setBroadcastError(null);
+    setBroadcastOpen(true);
+  }
+
+  const broadcastRequest = () => ({
+    targets: tabs
+      .filter((tab) => broadcastTargets.has(tab.id))
+      .flatMap((tab) => {
+        const terminalId = terminalConnections.get(tab.id);
+        return terminalId ? [{ terminal_id: terminalId, host: tab.host }] : [];
+      }),
+    command: broadcastCommand.trim(),
+    force: broadcastForce,
+    all_or_nothing: true,
+  });
+
+  async function previewBroadcast() {
+    setBroadcastBusy(true);
+    setBroadcastError(null);
+    try {
+      setBroadcastPreview(await api.terminalBroadcastPreview(broadcastRequest()));
+    } catch (error) {
+      setBroadcastPreview(null);
+      setBroadcastError(String(error));
+    } finally {
+      setBroadcastBusy(false);
+    }
+  }
+
+  async function runBroadcast() {
+    setBroadcastBusy(true);
+    setBroadcastError(null);
+    try {
+      const result = await api.terminalBroadcastRun(broadcastRequest());
+      setBroadcastPreview(result);
+      if (result.enqueued_any) {
+        setBroadcastOpen(false);
+      } else {
+        setBroadcastError(t("Broadcast was not sent to any terminal"));
+      }
+    } catch (error) {
+      setBroadcastError(String(error));
+    } finally {
+      setBroadcastBusy(false);
+    }
   }
 
   function updateBlockSearch(tabId: string | null, query: string) {
@@ -385,6 +462,16 @@ export default function TerminalPanel({ hosts, initialHost = "" }: Props) {
           >
             <BookMarked size={13} />
             {t("Command snippets")}
+          </Button>
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={openBroadcast}
+            disabled={terminalConnections.size < 2}
+            className="h-8"
+          >
+            <RadioTower size={13} />
+            {t("Broadcast command")}
           </Button>
         </div>
 
@@ -680,6 +767,14 @@ export default function TerminalPanel({ hosts, initialHost = "" }: Props) {
                   setSelectedBlock(block ? { tabId: tab.id, block } : null);
                   setBlockCopyStatus("idle");
                 }}
+                onConnectionChange={(connection) => {
+                  setTerminalConnections((previous) => {
+                    const next = new Map(previous);
+                    if (connection) next.set(tab.id, connection.terminalId);
+                    else next.delete(tab.id);
+                    return next;
+                  });
+                }}
               />
             </div>
           );
@@ -736,6 +831,96 @@ export default function TerminalPanel({ hosts, initialHost = "" }: Props) {
           </div>
         )}
       </div>
+      {broadcastOpen && (
+        <Dialog onClose={() => !broadcastBusy && setBroadcastOpen(false)} className="max-w-2xl">
+          <div className="grid gap-4">
+            <div>
+              <h2 className="text-lg font-semibold">{t("Broadcast command")}</h2>
+              <p className="text-xs text-muted-foreground">
+                {t("Review every target and its effective risk before sending. Delivery is authorization-atomic, not remote execution-atomic.")}
+              </p>
+            </div>
+            <div className="grid max-h-36 grid-cols-2 gap-2 overflow-y-auto rounded border border-border p-2">
+              {tabs.filter((tab) => terminalConnections.has(tab.id)).map((tab) => (
+                <label key={tab.id} className="flex items-center gap-2 rounded px-2 py-1 text-sm hover:bg-muted">
+                  <input
+                    type="checkbox"
+                    checked={broadcastTargets.has(tab.id)}
+                    onChange={() => {
+                      setBroadcastTargets((previous) => {
+                        const next = new Set(previous);
+                        if (next.has(tab.id)) next.delete(tab.id); else next.add(tab.id);
+                        return next;
+                      });
+                      setBroadcastPreview(null);
+                    }}
+                  />
+                  <span className="truncate">{tab.host}</span>
+                </label>
+              ))}
+            </div>
+            <Textarea
+              autoFocus
+              value={broadcastCommand}
+              onChange={(event) => {
+                setBroadcastCommand(event.target.value);
+                setBroadcastPreview(null);
+              }}
+              placeholder={t("Single command to run on selected terminals")}
+              className="min-h-20"
+            />
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={broadcastForce}
+                onChange={(event) => {
+                  setBroadcastForce(event.target.checked);
+                  setBroadcastPreview(null);
+                }}
+              />
+              {t("Force high-risk commands when policy allows")}
+            </label>
+            {broadcastPreview && (
+              <div className="grid gap-1 rounded border border-border p-2 text-xs">
+                {broadcastPreview.targets.map((target) => (
+                  <div key={target.terminal_id} className="flex items-center gap-2">
+                    <span className="min-w-0 flex-1 truncate">{target.host}</span>
+                    <RiskBadge level={target.risk_level} />
+                    <span className={target.authorized ? "text-success" : "text-destructive"}>
+                      {target.error ? target.error : target.requires_approval ? t("Approval required") : t("Ready")}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+            {broadcastError && <div className="text-sm text-destructive">{broadcastError}</div>}
+            <div className="flex justify-end gap-2">
+              <Button variant="secondary" onClick={() => setBroadcastOpen(false)} disabled={broadcastBusy}>
+                {t("Cancel")}
+              </Button>
+              <Button
+                variant="secondary"
+                onClick={() => void previewBroadcast()}
+                disabled={broadcastBusy || broadcastTargets.size < 2 || !broadcastCommand.trim()}
+              >
+                {t("Preview risk")}
+              </Button>
+              <Button
+                variant="destructive"
+                onClick={() => void runBroadcast()}
+                disabled={
+                  broadcastBusy ||
+                  !broadcastPreview ||
+                  broadcastPreview.targets.some((target) => !target.authorized)
+                }
+              >
+                <RadioTower size={14} />
+                {t("Broadcast and run on {count} terminals", { count: broadcastTargets.size })}
+              </Button>
+            </div>
+          </div>
+        </Dialog>
+      )}
       <SnippetsDialog
         open={snippetsOpen}
         canInsert={Boolean(paneTabIds[focusedPane])}

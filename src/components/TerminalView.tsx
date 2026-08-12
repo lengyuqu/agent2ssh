@@ -35,6 +35,8 @@ type Props = {
   /** Structured block boundaries for future audit correlation. */
   onBlocksChange?: (blocks: CommandBlockMetadata[]) => void;
   onBlockSelected?: (block: CommandBlockMetadata | null) => void;
+  /** Live daemon terminal identity used by the authenticated broadcast API. */
+  onConnectionChange?: (connection: { terminalId: string; host: string } | null) => void;
 };
 
 export type CommandBlockCopyResult =
@@ -45,6 +47,7 @@ export type TerminalViewHandle = {
   /** Inject text as if typed, without a trailing Enter — used by history search
    *  so the user can review/edit a past line before running it. */
   sendText: (text: string) => void;
+  getSelection: () => string;
   focus: () => void;
   getBlocks: () => CommandBlockMetadata[];
   searchBlocks: (query: string) => CommandBlockMetadata[];
@@ -55,7 +58,7 @@ export type TerminalViewHandle = {
 /** A live interactive terminal to a host, streamed over the daemon's
  *  /terminal WebSocket (raw bytes both ways: ANSI, control chars, TUIs). */
 const TerminalView = forwardRef<TerminalViewHandle, Props>(function TerminalView(
-  { host, terminalTheme, appTheme, onLineTyped, onHistoryRequest, onBlocksChange, onBlockSelected },
+  { host, terminalTheme, appTheme, onLineTyped, onHistoryRequest, onBlocksChange, onBlockSelected, onConnectionChange },
   ref
 ) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -75,6 +78,8 @@ const TerminalView = forwardRef<TerminalViewHandle, Props>(function TerminalView
   onBlocksChangeRef.current = onBlocksChange;
   const onBlockSelectedRef = useRef(onBlockSelected);
   onBlockSelectedRef.current = onBlockSelected;
+  const onConnectionChangeRef = useRef(onConnectionChange);
+  onConnectionChangeRef.current = onConnectionChange;
 
   const metadataFor = (id?: string): CommandBlockMetadata[] => {
     const term = termRef.current;
@@ -99,6 +104,7 @@ const TerminalView = forwardRef<TerminalViewHandle, Props>(function TerminalView
         }
         lineBufferRef.current += text;
       },
+      getSelection: () => termRef.current?.getSelection() ?? "",
       focus: () => termRef.current?.focus(),
       getBlocks: () => metadataFor(),
       searchBlocks: (query: string) => {
@@ -372,6 +378,9 @@ const TerminalView = forwardRef<TerminalViewHandle, Props>(function TerminalView
               return;
             }
             if (message.type === "connected") {
+              if (typeof message.terminal_id === "string") {
+                onConnectionChangeRef.current?.({ terminalId: message.terminal_id, host });
+              }
               const fingerprint =
                 typeof message.fingerprint_sha256 === "string"
                   ? ` ${
@@ -400,6 +409,7 @@ const TerminalView = forwardRef<TerminalViewHandle, Props>(function TerminalView
         if (!disposed) writeTerminalLine("\r\n\x1b[31m— connection error —\x1b[0m");
       };
       ws.onclose = () => {
+        onConnectionChangeRef.current?.(null);
         if (!disposed) writeTerminalLine("\r\n\x1b[33m— disconnected —\x1b[0m");
       };
     })();
@@ -420,6 +430,7 @@ const TerminalView = forwardRef<TerminalViewHandle, Props>(function TerminalView
 
     return () => {
       disposed = true;
+      onConnectionChangeRef.current?.(null);
       observer.disconnect();
       window.removeEventListener("resize", onResize);
       window.removeEventListener("agent2ssh:highlights-changed", refreshHighlightRules);

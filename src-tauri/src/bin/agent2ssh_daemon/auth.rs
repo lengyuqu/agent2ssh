@@ -5,6 +5,7 @@ use axum::{
     response::IntoResponse,
     Json,
 };
+use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 use super::{err, AppState, ErrorBody};
@@ -12,6 +13,12 @@ use super::{err, AppState, ErrorBody};
 #[derive(Clone)]
 pub(super) struct AuthContext {
     pub(super) scope: Option<DaemonScope>,
+    /// One-way identity of the exact bearer token that opened the resource.
+    pub(super) principal: [u8; 32],
+}
+
+fn token_principal(token: &str) -> [u8; 32] {
+    Sha256::digest(token.as_bytes()).into()
 }
 
 #[cfg(test)]
@@ -35,7 +42,10 @@ fn authenticate_token(
     token: &str,
 ) -> Result<AuthContext, (StatusCode, Json<ErrorBody>)> {
     if token_matches(token, &state.token) {
-        return Ok(AuthContext { scope: None });
+        return Ok(AuthContext {
+            scope: None,
+            principal: token_principal(token),
+        });
     }
 
     let scoped_tokens = load_scoped_daemon_tokens().map_err(|e| {
@@ -51,6 +61,7 @@ fn authenticate_token(
         if token_matches(token, &expected) {
             return Ok(AuthContext {
                 scope: scoped.scope.clone(),
+                principal: token_principal(token),
             });
         }
     }

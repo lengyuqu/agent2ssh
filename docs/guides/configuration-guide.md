@@ -939,17 +939,24 @@ agent2ssh webdav pull
 
 # 查看本地和远端的全局版本标记。
 agent2ssh webdav status
+
+# 检查过 status 后，显式接受覆盖已分叉的一侧。
+agent2ssh webdav push --force
+agent2ssh webdav pull --force
 ```
 
-三个命令都支持 `--url`、`--username`、`--password`、`--password-env`、`--config` 和 `--json`。
+三个命令都支持 `--url`、`--username`、`--password`、`--password-env`、`--config` 和 `--json`；`push`/`pull` 还支持显式冲突覆盖 `--force`。
 
 ### 备份与版本标记
 
 - 每次 `push` 或 `pull` 前都会在 `~/.agent2ssh/backups/sync-<timestamp>-<id>/` 创建本地版本备份。
-- `push` 会读取本地/远端已有标记，取较大的 `global_version` 并加 1，然后上传 `files/` 下的配置文件和远端 `sync_version.json`。
-- `pull` 会校验远端 manifest 中每个文件的 SHA-256，覆盖本地文件后写入本地 `sync_version.json`，表示本机已应用该全局版本。
+- 同步状态使用稳定的 portable-config SHA-256 摘要区分 `in_sync`、`local_ahead`、`remote_ahead`、`diverged` 和 `unknown`；摘要只包含排序后的路径与文件哈希，不受时间、方向和 sync id 影响。
+- schema v2 `push` 会把文件上传到按 `sync_id` 命名的不可变 `versions/` 对象，最后用 WebDAV ETag 条件写入 `sync_version.json`。远端并发变化会中止 marker 提交，不会让当前版本指向混合文件。
+- `pull` 会先把完整远端版本下载到内存并校验每个文件的 SHA-256，再创建本地备份并原子替换文件，避免校验失败留下半应用状态。
+- 默认拒绝覆盖 `diverged` 或较新的一侧；只有用户检查 `status` 后显式传入 `--force` 才允许覆盖。
 - `pull` 兼容旧版本远端 manifest 中的 `known_hosts.json`，但会跳过该文件，不会覆盖本机 SSH 主机指纹信任库。
-- 如果远端 manifest 中缺少某个可同步文件，`pull` 会在备份后删除本地对应文件，使本机状态与远端版本一致。
+- schema v1 远端缺少后来新增的 `snippets.json` 时会保留本地 snippets；schema v2 中缺少可同步文件才表示删除。
+- daemon 的 `GET /webdav/status` 返回相同的版本、摘要、冲突状态和 metadata 警告字段。
 
 ---
 

@@ -209,6 +209,9 @@ export type WebDavSyncStatus = {
   lastSyncAt?: string | null;
   lastUploadedBytes?: number | null;
   lastRemotePath?: string | null;
+  portableDigest?: string | null;
+  syncState: "in_sync" | "local_ahead" | "remote_ahead" | "diverged" | "unknown";
+  syncSummary: string;
 };
 
 // Rust: webdav_sync.rs — ConfigSnapshotInfo (V4-3)
@@ -325,6 +328,35 @@ export type SessionInfo = [string, string]; // [id, host]
 export type DaemonSessionInfo = {
   id: string;
   host: string;
+};
+
+export type TerminalBroadcastTarget = {
+  terminal_id: string;
+  host: string;
+};
+
+export type TerminalBroadcastRequest = {
+  targets: TerminalBroadcastTarget[];
+  command: string;
+  force?: boolean;
+  all_or_nothing?: boolean;
+};
+
+export type TerminalBroadcastTargetResult = TerminalBroadcastTarget & {
+  risk_level: RiskLevel;
+  requires_approval: boolean;
+  matched_policy: string | null;
+  authorized: boolean;
+  approval_granted: boolean;
+  sent: boolean;
+  error: string | null;
+};
+
+export type TerminalBroadcastResponse = {
+  broadcast_id: string;
+  enqueued_any: boolean;
+  all_or_nothing: boolean;
+  targets: TerminalBroadcastTargetResult[];
 };
 
 // Rust: types.rs — ForwardDirection (rename_all = "lowercase")

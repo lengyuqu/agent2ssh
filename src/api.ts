@@ -45,6 +45,8 @@ import type {
   SftpResult,
   SshKeyInfo,
   TeamConfigExport,
+  TerminalBroadcastRequest,
+  TerminalBroadcastResponse,
   TrustHostFingerprintRequest,
   WebDavSyncConfig,
   WebDavSyncSaveRequest,
@@ -383,6 +385,38 @@ export const api = {
     });
     if (!res.ok) throw new Error(`Failed to list daemon sessions: ${res.status}`);
     return (await res.json()) as DaemonSessionInfo[];
+  },
+  terminalBroadcastPreview: async (
+    request: TerminalBroadcastRequest
+  ): Promise<TerminalBroadcastResponse> => {
+    const token = await invoke<string>("get_daemon_token");
+    const res = await fetch(`${daemonUrl}/terminal/broadcast/preview`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        [TRACE_ID_HEADER]: SESSION_TRACE_ID,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ ...request, all_or_nothing: request.all_or_nothing ?? true }),
+    });
+    if (!res.ok) throw new Error(`Failed to preview terminal broadcast: ${res.status}`);
+    return (await res.json()) as TerminalBroadcastResponse;
+  },
+  terminalBroadcastRun: async (
+    request: TerminalBroadcastRequest
+  ): Promise<TerminalBroadcastResponse> => {
+    const token = await invoke<string>("get_daemon_token");
+    const res = await fetch(`${daemonUrl}/terminal/broadcast`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        [TRACE_ID_HEADER]: SESSION_TRACE_ID,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ ...request, all_or_nothing: request.all_or_nothing ?? true }),
+    });
+    if (!res.ok) throw new Error(`Failed to run terminal broadcast: ${res.status}`);
+    return (await res.json()) as TerminalBroadcastResponse;
   },
 
   // Port forwarding

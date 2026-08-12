@@ -54,12 +54,12 @@ use axum::{
 use chrono::Utc;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::net::TcpListener;
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, Mutex};
 use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
 
@@ -156,12 +156,23 @@ struct AppState {
     token: String,
     limiter: Arc<Mutex<ExecutionLimiter>>,
     session_input_buffers: Arc<Mutex<HashMap<Uuid, String>>>,
+    /// Live interactive terminals addressable by authenticated broadcast calls.
+    /// Entries exist only for the lifetime of their owning WebSocket.
+    terminal_inputs: Arc<Mutex<HashMap<Uuid, TerminalEndpoint>>>,
     /// T2-15: Shutdown token for propagating graceful shutdown to WS handlers.
     shutdown: agent2ssh::ws_drain::ShutdownToken,
     /// T2-15: Registry for draining active WS connections on shutdown.
     drain_registry: agent2ssh::ws_drain::DrainRegistry,
     /// T2-16: Prompt waiter for 2FA/OTP keyboard-interactive responses.
     prompt_waiter: agent2ssh::prompt_waiter::PromptWaiter,
+}
+
+#[derive(Clone)]
+struct TerminalEndpoint {
+    host: String,
+    tags: Vec<String>,
+    principal: [u8; 32],
+    input: mpsc::Sender<Vec<u8>>,
 }
 
 fn load_or_create_daemon_token(config_dir: &std::path::Path) -> anyhow::Result<String> {
@@ -2297,6 +2308,19 @@ async fn ssh_disconnect(
     }
 }
 
+// Versioned portable-configuration sync status. Credentials are resolved by
+// the core sync layer from webdav.toml/environment and are never serialized.
+async fn webdav_sync_status_handler(
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
+) -> Result<Json<agent2ssh::WebDavSyncStatus>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    agent2ssh::webdav_status(agent2ssh::WebDavSyncOptions::default())
+        .await
+        .map(Json)
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, e))
+}
+
 // ── Webhook config ───────────────────────────────────────────────────────────
 
 async fn get_webhook_config(
@@ -2818,6 +2842,375 @@ struct TerminalParams {
     host: String,
 }
 
+const MAX_TERMINAL_BROADCAST_TARGETS: usize = 32;
+
+#[derive(Clone, serde::Deserialize)]
+struct TerminalBroadcastTargetRequest {
+    terminal_id: String,
+    host: String,
+}
+
+#[derive(serde::Deserialize)]
+struct TerminalBroadcastRequest {
+    targets: Vec<TerminalBroadcastTargetRequest>,
+    command: String,
+    #[serde(default)]
+    force: bool,
+    #[serde(default = "default_true")]
+    all_or_nothing: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Clone, serde::Serialize)]
+struct TerminalBroadcastTargetResult {
+    terminal_id: String,
+    host: String,
+    risk_level: RiskLevel,
+    requires_approval: bool,
+    matched_policy: Option<String>,
+    authorized: bool,
+    approval_granted: bool,
+    sent: bool,
+    error: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct TerminalBroadcastResponse {
+    broadcast_id: String,
+    enqueued_any: bool,
+    all_or_nothing: bool,
+    targets: Vec<TerminalBroadcastTargetResult>,
+}
+
+fn validate_terminal_broadcast_request(
+    request: &TerminalBroadcastRequest,
+) -> Result<(), (StatusCode, Json<ErrorBody>)> {
+    ensure_command_length(&request.command)?;
+    if request.command.trim().is_empty() {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "broadcast command cannot be empty",
+        ));
+    }
+    if request
+        .command
+        .chars()
+        .any(|character| character.is_control())
+    {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "broadcast command cannot contain newlines or control characters",
+        ));
+    }
+    if request.targets.len() < 2 {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "terminal broadcast requires at least two targets",
+        ));
+    }
+    if request.targets.len() > MAX_TERMINAL_BROADCAST_TARGETS {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            format!("terminal broadcast supports at most {MAX_TERMINAL_BROADCAST_TARGETS} targets"),
+        ));
+    }
+    let mut ids = HashSet::new();
+    if request
+        .targets
+        .iter()
+        .any(|target| !ids.insert(target.terminal_id.as_str()))
+    {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "terminal broadcast targets must be unique",
+        ));
+    }
+    Ok(())
+}
+
+async fn terminal_broadcast_preview_results(
+    state: &AppState,
+    auth: &AuthContext,
+    request: &TerminalBroadcastRequest,
+) -> Vec<TerminalBroadcastTargetResult> {
+    let registry = state.terminal_inputs.lock().await;
+    let endpoints = request
+        .targets
+        .iter()
+        .map(|target| {
+            Uuid::parse_str(&target.terminal_id)
+                .ok()
+                .and_then(|id| registry.get(&id).cloned())
+        })
+        .collect::<Vec<_>>();
+    drop(registry);
+
+    let gate = load_execution_gate().ok();
+    let source = "daemon_terminal_broadcast";
+    let mut results = Vec::with_capacity(request.targets.len());
+    for (target, endpoint) in request.targets.iter().zip(endpoints) {
+        let mut result = TerminalBroadcastTargetResult {
+            terminal_id: target.terminal_id.clone(),
+            host: target.host.clone(),
+            risk_level: RiskLevel::Blocked,
+            requires_approval: false,
+            matched_policy: None,
+            authorized: false,
+            approval_granted: false,
+            sent: false,
+            error: None,
+        };
+        let Some(endpoint) = endpoint else {
+            result.error = Some("terminal is not connected".to_string());
+            results.push(result);
+            continue;
+        };
+        if endpoint.principal != auth.principal {
+            result.error = Some("terminal belongs to a different authenticated client".to_string());
+            results.push(result);
+            continue;
+        }
+        if endpoint.host != target.host {
+            result.error =
+                Some("terminal host does not match the registered connection".to_string());
+            results.push(result);
+            continue;
+        }
+        if let Err(error) = check_daemon_scope(
+            &auth.scope,
+            &endpoint.host,
+            &endpoint.tags,
+            &request.command,
+        ) {
+            result.error = Some(error);
+            results.push(result);
+            continue;
+        }
+        if gate
+            .as_ref()
+            .is_some_and(|status| gate_blocks_source(status, source))
+        {
+            result.error = Some("execution gate paused".to_string());
+            results.push(result);
+            continue;
+        }
+        let risk = apply_risk_override(
+            effective_command_risk(&request.command).await,
+            host_risk_override(&endpoint.host),
+        );
+        result.risk_level = risk;
+        if risk == RiskLevel::Blocked {
+            result.error = Some("command blocked by risk policy".to_string());
+            results.push(result);
+            continue;
+        }
+        match check_approval_required(&endpoint.host, &endpoint.tags, &request.command, risk) {
+            Ok(policy) => {
+                result.matched_policy = policy.as_ref().map(|item| item.name.clone());
+                result.requires_approval =
+                    policy.is_some() || (risk == RiskLevel::High && !request.force);
+                result.authorized = true;
+            }
+            Err(error) => result.error = Some(error.to_string()),
+        }
+        results.push(result);
+    }
+    results
+}
+
+async fn terminal_broadcast_preview(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Json(request): Json<TerminalBroadcastRequest>,
+) -> Result<Json<TerminalBroadcastResponse>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    validate_terminal_broadcast_request(&request)?;
+    let targets = terminal_broadcast_preview_results(&state, &auth, &request).await;
+    Ok(Json(TerminalBroadcastResponse {
+        broadcast_id: Uuid::new_v4().to_string(),
+        enqueued_any: false,
+        all_or_nothing: request.all_or_nothing,
+        targets,
+    }))
+}
+
+async fn terminal_broadcast_run(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Json(request): Json<TerminalBroadcastRequest>,
+) -> Result<Json<TerminalBroadcastResponse>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    validate_terminal_broadcast_request(&request)?;
+    let broadcast_id = Uuid::new_v4().to_string();
+    let source = "daemon_terminal_broadcast";
+    let mut results = terminal_broadcast_preview_results(&state, &auth, &request).await;
+    let has_preflight_failure = results.iter().any(|result| !result.authorized);
+    if request.all_or_nothing && has_preflight_failure {
+        for result in &results {
+            append_operation_audit(
+                source,
+                &result.host,
+                &format!("terminal broadcast {broadcast_id} {}", request.command),
+                result.risk_level,
+                None,
+                0,
+                Some(
+                    result
+                        .error
+                        .as_deref()
+                        .unwrap_or("broadcast cancelled by all-or-nothing preflight"),
+                ),
+            );
+        }
+        return Ok(Json(TerminalBroadcastResponse {
+            broadcast_id,
+            enqueued_any: false,
+            all_or_nothing: true,
+            targets: results,
+        }));
+    }
+
+    let eligible_indexes = results
+        .iter()
+        .enumerate()
+        .filter_map(|(index, result)| result.authorized.then_some(index))
+        .collect::<Vec<_>>();
+    let rate_targets = eligible_indexes
+        .iter()
+        .map(|index| {
+            let target = &results[*index];
+            (target.host.clone(), host_tags(&target.host))
+        })
+        .collect::<Vec<_>>();
+    if let Err((_, Json(error))) =
+        reject_if_rate_limited(&state, source, &rate_targets, &request.command).await
+    {
+        for index in eligible_indexes {
+            results[index].authorized = false;
+            results[index].error = Some(error.error.clone());
+        }
+        return Ok(Json(TerminalBroadcastResponse {
+            broadcast_id,
+            enqueued_any: false,
+            all_or_nothing: request.all_or_nothing,
+            targets: results,
+        }));
+    }
+
+    for index in &eligible_indexes {
+        let host = results[*index].host.clone();
+        let tags = host_tags(&host);
+        match authorize_command(
+            &auth.scope,
+            source,
+            &host,
+            &tags,
+            None,
+            &request.command,
+            request.force,
+            None,
+            None,
+        )
+        .await
+        {
+            Ok((risk, approved)) => {
+                results[*index].risk_level = risk;
+                results[*index].approval_granted = approved;
+            }
+            Err((_, Json(error))) => {
+                results[*index].authorized = false;
+                results[*index].error = Some(error.error);
+            }
+        }
+    }
+
+    if request.all_or_nothing && results.iter().any(|result| !result.authorized) {
+        for result in &mut results {
+            if result.authorized {
+                result.error =
+                    Some("broadcast cancelled because another target was denied".to_string());
+            }
+            append_operation_audit(
+                source,
+                &result.host,
+                &format!("terminal broadcast {broadcast_id} {}", request.command),
+                result.risk_level,
+                None,
+                0,
+                result.error.as_deref(),
+            );
+        }
+        return Ok(Json(TerminalBroadcastResponse {
+            broadcast_id,
+            enqueued_any: false,
+            all_or_nothing: true,
+            targets: results,
+        }));
+    }
+
+    let registry = state.terminal_inputs.lock().await;
+    let senders = request
+        .targets
+        .iter()
+        .map(|target| {
+            Uuid::parse_str(&target.terminal_id)
+                .ok()
+                .and_then(|id| registry.get(&id))
+                // Revalidate ownership and host after approvals finish. This
+                // closes the authorization-to-enqueue window if a terminal
+                // disconnects or its registry entry changes while approval is
+                // pending.
+                .filter(|endpoint| {
+                    endpoint.principal == auth.principal && endpoint.host == target.host
+                })
+                .map(|endpoint| endpoint.input.clone())
+        })
+        .collect::<Vec<_>>();
+    drop(registry);
+    let input = format!("{}\r", request.command).into_bytes();
+    for (index, sender) in senders.into_iter().enumerate() {
+        if !results[index].authorized {
+            continue;
+        }
+        match sender {
+            Some(sender) if sender.send(input.clone()).await.is_ok() => {
+                results[index].sent = true;
+                append_operation_audit(
+                    source,
+                    &results[index].host,
+                    &format!("terminal broadcast {broadcast_id} {}", request.command),
+                    results[index].risk_level,
+                    None,
+                    0,
+                    None,
+                );
+            }
+            _ => {
+                results[index].error = Some("terminal disconnected before delivery".to_string());
+                append_operation_audit(
+                    source,
+                    &results[index].host,
+                    &format!("terminal broadcast {broadcast_id} {}", request.command),
+                    results[index].risk_level,
+                    None,
+                    0,
+                    results[index].error.as_deref(),
+                );
+            }
+        }
+    }
+    let enqueued_any = results.iter().any(|result| result.sent);
+    Ok(Json(TerminalBroadcastResponse {
+        broadcast_id,
+        enqueued_any,
+        all_or_nothing: request.all_or_nothing,
+        targets: results,
+    }))
+}
+
 #[derive(serde::Deserialize)]
 struct RecordingDeleteParams {
     confirm: Option<String>,
@@ -3003,6 +3396,16 @@ async fn handle_terminal(
     // T2-15: Register this WS connection for drain tracking
     let drain_handle = state.drain_registry.register().await;
     let shutdown_token = state.shutdown.clone();
+    let (broadcast_tx, mut broadcast_rx) = mpsc::channel::<Vec<u8>>(8);
+    state.terminal_inputs.lock().await.insert(
+        terminal_id,
+        TerminalEndpoint {
+            host: host_name.clone(),
+            tags: tags.clone(),
+            principal: auth.principal,
+            input: broadcast_tx,
+        },
+    );
 
     let (mut ws_tx, mut ws_rx) = socket.split();
     let mut pending_input = String::new();
@@ -3062,6 +3465,7 @@ async fn handle_terminal(
                                 "fingerprint_sha256": info.fingerprint_sha256,
                                 "host_key_algorithm": info.host_key_algorithm,
                                 "recording_id": recording_id,
+                                "terminal_id": terminal_id.to_string(),
                             }).to_string()
                         )).await;
                     }
@@ -3189,6 +3593,16 @@ async fn handle_terminal(
                     Some(Err(_)) => break,
                 }
             }
+            broadcast = broadcast_rx.recv() => {
+                match broadcast {
+                    Some(input) => {
+                        if terminal_tx.send(TerminalCommand::Input(input)).is_err() {
+                            break;
+                        }
+                    }
+                    None => break,
+                }
+            }
         }
     }
 
@@ -3209,6 +3623,7 @@ async fn handle_terminal(
     }
     // T2-15: Unregister from drain registry (connection closed normally)
     drain_handle.unregister().await;
+    state.terminal_inputs.lock().await.remove(&terminal_id);
     state.limiter.lock().await.unregister_session(&terminal_id);
 
     // A1: Broadcast connection drop to any subscribers, then clean up
@@ -3724,11 +4139,49 @@ async fn serve_console() -> axum::response::Html<&'static str> {
 mod tests {
     use super::*;
 
+    fn broadcast_request(command: &str) -> TerminalBroadcastRequest {
+        TerminalBroadcastRequest {
+            targets: vec![
+                TerminalBroadcastTargetRequest {
+                    terminal_id: Uuid::new_v4().to_string(),
+                    host: "one".to_string(),
+                },
+                TerminalBroadcastTargetRequest {
+                    terminal_id: Uuid::new_v4().to_string(),
+                    host: "two".to_string(),
+                },
+            ],
+            command: command.to_string(),
+            force: false,
+            all_or_nothing: true,
+        }
+    }
+
+    #[test]
+    fn terminal_broadcast_accepts_a_frozen_unique_target_set() {
+        assert!(validate_terminal_broadcast_request(&broadcast_request("uptime")).is_ok());
+    }
+
+    #[test]
+    fn terminal_broadcast_rejects_control_input_and_duplicate_targets() {
+        for command in ["uptime\nwhoami", "printf \u{1b}[31m", "echo\0secret"] {
+            assert!(validate_terminal_broadcast_request(&broadcast_request(command)).is_err());
+        }
+        let mut duplicate = broadcast_request("uptime");
+        duplicate.targets[1].terminal_id = duplicate.targets[0].terminal_id.clone();
+        assert!(validate_terminal_broadcast_request(&duplicate).is_err());
+    }
+
     #[test]
     fn recording_endpoints_require_unrestricted_admin_token() {
-        assert!(require_recording_admin(&AuthContext { scope: None }).is_ok());
+        assert!(require_recording_admin(&AuthContext {
+            scope: None,
+            principal: [0; 32]
+        })
+        .is_ok());
         assert!(require_recording_admin(&AuthContext {
             scope: Some(DaemonScope::default()),
+            principal: [0; 32],
         })
         .is_err());
     }
@@ -3753,6 +4206,7 @@ mod tests {
             token: "test-token".into(),
             limiter: Arc::new(tokio::sync::Mutex::new(ExecutionLimiter::new(config))),
             session_input_buffers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            terminal_inputs: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             shutdown: agent2ssh::ws_drain::ShutdownToken::new(),
             drain_registry: agent2ssh::ws_drain::DrainRegistry::new(),
             prompt_waiter: agent2ssh::prompt_waiter::PromptWaiter::new(),
@@ -4271,6 +4725,7 @@ async fn main() -> anyhow::Result<()> {
         token: token.clone(),
         limiter: Arc::new(Mutex::new(ExecutionLimiter::new(limits))),
         session_input_buffers: Arc::new(Mutex::new(HashMap::new())),
+        terminal_inputs: Arc::new(Mutex::new(HashMap::new())),
         shutdown: agent2ssh::ws_drain::ShutdownToken::new(),
         drain_registry: agent2ssh::ws_drain::DrainRegistry::new(),
         prompt_waiter,
@@ -4308,6 +4763,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/exec/compare", post(exec_compare))
         .route("/exec/stream", get(exec_stream))
         .route("/terminal", get(terminal_attach))
+        .route(
+            "/terminal/broadcast/preview",
+            post(terminal_broadcast_preview),
+        )
+        .route("/terminal/broadcast", post(terminal_broadcast_run))
         .route(
             "/recordings/config",
             get(recordings_config_get).put(recordings_config_put),
@@ -4365,6 +4825,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/events/stream", get(events_stream))
         .route("/ssh-sync/diff", get(ssh_sync_diff))
         .route("/ssh-sync/export", post(ssh_sync_export_handler))
+        .route("/webdav/status", get(webdav_sync_status_handler))
         // T2-16: Prompt waiter endpoints for 2FA/OTP responses
         .route("/prompts/pending", get(get_pending_prompts))
         .route("/prompts/respond", post(post_respond_prompt))

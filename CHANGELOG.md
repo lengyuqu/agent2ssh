@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ## [0.3.0] - 2026-08-12
 
 ### Added
+- **Safe terminal broadcast**: Added token-owned live terminal IDs and preview/run endpoints for explicit multi-terminal command broadcasts. Every target passes scope, gate, rate-limit, effective-risk and approval checks before any input is enqueued, with per-target audit/results and an explicit desktop “Broadcast and run” action.
+- **Conflict-aware portable config sync**: Added stable SHA-256 configuration digests, local/remote/diverged status summaries across CLI, daemon, and desktop, plus a reusable sync transport abstraction with a deterministic fake backend for tests.
 - **Structured terminal workbench**: Added marker-backed command blocks with color rails, search, navigation, safe plain-text copy, and structured metadata for future audit consumers.
 - **Session recordings**: Added opt-in asciicast v2 terminal recording, protected local storage, daemon and desktop management APIs, variable-speed playback, and confirmed audited deletion.
 - **CLI completions**: Added Bash, Zsh, Fish, and PowerShell completion generation with read-only dynamic candidates for configured and active resources.
@@ -25,6 +27,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - **Branch protection**: Documented branch protection policy (`docs/guides/branch-protection.md`) and added `.github/CODEOWNERS`.
 
 ### Changed
+- **Versioned WebDAV commits**: WebDAV schema v2 uploads immutable per-sync objects and commits markers with ETag compare-and-swap; push/pull reject divergent overwrites unless `--force`, pull validates a complete snapshot before replacement, and schema v1 pulls preserve newer local-only snippets.
 - **WebDAV sync trust boundary**: `known_hosts.json` is no longer part of WebDAV sync payloads. Pulls from older remote manifests tolerate and skip legacy `known_hosts.json` entries so local SSH host-key trust state is not overwritten across machines.
 - **Desktop internationalization coverage**: Completed Chinese translations for the current desktop surface, including SSH fingerprint confirmation, connection progress, WebDAV Sync, MCP binding removal, the Sync module label, and the React error recovery screen.
 - **CI release runners**: Use Intel macOS runners for x86 builds; release workflow portability and macOS runner environment fixes; stop caching Rust toolchain binaries.

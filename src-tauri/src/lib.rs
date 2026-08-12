@@ -154,9 +154,10 @@ pub use telemetry::{
 };
 pub use types::*;
 pub use webdav_sync::{
-    collect_sync_files, create_sync_backup, load_local_sync_marker, webdav_pull, webdav_push,
-    webdav_status, WebDavSyncFile, WebDavSyncMarker, WebDavSyncOptions, WebDavSyncResult,
-    WebDavSyncStatus, SYNCABLE_FILES,
+    collect_sync_files, create_sync_backup, current_portable_config_digest, load_local_sync_marker,
+    portable_config_digest, sync_marker_digest, webdav_pull, webdav_push, webdav_status,
+    RemoteObject, RemoteWriteCondition, SyncRemote, SyncState, WebDavSyncFile, WebDavSyncMarker,
+    WebDavSyncOptions, WebDavSyncResult, WebDavSyncStatus, SYNCABLE_FILES,
 };
 
 pub use app_state::{

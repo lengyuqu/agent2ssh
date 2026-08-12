@@ -440,6 +440,44 @@ components:
         risk_rules: { type: string, nullable: true, description: "Raw risk_rules.toml content" }
         playbooks:  { type: string, nullable: true, description: "Raw playbooks.toml content" }
 
+    TerminalBroadcastRequest:
+      type: object
+      required: [targets, command]
+      properties:
+        targets:
+          type: array
+          minItems: 2
+          maxItems: 32
+          items:
+            type: object
+            required: [terminal_id, host]
+            properties:
+              terminal_id: { type: string, format: uuid }
+              host: { type: string }
+        command: { type: string, description: Single command without control characters; the server appends Enter. }
+        force: { type: boolean, default: false }
+        all_or_nothing: { type: boolean, default: true }
+    TerminalBroadcastResponse:
+      type: object
+      required: [broadcast_id, enqueued_any, all_or_nothing, targets]
+      properties:
+        broadcast_id: { type: string, format: uuid }
+        enqueued_any: { type: boolean }
+        all_or_nothing: { type: boolean }
+        targets:
+          type: array
+          items:
+            type: object
+            properties:
+              terminal_id: { type: string, format: uuid }
+              host: { type: string }
+              risk_level: { type: string, enum: [low, medium, high, blocked] }
+              requires_approval: { type: boolean }
+              matched_policy: { type: string, nullable: true }
+              authorized: { type: boolean }
+              approval_granted: { type: boolean }
+              sent: { type: boolean, description: Enqueued to the live terminal; does not mean remote completion. }
+              error: { type: string, nullable: true }
     Error:
       type: object
       properties:
@@ -743,6 +781,43 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+
+  /terminal/broadcast/preview:
+    post:
+      summary: Preview an authenticated multi-terminal broadcast
+      description: Resolves live terminal IDs, verifies token ownership, scope, gate, effective risk and approval requirements. It never sends terminal input.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TerminalBroadcastRequest" }
+      responses:
+        "200":
+          description: Per-target safety preview
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TerminalBroadcastResponse" }
+
+  /terminal/broadcast:
+    post:
+      summary: Authorize and enqueue a multi-terminal command
+      description: |
+        Freezes the explicit live-terminal target set, performs all authorization
+        and approvals before sending any input, then enqueues the command plus a
+        server-owned carriage return. `all_or_nothing` defaults to true. This is
+        authorization-atomic, not remote execution-atomic; per-target `sent`
+        means accepted by the live terminal queue, not completed remotely.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TerminalBroadcastRequest" }
+      responses:
+        "200":
+          description: Per-target authorization and enqueue results
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TerminalBroadcastResponse" }
 
   /recordings/config:
     description: Recording endpoints require the unrestricted admin token; scoped tokens are rejected.
@@ -1916,6 +1991,29 @@ paths:
                 properties:
                   path:           { type: string }
                   hosts_exported: { type: integer }
+
+  /webdav/status:
+    get:
+      summary: Inspect versioned portable-configuration sync state
+      description: Returns local and remote markers, stable SHA-256 digests, conflict state, and metadata warnings. WebDAV credentials are resolved from server-side configuration and are never returned.
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [state, summary]
+                properties:
+                  state:
+                    type: string
+                    enum: [in_sync, local_ahead, remote_ahead, diverged, unknown]
+                  summary:       { type: string }
+                  local_digest:  { type: string, nullable: true }
+                  remote_digest: { type: string, nullable: true }
+                  base_digest:   { type: string, nullable: true }
+                  metadata_error: { type: string, nullable: true }
+                  local:         { type: object, nullable: true }
+                  remote:        { type: object, nullable: true }
 
   /health-snapshot:
     get:

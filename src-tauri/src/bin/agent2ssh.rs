@@ -659,6 +659,9 @@ struct WebDavCliOptions {
     /// Environment variable holding the sync encryption password.
     #[arg(long)]
     sync_password_env: Option<String>,
+    /// Overwrite diverged local or remote configuration after reviewing status.
+    #[arg(long)]
+    force: bool,
     /// Output as JSON
     #[arg(long)]
     json: bool,
@@ -674,6 +677,7 @@ impl WebDavCliOptions {
             config_path: self.config,
             sync_password: self.sync_password,
             sync_password_env: self.sync_password_env,
+            force: self.force,
         }
     }
 }
@@ -3722,6 +3726,17 @@ fn print_webdav_status(status: &agent2ssh::WebDavSyncStatus) {
 
     print_marker("Local", &status.local);
     print_marker("Remote", &status.remote);
+    println!("State: {:?}", status.state);
+    println!("Summary: {}", status.summary);
+    if let Some(digest) = &status.local_digest {
+        println!("Local digest: {digest}");
+    }
+    if let Some(digest) = &status.remote_digest {
+        println!("Remote digest: {digest}");
+    }
+    if let Some(error) = &status.metadata_error {
+        println!("Metadata warning: {error}");
+    }
 }
 
 async fn check_daemon_health() -> bool {
