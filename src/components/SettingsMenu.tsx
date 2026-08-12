@@ -25,6 +25,7 @@ import { api, getDaemonUrl, reportError } from "../api";
 import { useI18n } from "../i18n";
 import type { DaemonHealth, DiagnosticLogEntry, ExecutionGateStatus } from "../types";
 import LanguageSwitcher from "./LanguageSwitcher";
+import HighlightSettings from "./HighlightSettings";
 import { THEMES, useTheme } from "../theme";
 import { cn } from "../lib/utils";
 
@@ -85,6 +86,10 @@ export default function SettingsMenu({
   );
   const [diagnosticLogs, setDiagnosticLogs] = useState<DiagnosticLogEntry[]>([]);
   const [diagnosticMessage, setDiagnosticMessage] = useState<string | null>(null);
+  const [systemReport, setSystemReport] = useState<string | null>(null);
+  const [cliPathMessage, setCliPathMessage] = useState<string | null>(null);
+  const [cliPathInstalled, setCliPathInstalled] = useState(false);
+  const [cliPathBusy, setCliPathBusy] = useState(false);
   const [appActionBusy, setAppActionBusy] = useState<"exit" | null>(null);
   // K3: in-app updater state.
   const [updateBusy, setUpdateBusy] = useState<"check" | "install" | null>(null);
@@ -152,6 +157,13 @@ export default function SettingsMenu({
       .secretsStatus()
       .then((s) => setSecretsInitialized(s.initialized))
       .catch(() => setSecretsInitialized(false));
+    void api
+      .getCliPathStatus()
+      .then((status) => {
+        setCliPathInstalled(status.installed);
+        setCliPathMessage(status.message);
+      })
+      .catch((err) => setCliPathMessage(String(err)));
   }, [open]);
 
   // K1: set the master password (first time) or change it. Setting it for the
@@ -331,6 +343,36 @@ export default function SettingsMenu({
     }
   }
 
+  async function loadSystemReport() {
+    setDiagnosticBusy("refresh");
+    setDiagnosticMessage(null);
+    try {
+      const report = await api.generateSystemReport();
+      setSystemReport(JSON.stringify(report, null, 2));
+      setDiagnosticMessage(t("System report generated"));
+    } catch (err) {
+      setDiagnosticMessage(String(err));
+    } finally {
+      setDiagnosticBusy(null);
+    }
+  }
+
+  async function toggleCliPath() {
+    setCliPathBusy(true);
+    try {
+      const status = cliPathInstalled
+        ? await api.removeCliFromPath()
+        : await api.installCliToPath();
+      setCliPathInstalled(status.installed);
+      setCliPathMessage(status.message);
+    } catch (err) {
+      setCliPathMessage(String(err));
+      reportError("settings-menu", "CLI PATH update failed", err);
+    } finally {
+      setCliPathBusy(false);
+    }
+  }
+
   async function quitApplication() {
     setAppActionBusy("exit");
     try {
@@ -376,7 +418,7 @@ export default function SettingsMenu({
 
       {open && (
         <div
-          className="absolute right-0 top-[calc(100%+8px)] z-50 grid w-[min(360px,calc(100vw-32px))] gap-3 rounded-xl border border-border bg-popover p-3.5 text-popover-foreground shadow-2xl max-md:left-0 max-md:right-auto"
+          className="absolute right-0 top-[calc(100%+8px)] z-50 grid max-h-[calc(100vh-80px)] w-[min(390px,calc(100vw-32px))] gap-3 overflow-y-auto rounded-xl border border-border bg-popover p-3.5 text-popover-foreground shadow-2xl max-md:left-0 max-md:right-auto"
           role="menu"
         >
           <div className="flex items-start justify-between gap-3 border-b border-border pb-2.5">
@@ -552,6 +594,11 @@ export default function SettingsMenu({
           </section>
 
           <section className="grid gap-2">
+            <div className={sectionTitleCls}>{t("Terminal highlights")}</div>
+            <HighlightSettings />
+          </section>
+
+          <section className="grid gap-2">
             <div className={sectionTitleCls}>{t("Daemon controls")}</div>
             <div className="grid grid-cols-3 gap-2">
               <button
@@ -679,7 +726,7 @@ export default function SettingsMenu({
               <FileText size={15} />
               {t("Diagnostics")}
             </div>
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-2 gap-2">
               <button
                 type="button"
                 className={cn(rowBtnCls, "justify-center px-2")}
@@ -710,6 +757,16 @@ export default function SettingsMenu({
                 <Trash2 size={16} />
                 <span className="truncate">{t("Clear")}</span>
               </button>
+              <button
+                type="button"
+                className={cn(rowBtnCls, "justify-center px-2")}
+                onClick={loadSystemReport}
+                disabled={diagnosticBusy !== null}
+                title={t("Generate system report")}
+              >
+                <FileText size={16} />
+                <span className="truncate">{t("System report")}</span>
+              </button>
             </div>
             {diagnosticMessage && (
               <div className="break-words text-xs leading-snug text-muted-foreground">
@@ -719,6 +776,11 @@ export default function SettingsMenu({
             {diagnosticLogs.length > 0 && (
               <pre className="max-h-40 overflow-auto rounded-md border border-border bg-muted p-2 font-mono text-[11px] leading-relaxed text-muted-foreground whitespace-pre-wrap break-words">
                 {diagnosticLogs.map(formatDiagnosticEntry).join("\n")}
+              </pre>
+            )}
+            {systemReport && (
+              <pre className="max-h-48 overflow-auto rounded-md border border-border bg-muted p-2 font-mono text-[11px] leading-relaxed text-muted-foreground whitespace-pre-wrap break-words">
+                {systemReport}
               </pre>
             )}
           </section>
@@ -741,6 +803,20 @@ export default function SettingsMenu({
 
           <section className="grid gap-2">
             <div className={sectionTitleCls}>{t("Setup")}</div>
+            <button
+              type="button"
+              className={rowBtnCls}
+              onClick={toggleCliPath}
+              disabled={cliPathBusy}
+            >
+              <Download size={16} />
+              <span className="truncate">
+                {cliPathInstalled ? t("Remove CLI from PATH") : t("Add CLI to PATH")}
+              </span>
+            </button>
+            {cliPathMessage && (
+              <div className="break-words text-xs text-muted-foreground">{cliPathMessage}</div>
+            )}
             <button
               type="button"
               className={rowBtnCls}

@@ -370,7 +370,8 @@ export const api = {
     direction: ForwardDirection,
     bindPort: number,
     targetHost: string,
-    targetPort: number
+    targetPort: number,
+    via?: string
   ) =>
     invoke<ForwardRule>("forward_add", {
       host,
@@ -378,8 +379,10 @@ export const api = {
       bindPort,
       targetHost,
       targetPort,
+      via: via || null,
     }),
   forwardList: () => invoke<ForwardRule[]>("forward_list"),
+  forwardStats: () => invoke<Record<string, import("./types").ForwardRuleStats>>("forward_stats"),
   forwardRemove: (id: string) => invoke<void>("forward_remove", { id }),
 
   // Audit
@@ -403,6 +406,7 @@ export const api = {
     }),
   clearDiagnosticLogs: () => invoke<void>("clear_diagnostic_logs"),
   exportDiagnosticBundle: () => invoke<string>("export_diagnostic_bundle"),
+  generateSystemReport: () => invoke<Record<string, unknown>>("generate_system_report"),
 
   // K10: opt-in, local-only telemetry toggle.
   getTelemetryEnabled: () => invoke<boolean>("get_telemetry_enabled"),

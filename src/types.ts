@@ -63,6 +63,7 @@ export type HostProfile = {
   port?: number | null;
   key_path?: string | null;
   password?: string | null;
+  passphrase?: string | null;
   jump_host?: string | null;
   proxy_id?: string | null;
   risk_override?: RiskLevel | null;
@@ -507,6 +508,13 @@ export type ImportResult = {
   hosts_updated: number;
   risk_rules_imported: boolean;
   playbooks_imported: boolean;
+};
+
+export type ForwardRuleStats = {
+  bytes_tx: number;
+  bytes_rx: number;
+  connections: number;
+  state: "running" | "stopped" | "error";
 };
 
 // Rust: types.rs — HighlightRule

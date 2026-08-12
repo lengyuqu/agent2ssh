@@ -231,9 +231,9 @@ fn fill_entropy(seed: &mut [u8]) -> Result<()> {
             }
 
             log_entropy_error(source, &format!("BCryptGenRandom status=0x{status:08x}"));
-            return Err(anyhow!(
+            Err(anyhow!(
                 "failed to read entropy via BCryptGenRandom ({source}): status {status:#x}"
-            ));
+            ))
         }
     }
 

@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ## [0.3.0] - 2026-08-12
 
 ### Added
+- **Terminal highlight UX**: Wired persisted highlight rules into xterm decorations and added desktop controls for adding, enabling, deleting, and resetting rules.
+- **Desktop diagnostics/setup surfaces**: Added in-app structured system reports, CLI PATH install/remove controls, and jump-host selection for port forwards.
 - **Secrets vault**: Encrypted backup/sync of `secrets.enc` with Argon2id and AES-256-GCM, lifecycle registry for daemon/managed processes, and structured error codes across the Rust backend.
 - **Redaction and sanitization pipeline**: Centralized output redaction (`redaction.rs`, `sanitize.rs`, `copy_redact.rs`) applied consistently across exec, audit, export, and terminal surfaces; secrets never leak into logs or audit exports.
 - **Embedded SSH forwarding**: Full local/remote port-forward support over the in-process SSH transport (`forward.rs`), replacing remaining system `ssh` runtime dependencies.
@@ -26,6 +28,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - **Windows Tauri command import**: Fixed the Windows Tauri command import in `tauri_commands.rs`.
 
 ### Fixed
+- **Recent feature completion**: Forward creation now waits for authenticated listener readiness, multi-rule batches roll back on partial failure, SSH `Include` supports multi-directory globs, Fish PATH entries use native syntax, and `v`-prefixed release tags compare correctly.
+- **Private-key passphrases**: Store passphrases in the encrypted secrets vault, preserve them during edits, migrate them during host renames, clear cache entries on lock/removal/auth failure, and refuse plaintext persistence while locked.
+- **Regression hardening**: Redacted host credentials from every transport response, exposed real tunnel state/traffic in the desktop, aligned highlight validation with JavaScript regex semantics, supported alternate-screen highlighting, rejected malformed remote versions, and removed the browser-opening side effect from URL tests.
 - **Tauri bundle build**: Added the missing single-instance plugin dependency for default desktop builds and restored the fingerprint confirmation commands used by the desktop connection flow.
 - **Icon packaging**: Regenerated the v3 32px app icons as RGBA PNGs so Tauri bundle generation accepts the icon set.
 

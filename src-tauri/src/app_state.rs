@@ -47,6 +47,9 @@ use serde::Serialize;
 use tokio::sync::{broadcast, Mutex as TokioMutex};
 use uuid::Uuid;
 
+type DiagnosticErrorSink = Arc<dyn Fn(&crate::diagnostics::DiagnosticLogEntry) + Send + Sync>;
+type HeadlessEventSink = Arc<dyn Fn(&str, serde_json::Value) -> bool + Send + Sync>;
+
 // ── P2 #5: Centralized state ─────────────────────────────────────────────
 
 /// Process-wide application state.
@@ -87,9 +90,7 @@ pub struct AppState {
     // RwLock (not Mutex) so the read path (checking + cloning the sink) doesn't
     // block other readers. The sink is behind Arc so the call site can invoke
     // it without holding the lock (re-entrancy safety).
-    pub error_sink: RwLock<
-        Option<std::sync::Arc<dyn Fn(&crate::diagnostics::DiagnosticLogEntry) + Send + Sync>>,
-    >,
+    pub error_sink: RwLock<Option<DiagnosticErrorSink>>,
 
     // store.rs — config file write lock
     pub store_lock: Mutex<()>,
@@ -278,7 +279,7 @@ pub enum Host {
     Headless {
         /// A sink closure that receives (event_name, payload_json) and
         /// returns `true` if delivered, `false` if the connection is gone.
-        sink: Arc<dyn Fn(&str, serde_json::Value) -> bool + Send + Sync>,
+        sink: HeadlessEventSink,
     },
 
     /// CLI: no event emission, just log to stderr.

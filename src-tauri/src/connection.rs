@@ -374,20 +374,16 @@ mod tests {
     #[tokio::test]
     async fn t2_11_drop_signal_propagates() {
         // T2-11: Verify that a watch channel can broadcast drop and restore
-        let (tx, mut rx) = watch::channel(true);
-        assert_eq!(*rx.borrow(), true, "initial state should be connected");
+        let (tx, rx) = watch::channel(true);
+        assert!(*rx.borrow(), "initial state should be connected");
 
         // Simulate connection drop
         let _ = tx.send(false);
-        assert_eq!(*rx.borrow(), false, "should reflect drop after send(false)");
+        assert!(!*rx.borrow(), "should reflect drop after send(false)");
 
         // Simulate reconnection
         let _ = tx.send(true);
-        assert_eq!(
-            *rx.borrow(),
-            true,
-            "should reflect restore after send(true)"
-        );
+        assert!(*rx.borrow(), "should reflect restore after send(true)");
     }
 
     #[tokio::test]

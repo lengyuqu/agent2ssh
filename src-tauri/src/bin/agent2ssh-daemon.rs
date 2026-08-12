@@ -926,7 +926,14 @@ async fn list_hosts(
 ) -> Result<Json<Vec<HostProfile>>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     list_hosts_core()
-        .map(Json)
+        .map(|hosts| {
+            Json(
+                hosts
+                    .into_iter()
+                    .map(HostProfile::redacted_for_transport)
+                    .collect(),
+            )
+        })
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))
 }
 
@@ -937,7 +944,7 @@ async fn add_host(
 ) -> Result<Json<HostProfile>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     add_host_core(host)
-        .map(Json)
+        .map(|host| Json(host.redacted_for_transport()))
         .map_err(|e| err(StatusCode::BAD_REQUEST, e))
 }
 
@@ -1903,16 +1910,26 @@ async fn forward_add_multi(
     let rules: Vec<agent2ssh::MultiForwardRule> = req
         .rules
         .iter()
-        .map(|r| agent2ssh::MultiForwardRule {
-            direction: match r.direction.as_str() {
+        .enumerate()
+        .map(|(index, r)| {
+            let direction = match r.direction.as_str() {
+                "local" => ForwardDirection::Local,
                 "remote" => ForwardDirection::Remote,
-                _ => ForwardDirection::Local,
-            },
-            bind_port: r.bind_port,
-            target_host: r.target_host.clone(),
-            target_port: r.target_port,
+                other => {
+                    return Err(err(
+                        StatusCode::BAD_REQUEST,
+                        format!("rule {index}: invalid forward direction '{other}'"),
+                    ))
+                }
+            };
+            Ok(agent2ssh::MultiForwardRule {
+                direction,
+                bind_port: r.bind_port,
+                target_host: r.target_host.clone(),
+                target_port: r.target_port,
+            })
         })
-        .collect();
+        .collect::<Result<_, _>>()?;
     match forward_add_multi_core_via(&req.host, &rules, via).await {
         Ok(result) => {
             append_operation_audit(

@@ -15,7 +15,6 @@
 
 use crate::store::config_dir;
 use crate::types::HighlightRule;
-use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 /// The JSON file name for user-editable highlight rules.
@@ -27,6 +26,7 @@ pub enum HighlightError {
     EmptyKeyword,
     NameRequired,
     NameTooLong,
+    InvalidColor,
     KeywordConflict,
     NotFound,
     IoError(String),
@@ -39,6 +39,7 @@ impl std::fmt::Display for HighlightError {
             Self::EmptyKeyword => write!(f, "highlight_empty_keyword"),
             Self::NameRequired => write!(f, "highlight_name_required"),
             Self::NameTooLong => write!(f, "highlight_name_too_long"),
+            Self::InvalidColor => write!(f, "highlight_invalid_color"),
             Self::KeywordConflict => write!(f, "highlight_keyword_conflict"),
             Self::NotFound => write!(f, "highlight_not_found"),
             Self::IoError(msg) => write!(f, "highlight_io_error: {msg}"),
@@ -112,6 +113,15 @@ fn validate_rule(rule: &HighlightRule) -> Result<(), HighlightError> {
     if rule.name.len() > 100 {
         return Err(HighlightError::NameTooLong);
     }
+    if rule.color.len() != 7
+        || !rule.color.starts_with('#')
+        || !rule.color[1..].bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(HighlightError::InvalidColor);
+    }
+    // Regexes are executed by JavaScript in the xterm renderer. Syntax and
+    // zero-width validation therefore belongs to that same runtime; Rust's
+    // regex crate accepts a different grammar (for example, no look-around).
     Ok(())
 }
 
@@ -403,6 +413,37 @@ mod tests {
         };
         let err = insert_rule(rule).unwrap_err();
         assert!(matches!(err, HighlightError::NameTooLong));
+
+        teardown_test_dir();
+    }
+
+    #[test]
+    fn insert_rejects_invalid_color_but_accepts_javascript_regex_syntax() {
+        setup_test_dir();
+        seed_default_rules().unwrap();
+
+        let invalid_color = HighlightRule {
+            keyword: "CUSTOM".into(),
+            name: "Custom".into(),
+            color: "red".into(),
+            enabled: true,
+            is_regex: true,
+            is_case_sensitive: false,
+        };
+        assert!(matches!(
+            insert_rule(invalid_color).unwrap_err(),
+            HighlightError::InvalidColor
+        ));
+
+        let javascript_regex = HighlightRule {
+            keyword: "(?=ERROR)ERROR".into(),
+            name: "JavaScript lookahead".into(),
+            color: "#FF0000".into(),
+            enabled: true,
+            is_regex: true,
+            is_case_sensitive: false,
+        };
+        assert!(insert_rule(javascript_regex).is_ok());
 
         teardown_test_dir();
     }

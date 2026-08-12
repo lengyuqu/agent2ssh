@@ -75,6 +75,7 @@ JSON 格式，包含 `hosts` 数组，也可以包含由桌面端代理管理页
       "user": "deploy",
       "port": 22,
       "key_path": "~/.ssh/id_ed25519",
+      "passphrase": "$agent2ssh-secret$",
       "jump_host": null,
       "proxy_id": "office-socks",
       "risk_override": null,
@@ -117,12 +118,19 @@ JSON 格式，包含 `hosts` 数组，也可以包含由桌面端代理管理页
 }
 ```
 
+私钥口令由桌面端录入后保存在 `secrets.enc`，`hosts.json` 中仅保留
+`$agent2ssh-secret$` 引用；凭据库未解锁时，程序会拒绝新增明文私钥口令。
+编辑主机时留空会保留原口令，切换为密码认证会清除已保存的私钥口令。
+也可以在编辑表单中勾选“清除已保存的私钥口令”进行显式删除。主机列表、
+新增/更新响应、CLI JSON、守护进程 HTTP 和 MCP 响应都不会回传密码或私钥口令。
+
 ### 字段说明
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `name` | string | 是 | 主机别名，用于 CLI/MCP/API 中引用 |
 | `host` | string | 是 | 主机地址（IP 或域名） |
+| `passphrase` | string/null | 否 | 私钥口令引用；由凭据库管理，不应手工写入明文 |
 | `user` | string | 否 | SSH 用户名 |
 | `port` | integer | 否 | SSH 端口，默认 22 |
 | `key_path` | string | 否 | SSH 私钥路径 |

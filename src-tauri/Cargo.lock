@@ -95,6 +95,7 @@ dependencies = [
  "fs2",
  "futures-util",
  "getrandom 0.4.2",
+ "glob",
  "hex",
  "hmac",
  "http-body-util",

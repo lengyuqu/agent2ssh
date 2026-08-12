@@ -195,7 +195,7 @@ impl Drop for ForwardHandle {
         //    proceed anyway — the thread will eventually exit on its own
         //    when it notices the stop flag.
         if let Some(worker) = self.worker.take() {
-            let _ = worker.join_timeout(DROP_GRACE_PERIOD);
+            worker.join_timeout(DROP_GRACE_PERIOD);
         }
     }
 }
@@ -317,6 +317,27 @@ pub async fn forward_add_core_via(
     )
     .map_err(|e| anyhow!("lifecycle reserve failed: {e}"))?;
 
+    let handle = start_forward_worker(host, rule.clone()).await?;
+
+    // Forward is ready — activate the lifecycle entry.
+    if let Err(error) = reservation.activate() {
+        drop(handle);
+        return Err(anyhow!("lifecycle activate failed: {error}"));
+    }
+
+    forwards().lock().await.insert(rule.id, handle);
+    Ok(rule)
+}
+
+/// Start one forwarding worker and wait until its SSH authentication and
+/// listener setup have succeeded. This prevents callers from seeing a rule as
+/// active when the worker has already failed in the background.
+async fn start_forward_worker(host: HostProfile, rule: ForwardRule) -> Result<ForwardHandle> {
+    let host_for_connect = host.clone();
+    let session = tokio::task::spawn_blocking(move || connect_embedded_ssh(&host_for_connect, 60))
+        .await
+        .map_err(|e| anyhow!("forward SSH task failed: {e}"))??;
+
     let stop = Arc::new(AtomicBool::new(false));
     let session_slot: Arc<Mutex<Option<ssh2::Session>>> = Arc::new(Mutex::new(None));
     let control = RuleControl::new();
@@ -324,20 +345,37 @@ pub async fn forward_add_core_via(
     let worker_session_slot = session_slot.clone();
     let worker_control = control.clone();
     let worker_rule = rule.clone();
+    let worker_direction = rule.direction;
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<std::result::Result<(), String>>();
     let worker = thread::spawn(move || {
+        let error_tx = ready_tx.clone();
         let result = match worker_rule.direction {
             ForwardDirection::Local => {
-                run_local_forward(host, worker_rule, worker_stop, worker_control)
+                // Local forwards open one direct-tcpip channel per client. The
+                // connection above is an authentication preflight; each client
+                // gets an independent SSH session so libssh2 blocking modes do
+                // not interfere across concurrent channels.
+                drop(session);
+                run_local_forward(
+                    host,
+                    worker_rule,
+                    worker_stop,
+                    worker_control.clone(),
+                    ready_tx,
+                )
             }
             ForwardDirection::Remote => run_remote_forward(
-                host,
+                session,
                 worker_rule,
                 worker_stop,
                 worker_session_slot,
-                worker_control,
+                worker_control.clone(),
+                ready_tx,
             ),
         };
         if let Err(error) = result {
+            worker_control.set_state(RuleState::Error);
+            let _ = error_tx.send(Err(error.to_string()));
             let _ = crate::diagnostics::append_diagnostic_log(
                 "error",
                 "embedded_ssh_forward",
@@ -347,22 +385,31 @@ pub async fn forward_add_core_via(
         }
     });
 
-    // Forward is ready — activate the lifecycle entry.
-    reservation
-        .activate()
-        .map_err(|e| anyhow!("lifecycle activate failed: {e}"))?;
-
-    forwards().lock().await.insert(
-        rule.id,
-        ForwardHandle {
-            rule: rule.clone(),
+    let ready = tokio::task::spawn_blocking(move || ready_rx.recv_timeout(Duration::from_secs(65)))
+        .await
+        .map_err(|e| anyhow!("forward readiness task failed: {e}"))?;
+    match ready {
+        Ok(Ok(())) => Ok(ForwardHandle {
+            rule,
             stop,
             control,
             session: session_slot,
             worker: Some(worker),
-        },
-    );
-    Ok(rule)
+        }),
+        Ok(Err(message)) => {
+            stop.store(true, Ordering::SeqCst);
+            worker.join_timeout(DROP_GRACE_PERIOD);
+            Err(anyhow!(message))
+        }
+        Err(_) => {
+            stop.store(true, Ordering::SeqCst);
+            worker.join_timeout(DROP_GRACE_PERIOD);
+            Err(anyhow!(
+                "{} forward did not become ready within 65 seconds",
+                worker_direction
+            ))
+        }
+    }
 }
 
 fn run_local_forward(
@@ -370,6 +417,7 @@ fn run_local_forward(
     rule: ForwardRule,
     stop: Arc<AtomicBool>,
     control: RuleControl,
+    ready: std::sync::mpsc::Sender<std::result::Result<(), String>>,
 ) -> Result<()> {
     // A2: Dual-stack loopback binding (IPv4 required, IPv6 best-effort).
     let (listener_v4, listener_v6) = bind_loopback(rule.bind_port)?;
@@ -385,6 +433,7 @@ fn run_local_forward(
             "ipv6": listener_v6.is_some(),
         })),
     );
+    let _ = ready.send(Ok(()));
 
     // If we have an IPv6 listener, run it in a separate thread.
     if let Some(listener_v6) = listener_v6 {
@@ -468,13 +517,13 @@ fn handle_local_connection(
 }
 
 fn run_remote_forward(
-    host: HostProfile,
+    session: ssh2::Session,
     rule: ForwardRule,
     stop: Arc<AtomicBool>,
     session_slot: Arc<Mutex<Option<ssh2::Session>>>,
     control: RuleControl,
+    ready: std::sync::mpsc::Sender<std::result::Result<(), String>>,
 ) -> Result<()> {
-    let session = connect_embedded_ssh(&host, 60)?;
     session.set_blocking(false);
     // Store the session so Drop can call disconnect() on it.
     if let Ok(mut guard) = session_slot.lock() {
@@ -493,6 +542,7 @@ fn run_remote_forward(
             "target_port": rule.target_port,
         })),
     );
+    let _ = ready.send(Ok(()));
 
     while !stop.load(Ordering::SeqCst) {
         match listener.accept() {
@@ -668,13 +718,9 @@ pub async fn forward_remove_core(id: Uuid) -> Result<()> {
 
 // ── B25: Multi-rule forward (single Forward, multiple -L/-R rules) ──────
 //
-// Opens one SSH session to the target host and starts multiple port-forward
-// rules through it. Each rule gets its own listener thread, but they share
-// the same underlying SSH connection — matching the behavior of
-// `ssh -L 8080:localhost:80 -L 3306:localhost:3306 host`.
-//
-// The batch is atomic: if any rule fails to start, all previously started
-// rules are rolled back before returning the error.
+// Starts multiple independently managed port-forward rules as one atomic API
+// operation. Each rule has its own SSH session and listener so removing or
+// failing one rule cannot corrupt another rule's libssh2 blocking state.
 
 /// Input rule for a multi-rule forward batch.
 #[derive(Debug, Clone)]
@@ -697,8 +743,8 @@ pub struct MultiForwardResult {
 }
 
 /// Start multiple port-forward rules on a single host in one batch.
-/// All rules share the same resolved host profile. If any rule fails to
-/// start, all previously started rules are rolled back.
+/// All rules share the same resolved host profile. If any rule fails to become
+/// ready, all previously started rules are rolled back.
 pub async fn forward_add_multi_core(
     host_name: &str,
     rules: &[MultiForwardRule],
@@ -743,59 +789,37 @@ pub async fn forward_add_multi_core_via(
 
         // Reserve a lifecycle entry for this forward.
         let lifecycle = crate::app_state::lifecycle();
-        let reservation = crate::lifecycle::LifecycleRegistry::reserve(
+        let reservation = match crate::lifecycle::LifecycleRegistry::reserve(
             &lifecycle,
             &forward_rule.id.to_string(),
             crate::app_state::ResourceKind::Forward,
             crate::app_state::ResourceOwner::Headless(uuid::Uuid::new_v4()),
-        )
-        .map_err(|e| anyhow!("lifecycle reserve failed: {e}"))?;
-
-        let stop = Arc::new(AtomicBool::new(false));
-        let session_slot: Arc<Mutex<Option<ssh2::Session>>> = Arc::new(Mutex::new(None));
-        let control = RuleControl::new();
-        let worker_stop = stop.clone();
-        let worker_session_slot = session_slot.clone();
-        let worker_control = control.clone();
-        let worker_rule = forward_rule.clone();
-        let worker_host = host.clone();
-        let worker = thread::spawn(move || {
-            let result = match worker_rule.direction {
-                ForwardDirection::Local => {
-                    run_local_forward(worker_host, worker_rule, worker_stop, worker_control)
-                }
-                ForwardDirection::Remote => run_remote_forward(
-                    worker_host,
-                    worker_rule,
-                    worker_stop,
-                    worker_session_slot,
-                    worker_control,
-                ),
-            };
-            if let Err(error) = result {
-                let _ = crate::diagnostics::append_diagnostic_log(
-                    "error",
-                    "embedded_ssh_forward",
-                    "multi-rule forward worker stopped with error",
-                    Some(serde_json::json!({ "error": error.to_string() })),
-                );
+        ) {
+            Ok(reservation) => reservation,
+            Err(error) => {
+                rollback_forward_batch(&started_ids).await;
+                return Err(anyhow!("lifecycle reserve failed: {error}"));
             }
-        });
+        };
 
-        reservation
-            .activate()
-            .map_err(|e| anyhow!("lifecycle activate failed: {e}"))?;
+        let handle = match start_forward_worker(host.clone(), forward_rule.clone()).await {
+            Ok(handle) => handle,
+            Err(error) => {
+                rollback_forward_batch(&started_ids).await;
+                return Err(anyhow!(
+                    "failed to start forward rule {}: {error}",
+                    started_ids.len()
+                ));
+            }
+        };
 
-        forwards().lock().await.insert(
-            forward_rule.id,
-            ForwardHandle {
-                rule: forward_rule.clone(),
-                stop,
-                control,
-                session: session_slot,
-                worker: Some(worker),
-            },
-        );
+        if let Err(error) = reservation.activate() {
+            drop(handle);
+            rollback_forward_batch(&started_ids).await;
+            return Err(anyhow!("lifecycle activate failed: {error}"));
+        }
+
+        forwards().lock().await.insert(forward_rule.id, handle);
         started_ids.push(forward_rule.id);
     }
 
@@ -804,6 +828,12 @@ pub async fn forward_add_multi_core_via(
         host: host_name.to_string(),
         count: rules.len(),
     })
+}
+
+async fn rollback_forward_batch(ids: &[Uuid]) {
+    for id in ids.iter().rev() {
+        let _ = forward_remove_core(*id).await;
+    }
 }
 
 #[cfg(test)]

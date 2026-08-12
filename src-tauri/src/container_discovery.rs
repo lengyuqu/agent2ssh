@@ -61,6 +61,7 @@ struct DockerContextRow {
     #[serde(rename = "Name")]
     name: String,
     #[serde(rename = "Current")]
+    #[cfg_attr(not(test), allow(dead_code))]
     current: bool,
 }
 
@@ -69,6 +70,7 @@ struct DockerPsRow {
     #[serde(rename = "ID")]
     id: String,
     #[serde(rename = "Image")]
+    #[cfg_attr(not(test), allow(dead_code))]
     image: String,
     #[serde(rename = "Names")]
     names: String,
@@ -121,6 +123,7 @@ struct K8sContainerSpec {
 struct K8sContainerStatus {
     name: String,
     #[serde(default)]
+    #[cfg_attr(not(test), allow(dead_code))]
     ready: bool,
 }
 

@@ -20,6 +20,8 @@ const emptyForm = {
   auth_mode: "password" as "password" | "managed_key" | "manual_key",
   key_path: "",
   password: "",
+  passphrase: "",
+  clear_passphrase: false,
   jump_host: "",
   proxy_id: "",
   tags: "",
@@ -48,7 +50,9 @@ function formFromHost(host: HostProfile) {
     port: host.port ?? 22,
     auth_mode: auth_mode as "password" | "managed_key" | "manual_key",
     key_path: host.key_path ?? "",
-    password: host.password ?? "",
+    password: "",
+    passphrase: "",
+    clear_passphrase: false,
     jump_host: host.jump_host ?? "",
     proxy_id: host.proxy_id ?? "",
     tags: (host.tags ?? []).join(", "),
@@ -100,7 +104,16 @@ export default function AddHostForm({
       user: form.user.trim() || null,
       port: form.port || null,
       key_path: form.auth_mode === "password" ? null : keyPath,
-      password: form.auth_mode === "password" ? form.password || null : null,
+      password:
+        form.auth_mode === "password" ? form.password || null : editingHost ? "" : null,
+      passphrase:
+        form.auth_mode === "password"
+          ? editingHost
+            ? ""
+            : null
+          : form.clear_passphrase
+            ? ""
+            : form.passphrase || null,
       jump_host: form.jump_host.trim() || null,
       proxy_id: form.proxy_id.trim() || null,
       tags,
@@ -192,6 +205,8 @@ export default function AddHostForm({
                 auth_mode: e.target.value as typeof form.auth_mode,
                 key_path: "",
                 password: "",
+                passphrase: "",
+                clear_passphrase: false,
               })
             }
           >
@@ -226,6 +241,40 @@ export default function AddHostForm({
               onChange={(e) => setForm({ ...form, key_path: e.target.value })}
               placeholder="~/.ssh/id_ed25519"
             />
+          </label>
+        )}
+
+        {form.auth_mode !== "password" && (
+          <label className={labelCls}>
+            {t("Private key passphrase")}
+            <Input
+              type="password"
+              value={form.passphrase}
+              onChange={(e) =>
+                setForm({ ...form, passphrase: e.target.value, clear_passphrase: false })
+              }
+              placeholder={t("Optional")}
+              disabled={form.clear_passphrase}
+            />
+            {isEditing && (
+              <span className="flex items-center gap-2 text-xs font-normal text-muted-foreground">
+                <input
+                  type="checkbox"
+                  checked={form.clear_passphrase}
+                  onChange={(event) =>
+                    setForm({
+                      ...form,
+                      clear_passphrase: event.target.checked,
+                      passphrase: "",
+                    })
+                  }
+                />
+                {t("Clear saved passphrase")}
+              </span>
+            )}
+            <span className="text-xs font-normal leading-snug text-muted-foreground">
+              {t("Encrypted in the Agent2SSH secrets vault and cached only while unlocked.")}
+            </span>
           </label>
         )}
 

@@ -29,7 +29,9 @@ use crate::{
         effective_command_risk, expand_exec_authorization_targets, CommandAuthorizationError,
         CommandAuthorizationInput,
     },
-    forward::{forward_add_core, forward_list_core, forward_remove_core},
+    forward::{
+        forward_add_core_via, forward_list_core, forward_remove_core, forward_stats_core, RuleStats,
+    },
     playbook::{
         delete_playbook_core, dry_run_playbook, list_playbooks_core,
         run_playbook_core_with_source_and_approved_steps, save_playbook_core, Playbook,
@@ -67,6 +69,8 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::app_state::app_state;
+#[cfg(not(windows))]
+use crate::shell_profile::{build_shell_profile_line, SHELL_PROFILE_SENTINEL};
 
 mod mcp_agent_config;
 pub use mcp_agent_config::{
@@ -339,17 +343,28 @@ fn split_completed_session_commands(pending: &str, input: &str) -> (Vec<String>,
 
 #[tauri::command]
 pub fn list_hosts() -> Result<Vec<HostProfile>, String> {
-    list_hosts_core().map_err(|e| e.to_string())
+    list_hosts_core()
+        .map(|hosts| {
+            hosts
+                .into_iter()
+                .map(HostProfile::redacted_for_transport)
+                .collect()
+        })
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn add_host(host: HostProfile) -> Result<HostProfile, String> {
-    add_host_core(host).map_err(|e| e.to_string())
+    add_host_core(host)
+        .map(HostProfile::redacted_for_transport)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn update_host(original_name: String, host: HostProfile) -> Result<HostProfile, String> {
-    update_host_core(&original_name, host).map_err(|e| e.to_string())
+    update_host_core(&original_name, host)
+        .map(HostProfile::redacted_for_transport)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1217,6 +1232,7 @@ pub async fn forward_add(
     bind_port: u16,
     target_host: String,
     target_port: u16,
+    via: Option<String>,
 ) -> Result<ForwardRule, String> {
     let source = source_from_transport();
     let command = format!(
@@ -1225,7 +1241,16 @@ pub async fn forward_add(
     );
     let risk = authorize_desktop_operation(&host, &command, false, &source).await?;
     let started = Instant::now();
-    match forward_add_core(&host, direction, bind_port, &target_host, target_port).await {
+    match forward_add_core_via(
+        &host,
+        direction,
+        bind_port,
+        &target_host,
+        target_port,
+        via.as_deref(),
+    )
+    .await
+    {
         Ok(rule) => {
             append_operation_audit(
                 &source,
@@ -1257,6 +1282,11 @@ pub async fn forward_add(
 #[tauri::command]
 pub async fn forward_list() -> Result<Vec<ForwardRule>, String> {
     Ok(forward_list_core().await)
+}
+
+#[tauri::command]
+pub async fn forward_stats() -> Result<std::collections::HashMap<Uuid, RuleStats>, String> {
+    Ok(forward_stats_core().await)
 }
 
 #[tauri::command]
@@ -1662,9 +1692,6 @@ pub fn get_cli_path_status() -> Result<CliPathStatus, String> {
 // On Linux/macOS, we modify the user's shell profile to add/remove an
 // `export PATH=...` line tagged with a sentinel comment.
 
-/// Sentinel comment that marks agent2ssh-managed PATH entries in shell profiles.
-const SHELL_PROFILE_SENTINEL: &str = "# agent2ssh-cli-path";
-
 #[cfg(not(windows))]
 fn detect_shell_profiles() -> Vec<std::path::PathBuf> {
     use std::path::PathBuf;
@@ -1692,15 +1719,6 @@ fn detect_shell_profiles() -> Vec<std::path::PathBuf> {
 }
 
 #[cfg(not(windows))]
-fn build_shell_profile_line(dir: &Path) -> String {
-    format!(
-        "export PATH=\"$PATH:{}\"  {}",
-        dir.to_string_lossy(),
-        SHELL_PROFILE_SENTINEL
-    )
-}
-
-#[cfg(not(windows))]
 fn append_shell_profile_entry(dir: &Path) -> Result<usize, String> {
     let profiles = detect_shell_profiles();
     if profiles.is_empty() {
@@ -1710,7 +1728,6 @@ fn append_shell_profile_entry(dir: &Path) -> Result<usize, String> {
                 .to_string(),
         );
     }
-    let line = build_shell_profile_line(dir);
     let mut modified = 0;
     for profile in &profiles {
         let content = std::fs::read_to_string(profile)
@@ -1720,6 +1737,8 @@ fn append_shell_profile_entry(dir: &Path) -> Result<usize, String> {
         if content.lines().any(|l| l.contains(SHELL_PROFILE_SENTINEL)) {
             continue;
         }
+
+        let line = build_shell_profile_line(profile, dir);
 
         // Append the PATH export line
         let new_content = if content.is_empty() || content.ends_with('\n') {
@@ -2723,28 +2742,26 @@ pub fn import_team_config_cmd(config: TeamConfigExport) -> Result<ImportResult, 
 
 #[cfg(target_os = "linux")]
 fn apply_wayland_compat() {
-    // Allow users to opt out entirely.
-    if std::env::var_os("AGENT2SSH_DISABLE_WAYLAND_COMPAT").is_some() {
-        return;
-    }
-
-    // Detect a Wayland session.
-    let wayland_session = std::env::var_os("WAYLAND_DISPLAY").is_some()
-        || std::env::var("XDG_SESSION_TYPE")
-            .map(|v| v.eq_ignore_ascii_case("wayland"))
-            .unwrap_or(false);
-    if !wayland_session {
+    let session_type = std::env::var("XDG_SESSION_TYPE").ok();
+    let decision = crate::wayland::decide_wayland_compat(
+        std::env::var_os("AGENT2SSH_DISABLE_WAYLAND_COMPAT").is_some(),
+        std::env::var_os("WAYLAND_DISPLAY").is_some(),
+        session_type.as_deref(),
+        std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_some(),
+        std::env::var_os("AGENT2SSH_KEEP_GBM_BACKEND").is_some(),
+    );
+    if !decision.apply {
         return;
     }
 
     // 1. Disable DMABUF renderer — crashes on NVIDIA/wlroots before window creation.
-    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+    if decision.disable_dmabuf_renderer {
         std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
     }
 
     // 2. Remove GBM_BACKEND — NVIDIA GBM causes "Failed to create GBM buffer"
     //    on Hyprland. Allow users to keep it via AGENT2SSH_KEEP_GBM_BACKEND.
-    if std::env::var_os("AGENT2SSH_KEEP_GBM_BACKEND").is_none() {
+    if decision.remove_gbm_backend {
         std::env::remove_var("GBM_BACKEND");
     }
 
@@ -2854,6 +2871,7 @@ pub fn run_tauri() {
             // Port forwarding
             forward_add,
             forward_list,
+            forward_stats,
             forward_remove,
             // Audit
             list_audit,

@@ -967,8 +967,29 @@ pub fn check_version_compatibility(remote_version: Option<&str>) -> VersionCompa
             message: "Unable to determine remote version".to_string(),
         },
         Some(rv) => {
-            let local_parts: Vec<u64> = local.split('.').filter_map(|s| s.parse().ok()).collect();
-            let remote_parts: Vec<u64> = rv.split('.').filter_map(|s| s.parse().ok()).collect();
+            let normalize = |version: &str| {
+                let core = version
+                    .trim()
+                    .trim_start_matches(['v', 'V'])
+                    .split(['-', '+'])
+                    .next()
+                    .unwrap_or("");
+                let parts = core
+                    .split('.')
+                    .map(str::parse::<u64>)
+                    .collect::<Result<Vec<_>, _>>()
+                    .ok()?;
+                (parts.len() >= 2).then_some(parts)
+            };
+            let local_parts = normalize(&local).expect("PROTOCOL_VERSION must be numeric");
+            let Some(remote_parts) = normalize(rv) else {
+                return VersionCompatibility {
+                    local_version: local,
+                    remote_version: Some(rv.to_string()),
+                    compatible: false,
+                    message: format!("Invalid remote version: {rv}"),
+                };
+            };
 
             let local_major = local_parts.first().copied().unwrap_or(0);
             let local_minor = local_parts.get(1).copied().unwrap_or(0);
@@ -1260,6 +1281,15 @@ mod tests {
     }
 
     #[test]
+    fn test_version_compatibility_accepts_v_prefixed_tag() {
+        let tag = format!("v{PROTOCOL_VERSION}");
+        let compat = check_version_compatibility(Some(&tag));
+        assert!(compat.compatible);
+        assert_eq!(compat.remote_version.as_deref(), Some(tag.as_str()));
+        assert!(compat.message.contains("match"));
+    }
+
+    #[test]
     fn test_version_compatibility_minor_diff() {
         // Use a version with a different minor: local major same, minor+10
         let local_parts: Vec<u64> = PROTOCOL_VERSION
@@ -1294,6 +1324,13 @@ mod tests {
         assert!(compat.compatible);
         assert_eq!(compat.remote_version, None);
         assert!(compat.message.contains("Unable to determine"));
+    }
+
+    #[test]
+    fn test_version_compatibility_rejects_malformed_version() {
+        let compat = check_version_compatibility(Some("not-a-version"));
+        assert!(!compat.compatible);
+        assert!(compat.message.contains("Invalid remote version"));
     }
 
     #[test]

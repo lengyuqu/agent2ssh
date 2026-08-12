@@ -634,13 +634,23 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
             let path = args["path"].as_str();
             serde_json::to_value(import_ssh_config_core(path).map_err(McpError::from)?)?
         }
-        McpTool::SshListHosts => serde_json::to_value(list_hosts_core().map_err(McpError::from)?)?,
+        McpTool::SshListHosts => serde_json::to_value(
+            list_hosts_core()
+                .map_err(McpError::from)?
+                .into_iter()
+                .map(HostProfile::redacted_for_transport)
+                .collect::<Vec<_>>(),
+        )?,
         McpTool::SshListDaemons => {
             serde_json::to_value(list_daemons_core().map_err(McpError::from)?)?
         }
         McpTool::SshAddHost => {
             let host: HostProfile = serde_json::from_value(args).map_err(McpError::internal)?;
-            serde_json::to_value(add_host_core(host).map_err(McpError::from)?)?
+            serde_json::to_value(
+                add_host_core(host)
+                    .map_err(McpError::from)?
+                    .redacted_for_transport(),
+            )?
         }
         McpTool::SshRemoveHost => {
             let host_name = args["name"]

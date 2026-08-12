@@ -100,27 +100,13 @@ fn splice_pattern(pattern: &str, base: &Path, chain: &mut Vec<PathBuf>, out: &mu
         return;
     }
 
-    // Glob expansion: list the parent directory and match.
-    let parent = full.parent();
-    let file_name = full.file_name();
-    if let (Some(parent), Some(file_name)) = (parent, file_name) {
-        if let Ok(entries) = std::fs::read_dir(parent) {
-            let pattern_str = file_name.to_string_lossy();
-            let mut matches: Vec<PathBuf> = entries
-                .filter_map(|e| e.ok())
-                .filter(|e| {
-                    e.file_name()
-                        .to_str()
-                        .map(|name| glob_match(&pattern_str, name))
-                        .unwrap_or(false)
-                })
-                .map(|e| e.path())
-                .collect();
-            // Sort for deterministic order (matches glob crate behavior).
-            matches.sort();
-            for path in matches {
-                expand_single_file(&path, base, chain, out);
-            }
+    // Expand the complete path pattern, including wildcard directory
+    // components such as `config.d/*/*.conf`.
+    if let Ok(paths) = glob::glob(&full_str) {
+        let mut matches: Vec<PathBuf> = paths.filter_map(Result::ok).collect();
+        matches.sort();
+        for path in matches {
+            expand_single_file(&path, base, chain, out);
         }
     }
 }
@@ -146,10 +132,12 @@ fn has_glob_meta(s: &str) -> bool {
 /// Simple glob matcher supporting `*` (any sequence), `?` (single char),
 /// and `[...]` (character class). Does NOT support `{a,b}` brace expansion
 /// (OpenSSH's `Include` doesn't either — that's a separate PathSpec feature).
+#[cfg(test)]
 fn glob_match(pattern: &str, name: &str) -> bool {
     glob_match_bytes(pattern.as_bytes(), name.as_bytes())
 }
 
+#[cfg(test)]
 fn glob_match_bytes(pattern: &[u8], name: &[u8]) -> bool {
     let mut p = 0usize;
     let mut n = 0usize;
@@ -220,6 +208,7 @@ fn glob_match_bytes(pattern: &[u8], name: &[u8]) -> bool {
 }
 
 /// Match a character class like `a-z` or `abc`.
+#[cfg(test)]
 fn char_class_match(class: &[u8], c: u8) -> bool {
     let mut i = 0;
     while i < class.len() {
@@ -298,6 +287,19 @@ mod tests {
         assert!(content.contains("Host main"));
         assert!(content.contains("Host alpha"));
         assert!(content.contains("Host beta"));
+    }
+
+    #[test]
+    fn include_splices_multi_level_glob_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "config.d/team/alpha.conf",
+            "Host alpha\n    HostName 10.0.0.1\n",
+        );
+        let root = write(dir.path(), "config", "Include config.d/*/*.conf\n");
+        let content = load_with_includes(&root, dir.path()).unwrap();
+        assert!(content.contains("Host alpha"));
     }
 
     #[test]

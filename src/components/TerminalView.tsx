@@ -6,6 +6,8 @@ import { api, getDaemonUrl } from "../api";
 import type { TerminalThemeId } from "../terminalThemes";
 import { resolveTerminalTheme } from "../terminalThemes";
 import type { Theme as AppTheme } from "../theme";
+import { compileHighlightRules } from "../lib/terminal/highlight";
+import { TerminalHighlightDecorations } from "../lib/terminal/highlight-decorations";
 
 /**
  * T1-8: Parse and handle OSC 52 clipboard sequences from terminal output.
@@ -149,6 +151,7 @@ const TerminalView = forwardRef<TerminalViewHandle, Props>(function TerminalView
       theme: resolveTerminalTheme(terminalTheme, appTheme),
     });
     termRef.current = term;
+    const highlighter = new TerminalHighlightDecorations(term, []);
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(container);
@@ -162,6 +165,23 @@ const TerminalView = forwardRef<TerminalViewHandle, Props>(function TerminalView
     let disposed = false;
     const encoder = encoderRef.current;
     lineBufferRef.current = "";
+
+    const writeTerminal = (data: string | Uint8Array) => {
+      term.write(data, () => highlighter.refresh());
+    };
+    const writeTerminalLine = (data: string) => {
+      term.writeln(data, () => highlighter.refresh());
+    };
+
+    const refreshHighlightRules = () => {
+      void api
+        .listHighlights()
+        .then((rules) => highlighter.setRules(compileHighlightRules(rules)))
+        .catch(() => highlighter.setRules([]));
+    };
+    refreshHighlightRules();
+    window.addEventListener("agent2ssh:highlights-changed", refreshHighlightRules);
+    const scrollSub = term.onScroll(() => highlighter.refresh());
 
     function sendResize() {
       if (ws && ws.readyState === WebSocket.OPEN) {
@@ -209,7 +229,7 @@ const TerminalView = forwardRef<TerminalViewHandle, Props>(function TerminalView
         await api.daemonStart();
         token = await api.getDaemonToken();
       } catch (err) {
-        term.writeln(`\x1b[31mFailed to start daemon: ${String(err)}\x1b[0m`);
+        writeTerminalLine(`\x1b[31mFailed to start daemon: ${String(err)}\x1b[0m`);
         return;
       }
       if (disposed) return;
@@ -226,12 +246,12 @@ const TerminalView = forwardRef<TerminalViewHandle, Props>(function TerminalView
           try {
             const parsed = JSON.parse(ev.data);
             if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-              term.write(ev.data);
+              writeTerminal(ev.data);
               return;
             }
             const message = parsed as Record<string, unknown>;
             if (message.type === "error" && message.error) {
-              term.writeln(`\r\n\x1b[31m${String(message.error)}\x1b[0m`);
+              writeTerminalLine(`\r\n\x1b[31m${String(message.error)}\x1b[0m`);
               return;
             }
             if (message.type === "connected") {
@@ -243,7 +263,7 @@ const TerminalView = forwardRef<TerminalViewHandle, Props>(function TerminalView
                         : "host-key"
                     } ${message.fingerprint_sha256}`
                 : "";
-              term.writeln(
+              writeTerminalLine(
                 `\x1b[2m— connected to ${
                   typeof message.username === "string" ? message.username : "user"
                 }@${typeof message.host === "string" ? message.host : host}${fingerprint} —\x1b[0m`
@@ -257,27 +277,27 @@ const TerminalView = forwardRef<TerminalViewHandle, Props>(function TerminalView
           const osc52 = extractOsc52(ev.data);
           if (osc52) {
             void handleOsc52(osc52.clipboard);
-            if (osc52.rest) term.write(osc52.rest);
+            if (osc52.rest) writeTerminal(osc52.rest);
             return;
           }
-          term.write(ev.data);
+          writeTerminal(ev.data);
         } else {
           const uint8 = new Uint8Array(ev.data as ArrayBuffer);
           const text = new TextDecoder().decode(uint8);
           const osc52b = extractOsc52(text);
           if (osc52b) {
             void handleOsc52(osc52b.clipboard);
-            if (osc52b.rest) term.write(osc52b.rest);
+            if (osc52b.rest) writeTerminal(osc52b.rest);
             return;
           }
-          term.write(uint8);
+          writeTerminal(uint8);
         }
       };
       ws.onerror = () => {
-        if (!disposed) term.writeln("\r\n\x1b[31m— connection error —\x1b[0m");
+        if (!disposed) writeTerminalLine("\r\n\x1b[31m— connection error —\x1b[0m");
       };
       ws.onclose = () => {
-        if (!disposed) term.writeln("\r\n\x1b[33m— disconnected —\x1b[0m");
+        if (!disposed) writeTerminalLine("\r\n\x1b[33m— disconnected —\x1b[0m");
       };
     })();
 
@@ -285,6 +305,7 @@ const TerminalView = forwardRef<TerminalViewHandle, Props>(function TerminalView
       try {
         fit.fit();
         sendResize();
+        highlighter.refresh();
       } catch {
         // ignore transient measure errors
       }
@@ -297,7 +318,10 @@ const TerminalView = forwardRef<TerminalViewHandle, Props>(function TerminalView
       disposed = true;
       observer.disconnect();
       window.removeEventListener("resize", onResize);
+      window.removeEventListener("agent2ssh:highlights-changed", refreshHighlightRules);
       dataSub.dispose();
+      scrollSub.dispose();
+      highlighter.dispose();
       ws?.close();
       wsRef.current = null;
       termRef.current = null;

@@ -973,7 +973,9 @@ fn passphrase_for_host(cache_key: &str, config_passphrase: Option<&str>) -> Opti
         return Some((*cached).clone());
     }
     // 2. Fall back to host config passphrase (first use)
-    config_passphrase.map(|s| s.to_string())
+    config_passphrase
+        .filter(|value| !crate::secrets::is_secret_ref(value))
+        .map(str::to_string)
 }
 
 fn authenticate(session: &Session, host: &HostProfile, username: &str) -> Result<String> {
@@ -1091,6 +1093,7 @@ fn authenticate(session: &Session, host: &HostProfile, username: &str) -> Result
                 return Ok("publickey_file".into());
             }
             Err(e) => {
+                passphrase_cache_evict(&cache_key);
                 // If the key is encrypted and no passphrase was provided,
                 // try the host.passphrase directly (first-use cache miss).
                 if passphrase.is_none() {
@@ -1132,7 +1135,7 @@ fn authenticate(session: &Session, host: &HostProfile, username: &str) -> Result
         for (filename, label) in &default_keys {
             let key_file = ssh_dir.join(filename);
             if key_file.exists() {
-                let cache_key = key_file.to_string_lossy().into_owned();
+                let cache_key = format!("host:{}", host.name);
                 let passphrase = passphrase_for_host(&cache_key, host.passphrase.as_deref());
                 if session
                     .userauth_pubkey_file(username, None, &key_file, passphrase.as_deref())
@@ -1144,6 +1147,7 @@ fn authenticate(session: &Session, host: &HostProfile, username: &str) -> Result
                     }
                     return Ok((*label).into());
                 }
+                passphrase_cache_evict(&cache_key);
             }
         }
     }

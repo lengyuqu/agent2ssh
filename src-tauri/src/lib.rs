@@ -36,6 +36,7 @@ pub mod sanitize;
 pub mod secrets;
 pub mod session;
 pub mod sftp_transfer;
+pub mod shell_profile;
 pub mod snippets;
 pub mod ssh_algo;
 pub mod ssh_config;
@@ -43,6 +44,7 @@ pub mod store;
 pub mod telemetry;
 pub mod types;
 pub mod url_safety;
+pub mod wayland;
 pub mod webdav_sync;
 pub mod ws_drain;
 

@@ -155,7 +155,7 @@ pub fn add_host_core(host: HostProfile) -> Result<HostProfile> {
     Ok(host)
 }
 
-pub fn update_host_core(original_name: &str, host: HostProfile) -> Result<HostProfile> {
+pub fn update_host_core(original_name: &str, mut host: HostProfile) -> Result<HostProfile> {
     validate_host(&host)?;
     let original_name = original_name.trim();
     if original_name.is_empty() {
@@ -169,10 +169,44 @@ pub fn update_host_core(original_name: &str, host: HostProfile) -> Result<HostPr
         .iter()
         .position(|item| item.name == original_name)
         .ok_or_else(|| anyhow!("host not found: {original_name}"))?;
+    let clear_password = host.password.as_deref() == Some("");
+    if clear_password {
+        host.password = None;
+    }
+    if host.password.is_none() && !clear_password {
+        host.password = config.hosts[original_idx].password.clone();
+    }
+    let passphrase_changed = host.passphrase.is_some();
+    let clear_passphrase = host.passphrase.as_deref() == Some("");
+    if clear_passphrase {
+        host.passphrase = None;
+    }
+    // The desktop deliberately does not echo an existing private-key
+    // passphrase back into its edit form. Preserve it unless the caller sends
+    // a replacement explicitly.
+    if host.passphrase.is_none() && !clear_passphrase {
+        host.passphrase = config.hosts[original_idx].passphrase.clone();
+    }
     if original_name != host.name && config.hosts.iter().any(|item| item.name == host.name) {
         return Err(anyhow!("host already exists: {}", host.name));
     }
     let renamed = original_name != host.name;
+    if renamed
+        && (config.hosts[original_idx]
+            .password
+            .as_deref()
+            .is_some_and(crate::secrets::is_secret_ref)
+            || config.hosts[original_idx]
+                .passphrase
+                .as_deref()
+                .is_some_and(crate::secrets::is_secret_ref))
+        && !crate::secrets::is_unlocked()
+        && !crate::secrets::try_unlock_from_env()
+    {
+        return Err(anyhow!(
+            "unlock the credential store before renaming a host with saved credentials"
+        ));
+    }
     config.hosts[original_idx] = host.clone();
     config.hosts.sort_by(|a, b| a.name.cmp(&b.name));
     save_config_unlocked(&config)?;
@@ -184,12 +218,31 @@ pub fn update_host_core(original_name: &str, host: HostProfile) -> Result<HostPr
     if renamed {
         let old_acct = crate::secrets::host_account(original_name);
         let new_acct = crate::secrets::host_account(&host.name);
-        if crate::secrets::get_secret(&new_acct).is_none() {
+        if !clear_password && crate::secrets::get_secret(&new_acct).is_none() {
             if let Some(secret) = crate::secrets::get_secret(&old_acct) {
                 let _ = crate::secrets::store_secret(&new_acct, &secret);
             }
         }
         crate::secrets::delete_secret(&old_acct);
+
+        let old_passphrase_acct = crate::secrets::host_passphrase_account(original_name);
+        let new_passphrase_acct = crate::secrets::host_passphrase_account(&host.name);
+        if !clear_passphrase && crate::secrets::get_secret(&new_passphrase_acct).is_none() {
+            if let Some(secret) = crate::secrets::get_secret(&old_passphrase_acct) {
+                let _ = crate::secrets::store_secret(&new_passphrase_acct, &secret);
+            }
+        }
+        crate::secrets::delete_secret(&old_passphrase_acct);
+        crate::embedded_ssh::passphrase_cache_evict(&format!("host:{original_name}"));
+    }
+    if clear_password {
+        crate::secrets::delete_secret(&crate::secrets::host_account(&host.name));
+    }
+    if clear_passphrase {
+        crate::secrets::delete_secret(&crate::secrets::host_passphrase_account(&host.name));
+    }
+    if passphrase_changed || renamed {
+        crate::embedded_ssh::passphrase_cache_evict(&format!("host:{}", host.name));
     }
     Ok(host)
 }
@@ -206,6 +259,8 @@ pub fn remove_host_core(name: &str) -> Result<()> {
     // K1: drop the host's encrypted secret so removed hosts don't leave orphaned
     // entries behind.
     crate::secrets::delete_secret(&crate::secrets::host_account(name));
+    crate::secrets::delete_secret(&crate::secrets::host_passphrase_account(name));
+    crate::embedded_ssh::passphrase_cache_evict(&format!("host:{name}"));
     Ok(())
 }
 
@@ -2174,12 +2229,11 @@ pub fn import_ssh_config_core(path: Option<&str>) -> Result<Vec<HostProfile>> {
 
     let raw = if let Some(parent) = config_path.parent() {
         // B38: Expand Include directives before parsing.
-        crate::ssh_config::load_with_includes(&config_path, parent).unwrap_or_else(|_| {
-            // Fallback to raw read if Include expansion fails
-            std::fs::read_to_string(&config_path)
-                .with_context(|| format!("failed to read {}", config_path.display()))
-                .unwrap_or_default()
-        })
+        match crate::ssh_config::load_with_includes(&config_path, parent) {
+            Ok(raw) => raw,
+            Err(_) => std::fs::read_to_string(&config_path)
+                .with_context(|| format!("failed to read {}", config_path.display()))?,
+        }
     } else {
         std::fs::read_to_string(&config_path)
             .with_context(|| format!("failed to read {}", config_path.display()))?
@@ -2507,11 +2561,11 @@ fn parse_ssh_config_file(path: &std::path::Path) -> Result<Vec<HostProfile>> {
     }
     let raw = if let Some(parent) = path.parent() {
         // B38: Expand Include directives before parsing.
-        crate::ssh_config::load_with_includes(path, parent).unwrap_or_else(|_| {
-            std::fs::read_to_string(path)
-                .with_context(|| format!("failed to read {}", path.display()))
-                .unwrap_or_default()
-        })
+        match crate::ssh_config::load_with_includes(path, parent) {
+            Ok(raw) => raw,
+            Err(_) => std::fs::read_to_string(path)
+                .with_context(|| format!("failed to read {}", path.display()))?,
+        }
     } else {
         std::fs::read_to_string(path)
             .with_context(|| format!("failed to read {}", path.display()))?
@@ -3178,7 +3232,7 @@ mod tests {
                 role: None,
                 owner: None,
                 init_command: None,
-                passphrase: None,
+                passphrase: Some("key-secret".into()),
             }],
         })
         .unwrap();
@@ -3187,6 +3241,7 @@ mod tests {
         assert_eq!(export.hosts.len(), 1);
         assert_eq!(export.hosts[0].key_path, None);
         assert_eq!(export.hosts[0].password, None);
+        assert_eq!(export.hosts[0].passphrase, None);
     }
 
     #[test]
@@ -3376,7 +3431,7 @@ mod tests {
                 role: None,
                 owner: None,
                 init_command: None,
-                passphrase: None,
+                passphrase: Some("local-key-secret".into()),
             }],
         })
         .unwrap();
@@ -3416,6 +3471,7 @@ mod tests {
         assert_eq!(updated.port, Some(2222));
         assert_eq!(updated.key_path.as_deref(), Some("~/.ssh/id_ed25519"));
         assert_eq!(updated.password.as_deref(), Some("local-secret"));
+        assert_eq!(updated.passphrase.as_deref(), Some("local-key-secret"));
         assert_eq!(updated.tags, vec!["new"]);
         assert_eq!(updated.env.as_deref(), Some("prod"));
 
@@ -3460,6 +3516,40 @@ mod tests {
         let config = crate::store::load_config().unwrap();
         let beta = config.hosts.iter().find(|h| h.name == "beta").unwrap();
         assert_eq!(beta.password.as_deref(), Some("rename-secret"));
+
+        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&config_dir);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_update_host_preserves_or_explicitly_clears_passphrase() {
+        let config_dir =
+            std::env::temp_dir().join(format!("agent2ssh-passphrase-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::env::set_var("AGENT2SSH_CONFIG_DIR", &config_dir);
+
+        let mut host = make_test_host("key-host");
+        host.key_path = Some("id_ed25519".into());
+        host.passphrase = Some("key-secret".into());
+        add_host_core(host).unwrap();
+
+        let mut preserve = make_test_host("key-host");
+        preserve.key_path = Some("id_ed25519".into());
+        update_host_core("key-host", preserve).unwrap();
+        let saved = crate::store::load_config().unwrap();
+        assert_eq!(saved.hosts[0].passphrase.as_deref(), Some("key-secret"));
+
+        let mut clear = make_test_host("key-host");
+        clear.key_path = Some("id_ed25519".into());
+        clear.passphrase = Some(String::new());
+        update_host_core("key-host", clear).unwrap();
+        let saved = crate::store::load_config().unwrap();
+        assert!(saved.hosts[0].passphrase.is_none());
+        assert_eq!(
+            crate::secrets::get_secret(&crate::secrets::host_passphrase_account("key-host")),
+            None
+        );
 
         std::env::remove_var("AGENT2SSH_CONFIG_DIR");
         let _ = std::fs::remove_dir_all(&config_dir);

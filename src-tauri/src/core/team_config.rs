@@ -8,7 +8,7 @@ use crate::{
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TeamConfigExport {
-    /// Host profiles with key_path/password stripped for safe sharing
+    /// Host profiles with key_path/password/passphrase stripped for safe sharing
     pub hosts: Vec<HostProfile>,
     /// Raw TOML content of risk_rules.toml (if it exists)
     pub risk_rules: Option<String>,
@@ -28,6 +28,7 @@ pub fn export_team_config() -> Result<TeamConfigExport> {
         .map(|mut h| {
             h.key_path = None;
             h.password = None;
+            h.passphrase = None;
             h
         })
         .collect();
@@ -81,12 +82,16 @@ pub fn import_team_config(export: &TeamConfigExport) -> Result<ImportResult> {
             } else {
                 let key_path = existing.key_path.clone();
                 let password = existing.password.clone();
+                let passphrase = existing.passphrase.clone();
                 let mut next = host.clone();
                 if next.key_path.is_none() {
                     next.key_path = key_path;
                 }
                 if next.password.is_none() {
                     next.password = password;
+                }
+                if next.passphrase.is_none() {
+                    next.passphrase = passphrase;
                 }
                 *existing = next;
                 updated += 1;

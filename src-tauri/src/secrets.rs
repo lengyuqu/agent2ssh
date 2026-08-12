@@ -118,6 +118,11 @@ pub fn host_account(host_name: &str) -> String {
     format!("host:{host_name}")
 }
 
+/// Stable account name for a host profile's encrypted private-key passphrase.
+pub fn host_passphrase_account(host_name: &str) -> String {
+    format!("host-key-passphrase:{host_name}")
+}
+
 /// Stable account name for a proxy profile's encrypted password.
 pub fn proxy_account(proxy_id: &str) -> String {
     format!("proxy:{proxy_id}")
@@ -131,18 +136,18 @@ fn key_cell() -> &'static RwLock<Option<[u8; 32]>> {
     &app_state().secrets_key
 }
 
-/// Thread-local key override (test-only). When set, takes priority over the
-/// global `key_cell()`, allowing parallel tests to each have their own unlocked
-/// key without interfering with each other.
+// Thread-local key override (test-only). When set, takes priority over the
+// global `key_cell()`, allowing parallel tests to each have their own unlocked
+// key without interfering with each other.
 #[cfg(test)]
 thread_local! {
     static THREAD_KEY: std::cell::RefCell<Option<Option<[u8; 32]>>> =
-        std::cell::RefCell::new(None);
+        const { std::cell::RefCell::new(None) };
 }
 
 fn cached_key() -> Option<[u8; 32]> {
     #[cfg(test)]
-    if let Some(key) = THREAD_KEY.with(|k| k.borrow().clone()) {
+    if let Some(key) = THREAD_KEY.with(|k| *k.borrow()) {
         return key;
     }
     *key_cell().read().expect("secrets key lock poisoned")
@@ -174,7 +179,7 @@ fn activate_thread_local_key() {
 fn backend_is_memory() -> bool {
     // Thread-local override takes priority (used by tests).
     #[cfg(test)]
-    if let Some(val) = THREAD_BACKEND.with(|b| b.borrow().clone()) {
+    if let Some(val) = THREAD_BACKEND.with(|b| *b.borrow()) {
         return val;
     }
     match std::env::var("AGENT2SSH_SECRETS_BACKEND") {
@@ -187,11 +192,11 @@ fn backend_is_memory() -> bool {
     }
 }
 
-/// Thread-local override for the secrets backend mode (test-only).
+// Thread-local override for the secrets backend mode (test-only).
 #[cfg(test)]
 thread_local! {
     static THREAD_BACKEND: std::cell::RefCell<Option<bool>> =
-        std::cell::RefCell::new(None);
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Set a thread-local secrets backend override (test-only).
@@ -356,6 +361,7 @@ impl MigrationLedger {
     /// Returns `true` only for records with `status == Completed`.
     /// A23: Skipped migrations are NOT "done" — they were intentionally
     /// bypassed, so the migration may need to run if preconditions change.
+    #[cfg_attr(not(test), allow(dead_code))]
     fn is_done(&self, id: &str) -> bool {
         self.completed
             .iter()
@@ -364,6 +370,7 @@ impl MigrationLedger {
 
     /// A23: Check whether a migration was explicitly skipped (precondition
     /// not met). Returns `true` only for records with `status == Skipped`.
+    #[cfg_attr(not(test), allow(dead_code))]
     fn is_skipped(&self, id: &str) -> bool {
         self.completed
             .iter()
@@ -380,6 +387,7 @@ impl MigrationLedger {
     /// A23: Append a "skipped" record with a reason. This records that
     /// a migration was deliberately bypassed (e.g. its precondition was not
     /// met), so future loads know it was handled.
+    #[cfg_attr(not(test), allow(dead_code))]
     fn append_skipped(&mut self, id: &str, reason: &str) -> Result<()> {
         if self.is_resolved(id) {
             return Ok(());
@@ -403,6 +411,7 @@ fn migrations_path() -> Result<std::path::PathBuf> {
 }
 
 /// Check whether the v1→v2 migration has been marked as complete.
+#[cfg_attr(not(test), allow(dead_code))]
 fn is_v1_to_v2_migration_done() -> bool {
     MigrationLedger::load()
         .map(|l| l.is_done(MIGRATION_V1_TO_V2))
@@ -711,7 +720,7 @@ pub fn unlock_or_init(password: &str) -> Result<()> {
         let store = EncryptedStoreV2 {
             version: 2,
             kdf: "argon2id".into(),
-            salt: b64().encode(&salt),
+            salt: b64().encode(salt),
             entries: HashMap::new(),
         };
         let json = serde_json::to_string_pretty(&store)?;
@@ -793,7 +802,7 @@ pub fn change_master_password(new_password: &str) -> Result<()> {
     let store = EncryptedStoreV2 {
         version: 2,
         kdf: "argon2id".into(),
-        salt: b64().encode(&salt),
+        salt: b64().encode(salt),
         entries,
     };
     std::fs::write(secrets_path()?, serde_json::to_string_pretty(&store)?)?;
@@ -832,6 +841,7 @@ pub fn lock() {
     #[cfg(test)]
     activate_thread_local_key();
     set_cached_key(None);
+    crate::embedded_ssh::passphrase_cache_clear();
 }
 
 // ── Per-account API ───────────────────────────────────────────────────────────
@@ -1357,7 +1367,7 @@ mod tests {
         let v1_store = serde_json::json!({
             "version": 1u32,
             "kdf": "argon2id",
-            "salt": b64().encode(&salt),
+            "salt": b64().encode(salt),
             "nonce": b64().encode(&nonce),
             "ciphertext": b64().encode(&ciphertext),
         });

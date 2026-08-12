@@ -62,8 +62,11 @@ pub fn open_external_url(url: &str) -> Result<()> {
     validate_url_scheme(url)?;
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", url])
+        // Invoke the URL protocol handler directly. Routing through
+        // `cmd /C start` would make shell metacharacters in an otherwise
+        // valid http(s) URL observable to cmd.exe.
+        std::process::Command::new("rundll32.exe")
+            .args(["url.dll,FileProtocolHandler", url])
             .spawn()
             .map_err(|e| anyhow!("failed to open URL: {e}"))?;
     }
@@ -199,8 +202,10 @@ mod tests {
     }
 
     #[test]
-    fn open_external_url_validates_first() {
-        assert!(open_external_url("https://example.com").is_ok());
+    fn open_external_url_rejects_unsafe_urls_without_spawning() {
+        // The valid-scheme cases above cover acceptance. Calling the real OS
+        // opener from a unit test is an observable side effect and used to
+        // launch example.com during `cargo test`.
         assert!(open_external_url("javascript:alert(1)").is_err());
     }
 

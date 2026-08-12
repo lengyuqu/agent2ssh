@@ -301,7 +301,7 @@ enum Commands {
     },
     /// B52: Check for app updates by querying GitHub releases
     VersionCheck {
-        /// GitHub repo in owner/name format (default: agent2ssh/agent2ssh)
+        /// GitHub repo in owner/name format (default: lengyuqu/agent2ssh)
         #[arg(long)]
         repo: Option<String>,
         /// Output as JSON
@@ -1058,13 +1058,23 @@ fn command_authorization_error(error: CommandAuthorizationError) -> anyhow::Erro
 }
 
 fn main() -> Result<()> {
-    // Use a larger stack size to avoid stack overflow in debug builds where
-    // clap's derive-generated parsing code has large unoptimized stack frames.
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .thread_stack_size(8 * 1024 * 1024) // 8 MB
-        .build()?;
-    runtime.block_on(async_main())
+    // Run the CLI future itself on a larger stack. Configuring Tokio's worker
+    // stack alone is insufficient because Runtime::block_on polls the future
+    // on the calling thread, whose default Windows stack is too small for the
+    // unoptimized clap-generated state machine in debug builds.
+    const CLI_STACK_SIZE: usize = 8 * 1024 * 1024;
+    std::thread::Builder::new()
+        .name("agent2ssh-cli".to_string())
+        .stack_size(CLI_STACK_SIZE)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .thread_stack_size(CLI_STACK_SIZE)
+                .build()?;
+            runtime.block_on(async_main())
+        })?
+        .join()
+        .map_err(|_| anyhow::anyhow!("CLI runtime thread panicked"))?
 }
 
 async fn async_main() -> Result<()> {
@@ -1118,7 +1128,10 @@ async fn async_main() -> Result<()> {
                         return Ok(());
                     }
                 }
-                let hosts = list_hosts_filtered_core(&filter)?;
+                let hosts: Vec<_> = list_hosts_filtered_core(&filter)?
+                    .into_iter()
+                    .map(HostProfile::redacted_for_transport)
+                    .collect();
                 if json {
                     println!("{}", serde_json::to_string_pretty(&hosts)?);
                 } else if hosts.is_empty() {
@@ -1169,7 +1182,8 @@ async fn async_main() -> Result<()> {
                     owner: clean_optional(owner),
                     init_command: clean_optional(init_command),
                     passphrase: None,
-                })?;
+                })?
+                .redacted_for_transport();
                 if json {
                     println!("{}", serde_json::to_string_pretty(&profile)?);
                 } else {
@@ -1653,25 +1667,31 @@ async fn async_main() -> Result<()> {
                 json,
             } => {
                 let dir = match direction.as_str() {
+                    "local" => ForwardDirection::Local,
                     "remote" => ForwardDirection::Remote,
-                    _ => ForwardDirection::Local,
+                    other => {
+                        return Err(anyhow::anyhow!(
+                            "direction must be 'local' or 'remote', got '{}'",
+                            other
+                        ))
+                    }
                 };
                 let (client, base_url, token) = daemon_client(daemon_alias.as_deref())?;
-                let url = if let Some(ref v) = via {
-                    format!("{base_url}/forwards?via={}", v)
-                } else {
-                    format!("{base_url}/forwards")
-                };
-                let rule: ForwardRule =
-                    daemon_json(client.post(url).bearer_auth(token).json(&ForwardRule {
-                        id: uuid::Uuid::new_v4(),
-                        host,
-                        direction: dir,
-                        bind_port,
-                        target_host,
-                        target_port,
-                    }))
-                    .await?;
+                let mut request = client
+                    .post(format!("{base_url}/forwards"))
+                    .bearer_auth(token);
+                if let Some(ref v) = via {
+                    request = request.query(&[("via", v)]);
+                }
+                let rule: ForwardRule = daemon_json(request.json(&ForwardRule {
+                    id: uuid::Uuid::new_v4(),
+                    host,
+                    direction: dir,
+                    bind_port,
+                    target_host,
+                    target_port,
+                }))
+                .await?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&rule)?);
                 } else {
@@ -1729,31 +1749,28 @@ async fn async_main() -> Result<()> {
                 }
 
                 let (client, base_url, token) = daemon_client(daemon_alias.as_deref())?;
-                let url = if let Some(ref v) = via {
-                    format!("{base_url}/forwards/multi?via={}", v)
-                } else {
-                    format!("{base_url}/forwards/multi")
-                };
-                let result: agent2ssh::MultiForwardResult = daemon_json(
-                    client
-                        .post(url)
-                        .bearer_auth(token)
-                        .json(&serde_json::json!({
-                            "host": &host,
-                            "rules": parsed_rules.iter().map(|r| {
-                                serde_json::json!({
-                                    "direction": match r.direction {
-                                        ForwardDirection::Local => "local",
-                                        ForwardDirection::Remote => "remote",
-                                    },
-                                    "bind_port": r.bind_port,
-                                    "target_host": &r.target_host,
-                                    "target_port": r.target_port,
-                                })
-                            }).collect::<Vec<_>>()
-                        })),
-                )
-                .await?;
+                let mut request = client
+                    .post(format!("{base_url}/forwards/multi"))
+                    .bearer_auth(token);
+                if let Some(ref v) = via {
+                    request = request.query(&[("via", v)]);
+                }
+                let result: agent2ssh::MultiForwardResult =
+                    daemon_json(request.json(&serde_json::json!({
+                        "host": &host,
+                        "rules": parsed_rules.iter().map(|r| {
+                            serde_json::json!({
+                                "direction": match r.direction {
+                                    ForwardDirection::Local => "local",
+                                    ForwardDirection::Remote => "remote",
+                                },
+                                "bind_port": r.bind_port,
+                                "target_host": &r.target_host,
+                                "target_port": r.target_port,
+                            })
+                        }).collect::<Vec<_>>()
+                    })))
+                    .await?;
 
                 if json {
                     println!("{}", serde_json::to_string_pretty(&result)?);
@@ -2835,9 +2852,13 @@ async fn async_main() -> Result<()> {
         }
         Commands::Integrate { command } => run_integrate_command(command)?,
         Commands::VersionCheck { repo, json } => {
-            let repo = repo.as_deref().unwrap_or("agent2ssh/agent2ssh");
+            let repo = repo.as_deref().unwrap_or("lengyuqu/agent2ssh");
             // Validate repo format
-            if !repo.contains('/') || repo.chars().any(|c| c.is_whitespace()) {
+            let repo_parts: Vec<&str> = repo.split('/').collect();
+            if repo_parts.len() != 2
+                || repo_parts.iter().any(|part| part.is_empty())
+                || repo.chars().any(|c| c.is_whitespace())
+            {
                 return Err(anyhow::anyhow!(
                     "invalid repo format '{}': expected 'owner/name'",
                     repo
@@ -2884,7 +2905,8 @@ async fn async_main() -> Result<()> {
                     location
                 ));
             }
-            let compat = agent2ssh::remote::check_version_compatibility(Some(latest_tag));
+            let normalized_tag = latest_tag.trim_start_matches(['v', 'V']);
+            let compat = agent2ssh::remote::check_version_compatibility(Some(normalized_tag));
             if json {
                 println!(
                     "{}",

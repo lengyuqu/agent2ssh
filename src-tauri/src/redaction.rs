@@ -634,10 +634,7 @@ mod tests {
             load_rules_from_json(&std::fs::read_to_string(&rules_path).unwrap()).unwrap();
         rules.pop();
         let json = serde_json::to_string_pretty(
-            &rules
-                .iter()
-                .map(|r| RedactRuleConfig::from(r))
-                .collect::<Vec<_>>(),
+            &rules.iter().map(RedactRuleConfig::from).collect::<Vec<_>>(),
         )
         .unwrap();
         std::fs::write(&rules_path, json).unwrap();

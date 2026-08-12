@@ -2,7 +2,7 @@ import { ArrowLeftRight, Loader2, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
-import type { ForwardDirection, ForwardRule, HostProfile } from "../types";
+import type { ForwardDirection, ForwardRule, ForwardRuleStats, HostProfile } from "../types";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
@@ -26,21 +26,31 @@ export default function ForwardPanel({ hosts, initialHost = "", onChanged }: Pro
   const { showToast } = useToast();
   const [tunnelHost, setTunnelHost] = useState(initialHost);
   const [rules, setRules] = useState<ForwardRule[]>([]);
+  const [stats, setStats] = useState<Record<string, ForwardRuleStats>>({});
   const [direction, setDirection] = useState<ForwardDirection>("local");
   const [bindPort, setBindPort] = useState(8080);
   const [destinationHost, setDestinationHost] = useState("localhost");
   const [targetPort, setTargetPort] = useState(80);
+  const [via, setVia] = useState("");
   const [busy, setBusy] = useState(false);
   const [removingId, setRemovingId] = useState<string | null>(null);
 
   const canAdd = Boolean(tunnelHost) && isValidPort(bindPort) && isValidPort(targetPort);
 
-  const activeHostNames = useMemo(() => new Set(rules.map((rule) => rule.host)), [rules]);
+  const activeHostNames = useMemo(
+    () => new Set(rules.filter((rule) => stats[rule.id]?.state === "running").map((rule) => rule.host)),
+    [rules, stats],
+  );
+  const activeRuleCount = useMemo(
+    () => rules.filter((rule) => stats[rule.id]?.state === "running").length,
+    [rules, stats],
+  );
 
   const refresh = useCallback(async () => {
     try {
-      const list = await api.forwardList();
+      const [list, currentStats] = await Promise.all([api.forwardList(), api.forwardStats()]);
       setRules(list);
+      setStats(currentStats);
     } catch (err) {
       showToast("error", String(err));
       reportError("forward-panel", "list forwards failed", err);
@@ -61,7 +71,7 @@ export default function ForwardPanel({ hosts, initialHost = "", onChanged }: Pro
     if (!canAdd) return;
     setBusy(true);
     try {
-      await api.forwardAdd(tunnelHost, direction, bindPort, destinationHost, targetPort);
+      await api.forwardAdd(tunnelHost, direction, bindPort, destinationHost, targetPort, via);
       await refresh();
       await onChanged?.();
     } catch (err) {
@@ -119,6 +129,19 @@ export default function ForwardPanel({ hosts, initialHost = "", onChanged }: Pro
               />
             </label>
           </div>
+          <label className={labelCls}>
+            {t("Jump host (optional)")}
+            <Select value={via} onChange={(event) => setVia(event.target.value)} disabled={busy}>
+              <option value="">{t("Direct connection")}</option>
+              {hosts
+                .filter((host) => host.name !== tunnelHost)
+                .map((host) => (
+                  <option key={host.name} value={host.name}>
+                    {host.name}
+                  </option>
+                ))}
+            </Select>
+          </label>
           <div className="grid grid-cols-2 gap-2.5 max-sm:grid-cols-1">
             <label className={labelCls}>
               {t("Target host")}
@@ -150,8 +173,8 @@ export default function ForwardPanel({ hosts, initialHost = "", onChanged }: Pro
         <div className="flex items-center gap-2 font-semibold">
           <ArrowLeftRight size={16} className="text-muted-foreground" />
           {t("Tunnel List")}
-          <Badge variant={rules.length > 0 ? "success" : "secondary"} className="ml-1 font-medium">
-            {t("{count} active", { count: rules.length })}
+          <Badge variant={activeRuleCount > 0 ? "success" : "secondary"} className="ml-1 font-medium">
+            {t("{count} active", { count: activeRuleCount })}
           </Badge>
           <IconButton className="ml-auto" onClick={refresh} title={t("Refresh")}>
             <RefreshCw size={15} />
@@ -161,6 +184,8 @@ export default function ForwardPanel({ hosts, initialHost = "", onChanged }: Pro
         <div className="grid gap-2">
           {rules.map((rule) => {
             const removing = removingId === rule.id;
+            const ruleStats = stats[rule.id];
+            const state = ruleStats?.state ?? "error";
             return (
               <div
                 key={rule.id}
@@ -171,7 +196,9 @@ export default function ForwardPanel({ hosts, initialHost = "", onChanged }: Pro
                     <Badge variant={rule.direction === "local" ? "default" : "warning"}>
                       {rule.direction === "local" ? "-L" : "-R"}
                     </Badge>
-                    <Badge variant="success">{t("Active")}</Badge>
+                    <Badge variant={state === "running" ? "success" : state === "error" ? "destructive" : "secondary"}>
+                      {t(state === "running" ? "Active" : state === "error" ? "Failed" : "Stopped")}
+                    </Badge>
                     <span className="text-xs text-muted-foreground">{rule.host}</span>
                   </div>
                   <div className="mt-2 grid gap-1.5 text-sm">
@@ -187,6 +214,16 @@ export default function ForwardPanel({ hosts, initialHost = "", onChanged }: Pro
                       label={t("Destination")}
                       value={`${rule.target_host}:${rule.target_port}`}
                     />
+                    {ruleStats && (
+                      <TunnelEndpoint
+                        label={t("Traffic")}
+                        value={t("{count} connections · {tx} sent · {rx} received", {
+                          count: ruleStats.connections,
+                          tx: formatBytes(ruleStats.bytes_tx),
+                          rx: formatBytes(ruleStats.bytes_rx),
+                        })}
+                      />
+                    )}
                   </div>
                 </div>
                 <IconButton
@@ -225,4 +262,11 @@ function TunnelEndpoint({ label, value }: { label: string; value: string }) {
 
 function isValidPort(port: number): boolean {
   return Number.isInteger(port) && port >= 1 && port <= 65535;
+}
+
+function formatBytes(value: number): string {
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`;
+  if (value < 1024 * 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
+  return `${(value / (1024 * 1024 * 1024)).toFixed(1)} GiB`;
 }

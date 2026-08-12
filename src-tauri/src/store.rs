@@ -85,14 +85,13 @@ pub fn config_dir() -> Result<PathBuf> {
     Ok(base.join(".agent2ssh"))
 }
 
-/// Thread-local override for the config directory. Tests should use
-/// [`set_test_config_dir`] / [`clear_test_config_dir`] instead of
-/// `std::env::set_var("AGENT2SSH_CONFIG_DIR", ...)` to avoid race conditions
-/// between parallel tests.
+// Thread-local override for the config directory. Tests should use
+// `set_test_config_dir` / `clear_test_config_dir` instead of mutating the
+// process environment to avoid races between parallel tests.
 #[cfg(test)]
 thread_local! {
     pub(crate) static THREAD_CONFIG_DIR: std::cell::RefCell<Option<PathBuf>> =
-        std::cell::RefCell::new(None);
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Set a thread-local config directory override (test-only).
@@ -279,6 +278,17 @@ fn internalize_secrets(config: &mut AppConfig) {
                 // else: locked — keep the marker so save preserves the ref.
             }
         }
+        if let Some(passphrase) = &host.passphrase {
+            if crate::secrets::is_current_secret_ref(passphrase) {
+                if let Some(real) =
+                    crate::secrets::get_secret(&crate::secrets::host_passphrase_account(&host.name))
+                {
+                    host.passphrase = Some(real);
+                } else if unlocked {
+                    host.passphrase = None;
+                }
+            }
+        }
     }
     for proxy in &mut config.proxies {
         if let Some(pw) = &proxy.password {
@@ -295,14 +305,16 @@ fn internalize_secrets(config: &mut AppConfig) {
     }
 }
 
-/// Encrypt real passwords into the app-managed store before persisting (K1),
+/// Encrypt real credentials into the app-managed store before persisting (K1),
 /// replacing each with the [`crate::secrets::SECRET_REF`] marker on disk. An
-/// already-marker password is left untouched (preserving the existing encrypted
-/// secret). If the store is **locked** (no master password available) a real
-/// password cannot be encrypted; rather than fail an unrelated save, we leave it
-/// as plaintext and warn — it gets encrypted on the next save once unlocked.
-fn externalize_secrets(config: &mut AppConfig) {
-    use crate::secrets::{host_account, is_secret_ref, proxy_account, store_secret, SECRET_REF};
+/// existing marker is left untouched. Legacy password/proxy behavior remains
+/// compatible when the vault is locked, but private-key passphrases fail closed
+/// so they are never newly written to `hosts.json` in plaintext.
+fn externalize_secrets(config: &mut AppConfig) -> Result<()> {
+    use crate::secrets::{
+        host_account, host_passphrase_account, is_secret_ref, proxy_account, store_secret,
+        SECRET_REF,
+    };
 
     for host in &mut config.hosts {
         if let Some(pw) = &host.password {
@@ -315,6 +327,22 @@ fn externalize_secrets(config: &mut AppConfig) {
                     "warning: could not encrypt password for host '{}' ({e}); left as plaintext until the credential store is unlocked",
                     host.name
                 ),
+            }
+        }
+        if let Some(passphrase) = &host.passphrase {
+            if passphrase.is_empty() || is_secret_ref(passphrase) {
+                continue;
+            }
+            match store_secret(&host_passphrase_account(&host.name), passphrase) {
+                Ok(()) => host.passphrase = Some(SECRET_REF.to_string()),
+                Err(e) => {
+                    return Err(e).with_context(|| {
+                        format!(
+                            "refusing to persist an unencrypted key passphrase for host '{}'",
+                            host.name
+                        )
+                    })
+                }
             }
         }
     }
@@ -332,6 +360,7 @@ fn externalize_secrets(config: &mut AppConfig) {
             }
         }
     }
+    Ok(())
 }
 
 /// Encrypt any plaintext passwords still living in `hosts.json` into the
@@ -353,6 +382,12 @@ pub fn migrate_plaintext_secrets() -> Result<usize> {
         .filter_map(|h| h.password.as_deref())
         .filter(|pw| !pw.is_empty() && !crate::secrets::is_secret_ref(pw))
         .count()
+        + on_disk
+            .hosts
+            .iter()
+            .filter_map(|h| h.passphrase.as_deref())
+            .filter(|value| !value.is_empty() && !crate::secrets::is_secret_ref(value))
+            .count()
         + on_disk
             .proxies
             .iter()
@@ -384,7 +419,7 @@ pub(crate) fn save_config_unlocked(config: &AppConfig) -> Result<()> {
     // K1: encrypt real passwords into the app-managed store, leaving only a
     // reference marker on disk. Operates on the clone, so the caller's `config`
     // (and any value it shares with the in-memory cache) keeps the real secrets.
-    externalize_secrets(&mut normalized);
+    externalize_secrets(&mut normalized)?;
     let raw = serde_json::to_string_pretty(&normalized)?;
     let path = config_path()?;
     let tmp_path = path.with_extension(format!("json.tmp.{}", std::process::id()));
@@ -1346,7 +1381,7 @@ mod tests {
             role: None,
             owner: None,
             init_command: None,
-            passphrase: None,
+            passphrase: Some("key-passphrase".into()),
         };
         save_config(&AppConfig {
             hosts: vec![host],
@@ -1361,6 +1396,10 @@ mod tests {
             "plaintext password must not be on disk: {raw}"
         );
         assert!(
+            !raw.contains("key-passphrase"),
+            "plaintext key passphrase must not be on disk: {raw}"
+        );
+        assert!(
             raw.contains(crate::secrets::SECRET_REF),
             "on-disk password must be the reference marker: {raw}"
         );
@@ -1368,6 +1407,10 @@ mod tests {
         // On load: the real password is resolved back from the store.
         let loaded = load_config().unwrap();
         assert_eq!(loaded.hosts[0].password.as_deref(), Some("super-secret"));
+        assert_eq!(
+            loaded.hosts[0].passphrase.as_deref(),
+            Some("key-passphrase")
+        );
 
         std::env::remove_var("AGENT2SSH_CONFIG_DIR");
         let _ = fs::remove_dir_all(&dir);

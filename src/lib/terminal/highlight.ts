@@ -77,14 +77,16 @@ export function validateHighlightRule(
   if (rule.name.length > 100) {
     return "name_too_long";
   }
-  try {
-    const flags = rule.is_case_sensitive ? "g" : "gi";
-    new RegExp(rule.keyword, flags);
-  } catch {
-    return "invalid";
-  }
-  if (isPureZeroWidth(rule.keyword)) {
-    return "zero_width";
+  if (rule.is_regex) {
+    try {
+      const flags = rule.is_case_sensitive ? "g" : "gi";
+      new RegExp(rule.keyword, flags);
+    } catch {
+      return "invalid";
+    }
+    if (isPureZeroWidth(rule.keyword)) {
+      return "zero_width";
+    }
   }
   return null;
 }
@@ -129,16 +131,17 @@ export function findMatches(
   for (const rule of compiled) {
     if (!rule.regex) continue;
     const regex = new RegExp(rule.source, rule.is_case_sensitive ? "g" : "gi");
-    let m: RegExpExecArray | null;
-    while ((m = regex.exec(text)) !== null) {
-      const start = m.index;
-      const end = start + m[0].length;
+    let match = regex.exec(text);
+    while (match !== null) {
+      const start = match.index;
+      const end = start + match[0].length;
       if (end === start) {
         // Zero-width match — advance to avoid infinite loop
         regex.lastIndex++;
-        continue;
+      } else {
+        matches.push({ start, end, color: rule.color, rule });
       }
-      matches.push({ start, end, color: rule.color, rule });
+      match = regex.exec(text);
     }
   }
 

@@ -258,11 +258,7 @@ fn extract_head_from_command(cmd_node: &Node, source: &[u8]) -> Option<String> {
                 while idx < words.len() {
                     if words[idx].starts_with('-') {
                         // Skip flag and possibly its value for long options.
-                        if words[idx].contains('=') {
-                            idx += 1;
-                        } else {
-                            idx += 1;
-                        }
+                        idx += 1;
                     } else if !skipped_duration {
                         // Skip the duration token.
                         skipped_duration = true;
@@ -447,13 +443,10 @@ fn extract_token_text(node: &Node, source: &[u8]) -> Option<String> {
             }
             "raw_string" | "ansi_c_string" => {
                 // ANSI-C quoting like $'\x72\x6d' — decode escapes.
-                return child
-                    .utf8_text(source)
-                    .ok()
-                    .map(|s| decode_ansi_c_escapes(s));
+                return child.utf8_text(source).ok().map(decode_ansi_c_escapes);
             }
             "string" => {
-                return child.utf8_text(source).ok().map(|s| strip_quotes(s));
+                return child.utf8_text(source).ok().map(strip_quotes);
             }
             "concatenation" => {
                 return extract_concatenation_text(&child, source);
@@ -734,9 +727,7 @@ fn collect_commands_recursive<'a>(
                 }
             }
             // Collect remaining words as args
-            for i in idx + 1..words.len() {
-                args.push(words[i].clone());
-            }
+            args.extend(words.iter().skip(idx + 1).cloned());
             out.push((*node, head, args));
         }
     }

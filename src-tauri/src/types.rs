@@ -83,15 +83,46 @@ pub struct HostProfile {
     /// `RemoteCommand` / rssh's `init_command`.
     #[serde(default)]
     pub init_command: Option<String>,
-    /// B43: Passphrase for encrypted SSH private keys. Stored in config for
-    /// convenience; loaded into the in-memory passphrase cache on first use.
-    /// For keys without a passphrase, leave as `None`.
+    /// Passphrase for an encrypted SSH private key. The persistence boundary
+    /// replaces this value with an encrypted-secret reference in `hosts.json`;
+    /// the plaintext lives only in the unlocked secrets store and memory cache.
     #[serde(default)]
     pub passphrase: Option<String>,
 }
 
+impl HostProfile {
+    /// Remove credentials before returning a host profile across CLI, MCP,
+    /// HTTP, or desktop IPC boundaries.
+    pub fn redacted_for_transport(mut self) -> Self {
+        self.password = None;
+        self.passphrase = None;
+        self
+    }
+}
+
 pub fn default_host_group() -> String {
     "default".into()
+}
+
+#[cfg(test)]
+mod host_profile_tests {
+    use super::*;
+
+    #[test]
+    fn transport_redaction_removes_both_credentials() {
+        let profile = HostProfile {
+            name: "prod".into(),
+            host: "example.internal".into(),
+            password: Some("password-secret".into()),
+            passphrase: Some("key-secret".into()),
+            ..HostProfile::default()
+        };
+
+        let redacted = profile.redacted_for_transport();
+        assert_eq!(redacted.name, "prod");
+        assert!(redacted.password.is_none());
+        assert!(redacted.passphrase.is_none());
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
