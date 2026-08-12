@@ -35,6 +35,29 @@ cargo build --release --no-default-features --features daemon --bin agent2ssh-da
 
 也可以从 [GitHub Releases](https://github.com/lengyuqu/agent2ssh/releases) 下载预编译二进制文件。
 
+### Shell 补全
+
+CLI 可为 Bash、Zsh、Fish 和 PowerShell 生成动态补全注册脚本。把对应命令加入 shell 启动文件即可：
+
+```bash
+# Bash (~/.bashrc)
+source <(agent2ssh completions bash)
+
+# Zsh (~/.zshrc)
+source <(agent2ssh completions zsh)
+
+# Fish (~/.config/fish/config.fish)
+agent2ssh completions fish | source
+```
+
+PowerShell（`$PROFILE`）：
+
+```powershell
+agent2ssh completions powershell | Out-String | Invoke-Expression
+```
+
+补全会动态读取已有的 host、playbook 和 daemon alias；本地 daemon 已运行且 token 已存在时，也会提供 session 与 forward ID。补全过程只读配置、只调用 daemon 的 GET 接口，不会创建配置目录、启动 daemon 或执行凭据迁移。
+
 ---
 
 ## 主机管理 (host)

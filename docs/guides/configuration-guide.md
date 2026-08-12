@@ -29,6 +29,8 @@ Agent2SSH 的所有配置和数据文件存储在 `~/.agent2ssh/` 目录下。�
   remotes.toml     # 远程守护进程注册表
   webhook.toml     # Webhook 通知配置
   webdav.toml      # 可选 WebDAV 同步配置
+  recording.json   # 终端录制开关（默认关闭）
+  recordings/      # 本地 asciicast v2 录制（敏感，不同步）
   sync_version.json # 最近一次 WebDAV 同步应用的全局版本标记
   backups/         # 同步/写入前的本地版本备份
   keys/            # SSH 密钥存储目录
@@ -906,7 +908,7 @@ chmod 600 ~/.agent2ssh/keys/my_key
 
 ## WebDAV 同步
 
-Agent2SSH 可以把可迁移配置同步到一个 WebDAV collection。同步范围是保守的：包含 `hosts.json`、`secrets.enc`、策略文件、执行限额、异常检测和 playbook；不包含 `known_hosts.json`、`daemon.token`、`daemon_tokens.toml`、`remotes.toml`、`webhook.toml`、`audit.jsonl`、`app.log`、`keys/` 私钥目录等本机敏感或运行时文件。
+Agent2SSH 可以把可迁移配置同步到一个 WebDAV collection。同步范围是保守的：包含 `hosts.json`、`secrets.enc`、策略文件、执行限额、异常检测、playbook 和命令片段；不包含 `known_hosts.json`、`daemon.token`、`daemon_tokens.toml`、`remotes.toml`、`webhook.toml`、`audit.jsonl`、`app.log`、`recording.json`、`recordings/`、`keys/` 私钥目录等本机敏感或运行时文件。
 
 ### 配置
 
@@ -948,6 +950,20 @@ agent2ssh webdav status
 - `pull` 会校验远端 manifest 中每个文件的 SHA-256，覆盖本地文件后写入本地 `sync_version.json`，表示本机已应用该全局版本。
 - `pull` 兼容旧版本远端 manifest 中的 `known_hosts.json`，但会跳过该文件，不会覆盖本机 SSH 主机指纹信任库。
 - 如果远端 manifest 中缺少某个可同步文件，`pull` 会在备份后删除本地对应文件，使本机状态与远端版本一致。
+
+---
+
+## 终端录制
+
+终端录制默认关闭。可以从桌面端“会话录制”页面启用，也可以向 daemon 发送
+`PUT /recordings/config`，正文为 `{"enabled":true}`。开关只影响之后新建的
+WebSocket 终端会话。
+
+录制使用 asciicast v2 JSONL 格式，保存在 `~/.agent2ssh/recordings/<UUID>.cast`。
+Unix 上目录和文件分别限制为 owner-only 权限；Windows 上沿用 Agent2SSH 的
+owner-only ACL 限制。录制内容是原始终端输出，可能包含密码、令牌、个人数据和
+命令结果，应按敏感数据处理。`recording.json` 和整个 `recordings/` 目录均不参与
+WebDAV 同步。
 
 ---
 

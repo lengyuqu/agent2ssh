@@ -34,6 +34,9 @@ import type {
   Playbook,
   PlaybookRunResult,
   ProxyProfile,
+  RecordingConfig,
+  RecordingContent,
+  RecordingInfo,
   RiskLevel,
   SftpExchangeRequest,
   SftpExchangeResult,
@@ -157,6 +160,16 @@ export const api = {
   getWebDavSyncStatus: () => invoke<WebDavSyncStatus>("get_webdav_sync_status"),
   testWebDavSync: () => invoke<WebDavSyncStatus>("test_webdav_sync"),
   pushWebDavSync: () => invoke<WebDavSyncStatus>("push_webdav_sync"),
+
+  // Local-only terminal recordings. These files may contain secrets and are
+  // intentionally excluded from WebDAV configuration snapshots.
+  getRecordingConfig: () => invoke<RecordingConfig>("get_recording_config"),
+  setRecordingConfig: (config: RecordingConfig) =>
+    invoke<RecordingConfig>("set_recording_config", { config }),
+  listRecordings: () => invoke<RecordingInfo[]>("list_recordings"),
+  readRecording: (id: string) => invoke<RecordingContent>("read_recording", { id }),
+  deleteRecording: (id: string) =>
+    invoke<RecordingInfo>("delete_recording", { id, confirmed: true }),
 
   // V4-3: config snapshots + templates (independent of WebDAV sync above —
   // reuses the same backup-directory mechanism, but works with no WebDAV

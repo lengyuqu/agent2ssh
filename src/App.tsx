@@ -4,6 +4,7 @@ import {
   Bot,
   BookOpen,
   Camera,
+  Clapperboard,
   Cloud,
   FolderOpen,
   HelpCircle,
@@ -46,6 +47,7 @@ import NotificationCenter from "./components/NotificationCenter";
 import PingPanel from "./components/PingPanel";
 import PlaybooksPanel from "./components/PlaybooksPanel";
 import ProxyPanel from "./components/ProxyPanel";
+import RecordingsPanel from "./components/RecordingsPanel";
 import SFTPPanel from "./components/SFTPPanel";
 import TerminalPanel from "./components/TerminalPanel";
 import SecretsUnlock from "./components/SecretsUnlock";
@@ -102,6 +104,7 @@ const MODULES = [
   { id: "approvals", label: "Approvals", icon: ShieldCheck },
   { id: "config", label: "Config Snapshots", icon: Camera },
   { id: "topology", label: "Topology", icon: Waypoints },
+  { id: "recordings", label: "Recordings", icon: Clapperboard },
 ] as const;
 
 // V3-4: mesh navigation, not a tab trail — each module lists a handful of the
@@ -111,6 +114,7 @@ const RELATED_MODULES: Partial<Record<(typeof MODULES)[number]["id"], Array<(typ
   topology: ["hosts", "tunnels"],
   proxies: ["hosts"],
   terminal: ["hosts"],
+  recordings: ["terminal", "audit"],
   execute: ["hosts", "audit"],
   "files-sessions": ["hosts"],
   tunnels: ["hosts"],
@@ -1092,6 +1096,8 @@ export default function App() {
           {activeModule === "terminal" && (
             <TerminalPanel hosts={hosts} initialHost={selectedHost} />
           )}
+
+          {activeModule === "recordings" && <RecordingsPanel />}
 
           {activeModule === "execute" && (
             <div className="grid gap-[18px]">

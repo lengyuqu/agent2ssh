@@ -67,6 +67,11 @@ denied_commands = ["rm *", "sudo *"]
 | POST | `/exec/preview` | 执行预览（不实际执行） |
 | GET | `/exec/stream` | WebSocket 流式执行 |
 | GET | `/terminal` | WebSocket 交互式终端 |
+| GET | `/recordings/config` | 获取终端录制开关 |
+| PUT | `/recordings/config` | 更新终端录制开关（仅影响新会话） |
+| GET | `/recordings` | 列出本地终端录制 |
+| GET | `/recordings/:id` | 读取 asciicast v2 录制 |
+| DELETE | `/recordings/:id?confirm=delete` | 明确确认后删除录制并写审计 |
 | GET | `/gate` | 查询全局执行 gate |
 | POST | `/gate/pause` | 暂停非桌面来源执行 |
 | POST | `/gate/resume` | 恢复执行 |
@@ -116,6 +121,29 @@ denied_commands = ["rm *", "sudo *"]
 | GET | `/ssh-sync/diff` | 与 `~/.ssh/config` 对比 |
 | POST | `/ssh-sync/export` | 导出到 SSH 配置文件 |
 | GET | `/console` | Web 控制台 |
+
+---
+
+## 终端录制与回放
+
+录制默认关闭，并可能包含密码或令牌。所有录制 API 仅接受 unrestricted admin
+token，scoped token 会被拒绝。启用后只录制新建的 `/terminal` 会话：
+
+```bash
+curl -X PUT -H "$AUTH" -H 'Content-Type: application/json' \
+  -d '{"enabled":true}' http://127.0.0.1:7722/recordings/config
+curl -H "$AUTH" http://127.0.0.1:7722/recordings
+```
+
+录制以 asciicast v2 JSONL 返回。删除必须携带精确的 `confirm=delete`，否则请求
+被拒绝；成功删除会写入安全审计：
+
+```bash
+curl -X DELETE -H "$AUTH" \
+  'http://127.0.0.1:7722/recordings/00000000-0000-4000-8000-000000000000?confirm=delete'
+```
+
+录制仅存储在 `~/.agent2ssh/recordings/`，不会同步到 WebDAV。
 
 ---
 

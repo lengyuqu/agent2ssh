@@ -230,6 +230,8 @@ For first-time external users, follow the [10-minute CLI and MCP setup guide](do
 - Persistent PTY sessions backed by the embedded SSH terminal worker for direct hosts
 - Session open/write/read/list/close
 - Browser/WebSocket interactive terminal with remote PTY resize forwarding
+- Marker-backed command blocks with color rails, search, navigation, safe plain-text copy, and structured block metadata
+- Opt-in local asciicast v2 terminal recording with variable-speed desktop playback; recordings are treated as sensitive and excluded from sync
 - Connection diagnostics include authentication method, host-key algorithm, server banner, and SHA256 host-key fingerprint
 - Local and remote port forwarding with desktop tunnel creation, active tunnel list, host counts, and removal controls
 - Forward list/remove by ID

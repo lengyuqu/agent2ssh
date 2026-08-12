@@ -10,6 +10,17 @@ import { compileHighlightRules } from "../lib/terminal/highlight";
 import { TerminalHighlightDecorations } from "../lib/terminal/highlight-decorations";
 import { registerClipboardOscHandler } from "../lib/terminal/osc52";
 import { createPaintScheduler } from "../lib/terminal/paint-scheduler";
+import {
+  CommandBlockTextLimitError,
+  commandBlockMetadata,
+  extractCommandBlockText,
+  resolveCommandBlockRange,
+  type CommandBlockMetadata,
+} from "../lib/terminal/block-content";
+import {
+  createCommandBlockTracker,
+  type CommandBlockTracker,
+} from "../lib/terminal/command-blocks";
 
 type Props = {
   host: string;
@@ -21,30 +32,62 @@ type Props = {
   /** V3-2: Ctrl+R is intercepted (not forwarded to the remote shell) to open the
    *  app's own history search instead of the shell's native reverse-i-search. */
   onHistoryRequest?: () => void;
+  /** Structured block boundaries for future audit correlation. */
+  onBlocksChange?: (blocks: CommandBlockMetadata[]) => void;
+  onBlockSelected?: (block: CommandBlockMetadata | null) => void;
 };
+
+export type CommandBlockCopyResult =
+  | { ok: true; characters: number }
+  | { ok: false; reason: "not_found" | "too_large" | "clipboard_unavailable" | "clipboard_failed" };
 
 export type TerminalViewHandle = {
   /** Inject text as if typed, without a trailing Enter — used by history search
    *  so the user can review/edit a past line before running it. */
   sendText: (text: string) => void;
   focus: () => void;
+  getBlocks: () => CommandBlockMetadata[];
+  searchBlocks: (query: string) => CommandBlockMetadata[];
+  selectBlock: (id: string) => boolean;
+  copyBlock: (id: string) => Promise<CommandBlockCopyResult>;
 };
 
 /** A live interactive terminal to a host, streamed over the daemon's
  *  /terminal WebSocket (raw bytes both ways: ANSI, control chars, TUIs). */
 const TerminalView = forwardRef<TerminalViewHandle, Props>(function TerminalView(
-  { host, terminalTheme, appTheme, onLineTyped, onHistoryRequest },
+  { host, terminalTheme, appTheme, onLineTyped, onHistoryRequest, onBlocksChange, onBlockSelected },
   ref
 ) {
   const containerRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const termRef = useRef<Terminal | null>(null);
+  const trackerRef = useRef<CommandBlockTracker | null>(null);
+  const overlayRef = useRef<HTMLDivElement>(null);
+  const blockPaintRef = useRef<{ schedule(): void } | null>(null);
+  const selectedBlockIdRef = useRef<string | null>(null);
   const encoderRef = useRef(new TextEncoder());
   const lineBufferRef = useRef("");
   const onLineTypedRef = useRef(onLineTyped);
   onLineTypedRef.current = onLineTyped;
   const onHistoryRequestRef = useRef(onHistoryRequest);
   onHistoryRequestRef.current = onHistoryRequest;
+  const onBlocksChangeRef = useRef(onBlocksChange);
+  onBlocksChangeRef.current = onBlocksChange;
+  const onBlockSelectedRef = useRef(onBlockSelected);
+  onBlockSelectedRef.current = onBlockSelected;
+
+  const metadataFor = (id?: string): CommandBlockMetadata[] => {
+    const term = termRef.current;
+    const tracker = trackerRef.current;
+    if (!term || !tracker) return [];
+    const result: CommandBlockMetadata[] = [];
+    for (const block of tracker.blocks) {
+      if (id && block.id !== id) continue;
+      const metadata = commandBlockMetadata(term, host, block);
+      if (metadata) result.push(metadata);
+    }
+    return result;
+  };
 
   useImperativeHandle(
     ref,
@@ -57,6 +100,62 @@ const TerminalView = forwardRef<TerminalViewHandle, Props>(function TerminalView
         lineBufferRef.current += text;
       },
       focus: () => termRef.current?.focus(),
+      getBlocks: () => metadataFor(),
+      searchBlocks: (query: string) => {
+        const term = termRef.current;
+        const tracker = trackerRef.current;
+        if (!term || !tracker) return [];
+        const needle = query.trim().toLocaleLowerCase();
+        if (!needle) return metadataFor();
+        const matches: CommandBlockMetadata[] = [];
+        for (const block of tracker.blocks) {
+          const commandMatch = block.command?.toLocaleLowerCase().includes(needle) ?? false;
+          let outputMatch = false;
+          if (!commandMatch) {
+            try {
+              outputMatch = extractCommandBlockText(term, block).toLocaleLowerCase().includes(needle);
+            } catch (error) {
+              if (!(error instanceof CommandBlockTextLimitError)) throw error;
+            }
+          }
+          if (commandMatch || outputMatch) {
+            const metadata = commandBlockMetadata(term, host, block);
+            if (metadata) matches.push(metadata);
+          }
+        }
+        return matches;
+      },
+      selectBlock: (id: string) => {
+        const term = termRef.current;
+        const tracker = trackerRef.current;
+        const block = tracker?.blocks.find((candidate) => candidate.id === id);
+        if (!term || !block || block.start.isDisposed) return false;
+        selectedBlockIdRef.current = id;
+        term.scrollToLine(Math.max(0, block.start.line - 1));
+        blockPaintRef.current?.schedule();
+        onBlockSelectedRef.current?.(commandBlockMetadata(term, host, block));
+        return true;
+      },
+      copyBlock: async (id: string) => {
+        const term = termRef.current;
+        const tracker = trackerRef.current;
+        const block = tracker?.blocks.find((candidate) => candidate.id === id);
+        if (!term || !block) return { ok: false, reason: "not_found" };
+        let text: string;
+        try {
+          text = extractCommandBlockText(term, block);
+        } catch (error) {
+          if (error instanceof CommandBlockTextLimitError) return { ok: false, reason: "too_large" };
+          return { ok: false, reason: "clipboard_failed" };
+        }
+        if (!navigator.clipboard?.writeText) return { ok: false, reason: "clipboard_unavailable" };
+        try {
+          await navigator.clipboard.writeText(text);
+          return { ok: true, characters: text.length };
+        } catch {
+          return { ok: false, reason: "clipboard_failed" };
+        }
+      },
     }),
     []
   );
@@ -104,6 +203,83 @@ const TerminalView = forwardRef<TerminalViewHandle, Props>(function TerminalView
       writeText: (text) => navigator.clipboard?.writeText(text),
     });
 
+    const tracker = createCommandBlockTracker(term, {
+      idPrefix: `${host}:${Date.now().toString(36)}`,
+      getPendingCommand: () => lineBufferRef.current,
+    });
+    trackerRef.current = tracker;
+
+    const paintBlocks = () => {
+      const overlay = overlayRef.current;
+      const screen = term.element?.querySelector<HTMLElement>(".xterm-screen");
+      if (!overlay || !screen || term.buffer.active.type === "alternate") {
+        overlay?.replaceChildren();
+        return;
+      }
+      const overlayRect = overlay.getBoundingClientRect();
+      const screenRect = screen.getBoundingClientRect();
+      const barLeft = Math.max(0, screenRect.left - overlayRect.left - 6);
+      const rowHeight = screenRect.height / Math.max(1, term.rows);
+      const viewportStart = term.buffer.normal.viewportY;
+      const viewportEnd = viewportStart + term.rows - 1;
+      const fragment = document.createDocumentFragment();
+
+      for (const block of tracker.blocks) {
+        const range = resolveCommandBlockRange(term, block);
+        if (!range || range.endLine < viewportStart || range.startLine > viewportEnd) continue;
+        const visibleStart = Math.max(range.startLine, viewportStart);
+        const visibleEnd = Math.min(range.endLine, viewportEnd);
+        const top = screenRect.top - overlayRect.top + (visibleStart - viewportStart) * rowHeight;
+        const height = Math.max(3, (visibleEnd - visibleStart + 1) * rowHeight);
+
+        if (selectedBlockIdRef.current === block.id) {
+          const selection = document.createElement("div");
+          selection.className = "command-block-selection";
+          Object.assign(selection.style, {
+            left: `${screenRect.left - overlayRect.left}px`,
+            top: `${top}px`,
+            width: `${screenRect.width}px`,
+            height: `${height}px`,
+            borderColor: block.color,
+          });
+          fragment.appendChild(selection);
+        }
+
+        const bar = document.createElement("button");
+        bar.type = "button";
+        bar.className = "command-block-bar";
+        bar.dataset.blockId = block.id;
+        bar.title = block.command || `Command block ${block.sequence}`;
+        bar.setAttribute("aria-label", `Select ${bar.title}`);
+        Object.assign(bar.style, {
+          left: `${barLeft}px`,
+          top: `${top}px`,
+          height: `${height}px`,
+          backgroundColor: block.color,
+        });
+        bar.addEventListener("click", () => {
+          selectedBlockIdRef.current = block.id;
+          blockPaint.schedule();
+          onBlockSelectedRef.current?.(commandBlockMetadata(term, host, block));
+          term.focus();
+        });
+        fragment.appendChild(bar);
+      }
+      overlay.replaceChildren(fragment);
+    };
+    const blockPaint = createPaintScheduler({ shouldPaint: () => !disposed, paint: paintBlocks });
+    blockPaintRef.current = blockPaint;
+    const blocksChangedSub = tracker.onChange(() => {
+      blockPaint.schedule();
+      onBlocksChangeRef.current?.(
+        tracker.blocks.flatMap((block) => {
+          const metadata = commandBlockMetadata(term, host, block);
+          return metadata ? [metadata] : [];
+        }),
+      );
+    });
+    const blockWriteSub = term.onWriteParsed(() => blockPaint.schedule());
+
     const writeTerminal = (data: string | Uint8Array) => {
       term.write(data);
     };
@@ -120,6 +296,7 @@ const TerminalView = forwardRef<TerminalViewHandle, Props>(function TerminalView
     refreshHighlightRules();
     window.addEventListener("agent2ssh:highlights-changed", refreshHighlightRules);
     const scrollSub = term.onScroll(() => highlightPaint.schedule());
+    const blockScrollSub = term.onScroll(() => blockPaint.schedule());
 
     function sendResize() {
       if (ws && ws.readyState === WebSocket.OPEN) {
@@ -232,6 +409,7 @@ const TerminalView = forwardRef<TerminalViewHandle, Props>(function TerminalView
         fit.fit();
         sendResize();
         highlightPaint.schedule();
+        blockPaint.schedule();
       } catch {
         // ignore transient measure errors
       }
@@ -247,8 +425,16 @@ const TerminalView = forwardRef<TerminalViewHandle, Props>(function TerminalView
       window.removeEventListener("agent2ssh:highlights-changed", refreshHighlightRules);
       dataSub.dispose();
       scrollSub.dispose();
+      blockScrollSub.dispose();
       writeParsedSub.dispose();
+      blockWriteSub.dispose();
       clipboardOscSub.dispose();
+      blocksChangedSub.dispose();
+      blockPaint.dispose();
+      blockPaintRef.current = null;
+      tracker.dispose();
+      trackerRef.current = null;
+      overlayRef.current?.replaceChildren();
       highlightPaint.dispose();
       highlighter.dispose();
       if (ws) {
@@ -264,7 +450,12 @@ const TerminalView = forwardRef<TerminalViewHandle, Props>(function TerminalView
     };
   }, [appTheme, host, terminalTheme]);
 
-  return <div ref={containerRef} className="terminal-surface h-full w-full p-2" />;
+  return (
+    <div className="terminal-surface relative h-full w-full overflow-hidden p-2">
+      <div ref={containerRef} className="h-full w-full" />
+      <div ref={overlayRef} className="pointer-events-none absolute inset-0 z-[3] overflow-hidden" />
+    </div>
+  );
 });
 
 export default TerminalView;

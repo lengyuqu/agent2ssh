@@ -7,6 +7,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ## [0.3.0] - 2026-08-12
 
 ### Added
+- **Structured terminal workbench**: Added marker-backed command blocks with color rails, search, navigation, safe plain-text copy, and structured metadata for future audit consumers.
+- **Session recordings**: Added opt-in asciicast v2 terminal recording, protected local storage, daemon and desktop management APIs, variable-speed playback, and confirmed audited deletion.
+- **CLI completions**: Added Bash, Zsh, Fish, and PowerShell completion generation with read-only dynamic candidates for configured and active resources.
 - **Terminal highlight UX**: Wired persisted highlight rules into xterm decorations and added desktop controls for adding, enabling, deleting, and resetting rules.
 - **Desktop diagnostics/setup surfaces**: Added in-app structured system reports, CLI PATH install/remove controls, and jump-host selection for port forwards.
 - **Secrets vault**: Encrypted backup/sync of `secrets.enc` with Argon2id and AES-256-GCM, lifecycle registry for daemon/managed processes, and structured error codes across the Rust backend.

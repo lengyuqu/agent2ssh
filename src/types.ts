@@ -37,6 +37,25 @@ export type AppPreferences = {
   closeWindowAction: CloseWindowAction;
 };
 
+export type RecordingConfig = {
+  enabled: boolean;
+};
+
+export type RecordingInfo = {
+  id: string;
+  host: string;
+  createdAt: string;
+  durationSeconds: number;
+  width: number;
+  height: number;
+  sizeBytes: number;
+};
+
+export type RecordingContent = {
+  info: RecordingInfo;
+  content: string;
+};
+
 // Rust: types.rs — HostProfile
 // Tags field uses #[serde(default)] so it may be absent (defaults to []).
 export type HostFingerprintStatus = {

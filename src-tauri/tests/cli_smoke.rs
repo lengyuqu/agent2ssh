@@ -69,6 +69,215 @@ async fn cli_host_help_exits_zero() {
 }
 
 #[tokio::test]
+async fn cli_completions_generate_all_supported_shell_registrations() {
+    for shell in ["bash", "zsh", "fish", "powershell"] {
+        let output = tokio::process::Command::new(cli_bin())
+            .args(["completions", shell])
+            .output()
+            .await
+            .unwrap_or_else(|error| panic!("failed to generate {shell} completions: {error}"));
+
+        assert!(
+            output.status.success(),
+            "{shell} completion generation failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("COMPLETE") && stdout.contains("agent2ssh"),
+            "{shell} output should register dynamic agent2ssh completion, got:\n{stdout}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn cli_dynamic_completion_reads_config_candidates() {
+    let config_dir = std::env::temp_dir().join(format!(
+        "agent2ssh-completion-hosts-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&config_dir).expect("create completion test config dir");
+    std::fs::write(
+        config_dir.join("hosts.json"),
+        r#"{"schema_version":1,"hosts":[{"name":"prod-web","host":"127.0.0.1"}]}"#,
+    )
+    .expect("write completion hosts config");
+    std::fs::write(
+        config_dir.join("playbooks.toml"),
+        r#"[[playbooks]]
+name = "deploy-web"
+description = "test"
+steps = ["true"]
+"#,
+    )
+    .expect("write completion playbooks config");
+    std::fs::write(
+        config_dir.join("remotes.toml"),
+        r#"[[remotes]]
+alias = "edge-daemon"
+url = "http://127.0.0.1:9"
+"#,
+    )
+    .expect("write completion remotes config");
+
+    // PowerShell's clap_complete protocol uses the final argument as the
+    // completion cursor, which makes it portable to exercise on every OS.
+    let output = tokio::process::Command::new(cli_bin())
+        .env("AGENT2SSH_CONFIG_DIR", &config_dir)
+        .env("COMPLETE", "powershell")
+        .args(["--", "agent2ssh", "exec", ""])
+        .output()
+        .await
+        .expect("run dynamic completion protocol");
+
+    assert!(
+        output.status.success(),
+        "dynamic completion failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("prod-web"),
+        "dynamic host completion should read the existing hosts file"
+    );
+
+    let playbooks = tokio::process::Command::new(cli_bin())
+        .env("AGENT2SSH_CONFIG_DIR", &config_dir)
+        .env("COMPLETE", "powershell")
+        .args(["--", "agent2ssh", "playbook", "run", ""])
+        .output()
+        .await
+        .expect("request playbook candidates");
+    assert!(playbooks.status.success());
+    assert!(
+        String::from_utf8_lossy(&playbooks.stdout).contains("deploy-web"),
+        "dynamic playbook completion should read the existing playbooks file"
+    );
+
+    let daemons = tokio::process::Command::new(cli_bin())
+        .env("AGENT2SSH_CONFIG_DIR", &config_dir)
+        .env("COMPLETE", "powershell")
+        .args(["--", "agent2ssh", "--daemon", ""])
+        .output()
+        .await
+        .expect("request daemon candidates");
+    assert!(daemons.status.success());
+    let daemon_stdout = String::from_utf8_lossy(&daemons.stdout);
+    assert!(daemon_stdout.contains("localhost"));
+    assert!(daemon_stdout.contains("edge-daemon"));
+
+    let _ = std::fs::remove_dir_all(config_dir);
+}
+
+#[tokio::test]
+async fn cli_dynamic_completion_reads_daemon_resource_ids_with_get() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let config_dir = std::env::temp_dir().join(format!(
+        "agent2ssh-completion-daemon-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&config_dir).expect("create completion daemon config dir");
+    std::fs::write(config_dir.join("daemon.token"), "completion-test-token\n")
+        .expect("write existing daemon token");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind completion mock daemon");
+    let addr = listener.local_addr().expect("completion mock daemon addr");
+    let server = tokio::spawn(async move {
+        for (expected_path, body) in [
+            ("/sessions", r#"[{"id":"session-123","host":"prod-web"}]"#),
+            ("/forwards", r#"[{"id":"forward-456","host":"prod-web"}]"#),
+        ] {
+            let (mut stream, _) = listener.accept().await.expect("accept completion GET");
+            let mut request = vec![0_u8; 4096];
+            let read = stream
+                .read(&mut request)
+                .await
+                .expect("read completion GET");
+            let request = String::from_utf8_lossy(&request[..read]).to_lowercase();
+            assert!(
+                request.starts_with(&format!("get {expected_path} http/1.1")),
+                "completion must use GET for {expected_path}, got:\n{request}"
+            );
+            assert!(request.contains("authorization: bearer completion-test-token"));
+
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write completion response");
+        }
+    });
+
+    let sessions = tokio::process::Command::new(cli_bin())
+        .env("AGENT2SSH_CONFIG_DIR", &config_dir)
+        .env("AGENT2SSH_DAEMON_ADDR", addr.to_string())
+        .env("COMPLETE", "powershell")
+        .args(["--", "agent2ssh", "session", "write", ""])
+        .output()
+        .await
+        .expect("request session ID candidates");
+    assert!(sessions.status.success());
+    assert!(String::from_utf8_lossy(&sessions.stdout).contains("session-123"));
+
+    let forwards = tokio::process::Command::new(cli_bin())
+        .env("AGENT2SSH_CONFIG_DIR", &config_dir)
+        .env("AGENT2SSH_DAEMON_ADDR", addr.to_string())
+        .env("COMPLETE", "powershell")
+        .args(["--", "agent2ssh", "forward", "rm", ""])
+        .output()
+        .await
+        .expect("request forward ID candidates");
+    assert!(forwards.status.success());
+    assert!(String::from_utf8_lossy(&forwards.stdout).contains("forward-456"));
+
+    server.await.expect("completion mock daemon task");
+    let _ = std::fs::remove_dir_all(config_dir);
+}
+
+#[cfg(any(unix, windows))]
+#[tokio::test]
+async fn cli_completion_does_not_create_config_or_daemon_state() {
+    let root = std::env::temp_dir().join(format!(
+        "agent2ssh-completion-read-only-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let config_dir = root.join("missing-config");
+    assert!(!config_dir.exists());
+
+    let registration = tokio::process::Command::new(cli_bin())
+        .env("AGENT2SSH_CONFIG_DIR", &config_dir)
+        .args([
+            "completions",
+            if cfg!(windows) { "powershell" } else { "bash" },
+        ])
+        .output()
+        .await
+        .expect("generate completion registration");
+    assert!(registration.status.success());
+
+    let candidates = tokio::process::Command::new(cli_bin())
+        .env("AGENT2SSH_CONFIG_DIR", &config_dir)
+        .env("COMPLETE", "powershell")
+        .args(["--", "agent2ssh", "session", "write", ""])
+        .output()
+        .await
+        .expect("request session candidates");
+    assert!(candidates.status.success());
+
+    assert!(
+        !config_dir.exists(),
+        "completion must not create the config directory, daemon token, or pid state"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn cli_webdav_help_exits_zero() {
     let output = tokio::process::Command::new(cli_bin())
         .args(["webdav", "--help"])

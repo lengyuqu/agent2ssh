@@ -3,10 +3,12 @@ import {
   ChevronDown,
   ChevronRight,
   Columns2,
+  Copy,
   History,
   LayoutGrid,
   Plus,
   Rows2,
+  Search,
   Square,
   TerminalSquare,
   X,
@@ -30,6 +32,7 @@ import { IconButton } from "./ui/icon-button";
 import { Input } from "./ui/input";
 import { Select } from "./ui/select";
 import { cn } from "../lib/utils";
+import type { CommandBlockMetadata } from "../lib/terminal/block-content";
 
 type Props = {
   hosts: HostProfile[];
@@ -129,6 +132,16 @@ export default function TerminalPanel({ hosts, initialHost = "" }: Props) {
   );
   const [collapsedHosts, setCollapsedHosts] = useState<Set<string>>(() => new Set());
   const [snippetsOpen, setSnippetsOpen] = useState(false);
+  const [blocksByTab, setBlocksByTab] = useState<Map<string, CommandBlockMetadata[]>>(
+    () => new Map(),
+  );
+  const [blockQuery, setBlockQuery] = useState("");
+  const [blockMatches, setBlockMatches] = useState<CommandBlockMetadata[]>([]);
+  const [selectedBlock, setSelectedBlock] = useState<{
+    tabId: string;
+    block: CommandBlockMetadata;
+  } | null>(null);
+  const [blockCopyStatus, setBlockCopyStatus] = useState<"idle" | "copied" | "failed">("idle");
 
   focusedTabIdRef.current = paneTabIds[focusedPane] ?? null;
 
@@ -192,6 +205,35 @@ export default function TerminalPanel({ hosts, initialHost = "" }: Props) {
     setPaneTabIds((prev) => prev.map((tabId) => (tabId === id ? null : tabId)));
     historyRef.current.delete(id);
     terminalRefs.current.delete(id);
+    setBlocksByTab((previous) => {
+      const next = new Map(previous);
+      next.delete(id);
+      return next;
+    });
+    setSelectedBlock((previous) => (previous?.tabId === id ? null : previous));
+  }
+
+  function updateBlockSearch(tabId: string | null, query: string) {
+    if (!tabId) {
+      setBlockMatches([]);
+      return;
+    }
+    const handle = terminalRefs.current.get(tabId);
+    setBlockMatches(handle ? handle.searchBlocks(query) : (blocksByTab.get(tabId) ?? []));
+  }
+
+  function selectCommandBlock(tabId: string, block: CommandBlockMetadata) {
+    if (!terminalRefs.current.get(tabId)?.selectBlock(block.id)) return;
+    setSelectedBlock({ tabId, block });
+    setBlockCopyStatus("idle");
+  }
+
+  async function copySelectedCommandBlock() {
+    if (!selectedBlock) return;
+    const result = await terminalRefs.current
+      .get(selectedBlock.tabId)
+      ?.copyBlock(selectedBlock.block.id);
+    setBlockCopyStatus(result?.ok ? "copied" : "failed");
   }
 
   function recordLine(tabId: string, line: string) {
@@ -256,6 +298,16 @@ export default function TerminalPanel({ hosts, initialHost = "" }: Props) {
     const needle = historySearch.query.trim().toLowerCase();
     return needle ? all.filter((line) => line.toLowerCase().includes(needle)) : all;
   }, [historySearch, searchTabId]);
+  const focusedTabId = paneTabIds[focusedPane] ?? null;
+  const visibleBlocks = blockQuery.trim()
+    ? blockMatches
+    : focusedTabId
+      ? (blocksByTab.get(focusedTabId) ?? [])
+      : [];
+
+  useEffect(() => {
+    updateBlockSearch(focusedTabId, blockQuery);
+  }, [focusedTabId]);
 
   return (
     <Card className="flex h-[72vh] overflow-hidden p-0">
@@ -397,6 +449,82 @@ export default function TerminalPanel({ hosts, initialHost = "" }: Props) {
           })}
         </div>
 
+        <div className="grid max-h-[210px] shrink-0 gap-1.5 border-t border-border pt-2">
+          <div className="px-1 text-[11px] font-bold uppercase tracking-wide text-muted-foreground">
+            {t("Command blocks")}
+          </div>
+          <div className="relative">
+            <Search
+              size={12}
+              className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground"
+            />
+            <Input
+              value={blockQuery}
+              onChange={(event) => {
+                const query = event.target.value;
+                setBlockQuery(query);
+                updateBlockSearch(focusedTabId, query);
+              }}
+              placeholder={t("Search blocks")}
+              disabled={!focusedTabId}
+              className="h-7 pl-7 text-xs"
+            />
+          </div>
+          <div className="max-h-[92px] overflow-y-auto rounded border border-border/70">
+            {visibleBlocks.length === 0 ? (
+              <div className="px-2 py-3 text-center text-[11px] text-muted-foreground">
+                {t(focusedTabId ? "No command blocks" : "Select a session")}
+              </div>
+            ) : (
+              visibleBlocks
+                .slice()
+                .reverse()
+                .slice(0, 50)
+                .map((block) => (
+                  <button
+                    key={block.id}
+                    type="button"
+                    onClick={() => focusedTabId && selectCommandBlock(focusedTabId, block)}
+                    className={cn(
+                      "flex w-full items-center gap-1.5 border-b border-border/50 px-2 py-1 text-left text-[11px] last:border-b-0 hover:bg-muted",
+                      selectedBlock?.tabId === focusedTabId && selectedBlock.block.id === block.id
+                        ? "bg-primary/10 text-primary"
+                        : "",
+                    )}
+                    title={block.command ?? t("Command unavailable")}
+                  >
+                    <span
+                      className="h-3 w-1 shrink-0 rounded-full"
+                      style={{ backgroundColor: block.color }}
+                    />
+                    <span className="truncate font-mono">
+                      {block.command ?? t("Command unavailable")}
+                    </span>
+                    <span className="ml-auto shrink-0 text-[9px] text-muted-foreground">
+                      {block.startLine + 1}-{block.endLine + 1}
+                    </span>
+                  </button>
+                ))
+            )}
+          </div>
+          {selectedBlock && selectedBlock.tabId === focusedTabId ? (
+            <div className="flex items-center gap-1.5 px-1 text-[10px] text-muted-foreground">
+              <span className="min-w-0 flex-1 truncate" title={selectedBlock.block.startedAt}>
+                {selectedBlock.block.active ? t("Running") : t("Completed")} · {selectedBlock.block.host}
+              </span>
+              <Button
+                size="sm"
+                variant="secondary"
+                className="h-6 px-2 text-[10px]"
+                onClick={() => void copySelectedCommandBlock()}
+              >
+                <Copy size={11} />
+                {t(blockCopyStatus === "copied" ? "Copied" : blockCopyStatus === "failed" ? "Copy failed" : "Copy")}
+              </Button>
+            </div>
+          ) : null}
+        </div>
+
         <label className="grid gap-1 text-xs font-medium text-muted-foreground">
           <span>{t("Terminal theme")}</span>
           <Select
@@ -533,6 +661,25 @@ export default function TerminalPanel({ hosts, initialHost = "" }: Props) {
                 onHistoryRequest={
                   assigned ? () => setHistorySearch({ paneIndex, query: "" }) : undefined
                 }
+                onBlocksChange={(blocks) => {
+                  setBlocksByTab((previous) => {
+                    const next = new Map(previous);
+                    next.set(tab.id, blocks);
+                    return next;
+                  });
+                  if (focusedTabIdRef.current === tab.id && blockQuery.trim()) {
+                    queueMicrotask(() => updateBlockSearch(tab.id, blockQuery));
+                  }
+                  setSelectedBlock((previous) => {
+                    if (previous?.tabId !== tab.id) return previous;
+                    const updated = blocks.find((block) => block.id === previous.block.id);
+                    return updated ? { tabId: tab.id, block: updated } : null;
+                  });
+                }}
+                onBlockSelected={(block) => {
+                  setSelectedBlock(block ? { tabId: tab.id, block } : null);
+                  setBlockCopyStatus("idle");
+                }}
               />
             </div>
           );

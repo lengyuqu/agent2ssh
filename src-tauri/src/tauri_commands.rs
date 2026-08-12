@@ -37,6 +37,11 @@ use crate::{
         run_playbook_core_with_source_and_approved_steps, save_playbook_core, Playbook,
         PlaybookRunResult,
     },
+    recording::{
+        delete_recording as delete_recording_core, list_recordings as list_recordings_core,
+        load_recording_config, read_recording as read_recording_core, save_recording_config,
+        RecordingConfig, RecordingContent, RecordingInfo,
+    },
     remote::{list_daemons_core, DaemonInfo},
     session::{
         session_close_core, session_list_core, session_open_core, session_read_core,
@@ -1684,6 +1689,44 @@ pub fn set_app_preferences(preferences: AppPreferences) -> Result<AppPreferences
 }
 
 #[tauri::command]
+pub fn get_recording_config() -> RecordingConfig {
+    load_recording_config()
+}
+
+#[tauri::command]
+pub fn set_recording_config(config: RecordingConfig) -> Result<RecordingConfig, String> {
+    save_recording_config(&config).map_err(|error| error.to_string())?;
+    Ok(config)
+}
+
+#[tauri::command]
+pub fn list_recordings() -> Result<Vec<RecordingInfo>, String> {
+    list_recordings_core().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn read_recording(id: String) -> Result<RecordingContent, String> {
+    read_recording_core(&id).map_err(|error| error.to_string())
+}
+
+/// Deletion is deliberately two-step at the contract boundary. The desktop
+/// must show the sensitive-data warning and then pass `confirmed: true`.
+#[tauri::command]
+pub fn delete_recording(id: String, confirmed: bool) -> Result<RecordingInfo, String> {
+    let info = delete_recording_core(&id, confirmed).map_err(|error| error.to_string())?;
+    append_operation_audit(
+        "desktop_recording",
+        &info.host,
+        &format!("delete terminal recording {}", info.id),
+        RiskLevel::Low,
+        Some(0),
+        0,
+        Some("explicitly confirmed terminal recording deletion"),
+    );
+    Ok(info)
+}
+
+#[tauri::command]
 pub fn get_cli_path_status() -> Result<CliPathStatus, String> {
     cli_path_status_with_message("CLI PATH status loaded.".to_string())
 }
@@ -2912,6 +2955,11 @@ pub fn run_tauri() {
             quit_app,
             get_app_preferences,
             set_app_preferences,
+            get_recording_config,
+            set_recording_config,
+            list_recordings,
+            read_recording,
+            delete_recording,
             get_cli_path_status,
             install_cli_to_path,
             remove_cli_from_path,

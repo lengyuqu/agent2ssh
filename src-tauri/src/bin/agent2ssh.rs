@@ -31,10 +31,19 @@ use agent2ssh::{
     SftpUploadRequest, Snippet, TeamConfigExport,
 };
 use anyhow::{Context, Result};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
+use clap_complete::engine::ArgValueCandidates;
+use clap_complete::env::{Bash, EnvCompleter, Fish, Powershell, Zsh};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+
+#[path = "agent2ssh/completion.rs"]
+mod agent2ssh_completion;
+
+use agent2ssh_completion::{
+    daemon_candidates, forward_candidates, host_candidates, playbook_candidates, session_candidates,
+};
 
 #[derive(Debug, Parser)]
 #[command(name = "agent2ssh", version)]
@@ -42,7 +51,7 @@ use std::path::PathBuf;
 struct Cli {
     /// Route operations through a remote daemon by alias (from ~/.agent2ssh/remotes.toml).
     /// Use "localhost" or omit for the local daemon.
-    #[arg(long, global = true)]
+    #[arg(long, global = true, add = ArgValueCandidates::new(daemon_candidates))]
     daemon: Option<String>,
     #[command(subcommand)]
     command: Commands,
@@ -50,11 +59,17 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// Generate dynamic shell completion registration
+    Completions {
+        /// Shell to generate registration for
+        shell: CompletionShell,
+    },
     Host {
         #[command(subcommand)]
         command: HostCommands,
     },
     Exec {
+        #[arg(add = ArgValueCandidates::new(host_candidates))]
         host: String,
         command: String,
         #[arg(long)]
@@ -80,7 +95,7 @@ enum Commands {
     },
     /// Run the same command on multiple hosts concurrently
     ExecMulti {
-        #[arg(required = true, num_args = 1..)]
+        #[arg(required = true, num_args = 1.., add = ArgValueCandidates::new(host_candidates))]
         hosts: Vec<String>,
         #[arg(long)]
         command: String,
@@ -136,7 +151,7 @@ enum Commands {
     },
     /// Check SSH reachability of one or more hosts
     Ping {
-        #[arg(required = true, num_args = 1..)]
+        #[arg(required = true, num_args = 1.., add = ArgValueCandidates::new(host_candidates))]
         hosts: Vec<String>,
         #[arg(long, default_value_t = 5)]
         timeout_secs: u64,
@@ -148,7 +163,7 @@ enum Commands {
         limit: usize,
         #[arg(long)]
         json: bool,
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(host_candidates))]
         host: Option<String>,
         #[arg(long, value_enum)]
         risk: Option<RiskLevel>,
@@ -185,7 +200,7 @@ enum Commands {
     /// Check risk level of a command
     Risk {
         command: String,
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(host_candidates))]
         host: Option<String>,
         #[arg(long)]
         json: bool,
@@ -267,7 +282,7 @@ enum Commands {
         #[arg(long)]
         json: bool,
         /// Run diagnostics against a specific remote daemon (by alias from remotes.toml)
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(daemon_candidates))]
         daemon: Option<String>,
     },
     /// Collect health snapshot (uptime, disk, memory, load) for configured hosts
@@ -276,7 +291,7 @@ enum Commands {
         #[arg(long)]
         json: bool,
         /// Hosts to collect health from (default: all configured hosts)
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(host_candidates))]
         hosts: Option<Vec<String>>,
     },
     /// Manage approval policies for high-risk command authorization
@@ -314,6 +329,25 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CompletionShell {
+    Bash,
+    Zsh,
+    Fish,
+    Powershell,
+}
+
+impl CompletionShell {
+    fn completer(self) -> &'static dyn EnvCompleter {
+        match self {
+            Self::Bash => &Bash,
+            Self::Zsh => &Zsh,
+            Self::Fish => &Fish,
+            Self::Powershell => &Powershell,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -406,7 +440,7 @@ enum HostCommands {
         #[arg(long)]
         password: Option<String>,
         /// Host profile alias to use as ProxyJump bastion
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(host_candidates))]
         jump: Option<String>,
         /// Override risk level for all commands on this host (low/medium/high)
         #[arg(long)]
@@ -430,6 +464,7 @@ enum HostCommands {
         json: bool,
     },
     Rm {
+        #[arg(add = ArgValueCandidates::new(host_candidates))]
         name: String,
         #[arg(long)]
         json: bool,
@@ -448,6 +483,7 @@ enum HostCommands {
 enum SftpCommands {
     /// Upload a local file to the remote host
     Put {
+        #[arg(add = ArgValueCandidates::new(host_candidates))]
         host: String,
         local: String,
         remote: String,
@@ -459,6 +495,7 @@ enum SftpCommands {
     },
     /// Download a remote file to local path
     Get {
+        #[arg(add = ArgValueCandidates::new(host_candidates))]
         host: String,
         remote: String,
         local: String,
@@ -470,6 +507,7 @@ enum SftpCommands {
     },
     /// List a remote directory
     Ls {
+        #[arg(add = ArgValueCandidates::new(host_candidates))]
         host: String,
         path: String,
         #[arg(long)]
@@ -477,6 +515,7 @@ enum SftpCommands {
     },
     /// Stat a remote file or directory
     Stat {
+        #[arg(add = ArgValueCandidates::new(host_candidates))]
         host: String,
         path: String,
         #[arg(long)]
@@ -484,6 +523,7 @@ enum SftpCommands {
     },
     /// Create a remote directory (mkdir -p)
     Mkdir {
+        #[arg(add = ArgValueCandidates::new(host_candidates))]
         host: String,
         path: String,
         #[arg(long)]
@@ -495,14 +535,20 @@ enum SftpCommands {
 enum SessionCommands {
     /// Open a persistent PTY session to a host
     Open {
+        #[arg(add = ArgValueCandidates::new(host_candidates))]
         host: String,
         #[arg(long)]
         json: bool,
     },
     /// Write input to an open session
-    Write { session_id: String, input: String },
+    Write {
+        #[arg(add = ArgValueCandidates::new(session_candidates))]
+        session_id: String,
+        input: String,
+    },
     /// Read buffered output from a session
     Read {
+        #[arg(add = ArgValueCandidates::new(session_candidates))]
         session_id: String,
         #[arg(long, default_value_t = 2000)]
         timeout_ms: u64,
@@ -511,6 +557,7 @@ enum SessionCommands {
     },
     /// Close a session
     Close {
+        #[arg(add = ArgValueCandidates::new(session_candidates))]
         session_id: String,
         #[arg(long)]
         json: bool,
@@ -526,6 +573,7 @@ enum SessionCommands {
 enum ForwardCommands {
     /// Start a port forward (SSH -L or -R tunnel)
     Add {
+        #[arg(add = ArgValueCandidates::new(host_candidates))]
         host: String,
         /// local or remote
         #[arg(long, default_value = "local")]
@@ -537,13 +585,14 @@ enum ForwardCommands {
         #[arg(long)]
         target_port: u16,
         /// B68: Jump host (bastion) profile name to route the tunnel through.
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(host_candidates))]
         via: Option<String>,
         #[arg(long)]
         json: bool,
     },
     /// Start multiple port forwards on a single host in one batch (B25)
     AddMulti {
+        #[arg(add = ArgValueCandidates::new(host_candidates))]
         host: String,
         /// Repeatable: each occurrence adds one rule.
         /// Format: "direction:bind_port:target_host:target_port"
@@ -551,7 +600,7 @@ enum ForwardCommands {
         #[arg(long = "rule", num_args = 1)]
         rules: Vec<String>,
         /// B68: Jump host (bastion) profile name to route the tunnel through.
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(host_candidates))]
         via: Option<String>,
         #[arg(long)]
         json: bool,
@@ -563,6 +612,7 @@ enum ForwardCommands {
     },
     /// Stop a port forward by ID
     Rm {
+        #[arg(add = ArgValueCandidates::new(forward_candidates))]
         id: String,
         #[arg(long)]
         json: bool,
@@ -721,7 +771,7 @@ enum PolicyCommands {
     Test {
         command: String,
         /// Host name used for approval policy host/tag matching
-        #[arg(long, default_value = "localhost")]
+        #[arg(long, default_value = "localhost", add = ArgValueCandidates::new(host_candidates))]
         host: String,
         #[arg(long)]
         json: bool,
@@ -736,7 +786,7 @@ enum PolicyCommands {
         /// Name for the new policy
         name: String,
         /// Comma-separated host names this policy applies to
-        #[arg(long, value_delimiter = ',')]
+        #[arg(long, value_delimiter = ',', add = ArgValueCandidates::new(host_candidates))]
         hosts: Option<Vec<String>>,
         /// Comma-separated tags this policy applies to
         #[arg(long, value_delimiter = ',')]
@@ -764,6 +814,7 @@ enum PolicyCommands {
     },
     /// Check if a command on a host would require approval
     Check {
+        #[arg(add = ArgValueCandidates::new(host_candidates))]
         host: String,
         command: String,
         #[arg(long)]
@@ -793,9 +844,10 @@ enum PlaybookCommands {
     /// Run a named playbook against a host
     Run {
         /// Playbook name to run
+        #[arg(add = ArgValueCandidates::new(playbook_candidates))]
         name: String,
         /// Target host profile alias
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(host_candidates))]
         host: String,
         /// Required for high-risk steps
         #[arg(long)]
@@ -816,6 +868,7 @@ enum PlaybookCommands {
     /// Show resolved commands without executing (dry run)
     DryRun {
         /// Playbook name to preview
+        #[arg(add = ArgValueCandidates::new(playbook_candidates))]
         name: String,
         /// Parameters as key=value pairs (repeatable)
         #[arg(long = "params", value_name = "KEY=VALUE")]
@@ -1142,7 +1195,27 @@ async fn remote_snippet_delete(alias: &str, name: &str) -> Result<bool> {
         .context("failed to decode daemon snippet delete response")
 }
 
+fn print_completion_registration(shell: CompletionShell) -> Result<()> {
+    shell
+        .completer()
+        .write_registration(
+            "COMPLETE",
+            "agent2ssh",
+            "agent2ssh",
+            "agent2ssh",
+            &mut std::io::stdout().lock(),
+        )
+        .context("failed to generate shell completion registration")
+}
+
 fn main() -> Result<()> {
+    // Dynamic shell completion must run before normal startup. In particular,
+    // it must not migrate secrets, create ~/.agent2ssh, or start the daemon.
+    clap_complete::CompleteEnv::with_factory(Cli::command)
+        .bin("agent2ssh")
+        .completer("agent2ssh")
+        .complete();
+
     // Run the CLI future itself on a larger stack. Configuring Tokio's worker
     // stack alone is insufficient because Runtime::block_on polls the future
     // on the calling thread, whose default Windows stack is too small for the
@@ -1165,16 +1238,23 @@ fn main() -> Result<()> {
 async fn async_main() -> Result<()> {
     agent2ssh::install_panic_hook("cli");
     agent2ssh::seed_trace_id_from_env();
+    let cli = Cli::parse();
+
+    if let Commands::Completions { shell } = &cli.command {
+        print_completion_registration(*shell)?;
+        return Ok(());
+    }
+
     // K1: best-effort one-shot migration of any legacy plaintext passwords into
     // the app-managed encrypted store. No-op once clean; never blocks startup
     // on failure.
     if let Err(e) = agent2ssh::migrate_plaintext_secrets() {
         eprintln!("warning: secret migration skipped: {e}");
     }
-    let cli = Cli::parse();
     let daemon_alias = cli.daemon.clone();
 
     match cli.command {
+        Commands::Completions { .. } => unreachable!("handled before CLI startup"),
         Commands::Host { command } => match command {
             HostCommands::List {
                 env,

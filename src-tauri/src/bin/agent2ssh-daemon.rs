@@ -2819,6 +2819,78 @@ struct TerminalParams {
 }
 
 #[derive(serde::Deserialize)]
+struct RecordingDeleteParams {
+    confirm: Option<String>,
+}
+
+fn require_recording_admin(auth: &AuthContext) -> Result<(), (StatusCode, Json<ErrorBody>)> {
+    if auth.scope.is_some() {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "terminal recordings require the unrestricted admin token",
+        ));
+    }
+    Ok(())
+}
+
+async fn recordings_config_get(
+    Extension(auth): Extension<AuthContext>,
+) -> Result<Json<agent2ssh::RecordingConfig>, (StatusCode, Json<ErrorBody>)> {
+    require_recording_admin(&auth)?;
+    Ok(Json(agent2ssh::load_recording_config()))
+}
+
+async fn recordings_config_put(
+    Extension(auth): Extension<AuthContext>,
+    Json(config): Json<agent2ssh::RecordingConfig>,
+) -> Result<Json<agent2ssh::RecordingConfig>, (StatusCode, Json<ErrorBody>)> {
+    require_recording_admin(&auth)?;
+    agent2ssh::save_recording_config(&config)
+        .map_err(|error| err(StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    Ok(Json(config))
+}
+
+async fn recordings_list(
+    Extension(auth): Extension<AuthContext>,
+) -> Result<Json<Vec<agent2ssh::RecordingInfo>>, (StatusCode, Json<ErrorBody>)> {
+    require_recording_admin(&auth)?;
+    agent2ssh::list_recordings()
+        .map(Json)
+        .map_err(|error| err(StatusCode::INTERNAL_SERVER_ERROR, error))
+}
+
+async fn recordings_read(
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<String>,
+) -> Result<Json<agent2ssh::RecordingContent>, (StatusCode, Json<ErrorBody>)> {
+    require_recording_admin(&auth)?;
+    agent2ssh::read_recording(&id)
+        .map(Json)
+        .map_err(|error| err(StatusCode::NOT_FOUND, error))
+}
+
+async fn recordings_delete(
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<String>,
+    Query(params): Query<RecordingDeleteParams>,
+) -> Result<Json<agent2ssh::RecordingInfo>, (StatusCode, Json<ErrorBody>)> {
+    require_recording_admin(&auth)?;
+    let confirmed = params.confirm.as_deref() == Some("delete");
+    let info = agent2ssh::delete_recording(&id, confirmed)
+        .map_err(|error| err(StatusCode::BAD_REQUEST, error))?;
+    append_operation_audit(
+        "daemon_recording",
+        &info.host,
+        &format!("delete terminal recording {}", info.id),
+        RiskLevel::Low,
+        Some(0),
+        0,
+        Some("explicit confirm=delete terminal recording deletion"),
+    );
+    Ok(Json(info))
+}
+
+#[derive(serde::Deserialize)]
 struct TerminalControlMessage {
     #[serde(rename = "type")]
     message_type: String,
@@ -2891,6 +2963,27 @@ async fn handle_terminal(
     use futures_util::{SinkExt, StreamExt};
     let host_name = host.name.clone();
     let (terminal_tx, terminal_rx) = spawn_terminal(host.clone(), 80, 24);
+    let mut recorder = if agent2ssh::load_recording_config().enabled {
+        match agent2ssh::Recorder::new(&host_name, 80, 24) {
+            Ok(recorder) => Some(recorder),
+            Err(error) => {
+                let _ = append_diagnostic_log(
+                    "error",
+                    "daemon_recording",
+                    "failed to start terminal recording",
+                    Some(serde_json::json!({
+                        "terminal_id": terminal_id,
+                        "host": host_name,
+                        "error": error.to_string(),
+                    })),
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let recording_id = recorder.as_ref().map(|active| active.id().to_string());
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<TerminalEvent>(128);
     let event_task = tokio::task::spawn_blocking(move || {
         while let Ok(event) = terminal_rx.recv() {
@@ -2930,6 +3023,20 @@ async fn handle_terminal(
                 ).await {
                     match event {
                         TerminalEvent::Output(data) => {
+                            if let Some(active) = recorder.as_mut() {
+                                if let Err(error) = active.record_output(&data) {
+                                    let _ = append_diagnostic_log(
+                                        "error",
+                                        "daemon_recording",
+                                        "terminal recording write failed",
+                                        Some(serde_json::json!({
+                                            "terminal_id": terminal_id,
+                                            "error": error.to_string(),
+                                        })),
+                                    );
+                                    recorder = None;
+                                }
+                            }
                             drain_handle.begin_send().await;
                             if ws_tx.send(Message::Binary(data)).await.is_err() {
                                 break;
@@ -2954,10 +3061,25 @@ async fn handle_terminal(
                                 "username": info.username,
                                 "fingerprint_sha256": info.fingerprint_sha256,
                                 "host_key_algorithm": info.host_key_algorithm,
+                                "recording_id": recording_id,
                             }).to_string()
                         )).await;
                     }
                     Some(TerminalEvent::Output(data)) => {
+                        if let Some(active) = recorder.as_mut() {
+                            if let Err(error) = active.record_output(&data) {
+                                let _ = append_diagnostic_log(
+                                    "error",
+                                    "daemon_recording",
+                                    "terminal recording write failed",
+                                    Some(serde_json::json!({
+                                        "terminal_id": terminal_id,
+                                        "error": error.to_string(),
+                                    })),
+                                );
+                                recorder = None;
+                            }
+                        }
                         drain_handle.begin_send().await;
                         if ws_tx.send(Message::Binary(data)).await.is_err() {
                             drain_handle.end_send().await;
@@ -3046,6 +3168,20 @@ async fn handle_terminal(
                                 cols,
                                 rows,
                             });
+                            if let Some(active) = recorder.as_mut() {
+                                if let Err(error) = active.record_resize(cols, rows) {
+                                    let _ = append_diagnostic_log(
+                                        "error",
+                                        "daemon_recording",
+                                        "terminal resize recording failed",
+                                        Some(serde_json::json!({
+                                            "terminal_id": terminal_id,
+                                            "error": error.to_string(),
+                                        })),
+                                    );
+                                    recorder = None;
+                                }
+                            }
                         }
                     }
                     Some(Ok(Message::Close(_))) | None => break,
@@ -3058,6 +3194,19 @@ async fn handle_terminal(
 
     let _ = terminal_tx.send(TerminalCommand::Close);
     let _ = event_task.await;
+    if let Some(active) = recorder {
+        if let Err(error) = active.finish() {
+            let _ = append_diagnostic_log(
+                "error",
+                "daemon_recording",
+                "failed to finalize terminal recording",
+                Some(serde_json::json!({
+                    "terminal_id": terminal_id,
+                    "error": error.to_string(),
+                })),
+            );
+        }
+    }
     // T2-15: Unregister from drain registry (connection closed normally)
     drain_handle.unregister().await;
     state.limiter.lock().await.unregister_session(&terminal_id);
@@ -3574,6 +3723,15 @@ async fn serve_console() -> axum::response::Html<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recording_endpoints_require_unrestricted_admin_token() {
+        assert!(require_recording_admin(&AuthContext { scope: None }).is_ok());
+        assert!(require_recording_admin(&AuthContext {
+            scope: Some(DaemonScope::default()),
+        })
+        .is_err());
+    }
     use agent2ssh::limits::ExecutionLimitConfig;
     use std::sync::{Mutex, OnceLock};
 
@@ -4150,6 +4308,15 @@ async fn main() -> anyhow::Result<()> {
         .route("/exec/compare", post(exec_compare))
         .route("/exec/stream", get(exec_stream))
         .route("/terminal", get(terminal_attach))
+        .route(
+            "/recordings/config",
+            get(recordings_config_get).put(recordings_config_put),
+        )
+        .route("/recordings", get(recordings_list))
+        .route(
+            "/recordings/:id",
+            get(recordings_read).delete(recordings_delete),
+        )
         .route("/audit", get(audit))
         .route("/audit/export", get(audit_export))
         .route("/sftp/upload", post(sftp_upload))

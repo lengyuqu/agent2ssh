@@ -744,6 +744,66 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+  /recordings/config:
+    description: Recording endpoints require the unrestricted admin token; scoped tokens are rejected.
+    get:
+      summary: Read the opt-in terminal recording setting
+      responses:
+        "200":
+          description: Recording configuration
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [enabled]
+                properties:
+                  enabled: { type: boolean, default: false }
+    put:
+      summary: Enable or disable recording for new terminal sessions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enabled]
+              properties:
+                enabled: { type: boolean }
+      responses:
+        "200": { description: Updated recording configuration }
+
+  /recordings:
+    get:
+      summary: List local asciicast v2 terminal recordings
+      description: Recordings may contain sensitive terminal output and are not included in WebDAV sync.
+      responses:
+        "200":
+          description: Recording metadata, newest first
+
+  /recordings/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Canonical UUID recording identifier; paths and arbitrary filenames are rejected.
+        schema: { type: string, format: uuid }
+    get:
+      summary: Read recording metadata and asciicast v2 JSONL content
+      responses:
+        "200": { description: Recording metadata and content }
+        "404": { description: Missing or invalid recording }
+    delete:
+      summary: Permanently delete a sensitive recording
+      description: Requires `confirm=delete`; successful deletion is appended to the security audit log.
+      parameters:
+        - name: confirm
+          in: query
+          required: true
+          schema: { type: string, const: delete }
+      responses:
+        "200": { description: Deleted recording metadata }
+        "400": { description: Confirmation missing or recording id invalid }
+
   /events/stream:
     get:
       summary: Subscribe to daemon events

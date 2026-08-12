@@ -29,6 +29,7 @@ pub mod path_resolver;
 pub mod playbook;
 pub mod policy;
 pub mod prompt_waiter;
+pub mod recording;
 pub mod redaction;
 pub mod remote;
 pub mod risk_config;
@@ -123,6 +124,10 @@ pub use playbook::{
 pub use policy::{
     existing_policy_path, load_policy_file, load_policy_from_path, parse_policy, policy_json_path,
     policy_toml_path, validate_policy_path, AgentPolicyFile, PolicyDecision, PolicyTestResult,
+};
+pub use recording::{
+    delete_recording, list_recordings, load_recording_config, read_recording,
+    save_recording_config, Recorder, RecordingConfig, RecordingContent, RecordingInfo,
 };
 pub use redaction::{
     default_rules, load_rules_from_json, redact_default, redact_with_defaults, redact_with_rules,
