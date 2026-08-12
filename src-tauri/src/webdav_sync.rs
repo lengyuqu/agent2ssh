@@ -492,6 +492,12 @@ pub fn delete_config_snapshot(id: &str) -> Result<()> {
 /// taking a safety snapshot so the change is undoable via snapshot restore.
 pub fn apply_config_template(files: &[(String, String)]) -> Result<ConfigSnapshotInfo> {
     for (name, _) in files {
+        // S1: Defense-in-depth — reject path traversal even for whitelisted names
+        if !crate::keys::is_safe_filename(name) {
+            return Err(anyhow!(
+                "refusing to write config file with unsafe name: {name}"
+            ));
+        }
         if !SYNCABLE_FILES.contains(&name.as_str()) {
             return Err(anyhow!(
                 "refusing to write non-syncable config file: {name}"

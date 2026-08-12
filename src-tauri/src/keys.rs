@@ -37,12 +37,25 @@ fn restrict_private_key_permissions(path: impl AsRef<std::path::Path>) -> Result
     restrict_file_to_owner(path)
 }
 
+/// S1: Validate that a name is a safe filename component — no path traversal,
+/// no absolute paths, no separators.
+///
+/// Uses the `Path::file_name()` identity check: when input contains path
+/// separators, `..`, or an absolute prefix, `file_name()` returns a different
+/// value than the input, so one comparison rejects every traversal/escape
+/// shape with no special cases.
+pub fn is_safe_filename(name: &str) -> bool {
+    std::path::Path::new(name).file_name() == Some(std::ffi::OsStr::new(name))
+}
+
 fn validate_key_name(name: &str) -> Result<()> {
     if name.trim().is_empty() {
         return Err(anyhow!("key name is required"));
     }
-    if name.contains('/') || name.contains('\\') || name.contains("..") {
-        return Err(anyhow!("invalid key name"));
+    if !is_safe_filename(name) {
+        return Err(anyhow!(
+            "invalid key name: path separators or traversal detected"
+        ));
     }
     Ok(())
 }

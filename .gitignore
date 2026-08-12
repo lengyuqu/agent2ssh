@@ -9,3 +9,6 @@ src-tauri/binaries/*
 .workbuddy/
 .qoder/
 .tmp-sync/
+demo/
+scripts/extract_git233_token.py
+scripts/peek_tea_config.py

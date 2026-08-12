@@ -2730,6 +2730,13 @@ async fn handle_terminal(
         }
     });
 
+    // A1: Per-connection SessionOwner + shutdown propagation.
+    // Each WS connection gets a unique owner UUID and a watch channel that
+    // broadcasts `false` when the connection drops. Any task spawned from
+    // this connection can subscribe to the watch receiver and abort early.
+    let connection_owner = agent2ssh::ResourceOwner::Headless(Uuid::new_v4());
+    let (drop_tx, _drop_rx) = tokio::sync::watch::channel(true);
+
     // T2-15: Register this WS connection for drain tracking
     let drain_handle = state.drain_registry.register().await;
     let shutdown_token = state.shutdown.clone();
@@ -2884,6 +2891,25 @@ async fn handle_terminal(
     // T2-15: Unregister from drain registry (connection closed normally)
     drain_handle.unregister().await;
     state.limiter.lock().await.unregister_session(&terminal_id);
+
+    // A1: Broadcast connection drop to any subscribers, then clean up
+    // all lifecycle resources owned by this connection.
+    let _ = drop_tx.send(false);
+    let closed = agent2ssh::app_state::lifecycle()
+        .lock()
+        .unwrap()
+        .close_owner(&connection_owner, &[]);
+    if !closed.is_empty() {
+        let _ = agent2ssh::append_diagnostic_log(
+            "info",
+            "daemon_terminal",
+            "connection drop: cleaned up owned resources",
+            Some(serde_json::json!({
+                "terminal_id": terminal_id,
+                "closed_resources": closed,
+            })),
+        );
+    }
 }
 
 // ── WebSocket streaming exec ─────────────────────────────────────────────────
@@ -3138,6 +3164,10 @@ async fn exec_stream(
         let drain_handle = app_state.drain_registry.register().await;
         let shutdown_token = app_state.shutdown.clone();
 
+        // A1: Per-connection owner for resource cleanup on disconnect.
+        let connection_owner = agent2ssh::ResourceOwner::Headless(Uuid::new_v4());
+        let (drop_tx, _drop_rx) = tokio::sync::watch::channel(true);
+
         loop {
             tokio::select! {
                 // T2-15: On shutdown, drain remaining output then close
@@ -3291,6 +3321,23 @@ async fn exec_stream(
                     .to_string(),
             ))
             .await;
+
+        // A1: Broadcast connection drop and clean up owned resources.
+        let _ = drop_tx.send(false);
+        let closed = agent2ssh::app_state::lifecycle()
+            .lock()
+            .unwrap()
+            .close_owner(&connection_owner, &[]);
+        if !closed.is_empty() {
+            let _ = agent2ssh::append_diagnostic_log(
+                "info",
+                "daemon_exec_stream",
+                "connection drop: cleaned up owned resources",
+                Some(serde_json::json!({
+                    "closed_resources": closed,
+                })),
+            );
+        }
     })
 }
 

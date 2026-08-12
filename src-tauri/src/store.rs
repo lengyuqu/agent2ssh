@@ -69,6 +69,13 @@ pub fn lock_config_file(name: &str) -> Result<FileLockGuard> {
 }
 
 pub fn config_dir() -> Result<PathBuf> {
+    // Thread-local override takes priority (used by tests to avoid env-var
+    // race conditions when running in parallel).
+    #[cfg(test)]
+    if let Some(path) = THREAD_CONFIG_DIR.with(|d| d.borrow().clone()) {
+        return Ok(path);
+    }
+
     if let Some(path) = config_dir_override(std::env::var("AGENT2SSH_CONFIG_DIR").ok()) {
         return Ok(path);
     }
@@ -76,6 +83,28 @@ pub fn config_dir() -> Result<PathBuf> {
     let base =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("unable to locate home directory"))?;
     Ok(base.join(".agent2ssh"))
+}
+
+/// Thread-local override for the config directory. Tests should use
+/// [`set_test_config_dir`] / [`clear_test_config_dir`] instead of
+/// `std::env::set_var("AGENT2SSH_CONFIG_DIR", ...)` to avoid race conditions
+/// between parallel tests.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static THREAD_CONFIG_DIR: std::cell::RefCell<Option<PathBuf>> =
+        std::cell::RefCell::new(None);
+}
+
+/// Set a thread-local config directory override (test-only).
+#[cfg(test)]
+pub fn set_test_config_dir(path: impl Into<PathBuf>) {
+    THREAD_CONFIG_DIR.with(|d| *d.borrow_mut() = Some(path.into()));
+}
+
+/// Clear the thread-local config directory override (test-only).
+#[cfg(test)]
+pub fn clear_test_config_dir() {
+    THREAD_CONFIG_DIR.with(|d| *d.borrow_mut() = None);
 }
 
 fn config_dir_override(path: Option<String>) -> Option<PathBuf> {
@@ -758,6 +787,16 @@ pub fn compute_metrics_trend(period: TrendPeriod) -> Result<MetricsTrend> {
 }
 
 pub fn redact_sensitive_text(input: &str) -> String {
+    // B1: Idempotency — if the text has already been redacted (contains
+    // redaction markers like `<REDACTED:...>` or `[REDACTED]`), return it
+    // as-is. This prevents double-redaction from corrupting structured
+    // payloads where a redaction marker's content might match a rule
+    // (e.g., a hex hash inside `<REDACTED:hex>` would match the hex rule
+    // again on a second pass).
+    if crate::redaction::is_pre_redacted(input) {
+        return input.to_string();
+    }
+
     // First pass: regex-based default rules (IP, API keys, JWT, hex blobs).
     let regex_redacted = crate::redaction::redact_default(input);
 

@@ -219,6 +219,7 @@ fn probe_host_fingerprint(host: &HostProfile, timeout_secs: u64) -> Result<(Stri
     tcp.set_read_timeout(Some(Duration::from_secs(timeout_secs)))?;
     tcp.set_write_timeout(Some(Duration::from_secs(timeout_secs)))?;
     session.set_tcp_stream(tcp);
+    crate::ssh_algo::apply_algo_prefs(&session, crate::ssh_algo::load_algo_prefs().as_ref())?;
     session.handshake()?;
     match session.host_key() {
         Some((_, kind)) => Ok((
@@ -773,6 +774,7 @@ fn connect_embedded_ssh_inner(
     tcp.set_read_timeout(Some(Duration::from_secs(timeout_secs)))?;
     tcp.set_write_timeout(Some(Duration::from_secs(timeout_secs)))?;
     session.set_tcp_stream(tcp);
+    crate::ssh_algo::apply_algo_prefs(&session, crate::ssh_algo::load_algo_prefs().as_ref())?;
     session.handshake()?;
 
     let host_address = format!("{}:{}", host.host, host.port.unwrap_or(22));

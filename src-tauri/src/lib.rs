@@ -21,6 +21,7 @@ pub mod lifecycle;
 pub mod limits;
 pub mod mcp_binding;
 pub mod notify;
+pub mod path_resolver;
 pub mod playbook;
 pub mod policy;
 pub mod redaction;
@@ -30,12 +31,18 @@ pub mod sanitize;
 pub mod secrets;
 pub mod session;
 pub mod sftp_transfer;
+pub mod ssh_algo;
 pub mod store;
 pub mod telemetry;
 pub mod types;
 pub mod webdav_sync;
 pub mod ws_drain;
 pub mod prompt_waiter;
+pub mod url_safety;
+pub mod snippets;
+pub mod container_discovery;
+pub mod osc_ipc;
+pub mod copy_redact;
 
 #[cfg(feature = "tauri")]
 pub mod tauri_commands;
@@ -82,7 +89,7 @@ pub use error_codes::{
     is_coded_error, parse_coded_error, AnyhowToCodedExt, CodedError, CodedResult, ErrorCode,
     WIRE_PREFIX as ERROR_WIRE_PREFIX,
 };
-pub use forward::{forward_add_core, forward_list_core, forward_remove_core};
+pub use forward::{forward_add_core, forward_list_core, forward_remove_core, forward_stats_core};
 pub use gate::{
     execution_gate_blocks_source, gate_blocks_source, load_execution_gate, save_execution_gate,
     source_can_bypass_gate, ExecutionGateMode, ExecutionGateStatus,
@@ -149,6 +156,13 @@ pub use lifecycle::{
 pub use backup_crypto::{
     decrypt_backup, encrypt_backup, is_encrypted_backup, ENCRYPTED_MAGIC,
 };
+pub use path_resolver::resolve_executable_in;
+pub use sftp_transfer::walk_local_dir;
+pub use url_safety::{validate_url_scheme, open_external_url, strip_ansi_escapes};
+pub use snippets::{load_snippets, save_snippets, Snippet};
+pub use container_discovery::{discover_containers, ContainerDiscoveryTarget, ContainerPlatform};
+pub use osc_ipc::{emit_osc_open, emit_osc_forward, AGENT2SSH_APP_ENV};
+pub use copy_redact::{redact_for_clipboard, load_copy_redact_rules, save_copy_redact_rules, CopyRedactRule};
 
 #[cfg(feature = "tauri")]
 pub use tauri_commands::run_tauri;
