@@ -22,7 +22,8 @@ use crate::{
         list_diagnostic_logs as list_diagnostic_logs_core, DiagnosticLogEntry,
     },
     embedded_ssh::{
-        get_host_fingerprint_status_core, trust_host_fingerprint_core, HostFingerprintStatus,
+        get_host_fingerprint_status_core, import_known_hosts_from_ssh, trust_host_fingerprint_core,
+        HostFingerprintStatus, KnownHostImportSummary,
     },
     execution_control::{
         append_rejected_exec_audit, authorize_command_with_approval, command_authorization_target,
@@ -113,6 +114,8 @@ fn append_operation_audit(
         duration_ms,
         risk_level: risk,
         truncated: false,
+        dropped_bytes: 0,
+        side_effect: None,
     };
     let _ = append_audit(&result, risk, reason, None, Some(source));
 }
@@ -461,6 +464,7 @@ async fn authorize_desktop_exec_request(request: &mut ExecRequest) -> Result<Ris
             force: request.force,
             reason: request.reason.clone(),
             change_id: request.change_id.clone(),
+            side_effect: request.side_effect.clone(),
         },
         |prompt| async move {
             let message = "approval required but no desktop approval handler is available";
@@ -517,6 +521,7 @@ async fn authorize_desktop_exec_targets(
                 force,
                 reason: reason.clone(),
                 change_id: change_id.clone(),
+                side_effect: None,
             },
             |prompt| async move {
                 let message = "approval required but no desktop approval handler is available";
@@ -570,6 +575,7 @@ async fn authorize_desktop_playbook_run(
                 force,
                 reason: None,
                 change_id: None,
+                side_effect: None,
             },
             |prompt| async move {
                 let message = "approval required but no desktop approval handler is available";
@@ -613,6 +619,7 @@ async fn authorize_desktop_operation(
             force,
             reason: None,
             change_id: None,
+            side_effect: None,
         },
         |prompt| async move {
             let message = "approval required but no desktop approval handler is available";
@@ -750,6 +757,7 @@ pub async fn sftp_exchange(request: SftpExchangeRequest) -> Result<SftpExchangeR
             local_path: local_temp.clone(),
             resume: false,
             transfer_id: None,
+            max_mb: None,
         },
         Some(source.clone()),
     )
@@ -1427,6 +1435,14 @@ pub fn passphrase_cache_evict(host_name: String) -> Result<(), String> {
 pub fn passphrase_cache_clear() -> Result<(), String> {
     crate::embedded_ssh::passphrase_cache_clear();
     Ok(())
+}
+
+/// G4: Redact sensitive text before it is placed on the clipboard, so a
+/// copied command block never leaks tokens/keys. Reuses the same
+/// `copy_redact_rules.json` rule set as exec/audit/export redaction.
+#[tauri::command]
+pub fn redact_for_clipboard(text: String) -> String {
+    crate::copy_redact::redact_for_clipboard(&text)
 }
 
 /// B24: List all terminal highlight rules.
@@ -2760,6 +2776,12 @@ pub fn trust_host_fingerprint(request: TrustHostFingerprintRequest) -> Result<()
     .map_err(|e| e.to_string())
 }
 
+/// G13: Import trust from the system OpenSSH `~/.ssh/known_hosts`.
+#[tauri::command]
+pub fn import_known_hosts(path: Option<String>) -> Result<KnownHostImportSummary, String> {
+    import_known_hosts_from_ssh(path.as_deref()).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn list_playbooks() -> Result<Vec<Playbook>, String> {
     list_playbooks_core().map_err(|e| e.to_string())
@@ -3037,6 +3059,8 @@ pub fn run_tauri() {
             remove_highlight,
             update_highlight,
             reset_highlights,
+            // G4: Copy-block redaction
+            redact_for_clipboard,
             // SSH Keys
             list_keys,
             generate_key,
@@ -3055,6 +3079,7 @@ pub fn run_tauri() {
             secrets_change_password,
             get_host_fingerprint_status,
             trust_host_fingerprint,
+            import_known_hosts,
             // Playbooks
             list_playbooks,
             save_playbook,

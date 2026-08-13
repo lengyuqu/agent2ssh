@@ -316,6 +316,9 @@ export const api = {
     invoke<HighlightRule[]>("update_highlight", { oldKeyword, rule }),
   resetHighlights: () => invoke<HighlightRule[]>("reset_highlights"),
 
+  // G4: Copy-block redaction (reuses copy_redact_rules.json)
+  redactForClipboard: (text: string) => invoke<string>("redact_for_clipboard", { text }),
+
   // Command snippets
   listSnippets: () => invoke<Snippet[]>("list_snippets_command"),
   saveSnippet: (snippet: Snippet) =>
@@ -498,6 +501,10 @@ export const api = {
     invoke<HostFingerprintStatus>("get_host_fingerprint_status", { host }),
   trustHostFingerprint: (request: TrustHostFingerprintRequest) =>
     invoke<void>("trust_host_fingerprint", { request }),
+
+  // G13: Import host-key trust from the system OpenSSH ~/.ssh/known_hosts
+  importKnownHosts: (path?: string) =>
+    invoke<{ imported: number; skipped: number }>("import_known_hosts", { path: path ?? null }),
 
   // Webhook config
   getWebhookConfig: () => invoke<WebhookConfig>("get_webhook_config"),

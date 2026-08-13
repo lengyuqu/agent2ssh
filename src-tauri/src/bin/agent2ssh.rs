@@ -6,6 +6,7 @@ use agent2ssh::daemon_control::{
     process_is_alive as daemon_process_is_alive, read_daemon_pid, remove_daemon_pid_file,
     start_daemon_background, terminate_process,
 };
+use agent2ssh::embedded_ssh::{import_known_hosts_from_ssh, KnownHostImportSummary};
 use agent2ssh::events::subscribe_events;
 use agent2ssh::execution_control::{
     append_rejected_exec_audit, authorize_command_with_approval, command_authorization_target,
@@ -63,6 +64,11 @@ enum Commands {
     Completions {
         /// Shell to generate registration for
         shell: CompletionShell,
+    },
+    /// Import host-key trust from the system OpenSSH ~/.ssh/known_hosts
+    KnownHosts {
+        #[command(subcommand)]
+        command: KnownHostsCommands,
     },
     Host {
         #[command(subcommand)]
@@ -409,6 +415,16 @@ enum IntegrateSkillCommands {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum KnownHostsCommands {
+    /// Import trust from ~/.ssh/known_hosts (default) or a given path
+    Import {
+        /// Path to an OpenSSH known_hosts file (defaults to ~/.ssh/known_hosts)
+        #[arg(long)]
+        path: Option<String>,
     },
 }
 
@@ -960,6 +976,7 @@ async fn authorize_local_exec_request(req: &mut ExecRequest) -> Result<RiskLevel
             force: req.force,
             reason: req.reason.clone(),
             change_id: req.change_id.clone(),
+            side_effect: req.side_effect.clone(),
         },
         |prompt| async move {
             let message = "approval required but no local approval handler is available";
@@ -1008,6 +1025,7 @@ async fn authorize_local_exec_targets(
                 force,
                 reason: reason.clone(),
                 change_id: change_id.clone(),
+                side_effect: None,
             },
             |prompt| async move {
                 let message = "approval required but no local approval handler is available";
@@ -1064,6 +1082,7 @@ async fn authorize_local_playbook_run(
                 force,
                 reason: reason.clone(),
                 change_id: change_id.clone(),
+                side_effect: None,
             },
             |prompt| async move {
                 let message = "approval required but no local approval handler is available";
@@ -1109,6 +1128,7 @@ async fn authorize_local_operation(
             force,
             reason: None,
             change_id: None,
+            side_effect: None,
         },
         |prompt| async move {
             let message = "approval required but no local approval handler is available";
@@ -1259,6 +1279,15 @@ async fn async_main() -> Result<()> {
 
     match cli.command {
         Commands::Completions { .. } => unreachable!("handled before CLI startup"),
+        Commands::KnownHosts { command } => match command {
+            KnownHostsCommands::Import { path } => {
+                let summary = import_known_hosts_from_ssh(path.as_deref())?;
+                println!(
+                    "imported {} host(s), skipped {} (hashed or conflicting)",
+                    summary.imported, summary.skipped
+                );
+            }
+        },
         Commands::Host { command } => match command {
             HostCommands::List {
                 env,
@@ -1415,6 +1444,7 @@ async fn async_main() -> Result<()> {
                 max_output_bytes: None,
                 reason,
                 change_id,
+                side_effect: None,
                 source: Some(source_from_transport()),
             };
 
@@ -1677,6 +1707,7 @@ async fn async_main() -> Result<()> {
                         local_path: local,
                         resume,
                         transfer_id: None,
+                        max_mb: None,
                     },
                     Some(source),
                 )

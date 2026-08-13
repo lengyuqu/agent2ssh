@@ -8,6 +8,24 @@ version: 0.2.1
 
 Use this skill when you need to operate remote machines through Agent2SSH.
 
+## Skill Catalog
+
+Match the task to a capability, then drill into only that section (load-on-demand,
+don't read the whole file for a single task):
+
+| Task scenario | Capability | Section |
+|---------------|-----------|---------|
+| Run a command / script on a host | `ssh_exec` / `agent2ssh exec` | Command Execution |
+| Same command across many hosts | `ssh_exec_multi` / `agent2ssh exec-multi` | Command Execution |
+| Copy a file up/down | `ssh_sftp_upload` / `ssh_sftp_download` | SFTP File Operations |
+| Browse / stat a remote path | `ssh_sftp_ls` / `ssh_sftp_stat` | SFTP File Operations |
+| Interactive REPL / long-running shell | `ssh_session_*` | Persistent PTY Sessions |
+| Expose a remote/local port | `ssh_forward_*` | Port Forwarding |
+| Check reachability before batch ops | `ssh_ping` | Connectivity Check |
+| Add / remove / import hosts | `ssh_add_host` / `host import-config` | Host Management |
+| Review past executions | `ssh_audit` | Audit Log |
+| High-risk command (sudo/rm/kill) | `force: true` + user confirmation | Risk Levels |
+
 ## Discovery Checklist
 
 Before using Agent2SSH from an agent, discover the available local entry point:

@@ -22,6 +22,7 @@ pub struct CommandAuthorizationInput<'a> {
     pub force: bool,
     pub reason: Option<String>,
     pub change_id: Option<String>,
+    pub side_effect: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +47,7 @@ pub struct ApprovalPrompt {
     pub ttl_secs: u64,
     pub reason: Option<String>,
     pub change_id: Option<String>,
+    pub side_effect: Option<String>,
     pub source: String,
 }
 
@@ -160,6 +162,8 @@ pub fn append_rejected_exec_audit(
         duration_ms: 0,
         risk_level: risk,
         truncated: false,
+        dropped_bytes: 0,
+        side_effect: None,
     };
     let _ = append_audit(&result, risk, Some(reason), change_id, Some(source));
 }
@@ -218,6 +222,7 @@ where
         ttl_secs,
         reason: input.reason,
         change_id: change_id.clone(),
+        side_effect: input.side_effect.clone(),
         source: input.source.to_string(),
     };
     match approval(prompt)
@@ -273,6 +278,7 @@ mod tests {
             force: false,
             reason: None,
             change_id: None,
+            side_effect: None,
         };
         let result = authorize_command_with_approval(input, |_| async {
             panic!("approval should not be requested when scope denies")
@@ -297,6 +303,7 @@ mod tests {
             force: false,
             reason: None,
             change_id: None,
+            side_effect: None,
         };
 
         let result = authorize_command_with_approval(input, |_| async {
@@ -322,6 +329,7 @@ mod tests {
             force: true,
             reason: None,
             change_id: None,
+            side_effect: None,
         };
 
         let result = authorize_command_with_approval(input, |_| async {

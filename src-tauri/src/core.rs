@@ -14,7 +14,7 @@ pub use team_config::*;
 
 use crate::{
     embedded_ssh::connect_embedded_ssh,
-    sanitize::analyze_command,
+    sanitize::{analyze_command, ShapeRisk},
     store::{append_audit, list_audit_raw, load_config, save_config_unlocked, store_write_lock},
     types::{
         default_host_group, source_from_env, AuditEntry, AuditFilter, BatchStrategy,
@@ -586,6 +586,18 @@ pub fn classify_risk(command: &str) -> RiskLevel {
         return RiskLevel::Medium;
     }
 
+    // ── SHAPE (interactive / unbounded loop) ────────────────────────────────
+    // Mirror RSSH's shape validator: commands that block a non-interactive
+    // exec channel (bare `top`, `htop`, `vim`, `less`, `tail -f`, ...) or run
+    // an unbounded sampling loop (`vmstat 1` without a count) must never be
+    // silently executed at Low risk by an agent — they would hang the session
+    // until timeout. Surface them at Medium so they are visible and gated.
+    match analysis.shape {
+        Some(ShapeRisk::Interactive) => return RiskLevel::Medium,
+        Some(ShapeRisk::UnboundedLoop) => return RiskLevel::Medium,
+        None => {}
+    }
+
     RiskLevel::Low
 }
 
@@ -808,6 +820,7 @@ struct EmbeddedExecOutput {
     stdout: Vec<u8>,
     stderr: Vec<u8>,
     truncated: bool,
+    dropped_bytes: usize,
 }
 
 fn exec_ssh_embedded(
@@ -825,22 +838,40 @@ fn exec_ssh_embedded(
         channel.send_eof()?;
     }
 
-    let mut stdout = Vec::new();
+    // Truncation keeps BOTH the head and the tail of the output. The trailing
+    // portion is where error stacks, OOM messages, and log tails live, so a
+    // head-only cut would throw away exactly what an agent needs to diagnose.
+    // We retain `head_bytes` from the start and `tail_bytes` (rolling) from
+    // the end, and record how many middle bytes were dropped.
+    let head_bytes = (max_bytes / 2).max(1);
+    let tail_bytes = max_bytes.saturating_sub(head_bytes);
+    let mut head = Vec::new();
+    let mut tail: Vec<u8> = Vec::new();
     let mut buffer = [0u8; 8192];
-    let mut truncated = false;
+    let mut total_read: usize = 0;
     loop {
         let read = channel.read(&mut buffer)?;
         if read == 0 {
             break;
         }
-        if stdout.len() < max_bytes {
-            let remaining = max_bytes - stdout.len();
-            stdout.extend_from_slice(&buffer[..read.min(remaining)]);
-        }
-        if stdout.len() >= max_bytes {
-            truncated = true;
+        total_read += read;
+        let chunk = &buffer[..read];
+        if head.len() < head_bytes {
+            let remaining = head_bytes - head.len();
+            let take = read.min(remaining);
+            head.extend_from_slice(&chunk[..take]);
+            if take < read {
+                append_rolling_tail(&mut tail, &chunk[take..], tail_bytes);
+            }
+        } else {
+            append_rolling_tail(&mut tail, chunk, tail_bytes);
         }
     }
+
+    let truncated = total_read > max_bytes;
+    let dropped_bytes = total_read.saturating_sub(max_bytes);
+    let mut stdout = head;
+    stdout.extend_from_slice(&tail);
 
     let mut stderr = Vec::new();
     channel.stderr().read_to_end(&mut stderr)?;
@@ -850,7 +881,26 @@ fn exec_ssh_embedded(
         stdout,
         stderr,
         truncated,
+        dropped_bytes,
     })
+}
+
+/// Append `chunk` to a rolling tail buffer that keeps only the last
+/// `max_tail` bytes, discarding the oldest bytes as it grows.
+fn append_rolling_tail(tail: &mut Vec<u8>, chunk: &[u8], max_tail: usize) {
+    if max_tail == 0 {
+        return;
+    }
+    if chunk.len() >= max_tail {
+        tail.clear();
+        tail.extend_from_slice(&chunk[chunk.len() - max_tail..]);
+    } else {
+        tail.extend_from_slice(chunk);
+        if tail.len() > max_tail {
+            let overflow = tail.len() - max_tail;
+            tail.drain(..overflow);
+        }
+    }
 }
 
 pub fn apply_risk_override(classified: RiskLevel, override_level: Option<RiskLevel>) -> RiskLevel {
@@ -935,6 +985,8 @@ pub(crate) async fn exec_ssh_core_with_risk_override(
         duration_ms: started.elapsed().as_millis(),
         risk_level: risk,
         truncated: embedded_output.truncated,
+        dropped_bytes: embedded_output.dropped_bytes,
+        side_effect: request.side_effect.clone(),
     };
     append_audit(
         &result,
@@ -972,6 +1024,8 @@ fn append_rejected_exec_audit(request: &ExecRequest, risk: RiskLevel, source: &s
         duration_ms: 0,
         risk_level: risk,
         truncated: false,
+        dropped_bytes: 0,
+        side_effect: None,
     };
     let _ = append_audit(
         &result,
@@ -1017,6 +1071,7 @@ pub async fn exec_multi_core(request: ExecMultiRequest) -> Vec<ExecMultiResult> 
                 max_output_bytes: None,
                 reason: req_reason,
                 change_id: req_change_id,
+                side_effect: None,
                 source: req_source,
             };
             match exec_ssh_core(req).await {
@@ -1109,6 +1164,7 @@ pub async fn exec_multi_with_strategy(request: ExecMultiBatchRequest) -> ExecMul
                     max_output_bytes: None,
                     reason: req_reason,
                     change_id: req_change_id,
+                    side_effect: None,
                     source: req_source,
                 };
                 match exec_ssh_core(req).await {
@@ -1203,6 +1259,7 @@ pub async fn exec_multi_with_strategy(request: ExecMultiBatchRequest) -> ExecMul
                     max_output_bytes: None,
                     reason: req_reason,
                     change_id: req_change_id,
+                    side_effect: None,
                     source: req_source,
                 };
                 match exec_ssh_core(req).await {
@@ -1542,6 +1599,8 @@ pub async fn sftp_upload_core_with_source(
             duration_ms: 0,
             risk_level: risk,
             truncated: false,
+            dropped_bytes: 0,
+            side_effect: None,
         };
         let _ = append_audit(&result, risk, Some(message), None, Some(&source));
         return Err(anyhow!(message));
@@ -1611,6 +1670,8 @@ pub async fn sftp_upload_core_with_source(
                 duration_ms,
                 risk_level: risk,
                 truncated: false,
+                dropped_bytes: 0,
+                side_effect: None,
             };
             let _ = append_audit(&result, risk, Some(&message), None, Some(&source));
             return Err(error);
@@ -1634,6 +1695,8 @@ pub async fn sftp_upload_core_with_source(
         duration_ms,
         risk_level: risk,
         truncated: false,
+        dropped_bytes: 0,
+        side_effect: None,
     };
     let _ = append_audit(&audit_result, risk, None, None, Some(&source));
     Ok(result)
@@ -1669,6 +1732,8 @@ pub async fn sftp_download_core_with_source(
             duration_ms: 0,
             risk_level: risk,
             truncated: false,
+            dropped_bytes: 0,
+            side_effect: None,
         };
         let _ = append_audit(&result, risk, Some(message), None, Some(&source));
         return Err(anyhow!(message));
@@ -1680,6 +1745,9 @@ pub async fn sftp_download_core_with_source(
     let local_for_task = local.clone();
     let resume = request.resume;
     let transfer_id = request.transfer_id.clone();
+    // G8: SFTP download is hard-capped (default 100 MiB). GB-scale artifacts
+    // belong on scp/rsync/sz, not a single SSH SFTP channel.
+    let max_mb = request.max_mb.unwrap_or(100);
     let transfer_result = tokio::task::spawn_blocking(move || -> Result<u64> {
         use std::io::{Seek, SeekFrom};
         let cancel = match &transfer_id {
@@ -1693,6 +1761,14 @@ pub async fn sftp_download_core_with_source(
                 .open(Path::new(&remote_path))
                 .with_context(|| format!("failed to open remote file {remote_path}"))?;
             let remote_size = remote_file.stat().ok().and_then(|s| s.size);
+            if let Some(size) = remote_size {
+                let cap_bytes = max_mb.saturating_mul(1024 * 1024);
+                if size > cap_bytes {
+                    return Err(anyhow!(
+                        "remote file is {size} bytes (>{max_mb} MiB); SFTP download is capped at {max_mb} MiB. Use scp/rsync/sz to pull it locally, then analyze with a local tool"
+                    ));
+                }
+            }
             // K6: resume appends from the local file's current length.
             let existing = std::fs::metadata(&local_for_task)
                 .map(|m| m.len())
@@ -1736,6 +1812,8 @@ pub async fn sftp_download_core_with_source(
                 duration_ms,
                 risk_level: risk,
                 truncated: false,
+                dropped_bytes: 0,
+                side_effect: None,
             };
             let _ = append_audit(&result, risk, Some(&message), None, Some(&source));
             return Err(error);
@@ -1759,6 +1837,8 @@ pub async fn sftp_download_core_with_source(
         duration_ms,
         risk_level: risk,
         truncated: false,
+        dropped_bytes: 0,
+        side_effect: None,
     };
     let _ = append_audit(&audit_result, risk, None, None, Some(&source));
     Ok(result)
@@ -1942,6 +2022,8 @@ where
             duration_ms: 0,
             risk_level: risk,
             truncated: false,
+            dropped_bytes: 0,
+            side_effect: None,
         };
         let _ = append_audit(&result, risk, Some(&message), None, Some(&source));
         return Err(anyhow!(message));
@@ -1966,6 +2048,8 @@ where
                 duration_ms,
                 risk_level: risk,
                 truncated: false,
+                dropped_bytes: 0,
+                side_effect: None,
             };
             let _ = append_audit(&result, risk, None, None, Some(&source));
             Ok(result)
@@ -1981,6 +2065,8 @@ where
                 duration_ms,
                 risk_level: risk,
                 truncated: false,
+                dropped_bytes: 0,
+                side_effect: None,
             };
             let _ = append_audit(&result, risk, Some(&message), None, Some(&source));
             Err(error)
@@ -2903,6 +2989,37 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_risk_interactive_shape_medium() {
+        // Interactive full-screen / flooding commands must not stay Low (they
+        // would block a non-interactive exec channel until timeout).
+        assert_eq!(classify_risk("htop"), RiskLevel::Medium);
+        assert_eq!(classify_risk("watch -n 1 date"), RiskLevel::Medium);
+        assert_eq!(classify_risk("vim /etc/hosts"), RiskLevel::Medium);
+        assert_eq!(classify_risk("less /var/log/syslog"), RiskLevel::Medium);
+        assert_eq!(classify_risk("tmux"), RiskLevel::Medium);
+        assert_eq!(classify_risk("top"), RiskLevel::Medium);
+        assert_eq!(classify_risk("tail -f /var/log/syslog"), RiskLevel::Medium);
+        // `sudo` already escalates to High before the shape check runs.
+        assert_eq!(classify_risk("sudo htop"), RiskLevel::High);
+    }
+
+    #[test]
+    fn test_classify_risk_unbounded_loop_medium() {
+        assert_eq!(classify_risk("vmstat"), RiskLevel::Medium);
+        assert_eq!(classify_risk("vmstat 1"), RiskLevel::Medium);
+        assert_eq!(classify_risk("iostat"), RiskLevel::Medium);
+    }
+
+    #[test]
+    fn test_classify_risk_batch_sampling_stays_low() {
+        // Batch / bounded sampling is safe and must stay Low.
+        assert_eq!(classify_risk("top -bn1"), RiskLevel::Low);
+        assert_eq!(classify_risk("top -l 1"), RiskLevel::Low);
+        assert_eq!(classify_risk("vmstat 1 5"), RiskLevel::Low);
+        assert_eq!(classify_risk("tail -n 100 /var/log/syslog"), RiskLevel::Low);
+    }
+
+    #[test]
     fn test_classify_risk_dd_blocked() {
         assert_eq!(
             classify_risk("dd if=/dev/zero of=/dev/sda bs=1M"),
@@ -3571,6 +3688,7 @@ mod tests {
             risk_level: RiskLevel::Low,
             reason: Some("daily health check".into()),
             change_id: Some("CHG-12345".into()),
+            side_effect: None,
             source: Some("cli".into()),
         };
 
@@ -3686,6 +3804,8 @@ mod tests {
                     duration_ms: 100,
                     risk_level: RiskLevel::Low,
                     truncated: false,
+                    dropped_bytes: 0,
+                    side_effect: None,
                 }),
                 error: None,
             },
@@ -3700,6 +3820,8 @@ mod tests {
                     duration_ms: 120,
                     risk_level: RiskLevel::Low,
                     truncated: false,
+                    dropped_bytes: 0,
+                    side_effect: None,
                 }),
                 error: None,
             },
@@ -3735,6 +3857,8 @@ mod tests {
                     duration_ms: 50,
                     risk_level: RiskLevel::Low,
                     truncated: false,
+                    dropped_bytes: 0,
+                    side_effect: None,
                 }),
                 error: None,
             },
@@ -3749,6 +3873,8 @@ mod tests {
                     duration_ms: 60,
                     risk_level: RiskLevel::Low,
                     truncated: false,
+                    dropped_bytes: 0,
+                    side_effect: None,
                 }),
                 error: None,
             },
@@ -3804,6 +3930,8 @@ mod tests {
                     duration_ms: 50,
                     risk_level: RiskLevel::Low,
                     truncated: false,
+                    dropped_bytes: 0,
+                    side_effect: None,
                 }),
                 error: None,
             },
@@ -3818,6 +3946,8 @@ mod tests {
                     duration_ms: 50,
                     risk_level: RiskLevel::Low,
                     truncated: false,
+                    dropped_bytes: 0,
+                    side_effect: None,
                 }),
                 error: None,
             },

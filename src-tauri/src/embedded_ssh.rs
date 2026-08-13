@@ -345,6 +345,129 @@ pub fn list_known_hosts_core() -> Result<Vec<TrustedHostFingerprint>> {
     Ok(trusted.into_values().collect())
 }
 
+/// G13: Result of importing trust from the system OpenSSH `known_hosts`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnownHostImportSummary {
+    pub imported: usize,
+    pub skipped: usize,
+}
+
+/// G13: Import trust from the system OpenSSH `~/.ssh/known_hosts` into
+/// Agent2SSH's `known_hosts.json`, so hosts already trusted by the command-line
+/// `ssh` no longer trigger a TOFU prompt in Agent2SSH.
+///
+/// Only plaintext host entries are imported. Hashed entries (`|1|...`) cannot
+/// be resolved back to a hostname and are counted as skipped. For each entry
+/// the SHA256 fingerprint is recomputed from the stored public-key blob, which
+/// matches the fingerprint Agent2SSH records at connect time. Conflicting
+/// fingerprints for an already-trusted identity are skipped (never overwrite).
+pub fn import_known_hosts_from_ssh(path: Option<&str>) -> Result<KnownHostImportSummary> {
+    let ssh_path = match path {
+        Some(p) => std::path::PathBuf::from(expand_tilde(p)),
+        None => dirs::home_dir()
+            .ok_or_else(|| anyhow!("cannot determine home directory"))?
+            .join(".ssh")
+            .join("known_hosts"),
+    };
+    if !ssh_path.exists() {
+        return Err(anyhow!("{} not found", ssh_path.display()));
+    }
+    let raw = std::fs::read_to_string(&ssh_path)
+        .with_context(|| format!("failed to read {}", ssh_path.display()))?;
+
+    let _guard = crate::store::lock_config_file(".known_hosts.lock")?;
+    let mut trusted = load_known_host_fingerprints_unlocked()?;
+    let now = now_unix_secs();
+
+    let mut imported = 0usize;
+    let mut skipped = 0usize;
+    let mut changed = false;
+
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('|') {
+            // Hashed host entry — hostname is not recoverable.
+            skipped += 1;
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let (Some(host_field), Some(key_type), Some(key_b64)) =
+            (parts.next(), parts.next(), parts.next())
+        else {
+            skipped += 1;
+            continue;
+        };
+        let key_blob = match STANDARD.decode(key_b64) {
+            Ok(blob) => blob,
+            Err(_) => {
+                skipped += 1;
+                continue;
+            }
+        };
+        let fingerprint = format!(
+            "SHA256:{}",
+            STANDARD_NO_PAD.encode(Sha256::digest(&key_blob))
+        );
+
+        let first_host = host_field.split(',').next().unwrap_or(host_field);
+        let (hostname, port) = split_host_port(first_host);
+        let identity = format!("{hostname}:{port}");
+
+        if let Some(existing) = trusted.get_mut(&identity) {
+            if existing.fingerprint_sha256 != fingerprint {
+                // Conflicting fingerprint — keep the existing trust, skip.
+                skipped += 1;
+                continue;
+            }
+            existing.last_seen_unix = now;
+            existing.host = hostname.clone();
+            existing.address = hostname.clone();
+            changed = true;
+            continue;
+        }
+
+        trusted.insert(
+            identity,
+            TrustedHostFingerprint {
+                host: hostname.clone(),
+                address: hostname.clone(),
+                host_key_algorithm: key_type.to_string(),
+                fingerprint_sha256: fingerprint,
+                first_seen_unix: now,
+                last_seen_unix: now,
+            },
+        );
+        imported += 1;
+        changed = true;
+    }
+
+    if changed {
+        save_known_host_fingerprints_unlocked(&trusted)?;
+    }
+    Ok(KnownHostImportSummary { imported, skipped })
+}
+
+/// Split an OpenSSH host field into `(hostname, port)`. Handles the
+/// `[ipv6]:port` form; a bare hostname defaults to port 22.
+fn split_host_port(host_field: &str) -> (String, u16) {
+    if let Some(rest) = host_field.strip_prefix('[') {
+        if let Some(close) = rest.find(']') {
+            let host = &rest[..close];
+            let after = &rest[close + 1..];
+            if let Some(port_str) = after.strip_prefix(':') {
+                if let Ok(port) = port_str.parse::<u16>() {
+                    return (host.to_string(), port);
+                }
+            }
+            return (host.to_string(), 22);
+        }
+    }
+    (host_field.to_string(), 22)
+}
+
 fn default_username() -> String {
     std::env::var("USER").unwrap_or_else(|_| "root".to_string())
 }

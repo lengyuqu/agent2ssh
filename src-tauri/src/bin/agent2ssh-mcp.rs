@@ -685,6 +685,7 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
             let daemon_alias = args["daemon_alias"].as_str().map(str::to_string);
             let reason = args["reason"].as_str().map(str::to_string);
             let change_id = args["change_id"].as_str().map(str::to_string);
+            let side_effect = args["side_effect"].as_str().map(str::to_string);
 
             let max_output_bytes = args["max_output_bytes"].as_u64().map(|v| v as usize);
             let mut request = ExecRequest {
@@ -696,6 +697,7 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
                 max_output_bytes,
                 reason,
                 change_id,
+                side_effect,
                 source: Some(mcp_source()),
             };
 

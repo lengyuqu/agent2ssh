@@ -21,6 +21,8 @@ import {
   createCommandBlockTracker,
   type CommandBlockTracker,
 } from "../lib/terminal/command-blocks";
+import { createFoldStore, type FoldStore } from "../lib/terminal/folds";
+import { renderBlocksToBlob } from "../lib/terminal/block-to-image";
 
 type Props = {
   host: string;
@@ -43,6 +45,10 @@ export type CommandBlockCopyResult =
   | { ok: true; characters: number }
   | { ok: false; reason: "not_found" | "too_large" | "clipboard_unavailable" | "clipboard_failed" };
 
+export type CommandBlockImageResult =
+  | { ok: true }
+  | { ok: false; reason: "not_found" | "render_failed" | "clipboard_unavailable" | "clipboard_failed" };
+
 export type TerminalViewHandle = {
   /** Inject text as if typed, without a trailing Enter — used by history search
    *  so the user can review/edit a past line before running it. */
@@ -53,6 +59,12 @@ export type TerminalViewHandle = {
   searchBlocks: (query: string) => CommandBlockMetadata[];
   selectBlock: (id: string) => boolean;
   copyBlock: (id: string) => Promise<CommandBlockCopyResult>;
+  /** Render a block to PNG and write it to the clipboard. */
+  copyBlockAsImage: (id: string) => Promise<CommandBlockImageResult>;
+  /** Fold/unfold a command block (real buffer splice, not CSS hide). */
+  foldBlock: (id: string) => boolean;
+  unfoldBlock: (id: string) => boolean;
+  isBlockFolded: (id: string) => boolean;
 };
 
 /** A live interactive terminal to a host, streamed over the daemon's
@@ -65,6 +77,7 @@ const TerminalView = forwardRef<TerminalViewHandle, Props>(function TerminalView
   const wsRef = useRef<WebSocket | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const trackerRef = useRef<CommandBlockTracker | null>(null);
+  const foldStoreRef = useRef<FoldStore | null>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
   const blockPaintRef = useRef<{ schedule(): void } | null>(null);
   const selectedBlockIdRef = useRef<string | null>(null);
@@ -156,8 +169,36 @@ const TerminalView = forwardRef<TerminalViewHandle, Props>(function TerminalView
         }
         if (!navigator.clipboard?.writeText) return { ok: false, reason: "clipboard_unavailable" };
         try {
-          await navigator.clipboard.writeText(text);
+          // G4: redact tokens/keys before the copied block reaches the
+          // clipboard — same rules as exec/audit/export (copy_redact_rules.json).
+          const redacted = await api.redactForClipboard(text);
+          await navigator.clipboard.writeText(redacted);
           return { ok: true, characters: text.length };
+        } catch {
+          return { ok: false, reason: "clipboard_failed" };
+        }
+      },
+      foldBlock: (id: string) => foldStoreRef.current?.fold(id) ?? false,
+      unfoldBlock: (id: string) => foldStoreRef.current?.unfold(id) ?? false,
+      isBlockFolded: (id: string) => foldStoreRef.current?.isFolded(id) ?? false,
+      copyBlockAsImage: async (id: string) => {
+        const term = termRef.current;
+        const tracker = trackerRef.current;
+        const block = tracker?.blocks.find((candidate) => candidate.id === id);
+        if (!term || !block) return { ok: false, reason: "not_found" };
+        if (!navigator.clipboard?.write || typeof ClipboardItem === "undefined") {
+          return { ok: false, reason: "clipboard_unavailable" };
+        }
+        let blob: Blob | null;
+        try {
+          blob = await renderBlocksToBlob(term, [block]);
+        } catch {
+          return { ok: false, reason: "render_failed" };
+        }
+        if (!blob) return { ok: false, reason: "render_failed" };
+        try {
+          await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+          return { ok: true };
         } catch {
           return { ok: false, reason: "clipboard_failed" };
         }
@@ -214,6 +255,9 @@ const TerminalView = forwardRef<TerminalViewHandle, Props>(function TerminalView
       getPendingCommand: () => lineBufferRef.current,
     });
     trackerRef.current = tracker;
+
+    const foldStore = createFoldStore(term, tracker);
+    foldStoreRef.current = foldStore;
 
     const paintBlocks = () => {
       const overlay = overlayRef.current;
@@ -416,6 +460,9 @@ const TerminalView = forwardRef<TerminalViewHandle, Props>(function TerminalView
 
     const onResize = () => {
       try {
+        // Folds are saved at the old column width — expand them before the
+        // terminal reflows its rows.
+        foldStoreRef.current?.unfoldAll();
         fit.fit();
         sendResize();
         highlightPaint.schedule();
@@ -443,6 +490,8 @@ const TerminalView = forwardRef<TerminalViewHandle, Props>(function TerminalView
       blocksChangedSub.dispose();
       blockPaint.dispose();
       blockPaintRef.current = null;
+      foldStoreRef.current?.dispose();
+      foldStoreRef.current = null;
       tracker.dispose();
       trackerRef.current = null;
       overlayRef.current?.replaceChildren();

@@ -197,6 +197,11 @@ pub struct ExecRequest {
     /// Optional change/ticket ID for this operation (for audit trail).
     #[serde(default)]
     pub change_id: Option<String>,
+    /// Optional side-effect description declared by the caller (G6), e.g.
+    /// "triggers a Full GC, 100-300ms business pause". Surfaced on the
+    /// approval card and recorded in the audit trail.
+    #[serde(default)]
+    pub side_effect: Option<String>,
     /// Source that initiated the operation, such as cli, mcp, daemon, or desktop.
     #[serde(default)]
     pub source: Option<String>,
@@ -291,6 +296,15 @@ pub struct ExecResult {
     /// True when output was cut short by max_output_bytes.
     #[serde(default)]
     pub truncated: bool,
+    /// Number of output bytes dropped by truncation. Truncation keeps the
+    /// head and tail of the output (so trailing error stacks survive) and
+    /// drops the middle; this records exactly how much was dropped.
+    #[serde(default)]
+    pub dropped_bytes: usize,
+    /// Side-effect description declared by the caller (G6), carried into the
+    /// audit trail so operators can see the declared impact of a command.
+    #[serde(default)]
+    pub side_effect: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -309,6 +323,9 @@ pub struct AuditEntry {
     /// Optional change/ticket ID
     #[serde(default)]
     pub change_id: Option<String>,
+    /// Optional side-effect description declared by the caller (G6).
+    #[serde(default)]
+    pub side_effect: Option<String>,
     /// Source that initiated the operation, such as cli, mcp, daemon, or desktop.
     #[serde(default)]
     pub source: Option<String>,
@@ -380,6 +397,12 @@ pub struct SftpDownloadRequest {
     /// `sftp_cancel`.
     #[serde(default)]
     pub transfer_id: Option<String>,
+    /// G8: hard cap on the remote file size in MiB (default 100). Files larger
+    /// than this are rejected with guidance to use `scp`/`rsync`/`sz` instead
+    /// of SFTP — a single SSH channel is not the right transport for GB-scale
+    /// artifacts, and an agent silently pulling them is hostile.
+    #[serde(default)]
+    pub max_mb: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

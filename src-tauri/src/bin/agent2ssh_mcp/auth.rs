@@ -24,6 +24,7 @@ pub(super) async fn authorize_local_mcp_exec_request(
             force: request.force,
             reason: request.reason.clone(),
             change_id: request.change_id.clone(),
+            side_effect: request.side_effect.clone(),
         },
         |prompt| async move {
             let message = "approval required but no local MCP approval handler is available";
@@ -70,6 +71,7 @@ pub(super) async fn authorize_local_mcp_exec_targets(
                 force,
                 reason: reason.clone(),
                 change_id: change_id.clone(),
+                side_effect: None,
             },
             |prompt| async move {
                 let message = "approval required but no local MCP approval handler is available";
@@ -125,6 +127,7 @@ pub(super) async fn authorize_local_mcp_playbook_run(
                 force,
                 reason: reason.clone(),
                 change_id: change_id.clone(),
+                side_effect: None,
             },
             |prompt| async move {
                 let message = "approval required but no local MCP approval handler is available";
@@ -168,6 +171,7 @@ pub(super) async fn authorize_local_mcp_operation(
             force,
             reason: None,
             change_id: None,
+            side_effect: None,
         },
         |prompt| async move {
             let message = "approval required but no local MCP approval handler is available";

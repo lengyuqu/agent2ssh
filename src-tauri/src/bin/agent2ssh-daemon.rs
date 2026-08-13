@@ -283,6 +283,8 @@ fn reject_if_gate_paused(
         duration_ms: 0,
         risk_level: RiskLevel::Blocked,
         truncated: false,
+        dropped_bytes: 0,
+        side_effect: None,
     };
     let _ = append_audit(
         &result,
@@ -330,6 +332,8 @@ fn append_operation_audit(
         duration_ms,
         risk_level: risk,
         truncated: false,
+        dropped_bytes: 0,
+        side_effect: None,
     };
     let _ = append_audit(&result, risk, reason, None, Some(source));
 }
@@ -442,6 +446,7 @@ async fn authorize_command(
         force,
         reason,
         change_id,
+        side_effect: None,
     };
 
     match authorize_command_with_approval(input, request_and_wait_for_approval).await {
@@ -600,6 +605,8 @@ fn write_limit_rejection_audit(
         duration_ms: 0,
         risk_level: RiskLevel::Blocked,
         truncated: false,
+        dropped_bytes: 0,
+        side_effect: None,
     };
     let reason = format!(
         "execution limit exceeded: {} current={} limit={}",
@@ -4027,7 +4034,7 @@ async fn exec_stream(
             stderr: String::new(),
             duration_ms,
             risk_level: risk,
-            truncated: false,
+            truncated: false, dropped_bytes: 0, side_effect: None,
         };
         let _ = append_audit(
             &audit_result,

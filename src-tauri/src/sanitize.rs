@@ -99,6 +99,23 @@ const BREW_PREFIXES: &[(&str, &str)] = &[
 /// awk variants that should be normalized to `awk`.
 const AWK_VARIANTS: &[&str] = &["gawk", "mawk", "nawk"];
 
+/// Structured shape risk, consumed by `classify_risk` to surface commands that
+/// would block or flood a non-interactive exec channel above `Low`.
+///
+/// This mirrors RSSH's "shape validator" layer: it flags command *shapes*
+/// (interactive full-screen programs, sampling loops without an explicit
+/// count) independently of the destructive-command blacklist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShapeRisk {
+    /// Interactive full-screen / flooding command (bare `top`, `htop`, `watch`,
+    /// `vim`, `less`, `tmux`, `screen`, `tail -f`). These block a
+    /// non-interactive exec channel or flood a session with terminal redraws.
+    Interactive,
+    /// Sampling loop without an explicit iteration count (`vmstat 1` instead
+    /// of `vmstat 1 5`).
+    UnboundedLoop,
+}
+
 /// The result of analyzing a command: the canonical head (or `None` if parsing
 /// failed — **fail-closed**), and whether the command had any parse errors.
 #[derive(Debug, Clone)]
@@ -118,6 +135,9 @@ pub struct CommandAnalysis {
     /// S3: Security warnings detected by per-command shape rules — e.g.
     /// `find -delete`, `curl -O`, `sed -i`, `tail -f` without a count, etc.
     pub shape_warnings: Vec<String>,
+    /// Structured shape risk (interactive / unbounded loop), if any. Consumed
+    /// by `classify_risk` to escalate these commands above `Low`.
+    pub shape: Option<ShapeRisk>,
 }
 
 /// Parse a command string and extract its canonical command head.
@@ -147,6 +167,7 @@ pub fn analyze_command(command: &str) -> CommandAnalysis {
                 had_parse_errors: true,
                 redirect_warnings: vec![],
                 shape_warnings: vec![],
+                shape: None,
             }
         }
     };
@@ -159,6 +180,7 @@ pub fn analyze_command(command: &str) -> CommandAnalysis {
                 had_parse_errors: true,
                 redirect_warnings: vec![],
                 shape_warnings: vec![],
+                shape: None,
             }
         }
     };
@@ -173,13 +195,14 @@ pub fn analyze_command(command: &str) -> CommandAnalysis {
     let redirect_warnings = check_all_redirects(&root, source);
 
     // S3: Check per-command shape rules (find -delete, curl -O, sed -i, etc.)
-    let shape_warnings = check_command_shapes(&root, source);
+    let (shape_warnings, shape) = check_command_shapes(&root, source);
 
     CommandAnalysis {
         canonical_head: head,
         had_parse_errors: had_errors,
         redirect_warnings,
         shape_warnings,
+        shape,
     }
 }
 
@@ -649,12 +672,21 @@ fn check_one_file_redirect(r: &Node, source: &[u8], warnings: &mut Vec<String>) 
 /// (interval + count) to prevent unbounded loops.
 const COUNTED_LOOP_COMMANDS: &[&str] = &["vmstat", "iostat", "mpstat", "sar", "pidstat", "dstat"];
 
+/// Interactive full-screen programs, pagers, and multiplexers that block a
+/// non-interactive exec channel (they read from the TTY / repaint the whole
+/// screen). RSSH's shape validator flags these before sending them to SSH.
+const INTERACTIVE_FULLSCREEN_COMMANDS: &[&str] = &[
+    "htop", "watch", "vim", "vi", "less", "more", "tmux", "screen", "nano", "emacs", "top",
+];
+
 /// S3: Check per-command shape rules — detect dangerous flags and patterns
 /// that bypass normal sanitization.
 ///
-/// Returns a list of warning strings for each dangerous shape found.
-fn check_command_shapes(root: &Node, source: &[u8]) -> Vec<String> {
+/// Returns `(warnings, shape)`: the warning strings plus a structured
+/// `ShapeRisk` classification (interactive / unbounded loop) if any.
+fn check_command_shapes(root: &Node, source: &[u8]) -> (Vec<String>, Option<ShapeRisk>) {
     let mut warnings = Vec::new();
+    let mut shape: Option<ShapeRisk> = None;
 
     // Find all `command` nodes in the tree
     let mut commands = Vec::new();
@@ -669,16 +701,27 @@ fn check_command_shapes(root: &Node, source: &[u8]) -> Vec<String> {
             "curl" => check_curl_shape(args, &mut warnings),
             "wget" => check_wget_shape(args, &mut warnings),
             "sed" => check_sed_shape(args, &mut warnings),
-            "tail" | "gtail" => check_tail_shape(args, &mut warnings),
+            "tail" | "gtail" => {
+                if check_tail_follow_shape(args, &mut warnings) {
+                    shape = shape.or(Some(ShapeRisk::Interactive));
+                }
+            }
             "touch" | "gtouch" => check_touch_shape(args, &mut warnings),
             cmd if COUNTED_LOOP_COMMANDS.contains(&cmd) => {
-                check_counted_loop_shape(&normalized, args, &mut warnings);
+                if check_counted_loop_shape(&normalized, args, &mut warnings) {
+                    shape = shape.or(Some(ShapeRisk::UnboundedLoop));
+                }
+            }
+            cmd if INTERACTIVE_FULLSCREEN_COMMANDS.contains(&cmd) => {
+                if check_interactive_shape(&normalized, args, &mut warnings) {
+                    shape = shape.or(Some(ShapeRisk::Interactive));
+                }
             }
             _ => {}
         }
     }
 
-    warnings
+    (warnings, shape)
 }
 
 /// Collect all `command` nodes with their head and arguments.
@@ -841,20 +884,25 @@ fn check_sed_shape(args: &[String], warnings: &mut Vec<String>) {
 }
 
 /// `tail -f` follows a file indefinitely (interactive blocking command).
-fn check_tail_shape(args: &[String], warnings: &mut Vec<String>) {
+/// Returns true if a follow flag was detected.
+fn check_tail_follow_shape(args: &[String], warnings: &mut Vec<String>) -> bool {
+    let mut followed = false;
     for t in args {
         if *t == "-f" || *t == "--follow" {
             warnings.push(
                 "tail -f (follows file indefinitely; interactive blocking command)".to_string(),
             );
+            followed = true;
         }
         // Combined flags like `-fq`
         if t.starts_with("-f") && t.len() > 2 && !t.starts_with("--") {
             warnings.push(format!(
                 "tail {t} (follows file indefinitely; interactive blocking command)"
             ));
+            followed = true;
         }
     }
+    followed
 }
 
 /// `touch` with timestamp-modifying flags changes file metadata.
@@ -879,7 +927,8 @@ fn check_touch_shape(args: &[String], warnings: &mut Vec<String>) {
 
 /// Commands like `vmstat`, `iostat` need at least 2 consecutive numbers
 /// (interval + count) to prevent unbounded loops.
-fn check_counted_loop_shape(head: &str, args: &[String], warnings: &mut Vec<String>) {
+/// Returns true if the loop is unbounded (no explicit count).
+fn check_counted_loop_shape(head: &str, args: &[String], warnings: &mut Vec<String>) -> bool {
     let mut consecutive: u32 = 0;
     let mut maxc: u32 = 0;
     for t in args {
@@ -894,7 +943,41 @@ fn check_counted_loop_shape(head: &str, args: &[String], warnings: &mut Vec<Stri
         warnings.push(format!(
             "{head} requires two consecutive numbers 'interval count' to prevent unbounded loop"
         ));
+        return true;
     }
+    false
+}
+
+/// Interactive full-screen / pager / multiplexer commands that block a
+/// non-interactive exec channel. `top` is a special case: it is only
+/// non-interactive when an explicit batch flag is present (`-b` on Linux,
+/// `-l` on macOS, or `-n` for an iteration count).
+///
+/// Returns true when the command is interactive (blocks the channel).
+fn check_interactive_shape(head: &str, args: &[String], warnings: &mut Vec<String>) -> bool {
+    if head == "top" {
+        let batched = args.iter().any(|t| {
+            t == "-b"
+                || t == "--batch"
+                || t == "-l"
+                || t == "-n"
+                || t.starts_with("-b")
+                || t.starts_with("-n")
+                || t.starts_with("-l")
+        });
+        if !batched {
+            warnings.push(
+                "top (interactive full-screen command; use `top -bn1` or `top -l 1` for batch output)"
+                    .to_string(),
+            );
+            return true;
+        }
+        return false;
+    }
+    warnings.push(format!(
+        "{head} (interactive full-screen command; blocks a non-interactive exec channel)"
+    ));
+    true
 }
 
 /// Convenience function: extract just the canonical head, or `None` on failure.
@@ -1390,6 +1473,50 @@ mod tests {
             analysis.shape_warnings.len() >= 2,
             "should collect multiple warnings, got: {:?}",
             analysis.shape_warnings
+        );
+    }
+
+    #[test]
+    fn s3_shape_interactive_fullscreen_classified() {
+        for cmd in ["htop", "watch -n 1 date", "vim file", "less file", "tmux"] {
+            assert_eq!(
+                analyze_command(cmd).shape,
+                Some(ShapeRisk::Interactive),
+                "{cmd} should be classified Interactive"
+            );
+        }
+    }
+
+    #[test]
+    fn s3_shape_top_bare_interactive_top_batch_not() {
+        assert_eq!(analyze_command("top").shape, Some(ShapeRisk::Interactive));
+        assert_eq!(analyze_command("top -bn1").shape, None);
+        assert_eq!(analyze_command("top -l 1").shape, None);
+    }
+
+    #[test]
+    fn s3_shape_tail_follow_interactive() {
+        assert_eq!(
+            analyze_command("tail -f /var/log/x").shape,
+            Some(ShapeRisk::Interactive)
+        );
+        assert_eq!(analyze_command("tail -n 10 /var/log/x").shape, None);
+    }
+
+    #[test]
+    fn s3_shape_unbounded_loop_classified() {
+        assert_eq!(
+            analyze_command("vmstat").shape,
+            Some(ShapeRisk::UnboundedLoop)
+        );
+        assert_eq!(analyze_command("vmstat 1 5").shape, None);
+    }
+
+    #[test]
+    fn s3_shape_interactive_through_sudo() {
+        assert_eq!(
+            analyze_command("sudo htop").shape,
+            Some(ShapeRisk::Interactive)
         );
     }
 }

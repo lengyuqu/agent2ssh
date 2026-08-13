@@ -232,7 +232,8 @@ fn tool_definitions() -> Vec<Value> {
                             "max_output_bytes": { "type": "integer", "description": "Truncate stdout to this many bytes (default 4 MiB)." },
                             "daemon_alias":     { "type": "string", "description": "Forward this exec to a remote daemon by alias (omit or 'localhost' for local)." },
                             "reason":           { "type": "string", "description": "Optional reason/note for this operation (audit trail)." },
-                            "change_id":        { "type": "string", "description": "Optional change/ticket ID for this operation (audit trail)." }
+                            "change_id":        { "type": "string", "description": "Optional change/ticket ID for this operation (audit trail)." },
+                            "side_effect":      { "type": "string", "description": "Optional side-effect description for the approval card and audit trail (e.g. 'triggers a Full GC, 100-300ms pause')." }
                         }
                     }
                 },
@@ -392,7 +393,8 @@ fn tool_definitions() -> Vec<Value> {
                         "properties": {
                             "host":        { "type": "string", "description": "Host profile alias." },
                             "remote_path": { "type": "string", "description": "Remote file path to download." },
-                            "local_path":  { "type": "string", "description": "Local destination path." }
+                            "local_path":  { "type": "string", "description": "Local destination path." },
+                            "max_mb":      { "type": "integer", "description": "Hard cap on the remote file size in MiB (default 100). Larger files are rejected with guidance to use scp/rsync." }
                         }
                     }
                 },

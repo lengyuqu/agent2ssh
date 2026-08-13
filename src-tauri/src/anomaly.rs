@@ -413,6 +413,7 @@ mod tests {
             risk_level,
             reason: None,
             change_id: None,
+            side_effect: None,
             source: Some(source.into()),
         }
     }

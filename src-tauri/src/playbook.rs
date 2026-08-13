@@ -419,6 +419,7 @@ pub async fn run_playbook_core_with_source_and_approved_steps(
             max_output_bytes: None,
             reason: reason.clone(),
             change_id: change_id.clone(),
+            side_effect: None,
             source: source.clone(),
         };
 
@@ -786,6 +787,7 @@ required = false
                 max_output_bytes: None,
                 reason: reason.clone(),
                 change_id: change_id.clone(),
+                side_effect: None,
                 source: None,
             };
             requests.push(request);
@@ -844,6 +846,8 @@ required = false
                 duration_ms: 200,
                 risk_level: RiskLevel::Medium,
                 truncated: false,
+                dropped_bytes: 0,
+                side_effect: None,
             };
             // Mirror append_audit's AuditEntry construction
             let entry = AuditEntry {
@@ -856,6 +860,7 @@ required = false
                 risk_level: RiskLevel::Medium,
                 reason: Some(reason.to_string()),
                 change_id: Some(change_id.to_string()),
+                side_effect: None,
                 source: None,
             };
             entries.push(entry);
@@ -933,6 +938,7 @@ required = false
             max_output_bytes: None,
             reason: Some("emergency fix".to_string()),
             change_id: Some("CHG-EMERGENCY".to_string()),
+            side_effect: None,
             source: None,
         };
 

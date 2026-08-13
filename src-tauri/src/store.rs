@@ -570,6 +570,7 @@ pub fn append_audit(
         risk_level,
         reason: reason.map(str::to_string),
         change_id: change_id.map(str::to_string),
+        side_effect: result.side_effect.clone(),
         source: source.map(str::to_string),
     };
     let mut file = OpenOptions::new()
@@ -1578,6 +1579,7 @@ mod tests {
             risk_level: RiskLevel::High,
             reason: None,
             change_id: None,
+            side_effect: None,
             source: None,
         };
         let entry2 = AuditEntry {
@@ -1590,6 +1592,7 @@ mod tests {
             risk_level: RiskLevel::Low,
             reason: None,
             change_id: None,
+            side_effect: None,
             source: None,
         };
 
@@ -1636,6 +1639,7 @@ mod tests {
             risk_level: RiskLevel::High,
             reason: None,
             change_id: None,
+            side_effect: None,
             source: None,
         };
         let entry2 = AuditEntry {
@@ -1648,6 +1652,7 @@ mod tests {
             risk_level: RiskLevel::Low,
             reason: None,
             change_id: None,
+            side_effect: None,
             source: None,
         };
 
@@ -1813,6 +1818,7 @@ mod tests {
                 risk_level: super::RiskLevel::Low,
                 reason: None,
                 change_id: None,
+                side_effect: None,
                 source: None,
             };
             body.push_str(&serde_json::to_string(&entry).unwrap());
@@ -1924,6 +1930,7 @@ mod tests {
             risk_level: RiskLevel::Low,
             reason: None,
             change_id: None,
+            side_effect: None,
             source: None,
         };
         let entry2 = AuditEntry {
@@ -1936,6 +1943,7 @@ mod tests {
             risk_level: RiskLevel::High,
             reason: Some("weekly update".into()),
             change_id: Some("CHG-001".into()),
+            side_effect: None,
             source: Some("cli".into()),
         };
 
@@ -2008,6 +2016,8 @@ mod tests {
                 duration_ms: 150,
                 risk_level: RiskLevel::Medium,
                 truncated: false,
+                dropped_bytes: 0,
+                side_effect: None,
             };
             // Mirror the AuditEntry construction in append_audit
             let entry = AuditEntry {
@@ -2020,6 +2030,7 @@ mod tests {
                 risk_level: RiskLevel::Medium,
                 reason: Some(reason.to_string()),
                 change_id: Some(change_id.to_string()),
+                side_effect: None,
                 source: Some("mcp".into()),
             };
             jsonl_lines.push(serde_json::to_string(&entry).unwrap());
@@ -2073,6 +2084,7 @@ mod tests {
             risk_level: RiskLevel::Low,
             reason: None,
             change_id: None,
+            side_effect: None,
             source: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
@@ -2101,6 +2113,7 @@ mod tests {
                 risk_level: RiskLevel::Low,
                 reason: Some("health check".into()),
                 change_id: Some("CHG-100".into()),
+                side_effect: None,
                 source: Some("cli".into()),
             },
             AuditEntry {
@@ -2113,6 +2126,7 @@ mod tests {
                 risk_level: RiskLevel::Low,
                 reason: None,
                 change_id: None,
+                side_effect: None,
                 source: None,
             },
             AuditEntry {
@@ -2125,6 +2139,7 @@ mod tests {
                 risk_level: RiskLevel::Medium,
                 reason: Some("health check".into()),
                 change_id: Some("CHG-100".into()),
+                side_effect: None,
                 source: Some("mcp".into()),
             },
         ];
