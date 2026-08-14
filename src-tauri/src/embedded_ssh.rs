@@ -21,6 +21,61 @@ use crate::{
     types::{HostProfile, ProxyProfile, ProxyProtocol},
 };
 
+// ── Jump-host bridge concurrency limit ─────────────────────────────────────
+//
+// Each `connect_via_jump_to` call spawns a dedicated bridge thread that ferries
+// bytes between a TCP socket and the SSH direct-tcpip channel. Without a cap,
+// a batch exec targeting many hosts through the same jump host could spawn
+// dozens of threads, each holding its own SSH session to the jump host (no
+// pooling yet). We limit the concurrent bridge threads globally to prevent
+// unbounded growth. Per-jump-host pooling + health checks + reconnect is a
+// future improvement tracked separately.
+//
+// The counter is best-effort: a thread that errors before incrementing (e.g.,
+// channel open fails) doesn't count, and decrement happens via Drop on the
+// guard. Override with `AGENT2SSH_MAX_JUMP_THREADS` (0 = unlimited, testing).
+const MAX_JUMP_THREADS_DEFAULT: usize = 64;
+
+static JUMP_THREAD_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn max_jump_threads() -> usize {
+    std::env::var("AGENT2SSH_MAX_JUMP_THREADS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(MAX_JUMP_THREADS_DEFAULT)
+}
+
+/// RAII guard that decrements the jump-thread counter on drop. Returned by
+/// `reserve_jump_thread` — call it before spawning the bridge thread.
+struct JumpThreadGuard;
+
+impl JumpThreadGuard {
+    fn reserve() -> Result<Self> {
+        let max = max_jump_threads();
+        if max == 0 {
+            return Ok(JumpThreadGuard);
+        }
+        // fetch_add returns the previous value; if it was already >= max, we
+        // overshot — back off and report the limit.
+        let prev = JUMP_THREAD_COUNT.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        if prev >= max {
+            JUMP_THREAD_COUNT.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+            return Err(anyhow!(
+                "jump host bridge thread limit reached: {prev} active (max {max}); raise AGENT2SSH_MAX_JUMP_THREADS or reduce concurrency"
+            ));
+        }
+        Ok(JumpThreadGuard)
+    }
+}
+
+impl Drop for JumpThreadGuard {
+    fn drop(&mut self) {
+        if max_jump_threads() != 0 {
+            JUMP_THREAD_COUNT.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct EmbeddedSshConnectionInfo {
     pub host: String,
@@ -566,13 +621,31 @@ fn connect_via_jump_to(
                 target_host, target_port
             )
         })?;
+    // TCP self-connect idiom: bind a loopback listener, connect to it, accept
+    // the other side. This looks wasteful (three syscalls + a real handshake)
+    // but is the simplest way to get two connected TcpStreams — which we need
+    // because libssh2's `Session::set_tcp_stream` requires a `TcpStream`
+    // specifically, not a generic FD. `UnixStream::pair()` would be cheaper
+    // but can't be passed to libssh2 without unsafe FD wrapping that would
+    // break the type abstraction.
+    //
+    // The original concern about a "race between bind and connect" is real in
+    // theory but vanishingly rare in practice: the bound port is not published
+    // anywhere, so another process would have to be scanning the ephemeral
+    // range to steal it. The failure mode is a clean connect error, not
+    // silently wrong behavior.
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     let local_addr = listener.local_addr()?;
     let client = TcpStream::connect(local_addr)?;
     let (server, _) = listener.accept()?;
     jump_session.set_blocking(false);
+    // Reserve a bridge-thread slot before spawning. The guard moves into the
+    // thread and decrements on drop (when the bridge loop exits), so the count
+    // stays accurate even if the bridge errors out.
+    let guard = JumpThreadGuard::reserve()?;
     thread::spawn(move || {
         let _jump_session = jump_session;
+        let _guard = guard; // drops when the thread exits
         if let Err(error) = bridge_tcp_and_channel(server, channel) {
             let _ = crate::diagnostics::append_diagnostic_log(
                 "warn",

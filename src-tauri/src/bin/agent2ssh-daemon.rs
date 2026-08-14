@@ -4690,6 +4690,25 @@ async fn main() -> anyhow::Result<()> {
     }
     install_hangup_handler();
 
+    // Periodic approval cleanup: drop entries older than the retention window
+    // (default 30 days) and compact the JSONL file. Runs every hour. Failures
+    // are logged but never abort the daemon. The first run happens 1 minute
+    // after startup so a busy startup isn't immediately hit by file compaction.
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        loop {
+            if let Err(e) = agent2ssh::cleanup_expired_approvals() {
+                let _ = agent2ssh::append_diagnostic_log(
+                    "warn",
+                    "daemon",
+                    "periodic approval cleanup failed",
+                    Some(serde_json::json!({ "error": e.to_string() })),
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+        }
+    });
+
     // Set the transport to Headless — the daemon serves via HTTP/SSE/WS.
     let _ = agent2ssh::set_host(agent2ssh::Host::Headless {
         sink: std::sync::Arc::new(|_event, _payload| true),

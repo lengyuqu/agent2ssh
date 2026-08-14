@@ -195,20 +195,16 @@ pub fn restrict_file_to_owner(path: impl AsRef<std::path::Path>) -> Result<()> {
 /// Windows owner-only ACL via `icacls`. We `/reset` then disable inheritance with
 /// `/inheritance:r` (drops all inherited ACEs) and `/grant:r` Full control to the
 /// current user only. The user principal is resolved from the `USERNAME`
-/// environment variable (qualified with `USERDOMAIN` when present); if it is
-/// unavailable we fall back to `%USERNAME%` so icacls expands it. Mirrors Unix
-/// `0600` (owner read/write, no group/other access).
+/// environment variable (qualified with `USERDOMAIN` when present). If the env
+/// var is missing or contains characters outside the safe set (defense against
+/// a polluted environment redirecting the ACL grant to an unintended principal),
+/// we fall back to `whoami`, then to a literal `%USERNAME%` only as a last
+/// resort. Mirrors Unix `0600` (owner read/write, no group/other access).
 #[cfg(windows)]
 fn restrict_file_to_owner_windows(path: &std::path::Path) -> Result<()> {
     use std::process::Command;
 
-    let user = match (std::env::var("USERDOMAIN"), std::env::var("USERNAME")) {
-        (Ok(domain), Ok(name)) if !domain.is_empty() && !name.is_empty() => {
-            format!("{domain}\\{name}")
-        }
-        (_, Ok(name)) if !name.is_empty() => name,
-        _ => "%USERNAME%".to_string(),
-    };
+    let user = resolve_windows_user_principal()?;
 
     let path_str = path
         .to_str()
@@ -234,6 +230,54 @@ fn restrict_file_to_owner_windows(path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+/// Resolve the current Windows user principal for ACL grant, hardening against
+/// a polluted `USERNAME` environment variable. The previous implementation
+/// trusted `USERNAME` directly — on Windows this is user-settable, so a
+/// tampered environment could redirect the `0600`-equivalent grant to an
+/// unintended account. We validate the env-var form first (alphanumerics,
+/// `_`, `-`, `.` only, max 104 chars) and fall back to `whoami` if it fails.
+#[cfg(windows)]
+fn resolve_windows_user_principal() -> Result<String> {
+    fn is_safe_name(s: &str) -> bool {
+        !s.is_empty()
+            && s.len() <= 104
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    }
+
+    if let (Ok(domain), Ok(name)) = (std::env::var("USERDOMAIN"), std::env::var("USERNAME")) {
+        if is_safe_name(&domain) && is_safe_name(&name) {
+            return Ok(format!("{domain}\\{name}"));
+        }
+    } else if let Ok(name) = std::env::var("USERNAME") {
+        if is_safe_name(&name) {
+            return Ok(name);
+        }
+    }
+
+    // Env var missing or contains unsafe chars — ask the OS via `whoami`.
+    // `whoami` returns `DOMAIN\username` (or just `username` in workgroup).
+    let output = std::process::Command::new("whoami")
+        .output()
+        .context("failed to invoke whoami for ACL principal lookup")?;
+    if output.status.success() {
+        let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        // whoami output form is `DOMAIN\user` or `user` — both safe-by-construction
+        // since they came from the OS, not the environment. Still reject empty.
+        if !raw.is_empty() {
+            return Ok(raw);
+        }
+    }
+
+    // Last resort: let icacls expand %USERNAME% itself. We can't trust the env
+    // var content, but if icacls expands it the same way, at least the file
+    // gets some owner rather than failing open. Prefer bailing closed if even
+    // this fails — callers of restrict_file_to_owner treat failure as fatal.
+    Err(anyhow::anyhow!(
+        "could not resolve current Windows user principal (USERNAME env var invalid and whoami failed)"
+    ))
+}
+
 pub fn load_config() -> Result<AppConfig> {
     ensure_config_dir()?;
     let path = config_path()?;
@@ -241,13 +285,28 @@ pub fn load_config() -> Result<AppConfig> {
         if !path.exists() {
             return Ok(normalize_config(AppConfig::default()));
         }
-        let raw = fs::read_to_string(&path).context("failed to read hosts config")?;
-        let config: AppConfig =
-            serde_json::from_str(&raw).context("failed to parse hosts config")?;
-        let mut config = normalize_config(migrate_config(config));
-        internalize_secrets(&mut config);
-        Ok(config)
+        // save_config uses temp-file + atomic rename, so agent2ssh's own writes
+        // never expose a half-written file to readers. The retry below covers
+        // the residual case of an *external* non-atomic write (e.g. a text
+        // editor truncating then writing hosts.json) racing with our read.
+        // On parse failure, wait briefly and try once more — if it still fails
+        // we surface the error rather than silently returning a default.
+        match load_config_from_disk(&path) {
+            Ok(config) => Ok(config),
+            Err(first_err) => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                load_config_from_disk(&path).map_err(|_| first_err)
+            }
+        }
     })
+}
+
+fn load_config_from_disk(path: &Path) -> Result<AppConfig> {
+    let raw = fs::read_to_string(path).context("failed to read hosts config")?;
+    let config: AppConfig = serde_json::from_str(&raw).context("failed to parse hosts config")?;
+    let mut config = normalize_config(migrate_config(config));
+    internalize_secrets(&mut config);
+    Ok(config)
 }
 
 /// Resolve encrypted-secret references back into real passwords after loading

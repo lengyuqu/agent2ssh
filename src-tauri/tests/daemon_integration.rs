@@ -1879,6 +1879,8 @@ fn exec_multi_batch_result_schema_matches_contract() {
                 duration_ms: 100,
                 risk_level: RiskLevel::Low,
                 truncated: false,
+                dropped_bytes: 0,
+                side_effect: None,
             }),
             error: None,
         }],
@@ -1983,6 +1985,7 @@ fn audit_export_response_contract() {
         risk_level: RiskLevel::Low,
         reason: Some("health check".into()),
         change_id: Some("CHG-001".into()),
+        side_effect: None,
         source: Some("daemon".into()),
     }];
 

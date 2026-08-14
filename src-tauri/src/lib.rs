@@ -58,9 +58,9 @@ pub use anomaly::{
 };
 pub use approval::{
     approval_action_url, approval_request_with_context, build_approval_context,
-    build_approval_context_with_effective_risk, check_approval_required, list_approval_policies,
-    load_approval_policies, save_approval_policies, ApprovalContext, ApprovalHistoryEntry,
-    ApprovalPolicy, ApprovalPolicyFile, RiskDetails,
+    build_approval_context_with_effective_risk, check_approval_required, cleanup_expired_approvals,
+    list_approval_policies, load_approval_policies, save_approval_policies, ApprovalContext,
+    ApprovalHistoryEntry, ApprovalPolicy, ApprovalPolicyFile, RiskDetails,
 };
 pub use connection::{connect_host, disconnect_host, list_active_connections};
 pub use core::{

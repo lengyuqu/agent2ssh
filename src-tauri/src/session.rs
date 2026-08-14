@@ -18,6 +18,10 @@ const DEFAULT_SESSION_COLS: u32 = 80;
 const DEFAULT_SESSION_ROWS: u32 = 24;
 const SESSION_OPEN_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const SESSION_READ_QUIET_PERIOD: Duration = Duration::from_millis(200);
+/// Hard cap on concurrent PTY sessions to prevent unbounded thread growth
+/// (each session spawns a dedicated OS thread in `spawn_terminal`). Override
+/// with `AGENT2SSH_MAX_SESSIONS` env var; 0 = unlimited (testing only).
+const MAX_SESSIONS_DEFAULT: usize = 64;
 
 pub struct SessionHandle {
     pub id: Uuid,
@@ -35,6 +39,19 @@ pub struct SessionHandle {
 // process lifetime since AppState is held in a OnceLock.
 fn sessions() -> &'static Mutex<HashMap<Uuid, Arc<StdMutex<SessionHandle>>>> {
     &app_state().sessions
+}
+
+/// Resolve the global concurrent PTY session cap. Reads
+/// `AGENT2SSH_MAX_SESSIONS` once per call (cheap) so a runtime change is
+/// picked up without restart. `0` means unlimited — intended for tests.
+fn max_sessions() -> usize {
+    match std::env::var("AGENT2SSH_MAX_SESSIONS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        Some(n) => n,
+        None => MAX_SESSIONS_DEFAULT,
+    }
 }
 
 pub fn resolve_host(name: &str) -> Result<HostProfile> {
@@ -93,6 +110,19 @@ fn probe_session_open(handle: &mut SessionHandle) -> Result<()> {
 
 pub async fn session_open_core(host_name: &str) -> Result<Uuid> {
     ensure_config_dir()?;
+
+    // Enforce a global concurrent session cap to prevent unbounded thread
+    // growth from leaky MCP/daemon clients that open sessions without closing.
+    let max = max_sessions();
+    if max > 0 {
+        let current = sessions().lock().await.len();
+        if current >= max {
+            return Err(anyhow!(
+                "session limit reached: {current} active (max {max}); close an existing session or raise AGENT2SSH_MAX_SESSIONS"
+            ));
+        }
+    }
+
     let host = resolve_host(host_name)?;
     let (tx, rx) = spawn_terminal(host, DEFAULT_SESSION_COLS, DEFAULT_SESSION_ROWS);
     let id = Uuid::new_v4();
@@ -119,7 +149,17 @@ pub async fn session_open_core(host_name: &str) -> Result<Uuid> {
         closed: false,
     };
 
-    probe_session_open(&mut handle).inspect_err(|_| {
+    // probe_session_open uses sync mpsc::recv_timeout (up to 10s). Run it on a
+    // blocking task so we don't stall a tokio worker thread on slow SSH connect.
+    let probe_result = tokio::task::spawn_blocking(move || {
+        let result = probe_session_open(&mut handle);
+        (result, handle)
+    })
+    .await
+    .map_err(|e| anyhow!("session probe task failed: {e}"))?;
+
+    handle = probe_result.1;
+    probe_result.0.inspect_err(|_| {
         // probe failed — reservation will be dropped, marking the
         // lifecycle entry as Closed automatically.
         let _ = lifecycle.lock().unwrap().close(&id.to_string(), None);
