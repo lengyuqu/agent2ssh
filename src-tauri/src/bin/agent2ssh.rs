@@ -6,7 +6,9 @@ use agent2ssh::daemon_control::{
     process_is_alive as daemon_process_is_alive, read_daemon_pid, remove_daemon_pid_file,
     start_daemon_background, terminate_process,
 };
-use agent2ssh::embedded_ssh::{import_known_hosts_from_ssh, KnownHostImportSummary};
+use agent2ssh::embedded_ssh::{
+    import_known_hosts_from_ssh, spawn_terminal, TerminalCommand, TerminalEvent,
+};
 use agent2ssh::events::subscribe_events;
 use agent2ssh::execution_control::{
     append_rejected_exec_audit, authorize_command_with_approval, command_authorization_target,
@@ -492,6 +494,17 @@ enum HostCommands {
         path: Option<String>,
         #[arg(long)]
         json: bool,
+    },
+    /// Open an interactive shell in the current terminal (raw PTY, like ssh)
+    Open {
+        #[arg(add = ArgValueCandidates::new(host_candidates))]
+        name: String,
+        /// Terminal columns (auto-detected on Unix)
+        #[arg(long)]
+        cols: Option<u32>,
+        /// Terminal rows (auto-detected on Unix)
+        #[arg(long)]
+        rows: Option<u32>,
     },
 }
 
@@ -1219,6 +1232,67 @@ async fn remote_snippet_delete(alias: &str, name: &str) -> Result<bool> {
         .context("failed to decode daemon snippet delete response")
 }
 
+/// Background event subscriber for CLI mode. Prints safety-relevant events
+/// (approval requests, anomalies, gate rejections) to stderr so they are
+/// visible during normal exec/multi-exec without requiring the user to run
+/// `agent2ssh events`. Suppress with `AGENT2SSH_QUIET=1`.
+///
+/// Why stderr: stdout is reserved for command output (often JSON); mixing
+/// event noise in there would break `--json` consumers. stderr reaches the
+/// terminal in interactive use and is captured separately in pipelines.
+fn spawn_default_event_subscriber() {
+    if std::env::var("AGENT2SSH_QUIET").as_deref() == Ok("1") {
+        return;
+    }
+    tokio::spawn(async move {
+        use agent2ssh::events::{subscribe_events, EventType};
+        let mut rx = subscribe_events();
+        while let Ok(event) = rx.recv().await {
+            match event.event_type {
+                EventType::ApprovalRequested => {
+                    eprintln!(
+                        "[agent2ssh] approval required: host={} risk={} cmd={}",
+                        event
+                            .data
+                            .get("host")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?"),
+                        event
+                            .data
+                            .get("risk_level")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?"),
+                        event
+                            .data
+                            .get("command")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?"),
+                    );
+                }
+                EventType::AnomalyDetected => {
+                    eprintln!(
+                        "[agent2ssh] anomaly detected: {}",
+                        serde_json::to_string(&event.data).unwrap_or_default()
+                    );
+                }
+                EventType::GateRejected => {
+                    eprintln!(
+                        "[agent2ssh] execution gate rejected: {}",
+                        serde_json::to_string(&event.data).unwrap_or_default()
+                    );
+                }
+                EventType::LimitRejected => {
+                    eprintln!(
+                        "[agent2ssh] execution limit rejected: {}",
+                        serde_json::to_string(&event.data).unwrap_or_default()
+                    );
+                }
+                _ => {}
+            }
+        }
+    });
+}
+
 fn print_completion_registration(shell: CompletionShell) -> Result<()> {
     shell
         .completer()
@@ -1275,6 +1349,17 @@ async fn async_main() -> Result<()> {
     if let Err(e) = agent2ssh::migrate_plaintext_secrets() {
         eprintln!("warning: secret migration skipped: {e}");
     }
+
+    // Default event subscriber: print anomaly/approval/gate-rejected events to
+    // stderr so CLI users see them even when running exec/multi-exec (the
+    // `agent2ssh events` subcommand is for full streaming; this is for visibility
+    // into safety-relevant events during normal operations). Suppress with
+    // AGENT2SSH_QUIET=1. The `events` subcommand keeps its own subscriber and
+    // doesn't need this one — it would just duplicate output.
+    if !matches!(cli.command, Commands::Events { .. }) {
+        spawn_default_event_subscriber();
+    }
+
     let daemon_alias = cli.daemon.clone();
 
     match cli.command {
@@ -1411,6 +1496,9 @@ async fn async_main() -> Result<()> {
                         println!("  {} → {}:{}", h.name, h.host, h.port.unwrap_or(22));
                     }
                 }
+            }
+            HostCommands::Open { name, cols, rows } => {
+                run_interactive_terminal(&name, cols, rows)?;
             }
         },
         Commands::Exec {
@@ -3877,4 +3965,214 @@ async fn daemon_json<T: serde::de::DeserializeOwned>(
         .json::<T>()
         .await
         .context("failed to parse daemon response")
+}
+
+// ── G14: interactive terminal (host open) ──────────────────────────────────
+
+#[cfg(unix)]
+mod raw_terminal {
+    use std::io;
+    use std::os::unix::io::AsRawFd;
+
+    /// Restores the terminal to its original state on drop.
+    pub struct RawTerminal {
+        original: libc::termios,
+    }
+
+    impl RawTerminal {
+        pub fn enable() -> io::Result<Self> {
+            let fd = io::stdin().as_raw_fd();
+            let mut original = unsafe { std::mem::zeroed::<libc::termios>() };
+            if unsafe { libc::tcgetattr(fd, &mut original) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let mut raw = original;
+            // ISIG off: Ctrl+C/Ctrl+Z arrive as raw bytes (0x03/0x1A) and are
+            // forwarded to the remote PTY instead of signalling the local CLI.
+            raw.c_lflag &= !(libc::ICANON | libc::ECHO | libc::ISIG | libc::IEXTEN);
+            raw.c_iflag &= !(libc::IXON | libc::ICRNL | libc::BRKINT | libc::INPCK | libc::ISTRIP);
+            raw.c_oflag &= !(libc::OPOST);
+            raw.c_cflag |= libc::CS8;
+            raw.c_cc[libc::VMIN] = 1;
+            raw.c_cc[libc::VTIME] = 0;
+            if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(Self { original })
+        }
+    }
+
+    impl Drop for RawTerminal {
+        fn drop(&mut self) {
+            let fd = io::stdin().as_raw_fd();
+            unsafe {
+                libc::tcsetattr(fd, libc::TCSANOW, &self.original);
+            }
+        }
+    }
+
+    pub fn terminal_size() -> (u32, u32) {
+        unsafe {
+            let mut ws: libc::winsize = std::mem::zeroed();
+            if libc::ioctl(io::stdout().as_raw_fd(), libc::TIOCGWINSZ, &mut ws) == 0
+                && ws.ws_col > 0
+                && ws.ws_row > 0
+            {
+                return (ws.ws_col as u32, ws.ws_row as u32);
+            }
+        }
+        (80, 24)
+    }
+}
+
+#[cfg(windows)]
+mod raw_terminal {
+    use std::io;
+    use windows_sys::Win32::System::Console::{
+        GetConsoleMode, GetStdHandle, SetConsoleMode, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT,
+        ENABLE_PROCESSED_INPUT, ENABLE_VIRTUAL_TERMINAL_INPUT, STD_INPUT_HANDLE,
+    };
+
+    pub struct RawTerminal {
+        original: u32,
+    }
+
+    impl RawTerminal {
+        pub fn enable() -> io::Result<Self> {
+            let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+            let mut original = 0u32;
+            if unsafe { GetConsoleMode(handle, &mut original) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // Disable echo + line + processed input; enable VT input so control
+            // chars (Ctrl+C etc.) arrive as raw bytes.
+            let mut raw = original;
+            raw &= !(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT);
+            raw |= ENABLE_VIRTUAL_TERMINAL_INPUT;
+            if unsafe { SetConsoleMode(handle, raw) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(Self { original })
+        }
+    }
+
+    impl Drop for RawTerminal {
+        fn drop(&mut self) {
+            let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+            unsafe {
+                SetConsoleMode(handle, self.original);
+            }
+        }
+    }
+
+    pub fn terminal_size() -> (u32, u32) {
+        (80, 24)
+    }
+}
+
+#[cfg(unix)]
+static RESIZE_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(unix)]
+extern "C" fn on_sigwinch(_sig: libc::c_int) {
+    use std::sync::atomic::Ordering;
+    RESIZE_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+/// G14: open an interactive shell to `host_name` in the current terminal,
+/// bridging raw stdin → PTY → stdout (like `ssh host`). The embedded PTY worker
+/// already handles connect/TOFU/auth; this only wires the local byte streams,
+/// window-size changes, and terminal raw mode.
+fn run_interactive_terminal(host_name: &str, cols: Option<u32>, rows: Option<u32>) -> Result<()> {
+    use std::io::{Read, Write};
+    use std::sync::mpsc::RecvTimeoutError;
+    use std::time::Duration;
+
+    let host = agent2ssh::store::load_config()?
+        .hosts
+        .into_iter()
+        .find(|h| h.name == host_name)
+        .ok_or_else(|| anyhow::anyhow!("unknown host profile: {host_name}"))?;
+
+    let (cols, rows) = match (cols, rows) {
+        (Some(c), Some(r)) => (c.max(1), r.max(1)),
+        _ => raw_terminal::terminal_size(),
+    };
+
+    let (cmd_tx, event_rx) = spawn_terminal(host, cols, rows);
+    // Enable raw mode AFTER the worker spawn; `raw` restores it on drop.
+    let raw = raw_terminal::RawTerminal::enable()?;
+
+    // stdin → PTY input (blocking read on a dedicated thread).
+    let stdin_tx = cmd_tx.clone();
+    let stdin_thread = std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        let mut stdin = std::io::stdin().lock();
+        loop {
+            match stdin.read(&mut buf) {
+                Ok(0) | Err(_) => {
+                    let _ = stdin_tx.send(TerminalCommand::Close);
+                    break;
+                }
+                Ok(n) => {
+                    if stdin_tx
+                        .send(TerminalCommand::Input(buf[..n].to_vec()))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGWINCH, on_sigwinch as libc::sighandler_t);
+    }
+
+    let mut stdout = std::io::stdout().lock();
+    loop {
+        #[cfg(unix)]
+        {
+            use std::sync::atomic::Ordering;
+            if RESIZE_REQUESTED.swap(false, Ordering::SeqCst) {
+                let (c, r) = raw_terminal::terminal_size();
+                let _ = cmd_tx.send(TerminalCommand::Resize { cols: c, rows: r });
+            }
+        }
+
+        match event_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(TerminalEvent::Connected(info)) => {
+                let fp = info
+                    .fingerprint_sha256
+                    .unwrap_or_else(|| "unknown".to_string());
+                let algo = info
+                    .host_key_algorithm
+                    .unwrap_or_else(|| "host-key".to_string());
+                let _ = writeln!(
+                    stdout,
+                    "— connected to {}@{} ({algo} {fp}) —",
+                    info.username, info.host
+                );
+                let _ = stdout.flush();
+            }
+            Ok(TerminalEvent::Output(data)) => {
+                let _ = stdout.write_all(&data);
+                let _ = stdout.flush();
+            }
+            Ok(TerminalEvent::Error(message)) => {
+                let _ = writeln!(stdout, "\r\n[error] {message}");
+                let _ = stdout.flush();
+            }
+            Ok(TerminalEvent::Closed) => break,
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
+    let _ = cmd_tx.send(TerminalCommand::Close);
+    drop(raw);
+    drop(stdin_thread); // detach: the blocking read exits with the process
+    Ok(())
 }

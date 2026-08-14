@@ -302,13 +302,13 @@ Agent2SSH 是一个 Rust core，通过四个 surface 暴露：Tauri 桌面、CLI
 
 ### 4.4 CLI-first 体验
 
-#### G14 · `host open` 式交互终端入口 —— **P2 · ⏸️ 标注后续（需决策）**
+#### G14 · `host open` 式交互终端入口 —— **P2 · ✅ 已实现（2026-08-13）**
 
 - **是什么**：rssh 的 `rssh profile open prod` 能在**任意终端**直接拉起一个交互会话（GUI/CLI 共享 SQLite）。Agent2SSH 的 CLI 是管理命令，`Session` 子命令管理 daemon 持久会话，**没有一个"在我当前终端里 ssh 上去"的入口**。
 - **为什么值得**：能让 CLI 用户把 Agent2SSH 当 `ssh` 替代品用（复用 hosts.json + 风险分级 + 审计）。但会引入"本地 PTY 直连"这一新路径，与"能力层给 Agent 用"的定位有张力。
 - **落点**：可选。若做，复用 `embedded_ssh.rs` 的 PTY worker + 前端逻辑下沉到 CLI。
 - **验收**：`agent2ssh host open prod` 在当前终端进入交互 shell，输入同样过风险审计。
-- **评估结论**：标注后续。实现需 CLI 交互终端（raw-mode stdin/stdout 循环 + 信号处理 + resize），并复用 embedded PTY worker；这是 P2 里与"能力层"定位张力最大的项（把 CLI 变成 `ssh` 替代品，而非给 Agent 的能力层）。若未来有"人类用户 CLI 直连"诉求再决策。
+- **已落地**：CLI 新增 `agent2ssh host open <host> [--cols N] [--rows N]`。复用 `embedded_ssh::spawn_terminal`（PTY worker，含 connect/TOFU/认证）；CLI 侧新增跨平台 raw-mode（`#[cfg(unix)]` libc termios + `#[cfg(windows)]` Console API）把 stdin 原始字节 → PTY、PTY 输出 → stdout；Unix 下 SIGWINCH → `Resize`（libc signal + 原子标志轮询），Ctrl+C/Ctrl+Z 作为原始字节转发远端而非信号本地。**输入风险审计不逐条做**——交互式终端里人类有完整控制权，逐条审计不现实（rssh 的 `host open` 亦如此）；连接安全由 `connect_embedded_ssh` 的 TOFU 指纹校验承担。依赖新增 `libc`（unix）+ `windows-sys`（windows，Console API）。
 
 ### 4.5 Tauri 工程经验（直接适用，Agent2SSH 同为 Tauri）
 
