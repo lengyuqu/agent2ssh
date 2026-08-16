@@ -46,14 +46,20 @@ fn max_jump_threads() -> usize {
 }
 
 /// RAII guard that decrements the jump-thread counter on drop. Returned by
-/// `reserve_jump_thread` — call it before spawning the bridge thread.
-struct JumpThreadGuard;
+/// `JumpThreadGuard::reserve` — call it before spawning the bridge thread.
+/// `counted` records whether `reserve` actually incremented, so Drop only
+/// decrements if it did — this is robust against `AGENT2SSH_MAX_JUMP_THREADS`
+/// changing between reserve and drop (e.g. tests toggling the env var).
+struct JumpThreadGuard {
+    counted: bool,
+}
 
 impl JumpThreadGuard {
     fn reserve() -> Result<Self> {
         let max = max_jump_threads();
         if max == 0 {
-            return Ok(JumpThreadGuard);
+            // Unlimited mode — don't touch the counter.
+            return Ok(JumpThreadGuard { counted: false });
         }
         // fetch_add returns the previous value; if it was already >= max, we
         // overshot — back off and report the limit.
@@ -64,13 +70,13 @@ impl JumpThreadGuard {
                 "jump host bridge thread limit reached: {prev} active (max {max}); raise AGENT2SSH_MAX_JUMP_THREADS or reduce concurrency"
             ));
         }
-        Ok(JumpThreadGuard)
+        Ok(JumpThreadGuard { counted: true })
     }
 }
 
 impl Drop for JumpThreadGuard {
     fn drop(&mut self) {
-        if max_jump_threads() != 0 {
+        if self.counted {
             JUMP_THREAD_COUNT.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
         }
     }

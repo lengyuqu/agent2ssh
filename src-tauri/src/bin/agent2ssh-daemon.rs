@@ -1939,6 +1939,10 @@ struct MultiForwardRuleDto {
     bind_port: u16,
     target_host: String,
     target_port: u16,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    group_id: Option<String>,
 }
 
 async fn forward_add_multi(
@@ -1995,6 +1999,8 @@ async fn forward_add_multi(
                 bind_port: r.bind_port,
                 target_host: r.target_host.clone(),
                 target_port: r.target_port,
+                name: r.name.clone(),
+                group_id: r.group_id.clone(),
             })
         })
         .collect::<Result<_, _>>()?;

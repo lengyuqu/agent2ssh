@@ -113,6 +113,10 @@ pub async fn session_open_core(host_name: &str) -> Result<Uuid> {
 
     // Enforce a global concurrent session cap to prevent unbounded thread
     // growth from leaky MCP/daemon clients that open sessions without closing.
+    // We check the count again after probe (before insert) because the probe
+    // runs on a blocking task and another caller may have inserted a session
+    // in the meantime — closing the TOCTOU window between the pre-check and
+    // the actual insert.
     let max = max_sessions();
     if max > 0 {
         let current = sessions().lock().await.len();
@@ -170,10 +174,20 @@ pub async fn session_open_core(host_name: &str) -> Result<Uuid> {
         .activate()
         .map_err(|e| anyhow!("lifecycle activate failed: {e}"))?;
 
-    sessions()
-        .lock()
-        .await
-        .insert(id, Arc::new(StdMutex::new(handle)));
+    // Re-check the cap under the lock right before insert. The probe ran on a
+    // blocking task; another caller may have inserted a session in the
+    // meantime. If we're now over the limit, drop the reservation and refuse.
+    {
+        let mut store = sessions().lock().await;
+        if max > 0 && store.len() >= max {
+            let _ = lifecycle.lock().unwrap().close(&id.to_string(), None);
+            return Err(anyhow!(
+                "session limit reached: {} active (max {max}); close an existing session or raise AGENT2SSH_MAX_SESSIONS",
+                store.len()
+            ));
+        }
+        store.insert(id, Arc::new(StdMutex::new(handle)));
+    }
     Ok(id)
 }
 

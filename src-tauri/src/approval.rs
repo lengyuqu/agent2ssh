@@ -307,6 +307,7 @@ fn compact_approvals_unlocked(requests: &HashMap<Uuid, ApprovalRequest>) -> Resu
 fn append_approval_unlocked(req: &ApprovalRequest) -> Result<()> {
     crate::store::ensure_config_dir()?;
     let path = approval_store_path()?;
+    let existed = path.exists();
     use std::io::Write;
     let mut file = std::fs::OpenOptions::new()
         .create(true)
@@ -314,7 +315,12 @@ fn append_approval_unlocked(req: &ApprovalRequest) -> Result<()> {
         .open(&path)?;
     let line = serde_json::to_string(req)?;
     writeln!(file, "{line}")?;
-    crate::store::restrict_file_to_owner(&path)?;
+    // Only restrict permissions when the file is first created — on Windows
+    // this spawns `icacls`, which is too expensive to run on every append.
+    // The file mode/ACL is preserved across subsequent appends.
+    if !existed {
+        crate::store::restrict_file_to_owner(&path)?;
+    }
     Ok(())
 }
 

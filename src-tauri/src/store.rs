@@ -269,10 +269,10 @@ fn resolve_windows_user_principal() -> Result<String> {
         }
     }
 
-    // Last resort: let icacls expand %USERNAME% itself. We can't trust the env
-    // var content, but if icacls expands it the same way, at least the file
-    // gets some owner rather than failing open. Prefer bailing closed if even
-    // this fails — callers of restrict_file_to_owner treat failure as fatal.
+    // Both env var and whoami failed — bail closed. Callers of
+    // restrict_file_to_owner treat failure as fatal, so the file won't be
+    // written without an owner-only ACL. This is safer than guessing a
+    // principal that might grant access to the wrong account.
     Err(anyhow::anyhow!(
         "could not resolve current Windows user principal (USERNAME env var invalid and whoami failed)"
     ))

@@ -1978,6 +1978,8 @@ async fn async_main() -> Result<()> {
                     bind_port,
                     target_host,
                     target_port,
+                    name: None,
+                    group_id: None,
                 }))
                 .await?;
                 if json {
@@ -2033,6 +2035,8 @@ async fn async_main() -> Result<()> {
                         bind_port,
                         target_host,
                         target_port,
+                        name: None,
+                        group_id: None,
                     });
                 }
 
