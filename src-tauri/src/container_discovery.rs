@@ -420,18 +420,17 @@ fn discover_k8s_targets(binary: &std::path::Path) -> Result<Vec<ContainerDiscove
                     container_name.to_string()
                 };
                 let target = ContainerDiscoveryTarget {
-                    id: format!("kubectl_exec:{ctx}:{}:{pod_name}:{container_name}", namespace.as_deref().unwrap_or("default")),
+                    id: format!(
+                        "kubectl_exec:{ctx}:{}:{pod_name}:{container_name}",
+                        namespace.as_deref().unwrap_or("default")
+                    ),
                     platform: ContainerPlatform::K8s,
                     context: ctx.clone(),
                     container_id: pod_name.clone(),
                     container_name: display_name,
                     status: pod.status.phase.clone(),
                     exec_args: {
-                        let mut args = vec![
-                            "--context".into(),
-                            ctx.clone(),
-                            "exec".into(),
-                        ];
+                        let mut args = vec!["--context".into(), ctx.clone(), "exec".into()];
                         if let Some(ns) = &namespace {
                             args.push("-n".into());
                             args.push(ns.clone());

@@ -1535,9 +1535,9 @@ pub fn redact_for_clipboard(text: String) -> String {
 /// B33: Discover Docker containers and Kubernetes pods that can be used
 /// as exec targets.
 #[tauri::command]
-pub fn discover_containers() -> Result<Vec<crate::container_discovery::ContainerDiscoveryTarget>, String> {
-    crate::container_discovery::discover_containers()
-        .map_err(|e| e.to_string())
+pub fn discover_containers(
+) -> Result<Vec<crate::container_discovery::ContainerDiscoveryTarget>, String> {
+    crate::container_discovery::discover_containers().map_err(|e| e.to_string())
 }
 
 /// Enumerate system fonts for terminal font selection.

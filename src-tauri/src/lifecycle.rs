@@ -369,8 +369,8 @@ mod tests {
 
         // Try to activate again — should fail because it's already Ready.
         let other_id = uuid_str();
-        let r2 = LifecycleRegistry::reserve(&reg, &other_id, ResourceKind::SshSession, owner())
-            .unwrap();
+        let r2 =
+            LifecycleRegistry::reserve(&reg, &other_id, ResourceKind::SshSession, owner()).unwrap();
         // Manually call activate on the already-Ready resource.
         let result = reg.lock().unwrap().activate(&id, r2.nonce());
         // nonce mismatch (r2 has a different nonce)
@@ -389,10 +389,10 @@ mod tests {
         // Reserve several resources for the same owner.
         let r1 = LifecycleRegistry::reserve(&reg, &id_a, ResourceKind::SshSession, owner.clone())
             .unwrap();
-        let r2 = LifecycleRegistry::reserve(&reg, &id_b, ResourceKind::Forward, owner.clone())
-            .unwrap();
-        let r3 = LifecycleRegistry::reserve(&reg, &id_c, ResourceKind::Transfer, owner.clone())
-            .unwrap();
+        let r2 =
+            LifecycleRegistry::reserve(&reg, &id_b, ResourceKind::Forward, owner.clone()).unwrap();
+        let r3 =
+            LifecycleRegistry::reserve(&reg, &id_c, ResourceKind::Transfer, owner.clone()).unwrap();
         r1.activate().unwrap();
         r2.activate().unwrap();
         r3.activate().unwrap();
@@ -424,8 +424,8 @@ mod tests {
         let id_a = uuid_str();
         let id_b = uuid_str();
 
-        let r1 = LifecycleRegistry::reserve(&reg, &id_a, ResourceKind::SshSession, owner())
-            .unwrap();
+        let r1 =
+            LifecycleRegistry::reserve(&reg, &id_a, ResourceKind::SshSession, owner()).unwrap();
         r1.activate().unwrap();
         reg.lock().unwrap().close(&id_a, None).unwrap();
 
@@ -476,12 +476,8 @@ mod tests {
     #[test]
     fn invalid_id_rejected() {
         let reg = make_registry();
-        let result = LifecycleRegistry::reserve(
-            &reg,
-            "not-a-uuid",
-            ResourceKind::SshSession,
-            owner(),
-        );
+        let result =
+            LifecycleRegistry::reserve(&reg, "not-a-uuid", ResourceKind::SshSession, owner());
         assert!(matches!(result, Err(LifecycleError::InvalidId(_))));
     }
 

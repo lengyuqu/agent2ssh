@@ -549,9 +549,7 @@ pub fn remove_system_known_host(host_name: &str, port: u16) -> Result<usize> {
         let host_field = trimmed.split_whitespace().next().unwrap_or("");
         let matches = patterns.iter().any(|p| {
             // known_hosts can have comma-separated hostnames.
-            host_field
-                .split(',')
-                .any(|h| h == p.as_str())
+            host_field.split(',').any(|h| h == p.as_str())
         });
         if matches {
             removed += 1;

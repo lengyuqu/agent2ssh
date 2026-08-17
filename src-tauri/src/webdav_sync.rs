@@ -287,9 +287,9 @@ fn resolve_config(options: &WebDavSyncOptions) -> Result<ResolvedWebDavConfig> {
 /// opt into plain-http (e.g. a trusted LAN WebDAV server).
 fn validate_webdav_url(url: &str) -> Result<()> {
     let lower = url.to_ascii_lowercase();
-    let scheme_end = lower
-        .find("://")
-        .ok_or_else(|| anyhow!("invalid WebDAV URL: missing scheme (expected http:// or https://): {url}"))?;
+    let scheme_end = lower.find("://").ok_or_else(|| {
+        anyhow!("invalid WebDAV URL: missing scheme (expected http:// or https://): {url}")
+    })?;
     let scheme = &lower[..scheme_end];
     match scheme {
         "https" => {}
@@ -302,7 +302,11 @@ fn validate_webdav_url(url: &str) -> Result<()> {
                 ));
             }
         }
-        s => return Err(anyhow!("WebDAV URL must use http or https scheme, got '{s}'")),
+        s => {
+            return Err(anyhow!(
+                "WebDAV URL must use http or https scheme, got '{s}'"
+            ))
+        }
     }
     // Check for embedded userinfo: anything between scheme:// and the next / should not contain @
     let after_scheme = &url[scheme_end + 3..];
@@ -357,7 +361,11 @@ fn truncate_error_body(body: &str) -> String {
     if trimmed.len() <= MAX_ERROR_BODY {
         trimmed.to_string()
     } else {
-        format!("{}...(truncated, {} bytes total)", &trimmed[..MAX_ERROR_BODY], trimmed.len())
+        format!(
+            "{}...(truncated, {} bytes total)",
+            &trimmed[..MAX_ERROR_BODY],
+            trimmed.len()
+        )
     }
 }
 
@@ -492,13 +500,10 @@ impl SyncRemote for WebDavRemote {
                 request.header(reqwest::header::IF_MATCH, version)
             }
         };
-        let response = request
-            .send()
-            .await
-            .map_err(|e| {
-                let kind = classify_reqwest_error(&e);
-                anyhow!("WebDAV PUT {url} failed ({kind:?}): {e}")
-            })?;
+        let response = request.send().await.map_err(|e| {
+            let kind = classify_reqwest_error(&e);
+            anyhow!("WebDAV PUT {url} failed ({kind:?}): {e}")
+        })?;
         if response.status() == StatusCode::PRECONDITION_FAILED
             || response.status() == StatusCode::CONFLICT
         {
@@ -913,9 +918,7 @@ fn validate_marker_schema(marker: &WebDavSyncMarker) -> Result<()> {
     // by reading only the fields we understand (serde ignores unknown fields).
     // Only reject schema_version == 0 (invalid) as a hard error.
     if marker.schema_version == 0 {
-        return Err(anyhow!(
-            "invalid sync marker schema version 0"
-        ));
+        return Err(anyhow!("invalid sync marker schema version 0"));
     }
     if marker.schema_version > CURRENT_SYNC_SCHEMA {
         // Warn but allow — downgrade path for forward-compatible reads.
@@ -940,7 +943,10 @@ fn validate_digest_format(digest: &str) -> Result<()> {
             digest.len()
         ));
     }
-    if !digest.chars().all(|c| c.is_ascii_hexdigit() && (c.is_ascii_digit() || c.is_ascii_lowercase())) {
+    if !digest
+        .chars()
+        .all(|c| c.is_ascii_hexdigit() && (c.is_ascii_digit() || c.is_ascii_lowercase()))
+    {
         return Err(anyhow!(
             "invalid digest: expected lowercase hex characters only, got '{digest}'"
         ));

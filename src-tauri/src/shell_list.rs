@@ -241,10 +241,7 @@ mod tests {
     #[test]
     fn list_shells_returns_non_empty() {
         let shells = list_shells();
-        assert!(
-            !shells.is_empty(),
-            "system should have at least one shell"
-        );
+        assert!(!shells.is_empty(), "system should have at least one shell");
     }
 
     #[test]

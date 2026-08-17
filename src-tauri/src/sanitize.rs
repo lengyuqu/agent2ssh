@@ -44,11 +44,34 @@ fn bash_parser() -> Result<Parser, tree_sitter::LanguageError> {
 /// so we skip the wrapper name and its flag arguments (starting with `-`) to
 /// find the real command.
 const WRAPPERS: &[&str] = &[
-    "sudo", "env", "timeout", "nohup", "doas", "su", "pkexec", "nice", "ionice", "stdbuf", "time",
-    "command", "builtin", "\\source", ".",
+    "sudo",
+    "env",
+    "timeout",
+    "nohup",
+    "doas",
+    "su",
+    "pkexec",
+    "nice",
+    "ionice",
+    "stdbuf",
+    "time",
+    "command",
+    "builtin",
+    "\\source",
+    ".",
     // Finding 13: additional wrappers that prepend another command.
-    "xargs", "setsid", "flock", "exec", "strace", "ltrace", "chrt", "taskset", "chroot",
-    "unshare", "fakeroot", "eatmydata",
+    "xargs",
+    "setsid",
+    "flock",
+    "exec",
+    "strace",
+    "ltrace",
+    "chrt",
+    "taskset",
+    "chroot",
+    "unshare",
+    "fakeroot",
+    "eatmydata",
 ];
 
 /// Finding 22: Wrappers that have a positional argument before the real command.
@@ -67,15 +90,42 @@ fn wrapper_value_flags(wrapper: &str) -> &'static [&'static str] {
         "stdbuf" => &["-i", "-o", "-e", "--input", "--output", "--error"],
         "chrt" => &["-p", "-m", "--pid", "--max"],
         "taskset" => &["-c", "-p", "--cpu-list", "--pid"],
-        "flock" => &["-w", "-W", "-E", "-c", "--wait", "--conflict-exit-code", "--command"],
+        "flock" => &[
+            "-w",
+            "-W",
+            "-E",
+            "-c",
+            "--wait",
+            "--conflict-exit-code",
+            "--command",
+        ],
         "strace" | "ltrace" => &[
-            "-o", "-e", "-p", "-s", "-S", "--output", "--expr", "--pid",
-            "--string-limit", "--summary",
+            "-o",
+            "-e",
+            "-p",
+            "-s",
+            "-S",
+            "--output",
+            "--expr",
+            "--pid",
+            "--string-limit",
+            "--summary",
         ],
         "xargs" => &[
-            "-I", "-P", "-L", "-n", "-s", "-t", "-r",
-            "--replace", "--max-procs", "--max-lines", "--max-args", "--max-chars",
-            "--arg-file", "-a",
+            "-I",
+            "-P",
+            "-L",
+            "-n",
+            "-s",
+            "-t",
+            "-r",
+            "--replace",
+            "--max-procs",
+            "--max-lines",
+            "--max-args",
+            "--max-chars",
+            "--arg-file",
+            "-a",
         ],
         "setsid" => &["-w", "--wait"],
         "unshare" => &["-r", "-R", "--root", "--mount-proc"],
@@ -192,7 +242,8 @@ pub struct CommandAnalysis {
 /// 6. If at any point we encounter an ERROR node or can't find a command name,
 ///    set `had_parse_errors = true`. If we can't find any command name at all,
 ///    return `canonical_head = None` (fail-closed).
-pub fn analyze_command(command: &str) -> CommandAnalysis {    let source = command.as_bytes();
+pub fn analyze_command(command: &str) -> CommandAnalysis {
+    let source = command.as_bytes();
     let mut parser = match bash_parser() {
         Ok(p) => p,
         Err(_) => {
@@ -844,12 +895,42 @@ const INTERACTIVE_FULLSCREEN_COMMANDS: &[&str] = &[
 /// When these flags are used, the actual code is hidden inside the flag argument,
 /// bypassing command sanitization.
 const INTERPRETER_COMMANDS: &[&str] = &[
-    "python", "python3", "python2", "pypy", "pypy3",
-    "bash", "sh", "zsh", "dash", "ksh", "fish", "csh", "tcsh",
-    "perl", "ruby", "node", "nodejs", "deno", "bun",
-    "php", "lua", "luajit", "tclsh", "wish", "awk", "gawk", "mawk",
-    "ocaml", "ghc", "ghci", "scala", "clojure", "rscript", "Rscript",
-    "powershell", "pwsh",
+    "python",
+    "python3",
+    "python2",
+    "pypy",
+    "pypy3",
+    "bash",
+    "sh",
+    "zsh",
+    "dash",
+    "ksh",
+    "fish",
+    "csh",
+    "tcsh",
+    "perl",
+    "ruby",
+    "node",
+    "nodejs",
+    "deno",
+    "bun",
+    "php",
+    "lua",
+    "luajit",
+    "tclsh",
+    "wish",
+    "awk",
+    "gawk",
+    "mawk",
+    "ocaml",
+    "ghc",
+    "ghci",
+    "scala",
+    "clojure",
+    "rscript",
+    "Rscript",
+    "powershell",
+    "pwsh",
 ];
 
 /// S3: Check per-command shape rules — detect dangerous flags and patterns
@@ -897,7 +978,8 @@ fn check_command_shapes(root: &Node, source: &[u8]) -> (Vec<String>, Option<Shap
             // Finding 14: eval is a deferred-execution builtin.
             "eval" => {
                 warnings.push(
-                    "eval (deferred execution: evaluates string as command, bypasses sanitize)".to_string()
+                    "eval (deferred execution: evaluates string as command, bypasses sanitize)"
+                        .to_string(),
                 );
             }
             _ => {}
@@ -1234,7 +1316,10 @@ mod tests {
     #[test]
     fn split_commands_breaks_chains_but_not_quotes() {
         assert_eq!(split_commands("ls -la"), vec!["ls -la"]);
-        assert_eq!(split_commands("echo hi && rm -rf /"), vec!["echo hi", "rm -rf /"]);
+        assert_eq!(
+            split_commands("echo hi && rm -rf /"),
+            vec!["echo hi", "rm -rf /"]
+        );
         assert_eq!(split_commands("true; shutdown"), vec!["true", "shutdown"]);
         assert_eq!(split_commands("ls | grep foo"), vec!["ls", "grep foo"]);
         // Quoted separators stay inside a single segment.
@@ -1246,9 +1331,15 @@ mod tests {
     fn env_wrapper_skips_unset_value() {
         // Regression: `env -u PATH` must not leave head stuck at "PATH".
         assert_eq!(canonical_head("env -u PATH rm -rf /"), Some("rm".into()));
-        assert_eq!(canonical_head("env --unset=PATH rm -rf /"), Some("rm".into()));
+        assert_eq!(
+            canonical_head("env --unset=PATH rm -rf /"),
+            Some("rm".into())
+        );
         assert_eq!(canonical_head("env -i rm -rf /"), Some("rm".into()));
-        assert_eq!(canonical_head("env VAR=value kubectl get pods"), Some("kubectl".into()));
+        assert_eq!(
+            canonical_head("env VAR=value kubectl get pods"),
+            Some("kubectl".into())
+        );
     }
 
     #[test]
@@ -1256,7 +1347,10 @@ mod tests {
         // Regression: the command is the value of `-c`, never the username.
         assert_eq!(canonical_head("su -c 'rm -rf /'"), Some("rm".into()));
         assert_eq!(canonical_head("su root -c 'id'"), Some("id".into()));
-        assert_eq!(canonical_head("su - root -c 'reboot'"), Some("reboot".into()));
+        assert_eq!(
+            canonical_head("su - root -c 'reboot'"),
+            Some("reboot".into())
+        );
         assert_eq!(canonical_head("su --command='ls -la'"), Some("ls".into()));
         assert_eq!(canonical_head("su -s /bin/sh -c 'id'"), Some("id".into()));
         // Without -c there is no extractable command (interactive shell).

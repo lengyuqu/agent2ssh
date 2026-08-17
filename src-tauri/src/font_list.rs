@@ -81,10 +81,7 @@ pub fn list_fonts() -> Vec<FontInfo> {
                 || lower.contains("mono")
                 || lower.contains("consol")
                 || lower.contains("fixed");
-            FontInfo {
-                family,
-                monospaced,
-            }
+            FontInfo { family, monospaced }
         })
         .collect()
 }

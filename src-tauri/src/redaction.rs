@@ -411,7 +411,11 @@ mod tests {
         assert!(out.contains("<REDACTED:ip>"), "IPs must be redacted: {out}");
         // Both real IPs are redacted, and the pre-existing marker is preserved
         // as-is — three markers in total.
-        assert_eq!(out.matches("<REDACTED:ip>").count(), 3, "both IPs redacted: {out}");
+        assert_eq!(
+            out.matches("<REDACTED:ip>").count(),
+            3,
+            "both IPs redacted: {out}"
+        );
     }
 
     #[test]
@@ -422,7 +426,10 @@ mod tests {
         let twice = redact_default(&once);
         assert_eq!(once, twice, "second pass must be a no-op on pure markers");
         let mixed = redact_default(&format!("{once} and 10.1.2.3"));
-        assert!(mixed.contains("<REDACTED:bearer>"), "marker preserved: {mixed}");
+        assert!(
+            mixed.contains("<REDACTED:bearer>"),
+            "marker preserved: {mixed}"
+        );
         assert!(mixed.contains("<REDACTED:ip>"), "new IP redacted: {mixed}");
     }
 
