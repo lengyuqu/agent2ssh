@@ -506,6 +506,46 @@ fn encrypt_entry(key: &[u8; 32], account: &str, plaintext: &[u8]) -> Result<(Vec
     Ok((nonce_bytes.to_vec(), ciphertext))
 }
 
+/// Reserved entry used to verify the master password on unlock. Without it, an
+/// empty store (no entries) previously accepted *any* password — the password
+/// was never checked because there was nothing to decrypt.
+const KEY_CHECK_ACCOUNT: &str = "__agent2ssh_key_check__";
+const KEY_CHECK_PLAINTEXT: &[u8] = b"agent2ssh-key-check";
+
+/// Build the key-check entry for a given key, so unlock can verify the master
+/// password even when the store contains no user secrets.
+fn key_check_entry(key: &[u8; 32]) -> Result<(String, EncryptedEntry)> {
+    let (nonce, ciphertext) = encrypt_entry(key, KEY_CHECK_ACCOUNT, KEY_CHECK_PLAINTEXT)?;
+    Ok((
+        KEY_CHECK_ACCOUNT.to_string(),
+        EncryptedEntry {
+            nonce: b64().encode(&nonce),
+            ciphertext: b64().encode(&ciphertext),
+        },
+    ))
+}
+
+/// Verify the master password by decrypting the key-check entry (if present).
+/// Returns Ok(true) when verified, Ok(false) when the store has no key-check
+/// entry (legacy store), and Err on wrong password / corruption.
+fn verify_key_check(
+    key: &[u8; 32],
+    entries: &std::collections::HashMap<String, EncryptedEntry>,
+) -> Result<bool> {
+    let Some(entry) = entries.get(KEY_CHECK_ACCOUNT) else {
+        return Ok(false);
+    };
+    let nonce = b64().decode(entry.nonce.as_bytes())?;
+    let ciphertext = b64().decode(entry.ciphertext.as_bytes())?;
+    let plain = decrypt_entry(key, KEY_CHECK_ACCOUNT, &nonce, &ciphertext)?;
+    if plain != KEY_CHECK_PLAINTEXT {
+        return Err(anyhow!(
+            "decryption failed (wrong master password or corrupt store)"
+        ));
+    }
+    Ok(true)
+}
+
 /// Decrypt a single entry, verifying the AEAD tag against the account name.
 ///
 /// Returns `Err` if the key is wrong, the account name doesn't match the AAD
@@ -565,6 +605,10 @@ fn load_map() -> Result<HashMap<String, String>> {
             serde_json::from_str(&raw).context("failed to parse secrets store (v2)")?;
         let mut map = HashMap::with_capacity(store.entries.len());
         for (account, entry) in &store.entries {
+            // Skip the internal key-check entry — it is not a user secret.
+            if account == KEY_CHECK_ACCOUNT {
+                continue;
+            }
             let nonce = b64()
                 .decode(entry.nonce.as_bytes())
                 .context("bad nonce encoding in entry")?;
@@ -604,7 +648,11 @@ fn save_map(map: &HashMap<String, String>) -> Result<()> {
     // write the salt must already have been chosen by `unlock_or_init`.
     let salt = read_salt()?.ok_or_else(|| anyhow!("secrets store salt missing"))?;
 
-    let mut entries = HashMap::with_capacity(map.len());
+    let mut entries = HashMap::with_capacity(map.len() + 1);
+    // Key-check entry so unlock can verify the master password even for
+    // empty stores (an empty store previously accepted any password).
+    let (check_account, check_entry) = key_check_entry(&key)?;
+    entries.insert(check_account, check_entry);
     for (account, secret) in map {
         let (nonce, ciphertext) = encrypt_entry(&key, account, secret.as_bytes())?;
         entries.insert(
@@ -733,12 +781,16 @@ pub fn unlock_or_init(password: &str) -> Result<()> {
         let version = probe.get("version").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
 
         if version >= 2 {
-            // v2: verify by decrypting one entry (or succeed if empty).
+            // v2: verify by decrypting the key-check entry first (works even
+            // for empty stores); fall back to any user entry for legacy
+            // stores written before the key-check entry existed.
             let store: EncryptedStoreV2 = serde_json::from_str(&raw)?;
-            if let Some((account, entry)) = store.entries.iter().next() {
-                let nonce = b64().decode(entry.nonce.as_bytes())?;
-                let ciphertext = b64().decode(entry.ciphertext.as_bytes())?;
-                decrypt_entry(&key, account, &nonce, &ciphertext)?;
+            if !verify_key_check(&key, &store.entries)? {
+                if let Some((account, entry)) = store.entries.iter().next() {
+                    let nonce = b64().decode(entry.nonce.as_bytes())?;
+                    let ciphertext = b64().decode(entry.ciphertext.as_bytes())?;
+                    decrypt_entry(&key, account, &nonce, &ciphertext)?;
+                }
             }
         } else {
             // v1: verify by decrypting the single blob.
@@ -752,11 +804,16 @@ pub fn unlock_or_init(password: &str) -> Result<()> {
         let salt = random_bytes::<16>()?;
         let key = derive_key(password, &salt)?;
         // Write an empty v2 store under the new salt, then cache the key.
+        // Includes the key-check entry so unlock verifies the password even
+        // though there are no user secrets yet.
+        let mut entries = HashMap::new();
+        let (check_account, check_entry) = key_check_entry(&key)?;
+        entries.insert(check_account, check_entry);
         let store = EncryptedStoreV2 {
             version: 2,
             kdf: "argon2id".into(),
             salt: b64().encode(salt),
-            entries: HashMap::new(),
+            entries,
         };
         let json = serde_json::to_string_pretty(&store)?;
 
@@ -788,10 +845,12 @@ pub fn unlock_or_init(password: &str) -> Result<()> {
                 let version = probe.get("version").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
                 if version >= 2 {
                     let store: EncryptedStoreV2 = serde_json::from_str(&raw)?;
-                    if let Some((account, entry)) = store.entries.iter().next() {
-                        let nonce = b64().decode(entry.nonce.as_bytes())?;
-                        let ciphertext = b64().decode(entry.ciphertext.as_bytes())?;
-                        decrypt_entry(&key, account, &nonce, &ciphertext)?;
+                    if !verify_key_check(&key, &store.entries)? {
+                        if let Some((account, entry)) = store.entries.iter().next() {
+                            let nonce = b64().decode(entry.nonce.as_bytes())?;
+                            let ciphertext = b64().decode(entry.ciphertext.as_bytes())?;
+                            decrypt_entry(&key, account, &nonce, &ciphertext)?;
+                        }
                     }
                 } else {
                     let store: EncryptedStoreV1 = serde_json::from_str(&raw)?;
@@ -823,7 +882,10 @@ pub fn change_master_password(new_password: &str) -> Result<()> {
     let key = derive_key(new_password, &salt)?;
 
     // Save in v2 format with the new key.
-    let mut entries = HashMap::with_capacity(map.len());
+    let mut entries = HashMap::with_capacity(map.len() + 1);
+    // Key-check entry: without it an empty store would accept any password.
+    let (check_account, check_entry) = key_check_entry(&key)?;
+    entries.insert(check_account, check_entry);
     for (account, secret) in &map {
         let (nonce, ciphertext) = encrypt_entry(&key, account, secret.as_bytes())?;
         entries.insert(
@@ -886,6 +948,11 @@ pub fn lock() {
 /// unlockable via env); returns an error otherwise so a caller never silently
 /// drops or leaks a password.
 pub fn store_secret(account: &str, secret: &str) -> Result<()> {
+    if account == KEY_CHECK_ACCOUNT {
+        return Err(anyhow!(
+            "'{KEY_CHECK_ACCOUNT}' is a reserved internal account and cannot be stored"
+        ));
+    }
     if backend_is_memory() {
         memory_store()
             .lock()
@@ -1047,6 +1114,42 @@ mod tests {
         lock();
         unlock_or_init("correct horse battery staple").unwrap();
         assert_eq!(get_secret(&acct).as_deref(), Some("s3cr3t"));
+
+        lock();
+        clear_test_backend();
+        crate::store::clear_test_config_dir();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn empty_store_rejects_wrong_password() {
+        // Regression: an empty store must verify the master password via the
+        // key-check entry instead of accepting any password.
+        let dir =
+            std::env::temp_dir().join(format!("agent2ssh-enc-empty-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::store::set_test_config_dir(&dir);
+        set_test_backend(false);
+        lock();
+
+        // Init an empty store with a real password.
+        unlock_or_init("real-password").unwrap();
+        lock();
+        assert!(
+            unlock_or_init("wrong-password").is_err(),
+            "empty store must reject a wrong password"
+        );
+        assert!(unlock_or_init("real-password").is_ok());
+
+        // The reserved key-check account must not be addressable as a secret.
+        let err = store_secret(KEY_CHECK_ACCOUNT, "x").unwrap_err().to_string();
+        assert!(err.contains("reserved"), "must reject reserved account: {err}");
+        assert_eq!(
+            get_secret(KEY_CHECK_ACCOUNT),
+            None,
+            "key-check entry must not surface as a secret"
+        );
 
         lock();
         clear_test_backend();

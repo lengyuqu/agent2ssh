@@ -163,22 +163,79 @@ pub fn default_rules() -> Vec<RedactRule> {
 /// literal string (via `NoExpand`), preventing `$1` capture group expansion
 /// from re-inserting sensitive data.
 ///
-/// **B1: Idempotency guard.** If the text already contains redaction markers
-/// (e.g., `<REDACTED:ip>`, `[REDACTED]`), it has already been processed and
-/// is returned as-is. This prevents double-redaction from corrupting structured
-/// payloads — for example, a hex hash inside a `<REDACTED:hex>` marker would
-/// match the hex rule again, and a second pass could mangle the marker itself.
+/// **Idempotency without bypass.** Existing redaction markers (`<REDACTED:...>`,
+/// `[REDACTED...]`) are extracted and placeholder-protected before rules run,
+/// then restored afterwards, so a second pass cannot mangle them. The previous
+/// whole-text skip (`is_pre_redacted`) was a security hole: any output
+/// containing a marker-like substring (`echo '<REDACTED:ip> 10.0.0.1'`) was
+/// returned entirely unredacted. Now non-marker text is always redacted.
 pub fn redact_with_rules(text: &str, rules: &[RedactRule]) -> String {
-    // B1: Idempotency — skip if already redacted.
-    if is_pre_redacted(text) {
-        return text.to_string();
-    }
-    let mut out = text.to_string();
+    let (protected, markers) = protect_markers(text);
+    let mut out = protected;
     for rule in rules {
         out = rule
             .pattern
             .replace_all(&out, NoExpand(&rule.replacement))
             .into_owned();
+    }
+    restore_markers(&out, &markers)
+}
+
+/// Placeholder delimiter for protected markers — a control character that
+/// cannot appear in normal text and is not matched by any default rule.
+const MARKER_DELIM: char = '\u{1}';
+
+/// Extract existing redaction markers (`<REDACTED:...>` / `[REDACTED...]`)
+/// and replace each with a unique placeholder. Returns the protected text and
+/// the extracted markers in order, so `restore_markers` can put them back.
+fn protect_markers(text: &str) -> (String, Vec<String>) {
+    let mut markers = Vec::new();
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    loop {
+        let lt = rest.find("<REDACTED:");
+        let br = rest.find("[REDACTED");
+        let start = match (lt, br) {
+            (Some(a), Some(b)) => a.min(b),
+            (Some(a), None) => a,
+            (None, Some(b)) => b,
+            (None, None) => {
+                // No markers left: flush the remaining text.
+                out.push_str(rest);
+                break;
+            }
+        };
+        out.push_str(&rest[..start]);
+        let after = &rest[start..];
+        // `<REDACTED:...>` closes on '>', `[REDACTED...]` on ']'.
+        let close_gt = lt.is_some_and(|l| l <= br.unwrap_or(usize::MAX));
+        let end = if close_gt {
+            after.find('>').map(|e| e + 1)
+        } else {
+            after.find(']').map(|e| e + 1)
+        };
+        match end {
+            Some(e) => {
+                let idx = markers.len();
+                out.push_str(&format!("{MARKER_DELIM}M{idx}{MARKER_DELIM}"));
+                markers.push(after[..e].to_string());
+                rest = &after[e..];
+            }
+            None => {
+                // Unterminated marker: treat as plain text, stop scanning.
+                out.push_str(after);
+                break;
+            }
+        }
+    }
+    (out, markers)
+}
+
+/// Restore protected markers after rules have been applied.
+fn restore_markers(text: &str, markers: &[String]) -> String {
+    let mut out = text.to_string();
+    for (i, marker) in markers.iter().enumerate() {
+        out = out.replace(&format!("{MARKER_DELIM}M{i}{MARKER_DELIM}"), marker);
     }
     out
 }
@@ -344,6 +401,37 @@ mod tests {
         // just check that an invalid pattern produces InvalidRegex.
         let err = validate_pattern("(").unwrap_err();
         assert!(matches!(err, RedactRuleError::InvalidRegex(_)));
+    }
+
+    #[test]
+    fn marker_substring_cannot_bypass_redaction() {
+        // Regression: an attacker-supplied string containing a marker-like
+        // substring must not disable redaction for the rest of the text.
+        let out = redact_default("connect to 10.0.0.1 then <REDACTED:ip> then 192.168.0.5");
+        assert!(out.contains("<REDACTED:ip>"), "IPs must be redacted: {out}");
+        // Both real IPs are redacted, and the pre-existing marker is preserved
+        // as-is — three markers in total.
+        assert_eq!(out.matches("<REDACTED:ip>").count(), 3, "both IPs redacted: {out}");
+    }
+
+    #[test]
+    fn idempotent_second_pass_preserves_markers() {
+        // A second pass must not corrupt existing markers, and mixed content
+        // still gets redacted.
+        let once = redact_default("Bearer abc123def456ghi789jkl012mno345pqr");
+        let twice = redact_default(&once);
+        assert_eq!(once, twice, "second pass must be a no-op on pure markers");
+        let mixed = redact_default(&format!("{once} and 10.1.2.3"));
+        assert!(mixed.contains("<REDACTED:bearer>"), "marker preserved: {mixed}");
+        assert!(mixed.contains("<REDACTED:ip>"), "new IP redacted: {mixed}");
+    }
+
+    #[test]
+    fn unterminated_marker_is_not_protected() {
+        // A marker-like substring without its closing bracket is plain text
+        // and the rest of the line must still be redacted.
+        let out = redact_default("foo <REDACTED:ip then 10.9.8.7");
+        assert!(out.contains("<REDACTED:ip>"), "IP redacted: {out}");
     }
 
     #[test]

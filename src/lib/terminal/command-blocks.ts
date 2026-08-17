@@ -116,9 +116,9 @@ export function createCommandBlockTracker(
     emit();
   };
 
-  const split = () => {
+  const split = (extraPrefix = "") => {
     closeCurrent(-1);
-    const pending = options.getPendingCommand?.().trim() ?? "";
+    const pending = ((options.getPendingCommand?.() ?? "") + extraPrefix).trim();
     open(pending || null);
   };
 
@@ -153,11 +153,23 @@ export function createCommandBlockTracker(
   disposables.push(
     terminal.onData((data) => {
       if (terminal.buffer.active.type !== "normal") return;
-      for (const character of data) {
-        if (character === "\r") {
-          if (splitMode === "enter") split();
-          else waitForReturnedPrompt();
+      // Pasted batches ("ls\runame\r") deliver whole lines plus Enter in one
+      // onData event, and this tracker's handler runs before the caller's
+      // line-buffer handler — so getPendingCommand() may not yet include the
+      // characters in the current payload. Extract the segment preceding each
+      // \r from this same payload and merge it into the pending command.
+      let lastCr = -1;
+      for (let i = 0; i < data.length; i++) {
+        if (data[i] !== "\r") continue;
+        const segment = data
+          .slice(lastCr + 1, i)
+          .replace(/[\x00-\x08\x0a-\x1f\x7f]/g, "");
+        if (splitMode === "enter") {
+          split(segment);
+        } else {
+          waitForReturnedPrompt();
         }
+        lastCr = i;
       }
     }),
     terminal.buffer.onBufferChange((buffer) => {

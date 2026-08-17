@@ -340,8 +340,14 @@ const TerminalView = forwardRef<TerminalViewHandle, Props>(function TerminalView
     const refreshHighlightRules = () => {
       void api
         .listHighlights()
-        .then((rules) => highlighter.setRules(compileHighlightRules(rules)))
-        .catch(() => highlighter.setRules([]));
+        .then((rules) => {
+          if (disposed) return;
+          highlighter.setRules(compileHighlightRules(rules));
+        })
+        .catch(() => {
+          if (disposed) return;
+          highlighter.setRules([]);
+        });
     };
     refreshHighlightRules();
     window.addEventListener("agent2ssh:highlights-changed", refreshHighlightRules);
@@ -508,7 +514,16 @@ const TerminalView = forwardRef<TerminalViewHandle, Props>(function TerminalView
       termRef.current = null;
       term.dispose();
     };
-  }, [appTheme, host, terminalTheme]);
+  }, [host]);
+
+  // Theme changes repaint the terminal instead of rebuilding it — rebuilding
+  // would destroy the session (WebSocket), scrollback, folds and command blocks.
+  useEffect(() => {
+    const term = termRef.current;
+    if (term) {
+      term.options.theme = resolveTerminalTheme(terminalTheme, appTheme);
+    }
+  }, [appTheme, terminalTheme]);
 
   return (
     <div className="terminal-surface relative h-full w-full overflow-hidden p-2">

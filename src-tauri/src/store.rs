@@ -938,15 +938,10 @@ pub fn compute_metrics_trend(period: TrendPeriod) -> Result<MetricsTrend> {
 }
 
 pub fn redact_sensitive_text(input: &str) -> String {
-    // B1: Idempotency — if the text has already been redacted (contains
-    // redaction markers like `<REDACTED:...>` or `[REDACTED]`), return it
-    // as-is. This prevents double-redaction from corrupting structured
-    // payloads where a redaction marker's content might match a rule
-    // (e.g., a hex hash inside `<REDACTED:hex>` would match the hex rule
-    // again on a second pass).
-    if crate::redaction::is_pre_redacted(input) {
-        return input.to_string();
-    }
+    // Anti-bypass: no whole-text skip here. Existing markers are protected
+    // inside `redact_default` (placeholder swap), so a marker-looking
+    // substring in remote output must not disable redaction for the rest of
+    // the text (e.g. `echo '<REDACTED:ip> 10.0.0.1'` must still redact the IP).
 
     // First pass: regex-based default rules (IP, API keys, JWT, hex blobs).
     let regex_redacted = crate::redaction::redact_default(input);

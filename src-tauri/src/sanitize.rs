@@ -333,7 +333,7 @@ fn extract_head_from_command(cmd_node: &Node, source: &[u8]) -> Option<String> {
     let wrapper_set: HashSet<&str> = WRAPPERS.iter().copied().collect();
 
     // Collect the word-like children of the command node.
-    let words = collect_command_words(cmd_node, source);
+    let mut words = collect_command_words(cmd_node, source);
     if words.is_empty() {
         return None;
     }
@@ -420,14 +420,52 @@ fn extract_head_from_command(cmd_node: &Node, source: &[u8]) -> Option<String> {
                 }
             }
             "su" => {
-                // su [username] [-c command] — skip the username argument.
-                // su takes an optional username, then possibly -c 'command'.
-                if idx < words.len() && !words[idx].starts_with('-') {
-                    idx += 1; // skip username
+                // su [-l|--login|-] [username] [-c 'command'] — the only
+                // extractable command is the value of `-c`/`--command`; without
+                // it su drops into an interactive shell. `-c` is a value flag:
+                // skip the flag and split its value to the first word, so
+                // `su -c 'rm -rf /'` yields head "rm" instead of mistaking a
+                // username (`su - root -c 'id'`) for the command.
+                let value_flags = ["-c", "--command"];
+                while idx < words.len() {
+                    if words[idx].starts_with('-') {
+                        if let Some(value) = words[idx].strip_prefix("--command=") {
+                            // --command='cmd' as a single token.
+                            words[idx] = value
+                                .split_whitespace()
+                                .next()
+                                .unwrap_or_default()
+                                .to_string();
+                            break;
+                        } else if words[idx].starts_with("-c=") {
+                            words[idx] = words[idx][3..]
+                                .split_whitespace()
+                                .next()
+                                .unwrap_or_default()
+                                .to_string();
+                            break;
+                        } else if words[idx].contains('=') {
+                            idx += 1; // some other --flag=value
+                        } else if value_flags.contains(&words[idx].as_str()) {
+                            idx += 1;
+                            if idx < words.len() {
+                                words[idx] = words[idx]
+                                    .split_whitespace()
+                                    .next()
+                                    .unwrap_or_default()
+                                    .to_string();
+                            }
+                            break;
+                        } else {
+                            idx += 1; // -l, -, --login, -s /bin/sh, ...
+                        }
+                    } else {
+                        idx += 1; // username / positional
+                    }
                 }
-                // Then skip flags.
-                while idx < words.len() && words[idx].starts_with('-') {
-                    idx += 1;
+                if idx >= words.len() {
+                    // No command after su (e.g. `su root` → interactive shell).
+                    return Some(normalize_name(&head));
                 }
             }
             "env" => {
@@ -1211,6 +1249,18 @@ mod tests {
         assert_eq!(canonical_head("env --unset=PATH rm -rf /"), Some("rm".into()));
         assert_eq!(canonical_head("env -i rm -rf /"), Some("rm".into()));
         assert_eq!(canonical_head("env VAR=value kubectl get pods"), Some("kubectl".into()));
+    }
+
+    #[test]
+    fn su_wrapper_finds_command_value_not_username() {
+        // Regression: the command is the value of `-c`, never the username.
+        assert_eq!(canonical_head("su -c 'rm -rf /'"), Some("rm".into()));
+        assert_eq!(canonical_head("su root -c 'id'"), Some("id".into()));
+        assert_eq!(canonical_head("su - root -c 'reboot'"), Some("reboot".into()));
+        assert_eq!(canonical_head("su --command='ls -la'"), Some("ls".into()));
+        assert_eq!(canonical_head("su -s /bin/sh -c 'id'"), Some("id".into()));
+        // Without -c there is no extractable command (interactive shell).
+        assert_eq!(canonical_head("su root"), Some("su".into()));
     }
 
     #[test]

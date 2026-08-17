@@ -281,6 +281,10 @@ fn resolve_config(options: &WebDavSyncOptions) -> Result<ResolvedWebDavConfig> {
 }
 
 /// Finding 7: Validate WebDAV URL — must be https/http, no embedded userinfo or query string.
+///
+/// Plain-http is rejected by default because Basic Auth credentials would be
+/// transmitted in cleartext. Set `AGENT2SSH_ALLOW_HTTP_WEBDAV=1` to explicitly
+/// opt into plain-http (e.g. a trusted LAN WebDAV server).
 fn validate_webdav_url(url: &str) -> Result<()> {
     let lower = url.to_ascii_lowercase();
     let scheme_end = lower
@@ -288,7 +292,16 @@ fn validate_webdav_url(url: &str) -> Result<()> {
         .ok_or_else(|| anyhow!("invalid WebDAV URL: missing scheme (expected http:// or https://): {url}"))?;
     let scheme = &lower[..scheme_end];
     match scheme {
-        "https" | "http" => {}
+        "https" => {}
+        "http" => {
+            let allow = std::env::var("AGENT2SSH_ALLOW_HTTP_WEBDAV").is_ok_and(|v| v == "1");
+            if !allow {
+                return Err(anyhow!(
+                    "WebDAV URL uses plain http, which transmits credentials in cleartext; \
+                     use https, or set AGENT2SSH_ALLOW_HTTP_WEBDAV=1 to explicitly allow plain-http"
+                ));
+            }
+        }
         s => return Err(anyhow!("WebDAV URL must use http or https scheme, got '{s}'")),
     }
     // Check for embedded userinfo: anything between scheme:// and the next / should not contain @
@@ -958,6 +971,17 @@ async fn sync_push<R: SyncRemote>(
     sync_password: Option<&str>,
     force: bool,
 ) -> Result<WebDavSyncResult> {
+    // Anti-plaintext: refuse to upload configuration without a sync password.
+    // Files (snippets, config) may contain sensitive data; the previous
+    // silent fallback uploaded them unencrypted whenever sync_password was
+    // unset, which users could not easily detect.
+    let sync_password = sync_password.ok_or_else(|| {
+        anyhow!(
+            "refusing to push configuration without a sync password: files would be uploaded in \
+             plaintext; set --sync-password / AGENT2SSH_SYNC_PASSWORD to enable encrypted sync"
+        )
+    })?;
+
     remote.ensure_layout().await?;
 
     let remote_info = get_remote_marker(remote).await?;
@@ -987,12 +1011,10 @@ async fn sync_push<R: SyncRemote>(
     let dir = config_dir()?;
     for file in &files {
         let bytes = fs::read(dir.join(&file.path))?;
-        let upload_bytes = if let Some(pw) = sync_password {
-            crate::backup_crypto::encrypt_backup(pw.as_bytes(), &bytes)
-                .with_context(|| format!("failed to encrypt {}", file.path))?
-        } else {
-            bytes
-        };
+        // sync_password is mandatory (checked at the top of sync_push), so
+        // every uploaded object is encrypted.
+        let upload_bytes = crate::backup_crypto::encrypt_backup(sync_password.as_bytes(), &bytes)
+            .with_context(|| format!("failed to encrypt {}", file.path))?;
         remote
             .write(
                 &remote_object_path(&new_marker, file),
@@ -1427,7 +1449,7 @@ mod tests {
             ..FakeRemote::default()
         };
         remote.insert(SYNC_VERSION_FILE, serde_json::to_vec(&base).unwrap());
-        let result = sync_push(&remote, None, false).await;
+        let result = sync_push(&remote, Some("test-pw"), false).await;
         assert!(result.unwrap_err().to_string().contains("conflict"));
 
         std::env::remove_var("AGENT2SSH_CONFIG_DIR");
@@ -1486,11 +1508,37 @@ mod tests {
 
         // Finding 20: future schema versions are now allowed via downgrade read
         // (warn but don't reject). The push should succeed with force=true.
-        let result = sync_push(&remote, None, true).await;
+        let result = sync_push(&remote, Some("test-pw"), true).await;
         assert!(
             result.is_ok(),
             "push with future-schema remote marker should succeed via downgrade, got: {:?}",
             result.err()
+        );
+
+        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn push_refuses_plaintext_without_sync_password() {
+        let dir =
+            std::env::temp_dir().join(format!("agent2ssh-sync-plain-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("AGENT2SSH_CONFIG_DIR", &dir);
+        fs::write(dir.join("hosts.json"), "{}").unwrap();
+
+        let remote = FakeRemote::default();
+        let result = sync_push(&remote, None, true).await;
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("without a sync password"),
+            "must refuse plaintext push, got: {err}"
+        );
+        // Nothing must have been written to the remote.
+        assert!(
+            matches!(remote.read(SYNC_VERSION_FILE).await, Ok(None)),
+            "no marker should exist after refused push"
         );
 
         std::env::remove_var("AGENT2SSH_CONFIG_DIR");
