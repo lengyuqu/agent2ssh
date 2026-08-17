@@ -1980,6 +1980,7 @@ async fn async_main() -> Result<()> {
                     target_port,
                     name: None,
                     group_id: None,
+                    via: None,
                 }))
                 .await?;
                 if json {

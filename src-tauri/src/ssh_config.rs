@@ -92,8 +92,9 @@ fn splice_pattern(pattern: &str, base: &Path, chain: &mut Vec<PathBuf>, out: &mu
         base.join(&expanded)
     };
 
-    // Expand glob patterns manually (avoid external `glob` crate dependency).
-    // If the path contains no glob metacharacters, treat it as a literal path.
+    // Expand glob patterns using the `glob` crate. If the path contains no
+    // glob metacharacters, treat it as a literal path (avoids glob overhead
+    // and handles non-existent literal paths without error).
     let full_str = full.to_string_lossy();
     if !has_glob_meta(&full_str) {
         expand_single_file(&full, base, chain, out);

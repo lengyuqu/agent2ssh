@@ -507,6 +507,12 @@ pub struct ForwardRule {
     /// Optional group id for organizing forwards (mirrors host groups).
     #[serde(default)]
     pub group_id: Option<String>,
+    /// Q2: Jump host override used when the forward was created via `--via`.
+    /// Stored so `forward_start_core` can re-establish the same jump path
+    /// when restarting a stopped rule. `None` means the host profile's own
+    /// `jump_host` field (if any) is used.
+    #[serde(default)]
+    pub via: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

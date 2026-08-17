@@ -18,7 +18,9 @@
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::Duration;
 
 use crate::path_resolver::resolve_executable_in;
 
@@ -152,22 +154,81 @@ fn resolve_kubectl() -> Result<std::path::PathBuf> {
         .ok_or_else(|| anyhow!("kubectl binary not found in PATH or common locations"))
 }
 
-/// Run a command and return its stdout as a string.
+/// Run a command and return its stdout as a string, with a 15-second timeout.
+///
+/// Q1: Without a timeout, a hung Docker daemon or unreachable K8s API server
+/// would block the entire discovery call indefinitely, potentially freezing
+/// the desktop UI. The timeout kills the orphaned process if it doesn't
+/// complete within the allotted time.
 fn run_capture(binary: &std::path::Path, args: &[&str]) -> Result<String> {
-    let output = Command::new(binary)
+    let child = Command::new(binary)
         .args(args)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .with_context(|| format!("failed to execute {}", binary.display()))?;
-    if !output.status.success() {
-        return Err(anyhow!(
-            "{} {} failed with exit code {:?}: {}",
+
+    const TIMEOUT: Duration = Duration::from_secs(15);
+
+    // Store the PID before moving the Child into the wait thread, so we
+    // can kill it if the timeout fires.
+    let pid = child.id();
+
+    let (tx, rx) = std::sync::mpsc::channel::<std::io::Result<std::process::Output>>();
+    thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+
+    match rx.recv_timeout(TIMEOUT) {
+        Ok(Ok(output)) => {
+            if !output.status.success() {
+                return Err(anyhow!(
+                    "{} {} failed with exit code {:?}: {}",
+                    binary.display(),
+                    args.join(" "),
+                    output.status.code(),
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ));
+            }
+            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        }
+        Ok(Err(e)) => Err(anyhow!(
+            "failed to wait for {} {}: {e}",
             binary.display(),
-            args.join(" "),
-            output.status.code(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
+            args.join(" ")
+        )),
+        Err(_) => {
+            // Timeout — kill the process to avoid orphaned children.
+            kill_process_by_pid(pid);
+            Err(anyhow!(
+                "{} {} timed out after {}s",
+                binary.display(),
+                args.join(" "),
+                TIMEOUT.as_secs()
+            ))
+        }
     }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// Kill a process by its PID (cross-platform best-effort).
+fn kill_process_by_pid(pid: u32) {
+    #[cfg(unix)]
+    {
+        let _ = Command::new("kill")
+            .arg("-9")
+            .arg(pid.to_string())
+            .output();
+    }
+    #[cfg(windows)]
+    {
+        let _ = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/F"])
+            .output();
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+    }
 }
 
 /// List Docker contexts.
@@ -205,7 +266,20 @@ fn discover_docker_targets(binary: &std::path::Path) -> Result<Vec<ContainerDisc
     for ctx in &contexts {
         let raw = match run_capture(binary, &["--context", ctx, "ps", "--format", "{{json .}}"]) {
             Ok(s) => s,
-            Err(_) => continue, // Skip contexts that can't be reached.
+            Err(e) => {
+                // Q6: Log the failure so users can diagnose why containers
+                // from a particular Docker context don't show up.
+                let _ = crate::diagnostics::append_diagnostic_log(
+                    "warn",
+                    "container_discovery",
+                    "docker ps failed for context",
+                    Some(serde_json::json!({
+                        "context": ctx,
+                        "error": e.to_string(),
+                    })),
+                );
+                continue;
+            }
         };
 
         for (line_num, line) in raw.lines().enumerate() {
@@ -282,7 +356,20 @@ fn discover_k8s_targets(binary: &std::path::Path) -> Result<Vec<ContainerDiscove
             &["--context", ctx, "get", "pods", "-A", "-o", "json"],
         ) {
             Ok(s) => s,
-            Err(_) => continue, // Skip unreachable contexts.
+            Err(e) => {
+                // Q6: Log the failure so users can diagnose why pods from a
+                // particular K8s context don't show up.
+                let _ = crate::diagnostics::append_diagnostic_log(
+                    "warn",
+                    "container_discovery",
+                    "kubectl get pods failed for context",
+                    Some(serde_json::json!({
+                        "context": ctx,
+                        "error": e.to_string(),
+                    })),
+                );
+                continue;
+            }
         };
 
         let pod_list: K8sPodList = match serde_json::from_str(&raw) {

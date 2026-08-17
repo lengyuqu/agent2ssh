@@ -61,7 +61,7 @@ pub struct WalkEntry {
 /// loops. Symlinks to directories are skipped (not followed) to prevent
 /// cycles. Broken symlinks are silently skipped.
 ///
-/// Returns entries sorted by depth-first order (parent directories first).
+/// Returns entries sorted by breadth-first order (parent directories first).
 pub fn walk_local_dir(root: &Path) -> io::Result<Vec<WalkEntry>> {
     let mut entries = Vec::new();
     let mut queue: VecDeque<(PathBuf, PathBuf, u32)> = VecDeque::new();

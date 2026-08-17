@@ -42,6 +42,12 @@ pub fn validate_osc_name(name: &str) -> Result<()> {
             ));
         }
     }
+    // Q5: Reject ':' to prevent ambiguity in OSC 7337 parsing — the
+    // sequence format is "{action}:{name}", so a ':' in the name could
+    // be misinterpreted as a delimiter by a naive parser.
+    if name.contains(':') {
+        return Err(anyhow!("name contains ':', which is not allowed in OSC names"));
+    }
     Ok(())
 }
 
@@ -103,6 +109,18 @@ mod tests {
         // Other C0 control chars.
         assert!(validate_osc_name("evil\x01name").is_err());
         assert!(validate_osc_name("evil\x1fname").is_err());
+    }
+
+    #[test]
+    fn validate_rejects_colon() {
+        // Q5: ':' is the delimiter in "{action}:{name}" — a name containing
+        // ':' could be misparsed by a naive terminal parser.
+        assert!(validate_osc_name("host:8080").is_err());
+        assert!(validate_osc_name("a:b:c").is_err());
+        assert!(validate_osc_name(":leading").is_err());
+        assert!(validate_osc_name("trailing:").is_err());
+        // A single ':' alone.
+        assert!(validate_osc_name(":").is_err());
     }
 
     #[test]

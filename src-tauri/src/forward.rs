@@ -204,11 +204,15 @@ impl ForwardHandle {
         self.stop.store(true, Ordering::SeqCst);
         self.control.connected.store(false, Ordering::SeqCst);
 
-        // Attempt graceful SSH disconnect.
+        // Q4: Track disconnect failure so the final state is consistent
+        // with Drop's behavior — StoppingError if disconnect failed.
+        let mut disconnect_failed = false;
         if let Ok(mut guard) = self.session.lock() {
             if let Some(session) = guard.take() {
                 session.set_timeout(500);
-                let _ = session.disconnect(None, "forward stopped", None);
+                if session.disconnect(None, "forward stopped", None).is_err() {
+                    disconnect_failed = true;
+                }
             }
         }
 
@@ -217,9 +221,13 @@ impl ForwardHandle {
             worker.join_timeout(DROP_GRACE_PERIOD);
         }
 
-        // Update state.
+        // Update state — same logic as Drop.
         let current_state = *self.control.state.lock().unwrap();
-        if current_state != RuleState::Error {
+        if current_state == RuleState::Error {
+            // Worker already errored — preserve that state.
+        } else if disconnect_failed {
+            self.control.set_state(RuleState::StoppingError);
+        } else {
             self.control.set_state(RuleState::Stopped);
         }
     }
@@ -376,6 +384,7 @@ pub async fn forward_add_core_via(
         target_port,
         name: None,
         group_id: None,
+        via: via.map(|s| s.to_string()),
     };
 
     // Reserve a lifecycle entry for this forward.
@@ -830,9 +839,11 @@ pub async fn forward_start_core(id: Uuid) -> Result<()> {
         return Ok(());
     }
     let rule = handle.rule().clone();
-    // We need the host profile to re-establish the SSH session.
-    // The host profile's own jump_host field (if set) is used automatically.
-    let host = resolve_host(&rule.host)?;
+    // Q2: Use resolve_host_with_jump so a stored jump-host override (from
+    // `--via` at creation time) is reapplied on restart. Without this, a
+    // stopped forward that was originally created with `--via bastion`
+    // would silently fall back to the profile's own jump_host (or none).
+    let host = resolve_host_with_jump(&rule.host, rule.via.as_deref())?;
     // Start a new worker with the same rule.
     let new_handle = start_forward_worker(host, rule).await?;
     // Replace the old handle with the new one.
@@ -926,6 +937,7 @@ pub async fn forward_add_multi_core_via(
             target_port: rule.target_port,
             name: rule.name.clone(),
             group_id: rule.group_id.clone(),
+            via: via.map(|s| s.to_string()),
         };
 
         // Reserve a lifecycle entry for this forward.
