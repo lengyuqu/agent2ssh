@@ -180,6 +180,12 @@ pub async fn session_open_core(host_name: &str) -> Result<Uuid> {
     {
         let mut store = sessions().lock().await;
         if max > 0 && store.len() >= max {
+            // Send Close so the terminal thread exits promptly instead of
+            // blocking on channel.read() until the SSH server times out.
+            // The thread is in non-blocking mode, so it picks this up within
+            // ~10ms. If the send fails (thread already gone), the error is
+            // ignored — the handle drop below will still disconnect the channel.
+            let _ = handle.tx.send(TerminalCommand::Close);
             let _ = lifecycle.lock().unwrap().close(&id.to_string(), None);
             return Err(anyhow!(
                 "session limit reached: {} active (max {max}); close an existing session or raise AGENT2SSH_MAX_SESSIONS",
