@@ -187,7 +187,10 @@ fn fill_entropy(seed: &mut [u8]) -> Result<()> {
             log_entropy_error(source, &e.to_string());
             anyhow!("failed to read entropy from /dev/urandom ({source}): {e}")
         })?;
-        return Ok(());
+        // Block-final expression (no `return`): on Linux this cfg block is the
+        // function tail, so the block value becomes the return value. A bare
+        // `return Ok(())` here trips clippy::needless_return on Linux builds.
+        Ok(())
     }
 
     #[cfg(target_os = "macos")]
