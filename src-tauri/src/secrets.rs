@@ -622,18 +622,12 @@ fn save_map(map: &HashMap<String, String>) -> Result<()> {
         entries,
     };
     let raw = serde_json::to_string_pretty(&store)?;
-    // Finding 11: Use sync_all() after writing secrets.enc to ensure crash-safety.
-    // std::fs::write does not fsync — data may sit in OS page cache and be lost
-    // on power failure. We explicitly open, write, sync, then set permissions.
-    {
-        use std::io::Write;
-        let mut file = std::fs::File::create(&path)
-            .with_context(|| format!("failed to create secrets store {}", path.display()))?;
-        file.write_all(raw.as_bytes())
-            .context("failed to write secrets store")?;
-        file.sync_all()
-            .context("failed to fsync secrets store")?;
-    }
+    // Finding 11 + atomicity: write to a temp file in the same directory,
+    // fsync it, then rename over secrets.enc. `File::create` truncates the
+    // original in place — a crash mid-write leaves a corrupt store and loses
+    // every credential. The rename is atomic, so readers always see either
+    // the old or the new content, never a partial write.
+    atomic_write_file(&path, raw.as_bytes())?;
     restrict_file_to_owner(&path)?;
 
     // B2/A23: After writing v2, mark the v1→v2 migration as done (if not
@@ -642,6 +636,36 @@ fn save_map(map: &HashMap<String, String>) -> Result<()> {
         let _ = mark_v1_to_v2_migration_done();
     }
 
+    Ok(())
+}
+
+/// Crash-safe atomic file write: write to a temp file in the same directory,
+/// fsync it, rename over the target, then best-effort fsync the parent
+/// directory. Unlike an in-place `File::create` write (which truncates the
+/// original and can leave a corrupt file on crash), the rename is atomic on
+/// POSIX and Windows, so the target is either the old or the new content.
+fn atomic_write_file(path: &std::path::Path, raw: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let dir = path
+        .parent()
+        .ok_or_else(|| anyhow!("no parent directory for {}", path.display()))?;
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "store".to_string());
+    let tmp = dir.join(format!(".{file_name}.tmp-{}", std::process::id()));
+    {
+        let mut file = std::fs::File::create(&tmp)
+            .with_context(|| format!("failed to create temp store {}", tmp.display()))?;
+        file.write_all(raw).context("failed to write temp store")?;
+        file.sync_all().context("failed to fsync temp store")?;
+    }
+    std::fs::rename(&tmp, path)
+        .with_context(|| format!("failed to rename temp store to {}", path.display()))?;
+    // Best-effort: fsync the directory so the rename is durable across power loss.
+    if let Ok(dir_file) = std::fs::File::open(dir) {
+        let _ = dir_file.sync_all();
+    }
     Ok(())
 }
 
@@ -816,8 +840,9 @@ pub fn change_master_password(new_password: &str) -> Result<()> {
         salt: b64().encode(salt),
         entries,
     };
-    std::fs::write(secrets_path()?, serde_json::to_string_pretty(&store)?)?;
-    restrict_file_to_owner(&secrets_path()?)?;
+    let path = secrets_path()?;
+    atomic_write_file(&path, serde_json::to_string_pretty(&store)?.as_bytes())?;
+    restrict_file_to_owner(&path)?;
     set_cached_key(Some(key));
     Ok(())
 }

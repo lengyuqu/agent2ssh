@@ -192,8 +192,7 @@ pub struct CommandAnalysis {
 /// 6. If at any point we encounter an ERROR node or can't find a command name,
 ///    set `had_parse_errors = true`. If we can't find any command name at all,
 ///    return `canonical_head = None` (fail-closed).
-pub fn analyze_command(command: &str) -> CommandAnalysis {
-    let source = command.as_bytes();
+pub fn analyze_command(command: &str) -> CommandAnalysis {    let source = command.as_bytes();
     let mut parser = match bash_parser() {
         Ok(p) => p,
         Err(_) => {
@@ -238,6 +237,50 @@ pub fn analyze_command(command: &str) -> CommandAnalysis {
         redirect_warnings,
         shape_warnings,
         shape,
+    }
+}
+
+/// Split a possibly-chained shell command (`a && b; c | d`) into its
+/// constituent command segments using the tree-sitter AST, so quoted
+/// separators (`echo "a && b"`) are not mis-split.
+///
+/// Risk classification uses this to close a bypass: single-head analysis
+/// only evaluates the first command of a chain, letting later destructive
+/// commands (e.g. `echo hi && rm -rf /`) escape detection. Evaluating every
+/// segment and keeping the strictest result closes that gap.
+///
+/// If parsing fails, the whole command is returned as one segment; the
+/// caller's existing parse-error handling stays fail-closed (High).
+pub fn split_commands(command: &str) -> Vec<String> {
+    let Ok(mut parser) = bash_parser() else {
+        return vec![command.to_string()];
+    };
+    let Some(tree) = parser.parse(command, None) else {
+        return vec![command.to_string()];
+    };
+    let root = tree.root_node();
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    collect_command_ranges(&root, &mut ranges);
+    if ranges.is_empty() {
+        return vec![command.to_string()];
+    }
+    ranges
+        .into_iter()
+        .map(|(start, end)| command[start..end].to_string())
+        .collect()
+}
+
+/// Depth-first collection of every `command` node's source byte range.
+/// Collecting all (including nested/substituted) commands is deliberately
+/// conservative: classifying a function body or `$(...)` substitution as
+/// dangerous escalates risk, which is the safe direction.
+fn collect_command_ranges(node: &Node, out: &mut Vec<(usize, usize)>) {
+    if node.kind() == "command" {
+        out.push((node.start_byte(), node.end_byte()));
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_command_ranges(&child, out);
     }
 }
 
@@ -385,6 +428,30 @@ fn extract_head_from_command(cmd_node: &Node, source: &[u8]) -> Option<String> {
                 // Then skip flags.
                 while idx < words.len() && words[idx].starts_with('-') {
                     idx += 1;
+                }
+            }
+            "env" => {
+                // env accepts `-u NAME` / `--unset=NAME` (skip the flag and its
+                // value) plus `-i`/`--ignore-environment`. `VAR=value`
+                // assignments are handled by is_wrapper_value below. Without
+                // this branch, `env -u PATH rm -rf /` would stop at "PATH"
+                // and hide the real command from risk classification.
+                let value_flags = ["-u", "--unset"];
+                while idx < words.len() {
+                    if words[idx].starts_with('-') {
+                        if words[idx].contains('=') {
+                            // Long option with '=' (e.g. --unset=PATH).
+                            idx += 1;
+                        } else if value_flags.contains(&words[idx].as_str()) {
+                            // Flag takes a value: skip flag + value.
+                            idx += 2;
+                        } else {
+                            // Bare flag without value.
+                            idx += 1;
+                        }
+                    } else {
+                        break;
+                    }
                 }
             }
             _ => {
@@ -1124,6 +1191,26 @@ mod tests {
         assert_eq!(canonical_head("ls -la"), Some("ls".into()));
         assert_eq!(canonical_head("cat /etc/hosts"), Some("cat".into()));
         assert_eq!(canonical_head("rm -rf /tmp/stuff"), Some("rm".into()));
+    }
+
+    #[test]
+    fn split_commands_breaks_chains_but_not_quotes() {
+        assert_eq!(split_commands("ls -la"), vec!["ls -la"]);
+        assert_eq!(split_commands("echo hi && rm -rf /"), vec!["echo hi", "rm -rf /"]);
+        assert_eq!(split_commands("true; shutdown"), vec!["true", "shutdown"]);
+        assert_eq!(split_commands("ls | grep foo"), vec!["ls", "grep foo"]);
+        // Quoted separators stay inside a single segment.
+        assert_eq!(split_commands("echo \"a && b\""), vec!["echo \"a && b\""]);
+        assert_eq!(split_commands("echo 'x;y'"), vec!["echo 'x;y'"]);
+    }
+
+    #[test]
+    fn env_wrapper_skips_unset_value() {
+        // Regression: `env -u PATH` must not leave head stuck at "PATH".
+        assert_eq!(canonical_head("env -u PATH rm -rf /"), Some("rm".into()));
+        assert_eq!(canonical_head("env --unset=PATH rm -rf /"), Some("rm".into()));
+        assert_eq!(canonical_head("env -i rm -rf /"), Some("rm".into()));
+        assert_eq!(canonical_head("env VAR=value kubectl get pods"), Some("kubectl".into()));
     }
 
     #[test]

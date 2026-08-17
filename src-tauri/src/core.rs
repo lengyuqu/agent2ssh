@@ -14,7 +14,7 @@ pub use team_config::*;
 
 use crate::{
     embedded_ssh::connect_embedded_ssh,
-    sanitize::{analyze_command, ShapeRisk},
+    sanitize::{analyze_command, split_commands, ShapeRisk},
     store::{append_audit, list_audit_raw, load_config, save_config_unlocked, store_write_lock},
     types::{
         default_host_group, source_from_env, AuditEntry, AuditFilter, BatchStrategy,
@@ -442,6 +442,30 @@ pub fn list_audit_core(filter: AuditFilter) -> Result<Vec<AuditEntry>> {
 }
 
 pub fn classify_risk(command: &str) -> RiskLevel {
+    // First pass: whole-command analysis. This must run before chain
+    // splitting so whole-command substring patterns that span segments
+    // (fork bombs like `:(){ :|:& };:`, mkfs, ...) cannot evade by being
+    // split apart.
+    let base = classify_risk_single(command);
+
+    // Chain bypass fix: a chained command (`echo hi && rm -rf /`) hides
+    // destructive segments from single-head analysis. Re-evaluate each
+    // top-level segment independently and keep the strictest result.
+    let segments = split_commands(command);
+    if segments.len() > 1 {
+        let chained = segments
+            .into_iter()
+            .map(|seg| classify_risk(&seg))
+            .fold(RiskLevel::Low, RiskLevel::max_severity);
+        return base.max_severity(chained);
+    }
+    base
+}
+
+/// Single-command risk classification (no chain splitting). Whole-command
+/// substring patterns (fork bombs, mkfs, dd to block devices, shutdown, ...)
+/// and the AST-derived canonical head checks all run here.
+fn classify_risk_single(command: &str) -> RiskLevel {
     let lower = command.trim().to_lowercase();
     let tokens: Vec<&str> = lower.split_whitespace().collect();
 
@@ -576,6 +600,25 @@ pub fn classify_risk(command: &str) -> RiskLevel {
     // recursive chown — use canonical head
     if head == "chown" && (lower.contains("-r") || lower.contains("--recursive")) {
         return RiskLevel::High;
+    }
+
+    // ── REDIRECT (AST) ──────────────────────────────────────────────────────
+    // Consume the AST redirect warnings that `lower.contains("> /path")`
+    // substring checks miss — notably space-less variants like `>/dev/sda`,
+    // `>/etc/passwd`. Any file-write redirect bypassing the patch_file
+    // workflow is at least Medium; raw block-device writes are Blocked.
+    if !analysis.redirect_warnings.is_empty() {
+        const BLOCK_DEVICES: &[&str] = &[
+            "/dev/sd", "/dev/nvme", "/dev/xvd", "/dev/disk", "/dev/md", "/dev/mapper",
+        ];
+        for warning in &analysis.redirect_warnings {
+            for dev in BLOCK_DEVICES {
+                if warning.contains(&format!("redirect to '{dev}")) {
+                    return RiskLevel::Blocked;
+                }
+            }
+        }
+        return RiskLevel::Medium;
     }
 
     // ── MEDIUM ───────────────────────────────────────────────────────────────
@@ -3208,6 +3251,23 @@ mod tests {
         assert_eq!(classify_risk("sudo shutdown"), RiskLevel::Blocked);
         assert_eq!(classify_risk("init 0"), RiskLevel::Blocked);
         assert_eq!(classify_risk("init 6"), RiskLevel::Blocked);
+    }
+
+    #[test]
+    fn test_classify_risk_chain_cannot_hide_destructive_command() {
+        // Chain-bypass regression: a destructive command hidden behind a
+        // benign first segment must still be caught at its own severity.
+        assert_eq!(classify_risk("echo hi && rm -rf /"), RiskLevel::Blocked);
+        assert_eq!(classify_risk("rm -rf / && echo done"), RiskLevel::Blocked);
+        assert_eq!(classify_risk("true; shutdown"), RiskLevel::Blocked);
+        assert_eq!(classify_risk("ls -la | sudo rm -rf /"), RiskLevel::Blocked);
+        assert_eq!(classify_risk("env -u PATH rm -rf /"), RiskLevel::Blocked);
+        assert_eq!(classify_risk("env --unset=PATH rm -rf /"), RiskLevel::Blocked);
+        // Quoted separators are not command chains.
+        assert_eq!(classify_risk("echo \"a && b\""), RiskLevel::Low);
+        // Space-less block-device / system-file redirects must not fall to Low.
+        assert_eq!(classify_risk("echo x >/dev/sda"), RiskLevel::Blocked);
+        assert_eq!(classify_risk("echo x >/etc/passwd"), RiskLevel::Medium);
     }
 
     #[test]
