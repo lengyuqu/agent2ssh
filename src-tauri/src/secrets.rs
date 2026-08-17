@@ -1143,8 +1143,13 @@ mod tests {
         assert!(unlock_or_init("real-password").is_ok());
 
         // The reserved key-check account must not be addressable as a secret.
-        let err = store_secret(KEY_CHECK_ACCOUNT, "x").unwrap_err().to_string();
-        assert!(err.contains("reserved"), "must reject reserved account: {err}");
+        let err = store_secret(KEY_CHECK_ACCOUNT, "x")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("reserved"),
+            "must reject reserved account: {err}"
+        );
         assert_eq!(
             get_secret(KEY_CHECK_ACCOUNT),
             None,

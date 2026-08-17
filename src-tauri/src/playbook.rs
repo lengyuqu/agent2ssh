@@ -862,9 +862,9 @@ required = false
                 change_id: Some(change_id.to_string()),
                 side_effect: None,
                 source: None,
-        action: None,
-        outcome: None,
-    };
+                action: None,
+                outcome: None,
+            };
             entries.push(entry);
         }
 

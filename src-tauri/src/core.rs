@@ -609,7 +609,12 @@ fn classify_risk_single(command: &str) -> RiskLevel {
     // workflow is at least Medium; raw block-device writes are Blocked.
     if !analysis.redirect_warnings.is_empty() {
         const BLOCK_DEVICES: &[&str] = &[
-            "/dev/sd", "/dev/nvme", "/dev/xvd", "/dev/disk", "/dev/md", "/dev/mapper",
+            "/dev/sd",
+            "/dev/nvme",
+            "/dev/xvd",
+            "/dev/disk",
+            "/dev/md",
+            "/dev/mapper",
         ];
         for warning in &analysis.redirect_warnings {
             for dev in BLOCK_DEVICES {
@@ -2336,13 +2341,8 @@ pub async fn sftp_remove_file_core(
     path: &str,
     timeout_secs: Option<u64>,
 ) -> Result<ExecResult> {
-    sftp_remove_file_core_with_source(
-        host_name,
-        path,
-        timeout_secs,
-        Some(source_from_env("core")),
-    )
-    .await
+    sftp_remove_file_core_with_source(host_name, path, timeout_secs, Some(source_from_env("core")))
+        .await
 }
 
 pub async fn sftp_remove_file_core_with_source(
@@ -2374,13 +2374,8 @@ pub async fn sftp_remove_dir_core(
     path: &str,
     timeout_secs: Option<u64>,
 ) -> Result<ExecResult> {
-    sftp_remove_dir_core_with_source(
-        host_name,
-        path,
-        timeout_secs,
-        Some(source_from_env("core")),
-    )
-    .await
+    sftp_remove_dir_core_with_source(host_name, path, timeout_secs, Some(source_from_env("core")))
+        .await
 }
 
 pub async fn sftp_remove_dir_core_with_source(
@@ -2444,10 +2439,12 @@ pub async fn sftp_remove_dir_all_core_with_source(
             let mut queue: Vec<String> = vec![path.clone()];
 
             while let Some(dir) = queue.pop() {
-                let entries = sftp.readdir(Path::new(&dir))
+                let entries = sftp
+                    .readdir(Path::new(&dir))
                     .with_context(|| format!("failed to read remote directory {dir}"))?;
                 for (entry_path, stat) in entries {
-                    let entry_name = entry_path.file_name()
+                    let entry_name = entry_path
+                        .file_name()
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_default();
                     if entry_name == "." || entry_name == ".." {
@@ -3262,7 +3259,10 @@ mod tests {
         assert_eq!(classify_risk("true; shutdown"), RiskLevel::Blocked);
         assert_eq!(classify_risk("ls -la | sudo rm -rf /"), RiskLevel::Blocked);
         assert_eq!(classify_risk("env -u PATH rm -rf /"), RiskLevel::Blocked);
-        assert_eq!(classify_risk("env --unset=PATH rm -rf /"), RiskLevel::Blocked);
+        assert_eq!(
+            classify_risk("env --unset=PATH rm -rf /"),
+            RiskLevel::Blocked
+        );
         // Quoted separators are not command chains.
         assert_eq!(classify_risk("echo \"a && b\""), RiskLevel::Low);
         // Space-less block-device / system-file redirects must not fall to Low.
@@ -4009,9 +4009,9 @@ mod tests {
             change_id: Some("CHG-12345".into()),
             side_effect: None,
             source: Some("cli".into()),
-        action: None,
-        outcome: None,
-    };
+            action: None,
+            outcome: None,
+        };
 
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains("daily health check"));

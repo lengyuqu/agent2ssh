@@ -415,9 +415,9 @@ mod tests {
             change_id: None,
             side_effect: None,
             source: Some(source.into()),
-        action: None,
-        outcome: None,
-    }
+            action: None,
+            outcome: None,
+        }
     }
 
     #[test]

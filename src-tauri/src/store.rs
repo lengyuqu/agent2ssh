@@ -619,7 +619,7 @@ pub fn append_audit(
     ensure_config_dir()?;
     let _guard = audit_write_lock()?;
     rotate_audit_if_needed_unlocked(10 * 1024 * 1024)?; // 10 MB default
-    // Finding 16: Derive action and outcome from the ExecResult.
+                                                        // Finding 16: Derive action and outcome from the ExecResult.
     let action = derive_audit_action(&result.command);
     let outcome = derive_audit_outcome(result.exit_code, risk_level);
     let entry = AuditEntry {
@@ -658,7 +658,10 @@ fn derive_audit_action(command: &str) -> Option<String> {
         Some("sftp_mkdir".into())
     } else if lower.starts_with("sftp rename") {
         Some("sftp_rename".into())
-    } else if lower.starts_with("sftp rm") || lower.starts_with("sftp rmdir") || lower.starts_with("sftp rm-rf") {
+    } else if lower.starts_with("sftp rm")
+        || lower.starts_with("sftp rmdir")
+        || lower.starts_with("sftp rm-rf")
+    {
         Some("sftp_remove".into())
     } else if lower.starts_with("sftp ls") {
         Some("sftp_list".into())
@@ -678,7 +681,12 @@ fn derive_audit_action(command: &str) -> Option<String> {
         Some("forward_start".into())
     } else if lower.starts_with("forward list") {
         Some("forward_list".into())
-    } else if lower.starts_with("config update") || lower.starts_with("host add") || lower.starts_with("host update") || lower.starts_with("host remove") || lower.starts_with("host delete") {
+    } else if lower.starts_with("config update")
+        || lower.starts_with("host add")
+        || lower.starts_with("host update")
+        || lower.starts_with("host remove")
+        || lower.starts_with("host delete")
+    {
         Some("config_update".into())
     } else {
         Some("exec".into())
@@ -1691,9 +1699,9 @@ mod tests {
             change_id: None,
             side_effect: None,
             source: None,
-        action: None,
-        outcome: None,
-    };
+            action: None,
+            outcome: None,
+        };
         let entry2 = AuditEntry {
             id: Uuid::new_v4(),
             ts: Utc::now(),
@@ -1706,9 +1714,9 @@ mod tests {
             change_id: None,
             side_effect: None,
             source: None,
-        action: None,
-        outcome: None,
-    };
+            action: None,
+            outcome: None,
+        };
 
         // Test search: "apt" should match entry1's command
         let needle = "apt".to_lowercase();
@@ -1755,9 +1763,9 @@ mod tests {
             change_id: None,
             side_effect: None,
             source: None,
-        action: None,
-        outcome: None,
-    };
+            action: None,
+            outcome: None,
+        };
         let entry2 = AuditEntry {
             id: Uuid::new_v4(),
             ts: Utc::now(),
@@ -1770,9 +1778,9 @@ mod tests {
             change_id: None,
             side_effect: None,
             source: None,
-        action: None,
-        outcome: None,
-    };
+            action: None,
+            outcome: None,
+        };
 
         // Test command_pattern: "kubectl delete *" should match entry1
         let pattern = "kubectl delete *";
@@ -2052,9 +2060,9 @@ mod tests {
             change_id: None,
             side_effect: None,
             source: None,
-        action: None,
-        outcome: None,
-    };
+            action: None,
+            outcome: None,
+        };
         let entry2 = AuditEntry {
             id: Uuid::new_v4(),
             ts: Utc::now(),
@@ -2067,9 +2075,9 @@ mod tests {
             change_id: Some("CHG-001".into()),
             side_effect: None,
             source: Some("cli".into()),
-        action: None,
-        outcome: None,
-    };
+            action: None,
+            outcome: None,
+        };
 
         let entries = vec![entry1, entry2];
 
@@ -2156,9 +2164,9 @@ mod tests {
                 change_id: Some(change_id.to_string()),
                 side_effect: None,
                 source: Some("mcp".into()),
-        action: None,
-        outcome: None,
-    };
+                action: None,
+                outcome: None,
+            };
             jsonl_lines.push(serde_json::to_string(&entry).unwrap());
         }
 
@@ -2212,9 +2220,9 @@ mod tests {
             change_id: None,
             side_effect: None,
             source: None,
-        action: None,
-        outcome: None,
-    };
+            action: None,
+            outcome: None,
+        };
         let json = serde_json::to_string(&entry).unwrap();
         let parsed: AuditEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.reason, None);
@@ -2243,9 +2251,9 @@ mod tests {
                 change_id: Some("CHG-100".into()),
                 side_effect: None,
                 source: Some("cli".into()),
-        action: None,
-        outcome: None,
-    },
+                action: None,
+                outcome: None,
+            },
             AuditEntry {
                 id: Uuid::new_v4(),
                 ts: Utc::now(),
@@ -2258,9 +2266,9 @@ mod tests {
                 change_id: None,
                 side_effect: None,
                 source: None,
-        action: None,
-        outcome: None,
-    },
+                action: None,
+                outcome: None,
+            },
             AuditEntry {
                 id: Uuid::new_v4(),
                 ts: Utc::now(),
@@ -2273,9 +2281,9 @@ mod tests {
                 change_id: Some("CHG-100".into()),
                 side_effect: None,
                 source: Some("mcp".into()),
-        action: None,
-        outcome: None,
-    },
+                action: None,
+                outcome: None,
+            },
         ];
 
         // Write JSONL and read back

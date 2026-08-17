@@ -493,7 +493,10 @@ fn run_local_forward(
     // A2: Dual-stack loopback binding (IPv4 required, IPv6 best-effort).
     let (listener_v4, listener_v6) = bind_loopback(rule.bind_port)?;
     // Findings 4+6+7: Record actual bound port, mark as Active + connected.
-    let actual_port = listener_v4.local_addr().map(|a| a.port()).unwrap_or(rule.bind_port);
+    let actual_port = listener_v4
+        .local_addr()
+        .map(|a| a.port())
+        .unwrap_or(rule.bind_port);
     control.effective_port.store(actual_port, Ordering::Relaxed);
     control.connected.store(true, Ordering::Relaxed);
     control.set_state(RuleState::Active);

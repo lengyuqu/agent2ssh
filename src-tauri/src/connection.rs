@@ -206,7 +206,11 @@ pub async fn disconnect_host(host_name: &str) -> Result<()> {
     resolve_host(host_name)?;
     // Remove the connection and retrieve its lifecycle ID so we can
     // close the lifecycle entry by the correct UUID.
-    let lifecycle_id = connections().lock().await.remove(host_name).map(|conn| conn.lifecycle_id);
+    let lifecycle_id = connections()
+        .lock()
+        .await
+        .remove(host_name)
+        .map(|conn| conn.lifecycle_id);
     // Mark the lifecycle entry as Closed.
     if let Some(id) = lifecycle_id {
         let _ = crate::app_state::lifecycle()
