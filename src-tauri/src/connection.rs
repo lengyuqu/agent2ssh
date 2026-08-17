@@ -57,6 +57,10 @@ pub struct RetainedConnection {
     /// T2-11: Drop signal — sends `false` when connection drops.
     /// Blocking tasks subscribe to this to cancel their pending operations.
     drop_tx: DropSignal,
+    /// Lifecycle registry ID (UUID) for this connection. Stored so
+    /// `disconnect_host` can close the lifecycle entry by the same ID
+    /// that was used to reserve it.
+    lifecycle_id: Uuid,
 }
 
 type ConnectionHandleSnapshot = (
@@ -154,10 +158,13 @@ pub async fn connect_host(host_name: &str) -> Result<()> {
     }
 
     // Reserve a lifecycle entry for this connection.
+    // Finding 21: Use a UUID for the lifecycle ID instead of the host name,
+    // since the lifecycle registry now validates UUID format.
+    let lifecycle_id = Uuid::new_v4();
     let lifecycle = crate::app_state::lifecycle();
     let reservation = crate::lifecycle::LifecycleRegistry::reserve(
         &lifecycle,
-        &host.name,
+        &lifecycle_id.to_string(),
         crate::app_state::ResourceKind::Connection,
         crate::app_state::ResourceOwner::Headless(Uuid::new_v4()),
     )
@@ -186,6 +193,7 @@ pub async fn connect_host(host_name: &str) -> Result<()> {
                 ..Default::default()
             })),
             drop_tx,
+            lifecycle_id,
         },
     );
 
@@ -196,12 +204,16 @@ pub async fn connect_host(host_name: &str) -> Result<()> {
 /// Close a retained embedded SSH connection.
 pub async fn disconnect_host(host_name: &str) -> Result<()> {
     resolve_host(host_name)?;
-    connections().lock().await.remove(host_name);
+    // Remove the connection and retrieve its lifecycle ID so we can
+    // close the lifecycle entry by the correct UUID.
+    let lifecycle_id = connections().lock().await.remove(host_name).map(|conn| conn.lifecycle_id);
     // Mark the lifecycle entry as Closed.
-    let _ = crate::app_state::lifecycle()
-        .lock()
-        .unwrap()
-        .close(host_name, None);
+    if let Some(id) = lifecycle_id {
+        let _ = crate::app_state::lifecycle()
+            .lock()
+            .unwrap()
+            .close(&id.to_string(), None);
+    }
     Ok(())
 }
 

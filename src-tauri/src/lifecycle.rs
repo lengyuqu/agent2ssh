@@ -70,6 +70,13 @@ impl LifecycleRegistry {
         kind: ResourceKind,
         owner: ResourceOwner,
     ) -> Result<ResourceReservation, LifecycleError> {
+        // Finding 21: Validate that the ID is a well-formed UUID. This
+        // prevents arbitrary strings (which could collide with internal
+        // keying schemes or break downstream consumers that assume UUID
+        // format) from being used as resource IDs.
+        if Uuid::parse_str(id).is_err() {
+            return Err(LifecycleError::InvalidId(id.to_string()));
+        }
         let mut reg = registry.lock().unwrap();
         if let Some(existing) = reg.records.get(id) {
             if existing.phase != ResourcePhase::Closed {
@@ -231,6 +238,8 @@ pub enum LifecycleError {
     AlreadyInUse(String),
     #[error("resource not found: {0}")]
     NotFound(String),
+    #[error("invalid resource ID (not a valid UUID): {0}")]
+    InvalidId(String),
     #[error("nonce mismatch for resource {0} (possible ABA)")]
     NonceMismatch(String),
     #[error("resource {id} is not Pending (current phase: {phase:?})")]
@@ -249,21 +258,26 @@ mod tests {
         Arc::new(Mutex::new(LifecycleRegistry::new()))
     }
 
+    /// Generate a random UUID string for test resource IDs.
+    fn uuid_str() -> String {
+        Uuid::new_v4().to_string()
+    }
+
     #[test]
     fn reserve_activate_close_roundtrip() {
         let reg = make_registry();
+        let id = uuid_str();
 
         let reservation =
-            LifecycleRegistry::reserve(&reg, "session-1", ResourceKind::SshSession, owner())
-                .unwrap();
+            LifecycleRegistry::reserve(&reg, &id, ResourceKind::SshSession, owner()).unwrap();
         assert_eq!(
-            reg.lock().unwrap().get("session-1").unwrap().phase,
+            reg.lock().unwrap().get(&id).unwrap().phase,
             ResourcePhase::Pending
         );
 
         reservation.activate().unwrap();
         assert_eq!(
-            reg.lock().unwrap().get("session-1").unwrap().phase,
+            reg.lock().unwrap().get(&id).unwrap().phase,
             ResourcePhase::Ready
         );
     }
@@ -271,20 +285,20 @@ mod tests {
     #[test]
     fn drop_without_activate_marks_closed() {
         let reg = make_registry();
+        let id = uuid_str();
 
         {
             let reservation =
-                LifecycleRegistry::reserve(&reg, "session-2", ResourceKind::SshSession, owner())
-                    .unwrap();
+                LifecycleRegistry::reserve(&reg, &id, ResourceKind::SshSession, owner()).unwrap();
             assert_eq!(
-                reg.lock().unwrap().get("session-2").unwrap().phase,
+                reg.lock().unwrap().get(&id).unwrap().phase,
                 ResourcePhase::Pending
             );
             // Drop without activating.
             drop(reservation);
         }
         assert_eq!(
-            reg.lock().unwrap().get("session-2").unwrap().phase,
+            reg.lock().unwrap().get(&id).unwrap().phase,
             ResourcePhase::Closed
         );
     }
@@ -293,71 +307,72 @@ mod tests {
     fn double_reserve_fails() {
         let reg = make_registry();
         let owner = owner();
+        let id = uuid_str();
 
         let _r1 =
-            LifecycleRegistry::reserve(&reg, "session-3", ResourceKind::SshSession, owner.clone())
-                .unwrap();
-        let result = LifecycleRegistry::reserve(&reg, "session-3", ResourceKind::SshSession, owner);
+            LifecycleRegistry::reserve(&reg, &id, ResourceKind::SshSession, owner.clone()).unwrap();
+        let result = LifecycleRegistry::reserve(&reg, &id, ResourceKind::SshSession, owner);
         assert!(matches!(result, Err(LifecycleError::AlreadyInUse(_))));
     }
 
     #[test]
     fn reserve_after_close_succeeds() {
         let reg = make_registry();
-        let id = "session-4";
+        let id = uuid_str();
         let owner = owner();
 
         let nonce1;
         {
-            let r1 = LifecycleRegistry::reserve(&reg, id, ResourceKind::SshSession, owner.clone())
+            let r1 = LifecycleRegistry::reserve(&reg, &id, ResourceKind::SshSession, owner.clone())
                 .unwrap();
             nonce1 = r1.nonce();
             r1.activate().unwrap();
         }
-        reg.lock().unwrap().close(id, None).unwrap();
+        reg.lock().unwrap().close(&id, None).unwrap();
 
         // After close, a new reservation with the same ID should work
         // and get a different nonce (ABA prevention).
-        let r2 = LifecycleRegistry::reserve(&reg, id, ResourceKind::SshSession, owner).unwrap();
+        let r2 = LifecycleRegistry::reserve(&reg, &id, ResourceKind::SshSession, owner).unwrap();
         let nonce2 = r2.nonce();
         assert_ne!(nonce1, nonce2);
-        assert_eq!(reg.lock().unwrap().get(id).unwrap().nonce, nonce2);
+        assert_eq!(reg.lock().unwrap().get(&id).unwrap().nonce, nonce2);
     }
 
     #[test]
     fn nonce_mismatch_prevents_aba() {
         let reg = make_registry();
-        let id = "session-5";
+        let id = uuid_str();
 
-        let r1 = LifecycleRegistry::reserve(&reg, id, ResourceKind::SshSession, owner()).unwrap();
+        let r1 = LifecycleRegistry::reserve(&reg, &id, ResourceKind::SshSession, owner()).unwrap();
         let nonce1 = r1.nonce();
         r1.activate().unwrap();
-        reg.lock().unwrap().close(id, None).unwrap();
+        reg.lock().unwrap().close(&id, None).unwrap();
 
         // New reservation gets a new nonce.
-        let r2 = LifecycleRegistry::reserve(&reg, id, ResourceKind::SshSession, owner()).unwrap();
+        let r2 = LifecycleRegistry::reserve(&reg, &id, ResourceKind::SshSession, owner()).unwrap();
         let nonce2 = r2.nonce();
         assert_ne!(nonce1, nonce2);
         r2.activate().unwrap();
 
         // Trying to close with the old nonce should fail.
-        let result = reg.lock().unwrap().close(id, Some(nonce1));
+        let result = reg.lock().unwrap().close(&id, Some(nonce1));
         assert!(matches!(result, Err(LifecycleError::NonceMismatch(_))));
     }
 
     #[test]
     fn activate_wrong_phase_fails() {
         let reg = make_registry();
-        let id = "session-6";
+        let id = uuid_str();
 
-        let r1 = LifecycleRegistry::reserve(&reg, id, ResourceKind::SshSession, owner()).unwrap();
+        let r1 = LifecycleRegistry::reserve(&reg, &id, ResourceKind::SshSession, owner()).unwrap();
         r1.activate().unwrap();
 
         // Try to activate again — should fail because it's already Ready.
-        let r2 =
-            LifecycleRegistry::reserve(&reg, "other", ResourceKind::SshSession, owner()).unwrap();
+        let other_id = uuid_str();
+        let r2 = LifecycleRegistry::reserve(&reg, &other_id, ResourceKind::SshSession, owner())
+            .unwrap();
         // Manually call activate on the already-Ready resource.
-        let result = reg.lock().unwrap().activate(id, r2.nonce());
+        let result = reg.lock().unwrap().activate(&id, r2.nonce());
         // nonce mismatch (r2 has a different nonce)
         assert!(matches!(result, Err(LifecycleError::NonceMismatch(_))));
     }
@@ -367,34 +382,38 @@ mod tests {
         let reg = make_registry();
         let owner = owner();
 
+        let id_a = uuid_str();
+        let id_b = uuid_str();
+        let id_c = uuid_str();
+
         // Reserve several resources for the same owner.
-        let r1 =
-            LifecycleRegistry::reserve(&reg, "a", ResourceKind::SshSession, owner.clone()).unwrap();
-        let r2 =
-            LifecycleRegistry::reserve(&reg, "b", ResourceKind::Forward, owner.clone()).unwrap();
-        let r3 =
-            LifecycleRegistry::reserve(&reg, "c", ResourceKind::Transfer, owner.clone()).unwrap();
+        let r1 = LifecycleRegistry::reserve(&reg, &id_a, ResourceKind::SshSession, owner.clone())
+            .unwrap();
+        let r2 = LifecycleRegistry::reserve(&reg, &id_b, ResourceKind::Forward, owner.clone())
+            .unwrap();
+        let r3 = LifecycleRegistry::reserve(&reg, &id_c, ResourceKind::Transfer, owner.clone())
+            .unwrap();
         r1.activate().unwrap();
         r2.activate().unwrap();
         r3.activate().unwrap();
 
         // Close all except "b".
-        let closed = reg.lock().unwrap().close_owner(&owner, &["b"]);
+        let closed = reg.lock().unwrap().close_owner(&owner, &[&id_b]);
         assert_eq!(closed.len(), 2);
-        assert!(closed.contains(&"a".to_string()));
-        assert!(closed.contains(&"c".to_string()));
-        assert!(!closed.contains(&"b".to_string()));
+        assert!(closed.contains(&id_a));
+        assert!(closed.contains(&id_c));
+        assert!(!closed.contains(&id_b));
 
         assert_eq!(
-            reg.lock().unwrap().get("a").unwrap().phase,
+            reg.lock().unwrap().get(&id_a).unwrap().phase,
             ResourcePhase::Closed
         );
         assert_eq!(
-            reg.lock().unwrap().get("b").unwrap().phase,
+            reg.lock().unwrap().get(&id_b).unwrap().phase,
             ResourcePhase::Ready
         );
         assert_eq!(
-            reg.lock().unwrap().get("c").unwrap().phase,
+            reg.lock().unwrap().get(&id_c).unwrap().phase,
             ResourcePhase::Closed
         );
     }
@@ -402,12 +421,15 @@ mod tests {
     #[test]
     fn gc_removes_closed_records() {
         let reg = make_registry();
+        let id_a = uuid_str();
+        let id_b = uuid_str();
 
-        let r1 = LifecycleRegistry::reserve(&reg, "a", ResourceKind::SshSession, owner()).unwrap();
+        let r1 = LifecycleRegistry::reserve(&reg, &id_a, ResourceKind::SshSession, owner())
+            .unwrap();
         r1.activate().unwrap();
-        reg.lock().unwrap().close("a", None).unwrap();
+        reg.lock().unwrap().close(&id_a, None).unwrap();
 
-        let r2 = LifecycleRegistry::reserve(&reg, "b", ResourceKind::Forward, owner()).unwrap();
+        let r2 = LifecycleRegistry::reserve(&reg, &id_b, ResourceKind::Forward, owner()).unwrap();
         r2.activate().unwrap();
 
         let mut reg_guard = reg.lock().unwrap();
@@ -415,7 +437,7 @@ mod tests {
         let removed = reg_guard.gc();
         assert_eq!(removed, 1);
         assert_eq!(reg_guard.records.len(), 1);
-        assert!(reg_guard.records.contains_key("b"));
+        assert!(reg_guard.records.contains_key(&id_b));
     }
 
     #[test]
@@ -424,27 +446,49 @@ mod tests {
         let owner1 = owner();
         let owner2 = ResourceOwner::Headless(Uuid::new_v4());
 
-        let r1 = LifecycleRegistry::reserve(&reg, "a", ResourceKind::SshSession, owner1.clone())
+        let id_a = uuid_str();
+        let id_b = uuid_str();
+
+        let r1 = LifecycleRegistry::reserve(&reg, &id_a, ResourceKind::SshSession, owner1.clone())
             .unwrap();
         r1.activate().unwrap();
         let r2 =
-            LifecycleRegistry::reserve(&reg, "b", ResourceKind::Forward, owner2.clone()).unwrap();
+            LifecycleRegistry::reserve(&reg, &id_b, ResourceKind::Forward, owner2.clone()).unwrap();
         // r2 stays Pending — drop it so it gets marked Closed
         drop(r2);
 
         let reg_guard = reg.lock().unwrap();
         let ready = reg_guard.list_by_phase(ResourcePhase::Ready);
         assert_eq!(ready.len(), 1);
-        assert_eq!(ready[0].id, "a");
+        assert_eq!(ready[0].id, id_a);
 
         // r2 was dropped without activating, so it's Closed, not Pending
         let closed = reg_guard.list_by_phase(ResourcePhase::Closed);
         assert_eq!(closed.len(), 1);
-        assert_eq!(closed[0].id, "b");
+        assert_eq!(closed[0].id, id_b);
 
         let owner1_resources = reg_guard.list_by_owner(&owner1);
         assert_eq!(owner1_resources.len(), 1);
         let owner2_resources = reg_guard.list_by_owner(&owner2);
         assert_eq!(owner2_resources.len(), 1);
+    }
+
+    #[test]
+    fn invalid_id_rejected() {
+        let reg = make_registry();
+        let result = LifecycleRegistry::reserve(
+            &reg,
+            "not-a-uuid",
+            ResourceKind::SshSession,
+            owner(),
+        );
+        assert!(matches!(result, Err(LifecycleError::InvalidId(_))));
+    }
+
+    #[test]
+    fn empty_id_rejected() {
+        let reg = make_registry();
+        let result = LifecycleRegistry::reserve(&reg, "", ResourceKind::SshSession, owner());
+        assert!(matches!(result, Err(LifecycleError::InvalidId(_))));
     }
 }

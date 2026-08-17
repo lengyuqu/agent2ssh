@@ -1925,6 +1925,120 @@ async fn forward_remove(
         .map_err(|e| err(StatusCode::BAD_REQUEST, e))
 }
 
+// ── Finding 17: Single-rule start/stop ───────────────────────────────────────
+
+async fn forward_stop(
+    State(s): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<String>,
+) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    let uuid = Uuid::parse_str(&id).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
+    let source = source_from_transport();
+    if let Some(rule) = forward_list_core()
+        .await
+        .into_iter()
+        .find(|rule| rule.id == uuid)
+    {
+        let command = format!(
+            "forward stop {} {}:{} -> {}:{}",
+            rule.direction, rule.bind_port, rule.target_host, rule.host, rule.target_port
+        );
+        let tags = host_tags(&rule.host);
+        reject_if_gate_paused(&source, &rule.host, &command)?;
+        let targets = vec![(rule.host.clone(), tags.clone())];
+        reject_if_rate_limited(&s, &source, &targets, &command).await?;
+        check_daemon_scope(&auth.scope, &rule.host, &tags, &command)
+            .map_err(|e| err(StatusCode::FORBIDDEN, e))?;
+        let (risk, _) = authorize_command(
+            &auth.scope,
+            &source,
+            &rule.host,
+            &tags,
+            None,
+            &command,
+            false,
+            None,
+            None,
+        )
+        .await?;
+        let started = Instant::now();
+        forward_stop_core(uuid)
+            .await
+            .map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
+        append_operation_audit(
+            &source,
+            &rule.host,
+            &command,
+            risk,
+            Some(0),
+            started.elapsed().as_millis(),
+            None,
+        );
+        return Ok(Json(OkBody { ok: true }));
+    }
+    forward_stop_core(uuid)
+        .await
+        .map(|_| Json(OkBody { ok: true }))
+        .map_err(|e| err(StatusCode::BAD_REQUEST, e))
+}
+
+async fn forward_start(
+    State(s): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<String>,
+) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    let uuid = Uuid::parse_str(&id).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
+    let source = source_from_transport();
+    if let Some(rule) = forward_list_core()
+        .await
+        .into_iter()
+        .find(|rule| rule.id == uuid)
+    {
+        let command = format!(
+            "forward start {} {}:{} -> {}:{}",
+            rule.direction, rule.bind_port, rule.target_host, rule.host, rule.target_port
+        );
+        let tags = host_tags(&rule.host);
+        reject_if_gate_paused(&source, &rule.host, &command)?;
+        let targets = vec![(rule.host.clone(), tags.clone())];
+        reject_if_rate_limited(&s, &source, &targets, &command).await?;
+        check_daemon_scope(&auth.scope, &rule.host, &tags, &command)
+            .map_err(|e| err(StatusCode::FORBIDDEN, e))?;
+        let (risk, _) = authorize_command(
+            &auth.scope,
+            &source,
+            &rule.host,
+            &tags,
+            None,
+            &command,
+            false,
+            None,
+            None,
+        )
+        .await?;
+        let started = Instant::now();
+        forward_start_core(uuid)
+            .await
+            .map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
+        append_operation_audit(
+            &source,
+            &rule.host,
+            &command,
+            risk,
+            Some(0),
+            started.elapsed().as_millis(),
+            None,
+        );
+        return Ok(Json(OkBody { ok: true }));
+    }
+    forward_start_core(uuid)
+        .await
+        .map(|_| Json(OkBody { ok: true }))
+        .map_err(|e| err(StatusCode::BAD_REQUEST, e))
+}
+
 // ── B25: Multi-rule forward ──────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -4823,6 +4937,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/forwards", post(forward_add).get(forward_list))
         .route("/forwards/multi", post(forward_add_multi))
         .route("/forwards/:id", delete(forward_remove))
+        .route("/forwards/:id/stop", post(forward_stop))
+        .route("/forwards/:id/start", post(forward_start))
         .route("/approvals", get(approvals_list))
         .route("/approvals/:id/approve", post(approval_approve))
         .route("/approvals/:id/reject", post(approval_reject))

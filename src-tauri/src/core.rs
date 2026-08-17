@@ -1805,26 +1805,52 @@ pub async fn sftp_download_core_with_source(
                     ));
                 }
             }
-            // K6: resume appends from the local file's current length.
-            let existing = std::fs::metadata(&local_for_task)
+            // Finding 5: atomic download via .part temp file.
+            // Write to {local_path}.part, then rename to final path on success.
+            // For resume: check .part file first (previous incomplete download),
+            // fall back to the final path (backward compat with pre-.part downloads).
+            let part_path = format!("{local_for_task}.part");
+            let part_existing = std::fs::metadata(&part_path)
                 .map(|m| m.len())
                 .unwrap_or(0);
+            let final_existing = std::fs::metadata(&local_for_task)
+                .map(|m| m.len())
+                .unwrap_or(0);
+            let (write_path, existing) = if part_existing > 0 {
+                (part_path.as_str(), part_existing)
+            } else if final_existing > 0 && resume {
+                // Backward compat: resume from final path, then rename to .part.
+                // Move existing file to .part first.
+                std::fs::rename(&local_for_task, &part_path)
+                    .with_context(|| format!("failed to stage {local_for_task} -> {part_path}"))?;
+                (part_path.as_str(), final_existing)
+            } else {
+                (part_path.as_str(), 0)
+            };
             let offset = crate::sftp_transfer::resume_offset(resume, existing, remote_size);
             let mut local_file = if offset > 0 {
                 remote_file.seek(SeekFrom::Start(offset))?;
                 std::fs::OpenOptions::new()
                     .append(true)
-                    .open(&local_for_task)
+                    .open(write_path)
                     .with_context(|| {
-                        format!("failed to open local file for resume {local_for_task}")
+                        format!("failed to open local file for resume {write_path}")
                     })?
             } else {
-                std::fs::File::create(&local_for_task)
-                    .with_context(|| format!("failed to create local file {local_for_task}"))?
+                std::fs::File::create(write_path)
+                    .with_context(|| format!("failed to create local file {write_path}"))?
             };
             let copied =
                 crate::sftp_transfer::copy_cancellable(&mut remote_file, &mut local_file, &cancel)?;
-            Ok(offset + copied)
+            // Flush and drop to ensure data is written before rename.
+            drop(local_file);
+            let total = offset + copied;
+            // Rename .part -> final path atomically.
+            if write_path != local_for_task {
+                std::fs::rename(write_path, &local_for_task)
+                    .with_context(|| format!("failed to finalize download: rename {write_path} -> {local_for_task}"))?;
+            }
+            Ok(total)
         })();
         if let Some(id) = &transfer_id {
             crate::sftp_transfer::unregister(id);
@@ -2210,6 +2236,203 @@ pub async fn sftp_mkdir_core_with_source(
             let sftp = session.sftp()?;
             create_sftp_dir_all(&sftp, &path)?;
             Ok(format!("created directory {path}\n"))
+        },
+    )
+    .await
+}
+
+/// Finding 3: SFTP rename — rename a remote file or directory.
+pub async fn sftp_rename_core(
+    host_name: &str,
+    old_path: &str,
+    new_path: &str,
+    timeout_secs: Option<u64>,
+) -> Result<ExecResult> {
+    sftp_rename_core_with_source(
+        host_name,
+        old_path,
+        new_path,
+        timeout_secs,
+        Some(source_from_env("core")),
+    )
+    .await
+}
+
+pub async fn sftp_rename_core_with_source(
+    host_name: &str,
+    old_path: &str,
+    new_path: &str,
+    timeout_secs: Option<u64>,
+    source: Option<String>,
+) -> Result<ExecResult> {
+    let combined_path = format!("{old_path} -> {new_path}");
+    sftp_dir_operation_core(
+        host_name,
+        &combined_path,
+        timeout_secs,
+        "rename",
+        source,
+        |host, path, timeout| {
+            let parts: Vec<&str> = path.split(" -> ").collect();
+            if parts.len() != 2 {
+                return Err(anyhow!("invalid rename path spec: expected 'old -> new'"));
+            }
+            let session = connect_embedded_ssh(&host, timeout)?;
+            let sftp = session.sftp()?;
+            sftp.rename(Path::new(parts[0]), Path::new(parts[1]), None)
+                .with_context(|| format!("failed to rename {} to {}", parts[0], parts[1]))?;
+            Ok(format!("renamed {} to {}\n", parts[0], parts[1]))
+        },
+    )
+    .await
+}
+
+/// Finding 4: SFTP remove_file — delete a remote file.
+pub async fn sftp_remove_file_core(
+    host_name: &str,
+    path: &str,
+    timeout_secs: Option<u64>,
+) -> Result<ExecResult> {
+    sftp_remove_file_core_with_source(
+        host_name,
+        path,
+        timeout_secs,
+        Some(source_from_env("core")),
+    )
+    .await
+}
+
+pub async fn sftp_remove_file_core_with_source(
+    host_name: &str,
+    path: &str,
+    timeout_secs: Option<u64>,
+    source: Option<String>,
+) -> Result<ExecResult> {
+    sftp_dir_operation_core(
+        host_name,
+        path,
+        timeout_secs,
+        "rm",
+        source,
+        |host, path, timeout| {
+            let session = connect_embedded_ssh(&host, timeout)?;
+            let sftp = session.sftp()?;
+            sftp.unlink(Path::new(&path))
+                .with_context(|| format!("failed to delete remote file {path}"))?;
+            Ok(format!("deleted file {path}\n"))
+        },
+    )
+    .await
+}
+
+/// Finding 4: SFTP remove_dir — delete an empty remote directory.
+pub async fn sftp_remove_dir_core(
+    host_name: &str,
+    path: &str,
+    timeout_secs: Option<u64>,
+) -> Result<ExecResult> {
+    sftp_remove_dir_core_with_source(
+        host_name,
+        path,
+        timeout_secs,
+        Some(source_from_env("core")),
+    )
+    .await
+}
+
+pub async fn sftp_remove_dir_core_with_source(
+    host_name: &str,
+    path: &str,
+    timeout_secs: Option<u64>,
+    source: Option<String>,
+) -> Result<ExecResult> {
+    sftp_dir_operation_core(
+        host_name,
+        path,
+        timeout_secs,
+        "rmdir",
+        source,
+        |host, path, timeout| {
+            let session = connect_embedded_ssh(&host, timeout)?;
+            let sftp = session.sftp()?;
+            sftp.rmdir(Path::new(&path))
+                .with_context(|| format!("failed to remove remote directory {path}"))?;
+            Ok(format!("removed directory {path}\n"))
+        },
+    )
+    .await
+}
+
+/// Finding 4: SFTP remove_dir_all — recursively delete a remote directory tree.
+/// Uses BFS traversal to delete files first, then empty directories bottom-up.
+pub async fn sftp_remove_dir_all_core(
+    host_name: &str,
+    path: &str,
+    timeout_secs: Option<u64>,
+) -> Result<ExecResult> {
+    sftp_remove_dir_all_core_with_source(
+        host_name,
+        path,
+        timeout_secs,
+        Some(source_from_env("core")),
+    )
+    .await
+}
+
+pub async fn sftp_remove_dir_all_core_with_source(
+    host_name: &str,
+    path: &str,
+    timeout_secs: Option<u64>,
+    source: Option<String>,
+) -> Result<ExecResult> {
+    sftp_dir_operation_core(
+        host_name,
+        path,
+        timeout_secs,
+        "rm-rf",
+        source,
+        |host, path, timeout| {
+            let session = connect_embedded_ssh(&host, timeout)?;
+            let sftp = session.sftp()?;
+
+            // BFS: collect all entries, then delete files first, directories last.
+            let mut dirs_to_delete: Vec<String> = vec![path.clone()];
+            let mut files_to_delete: Vec<String> = Vec::new();
+            let mut queue: Vec<String> = vec![path.clone()];
+
+            while let Some(dir) = queue.pop() {
+                let entries = sftp.readdir(Path::new(&dir))
+                    .with_context(|| format!("failed to read remote directory {dir}"))?;
+                for (entry_path, stat) in entries {
+                    let entry_name = entry_path.file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    if entry_name == "." || entry_name == ".." {
+                        continue;
+                    }
+                    let full_path = format!("{}/{}", dir.trim_end_matches('/'), entry_name);
+                    if sftp_is_directory(&stat) {
+                        dirs_to_delete.push(full_path.clone());
+                        queue.push(full_path);
+                    } else {
+                        files_to_delete.push(full_path);
+                    }
+                }
+            }
+
+            // Delete all files first.
+            for file_path in &files_to_delete {
+                sftp.unlink(Path::new(file_path))
+                    .with_context(|| format!("failed to delete remote file {file_path}"))?;
+            }
+            // Delete directories deepest-first (reverse BFS order).
+            for dir_path in dirs_to_delete.iter().rev() {
+                sftp.rmdir(Path::new(dir_path))
+                    .with_context(|| format!("failed to remove remote directory {dir_path}"))?;
+            }
+
+            let total = files_to_delete.len() + dirs_to_delete.len();
+            Ok(format!("recursively deleted {path} ({total} entries)\n"))
         },
     )
     .await
@@ -3726,7 +3949,9 @@ mod tests {
             change_id: Some("CHG-12345".into()),
             side_effect: None,
             source: Some("cli".into()),
-        };
+        action: None,
+        outcome: None,
+    };
 
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains("daily health check"));

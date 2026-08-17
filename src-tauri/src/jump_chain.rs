@@ -58,9 +58,15 @@ fn resolve_jump_chain_recursive(
 
     // T2-12: Cycle detection — if we've already visited this host name,
     // there's a cycle in the chain.
+    // Finding 15: Show the full path that caused the cycle, not just the
+    // duplicate host name.
     if !visited.insert(host.name.clone()) {
+        let path: Vec<String> = chain.iter().map(|h| h.name.clone()).collect();
+        let path_str = path.join(" -> ");
         return Err(anyhow!(
-            "jump chain cycle detected: '{}' appears twice in the chain",
+            "jump chain cycle detected: '{}' appears twice in the chain. Full path: {} -> {}",
+            host.name,
+            path_str,
             host.name
         ));
     }

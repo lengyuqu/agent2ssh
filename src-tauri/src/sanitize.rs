@@ -46,7 +46,42 @@ fn bash_parser() -> Result<Parser, tree_sitter::LanguageError> {
 const WRAPPERS: &[&str] = &[
     "sudo", "env", "timeout", "nohup", "doas", "su", "pkexec", "nice", "ionice", "stdbuf", "time",
     "command", "builtin", "\\source", ".",
+    // Finding 13: additional wrappers that prepend another command.
+    "xargs", "setsid", "flock", "exec", "strace", "ltrace", "chrt", "taskset", "chroot",
+    "unshare", "fakeroot", "eatmydata",
 ];
+
+/// Finding 22: Wrappers that have a positional argument before the real command.
+/// For example, `flock /path/to/lock command`, `chroot /newroot command`,
+/// `timeout 30s command`, `xargs command` (xargs's positional IS the command).
+/// These wrappers skip their positional argument before looking for the command.
+const POSITIONAL_WRAPPERS: &[&str] = &["flock", "chroot", "unshare"];
+
+/// Finding 22: For certain wrappers, some flags take a value argument.
+/// We need to skip both the flag and its value, otherwise the value
+/// is mistaken for the real command (e.g. `nice -n 5 cmd` → `5` is NOT the command).
+fn wrapper_value_flags(wrapper: &str) -> &'static [&'static str] {
+    match wrapper {
+        "nice" => &["-n", "--adjustment"],
+        "ionice" => &["-c", "-n", "-p", "--class", "--classdata", "--pid"],
+        "stdbuf" => &["-i", "-o", "-e", "--input", "--output", "--error"],
+        "chrt" => &["-p", "-m", "--pid", "--max"],
+        "taskset" => &["-c", "-p", "--cpu-list", "--pid"],
+        "flock" => &["-w", "-W", "-E", "-c", "--wait", "--conflict-exit-code", "--command"],
+        "strace" | "ltrace" => &[
+            "-o", "-e", "-p", "-s", "-S", "--output", "--expr", "--pid",
+            "--string-limit", "--summary",
+        ],
+        "xargs" => &[
+            "-I", "-P", "-L", "-n", "-s", "-t", "-r",
+            "--replace", "--max-procs", "--max-lines", "--max-args", "--max-chars",
+            "--arg-file", "-a",
+        ],
+        "setsid" => &["-w", "--wait"],
+        "unshare" => &["-r", "-R", "--root", "--mount-proc"],
+        _ => &[],
+    }
+}
 
 /// macOS brew coreutils aliases: `g<cmd>` maps to `<cmd>`.
 const BREW_PREFIXES: &[(&str, &str)] = &[
@@ -353,9 +388,30 @@ fn extract_head_from_command(cmd_node: &Node, source: &[u8]) -> Option<String> {
                 }
             }
             _ => {
-                // Generic wrapper: skip flag arguments (tokens starting with '-').
-                while idx < words.len() && words[idx].starts_with('-') {
-                    idx += 1;
+                // Finding 22: Generic wrapper — skip flags, but also skip
+                // values of flags that take an argument (e.g. `nice -n 5 cmd`).
+                let value_flags = wrapper_value_flags(&wrapper_lower);
+                let positional = POSITIONAL_WRAPPERS.contains(&wrapper_lower.as_str());
+                let mut skipped_positional = false;
+                while idx < words.len() {
+                    if words[idx].starts_with('-') {
+                        // Long option with '=' (e.g. --adjustment=5): skip one token.
+                        if words[idx].contains('=') {
+                            idx += 1;
+                        } else if value_flags.contains(&words[idx].as_str()) {
+                            // Flag takes a value: skip flag + value.
+                            idx += 2;
+                        } else {
+                            // Bare flag without value.
+                            idx += 1;
+                        }
+                    } else if positional && !skipped_positional {
+                        // Skip the positional argument (lock file, new root, etc.)
+                        skipped_positional = true;
+                        idx += 1;
+                    } else {
+                        break;
+                    }
                 }
             }
         }
@@ -679,6 +735,18 @@ const INTERACTIVE_FULLSCREEN_COMMANDS: &[&str] = &[
     "htop", "watch", "vim", "vi", "less", "more", "tmux", "screen", "nano", "emacs", "top",
 ];
 
+/// Finding 12: Interpreters that support inline code execution via `-c` or `-e` flags.
+/// When these flags are used, the actual code is hidden inside the flag argument,
+/// bypassing command sanitization.
+const INTERPRETER_COMMANDS: &[&str] = &[
+    "python", "python3", "python2", "pypy", "pypy3",
+    "bash", "sh", "zsh", "dash", "ksh", "fish", "csh", "tcsh",
+    "perl", "ruby", "node", "nodejs", "deno", "bun",
+    "php", "lua", "luajit", "tclsh", "wish", "awk", "gawk", "mawk",
+    "ocaml", "ghc", "ghci", "scala", "clojure", "rscript", "Rscript",
+    "powershell", "pwsh",
+];
+
 /// S3: Check per-command shape rules — detect dangerous flags and patterns
 /// that bypass normal sanitization.
 ///
@@ -716,6 +784,16 @@ fn check_command_shapes(root: &Node, source: &[u8]) -> (Vec<String>, Option<Shap
                 if check_interactive_shape(&normalized, args, &mut warnings) {
                     shape = shape.or(Some(ShapeRisk::Interactive));
                 }
+            }
+            // Finding 12: Detect interpreter delayed execution (python -c, bash -c, perl -e, etc.)
+            cmd if INTERPRETER_COMMANDS.contains(&cmd) => {
+                check_interpreter_shape(&normalized, args, &mut warnings);
+            }
+            // Finding 14: eval is a deferred-execution builtin.
+            "eval" => {
+                warnings.push(
+                    "eval (deferred execution: evaluates string as command, bypasses sanitize)".to_string()
+                );
             }
             _ => {}
         }
@@ -978,6 +1056,55 @@ fn check_interactive_shape(head: &str, args: &[String], warnings: &mut Vec<Strin
         "{head} (interactive full-screen command; blocks a non-interactive exec channel)"
     ));
     true
+}
+
+/// Finding 12: Detect interpreter delayed execution.
+/// Interpreters like python, bash, perl, ruby, node support `-c` or `-e` flags
+/// that execute inline code. This bypasses sanitization because the actual
+/// commands are hidden inside the flag argument string.
+fn check_interpreter_shape(head: &str, args: &[String], warnings: &mut Vec<String>) {
+    // Flags that trigger inline/deferred code execution.
+    const INLINE_FLAGS: &[&str] = &["-c", "-e", "--eval", "--execute", "--script"];
+    // Some interpreters use different flag names.
+    let inline_flags: &[&str] = match head {
+        "perl" | "ruby" | "node" | "nodejs" | "deno" | "bun" => &["-e", "--eval", "--execute"],
+        "php" => &["-r", "--run"],
+        "lua" | "luajit" => &["-e", "--execute"],
+        "tclsh" | "wish" => &["-c", "--command"],
+        "awk" | "gawk" | "mawk" => &["-e", "--source"],
+        _ => INLINE_FLAGS,
+    };
+
+    for (i, t) in args.iter().enumerate() {
+        if inline_flags.contains(&t.as_str()) {
+            // The next argument is the inline code.
+            let code_preview = args
+                .get(i + 1)
+                .map(|s| {
+                    let s = s.trim();
+                    if s.len() > 60 {
+                        format!("{}...", &s[..60])
+                    } else {
+                        s.to_string()
+                    }
+                })
+                .unwrap_or_else(|| "<empty>".to_string());
+            warnings.push(format!(
+                "{head} {t} (deferred execution: inline code bypasses sanitize: {code_preview})"
+            ));
+        }
+        // Handle combined forms like `-c'code'` or `--eval=code`.
+        if t.starts_with("-c") && t.len() > 2 && !t.starts_with("--") {
+            warnings.push(format!(
+                "{head} {t} (deferred execution: inline code bypasses sanitize)"
+            ));
+        }
+        if t.starts_with("--eval=") || t.starts_with("--execute=") || t.starts_with("--run=") {
+            warnings.push(format!(
+                "{head} {t} (deferred execution: inline code bypasses sanitize)"
+            ));
+        }
+    }
 }
 
 /// Convenience function: extract just the canonical head, or `None` on failure.

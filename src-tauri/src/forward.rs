@@ -189,6 +189,42 @@ pub struct ForwardHandle {
     worker: Option<thread::JoinHandle<()>>,
 }
 
+impl ForwardHandle {
+    /// Return the rule that this handle was created for.
+    /// Finding 17: Used by `forward_start_core` to restart a stopped rule.
+    pub fn rule(&self) -> &ForwardRule {
+        &self.rule
+    }
+
+    /// Finding 17: Stop the worker thread and disconnect the session without
+    /// removing the handle from the store. The rule can be restarted later
+    /// with `forward_start_core`.
+    pub fn stop_worker(&mut self) {
+        // Signal the worker to stop accepting new connections.
+        self.stop.store(true, Ordering::SeqCst);
+        self.control.connected.store(false, Ordering::SeqCst);
+
+        // Attempt graceful SSH disconnect.
+        if let Ok(mut guard) = self.session.lock() {
+            if let Some(session) = guard.take() {
+                session.set_timeout(500);
+                let _ = session.disconnect(None, "forward stopped", None);
+            }
+        }
+
+        // Join the worker thread with a grace period.
+        if let Some(worker) = self.worker.take() {
+            worker.join_timeout(DROP_GRACE_PERIOD);
+        }
+
+        // Update state.
+        let current_state = *self.control.state.lock().unwrap();
+        if current_state != RuleState::Error {
+            self.control.set_state(RuleState::Stopped);
+        }
+    }
+}
+
 impl Drop for ForwardHandle {
     fn drop(&mut self) {
         // 1. Signal the worker to stop accepting new connections.
@@ -757,6 +793,50 @@ pub async fn forward_remove_core(id: Uuid) -> Result<()> {
         .lock()
         .unwrap()
         .close(&id.to_string(), None);
+    Ok(())
+}
+
+// ── Finding 17: Single-rule start/stop ─────────────────────────────────────
+//
+// Stop a forward rule's worker without removing it from the store. The rule
+// can be restarted later with `forward_start_core`. This is useful for
+// temporarily pausing traffic without losing the rule configuration.
+
+/// Stop a single forward rule by its ID. The rule remains in the store and
+/// can be restarted with `forward_start_core`.
+pub async fn forward_stop_core(id: Uuid) -> Result<()> {
+    let mut store = forwards().lock().await;
+    let handle = store
+        .get_mut(&id)
+        .ok_or_else(|| anyhow!("unknown forward: {id}"))?;
+    // Don't stop if already stopped.
+    let state = *handle.control.state.lock().unwrap();
+    if state == RuleState::Stopped || state == RuleState::StoppingError {
+        return Ok(());
+    }
+    handle.stop_worker();
+    Ok(())
+}
+
+/// Restart a previously stopped forward rule by its ID.
+pub async fn forward_start_core(id: Uuid) -> Result<()> {
+    let mut store = forwards().lock().await;
+    let handle = store
+        .get(&id)
+        .ok_or_else(|| anyhow!("unknown forward: {id}"))?;
+    // Only restart if currently stopped.
+    let state = *handle.control.state.lock().unwrap();
+    if state == RuleState::Active || state == RuleState::Starting {
+        return Ok(());
+    }
+    let rule = handle.rule().clone();
+    // We need the host profile to re-establish the SSH session.
+    // The host profile's own jump_host field (if set) is used automatically.
+    let host = resolve_host(&rule.host)?;
+    // Start a new worker with the same rule.
+    let new_handle = start_forward_worker(host, rule).await?;
+    // Replace the old handle with the new one.
+    store.insert(id, new_handle);
     Ok(())
 }
 

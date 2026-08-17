@@ -31,7 +31,8 @@ use crate::{
         CommandAuthorizationInput,
     },
     forward::{
-        forward_add_core_via, forward_list_core, forward_remove_core, forward_stats_core, RuleStats,
+        forward_add_core_via, forward_list_core, forward_remove_core, forward_start_core,
+        forward_stats_core, forward_stop_core, RuleStats,
     },
     playbook::{
         delete_playbook_core, dry_run_playbook, list_playbooks_core,
@@ -1347,6 +1348,100 @@ pub async fn forward_remove(id: String) -> Result<(), String> {
         };
     }
     forward_remove_core(uuid).await.map_err(|e| e.to_string())
+}
+
+/// Finding 17: Stop a single forward rule by ID without removing it.
+#[tauri::command]
+pub async fn forward_stop(id: String) -> Result<(), String> {
+    let uuid = Uuid::parse_str(&id).map_err(|e| e.to_string())?;
+    let source = source_from_transport();
+    if let Some(rule) = forward_list_core()
+        .await
+        .into_iter()
+        .find(|rule| rule.id == uuid)
+    {
+        let command = format!(
+            "forward stop {} {}:{} -> {}:{}",
+            rule.direction, rule.bind_port, rule.target_host, rule.host, rule.target_port
+        );
+        let risk = authorize_desktop_operation(&rule.host, &command, false, &source).await?;
+        let started = Instant::now();
+        return match forward_stop_core(uuid).await {
+            Ok(()) => {
+                append_operation_audit(
+                    &source,
+                    &rule.host,
+                    &command,
+                    risk,
+                    Some(0),
+                    started.elapsed().as_millis(),
+                    None,
+                );
+                Ok(())
+            }
+            Err(e) => {
+                let message = e.to_string();
+                append_operation_audit(
+                    &source,
+                    &rule.host,
+                    &command,
+                    risk,
+                    None,
+                    started.elapsed().as_millis(),
+                    Some(&message),
+                );
+                Err(message)
+            }
+        };
+    }
+    forward_stop_core(uuid).await.map_err(|e| e.to_string())
+}
+
+/// Finding 17: Restart a previously stopped forward rule by ID.
+#[tauri::command]
+pub async fn forward_start(id: String) -> Result<(), String> {
+    let uuid = Uuid::parse_str(&id).map_err(|e| e.to_string())?;
+    let source = source_from_transport();
+    if let Some(rule) = forward_list_core()
+        .await
+        .into_iter()
+        .find(|rule| rule.id == uuid)
+    {
+        let command = format!(
+            "forward start {} {}:{} -> {}:{}",
+            rule.direction, rule.bind_port, rule.target_host, rule.host, rule.target_port
+        );
+        let risk = authorize_desktop_operation(&rule.host, &command, false, &source).await?;
+        let started = Instant::now();
+        return match forward_start_core(uuid).await {
+            Ok(()) => {
+                append_operation_audit(
+                    &source,
+                    &rule.host,
+                    &command,
+                    risk,
+                    Some(0),
+                    started.elapsed().as_millis(),
+                    None,
+                );
+                Ok(())
+            }
+            Err(e) => {
+                let message = e.to_string();
+                append_operation_audit(
+                    &source,
+                    &rule.host,
+                    &command,
+                    risk,
+                    None,
+                    started.elapsed().as_millis(),
+                    Some(&message),
+                );
+                Err(message)
+            }
+        };
+    }
+    forward_start_core(uuid).await.map_err(|e| e.to_string())
 }
 
 // ── Audit ────────────────────────────────────────────────────────────────────
@@ -3043,6 +3138,8 @@ pub fn run_tauri() {
             forward_list,
             forward_stats,
             forward_remove,
+            forward_stop,
+            forward_start,
             // Audit
             list_audit,
             // Daemon helpers

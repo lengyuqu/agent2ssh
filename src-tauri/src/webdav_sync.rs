@@ -98,7 +98,7 @@ pub enum SyncState {
     Unknown,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct WebDavSyncOptions {
     pub url: Option<String>,
     pub username: Option<String>,
@@ -114,6 +114,74 @@ pub struct WebDavSyncOptions {
     /// Explicitly allow overwriting configuration when the remote and local
     /// sides no longer share the same last-applied digest.
     pub force: bool,
+}
+
+/// Mask secret fields in Debug output to prevent credential leakage.
+fn mask_secret(s: &Option<String>) -> &'static str {
+    if s.as_ref().map(|v| !v.is_empty()).unwrap_or(false) {
+        "***"
+    } else {
+        "None"
+    }
+}
+
+impl std::fmt::Debug for WebDavSyncOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WebDavSyncOptions")
+            .field("url", &self.url)
+            .field("username", &self.username)
+            .field("password", &mask_secret(&self.password))
+            .field("password_env", &self.password_env)
+            .field("config_path", &self.config_path)
+            .field("sync_password", &mask_secret(&self.sync_password))
+            .field("sync_password_env", &self.sync_password_env)
+            .field("force", &self.force)
+            .finish()
+    }
+}
+
+#[derive(Clone, Deserialize, Default)]
+struct WebDavConfigFile {
+    url: Option<String>,
+    username: Option<String>,
+    password: Option<String>,
+    password_env: Option<String>,
+    #[serde(default)]
+    sync_password: Option<String>,
+    #[serde(default)]
+    sync_password_env: Option<String>,
+}
+
+impl std::fmt::Debug for WebDavConfigFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WebDavConfigFile")
+            .field("url", &self.url)
+            .field("username", &self.username)
+            .field("password", &mask_secret(&self.password))
+            .field("password_env", &self.password_env)
+            .field("sync_password", &mask_secret(&self.sync_password))
+            .field("sync_password_env", &self.sync_password_env)
+            .finish()
+    }
+}
+
+#[derive(Clone)]
+struct ResolvedWebDavConfig {
+    url: String,
+    username: Option<String>,
+    password: Option<String>,
+    sync_password: Option<String>,
+}
+
+impl std::fmt::Debug for ResolvedWebDavConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedWebDavConfig")
+            .field("url", &self.url)
+            .field("username", &self.username)
+            .field("password", &mask_secret(&self.password))
+            .field("sync_password", &mask_secret(&self.sync_password))
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -144,26 +212,6 @@ pub trait SyncRemote {
     ) -> impl Future<Output = Result<()>> + Send;
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
-struct WebDavConfigFile {
-    url: Option<String>,
-    username: Option<String>,
-    password: Option<String>,
-    password_env: Option<String>,
-    #[serde(default)]
-    sync_password: Option<String>,
-    #[serde(default)]
-    sync_password_env: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-struct ResolvedWebDavConfig {
-    url: String,
-    username: Option<String>,
-    password: Option<String>,
-    sync_password: Option<String>,
-}
-
 fn default_config_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("webdav.toml"))
 }
@@ -190,6 +238,8 @@ fn resolve_config(options: &WebDavSyncOptions) -> Result<ResolvedWebDavConfig> {
         .or(file.url)
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| anyhow!("WebDAV URL is required (--url or AGENT2SSH_WEBDAV_URL)"))?;
+    // Finding 7: validate URL scheme and reject embedded userinfo/query.
+    validate_webdav_url(&url)?;
     let username = options
         .username
         .clone()
@@ -230,9 +280,44 @@ fn resolve_config(options: &WebDavSyncOptions) -> Result<ResolvedWebDavConfig> {
     })
 }
 
+/// Finding 7: Validate WebDAV URL — must be https/http, no embedded userinfo or query string.
+fn validate_webdav_url(url: &str) -> Result<()> {
+    let lower = url.to_ascii_lowercase();
+    let scheme_end = lower
+        .find("://")
+        .ok_or_else(|| anyhow!("invalid WebDAV URL: missing scheme (expected http:// or https://): {url}"))?;
+    let scheme = &lower[..scheme_end];
+    match scheme {
+        "https" | "http" => {}
+        s => return Err(anyhow!("WebDAV URL must use http or https scheme, got '{s}'")),
+    }
+    // Check for embedded userinfo: anything between scheme:// and the next / should not contain @
+    let after_scheme = &url[scheme_end + 3..];
+    let authority_end = after_scheme.find('/').unwrap_or(after_scheme.len());
+    let authority = &after_scheme[..authority_end];
+    if authority.contains('@') {
+        return Err(anyhow!(
+            "WebDAV URL must not contain embedded credentials (userinfo); use --username/--password instead"
+        ));
+    }
+    // Reject query strings
+    if url.contains('?') {
+        return Err(anyhow!(
+            "WebDAV URL must not contain a query string; got: {url}"
+        ));
+    }
+    Ok(())
+}
+
+/// Finding 9 + 23: HTTP client with User-Agent header and 30s timeout.
 fn client() -> Result<Client> {
     Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
+        .timeout(std::time::Duration::from_secs(30))
+        .user_agent(concat!(
+            "agent2ssh/",
+            env!("CARGO_PKG_VERSION"),
+            " (WebDAV sync)"
+        ))
         .build()
         .context("failed to build WebDAV HTTP client")
 }
@@ -252,6 +337,63 @@ fn with_auth(request: RequestBuilder, config: &ResolvedWebDavConfig) -> RequestB
     }
 }
 
+/// Finding 8: Truncate error response body to 2KB to avoid unbounded error messages.
+fn truncate_error_body(body: &str) -> String {
+    const MAX_ERROR_BODY: usize = 2048;
+    let trimmed = body.trim();
+    if trimmed.len() <= MAX_ERROR_BODY {
+        trimmed.to_string()
+    } else {
+        format!("{}...(truncated, {} bytes total)", &trimmed[..MAX_ERROR_BODY], trimmed.len())
+    }
+}
+
+/// Finding 10: Classify WebDAV errors into typed categories for better diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WebDavErrorKind {
+    Timeout,
+    Auth,
+    Api,
+    Network,
+}
+
+impl std::fmt::Display for WebDavErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WebDavErrorKind::Timeout => write!(f, "timeout"),
+            WebDavErrorKind::Auth => write!(f, "auth"),
+            WebDavErrorKind::Api => write!(f, "api"),
+            WebDavErrorKind::Network => write!(f, "network"),
+        }
+    }
+}
+
+/// Classify a reqwest error into a typed WebDavErrorKind.
+fn classify_reqwest_error(err: &reqwest::Error) -> WebDavErrorKind {
+    if err.is_timeout() {
+        WebDavErrorKind::Timeout
+    } else if err.is_connect() || err.is_request() {
+        WebDavErrorKind::Network
+    } else {
+        WebDavErrorKind::Api
+    }
+}
+
+/// Classify an HTTP status code into a typed WebDavErrorKind.
+fn classify_status(status: StatusCode) -> WebDavErrorKind {
+    match status.as_u16() {
+        401 | 403 | 407 => WebDavErrorKind::Auth,
+        408 | 504 => WebDavErrorKind::Timeout,
+        _ => WebDavErrorKind::Api,
+    }
+}
+
+fn webdav_error(operation: &str, url: &str, status: StatusCode, body: &str) -> anyhow::Error {
+    let kind = classify_status(status);
+    let truncated = truncate_error_body(body);
+    anyhow!("WebDAV {operation} failed for {url}: [{kind}] {status} {truncated}")
+}
+
 async fn ensure_collection(
     client: &Client,
     config: &ResolvedWebDavConfig,
@@ -261,16 +403,16 @@ async fn ensure_collection(
     let response = with_auth(client.request(method, url), config)
         .send()
         .await
-        .with_context(|| format!("failed to create WebDAV collection {url}"))?;
+        .map_err(|e| {
+            let kind = classify_reqwest_error(&e);
+            anyhow!("WebDAV MKCOL {url} failed ({kind:?}): {e}")
+        })?;
     match response.status() {
         status if status.is_success() => Ok(()),
         StatusCode::METHOD_NOT_ALLOWED | StatusCode::CONFLICT => Ok(()),
         status => {
             let body = response.text().await.unwrap_or_default();
-            Err(anyhow!(
-                "WebDAV MKCOL failed for {url}: {status} {}",
-                body.trim()
-            ))
+            Err(webdav_error("MKCOL", url, status, &body))
         }
     }
 }
@@ -299,17 +441,17 @@ impl SyncRemote for WebDavRemote {
         let response = with_auth(self.client.get(url.clone()), &self.config)
             .send()
             .await
-            .with_context(|| format!("failed to fetch remote object {url}"))?;
+            .map_err(|e| {
+                let kind = classify_reqwest_error(&e);
+                anyhow!("WebDAV GET {url} failed ({kind:?}): {e}")
+            })?;
         if response.status() == StatusCode::NOT_FOUND {
             return Ok(None);
         }
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            return Err(anyhow!(
-                "WebDAV GET failed for {url}: {status} {}",
-                body.trim()
-            ));
+            return Err(webdav_error("GET", &url, status, &body));
         }
         let version = response
             .headers()
@@ -340,7 +482,10 @@ impl SyncRemote for WebDavRemote {
         let response = request
             .send()
             .await
-            .with_context(|| format!("failed to upload {url}"))?;
+            .map_err(|e| {
+                let kind = classify_reqwest_error(&e);
+                anyhow!("WebDAV PUT {url} failed ({kind:?}): {e}")
+            })?;
         if response.status() == StatusCode::PRECONDITION_FAILED
             || response.status() == StatusCode::CONFLICT
         {
@@ -351,10 +496,7 @@ impl SyncRemote for WebDavRemote {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            return Err(anyhow!(
-                "WebDAV PUT failed for {url}: {status} {}",
-                body.trim()
-            ));
+            return Err(webdav_error("PUT", &url, status, &body));
         }
         Ok(())
     }
@@ -754,11 +896,40 @@ fn marker(global_version: u64, direction: &str, files: Vec<WebDavSyncFile>) -> W
 }
 
 fn validate_marker_schema(marker: &WebDavSyncMarker) -> Result<()> {
-    if marker.schema_version == 0 || marker.schema_version > CURRENT_SYNC_SCHEMA {
+    // Finding 20: version downgrade — allow markers from higher schema versions
+    // by reading only the fields we understand (serde ignores unknown fields).
+    // Only reject schema_version == 0 (invalid) as a hard error.
+    if marker.schema_version == 0 {
         return Err(anyhow!(
-            "unsupported sync marker schema {} (this client supports up to {})",
+            "invalid sync marker schema version 0"
+        ));
+    }
+    if marker.schema_version > CURRENT_SYNC_SCHEMA {
+        // Warn but allow — downgrade path for forward-compatible reads.
+        eprintln!(
+            "warning: remote sync marker schema {} is newer than local {} — attempting downgrade read",
             marker.schema_version,
             CURRENT_SYNC_SCHEMA
+        );
+    }
+    // Finding 19: validate digest format if present (64-char hex SHA-256).
+    if let Some(digest) = &marker.digest {
+        validate_digest_format(digest)?;
+    }
+    Ok(())
+}
+
+/// Finding 19: Validate that a digest string is a 64-character lowercase hex string (SHA-256).
+fn validate_digest_format(digest: &str) -> Result<()> {
+    if digest.len() != 64 {
+        return Err(anyhow!(
+            "invalid digest: expected 64 hex characters, got {} characters",
+            digest.len()
+        ));
+    }
+    if !digest.chars().all(|c| c.is_ascii_hexdigit() && (c.is_ascii_digit() || c.is_ascii_lowercase())) {
+        return Err(anyhow!(
+            "invalid digest: expected lowercase hex characters only, got '{digest}'"
         ));
     }
     Ok(())
@@ -1029,7 +1200,7 @@ async fn sync_status<R: SyncRemote>(remote_transport: &R) -> Result<WebDavSyncSt
             Ok(marker) if validate_marker_schema(&marker).is_ok() => Some(marker),
             Ok(marker) => {
                 metadata_errors.push(format!(
-                    "remote metadata: unsupported schema {}",
+                    "remote metadata: invalid schema {}",
                     marker.schema_version
                 ));
                 None
@@ -1302,7 +1473,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
-    async fn future_schema_is_rejected_before_push_writes() {
+    async fn future_schema_allows_downgrade_read() {
         let dir =
             std::env::temp_dir().join(format!("agent2ssh-sync-future-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
@@ -1313,12 +1484,14 @@ mod tests {
         let remote = FakeRemote::default();
         remote.insert(SYNC_VERSION_FILE, serde_json::to_vec(&future).unwrap());
 
+        // Finding 20: future schema versions are now allowed via downgrade read
+        // (warn but don't reject). The push should succeed with force=true.
         let result = sync_push(&remote, None, true).await;
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("unsupported sync marker schema"));
-        assert_eq!(remote.objects.lock().unwrap().len(), 1);
+        assert!(
+            result.is_ok(),
+            "push with future-schema remote marker should succeed via downgrade, got: {:?}",
+            result.err()
+        );
 
         std::env::remove_var("AGENT2SSH_CONFIG_DIR");
         let _ = fs::remove_dir_all(&dir);

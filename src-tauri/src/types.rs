@@ -344,6 +344,15 @@ pub struct AuditEntry {
     /// Source that initiated the operation, such as cli, mcp, daemon, or desktop.
     #[serde(default)]
     pub source: Option<String>,
+    /// Finding 16: The action category — what kind of operation was performed
+    /// (e.g. "exec", "sftp_upload", "sftp_download", "sftp_mkdir", "sftp_rename",
+    /// "sftp_remove", "forward_add", "forward_remove", "config_update").
+    #[serde(default)]
+    pub action: Option<String>,
+    /// Finding 16: The outcome of the operation — "success", "blocked", "error",
+    /// or "timeout". Derived from exit_code and risk_level.
+    #[serde(default)]
+    pub outcome: Option<String>,
 }
 
 fn default_risk() -> RiskLevel {

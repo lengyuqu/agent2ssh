@@ -1987,6 +1987,8 @@ fn audit_export_response_contract() {
         change_id: Some("CHG-001".into()),
         side_effect: None,
         source: Some("daemon".into()),
+        action: None,
+        outcome: None,
     }];
 
     // JSONL format: each line is a valid AuditEntry JSON

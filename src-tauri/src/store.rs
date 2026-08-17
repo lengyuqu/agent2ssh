@@ -619,6 +619,9 @@ pub fn append_audit(
     ensure_config_dir()?;
     let _guard = audit_write_lock()?;
     rotate_audit_if_needed_unlocked(10 * 1024 * 1024)?; // 10 MB default
+    // Finding 16: Derive action and outcome from the ExecResult.
+    let action = derive_audit_action(&result.command);
+    let outcome = derive_audit_outcome(result.exit_code, risk_level);
     let entry = AuditEntry {
         id: Uuid::new_v4(),
         ts: Utc::now(),
@@ -631,6 +634,8 @@ pub fn append_audit(
         change_id: change_id.map(str::to_string),
         side_effect: result.side_effect.clone(),
         source: source.map(str::to_string),
+        action,
+        outcome,
     };
     let mut file = OpenOptions::new()
         .create(true)
@@ -640,6 +645,57 @@ pub fn append_audit(
     writeln!(file, "{}", serde_json::to_string(&entry)?)?;
     detect_and_publish_audit_anomalies(&entry);
     Ok(())
+}
+
+/// Finding 16: Derive the action category from the command string.
+fn derive_audit_action(command: &str) -> Option<String> {
+    let lower = command.to_lowercase();
+    if lower.starts_with("sftp upload") {
+        Some("sftp_upload".into())
+    } else if lower.starts_with("sftp download") {
+        Some("sftp_download".into())
+    } else if lower.starts_with("sftp mkdir") {
+        Some("sftp_mkdir".into())
+    } else if lower.starts_with("sftp rename") {
+        Some("sftp_rename".into())
+    } else if lower.starts_with("sftp rm") || lower.starts_with("sftp rmdir") || lower.starts_with("sftp rm-rf") {
+        Some("sftp_remove".into())
+    } else if lower.starts_with("sftp ls") {
+        Some("sftp_list".into())
+    } else if lower.starts_with("sftp stat") {
+        Some("sftp_stat".into())
+    } else if lower.starts_with("sftp read") {
+        Some("sftp_read".into())
+    } else if lower.starts_with("sftp walk") {
+        Some("sftp_walk".into())
+    } else if lower.starts_with("forward add") || lower.starts_with("forward add-multi") {
+        Some("forward_add".into())
+    } else if lower.starts_with("forward remove") || lower.starts_with("forward del") {
+        Some("forward_remove".into())
+    } else if lower.starts_with("forward stop") {
+        Some("forward_stop".into())
+    } else if lower.starts_with("forward start") {
+        Some("forward_start".into())
+    } else if lower.starts_with("forward list") {
+        Some("forward_list".into())
+    } else if lower.starts_with("config update") || lower.starts_with("host add") || lower.starts_with("host update") || lower.starts_with("host remove") || lower.starts_with("host delete") {
+        Some("config_update".into())
+    } else {
+        Some("exec".into())
+    }
+}
+
+/// Finding 16: Derive the outcome from exit_code and risk_level.
+fn derive_audit_outcome(exit_code: Option<i32>, risk_level: RiskLevel) -> Option<String> {
+    if risk_level == RiskLevel::Blocked {
+        Some("blocked".into())
+    } else {
+        match exit_code {
+            Some(0) => Some("success".into()),
+            Some(_) => Some("error".into()),
+            None => Some("error".into()),
+        }
+    }
 }
 
 fn detect_and_publish_audit_anomalies(entry: &AuditEntry) {
@@ -1640,7 +1696,9 @@ mod tests {
             change_id: None,
             side_effect: None,
             source: None,
-        };
+        action: None,
+        outcome: None,
+    };
         let entry2 = AuditEntry {
             id: Uuid::new_v4(),
             ts: Utc::now(),
@@ -1653,7 +1711,9 @@ mod tests {
             change_id: None,
             side_effect: None,
             source: None,
-        };
+        action: None,
+        outcome: None,
+    };
 
         // Test search: "apt" should match entry1's command
         let needle = "apt".to_lowercase();
@@ -1700,7 +1760,9 @@ mod tests {
             change_id: None,
             side_effect: None,
             source: None,
-        };
+        action: None,
+        outcome: None,
+    };
         let entry2 = AuditEntry {
             id: Uuid::new_v4(),
             ts: Utc::now(),
@@ -1713,7 +1775,9 @@ mod tests {
             change_id: None,
             side_effect: None,
             source: None,
-        };
+        action: None,
+        outcome: None,
+    };
 
         // Test command_pattern: "kubectl delete *" should match entry1
         let pattern = "kubectl delete *";
@@ -1879,6 +1943,8 @@ mod tests {
                 change_id: None,
                 side_effect: None,
                 source: None,
+                action: None,
+                outcome: None,
             };
             body.push_str(&serde_json::to_string(&entry).unwrap());
             body.push('\n');
@@ -1991,7 +2057,9 @@ mod tests {
             change_id: None,
             side_effect: None,
             source: None,
-        };
+        action: None,
+        outcome: None,
+    };
         let entry2 = AuditEntry {
             id: Uuid::new_v4(),
             ts: Utc::now(),
@@ -2004,7 +2072,9 @@ mod tests {
             change_id: Some("CHG-001".into()),
             side_effect: None,
             source: Some("cli".into()),
-        };
+        action: None,
+        outcome: None,
+    };
 
         let entries = vec![entry1, entry2];
 
@@ -2091,7 +2161,9 @@ mod tests {
                 change_id: Some(change_id.to_string()),
                 side_effect: None,
                 source: Some("mcp".into()),
-            };
+        action: None,
+        outcome: None,
+    };
             jsonl_lines.push(serde_json::to_string(&entry).unwrap());
         }
 
@@ -2145,7 +2217,9 @@ mod tests {
             change_id: None,
             side_effect: None,
             source: None,
-        };
+        action: None,
+        outcome: None,
+    };
         let json = serde_json::to_string(&entry).unwrap();
         let parsed: AuditEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.reason, None);
@@ -2174,7 +2248,9 @@ mod tests {
                 change_id: Some("CHG-100".into()),
                 side_effect: None,
                 source: Some("cli".into()),
-            },
+        action: None,
+        outcome: None,
+    },
             AuditEntry {
                 id: Uuid::new_v4(),
                 ts: Utc::now(),
@@ -2187,7 +2263,9 @@ mod tests {
                 change_id: None,
                 side_effect: None,
                 source: None,
-            },
+        action: None,
+        outcome: None,
+    },
             AuditEntry {
                 id: Uuid::new_v4(),
                 ts: Utc::now(),
@@ -2200,7 +2278,9 @@ mod tests {
                 change_id: Some("CHG-100".into()),
                 side_effect: None,
                 source: Some("mcp".into()),
-            },
+        action: None,
+        outcome: None,
+    },
         ];
 
         // Write JSONL and read back

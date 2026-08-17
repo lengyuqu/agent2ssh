@@ -511,6 +511,68 @@ pub fn import_known_hosts_from_ssh(path: Option<&str>) -> Result<KnownHostImport
     Ok(KnownHostImportSummary { imported, skipped })
 }
 
+/// Finding 18: Remove a host entry from the system OpenSSH `~/.ssh/known_hosts`.
+///
+/// Equivalent to `ssh-keygen -R <hostname>`. Removes all lines matching the
+/// given hostname (or `[hostname]:port` for non-default ports). The file is
+/// rewritten in-place with a backup (`.bak`).
+///
+/// Returns the number of entries removed.
+pub fn remove_system_known_host(host_name: &str, port: u16) -> Result<usize> {
+    let ssh_path = dirs::home_dir()
+        .ok_or_else(|| anyhow!("cannot determine home directory"))?
+        .join(".ssh")
+        .join("known_hosts");
+    if !ssh_path.exists() {
+        return Err(anyhow!("{} not found", ssh_path.display()));
+    }
+    let raw = std::fs::read_to_string(&ssh_path)
+        .with_context(|| format!("failed to read {}", ssh_path.display()))?;
+
+    // Build the patterns to match: bare hostname and [hostname]:port form.
+    let patterns: Vec<String> = if port == 22 {
+        vec![host_name.to_string()]
+    } else {
+        vec![format!("[{}]:{}", host_name, port)]
+    };
+
+    let mut kept = String::new();
+    let mut removed = 0usize;
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            kept.push_str(line);
+            kept.push('\n');
+            continue;
+        }
+        // Check if this line matches any of our patterns.
+        let host_field = trimmed.split_whitespace().next().unwrap_or("");
+        let matches = patterns.iter().any(|p| {
+            // known_hosts can have comma-separated hostnames.
+            host_field
+                .split(',')
+                .any(|h| h == p.as_str())
+        });
+        if matches {
+            removed += 1;
+        } else {
+            kept.push_str(line);
+            kept.push('\n');
+        }
+    }
+
+    if removed > 0 {
+        // Write backup.
+        let bak_path = ssh_path.with_extension("bak");
+        std::fs::write(&bak_path, &raw)
+            .with_context(|| format!("failed to write backup {}", bak_path.display()))?;
+        std::fs::write(&ssh_path, &kept)
+            .with_context(|| format!("failed to rewrite {}", ssh_path.display()))?;
+    }
+
+    Ok(removed)
+}
+
 /// Split an OpenSSH host field into `(hostname, port)`. Handles the
 /// `[ipv6]:port` form; a bare hostname defaults to port 22.
 fn split_host_port(host_field: &str) -> (String, u16) {
@@ -1316,12 +1378,15 @@ fn authenticate(session: &Session, host: &HostProfile, username: &str) -> Result
     }
 
     // T2-9: Try SSH agent first (includes Windows Pageant via ssh2's agent connector)
+    // Finding 1: Iterate ALL agent identities, not just the first one.
     if let Ok(mut agent) = session.agent() {
         if agent.connect().is_ok() && agent.list_identities().is_ok() {
-            if let Some(identity) = agent.identities().ok().into_iter().flatten().next() {
+            for identity in agent.identities().ok().into_iter().flatten() {
                 if agent.userauth(username, &identity).is_ok() && session.authenticated() {
                     return Ok("agent".into());
                 }
+                // Try next identity — the agent may hold multiple keys and
+                // only one may be authorized for this host.
             }
         }
     }
@@ -1333,6 +1398,9 @@ fn authenticate(session: &Session, host: &HostProfile, username: &str) -> Result
             ("id_ed25519", "publickey_default_ed25519"),
             ("id_rsa", "publickey_default_rsa"),
             ("id_ecdsa", "publickey_default_ecdsa"),
+            // Finding 2: FIDO/U2F security key variants.
+            ("id_ed25519_sk", "publickey_default_ed25519_sk"),
+            ("id_ecdsa_sk", "publickey_default_ecdsa_sk"),
         ];
         for (filename, label) in &default_keys {
             let key_file = ssh_dir.join(filename);

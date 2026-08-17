@@ -622,7 +622,18 @@ fn save_map(map: &HashMap<String, String>) -> Result<()> {
         entries,
     };
     let raw = serde_json::to_string_pretty(&store)?;
-    std::fs::write(&path, raw).context("failed to write secrets store")?;
+    // Finding 11: Use sync_all() after writing secrets.enc to ensure crash-safety.
+    // std::fs::write does not fsync — data may sit in OS page cache and be lost
+    // on power failure. We explicitly open, write, sync, then set permissions.
+    {
+        use std::io::Write;
+        let mut file = std::fs::File::create(&path)
+            .with_context(|| format!("failed to create secrets store {}", path.display()))?;
+        file.write_all(raw.as_bytes())
+            .context("failed to write secrets store")?;
+        file.sync_all()
+            .context("failed to fsync secrets store")?;
+    }
     restrict_file_to_owner(&path)?;
 
     // B2/A23: After writing v2, mark the v1→v2 migration as done (if not

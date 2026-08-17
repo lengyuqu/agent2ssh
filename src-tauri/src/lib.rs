@@ -98,8 +98,8 @@ pub use execution_control::{
 };
 pub use forward::{
     forward_add_core, forward_add_core_via, forward_add_multi_core, forward_add_multi_core_via,
-    forward_list_core, forward_remove_core, forward_stats_core, MultiForwardResult,
-    MultiForwardRule,
+    forward_list_core, forward_remove_core, forward_start_core, forward_stats_core,
+    forward_stop_core, MultiForwardResult, MultiForwardRule,
 };
 pub use gate::{
     execution_gate_blocks_source, gate_blocks_source, load_execution_gate, save_execution_gate,
