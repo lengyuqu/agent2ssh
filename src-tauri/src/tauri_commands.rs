@@ -269,14 +269,6 @@ fn write_user_path_value(path_value: &str) -> Result<(), String> {
     }
 }
 
-#[cfg(not(windows))]
-fn write_user_path_value(_path_value: &str) -> Result<(), String> {
-    // B51: On non-Windows, we don't write a single PATH string to a registry.
-    // Instead, install_cli_to_path / remove_cli_from_path use shell profile
-    // modification directly via append_shell_profile_entry / remove_shell_profile_entry.
-    Err("Use install_cli_to_path / remove_cli_from_path on non-Windows".to_string())
-}
-
 fn append_user_path_dir(path_value: &str, dir: &Path) -> String {
     let dir = dir.to_string_lossy();
     let trimmed = path_value.trim().trim_end_matches(';');
