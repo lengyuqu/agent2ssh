@@ -161,9 +161,12 @@ export function createCommandBlockTracker(
       let lastCr = -1;
       for (let i = 0; i < data.length; i++) {
         if (data[i] !== "\r") continue;
-        const segment = data
-          .slice(lastCr + 1, i)
-          .replace(/[\x00-\x08\x0a-\x1f\x7f]/g, "");
+        // Keep printable characters (>= space, excluding DEL) — a regex with
+        // control-character escapes is rejected by biome's
+        // noControlCharactersInRegex, so filter by code unit instead.
+        const segment = Array.from(data.slice(lastCr + 1, i))
+          .filter((c) => c >= " " && c !== "\x7f")
+          .join("");
         if (splitMode === "enter") {
           split(segment);
         } else {
