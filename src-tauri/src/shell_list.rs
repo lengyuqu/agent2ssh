@@ -178,7 +178,7 @@ pub fn list_shells() -> Vec<ShellInfo> {
 }
 
 /// Generate a human-friendly display name for a shell.
-fn pretty_name(binary_name: &str, path: &PathBuf) -> String {
+fn pretty_name(binary_name: &str, path: &std::path::Path) -> String {
     let lower = binary_name.to_lowercase();
     match lower.as_str() {
         "pwsh" | "pwsh.exe" | "pwsh-preview" => "PowerShell 7".to_string(),

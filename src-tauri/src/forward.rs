@@ -905,14 +905,12 @@ pub async fn forward_add_multi_core_via(
     // Finding 5: Check for duplicate local ports within the batch.
     let mut seen_local_ports: std::collections::HashSet<u16> = std::collections::HashSet::new();
     for (i, rule) in rules.iter().enumerate() {
-        if rule.direction == ForwardDirection::Local {
-            if !seen_local_ports.insert(rule.bind_port) {
-                return Err(anyhow!(
-                    "rule {}: duplicate local port {} in forward batch",
-                    i,
-                    rule.bind_port
-                ));
-            }
+        if rule.direction == ForwardDirection::Local && !seen_local_ports.insert(rule.bind_port) {
+            return Err(anyhow!(
+                "rule {}: duplicate local port {} in forward batch",
+                i,
+                rule.bind_port
+            ));
         }
     }
 

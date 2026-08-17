@@ -4132,7 +4132,8 @@ fn run_interactive_terminal(host_name: &str, cols: Option<u32>, rows: Option<u32
 
     #[cfg(unix)]
     unsafe {
-        libc::signal(libc::SIGWINCH, on_sigwinch as libc::sighandler_t);
+        // Cast via pointer first to satisfy clippy::function_casts_as_integer.
+        libc::signal(libc::SIGWINCH, on_sigwinch as *const () as libc::sighandler_t);
     }
 
     let mut stdout = std::io::stdout().lock();

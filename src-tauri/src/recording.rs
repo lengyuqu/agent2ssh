@@ -268,7 +268,7 @@ pub fn list_recordings() -> Result<Vec<RecordingInfo>> {
             recordings.push(info);
         }
     }
-    recordings.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    recordings.sort_by_key(|info| std::cmp::Reverse(info.created_at));
     Ok(recordings)
 }
 
