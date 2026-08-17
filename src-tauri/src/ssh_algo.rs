@@ -52,8 +52,10 @@ pub struct SshAlgoPrefs {
 /// - DSA host keys (ssh-dss)
 /// - 3DES-CBC cipher
 /// - hmac-sha1-96 MAC
-/// - None compression (no compression is fine, but "none" as a compression
-///   preference doesn't make sense — we use zlib)
+/// - zlib compression: the embedded transport (libssh2, as built by the
+///   `ssh2` crate) only supports the `none` compression method, so listing
+///   `zlib@openssh.com`/`zlib` here fails the fail-closed validation against
+///   a real sshd ("unsupported SSH algorithm 'zlib@openssh.com' ...").
 pub fn safe_defaults() -> SshAlgoPrefs {
     SshAlgoPrefs {
         kex: "curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group16-sha512,diffie-hellman-group-exchange-sha256,diffie-hellman-group14-sha256".into(),
@@ -62,8 +64,8 @@ pub fn safe_defaults() -> SshAlgoPrefs {
         cipher_sc: "chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr".into(),
         mac_cs: "hmac-sha2-256,hmac-sha2-512".into(),
         mac_sc: "hmac-sha2-256,hmac-sha2-512".into(),
-        comp_cs: "none,zlib@openssh.com,zlib".into(),
-        comp_sc: "none,zlib@openssh.com,zlib".into(),
+        comp_cs: "none".into(),
+        comp_sc: "none".into(),
     }
 }
 
