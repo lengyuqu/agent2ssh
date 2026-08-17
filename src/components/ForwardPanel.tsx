@@ -38,11 +38,11 @@ export default function ForwardPanel({ hosts, initialHost = "", onChanged }: Pro
   const canAdd = Boolean(tunnelHost) && isValidPort(bindPort) && isValidPort(targetPort);
 
   const activeHostNames = useMemo(
-    () => new Set(rules.filter((rule) => stats[rule.id]?.state === "running").map((rule) => rule.host)),
+    () => new Set(rules.filter((rule) => stats[rule.id]?.state === "active" || stats[rule.id]?.state === "starting").map((rule) => rule.host)),
     [rules, stats],
   );
   const activeRuleCount = useMemo(
-    () => rules.filter((rule) => stats[rule.id]?.state === "running").length,
+    () => rules.filter((rule) => stats[rule.id]?.state === "active" || stats[rule.id]?.state === "starting").length,
     [rules, stats],
   );
 
@@ -196,8 +196,8 @@ export default function ForwardPanel({ hosts, initialHost = "", onChanged }: Pro
                     <Badge variant={rule.direction === "local" ? "default" : "warning"}>
                       {rule.direction === "local" ? "-L" : "-R"}
                     </Badge>
-                    <Badge variant={state === "running" ? "success" : state === "error" ? "destructive" : "secondary"}>
-                      {t(state === "running" ? "Active" : state === "error" ? "Failed" : "Stopped")}
+                    <Badge variant={state === "active" ? "success" : state === "error" || state === "stopping_error" ? "destructive" : "secondary"}>
+                      {t(state === "active" ? "Active" : state === "error" ? "Failed" : state === "starting" ? "Starting" : state === "stopping_error" ? "Stop Error" : "Stopped")}
                     </Badge>
                     <span className="text-xs text-muted-foreground">{rule.host}</span>
                   </div>

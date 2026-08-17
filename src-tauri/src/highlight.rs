@@ -110,7 +110,7 @@ fn validate_rule(rule: &HighlightRule) -> Result<(), HighlightError> {
     if rule.name.trim().is_empty() {
         return Err(HighlightError::NameRequired);
     }
-    if rule.name.len() > 100 {
+    if rule.name.chars().count() > 100 {
         return Err(HighlightError::NameTooLong);
     }
     if rule.color.len() != 7

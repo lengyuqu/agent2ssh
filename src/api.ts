@@ -52,6 +52,9 @@ import type {
   WebDavSyncSaveRequest,
   WebDavSyncStatus,
   WebhookConfig,
+  ContainerDiscoveryTarget,
+  FontInfo,
+  ShellInfo,
 } from "./types";
 
 let daemonUrl = "http://127.0.0.1:7722";
@@ -315,6 +318,14 @@ export const api = {
   updateHighlight: (oldKeyword: string, rule: HighlightRule) =>
     invoke<HighlightRule[]>("update_highlight", { oldKeyword, rule }),
   resetHighlights: () => invoke<HighlightRule[]>("reset_highlights"),
+
+  // B33: Container Discovery
+  discoverContainers: () => invoke<ContainerDiscoveryTarget[]>("discover_containers"),
+
+  // Font + Shell enumeration
+  listFonts: () => invoke<FontInfo[]>("list_fonts"),
+  listShells: () => invoke<ShellInfo[]>("list_shells"),
+  defaultShell: () => invoke<ShellInfo | null>("default_shell"),
 
   // G4: Copy-block redaction (reuses copy_redact_rules.json)
   redactForClipboard: (text: string) => invoke<string>("redact_for_clipboard", { text }),

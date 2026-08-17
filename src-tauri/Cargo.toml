@@ -95,6 +95,8 @@ tempfile = "3"
 # G14: interactive terminal (`host open`) — Unix raw-mode (termios) and
 # Windows raw-mode (console API) for byte-stream stdin/stdout bridging.
 libc = "0.2"
+# B24/font: System font enumeration for terminal font selection.
+fontdb = "0.23"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.48", features = ["Win32_System_Console", "Win32_Foundation"] }

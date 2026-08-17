@@ -129,12 +129,27 @@ mod host_profile_tests {
 pub struct HostGroup {
     pub id: String,
     pub name: String,
+    /// Hex color for UI badge/label (e.g. "#4A6CF7"). Defaults to a neutral
+    /// blue when unset.
+    #[serde(default = "default_group_color")]
+    pub color: String,
+    /// Manual sort order (ascending). Groups with the same sort_order fall
+    /// back to alphabetical name ordering.
+    #[serde(default)]
+    pub sort_order: i32,
+}
+
+/// Default color for groups that don't specify one.
+pub fn default_group_color() -> String {
+    "#4A6CF7".into()
 }
 
 pub fn default_host_groups() -> Vec<HostGroup> {
     vec![HostGroup {
         id: default_host_group(),
         name: "Default".into(),
+        color: default_group_color(),
+        sort_order: 0,
     }]
 }
 
@@ -477,6 +492,12 @@ pub struct ForwardRule {
     pub bind_port: u16,
     pub target_host: String,
     pub target_port: u16,
+    /// Human-readable label for the forward rule (e.g. "DB Tunnel").
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Optional group id for organizing forwards (mirrors host groups).
+    #[serde(default)]
+    pub group_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

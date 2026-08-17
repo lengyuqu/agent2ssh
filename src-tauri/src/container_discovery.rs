@@ -129,6 +129,17 @@ struct K8sContainerStatus {
 
 // ── Discovery functions ─────────────────────────────────────────────────────
 
+/// Normalize a namespace string.
+/// Returns `None` for `"*"`, `"all"`, or empty — meaning "all namespaces".
+fn normalize_namespace(ns: &str) -> Option<String> {
+    let trimmed = ns.trim();
+    if trimmed.is_empty() || trimmed == "*" || trimmed.eq_ignore_ascii_case("all") {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 /// Resolve the Docker binary path.
 fn resolve_docker() -> Result<std::path::PathBuf> {
     resolve_executable_in("docker")
@@ -163,12 +174,20 @@ fn run_capture(binary: &std::path::Path, args: &[&str]) -> Result<String> {
 fn docker_contexts(binary: &std::path::Path) -> Result<Vec<String>> {
     let raw = run_capture(binary, &["context", "ls", "--format", "{{json .}}"])?;
     let mut contexts = Vec::new();
-    for line in raw.lines() {
+    for (line_num, line) in raw.lines().enumerate() {
         if line.trim().is_empty() {
             continue;
         }
-        if let Ok(row) = serde_json::from_str::<DockerContextRow>(line) {
-            contexts.push(row.name);
+        match serde_json::from_str::<DockerContextRow>(line) {
+            Ok(row) => contexts.push(row.name),
+            Err(e) => {
+                let _ = crate::diagnostics::append_diagnostic_log(
+                    "warn",
+                    "container_discovery",
+                    "docker context JSON parse error",
+                    Some(serde_json::json!({ "line": line_num + 1, "error": e.to_string() })),
+                );
+            }
         }
     }
     if contexts.is_empty() {
@@ -189,37 +208,51 @@ fn discover_docker_targets(binary: &std::path::Path) -> Result<Vec<ContainerDisc
             Err(_) => continue, // Skip contexts that can't be reached.
         };
 
-        for line in raw.lines() {
+        for (line_num, line) in raw.lines().enumerate() {
             if line.trim().is_empty() {
                 continue;
             }
-            if let Ok(row) = serde_json::from_str::<DockerPsRow>(line) {
-                let id_short = if row.id.len() >= 12 {
-                    row.id[..12].to_string()
-                } else {
-                    row.id.clone()
-                };
-                let container_name = row.names.split(',').next().unwrap_or(&id_short).to_string();
-                let target = ContainerDiscoveryTarget {
-                    id: format!("docker_exec:{ctx}:{}", row.id),
-                    platform: ContainerPlatform::Docker,
-                    context: ctx.clone(),
-                    container_id: row.id.clone(),
-                    container_name: container_name.clone(),
-                    status: row.status,
-                    exec_args: vec![
-                        "--context".into(),
-                        ctx.clone(),
-                        "exec".into(),
-                        "-it".into(),
-                        row.id.clone(),
-                        "/bin/sh".into(),
-                    ],
-                    exec_binary: binary.display().to_string(),
-                    namespace: None,
-                };
-                targets.push(target);
-            }
+            let row = match serde_json::from_str::<DockerPsRow>(line) {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = crate::diagnostics::append_diagnostic_log(
+                        "warn",
+                        "container_discovery",
+                        "docker ps JSON parse error",
+                        Some(serde_json::json!({
+                            "context": ctx,
+                            "line": line_num + 1,
+                            "error": e.to_string(),
+                        })),
+                    );
+                    continue;
+                }
+            };
+            let id_short = if row.id.len() >= 12 {
+                row.id[..12].to_string()
+            } else {
+                row.id.clone()
+            };
+            let container_name = row.names.split(',').next().unwrap_or(&id_short).to_string();
+            let target = ContainerDiscoveryTarget {
+                id: format!("docker_exec:{ctx}:{}", row.id),
+                platform: ContainerPlatform::Docker,
+                context: ctx.clone(),
+                container_id: row.id.clone(),
+                container_name: container_name.clone(),
+                status: row.status,
+                exec_args: vec![
+                    "--context".into(),
+                    ctx.clone(),
+                    "exec".into(),
+                    "-it".into(),
+                    row.id.clone(),
+                    "/bin/sh".into(),
+                ],
+                exec_binary: binary.display().to_string(),
+                namespace: None,
+            };
+            targets.push(target);
         }
     }
 
@@ -254,14 +287,26 @@ fn discover_k8s_targets(binary: &std::path::Path) -> Result<Vec<ContainerDiscove
 
         let pod_list: K8sPodList = match serde_json::from_str(&raw) {
             Ok(p) => p,
-            Err(_) => continue,
+            Err(e) => {
+                let _ = crate::diagnostics::append_diagnostic_log(
+                    "warn",
+                    "container_discovery",
+                    "kubectl get pods JSON parse error",
+                    Some(serde_json::json!({
+                        "context": ctx,
+                        "error": e.to_string(),
+                    })),
+                );
+                continue;
+            }
         };
 
         for pod in &pod_list.items {
             if pod.status.phase != "Running" {
                 continue;
             }
-            let namespace = &pod.metadata.namespace;
+            // Finding 12: Normalize namespace (* → None for "all namespaces").
+            let namespace = normalize_namespace(&pod.metadata.namespace);
             let pod_name = &pod.metadata.name;
 
             // Use container_statuses if available, otherwise fall back to spec.containers.
@@ -278,29 +323,42 @@ fn discover_k8s_targets(binary: &std::path::Path) -> Result<Vec<ContainerDiscove
                         .collect()
                 });
 
+            // Finding 16: For multi-container pods, format name as "pod/container".
+            let multi_container = containers.len() > 1;
+
             for container_name in &containers {
+                let display_name = if multi_container {
+                    format!("{pod_name}/{container_name}")
+                } else {
+                    container_name.to_string()
+                };
                 let target = ContainerDiscoveryTarget {
-                    id: format!("kubectl_exec:{ctx}:{namespace}:{pod_name}:{container_name}"),
+                    id: format!("kubectl_exec:{ctx}:{}:{pod_name}:{container_name}", namespace.as_deref().unwrap_or("default")),
                     platform: ContainerPlatform::K8s,
                     context: ctx.clone(),
                     container_id: pod_name.clone(),
-                    container_name: container_name.to_string(),
+                    container_name: display_name,
                     status: pod.status.phase.clone(),
-                    exec_args: vec![
-                        "--context".into(),
-                        ctx.clone(),
-                        "exec".into(),
-                        "-n".into(),
-                        namespace.clone(),
-                        "-it".into(),
-                        pod_name.clone(),
-                        "-c".into(),
-                        container_name.to_string(),
-                        "--".into(),
-                        "/bin/sh".into(),
-                    ],
+                    exec_args: {
+                        let mut args = vec![
+                            "--context".into(),
+                            ctx.clone(),
+                            "exec".into(),
+                        ];
+                        if let Some(ns) = &namespace {
+                            args.push("-n".into());
+                            args.push(ns.clone());
+                        }
+                        args.push("-it".into());
+                        args.push(pod_name.clone());
+                        args.push("-c".into());
+                        args.push(container_name.to_string());
+                        args.push("--".into());
+                        args.push("/bin/sh".into());
+                        args
+                    },
                     exec_binary: binary.display().to_string(),
-                    namespace: Some(namespace.clone()),
+                    namespace: namespace.clone(),
                 };
                 targets.push(target);
             }

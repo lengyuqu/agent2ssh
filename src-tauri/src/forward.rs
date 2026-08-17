@@ -4,7 +4,7 @@ use std::{
     io::{ErrorKind, Read, Write},
     net::{IpAddr, Shutdown, TcpListener, TcpStream},
     sync::{
-        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering},
         Arc, Mutex,
     },
     thread,
@@ -38,9 +38,16 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuleState {
-    Running,
+    /// Worker spawned but listener not yet bound / SSH session not ready.
+    Starting,
+    /// Listener bound and actively accepting connections.
+    Active,
+    /// Gracefully stopped.
     Stopped,
+    /// Worker failed.
     Error,
+    /// Graceful stop failed (disconnect or join timeout).
+    StoppingError,
 }
 
 /// Per-rule atomic counters for observability.
@@ -56,6 +63,10 @@ pub struct RuleControl {
     pub connections: Arc<AtomicU32>,
     /// Current rule state.
     pub state: Arc<Mutex<RuleState>>,
+    /// The actual bound port (0 until listener is bound, then the real port).
+    pub effective_port: Arc<AtomicU16>,
+    /// Whether the forward's SSH transport / listener is alive.
+    pub connected: Arc<AtomicBool>,
 }
 
 impl Default for RuleControl {
@@ -70,16 +81,21 @@ impl RuleControl {
             bytes_tx: Arc::new(AtomicU64::new(0)),
             bytes_rx: Arc::new(AtomicU64::new(0)),
             connections: Arc::new(AtomicU32::new(0)),
-            state: Arc::new(Mutex::new(RuleState::Running)),
+            state: Arc::new(Mutex::new(RuleState::Starting)),
+            effective_port: Arc::new(AtomicU16::new(0)),
+            connected: Arc::new(AtomicBool::new(false)),
         }
     }
 
     pub fn snapshot(&self) -> RuleStats {
+        let port = self.effective_port.load(Ordering::Relaxed);
         RuleStats {
             bytes_tx: self.bytes_tx.load(Ordering::Relaxed),
             bytes_rx: self.bytes_rx.load(Ordering::Relaxed),
             connections: self.connections.load(Ordering::Relaxed),
             state: *self.state.lock().unwrap(),
+            effective_port: if port > 0 { Some(port) } else { None },
+            connected: self.connected.load(Ordering::Relaxed),
         }
     }
 
@@ -95,6 +111,10 @@ pub struct RuleStats {
     pub bytes_rx: u64,
     pub connections: u32,
     pub state: RuleState,
+    /// The actual bound port (None until the listener is bound).
+    pub effective_port: Option<u16>,
+    /// Whether the SSH transport / listener is alive.
+    pub connected: bool,
 }
 
 // ── A2: bind_loopback dual-stack best-effort ─────────────────────────────
@@ -174,19 +194,22 @@ impl Drop for ForwardHandle {
         // 1. Signal the worker to stop accepting new connections.
         self.stop.store(true, Ordering::SeqCst);
 
-        // A3: Mark rule state as Stopped.
-        self.control.set_state(RuleState::Stopped);
+        // Finding 7: Mark transport as disconnected.
+        self.control.connected.store(false, Ordering::SeqCst);
 
         // 2. Attempt graceful SSH disconnect before joining.
         //    This sends SSH_MSG_DISCONNECT to the server, allowing it to
         //    clean up the session immediately instead of waiting for TCP
         //    keepalive timeout (which can be minutes).
+        let mut disconnect_failed = false;
         if let Ok(mut guard) = self.session.lock() {
             if let Some(session) = guard.take() {
                 // Set a short timeout for the disconnect call so we don't
                 // block indefinitely if the network is unreachable.
                 session.set_timeout(500);
-                let _ = session.disconnect(None, "forward closed", None);
+                if session.disconnect(None, "forward closed", None).is_err() {
+                    disconnect_failed = true;
+                }
             }
         }
 
@@ -196,6 +219,16 @@ impl Drop for ForwardHandle {
         //    when it notices the stop flag.
         if let Some(worker) = self.worker.take() {
             worker.join_timeout(DROP_GRACE_PERIOD);
+        }
+
+        // Finding 4: Set final state — StoppingError if disconnect or join failed.
+        let current_state = *self.control.state.lock().unwrap();
+        if current_state == RuleState::Error {
+            // Worker already errored — preserve that state.
+        } else if disconnect_failed {
+            self.control.set_state(RuleState::StoppingError);
+        } else {
+            self.control.set_state(RuleState::Stopped);
         }
     }
 }
@@ -305,6 +338,8 @@ pub async fn forward_add_core_via(
         bind_port,
         target_host: target_host.to_string(),
         target_port,
+        name: None,
+        group_id: None,
     };
 
     // Reserve a lifecycle entry for this forward.
@@ -421,6 +456,11 @@ fn run_local_forward(
 ) -> Result<()> {
     // A2: Dual-stack loopback binding (IPv4 required, IPv6 best-effort).
     let (listener_v4, listener_v6) = bind_loopback(rule.bind_port)?;
+    // Findings 4+6+7: Record actual bound port, mark as Active + connected.
+    let actual_port = listener_v4.local_addr().map(|a| a.port()).unwrap_or(rule.bind_port);
+    control.effective_port.store(actual_port, Ordering::Relaxed);
+    control.connected.store(true, Ordering::Relaxed);
+    control.set_state(RuleState::Active);
     let _ = crate::diagnostics::append_diagnostic_log(
         "info",
         "embedded_ssh_forward",
@@ -531,6 +571,10 @@ fn run_remote_forward(
     }
     let (mut listener, bound_port) =
         session.channel_forward_listen(rule.bind_port, None, Some(16))?;
+    // Findings 4+6+7: Record actual bound port, mark as Active + connected.
+    control.effective_port.store(bound_port, Ordering::Relaxed);
+    control.connected.store(true, Ordering::Relaxed);
+    control.set_state(RuleState::Active);
     let _ = crate::diagnostics::append_diagnostic_log(
         "info",
         "embedded_ssh_forward",
@@ -729,6 +773,10 @@ pub struct MultiForwardRule {
     pub bind_port: u16,
     pub target_host: String,
     pub target_port: u16,
+    /// Optional label for this individual rule.
+    pub name: Option<String>,
+    /// Optional group id for organizing this rule.
+    pub group_id: Option<String>,
 }
 
 /// Result of a successful multi-rule forward addition.
@@ -774,6 +822,19 @@ pub async fn forward_add_multi_core_via(
             ));
         }
     }
+    // Finding 5: Check for duplicate local ports within the batch.
+    let mut seen_local_ports: std::collections::HashSet<u16> = std::collections::HashSet::new();
+    for (i, rule) in rules.iter().enumerate() {
+        if rule.direction == ForwardDirection::Local {
+            if !seen_local_ports.insert(rule.bind_port) {
+                return Err(anyhow!(
+                    "rule {}: duplicate local port {} in forward batch",
+                    i,
+                    rule.bind_port
+                ));
+            }
+        }
+    }
 
     let mut started_ids = Vec::with_capacity(rules.len());
 
@@ -785,6 +846,8 @@ pub async fn forward_add_multi_core_via(
             bind_port: rule.bind_port,
             target_host: rule.target_host.clone(),
             target_port: rule.target_port,
+            name: rule.name.clone(),
+            group_id: rule.group_id.clone(),
         };
 
         // Reserve a lifecycle entry for this forward.
@@ -885,7 +948,9 @@ mod tests {
         assert_eq!(stats.bytes_tx, 0);
         assert_eq!(stats.bytes_rx, 0);
         assert_eq!(stats.connections, 0);
-        assert_eq!(stats.state, RuleState::Running);
+        assert_eq!(stats.state, RuleState::Starting);
+        assert_eq!(stats.effective_port, None);
+        assert!(!stats.connected);
     }
 
     #[test]
@@ -905,7 +970,7 @@ mod tests {
     #[test]
     fn rule_control_state_transitions() {
         let rc = RuleControl::new();
-        assert_eq!(rc.snapshot().state, RuleState::Running);
+        assert_eq!(rc.snapshot().state, RuleState::Starting);
 
         rc.set_state(RuleState::Error);
         assert_eq!(rc.snapshot().state, RuleState::Error);

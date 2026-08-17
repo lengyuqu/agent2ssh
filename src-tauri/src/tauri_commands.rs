@@ -1445,6 +1445,32 @@ pub fn redact_for_clipboard(text: String) -> String {
     crate::copy_redact::redact_for_clipboard(&text)
 }
 
+/// B33: Discover Docker containers and Kubernetes pods that can be used
+/// as exec targets.
+#[tauri::command]
+pub fn discover_containers() -> Result<Vec<crate::container_discovery::ContainerDiscoveryTarget>, String> {
+    crate::container_discovery::discover_containers()
+        .map_err(|e| e.to_string())
+}
+
+/// Enumerate system fonts for terminal font selection.
+#[tauri::command]
+pub fn list_fonts() -> Result<Vec<crate::font_list::FontInfo>, String> {
+    Ok(crate::font_list::list_fonts())
+}
+
+/// Enumerate locally installed shells.
+#[tauri::command]
+pub fn list_shells() -> Result<Vec<crate::shell_list::ShellInfo>, String> {
+    Ok(crate::shell_list::list_shells())
+}
+
+/// Get the default shell for the current system.
+#[tauri::command]
+pub fn default_shell() -> Result<Option<crate::shell_list::ShellInfo>, String> {
+    Ok(crate::shell_list::default_shell())
+}
+
 /// B24: List all terminal highlight rules.
 #[tauri::command]
 pub fn list_highlights() -> Result<Vec<crate::types::HighlightRule>, String> {
@@ -3059,6 +3085,12 @@ pub fn run_tauri() {
             remove_highlight,
             update_highlight,
             reset_highlights,
+            // B33: Container Discovery
+            discover_containers,
+            // Font + Shell enumeration
+            list_fonts,
+            list_shells,
+            default_shell,
             // G4: Copy-block redaction
             redact_for_clipboard,
             // SSH Keys

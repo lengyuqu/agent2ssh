@@ -93,6 +93,15 @@ pub fn load_copy_redact_rules() -> Result<Vec<CopyRedactRule>> {
     for c in configs {
         let pattern = Regex::new(&c.pattern)
             .with_context(|| format!("invalid regex in copy redact rules: {}", c.pattern))?;
+        // Finding 18: Reject zero-width patterns that match empty strings.
+        // These cause infinite replace loops or empty matches that degrade
+        // clipboard performance.
+        if pattern.is_match("") {
+            return Err(anyhow::anyhow!(
+                "copy redact pattern '{}' matches empty string — zero-width patterns are not allowed",
+                c.pattern
+            ));
+        }
         rules.push(CopyRedactRule {
             pattern,
             replacement: c.replacement,

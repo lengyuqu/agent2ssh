@@ -131,7 +131,7 @@ export default function App() {
   const { t } = useI18n();
   const { showToast } = useToast();
   const [hosts, setHosts] = useState<HostProfile[]>([]);
-  const [groups, setGroups] = useState<HostGroup[]>([{ id: "default", name: "Default" }]);
+  const [groups, setGroups] = useState<HostGroup[]>([{ id: "default", name: "Default", color: "#4A6CF7", sort_order: 0 }]);
   const [proxies, setProxies] = useState<ProxyProfile[]>([]);
   const [selectedHost, setSelectedHost] = useState("");
   const [selectedGroup, setSelectedGroup] = useState("default");
@@ -192,7 +192,7 @@ export default function App() {
       api.listProxies(),
     ]);
     setHosts(hostList);
-    setGroups(groupList.length > 0 ? groupList : [{ id: "default", name: "Default" }]);
+    setGroups(groupList.length > 0 ? groupList : [{ id: "default", name: "Default", color: "#4A6CF7", sort_order: 0 }]);
     setProxies(proxyList);
     setSelectedHost((current) => {
       if (current && hostList.some((host) => host.name === current)) {
@@ -260,7 +260,7 @@ export default function App() {
         id = `${groupIdFromName(trimmed)}-${suffix}`;
         suffix += 1;
       }
-      await api.saveHostGroup({ id, name: trimmed });
+      await api.saveHostGroup({ id, name: trimmed, color: "#4A6CF7", sort_order: 0 });
       setSelectedGroup(id);
       await refresh();
     } catch (err) {
@@ -272,7 +272,7 @@ export default function App() {
     const trimmed = name.trim();
     if (!trimmed) return;
     try {
-      await api.saveHostGroup({ id, name: trimmed });
+      await api.saveHostGroup({ id, name: trimmed, color: "#4A6CF7", sort_order: 0 });
       await refresh();
     } catch (err) {
       showToast("error", String(err));

@@ -96,6 +96,10 @@ export type HostProfile = {
 export type HostGroup = {
   id: string;
   name: string;
+  /** Hex color for UI badge (e.g. "#4A6CF7"). */
+  color: string;
+  /** Manual sort order (ascending). */
+  sort_order: number;
 };
 
 export type ProxyProtocol = "http" | "socks5";
@@ -371,6 +375,10 @@ export type ForwardRule = {
   bind_port: number;
   target_host: string;
   target_port: number;
+  /** Human-readable label. */
+  name?: string | null;
+  /** Optional group id. */
+  group_id?: string | null;
 };
 
 // Rust: types.rs — AuditFilter
@@ -565,7 +573,9 @@ export type ForwardRuleStats = {
   bytes_tx: number;
   bytes_rx: number;
   connections: number;
-  state: "running" | "stopped" | "error";
+  state: "starting" | "active" | "stopped" | "error" | "stopping_error";
+  effective_port: number | null;
+  connected: boolean;
 };
 
 // Rust: types.rs — HighlightRule
@@ -585,4 +595,35 @@ export type Snippet = {
   name: string;
   command: string;
   description?: string | null;
+};
+
+// Rust: container_discovery.rs — ContainerDiscoveryTarget
+// Rust: container_discovery.rs — ContainerPlatform
+export type ContainerPlatform = "docker" | "k8s";
+
+export type ContainerDiscoveryTarget = {
+  id: string;
+  platform: ContainerPlatform;
+  context: string;
+  container_id: string;
+  container_name: string;
+  status: string;
+  exec_args: string[];
+  exec_binary: string;
+  namespace: string | null;
+};
+
+// Rust: font_list.rs — FontInfo
+export type FontInfo = {
+  family: string;
+  monospaced: boolean;
+};
+
+// Rust: shell_list.rs — ShellFamily + ShellInfo
+export type ShellFamily = "posix" | "cmd" | "powershell";
+
+export type ShellInfo = {
+  name: string;
+  path: string;
+  family: ShellFamily;
 };

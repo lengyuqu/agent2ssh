@@ -42,6 +42,23 @@ pub fn set_trace_id(trace_id: Option<String>) {
     CURRENT_TRACE_ID.with(|cell| *cell.borrow_mut() = trace_id);
 }
 
+/// Walk the full `std::error::Error::source()` chain and join all causes
+/// into a single string, separated by `": "`.
+///
+/// Example: `"SSH handshake failed: key exchange error: no matching cipher"`
+///
+/// Used by the error sink and diagnostic logging to capture the complete
+/// causal chain rather than just the top-level message.
+pub fn error_chain(err: &dyn std::error::Error) -> String {
+    let mut parts = vec![err.to_string()];
+    let mut source = err.source();
+    while let Some(s) = source {
+        parts.push(s.to_string());
+        source = s.source();
+    }
+    parts.join(": ")
+}
+
 /// The trace id bound to the current thread, if any.
 pub fn current_trace_id() -> Option<String> {
     CURRENT_TRACE_ID.with(|cell| cell.borrow().clone())
@@ -742,5 +759,66 @@ diagnostic_cooldown_secs = 60
 
         std::env::remove_var("AGENT2SSH_CONFIG_DIR");
         let _ = std::fs::remove_dir_all(&config_dir);
+    }
+
+    #[test]
+    fn error_chain_walks_full_cause_chain() {
+        use std::fmt;
+
+        #[derive(Debug)]
+        struct InnerError(&'static str);
+        impl fmt::Display for InnerError {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "{}", self.0)
+            }
+        }
+        impl std::error::Error for InnerError {}
+
+        #[derive(Debug)]
+        struct MiddleError(&'static str, InnerError);
+        impl fmt::Display for MiddleError {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "{}", self.0)
+            }
+        }
+        impl std::error::Error for MiddleError {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.1)
+            }
+        }
+
+        #[derive(Debug)]
+        struct OuterError(&'static str, MiddleError);
+        impl fmt::Display for OuterError {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "{}", self.0)
+            }
+        }
+        impl std::error::Error for OuterError {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.1)
+            }
+        }
+
+        let err = OuterError("outer", MiddleError("middle", InnerError("inner")));
+        let chain = error_chain(&err);
+        assert_eq!(chain, "outer: middle: inner");
+    }
+
+    #[test]
+    fn error_chain_single_level_no_source() {
+        use std::fmt;
+        #[derive(Debug)]
+        struct SimpleError(&'static str);
+        impl fmt::Display for SimpleError {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "{}", self.0)
+            }
+        }
+        impl std::error::Error for SimpleError {}
+
+        let err = SimpleError("just one level");
+        let chain = error_chain(&err);
+        assert_eq!(chain, "just one level");
     }
 }

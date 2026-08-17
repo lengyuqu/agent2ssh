@@ -11,7 +11,7 @@ vi.mock("../api", () => ({
   api: { setTrayLabels: vi.fn().mockResolvedValue(undefined) },
 }));
 
-const groups: HostGroup[] = [{ id: "default", name: "Default" }];
+const groups: HostGroup[] = [{ id: "default", name: "Default", color: "#4A6CF7", sort_order: 0 }];
 
 function makeHost(overrides: Partial<HostProfile> = {}): HostProfile {
   return {

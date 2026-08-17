@@ -84,7 +84,14 @@ pub fn list_hosts_core() -> Result<Vec<HostProfile>> {
 }
 
 pub fn list_host_groups_core() -> Result<Vec<HostGroup>> {
-    Ok(load_config()?.groups)
+    let mut groups = load_config()?.groups;
+    // Sort by sort_order ASC, then name ASC for stable display.
+    groups.sort_by(|a, b| {
+        a.sort_order
+            .cmp(&b.sort_order)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    Ok(groups)
 }
 
 pub fn list_proxies_core() -> Result<Vec<ProxyProfile>> {
@@ -307,6 +314,8 @@ pub fn save_host_group_core(group: HostGroup) -> Result<HostGroup> {
     let mut config = load_config()?;
     if let Some(existing) = config.groups.iter_mut().find(|item| item.id == group.id) {
         existing.name = group.name.clone();
+        existing.color = group.color.clone();
+        existing.sort_order = group.sort_order;
     } else {
         config.groups.push(group.clone());
     }
@@ -345,6 +354,10 @@ pub fn delete_host_group_core(id: &str) -> Result<bool> {
                 host.group = default_group.clone();
             }
         }
+        // Note: ForwardRule.group_id is in-memory only (not persisted in
+        // AppConfig), so there's no config-level cascade needed. A dangling
+        // group_id on a live forward is harmless — the frontend treats
+        // unknown group ids as "ungrouped."
         save_config_unlocked(&config)?;
     }
     Ok(removed)
@@ -359,7 +372,26 @@ fn normalize_host_group(mut group: HostGroup) -> Result<HostGroup> {
     if group.name.is_empty() {
         return Err(anyhow!("group name is required"));
     }
+    // Finding 1: Validate group name for OSC safety at save time.
+    crate::osc_ipc::validate_osc_name(&group.name)?;
+    // Finding 2: Validate and normalize color to uppercase #RRGGBB hex.
+    group.color = normalize_group_color(&group.color);
     Ok(group)
+}
+
+/// Validate and normalize a group color string.
+/// Accepts `#rrggbb` hex format (case-insensitive), returns uppercase `#RRGGBB`.
+/// Falls back to the default color if the input is invalid.
+fn normalize_group_color(color: &str) -> String {
+    let trimmed = color.trim();
+    if trimmed.len() == 7
+        && trimmed.starts_with('#')
+        && trimmed[1..].bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        trimmed.to_uppercase()
+    } else {
+        crate::types::default_group_color()
+    }
 }
 
 fn normalize_proxy(mut proxy: ProxyProfile) -> Result<ProxyProfile> {
@@ -400,6 +432,8 @@ fn ensure_host_group_exists(config: &mut crate::types::AppConfig, group_id: &str
     config.groups.push(HostGroup {
         id: group_id.to_string(),
         name: group_id.to_string(),
+        color: crate::types::default_group_color(),
+        sort_order: 0,
     });
 }
 
@@ -1520,6 +1554,8 @@ fn validate_host(host: &HostProfile) -> Result<()> {
     if host.name.trim().is_empty() {
         return Err(anyhow!("host alias is required"));
     }
+    // Finding 1: Validate host name for OSC safety at save time.
+    crate::osc_ipc::validate_osc_name(host.name.trim())?;
     if host.host.trim().is_empty() {
         return Err(anyhow!("host address is required"));
     }
