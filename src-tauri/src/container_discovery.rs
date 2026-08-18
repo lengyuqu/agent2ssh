@@ -214,10 +214,7 @@ fn run_capture(binary: &std::path::Path, args: &[&str]) -> Result<String> {
 fn kill_process_by_pid(pid: u32) {
     #[cfg(unix)]
     {
-        let _ = Command::new("kill")
-            .arg("-9")
-            .arg(pid.to_string())
-            .output();
+        let _ = Command::new("kill").arg("-9").arg(pid.to_string()).output();
     }
     #[cfg(windows)]
     {

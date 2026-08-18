@@ -46,7 +46,9 @@ pub fn validate_osc_name(name: &str) -> Result<()> {
     // sequence format is "{action}:{name}", so a ':' in the name could
     // be misinterpreted as a delimiter by a naive parser.
     if name.contains(':') {
-        return Err(anyhow!("name contains ':', which is not allowed in OSC names"));
+        return Err(anyhow!(
+            "name contains ':', which is not allowed in OSC names"
+        ));
     }
     Ok(())
 }
