@@ -379,6 +379,8 @@ export type ForwardRule = {
   name?: string | null;
   /** Optional group id. */
   group_id?: string | null;
+  /** Jump-host override captured from --via at creation; re-applied on restart. */
+  via?: string | null;
 };
 
 // Rust: types.rs — AuditFilter
