@@ -113,6 +113,7 @@ ssh_health_snapshot     ssh_gate_status
 ssh_daemon_diagnose     ssh_daemon_version_check
 ssh_daemons_view        ssh_events_subscribe
 ssh_sync_diff           ssh_sync_export
+ssh_snippet_list
 ```
 
 ### 写入类（Write/Mutate）
@@ -130,6 +131,7 @@ ssh_remove_host         ssh_import_config
 ssh_connect             ssh_disconnect
 ssh_approval_respond    ssh_playbook_run
 ssh_webhook_config (set)  ssh_config_import
+ssh_snippet_save         ssh_snippet_delete
 ```
 
 ---
