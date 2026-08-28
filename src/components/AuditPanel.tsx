@@ -1,4 +1,4 @@
-import { Clipboard, History, RefreshCw, SlidersHorizontal } from "lucide-react";
+import { Clipboard, History, RefreshCw, RotateCcw, SlidersHorizontal } from "lucide-react";
 import { useMemo, useState } from "react";
 import {
   createColumnHelper,
@@ -62,11 +62,14 @@ const RENDER_CAP_STEP = 200;
 type Props = {
   audit: AuditEntry[];
   onRefresh: (filter?: AuditFilter) => void | Promise<void>;
+  /** v3 §3.3/§3.4: replay an audit row in the terminal drawer. Optional — the
+   *  replay column only renders when a handler is provided. */
+  onReplay?: (entry: AuditEntry) => void;
 };
 
 const columnHelper = createColumnHelper<AuditEntry>();
 
-export default function AuditPanel({ audit, onRefresh }: Props) {
+export default function AuditPanel({ audit, onRefresh, onReplay }: Props) {
   const { t } = useI18n();
   const { showToast } = useToast();
   const [showFilters, setShowFilters] = useState(false);
@@ -173,9 +176,30 @@ export default function AuditPanel({ audit, onRefresh }: Props) {
         header: t("Risk level"),
         cell: (info) => <RiskBadge level={info.getValue() ?? "low"} hideLow />,
       }),
+      // v3: replay raises the terminal drawer and re-runs the command (§3.4).
+      ...(onReplay
+        ? [
+            columnHelper.display({
+              id: "replay",
+              size: 40,
+              header: () => null,
+              cell: ({ row }) => (
+                <IconButton
+                  className="size-6"
+                  title={t("Replay")}
+                  onClick={() => onReplay(row.original)}
+                >
+                  <RotateCcw size={13} />
+                </IconButton>
+              ),
+              enableSorting: false,
+              enableHiding: false,
+            }),
+          ]
+        : []),
     ],
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [t]
+    [t, onReplay]
   );
 
   const table = useReactTable({

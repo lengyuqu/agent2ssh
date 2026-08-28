@@ -53,6 +53,7 @@ import PlaybooksPanel from "./components/PlaybooksPanel";
 import ProxyPanel from "./components/ProxyPanel";
 import RecordingsPanel from "./components/RecordingsPanel";
 import SFTPPanel from "./components/SFTPPanel";
+import TerminalDrawer from "./components/TerminalDrawer";
 import TerminalPanel from "./components/TerminalPanel";
 import SecretsUnlock from "./components/SecretsUnlock";
 import SettingsMenu from "./components/SettingsMenu";
@@ -188,6 +189,14 @@ export default function App() {
   } | null>(null);
   const [fingerprintBusy, setFingerprintBusy] = useState(false);
   const [connectionProgress, setConnectionProgress] = useState<ConnectionProgress | null>(null);
+  // v3 T05: right-side terminal drawer. Raised by the approval workbench
+  // ("approve and execute" — command=null, the daemon executes the approved
+  // command itself) and by audit rows ("replay" — the historical command is
+  // typed into a fresh PTY once the session connects).
+  const [terminalDrawer, setTerminalDrawer] = useState<{
+    host: string;
+    command: string | null;
+  } | null>(null);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   // V4-5: icon-only sidebar, independent of the existing max-lg full-stack
   // fallback for genuinely narrow/mobile-style widths.
@@ -522,6 +531,11 @@ export default function App() {
     try {
       await api.approvalApprove(approval.id);
       setPendingApprovals((prev) => prev.filter((a) => a.id !== approval.id));
+      // v3 §3.4: raise the terminal drawer as a live viewport onto the host.
+      // The daemon runs the approved command itself (the original exec caller
+      // was waiting on approval_wait), so the drawer must NOT re-type the
+      // command — that would execute it twice.
+      setTerminalDrawer({ host: approval.host, command: null });
     } catch (err) {
       showToast("error", t("Failed to approve: {error}", { error: String(err) }));
     }
@@ -1181,7 +1195,11 @@ export default function App() {
           {activeModule === "audit" && (
             <div className="grid gap-[18px]">
               <AuditCharts />
-              <AuditPanel audit={audit} onRefresh={refreshAudit} />
+              <AuditPanel
+                audit={audit}
+                onRefresh={refreshAudit}
+                onReplay={(entry) => setTerminalDrawer({ host: entry.host, command: entry.command })}
+              />
             </div>
           )}
 
@@ -1214,6 +1232,14 @@ export default function App() {
         </section>
       </section>
       </main>
+
+      {/* v3 §3.4: terminal drawer — approvals + audit replay viewport */}
+      <TerminalDrawer
+        open={terminalDrawer !== null}
+        host={terminalDrawer?.host ?? ""}
+        command={terminalDrawer?.command ?? null}
+        onClose={() => setTerminalDrawer(null)}
+      />
     </div>
   );
 }

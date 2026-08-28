@@ -793,6 +793,9 @@ const zh: Record<string, string> = {
   "Copy command and go to Execution": "复制命令并前往执行",
   "Keyboard: ↑↓ select · ↵ review · ⌘↵ approve · ⌫ reject": "键盘：↑↓ 选择 · ↵ 查看 · ⌘↵ 批准 · ⌫ 拒绝",
   "Confirm execution": "确认执行",
+  // v3 T05: terminal drawer
+  "Live terminal": "实时终端",
+  "Approved · daemon executing on this host": "已批准 · daemon 正在该主机执行",
   // v3 T04: host policy summary + audit skin
   "low auto-approve": "low 自动放行",
   "med/high need approval": "med/high 需审批",
