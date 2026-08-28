@@ -1,21 +1,21 @@
 class Agent2ssh < Formula
   desc "SSH capability layer for general-purpose agents"
   homepage "https://github.com/lengyuqu/agent2ssh"
-  version "0.2.1"
+  version "0.3.0"
 
   on_macos do
     if Hardware::CPU.arm?
       url "https://github.com/lengyuqu/agent2ssh/releases/download/v#{version}/agent2ssh-aarch64-apple-darwin.tar.gz"
-      sha256 "aa675e11e2eaf5dfe19f92a2dc6715dd624b9d712ec7317850cade87158391ad"
+      sha256 "c5a6ab3d192f5171fe8522a6c063b7737c393ebe1f92114e475dcf9f3f0c2a41"
     else
       url "https://github.com/lengyuqu/agent2ssh/releases/download/v#{version}/agent2ssh-x86_64-apple-darwin.tar.gz"
-      sha256 "052c8e42be19a4980749bcbf166873d6326dff17d5ee34c036a6cdb7d5e8d9b1"
+      sha256 "8bfd6be7063c459e055caa3721944200384112adc3af784f6f8e006d9f3907c0"
     end
   end
 
   on_linux do
     url "https://github.com/lengyuqu/agent2ssh/releases/download/v#{version}/agent2ssh-x86_64-unknown-linux-gnu.tar.gz"
-    sha256 "3b4d9a72c573ada3edb0070aa8b56fbe8a384f737d19b36c2868c59c094d78e0"
+    sha256 "e10fa4310a4dc772c967b318ab26c4fab3ba85932244563fc992bb392fe1af89"
   end
 
   def install
