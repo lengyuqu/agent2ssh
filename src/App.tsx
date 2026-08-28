@@ -10,12 +10,15 @@ import {
   HelpCircle,
   History,
   Key,
+  KeyRound,
   LayoutDashboard,
   Loader2,
   Network,
   PanelLeftClose,
   PanelLeftOpen,
   Play,
+  Plus,
+  RefreshCw,
   Server,
   ShieldCheck,
   Terminal,
@@ -31,7 +34,10 @@ import AuditPanel from "./components/AuditPanel";
 import Breadcrumb from "./components/Breadcrumb";
 import ConfigSnapshotsPanel from "./components/ConfigSnapshotsPanel";
 import ConnectionTopology from "./components/ConnectionTopology";
-import CommandPalette, { type CommandPaletteModule } from "./components/CommandPalette";
+import CommandPalette, {
+  type CommandPaletteModule,
+  type PaletteQuickAction,
+} from "./components/CommandPalette";
 import Dashboard from "./components/Dashboard";
 import ExecPanel from "./components/ExecPanel";
 import ForwardPanel from "./components/ForwardPanel";
@@ -166,6 +172,9 @@ export default function App() {
   // K1: true when the app-managed credential store is initialized but locked,
   // gating the UI behind a master-password unlock dialog at startup.
   const [secretsLocked, setSecretsLocked] = useState(false);
+  // v3 T05: set by the ⌘K "unlock credentials" quick action to re-surface the
+  // unlock gate even when the store was already unlocked at startup.
+  const [unlockRequested, setUnlockRequested] = useState(false);
   const [gateStatus, setGateStatus] = useState<ExecutionGateStatus | null>(null);
   const [gateBusy, setGateBusy] = useState(false);
   const [gateCheckedAt, setGateCheckedAt] = useState<number | null>(null);
@@ -477,10 +486,7 @@ export default function App() {
         e.preventDefault();
         // v3: the auto approval dialog is gone — jump to the workbench and
         // focus the first pending card instead (plan §1.3 / §5 risk #3).
-        openModule("approvals");
-        window.setTimeout(() => {
-          document.getElementById("approval-queue-card-0")?.focus();
-        }, 80);
+        openApprovalsWorkbench();
         return;
       }
 
@@ -563,6 +569,52 @@ export default function App() {
   function openModule(id: (typeof MODULES)[number]["id"]) {
     setActiveModule(id);
   }
+
+  // v3 §1.3: jump to the approval workbench and focus the first pending card
+  // (shared by ⌘⇧A and the ⌘K pending-approvals group).
+  function openApprovalsWorkbench() {
+    openModule("approvals");
+    window.setTimeout(() => {
+      document.getElementById("approval-queue-card-0")?.focus();
+    }, 80);
+  }
+
+  // v3 §3.5: ⌘K quick actions — sync / unlock credentials / new host. The
+  // unlock entry surfaces the credential gate (or the Keys module when already
+  // unlocked); actions are rebuilt when language or lock state changes.
+  const quickActions = useMemo<PaletteQuickAction[]>(
+    () => [
+      {
+        id: "sync",
+        label: t("Sync now"),
+        icon: RefreshCw,
+        run: () => {
+          void api
+            .pushWebDavSync()
+            .then(() => showToast("success", t("WebDAV sync upload completed.")))
+            .catch((err) => showToast("error", String(err)));
+        },
+      },
+      {
+        id: "unlock-secrets",
+        label: t("Unlock credentials"),
+        icon: KeyRound,
+        run: () => {
+          if (secretsLocked) setUnlockRequested(true);
+          else openModule("keys");
+        },
+      },
+      {
+        id: "new-host",
+        label: t("New host"),
+        icon: Plus,
+        run: () => openModule("hosts"),
+      },
+    ],
+    // openModule is a stable setState wrapper; showToast/t come from context.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [t, secretsLocked]
+  );
 
   const activeModuleMeta = MODULES.find((module) => module.id === activeModule) ?? MODULES[0];
   const ActiveModuleIcon = activeModuleMeta.icon;
@@ -733,11 +785,12 @@ export default function App() {
   return (
     <div className="flex h-screen flex-col bg-background text-foreground">
       {/* K1: master-password unlock gate. Reloads hosts after unlock so resolved
-          passwords are reflected. */}
-      {secretsLocked && (
+          passwords are reflected. Also surfaced via the ⌘K unlock quick action. */}
+      {(secretsLocked || unlockRequested) && (
         <SecretsUnlock
           onUnlocked={() => {
             setSecretsLocked(false);
+            setUnlockRequested(false);
             void refresh().catch((err) => showToast("error", String(err)));
           }}
         />
@@ -750,8 +803,11 @@ export default function App() {
         onClose={() => setCommandPaletteOpen(false)}
         modules={MODULES}
         hosts={hosts}
+        pending={pendingApprovals}
+        quickActions={quickActions}
         onNavigateModule={(id) => openModule(id as (typeof MODULES)[number]["id"])}
         onSelectHost={setSelectedHost}
+        onOpenApprovals={openApprovalsWorkbench}
       />
 
       {/* v3: approvals live in the always-on workbench; no auto dialog (Fix-1 retired). */}

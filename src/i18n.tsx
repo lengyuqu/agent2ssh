@@ -638,9 +638,17 @@ const zh: Record<string, string> = {
   "{count} active connections": "{count} 个活跃连接",
   // V1-3: Command palette
   "Search modules, hosts, tags...": "搜索模块、主机、标签...",
+  "Search modules, hosts, tools... (> for MCP tools)": "搜索模块、主机、工具...（输入 > 搜索 MCP 工具）",
   "Command palette": "命令面板",
   "No matches": "没有匹配结果",
   "Module": "模块",
+  "Action": "操作",
+  "Navigate": "跳转",
+  "Quick actions": "快捷操作",
+  "MCP tools": "MCP 工具",
+  "Connect host": "连接主机",
+  "Sync now": "立即同步",
+  "New host": "新建主机",
   "Open command palette": "打开命令面板",
   // V1-1: Dashboard
   "Dashboard": "仪表盘",

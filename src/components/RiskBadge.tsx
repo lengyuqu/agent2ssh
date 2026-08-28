@@ -17,6 +17,16 @@ const map: Record<RiskLevel, string> = {
   blocked: "bg-risk-high text-canvas-0",
 };
 
+/** Text-only risk tint for mono command rows (palette / detail / audit).
+ *  Derived from the same family mapping above — RiskBadge stays the single
+ *  source of risk-color truth (v3 §4.2). */
+export const RISK_TEXT_CLS: Record<RiskLevel, string> = {
+  low: "text-risk-low",
+  medium: "text-risk-medium",
+  high: "text-risk-high",
+  blocked: "text-risk-high",
+};
+
 export default function RiskBadge({ level, hideLow }: Props) {
   const { t } = useI18n();
   if (hideLow && level === "low") return null;
