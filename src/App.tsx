@@ -25,8 +25,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, reportError } from "./api";
 import AddHostForm from "./components/AddHostForm";
-import ApprovalDialog from "./components/ApprovalDialog";
-import ApprovalTimeline from "./components/ApprovalTimeline";
+import ApprovalWorkbench from "./components/approval/ApprovalWorkbench";
 import AuditCharts from "./components/AuditCharts";
 import AuditPanel from "./components/AuditPanel";
 import Breadcrumb from "./components/Breadcrumb";
@@ -136,7 +135,7 @@ export default function App() {
   const [selectedHost, setSelectedHost] = useState("");
   const [selectedGroup, setSelectedGroup] = useState("default");
   const [editingHost, setEditingHost] = useState<HostProfile | null>(null);
-  const [activeModule, setActiveModule] = useState<(typeof MODULES)[number]["id"]>("dashboard");
+  const [activeModule, setActiveModule] = useState<(typeof MODULES)[number]["id"]>("approvals");
   const [audit, setAudit] = useState<AuditEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [pendingApprovals, setPendingApprovals] = useState<ApprovalRequest[]>([]);
@@ -168,7 +167,6 @@ export default function App() {
     }
   });
   const webDavSyncInFlight = useRef(false);
-  const pendingApprovalsRef = useRef<ApprovalRequest[]>([]);
   // V2-1: previous connection-status snapshot, used to detect connect/disconnect
   // transitions for the connection-status notification. No backend SSE event
   // exists for this today (host_connected/host_disconnected are defined but
@@ -353,10 +351,6 @@ export default function App() {
     }
   });
 
-  useEffect(() => {
-    pendingApprovalsRef.current = pendingApprovals;
-  }, [pendingApprovals]);
-
   // Poll connection status every 5 seconds
   const pollConnections = useCallback(async () => {
     try {
@@ -458,12 +452,12 @@ export default function App() {
 
       if (e.shiftKey && key === "a") {
         e.preventDefault();
-        const approval = pendingApprovalsRef.current[0];
-        if (approval) {
-          document.getElementById("approval-dialog-cancel")?.focus();
-        } else {
-          showToast("success", t("No pending approvals"));
-        }
+        // v3: the auto approval dialog is gone — jump to the workbench and
+        // focus the first pending card instead (plan §1.3 / §5 risk #3).
+        openModule("approvals");
+        window.setTimeout(() => {
+          document.getElementById("approval-queue-card-0")?.focus();
+        }, 80);
         return;
       }
 
@@ -696,8 +690,6 @@ export default function App() {
     );
   }
 
-  const currentApproval = pendingApprovals[0] ?? null;
-
   // Render setup wizard overlay when active
   if (showWizard) {
     return (
@@ -739,16 +731,7 @@ export default function App() {
         onSelectHost={setSelectedHost}
       />
 
-      {/* Approval dialog overlay (Fix-1) */}
-      {currentApproval && (
-        <ApprovalDialog
-          command={currentApproval.command}
-          riskLevel={currentApproval.risk_level}
-          onConfirm={() => handleApprove(currentApproval)}
-          onCancel={() => handleReject(currentApproval)}
-        />
-      )}
-
+      {/* v3: approvals live in the always-on workbench; no auto dialog (Fix-1 retired). */}
       {fingerprintPrompt && (
         <Dialog
           onClose={fingerprintBusy ? undefined : () => setFingerprintPrompt(null)}
@@ -937,7 +920,7 @@ export default function App() {
                   "relative flex items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm font-medium transition-colors",
                   sidebarCollapsed && "justify-center px-2",
                   active
-                    ? "bg-sidebar-accent text-white shadow-sm"
+                    ? "bg-sidebar-accent text-primary-foreground"
                     : "text-sidebar-foreground/80 hover:bg-white/5 hover:text-sidebar-foreground"
                 )}
                 onClick={() => openModule(id)}
@@ -1137,7 +1120,17 @@ export default function App() {
 
           {activeModule === "help" && <HelpPanel />}
 
-          {activeModule === "approvals" && <ApprovalTimeline />}
+          {activeModule === "approvals" && (
+            <ApprovalWorkbench
+              pending={pendingApprovals}
+              onApprove={handleApprove}
+              onReject={handleReject}
+              onGoExecute={(approval) => {
+                setSelectedHost(approval.host);
+                openModule("execute");
+              }}
+            />
+          )}
 
           {activeModule === "config" && <ConfigSnapshotsPanel />}
 

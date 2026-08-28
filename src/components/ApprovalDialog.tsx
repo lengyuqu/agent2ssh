@@ -13,13 +13,16 @@ type Props = {
   onCancel: () => void;
 };
 
+/** v3 T02: the former auto-popup is gone; this dialog is now ONLY the second
+ * step of confirming high/blocked approvals from the workbench (⌘↵ included).
+ * API unchanged: { command, riskLevel, onConfirm, onCancel }. */
 export default function ApprovalDialog({ command, riskLevel, onConfirm, onCancel }: Props) {
   const { t } = useI18n();
   return (
     <Dialog onClose={onCancel}>
-      <div className="mb-4 flex items-center gap-2.5 text-destructive">
+      <div className="mb-4 flex items-center gap-2.5 text-risk-high">
         <ShieldAlert size={20} />
-        <h3 className="flex-1 text-lg font-semibold">{t("High-risk command")}</h3>
+        <h3 className="flex-1 text-lg font-semibold">{t("Confirm execution")}</h3>
         <IconButton onClick={onCancel}>
           <X size={16} />
         </IconButton>
@@ -31,8 +34,8 @@ export default function ApprovalDialog({ command, riskLevel, onConfirm, onCancel
         </p>
         <RiskBadge level={riskLevel} />
 
-        <div className="rounded-md bg-muted px-3.5 py-3">
-          <code className="break-all font-mono text-sm text-foreground">{command}</code>
+        <div className="rounded-md border border-line bg-canvas-0 px-3.5 py-3">
+          <code className="break-all font-mono text-sm text-risk-high">{command}</code>
         </div>
 
         <p className="text-sm text-muted-foreground">
@@ -44,7 +47,7 @@ export default function ApprovalDialog({ command, riskLevel, onConfirm, onCancel
         <Button id="approval-dialog-cancel" variant="secondary" onClick={onCancel}>
           {t("Cancel")}
         </Button>
-        <Button variant="destructive" onClick={onConfirm}>
+        <Button onClick={onConfirm}>
           <ShieldAlert size={14} />
           {t("Confirm and execute")}
         </Button>

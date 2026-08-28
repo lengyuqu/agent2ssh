@@ -7,11 +7,14 @@ type Props = {
   hideLow?: boolean;
 };
 
+/* v3 §4.2: RiskBadge is the SINGLE implementation point for risk colors.
+   low/medium/high = tinted bg + colored text; blocked = solid risk-high with
+   canvas-0 text. Chips are data → mono uppercase. */
 const map: Record<RiskLevel, string> = {
-  low: "bg-success/12 text-success",
-  medium: "bg-warning/15 text-warning",
-  high: "bg-destructive/12 text-destructive",
-  blocked: "bg-destructive text-destructive-foreground",
+  low: "bg-risk-low/12 text-risk-low",
+  medium: "bg-risk-medium/15 text-risk-medium",
+  high: "bg-risk-high/12 text-risk-high",
+  blocked: "bg-risk-high text-canvas-0",
 };
 
 export default function RiskBadge({ level, hideLow }: Props) {
@@ -20,7 +23,7 @@ export default function RiskBadge({ level, hideLow }: Props) {
   return (
     <span
       className={cn(
-        "inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-bold uppercase tracking-wide align-middle",
+        "inline-flex items-center rounded-full px-2 py-0.5 font-mono text-[11px] font-bold uppercase tracking-wide align-middle",
         map[level]
       )}
     >

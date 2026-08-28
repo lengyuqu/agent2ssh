@@ -544,6 +544,7 @@ const zh: Record<string, string> = {
   "Finish": "完成",
   "Language": "语言",
   "Theme": "主题",
+  "Midnight Ops": "午夜指挥舱",
   "System": "跟随系统",
   "Light": "浅色",
   "Dark": "深色",
@@ -772,6 +773,17 @@ const zh: Record<string, string> = {
   "Failed to load snippets: {error}": "加载命令片段失败：{error}",
   "Failed to save snippet: {error}": "保存命令片段失败：{error}",
   "Failed to delete snippet: {error}": "删除命令片段失败：{error}",
+  // v3 T02: approval workbench
+  "items awaiting your decision": "项待您裁决",
+  "In flight": "执行中",
+  "Decided today": "今日已审",
+  "Approval queue": "审批队列",
+  "Nothing awaiting approval": "没有待审批的命令",
+  "Requested at": "请求于",
+  "Approve and execute": "批准执行",
+  "Copy command and go to Execution": "复制命令并前往执行",
+  "Keyboard: ↑↓ select · ↵ review · ⌘↵ approve · ⌫ reject": "键盘：↑↓ 选择 · ↵ 查看 · ⌘↵ 批准 · ⌫ 拒绝",
+  "Confirm execution": "确认执行",
 };
 
 const I18nContext = createContext<I18nContextValue | null>(null);
