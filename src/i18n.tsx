@@ -627,7 +627,7 @@ const zh: Record<string, string> = {
   "Something went wrong": "界面出现异常",
   "The interface hit an unexpected error and stopped rendering. The details were written to the diagnostic log (Settings → Diagnostics).": "界面遇到意外错误并停止渲染。详细信息已写入诊断日志（设置 → 诊断日志）。",
   "Reload": "重新加载",
-  // V1-2: Footbar
+  // V1-2: status bar
   "Local daemon health": "本地 Daemon 健康状态",
   "Daemon running": "Daemon 运行中",
   "Daemon offline": "Daemon 离线",
@@ -638,6 +638,7 @@ const zh: Record<string, string> = {
   "{count} active connections": "{count} 个活跃连接",
   // V1-3: Command palette
   "Search modules, hosts, tags...": "搜索模块、主机、标签...",
+  "Command palette": "命令面板",
   "No matches": "没有匹配结果",
   "Module": "模块",
   "Open command palette": "打开命令面板",

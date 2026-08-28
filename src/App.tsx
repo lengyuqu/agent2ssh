@@ -34,7 +34,6 @@ import ConnectionTopology from "./components/ConnectionTopology";
 import CommandPalette, { type CommandPaletteModule } from "./components/CommandPalette";
 import Dashboard from "./components/Dashboard";
 import ExecPanel from "./components/ExecPanel";
-import Footbar from "./components/Footbar";
 import ForwardPanel from "./components/ForwardPanel";
 import HelpPanel from "./components/HelpPanel";
 import HostList from "./components/HostList";
@@ -53,6 +52,7 @@ import SecretsUnlock from "./components/SecretsUnlock";
 import SettingsMenu from "./components/SettingsMenu";
 import SetupWizard from "./components/SetupWizard";
 import SyncPanel from "./components/SyncPanel";
+import TopBar from "./components/TopBar";
 import { Button } from "./components/ui/button";
 import { Dialog } from "./components/ui/dialog";
 import { IconButton } from "./components/ui/icon-button";
@@ -105,6 +105,29 @@ const MODULES = [
   { id: "topology", label: "Topology", icon: Waypoints },
   { id: "recordings", label: "Recordings", icon: Clapperboard },
 ] as const;
+
+// v3 3.1: sidebar render order (approvals on top). MODULES order above is
+// frozen by the Ctrl/⌘+1..9 shortcuts; only the sidebar display order changes.
+const SIDEBAR_ORDER: Array<(typeof MODULES)[number]["id"]> = [
+  "approvals",
+  "hosts",
+  "audit",
+  "mcp-agents",
+  "dashboard",
+  "terminal",
+  "execute",
+  "files-sessions",
+  "tunnels",
+  "activity",
+  "proxies",
+  "sync",
+  "keys",
+  "playbooks",
+  "config",
+  "topology",
+  "recordings",
+  "help",
+];
 
 // V3-4: mesh navigation, not a tab trail — each module lists a handful of the
 // other modules an operator is likely to jump to from here.
@@ -866,28 +889,53 @@ export default function App() {
         </Dialog>
       )}
 
+      {/* v3: status top bar with agent pills + ⌘K entry */}
+      <TopBar
+        daemonHealth={daemonHealth}
+        gateStatus={gateStatus}
+        secretsLocked={secretsLocked}
+        connectionStatuses={connectionStatuses}
+        pendingApprovalsCount={pendingApprovals.length}
+        onOpenPalette={() => setCommandPaletteOpen(true)}
+        onOpenApprovals={() => openModule("approvals")}
+        actions={
+          <SettingsMenu
+            gateStatus={gateStatus}
+            gateBusy={gateBusy}
+            gateCheckedAt={gateCheckedAt}
+            daemonHealth={daemonHealth}
+            daemonHealthCheckedAt={daemonHealthCheckedAt}
+            onGateToggle={handleGateToggle}
+            onGateRefresh={pollGateStatus}
+            onDaemonHealthRefresh={pollDaemonHealth}
+            onImportConfig={handleImportConfig}
+            onOpenSetup={() => {
+              setWizardDismissed(false);
+              setShowWizard(true);
+            }}
+          />
+        }
+      />
+
       <main className={cn("flex min-h-0 flex-1 overflow-hidden", !sidebarCollapsed && "max-lg:flex-col max-lg:overflow-y-auto")}>
       <aside
         className={cn(
-          "flex shrink-0 flex-col gap-5 overflow-y-auto bg-sidebar p-5 text-sidebar-foreground",
+          "flex shrink-0 flex-col gap-3 overflow-y-auto border-r border-line bg-sidebar p-3 text-sidebar-foreground",
           sidebarCollapsed
-            ? "w-[76px] items-center p-3"
-            : "lg:w-[280px] max-lg:w-full max-lg:overflow-visible"
+            ? "w-[68px] items-center"
+            : "w-[150px] max-lg:w-full max-lg:overflow-visible"
         )}
       >
-        <div className={cn("flex items-center gap-3", sidebarCollapsed && "flex-col gap-2")}>
-          <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-sidebar-accent/15 text-sidebar-accent">
-            <Terminal size={20} />
+        <div className={cn("flex items-center gap-2", sidebarCollapsed && "flex-col")}>
+          <div className="flex size-7 shrink-0 items-center justify-center rounded-md border border-edge font-mono text-[11px] font-bold text-foreground">
+            A2
           </div>
-          <div className={cn("min-w-0", sidebarCollapsed && "hidden")}>
-            <h1 className="text-lg font-bold leading-tight">Agent2SSH</h1>
-            <span className="block text-xs text-sidebar-foreground/55">
-              {t("Local SSH capability layer")}
-            </span>
-          </div>
+          <span className={cn("min-w-0 truncate text-sm font-bold", sidebarCollapsed && "hidden")}>
+            Agent2SSH
+          </span>
           <IconButton
             className={cn(
-              "ml-auto shrink-0 border-white/15 bg-transparent text-sidebar-foreground/70 hover:bg-white/10 hover:text-sidebar-foreground",
+              "ml-auto shrink-0 border-transparent bg-transparent text-sidebar-foreground/70 hover:bg-white/10 hover:text-sidebar-foreground",
               sidebarCollapsed && "ml-0"
             )}
             onClick={() => setSidebarCollapsed((value) => !value)}
@@ -897,27 +945,24 @@ export default function App() {
           </IconButton>
         </div>
         <nav
-          className={cn("flex flex-col gap-1", !sidebarCollapsed && "max-lg:flex-row max-lg:flex-wrap")}
+          className={cn("flex flex-col gap-0.5", !sidebarCollapsed && "max-lg:flex-row max-lg:flex-wrap")}
           aria-label={t("Modules")}
         >
-          <div
-            className={cn(
-              "px-2 pb-1 text-[11px] font-bold uppercase tracking-wider text-sidebar-foreground/45",
-              sidebarCollapsed ? "hidden" : "max-lg:hidden"
-            )}
-          >
-            {t("Modules")}
-          </div>
-          {MODULES.map(({ id, label, icon: Icon }) => {
+          {SIDEBAR_ORDER.map((id) => {
+            const meta = MODULES.find((module) => module.id === id) ?? MODULES[0];
+            const { label, icon: Icon } = meta;
             const active = activeModule === id;
-            const showBadge = id === "approvals" && pendingApprovals.length > 0;
+            // Action-color discipline: count badges stay neutral (foreground +
+            // border); only the active row wears cyan. On the cyan row the
+            // badge inverts to canvas-0 for contrast.
+            const badge = id === "approvals" && pendingApprovals.length > 0;
             return (
               <button
                 key={id}
                 type="button"
                 title={sidebarCollapsed ? t(label) : undefined}
                 className={cn(
-                  "relative flex items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm font-medium transition-colors",
+                  "relative flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] font-medium transition-colors",
                   sidebarCollapsed && "justify-center px-2",
                   active
                     ? "bg-sidebar-accent text-primary-foreground"
@@ -925,15 +970,22 @@ export default function App() {
                 )}
                 onClick={() => openModule(id)}
               >
-                <Icon size={15} className={active ? "shrink-0" : "shrink-0 opacity-70"} />
-                <span className={cn(sidebarCollapsed && "hidden")}>{t(label)}</span>
-                {showBadge && (
+                <Icon size={14} className={active ? "shrink-0" : "shrink-0 opacity-70"} />
+                <span className={cn("truncate", sidebarCollapsed && "hidden")}>{t(label)}</span>
+                {badge && !sidebarCollapsed && (
                   <span
                     className={cn(
-                      "size-2 rounded-full bg-warning",
-                      sidebarCollapsed ? "absolute right-1.5 top-1.5" : "ml-auto"
+                      "ml-auto shrink-0 rounded-full px-1.5 font-mono text-[10px] font-bold leading-4",
+                      active
+                        ? "bg-canvas-0 text-primary"
+                        : "border border-line text-muted-foreground"
                     )}
-                  />
+                  >
+                    {pendingApprovals.length}
+                  </span>
+                )}
+                {badge && sidebarCollapsed && (
+                  <span className="absolute right-1.5 top-1.5 size-2 rounded-full bg-risk-medium" />
                 )}
               </button>
             );
@@ -942,17 +994,15 @@ export default function App() {
         <div className={cn("w-full", sidebarCollapsed && "hidden")}>
           <PingPanel hosts={hosts} />
         </div>
-        {pendingApprovals.length > 0 && (
-          <div
-            className={cn(
-              "flex items-center gap-2 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-sm font-medium text-warning",
-              sidebarCollapsed && "hidden"
-            )}
+        {!sidebarCollapsed && (
+          <button
+            type="button"
+            onClick={() => setCommandPaletteOpen(true)}
+            className="mt-auto flex items-center justify-between rounded-lg px-2.5 py-1.5 text-[13px] text-sidebar-foreground/70 transition-colors hover:bg-white/5 hover:text-sidebar-foreground"
           >
-            <span className="size-2 animate-pulse rounded-full bg-warning" />
-            {pendingApprovals.length}{" "}
-            {t(pendingApprovals.length > 1 ? "pending approvals" : "pending approval")}
-          </div>
+            <span>{t("Command palette")}</span>
+            <span className="font-mono text-[11px] text-faint">⌘K</span>
+          </button>
         )}
       </aside>
 
@@ -962,6 +1012,8 @@ export default function App() {
           !sidebarCollapsed && "max-lg:overflow-visible"
         )}
       >
+        {/* v3: gate/approval pills and settings live in the TopBar now — the
+            module header keeps only the title. */}
         <header className="flex items-start justify-between gap-4 max-md:flex-col">
           <div className="min-w-0">
             <h2 className="flex items-center gap-2 text-xl font-bold">
@@ -975,47 +1027,6 @@ export default function App() {
                   ? t("{count} hosts configured", { count: hosts.length })
                 : t("Add a host to start issuing SSH commands")}
             </p>
-          </div>
-          <div className="flex flex-wrap items-center justify-end gap-2 max-md:justify-start">
-            {pendingApprovals.length > 0 && (
-              <div className="inline-flex items-center gap-2 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-sm font-medium text-warning">
-                <span className="size-2 animate-pulse rounded-full bg-warning" />
-                {pendingApprovals.length}{" "}
-                {t(pendingApprovals.length > 1 ? "pending approvals" : "pending approval")}
-              </div>
-            )}
-            <div
-              className={cn(
-                "inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-medium",
-                gateStatus === null
-                  ? "border-border bg-muted text-muted-foreground"
-                  : gateStatus.mode === "paused"
-                    ? "border-destructive/30 bg-destructive/10 text-destructive"
-                    : "border-success/30 bg-success/10 text-success"
-              )}
-            >
-              <Activity size={15} />
-              {gateStatus === null
-                ? t("Gate unavailable")
-                : gateStatus.mode === "paused"
-                  ? t("Gate paused")
-                  : t("Gate active")}
-            </div>
-            <SettingsMenu
-              gateStatus={gateStatus}
-              gateBusy={gateBusy}
-              gateCheckedAt={gateCheckedAt}
-              daemonHealth={daemonHealth}
-              daemonHealthCheckedAt={daemonHealthCheckedAt}
-              onGateToggle={handleGateToggle}
-              onGateRefresh={pollGateStatus}
-              onDaemonHealthRefresh={pollDaemonHealth}
-              onImportConfig={handleImportConfig}
-              onOpenSetup={() => {
-                setWizardDismissed(false);
-                setShowWizard(true);
-              }}
-            />
           </div>
         </header>
 
@@ -1147,13 +1158,6 @@ export default function App() {
         </section>
       </section>
       </main>
-
-      <Footbar
-        daemonHealth={daemonHealth}
-        gateStatus={gateStatus}
-        secretsLocked={secretsLocked}
-        connectionStatuses={connectionStatuses}
-      />
     </div>
   );
 }
