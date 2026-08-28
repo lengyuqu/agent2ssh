@@ -36,11 +36,13 @@ const FETCH_LIMIT = 5000;
 const HEATMAP_TOP_HOSTS = 8;
 
 const RISK_ORDER: RiskLevel[] = ["low", "medium", "high", "blocked"];
+// v3: chart colors stay on the risk families via the token layer (inline var()
+// is allowed where class names can't reach — recharts needs raw color strings).
 const RISK_COLOR: Record<RiskLevel, string> = {
-  low: "var(--success)",
-  medium: "var(--warning)",
-  high: "var(--destructive)",
-  blocked: "var(--destructive)",
+  low: "var(--risk-low)",
+  medium: "var(--risk-medium)",
+  high: "var(--risk-high)",
+  blocked: "var(--risk-high)",
 };
 
 function tooltipBoxCls() {
@@ -211,7 +213,7 @@ export default function AuditCharts() {
               onClick={() => setRange(key)}
               className={cn(
                 "rounded px-2.5 py-1 text-xs font-semibold transition-colors",
-                range === key ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
+                range === key ? "bg-card text-foreground" : "text-muted-foreground hover:text-foreground"
               )}
             >
               {RANGE_LABEL[key]}

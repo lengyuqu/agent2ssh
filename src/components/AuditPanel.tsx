@@ -24,6 +24,38 @@ import { cn } from "../lib/utils";
 
 const labelCls = "grid gap-1.5 text-sm font-medium text-foreground/90";
 
+// v3: result three-state — approved/executed ok = low green, failed = high red,
+// no exit recorded (auto/blocked paths) = text-3 faint.
+const RESULT_DOT: Record<"ok" | "fail" | "none", string> = {
+  ok: "bg-risk-low",
+  fail: "bg-risk-high",
+  none: "bg-muted-foreground/50",
+};
+
+// Command cells are tinted with the risk family of the entry (full-row, since
+// matched-rule fragment data is not available from the backend yet).
+const COMMAND_TINT: Record<RiskLevel, string> = {
+  low: "text-risk-low",
+  medium: "text-risk-medium",
+  high: "text-risk-high",
+  blocked: "text-risk-high",
+};
+
+// Filter chips: selected chip = solid risk color with canvas-0 text, idle = risk outline.
+const CHIP_ACTIVE: Record<RiskLevel, string> = {
+  low: "border-transparent bg-risk-low text-canvas-0",
+  medium: "border-transparent bg-risk-medium text-canvas-0",
+  high: "border-transparent bg-risk-high text-canvas-0",
+  blocked: "border-transparent bg-risk-high text-canvas-0",
+};
+
+const CHIP_IDLE: Record<RiskLevel, string> = {
+  low: "border-risk-low/50 text-risk-low hover:border-risk-low",
+  medium: "border-risk-medium/50 text-risk-medium hover:border-risk-medium",
+  high: "border-risk-high/50 text-risk-high hover:border-risk-high",
+  blocked: "border-risk-high/50 text-risk-high hover:border-risk-high",
+};
+
 // J3: cap mounted rows so a large `limit` query never renders thousands of nodes.
 const RENDER_CAP_STEP = 200;
 
@@ -99,7 +131,7 @@ export default function AuditPanel({ audit, onRefresh }: Props) {
       columnHelper.accessor("ts", {
         header: t("time"),
         cell: (info) => (
-          <span className="text-xs text-muted-foreground">
+          <span className="font-mono text-xs text-faint">
             {new Date(info.getValue()).toLocaleString()}
           </span>
         ),
@@ -112,17 +144,30 @@ export default function AuditPanel({ audit, onRefresh }: Props) {
         header: t("Command"),
         enableSorting: false,
         cell: (info) => (
-          <code className="block truncate font-mono text-sm">{info.getValue()}</code>
+          <code
+            className={cn(
+              "block truncate font-mono text-sm",
+              COMMAND_TINT[info.row.original.risk_level ?? "low"]
+            )}
+          >
+            {info.getValue()}
+          </code>
         ),
       }),
       columnHelper.accessor("duration_ms", {
         id: "duration_ms",
         header: t("Duration"),
-        cell: (info) => (
-          <em className="text-xs not-italic text-muted-foreground">
-            exit={info.row.original.exit_code ?? "signal"} {info.getValue()}ms
-          </em>
-        ),
+        cell: (info) => {
+          const exit = info.row.original.exit_code;
+          const result: "ok" | "fail" | "none" =
+            exit === null ? "none" : exit === 0 ? "ok" : "fail";
+          return (
+            <span className="flex items-center gap-1.5 font-mono text-xs not-italic text-faint">
+              <span className={cn("size-1.5 shrink-0 rounded-full", RESULT_DOT[result])} aria-hidden />
+              exit={exit ?? "signal"} {info.getValue()}ms
+            </span>
+          );
+        },
       }),
       columnHelper.accessor("risk_level", {
         header: t("Risk level"),
@@ -148,6 +193,29 @@ export default function AuditPanel({ audit, onRefresh }: Props) {
   const rows = table.getRowModel().rows;
   const selectedIds = Object.keys(rowSelection).filter((id) => rowSelection[id]);
 
+  // v3: risk count chips over the currently loaded entries.
+  const riskCounts = useMemo(() => {
+    const counts: Record<RiskLevel | "all", number> = {
+      all: audit.length,
+      low: 0,
+      medium: 0,
+      high: 0,
+      blocked: 0,
+    };
+    for (const entry of audit) counts[entry.risk_level] += 1;
+    return counts;
+  }, [audit]);
+
+  function selectRisk(level: RiskLevel | "") {
+    setRiskFilter(level);
+    setRenderCap(RENDER_CAP_STEP);
+    onRefresh({
+      limit: parseLimit(String(limit)),
+      host: hostFilter.trim() || null,
+      risk_level: level || null,
+    });
+  }
+
   function copySelectedAsJson() {
     const selected = audit.filter((entry) => rowSelection[entry.id]);
     navigator.clipboard
@@ -171,6 +239,35 @@ export default function AuditPanel({ audit, onRefresh }: Props) {
         <IconButton onClick={() => onRefresh()} title={t("Refresh audit")}>
           <RefreshCw size={15} />
         </IconButton>
+      </div>
+
+      {/* v3: risk filter chips — selected = solid risk color, idle = outline */}
+      <div className="flex flex-wrap items-center gap-1.5">
+        <button
+          type="button"
+          onClick={() => selectRisk("")}
+          className={cn(
+            "rounded-full border px-2.5 py-0.5 font-mono text-[10.5px] font-bold uppercase tracking-wide transition-colors",
+            riskFilter === ""
+              ? "border-transparent bg-foreground text-background"
+              : "border-border text-muted-foreground hover:border-edge-strong hover:text-foreground"
+          )}
+        >
+          {t("all")} {riskCounts.all}
+        </button>
+        {(Object.keys(CHIP_ACTIVE) as RiskLevel[]).map((level) => (
+          <button
+            key={level}
+            type="button"
+            onClick={() => selectRisk(level)}
+            className={cn(
+              "rounded-full border px-2.5 py-0.5 font-mono text-[10.5px] font-bold uppercase tracking-wide transition-colors",
+              riskFilter === level ? CHIP_ACTIVE[level] : CHIP_IDLE[level]
+            )}
+          >
+            {t(level)} {riskCounts[level]}
+          </button>
+        ))}
       </div>
 
       {showFilters && (
@@ -260,7 +357,8 @@ export default function AuditPanel({ audit, onRefresh }: Props) {
                   key={row.id}
                   className={cn(
                     "border-t border-border",
-                    row.original.risk_level === "high" && "bg-warning/10"
+                    row.original.risk_level === "high" && "bg-risk-high/5",
+                    row.original.risk_level === "blocked" && "bg-risk-high/5"
                   )}
                 >
                   {row.getVisibleCells().map((cell) => (

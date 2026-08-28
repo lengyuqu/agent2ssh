@@ -211,7 +211,7 @@ export default function HostList({
         id: "address",
         header: t("Host"),
         cell: ({ row }) => (
-          <span className="block break-all text-xs text-muted-foreground">
+          <span className="block break-all font-mono text-xs text-muted-foreground">
             {row.original.address}
             {row.original.host.jump_host && ` via ${row.original.host.jump_host}`}
             {proxyLabel(row.original.host.proxy_id) &&
@@ -334,6 +334,30 @@ export default function HostList({
         <IconButton onClick={onRefresh} title={t("Refresh hosts")}>
           <RefreshCw size={15} />
         </IconButton>
+      </div>
+
+      {/* v3 3.2: the policy summary line — the soul of this page. Frontend
+          constants only (no backend field); the three segments reuse the risk
+          families so they always match RiskBadge. */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-line bg-canvas-1 px-3 py-2 font-mono text-[11px] uppercase tracking-wide">
+        <span className="flex items-center gap-1.5 text-risk-low">
+          <span className="size-1.5 rounded-full bg-risk-low" aria-hidden />
+          {t("low auto-approve")}
+        </span>
+        <span className="text-faint" aria-hidden>
+          ·
+        </span>
+        <span className="flex items-center gap-1.5 text-risk-medium">
+          <span className="size-1.5 rounded-full bg-risk-medium" aria-hidden />
+          {t("med/high need approval")}
+        </span>
+        <span className="text-faint" aria-hidden>
+          ·
+        </span>
+        <span className="flex items-center gap-1.5 text-risk-high">
+          <span className="size-1.5 rounded-full bg-risk-high" aria-hidden />
+          {t("deletion forbidden")}
+        </span>
       </div>
 
       <div className="rounded-lg border border-border bg-muted/40 p-3">
@@ -519,7 +543,9 @@ export default function HostList({
                   onClick={() => onSelect(row.original.host.name)}
                   className={cn(
                     "cursor-pointer border-b border-border transition-colors last:border-b-0",
-                    row.original.host.name === selectedHost ? "bg-primary/5" : "hover:bg-muted/50"
+                    row.original.host.name === selectedHost ? "bg-canvas-2" : "hover:bg-muted/50",
+                    // v3 3.2: offline hosts are visually de-emphasized.
+                    !row.original.connected && "opacity-75"
                   )}
                 >
                   {row.getVisibleCells().map((cell) => (
