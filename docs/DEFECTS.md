@@ -5,6 +5,7 @@
 > 检查范围：前端 (React/TS) + Rust 后端 + 构建流程 + 测试
 >
 > ⚠️ **归档声明**：本文件为 **0.2.1 时代审计快照**，仅作历史存档。当前代码基已发布 **0.3.0**（见 `CHANGELOG.md`）。文中组件引用路径现位于 `src/components/`，行号基于 0.2.1 快照，可能已偏移。现行状态以 `CHANGELOG` 与 CI 实测为准。
+> 📌 0.3.0 实测基线（2026-08-28）：Rust lib tests = **578 passed**、CLI/MCP smoke = 29、daemon integration = 57、i18n 442 keys / 0 缺译。
 
 ---
 

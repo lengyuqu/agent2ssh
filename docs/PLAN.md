@@ -16,7 +16,7 @@
 
 ### 1. 当前判断
 
-项目已完成 P0-P10、F1-F6、S1-S9、G、E、O、H、I、J、K 全部阶段，0.2.1 已发布。基线数据：203 Rust lib tests、29 CLI/MCP smoke、57 daemon integration、442 i18n keys / 0 缺译、14 low-risk defects（8 FE + 6 Rust）。
+项目已完成 P0-P10、F1-F6、S1-S9、G、E、O、H、I、J、K 全部阶段，0.2.1 已发布。基线数据：578 Rust lib tests、29 CLI/MCP smoke、57 daemon integration、442 i18n keys / 0 缺译、14 low-risk defects（8 FE + 6 Rust）。
 
 旧 plan2.md 的定位是"质量收口"，Q1（发布可信度）已完成，Q2（凭据/WebDAV 回归）部分完成。后续不再继续质量收口路线，而是进入功能+UI 演进——让桌面端从"可用的 SSH 能力层"升级为"高效、直观、可操作的 SSH 操作面"。
 
@@ -174,7 +174,7 @@ P0-P10 已全部完成。当前基线：
 - 安全能力：风险评分、统一 policy-as-code、审批队列、审批端点、桌面审批弹窗、敏感命令脱敏、execution gate、执行限额、异常检测
 - 运维能力：内置 SSH 连接保留、Webhook 通知、remote daemon registry、健康检查、指标、审计轮转
 - 生态能力：SSH key 管理、团队配置导入导出、MCP 客户端模板、插件/Skill 分发文档
-- 验收结果：当前本地回归包含 203 个 Rust lib 单测、29 个 CLI/MCP smoke 测试、57 个 daemon 集成测试，以及前端 `npm run build`、macOS `npm run tauri:build` 打包验证
+- 验收结果：当前本地回归包含 578 个 Rust lib 单测、29 个 CLI/MCP smoke 测试、57 个 daemon 集成测试，以及前端 `npm run build`、macOS `npm run tauri:build` 打包验证
 - MCP 工具：51 个，详见 [skills.md](skills.md)
 
 ### 协作规则
@@ -636,7 +636,7 @@ S9(0.1.1 已收口)
 | K9 | ✅ 已完成 | 低 | Claude | 鉴权侧信道核查 | `token_matches` 改用 `subtle::ConstantTimeEq`（替换手写折叠，语义不变：空 expected 永不匹配）。复核：服务端唯一校验点即此处（scoped token 也经此），webhook 仅出站签名无入站校验。含 3 单测 |
 | K10 | ✅ 已完成 | 低 | Claude | 体验与运维打磨 | i18n 审计脚本最新确认 442 checked keys / 0 缺译 / 0 placeholder mismatch（含 SSH fingerprint、WebDAV Sync、MCP 解绑、Sync 模块 label 和 ErrorBoundary 恢复页）。a11y：Settings 已 Escape 关闭、新增控件均为原生 `<button>`/`<label><input>`。新增 `telemetry.rs`：opt-in（默认关）本地遥测（`telemetry.toml` 开关 + `telemetry.jsonl` 2MiB 上限，无网络导出），panic hook 接入 crash 事件（关时 no-op）；Tauri get/set 命令 + Settings 复选框。含单测（默认关、开后落盘、可关） |
 
-> Phase K 收口（2026-06-21，Claude）：K1–K10 全部落地。验证：`cargo test --no-default-features` 全绿（lib 195 + daemon-feature 28 + integration daemon 57 + daemon bin 18）；CLI/MCP/daemon/tauri 四套 `cargo check` 通过；`cargo fmt --check` 干净；`npm run build`/`tsc --noEmit` 通过；i18n 0 缺译。2026-06-22 用户补充确认 Windows 真机测试已完成，覆盖 Windows ACL 与路径冒烟。后续补充验证：Rust lib 203、CLI/MCP smoke 29、daemon integration 57、i18n 442 checked keys / 0 缺译 / 0 placeholder mismatch、`npm run tauri:build` 重新生成 `.app` 和 `.dmg`。K3/K4 涉及的证书、公证、灰度发布端和本地 Docker 环境差异已归类为发布运营或环境事项，不再作为路线图剩余计划。
+> Phase K 收口（2026-06-21，Claude）：K1–K10 全部落地。验证：`cargo test --no-default-features` 全绿（lib 195 + daemon-feature 28 + integration daemon 57 + daemon bin 18）；CLI/MCP/daemon/tauri 四套 `cargo check` 通过；`cargo fmt --check` 干净；`npm run build`/`tsc --noEmit` 通过；i18n 0 缺译。2026-06-22 用户补充确认 Windows 真机测试已完成，覆盖 Windows ACL 与路径冒烟。后续补充验证：Rust lib 578、CLI/MCP smoke 29、daemon integration 57、i18n 442 checked keys / 0 缺译 / 0 placeholder mismatch、`npm run tauri:build` 重新生成 `.app` 和 `.dmg`。K3/K4 涉及的证书、公证、灰度发布端和本地 Docker 环境差异已归类为发布运营或环境事项，不再作为路线图剩余计划。
 
 ## 附录：Plan 2 Q1/Q2 执行报告
 
