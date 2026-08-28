@@ -61,7 +61,8 @@ const midnightOps: ITheme = {
   brightWhite: "#FFFFFF",
 };
 
-const githubDark: ITheme = {  background: "#0d1117",
+const githubDark: ITheme = {
+  background: "#0d1117",
   foreground: "#c9d1d9",
   cursor: "#58a6ff",
   cursorAccent: "#0d1117",

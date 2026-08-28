@@ -2,10 +2,11 @@ import { createContext, type ReactNode, useContext, useEffect, useMemo, useState
 
 export type Theme = "midnight-ops" | "system" | "light" | "dark" | "dracula" | "nord" | "solarized-light";
 
-/** Theme options shown in the picker. `swatch` is a representative color dot. */
+/** Theme options shown in the picker. `swatch` is a representative color dot.
+ *  v3 risk #1: "system" is gone from the picker — its semantics (no data-theme
+ *  attribute → :root ops-bridge skin) are identical to midnight-ops. */
 export const THEMES: { id: Theme; label: string; swatch: string }[] = [
   { id: "midnight-ops", label: "Midnight Ops", swatch: "#2DD4BF" },
-  { id: "system", label: "System", swatch: "#2DD4BF" },
   { id: "light", label: "Light", swatch: "#17857c" },
   { id: "dark", label: "Dark", swatch: "#5ac8a6" },
   { id: "dracula", label: "Dracula", swatch: "#bd93f9" },
@@ -35,6 +36,9 @@ export function applyTheme(theme: Theme) {
 function initialTheme(): Theme {
   try {
     const saved = localStorage.getItem(STORAGE_KEY);
+    // Legacy "system" resolves to midnight-ops (same visual semantics since
+    // the v3 token swap) instead of being rejected or erroring.
+    if (saved === "system") return "midnight-ops";
     if (saved && VALID.has(saved as Theme)) return saved as Theme;
   } catch {
     // localStorage may be unavailable
