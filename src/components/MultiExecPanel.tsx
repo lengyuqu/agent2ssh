@@ -162,11 +162,11 @@ export default function MultiExecPanel({ hosts, onExecComplete }: Props) {
           ))}
           {results.map((r) =>
             r.result ? (
-              <div key={`${r.host}-output`} className="overflow-hidden rounded-md bg-[#0e1620]">
-                <div className="bg-white/5 px-3.5 py-1.5 text-xs font-semibold text-[#8fb0c5]">
+              <div key={`${r.host}-output`} className="overflow-hidden rounded-md bg-canvas-0">
+                <div className="bg-canvas-2 px-3.5 py-1.5 text-xs font-semibold text-muted-foreground">
                   {r.host}
                 </div>
-                <pre className="m-0 whitespace-pre-wrap break-words px-3.5 py-2.5 font-mono text-[13px] text-[#e6edf3]">
+                <pre className="m-0 whitespace-pre-wrap break-words px-3.5 py-2.5 font-mono text-[13px] text-foreground">
                   {r.result.stdout || r.result.stderr || t("(no output)")}
                 </pre>
               </div>

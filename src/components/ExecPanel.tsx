@@ -202,14 +202,14 @@ export default function ExecPanel({ hosts, initialHost = "", onExecComplete }: P
         {busy ? t("Running") : t("Run over SSH")}
       </Button>
 
-      <div className="min-h-[250px] overflow-auto rounded-md bg-[#0e1620] text-[#e6edf3]">
+      <div className="min-h-[250px] overflow-auto rounded-md bg-canvas-0 text-foreground">
         {result ? (
           <>
-            <div className="flex flex-wrap items-center gap-2.5 border-b border-white/10 px-3.5 py-2.5 text-[#8fb0c5]">
+            <div className="flex flex-wrap items-center gap-2.5 border-b border-line px-3.5 py-2.5 text-muted-foreground">
               exit={result.exit_code ?? "signal"} duration={result.duration_ms}ms{" "}
               <RiskBadge level={result.risk_level} />
               {result.truncated && (
-                <span className="rounded bg-warning/80 px-1.5 py-px text-[11px] font-semibold text-[#fef3c7]">
+                <span className="rounded bg-warning/80 px-1.5 py-px text-[11px] font-semibold text-canvas-0">
                   {t("output truncated")}
                 </span>
               )}
@@ -218,7 +218,7 @@ export default function ExecPanel({ hosts, initialHost = "", onExecComplete }: P
               {result.stdout || result.stderr || t("(no output)")}
             </pre>
             {result.stderr && (
-              <pre className="m-0 whitespace-pre-wrap break-words border-t border-white/10 p-3.5 font-mono text-[13px] text-[#ffb4a6]">
+              <pre className="m-0 whitespace-pre-wrap break-words border-t border-line p-3.5 font-mono text-[13px] text-risk-high">
                 {result.stderr}
               </pre>
             )}

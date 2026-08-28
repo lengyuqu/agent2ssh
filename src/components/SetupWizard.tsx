@@ -132,7 +132,7 @@ export default function SetupWizard({ onComplete, onSkip }: SetupWizardProps) {
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-background p-6">
-      <div className="w-full max-w-[560px] overflow-hidden rounded-xl border border-border bg-card shadow-xl">
+      <div className="w-full max-w-[560px] overflow-hidden rounded-xl border border-edge bg-card">
         {/* Step indicator */}
         <div className="flex items-center gap-3 border-b border-border px-6 py-4">
           <span className="inline-flex h-7 min-w-9 items-center justify-center rounded-full bg-primary px-2 text-xs font-semibold text-primary-foreground">

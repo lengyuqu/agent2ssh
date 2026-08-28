@@ -44,10 +44,19 @@ const ToastContext = createContext<ToastContextValue | null>(null);
 
 const AUTO_DISMISS_MS = 5000;
 
-const VARIANT_STYLES: Record<ToastVariant, string> = {
-  success: "border-success/40 text-success",
-  error: "border-destructive/40 text-destructive",
-  warning: "border-warning/40 text-warning",
+/* v3: the semantic color lives in a 3px left edge bar (risk families + action
+   for in-flight background tasks), on a canvas-3 surface with an edge border —
+   no shadows. */
+const VARIANT_EDGE: Record<ToastVariant, string> = {
+  success: "bg-risk-low",
+  error: "bg-risk-high",
+  warning: "bg-risk-medium",
+};
+
+const VARIANT_ICON_CLS: Record<ToastVariant, string> = {
+  success: "text-risk-low",
+  error: "text-risk-high",
+  warning: "text-risk-medium",
 };
 
 const VARIANT_ICON: Record<ToastVariant, typeof CheckCircle2> = {
@@ -100,13 +109,14 @@ export function ToastProvider({ children }: { children: ReactNode }) {
             <div
               key={item.id}
               role="status"
-              className={cn(
-                "pointer-events-auto grid w-full max-w-md gap-1.5 rounded-lg border bg-card/95 px-3 py-2 text-sm text-foreground shadow-lg backdrop-blur-sm",
-                VARIANT_STYLES[item.variant]
-              )}
+              className="pointer-events-auto relative grid w-full max-w-md gap-1.5 overflow-hidden rounded-lg border border-edge bg-popover px-3 py-2 pl-4 text-sm text-foreground"
             >
+              <span
+                className={cn("absolute inset-y-0 left-0 w-[3px]", VARIANT_EDGE[item.variant])}
+                aria-hidden
+              />
               <div className="flex items-start gap-2">
-                <Icon size={16} className="mt-0.5 shrink-0" />
+                <Icon size={16} className={cn("mt-0.5 shrink-0", VARIANT_ICON_CLS[item.variant])} />
                 <div className="min-w-0 flex-1">
                   {item.title && <div className="font-semibold">{item.title}</div>}
                   <span className="break-words text-foreground/90">{item.message}</span>

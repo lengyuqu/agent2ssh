@@ -782,7 +782,7 @@ export default function TerminalPanel({ hosts, initialHost = "" }: Props) {
 
         {historySearch && searchTabId && (
           <div
-            className="absolute inset-x-0 top-2 z-20 mx-auto w-[min(420px,90%)] rounded-lg border border-border bg-popover text-popover-foreground shadow-2xl"
+            className="absolute inset-x-0 top-2 z-20 mx-auto w-[min(420px,90%)] rounded-lg border border-edge bg-popover text-popover-foreground"
             style={{
               left: `${paneRect(layout, ratios, historySearch.paneIndex).left}%`,
               width: `min(420px, ${paneRect(layout, ratios, historySearch.paneIndex).width}% - 16px)`,

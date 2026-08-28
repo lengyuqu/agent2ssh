@@ -109,7 +109,7 @@ export default function CommandPalette({
       onClick={onClose}
     >
       <div
-        className="w-full max-w-lg overflow-hidden rounded-xl border border-border bg-card text-card-foreground shadow-2xl max-sm:h-full max-sm:max-w-full max-sm:rounded-none max-sm:border-none"
+        className="w-full max-w-lg overflow-hidden rounded-xl border border-edge bg-popover text-popover-foreground max-sm:h-full max-sm:max-w-full max-sm:rounded-none max-sm:border-none"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center gap-2 border-b border-border px-4 py-3">

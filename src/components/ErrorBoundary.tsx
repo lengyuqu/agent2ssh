@@ -52,7 +52,7 @@ class ErrorBoundaryInner extends Component<Props, State> {
             "The interface hit an unexpected error and stopped rendering. The details were written to the diagnostic log (Settings → Diagnostics)."
           )}
         </p>
-        <pre className="max-h-40 max-w-full overflow-auto rounded-md bg-[#0e1620] px-3 py-2 text-left text-xs text-[#e6edf3]">
+        <pre className="max-h-40 max-w-full overflow-auto rounded-md bg-canvas-0 px-3 py-2 text-left text-xs text-foreground">
           {error.message}
         </pre>
         <button

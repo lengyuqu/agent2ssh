@@ -97,18 +97,18 @@ export default function HostDiffView({ results }: Props) {
         </span>
       </div>
 
-      <pre className="m-0 max-h-[360px] overflow-auto rounded-md bg-[#0e1620] p-0 font-mono text-[13px] text-[#e6edf3]">
+      <pre className="m-0 max-h-[360px] overflow-auto rounded-md bg-canvas-0 p-0 font-mono text-[13px] text-foreground">
         {lines.length === 0 ? (
-          <div className="px-3.5 py-2.5 text-[#8fb0c5]">{t("(no output)")}</div>
+          <div className="px-3.5 py-2.5 text-muted-foreground">{t("(no output)")}</div>
         ) : (
           lines.map((line) => (
             <div
               key={line.key}
               className={
                 line.kind === "removed"
-                  ? "bg-[#4a1f24] px-3.5 text-[#ffb4a6]"
+                  ? "bg-risk-high/10 px-3.5 text-risk-high"
                   : line.kind === "added"
-                    ? "bg-[#1f3a2a] px-3.5 text-[#9be3ae]"
+                    ? "bg-risk-low/10 px-3.5 text-risk-low"
                     : "px-3.5"
               }
             >

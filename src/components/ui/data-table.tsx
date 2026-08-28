@@ -32,7 +32,7 @@ export function ColumnVisibilityMenu<T>({ table, label }: { table: Table<T>; lab
         <Columns3 size={15} />
       </IconButton>
       {open && (
-        <div className="absolute right-0 top-[calc(100%+6px)] z-30 grid w-48 gap-0.5 rounded-lg border border-border bg-popover p-2 text-popover-foreground shadow-xl">
+        <div className="absolute right-0 top-[calc(100%+6px)] z-30 grid w-48 gap-0.5 rounded-lg border border-edge bg-popover p-2 text-popover-foreground">
           {hideable.map((column) => (
             <label
               key={column.id}

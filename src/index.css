@@ -6,12 +6,21 @@
    reset. Every panel is now built from the tokens/primitives here, so a heavy
    global reset isn't needed; if you later want stricter normalization you can
    add `@import "tailwindcss/preflight.css" layer(base);` and re-test the panels.
+
+   v3 "Midnight Ops": :root IS the ops-bridge dark skin. The 14 design tokens
+   (--canvas-*, --line, --edge*, --text-*, --action*, --risk-*) live ONLY here
+   and derive the shadcn semantic variables, so the ~40 existing panels restyle
+   with zero component changes. Light/dracula/nord/solarized-light remain for
+   legacy users; there is no prefers-color-scheme branch anymore — "system"
+   means Midnight Ops (see src/theme.tsx).
    ────────────────────────────────────────────────────────────────────────── */
 @layer theme, base, components, utilities;
 @import "tailwindcss/theme.css" layer(theme);
 @import "tailwindcss/utilities.css" layer(utilities);
 
-/* Map semantic tokens → Tailwind color/radius utilities (bg-card, text-muted-foreground, rounded-lg, …) */
+/* Map semantic tokens → Tailwind color/radius utilities (bg-card, text-muted-foreground, …)
+   Plus direct pass-through mappings for the v3 design primitives so new
+   components can write bg-canvas-0 / text-risk-high / border-edge-strong. */
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -40,29 +49,95 @@
   --color-sidebar-accent: var(--sidebar-accent);
   --color-sidebar-border: var(--sidebar-border);
 
+  /* v3 Midnight Ops primitives (direct pass-through) */
+  --color-canvas-0: var(--canvas-0);
+  --color-canvas-1: var(--canvas-1);
+  --color-canvas-2: var(--canvas-2);
+  --color-canvas-3: var(--canvas-3);
+  --color-line: var(--line);
+  --color-edge: var(--edge);
+  --color-edge-strong: var(--edge-strong);
+  --color-faint: var(--faint);
+  --color-risk-low: var(--risk-low);
+  --color-risk-medium: var(--risk-medium);
+  --color-risk-high: var(--risk-high);
+
+  /* All data (commands, hosts, timestamps, metrics, versions) uses JetBrains
+     Mono via the font-mono utility; UI copy stays Inter. */
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
 }
 
-/* ── Light theme (default) ─────────────────────────────────────────────────── */
-/* "System" = no data-theme attribute (light by default, dark via the media
-   query below). Explicit themes set data-theme on <html>; see src/theme.tsx.
-   Only color tokens vary per theme — radius and the legacy aliases are declared
-   once on :root and resolve var() lazily, so they follow the active theme. */
+/* ── Midnight Ops (default — :root without data-theme) ────────────────────── */
+/* The 14 design tokens are declared once here; the shadcn semantic variables
+   derive from them. Legacy aliases resolve lazily so they track the theme. */
 :root {
   --radius: 0.625rem;
-  /* Legacy aliases — the 5 variables referenced by KeysPanel etc. that were
-     never defined (silent styling bug); resolved lazily so they track theme. */
   --surface: var(--card);
   --text: var(--foreground);
   --text-muted: var(--muted-foreground);
   --accent: var(--primary);
+
+  /* Canvas layers (deep → light; hierarchy comes from layering, no shadows) */
+  --canvas-0: #0A0F18; /* deepest: sidebar / command blocks */
+  --canvas-1: #0E1420; /* main canvas */
+  --canvas-2: #131A28; /* cards / selected rows */
+  --canvas-3: #1A2334; /* raised overlays (dialogs / palette) */
+
+  /* Lines and edges */
+  --line: #1C2637;
+  --edge: #263042;
+  --edge-strong: #33405A;
+
+  /* Text */
+  --text-1: #E6EDF3;
+  --text-2: #8B98AC;
+  /* Raised from spec's #5A6778 (≈3.9:1) to hit the design's own ≥4.5:1 floor
+     on canvas-1 (plan §5 risk #8). Token-only change, no component impact. */
+  --text-3: #64748B;
+
+  /* Action — the single accent, reserved for clickable actions only */
+  --action: #2DD4BF;
+  --action-hover: #4AE0CD;
+  --action-ink: #062B26;
+
+  /* Risk families (the product's narrative colors, used everywhere) */
+  --risk-low: #34D399;
+  --risk-medium: #FFB224;
+  --risk-high: #F25555; /* blocked reuses this value with canvas-0 text */
+
+  color-scheme: dark;
+  --background: var(--canvas-1);
+  --foreground: var(--text-1);
+  --card: var(--canvas-2);
+  --card-foreground: var(--text-1);
+  --popover: var(--canvas-3);
+  --popover-foreground: var(--text-1);
+  --primary: var(--action);
+  --primary-foreground: var(--action-ink);
+  --secondary: var(--canvas-2);
+  --secondary-foreground: var(--text-1);
+  --muted: var(--canvas-2);
+  --muted-foreground: var(--text-2);
+  --faint: var(--text-3);
+  --destructive: var(--risk-high);
+  --destructive-foreground: var(--canvas-0);
+  --success: var(--risk-low);
+  --warning: var(--risk-medium);
+  --border: var(--line);
+  --input: var(--edge);
+  --ring: var(--edge-strong);
+  --sidebar: var(--canvas-0);
+  --sidebar-foreground: var(--text-1);
+  --sidebar-accent: var(--action);
+  --sidebar-border: var(--line);
 }
 
-/* ── Light (default + explicit) ────────────────────────────────────────────── */
-:root,
+/* ── Light (explicit opt-in, legacy users) ────────────────────────────────── */
 :root[data-theme="light"] {
   color-scheme: light;
   --background: #f7f8f6;
@@ -91,34 +166,6 @@
 }
 
 /* ── Dark — soft, GitHub-dark-dimmed inspired (not pure black) ──────────────── */
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme]) {
-    color-scheme: dark;
-    --background: #1f2329;
-    --foreground: #c7d0d8;
-    --card: #272c33;
-    --card-foreground: #c7d0d8;
-    --popover: #2b3138;
-    --popover-foreground: #d1dae2;
-    --primary: #5ac8a6;
-    --primary-foreground: #10231d;
-    --secondary: #30363d;
-    --secondary-foreground: #ccd5dc;
-    --muted: #30363d;
-    --muted-foreground: #9aa5af;
-    --destructive: #e06c75;
-    --destructive-foreground: #240c10;
-    --success: #7fbf7f;
-    --warning: #d8a657;
-    --border: #3d4650;
-    --input: #46505b;
-    --ring: #5ac8a6;
-    --sidebar: #1a1e24;
-    --sidebar-foreground: #cbd5dd;
-    --sidebar-accent: #5ac8a6;
-    --sidebar-border: #313943;
-  }
-}
 :root[data-theme="dark"] {
   color-scheme: dark;
   --background: #1f2329;
@@ -312,7 +359,7 @@
   .command-block-bar:focus-visible {
     width: 9px;
     opacity: 1;
-    outline: 1px solid rgba(255, 255, 255, 0.8);
+    outline: 1px solid var(--edge-strong);
     outline-offset: 1px;
   }
 
@@ -320,6 +367,7 @@
     pointer-events: none;
     position: absolute;
     border-left: 2px solid;
-    background: rgba(255, 255, 255, 0.055);
+    /* Risk-family tint (driven by --risk-* instead of the old white rgba). */
+    background: color-mix(in srgb, var(--risk-low) 7%, transparent);
   }
 }

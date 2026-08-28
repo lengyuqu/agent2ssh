@@ -15,7 +15,7 @@ export function Dialog({ onClose, className, children }: DialogProps) {
     >
       <div
         className={cn(
-          "w-full max-w-md rounded-xl border border-border bg-card p-6 text-card-foreground shadow-2xl",
+          "w-full max-w-md rounded-xl border border-edge bg-popover p-6 text-popover-foreground",
           className
         )}
         onClick={(e) => e.stopPropagation()}

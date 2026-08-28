@@ -21,7 +21,7 @@ type TerminalPalette = {
 export const TERMINAL_THEME_STORAGE_KEY = "agent2ssh.terminalTheme";
 
 export const TERMINAL_THEME_OPTIONS: { id: TerminalThemeId; label: string; swatch: string }[] = [
-  { id: "app", label: "Match app", swatch: "linear-gradient(135deg, #f5f7f9 0 50%, #1a1d23 50% 100%)" },
+  { id: "app", label: "Match app", swatch: "#2DD4BF" },
   { id: "github-dark", label: "GitHub Dark", swatch: "#58a6ff" },
   { id: "tokyo-night", label: "Tokyo Night", swatch: "#7aa2f7" },
   { id: "dracula", label: "Dracula", swatch: "#bd93f9" },
@@ -31,8 +31,37 @@ export const TERMINAL_THEME_OPTIONS: { id: TerminalThemeId; label: string; swatc
   { id: "amber", label: "Amber", swatch: "#ffb86c" },
 ];
 
-const githubDark: ITheme = {
-  background: "#0d1117",
+// Midnight Ops (v3): ops-bridge dark canvas + risk-family accents. Used by the
+// "app" (Match app) terminal theme when the app skin is Midnight Ops/System.
+const midnightOps: ITheme = {
+  background: "#0A0F18",
+  foreground: "#E6EDF3",
+  cursor: "#2DD4BF",
+  cursorAccent: "#0A0F18",
+  selectionBackground: "#1A2334",
+  selectionForeground: "#E6EDF3",
+  selectionInactiveBackground: "#131A28",
+  scrollbarSliderBackground: "#26304266",
+  scrollbarSliderHoverBackground: "#33405A88",
+  black: "#1C2637",
+  red: "#F25555",
+  green: "#34D399",
+  yellow: "#FFB224",
+  blue: "#58a6ff",
+  magenta: "#bc8cff",
+  cyan: "#2DD4BF",
+  white: "#E6EDF3",
+  brightBlack: "#33405A",
+  brightRed: "#FF7B72",
+  brightGreen: "#6EE7B7",
+  brightYellow: "#FFD37A",
+  brightBlue: "#79c0ff",
+  brightMagenta: "#d2a8ff",
+  brightCyan: "#4AE0CD",
+  brightWhite: "#FFFFFF",
+};
+
+const githubDark: ITheme = {  background: "#0d1117",
   foreground: "#c9d1d9",
   cursor: "#58a6ff",
   cursorAccent: "#0d1117",
@@ -256,7 +285,10 @@ export function resolveTerminalTheme(id: TerminalThemeId, appTheme: AppTheme): I
   if (appTheme === "dracula") return dracula;
   if (appTheme === "nord") return nord;
   if (appTheme === "solarized-light" || appTheme === "light") return solarizedLight;
-  return githubDark;
+  // "dark" keeps its GitHub-dark feel; Midnight Ops (default) and "system"
+  // (which now means Midnight Ops) get the ops-bridge surface.
+  if (appTheme === "dark") return githubDark;
+  return midnightOps;
 }
 
 export function terminalThemeBackground(id: TerminalThemeId, appTheme: AppTheme): string {

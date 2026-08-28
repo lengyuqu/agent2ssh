@@ -418,7 +418,7 @@ export default function SettingsMenu({
 
       {open && (
         <div
-          className="absolute right-0 top-[calc(100%+8px)] z-50 grid max-h-[calc(100vh-80px)] w-[min(390px,calc(100vw-32px))] gap-3 overflow-y-auto rounded-xl border border-border bg-popover p-3.5 text-popover-foreground shadow-2xl max-md:left-0 max-md:right-auto"
+          className="absolute right-0 top-[calc(100%+8px)] z-50 grid max-h-[calc(100vh-80px)] w-[min(390px,calc(100vw-32px))] gap-3 overflow-y-auto rounded-xl border border-edge bg-popover p-3.5 text-popover-foreground max-md:left-0 max-md:right-auto"
           role="menu"
         >
           <div className="flex items-start justify-between gap-3 border-b border-border pb-2.5">

@@ -44,7 +44,7 @@ const RISK_COLOR: Record<RiskLevel, string> = {
 };
 
 function tooltipBoxCls() {
-  return "rounded-md border border-border bg-popover px-2.5 py-1.5 text-xs text-popover-foreground shadow-lg";
+  return "rounded-md border border-edge bg-popover px-2.5 py-1.5 text-xs text-popover-foreground";
 }
 
 function TrendTooltip({ active, payload, label }: { active?: boolean; payload?: Array<{ value: number }>; label?: string }) {
