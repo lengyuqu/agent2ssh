@@ -371,3 +371,24 @@
     background: color-mix(in srgb, var(--risk-low) 7%, transparent);
   }
 }
+
+/* v3 §3.6: toast entry slide. Gated behind prefers-reduced-motion so users
+   with the OS reduce-motion setting get an instant appearance instead. */
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@layer utilities {
+  @media (prefers-reduced-motion: no-preference) {
+    .toast-enter {
+      animation: toast-in 160ms ease-out;
+    }
+  }
+}
