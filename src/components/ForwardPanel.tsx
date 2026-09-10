@@ -12,8 +12,8 @@ import { Input } from "./ui/input";
 import { Select } from "./ui/select";
 import { EmptyState } from "./ui/state";
 import { useToast } from "./ui/toast";
-
-const labelCls = "grid gap-1.5 text-sm font-medium text-foreground/90";
+import { formatBytes } from "../lib/format";
+import { labelCls } from "../lib/ui-classes";
 
 type Props = {
   hosts: HostProfile[];
@@ -264,9 +264,3 @@ function isValidPort(port: number): boolean {
   return Number.isInteger(port) && port >= 1 && port <= 65535;
 }
 
-function formatBytes(value: number): string {
-  if (value < 1024) return `${value} B`;
-  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`;
-  if (value < 1024 * 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
-  return `${(value / (1024 * 1024 * 1024)).toFixed(1)} GiB`;
-}

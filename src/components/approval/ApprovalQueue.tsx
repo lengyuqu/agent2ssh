@@ -1,6 +1,7 @@
 import { useI18n } from "../../i18n";
 import type { RiskLevel } from "../../types";
 import { cn } from "../../lib/utils";
+import { formatClockTime } from "../../lib/format";
 
 type Props = {
   items: ApprovalRequestLite[];
@@ -24,12 +25,6 @@ const RISK_EDGE: Record<RiskLevel, string> = {
   high: "border-l-risk-high",
   blocked: "border-l-risk-high",
 };
-
-function formatTime(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleTimeString();
-}
 
 /** v3 3.1: the 250px pending queue. Selected card = canvas-2 + 2px risk-colored
  * left edge; unselected cards are dimmed to text-2. Cards are buttons so ↑↓
@@ -66,7 +61,7 @@ export default function ApprovalQueue({ items, selectedIndex, onSelect }: Props)
             <div className="flex items-center gap-2">
               <span className="truncate font-mono text-xs font-semibold">{item.host}</span>
               <span className="ml-auto shrink-0 font-mono text-[11px] text-faint">
-                {formatTime(item.requested_at)}
+                {formatClockTime(item.requested_at)}
               </span>
             </div>
             <code

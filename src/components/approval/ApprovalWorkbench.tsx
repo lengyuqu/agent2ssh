@@ -9,6 +9,7 @@ import { Badge } from "../ui/badge";
 import ApprovalDetail from "./ApprovalDetail";
 import ApprovalQueue from "./ApprovalQueue";
 import { cn } from "../../lib/utils";
+import { formatClockTime } from "../../lib/format";
 
 const HISTORY_POLL_MS = 10000;
 const STATS_POLL_MS = 30000;
@@ -257,7 +258,7 @@ export default function ApprovalWorkbench({ pending, onApprove, onReject, onGoEx
               {decidedToday.slice(0, DECIDED_RENDER_CAP).map((item) => (
                 <div key={item.id} className="flex items-center gap-2 text-xs">
                   <span className="font-mono text-[11px] text-faint">
-                    {new Date(item.requested_at).toLocaleTimeString()}
+                    {formatClockTime(item.requested_at)}
                   </span>
                   <span className="truncate font-mono font-semibold">{item.host}</span>
                   <code className="min-w-0 flex-1 truncate font-mono text-muted-foreground">

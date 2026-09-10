@@ -6,6 +6,7 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::app_state::app_state;
+use crate::store::glob_match;
 use crate::types::RiskLevel;
 
 /// Default TTL for approval requests in seconds (5 minutes).
@@ -740,42 +741,6 @@ fn risk_ordinal(level: RiskLevel) -> u8 {
         RiskLevel::High => 2,
         RiskLevel::Blocked => 3,
     }
-}
-
-/// Simple glob matching supporting `*` (zero or more characters) and `?`
-/// (exactly one character). Matching is case-insensitive.
-fn glob_match(pattern: &str, text: &str) -> bool {
-    let pattern: Vec<char> = pattern.to_lowercase().chars().collect();
-    let text: Vec<char> = text.to_lowercase().chars().collect();
-    glob_match_inner(&pattern, &text)
-}
-
-fn glob_match_inner(pattern: &[char], text: &[char]) -> bool {
-    let (mut pi, mut ti) = (0usize, 0usize);
-    let (mut star_pi, mut star_ti) = (usize::MAX, 0usize);
-
-    while ti < text.len() {
-        if pi < pattern.len() && (pattern[pi] == '?' || pattern[pi] == text[ti]) {
-            pi += 1;
-            ti += 1;
-        } else if pi < pattern.len() && pattern[pi] == '*' {
-            star_pi = pi;
-            star_ti = ti;
-            pi += 1;
-        } else if star_pi != usize::MAX {
-            pi = star_pi + 1;
-            star_ti += 1;
-            ti = star_ti;
-        } else {
-            return false;
-        }
-    }
-
-    while pi < pattern.len() && pattern[pi] == '*' {
-        pi += 1;
-    }
-
-    pi == pattern.len()
 }
 
 /// An approval policy rule that determines when approval is required.

@@ -11,8 +11,8 @@ use agent2ssh::embedded_ssh::{
 };
 use agent2ssh::events::subscribe_events;
 use agent2ssh::execution_control::{
-    append_rejected_exec_audit, authorize_command_with_approval, command_authorization_target,
-    expand_exec_authorization_targets, CommandAuthorizationError, CommandAuthorizationInput,
+    authorize_command_without_approval_handler, command_authorization_target,
+    expand_exec_authorization_targets, CommandAuthorizationError,
 };
 use agent2ssh::remote::{
     check_daemon_scope, check_daemon_version, diagnose_daemon, get_daemon, get_daemon_with_scope,
@@ -977,34 +977,18 @@ fn cli_host_tags(host: &str) -> Vec<String> {
 async fn authorize_local_exec_request(req: &mut ExecRequest) -> Result<RiskLevel> {
     let target = command_authorization_target(&req.host);
     let source = req.source.as_deref().unwrap_or("cli").to_string();
-    let auth_scope = None;
-    let result = authorize_command_with_approval(
-        CommandAuthorizationInput {
-            auth_scope: &auth_scope,
-            source: &source,
-            host: &req.host,
-            tags: &target.tags,
-            risk_override: target.risk_override,
-            command: &req.command,
-            force: req.force,
-            reason: req.reason.clone(),
-            change_id: req.change_id.clone(),
-            side_effect: req.side_effect.clone(),
-        },
-        |prompt| async move {
-            let message = "approval required but no local approval handler is available";
-            append_rejected_exec_audit(
-                &prompt.source,
-                &prompt.host,
-                &prompt.command,
-                prompt.risk,
-                message,
-                prompt.change_id.as_deref(),
-            );
-            Err(format!(
-                "{message}; run through the daemon approval flow or use --force when policy allows"
-            ))
-        },
+    let result = authorize_command_without_approval_handler(
+        &source,
+        &req.host,
+        &target.tags,
+        target.risk_override,
+        &req.command,
+        req.force,
+        req.reason.clone(),
+        req.change_id.clone(),
+        req.side_effect.clone(),
+        "approval required but no local approval handler is available",
+        "; run through the daemon approval flow or use --force when policy allows",
     )
     .await
     .map_err(command_authorization_error)?;
@@ -1024,36 +1008,20 @@ async fn authorize_local_exec_targets(
     source: &str,
 ) -> Result<Vec<String>> {
     let targets = expand_exec_authorization_targets(hosts, tags)?;
-    let auth_scope = None;
     let mut approved_hosts = Vec::new();
     for target in targets {
-        let result = authorize_command_with_approval(
-            CommandAuthorizationInput {
-                auth_scope: &auth_scope,
-                source,
-                host: &target.host,
-                tags: &target.tags,
-                risk_override: target.risk_override,
-                command,
-                force,
-                reason: reason.clone(),
-                change_id: change_id.clone(),
-                side_effect: None,
-            },
-            |prompt| async move {
-                let message = "approval required but no local approval handler is available";
-                append_rejected_exec_audit(
-                    &prompt.source,
-                    &prompt.host,
-                    &prompt.command,
-                    prompt.risk,
-                    message,
-                    prompt.change_id.as_deref(),
-                );
-                Err(format!(
-                    "{message}; run through the daemon approval flow or use --force when policy allows"
-                ))
-            },
+        let result = authorize_command_without_approval_handler(
+            source,
+            &target.host,
+            &target.tags,
+            target.risk_override,
+            command,
+            force,
+            reason.clone(),
+            change_id.clone(),
+            None,
+            "approval required but no local approval handler is available",
+            "; run through the daemon approval flow or use --force when policy allows",
         )
         .await
         .map_err(command_authorization_error)?;
@@ -1080,37 +1048,21 @@ async fn authorize_local_playbook_run(
         .find(|item| item.name == playbook)
         .and_then(|item| item.risk_override);
     let risk_override = playbook_risk_override.or(target.risk_override);
-    let auth_scope = None;
     let mut approved_steps = Vec::new();
 
     for step in dry_run.steps {
-        let result = authorize_command_with_approval(
-            CommandAuthorizationInput {
-                auth_scope: &auth_scope,
-                source,
-                host,
-                tags: &target.tags,
-                risk_override,
-                command: &step.command_resolved,
-                force,
-                reason: reason.clone(),
-                change_id: change_id.clone(),
-                side_effect: None,
-            },
-            |prompt| async move {
-                let message = "approval required but no local approval handler is available";
-                append_rejected_exec_audit(
-                    &prompt.source,
-                    &prompt.host,
-                    &prompt.command,
-                    prompt.risk,
-                    message,
-                    prompt.change_id.as_deref(),
-                );
-                Err(format!(
-                    "{message}; run through the daemon approval flow or use --force when policy allows"
-                ))
-            },
+        let result = authorize_command_without_approval_handler(
+            source,
+            host,
+            &target.tags,
+            risk_override,
+            &step.command_resolved,
+            force,
+            reason.clone(),
+            change_id.clone(),
+            None,
+            "approval required but no local approval handler is available",
+            "; run through the daemon approval flow or use --force when policy allows",
         )
         .await
         .map_err(command_authorization_error)?;
@@ -1129,34 +1081,18 @@ async fn authorize_local_operation(
     source: &str,
 ) -> Result<()> {
     let target = command_authorization_target(host);
-    let auth_scope = None;
-    authorize_command_with_approval(
-        CommandAuthorizationInput {
-            auth_scope: &auth_scope,
-            source,
-            host,
-            tags: &target.tags,
-            risk_override: target.risk_override,
-            command,
-            force,
-            reason: None,
-            change_id: None,
-            side_effect: None,
-        },
-        |prompt| async move {
-            let message = "approval required but no local approval handler is available";
-            append_rejected_exec_audit(
-                &prompt.source,
-                &prompt.host,
-                &prompt.command,
-                prompt.risk,
-                message,
-                prompt.change_id.as_deref(),
-            );
-            Err(format!(
-                "{message}; run through the daemon approval flow or use --force when policy allows"
-            ))
-        },
+    authorize_command_without_approval_handler(
+        source,
+        host,
+        &target.tags,
+        target.risk_override,
+        command,
+        force,
+        None,
+        None,
+        None,
+        "approval required but no local approval handler is available",
+        "; run through the daemon approval flow or use --force when policy allows",
     )
     .await
     .map_err(command_authorization_error)?;

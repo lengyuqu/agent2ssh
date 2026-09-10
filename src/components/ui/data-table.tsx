@@ -1,6 +1,6 @@
 import { ChevronDown, ChevronUp, ChevronsUpDown, Columns3 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
-import type { Table } from "@tanstack/react-table";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { flexRender, type ColumnDef, type Row, type Table } from "@tanstack/react-table";
 import { IconButton } from "./icon-button";
 
 /** V3-3: small shared bits for TanStack-Table-backed lists (HostList, AuditPanel). */
@@ -49,6 +49,104 @@ export function ColumnVisibilityMenu<T>({ table, label }: { table: Table<T>; lab
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+/** Shared row-selection display column: header select-all (indeterminate) + per-row checkbox. */
+export function selectColumn<T>(
+  options: { size?: number; stopRowClick?: boolean } = {}
+): ColumnDef<T, unknown> {
+  const { size = 28, stopRowClick = false } = options;
+  return {
+    id: "select",
+    size,
+    header: ({ table }) => (
+      <input
+        type="checkbox"
+        className="size-4 accent-primary"
+        checked={table.getIsAllRowsSelected()}
+        ref={(el) => {
+          if (el) el.indeterminate = table.getIsSomeRowsSelected() && !table.getIsAllRowsSelected();
+        }}
+        onChange={table.getToggleAllRowsSelectedHandler()}
+      />
+    ),
+    cell: ({ row }) => (
+      <input
+        type="checkbox"
+        className="size-4 accent-primary"
+        checked={row.getIsSelected()}
+        onChange={row.getToggleSelectedHandler()}
+        onClick={stopRowClick ? (event) => event.stopPropagation() : undefined}
+      />
+    ),
+    enableSorting: false,
+    enableHiding: false,
+  };
+}
+
+/** Shared sortable table skeleton (header row + body rows) used by HostList / AuditPanel. */
+export function DataTable<T>({
+  table,
+  rows,
+  minWidth = 560,
+  wrapperClassName = "overflow-x-auto",
+  rowClassName,
+  onRowClick,
+  footer,
+}: {
+  table: Table<T>;
+  rows?: Row<T>[];
+  minWidth?: number;
+  wrapperClassName?: string;
+  rowClassName?: (row: Row<T>) => string;
+  onRowClick?: (row: Row<T>) => void;
+  footer?: ReactNode;
+}) {
+  const bodyRows = rows ?? table.getRowModel().rows;
+  return (
+    <div className={wrapperClassName}>
+      <table className="w-full border-collapse text-sm" style={{ minWidth }}>
+        <thead>
+          {table.getHeaderGroups().map((headerGroup) => (
+            <tr key={headerGroup.id} className="border-b border-border text-left">
+              {headerGroup.headers.map((header) => (
+                <th key={header.id} className="px-2 py-1.5 font-medium text-muted-foreground">
+                  {header.isPlaceholder ? null : header.column.getCanSort() ? (
+                    <button
+                      type="button"
+                      className="flex items-center gap-1 hover:text-foreground"
+                      onClick={header.column.getToggleSortingHandler()}
+                    >
+                      {flexRender(header.column.columnDef.header, header.getContext())}
+                      <SortIcon direction={header.column.getIsSorted()} />
+                    </button>
+                  ) : (
+                    flexRender(header.column.columnDef.header, header.getContext())
+                  )}
+                </th>
+              ))}
+            </tr>
+          ))}
+        </thead>
+        <tbody>
+          {bodyRows.map((row) => (
+            <tr
+              key={row.id}
+              onClick={onRowClick ? () => onRowClick(row) : undefined}
+              className={rowClassName ? rowClassName(row) : undefined}
+            >
+              {row.getVisibleCells().map((cell) => (
+                <td key={cell.id} className="px-2 py-2 align-middle">
+                  {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {footer}
     </div>
   );
 }

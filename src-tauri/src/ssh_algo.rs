@@ -135,6 +135,10 @@ pub fn load_algo_prefs() -> Option<SshAlgoPrefs> {
 }
 
 /// Save algorithm preferences to the config file.
+// TODO(unwired): asymmetric with `load_algo_prefs` above — preferences are read
+// at connect time but nothing ever writes them, so `ssh_algos.json` is never
+// created by the app. Either wire this up to a settings surface or delete both
+// halves; do not leave the read path silently depending on a file nothing writes.
 pub fn save_algo_prefs(prefs: &SshAlgoPrefs) -> Result<()> {
     crate::store::ensure_config_dir()?;
     let path = crate::store::config_dir()?.join("ssh_algos.json");

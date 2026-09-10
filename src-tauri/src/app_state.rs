@@ -310,6 +310,9 @@ impl Host {
     /// Emit an event through the internal event bus (all transports).
     /// This is the common path for events that should be observable
     /// regardless of transport — the bus was already used by `events.rs`.
+    // TODO(unwired): no caller in the repository — `events.rs` publishes through
+    // `crate::events::publish_event` directly. Kept pending a decision on whether
+    // AppState should be the single entry point for bus emission.
     pub fn emit_bus(&self, event_type: crate::events::EventType, data: serde_json::Value) {
         crate::events::publish_event(event_type, data);
     }
@@ -332,11 +335,14 @@ impl Host {
     }
 
     /// Check if this host is the headless (daemon) variant.
+    // TODO(unwired): no caller in the repository. `transport_source` /
+    // `is_desktop` cover the call sites that exist today.
     pub fn is_headless(&self) -> bool {
         matches!(self, Host::Headless { .. })
     }
 
     /// Check if this host is the CLI variant.
+    // TODO(unwired): no caller in the repository (same as `is_headless`).
     pub fn is_cli(&self) -> bool {
         matches!(self, Host::Cli)
     }

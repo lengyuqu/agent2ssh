@@ -7,6 +7,7 @@ import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
 import { useToast } from "./ui/toast";
+import { confirmDialog } from "./ui/dialog";
 
 const chipCls = "max-w-full truncate rounded bg-muted px-1.5 py-1 text-xs text-muted-foreground";
 
@@ -82,7 +83,12 @@ export default function McpAgentsPanel() {
   }
 
   async function uninstallSkill() {
-    if (!window.confirm(t("Remove the installed agent skill?"))) return;
+    const ok = await confirmDialog({
+      title: t("Remove the installed agent skill?"),
+      confirmLabel: t("Uninstall"),
+      danger: true,
+    });
+    if (!ok) return;
     setSkillBusy(true);
     try {
       const status = await api.uninstallAgentSkill();
@@ -115,11 +121,13 @@ export default function McpAgentsPanel() {
   }
 
   async function uninstall(agent: McpAgentConfigStatus) {
-    const confirmed = window.confirm(
-      t("Remove the Agent2SSH MCP binding from {name}? Restart that agent client afterward.", {
+    const confirmed = await confirmDialog({
+      title: t("Remove the Agent2SSH MCP binding from {name}? Restart that agent client afterward.", {
         name: agent.name,
-      })
-    );
+      }),
+      confirmLabel: t("Uninstall"),
+      danger: true,
+    });
     if (!confirmed) return;
     setUninstalling(agent.id);
     try {

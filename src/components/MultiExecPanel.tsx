@@ -2,6 +2,7 @@ import { Play, Server } from "lucide-react";
 import { useState } from "react";
 import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
+import { labelCls } from "../lib/ui-classes";
 import type { ExecMultiResult, HostProfile } from "../types";
 import HostDiffView from "./HostDiffView";
 import RiskBadge from "./RiskBadge";
@@ -11,8 +12,6 @@ import { Input } from "./ui/input";
 import { Textarea } from "./ui/textarea";
 import { useToast } from "./ui/toast";
 import { cn } from "../lib/utils";
-
-const labelCls = "grid gap-1.5 text-sm font-medium text-foreground/90";
 
 type Props = {
   hosts: HostProfile[];

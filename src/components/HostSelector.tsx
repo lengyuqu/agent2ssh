@@ -1,6 +1,7 @@
 import { Server } from "lucide-react";
 import { useEffect } from "react";
 import { useI18n } from "../i18n";
+import { labelCls } from "../lib/ui-classes";
 import type { HostProfile } from "../types";
 import { Select } from "./ui/select";
 
@@ -11,8 +12,6 @@ type Props = {
   label?: string;
   disabled?: boolean;
 };
-
-const labelCls = "grid gap-1.5 text-sm font-medium text-foreground/90";
 
 function describeHost(host: HostProfile): string {
   const endpoint = `${host.user ? `${host.user}@` : ""}${host.host}:${host.port ?? 22}`;

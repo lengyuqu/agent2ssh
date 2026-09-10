@@ -61,7 +61,7 @@ import SetupWizard from "./components/SetupWizard";
 import SyncPanel from "./components/SyncPanel";
 import TopBar from "./components/TopBar";
 import { Button } from "./components/ui/button";
-import { Dialog } from "./components/ui/dialog";
+import { ConfirmHost, Dialog } from "./components/ui/dialog";
 import { IconButton } from "./components/ui/icon-button";
 import { useToast } from "./components/ui/toast";
 import { useAgentEvents } from "./eventsBus";
@@ -1240,6 +1240,8 @@ export default function App() {
         command={terminalDrawer?.command ?? null}
         onClose={() => setTerminalDrawer(null)}
       />
+
+      <ConfirmHost />
     </div>
   );
 }

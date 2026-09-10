@@ -19,6 +19,7 @@ import { lazy, Suspense, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
+import { labelCls } from "../lib/ui-classes";
 import type { HostProfile, LocalDirListing } from "../types";
 import HostSelector from "./HostSelector";
 import { Button } from "./ui/button";
@@ -31,8 +32,6 @@ import { useToast } from "./ui/toast";
 // V3-1: Monaco is a large dependency (see src/lib/monacoSetup.ts) — deferred
 // to its own chunk and only fetched the first time a preview is opened.
 const FilePreview = lazy(() => import("./FilePreview"));
-
-const labelCls = "grid gap-1.5 text-sm font-medium text-foreground/90";
 
 type Side = "left" | "right";
 type LocationKind = "remote" | "local";

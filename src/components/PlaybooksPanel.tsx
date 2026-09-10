@@ -27,6 +27,7 @@ import { Select } from "./ui/select";
 import { Textarea } from "./ui/textarea";
 import { EmptyState } from "./ui/state";
 import { useToast } from "./ui/toast";
+import { confirmDialog } from "./ui/dialog";
 import { cn } from "../lib/utils";
 
 type Props = {
@@ -281,7 +282,12 @@ export default function PlaybooksPanel({ hosts }: Props) {
   }
 
   async function handleDelete(playbook: Playbook) {
-    if (!window.confirm(t("Delete playbook {name}?", { name: playbook.name }))) return;
+    const ok = await confirmDialog({
+      title: t("Delete playbook {name}?", { name: playbook.name }),
+      confirmLabel: t("Delete"),
+      danger: true,
+    });
+    if (!ok) return;
     try {
       await api.deletePlaybook(playbook.name);
       if (selectedPlaybook === playbook.name) setSelectedPlaybook(null);

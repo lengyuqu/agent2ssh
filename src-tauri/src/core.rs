@@ -14,7 +14,9 @@ pub use team_config::*;
 
 use crate::{
     embedded_ssh::connect_embedded_ssh,
+    path_resolver::expand_tilde,
     sanitize::{analyze_command, split_commands, ShapeRisk},
+    session::resolve_host,
     store::{append_audit, list_audit_raw, load_config, save_config_unlocked, store_write_lock},
     types::{
         default_host_group, source_from_env, AuditEntry, AuditFilter, BatchStrategy,
@@ -1624,33 +1626,11 @@ fn validate_host(host: &HostProfile) -> Result<()> {
     Ok(())
 }
 
-fn resolve_host(name: &str) -> Result<HostProfile> {
-    load_config()?
-        .hosts
-        .into_iter()
-        .find(|host| host.name == name)
-        .ok_or_else(|| anyhow!("unknown host profile: {name}"))
-}
-
 fn ssh_target(host: &HostProfile) -> String {
     match &host.user {
         Some(user) if !user.trim().is_empty() => format!("{user}@{}", host.host),
         _ => host.host.clone(),
     }
-}
-
-fn expand_tilde(path: &str) -> String {
-    if path == "~" {
-        return dirs::home_dir()
-            .map(|home| home.display().to_string())
-            .unwrap_or_else(|| path.to_string());
-    }
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest).display().to_string();
-        }
-    }
-    path.to_string()
 }
 
 pub async fn sftp_upload_core(request: SftpUploadRequest) -> Result<SftpResult> {
@@ -2288,6 +2268,19 @@ pub async fn sftp_mkdir_core_with_source(
     )
     .await
 }
+
+// TODO(unwired): The SFTP rename/remove cluster below is fully implemented but
+// currently unreachable — no `#[tauri::command]` wrapper is registered for it
+// (see `tauri_commands.rs`) and no CLI/MCP/daemon surface calls it either, so
+// nothing in the repository invokes any of these eight functions:
+//   sftp_rename_core / sftp_rename_core_with_source
+//   sftp_remove_file_core / sftp_remove_file_core_with_source
+//   sftp_remove_dir_core / sftp_remove_dir_core_with_source
+//   sftp_remove_dir_all_core / sftp_remove_dir_all_core_with_source
+// Kept (not deleted) pending a product decision on whether remote rename/delete
+// ships. If it does not, delete the whole block; if it does, wire it up through
+// `tauri_commands.rs` and the frontend and drop this note.
+// The `_with_source` variants are only reachable from their `_core` wrappers.
 
 /// Finding 3: SFTP rename — rename a remote file or directory.
 pub async fn sftp_rename_core(

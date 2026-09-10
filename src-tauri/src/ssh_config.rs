@@ -17,6 +17,7 @@
 //! - Cycle detection: canonicalized paths in a DFS chain.
 //! - Missing files / empty globs are silently skipped (OpenSSH behavior).
 
+use crate::path_resolver::expand_tilde;
 use std::path::{Path, PathBuf};
 
 /// Maximum `Include` nesting depth — matches OpenSSH's `MAX_INCLUDE_DEPTH`.
@@ -232,15 +233,6 @@ fn char_class_match(class: &[u8], c: u8) -> bool {
 /// back to themselves (they failed read_to_string anyway).
 fn canonical(p: &Path) -> PathBuf {
     std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
-}
-
-fn expand_tilde(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest).to_string_lossy().to_string();
-        }
-    }
-    path.to_string()
 }
 
 #[cfg(test)]

@@ -2,7 +2,6 @@ import { Clipboard, History, RefreshCw, RotateCcw, SlidersHorizontal } from "luc
 import { useMemo, useState } from "react";
 import {
   createColumnHelper,
-  flexRender,
   getCoreRowModel,
   getSortedRowModel,
   useReactTable,
@@ -14,15 +13,15 @@ import type { AuditEntry, AuditFilter, RiskLevel } from "../types";
 import RiskBadge from "./RiskBadge";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
-import { ColumnVisibilityMenu, SortIcon } from "./ui/data-table";
+import { ColumnVisibilityMenu, DataTable, selectColumn } from "./ui/data-table";
 import { IconButton } from "./ui/icon-button";
 import { Input } from "./ui/input";
 import { Select } from "./ui/select";
 import { EmptyState } from "./ui/state";
 import { useToast } from "./ui/toast";
 import { cn } from "../lib/utils";
-
-const labelCls = "grid gap-1.5 text-sm font-medium text-foreground/90";
+import { formatDateTime } from "../lib/format";
+import { labelCls } from "../lib/ui-classes";
 
 // v3: result three-state — approved/executed ok = low green, failed = high red,
 // no exit recorded (auto/blocked paths) = text-3 faint.
@@ -106,36 +105,12 @@ export default function AuditPanel({ audit, onRefresh, onReplay }: Props) {
 
   const columns = useMemo(
     () => [
-      columnHelper.display({
-        id: "select",
-        size: 28,
-        header: ({ table }) => (
-          <input
-            type="checkbox"
-            className="size-4 accent-primary"
-            checked={table.getIsAllRowsSelected()}
-            ref={(el) => {
-              if (el) el.indeterminate = table.getIsSomeRowsSelected() && !table.getIsAllRowsSelected();
-            }}
-            onChange={table.getToggleAllRowsSelectedHandler()}
-          />
-        ),
-        cell: ({ row }) => (
-          <input
-            type="checkbox"
-            className="size-4 accent-primary"
-            checked={row.getIsSelected()}
-            onChange={row.getToggleSelectedHandler()}
-          />
-        ),
-        enableSorting: false,
-        enableHiding: false,
-      }),
+      selectColumn<AuditEntry>({ size: 28 }),
       columnHelper.accessor("ts", {
         header: t("time"),
         cell: (info) => (
           <span className="font-mono text-xs text-faint">
-            {new Date(info.getValue()).toLocaleString()}
+            {formatDateTime(info.getValue())}
           </span>
         ),
       }),
@@ -351,59 +326,29 @@ export default function AuditPanel({ audit, onRefresh, onReplay }: Props) {
       {audit.length === 0 ? (
         <EmptyState icon={History} title={t("No commands executed yet")} />
       ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[640px] border-collapse text-sm">
-            <thead>
-              {table.getHeaderGroups().map((headerGroup) => (
-                <tr key={headerGroup.id} className="border-b border-border text-left">
-                  {headerGroup.headers.map((header) => (
-                    <th key={header.id} className="px-2 py-1.5 font-medium text-muted-foreground">
-                      {header.isPlaceholder ? null : header.column.getCanSort() ? (
-                        <button
-                          type="button"
-                          className="flex items-center gap-1 hover:text-foreground"
-                          onClick={header.column.getToggleSortingHandler()}
-                        >
-                          {flexRender(header.column.columnDef.header, header.getContext())}
-                          <SortIcon direction={header.column.getIsSorted()} />
-                        </button>
-                      ) : (
-                        flexRender(header.column.columnDef.header, header.getContext())
-                      )}
-                    </th>
-                  ))}
-                </tr>
-              ))}
-            </thead>
-            <tbody>
-              {rows.slice(0, renderCap).map((row) => (
-                <tr
-                  key={row.id}
-                  className={cn(
-                    "border-t border-border",
-                    row.original.risk_level === "high" && "bg-risk-high/5",
-                    row.original.risk_level === "blocked" && "bg-risk-high/5"
-                  )}
-                >
-                  {row.getVisibleCells().map((cell) => (
-                    <td key={cell.id} className="px-2 py-2 align-middle">
-                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {rows.length > renderCap && (
-            <button
-              type="button"
-              onClick={() => setRenderCap((c) => c + RENDER_CAP_STEP)}
-              className="w-full border-t border-border pt-2 text-center text-xs text-muted-foreground hover:text-foreground"
-            >
-              {t("Show more ({count} hidden)", { count: rows.length - renderCap })}
-            </button>
-          )}
-        </div>
+        <DataTable
+          table={table}
+          rows={rows.slice(0, renderCap)}
+          minWidth={640}
+          rowClassName={(row) =>
+            cn(
+              "border-t border-border",
+              (row.original.risk_level === "high" || row.original.risk_level === "blocked") &&
+                "bg-risk-high/5"
+            )
+          }
+          footer={
+            rows.length > renderCap ? (
+              <button
+                type="button"
+                onClick={() => setRenderCap((c) => c + RENDER_CAP_STEP)}
+                className="w-full border-t border-border pt-2 text-center text-xs text-muted-foreground hover:text-foreground"
+              >
+                {t("Show more ({count} hidden)", { count: rows.length - renderCap })}
+              </button>
+            ) : null
+          }
+        />
       )}
     </Card>
   );

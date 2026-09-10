@@ -12,10 +12,8 @@ use tokio::sync::{watch, Mutex};
 use uuid::Uuid;
 
 use crate::{
-    app_state::app_state,
-    embedded_ssh::connect_embedded_ssh,
-    store::load_config,
-    types::{ConnectionStatus, HostProfile},
+    app_state::app_state, embedded_ssh::connect_embedded_ssh, session::resolve_host,
+    store::load_config, types::ConnectionStatus,
 };
 
 /// How often the supervisor probes each retained connection's liveness (K5).
@@ -95,14 +93,6 @@ async fn per_host_lock(host_name: &str) -> Arc<Mutex<()>> {
     map.entry(host_name.to_string())
         .or_insert_with(|| Arc::new(Mutex::new(())))
         .clone()
-}
-
-fn resolve_host(host_name: &str) -> Result<HostProfile> {
-    load_config()?
-        .hosts
-        .into_iter()
-        .find(|host| host.name == host_name)
-        .ok_or_else(|| anyhow!("unknown host profile: {host_name}"))
 }
 
 /// Apply libssh2 keepalive settings to a freshly established session.

@@ -21,23 +21,27 @@ const REMOTE_VERSIONS_DIR: &str = "versions";
 const SYNC_MARKER_CLIENT_VERSION: &str = "redacted";
 const CURRENT_SYNC_SCHEMA: u32 = 2;
 
-/// Files that are safe and useful to move across machines. This intentionally
-/// excludes local SSH trust state, daemon tokens, audit/log data, private SSH
-/// keys, and remote daemon token registries.
+/// Files that are safe and useful to move across machines.
+///
+/// This intentionally excludes local SSH trust state, daemon tokens, audit/log
+/// data, private SSH keys, remote daemon token registries, and — by explicit
+/// product decision — the credential and local-only state files
+/// `secrets.enc`, `snippets.json`, and `approval_policies.toml`.
+///
+/// This is the **single** portable-configuration file list for the whole crate:
+/// the desktop JSON-blob WebDAV sync in `tauri_commands.rs` previously kept a
+/// second, already-diverged copy (`WEBDAV_SYNC_FILES`); it now reads this one.
 pub const SYNCABLE_FILES: &[&str] = &[
     "hosts.json",
-    "secrets.enc",
+    "playbooks.toml",
+    "risk_rules.toml",
     "policy.toml",
     "policy.json",
-    "risk_rules.toml",
-    "approval_policies.toml",
     "execution_limits.toml",
     "anomaly.toml",
-    "playbooks.toml",
-    "snippets.json",
+    "webhook.toml",
+    "app_preferences.json",
 ];
-
-const LEGACY_UNSYNCABLE_REMOTE_FILES: &[&str] = &["known_hosts.json"];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebDavSyncFile {
@@ -647,19 +651,6 @@ pub fn collect_sync_files() -> Result<Vec<WebDavSyncFile>> {
             continue;
         }
 
-        // T1-4: Use CiphertextStore for secrets.enc to enforce read-only access
-        // at the type level — the sync fingerprint path must never write secrets.
-        if *rel == "secrets.enc" {
-            let store = crate::secrets::CiphertextStore::load()?;
-            let bytes = store.raw_bytes();
-            files.push(WebDavSyncFile {
-                path: (*rel).to_string(),
-                bytes: bytes.len() as u64,
-                sha256: hash_bytes(bytes),
-            });
-            continue;
-        }
-
         let bytes =
             fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
         files.push(WebDavSyncFile {
@@ -672,18 +663,19 @@ pub fn collect_sync_files() -> Result<Vec<WebDavSyncFile>> {
     Ok(files)
 }
 
+/// A remote marker may only reference files we know how to sync.
+///
+/// Files dropped from [`SYNCABLE_FILES`] (`known_hosts.json`, `secrets.enc`,
+/// `snippets.json`, `approval_policies.toml`) are rejected here; a pre-existing
+/// remote marker that still lists them must be migrated rather than trusted.
 fn validate_remote_file(path: &str) -> Result<()> {
-    if SYNCABLE_FILES.contains(&path) || is_legacy_unsyncable_remote_file(path) {
+    if SYNCABLE_FILES.contains(&path) {
         Ok(())
     } else {
         Err(anyhow!(
             "remote marker contains unsupported sync file: {path}"
         ))
     }
-}
-
-fn is_legacy_unsyncable_remote_file(path: &str) -> bool {
-    LEGACY_UNSYNCABLE_REMOTE_FILES.contains(&path)
 }
 
 /// `label` is a free-form note for humans browsing the backups directory (e.g.
@@ -1090,12 +1082,7 @@ async fn sync_pull<R: SyncRemote>(
     for file in &remote_marker.files {
         validate_remote_file(&file.path)?;
     }
-    let applied_files: Vec<WebDavSyncFile> = remote_marker
-        .files
-        .iter()
-        .filter(|file| !is_legacy_unsyncable_remote_file(&file.path))
-        .cloned()
-        .collect();
+    let applied_files: Vec<WebDavSyncFile> = remote_marker.files.clone();
 
     let local_marker = load_local_sync_marker()?;
     let local_digest = current_portable_config_digest()?;
@@ -1165,11 +1152,6 @@ async fn sync_pull<R: SyncRemote>(
     }
 
     for rel in SYNCABLE_FILES {
-        // Schema v1 predates snippets. Absence in an old manifest means the
-        // old client did not know about the file, not that the user deleted it.
-        if remote_marker.schema_version == 1 && *rel == "snippets.json" {
-            continue;
-        }
         if remote_paths.contains(*rel) {
             continue;
         }
@@ -1464,7 +1446,10 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
-    async fn legacy_pull_preserves_snippets_missing_from_old_manifest() {
+    async fn pull_preserves_files_outside_the_sync_set() {
+        // Files that are not in `SYNCABLE_FILES` are never stale-removed by a
+        // pull, regardless of whether they are missing from the remote marker.
+        // `snippets.json` and `approval_policies.toml` are local-only by design.
         let dir = std::env::temp_dir().join(format!(
             "agent2ssh-sync-legacy-pull-{}",
             uuid::Uuid::new_v4()
@@ -1472,6 +1457,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         std::env::set_var("AGENT2SSH_CONFIG_DIR", &dir);
         fs::write(dir.join("snippets.json"), r#"[{"name":"keep"}]"#).unwrap();
+        fs::write(dir.join("approval_policies.toml"), "# keep me\n").unwrap();
 
         let host_bytes = b"{\"hosts\":[]}".to_vec();
         let legacy = WebDavSyncMarker {
@@ -1493,6 +1479,10 @@ mod tests {
         assert_eq!(
             fs::read_to_string(dir.join("snippets.json")).unwrap(),
             r#"[{"name":"keep"}]"#
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join("approval_policies.toml")).unwrap(),
+            "# keep me\n"
         );
 
         std::env::remove_var("AGENT2SSH_CONFIG_DIR");
@@ -1553,12 +1543,18 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn collect_sync_files_excludes_local_tokens_logs_and_keys() {
+    fn collect_sync_files_includes_syncable_set_and_excludes_local_state() {
         let dir = std::env::temp_dir().join(format!("agent2ssh-sync-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(dir.join("keys")).unwrap();
         std::env::set_var("AGENT2SSH_CONFIG_DIR", &dir);
         fs::write(dir.join("hosts.json"), "{}").unwrap();
+        // `webhook.toml` is part of the sync set and must be collected.
+        fs::write(dir.join("webhook.toml"), "[hook]\n").unwrap();
+        // Dropped from the sync set — must no longer be collected.
         fs::write(dir.join("secrets.enc"), "encrypted").unwrap();
+        fs::write(dir.join("snippets.json"), "[]").unwrap();
+        fs::write(dir.join("approval_policies.toml"), "").unwrap();
+        // Never syncable.
         fs::write(dir.join("known_hosts.json"), "{}").unwrap();
         fs::write(dir.join("daemon.token"), "local-token").unwrap();
         fs::write(dir.join("audit.jsonl"), "{}\n").unwrap();
@@ -1567,7 +1563,10 @@ mod tests {
         let files = collect_sync_files().unwrap();
         let names: Vec<_> = files.iter().map(|file| file.path.as_str()).collect();
         assert!(names.contains(&"hosts.json"));
-        assert!(names.contains(&"secrets.enc"));
+        assert!(names.contains(&"webhook.toml"));
+        assert!(!names.contains(&"secrets.enc"));
+        assert!(!names.contains(&"snippets.json"));
+        assert!(!names.contains(&"approval_policies.toml"));
         assert!(!names.contains(&"known_hosts.json"));
         assert!(!names.contains(&"daemon.token"));
         assert!(!names.contains(&"audit.jsonl"));
@@ -1610,10 +1609,17 @@ mod tests {
     }
 
     #[test]
-    fn remote_validation_allows_legacy_known_hosts_but_rejects_unknown_files() {
-        validate_remote_file("known_hosts.json").unwrap();
+    fn remote_validation_accepts_syncable_files_and_rejects_unknown_ones() {
         validate_remote_file("hosts.json").unwrap();
+        validate_remote_file("webhook.toml").unwrap();
         assert!(validate_remote_file("daemon.token").is_err());
+        // `known_hosts.json` was never syncable; `secrets.enc`, `snippets.json`,
+        // and `approval_policies.toml` were dropped from the sync set. All four
+        // must be rejected so a stale remote marker cannot smuggle them in.
+        assert!(validate_remote_file("known_hosts.json").is_err());
+        assert!(validate_remote_file("secrets.enc").is_err());
+        assert!(validate_remote_file("snippets.json").is_err());
+        assert!(validate_remote_file("approval_policies.toml").is_err());
     }
 
     #[test]

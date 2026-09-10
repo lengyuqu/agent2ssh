@@ -314,28 +314,62 @@ fn host_risk_override(host: &str) -> Option<RiskLevel> {
     command_authorization_target(host).risk_override
 }
 
-fn append_operation_audit(
-    source: &str,
-    host: &str,
-    command: &str,
+/// Outcome of the shared daemon pre-execution gate chain.
+struct PreflightResult {
+    /// Transport-derived source, reused by the caller for its audit entry.
+    source: String,
     risk: RiskLevel,
-    exit_code: Option<i32>,
-    duration_ms: u128,
-    reason: Option<&str>,
-) {
-    let result = ExecResult {
-        host: host.to_string(),
-        command: command.to_string(),
-        exit_code,
-        stdout: String::new(),
-        stderr: reason.unwrap_or_default().to_string(),
-        duration_ms,
-        risk_level: risk,
-        truncated: false,
-        dropped_bytes: 0,
-        side_effect: None,
-    };
-    let _ = append_audit(&result, risk, reason, None, Some(source));
+    /// Whether the command was pre-approved (e.g. by an approval policy).
+    /// TODO(dedup): 目前无调用方消费该字段；保留以对齐 authorize_command 的返回语义，待有消费方时移除 #[allow(dead_code)]。
+    #[allow(dead_code)]
+    approved: bool,
+}
+
+/// Run the gate chain every single-host mutating daemon handler shares:
+/// execution-gate check, rate-limit check, and scope/risk authorization.
+/// The caller is responsible for incrementing `REQUEST_COUNT` at the handler
+/// entry (consistent with the other ~52 daemon handlers) before invoking this;
+/// this helper only performs the gate checks. The caller computes `source`
+/// itself (via `source_from_transport()` or `source_or_env_for_request(...)?`)
+/// and passes it in, preserving its own source-resolution and `?`-error-
+/// propagation path.
+///
+/// Handlers with multi-host targets, multi-step authorization loops, or those
+/// needing an extra pre-authorization check (e.g. `check_daemon_scope`) between
+/// the rate-limit and authorize steps, must keep the chain inline instead.
+#[allow(clippy::too_many_arguments)]
+async fn preflight_guarded_request(
+    state: &AppState,
+    auth: &AuthContext,
+    host: &str,
+    tags: Vec<String>,
+    source: String,
+    command: &str,
+    risk_override: Option<RiskLevel>,
+    force: bool,
+    reason: Option<String>,
+    change_id: Option<String>,
+) -> Result<PreflightResult, (StatusCode, Json<ErrorBody>)> {
+    reject_if_gate_paused(&source, host, command)?;
+    let targets = vec![(host.to_string(), tags)];
+    reject_if_rate_limited(state, &source, &targets, command).await?;
+    let (risk, approved) = authorize_command(
+        &auth.scope,
+        &source,
+        host,
+        &targets[0].1,
+        risk_override,
+        command,
+        force,
+        reason,
+        change_id,
+    )
+    .await?;
+    Ok(PreflightResult {
+        source,
+        risk,
+        approved,
+    })
 }
 
 fn split_completed_session_commands(pending: &str, input: &str) -> (Vec<String>, String) {
@@ -1055,30 +1089,22 @@ async fn exec(
     let source = source_or_env_for_request(req.source.clone(), "daemon")?;
     req.source = Some(source.clone());
     ensure_command_length(&req.command)?;
-    reject_if_gate_paused(&source, &req.host, &req.command)?;
-    let targets = vec![(req.host.clone(), host_tags(&req.host))];
-    reject_if_rate_limited(&s, &source, &targets, &req.command).await?;
-    tracing::info!(host = %req.host, command = %req.command, "exec handler invoked");
-
-    let exec_start = Instant::now();
-
-    let tags = targets
-        .first()
-        .map(|(_, tags)| tags.clone())
-        .unwrap_or_default();
-    let (risk, approved) = authorize_command(
-        &auth.scope,
-        &source,
+    let pf = preflight_guarded_request(
+        &s,
+        &auth,
         &req.host,
-        &tags,
-        None,
+        host_tags(&req.host),
+        source,
         &req.command,
+        None,
         req.force,
         req.reason.clone(),
         req.change_id.clone(),
     )
     .await?;
-    if approved && risk == RiskLevel::High {
+    tracing::info!(host = %req.host, command = %req.command, "exec handler invoked");
+    let exec_start = Instant::now();
+    if pf.approved && pf.risk == RiskLevel::High {
         req.force = true;
     }
 
@@ -1267,26 +1293,21 @@ async fn sftp_upload(
     Json(req): Json<SftpUploadRequest>,
 ) -> Result<Json<SftpResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    let source = source_from_transport();
     let command = format!("sftp upload {} -> {}", req.local_path, req.remote_path);
-    reject_if_gate_paused(&source, &req.host, &command)?;
-    let targets = vec![(req.host.clone(), host_tags(&req.host))];
-    reject_if_rate_limited(&s, &source, &targets, &command).await?;
-    authorize_command(
-        &auth.scope,
-        &source,
+    let pf = preflight_guarded_request(
+        &s,
+        &auth,
         &req.host,
-        &targets
-            .first()
-            .map(|(_, tags)| tags.clone())
-            .unwrap_or_default(),
-        None,
+        host_tags(&req.host),
+        source_from_transport(),
         &command,
+        None,
         false,
         None,
         None,
     )
     .await?;
+    let source = pf.source;
     sftp_upload_core_with_source(req, Some(source))
         .await
         .map(Json)
@@ -1298,26 +1319,21 @@ async fn sftp_download(
     Json(req): Json<SftpDownloadRequest>,
 ) -> Result<Json<SftpResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    let source = source_from_transport();
     let command = format!("sftp download {} -> {}", req.remote_path, req.local_path);
-    reject_if_gate_paused(&source, &req.host, &command)?;
-    let targets = vec![(req.host.clone(), host_tags(&req.host))];
-    reject_if_rate_limited(&s, &source, &targets, &command).await?;
-    authorize_command(
-        &auth.scope,
-        &source,
+    let pf = preflight_guarded_request(
+        &s,
+        &auth,
         &req.host,
-        &targets
-            .first()
-            .map(|(_, tags)| tags.clone())
-            .unwrap_or_default(),
-        None,
+        host_tags(&req.host),
+        source_from_transport(),
         &command,
+        None,
         false,
         None,
         None,
     )
     .await?;
+    let source = pf.source;
     sftp_download_core_with_source(req, Some(source))
         .await
         .map(Json)
@@ -1329,21 +1345,15 @@ async fn sftp_ls(
     Json(body): Json<SftpDirBody>,
 ) -> Result<Json<ExecResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    let source = source_from_transport();
     let command = format!("sftp ls {}", body.path);
-    reject_if_gate_paused(&source, &body.host, &command)?;
-    let targets = vec![(body.host.clone(), host_tags(&body.host))];
-    reject_if_rate_limited(&s, &source, &targets, &command).await?;
-    let (risk, _) = authorize_command(
-        &auth.scope,
-        &source,
+    let PreflightResult { source, risk, .. } = preflight_guarded_request(
+        &s,
+        &auth,
         &body.host,
-        &targets
-            .first()
-            .map(|(_, tags)| tags.clone())
-            .unwrap_or_default(),
-        None,
+        host_tags(&body.host),
+        source_from_transport(),
         &command,
+        None,
         false,
         None,
         None,
@@ -1384,21 +1394,15 @@ async fn sftp_stat(
     Json(body): Json<SftpDirBody>,
 ) -> Result<Json<ExecResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    let source = source_from_transport();
     let command = format!("sftp stat {}", body.path);
-    reject_if_gate_paused(&source, &body.host, &command)?;
-    let targets = vec![(body.host.clone(), host_tags(&body.host))];
-    reject_if_rate_limited(&s, &source, &targets, &command).await?;
-    let (risk, _) = authorize_command(
-        &auth.scope,
-        &source,
+    let PreflightResult { source, risk, .. } = preflight_guarded_request(
+        &s,
+        &auth,
         &body.host,
-        &targets
-            .first()
-            .map(|(_, tags)| tags.clone())
-            .unwrap_or_default(),
-        None,
+        host_tags(&body.host),
+        source_from_transport(),
         &command,
+        None,
         false,
         None,
         None,
@@ -1439,21 +1443,15 @@ async fn sftp_mkdir(
     Json(body): Json<SftpDirBody>,
 ) -> Result<Json<ExecResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    let source = source_from_transport();
     let command = format!("sftp mkdir {}", body.path);
-    reject_if_gate_paused(&source, &body.host, &command)?;
-    let targets = vec![(body.host.clone(), host_tags(&body.host))];
-    reject_if_rate_limited(&s, &source, &targets, &command).await?;
-    let (risk, _) = authorize_command(
-        &auth.scope,
-        &source,
+    let PreflightResult { source, risk, .. } = preflight_guarded_request(
+        &s,
+        &auth,
         &body.host,
-        &targets
-            .first()
-            .map(|(_, tags)| tags.clone())
-            .unwrap_or_default(),
-        None,
+        host_tags(&body.host),
+        source_from_transport(),
         &command,
+        None,
         false,
         None,
         None,
@@ -1795,7 +1793,6 @@ async fn forward_add(
     Json(req): Json<ForwardRule>,
 ) -> Result<Json<ForwardRule>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    let source = source_from_transport();
     let via = params.get("via").map(String::as_str);
     let command = format!(
         "forward {} {}:{} -> {}:{}{}",
@@ -1806,19 +1803,14 @@ async fn forward_add(
         req.target_port,
         via.map(|v| format!(" via {v}")).unwrap_or_default()
     );
-    reject_if_gate_paused(&source, &req.host, &command)?;
-    let targets = vec![(req.host.clone(), host_tags(&req.host))];
-    reject_if_rate_limited(&s, &source, &targets, &command).await?;
-    let (risk, _) = authorize_command(
-        &auth.scope,
-        &source,
+    let PreflightResult { source, risk, .. } = preflight_guarded_request(
+        &s,
+        &auth,
         &req.host,
-        &targets
-            .first()
-            .map(|(_, tags)| tags.clone())
-            .unwrap_or_default(),
-        None,
+        host_tags(&req.host),
+        source_from_transport(),
         &command,
+        None,
         false,
         None,
         None,
@@ -2066,7 +2058,6 @@ async fn forward_add_multi(
     Json(req): Json<MultiForwardRequest>,
 ) -> Result<Json<agent2ssh::MultiForwardResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    let source = source_from_transport();
     let via = params.get("via").map(String::as_str);
     let command = format!(
         "forward multi {} ({} rules){}",
@@ -2074,19 +2065,14 @@ async fn forward_add_multi(
         req.rules.len(),
         via.map(|v| format!(" via {v}")).unwrap_or_default()
     );
-    reject_if_gate_paused(&source, &req.host, &command)?;
-    let targets = vec![(req.host.clone(), host_tags(&req.host))];
-    reject_if_rate_limited(&s, &source, &targets, &command).await?;
-    let (risk, _) = authorize_command(
-        &auth.scope,
-        &source,
+    let PreflightResult { source, risk, .. } = preflight_guarded_request(
+        &s,
+        &auth,
         &req.host,
-        &targets
-            .first()
-            .map(|(_, tags)| tags.clone())
-            .unwrap_or_default(),
-        None,
+        host_tags(&req.host),
+        source_from_transport(),
         &command,
+        None,
         false,
         None,
         None,
@@ -2701,26 +2687,20 @@ async fn proxy_exec(
 
     // If alias is "localhost", execute locally
     if alias == "localhost" {
-        reject_if_gate_paused(&source, &req.host, &req.command)?;
-        let targets = vec![(req.host.clone(), host_tags(&req.host))];
-        reject_if_rate_limited(&s, &source, &targets, &req.command).await?;
-        let tags = targets
-            .first()
-            .map(|(_, tags)| tags.clone())
-            .unwrap_or_default();
-        let (risk, approved) = authorize_command(
-            &auth.scope,
-            &source,
+        let pf = preflight_guarded_request(
+            &s,
+            &auth,
             &req.host,
-            &tags,
-            None,
+            host_tags(&req.host),
+            source.clone(),
             &req.command,
+            None,
             req.force,
             req.reason.clone(),
             req.change_id.clone(),
         )
         .await?;
-        if approved && risk == RiskLevel::High {
+        if pf.approved && pf.risk == RiskLevel::High {
             req.force = true;
         }
         return exec_ssh_core(req)

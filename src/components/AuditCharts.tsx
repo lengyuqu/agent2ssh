@@ -18,6 +18,7 @@ import type { AuditEntry, RiskLevel } from "../types";
 import { Card } from "./ui/card";
 import { EmptyState } from "./ui/state";
 import { cn } from "../lib/utils";
+import { formatClockTime } from "../lib/format";
 
 type RangeKey = "24h" | "7d" | "30d";
 
@@ -138,7 +139,7 @@ export default function AuditCharts() {
       const date = new Date(bucketStart);
       const key =
         range === "24h"
-          ? date.toLocaleTimeString([], { hour: "2-digit" })
+          ? formatClockTime(date, { hour: "2-digit" })
           : date.toLocaleDateString([], { month: "short", day: "numeric" });
       buckets.set(key, 0);
     }

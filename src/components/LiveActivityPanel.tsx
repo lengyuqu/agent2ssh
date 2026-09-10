@@ -8,6 +8,7 @@ import { Card } from "./ui/card";
 import { Select } from "./ui/select";
 import { EmptyState } from "./ui/state";
 import { cn } from "../lib/utils";
+import { formatClockTime } from "../lib/format";
 
 const MAX_EVENTS = 80;
 const AUDIT_POLL_MS = 10000;
@@ -92,12 +93,6 @@ function auditToItem(entry: AuditEntry): ActivityItem {
       source: entry.source ?? null,
     },
   };
-}
-
-function formatTime(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleTimeString();
 }
 
 function needsAttention(item: ActivityItem): boolean {
@@ -306,7 +301,7 @@ export default function LiveActivityPanel() {
                 >
                   {expanded.has(item.id) ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                 </button>
-                <span>{formatTime(item.ts)}</span>
+                <span>{formatClockTime(item.ts)}</span>
                 <span>{item.source}</span>
                 <span>{item.kind}</span>
                 {item.host && <strong className="font-semibold text-foreground">{item.host}</strong>}

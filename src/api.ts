@@ -72,11 +72,6 @@ const SESSION_TRACE_ID: string =
     ? crypto.randomUUID()
     : `sess-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
-/** Get the current desktop session's correlation id. */
-export function getSessionTraceId(): string {
-  return SESSION_TRACE_ID;
-}
-
 /** Headers for direct daemon fetches that carry the session correlation id. */
 export function traceHeaders(): Record<string, string> {
   return { [TRACE_ID_HEADER]: SESSION_TRACE_ID };
@@ -116,11 +111,6 @@ export function reportError(
       ? { error: err.message, stack: err.stack }
       : { error: String(err) };
   logDiagnostic("error", component, message, { ...detail, ...(fields ?? {}) });
-}
-
-/** Change the base URL used for direct daemon HTTP calls (e.g. approvals, webhooks). */
-export function setDaemonUrl(url: string): void {
-  daemonUrl = url.replace(/\/+$/, "");
 }
 
 /** Get the current daemon base URL. */

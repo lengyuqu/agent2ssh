@@ -9,6 +9,7 @@ import { IconButton } from "./ui/icon-button";
 import { Input } from "./ui/input";
 import { EmptyState } from "./ui/state";
 import { useToast } from "./ui/toast";
+import { confirmDialog } from "./ui/dialog";
 import { cn } from "../lib/utils";
 
 type Props = {
@@ -76,7 +77,12 @@ export default function KeysPanel({ onChanged }: Props) {
   }
 
   async function handleDelete(name: string) {
-    if (!confirm(t('Delete key "{name}"?', { name }))) return;
+    const ok = await confirmDialog({
+      title: t('Delete key "{name}"?', { name }),
+      confirmLabel: t("Delete"),
+      danger: true,
+    });
+    if (!ok) return;
     try {
       await api.deleteKey(name);
       await refresh();

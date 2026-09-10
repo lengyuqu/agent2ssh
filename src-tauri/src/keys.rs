@@ -6,7 +6,10 @@ use ssh_key::{
 };
 use std::path::PathBuf;
 
-use crate::store::{config_dir, restrict_file_to_owner};
+use crate::{
+    path_resolver::expand_tilde,
+    store::{config_dir, restrict_file_to_owner},
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SshKeyInfo {
@@ -347,20 +350,6 @@ pub fn delete_key_core(name: &str) -> Result<()> {
         let _ = std::fs::remove_file(&public);
     }
     Ok(())
-}
-
-fn expand_tilde(path: &str) -> String {
-    if path == "~" {
-        return dirs::home_dir()
-            .map(|h| h.display().to_string())
-            .unwrap_or_else(|| path.to_string());
-    }
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest).display().to_string();
-        }
-    }
-    path.to_string()
 }
 
 #[cfg(test)]

@@ -17,6 +17,8 @@ use std::{
 };
 
 use crate::{
+    path_resolver::expand_tilde,
+    session::resolve_host,
     store::{config_dir, ensure_config_dir, load_config, restrict_file_to_owner},
     types::{HostProfile, ProxyProfile, ProxyProtocol},
 };
@@ -127,20 +129,6 @@ pub struct HostFingerprintStatus {
     pub trusted: bool,
     pub expected_host_key_algorithm: Option<String>,
     pub expected_fingerprint_sha256: Option<String>,
-}
-
-fn expand_tilde(path: &str) -> String {
-    if path == "~" {
-        return dirs::home_dir()
-            .map(|home| home.display().to_string())
-            .unwrap_or_else(|| path.to_string());
-    }
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest).display().to_string();
-        }
-    }
-    path.to_string()
 }
 
 fn validate_key_path(path: &str) -> Result<()> {
@@ -266,14 +254,6 @@ fn trust_or_verify_host_fingerprint(
     save_known_host_fingerprints_unlocked(&trusted)
 }
 
-fn resolve_host_profile(name: &str) -> Result<HostProfile> {
-    load_config()?
-        .hosts
-        .into_iter()
-        .find(|host| host.name == name)
-        .ok_or_else(|| anyhow!("unknown host profile: {name}"))
-}
-
 fn probe_host_fingerprint(host: &HostProfile, timeout_secs: u64) -> Result<(String, String)> {
     let mut session = Session::new()?;
     let tcp = connect_transport(host, timeout_secs, 0)?;
@@ -296,7 +276,7 @@ pub fn get_host_fingerprint_status_core(
     host_name: &str,
     timeout_secs: u64,
 ) -> Result<HostFingerprintStatus> {
-    let host = resolve_host_profile(host_name)?;
+    let host = resolve_host(host_name)?;
     let address = format!("{}:{}", host.host, host.port.unwrap_or(22));
     let (host_key_algorithm, fingerprint_sha256) = probe_host_fingerprint(&host, timeout_secs)?;
     let _guard = crate::store::lock_config_file(".known_hosts.lock")?;
@@ -327,7 +307,7 @@ pub fn trust_host_fingerprint_core(
     fingerprint_sha256: &str,
     timeout_secs: u64,
 ) -> Result<()> {
-    let host = resolve_host_profile(host_name)?;
+    let host = resolve_host(host_name)?;
     let address = format!("{}:{}", host.host, host.port.unwrap_or(22));
     let (current_algorithm, current_fingerprint) = probe_host_fingerprint(&host, timeout_secs)?;
     if current_algorithm != host_key_algorithm || current_fingerprint != fingerprint_sha256 {
@@ -384,7 +364,7 @@ pub fn remove_known_host_core(host_name_or_identity: &str) -> Result<bool> {
     let _guard = crate::store::lock_config_file(".known_hosts.lock")?;
 
     // Try to resolve as a host profile name first — if found, use its identity
-    let identity = match resolve_host_profile(host_name_or_identity) {
+    let identity = match resolve_host(host_name_or_identity) {
         Ok(host) => known_host_identity(&host),
         Err(_) => {
             // Not a profile name — treat the input as a raw identity (host:port)
@@ -511,6 +491,10 @@ pub fn import_known_hosts_from_ssh(path: Option<&str>) -> Result<KnownHostImport
     Ok(KnownHostImportSummary { imported, skipped })
 }
 
+// TODO(unwired): no caller in the repository (CLI/MCP/desktop/daemon all use the
+// app-managed `known_hosts.json` store via `remove_known_host_core` instead).
+// Kept because a "forget this host in OpenSSH too" affordance is a plausible
+// near-term feature; wire it to a command or delete it.
 /// Finding 18: Remove a host entry from the system OpenSSH `~/.ssh/known_hosts`.
 ///
 /// Equivalent to `ssh-keygen -R <hostname>`. Removes all lines matching the
@@ -974,7 +958,7 @@ fn bridge_tcp_and_channel(mut stream: TcpStream, mut channel: ssh2::Channel) -> 
     Ok(())
 }
 
-fn write_all_tcp(stream: &mut TcpStream, mut data: &[u8]) -> Result<()> {
+pub(crate) fn write_all_tcp(stream: &mut TcpStream, mut data: &[u8]) -> Result<()> {
     while !data.is_empty() {
         match stream.write(data) {
             Ok(0) => return Err(anyhow!("tcp stream closed while writing")),
@@ -988,7 +972,7 @@ fn write_all_tcp(stream: &mut TcpStream, mut data: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn write_all_channel(channel: &mut ssh2::Channel, mut data: &[u8]) -> Result<()> {
+pub(crate) fn write_all_channel(channel: &mut ssh2::Channel, mut data: &[u8]) -> Result<()> {
     while !data.is_empty() {
         match channel.write(data) {
             Ok(0) => return Err(anyhow!("ssh channel closed while writing")),

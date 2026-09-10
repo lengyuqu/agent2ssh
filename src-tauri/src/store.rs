@@ -647,6 +647,38 @@ pub fn append_audit(
     Ok(())
 }
 
+/// Append an audit entry for a command whose result was not captured as an
+/// [`ExecResult`] — typically an operation that was rejected before execution,
+/// or a control-plane action such as an SFTP transfer or a session open.
+///
+/// `reason` carries the rejection/failure text and is also mirrored into
+/// `stderr` so the audit reader sees it in both places. This is the single
+/// implementation shared by `tauri_commands` and the daemon; both previously
+/// kept a private copy.
+pub fn append_operation_audit(
+    source: &str,
+    host: &str,
+    command: &str,
+    risk: RiskLevel,
+    exit_code: Option<i32>,
+    duration_ms: u128,
+    reason: Option<&str>,
+) {
+    let result = ExecResult {
+        host: host.to_string(),
+        command: command.to_string(),
+        exit_code,
+        stdout: String::new(),
+        stderr: reason.unwrap_or_default().to_string(),
+        duration_ms,
+        risk_level: risk,
+        truncated: false,
+        dropped_bytes: 0,
+        side_effect: None,
+    };
+    let _ = append_audit(&result, risk, reason, None, Some(source));
+}
+
 /// Finding 16: Derive the action category from the command string.
 fn derive_audit_action(command: &str) -> Option<String> {
     let lower = command.to_lowercase();

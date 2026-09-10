@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use std::{
     collections::HashMap,
-    io::{ErrorKind, Read, Write},
+    io::{ErrorKind, Read},
     net::{IpAddr, Shutdown, TcpListener, TcpStream},
     sync::{
         atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering},
@@ -15,7 +15,8 @@ use uuid::Uuid;
 
 use crate::{
     app_state::app_state,
-    embedded_ssh::connect_embedded_ssh,
+    embedded_ssh::{connect_embedded_ssh, write_all_channel, write_all_tcp},
+    session::resolve_host,
     store::load_config,
     types::{ForwardDirection, ForwardRule, HostProfile},
 };
@@ -302,14 +303,6 @@ impl JoinHandleExt for thread::JoinHandle<()> {
 // Process-local forward store, delegated to AppState (P2 #5).
 fn forwards() -> &'static TokioMutex<HashMap<Uuid, ForwardHandle>> {
     &app_state().forwards
-}
-
-fn resolve_host(name: &str) -> Result<HostProfile> {
-    load_config()?
-        .hosts
-        .into_iter()
-        .find(|h| h.name == name)
-        .ok_or_else(|| anyhow!("unknown host profile: {name}"))
 }
 
 /// B68: Resolve a host profile and optionally override or set its jump_host.
@@ -743,35 +736,6 @@ fn bridge_tcp_and_channel(
 
     let _ = channel.close();
     let _ = channel.wait_close();
-    Ok(())
-}
-
-fn write_all_tcp(stream: &mut TcpStream, mut data: &[u8]) -> Result<()> {
-    while !data.is_empty() {
-        match stream.write(data) {
-            Ok(0) => return Err(anyhow!("tcp stream closed while writing")),
-            Ok(n) => data = &data[n..],
-            Err(error) if error.kind() == ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(5));
-            }
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Ok(())
-}
-
-fn write_all_channel(channel: &mut ssh2::Channel, mut data: &[u8]) -> Result<()> {
-    while !data.is_empty() {
-        match channel.write(data) {
-            Ok(0) => return Err(anyhow!("ssh channel closed while writing")),
-            Ok(n) => data = &data[n..],
-            Err(error) if error.kind() == ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(5));
-            }
-            Err(error) => return Err(error.into()),
-        }
-    }
-    let _ = channel.flush();
     Ok(())
 }
 

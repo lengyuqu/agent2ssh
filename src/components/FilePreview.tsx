@@ -6,6 +6,7 @@ import { useI18n } from "../i18n";
 import { useTheme } from "../theme";
 import { ensureMonacoConfigured } from "../lib/monacoSetup";
 import { languageForFile } from "../lib/previewLanguage";
+import { formatDateTime } from "../lib/format";
 import { Dialog } from "./ui/dialog";
 import { LoadingState } from "./ui/state";
 
@@ -111,7 +112,7 @@ export default function FilePreview({ onClose, name, path, size, mtime, kind, ho
             <dt className="text-muted-foreground">{t("Size")}</dt>
             <dd>{size !== null ? humanSize(size) : t("Unknown")}</dd>
             <dt className="text-muted-foreground">{t("Modified")}</dt>
-            <dd>{mtime !== null ? new Date(mtime * 1000).toLocaleString() : t("Unknown")}</dd>
+            <dd>{mtime !== null ? formatDateTime(mtime * 1000) : t("Unknown")}</dd>
           </dl>
         </div>
       )}

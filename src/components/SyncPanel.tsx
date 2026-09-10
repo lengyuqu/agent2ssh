@@ -17,6 +17,7 @@ import { Button } from "./ui/button";
 import { Card } from "./ui/card";
 import { Input } from "./ui/input";
 import { useToast } from "./ui/toast";
+import { formatBytes, formatDateTime } from "../lib/format";
 
 type SyncAction = "load" | "save" | "test" | "push" | "refresh";
 
@@ -27,20 +28,6 @@ const defaultForm: WebDavSyncConfig = {
   remotePath: "agent2ssh/agent2ssh-sync.json",
   passwordConfigured: false,
 };
-
-function formatTime(value?: string | null): string {
-  if (!value) return "Never";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString();
-}
-
-function formatBytes(value?: number | null): string {
-  if (!value) return "0 B";
-  if (value < 1024) return `${value} B`;
-  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
-  return `${(value / 1024 / 1024).toFixed(2)} MB`;
-}
 
 export default function SyncPanel() {
   const { t } = useI18n();
@@ -394,7 +381,7 @@ export default function SyncPanel() {
           </div>
           <div className="rounded-lg border border-border bg-muted/35 px-3 py-2">
             <span className="text-muted-foreground">{t("Last sync time")}</span>
-            <div className="mt-1 font-medium">{t(formatTime(status?.lastSyncAt))}</div>
+            <div className="mt-1 font-medium">{t(status?.lastSyncAt ? formatDateTime(status.lastSyncAt) : "Never")}</div>
           </div>
           <div className="rounded-lg border border-border bg-muted/35 px-3 py-2">
             <span className="text-muted-foreground">{t("Uploaded size")}</span>

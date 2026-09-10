@@ -26,9 +26,8 @@ use crate::{
         HostFingerprintStatus, KnownHostImportSummary,
     },
     execution_control::{
-        append_rejected_exec_audit, authorize_command_with_approval, command_authorization_target,
+        authorize_command_without_approval_handler, command_authorization_target,
         effective_command_risk, expand_exec_authorization_targets, CommandAuthorizationError,
-        CommandAuthorizationInput,
     },
     forward::{
         forward_add_core_via, forward_list_core, forward_remove_core, forward_start_core,
@@ -50,7 +49,7 @@ use crate::{
         session_write_core,
     },
     snippets::{add_snippet, load_snippets, remove_snippet, Snippet},
-    store::{append_audit, config_dir, lock_config_file, restrict_file_to_owner},
+    store::{append_operation_audit, config_dir, lock_config_file, restrict_file_to_owner},
     types::{
         source_from_transport, AuditEntry, AuditFilter, ConnectionStatus, ExecMultiResult,
         ExecRequest, ExecResult, ForwardDirection, ForwardRule, HostGroup, HostProfile, PingResult,
@@ -59,7 +58,7 @@ use crate::{
     },
     webdav_sync::{
         apply_config_template, create_named_snapshot, delete_config_snapshot,
-        list_config_snapshots, restore_config_snapshot, ConfigSnapshotInfo,
+        list_config_snapshots, restore_config_snapshot, ConfigSnapshotInfo, SYNCABLE_FILES,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -95,30 +94,6 @@ fn ensure_command_length(command: &str) -> Result<(), String> {
     validate_command_length(command)
         .map_err(|_| format!("command length exceeds maximum of {MAX_COMMAND_BYTES} bytes"))?;
     Ok(())
-}
-
-fn append_operation_audit(
-    source: &str,
-    host: &str,
-    command: &str,
-    risk: RiskLevel,
-    exit_code: Option<i32>,
-    duration_ms: u128,
-    reason: Option<&str>,
-) {
-    let result = ExecResult {
-        host: host.to_string(),
-        command: command.to_string(),
-        exit_code,
-        stdout: String::new(),
-        stderr: reason.unwrap_or_default().to_string(),
-        duration_ms,
-        risk_level: risk,
-        truncated: false,
-        dropped_bytes: 0,
-        side_effect: None,
-    };
-    let _ = append_audit(&result, risk, reason, None, Some(source));
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -445,32 +420,18 @@ pub async fn exec_ssh(mut request: ExecRequest) -> Result<ExecResult, String> {
 async fn authorize_desktop_exec_request(request: &mut ExecRequest) -> Result<RiskLevel, String> {
     let target = command_authorization_target(&request.host);
     let source = request.source.as_deref().unwrap_or("desktop").to_string();
-    let auth_scope = None;
-    let result = authorize_command_with_approval(
-        CommandAuthorizationInput {
-            auth_scope: &auth_scope,
-            source: &source,
-            host: &request.host,
-            tags: &target.tags,
-            risk_override: target.risk_override,
-            command: &request.command,
-            force: request.force,
-            reason: request.reason.clone(),
-            change_id: request.change_id.clone(),
-            side_effect: request.side_effect.clone(),
-        },
-        |prompt| async move {
-            let message = "approval required but no desktop approval handler is available";
-            append_rejected_exec_audit(
-                &prompt.source,
-                &prompt.host,
-                &prompt.command,
-                prompt.risk,
-                message,
-                prompt.change_id.as_deref(),
-            );
-            Err(format!("{message}; run through the daemon approval flow"))
-        },
+    let result = authorize_command_without_approval_handler(
+        &source,
+        &request.host,
+        &target.tags,
+        target.risk_override,
+        &request.command,
+        request.force,
+        request.reason.clone(),
+        request.change_id.clone(),
+        request.side_effect.clone(),
+        "approval required but no desktop approval handler is available",
+        "; run through the daemon approval flow",
     )
     .await
     .map_err(command_authorization_error)?;
@@ -500,34 +461,20 @@ async fn authorize_desktop_exec_targets(
     source: &str,
 ) -> Result<Vec<String>, String> {
     let targets = expand_exec_authorization_targets(hosts, tags).map_err(|e| e.to_string())?;
-    let auth_scope = None;
     let mut approved_hosts = Vec::new();
     for target in targets {
-        let result = authorize_command_with_approval(
-            CommandAuthorizationInput {
-                auth_scope: &auth_scope,
-                source,
-                host: &target.host,
-                tags: &target.tags,
-                risk_override: target.risk_override,
-                command,
-                force,
-                reason: reason.clone(),
-                change_id: change_id.clone(),
-                side_effect: None,
-            },
-            |prompt| async move {
-                let message = "approval required but no desktop approval handler is available";
-                append_rejected_exec_audit(
-                    &prompt.source,
-                    &prompt.host,
-                    &prompt.command,
-                    prompt.risk,
-                    message,
-                    prompt.change_id.as_deref(),
-                );
-                Err(format!("{message}; run through the daemon approval flow"))
-            },
+        let result = authorize_command_without_approval_handler(
+            source,
+            &target.host,
+            &target.tags,
+            target.risk_override,
+            command,
+            force,
+            reason.clone(),
+            change_id.clone(),
+            None,
+            "approval required but no desktop approval handler is available",
+            "; run through the daemon approval flow",
         )
         .await
         .map_err(command_authorization_error)?;
@@ -553,35 +500,21 @@ async fn authorize_desktop_playbook_run(
         .find(|item| item.name == playbook)
         .and_then(|item| item.risk_override);
     let risk_override = playbook_risk_override.or(target.risk_override);
-    let auth_scope = None;
     let mut approved_steps = Vec::new();
 
     for step in dry_run.steps {
-        let result = authorize_command_with_approval(
-            CommandAuthorizationInput {
-                auth_scope: &auth_scope,
-                source,
-                host,
-                tags: &target.tags,
-                risk_override,
-                command: &step.command_resolved,
-                force,
-                reason: None,
-                change_id: None,
-                side_effect: None,
-            },
-            |prompt| async move {
-                let message = "approval required but no desktop approval handler is available";
-                append_rejected_exec_audit(
-                    &prompt.source,
-                    &prompt.host,
-                    &prompt.command,
-                    prompt.risk,
-                    message,
-                    prompt.change_id.as_deref(),
-                );
-                Err(format!("{message}; run through the daemon approval flow"))
-            },
+        let result = authorize_command_without_approval_handler(
+            source,
+            host,
+            &target.tags,
+            risk_override,
+            &step.command_resolved,
+            force,
+            None,
+            None,
+            None,
+            "approval required but no desktop approval handler is available",
+            "; run through the daemon approval flow",
         )
         .await
         .map_err(command_authorization_error)?;
@@ -600,32 +533,18 @@ async fn authorize_desktop_operation(
     source: &str,
 ) -> Result<RiskLevel, String> {
     let target = command_authorization_target(host);
-    let auth_scope = None;
-    let result = authorize_command_with_approval(
-        CommandAuthorizationInput {
-            auth_scope: &auth_scope,
-            source,
-            host,
-            tags: &target.tags,
-            risk_override: target.risk_override,
-            command,
-            force,
-            reason: None,
-            change_id: None,
-            side_effect: None,
-        },
-        |prompt| async move {
-            let message = "approval required but no desktop approval handler is available";
-            append_rejected_exec_audit(
-                &prompt.source,
-                &prompt.host,
-                &prompt.command,
-                prompt.risk,
-                message,
-                prompt.change_id.as_deref(),
-            );
-            Err(format!("{message}; run through the daemon approval flow"))
-        },
+    let result = authorize_command_without_approval_handler(
+        source,
+        host,
+        &target.tags,
+        target.risk_override,
+        command,
+        force,
+        None,
+        None,
+        None,
+        "approval required but no desktop approval handler is available",
+        "; run through the daemon approval flow",
     )
     .await
     .map_err(command_authorization_error)?;
@@ -2093,18 +2012,6 @@ struct WebDavSyncFile {
     bytes: u64,
 }
 
-const WEBDAV_SYNC_FILES: &[&str] = &[
-    "hosts.json",
-    "playbooks.toml",
-    "risk_rules.toml",
-    "policy.toml",
-    "policy.json",
-    "execution_limits.toml",
-    "anomaly.toml",
-    "webhook.toml",
-    "app_preferences.json",
-];
-
 fn default_webdav_remote_path() -> String {
     "agent2ssh/agent2ssh-sync.json".to_string()
 }
@@ -2402,7 +2309,8 @@ async fn propfind_webdav_parent(
 async fn build_webdav_sync_payload() -> Result<(Vec<u8>, usize), String> {
     let dir = config_dir().map_err(|e| e.to_string())?;
     let mut files = Vec::new();
-    for name in WEBDAV_SYNC_FILES {
+    // Single source of truth for the portable config file list: `webdav_sync::SYNCABLE_FILES`.
+    for name in SYNCABLE_FILES {
         let path = dir.join(name);
         if !path.is_file() {
             continue;

@@ -2,6 +2,7 @@ import { Camera, History, RefreshCw, RotateCcw, Trash2, Wand2 } from "lucide-rea
 import { useEffect, useState } from "react";
 import { api, reportError } from "../api";
 import { CONFIG_TEMPLATES, type ConfigTemplate } from "../lib/configTemplates";
+import { formatDateTime } from "../lib/format";
 import { useI18n } from "../i18n";
 import type { ConfigSnapshotInfo } from "../types";
 import { Button } from "./ui/button";
@@ -11,13 +12,6 @@ import { IconButton } from "./ui/icon-button";
 import { Input } from "./ui/input";
 import { EmptyState } from "./ui/state";
 import { useToast } from "./ui/toast";
-
-function formatTime(value?: string | null): string {
-  if (!value) return "";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString();
-}
 
 /** V4-3: built-in policy/limits templates + snapshot save/restore of the config dir. */
 export default function ConfigSnapshotsPanel() {
@@ -185,7 +179,7 @@ export default function ConfigSnapshotsPanel() {
                     {snapshot.label ?? t("(unlabeled)")}
                   </div>
                   <div className="text-xs text-muted-foreground">
-                    {formatTime(snapshot.created_at)} · {t("{count} files", { count: snapshot.files.length })}
+                    {formatDateTime(snapshot.created_at)} · {t("{count} files", { count: snapshot.files.length })}
                   </div>
                 </div>
                 <Button

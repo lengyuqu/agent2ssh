@@ -28,6 +28,7 @@ import LanguageSwitcher from "./LanguageSwitcher";
 import HighlightSettings from "./HighlightSettings";
 import { THEMES, useTheme } from "../theme";
 import { cn } from "../lib/utils";
+import { formatClockTime } from "../lib/format";
 
 type Props = {
   gateStatus: ExecutionGateStatus | null;
@@ -110,18 +111,10 @@ export default function SettingsMenu({
   const daemonUrl = getDaemonUrl();
   const consoleUrl = `${daemonUrl}/console`;
   const checkedAtText = gateCheckedAt
-    ? new Date(gateCheckedAt).toLocaleTimeString([], {
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-      })
+    ? formatClockTime(gateCheckedAt, { hour: "2-digit", minute: "2-digit", second: "2-digit" })
     : t("Never");
   const daemonCheckedAtText = daemonHealthCheckedAt
-    ? new Date(daemonHealthCheckedAt).toLocaleTimeString([], {
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-      })
+    ? formatClockTime(daemonHealthCheckedAt, { hour: "2-digit", minute: "2-digit", second: "2-digit" })
     : t("Never");
 
   useEffect(() => {
@@ -386,11 +379,7 @@ export default function SettingsMenu({
   }
 
   function formatDiagnosticEntry(entry: DiagnosticLogEntry): string {
-    const time = new Date(entry.ts).toLocaleTimeString([], {
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-    });
+    const time = formatClockTime(entry.ts, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
     return `${time} ${entry.level.toUpperCase()} ${entry.component}: ${entry.message}`;
   }
 

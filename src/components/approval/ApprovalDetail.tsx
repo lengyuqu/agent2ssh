@@ -5,6 +5,7 @@ import type { ApprovalRequest, RiskLevel } from "../../types";
 import RiskBadge from "../RiskBadge";
 import { Button } from "../ui/button";
 import { cn } from "../../lib/utils";
+import { formatDateTime } from "../../lib/format";
 
 type Props = {
   approval: ApprovalRequest | null;
@@ -24,12 +25,6 @@ const COMMAND_TINT: Record<RiskLevel, string> = {
   high: "text-risk-high",
   blocked: "text-risk-high",
 };
-
-function formatTime(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString();
-}
 
 /** v3 3.1: detail column — command block on canvas-0, mono, full-row risk
  * tint, then the three action buttons and the keyboard hint line. */
@@ -69,7 +64,7 @@ export default function ApprovalDetail({
         <span className="font-mono text-sm font-semibold">{approval.host}</span>
         <RiskBadge level={approval.risk_level} />
         <span className="ml-auto font-mono text-[11px] text-faint">
-          {t("Requested at")} {formatTime(approval.requested_at)}
+          {t("Requested at")} {formatDateTime(approval.requested_at)}
         </span>
       </div>
 

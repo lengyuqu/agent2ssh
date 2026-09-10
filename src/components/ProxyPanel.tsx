@@ -2,6 +2,7 @@ import { Edit3, Network, Plus, Save, Trash2, X } from "lucide-react";
 import { FormEvent, useMemo, useState } from "react";
 import { api } from "../api";
 import { useI18n } from "../i18n";
+import { labelCls } from "../lib/ui-classes";
 import type { HostProfile, ProxyProfile, ProxyProtocol } from "../types";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
@@ -12,8 +13,6 @@ import { Input } from "./ui/input";
 import { Select } from "./ui/select";
 import { EmptyState } from "./ui/state";
 import { useToast } from "./ui/toast";
-
-const labelCls = "grid gap-1.5 text-sm font-medium text-foreground/90";
 
 const emptyForm = {
   id: "",

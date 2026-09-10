@@ -2,6 +2,7 @@ import { ChevronDown, ChevronUp, Play, ShieldAlert } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
+import { labelCls } from "../lib/ui-classes";
 import type { ExecResult, HostProfile, RiskLevel } from "../types";
 import ApprovalDialog from "./ApprovalDialog";
 import HostSelector from "./HostSelector";
@@ -11,8 +12,6 @@ import { Card } from "./ui/card";
 import { Input } from "./ui/input";
 import { Textarea } from "./ui/textarea";
 import { useToast } from "./ui/toast";
-
-const labelCls = "grid gap-1.5 text-sm font-medium text-foreground/90";
 
 type Props = {
   hosts: HostProfile[];

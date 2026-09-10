@@ -9,12 +9,8 @@ import type { RecordingContent, RecordingInfo } from "../types";
 import { Button } from "./ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
 import { useToast } from "./ui/toast";
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MiB`;
-}
+import { confirmDialog } from "./ui/dialog";
+import { formatBytes, formatDateTime } from "../lib/format";
 
 export default function RecordingsPanel() {
   const { t } = useI18n();
@@ -165,13 +161,14 @@ export default function RecordingsPanel() {
   }
 
   async function removeRecording(info: RecordingInfo) {
-    if (
-      !window.confirm(
-        t("Permanently delete this sensitive terminal recording from {host}?", { host: info.host })
-      )
-    ) {
-      return;
-    }
+    const confirmed = await confirmDialog({
+      title: t("Permanently delete this sensitive terminal recording from {host}?", {
+        host: info.host,
+      }),
+      confirmLabel: t("Delete"),
+      danger: true,
+    });
+    if (!confirmed) return;
     setBusyId(info.id);
     try {
       await api.deleteRecording(info.id);
@@ -250,7 +247,7 @@ export default function RecordingsPanel() {
                   >
                     <div className="truncate font-semibold">{recording.host}</div>
                     <div className="mt-1 text-xs text-muted-foreground">
-                      {new Date(recording.createdAt).toLocaleString()} · {recording.durationSeconds.toFixed(1)}s · {formatBytes(recording.sizeBytes)}
+                      {formatDateTime(recording.createdAt)} · {recording.durationSeconds.toFixed(1)}s · {formatBytes(recording.sizeBytes)}
                     </div>
                   </button>
                   <Button

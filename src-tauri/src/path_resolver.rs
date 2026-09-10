@@ -1,4 +1,15 @@
-//! Desktop PATH resolution for external executables (A5).
+//! Path utilities: desktop PATH resolution for external executables (A5), plus
+//! shared path-string helpers used across modules.
+//!
+//! ## `expand_tilde`
+//!
+//! `expand_tilde` is the single implementation of `~` expansion for the whole
+//! crate. It previously existed as four near-identical private copies in
+//! `core.rs`, `embedded_ssh.rs`, `keys.rs`, and `ssh_config.rs`; those copies
+//! have been removed in favour of this one. The `ssh_config.rs` variant only
+//! handled `~/` and silently left a bare `~` alone — this version handles both.
+//!
+//! ## Desktop PATH resolution
 //!
 //! When resolving an executable name (e.g., "code", "vim", "git") to an
 //! absolute path, the standard `which`-style approach only searches the
@@ -130,9 +141,60 @@ fn is_executable(path: &Path) -> bool {
     }
 }
 
+/// Expand a leading `~` to the current user's home directory.
+///
+/// Handles both a bare `"~"` (which becomes the home directory itself) and a
+/// `"~/rest"` prefix. Any other input — including `~user/...`, which we do not
+/// support — is returned unchanged. When the home directory cannot be
+/// determined the input is also returned unchanged, so callers keep whatever
+/// the user typed rather than getting an empty path.
+///
+/// This is the crate-wide implementation; do not add module-local copies.
+pub fn expand_tilde(path: &str) -> String {
+    if path == "~" {
+        return dirs::home_dir()
+            .map(|home| home.display().to_string())
+            .unwrap_or_else(|| path.to_string());
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest).display().to_string();
+        }
+    }
+    path.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expand_tilde_handles_bare_tilde() {
+        if dirs::home_dir().is_none() {
+            return;
+        }
+        let expanded = expand_tilde("~");
+        assert_ne!(expanded, "~");
+        assert_eq!(expanded, dirs::home_dir().unwrap().display().to_string());
+    }
+
+    #[test]
+    fn expand_tilde_handles_tilde_prefix() {
+        if dirs::home_dir().is_none() {
+            return;
+        }
+        let expanded = expand_tilde("~/.ssh/config");
+        assert!(expanded.starts_with(&dirs::home_dir().unwrap().display().to_string()));
+        assert!(expanded.ends_with(".ssh/config"));
+    }
+
+    #[test]
+    fn expand_tilde_leaves_other_paths_untouched() {
+        assert_eq!(expand_tilde("/etc/ssh/ssh_config"), "/etc/ssh/ssh_config");
+        assert_eq!(expand_tilde("relative/path"), "relative/path");
+        // `~user` form is not supported and must pass through unchanged.
+        assert_eq!(expand_tilde("~other/key"), "~other/key");
+    }
 
     #[test]
     fn resolve_known_system_executable() {

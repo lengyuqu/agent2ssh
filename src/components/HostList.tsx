@@ -13,7 +13,6 @@ import {
 import { useMemo, useState } from "react";
 import {
   createColumnHelper,
-  flexRender,
   getCoreRowModel,
   getSortedRowModel,
   useReactTable,
@@ -25,7 +24,7 @@ import type { ConnectionStatus, HostGroup, HostProfile, ProxyProfile } from "../
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
-import { ColumnVisibilityMenu, SortIcon } from "./ui/data-table";
+import { ColumnVisibilityMenu, DataTable, selectColumn } from "./ui/data-table";
 import { Dialog } from "./ui/dialog";
 import { IconButton } from "./ui/icon-button";
 import { Input } from "./ui/input";
@@ -167,32 +166,7 @@ export default function HostList({
 
   const columns = useMemo(
     () => [
-      columnHelper.display({
-        id: "select",
-        size: 32,
-        header: ({ table }) => (
-          <input
-            type="checkbox"
-            className="size-4 accent-primary"
-            checked={table.getIsAllRowsSelected()}
-            ref={(el) => {
-              if (el) el.indeterminate = table.getIsSomeRowsSelected() && !table.getIsAllRowsSelected();
-            }}
-            onChange={table.getToggleAllRowsSelectedHandler()}
-          />
-        ),
-        cell: ({ row }) => (
-          <input
-            type="checkbox"
-            className="size-4 accent-primary"
-            checked={row.getIsSelected()}
-            onChange={row.getToggleSelectedHandler()}
-            onClick={(e) => e.stopPropagation()}
-          />
-        ),
-        enableSorting: false,
-        enableHiding: false,
-      }),
+      selectColumn<Row>({ size: 32, stopRowClick: true }),
       columnHelper.accessor((row) => row.host.name, {
         id: "name",
         header: t("Name"),
@@ -513,50 +487,19 @@ export default function HostList({
         ) : filteredHosts.length === 0 ? (
           <EmptyState icon={Server} title={t("No hosts match filters")} />
         ) : (
-          <table className="w-full min-w-[560px] border-collapse text-sm">
-            <thead>
-              {table.getHeaderGroups().map((headerGroup) => (
-                <tr key={headerGroup.id} className="border-b border-border text-left">
-                  {headerGroup.headers.map((header) => (
-                    <th key={header.id} className="px-2 py-1.5 font-medium text-muted-foreground">
-                      {header.isPlaceholder ? null : header.column.getCanSort() ? (
-                        <button
-                          type="button"
-                          className="flex items-center gap-1 hover:text-foreground"
-                          onClick={header.column.getToggleSortingHandler()}
-                        >
-                          {flexRender(header.column.columnDef.header, header.getContext())}
-                          <SortIcon direction={header.column.getIsSorted()} />
-                        </button>
-                      ) : (
-                        flexRender(header.column.columnDef.header, header.getContext())
-                      )}
-                    </th>
-                  ))}
-                </tr>
-              ))}
-            </thead>
-            <tbody>
-              {table.getRowModel().rows.map((row) => (
-                <tr
-                  key={row.id}
-                  onClick={() => onSelect(row.original.host.name)}
-                  className={cn(
-                    "cursor-pointer border-b border-border transition-colors last:border-b-0",
-                    row.original.host.name === selectedHost ? "bg-canvas-2" : "hover:bg-muted/50",
-                    // v3 3.2: offline hosts are visually de-emphasized.
-                    !row.original.connected && "opacity-75"
-                  )}
-                >
-                  {row.getVisibleCells().map((cell) => (
-                    <td key={cell.id} className="px-2 py-2 align-middle">
-                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <DataTable
+            table={table}
+            minWidth={560}
+            wrapperClassName="contents"
+            onRowClick={(row) => onSelect(row.original.host.name)}
+            rowClassName={(row) =>
+              cn(
+                "cursor-pointer border-b border-border transition-colors last:border-b-0",
+                row.original.host.name === selectedHost ? "bg-canvas-2" : "hover:bg-muted/50",
+                !row.original.connected && "opacity-75"
+              )
+            }
+          />
         )}
       </div>
 

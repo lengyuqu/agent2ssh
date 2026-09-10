@@ -15,7 +15,7 @@ import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
 import type { Snippet } from "../types";
 import { Button } from "./ui/button";
-import { Dialog } from "./ui/dialog";
+import { Dialog, confirmDialog } from "./ui/dialog";
 import { IconButton } from "./ui/icon-button";
 import { Input } from "./ui/input";
 import { Textarea } from "./ui/textarea";
@@ -135,7 +135,12 @@ export default function SnippetsDialog({ open, canInsert, onClose, onInsert }: P
   }
 
   async function handleDelete(snippet: Snippet) {
-    if (!window.confirm(t("Delete snippet {name}?", { name: snippet.name }))) return;
+    const ok = await confirmDialog({
+      title: t("Delete snippet {name}?", { name: snippet.name }),
+      confirmLabel: t("Delete"),
+      danger: true,
+    });
+    if (!ok) return;
     try {
       await api.deleteSnippet(snippet.name);
       setSnippets((current) => current.filter((candidate) => candidate.name !== snippet.name));

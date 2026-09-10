@@ -62,23 +62,10 @@ fn default_copy_rules() -> Vec<CopyRedactRule> {
     .collect()
 }
 
-/// Resolve the config directory, honouring the `AGENT2SSH_CONFIG_DIR`
-/// environment variable (used by tests).
-fn config_dir() -> Result<std::path::PathBuf> {
-    crate::store::config_dir()
-}
-
-fn ensure_config_dir() -> Result<()> {
-    let dir = config_dir()?;
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("failed to create config dir {}", dir.display()))?;
-    Ok(())
-}
-
 /// Load copy-redaction rules from the config file. If the file doesn't exist,
 /// seeds it with defaults first (seed-once semantics).
 pub fn load_copy_redact_rules() -> Result<Vec<CopyRedactRule>> {
-    let path = config_dir()?.join(COPY_REDACT_FILE);
+    let path = crate::store::config_dir()?.join(COPY_REDACT_FILE);
     if !path.exists() {
         // Seed defaults on first run.
         let rules = default_copy_rules();
@@ -112,13 +99,16 @@ pub fn load_copy_redact_rules() -> Result<Vec<CopyRedactRule>> {
 
 /// Save copy-redaction rules to the config file.
 pub fn save_copy_redact_rules(rules: &[CopyRedactRule]) -> Result<()> {
-    ensure_config_dir()?;
-    let path = config_dir()?.join(COPY_REDACT_FILE);
+    crate::store::ensure_config_dir()?;
+    let path = crate::store::config_dir()?.join(COPY_REDACT_FILE);
     let configs: Vec<CopyRedactRuleConfig> = rules.iter().map(Into::into).collect();
     let json = serde_json::to_string_pretty(&configs)?;
     std::fs::write(&path, json)
         .with_context(|| format!("failed to write copy redact rules file {}", path.display()))?;
-    restrict_file_to_owner(&path)?;
+    // Shared with `store` so the Windows ACL hardening path is not bypassed: the
+    // previous module-local helper was Unix-only and silently did nothing on
+    // Windows, leaving the rules file readable by other local accounts.
+    crate::store::restrict_file_to_owner(&path)?;
     Ok(())
 }
 
@@ -154,23 +144,6 @@ fn is_already_redacted(text: &str) -> bool {
 pub fn reset_copy_redact_rules() -> Result<()> {
     let rules = default_copy_rules();
     save_copy_redact_rules(&rules)
-}
-
-/// Restrict file permissions to the current user only (Unix only; no-op on
-/// Windows where file ACLs are managed differently).
-fn restrict_file_to_owner(path: &std::path::Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(path)?.permissions();
-        perms.set_mode(0o600);
-        std::fs::set_permissions(path, perms)?;
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-    }
-    Ok(())
 }
 
 #[cfg(test)]

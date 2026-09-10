@@ -1,6 +1,6 @@
 use agent2ssh::execution_control::{
-    append_rejected_exec_audit, authorize_command_with_approval, command_authorization_target,
-    expand_exec_authorization_targets, CommandAuthorizationError, CommandAuthorizationInput,
+    authorize_command_without_approval_handler, command_authorization_target,
+    expand_exec_authorization_targets, CommandAuthorizationError,
 };
 use agent2ssh::{dry_run_playbook, list_playbooks_core, ExecRequest, RiskLevel};
 use std::collections::HashMap;
@@ -12,32 +12,18 @@ pub(super) async fn authorize_local_mcp_exec_request(
 ) -> std::result::Result<RiskLevel, McpError> {
     let target = command_authorization_target(&request.host);
     let source = request.source.as_deref().unwrap_or("mcp").to_string();
-    let auth_scope = None;
-    let result = authorize_command_with_approval(
-        CommandAuthorizationInput {
-            auth_scope: &auth_scope,
-            source: &source,
-            host: &request.host,
-            tags: &target.tags,
-            risk_override: target.risk_override,
-            command: &request.command,
-            force: request.force,
-            reason: request.reason.clone(),
-            change_id: request.change_id.clone(),
-            side_effect: request.side_effect.clone(),
-        },
-        |prompt| async move {
-            let message = "approval required but no local MCP approval handler is available";
-            append_rejected_exec_audit(
-                &prompt.source,
-                &prompt.host,
-                &prompt.command,
-                prompt.risk,
-                message,
-                prompt.change_id.as_deref(),
-            );
-            Err(format!("{message}; run through the daemon approval flow"))
-        },
+    let result = authorize_command_without_approval_handler(
+        &source,
+        &request.host,
+        &target.tags,
+        target.risk_override,
+        &request.command,
+        request.force,
+        request.reason.clone(),
+        request.change_id.clone(),
+        request.side_effect.clone(),
+        "approval required but no local MCP approval handler is available",
+        "; run through the daemon approval flow",
     )
     .await
     .map_err(mcp_authorization_error)?;
@@ -57,34 +43,20 @@ pub(super) async fn authorize_local_mcp_exec_targets(
     source: &str,
 ) -> std::result::Result<Vec<String>, McpError> {
     let targets = expand_exec_authorization_targets(hosts, tags).map_err(McpError::from)?;
-    let auth_scope = None;
     let mut approved_hosts = Vec::new();
     for target in targets {
-        let result = authorize_command_with_approval(
-            CommandAuthorizationInput {
-                auth_scope: &auth_scope,
-                source,
-                host: &target.host,
-                tags: &target.tags,
-                risk_override: target.risk_override,
-                command,
-                force,
-                reason: reason.clone(),
-                change_id: change_id.clone(),
-                side_effect: None,
-            },
-            |prompt| async move {
-                let message = "approval required but no local MCP approval handler is available";
-                append_rejected_exec_audit(
-                    &prompt.source,
-                    &prompt.host,
-                    &prompt.command,
-                    prompt.risk,
-                    message,
-                    prompt.change_id.as_deref(),
-                );
-                Err(format!("{message}; run through the daemon approval flow"))
-            },
+        let result = authorize_command_without_approval_handler(
+            source,
+            &target.host,
+            &target.tags,
+            target.risk_override,
+            command,
+            force,
+            reason.clone(),
+            change_id.clone(),
+            None,
+            "approval required but no local MCP approval handler is available",
+            "; run through the daemon approval flow",
         )
         .await
         .map_err(mcp_authorization_error)?;
@@ -112,35 +84,21 @@ pub(super) async fn authorize_local_mcp_playbook_run(
         .find(|item| item.name == playbook)
         .and_then(|item| item.risk_override);
     let risk_override = playbook_risk_override.or(target.risk_override);
-    let auth_scope = None;
     let mut approved_steps = Vec::new();
 
     for step in dry_run.steps {
-        let result = authorize_command_with_approval(
-            CommandAuthorizationInput {
-                auth_scope: &auth_scope,
-                source,
-                host,
-                tags: &target.tags,
-                risk_override,
-                command: &step.command_resolved,
-                force,
-                reason: reason.clone(),
-                change_id: change_id.clone(),
-                side_effect: None,
-            },
-            |prompt| async move {
-                let message = "approval required but no local MCP approval handler is available";
-                append_rejected_exec_audit(
-                    &prompt.source,
-                    &prompt.host,
-                    &prompt.command,
-                    prompt.risk,
-                    message,
-                    prompt.change_id.as_deref(),
-                );
-                Err(format!("{message}; run through the daemon approval flow"))
-            },
+        let result = authorize_command_without_approval_handler(
+            source,
+            host,
+            &target.tags,
+            risk_override,
+            &step.command_resolved,
+            force,
+            reason.clone(),
+            change_id.clone(),
+            None,
+            "approval required but no local MCP approval handler is available",
+            "; run through the daemon approval flow",
         )
         .await
         .map_err(mcp_authorization_error)?;
@@ -159,32 +117,18 @@ pub(super) async fn authorize_local_mcp_operation(
     source: &str,
 ) -> std::result::Result<(), McpError> {
     let target = command_authorization_target(host);
-    let auth_scope = None;
-    authorize_command_with_approval(
-        CommandAuthorizationInput {
-            auth_scope: &auth_scope,
-            source,
-            host,
-            tags: &target.tags,
-            risk_override: target.risk_override,
-            command,
-            force,
-            reason: None,
-            change_id: None,
-            side_effect: None,
-        },
-        |prompt| async move {
-            let message = "approval required but no local MCP approval handler is available";
-            append_rejected_exec_audit(
-                &prompt.source,
-                &prompt.host,
-                &prompt.command,
-                prompt.risk,
-                message,
-                prompt.change_id.as_deref(),
-            );
-            Err(format!("{message}; run through the daemon approval flow"))
-        },
+    authorize_command_without_approval_handler(
+        source,
+        host,
+        &target.tags,
+        target.risk_override,
+        command,
+        force,
+        None,
+        None,
+        None,
+        "approval required but no local MCP approval handler is available",
+        "; run through the daemon approval flow",
     )
     .await
     .map_err(mcp_authorization_error)?;

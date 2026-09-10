@@ -168,6 +168,59 @@ pub fn append_rejected_exec_audit(
     let _ = append_audit(&result, risk, Some(reason), change_id, Some(source));
 }
 
+/// Authorize a command for call sites that have no local approval UI.
+///
+/// Builds the [`CommandAuthorizationInput`] and supplies an approval handler
+/// that records the rejection to the audit log and fails with a composed
+/// message.
+///
+/// `rejection_message` is the clean, operator-facing reason recorded in the
+/// audit log and used as the base of the returned error. `rejection_hint` is
+/// appended *only* to the returned `Err` (the interactive user hint), so the
+/// audit trail stays free of instruction text. Callers pass the exact
+/// user-visible wording for each surface (CLI / MCP / desktop).
+pub async fn authorize_command_without_approval_handler(
+    source: &str,
+    host: &str,
+    tags: &[String],
+    risk_override: Option<RiskLevel>,
+    command: &str,
+    force: bool,
+    reason: Option<String>,
+    change_id: Option<String>,
+    side_effect: Option<String>,
+    rejection_message: &str,
+    rejection_hint: &str,
+) -> Result<CommandAuthorization, CommandAuthorizationError> {
+    let auth_scope = None;
+    authorize_command_with_approval(
+        CommandAuthorizationInput {
+            auth_scope: &auth_scope,
+            source,
+            host,
+            tags,
+            risk_override,
+            command,
+            force,
+            reason,
+            change_id,
+            side_effect,
+        },
+        |prompt| async move {
+            append_rejected_exec_audit(
+                &prompt.source,
+                &prompt.host,
+                &prompt.command,
+                prompt.risk,
+                rejection_message,
+                prompt.change_id.as_deref(),
+            );
+            Err(format!("{rejection_message}{rejection_hint}"))
+        },
+    )
+    .await
+}
+
 pub async fn authorize_command_with_approval<F, Fut>(
     input: CommandAuthorizationInput<'_>,
     approval: F,
