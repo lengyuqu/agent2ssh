@@ -291,14 +291,16 @@ Agent2SSH 是一个 Rust core，通过四个 surface 暴露：Tauri 桌面、CLI
 - **验收**：与 WebDAV 同语义的 push/pull/冲突检测。
 - **评估结论**：transport 抽象已就位——`webdav_sync.rs` 的 `SyncRemote` trait（`ensure_layout`/`read`/`write`）让同步算法与后端解耦。GitHub 通道 = 实现一个 `GitHubRemote`（GitHub Contents API + base64 + ETag CAS + token 管理）+ 配置 + CLI。但 WebDAV 已满足核心同步需求，GitHub 通道是 P2 里成本最高、边际价值最低的项，故标注后续，未来有需求时按 `SyncRemote` 接口落地。
 
-#### G13 · known_hosts 与系统 ssh 共享（哲学取舍）—— **P1 · ✅ 已实现单向导入（2026-08-13）**
+#### G13 · known_hosts 与系统 ssh 共享（哲学取舍）—— **P1 · ✅ 已实现导入 + 移除（2026-08-13 / 2026-09-12）**
 
 - **是什么**：rssh 直接读写系统 `~/.ssh/known_hosts`，命令行信任过的主机 GUI 不再问。Agent2SSH 自建 `known_hosts.json`（TOFU）。
 - **为什么值得**：rssh 的观点——"同一份真相，两个工具共用，换工具成本为零"。但 Agent2SSH 面向 Agent 自动化，自建 + TOFU 有真实理由：不污染用户 ssh 的信任库、可纳入 sync 策略、可做指纹变更拒绝。**两者都有道理，不必二选一**。
 - **建议**：保持自建 `known_hosts.json` 为主，但增加**双向导入/导出**（`ssh-keyscan` 式导入系统 known_hosts + 导出回写），让"命令行 ssh 信任过的主机"能一键进 Agent2SSH。
 - **落点**：`ssh_config.rs` / 新增 `known_hosts` 导入导出命令。
 - **验收**：导入后 Agent2SSH 对已信任主机不再 TOFU 提示；导出不覆盖系统里 Agent2SSH 未管理的条目。
-- **已落地**：新增 `embedded_ssh::import_known_hosts_from_ssh()`（解析 OpenSSH `known_hosts` 明文行，从 base64 key 重算 SHA256 指纹写入 `known_hosts.json`；跳过 hashed `|1|...` 行与指纹冲突项），暴露为 Tauri command `import_known_hosts` + CLI `agent2ssh known-hosts import [--path]` + 前端 `api.importKnownHosts`。**导出回写系统 known_hosts 不可行**——`TrustedHostFingerprint` 只存 SHA256 指纹、无完整 public key，无法构造 OpenSSH 标准行；故只做单向导入（命令行 ssh 信任 → Agent2SSH）。
+- **已落地（导入，2026-08-13）**：新增 `embedded_ssh::import_known_hosts_from_ssh()`（解析 OpenSSH `known_hosts` 明文行，从 base64 key 重算 SHA256 指纹写入 `known_hosts.json`；跳过 hashed `|1|...` 行与指纹冲突项），暴露为 Tauri command `import_known_hosts` + CLI `agent2ssh known-hosts import [--path]` + 前端 `api.importKnownHosts`。
+- **已落地（移除，2026-09-12）**：`embedded_ssh::remove_system_known_host()` 是 `ssh-keygen -R` 的等价物——按主机名（或 `[host]:port` 形式）删掉系统 `known_hosts` 里的条目，就地重写并留 `.bak`。暴露为 Tauri command `forget_system_known_host`（Host Management 每行的「Forget in OpenSSH known_hosts」）+ CLI `agent2ssh known-hosts forget <host> [--port] [--json]`，与导入侧的三个面一一对应。
+- **修正一处早先的结论**：本条目原先写「**导出回写系统 known_hosts 不可行**——`TrustedHostFingerprint` 只存 SHA256 指纹、无完整 public key，无法构造 OpenSSH 标准行；故只做单向导入」。前半句成立，但**只否定了"写"**：*删除*不需要完整 public key，按 hostname/pattern 匹配即可，所以"只做单向"的结论下得过早。准确表述是：**导出（写新条目）不可行，移除（删已有条目）可行**，当前面向系统 `~/.ssh/known_hosts` 的能力是「导入 + 移除」，仍不含导出回写。
 
 ### 4.4 CLI-first 体验
 
@@ -332,7 +334,7 @@ Agent2SSH 是一个 Rust core，通过四个 surface 暴露：Tauri 桌面、CLI
 | G10 | OSC 命令边界 + exit code | P1 | 中 | `osc_ipc.rs` | 命令块自闭合、审计到命令粒度 |
 | G4 | 块级脱敏一致性 | P1 | 中 | `terminal/command-block-redaction.ts` | 人/Agent/审计三者一致 |
 | G6 | side_effect 声明字段 | P1 | 小 | MCP tool schema | 审批弹窗展示副作用 |
-| G13 | known_hosts 双向导入导出 | P1 | 中 | `ssh_config.rs` | 与系统 ssh 共享信任，需决策 |
+| G13 | known_hosts 与系统 ssh 共享（导入 + 移除；导出回写不可行） | P1 | 中 | `ssh_config.rs` / `embedded_ssh.rs` | 与系统 ssh 共享信任，需决策 |
 | G2 | 复制为图片 | P2 | 中 | `terminal/block-to-image.ts` | PNG 贴图不丢颜色 |
 | G3 | Prompt 切分模式 | P2 | 小 | `terminal/prompt.ts` | 更贴合命令边界 |
 | G8 | download 硬上限 | P2 | 小 | `sftp_transfer.rs` | 防 Agent 静默拉巨型文件 |

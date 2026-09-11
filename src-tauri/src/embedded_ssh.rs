@@ -494,10 +494,12 @@ pub fn import_known_hosts_from_ssh(path: Option<&str>) -> Result<KnownHostImport
     Ok(KnownHostImportSummary { imported, skipped })
 }
 
-// TODO(unwired): no caller in the repository (CLI/MCP/desktop/daemon all use the
-// app-managed `known_hosts.json` store via `remove_known_host_core` instead).
-// Kept because a "forget this host in OpenSSH too" affordance is a plausible
-// near-term feature; wire it to a command or delete it.
+// The withdraw to `import_known_hosts_from_ssh`'s grant. Reached from two
+// places: `tauri_commands::forget_system_known_host`, which backs the "Forget
+// in OpenSSH known_hosts" action in Host Management, and the CLI's
+// `known-hosts forget`. The app-managed `known_hosts.json` store stays a
+// separate thing — `remove_known_host_core` covers that — and the two are
+// deliberately not merged, because this one edits a file OpenSSH also writes.
 /// Finding 18: Remove a host entry from the system OpenSSH `~/.ssh/known_hosts`.
 ///
 /// Equivalent to `ssh-keygen -R <hostname>`. Removes all lines matching the

@@ -2255,18 +2255,13 @@ pub async fn sftp_mkdir_core_with_source(
     .await
 }
 
-// TODO(unwired): The SFTP rename/remove cluster below is fully implemented but
-// currently unreachable — no `#[tauri::command]` wrapper is registered for it
-// (see `tauri_commands.rs`) and no CLI/MCP/daemon surface calls it either, so
-// nothing in the repository invokes any of these eight functions:
-//   sftp_rename_core / sftp_rename_core_with_source
-//   sftp_remove_file_core / sftp_remove_file_core_with_source
-//   sftp_remove_dir_core / sftp_remove_dir_core_with_source
-//   sftp_remove_dir_all_core / sftp_remove_dir_all_core_with_source
-// Kept (not deleted) pending a product decision on whether remote rename/delete
-// ships. If it does not, delete the whole block; if it does, wire it up through
-// `tauri_commands.rs` and the frontend and drop this note.
-// The `_with_source` variants are only reachable from their `_core` wrappers.
+// The SFTP rename/remove cluster. Each operation comes in two shapes: a `_core`
+// wrapper that resolves the transport source itself, and a `_with_source`
+// variant that takes it from the caller. The CLI, the MCP server and the daemon
+// call the `_with_source` form directly; `tauri_commands.rs` wraps the same
+// shape for the desktop. All four are rated by `classify_risk_single`, which
+// mirrors the equivalent shell verbs for the synthetic `sftp <op> <path>`
+// strings these surfaces build — see the `sftp` branch there.
 
 /// Finding 3: SFTP rename — rename a remote file or directory.
 pub async fn sftp_rename_core(

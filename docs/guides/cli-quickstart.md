@@ -388,6 +388,18 @@ Agent2SSH 首次连接主机时会自动信任 SSH host key，并保存到 `~/.a
 
 如果你确认远端主机重装或合法轮换了 SSH host key，可以删除 `known_hosts.json` 中对应条目后重新连接。不要共享或提交该文件，它是本机信任状态。
 
+Agent2SSH 自建的 `known_hosts.json` 与 OpenSSH 自己的 `~/.ssh/known_hosts` 是**两份独立状态**。若要在两者之间搬动信任，用 `known-hosts` 子命令：
+
+```bash
+# 把 OpenSSH 已信任的主机导入 Agent2SSH（跳过 hashed 行与指纹冲突项）
+agent2ssh known-hosts import [--path <file>]
+
+# 从 OpenSSH 的 ~/.ssh/known_hosts 里移除某台主机 —— 等价于 `ssh-keygen -R`
+agent2ssh known-hosts forget <host> [--port N] [--json]
+```
+
+`forget` 按主机名匹配裸主机名形式与 `[host]:port` 形式，就地重写文件并留一份 `.bak`；没有命中时打印提示而不是报错（与 `ssh-keygen -R` 一致）。反向的**导出回写**暂不支持——本机信任记录只保存 SHA256 指纹、没有完整 public key，无法构造 OpenSSH 标准行。
+
 ---
 
 ## 审计日志 (audit)

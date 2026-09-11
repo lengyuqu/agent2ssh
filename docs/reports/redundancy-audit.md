@@ -219,7 +219,7 @@
 | 项 | 差距 | 落地 |
 |---|---|---|
 | `sftp_rename_core` / `sftp_remove_file_core` / `sftp_remove_dir_core` / `sftp_remove_dir_all_core` | `core.rs` 里实现完整（`remove_dir_all` 是 BFS 递归删除）且带单测；`store.rs` 的分类器**已为 `sftp_rename` / `sftp_remove` 预留分支**，`types.rs` 的文档也列了这两个 action label。但没有 CLI 子命令、没有 MCP 工具、没有 daemon 路由、没有 Tauri 命令、前端无 UI —— 五个入口全部不可达 | CLI `sftp rename\|rm\|rmdir\|rm-rf`；MCP `ssh_sftp_rename` / `_rm` / `_rmdir` / `_rm_rf`（工具数 54 → 58）；daemon `POST /sftp/rename\|rm\|rmdir\|rm-rf`；桌面命令 ×4 + SFTP 面板远程行右键菜单 |
-| `remove_system_known_host` | 是 G13 `import_known_hosts_from_ssh` 的对偶（`ssh-keygen -R`），CLI 与 daemon 已可达，但桌面端只有「导入」一半，且该函数在桌面侧**零调用点** | 新增 `forget_system_known_host` 命令 + Host Management 每行「从 OpenSSH known_hosts 移除」 |
+| `remove_system_known_host` | 是 G13 `import_known_hosts_from_ssh` 的对偶（`ssh-keygen -R`）。⚠️ **本轮初稿在此写错过**：当时写「CLI 与 daemon 已可达」，事后 `git grep` 实测确认**全仓零调用点**——CLI 侧只有 `known-hosts import`，daemon/MCP 两侧从来没有 known_hosts 面 | 桌面新增 `forget_system_known_host` 命令 + Host Management 每行「从 OpenSSH known_hosts 移除」；又补 CLI `agent2ssh known-hosts forget <host> [--port] [--json]`，使与导入侧的三个面（Tauri 命令 / CLI / 前端 api）一一对应 |
 | `save_algo_prefs` | 读侧是真跑的（`embedded_ssh.rs:266` / `:1416` 每次握手前 `load_algo_prefs`），但没有任何代码写 `ssh_algos.json`，该文件名在所有文档里都**未出现过** —— 等于一个只能手改、且未文档化的隐形配置 | Settings 新增「SSH algorithms」分区 + 编辑对话框（8 个字段、与内置默认值差异标记、一键恢复）；保存前校验 |
 
 > **接线前的安全前提**：SFTP 这四条在任何 surface 都不执行 shell，只构造 `sftp <op> <path>` 字符串用于风险分类 / 审批策略 / 审计 action。`classify_risk_single` 只认 shell 动词，canonical head 恒为 `sftp`，于是 `rm` 规则一条都匹配不到、全部落到默认 verdict —— **实测 `sftp rm-rf /` = low**。而审批是 opt-in（无策略命中即自动批准），所以直接接线会让「递归删远端 `/`」被静默放行。已先在 `classify_risk_single` 加 `sftp` 分支镜像 shell 表（`rm-rf /`、`/*`、`/.` → blocked；其它 `rm-rf` → high；`rename` → medium；`rm`/`rmdir` 保持 low），并补 2 个单测（含一个断言路径里夹 `;` 的链式载荷仍被链式检测抓住）。
@@ -240,8 +240,39 @@
 
 ## 本轮的验证
 
-`cargo fmt --check` clean；clippy 四目标（CLI+MCP / daemon / lib 非默认 / lib 默认 tauri）各 0 warning；`cargo test --lib` 607、`--no-default-features --lib` 599、`cli_contract` 27、`cli_smoke` 33、`daemon_integration` 57、`connect_deadline` 2 全绿；`npm test` 79、`npm run lint` 95 文件 clean、`npm run build` 通过、`check-i18n.mjs` 无缺失键。
+`cargo fmt --check` clean；clippy 四目标（CLI+MCP / daemon / lib 非默认 / lib 默认 tauri）各 0 warning；`cargo test --lib` 607、`--no-default-features --lib` 599、`cli_contract` 29（含本轮新增 2 个 `known-hosts` 契约用例）、`cli_smoke` 33、`daemon_integration` 57、`connect_deadline` 2 全绿；`npm test` 79、`npm run lint` 96 文件 clean、`npm run build` 通过、`check-i18n.mjs` 无缺失键。
 
 **顺带修掉的三个既有缺陷**（见 `CHANGELOG.md`）：① 上面那个 `sftp` 风险洞；② 工具数 54 → 58 后 2 处测试断言 + 8 个文档文件 14 处计数未同步；③ `test_timed_out_approval_cannot_be_approved` 的墙钟竞态（TTL 判定用 `Utc::now()` 而 `tokio::time::sleep` 走单调钟，单发 sleep 在 6 次整轮运行里挂了 1 次）。
 
 **同时发现并已规避的工程陷阱**：并行发出的多个 `Edit` 调用若打在同一文件上会互相覆盖（各读原文件、后写者胜），本轮因此丢过 2 处写入（`api.ts` 的类型导入、`AlgoPrefsDialog` 的一处 `t()` 字面量），均已补回。同文件多改必须串行。
+
+## 复查（2026-09-12）：接线是否真的完成
+
+用户追问「该实现的实现了吗？」，于是重做一次**功能级**核查（不是只看 diff，因为「不可达」正是 diff 看不出的失败模式）。结果分三类：
+
+### 已确认接通（用编译出来的二进制实测）
+
+| 项 | 证据 |
+|---|---|
+| SFTP 四操作 | `agent2ssh sftp --help` 列出 `rename`/`rm`/`rmdir`/`rm-rf`；`risk` 实测 `sftp rm-rf /` → blocked、`sftp rm-rf /home` → high、`sftp rename` → medium、`sftp rm`/`sftp rmdir` → low，与 `rm -rf /` / `rm -rf /home` / `mv` 逐条一致 |
+| MCP 四工具 | `mcp_stdio_end_to_end_initialize_tools_and_risk` 走真实 stdio 握手并断言 `tools/list` = 58 |
+| 算法偏好 | `get_algo_prefs` 读侧本就在 `embedded_ssh.rs:266`/`:1416` 每次握手前跑；写侧新增三命令 + 前端对话框 |
+
+四个符号（`sftp_*_core_with_source` 各变体、`remove_system_known_host`）现在都有**自身模块之外的调用点**，由 `git grep` 逐个确认。
+
+### 复查才发现的遗漏与错误（已修）
+
+1. **CLI 少一个对偶**：CLI 只有 `known-hosts import`，而 `KnownHostsCommands` 枚举**只挂了一个 `Import` 变体**——本就是为对偶预留的形状。G13 的三面约定是「Tauri 命令 + CLI + 前端 api」，desktop 与前端都有了两向，只有 CLI 缺。已补 `known-hosts forget <host> [--port] [--json]`，并用临时 `HOME` + 四行伪 `known_hosts` 实测（裸主机名 / `[host]:port` / 多别名行 / hashed `|1|` 行 / 注释保留 / `.bak` 生成 / miss 不报错）。
+2. **两处 `TODO(unwired)` 注释在代码接线后没删**：`core.rs` 仍说 SFTP 簇「八函数无任何仓库内调用者」，`embedded_ssh.rs` 仍说 `remove_system_known_host`「no caller in the repository」——两者在写下时成立、接线后为假。**这种注释最坏的形态就是这个**：想知道「还有什么没接线」的直觉做法正是 grep 这个字符串，而它会指向两处已经上线的东西。已改为描述真实调用点。
+3. **CHANGELOG 与审计报告里一句事实错误**：初稿称 `remove_system_known_host`「CLI 与 daemon 已可达」，实测为假（全仓零调用点）。已修正。
+4. **G13 设计文档的结论下得过早**：`docs/rssh-design-analysis.md` 写「导出回写系统 known_hosts 不可行——只存 SHA256 指纹、无完整 public key，故只做单向导入」。前半句只否定了**写**；**删**按 hostname 匹配，不需要 key 材料。已修正为「导出不可行、移除可行」，状态行由「双向导入导出」改为「导入 + 移除」。
+
+### 仍无调用且已定性为冗余（有意保留）
+
+`emit_bus`（0 调用点）、`is_headless` / `is_cli`（0 调用点）、`policy_risk_rules`（0 调用点）。四者都保留 `TODO(unwired)` 标注，且该标注**仍然准确**。它们的详情见上面「第二类」。
+
+## 本轮（复查）的验证
+
+`cargo fmt --check` clean；`cargo build --no-default-features --bin agent2ssh` 通过；CLI `sftp --help` / `known-hosts --help` / `risk` 输出已实测（见上）；完整矩阵随后重跑。
+
+**方法论教训**：只 grep 调用点会漏掉「有调用点但路径根本跑不通」的情形，只读 diff 则会漏掉「没人调用」——`TODO(unwired)` 这类标注**在接线时必须同步删除**，否则它会反过来成为下一次审计的错误信源。
