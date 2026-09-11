@@ -19,6 +19,27 @@
 #    builds platform-native installers (DMG, AppImage, deb, MSI/NSIS).
 #
 # No separate dry-run job is needed: the PR build IS the dry-run.
+#
+# ⚠️ WHEN YOU BUMP AN ACTION VERSION BELOW, ALSO UPDATE THE REPOSITORY SETTING.
+# This repository restricts Actions to an explicit allow-list
+# (Settings → Actions → General → "Allow select actions"), and the patterns in
+# it are matched against `owner/repo@ref` — so they pin the *version* too.
+# `github_owned_allowed` covers `actions/*` at any version, but a third-party
+# action (here `softprops/action-gh-release`) is only permitted if the list
+# holds its exact ref. When the list and the workflow drift apart the run dies
+# in `startup_failure` with zero jobs and no log to read, which is hard to
+# diagnose from the UI. Sync them together:
+#
+#   gh api repos/lengyuqu/agent2ssh/actions/permissions/selected-actions
+#   gh api -X PUT repos/lengyuqu/agent2ssh/actions/permissions/selected-actions \
+#     -F github_owned_allowed=true -F verified_allowed=false \
+#     -f 'patterns_allowed[]=actions/checkout@v7' \
+#     -f 'patterns_allowed[]=actions/setup-node@v7' \
+#     -f 'patterns_allowed[]=actions/cache@v6' \
+#     -f 'patterns_allowed[]=dtolnay/rust-toolchain@stable' \
+#     -f 'patterns_allowed[]=softprops/action-gh-release@v3'
+#
+# (Use -F for the booleans; -f sends them as strings and the API rejects that.)
 # =============================================================================
 
 name: CI
@@ -30,6 +51,11 @@ on:
     branches: [main]
   release:
     types: [published]
+  # Lets a maintainer re-trigger the checks without pushing a commit. A run that
+  # dies in `startup_failure` — for example when the repository's allowed-actions
+  # list no longer matches the versions pinned below — cannot be re-run from the
+  # UI or the API, so this is the only way back without a new commit.
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
