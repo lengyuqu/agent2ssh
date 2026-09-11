@@ -637,6 +637,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ExecMultiBatchResult" }
+        "400":
+          description: Command too long, or the requested hosts/tags matched no configured host
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scope denied or approval rejected
           content:
@@ -672,6 +677,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ExecComparison" }
+        "400":
+          description: Command too long, or the requested hosts/tags matched no configured host
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scope denied or approval rejected
           content:
@@ -1736,7 +1746,7 @@ paths:
                     type: array
                     items: { type: string }
         "400":
-          description: Missing host/hosts or unknown target
+          description: Missing host/hosts, unknown target, or an empty multi-host/tag selection
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -2025,7 +2035,7 @@ paths:
           schema:
             type: array
             items: { type: string }
-          description: Host aliases to collect health from (default: all configured hosts).
+          description: "Host aliases to collect health from (default: all configured hosts)."
         - name: timeout_secs
           in: query
           schema: { type: integer, default: 10 }

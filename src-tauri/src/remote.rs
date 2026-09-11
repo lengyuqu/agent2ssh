@@ -1,6 +1,8 @@
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::sync::OnceLock;
+use std::time::Duration;
 
 use crate::{
     store::{config_dir, glob_match},
@@ -371,21 +373,43 @@ pub fn read_local_token() -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
+/// Budget for a single `/health` probe.
+const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The shared client used by [`check_health_blocking`].
+///
+/// `reqwest::blocking::Client` owns a dedicated runtime thread and hands each
+/// request to it over a channel, so one client serves every probe. Building one
+/// per probe spawned and joined that thread for each daemon in the list.
+/// Construction only fails if the runtime thread cannot start.
+fn health_probe_client() -> Option<&'static reqwest::blocking::Client> {
+    static CLIENT: OnceLock<Option<reqwest::blocking::Client>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::blocking::Client::builder()
+                .timeout(HEALTH_PROBE_TIMEOUT)
+                .build()
+                .ok()
+        })
+        .as_ref()
+}
+
 /// Synchronous health check (used by list_daemons_core which is not async).
-/// Returns true if GET /health responds 200 within 2 seconds.
+/// Returns true if GET /health responds 2xx within 2 seconds.
 fn check_health_blocking(url: &str) -> bool {
     let health_url = format!("{}/health", url.trim_end_matches('/'));
-    // Keep the synchronous API from blocking its caller while using the exact
-    // configured scheme and hostname. In particular, HTTPS must not receive a
-    // plaintext HTTP request and DNS names must not fall back to localhost.
+    // Use a real client so the configured scheme and hostname are honoured: an
+    // `https://` remote must not be probed with a plaintext request, and a
+    // hostname must not fall back to the loopback daemon address when it cannot
+    // be parsed as an address literal.
+    //
+    // The probe runs on a scoped thread because `reqwest::blocking` must not be
+    // driven from inside the caller's async context. This is why the function is
+    // synchronous: `list_daemons_core` joins the thread, so it blocks its caller
+    // for at most [`HEALTH_PROBE_TIMEOUT`].
     std::thread::scope(|s| {
         let handle = s.spawn(move || -> bool {
-            use std::time::Duration;
-
-            let Ok(client) = reqwest::blocking::Client::builder()
-                .timeout(Duration::from_secs(2))
-                .build()
-            else {
+            let Some(client) = health_probe_client() else {
                 return false;
             };
             client

@@ -608,15 +608,19 @@ pub(crate) fn connect_tcp_address(host: &str, port: u16, timeout_secs: u64) -> R
         return Err(anyhow!("failed to resolve {address}"));
     }
 
-    // Try every resolved address within one total budget. This handles the
-    // common case where an unreachable AAAA record precedes a usable A record.
+    // Try every resolved address within one total budget, capped at 30 s so a
+    // caller asking for a longer SSH timeout does not spend all of it on a
+    // single unreachable address. This handles the common case where an
+    // unreachable AAAA record precedes a usable A record.
     let budget = Duration::from_secs(timeout_secs.min(30)).max(Duration::from_millis(1));
     let started = std::time::Instant::now();
-    let mut last_error = None;
+    let mut failures = Vec::new();
+    let mut skipped = 0usize;
     for socket_addr in socket_addrs {
         let elapsed = started.elapsed();
         if elapsed >= budget {
-            break;
+            skipped += 1;
+            continue;
         }
         let remaining = budget - elapsed;
         match TcpStream::connect_timeout(&socket_addr, remaining) {
@@ -626,16 +630,24 @@ pub(crate) fn connect_tcp_address(host: &str, port: u16, timeout_secs: u64) -> R
                 tcp.set_write_timeout(Some(io_timeout))?;
                 return Ok(tcp);
             }
-            Err(error) => last_error = Some(error),
+            Err(error) => failures.push(format!("{socket_addr}: {error}")),
         }
     }
 
-    Err(anyhow!(
-        "failed to connect to {address}: {}",
-        last_error
-            .map(|error| error.to_string())
-            .unwrap_or_else(|| "connection timeout".to_string())
-    ))
+    // Report every attempt. A host that resolves to both an A and an AAAA
+    // record usually fails for a different reason on each, and keeping only the
+    // last one hides the address whose error explains the outage.
+    let mut detail = if failures.is_empty() {
+        "connection timed out".to_string()
+    } else {
+        failures.join("; ")
+    };
+    if skipped > 0 {
+        detail.push_str(&format!(
+            "; {skipped} further address(es) not attempted after the {budget:?} connect budget"
+        ));
+    }
+    Err(anyhow!("failed to connect to {address}: {detail}"))
 }
 
 fn connect_direct_tcp(host: &HostProfile, timeout_secs: u64) -> Result<TcpStream> {

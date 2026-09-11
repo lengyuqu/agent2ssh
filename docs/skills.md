@@ -17,8 +17,8 @@ the `mcp_tools_match_skills_md_documentation` integration test.
 | 5 | `ssh_remove_host` | Remove a configured SSH host profile by alias. |
 | 6 | `ssh_exec` | Run a non-interactive command over SSH. Returns stdout, stderr, exit code, timing, and risk level. High-risk commands require `force: true`; blocked commands always fail. Optionally forward to a remote daemon via `daemon_alias`. |
 | 7 | `ssh_ping` | Check SSH reachability of one or more hosts. Returns reachable status and latency for each. |
-| 8 | `ssh_exec_multi` | Run the same command on multiple hosts concurrently. Returns an array of per-host results. Supports optional batch strategy for concurrency limits, failure thresholds, and batched rollout. |
-| 9 | `ssh_exec_compare` | Compare execution results across multiple hosts. Groups by exit code and highlights stdout/stderr differences. Provide either results directly or run a command on multiple hosts. |
+| 8 | `ssh_exec_multi` | Run the same command on multiple hosts concurrently. Returns an array of per-host results. Supports optional batch strategy for concurrency limits, failure thresholds, and batched rollout. Fails when the requested hosts or tags match no configured host. |
+| 9 | `ssh_exec_compare` | Compare execution results across multiple hosts. Groups by exit code and highlights stdout/stderr differences. Provide either results directly or run a command on multiple hosts. Fails when the multi-host selection matches no configured host. |
 | 10 | `ssh_audit` | Return recent SSH execution audit log entries with optional filtering. |
 | 11 | `ssh_audit_export` | Export audit log entries as JSONL or CSV with optional filtering. Redaction is applied at write time so exported data preserves redaction. |
 | 12 | `ssh_sftp_ls` | List a remote directory via embedded SFTP. |
@@ -53,7 +53,7 @@ the `mcp_tools_match_skills_md_documentation` integration test.
 | 41 | `ssh_config_import_preview` | Preview what a team config import will change without actually importing. Shows hosts to add, skip, update, and risk rules/playbook changes. |
 | 42 | `ssh_doctor` | Run diagnostic checks on the agent2ssh environment: embedded SSH/keygen capability, config directory, `hosts.json`, daemon token permissions, daemon health, optional config files, and audit log size. |
 | 43 | `ssh_metrics` | Retrieve basic metrics from the local agent2ssh daemon (requests, execs, blocked commands, durations, approvals). Reads from `GET /metrics` on `127.0.0.1:7722`. |
-| 44 | `ssh_preview_exec` | Preview what an execution will do before running it. Returns target hosts, commands, risk levels, warnings, and whether approval is required. Supports single-host and multi-host preview. |
+| 44 | `ssh_preview_exec` | Preview what an execution will do before running it. Returns target hosts, commands, risk levels, warnings, and whether approval is required. Supports single-host and multi-host preview. Fails when a multi-host selection matches no configured host, matching `ssh_exec_multi`. |
 | 45 | `ssh_approval_policies_list` | List all configured approval policies. Each policy specifies when approval is required based on host, tags, risk level, and command pattern. |
 | 46 | `ssh_approval_check` | Check whether running a command on a specific host requires approval based on configured policies. Returns the matching policy name and whether approval is needed. |
 | 47 | `ssh_health_snapshot` | Collect a health snapshot (uptime, disk, memory, load, SSH latency) for configured hosts. Returns per-host data collected concurrently via SSH. |

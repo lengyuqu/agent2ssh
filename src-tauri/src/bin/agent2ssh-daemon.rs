@@ -1172,7 +1172,7 @@ async fn exec_multi(
         strategy: body.strategy,
     })
     .await
-    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    .map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
     Ok(Json(batch_result))
 }
 
@@ -1213,7 +1213,7 @@ async fn exec_compare(
         source: Some(source),
     })
     .await
-    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    .map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
     Ok(Json(compare_exec_results(&results)))
 }
 

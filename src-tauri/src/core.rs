@@ -755,6 +755,21 @@ fn expand_hosts_by_tags(hosts: Vec<String>, tags: Option<Vec<String>>) -> Result
     Ok(expanded)
 }
 
+/// Resolve the target list for a multi-host operation, rejecting an empty one.
+///
+/// `hosts` may legitimately be empty when the caller selected targets by tag, so
+/// an empty resolved list always means nothing matched. Both the plan and the
+/// execution paths resolve through here: a mistyped `--tags` has to fail the
+/// preview the same way it fails the run, or the preview reports that a command
+/// nobody will receive is safe to send.
+fn resolve_exec_targets(hosts: Vec<String>, tags: Option<Vec<String>>) -> Result<Vec<String>> {
+    let resolved = expand_hosts_by_tags(hosts, tags)?;
+    if resolved.is_empty() {
+        return Err(anyhow!("no hosts matched the requested hosts or tags"));
+    }
+    Ok(resolved)
+}
+
 /// Preview an execution plan for multiple hosts.
 pub async fn preview_exec_multi(
     hosts: Vec<String>,
@@ -765,7 +780,7 @@ pub async fn preview_exec_multi(
     validate_command_length(command)?;
     let timeout = timeout_secs.unwrap_or(60);
 
-    let resolved_names = expand_hosts_by_tags(hosts, tags)?;
+    let resolved_names = resolve_exec_targets(hosts, tags)?;
 
     let built_in_risk = classify_risk(command);
     let classified_risk = crate::risk_config::classify_effective_risk(command, built_in_risk).await;
@@ -1338,10 +1353,7 @@ pub async fn exec_multi_core(request: ExecMultiRequest) -> Result<Vec<ExecMultiR
         change_id,
         source,
     } = request;
-    let resolved_hosts = expand_hosts_by_tags(hosts, tags)?;
-    if resolved_hosts.is_empty() {
-        return Err(anyhow!("no hosts matched the requested hosts or tags"));
-    }
+    let resolved_hosts = resolve_exec_targets(hosts, tags)?;
 
     let mut set = JoinSet::new();
 
@@ -1409,10 +1421,7 @@ pub async fn exec_multi_with_strategy(
     } = request;
     let started = Instant::now();
 
-    let resolved_hosts = expand_hosts_by_tags(hosts, tags)?;
-    if resolved_hosts.is_empty() {
-        return Err(anyhow!("no hosts matched the requested hosts or tags"));
-    }
+    let resolved_hosts = resolve_exec_targets(hosts, tags)?;
 
     let total_hosts = resolved_hosts.len();
 
@@ -3483,6 +3492,17 @@ mod tests {
         assert!(capture.into_bytes().is_empty());
     }
 
+    #[test]
+    fn bounded_capture_one_byte_budget_keeps_the_newest_byte() {
+        // The head takes `max_bytes / 2` and the tail the remainder, so an odd
+        // one-byte budget is all tail: it keeps the newest byte, not the oldest.
+        let mut capture = BoundedCapture::new(1);
+        capture.push(b"ab");
+        assert!(capture.truncated());
+        assert_eq!(capture.dropped_bytes(), 1);
+        assert_eq!(capture.into_bytes(), b"b");
+    }
+
     fn empty_exec_request() -> ExecMultiRequest {
         ExecMultiRequest {
             hosts: Vec::new(),
@@ -3517,6 +3537,40 @@ mod tests {
         .await
         .unwrap_err();
         assert!(error.to_string().contains("no hosts matched"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn preview_rejects_empty_targets_like_exec_does() {
+        // The tag path reads the config dir, so point it at an empty one rather
+        // than the machine's real configuration.
+        let config_dir = std::env::temp_dir().join(format!(
+            "agent2ssh-preview-empty-targets-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let previous = std::env::var("AGENT2SSH_CONFIG_DIR").ok();
+        std::env::set_var("AGENT2SSH_CONFIG_DIR", &config_dir);
+
+        // The preview and the run resolve through the same helper, so a
+        // selection that matches nothing cannot preview as a safe no-op while
+        // the run fails. Both an empty host list and a tag nobody carries must
+        // fail the preview.
+        let error = preview_exec_multi(Vec::new(), "true", None, Some(1))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("no hosts matched"));
+
+        let error = preview_exec_multi(Vec::new(), "true", Some(vec!["typo".into()]), Some(1))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("no hosts matched"));
+
+        match previous {
+            Some(value) => std::env::set_var("AGENT2SSH_CONFIG_DIR", value),
+            None => std::env::remove_var("AGENT2SSH_CONFIG_DIR"),
+        }
+        let _ = std::fs::remove_dir_all(&config_dir);
     }
 
     #[test]
