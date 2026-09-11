@@ -197,13 +197,23 @@ pub struct ExecRequest {
     /// Required for High-risk commands; ignored for Low/Medium; Blocked always fails.
     #[serde(default)]
     pub force: bool,
-    /// Kill the remote command after this many seconds (default 60).
+    /// Stop waiting for the remote command after this many seconds (default 60).
+    ///
+    /// The exec is bounded by this deadline and the timed-out attempt is
+    /// recorded in the audit log with no exit code. The client then closes the
+    /// SSH channel and drops the connection so the local worker (and its
+    /// blocking task) is released. Measured against OpenSSH 9.7, that does
+    /// **not** terminate the remote command: a pty-less exec channel's process
+    /// group is only cleaned up on the pty path. Wrap long-running commands in
+    /// `timeout(1)` on the remote side when the stop has to be guaranteed.
     #[serde(default)]
     pub timeout_secs: Option<u64>,
     /// Data to pipe into the remote command's stdin. The pipe is closed after writing.
     #[serde(default)]
     pub stdin: Option<String>,
-    /// Truncate stdout+stderr to this many bytes total (default 4 MiB).
+    /// Truncate stdout and stderr to this many bytes each (default 4 MiB).
+    /// Truncation keeps the head and the tail of a stream and records the
+    /// dropped middle in `ExecResult::dropped_bytes`.
     #[serde(default)]
     pub max_output_bytes: Option<usize>,
     /// Optional reason/note for this operation (for audit trail).

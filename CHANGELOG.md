@@ -6,16 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+- **Opt-in sshd fixture tests**: `src-tauri/tests/exec_fixture.rs` runs against a real sshd and covers the two runtime behaviours the unit suites structurally cannot reach — draining stdout and stderr off one SSH channel, and bounding a remote command by its timeout. The suite is skipped unless `AGENT2SSH_TEST_SSH_PORT` points at a reachable server; `scripts/sshd-fixture/Dockerfile` builds a throwaway alpine/OpenSSH container to point it at. Both bugs below passed the full unit, CLI and daemon suites before these tests existed.
+
 ### Changed
 - **WebDAV sync set convergence**: The desktop and CLI/daemon portable-config file lists were merged into the single `webdav_sync::SYNCABLE_FILES` constant, so every sync path now carries the same files. `webhook.toml` and `app_preferences.json` are synced from every entry point.
 - **Local-only configuration files**: `secrets.enc`, `snippets.json`, and `approval_policies.toml` are no longer part of WebDAV sync and do not cross machines. Machines that relied on cloud sync for shared credentials or snippets must migrate them manually.
 - **Byte units in the WebDAV Sync panel**: `formatBytes` now reports `KiB`/`MiB` consistently across the UI, replacing the panel's `KB`/`MB` labels.
+- **`ExecRequest::timeout_secs` contract**: The deadline bounds how long the client waits, not the lifetime of the remote command. Documented the measured OpenSSH 9.7 behaviour (below) and directed callers that need a guaranteed stop to wrap the command server-side in `timeout(1)`.
 
 ### Fixed
+- **stdout/stderr drain deadlock**: `exec_ssh_embedded` drained stdout to EOF before reading stderr. The SSH channel window is shared between the two streams, so a command that filled stderr while still holding stdout open blocked its own writes and the read never returned. Both streams are now read on every pass, EOF is taken from `Channel::eof`, and the deadline is enforced inside the loop. `max_output_bytes` is applied per stream via a head-and-tail accumulator, so a stderr flood can no longer grow the process without bound.
+- **Timed-out execs no longer leak a blocking worker**: The timeout path closed the channel while the session had already been switched back to blocking mode, and a blocking `close` waits for a server acknowledgement that only arrives once the remote command exits — so a 2 s deadline on an 8 s command returned after 8 s, and the abandoned `spawn_blocking` task kept the caller's runtime alive. The session now stays non-blocking through the teardown, and the post-drain exchange is bounded by an explicit session timeout instead of blocking indefinitely.
+- **Timed-out execs are audited**: A timeout previously returned straight out of the exec and wrote no audit entry, even though the command did run. Timeouts are now recorded with no exit code and a reason of `command timed out after Ns`.
+- **Bounded stderr capture**: `max_output_bytes` now caps stderr as well as stdout (each stream keeps its head and tail, and `dropped_bytes` reports the total discarded). Stderr was previously read to EOF with no limit, so a chatty remote command could grow the process without bound.
 - **WebDAV failures are surfaced**: The desktop sync actions and the automatic post-change sync now read `lastSuccess` off the returned status. Failures previously showed a success toast, and automatic sync failures produced no toast and no diagnostic at all, because the backend reports sync errors as a status rather than as a rejected call.
 - **Unix PATH detection**: `path_contains_dir` splits on the platform separator (`:` on Unix, `;` on Windows) instead of always `;`. Splitting on `;` made the whole Unix PATH a single segment, so the CLI status panel always reported the binaries as absent from `PATH`.
 - **Ephemeral-port port forwards**: `bind_port = 0` now binds IPv6 loopback on the port IPv4 actually received. Binding both stacks on the literal `0` gave them two different ephemeral ports while only IPv4's was recorded, so clients resolving `localhost` to `::1` reached the wrong port.
 - **Legacy WebDAV markers**: A pull from a marker that still lists a dropped or never-syncable file (`known_hosts.json`, `secrets.enc`, `snippets.json`, `approval_policies.toml`) is accepted and the entry is skipped, rather than failing the whole pull. This restores the 0.3.0 contract that a stale remote manifest cannot overwrite local SSH host-key trust state, credentials, or snippets.
+
+### Verified
+- Containerised OpenSSH 9.7 fixture (`scripts/sshd-fixture`) with the opt-in `exec_fixture` suite: 3 tests covering the stderr flood, the timeout deadline, and the timeout audit entry.
+- An 8 MiB stderr flood used to stall past a 30 s deadline; it now drains in under 2 s with both streams captured and truncated to `max_output_bytes`.
+- Measured limitation (not a regression): a pty-less exec channel's remote command survives the client closing the channel or dropping the connection (`docker exec ps` shows the process, and its `/tmp` marker appears after the client returned). Only the pty path reaps the process group, so a guaranteed stop requires a remote-side `timeout(1)`.
 
 ## [0.3.0] - 2026-08-12
 

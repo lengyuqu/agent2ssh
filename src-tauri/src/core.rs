@@ -1,11 +1,11 @@
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
-    io::{Read, Write},
+    io::{ErrorKind, Read, Write},
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
-    time::Instant,
+    thread,
+    time::{Duration, Instant},
 };
 use tokio::{sync::Semaphore, task::JoinSet};
 
@@ -907,6 +907,33 @@ struct EmbeddedExecOutput {
     dropped_bytes: usize,
 }
 
+/// Marks an exec that hit its own deadline, so the caller can report the timeout
+/// and still write the audit entry the command owes.
+#[derive(Debug)]
+struct ExecTimeout {
+    timeout_secs: u64,
+}
+
+impl std::fmt::Display for ExecTimeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SSH command timed out after {}s", self.timeout_secs)
+    }
+}
+
+impl std::error::Error for ExecTimeout {}
+
+/// Idle passes tolerated after the channel reports EOF before the drain ends.
+/// Covers a trailing extended-data (stderr) packet still in flight.
+const DRAIN_IDLE_PASSES_AFTER_EOF: u8 = 2;
+
+/// Sleep between non-productive drain passes. Matches the polling interval
+/// `embedded_ssh::bridge_tcp_and_channel` uses.
+const DRAIN_IDLE_SLEEP: Duration = Duration::from_millis(5);
+
+/// Bound on the blocking teardown exchange (`wait_close`) that runs after the
+/// command has already been drained to EOF. See `exec_ssh_embedded`.
+const TEARDOWN_TIMEOUT_MS: u32 = 30_000;
+
 fn exec_ssh_embedded(
     host: HostProfile,
     command: String,
@@ -922,51 +949,185 @@ fn exec_ssh_embedded(
         channel.send_eof()?;
     }
 
-    // Truncation keeps BOTH the head and the tail of the output. The trailing
-    // portion is where error stacks, OOM messages, and log tails live, so a
-    // head-only cut would throw away exactly what an agent needs to diagnose.
-    // We retain `head_bytes` from the start and `tail_bytes` (rolling) from
-    // the end, and record how many middle bytes were dropped.
-    let head_bytes = (max_bytes / 2).max(1);
-    let tail_bytes = max_bytes.saturating_sub(head_bytes);
-    let mut head = Vec::new();
-    let mut tail: Vec<u8> = Vec::new();
-    let mut buffer = [0u8; 8192];
-    let mut total_read: usize = 0;
-    loop {
-        let read = channel.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        total_read += read;
-        let chunk = &buffer[..read];
-        if head.len() < head_bytes {
-            let remaining = head_bytes - head.len();
-            let take = read.min(remaining);
-            head.extend_from_slice(&chunk[..take]);
-            if take < read {
-                append_rolling_tail(&mut tail, &chunk[take..], tail_bytes);
-            }
-        } else {
-            append_rolling_tail(&mut tail, chunk, tail_bytes);
-        }
+    // Both streams are drained together from here on. `timeout_secs` bounds the
+    // command itself, so the deadline starts once it has been sent rather than
+    // when the connection was opened.
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let mut stdout = BoundedCapture::new(max_bytes);
+    let mut stderr = BoundedCapture::new(max_bytes);
+
+    // Non-blocking I/O is only safe for the drain: `wait_close` needs a
+    // request/confirm exchange, so blocking is restored once the command is
+    // known to have finished.
+    session.set_blocking(false);
+    let drained = drain_channel_output(
+        &mut channel,
+        &mut stdout,
+        &mut stderr,
+        deadline,
+        timeout_secs,
+    );
+
+    if let Err(error) = drained {
+        // Still non-blocking here on purpose. Blocking-mode `close` waits for a
+        // server acknowledgement that only arrives once the remote command has
+        // exited, so calling it after `set_blocking(true)` made the timeout path
+        // block for the command's full remaining runtime — a 1 s deadline on an
+        // 8 s command took 8 s to return. Tearing the connection down in
+        // non-blocking mode returns promptly instead.
+        //
+        // Measured against OpenSSH 9.7 this does **not** kill the remote
+        // command: a pty-less exec channel's process group is only reaped on
+        // the pty path. Stopping it for real needs a PTY or a server-side
+        // `timeout` wrapper — see `ExecRequest::timeout_secs`.
+        let _ = channel.close();
+        let _ = session.disconnect(None, "command timed out", None);
+        return Err(error);
     }
 
-    let truncated = total_read > max_bytes;
-    let dropped_bytes = total_read.saturating_sub(max_bytes);
-    let mut stdout = head;
-    stdout.extend_from_slice(&tail);
-
-    let mut stderr = Vec::new();
-    channel.stderr().read_to_end(&mut stderr)?;
+    // The command has been drained to EOF, so the remaining blocking exchanges
+    // (CHANNEL_CLOSE, `exit_status`) complete without a further wait. The
+    // session timeout below is a teardown guard only — it bounds a wedged peer,
+    // it is not part of the command's own budget, so it is deliberately not
+    // derived from `timeout_secs`. Without it libssh2 blocks indefinitely.
+    session.set_blocking(true);
+    session.set_timeout(TEARDOWN_TIMEOUT_MS);
     channel.wait_close()?;
+
+    let truncated = stdout.truncated() || stderr.truncated();
+    let dropped_bytes = stdout.dropped_bytes() + stderr.dropped_bytes();
     Ok(EmbeddedExecOutput {
         exit_code: Some(channel.exit_status()?),
-        stdout,
-        stderr,
+        stdout: stdout.into_bytes(),
+        stderr: stderr.into_bytes(),
         truncated,
         dropped_bytes,
     })
+}
+
+/// Drains stdout and stderr off one channel until it reports EOF and both
+/// streams have gone quiet.
+///
+/// Two properties matter here and both were missing before:
+///
+/// * **Both streams are read every pass.** The SSH channel window is shared, so
+///   a remote command that fills stderr while its stdout is still open blocks
+///   its own writes; reading stdout to EOF first deadlocks. `ssh2` follows
+///   libssh2 in returning `Ok(0)` for "nothing buffered right now" rather than
+///   for EOF — the same convention `embedded_ssh::bridge_tcp_and_channel` relies
+///   on — so EOF has to come from [`ssh2::Channel::eof`].
+/// * **The deadline is enforced here.** On expiry the caller tears the
+///   connection down so the local worker returns promptly. That does not stop
+///   a pty-less remote command — see `ExecRequest::timeout_secs`.
+fn drain_channel_output(
+    channel: &mut ssh2::Channel,
+    stdout: &mut BoundedCapture,
+    stderr: &mut BoundedCapture,
+    deadline: Instant,
+    timeout_secs: u64,
+) -> Result<()> {
+    let mut stdout_buf = [0u8; 8192];
+    let mut stderr_buf = [0u8; 8192];
+    let mut idle_after_eof = 0u8;
+
+    loop {
+        let mut progressed = false;
+
+        match channel.read(&mut stdout_buf) {
+            Ok(0) => {}
+            Ok(read) => {
+                stdout.push(&stdout_buf[..read]);
+                progressed = true;
+            }
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {}
+            Err(error) => return Err(error.into()),
+        }
+
+        match channel.stderr().read(&mut stderr_buf) {
+            Ok(0) => {}
+            Ok(read) => {
+                stderr.push(&stderr_buf[..read]);
+                progressed = true;
+            }
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {}
+            Err(error) => return Err(error.into()),
+        }
+
+        // `eof()` stays false while stderr data is still buffered, so this is the
+        // normal exit; the extra idle passes absorb a trailing packet.
+        if channel.eof() && !progressed {
+            idle_after_eof += 1;
+            if idle_after_eof >= DRAIN_IDLE_PASSES_AFTER_EOF {
+                return Ok(());
+            }
+        } else {
+            idle_after_eof = 0;
+        }
+
+        if Instant::now() >= deadline {
+            return Err(ExecTimeout { timeout_secs }.into());
+        }
+
+        if !progressed {
+            thread::sleep(DRAIN_IDLE_SLEEP);
+        }
+    }
+}
+
+/// Bounded head+tail accumulator for a single output stream.
+///
+/// Retains the first `max_bytes / 2` bytes and a rolling window of the last
+/// `max_bytes / 2`, while counting every byte it was fed so callers can report
+/// how much of the middle was dropped.
+struct BoundedCapture {
+    head: Vec<u8>,
+    tail: Vec<u8>,
+    max_bytes: usize,
+    head_bytes: usize,
+    tail_bytes: usize,
+    total: usize,
+}
+
+impl BoundedCapture {
+    fn new(max_bytes: usize) -> Self {
+        let head_bytes = (max_bytes / 2).max(1);
+        Self {
+            head: Vec::new(),
+            tail: Vec::new(),
+            max_bytes,
+            head_bytes,
+            tail_bytes: max_bytes.saturating_sub(head_bytes),
+            total: 0,
+        }
+    }
+
+    fn push(&mut self, chunk: &[u8]) {
+        self.total += chunk.len();
+        if self.head.len() < self.head_bytes {
+            let remaining = self.head_bytes - self.head.len();
+            let take = chunk.len().min(remaining);
+            self.head.extend_from_slice(&chunk[..take]);
+            if take < chunk.len() {
+                append_rolling_tail(&mut self.tail, &chunk[take..], self.tail_bytes);
+            }
+        } else {
+            append_rolling_tail(&mut self.tail, chunk, self.tail_bytes);
+        }
+    }
+
+    fn truncated(&self) -> bool {
+        self.total > self.max_bytes
+    }
+
+    fn dropped_bytes(&self) -> usize {
+        self.total.saturating_sub(self.max_bytes)
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        let mut out = self.head;
+        out.extend_from_slice(&self.tail);
+        out
+    }
 }
 
 /// Append `chunk` to a rolling tail buffer that keeps only the last
@@ -1039,26 +1200,32 @@ pub(crate) async fn exec_ssh_core_with_risk_override(
     let embedded_host = host.clone();
     let embedded_command = request.command.clone();
     let embedded_stdin = request.stdin.clone();
-    let embedded_output = tokio::time::timeout(
-        Duration::from_secs(timeout_secs),
-        tokio::task::spawn_blocking(move || {
-            exec_ssh_embedded(
-                embedded_host,
-                embedded_command,
-                embedded_stdin,
-                timeout_secs,
-                max_bytes,
-            )
-        }),
-    )
-    .await
-    .map_err(|_| {
-        anyhow!(
-            "SSH command timed out after {timeout_secs}s: '{}'",
-            request.command
+    let embedded_output = tokio::task::spawn_blocking(move || {
+        exec_ssh_embedded(
+            embedded_host,
+            embedded_command,
+            embedded_stdin,
+            timeout_secs,
+            max_bytes,
         )
-    })?
-    .context("embedded SSH task failed")??;
+    })
+    .await
+    .context("embedded SSH task failed")?
+    .map_err(|error| {
+        // `exec_ssh_embedded` owns its deadline, so the blocking task always
+        // finishes: dropping a `tokio::time::timeout` handle around it used to
+        // leave the SSH channel — and the remote command — running.
+        if let Some(timeout) = error.downcast_ref::<ExecTimeout>() {
+            let message = format!("command timed out after {}s", timeout.timeout_secs);
+            append_timed_out_exec_audit(&request, risk, &source, &message);
+            return anyhow!(
+                "SSH command timed out after {}s: '{}'",
+                timeout.timeout_secs,
+                request.command
+            );
+        }
+        error
+    })?;
 
     let result = ExecResult {
         host: request.host,
@@ -1115,6 +1282,38 @@ fn append_rejected_exec_audit(request: &ExecRequest, risk: RiskLevel, source: &s
         &result,
         risk,
         request.reason.as_deref().or(Some(message)),
+        request.change_id.as_deref(),
+        Some(source),
+    );
+}
+
+/// Records an exec that was cut short by its own timeout.
+///
+/// Distinct from [`append_rejected_exec_audit`]: this command *did* run, and the
+/// timeout is the fact worth recording, so the message is the reason rather than
+/// the caller-supplied note.
+fn append_timed_out_exec_audit(
+    request: &ExecRequest,
+    risk: RiskLevel,
+    source: &str,
+    message: &str,
+) {
+    let result = ExecResult {
+        host: request.host.clone(),
+        command: request.command.clone(),
+        exit_code: None,
+        stdout: String::new(),
+        stderr: message.to_string(),
+        duration_ms: 0,
+        risk_level: risk,
+        truncated: false,
+        dropped_bytes: 0,
+        side_effect: None,
+    };
+    let _ = append_audit(
+        &result,
+        risk,
+        Some(message),
         request.change_id.as_deref(),
         Some(source),
     );
@@ -3241,6 +3440,40 @@ mod tests {
         assert_eq!(classify_risk("sudo shutdown"), RiskLevel::Blocked);
         assert_eq!(classify_risk("init 0"), RiskLevel::Blocked);
         assert_eq!(classify_risk("init 6"), RiskLevel::Blocked);
+    }
+
+    #[test]
+    fn bounded_capture_keeps_head_and_tail_and_counts_dropped_bytes() {
+        // 16 bytes => 8 head + 8 tail.
+        let mut capture = BoundedCapture::new(16);
+        capture.push(b"0123456789");
+        capture.push(b"abcdefghij");
+        assert!(capture.truncated());
+        assert_eq!(capture.dropped_bytes(), 4);
+        assert_eq!(capture.into_bytes(), b"01234567cdefghij");
+    }
+
+    #[test]
+    fn bounded_capture_leaves_short_output_untouched() {
+        let mut capture = BoundedCapture::new(16);
+        capture.push(b"short");
+        assert!(!capture.truncated());
+        assert_eq!(capture.dropped_bytes(), 0);
+        assert_eq!(capture.into_bytes(), b"short");
+    }
+
+    #[test]
+    fn bounded_capture_never_exceeds_its_budget() {
+        // Any number of chunks must stay within `max_bytes`, which is what keeps
+        // a stderr-heavy remote command from growing this process unbounded.
+        let max_bytes = 4096;
+        let mut capture = BoundedCapture::new(max_bytes);
+        for _ in 0..512 {
+            capture.push(&[b'x'; 8192]);
+        }
+        assert!(capture.truncated());
+        assert_eq!(capture.dropped_bytes(), 512 * 8192 - max_bytes);
+        assert_eq!(capture.into_bytes().len(), max_bytes);
     }
 
     #[test]

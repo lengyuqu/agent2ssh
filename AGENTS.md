@@ -19,6 +19,7 @@ Agent2SSH combines a React/Vite desktop frontend with a Rust/Tauri backend. Fron
 - `cargo check --manifest-path src-tauri/Cargo.toml --no-default-features --features daemon --bin agent2ssh-daemon`: daemon compile check.
 - `cargo check --manifest-path src-tauri/Cargo.toml`: Tauri app compile check (default feature).
 - `cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features daemon --test daemon_integration`: run daemon integration tests.
+- `AGENT2SSH_TEST_SSH_PORT=2222 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --test exec_fixture -- --test-threads=1`: run the opt-in sshd fixture tests (skipped without the env var). Build the server with `docker build -t a2s-sshd:local scripts/sshd-fixture && docker run -d --name a2s-sshd -p 2222:22 a2s-sshd:local`.
 - `./scripts/e2e-local.sh`: run local preflight builds, tests, smoke checks, and sidecar preparation.
 
 ## Coding Style & Naming Conventions
