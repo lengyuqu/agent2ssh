@@ -24,7 +24,8 @@ import type { HostProfile, LocalDirListing } from "../types";
 import HostSelector from "./HostSelector";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
-import { Dialog } from "./ui/dialog";
+import { ContextMenu, type ContextMenuItem } from "./ui/context-menu";
+import { Dialog, confirmDialog } from "./ui/dialog";
 import { Input } from "./ui/input";
 import { EmptyState, ErrorState, LoadingState } from "./ui/state";
 import { useToast } from "./ui/toast";
@@ -317,6 +318,15 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
   const [lastResult, setLastResult] = useState<{ count: number; dest: string; ms: number } | null>(null);
   // V3-1: double-click a file row to preview it (Monaco for text, metadata card otherwise).
   const [preview, setPreview] = useState<{ side: Side; entry: FileEntry } | null>(null);
+  // Right-click menu for the remote side. Only the remote side gets one: every
+  // rename/remove backend takes a host name and goes through SFTP, and the
+  // local side has no equivalent local filesystem commands.
+  const [menu, setMenu] = useState<{
+    side: Side;
+    entry: FileEntry;
+    x: number;
+    y: number;
+  } | null>(null);
 
   const isTransferring = transfer !== null;
 
@@ -479,6 +489,70 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
       showToast("error", String(err));
       reportFailure("mkdir failed", err, { side, target });
     }
+  }
+
+  // ── Rename / delete (remote side, via the context menu) ───────────────────
+
+  async function renameEntry(side: Side, entry: FileEntry) {
+    const s = getSide(side);
+    if (s.kind !== "remote" || !s.host) return;
+    const from = joinForKind(s.kind, s.path, entry.name);
+    const next = window.prompt(t("Rename to"), entry.name);
+    if (next === null) return;
+    const name = next.trim();
+    // A no-op rename would still round-trip to the server and land in the audit
+    // log as a write, so skip it.
+    if (!name || name === entry.name) return;
+    const to = remoteJoin(s.path, name);
+    try {
+      await api.sftpRename(s.host, from, to);
+      await refreshSide(side);
+    } catch (err) {
+      showToast("error", String(err));
+      reportFailure("sftp rename failed", err, { side, from, to });
+    }
+  }
+
+  async function deleteEntry(side: Side, entry: FileEntry) {
+    const s = getSide(side);
+    if (s.kind !== "remote" || !s.host) return;
+    const target = joinForKind(s.kind, s.path, entry.name);
+    const ok = await confirmDialog({
+      title: t("Delete {name}?", { name: entry.name }),
+      description: entry.isDir
+        ? t("This deletes the folder and everything inside it. It cannot be undone.")
+        : t("This permanently deletes the remote file. It cannot be undone."),
+      confirmLabel: t("Delete"),
+      cancelLabel: t("Cancel"),
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      // Directories go through the recursive core: a file manager's delete is
+      // expected to work on a non-empty folder, and the backend rates
+      // `sftp rm-rf` as high risk (blocked outright for `/`), so it is never
+      // silently auto-approved.
+      if (entry.isDir) {
+        await api.sftpRemoveDirAll(s.host, target);
+      } else {
+        await api.sftpRemoveFile(s.host, target);
+      }
+      await refreshSide(side);
+    } catch (err) {
+      showToast("error", String(err));
+      reportFailure("sftp delete failed", err, { side, target, isDir: entry.isDir });
+    }
+  }
+
+  function entryMenuItems(side: Side, entry: FileEntry): ContextMenuItem[] {
+    return [
+      { label: t("Rename"), onSelect: () => void renameEntry(side, entry) },
+      {
+        label: t("Delete"),
+        danger: true,
+        onSelect: () => void deleteEntry(side, entry),
+      },
+    ];
   }
 
   // ── Transfer ──────────────────────────────────────────────────────────────
@@ -963,6 +1037,20 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
                     onDragStart={(e) => onEntryDragStart(side, entry, e)}
                     onClick={() => openEntry(side, entry)}
                     onDoubleClick={() => openPreview(side, entry)}
+                    onContextMenu={
+                      s.kind === "remote"
+                        ? (e) => {
+                            e.preventDefault();
+                            // Select the row first so the menu's target is
+                            // visually unambiguous.
+                            setSide(side, (prev) => ({
+                              ...prev,
+                              selected: [full],
+                            }));
+                            setMenu({ side, entry, x: e.clientX, y: e.clientY });
+                          }
+                        : undefined
+                    }
                     title={full}
                     className={`group flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 text-sm transition-colors hover:bg-muted ${
                       selected ? "bg-primary/12 text-primary" : ""
@@ -1184,6 +1272,14 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
             host={getSide(preview.side).host}
           />
         </Suspense>
+      )}
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          items={entryMenuItems(menu.side, menu.entry)}
+          onClose={() => setMenu(null)}
+        />
       )}
     </Card>
   );

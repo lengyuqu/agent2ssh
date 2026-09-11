@@ -19,6 +19,10 @@ pub(super) enum McpTool {
     SshSftpLs,
     SshSftpStat,
     SshSftpMkdir,
+    SshSftpRename,
+    SshSftpRm,
+    SshSftpRmdir,
+    SshSftpRmRf,
     SshSftpUpload,
     SshSftpDownload,
     SshSessionOpen,
@@ -97,6 +101,10 @@ fn tool_kind(name: &str) -> Option<McpTool> {
         "ssh_sftp_ls" => Some(McpTool::SshSftpLs),
         "ssh_sftp_stat" => Some(McpTool::SshSftpStat),
         "ssh_sftp_mkdir" => Some(McpTool::SshSftpMkdir),
+        "ssh_sftp_rename" => Some(McpTool::SshSftpRename),
+        "ssh_sftp_rm" => Some(McpTool::SshSftpRm),
+        "ssh_sftp_rmdir" => Some(McpTool::SshSftpRmdir),
+        "ssh_sftp_rm_rf" => Some(McpTool::SshSftpRmRf),
         "ssh_sftp_upload" => Some(McpTool::SshSftpUpload),
         "ssh_sftp_download" => Some(McpTool::SshSftpDownload),
         "ssh_session_open" => Some(McpTool::SshSessionOpen),
@@ -361,6 +369,59 @@ fn tool_definitions() -> Vec<Value> {
                 {
                     "name": "ssh_sftp_mkdir",
                     "description": "Create a remote directory recursively via embedded SFTP.",
+                    "inputSchema": {
+                        "type": "object",
+                        "required": ["host", "path"],
+                        "properties": {
+                            "host":         { "type": "string" },
+                            "path":         { "type": "string" },
+                            "timeout_secs": { "type": "integer" }
+                        }
+                    }
+                },
+                {
+                    "name": "ssh_sftp_rename",
+                    "description": "Rename or move a remote file or directory via embedded SFTP. Rated medium risk.",
+                    "inputSchema": {
+                        "type": "object",
+                        "required": ["host", "old_path", "new_path"],
+                        "properties": {
+                            "host":         { "type": "string" },
+                            "old_path":     { "type": "string" },
+                            "new_path":     { "type": "string" },
+                            "timeout_secs": { "type": "integer" }
+                        }
+                    }
+                },
+                {
+                    "name": "ssh_sftp_rm",
+                    "description": "Delete a single remote file via embedded SFTP. Rated low risk, but host approval policies may still require approval.",
+                    "inputSchema": {
+                        "type": "object",
+                        "required": ["host", "path"],
+                        "properties": {
+                            "host":         { "type": "string" },
+                            "path":         { "type": "string" },
+                            "timeout_secs": { "type": "integer" }
+                        }
+                    }
+                },
+                {
+                    "name": "ssh_sftp_rmdir",
+                    "description": "Remove an empty remote directory via embedded SFTP. Fails when the directory is not empty; use ssh_sftp_rm_rf for a recursive delete. Rated low risk.",
+                    "inputSchema": {
+                        "type": "object",
+                        "required": ["host", "path"],
+                        "properties": {
+                            "host":         { "type": "string" },
+                            "path":         { "type": "string" },
+                            "timeout_secs": { "type": "integer" }
+                        }
+                    }
+                },
+                {
+                    "name": "ssh_sftp_rm_rf",
+                    "description": "Recursively delete a remote directory tree via embedded SFTP (the remote equivalent of `rm -rf`). Rated high risk, and blocked outright when the target is `/`, `/*` or `/.`; other targets may still require approval. This cannot be undone.",
                     "inputSchema": {
                         "type": "object",
                         "required": ["host", "path"],

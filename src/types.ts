@@ -629,3 +629,24 @@ export type ShellInfo = {
   path: string;
   family: ShellFamily;
 };
+
+// Rust: ssh_algo.rs — SshAlgoPrefs
+// Each field is a comma-delimited, most-preferred-first list; compression is
+// always `none` because this build of libssh2 has no zlib support.
+export type SshAlgoPrefs = {
+  kex: string;
+  hostkey: string;
+  cipher_cs: string;
+  cipher_sc: string;
+  mac_cs: string;
+  mac_sc: string;
+  comp_cs: string;
+  comp_sc: string;
+};
+
+// Rust: tauri_commands.rs — AlgoPrefsState
+export type AlgoPrefsState = {
+  prefs: SshAlgoPrefs;
+  custom: boolean;
+  defaults: SshAlgoPrefs;
+};

@@ -753,6 +753,13 @@ struct SftpDirBody {
     host: String,
     path: String,
 }
+/// Body for `/sftp/rename`, which needs both endpoints.
+#[derive(Deserialize)]
+struct SftpRenameBody {
+    host: String,
+    old_path: String,
+    new_path: String,
+}
 #[derive(Deserialize)]
 struct SessionOpenBody {
     host: String,
@@ -1478,6 +1485,164 @@ async fn sftp_mkdir(
                 &source,
                 &body.host,
                 &command,
+                risk,
+                None,
+                started.elapsed().as_millis(),
+                Some(&message),
+            );
+            Err(err(StatusCode::BAD_REQUEST, e))
+        }
+    }
+}
+
+/// Shared body of the four destructive SFTP handlers below.
+///
+/// Every one of them builds a `sftp <operation> <path>` string that is used for
+/// the preflight gate, the risk classification and the audit entry — the same
+/// string `core::sftp_dir_operation_core` builds internally. The risk levels
+/// come from `core::classify_risk`, which rates `sftp rm-rf` as high and
+/// `sftp rm-rf /` as blocked; keeping the strings identical is what makes that
+/// rating apply here.
+async fn sftp_rename(
+    State(s): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Json(body): Json<SftpRenameBody>,
+) -> Result<Json<ExecResult>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    let command = format!("sftp rename {} -> {}", body.old_path, body.new_path);
+    let PreflightResult { source, risk, .. } = preflight_guarded_request(
+        &s,
+        &auth,
+        &body.host,
+        host_tags(&body.host),
+        source_from_transport(),
+        &command,
+        None,
+        false,
+        None,
+        None,
+    )
+    .await?;
+    let started = Instant::now();
+    let outcome = sftp_rename_core_with_source(
+        &body.host,
+        &body.old_path,
+        &body.new_path,
+        None,
+        Some(source.clone()),
+    )
+    .await;
+    finish_sftp_operation(outcome, &source, &body.host, &command, risk, started)
+}
+
+async fn sftp_rm(
+    State(s): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Json(body): Json<SftpDirBody>,
+) -> Result<Json<ExecResult>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    let command = format!("sftp rm {}", body.path);
+    let PreflightResult { source, risk, .. } = preflight_guarded_request(
+        &s,
+        &auth,
+        &body.host,
+        host_tags(&body.host),
+        source_from_transport(),
+        &command,
+        None,
+        false,
+        None,
+        None,
+    )
+    .await?;
+    let started = Instant::now();
+    let outcome =
+        sftp_remove_file_core_with_source(&body.host, &body.path, None, Some(source.clone())).await;
+    finish_sftp_operation(outcome, &source, &body.host, &command, risk, started)
+}
+
+async fn sftp_rmdir(
+    State(s): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Json(body): Json<SftpDirBody>,
+) -> Result<Json<ExecResult>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    let command = format!("sftp rmdir {}", body.path);
+    let PreflightResult { source, risk, .. } = preflight_guarded_request(
+        &s,
+        &auth,
+        &body.host,
+        host_tags(&body.host),
+        source_from_transport(),
+        &command,
+        None,
+        false,
+        None,
+        None,
+    )
+    .await?;
+    let started = Instant::now();
+    let outcome =
+        sftp_remove_dir_core_with_source(&body.host, &body.path, None, Some(source.clone())).await;
+    finish_sftp_operation(outcome, &source, &body.host, &command, risk, started)
+}
+
+async fn sftp_rm_rf(
+    State(s): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Json(body): Json<SftpDirBody>,
+) -> Result<Json<ExecResult>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    let command = format!("sftp rm-rf {}", body.path);
+    let PreflightResult { source, risk, .. } = preflight_guarded_request(
+        &s,
+        &auth,
+        &body.host,
+        host_tags(&body.host),
+        source_from_transport(),
+        &command,
+        None,
+        false,
+        None,
+        None,
+    )
+    .await?;
+    let started = Instant::now();
+    let outcome =
+        sftp_remove_dir_all_core_with_source(&body.host, &body.path, None, Some(source.clone()))
+            .await;
+    finish_sftp_operation(outcome, &source, &body.host, &command, risk, started)
+}
+
+/// Record the audit entry and shape the HTTP result for the destructive SFTP
+/// handlers above, which all share the same success/failure contract.
+fn finish_sftp_operation(
+    outcome: anyhow::Result<ExecResult>,
+    source: &str,
+    host: &str,
+    command: &str,
+    risk: RiskLevel,
+    started: Instant,
+) -> Result<Json<ExecResult>, (StatusCode, Json<ErrorBody>)> {
+    match outcome {
+        Ok(result) => {
+            append_operation_audit(
+                source,
+                host,
+                command,
+                risk,
+                result.exit_code,
+                started.elapsed().as_millis(),
+                None,
+            );
+            Ok(Json(result))
+        }
+        Err(e) => {
+            let message = e.to_string();
+            append_operation_audit(
+                source,
+                host,
+                command,
                 risk,
                 None,
                 started.elapsed().as_millis(),
@@ -4911,6 +5076,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/sftp/ls", post(sftp_ls))
         .route("/sftp/stat", post(sftp_stat))
         .route("/sftp/mkdir", post(sftp_mkdir))
+        .route("/sftp/rename", post(sftp_rename))
+        .route("/sftp/rm", post(sftp_rm))
+        .route("/sftp/rmdir", post(sftp_rmdir))
+        .route("/sftp/rm-rf", post(sftp_rm_rf))
         .route("/sessions", post(session_open).get(session_list))
         .route("/sessions/:id/write", post(session_write))
         .route("/sessions/:id/read", get(session_read))

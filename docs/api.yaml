@@ -1200,6 +1200,191 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+  /sftp/rename:
+    post:
+      summary: Rename or move a remote file or directory
+      description: Applies bearer-token scope, execution gate, execution limits, effective risk, and approval policy using an `sftp rename ...` operation string. Rated medium risk by the built-in classifier.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [host, old_path, new_path]
+              properties:
+                host: { type: string }
+                old_path: { type: string }
+                new_path: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExecResult" }
+        "400":
+          description: Rename rejected by the SSH/SFTP layer
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Scope denied or approval rejected
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "408":
+          description: Approval timed out
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "423":
+          description: Execution gate paused
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Execution limit exceeded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /sftp/rm:
+    post:
+      summary: Delete a single remote file
+      description: Applies bearer-token scope, execution gate, execution limits, effective risk, and approval policy using an `sftp rm ...` operation string. Rated low risk by the built-in classifier, but host approval policies may still require approval.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [host, path]
+              properties:
+                host: { type: string }
+                path: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExecResult" }
+        "400":
+          description: Delete rejected by the SSH/SFTP layer
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Scope denied or approval rejected
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "408":
+          description: Approval timed out
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "423":
+          description: Execution gate paused
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Execution limit exceeded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /sftp/rmdir:
+    post:
+      summary: Remove an empty remote directory
+      description: Applies bearer-token scope, execution gate, execution limits, effective risk, and approval policy using an `sftp rmdir ...` operation string. Fails when the directory is not empty; use `/sftp/rm-rf` for a recursive delete. Rated low risk by the built-in classifier.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [host, path]
+              properties:
+                host: { type: string }
+                path: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExecResult" }
+        "400":
+          description: Directory is not empty, or the SSH/SFTP layer rejected the removal
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Scope denied or approval rejected
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "408":
+          description: Approval timed out
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "423":
+          description: Execution gate paused
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Execution limit exceeded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /sftp/rm-rf:
+    post:
+      summary: Recursively delete a remote directory tree
+      description: |
+        Applies bearer-token scope, execution gate, execution limits, effective risk,
+        and approval policy using an `sftp rm-rf ...` operation string. This is the
+        remote equivalent of `rm -rf`: the built-in classifier rates the operation
+        high risk, and blocks it outright when `path` is `/`, `/*` or `/.`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [host, path]
+              properties:
+                host: { type: string }
+                path: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExecResult" }
+        "400":
+          description: Recursive delete rejected by the SSH/SFTP layer
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Scope denied, blocked by risk policy, or approval rejected
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "408":
+          description: Approval timed out
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "423":
+          description: Execution gate paused
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Execution limit exceeded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /sessions:
     post:
       summary: Open a persistent PTY session

@@ -590,6 +590,42 @@ export default function App() {
     }
   }
 
+  // G13: the two halves of OpenSSH known_hosts interop. Import pulls the system
+  // file's trust into the app-managed store; forget drops a host from the
+  // system file (`ssh-keygen -R`) without touching the app's own store.
+  async function handleImportOpensshTrust() {
+    try {
+      const summary = await api.importKnownHosts();
+      await refresh();
+      showToast(
+        "success",
+        t("Imported {imported} trusted host(s) from OpenSSH, skipped {skipped}.", {
+          imported: summary.imported,
+          skipped: summary.skipped,
+        }),
+      );
+    } catch (err) {
+      showToast("error", String(err));
+    }
+  }
+
+  async function handleForgetOpenssh(host: HostProfile) {
+    try {
+      const removed = await api.forgetSystemKnownHost(host.host, host.port ?? 22);
+      showToast(
+        removed > 0 ? "success" : "warning",
+        removed > 0
+          ? t("Removed {count} OpenSSH known_hosts entry(ies) for {name}.", {
+              count: removed,
+              name: host.host,
+            })
+          : t("{name} had no entry in the system OpenSSH known_hosts.", { name: host.host }),
+      );
+    } catch (err) {
+      showToast("error", String(err));
+    }
+  }
+
   function openModule(id: (typeof MODULES)[number]["id"]) {
     setActiveModule(id);
   }
@@ -1162,6 +1198,8 @@ export default function App() {
                 onRefresh={refresh}
                 onConnect={handleConnect}
                 onDisconnect={handleDisconnect}
+                onImportOpensshTrust={handleImportOpensshTrust}
+                onForgetOpenssh={handleForgetOpenssh}
               />
               <AddHostForm
                 hosts={hosts}

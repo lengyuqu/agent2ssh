@@ -45,6 +45,8 @@ function renderHostList(overrides: Partial<HostListProps> = {}) {
     onRefresh: vi.fn(),
     onConnect: vi.fn(),
     onDisconnect: vi.fn(),
+    onImportOpensshTrust: vi.fn(),
+    onForgetOpenssh: vi.fn(),
     ...overrides,
   };
   const view = render(
@@ -99,8 +101,23 @@ describe("HostList", () => {
     expect(props.onDisconnect).toHaveBeenCalledWith("web-01");
   });
 
-  it("filters hosts by env", () => {
-    renderHostList({
+  it("forgets a host in the system OpenSSH known_hosts from the row action", () => {
+    const { props } = renderHostList();
+
+    fireEvent.click(screen.getByTitle("Forget web-01 in OpenSSH known_hosts"));
+
+    expect(props.onForgetOpenssh).toHaveBeenCalledWith(expect.objectContaining({ name: "web-01" }));
+  });
+
+  it("imports OpenSSH trust from the header action", () => {
+    const { props } = renderHostList();
+
+    fireEvent.click(screen.getByTitle("Import trust from OpenSSH (~/.ssh/known_hosts)"));
+
+    expect(props.onImportOpensshTrust).toHaveBeenCalledTimes(1);
+  });
+
+  it("filters hosts by env", () => {    renderHostList({
       hosts: [
         makeHost({ name: "web-01", env: "prod" }),
         makeHost({ name: "web-02", host: "10.0.0.2", env: "staging" }),

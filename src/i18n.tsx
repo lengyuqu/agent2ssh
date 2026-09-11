@@ -378,6 +378,13 @@ const zh: Record<string, string> = {
   "Select one or more files to transfer": "请选择要传输的文件",
   "Local to local copy is not supported": "不支持本机到本机的复制",
   "New folder name": "新文件夹名称",
+  "Rename": "重命名",
+  "Rename to": "重命名为",
+  "Delete {name}?": "删除 {name}？",
+  "This deletes the folder and everything inside it. It cannot be undone.":
+    "将删除该文件夹及其全部内容，且无法撤销。",
+  "This permanently deletes the remote file. It cannot be undone.":
+    "将永久删除远端文件，且无法撤销。",
   "Transferring {done}/{total}": "正在传输 {done}/{total}",
   "Transferred {count} file(s) to {dest} in {ms}ms": "已传输 {count} 个文件到 {dest}，用时 {ms}ms",
   "Overwrite existing files?": "覆盖已存在的文件？",
@@ -437,6 +444,15 @@ const zh: Record<string, string> = {
   "Not recorded": "未记录",
   "Updating...": "更新中...",
   "Trust and reconnect": "信任并重新连接",
+  "Import trust from OpenSSH (~/.ssh/known_hosts)":
+    "从 OpenSSH（~/.ssh/known_hosts）导入信任记录",
+  "Forget {name} in OpenSSH known_hosts": "在 OpenSSH known_hosts 中移除 {name}",
+  "Imported {imported} trusted host(s) from OpenSSH, skipped {skipped}.":
+    "已从 OpenSSH 导入 {imported} 条受信主机记录，跳过 {skipped} 条。",
+  "Removed {count} OpenSSH known_hosts entry(ies) for {name}.":
+    "已移除 {name} 在 OpenSSH known_hosts 中的 {count} 条记录。",
+  "{name} had no entry in the system OpenSSH known_hosts.":
+    "{name} 在系统 OpenSSH known_hosts 中没有记录。",
   "Please wait. The app is still responsive while SSH connects.": "请稍候。SSH 连接过程中应用仍可响应。",
   "Connection status updated.": "连接状态已更新。",
   "You can close this dialog and retry from Host Management.": "你可以关闭此对话框，并从主机管理中重试。",
@@ -756,6 +772,34 @@ const zh: Record<string, string> = {
   "low auto-approve": "low 自动放行",
   "med/high need approval": "med/high 需审批",
   "deletion forbidden": "删除类禁止",
+  // A22: SSH algorithm preferences
+  "SSH algorithms": "SSH 算法",
+  "Negotiation preferences passed to libssh2 before the handshake. Most-preferred first, comma-separated.":
+    "握手前传给 libssh2 的协商偏好。最优先的排在最前，逗号分隔。",
+  "Using custom algorithm preferences.": "正在使用自定义算法偏好。",
+  "Using the built-in safe defaults.": "正在使用内置安全默认值。",
+  "Negotiation preferences for new connections.": "新连接的协商偏好。",
+  "Edit SSH algorithms": "编辑 SSH 算法",
+  "Built-in defaults": "内置默认值",
+  "Custom": "自定义",
+  "Key exchange": "密钥交换",
+  "Host key": "主机密钥",
+  "Ciphers (client → server)": "加密算法（客户端 → 服务端）",
+  "Ciphers (server → client)": "加密算法（服务端 → 客户端）",
+  "MACs (client → server)": "MAC（客户端 → 服务端）",
+  "MACs (server → client)": "MAC（服务端 → 客户端）",
+  "Compression (client → server)": "压缩（客户端 → 服务端）",
+  "Compression (server → client)": "压缩（服务端 → 客户端）",
+  "Differs from defaults": "与默认值不同",
+  "This build of libssh2 has no zlib support, so both compression fields must stay `none`. Any other value is rejected instead of silently breaking every connection.":
+    "此版本的 libssh2 未编译 zlib 支持，因此两个压缩字段必须保持 `none`。填入其他值会被拒绝，而不是静默地让所有连接失败。",
+  "Applies to new connections; open sessions keep their negotiated algorithms.":
+    "对新连接生效；已打开的会话保持其已协商的算法。",
+  "Reset to defaults": "恢复默认值",
+  "Save algorithms": "保存算法",
+  "No changes to save": "没有需要保存的改动",
+  "Saved. New connections will use these algorithms.": "已保存。新连接将使用这些算法。",
+  "Reverted to the built-in safe defaults.": "已恢复为内置安全默认值。",
 };
 
 const I18nContext = createContext<I18nContextValue | null>(null);

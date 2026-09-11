@@ -960,20 +960,20 @@ async fn http_hosts_list_returns_valid_json_array() {
 // Part 3: MCP tool enumeration test (P4-1)
 // ============================================================================
 
-/// Meta-test: verify the MCP binary declares exactly 54 tools by parsing
+/// Meta-test: verify the MCP binary declares exactly 58 tools by parsing
 /// the schema-driven tool registry and counting `"name":` entries.
 ///
 /// This avoids the need to run the MCP server over stdio JSON-RPC, which
 /// requires a full process lifecycle. Instead we treat the source as the
 /// canonical tool registry and assert on its structure.
 #[test]
-fn mcp_tool_list_contains_exactly_54_tools() {
+fn mcp_tool_list_contains_exactly_58_tools() {
     let registry = include_str!("../src/bin/agent2ssh_mcp/tools.rs");
     let tool_count = registry.matches("\"name\": \"ssh_").count();
 
     assert_eq!(
-        tool_count, 54,
-        "Expected exactly 54 MCP tools, found {tool_count}. \
+        tool_count, 58,
+        "Expected exactly 58 MCP tools, found {tool_count}. \
          If you added or removed a tool, update this count and the expected list below."
     );
 }
@@ -998,6 +998,10 @@ fn mcp_tool_list_contains_all_expected_names() {
         "ssh_sftp_ls",
         "ssh_sftp_stat",
         "ssh_sftp_mkdir",
+        "ssh_sftp_rename",
+        "ssh_sftp_rm",
+        "ssh_sftp_rmdir",
+        "ssh_sftp_rm_rf",
         "ssh_sftp_upload",
         "ssh_sftp_download",
         "ssh_session_open",
@@ -1069,6 +1073,10 @@ fn mcp_call_tool_handler_covers_all_tools() {
         "ssh_sftp_ls",
         "ssh_sftp_stat",
         "ssh_sftp_mkdir",
+        "ssh_sftp_rename",
+        "ssh_sftp_rm",
+        "ssh_sftp_rmdir",
+        "ssh_sftp_rm_rf",
         "ssh_sftp_upload",
         "ssh_sftp_download",
         "ssh_session_open",
@@ -1719,6 +1727,10 @@ fn mcp_tools_match_skills_md_documentation() {
         "ssh_sftp_ls",
         "ssh_sftp_stat",
         "ssh_sftp_mkdir",
+        "ssh_sftp_rename",
+        "ssh_sftp_rm",
+        "ssh_sftp_rmdir",
+        "ssh_sftp_rm_rf",
         "ssh_sftp_upload",
         "ssh_sftp_download",
         "ssh_session_open",

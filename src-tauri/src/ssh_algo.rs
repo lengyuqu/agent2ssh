@@ -134,18 +134,128 @@ pub fn load_algo_prefs() -> Option<SshAlgoPrefs> {
     serde_json::from_str(&raw).ok()
 }
 
+/// The preferences actually used for the next connection: the user's file when
+/// it exists and parses, otherwise [`safe_defaults`].
+pub fn effective_algo_prefs() -> SshAlgoPrefs {
+    load_algo_prefs().unwrap_or_else(safe_defaults)
+}
+
+/// True when `ssh_algos.json` exists and could be read, i.e. the connection
+/// path is using something other than the built-in defaults.
+pub fn has_custom_algo_prefs() -> bool {
+    load_algo_prefs().is_some()
+}
+
+/// The compression algorithm libssh2 accepts in this build.
+///
+/// The `ssh2` crate does not compile in zlib support, so `none` is the only
+/// value that survives the fail-closed check in [`apply_algo_prefs`]. Anything
+/// else is rejected here rather than at connect time, where it would break
+/// every connection until the user edited the file by hand.
+const SUPPORTED_COMPRESSION: &str = "none";
+
+/// Validate preferences before they are persisted.
+///
+/// [`apply_algo_prefs`] is deliberately fail-closed: one unknown algorithm name
+/// makes every connection fail. That is the right call for hand-edited files,
+/// but it means anything the app itself writes must be checked first, or a typo
+/// in the settings dialog would take the whole SSH surface down with it. This
+/// validates shape and the one constraint we can know without a live server
+/// (compression); server-specific names still cannot be verified offline, which
+/// is why [`reset_algo_prefs`] exists as the way back.
+pub fn validate_algo_prefs(prefs: &SshAlgoPrefs) -> Result<()> {
+    let fields: [(&str, &str); 8] = [
+        ("kex", &prefs.kex),
+        ("hostkey", &prefs.hostkey),
+        ("cipher client->server", &prefs.cipher_cs),
+        ("cipher server->client", &prefs.cipher_sc),
+        ("mac client->server", &prefs.mac_cs),
+        ("mac server->client", &prefs.mac_sc),
+        ("compression client->server", &prefs.comp_cs),
+        ("compression server->client", &prefs.comp_sc),
+    ];
+
+    for (label, value) in fields {
+        let entries: Vec<&str> = value
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        if entries.is_empty() {
+            return Err(anyhow!(
+                "{label} must list at least one algorithm (use the safe defaults to reset)"
+            ));
+        }
+        let mut seen = HashSet::new();
+        for entry in entries {
+            if !is_plausible_algorithm_name(entry) {
+                return Err(anyhow!(
+                    "unsupported SSH algorithm '{entry}' in {label}: names may only contain \
+                     letters, digits and . _ - @"
+                ));
+            }
+            if !seen.insert(entry) {
+                return Err(anyhow!("duplicate SSH algorithm '{entry}' in {label}"));
+            }
+        }
+    }
+
+    for (label, value) in [
+        ("compression client->server", &prefs.comp_cs),
+        ("compression server->client", &prefs.comp_sc),
+    ] {
+        let entries: Vec<&str> = value
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        if entries != [SUPPORTED_COMPRESSION] {
+            return Err(anyhow!(
+                "{label} must be exactly '{SUPPORTED_COMPRESSION}': this build of libssh2 has no \
+                 zlib support, so any other value would make every connection fail"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// A conservative syntax check — this is not a guarantee that libssh2 knows the
+/// algorithm. It keeps the file to well-formed tokens (so it can round-trip
+/// through the settings dialog and the comma-delimited parser) without
+/// pretending to be an offline capability probe.
+fn is_plausible_algorithm_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '@' | '+'))
+}
+
 /// Save algorithm preferences to the config file.
-// TODO(unwired): asymmetric with `load_algo_prefs` above — preferences are read
-// at connect time but nothing ever writes them, so `ssh_algos.json` is never
-// created by the app. Either wire this up to a settings surface or delete both
-// halves; do not leave the read path silently depending on a file nothing writes.
+///
+/// Validates first: see [`validate_algo_prefs`] for why the write path may not
+/// simply trust its input.
 pub fn save_algo_prefs(prefs: &SshAlgoPrefs) -> Result<()> {
+    validate_algo_prefs(prefs)?;
     crate::store::ensure_config_dir()?;
     let path = crate::store::config_dir()?.join("ssh_algos.json");
     let raw = serde_json::to_string_pretty(prefs)?;
     std::fs::write(&path, raw)?;
     crate::store::restrict_file_to_owner(&path)?;
     Ok(())
+}
+
+/// Drop `ssh_algos.json` so the next connection falls back to [`safe_defaults`].
+///
+/// This is the documented way out of a preference set that turned out to be
+/// unsupported by a given server.
+pub fn reset_algo_prefs() -> Result<()> {
+    let path = crate::store::config_dir()?.join("ssh_algos.json");
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(anyhow!("failed to remove {}: {e}", path.display())),
+    }
 }
 
 #[cfg(test)]
@@ -235,5 +345,50 @@ mod tests {
         assert!(prefs.kex.is_empty());
         assert!(prefs.hostkey.is_empty());
         assert!(prefs.cipher_cs.is_empty());
+    }
+
+    /// The safe defaults must be writable: they are what the settings dialog
+    /// offers as "reset", so a rejection here would make the reset unusable.
+    #[test]
+    fn safe_defaults_pass_validation() {
+        validate_algo_prefs(&safe_defaults()).expect("safe defaults must validate");
+    }
+
+    #[test]
+    fn validation_rejects_empty_field() {
+        let mut prefs = safe_defaults();
+        prefs.kex = "   ".into();
+        let err = validate_algo_prefs(&prefs).unwrap_err().to_string();
+        assert!(err.contains("at least one algorithm"), "got: {err}");
+    }
+
+    #[test]
+    fn validation_rejects_unparseable_name() {
+        let mut prefs = safe_defaults();
+        prefs.cipher_cs = "aes256-ctr,not an algorithm".into();
+        let err = validate_algo_prefs(&prefs).unwrap_err().to_string();
+        assert!(err.contains("unsupported SSH algorithm"), "got: {err}");
+    }
+
+    #[test]
+    fn validation_rejects_duplicate_entries() {
+        let mut prefs = safe_defaults();
+        prefs.mac_cs = "hmac-sha2-256,hmac-sha2-256".into();
+        let err = validate_algo_prefs(&prefs).unwrap_err().to_string();
+        assert!(err.contains("duplicate"), "got: {err}");
+    }
+
+    /// libssh2 is built without zlib support, so a compression value other than
+    /// `none` fails closed at connect time. It must be caught at save time.
+    #[test]
+    fn validation_rejects_unsupported_compression() {
+        let mut prefs = safe_defaults();
+        prefs.comp_cs = "zlib@openssh.com".into();
+        let err = validate_algo_prefs(&prefs).unwrap_err().to_string();
+        assert!(err.contains("compression"), "got: {err}");
+
+        let mut prefs = safe_defaults();
+        prefs.comp_sc = "".into();
+        assert!(validate_algo_prefs(&prefs).is_err());
     }
 }

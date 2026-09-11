@@ -62,6 +62,10 @@ the client config.
 | List remote dir | `agent2ssh sftp ls <host> <path>` / `ssh_sftp_ls` |
 | Stat remote path | `agent2ssh sftp stat <host> <path>` / `ssh_sftp_stat` |
 | Make remote dir | `agent2ssh sftp mkdir <host> <path>` / `ssh_sftp_mkdir` |
+| Rename / move remote path | `agent2ssh sftp rename <host> <old> <new>` / `ssh_sftp_rename` |
+| Delete remote file | `agent2ssh sftp rm <host> <path>` / `ssh_sftp_rm` |
+| Remove empty remote dir | `agent2ssh sftp rmdir <host> <path>` / `ssh_sftp_rmdir` |
+| Recursive remote delete | `agent2ssh sftp rm-rf <host> <path>` / `ssh_sftp_rm_rf` |
 | Persistent session | `agent2ssh session open/write/read/close` / `ssh_session_*` |
 | Port forward | `agent2ssh forward add/list/rm` / `ssh_forward_*` |
 | View audit log | `agent2ssh audit --json` / `ssh_audit` |

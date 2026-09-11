@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  AlgoPrefsState,
   ApprovalRequest,
   AuditEntry,
   AuditFilter,
@@ -43,6 +44,7 @@ import type {
   SessionInfo,
   Snippet,
   SftpResult,
+  SshAlgoPrefs,
   SshKeyInfo,
   TeamConfigExport,
   TerminalBroadcastRequest,
@@ -271,6 +273,44 @@ export const api = {
     }),
   sftpMkdir: (host: string, path: string, timeoutSecs?: number) =>
     invoke<ExecResult>("sftp_mkdir", {
+      host,
+      path,
+      timeoutSecs: timeoutSecs ?? null,
+    }),
+  /** Rename or move a remote file/directory. */
+  sftpRename: (
+    host: string,
+    oldPath: string,
+    newPath: string,
+    timeoutSecs?: number,
+  ) =>
+    invoke<ExecResult>("sftp_rename", {
+      host,
+      oldPath,
+      newPath,
+      timeoutSecs: timeoutSecs ?? null,
+    }),
+  /** Delete a single remote file. */
+  sftpRemoveFile: (host: string, path: string, timeoutSecs?: number) =>
+    invoke<ExecResult>("sftp_remove_file", {
+      host,
+      path,
+      timeoutSecs: timeoutSecs ?? null,
+    }),
+  /** Remove an *empty* remote directory; fails when it is not empty. */
+  sftpRemoveDir: (host: string, path: string, timeoutSecs?: number) =>
+    invoke<ExecResult>("sftp_remove_dir", {
+      host,
+      path,
+      timeoutSecs: timeoutSecs ?? null,
+    }),
+  /**
+   * Recursively delete a remote directory tree — the remote `rm -rf`. The
+   * backend rates `sftp rm-rf /` as blocked and any other target as high risk,
+   * so this may surface an approval prompt rather than deleting outright.
+   */
+  sftpRemoveDirAll: (host: string, path: string, timeoutSecs?: number) =>
+    invoke<ExecResult>("sftp_remove_dir_all", {
       host,
       path,
       timeoutSecs: timeoutSecs ?? null,
@@ -506,6 +546,23 @@ export const api = {
   // G13: Import host-key trust from the system OpenSSH ~/.ssh/known_hosts
   importKnownHosts: (path?: string) =>
     invoke<{ imported: number; skipped: number }>("import_known_hosts", { path: path ?? null }),
+  /**
+   * The other half of G13: drop a host's keys from the system OpenSSH
+   * `~/.ssh/known_hosts` (`ssh-keygen -R`). Returns how many entries were
+   * removed; 0 means the host was not present. Backs up the file to `.bak`.
+   */
+  forgetSystemKnownHost: (hostName: string, port?: number | null) =>
+    invoke<number>("forget_system_known_host", { hostName, port: port ?? null }),
+
+  // A22: SSH algorithm preferences (KEX / hostkey / ciphers / MACs / compression).
+  //
+  // The read side reports both the effective list and the built-in defaults, so
+  // a settings UI can diff against the defaults and offer a reset. A bad entry
+  // makes every connection fail closed, which is why `setAlgoPrefs` validates on
+  // the Rust side and returns a descriptive error instead of writing junk.
+  getAlgoPrefs: () => invoke<AlgoPrefsState>("get_algo_prefs"),
+  setAlgoPrefs: (prefs: SshAlgoPrefs) => invoke<void>("set_algo_prefs", { prefs }),
+  clearAlgoPrefs: () => invoke<void>("clear_algo_prefs"),
 
   // Webhook config
   getWebhookConfig: () => invoke<WebhookConfig>("get_webhook_config"),

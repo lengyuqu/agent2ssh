@@ -426,7 +426,7 @@ async fn mcp_stdio_end_to_end_initialize_tools_and_risk() {
     )
     .unwrap();
     let tool_count = tools["result"]["tools"].as_array().unwrap().len();
-    assert_eq!(tool_count, 54);
+    assert_eq!(tool_count, 58);
 
     let risk: serde_json::Value = serde_json::from_str(
         &lines

@@ -10,10 +10,12 @@ use crate::{
         import_team_config, list_audit_core, list_host_groups_core, list_hosts_core,
         list_proxies_core, ping_hosts_core, remove_host_core, save_host_group_core,
         save_proxy_core, sftp_download_core_with_source, sftp_ls_core_with_source,
-        sftp_mkdir_core_with_source, sftp_read_text_core_with_source, sftp_stat_core_with_source,
-        sftp_upload_core_with_source, sftp_walk_core_with_source, update_host_core,
-        validate_command_length, ExecMultiRequest, ImportResult, TeamConfigExport,
-        MAX_COMMAND_BYTES,
+        sftp_mkdir_core_with_source, sftp_read_text_core_with_source,
+        sftp_remove_dir_all_core_with_source, sftp_remove_dir_core_with_source,
+        sftp_remove_file_core_with_source, sftp_rename_core_with_source,
+        sftp_stat_core_with_source, sftp_upload_core_with_source, sftp_walk_core_with_source,
+        update_host_core, validate_command_length, ExecMultiRequest, ImportResult,
+        TeamConfigExport, MAX_COMMAND_BYTES,
     },
     diagnostics::{
         append_diagnostic_log, clear_diagnostic_logs as clear_diagnostic_logs_core,
@@ -22,8 +24,8 @@ use crate::{
         list_diagnostic_logs as list_diagnostic_logs_core, DiagnosticLogEntry,
     },
     embedded_ssh::{
-        get_host_fingerprint_status_core, import_known_hosts_from_ssh, trust_host_fingerprint_core,
-        HostFingerprintStatus, KnownHostImportSummary,
+        get_host_fingerprint_status_core, import_known_hosts_from_ssh, remove_system_known_host,
+        trust_host_fingerprint_core, HostFingerprintStatus, KnownHostImportSummary,
     },
     execution_control::{
         authorize_command_without_approval_handler, command_authorization_target,
@@ -49,6 +51,10 @@ use crate::{
         session_write_core,
     },
     snippets::{add_snippet, load_snippets, remove_snippet, Snippet},
+    ssh_algo::{
+        effective_algo_prefs, has_custom_algo_prefs, reset_algo_prefs, safe_defaults,
+        save_algo_prefs, SshAlgoPrefs,
+    },
     store::{append_operation_audit, config_dir, lock_config_file, restrict_file_to_owner},
     types::{
         source_from_transport, AuditEntry, AuditFilter, ConnectionStatus, ExecMultiResult,
@@ -766,6 +772,78 @@ pub async fn sftp_mkdir(
     let command = format!("sftp mkdir {}", path);
     authorize_desktop_operation(&host, &command, false, &source).await?;
     sftp_mkdir_core_with_source(&host, &path, timeout_secs, Some(source))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Rename or move a remote file or directory.
+///
+/// The `command` string below is not a shell command: it exists so the risk
+/// classifier, the approval policy and the audit log all see the same
+/// `sftp rename ...` operation that `core::sftp_dir_operation_core` records.
+/// It must stay byte-identical to what the core builds, or authorization would
+/// be evaluated against a different operation than the one audited.
+#[tauri::command]
+pub async fn sftp_rename(
+    host: String,
+    old_path: String,
+    new_path: String,
+    timeout_secs: Option<u64>,
+) -> Result<ExecResult, String> {
+    let source = source_from_transport();
+    let command = format!("sftp rename {} -> {}", old_path, new_path);
+    authorize_desktop_operation(&host, &command, false, &source).await?;
+    sftp_rename_core_with_source(&host, &old_path, &new_path, timeout_secs, Some(source))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Delete a single remote file (`unlink`).
+#[tauri::command]
+pub async fn sftp_remove_file(
+    host: String,
+    path: String,
+    timeout_secs: Option<u64>,
+) -> Result<ExecResult, String> {
+    let source = source_from_transport();
+    let command = format!("sftp rm {}", path);
+    authorize_desktop_operation(&host, &command, false, &source).await?;
+    sftp_remove_file_core_with_source(&host, &path, timeout_secs, Some(source))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Remove an *empty* remote directory (`rmdir`). Fails on a non-empty
+/// directory; use `sftp_remove_dir_all` for a recursive delete.
+#[tauri::command]
+pub async fn sftp_remove_dir(
+    host: String,
+    path: String,
+    timeout_secs: Option<u64>,
+) -> Result<ExecResult, String> {
+    let source = source_from_transport();
+    let command = format!("sftp rmdir {}", path);
+    authorize_desktop_operation(&host, &command, false, &source).await?;
+    sftp_remove_dir_core_with_source(&host, &path, timeout_secs, Some(source))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Recursively delete a remote directory tree.
+///
+/// This is the remote equivalent of `rm -rf`, and `core::classify_risk` rates
+/// `sftp rm-rf /`, `/*` and `/.` as `Blocked` and any other target as `High` —
+/// so a recursive delete is never silently auto-approved.
+#[tauri::command]
+pub async fn sftp_remove_dir_all(
+    host: String,
+    path: String,
+    timeout_secs: Option<u64>,
+) -> Result<ExecResult, String> {
+    let source = source_from_transport();
+    let command = format!("sftp rm-rf {}", path);
+    authorize_desktop_operation(&host, &command, false, &source).await?;
+    sftp_remove_dir_all_core_with_source(&host, &path, timeout_secs, Some(source))
         .await
         .map_err(|e| e.to_string())
 }
@@ -2808,6 +2886,53 @@ pub fn import_known_hosts(path: Option<String>) -> Result<KnownHostImportSummary
     import_known_hosts_from_ssh(path.as_deref()).map_err(|e| e.to_string())
 }
 
+/// The other half of G13: drop a host's keys from the system OpenSSH
+/// `~/.ssh/known_hosts`, i.e. `ssh-keygen -R`. Rewrites the file in place and
+/// leaves a `.bak` behind; returns how many entries were removed (0 when the
+/// host was not present).
+#[tauri::command]
+pub fn forget_system_known_host(host_name: String, port: Option<u16>) -> Result<usize, String> {
+    remove_system_known_host(&host_name, port.unwrap_or(22)).map_err(|e| e.to_string())
+}
+
+/// Everything the SSH-algorithm settings dialog needs in one round trip.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AlgoPrefsState {
+    /// Preferences currently in effect for the next connection.
+    pub prefs: SshAlgoPrefs,
+    /// True when `ssh_algos.json` exists, i.e. the user overrode the defaults.
+    pub custom: bool,
+    /// The built-in defaults, so the dialog can offer a reset target without
+    /// duplicating these values in the frontend.
+    pub defaults: SshAlgoPrefs,
+}
+
+/// A22: read the SSH algorithm preferences in effect.
+#[tauri::command]
+pub fn get_algo_prefs() -> Result<AlgoPrefsState, String> {
+    Ok(AlgoPrefsState {
+        prefs: effective_algo_prefs(),
+        custom: has_custom_algo_prefs(),
+        defaults: safe_defaults(),
+    })
+}
+
+/// A22: persist SSH algorithm preferences.
+///
+/// Validation happens in `ssh_algo::save_algo_prefs`; it has to, because
+/// `apply_algo_prefs` is fail-closed and an unknown name would break every
+/// connection rather than just this one.
+#[tauri::command]
+pub fn set_algo_prefs(prefs: SshAlgoPrefs) -> Result<(), String> {
+    save_algo_prefs(&prefs).map_err(|e| e.to_string())
+}
+
+/// A22: drop `ssh_algos.json` and fall back to the built-in safe defaults.
+#[tauri::command]
+pub fn clear_algo_prefs() -> Result<(), String> {
+    reset_algo_prefs().map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn list_playbooks() -> Result<Vec<Playbook>, String> {
     list_playbooks_core().map_err(|e| e.to_string())
@@ -3026,6 +3151,10 @@ pub fn run_tauri() {
             sftp_ls,
             sftp_stat,
             sftp_mkdir,
+            sftp_rename,
+            sftp_remove_file,
+            sftp_remove_dir,
+            sftp_remove_dir_all,
             sftp_read_text,
             local_ls,
             local_walk,
@@ -3114,6 +3243,10 @@ pub fn run_tauri() {
             get_host_fingerprint_status,
             trust_host_fingerprint,
             import_known_hosts,
+            forget_system_known_host,
+            get_algo_prefs,
+            set_algo_prefs,
+            clear_algo_prefs,
             // Playbooks
             list_playbooks,
             save_playbook,

@@ -7,6 +7,7 @@ import {
   ExternalLink,
   FileText,
   Keyboard,
+  KeyRound,
   Lock,
   PauseCircle,
   PlayCircle,
@@ -26,6 +27,7 @@ import { useI18n } from "../i18n";
 import type { DaemonHealth, DiagnosticLogEntry, ExecutionGateStatus } from "../types";
 import LanguageSwitcher from "./LanguageSwitcher";
 import HighlightSettings from "./HighlightSettings";
+import AlgoPrefsDialog from "./AlgoPrefsDialog";
 import { THEMES, useTheme } from "../theme";
 import { cn } from "../lib/utils";
 import { formatClockTime } from "../lib/format";
@@ -103,6 +105,10 @@ export default function SettingsMenu({
   const [masterPassword, setMasterPassword] = useState("");
   const [secretsBusy, setSecretsBusy] = useState(false);
   const [secretsMessage, setSecretsMessage] = useState<string | null>(null);
+  // A22: SSH algorithm preferences. `null` means "not loaded yet / load failed",
+  // which the status line renders as a neutral hint rather than a claim.
+  const [algoOpen, setAlgoOpen] = useState(false);
+  const [algoCustom, setAlgoCustom] = useState<boolean | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const gatePaused = gateStatus?.mode === "paused";
   const gateUnavailable = gateStatus === null;
@@ -127,7 +133,9 @@ export default function SettingsMenu({
     }
 
     function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") setOpen(false);
+      // The algorithm dialog handles its own Escape; don't tear down the menu
+      // underneath it at the same time.
+      if (event.key === "Escape" && !algoOpen) setOpen(false);
     }
 
     document.addEventListener("pointerdown", handlePointerDown);
@@ -136,7 +144,7 @@ export default function SettingsMenu({
       document.removeEventListener("pointerdown", handlePointerDown);
       document.removeEventListener("keydown", handleKeyDown);
     };
-  }, [open]);
+  }, [open, algoOpen]);
 
   // K10: load the telemetry opt-in state when the menu opens.
   useEffect(() => {
@@ -157,6 +165,12 @@ export default function SettingsMenu({
         setCliPathMessage(status.message);
       })
       .catch((err) => setCliPathMessage(String(err)));
+    // A22: whether custom SSH algorithms are in effect. A failed read leaves the
+    // status as `null` so the section doesn't assert either state.
+    void api
+      .getAlgoPrefs()
+      .then((s) => setAlgoCustom(s.custom))
+      .catch(() => setAlgoCustom(null));
   }, [open]);
 
   // K1: set the master password (first time) or change it. Setting it for the
@@ -566,6 +580,29 @@ export default function SettingsMenu({
           </section>
 
           <section className="grid gap-2">
+            <div className={sectionTitleCls}>
+              <KeyRound size={15} />
+              {t("SSH algorithms")}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {algoCustom === null
+                ? t("Negotiation preferences for new connections.")
+                : algoCustom
+                  ? t("Using custom algorithm preferences.")
+                  : t("Using the built-in safe defaults.")}
+            </p>
+            <button
+              type="button"
+              className={rowBtnCls}
+              onClick={() => setAlgoOpen(true)}
+              title={t("Edit SSH algorithms")}
+            >
+              <KeyRound size={16} />
+              <span className="truncate">{t("Edit SSH algorithms")}</span>
+            </button>
+          </section>
+
+          <section className="grid gap-2">
             <div className={sectionTitleCls}>{t("Telemetry")}</div>
             <label className="flex items-start gap-2.5 text-sm">
               <input
@@ -836,6 +873,8 @@ export default function SettingsMenu({
           </div>
         </div>
       )}
+
+      {algoOpen && <AlgoPrefsDialog onClose={() => setAlgoOpen(false)} />}
     </div>
   );
 }

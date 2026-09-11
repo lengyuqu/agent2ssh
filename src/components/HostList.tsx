@@ -7,6 +7,8 @@ import {
   RefreshCw,
   Save,
   Server,
+  ShieldCheck,
+  ShieldMinus,
   Trash2,
   X,
 } from "lucide-react";
@@ -49,6 +51,10 @@ type Props = {
   onRefresh: () => void;
   onConnect: (name: string) => void;
   onDisconnect: (name: string) => void;
+  /** G13: pull trust in from the system OpenSSH `~/.ssh/known_hosts`. */
+  onImportOpensshTrust: () => void;
+  /** G13: drop this host's keys from the system OpenSSH `~/.ssh/known_hosts`. */
+  onForgetOpenssh: (host: HostProfile) => void;
 };
 
 type ConnState = { connected: boolean; dotClass: string; label: string };
@@ -80,6 +86,8 @@ export default function HostList({
   onRefresh,
   onConnect,
   onDisconnect,
+  onImportOpensshTrust,
+  onForgetOpenssh,
 }: Props) {
   const { t } = useI18n();
   const [confirmTarget, setConfirmTarget] = useState<string | null>(null);
@@ -264,6 +272,15 @@ export default function HostList({
                 {connected ? <PlugZap size={14} /> : <Plug size={14} />}
               </IconButton>
               <IconButton
+                title={t("Forget {name} in OpenSSH known_hosts", { name: host.name })}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onForgetOpenssh(host);
+                }}
+              >
+                <ShieldMinus size={14} />
+              </IconButton>
+              <IconButton
                 variant="danger"
                 title={t("Remove {name}", { name: host.name })}
                 onClick={(e) => {
@@ -279,7 +296,7 @@ export default function HostList({
       }),
     ],
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [t, proxies]
+    [t, proxies, onForgetOpenssh]
   );
 
   const table = useReactTable({
@@ -307,6 +324,12 @@ export default function HostList({
         <ColumnVisibilityMenu table={table} label={t("Toggle columns")} />
         <IconButton onClick={onRefresh} title={t("Refresh hosts")}>
           <RefreshCw size={15} />
+        </IconButton>
+        <IconButton
+          onClick={onImportOpensshTrust}
+          title={t("Import trust from OpenSSH (~/.ssh/known_hosts)")}
+        >
+          <ShieldCheck size={15} />
         </IconButton>
       </div>
 

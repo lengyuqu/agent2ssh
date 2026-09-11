@@ -27,11 +27,12 @@ use agent2ssh::{
     list_playbooks_core, load_snippets, ping_hosts_core, preview_exec, preview_exec_multi,
     remove_host_core, remove_snippet, run_playbook_core_with_source_and_approved_steps,
     sftp_download_core_with_source, sftp_ls_core_with_source, sftp_mkdir_core_with_source,
-    sftp_stat_core_with_source, sftp_upload_core_with_source, source_from_transport,
-    validate_policy_path, AuditFilter, BatchStrategy, ExecComparison, ExecMultiBatchRequest,
-    ExecMultiRequest, ExecRequest, ExecutionGateStatus, ForwardDirection, ForwardRule, HostFilter,
-    HostProfile, PolicyDecision, PolicyTestResult, RiskLevel, SftpDownloadRequest,
-    SftpUploadRequest, Snippet, TeamConfigExport,
+    sftp_remove_dir_all_core_with_source, sftp_remove_dir_core_with_source,
+    sftp_remove_file_core_with_source, sftp_rename_core_with_source, sftp_stat_core_with_source,
+    sftp_upload_core_with_source, source_from_transport, validate_policy_path, AuditFilter,
+    BatchStrategy, ExecComparison, ExecMultiBatchRequest, ExecMultiRequest, ExecRequest,
+    ExecutionGateStatus, ForwardDirection, ForwardRule, HostFilter, HostProfile, PolicyDecision,
+    PolicyTestResult, RiskLevel, SftpDownloadRequest, SftpUploadRequest, Snippet, TeamConfigExport,
 };
 use anyhow::{Context, Result};
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
@@ -552,6 +553,43 @@ enum SftpCommands {
     },
     /// Create a remote directory (mkdir -p)
     Mkdir {
+        #[arg(add = ArgValueCandidates::new(host_candidates))]
+        host: String,
+        path: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Rename or move a remote file or directory
+    Rename {
+        #[arg(add = ArgValueCandidates::new(host_candidates))]
+        host: String,
+        old: String,
+        new: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delete a single remote file
+    Rm {
+        #[arg(add = ArgValueCandidates::new(host_candidates))]
+        host: String,
+        path: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove an empty remote directory (fails when it is not empty)
+    Rmdir {
+        #[arg(add = ArgValueCandidates::new(host_candidates))]
+        host: String,
+        path: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Recursively delete a remote directory tree (remote `rm -rf`)
+    ///
+    /// Rated high risk by the built-in classifier, and blocked outright when
+    /// the target is `/` or `/*`, so it can require approval.
+    #[command(name = "rm-rf")]
+    RmRf {
         #[arg(add = ArgValueCandidates::new(host_candidates))]
         host: String,
         path: String,
@@ -1776,6 +1814,73 @@ async fn async_main() -> Result<()> {
                     println!("{}", serde_json::to_string_pretty(&result)?);
                 } else if result.exit_code == Some(0) {
                     println!("Created directory '{path}' on {host}.");
+                } else {
+                    eprintln!("{}", result.stderr);
+                    std::process::exit(result.exit_code.unwrap_or(1));
+                }
+            }
+            SftpCommands::Rename {
+                host,
+                old,
+                new,
+                json,
+            } => {
+                let source = source_from_transport();
+                // Must stay identical to the string `core::sftp_dir_operation_core`
+                // records, so authorization and the audit entry agree.
+                let command = format!("sftp rename {old} -> {new}");
+                authorize_local_operation(&host, &command, false, &source).await?;
+                let result =
+                    sftp_rename_core_with_source(&host, &old, &new, None, Some(source)).await?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                } else if result.exit_code == Some(0) {
+                    println!("Renamed '{old}' to '{new}' on {host}.");
+                } else {
+                    eprintln!("{}", result.stderr);
+                    std::process::exit(result.exit_code.unwrap_or(1));
+                }
+            }
+            SftpCommands::Rm { host, path, json } => {
+                let source = source_from_transport();
+                let command = format!("sftp rm {path}");
+                authorize_local_operation(&host, &command, false, &source).await?;
+                let result =
+                    sftp_remove_file_core_with_source(&host, &path, None, Some(source)).await?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                } else if result.exit_code == Some(0) {
+                    println!("Deleted '{path}' on {host}.");
+                } else {
+                    eprintln!("{}", result.stderr);
+                    std::process::exit(result.exit_code.unwrap_or(1));
+                }
+            }
+            SftpCommands::Rmdir { host, path, json } => {
+                let source = source_from_transport();
+                let command = format!("sftp rmdir {path}");
+                authorize_local_operation(&host, &command, false, &source).await?;
+                let result =
+                    sftp_remove_dir_core_with_source(&host, &path, None, Some(source)).await?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                } else if result.exit_code == Some(0) {
+                    println!("Removed directory '{path}' on {host}.");
+                } else {
+                    eprintln!("{}", result.stderr);
+                    std::process::exit(result.exit_code.unwrap_or(1));
+                }
+            }
+            SftpCommands::RmRf { host, path, json } => {
+                let source = source_from_transport();
+                let command = format!("sftp rm-rf {path}");
+                authorize_local_operation(&host, &command, false, &source).await?;
+                let result =
+                    sftp_remove_dir_all_core_with_source(&host, &path, None, Some(source)).await?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                } else if result.exit_code == Some(0) {
+                    println!("Removed '{path}' and everything inside it on {host}.");
                 } else {
                     eprintln!("{}", result.stderr);
                     std::process::exit(result.exit_code.unwrap_or(1));

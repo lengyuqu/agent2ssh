@@ -24,10 +24,11 @@ use agent2ssh::{
     preview_team_config_import, remove_host_core, remove_snippet,
     run_playbook_core_with_source_and_approved_steps, session_close_core, session_list_core,
     session_open_core, session_read_core, session_write_core, sftp_download_core_with_source,
-    sftp_ls_core_with_source, sftp_mkdir_core_with_source, sftp_stat_core_with_source,
-    sftp_upload_core_with_source, AuditFilter, ExecMultiBatchRequest, ExecMultiRequest,
-    ExecRequest, ForwardDirection, HostProfile, RiskLevel, SftpDownloadRequest, SftpUploadRequest,
-    TeamConfigExport,
+    sftp_ls_core_with_source, sftp_mkdir_core_with_source, sftp_remove_dir_all_core_with_source,
+    sftp_remove_dir_core_with_source, sftp_remove_file_core_with_source,
+    sftp_rename_core_with_source, sftp_stat_core_with_source, sftp_upload_core_with_source,
+    AuditFilter, ExecMultiBatchRequest, ExecMultiRequest, ExecRequest, ForwardDirection,
+    HostProfile, RiskLevel, SftpDownloadRequest, SftpUploadRequest, TeamConfigExport,
 };
 use anyhow::Result;
 use serde::{de::DeserializeOwned, Deserialize};
@@ -916,6 +917,77 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
             authorize_local_mcp_operation(host, &command, false, &source).await?;
             serde_json::to_value(
                 sftp_mkdir_core_with_source(host, path, timeout_secs, Some(source))
+                    .await
+                    .map_err(McpError::from)?,
+            )?
+        }
+        McpTool::SshSftpRename => {
+            let host = args["host"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("host required"))?;
+            let old_path = args["old_path"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("old_path required"))?;
+            let new_path = args["new_path"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("new_path required"))?;
+            let timeout_secs = args["timeout_secs"].as_u64();
+            let source = mcp_source();
+            let command = format!("sftp rename {old_path} -> {new_path}");
+            authorize_local_mcp_operation(host, &command, false, &source).await?;
+            serde_json::to_value(
+                sftp_rename_core_with_source(host, old_path, new_path, timeout_secs, Some(source))
+                    .await
+                    .map_err(McpError::from)?,
+            )?
+        }
+        McpTool::SshSftpRm => {
+            let host = args["host"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("host required"))?;
+            let path = args["path"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("path required"))?;
+            let timeout_secs = args["timeout_secs"].as_u64();
+            let source = mcp_source();
+            let command = format!("sftp rm {path}");
+            authorize_local_mcp_operation(host, &command, false, &source).await?;
+            serde_json::to_value(
+                sftp_remove_file_core_with_source(host, path, timeout_secs, Some(source))
+                    .await
+                    .map_err(McpError::from)?,
+            )?
+        }
+        McpTool::SshSftpRmdir => {
+            let host = args["host"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("host required"))?;
+            let path = args["path"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("path required"))?;
+            let timeout_secs = args["timeout_secs"].as_u64();
+            let source = mcp_source();
+            let command = format!("sftp rmdir {path}");
+            authorize_local_mcp_operation(host, &command, false, &source).await?;
+            serde_json::to_value(
+                sftp_remove_dir_core_with_source(host, path, timeout_secs, Some(source))
+                    .await
+                    .map_err(McpError::from)?,
+            )?
+        }
+        McpTool::SshSftpRmRf => {
+            let host = args["host"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("host required"))?;
+            let path = args["path"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("path required"))?;
+            let timeout_secs = args["timeout_secs"].as_u64();
+            let source = mcp_source();
+            let command = format!("sftp rm-rf {path}");
+            authorize_local_mcp_operation(host, &command, false, &source).await?;
+            serde_json::to_value(
+                sftp_remove_dir_all_core_with_source(host, path, timeout_secs, Some(source))
                     .await
                     .map_err(McpError::from)?,
             )?
