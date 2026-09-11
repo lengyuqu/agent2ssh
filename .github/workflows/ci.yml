@@ -115,6 +115,17 @@ jobs:
     name: Tauri feature unit tests
     needs: contract-consistency
     runs-on: ubuntu-latest
+    env:
+      # `tauri_build::build()` refuses to run unless every `bundle.externalBin`
+      # sidecar exists as src-tauri/binaries/<name>-<host-triple>. Those are
+      # gitignored build outputs that only the tauri-bundle job produces, so a
+      # bare runner has none and the build script aborts with
+      # `resource path binaries/agent2ssh-cli-x86_64-unknown-linux-gnu doesn't
+      # exist`. This job only compiles and unit-tests the tauri-gated library —
+      # it never packages or launches the app — so blank out externalBin.
+      # tauri-build merges TAURI_CONFIG over tauri.conf.json (JSON merge patch,
+      # which replaces arrays wholesale), and an empty list is a no-op there.
+      TAURI_CONFIG: '{"bundle":{"externalBin":[]}}'
     steps:
       - uses: actions/checkout@v4
 
