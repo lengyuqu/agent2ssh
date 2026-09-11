@@ -8,6 +8,8 @@
 //! Mirrors rssh's `tests/cli_contract.rs` pattern, adapted to agent2ssh's
 //! command structure.
 
+use agent2ssh::store::CONFIG_DIR_ENV;
+
 /// Path to the CLI binary, resolved at compile time by cargo.
 fn cli_bin() -> std::path::PathBuf {
     env!("CARGO_BIN_EXE_agent2ssh").into()
@@ -34,7 +36,7 @@ async fn run_cli_in_dir(
     args: &[&str],
 ) -> (String, String, Option<i32>) {
     let output = tokio::process::Command::new(cli_bin())
-        .env("AGENT2SSH_CONFIG_DIR", config_dir)
+        .env(CONFIG_DIR_ENV, config_dir)
         .args(args)
         .output()
         .await

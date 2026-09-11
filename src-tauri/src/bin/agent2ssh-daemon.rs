@@ -4302,9 +4302,9 @@ mod tests {
         let temp =
             std::env::temp_dir().join(format!("agent2ssh-daemon-gate-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp).unwrap();
-        std::env::set_var("AGENT2SSH_CONFIG_DIR", &temp);
+        std::env::set_var(CONFIG_DIR_ENV, &temp);
         let out = f();
-        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        std::env::remove_var(CONFIG_DIR_ENV);
         let _ = std::fs::remove_dir_all(&temp);
         out
     }

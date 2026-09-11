@@ -5,6 +5,8 @@
 //! exercising clap argument parsing end-to-end without requiring any SSH
 //! connectivity.
 
+use agent2ssh::store::CONFIG_DIR_ENV;
+
 /// Path to the CLI binary, resolved at compile time by cargo.
 fn cli_bin() -> std::path::PathBuf {
     env!("CARGO_BIN_EXE_agent2ssh").into()
@@ -123,7 +125,7 @@ url = "http://127.0.0.1:9"
     // PowerShell's clap_complete protocol uses the final argument as the
     // completion cursor, which makes it portable to exercise on every OS.
     let output = tokio::process::Command::new(cli_bin())
-        .env("AGENT2SSH_CONFIG_DIR", &config_dir)
+        .env(CONFIG_DIR_ENV, &config_dir)
         .env("COMPLETE", "powershell")
         .args(["--", "agent2ssh", "exec", ""])
         .output()
@@ -141,7 +143,7 @@ url = "http://127.0.0.1:9"
     );
 
     let playbooks = tokio::process::Command::new(cli_bin())
-        .env("AGENT2SSH_CONFIG_DIR", &config_dir)
+        .env(CONFIG_DIR_ENV, &config_dir)
         .env("COMPLETE", "powershell")
         .args(["--", "agent2ssh", "playbook", "run", ""])
         .output()
@@ -154,7 +156,7 @@ url = "http://127.0.0.1:9"
     );
 
     let daemons = tokio::process::Command::new(cli_bin())
-        .env("AGENT2SSH_CONFIG_DIR", &config_dir)
+        .env(CONFIG_DIR_ENV, &config_dir)
         .env("COMPLETE", "powershell")
         .args(["--", "agent2ssh", "--daemon", ""])
         .output()
@@ -215,7 +217,7 @@ async fn cli_dynamic_completion_reads_daemon_resource_ids_with_get() {
     });
 
     let sessions = tokio::process::Command::new(cli_bin())
-        .env("AGENT2SSH_CONFIG_DIR", &config_dir)
+        .env(CONFIG_DIR_ENV, &config_dir)
         .env("AGENT2SSH_DAEMON_ADDR", addr.to_string())
         .env("COMPLETE", "powershell")
         .args(["--", "agent2ssh", "session", "write", ""])
@@ -226,7 +228,7 @@ async fn cli_dynamic_completion_reads_daemon_resource_ids_with_get() {
     assert!(String::from_utf8_lossy(&sessions.stdout).contains("session-123"));
 
     let forwards = tokio::process::Command::new(cli_bin())
-        .env("AGENT2SSH_CONFIG_DIR", &config_dir)
+        .env(CONFIG_DIR_ENV, &config_dir)
         .env("AGENT2SSH_DAEMON_ADDR", addr.to_string())
         .env("COMPLETE", "powershell")
         .args(["--", "agent2ssh", "forward", "rm", ""])
@@ -251,7 +253,7 @@ async fn cli_completion_does_not_create_config_or_daemon_state() {
     assert!(!config_dir.exists());
 
     let registration = tokio::process::Command::new(cli_bin())
-        .env("AGENT2SSH_CONFIG_DIR", &config_dir)
+        .env(CONFIG_DIR_ENV, &config_dir)
         .args([
             "completions",
             if cfg!(windows) { "powershell" } else { "bash" },
@@ -262,7 +264,7 @@ async fn cli_completion_does_not_create_config_or_daemon_state() {
     assert!(registration.status.success());
 
     let candidates = tokio::process::Command::new(cli_bin())
-        .env("AGENT2SSH_CONFIG_DIR", &config_dir)
+        .env(CONFIG_DIR_ENV, &config_dir)
         .env("COMPLETE", "powershell")
         .args(["--", "agent2ssh", "session", "write", ""])
         .output()
@@ -337,7 +339,7 @@ async fn mcp_stdio_end_to_end_initialize_tools_and_risk() {
     write_mcp_test_binding(&config_dir, source, binding_key);
 
     let mut child = Command::new(mcp_bin())
-        .env("AGENT2SSH_CONFIG_DIR", &config_dir)
+        .env(CONFIG_DIR_ENV, &config_dir)
         .env("AGENT2SSH_SOURCE", source)
         .env("AGENT2SSH_BINDING_KEY", binding_key)
         .stdin(std::process::Stdio::piped())
@@ -489,7 +491,7 @@ token = "tok"
     .expect("write remotes.toml");
 
     let mut child = Command::new(mcp_bin())
-        .env("AGENT2SSH_CONFIG_DIR", &config_dir)
+        .env(CONFIG_DIR_ENV, &config_dir)
         .env("AGENT2SSH_SOURCE", source)
         .env("AGENT2SSH_BINDING_KEY", binding_key)
         .stdin(std::process::Stdio::piped())
@@ -583,7 +585,7 @@ async fn cli_host_list_filters_by_metadata_and_tag() {
     std::fs::create_dir_all(&config_dir).expect("create temp config dir");
 
     let add = tokio::process::Command::new(cli_bin())
-        .env("AGENT2SSH_CONFIG_DIR", &config_dir)
+        .env(CONFIG_DIR_ENV, &config_dir)
         .args([
             "host",
             "add",
@@ -610,7 +612,7 @@ async fn cli_host_list_filters_by_metadata_and_tag() {
     );
 
     let list = tokio::process::Command::new(cli_bin())
-        .env("AGENT2SSH_CONFIG_DIR", &config_dir)
+        .env(CONFIG_DIR_ENV, &config_dir)
         .args([
             "host", "list", "--env", "PROD", "--role", "web", "--owner", "platform", "--tag",
             "blue", "--json",
@@ -632,7 +634,7 @@ async fn cli_host_list_filters_by_metadata_and_tag() {
     assert_eq!(hosts[0]["owner"], "platform");
 
     let empty = tokio::process::Command::new(cli_bin())
-        .env("AGENT2SSH_CONFIG_DIR", &config_dir)
+        .env(CONFIG_DIR_ENV, &config_dir)
         .args(["host", "list", "--env", "staging", "--json"])
         .output()
         .await
@@ -1096,7 +1098,7 @@ requires_approval = true
     .expect("write policy file");
 
     let output = std::process::Command::new(cli_bin())
-        .env("AGENT2SSH_CONFIG_DIR", &dir)
+        .env(CONFIG_DIR_ENV, &dir)
         .args(["policy", "validate", "--json"])
         .output()
         .expect("failed to run policy validate");
@@ -1129,7 +1131,7 @@ patterns = ["terraform destroy*"]
     .expect("write policy file");
 
     let output = std::process::Command::new(cli_bin())
-        .env("AGENT2SSH_CONFIG_DIR", &dir)
+        .env(CONFIG_DIR_ENV, &dir)
         .args([
             "policy",
             "test",
@@ -1161,7 +1163,7 @@ fn cli_policy_test_applies_host_risk_override() {
     std::fs::create_dir_all(&dir).expect("create temp config dir");
 
     let add = std::process::Command::new(cli_bin())
-        .env("AGENT2SSH_CONFIG_DIR", &dir)
+        .env(CONFIG_DIR_ENV, &dir)
         .args([
             "host",
             "add",
@@ -1181,7 +1183,7 @@ fn cli_policy_test_applies_host_risk_override() {
     );
 
     let output = std::process::Command::new(cli_bin())
-        .env("AGENT2SSH_CONFIG_DIR", &dir)
+        .env(CONFIG_DIR_ENV, &dir)
         .args([
             "policy",
             "test",

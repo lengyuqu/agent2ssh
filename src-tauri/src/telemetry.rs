@@ -102,12 +102,13 @@ fn record_event_inner(kind: &str, data: serde_json::Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::CONFIG_DIR_ENV;
 
     #[test]
     #[serial_test::serial]
     fn disabled_by_default_and_toggleable() {
         let dir = std::env::temp_dir().join(format!("agent2ssh-tele-{}", uuid::Uuid::new_v4()));
-        std::env::set_var("AGENT2SSH_CONFIG_DIR", &dir);
+        std::env::set_var(CONFIG_DIR_ENV, &dir);
 
         // Default: off, and recording is a no-op (no file created).
         assert!(!telemetry_enabled());
@@ -125,7 +126,7 @@ mod tests {
         save_telemetry_config(false).unwrap();
         assert!(!telemetry_enabled());
 
-        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        std::env::remove_var(CONFIG_DIR_ENV);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

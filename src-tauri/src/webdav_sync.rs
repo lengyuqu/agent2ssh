@@ -1282,6 +1282,7 @@ async fn sync_status<R: SyncRemote>(remote_transport: &R) -> Result<WebDavSyncSt
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::CONFIG_DIR_ENV;
     use std::collections::HashMap;
     use std::sync::Mutex;
 
@@ -1439,7 +1440,7 @@ mod tests {
     async fn status_degrades_corrupt_metadata_to_unknown() {
         let dir = std::env::temp_dir().join(format!("agent2ssh-sync-bad-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
-        std::env::set_var("AGENT2SSH_CONFIG_DIR", &dir);
+        std::env::set_var(CONFIG_DIR_ENV, &dir);
         fs::write(dir.join("hosts.json"), "{}").unwrap();
         fs::write(dir.join(SYNC_VERSION_FILE), "not-json").unwrap();
         let remote = FakeRemote::default();
@@ -1449,7 +1450,7 @@ mod tests {
         assert_eq!(status.state, SyncState::Unknown);
         assert!(status.metadata_error.unwrap().contains("metadata"));
 
-        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        std::env::remove_var(CONFIG_DIR_ENV);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1459,7 +1460,7 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("agent2ssh-sync-race-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
-        std::env::set_var("AGENT2SSH_CONFIG_DIR", &dir);
+        std::env::set_var(CONFIG_DIR_ENV, &dir);
         let base = marker(1, "push", vec![file("hosts.json", b"base")]);
         write_local_marker(&base).unwrap();
         fs::write(dir.join("hosts.json"), b"local change").unwrap();
@@ -1472,7 +1473,7 @@ mod tests {
         let result = sync_push(&remote, Some("test-pw"), false).await;
         assert!(result.unwrap_err().to_string().contains("conflict"));
 
-        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        std::env::remove_var(CONFIG_DIR_ENV);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1487,7 +1488,7 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         fs::create_dir_all(&dir).unwrap();
-        std::env::set_var("AGENT2SSH_CONFIG_DIR", &dir);
+        std::env::set_var(CONFIG_DIR_ENV, &dir);
         fs::write(dir.join("snippets.json"), r#"[{"name":"keep"}]"#).unwrap();
         fs::write(dir.join("approval_policies.toml"), "# keep me\n").unwrap();
 
@@ -1517,7 +1518,7 @@ mod tests {
             "# keep me\n"
         );
 
-        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        std::env::remove_var(CONFIG_DIR_ENV);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1532,7 +1533,7 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         fs::create_dir_all(&dir).unwrap();
-        std::env::set_var("AGENT2SSH_CONFIG_DIR", &dir);
+        std::env::set_var(CONFIG_DIR_ENV, &dir);
 
         let host_bytes = b"{\"hosts\":[]}".to_vec();
         let stale = WebDavSyncMarker {
@@ -1563,7 +1564,7 @@ mod tests {
         assert!(!dir.join("snippets.json").exists());
         assert!(!dir.join("known_hosts.json").exists());
 
-        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        std::env::remove_var(CONFIG_DIR_ENV);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1573,7 +1574,7 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("agent2ssh-sync-future-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
-        std::env::set_var("AGENT2SSH_CONFIG_DIR", &dir);
+        std::env::set_var(CONFIG_DIR_ENV, &dir);
         fs::write(dir.join("hosts.json"), "{}").unwrap();
         let mut future = marker(9, "push", vec![]);
         future.schema_version = CURRENT_SYNC_SCHEMA + 1;
@@ -1589,7 +1590,7 @@ mod tests {
             result.err()
         );
 
-        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        std::env::remove_var(CONFIG_DIR_ENV);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1599,7 +1600,7 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("agent2ssh-sync-plain-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
-        std::env::set_var("AGENT2SSH_CONFIG_DIR", &dir);
+        std::env::set_var(CONFIG_DIR_ENV, &dir);
         fs::write(dir.join("hosts.json"), "{}").unwrap();
 
         let remote = FakeRemote::default();
@@ -1615,7 +1616,7 @@ mod tests {
             "no marker should exist after refused push"
         );
 
-        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        std::env::remove_var(CONFIG_DIR_ENV);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1624,7 +1625,7 @@ mod tests {
     fn collect_sync_files_includes_syncable_set_and_excludes_local_state() {
         let dir = std::env::temp_dir().join(format!("agent2ssh-sync-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(dir.join("keys")).unwrap();
-        std::env::set_var("AGENT2SSH_CONFIG_DIR", &dir);
+        std::env::set_var(CONFIG_DIR_ENV, &dir);
         fs::write(dir.join("hosts.json"), "{}").unwrap();
         // `webhook.toml` is part of the sync set and must be collected.
         fs::write(dir.join("webhook.toml"), "[hook]\n").unwrap();
@@ -1650,7 +1651,7 @@ mod tests {
         assert!(!names.contains(&"audit.jsonl"));
         assert!(!names.contains(&"keys/id_ed25519"));
 
-        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        std::env::remove_var(CONFIG_DIR_ENV);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1660,7 +1661,7 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("agent2ssh-sync-backup-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
-        std::env::set_var("AGENT2SSH_CONFIG_DIR", &dir);
+        std::env::set_var(CONFIG_DIR_ENV, &dir);
         fs::write(dir.join("hosts.json"), "{}").unwrap();
         fs::write(dir.join("known_hosts.json"), "{}").unwrap();
         fs::write(dir.join(SYNC_VERSION_FILE), "{}").unwrap();
@@ -1673,7 +1674,7 @@ mod tests {
         assert!(!backup.join("daemon.token").exists());
         assert!(backup.join("backup_manifest.json").exists());
 
-        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        std::env::remove_var(CONFIG_DIR_ENV);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1723,7 +1724,7 @@ mod tests {
     fn named_snapshot_round_trips_through_list_and_restore() {
         let dir = std::env::temp_dir().join(format!("agent2ssh-snap-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
-        std::env::set_var("AGENT2SSH_CONFIG_DIR", &dir);
+        std::env::set_var(CONFIG_DIR_ENV, &dir);
         fs::write(dir.join("hosts.json"), r#"{"v":1}"#).unwrap();
 
         let created = create_named_snapshot("before-change").unwrap();
@@ -1749,7 +1750,7 @@ mod tests {
         let after_delete = list_config_snapshots().unwrap();
         assert!(!after_delete.iter().any(|s| s.id == created.id));
 
-        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        std::env::remove_var(CONFIG_DIR_ENV);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1758,7 +1759,7 @@ mod tests {
     fn apply_config_template_rejects_non_syncable_files() {
         let dir = std::env::temp_dir().join(format!("agent2ssh-tmpl-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
-        std::env::set_var("AGENT2SSH_CONFIG_DIR", &dir);
+        std::env::set_var(CONFIG_DIR_ENV, &dir);
 
         let result = apply_config_template(&[("daemon.token".to_string(), "x".to_string())]);
         assert!(result.is_err());
@@ -1774,7 +1775,7 @@ mod tests {
             "enabled = true\n"
         );
 
-        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        std::env::remove_var(CONFIG_DIR_ENV);
         let _ = fs::remove_dir_all(&dir);
     }
 

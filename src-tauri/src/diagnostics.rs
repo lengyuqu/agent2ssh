@@ -635,6 +635,7 @@ pub fn generate_system_report() -> Result<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::CONFIG_DIR_ENV;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static SINK_HITS: AtomicUsize = AtomicUsize::new(0);
@@ -644,7 +645,7 @@ mod tests {
     fn error_sink_fires_only_for_errors_and_redacts() {
         let config_dir = std::env::temp_dir().join(format!("agent2ssh-diag-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&config_dir).unwrap();
-        std::env::set_var("AGENT2SSH_CONFIG_DIR", &config_dir);
+        std::env::set_var(CONFIG_DIR_ENV, &config_dir);
 
         // Re-registration overrides (H9): this test's sink replaces whatever an
         // earlier test installed, so the hit counter below reflects only us.
@@ -684,7 +685,7 @@ mod tests {
             "password field must be redacted"
         );
 
-        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        std::env::remove_var(CONFIG_DIR_ENV);
         let _ = std::fs::remove_dir_all(&config_dir);
     }
 
@@ -693,7 +694,7 @@ mod tests {
     fn no_sink_variant_writes_but_never_fans_out() {
         let config_dir = std::env::temp_dir().join(format!("agent2ssh-diag-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&config_dir).unwrap();
-        std::env::set_var("AGENT2SSH_CONFIG_DIR", &config_dir);
+        std::env::set_var(CONFIG_DIR_ENV, &config_dir);
 
         set_error_sink(|_entry| {
             SINK_HITS.fetch_add(1, Ordering::SeqCst);
@@ -716,7 +717,7 @@ mod tests {
             "no-sink error entry should still be persisted"
         );
 
-        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        std::env::remove_var(CONFIG_DIR_ENV);
         let _ = std::fs::remove_dir_all(&config_dir);
     }
 
@@ -726,7 +727,7 @@ mod tests {
         let config_dir =
             std::env::temp_dir().join(format!("agent2ssh-diag-burst-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&config_dir).unwrap();
-        std::env::set_var("AGENT2SSH_CONFIG_DIR", &config_dir);
+        std::env::set_var(CONFIG_DIR_ENV, &config_dir);
         std::fs::write(
             config_dir.join("anomaly.toml"),
             r#"
@@ -757,7 +758,7 @@ diagnostic_cooldown_secs = 60
             "webhook errors must not refresh diagnostic burst cooldown"
         );
 
-        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        std::env::remove_var(CONFIG_DIR_ENV);
         let _ = std::fs::remove_dir_all(&config_dir);
     }
 

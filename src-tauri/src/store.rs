@@ -68,6 +68,13 @@ pub fn lock_config_file(name: &str) -> Result<FileLockGuard> {
     Ok(FileLockGuard { _file: file })
 }
 
+/// Environment variable that overrides the configuration directory.
+///
+/// Read by [`config_dir`]. Tests set it through `std::env::set_var` to point the
+/// CLI, daemon and library at an isolated directory, so the name is shared here
+/// rather than spelled out at each call site.
+pub const CONFIG_DIR_ENV: &str = "AGENT2SSH_CONFIG_DIR";
+
 pub fn config_dir() -> Result<PathBuf> {
     // Thread-local override takes priority (used by tests to avoid env-var
     // race conditions when running in parallel).
@@ -76,7 +83,7 @@ pub fn config_dir() -> Result<PathBuf> {
         return Ok(path);
     }
 
-    if let Some(path) = config_dir_override(std::env::var("AGENT2SSH_CONFIG_DIR").ok()) {
+    if let Some(path) = config_dir_override(std::env::var(CONFIG_DIR_ENV).ok()) {
         return Ok(path);
     }
 
@@ -1463,7 +1470,7 @@ mod tests {
     fn save_config_writes_backup_of_previous_file() {
         // Isolate the config dir for this test process.
         let dir = std::env::temp_dir().join(format!("agent2ssh-bak-{}", uuid::Uuid::new_v4()));
-        std::env::set_var("AGENT2SSH_CONFIG_DIR", &dir);
+        std::env::set_var(CONFIG_DIR_ENV, &dir);
 
         let first = AppConfig {
             hosts: vec![crate::types::HostProfile {
@@ -1505,7 +1512,7 @@ mod tests {
             "backup holds the previous version, got: {backup_raw}"
         );
 
-        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        std::env::remove_var(CONFIG_DIR_ENV);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1514,7 +1521,7 @@ mod tests {
     fn passwords_persist_as_marker_not_plaintext() {
         // cfg(test) routes secrets to the in-memory backend.
         let dir = std::env::temp_dir().join(format!("agent2ssh-kc-{}", uuid::Uuid::new_v4()));
-        std::env::set_var("AGENT2SSH_CONFIG_DIR", &dir);
+        std::env::set_var(CONFIG_DIR_ENV, &dir);
 
         let host = crate::types::HostProfile {
             name: "kc-host".into(),
@@ -1563,7 +1570,7 @@ mod tests {
             Some("key-passphrase")
         );
 
-        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        std::env::remove_var(CONFIG_DIR_ENV);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1572,7 +1579,7 @@ mod tests {
     fn migrate_secrets_moves_legacy_plaintext() {
         let dir = std::env::temp_dir().join(format!("agent2ssh-kc-mig-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
-        std::env::set_var("AGENT2SSH_CONFIG_DIR", &dir);
+        std::env::set_var(CONFIG_DIR_ENV, &dir);
 
         // Hand-write a legacy config with a plaintext password (as pre-K1 builds did).
         let legacy = r#"{
@@ -1600,7 +1607,7 @@ mod tests {
         let loaded = load_config().unwrap();
         assert_eq!(loaded.hosts[0].password.as_deref(), Some("plain-pw"));
 
-        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        std::env::remove_var(CONFIG_DIR_ENV);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1610,7 +1617,7 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("agent2ssh-legacy-kc-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
-        std::env::set_var("AGENT2SSH_CONFIG_DIR", &dir);
+        std::env::set_var(CONFIG_DIR_ENV, &dir);
 
         let legacy = format!(
             r#"{{
@@ -1635,7 +1642,7 @@ mod tests {
         assert!(raw.contains(crate::secrets::LEGACY_KEYRING_REF));
         assert!(!raw.contains(crate::secrets::SECRET_REF));
 
-        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        std::env::remove_var(CONFIG_DIR_ENV);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1916,13 +1923,13 @@ mod tests {
         let config_dir =
             std::env::temp_dir().join(format!("agent2ssh-export-jsonl-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&config_dir).unwrap();
-        std::env::set_var("AGENT2SSH_CONFIG_DIR", &config_dir);
+        std::env::set_var(CONFIG_DIR_ENV, &config_dir);
 
         let filter = AuditFilter::default();
         let output = super::export_audit_jsonl(&filter).unwrap();
         assert!(output.is_empty(), "empty audit should return empty string");
 
-        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        std::env::remove_var(CONFIG_DIR_ENV);
         let _ = std::fs::remove_dir_all(&config_dir);
     }
 
@@ -1933,7 +1940,7 @@ mod tests {
         let config_dir =
             std::env::temp_dir().join(format!("agent2ssh-export-csv-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&config_dir).unwrap();
-        std::env::set_var("AGENT2SSH_CONFIG_DIR", &config_dir);
+        std::env::set_var(CONFIG_DIR_ENV, &config_dir);
 
         let filter = AuditFilter::default();
         let output = super::export_audit_csv(&filter).unwrap();
@@ -1943,7 +1950,7 @@ mod tests {
         // Should only contain the header row (no data)
         assert_eq!(output.lines().count(), 1);
 
-        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        std::env::remove_var(CONFIG_DIR_ENV);
         let _ = std::fs::remove_dir_all(&config_dir);
     }
 
@@ -1956,7 +1963,7 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("agent2ssh-auditscan-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::env::set_var("AGENT2SSH_CONFIG_DIR", &dir);
+        std::env::set_var(CONFIG_DIR_ENV, &dir);
 
         let n: usize = 5000;
         let base = chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_000, 0).unwrap();
@@ -2018,7 +2025,7 @@ mod tests {
         });
         assert_eq!(windowed, vec!["cmd 4999", "cmd 4998", "cmd 4997"]);
 
-        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        std::env::remove_var(CONFIG_DIR_ENV);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2030,7 +2037,7 @@ mod tests {
         let config_dir =
             std::env::temp_dir().join(format!("agent2ssh-hostscache-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&config_dir).unwrap();
-        std::env::set_var("AGENT2SSH_CONFIG_DIR", &config_dir);
+        std::env::set_var(CONFIG_DIR_ENV, &config_dir);
 
         // Drop any cache state leaked from an earlier test in this process.
         super::HOSTS_CACHE.invalidate();
@@ -2056,7 +2063,7 @@ mod tests {
             "removal must invalidate the cache too"
         );
 
-        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        std::env::remove_var(CONFIG_DIR_ENV);
         let _ = std::fs::remove_dir_all(&config_dir);
     }
 

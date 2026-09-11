@@ -355,6 +355,7 @@ pub fn delete_key_core(name: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::CONFIG_DIR_ENV;
 
     #[cfg(test)]
     fn entropy_source_name() -> &'static str {
@@ -379,10 +380,10 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn test_generate_key_core_writes_openssh_ed25519_pair() {
-        let original_config_dir = std::env::var("AGENT2SSH_CONFIG_DIR").ok();
+        let original_config_dir = std::env::var(CONFIG_DIR_ENV).ok();
         let config_dir =
             std::env::temp_dir().join(format!("agent2ssh-keygen-{}", uuid::Uuid::new_v4()));
-        std::env::set_var("AGENT2SSH_CONFIG_DIR", &config_dir);
+        std::env::set_var(CONFIG_DIR_ENV, &config_dir);
 
         let result = generate_key_core("id_ed25519_test", Some("agent2ssh-test")).unwrap();
         let private_raw = std::fs::read_to_string(&result.private_path).unwrap();
@@ -400,8 +401,8 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&config_dir);
         match original_config_dir {
-            Some(value) => std::env::set_var("AGENT2SSH_CONFIG_DIR", value),
-            None => std::env::remove_var("AGENT2SSH_CONFIG_DIR"),
+            Some(value) => std::env::set_var(CONFIG_DIR_ENV, value),
+            None => std::env::remove_var(CONFIG_DIR_ENV),
         }
     }
 

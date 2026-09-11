@@ -85,7 +85,7 @@
 | 位置 | 说明 |
 |---|---|
 | 8 个组件文件 | `const labelCls = ...` 逐字复制（AddHostForm / AuditPanel / ExecPanel / ForwardPanel / HostSelector / MultiExecPanel / ProxyPanel / SFTPPanel），共 47 处引用同一常量 |
-| Rust 全仓 | `"AGENT2SSH_CONFIG_DIR"` 作为**裸字面量出现 71 次**，应为 `pub const` |
+| Rust 全仓 | `"AGENT2SSH_CONFIG_DIR"` 作为**裸字面量出现 71 次**，应为 `pub const`（✅ 2026-09-11 已处理：新增 `store::CONFIG_DIR_ENV`，98 处调用点收敛，详见下） |
 | `src-tauri/Cargo.toml` | `rand = "0.8"` 与 `getrandom = "0.4"` 双 RNG 入口（各 3 处使用）；`rand` 内部本就走 `getrandom`，可统一 |
 | `store.rs:2155` / `playbook.rs:853` | 测试中重复构造 `AuditEntry`（两处注释均自认 "Mirror append_audit"）→ 测试 fixture 未复用 |
 | `core.rs:397` `normalize_proxy()` vs `store.rs:567-580` | 代理字段 trim/过滤逻辑两处重复 |
@@ -153,7 +153,7 @@
 
 | 条目 | 原因 |
 |---|---|
-| `"AGENT2SSH_CONFIG_DIR"` 裸字面量 71 处 | 不在「建议处理顺序」内；纯常量化改造，建议单独一轮 |
+| `"AGENT2SSH_CONFIG_DIR"` 裸字面量 71 处 | ✅ 2026-09-11 已处理（见文末）；其余项不在「建议处理顺序」内 |
 | `rand` + `getrandom` 双 RNG 入口 | 需评估版本兼容与行为差异，收益低 |
 | `normalize_proxy` / 测试 `AuditEntry` fixture 重复 | 低收益 |
 | P1#11 三态组件 | 见上，无安全替换点 |
@@ -180,3 +180,30 @@
 | `npm run build` | 通过 |
 
 > 收尾时发现并修复了两处由本次重构引入的未用导入 warning：`forward.rs` 的 `Write`（原被已删的本地 `write_all_*` 使用）与 `connection.rs` 的 `HostProfile`（原被已删的本地 `resolve_host` 使用）。修后全 feature 矩阵 0 warning。
+
+---
+
+# 后续补处理（2026-09-11）
+
+## `"AGENT2SSH_CONFIG_DIR"` 裸字面量收敛
+
+上表「未处理（有意搁置）」中的最后一项。新增 `store::CONFIG_DIR_ENV`（声明紧邻读取它的 `store::config_dir()`），替换 **98 处**调用点，涉及 15 个文件：
+
+| 分层 | 文件 | 处数 | 导入位置 |
+|---|---|---|---|
+| 库 | `webdav_sync.rs` | 20 | `mod tests` 内 `use crate::store::CONFIG_DIR_ENV;` |
+| 库 | `store.rs` | 17 | 同模块，无需导入（含 `config_dir()` 生产路径 1 处） |
+| 库 | `core.rs` | 14 | 同上 |
+| 库 | `embedded_ssh.rs` / `diagnostics.rs` | 6 / 6 | 同上 |
+| 库 | `keys.rs` | 4 | 同上 |
+| 库 | `telemetry.rs` / `policy.rs` / `mcp_binding.rs` / `anomaly.rs` | 各 2 | 同上 |
+| 二进制 | `bin/agent2ssh-daemon.rs` | 2 | 无需导入（`use agent2ssh::store::*;` 已在作用域） |
+| 集成测试 | `tests/cli_smoke.rs` | 16 | 文件顶 `use agent2ssh::store::CONFIG_DIR_ENV;` |
+| 集成测试 | `tests/exec_fixture.rs` / `connect_deadline.rs` | 各 2 | 同上 |
+| 集成测试 | `tests/cli_contract.rs` | 1 | 同上 |
+
+**关键取舍**：全部 98 处都在测试代码里（`src/` 侧仅 `config_dir()` 自身 1 处在生产路径）。因此 `src/` 各文件的导入必须放进 `mod tests` 内 —— 放到文件顶会让非测试构建报 `unused_imports`，而 clippy 门是 `-D warnings`。集成测试是独立 crate，导入放文件顶（整体编译单元即测试）不会有该问题。
+
+**未纳入**：`scripts/e2-scale-plan-smoke.py` 与文档中的同名字面量（非 Rust，不在本项范围）。
+
+**验证**：`cargo fmt` 后 clippy 四目标（lib 非默认 / lib 默认 tauri / CLI+MCP / daemon）与 `cargo check --tests`（两种特性）全部 exit=0、零 warning；`592`（非默认）/ `600`（默认）lib、`cli_smoke` 33、`cli_contract` 27、`connect_deadline` 2、`daemon_integration` 57 全绿，测试计数与改动前一致。

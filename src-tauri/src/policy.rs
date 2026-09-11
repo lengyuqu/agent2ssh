@@ -150,6 +150,7 @@ fn save_policy_to_path(path: &Path, policy: &AgentPolicyFile) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::CONFIG_DIR_ENV;
 
     #[test]
     fn parse_toml_policy_with_risk_and_approval() {
@@ -253,7 +254,7 @@ ttl_secs = 300
     fn load_policy_file_reflects_saves_via_cache() {
         let dir = std::env::temp_dir().join(format!("a2s-policy-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::env::set_var("AGENT2SSH_CONFIG_DIR", &dir);
+        std::env::set_var(CONFIG_DIR_ENV, &dir);
         POLICY_CACHE.invalidate();
 
         // No policy file yet -> None (also populates the cache).
@@ -277,7 +278,7 @@ ttl_secs = 300
             .policies
             .is_empty());
 
-        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        std::env::remove_var(CONFIG_DIR_ENV);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

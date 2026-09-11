@@ -98,6 +98,7 @@ pub fn verify_mcp_binding_from_env() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::CONFIG_DIR_ENV;
 
     fn with_temp_config_dir<T>(name: &str, f: impl FnOnce() -> T) -> T {
         let dir = std::env::temp_dir().join(format!(
@@ -105,9 +106,9 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         fs::create_dir_all(&dir).unwrap();
-        std::env::set_var("AGENT2SSH_CONFIG_DIR", &dir);
+        std::env::set_var(CONFIG_DIR_ENV, &dir);
         let result = f();
-        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        std::env::remove_var(CONFIG_DIR_ENV);
         let _ = fs::remove_dir_all(dir);
         result
     }

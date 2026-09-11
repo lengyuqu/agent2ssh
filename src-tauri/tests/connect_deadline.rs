@@ -13,6 +13,8 @@
 //! the session drops and the peer observes EOF. While the worker was leaked the
 //! peer never did, which is how this was reproduced before the fix.
 
+use agent2ssh::store::CONFIG_DIR_ENV;
+
 use std::io::Read;
 use std::net::TcpListener;
 use std::path::PathBuf;
@@ -65,12 +67,12 @@ fn isolated_config(port: u16, label: &str) -> PathBuf {
         serde_json::to_vec_pretty(&hosts).unwrap(),
     )
     .expect("write hosts.json");
-    std::env::set_var("AGENT2SSH_CONFIG_DIR", &dir);
+    std::env::set_var(CONFIG_DIR_ENV, &dir);
     dir
 }
 
 fn release_config(dir: PathBuf) {
-    std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+    std::env::remove_var(CONFIG_DIR_ENV);
     let _ = std::fs::remove_dir_all(dir);
 }
 

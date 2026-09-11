@@ -399,6 +399,7 @@ impl DateTimeHour for chrono::DateTime<chrono::Utc> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::CONFIG_DIR_ENV;
     use chrono::Utc;
     use uuid::Uuid;
 
@@ -464,7 +465,7 @@ mod tests {
         // Isolate config (defaults: threshold 5) under a temp dir.
         let config_dir = std::env::temp_dir().join(format!("agent2ssh-anomaly-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&config_dir).unwrap();
-        std::env::set_var("AGENT2SSH_CONFIG_DIR", &config_dir);
+        std::env::set_var(CONFIG_DIR_ENV, &config_dir);
 
         // Reset the shared sliding-window state so prior tests don't bleed in.
         error_times().lock().unwrap().clear();
@@ -485,7 +486,7 @@ mod tests {
         // Webhook-delivery errors are ignored so they cannot self-trigger.
         assert!(record_diagnostic_error("daemon", "anomaly webhook error").is_empty());
 
-        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        std::env::remove_var(CONFIG_DIR_ENV);
         let _ = std::fs::remove_dir_all(&config_dir);
     }
 }

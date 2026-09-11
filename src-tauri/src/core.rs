@@ -3183,6 +3183,7 @@ pub async fn ping_hosts_core(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::CONFIG_DIR_ENV;
     use crate::types::AppConfig;
 
     #[test]
@@ -3244,8 +3245,8 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&config_dir).unwrap();
-        let previous = std::env::var("AGENT2SSH_CONFIG_DIR").ok();
-        std::env::set_var("AGENT2SSH_CONFIG_DIR", &config_dir);
+        let previous = std::env::var(CONFIG_DIR_ENV).ok();
+        std::env::set_var(CONFIG_DIR_ENV, &config_dir);
 
         // The preview and the run resolve through the same helper, so a
         // selection that matches nothing cannot preview as a safe no-op while
@@ -3262,8 +3263,8 @@ mod tests {
         assert!(error.to_string().contains("no hosts matched"));
 
         match previous {
-            Some(value) => std::env::set_var("AGENT2SSH_CONFIG_DIR", value),
-            None => std::env::remove_var("AGENT2SSH_CONFIG_DIR"),
+            Some(value) => std::env::set_var(CONFIG_DIR_ENV, value),
+            None => std::env::remove_var(CONFIG_DIR_ENV),
         }
         let _ = std::fs::remove_dir_all(&config_dir);
     }
@@ -3664,7 +3665,7 @@ mod tests {
         let config_dir =
             std::env::temp_dir().join(format!("agent2ssh-export-auth-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&config_dir).unwrap();
-        std::env::set_var("AGENT2SSH_CONFIG_DIR", &config_dir);
+        std::env::set_var(CONFIG_DIR_ENV, &config_dir);
 
         crate::store::save_config(&AppConfig {
             schema_version: 0,
@@ -3704,7 +3705,7 @@ mod tests {
         let config_dir =
             std::env::temp_dir().join(format!("agent2ssh-proxy-delete-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&config_dir).unwrap();
-        std::env::set_var("AGENT2SSH_CONFIG_DIR", &config_dir);
+        std::env::set_var(CONFIG_DIR_ENV, &config_dir);
 
         save_proxy_core(ProxyProfile {
             id: "corp".into(),
@@ -3772,7 +3773,7 @@ mod tests {
         let config_dir =
             std::env::temp_dir().join(format!("agent2ssh-preview-import-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&config_dir).unwrap();
-        std::env::set_var("AGENT2SSH_CONFIG_DIR", &config_dir);
+        std::env::set_var(CONFIG_DIR_ENV, &config_dir);
 
         // Set up existing config with one host
         let existing_config = AppConfig {
@@ -3853,7 +3854,7 @@ mod tests {
         assert_eq!(preview.playbooks_change, None);
         assert!(preview.summary.contains("1 host(s) to add"));
 
-        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        std::env::remove_var(CONFIG_DIR_ENV);
         let _ = std::fs::remove_dir_all(&config_dir);
     }
 
@@ -3863,7 +3864,7 @@ mod tests {
         let config_dir =
             std::env::temp_dir().join(format!("agent2ssh-import-update-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&config_dir).unwrap();
-        std::env::set_var("AGENT2SSH_CONFIG_DIR", &config_dir);
+        std::env::set_var(CONFIG_DIR_ENV, &config_dir);
 
         crate::store::save_config(&AppConfig {
             schema_version: 0,
@@ -3929,7 +3930,7 @@ mod tests {
         assert_eq!(updated.tags, vec!["new"]);
         assert_eq!(updated.env.as_deref(), Some("prod"));
 
-        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        std::env::remove_var(CONFIG_DIR_ENV);
         let _ = std::fs::remove_dir_all(&config_dir);
     }
 
@@ -3941,7 +3942,7 @@ mod tests {
         let config_dir =
             std::env::temp_dir().join(format!("agent2ssh-rename-kc-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&config_dir).unwrap();
-        std::env::set_var("AGENT2SSH_CONFIG_DIR", &config_dir);
+        std::env::set_var(CONFIG_DIR_ENV, &config_dir);
 
         // Create a password host "alpha"; the secret lands under host:alpha.
         let mut host = make_test_host("alpha");
@@ -3971,7 +3972,7 @@ mod tests {
         let beta = config.hosts.iter().find(|h| h.name == "beta").unwrap();
         assert_eq!(beta.password.as_deref(), Some("rename-secret"));
 
-        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        std::env::remove_var(CONFIG_DIR_ENV);
         let _ = std::fs::remove_dir_all(&config_dir);
     }
 
@@ -3981,7 +3982,7 @@ mod tests {
         let config_dir =
             std::env::temp_dir().join(format!("agent2ssh-passphrase-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&config_dir).unwrap();
-        std::env::set_var("AGENT2SSH_CONFIG_DIR", &config_dir);
+        std::env::set_var(CONFIG_DIR_ENV, &config_dir);
 
         let mut host = make_test_host("key-host");
         host.key_path = Some("id_ed25519".into());
@@ -4005,7 +4006,7 @@ mod tests {
             None
         );
 
-        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        std::env::remove_var(CONFIG_DIR_ENV);
         let _ = std::fs::remove_dir_all(&config_dir);
     }
 

@@ -28,6 +28,8 @@
 //! both are available: it keeps the encrypted credential-store path out of the
 //! suite, for the same reason `scripts/e2e-docker.sh` avoids passwords.
 
+use agent2ssh::store::CONFIG_DIR_ENV;
+
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -103,12 +105,12 @@ fn isolated_config(fixture: &Fixture, label: &str) -> PathBuf {
         serde_json::to_vec_pretty(&hosts).unwrap(),
     )
     .expect("write fixture hosts.json");
-    std::env::set_var("AGENT2SSH_CONFIG_DIR", &dir);
+    std::env::set_var(CONFIG_DIR_ENV, &dir);
     dir
 }
 
 fn release_config(dir: PathBuf) {
-    std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+    std::env::remove_var(CONFIG_DIR_ENV);
     let _ = std::fs::remove_dir_all(dir);
 }
 

@@ -1963,6 +1963,7 @@ fn run_terminal(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::CONFIG_DIR_ENV;
 
     fn test_host() -> HostProfile {
         HostProfile {
@@ -2064,7 +2065,7 @@ mod tests {
         let config_dir =
             std::env::temp_dir().join(format!("agent2ssh-known-hosts-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&config_dir).unwrap();
-        std::env::set_var("AGENT2SSH_CONFIG_DIR", &config_dir);
+        std::env::set_var(CONFIG_DIR_ENV, &config_dir);
         let host = test_host();
 
         trust_or_verify_host_fingerprint(
@@ -2100,7 +2101,7 @@ mod tests {
             "unexpected mismatch error: {mismatch}"
         );
 
-        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        std::env::remove_var(CONFIG_DIR_ENV);
         let _ = std::fs::remove_dir_all(&config_dir);
     }
 
@@ -2189,7 +2190,7 @@ mod tests {
         let config_dir =
             std::env::temp_dir().join(format!("agent2ssh-known-hosts-rm-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&config_dir).unwrap();
-        std::env::set_var("AGENT2SSH_CONFIG_DIR", &config_dir);
+        std::env::set_var(CONFIG_DIR_ENV, &config_dir);
 
         let host = test_host();
         trust_or_verify_host_fingerprint(&host, "example.internal:22", "ssh-ed25519", "SHA256:abc")
@@ -2214,7 +2215,7 @@ mod tests {
             "should return false when no entry was found"
         );
 
-        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        std::env::remove_var(CONFIG_DIR_ENV);
         let _ = std::fs::remove_dir_all(&config_dir);
     }
 
@@ -2226,7 +2227,7 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&config_dir).unwrap();
-        std::env::set_var("AGENT2SSH_CONFIG_DIR", &config_dir);
+        std::env::set_var(CONFIG_DIR_ENV, &config_dir);
 
         let host = test_host();
         trust_or_verify_host_fingerprint(&host, "example.internal:22", "ssh-ed25519", "SHA256:xyz")
@@ -2236,7 +2237,7 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].fingerprint_sha256, "SHA256:xyz");
 
-        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        std::env::remove_var(CONFIG_DIR_ENV);
         let _ = std::fs::remove_dir_all(&config_dir);
     }
 }
