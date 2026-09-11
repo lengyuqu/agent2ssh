@@ -6,7 +6,7 @@
 //! real server.
 //!
 //! The suite is skipped unless `AGENT2SSH_TEST_SSH_PORT` points at a reachable
-//! sshd. To run it:
+//! sshd. To run it against the local fixture image:
 //!
 //! ```sh
 //! docker build -t a2s-sshd:local scripts/sshd-fixture
@@ -16,9 +16,16 @@
 //!     --test exec_fixture -- --test-threads=1 --nocapture
 //! ```
 //!
+//! `scripts/e2e-docker.sh` also runs it, against the container that script has
+//! already started, with the throwaway key it generated.
+//!
 //! Optional overrides: `AGENT2SSH_TEST_SSH_HOST` (default `127.0.0.1`),
-//! `AGENT2SSH_TEST_SSH_USER` (default `root`), `AGENT2SSH_TEST_SSH_PASSWORD`
-//! (default `a2s-fixture`).
+//! `AGENT2SSH_TEST_SSH_USER` (default `root`), and either
+//! `AGENT2SSH_TEST_SSH_KEY` — a private key path, which is what CI and
+//! `scripts/e2e-docker.sh` use — or `AGENT2SSH_TEST_SSH_PASSWORD` (default
+//! `a2s-fixture`, matching `scripts/sshd-fixture`). Key auth is preferred where
+//! both are available: it keeps the encrypted credential-store path out of the
+//! suite, for the same reason `scripts/e2e-docker.sh` avoids passwords.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -38,6 +45,8 @@ struct Fixture {
     host: String,
     port: u16,
     user: String,
+    /// Private key path. Takes precedence over `password` when set.
+    key: Option<String>,
     password: String,
 }
 
@@ -47,10 +56,15 @@ fn fixture() -> Option<Fixture> {
         .trim()
         .parse()
         .ok()?;
+    let key = std::env::var("AGENT2SSH_TEST_SSH_KEY")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
     Some(Fixture {
         host: std::env::var("AGENT2SSH_TEST_SSH_HOST").unwrap_or_else(|_| "127.0.0.1".to_string()),
         port,
         user: std::env::var("AGENT2SSH_TEST_SSH_USER").unwrap_or_else(|_| "root".to_string()),
+        key,
         password: std::env::var("AGENT2SSH_TEST_SSH_PASSWORD")
             .unwrap_or_else(|_| "a2s-fixture".to_string()),
     })
@@ -68,15 +82,19 @@ fn isolated_config(fixture: &Fixture, label: &str) -> PathBuf {
             .as_nanos()
     ));
     std::fs::create_dir_all(&dir).expect("create fixture config dir");
+    let mut host = serde_json::json!({
+        "name": "fixture",
+        "host": fixture.host,
+        "port": fixture.port,
+        "user": fixture.user,
+    });
+    match &fixture.key {
+        Some(key) => host["key_path"] = serde_json::json!(key),
+        None => host["password"] = serde_json::json!(fixture.password),
+    }
     let hosts = serde_json::json!({
         "schema_version": 1,
-        "hosts": [{
-            "name": "fixture",
-            "host": fixture.host,
-            "port": fixture.port,
-            "user": fixture.user,
-            "password": fixture.password,
-        }],
+        "hosts": [host],
     });
     std::fs::write(
         dir.join("hosts.json"),
