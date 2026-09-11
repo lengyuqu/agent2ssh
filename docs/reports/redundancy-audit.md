@@ -135,7 +135,7 @@
 | P1#11 三态组件被绕过 | ⏸ 保留 | 逐处核对后确认均为解构 / 内联用法，**无安全的 panel 级替换点**，强改会引入行为差异 |
 | P1#12 `window.confirm` ×6 | ✅ 统一 | `ui/dialog.tsx` 新增 `ConfirmDialog` / `confirmDialog()` / `ConfirmHost`，`App.tsx` 挂载 |
 | P1#13 daemon 前置链样板 | ✅ 收敛 9 个 handler | 新增 `preflight_guarded_request`（纯 gate 链：gate_paused → rate_limit → authorize） |
-| P2 Rust 死代码 | ✅ 保留 + `TODO(unwired)` 标注 | 8 个 `sftp_*_core`、`remove_system_known_host`、`emit_bus`/`is_headless`/`is_cli`、`policy_risk_rules`；`save_algo_prefs` 标注与 `load_algo_prefs` 的不对称 |
+| P2 Rust 死代码 | ✅ 定性后接线（2026-09-11） | 8 个 `sftp_*_core`、`remove_system_known_host`、`save_algo_prefs` 已全部接线；`emit_bus`/`is_headless`/`is_cli`、`policy_risk_rules` 定性为冗余，仍保留待删（见文末） |
 | P2 TS 死导出 | ✅ 删除 | `getSessionTraceId` / `setDaemonUrl` / `CardDescription` / `CardFooter` / `badgeVariants` / `buttonVariants` 的 `export` |
 | P2 i18n 死词条 | ✅ 删除 **49 条** | 逐条核验 `src/` 零引用（报告原估 ~53，实际确认 49，未误删） |
 | P2 `labelCls` 复制 ×8 | ✅ →1 | 新建 `src/lib/ui-classes.ts`，1 定义 / 8 引用 |
@@ -207,3 +207,41 @@
 **未纳入**：`scripts/e2-scale-plan-smoke.py` 与文档中的同名字面量（非 Rust，不在本项范围）。
 
 **验证**：`cargo fmt` 后 clippy 四目标（lib 非默认 / lib 默认 tauri / CLI+MCP / daemon）与 `cargo check --tests`（两种特性）全部 exit=0、零 warning；`592`（非默认）/ `600`（默认）lib、`cli_smoke` 33、`cli_contract` 27、`connect_deadline` 2、`daemon_integration` 57 全绿，测试计数与改动前一致。
+
+---
+
+# P2 死代码定性（2026-09-11）
+
+上一轮只做了「保留 + `TODO(unwired)` 标注」，没有区分「设计过但没实现」与「本来就多余」。逐项定性后分三类：
+
+## 第一类：设计了、实现了一半 → 已接线
+
+| 项 | 差距 | 落地 |
+|---|---|---|
+| `sftp_rename_core` / `sftp_remove_file_core` / `sftp_remove_dir_core` / `sftp_remove_dir_all_core` | `core.rs` 里实现完整（`remove_dir_all` 是 BFS 递归删除）且带单测；`store.rs` 的分类器**已为 `sftp_rename` / `sftp_remove` 预留分支**，`types.rs` 的文档也列了这两个 action label。但没有 CLI 子命令、没有 MCP 工具、没有 daemon 路由、没有 Tauri 命令、前端无 UI —— 五个入口全部不可达 | CLI `sftp rename\|rm\|rmdir\|rm-rf`；MCP `ssh_sftp_rename` / `_rm` / `_rmdir` / `_rm_rf`（工具数 54 → 58）；daemon `POST /sftp/rename\|rm\|rmdir\|rm-rf`；桌面命令 ×4 + SFTP 面板远程行右键菜单 |
+| `remove_system_known_host` | 是 G13 `import_known_hosts_from_ssh` 的对偶（`ssh-keygen -R`），CLI 与 daemon 已可达，但桌面端只有「导入」一半，且该函数在桌面侧**零调用点** | 新增 `forget_system_known_host` 命令 + Host Management 每行「从 OpenSSH known_hosts 移除」 |
+| `save_algo_prefs` | 读侧是真跑的（`embedded_ssh.rs:266` / `:1416` 每次握手前 `load_algo_prefs`），但没有任何代码写 `ssh_algos.json`，该文件名在所有文档里都**未出现过** —— 等于一个只能手改、且未文档化的隐形配置 | Settings 新增「SSH algorithms」分区 + 编辑对话框（8 个字段、与内置默认值差异标记、一键恢复）；保存前校验 |
+
+> **接线前的安全前提**：SFTP 这四条在任何 surface 都不执行 shell，只构造 `sftp <op> <path>` 字符串用于风险分类 / 审批策略 / 审计 action。`classify_risk_single` 只认 shell 动词，canonical head 恒为 `sftp`，于是 `rm` 规则一条都匹配不到、全部落到默认 verdict —— **实测 `sftp rm-rf /` = low**。而审批是 opt-in（无策略命中即自动批准），所以直接接线会让「递归删远端 `/`」被静默放行。已先在 `classify_risk_single` 加 `sftp` 分支镜像 shell 表（`rm-rf /`、`/*`、`/.` → blocked；其它 `rm-rf` → high；`rename` → medium；`rm`/`rmdir` 保持 low），并补 2 个单测（含一个断言路径里夹 `;` 的链式载荷仍被链式检测抓住）。
+
+## 第二类：不是需求缺失，是冗余 → 保留未删
+
+| 项 | 定性依据 |
+|---|---|
+| `Host::emit` / `emit_bus` | **`Host::Tauri` 变体在生产代码里从未被构造过** —— `set_host` 只有 daemon 一个调用点，桌面端有意让全局 Host 停在 `Host::Cli`（`tauri_commands.rs` 有注释说明）。`Host::emit` 只在测试里被调用；生产在用 `is_desktop()` 与 `transport_name()` |
+| `is_headless` / `is_cli` | 同上，随 `Host` 变体一起冗余 |
+| `policy_risk_rules` | 不是没实现 —— `risk_config.rs` 在统一 policy 存在时直接 `load_policy_from_path(&path)?.risk`，所以 `docs/architecture.md` 承诺的「policy.toml 优先」是成立的。该访问器只是与 `policy_approval_policies` 同形的重复入口 |
+
+这四项无调用、无计划，**可删**，但未执行（用户未就此表态）。
+
+## 第三类：文档承诺实际已实现
+
+`policy_risk_rules` 见上。
+
+## 本轮的验证
+
+`cargo fmt --check` clean；clippy 四目标（CLI+MCP / daemon / lib 非默认 / lib 默认 tauri）各 0 warning；`cargo test --lib` 607、`--no-default-features --lib` 599、`cli_contract` 27、`cli_smoke` 33、`daemon_integration` 57、`connect_deadline` 2 全绿；`npm test` 79、`npm run lint` 95 文件 clean、`npm run build` 通过、`check-i18n.mjs` 无缺失键。
+
+**顺带修掉的三个既有缺陷**（见 `CHANGELOG.md`）：① 上面那个 `sftp` 风险洞；② 工具数 54 → 58 后 2 处测试断言 + 8 个文档文件 14 处计数未同步；③ `test_timed_out_approval_cannot_be_approved` 的墙钟竞态（TTL 判定用 `Utc::now()` 而 `tokio::time::sleep` 走单调钟，单发 sleep 在 6 次整轮运行里挂了 1 次）。
+
+**同时发现并已规避的工程陷阱**：并行发出的多个 `Edit` 调用若打在同一文件上会互相覆盖（各读原文件、后写者胜），本轮因此丢过 2 处写入（`api.ts` 的类型导入、`AlgoPrefsDialog` 的一处 `t()` 字面量），均已补回。同文件多改必须串行。

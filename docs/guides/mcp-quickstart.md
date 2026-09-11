@@ -2,7 +2,7 @@
 
 ## 概述
 
-Agent2SSH 通过 MCP (Model Context Protocol) stdio 协议暴露 **54 个工具**，使任何兼容 MCP 的 AI Agent 都能直接管理 SSH 主机、命令片段、执行远程命令、传输文件、管理会话、端口转发、Playbook、审计、健康检查、指标和远程 daemon。
+Agent2SSH 通过 MCP (Model Context Protocol) stdio 协议暴露 **58 个工具**，使任何兼容 MCP 的 AI Agent 都能直接管理 SSH 主机、命令片段、执行远程命令、传输文件、管理会话、端口转发、Playbook、审计、健康检查、指标和远程 daemon。
 
 MCP 服务器以 `agent2ssh-mcp` 二进制运行，通过标准输入/输出与 Agent 通信，遵循 JSON-RPC 2.0 协议，无需网络端口或 HTTP 服务。
 
@@ -44,7 +44,7 @@ MCP 服务器以 `agent2ssh-mcp` 二进制运行，通过标准输入/输出与 
 
 `AGENT2SSH_SOURCE` 会写入 audit 和 Live Activity 的来源字段。不同客户端应使用不同值，例如 `workbuddy`、`qoder_work`、`trae`、`codex` 或 `claude_desktop`。
 
-配置完成后，Agent 将自动发现并调用所有 54 个 SSH 工具。
+配置完成后，Agent 将自动发现并调用所有 58 个 SSH 工具。
 
 ---
 
@@ -238,6 +238,55 @@ MCP 服务器以 `agent2ssh-mcp` 二进制运行，通过标准输入/输出与 
   "arguments": {
     "host": "web1",
     "path": "/opt/app/releases/2025"
+  }
+}
+```
+
+**ssh_sftp_rename** -- 重命名/移动远程路径（中等风险，可能触发审批）
+
+```json
+{
+  "name": "ssh_sftp_rename",
+  "arguments": {
+    "host": "web1",
+    "old_path": "/opt/app/current",
+    "new_path": "/opt/app/previous"
+  }
+}
+```
+
+**ssh_sftp_rm** -- 删除单个远程文件
+
+```json
+{
+  "name": "ssh_sftp_rm",
+  "arguments": {
+    "host": "web1",
+    "path": "/tmp/build.log"
+  }
+}
+```
+
+**ssh_sftp_rmdir** -- 删除**空的**远程目录；目录非空会失败，递归删除请用 `ssh_sftp_rm_rf`
+
+```json
+{
+  "name": "ssh_sftp_rmdir",
+  "arguments": {
+    "host": "web1",
+    "path": "/opt/app/releases/2024"
+  }
+}
+```
+
+**ssh_sftp_rm_rf** -- 递归删除远程目录树（高风险，且 `path` 为 `/`、`/*`、`/.` 时**直接阻断**）
+
+```json
+{
+  "name": "ssh_sftp_rm_rf",
+  "arguments": {
+    "host": "web1",
+    "path": "/opt/app/releases/2024"
   }
 }
 ```
@@ -594,7 +643,7 @@ token_env = "AGENT2SSH_CI_TOKEN"
 
 ## 常用工具摘录
 
-完整 54 个工具列表与权威描述以 [MCP Tools Reference](../skills.md) 为准。下表只列出最常用的基础入口，编号对应 `tools/list` 返回顺序的前 31 个。
+完整 58 个工具列表与权威描述以 [MCP Tools Reference](../skills.md) 为准。下表只列出最常用的基础入口，编号对应 `tools/list` 返回顺序的前 35 个。
 
 | # | 工具名称 | 说明 |
 |---|----------|------|
@@ -612,22 +661,26 @@ token_env = "AGENT2SSH_CI_TOKEN"
 | 12 | `ssh_sftp_ls` | 列出远程目录 |
 | 13 | `ssh_sftp_stat` | 查看远程文件信息 |
 | 14 | `ssh_sftp_mkdir` | 创建远程目录 |
-| 15 | `ssh_sftp_upload` | 上传文件 |
-| 16 | `ssh_sftp_download` | 下载文件 |
-| 17 | `ssh_session_open` | 打开 PTY 会话 |
-| 18 | `ssh_session_write` | 向会话写入输入 |
-| 19 | `ssh_session_read` | 读取会话输出 |
-| 20 | `ssh_session_close` | 关闭会话 |
-| 21 | `ssh_session_list` | 列出所有会话 |
-| 22 | `ssh_forward_add` | 添加端口转发 |
-| 23 | `ssh_forward_list` | 列出转发隧道 |
-| 24 | `ssh_forward_remove` | 删除端口转发 |
-| 25 | `ssh_risk_check` | 检查命令风险等级 |
-| 26 | `ssh_gate_status` | 读取本地 daemon 执行门状态（active / paused） |
-| 27 | `ssh_approval_list` | 列出审批请求 |
-| 28 | `ssh_approval_respond` | 批准或拒绝审批 |
-| 29 | `ssh_playbook_list` | 列出 Playbook |
-| 30 | `ssh_playbook_run` | 执行 Playbook |
-| 31 | `ssh_playbook_dry_run` | 预览 Playbook 步骤（不执行） |
+| 15 | `ssh_sftp_rename` | 重命名/移动远程文件或目录（中等风险） |
+| 16 | `ssh_sftp_rm` | 删除单个远程文件 |
+| 17 | `ssh_sftp_rmdir` | 删除空的远程目录（非空会失败） |
+| 18 | `ssh_sftp_rm_rf` | 递归删除远程目录树（高风险，`/` 与 `/*` 直接阻断） |
+| 19 | `ssh_sftp_upload` | 上传文件 |
+| 20 | `ssh_sftp_download` | 下载文件 |
+| 21 | `ssh_session_open` | 打开 PTY 会话 |
+| 22 | `ssh_session_write` | 向会话写入输入 |
+| 23 | `ssh_session_read` | 读取会话输出 |
+| 24 | `ssh_session_close` | 关闭会话 |
+| 25 | `ssh_session_list` | 列出所有会话 |
+| 26 | `ssh_forward_add` | 添加端口转发 |
+| 27 | `ssh_forward_list` | 列出转发隧道 |
+| 28 | `ssh_forward_remove` | 删除端口转发 |
+| 29 | `ssh_risk_check` | 检查命令风险等级 |
+| 30 | `ssh_gate_status` | 读取本地 daemon 执行门状态（active / paused） |
+| 31 | `ssh_approval_list` | 列出审批请求 |
+| 32 | `ssh_approval_respond` | 批准或拒绝审批 |
+| 33 | `ssh_playbook_list` | 列出 Playbook |
+| 34 | `ssh_playbook_run` | 执行 Playbook |
+| 35 | `ssh_playbook_dry_run` | 预览 Playbook 步骤（不执行） |
 
 其余 20 个工具（`ssh_connection_status` 到 `ssh_sync_export`）涵盖连接保留、Webhook、配置导入/导出/预览、Doctor、Metrics、Preview、审批策略、健康快照、远程 Daemon 诊断、Metrics 趋势、事件订阅、与 `~/.ssh/config` 同步等。请直接阅读 [MCP Tools Reference](../skills.md) 了解参数与返回。

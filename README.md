@@ -176,7 +176,7 @@ Configure Agent2SSH as an MCP server in your agent's config:
 Set `AGENT2SSH_SOURCE` to the client label you want to see in Activity, such as
 `workbuddy`, `qoder_work`, `trae`, `codex`, or `claude_desktop`.
 
-See [docs/skills.md](docs/skills.md) for the full list of 54 MCP tools.
+See [docs/skills.md](docs/skills.md) for the full list of 58 MCP tools.
 
 For first-time external users, follow the [10-minute CLI and MCP setup guide](docs/guides/external-user-10min.md). It covers host import, low-risk command verification, Codex/Claude-style MCP configuration, and sanitized feedback submission.
 
@@ -231,7 +231,11 @@ For first-time external users, follow the [10-minute CLI and MCP setup guide](do
 - Remote directory listing: `sftp ls` / `ssh_sftp_ls`
 - Remote stat: `sftp stat` / `ssh_sftp_stat`
 - Remote mkdir: `sftp mkdir` / `ssh_sftp_mkdir`
-- Desktop Files page provides a two-pane SFTP file manager with path shortcuts, folder navigation, file selection, directory creation, and copy-left/copy-right transfer actions
+- Remote rename / move: `sftp rename` / `ssh_sftp_rename`
+- Remote delete file: `sftp rm` / `ssh_sftp_rm`
+- Remote remove empty directory: `sftp rmdir` / `ssh_sftp_rmdir`
+- Remote recursive delete: `sftp rm-rf` / `ssh_sftp_rm_rf` — rated high risk, and blocked outright for `/`, `/*` and `/.`
+- Desktop Files page provides a two-pane SFTP file manager with path shortcuts, folder navigation, file selection, directory creation, copy-left/copy-right transfer actions, and a right-click menu for rename/delete on the remote side
 - Daemon SFTP operations pass through the same scope, risk, approval, gate, limit, and audit checks as command execution; directory helpers also record an operation-level audit entry in addition to the underlying shell command result
 
 ### Sessions And Tunnels
@@ -271,9 +275,9 @@ For first-time external users, follow the [10-minute CLI and MCP setup guide](do
 - MCP tools for local and remote operation
 - Bounded event previews for session input/output and streaming exec output, suitable for local agent activity monitoring
 
-## MCP Tools (54)
+## MCP Tools (58)
 
-Agent2SSH exposes **54 MCP tools** covering host management, command snippets, command execution, SFTP, persistent sessions, port forwarding, playbooks, audit, approval workflows, execution gate visibility, daemon management, and more.
+Agent2SSH exposes **58 MCP tools** covering host management, command snippets, command execution, SFTP, persistent sessions, port forwarding, playbooks, audit, approval workflows, execution gate visibility, daemon management, and more.
 
 For the complete tool reference with descriptions and parameters, see [docs/skills.md](docs/skills.md).
 
