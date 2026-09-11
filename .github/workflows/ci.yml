@@ -218,6 +218,10 @@ jobs:
         run: cargo test --no-default-features --test cli_smoke
         working-directory: src-tauri
 
+      - name: Rust connect deadline tests
+        run: cargo test --no-default-features --test connect_deadline
+        working-directory: src-tauri
+
       # ── Compilation checks ────────────────────────────────────────────────
 
       - name: Rust check (CLI + MCP)

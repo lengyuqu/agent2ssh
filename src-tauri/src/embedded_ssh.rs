@@ -987,6 +987,14 @@ pub(crate) fn write_all_channel(channel: &mut ssh2::Channel, mut data: &[u8]) ->
     Ok(())
 }
 
+/// libssh2's blocking-mode budget for a session, in milliseconds.
+///
+/// `ssh2::Session::set_timeout` treats `0` as "wait forever", so a zero-second
+/// caller budget is clamped to 1 ms rather than disabling the bound.
+fn session_timeout_ms(timeout_secs: u64) -> u32 {
+    timeout_secs.saturating_mul(1000).clamp(1, u32::MAX as u64) as u32
+}
+
 fn connect_embedded_ssh_inner(
     host: &HostProfile,
     timeout_secs: u64,
@@ -1020,6 +1028,15 @@ fn connect_embedded_ssh_inner(
     tcp.set_read_timeout(Some(Duration::from_secs(timeout_secs)))?;
     tcp.set_write_timeout(Some(Duration::from_secs(timeout_secs)))?;
     session.set_tcp_stream(tcp);
+    // Socket-level timeouts alone do not bound libssh2: its blocking-mode waits
+    // loop internally without a deadline, so a peer that accepts the TCP
+    // connection and then goes silent leaves `handshake` blocked forever.
+    // Measured against a blackhole listener, `connect_embedded_ssh` never
+    // returned — callers that wrap the connect in `tokio::time::timeout` gave up
+    // on schedule but leaked the blocked worker and its socket (`ping_hosts_core`
+    // and `collect_health_snapshot` both did, once per host, per poll). Give the
+    // session the same budget the socket has so blocking calls fail instead.
+    session.set_timeout(session_timeout_ms(timeout_secs));
     crate::ssh_algo::apply_algo_prefs(&session, crate::ssh_algo::load_algo_prefs().as_ref())?;
     session.handshake()?;
 
