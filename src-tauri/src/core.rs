@@ -1090,7 +1090,7 @@ struct BoundedCapture {
 
 impl BoundedCapture {
     fn new(max_bytes: usize) -> Self {
-        let head_bytes = (max_bytes / 2).max(1);
+        let head_bytes = max_bytes / 2;
         Self {
             head: Vec::new(),
             tail: Vec::new(),
@@ -1217,7 +1217,13 @@ pub(crate) async fn exec_ssh_core_with_risk_override(
         // leave the SSH channel — and the remote command — running.
         if let Some(timeout) = error.downcast_ref::<ExecTimeout>() {
             let message = format!("command timed out after {}s", timeout.timeout_secs);
-            append_timed_out_exec_audit(&request, risk, &source, &message);
+            append_timed_out_exec_audit(
+                &request,
+                risk,
+                &source,
+                &message,
+                started.elapsed().as_millis(),
+            );
             return anyhow!(
                 "SSH command timed out after {}s: '{}'",
                 timeout.timeout_secs,
@@ -1297,6 +1303,7 @@ fn append_timed_out_exec_audit(
     risk: RiskLevel,
     source: &str,
     message: &str,
+    duration_ms: u128,
 ) {
     let result = ExecResult {
         host: request.host.clone(),
@@ -1304,7 +1311,7 @@ fn append_timed_out_exec_audit(
         exit_code: None,
         stdout: String::new(),
         stderr: message.to_string(),
-        duration_ms: 0,
+        duration_ms,
         risk_level: risk,
         truncated: false,
         dropped_bytes: 0,
@@ -1319,7 +1326,7 @@ fn append_timed_out_exec_audit(
     );
 }
 
-pub async fn exec_multi_core(request: ExecMultiRequest) -> Vec<ExecMultiResult> {
+pub async fn exec_multi_core(request: ExecMultiRequest) -> Result<Vec<ExecMultiResult>> {
     let ExecMultiRequest {
         hosts,
         command,
@@ -1331,10 +1338,10 @@ pub async fn exec_multi_core(request: ExecMultiRequest) -> Vec<ExecMultiResult> 
         change_id,
         source,
     } = request;
-    let resolved_hosts = match expand_hosts_by_tags(hosts, tags) {
-        Ok(hosts) => hosts,
-        Err(_) => return vec![],
-    };
+    let resolved_hosts = expand_hosts_by_tags(hosts, tags)?;
+    if resolved_hosts.is_empty() {
+        return Err(anyhow!("no hosts matched the requested hosts or tags"));
+    }
 
     let mut set = JoinSet::new();
 
@@ -1380,12 +1387,14 @@ pub async fn exec_multi_core(request: ExecMultiRequest) -> Vec<ExecMultiResult> 
             error: Some(format!("task panicked: {e}")),
         }));
     }
-    results
+    Ok(results)
 }
 
 /// Execute a command on multiple hosts with a batch strategy controlling concurrency,
 /// failure thresholds, batched rollout, and pauses between batches.
-pub async fn exec_multi_with_strategy(request: ExecMultiBatchRequest) -> ExecMultiBatchResult {
+pub async fn exec_multi_with_strategy(
+    request: ExecMultiBatchRequest,
+) -> Result<ExecMultiBatchResult> {
     let ExecMultiBatchRequest { request, strategy } = request;
     let ExecMultiRequest {
         hosts,
@@ -1400,21 +1409,10 @@ pub async fn exec_multi_with_strategy(request: ExecMultiBatchRequest) -> ExecMul
     } = request;
     let started = Instant::now();
 
-    let resolved_hosts = match expand_hosts_by_tags(hosts, tags) {
-        Ok(hosts) => hosts,
-        Err(_) => {
-            return ExecMultiBatchResult {
-                results: vec![],
-                total_hosts: 0,
-                successful: 0,
-                failed: 0,
-                skipped: 0,
-                stopped_early: false,
-                batches_executed: 0,
-                total_duration_ms: started.elapsed().as_millis(),
-            };
-        }
-    };
+    let resolved_hosts = expand_hosts_by_tags(hosts, tags)?;
+    if resolved_hosts.is_empty() {
+        return Err(anyhow!("no hosts matched the requested hosts or tags"));
+    }
 
     let total_hosts = resolved_hosts.len();
 
@@ -1474,7 +1472,7 @@ pub async fn exec_multi_with_strategy(request: ExecMultiBatchRequest) -> ExecMul
         }
         let successful = results.iter().filter(|r| r.result.is_some()).count();
         let failed = results.len() - successful;
-        return ExecMultiBatchResult {
+        return Ok(ExecMultiBatchResult {
             results,
             total_hosts,
             successful,
@@ -1483,7 +1481,7 @@ pub async fn exec_multi_with_strategy(request: ExecMultiBatchRequest) -> ExecMul
             stopped_early: false,
             batches_executed: 1,
             total_duration_ms: started.elapsed().as_millis(),
-        };
+        });
     }
 
     // Build batches
@@ -1588,7 +1586,7 @@ pub async fn exec_multi_with_strategy(request: ExecMultiBatchRequest) -> ExecMul
     let successful = all_results.iter().filter(|r| r.result.is_some()).count();
     let failed = all_results.iter().filter(|r| r.result.is_none()).count();
 
-    ExecMultiBatchResult {
+    Ok(ExecMultiBatchResult {
         results: all_results,
         total_hosts,
         successful,
@@ -1597,7 +1595,7 @@ pub async fn exec_multi_with_strategy(request: ExecMultiBatchRequest) -> ExecMul
         stopped_early,
         batches_executed,
         total_duration_ms: started.elapsed().as_millis(),
-    }
+    })
 }
 
 // ── Execution Result Comparison ─────────────────────────────────────────────
@@ -3474,6 +3472,51 @@ mod tests {
         assert!(capture.truncated());
         assert_eq!(capture.dropped_bytes(), 512 * 8192 - max_bytes);
         assert_eq!(capture.into_bytes().len(), max_bytes);
+    }
+
+    #[test]
+    fn bounded_capture_zero_budget_keeps_no_bytes() {
+        let mut capture = BoundedCapture::new(0);
+        capture.push(b"discarded");
+        assert!(capture.truncated());
+        assert_eq!(capture.dropped_bytes(), 9);
+        assert!(capture.into_bytes().is_empty());
+    }
+
+    fn empty_exec_request() -> ExecMultiRequest {
+        ExecMultiRequest {
+            hosts: Vec::new(),
+            command: "true".into(),
+            force: false,
+            approved_hosts: Vec::new(),
+            timeout_secs: Some(1),
+            tags: None,
+            reason: None,
+            change_id: None,
+            source: Some("test".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn exec_multi_rejects_empty_targets() {
+        let error = exec_multi_core(empty_exec_request()).await.unwrap_err();
+        assert!(error.to_string().contains("no hosts matched"));
+    }
+
+    #[tokio::test]
+    async fn exec_multi_strategy_rejects_empty_targets_without_panicking() {
+        let error = exec_multi_with_strategy(ExecMultiBatchRequest {
+            request: empty_exec_request(),
+            strategy: Some(BatchStrategy {
+                concurrency: Some(1),
+                max_failures: None,
+                batch_size: None,
+                pause_between_batches_secs: None,
+            }),
+        })
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("no hosts matched"));
     }
 
     #[test]

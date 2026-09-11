@@ -1157,23 +1157,23 @@ async fn exec_multi(
         body.change_id.clone(),
     )
     .await?;
-    Ok(Json(
-        exec_multi_with_strategy(ExecMultiBatchRequest {
-            request: ExecMultiRequest {
-                hosts: body.hosts,
-                command: body.command,
-                force,
-                approved_hosts,
-                timeout_secs: body.timeout_secs,
-                tags: body.tags,
-                reason: body.reason,
-                change_id: body.change_id,
-                source: Some(source),
-            },
-            strategy: body.strategy,
-        })
-        .await,
-    ))
+    let batch_result = exec_multi_with_strategy(ExecMultiBatchRequest {
+        request: ExecMultiRequest {
+            hosts: body.hosts,
+            command: body.command,
+            force,
+            approved_hosts,
+            timeout_secs: body.timeout_secs,
+            tags: body.tags,
+            reason: body.reason,
+            change_id: body.change_id,
+            source: Some(source),
+        },
+        strategy: body.strategy,
+    })
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(batch_result))
 }
 
 async fn exec_compare(
@@ -1212,7 +1212,8 @@ async fn exec_compare(
         change_id: None,
         source: Some(source),
     })
-    .await;
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(compare_exec_results(&results)))
 }
 

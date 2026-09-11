@@ -824,7 +824,8 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
                 },
                 strategy,
             })
-            .await;
+            .await
+            .map_err(McpError::from)?;
             serde_json::to_value(batch_result)?
         }
         McpTool::SshExecCompare => {
@@ -863,7 +864,8 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
                 change_id: None,
                 source: Some(source),
             })
-            .await;
+            .await
+            .map_err(McpError::from)?;
             let comparison = compare_exec_results(&results);
             serde_json::to_value(comparison)?
         }

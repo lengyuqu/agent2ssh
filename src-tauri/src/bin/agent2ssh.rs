@@ -1599,7 +1599,7 @@ async fn async_main() -> Result<()> {
                     },
                     strategy: Some(strategy),
                 })
-                .await;
+                .await?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&batch_result)?);
                 } else {
@@ -1652,7 +1652,7 @@ async fn async_main() -> Result<()> {
                     change_id,
                     source: Some(source),
                 })
-                .await;
+                .await?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&results)?);
                 } else {

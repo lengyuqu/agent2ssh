@@ -565,7 +565,7 @@ pub async fn exec_multi(
     let source = source_from_transport();
     let approved_hosts =
         authorize_desktop_exec_targets(&hosts, &tags, &command, force, None, None, &source).await?;
-    Ok(exec_multi_core(ExecMultiRequest {
+    let results = exec_multi_core(ExecMultiRequest {
         hosts,
         command,
         force,
@@ -576,7 +576,9 @@ pub async fn exec_multi(
         change_id: None,
         source: Some(source),
     })
-    .await)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(results)
 }
 
 #[tauri::command]
