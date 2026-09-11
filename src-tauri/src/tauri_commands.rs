@@ -211,16 +211,6 @@ fn read_user_path_value() -> Result<String, String> {
     Ok(std::env::var("PATH").unwrap_or_default())
 }
 
-#[cfg(not(windows))]
-fn write_user_path_value(_path_value: &str) -> Result<(), String> {
-    // B51: On non-Windows, we don't write a single PATH string to a registry.
-    // Instead, install_cli_to_path / remove_cli_from_path use shell profile
-    // modification directly via append_shell_profile_entry / remove_shell_profile_entry.
-    // This function is kept for API compatibility but should not be called
-    // on non-Windows. If it is, return an informative error.
-    Err("Use install_cli_to_path / remove_cli_from_path on non-Windows".to_string())
-}
-
 #[cfg(windows)]
 fn write_user_path_value(path_value: &str) -> Result<(), String> {
     let status = Command::new("reg.exe")
@@ -244,6 +234,9 @@ fn write_user_path_value(path_value: &str) -> Result<(), String> {
     }
 }
 
+/// Windows-only: the user PATH is a single registry string, so it is rewritten
+/// wholesale. Non-Windows goes through the shell-profile helpers instead.
+#[cfg(windows)]
 fn append_user_path_dir(path_value: &str, dir: &Path) -> String {
     let dir = dir.to_string_lossy();
     let trimmed = path_value.trim().trim_end_matches(';');
@@ -254,6 +247,8 @@ fn append_user_path_dir(path_value: &str, dir: &Path) -> String {
     }
 }
 
+/// Windows-only counterpart of [`append_user_path_dir`].
+#[cfg(windows)]
 fn remove_user_path_dir(path_value: &str, dir: &Path) -> String {
     let expected = normalize_path_segment(dir);
     path_value

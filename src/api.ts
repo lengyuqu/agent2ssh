@@ -57,7 +57,7 @@ import type {
   ShellInfo,
 } from "./types";
 
-let daemonUrl = "http://127.0.0.1:7722";
+const daemonUrl = "http://127.0.0.1:7722";
 
 /** Header used to propagate a correlation id to the daemon (mirrors the Rust `TRACE_ID_HEADER`). */
 const TRACE_ID_HEADER = "X-Agent2SSH-Trace-Id";

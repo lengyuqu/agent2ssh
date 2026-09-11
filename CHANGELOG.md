@@ -4,6 +4,16 @@ All notable changes to Agent2SSH are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Changed
+- **WebDAV sync set convergence**: The desktop and CLI/daemon portable-config file lists were merged into the single `webdav_sync::SYNCABLE_FILES` constant, so every sync path now carries the same files. `webhook.toml` and `app_preferences.json` are synced from every entry point.
+- **Local-only configuration files**: `secrets.enc`, `snippets.json`, and `approval_policies.toml` are no longer part of WebDAV sync and do not cross machines. Machines that relied on cloud sync for shared credentials or snippets must migrate them manually.
+- **Byte units in the WebDAV Sync panel**: `formatBytes` now reports `KiB`/`MiB` consistently across the UI, replacing the panel's `KB`/`MB` labels.
+
+### Fixed
+- **Legacy WebDAV markers**: A pull from a marker that still lists a dropped or never-syncable file (`known_hosts.json`, `secrets.enc`, `snippets.json`, `approval_policies.toml`) is accepted and the entry is skipped, rather than failing the whole pull. This restores the 0.3.0 contract that a stale remote manifest cannot overwrite local SSH host-key trust state, credentials, or snippets.
+
 ## [0.3.0] - 2026-08-12
 
 ### Added

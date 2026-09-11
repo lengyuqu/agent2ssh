@@ -43,6 +43,25 @@ pub const SYNCABLE_FILES: &[&str] = &[
     "app_preferences.json",
 ];
 
+/// Names an **older remote marker** may still list but that are never applied to
+/// the local config dir.
+///
+/// `known_hosts.json` was never syncable. `secrets.enc`, `snippets.json` and
+/// `approval_policies.toml` were dropped from the sync set when the desktop and
+/// CLI/daemon file lists converged on [`SYNCABLE_FILES`], so markers written by
+/// an older build still reference them. A pull tolerates and *skips* these names
+/// — the contract `known_hosts.json` has had since 0.3.0 — instead of failing.
+const LEGACY_UNSYNCABLE_REMOTE_FILES: &[&str] = &[
+    "known_hosts.json",
+    "secrets.enc",
+    "snippets.json",
+    "approval_policies.toml",
+];
+
+fn is_legacy_unsyncable_remote_file(path: &str) -> bool {
+    LEGACY_UNSYNCABLE_REMOTE_FILES.contains(&path)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebDavSyncFile {
     pub path: String,
@@ -665,17 +684,30 @@ pub fn collect_sync_files() -> Result<Vec<WebDavSyncFile>> {
 
 /// A remote marker may only reference files we know how to sync.
 ///
-/// Files dropped from [`SYNCABLE_FILES`] (`known_hosts.json`, `secrets.enc`,
-/// `snippets.json`, `approval_policies.toml`) are rejected here; a pre-existing
-/// remote marker that still lists them must be migrated rather than trusted.
+/// Names dropped from [`SYNCABLE_FILES`] are accepted here so a marker written
+/// by an older build still pulls; [`applied_sync_files`] then keeps them out of
+/// the applied set, so tolerating them never writes them into the config dir.
 fn validate_remote_file(path: &str) -> Result<()> {
-    if SYNCABLE_FILES.contains(&path) {
+    if SYNCABLE_FILES.contains(&path) || is_legacy_unsyncable_remote_file(path) {
         Ok(())
     } else {
         Err(anyhow!(
             "remote marker contains unsupported sync file: {path}"
         ))
     }
+}
+
+/// The subset of a remote marker's file list a pull is allowed to write locally.
+///
+/// Legacy names are stripped here: local SSH host-key trust state, the
+/// credential store and snippets must never be overwritten from a stale
+/// manifest, even though the marker itself is accepted.
+fn applied_sync_files(files: &[WebDavSyncFile]) -> Vec<WebDavSyncFile> {
+    files
+        .iter()
+        .filter(|file| !is_legacy_unsyncable_remote_file(&file.path))
+        .cloned()
+        .collect()
 }
 
 /// `label` is a free-form note for humans browsing the backups directory (e.g.
@@ -1082,7 +1114,7 @@ async fn sync_pull<R: SyncRemote>(
     for file in &remote_marker.files {
         validate_remote_file(&file.path)?;
     }
-    let applied_files: Vec<WebDavSyncFile> = remote_marker.files.clone();
+    let applied_files = applied_sync_files(&remote_marker.files);
 
     let local_marker = load_local_sync_marker()?;
     let local_digest = current_portable_config_digest()?;
@@ -1491,6 +1523,52 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
+    async fn pull_tolerates_and_skips_files_dropped_from_the_sync_set() {
+        // A marker written by an older build still lists `secrets.enc`,
+        // `snippets.json` and `known_hosts.json`. The pull must succeed (no hard
+        // failure on the stale names) and must not write any of them locally.
+        let dir = std::env::temp_dir().join(format!(
+            "agent2ssh-sync-stale-marker-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("AGENT2SSH_CONFIG_DIR", &dir);
+
+        let host_bytes = b"{\"hosts\":[]}".to_vec();
+        let stale = WebDavSyncMarker {
+            schema_version: 2,
+            global_version: 3,
+            sync_id: "stale".to_string(),
+            updated_at: Utc::now(),
+            app_version: "old".to_string(),
+            direction: "push".to_string(),
+            files: vec![
+                file("hosts.json", &host_bytes),
+                file("secrets.enc", b"legacy-ciphertext"),
+                file("snippets.json", b"[]"),
+                file("known_hosts.json", b"{}"),
+            ],
+            digest: None,
+            object_prefix: None,
+        };
+        let remote = FakeRemote::default();
+        remote.insert(SYNC_VERSION_FILE, serde_json::to_vec(&stale).unwrap());
+        remote.insert("files/hosts.json", host_bytes);
+
+        let result = sync_pull(&remote, None, true).await.unwrap();
+        let pulled: Vec<&str> = result.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(pulled, vec!["hosts.json"]);
+        assert!(dir.join("hosts.json").exists());
+        assert!(!dir.join("secrets.enc").exists());
+        assert!(!dir.join("snippets.json").exists());
+        assert!(!dir.join("known_hosts.json").exists());
+
+        std::env::remove_var("AGENT2SSH_CONFIG_DIR");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
     async fn future_schema_allows_downgrade_read() {
         let dir =
             std::env::temp_dir().join(format!("agent2ssh-sync-future-{}", uuid::Uuid::new_v4()));
@@ -1613,13 +1691,31 @@ mod tests {
         validate_remote_file("hosts.json").unwrap();
         validate_remote_file("webhook.toml").unwrap();
         assert!(validate_remote_file("daemon.token").is_err());
-        // `known_hosts.json` was never syncable; `secrets.enc`, `snippets.json`,
+        // `known_hosts.json` was never syncable; `secrets.enc`, `snippets.json`
         // and `approval_policies.toml` were dropped from the sync set. All four
-        // must be rejected so a stale remote marker cannot smuggle them in.
-        assert!(validate_remote_file("known_hosts.json").is_err());
-        assert!(validate_remote_file("secrets.enc").is_err());
-        assert!(validate_remote_file("snippets.json").is_err());
-        assert!(validate_remote_file("approval_policies.toml").is_err());
+        // are tolerated so an older marker still pulls, but `applied_sync_files`
+        // keeps them out of the applied set so they cannot reach the config dir.
+        for legacy in LEGACY_UNSYNCABLE_REMOTE_FILES {
+            assert!(!SYNCABLE_FILES.contains(legacy), "{legacy} is not syncable");
+            validate_remote_file(legacy).unwrap();
+            assert!(is_legacy_unsyncable_remote_file(legacy));
+        }
+        assert!(applied_sync_files(&[]).is_empty());
+    }
+
+    #[test]
+    fn applied_sync_files_strips_legacy_names_from_a_stale_marker() {
+        let files = vec![
+            file("hosts.json", b"{}"),
+            file("secrets.enc", b"legacy-ciphertext"),
+            file("snippets.json", b"[]"),
+            file("known_hosts.json", b"{}"),
+            file("approval_policies.toml", b""),
+            file("webhook.toml", b""),
+        ];
+        let applied = applied_sync_files(&files);
+        let names: Vec<&str> = applied.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(names, vec!["hosts.json", "webhook.toml"]);
     }
 
     #[test]

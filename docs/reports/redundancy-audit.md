@@ -161,7 +161,7 @@
 ## 需知晓的行为差异（有意收敛，非回归）
 
 1. **`formatBytes` 单位**：SyncPanel 由 `KB/MB` → `KiB/MiB`，与另两处对齐。1024 进制下 `KiB` 更准确，但属**用户可见文案变化**。
-2. **`secrets.enc` / `snippets.json` / `approval_policies.toml` 不再跨机同步**：P0#2 收敛后同步集合以 `SYNCABLE_FILES` 为唯一来源，这三个不再入集。**属产品面缺口**：依赖云同步在多机间共享密钥的用户需手动迁移，需单独决策是否补回。
+2. **`secrets.enc` / `snippets.json` / `approval_policies.toml` 不再跨机同步**：P0#2 收敛后同步集合以 `SYNCABLE_FILES` 为唯一来源，这三个不再入集。**属产品面缺口**：依赖云同步在多机间共享密钥的用户需手动迁移，需单独决策是否补回。**（2026-09-11 补记）** 收敛时把 `validate_remote_file` 改成了严格白名单，顺带删掉了 `known_hosts.json` 的遗留容忍逻辑，导致旧 marker 列出这些文件时 `pull` 直接硬失败——已恢复「容忍并跳过」语义（`applied_sync_files` 过滤），同步集合成员关系不变；见 `CHANGELOG.md` 的 `[Unreleased]` 段。
 3. **daemon `requests_total` 口径**：计数器最终实现放在每个 handler **入口首行**（在 source 解析之前），与改前 68 处调用点的语义完全一致——非法 / 无 source 请求仍计入。
 4. **`test-setup.ts` 新增 localStorage shim**：Node 26 的实验性 `localStorage` 全局会遮蔽 jsdom 的实现，导致 `i18n.tsx` 抛 `localStorage is not defined`。已用 `git show HEAD:src/i18n.tsx` 证实用法早于本次改动存在。**建议此文件独立成一个 commit**，与去冗余改动分开。
 
