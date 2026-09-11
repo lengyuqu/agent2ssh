@@ -7,7 +7,8 @@ use agent2ssh::daemon_control::{
     start_daemon_background, terminate_process,
 };
 use agent2ssh::embedded_ssh::{
-    import_known_hosts_from_ssh, spawn_terminal, TerminalCommand, TerminalEvent,
+    import_known_hosts_from_ssh, remove_system_known_host, spawn_terminal, TerminalCommand,
+    TerminalEvent,
 };
 use agent2ssh::events::subscribe_events;
 use agent2ssh::execution_control::{
@@ -68,7 +69,7 @@ enum Commands {
         /// Shell to generate registration for
         shell: CompletionShell,
     },
-    /// Import host-key trust from the system OpenSSH ~/.ssh/known_hosts
+    /// Move host-key trust in or out of the system OpenSSH ~/.ssh/known_hosts
     KnownHosts {
         #[command(subcommand)]
         command: KnownHostsCommands,
@@ -428,6 +429,17 @@ enum KnownHostsCommands {
         /// Path to an OpenSSH known_hosts file (defaults to ~/.ssh/known_hosts)
         #[arg(long)]
         path: Option<String>,
+    },
+    /// Drop a host's keys from ~/.ssh/known_hosts — the `ssh-keygen -R` equivalent
+    Forget {
+        /// Host to forget (hostname, IP, or `[hostname]:port` key as OpenSSH wrote it)
+        host: String,
+        /// Port the entry was recorded under
+        #[arg(long, default_value_t = 22)]
+        port: u16,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -1345,6 +1357,26 @@ async fn async_main() -> Result<()> {
                     "imported {} host(s), skipped {} (hashed or conflicting)",
                     summary.imported, summary.skipped
                 );
+            }
+            KnownHostsCommands::Forget { host, port, json } => {
+                let removed = remove_system_known_host(&host, port)?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "host": host,
+                            "port": port,
+                            "removed": removed,
+                        }))?
+                    );
+                } else if removed == 0 {
+                    // `ssh-keygen -R` is idempotent and exits 0 on a miss, so
+                    // this is a report, not an error.
+                    println!("no known_hosts entry matched {host} (port {port})");
+                } else {
+                    let noun = if removed == 1 { "entry" } else { "entries" };
+                    println!("removed {removed} known_hosts {noun} for {host} (port {port})");
+                }
             }
         },
         Commands::Host { command } => match command {

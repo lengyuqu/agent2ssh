@@ -400,3 +400,39 @@ async fn b39_secrets_status_on_uninitialized_store() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ── known-hosts contract (G13) ──────────────────────────────────────────────
+
+/// G13 exposes trust movement against the *system* OpenSSH `known_hosts` in
+/// both directions. The import half shipped in 2026-08-13; the forget half
+/// followed once `remove_system_known_host` was wired up. Pin both, so dropping
+/// either from the CLI surface is a test failure rather than a silent
+/// regression — this is exactly how the forget half went missing the first
+/// time.
+#[tokio::test]
+async fn b40_known_hosts_help_lists_import_and_forget() {
+    let (stdout, _stderr, code) = run_cli(&["known-hosts", "--help"]).await;
+    assert_eq!(code, Some(0));
+    assert!(
+        stdout.contains("import"),
+        "known-hosts help must list the import subcommand, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("forget"),
+        "known-hosts help must list the forget subcommand, got:\n{stdout}"
+    );
+}
+
+/// `forget` reports its result as JSON on request, so an agent can read the
+/// removal count instead of scraping the human line.
+#[tokio::test]
+async fn b40_known_hosts_forget_exposes_json_and_port() {
+    let (stdout, _stderr, code) = run_cli(&["known-hosts", "forget", "--help"]).await;
+    assert_eq!(code, Some(0));
+    assert!(stdout.contains("--json"), "forget must accept --json");
+    assert!(stdout.contains("--port"), "forget must accept --port");
+    assert!(
+        stdout.contains("<HOST>") || stdout.contains("host"),
+        "forget must take a host argument"
+    );
+}
