@@ -2580,21 +2580,22 @@ fn build_system_tray(
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| {
             if event.id().as_ref() == TRAY_MENU_OPEN_ID {
-                reveal_main_window(&app.app_handle());
+                reveal_main_window(app.app_handle());
             }
 
             if event.id().as_ref() == TRAY_MENU_QUIT_ID {
-                quit_from_tray(&app.app_handle());
+                quit_from_tray(app.app_handle());
             }
         })
         .on_tray_icon_event(|app, event| match event {
-            tauri::tray::TrayIconEvent::Click { button, .. }
-                if button == tauri::tray::MouseButton::Left =>
-            {
-                reveal_main_window(&app.app_handle());
+            tauri::tray::TrayIconEvent::Click {
+                button: tauri::tray::MouseButton::Left,
+                ..
+            } => {
+                reveal_main_window(app.app_handle());
             }
             tauri::tray::TrayIconEvent::DoubleClick { .. } => {
-                reveal_main_window(&app.app_handle());
+                reveal_main_window(app.app_handle());
             }
             _ => {}
         });

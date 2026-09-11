@@ -10,6 +10,9 @@
 #    tests, integration tests, CLI smoke tests, the explicit contract-consistency
 #    gate, and builds the frontend. This acts as a release dry-run — if a PR
 #    passes all checks here, the code is ready to be merged and released.
+#    The `tauri-unit-tests` job covers the default (tauri) feature set, which
+#    every other cargo invocation here excludes; `real-ssh-e2e` covers the exec
+#    and transfer paths against a containerized OpenSSH server.
 #
 # 2. **Release**: When a GitHub release is published, the same build job produces
 #    release binaries and uploads them as assets. The `tauri-bundle` job then
@@ -101,6 +104,57 @@ jobs:
           cargo test --no-default-features --test cli_smoke cli_exec_help_shows_reason_and_change_id
           cargo test --no-default-features --test cli_smoke cli_exec_multi_help_shows_reason_and_change_id
           cargo test --no-default-features --test cli_smoke cli_playbook_run_help_shows_reason_and_change_id
+        working-directory: src-tauri
+
+  # Every cargo invocation in `contract-consistency` and `build` passes
+  # `--no-default-features`, which leaves `#[cfg(feature = "tauri")]` code
+  # (src/tauri_commands.rs) uncompiled, untested and unlinted: its unit tests
+  # could not fail a pull request, and a lint regression in the tray/command
+  # code could not either. This job covers the default feature set end to end.
+  tauri-unit-tests:
+    name: Tauri feature unit tests
+    needs: contract-consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            src-tauri/target/
+          key: ${{ runner.os }}-tauri-test-cargo-v2-${{ hashFiles('src-tauri/Cargo.lock') }}
+
+      # Tauri's Linux prerequisites; same set the tauri-bundle job installs.
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Install npm deps
+        run: npm install
+
+      # `tauri_build::build()` requires frontendDist ("../dist") to exist.
+      - name: Frontend build
+        run: npm run build
+
+      - name: Rust clippy (tauri feature)
+        run: cargo clippy --lib -- -D warnings
+        working-directory: src-tauri
+
+      - name: Rust unit tests (tauri feature)
+        run: cargo test --lib
         working-directory: src-tauri
 
   build:

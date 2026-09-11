@@ -14,12 +14,13 @@ Agent2SSH combines a React/Vite desktop frontend with a Rust/Tauri backend. Fron
 - `npm run tauri:dev`: launch the desktop app in development mode.
 - `npm run tauri:build`: build sidecar binaries, frontend, and the packaged Tauri app.
 - `cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib`: run Rust library tests.
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib`: run Rust library tests for the default (tauri) feature set. This is the only command that compiles and runs `src/tauri_commands.rs` tests, so run it alongside the `--no-default-features` one. It needs the frontend `dist/` to exist, so run `npm run build` first.
 - `cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --test cli_smoke`: run CLI/MCP smoke tests.
 - `cargo check --manifest-path src-tauri/Cargo.toml --no-default-features --bin agent2ssh --bin agent2ssh-mcp`: CLI/MCP compile check (no features).
 - `cargo check --manifest-path src-tauri/Cargo.toml --no-default-features --features daemon --bin agent2ssh-daemon`: daemon compile check.
 - `cargo check --manifest-path src-tauri/Cargo.toml`: Tauri app compile check (default feature).
 - `cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features daemon --test daemon_integration`: run daemon integration tests.
-- `AGENT2SSH_TEST_SSH_PORT=2222 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --test exec_fixture -- --test-threads=1`: run the opt-in sshd fixture tests (skipped without the env var). Build the server with `docker build -t a2s-sshd:local scripts/sshd-fixture && docker run -d --name a2s-sshd -p 2222:22 a2s-sshd:local`.
+- `AGENT2SSH_TEST_SSH_PORT=2222 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --test exec_fixture -- --test-threads=1`: run the sshd fixture tests (skipped without the env var). Also run by `./scripts/e2e-docker.sh` and by the CI `real-ssh-e2e` job, which supply `AGENT2SSH_TEST_SSH_KEY`. Build a local server with `docker build -t a2s-sshd:local scripts/sshd-fixture && docker run -d --name a2s-sshd -p 2222:22 a2s-sshd:local`.
 - `./scripts/e2e-local.sh`: run local preflight builds, tests, smoke checks, and sidecar preparation.
 
 ## Coding Style & Naming Conventions
@@ -28,7 +29,7 @@ Use TypeScript with React function components and PascalCase component filenames
 
 ## Testing Guidelines
 
-Place Rust integration tests in `src-tauri/tests/` and name them by behavior or surface, for example `cli_smoke.rs` or `daemon_integration.rs`. Prefer targeted tests for policy, risk, approval, daemon, and command execution changes. Frontend behavior tests live next to components as `src/**/*.test.tsx` (for example `src/components/HostList.test.tsx`) and run with `npm test` (Vitest + jsdom + Testing Library, configured in `vite.config.ts` with setup in `src/test-setup.ts`); mock `src/api.ts` in tests so they never touch the Tauri bridge. For frontend changes, run `npm test` and `npm run build`; add manual desktop checks with `npm run tauri:dev` when UI behavior changes.
+Place Rust integration tests in `src-tauri/tests/` and name them by behavior or surface, for example `cli_smoke.rs` or `daemon_integration.rs`. Prefer targeted tests for policy, risk, approval, daemon, and command execution changes. Tests behind `#[cfg(feature = "tauri")]` — such as the ones in `src/tauri_commands.rs` — only compile under the default feature set, so Rust changes need both `cargo test --no-default-features --lib` and `cargo test --lib`. Any test that needs a real SSH server should follow `tests/exec_fixture.rs`: skip unless `AGENT2SSH_TEST_SSH_PORT` is set, and wire it into `scripts/e2e-docker.sh` so CI runs it. Frontend behavior tests live next to components as `src/**/*.test.tsx` (for example `src/components/HostList.test.tsx`) and run with `npm test` (Vitest + jsdom + Testing Library, configured in `vite.config.ts` with setup in `src/test-setup.ts`); mock `src/api.ts` in tests so they never touch the Tauri bridge. For frontend changes, run `npm test` and `npm run build`; add manual desktop checks with `npm run tauri:dev` when UI behavior changes.
 
 ## Commit & Pull Request Guidelines
 

@@ -179,6 +179,10 @@ pub fn append_rejected_exec_audit(
 /// appended *only* to the returned `Err` (the interactive user hint), so the
 /// audit trail stays free of instruction text. Callers pass the exact
 /// user-visible wording for each surface (CLI / MCP / desktop).
+// The parameter list mirrors `CommandAuthorizationInput` plus the two rejection
+// strings, and it deliberately defaults `auth_scope` for the non-daemon
+// callers, so passing the struct in would push that default onto all 12 of them.
+#[allow(clippy::too_many_arguments)]
 pub async fn authorize_command_without_approval_handler(
     source: &str,
     host: &str,

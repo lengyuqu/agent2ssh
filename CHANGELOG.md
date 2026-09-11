@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 - **Opt-in sshd fixture tests**: `src-tauri/tests/exec_fixture.rs` runs against a real sshd and covers the two runtime behaviours the unit suites structurally cannot reach — draining stdout and stderr off one SSH channel, and bounding a remote command by its timeout. The suite is skipped unless `AGENT2SSH_TEST_SSH_PORT` points at a reachable server; `scripts/sshd-fixture/Dockerfile` builds a throwaway alpine/OpenSSH container to point it at. Both bugs below passed the full unit, CLI and daemon suites before these tests existed.
+- **Tauri feature coverage in CI**: A new `tauri-unit-tests` job compiles, lints and tests the default feature set, so `src/tauri_commands.rs` — behind `#[cfg(feature = "tauri")]` — can now fail a pull request. Every other cargo invocation in CI passes `--no-default-features`, which left that module uncompiled, untested and unlinted.
 
 ### Changed
 - **WebDAV sync set convergence**: The desktop and CLI/daemon portable-config file lists were merged into the single `webdav_sync::SYNCABLE_FILES` constant, so every sync path now carries the same files. `webhook.toml` and `app_preferences.json` are synced from every entry point.
@@ -24,8 +25,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - **Unix PATH detection**: `path_contains_dir` splits on the platform separator (`:` on Unix, `;` on Windows) instead of always `;`. Splitting on `;` made the whole Unix PATH a single segment, so the CLI status panel always reported the binaries as absent from `PATH`.
 - **Ephemeral-port port forwards**: `bind_port = 0` now binds IPv6 loopback on the port IPv4 actually received. Binding both stacks on the literal `0` gave them two different ephemeral ports while only IPv4's was recorded, so clients resolving `localhost` to `::1` reached the wrong port.
 - **Legacy WebDAV markers**: A pull from a marker that still lists a dropped or never-syncable file (`known_hosts.json`, `secrets.enc`, `snippets.json`, `approval_policies.toml`) is accepted and the entry is skipped, rather than failing the whole pull. This restores the 0.3.0 contract that a stale remote manifest cannot overwrite local SSH host-key trust state, credentials, or snippets.
+- **Red clippy gate**: `execution_control::authorize_command_without_approval_handler` trips `clippy::too_many_arguments` (11 against a threshold of 7), so both `Rust clippy` steps in `contract-consistency` fail and the whole workflow is blocked — the commit that added it (`f262505`) ran `cargo check` but not clippy. The library also carried five needless borrows and a redundant match guard in the tray setup, invisible because no CI step enabled the tauri feature. All six are resolved.
 
 ### Verified
+- `cargo clippy` for the lib under both feature sets, and the two `Rust clippy` invocations as CI runs them, now report nothing.
 - Containerised OpenSSH 9.7 fixture (`scripts/sshd-fixture`) with the opt-in `exec_fixture` suite: 3 tests covering the stderr flood, the timeout deadline, and the timeout audit entry.
 - An 8 MiB stderr flood used to stall past a 30 s deadline; it now drains in under 2 s with both streams captured and truncated to `max_output_bytes`.
 - Measured limitation (not a regression): a pty-less exec channel's remote command survives the client closing the channel or dropping the connection (`docker exec ps` shows the process, and its `/tmp` marker appears after the client returned). Only the pty path reaps the process group, so a guaranteed stop requires a remote-side `timeout(1)`.
