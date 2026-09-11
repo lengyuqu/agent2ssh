@@ -12,6 +12,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - **Byte units in the WebDAV Sync panel**: `formatBytes` now reports `KiB`/`MiB` consistently across the UI, replacing the panel's `KB`/`MB` labels.
 
 ### Fixed
+- **WebDAV failures are surfaced**: The desktop sync actions and the automatic post-change sync now read `lastSuccess` off the returned status. Failures previously showed a success toast, and automatic sync failures produced no toast and no diagnostic at all, because the backend reports sync errors as a status rather than as a rejected call.
+- **Unix PATH detection**: `path_contains_dir` splits on the platform separator (`:` on Unix, `;` on Windows) instead of always `;`. Splitting on `;` made the whole Unix PATH a single segment, so the CLI status panel always reported the binaries as absent from `PATH`.
+- **Ephemeral-port port forwards**: `bind_port = 0` now binds IPv6 loopback on the port IPv4 actually received. Binding both stacks on the literal `0` gave them two different ephemeral ports while only IPv4's was recorded, so clients resolving `localhost` to `::1` reached the wrong port.
 - **Legacy WebDAV markers**: A pull from a marker that still lists a dropped or never-syncable file (`known_hosts.json`, `secrets.enc`, `snippets.json`, `approval_policies.toml`) is accepted and the entry is skipped, rather than failing the whole pull. This restores the 0.3.0 contract that a stale remote manifest cannot overwrite local SSH host-key trust state, credentials, or snippets.
 
 ## [0.3.0] - 2026-08-12

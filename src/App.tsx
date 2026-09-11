@@ -254,7 +254,17 @@ export default function App() {
       if (!config.enabled || !config.url.trim() || !config.remotePath.trim()) {
         return;
       }
-      await api.pushWebDavSync();
+      const status = await api.pushWebDavSync();
+      // The command resolves even when the upload fails, so failure has to be
+      // read off the status — `catch` never fires for a rejected sync.
+      if (status.lastSuccess === false) {
+        reportError(
+          "webdav-auto-sync",
+          "automatic webdav sync failed",
+          new Error(status.lastMessage ?? "unknown"),
+          { reason }
+        );
+      }
     } catch (err) {
       reportError("webdav-auto-sync", "automatic webdav sync failed", err, { reason });
     } finally {
@@ -605,7 +615,19 @@ export default function App() {
         run: () => {
           void api
             .pushWebDavSync()
-            .then(() => showToast("success", t("WebDAV sync upload completed.")))
+            .then((status) => {
+              if (status.lastSuccess === false) {
+                showToast(
+                  "error",
+                  status.lastMessage ?? t("WebDAV sync upload failed.")
+                );
+                return;
+              }
+              showToast(
+                "success",
+                status.lastMessage ?? t("WebDAV sync upload completed.")
+              );
+            })
             .catch((err) => showToast("error", String(err)));
         },
       },

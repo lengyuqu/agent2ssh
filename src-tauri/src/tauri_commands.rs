@@ -156,10 +156,17 @@ fn normalize_path_segment(path: &Path) -> String {
         .to_ascii_lowercase()
 }
 
+/// PATH entry separator: `;` on Windows, `:` everywhere else.
+///
+/// `shell_profile.rs` writes POSIX profiles with `:`, so splitting on `;` made
+/// `path_contains_dir` treat the whole Unix PATH as a single segment and always
+/// report `false`.
+const PATH_SEPARATOR: char = if cfg!(windows) { ';' } else { ':' };
+
 fn path_contains_dir(raw_path: &str, dir: &Path) -> bool {
     let expected = normalize_path_segment(dir);
     raw_path
-        .split(';')
+        .split(PATH_SEPARATOR)
         .map(str::trim)
         .filter(|segment| !segment.is_empty())
         .any(|segment| normalize_path_segment(Path::new(segment)) == expected)
@@ -3137,6 +3144,22 @@ mod tests {
             expand_local_path(Some("/etc".into())),
             std::path::PathBuf::from("/etc")
         );
+    }
+
+    #[test]
+    fn path_contains_dir_uses_the_platform_separator() {
+        // `join_paths` emits the platform separator (`:` on Unix, `;` on
+        // Windows), so this fails on Unix if the split character is wrong.
+        let dir = std::env::temp_dir();
+        let raw = std::env::join_paths([dir.as_path(), Path::new("/no-such-agent2ssh-dir")])
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            path_contains_dir(&raw, &dir),
+            "expected {raw} to contain the temp dir"
+        );
+        assert!(!path_contains_dir("/no-such-a:/no-such-b", &dir));
     }
 
     #[test]

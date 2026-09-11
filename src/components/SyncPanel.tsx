@@ -137,12 +137,40 @@ export default function SyncPanel() {
     }
   }
 
+  // A failed WebDAV action still *resolves*: the backend reports failure through
+  // `lastSuccess` rather than throwing, so the toast variant has to be derived
+  // from the returned status. Reading only `catch` produced a green toast on a
+  // failed upload.
+  function showSyncOutcome(nextStatus: WebDavSyncStatus, action: "test" | "push") {
+    if (nextStatus.lastSuccess === false) {
+      const message =
+        nextStatus.lastMessage ??
+        t(
+          action === "test"
+            ? "WebDAV connection test failed."
+            : "WebDAV sync upload failed."
+        );
+      showToast("error", message);
+      reportError("sync-panel", `${action} webdav sync failed`, new Error(message));
+      return;
+    }
+    showToast(
+      "success",
+      nextStatus.lastMessage ??
+        t(
+          action === "test"
+            ? "WebDAV connection test completed."
+            : "WebDAV sync upload completed."
+        )
+    );
+  }
+
   async function testConnection() {
     setBusy("test");
     try {
       const nextStatus = await api.testWebDavSync();
       setStatus(nextStatus);
-      showToast("success", nextStatus.lastMessage ?? t("WebDAV connection test completed."));
+      showSyncOutcome(nextStatus, "test");
     } catch (err) {
       showToast("error", String(err));
       reportError("sync-panel", "test webdav sync failed", err);
@@ -156,7 +184,7 @@ export default function SyncPanel() {
     try {
       const nextStatus = await api.pushWebDavSync();
       setStatus(nextStatus);
-      showToast("success", nextStatus.lastMessage ?? t("WebDAV sync upload completed."));
+      showSyncOutcome(nextStatus, "push");
     } catch (err) {
       showToast("error", String(err));
       reportError("sync-panel", "push webdav sync failed", err);

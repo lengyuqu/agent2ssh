@@ -142,14 +142,21 @@ fn bind_loopback(port: u16) -> Result<(TcpListener, Option<TcpListener>)> {
         .with_context(|| format!("failed to bind 127.0.0.1:{}", port))?;
     v4.set_nonblocking(true)?;
 
-    let v6 = match TcpListener::bind(("::1", port)) {
+    // `port == 0` asks the OS for an ephemeral port. Binding IPv6 with the same
+    // literal `0` would pick a *different* ephemeral port, so the two listeners
+    // would disagree and the recorded `effective_port` (taken from IPv4) would
+    // be wrong for clients that resolve `localhost` to `::1`. Always re-bind
+    // IPv6 on the port IPv4 actually got.
+    let bound_port = v4.local_addr()?.port();
+
+    let v6 = match TcpListener::bind(("::1", bound_port)) {
         Ok(listener) => {
             listener.set_nonblocking(true)?;
             let _ = crate::diagnostics::append_diagnostic_log(
                 "info",
                 "embedded_ssh_forward",
                 "dual-stack loopback bound (IPv4 + IPv6)",
-                Some(serde_json::json!({ "port": port })),
+                Some(serde_json::json!({ "port": bound_port })),
             );
             Some(listener)
         }
@@ -161,7 +168,7 @@ fn bind_loopback(port: u16) -> Result<(TcpListener, Option<TcpListener>)> {
                 "embedded_ssh_forward",
                 "IPv6 loopback bind skipped (best-effort)",
                 Some(serde_json::json!({
-                    "port": port,
+                    "port": bound_port,
                     "error": error.to_string(),
                 })),
             );

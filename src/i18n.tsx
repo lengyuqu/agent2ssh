@@ -569,6 +569,8 @@ const zh: Record<string, string> = {
   "WebDAV sync settings saved.": "WebDAV 同步设置已保存。",
   "WebDAV connection test completed.": "WebDAV 连接测试已完成。",
   "WebDAV sync upload completed.": "WebDAV 同步上传已完成。",
+  "WebDAV connection test failed.": "WebDAV 连接测试失败。",
+  "WebDAV sync upload failed.": "WebDAV 同步上传失败。",
   "Testing...": "测试中...",
   "Test connection": "测试连接",
   "Uploading...": "上传中...",
