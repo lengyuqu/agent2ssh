@@ -1,8 +1,8 @@
 use anyhow::{anyhow, Context, Result};
 use std::{
     collections::HashMap,
-    io::{ErrorKind, Read},
-    net::{IpAddr, Shutdown, TcpListener, TcpStream},
+    io::ErrorKind,
+    net::{IpAddr, TcpListener, TcpStream},
     sync::{
         atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering},
         Arc, Mutex,
@@ -16,8 +16,7 @@ use uuid::Uuid;
 use crate::{
     app_state::app_state,
     embedded_ssh::{
-        connect_embedded_ssh, connect_tcp_address, write_all_channel_with_stop,
-        write_all_tcp_with_stop,
+        bridge_tcp_and_channel, connect_embedded_ssh, connect_tcp_address, BridgeCounters,
     },
     session::resolve_host,
     store::load_config,
@@ -614,7 +613,12 @@ fn handle_local_connection(
     let session = connect_embedded_ssh(&host, 60)?;
     let channel = session.channel_direct_tcpip(&target_host, target_port, None)?;
     session.set_blocking(false);
-    bridge_tcp_and_channel(stream, channel, control, stop)
+    bridge_tcp_and_channel(
+        stream,
+        channel,
+        Some(stop),
+        Some(&RuleBridgeCounters(control)),
+    )
 }
 
 fn run_remote_forward(
@@ -660,9 +664,12 @@ fn run_remote_forward(
                 thread::spawn(
                     move || match connect_tcp_address(&target_host, target_port, 5) {
                         Ok(stream) => {
-                            if let Err(error) =
-                                bridge_tcp_and_channel(stream, channel, &control, &stop)
-                            {
+                            if let Err(error) = bridge_tcp_and_channel(
+                                stream,
+                                channel,
+                                Some(&stop),
+                                Some(&RuleBridgeCounters(&control)),
+                            ) {
                                 let _ = crate::diagnostics::append_diagnostic_log(
                                     "warn",
                                     "embedded_ssh_forward",
@@ -709,71 +716,20 @@ fn ssh_error_is_would_block(error: &ssh2::Error) -> bool {
     matches!(error.code(), ssh2::ErrorCode::Session(-37))
 }
 
-fn bridge_tcp_and_channel(
-    mut stream: TcpStream,
-    mut channel: ssh2::Channel,
-    control: &RuleControl,
-    stop: &AtomicBool,
-) -> Result<()> {
-    stream.set_nonblocking(true)?;
-    let mut tcp_closed = false;
-    let mut channel_closed = false;
-    let mut tcp_buf = [0u8; 8192];
-    let mut channel_buf = [0u8; 8192];
+/// Feeds a forward rule's live byte counters from the shared bridge.
+///
+/// The bridge lives in `embedded_ssh` and knows nothing about forwards, so the
+/// counters are injected instead of the bridge reaching for a `RuleControl`.
+struct RuleBridgeCounters<'a>(&'a RuleControl);
 
-    while !tcp_closed || !channel_closed {
-        if stop.load(Ordering::SeqCst) {
-            break;
-        }
-        match stream.read(&mut tcp_buf) {
-            Ok(0) => {
-                tcp_closed = true;
-                let _ = channel.send_eof();
-            }
-            Ok(n) => {
-                // A3: Track bytes sent from client → SSH target.
-                control.bytes_tx.fetch_add(n as u64, Ordering::Relaxed);
-                if let Err(error) = write_all_channel_with_stop(&mut channel, &tcp_buf[..n], stop) {
-                    if !stop.load(Ordering::SeqCst) {
-                        return Err(error);
-                    }
-                    break;
-                }
-            }
-            Err(error) if error.kind() == ErrorKind::WouldBlock => {}
-            Err(error) => return Err(error.into()),
-        }
-
-        match channel.read(&mut channel_buf) {
-            Ok(0) => {
-                if channel.eof() {
-                    channel_closed = true;
-                    let _ = stream.shutdown(Shutdown::Write);
-                }
-            }
-            Ok(n) => {
-                // A3: Track bytes sent from SSH target → client.
-                control.bytes_rx.fetch_add(n as u64, Ordering::Relaxed);
-                if let Err(error) = write_all_tcp_with_stop(&mut stream, &channel_buf[..n], stop) {
-                    if !stop.load(Ordering::SeqCst) {
-                        return Err(error);
-                    }
-                    break;
-                }
-            }
-            Err(error) if error.kind() == ErrorKind::WouldBlock => {}
-            Err(error) => return Err(error.into()),
-        }
-
-        if tcp_closed && channel_closed {
-            break;
-        }
-        thread::sleep(Duration::from_millis(5));
+impl BridgeCounters for RuleBridgeCounters<'_> {
+    fn client_to_target(&self, bytes: usize) {
+        self.0.bytes_tx.fetch_add(bytes as u64, Ordering::Relaxed);
     }
 
-    let _ = channel.close();
-    let _ = channel.wait_close();
-    Ok(())
+    fn target_to_client(&self, bytes: usize) {
+        self.0.bytes_rx.fetch_add(bytes as u64, Ordering::Relaxed);
+    }
 }
 
 pub async fn forward_list_core() -> Vec<ForwardRule> {

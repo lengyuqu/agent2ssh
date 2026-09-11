@@ -1,9 +1,10 @@
 //! Opt-in integration tests against a real `sshd`.
 //!
 //! These cover runtime behaviour that the unit suites structurally cannot reach:
-//! draining stdout and stderr off a single SSH channel, and bounding a remote
-//! command by its timeout. Both shipped broken because nothing ever exercised a
-//! real server.
+//! draining stdout and stderr off a single SSH channel, bounding a remote
+//! command by its timeout, and collecting a health snapshot — which shares that
+//! drain. All of them shipped broken because nothing ever exercised a real
+//! server.
 //!
 //! The suite is skipped unless `AGENT2SSH_TEST_SSH_PORT` points at a reachable
 //! sshd. To run it against the local fixture image:
@@ -31,6 +32,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use agent2ssh::core::exec_ssh_core;
+use agent2ssh::health::collect_health_snapshot;
 use agent2ssh::store::list_audit_raw;
 use agent2ssh::types::{AuditFilter, ExecRequest};
 
@@ -302,6 +304,42 @@ async fn timeout_is_recorded_in_the_audit_log() {
             .is_some_and(|reason| reason.contains("timed out")),
         "audit entry does not record the timeout: {:?}",
         recorded.reason
+    );
+
+    release_config(dir);
+}
+
+/// The health collector drives the same shared capture path as exec.
+///
+/// Its old body read stdout to EOF before touching stderr and bounded neither,
+/// so it carried the same shared-channel-window deadlock the exec path was
+/// fixed for, and it had no deadline of its own. This runs the real
+/// `HEALTH_COMMAND` against a real sshd and checks the output was captured and
+/// parsed, which nothing covered before.
+#[tokio::test]
+#[serial_test::serial]
+async fn health_snapshot_collects_over_the_shared_capture_path() {
+    let Some(fixture) = fixture() else {
+        return skip();
+    };
+    let dir = isolated_config(&fixture, "health");
+
+    let snapshot = collect_health_snapshot(vec!["fixture".to_string()], Some(10)).await;
+
+    let host = snapshot
+        .hosts
+        .first()
+        .expect("one host was requested, so one snapshot is expected");
+    assert!(host.reachable, "health collection failed: {:?}", host.error);
+    assert_eq!(host.error, None, "unexpected error: {:?}", host.error);
+    assert!(host.latency_ms.is_some());
+    assert!(
+        host.uptime.is_some(),
+        "the uptime section was not parsed out of the captured stdout"
+    );
+    assert!(
+        host.disk_usage.is_some(),
+        "the disk section was not parsed out of the captured stdout"
     );
 
     release_config(dir);

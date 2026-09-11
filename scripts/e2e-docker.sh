@@ -7,7 +7,7 @@
 # round-trip (upload → download → byte-compare), recursive directory transfer
 # (J4: build a tree remotely + pull it back), resume (K6), mkdir/ls, and the
 # exec runtime suite (src-tauri/tests/exec_fixture.rs: stderr drain, the timeout
-# deadline, and the timeout audit entry). It is the regression that closes the
+# deadline, the timeout audit entry, and a health snapshot). It is the regression that closes the
 # "runtime-unverified" gaps (native transfer paths, recursive transfer, exec
 # deadline handling).
 #
@@ -122,21 +122,22 @@ head -c 524288 "$WORK/payload.bin" > "$WORK/partial.out"   # first 512 KiB only
 "$CLI" sftp get e2e /config/payload.bin "$WORK/partial.out" --resume
 if cmp -s "$WORK/payload.bin" "$WORK/partial.out"; then ok "resume completed file"; else bad "resume mismatch"; fi
 
-# ── 6. Exec runtime: stderr drain + timeout deadline ──────────────────────────
+# ── 6. Exec runtime: stderr drain + timeout deadline + health collection ──────
 # src-tauri/tests/exec_fixture.rs drives the embedded transport directly, so it
 # catches channel-level regressions the CLI-level checks above cannot: a stderr
-# flood that deadlocks the shared channel window, and a timeout that must return
-# at its deadline. It reuses the key and the container already running here.
-note "Exec runtime regression suite (stderr drain, timeout deadline)"
+# flood that deadlocks the shared channel window, a timeout that must return at
+# its deadline, and a health snapshot over the same shared capture path. It
+# reuses the key and the container already running here.
+note "Exec runtime regression suite (stderr drain, timeout deadline, health)"
 if ( cd "$REPO_ROOT/src-tauri" && \
      AGENT2SSH_TEST_SSH_PORT="$SSH_PORT" \
      AGENT2SSH_TEST_SSH_HOST=127.0.0.1 \
      AGENT2SSH_TEST_SSH_USER=tester \
      AGENT2SSH_TEST_SSH_KEY="$WORK/id_ed25519" \
      cargo test --no-default-features --test exec_fixture -- --test-threads=1 ); then
-  ok "exec runtime suite (drain + timeout + timeout audit)"
+  ok "exec runtime suite (drain + timeout + timeout audit + health)"
 else
-  bad "exec runtime suite (drain + timeout + timeout audit)"
+  bad "exec runtime suite (drain + timeout + timeout audit + health)"
 fi
 
 # ── Summary ───────────────────────────────────────────────────────────────────

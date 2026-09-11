@@ -16,7 +16,7 @@ use std::{
         mpsc,
     },
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use crate::{
@@ -747,7 +747,7 @@ fn connect_via_jump_to(
     thread::spawn(move || {
         let _jump_session = jump_session;
         let _guard = guard; // drops when the thread exits
-        if let Err(error) = bridge_tcp_and_channel(server, channel) {
+        if let Err(error) = bridge_tcp_and_channel(server, channel, None, None) {
             let _ = crate::diagnostics::append_diagnostic_log(
                 "warn",
                 "embedded_ssh",
@@ -968,7 +968,38 @@ fn read_and_discard(stream: &mut TcpStream, len: usize) -> Result<()> {
     Ok(())
 }
 
-fn bridge_tcp_and_channel(mut stream: TcpStream, mut channel: ssh2::Channel) -> Result<()> {
+/// Observes the bytes crossing a TCP↔channel bridge.
+///
+/// The bridge stays ignorant of who cares about throughput: the port forwarder
+/// uses this to keep its live per-rule counters, and the jump-host bridge
+/// ignores the frames entirely.
+pub(crate) trait BridgeCounters {
+    /// Bytes read from the local TCP peer and written to the SSH target.
+    fn client_to_target(&self, bytes: usize);
+    /// Bytes read from the SSH target and written to the local TCP peer.
+    fn target_to_client(&self, bytes: usize);
+}
+
+/// True when a caller has asked a bridge to stop.
+fn bridge_stopped(stop: Option<&AtomicBool>) -> bool {
+    stop.is_some_and(|flag| flag.load(Ordering::SeqCst))
+}
+
+/// Ferry bytes between a TCP socket and an SSH channel in both directions.
+///
+/// One implementation serves both tunnel paths — the jump-host `direct-tcpip`
+/// bridge and the local/remote port forwarders — so a fix to the read or EOF
+/// handling below applies to every tunnel rather than to one of two copies.
+///
+/// `stop` lets a caller cancel a long-lived tunnel: it is tested before each
+/// half-cycle and inside each write, and a write that failed only because the
+/// flag was raised is a clean stop rather than an error.
+pub(crate) fn bridge_tcp_and_channel(
+    mut stream: TcpStream,
+    mut channel: ssh2::Channel,
+    stop: Option<&AtomicBool>,
+    counters: Option<&dyn BridgeCounters>,
+) -> Result<()> {
     stream.set_nonblocking(true)?;
     let mut tcp_closed = false;
     let mut channel_closed = false;
@@ -976,24 +1007,49 @@ fn bridge_tcp_and_channel(mut stream: TcpStream, mut channel: ssh2::Channel) -> 
     let mut channel_buf = [0u8; 8192];
 
     while !tcp_closed || !channel_closed {
+        if bridge_stopped(stop) {
+            break;
+        }
         match stream.read(&mut tcp_buf) {
             Ok(0) => {
                 tcp_closed = true;
                 let _ = channel.send_eof();
             }
-            Ok(n) => write_all_channel(&mut channel, &tcp_buf[..n])?,
+            Ok(n) => {
+                if let Some(counters) = counters {
+                    counters.client_to_target(n);
+                }
+                if let Err(error) = write_all_channel(&mut channel, &tcp_buf[..n], stop) {
+                    if !bridge_stopped(stop) {
+                        return Err(error);
+                    }
+                    break;
+                }
+            }
             Err(error) if error.kind() == ErrorKind::WouldBlock => {}
             Err(error) => return Err(error.into()),
         }
 
         match channel.read(&mut channel_buf) {
             Ok(0) => {
+                // `Ok(0)` also means "nothing buffered right now" on a
+                // non-blocking libssh2 channel, so EOF has to come from `eof()`.
                 if channel.eof() {
                     channel_closed = true;
                     let _ = stream.shutdown(Shutdown::Write);
                 }
             }
-            Ok(n) => write_all_tcp(&mut stream, &channel_buf[..n])?,
+            Ok(n) => {
+                if let Some(counters) = counters {
+                    counters.target_to_client(n);
+                }
+                if let Err(error) = write_all_tcp(&mut stream, &channel_buf[..n], stop) {
+                    if !bridge_stopped(stop) {
+                        return Err(error);
+                    }
+                    break;
+                }
+            }
             Err(error) if error.kind() == ErrorKind::WouldBlock => {}
             Err(error) => return Err(error.into()),
         }
@@ -1009,13 +1065,9 @@ fn bridge_tcp_and_channel(mut stream: TcpStream, mut channel: ssh2::Channel) -> 
     Ok(())
 }
 
-fn write_all_tcp_inner(
-    stream: &mut TcpStream,
-    mut data: &[u8],
-    stop: Option<&AtomicBool>,
-) -> Result<()> {
+fn write_all_tcp(stream: &mut TcpStream, mut data: &[u8], stop: Option<&AtomicBool>) -> Result<()> {
     while !data.is_empty() {
-        if stop.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+        if bridge_stopped(stop) {
             return Err(anyhow!("forward stopped"));
         }
         match stream.write(data) {
@@ -1030,25 +1082,13 @@ fn write_all_tcp_inner(
     Ok(())
 }
 
-pub(crate) fn write_all_tcp(stream: &mut TcpStream, data: &[u8]) -> Result<()> {
-    write_all_tcp_inner(stream, data, None)
-}
-
-pub(crate) fn write_all_tcp_with_stop(
-    stream: &mut TcpStream,
-    data: &[u8],
-    stop: &AtomicBool,
-) -> Result<()> {
-    write_all_tcp_inner(stream, data, Some(stop))
-}
-
-fn write_all_channel_inner(
+fn write_all_channel(
     channel: &mut ssh2::Channel,
     mut data: &[u8],
     stop: Option<&AtomicBool>,
 ) -> Result<()> {
     while !data.is_empty() {
-        if stop.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+        if bridge_stopped(stop) {
             return Err(anyhow!("forward stopped"));
         }
         match channel.write(data) {
@@ -1064,16 +1104,263 @@ fn write_all_channel_inner(
     Ok(())
 }
 
-pub(crate) fn write_all_channel(channel: &mut ssh2::Channel, data: &[u8]) -> Result<()> {
-    write_all_channel_inner(channel, data, None)
+// ── Command capture ────────────────────────────────────────────────────────
+//
+// Shared by `core::exec_ssh_embedded` and `health::run_health_command`. Both
+// need exactly this: send a command, drain both streams, bound what is kept,
+// and report the exit status. The exec path is the one that was fixed after the
+// deadlock below was measured; the health path had the same latent bug, so it
+// calls in here instead of keeping a second, broken copy.
+
+/// Marks a command that outlived its own deadline, so a caller can report a
+/// timeout rather than a generic I/O failure.
+#[derive(Debug)]
+pub(crate) struct ExecTimeout {
+    pub(crate) timeout_secs: u64,
 }
 
-pub(crate) fn write_all_channel_with_stop(
+impl std::fmt::Display for ExecTimeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SSH command timed out after {}s", self.timeout_secs)
+    }
+}
+
+impl std::error::Error for ExecTimeout {}
+
+/// Idle passes tolerated after the channel reports EOF before the drain ends.
+/// Covers a trailing extended-data (stderr) packet still in flight.
+const DRAIN_IDLE_PASSES_AFTER_EOF: u8 = 2;
+
+/// Sleep between non-productive drain passes.
+const DRAIN_IDLE_SLEEP: Duration = Duration::from_millis(5);
+
+/// Bound on the blocking teardown exchange (`wait_close`) that runs after a
+/// command has already been drained to EOF. Without it libssh2 blocks forever.
+pub(crate) const TEARDOWN_TIMEOUT_MS: u32 = 30_000;
+
+/// What a captured command produced.
+pub(crate) struct CapturedExec {
+    pub(crate) exit_code: Option<i32>,
+    pub(crate) stdout: Vec<u8>,
+    pub(crate) stderr: Vec<u8>,
+    /// True when either stream was cut short by `max_bytes`.
+    pub(crate) truncated: bool,
+    /// Total bytes discarded from both streams.
+    pub(crate) dropped_bytes: usize,
+}
+
+/// Run `command` over SSH and capture both output streams.
+///
+/// `timeout_secs` bounds the command itself, starting once it has been sent —
+/// not when the connection was opened — and `max_bytes` bounds each stream
+/// independently.
+pub(crate) fn run_command_capture(
+    host: &HostProfile,
+    command: &str,
+    stdin: Option<&[u8]>,
+    timeout_secs: u64,
+    max_bytes: usize,
+) -> Result<CapturedExec> {
+    let session = connect_embedded_ssh(host, timeout_secs)?;
+    let mut channel = session.channel_session()?;
+    channel.exec(command)?;
+    if let Some(data) = stdin {
+        channel.write_all(data)?;
+        channel.send_eof()?;
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let mut stdout = BoundedCapture::new(max_bytes);
+    let mut stderr = BoundedCapture::new(max_bytes);
+
+    // Non-blocking I/O is only safe for the drain: `wait_close` needs a
+    // request/confirm exchange, so blocking is restored once the command is
+    // known to have finished.
+    session.set_blocking(false);
+    let drained = drain_channel_output(
+        &mut channel,
+        &mut stdout,
+        &mut stderr,
+        deadline,
+        timeout_secs,
+    );
+
+    if let Err(error) = drained {
+        // Still non-blocking here on purpose. Blocking-mode `close` waits for a
+        // server acknowledgement that only arrives once the remote command has
+        // exited, so calling it after `set_blocking(true)` made the timeout path
+        // block for the command's full remaining runtime — a 1 s deadline on an
+        // 8 s command took 8 s to return. Tearing the connection down in
+        // non-blocking mode returns promptly instead.
+        //
+        // Measured against OpenSSH 9.7 this does **not** kill the remote
+        // command: a pty-less exec channel's process group is only reaped on
+        // the pty path. Stopping it for real needs a PTY or a server-side
+        // `timeout` wrapper — see `ExecRequest::timeout_secs`.
+        let _ = channel.close();
+        let _ = session.disconnect(None, "command timed out", None);
+        return Err(error);
+    }
+
+    // The command has been drained to EOF, so the remaining blocking exchanges
+    // (CHANNEL_CLOSE, `exit_status`) complete without a further wait. This is a
+    // teardown guard only — it bounds a wedged peer, it is not part of the
+    // command's own budget, so it is deliberately not derived from
+    // `timeout_secs`.
+    session.set_blocking(true);
+    session.set_timeout(TEARDOWN_TIMEOUT_MS);
+    channel.wait_close()?;
+
+    Ok(CapturedExec {
+        exit_code: Some(channel.exit_status()?),
+        truncated: stdout.truncated() || stderr.truncated(),
+        dropped_bytes: stdout.dropped_bytes() + stderr.dropped_bytes(),
+        stdout: stdout.into_bytes(),
+        stderr: stderr.into_bytes(),
+    })
+}
+
+/// Drains stdout and stderr off one channel until it reports EOF and both
+/// streams have gone quiet.
+///
+/// Two properties matter here and both were missing before:
+///
+/// * **Both streams are read every pass.** The SSH channel window is shared, so
+///   a remote command that fills stderr while its stdout is still open blocks
+///   its own writes; reading stdout to EOF first deadlocks. `ssh2` follows
+///   libssh2 in returning `Ok(0)` for "nothing buffered right now" rather than
+///   for EOF — the same convention `bridge_tcp_and_channel` relies on — so EOF
+///   has to come from [`ssh2::Channel::eof`].
+/// * **The deadline is enforced here.** On expiry the caller tears the
+///   connection down so the local worker returns promptly. That does not stop
+///   a pty-less remote command — see `ExecRequest::timeout_secs`.
+fn drain_channel_output(
     channel: &mut ssh2::Channel,
-    data: &[u8],
-    stop: &AtomicBool,
+    stdout: &mut BoundedCapture,
+    stderr: &mut BoundedCapture,
+    deadline: Instant,
+    timeout_secs: u64,
 ) -> Result<()> {
-    write_all_channel_inner(channel, data, Some(stop))
+    let mut stdout_buf = [0u8; 8192];
+    let mut stderr_buf = [0u8; 8192];
+    let mut idle_after_eof = 0u8;
+
+    loop {
+        let mut progressed = false;
+
+        match channel.read(&mut stdout_buf) {
+            Ok(0) => {}
+            Ok(read) => {
+                stdout.push(&stdout_buf[..read]);
+                progressed = true;
+            }
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {}
+            Err(error) => return Err(error.into()),
+        }
+
+        match channel.stderr().read(&mut stderr_buf) {
+            Ok(0) => {}
+            Ok(read) => {
+                stderr.push(&stderr_buf[..read]);
+                progressed = true;
+            }
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {}
+            Err(error) => return Err(error.into()),
+        }
+
+        // `eof()` stays false while stderr data is still buffered, so this is the
+        // normal exit; the extra idle passes absorb a trailing packet.
+        if channel.eof() && !progressed {
+            idle_after_eof += 1;
+            if idle_after_eof >= DRAIN_IDLE_PASSES_AFTER_EOF {
+                return Ok(());
+            }
+        } else {
+            idle_after_eof = 0;
+        }
+
+        if Instant::now() >= deadline {
+            return Err(ExecTimeout { timeout_secs }.into());
+        }
+
+        if !progressed {
+            thread::sleep(DRAIN_IDLE_SLEEP);
+        }
+    }
+}
+
+/// Bounded head+tail accumulator for a single output stream.
+///
+/// Retains the first `max_bytes / 2` bytes and a rolling window of the last
+/// `max_bytes / 2`, while counting every byte it was fed so callers can report
+/// how much of the middle was dropped.
+struct BoundedCapture {
+    head: Vec<u8>,
+    tail: Vec<u8>,
+    max_bytes: usize,
+    head_bytes: usize,
+    tail_bytes: usize,
+    total: usize,
+}
+
+impl BoundedCapture {
+    fn new(max_bytes: usize) -> Self {
+        let head_bytes = max_bytes / 2;
+        Self {
+            head: Vec::new(),
+            tail: Vec::new(),
+            max_bytes,
+            head_bytes,
+            tail_bytes: max_bytes.saturating_sub(head_bytes),
+            total: 0,
+        }
+    }
+
+    fn push(&mut self, chunk: &[u8]) {
+        self.total += chunk.len();
+        if self.head.len() < self.head_bytes {
+            let remaining = self.head_bytes - self.head.len();
+            let take = chunk.len().min(remaining);
+            self.head.extend_from_slice(&chunk[..take]);
+            if take < chunk.len() {
+                append_rolling_tail(&mut self.tail, &chunk[take..], self.tail_bytes);
+            }
+        } else {
+            append_rolling_tail(&mut self.tail, chunk, self.tail_bytes);
+        }
+    }
+
+    fn truncated(&self) -> bool {
+        self.total > self.max_bytes
+    }
+
+    fn dropped_bytes(&self) -> usize {
+        self.total.saturating_sub(self.max_bytes)
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        let mut out = self.head;
+        out.extend_from_slice(&self.tail);
+        out
+    }
+}
+
+/// Append `chunk` to a rolling tail buffer that keeps only the last
+/// `max_tail` bytes, discarding the oldest bytes as it grows.
+fn append_rolling_tail(tail: &mut Vec<u8>, chunk: &[u8], max_tail: usize) {
+    if max_tail == 0 {
+        return;
+    }
+    if chunk.len() >= max_tail {
+        tail.clear();
+        tail.extend_from_slice(&chunk[chunk.len() - max_tail..]);
+    } else {
+        tail.extend_from_slice(chunk);
+        if tail.len() > max_tail {
+            let overflow = tail.len() - max_tail;
+            tail.drain(..overflow);
+        }
+    }
 }
 
 /// libssh2's blocking-mode budget for a session, in milliseconds.
@@ -1715,6 +2002,60 @@ mod tests {
         assert_eq!(format_host_port("::1", 22), "[::1]:22");
         assert_eq!(format_host_port("[::1]", 2222), "[::1]:2222");
         assert_eq!(format_host_port("127.0.0.1", 22), "127.0.0.1:22");
+    }
+
+    #[test]
+    fn bounded_capture_keeps_head_and_tail_and_counts_dropped_bytes() {
+        // 16 bytes => 8 head + 8 tail.
+        let mut capture = BoundedCapture::new(16);
+        capture.push(b"0123456789");
+        capture.push(b"abcdefghij");
+        assert!(capture.truncated());
+        assert_eq!(capture.dropped_bytes(), 4);
+        assert_eq!(capture.into_bytes(), b"01234567cdefghij");
+    }
+
+    #[test]
+    fn bounded_capture_leaves_short_output_untouched() {
+        let mut capture = BoundedCapture::new(16);
+        capture.push(b"short");
+        assert!(!capture.truncated());
+        assert_eq!(capture.dropped_bytes(), 0);
+        assert_eq!(capture.into_bytes(), b"short");
+    }
+
+    #[test]
+    fn bounded_capture_never_exceeds_its_budget() {
+        // Any number of chunks must stay within `max_bytes`, which is what keeps
+        // a stderr-heavy remote command from growing this process unbounded.
+        let max_bytes = 4096;
+        let mut capture = BoundedCapture::new(max_bytes);
+        for _ in 0..512 {
+            capture.push(&[b'x'; 8192]);
+        }
+        assert!(capture.truncated());
+        assert_eq!(capture.dropped_bytes(), 512 * 8192 - max_bytes);
+        assert_eq!(capture.into_bytes().len(), max_bytes);
+    }
+
+    #[test]
+    fn bounded_capture_zero_budget_keeps_no_bytes() {
+        let mut capture = BoundedCapture::new(0);
+        capture.push(b"discarded");
+        assert!(capture.truncated());
+        assert_eq!(capture.dropped_bytes(), 9);
+        assert!(capture.into_bytes().is_empty());
+    }
+
+    #[test]
+    fn bounded_capture_one_byte_budget_keeps_the_newest_byte() {
+        // The head takes `max_bytes / 2` and the tail the remainder, so an odd
+        // one-byte budget is all tail: it keeps the newest byte, not the oldest.
+        let mut capture = BoundedCapture::new(1);
+        capture.push(b"ab");
+        assert!(capture.truncated());
+        assert_eq!(capture.dropped_bytes(), 1);
+        assert_eq!(capture.into_bytes(), b"b");
     }
 
     #[test]

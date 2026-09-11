@@ -1,11 +1,10 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::io::Read;
 use std::time::{Duration, Instant};
 use tokio::task::JoinSet;
 
-use crate::embedded_ssh::connect_embedded_ssh;
+use crate::embedded_ssh::run_command_capture;
 use crate::store::{config_dir, load_config};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,19 +167,26 @@ pub async fn collect_health_snapshot(
     snapshot
 }
 
+/// Cap on each captured stream. The health command prints a handful of lines;
+/// the bound is here so a chatty login shell or profile writing to stderr
+/// cannot grow the collector without limit.
+const HEALTH_OUTPUT_LIMIT: usize = 64 * 1024;
+
 fn run_health_command(
     host: &crate::types::HostProfile,
     timeout: u64,
 ) -> Result<(String, String, Option<i32>)> {
-    let session = connect_embedded_ssh(host, timeout)?;
-    let mut channel = session.channel_session()?;
-    channel.exec(HEALTH_COMMAND)?;
-    let mut stdout = String::new();
-    channel.read_to_string(&mut stdout)?;
-    let mut stderr = String::new();
-    channel.stderr().read_to_string(&mut stderr)?;
-    channel.wait_close()?;
-    Ok((stdout, stderr, Some(channel.exit_status()?)))
+    // Shared with the exec path. The previous body read stdout to EOF before
+    // touching stderr and capped neither, which is the same shared-channel-window
+    // deadlock `exec_ssh_embedded` hit — a remote that filled stderr while
+    // holding stdout open blocked its own writes. It also had no deadline of its
+    // own, relying entirely on the caller's outer `tokio::time::timeout`.
+    let captured = run_command_capture(host, HEALTH_COMMAND, None, timeout, HEALTH_OUTPUT_LIMIT)?;
+    Ok((
+        String::from_utf8_lossy(&captured.stdout).into_owned(),
+        String::from_utf8_lossy(&captured.stderr).into_owned(),
+        captured.exit_code,
+    ))
 }
 
 /// Load the last persisted health snapshot from disk.
