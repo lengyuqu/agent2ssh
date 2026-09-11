@@ -469,6 +469,37 @@ fn classify_risk_single(command: &str) -> RiskLevel {
     let lower = command.trim().to_lowercase();
     let tokens: Vec<&str> = lower.split_whitespace().collect();
 
+    // ── App-synthetic SFTP operations ────────────────────────────────────────
+    // The CLI/MCP/daemon/desktop SFTP surfaces never run a shell. They build a
+    // synthetic `sftp <operation> <path>` string purely to drive the risk
+    // classifier, the approval policy and the audit action. That string is not
+    // a command anyone executes, so its canonical head is always the literal
+    // `sftp` and the `rm` rules further down can never match it.
+    //
+    // Without this block the remote equivalents of `rm -rf /` classify as Low
+    // and are auto-approved: approval is opt-in (no matching policy means no
+    // approval), so Low is the weakest setting this can carry.
+    //
+    // Levels mirror the shell rules above so the two paths agree:
+    //   `rm -rf /`      -> Blocked  =>  `sftp rm-rf /`          -> Blocked
+    //   `rm -rf <path>` -> High     =>  `sftp rm-rf <path>`     -> High
+    //   `rm <path>`     -> Low      =>  `sftp rm <path>`        -> Low
+    //   `rmdir <path>`  -> Low      =>  `sftp rmdir <path>`     -> Low
+    //   `mv <a> <b>`    -> Medium   =>  `sftp rename <a> -> <b>` -> Medium
+    if tokens.first() == Some(&"sftp") {
+        match tokens.get(1).copied() {
+            Some("rm-rf") => {
+                let target = tokens.last().copied().unwrap_or("");
+                if target == "/" || target == "/*" || target == "/." {
+                    return RiskLevel::Blocked;
+                }
+                return RiskLevel::High;
+            }
+            Some("rename") => return RiskLevel::Medium,
+            _ => {}
+        }
+    }
+
     // ── AST-based canonical head extraction ──────────────────────────────────
     // Use tree-sitter-bash to parse the command and extract the real command
     // name after stripping wrappers (sudo, env, timeout, ...) and normalizing
@@ -3516,6 +3547,42 @@ mod tests {
         assert!(!command.starts_with("ls -la "));
         assert!(!command.starts_with("stat "));
         assert!(!command.starts_with("mkdir -p "));
+    }
+
+    /// The SFTP surfaces build a synthetic `sftp <operation> <path>` string that
+    /// never reaches a shell, so the shell `rm` rules cannot see it. These
+    /// assertions pin the mirrored levels: wiring up `sftp_remove_dir_all_core`
+    /// must not hand a recursive remote delete of `/` an auto-approved verdict.
+    #[test]
+    fn test_sftp_operations_mirror_shell_risk_levels() {
+        // Recursive delete of a filesystem root is blocked, exactly like `rm -rf /`.
+        assert_eq!(classify_risk("sftp rm-rf /"), RiskLevel::Blocked);
+        assert_eq!(classify_risk("sftp rm-rf /*"), RiskLevel::Blocked);
+        assert_eq!(classify_risk("sftp rm-rf /."), RiskLevel::Blocked);
+        // Any other recursive delete is High, like `rm -rf <path>`.
+        assert_eq!(classify_risk("sftp rm-rf /tmp/x"), RiskLevel::High);
+        assert_eq!(classify_risk("sftp rm-rf /home"), RiskLevel::High);
+        // Single-item deletes stay Low, like `rm <path>` / `rmdir <path>`.
+        assert_eq!(classify_risk("sftp rm /tmp/x"), RiskLevel::Low);
+        assert_eq!(classify_risk("sftp rmdir /tmp/x"), RiskLevel::Low);
+        // Rename mirrors `mv` (Medium).
+        assert_eq!(
+            classify_risk("sftp rename /tmp/a -> /tmp/b"),
+            RiskLevel::Medium
+        );
+        // Read-only and create operations remain Low.
+        assert_eq!(classify_risk("sftp ls /tmp/x"), RiskLevel::Low);
+        assert_eq!(classify_risk("sftp mkdir /tmp/x"), RiskLevel::Low);
+    }
+
+    /// A destructive segment smuggled into an SFTP path must not lower the
+    /// whole-string verdict: chain splitting still sees the second segment.
+    #[test]
+    fn test_sftp_path_cannot_smuggle_a_chain_past_the_classifier() {
+        assert_eq!(
+            classify_risk("sftp ls /tmp/a; rm -rf /"),
+            RiskLevel::Blocked
+        );
     }
 
     #[test]
