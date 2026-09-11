@@ -11,7 +11,10 @@ use std::{
     io::{ErrorKind, Read, Write},
     net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs},
     path::{Component, Path},
-    sync::mpsc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -277,7 +280,7 @@ pub fn get_host_fingerprint_status_core(
     timeout_secs: u64,
 ) -> Result<HostFingerprintStatus> {
     let host = resolve_host(host_name)?;
-    let address = format!("{}:{}", host.host, host.port.unwrap_or(22));
+    let address = format_host_port(&host.host, host.port.unwrap_or(22));
     let (host_key_algorithm, fingerprint_sha256) = probe_host_fingerprint(&host, timeout_secs)?;
     let _guard = crate::store::lock_config_file(".known_hosts.lock")?;
     let trusted = load_known_host_fingerprints_unlocked()?;
@@ -308,7 +311,7 @@ pub fn trust_host_fingerprint_core(
     timeout_secs: u64,
 ) -> Result<()> {
     let host = resolve_host(host_name)?;
-    let address = format!("{}:{}", host.host, host.port.unwrap_or(22));
+    let address = format_host_port(&host.host, host.port.unwrap_or(22));
     let (current_algorithm, current_fingerprint) = probe_host_fingerprint(&host, timeout_secs)?;
     if current_algorithm != host_key_algorithm || current_fingerprint != fingerprint_sha256 {
         return Err(anyhow!(
@@ -586,17 +589,53 @@ pub fn resolved_username(host: &HostProfile) -> String {
         .unwrap_or_else(default_username)
 }
 
-fn connect_tcp_address(host: &str, port: u16, timeout_secs: u64) -> Result<TcpStream> {
-    let address = format!("{host}:{port}");
-    let socket_addr = address
+fn format_host_port(host: &str, port: u16) -> String {
+    let host = host.trim();
+    if host.starts_with('[') || !host.contains(':') {
+        format!("{host}:{port}")
+    } else {
+        format!("[{host}]:{port}")
+    }
+}
+
+pub(crate) fn connect_tcp_address(host: &str, port: u16, timeout_secs: u64) -> Result<TcpStream> {
+    let address = format_host_port(host, port);
+    let socket_addrs = address
         .to_socket_addrs()
         .with_context(|| format!("failed to resolve {address}"))?
-        .next()
-        .ok_or_else(|| anyhow!("failed to resolve {address}"))?;
-    let tcp = TcpStream::connect_timeout(&socket_addr, Duration::from_secs(timeout_secs.min(30)))?;
-    tcp.set_read_timeout(Some(Duration::from_secs(timeout_secs)))?;
-    tcp.set_write_timeout(Some(Duration::from_secs(timeout_secs)))?;
-    Ok(tcp)
+        .collect::<Vec<_>>();
+    if socket_addrs.is_empty() {
+        return Err(anyhow!("failed to resolve {address}"));
+    }
+
+    // Try every resolved address within one total budget. This handles the
+    // common case where an unreachable AAAA record precedes a usable A record.
+    let budget = Duration::from_secs(timeout_secs.min(30)).max(Duration::from_millis(1));
+    let started = std::time::Instant::now();
+    let mut last_error = None;
+    for socket_addr in socket_addrs {
+        let elapsed = started.elapsed();
+        if elapsed >= budget {
+            break;
+        }
+        let remaining = budget - elapsed;
+        match TcpStream::connect_timeout(&socket_addr, remaining) {
+            Ok(tcp) => {
+                let io_timeout = Duration::from_secs(timeout_secs).max(Duration::from_millis(1));
+                tcp.set_read_timeout(Some(io_timeout))?;
+                tcp.set_write_timeout(Some(io_timeout))?;
+                return Ok(tcp);
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+
+    Err(anyhow!(
+        "failed to connect to {address}: {}",
+        last_error
+            .map(|error| error.to_string())
+            .unwrap_or_else(|| "connection timeout".to_string())
+    ))
 }
 
 fn connect_direct_tcp(host: &HostProfile, timeout_secs: u64) -> Result<TcpStream> {
@@ -767,7 +806,7 @@ fn connect_http_proxy(
     proxy: &ProxyProfile,
     host: &HostProfile,
 ) -> Result<()> {
-    let target = format!("{}:{}", host.host, host.port.unwrap_or(22));
+    let target = format_host_port(&host.host, host.port.unwrap_or(22));
     let mut request =
         format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\nProxy-Connection: Keep-Alive\r\n");
     if let Some(username) = proxy
@@ -958,8 +997,15 @@ fn bridge_tcp_and_channel(mut stream: TcpStream, mut channel: ssh2::Channel) -> 
     Ok(())
 }
 
-pub(crate) fn write_all_tcp(stream: &mut TcpStream, mut data: &[u8]) -> Result<()> {
+fn write_all_tcp_inner(
+    stream: &mut TcpStream,
+    mut data: &[u8],
+    stop: Option<&AtomicBool>,
+) -> Result<()> {
     while !data.is_empty() {
+        if stop.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+            return Err(anyhow!("forward stopped"));
+        }
         match stream.write(data) {
             Ok(0) => return Err(anyhow!("tcp stream closed while writing")),
             Ok(n) => data = &data[n..],
@@ -972,8 +1018,27 @@ pub(crate) fn write_all_tcp(stream: &mut TcpStream, mut data: &[u8]) -> Result<(
     Ok(())
 }
 
-pub(crate) fn write_all_channel(channel: &mut ssh2::Channel, mut data: &[u8]) -> Result<()> {
+pub(crate) fn write_all_tcp(stream: &mut TcpStream, data: &[u8]) -> Result<()> {
+    write_all_tcp_inner(stream, data, None)
+}
+
+pub(crate) fn write_all_tcp_with_stop(
+    stream: &mut TcpStream,
+    data: &[u8],
+    stop: &AtomicBool,
+) -> Result<()> {
+    write_all_tcp_inner(stream, data, Some(stop))
+}
+
+fn write_all_channel_inner(
+    channel: &mut ssh2::Channel,
+    mut data: &[u8],
+    stop: Option<&AtomicBool>,
+) -> Result<()> {
     while !data.is_empty() {
+        if stop.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+            return Err(anyhow!("forward stopped"));
+        }
         match channel.write(data) {
             Ok(0) => return Err(anyhow!("ssh channel closed while writing")),
             Ok(n) => data = &data[n..],
@@ -985,6 +1050,18 @@ pub(crate) fn write_all_channel(channel: &mut ssh2::Channel, mut data: &[u8]) ->
     }
     let _ = channel.flush();
     Ok(())
+}
+
+pub(crate) fn write_all_channel(channel: &mut ssh2::Channel, data: &[u8]) -> Result<()> {
+    write_all_channel_inner(channel, data, None)
+}
+
+pub(crate) fn write_all_channel_with_stop(
+    channel: &mut ssh2::Channel,
+    data: &[u8],
+    stop: &AtomicBool,
+) -> Result<()> {
+    write_all_channel_inner(channel, data, Some(stop))
 }
 
 /// libssh2's blocking-mode budget for a session, in milliseconds.
@@ -1040,7 +1117,7 @@ fn connect_embedded_ssh_inner(
     crate::ssh_algo::apply_algo_prefs(&session, crate::ssh_algo::load_algo_prefs().as_ref())?;
     session.handshake()?;
 
-    let host_address = format!("{}:{}", host.host, host.port.unwrap_or(22));
+    let host_address = format_host_port(&host.host, host.port.unwrap_or(22));
     let (host_key_algorithm, host_key_fingerprint) = match session.host_key() {
         Some((_, kind)) => (
             host_key_algorithm(kind).to_string(),
@@ -1057,7 +1134,7 @@ fn connect_embedded_ssh_inner(
     )?;
 
     let username = resolved_username(host);
-    let auth_method = authenticate(&session, host, &username)?;
+    let auth_method = authenticate(&session, host, &username, timeout_secs)?;
 
     if !session.authenticated() {
         return Err(anyhow!("SSH authentication failed for '{}'", host.name));
@@ -1111,6 +1188,8 @@ struct KeyboardInteractivePrompter<'a> {
     extra_credentials: &'a [String],
     /// Round counter — incremented each time `prompt` is called.
     round: u32,
+    /// Keep external prompt waits within the caller's SSH timeout budget.
+    prompt_timeout: Duration,
 }
 
 impl KeyboardInteractivePrompt for KeyboardInteractivePrompter<'_> {
@@ -1145,8 +1224,7 @@ impl KeyboardInteractivePrompt for KeyboardInteractivePrompter<'_> {
                                 "round": self.round,
                             })),
                         );
-                        // Block for up to 120 seconds for an external response
-                        match rx.recv_timeout(std::time::Duration::from_secs(120)) {
+                        match rx.recv_timeout(self.prompt_timeout) {
                             Ok(answer) => {
                                 let _ = crate::diagnostics::append_diagnostic_log(
                                     "info",
@@ -1166,7 +1244,7 @@ impl KeyboardInteractivePrompt for KeyboardInteractivePrompter<'_> {
                                     "keyboard-interactive prompt timed out",
                                     Some(serde_json::json!({
                                         "nonce": guard.nonce(),
-                                        "timeout_secs": 120,
+                                        "timeout_ms": self.prompt_timeout.as_millis(),
                                     })),
                                 );
                                 // Fall through to extra_credentials fallback
@@ -1241,7 +1319,12 @@ fn passphrase_for_host(cache_key: &str, config_passphrase: Option<&str>) -> Opti
         .map(str::to_string)
 }
 
-fn authenticate(session: &Session, host: &HostProfile, username: &str) -> Result<String> {
+fn authenticate(
+    session: &Session,
+    host: &HostProfile,
+    username: &str,
+    timeout_secs: u64,
+) -> Result<String> {
     let auth_methods = session.auth_methods(username).unwrap_or("").to_string();
     let _ = crate::diagnostics::append_diagnostic_log(
         "info",
@@ -1294,6 +1377,7 @@ fn authenticate(session: &Session, host: &HostProfile, username: &str) -> Result
                 password,
                 extra_credentials: &extra_creds,
                 round: 0,
+                prompt_timeout: Duration::from_secs(timeout_secs),
             };
             // T2-10: Loop to handle multi-round keyboard-interactive (2FA chains)
             loop {
@@ -1442,7 +1526,7 @@ fn connection_info(
 
     EmbeddedSshConnectionInfo {
         host: host.name.clone(),
-        address: format!("{}:{}", host.host, host.port.unwrap_or(22)),
+        address: format_host_port(&host.host, host.port.unwrap_or(22)),
         username: resolved_username(host),
         fingerprint_sha256,
         host_key_algorithm,
@@ -1612,6 +1696,13 @@ mod tests {
             username: None,
             password: None,
         }
+    }
+
+    #[test]
+    fn format_host_port_brackets_ipv6_literals() {
+        assert_eq!(format_host_port("::1", 22), "[::1]:22");
+        assert_eq!(format_host_port("[::1]", 2222), "[::1]:2222");
+        assert_eq!(format_host_port("127.0.0.1", 22), "127.0.0.1:22");
     }
 
     #[test]

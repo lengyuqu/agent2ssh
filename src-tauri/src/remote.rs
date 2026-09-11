@@ -375,49 +375,23 @@ pub fn read_local_token() -> Option<String> {
 /// Returns true if GET /health responds 200 within 2 seconds.
 fn check_health_blocking(url: &str) -> bool {
     let health_url = format!("{}/health", url.trim_end_matches('/'));
-    // Use a simple blocking HTTP GET via a short-lived thread + std TCP.
-    // We avoid pulling in a blocking HTTP client just for this probe.
+    // Keep the synchronous API from blocking its caller while using the exact
+    // configured scheme and hostname. In particular, HTTPS must not receive a
+    // plaintext HTTP request and DNS names must not fall back to localhost.
     std::thread::scope(|s| {
         let handle = s.spawn(move || -> bool {
-            use std::io::{Read, Write};
-            use std::net::TcpStream;
             use std::time::Duration;
 
-            // Parse host:port from the URL
-            let without_scheme = health_url
-                .strip_prefix("http://")
-                .or_else(|| health_url.strip_prefix("https://"))
-                .unwrap_or(&health_url);
-            let host_port = without_scheme.split('/').next().unwrap_or(without_scheme);
-
-            let stream = match TcpStream::connect_timeout(
-                &host_port.parse().unwrap_or_else(|_| {
-                    // Fallback: dial the default loopback daemon address.
-                    DEFAULT_DAEMON_ADDR.parse().unwrap()
-                }),
-                Duration::from_secs(2),
-            ) {
-                Ok(s) => s,
-                Err(_) => return false,
+            let Ok(client) = reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(2))
+                .build()
+            else {
+                return false;
             };
-            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-            let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
-
-            let mut stream = stream;
-            let request = format!(
-                "GET /health HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
-                host_port
-            );
-            if stream.write_all(request.as_bytes()).is_err() {
-                return false;
-            }
-
-            let mut buf = Vec::new();
-            if stream.read_to_end(&mut buf).is_err() {
-                return false;
-            }
-            let response = String::from_utf8_lossy(&buf);
-            response.contains("200")
+            client
+                .get(health_url)
+                .send()
+                .is_ok_and(|response| response.status().is_success())
         });
         handle.join().unwrap_or(false)
     })
@@ -690,56 +664,41 @@ pub async fn diagnose_daemon(alias: &str) -> Result<DaemonDiagnostic> {
     let host_port = without_scheme.split('/').next().unwrap_or(without_scheme);
     let is_https = url.starts_with("https://");
 
-    // a. DNS/TCP connectivity
-    let tcp_result: Result<std::net::SocketAddr> = host_port
-        .parse()
-        .map_err(|e: std::net::AddrParseError| anyhow!("invalid address '{}': {}", host_port, e));
-
-    let tcp_addr = match tcp_result {
-        Ok(addr) => {
-            let connect_result = tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                tokio::net::TcpStream::connect(addr),
-            )
-            .await;
-            match connect_result {
-                Ok(Ok(_)) => {
-                    checks.push(DiagnosticCheck {
-                        name: "TCP connectivity".to_string(),
-                        status: DiagnosticStatus::Ok,
-                        message: format!("Successfully connected to {}", host_port),
-                        details: None,
-                    });
-                    Some(addr)
-                }
-                Ok(Err(e)) => {
-                    checks.push(DiagnosticCheck {
-                        name: "TCP connectivity".to_string(),
-                        status: DiagnosticStatus::Error,
-                        message: format!("Cannot connect to {}: {}", host_port, e),
-                        details: None,
-                    });
-                    None
-                }
-                Err(_) => {
-                    checks.push(DiagnosticCheck {
-                        name: "TCP connectivity".to_string(),
-                        status: DiagnosticStatus::Error,
-                        message: format!("Connection to {} timed out (5s)", host_port),
-                        details: None,
-                    });
-                    None
-                }
-            }
+    // a. DNS/TCP connectivity. `TcpStream::connect` resolves hostnames and
+    // tries all returned addresses, so this works for DNS names as well as
+    // IPv4/IPv6 literals.
+    let tcp_connected = match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::net::TcpStream::connect(host_port),
+    )
+    .await
+    {
+        Ok(Ok(_)) => {
+            checks.push(DiagnosticCheck {
+                name: "TCP connectivity".to_string(),
+                status: DiagnosticStatus::Ok,
+                message: format!("Successfully connected to {}", host_port),
+                details: None,
+            });
+            true
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             checks.push(DiagnosticCheck {
                 name: "TCP connectivity".to_string(),
                 status: DiagnosticStatus::Error,
-                message: format!("Invalid address: {}", e),
+                message: format!("Cannot connect to {}: {}", host_port, e),
                 details: None,
             });
-            None
+            false
+        }
+        Err(_) => {
+            checks.push(DiagnosticCheck {
+                name: "TCP connectivity".to_string(),
+                status: DiagnosticStatus::Error,
+                message: format!("Connection to {} timed out (5s)", host_port),
+                details: None,
+            });
+            false
         }
     };
 
@@ -809,7 +768,7 @@ pub async fn diagnose_daemon(alias: &str) -> Result<DaemonDiagnostic> {
     });
 
     // d. Auth check (GET /health with Bearer token) + e. Version check + f. Latency
-    if tcp_addr.is_some() {
+    if tcp_connected {
         let health_url = format!("{}/health", url.trim_end_matches('/'));
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(5))

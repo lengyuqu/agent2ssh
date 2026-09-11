@@ -15,7 +15,10 @@ use uuid::Uuid;
 
 use crate::{
     app_state::app_state,
-    embedded_ssh::{connect_embedded_ssh, write_all_channel, write_all_tcp},
+    embedded_ssh::{
+        connect_embedded_ssh, connect_tcp_address, write_all_channel_with_stop,
+        write_all_tcp_with_stop,
+    },
     session::resolve_host,
     store::load_config,
     types::{ForwardDirection, ForwardRule, HostProfile},
@@ -553,11 +556,17 @@ fn run_accept_loop(
                 let host = host.clone();
                 let target_host = rule.target_host.clone();
                 let target_port = rule.target_port;
+                let stop = stop.clone();
                 let control = control.clone();
                 thread::spawn(move || {
-                    if let Err(error) =
-                        handle_local_connection(host, stream, target_host, target_port, &control)
-                    {
+                    if let Err(error) = handle_local_connection(
+                        host,
+                        stream,
+                        target_host,
+                        target_port,
+                        &control,
+                        &stop,
+                    ) {
                         let _ = crate::diagnostics::append_diagnostic_log(
                             "warn",
                             "embedded_ssh_forward",
@@ -597,11 +606,15 @@ fn handle_local_connection(
     target_host: String,
     target_port: u16,
     control: &RuleControl,
+    stop: &AtomicBool,
 ) -> Result<()> {
+    if stop.load(Ordering::SeqCst) {
+        return Ok(());
+    }
     let session = connect_embedded_ssh(&host, 60)?;
     let channel = session.channel_direct_tcpip(&target_host, target_port, None)?;
     session.set_blocking(false);
-    bridge_tcp_and_channel(stream, channel, control)
+    bridge_tcp_and_channel(stream, channel, control, stop)
 }
 
 fn run_remote_forward(
@@ -642,11 +655,14 @@ fn run_remote_forward(
                 control.connections.fetch_add(1, Ordering::Relaxed);
                 let target_host = rule.target_host.clone();
                 let target_port = rule.target_port;
+                let stop = stop.clone();
                 let control = control.clone();
-                thread::spawn(move || {
-                    match TcpStream::connect((target_host.as_str(), target_port)) {
+                thread::spawn(
+                    move || match connect_tcp_address(&target_host, target_port, 5) {
                         Ok(stream) => {
-                            if let Err(error) = bridge_tcp_and_channel(stream, channel, &control) {
+                            if let Err(error) =
+                                bridge_tcp_and_channel(stream, channel, &control, &stop)
+                            {
                                 let _ = crate::diagnostics::append_diagnostic_log(
                                     "warn",
                                     "embedded_ssh_forward",
@@ -663,8 +679,8 @@ fn run_remote_forward(
                                 Some(serde_json::json!({ "error": error.to_string() })),
                             );
                         }
-                    }
-                });
+                    },
+                );
             }
             Err(error) if ssh_error_is_would_block(&error) => {
                 thread::sleep(Duration::from_millis(50));
@@ -697,6 +713,7 @@ fn bridge_tcp_and_channel(
     mut stream: TcpStream,
     mut channel: ssh2::Channel,
     control: &RuleControl,
+    stop: &AtomicBool,
 ) -> Result<()> {
     stream.set_nonblocking(true)?;
     let mut tcp_closed = false;
@@ -705,6 +722,9 @@ fn bridge_tcp_and_channel(
     let mut channel_buf = [0u8; 8192];
 
     while !tcp_closed || !channel_closed {
+        if stop.load(Ordering::SeqCst) {
+            break;
+        }
         match stream.read(&mut tcp_buf) {
             Ok(0) => {
                 tcp_closed = true;
@@ -713,7 +733,12 @@ fn bridge_tcp_and_channel(
             Ok(n) => {
                 // A3: Track bytes sent from client → SSH target.
                 control.bytes_tx.fetch_add(n as u64, Ordering::Relaxed);
-                write_all_channel(&mut channel, &tcp_buf[..n])?;
+                if let Err(error) = write_all_channel_with_stop(&mut channel, &tcp_buf[..n], stop) {
+                    if !stop.load(Ordering::SeqCst) {
+                        return Err(error);
+                    }
+                    break;
+                }
             }
             Err(error) if error.kind() == ErrorKind::WouldBlock => {}
             Err(error) => return Err(error.into()),
@@ -729,7 +754,12 @@ fn bridge_tcp_and_channel(
             Ok(n) => {
                 // A3: Track bytes sent from SSH target → client.
                 control.bytes_rx.fetch_add(n as u64, Ordering::Relaxed);
-                write_all_tcp(&mut stream, &channel_buf[..n])?;
+                if let Err(error) = write_all_tcp_with_stop(&mut stream, &channel_buf[..n], stop) {
+                    if !stop.load(Ordering::SeqCst) {
+                        return Err(error);
+                    }
+                    break;
+                }
             }
             Err(error) if error.kind() == ErrorKind::WouldBlock => {}
             Err(error) => return Err(error.into()),
