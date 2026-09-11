@@ -5,11 +5,12 @@
 # This workflow serves dual purposes:
 #
 # 1. **PR dry-run**: Every pull request triggers the full `build` job matrix,
-#    which compiles all binaries (CLI, MCP, daemon) across 4 target platforms
-#    (x86_64 macOS, aarch64 macOS, x86_64 Linux, x86_64 Windows), runs unit
-#    tests, integration tests, CLI smoke tests, the explicit contract-consistency
-#    gate, and builds the frontend. This acts as a release dry-run — if a PR
-#    passes all checks here, the code is ready to be merged and released.
+#    which compiles all binaries (CLI, MCP, daemon) across 3 target platforms
+#    (aarch64 macOS, x86_64 Linux, x86_64 Windows; Intel Macs are no longer
+#    supported), runs unit tests, integration tests, CLI smoke tests, the
+#    explicit contract-consistency gate, and builds the frontend. This acts as
+#    a release dry-run — if a PR passes all checks here, the code is ready to
+#    be merged and released.
 #    The `tauri-unit-tests` job covers the default (tauri) feature set, which
 #    every other cargo invocation here excludes; `real-ssh-e2e` covers the exec
 #    and transfer paths against a containerized OpenSSH server.
@@ -199,8 +200,8 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
+          # macOS ships Apple Silicon only. Intel Macs are no longer supported,
+          # so there is no x86_64-apple-darwin leg to build or publish.
           - os: macos-latest
             target: aarch64-apple-darwin
           - os: ubuntu-latest
@@ -340,9 +341,6 @@ jobs:
         include:
           - os: macos-latest
             target: aarch64-apple-darwin
-            bundles: app,dmg
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
             bundles: app,dmg
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu

@@ -123,7 +123,7 @@ git push git233 main --tags
 
 ### 2.3 CI 构建（CI Builds）
 
-- [ ] 确认 `build` job 已通过（4 平台编译：macOS x86_64 / aarch64、Linux x86_64、Windows x86_64）
+- [ ] 确认 `build` job 已通过（3 平台编译：macOS aarch64、Linux x86_64、Windows x86_64；Intel Mac 已不再支持）
 - [ ] 确认 `tauri-bundle` job 已产出安装包（`.dmg` / `.AppImage` / `.msi`）
 - [ ] 检查 GitHub Releases 页面，确认所有构建资产完整
 - [ ] 确认每个平台的 `CHECKSUMS-SHA256.txt` 已上传为 release asset

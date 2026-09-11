@@ -8,8 +8,11 @@ class Agent2ssh < Formula
       url "https://github.com/lengyuqu/agent2ssh/releases/download/v#{version}/agent2ssh-aarch64-apple-darwin.tar.gz"
       sha256 "c5a6ab3d192f5171fe8522a6c063b7737c393ebe1f92114e475dcf9f3f0c2a41"
     else
-      url "https://github.com/lengyuqu/agent2ssh/releases/download/v#{version}/agent2ssh-x86_64-apple-darwin.tar.gz"
-      sha256 "8bfd6be7063c459e055caa3721944200384112adc3af784f6f8e006d9f3907c0"
+      # Intel macOS support was dropped, so no x86_64-apple-darwin archive is
+      # published any more. Fail loudly here rather than handing Homebrew a URL
+      # that 404s, which would surface as an opaque download error.
+      odie "agent2ssh no longer ships a prebuilt binary for Intel Macs. " \
+           "Build it from source with `cargo build --release`, or use an Apple Silicon Mac."
     end
   end
 

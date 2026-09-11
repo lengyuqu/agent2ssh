@@ -30,6 +30,9 @@ brew install agent2ssh
 
 也可以从 [GitHub Releases](https://github.com/lengyuqu/agent2ssh/releases) 下载预编译二进制或桌面安装包。源码构建方式见下方英文的 Installation 与 Development 小节。
 
+> **支持的平台**：macOS（Apple Silicon）、Linux（x86_64）、Windows（x86_64）。
+> **Intel Mac（`x86_64-apple-darwin`）已不再支持** —— 从下一版开始不再发布该平台的二进制与安装包，Homebrew 在 Intel Mac 上会直接报错。仍需要的话请从源码构建（`cargo build --release`），但官方不再测试该架构。
+
 ### 快速开发与运行
 
 ```bash
@@ -102,6 +105,12 @@ cargo run --no-default-features --features daemon --bin agent2ssh-daemon
 brew tap lengyuqu/agent2ssh
 brew install agent2ssh
 ```
+
+Supported platforms are macOS on Apple Silicon, Linux x86_64, and Windows x86_64.
+Intel Macs (`x86_64-apple-darwin`) are no longer supported: the next release
+stops publishing binaries and bundles for that target, and the Homebrew formula
+now fails with an explicit message instead of downloading a missing archive.
+Building from source still works, but that architecture is no longer tested.
 
 ### From source
 

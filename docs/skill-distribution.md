@@ -42,7 +42,6 @@ agent2ssh integrate add claude_code   # 或 claude_desktop / cursor / codex / ge
 | 平台 | 文件名 |
 |------|--------|
 | macOS (Apple Silicon) | `agent2ssh-mcp` (aarch64-apple-darwin) |
-| macOS (Intel) | `agent2ssh-mcp` (x86_64-apple-darwin) |
 | Linux (x86_64) | `agent2ssh-mcp` (x86_64-unknown-linux-gnu) |
 | Windows (x86_64) | `agent2ssh-mcp.exe` (x86_64-pc-windows-msvc) |
 

@@ -50,7 +50,7 @@
 保护规则依赖 [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) 中定义的 CI 检查：
 
 - **contract-consistency**：验证 MCP 工具契约一致性。
-- **build**：跨平台编译（macOS x86_64/aarch64、Linux x86_64、Windows x86_64）、单元测试、集成测试、CLI 冒烟测试和前端构建。
+- **build**：跨平台编译（macOS aarch64、Linux x86_64、Windows x86_64）、单元测试、集成测试、CLI 冒烟测试和前端构建。
 
 PR 必须通过以上所有检查后，合并按钮才会可用。
 

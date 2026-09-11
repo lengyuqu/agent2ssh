@@ -1067,9 +1067,9 @@ type CHECKSUMS-SHA256.txt
 验证通过时，每行输出 `OK`：
 
 ```text
-agent2ssh-x86_64-apple-darwin: OK
-agent2ssh-mcp-x86_64-apple-darwin: OK
-agent2ssh-daemon-x86_64-apple-darwin: OK
+agent2ssh-aarch64-apple-darwin: OK
+agent2ssh-mcp-aarch64-apple-darwin: OK
+agent2ssh-daemon-aarch64-apple-darwin: OK
 ```
 
 如果校验和不匹配，输出将包含 `FAILED`。此时**请勿使用**该文件，并重新下载或从其他源获取。

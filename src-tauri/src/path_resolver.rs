@@ -17,7 +17,7 @@
 //! installed in well-known locations that may not be on `PATH`:
 //!
 //! - **macOS**: `/opt/homebrew/bin` (Apple Silicon Homebrew),
-//!   `/usr/local/bin` (Intel Homebrew), `/Applications/...`
+//!   `/usr/local/bin` (generic local installs), `/Applications/...`
 //! - **Linux**: `/snap/bin` (Snap packages), `/usr/local/bin`
 //! - **Windows**: Chocolatey (`C:\ProgramData\chocolatey\bin`),
 //!   Scoop (`%USERPROFILE%\scoop\shims`), VS Code CLI
@@ -84,7 +84,8 @@ fn platform_fallback_dirs() -> Vec<PathBuf> {
     {
         // macOS Homebrew (Apple Silicon)
         dirs.push(PathBuf::from("/opt/homebrew/bin"));
-        // macOS Homebrew (Intel) / generic local
+        // Generic local installs. Homebrew used this prefix on Intel Macs, but
+        // plenty of non-Homebrew tools land here on any macOS, so it stays.
         dirs.push(PathBuf::from("/usr/local/bin"));
         // Linux Snap
         dirs.push(PathBuf::from("/snap/bin"));
