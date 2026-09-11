@@ -955,6 +955,34 @@ mod tests {
 
     // ── TTL behavior tests ──────────────────────────────────────────────────
 
+    /// Wait until `id`'s TTL has demonstrably elapsed.
+    ///
+    /// These tests cannot just `sleep(2s)` and then assert an expired approval.
+    /// The TTL check compares wall-clock `Utc::now()` timestamps, while
+    /// `tokio::time::sleep` advances the *monotonic* clock, so a backward
+    /// wall-clock step during the sleep (NTP correction) leaves `elapsed` short
+    /// of `ttl_secs` and the assertion fails intermittently — one flake in six
+    /// full-suite runs before this helper. Polling until the expiry is actually
+    /// observed makes the wait provable rather than assumed, and
+    /// `approval_poll` performs the same `Pending -> TimedOut` transition the
+    /// later assertions rely on.
+    async fn wait_until_expired(id: Uuid) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            match approval_poll(id).await {
+                Some(ApprovalStatus::Pending) => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "approval {id} was still pending after 60s; its TTL never elapsed"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                Some(ApprovalStatus::TimedOut) => return,
+                other => panic!("expected approval {id} to time out, got {other:?}"),
+            }
+        }
+    }
+
     /// Approval created within TTL reports as Pending.
     #[tokio::test]
     #[serial_test::serial]
@@ -980,7 +1008,7 @@ mod tests {
         assert_eq!(approval_poll(id).await, Some(ApprovalStatus::Pending));
 
         // Wait for TTL to expire
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        wait_until_expired(id).await;
 
         // Now it should be TimedOut
         assert_eq!(approval_poll(id).await, Some(ApprovalStatus::TimedOut));
@@ -991,7 +1019,7 @@ mod tests {
     #[serial_test::serial]
     async fn test_approval_list_marks_expired_as_timed_out() {
         let id = approval_request_with_ttl("host", "cmd", RiskLevel::High, 1).await;
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        wait_until_expired(id).await;
 
         let list = approval_list().await;
         let entry = list.iter().find(|r| r.id == id).unwrap();
@@ -1003,7 +1031,7 @@ mod tests {
     #[serial_test::serial]
     async fn test_timed_out_approval_cannot_be_approved() {
         let id = approval_request_with_ttl("host", "cmd", RiskLevel::High, 1).await;
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        wait_until_expired(id).await;
 
         let result = approval_respond(id, true).await;
         assert!(result.is_err());
@@ -1020,7 +1048,7 @@ mod tests {
     #[serial_test::serial]
     async fn test_timed_out_approval_cannot_be_rejected() {
         let id = approval_request_with_ttl("host", "cmd", RiskLevel::High, 1).await;
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        wait_until_expired(id).await;
 
         let result = approval_respond(id, false).await;
         assert!(result.is_err());
