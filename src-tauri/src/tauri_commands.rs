@@ -3077,10 +3077,12 @@ pub fn run_tauri() {
     if let Err(e) = crate::store::migrate_plaintext_secrets() {
         eprintln!("warning: secret migration skipped: {e}");
     }
-    // The transport is implicitly Tauri when the `tauri` feature is compiled
-    // in (is_desktop() returns true under #[cfg(feature = "tauri")]). The
-    // global Host stays at Host::Cli (the default) since per-command AppHandle
-    // instances are passed directly to each Tauri command handler.
+    // Install the transport identity in the setup hook below. `Host::is_desktop()`
+    // is `matches!(self, Host::Tauri(..))` — a test on the value, *not* a test on
+    // whether the `tauri` feature is compiled — so leaving the global Host at its
+    // `Host::Cli` default made every transport-aware read lie: `diagnostics`
+    // reported `"transport": "cli"` and `"is_desktop": false` inside the desktop
+    // app. The daemon does the equivalent with `Host::Headless` at its own startup.
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             reveal_main_window(app);
@@ -3092,6 +3094,11 @@ pub fn run_tauri() {
         // check/download/install flow from Settings.
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
+            // Announce the transport once, here. `Host::emit` reads the AppHandle
+            // this stores, and `transport_name()` / `is_desktop()` read the
+            // variant, so both the diagnostics report and any future
+            // transport-aware branch resolve to "desktop" instead of "cli".
+            let _ = crate::app_state::set_host(crate::app_state::Host::Tauri(app.handle().clone()));
             build_system_tray(app.handle(), "Open", "Quit", "Agent2SSH")?;
             Ok(())
         })

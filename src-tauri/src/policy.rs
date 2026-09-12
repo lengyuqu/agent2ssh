@@ -110,13 +110,6 @@ pub fn validate_policy_path(path: Option<&Path>) -> Result<AgentPolicyFile> {
     }
 }
 
-// TODO(unwired): no caller in the repository. `policy_approval_policies` is the
-// one actually used; risk rules are read through `risk_config.rs` instead.
-// Kept pending a decision on unifying risk-rule loading on this accessor.
-pub fn policy_risk_rules() -> Result<Option<RiskRules>> {
-    Ok(load_policy_file()?.map(|policy| policy.risk))
-}
-
 pub fn policy_approval_policies() -> Result<Option<Vec<ApprovalPolicy>>> {
     Ok(load_policy_file()?.map(|policy| policy.approval.policies))
 }

@@ -307,16 +307,6 @@ impl Host {
         }
     }
 
-    /// Emit an event through the internal event bus (all transports).
-    /// This is the common path for events that should be observable
-    /// regardless of transport — the bus was already used by `events.rs`.
-    // TODO(unwired): no caller in the repository — `events.rs` publishes through
-    // `crate::events::publish_event` directly. Kept pending a decision on whether
-    // AppState should be the single entry point for bus emission.
-    pub fn emit_bus(&self, event_type: crate::events::EventType, data: serde_json::Value) {
-        crate::events::publish_event(event_type, data);
-    }
-
     /// Get the process-wide AppState.
     pub fn state(&self) -> &'static AppState {
         app_state()
@@ -332,19 +322,6 @@ impl Host {
     #[cfg(not(feature = "tauri"))]
     pub fn is_desktop(&self) -> bool {
         false
-    }
-
-    /// Check if this host is the headless (daemon) variant.
-    // TODO(unwired): no caller in the repository. `transport_source` /
-    // `is_desktop` cover the call sites that exist today.
-    pub fn is_headless(&self) -> bool {
-        matches!(self, Host::Headless { .. })
-    }
-
-    /// Check if this host is the CLI variant.
-    // TODO(unwired): no caller in the repository (same as `is_headless`).
-    pub fn is_cli(&self) -> bool {
-        matches!(self, Host::Cli)
     }
 
     /// Return a string identifier for the transport, suitable for use
@@ -408,5 +385,40 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].0, "test_event");
         assert_eq!(events[0].1["ok"], true);
+    }
+
+    /// `is_desktop()` asks about the *value*, not about whether the `tauri`
+    /// feature is compiled. The desktop app used to assume otherwise — its
+    /// startup comment claimed `is_desktop()` "returns true under
+    /// `#[cfg(feature = "tauri")]`" — so it never installed `Host::Tauri` and
+    /// every transport-aware read answered "cli". Pin the value-based
+    /// semantics that make a missed `set_host` visible.
+    #[test]
+    fn transport_name_and_is_desktop_follow_the_value() {
+        assert_eq!(Host::Cli.transport_name(), "cli");
+        assert!(!Host::Cli.is_desktop());
+
+        let headless = Host::Headless {
+            sink: Arc::new(|_event, _payload| true),
+        };
+        assert_eq!(headless.transport_name(), "daemon");
+        // A daemon Host answers false even in a build with `tauri` compiled in,
+        // which is exactly what makes the value the source of truth.
+        assert!(!headless.is_desktop());
+    }
+
+    /// `set_host` is what the binary entry points call once at startup, and it
+    /// is process-global, so this restores the previous host before returning.
+    /// Serial because it mutates the shared `AppState`.
+    #[test]
+    #[serial_test::serial]
+    fn set_host_replaces_the_active_transport() {
+        let previous = set_host(Host::Headless {
+            sink: Arc::new(|_event, _payload| true),
+        });
+        assert_eq!(host().transport_name(), "daemon");
+        assert!(!host().is_desktop());
+        set_host(previous);
+        assert_eq!(host().transport_name(), "cli");
     }
 }

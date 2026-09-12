@@ -62,6 +62,10 @@
 
 ### 完全无引用的 Rust 函数
 
+> ⚠️ 下表是 2026-09-11 首次审计时的**原始快照**，行号与「死分支」判断都是当时的状态。
+> 其中已接线的项不再无引用，已删除的项在源码里已不存在。**不要**把它当作当前代码状态的清单；
+> 处置结果见下方「解决状态」表与文末的复查小节。
+
 | 位置 | 说明 |
 |---|---|
 | `core.rs:2293/2308/2339/2347/2372/2380/2406/2419` | **8 个 `sftp_*_core` 函数**（`sftp_rename_core(+_with_source)`、`sftp_remove_file/dir/dir_all_core(+_with_source)`），共约 180 行。既未注册为 tauri command，前端也无调用 —— 整条 SFTP rename/remove 能力是死分支。 |
@@ -135,7 +139,7 @@
 | P1#11 三态组件被绕过 | ⏸ 保留 | 逐处核对后确认均为解构 / 内联用法，**无安全的 panel 级替换点**，强改会引入行为差异 |
 | P1#12 `window.confirm` ×6 | ✅ 统一 | `ui/dialog.tsx` 新增 `ConfirmDialog` / `confirmDialog()` / `ConfirmHost`，`App.tsx` 挂载 |
 | P1#13 daemon 前置链样板 | ✅ 收敛 9 个 handler | 新增 `preflight_guarded_request`（纯 gate 链：gate_paused → rate_limit → authorize） |
-| P2 Rust 死代码 | ✅ 定性后接线（2026-09-11） | 8 个 `sftp_*_core`、`remove_system_known_host`、`save_algo_prefs` 已全部接线；`emit_bus`/`is_headless`/`is_cli`、`policy_risk_rules` 定性为冗余，仍保留待删（见文末） |
+| P2 Rust 死代码 | ✅ 接线 + 清理（2026-09-11 / 09-12） | 8 个 `sftp_*_core`、`remove_system_known_host`、`save_algo_prefs` 已全部接线；`emit_bus` / `is_headless` / `is_cli` / `policy_risk_rules` 定性为冗余后**已删除**（见文末「第二类」）。删除过程中连带发现并修复了一个真缺陷：桌面端从不 `set_host`，`Host` 恒停在 `Host::Cli` |
 | P2 TS 死导出 | ✅ 删除 | `getSessionTraceId` / `setDaemonUrl` / `CardDescription` / `CardFooter` / `badgeVariants` / `buttonVariants` 的 `export` |
 | P2 i18n 死词条 | ✅ 删除 **49 条** | 逐条核验 `src/` 零引用（报告原估 ~53，实际确认 49，未误删） |
 | P2 `labelCls` 复制 ×8 | ✅ →1 | 新建 `src/lib/ui-classes.ts`，1 定义 / 8 引用 |
@@ -224,19 +228,30 @@
 
 > **接线前的安全前提**：SFTP 这四条在任何 surface 都不执行 shell，只构造 `sftp <op> <path>` 字符串用于风险分类 / 审批策略 / 审计 action。`classify_risk_single` 只认 shell 动词，canonical head 恒为 `sftp`，于是 `rm` 规则一条都匹配不到、全部落到默认 verdict —— **实测 `sftp rm-rf /` = low**。而审批是 opt-in（无策略命中即自动批准），所以直接接线会让「递归删远端 `/`」被静默放行。已先在 `classify_risk_single` 加 `sftp` 分支镜像 shell 表（`rm-rf /`、`/*`、`/.` → blocked；其它 `rm-rf` → high；`rename` → medium；`rm`/`rmdir` 保持 low），并补 2 个单测（含一个断言路径里夹 `;` 的链式载荷仍被链式检测抓住）。
 
-## 第二类：不是需求缺失，是冗余 → 保留未删
+## 第二类：不是需求缺失，是冗余 → 已删除（2026-09-12）
 
-| 项 | 定性依据 |
-|---|---|
-| `Host::emit` / `emit_bus` | **`Host::Tauri` 变体在生产代码里从未被构造过** —— `set_host` 只有 daemon 一个调用点，桌面端有意让全局 Host 停在 `Host::Cli`（`tauri_commands.rs` 有注释说明）。`Host::emit` 只在测试里被调用；生产在用 `is_desktop()` 与 `transport_name()` |
-| `is_headless` / `is_cli` | 同上，随 `Host` 变体一起冗余 |
-| `policy_risk_rules` | 不是没实现 —— `risk_config.rs` 在统一 policy 存在时直接 `load_policy_from_path(&path)?.risk`，所以 `docs/architecture.md` 承诺的「policy.toml 优先」是成立的。该访问器只是与 `policy_approval_policies` 同形的重复入口 |
+| 项 | 定性依据 | 处置 |
+|---|---|---|
+| `emit_bus` | 只是 `events::publish_event` 的**转发壳**，而 `publish_event` 有 15+ 个直接调用点（`anomaly.rs`、`approval.rs`、daemon 各处）。绕经 `AppState` 再转发不产生任何行为差异，只多一层 | **已删** |
+| `is_headless` / `is_cli` | 与 `transport_name()` 重复的谓词（`matches!(self, Variant)` vs `transport_name()` 的比较），零调用。`is_desktop()` 有真实调用点（`diagnostics.rs:545`）故保留 | **已删** |
+| `policy_risk_rules` | 不是「没接线的功能」，而是 `risk_config::load_risk_rules()` 的**劣化副本**：它同步只读 `policy.toml` 的 `risk` 字段，**忽略 `risk_rules.toml` 回退**、也没有 mtime 缓存；而 `load_risk_rules()` 两者都做。所以「把它接上线」反而会**退步**——读取会漏掉独立的 `risk_rules.toml` | **已删**（接线才是错的） |
 
-这四项无调用、无计划，**可删**，但未执行（用户未就此表态）。
+`Host::emit` **保留**：它有单测覆盖，且是 `Host` 枚举文档里写明的 `app.emit()` 迁移目标（桌面端补上 `set_host` 后，它的 `Host::Tauri` 分支已可达）。它不是同形重复入口，只是尚未被生产代码采用。
+
+### 删除时暴露的根因：桌面端从不声明自己是 desktop
+
+`TODO(unwired)` 把 `is_headless` / `is_cli` 归类为「冗余谓词」，但底下真正的问题更严重：**这对谓词（以及 `transport_name()`）赖以判断的 `Host` 值，在桌面端永远是默认值 `Host::Cli`。**
+
+- `tauri_commands.rs` 的 `run_tauri` 原注释写着「`is_desktop()` returns true under `#[cfg(feature = "tauri")]`」，据此认为不必调用 `set_host`。
+- 但实现是 `#[cfg(feature = "tauri")] pub fn is_desktop(&self) -> bool { matches!(self, Host::Tauri(..)) }` —— **判的是值，不是 feature**。
+- 而 `set_host` 全仓只有一个调用点：daemon 启动时设 `Host::Headless`。桌面端从不构造 `Host::Tauri`。
+- 后果：桌面应用的诊断报告里 `"transport": "cli"`、`"is_desktop": false`。
+
+已在 `run_tauri` 的 `.setup()` 钩子里补 `set_host(Host::Tauri(app.handle().clone()))`，并把那段错误注释改为描述真实机制；`app_state.rs` 补了两个单测锁住「按值判断」的语义。详见 `CHANGELOG.md` 的 `Fixed` 条目。
 
 ## 第三类：文档承诺实际已实现
 
-`policy_risk_rules` 见上。
+原始审计怀疑 `policy.toml` 的 `risk` 字段没人读。核实结论：`risk_config::load_risk_rules()` 在统一 policy 文件存在时正是 `load_policy_from_path(&path)?.risk`，所以 `docs/architecture.md` 承诺的「policy.toml 优先」成立——只是入口是 `load_risk_rules()`（async + 带缓存 + 含 `risk_rules.toml` 回退），而不是那个同形但劣化的 `policy_risk_rules()`。后者已删（见上）。
 
 ## 本轮的验证
 
@@ -267,12 +282,18 @@
 3. **CHANGELOG 与审计报告里一句事实错误**：初稿称 `remove_system_known_host`「CLI 与 daemon 已可达」，实测为假（全仓零调用点）。已修正。
 4. **G13 设计文档的结论下得过早**：`docs/rssh-design-analysis.md` 写「导出回写系统 known_hosts 不可行——只存 SHA256 指纹、无完整 public key，故只做单向导入」。前半句只否定了**写**；**删**按 hostname 匹配，不需要 key 材料。已修正为「导出不可行、移除可行」，状态行由「双向导入导出」改为「导入 + 移除」。
 
-### 仍无调用且已定性为冗余（有意保留）
+### 冗余项的处置：已删（2026-09-12）
 
-`emit_bus`（0 调用点）、`is_headless` / `is_cli`（0 调用点）、`policy_risk_rules`（0 调用点）。四者都保留 `TODO(unwired)` 标注，且该标注**仍然准确**。它们的详情见上面「第二类」。
+`emit_bus`、`is_headless`、`is_cli`、`policy_risk_rules` 均零调用，已全部删除，连带删掉它们的 `TODO(unwired)` 注释（详情见上面「第二类」）。删除时发现一个真缺陷：桌面端从不调用 `set_host`，`Host` 恒为默认的 `Host::Cli`，于是诊断报告把桌面应用报成 `"transport": "cli"` / `"is_desktop": false` —— 已在 `run_tauri` 的 setup 阶段一并修复。
 
 ## 本轮（复查）的验证
 
-`cargo fmt --check` clean；`cargo build --no-default-features --bin agent2ssh` 通过；CLI `sftp --help` / `known-hosts --help` / `risk` 输出已实测（见上）；完整矩阵随后重跑。
+`cargo fmt --check` clean；`cargo build --no-default-features --bin agent2ssh` 通过；CLI `sftp --help` / `known-hosts --help` / `risk` 输出已实测（见上）。
 
 **方法论教训**：只 grep 调用点会漏掉「有调用点但路径根本跑不通」的情形，只读 diff 则会漏掉「没人调用」——`TODO(unwired)` 这类标注**在接线时必须同步删除**，否则它会反过来成为下一次审计的错误信源。
+
+## 清理轮（2026-09-12）的验证
+
+删除四个冗余项 + 修复桌面端 transport 之后重跑全量矩阵，全绿：`cargo fmt --check` clean；clippy 四目标（CLI+MCP / daemon / lib 非默认 / lib 默认 tauri）各 0 warning；`cargo test --lib` **609**、`--no-default-features --lib` **601**（各比上轮 **+2**，正是新增的两个 `Host` 单测）、`cli_contract` 29、`cli_smoke` 33、`daemon_integration` 57、`connect_deadline` 2。删除的验证是双向的：`git grep` 确认四个符号在 Rust 源码与 `src/`（前端从未引用过它们）都无残留，同时 `policy.rs` 的 `RiskRules` 导入因 `AgentPolicyFile` 字段仍在用而**保留**、`Host::emit` 因有单测而**保留**。
+
+**方法论教训（本轮新增一条）**：判断某段代码「多余」之前，先确认它引用的运行时状态是不是真的被设置了。`TODO` 把 `is_headless` / `is_cli` 说成「冗余谓词」，而真相是它们依赖的 `Host` 值在桌面端**从未被安装**——照注释直接删掉就永远发现不了那个真 bug。
