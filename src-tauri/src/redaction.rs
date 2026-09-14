@@ -689,9 +689,7 @@ mod tests {
 
     #[test]
     fn a24_seed_creates_file_on_first_run() {
-        let dir = std::env::temp_dir().join(format!("agent2ssh-a24s-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        crate::store::set_test_config_dir(&dir);
+        let dir = crate::store::TestConfigDir::new("a24s");
 
         // File should not exist yet.
         let rules_path = dir.join(REDACT_RULES_FILE);
@@ -710,15 +708,12 @@ mod tests {
             "seeded rules must match defaults"
         );
 
-        crate::store::clear_test_config_dir();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a24_seed_is_idempotent_does_not_overwrite() {
-        let dir = std::env::temp_dir().join(format!("agent2ssh-a24i-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        crate::store::set_test_config_dir(&dir);
+        let dir = crate::store::TestConfigDir::new("a24i");
 
         // Seed first.
         seed_default_rules().unwrap();
@@ -743,15 +738,12 @@ mod tests {
             "re-seeding must not overwrite user customizations"
         );
 
-        crate::store::clear_test_config_dir();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a24_reset_restores_defaults() {
-        let dir = std::env::temp_dir().join(format!("agent2ssh-a24r-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        crate::store::set_test_config_dir(&dir);
+        let dir = crate::store::TestConfigDir::new("a24r");
 
         // Seed + modify (remove rules).
         seed_default_rules().unwrap();
@@ -769,15 +761,12 @@ mod tests {
             "reset must restore all default rules"
         );
 
-        crate::store::clear_test_config_dir();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a24_load_user_rules_falls_back_on_corrupt_file() {
-        let dir = std::env::temp_dir().join(format!("agent2ssh-a24c-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        crate::store::set_test_config_dir(&dir);
+        let dir = crate::store::TestConfigDir::new("a24c");
 
         // Write a corrupt JSON file.
         let rules_path = dir.join(REDACT_RULES_FILE);
@@ -787,15 +776,12 @@ mod tests {
         assert!(!rules.is_empty(), "corrupt file must fall back to defaults");
         assert_eq!(rules.len(), default_rules().len());
 
-        crate::store::clear_test_config_dir();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a24_redact_with_user_rules_works() {
-        let dir = std::env::temp_dir().join(format!("agent2ssh-a24w-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        crate::store::set_test_config_dir(&dir);
+        let dir = crate::store::TestConfigDir::new("a24w");
 
         seed_default_rules().unwrap();
         let result = redact_with_user_rules(
@@ -804,7 +790,6 @@ mod tests {
         assert!(result.contains("<REDACTED:ip>"), "must redact IP");
         assert!(result.contains("<REDACTED:bearer>"), "must redact bearer");
 
-        crate::store::clear_test_config_dir();
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

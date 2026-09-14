@@ -277,21 +277,9 @@ pub fn reset_defaults() -> Result<Vec<HighlightRule>, HighlightError> {
 mod tests {
     use super::*;
 
-    fn setup_test_dir() -> std::path::PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("agent2ssh-highlight-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        crate::store::set_test_config_dir(&dir);
-        dir
-    }
-
-    fn teardown_test_dir() {
-        crate::store::clear_test_config_dir();
-    }
-
     #[test]
     fn seed_creates_defaults_on_first_call() {
-        let dir = setup_test_dir();
+        let dir = crate::store::TestConfigDir::new("highlight");
         let rules_path = dir.join(HIGHLIGHT_RULES_FILE);
         assert!(!rules_path.exists());
 
@@ -303,13 +291,11 @@ mod tests {
         assert!(rules.iter().any(|r| r.keyword == "ERROR"));
         assert!(rules.iter().any(|r| r.keyword == "WARN"));
         assert!(rules.iter().any(|r| r.name == "IPv4"));
-
-        teardown_test_dir();
     }
 
     #[test]
     fn seed_is_idempotent() {
-        setup_test_dir();
+        let _dir = crate::store::TestConfigDir::new("highlight");
         seed_default_rules().unwrap();
         let first = list_rules();
 
@@ -318,12 +304,11 @@ mod tests {
         let second = list_rules();
 
         assert_eq!(first, second);
-        teardown_test_dir();
     }
 
     #[test]
     fn insert_adds_new_rule() {
-        setup_test_dir();
+        let _dir = crate::store::TestConfigDir::new("highlight");
         seed_default_rules().unwrap();
 
         let rule = HighlightRule {
@@ -337,13 +322,11 @@ mod tests {
         let rules = insert_rule(rule).unwrap();
         assert_eq!(rules.len(), 6);
         assert!(rules.iter().any(|r| r.keyword == "FATAL"));
-
-        teardown_test_dir();
     }
 
     #[test]
     fn insert_rejects_duplicate_keyword() {
-        setup_test_dir();
+        let _dir = crate::store::TestConfigDir::new("highlight");
         seed_default_rules().unwrap();
 
         let rule = HighlightRule {
@@ -356,13 +339,11 @@ mod tests {
         };
         let err = insert_rule(rule).unwrap_err();
         assert!(matches!(err, HighlightError::KeywordConflict));
-
-        teardown_test_dir();
     }
 
     #[test]
     fn insert_rejects_empty_keyword() {
-        setup_test_dir();
+        let _dir = crate::store::TestConfigDir::new("highlight");
         seed_default_rules().unwrap();
 
         let rule = HighlightRule {
@@ -375,13 +356,11 @@ mod tests {
         };
         let err = insert_rule(rule).unwrap_err();
         assert!(matches!(err, HighlightError::EmptyKeyword));
-
-        teardown_test_dir();
     }
 
     #[test]
     fn insert_rejects_empty_name() {
-        setup_test_dir();
+        let _dir = crate::store::TestConfigDir::new("highlight");
         seed_default_rules().unwrap();
 
         let rule = HighlightRule {
@@ -394,13 +373,11 @@ mod tests {
         };
         let err = insert_rule(rule).unwrap_err();
         assert!(matches!(err, HighlightError::NameRequired));
-
-        teardown_test_dir();
     }
 
     #[test]
     fn insert_rejects_name_too_long() {
-        setup_test_dir();
+        let _dir = crate::store::TestConfigDir::new("highlight");
         seed_default_rules().unwrap();
 
         let rule = HighlightRule {
@@ -413,13 +390,11 @@ mod tests {
         };
         let err = insert_rule(rule).unwrap_err();
         assert!(matches!(err, HighlightError::NameTooLong));
-
-        teardown_test_dir();
     }
 
     #[test]
     fn insert_rejects_invalid_color_but_accepts_javascript_regex_syntax() {
-        setup_test_dir();
+        let _dir = crate::store::TestConfigDir::new("highlight");
         seed_default_rules().unwrap();
 
         let invalid_color = HighlightRule {
@@ -444,36 +419,30 @@ mod tests {
             is_case_sensitive: false,
         };
         assert!(insert_rule(javascript_regex).is_ok());
-
-        teardown_test_dir();
     }
 
     #[test]
     fn delete_removes_rule() {
-        setup_test_dir();
+        let _dir = crate::store::TestConfigDir::new("highlight");
         seed_default_rules().unwrap();
 
         let rules = delete_rule("ERROR").unwrap();
         assert_eq!(rules.len(), 4);
         assert!(!rules.iter().any(|r| r.keyword == "ERROR"));
-
-        teardown_test_dir();
     }
 
     #[test]
     fn delete_returns_error_for_missing() {
-        setup_test_dir();
+        let _dir = crate::store::TestConfigDir::new("highlight");
         seed_default_rules().unwrap();
 
         let err = delete_rule("NONEXISTENT").unwrap_err();
         assert!(matches!(err, HighlightError::NotFound));
-
-        teardown_test_dir();
     }
 
     #[test]
     fn update_changes_rule() {
-        setup_test_dir();
+        let _dir = crate::store::TestConfigDir::new("highlight");
         seed_default_rules().unwrap();
 
         let updated = HighlightRule {
@@ -490,13 +459,11 @@ mod tests {
         assert_eq!(rule.color, "#FF00FF");
         assert!(!rule.enabled);
         assert!(rule.is_case_sensitive);
-
-        teardown_test_dir();
     }
 
     #[test]
     fn update_supports_keyword_rename() {
-        setup_test_dir();
+        let _dir = crate::store::TestConfigDir::new("highlight");
         seed_default_rules().unwrap();
 
         let updated = HighlightRule {
@@ -510,13 +477,11 @@ mod tests {
         let rules = update_rule("ERROR", updated).unwrap();
         assert!(rules.iter().any(|r| r.keyword == "FATAL_ERROR"));
         assert!(!rules.iter().any(|r| r.keyword == "ERROR"));
-
-        teardown_test_dir();
     }
 
     #[test]
     fn update_rejects_conflict_on_rename() {
-        setup_test_dir();
+        let _dir = crate::store::TestConfigDir::new("highlight");
         seed_default_rules().unwrap();
 
         let updated = HighlightRule {
@@ -529,13 +494,11 @@ mod tests {
         };
         let err = update_rule("ERROR", updated).unwrap_err();
         assert!(matches!(err, HighlightError::KeywordConflict));
-
-        teardown_test_dir();
     }
 
     #[test]
     fn reset_restores_defaults() {
-        setup_test_dir();
+        let _dir = crate::store::TestConfigDir::new("highlight");
         seed_default_rules().unwrap();
 
         // Add a custom rule
@@ -554,8 +517,6 @@ mod tests {
         let rules = reset_defaults().unwrap();
         assert_eq!(rules.len(), 5);
         assert!(!rules.iter().any(|r| r.keyword == "CUSTOM"));
-
-        teardown_test_dir();
     }
 
     #[test]
@@ -599,7 +560,7 @@ mod tests {
 
     #[test]
     fn user_deletions_persist_after_seed() {
-        setup_test_dir();
+        let _dir = crate::store::TestConfigDir::new("highlight");
         seed_default_rules().unwrap();
 
         // Delete a rule
@@ -610,7 +571,5 @@ mod tests {
         seed_default_rules().unwrap();
         assert_eq!(list_rules().len(), 4);
         assert!(!list_rules().iter().any(|r| r.keyword == "WARN"));
-
-        teardown_test_dir();
     }
 }

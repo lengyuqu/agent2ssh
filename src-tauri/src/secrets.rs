@@ -1084,9 +1084,7 @@ mod tests {
     #[serial_test::serial]
     fn encrypted_store_init_unlock_roundtrip() {
         // Exercise the real encrypted backend (not the memory test default).
-        let dir = std::env::temp_dir().join(format!("agent2ssh-enc-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        crate::store::set_test_config_dir(&dir);
+        let dir = crate::store::TestConfigDir::new("enc");
         set_test_backend(false);
         lock();
 
@@ -1117,7 +1115,6 @@ mod tests {
 
         lock();
         clear_test_backend();
-        crate::store::clear_test_config_dir();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1126,10 +1123,7 @@ mod tests {
     fn empty_store_rejects_wrong_password() {
         // Regression: an empty store must verify the master password via the
         // key-check entry instead of accepting any password.
-        let dir =
-            std::env::temp_dir().join(format!("agent2ssh-enc-empty-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        crate::store::set_test_config_dir(&dir);
+        let dir = crate::store::TestConfigDir::new("enc-empty");
         set_test_backend(false);
         lock();
 
@@ -1158,16 +1152,13 @@ mod tests {
 
         lock();
         clear_test_backend();
-        crate::store::clear_test_config_dir();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     #[serial_test::serial]
     fn migration_ledger_preserves_existing_records() {
-        let dir = std::env::temp_dir().join(format!("agent2ssh-mig-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        crate::store::set_test_config_dir(&dir);
+        let dir = crate::store::TestConfigDir::new("mig");
         set_test_backend(false);
         lock();
 
@@ -1207,7 +1198,6 @@ mod tests {
 
         lock();
         clear_test_backend();
-        crate::store::clear_test_config_dir();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1216,9 +1206,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn s8_race_winner_adopts_existing_file() {
-        let dir = std::env::temp_dir().join(format!("agent2ssh-s8-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        crate::store::set_test_config_dir(&dir);
+        let dir = crate::store::TestConfigDir::new("s8");
         set_test_backend(false);
         lock();
 
@@ -1238,16 +1226,13 @@ mod tests {
 
         lock();
         clear_test_backend();
-        crate::store::clear_test_config_dir();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     #[serial_test::serial]
     fn s8_race_with_wrong_password_fails() {
-        let dir = std::env::temp_dir().join(format!("agent2ssh-s8w-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        crate::store::set_test_config_dir(&dir);
+        let dir = crate::store::TestConfigDir::new("s8w");
         set_test_backend(false);
         lock();
 
@@ -1265,7 +1250,6 @@ mod tests {
 
         lock();
         clear_test_backend();
-        crate::store::clear_test_config_dir();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1274,9 +1258,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn s9_secret_exists_returns_true_for_stored_secret() {
-        let dir = std::env::temp_dir().join(format!("agent2ssh-s9-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        crate::store::set_test_config_dir(&dir);
+        let dir = crate::store::TestConfigDir::new("s9");
         set_test_backend(false);
         lock();
 
@@ -1295,16 +1277,13 @@ mod tests {
 
         lock();
         clear_test_backend();
-        crate::store::clear_test_config_dir();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     #[serial_test::serial]
     fn s9_secret_exists_returns_false_when_locked() {
-        let dir = std::env::temp_dir().join(format!("agent2ssh-s9l-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        crate::store::set_test_config_dir(&dir);
+        let dir = crate::store::TestConfigDir::new("s9l");
         set_test_backend(false);
         lock();
 
@@ -1320,16 +1299,13 @@ mod tests {
         );
 
         clear_test_backend();
-        crate::store::clear_test_config_dir();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     #[serial_test::serial]
     fn s9_secret_exists_returns_false_when_no_store() {
-        let dir = std::env::temp_dir().join(format!("agent2ssh-s9n-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        crate::store::set_test_config_dir(&dir);
+        let dir = crate::store::TestConfigDir::new("s9n");
         set_test_backend(false);
 
         assert!(
@@ -1338,7 +1314,6 @@ mod tests {
         );
 
         clear_test_backend();
-        crate::store::clear_test_config_dir();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1347,9 +1322,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn a23_skipped_migration_is_not_done() {
-        let dir = std::env::temp_dir().join(format!("agent2ssh-a23s-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        crate::store::set_test_config_dir(&dir);
+        let dir = crate::store::TestConfigDir::new("a23s");
 
         let mut ledger = MigrationLedger::default();
         ledger
@@ -1366,16 +1339,13 @@ mod tests {
             "skipped is resolved"
         );
 
-        crate::store::clear_test_config_dir();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     #[serial_test::serial]
     fn a23_completed_then_skipped_is_idempotent() {
-        let dir = std::env::temp_dir().join(format!("agent2ssh-a23c-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        crate::store::set_test_config_dir(&dir);
+        let dir = crate::store::TestConfigDir::new("a23c");
 
         let mut ledger = MigrationLedger::default();
         // First: mark as completed.
@@ -1405,16 +1375,13 @@ mod tests {
             "still done, not overwritten to skipped"
         );
 
-        crate::store::clear_test_config_dir();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     #[serial_test::serial]
     fn a23_skipped_record_has_reason() {
-        let dir = std::env::temp_dir().join(format!("agent2ssh-a23r-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        crate::store::set_test_config_dir(&dir);
+        let dir = crate::store::TestConfigDir::new("a23r");
 
         let mut ledger = MigrationLedger::default();
         ledger
@@ -1435,16 +1402,13 @@ mod tests {
             Some("precondition not met: keyring unavailable")
         );
 
-        crate::store::clear_test_config_dir();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     #[serial_test::serial]
     fn a23_resolved_skips_version_probe() {
-        let dir = std::env::temp_dir().join(format!("agent2ssh-a23p-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        crate::store::set_test_config_dir(&dir);
+        let dir = crate::store::TestConfigDir::new("a23p");
         set_test_backend(false);
         lock();
 
@@ -1463,31 +1427,25 @@ mod tests {
 
         lock();
         clear_test_backend();
-        crate::store::clear_test_config_dir();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     #[serial_test::serial]
     fn migration_ledger_starts_empty() {
-        let dir = std::env::temp_dir().join(format!("agent2ssh-mig-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        crate::store::set_test_config_dir(&dir);
+        let dir = crate::store::TestConfigDir::new("mig");
 
         let ledger = MigrationLedger::load().unwrap();
         assert!(ledger.completed.is_empty(), "fresh dir has no migrations");
         assert!(!ledger.is_done(MIGRATION_V1_TO_V2));
 
-        crate::store::clear_test_config_dir();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     #[serial_test::serial]
     fn migration_marker_written_after_v1_to_v2() {
-        let dir = std::env::temp_dir().join(format!("agent2ssh-mig-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        crate::store::set_test_config_dir(&dir);
+        let dir = crate::store::TestConfigDir::new("mig");
         set_test_backend(false);
         lock();
 
@@ -1559,16 +1517,13 @@ mod tests {
 
         lock();
         clear_test_backend();
-        crate::store::clear_test_config_dir();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     #[serial_test::serial]
     fn migration_marker_skips_v1_probe_on_reload() {
-        let dir = std::env::temp_dir().join(format!("agent2ssh-mig-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        crate::store::set_test_config_dir(&dir);
+        let dir = crate::store::TestConfigDir::new("mig");
         set_test_backend(false);
         lock();
 
@@ -1591,16 +1546,13 @@ mod tests {
 
         lock();
         clear_test_backend();
-        crate::store::clear_test_config_dir();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     #[serial_test::serial]
     fn migration_marker_is_idempotent() {
-        let dir = std::env::temp_dir().join(format!("agent2ssh-mig-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        crate::store::set_test_config_dir(&dir);
+        let dir = crate::store::TestConfigDir::new("mig");
         set_test_backend(false);
         lock();
 
@@ -1619,16 +1571,13 @@ mod tests {
 
         lock();
         clear_test_backend();
-        crate::store::clear_test_config_dir();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     #[serial_test::serial]
     fn migration_marker_records_file_fingerprint() {
-        let dir = std::env::temp_dir().join(format!("agent2ssh-mig-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        crate::store::set_test_config_dir(&dir);
+        let dir = crate::store::TestConfigDir::new("mig");
         set_test_backend(false);
         lock();
 
@@ -1646,7 +1595,6 @@ mod tests {
 
         lock();
         clear_test_backend();
-        crate::store::clear_test_config_dir();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1655,9 +1603,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn ciphertext_store_loads_and_fingerprints_existing_file() {
-        let dir = std::env::temp_dir().join(format!("agent2ssh-cts-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        crate::store::set_test_config_dir(&dir);
+        let dir = crate::store::TestConfigDir::new("cts");
 
         // No file yet — load succeeds with empty bytes.
         let store = CiphertextStore::load().unwrap();
@@ -1677,16 +1623,13 @@ mod tests {
         let fp2 = store.fingerprint();
         assert_eq!(fp, fp2, "fingerprint must be deterministic");
 
-        crate::store::clear_test_config_dir();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     #[serial_test::serial]
     fn ciphertext_store_fingerprint_changes_when_file_changes() {
-        let dir = std::env::temp_dir().join(format!("agent2ssh-cts2-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        crate::store::set_test_config_dir(&dir);
+        let dir = crate::store::TestConfigDir::new("cts2");
 
         std::fs::write(dir.join(SECRETS_FILE), b"content-a").unwrap();
         let fp_a = CiphertextStore::load().unwrap().fingerprint();
@@ -1696,7 +1639,6 @@ mod tests {
 
         assert_ne!(fp_a, fp_b, "fingerprint must change when content changes");
 
-        crate::store::clear_test_config_dir();
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

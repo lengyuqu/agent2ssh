@@ -195,30 +195,16 @@ pub fn merge_snippets(local: &[Snippet], incoming: &[Snippet]) -> Vec<Snippet> {
 mod tests {
     use super::*;
 
-    fn unique_dir(label: &str) -> std::path::PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("agent2ssh-snip-{}-{}", label, uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        crate::store::set_test_config_dir(&dir);
-        dir
-    }
-
-    fn cleanup(dir: &std::path::Path) {
-        crate::store::clear_test_config_dir();
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
     #[test]
     fn load_empty_when_no_file() {
-        let dir = unique_dir("empty");
+        let _dir = crate::store::TestConfigDir::new("snip-empty");
         let snippets = load_snippets().unwrap();
         assert!(snippets.is_empty());
-        cleanup(&dir);
     }
 
     #[test]
     fn save_and_load_roundtrip() {
-        let dir = unique_dir("roundtrip");
+        let _dir = crate::store::TestConfigDir::new("snip-roundtrip");
         let snippets = vec![
             Snippet {
                 name: "check-logs".into(),
@@ -240,26 +226,22 @@ mod tests {
         assert_eq!(loaded[0].description.as_deref(), Some("Follow syslog"));
         assert_eq!(loaded[1].name, "disk-usage");
         assert!(loaded[1].description.is_none());
-
-        cleanup(&dir);
     }
 
     #[test]
     fn add_new_snippet() {
-        let dir = unique_dir("add");
+        let _dir = crate::store::TestConfigDir::new("snip-add");
         add_snippet("hello", "echo hello", None).unwrap();
         add_snippet("world", "echo world", Some("Print world")).unwrap();
 
         let snippets = load_snippets().unwrap();
         assert_eq!(snippets.len(), 2);
         assert_eq!(snippets[1].description.as_deref(), Some("Print world"));
-
-        cleanup(&dir);
     }
 
     #[test]
     fn add_updates_existing_by_name() {
-        let dir = unique_dir("update");
+        let _dir = crate::store::TestConfigDir::new("snip-update");
         add_snippet("greet", "echo hi", None).unwrap();
         add_snippet("greet", "echo hello", Some("Updated")).unwrap();
 
@@ -267,13 +249,11 @@ mod tests {
         assert_eq!(snippets.len(), 1);
         assert_eq!(snippets[0].command, "echo hello");
         assert_eq!(snippets[0].description.as_deref(), Some("Updated"));
-
-        cleanup(&dir);
     }
 
     #[test]
     fn remove_by_name() {
-        let dir = unique_dir("remove");
+        let _dir = crate::store::TestConfigDir::new("snip-remove");
         add_snippet("keep", "echo keep", None).unwrap();
         add_snippet("delete", "echo delete", None).unwrap();
 
@@ -287,13 +267,11 @@ mod tests {
         // Removing non-existent returns false.
         let removed_again = remove_snippet("delete").unwrap();
         assert!(!removed_again);
-
-        cleanup(&dir);
     }
 
     #[test]
     fn load_fails_on_corrupt_json() {
-        let dir = unique_dir("corrupt");
+        let dir = crate::store::TestConfigDir::new("snip-corrupt");
         let path = dir.join(SNIPPETS_FILE);
         std::fs::write(&path, "{{corrupt").unwrap();
 
@@ -302,8 +280,6 @@ mod tests {
             result.is_err(),
             "corrupt JSON must fail, not silently clear"
         );
-
-        cleanup(&dir);
     }
 
     #[test]

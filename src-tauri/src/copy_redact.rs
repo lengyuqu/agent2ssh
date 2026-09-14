@@ -150,84 +150,62 @@ pub fn reset_copy_redact_rules() -> Result<()> {
 mod tests {
     use super::*;
 
-    fn unique_dir(label: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "agent2ssh-copyredact-{}-{}",
-            label,
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        crate::store::set_test_config_dir(&dir);
-        dir
-    }
-
-    fn cleanup(dir: &std::path::Path) {
-        crate::store::clear_test_config_dir();
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
     #[test]
     fn redacts_api_key() {
-        let dir = unique_dir("apikey");
+        let _dir = crate::store::TestConfigDir::new("copyredact-apikey");
         let result = redact_for_clipboard("key: sk-abc123def456ghi789jkl012mno345pqr");
         assert!(result.contains("[REDACTED:api-key]"));
         assert!(!result.contains("sk-abc123"));
-        cleanup(&dir);
     }
 
     #[test]
     fn redacts_password_assignment() {
-        let dir = unique_dir("password");
+        let _dir = crate::store::TestConfigDir::new("copyredact-password");
         let result = redact_for_clipboard("password=hunter2");
         assert!(result.contains("[REDACTED:password]"));
         assert!(!result.contains("hunter2"));
-        cleanup(&dir);
     }
 
     #[test]
     fn redacts_bearer_token() {
-        let dir = unique_dir("bearer");
+        let _dir = crate::store::TestConfigDir::new("copyredact-bearer");
         let result = redact_for_clipboard(
             "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc123def456",
         );
         assert!(result.contains("[REDACTED:bearer]"));
-        cleanup(&dir);
     }
 
     #[test]
     fn does_not_redact_ips_by_default() {
-        let dir = unique_dir("ip");
+        let _dir = crate::store::TestConfigDir::new("copyredact-ip");
         let result = redact_for_clipboard("connect to 10.0.0.5");
         // IPs are NOT redacted in copy mode (unlike log mode).
         assert!(
             result.contains("10.0.0.5"),
             "IPs should be visible in clipboard content"
         );
-        cleanup(&dir);
     }
 
     #[test]
     fn idempotent_does_not_double_redact() {
-        let dir = unique_dir("idempotent");
+        let _dir = crate::store::TestConfigDir::new("copyredact-idempotent");
         let input = "key: sk-abc123def456ghi789jkl012mno345pqr";
         let once = redact_for_clipboard(input);
         let twice = redact_for_clipboard(&once);
         assert_eq!(once, twice, "double redaction must be idempotent");
-        cleanup(&dir);
     }
 
     #[test]
     fn preserves_normal_text() {
-        let dir = unique_dir("normal");
+        let _dir = crate::store::TestConfigDir::new("copyredact-normal");
         let input = "ls -la /tmp && echo hello";
         let result = redact_for_clipboard(input);
         assert_eq!(result, input);
-        cleanup(&dir);
     }
 
     #[test]
     fn saves_and_loads_custom_rules() {
-        let dir = unique_dir("custom");
+        let _dir = crate::store::TestConfigDir::new("copyredact-custom");
 
         // First load seeds defaults.
         let defaults = load_copy_redact_rules().unwrap();
@@ -248,13 +226,11 @@ mod tests {
         // Redaction must use the custom rule.
         let result = redact_for_clipboard("found my-secret-42 here");
         assert!(result.contains("[REDACTED:custom]"));
-
-        cleanup(&dir);
     }
 
     #[test]
     fn reset_restores_defaults() {
-        let dir = unique_dir("reset");
+        let _dir = crate::store::TestConfigDir::new("copyredact-reset");
 
         // Save custom rules (empty).
         save_copy_redact_rules(&[]).unwrap();
@@ -265,8 +241,6 @@ mod tests {
         reset_copy_redact_rules().unwrap();
         let loaded = load_copy_redact_rules().unwrap();
         assert!(!loaded.is_empty(), "reset must restore defaults");
-
-        cleanup(&dir);
     }
 
     #[test]
@@ -274,7 +248,7 @@ mod tests {
         // The copy redaction rules must be independent from the log/AI
         // redaction rules in redaction.rs. They use different files and
         // different default rule sets.
-        let dir = unique_dir("independent");
+        let _dir = crate::store::TestConfigDir::new("copyredact-independent");
 
         // Save custom copy rules.
         let custom = vec![CopyRedactRule {
@@ -289,13 +263,11 @@ mod tests {
             !log_rules.iter().any(|r| r.replacement.contains("copy")),
             "log redaction must not contain copy-specific rules"
         );
-
-        cleanup(&dir);
     }
 
     #[test]
     fn no_expand_prevents_capture_group_reinsertion() {
-        let dir = unique_dir("noexpand");
+        let _dir = crate::store::TestConfigDir::new("copyredact-noexpand");
 
         // Write a rule with $1 in replacement — NoExpand should prevent
         // the captured secret from being re-inserted.
@@ -310,13 +282,11 @@ mod tests {
             result, "key=$1",
             "NoExpand must prevent capture group expansion"
         );
-
-        cleanup(&dir);
     }
 
     #[test]
     fn redacts_multiple_patterns() {
-        let dir = unique_dir("multi");
+        let _dir = crate::store::TestConfigDir::new("copyredact-multi");
         let input = "password=hunter2 key=sk-abc123def456ghi789jkl012mno345 Bearer eyJabc.eyJdef.ghi1234567890";
         let result = redact_for_clipboard(input);
         assert!(result.contains("[REDACTED:password]"));
@@ -324,14 +294,12 @@ mod tests {
         assert!(result.contains("[REDACTED:bearer]"));
         assert!(!result.contains("hunter2"));
         assert!(!result.contains("sk-abc123"));
-        cleanup(&dir);
     }
 
     #[test]
     fn empty_string_is_unchanged() {
-        let dir = unique_dir("empty");
+        let _dir = crate::store::TestConfigDir::new("copyredact-empty");
         assert_eq!(redact_for_clipboard(""), "");
-        cleanup(&dir);
     }
 
     #[test]

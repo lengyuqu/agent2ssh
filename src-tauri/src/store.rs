@@ -113,6 +113,61 @@ pub fn clear_test_config_dir() {
     THREAD_CONFIG_DIR.with(|d| *d.borrow_mut() = None);
 }
 
+/// A scratch config directory for one test, removed when it goes out of scope.
+///
+/// Constructing one creates a private directory, points the thread-local
+/// override at it, and deletes it on drop — including when the test panics.
+/// That replaces the hand-written "make a temp dir, call `set_test_config_dir`,
+/// remember to call `cleanup` at the end" pattern, where every `assert!` that
+/// fired early also skipped the cleanup.
+///
+/// The name carries a fresh UUID, so two tests in the same process never share
+/// a directory. Naming it after the process id, as one test did, does not.
+///
+/// It derefs to [`Path`], so callers keep writing `dir.join("hosts.json")`.
+#[cfg(test)]
+pub struct TestConfigDir {
+    path: PathBuf,
+}
+
+#[cfg(test)]
+impl TestConfigDir {
+    pub fn new(label: &str) -> Self {
+        let path = std::env::temp_dir().join(format!("agent2ssh-{label}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).expect("failed to create test config dir");
+        set_test_config_dir(&path);
+        Self { path }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+#[cfg(test)]
+impl std::ops::Deref for TestConfigDir {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.path
+    }
+}
+
+#[cfg(test)]
+impl AsRef<Path> for TestConfigDir {
+    fn as_ref(&self) -> &Path {
+        &self.path
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestConfigDir {
+    fn drop(&mut self) {
+        clear_test_config_dir();
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
 fn config_dir_override(path: Option<String>) -> Option<PathBuf> {
     path.filter(|value| !value.trim().is_empty())
         .map(PathBuf::from)

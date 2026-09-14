@@ -1047,34 +1047,25 @@ mod tests {
         // resolve_host_with_jump should reject an unknown jump host profile.
         // We can't easily set up a full config here, but we can verify the
         // error path when the host or jump host doesn't exist.
-        crate::store::set_test_config_dir(
-            std::env::temp_dir().join(format!("agent2ssh_b68_test_{}", std::process::id())),
-        );
+        let _dir = crate::store::TestConfigDir::new("b68-test");
         let result = resolve_host_with_jump("nonexistent", Some("also_nonexistent"));
         assert!(result.is_err());
-        crate::store::clear_test_config_dir();
     }
 
     #[test]
     fn resolve_host_with_jump_none_preserves_existing() {
         // When via is None, the function should just resolve normally.
-        crate::store::set_test_config_dir(
-            std::env::temp_dir().join(format!("agent2ssh_b68_none_{}", std::process::id())),
-        );
+        let _dir = crate::store::TestConfigDir::new("b68-none");
         let result = resolve_host_with_jump("nonexistent", None);
         assert!(result.is_err());
-        crate::store::clear_test_config_dir();
     }
 
     #[test]
     fn resolve_host_with_jump_empty_string_treated_as_none() {
         // An empty string or whitespace-only via should be treated as None.
-        crate::store::set_test_config_dir(
-            std::env::temp_dir().join(format!("agent2ssh_b68_empty_{}", std::process::id())),
-        );
+        let _dir = crate::store::TestConfigDir::new("b68-empty");
         let result = resolve_host_with_jump("nonexistent", Some("   "));
         // Should behave as if via was None — host not found.
         assert!(result.is_err());
-        crate::store::clear_test_config_dir();
     }
 }
