@@ -182,6 +182,33 @@ pub struct ProxyProfile {
     pub password: Option<String>,
 }
 
+impl ProxyProfile {
+    /// Trim the free-text fields in place.
+    ///
+    /// Two callers need exactly this and used to carry byte-identical copies:
+    /// `core::normalize_proxy`, which validates a single proxy the user
+    /// submitted and reports the first missing field, and
+    /// `store::normalize_config`, which repairs a loaded `hosts.json` and drops
+    /// entries that fail the same required-field checks. Only the cleaning is
+    /// shared — erroring versus dropping stays a per-surface policy.
+    pub fn trim_fields(&mut self) {
+        self.id = self.id.trim().to_string();
+        self.name = self.name.trim().to_string();
+        self.host = self.host.trim().to_string();
+        self.username = self
+            .username
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
+        self.password = self
+            .password
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HostFilter {
     pub env: Option<String>,
@@ -189,7 +216,6 @@ pub struct HostFilter {
     pub owner: Option<String>,
     pub tag: Option<String>,
 }
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecRequest {
     pub host: String,

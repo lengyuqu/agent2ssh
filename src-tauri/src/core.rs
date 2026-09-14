@@ -395,20 +395,7 @@ fn normalize_group_color(color: &str) -> String {
 }
 
 fn normalize_proxy(mut proxy: ProxyProfile) -> Result<ProxyProfile> {
-    proxy.id = proxy.id.trim().to_string();
-    proxy.name = proxy.name.trim().to_string();
-    proxy.host = proxy.host.trim().to_string();
-    proxy.username = proxy
-        .username
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned);
-    proxy.password = proxy
-        .password
-        .as_deref()
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned);
+    proxy.trim_fields();
     if proxy.id.is_empty() {
         return Err(anyhow!("proxy id is required"));
     }

@@ -571,20 +571,7 @@ fn normalize_config(mut config: AppConfig) -> AppConfig {
     let valid_groups: std::collections::HashSet<String> =
         config.groups.iter().map(|group| group.id.clone()).collect();
     for proxy in &mut config.proxies {
-        proxy.id = proxy.id.trim().to_string();
-        proxy.name = proxy.name.trim().to_string();
-        proxy.host = proxy.host.trim().to_string();
-        proxy.username = proxy
-            .username
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned);
-        proxy.password = proxy
-            .password
-            .as_deref()
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned);
+        proxy.trim_fields();
     }
     config.proxies.retain(|proxy| {
         !proxy.id.is_empty() && !proxy.name.is_empty() && !proxy.host.is_empty() && proxy.port > 0
