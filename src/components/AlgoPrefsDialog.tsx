@@ -6,6 +6,7 @@ import type { AlgoPrefsState, SshAlgoPrefs } from "../types";
 import { Button } from "./ui/button";
 import { Dialog } from "./ui/dialog";
 import { cn } from "../lib/utils";
+import { InlineAlert } from "./ui/state";
 
 // A22: the eight `SshAlgoPrefs` fields, in the order they are negotiated. Each
 // is a comma-delimited, most-preferred-first list handed to libssh2.
@@ -190,9 +191,9 @@ export default function AlgoPrefsDialog({ onClose }: Props) {
 
         {message && <div className="text-xs text-success">{message}</div>}
         {error && (
-          <div className="break-words rounded-md border border-destructive/40 bg-destructive/10 px-2.5 py-2 text-xs text-destructive">
+          <InlineAlert tone="destructive" bordered>
             {error}
-          </div>
+          </InlineAlert>
         )}
       </div>
 

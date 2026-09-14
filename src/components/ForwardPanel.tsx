@@ -1,4 +1,4 @@
-import { ArrowLeftRight, Loader2, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { ArrowLeftRight, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
@@ -10,7 +10,7 @@ import HostSelector from "./HostSelector";
 import { IconButton } from "./ui/icon-button";
 import { Input } from "./ui/input";
 import { Select } from "./ui/select";
-import { EmptyState } from "./ui/state";
+import { EmptyState, Spinner } from "./ui/state";
 import { useToast } from "./ui/toast";
 import { formatBytes } from "../lib/format";
 import { labelCls } from "../lib/ui-classes";
@@ -163,7 +163,7 @@ export default function ForwardPanel({ hosts, initialHost = "", onChanged }: Pro
             </label>
           </div>
           <Button onClick={addForward} disabled={busy || !canAdd} className="w-full">
-            {busy ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />}
+            {busy ? <Spinner size={14} /> : <Plus size={14} />}
             {busy ? t("Adding...") : t("Add tunnel")}
           </Button>
         </div>
@@ -231,7 +231,7 @@ export default function ForwardPanel({ hosts, initialHost = "", onChanged }: Pro
                   title={t("Remove tunnel")}
                   disabled={removing}
                 >
-                  {removing ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+                  {removing ? <Spinner size={14} /> : <Trash2 size={14} />}
                 </IconButton>
               </div>
             );

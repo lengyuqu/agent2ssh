@@ -4,7 +4,6 @@ import {
   Edit3,
   FileCode,
   GripVertical,
-  Loader2,
   Play,
   Plus,
   RefreshCw,
@@ -25,7 +24,7 @@ import { IconButton } from "./ui/icon-button";
 import { Input } from "./ui/input";
 import { Select } from "./ui/select";
 import { Textarea } from "./ui/textarea";
-import { EmptyState } from "./ui/state";
+import { EmptyState, Spinner } from "./ui/state";
 import { useToast } from "./ui/toast";
 import { confirmDialog } from "./ui/dialog";
 import { cn } from "../lib/utils";
@@ -497,7 +496,7 @@ export default function PlaybooksPanel({ hosts }: Props) {
           </div>
           <div className="flex items-center gap-2">
             <Button onClick={handleSave} disabled={saving}>
-              {saving ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
+              {saving ? <Spinner size={14} /> : <Save size={14} />}
               {t("Save")}
             </Button>
             <Button variant="secondary" onClick={cancelEdit} disabled={saving}>
@@ -596,7 +595,7 @@ export default function PlaybooksPanel({ hosts }: Props) {
               {t("Force")}
             </label>
             <Button disabled={running || !selectedHost} onClick={handleRun}>
-              {running ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
+              {running ? <Spinner size={14} /> : <Play size={14} />}
               {running ? t("Running...") : t("Execute")}
             </Button>
             <Button variant="secondary" onClick={hideRunForm}>

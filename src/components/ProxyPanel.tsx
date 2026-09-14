@@ -11,7 +11,7 @@ import { Dialog } from "./ui/dialog";
 import { IconButton } from "./ui/icon-button";
 import { Input } from "./ui/input";
 import { Select } from "./ui/select";
-import { EmptyState } from "./ui/state";
+import { EmptyState, InlineAlert } from "./ui/state";
 import { useToast } from "./ui/toast";
 
 const emptyForm = {
@@ -259,9 +259,9 @@ export default function ProxyPanel({ proxies, hosts, onChanged }: Props) {
       {confirmDelete && (
         <Dialog onClose={() => setConfirmDelete(null)} className="max-w-sm">
           <p className="mb-2">{t("Delete proxy {name}?", { name: confirmDelete.name })}</p>
-          <p className="rounded-md bg-warning/10 px-2.5 py-2 text-sm text-warning">
+          <InlineAlert>
             {t("Hosts using this proxy will switch back to direct connections.")}
-          </p>
+          </InlineAlert>
           <div className="mt-4 flex justify-end gap-2.5">
             <Button variant="secondary" onClick={() => setConfirmDelete(null)}>
               {t("Cancel")}

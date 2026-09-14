@@ -5,6 +5,7 @@ import type { HostProfile, SshKeyInfo } from "../types";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { cn } from "../lib/utils";
+import { InlineAlert } from "./ui/state";
 
 interface SetupWizardProps {
   onComplete: () => void;
@@ -25,9 +26,6 @@ const codeCls = "rounded bg-muted px-1.5 py-0.5 font-mono text-sm text-primary";
 const hintCls = "text-sm text-muted-foreground";
 const stepTextCls = "m-0 leading-relaxed text-foreground/80";
 const previewCls = "rounded-lg border border-border bg-muted/40 p-3.5";
-const errorCls =
-  "rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive";
-
 export default function SetupWizard({ onComplete, onSkip }: SetupWizardProps) {
   const { t } = useI18n();
   const [step, setStep] = useState(0);
@@ -181,7 +179,7 @@ export default function SetupWizard({ onComplete, onSkip }: SetupWizardProps) {
               <Button onClick={handleImport} disabled={importing} className="self-start">
                 {importing ? t("Importing...") : t("Import from ~/.ssh/config")}
               </Button>
-              {importError && <div className={errorCls}>{importError}</div>}
+              {importError && <InlineAlert tone="destructive" bordered>{importError}</InlineAlert>}
               {importedHosts.length > 0 && (
                 <div className={previewCls}>
                   <p className="m-0 mb-2 text-sm font-semibold">
@@ -241,7 +239,7 @@ export default function SetupWizard({ onComplete, onSkip }: SetupWizardProps) {
                   {generatingKey ? t("Generating...") : t("Generate Key")}
                 </Button>
               </div>
-              {keyError && <div className={errorCls}>{keyError}</div>}
+              {keyError && <InlineAlert tone="destructive" bordered>{keyError}</InlineAlert>}
             </div>
           )}
 
@@ -268,7 +266,7 @@ export default function SetupWizard({ onComplete, onSkip }: SetupWizardProps) {
                     ? t("Check Daemon Status")
                     : t("Start Daemon")}
               </Button>
-              {daemonError && <div className={errorCls}>{daemonError}</div>}
+              {daemonError && <InlineAlert tone="destructive" bordered>{daemonError}</InlineAlert>}
               <p className={hintCls}>
                 {t("You can also manage the daemon from Settings or a terminal:")}{" "}
                 <code className={codeCls}>agent2ssh daemon start</code>

@@ -9,7 +9,6 @@ import {
   FolderOpen,
   FolderPlus,
   HardDrive,
-  Loader2,
   RefreshCw,
   Server,
   Square,
@@ -27,7 +26,7 @@ import { Card } from "./ui/card";
 import { ContextMenu, type ContextMenuItem } from "./ui/context-menu";
 import { Dialog, confirmDialog } from "./ui/dialog";
 import { Input } from "./ui/input";
-import { EmptyState, ErrorState, LoadingState } from "./ui/state";
+import { EmptyState, ErrorState, LoadingState, Spinner } from "./ui/state";
 import { useToast } from "./ui/toast";
 
 // V3-1: Monaco is a large dependency (see src/lib/monacoSetup.ts) — deferred
@@ -1156,7 +1155,7 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
       {transfer && (
         <div className="rounded-lg border border-primary/30 bg-primary/10 px-3 py-2.5 text-sm text-primary">
           <div className="flex items-center gap-2">
-            <Loader2 size={14} className="animate-spin" />
+            <Spinner size={14} />
             {t("Transferring {done}/{total}", { done: transfer.done, total: transfer.total })}
             {transfer.bytesTotal > 0 && (
               <span className="text-primary/80">

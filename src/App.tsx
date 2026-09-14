@@ -12,7 +12,6 @@ import {
   Key,
   KeyRound,
   LayoutDashboard,
-  Loader2,
   Network,
   PanelLeftClose,
   PanelLeftOpen,
@@ -63,6 +62,7 @@ import TopBar from "./components/TopBar";
 import { Button } from "./components/ui/button";
 import { ConfirmHost, Dialog } from "./components/ui/dialog";
 import { IconButton } from "./components/ui/icon-button";
+import { Spinner } from "./components/ui/state";
 import { useToast } from "./components/ui/toast";
 import { useAgentEvents } from "./eventsBus";
 import { useI18n } from "./i18n";
@@ -831,7 +831,7 @@ export default function App() {
   if (loading) {
     return (
       <main className="flex min-h-screen flex-col items-center justify-center gap-4 bg-background text-muted-foreground">
-        <Loader2 size={32} className="animate-spin" />
+        <Spinner size={32} />
         <span>{t("Loading Agent2SSH...")}</span>
       </main>
     );
@@ -977,7 +977,7 @@ export default function App() {
 
           <div className="mt-5 rounded-lg border border-border bg-muted/50 px-3 py-3">
             <div className="flex items-center gap-2 text-sm font-medium">
-              {connectionProgress.busy && <Loader2 size={15} className="animate-spin" />}
+              {connectionProgress.busy && <Spinner size={15} />}
               <span className="truncate">{connectionProgress.host}</span>
               <span className="ml-auto tabular-nums text-muted-foreground">
                 {Math.round(connectionProgress.percent)}%

@@ -10,7 +10,7 @@ import { Card } from "./ui/card";
 import { Dialog } from "./ui/dialog";
 import { IconButton } from "./ui/icon-button";
 import { Input } from "./ui/input";
-import { EmptyState } from "./ui/state";
+import { EmptyState, InlineAlert } from "./ui/state";
 import { useToast } from "./ui/toast";
 
 /** V4-3: built-in policy/limits templates + snapshot save/restore of the config dir. */
@@ -210,9 +210,9 @@ export default function ConfigSnapshotsPanel() {
           <p className="mb-2">
             {t("Apply the {name} template?", { name: t(confirmTemplate.name) })}
           </p>
-          <p className="rounded-md bg-warning/10 px-2.5 py-2 text-sm text-warning">
+          <InlineAlert>
             {t("This overwrites policy.toml and execution_limits.toml. A snapshot is saved first.")}
-          </p>
+          </InlineAlert>
           <div className="mt-4 flex justify-end gap-2.5">
             <Button variant="secondary" onClick={() => setConfirmTemplate(null)}>
               {t("Cancel")}
@@ -231,9 +231,9 @@ export default function ConfigSnapshotsPanel() {
               label: confirmRestore.label ?? confirmRestore.id,
             })}
           </p>
-          <p className="rounded-md bg-warning/10 px-2.5 py-2 text-sm text-warning">
+          <InlineAlert>
             {t("This overwrites your current config with the snapshot's files. A backup of the current state is saved first.")}
-          </p>
+          </InlineAlert>
           <div className="mt-4 flex justify-end gap-2.5">
             <Button variant="secondary" onClick={() => setConfirmRestore(null)}>
               {t("Cancel")}

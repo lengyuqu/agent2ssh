@@ -30,7 +30,7 @@ import { ColumnVisibilityMenu, DataTable, selectColumn } from "./ui/data-table";
 import { Dialog } from "./ui/dialog";
 import { IconButton } from "./ui/icon-button";
 import { Input } from "./ui/input";
-import { EmptyState } from "./ui/state";
+import { EmptyState, InlineAlert } from "./ui/state";
 import { cn } from "../lib/utils";
 
 type Props = {
@@ -529,9 +529,9 @@ export default function HostList({
       {confirmTarget && (
         <Dialog onClose={() => setConfirmTarget(null)} className="max-w-sm">
           <p className="mb-2">{t("Remove host {name}?", { name: confirmTarget })}</p>
-          <p className="rounded-md bg-warning/10 px-2.5 py-2 text-sm text-warning">
+          <InlineAlert>
             {t("Any open sessions or forwards to this host will become orphaned.")}
-          </p>
+          </InlineAlert>
           <div className="mt-4 flex justify-end gap-2.5">
             <Button variant="secondary" onClick={() => setConfirmTarget(null)}>
               {t("Cancel")}
@@ -554,9 +554,9 @@ export default function HostList({
           <p className="mb-2">
             {t("Remove {count} selected hosts?", { count: selectedNames.length })}
           </p>
-          <p className="rounded-md bg-warning/10 px-2.5 py-2 text-sm text-warning">
+          <InlineAlert>
             {t("Any open sessions or forwards to these hosts will become orphaned.")}
-          </p>
+          </InlineAlert>
           <div className="mt-4 flex justify-end gap-2.5">
             <Button variant="secondary" onClick={() => setConfirmBatch(false)}>
               {t("Cancel")}
@@ -583,9 +583,9 @@ export default function HostList({
                 groups.find((group) => group.id === confirmGroupTarget)?.name ?? confirmGroupTarget,
             })}
           </p>
-          <p className="rounded-md bg-warning/10 px-2.5 py-2 text-sm text-warning">
+          <InlineAlert>
             {t("Hosts in this group will move to Default.")}
-          </p>
+          </InlineAlert>
           <div className="mt-4 flex justify-end gap-2.5">
             <Button variant="secondary" onClick={() => setConfirmGroupTarget(null)}>
               {t("Cancel")}

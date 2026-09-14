@@ -6,7 +6,7 @@ import { useI18n } from "../i18n";
 import type { AgentEvent, AuditEntry } from "../types";
 import { Card } from "./ui/card";
 import { Select } from "./ui/select";
-import { EmptyState } from "./ui/state";
+import { EmptyState, InlineAlert } from "./ui/state";
 import { cn } from "../lib/utils";
 import { formatClockTime } from "../lib/format";
 
@@ -233,14 +233,12 @@ export default function LiveActivityPanel() {
         </span>
       </div>
 
-      <div className="flex items-start gap-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning">
-        <ShieldAlert size={14} className="mt-0.5 shrink-0" />
+      <InlineAlert bordered icon={ShieldAlert}>
         {t("Local daemon events stream live. Recent audit records catch CLI/MCP execs that wrote to the same config directory.")}
-      </div>
+      </InlineAlert>
 
       {attentionItem && (
-        <div className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2.5 text-destructive">
-          <ShieldAlert size={15} className="mt-0.5 shrink-0" />
+        <InlineAlert tone="destructive" bordered icon={ShieldAlert}>
           <div className="grid gap-0.5">
             <strong className="break-words">{attentionItem.source}</strong>
             <span className="break-words text-sm">
@@ -250,7 +248,7 @@ export default function LiveActivityPanel() {
               {attentionItem.anomalyReason ? `: ${attentionItem.anomalyReason}` : ""}
             </span>
           </div>
-        </div>
+        </InlineAlert>
       )}
 
       <div className="grid grid-cols-[minmax(0,1fr)_minmax(120px,0.35fr)_minmax(120px,0.35fr)] gap-2 max-sm:grid-cols-1">

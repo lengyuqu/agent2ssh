@@ -2,7 +2,6 @@ import {
   AlertTriangle,
   CheckCircle2,
   Cloud,
-  Loader2,
   RefreshCw,
   Save,
   UploadCloud,
@@ -16,6 +15,7 @@ import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
 import { Input } from "./ui/input";
+import { InlineAlert, Spinner } from "./ui/state";
 import { useToast } from "./ui/toast";
 import { formatBytes, formatDateTime } from "../lib/format";
 
@@ -288,27 +288,24 @@ export default function SyncPanel() {
             </label>
           </div>
 
-          <div className="rounded-lg border border-warning/30 bg-warning/10 p-3 text-sm text-warning">
-            <div className="flex items-start gap-2">
-              <AlertTriangle size={16} className="mt-0.5 shrink-0" />
-              <div className="grid gap-1 leading-snug">
-                <p>
-                  {t(
-                    "Sync uploads a local configuration snapshot. Host records may include credentials if they are saved locally."
-                  )}
-                </p>
-                <p>
-                  {t(
-                    "When enabled, sync runs every 10 minutes and after hosts, proxies, tunnels, or keys change."
-                  )}
-                </p>
-              </div>
+          <InlineAlert bordered icon={AlertTriangle} className="rounded-lg p-3">
+            <div className="grid gap-1 leading-snug">
+              <p>
+                {t(
+                  "Sync uploads a local configuration snapshot. Host records may include credentials if they are saved locally."
+                )}
+              </p>
+              <p>
+                {t(
+                  "When enabled, sync runs every 10 minutes and after hosts, proxies, tunnels, or keys change."
+                )}
+              </p>
             </div>
-          </div>
+          </InlineAlert>
 
           <div className="flex flex-wrap justify-end gap-2">
             <Button type="submit" disabled={isBusy}>
-              {busy === "save" ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
+              {busy === "save" ? <Spinner size={14} /> : <Save size={14} />}
               {busy === "save" ? t("Saving...") : t("Save")}
             </Button>
             <Button
@@ -317,7 +314,7 @@ export default function SyncPanel() {
               disabled={isBusy || !canTest}
             >
               {busy === "test" ? (
-                <Loader2 size={14} className="animate-spin" />
+                <Spinner size={14} />
               ) : (
                 <RefreshCw size={14} />
               )}
@@ -325,7 +322,7 @@ export default function SyncPanel() {
             </Button>
             <Button onClick={pushNow} disabled={isBusy || !canUpload}>
               {busy === "push" ? (
-                <Loader2 size={14} className="animate-spin" />
+                <Spinner size={14} />
               ) : (
                 <UploadCloud size={14} />
               )}
@@ -346,7 +343,7 @@ export default function SyncPanel() {
             disabled={isBusy}
           >
             {busy === "refresh" ? (
-              <Loader2 size={14} className="animate-spin" />
+              <Spinner size={14} />
             ) : (
               <RefreshCw size={14} />
             )}

@@ -1,7 +1,6 @@
 import {
   BookMarked,
   Edit3,
-  Loader2,
   Plus,
   RefreshCw,
   Save,
@@ -16,6 +15,7 @@ import { useI18n } from "../i18n";
 import type { Snippet } from "../types";
 import { Button } from "./ui/button";
 import { Dialog, confirmDialog } from "./ui/dialog";
+import { Spinner } from "./ui/state";
 import { IconButton } from "./ui/icon-button";
 import { Input } from "./ui/input";
 import { Textarea } from "./ui/textarea";
@@ -235,7 +235,7 @@ export default function SnippetsDialog({ open, canInsert, onClose, onInsert }: P
               </label>
               <div className="flex gap-2">
                 <Button size="sm" onClick={handleSave} disabled={saving}>
-                  {saving ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
+                  {saving ? <Spinner size={14} /> : <Save size={14} />}
                   {t("Save")}
                 </Button>
                 <Button size="sm" variant="secondary" onClick={cancelEdit} disabled={saving}>
