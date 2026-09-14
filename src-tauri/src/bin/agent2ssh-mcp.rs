@@ -6,12 +6,22 @@ use agent2ssh::approval::{
 };
 use agent2ssh::events::subscribe_events;
 use agent2ssh::execution_control::command_authorization_target;
+use agent2ssh::highlight::{
+    delete_rule as delete_highlight_rule, insert_rule as insert_highlight_rule,
+    list_rules as list_highlight_rules, regex_escape, reset_defaults as reset_highlight_rules,
+    update_rule as update_highlight_rule,
+};
 use agent2ssh::notify::{load_webhook_config, save_webhook_config};
+use agent2ssh::redaction::{
+    delete_rule as delete_redact_rule, insert_rule as insert_redact_rule,
+    list_rules as list_redact_rules, reset_default_rules, update_rule as update_redact_rule,
+};
 use agent2ssh::remote::{
     check_daemon_scope, check_daemon_version, diagnose_daemon, get_daemon, get_daemon_with_scope,
     get_daemons_unified_view, list_daemons_core, tags_for_remote_scope_check,
 };
 use agent2ssh::risk_config::classify_with_user_rules;
+use agent2ssh::ssh_algo::{reset_algo_prefs, save_algo_prefs, AlgoPrefsState, SshAlgoPrefs};
 use agent2ssh::store::{audit_path, compute_metrics_trend, TrendPeriod};
 use agent2ssh::{
     add_host_core, add_snippet, append_diagnostic_log, collect_health_snapshot,
@@ -79,6 +89,48 @@ impl From<anyhow::Error> for McpError {
 impl From<serde_json::Error> for McpError {
     fn from(err: serde_json::Error) -> Self {
         Self::internal(err)
+    }
+}
+
+/// Reject a removal the caller did not confirm.
+///
+/// `required` only proves a key is present, so `"force": false` satisfies the
+/// schema and would otherwise reach the writer as if it had been confirmed. The
+/// check is repeated here rather than left to the daemon because the daemon is
+/// only one of several writers.
+fn require_force(args: &Value, consequence: &str) -> Result<(), McpError> {
+    if args["force"].as_bool() == Some(true) {
+        return Ok(());
+    }
+    Err(McpError::internal(format!(
+        "force must be true to remove this rule: {consequence}"
+    )))
+}
+
+/// The keyword to store, escaped when the caller asked for a literal one.
+///
+/// `is_regex: false` cannot express this: `normalize_rule` treats that field as
+/// a migration input, escapes the keyword itself and writes `true` back, so a
+/// literal rule has to be escaped at the call site instead of flagged.
+fn maybe_escaped(value: &str, args: &Value) -> String {
+    if args["literal"].as_bool() == Some(true) {
+        regex_escape(value)
+    } else {
+        value.to_string()
+    }
+}
+
+/// Point one algorithm list at the given value, reporting whether it was given.
+///
+/// Returning whether anything changed is what lets a call that named no list at
+/// all be refused, instead of rewriting the file with what it already held.
+fn apply_override(target: &mut String, value: Option<&str>) -> bool {
+    match value {
+        Some(value) => {
+            *target = value.to_string();
+            true
+        }
+        None => false,
     }
 }
 
@@ -1710,6 +1762,148 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
             let (out_path, count) = export_to_ssh_config(path, None)
                 .map_err(|e| McpError::internal(format!("ssh sync export failed: {e}")))?;
             json!({ "path": out_path, "hosts_exported": count })
+        }
+        McpTool::SshRedactRuleList => serde_json::to_value(list_redact_rules())?,
+        McpTool::SshRedactRuleAdd => {
+            let pattern = args["pattern"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("pattern required"))?;
+            let replacement = args["replacement"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("replacement required"))?;
+            serde_json::to_value(
+                insert_redact_rule(pattern, replacement).map_err(McpError::internal)?,
+            )?
+        }
+        McpTool::SshRedactRuleUpdate => {
+            let pattern = args["pattern"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("pattern required"))?;
+            let replacement = args["replacement"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("replacement required"))?;
+            let renamed = args["new_pattern"].as_str().unwrap_or(pattern);
+            serde_json::to_value(
+                update_redact_rule(pattern, renamed, replacement).map_err(McpError::internal)?,
+            )?
+        }
+        McpTool::SshRedactRuleRemove => {
+            let pattern = args["pattern"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("pattern required"))?;
+            require_force(
+                &args,
+                "that class of secret stops being redacted in every audit record, webhook \
+                 notification, playbook result and diagnostic export",
+            )?;
+            serde_json::to_value(delete_redact_rule(pattern).map_err(McpError::internal)?)?
+        }
+        McpTool::SshRedactRuleReset => {
+            reset_default_rules().map_err(McpError::internal)?;
+            serde_json::to_value(list_redact_rules())?
+        }
+        McpTool::SshHighlightRuleList => serde_json::to_value(list_highlight_rules())?,
+        McpTool::SshHighlightRuleAdd => {
+            let keyword = args["keyword"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("keyword required"))?;
+            let name = args["name"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("name required"))?;
+            let color = args["color"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("color required"))?;
+            // A literal rule is escaped here rather than by handing `insert_rule`
+            // an `is_regex: false` rule: that field is a migration input, and
+            // `normalize_rule` consumes it by escaping the keyword and writing
+            // `true` back, so nothing ever stores a non-regex rule.
+            let rule = agent2ssh::types::HighlightRule {
+                keyword: maybe_escaped(keyword, &args),
+                name: name.to_string(),
+                color: color.to_string(),
+                enabled: true,
+                is_regex: true,
+                is_case_sensitive: args["case_sensitive"].as_bool().unwrap_or(false),
+            };
+            serde_json::to_value(insert_highlight_rule(rule).map_err(McpError::internal)?)?
+        }
+        McpTool::SshHighlightRuleUpdate => {
+            let keyword = args["keyword"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("keyword required"))?;
+            // Every field left out keeps its current value, so the rule has to be
+            // read before it can be rewritten.
+            let existing = list_highlight_rules()
+                .into_iter()
+                .find(|rule| rule.keyword == keyword)
+                .ok_or_else(|| {
+                    McpError::internal(format!("no highlight rule matches this keyword: {keyword}"))
+                })?;
+            let escape_new_keyword = args["literal"].as_bool() == Some(true);
+            if escape_new_keyword && args["new_keyword"].as_str().is_none() {
+                return Err(McpError::internal(
+                    "literal escapes new_keyword, so it needs one; the rule's current keyword \
+                     is already escaped",
+                ));
+            }
+            let next_keyword = match args["new_keyword"].as_str() {
+                Some(new_keyword) => maybe_escaped(new_keyword, &args),
+                None => existing.keyword.clone(),
+            };
+            let rule = agent2ssh::types::HighlightRule {
+                keyword: next_keyword,
+                name: args["name"]
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or(existing.name),
+                color: args["color"]
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or(existing.color),
+                enabled: existing.enabled,
+                is_regex: true,
+                is_case_sensitive: args["case_sensitive"]
+                    .as_bool()
+                    .unwrap_or(existing.is_case_sensitive),
+            };
+            serde_json::to_value(update_highlight_rule(keyword, rule).map_err(McpError::internal)?)?
+        }
+        McpTool::SshHighlightRuleRemove => {
+            let keyword = args["keyword"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("keyword required"))?;
+            require_force(&args, "the terminal stops painting matches for it")?;
+            serde_json::to_value(delete_highlight_rule(keyword).map_err(McpError::internal)?)?
+        }
+        McpTool::SshHighlightRuleReset => {
+            serde_json::to_value(reset_highlight_rules().map_err(McpError::internal)?)?
+        }
+        McpTool::SshAlgoPrefsGet => serde_json::to_value(AlgoPrefsState::snapshot())?,
+        McpTool::SshAlgoPrefsSet => {
+            // Start from what is in effect and override only what was given, so
+            // setting one list does not silently reset the other seven.
+            let mut prefs: SshAlgoPrefs = AlgoPrefsState::snapshot().prefs;
+            let mut changed = false;
+            changed |= apply_override(&mut prefs.kex, args["kex"].as_str());
+            changed |= apply_override(&mut prefs.hostkey, args["hostkey"].as_str());
+            changed |= apply_override(&mut prefs.cipher_cs, args["cipher_cs"].as_str());
+            changed |= apply_override(&mut prefs.cipher_sc, args["cipher_sc"].as_str());
+            changed |= apply_override(&mut prefs.mac_cs, args["mac_cs"].as_str());
+            changed |= apply_override(&mut prefs.mac_sc, args["mac_sc"].as_str());
+            changed |= apply_override(&mut prefs.comp_cs, args["comp_cs"].as_str());
+            changed |= apply_override(&mut prefs.comp_sc, args["comp_sc"].as_str());
+            if !changed {
+                return Err(McpError::internal(
+                    "nothing to set: pass at least one algorithm list (kex, hostkey, cipher_cs, \
+                     cipher_sc, mac_cs, mac_sc, comp_cs, comp_sc)",
+                ));
+            }
+            save_algo_prefs(&prefs).map_err(McpError::internal)?;
+            serde_json::to_value(AlgoPrefsState::snapshot())?
+        }
+        McpTool::SshAlgoPrefsClear => {
+            reset_algo_prefs().map_err(McpError::internal)?;
+            serde_json::to_value(AlgoPrefsState::snapshot())?
         }
     };
 

@@ -51,10 +51,7 @@ use crate::{
         session_write_core, split_completed_session_commands,
     },
     snippets::{add_snippet, load_snippets, remove_snippet, Snippet},
-    ssh_algo::{
-        effective_algo_prefs, has_custom_algo_prefs, reset_algo_prefs, safe_defaults,
-        save_algo_prefs, SshAlgoPrefs,
-    },
+    ssh_algo::{reset_algo_prefs, save_algo_prefs, AlgoPrefsState, SshAlgoPrefs},
     store::{append_operation_audit, config_dir, lock_config_file, restrict_file_to_owner},
     types::{
         source_from_transport, AuditEntry, AuditFilter, ConnectionStatus, ExecMultiResult,
@@ -2919,26 +2916,14 @@ pub fn forget_system_known_host(host_name: String, port: Option<u16>) -> Result<
     remove_system_known_host(&host_name, port.unwrap_or(22)).map_err(|e| e.to_string())
 }
 
-/// Everything the SSH-algorithm settings dialog needs in one round trip.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct AlgoPrefsState {
-    /// Preferences currently in effect for the next connection.
-    pub prefs: SshAlgoPrefs,
-    /// True when `ssh_algos.json` exists, i.e. the user overrode the defaults.
-    pub custom: bool,
-    /// The built-in defaults, so the dialog can offer a reset target without
-    /// duplicating these values in the frontend.
-    pub defaults: SshAlgoPrefs,
-}
-
 /// A22: read the SSH algorithm preferences in effect.
+///
+/// `AlgoPrefsState` lives in `ssh_algo` rather than here, because the CLI and the
+/// daemon return the same three fields and this module is compiled out of both of
+/// them.
 #[tauri::command]
 pub fn get_algo_prefs() -> Result<AlgoPrefsState, String> {
-    Ok(AlgoPrefsState {
-        prefs: effective_algo_prefs(),
-        custom: has_custom_algo_prefs(),
-        defaults: safe_defaults(),
-    })
+    Ok(AlgoPrefsState::snapshot())
 }
 
 /// A22: persist SSH algorithm preferences.

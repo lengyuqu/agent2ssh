@@ -22,6 +22,11 @@ use agent2ssh::gate::{
     ExecutionGateMode, ExecutionGateStatus,
 };
 use agent2ssh::health::{collect_health_snapshot, load_health_snapshot};
+use agent2ssh::highlight::{
+    delete_rule as delete_highlight_rule, insert_rule as insert_highlight_rule,
+    list_rules as list_highlight_rules, reset_defaults as reset_highlight_rules,
+    update_rule as update_highlight_rule,
+};
 use agent2ssh::limits::{load_execution_limits, ExecutionLimitRejection, ExecutionLimiter};
 use agent2ssh::notify::{
     fire_webhook, load_webhook_config, notify_approval_pending, save_webhook_config, WebhookConfig,
@@ -31,6 +36,10 @@ use agent2ssh::playbook::{
     dry_run_playbook, list_playbooks_core, run_playbook_core_with_source_and_approved_steps,
     Playbook, PlaybookDryRun, PlaybookRunResult,
 };
+use agent2ssh::redaction::{
+    delete_rule as delete_redact_rule, insert_rule as insert_redact_rule,
+    list_rules as list_redact_rules, reset_default_rules, update_rule as update_redact_rule,
+};
 use agent2ssh::remote::{
     check_daemon_scope, check_daemon_version, diagnose_daemon, get_daemon_with_scope,
     get_daemons_unified_view, list_daemons_core, tags_for_remote_scope_check, DaemonScope,
@@ -38,6 +47,7 @@ use agent2ssh::remote::{
 use agent2ssh::risk_config::classify_with_user_rules;
 use agent2ssh::session::*;
 use agent2ssh::snippets::{add_snippet, load_snippets, remove_snippet, Snippet};
+use agent2ssh::ssh_algo::{reset_algo_prefs, save_algo_prefs, AlgoPrefsState, SshAlgoPrefs};
 use agent2ssh::store::*;
 use agent2ssh::types::*;
 
@@ -1056,6 +1066,213 @@ async fn delete_snippet(
             format!("failed to delete snippet: {error}"),
         )
     })
+}
+
+// ── A24 / B24 / A22: the configuration lifecycles, over HTTP ────────────────
+//
+// These are the three rule/algorithm lifecycles the desktop commands wrap,
+// reached over HTTP so that `agent2ssh --daemon <alias> redact …` — or any other
+// client — can manage the configuration of the machine it is talking to. None of
+// them builds a command string, so there is no risk classification and no
+// approval gate. The one gate is `force` on a removal, and it is asked here as
+// well as in the CLI and the MCP server because a client that speaks HTTP
+// directly passes through neither of the other two.
+//
+// The removals take their identity in the body rather than in the path. A
+// redaction rule's identity is a regular expression — `/redact/rules/:pattern`
+// would have to survive percent-encoding `(?i)password` — and `/snippets/:name`
+// only works because a snippet name is a name.
+
+#[derive(Debug, serde::Deserialize)]
+struct RedactAddBody {
+    pattern: String,
+    replacement: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RedactUpdateBody {
+    /// The pattern that identifies the rule being replaced.
+    pattern: String,
+    replacement: String,
+    /// Renames the rule when present; the pattern is kept otherwise.
+    #[serde(default)]
+    new_pattern: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RedactDeleteBody {
+    pattern: String,
+    #[serde(default)]
+    force: bool,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct HighlightDeleteBody {
+    keyword: String,
+    #[serde(default)]
+    force: bool,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct HighlightUpdateBody {
+    /// The keyword that identifies the rule being replaced.
+    keyword: String,
+    /// The rule as it should be afterwards.
+    rule: HighlightRule,
+}
+
+/// The 400 for a removal that did not ask for one.
+fn force_required(subject: &str, consequence: &str) -> (StatusCode, Json<ErrorBody>) {
+    err(
+        StatusCode::BAD_REQUEST,
+        format!(
+            "refusing to remove '{subject}' without force: true — {consequence}. \
+             POST to .../reset restores the built-in set."
+        ),
+    )
+}
+
+async fn redact_rules_list(
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
+) -> Result<Json<Vec<RedactRuleInfo>>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    Ok(Json(list_redact_rules()))
+}
+
+async fn redact_rules_add(
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
+    Json(body): Json<RedactAddBody>,
+) -> Result<Json<Vec<RedactRuleInfo>>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    insert_redact_rule(&body.pattern, &body.replacement)
+        .map(Json)
+        .map_err(|error| err(StatusCode::BAD_REQUEST, error.to_string()))
+}
+
+async fn redact_rules_update(
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
+    Json(body): Json<RedactUpdateBody>,
+) -> Result<Json<Vec<RedactRuleInfo>>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    let pattern = body.new_pattern.as_deref().unwrap_or(&body.pattern);
+    update_redact_rule(&body.pattern, pattern, &body.replacement)
+        .map(Json)
+        .map_err(|error| err(StatusCode::BAD_REQUEST, error.to_string()))
+}
+
+async fn redact_rules_delete(
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
+    Json(body): Json<RedactDeleteBody>,
+) -> Result<Json<Vec<RedactRuleInfo>>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    if !body.force {
+        return Err(force_required(
+            &body.pattern,
+            "that class of secret stops being redacted everywhere this instance writes",
+        ));
+    }
+    delete_redact_rule(&body.pattern)
+        .map(Json)
+        .map_err(|error| err(StatusCode::BAD_REQUEST, error.to_string()))
+}
+
+async fn redact_rules_reset(
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
+) -> Result<Json<Vec<RedactRuleInfo>>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    reset_default_rules()
+        .map_err(|error| err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    Ok(Json(list_redact_rules()))
+}
+
+async fn highlight_rules_list(
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
+) -> Result<Json<Vec<HighlightRule>>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    Ok(Json(list_highlight_rules()))
+}
+
+async fn highlight_rules_add(
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
+    Json(rule): Json<HighlightRule>,
+) -> Result<Json<Vec<HighlightRule>>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    insert_highlight_rule(rule)
+        .map(Json)
+        .map_err(|error| err(StatusCode::BAD_REQUEST, error.to_string()))
+}
+
+async fn highlight_rules_update(
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
+    Json(body): Json<HighlightUpdateBody>,
+) -> Result<Json<Vec<HighlightRule>>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    update_highlight_rule(&body.keyword, body.rule)
+        .map(Json)
+        .map_err(|error| err(StatusCode::BAD_REQUEST, error.to_string()))
+}
+
+async fn highlight_rules_delete(
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
+    Json(body): Json<HighlightDeleteBody>,
+) -> Result<Json<Vec<HighlightRule>>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    if !body.force {
+        return Err(force_required(
+            &body.keyword,
+            "the terminal stops painting matches for it",
+        ));
+    }
+    delete_highlight_rule(&body.keyword)
+        .map(Json)
+        .map_err(|error| err(StatusCode::BAD_REQUEST, error.to_string()))
+}
+
+async fn highlight_rules_reset(
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
+) -> Result<Json<Vec<HighlightRule>>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    reset_highlight_rules()
+        .map(Json)
+        .map_err(|error| err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
+}
+
+async fn algo_prefs_get(
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
+) -> Result<Json<AlgoPrefsState>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    Ok(Json(AlgoPrefsState::snapshot()))
+}
+
+async fn algo_prefs_set(
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
+    Json(prefs): Json<SshAlgoPrefs>,
+) -> Result<Json<AlgoPrefsState>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    save_algo_prefs(&prefs).map_err(|error| err(StatusCode::BAD_REQUEST, error.to_string()))?;
+    Ok(Json(AlgoPrefsState::snapshot()))
+}
+
+async fn algo_prefs_clear(
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
+) -> Result<Json<AlgoPrefsState>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    reset_algo_prefs()
+        .map_err(|error| err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    Ok(Json(AlgoPrefsState::snapshot()))
 }
 
 async fn ping(
@@ -5017,6 +5234,26 @@ async fn main() -> anyhow::Result<()> {
         .route("/hosts/:name", delete(remove_host))
         .route("/snippets", get(list_snippets).post(save_snippet))
         .route("/snippets/:name", delete(delete_snippet))
+        .route(
+            "/redact/rules",
+            get(redact_rules_list).post(redact_rules_add),
+        )
+        .route("/redact/rules/update", post(redact_rules_update))
+        .route("/redact/rules/delete", post(redact_rules_delete))
+        .route("/redact/rules/reset", post(redact_rules_reset))
+        .route(
+            "/highlight/rules",
+            get(highlight_rules_list).post(highlight_rules_add),
+        )
+        .route("/highlight/rules/update", post(highlight_rules_update))
+        .route("/highlight/rules/delete", post(highlight_rules_delete))
+        .route("/highlight/rules/reset", post(highlight_rules_reset))
+        .route(
+            "/algo/prefs",
+            get(algo_prefs_get)
+                .put(algo_prefs_set)
+                .delete(algo_prefs_clear),
+        )
         .route("/ping", post(ping))
         .route("/exec", post(exec))
         .route("/exec-multi", post(exec_multi))

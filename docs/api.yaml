@@ -1577,6 +1577,92 @@ paths:
                 properties:
                   ok: { type: boolean }
 
+  /forwards/multi:
+    post:
+      summary: Add several port forward tunnels on one host in a single batch
+      description: All rules share one resolved host profile. If any rule fails to become ready, the rules already started are rolled back, so the response either lists every rule or nothing was added.
+      parameters:
+        - name: via
+          in: query
+          schema: { type: string }
+          description: Optional jump host the tunnels are established through.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [host, rules]
+              properties:
+                host: { type: string, description: "Host profile name shared by every rule." }
+                rules:
+                  type: array
+                  items:
+                    type: object
+                    required: [direction, bind_port, target_host, target_port]
+                    properties:
+                      direction:   { type: string, description: "local or remote." }
+                      bind_port:   { type: integer }
+                      target_host: { type: string }
+                      target_port: { type: integer }
+                      name:        { type: string, nullable: true }
+                      group_id:    { type: string, nullable: true }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ids:   { type: array, items: { type: string, format: uuid }, description: "The started rules, in the order they were requested." }
+                  host:  { type: string }
+                  count: { type: integer }
+        "403":
+          description: Scope denied or approval rejected
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /forwards/{id}/start:
+    post:
+      summary: Start a stopped tunnel
+      description: Routed through the same authorization path as adding a tunnel, using a `forward start ...` operation string.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+        "400":
+          description: The id is not a UUID.
+
+  /forwards/{id}/stop:
+    post:
+      summary: Stop a running tunnel without removing it
+      description: Routed through the same authorization path as adding a tunnel, using a `forward stop ...` operation string.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+        "400":
+          description: The id is not a UUID.
+
   /approvals:
     get:
       summary: List pending approval requests
@@ -2271,3 +2357,380 @@ paths:
                     load:        { type: string, nullable: true }
                     latency_ms:  { type: integer, nullable: true }
                     error:       { type: string, nullable: true }
+
+  # ── Local configuration lifecycles ─────────────────────────────────────────
+  #
+  # Command snippets, sensitive-data redaction rules, terminal highlight rules
+  # and SSH algorithm preferences. Each is backed by one file under
+  # `~/.agent2ssh/` written with owner-only permissions. Redaction and highlight
+  # rules are keyed by their pattern/keyword, which is also their identity: a
+  # regular expression is not usable as a URL path segment, so the identity
+  # travels in the request body and updates and removals get their own POST
+  # paths instead of `/{pattern}`.
+
+  /snippets:
+    get:
+      summary: List command snippets
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: object }
+    post:
+      summary: Create or replace a command snippet, keyed by name
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, command]
+              properties:
+                name:        { type: string }
+                command:     { type: string }
+                description: { type: string, nullable: true }
+      responses:
+        "200":
+          description: The full snippet list after the write.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: object }
+        "400":
+          description: Invalid snippet name or command.
+
+  /snippets/{name}:
+    delete:
+      summary: Remove a command snippet
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Whether a snippet was removed.
+          content:
+            application/json:
+              schema: { type: boolean }
+        "400":
+          description: Invalid snippet name.
+
+  /redact/rules:
+    get:
+      summary: List sensitive-data redaction rules
+      description: The rules this instance applies before it writes an audit record, webhook notification, playbook result or diagnostic export. Seeds the built-in set on first read.
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    pattern:     { type: string }
+                    replacement: { type: string }
+                    is_builtin:  { type: boolean }
+    post:
+      summary: Add a redaction rule
+      description: A rule's pattern is its identity, so a pattern that is already present is rejected rather than overwritten, and an invalid regex is rejected before anything is written.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pattern, replacement]
+              properties:
+                pattern:     { type: string, description: "Regular expression to match; also the rule's identity." }
+                replacement: { type: string, description: "Literal replacement text, used verbatim." }
+      responses:
+        "200":
+          description: The full rule list after the write.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: object }
+        "400":
+          description: The pattern does not compile, matches the empty string, or is already in the set. An empty replacement is allowed — it deletes the matched text rather than substituting it.
+
+  /redact/rules/update:
+    post:
+      summary: Replace the redaction rule identified by pattern
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pattern, replacement]
+              properties:
+                pattern:     { type: string, description: "The pattern that identifies the rule to replace." }
+                replacement: { type: string }
+                new_pattern: { type: string, description: "Rename the rule to this pattern (default: keep)." }
+      responses:
+        "200":
+          description: The full rule list after the write.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: object }
+        "400":
+          description: No rule matches the pattern, or the new pattern does not compile, matches the empty string, or is already taken by another rule.
+
+  /redact/rules/delete:
+    post:
+      summary: Remove a redaction rule
+      description: "Requires `force: true`. Removing a rule stops that class of secret being redacted everywhere this instance writes, so a call without it is rejected with 400 and changes nothing. `POST .../reset` restores the built-in set."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pattern]
+              properties:
+                pattern: { type: string }
+                force:   { type: boolean, description: "Must be true." }
+      responses:
+        "200":
+          description: The full rule list after the write.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: object }
+        "400":
+          description: Missing `force`, or no rule matches the pattern.
+
+  /redact/rules/reset:
+    post:
+      summary: Restore the built-in redaction rule set
+      description: Discards every edit. This is the way back from a removal, because it only ever adds rules back.
+      responses:
+        "200":
+          description: The restored rule list.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: object }
+        "500":
+          description: The built-in set could not be written.
+
+  /highlight/rules:
+    get:
+      summary: List terminal highlight rules
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    keyword:           { type: string }
+                    name:              { type: string }
+                    color:             { type: string }
+                    enabled:           { type: boolean }
+                    is_regex:          { type: boolean }
+                    is_case_sensitive: { type: boolean }
+    post:
+      summary: Add a terminal highlight rule
+      description: A rule's keyword is its identity, so a duplicate is rejected. Rules are stored as regular expressions, so a caller that wants plain-text matching has to escape the keyword itself before sending it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [keyword, name, color]
+              properties:
+                keyword:           { type: string }
+                name:              { type: string }
+                color:             { type: string }
+                enabled:           { type: boolean, default: true }
+                is_regex:          { type: boolean, default: true }
+                is_case_sensitive: { type: boolean, default: false }
+      responses:
+        "200":
+          description: The full rule list after the write.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: object }
+        "400":
+          description: Empty keyword, a missing or over-long name, a color that is not `#RRGGBB`, or a keyword already in the set. The keyword's regex syntax is deliberately not checked here — the renderer compiles it with JavaScript, whose grammar differs from the one a Rust-side check would use.
+
+  /highlight/rules/update:
+    post:
+      summary: Replace the terminal highlight rule identified by keyword
+      description: The rule is sent whole, so the caller reads it first and returns the fields it wants to keep unchanged.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [keyword, rule]
+              properties:
+                keyword: { type: string, description: "The keyword that identifies the rule to replace." }
+                rule:    { type: object, description: "The rule as it should be afterwards." }
+      responses:
+        "200":
+          description: The full rule list after the write.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: object }
+        "400":
+          description: No rule matches the keyword, or the replacement rule fails the same checks as an added one.
+
+  /highlight/rules/delete:
+    post:
+      summary: Remove a terminal highlight rule
+      description: "Requires `force: true` so a mistyped keyword cannot quietly drop a rule the caller meant to keep. A call without it is rejected with 400 and changes nothing."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [keyword]
+              properties:
+                keyword: { type: string }
+                force:   { type: boolean, description: "Must be true." }
+      responses:
+        "200":
+          description: The full rule list after the write.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: object }
+        "400":
+          description: Missing `force`, or no rule matches the keyword.
+
+  /highlight/rules/reset:
+    post:
+      summary: Restore the built-in terminal highlight rules
+      description: Discards every edit.
+      responses:
+        "200":
+          description: The restored rule list.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: object }
+        "500":
+          description: The built-in set could not be written.
+
+  /algo/prefs:
+    get:
+      summary: Show the SSH algorithm preferences in effect
+      description: Returns the preferences that will be used for the next handshake, whether they are an override or the built-in defaults, and the defaults they would fall back to.
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  prefs:    { type: object, description: "The effective preferences; each field is a comma-separated list in preference order." }
+                  custom:   { type: boolean, description: "True when an override is stored rather than the defaults." }
+                  defaults: { type: object, description: "The built-in safe defaults." }
+    put:
+      summary: Replace the SSH algorithm preferences
+      description: Sent whole rather than field by field, so a caller changing one list reads the current value first. Each list must be non-empty, free of duplicates and composed of plausible algorithm names, so a list that could not complete a handshake is rejected rather than written. Takes effect on the next handshake.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kex, hostkey, cipher_cs, cipher_sc, mac_cs, mac_sc, comp_cs, comp_sc]
+              properties:
+                kex:       { type: string }
+                hostkey:   { type: string }
+                cipher_cs: { type: string }
+                cipher_sc: { type: string }
+                mac_cs:    { type: string }
+                mac_sc:    { type: string }
+                comp_cs:   { type: string }
+                comp_sc:   { type: string }
+      responses:
+        "200":
+          description: The preferences in effect after the write.
+          content:
+            application/json:
+              schema: { type: object }
+        "400":
+          description: A list is empty, repeats an entry, or contains an implausible algorithm name.
+    delete:
+      summary: Drop the SSH algorithm overrides
+      description: Goes back to the built-in safe defaults.
+      responses:
+        "200":
+          description: The preferences in effect after the change.
+          content:
+            application/json:
+              schema: { type: object }
+        "500":
+          description: The stored override could not be removed.
+
+  # ── Interactive prompts (2FA / OTP) ────────────────────────────────────────
+  #
+  # When a connection or command needs an answer the SSH library cannot get on
+  # its own — a keyboard-interactive challenge, an OTP — the daemon parks the
+  # question here and waits. A caller polls for pending prompts, shows them to a
+  # human, and posts the answer back by nonce.
+
+  /prompts/pending:
+    get:
+      summary: List prompts waiting for an answer
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  pending:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        nonce:       { type: string, description: "Identifies this prompt when answering it." }
+                        prompt_text: { type: string, description: "The question as the server asked it." }
+                  count: { type: integer }
+
+  /prompts/respond:
+    post:
+      summary: Answer a pending prompt
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [nonce, answer]
+              properties:
+                nonce:  { type: string }
+                answer: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { type: object }
+        "404":
+          description: No prompt is waiting under that nonce.

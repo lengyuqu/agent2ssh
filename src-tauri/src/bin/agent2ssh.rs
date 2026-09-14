@@ -20,6 +20,7 @@ use agent2ssh::remote::{
     get_daemons_unified_view, tags_for_remote_scope_check, PROTOCOL_VERSION,
 };
 use agent2ssh::store::{audit_path, compute_metrics_trend, restrict_file_to_owner, TrendPeriod};
+use agent2ssh::types::{HighlightRule, RedactRuleInfo};
 use agent2ssh::{
     add_host_core, add_snippet, collect_health_snapshot, compare_exec_results, dry_run_playbook,
     effective_command_risk, exec_multi_core, exec_multi_with_strategy, exec_ssh_core,
@@ -34,6 +35,18 @@ use agent2ssh::{
     BatchStrategy, ExecComparison, ExecMultiBatchRequest, ExecMultiRequest, ExecRequest,
     ExecutionGateStatus, ForwardDirection, ForwardRule, HostFilter, HostProfile, PolicyDecision,
     PolicyTestResult, RiskLevel, SftpDownloadRequest, SftpUploadRequest, Snippet, TeamConfigExport,
+};
+use agent2ssh::{
+    highlight::{
+        delete_rule as delete_highlight_rule, insert_rule as insert_highlight_rule,
+        list_rules as list_highlight_rules, regex_escape, reset_defaults as reset_highlight_rules,
+        update_rule as update_highlight_rule,
+    },
+    redaction::{
+        delete_rule as delete_redact_rule, insert_rule as insert_redact_rule,
+        list_rules as list_redact_rules, reset_default_rules, update_rule as update_redact_rule,
+    },
+    ssh_algo::{reset_algo_prefs, save_algo_prefs, AlgoPrefsState, SshAlgoPrefs},
 };
 use anyhow::{Context, Result};
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
@@ -285,6 +298,23 @@ enum Commands {
     Snippet {
         #[command(subcommand)]
         command: SnippetCommands,
+    },
+    /// Manage the sensitive-data redaction rules the app applies before it
+    /// writes an audit record, webhook notification, playbook result or
+    /// diagnostic export
+    Redact {
+        #[command(subcommand)]
+        command: RedactCommands,
+    },
+    /// Manage the terminal highlight rules the UI paints matches with
+    Highlight {
+        #[command(subcommand)]
+        command: HighlightCommands,
+    },
+    /// Show or replace the SSH algorithm preferences used for the next handshake
+    Algo {
+        #[command(subcommand)]
+        command: AlgoCommands,
     },
     /// Run diagnostic checks on the agent2ssh environment
     Doctor {
@@ -983,6 +1013,172 @@ enum SnippetCommands {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum RedactCommands {
+    /// List every rule, marking the built-in ones
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add a rule. Fails when the pattern is already present, because a pattern
+    /// *is* a rule's identity here — a second rule for it would make edit and
+    /// delete ambiguous.
+    Add {
+        /// Regex pattern to match; also the rule's identity
+        pattern: String,
+        /// Literal replacement text, used verbatim (capture groups are not expanded)
+        replacement: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Replace the rule identified by PATTERN; anything you omit is kept
+    Update {
+        /// The pattern that identifies the rule to replace
+        pattern: String,
+        /// New literal replacement text
+        #[arg(long)]
+        replacement: Option<String>,
+        /// Rename the rule to this pattern
+        #[arg(long)]
+        new_pattern: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove a rule
+    ///
+    /// Removal stops that class of secret being redacted everywhere the app
+    /// writes, so it takes --force. `redact reset` puts the built-in rules back.
+    Remove {
+        pattern: String,
+        /// Confirm the removal. Without it the command refuses and names the
+        /// class of secret that would stop being redacted.
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Restore the built-in rule set, discarding your edits
+    Reset {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum HighlightCommands {
+    /// List every highlight rule
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add a highlight rule
+    Add {
+        /// Pattern to match, or literal text when --literal is given; also the
+        /// rule's identity
+        keyword: String,
+        /// Human-readable label shown in the settings panel
+        #[arg(long)]
+        name: String,
+        /// Hex color, e.g. #FF6B6B
+        #[arg(long)]
+        color: String,
+        /// Match case-sensitively
+        #[arg(long)]
+        case_sensitive: bool,
+        /// Escape KEYWORD so it matches literally instead of as a regular
+        /// expression
+        #[arg(long)]
+        literal: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Change the rule identified by KEYWORD; anything you omit is kept
+    Update {
+        keyword: String,
+        #[arg(long)]
+        new_keyword: Option<String>,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        color: Option<String>,
+        /// Written as `--case-sensitive true` or `--case-sensitive false`,
+        /// because "omitted" and "set to false" have to be distinguishable here
+        #[arg(long, value_name = "true|false")]
+        case_sensitive: Option<bool>,
+        /// Escape NEW_KEYWORD so it matches literally. Escape is applied to what
+        /// you supply, never to the rule's current keyword — re-escaping an
+        /// already-escaped pattern would change what it matches.
+        #[arg(long)]
+        literal: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove a highlight rule
+    ///
+    /// This hides nothing the app writes — it only stops the terminal painting a
+    /// match — but it takes --force all the same, so that "every removal in this
+    /// group needs --force" is one rule to remember rather than three, and a
+    /// mistyped KEYWORD cannot quietly drop a rule you meant to keep.
+    Remove {
+        keyword: String,
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Restore the built-in highlight rules, discarding your edits
+    Reset {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AlgoCommands {
+    /// Show the effective algorithm preferences and where they come from
+    Get {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Replace one or more algorithm lists, keeping the ones you leave out
+    ///
+    /// Each list is comma-separated and in the order the SSH library should try
+    /// them, e.g. `--kex curve25519-sha256,diffie-hellman-group16-sha512`.
+    Set {
+        /// Key exchange algorithms
+        #[arg(long)]
+        kex: Option<String>,
+        /// Host key algorithms
+        #[arg(long)]
+        hostkey: Option<String>,
+        /// Client-to-server ciphers
+        #[arg(long)]
+        cipher_cs: Option<String>,
+        /// Server-to-client ciphers
+        #[arg(long)]
+        cipher_sc: Option<String>,
+        /// Client-to-server MACs
+        #[arg(long)]
+        mac_cs: Option<String>,
+        /// Server-to-client MACs
+        #[arg(long)]
+        mac_sc: Option<String>,
+        /// Client-to-server compression
+        #[arg(long)]
+        comp_cs: Option<String>,
+        /// Server-to-client compression
+        #[arg(long)]
+        comp_sc: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Drop the overrides and go back to the built-in safe defaults
+    Clear {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 async fn effective_risk_for_policy(
     command: &str,
     risk_override: Option<RiskLevel>,
@@ -1206,6 +1402,52 @@ async fn remote_snippet_delete(alias: &str, name: &str) -> Result<bool> {
         .json()
         .await
         .context("failed to decode daemon snippet delete response")
+}
+
+/// One request against a remote daemon's configuration endpoints.
+///
+/// `--daemon` is a global flag, so every command has to decide what it means.
+/// For hosts, audit and snippets it means "run this against that machine", and
+/// the rule and algorithm commands are no different: ignoring the flag would
+/// read the *local* rule set and answer a question nobody asked, which is worse
+/// than not supporting the flag at all. Thirteen near-identical helpers would
+/// also be thirteen places to get the auth header wrong, so there is one.
+///
+/// The body crosses as `serde_json::Value` rather than a generic `T`: with an
+/// `Option<&T>` parameter, a call that passes no body leaves `T` uninferrable and
+/// would have to name a type it never mentions.
+async fn remote_config<R: serde::de::DeserializeOwned>(
+    alias: &str,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> Result<R> {
+    let (url, token) = get_daemon(alias)?;
+    let mut request =
+        reqwest::Client::new().request(method, format!("{}{path}", url.trim_end_matches('/')));
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    if let Some(body) = body {
+        request = request.json(&body);
+    }
+    request
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await
+        .context("failed to decode the daemon's config response")
+}
+
+/// The alias to route through, or `None` to act on this machine.
+///
+/// `--daemon localhost` names the daemon running here, so every command treats it
+/// as local; only an explicit remote alias changes the target. The check used to
+/// be spelled out inline wherever it was needed, which is one place to forget it
+/// per command.
+fn remote_alias(alias: Option<&str>) -> Option<&str> {
+    alias.filter(|alias| *alias != "localhost")
 }
 
 /// Background event subscriber for CLI mode. Prints safety-relevant events
@@ -3127,6 +3369,440 @@ async fn async_main() -> Result<()> {
                 }
             }
         },
+        Commands::Redact { command } => match command {
+            RedactCommands::List { json } => {
+                let rules: Vec<RedactRuleInfo> = match remote_alias(daemon_alias.as_deref()) {
+                    Some(alias) => {
+                        remote_config(alias, reqwest::Method::GET, "/redact/rules", None).await?
+                    }
+                    None => list_redact_rules(),
+                };
+                print_redact_rules(&rules, json)?;
+            }
+            RedactCommands::Add {
+                pattern,
+                replacement,
+                json,
+            } => {
+                let rules: Vec<RedactRuleInfo> = match remote_alias(daemon_alias.as_deref()) {
+                    Some(alias) => {
+                        remote_config(
+                            alias,
+                            reqwest::Method::POST,
+                            "/redact/rules",
+                            Some(serde_json::json!({
+                                "pattern": pattern,
+                                "replacement": replacement,
+                            })),
+                        )
+                        .await?
+                    }
+                    None => insert_redact_rule(&pattern, &replacement)?,
+                };
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&rules)?);
+                } else {
+                    println!("Added redaction rule '{}'.", pattern);
+                }
+            }
+            RedactCommands::Update {
+                pattern,
+                replacement,
+                new_pattern,
+                json,
+            } => {
+                if replacement.is_none() && new_pattern.is_none() {
+                    anyhow::bail!(
+                        "nothing to change for '{pattern}': pass --replacement, --new-pattern, or both"
+                    );
+                }
+                let rules: Vec<RedactRuleInfo> = match remote_alias(daemon_alias.as_deref()) {
+                    Some(alias) => {
+                        // The daemon applies a whole rule, so the merge happens
+                        // here — on whichever side owns the current value.
+                        let current: Vec<RedactRuleInfo> =
+                            remote_config(alias, reqwest::Method::GET, "/redact/rules", None)
+                                .await?;
+                        let existing = find_redact_rule(&current, &pattern)?;
+                        let next_replacement = replacement
+                            .clone()
+                            .unwrap_or_else(|| existing.replacement.clone());
+                        let next_pattern = new_pattern.clone().unwrap_or_else(|| pattern.clone());
+                        remote_config(
+                            alias,
+                            reqwest::Method::POST,
+                            "/redact/rules/update",
+                            Some(serde_json::json!({
+                                "pattern": pattern,
+                                "new_pattern": next_pattern,
+                                "replacement": next_replacement,
+                            })),
+                        )
+                        .await?
+                    }
+                    None => {
+                        let current = list_redact_rules();
+                        let existing = find_redact_rule(&current, &pattern)?;
+                        let next_replacement =
+                            replacement.unwrap_or_else(|| existing.replacement.clone());
+                        let next_pattern = new_pattern.unwrap_or_else(|| pattern.clone());
+                        update_redact_rule(&pattern, &next_pattern, &next_replacement)?
+                    }
+                };
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&rules)?);
+                } else {
+                    println!("Updated redaction rule '{}'.", pattern);
+                }
+            }
+            RedactCommands::Remove {
+                pattern,
+                force,
+                json,
+            } => {
+                let rules: Vec<RedactRuleInfo> = match remote_alias(daemon_alias.as_deref()) {
+                    Some(alias) => {
+                        let current: Vec<RedactRuleInfo> =
+                            remote_config(alias, reqwest::Method::GET, "/redact/rules", None)
+                                .await?;
+                        let existing = find_redact_rule(&current, &pattern)?;
+                        if !force {
+                            let consequence = if existing.is_builtin {
+                                "This is a built-in rule: that class of secret stops being redacted in every audit record, webhook notification, playbook result and diagnostic export."
+                            } else {
+                                "That class of secret stops being redacted in every audit record, webhook notification, playbook result and diagnostic export."
+                            };
+                            refuse_removal_without_force("redact", &pattern, consequence);
+                        }
+                        remote_config(
+                            alias,
+                            reqwest::Method::POST,
+                            "/redact/rules/delete",
+                            Some(serde_json::json!({ "pattern": pattern, "force": true })),
+                        )
+                        .await?
+                    }
+                    None => {
+                        let current = list_redact_rules();
+                        let existing = find_redact_rule(&current, &pattern)?;
+                        if !force {
+                            let consequence = if existing.is_builtin {
+                                "This is a built-in rule: that class of secret stops being redacted in every audit record, webhook notification, playbook result and diagnostic export."
+                            } else {
+                                "That class of secret stops being redacted in every audit record, webhook notification, playbook result and diagnostic export."
+                            };
+                            refuse_removal_without_force("redact", &pattern, consequence);
+                        }
+                        delete_redact_rule(&pattern)?
+                    }
+                };
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&rules)?);
+                } else {
+                    println!("Removed redaction rule '{}'.", pattern);
+                    println!("`agent2ssh redact reset` restores the built-in set.");
+                }
+            }
+            RedactCommands::Reset { json } => {
+                let rules: Vec<RedactRuleInfo> = match remote_alias(daemon_alias.as_deref()) {
+                    Some(alias) => {
+                        remote_config(
+                            alias,
+                            reqwest::Method::POST,
+                            "/redact/rules/reset",
+                            Some(serde_json::json!({})),
+                        )
+                        .await?
+                    }
+                    None => {
+                        reset_default_rules()?;
+                        list_redact_rules()
+                    }
+                };
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&rules)?);
+                } else {
+                    println!("Restored {} built-in redaction rule(s).", rules.len());
+                }
+            }
+        },
+        Commands::Highlight { command } => match command {
+            HighlightCommands::List { json } => {
+                let rules: Vec<HighlightRule> = match remote_alias(daemon_alias.as_deref()) {
+                    Some(alias) => {
+                        remote_config(alias, reqwest::Method::GET, "/highlight/rules", None).await?
+                    }
+                    None => list_highlight_rules(),
+                };
+                print_highlight_rules(&rules, json)?;
+            }
+            HighlightCommands::Add {
+                keyword,
+                name,
+                color,
+                case_sensitive,
+                literal,
+                json,
+            } => {
+                // A rule is stored as a regex either way: `is_regex: false` is a
+                // migration input that `normalize_rule` consumes by escaping the
+                // keyword and writing `true` back. A literal rule is therefore
+                // spelled out here rather than leaning on that legacy path.
+                let rule = HighlightRule {
+                    keyword: if literal {
+                        regex_escape(&keyword)
+                    } else {
+                        keyword.clone()
+                    },
+                    name,
+                    color,
+                    enabled: true,
+                    is_regex: true,
+                    is_case_sensitive: case_sensitive,
+                };
+                let rules: Vec<HighlightRule> = match remote_alias(daemon_alias.as_deref()) {
+                    Some(alias) => {
+                        remote_config(
+                            alias,
+                            reqwest::Method::POST,
+                            "/highlight/rules",
+                            Some(serde_json::to_value(&rule)?),
+                        )
+                        .await?
+                    }
+                    None => insert_highlight_rule(rule)?,
+                };
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&rules)?);
+                } else {
+                    println!("Added highlight rule '{}'.", keyword);
+                }
+            }
+            HighlightCommands::Update {
+                keyword,
+                new_keyword,
+                name,
+                color,
+                case_sensitive,
+                literal,
+                json,
+            } => {
+                let remote = remote_alias(daemon_alias.as_deref());
+                // Whatever was left out keeps its current value, so the rule has
+                // to be read before it can be rewritten. `enabled` is not a flag
+                // here — `highlight add` creates enabled rules and there is no
+                // other way to change it, so it is carried through unchanged
+                // rather than silently reset by an unrelated edit.
+                let current: Vec<HighlightRule> = match remote {
+                    Some(alias) => {
+                        remote_config(alias, reqwest::Method::GET, "/highlight/rules", None).await?
+                    }
+                    None => list_highlight_rules(),
+                };
+                let existing = find_highlight_rule(&current, &keyword)?;
+                if literal && new_keyword.is_none() {
+                    anyhow::bail!(
+                        "--literal escapes --new-keyword, so it needs one; '{keyword}' is already escaped"
+                    );
+                }
+                let next_keyword = match new_keyword {
+                    Some(new_keyword) if literal => regex_escape(&new_keyword),
+                    Some(new_keyword) => new_keyword,
+                    None => existing.keyword.clone(),
+                };
+                let updated = HighlightRule {
+                    keyword: next_keyword,
+                    name: name.unwrap_or_else(|| existing.name.clone()),
+                    color: color.unwrap_or_else(|| existing.color.clone()),
+                    enabled: existing.enabled,
+                    is_regex: true,
+                    is_case_sensitive: case_sensitive.unwrap_or(existing.is_case_sensitive),
+                };
+                let rules: Vec<HighlightRule> = match remote {
+                    Some(alias) => {
+                        remote_config(
+                            alias,
+                            reqwest::Method::POST,
+                            "/highlight/rules/update",
+                            Some(serde_json::json!({ "keyword": keyword, "rule": updated })),
+                        )
+                        .await?
+                    }
+                    None => update_highlight_rule(&keyword, updated)?,
+                };
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&rules)?);
+                } else {
+                    println!("Updated highlight rule '{}'.", keyword);
+                }
+            }
+            HighlightCommands::Remove {
+                keyword,
+                force,
+                json,
+            } => {
+                let rules: Vec<HighlightRule> = match remote_alias(daemon_alias.as_deref()) {
+                    Some(alias) => {
+                        let current: Vec<HighlightRule> =
+                            remote_config(alias, reqwest::Method::GET, "/highlight/rules", None)
+                                .await?;
+                        find_highlight_rule(&current, &keyword)?;
+                        if !force {
+                            refuse_removal_without_force(
+                                "highlight",
+                                &keyword,
+                                "The terminal stops painting matches for it.",
+                            );
+                        }
+                        remote_config(
+                            alias,
+                            reqwest::Method::POST,
+                            "/highlight/rules/delete",
+                            Some(serde_json::json!({ "keyword": keyword, "force": true })),
+                        )
+                        .await?
+                    }
+                    None => {
+                        find_highlight_rule(&list_highlight_rules(), &keyword)?;
+                        if !force {
+                            refuse_removal_without_force(
+                                "highlight",
+                                &keyword,
+                                "The terminal stops painting matches for it.",
+                            );
+                        }
+                        delete_highlight_rule(&keyword)?
+                    }
+                };
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&rules)?);
+                } else {
+                    println!("Removed highlight rule '{}'.", keyword);
+                    println!("`agent2ssh highlight reset` restores the built-in set.");
+                }
+            }
+            HighlightCommands::Reset { json } => {
+                let rules: Vec<HighlightRule> = match remote_alias(daemon_alias.as_deref()) {
+                    Some(alias) => {
+                        remote_config(
+                            alias,
+                            reqwest::Method::POST,
+                            "/highlight/rules/reset",
+                            Some(serde_json::json!({})),
+                        )
+                        .await?
+                    }
+                    None => reset_highlight_rules()?,
+                };
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&rules)?);
+                } else {
+                    println!("Restored {} built-in highlight rule(s).", rules.len());
+                }
+            }
+        },
+        Commands::Algo { command } => match command {
+            AlgoCommands::Get { json } => {
+                let state: AlgoPrefsState = match remote_alias(daemon_alias.as_deref()) {
+                    Some(alias) => {
+                        remote_config(alias, reqwest::Method::GET, "/algo/prefs", None).await?
+                    }
+                    None => AlgoPrefsState::snapshot(),
+                };
+                print_algo_prefs(&state, json)?;
+            }
+            AlgoCommands::Set {
+                kex,
+                hostkey,
+                cipher_cs,
+                cipher_sc,
+                mac_cs,
+                mac_sc,
+                comp_cs,
+                comp_sc,
+                json,
+            } => {
+                if [
+                    &kex, &hostkey, &cipher_cs, &cipher_sc, &mac_cs, &mac_sc, &comp_cs, &comp_sc,
+                ]
+                .iter()
+                .all(|value| value.is_none())
+                {
+                    anyhow::bail!(
+                        "nothing to set: pass at least one of --kex, --hostkey, --cipher-cs, \
+                         --cipher-sc, --mac-cs, --mac-sc, --comp-cs, --comp-sc"
+                    );
+                }
+                // Start from what is in effect — this machine's file, or the
+                // daemon's — and override only what was given, so setting one list
+                // does not silently reset the other seven.
+                let starter: AlgoPrefsState = match remote_alias(daemon_alias.as_deref()) {
+                    Some(alias) => {
+                        remote_config(alias, reqwest::Method::GET, "/algo/prefs", None).await?
+                    }
+                    None => AlgoPrefsState::snapshot(),
+                };
+                let mut next: SshAlgoPrefs = starter.prefs;
+                if let Some(value) = kex {
+                    next.kex = value;
+                }
+                if let Some(value) = hostkey {
+                    next.hostkey = value;
+                }
+                if let Some(value) = cipher_cs {
+                    next.cipher_cs = value;
+                }
+                if let Some(value) = cipher_sc {
+                    next.cipher_sc = value;
+                }
+                if let Some(value) = mac_cs {
+                    next.mac_cs = value;
+                }
+                if let Some(value) = mac_sc {
+                    next.mac_sc = value;
+                }
+                if let Some(value) = comp_cs {
+                    next.comp_cs = value;
+                }
+                if let Some(value) = comp_sc {
+                    next.comp_sc = value;
+                }
+                let state: AlgoPrefsState = match remote_alias(daemon_alias.as_deref()) {
+                    Some(alias) => {
+                        remote_config(
+                            alias,
+                            reqwest::Method::PUT,
+                            "/algo/prefs",
+                            Some(serde_json::to_value(&next)?),
+                        )
+                        .await?
+                    }
+                    None => {
+                        save_algo_prefs(&next)?;
+                        AlgoPrefsState::snapshot()
+                    }
+                };
+                print_algo_prefs(&state, json)?;
+            }
+            AlgoCommands::Clear { json } => {
+                let state: AlgoPrefsState = match remote_alias(daemon_alias.as_deref()) {
+                    Some(alias) => {
+                        remote_config(alias, reqwest::Method::DELETE, "/algo/prefs", None).await?
+                    }
+                    None => {
+                        reset_algo_prefs()?;
+                        AlgoPrefsState::snapshot()
+                    }
+                };
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&state)?);
+                } else {
+                    println!(
+                        "Cleared the algorithm overrides; the built-in safe defaults are in effect."
+                    );
+                }
+            }
+        },
         Commands::Playbook { command } => match command {
             PlaybookCommands::List { json } => {
                 let playbooks = agent2ssh::list_playbooks_core()?;
@@ -3793,6 +4469,133 @@ fn print_host_row(host: &HostProfile) {
     } else {
         println!("{}\t{}\t{}", host.name, target, metadata.join(" "));
     }
+}
+
+/// Print a redaction rule set for a terminal.
+fn print_redact_rules(rules: &[RedactRuleInfo], json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(rules)?);
+        return Ok(());
+    }
+    if rules.is_empty() {
+        // An empty set is not a neutral "nothing configured" state: it is a set
+        // that redacts nothing, and the desktop renders the same fact as a
+        // warning rather than an empty list.
+        println!(
+            "No redaction rules — nothing is redacted. `agent2ssh redact reset` restores the built-in set."
+        );
+        return Ok(());
+    }
+    for rule in rules {
+        let origin = if rule.is_builtin {
+            "built-in"
+        } else {
+            "custom"
+        };
+        println!("{origin:<8}  {}\t{}", rule.pattern, rule.replacement);
+    }
+    Ok(())
+}
+
+/// Print a highlight rule set for a terminal.
+fn print_highlight_rules(rules: &[HighlightRule], json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(rules)?);
+        return Ok(());
+    }
+    if rules.is_empty() {
+        println!("No highlight rules.");
+        return Ok(());
+    }
+    for rule in rules {
+        // `is_regex` is deliberately not a column: every rule is stored as a
+        // regex (a literal one is escaped first), so the field is `true` for
+        // every rule the user can create and printing it would say "regex" about
+        // a rule they wrote with --literal.
+        println!(
+            "{}\t{}\t{}\t{}\t{}",
+            rule.keyword,
+            rule.name,
+            rule.color,
+            if rule.enabled { "enabled" } else { "disabled" },
+            if rule.is_case_sensitive {
+                "case-sensitive"
+            } else {
+                "case-insensitive"
+            },
+        );
+    }
+    Ok(())
+}
+
+/// Print the SSH algorithm preferences and where they came from.
+fn print_algo_prefs(state: &AlgoPrefsState, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(state)?);
+        return Ok(());
+    }
+    let source = if state.custom {
+        "overridden by ssh_algos.json"
+    } else {
+        "built-in defaults"
+    };
+    println!("SSH algorithm preferences ({source})");
+    let prefs = &state.prefs;
+    for (label, value) in [
+        ("kex", &prefs.kex),
+        ("hostkey", &prefs.hostkey),
+        ("cipher_cs", &prefs.cipher_cs),
+        ("cipher_sc", &prefs.cipher_sc),
+        ("mac_cs", &prefs.mac_cs),
+        ("mac_sc", &prefs.mac_sc),
+        ("comp_cs", &prefs.comp_cs),
+        ("comp_sc", &prefs.comp_sc),
+    ] {
+        // An empty list means "whatever libssh2 would do", which reads as a
+        // missing value if it is printed as nothing at all.
+        let shown = if value.is_empty() {
+            "(libssh2 default)"
+        } else {
+            value.as_str()
+        };
+        println!("{label:<10}  {shown}");
+    }
+    Ok(())
+}
+
+/// The one rule whose pattern is `pattern`, or an error naming the pattern.
+///
+/// Looking the rule up before acting is what lets a mistyped pattern be reported
+/// as "not found" rather than as a missing `--force`, and it is where the
+/// built-in marker is read from.
+fn find_redact_rule<'a>(rules: &'a [RedactRuleInfo], pattern: &str) -> Result<&'a RedactRuleInfo> {
+    rules
+        .iter()
+        .find(|rule| rule.pattern == pattern)
+        .ok_or_else(|| anyhow::anyhow!("no redaction rule matches this pattern: {pattern}"))
+}
+
+/// The one rule whose keyword is `keyword`, or an error naming the keyword.
+fn find_highlight_rule<'a>(rules: &'a [HighlightRule], keyword: &str) -> Result<&'a HighlightRule> {
+    rules
+        .iter()
+        .find(|rule| rule.keyword == keyword)
+        .ok_or_else(|| anyhow::anyhow!("no highlight rule matches this keyword: {keyword}"))
+}
+
+/// Refuse an unconfirmed removal, and say what it would have changed.
+///
+/// The desktop asks through a confirmation dialog, and the daemon and the MCP
+/// server check the same flag on their side; on the command line the flag *is*
+/// the answer, so it is checked before anything is written.
+///
+/// Exit code 2 rather than 1: this is a refusal to act, not a failure, so a
+/// script can tell "you forgot --force" apart from "that rule does not exist".
+fn refuse_removal_without_force(group: &str, subject: &str, consequence: &str) {
+    eprintln!("refusing to remove {group} '{subject}' without --force.");
+    eprintln!("{consequence}");
+    eprintln!("`agent2ssh {group} reset` restores the built-in set.");
+    std::process::exit(2);
 }
 
 fn print_exec_plan(plan: &agent2ssh::ExecPlan) {

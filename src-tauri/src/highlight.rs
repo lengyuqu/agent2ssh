@@ -21,14 +21,28 @@ use std::collections::HashSet;
 const HIGHLIGHT_RULES_FILE: &str = "highlight_rules.json";
 
 /// Errors returned by highlight rule operations.
+///
+/// `Display` renders a sentence, not a translation key. It used to write
+/// `highlight_not_found` and friends, on the assumption that the frontend would
+/// map those keys through its own table — but no such table was ever written,
+/// and nothing in the repository has ever consumed one: the desktop command
+/// wrappers call `to_string()` and the panel renders the result, so the message
+/// the operator saw *was* `highlight_not_found`. A key nobody translates is not
+/// a contract, and a sentence is what every other error in this crate already
+/// produces (`RedactRuleError`, `ssh_algo`'s `anyhow`). Two of the variants now
+/// carry the keyword that caused them, because a caller that has to say *which*
+/// rule it could not find otherwise has to guess it back from its own input.
 #[derive(Debug, Clone)]
 pub enum HighlightError {
     EmptyKeyword,
     NameRequired,
     NameTooLong,
     InvalidColor,
-    KeywordConflict,
-    NotFound,
+    /// A rule for this keyword already exists. The keyword *is* a rule's
+    /// identity, so a second one would make edit and delete ambiguous.
+    KeywordConflict(String),
+    /// No rule in the set has this keyword.
+    NotFound(String),
     IoError(String),
     ParseError(String),
 }
@@ -36,18 +50,29 @@ pub enum HighlightError {
 impl std::fmt::Display for HighlightError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::EmptyKeyword => write!(f, "highlight_empty_keyword"),
-            Self::NameRequired => write!(f, "highlight_name_required"),
-            Self::NameTooLong => write!(f, "highlight_name_too_long"),
-            Self::InvalidColor => write!(f, "highlight_invalid_color"),
-            Self::KeywordConflict => write!(f, "highlight_keyword_conflict"),
-            Self::NotFound => write!(f, "highlight_not_found"),
-            Self::IoError(msg) => write!(f, "highlight_io_error: {msg}"),
-            Self::ParseError(msg) => write!(f, "highlight_parse_error: {msg}"),
+            Self::EmptyKeyword => write!(f, "a highlight rule needs a non-empty keyword"),
+            Self::NameRequired => write!(f, "a highlight rule needs a name"),
+            Self::NameTooLong => {
+                write!(f, "the highlight rule name is longer than 100 characters")
+            }
+            Self::InvalidColor => {
+                write!(f, "the color must be a hex value like #FF6B6B")
+            }
+            Self::KeywordConflict(keyword) => {
+                write!(f, "a highlight rule for keyword '{keyword}' already exists")
+            }
+            Self::NotFound(keyword) => {
+                write!(f, "no highlight rule matches keyword '{keyword}'")
+            }
+            Self::IoError(msg) => write!(f, "highlight rules file: {msg}"),
+            Self::ParseError(msg) => write!(f, "malformed highlight rules: {msg}"),
         }
     }
 }
 
+// `Display` is hand-written above, so `thiserror` is not in play and the trait
+// that makes this type composable — `?` straight into `anyhow::Result`, which is
+// what the CLI, the MCP server and the daemon all want — has to be stated.
 impl std::error::Error for HighlightError {}
 
 /// Path to the user-editable highlight rules file.
@@ -205,7 +230,7 @@ pub fn insert_rule(rule: HighlightRule) -> Result<Vec<HighlightRule>, HighlightE
     let mut rules = list_rules();
     let keywords: HashSet<&str> = rules.iter().map(|r| r.keyword.as_str()).collect();
     if keywords.contains(rule.keyword.as_str()) {
-        return Err(HighlightError::KeywordConflict);
+        return Err(HighlightError::KeywordConflict(rule.keyword.clone()));
     }
     rules.push(rule);
     let path = highlight_rules_path()
@@ -220,7 +245,7 @@ pub fn delete_rule(keyword: &str) -> Result<Vec<HighlightRule>, HighlightError> 
     let before = rules.len();
     rules.retain(|r| r.keyword != keyword);
     if rules.len() == before {
-        return Err(HighlightError::NotFound);
+        return Err(HighlightError::NotFound(keyword.to_string()));
     }
     let path = highlight_rules_path()
         .ok_or_else(|| HighlightError::IoError("cannot determine config directory".into()))?;
@@ -240,7 +265,7 @@ pub fn update_rule(
     let idx = rules
         .iter()
         .position(|r| r.keyword == old_keyword)
-        .ok_or(HighlightError::NotFound)?;
+        .ok_or_else(|| HighlightError::NotFound(old_keyword.to_string()))?;
     // If keyword changed, check for conflict with another rule
     if rule.keyword != old_keyword {
         let conflict = rules
@@ -248,7 +273,7 @@ pub fn update_rule(
             .enumerate()
             .any(|(i, r)| i != idx && r.keyword == rule.keyword);
         if conflict {
-            return Err(HighlightError::KeywordConflict);
+            return Err(HighlightError::KeywordConflict(rule.keyword.clone()));
         }
     }
     rules[idx] = rule;
@@ -349,7 +374,9 @@ mod tests {
             is_case_sensitive: false,
         };
         let err = insert_rule(rule).unwrap_err();
-        assert!(matches!(err, HighlightError::KeywordConflict));
+        // The payload names the keyword that clashed, so a non-UI caller does
+        // not have to echo back the rule it just constructed.
+        assert!(matches!(&err, HighlightError::KeywordConflict(k) if k == "ERROR"));
     }
 
     #[test]
@@ -448,7 +475,7 @@ mod tests {
         seed_default_rules().unwrap();
 
         let err = delete_rule("NONEXISTENT").unwrap_err();
-        assert!(matches!(err, HighlightError::NotFound));
+        assert!(matches!(&err, HighlightError::NotFound(k) if k == "NONEXISTENT"));
     }
 
     #[test]
@@ -504,7 +531,7 @@ mod tests {
             is_case_sensitive: false,
         };
         let err = update_rule("ERROR", updated).unwrap_err();
-        assert!(matches!(err, HighlightError::KeywordConflict));
+        assert!(matches!(&err, HighlightError::KeywordConflict(k) if k == "WARN"));
     }
 
     #[test]

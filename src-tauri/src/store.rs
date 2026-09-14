@@ -228,12 +228,12 @@ pub fn ensure_config_dir() -> Result<()> {
 /// other file under `~/.agent2ssh/` already gets.
 ///
 /// This is the shared write path for the independent rule files —
-/// `highlight_rules.json` and `copy_redact_rules.json`, plus `redact_rules.json`
-/// once its lifecycle is reachable. Each of them used to spell out create-dir,
-/// serialize and write on its own, and one never called
-/// `restrict_file_to_owner` at all, so its rule file landed at whatever the
-/// umask allowed. Keeping that step inside this function is the point: a rule
-/// file cannot be written world-readable by forgetting to ask for hardening.
+/// `highlight_rules.json`, `redact_rules.json`, `copy_redact_rules.json` and
+/// `ssh_algos.json`. Each of them used to spell out create-dir, serialize and
+/// write on its own, and one never called `restrict_file_to_owner` at all, so
+/// its rule file landed at whatever the umask allowed. Keeping that step inside
+/// this function is the point: a rule file cannot be written world-readable by
+/// forgetting to ask for hardening.
 ///
 /// It deliberately takes no lock and keeps no backup. `save_config` owns those
 /// concerns for `hosts.json`, where several processes may write and a recoverable

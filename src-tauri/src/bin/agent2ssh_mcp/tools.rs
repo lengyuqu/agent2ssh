@@ -63,6 +63,19 @@ pub(super) enum McpTool {
     SshEventsSubscribe,
     SshSyncDiff,
     SshSyncExport,
+    SshRedactRuleList,
+    SshRedactRuleAdd,
+    SshRedactRuleUpdate,
+    SshRedactRuleRemove,
+    SshRedactRuleReset,
+    SshHighlightRuleList,
+    SshHighlightRuleAdd,
+    SshHighlightRuleUpdate,
+    SshHighlightRuleRemove,
+    SshHighlightRuleReset,
+    SshAlgoPrefsGet,
+    SshAlgoPrefsSet,
+    SshAlgoPrefsClear,
 }
 
 pub(super) struct ToolCall {
@@ -145,6 +158,19 @@ fn tool_kind(name: &str) -> Option<McpTool> {
         "ssh_events_subscribe" => Some(McpTool::SshEventsSubscribe),
         "ssh_sync_diff" => Some(McpTool::SshSyncDiff),
         "ssh_sync_export" => Some(McpTool::SshSyncExport),
+        "ssh_redact_rule_list" => Some(McpTool::SshRedactRuleList),
+        "ssh_redact_rule_add" => Some(McpTool::SshRedactRuleAdd),
+        "ssh_redact_rule_update" => Some(McpTool::SshRedactRuleUpdate),
+        "ssh_redact_rule_remove" => Some(McpTool::SshRedactRuleRemove),
+        "ssh_redact_rule_reset" => Some(McpTool::SshRedactRuleReset),
+        "ssh_highlight_rule_list" => Some(McpTool::SshHighlightRuleList),
+        "ssh_highlight_rule_add" => Some(McpTool::SshHighlightRuleAdd),
+        "ssh_highlight_rule_update" => Some(McpTool::SshHighlightRuleUpdate),
+        "ssh_highlight_rule_remove" => Some(McpTool::SshHighlightRuleRemove),
+        "ssh_highlight_rule_reset" => Some(McpTool::SshHighlightRuleReset),
+        "ssh_algo_prefs_get" => Some(McpTool::SshAlgoPrefsGet),
+        "ssh_algo_prefs_set" => Some(McpTool::SshAlgoPrefsSet),
+        "ssh_algo_prefs_clear" => Some(McpTool::SshAlgoPrefsClear),
         _ => None,
     }
 }
@@ -835,6 +861,133 @@ fn tool_definitions() -> Vec<Value> {
                             "path": { "type": "string", "description": "Path to write SSH config (default: ~/.ssh/config.d/agent2ssh.conf)" }
                         }
                     }
+                },
+                {
+                    "name": "ssh_redact_rule_list",
+                    "description": "List the sensitive-data redaction rules this instance applies before it writes an audit record, webhook notification, playbook result or diagnostic export. Each rule is marked when it is one of the built-in defaults. Read-only.",
+                    "inputSchema": { "type": "object", "properties": {} }
+                },
+                {
+                    "name": "ssh_redact_rule_add",
+                    "description": "Add a redaction rule. A rule's pattern is its identity, so adding a pattern that is already present fails instead of overwriting it, and an invalid regex is rejected before anything is written. The replacement is literal.",
+                    "inputSchema": {
+                        "type": "object",
+                        "required": ["pattern", "replacement"],
+                        "properties": {
+                            "pattern":     { "type": "string", "description": "Regular expression to match; also the rule's identity." },
+                            "replacement": { "type": "string", "description": "Literal replacement text, used verbatim (capture groups are not expanded)." }
+                        }
+                    }
+                },
+                {
+                    "name": "ssh_redact_rule_update",
+                    "description": "Replace the redaction rule identified by pattern. Omit new_pattern to keep the current pattern, which is the usual case of changing only the replacement.",
+                    "inputSchema": {
+                        "type": "object",
+                        "required": ["pattern", "replacement"],
+                        "properties": {
+                            "pattern":     { "type": "string", "description": "The pattern that identifies the rule to replace." },
+                            "replacement": { "type": "string", "description": "New literal replacement text." },
+                            "new_pattern": { "type": "string", "description": "Rename the rule to this pattern (default: keep pattern)." }
+                        }
+                    }
+                },
+                {
+                    "name": "ssh_redact_rule_remove",
+                    "description": "Remove a redaction rule. This cannot be undone by re-adding the pattern as it was, and it stops that class of secret being redacted everywhere this instance writes, so force must be true; a call without it is rejected and changes nothing. ssh_redact_rule_reset restores the built-in set.",
+                    "inputSchema": {
+                        "type": "object",
+                        "required": ["pattern", "force"],
+                        "properties": {
+                            "pattern": { "type": "string", "description": "The pattern that identifies the rule to remove." },
+                            "force":   { "type": "boolean", "description": "Must be true. Removing a rule means that class of secret stops being redacted in every audit record, webhook notification, playbook result and diagnostic export." }
+                        }
+                    }
+                },
+                {
+                    "name": "ssh_redact_rule_reset",
+                    "description": "Restore the built-in redaction rule set, discarding every edit you have made. This is the way back from a removal, because it only ever adds rules back. Modifies configuration.",
+                    "inputSchema": { "type": "object", "properties": {} }
+                },
+                {
+                    "name": "ssh_highlight_rule_list",
+                    "description": "List the terminal highlight rules the UI paints matches with. Read-only.",
+                    "inputSchema": { "type": "object", "properties": {} }
+                },
+                {
+                    "name": "ssh_highlight_rule_add",
+                    "description": "Add a terminal highlight rule. A rule's keyword is its identity, so a duplicate fails instead of overwriting. Rules are stored as regular expressions: pass literal true to escape the keyword first so it matches as plain text.",
+                    "inputSchema": {
+                        "type": "object",
+                        "required": ["keyword", "name", "color"],
+                        "properties": {
+                            "keyword":        { "type": "string",  "description": "Pattern to match, or literal text when literal is true; also the rule's identity." },
+                            "name":           { "type": "string",  "description": "Human-readable label shown in the settings panel." },
+                            "color":          { "type": "string",  "description": "Hex color like #FF6B6B." },
+                            "case_sensitive": { "type": "boolean", "description": "Match case-sensitively (default false)." },
+                            "literal":        { "type": "boolean", "description": "Escape keyword so it matches literally instead of as a regular expression (default false)." }
+                        }
+                    }
+                },
+                {
+                    "name": "ssh_highlight_rule_update",
+                    "description": "Replace the terminal highlight rule identified by keyword. Every field you omit keeps its current value. This changes only what the terminal paints, never what the app writes.",
+                    "inputSchema": {
+                        "type": "object",
+                        "required": ["keyword"],
+                        "properties": {
+                            "keyword":        { "type": "string",  "description": "The keyword that identifies the rule to replace." },
+                            "new_keyword":    { "type": "string",  "description": "Rename the rule to this pattern (default: keep keyword)." },
+                            "name":           { "type": "string",  "description": "New label (default: keep)." },
+                            "color":          { "type": "string",  "description": "New hex color (default: keep)." },
+                            "case_sensitive": { "type": "boolean", "description": "New case-sensitivity (default: keep)." },
+                            "literal":        { "type": "boolean", "description": "Escape new_keyword so it matches literally; meaningful only together with new_keyword." }
+                        }
+                    }
+                },
+                {
+                    "name": "ssh_highlight_rule_remove",
+                    "description": "Remove a terminal highlight rule. This hides nothing the app writes, but it still requires force so a mistyped keyword cannot quietly drop a rule you meant to keep. ssh_highlight_rule_reset restores the built-in set.",
+                    "inputSchema": {
+                        "type": "object",
+                        "required": ["keyword", "force"],
+                        "properties": {
+                            "keyword": { "type": "string",  "description": "The keyword that identifies the rule to remove." },
+                            "force":   { "type": "boolean", "description": "Must be true." }
+                        }
+                    }
+                },
+                {
+                    "name": "ssh_highlight_rule_reset",
+                    "description": "Restore the built-in terminal highlight rules, discarding every edit. Modifies configuration.",
+                    "inputSchema": { "type": "object", "properties": {} }
+                },
+                {
+                    "name": "ssh_algo_prefs_get",
+                    "description": "Show the SSH algorithm preferences in effect for the next handshake, whether they are an override or the built-in defaults, and the defaults they would fall back to. Read-only.",
+                    "inputSchema": { "type": "object", "properties": {} }
+                },
+                {
+                    "name": "ssh_algo_prefs_set",
+                    "description": "Replace one or more SSH algorithm lists; the ones you leave out keep their current value. Each list is checked before it is stored: it must not be empty, must not repeat an entry, and every entry has to look like an algorithm name, so a list that could not complete a handshake is rejected rather than written. Takes effect on the next handshake; already-open sessions keep the algorithms they negotiated.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "kex":       { "type": "string", "description": "Comma-separated key exchange algorithms, most preferred first." },
+                            "hostkey":   { "type": "string", "description": "Comma-separated host key algorithms." },
+                            "cipher_cs": { "type": "string", "description": "Comma-separated client-to-server ciphers." },
+                            "cipher_sc": { "type": "string", "description": "Comma-separated server-to-client ciphers." },
+                            "mac_cs":    { "type": "string", "description": "Comma-separated client-to-server MACs." },
+                            "mac_sc":    { "type": "string", "description": "Comma-separated server-to-client MACs." },
+                            "comp_cs":   { "type": "string", "description": "Comma-separated client-to-server compression." },
+                            "comp_sc":   { "type": "string", "description": "Comma-separated server-to-client compression." }
+                        }
+                    }
+                },
+                {
+                    "name": "ssh_algo_prefs_clear",
+                    "description": "Drop the SSH algorithm overrides and go back to the built-in safe defaults. Modifies configuration.",
+                    "inputSchema": { "type": "object", "properties": {} }
                 }
             ])
         .as_array()

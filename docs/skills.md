@@ -1,6 +1,6 @@
 # Agent2SSH MCP Tools Reference
 
-Agent2SSH exposes 58 tools via the Model Context Protocol (MCP) stdio server.
+Agent2SSH exposes 71 tools via the Model Context Protocol (MCP) stdio server.
 
 ## Tool List
 
@@ -68,6 +68,19 @@ the `mcp_tools_match_skills_md_documentation` integration test.
 | 56 | `ssh_events_subscribe` | Subscribe to the real-time event stream. Returns the latest events from the event bus. For continuous streaming, use the daemon's SSE endpoint `GET /events/stream`. |
 | 57 | `ssh_sync_diff` | Compare Agent2SSH hosts with `~/.ssh/config`. Shows hosts only on one side and conflicts. |
 | 58 | `ssh_sync_export` | Export Agent2SSH hosts to SSH config format file (default `~/.ssh/config.d/agent2ssh.conf`). |
+| 59 | `ssh_redact_rule_list` | List the sensitive-data redaction rules this instance applies before it writes an audit record, webhook notification, playbook result or diagnostic export. Each rule is marked when it is one of the built-in defaults. Read-only. |
+| 60 | `ssh_redact_rule_add` | Add a redaction rule. A rule's pattern is its identity, so adding a pattern that is already present fails instead of overwriting it, and an invalid regex is rejected before anything is written. The replacement is literal. |
+| 61 | `ssh_redact_rule_update` | Replace the redaction rule identified by `pattern`. Omit `new_pattern` to keep the current pattern, which is the usual case of changing only the replacement. |
+| 62 | `ssh_redact_rule_remove` | Remove a redaction rule. Requires `force: true`, because it stops that class of secret being redacted everywhere this instance writes; a call without it is rejected and changes nothing. `ssh_redact_rule_reset` restores the built-in set. |
+| 63 | `ssh_redact_rule_reset` | Restore the built-in redaction rule set, discarding every edit. This is the way back from a removal, because it only ever adds rules back. |
+| 64 | `ssh_highlight_rule_list` | List the terminal highlight rules the UI paints matches with. Read-only. |
+| 65 | `ssh_highlight_rule_add` | Add a terminal highlight rule. A rule's keyword is its identity, so a duplicate fails instead of overwriting. Rules are stored as regular expressions: pass `literal: true` to escape the keyword first so it matches as plain text. |
+| 66 | `ssh_highlight_rule_update` | Replace the terminal highlight rule identified by `keyword`. Every field you omit keeps its current value. `literal` escapes `new_keyword` and is meaningful only together with it. Changes only what the terminal paints, never what the app writes. |
+| 67 | `ssh_highlight_rule_remove` | Remove a terminal highlight rule. Requires `force: true` so a mistyped keyword cannot quietly drop a rule you meant to keep. `ssh_highlight_rule_reset` restores the built-in set. |
+| 68 | `ssh_highlight_rule_reset` | Restore the built-in terminal highlight rules, discarding every edit. |
+| 69 | `ssh_algo_prefs_get` | Show the SSH algorithm preferences in effect for the next handshake, whether they are an override or the built-in defaults, and the defaults they would fall back to. Read-only. |
+| 70 | `ssh_algo_prefs_set` | Replace one or more SSH algorithm lists; the ones you leave out keep their current value. Each list is checked before it is stored, so a list that could not complete a handshake is rejected rather than written. Takes effect on the next handshake. |
+| 71 | `ssh_algo_prefs_clear` | Drop the SSH algorithm overrides and go back to the built-in safe defaults. |
 
 ## Risk Levels
 

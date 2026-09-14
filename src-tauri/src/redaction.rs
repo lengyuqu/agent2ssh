@@ -406,8 +406,14 @@ pub fn load_user_rules() -> Vec<RedactRule> {
 /// customizations. This is the only way to restore a rule the user deleted.
 ///
 /// Note the direction of travel: this restores redaction rules, it never
-/// removes them. That is why the operation is safe to expose on every surface,
-/// while "add/remove a rule" deliberately is not.
+/// removes them. An earlier revision let that asymmetry decide which operations
+/// to expose — reset on every surface, add/update/delete on none — and that was
+/// wrong: the same settings panel already edited its sibling
+/// `highlight_rules.json` in full, so the restriction never made anything safer,
+/// it only pushed editing back to a file nothing pointed at. The asymmetry now
+/// decides *framing* instead: removal has to name the class of secret that stops
+/// being redacted, and this is the operation that puts it back. All four
+/// operations reach every surface.
 pub fn reset_default_rules() -> Result<(), RedactRuleError> {
     let path = redact_rules_path()?;
     write_rules_file(&path, &default_rules())

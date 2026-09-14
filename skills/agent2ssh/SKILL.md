@@ -1,7 +1,7 @@
 ---
 name: agent2ssh
-description: Operate remote machines over SSH through Agent2SSH — host management, command execution with risk classification and approvals, SFTP transfers, persistent PTY sessions, port forwards, playbooks, and audit. Use when asked to run commands on remote servers, transfer files, manage SSH hosts or tunnels, or automate multi-host operations via the agent2ssh CLI or its MCP tools.
-version: 0.2.1
+description: Operate remote machines over SSH through Agent2SSH — host management, command execution with risk classification and approvals, SFTP transfers, persistent PTY sessions, port forwards, playbooks, audit, and the local redaction / highlight / SSH-algorithm rule sets. Use when asked to run commands on remote servers, transfer files, manage SSH hosts or tunnels, tune what gets redacted or highlighted, or automate multi-host operations via the agent2ssh CLI or its MCP tools.
+version: 0.3.0
 ---
 
 # Agent2SSH Skill
@@ -24,6 +24,7 @@ don't read the whole file for a single task):
 | Check reachability before batch ops | `ssh_ping` | Connectivity Check |
 | Add / remove / import hosts | `ssh_add_host` / `host import-config` | Host Management |
 | Review past executions | `ssh_audit` | Audit Log |
+| Tune redaction / highlight / SSH algorithms | `ssh_redact_rule_*` / `ssh_highlight_rule_*` / `ssh_algo_prefs_*` | Local Configuration |
 | High-risk command (sudo/rm/kill) | `force: true` + user confirmation | Risk Levels |
 
 ## Discovery Checklist
@@ -256,6 +257,47 @@ agent2ssh audit --exit-code 1 --json
 ```
 
 MCP: `ssh_audit` with optional `host`, `risk_level`, `exit_code`, `since`, `until` filters.
+
+---
+
+## Local Configuration
+
+Three independent rule sets live under `~/.agent2ssh/` and are reachable from
+every surface — desktop Settings, `agent2ssh <group>`, and the `ssh_*` MCP tools:
+
+| Rule set | Group | What it changes |
+|----------|-------|-----------------|
+| Sensitive-data redaction | `redact` | What gets scrubbed from audit records, webhook notifications, playbook results and diagnostic exports |
+| Terminal highlight | `highlight` | What the terminal paints — never what the app writes |
+| SSH algorithm preferences | `algo` | The algorithms offered in the next handshake |
+
+```bash
+agent2ssh redact list --json
+agent2ssh redact add 'MY_SECRET_[0-9]+' '<scrubbed>' --json
+agent2ssh highlight add 'ERROR' --name Errors --color '#FF6B6B' --json
+agent2ssh highlight add 'a.b' --name Literal --color '#FFD060' --literal --json
+agent2ssh algo set --kex curve25519-sha256 --json
+```
+
+Four things to know before calling these:
+
+- **Removal needs `--force` / `force: true`.** `redact remove` and
+  `highlight remove` refuse an unconfirmed call — exit **2** on the CLI, HTTP
+  **400** from the daemon and MCP — and change nothing. `... reset` restores the
+  built-in set, which is the way back from a removal.
+- **A rule's pattern or keyword is its identity.** Adding a duplicate fails
+  rather than overwriting it — including when it duplicates a built-in.
+- **Only `redact` validates the pattern.** `redact add` rejects a pattern that
+  does not compile or that matches the empty string, before anything is written.
+  `highlight` does not: its rule is compiled by the terminal renderer's
+  JavaScript engine, so a Rust-side check would accept a different grammar.
+- **`--literal` escapes at the call site**, so the text matches as plain text
+  rather than as a regex. Every rule is stored as a regex, so `highlight list`
+  does not distinguish the two, and renaming a literal rule needs its new
+  keyword passed with `--literal` as well or it would be escaped twice.
+- **`algo set` touches only the lists you name**; `algo clear` drops the
+  overrides and falls back to the built-in safe defaults. A handshake already
+  open keeps the algorithms it negotiated.
 
 ---
 

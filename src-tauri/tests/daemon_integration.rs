@@ -960,20 +960,20 @@ async fn http_hosts_list_returns_valid_json_array() {
 // Part 3: MCP tool enumeration test (P4-1)
 // ============================================================================
 
-/// Meta-test: verify the MCP binary declares exactly 58 tools by parsing
+/// Meta-test: verify the MCP binary declares exactly 71 tools by parsing
 /// the schema-driven tool registry and counting `"name":` entries.
 ///
 /// This avoids the need to run the MCP server over stdio JSON-RPC, which
 /// requires a full process lifecycle. Instead we treat the source as the
 /// canonical tool registry and assert on its structure.
 #[test]
-fn mcp_tool_list_contains_exactly_58_tools() {
+fn mcp_tool_list_contains_exactly_71_tools() {
     let registry = include_str!("../src/bin/agent2ssh_mcp/tools.rs");
     let tool_count = registry.matches("\"name\": \"ssh_").count();
 
     assert_eq!(
-        tool_count, 58,
-        "Expected exactly 58 MCP tools, found {tool_count}. \
+        tool_count, 71,
+        "Expected exactly 71 MCP tools, found {tool_count}. \
          If you added or removed a tool, update this count and the expected list below."
     );
 }
@@ -1042,6 +1042,19 @@ fn mcp_tool_list_contains_all_expected_names() {
         "ssh_events_subscribe",
         "ssh_sync_diff",
         "ssh_sync_export",
+        "ssh_redact_rule_list",
+        "ssh_redact_rule_add",
+        "ssh_redact_rule_update",
+        "ssh_redact_rule_remove",
+        "ssh_redact_rule_reset",
+        "ssh_highlight_rule_list",
+        "ssh_highlight_rule_add",
+        "ssh_highlight_rule_update",
+        "ssh_highlight_rule_remove",
+        "ssh_highlight_rule_reset",
+        "ssh_algo_prefs_get",
+        "ssh_algo_prefs_set",
+        "ssh_algo_prefs_clear",
     ];
 
     for tool_name in &expected_tools {
@@ -1117,6 +1130,19 @@ fn mcp_call_tool_handler_covers_all_tools() {
         "ssh_events_subscribe",
         "ssh_sync_diff",
         "ssh_sync_export",
+        "ssh_redact_rule_list",
+        "ssh_redact_rule_add",
+        "ssh_redact_rule_update",
+        "ssh_redact_rule_remove",
+        "ssh_redact_rule_reset",
+        "ssh_highlight_rule_list",
+        "ssh_highlight_rule_add",
+        "ssh_highlight_rule_update",
+        "ssh_highlight_rule_remove",
+        "ssh_highlight_rule_reset",
+        "ssh_algo_prefs_get",
+        "ssh_algo_prefs_set",
+        "ssh_algo_prefs_clear",
     ];
 
     // Find the call_tool function body
@@ -1771,6 +1797,19 @@ fn mcp_tools_match_skills_md_documentation() {
         "ssh_events_subscribe",
         "ssh_sync_diff",
         "ssh_sync_export",
+        "ssh_redact_rule_list",
+        "ssh_redact_rule_add",
+        "ssh_redact_rule_update",
+        "ssh_redact_rule_remove",
+        "ssh_redact_rule_reset",
+        "ssh_highlight_rule_list",
+        "ssh_highlight_rule_add",
+        "ssh_highlight_rule_update",
+        "ssh_highlight_rule_remove",
+        "ssh_highlight_rule_reset",
+        "ssh_algo_prefs_get",
+        "ssh_algo_prefs_set",
+        "ssh_algo_prefs_clear",
     ];
 
     assert_eq!(
@@ -1802,6 +1841,97 @@ fn mcp_tools_match_skills_md_documentation() {
 }
 
 // ── S3-2: OpenAPI / daemon contract checks ──────────────────────────────────
+
+/// Every daemon route is in `docs/api.yaml`, and nothing else is.
+///
+/// `docs/api.yaml` is the published contract, so a route that is not in it is a
+/// route no client can discover — and the gap is invisible from either side
+/// alone, which is how `/snippets`, the port-forward batch operations and the
+/// 2FA prompt endpoints all went undocumented at once. The two non-API routes
+/// are the browser console and its root redirect.
+#[test]
+fn api_yaml_documents_every_daemon_route() {
+    // `/` and `/console` serve the web console, not the API.
+    const NON_API_ROUTES: [&str; 2] = ["/", "/console"];
+
+    let daemon = include_str!("../src/bin/agent2ssh-daemon.rs");
+    let spec = include_str!("../../docs/api.yaml");
+
+    // `Path` parameters are `:id` in axum and `{id}` in OpenAPI.
+    let mut routes: Vec<String> = Vec::new();
+    for (index, _) in daemon.match_indices(".route(") {
+        let rest = &daemon[index..];
+        let Some(open) = rest.find('"') else { continue };
+        let Some(close) = rest[open + 1..].find('"') else {
+            continue;
+        };
+        let path = &rest[open + 1..open + 1 + close];
+        if !path.starts_with('/') {
+            continue;
+        }
+        let mut normalized = String::new();
+        let mut chars = path.chars();
+        while let Some(ch) = chars.next() {
+            if ch == ':' {
+                normalized.push('{');
+                for ch in chars.by_ref() {
+                    if ch == '/' {
+                        break;
+                    }
+                    normalized.push(ch);
+                }
+                normalized.push('}');
+                normalized.push('/');
+            } else {
+                normalized.push(ch);
+            }
+        }
+        // Keep the root path intact; only strip trailing slashes after it.
+        while normalized.len() > 1 && normalized.ends_with('/') {
+            normalized.pop();
+        }
+        if !NON_API_ROUTES.contains(&normalized.as_str()) {
+            routes.push(normalized);
+        }
+    }
+    routes.sort();
+    routes.dedup();
+    assert!(!routes.is_empty(), "no daemon routes were found to compare");
+
+    // Top-level OpenAPI paths are indented two spaces under `paths:`.
+    let documented: Vec<String> = spec
+        .lines()
+        .filter_map(|line| line.strip_prefix("  /"))
+        .map(|rest| rest.split(':').next().unwrap_or_default())
+        .map(|path| {
+            if path.is_empty() {
+                "/".to_string()
+            } else {
+                format!("/{path}")
+            }
+        })
+        .collect();
+
+    let undocumented: Vec<&String> = routes
+        .iter()
+        .filter(|route| !documented.iter().any(|path| path == route.as_str()))
+        .collect();
+    assert!(
+        undocumented.is_empty(),
+        "these daemon routes are missing from docs/api.yaml: {undocumented:?}. \
+         Add them to `paths:` — every route is part of the contract a client programs against."
+    );
+
+    let phantom: Vec<&String> = documented
+        .iter()
+        .filter(|path| !routes.iter().any(|route| route == *path))
+        .collect();
+    assert!(
+        phantom.is_empty(),
+        "docs/api.yaml documents paths the daemon does not serve: {phantom:?}. \
+         Either the route was removed and the spec was not, or the path is misspelled."
+    );
+}
 
 #[test]
 fn exec_request_schema_includes_reason_and_change_id() {

@@ -177,6 +177,265 @@ async fn snippet_help_and_local_crud_contract() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+// ── Local configuration lifecycles (redact / highlight / algo) ─────────────
+
+/// The three rule/algorithm command families expose the same shape as
+/// `snippet`: a help listing, a `--json` list, and local CRUD. What this test
+/// pins down beyond that is the removal gate — `remove` on the two rule
+/// families exits **2**, not 1, because "you forgot --force" has to stay
+/// distinguishable from "that rule does not exist" for a script.
+#[tokio::test]
+async fn redact_highlight_algo_help_and_local_crud_contract() {
+    for (group, commands) in [
+        (
+            "redact",
+            ["list", "add", "update", "remove", "reset"].as_slice(),
+        ),
+        (
+            "highlight",
+            ["list", "add", "update", "remove", "reset"].as_slice(),
+        ),
+        ("algo", ["get", "set", "clear"].as_slice()),
+    ] {
+        let (stdout, _stderr, code) = run_cli(&[group, "--help"]).await;
+        assert_eq!(code, Some(0), "{group} --help must exit 0");
+        for command in commands {
+            assert!(
+                stdout.contains(command),
+                "{group} help must mention {command}"
+            );
+        }
+    }
+
+    let dir = unique_temp_dir("local-config-crud");
+
+    // ── redact: seeded built-ins, then add / remove / reset ────────────────
+    let (stdout, stderr, code) = run_cli_in_dir(&dir, &["redact", "list", "--json"]).await;
+    assert_eq!(code, Some(0), "redact list failed: {stderr}");
+    let seeded: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let seeded = seeded.as_array().unwrap();
+    assert!(
+        !seeded.is_empty(),
+        "a first read must seed the built-in rules"
+    );
+    assert!(
+        seeded.iter().all(|rule| rule["is_builtin"] == true),
+        "a freshly seeded set is entirely built-in"
+    );
+    let seeded_len = seeded.len();
+
+    let (stdout, stderr, code) = run_cli_in_dir(
+        &dir,
+        &["redact", "add", "MY_SEC_[0-9]+", "<scrubbed>", "--json"],
+    )
+    .await;
+    assert_eq!(code, Some(0), "redact add failed: {stderr}");
+    let added: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let mine = added
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|rule| rule["pattern"] == "MY_SEC_[0-9]+")
+        .expect("the added rule must be listed");
+    assert_eq!(mine["is_builtin"], false);
+    assert_eq!(mine["replacement"], "<scrubbed>");
+
+    // The pattern is the identity, so a second rule for it is refused rather
+    // than allowed to shadow the first — including when it duplicates a
+    // built-in, which is in the same file.
+    let (_stdout, stderr, code) = run_cli_in_dir(
+        &dir,
+        &["redact", "add", "MY_SEC_[0-9]+", "<other>", "--json"],
+    )
+    .await;
+    assert_ne!(code, Some(0), "a duplicate pattern must be refused");
+    assert!(stderr.contains("already exists"), "stderr: {stderr}");
+
+    let (_stdout, stderr, code) =
+        run_cli_in_dir(&dir, &["redact", "add", "AKIA[0-9A-Z]{16}", "<x>"]).await;
+    assert_ne!(
+        code,
+        Some(0),
+        "duplicating a built-in pattern must be refused too"
+    );
+    assert!(stderr.contains("already exists"), "stderr: {stderr}");
+
+    // `redact` validates the regex before writing; `highlight` does not, because
+    // the renderer's JavaScript engine compiles it, not this one. Both halves
+    // are pinned here so the asymmetry cannot drift unnoticed.
+    let (_stdout, _stderr, code) = run_cli_in_dir(&dir, &["redact", "add", "(", "<x>"]).await;
+    assert_ne!(code, Some(0), "an uncompilable pattern must be refused");
+
+    let (_stdout, stderr, code) = run_cli_in_dir(
+        &dir,
+        &[
+            "highlight",
+            "add",
+            "not-a-color",
+            "--name",
+            "x",
+            "--color",
+            "red",
+        ],
+    )
+    .await;
+    assert_ne!(code, Some(0), "a non-hex color must be refused");
+    assert!(stderr.contains("hex"), "stderr: {stderr}");
+
+    let (stdout, stderr, code) = run_cli_in_dir(
+        &dir,
+        &[
+            "highlight",
+            "add",
+            "(",
+            "--name",
+            "unchecked-regex",
+            "--color",
+            "#123456",
+            "--json",
+        ],
+    )
+    .await;
+    assert_eq!(
+        code,
+        Some(0),
+        "highlight must not reject a keyword this engine cannot compile: {stderr}"
+    );
+    let unchecked: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(unchecked
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|rule| rule["name"] == "unchecked-regex"));
+
+    // Removing without --force is a refusal, not a failure: exit 2.
+    let (_stdout, stderr, code) =
+        run_cli_in_dir(&dir, &["redact", "remove", "MY_SEC_[0-9]+"]).await;
+    assert_eq!(code, Some(2), "unconfirmed removal must exit 2");
+    assert!(
+        stderr.contains("--force"),
+        "the refusal must name the flag: {stderr}"
+    );
+    // ...and it must not have removed anything.
+    let (stdout, _stderr, code) = run_cli_in_dir(&dir, &["redact", "list", "--json"]).await;
+    assert_eq!(code, Some(0));
+    let still_there: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(
+        still_there
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|rule| rule["pattern"] == "MY_SEC_[0-9]+"),
+        "a refused removal must leave the rule in place"
+    );
+
+    let (stdout, stderr, code) = run_cli_in_dir(
+        &dir,
+        &["redact", "remove", "MY_SEC_[0-9]+", "--force", "--json"],
+    )
+    .await;
+    assert_eq!(code, Some(0), "confirmed removal failed: {stderr}");
+    let after: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(
+        !after
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|rule| rule["pattern"] == "MY_SEC_[0-9]+"),
+        "a confirmed removal must drop the rule"
+    );
+
+    let (stdout, stderr, code) = run_cli_in_dir(&dir, &["redact", "reset", "--json"]).await;
+    assert_eq!(code, Some(0), "redact reset failed: {stderr}");
+    let restored: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(
+        restored.as_array().unwrap().len(),
+        seeded_len,
+        "reset must restore exactly the seeded set"
+    );
+
+    // ── highlight: --literal escapes, duplicates are refused ───────────────
+    let (stdout, stderr, code) = run_cli_in_dir(
+        &dir,
+        &[
+            "highlight",
+            "add",
+            "a.b",
+            "--name",
+            "dots",
+            "--color",
+            "#ff0000",
+            "--literal",
+            "--json",
+        ],
+    )
+    .await;
+    assert_eq!(code, Some(0), "highlight add failed: {stderr}");
+    let rules: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let dots = rules
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|rule| rule["name"] == "dots")
+        .expect("the added rule must be listed");
+    // `--literal` escapes at the call site: `is_regex` is always true because
+    // `normalize_rule` consumes `false` as a migration input.
+    assert_eq!(
+        dots["keyword"], "a\\.b",
+        "--literal must escape the keyword before storing it"
+    );
+    assert_eq!(dots["is_regex"], true);
+
+    // The escaped form is the identity, so the unescaped one does not match.
+    let (_stdout, stderr, code) =
+        run_cli_in_dir(&dir, &["highlight", "remove", "a.b", "--force"]).await;
+    assert_ne!(code, Some(0), "an unescaped keyword is not the identity");
+    assert!(stderr.contains("no highlight rule"), "stderr: {stderr}");
+
+    let (_stdout, stderr, code) = run_cli_in_dir(&dir, &["highlight", "remove", "a\\.b"]).await;
+    assert_eq!(code, Some(2), "unconfirmed removal must exit 2");
+    assert!(stderr.contains("--force"), "the refusal must name the flag");
+
+    // ── algo: a partial set keeps the untouched lists ──────────────────────
+    let (stdout, stderr, code) = run_cli_in_dir(&dir, &["algo", "get", "--json"]).await;
+    assert_eq!(code, Some(0), "algo get failed: {stderr}");
+    let before: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(before["custom"], false, "nothing is overridden yet");
+    let hostkey_before = before["prefs"]["hostkey"].clone();
+
+    let (stdout, stderr, code) = run_cli_in_dir(
+        &dir,
+        &["algo", "set", "--kex", "curve25519-sha256", "--json"],
+    )
+    .await;
+    assert_eq!(code, Some(0), "algo set failed: {stderr}");
+    let after: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(after["custom"], true);
+    assert_eq!(after["prefs"]["kex"], "curve25519-sha256");
+    assert_eq!(
+        after["prefs"]["hostkey"], hostkey_before,
+        "setting one list must not reset the others"
+    );
+
+    let (_stdout, stderr, code) = run_cli_in_dir(&dir, &["algo", "set"]).await;
+    assert_ne!(code, Some(0), "a set that names no list must fail");
+    assert!(
+        stderr.contains("nothing to set"),
+        "stderr must say why: {stderr}"
+    );
+
+    let (stdout, stderr, code) = run_cli_in_dir(&dir, &["algo", "clear", "--json"]).await;
+    assert_eq!(code, Some(0), "algo clear failed: {stderr}");
+    let cleared: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(cleared["custom"], false);
+    assert_eq!(
+        cleared["prefs"]["kex"], before["prefs"]["kex"],
+        "clearing must fall back to the defaults"
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 // ── Version contract ───────────────────────────────────────────────────────
 
 #[tokio::test]

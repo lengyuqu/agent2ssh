@@ -146,6 +146,36 @@ pub fn has_custom_algo_prefs() -> bool {
     load_algo_prefs().is_some()
 }
 
+/// Everything a caller needs to show the algorithm settings in one round trip.
+///
+/// This lives here rather than beside the desktop command that first needed it,
+/// because the CLI and the daemon read and write these same three fields and the
+/// desktop's copy sat behind `feature = "tauri"` — compiled out of both of them.
+/// A second, same-shaped struct for those two surfaces is the "mirror of a live
+/// type" that A24's cleanup already had to delete once.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AlgoPrefsState {
+    /// Preferences currently in effect for the next connection.
+    pub prefs: SshAlgoPrefs,
+    /// True when `ssh_algos.json` exists, i.e. the user overrode the defaults.
+    pub custom: bool,
+    /// The built-in defaults, so a caller can offer a reset target without
+    /// duplicating these values.
+    pub defaults: SshAlgoPrefs,
+}
+
+impl AlgoPrefsState {
+    /// What is in effect, whether it is an override, and the defaults it would
+    /// fall back to.
+    pub fn snapshot() -> Self {
+        Self {
+            prefs: effective_algo_prefs(),
+            custom: has_custom_algo_prefs(),
+            defaults: safe_defaults(),
+        }
+    }
+}
+
 /// The compression algorithm libssh2 accepts in this build.
 ///
 /// The `ssh2` crate does not compile in zlib support, so `none` is the only
@@ -237,12 +267,8 @@ fn is_plausible_algorithm_name(name: &str) -> bool {
 /// simply trust its input.
 pub fn save_algo_prefs(prefs: &SshAlgoPrefs) -> Result<()> {
     validate_algo_prefs(prefs)?;
-    crate::store::ensure_config_dir()?;
     let path = crate::store::config_dir()?.join("ssh_algos.json");
-    let raw = serde_json::to_string_pretty(prefs)?;
-    std::fs::write(&path, raw)?;
-    crate::store::restrict_file_to_owner(&path)?;
-    Ok(())
+    crate::store::write_private_json(&path, prefs)
 }
 
 /// Drop `ssh_algos.json` so the next connection falls back to [`safe_defaults`].
