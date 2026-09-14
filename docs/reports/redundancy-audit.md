@@ -325,7 +325,7 @@
 | **R4** | `ssh_config.rs` 的**测试专用 glob 镜像** | 3 个 `#[cfg(test)]` 函数（`glob_match` / `glob_match_bytes` / `char_class_match`）+ 约 10 个只为测它们的单测 | 生产侧 `splice_includes` 用的是 **`glob` crate**；这组镜像全仓仅被自己的测试引用 | 删除镜像与其单测（生产路径已有 `include_splices_glob_matches` 等真实覆盖），或明确它要保护什么语义 |
 | **R5** | `AuditEntry` 测试 fixture 重复 | `playbook.rs:853` + `store.rs:2194` | 两处注释均自认「Mirror append_audit」；重复块检测命中 | 抽 `#[cfg(test)] pub(crate) fn test_audit_entry(...)` 复用 |
 | **R6** | P1#11 手写 spinner / 错误块 | `animate-spin` **25 处 / 12 文件**；`text-destructive` **21 文件**；`ErrorState` 仅 `SFTPPanel` 1 个组件在用 | 逐文件统计 | 体量最大、且属用户可见一致性；报告判定「无安全 panel 级替换点」，需逐处确认后再动 |
-| **R7** | `redaction.rs` / `highlight.rs` 平行规则库 | 各含 `seed_default_rules()` + `load_rules_from_json()`，同职责、不同规则类型 | 同名 `pub fn` 扫描 | 可抽泛型规则库；中等收益、中等风险（原报告未列） |
+| **R7** | `redaction.rs` / `highlight.rs` 平行规则库 | 各含 `seed_default_rules()` + `load_rules_from_json()`，同职责、不同规则类型 | 同名 `pub fn` 扫描 | 可抽泛型规则库；中等收益、中等风险（原报告未列）。**⚠ 本行的范围与性质均已被证伪：实测是三方平行（漏了 `copy_redact.rs`）、其中一方是死代码、真正缺陷是权限加固缺失而非重复。见「对本报告自身结论的三处订正」** |
 | **R8** | `rand` + `getrandom` 双 RNG 入口 | `Cargo.toml:65-66`；`rand` 仅在 `backup_crypto.rs:78-79` 用了 2 次 | `getrandom::fill` 已在 `keys.rs` / `mcp_binding.rs` / `secrets.rs` 使用 | 这 2 处改为 `getrandom::fill` 后删 `rand` 依赖（先 `cargo tree -i rand` 确认无其他消费者） |
 | **R9** | 测试助手 `unique_dir` ×2 | `copy_redact.rs:153` + `snippets.rs:198` | `#[cfg(test)]` 扫描 | 低收益 |
 | **R10** | 前端 2 处 8 行 UI 惯用法 | 「Refresh IconButton + `animate-spin`」`SnippetsDialog:170` / `PlaybooksPanel:339`；「host `<Select>`」`TerminalPanel:445` / `PlaybooksPanel:576` | 重复块检测 | 低收益；与 R6 同源，做 R6 可顺带覆盖 |
@@ -341,7 +341,7 @@
 
 ## 处理结果（本轮落地）
 
-按「R1 → R3 → R2 → 低风险项」推进，九项已收敛，各自独立成提交：
+按「R1 → R3 → R2 → 低风险项」推进，十项已收敛，各自独立成提交：
 
 | # | 提交 | 结果 |
 |---|---|---|
@@ -354,11 +354,16 @@
 | R8 | `e0a539f` | `backup_crypto` 改用 `getrandom::fill`，`rand` 依赖已删除 |
 | R6 | `627937a` | `ui/state.tsx` 新增 `Spinner` 与 `InlineAlert`，收拢 12 处手写 spinner、13 处手着色提示盒；补 `ui/state.test.tsx`（+9 测试） |
 | R11 | `29ea30c` | `ConfirmDialog` 补 `note` / `confirmDisabled` 两个槽位，7 处手搓确认框收拢；顺带修掉「Cancel 未走 i18n」缺陷；补 `ui/dialog.test.tsx`（+9 测试） |
+| R7 | `e7054a2` | `store::write_private_json` 成为三个规则文件的唯一写入路径；**修掉 `highlight_rules.json` 缺权限加固的真缺陷**；+2 测试 |
 
-### 对本报告自身结论的两处订正
+### 对本报告自身结论的三处订正
 
 - **R3 的建议是错的**。原建议写「让 `store` 的 `normalize_config` 改调 `core::normalize_proxy`」。实际执行时发现两者的**失败策略有意不同**：`core` 对单个提交报错并把字段名回给用户（`proxy id is required`），`store` 对整文件静默 `retain` 丢弃。合并会把其中一种强加给另一种。因此只收敛了 trim（两种策略下逐字相同的那部分），校验各自保留。**这是本轮唯一一处「按原建议做反而会引入缺陷」的地方。**
 - **R9 的收益被低估**。它不只是「低收益」的去重：`highlight.rs` 的 teardown 只清 override、**从不删目录**（每次跑测试泄漏一个临时目录），`forward.rs` 三处用 `std::process::id()` 造「唯一」目录，**同进程内测试实际共用一个目录**。两者都是真实缺陷，随 R9 一并修掉。
+- **R7 的形态与范围都写错了**。原始扫描表把它记为「`redaction.rs` / `highlight.rs` 平行规则库……可抽泛型规则库」，
+  检测方式是「同名 `pub fn` 扫描」。实际是**三方**平行（漏了 `src/copy_redact.rs`），其中 `redaction` 那一方**整个是死代码**，
+  而唯一真正的缺陷是**两个活写入者里有一个漏了全仓统一的 `0600` 权限加固**——「抽泛型规则库」既不是唯一解法、也不是重点。
+  详见下面「R7 落地」一节。**教训：`同名 pub fn 扫描` 这种机械检测会同时误判范围（漏文件）和误判性质（把「写入路径缺一个横切步骤」当成「重复代码」）。**
 
 ### 本轮新踩到的坑（供下一轮参考）
 
@@ -460,11 +465,68 @@
 留给有主题截图条件的一轮处理。**注意它与上面的「标题颜色」delta 是同一件事的两个方向**：
 保持现状 → 7 个迁移点略暗；删掉 → 7 个原有调用点略暗。两边都不零成本。
 
+### R7 落地：不是「两个平行规则库」，是三方平行 + 一个死生命周期 + 一个权限缺口
+
+报告对 R7 的描述只有一行：「`redaction.rs` / `highlight.rs` 平行规则库，各含 `seed_default_rules()` + `load_rules_from_json()`，
+同职责、不同规则类型」，检测方式写的是「同名 `pub fn` 扫描」。**勘察推翻了这个描述的三处分。**
+
+**一、是三方，报告漏了第三方。** `src/copy_redact.rs` 有完整的一套同名生命周期：
+`CopyRedactRuleConfig` + `From<&CopyRedactRule>`、`default_copy_rules()`、`load_copy_redact_rules()`、
+`save_copy_redact_rules()`、`reset_copy_redact_rules()`。报告只数了两个文件，所以「抽泛型规则库」这个建议的方向对、范围错。
+
+**二、其中一方整个是死代码。** `redaction.rs` 的 A24「用户可编辑规则文件」部分（`src-tauri/src/redaction.rs:278–390`，
+**113 行**：`REDACT_RULES_FILE`、`redact_rules_path()`、`seed_default_rules()`、`load_user_rules()`、
+`reset_default_rules()`、`redact_with_user_rules()`、`RedactRuleConfig` + 它的 `From`、`load_rules_from_json()`）
+**在全仓没有任何调用者**：四个生命周期函数零调用，`load_rules_from_json` 虽从 `lib.rs` re-export 但也零调用。
+前端零提及，`tauri_commands.rs` 里也没有对应命令。它还有 **5 个** `a24_*` 测试（`:688` 起）——测试全绿，
+因为它们直接调用这些函数；绿的是函数，不是功能。**redaction 的引擎是活的**（`redact_default` ← `store.rs:1036`），
+死的只是「文件化 + 用户可编辑」这一层。而 `copy_redact` 恰好是**同一想法的已接线版本**——
+`redact_for_clipboard` 读它的规则文件，桌面端有命令。换言之：这个能力在剪贴板侧做完了，在日志侧停在了半途。
+
+**三、真正的缺陷不在「重复」，在「写入路径漏了一个横切步骤」。**
+
+| | `highlight.rs` | `copy_redact.rs` | `redaction.rs` |
+|---|---|---|---|
+| 接线状态 | **活**（`tauri_commands` 5 个命令） | **活**（`redact_for_clipboard` ← `tauri_commands:1502`） | **死**（零调用者） |
+| 默认规则 | `default_rules()` 私有 | `default_copy_rules()` 私有 | `default_rules()` pub |
+| 配置 DTO | 不需要（`HighlightRule` 本身可序列化） | `CopyRedactRuleConfig` | `RedactRuleConfig` |
+| 写入 | `save_rules()` | `save_copy_redact_rules()` | 内联在 `seed` 与 `reset` **两处** |
+| **权限加固** | **❌ 缺** | ✅ `restrict_file_to_owner` | ❌ 缺 |
+| 错误类型 | `HighlightError`（有 `IoError` / `ParseError`） | `anyhow::Result` | `RedactRuleError`（**只有 `InvalidRegex` / `ZeroWidth`**） |
+
+`restrict_file_to_owner`（Unix `0600`，Windows `icacls` 收紧 ACL）是**全仓 16 个文件、约 40 处调用点**的惯例，
+覆盖 `daemon.token`、`keys/`、`hosts.json`、`secrets.enc`、录屏、审批策略等等。
+**三个规则文件里只有 `copy_redact` 做了这一步**，而且它带着注释说明自己修过一个缺陷：
+「previous module-local helper was Unix-only and silently did nothing on Windows, leaving the rules file readable by other local accounts」。
+`highlight` 两个平台都从来没做过这一步。
+
+**实测后果**：`highlight_rules.json` 在本机（umask `022`）落成 `0644` / `-rw-r--r--`——**任何本地账户可读**。
+对本轮两个文件来说敏感性有限（高亮关键词不是秘密），但这是与仓库自身惯例的背离，而修法零风险。
+另有一处内部不对称：`redaction` 的 `seed` 建父目录、`reset` **不建**（同一段写入逻辑抄了两遍、只改了一半）。
+
+**落地方案**：在 `store.rs` 新增 `write_private_json<T: Serialize>(path, value)`——
+建父目录 → `to_string_pretty` → 写入 → `restrict_file_to_owner`，**加固放在函数内部，让「忘记加固」在结构上不可能发生**
+（与 R6 的 `InlineAlert`、R11 的 `ConfirmDialog` 默认标签同一条思路：由构造保证，而非靠纪律）。
+两个**活**的写入者（`highlight::save_rules`、`copy_redact::save_copy_redact_rules`）改走它。
+它刻意不加锁、不做备份——那是 `save_config` 对 `hosts.json` 的职责（多进程写 + 需要可回退的上一版），规则文件一次只有一个用户动作在写。
+顺带 `highlight::save_rules` 不再吞掉 `create_dir_all` 的失败。
+
+**`redaction.rs` 的死生命周期本轮故意不动。** 理由：它是「未完成的功能」而不是「更差的副本」，
+删掉它和接上它都是产品决策（仓库既有先例两种都有——`policy_risk_rules` 因为只是活路径的更差副本而被删，
+`ssh_algo` 的半成品则被接上）。所以它保留原样、保留那两处内联写入（因而也保留缺少的加固），
+并在下面「仍未处理」里作为一项**需要决策**列出。
+
+**验证**：`cargo fmt --check` 干净；clippy `-D warnings` 四目标 0 告警；
+`cargo test --no-default-features --lib` **598**（+2）、`cargo test --lib` **606**（+2）；
+cli_smoke 33 / connect_deadline 2 / daemon_integration 57 全绿。
+两个新测试：`test_write_private_json_hardens_and_creates_parents`（0600 + 自动建父目录）、
+`seed_restricts_the_rules_file_to_its_owner`（**这是那个被暴露文件的回归测试**）。
+
 ## 仍未处理
 
 | # | 项 | 为什么留到下一轮 |
 |---|---|---|
-| R7 | `redaction.rs` / `highlight.rs` 平行规则库 | 抽泛型规则库是**中等风险**重构，收益中等；R6 与 R11 都已落地，它是前端之外唯一剩下的并行结构。**需先确认是否推进** |
+| R7 余项 | `redaction.rs:278–390` 的 A24 文件生命周期（113 行 + 5 个测试）零调用者 | 见上「R7 落地」第二节。**这是「未完成的功能」而非「更差的副本」，删与接都是产品决策**，故不自行处置。若接上，则是一个五面贯通的活（桌面 UI + 命令 + 可能还有 CLI/MCP），按 `agent2ssh-add-operation` 走；若删掉，`RedactRuleConfig` 与 `load_rules_from_json` 的 re-export 需一并移除 |
 | R10 | 前端两个 UI 惯用法（见上「R10 重新取证」） | 两项都**不是机械替换**：一项要动 `IconButton` 的 API（加 `busy`），另一项会改变 `TerminalPanel` / `PlaybooksPanel` 工具栏的行为。**都要先定契约** |
 | R11 余项 | `ConfirmDialog` 标题的 `text-foreground` 与它所在的 `bg-popover` 表面不匹配 | 见上「留待决定的一处 token 错配」。**已取证、未改**：改它会动到全部 14 个确认框，而 6 套主题里有两套无法在本机目视验证。不是冗余项，故不占 R 编号 |
 
