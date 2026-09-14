@@ -820,6 +820,10 @@ required = false
     fn test_playbook_audit_entries_all_share_context() {
         // Simulate a playbook run that produces audit entries for multiple steps,
         // and verify all entries share the same reason and change_id.
+        //
+        // Isolated because the entries are redacted through
+        // `redact_sensitive_text`, which reads `redact_rules.json`.
+        let _dir = crate::store::TestConfigDir::new("pb-redact");
         use crate::store::redact_sensitive_text;
         use crate::types::{AuditEntry, ExecResult};
 

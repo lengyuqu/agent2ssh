@@ -21,6 +21,7 @@ import type {
   ForwardDirection,
   ForwardRule,
   HighlightRule,
+  RedactRuleConfig,
   HostFingerprintStatus,
   HostGroup,
   HostProfile,
@@ -348,6 +349,10 @@ export const api = {
   updateHighlight: (oldKeyword: string, rule: HighlightRule) =>
     invoke<HighlightRule[]>("update_highlight", { oldKeyword, rule }),
   resetHighlights: () => invoke<HighlightRule[]>("reset_highlights"),
+
+  // A24: Redaction rules (redact_rules.json)
+  listRedactRules: () => invoke<RedactRuleConfig[]>("list_redact_rules"),
+  resetRedactRules: () => invoke<RedactRuleConfig[]>("reset_redact_rules"),
 
   // B33: Container Discovery
   discoverContainers: () => invoke<ContainerDiscoveryTarget[]>("discover_containers"),

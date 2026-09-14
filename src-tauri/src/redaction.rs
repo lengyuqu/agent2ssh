@@ -50,7 +50,7 @@ pub struct RedactRule {
     pub replacement: String,
 }
 
-/// Error type for redaction rule validation.
+/// Error type for redaction rule validation and rules-file lifecycle.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum RedactRuleError {
     /// The regex pattern is syntactically invalid.
@@ -61,6 +61,18 @@ pub enum RedactRuleError {
     /// which would cause spurious replacements everywhere.
     #[error("zero-width pattern: {0}")]
     ZeroWidth(String),
+
+    /// Reading or writing `redact_rules.json` failed.
+    ///
+    /// The A24 lifecycle used to report these as `InvalidRegex`, because the
+    /// enum had no other variant — a missing config directory surfaced to the
+    /// user as "invalid regex pattern: cannot determine config directory".
+    #[error("redaction rules file: {0}")]
+    IoError(String),
+
+    /// The rules file is not valid JSON, or a rule in it is malformed.
+    #[error("malformed redaction rules: {0}")]
+    ParseError(String),
 }
 
 /// Validate a regex pattern: it must compile and must not be zero-width.
@@ -286,54 +298,71 @@ pub fn redact_with_defaults(text: &str, custom_rules: &[RedactRule]) -> String {
 //    deleted a rule, it stays deleted (no re-seeding).
 // 3. Only an explicit `reset_default_rules()` restores the hardcoded set.
 //
-// This mirrors rssh's `db/highlight.rs:221` seed-once pattern, adapted to
-// file-based storage.
+// This mirrors `copy_redact.rs` — likewise a seed-once, owner-only file that
+// the live redaction path reads — and rssh's `db/highlight.rs:221`.
+//
+// This lifecycle used to be dead code: it was written, tested and never
+// called, because the live redaction path (`store::redact_sensitive_text`,
+// and through it audit records, notifications, playbook results and the
+// diagnostic export) called `redact_default` unconditionally. Editing
+// `redact_rules.json` therefore changed nothing. That path now reads the file,
+// so this module is the single source of truth for what the app redacts.
 
 /// The JSON file name for user-editable redaction rules.
 const REDACT_RULES_FILE: &str = "redact_rules.json";
 
 /// Path to the user-editable redaction rules file.
-fn redact_rules_path() -> Option<std::path::PathBuf> {
+fn redact_rules_path() -> Result<std::path::PathBuf, RedactRuleError> {
     crate::store::config_dir()
-        .ok()
         .map(|d| d.join(REDACT_RULES_FILE))
+        .map_err(|e| RedactRuleError::IoError(e.to_string()))
+}
+
+/// Write a rule set to the rules file, owner-only.
+///
+/// Goes through `store::write_private_json` for the same reason the other two
+/// rule files do: this file decides what the app redacts, so it must not be
+/// readable by other local accounts. A24 originally used a bare `fs::write`,
+/// which lands at whatever the umask allows (`0644` under the default `022`).
+fn write_rules_file(path: &std::path::Path, rules: &[RedactRule]) -> Result<(), RedactRuleError> {
+    let configs: Vec<RedactRuleConfig> = rules.iter().map(RedactRuleConfig::from).collect();
+    crate::store::write_private_json(path, &configs)
+        .map_err(|e| RedactRuleError::IoError(e.to_string()))
 }
 
 /// A24: Seed the default rules to a JSON file **only if the file does not
 /// already exist**. Once the file exists, the user owns it — deleted rules
 /// stay deleted.
 ///
-/// Returns the path to the file. This function is idempotent: if the file
-/// already exists, it does nothing.
+/// This function is idempotent: if the file already exists, it does nothing.
 pub fn seed_default_rules() -> Result<(), RedactRuleError> {
-    let path = redact_rules_path()
-        .ok_or_else(|| RedactRuleError::InvalidRegex("cannot determine config directory".into()))?;
+    let path = redact_rules_path()?;
     if path.exists() {
         // Already seeded — user may have customized it. Do not overwrite.
         return Ok(());
     }
-    let rules = default_rules();
-    let configs: Vec<RedactRuleConfig> = rules.iter().map(Into::into).collect();
-    let json = serde_json::to_string_pretty(&configs)
-        .map_err(|e| RedactRuleError::InvalidRegex(e.to_string()))?;
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    std::fs::write(&path, json)
-        .map_err(|e| RedactRuleError::InvalidRegex(format!("failed to write rules file: {e}")))?;
-    Ok(())
+    write_rules_file(&path, &default_rules())
 }
 
 /// A24: Load user-editable rules from the config file. If the file doesn't
 /// exist yet, seed it first (one-time) and then load.
 ///
 /// Returns the rules from the file, which may differ from the hardcoded
-/// defaults if the user edited them.
+/// defaults if the user edited them. A missing, unreadable or malformed file
+/// falls back to `default_rules()` — redaction must never be *weaker* because
+/// the config is broken.
+///
+/// This is deliberately uncached. It reads and recompiles on every call, which
+/// is what `default_rules()` already did on the same path, and it keeps an
+/// externally edited file effective immediately. A mtime-keyed cache would
+/// have to cope with filesystem mtime granularity, where "write the file then
+/// read it back in the same tick" is not guaranteed to invalidate — the exact
+/// shape that makes a test flaky.
 pub fn load_user_rules() -> Vec<RedactRule> {
     let _ = seed_default_rules();
     let path = match redact_rules_path() {
-        Some(p) => p,
-        None => return default_rules(),
+        Ok(p) => p,
+        Err(_) => return default_rules(),
     };
     match std::fs::read_to_string(&path) {
         Ok(json) => load_rules_from_json(&json).unwrap_or_else(|_| default_rules()),
@@ -343,20 +372,19 @@ pub fn load_user_rules() -> Vec<RedactRule> {
 
 /// A24: Reset the rules file to the hardcoded defaults, discarding any user
 /// customizations. This is the only way to restore a rule the user deleted.
+///
+/// Note the direction of travel: this restores redaction rules, it never
+/// removes them. That is why the operation is safe to expose on every surface,
+/// while "add/remove a rule" deliberately is not.
 pub fn reset_default_rules() -> Result<(), RedactRuleError> {
-    let path = redact_rules_path()
-        .ok_or_else(|| RedactRuleError::InvalidRegex("cannot determine config directory".into()))?;
-    let rules = default_rules();
-    let configs: Vec<RedactRuleConfig> = rules.iter().map(Into::into).collect();
-    let json = serde_json::to_string_pretty(&configs)
-        .map_err(|e| RedactRuleError::InvalidRegex(e.to_string()))?;
-    std::fs::write(&path, json)
-        .map_err(|e| RedactRuleError::InvalidRegex(format!("failed to write rules file: {e}")))?;
-    Ok(())
+    let path = redact_rules_path()?;
+    write_rules_file(&path, &default_rules())
 }
 
 /// A24: Redact using the user-editable rules (loaded from file), falling
 /// back to hardcoded defaults if the file is missing or corrupt.
+///
+/// This is what the live path calls — see `store::redact_sensitive_text`.
 pub fn redact_with_user_rules(text: &str) -> String {
     let rules = load_user_rules();
     redact_with_rules(text, &rules)
@@ -378,11 +406,12 @@ impl From<&RedactRule> for RedactRuleConfig {
     }
 }
 
-/// Load custom rules from a JSON config string. Returns an error if any
-/// rule fails validation (invalid regex or zero-width pattern).
+/// Load custom rules from a JSON config string. Returns an error if the JSON
+/// does not parse, or if any rule fails validation (invalid regex or
+/// zero-width pattern).
 pub fn load_rules_from_json(json: &str) -> Result<Vec<RedactRule>, RedactRuleError> {
     let configs: Vec<RedactRuleConfig> =
-        serde_json::from_str(json).map_err(|e| RedactRuleError::InvalidRegex(e.to_string()))?;
+        serde_json::from_str(json).map_err(|e| RedactRuleError::ParseError(e.to_string()))?;
     configs
         .into_iter()
         .map(|c| RedactRule::new(&c.pattern, &c.replacement))
@@ -679,6 +708,11 @@ mod tests {
     #[test]
     fn redact_sensitive_text_idempotent() {
         // The combined redaction function in store.rs should also be idempotent.
+        //
+        // It reads `redact_rules.json` now, so this needs an isolated config
+        // dir — otherwise it would seed and read the developer's real
+        // `~/.agent2ssh/redact_rules.json` and fail on a customized machine.
+        let _dir = crate::store::TestConfigDir::new("a24idem");
         let input = "deploy --token secret123 password=hunter2 --api-key sk-abc123def456ghi789jkl012mno345pqr";
         let once = crate::store::redact_sensitive_text(input);
         let twice = crate::store::redact_sensitive_text(&once);
@@ -791,5 +825,74 @@ mod tests {
         assert!(result.contains("<REDACTED:bearer>"), "must redact bearer");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a24_rules_file_is_owner_only() {
+        // The rules file is written through `store::write_private_json`, so it
+        // lands at 0600 like every other file under the config dir. The
+        // original A24 code used a bare `fs::write` and would have produced
+        // 0644 under the default umask.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = crate::store::TestConfigDir::new("a24perms");
+        seed_default_rules().unwrap();
+        let mode = std::fs::metadata(dir.join(REDACT_RULES_FILE))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn a24_malformed_json_is_a_parse_error_not_a_regex_error() {
+        // The lifecycle used to report every failure — missing config dir,
+        // unwritable file, bad JSON — as `InvalidRegex`, which surfaced to the
+        // user as "invalid regex pattern: <io error>".
+        let err = load_rules_from_json("{{").unwrap_err();
+        assert!(
+            matches!(err, RedactRuleError::ParseError(_)),
+            "expected ParseError, got {err:?}"
+        );
+    }
+
+    /// The live path must actually read the file.
+    ///
+    /// Before the wiring, rewriting `redact_rules.json` changed nothing at all,
+    /// because `store::redact_sensitive_text` called `redact_default`
+    /// unconditionally. This asserts both directions: a rule that only exists
+    /// in the file is applied, and a default rule the user deleted is gone —
+    /// i.e. the file *is* the rule set, it is not merely additive.
+    #[test]
+    fn redact_sensitive_text_reads_the_rules_file() {
+        let dir = crate::store::TestConfigDir::new("a24live");
+        std::fs::write(
+            dir.join(REDACT_RULES_FILE),
+            r#"[{"pattern": "secret-project", "replacement": "<REDACTED:project>"}]"#,
+        )
+        .unwrap();
+
+        let result = crate::store::redact_sensitive_text("connect to 10.0.0.5 for secret-project");
+        assert!(
+            result.contains("<REDACTED:project>"),
+            "the file's own rule must be applied, got {result}"
+        );
+        assert!(
+            result.contains("10.0.0.5"),
+            "removing the default IP rule must stop IP redaction, got {result}"
+        );
+    }
+
+    #[test]
+    fn redact_sensitive_text_falls_back_to_defaults_on_corrupt_file() {
+        let dir = crate::store::TestConfigDir::new("a24livebad");
+        std::fs::write(dir.join(REDACT_RULES_FILE), "{{not json").unwrap();
+
+        let result = crate::store::redact_sensitive_text("connect to 10.0.0.5");
+        assert!(
+            result.contains("<REDACTED:ip>"),
+            "a broken rules file must not weaken redaction, got {result}"
+        );
     }
 }

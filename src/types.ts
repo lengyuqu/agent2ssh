@@ -591,6 +591,15 @@ export type HighlightRule = {
   is_case_sensitive: boolean;
 };
 
+// Rust: redaction.rs — RedactRuleConfig
+// A24: A redaction rule as stored in `redact_rules.json`. The compiled form
+// (Rust `regex::Regex`) never crosses the wire, and `pattern` is the only
+// identity a rule has — there is no name or keyword.
+export type RedactRuleConfig = {
+  pattern: string;
+  replacement: string;
+};
+
 // Rust: snippets.rs — Snippet
 // description is omitted when the backend value is None.
 export type Snippet = {

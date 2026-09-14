@@ -1564,6 +1564,30 @@ pub fn reset_highlights() -> Result<Vec<crate::types::HighlightRule>, String> {
     crate::highlight::reset_defaults().map_err(|e| e.to_string())
 }
 
+/// A24: List the redaction rules the app applies to logs, audit records,
+/// notifications and the diagnostic export.
+///
+/// These come from `redact_rules.json`, which is seeded from the built-in set
+/// on first run and is the live rule set from then on.
+#[tauri::command]
+pub fn list_redact_rules() -> Result<Vec<crate::redaction::RedactRuleConfig>, String> {
+    Ok(crate::redaction::load_user_rules()
+        .iter()
+        .map(crate::redaction::RedactRuleConfig::from)
+        .collect())
+}
+
+/// A24: Restore the built-in redaction rules, discarding user customizations.
+///
+/// Only the safe direction is exposed: this can re-enable a rule the user
+/// deleted, never remove one. Editing the set is deliberately left to the
+/// file, so a mistyped click cannot stop a secret from being redacted.
+#[tauri::command]
+pub fn reset_redact_rules() -> Result<Vec<crate::redaction::RedactRuleConfig>, String> {
+    crate::redaction::reset_default_rules().map_err(|e| e.to_string())?;
+    list_redact_rules()
+}
+
 #[tauri::command]
 pub fn daemon_status() -> Result<DaemonControlResult, String> {
     match crate::daemon_control::read_daemon_pid().map_err(|e| e.to_string())? {
@@ -3193,6 +3217,9 @@ pub fn run_tauri() {
             remove_highlight,
             update_highlight,
             reset_highlights,
+            // A24: Editable redaction rules
+            list_redact_rules,
+            reset_redact_rules,
             // B33: Container Discovery
             discover_containers,
             // Font + Shell enumeration

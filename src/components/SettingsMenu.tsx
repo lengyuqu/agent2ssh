@@ -27,6 +27,7 @@ import { useI18n } from "../i18n";
 import type { DaemonHealth, DiagnosticLogEntry, ExecutionGateStatus } from "../types";
 import LanguageSwitcher from "./LanguageSwitcher";
 import HighlightSettings from "./HighlightSettings";
+import RedactionSettings from "./RedactionSettings";
 import AlgoPrefsDialog from "./AlgoPrefsDialog";
 import { THEMES, useTheme } from "../theme";
 import { cn } from "../lib/utils";
@@ -622,6 +623,11 @@ export default function SettingsMenu({
           <section className="grid gap-2">
             <div className={sectionTitleCls}>{t("Terminal highlights")}</div>
             <HighlightSettings />
+          </section>
+
+          <section className="grid gap-2">
+            <div className={sectionTitleCls}>{t("Redaction rules")}</div>
+            <RedactionSettings />
           </section>
 
           <section className="grid gap-2">

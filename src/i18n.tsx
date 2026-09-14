@@ -268,6 +268,14 @@ const zh: Record<string, string> = {
     "口令会加密保存在 Agent2SSH 密钥库中，并仅在解锁期间缓存。",
   "Clear saved passphrase": "清除已保存的私钥口令",
   "Terminal highlights": "终端高亮",
+  "Redaction rules": "脱敏规则",
+  "Rules live in redact_rules.json in your config folder.":
+    "规则保存在配置目录的 redact_rules.json 中。",
+  "Restore defaults": "恢复默认",
+  "Restore the default redaction rules?": "恢复默认脱敏规则？",
+  "This restores the built-in rules and discards any you added or removed.":
+    "这会恢复内置规则，并丢弃你新增或删除的规则。",
+  "No redaction rules.": "没有脱敏规则。",
   "Rule name": "规则名称",
   "Regular expression": "正则表达式",
   "Keyword": "关键词",

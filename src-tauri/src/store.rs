@@ -1052,12 +1052,19 @@ pub fn compute_metrics_trend(period: TrendPeriod) -> Result<MetricsTrend> {
 
 pub fn redact_sensitive_text(input: &str) -> String {
     // Anti-bypass: no whole-text skip here. Existing markers are protected
-    // inside `redact_default` (placeholder swap), so a marker-looking
+    // inside `redact_with_rules` (placeholder swap), so a marker-looking
     // substring in remote output must not disable redaction for the rest of
     // the text (e.g. `echo '<REDACTED:ip> 10.0.0.1'` must still redact the IP).
 
-    // First pass: regex-based default rules (IP, API keys, JWT, hex blobs).
-    let regex_redacted = crate::redaction::redact_default(input);
+    // First pass: the rule set from `redact_rules.json`, seeded from
+    // `redaction::default_rules()` (IP, API keys, JWT, hex blobs) and falling
+    // back to it whenever the file is missing or malformed.
+    //
+    // This reads the file rather than calling `redact_default` directly, which
+    // is what makes the rule set user-editable at all: the file is the source
+    // of truth for every redaction the app performs — audit records,
+    // notifications, playbook results and the diagnostic export.
+    let regex_redacted = crate::redaction::redact_with_user_rules(input);
 
     // Second pass: existing token-based heuristics (keyword=value, bearer,
     // private keys, high-entropy strings).
@@ -1736,6 +1743,12 @@ mod tests {
 
     #[test]
     fn test_redact_sensitive_text() {
+        // The regex pass reads `redact_rules.json`, so this test pins the
+        // thread-local config dir. Without it the expectations below would
+        // depend on the developer's own rules file — deleting the hex rule
+        // would fail the `generic` case — and every run would seed the real
+        // `~/.agent2ssh/redact_rules.json`.
+        let _dir = TestConfigDir::new("redacttext");
         let redacted = redact_sensitive_text(
             "deploy --token abc password=hunter2 --api-key key123 --safe value",
         );
@@ -2223,6 +2236,10 @@ mod tests {
         // Verify that audit entries constructed for an exec-multi scenario
         // correctly carry reason and change_id through the full JSONL
         // serialisation round-trip — one entry per target host.
+        //
+        // Isolated because the entries are redacted through
+        // `redact_sensitive_text`, which reads `redact_rules.json`.
+        let _dir = TestConfigDir::new("execmulti");
 
         let reason = "deploy v2.3.1";
         let change_id = "CHG-20240614-001";
