@@ -28,6 +28,7 @@ import {
 import { useTheme, type Theme as AppTheme } from "../theme";
 import TerminalView, { type TerminalViewHandle } from "./TerminalView";
 import SnippetsDialog from "./SnippetsDialog";
+import HostSelector from "./HostSelector";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
 import { IconButton } from "./ui/icon-button";
@@ -438,18 +439,15 @@ export default function TerminalPanel({ hosts, initialHost = "" }: Props) {
           <div className="px-1 text-[11px] font-bold uppercase tracking-wide text-muted-foreground">
             {t("New terminal")}
           </div>
-          <Select
+          <HostSelector
+            hosts={hosts}
             value={newHost}
-            onChange={(e) => setNewHost(e.target.value)}
-            className="h-8 text-xs"
-          >
-            {hosts.length === 0 && <option value="">{t("No hosts")}</option>}
-            {hosts.map((host) => (
-              <option key={host.name} value={host.name}>
-                {host.name}
-              </option>
-            ))}
-          </Select>
+            onChange={setNewHost}
+            allowEmpty
+            optionLabel={(host) => host.name}
+            shell="bare"
+            selectClassName="h-8 text-xs"
+          />
           <Button size="sm" onClick={() => openTab(newHost)} disabled={!newHost} className="h-8">
             <Plus size={13} />
             {t("New terminal")}

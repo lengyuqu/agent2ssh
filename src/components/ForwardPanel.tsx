@@ -129,19 +129,17 @@ export default function ForwardPanel({ hosts, initialHost = "", onChanged }: Pro
               />
             </label>
           </div>
-          <label className={labelCls}>
-            {t("Jump host (optional)")}
-            <Select value={via} onChange={(event) => setVia(event.target.value)} disabled={busy}>
-              <option value="">{t("Direct connection")}</option>
-              {hosts
-                .filter((host) => host.name !== tunnelHost)
-                .map((host) => (
-                  <option key={host.name} value={host.name}>
-                    {host.name}
-                  </option>
-                ))}
-            </Select>
-          </label>
+          <HostSelector
+            hosts={hosts.filter((host) => host.name !== tunnelHost)}
+            value={via}
+            onChange={setVia}
+            label={t("Jump host (optional)")}
+            disabled={busy}
+            allowEmpty
+            emptyOption={t("Direct connection")}
+            optionLabel={(host) => host.name}
+            shell="plain"
+          />
           <div className="grid grid-cols-2 gap-2.5 max-sm:grid-cols-1">
             <label className={labelCls}>
               {t("Target host")}

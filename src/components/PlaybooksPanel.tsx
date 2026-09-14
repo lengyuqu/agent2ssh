@@ -18,6 +18,7 @@ import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
 import type { HostProfile, Playbook, PlaybookRunResult, RiskLevel } from "../types";
 import RiskBadge from "./RiskBadge";
+import HostSelector from "./HostSelector";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
 import { IconButton } from "./ui/icon-button";
@@ -568,18 +569,15 @@ export default function PlaybooksPanel({ hosts }: Props) {
             )}
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <Select
-              className="min-w-[150px] flex-none"
+            <HostSelector
+              hosts={hosts}
               value={selectedHost}
-              onChange={(event) => setSelectedHost(event.target.value)}
-            >
-              {hosts.length === 0 && <option value="">{t("No hosts")}</option>}
-              {hosts.map((host) => (
-                <option key={host.name} value={host.name}>
-                  {host.name}
-                </option>
-              ))}
-            </Select>
+              onChange={setSelectedHost}
+              allowEmpty
+              optionLabel={(host) => host.name}
+              shell="bare"
+              selectClassName="min-w-[150px] flex-none"
+            />
             <label
               className={cn(
                 "inline-flex cursor-pointer select-none items-center gap-1.5 font-semibold",

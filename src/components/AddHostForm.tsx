@@ -4,6 +4,7 @@ import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
 import { labelCls } from "../lib/ui-classes";
 import type { HostGroup, HostProfile, ProxyProfile, SshKeyInfo } from "../types";
+import HostSelector from "./HostSelector";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
 import { IconButton } from "./ui/icon-button";
@@ -338,20 +339,16 @@ export default function AddHostForm({
             />
           </label>
         </div>
-        <label className={labelCls}>
-          {t("Jump host (bastion)")}
-          <Select
-            value={form.jump_host}
-            onChange={(e) => setForm({ ...form, jump_host: e.target.value })}
-          >
-            <option value="">{t("None")}</option>
-            {otherHosts.map((h) => (
-              <option key={h.name} value={h.name}>
-                {h.name} ({h.host})
-              </option>
-            ))}
-          </Select>
-        </label>
+        <HostSelector
+          hosts={otherHosts}
+          value={form.jump_host}
+          onChange={(value) => setForm({ ...form, jump_host: value })}
+          label={t("Jump host (bastion)")}
+          allowEmpty
+          emptyOption={t("None")}
+          optionLabel={(h) => `${h.name} (${h.host})`}
+          shell="plain"
+        />
         <label className={labelCls}>
           {t("Proxy")}
           <Select
