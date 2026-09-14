@@ -325,10 +325,10 @@
 | **R4** | `ssh_config.rs` 的**测试专用 glob 镜像** | 3 个 `#[cfg(test)]` 函数（`glob_match` / `glob_match_bytes` / `char_class_match`）+ 约 10 个只为测它们的单测 | 生产侧 `splice_includes` 用的是 **`glob` crate**；这组镜像全仓仅被自己的测试引用 | 删除镜像与其单测（生产路径已有 `include_splices_glob_matches` 等真实覆盖），或明确它要保护什么语义 |
 | **R5** | `AuditEntry` 测试 fixture 重复 | `playbook.rs:853` + `store.rs:2194` | 两处注释均自认「Mirror append_audit」；重复块检测命中 | 抽 `#[cfg(test)] pub(crate) fn test_audit_entry(...)` 复用 |
 | **R6** | P1#11 手写 spinner / 错误块 | `animate-spin` **25 处 / 12 文件**；`text-destructive` **21 文件**；`ErrorState` 仅 `SFTPPanel` 1 个组件在用 | 逐文件统计 | 体量最大、且属用户可见一致性；报告判定「无安全 panel 级替换点」，需逐处确认后再动 |
-| **R7** | `redaction.rs` / `highlight.rs` 平行规则库 | 各含 `seed_default_rules()` + `load_rules_from_json()`，同职责、不同规则类型 | 同名 `pub fn` 扫描 | 可抽泛型规则库；中等收益、中等风险（原报告未列）。**⚠ 本行的范围与性质均已被证伪：实测是三方平行（漏了 `copy_redact.rs`）、其中一方是死代码、真正缺陷是权限加固缺失而非重复。见「对本报告自身结论的三处订正」** |
+| **R7** | `redaction.rs` / `highlight.rs` 平行规则库 | 各含 `seed_default_rules()` + `load_rules_from_json()`，同职责、不同规则类型 | 同名 `pub fn` 扫描 | 可抽泛型规则库；中等收益、中等风险（原报告未列）。**⚠ 本行的范围与性质均已被证伪：实测是三方平行（漏了 `copy_redact.rs`）、其中一方是死代码、真正缺陷是权限加固缺失而非重复。见「对本报告自身结论的四处订正」** |
 | **R8** | `rand` + `getrandom` 双 RNG 入口 | `Cargo.toml:65-66`；`rand` 仅在 `backup_crypto.rs:78-79` 用了 2 次 | `getrandom::fill` 已在 `keys.rs` / `mcp_binding.rs` / `secrets.rs` 使用 | 这 2 处改为 `getrandom::fill` 后删 `rand` 依赖（先 `cargo tree -i rand` 确认无其他消费者） |
 | **R9** | 测试助手 `unique_dir` ×2 | `copy_redact.rs:153` + `snippets.rs:198` | `#[cfg(test)]` 扫描 | 低收益 |
-| **R10** | 前端 2 处 8 行 UI 惯用法 | 「Refresh IconButton + `animate-spin`」`SnippetsDialog:170` / `PlaybooksPanel:339`；「host `<Select>`」`TerminalPanel:445` / `PlaybooksPanel:576` | 重复块检测 | 低收益；与 R6 同源，做 R6 可顺带覆盖 |
+| **R10** | 前端 2 处 8 行 UI 惯用法 | 「Refresh IconButton + `animate-spin`」`SnippetsDialog:170` / `PlaybooksPanel:339`；「host `<Select>`」`TerminalPanel:445` / `PlaybooksPanel:576` | 重复块检测 | 低收益；与 R6 同源，做 R6 可顺带覆盖。**⚠ 本行的范围被低估：检测口径是「重复块」，所以它只圈到了 busy 惯用法 11 处里的 2 处（另 9 处不是逐字重复块）。且「给 `IconButton` 加 `busy` 就收拢」已被证伪。见「R10 重新取证」的补测段** |
 
 ## 已排除：形似但**非**冗余（避免下一轮误删）
 
@@ -401,7 +401,31 @@
 切换全仓有 **11 处**（`RefreshCw` 10 + `RotateCcw` 1），落在 6 个文件、3 种显式尺寸（14 / 15 / 16）加 1 处无尺寸，
 且 busy 表达式有 7 组不同写法 —— 仅 `SettingsMenu` 一个文件就占了 5 组（`refreshBusy` / `healthBusy` /
 `updateBusy === "check"` / `daemonActionBusy === "restart"` / `diagnosticBusy === "refresh"`）。
-要收就得给 `IconButton` 加 `busy` 属性（API 变更），并把「刷新语义」提升为组件契约 —— 需先定契约，不能顺手改。
+要收就得定「busy 怎么画」这个契约 —— 需先定契约，不能顺手改。
+**（2026-09-14 第二轮补测：报告建议的「给 `IconButton` 加 `busy`」这条路径只覆盖 11 处里的 2 处，见下。）**
+
+**11 处按「外层包装」拆开（补测）**：
+
+| 外层 | 处数 | 位置 |
+|---|---|---|
+| `IconButton` | **2** | `SnippetsDialog:176`、`PlaybooksPanel:344` |
+| 共享 `<Button>` + 文字标签 | **4** | `McpAgentsPanel:159`、`RecordingsPanel:230`、`AlgoPrefsDialog:206`（`RotateCcw`）、`SFTPPanel:942`（无标签） |
+| **裸 `<button>`** | **5** | `SettingsMenu:484 / 512 / 533 / 664 / 769`（全部 `size={16}` + 标签） |
+
+所以「给 `IconButton` 加 `busy`」只解决 2/11；**最大的一块（5 处）是 `SettingsMenu` 的裸按钮**，
+报告正文没提到它们是裸按钮。另外 `SettingsMenu:664` 忙碌时还会把标签从 `Restart daemon` 切成 `Restarting...`，
+说明「busy」在这些站点上影响的**不只图标**。
+
+**一处报告未记的尺寸不一致**：同一个「卡片头刷新 `IconButton`」被画成两种尺寸——
+3 处静态的（`ConfigSnapshotsPanel:150` / `ForwardPanel:179` / `ConnectionTopology:234`）是 `size={15}`，
+2 处会转的是 `size={14}`。尺寸差异**刚好沿着「会不会转」切开**，
+因此任何统一 busy 画法的改动都会顺带改到这 5 处的图标尺寸（属可见变化，需一并拍板）。
+
+**本轮新发现（未编号，待拍板是否立项）**：`SettingsMenu.tsx` 有 **23 个裸 `<button>`、0 个 `<Button>`**，
+是全仓最大的裸按钮集中点（第二名 `SFTPPanel` 8 处，其余 ≤ 6；全仓 `<Button>` 共 **85** 处）。
+它与 R10-1 **相邻但不同源**：R10-1 是「busy 态怎么画」，这个是「整个面板不用共享按钮组件」。
+本轮不立项——立项前需要先确认 `Button` 是否存在能覆盖设置面板那种密排小按钮的尺寸档
+（否则「替换」会改变面板密度，属可见变化）。
 
 **R10-2 host 选择器**。**`src/components/HostSelector.tsx` 已经存在**，而 `TerminalPanel:441` 与
 `PlaybooksPanel:571` 仍在手搓同一段 8 行 `<Select>`（`{hosts.length === 0 && <option value="">{t("No hosts")}</option>}` +
@@ -471,10 +495,21 @@
 在 dark（`#c7d0d8` vs `#d1dae2`）与 nord（`#d8dee9` vs `#eceff4`）两套主题下这两个 token 不同色，
 标题因此比弹层里的其他文字略暗。
 
-**已取证，本轮不改。** 理由：改法（删掉 `text-foreground` 让标题继承）会让 14 个确认框的标题在两套主题下一起变色，
+**已取证，本轮不改。** 理由：改法（删掉 `text-foreground` 让标题继承）会让**全部**确认框的标题在两套主题下一起变色，
 而这两套主题无法在本机目视验证，属「读 CSS 变量推断出来的修改」，收益（颜色一致性）远小于风险。
 留给有主题截图条件的一轮处理。**注意它与上面的「标题颜色」delta 是同一件事的两个方向**：
 保持现状 → 7 个迁移点略暗；删掉 → 7 个原有调用点略暗。两边都不零成本。
+
+**（2026-09-14 第二轮补测，两项结论一正一误）**：
+
+- **主题差异的范围属实，已逐套复核**：全仓 **6 套主题**，只有 **dark**（`--foreground: #c7d0d8`
+  vs `--popover-foreground: #d1dae2`）与 **nord**（`#d8dee9` vs `#eceff4`）两个 token 取值不同；
+  其余四套（`:root` / `light` / `dracula` / `solarized-light`）两值相同。
+  → 改动**只在两套主题下可见**，这也正是它无法在本机目视验证的原因。
+- **但「14 个确认框」这个计数已过期**：`<ConfirmDialog>` / `confirmDialog()` 的调用点现在是 **16 个**
+  （`HostList` 3、`ConfigSnapshotsPanel` 3、`RedactionSettings` **2**、`McpAgentsPanel` 2，
+  其余 6 个文件各 1）。**其中 +2 来自本轮「R7 余项（第二步）」新增的删除确认与恢复默认确认**——
+  这个数字是被我自己这一轮的改动推高的。**影响面由 14 变 16，风险随之后移；「暂不处理」的结论不变。**
 
 ### R7 落地：不是「两个平行规则库」，是三方平行 + 一个死生命周期 + 一个权限缺口
 
@@ -650,8 +685,10 @@ tsc 干净、biome **100** 文件、`check-i18n` 干净、vitest **106**（97 + 
 | # | 项 | 为什么留到下一轮 |
 |---|---|---|
 | R7 余项（再度收窄） | A24 的 **CLI / MCP / daemon** 三个面尚未暴露 | `51522a0` 接线 + `9c843ed` 桌面完整 CRUD，已等于 B24 highlight 的同一个面集合。剩下三个面按 `agent2ssh-add-operation` 走，但**该暴露哪些必须重新论证**：上一轮「只应暴露 list + reset」的判据（把安全方向当成唯一筛选条件）已被用户推翻，不能直接沿用。可考虑的中间形态是「`list` + `reset` 上自动化面，`add` / `update` / `delete` 仅桌面」。同步时须改 `docs/skills.md` 与其余 ~10 处 MCP 工具计数 |
-| R10 | 前端两个 UI 惯用法（见上「R10 重新取证」） | 两项都**不是机械替换**：一项要动 `IconButton` 的 API（加 `busy`），另一项会改变 `TerminalPanel` / `PlaybooksPanel` 工具栏的行为。**都要先定契约** |
-| R11 余项 | `ConfirmDialog` 标题的 `text-foreground` 与它所在的 `bg-popover` 表面不匹配 | 见上「留待决定的一处 token 错配」。**已取证、未改**：改它会动到全部 14 个确认框，而 6 套主题里有两套无法在本机目视验证。不是冗余项，故不占 R 编号 |
+| R10-1（busy 图标） | 11 处 busy 切换图标 + 5 处 `IconButton` 刷新按钮 | **报告建议的「给 `IconButton` 加 `busy`」只覆盖 2/11**（补测，见上）。需先定「busy 怎么画」的契约：busy 时换成 `Spinner`，还是让原图标自转。11 处分布在 3 种外层（`IconButton` 2 / `Button` 4 / **裸 `<button>` 5**），且任何统一都会顺带改到 5 处的图标尺寸（静态 15 ↔ 忙碌 14）。**属可见变化，需拍板** |
+| R10-2（host 选择器） | `HostSelector` 已存在，`TerminalPanel:446` / `PlaybooksPanel:576` 仍手搓同一个 `<Select>` | 补测确认：合并会改**下拉项文案**（`name` → `name - user@host:port`）并引入自动选中第一个 host。可加 `compact` / `optionLabel` 两个开关保住现有行为，但**文案变化无法避免**。**属产品决策，不宜由去重驱动** |
+| 新发现（未编号） | `SettingsMenu`：23 个裸 `<button>` / 0 个 `<Button>`，全仓最大集中点 | 见上「R10 重新取证」的补测段。**未立项**：立项前需先确认 `Button` 是否存在能覆盖设置面板那种密排小按钮的尺寸档，否则「替换」会改变面板密度 |
+| R11 余项 | `ConfirmDialog` 标题的 `text-foreground` 与它所在的 `bg-popover` 表面不匹配 | 见上「留待决定的一处 token 错配」。**已取证、未改**：补测确认 6 套主题里**只有 dark / nord** 两套这两个 token 不同色，但这两套无法在本机目视验证，属「读 CSS 变量推断出来的修改」。影响面已由 14 涨到 **16** 个确认框（本轮 +2）。不是冗余项，故不占 R 编号 |
 
 ## 本轮（增量扫描）的验证
 
