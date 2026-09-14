@@ -355,6 +355,7 @@
 | R6 | `627937a` | `ui/state.tsx` 新增 `Spinner` 与 `InlineAlert`，收拢 12 处手写 spinner、13 处手着色提示盒；补 `ui/state.test.tsx`（+9 测试） |
 | R11 | `29ea30c` | `ConfirmDialog` 补 `note` / `confirmDisabled` 两个槽位，7 处手搓确认框收拢；顺带修掉「Cancel 未走 i18n」缺陷；补 `ui/dialog.test.tsx`（+9 测试） |
 | R7 | `e7054a2` | `store::write_private_json` 成为三个规则文件的唯一写入路径；**修掉 `highlight_rules.json` 缺权限加固的真缺陷**；+2 测试 |
+| R7 余项 | `51522a0` | A24 生命周期接线：`redact_rules.json` 成为**实时的规则来源**（core 切换 + 桌面命令 + 设置面板）；错误类型补 `IoError`/`ParseError`；写入改走 `write_private_json`（0600）；+4 测试 |
 
 ### 对本报告自身结论的三处订正
 
@@ -487,7 +488,7 @@
 
 | | `highlight.rs` | `copy_redact.rs` | `redaction.rs` |
 |---|---|---|---|
-| 接线状态 | **活**（`tauri_commands` 5 个命令） | **活**（`redact_for_clipboard` ← `tauri_commands:1502`） | **死**（零调用者） |
+| 接线状态 | **活**（`tauri_commands` 5 个命令） | **活**（`redact_for_clipboard` ← `tauri_commands:1502`） | **死**（零调用者）→ `51522a0` **已接线**，见「R7 余项落地」 |
 | 默认规则 | `default_rules()` 私有 | `default_copy_rules()` 私有 | `default_rules()` pub |
 | 配置 DTO | 不需要（`HighlightRule` 本身可序列化） | `CopyRedactRuleConfig` | `RedactRuleConfig` |
 | 写入 | `save_rules()` | `save_copy_redact_rules()` | 内联在 `seed` 与 `reset` **两处** |
@@ -511,7 +512,8 @@
 它刻意不加锁、不做备份——那是 `save_config` 对 `hosts.json` 的职责（多进程写 + 需要可回退的上一版），规则文件一次只有一个用户动作在写。
 顺带 `highlight::save_rules` 不再吞掉 `create_dir_all` 的失败。
 
-**`redaction.rs` 的死生命周期本轮故意不动。** 理由：它是「未完成的功能」而不是「更差的副本」，
+**`redaction.rs` 的死生命周期本轮故意不动。**（**下一轮已接上，见下面「R7 余项落地」——本节保留当时的判断过程。**）
+理由：它是「未完成的功能」而不是「更差的副本」，
 删掉它和接上它都是产品决策（仓库既有先例两种都有——`policy_risk_rules` 因为只是活路径的更差副本而被删，
 `ssh_algo` 的半成品则被接上）。所以它保留原样、保留那两处内联写入（因而也保留缺少的加固），
 并在下面「仍未处理」里作为一项**需要决策**列出。
@@ -522,11 +524,68 @@ cli_smoke 33 / connect_deadline 2 / daemon_integration 57 全绿。
 两个新测试：`test_write_private_json_hardens_and_creates_parents`（0600 + 自动建父目录）、
 `seed_restricts_the_rules_file_to_its_owner`（**这是那个被暴露文件的回归测试**）。
 
+### R7 余项落地：把 A24 接到实时路径上（`51522a0`）
+
+上一轮把 A24 列为「删与接都是产品决策」。本轮决定**接上**，但勘察让原计划的三处前提都不成立：
+
+**一、「五面贯通」这个说法本身要先改。** 动手前重测了它的模板——**`highlight`（B24）和 `copy_redact` 自己都不是五面贯通的**：
+`highlight` 是 core + 桌面 5 个命令 + `api.ts` + UI，CLI / MCP / daemon 一个都没有；
+`copy_redact` 更少，只有一个桌面命令，规则文件靠手改。
+所以「A24 比照 highlight 接线」= **core + 桌面 + UI**，而不是四五个面。
+**教训与 R7 同源：报告/计划里的范围描述，和它的计数一样要回测。**
+
+**二、真正的交付不是「把死函数接上」，而是「换掉实时路径读谁」。**
+`store::redact_sensitive_text` 原本调 `redact_default`（硬编码），因此文件即使被接上也只是个装饰。
+现在它调 `redact_with_user_rules`，文件成为**审计记录 / webhook 通知 / playbook 结果 / 诊断导出**四条链路共同的规则来源。
+这一条是整件事的重点——死函数接上但不改路径，就是「改而不善」。
+
+**三、安全方向决定了暴露哪些操作。** 报告原文把 A24 描述为「用户可 customize、**disable**、add 规则」。
+「disable」这条在实时路径上是**安全降级**：删掉一条规则 = 某类秘密在应用写的所有地方不再被脱敏。
+所以本轮的切分是：
+
+| 操作 | 方向 | 暴露 |
+|---|---|---|
+| `list` | 只读 | ✅ 桌面 + 设置面板 |
+| `reset`（恢复内置） | **只会变强**（把用户删掉的规则加回来） | ✅ 桌面 + 设置面板（带确认框） |
+| `add` / `delete` / `update` | 可能变弱 | ❌ 不做 UI；仍是手改 `redact_rules.json` |
+
+手改文件这条路不是妥协，而是**该文件既有兄弟的既有契约**：`copy_redact_rules.json` 从来没有 CRUD UI。
+面板因此是只读 + 一个「恢复默认」，并在组件注释里写明为什么不做编辑。
+
+**顺带把上一轮留下的两处一并修掉**（都在这次必须碰的函数里）：
+`seed` 建父目录而 `reset` 不建（同一段写入逻辑抄了两遍只改了一半）；
+以及 `RedactRuleError` **只有 `InvalidRegex` / `ZeroWidth`**，导致「配置目录取不到」「文件不是 JSON」全被报成
+`invalid regex pattern: cannot determine config directory` —— 现在补 `IoError` / `ParseError`。
+上一轮记录过「它在全仓无穷举匹配、可安全扩充」，本轮正是那个时机。
+写入改走 `store::write_private_json`（0600）：原实现是裸 `fs::write`，**实测 umask 022 下落成 `0644`**——
+不过这是**潜在**缺陷而不是已发生的（函数此前不可达，文件从未被写出）。
+
+**一处刻意不做的事：不给 `load_user_rules` 加缓存。** 它在实时路径上每次调用都读文件 + 重编译，
+但**原来的 `redact_default` 在同一路径上本来就每次重编译 `default_rules()`**，所以这是增量而非新增量级；
+而 mtime 缓存要处理**文件系统 mtime 粒度**——「刚写完立刻读回」并不保证失效，正是让测试 flaky 的那种形状。
+
+**一处必须一起改的横切面：测试的配置目录隔离。** 实时路径改读文件后，
+任何传递调用 `redact_sensitive_text` 的测试都会去读写开发者真实的 `~/.agent2ssh/redact_rules.json`。
+逐点审计后隔离了 3 处：`store::test_redact_sensitive_text`（它**断言的是字面量期望值**，
+删掉内置 hex 规则的开发者会让它失败）、`store::test_exec_multi_audit_entries_reason_and_change_id`、
+`playbook::test_playbook_audit_entries_all_share_context`。
+`notify.rs` / `diagnostics.rs` 的测试本来就用 `HOME` / `CONFIG_DIR_ENV` 隔离，未动。
+
+**验证**：`cargo fmt --check` 干净；clippy `-D warnings` 四目标 0 告警；
+`cargo test --no-default-features --lib` **602**（598 + 4）、`cargo test --lib` **610**（606 + 4），两处都恰好 +4；
+tsc 干净、biome 99 文件、`check-i18n` 干净、vitest 97、`npm run build` 成功、`gen/schemas` 无噪声。
+新测试 4 个，其中 `redact_sensitive_text_reads_the_rules_file` 是**接线本身的回归测试**：
+它同时断言「只存在于文件里的规则被应用」与「被删掉的内置规则不再生效」，
+即证明文件是**权威的**而不是叠加的——没有它，「接上」和「没接上」在测试上无法区分。
+另 3 个：`a24_rules_file_is_owner_only`（0600）、
+`a24_malformed_json_is_a_parse_error_not_a_regex_error`、
+`redact_sensitive_text_falls_back_to_defaults_on_corrupt_file`。
+
 ## 仍未处理
 
 | # | 项 | 为什么留到下一轮 |
 |---|---|---|
-| R7 余项 | `redaction.rs:278–390` 的 A24 文件生命周期（113 行 + 5 个测试）零调用者 | 见上「R7 落地」第二节。**这是「未完成的功能」而非「更差的副本」，删与接都是产品决策**，故不自行处置。若接上，则是一个五面贯通的活（桌面 UI + 命令 + 可能还有 CLI/MCP），按 `agent2ssh-add-operation` 走；若删掉，`RedactRuleConfig` 与 `load_rules_from_json` 的 re-export 需一并移除 |
+| R7 余项（已收窄） | A24 的 **CLI / MCP / daemon** 三个面尚未暴露 | `51522a0` 已完成 core 切换 + 桌面命令 + 设置面板（即 B24 highlight 的同一个面集合）。剩下三个面按 `agent2ssh-add-operation` 走，但**只应暴露 list + reset**：reset 是「恢复内置规则」，只会让脱敏变强；**add / delete / update 不应上自动化面**——那等于让 agent 或远端客户端在无审批门的情况下关掉审计日志里的脱敏。同步时须改 `docs/skills.md` 与其余 ~10 处 MCP 工具计数 |
 | R10 | 前端两个 UI 惯用法（见上「R10 重新取证」） | 两项都**不是机械替换**：一项要动 `IconButton` 的 API（加 `busy`），另一项会改变 `TerminalPanel` / `PlaybooksPanel` 工具栏的行为。**都要先定契约** |
 | R11 余项 | `ConfirmDialog` 标题的 `text-foreground` 与它所在的 `bg-popover` 表面不匹配 | 见上「留待决定的一处 token 错配」。**已取证、未改**：改它会动到全部 14 个确认框，而 6 套主题里有两套无法在本机目视验证。不是冗余项，故不占 R 编号 |
 
