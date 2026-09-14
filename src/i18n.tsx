@@ -249,6 +249,7 @@ const zh: Record<string, string> = {
   "Remove host {name}?": "删除主机 {name}？",
   "Any open sessions or forwards to this host will become orphaned.": "该主机上的会话或转发会变成孤立资源。",
   "Cancel": "取消",
+  "Confirm": "确认",
   "Remove": "删除",
   "Add Host": "添加主机",
   "Alias": "别名",

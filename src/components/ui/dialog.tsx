@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useI18n } from "../../i18n";
 import { cn } from "../../lib/utils";
 import { Button } from "./button";
 
@@ -31,9 +32,21 @@ export function Dialog({ onClose, className, children }: DialogProps) {
 export type ConfirmOptions = {
   title: string;
   description?: string;
+  /**
+   * Extra body rendered between the description and the buttons.
+   *
+   * This is where a consequence belongs — an `<InlineAlert>` saying that open
+   * sessions become orphaned, not a `<p>`. The neutral elaboration (what the
+   * action does, that it cannot be undone) stays in `description`, which is
+   * quieter on purpose. Seven call sites used to hand-roll the dialog itself
+   * and six of them put an alert here.
+   */
+  note?: React.ReactNode;
   confirmLabel?: string;
   cancelLabel?: string;
   danger?: boolean;
+  /** Keeps the confirm button disabled while the action is in flight. */
+  confirmDisabled?: boolean;
 };
 
 type PendingConfirm = ConfirmOptions & { resolve: (ok: boolean) => void };
@@ -43,26 +56,46 @@ type ConfirmDialogProps = ConfirmOptions & {
   onCancel: () => void;
 };
 
-/** Controlled confirmation dialog built on <Dialog>. */
+/**
+ * Controlled confirmation dialog built on <Dialog>.
+ *
+ * This is the app's one spec for "are you sure?". The buttons are the default
+ * size, matching <ApprovalDialog> and every other footer that ends with
+ * `mt-4 flex justify-end gap-2.5`; a modal is the last place to shrink a
+ * target, and `size="sm"` put the labels below the app's 14px base.
+ *
+ * The labels default through `t()` rather than to the literals "Confirm" and
+ * "Cancel". Six of the seven `confirmDialog()` call sites took the literal
+ * default and so shipped an untranslated Cancel button to every non-English
+ * locale; the default now cannot be forgotten.
+ */
 export function ConfirmDialog({
   title,
   description,
-  confirmLabel = "Confirm",
-  cancelLabel = "Cancel",
+  note,
+  confirmLabel,
+  cancelLabel,
   danger = false,
+  confirmDisabled = false,
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
+  const { t } = useI18n();
   return (
     <Dialog onClose={onCancel} className="max-w-sm">
       <p className="text-sm font-medium text-foreground">{title}</p>
       {description && <p className="mt-2 text-xs text-muted-foreground">{description}</p>}
+      {note && <div className="mt-2">{note}</div>}
       <div className="mt-4 flex justify-end gap-2.5">
-        <Button variant="secondary" size="sm" onClick={onCancel}>
-          {cancelLabel}
+        <Button variant="secondary" onClick={onCancel}>
+          {cancelLabel ?? t("Cancel")}
         </Button>
-        <Button variant={danger ? "destructive" : "default"} size="sm" onClick={onConfirm}>
-          {confirmLabel}
+        <Button
+          variant={danger ? "destructive" : "default"}
+          onClick={onConfirm}
+          disabled={confirmDisabled}
+        >
+          {confirmLabel ?? t("Confirm")}
         </Button>
       </div>
     </Dialog>
@@ -114,9 +147,11 @@ export function ConfirmHost() {
     <ConfirmDialog
       title={pending.title}
       description={pending.description}
+      note={pending.note}
       confirmLabel={pending.confirmLabel}
       cancelLabel={pending.cancelLabel}
       danger={pending.danger}
+      confirmDisabled={pending.confirmDisabled}
       onConfirm={() => settle(true)}
       onCancel={() => settle(false)}
     />

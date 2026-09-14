@@ -7,7 +7,7 @@ import type { HostProfile, ProxyProfile, ProxyProtocol } from "../types";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
-import { Dialog } from "./ui/dialog";
+import { ConfirmDialog } from "./ui/dialog";
 import { IconButton } from "./ui/icon-button";
 import { Input } from "./ui/input";
 import { Select } from "./ui/select";
@@ -257,20 +257,18 @@ export default function ProxyPanel({ proxies, hosts, onChanged }: Props) {
       </Card>
 
       {confirmDelete && (
-        <Dialog onClose={() => setConfirmDelete(null)} className="max-w-sm">
-          <p className="mb-2">{t("Delete proxy {name}?", { name: confirmDelete.name })}</p>
-          <InlineAlert>
-            {t("Hosts using this proxy will switch back to direct connections.")}
-          </InlineAlert>
-          <div className="mt-4 flex justify-end gap-2.5">
-            <Button variant="secondary" onClick={() => setConfirmDelete(null)}>
-              {t("Cancel")}
-            </Button>
-            <Button variant="destructive" onClick={() => handleDelete(confirmDelete)}>
-              {t("Delete")}
-            </Button>
-          </div>
-        </Dialog>
+        <ConfirmDialog
+          title={t("Delete proxy {name}?", { name: confirmDelete.name })}
+          note={
+            <InlineAlert>
+              {t("Hosts using this proxy will switch back to direct connections.")}
+            </InlineAlert>
+          }
+          confirmLabel={t("Delete")}
+          danger
+          onConfirm={() => handleDelete(confirmDelete)}
+          onCancel={() => setConfirmDelete(null)}
+        />
       )}
     </div>
   );

@@ -7,7 +7,7 @@ import { useI18n } from "../i18n";
 import type { ConfigSnapshotInfo } from "../types";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
-import { Dialog } from "./ui/dialog";
+import { ConfirmDialog } from "./ui/dialog";
 import { IconButton } from "./ui/icon-button";
 import { Input } from "./ui/input";
 import { EmptyState, InlineAlert } from "./ui/state";
@@ -206,61 +206,49 @@ export default function ConfigSnapshotsPanel() {
       </Card>
 
       {confirmTemplate && (
-        <Dialog onClose={() => setConfirmTemplate(null)} className="max-w-sm">
-          <p className="mb-2">
-            {t("Apply the {name} template?", { name: t(confirmTemplate.name) })}
-          </p>
-          <InlineAlert>
-            {t("This overwrites policy.toml and execution_limits.toml. A snapshot is saved first.")}
-          </InlineAlert>
-          <div className="mt-4 flex justify-end gap-2.5">
-            <Button variant="secondary" onClick={() => setConfirmTemplate(null)}>
-              {t("Cancel")}
-            </Button>
-            <Button onClick={() => applyTemplate(confirmTemplate)} disabled={busy}>
-              {t("Apply template")}
-            </Button>
-          </div>
-        </Dialog>
+        <ConfirmDialog
+          title={t("Apply the {name} template?", { name: t(confirmTemplate.name) })}
+          note={
+            <InlineAlert>
+              {t("This overwrites policy.toml and execution_limits.toml. A snapshot is saved first.")}
+            </InlineAlert>
+          }
+          confirmLabel={t("Apply template")}
+          confirmDisabled={busy}
+          onConfirm={() => applyTemplate(confirmTemplate)}
+          onCancel={() => setConfirmTemplate(null)}
+        />
       )}
 
       {confirmRestore && (
-        <Dialog onClose={() => setConfirmRestore(null)} className="max-w-sm">
-          <p className="mb-2">
-            {t("Restore snapshot {label}?", {
-              label: confirmRestore.label ?? confirmRestore.id,
-            })}
-          </p>
-          <InlineAlert>
-            {t("This overwrites your current config with the snapshot's files. A backup of the current state is saved first.")}
-          </InlineAlert>
-          <div className="mt-4 flex justify-end gap-2.5">
-            <Button variant="secondary" onClick={() => setConfirmRestore(null)}>
-              {t("Cancel")}
-            </Button>
-            <Button variant="destructive" onClick={() => restoreSnapshot(confirmRestore)} disabled={busy}>
-              {t("Restore")}
-            </Button>
-          </div>
-        </Dialog>
+        <ConfirmDialog
+          title={t("Restore snapshot {label}?", {
+            label: confirmRestore.label ?? confirmRestore.id,
+          })}
+          note={
+            <InlineAlert>
+              {t("This overwrites your current config with the snapshot's files. A backup of the current state is saved first.")}
+            </InlineAlert>
+          }
+          confirmLabel={t("Restore")}
+          danger
+          confirmDisabled={busy}
+          onConfirm={() => restoreSnapshot(confirmRestore)}
+          onCancel={() => setConfirmRestore(null)}
+        />
       )}
 
       {confirmDelete && (
-        <Dialog onClose={() => setConfirmDelete(null)} className="max-w-sm">
-          <p className="mb-2">
-            {t("Delete snapshot {label}?", {
-              label: confirmDelete.label ?? confirmDelete.id,
-            })}
-          </p>
-          <div className="mt-4 flex justify-end gap-2.5">
-            <Button variant="secondary" onClick={() => setConfirmDelete(null)}>
-              {t("Cancel")}
-            </Button>
-            <Button variant="destructive" onClick={() => deleteSnapshot(confirmDelete)} disabled={busy}>
-              {t("Delete")}
-            </Button>
-          </div>
-        </Dialog>
+        <ConfirmDialog
+          title={t("Delete snapshot {label}?", {
+            label: confirmDelete.label ?? confirmDelete.id,
+          })}
+          confirmLabel={t("Delete")}
+          danger
+          confirmDisabled={busy}
+          onConfirm={() => deleteSnapshot(confirmDelete)}
+          onCancel={() => setConfirmDelete(null)}
+        />
       )}
     </div>
   );

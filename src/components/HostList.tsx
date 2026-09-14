@@ -27,7 +27,7 @@ import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
 import { ColumnVisibilityMenu, DataTable, selectColumn } from "./ui/data-table";
-import { Dialog } from "./ui/dialog";
+import { ConfirmDialog } from "./ui/dialog";
 import { IconButton } from "./ui/icon-button";
 import { Input } from "./ui/input";
 import { EmptyState, InlineAlert } from "./ui/state";
@@ -527,80 +527,59 @@ export default function HostList({
       </div>
 
       {confirmTarget && (
-        <Dialog onClose={() => setConfirmTarget(null)} className="max-w-sm">
-          <p className="mb-2">{t("Remove host {name}?", { name: confirmTarget })}</p>
-          <InlineAlert>
-            {t("Any open sessions or forwards to this host will become orphaned.")}
-          </InlineAlert>
-          <div className="mt-4 flex justify-end gap-2.5">
-            <Button variant="secondary" onClick={() => setConfirmTarget(null)}>
-              {t("Cancel")}
-            </Button>
-            <Button
-              variant="destructive"
-              onClick={() => {
-                onRemove(confirmTarget);
-                setConfirmTarget(null);
-              }}
-            >
-              {t("Remove")}
-            </Button>
-          </div>
-        </Dialog>
+        <ConfirmDialog
+          title={t("Remove host {name}?", { name: confirmTarget })}
+          note={
+            <InlineAlert>
+              {t("Any open sessions or forwards to this host will become orphaned.")}
+            </InlineAlert>
+          }
+          confirmLabel={t("Remove")}
+          danger
+          onConfirm={() => {
+            onRemove(confirmTarget);
+            setConfirmTarget(null);
+          }}
+          onCancel={() => setConfirmTarget(null)}
+        />
       )}
 
       {confirmBatch && (
-        <Dialog onClose={() => setConfirmBatch(false)} className="max-w-sm">
-          <p className="mb-2">
-            {t("Remove {count} selected hosts?", { count: selectedNames.length })}
-          </p>
-          <InlineAlert>
-            {t("Any open sessions or forwards to these hosts will become orphaned.")}
-          </InlineAlert>
-          <div className="mt-4 flex justify-end gap-2.5">
-            <Button variant="secondary" onClick={() => setConfirmBatch(false)}>
-              {t("Cancel")}
-            </Button>
-            <Button
-              variant="destructive"
-              onClick={() => {
-                onBatchRemove(selectedNames);
-                setRowSelection({});
-                setConfirmBatch(false);
-              }}
-            >
-              {t("Remove")}
-            </Button>
-          </div>
-        </Dialog>
+        <ConfirmDialog
+          title={t("Remove {count} selected hosts?", { count: selectedNames.length })}
+          note={
+            <InlineAlert>
+              {t("Any open sessions or forwards to these hosts will become orphaned.")}
+            </InlineAlert>
+          }
+          confirmLabel={t("Remove")}
+          danger
+          onConfirm={() => {
+            onBatchRemove(selectedNames);
+            setRowSelection({});
+            setConfirmBatch(false);
+          }}
+          onCancel={() => setConfirmBatch(false)}
+        />
       )}
 
       {confirmGroupTarget && (
-        <Dialog onClose={() => setConfirmGroupTarget(null)} className="max-w-sm">
-          <p className="mb-2">
-            {t("Delete group {name}?", {
-              name:
-                groups.find((group) => group.id === confirmGroupTarget)?.name ?? confirmGroupTarget,
-            })}
-          </p>
-          <InlineAlert>
-            {t("Hosts in this group will move to Default.")}
-          </InlineAlert>
-          <div className="mt-4 flex justify-end gap-2.5">
-            <Button variant="secondary" onClick={() => setConfirmGroupTarget(null)}>
-              {t("Cancel")}
-            </Button>
-            <Button
-              variant="destructive"
-              onClick={async () => {
-                await onDeleteGroup(confirmGroupTarget);
-                setConfirmGroupTarget(null);
-              }}
-            >
-              {t("Delete")}
-            </Button>
-          </div>
-        </Dialog>
+        <ConfirmDialog
+          title={t("Delete group {name}?", {
+            name:
+              groups.find((group) => group.id === confirmGroupTarget)?.name ?? confirmGroupTarget,
+          })}
+          note={
+            <InlineAlert>{t("Hosts in this group will move to Default.")}</InlineAlert>
+          }
+          confirmLabel={t("Delete")}
+          danger
+          onConfirm={async () => {
+            await onDeleteGroup(confirmGroupTarget);
+            setConfirmGroupTarget(null);
+          }}
+          onCancel={() => setConfirmGroupTarget(null)}
+        />
       )}
     </Card>
   );
