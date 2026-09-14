@@ -33,7 +33,6 @@ use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use anyhow::{anyhow, Result};
 use argon2::{Algorithm, Argon2, Params, Version};
-use rand::RngCore;
 
 /// Magic prefix for encrypted backup files.
 pub const ENCRYPTED_MAGIC: &[u8] = b"AGENT2SSH_ENCRYPTED_BACKUP_V1";
@@ -75,8 +74,9 @@ fn derive_key(password: &[u8], salt: &[u8]) -> Result<[u8; 32]> {
 pub fn encrypt_backup(password: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
     let mut salt = [0u8; SALT_LEN];
     let mut nonce_bytes = [0u8; NONCE_LEN];
-    rand::thread_rng().fill_bytes(&mut salt);
-    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    getrandom::fill(&mut salt).map_err(|e| anyhow!("failed to generate backup salt: {e}"))?;
+    getrandom::fill(&mut nonce_bytes)
+        .map_err(|e| anyhow!("failed to generate backup nonce: {e}"))?;
 
     let key_bytes = derive_key(password, &salt)?;
     let key = Key::<Aes256Gcm>::from_slice(&key_bytes);
