@@ -28,8 +28,8 @@ use crate::{
         trust_host_fingerprint_core, HostFingerprintStatus, KnownHostImportSummary,
     },
     execution_control::{
-        authorize_command_without_approval_handler, command_authorization_target,
-        effective_command_risk, expand_exec_authorization_targets, CommandAuthorizationError,
+        authorize_command_without_approval_handler, authorize_targets_without_approval_handler,
+        command_authorization_target, effective_command_risk, CommandAuthorizationError,
     },
     forward::{
         forward_add_core_via, forward_list_core, forward_remove_core, forward_start_core,
@@ -448,29 +448,19 @@ async fn authorize_desktop_exec_targets(
     change_id: Option<String>,
     source: &str,
 ) -> Result<Vec<String>, String> {
-    let targets = expand_exec_authorization_targets(hosts, tags).map_err(|e| e.to_string())?;
-    let mut approved_hosts = Vec::new();
-    for target in targets {
-        let result = authorize_command_without_approval_handler(
-            source,
-            &target.host,
-            &target.tags,
-            target.risk_override,
-            command,
-            force,
-            reason.clone(),
-            change_id.clone(),
-            None,
-            "approval required but no desktop approval handler is available",
-            "; run through the daemon approval flow",
-        )
-        .await
-        .map_err(command_authorization_error)?;
-        if result.approved && result.risk == RiskLevel::High {
-            approved_hosts.push(target.host);
-        }
-    }
-    Ok(approved_hosts)
+    authorize_targets_without_approval_handler(
+        source,
+        hosts,
+        tags,
+        command,
+        force,
+        reason,
+        change_id,
+        "approval required but no desktop approval handler is available",
+        "; run through the daemon approval flow",
+    )
+    .await
+    .map_err(command_authorization_error)
 }
 
 async fn authorize_desktop_playbook_run(

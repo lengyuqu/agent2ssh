@@ -225,6 +225,64 @@ pub async fn authorize_command_without_approval_handler(
     .await
 }
 
+/// Authorize one command across every host an exec request expands to.
+///
+/// CLI, MCP and desktop all run the same loop: expand the host/tag selection,
+/// authorize each target on its own, and keep the names of the high-risk hosts
+/// that came back approved so the caller can flip `force` for exactly those.
+/// The loop is where the multi-host authorization rule lives, so it is worth
+/// having one copy — three copies meant three places to notice if the rule
+/// changed.
+///
+/// The per-surface parts stay per-surface. `rejection_message` and
+/// `rejection_hint` are forwarded verbatim to
+/// [`authorize_command_without_approval_handler`], and rendering the returned
+/// [`CommandAuthorizationError`] is left to the caller, which is also what lets
+/// MCP keep its own `McpError` mapping.
+///
+/// A failure to expand the selection is folded into
+/// [`CommandAuthorizationError::Internal`] with its original message. Every
+/// surface already renders `Internal` as the bare message, so what the user
+/// sees is unchanged.
+// The parameter list mirrors `authorize_command_without_approval_handler` and
+// has the same three callers, so passing a struct would only add a hop.
+#[allow(clippy::too_many_arguments)]
+pub async fn authorize_targets_without_approval_handler(
+    source: &str,
+    hosts: &[String],
+    tags: &Option<Vec<String>>,
+    command: &str,
+    force: bool,
+    reason: Option<String>,
+    change_id: Option<String>,
+    rejection_message: &str,
+    rejection_hint: &str,
+) -> Result<Vec<String>, CommandAuthorizationError> {
+    let targets = expand_exec_authorization_targets(hosts, tags)
+        .map_err(|error| CommandAuthorizationError::Internal(error.to_string()))?;
+    let mut approved_hosts = Vec::new();
+    for target in targets {
+        let result = authorize_command_without_approval_handler(
+            source,
+            &target.host,
+            &target.tags,
+            target.risk_override,
+            command,
+            force,
+            reason.clone(),
+            change_id.clone(),
+            None,
+            rejection_message,
+            rejection_hint,
+        )
+        .await?;
+        if result.approved && result.risk == RiskLevel::High {
+            approved_hosts.push(target.host);
+        }
+    }
+    Ok(approved_hosts)
+}
+
 pub async fn authorize_command_with_approval<F, Fut>(
     input: CommandAuthorizationInput<'_>,
     approval: F,

@@ -12,8 +12,8 @@ use agent2ssh::embedded_ssh::{
 };
 use agent2ssh::events::subscribe_events;
 use agent2ssh::execution_control::{
-    authorize_command_without_approval_handler, command_authorization_target,
-    expand_exec_authorization_targets, CommandAuthorizationError,
+    authorize_command_without_approval_handler, authorize_targets_without_approval_handler,
+    command_authorization_target, CommandAuthorizationError,
 };
 use agent2ssh::remote::{
     check_daemon_scope, check_daemon_version, diagnose_daemon, get_daemon, get_daemon_with_scope,
@@ -1057,29 +1057,19 @@ async fn authorize_local_exec_targets(
     change_id: Option<String>,
     source: &str,
 ) -> Result<Vec<String>> {
-    let targets = expand_exec_authorization_targets(hosts, tags)?;
-    let mut approved_hosts = Vec::new();
-    for target in targets {
-        let result = authorize_command_without_approval_handler(
-            source,
-            &target.host,
-            &target.tags,
-            target.risk_override,
-            command,
-            force,
-            reason.clone(),
-            change_id.clone(),
-            None,
-            "approval required but no local approval handler is available",
-            "; run through the daemon approval flow or use --force when policy allows",
-        )
-        .await
-        .map_err(command_authorization_error)?;
-        if result.approved && result.risk == RiskLevel::High {
-            approved_hosts.push(target.host);
-        }
-    }
-    Ok(approved_hosts)
+    authorize_targets_without_approval_handler(
+        source,
+        hosts,
+        tags,
+        command,
+        force,
+        reason,
+        change_id,
+        "approval required but no local approval handler is available",
+        "; run through the daemon approval flow or use --force when policy allows",
+    )
+    .await
+    .map_err(command_authorization_error)
 }
 
 async fn authorize_local_playbook_run(

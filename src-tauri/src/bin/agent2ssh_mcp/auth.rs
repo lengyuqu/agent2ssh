@@ -1,6 +1,6 @@
 use agent2ssh::execution_control::{
-    authorize_command_without_approval_handler, command_authorization_target,
-    expand_exec_authorization_targets, CommandAuthorizationError,
+    authorize_command_without_approval_handler, authorize_targets_without_approval_handler,
+    command_authorization_target, CommandAuthorizationError,
 };
 use agent2ssh::{dry_run_playbook, list_playbooks_core, ExecRequest, RiskLevel};
 use std::collections::HashMap;
@@ -42,29 +42,19 @@ pub(super) async fn authorize_local_mcp_exec_targets(
     change_id: Option<String>,
     source: &str,
 ) -> std::result::Result<Vec<String>, McpError> {
-    let targets = expand_exec_authorization_targets(hosts, tags).map_err(McpError::from)?;
-    let mut approved_hosts = Vec::new();
-    for target in targets {
-        let result = authorize_command_without_approval_handler(
-            source,
-            &target.host,
-            &target.tags,
-            target.risk_override,
-            command,
-            force,
-            reason.clone(),
-            change_id.clone(),
-            None,
-            "approval required but no local MCP approval handler is available",
-            "; run through the daemon approval flow",
-        )
-        .await
-        .map_err(mcp_authorization_error)?;
-        if result.approved && result.risk == RiskLevel::High {
-            approved_hosts.push(target.host);
-        }
-    }
-    Ok(approved_hosts)
+    authorize_targets_without_approval_handler(
+        source,
+        hosts,
+        tags,
+        command,
+        force,
+        reason,
+        change_id,
+        "approval required but no local MCP approval handler is available",
+        "; run through the daemon approval flow",
+    )
+    .await
+    .map_err(mcp_authorization_error)
 }
 
 pub(super) async fn authorize_local_mcp_playbook_run(
