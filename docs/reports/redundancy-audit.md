@@ -352,6 +352,7 @@
 | R5 | `eb6f6aa` | 新增 `AuditEntry::test_fixture()`，15 处字面量改为「只覆写断言字段」 |
 | R9 | `07d3c64` | 新增 `store::TestConfigDir`（RAII），六个模块的临时配置目录统一 |
 | R8 | `e0a539f` | `backup_crypto` 改用 `getrandom::fill`，`rand` 依赖已删除 |
+| R6 | `627937a` | `ui/state.tsx` 新增 `Spinner` 与 `InlineAlert`，收拢 12 处手写 spinner、13 处手着色提示盒；补 `ui/state.test.tsx`（+9 测试） |
 
 ### 对本报告自身结论的两处订正
 
@@ -368,9 +369,55 @@
 
 | # | 项 | 为什么留到下一轮 |
 |---|---|---|
-| R6 | 手写 spinner / 错误块（`animate-spin` 25 处 / 12 文件，`text-destructive` 21 文件） | 不是机械去重，需要逐处决定抽什么组件、替换后视觉是否等价；属**用户可见一致性**工程，值得单独一轮 |
 | R7 | `redaction.rs` / `highlight.rs` 平行规则库 | 抽泛型规则库是**中等风险**重构，收益中等；建议在 R6 之后再评估 |
-| R10 | 前端 2 处 8 行 UI 惯用法 | 与 R6 同源，做 R6 时顺带覆盖 |
+| R10 | 前端两个 UI 惯用法（见下，已重新取证） | 两项都**不是机械替换**：一项会改变行为，另一项要动 `IconButton` 的 API |
+
+### R6 落地时的取舍（用户可见变更已在此列明）
+
+- **改了 2 处外观，均朝统一规格**：`AlgoPrefsDialog` 的错误框 `text-xs → text-sm`、`px-2.5 → px-3`；
+  `SyncPanel` 的 warning 提示条去掉一次性的 `rounded-lg`/`p-3`（改回 `rounded-md`/`px-3 py-2`）。其余 10 处渲染结果不变。
+- **未并入的一处**：`SFTPPanel:1157` 的传输进度条同为着色边框盒，但它是**进度指示**（spinner 打头、`items-center`、
+  内容为内联文本 + 条件 `<span>`），并入会强行套用 alert 布局（`items-start` + `break-words` 包裹层会吃掉文本与
+  `<span>` 之间的 `gap`）。故保留，并在组件注释里说明 `InlineAlert` 是 alert、不是 progress。
+- **未动 `"animate-spin" : ""` 切换写法**（11 处）。抽 `BusyIcon` 后调用点反而更长
+  （`<BusyIcon busy={loading} icon={RefreshCw} size={14} />` vs `<RefreshCw size={14} className={loading ? "animate-spin" : ""} />`），
+  属改而不善。`Spinner` 只统一了「spinner 长什么样」这一件事。
+
+### R10 重新取证：两项都是设计决策，不是去重
+
+**R10-1 刷新按钮**。`title={t("Refresh")}` 的 `IconButton` 有 **5 处**，其中 2 处内含会转的 `RefreshCw`
+（`SnippetsDialog:176` / `PlaybooksPanel:344`，这两处是逐字重复的 6 行块），另 3 处是不转的静态图标
+（`ConfigSnapshotsPanel:150` / `ForwardPanel:179` / `ConnectionTopology:234`）。而 `className={busy ? "animate-spin" : ""}`
+切换全仓有 **11 处**（`RefreshCw` 10 + `RotateCcw` 1），落在 6 个文件、3 种显式尺寸（14 / 15 / 16）加 1 处无尺寸，
+且 busy 表达式有 7 组不同写法 —— 仅 `SettingsMenu` 一个文件就占了 5 组（`refreshBusy` / `healthBusy` /
+`updateBusy === "check"` / `daemonActionBusy === "restart"` / `diagnosticBusy === "refresh"`）。
+要收就得给 `IconButton` 加 `busy` 属性（API 变更），并把「刷新语义」提升为组件契约 —— 需先定契约，不能顺手改。
+
+**R10-2 host 选择器**。**`src/components/HostSelector.tsx` 已经存在**，而 `TerminalPanel:441` 与
+`PlaybooksPanel:571` 仍在手搓同一段 8 行 `<Select>`（`{hosts.length === 0 && <option value="">{t("No hosts")}</option>}` +
+`hosts.map(...)`），选项文案为 `host.name`。
+但两者**契约不匹配**，不是 drop-in：
+
+| | `HostSelector` | 两处手搓 |
+|---|---|---|
+| 外层 | `<label>` 包裹 + 图标 + 「Target server」标题 | 裸 `<Select>`，嵌在 `flex flex-wrap items-center gap-2` 工具条里 |
+| 选项文案 | `name - user@host:port`（`describeHost`） | 仅 `name` |
+| 空值时 | **自动选中第一个 host**（`useEffect`） | 允许空选，靠提交按钮 `disabled={!newHost}` 兜底 |
+
+自动选中会改变这两处工具栏的行为（用户原本可以看到「未选择」状态）。故需先决定：是给 `HostSelector` 加一个
+`compact` / 无 label 变体并接受自动选中，还是让两处显式选择「不自动选」。**属产品决策，不宜由去重驱动。**
+
+### 另记：新发现的同类项（原报告未列，未处理）
+
+**确认对话框绕过 `ConfirmDialog`**。`ui/dialog.tsx` 已提供 `ConfirmDialog` 与命令式 `confirmDialog()`，
+`ConfirmOptions` 也已有 `title` / `description` / `danger`，且 `confirmDialog()` 已被 7 处采用
+（`SnippetsDialog:138`、`KeysPanel:80`、`McpAgentsPanel:86`/`:124`、`PlaybooksPanel:284`、`RecordingsPanel:164`、
+`SFTPPanel:519`）。但另有 **7 处**仍手搓 `<Dialog onClose={...} className="max-w-sm">` + 概要 + 警示条 + Cancel/确认 footer：
+`HostList:530`/`:553`/`:579`、`ConfigSnapshotsPanel:209`/`:228`/`:249`、`ProxyPanel:260`
+（`mt-4 flex justify-end gap-2.5` 这个 footer 惯用法共 8 处、`t("Cancel")` 共 21 处）。
+未能迁移的原因是 `ConfirmOptions` **没有警示条槽位**（这几处的警示条正是上面 `InlineAlert` 的来源），
+且 `ConfirmDialog` 用 `size="sm"` 按钮而手搓处用默认尺寸，再加上命令式 API 与现有 `useState` + `<Dialog>` 的
+状态管理方式不同。**建议作为 R11 单独立项**：给 `ConfirmOptions` 加一个可选警示/正文槽位，再逐处迁移。
 
 ## 本轮（增量扫描）的验证
 

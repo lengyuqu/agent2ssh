@@ -126,7 +126,7 @@ type InlineAlertProps = {
  * An alert or warning note *inside* a panel or dialog.
  *
  * This is the counterpart to <ErrorState>, which is the full-panel placeholder.
- * Ten call sites had hand-rolled this box and drifted apart: three different
+ * Thirteen call sites had hand-rolled this box and drifted apart: three different
  * paddings, two border alphas, two font sizes. The warning note alone was copied
  * verbatim six times, so this is the single spec for both shapes.
  */
