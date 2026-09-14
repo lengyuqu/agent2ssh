@@ -358,6 +358,43 @@ pub struct ExecResult {
     pub side_effect: Option<String>,
 }
 
+#[cfg(test)]
+impl AuditEntry {
+    /// An audit entry with every optional field empty and a fresh id/timestamp.
+    ///
+    /// Tests build entries by overriding only the fields they assert on:
+    ///
+    /// ```ignore
+    /// AuditEntry {
+    ///     host: "db-1".into(),
+    ///     command: "pg_dump mydb".into(),
+    ///     risk_level: RiskLevel::Low,
+    ///     ..AuditEntry::test_fixture()
+    /// }
+    /// ```
+    ///
+    /// The alternative — spelling out all thirteen fields at each site — is
+    /// how the last four fields (`side_effect`, `source`, `action`, `outcome`)
+    /// each ended up requiring an edit in every test literal.
+    pub(crate) fn test_fixture() -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            ts: Utc::now(),
+            host: String::new(),
+            command: String::new(),
+            exit_code: None,
+            duration_ms: 0,
+            risk_level: RiskLevel::Low,
+            reason: None,
+            change_id: None,
+            side_effect: None,
+            source: None,
+            action: None,
+            outcome: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditEntry {
     pub id: Uuid,

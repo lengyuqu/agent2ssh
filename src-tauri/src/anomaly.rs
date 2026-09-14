@@ -405,7 +405,6 @@ mod tests {
 
     fn audit(source: &str, command: &str, risk_level: RiskLevel, offset_secs: i64) -> AuditEntry {
         AuditEntry {
-            id: Uuid::new_v4(),
             ts: Utc::now() + chrono::Duration::seconds(offset_secs),
             host: "web".into(),
             command: command.into(),
@@ -414,10 +413,8 @@ mod tests {
             risk_level,
             reason: None,
             change_id: None,
-            side_effect: None,
             source: Some(source.into()),
-            action: None,
-            outcome: None,
+            ..AuditEntry::test_fixture()
         }
     }
 

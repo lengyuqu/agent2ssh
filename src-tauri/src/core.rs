@@ -4062,12 +4062,8 @@ mod tests {
     #[test]
     fn test_audit_entry_with_reason_and_change_id() {
         use crate::types::AuditEntry;
-        use chrono::Utc;
-        use uuid::Uuid;
 
         let entry = AuditEntry {
-            id: Uuid::new_v4(),
-            ts: Utc::now(),
             host: "test-host".into(),
             command: "uptime".into(),
             exit_code: Some(0),
@@ -4075,10 +4071,8 @@ mod tests {
             risk_level: RiskLevel::Low,
             reason: Some("daily health check".into()),
             change_id: Some("CHG-12345".into()),
-            side_effect: None,
             source: Some("cli".into()),
-            action: None,
-            outcome: None,
+            ..AuditEntry::test_fixture()
         };
 
         let json = serde_json::to_string(&entry).unwrap();

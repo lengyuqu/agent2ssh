@@ -1710,12 +1710,8 @@ mod tests {
         // Test the search/glob logic directly without relying on env vars
         // (env vars have race conditions in parallel tests)
         use crate::types::{AuditEntry, RiskLevel};
-        use chrono::Utc;
-        use uuid::Uuid;
 
         let entry1 = AuditEntry {
-            id: Uuid::new_v4(),
-            ts: Utc::now(),
             host: "prod-server".into(),
             command: "sudo apt update".into(),
             exit_code: Some(0),
@@ -1723,14 +1719,10 @@ mod tests {
             risk_level: RiskLevel::High,
             reason: None,
             change_id: None,
-            side_effect: None,
             source: None,
-            action: None,
-            outcome: None,
+            ..AuditEntry::test_fixture()
         };
         let entry2 = AuditEntry {
-            id: Uuid::new_v4(),
-            ts: Utc::now(),
             host: "dev-box".into(),
             command: "ls -la".into(),
             exit_code: Some(0),
@@ -1738,10 +1730,8 @@ mod tests {
             risk_level: RiskLevel::Low,
             reason: None,
             change_id: None,
-            side_effect: None,
             source: None,
-            action: None,
-            outcome: None,
+            ..AuditEntry::test_fixture()
         };
 
         // Test search: "apt" should match entry1's command
@@ -1774,12 +1764,8 @@ mod tests {
     #[test]
     fn test_audit_filter_command_pattern() {
         use crate::types::{AuditEntry, RiskLevel};
-        use chrono::Utc;
-        use uuid::Uuid;
 
         let entry1 = AuditEntry {
-            id: Uuid::new_v4(),
-            ts: Utc::now(),
             host: "server".into(),
             command: "kubectl delete namespace default".into(),
             exit_code: Some(0),
@@ -1787,14 +1773,10 @@ mod tests {
             risk_level: RiskLevel::High,
             reason: None,
             change_id: None,
-            side_effect: None,
             source: None,
-            action: None,
-            outcome: None,
+            ..AuditEntry::test_fixture()
         };
         let entry2 = AuditEntry {
-            id: Uuid::new_v4(),
-            ts: Utc::now(),
             host: "server".into(),
             command: "ls -la".into(),
             exit_code: Some(0),
@@ -1802,10 +1784,8 @@ mod tests {
             risk_level: RiskLevel::Low,
             reason: None,
             change_id: None,
-            side_effect: None,
             source: None,
-            action: None,
-            outcome: None,
+            ..AuditEntry::test_fixture()
         };
 
         // Test command_pattern: "kubectl delete *" should match entry1
@@ -1957,7 +1937,6 @@ mod tests {
         let mut body = String::new();
         for i in 0..n {
             let entry = super::AuditEntry {
-                id: uuid::Uuid::new_v4(),
                 ts: base + chrono::Duration::seconds(i as i64),
                 host: if i % 2 == 0 {
                     "alpha".into()
@@ -1970,10 +1949,8 @@ mod tests {
                 risk_level: super::RiskLevel::Low,
                 reason: None,
                 change_id: None,
-                side_effect: None,
                 source: None,
-                action: None,
-                outcome: None,
+                ..super::AuditEntry::test_fixture()
             };
             body.push_str(&serde_json::to_string(&entry).unwrap());
             body.push('\n');
@@ -2071,12 +2048,8 @@ mod tests {
     fn test_export_audit_jsonl_with_data() {
         // Test the JSONL and CSV formatting logic directly without relying on
         // env vars (which have race conditions in parallel tests).
-        use chrono::Utc;
-        use uuid::Uuid;
 
         let entry1 = AuditEntry {
-            id: Uuid::new_v4(),
-            ts: Utc::now(),
             host: "test-host".into(),
             command: "ls -la".into(),
             exit_code: Some(0),
@@ -2084,14 +2057,10 @@ mod tests {
             risk_level: RiskLevel::Low,
             reason: None,
             change_id: None,
-            side_effect: None,
             source: None,
-            action: None,
-            outcome: None,
+            ..AuditEntry::test_fixture()
         };
         let entry2 = AuditEntry {
-            id: Uuid::new_v4(),
-            ts: Utc::now(),
             host: "prod-host".into(),
             command: "sudo apt update".into(),
             exit_code: Some(0),
@@ -2099,10 +2068,8 @@ mod tests {
             risk_level: RiskLevel::High,
             reason: Some("weekly update".into()),
             change_id: Some("CHG-001".into()),
-            side_effect: None,
             source: Some("cli".into()),
-            action: None,
-            outcome: None,
+            ..AuditEntry::test_fixture()
         };
 
         let entries = vec![entry1, entry2];
@@ -2155,8 +2122,6 @@ mod tests {
         // Verify that audit entries constructed for an exec-multi scenario
         // correctly carry reason and change_id through the full JSONL
         // serialisation round-trip — one entry per target host.
-        use chrono::Utc;
-        use uuid::Uuid;
 
         let reason = "deploy v2.3.1";
         let change_id = "CHG-20240614-001";
@@ -2179,8 +2144,6 @@ mod tests {
             };
             // Mirror the AuditEntry construction in append_audit
             let entry = AuditEntry {
-                id: Uuid::new_v4(),
-                ts: Utc::now(),
                 host: result.host.clone(),
                 command: redact_sensitive_text(&result.command),
                 exit_code: result.exit_code,
@@ -2188,10 +2151,8 @@ mod tests {
                 risk_level: RiskLevel::Medium,
                 reason: Some(reason.to_string()),
                 change_id: Some(change_id.to_string()),
-                side_effect: None,
                 source: Some("mcp".into()),
-                action: None,
-                outcome: None,
+                ..AuditEntry::test_fixture()
             };
             jsonl_lines.push(serde_json::to_string(&entry).unwrap());
         }
@@ -2231,12 +2192,8 @@ mod tests {
     #[test]
     fn test_exec_multi_audit_entries_without_reason() {
         // Verify exec-multi without reason/change_id produces entries with None
-        use chrono::Utc;
-        use uuid::Uuid;
 
         let entry = AuditEntry {
-            id: Uuid::new_v4(),
-            ts: Utc::now(),
             host: "db-1".into(),
             command: "pg_dump mydb".into(),
             exit_code: Some(0),
@@ -2244,10 +2201,8 @@ mod tests {
             risk_level: RiskLevel::Low,
             reason: None,
             change_id: None,
-            side_effect: None,
             source: None,
-            action: None,
-            outcome: None,
+            ..AuditEntry::test_fixture()
         };
         let json = serde_json::to_string(&entry).unwrap();
         let parsed: AuditEntry = serde_json::from_str(&json).unwrap();
@@ -2261,13 +2216,9 @@ mod tests {
         // Simulate a full exec-multi audit trail: write JSONL entries for
         // multiple hosts, read them back, and verify reason/change_id survive
         // the round-trip — including search-style filtering.
-        use chrono::Utc;
-        use uuid::Uuid;
 
         let entries = [
             AuditEntry {
-                id: Uuid::new_v4(),
-                ts: Utc::now(),
                 host: "alpha".into(),
                 command: "uptime".into(),
                 exit_code: Some(0),
@@ -2275,14 +2226,10 @@ mod tests {
                 risk_level: RiskLevel::Low,
                 reason: Some("health check".into()),
                 change_id: Some("CHG-100".into()),
-                side_effect: None,
                 source: Some("cli".into()),
-                action: None,
-                outcome: None,
+                ..AuditEntry::test_fixture()
             },
             AuditEntry {
-                id: Uuid::new_v4(),
-                ts: Utc::now(),
                 host: "beta".into(),
                 command: "df -h".into(),
                 exit_code: Some(0),
@@ -2290,14 +2237,10 @@ mod tests {
                 risk_level: RiskLevel::Low,
                 reason: None,
                 change_id: None,
-                side_effect: None,
                 source: None,
-                action: None,
-                outcome: None,
+                ..AuditEntry::test_fixture()
             },
             AuditEntry {
-                id: Uuid::new_v4(),
-                ts: Utc::now(),
                 host: "gamma".into(),
                 command: "free -m".into(),
                 exit_code: Some(1),
@@ -2305,10 +2248,8 @@ mod tests {
                 risk_level: RiskLevel::Medium,
                 reason: Some("health check".into()),
                 change_id: Some("CHG-100".into()),
-                side_effect: None,
                 source: Some("mcp".into()),
-                action: None,
-                outcome: None,
+                ..AuditEntry::test_fixture()
             },
         ];
 

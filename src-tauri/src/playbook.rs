@@ -822,8 +822,6 @@ required = false
         // and verify all entries share the same reason and change_id.
         use crate::store::redact_sensitive_text;
         use crate::types::{AuditEntry, ExecResult};
-        use chrono::Utc;
-        use uuid::Uuid;
 
         let reason = "nightly deploy v3.0";
         let change_id = "CHG-NIGHTLY-001";
@@ -851,8 +849,6 @@ required = false
             };
             // Mirror append_audit's AuditEntry construction
             let entry = AuditEntry {
-                id: Uuid::new_v4(),
-                ts: Utc::now(),
                 host: result.host.clone(),
                 command: redact_sensitive_text(&result.command),
                 exit_code: result.exit_code,
@@ -860,10 +856,8 @@ required = false
                 risk_level: RiskLevel::Medium,
                 reason: Some(reason.to_string()),
                 change_id: Some(change_id.to_string()),
-                side_effect: None,
                 source: None,
-                action: None,
-                outcome: None,
+                ..AuditEntry::test_fixture()
             };
             entries.push(entry);
         }
