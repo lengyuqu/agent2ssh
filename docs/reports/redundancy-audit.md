@@ -297,3 +297,52 @@
 删除四个冗余项 + 修复桌面端 transport 之后重跑全量矩阵，全绿：`cargo fmt --check` clean；clippy 四目标（CLI+MCP / daemon / lib 非默认 / lib 默认 tauri）各 0 warning；`cargo test --lib` **609**、`--no-default-features --lib` **601**（各比上轮 **+2**，正是新增的两个 `Host` 单测）、`cli_contract` 29、`cli_smoke` 33、`daemon_integration` 57、`connect_deadline` 2。删除的验证是双向的：`git grep` 确认四个符号在 Rust 源码与 `src/`（前端从未引用过它们）都无残留，同时 `policy.rs` 的 `RiskRules` 导入因 `AgentPolicyFile` 字段仍在用而**保留**、`Host::emit` 因有单测而**保留**。
 
 **方法论教训（本轮新增一条）**：判断某段代码「多余」之前，先确认它引用的运行时状态是不是真的被设置了。`TODO` 把 `is_headless` / `is_cli` 说成「冗余谓词」，而真相是它们依赖的 `Host` 值在桌面端**从未被安装**——照注释直接删掉就永远发现不了那个真 bug。
+
+---
+
+# 增量扫描（2026-09-14）
+
+用户问「针对冗余代码修复，还有哪些需要处理的」。重跑一轮**机械扫描 + 逐项实测**（不依赖上面各节的自述），
+方法固化为脚本 `~/.workbuddy/skills/agent2ssh-add-operation/scripts/redundancy_scan.py`（五类检查）。
+
+## 机械可查的三类已清零
+
+| 检查 | 结果 |
+|---|---|
+| Rust `pub fn` 全仓仅出现一次（死函数） | **0** |
+| TS `export` 全仓仅出现一次（死导出） | **0** |
+| i18n 未使用键 | **0**（4 条疑似键经核实均为模板串动态键 `t(\`Highlight validation: ${v}\`)`） |
+
+`TODO(unwired)` 标注也已归零。所以上一轮的清理是**彻底**的；剩下的不是「没人调用」，而是「重复 / 形态问题」。
+
+## 待处理清单（按建议优先级）
+
+| # | 项 | 位置 / 规模 | 证据 | 建议 |
+|---|---|---|---|---|
+| **R1** | `split_completed_session_commands` **整函数逐字复制** | `tauri_commands.rs:307` + `bin/agent2ssh-daemon.rs:375`，各 19 行 | 归一化后 **17 行完全一致** | 提到公共模块（`session.rs`），两处改引。**本轮最干净的一处** |
+| **R2** | 多主机授权循环 **~30 行 × 3** | `tauri_commands.rs:466` / `bin/agent2ssh.rs:1055` / `agent2ssh_mcp/auth.rs:40` | 仅「拒绝文案 + 错误映射」不同（`command_authorization_error` 在前两处相同，MCP 用 `mcp_authorization_error`） | 加 `authorize_targets_without_approval_handler(rejection_message, rejection_hint)`；这是 **P1#6/#7 收敛时漏掉的多主机分支** |
+| **R3** | `normalize_proxy` 重复 —— **报告称已收敛，实测未收敛** | `core.rs:397`（fn） + `store.rs:574`（内联块） | 重复块检测命中 `core.rs:398-405` / `store.rs:574-581` | 让 `store` 的 `normalize_config` 改调 `core::normalize_proxy`（先确认「循环 + retain + sort」组合语义等价）。**注意它不再同名，按名字搜不到** |
+| **R4** | `ssh_config.rs` 的**测试专用 glob 镜像** | 3 个 `#[cfg(test)]` 函数（`glob_match` / `glob_match_bytes` / `char_class_match`）+ 约 10 个只为测它们的单测 | 生产侧 `splice_includes` 用的是 **`glob` crate**；这组镜像全仓仅被自己的测试引用 | 删除镜像与其单测（生产路径已有 `include_splices_glob_matches` 等真实覆盖），或明确它要保护什么语义 |
+| **R5** | `AuditEntry` 测试 fixture 重复 | `playbook.rs:853` + `store.rs:2194` | 两处注释均自认「Mirror append_audit」；重复块检测命中 | 抽 `#[cfg(test)] pub(crate) fn test_audit_entry(...)` 复用 |
+| **R6** | P1#11 手写 spinner / 错误块 | `animate-spin` **25 处 / 12 文件**；`text-destructive` **21 文件**；`ErrorState` 仅 `SFTPPanel` 1 个组件在用 | 逐文件统计 | 体量最大、且属用户可见一致性；报告判定「无安全 panel 级替换点」，需逐处确认后再动 |
+| **R7** | `redaction.rs` / `highlight.rs` 平行规则库 | 各含 `seed_default_rules()` + `load_rules_from_json()`，同职责、不同规则类型 | 同名 `pub fn` 扫描 | 可抽泛型规则库；中等收益、中等风险（原报告未列） |
+| **R8** | `rand` + `getrandom` 双 RNG 入口 | `Cargo.toml:65-66`；`rand` 仅在 `backup_crypto.rs:78-79` 用了 2 次 | `getrandom::fill` 已在 `keys.rs` / `mcp_binding.rs` / `secrets.rs` 使用 | 这 2 处改为 `getrandom::fill` 后删 `rand` 依赖（先 `cargo tree -i rand` 确认无其他消费者） |
+| **R9** | 测试助手 `unique_dir` ×2 | `copy_redact.rs:153` + `snippets.rs:198` | `#[cfg(test)]` 扫描 | 低收益 |
+| **R10** | 前端 2 处 8 行 UI 惯用法 | 「Refresh IconButton + `animate-spin`」`SnippetsDialog:170` / `PlaybooksPanel:339`；「host `<Select>`」`TerminalPanel:445` / `PlaybooksPanel:576` | 重复块检测 | 低收益；与 R6 同源，做 R6 可顺带覆盖 |
+
+## 已排除：形似但**非**冗余（避免下一轮误删）
+
+| 形似之处 | 为什么保留 |
+|---|---|
+| `daemon::authorize_command` vs `execution_control::authorize_command_without_approval_handler`（同为 8 参） | daemon 版多一个 daemon 专属 `auth_scope`、错误类型是 `(StatusCode, Json<ErrorBody>)`；`execution_control` 的注释明确写了「传 struct 会把 `auth_scope` 默认值推给全部 12 个调用方」 |
+| `ssh_config::glob_match` vs `store::glob_match` | 前者字节级、**大小写敏感**、支持 `[...]` 字符类；后者**大小写不敏感**、只支持 `*`/`?`。**两种语义**。（前者是死代码，见 R4，但「同名」不是它该删的理由） |
+| 同名 `#[tauri::command]` 与 `diagnostics.rs` / `recording.rs` 同名的实现 | 薄封装 + 实现分层，本仓既定模式 |
+| `Host::is_desktop` / `activate` / `terminal_size` 等同名双份 | `#[cfg]` 门控，非副本 |
+
+## 本轮（增量扫描）的验证
+
+无代码改动，仅扫描 + 只读核实。所有结论均可用脚本复现：
+
+```sh
+python3 ~/.workbuddy/skills/agent2ssh-add-operation/scripts/redundancy_scan.py /Users/yuqu/Vbercodeing/agent2ssh
+```
