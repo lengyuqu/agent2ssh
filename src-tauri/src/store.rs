@@ -224,6 +224,30 @@ pub fn ensure_config_dir() -> Result<()> {
     fs::create_dir_all(config_dir()?).context("failed to create ~/.agent2ssh")
 }
 
+/// Write a small config-adjacent JSON file with the owner-only permissions every
+/// other file under `~/.agent2ssh/` already gets.
+///
+/// This is the shared write path for the independent rule files —
+/// `highlight_rules.json` and `copy_redact_rules.json`, plus `redact_rules.json`
+/// once its lifecycle is reachable. Each of them used to spell out create-dir,
+/// serialize and write on its own, and one never called
+/// `restrict_file_to_owner` at all, so its rule file landed at whatever the
+/// umask allowed. Keeping that step inside this function is the point: a rule
+/// file cannot be written world-readable by forgetting to ask for hardening.
+///
+/// It deliberately takes no lock and keeps no backup. `save_config` owns those
+/// concerns for `hosts.json`, where several processes may write and a recoverable
+/// previous version matters; a rule file is written by one user action at a time.
+pub fn write_private_json<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let json = serde_json::to_string_pretty(value)?;
+    fs::write(path, json).with_context(|| format!("failed to write {}", path.display()))?;
+    restrict_file_to_owner(path)
+}
+
 /// Restrict a sensitive file (tokens, keys, host config) to owner-only access.
 ///
 /// On Unix this sets mode `0600`. On Windows it strips inherited ACEs and grants
@@ -1460,6 +1484,28 @@ mod tests {
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         let _ = fs::remove_file(&path);
         assert_eq!(mode, 0o600);
+    }
+
+    /// Pins the step the rule files used to be able to skip: a file written
+    /// through the shared path comes out owner-only, and a parent directory that
+    /// does not exist yet is created rather than failing the write.
+    #[cfg(unix)]
+    #[test]
+    fn test_write_private_json_hardens_and_creates_parents() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("agent2ssh-wpj-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("nested").join("rules.json");
+
+        write_private_json(&path, &["a", "b"]).unwrap();
+
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        let written: Vec<String> =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+
+        assert_eq!(mode, 0o600);
+        assert_eq!(written, vec!["a".to_string(), "b".to_string()]);
     }
 
     #[test]

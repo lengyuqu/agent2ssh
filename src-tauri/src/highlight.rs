@@ -190,16 +190,11 @@ pub fn load_rules_from_json(json: &str) -> Result<Vec<HighlightRule>, HighlightE
     Ok(rules.into_iter().map(normalize_rule).collect())
 }
 
-/// Save highlight rules to the JSON file.
+/// Save highlight rules to the JSON file, owner-only like every other file under
+/// the config dir.
 fn save_rules(path: &std::path::Path, rules: &[HighlightRule]) -> Result<(), HighlightError> {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let json =
-        serde_json::to_string_pretty(rules).map_err(|e| HighlightError::IoError(e.to_string()))?;
-    std::fs::write(path, json)
-        .map_err(|e| HighlightError::IoError(format!("failed to write rules file: {e}")))?;
-    Ok(())
+    crate::store::write_private_json(path, rules)
+        .map_err(|e| HighlightError::IoError(e.to_string()))
 }
 
 /// Add a new highlight rule. Returns an error if the keyword conflicts with
@@ -291,6 +286,22 @@ mod tests {
         assert!(rules.iter().any(|r| r.keyword == "ERROR"));
         assert!(rules.iter().any(|r| r.keyword == "WARN"));
         assert!(rules.iter().any(|r| r.name == "IPv4"));
+    }
+
+    /// Regression: this file used to be written with whatever the umask allowed,
+    /// while every other file under the config dir was restricted to its owner.
+    #[cfg(unix)]
+    #[test]
+    fn seed_restricts_the_rules_file_to_its_owner() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = crate::store::TestConfigDir::new("highlight-perms");
+        let rules_path = dir.join(HIGHLIGHT_RULES_FILE);
+
+        seed_default_rules().unwrap();
+
+        let mode = std::fs::metadata(&rules_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[test]

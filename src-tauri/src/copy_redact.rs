@@ -98,17 +98,14 @@ pub fn load_copy_redact_rules() -> Result<Vec<CopyRedactRule>> {
 }
 
 /// Save copy-redaction rules to the config file.
+///
+/// Goes through `store::write_private_json`, so the Windows ACL hardening this
+/// module already needed is no longer a step the next rule file can omit: the
+/// rules file used to be owner-only here and world-readable in `highlight`.
 pub fn save_copy_redact_rules(rules: &[CopyRedactRule]) -> Result<()> {
-    crate::store::ensure_config_dir()?;
     let path = crate::store::config_dir()?.join(COPY_REDACT_FILE);
     let configs: Vec<CopyRedactRuleConfig> = rules.iter().map(Into::into).collect();
-    let json = serde_json::to_string_pretty(&configs)?;
-    std::fs::write(&path, json)
-        .with_context(|| format!("failed to write copy redact rules file {}", path.display()))?;
-    // Shared with `store` so the Windows ACL hardening path is not bypassed: the
-    // previous module-local helper was Unix-only and silently did nothing on
-    // Windows, leaving the rules file readable by other local accounts.
-    crate::store::restrict_file_to_owner(&path)?;
+    crate::store::write_private_json(&path, &configs)?;
     Ok(())
 }
 
