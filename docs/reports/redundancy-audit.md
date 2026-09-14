@@ -339,6 +339,39 @@
 | 同名 `#[tauri::command]` 与 `diagnostics.rs` / `recording.rs` 同名的实现 | 薄封装 + 实现分层，本仓既定模式 |
 | `Host::is_desktop` / `activate` / `terminal_size` 等同名双份 | `#[cfg]` 门控，非副本 |
 
+## 处理结果（本轮落地）
+
+按「R1 → R3 → R2 → 低风险项」推进，七项已收敛，各自独立成提交：
+
+| # | 提交 | 结果 |
+|---|---|---|
+| R1 | `7455e12` | `split_completed_session_commands` 提到 `session.rs`，两侧改引；daemon 因已 `use agent2ssh::session::*` 无需改 import |
+| R3 | `dce8809` | 落成 `ProxyProfile::trim_fields`（纯 trim），**校验与失败策略留在各自侧** |
+| R2 | `a268c76` | 新增 `execution_control::authorize_targets_without_approval_handler`，三处各缩为转发 |
+| R4 | `3aceca7` | 删除 `ssh_config.rs` 的测试专用 glob 镜像（3 函数 + 6 单测，-138 行） |
+| R5 | `eb6f6aa` | 新增 `AuditEntry::test_fixture()`，15 处字面量改为「只覆写断言字段」 |
+| R9 | `07d3c64` | 新增 `store::TestConfigDir`（RAII），六个模块的临时配置目录统一 |
+| R8 | `e0a539f` | `backup_crypto` 改用 `getrandom::fill`，`rand` 依赖已删除 |
+
+### 对本报告自身结论的两处订正
+
+- **R3 的建议是错的**。原建议写「让 `store` 的 `normalize_config` 改调 `core::normalize_proxy`」。实际执行时发现两者的**失败策略有意不同**：`core` 对单个提交报错并把字段名回给用户（`proxy id is required`），`store` 对整文件静默 `retain` 丢弃。合并会把其中一种强加给另一种。因此只收敛了 trim（两种策略下逐字相同的那部分），校验各自保留。**这是本轮唯一一处「按原建议做反而会引入缺陷」的地方。**
+- **R9 的收益被低估**。它不只是「低收益」的去重：`highlight.rs` 的 teardown 只清 override、**从不删目录**（每次跑测试泄漏一个临时目录），`forward.rs` 三处用 `std::process::id()` 造「唯一」目录，**同进程内测试实际共用一个目录**。两者都是真实缺陷，随 R9 一并修掉。
+
+### 本轮新踩到的坑（供下一轮参考）
+
+- **`..base,` 不能带尾逗号**：Rust 报 `cannot use a comma after the base struct`，struct update 语法的展开项必须是最后一个且无逗号。
+- **`let _x = Guard::new();` 与裸 `Guard::new();` 不等价**：后者是临时值，**当行即析构**。R9 里 5 个 highlight 测试因此失败——旧 helper 的 override 是副作用、返回值被丢弃，机械替换成裸语句后 override 在测试体执行前就被清掉了。
+- **`fn f(..) -> AuditEntry {` 也会匹配 `AuditEntry {`**：按「含 `AuditEntry {` 的行」定位字面量会把函数签名当成字面量起点，导致花括号配对整体错位。
+
+## 仍未处理
+
+| # | 项 | 为什么留到下一轮 |
+|---|---|---|
+| R6 | 手写 spinner / 错误块（`animate-spin` 25 处 / 12 文件，`text-destructive` 21 文件） | 不是机械去重，需要逐处决定抽什么组件、替换后视觉是否等价；属**用户可见一致性**工程，值得单独一轮 |
+| R7 | `redaction.rs` / `highlight.rs` 平行规则库 | 抽泛型规则库是**中等风险**重构，收益中等；建议在 R6 之后再评估 |
+| R10 | 前端 2 处 8 行 UI 惯用法 | 与 R6 同源，做 R6 时顺带覆盖 |
+
 ## 本轮（增量扫描）的验证
 
 无代码改动，仅扫描 + 只读核实。所有结论均可用脚本复现：
