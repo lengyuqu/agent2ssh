@@ -395,16 +395,44 @@
 
 ### R10 重新取证：两项都是设计决策，不是去重
 
-**R10-1 刷新按钮**。`title={t("Refresh")}` 的 `IconButton` 有 **5 处**，其中 2 处内含会转的 `RefreshCw`
-（`SnippetsDialog:176` / `PlaybooksPanel:344`，这两处是逐字重复的 6 行块），另 3 处是不转的静态图标
-（`ConfigSnapshotsPanel:150` / `ForwardPanel:179` / `ConnectionTopology:234`）。而 `className={busy ? "animate-spin" : ""}`
-切换全仓有 **11 处**（`RefreshCw` 10 + `RotateCcw` 1），落在 6 个文件、3 种显式尺寸（14 / 15 / 16）加 1 处无尺寸，
+**R10-1 刷新按钮**。`title={t("Refresh")}` 的 `IconButton` 有 **7 处**（订正：第二轮记 5 处，漏了
+`AuditPanel:238` 与 `HostList:325`）—— 5 处静态（`AuditPanel:238`、`ConfigSnapshotsPanel:150`、
+`ForwardPanel:179`、`HostList:325`、`ConnectionTopology:234`，全部 `size={15}`）与 2 处会转的
+（`SnippetsDialog:176` / `PlaybooksPanel:344`，`size={14}`，这两处是逐字重复的 6 行块）。
+而 `className={busy ? "animate-spin" : ""}` 切换全仓有 **11 处**（`RefreshCw` 10 + `RotateCcw` 1），
+落在 6 个文件、3 种显式尺寸（14 / 15 / 16）加 1 处无尺寸，
 且 busy 表达式有 7 组不同写法 —— 仅 `SettingsMenu` 一个文件就占了 5 组（`refreshBusy` / `healthBusy` /
 `updateBusy === "check"` / `daemonActionBusy === "restart"` / `diagnosticBusy === "refresh"`）。
 要收就得定「busy 怎么画」这个契约 —— 需先定契约，不能顺手改。
 **（2026-09-14 第二轮补测：报告建议的「给 `IconButton` 加 `busy`」这条路径只覆盖 11 处里的 2 处，见下。）**
 
-**11 处按「外层包装」拆开（补测）**：
+**第三轮补测：仓里早就有了「busy 怎么画」的答案，而且已经用了 11 次**
+
+11 处手写者不是全仓唯一的 busy 画法。另有 **11 处调用点**采用「忙碌时把按钮自己的图标**换成** `Spinner`」：
+
+| 站点 | 形态 |
+|---|---|
+| `SyncPanel:308 / 316 / 324 / 345` | `{busy === "…" ? <Spinner size={14} /> : <Save \| RefreshCw \| UploadCloud size={14} />}` |
+| `PlaybooksPanel:499 / 598` | `<Save>` / `<Play>` 同上 |
+| `SnippetsDialog:238` | `<Save>` 同上 |
+| `ForwardPanel:166 / 234` | `<Plus>` / `<Trash2>` 同上 |
+| `App.tsx:980`、`SFTPPanel:1158` | 非按钮：连接进度行 / 传输提示条 |
+
+9 处在按钮内（8 处是共享 `<Button>`，1 处 `ForwardPanel:234` 是 `IconButton`），尺寸一律 14。
+
+所以「busy 怎么画」在本仓是**两种并存的语言**：
+
+| | (A) 换成 `Spinner` | (B) 原图标 `animate-spin` |
+|---|---|---|
+| 调用点 | **11**（9 按钮 + 2 非按钮） | **11** |
+| 是否已有统一出口 | **是** —— `Spinner`（`state.tsx`，带 `aria-hidden`、3 个测试） | 否，字面量散在 6 个文件 |
+| 尺寸 | 一律 14 | 14×4 / 15×1 / 16×5 / 无×1 |
+| 忙碌时图标形状 | 变（→ 加载圈） | 不变 |
+
+**两个方向都能收，但 (A) 的边际成本更低**：它不需要新造组件，且收完只剩一种语言；
+(B) 若只覆盖这 11 处，另 11 处仍在走 `Spinner` —— 全仓仍是两种语言。
+
+**11 处手写者按「外层包装」拆开**：
 
 | 外层 | 处数 | 位置 |
 |---|---|---|
@@ -416,10 +444,20 @@
 报告正文没提到它们是裸按钮。另外 `SettingsMenu:664` 忙碌时还会把标签从 `Restart daemon` 切成 `Restarting...`，
 说明「busy」在这些站点上影响的**不只图标**。
 
-**一处报告未记的尺寸不一致**：同一个「卡片头刷新 `IconButton`」被画成两种尺寸——
-3 处静态的（`ConfigSnapshotsPanel:150` / `ForwardPanel:179` / `ConnectionTopology:234`）是 `size={15}`，
-2 处会转的是 `size={14}`。尺寸差异**刚好沿着「会不会转」切开**，
-因此任何统一 busy 画法的改动都会顺带改到这 5 处的图标尺寸（属可见变化，需一并拍板）。
+**同一族的尺寸不一致，但只有一半是真的（第三轮订正）**：7 处「卡片头 / 工具栏刷新 `IconButton`」
+被画成两种尺寸 —— 5 处静态是 `size={15}`、2 处会转的是 `size={14}`，差异**刚好沿着「会不会转」切开**。
+但**只有 `IconButton` 与裸 `<button>` 内的尺寸才是真实渲染差异**，因为共享 `Button` 的基础类含
+`[&_svg]:size-4`，构建产物里确实生成了：
+
+```css
+.\[\&_svg\]\:size-4 svg{width:calc(var(--spacing) * 4);height:calc(var(--spacing) * 4)}
+```
+
+它作用于 `svg` 元素本身，而 `<RefreshCw size={14} />` 产生的 `width="14"` 只是 presentation
+attribute —— 级联上低于任何作者样式表声明。**所以 4 处 `Button` 内传的 `size`（14 / 14 / 15 / 无）
+全是死参数，实际一律渲染 16px**；只有 `IconButton`（仅 `[&_svg]:shrink-0`，不覆盖尺寸）与裸 `<button>`
+让 `size` 生效。这条**不限于 R10-1**：它意味着「在 `Button` 里写 `size`」是一类静默失效的写法，
+可在收口时一并清掉（零视觉变化）。
 
 **本轮新发现（未编号，待拍板是否立项）**：`SettingsMenu.tsx` 有 **23 个裸 `<button>`、0 个 `<Button>`**，
 是全仓最大的裸按钮集中点（第二名 `SFTPPanel` 8 处，其余 ≤ 6；全仓 `<Button>` 共 **85** 处）。
@@ -685,7 +723,7 @@ tsc 干净、biome **100** 文件、`check-i18n` 干净、vitest **106**（97 + 
 | # | 项 | 为什么留到下一轮 |
 |---|---|---|
 | R7 余项（再度收窄） | A24 的 **CLI / MCP / daemon** 三个面尚未暴露 | `51522a0` 接线 + `9c843ed` 桌面完整 CRUD，已等于 B24 highlight 的同一个面集合。剩下三个面按 `agent2ssh-add-operation` 走，但**该暴露哪些必须重新论证**：上一轮「只应暴露 list + reset」的判据（把安全方向当成唯一筛选条件）已被用户推翻，不能直接沿用。可考虑的中间形态是「`list` + `reset` 上自动化面，`add` / `update` / `delete` 仅桌面」。同步时须改 `docs/skills.md` 与其余 ~10 处 MCP 工具计数 |
-| R10-1（busy 图标） | 11 处 busy 切换图标 + 5 处 `IconButton` 刷新按钮 | **报告建议的「给 `IconButton` 加 `busy`」只覆盖 2/11**（补测，见上）。需先定「busy 怎么画」的契约：busy 时换成 `Spinner`，还是让原图标自转。11 处分布在 3 种外层（`IconButton` 2 / `Button` 4 / **裸 `<button>` 5**），且任何统一都会顺带改到 5 处的图标尺寸（静态 15 ↔ 忙碌 14）。**属可见变化，需拍板** |
+| R10-1（busy 图标） | 11 处 busy 切换图标 + 7 处 `IconButton` 刷新按钮 | 两轮补测（见上）。**「给 `IconButton` 加 `busy`」只覆盖 2/11**；11 处分布在 3 种外层（`IconButton` 2 / `Button` 4 / **裸 `<button>` 5**）。第三轮关键事实：仓里**已有「换成 `Spinner`」这一 busy 语言且用了 11 处**（含 `Spinner` 组件与测试），与这 11 处手写者构成**两种并存语言**。因此收口有 A/B 两方向：(A) 收向 `Spinner` —— 零新组件、收完只剩一种语言，代价是忙碌时图标形状变；(B) 新造组件让原图标自转 —— 只覆盖 11 处则仍是两种语言。**两个方向的代价都属可见变化，需拍板**；另确认共享 `Button` 的 `[&_svg]:size-4` 使按钮内 `size` 成为死参数（本项收口可顺手清掉，零视觉变化） |
 | R10-2（host 选择器） | `HostSelector` 已存在，`TerminalPanel:446` / `PlaybooksPanel:576` 仍手搓同一个 `<Select>` | 补测确认：合并会改**下拉项文案**（`name` → `name - user@host:port`）并引入自动选中第一个 host。可加 `compact` / `optionLabel` 两个开关保住现有行为，但**文案变化无法避免**。**属产品决策，不宜由去重驱动** |
 | 新发现（未编号） | `SettingsMenu`：23 个裸 `<button>` / 0 个 `<Button>`，全仓最大集中点 | 见上「R10 重新取证」的补测段。**未立项**：立项前需先确认 `Button` 是否存在能覆盖设置面板那种密排小按钮的尺寸档，否则「替换」会改变面板密度 |
 | R11 余项 | `ConfirmDialog` 标题的 `text-foreground` 与它所在的 `bg-popover` 表面不匹配 | 见上「留待决定的一处 token 错配」。**已取证、未改**：补测确认 6 套主题里**只有 dark / nord** 两套这两个 token 不同色，但这两套无法在本机目视验证，属「读 CSS 变量推断出来的修改」。影响面已由 14 涨到 **16** 个确认框（本轮 +2）。不是冗余项，故不占 R 编号 |
