@@ -13,7 +13,8 @@
 //! - Relative patterns resolve against the config file's directory
 //!   (OpenSSH semantics: `~/.ssh` for user configs).
 //! - `~` is expanded via `dirs::home_dir()`.
-//! - Glob patterns use `std::fs` (no external `glob` crate needed).
+//! - Glob patterns are expanded with the `glob` crate. Paths without
+//!   metacharacters bypass it and are treated as literals.
 //! - Cycle detection: canonicalized paths in a DFS chain.
 //! - Missing files / empty globs are silently skipped (OpenSSH behavior).
 
@@ -129,104 +130,6 @@ fn expand_single_file(path: &Path, base: &Path, chain: &mut Vec<PathBuf>, out: &
 /// Check if a string contains glob metacharacters.
 fn has_glob_meta(s: &str) -> bool {
     s.contains(['*', '?', '[', ']'])
-}
-
-/// Simple glob matcher supporting `*` (any sequence), `?` (single char),
-/// and `[...]` (character class). Does NOT support `{a,b}` brace expansion
-/// (OpenSSH's `Include` doesn't either — that's a separate PathSpec feature).
-#[cfg(test)]
-fn glob_match(pattern: &str, name: &str) -> bool {
-    glob_match_bytes(pattern.as_bytes(), name.as_bytes())
-}
-
-#[cfg(test)]
-fn glob_match_bytes(pattern: &[u8], name: &[u8]) -> bool {
-    let mut p = 0usize;
-    let mut n = 0usize;
-    let mut star_p: Option<usize> = None;
-    let mut star_n = 0usize;
-
-    while n < name.len() {
-        if p < pattern.len() {
-            match pattern[p] {
-                b'?' => {
-                    p += 1;
-                    n += 1;
-                    continue;
-                }
-                b'*' => {
-                    star_p = Some(p);
-                    star_n = n;
-                    p += 1;
-                    continue;
-                }
-                b'[' => {
-                    // Character class: [abc] or [a-z] or [!abc]
-                    if let Some(end) = pattern[p..].iter().position(|&c| c == b']') {
-                        let class = &pattern[p + 1..p + end];
-                        let (negated, chars) = if !class.is_empty() && class[0] == b'!' {
-                            (true, &class[1..])
-                        } else {
-                            (false, class)
-                        };
-                        let matched = char_class_match(chars, name[n]);
-                        if matched != negated {
-                            p += end + 1;
-                            n += 1;
-                            continue;
-                        }
-                    }
-                    // Malformed class — treat `[` as literal
-                    if pattern[p] == name[n] {
-                        p += 1;
-                        n += 1;
-                        continue;
-                    }
-                }
-                c => {
-                    if c == name[n] {
-                        p += 1;
-                        n += 1;
-                        continue;
-                    }
-                }
-            }
-        }
-        // No match — backtrack to last `*`
-        if let Some(sp) = star_p {
-            p = sp + 1;
-            star_n += 1;
-            n = star_n;
-        } else {
-            return false;
-        }
-    }
-
-    // Consume trailing `*` in pattern
-    while p < pattern.len() && pattern[p] == b'*' {
-        p += 1;
-    }
-    p == pattern.len()
-}
-
-/// Match a character class like `a-z` or `abc`.
-#[cfg(test)]
-fn char_class_match(class: &[u8], c: u8) -> bool {
-    let mut i = 0;
-    while i < class.len() {
-        if i + 2 < class.len() && class[i + 1] == b'-' {
-            if c >= class[i] && c <= class[i + 2] {
-                return true;
-            }
-            i += 3;
-        } else {
-            if class[i] == c {
-                return true;
-            }
-            i += 1;
-        }
-    }
-    false
 }
 
 /// Symlink-stable identity for cycle detection; unresolvable paths fall
@@ -433,45 +336,6 @@ mod tests {
         assert!(content.contains("Host tilde"));
         // Cleanup
         let _ = fs::remove_file(home.join(".ssh/test_include_file"));
-    }
-
-    // ── glob_match unit tests ───────────────────────────────────────────
-
-    #[test]
-    fn glob_match_star() {
-        assert!(glob_match("*.conf", "alpha.conf"));
-        assert!(glob_match("*.conf", "beta.conf"));
-        assert!(!glob_match("*.conf", "alpha.txt"));
-    }
-
-    #[test]
-    fn glob_match_question() {
-        assert!(glob_match("?.txt", "a.txt"));
-        assert!(!glob_match("?.txt", "ab.txt"));
-    }
-
-    #[test]
-    fn glob_match_literal() {
-        assert!(glob_match("config", "config"));
-        assert!(!glob_match("config", "other"));
-    }
-
-    #[test]
-    fn glob_match_char_class() {
-        assert!(glob_match("[ab].conf", "a.conf"));
-        assert!(glob_match("[ab].conf", "b.conf"));
-        assert!(!glob_match("[ab].conf", "c.conf"));
-    }
-
-    #[test]
-    fn glob_match_star_matches_empty() {
-        assert!(glob_match("*.conf", ".conf"));
-    }
-
-    #[test]
-    fn glob_match_star_at_end() {
-        assert!(glob_match("config*", "config"));
-        assert!(glob_match("config*", "config.d"));
     }
 
     #[test]
