@@ -459,6 +459,19 @@ attribute —— 级联上低于任何作者样式表声明。**所以 4 处 `Bu
 让 `size` 生效。这条**不限于 R10-1**：它意味着「在 `Button` 里写 `size`」是一类静默失效的写法，
 可在收口时一并清掉（零视觉变化）。
 
+**结论（`dd59051`）：已收口，取方向 A。** 11 处全部改为 `{busy ? <Spinner size={n} /> : <原图标 size={n} />}`。
+另收一处**断言时才发现**的同类站点：`ui/toast.tsx` 的 `progress` 变体把 `animate-spin` 写在类名表里
+（`VARIANT_ICON_CLS.progress`），是第三种「手写旋转」的写法。该变体**当前零调用点**（单行调用 90 处
+全是 error / success / warning，多行调用亦然），而换成 `Spinner` 后渲染出的类集合完全相同，
+故属零视觉变化——收它是为了让 `Spinner` 自己的文档注释（「`Spinner` is the only thing in the app
+that turns」）不再是一句假话，而不是修一个可见问题。
+
+按站点保留的差异：`SettingsMenu` 5 处保持 `size={16}`、`RecordingsPanel` 保持行内标签，两者都不属重复。
+**唯一可见变化**：`IconButton` 内 2 处忙碌 `RefreshCw` 由 14 → 15，与同族 5 处静态对齐（这 2 处尺寸真实生效，
+所以点击瞬间图标曾缩 1px）；`Button` 内 4 处死 `size` 一并删除，零视觉变化。
+收口后全仓手写 `animate-spin` 归零（只剩 `Spinner` 定义本身与两处注释），`Spinner` 调用点 13 → 25，
+且「忙碌时图标变成加载圈」是本仓既有主流形态，不是本次新引入的语言。
+
 **本轮新发现（未编号，待拍板是否立项）**：`SettingsMenu.tsx` 有 **23 个裸 `<button>`、0 个 `<Button>`**，
 是全仓最大的裸按钮集中点（第二名 `SFTPPanel` 8 处，其余 ≤ 6；全仓 `<Button>` 共 **85** 处）。
 它与 R10-1 **相邻但不同源**：R10-1 是「busy 态怎么画」，这个是「整个面板不用共享按钮组件」。
@@ -723,7 +736,6 @@ tsc 干净、biome **100** 文件、`check-i18n` 干净、vitest **106**（97 + 
 | # | 项 | 为什么留到下一轮 |
 |---|---|---|
 | R7 余项（再度收窄） | A24 的 **CLI / MCP / daemon** 三个面尚未暴露 | `51522a0` 接线 + `9c843ed` 桌面完整 CRUD，已等于 B24 highlight 的同一个面集合。剩下三个面按 `agent2ssh-add-operation` 走，但**该暴露哪些必须重新论证**：上一轮「只应暴露 list + reset」的判据（把安全方向当成唯一筛选条件）已被用户推翻，不能直接沿用。可考虑的中间形态是「`list` + `reset` 上自动化面，`add` / `update` / `delete` 仅桌面」。同步时须改 `docs/skills.md` 与其余 ~10 处 MCP 工具计数 |
-| R10-1（busy 图标） | 11 处 busy 切换图标 + 7 处 `IconButton` 刷新按钮 | 两轮补测（见上）。**「给 `IconButton` 加 `busy`」只覆盖 2/11**；11 处分布在 3 种外层（`IconButton` 2 / `Button` 4 / **裸 `<button>` 5**）。第三轮关键事实：仓里**已有「换成 `Spinner`」这一 busy 语言且用了 11 处**（含 `Spinner` 组件与测试），与这 11 处手写者构成**两种并存语言**。因此收口有 A/B 两方向：(A) 收向 `Spinner` —— 零新组件、收完只剩一种语言，代价是忙碌时图标形状变；(B) 新造组件让原图标自转 —— 只覆盖 11 处则仍是两种语言。**两个方向的代价都属可见变化，需拍板**；另确认共享 `Button` 的 `[&_svg]:size-4` 使按钮内 `size` 成为死参数（本项收口可顺手清掉，零视觉变化） |
 | R10-2（host 选择器） | `HostSelector` 已存在，`TerminalPanel:446` / `PlaybooksPanel:576` 仍手搓同一个 `<Select>` | 补测确认：合并会改**下拉项文案**（`name` → `name - user@host:port`）并引入自动选中第一个 host。可加 `compact` / `optionLabel` 两个开关保住现有行为，但**文案变化无法避免**。**属产品决策，不宜由去重驱动** |
 | 新发现（未编号） | `SettingsMenu`：23 个裸 `<button>` / 0 个 `<Button>`，全仓最大集中点 | 见上「R10 重新取证」的补测段。**未立项**：立项前需先确认 `Button` 是否存在能覆盖设置面板那种密排小按钮的尺寸档，否则「替换」会改变面板密度 |
 | R11 余项 | `ConfirmDialog` 标题的 `text-foreground` 与它所在的 `bg-popover` 表面不匹配 | 见上「留待决定的一处 token 错配」。**已取证、未改**：补测确认 6 套主题里**只有 dark / nord** 两套这两个 token 不同色，但这两套无法在本机目视验证，属「读 CSS 变量推断出来的修改」。影响面已由 14 涨到 **16** 个确认框（本轮 +2）。不是冗余项，故不占 R 编号 |
