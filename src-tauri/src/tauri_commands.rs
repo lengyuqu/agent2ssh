@@ -1496,8 +1496,13 @@ pub fn passphrase_cache_clear() -> Result<(), String> {
 }
 
 /// G4: Redact sensitive text before it is placed on the clipboard, so a
-/// copied command block never leaks tokens/keys. Reuses the same
-/// `copy_redact_rules.json` rule set as exec/audit/export redaction.
+/// copied command block never leaks tokens/keys.
+///
+/// This reads its own rule file, `copy_redact_rules.json`, seeded from
+/// `copy_redact::default_copy_rules()` and with no editing surface of its own.
+/// It is *not* the rule set the exec/audit/export path applies — that one is
+/// `redact_rules.json`, read by `store::redact_sensitive_text` and editable
+/// from Settings. Editing either one does not change the other.
 #[tauri::command]
 pub fn redact_for_clipboard(text: String) -> String {
     crate::copy_redact::redact_for_clipboard(&text)

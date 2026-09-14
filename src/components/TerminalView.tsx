@@ -170,7 +170,9 @@ const TerminalView = forwardRef<TerminalViewHandle, Props>(function TerminalView
         if (!navigator.clipboard?.writeText) return { ok: false, reason: "clipboard_unavailable" };
         try {
           // G4: redact tokens/keys before the copied block reaches the
-          // clipboard — same rules as exec/audit/export (copy_redact_rules.json).
+          // clipboard. This is its own rule set (`copy_redact_rules.json`),
+          // separate from the one the exec/audit/export path applies
+          // (`redact_rules.json`, editable from Settings).
           const redacted = await api.redactForClipboard(text);
           await navigator.clipboard.writeText(redacted);
           return { ok: true, characters: text.length };
