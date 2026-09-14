@@ -356,8 +356,9 @@
 | R11 | `29ea30c` | `ConfirmDialog` 补 `note` / `confirmDisabled` 两个槽位，7 处手搓确认框收拢；顺带修掉「Cancel 未走 i18n」缺陷；补 `ui/dialog.test.tsx`（+9 测试） |
 | R7 | `e7054a2` | `store::write_private_json` 成为三个规则文件的唯一写入路径；**修掉 `highlight_rules.json` 缺权限加固的真缺陷**；+2 测试 |
 | R7 余项 | `51522a0` | A24 生命周期接线：`redact_rules.json` 成为**实时的规则来源**（core 切换 + 桌面命令 + 设置面板）；错误类型补 `IoError`/`ParseError`；写入改走 `write_private_json`（0600）；+4 测试 |
+| R7 余项（第二步） | `9c843ed` | 桌面给出完整 CRUD（`add` / `update` / `delete`），推翻上一轮「只暴露安全方向」的判据；护栏改为确认框 + `Built-in` 徽章 + `Duplicate`/`NotFound` 写入前校验 + 空集警示；`BUILTIN_RULES` 提成常量；删掉死镜像 `RedactRuleConfig`；+8 Rust 测试、+9 前端测试（`RedactionSettings.test.tsx`） |
 
-### 对本报告自身结论的三处订正
+### 对本报告自身结论的四处订正
 
 - **R3 的建议是错的**。原建议写「让 `store` 的 `normalize_config` 改调 `core::normalize_proxy`」。实际执行时发现两者的**失败策略有意不同**：`core` 对单个提交报错并把字段名回给用户（`proxy id is required`），`store` 对整文件静默 `retain` 丢弃。合并会把其中一种强加给另一种。因此只收敛了 trim（两种策略下逐字相同的那部分），校验各自保留。**这是本轮唯一一处「按原建议做反而会引入缺陷」的地方。**
 - **R9 的收益被低估**。它不只是「低收益」的去重：`highlight.rs` 的 teardown 只清 override、**从不删目录**（每次跑测试泄漏一个临时目录），`forward.rs` 三处用 `std::process::id()` 造「唯一」目录，**同进程内测试实际共用一个目录**。两者都是真实缺陷，随 R9 一并修掉。
@@ -365,6 +366,15 @@
   检测方式是「同名 `pub fn` 扫描」。实际是**三方**平行（漏了 `src/copy_redact.rs`），其中 `redaction` 那一方**整个是死代码**，
   而唯一真正的缺陷是**两个活写入者里有一个漏了全仓统一的 `0600` 权限加固**——「抽泛型规则库」既不是唯一解法、也不是重点。
   详见下面「R7 落地」一节。**教训：`同名 pub fn 扫描` 这种机械检测会同时误判范围（漏文件）和误判性质（把「写入路径缺一个横切步骤」当成「重复代码」）。**
+- **R7 余项的「只暴露安全方向」同样站不住**（第四处，`9c843ed` 反转）。上一轮在本报告里论证：
+  `reset`（恢复内置规则）只会让脱敏**变强**，而 `delete` 会让某类秘密在应用写入的所有位置不再被脱敏，
+  因此只暴露 `list` + `reset`，`add` / `delete` / `update` 留在手改文件；佐证是
+  「`copy_redact_rules.json` 从来没有 CRUD UI」。
+  **事实成立，论证不成立**：`copy_redact` 恰恰是同族里**唯一**一个没有编辑面的成员，
+  而三十行之外的 `HighlightSettings` 四个操作俱全（core + 5 个桌面命令 + `api.ts` + 面板）。
+  只举一个同向的兄弟，就等于让它替结论说话。护栏因此从「不暴露这个操作」换成「给这个操作定性」，
+  细节见「R7 余项（第二步）」一节。
+  **教训：以「兄弟模块的既有契约」为论据时，必须先把兄弟逐个列出并注明各自形态，否则该论据只反映被选中的那个样本。**
 
 ### 本轮新踩到的坑（供下一轮参考）
 
@@ -543,13 +553,15 @@ cli_smoke 33 / connect_deadline 2 / daemon_integration 57 全绿。
 「disable」这条在实时路径上是**安全降级**：删掉一条规则 = 某类秘密在应用写的所有地方不再被脱敏。
 所以本轮的切分是：
 
-| 操作 | 方向 | 暴露 |
-|---|---|---|
-| `list` | 只读 | ✅ 桌面 + 设置面板 |
-| `reset`（恢复内置） | **只会变强**（把用户删掉的规则加回来） | ✅ 桌面 + 设置面板（带确认框） |
-| `add` / `delete` / `update` | 可能变弱 | ❌ 不做 UI；仍是手改 `redact_rules.json` |
+| 操作 | 方向 | 本轮暴露 | 下一轮 |
+|---|---|---|---|
+| `list` | 只读 | ✅ 桌面 + 设置面板 | — |
+| `reset`（恢复内置） | **只会变强**（把用户删掉的规则加回来） | ✅ 桌面 + 设置面板（带确认框） | — |
+| `add` / `delete` / `update` | 可能变弱 | ❌ 不做 UI；仍是手改 `redact_rules.json` | **已被推翻，见「R7 余项（第二步）」** |
 
-手改文件这条路不是妥协，而是**该文件既有兄弟的既有契约**：`copy_redact_rules.json` 从来没有 CRUD UI。
+手改文件这条路当时记作「不是妥协，而是**该文件既有兄弟的既有契约**」：`copy_redact_rules.json` 从来没有 CRUD UI。
+**这句推论下一轮被推翻了——被推翻的不是事实（复测仍成立：`copy_redact` 至今只有一个桌面命令、零 CRUD 面），
+而是这条推论本身：它选错了对比对象。**
 面板因此是只读 + 一个「恢复默认」，并在组件注释里写明为什么不做编辑。
 
 **顺带把上一轮留下的两处一并修掉**（都在这次必须碰的函数里）：
@@ -581,11 +593,63 @@ tsc 干净、biome 99 文件、`check-i18n` 干净、vitest 97、`npm run build`
 `a24_malformed_json_is_a_parse_error_not_a_regex_error`、
 `redact_sensitive_text_falls_back_to_defaults_on_corrupt_file`。
 
+### R7 余项（第二步）：add / update / delete 也做进 UI（`9c843ed`）
+
+上一轮把 `add` / `delete` / `update` 留在手改文件，并把这个切分同时写进了 CHANGELOG、本报告、组件注释和工作记忆四处。
+**用户直接推翻了它**（「add/delete/update 也应该有 ui」），本轮照办，
+并把护栏从「不暴露这个操作」换成「给这个操作定性」。
+
+**被推翻的不是事实，是那条论证。** 上一轮写下的是两句：一句是实测（`copy_redact` 确实没有 CRUD UI），
+另一句是由此得出的推论（所以「手改文件」是本仓既有契约、不算妥协）。推论的问题在于**只列了一个同向的兄弟**：
+同一个设置面板往上三十行就是 `HighlightSettings`，它 **add / update / delete 全都有**
+（core + 5 个桌面命令 + `api.ts` + 面板）。拿唯一一个没有编辑面的规则库去代表另外两个，结论自然偏向它。
+
+**教训：用「兄弟模块的既有契约」当论据时，必须先把兄弟全列出来、给出各自的形态，再下结论。**
+只举一个例子就等于让例子替你选结论——这与 R7 本身的错误同源（范围描述没回测）。
+
+**护栏从「没有这个操作」换成「给这个操作定性」：**
+
+| 机制 | 替代了原先的什么 |
+|---|---|
+| 删除走 `ConfirmDialog` + `danger`，文案点名后果（此后写入的审计记录 / 通知 / 诊断导出不再脱敏） | 原先「你不该做这件事」 |
+| 内置规则带 `Built-in` 徽章；删除内置规则时对话框再加一条 `InlineAlert`：「这是内置规则，删除后应用写入的所有位置都不再对这一类秘密脱敏」 | 徽章让警告能说清**具体丢的是哪一类**，而不是泛泛的「有风险」 |
+| 空规则集渲染 `InlineAlert tone="destructive"`（「规则列表为空，审计记录会原样写出」） | 「空」原先会被读成中性的「还没配」 |
+| 空 replacement 渲染成 `(removed)` | 原先是一个无名空白单元格 |
+| `Duplicate` / `NotFound` 在写入前挡住歧义操作 | 原先靠用户不犯错 |
+
+**`pattern` 是规则唯一的身份**（没有 id、没有 name），所以那两个错误变体不是防御性编程而是**必需**：
+不改的话，「改名撞上另一条规则」会静默覆盖它，「改一个已不存在的 pattern」会静默变成新增。
+`insert_rule` / `update_rule` 都**先校验正则再动文件**，坏 pattern 不会留下半写状态。
+`update_rule` 的查重特意跳过「改的正是自己」（只在 `pattern != old_pattern` 时查），
+否则只改替换文本会和自己撞车——这条有专门的测试。
+
+**`BUILTIN_RULES` 提成一个常量数组**，`default_rules()` 与新增的 `is_builtin_pattern()` 都读它。
+原先「是否内置」只能靠重编译内置正则来回答；提出来之后，**播种集合与徽章在结构上不可能漂移**——
+而这正是 UI 那条「删除内置规则会让一整类秘密不再脱敏」的警告所依赖的性质。
+
+**顺带删掉一个上一轮刚引入的死镜像**：`src/types.ts` 的 `RedactRuleConfig`。
+它随只读面板一起进来，本轮面板改用 `RedactRuleInfo` 后全前端零引用——
+前端从不读 `redact_rules.json`，这个同形状的第二类型只提供了让两者漂移的机会。
+
+**一处必须一起改的措辞**：i18n 里恢复默认的说明原文是「恢复内置规则，并丢弃你**新增或删除**的规则」。
+「丢弃你删除的规则」本身就不通（删除的规则正是被恢复的对象），CRUD 到位后这句会真的误导，
+故改为「用内置规则替换当前列表：你新增的会被丢弃，你删除的会重新恢复」。
+
+**验证**：`cargo fmt` 干净；clippy `-D warnings` 四目标 0 告警；
+`cargo test --no-default-features --lib` **610**（602 + 8）、`cargo test --lib` **618**（610 + 8），两处都恰好 +8；
+tsc 干净、biome **100** 文件、`check-i18n` 干净、vitest **106**（97 + 9）、`npm run build` 成功、`gen/schemas` 无噪声。
+新增 Rust 测试 8 个，其中三个是**不变量测试**而非功能测试：
+`a24_every_default_rule_is_reported_as_built_in`（徽章与播种集合不漂移）、
+`a24_update_rule_allows_changing_only_the_replacement`（只改替换文本不和自己撞车）、
+`a24_delete_rule_removes_by_pattern_and_can_empty_the_set`
+（删空之后 `redact_with_user_rules` 真的不再脱敏——这条同时钉住「空文件不会被重新播种」）。
+前端新增 `RedactionSettings.test.tsx` 单文件 9 个，覆盖四个操作各自的成功路径 + 拒绝路径 + 确认框门禁 + 空集警示。
+
 ## 仍未处理
 
 | # | 项 | 为什么留到下一轮 |
 |---|---|---|
-| R7 余项（已收窄） | A24 的 **CLI / MCP / daemon** 三个面尚未暴露 | `51522a0` 已完成 core 切换 + 桌面命令 + 设置面板（即 B24 highlight 的同一个面集合）。剩下三个面按 `agent2ssh-add-operation` 走，但**只应暴露 list + reset**：reset 是「恢复内置规则」，只会让脱敏变强；**add / delete / update 不应上自动化面**——那等于让 agent 或远端客户端在无审批门的情况下关掉审计日志里的脱敏。同步时须改 `docs/skills.md` 与其余 ~10 处 MCP 工具计数 |
+| R7 余项（再度收窄） | A24 的 **CLI / MCP / daemon** 三个面尚未暴露 | `51522a0` 接线 + `9c843ed` 桌面完整 CRUD，已等于 B24 highlight 的同一个面集合。剩下三个面按 `agent2ssh-add-operation` 走，但**该暴露哪些必须重新论证**：上一轮「只应暴露 list + reset」的判据（把安全方向当成唯一筛选条件）已被用户推翻，不能直接沿用。可考虑的中间形态是「`list` + `reset` 上自动化面，`add` / `update` / `delete` 仅桌面」。同步时须改 `docs/skills.md` 与其余 ~10 处 MCP 工具计数 |
 | R10 | 前端两个 UI 惯用法（见上「R10 重新取证」） | 两项都**不是机械替换**：一项要动 `IconButton` 的 API（加 `busy`），另一项会改变 `TerminalPanel` / `PlaybooksPanel` 工具栏的行为。**都要先定契约** |
 | R11 余项 | `ConfirmDialog` 标题的 `text-foreground` 与它所在的 `bg-popover` 表面不匹配 | 见上「留待决定的一处 token 错配」。**已取证、未改**：改它会动到全部 14 个确认框，而 6 套主题里有两套无法在本机目视验证。不是冗余项，故不占 R 编号 |
 

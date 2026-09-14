@@ -29,6 +29,9 @@ Agent2SSH 的所有配置和数据文件存储在 `~/.agent2ssh/` 目录下。�
   remotes.toml     # 远程守护进程注册表
   webhook.toml     # Webhook 通知配置
   webdav.toml      # 可选 WebDAV 同步配置
+  redact_rules.json      # A24 脱敏规则（seed-once，权威；设置面板可增删改）
+  highlight_rules.json   # B24 终端高亮规则（设置面板可增删改）
+  copy_redact_rules.json # G4 复制块脱敏规则（seed-once，无编辑界面）
   recording.json   # 终端录制开关（默认关闭）
   recordings/      # 本地 asciicast v2 录制（敏感，不同步）
   sync_version.json # 最近一次 WebDAV 同步应用的全局版本标记
@@ -895,6 +898,7 @@ Agent2SSH 自动设置敏感文件的权限：
 | `daemon.token` | 0600 | 仅所有者可读写 |
 | `daemon_tokens.toml` | 0600 | 包含明文 token 时仅所有者可读写；使用 `token_env` 时仍建议限制权限 |
 | `keys/*` (私钥) | 0600 | 仅所有者可读写 |
+| `redact_rules.json` / `highlight_rules.json` / `copy_redact_rules.json` | 0600 | 三个规则文件；统一由 `store::write_private_json` 加固，新增规则文件时不会漏掉这一步 |
 
 在 Unix 系统上权限自动设置。手动创建文件时，请确保设置正确权限：
 
@@ -971,6 +975,58 @@ Unix 上目录和文件分别限制为 owner-only 权限；Windows 上沿用 Age
 owner-only ACL 限制。录制内容是原始终端输出，可能包含密码、令牌、个人数据和
 命令结果，应按敏感数据处理。`recording.json` 和整个 `recordings/` 目录均不参与
 WebDAV 同步。
+
+---
+
+## redact_rules.json
+
+A24：应用在脱敏时使用的正则规则集。它是**权威的**而不是叠加的——`store::redact_sensitive_text`
+每次调用都读这个文件，而**审计记录、Webhook 通知、Playbook 结果、诊断导出**四条链路都经过它。
+
+生命周期：
+
+- 首次运行时用内置规则播种：私有 IPv4（10/172.16-31/192.168）、IPv6 环回与链路本地、
+  Bearer、`sk-` 与 `AKIA`、JWT、32 位以上十六进制块。
+- 之后文件归使用者所有：**删掉的规则不会被重新播种**，只有显式「恢复默认」才会回来。
+- 文件缺失、不可读或 JSON 损坏时**回落到内置集合**——配置坏掉绝不能让脱敏变弱。
+- 通过 `store::write_private_json` 写入，Unix 上为 `0600`。
+
+### 桌面端编辑
+
+设置面板的「脱敏规则」可以增删改，护栏如下：
+
+- **匹配模式（pattern）就是规则的唯一身份**，没有 id、没有名字。「新增一条已存在的 pattern」
+  「改名撞上另一条规则」「改一条已不存在的 pattern」都会被拒绝并报错，而不是静默覆盖或静默新增。
+- 模式与替换文本都在**写入前**校验：正则非法，或者模式是**零宽**的
+  （如 `a*`、`\b`——它会把替换文本插进每个字符之间而非替换秘密）都不会被写入。
+- 替换文本留空的含义是**删除匹配内容**，面板里显示为 `(removed)`。
+- 内置规则带 `Built-in` 徽章；删除内置规则时确认框会额外说明
+  「应用写入的所有位置都不再对这一类秘密脱敏」。
+- **删空是允许的，但后果很重**：空规则集意味着审计记录、通知与诊断导出**原样写出**。
+  面板把这个状态渲染成警示而不是空列表，「恢复默认」是唯一的回退路径。
+
+CLI、MCP 与 daemon 目前**不**暴露这些操作，只有桌面端可以编辑。
+规则文件也**不参与 WebDAV 同步**（不在 `webdav_sync::SYNCABLE_FILES` 里，与另两个规则文件一致），
+因此在 A 机器上改的规则不会带到 B 机器。
+
+### 与 copy_redact_rules.json 的区别
+
+终端「复制代码块」走的是**另一套独立规则**（`copy_redact_rules.json`，G4），它没有编辑界面。
+两者互不影响：在设置面板里新增一条规则，**不会**改变复制到剪贴板时的脱敏结果。
+
+### 直接编辑文件
+
+面板和文件是同一份数据，也可以直接改（外部编辑后立即生效，这里没有缓存）：
+
+```json
+[
+  { "pattern": "\\b10\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\b", "replacement": "<REDACTED:ip>" },
+  { "pattern": "secret-project", "replacement": "<REDACTED:project>" }
+]
+```
+
+替换文本按**字面量**使用（内部走 `regex::NoExpand`），因此 `$1` 不会被展开成捕获组——
+写 `$1` 只会把匹配到的东西替换成字面的 `$1` 两个字符，而不会把秘密原样放回去。
 
 ---
 
