@@ -9,7 +9,25 @@ type DialogProps = {
   children: React.ReactNode;
 };
 
-/** Lightweight modal overlay + centered card. Click-outside calls onClose. */
+/**
+ * Lightweight modal overlay + centered card. Click-outside calls onClose.
+ *
+ * The card declares `bg-popover text-popover-foreground`, so its children
+ * inherit the popover text token. What that does *not* mean: `--text-1 →
+ * --foreground` is the design system's text token (docs/plans/ui-v3-midnight-ops.md)
+ * and the `*-foreground` surface variables are shadcn-compat aliases of it, so
+ * inside this card `text-foreground` is a no-op in Midnight Ops rather than an
+ * override. Eleven sites on popover surfaces spell it out anyway — six in
+ * dialogs (ConfirmDialog's title, two in App.tsx, FilePreview, AlgoPrefsDialog,
+ * SnippetsDialog) and five on the palette, settings menu, context menu and
+ * toast (which pairs `bg-popover` with `text-foreground` on one element) —
+ * while all seven uses of `text-popover-foreground` sit on the `bg-popover`
+ * container itself and never on a child. Only the two hand-tuned legacy themes
+ * differentiate the tokens (`dark` #c7d0d8 vs #d1dae2, `nord` #d8dee9 vs
+ * #eceff4). So don't "correct" one of those eleven in isolation: it would be
+ * the only exception, and the edit would be invisible in the default theme and
+ * unverifiable in the two it touches.
+ */
 export function Dialog({ onClose, className, children }: DialogProps) {
   return (
     <div
@@ -68,6 +86,11 @@ type ConfirmDialogProps = ConfirmOptions & {
  * "Cancel". Six of the seven `confirmDialog()` call sites took the literal
  * default and so shipped an untranslated Cancel button to every non-English
  * locale; the default now cannot be forgotten.
+ *
+ * The title writes `text-foreground` instead of inheriting the card's
+ * `popover-foreground`. That is the repo-wide convention for full-strength
+ * text on a popover surface, not an oversight — read <Dialog> above before
+ * changing it.
  */
 export function ConfirmDialog({
   title,
