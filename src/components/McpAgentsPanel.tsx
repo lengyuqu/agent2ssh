@@ -6,6 +6,7 @@ import type { AgentSkillStatus, McpAgentConfigStatus } from "../types";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
+import { Spinner } from "./ui/state";
 import { useToast } from "./ui/toast";
 import { confirmDialog } from "./ui/dialog";
 
@@ -156,7 +157,7 @@ export default function McpAgentsPanel() {
           {t("MCP Agents")}
         </h3>
         <Button variant="secondary" size="sm" className="ml-auto" onClick={refresh} disabled={loading}>
-          <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
+          {loading ? <Spinner /> : <RefreshCw />}
           {t("Refresh")}
         </Button>
       </div>

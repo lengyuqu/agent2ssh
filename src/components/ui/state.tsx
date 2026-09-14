@@ -20,6 +20,13 @@ type SpinnerProps = {
  * times, at four different sizes — so the glyph was decided in twelve places.
  * Anything that spins should go through this, which also makes the icon
  * decorative for assistive tech instead of an unnamed graphic.
+ *
+ * "Anything" includes a button's busy state. Eleven more call sites used to
+ * spin the button's *own* glyph behind a hand-written `animate-spin` toggle,
+ * which was a second answer to a question this component had already
+ * answered. They now swap this mark in instead, so `Spinner` is the only thing
+ * in the app that turns, and its two meanings — a panel loading, an action in
+ * flight — are deliberately drawn the same.
  */
 export function Spinner({ size = 14, className }: SpinnerProps) {
   return <Loader2 size={size} aria-hidden className={cn("animate-spin", className)} />;

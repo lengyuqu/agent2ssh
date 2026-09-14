@@ -10,6 +10,7 @@ import { Button } from "./ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
 import { useToast } from "./ui/toast";
 import { confirmDialog } from "./ui/dialog";
+import { Spinner } from "./ui/state";
 import { formatBytes, formatDateTime } from "../lib/format";
 
 export default function RecordingsPanel() {
@@ -227,7 +228,7 @@ export default function RecordingsPanel() {
           <CardHeader className="flex-row items-center justify-between">
             <CardTitle>{t("Recordings")}</CardTitle>
             <Button variant="outline" size="sm" onClick={() => void refresh()} disabled={loading}>
-              <RefreshCw className={loading ? "animate-spin" : ""} /> {t("Refresh")}
+              {loading ? <Spinner /> : <RefreshCw />} {t("Refresh")}
             </Button>
           </CardHeader>
           <CardContent className="grid max-h-[560px] gap-2 overflow-y-auto">

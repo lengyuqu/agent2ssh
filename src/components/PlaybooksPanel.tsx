@@ -341,7 +341,7 @@ export default function PlaybooksPanel({ hosts }: Props) {
           onClick={refresh}
           disabled={loading}
         >
-          <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
+          {loading ? <Spinner size={15} /> : <RefreshCw size={15} />}
         </IconButton>
         <Button variant="secondary" size="sm" onClick={startCreate}>
           <Plus size={14} />

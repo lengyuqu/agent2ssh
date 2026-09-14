@@ -6,7 +6,7 @@ import type { AlgoPrefsState, SshAlgoPrefs } from "../types";
 import { Button } from "./ui/button";
 import { Dialog } from "./ui/dialog";
 import { cn } from "../lib/utils";
-import { InlineAlert } from "./ui/state";
+import { InlineAlert, Spinner } from "./ui/state";
 
 // A22: the eight `SshAlgoPrefs` fields, in the order they are negotiated. Each
 // is a comma-delimited, most-preferred-first list handed to libssh2.
@@ -203,7 +203,7 @@ export default function AlgoPrefsDialog({ onClose }: Props) {
         </span>
         <div className="flex items-center gap-2">
           <Button variant="outline" size="sm" onClick={reset} disabled={busy !== null}>
-            <RotateCcw size={15} className={busy === "reset" ? "animate-spin" : ""} />
+            {busy === "reset" ? <Spinner /> : <RotateCcw />}
             {t("Reset to defaults")}
           </Button>
           <Button

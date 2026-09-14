@@ -1,4 +1,4 @@
-import { AlertTriangle, CheckCircle2, Loader2, X, XCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, X, XCircle } from "lucide-react";
 import {
   createContext,
   type ReactNode,
@@ -10,6 +10,7 @@ import {
 } from "react";
 import { cn } from "../../lib/utils";
 import { Button } from "./button";
+import { Spinner } from "./state";
 
 export type ToastVariant = "success" | "error" | "warning" | "progress";
 
@@ -62,14 +63,17 @@ const VARIANT_ICON_CLS: Record<ToastVariant, string> = {
   success: "text-risk-low",
   error: "text-risk-high",
   warning: "text-risk-medium",
-  progress: "text-primary animate-spin",
+  progress: "text-primary",
 };
 
-const VARIANT_ICON: Record<ToastVariant, typeof CheckCircle2> = {
-  success: CheckCircle2,
-  error: XCircle,
-  warning: AlertTriangle,
-  progress: Loader2,
+/* `progress` is not a static glyph: it is the one variant whose mark turns, and
+   the app has exactly one thing that turns, so it renders the shared <Spinner>
+   instead of carrying a second hand-rolled `animate-spin`. */
+const VARIANT_GLYPH: Record<ToastVariant, (className: string) => ReactNode> = {
+  success: (className) => <CheckCircle2 size={16} className={className} />,
+  error: (className) => <XCircle size={16} className={className} />,
+  warning: (className) => <AlertTriangle size={16} className={className} />,
+  progress: (className) => <Spinner size={16} className={className} />,
 };
 
 /** V1-4: app-wide toast host. Wrap the tree once (see main.tsx); call useToast() anywhere below it.
@@ -130,7 +134,6 @@ export function ToastProvider({ children }: { children: ReactNode }) {
           </div>
         )}
         {ordered.map((item) => {
-          const Icon = VARIANT_ICON[item.variant];
           return (
             <div
               key={item.id}
@@ -142,7 +145,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
                 aria-hidden
               />
               <div className="flex items-start gap-2">
-                <Icon size={16} className={cn("mt-0.5 shrink-0", VARIANT_ICON_CLS[item.variant])} />
+                {VARIANT_GLYPH[item.variant](cn("mt-0.5 shrink-0", VARIANT_ICON_CLS[item.variant]))}
                 <div className="min-w-0 flex-1">
                   {item.title && <div className="font-semibold">{item.title}</div>}
                   <span className="break-words text-foreground/90">{item.message}</span>

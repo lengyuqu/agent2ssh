@@ -939,7 +939,7 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
               disabled={isTransferring || (s.kind === "remote" && !s.host)}
               className="shrink-0"
             >
-              <RefreshCw size={14} className={s.loading ? "animate-spin" : ""} />
+              {s.loading ? <Spinner /> : <RefreshCw />}
             </Button>
           </div>
         </label>

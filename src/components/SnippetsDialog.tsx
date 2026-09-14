@@ -173,7 +173,7 @@ export default function SnippetsDialog({ open, canInsert, onClose, onInsert }: P
             onClick={refresh}
             disabled={loading}
           >
-            <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
+            {loading ? <Spinner size={15} /> : <RefreshCw size={15} />}
           </IconButton>
           <Button size="sm" variant="secondary" onClick={startCreate}>
             <Plus size={14} />

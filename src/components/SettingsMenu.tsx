@@ -29,6 +29,7 @@ import LanguageSwitcher from "./LanguageSwitcher";
 import HighlightSettings from "./HighlightSettings";
 import RedactionSettings from "./RedactionSettings";
 import AlgoPrefsDialog from "./AlgoPrefsDialog";
+import { Spinner } from "./ui/state";
 import { THEMES, useTheme } from "../theme";
 import { cn } from "../lib/utils";
 import { formatClockTime } from "../lib/format";
@@ -481,7 +482,7 @@ export default function SettingsMenu({
               disabled={refreshBusy}
               title={t("Refresh gate status")}
             >
-              <RefreshCw size={16} className={refreshBusy ? "animate-spin" : ""} />
+              {refreshBusy ? <Spinner size={16} /> : <RefreshCw size={16} />}
               {t("Refresh gate status")}
             </button>
           </section>
@@ -509,7 +510,7 @@ export default function SettingsMenu({
               disabled={healthBusy}
               title={t("Refresh daemon health")}
             >
-              <RefreshCw size={16} className={healthBusy ? "animate-spin" : ""} />
+              {healthBusy ? <Spinner size={16} /> : <RefreshCw size={16} />}
               {t("Refresh daemon health")}
             </button>
           </section>
@@ -530,7 +531,7 @@ export default function SettingsMenu({
                 disabled={updateBusy !== null}
                 title={t("Check for updates")}
               >
-                <RefreshCw size={16} className={updateBusy === "check" ? "animate-spin" : ""} />
+                {updateBusy === "check" ? <Spinner size={16} /> : <RefreshCw size={16} />}
                 {t("Check for updates")}
               </button>
               <button
@@ -661,7 +662,7 @@ export default function SettingsMenu({
                 onClick={() => runDaemonAction("restart")}
                 disabled={daemonActionBusy !== null}
               >
-                <RefreshCw size={16} className={daemonActionBusy === "restart" ? "animate-spin" : ""} />
+                {daemonActionBusy === "restart" ? <Spinner size={16} /> : <RefreshCw size={16} />}
                 <span className="truncate">
                   {daemonActionBusy === "restart" ? t("Restarting...") : t("Restart daemon")}
                 </span>
@@ -766,7 +767,7 @@ export default function SettingsMenu({
                 disabled={diagnosticBusy !== null}
                 title={t("Refresh diagnostics")}
               >
-                <RefreshCw size={16} className={diagnosticBusy === "refresh" ? "animate-spin" : ""} />
+                {diagnosticBusy === "refresh" ? <Spinner size={16} /> : <RefreshCw size={16} />}
                 <span className="truncate">{t("Refresh")}</span>
               </button>
               <button
