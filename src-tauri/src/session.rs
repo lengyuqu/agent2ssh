@@ -297,3 +297,55 @@ pub async fn session_list_core() -> Vec<(Uuid, String)> {
         .filter_map(|h| h.lock().ok().map(|handle| (handle.id, handle.host.clone())))
         .collect()
 }
+
+/// Split a session's pending input plus the newly written bytes into whole
+/// commands plus whatever trailing fragment is still incomplete.
+///
+/// This is what makes a fragmented write safe to authorize. A session write can
+/// end mid-line, so a caller that authorized only the bytes it just received
+/// would let a command be assembled across several writes and then run without
+/// ever being approved. Returning complete lines lets `session_write` (desktop)
+/// and the daemon's websocket handler authorize each command individually.
+///
+/// Shared by both surfaces — the splitter was previously duplicated verbatim in
+/// `tauri_commands.rs` and `bin/agent2ssh-daemon.rs`, which meant a fix here
+/// would have had to be made twice.
+pub fn split_completed_session_commands(pending: &str, input: &str) -> (Vec<String>, String) {
+    let mut combined = String::with_capacity(pending.len() + input.len());
+    combined.push_str(pending);
+    combined.push_str(input);
+
+    let mut commands = Vec::new();
+    let mut start = 0usize;
+    for (idx, ch) in combined.char_indices() {
+        if ch == '\n' || ch == '\r' {
+            let command = combined[start..idx].trim();
+            if !command.is_empty() {
+                commands.push(command.to_string());
+            }
+            start = idx + ch.len_utf8();
+        }
+    }
+
+    (commands, combined[start..].to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_completed_session_commands;
+
+    /// A command may be typed in fragments. Each newline must close a command so
+    /// the caller can authorize it, and the trailing partial line must come back
+    /// as `pending` instead of being treated as runnable.
+    #[test]
+    fn session_input_splitter_authorizes_fragmented_lines() {
+        let (commands, pending) = split_completed_session_commands("rm -rf ", "/\n");
+        assert_eq!(commands, vec!["rm -rf /"]);
+        assert!(pending.is_empty());
+
+        let (commands, pending) =
+            split_completed_session_commands("", "echo one\necho two\rpartial");
+        assert_eq!(commands, vec!["echo one", "echo two"]);
+        assert_eq!(pending, "partial");
+    }
+}

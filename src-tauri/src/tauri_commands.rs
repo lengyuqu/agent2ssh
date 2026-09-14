@@ -48,7 +48,7 @@ use crate::{
     remote::{list_daemons_core, DaemonInfo},
     session::{
         session_close_core, session_list_core, session_open_core, session_read_core,
-        session_write_core,
+        session_write_core, split_completed_session_commands,
     },
     snippets::{add_snippet, load_snippets, remove_snippet, Snippet},
     ssh_algo::{
@@ -302,26 +302,6 @@ fn cli_path_status_with_message(message: String) -> Result<CliPathStatus, String
         installed,
         message,
     })
-}
-
-fn split_completed_session_commands(pending: &str, input: &str) -> (Vec<String>, String) {
-    let mut combined = String::with_capacity(pending.len() + input.len());
-    combined.push_str(pending);
-    combined.push_str(input);
-
-    let mut commands = Vec::new();
-    let mut start = 0usize;
-    for (idx, ch) in combined.char_indices() {
-        if ch == '\n' || ch == '\r' {
-            let command = combined[start..idx].trim();
-            if !command.is_empty() {
-                commands.push(command.to_string());
-            }
-            start = idx + ch.len_utf8();
-        }
-    }
-
-    (commands, combined[start..].to_string())
 }
 
 // ── Host management ──────────────────────────────────────────────────────────
