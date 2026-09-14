@@ -341,7 +341,7 @@
 
 ## 处理结果（本轮落地）
 
-按「R1 → R3 → R2 → 低风险项」推进，七项已收敛，各自独立成提交：
+按「R1 → R3 → R2 → 低风险项」推进，九项已收敛，各自独立成提交：
 
 | # | 提交 | 结果 |
 |---|---|---|
@@ -353,6 +353,7 @@
 | R9 | `07d3c64` | 新增 `store::TestConfigDir`（RAII），六个模块的临时配置目录统一 |
 | R8 | `e0a539f` | `backup_crypto` 改用 `getrandom::fill`，`rand` 依赖已删除 |
 | R6 | `627937a` | `ui/state.tsx` 新增 `Spinner` 与 `InlineAlert`，收拢 12 处手写 spinner、13 处手着色提示盒；补 `ui/state.test.tsx`（+9 测试） |
+| R11 | `29ea30c` | `ConfirmDialog` 补 `note` / `confirmDisabled` 两个槽位，7 处手搓确认框收拢；顺带修掉「Cancel 未走 i18n」缺陷；补 `ui/dialog.test.tsx`（+9 测试） |
 
 ### 对本报告自身结论的两处订正
 
@@ -364,13 +365,6 @@
 - **`..base,` 不能带尾逗号**：Rust 报 `cannot use a comma after the base struct`，struct update 语法的展开项必须是最后一个且无逗号。
 - **`let _x = Guard::new();` 与裸 `Guard::new();` 不等价**：后者是临时值，**当行即析构**。R9 里 5 个 highlight 测试因此失败——旧 helper 的 override 是副作用、返回值被丢弃，机械替换成裸语句后 override 在测试体执行前就被清掉了。
 - **`fn f(..) -> AuditEntry {` 也会匹配 `AuditEntry {`**：按「含 `AuditEntry {` 的行」定位字面量会把函数签名当成字面量起点，导致花括号配对整体错位。
-
-## 仍未处理
-
-| # | 项 | 为什么留到下一轮 |
-|---|---|---|
-| R7 | `redaction.rs` / `highlight.rs` 平行规则库 | 抽泛型规则库是**中等风险**重构，收益中等；建议在 R6 之后再评估 |
-| R10 | 前端两个 UI 惯用法（见下，已重新取证） | 两项都**不是机械替换**：一项会改变行为，另一项要动 `IconButton` 的 API |
 
 ### R6 落地时的取舍（用户可见变更已在此列明）
 
@@ -407,17 +401,72 @@
 自动选中会改变这两处工具栏的行为（用户原本可以看到「未选择」状态）。故需先决定：是给 `HostSelector` 加一个
 `compact` / 无 label 变体并接受自动选中，还是让两处显式选择「不自动选」。**属产品决策，不宜由去重驱动。**
 
-### 另记：新发现的同类项（原报告未列，未处理）
+### R11 落地：两个槽位，而不是一类字符串
 
-**确认对话框绕过 `ConfirmDialog`**。`ui/dialog.tsx` 已提供 `ConfirmDialog` 与命令式 `confirmDialog()`，
-`ConfirmOptions` 也已有 `title` / `description` / `danger`，且 `confirmDialog()` 已被 7 处采用
-（`SnippetsDialog:138`、`KeysPanel:80`、`McpAgentsPanel:86`/`:124`、`PlaybooksPanel:284`、`RecordingsPanel:164`、
-`SFTPPanel:519`）。但另有 **7 处**仍手搓 `<Dialog onClose={...} className="max-w-sm">` + 概要 + 警示条 + Cancel/确认 footer：
-`HostList:530`/`:553`/`:579`、`ConfigSnapshotsPanel:209`/`:228`/`:249`、`ProxyPanel:260`
-（`mt-4 flex justify-end gap-2.5` 这个 footer 惯用法共 8 处、`t("Cancel")` 共 21 处）。
-未能迁移的原因是 `ConfirmOptions` **没有警示条槽位**（这几处的警示条正是上面 `InlineAlert` 的来源），
-且 `ConfirmDialog` 用 `size="sm"` 按钮而手搓处用默认尺寸，再加上命令式 API 与现有 `useState` + `<Dialog>` 的
-状态管理方式不同。**建议作为 R11 单独立项**：给 `ConfirmOptions` 加一个可选警示/正文槽位，再逐处迁移。
+上一轮把 R11 记为「7 处手搓确认框绕过 `ConfirmDialog`」。**这次实测确认了 7 这个数（原写 6 是错的），
+但形态不是「类名字符串重复」，而是「共享组件缺两个槽位」**：
+
+| 站点 | 标题 | 警示条 | 确认按钮 |
+|---|---|---|---|
+| `HostList:530` 删单主机 | `Remove host {name}?` | `<InlineAlert>` 孤立资源 | destructive |
+| `HostList:553` 批量删 | `Remove {count} selected hosts?` | `<InlineAlert>` 孤立资源 | destructive |
+| `HostList:579` 删分组 | `Delete group {name}?` | `<InlineAlert>` 移入 Default | destructive |
+| `ConfigSnapshotsPanel:209` 应用模板 | `Apply the {name} template?` | `<InlineAlert>` 覆盖 policy.toml | default + `disabled={busy}` |
+| `ConfigSnapshotsPanel:228` 恢复快照 | `Restore snapshot {label}?` | `<InlineAlert>` 覆盖当前配置 | destructive + `disabled={busy}` |
+| `ConfigSnapshotsPanel:249` 删快照 | `Delete snapshot {label}?` | **无** | destructive + `disabled={busy}` |
+| `ProxyPanel:260` 删代理 | `Delete proxy {name}?` | `<InlineAlert>` 回退直连 | destructive |
+
+所以 `ConfirmDialog` 只缺两样东西，且两样都是**纯增量、向后兼容**的：
+
+- `note?: React.ReactNode` —— 6/7 处的内容；渲染在 `description` 与按钮行之间。**「后果」用 `note`（着色警示盒），
+  「中性说明」用 `description`（灰色小字）**，这条分工此前没有写下来，现在写进类型注释：`SFTPPanel:519`
+  的「删除后不可撤销」就该是 `description`，而 `HostList` 的「会话会变成孤立资源」就该是 `note`。
+- `confirmDisabled?: boolean` —— 3 处快照对话框在飞行中需要它。
+
+### R11 的三处可见变更（全部落在已使用 `ConfirmDialog` 的 7 处）
+
+按钮尺寸是唯一需要判断的地方：全仓 `flex justify-end gap-2.5` 这个 footer 惯用法共 9 处，
+其中 **8 处是手搓确认框、都用默认尺寸**（含最权威的 `ApprovalDialog` 风险闸门），**只有 `ConfirmDialog` 一个用 `size="sm"`**。
+而应用基准字号是 **14px（`text-sm`）**，`size="sm"` 是 `h-8 text-xs` —— **模态框的按钮比它自己的正文还小**，
+像是从面板工具栏抄来的。故**去掉 `size="sm"`**，统一到默认尺寸。
+
+- 7 处**已使用** `ConfirmDialog` 的确认框：按钮 `h-8 text-xs` → `h-9 text-sm`（变大）。
+- 7 处**新迁移**的确认框：按钮尺寸**不变**（它们本来就是默认尺寸）；标题由常规字重 → `font-medium`。
+- 标题颜色：原先继承弹层的 `popover-foreground`，现在被 `ConfirmDialog` 显式写成 `text-foreground`。
+  6 套主题里 4 套两个 token 同色，**dark 与 nord 两套不同**，这两套下标题比原先略暗。
+
+### R11 顺带修掉的一个真缺陷：确认框的 Cancel 从未走 i18n
+
+`ConfirmDialog` 把 `cancelLabel` / `confirmLabel` 默认成**字面量** `"Cancel"` / `"Confirm"`，
+而 7 个 `confirmDialog()` 调用点里**有 6 个省略了 `cancelLabel`** —— 于是这 6 处在中文界面上渲染英文 "Cancel"，
+而 `"Cancel": "取消"` 就在 zh 表里、另外 14 处调用点都规规矩矩写着 `t("Cancel")`。
+
+**修法是让默认值走 `t()`**，而不是让 7 个迁移点各自补一个 `cancelLabel={t("Cancel")}`：
+后者只能修好当下这 7 处，下一个写 `confirmDialog({...})` 的人照样会漏。**默认值正确 = 由构造保证，而非靠纪律。**
+代价是 `ui/dialog.tsx` 从此依赖 `src/i18n`（`ui/` 此前零 i18n 依赖），这是**有意为之**：
+`useI18n()` 在任何渲染路径上都可用（`main.tsx` 的 `I18nProvider` 包住 `App`，`ConfirmHost` 在其中），
+且 `ui/` 并非独立发包，用本仓的 i18n 不构成层次违规。**未来若有人想把 i18n 从这里摘出去，请先读这段。**
+`"Confirm"` 也补了 zh 条目 —— 它此前从未真正渲染过，所以一直不必存在。
+
+### 留待决定的一处 token 错配
+
+`ConfirmDialog` 的标题写 `text-sm font-medium text-foreground`，但 `ConfirmDialog` 永远渲染在 `<Dialog>` 里，
+而 `<Dialog>` 的卡片是 `bg-popover text-popover-foreground`。**弹层表面上的文字本该用 `popover-foreground`。**
+在 dark（`#c7d0d8` vs `#d1dae2`）与 nord（`#d8dee9` vs `#eceff4`）两套主题下这两个 token 不同色，
+标题因此比弹层里的其他文字略暗。
+
+**已取证，本轮不改。** 理由：改法（删掉 `text-foreground` 让标题继承）会让 14 个确认框的标题在两套主题下一起变色，
+而这两套主题无法在本机目视验证，属「读 CSS 变量推断出来的修改」，收益（颜色一致性）远小于风险。
+留给有主题截图条件的一轮处理。**注意它与上面的「标题颜色」delta 是同一件事的两个方向**：
+保持现状 → 7 个迁移点略暗；删掉 → 7 个原有调用点略暗。两边都不零成本。
+
+## 仍未处理
+
+| # | 项 | 为什么留到下一轮 |
+|---|---|---|
+| R7 | `redaction.rs` / `highlight.rs` 平行规则库 | 抽泛型规则库是**中等风险**重构，收益中等；R6 与 R11 都已落地，它是前端之外唯一剩下的并行结构。**需先确认是否推进** |
+| R10 | 前端两个 UI 惯用法（见上「R10 重新取证」） | 两项都**不是机械替换**：一项要动 `IconButton` 的 API（加 `busy`），另一项会改变 `TerminalPanel` / `PlaybooksPanel` 工具栏的行为。**都要先定契约** |
+| R11 余项 | `ConfirmDialog` 标题的 `text-foreground` 与它所在的 `bg-popover` 表面不匹配 | 见上「留待决定的一处 token 错配」。**已取证、未改**：改它会动到全部 14 个确认框，而 6 套主题里有两套无法在本机目视验证。不是冗余项，故不占 R 编号 |
 
 ## 本轮（增量扫描）的验证
 
