@@ -7,8 +7,9 @@
 # 1. **PR dry-run**: Every pull request triggers the full `build` job matrix,
 #    which compiles all binaries (CLI, MCP, daemon) across 3 target platforms
 #    (aarch64 macOS, x86_64 Linux, x86_64 Windows; Intel Macs are no longer
-#    supported), runs unit tests, integration tests, CLI smoke tests, the
-#    explicit contract-consistency gate, and builds the frontend. This acts as
+#    supported), runs unit tests, integration tests, CLI smoke and CLI
+#    contract tests, the explicit contract-consistency gate, and builds the
+#    frontend. This acts as
 #    a release dry-run — if a PR passes all checks here, the code is ready to
 #    be merged and released.
 #    The `tauri-unit-tests` job covers the default (tauri) feature set, which
@@ -254,6 +255,10 @@ jobs:
 
       - name: Rust CLI smoke tests
         run: cargo test --no-default-features --test cli_smoke
+        working-directory: src-tauri
+
+      - name: Rust CLI contract tests
+        run: cargo test --no-default-features --test cli_contract
         working-directory: src-tauri
 
       - name: Rust connect deadline tests
