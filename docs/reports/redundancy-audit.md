@@ -833,7 +833,7 @@ A22 的 `SshAlgoPrefs` 是**单例结构体**（8 个算法列表字段），不
 3. **`force` 在三层各查一次，不共享。** 删除一条脱敏规则会让该类机密在此后**所有**审计记录、Webhook 通知、Playbook 结果和诊断导出里不再被脱敏；删除一条高亮规则不隐藏任何本应用写出的内容，但仍要求确认，以免拼错的关键字悄悄删掉一条本想保留的规则。三层重复检查的理由是：直接说 HTTP 的客户端不经过另外两层；而 MCP 的 `required` 只证明「键存在」——`"force": false` 能过 schema 校验，必须在 handler 里显式拦（实测已覆盖这一条）。CLI 的**退出码 2** 是刻意的：让脚本能区分「忘了 `--force`」与「那条规则不存在」（后者 exit 1）。
 4. **`--literal` 在调用点转义，而不是靠 `is_regex: false`。** 后者是迁移输入：`normalize_rule` 会把关键字转义后把 `is_regex` 写回 `true`，所以**没有任何一条规则以非正则形态被存储**。由此两点：`update --literal` 必须配 `--new-keyword`（否则会对已转义的 pattern 二次转义、改变语义，实测强制），以及 `highlight list` **不打印** regex/literal 列（任何写入后都是 `true`，该列对全部规则说同一句话，属误导）。
 
-### 顺带发现并修掉的四项
+### 顺带发现并修掉的五项
 
 | 发现 | 是什么 | 处理 |
 |---|---|---|
@@ -841,6 +841,7 @@ A22 的 `SshAlgoPrefs` 是**单例结构体**（8 个算法列表字段），不
 | **3 处契约描述与实现不符** | 见下 | 逐条改成实现的实际行为，并把 redact/highlight 的**不对称**写在调用者会看的地方 + 用测试钉住 |
 | **`CLAUDE.md` 仍写 51 个工具** | 活性指令文件里两行，落后 7 个增长台阶 | 改 71，并让两行各自点名那个会因漂移而失败的测试 |
 | **`ssh_algos.json` 是第四个未收敛的写入者** | `save_algo_prefs` 自己内联「建目录 + 序列化 + 写 + `restrict_file_to_owner`」，而 `write_private_json` 的文档注释已把另外三个文件列为调用者 | 收敛；顺带去掉冗余的 `ensure_config_dir()`，并让注释点名第四个文件。语义无变化（同为 `0600`，Windows 走同一套 `icacls`） |
+| **`cli_contract` 从未被 CI 执行** | `src-tauri/tests/cli_contract.rs` 自 B39 起有 29 个用例（本轮再加 1 个），但 `build` 的 cargo-test 步骤点的是 `--lib` / `--test daemon_integration` / `--test cli_smoke` / `--test connect_deadline`，`contract-consistency` 跑的是前两个套件里**按名字过滤的 9 个**用例。两侧各自都正常：测试是绿的，只是没有人在 CI 里跑它们。于是本轮新加的生命周期契约测试同样只是装饰——**「已通过的测试」与「能拦住回归的测试」是两回事** | 在 `build` 里紧挨 `cli_smoke` 加一个 `--test cli_contract` 步骤，三个平台都跑；它不需要夹具（每条用例对临时 `AGENT2SSH_CONFIG_DIR` 起真实二进制，无平台假设）。`exec_fixture` 不动——它要容器化 sshd，只在 `real-ssh-e2e`（`scripts/e2e-docker.sh`）里跑，那是它唯一合理的位置 |
 
 ### 三处被自己写出来的错误描述（写完实测才发现）
 
@@ -861,6 +862,7 @@ A22 的 `SshAlgoPrefs` 是**单例结构体**（8 个算法列表字段），不
 - **clippy** 四个目标（CLI+MCP、daemon、默认特性 lib、`--no-default-features` lib）全部 `-D warnings` 干净；`cargo fmt --check` 干净。
 - **前端**未改动，仍复验：`npm run lint` 101 文件干净、`npm test` **121** 通过 / 17 文件、`npm run build` 成功、`check-i18n` 无缺失。
 - **一致性测试的灵敏度是实测的，不是假设的**：从 `docs/api.yaml` 删掉 `/algo/prefs` 一条，测试失败并点名该路径；还原后通过。一个恒真的测试比没有测试更糟。
+- **CI 缺口也是 grep 实测出来的**：本轮之前 `.github/workflows/ci.yml` **零处**引用 `cli_contract`（改后恰好 1 处），`build` 的四个测试步骤与 `contract-consistency` 的 9 个过滤用例逐个列出核对，没有一处覆盖整个套件；`cli_contract` 全文无 `cfg(unix)` / `/tmp` / `chmod` / 权限模式断言，只经临时 `AGENT2SSH_CONFIG_DIR` 起真实二进制，故可安全进三平台矩阵。
 - **三处被订正的描述，每一条都先用运行中的二进制反驳过**再用文字记录：`redact add '('` 非零退出、`redact add <同 pattern 两次>` 报 `already exists`（**与内置 pattern 撞车同样拒**，因为两者在同一文件里）、`redact add PATTERN ''` 被接受、`highlight add '('` 被接受、`highlight add --color red` 报十六进制颜色错误。
 
 ### 有意不做
