@@ -359,6 +359,7 @@
 | R7 余项 | `51522a0` | A24 生命周期接线：`redact_rules.json` 成为**实时的规则来源**（core 切换 + 桌面命令 + 设置面板）；错误类型补 `IoError`/`ParseError`；写入改走 `write_private_json`（0600）；+4 测试 |
 | R7 余项（第二步） | `9c843ed` | 桌面给出完整 CRUD（`add` / `update` / `delete`），推翻上一轮「只暴露安全方向」的判据；护栏改为确认框 + `Built-in` 徽章 + `Duplicate`/`NotFound` 写入前校验 + 空集警示；`BUILTIN_RULES` 提成常量；删掉死镜像 `RedactRuleConfig`；+8 Rust 测试、+9 前端测试（`RedactionSettings.test.tsx`） |
 | R7 余项（第三步） | 见下「R7 余项（第三步）」 | 三个规则库 × 三个面 = **13 个操作 × 3**；`delete` 三层都要求显式确认；顺带发现并补上 **7 条从未进过 `docs/api.yaml` 的 daemon 路由**，并为它加了一个双向一致性测试；订正 **3 处与实现不符的契约描述**；`ssh_algos.json` 收敛到 `write_private_json` |
+| R11 余项 | 见下「R11 余项：一处 token 错配，结案不改」 | 勘察**推翻立项前提**（「`ConfirmDialog` 标题违反弹层表面契约」）：同族 **11 处 / 9 文件**在 popover 表面上同样写 `text-foreground`，而 7 处 `text-popover-foreground` 全在容器自身。结案为「不动 token」，把规则与同族清单写进 `ui/dialog.tsx`；订正上一轮的「7 vs 7 两个方向」。**零行为变更** |
 
 ### 对本报告自身结论的四处订正
 
@@ -603,9 +604,12 @@ vitest **121**（106 + 15，恰好 +15）；`npm run build` 成功。
 且 `ui/` 并非独立发包，用本仓的 i18n 不构成层次违规。**未来若有人想把 i18n 从这里摘出去，请先读这段。**
 `"Confirm"` 也补了 zh 条目 —— 它此前从未真正渲染过，所以一直不必存在。
 
-### 留待决定的一处 token 错配
+### R11 余项：一处 token 错配，结案不改（2026-09-14 第三轮）
 
-`ConfirmDialog` 的标题写 `text-sm font-medium text-foreground`，但 `ConfirmDialog` 永远渲染在 `<Dialog>` 里，
+> **结案：不动 token。** 立项前提（「`ConfirmDialog` 标题违反弹层表面契约」）被实测推翻，
+> 见本节末「第三轮：同族 11 处，前提不成立」。下面两段保留为前两轮的取证过程。
+
+原题：`ConfirmDialog` 的标题写 `text-sm font-medium text-foreground`，但 `ConfirmDialog` 永远渲染在 `<Dialog>` 里，
 而 `<Dialog>` 的卡片是 `bg-popover text-popover-foreground`。**弹层表面上的文字本该用 `popover-foreground`。**
 在 dark（`#c7d0d8` vs `#d1dae2`）与 nord（`#d8dee9` vs `#eceff4`）两套主题下这两个 token 不同色，
 标题因此比弹层里的其他文字略暗。
@@ -614,6 +618,8 @@ vitest **121**（106 + 15，恰好 +15）；`npm run build` 成功。
 而这两套主题无法在本机目视验证，属「读 CSS 变量推断出来的修改」，收益（颜色一致性）远小于风险。
 留给有主题截图条件的一轮处理。**注意它与上面的「标题颜色」delta 是同一件事的两个方向**：
 保持现状 → 7 个迁移点略暗；删掉 → 7 个原有调用点略暗。两边都不零成本。
+**（第三轮实测订正：这句「7 对 7」的分野不存在——R11 落地后 16 个调用点全部写 `text-foreground`，
+那是把「相对 R11 之前」的两次 delta 误写成了两个现存阵营。见本节末。）**
 
 **（2026-09-14 第二轮补测，两项结论一正一误）**：
 
@@ -625,6 +631,54 @@ vitest **121**（106 + 15，恰好 +15）；`npm run build` 成功。
   （`HostList` 3、`ConfigSnapshotsPanel` 3、`RedactionSettings` **2**、`McpAgentsPanel` 2，
   其余 6 个文件各 1）。**其中 +2 来自本轮「R7 余项（第二步）」新增的删除确认与恢复默认确认**——
   这个数字是被我自己这一轮的改动推高的。**影响面由 14 变 16，风险随之后移；「暂不处理」的结论不变。**
+
+#### 第三轮：同族 11 处，前提不成立
+
+第三轮的目的本来是「把改法定下来」，结果先证伪了立项前提。原前提是「`ConfirmDialog` 标题写
+`text-foreground`，而它所在的表面声明 `bg-popover`，所以这是错配」。逐项实测：
+
+| 事实 | 数量 | 证据 |
+|---|---|---|
+| `text-foreground` 显式写在 popover 表面上 | **11 处 / 9 文件** | `<Dialog>` 卡片内 **6**（本组件标题、`App.tsx`×2、`FilePreview`、`AlgoPrefsDialog`、`SnippetsDialog`）；其他 popover 表面 **5**（`ui/toast`×2、`CommandPalette`、`SettingsMenu`、`ui/context-menu`） |
+| `text-popover-foreground` | **7 处** | **全部写在 `bg-popover` 容器自己身上**，从不做子元素覆盖 |
+| `text-foreground` 全仓 | **49 处** | 对照：`text-muted-foreground` **235** 处才是主力；`text-card-foreground` / `text-secondary-foreground` 各 1、`text-accent-foreground` 0 |
+| 两个 token 取值不同的主题 | **2 / 6** | 只有 `dark`（`#c7d0d8` vs `#d1dae2`）与 `nord`（`#d8dee9` vs `#eceff4`） |
+
+口径与复现（**注释行不计入**；`hover:` / `focus:` 前缀与其他 `*-foreground` 不计入）：
+
+```bash
+git grep -n "text-foreground" -- src/ \
+  | grep -v 'text-\(muted\|popover\|primary\|destructive\|card\|secondary\|sidebar\|accent\)-foreground' \
+  | grep -v 'hover:text-foreground\|focus:text-foreground\|group-hover:text-foreground' \
+  | grep -vE ':[0-9]+:[[:space:]]*(\*|//|/\*)' | wc -l          # → 49
+```
+
+> ⚠️ 这个数**会被「写文档」这个动作推高**：本节定稿时把 token 名字写进了 `ui/dialog.tsx` 的注释，
+> 不排除注释行的同类统计立刻从 49 变成 **52**。与第二轮「14 → 16」是同一个陷阱——**统计口径必须写死，
+> 否则下一轮读到的是一个被上一轮自己抬高的数字。**
+
+决定性证据两条：
+
+1. **`ui/toast.tsx:141` 把 `bg-popover` 与 `text-foreground` 写在同一个元素上。** 若「popover 表面必须用
+   popover-foreground」是本仓契约，这一行就自相矛盾；它同时说明既有读法是「`bg-popover` 只管底色与默认继承，
+   子元素可以显式点回 `text-foreground`」。
+2. **设计计划的映射表是 `--text-1 → --foreground`**（`docs/plans/ui-v3-midnight-ops.md:24`），而 `src/index.css`
+   的默认主题把 `--card-foreground` / `--popover-foreground` / `--secondary-foreground` 全部指向 `--text-1`。
+   即 **`--foreground` 才是设计系统原生的文字 token**，`--popover-foreground` 是 shadcn 兼容别名；
+   默认主题里两者同值，`text-foreground` 是 **no-op 而非覆盖**。
+
+于是「单独改 `ConfirmDialog` 这一处」不再是修错配，而是**让 11 个同族成员里出现唯一的例外**。三个方向与代价
+（全部只在 dark/nord 上可见，设计系统里是 no-op；对比度为实测值）：
+
+| 方向 | 改动面 | dark/nord 上的可见 delta | 未采纳的原因 |
+|---|---|---|---|
+| **保持现状（采纳）** | 0 | 无 | — |
+| 对齐两套主题的 `--popover-foreground` 到 `--foreground` | 2 行 token | popover 的**继承**文字变暗：dark 9.28→**8.41**:1、nord 8.73→**7.45**:1 | 让 11 处 override 变 no-op，且仍远高于 4.5:1（**对比度是安全的**）；但改的是主题而不是组件，超出 R11 范围，且同样无本机目视条件——正是上一轮推迟它的理由 |
+| 删掉这 11 处的 `text-foreground` | 9 文件 | 这 11 处变亮 | 改动面最大；且会一并抹平 `text-foreground/85`、`/90` 这类**有意的「弱化一档」分级** |
+
+**规则已写进代码**（`ui/dialog.tsx`）：`Dialog` 的表面声明处记下同族清单与「`--foreground` 才是原生 token」，
+`ConfirmDialog` 的标题处留一句指针。这样下一轮拿到的是**同族清单**而不是一个孤立样本——
+上一轮正因为只盯着一个 `ConfirmDialog`，才把它读成了异常。
 
 ### R7 落地：不是「两个平行规则库」，是三方平行 + 一个死生命周期 + 一个权限缺口
 
@@ -878,7 +932,6 @@ A22 的 `SshAlgoPrefs` 是**单例结构体**（8 个算法列表字段），不
 | # | 项 | 为什么留到下一轮 |
 |---|---|---|
 | 新发现（未编号） | `SettingsMenu`：23 个裸 `<button>` / 0 个 `<Button>`，全仓最大集中点 | 见上「R10 重新取证」的补测段。**未立项**：立项前需先确认 `Button` 是否存在能覆盖设置面板那种密排小按钮的尺寸档，否则「替换」会改变面板密度 |
-| R11 余项 | `ConfirmDialog` 标题的 `text-foreground` 与它所在的 `bg-popover` 表面不匹配 | 见上「留待决定的一处 token 错配」。**已取证、未改**：补测确认 6 套主题里**只有 dark / nord** 两套这两个 token 不同色，但这两套无法在本机目视验证，属「读 CSS 变量推断出来的修改」。影响面已由 14 涨到 **16** 个确认框（本轮 +2）。不是冗余项，故不占 R 编号 |
 
 ## 本轮（增量扫描）的验证
 
