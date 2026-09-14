@@ -325,7 +325,7 @@
 | **R4** | `ssh_config.rs` 的**测试专用 glob 镜像** | 3 个 `#[cfg(test)]` 函数（`glob_match` / `glob_match_bytes` / `char_class_match`）+ 约 10 个只为测它们的单测 | 生产侧 `splice_includes` 用的是 **`glob` crate**；这组镜像全仓仅被自己的测试引用 | 删除镜像与其单测（生产路径已有 `include_splices_glob_matches` 等真实覆盖），或明确它要保护什么语义 |
 | **R5** | `AuditEntry` 测试 fixture 重复 | `playbook.rs:853` + `store.rs:2194` | 两处注释均自认「Mirror append_audit」；重复块检测命中 | 抽 `#[cfg(test)] pub(crate) fn test_audit_entry(...)` 复用 |
 | **R6** | P1#11 手写 spinner / 错误块 | `animate-spin` **25 处 / 12 文件**；`text-destructive` **21 文件**；`ErrorState` 仅 `SFTPPanel` 1 个组件在用 | 逐文件统计 | 体量最大、且属用户可见一致性；报告判定「无安全 panel 级替换点」，需逐处确认后再动 |
-| **R7** | `redaction.rs` / `highlight.rs` 平行规则库 | 各含 `seed_default_rules()` + `load_rules_from_json()`，同职责、不同规则类型 | 同名 `pub fn` 扫描 | 可抽泛型规则库；中等收益、中等风险（原报告未列）。**⚠ 本行的范围与性质均已被证伪：实测是三方平行（漏了 `copy_redact.rs`）、其中一方是死代码、真正缺陷是权限加固缺失而非重复。见「对本报告自身结论的四处订正」** |
+| **R7** | `redaction.rs` / `highlight.rs` 平行规则库 | 各含 `seed_default_rules()` + `load_rules_from_json()`，同职责、不同规则类型 | 同名 `pub fn` 扫描 | 可抽泛型规则库；中等收益、中等风险（原报告未列）。**⚠ 本行的范围与性质均已被证伪：实测是三方平行（漏了 `copy_redact.rs`）、其中一方是死代码、真正缺陷是权限加固缺失而非重复。见「对本报告自身结论的四处订正」**。**三步均已落地**（`e7054a2` → `51522a0` / `9c843ed` → 第三步见「R7 余项（第三步）」），且第三步把「补齐同族惯例」这一立项前提也证伪了——六个同族成员里只有两个上了自动化面 |
 | **R8** | `rand` + `getrandom` 双 RNG 入口 | `Cargo.toml:65-66`；`rand` 仅在 `backup_crypto.rs:78-79` 用了 2 次 | `getrandom::fill` 已在 `keys.rs` / `mcp_binding.rs` / `secrets.rs` 使用 | 这 2 处改为 `getrandom::fill` 后删 `rand` 依赖（先 `cargo tree -i rand` 确认无其他消费者） |
 | **R9** | 测试助手 `unique_dir` ×2 | `copy_redact.rs:153` + `snippets.rs:198` | `#[cfg(test)]` 扫描 | 低收益 |
 | **R10** | 前端 2 处 8 行 UI 惯用法 | 「Refresh IconButton + `animate-spin`」`SnippetsDialog:170` / `PlaybooksPanel:339`；「host `<Select>`」`TerminalPanel:445` / `PlaybooksPanel:576` | 重复块检测 | 低收益；与 R6 同源，做 R6 可顺带覆盖。**⚠ 本行的范围被低估：检测口径是「重复块」，所以它只圈到了 busy 惯用法 11 处里的 2 处（另 9 处不是逐字重复块）。且「给 `IconButton` 加 `busy` 就收拢」已被证伪。见「R10 重新取证」的补测段** |
@@ -358,6 +358,7 @@
 | R7 | `e7054a2` | `store::write_private_json` 成为三个规则文件的唯一写入路径；**修掉 `highlight_rules.json` 缺权限加固的真缺陷**；+2 测试 |
 | R7 余项 | `51522a0` | A24 生命周期接线：`redact_rules.json` 成为**实时的规则来源**（core 切换 + 桌面命令 + 设置面板）；错误类型补 `IoError`/`ParseError`；写入改走 `write_private_json`（0600）；+4 测试 |
 | R7 余项（第二步） | `9c843ed` | 桌面给出完整 CRUD（`add` / `update` / `delete`），推翻上一轮「只暴露安全方向」的判据；护栏改为确认框 + `Built-in` 徽章 + `Duplicate`/`NotFound` 写入前校验 + 空集警示；`BUILTIN_RULES` 提成常量；删掉死镜像 `RedactRuleConfig`；+8 Rust 测试、+9 前端测试（`RedactionSettings.test.tsx`） |
+| R7 余项（第三步） | 见下「R7 余项（第三步）」 | 三个规则库 × 三个面 = **13 个操作 × 3**；`delete` 三层都要求显式确认；顺带发现并补上 **7 条从未进过 `docs/api.yaml` 的 daemon 路由**，并为它加了一个双向一致性测试；订正 **3 处与实现不符的契约描述**；`ssh_algos.json` 收敛到 `write_private_json` |
 
 ### 对本报告自身结论的四处订正
 
@@ -794,11 +795,86 @@ tsc 干净、biome **100** 文件、`check-i18n` 干净、vitest **106**（97 + 
 （删空之后 `redact_with_user_rules` 真的不再脱敏——这条同时钉住「空文件不会被重新播种」）。
 前端新增 `RedactionSettings.test.tsx` 单文件 9 个，覆盖四个操作各自的成功路径 + 拒绝路径 + 确认框门禁 + 空集警示。
 
+## R7 余项（第三步）：三个规则库上三个自动化面
+
+### 立项前提先被证伪：这一步不是「追上同族」，是走得比同族更远
+
+上一轮把余项记成「A24 的 CLI / MCP / daemon 三个面尚未暴露」，隐含的说法是「同族都上了，只差它」。回 grep 实测后这个说法不成立。把「本地配置」六成员的四面包裹逐个点出来：
+
+| 本地配置 | CLI | MCP | daemon | 桌面 |
+|---|---|---|---|---|
+| `snippets` | ✅ | ✅ 3 工具 | ✅ GET+POST / DELETE | ✅ |
+| `approval_policies` | ✅ | ⚠️ **仅 list** | ✅ GET+PUT | ✅ |
+| **`redact_rules`** | ❌ | ❌ | ❌ | ✅ 5 命令 |
+| **`highlight_rules`** | ❌ | ❌ | ❌ | ✅ 5 命令 |
+| **`algo_prefs`** | ❌ | ❌ | ❌ | ✅ 3 命令 |
+| `copy_redact` | ❌ | ❌ | ❌ | ⚠️ **无编辑面** |
+
+**六个里只有两个上了自动化面，其中一个（approval policies）的 MCP 面还是只读的。** 所以本轮的准确描述是「三个规则库一起，一次上满三面」，而不是「补齐同族惯例」——按同族惯例只上 `list` + `reset` 才是「对齐」。这点必须写进报告，否则「五面贯通」会掩盖真实范围。（`ssh_approval_policies_list` 只读且**没有任何注释说明理由**，属未记录的欠账而非写下来的政策；本轮不动它，留作下一轮的取证对象。）
+
+### 落地范围：13 个操作 × 3 个面
+
+| 规则库 | 操作数 | 操作 |
+|---|---|---|
+| `redact` | 5 | `list` / `add` / `update` / `remove` / `reset` |
+| `highlight` | 5 | `list` / `add` / `update` / `remove` / `reset` |
+| `algo` | **3** | `get` / `set` / `clear` |
+
+A22 的 `SshAlgoPrefs` 是**单例结构体**（8 个算法列表字段），不是规则列表，所以没有「增删一条」这个动作——`5 + 5 + 3 = 13`，不是 15。三面各自形态：
+
+- **CLI**：`agent2ssh redact | highlight | algo`，13 个操作全部支持 `--json`。
+- **MCP**：`ssh_redact_rule_*` / `ssh_highlight_rule_*` / `ssh_algo_prefs_*`，13 个工具，**追加到 `tools/list` 末尾**（位置 58–70），所以 `docs/skills.md` 的既有 58 行编号不用重排。
+- **daemon**：`/redact/rules` GET+POST、`/redact/rules/{update,delete,reset}` POST、`/highlight/rules` 同构四条、`/algo/prefs` GET+PUT+DELETE。
+
+### 四个设计判断（其中两个如果做错会静默出错）
+
+1. **`--daemon` 必须被尊重。** 它是 CLI 的全局旗标（`#[arg(long, global = true)]`），新命令若不支持，`agent2ssh --daemon prod redact list` 会**静默读本地文件并给出看起来正确的答案**——比不支持更糟。所以 13 个操作全部经 `remote_config(alias, method, path, body)` 走 HTTP：一个助手负责解析别名、附加 bearer token、解码响应，而不是 13 个近似函数（13 份都可能把 auth header 写错）。`remote_alias()` 把 `"localhost"` 视为本地，只有真正的远端别名才转向。
+2. **身份只能走 body。** `pattern` / `keyword` 既是规则的唯一身份，又是正则（`(?i)password` 这类字符对 URL path 不友好），所以不能做 `/redact/rules/:pattern`；update / delete 各占一条 POST 路径、身份在 body 里。这与既有的 `/approval/policies` **`PUT` 整表替换**是同一条理由。
+3. **`force` 在三层各查一次，不共享。** 删除一条脱敏规则会让该类机密在此后**所有**审计记录、Webhook 通知、Playbook 结果和诊断导出里不再被脱敏；删除一条高亮规则不隐藏任何本应用写出的内容，但仍要求确认，以免拼错的关键字悄悄删掉一条本想保留的规则。三层重复检查的理由是：直接说 HTTP 的客户端不经过另外两层；而 MCP 的 `required` 只证明「键存在」——`"force": false` 能过 schema 校验，必须在 handler 里显式拦（实测已覆盖这一条）。CLI 的**退出码 2** 是刻意的：让脚本能区分「忘了 `--force`」与「那条规则不存在」（后者 exit 1）。
+4. **`--literal` 在调用点转义，而不是靠 `is_regex: false`。** 后者是迁移输入：`normalize_rule` 会把关键字转义后把 `is_regex` 写回 `true`，所以**没有任何一条规则以非正则形态被存储**。由此两点：`update --literal` 必须配 `--new-keyword`（否则会对已转义的 pattern 二次转义、改变语义，实测强制），以及 `highlight list` **不打印** regex/literal 列（任何写入后都是 `true`，该列对全部规则说同一句话，属误导）。
+
+### 顺带发现并修掉的四项
+
+| 发现 | 是什么 | 处理 |
+|---|---|---|
+| **`docs/api.yaml` 缺 7 条路由** | `/snippets`、`/snippets/{name}`、`/forwards/multi`、`/forwards/{id}/start`、`/forwards/{id}/stop`、`/prompts/pending`、`/prompts/respond`。每一处从单侧看都正常：服务端在跑，客户端发现不了。两侧在不同文件里，没有任何东西比对过 | 补上；新增 `api_yaml_documents_every_daemon_route`，**双向**断言（有路由无条目、有条目无路由），只豁免 `/` 与 `/console` 两个控制台路径。现为 84 条 `.route(..)` − 2 = 82 条 `paths`，两侧零未匹配 |
+| **3 处契约描述与实现不符** | 见下 | 逐条改成实现的实际行为，并把 redact/highlight 的**不对称**写在调用者会看的地方 + 用测试钉住 |
+| **`CLAUDE.md` 仍写 51 个工具** | 活性指令文件里两行，落后 7 个增长台阶 | 改 71，并让两行各自点名那个会因漂移而失败的测试 |
+| **`ssh_algos.json` 是第四个未收敛的写入者** | `save_algo_prefs` 自己内联「建目录 + 序列化 + 写 + `restrict_file_to_owner`」，而 `write_private_json` 的文档注释已把另外三个文件列为调用者 | 收敛；顺带去掉冗余的 `ensure_config_dir()`，并让注释点名第四个文件。语义无变化（同为 `0600`，Windows 走同一套 `icacls`） |
+
+### 三处被自己写出来的错误描述（写完实测才发现）
+
+这三处都是**先写文档、再回代码核对**时暴露的，属于「文档里的检测数字与范围描述都不可信」的同一类：
+
+1. **MCP 的 `ssh_algo_prefs_set` 描述**称「名字会对着本构建支持的算法集校验，未知名字会被拒绝而不是被丢弃」。实际 `validate_algo_prefs` 只校验**形态**：非空、无重复、字符限于字母数字与 `._-@`。一个形态合法但 libssh2 从没听过的名字会通过校验、在握手时才失败——正是那句承诺排除的结果。已改写成形态校验。
+2. **`POST /redact/rules` 与 `.../update` 的 400** 里列了「空 replacement」。`RedactRule::new` 只校验 pattern，空替换是**合法**的（表示把匹配到的文本直接删掉而不是替换）——实测 `redact add PATTERN ''` 被接受。
+3. **`POST /highlight/rules` 与 `.../update` 的 400** 里列了「无效正则」。`highlight::validate_rule` 只查关键字、名字和颜色，且**代码里有一条注释解释了为什么到此为止**：正则由 xterm 渲染器的 JavaScript 引擎编译，其文法与 Rust 不同（例如没有 look-around），所以 Rust 侧检查会拒掉可用的、放过不可用的。实测 `highlight add '('` 被接受、`--color red` 被拒绝。
+
+前两条是关于**参数校验**的过度承诺，第三条相反——把一个**有意的设计选择**写成了缺陷。两族的这条不对称现在写在 `docs/skills.md`、`skills/agent2ssh/SKILL.md` 和 `docs/api.yaml` 三处，并由 `redact_highlight_algo_help_and_local_crud_contract` 同时钉住两半（redact 拒 `(`、highlight 收 `(`），这样以后给 highlight 补 Rust 侧正则检查会让测试失败而不是静默通过。
+
+### 本轮的验证
+
+- **CLI**（隔离 `AGENT2SSH_CONFIG_DIR`）：`redact list` 首次播种 10 条内置并落盘 `0600`；`add` 标 `is_builtin: false`；`update` 只改替换文本；`remove` 无 `--force` → **exit 2** 且文案点名 built-in；`remove` 不存在 → exit 1；`reset` 恢复恰好 10 条；`highlight add --literal 'a.b'` 存成 `a\.b`；`highlight update --literal` 无 `--new-keyword` → exit 1；`algo set --kex` 只覆盖 kex 且落盘；`algo clear` 删文件；`--daemon localhost` 视为本地、未知别名报错不静默。
+- **MCP**（真实 stdio 握手）：`tools/list` = **71** 条，13 个新名字位于 58–70，其下无重编号；`ssh_redact_rule_remove` 缺 `force` 键由 schema 拒、`"force": false` 由 handler 拒；`literal: true` 存成 `a\.b`；`algo set` 未点名任何列表被拒。
+- **daemon**（带 token）：无 token 取 `/redact/rules` → **401**；13 条路由逐条打通——`force` 缺失与 `false` 均 **400**、`true` 为 200；`reset` 恢复内置集；字面量转义落盘；`PUT /algo/prefs` 保持**整表语义**（部分 body → 422，CLI 的 read-merge-write 保留另外七个列表）。三个规则文件均 `0600`。
+- **测试套件**（`--no-default-features` 为准）：`lib` 610、`daemon_integration` **58**、`cli_smoke` **33**、`cli_contract` **30**、`connect_deadline` 2、`exec_fixture` 4 全绿；默认特性 `lib` 618。`daemon_integration` 与 `cli_contract` 各 +1（路由一致性测试、生命周期契约测试），`cli_smoke` 的 `tools/list` 断言 58 → **71**。
+- **clippy** 四个目标（CLI+MCP、daemon、默认特性 lib、`--no-default-features` lib）全部 `-D warnings` 干净；`cargo fmt --check` 干净。
+- **前端**未改动，仍复验：`npm run lint` 101 文件干净、`npm test` **121** 通过 / 17 文件、`npm run build` 成功、`check-i18n` 无缺失。
+- **一致性测试的灵敏度是实测的，不是假设的**：从 `docs/api.yaml` 删掉 `/algo/prefs` 一条，测试失败并点名该路径；还原后通过。一个恒真的测试比没有测试更糟。
+- **三处被订正的描述，每一条都先用运行中的二进制反驳过**再用文字记录：`redact add '('` 非零退出、`redact add <同 pattern 两次>` 报 `already exists`（**与内置 pattern 撞车同样拒**，因为两者在同一文件里）、`redact add PATTERN ''` 被接受、`highlight add '('` 被接受、`highlight add --color red` 报十六进制颜色错误。
+
+### 有意不做
+
+| 项 | 为什么 |
+|---|---|
+| `ssh_approval_policies_list` 的 MCP 面仍只读 | 同族里的未记录欠账，但它是**独立的一条**：要判断的是「policy 的写入面该不该给 agent」，与三个规则库的判据无关。本轮不夹带 |
+| 其余三个面（桌面已有）之外的第六个成员 `copy_redact` | 无编辑面（连桌面都没有），且它的规则集是 `SYNCABLE` 之外的独立文件；本轮范围由用户钉死为「三个规则库一起」 |
+| MCP 工具级风险分级表 | `docs/skill-distribution.md` 里按只读/写入手工分类，13 个新工具已按其性质归位（3 只读 + 10 写入）。但**没有测试**校验这张表与实际工具集一致——它是一张会漂移的表，本轮只做同步，未立项目 |
+
 ## 仍未处理
 
 | # | 项 | 为什么留到下一轮 |
 |---|---|---|
-| R7 余项（再度收窄） | A24 的 **CLI / MCP / daemon** 三个面尚未暴露 | `51522a0` 接线 + `9c843ed` 桌面完整 CRUD，已等于 B24 highlight 的同一个面集合。剩下三个面按 `agent2ssh-add-operation` 走，但**该暴露哪些必须重新论证**：上一轮「只应暴露 list + reset」的判据（把安全方向当成唯一筛选条件）已被用户推翻，不能直接沿用。可考虑的中间形态是「`list` + `reset` 上自动化面，`add` / `update` / `delete` 仅桌面」。同步时须改 `docs/skills.md` 与其余 ~10 处 MCP 工具计数 |
 | 新发现（未编号） | `SettingsMenu`：23 个裸 `<button>` / 0 个 `<Button>`，全仓最大集中点 | 见上「R10 重新取证」的补测段。**未立项**：立项前需先确认 `Button` 是否存在能覆盖设置面板那种密排小按钮的尺寸档，否则「替换」会改变面板密度 |
 | R11 余项 | `ConfirmDialog` 标题的 `text-foreground` 与它所在的 `bg-popover` 表面不匹配 | 见上「留待决定的一处 token 错配」。**已取证、未改**：补测确认 6 套主题里**只有 dark / nord** 两套这两个 token 不同色，但这两套无法在本机目视验证，属「读 CSS 变量推断出来的修改」。影响面已由 14 涨到 **16** 个确认框（本轮 +2）。不是冗余项，故不占 R 编号 |
 

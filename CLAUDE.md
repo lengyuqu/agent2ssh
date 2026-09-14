@@ -8,7 +8,7 @@ Agent2SSH is a local SSH capability layer for general-purpose agents. One Rust c
 
 - `agent2ssh-app` — Tauri desktop app (React/TS frontend in `src/`, Rust commands in `src-tauri/src/tauri_commands.rs`)
 - `agent2ssh` — CLI (`src-tauri/src/bin/agent2ssh.rs`)
-- `agent2ssh-mcp` — stdio MCP server, 51 tools (`src-tauri/src/bin/agent2ssh-mcp.rs`)
+- `agent2ssh-mcp` — stdio MCP server, 71 tools (`src-tauri/src/bin/agent2ssh-mcp.rs`)
 - `agent2ssh-daemon` — local HTTP/WebSocket/SSE server on `127.0.0.1:7722` (`src-tauri/src/bin/agent2ssh-daemon.rs`)
 
 ## Build / check / test
@@ -84,6 +84,6 @@ All runtime state is under `~/.agent2ssh/`: `hosts.json`, `audit.jsonl`, `policy
 ## Docs worth reading before changing related code
 
 - `docs/architecture.md` — system design
-- `docs/api.yaml` — daemon REST/WS contract (keep in sync when changing daemon routes)
-- `docs/skills.md` — full reference for the 51 MCP tools (keep in sync when adding/changing MCP tools)
+- `docs/api.yaml` — daemon REST/WS contract; `api_yaml_documents_every_daemon_route` fails in both directions, so a new route and its spec entry have to land together
+- `docs/skills.md` — full reference for the 71 MCP tools; `mcp_tools_match_skills_md_documentation` and `mcp_tool_list_contains_exactly_71_tools` fail when the count and the table drift apart
 - [PLAN.md](docs/PLAN.md) — 单一规划源（活跃 Plan 2 + 历史归档）

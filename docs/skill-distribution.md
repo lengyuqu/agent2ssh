@@ -6,7 +6,7 @@
 
 ## Skill 概述
 
-Agent2SSH 以 `agent2ssh-mcp` 二进制形式暴露 MCP stdio 服务器，将 SSH 操作能力（主机管理、命令片段、命令执行、SFTP、会话、端口转发、Playbook、审计、审批、健康检查、指标、execution gate 和 remote daemon 等）封装为 58 个 MCP 工具，供任何支持 MCP 协议的 AI 客户端（Claude Desktop、Cursor、Codex 等）直接调用。
+Agent2SSH 以 `agent2ssh-mcp` 二进制形式暴露 MCP stdio 服务器，将 SSH 操作能力（主机管理、命令片段、命令执行、SFTP、会话、端口转发、Playbook、审计、审批、健康检查、指标、execution gate、remote daemon，以及脱敏/高亮/算法三类本地配置）封装为 71 个 MCP 工具，供任何支持 MCP 协议的 AI 客户端（Claude Desktop、Cursor、Codex 等）直接调用。
 
 **工作原理**：
 
@@ -89,7 +89,7 @@ Agent2SSH 的所有组件（CLI、MCP server、daemon、Tauri 桌面应用）共
 
 ## 最小权限建议
 
-在授予 AI 客户端 Agent2SSH 访问权限时，需了解不同工具的副作用范围。完整 58 个工具定义见 [MCP Tools Reference](skills.md)，以下按风险级别分类：
+在授予 AI 客户端 Agent2SSH 访问权限时，需了解不同工具的副作用范围。完整 71 个工具定义见 [MCP Tools Reference](skills.md)，以下按风险级别分类：
 
 ### 只读类（Read-only）
 
@@ -113,6 +113,8 @@ ssh_daemon_diagnose     ssh_daemon_version_check
 ssh_daemons_view        ssh_events_subscribe
 ssh_sync_diff           ssh_sync_export
 ssh_snippet_list
+ssh_redact_rule_list    ssh_highlight_rule_list
+ssh_algo_prefs_get
 ```
 
 ### 写入类（Write/Mutate）
@@ -133,7 +135,14 @@ ssh_connect             ssh_disconnect
 ssh_approval_respond    ssh_playbook_run
 ssh_webhook_config (set)  ssh_config_import
 ssh_snippet_save         ssh_snippet_delete
+ssh_redact_rule_add      ssh_redact_rule_update
+ssh_redact_rule_remove   ssh_redact_rule_reset
+ssh_highlight_rule_add   ssh_highlight_rule_update
+ssh_highlight_rule_remove  ssh_highlight_rule_reset
+ssh_algo_prefs_set       ssh_algo_prefs_clear
 ```
+
+`ssh_redact_rule_remove` 与 `ssh_highlight_rule_remove` 另外要求 `force: true`：删除一条脱敏规则会让该类机密不再出现在此后所有的审计记录、Webhook 通知、Playbook 结果和诊断导出中；删除一条高亮规则不会隐藏任何本应用写出的内容，但仍要求确认，以免拼错的关键字悄悄删掉一条本想保留的规则。缺少 `force` 的调用会被拒绝且不产生任何变更，`..._reset` 可恢复内置集合。三个规则库的写入都会落到 `~/.agent2ssh` 下的私有文件（`0600`）。
 
 ---
 
