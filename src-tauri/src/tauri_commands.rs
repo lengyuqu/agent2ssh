@@ -1568,22 +1568,47 @@ pub fn reset_highlights() -> Result<Vec<crate::types::HighlightRule>, String> {
 /// notifications and the diagnostic export.
 ///
 /// These come from `redact_rules.json`, which is seeded from the built-in set
-/// on first run and is the live rule set from then on.
+/// on first run and is the live rule set from then on. Each rule carries
+/// `is_builtin` so the UI can mark the shipped patterns.
 #[tauri::command]
-pub fn list_redact_rules() -> Result<Vec<crate::redaction::RedactRuleConfig>, String> {
-    Ok(crate::redaction::load_user_rules()
-        .iter()
-        .map(crate::redaction::RedactRuleConfig::from)
-        .collect())
+pub fn list_redact_rules() -> Result<Vec<crate::types::RedactRuleInfo>, String> {
+    Ok(crate::redaction::list_rules())
+}
+
+/// A24: Add a redaction rule. The pattern is the rule's identity.
+#[tauri::command]
+pub fn add_redact_rule(
+    pattern: String,
+    replacement: String,
+) -> Result<Vec<crate::types::RedactRuleInfo>, String> {
+    crate::redaction::insert_rule(&pattern, &replacement).map_err(|e| e.to_string())
+}
+
+/// A24: Replace the rule identified by `old_pattern`.
+#[tauri::command]
+pub fn update_redact_rule(
+    old_pattern: String,
+    pattern: String,
+    replacement: String,
+) -> Result<Vec<crate::types::RedactRuleInfo>, String> {
+    crate::redaction::update_rule(&old_pattern, &pattern, &replacement).map_err(|e| e.to_string())
+}
+
+/// A24: Remove the rule identified by `pattern`.
+///
+/// Removing a rule is not a preference. Whatever it matched stops being redacted
+/// in every audit record, notification and exported diagnostic written from then
+/// on, so the desktop only calls this behind a confirmation that says so, and
+/// shows an empty set as a warning rather than as a neutral state — an empty
+/// rules file means nothing is redacted at all.
+#[tauri::command]
+pub fn remove_redact_rule(pattern: String) -> Result<Vec<crate::types::RedactRuleInfo>, String> {
+    crate::redaction::delete_rule(&pattern).map_err(|e| e.to_string())
 }
 
 /// A24: Restore the built-in redaction rules, discarding user customizations.
-///
-/// Only the safe direction is exposed: this can re-enable a rule the user
-/// deleted, never remove one. Editing the set is deliberately left to the
-/// file, so a mistyped click cannot stop a secret from being redacted.
 #[tauri::command]
-pub fn reset_redact_rules() -> Result<Vec<crate::redaction::RedactRuleConfig>, String> {
+pub fn reset_redact_rules() -> Result<Vec<crate::types::RedactRuleInfo>, String> {
     crate::redaction::reset_default_rules().map_err(|e| e.to_string())?;
     list_redact_rules()
 }
@@ -3219,6 +3244,9 @@ pub fn run_tauri() {
             reset_highlights,
             // A24: Editable redaction rules
             list_redact_rules,
+            add_redact_rule,
+            update_redact_rule,
+            remove_redact_rule,
             reset_redact_rules,
             // B33: Container Discovery
             discover_containers,

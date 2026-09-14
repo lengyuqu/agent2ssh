@@ -273,9 +273,21 @@ const zh: Record<string, string> = {
     "规则保存在配置目录的 redact_rules.json 中。",
   "Restore defaults": "恢复默认",
   "Restore the default redaction rules?": "恢复默认脱敏规则？",
-  "This restores the built-in rules and discards any you added or removed.":
-    "这会恢复内置规则，并丢弃你新增或删除的规则。",
-  "No redaction rules.": "没有脱敏规则。",
+  "This replaces the current rules with the built-in set: any you added are discarded, and any you removed come back.":
+    "这会用内置规则替换当前列表：你新增的会被丢弃，你删除的会重新恢复。",
+  "Built-in": "内置",
+  "Pattern": "匹配模式",
+  "Replacement": "替换为",
+  "(removed)": "（移除匹配内容）",
+  "Edit pattern: {pattern}": "编辑匹配模式：{pattern}",
+  "Edit replacement: {pattern}": "编辑替换文本：{pattern}",
+  "Remove the {pattern} rule?": "删除规则 {pattern}？",
+  "Matching text will no longer be redacted in audit records, notifications or exported diagnostics written from now on.":
+    "此后写入的审计记录、通知与导出的诊断信息中，匹配内容不再被脱敏。",
+  "This is a built-in rule; removing it stops a whole class of secret being redacted everywhere the app writes.":
+    "这是内置规则；删除后应用写入的所有位置都不再对这一类秘密脱敏。",
+  "The rule list is empty, so audit records, notifications and exported diagnostics are written verbatim.":
+    "规则列表为空，因此审计记录、通知与导出的诊断信息会原样写出。",
   "Rule name": "规则名称",
   "Regular expression": "正则表达式",
   "Keyword": "关键词",

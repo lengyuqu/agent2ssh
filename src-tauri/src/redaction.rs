@@ -73,6 +73,15 @@ pub enum RedactRuleError {
     /// The rules file is not valid JSON, or a rule in it is malformed.
     #[error("malformed redaction rules: {0}")]
     ParseError(String),
+
+    /// A rule for this pattern is already in the set. The pattern *is* a rule's
+    /// identity, so a second one would make edit and delete ambiguous.
+    #[error("a rule for this pattern already exists: {0}")]
+    Duplicate(String),
+
+    /// No rule in the set has this pattern.
+    #[error("no redaction rule matches this pattern: {0}")]
+    NotFound(String),
 }
 
 /// Validate a regex pattern: it must compile and must not be zero-width.
@@ -130,43 +139,66 @@ impl RedactRule {
     }
 }
 
-/// The default redaction rule set. These are always active unless explicitly
-/// disabled by providing an empty rules list to `redact_with_rules`.
+/// The built-in rule set, as literal pattern/replacement pairs.
+///
+/// `default_rules()` compiles these; `is_builtin_pattern` compares against them
+/// as plain strings, so asking "is this one of the built-ins?" costs no regex
+/// compilation. One array means the seeded set and the built-in set cannot
+/// drift apart.
+///
+/// Order matters: `fe80::` must be tried before `::1`, or `::1` matches inside
+/// `fe80::1` and leaves a stray `0:1`.
+const BUILTIN_RULES: &[(&str, &str)] = &[
+    // Private IPv4 ranges (RFC 1918)
+    (r"\b10\.\d{1,3}\.\d{1,3}\.\d{1,3}\b", "<REDACTED:ip>"),
+    (
+        r"\b172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}\b",
+        "<REDACTED:ip>",
+    ),
+    (r"\b192\.168\.\d{1,3}\.\d{1,3}\b", "<REDACTED:ip>"),
+    // IPv6 loopback and link-local
+    // No leading \b because \b doesn't work around ':' (colon is a
+    // non-word char, same as space, so no word boundary between them).
+    // The trailing \b is sufficient to prevent matching ::1 inside ::123.
+    // fe80:: rule must come before ::1 to avoid ::1 matching inside fe80::1.
+    (r"fe80::[0-9a-fA-F:]+\b", "<REDACTED:ip>"),
+    (r"::1\b", "<REDACTED:ip>"),
+    // Bearer tokens
+    (r"Bearer\s+[A-Za-z0-9_\-\.]{20,}", "<REDACTED:bearer>"),
+    // API keys
+    (r"sk-[A-Za-z0-9_\-]{20,}", "<REDACTED:api-key>"),
+    (r"AKIA[0-9A-Z]{16}", "<REDACTED:aws-key>"),
+    // JWT tokens (three base64url segments joined by dots)
+    (
+        r"eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]+",
+        "<REDACTED:jwt>",
+    ),
+    // Hex blobs: 32+ hex chars (SHA-256, SSH fingerprints, etc.)
+    (r"\b[0-9a-fA-F]{32,}\b", "<REDACTED:hex>"),
+];
+
+/// The default redaction rule set: [`BUILTIN_RULES`], compiled.
+///
+/// These become the live rule set on first run (via `seed_default_rules`) and
+/// are the fallback whenever the rules file is missing or unreadable. Handing
+/// an empty list to `redact_with_rules` is the only way to run with no rules.
 ///
 /// Each rule uses a regex pattern and a literal replacement (via NoExpand).
 /// No capture groups are expanded — the replacement string is used verbatim.
 pub fn default_rules() -> Vec<RedactRule> {
-    [
-        // Private IPv4 ranges (RFC 1918)
-        (r"\b10\.\d{1,3}\.\d{1,3}\.\d{1,3}\b", "<REDACTED:ip>"),
-        (
-            r"\b172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}\b",
-            "<REDACTED:ip>",
-        ),
-        (r"\b192\.168\.\d{1,3}\.\d{1,3}\b", "<REDACTED:ip>"),
-        // IPv6 loopback and link-local
-        // No leading \b because \b doesn't work around ':' (colon is a
-        // non-word char, same as space, so no word boundary between them).
-        // The trailing \b is sufficient to prevent matching ::1 inside ::123.
-        // fe80:: rule must come before ::1 to avoid ::1 matching inside fe80::1.
-        (r"fe80::[0-9a-fA-F:]+\b", "<REDACTED:ip>"),
-        (r"::1\b", "<REDACTED:ip>"),
-        // Bearer tokens
-        (r"Bearer\s+[A-Za-z0-9_\-\.]{20,}", "<REDACTED:bearer>"),
-        // API keys
-        (r"sk-[A-Za-z0-9_\-]{20,}", "<REDACTED:api-key>"),
-        (r"AKIA[0-9A-Z]{16}", "<REDACTED:aws-key>"),
-        // JWT tokens (three base64url segments joined by dots)
-        (
-            r"eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]+",
-            "<REDACTED:jwt>",
-        ),
-        // Hex blobs: 32+ hex chars (SHA-256, SSH fingerprints, etc.)
-        (r"\b[0-9a-fA-F]{32,}\b", "<REDACTED:hex>"),
-    ]
-    .into_iter()
-    .map(|(p, r)| RedactRule::new_unchecked(p, r))
-    .collect()
+    BUILTIN_RULES
+        .iter()
+        .map(|(p, r)| RedactRule::new_unchecked(p, r))
+        .collect()
+}
+
+/// Whether `pattern` is one of the built-in rules.
+///
+/// The desktop UI marks these and says more before deleting one: removing a
+/// built-in rule stops a whole class of secret being redacted everywhere the
+/// app writes, exported audit logs included.
+pub fn is_builtin_pattern(pattern: &str) -> bool {
+    BUILTIN_RULES.iter().any(|(p, _)| *p == pattern)
 }
 
 /// Apply redaction rules to a text string.
@@ -388,6 +420,85 @@ pub fn reset_default_rules() -> Result<(), RedactRuleError> {
 pub fn redact_with_user_rules(text: &str) -> String {
     let rules = load_user_rules();
     redact_with_rules(text, &rules)
+}
+
+// ── A24: Editing the rule set ────────────────────────────────────────────────
+//
+// A rule's identity is its pattern: there is no separate id, and no two rules
+// may share one. Editing a rule that is not in the set, or adding one that
+// already is, is an error rather than a silent no-op, so a caller working from
+// a stale list learns that instead of quietly overwriting something.
+
+/// List the live rule set, each rule tagged with whether it is built in.
+pub fn list_rules() -> Vec<crate::types::RedactRuleInfo> {
+    load_user_rules()
+        .iter()
+        .map(|rule| crate::types::RedactRuleInfo {
+            pattern: rule.pattern.as_str().to_string(),
+            replacement: rule.replacement.clone(),
+            is_builtin: is_builtin_pattern(rule.pattern.as_str()),
+        })
+        .collect()
+}
+
+/// Add a rule, failing if the pattern is already present or does not compile.
+pub fn insert_rule(
+    pattern: &str,
+    replacement: &str,
+) -> Result<Vec<crate::types::RedactRuleInfo>, RedactRuleError> {
+    // Validate before touching the file, so a bad pattern cannot leave a
+    // half-written set behind.
+    let rule = RedactRule::new(pattern, replacement)?;
+    let mut rules = load_user_rules();
+    if rules.iter().any(|r| r.pattern.as_str() == pattern) {
+        return Err(RedactRuleError::Duplicate(pattern.to_string()));
+    }
+    rules.push(rule);
+    write_rules_file(&redact_rules_path()?, &rules)?;
+    Ok(list_rules())
+}
+
+/// Replace the rule identified by `old_pattern`.
+///
+/// Renaming onto a pattern that already exists is a `Duplicate`; an
+/// `old_pattern` with no rule behind it is a `NotFound`.
+pub fn update_rule(
+    old_pattern: &str,
+    pattern: &str,
+    replacement: &str,
+) -> Result<Vec<crate::types::RedactRuleInfo>, RedactRuleError> {
+    let rule = RedactRule::new(pattern, replacement)?;
+    let mut rules = load_user_rules();
+    let index = rules
+        .iter()
+        .position(|r| r.pattern.as_str() == old_pattern)
+        .ok_or_else(|| RedactRuleError::NotFound(old_pattern.to_string()))?;
+    if pattern != old_pattern && rules.iter().any(|r| r.pattern.as_str() == pattern) {
+        return Err(RedactRuleError::Duplicate(pattern.to_string()));
+    }
+    rules[index] = rule;
+    write_rules_file(&redact_rules_path()?, &rules)?;
+    Ok(list_rules())
+}
+
+/// Remove the rule identified by `pattern`.
+///
+/// Built-in rules can be removed: that is what a user-owned rule set means, and
+/// `reset_default_rules` puts them back. Callers are expected to warn first —
+/// removal stops that class of secret being redacted everywhere the app writes.
+///
+/// Note the empty-set case: removing the last rule leaves `[]`, and an empty
+/// file is an empty rule set, so *nothing* is redacted afterwards. Callers are
+/// expected to say so rather than present an empty list as a neutral state.
+pub fn delete_rule(pattern: &str) -> Result<Vec<crate::types::RedactRuleInfo>, RedactRuleError> {
+    let mut rules = load_user_rules();
+    let index = rules
+        .iter()
+        .position(|r| r.pattern.as_str() == pattern)
+        .ok_or_else(|| RedactRuleError::NotFound(pattern.to_string()))?;
+    rules.remove(index);
+    write_rules_file(&redact_rules_path()?, &rules)?;
+    Ok(list_rules())
 }
 
 /// Serialize the rule set for configuration persistence.
@@ -894,5 +1005,184 @@ mod tests {
             result.contains("<REDACTED:ip>"),
             "a broken rules file must not weaken redaction, got {result}"
         );
+    }
+
+    // ── A24: Editing the rule set ─────────────────────────────────────────
+
+    /// `BUILTIN_RULES` exists so the badge and the seeded set cannot drift
+    /// apart. If they did, a fresh install would mark a shipped rule as the
+    /// user's own and drop the warning that belongs on deleting it.
+    #[test]
+    fn a24_every_default_rule_is_reported_as_built_in() {
+        for rule in default_rules() {
+            assert!(
+                is_builtin_pattern(rule.pattern.as_str()),
+                "{} is seeded but not marked built-in",
+                rule.pattern.as_str()
+            );
+        }
+        assert!(!is_builtin_pattern("secret-project"));
+    }
+
+    /// An add has to reach the file, because the file is what the live path
+    /// reads — a list that only grew in memory would redact nothing.
+    #[test]
+    fn a24_insert_rule_round_trips_through_the_file() {
+        let dir = crate::store::TestConfigDir::new("a24add");
+        seed_default_rules().unwrap();
+
+        let rules = insert_rule("secret-project", "<REDACTED:project>").unwrap();
+        assert_eq!(rules.len(), default_rules().len() + 1);
+
+        let added = rules
+            .iter()
+            .find(|r| r.pattern == "secret-project")
+            .expect("the added rule must be listed");
+        assert_eq!(added.replacement, "<REDACTED:project>");
+        assert!(!added.is_builtin, "a user rule is not built in");
+
+        let on_disk = std::fs::read_to_string(dir.join(REDACT_RULES_FILE)).unwrap();
+        assert!(on_disk.contains("secret-project"), "file was {on_disk}");
+        assert!(redact_with_user_rules("connect to secret-project").contains("<REDACTED:project>"));
+    }
+
+    #[test]
+    fn a24_insert_rule_rejects_a_duplicate_without_writing() {
+        let _dir = crate::store::TestConfigDir::new("a24dup");
+        seed_default_rules().unwrap();
+
+        // The pattern is a rule's identity, so a second one would make edit and
+        // delete ambiguous — it is an error, not a silent overwrite.
+        let existing = list_rules()[0].pattern.clone();
+        assert_eq!(
+            insert_rule(&existing, "<REDACTED:x>").unwrap_err(),
+            RedactRuleError::Duplicate(existing.clone())
+        );
+        assert_eq!(list_rules().len(), default_rules().len());
+    }
+
+    #[test]
+    fn a24_insert_rule_validates_before_writing() {
+        let _dir = crate::store::TestConfigDir::new("a24bad");
+        seed_default_rules().unwrap();
+
+        assert!(matches!(
+            insert_rule("(", "<x>").unwrap_err(),
+            RedactRuleError::InvalidRegex(_)
+        ));
+        assert_eq!(
+            insert_rule("a*", "<x>").unwrap_err(),
+            RedactRuleError::ZeroWidth("a*".to_string())
+        );
+        assert_eq!(list_rules().len(), default_rules().len());
+    }
+
+    #[test]
+    fn a24_update_rule_renames_a_rule() {
+        let _dir = crate::store::TestConfigDir::new("a24ren");
+        seed_default_rules().unwrap();
+        insert_rule("alpha", "<A>").unwrap();
+
+        let rules = update_rule("alpha", "beta", "<B>").unwrap();
+        assert!(
+            rules.iter().all(|r| r.pattern != "alpha"),
+            "the old pattern must be gone"
+        );
+        assert_eq!(
+            rules
+                .iter()
+                .find(|r| r.pattern == "beta")
+                .expect("the new pattern must be listed")
+                .replacement,
+            "<B>"
+        );
+        assert_eq!(
+            rules.len(),
+            default_rules().len() + 1,
+            "a rename is not an add"
+        );
+    }
+
+    /// The duplicate check has to skip the rule being edited, or a
+    /// replacement-only change would collide with itself.
+    #[test]
+    fn a24_update_rule_allows_changing_only_the_replacement() {
+        let _dir = crate::store::TestConfigDir::new("a24repl");
+        seed_default_rules().unwrap();
+        insert_rule("alpha", "<A>").unwrap();
+
+        let rules = update_rule("alpha", "alpha", "<A2>").unwrap();
+        assert_eq!(
+            rules
+                .iter()
+                .find(|r| r.pattern == "alpha")
+                .expect("alpha must survive the edit")
+                .replacement,
+            "<A2>"
+        );
+    }
+
+    #[test]
+    fn a24_update_rule_rejects_unknown_and_colliding_patterns() {
+        let _dir = crate::store::TestConfigDir::new("a24updbad");
+        seed_default_rules().unwrap();
+        insert_rule("alpha", "<A>").unwrap();
+        insert_rule("beta", "<B>").unwrap();
+
+        // An unknown pattern is an error rather than a silent insert, so a
+        // caller working from a stale list finds out.
+        assert_eq!(
+            update_rule("nope", "gamma", "<G>").unwrap_err(),
+            RedactRuleError::NotFound("nope".to_string())
+        );
+        assert_eq!(
+            update_rule("alpha", "beta", "<X>").unwrap_err(),
+            RedactRuleError::Duplicate("beta".to_string())
+        );
+
+        let rules = list_rules();
+        assert_eq!(
+            rules
+                .iter()
+                .find(|r| r.pattern == "alpha")
+                .expect("alpha must be untouched by both rejections")
+                .replacement,
+            "<A>"
+        );
+    }
+
+    /// Deleting is resolved by pattern, and the empty set is a real state:
+    /// removing the last rule leaves `[]`, and an empty rules file means the
+    /// app redacts nothing at all.
+    #[test]
+    fn a24_delete_rule_removes_by_pattern_and_can_empty_the_set() {
+        let _dir = crate::store::TestConfigDir::new("a24del");
+        seed_default_rules().unwrap();
+
+        assert_eq!(
+            delete_rule("nope").unwrap_err(),
+            RedactRuleError::NotFound("nope".to_string())
+        );
+
+        // Built-in rules are deletable — that is what a user-owned set means —
+        // and `reset_default_rules` is the way back.
+        let shipped = list_rules()[0].pattern.clone();
+        let rules = delete_rule(&shipped).unwrap();
+        assert_eq!(rules.len(), default_rules().len() - 1);
+        assert!(rules.iter().all(|r| r.pattern != shipped));
+
+        let mut remaining: Vec<String> = rules.iter().map(|r| r.pattern.clone()).collect();
+        while let Some(pattern) = remaining.pop() {
+            delete_rule(&pattern).unwrap();
+        }
+
+        assert!(list_rules().is_empty(), "the set must be empty");
+        assert!(
+            redact_with_user_rules("connect to 10.0.0.5").contains("10.0.0.5"),
+            "an empty rule set redacts nothing; the file must not be re-seeded"
+        );
+
+        reset_default_rules().unwrap();
+        assert_eq!(list_rules().len(), default_rules().len());
     }
 }

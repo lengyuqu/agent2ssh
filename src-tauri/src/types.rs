@@ -632,3 +632,18 @@ pub struct HighlightRule {
     #[serde(default)]
     pub is_case_sensitive: bool,
 }
+
+/// A24: A redaction rule as the API surfaces see it.
+///
+/// This is `redaction::RedactRuleConfig` — the on-disk shape — plus `is_builtin`,
+/// which the UI uses to mark the patterns the app ships with and to say more
+/// before deleting one. The pattern is the rule's identity: there is no id.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RedactRuleInfo {
+    /// Regex source string. Also the identity key.
+    pub pattern: String,
+    /// Literal replacement, used verbatim (capture groups are not expanded).
+    pub replacement: String,
+    /// True when this pattern is one of the built-in defaults.
+    pub is_builtin: bool,
+}

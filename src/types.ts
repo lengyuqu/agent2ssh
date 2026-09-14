@@ -591,13 +591,19 @@ export type HighlightRule = {
   is_case_sensitive: boolean;
 };
 
-// Rust: redaction.rs — RedactRuleConfig
-// A24: A redaction rule as stored in `redact_rules.json`. The compiled form
-// (Rust `regex::Regex`) never crosses the wire, and `pattern` is the only
-// identity a rule has — there is no name or keyword.
-export type RedactRuleConfig = {
+// Rust: types.rs — RedactRuleInfo
+// A24: A redaction rule as the API surfaces see it — `redaction::RedactRuleConfig`
+// plus `is_builtin`. The pattern is the rule's identity, so unlike a highlight
+// rule there is no name to carry. `is_builtin` marks the patterns the app ships
+// with, so the UI can say more before deleting one.
+//
+// The on-disk shape has no separate mirror here: nothing in the frontend reads
+// `redact_rules.json`, and a second type with the same two fields only gave the
+// two an opportunity to drift.
+export type RedactRuleInfo = {
   pattern: string;
   replacement: string;
+  is_builtin: boolean;
 };
 
 // Rust: snippets.rs — Snippet

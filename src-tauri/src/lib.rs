@@ -135,9 +135,10 @@ pub use recording::{
     save_recording_config, Recorder, RecordingConfig, RecordingContent, RecordingInfo,
 };
 pub use redaction::{
-    default_rules, load_rules_from_json, load_user_rules, redact_default, redact_with_defaults,
-    redact_with_rules, redact_with_user_rules, reset_default_rules, seed_default_rules,
-    validate_pattern, RedactRule, RedactRuleConfig, RedactRuleError,
+    default_rules, delete_rule, insert_rule, is_builtin_pattern, list_rules, load_rules_from_json,
+    load_user_rules, redact_default, redact_with_defaults, redact_with_rules,
+    redact_with_user_rules, reset_default_rules, seed_default_rules, update_rule, validate_pattern,
+    RedactRule, RedactRuleConfig, RedactRuleError,
 };
 pub use remote::{
     check_daemon_version, check_version_compatibility, diagnose_daemon, get_daemons_unified_view,
