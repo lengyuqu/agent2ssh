@@ -360,6 +360,7 @@
 | R7 余项（第二步） | `9c843ed` | 桌面给出完整 CRUD（`add` / `update` / `delete`），推翻上一轮「只暴露安全方向」的判据；护栏改为确认框 + `Built-in` 徽章 + `Duplicate`/`NotFound` 写入前校验 + 空集警示；`BUILTIN_RULES` 提成常量；删掉死镜像 `RedactRuleConfig`；+8 Rust 测试、+9 前端测试（`RedactionSettings.test.tsx`） |
 | R7 余项（第三步） | 见下「R7 余项（第三步）」 | 三个规则库 × 三个面 = **13 个操作 × 3**；`delete` 三层都要求显式确认；顺带发现并补上 **7 条从未进过 `docs/api.yaml` 的 daemon 路由**，并为它加了一个双向一致性测试；订正 **3 处与实现不符的契约描述**；`ssh_algos.json` 收敛到 `write_private_json` |
 | R11 余项 | 见下「R11 余项：一处 token 错配，结案不改」 | 勘察**推翻立项前提**（「`ConfirmDialog` 标题违反弹层表面契约」）：同族 **11 处 / 9 文件**在 popover 表面上同样写 `text-foreground`，而 7 处 `text-popover-foreground` 全在容器自身。结案为「不动 token」，把规则与同族清单写进 `ui/dialog.tsx`；订正上一轮的「7 vs 7 两个方向」。**零行为变更** |
+| 新发现 → 已落地 | `091e3a9` | `SettingsMenu` 的 **23 处**裸 `<button>` 全部迁到共享原语（**22 `<Button>` + 1 `<IconButton>`**）；**推翻两项立项前提**（小尺寸档早已在 `IconButton` 上；23 处实为 20 处 / 2 种）；给 `Button` 加 `block` / `align` 两个**纯增量轴**（既有 85 处零变化）；外观等价性逐 token 实测（7 个形态里 6 个「去掉 0」）；**顺带修掉「新轴未转发进 `buttonVariants`」的零症状静默失效**；+2 测试文件 / +15 测试 |
 
 ### 对本报告自身结论的四处订正
 
@@ -458,9 +459,17 @@
 
 它作用于 `svg` 元素本身，而 `<RefreshCw size={14} />` 产生的 `width="14"` 只是 presentation
 attribute —— 级联上低于任何作者样式表声明。**所以 4 处 `Button` 内传的 `size`（14 / 14 / 15 / 无）
-全是死参数，实际一律渲染 16px**；只有 `IconButton`（仅 `[&_svg]:shrink-0`，不覆盖尺寸）与裸 `<button>`
+全是死参数，实际一律渲染同一个尺寸**；只有 `IconButton`（仅 `[&_svg]:shrink-0`，不覆盖尺寸）与裸 `<button>`
 让 `size` 生效。这条**不限于 R10-1**：它意味着「在 `Button` 里写 `size`」是一类静默失效的写法，
 可在收口时一并清掉（零视觉变化）。
+
+> **订正（2026-09-14，SettingsMenu 迁移那一轮实测）**：上句原先写的是「实际一律渲染 **16px**」，
+> 那是把 `1rem` 当成了浏览器默认的 16px。本仓 `html` 是 **`font-size: 14px`**（在产物 CSS 里可直接看到
+> `html{…;font-size:14px}`），而 `--spacing: .25rem`，所以 `size-4` = `calc(0.25rem * 4)` = `1rem` = **14px**。
+> 结论的方向不变（`size` 仍是死参数），但**解析出来的值从 16 改成 14** —— 这个数在下一轮被用来判断
+> 「23 处迁移后图标会缩多少」，写错就会把 16→14 说成 16→16。
+> 教训：`calc(var(--spacing) * N)` 这类表达式**必须回到产物里读出 `--spacing` 与根字号再换算**，
+> 不能按 `1rem = 16px` 心算。
 
 **结论（`dd59051`）：已收口，取方向 A。** 11 处全部改为 `{busy ? <Spinner size={n} /> : <原图标 size={n} />}`。
 另收一处**断言时才发现**的同类站点：`ui/toast.tsx` 的 `progress` 变体把 `animate-spin` 写在类名表里
@@ -475,11 +484,96 @@ that turns」）不再是一句假话，而不是修一个可见问题。
 收口后全仓手写 `animate-spin` 归零（只剩 `Spinner` 定义本身与两处注释），`Spinner` 调用点 13 → 25，
 且「忙碌时图标变成加载圈」是本仓既有主流形态，不是本次新引入的语言。
 
-**本轮新发现（未编号，待拍板是否立项）**：`SettingsMenu.tsx` 有 **23 个裸 `<button>`、0 个 `<Button>`**，
-是全仓最大的裸按钮集中点（第二名 `SFTPPanel` 8 处，其余 ≤ 6；全仓 `<Button>` 共 **85** 处）。
-它与 R10-1 **相邻但不同源**：R10-1 是「busy 态怎么画」，这个是「整个面板不用共享按钮组件」。
-本轮不立项——立项前需要先确认 `Button` 是否存在能覆盖设置面板那种密排小按钮的尺寸档
-（否则「替换」会改变面板密度，属可见变化）。
+**已立项并落地（同轮）**：`SettingsMenu.tsx` 的 **23 处**裸 `<button>` 全部迁到共享原语，产出
+**22 `<Button>` + 1 `<IconButton>`**。它与 R10-1 **相邻但不同源**：R10-1 是「busy 态怎么画」，
+这个是「整个面板不用共享按钮组件」。用户拍板**「23 处全迁，并给 `Button` 加整宽档」**。
+
+立项前的四项勘察里，**前两项直接推翻了上一轮写进「仍未处理」表的前提**：
+
+| 上一轮写的前提 | 实测 | 结论 |
+|---|---|---|
+| 「`Button` 缺覆盖密排小按钮的尺寸档」（目前只有 `default` / `sm` / `lg` / `icon`，无 `icon-sm`） | 小尺寸档**早已存在**，只是长在 `IconButton` 上（`default` = `size-8`、`sm` = `size-7`，`IconButton` 共 **37** 处调用）。且 23 处里 **20 处是 `h-9` 整宽行**，根本不是「密排小按钮」 | **前提不成立**，无需新增尺寸档 |
+| 「23 种手搓样式」（寓意 23 处各不相同） | 23 处只有 **2 个本地类常量**：`actionBtnCls`（`:52`，**6** 处引用）、`rowBtnCls`（`:54`，**14** 处引用），另有 3 个独特站点。且 `rowBtnCls` 只长出两个形态：左对齐行 **6** 处 + `cn(rowBtnCls, "justify-center px-2")` **8** 处 | 真实重复是 **20 处 / 2 种**，不是 23 种 |
+
+另两项决定了「迁移」到底要加什么：
+
+- **真实缺口是「整宽 / 行几何」以轴的形式缺席，不是尺寸**。`Button` 是 `inline-flex`，由标签定宽，
+  因此它没有表达过「填满容器」——**但有 5 处调用点手写 `className="w-full"` 绕过**
+  （`ForwardPanel:163`、`ProxyPanel:252`、`ExecPanel:199`、`AddHostForm:366`、`MultiExecPanel:129`），
+  `align`（内容左对齐）则是**一处也没有**。⚠️ 这里订正一处我自己先写错的说法：
+  「`Button` 从未有过 `w-full`」是假的，正确口径是**「没有轴，只有手写」**。
+- **`ContextMenu` 不能当作可接的菜单项原语**：它是**指针定位的浮层**
+  （`ContextMenu({ x, y, items, onClose })`），其项是扁平项（无边框、`font-medium`、无固定高），
+  与面板那种带边框的整宽行不同形。
+- 裸按钮口径：`src/**/*.tsx` 共 **80** 个裸 `<button>` 开标签（其中 2 处在测试文件里），
+  `SettingsMenu` 23、`SFTPPanel` 8、`RedactionSettings` 6、`App.tsx` 4，其余 ≤ 3。
+
+落地方式：给 `Button` 加**两个纯增量轴**（`defaultVariants` 一行未动，所以既有 **85** 处 `<Button>`
+调用零变化；`<IconButton>` 37 处不受影响。迁移后两者变为 116 / 45，差额即本轮的 22 + 1 与新测试文件）：
+
+| 轴 | 值 | 类 | 为什么需要 |
+|---|---|---|---|
+| `block` | `true` | `w-full` | 把 5 处手写的 `className="w-full"` 变成一个名字 |
+| `align` | `center` / `start` | `` / `justify-start text-left` | `start` 是「行」不是「按钮」。**必须带 `text-left`**：本仓只 import `theme` + `utilities` 两层（无 preflight），`base` 层也只重置 `font: inherit`，所以 `<button>` 保留 UA 的 `text-align: center`；不写它，截断标签的省略号会跑到行中间 |
+
+23 处的映射（删掉两个本地常量；`:436` 关闭键 → `IconButton size="sm"`，因为它的 `X` 是 **15px**，
+而 `Button` 基类的 `[&_svg]:size-4` 会把它夹到 14px —— `IconButton` 只带 `[&_svg]:shrink-0`，不碰尺寸）：
+
+| 站点 | 处数 | 目标 |
+|---|---|---|
+| `actionBtnCls` | 5 | `<Button variant="outline" block className="font-bold">` |
+| `actionBtnCls` + `"w-auto px-3"` | 1 | `<Button variant="outline" className="px-3 font-bold">` |
+| `rowBtnCls` 左对齐 | 6 | `<Button variant="outline" block align="start" className="px-2.5 font-bold">` |
+| `cn(rowBtnCls, "justify-center px-2")` | 8 | `<Button variant="outline" block className="px-2 text-left font-bold">` |
+| `:412` 触发键 | 1 | `<Button variant="outline" align="start" className="gap-1.5 px-3 font-bold text-foreground/80">` |
+| `:436` 关闭键 | 1 | `<IconButton size="sm" className="shrink-0">` |
+| `:682` 主题项 | 1 | `<Button variant="outline" align="start" className={cn("h-auto px-2.5 py-1.5 font-medium", …)}>` |
+
+`text-left` 在 8 处密排键上被**保留**（原 `rowBtnCls` 本来就有），因为 `justify-center` 与 `text-left`
+并不矛盾：前者摆 flex 项，后者决定标签被截断时省略号落在哪一端。
+
+**外观等价性是逐 token 实测的，不是推断的**。用真实的 `cva` 渲染出每个站点最终类名，与它替掉的手写类串
+做集合差（一次性探针，跑完即删）：
+
+| 站点 | 去掉 | 新增 |
+|---|---|---|
+| `actionBtnCls`（5） | **0** | 14 |
+| `rowBtnCls`（6） | **0** | 14 |
+| 密排居中键（8） | `px-2.5`（同组被 `px-2` 合并，**原有写法也是这个结果**） | 13 |
+| 触发键（1） | **0** | 15 |
+| 关闭键（1） | **0** | 9 |
+| 主题项未选中（1） | **0** | 16 |
+| 主题项选中（1） | **0** | 17 |
+
+七项里六项 `去掉` 为 0，唯一那 1 项是 tailwind-merge 的同组归并。合并出的**可见**变化有五条：
+
+1. `cursor-pointer`：23 处原本是箭头光标（`Button` 基类带 `cursor-pointer`，与全仓另 85 处 `<Button>`
+   和 37 处 `IconButton` 一致）。
+2. `focus-visible:ring-2`：键盘聚焦有环（原为 UA outline）。
+3. **图标 16px → 14px**：`[&_svg]:size-4` = `calc(var(--spacing) * 4)`，而本仓 `html` 是
+   `font-size: 14px` → **1rem = 14px**。这也订正了本报告 R10 段里「实际一律渲染 16px」那句（见该段）。
+4. **7 处 `actionBtnCls` 组的左右内边距由 UA 的 `1px 6px` 变成 `px-4`**
+   （本仓 `base` 层只重置 `font: inherit`，**不重置 `padding`**）。这 7 处都是 `w-full` + 居中标签，
+   所以变化体现在标签的可用宽度上，不在对齐上。
+5. `text-foreground` 由「继承面板的 `text-popover-foreground`」变成显式 —— 两者只在 `dark` / `nord` 两套主题里不同值。
+
+**一处真回归，是被上面那张等价性表抓出来的**：`variant="outline"` 自带
+`hover:bg-muted hover:text-foreground`，而主题项**选中态原本没有任何 hover 类**。若按最初的写法
+`theme === opt.id && "border-primary bg-primary/10 text-primary"`，鼠标悬停在**已选中**的主题上时
+`hover:bg-muted` 会盖掉主色底，**看起来像是没选中**。已在选中分支重述 hover 对
+（`hover:bg-primary/10 hover:text-primary`），该项在表里恢复为 `去掉 0`。
+
+**顺带抓到并修掉一个零症状的静默失效**：两个新轴只加进了 `cva` 定义，而 `Button` 里的调用点仍是
+`buttonVariants({ variant, size })` —— **没有转发**。于是 `block` / `align` 既不产出类名，
+又会作为 `block=""` / `align="start"` 被 `{...props}` spread 到 DOM 上。症状为零：`tsc` 通过、
+既有 **121** 项测试全绿、`variant` / `size` 照常工作。唯一发现它的是**本轮新写的测试**。
+
+**收尾**：`cn` 导入保留（`statusCls` 与主题项仍在用）；新增 `ui/button.test.tsx`（+9）钉住两个新轴
+与「默认仍 `justify-center`、不设 `w-full`」，新增 `ui/icon-button.test.tsx`（+6）钉住
+「`IconButton` 不改子 svg 尺寸」（这正是关闭键选它的理由）。前端测试 17 文件 / 121 项 → **19 / 136**。
+
+**验证**：`biome check src/`（103 文件）干净、`tsc --noEmit` 干净、`vitest run` 19/136 全绿、
+`vite build` 成功、`scripts/check-i18n.mjs` 退出码 0。
 
 **R10-2 host 选择器**。**`src/components/HostSelector.tsx` 已经存在**（3 处在用：`ForwardPanel:107` /
 `SFTPPanel:861` / `ExecPanel:128`），另有 4 处仍在手搓同一个单选框，选项文案为 `host.name`。
@@ -931,7 +1025,7 @@ A22 的 `SshAlgoPrefs` 是**单例结构体**（8 个算法列表字段），不
 
 | # | 项 | 为什么留到下一轮 |
 |---|---|---|
-| 新发现（未编号） | `SettingsMenu`：23 个裸 `<button>` / 0 个 `<Button>`，全仓最大集中点 | 见上「R10 重新取证」的补测段。**未立项**：立项前需先确认 `Button` 是否存在能覆盖设置面板那种密排小按钮的尺寸档，否则「替换」会改变面板密度 |
+| 新发现（未编号） | `Button` 的 `w-full` 仍有 **5 处手写**：`ForwardPanel:163`、`ProxyPanel:252`、`ExecPanel:199`、`AddHostForm:366`、`MultiExecPanel:129` | 本轮为 `Button` 新增的 `block` 轴**正是这 5 处的名字**，但用户批准的范围是「`SettingsMenu` 23 处 + 加轴」，未含这 5 处。收口是零视觉变化的机械替换（`className="w-full"` → `block`），**等一句批准**；不收就会留下「同一件事两种写法」，下一轮必然作为新发现再被扫出来 |
 
 ## 本轮（增量扫描）的验证
 
