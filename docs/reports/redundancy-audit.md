@@ -329,6 +329,7 @@
 | **R8** | `rand` + `getrandom` 双 RNG 入口 | `Cargo.toml:65-66`；`rand` 仅在 `backup_crypto.rs:78-79` 用了 2 次 | `getrandom::fill` 已在 `keys.rs` / `mcp_binding.rs` / `secrets.rs` 使用 | 这 2 处改为 `getrandom::fill` 后删 `rand` 依赖（先 `cargo tree -i rand` 确认无其他消费者） |
 | **R9** | 测试助手 `unique_dir` ×2 | `copy_redact.rs:153` + `snippets.rs:198` | `#[cfg(test)]` 扫描 | 低收益 |
 | **R10** | 前端 2 处 8 行 UI 惯用法 | 「Refresh IconButton + `animate-spin`」`SnippetsDialog:170` / `PlaybooksPanel:339`；「host `<Select>`」`TerminalPanel:445` / `PlaybooksPanel:576` | 重复块检测 | 低收益；与 R6 同源，做 R6 可顺带覆盖。**⚠ 本行的范围被低估：检测口径是「重复块」，所以它只圈到了 busy 惯用法 11 处里的 2 处（另 9 处不是逐字重复块）。且「给 `IconButton` 加 `busy` 就收拢」已被证伪。见「R10 重新取证」的补测段** |
+| | | | | **⚠ 同一口径在 R10-2 上又错一次：`host <Select>` 本行记 2 处（逐字重复口径下正确），按「单选一个配置 host」的意图扫是 4 处（漏 `AddHostForm:341`、`ForwardPanel:134`）。R10-1 / R10-2 都已落地，见「R10 重新取证」与「R10-2 落地」** |
 
 ## 已排除：形似但**非**冗余（避免下一轮误删）
 
@@ -478,19 +479,81 @@ that turns」）不再是一句假话，而不是修一个可见问题。
 本轮不立项——立项前需要先确认 `Button` 是否存在能覆盖设置面板那种密排小按钮的尺寸档
 （否则「替换」会改变面板密度，属可见变化）。
 
-**R10-2 host 选择器**。**`src/components/HostSelector.tsx` 已经存在**，而 `TerminalPanel:441` 与
-`PlaybooksPanel:571` 仍在手搓同一段 8 行 `<Select>`（`{hosts.length === 0 && <option value="">{t("No hosts")}</option>}` +
-`hosts.map(...)`），选项文案为 `host.name`。
-但两者**契约不匹配**，不是 drop-in：
+**R10-2 host 选择器**。**`src/components/HostSelector.tsx` 已经存在**（3 处在用：`ForwardPanel:107` /
+`SFTPPanel:861` / `ExecPanel:128`），另有 4 处仍在手搓同一个单选框，选项文案为 `host.name`。
+**该行的「2 处」是「逐字重复」口径下正确的数，按「单选一个配置 host」的意图扫是 4 处**
+（补 `AddHostForm:341` 的 bastion、`ForwardPanel:134` 的跳板机——两者外层本来就是 `labelCls`，与
+`HostSelector` 最接近）。和 R10-1 同一个教训：**「只有 N 处」永远要问口径**。
 
-| | `HostSelector` | 两处手搓 |
+四处与 `HostSelector` 的差异，逐项清点后**全部可用纯增量 prop 保住**：
+
+| # | 站点 | 外层 | 选项文案 | 空选项 | 自动选中 | 过滤 |
+|---|---|---|---|---|---|---|
+| 0 | `HostSelector`（原有形态） | `labelCls` + Server 图标 | `name - user@host:port` | — | ✅ 强制 | — |
+| 1 | `TerminalPanel:441` | `grid` + 大写小标题 | `name` | ✅ `No hosts` | ❌ | — |
+| 2 | `PlaybooksPanel:571` | 工具条（`flex flex-wrap`） | `name` | ✅ `No hosts` | ❌ | — |
+| 3 | `AddHostForm:341` | `labelCls` 无图标 | `name (host)` | ✅ `None` | ❌ | 排除自己 |
+| 4 | `ForwardPanel:134` | `labelCls` 无图标 | `name` | ✅ `Direct connection` | ❌ | 排除 `tunnelHost` |
+
+**上一轮写的「文案变化无法避免」是错的**：`optionLabel` 这类回调能逐点保住现有文案，所以
+「整个控件收敛」这条路是**零可见变化**的。上一轮之所以判断成「属产品决策」，是因为只设想了
+`compact` 这一个开关，而它只能整体切形态、切不了文案。**教训：给用户的选项集若不完整，
+「需要拍板」这个结论本身就会是假的。**
+
+另有一处**本来就有的能力被漏读**：`HostSelector:47` 早已有
+`hosts.length === 0 && <option value="">{t("No hosts")}</option>`，所以站点 1 / 2 的空态
+**不需要新 prop**——它们只要不传 `emptyOption` 就自动得到原样。
+
+### R10-2 落地：五个 prop，两处被漏掉的站点
+
+用户拍板「整个控件收敛」。组件新增 5 个 prop，**全部有默认值、保留原有全部行为**：
+
+| prop | 作用 | 谁需要 |
 |---|---|---|
-| 外层 | `<label>` 包裹 + 图标 + 「Target server」标题 | 裸 `<Select>`，嵌在 `flex flex-wrap items-center gap-2` 工具条里 |
-| 选项文案 | `name - user@host:port`（`describeHost`） | 仅 `name` |
-| 空值时 | **自动选中第一个 host**（`useEffect`） | 允许空选，靠提交按钮 `disabled={!newHost}` 兜底 |
+| `allowEmpty` | `""` 是否为合法值：为真则不自动选中、空列表也不禁用；为假（默认）则强制选中第一个 / 值失效时回落第一个 | 站点 1/2/3/4 |
+| `emptyOption` | 常驻的空项文案（`None` / `Direct connection`）；不传时唯一空项是「无 host」占位，**那个占位不是可选项** | 站点 3/4 |
+| `optionLabel` | 单条选项文案，默认 `describeHost` | 站点 1/2/3/4 |
+| `shell` | `label`（图标+标题，原样）/ `plain`（纯文本）/ `bare`（裸 `<select>`） | 站点 3/4 用 `plain`，站点 1/2 用 `bare` |
+| `selectClassName` | 转发给 `<select>` 本身，供工具条定尺寸 | 站点 1/2 |
 
-自动选中会改变这两处工具栏的行为（用户原本可以看到「未选择」状态）。故需先决定：是给 `HostSelector` 加一个
-`compact` / 无 label 变体并接受自动选中，还是让两处显式选择「不自动选」。**属产品决策，不宜由去重驱动。**
+`useEffect` 的语义分支（原为无条件 `onChange(hosts[0].name)`）：
+
+```tsx
+if (hosts.length === 0) { if (value) onChange(""); return; }
+if (hosts.some((host) => host.name === value)) return;
+const next = allowEmpty ? "" : hosts[0].name;   // 空值合法时空值就是「无」的正确答案
+if (next !== value) onChange(next);
+```
+
+三处**形似但不同、必须排除**的站点，写在这里免得下一轮重新发现：
+
+- `AddHostForm:354` 的 `proxy_id` 下拉**结构几乎一致**（`Direct connection` 空项 + 过滤后的实体列表），
+  但数据源是 `proxies` 而不是 `HostProfile`，`HostSelector` 的类型不适用。若要收它，得先泛化成一个
+  按实体参数化的选择器——那是另一个立项，不是 R10-2。
+- `MultiExecPanel:77` 是**多选 chip 组**（`<button>` 胶囊 + `selected.includes`），不是单选下拉。
+- `HostDiffView:72/79` 的下拉数据源是**本次执行结果**，不是 host 配置。
+
+**验收：DOM 等价。**`optionLabel` 逐点复刻了 4 种原文案，`shell` 复刻了 2 种外形，`emptyOption`
+复刻了 3 种空项；站点 1 / 2 的「未选择」状态由 `allowEmpty` 保住。
+唯一**有意**的差异：host 列表被清空时，`allowEmpty` 分支会把悬空的值清掉（站点 1/2 原本留着，
+靠提交按钮 `disabled` 兜底）。这与该组件既有的「空列表时清空」语义一致，是收敛而非回归。
+`TerminalPanel:120` 的初始选中在 **useState 初始化器**里、`PlaybooksPanel:306` 的延迟选中在
+**`showRunForm` 事件处理器**里，都不走 effect，所以 `allowEmpty` 不影响它们——**这也反证了
+`allowEmpty` 是必需的**：`PlaybooksPanel.selectedHost` 初值是 `""`，若用默认值，effect 会在挂载时
+就把 `hosts[0]` 填进去，那才是真正的可见变化。
+
+**这 5 处此前 0 测试覆盖**。新增 `HostSelector.test.tsx`，15 个测试分四组：
+选项文案（默认 / 覆盖）、空项（`emptyOption` / 空列表占位 / 有 host 时空项不出现）、
+`allowEmpty` 的两个可观测后果（不自动选中、空列表不禁用）+ 默认强制选中 + 值失效时两种回落、
+三种 `shell` + `selectClassName` 转发。断言打在**语义**上（`onChange` 收到什么、`<select>` 是否
+`disabled`、`option` 的 `[value, text]`），而非偶然的间距。
+
+**验证**（`fdc8d54`）：tsc exit 0；biome **101** 文件（100 + 1 新测试文件）；
+`check-i18n` 干净（无新 key——5 个 `emptyOption` / `label` 值全是既有的）；
+vitest **121**（106 + 15，恰好 +15）；`npm run build` 成功。
+`<HostSelector>` 调用点 **7**（3 原有 + 4 合并）；四处目标文件里残留的 8 个 `<Select>`
+逐个核对**全部属于其他实体**（`auth_mode` / `key_path` / `group` / `proxy_id` / `direction` /
+`risk_override` / 终端主题 / 会话分配），无一是 host 单选。
 
 ### R11 落地：两个槽位，而不是一类字符串
 
@@ -736,7 +799,6 @@ tsc 干净、biome **100** 文件、`check-i18n` 干净、vitest **106**（97 + 
 | # | 项 | 为什么留到下一轮 |
 |---|---|---|
 | R7 余项（再度收窄） | A24 的 **CLI / MCP / daemon** 三个面尚未暴露 | `51522a0` 接线 + `9c843ed` 桌面完整 CRUD，已等于 B24 highlight 的同一个面集合。剩下三个面按 `agent2ssh-add-operation` 走，但**该暴露哪些必须重新论证**：上一轮「只应暴露 list + reset」的判据（把安全方向当成唯一筛选条件）已被用户推翻，不能直接沿用。可考虑的中间形态是「`list` + `reset` 上自动化面，`add` / `update` / `delete` 仅桌面」。同步时须改 `docs/skills.md` 与其余 ~10 处 MCP 工具计数 |
-| R10-2（host 选择器） | `HostSelector` 已存在，`TerminalPanel:446` / `PlaybooksPanel:576` 仍手搓同一个 `<Select>` | 补测确认：合并会改**下拉项文案**（`name` → `name - user@host:port`）并引入自动选中第一个 host。可加 `compact` / `optionLabel` 两个开关保住现有行为，但**文案变化无法避免**。**属产品决策，不宜由去重驱动** |
 | 新发现（未编号） | `SettingsMenu`：23 个裸 `<button>` / 0 个 `<Button>`，全仓最大集中点 | 见上「R10 重新取证」的补测段。**未立项**：立项前需先确认 `Button` 是否存在能覆盖设置面板那种密排小按钮的尺寸档，否则「替换」会改变面板密度 |
 | R11 余项 | `ConfirmDialog` 标题的 `text-foreground` 与它所在的 `bg-popover` 表面不匹配 | 见上「留待决定的一处 token 错配」。**已取证、未改**：补测确认 6 套主题里**只有 dark / nord** 两套这两个 token 不同色，但这两套无法在本机目视验证，属「读 CSS 变量推断出来的修改」。影响面已由 14 涨到 **16** 个确认框（本轮 +2）。不是冗余项，故不占 R 编号 |
 
