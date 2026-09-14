@@ -22,7 +22,25 @@ const buttonVariants = cva(
         sm: "h-8 rounded-md px-3 text-xs",
         lg: "h-10 rounded-md px-6",
         icon: "size-9"
-      }
+      },
+      /**
+       * Fills the container. Buttons are otherwise sized by their label, so
+       * this needed naming: five call sites (`ForwardPanel`, `ProxyPanel`,
+       * `ExecPanel`, `AddHostForm`, `MultiExecPanel`) already spelled it by
+       * hand as `className="w-full"`, and the settings panel adds nineteen
+       * more. Those five are left as they are, not converted. See `align` for
+       * the other half of the row shape.
+       */
+      block: { true: "w-full" },
+      /**
+       * Content alignment. `start` is a row -- a settings row, a menu item or
+       * the settings-panel trigger -- rather than a button. It carries
+       * `text-left` because the app imports Tailwind's theme and utilities
+       * layers but not `preflight`, so a `<button>` keeps the UA's
+       * `text-align: center`; without it a truncating label would put its
+       * ellipsis in the middle of the row.
+       */
+      align: { center: "", start: "justify-start text-left" }
     },
     defaultVariants: { variant: "default", size: "default" }
   }
@@ -33,11 +51,11 @@ export interface ButtonProps
     VariantProps<typeof buttonVariants> {}
 
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
-  ({ className, variant, size, type = "button", ...props }, ref) => (
+  ({ className, variant, size, block, align, type = "button", ...props }, ref) => (
     <button
       ref={ref}
       type={type}
-      className={cn(buttonVariants({ variant, size }), className)}
+      className={cn(buttonVariants({ variant, size, block, align }), className)}
       {...props}
     />
   )

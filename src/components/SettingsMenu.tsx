@@ -29,6 +29,8 @@ import LanguageSwitcher from "./LanguageSwitcher";
 import HighlightSettings from "./HighlightSettings";
 import RedactionSettings from "./RedactionSettings";
 import AlgoPrefsDialog from "./AlgoPrefsDialog";
+import { Button } from "./ui/button";
+import { IconButton } from "./ui/icon-button";
 import { Spinner } from "./ui/state";
 import { THEMES, useTheme } from "../theme";
 import { cn } from "../lib/utils";
@@ -49,10 +51,6 @@ type Props = {
 
 const sectionTitleCls =
   "flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide text-muted-foreground";
-const actionBtnCls =
-  "inline-flex h-9 w-full items-center justify-center gap-2 rounded-md border border-input bg-card text-sm font-bold transition-colors hover:bg-muted disabled:pointer-events-none disabled:opacity-55";
-const rowBtnCls =
-  "inline-flex h-9 w-full items-center gap-2 rounded-md border border-input bg-card px-2.5 text-left text-sm font-bold transition-colors hover:bg-muted disabled:pointer-events-none disabled:opacity-55";
 const kbdCls = "rounded border border-border bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground";
 
 // V2-5: static reference list for the global shortcuts wired up in App.tsx /
@@ -409,9 +407,10 @@ export default function SettingsMenu({
 
   return (
     <div className="relative" ref={menuRef}>
-      <button
-        type="button"
-        className="inline-flex h-9 items-center gap-1.5 rounded-md border border-input bg-card px-3 text-sm font-bold text-foreground/80 transition-colors hover:bg-muted hover:text-foreground"
+      <Button
+        variant="outline"
+        align="start"
+        className="gap-1.5 px-3 font-bold text-foreground/80"
         onClick={() => setOpen((next) => !next)}
         aria-haspopup="menu"
         aria-expanded={open}
@@ -419,7 +418,7 @@ export default function SettingsMenu({
       >
         <Settings size={16} />
         <span>{t("Settings")}</span>
-      </button>
+      </Button>
 
       {open && (
         <div
@@ -433,14 +432,14 @@ export default function SettingsMenu({
                 {t("App preferences and safety controls")}
               </span>
             </div>
-            <button
-              type="button"
-              className="inline-flex size-7 shrink-0 items-center justify-center rounded-md border border-border bg-card text-muted-foreground transition-colors hover:bg-muted"
+            <IconButton
+              size="sm"
+              className="shrink-0"
               onClick={() => setOpen(false)}
               title={t("Close")}
             >
               <X size={15} />
-            </button>
+            </IconButton>
           </div>
 
           <section className="grid gap-2">
@@ -465,26 +464,28 @@ export default function SettingsMenu({
             <div className="flex flex-wrap gap-x-2.5 gap-y-1 text-xs text-muted-foreground">
               {t("Last checked: {time}", { time: checkedAtText })}
             </div>
-            <button
-              type="button"
-              className={actionBtnCls}
+            <Button
+              variant="outline"
+              block
+              className="font-bold"
               onClick={onGateToggle}
               disabled={gateBusy || gateStatus === null}
               title={gatePaused ? t("Resume execution gate") : t("Pause execution gate")}
             >
               {gatePaused ? <PlayCircle size={16} /> : <PauseCircle size={16} />}
               {gatePaused ? t("Resume") : t("Pause")}
-            </button>
-            <button
-              type="button"
-              className={actionBtnCls}
+            </Button>
+            <Button
+              variant="outline"
+              block
+              className="font-bold"
               onClick={handleGateRefresh}
               disabled={refreshBusy}
               title={t("Refresh gate status")}
             >
               {refreshBusy ? <Spinner size={16} /> : <RefreshCw size={16} />}
               {t("Refresh gate status")}
-            </button>
+            </Button>
           </section>
 
           <section className="grid gap-2">
@@ -503,16 +504,17 @@ export default function SettingsMenu({
               {daemonHealth?.pid != null && <span>{t("PID: {pid}", { pid: daemonHealth.pid })}</span>}
               <span>{t("Last checked: {time}", { time: daemonCheckedAtText })}</span>
             </div>
-            <button
-              type="button"
-              className={actionBtnCls}
+            <Button
+              variant="outline"
+              block
+              className="font-bold"
               onClick={handleDaemonHealthRefresh}
               disabled={healthBusy}
               title={t("Refresh daemon health")}
             >
               {healthBusy ? <Spinner size={16} /> : <RefreshCw size={16} />}
               {t("Refresh daemon health")}
-            </button>
+            </Button>
           </section>
 
           <section className="grid gap-2">
@@ -524,26 +526,28 @@ export default function SettingsMenu({
               <div className="text-xs text-muted-foreground">{updateMessage}</div>
             )}
             <div className="grid grid-cols-2 gap-2">
-              <button
-                type="button"
-                className={actionBtnCls}
+              <Button
+                variant="outline"
+                block
+                className="font-bold"
                 onClick={handleCheckForUpdate}
                 disabled={updateBusy !== null}
                 title={t("Check for updates")}
               >
                 {updateBusy === "check" ? <Spinner size={16} /> : <RefreshCw size={16} />}
                 {t("Check for updates")}
-              </button>
-              <button
-                type="button"
-                className={actionBtnCls}
+              </Button>
+              <Button
+                variant="outline"
+                block
+                className="font-bold"
                 onClick={handleInstallUpdate}
                 disabled={updateBusy !== null || !updateAvailable}
                 title={t("Install update")}
               >
                 <Download size={16} className={updateBusy === "install" ? "animate-pulse" : ""} />
                 {t("Install update")}
-              </button>
+              </Button>
             </div>
           </section>
 
@@ -570,14 +574,14 @@ export default function SettingsMenu({
                 placeholder={secretsInitialized ? t("New master password") : t("Master password")}
                 className="h-9 flex-1 rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
               />
-              <button
-                type="button"
-                className={cn(actionBtnCls, "w-auto px-3")}
+              <Button
+                variant="outline"
+                className="px-3 font-bold"
                 onClick={submitMasterPassword}
                 disabled={!masterPassword || secretsBusy}
               >
                 {secretsInitialized ? t("Change master password") : t("Set master password")}
-              </button>
+              </Button>
             </div>
           </section>
 
@@ -593,15 +597,17 @@ export default function SettingsMenu({
                   ? t("Using custom algorithm preferences.")
                   : t("Using the built-in safe defaults.")}
             </p>
-            <button
-              type="button"
-              className={rowBtnCls}
+            <Button
+              variant="outline"
+              block
+              align="start"
+              className="px-2.5 font-bold"
               onClick={() => setAlgoOpen(true)}
               title={t("Edit SSH algorithms")}
             >
               <KeyRound size={16} />
               <span className="truncate">{t("Edit SSH algorithms")}</span>
-            </button>
+            </Button>
           </section>
 
           <section className="grid gap-2">
@@ -634,9 +640,10 @@ export default function SettingsMenu({
           <section className="grid gap-2">
             <div className={sectionTitleCls}>{t("Daemon controls")}</div>
             <div className="grid grid-cols-3 gap-2">
-              <button
-                type="button"
-                className={cn(rowBtnCls, "justify-center px-2")}
+              <Button
+                variant="outline"
+                block
+                className="px-2 text-left font-bold"
                 onClick={() => runDaemonAction("start")}
                 disabled={daemonActionBusy !== null || daemonHealthy}
               >
@@ -644,10 +651,11 @@ export default function SettingsMenu({
                 <span className="truncate">
                   {daemonActionBusy === "start" ? t("Starting...") : t("Start daemon")}
                 </span>
-              </button>
-              <button
-                type="button"
-                className={cn(rowBtnCls, "justify-center px-2")}
+              </Button>
+              <Button
+                variant="outline"
+                block
+                className="px-2 text-left font-bold"
                 onClick={() => runDaemonAction("stop")}
                 disabled={daemonActionBusy !== null || !daemonHealthy}
               >
@@ -655,10 +663,11 @@ export default function SettingsMenu({
                 <span className="truncate">
                   {daemonActionBusy === "stop" ? t("Stopping...") : t("Stop daemon")}
                 </span>
-              </button>
-              <button
-                type="button"
-                className={cn(rowBtnCls, "justify-center px-2")}
+              </Button>
+              <Button
+                variant="outline"
+                block
+                className="px-2 text-left font-bold"
                 onClick={() => runDaemonAction("restart")}
                 disabled={daemonActionBusy !== null}
               >
@@ -666,7 +675,7 @@ export default function SettingsMenu({
                 <span className="truncate">
                   {daemonActionBusy === "restart" ? t("Restarting...") : t("Restart daemon")}
                 </span>
-              </button>
+              </Button>
             </div>
             {daemonActionMessage && (
               <div className="flex flex-wrap gap-x-2.5 gap-y-1 text-xs text-muted-foreground">
@@ -679,15 +688,20 @@ export default function SettingsMenu({
             <div className={sectionTitleCls}>{t("Theme")}</div>
             <div className="grid grid-cols-2 gap-1.5">
               {THEMES.map((opt) => (
-                <button
+                <Button
                   key={opt.id}
-                  type="button"
+                  variant="outline"
+                  align="start"
                   onClick={() => setTheme(opt.id)}
                   className={cn(
-                    "inline-flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-sm font-medium transition-colors",
+                    "h-auto px-2.5 py-1.5 font-medium",
+                    // The selected branch has to restate the hover pair: the
+                    // variant's own hover:bg-muted/hover:text-foreground would
+                    // otherwise paint over the primary tint on pointer-over,
+                    // making the selected swatch look unselected.
                     theme === opt.id
-                      ? "border-primary bg-primary/10 text-primary"
-                      : "border-input bg-card text-foreground hover:bg-muted"
+                      ? "border-primary bg-primary/10 text-primary hover:bg-primary/10 hover:text-primary"
+                      : undefined
                   )}
                 >
                   <span
@@ -695,7 +709,7 @@ export default function SettingsMenu({
                     style={{ background: opt.swatch }}
                   />
                   <span className="truncate">{t(opt.label)}</span>
-                </button>
+                </Button>
               ))}
             </div>
           </section>
@@ -738,11 +752,23 @@ export default function SettingsMenu({
             >
               {consoleUrl}
             </div>
-            <button type="button" className={rowBtnCls} onClick={openConsole}>
+            <Button
+              variant="outline"
+              block
+              align="start"
+              className="px-2.5 font-bold"
+              onClick={openConsole}
+            >
               <ExternalLink size={16} />
               <span className="truncate">{t("Open Web Console")}</span>
-            </button>
-            <button type="button" className={rowBtnCls} onClick={copyConsoleUrl}>
+            </Button>
+            <Button
+              variant="outline"
+              block
+              align="start"
+              className="px-2.5 font-bold"
+              onClick={copyConsoleUrl}
+            >
               <Clipboard size={16} />
               <span className="truncate">
                 {copyStatus === "copied"
@@ -751,7 +777,7 @@ export default function SettingsMenu({
                     ? t("Copy failed")
                     : t("Copy console URL")}
               </span>
-            </button>
+            </Button>
           </section>
 
           <section className="grid gap-2">
@@ -760,46 +786,50 @@ export default function SettingsMenu({
               {t("Diagnostics")}
             </div>
             <div className="grid grid-cols-2 gap-2">
-              <button
-                type="button"
-                className={cn(rowBtnCls, "justify-center px-2")}
+              <Button
+                variant="outline"
+                block
+                className="px-2 text-left font-bold"
                 onClick={refreshDiagnostics}
                 disabled={diagnosticBusy !== null}
                 title={t("Refresh diagnostics")}
               >
                 {diagnosticBusy === "refresh" ? <Spinner size={16} /> : <RefreshCw size={16} />}
                 <span className="truncate">{t("Refresh")}</span>
-              </button>
-              <button
-                type="button"
-                className={cn(rowBtnCls, "justify-center px-2")}
+              </Button>
+              <Button
+                variant="outline"
+                block
+                className="px-2 text-left font-bold"
                 onClick={exportDiagnostics}
                 disabled={diagnosticBusy !== null}
                 title={t("Export diagnostics")}
               >
                 <Download size={16} />
                 <span className="truncate">{t("Export")}</span>
-              </button>
-              <button
-                type="button"
-                className={cn(rowBtnCls, "justify-center px-2")}
+              </Button>
+              <Button
+                variant="outline"
+                block
+                className="px-2 text-left font-bold"
                 onClick={clearDiagnostics}
                 disabled={diagnosticBusy !== null}
                 title={t("Clear app log")}
               >
                 <Trash2 size={16} />
                 <span className="truncate">{t("Clear")}</span>
-              </button>
-              <button
-                type="button"
-                className={cn(rowBtnCls, "justify-center px-2")}
+              </Button>
+              <Button
+                variant="outline"
+                block
+                className="px-2 text-left font-bold"
                 onClick={loadSystemReport}
                 disabled={diagnosticBusy !== null}
                 title={t("Generate system report")}
               >
                 <FileText size={16} />
                 <span className="truncate">{t("System report")}</span>
-              </button>
+              </Button>
             </div>
             {diagnosticMessage && (
               <div className="break-words text-xs leading-snug text-muted-foreground">
@@ -820,9 +850,10 @@ export default function SettingsMenu({
 
           <section className="grid gap-2">
             <div className={sectionTitleCls}>{t("App")}</div>
-            <button
-              type="button"
-              className={cn(rowBtnCls, "justify-center px-2")}
+            <Button
+              variant="outline"
+              block
+              className="px-2 text-left font-bold"
               onClick={quitApplication}
               disabled={appActionBusy !== null}
               title={t("Quit application")}
@@ -831,14 +862,16 @@ export default function SettingsMenu({
               <span className="truncate">
                 {appActionBusy === "exit" ? t("Exiting...") : t("Quit application")}
               </span>
-            </button>
+            </Button>
           </section>
 
           <section className="grid gap-2">
             <div className={sectionTitleCls}>{t("Setup")}</div>
-            <button
-              type="button"
-              className={rowBtnCls}
+            <Button
+              variant="outline"
+              block
+              align="start"
+              className="px-2.5 font-bold"
               onClick={toggleCliPath}
               disabled={cliPathBusy}
             >
@@ -846,13 +879,15 @@ export default function SettingsMenu({
               <span className="truncate">
                 {cliPathInstalled ? t("Remove CLI from PATH") : t("Add CLI to PATH")}
               </span>
-            </button>
+            </Button>
             {cliPathMessage && (
               <div className="break-words text-xs text-muted-foreground">{cliPathMessage}</div>
             )}
-            <button
-              type="button"
-              className={rowBtnCls}
+            <Button
+              variant="outline"
+              block
+              align="start"
+              className="px-2.5 font-bold"
               onClick={() => {
                 onImportConfig();
                 setOpen(false);
@@ -860,10 +895,12 @@ export default function SettingsMenu({
             >
               <Upload size={16} />
               <span className="truncate">{t("Import from ~/.ssh/config")}</span>
-            </button>
-            <button
-              type="button"
-              className={rowBtnCls}
+            </Button>
+            <Button
+              variant="outline"
+              block
+              align="start"
+              className="px-2.5 font-bold"
               onClick={() => {
                 onOpenSetup();
                 setOpen(false);
@@ -871,7 +908,7 @@ export default function SettingsMenu({
             >
               <Wand2 size={16} />
               <span className="truncate">{t("Open setup wizard")}</span>
-            </button>
+            </Button>
           </section>
 
           <div className="flex items-center gap-2 border-t border-border pt-3 text-xs text-muted-foreground">
