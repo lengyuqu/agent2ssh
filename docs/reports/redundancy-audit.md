@@ -155,11 +155,13 @@
 
 ## 未处理（有意搁置）
 
-| 条目 | 原因 |
+> 本节 4 行里已有 3 行落地。下表保留已处理行以便与「处理结果（本轮落地）」对照，**当前真正仍搁置的只剩 `P1#11` 一项**。
+
+| 条目 | 原因 / 现状 |
 |---|---|
 | `"AGENT2SSH_CONFIG_DIR"` 裸字面量 71 处 | ✅ 2026-09-11 已处理（见文末）；其余项不在「建议处理顺序」内 |
-| `rand` + `getrandom` 双 RNG 入口 | 需评估版本兼容与行为差异，收益低 |
-| `normalize_proxy` / 测试 `AuditEntry` fixture 重复 | 低收益 |
+| `rand` + `getrandom` 双 RNG 入口 | ✅ 已处理：R8 `e0a539f`。**2026-09-14 实测复核**：`Cargo.toml` 无 `rand`、全仓无 `rand::`，只剩 `getrandom = "0.4"` |
+| `normalize_proxy` / 测试 `AuditEntry` fixture 重复 | ✅ 已处理：R3 `dce8809`（落成 `ProxyProfile::trim_fields`，`types.rs:194`）+ R5 `eb6f6aa`（落成 `AuditEntry::test_fixture`，`types.rs:379`）。注意 R3 **只收敛了 trim**——两侧校验与失败策略有意不同，见「对本报告自身结论的四处订正」 |
 | P1#11 三态组件 | 见上，无安全替换点 |
 
 ## 需知晓的行为差异（有意收敛，非回归）
