@@ -330,8 +330,9 @@ struct PreflightResult {
     source: String,
     risk: RiskLevel,
     /// Whether the command was pre-approved (e.g. by an approval policy).
-    /// TODO(dedup): 目前无调用方消费该字段；保留以对齐 authorize_command 的返回语义，待有消费方时移除 #[allow(dead_code)]。
-    #[allow(dead_code)]
+    /// Read by the exec and playbook-step handlers to upgrade a pre-approved
+    /// high-risk command into a forced execution (`pf.approved && pf.risk ==
+    /// RiskLevel::High`), so this field must stay readable.
     approved: bool,
 }
 
