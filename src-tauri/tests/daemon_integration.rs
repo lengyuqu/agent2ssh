@@ -1840,6 +1840,247 @@ fn mcp_tools_match_skills_md_documentation() {
     }
 }
 
+// ── S3-1b: risk-tier documentation consistency ──────────────────────────────
+
+/// The read-only / write classification in `docs/skill-distribution.md` must
+/// agree with the MCP tool registry, name for name.
+///
+/// That document is what an operator reads before deciding what to grant an AI
+/// client, so a tool that quietly changes tier — or a new tool that is never
+/// classified at all — is a privilege decision made by omission. Nothing in the
+/// codebase referenced the file, so nothing could catch that drift: it happened
+/// to be correct (36 + 36 = 72 listings, 71 unique, `ssh_webhook_config` being
+/// the one tool with both a `(get)` and a `(set)` form) rather than being kept
+/// correct.
+///
+/// Both tiers are therefore pinned in full below. Counting alone would not do:
+/// moving a mutating tool from `写入类` to `只读类` leaves the count, the union
+/// and the cross-tier overlap all untouched, and that move is the one drift with
+/// a security consequence.
+#[test]
+fn risk_tiers_match_mcp_tool_registry() {
+    // A listing entry is a bare tool name, optionally followed by a form marker
+    // (`ssh_webhook_config (get)`); the marker is dropped so both forms collapse
+    // onto the single registry name.
+    fn normalize(token: &str) -> &str {
+        let mut name = token;
+        for suffix in ["(get)", "(set)"] {
+            if let Some(stripped) = name.strip_suffix(suffix) {
+                name = stripped;
+            }
+        }
+        name
+    }
+
+    // Collect the fenced tool listing that follows the `### <marker>` heading.
+    fn tier_listing<'a>(doc: &'a str, marker: &str) -> Vec<&'a str> {
+        let mut out = Vec::new();
+        let mut in_section = false;
+        let mut in_fence = false;
+        for line in doc.lines() {
+            if line.starts_with("### ") {
+                if in_section {
+                    break; // the next tier heading ends this listing
+                }
+                in_section = line.contains(marker);
+                continue;
+            }
+            if !in_section {
+                continue;
+            }
+            if line.trim_start().starts_with("```") {
+                if in_fence {
+                    break; // the closing fence ends the listing
+                }
+                in_fence = true;
+                continue;
+            }
+            if in_fence {
+                for token in line.split_whitespace() {
+                    let name = normalize(token);
+                    if name.starts_with("ssh_") {
+                        out.push(name);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    // The published read-only tier. `ssh_webhook_config` is the only tool that
+    // also appears in `WRITE`, because it exposes both a `(get)` and a `(set)`
+    // form.
+    const READ_ONLY: [&str; 36] = [
+        "ssh_list_hosts",
+        "ssh_list_daemons",
+        "ssh_ping",
+        "ssh_audit",
+        "ssh_audit_export",
+        "ssh_sftp_ls",
+        "ssh_sftp_stat",
+        "ssh_session_list",
+        "ssh_session_read",
+        "ssh_forward_list",
+        "ssh_risk_check",
+        "ssh_approval_list",
+        "ssh_approval_policies_list",
+        "ssh_approval_check",
+        "ssh_connection_status",
+        "ssh_playbook_list",
+        "ssh_playbook_dry_run",
+        "ssh_config_export",
+        "ssh_config_import_preview",
+        "ssh_webhook_config",
+        "ssh_doctor",
+        "ssh_metrics",
+        "ssh_metrics_trend",
+        "ssh_preview_exec",
+        "ssh_health_snapshot",
+        "ssh_gate_status",
+        "ssh_daemon_diagnose",
+        "ssh_daemon_version_check",
+        "ssh_daemons_view",
+        "ssh_events_subscribe",
+        "ssh_sync_diff",
+        "ssh_sync_export",
+        "ssh_snippet_list",
+        "ssh_redact_rule_list",
+        "ssh_highlight_rule_list",
+        "ssh_algo_prefs_get",
+    ];
+
+    // The published write tier.
+    const WRITE: [&str; 36] = [
+        "ssh_exec",
+        "ssh_exec_multi",
+        "ssh_exec_compare",
+        "ssh_session_open",
+        "ssh_session_write",
+        "ssh_session_close",
+        "ssh_sftp_upload",
+        "ssh_sftp_download",
+        "ssh_sftp_mkdir",
+        "ssh_forward_add",
+        "ssh_sftp_rename",
+        "ssh_sftp_rm",
+        "ssh_sftp_rmdir",
+        "ssh_sftp_rm_rf",
+        "ssh_forward_remove",
+        "ssh_add_host",
+        "ssh_remove_host",
+        "ssh_import_config",
+        "ssh_connect",
+        "ssh_disconnect",
+        "ssh_approval_respond",
+        "ssh_playbook_run",
+        "ssh_webhook_config",
+        "ssh_config_import",
+        "ssh_snippet_save",
+        "ssh_snippet_delete",
+        "ssh_redact_rule_add",
+        "ssh_redact_rule_update",
+        "ssh_redact_rule_remove",
+        "ssh_redact_rule_reset",
+        "ssh_highlight_rule_add",
+        "ssh_highlight_rule_update",
+        "ssh_highlight_rule_remove",
+        "ssh_highlight_rule_reset",
+        "ssh_algo_prefs_set",
+        "ssh_algo_prefs_clear",
+    ];
+
+    let doc = include_str!("../../docs/skill-distribution.md");
+    let registry = include_str!("../src/bin/agent2ssh_mcp/tools.rs");
+
+    // No dedup on these two: a tool listed twice in one tier must fail.
+    let mut read_only = tier_listing(doc, "只读类");
+    read_only.sort_unstable();
+    let mut write = tier_listing(doc, "写入类");
+    write.sort_unstable();
+
+    assert!(
+        !read_only.is_empty() && !write.is_empty(),
+        "could not parse the risk tiers out of docs/skill-distribution.md \
+         (read-only: {} entries, write: {} entries); the headings or the fenced \
+         layout must have changed",
+        read_only.len(),
+        write.len()
+    );
+
+    let mut expected_read_only = READ_ONLY.to_vec();
+    expected_read_only.sort_unstable();
+    assert_eq!(
+        read_only, expected_read_only,
+        "the 只读类 tier in docs/skill-distribution.md no longer matches this \
+         list. If a tool MOVED here, confirm it truly has no side effects before \
+         updating READ_ONLY; if the listing gained a genuinely new tool, add it \
+         in both places."
+    );
+
+    let mut expected_write = WRITE.to_vec();
+    expected_write.sort_unstable();
+    assert_eq!(
+        write, expected_write,
+        "the 写入类 tier in docs/skill-distribution.md no longer matches this \
+         list. If a tool DISAPPEARED from here, that is the dangerous direction: \
+         a mutating tool must never be presented as safe to grant."
+    );
+
+    // The pins above say nothing about a tool that is in the registry but in no
+    // tier at all, so the union is checked against the registry too — read from
+    // the same `"name": "ssh_..."` literals the tool-count test uses, so the two
+    // can never disagree about what the registry holds.
+    let mut registry_tools: Vec<&str> = Vec::new();
+    let mut rest = registry;
+    while let Some(idx) = rest.find("\"name\": \"") {
+        let tail = &rest[idx + 9..];
+        let end = tail
+            .find('"')
+            .expect("unterminated MCP tool name in tools.rs");
+        let name = &tail[..end];
+        if name.starts_with("ssh_") {
+            registry_tools.push(name);
+        }
+        rest = &tail[end..];
+    }
+    assert!(
+        !registry_tools.is_empty(),
+        "could not parse any MCP tool name out of src/bin/agent2ssh_mcp/tools.rs"
+    );
+    registry_tools.sort_unstable();
+    registry_tools.dedup();
+
+    let mut classified: Vec<&str> = read_only.iter().chain(write.iter()).copied().collect();
+    classified.sort_unstable();
+    classified.dedup();
+
+    // Both directions in one assertion. `unclassified` is the realistic drift: a
+    // 72nd tool lands in the registry and nobody tiers it — the only other test
+    // that notices is the tool count, whose natural fix is to bump a number.
+    // `phantom` is the reverse, a tier entry naming something the registry no
+    // longer has. Reported together so neither can shadow the other.
+    let unclassified: Vec<&str> = registry_tools
+        .iter()
+        .copied()
+        .filter(|tool| !classified.contains(tool))
+        .collect();
+    let phantom: Vec<&str> = classified
+        .iter()
+        .copied()
+        .filter(|name| !registry_tools.contains(name))
+        .collect();
+    assert!(
+        unclassified.is_empty() && phantom.is_empty(),
+        "docs/skill-distribution.md and the MCP registry disagree: {} tool(s) are \
+         in the registry but in no risk tier ({:?}); {} risk-tier name(s) are not \
+         MCP tools ({:?})",
+        unclassified.len(),
+        unclassified,
+        phantom.len(),
+        phantom
+    );
+}
+
 // ── S3-2: OpenAPI / daemon contract checks ──────────────────────────────────
 
 /// Every daemon route is in `docs/api.yaml`, and nothing else is.
