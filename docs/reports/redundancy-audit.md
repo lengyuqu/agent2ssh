@@ -991,7 +991,7 @@ A22 的 `SshAlgoPrefs` 是**单例结构体**（8 个算法列表字段），不
 | **3 处契约描述与实现不符** | 见下 | 逐条改成实现的实际行为，并把 redact/highlight 的**不对称**写在调用者会看的地方 + 用测试钉住 |
 | **`CLAUDE.md` 仍写 51 个工具** | 活性指令文件里两行，落后 7 个增长台阶 | 改 71，并让两行各自点名那个会因漂移而失败的测试 |
 | **`ssh_algos.json` 是第四个未收敛的写入者** | `save_algo_prefs` 自己内联「建目录 + 序列化 + 写 + `restrict_file_to_owner`」，而 `write_private_json` 的文档注释已把另外三个文件列为调用者 | 收敛；顺带去掉冗余的 `ensure_config_dir()`，并让注释点名第四个文件。语义无变化（同为 `0600`，Windows 走同一套 `icacls`） |
-| **`cli_contract` 从未被 CI 执行** | `src-tauri/tests/cli_contract.rs` 自 B39 起有 29 个用例（本轮再加 1 个），但 `build` 的 cargo-test 步骤点的是 `--lib` / `--test daemon_integration` / `--test cli_smoke` / `--test connect_deadline`，`contract-consistency` 跑的是前两个套件里**按名字过滤的 9 个**用例。两侧各自都正常：测试是绿的，只是没有人在 CI 里跑它们。于是本轮新加的生命周期契约测试同样只是装饰——**「已通过的测试」与「能拦住回归的测试」是两回事** | 在 `build` 里紧挨 `cli_smoke` 加一个 `--test cli_contract` 步骤，三个平台都跑；它不需要夹具（每条用例对临时 `AGENT2SSH_CONFIG_DIR` 起真实二进制，无平台假设）。`exec_fixture` 不动——它要容器化 sshd，只在 `real-ssh-e2e`（`scripts/e2e-docker.sh`）里跑，那是它唯一合理的位置 |
+| **`cli_contract` 从未被 CI 执行** | `src-tauri/tests/cli_contract.rs` 自 B39 起有 29 个用例（本轮再加 1 个），但 `build` 的 cargo-test 步骤点的是 `--lib` / `--test daemon_integration` / `--test cli_smoke` / `--test connect_deadline`，`contract-consistency` 跑的是前两个套件里**按名字过滤的 9 个**用例。两侧各自都正常：测试是绿的，只是没有人在 CI 里跑它们。于是本轮新加的生命周期契约测试同样只是装饰——**「已通过的测试」与「能拦住回归的测试」是两回事** | 在 `build` 里紧挨 `cli_smoke` 加一个 `--test cli_contract` 步骤，三个平台都跑；它不需要夹具（每条用例对临时 `AGENT2SSH_CONFIG_DIR` 起真实二进制，无平台假设）。`exec_fixture` 不动——它要容器化 sshd，只在 `real-ssh-e2e`（`scripts/e2e-container.sh`，当时名为 `e2e-docker.sh`）里跑，那是它唯一合理的位置 |
 
 ### 三处被自己写出来的错误描述（写完实测才发现）
 

@@ -1,7 +1,7 @@
 ---
 name: agent2ssh
 description: Operate remote machines over SSH through Agent2SSH — host management, command execution with risk classification and approvals, SFTP transfers, persistent PTY sessions, port forwards, playbooks, audit, and the local redaction / highlight / SSH-algorithm rule sets. Use when asked to run commands on remote servers, transfer files, manage SSH hosts or tunnels, tune what gets redacted or highlighted, or automate multi-host operations via the agent2ssh CLI or its MCP tools.
-version: 0.3.0
+version: 0.3.3
 ---
 
 # Agent2SSH Skill
@@ -23,6 +23,7 @@ don't read the whole file for a single task):
 | Expose a remote/local port | `ssh_forward_*` | Port Forwarding |
 | Check reachability before batch ops | `ssh_ping` | Connectivity Check |
 | Add / remove / import hosts | `ssh_add_host` / `host import-config` | Host Management |
+| Generate a key that will actually authenticate | `agent2ssh keys generate` | SSH Keys |
 | Review past executions | `ssh_audit` | Audit Log |
 | Tune redaction / highlight / SSH algorithms | `ssh_redact_rule_*` / `ssh_highlight_rule_*` / `ssh_algo_prefs_*` | Local Configuration |
 | High-risk command (sudo/rm/kill) | `force: true` + user confirmation | Risk Levels |
@@ -70,6 +71,7 @@ the client config.
 | Persistent session | `agent2ssh session open/write/read/close` / `ssh_session_*` |
 | Port forward | `agent2ssh forward add/list/rm` / `ssh_forward_*` |
 | View audit log | `agent2ssh audit --json` / `ssh_audit` |
+| Generate a usable key | `agent2ssh keys generate <name>` / `agent2ssh keys algorithm` |
 
 ---
 
@@ -100,6 +102,38 @@ Remove a host:
 ```bash
 agent2ssh host rm prod --json
 ```
+
+---
+
+## SSH Keys
+
+Key pairs live in `~/.agent2ssh/keys/` and are referenced by `key_path` on a host.
+
+```bash
+agent2ssh keys algorithm            # ed25519 or rsa — what this build can use
+agent2ssh keys algorithm --name     # the same, as a bare word for scripts
+agent2ssh keys algorithm --json     # adds bits + reads_openssh_private_keys
+agent2ssh keys generate id-work     # prints the private key path, nothing else
+agent2ssh keys generate id-work --type rsa --json
+agent2ssh host add web1 --host 10.0.0.5 --key "$(agent2ssh keys generate web1)"
+```
+
+Three things matter before generating:
+
+- **Ask, do not assume.** `keys algorithm` is the only correct source for the
+  type, because it depends on the crypto backend the SSH library was built with
+  rather than on the platform. Generating Ed25519 on a build that cannot read the
+  OpenSSH container produces a key that is stored, listed, and then rejected at
+  authentication time. `keys generate` with no `--type` follows that
+  recommendation on its own, which is what makes the one-liner above safe.
+- **RSA here means traditional PEM.** 3072-bit, `-----BEGIN RSA PRIVATE KEY-----`,
+  which is the only RSA encoding a WinCNG build can load — writing it as PEM is
+  what keeps an RSA key usable whichever backend the build links. The public
+  half is still the standard single-line `ssh-rsa …` that `authorized_keys`
+  expects. Sizes below 2048 are refused.
+- **Replacing an existing name fails** rather than overwriting it, and the
+  generated private key is restricted to its owner (0600). Deleting a key does
+  not update hosts that reference it.
 
 ---
 
@@ -279,7 +313,7 @@ agent2ssh highlight add 'a.b' --name Literal --color '#FFD060' --literal --json
 agent2ssh algo set --kex curve25519-sha256 --json
 ```
 
-Four things to know before calling these:
+Seven things to know before calling these:
 
 - **Removal needs `--force` / `force: true`.** `redact remove` and
   `highlight remove` refuse an unconfirmed call — exit **2** on the CLI, HTTP
@@ -298,6 +332,42 @@ Four things to know before calling these:
 - **`algo set` touches only the lists you name**; `algo clear` drops the
   overrides and falls back to the built-in safe defaults. A handshake already
   open keeps the algorithms it negotiated.
+- **An algorithm this build cannot negotiate is accepted at save time and then
+  fails every connection.** `algo set` checks the shape of a name, not whether
+  the linked libssh2 can do it, and the preferences are applied fail-closed
+  immediately before each handshake — so `--kex curve25519-sha256` is a no-op on
+  this project's builds, which link OpenSSL, and an outage on one that links
+  WinCNG, which has no curve25519, no ed25519 host key and no AES-GCM. The
+  built-in defaults are narrowed to what the build can actually negotiate, which
+  is what makes `algo set` safe on either. `algo clear` is the way back. Ask
+  `algo get` rather than assuming a list is portable.
+- **A private key the server accepts can still be unusable here, and it is an
+  encoding problem, not a key problem.** The linked libssh2 reads private keys
+  through whichever crypto backend it was built with: a WinCNG build understands
+  only traditional PEM, `-----BEGIN RSA PRIVATE KEY-----` and
+  `-----BEGIN DSA PRIVATE KEY-----`, so a key in the OpenSSH container format
+  (`-----BEGIN OPENSSH PRIVATE KEY-----`, which `ssh-keygen` has written by
+  default since OpenSSH 7.8, `-t rsa` included) cannot authenticate there at all,
+  and Ed25519 keys cannot be used by it in any format. The failure names this
+  rather than reporting `unknown error`; the fix is `ssh-keygen -p -m PEM -f
+  <key>` on an RSA or DSA key, or importing one that is already PEM. Do not
+  hand-build a key for this app: `keys algorithm` reports the type this build can
+  authenticate with and `keys generate` produces it, so the key the app generates
+  is always one the app can use.
+- **Windows links OpenSSL, not WinCNG.** `src-tauri/Cargo.toml` enables `ssh2`'s
+  `openssl-on-win32` together with `vendored-openssl`, so every platform this
+  project builds now offers curve25519, ed25519/ECDSA host keys, AES-GCM and
+  `chacha20-poly1305`, reads the OpenSSH container format, and completes a
+  handshake with an OpenSSH 10.0+ server. A WinCNG build could not reach that
+  last point at all: it offers only the `diffie-hellman-group*` exchanges, which
+  OpenSSH 10.0 removed, so the negotiation had no common algorithm and failed
+  before authentication with `Session(-5) Unable to exchange encryption keys` —
+  a failure that looks nothing like a key problem. The bundled OpenSSL is built
+  from source and linked statically, so no `libssl*.dll`/`libcrypto*.dll` needs
+  to ship. Building it needs `nmake` plus a *full* Perl, which is why
+  `.cargo/config.toml` pins `OPENSSL_SRC_PERL` to `scripts/win-perl.cmd` — the
+  Perl bundled with Git for Windows is trimmed and cannot drive OpenSSL's
+  `Configure`. NASM is optional and only turns on OpenSSL's assembly routines.
 
 ---
 
