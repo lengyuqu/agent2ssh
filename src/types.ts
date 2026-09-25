@@ -471,6 +471,11 @@ export type SshKeyInfo = {
   created_at?: string | null;
 };
 
+// Rust: keys.rs — KeyAlgorithm
+// "rsa" means traditional PKCS#1 PEM, which is the only private-key encoding
+// libssh2's WinCNG backend can read. "ed25519" uses the OpenSSH container.
+export type KeyAlgorithm = "ed25519" | "rsa";
+
 // Rust: types.rs — ConnectionStatus
 export type ConnectionStatus = {
   host: string;

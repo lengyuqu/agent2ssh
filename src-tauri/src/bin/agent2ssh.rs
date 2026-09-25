@@ -334,6 +334,11 @@ enum Commands {
         #[arg(long, add = ArgValueCandidates::new(host_candidates))]
         hosts: Option<Vec<String>>,
     },
+    /// Manage the SSH key pairs in the agent2ssh keys directory
+    Keys {
+        #[command(subcommand)]
+        command: KeyCommands,
+    },
     /// Manage approval policies for high-risk command authorization
     Policy {
         #[command(subcommand)]
@@ -467,6 +472,62 @@ enum KnownHostsCommands {
         /// Port the entry was recorded under
         #[arg(long, default_value_t = 22)]
         port: u16,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// A key algorithm the CLI accepts. Deliberately a clap enum rather than a
+/// free-form string: it gives shell completion, a parse error that names the
+/// accepted values, and an exhaustive match onto `KeyAlgorithm` so the two can
+/// never disagree about what the CLI can ask for.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum KeyTypeArg {
+    Ed25519,
+    Rsa,
+}
+
+impl KeyTypeArg {
+    fn algorithm(self) -> agent2ssh::keys::KeyAlgorithm {
+        match self {
+            Self::Ed25519 => agent2ssh::keys::KeyAlgorithm::Ed25519,
+            Self::Rsa => agent2ssh::keys::KeyAlgorithm::Rsa,
+        }
+    }
+}
+
+#[derive(Debug, Subcommand)]
+enum KeyCommands {
+    /// Show the key algorithm this build can authenticate with
+    ///
+    /// This is a property of the SSH library agent2ssh links, not of the host
+    /// OS: a build whose libssh2 uses the WinCNG backend cannot read the OpenSSH
+    /// private-key container, so it recommends RSA written as traditional PEM
+    /// (`-----BEGIN RSA PRIVATE KEY-----`). Scripts that provision a key should
+    /// ask here rather than assume a type, or the key they generate may be one
+    /// this build cannot use.
+    Algorithm {
+        /// Print only the algorithm name (for scripts)
+        #[arg(long)]
+        name: bool,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Generate a key pair in the agent2ssh keys directory
+    Generate {
+        /// Key name, used as the private key filename
+        name: String,
+        /// Algorithm to generate: ed25519 or rsa
+        ///
+        /// Defaults to `keys algorithm`, i.e. whichever type this build can
+        /// actually authenticate with.
+        #[arg(long = "type", value_name = "ALGORITHM")]
+        key_type: Option<KeyTypeArg>,
+        /// Comment written into the public key
+        #[arg(long)]
+        comment: Option<String>,
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -3091,6 +3152,57 @@ async fn async_main() -> Result<()> {
                 }
             }
         }
+        Commands::Keys { command } => match command {
+            KeyCommands::Algorithm { name, json } => {
+                let algorithm = agent2ssh::keys::KeyAlgorithm::default_for_build();
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "algorithm": algorithm.as_str(),
+                            // Only meaningful for RSA, which is the one type the
+                            // app sizes itself.
+                            "bits": (algorithm == agent2ssh::keys::KeyAlgorithm::Rsa)
+                                .then_some(agent2ssh::keys::RSA_BITS),
+                            // The probe the recommendation is derived from, so a
+                            // surprising answer can be explained from the output.
+                            "reads_openssh_private_keys":
+                                agent2ssh::ssh_key_format::reads_openssh_private_keys(),
+                        }))?
+                    );
+                } else if name {
+                    println!("{}", algorithm.as_str());
+                } else {
+                    println!("{}", algorithm.as_str());
+                    if algorithm == agent2ssh::keys::KeyAlgorithm::Rsa {
+                        println!(
+                            "  this build cannot read OpenSSH-format private keys, so RSA is \
+                             written as traditional PEM"
+                        );
+                    }
+                }
+            }
+            KeyCommands::Generate {
+                name,
+                key_type,
+                comment,
+                json,
+            } => {
+                let algorithm = match key_type {
+                    Some(key_type) => key_type.algorithm(),
+                    None => agent2ssh::keys::KeyAlgorithm::default_for_build(),
+                };
+                let key =
+                    agent2ssh::keys::generate_key_core_with(&name, comment.as_deref(), algorithm)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&key)?);
+                } else {
+                    // The private key path alone: this is what a script needs to
+                    // feed `--key`, `ssh -i` or `AGENT2SSH_TEST_SSH_KEY`.
+                    println!("{}", key.private_path);
+                }
+            }
+        },
         Commands::Policy { command } => match command {
             PolicyCommands::Validate { path, json } => {
                 let policy = validate_policy_path(path.as_deref())?;

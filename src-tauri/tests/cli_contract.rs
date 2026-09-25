@@ -695,3 +695,111 @@ async fn b40_known_hosts_forget_exposes_json_and_port() {
         "forget must take a host argument"
     );
 }
+
+// ── Key generation surface ─────────────────────────────────────────────────
+
+/// The key algorithms libssh2 accepts depend on the crypto backend the SSH
+/// library was built against, so "generate a key" is not portable: a build whose
+/// libssh2 uses WinCNG cannot read the OpenSSH private-key container that
+/// `ssh-keygen` writes, and Ed25519 is impossible there in any form. `keys
+/// algorithm` exists so a script can ask instead of guess, and `keys generate`
+/// so it can act on the answer.
+///
+/// Pinned here: the recommendation never contradicts the readability probe
+/// reported beside it, `generate` with no `--type` produces a key matching the
+/// recommendation, and it prints the private key path on stdout as its only
+/// output — which is what makes `--key "$(agent2ssh keys generate …)"` work.
+#[tokio::test]
+async fn keys_help_algorithm_and_generate_contract() {
+    let (stdout, _stderr, code) = run_cli(&["keys", "--help"]).await;
+    assert_eq!(code, Some(0), "keys --help must exit 0");
+    for command in ["algorithm", "generate"] {
+        assert!(stdout.contains(command), "keys help must mention {command}");
+    }
+
+    let dir = unique_temp_dir("keys-generate");
+
+    let (stdout, stderr, code) = run_cli_in_dir(&dir, &["keys", "algorithm", "--json"]).await;
+    assert_eq!(code, Some(0), "keys algorithm failed: {stderr}");
+    let reported: serde_json::Value = serde_json::from_str(&stdout).expect("algorithm JSON");
+    let algorithm = reported["algorithm"]
+        .as_str()
+        .expect("algorithm field")
+        .to_string();
+    assert!(
+        matches!(algorithm.as_str(), "ed25519" | "rsa"),
+        "unexpected algorithm: {algorithm}"
+    );
+    assert_eq!(
+        algorithm == "ed25519",
+        reported["reads_openssh_private_keys"]
+            .as_bool()
+            .expect("reads_openssh_private_keys field"),
+        "the recommendation contradicts the probe it is derived from: {reported}"
+    );
+
+    // `--name` is the form a script reads; it must not drift from `--json`.
+    let (stdout, stderr, code) = run_cli_in_dir(&dir, &["keys", "algorithm", "--name"]).await;
+    assert_eq!(code, Some(0), "keys algorithm --name failed: {stderr}");
+    assert_eq!(stdout.trim(), algorithm, "--name and --json disagree");
+
+    let (stdout, stderr, code) = run_cli_in_dir(&dir, &["keys", "generate", "cli-contract"]).await;
+    assert_eq!(code, Some(0), "keys generate failed: {stderr}");
+    let private_path = std::path::PathBuf::from(stdout.trim());
+    assert!(
+        private_path.is_file(),
+        "generate must print the private key path, printed {stdout:?}"
+    );
+    let public_path = std::path::PathBuf::from(format!("{}.pub", private_path.display()));
+    assert!(public_path.is_file(), "the public key must be written too");
+
+    // The pair on disk has to match the recommendation, or a script that skipped
+    // `keys algorithm` would generate a key this build cannot authenticate with.
+    let private_raw = std::fs::read_to_string(&private_path).expect("read private key");
+    let public_raw = std::fs::read_to_string(&public_path).expect("read public key");
+    match algorithm.as_str() {
+        "rsa" => {
+            assert!(
+                private_raw.starts_with("-----BEGIN RSA PRIVATE KEY-----"),
+                "a build that cannot read the OpenSSH container must not write one"
+            );
+            assert!(public_raw.starts_with("ssh-rsa "), "{public_raw}");
+        }
+        _ => {
+            assert!(private_raw.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----"));
+            assert!(public_raw.starts_with("ssh-ed25519 "), "{public_raw}");
+        }
+    }
+
+    // An explicit --type still wins, and its output is the full record.
+    let (stdout, stderr, code) = run_cli_in_dir(
+        &dir,
+        &[
+            "keys",
+            "generate",
+            "cli-explicit",
+            "--type",
+            "rsa",
+            "--json",
+        ],
+    )
+    .await;
+    assert_eq!(code, Some(0), "keys generate --type rsa failed: {stderr}");
+    let generated: serde_json::Value = serde_json::from_str(&stdout).expect("generate JSON");
+    assert_eq!(generated["key_type"], "rsa");
+    assert!(generated["public_key"]
+        .as_str()
+        .expect("public_key field")
+        .starts_with("ssh-rsa "));
+
+    // An unusable type name is a usage error, not a silent fallback.
+    let (_, stderr, code) =
+        run_cli_in_dir(&dir, &["keys", "generate", "cli-bad", "--type", "dsa"]).await;
+    assert_eq!(
+        code,
+        Some(2),
+        "an unknown --type must be rejected: {stderr}"
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}

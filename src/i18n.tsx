@@ -487,6 +487,12 @@ const zh: Record<string, string> = {
   "Key name (e.g. id-work)": "密钥名称（例如 id-work）",
   "Comment (optional)": "备注（可选）",
   "Generate Ed25519 Key": "生成 Ed25519 密钥",
+  "RSA (traditional PEM)": "RSA（传统 PEM）",
+  "recommended": "推荐",
+  "This platform's SSH library cannot read Ed25519 keys, so a key generated here will not authenticate. Choose RSA to get a usable key.":
+    "当前平台的 SSH 库无法读取 Ed25519 密钥，在这里生成的此类密钥无法用于认证。请选择 RSA 以获得可用的密钥。",
+  "RSA keys are written as traditional PEM (`-----BEGIN RSA PRIVATE KEY-----`) because that is the only private-key encoding this platform's SSH library can read.":
+    "RSA 密钥以传统 PEM（`-----BEGIN RSA PRIVATE KEY-----`）写出，因为这是当前平台 SSH 库唯一能读取的私钥格式。",
   "Path to private key (e.g. ~/.ssh/id_rsa)": "私钥路径（例如 ~/.ssh/id_rsa）",
   "Name (optional, defaults to filename)": "名称（可选，默认文件名）",
   "Import Key": "导入密钥",

@@ -62,6 +62,18 @@ toml = "0.8"
 reqwest = { version = "0.12", features = ["json", "blocking"] }
 ssh2 = "0.9"
 ssh-key = { version = "0.7.0-rc.10", features = ["ed25519"] }
+# Key generation for the one RSA encoding libssh2's WinCNG backend can read.
+# `ssh-key` generates RSA but cannot write a private key as traditional PEM —
+# it only emits the OpenSSH container, whose parser is absent from WinCNG — so
+# the PKCS#1 encoder has to come from `rsa` itself. Pinned to 0.9 on purpose:
+# `ssh-key` 0.7.0-rc.10 asks for `rsa 0.10.0-rc.18`, and `rand_core` 0.10, both
+# pre-releases, for a code path this crate does not use.
+rsa = "0.9"
+# Traits only: `rsa` requires a `CryptoRngCore`, and the adapter in `keys.rs`
+# fulfils it from the crate's existing `fill_entropy`. The `getrandom` feature is
+# deliberately left off so this does not add a second entropy source — nor a
+# second `getrandom` major version next to the 0.4 this crate already uses.
+rand_core = "0.6"
 getrandom = "0.4"
 hmac = "0.12"
 sha2 = "0.10"
@@ -106,3 +118,16 @@ tower = { version = "0.4", features = ["util"] }
 http-body-util = "0.1"
 serde_json = "1"
 serial_test = "3"
+
+# RSA key generation is pure big-integer arithmetic, and `num-bigint-dig` is
+# roughly two orders of magnitude slower when built without optimisation: the
+# 3072-bit key the key-generation tests produce took long enough to look like a
+# hang, turning a unit test into a timeout. Optimising this one crate keeps the
+# debug profile's fast builds for everything else while making the tests usable.
+[profile.dev.package.num-bigint-dig]
+opt-level = 3
+
+# Same reasoning for the test profile, which `cargo test` uses for dependencies
+# by default only at `opt-level = 0`.
+[profile.test.package.num-bigint-dig]
+opt-level = 3

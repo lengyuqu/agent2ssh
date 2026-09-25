@@ -43,6 +43,7 @@ pub mod shell_profile;
 pub mod snippets;
 pub mod ssh_algo;
 pub mod ssh_config;
+pub mod ssh_key_format;
 pub mod store;
 pub mod telemetry;
 pub mod types;

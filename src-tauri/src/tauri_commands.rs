@@ -1,5 +1,6 @@
 use crate::keys::{
-    delete_key_core, generate_key_core, import_key_core, list_keys_core, SshKeyInfo,
+    delete_key_core, generate_key_core_with, import_key_core, list_keys_core, KeyAlgorithm,
+    SshKeyInfo,
 };
 use crate::notify::{load_webhook_config, save_webhook_config, WebhookConfig};
 use crate::{
@@ -2732,9 +2733,31 @@ pub fn list_keys() -> Result<Vec<SshKeyInfo>, String> {
     list_keys_core().map_err(|e| e.to_string())
 }
 
+/// The key algorithm this build recommends, so the UI can preselect it.
+///
+/// Resolved on this side because it is a property of the linked SSH library,
+/// not of the host OS: see [`KeyAlgorithm::default_for_build`].
 #[tauri::command]
-pub fn generate_key(name: String, comment: Option<String>) -> Result<SshKeyInfo, String> {
-    generate_key_core(&name, comment.as_deref()).map_err(|e| e.to_string())
+pub fn default_key_algorithm() -> String {
+    KeyAlgorithm::default_for_build().as_str().to_string()
+}
+
+/// Generate a key pair. `algorithm` is `"ed25519"` or `"rsa"`; `None` uses the
+/// algorithm this build can actually authenticate with.
+#[tauri::command]
+pub fn generate_key(
+    name: String,
+    comment: Option<String>,
+    algorithm: Option<String>,
+) -> Result<SshKeyInfo, String> {
+    let algorithm = match algorithm.as_deref() {
+        None => KeyAlgorithm::default_for_build(),
+        Some(requested) => KeyAlgorithm::from_name(requested).ok_or_else(|| {
+            format!("unknown key algorithm '{requested}': expected 'ed25519' or 'rsa'")
+        })?,
+    };
+
+    generate_key_core_with(&name, comment.as_deref(), algorithm).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -3248,6 +3271,7 @@ pub fn run_tauri() {
             redact_for_clipboard,
             // SSH Keys
             list_keys,
+            default_key_algorithm,
             generate_key,
             import_key,
             delete_key,

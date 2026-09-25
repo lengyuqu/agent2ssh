@@ -1,10 +1,16 @@
 use anyhow::{anyhow, Result};
+use base64::Engine as _;
+use rand_core::{CryptoRng, RngCore};
+use rsa::pkcs1::{EncodeRsaPrivateKey, LineEnding as PemLineEnding};
+use rsa::traits::PublicKeyParts;
+use rsa::RsaPrivateKey;
 use serde::{Deserialize, Serialize};
 use ssh_key::{
     private::{Ed25519Keypair, KeypairData},
     LineEnding, PrivateKey,
 };
 use std::path::PathBuf;
+use zeroize::Zeroizing;
 
 use crate::{
     path_resolver::expand_tilde,
@@ -142,8 +148,338 @@ pub fn list_keys_core() -> Result<Vec<SshKeyInfo>> {
     Ok(keys)
 }
 
-/// Generate a new Ed25519 key pair
+/// Bits used for generated RSA keys.
+///
+/// 3072 is the smallest size that reaches a 128-bit security level, and is what
+/// `ssh-keygen -t rsa` has defaulted to since OpenSSH 9.5. It is also the size
+/// verified end to end against a real `sshd` in the Windows container fixture,
+/// so the number in the UI is a number that has actually authenticated.
+pub const RSA_BITS: usize = 3072;
+
+/// Below this, an RSA key no longer reaches the 128-bit security level the app
+/// advertises, so generation refuses rather than producing a weak key.
+const RSA_BITS_MIN: usize = 2048;
+
+/// A key algorithm this app can generate.
+///
+/// The set is deliberately tiny, and the default is derived from what the
+/// linked libssh2 can authenticate with — not from the host OS. See
+/// [`KeyAlgorithm::default_for_build`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum KeyAlgorithm {
+    /// Ed25519, written in the OpenSSH private-key container.
+    ///
+    /// The better key: smaller, faster, and not dependent on prime generation.
+    /// Unusable on a WinCNG build, which cannot read the container format.
+    Ed25519,
+    /// RSA, written as traditional PKCS#1 PEM (`-----BEGIN RSA PRIVATE KEY-----`).
+    ///
+    /// The only key that authenticates on a WinCNG build, because that backend
+    /// reads exactly two PEM headers and cannot parse the OpenSSH container —
+    /// see [`crate::ssh_key_format`].
+    Rsa,
+}
+
+impl KeyAlgorithm {
+    /// The algorithm to use when the caller expresses no preference.
+    ///
+    /// Driven by [`crate::ssh_key_format::generated_key_type_is_usable`], so a
+    /// build that can read OpenSSH containers gets Ed25519 and a WinCNG build
+    /// gets the RSA-PEM form it can actually use. Because the probe reads the
+    /// build's own algorithm list, enabling `ssh2`'s `openssl-on-win32` feature
+    /// flips this to Ed25519 without any change here.
+    ///
+    /// Deliberately not `impl Default`: this consults a capability probe, and a
+    /// silent default that can pick RSA is worth spelling out at each call site.
+    pub fn default_for_build() -> Self {
+        if crate::ssh_key_format::generated_key_type_is_usable() {
+            Self::Ed25519
+        } else {
+            Self::Rsa
+        }
+    }
+
+    /// Parse an algorithm name from a UI or IPC payload, case-insensitively.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "ed25519" => Some(Self::Ed25519),
+            "rsa" => Some(Self::Rsa),
+            _ => None,
+        }
+    }
+
+    /// The value carried over IPC and shown in the UI (`SshKeyInfo::key_type`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ed25519 => "ed25519",
+            Self::Rsa => "rsa",
+        }
+    }
+}
+
+/// A freshly generated key pair, still in memory.
+///
+/// The private half stays in a [`Zeroizing`] buffer right up to the `write`, so
+/// the only plain copy on the heap is the one `std::fs::write` is handed.
+struct GeneratedKeyPair {
+    private_pem: Zeroizing<String>,
+    /// The single-line `ssh-…` form an `authorized_keys` file expects, without
+    /// a trailing newline.
+    public_openssh: String,
+    key_type: &'static str,
+}
+
+/// The raw entropy source: fills `dest` entirely, or fails.
+type EntropySource = fn(&mut [u8]) -> Result<()>;
+
+/// The message used when generation aborts because entropy is unavailable. The
+/// caller normally replaces it with the recorded, more specific reason; it only
+/// reaches the user if the panic escapes [`generate_rsa_pair`], which would
+/// itself be a bug worth making loud.
+const ENTROPY_ABORT_MESSAGE: &str =
+    "aborted key generation because the operating system entropy source failed";
+
+/// Adapts [`fill_entropy`] to the infallible `RngCore` interface `rsa` needs.
+///
+/// `RngCore::fill_bytes` cannot report an error, and neither quiet option is
+/// acceptable:
+///
+/// * leaving the buffer zeroed or untouched makes `num-bigint-dig`'s `gen_prime`
+///   loop forever — it forces a fixed candidate (top two bits and the low bit
+///   set) and retries until *that same number* is prime, which for a composite
+///   is never;
+/// * substituting bytes from a deterministic generator risks emitting a key
+///   whose factors are recoverable.
+///
+/// So a failed read aborts instead: the reason is recorded, and `fill_bytes`
+/// panics rather than returning unusable bytes. `fill_bytes` is documented as
+/// allowed to panic when it cannot fill the buffer, and this is the same
+/// contract `rand_core::OsRng` has. [`generate_rsa_pair`] is the only caller,
+/// and it runs the generator under `catch_unwind` so the panic becomes an error
+/// rather than a crash.
+struct EntropyRng {
+    source: EntropySource,
+    failure: Option<String>,
+}
+
+impl EntropyRng {
+    fn new() -> Self {
+        Self {
+            source: fill_entropy,
+            failure: None,
+        }
+    }
+
+    /// Constructor for tests, so the failure path is reachable without breaking
+    /// the machine's entropy source.
+    #[cfg(test)]
+    fn with_source(source: EntropySource) -> Self {
+        Self {
+            source,
+            failure: None,
+        }
+    }
+
+    /// Take the recorded failure, if the source ever failed.
+    fn take_failure(&mut self) -> Option<String> {
+        self.failure.take()
+    }
+
+    fn read(&mut self, dest: &mut [u8]) {
+        // Once the source has failed there is nothing to gain from calling it
+        // again — one key search hits it hundreds of times — so abort at once.
+        if self.failure.is_some() {
+            panic!("{ENTROPY_ABORT_MESSAGE}");
+        }
+        if let Err(error) = (self.source)(dest) {
+            self.failure = Some(error.to_string());
+            panic!("{ENTROPY_ABORT_MESSAGE}");
+        }
+    }
+}
+
+impl RngCore for EntropyRng {
+    fn next_u32(&mut self) -> u32 {
+        let mut bytes = [0u8; 4];
+        self.read(&mut bytes);
+        u32::from_le_bytes(bytes)
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        let mut bytes = [0u8; 8];
+        self.read(&mut bytes);
+        u64::from_le_bytes(bytes)
+    }
+
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        self.read(dest);
+    }
+
+    /// Delegates to [`RngCore::fill_bytes`], which the trait explicitly allows.
+    ///
+    /// A `rand_core::Error` cannot be built here without pulling in a second
+    /// `getrandom` major version, and inventing one would hide the reason the
+    /// source gave. The panic is caught by [`generate_rsa_pair`] anyway.
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> std::result::Result<(), rand_core::Error> {
+        self.fill_bytes(dest);
+        Ok(())
+    }
+}
+
+impl CryptoRng for EntropyRng {}
+
+/// The message inside a panic payload, for reporting a caught panic.
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| payload.downcast_ref::<&str>().map(|text| text.to_string()))
+        .unwrap_or_else(|| "the generator panicked".to_string())
+}
+
+/// Generate an Ed25519 pair in the OpenSSH container format.
+fn generate_ed25519_pair(comment: &str) -> Result<GeneratedKeyPair> {
+    let mut seed = [0u8; ssh_key::private::Ed25519PrivateKey::BYTE_SIZE];
+    fill_entropy(&mut seed)?;
+    let keypair = Ed25519Keypair::from_seed(&seed);
+    let private_key = PrivateKey::new(KeypairData::from(keypair), comment)?;
+
+    Ok(GeneratedKeyPair {
+        private_pem: private_key.to_openssh(LineEnding::LF)?,
+        public_openssh: private_key.public_key().to_openssh()?,
+        key_type: KeyAlgorithm::Ed25519.as_str(),
+    })
+}
+
+/// Generate an RSA pair in the one encoding libssh2's WinCNG backend can read.
+///
+/// The private key is traditional PKCS#1 PEM rather than the OpenSSH container
+/// `ssh-keygen` would write, because the container is unreadable on Windows. A
+/// key this app generates is the only kind a Windows user can be handed that
+/// actually authenticates, so the format matters more here than novelty.
+///
+/// The public key is still the standard single-line `ssh-rsa …` form, which is
+/// what every `authorized_keys` file and every server expects.
+fn generate_rsa_pair(bits: usize, comment: &str) -> Result<GeneratedKeyPair> {
+    if bits < RSA_BITS_MIN {
+        return Err(anyhow!(
+            "refusing to generate a {bits}-bit RSA key: the minimum is {RSA_BITS_MIN} bits"
+        ));
+    }
+
+    let mut rng = EntropyRng::new();
+
+    // Prime generation is driven by `rsa`, which only ever sees the infallible
+    // `RngCore` interface; `EntropyRng` aborts by panicking when entropy is
+    // unavailable. Catch that here so a broken entropy source surfaces as an
+    // error instead of taking the app down. `AssertUnwindSafe` is sound: `rng`
+    // is inspected immediately afterwards and neither `rsa` nor `rng` is left
+    // in a state that is observed by anyone else.
+    let generated = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        RsaPrivateKey::new(&mut rng, bits)
+    }));
+
+    // Consult the recorded reason before the panic payload: it names the real
+    // problem, while the payload only repeats the abort message.
+    if let Some(reason) = rng.take_failure() {
+        let _ = crate::diagnostics::append_diagnostic_log(
+            "error",
+            "keys",
+            "RSA key generation aborted: entropy unavailable",
+            Some(serde_json::json!({ "bits": bits, "reason": reason })),
+        );
+        return Err(anyhow!(
+            "could not generate an RSA key because the operating system entropy source failed: {reason}"
+        ));
+    }
+
+    let private_key = match generated {
+        Ok(Ok(key)) => key,
+        Ok(Err(error)) => return Err(anyhow!("could not generate an RSA key: {error}")),
+        // Reached when the generator itself panics — `num-bigint-dig` has an
+        // internal `panic!` in its primality test — so the payload is the only
+        // description of what happened.
+        Err(payload) => {
+            return Err(anyhow!(
+                "could not generate an RSA key: {}",
+                panic_payload_message(&*payload)
+            ))
+        }
+    };
+
+    Ok(GeneratedKeyPair {
+        private_pem: private_key
+            .to_pkcs1_pem(PemLineEnding::LF)
+            .map_err(|error| anyhow!("could not encode the generated RSA key as PEM: {error}"))?,
+        public_openssh: encode_ssh_rsa_public_key(&private_key, comment),
+        key_type: KeyAlgorithm::Rsa.as_str(),
+    })
+}
+
+/// Encode an RSA public key as the single-line `ssh-rsa <base64> [comment]` form
+/// an `authorized_keys` file expects.
+///
+/// Hand-rolled because `ssh-key` cannot produce it for a key that came from
+/// `rsa`: its `Mpint` type belongs to a pre-release `ssh-encoding` this crate
+/// does not otherwise depend on. The wire format is fixed by RFC 4253 §6.6, and
+/// `test_generate_key_core_with_rsa_writes_traditional_pem` checks this encoder
+/// against `ssh-key`'s own parser — and the E2E against a real sshd — so the two
+/// cannot silently diverge.
+fn encode_ssh_rsa_public_key(key: &RsaPrivateKey, comment: &str) -> String {
+    let mut blob = Vec::new();
+    push_ssh_string(&mut blob, b"ssh-rsa");
+    push_ssh_mpint(&mut blob, &key.e().to_bytes_be());
+    push_ssh_mpint(&mut blob, &key.n().to_bytes_be());
+
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&blob);
+    if comment.is_empty() {
+        format!("ssh-rsa {encoded}")
+    } else {
+        format!("ssh-rsa {encoded} {comment}")
+    }
+}
+
+/// Append a length-prefixed byte string (`string` in RFC 4251 §5).
+fn push_ssh_string(buffer: &mut Vec<u8>, value: &[u8]) {
+    buffer.extend_from_slice(&(value.len() as u32).to_be_bytes());
+    buffer.extend_from_slice(value);
+}
+
+/// Append a length-prefixed non-negative integer (`mpint` in RFC 4251 §5).
+///
+/// `mpint` is signed, so a magnitude whose top bit is set needs a leading zero
+/// byte to stay positive. `e` and `n` are always positive, so nothing else is
+/// required: no sign byte for negatives, and no truncation of leading zeros
+/// because `to_bytes_be` is already minimal.
+fn push_ssh_mpint(buffer: &mut Vec<u8>, magnitude: &[u8]) {
+    let pad = magnitude.first().is_some_and(|byte| byte & 0x80 != 0);
+    let length = magnitude.len() + usize::from(pad);
+
+    buffer.extend_from_slice(&(length as u32).to_be_bytes());
+    if pad {
+        buffer.push(0);
+    }
+    buffer.extend_from_slice(magnitude);
+}
+
+/// Generate a new key pair using the algorithm that fits this build.
+///
+/// See [`generate_key_core_with`] to name the algorithm explicitly.
 pub fn generate_key_core(name: &str, comment: Option<&str>) -> Result<SshKeyInfo> {
+    generate_key_core_with(name, comment, KeyAlgorithm::default_for_build())
+}
+
+/// Generate a new key pair in `~/.agent2ssh/keys/`.
+///
+/// `comment` becomes the OpenSSH comment for Ed25519 keys and the trailing
+/// comment of the `ssh-rsa …` line for RSA keys — traditional PKCS#1 PEM has
+/// nowhere to store one, so the `.pub` file is the only place it can live.
+pub fn generate_key_core_with(
+    name: &str,
+    comment: Option<&str>,
+    algorithm: KeyAlgorithm,
+) -> Result<SshKeyInfo> {
     validate_key_name(name)?;
 
     let dir = keys_dir()?;
@@ -155,23 +491,21 @@ pub fn generate_key_core(name: &str, comment: Option<&str>) -> Result<SshKeyInfo
     }
 
     let comment = comment.unwrap_or("agent2ssh");
-    let mut seed = [0u8; ssh_key::private::Ed25519PrivateKey::BYTE_SIZE];
-    fill_entropy(&mut seed)?;
-    let keypair = Ed25519Keypair::from_seed(&seed);
-    let private_key = PrivateKey::new(KeypairData::from(keypair), comment)?;
-    let private_pem = private_key.to_openssh(LineEnding::LF)?;
-    let public_key = private_key.public_key().to_openssh()?;
+    let pair = match algorithm {
+        KeyAlgorithm::Ed25519 => generate_ed25519_pair(comment)?,
+        KeyAlgorithm::Rsa => generate_rsa_pair(RSA_BITS, comment)?,
+    };
 
-    std::fs::write(&private_path, private_pem.as_bytes())?;
+    std::fs::write(&private_path, pair.private_pem.as_bytes())?;
     restrict_private_key_permissions(&private_path)?;
-    std::fs::write(&public_path, format!("{public_key}\n"))?;
+    std::fs::write(&public_path, format!("{}\n", pair.public_openssh))?;
 
     Ok(SshKeyInfo {
         name: name.to_string(),
         private_path: private_path.display().to_string(),
         public_path: public_path.display().to_string(),
-        public_key,
-        key_type: "ed25519".to_string(),
+        public_key: pair.public_openssh,
+        key_type: pair.key_type.to_string(),
         created_at: Some(chrono::Utc::now().to_rfc3339()),
     })
 }
@@ -355,7 +689,9 @@ pub fn delete_key_core(name: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ssh_key_format::{detect_private_key_format, format_name, PrivateKeyFormat};
     use crate::store::CONFIG_DIR_ENV;
+    use std::path::Path;
 
     #[cfg(test)]
     fn entropy_source_name() -> &'static str {
@@ -377,33 +713,157 @@ mod tests {
         }
     }
 
-    #[test]
-    #[serial_test::serial]
-    fn test_generate_key_core_writes_openssh_ed25519_pair() {
-        let original_config_dir = std::env::var(CONFIG_DIR_ENV).ok();
+    /// Redirects the keys directory at a fresh temp dir for the duration of
+    /// `body`, restoring whatever `CONFIG_DIR_ENV` held before.
+    ///
+    /// `generate_key_core*` resolves `~/.agent2ssh/keys` through that variable,
+    /// so a test that writes keys must not run concurrently with another one —
+    /// every caller is `#[serial]`.
+    fn with_temp_config_dir<T>(body: impl FnOnce() -> T) -> T {
+        let original = std::env::var(CONFIG_DIR_ENV).ok();
         let config_dir =
             std::env::temp_dir().join(format!("agent2ssh-keygen-{}", uuid::Uuid::new_v4()));
         std::env::set_var(CONFIG_DIR_ENV, &config_dir);
 
-        let result = generate_key_core("id_ed25519_test", Some("agent2ssh-test")).unwrap();
-        let private_raw = std::fs::read_to_string(&result.private_path).unwrap();
-        let public_raw = std::fs::read_to_string(&result.public_path).unwrap();
-
-        let private_key = PrivateKey::from_openssh(&private_raw).unwrap();
-        assert_eq!(private_key.algorithm(), ssh_key::Algorithm::Ed25519);
-        assert_eq!(private_key.comment().as_str().unwrap(), "agent2ssh-test");
-        assert!(private_raw.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----"));
-        assert!(public_raw.starts_with("ssh-ed25519 "));
-        assert_eq!(
-            public_raw.trim(),
-            private_key.public_key().to_openssh().unwrap()
-        );
+        let outcome = body();
 
         let _ = std::fs::remove_dir_all(&config_dir);
-        match original_config_dir {
+        match original {
             Some(value) => std::env::set_var(CONFIG_DIR_ENV, value),
             None => std::env::remove_var(CONFIG_DIR_ENV),
         }
+        outcome
+    }
+
+    /// An entropy source that always fails, so the abort path is reachable
+    /// without touching the machine's real entropy source.
+    fn failing_entropy(_seed: &mut [u8]) -> Result<()> {
+        Err(anyhow!("synthetic entropy failure"))
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_generate_key_core_writes_openssh_ed25519_pair() {
+        with_temp_config_dir(|| {
+            let result = generate_key_core_with(
+                "id_ed25519_test",
+                Some("agent2ssh-test"),
+                KeyAlgorithm::Ed25519,
+            )
+            .unwrap();
+            let private_raw = std::fs::read_to_string(&result.private_path).unwrap();
+            let public_raw = std::fs::read_to_string(&result.public_path).unwrap();
+
+            let private_key = PrivateKey::from_openssh(&private_raw).unwrap();
+            assert_eq!(private_key.algorithm(), ssh_key::Algorithm::Ed25519);
+            assert_eq!(private_key.comment().as_str().unwrap(), "agent2ssh-test");
+            assert!(private_raw.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----"));
+            assert!(public_raw.starts_with("ssh-ed25519 "));
+            assert_eq!(
+                public_raw.trim(),
+                private_key.public_key().to_openssh().unwrap()
+            );
+            assert_eq!(result.key_type, "ed25519");
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_generate_key_core_with_rsa_writes_traditional_pem() {
+        with_temp_config_dir(|| {
+            let result =
+                generate_key_core_with("id_rsa_test", Some("agent2ssh-test"), KeyAlgorithm::Rsa)
+                    .unwrap();
+            let private_raw = std::fs::read_to_string(&result.private_path).unwrap();
+            let public_raw = std::fs::read_to_string(&result.public_path).unwrap();
+
+            // The whole point of this path: a header the WinCNG backend can
+            // load, and the container format it cannot.
+            assert!(
+                private_raw.starts_with("-----BEGIN RSA PRIVATE KEY-----"),
+                "unexpected private key header: {}",
+                private_raw.lines().next().unwrap_or_default()
+            );
+            assert!(!private_raw.contains("OPENSSH PRIVATE KEY"));
+            assert_eq!(
+                detect_private_key_format(Path::new(&result.private_path)),
+                PrivateKeyFormat::PemRsa
+            );
+
+            assert_eq!(result.key_type, "rsa");
+            assert_eq!(public_raw.trim(), result.public_key);
+            assert!(public_raw.starts_with("ssh-rsa "));
+            assert!(public_raw.ends_with("agent2ssh-test\n"), "{public_raw}");
+
+            // Cross-check the hand-rolled encoding against the library parser
+            // the rest of the app reads keys with, so the two cannot drift.
+            let parsed = ssh_key::PublicKey::from_openssh(public_raw.trim()).unwrap();
+            assert_eq!(parsed.algorithm(), ssh_key::Algorithm::Rsa { hash: None });
+            assert_eq!(parsed.comment().as_str().unwrap(), "agent2ssh-test");
+        });
+    }
+
+    /// The invariant that ties generation to [`crate::ssh_key_format`]: whatever
+    /// the app generates by default, this build must be able to read back. On
+    /// Windows that is the whole feature — Ed25519 would be generated, stored,
+    /// and then rejected by libssh2 at authentication time.
+    #[test]
+    #[serial_test::serial]
+    fn the_default_algorithm_produces_a_key_this_build_can_read() {
+        with_temp_config_dir(|| {
+            let result = generate_key_core("id_default", None).unwrap();
+            let format = detect_private_key_format(Path::new(&result.private_path));
+
+            match format {
+                // Traditional PEM, readable by every backend libssh2 ships.
+                PrivateKeyFormat::PemRsa | PrivateKeyFormat::PemDsa => {}
+                PrivateKeyFormat::OpensshContainer => assert!(
+                    crate::ssh_key_format::reads_openssh_private_keys(),
+                    "generated an OpenSSH container on a build that cannot read one"
+                ),
+                other => panic!("unexpected generated key format: {}", format_name(other)),
+            }
+
+            assert_eq!(result.key_type, KeyAlgorithm::default_for_build().as_str());
+        });
+    }
+
+    #[test]
+    fn rsa_generation_refuses_keys_below_the_minimum_size() {
+        let error = match generate_rsa_pair(1024, "agent2ssh-test") {
+            Ok(_) => panic!("a 1024-bit RSA key must be refused"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("1024"), "{error}");
+        assert!(error.contains(&RSA_BITS_MIN.to_string()), "{error}");
+    }
+
+    #[test]
+    fn entropy_failure_aborts_instead_of_returning_unusable_bytes() {
+        let mut rng = EntropyRng::with_source(failing_entropy);
+
+        // `RngCore::fill_bytes` cannot report an error, so the adapter aborts.
+        // Returning zeroed bytes instead would be worse than a failure: a fixed
+        // candidate makes the prime search spin forever, and a derivable one
+        // would be a broken key.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            rng.fill_bytes(&mut [0u8; 8])
+        }));
+        assert!(outcome.is_err(), "a failed read must not return bytes");
+        assert_eq!(
+            rng.take_failure().as_deref(),
+            Some("synthetic entropy failure")
+        );
+        assert!(rng.take_failure().is_none(), "the reason is taken once");
+    }
+
+    #[test]
+    fn algorithm_names_round_trip_through_the_ipc_form() {
+        for algorithm in [KeyAlgorithm::Ed25519, KeyAlgorithm::Rsa] {
+            assert_eq!(KeyAlgorithm::from_name(algorithm.as_str()), Some(algorithm));
+        }
+        assert_eq!(KeyAlgorithm::from_name("  RSA "), Some(KeyAlgorithm::Rsa));
+        assert_eq!(KeyAlgorithm::from_name("dsa"), None);
     }
 
     #[test]

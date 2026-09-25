@@ -42,6 +42,7 @@ import type {
   RiskLevel,
   SftpExchangeRequest,
   SftpExchangeResult,
+  KeyAlgorithm,
   SessionInfo,
   Snippet,
   SftpResult,
@@ -531,8 +532,15 @@ export const api = {
 
   // SSH Keys
   listKeys: () => invoke<SshKeyInfo[]>("list_keys"),
-  generateKey: (name: string, comment?: string) =>
-    invoke<SshKeyInfo>("generate_key", { name, comment: comment ?? null }),
+  // The algorithm this build can actually authenticate with, so the form can
+  // preselect it instead of guessing from the host OS.
+  defaultKeyAlgorithm: () => invoke<KeyAlgorithm>("default_key_algorithm"),
+  generateKey: (name: string, comment?: string, algorithm?: KeyAlgorithm) =>
+    invoke<SshKeyInfo>("generate_key", {
+      name,
+      comment: comment ?? null,
+      algorithm: algorithm ?? null,
+    }),
   importKey: (sourcePath: string, name?: string) =>
     invoke<SshKeyInfo>("import_key", { sourcePath, name: name ?? null }),
   deleteKey: (name: string) => invoke<void>("delete_key", { name }),

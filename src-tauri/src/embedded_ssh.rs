@@ -1732,6 +1732,22 @@ fn authenticate(
         let path = expand_tilde(key_path);
         let cache_key = format!("host:{}", host.name);
         let passphrase = passphrase_for_host(&cache_key, host.passphrase.as_deref());
+        // Record the key's encoding up front: file-format support lives in
+        // whichever crypto backend libssh2 was built with, so when key auth
+        // fails this is the field that explains it (no key material, no path).
+        let _ = crate::diagnostics::append_diagnostic_log(
+            "info",
+            "embedded_ssh",
+            "ssh private key inspected",
+            Some(serde_json::json!({
+                "host": host.name,
+                "key_format": crate::ssh_key_format::format_name(
+                    crate::ssh_key_format::detect_private_key_format(Path::new(&path)),
+                ),
+                "openssh_container_readable":
+                    crate::ssh_key_format::reads_openssh_private_keys(),
+            })),
+        );
         match session.userauth_pubkey_file(username, None, Path::new(&path), passphrase.as_deref())
         {
             Ok(()) => {
@@ -1755,6 +1771,18 @@ fn authenticate(
                             return Ok("publickey_file".into());
                         }
                     }
+                }
+                // libssh2's key-file loader returns a bare -1 that no error
+                // constant describes, so the raw failure reads
+                // "[Session(-1)] unknown error" and points at nothing. When the
+                // key file itself is the reason — an OpenSSH-container key on a
+                // build whose backend cannot read that format — report that
+                // instead, because it is actionable.
+                if let Some(hint) = crate::ssh_key_format::unusable_key_hint(Path::new(&path), &e) {
+                    return Err(anyhow!(
+                        "SSH key authentication failed for '{}': {hint}",
+                        host.name
+                    ));
                 }
                 return Err(e.into());
             }
