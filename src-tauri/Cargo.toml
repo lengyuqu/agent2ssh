@@ -111,6 +111,55 @@ fontdb = "0.23"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.48", features = ["Win32_System_Console", "Win32_Foundation"] }
+# Swap libssh2's Windows crypto backend from WinCNG to OpenSSL, and build that
+# OpenSSL from source so the linked binary has no OpenSSL DLL to find at load
+# time.
+#
+# WinCNG offers MODP Diffie-Hellman only. OpenSSH >= 10.0 dropped every
+# `diffie-hellman-group*` method, so a WinCNG client and a modern server share no
+# key-exchange algorithm at all and the handshake dies before authentication with
+# `Session(-5) Unable to exchange encryption keys`. OpenSSL also brings
+# curve25519/ECDH, ed25519/ECDSA host keys, AES-GCM, and the OpenSSH private-key
+# container parser that `ssh_key_format` probes for, so switching backends lifts
+# all four limits at once. Each one is observable from outside the code:
+# `agent2ssh algo get` gains the algorithms and `agent2ssh keys algorithm`
+# switches its recommendation from RSA to Ed25519 on its own.
+#
+# The two features are not interchangeable, and both are required:
+# - `openssl-on-win32` is what makes `libssh2-sys`'s build script define
+#   `LIBSSH2_OPENSSL`. That script tests the `CARGO_FEATURE_OPENSSL_ON_WIN32`
+#   environment variable alone and never inspects `vendored-openssl`, so with
+#   only the latter the build would compile an OpenSSL and still link WinCNG.
+# - `vendored-openssl` is what makes `openssl-sys` build OpenSSL from source
+#   (`openssl-src` 300.x, i.e. OpenSSL 3.x) instead of searching for an
+#   installed copy. Without it the build fails outright on any machine that has
+#   no OpenSSL — every CI runner included.
+# Together they keep the Windows binary self-contained: there is no
+# `libssl-*.dll`/`libcrypto-*.dll` to ship, and none that can be missing on a
+# user's machine. Linking a local pre-built OpenSSL instead works, but only
+# because its import libraries happen to be import libraries: the binary then
+# loads its crypto from a DLL and fails at startup where that DLL is absent,
+# which trades the key-exchange bug for a harder-to-diagnose one.
+#
+# Scoped to `cfg(windows)` on purpose: `libssh2-sys`'s `openssl-on-win32` turns
+# on its `cfg(windows)` `openssl-sys` dependency, whereas on Linux/macOS it would
+# pull in an unconditional one and demand a system OpenSSL. Keeping this entry
+# target-scoped is what lets the Unix CI legs keep building untouched.
+#
+# Building OpenSSL from source needs a C toolchain (MSVC, already required) and a
+# *full* Perl. Git for Windows ships a trimmed Perl that is not enough, so
+# `src-tauri/.cargo/config.toml` pins `OPENSSL_SRC_PERL` to
+# `scripts/win-perl.cmd`, which resolves a complete distribution and explains
+# itself when there is none. NASM is optional: `openssl-src` probes for it and
+# falls back to `no-asm` when it is missing, which still builds a working OpenSSL
+# without the assembly routines. It is installed in the Windows CI legs and
+# available from Scoop (`scoop install nasm`) so both ends produce the same,
+# faster binary rather than two kinds of build that differ only in speed.
+#
+# `OPENSSL_NO_VENDOR` is deliberately not set anywhere: it exists as an escape
+# hatch to go back to a pre-built OpenSSL, and setting it would quietly undo all
+# of the above.
+ssh2 = { version = "0.9", features = ["openssl-on-win32", "vendored-openssl"] }
 
 [dev-dependencies]
 axum = "0.7"
