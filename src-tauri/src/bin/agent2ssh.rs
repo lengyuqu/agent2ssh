@@ -334,6 +334,12 @@ enum Commands {
         #[arg(long, add = ArgValueCandidates::new(host_candidates))]
         hosts: Option<Vec<String>>,
     },
+    /// Discover containers running under Docker, wslc, Apple container or
+    /// Kubernetes that can be used as exec targets
+    Containers {
+        #[command(subcommand)]
+        command: ContainerCommands,
+    },
     /// Manage the SSH key pairs in the agent2ssh keys directory
     Keys {
         #[command(subcommand)]
@@ -472,6 +478,34 @@ enum KnownHostsCommands {
         /// Port the entry was recorded under
         #[arg(long, default_value_t = 22)]
         port: u16,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ContainerCommands {
+    /// List containers that can be exec'd into
+    List {
+        /// Include containers that are not running
+        #[arg(long)]
+        all: bool,
+        /// Limit discovery to one runtime: auto (default), docker, wslc, apple, k8s
+        #[arg(long, value_name = "RUNTIME")]
+        runtime: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show which local container runtime agent2ssh drives, and how it was chosen
+    Runtime {
+        /// Pin a runtime instead of auto-detecting: docker, wslc, apple
+        #[arg(long, value_name = "RUNTIME")]
+        runtime: Option<String>,
+        /// Print only the resolved binary path (for scripts)
+        #[arg(long)]
+        binary: bool,
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -3152,6 +3186,36 @@ async fn async_main() -> Result<()> {
                 }
             }
         }
+        Commands::Containers { command } => match command {
+            ContainerCommands::List { all, runtime, json } => {
+                let targets =
+                    agent2ssh::container_discovery::discover_containers(all, runtime.as_deref())?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&targets)?);
+                } else {
+                    print_container_targets(&targets);
+                }
+            }
+            ContainerCommands::Runtime {
+                runtime,
+                binary,
+                json,
+            } => {
+                let resolved = agent2ssh::container_runtime::select(runtime.as_deref())?;
+                if binary {
+                    println!("{}", resolved.binary.display());
+                } else if json {
+                    println!("{}", serde_json::to_string_pretty(&resolved.info(true))?);
+                } else {
+                    println!(
+                        "{}  {}  ({})",
+                        resolved.runtime.id(),
+                        resolved.binary.display(),
+                        resolved.runtime.display_name()
+                    );
+                }
+            }
+        },
         Commands::Keys { command } => match command {
             KeyCommands::Algorithm { name, json } => {
                 let algorithm = agent2ssh::keys::KeyAlgorithm::default_for_build();
@@ -4607,6 +4671,69 @@ fn print_redact_rules(rules: &[RedactRuleInfo], json: bool) -> Result<()> {
         println!("{origin:<8}  {}\t{}", rule.pattern, rule.replacement);
     }
     Ok(())
+}
+
+/// Truncate a table cell to `width` characters, marking the cut with an ellipsis.
+/// Counts characters, not bytes, so a container image with non-ASCII characters
+/// does not get cut mid-codepoint.
+fn truncate_cell(value: &str, width: usize) -> String {
+    if value.chars().count() <= width {
+        return value.to_string();
+    }
+    let kept: String = value.chars().take(width.saturating_sub(1)).collect();
+    format!("{kept}…")
+}
+
+/// Print discovered container targets as a table, or explain why the list is
+/// empty. The empty case lists every runtime with its state, so "no containers
+/// running" is distinguishable from "no runtime installed".
+fn print_container_targets(targets: &[agent2ssh::ContainerDiscoveryTarget]) {
+    if !targets.is_empty() {
+        println!(
+            "{:<8} {:<24} {:<30} {:<18} CONTEXT",
+            "PLATFORM", "NAME", "IMAGE", "STATUS"
+        );
+        println!("{:-<100}", "");
+        for target in targets {
+            println!(
+                "{:<8} {:<24} {:<30} {:<18} {}",
+                target.platform.id(),
+                truncate_cell(&target.container_name, 24),
+                truncate_cell(&target.image, 30),
+                truncate_cell(&target.status, 18),
+                target.context
+            );
+        }
+        println!(
+            "\n{} target(s). Use --json for the exec argv of each target.",
+            targets.len()
+        );
+        return;
+    }
+
+    println!("No containers found.");
+    let infos = agent2ssh::container_runtime::infos();
+    let any_available = infos.iter().any(|info| info.available);
+    if any_available {
+        println!("\nChecked runtimes:");
+    } else {
+        println!("\nNo container runtime is available on this host:");
+    }
+    for info in &infos {
+        let state = match (&info.binary, &info.unsupported_reason) {
+            (Some(binary), _) => binary.clone(),
+            (None, Some(reason)) => format!("unavailable — {reason}"),
+            (None, None) => "not installed".to_string(),
+        };
+        let marker = if info.selected { "*" } else { " " };
+        println!(
+            "{marker} {:<8} {:<22} {}",
+            info.runtime.id(),
+            info.display_name,
+            state
+        );
+    }
+    println!("\nPass --all to include stopped containers, or --runtime <id> to narrow discovery.");
 }
 
 /// Print a highlight rule set for a terminal.

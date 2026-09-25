@@ -827,6 +827,26 @@ const zh: Record<string, string> = {
   "No changes to save": "没有需要保存的改动",
   "Saved. New connections will use these algorithms.": "已保存。新连接将使用这些算法。",
   "Reverted to the built-in safe defaults.": "已恢复为内置安全默认值。",
+  // Container discovery module (Docker / wslc / Apple container / Kubernetes)
+  "Containers": "容器",
+  "{count} targets": "{count} 个目标",
+  "Include stopped": "含已停止",
+  "Include stopped containers": "包含已停止的容器",
+  "Refresh containers": "刷新容器",
+  "detected (auto)": "已检测（自动选择）",
+  // "detected" already exists above (McpAgentsPanel); reused, not redeclared.
+  "not installed": "未安装",
+  "unsupported here": "本平台不支持",
+  "Reading container runtimes...": "正在读取容器运行时…",
+  "No containers found": "未发现容器",
+  "No container runtime is available on this host": "本机没有可用的容器运行时",
+  "Start a container, then refresh — or include stopped ones.":
+    "启动一个容器后刷新，或勾选「含已停止」。",
+  "Install Docker, WSL containers (wslc) or Apple container on this host, then refresh. Only the runtimes this platform supports are listed.":
+    "请在本机安装 Docker、WSL 容器（wslc）或 Apple container 后刷新。列表中只会出现当前平台支持的运行时。",
+  "Copy exec command": "复制进入容器的命令",
+  "Open in terminal": "在终端中打开",
+  "Opening...": "正在打开…",
 };
 
 const I18nContext = createContext<I18nContextValue | null>(null);

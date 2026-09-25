@@ -621,7 +621,8 @@ export type Snippet = {
 
 // Rust: container_discovery.rs — ContainerDiscoveryTarget
 // Rust: container_discovery.rs — ContainerPlatform
-export type ContainerPlatform = "docker" | "k8s";
+// "docker" | "wslc" | "apple" are local runtimes; "k8s" is the orchestrator.
+export type ContainerPlatform = "docker" | "wslc" | "apple" | "k8s";
 
 export type ContainerDiscoveryTarget = {
   id: string;
@@ -629,10 +630,24 @@ export type ContainerDiscoveryTarget = {
   context: string;
   container_id: string;
   container_name: string;
+  image: string;
   status: string;
   exec_args: string[];
   exec_binary: string;
   namespace: string | null;
+};
+
+// Rust: container_runtime.rs — ContainerRuntimeInfo
+// One entry per runtime the build knows about, whether or not this host has it,
+// so the UI can explain an empty container list instead of showing nothing.
+export type ContainerRuntimeInfo = {
+  runtime: "docker" | "wslc" | "apple";
+  display_name: string;
+  binary: string | null;
+  supported: boolean;
+  available: boolean;
+  selected: boolean;
+  unsupported_reason: string | null;
 };
 
 // Rust: font_list.rs — FontInfo

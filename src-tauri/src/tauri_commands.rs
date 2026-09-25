@@ -1506,12 +1506,38 @@ pub fn redact_for_clipboard(text: String) -> String {
     crate::copy_redact::redact_for_clipboard(&text)
 }
 
-/// B33: Discover Docker containers and Kubernetes pods that can be used
-/// as exec targets.
+/// B33: Discover container exec targets — Docker, wslc, Apple container and
+/// Kubernetes pods.
+///
+/// Both arguments are optional so the historical no-argument call keeps
+/// working: `all` defaults to false (running containers only) and `runtime`
+/// defaults to auto-detection across every installed runtime.
 #[tauri::command]
 pub fn discover_containers(
+    all: Option<bool>,
+    runtime: Option<String>,
 ) -> Result<Vec<crate::container_discovery::ContainerDiscoveryTarget>, String> {
-    crate::container_discovery::discover_containers().map_err(|e| e.to_string())
+    crate::container_discovery::discover_containers(all.unwrap_or(false), runtime.as_deref())
+        .map_err(|e| e.to_string())
+}
+
+/// State of every container runtime this build knows about on this host
+/// (supported / installed / selected), so the UI can explain an empty list
+/// instead of showing nothing.
+#[tauri::command]
+pub fn container_runtimes() -> Vec<crate::container_runtime::ContainerRuntimeInfo> {
+    crate::container_runtime::infos()
+}
+
+/// Open a discovered container target in the user's terminal.
+///
+/// The argv is the one discovery produced (`exec_binary` + `exec_args`) and is
+/// validated against the runtimes this process resolved before anything is
+/// spawned — see `container_terminal` for what that check does and does not
+/// cover.
+#[tauri::command]
+pub fn launch_container_target(exec_binary: String, exec_args: Vec<String>) -> Result<(), String> {
+    crate::container_terminal::launch(&exec_binary, &exec_args)
 }
 
 /// Enumerate system fonts for terminal font selection.
@@ -3263,6 +3289,8 @@ pub fn run_tauri() {
             reset_redact_rules,
             // B33: Container Discovery
             discover_containers,
+            container_runtimes,
+            launch_container_target,
             // Font + Shell enumeration
             list_fonts,
             list_shells,

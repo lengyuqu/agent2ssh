@@ -3,6 +3,7 @@ import {
   ArrowLeftRight,
   Bot,
   BookOpen,
+  Boxes,
   Camera,
   Clapperboard,
   Cloud,
@@ -32,6 +33,7 @@ import AuditCharts from "./components/AuditCharts";
 import AuditPanel from "./components/AuditPanel";
 import Breadcrumb from "./components/Breadcrumb";
 import ConfigSnapshotsPanel from "./components/ConfigSnapshotsPanel";
+import ContainersPanel from "./components/ContainersPanel";
 import ConnectionTopology from "./components/ConnectionTopology";
 import CommandPalette, {
   type CommandPaletteModule,
@@ -111,6 +113,7 @@ const MODULES = [
   { id: "config", label: "Config Snapshots", icon: Camera },
   { id: "topology", label: "Topology", icon: Waypoints },
   { id: "recordings", label: "Recordings", icon: Clapperboard },
+  { id: "containers", label: "Containers", icon: Boxes },
 ] as const;
 
 // v3 3.1: sidebar render order (approvals on top). MODULES order above is
@@ -133,6 +136,7 @@ const SIDEBAR_ORDER: Array<(typeof MODULES)[number]["id"]> = [
   "config",
   "topology",
   "recordings",
+  "containers",
   "help",
 ];
 
@@ -154,6 +158,7 @@ const RELATED_MODULES: Partial<Record<(typeof MODULES)[number]["id"], Array<(typ
   approvals: ["execute", "audit"],
   sync: ["config"],
   config: ["sync"],
+  containers: ["terminal", "hosts"],
 };
 
 export default function App() {
@@ -1278,6 +1283,8 @@ export default function App() {
           )}
 
           {activeModule === "config" && <ConfigSnapshotsPanel />}
+
+          {activeModule === "containers" && <ContainersPanel />}
 
           {activeModule === "topology" && (
             <ConnectionTopology

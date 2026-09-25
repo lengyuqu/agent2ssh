@@ -696,6 +696,185 @@ async fn b40_known_hosts_forget_exposes_json_and_port() {
     );
 }
 
+// ── Container runtime surface (wslc / Apple container support) ─────────────
+//
+// These assert the *contract* of the multi-runtime container surface, not which
+// containers exist: a runner with no container CLI must still get a clean exit
+// code and an explainable message, and a runner with one must get parseable
+// JSON. Nothing here touches SSH.
+
+/// The top-level help must advertise the container surface, otherwise the
+/// feature is invisible to agents driving the CLI.
+#[tokio::test]
+async fn b41_root_help_lists_containers() {
+    let (stdout, _stderr, code) = run_cli(&["--help"]).await;
+    assert_eq!(code, Some(0));
+    assert!(
+        stdout.contains("containers"),
+        "root help must mention the containers subcommand, got:\n{stdout}"
+    );
+}
+
+#[tokio::test]
+async fn b41_containers_help_lists_list_and_runtime() {
+    let (stdout, _stderr, code) = run_cli(&["containers", "--help"]).await;
+    assert_eq!(code, Some(0));
+    assert!(stdout.contains("list"), "containers help must list 'list'");
+    assert!(
+        stdout.contains("runtime"),
+        "containers help must list 'runtime'"
+    );
+}
+
+#[tokio::test]
+async fn b41_containers_list_help_exposes_all_and_runtime_filter() {
+    let (stdout, _stderr, code) = run_cli(&["containers", "list", "--help"]).await;
+    assert_eq!(code, Some(0));
+    assert!(stdout.contains("--all"), "list must accept --all");
+    assert!(stdout.contains("--runtime"), "list must accept --runtime");
+    assert!(stdout.contains("--json"), "list must accept --json");
+}
+
+/// `containers list --json` is an array, always — even when nothing is
+/// installed — so a caller can iterate it without special-casing.
+#[tokio::test]
+async fn b41_containers_list_json_is_an_array() {
+    let dir = unique_temp_dir("containers-list-json");
+    let (stdout, stderr, code) = run_cli_in_dir(&dir, &["containers", "list", "--json"]).await;
+    assert_eq!(
+        code,
+        Some(0),
+        "containers list --json must exit 0; stderr:\n{stderr}"
+    );
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("containers list --json must emit valid JSON");
+    assert!(
+        parsed.is_array(),
+        "containers list --json must emit an array, got: {parsed}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Each target carries the argv needed to exec into it; a target without an
+/// exec binary or with fewer than four argv entries could not be run at all.
+#[tokio::test]
+async fn b41_containers_list_targets_carry_complete_exec_argv() {
+    let dir = unique_temp_dir("containers-list-argv");
+    let (stdout, _stderr, code) =
+        run_cli_in_dir(&dir, &["containers", "list", "--all", "--json"]).await;
+    assert_eq!(code, Some(0));
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    for target in parsed.as_array().expect("array") {
+        let binary = target["exec_binary"].as_str().unwrap_or_default();
+        assert!(!binary.is_empty(), "target has no exec_binary: {target}");
+        let args = target["exec_args"].as_array().expect("exec_args array");
+        assert!(args.len() >= 4, "target exec_args too short: {target}");
+        assert_eq!(
+            args[0].as_str(),
+            Some("exec"),
+            "expected an exec argv: {target}"
+        );
+        let platform = target["platform"].as_str().expect("platform string");
+        assert!(
+            ["docker", "wslc", "apple", "k8s"].contains(&platform),
+            "unexpected platform {platform}"
+        );
+        let id = target["id"].as_str().expect("id string");
+        assert!(
+            id.starts_with(&format!(
+                "{}_exec:",
+                if platform == "k8s" {
+                    "kubectl"
+                } else {
+                    platform
+                }
+            )),
+            "id {id} does not encode platform {platform}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An unknown runtime must fail loudly and name the valid ones, rather than
+/// silently discovering nothing.
+#[tokio::test]
+async fn b41_containers_rejects_unknown_runtime_filter() {
+    let (stdout, stderr, code) = run_cli(&["containers", "list", "--runtime", "podman"]).await;
+    assert_eq!(code, Some(1), "stdout:\n{stdout}");
+    assert!(
+        stderr.contains("podman"),
+        "stderr must name the bad value:\n{stderr}"
+    );
+    for runtime in ["docker", "wslc", "apple", "k8s"] {
+        assert!(
+            stderr.contains(runtime),
+            "stderr must list valid runtime '{runtime}':\n{stderr}"
+        );
+    }
+}
+
+/// `containers runtime` either resolves a runtime (exit 0) or explains that
+/// none is installed (exit 1). Both outcomes are contracts; a panic, a silent
+/// success with no runtime, or a bare error is not.
+#[tokio::test]
+async fn b41_containers_runtime_resolves_or_explains() {
+    let dir = unique_temp_dir("containers-runtime");
+    let (stdout, stderr, code) = run_cli_in_dir(&dir, &["containers", "runtime", "--json"]).await;
+    if code == Some(0) {
+        let parsed: serde_json::Value =
+            serde_json::from_str(&stdout).expect("runtime --json must be an object");
+        for key in [
+            "runtime",
+            "display_name",
+            "supported",
+            "available",
+            "selected",
+        ] {
+            assert!(
+                parsed.get(key).is_some(),
+                "runtime --json is missing '{key}': {parsed}"
+            );
+        }
+        assert_eq!(parsed["available"], serde_json::Value::Bool(true));
+        assert!(
+            ["docker", "wslc", "apple"].contains(&parsed["runtime"].as_str().unwrap_or_default()),
+            "unexpected runtime id in {parsed}"
+        );
+    } else {
+        assert_eq!(code, Some(1));
+        assert!(
+            stderr.contains("no container runtime found"),
+            "the no-runtime path must explain itself, got:\n{stderr}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `--binary` is the script-facing output: one line, no JSON, and it must agree
+/// with the JSON form when a runtime resolves.
+#[tokio::test]
+async fn b41_containers_runtime_binary_is_a_single_plain_line() {
+    let dir = unique_temp_dir("containers-runtime-binary");
+    let (stdout, _stderr, code) =
+        run_cli_in_dir(&dir, &["containers", "runtime", "--binary"]).await;
+    if code == Some(0) {
+        let lines: Vec<&str> = stdout.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "--binary must print exactly one line:\n{stdout}"
+        );
+        assert!(
+            !lines[0].contains('{'),
+            "--binary must not print JSON: {}",
+            lines[0]
+        );
+    } else {
+        assert_eq!(code, Some(1));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ── Key generation surface ─────────────────────────────────────────────────
 
 /// The key algorithms libssh2 accepts depend on the crypto backend the SSH

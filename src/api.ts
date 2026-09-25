@@ -57,6 +57,7 @@ import type {
   WebDavSyncStatus,
   WebhookConfig,
   ContainerDiscoveryTarget,
+  ContainerRuntimeInfo,
   FontInfo,
   ShellInfo,
 } from "./types";
@@ -361,8 +362,22 @@ export const api = {
     invoke<RedactRuleInfo[]>("remove_redact_rule", { pattern }),
   resetRedactRules: () => invoke<RedactRuleInfo[]>("reset_redact_rules"),
 
-  // B33: Container Discovery
-  discoverContainers: () => invoke<ContainerDiscoveryTarget[]>("discover_containers"),
+  // B33: Container Discovery. `all` includes stopped containers; `runtime`
+  // narrows discovery to one runtime ("docker" | "wslc" | "apple" | "k8s"),
+  // omitted or "auto" scans every installed one.
+  discoverContainers: (options?: { all?: boolean; runtime?: string }) =>
+    invoke<ContainerDiscoveryTarget[]>("discover_containers", {
+      all: options?.all ?? false,
+      runtime: options?.runtime ?? null,
+    }),
+  // Which container runtimes this build knows about on this host, and which one
+  // auto-detection picked. Readable when nothing is installed, so the UI can
+  // say why the list is empty.
+  containerRuntimes: () => invoke<ContainerRuntimeInfo[]>("container_runtimes"),
+  // Open a discovered target in the user's terminal. The backend re-validates
+  // the argv against the runtimes it resolved itself before spawning anything.
+  launchContainerTarget: (execBinary: string, execArgs: string[]) =>
+    invoke<void>("launch_container_target", { execBinary, execArgs }),
 
   // Font + Shell enumeration
   listFonts: () => invoke<FontInfo[]>("list_fonts"),

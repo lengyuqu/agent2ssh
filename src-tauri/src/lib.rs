@@ -5,6 +5,8 @@ pub mod backup_crypto;
 pub mod config_cache;
 pub mod connection;
 pub mod container_discovery;
+pub mod container_runtime;
+pub mod container_terminal;
 pub mod copy_redact;
 pub mod core;
 pub mod daemon_control;
@@ -174,6 +176,11 @@ pub use app_state::{
 };
 pub use backup_crypto::{decrypt_backup, encrypt_backup, is_encrypted_backup, ENCRYPTED_MAGIC};
 pub use container_discovery::{discover_containers, ContainerDiscoveryTarget, ContainerPlatform};
+pub use container_runtime::{
+    available as available_container_runtimes, infos as container_runtime_infos,
+    select as select_container_runtime, ContainerRuntime, ContainerRuntimeInfo, ResolvedRuntime,
+    RUNTIME_ENV as CONTAINER_RUNTIME_ENV,
+};
 pub use copy_redact::{
     load_copy_redact_rules, redact_for_clipboard, save_copy_redact_rules, CopyRedactRule,
 };
