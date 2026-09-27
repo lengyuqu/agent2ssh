@@ -281,6 +281,21 @@ fn append_diagnostic_log_inner(
     fields: Option<Value>,
     notify_sink: bool,
 ) -> Result<DiagnosticLogEntry> {
+    // AppState::new() loads the persisted approval store, which logs on the
+    // retention-cleanup / legacy-migration / malformed-line paths. Logging
+    // needs `diagnostic_lock`, which is a field of AppState itself, so a
+    // same-thread re-entrant `app_state()` here would deadlock on the
+    // OnceLock. Drop best-effort diagnostics emitted during initialization.
+    if crate::app_state::app_state_initializing() {
+        return Ok(DiagnosticLogEntry {
+            id: Uuid::new_v4().to_string(),
+            ts: Utc::now().to_rfc3339(),
+            level: normalize_level(level),
+            component: component.trim().to_string(),
+            message: redact_sensitive_text(message.trim()),
+            fields: redact_value(fields.unwrap_or_else(|| json!({}))),
+        });
+    }
     ensure_config_dir()?;
     // Two-tier lock matching store/audit: a process-local mutex serializes our
     // own threads, and a cross-process advisory file lock keeps the other
