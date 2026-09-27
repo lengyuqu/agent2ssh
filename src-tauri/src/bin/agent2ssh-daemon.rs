@@ -2238,6 +2238,222 @@ async fn session_list(
     ))
 }
 
+// ── Resident environment sessions ───────────────────────────────────────────
+//
+// Long-lived shells for `local:<id>` environments; the mechanism lives in
+// `agent2ssh::resident_session`, the policy (gate chain, scope, approval,
+// audit) lives here, exactly as it does for the one-shot /local-exec.
+
+#[derive(Debug, Deserialize)]
+struct ResidentOpenBody {
+    /// The environment to live in: `local:<id>` (`local:vs`, `local:pwsh`, ...).
+    host: String,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    force: bool,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    change_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResidentExecBody {
+    command: String,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    force: bool,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    change_id: Option<String>,
+    #[serde(default)]
+    side_effect: Option<String>,
+}
+
+/// Opening a session establishes an environment on this machine; it is not
+/// itself a shell command, so it is authorized and audited under a stable
+/// action string rather than borrowing some command's risk classification.
+const RESIDENT_OPEN_COMMAND: &str = "resident-session open";
+const RESIDENT_CLOSE_COMMAND: &str = "resident-session close";
+
+/// Open a resident session in a `local:<id>` environment.
+///
+/// Blocks until the shell is warm (the Visual Studio bootstrap — the slowest
+/// environment — runs once here), so the first exec pays no
+/// environment-establishment cost. The open is itself a preflight-guarded
+/// action keyed on the environment's host id, so a token scope or approval
+/// policy that governs `local:vs` execs governs `local:vs` sessions too.
+async fn resident_session_open(
+    State(s): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Json(req): Json<ResidentOpenBody>,
+) -> Result<Json<agent2ssh::resident_session::ResidentSessionInfo>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+
+    // Checked before the gate chain, for the same reason /local-exec checks
+    // its host first: the scope and approval checks below must be evaluated
+    // against the environment that will actually host the session, not an
+    // alias the client typed.
+    if !is_local_host(&req.host) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "resident sessions require host = '{LOCAL_ENV_PREFIX}<environment>', got '{}'",
+                req.host
+            ),
+        ));
+    }
+
+    let source = source_or_env_for_request(req.source.clone(), "daemon")?;
+    let PreflightResult { source, risk, .. } = preflight_guarded_request(
+        &s,
+        &auth,
+        &req.host,
+        host_tags(&req.host),
+        source,
+        RESIDENT_OPEN_COMMAND,
+        None,
+        req.force,
+        req.reason.clone(),
+        req.change_id.clone(),
+    )
+    .await?;
+
+    let started = Instant::now();
+    match agent2ssh::resident_session::resident_open_core(&req.host).await {
+        Ok(info) => {
+            append_operation_audit(
+                &source,
+                &req.host,
+                RESIDENT_OPEN_COMMAND,
+                risk,
+                Some(0),
+                started.elapsed().as_millis(),
+                None,
+            );
+            Ok(Json(info))
+        }
+        Err(error) => {
+            let message = error.to_string();
+            append_operation_audit(
+                &source,
+                &req.host,
+                RESIDENT_OPEN_COMMAND,
+                risk,
+                None,
+                started.elapsed().as_millis(),
+                Some(&message),
+            );
+            Err(err(StatusCode::BAD_REQUEST, message))
+        }
+    }
+}
+
+/// Run one command inside a resident session.
+///
+/// The command is authorized against the session's *own* host id — read from
+/// the registry, not from the request — so a resident command cannot ride a
+/// name the client made up. Per-command authorization means a resident
+/// session is never a weaker path than a one-shot exec: every command pays
+/// the same gate chain, every time.
+async fn resident_session_exec(
+    State(s): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<ResidentExecBody>,
+) -> Result<Json<ExecResult>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+
+    let host = agent2ssh::resident_session::session_host(id)
+        .await
+        .ok_or_else(|| {
+            err(
+                StatusCode::BAD_REQUEST,
+                format!("unknown resident session: {id}"),
+            )
+        })?;
+
+    let source = source_or_env_for_request(req.source.clone(), "daemon")?;
+    ensure_command_length(&req.command)?;
+    let PreflightResult { source, risk, .. } = preflight_guarded_request(
+        &s,
+        &auth,
+        &host,
+        host_tags(&host),
+        source,
+        &req.command,
+        None,
+        req.force,
+        req.reason.clone(),
+        req.change_id.clone(),
+    )
+    .await?;
+
+    let started = Instant::now();
+    let result = agent2ssh::resident_session::resident_exec_core(
+        id,
+        req.command,
+        req.timeout_secs,
+        risk,
+        &source,
+        req.reason,
+        req.change_id,
+        req.side_effect,
+    )
+    .await;
+    EXEC_COUNT.fetch_add(1, Ordering::Relaxed);
+    EXEC_TOTAL_DURATION_MS.fetch_add(started.elapsed().as_millis() as u64, Ordering::Relaxed);
+    result
+        .map(Json)
+        .map_err(|e| err(StatusCode::BAD_REQUEST, e))
+}
+
+/// List resident sessions.
+async fn resident_session_list(
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
+) -> Result<
+    Json<Vec<agent2ssh::resident_session::ResidentSessionSummary>>,
+    (StatusCode, Json<ErrorBody>),
+> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    Ok(Json(
+        agent2ssh::resident_session::resident_list_core().await,
+    ))
+}
+
+/// Close a resident session, killing its shell.
+async fn resident_session_close(
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    let started = Instant::now();
+    match agent2ssh::resident_session::resident_close_core(id).await {
+        Ok(host) => {
+            append_operation_audit(
+                &source_from_transport(),
+                &host,
+                RESIDENT_CLOSE_COMMAND,
+                RiskLevel::Low,
+                Some(0),
+                started.elapsed().as_millis(),
+                None,
+            );
+            Ok(Json(
+                serde_json::json!({ "closed": true, "id": id.to_string() }),
+            ))
+        }
+        Err(error) => Err(err(StatusCode::BAD_REQUEST, error.to_string())),
+    }
+}
+
 // ── Forwards ─────────────────────────────────────────────────────────────────
 
 async fn forward_add(
@@ -5251,6 +5467,26 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Resident environment sessions: reclaim shells no one has commanded for
+    // longer than the idle TTL (AGENT2SSH_RESIDENT_IDLE_TTL_SECS). A cheap
+    // sweep — sessions store their own last-active time; closing one kills
+    // its process group.
+    tokio::spawn(async {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            let reclaimed = agent2ssh::resident_session::reap_idle_sessions().await;
+            if reclaimed > 0 {
+                let _ = agent2ssh::append_diagnostic_log(
+                    "info",
+                    "resident_session",
+                    "reclaimed idle resident sessions",
+                    Some(serde_json::json!({ "count": reclaimed })),
+                );
+            }
+        }
+    });
+
     // Set the transport to Headless — the daemon serves via HTTP/SSE/WS.
     let _ = agent2ssh::set_host(agent2ssh::Host::Headless {
         sink: std::sync::Arc::new(|_event, _payload| true),
@@ -5381,6 +5617,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/sessions/:id/write", post(session_write))
         .route("/sessions/:id/read", get(session_read))
         .route("/sessions/:id", delete(session_close))
+        .route(
+            "/resident-sessions",
+            post(resident_session_open).get(resident_session_list),
+        )
+        .route("/resident-sessions/:id/exec", post(resident_session_exec))
+        .route("/resident-sessions/:id", delete(resident_session_close))
         .route("/forwards", post(forward_add).get(forward_list))
         .route("/forwards/multi", post(forward_add_multi))
         .route("/forwards/:id", delete(forward_remove))

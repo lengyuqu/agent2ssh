@@ -2233,6 +2233,76 @@ fn local_exec_route_runs_the_shared_preflight() {
     );
 }
 
+/// A resident session is a shell that stays alive between commands, which
+/// makes it *more* tempting to treat as a trusted channel — the session was
+/// opened under one authorization, and a later command might hope to ride on
+/// that. It must not: every command pays the same gate chain as a one-shot
+/// exec, keyed on the session's own host id (read from the registry, not from
+/// the request). The open must equally be a preflight-guarded action. Both
+/// facts live only in the handler bodies, so they are pinned at the source
+/// level, the same way `local_exec_route_runs_the_shared_preflight` does.
+#[test]
+fn resident_session_routes_run_the_shared_preflight() {
+    let daemon = include_str!("../src/bin/agent2ssh-daemon.rs");
+
+    assert!(
+        daemon.contains(r#""/resident-sessions""#),
+        "the /resident-sessions route is missing"
+    );
+    assert!(
+        daemon.contains(r#".route("/resident-sessions/:id/exec", post(resident_session_exec))"#),
+        "the /resident-sessions/:id/exec route is missing or misrouted"
+    );
+
+    // The open is itself a gated action, evaluated against the environment id
+    // the client named — after a local-host check, like /local-exec.
+    let open = handler_body(daemon, "async fn resident_session_open(");
+    let open_preflight = open
+        .find("preflight_guarded_request(")
+        .expect("resident_session_open does not run the shared gate chain");
+    let open_host_check = open
+        .find("is_local_host(&req.host)")
+        .expect("resident_session_open does not check for a local host id at all");
+    assert!(
+        open_host_check < open_preflight,
+        "resident_session_open must reject a non-local host *before* the gate chain runs"
+    );
+
+    // Exec authorizes against the session's own host id: the lookup from the
+    // registry must precede the gate chain, or a client could name any host
+    // alias it likes and borrow its scope entry.
+    let exec_body = handler_body(daemon, "async fn resident_session_exec(");
+    let exec_preflight = exec_body
+        .find("preflight_guarded_request(")
+        .expect("resident_session_exec does not run the shared gate chain");
+    let session_host = exec_body
+        .find("session_host(id)")
+        .expect("resident_session_exec does not authorize against the session's own host id");
+    assert!(
+        session_host < exec_preflight,
+        "resident_session_exec must read the session's host id *before* the gate \
+         chain runs, so the command is authorized against the environment the \
+         session actually lives in"
+    );
+}
+
+/// Extract one handler's body, ending at the next top-level async fn. Required
+/// rather than optional — a fallback to "the rest of the file" would let these
+/// assertions pass on another handler's preflight call.
+fn handler_body<'a>(source: &'a str, signature: &str) -> &'a str {
+    let start = source
+        .find(signature)
+        .unwrap_or_else(|| panic!("the daemon has no `{signature}` handler"));
+    let rest = &source[start + signature.len()..];
+    let end = rest.find("\nasync fn ").unwrap_or_else(|| {
+        panic!(
+            "`{signature}` is no longer followed by another top-level \
+             handler, so its body cannot be isolated and these checks would be vacuous"
+        )
+    });
+    &rest[..end]
+}
+
 #[test]
 fn exec_request_schema_includes_reason_and_change_id() {
     // Verify ExecRequest deserialization accepts reason and change_id fields,

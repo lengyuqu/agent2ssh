@@ -37,6 +37,7 @@ pub mod prompt_waiter;
 pub mod recording;
 pub mod redaction;
 pub mod remote;
+pub mod resident_session;
 pub mod risk_config;
 pub mod sanitize;
 pub mod secrets;

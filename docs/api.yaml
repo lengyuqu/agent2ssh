@@ -1556,6 +1556,128 @@ paths:
                 properties:
                   ok: { type: boolean }
 
+  /resident-sessions:
+    post:
+      summary: Open a resident session in a local terminal environment
+      description: |
+        Spawns a long-lived shell for a `local:<id>` environment (`local:pwsh`, `local:vs`,
+        `local:wsl[:<distribution>]`, ...) and blocks until it is warm, so later commands pay no
+        environment-establishment cost and the shell's own state (cwd, variables) persists across
+        commands. Shell state persisting is a semantic difference from one-shot `/local-exec`,
+        which stays the default.
+        Applies bearer-token scope, execution gate, execution limits, effective risk, and approval
+        policy keyed on the environment's host id; containers are refused (one-shot exec targets).
+        Sessions die with the daemon, on idle TTL (AGENT2SSH_RESIDENT_IDLE_TTL_SECS, default 600),
+        on a command timeout, or when a command exits the shell.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [host]
+              properties:
+                host: { type: string, description: "The `local:<id>` environment to live in" }
+                source: { type: string }
+                force: { type: boolean }
+                reason: { type: string }
+                change_id: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string, format: uuid }
+                  host: { type: string }
+                  label: { type: string }
+                  warmup_ms: { type: integer }
+        "400":
+          description: Unknown environment, container host, session cap reached, or authorization refused
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+    get:
+      summary: List resident sessions
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: string, format: uuid }
+                    host: { type: string }
+                    label: { type: string }
+                    idle_secs: { type: integer }
+                    dead: { type: boolean }
+
+  /resident-sessions/{id}/exec:
+    post:
+      summary: Run one command inside a resident session
+      description: |
+        The command is authorized per-call against the session's own host id through the same gate
+        chain as `/exec` and `/local-exec` (bearer-token scope, execution gate, execution limits,
+        effective risk, approval policy), so a resident session is never a weaker path than a
+        one-shot exec. Output is bounded by the session's rolling window; `truncated` and
+        `dropped_bytes` report it. A command that outlives `timeout_secs` kills the session.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [command]
+              properties:
+                command: { type: string }
+                timeout_secs: { type: integer }
+                source: { type: string }
+                force: { type: boolean }
+                reason: { type: string }
+                change_id: { type: string }
+                side_effect: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExecResult" }
+        "400":
+          description: Unknown or dead session, command timed out (session killed), or authorization refused
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /resident-sessions/{id}:
+    delete:
+      summary: Close a resident session, killing its shell
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  closed: { type: boolean }
+                  id: { type: string, format: uuid }
+        "400":
+          description: Unknown session
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /forwards:
     post:
       summary: Add a port forward tunnel
