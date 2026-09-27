@@ -167,18 +167,36 @@ pub fn launch(exec_binary: &str, exec_args: &[String]) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         let script = write_macos_launcher(&binary, exec_args)?;
-        let result = spawn_detached(
-            "open",
-            &[
-                "-a".to_string(),
-                "Terminal".to_string(),
-                script.display().to_string(),
-            ],
-        );
-        // Terminal has been handed the path; the file is no longer needed even
-        // if `open` reported a failure (Terminal may have started anyway).
-        let _ = std::fs::remove_file(&script);
-        result
+        // `open` is a short-lived helper: it exits once LaunchServices has the
+        // document, and Terminal reads the script afterwards. Two ordering
+        // rules follow. First, wait for `open` to exit — spawning it detached
+        // and deleting the file right away raced the helper's own path
+        // resolution and Terminal silently never appeared. Second, keep the
+        // file alive for a grace period after `open` succeeds, because the
+        // Terminal-side read is asynchronous. A failed `open` needs no grace
+        // period; the script is removed immediately.
+        let opened = std::process::Command::new("open")
+            .args(["-a".to_string(), "Terminal".to_string()])
+            .arg(&script)
+            .status()
+            .map_err(|e| format!("failed to start open: {e}"))
+            .and_then(|status| {
+                if status.success() {
+                    Ok(())
+                } else {
+                    Err(format!("open -a Terminal failed: {status}"))
+                }
+            });
+        if opened.is_ok() {
+            let cleanup = script.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(10));
+                let _ = std::fs::remove_file(&cleanup);
+            });
+        } else {
+            let _ = std::fs::remove_file(&script);
+        }
+        opened
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -203,6 +221,10 @@ pub fn launch(exec_binary: &str, exec_args: &[String]) -> Result<(), String> {
 }
 
 /// Start a detached child, reporting a spawn failure as a readable message.
+///
+/// Only the Windows and Linux branches use it: on macOS the launcher is the
+/// short-lived `open` helper, whose completion `launch` must wait for.
+#[cfg(any(windows, all(unix, not(target_os = "macos"))))]
 fn spawn_detached(program: &str, args: &[String]) -> Result<(), String> {
     std::process::Command::new(program)
         .args(args)

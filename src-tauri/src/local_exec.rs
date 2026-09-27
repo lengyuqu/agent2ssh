@@ -539,6 +539,12 @@ fn vs_install_path_from_vswhere(vs_root: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Locate `VsDevShell.bat` under one Visual Studio install root.
+///
+/// Windows-only by construction — every caller is behind `#[cfg(windows)]` —
+/// so the function is gated to match and does not compile (and cannot be
+/// flagged dead) on other platforms.
+#[cfg(windows)]
 fn vs_dev_shell_script_in(install: &Path) -> Option<PathBuf> {
     let script = install
         .join("Common7")
