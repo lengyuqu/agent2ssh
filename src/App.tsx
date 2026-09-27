@@ -22,6 +22,7 @@ import {
   Server,
   ShieldCheck,
   Terminal,
+  Timer,
   Waypoints,
   X,
 } from "lucide-react";
@@ -34,6 +35,7 @@ import AuditPanel from "./components/AuditPanel";
 import Breadcrumb from "./components/Breadcrumb";
 import ConfigSnapshotsPanel from "./components/ConfigSnapshotsPanel";
 import ContainersPanel from "./components/ContainersPanel";
+import ResidentSessionsPanel from "./components/ResidentSessionsPanel";
 import ConnectionTopology from "./components/ConnectionTopology";
 import CommandPalette, {
   type CommandPaletteModule,
@@ -114,6 +116,7 @@ const MODULES = [
   { id: "topology", label: "Topology", icon: Waypoints },
   { id: "recordings", label: "Recordings", icon: Clapperboard },
   { id: "containers", label: "Containers", icon: Boxes },
+  { id: "resident-sessions", label: "Resident Sessions", icon: Timer },
 ] as const;
 
 // v3 3.1: sidebar render order (approvals on top). MODULES order above is
@@ -1285,6 +1288,7 @@ export default function App() {
           {activeModule === "config" && <ConfigSnapshotsPanel />}
 
           {activeModule === "containers" && <ContainersPanel />}
+          {activeModule === "resident-sessions" && <ResidentSessionsPanel />}
 
           {activeModule === "topology" && (
             <ConnectionTopology

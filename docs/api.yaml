@@ -1656,6 +1656,39 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
 
   /resident-sessions/{id}:
+    get:
+      summary: Read one resident session, including its buffered output
+      description: |
+        Identity fields plus the session's rolling output buffer — the same
+        buffer `exec` reads, so a command left running detached inside the shell
+        (start-then-collect) can be picked up later. Consumes nothing and does
+        not count as activity for the idle TTL. A session whose shell has exited
+        is reported `dead` even before the idle reaper reclaims it.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string, format: uuid }
+                  host: { type: string }
+                  label: { type: string }
+                  idle_secs: { type: integer }
+                  dead: { type: boolean }
+                  output: { type: string }
+                  truncated: { type: boolean }
+                  dropped_bytes: { type: integer }
+        "400":
+          description: Unknown session
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
     delete:
       summary: Close a resident session, killing its shell
       parameters:

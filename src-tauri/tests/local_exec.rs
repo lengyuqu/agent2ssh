@@ -375,29 +375,42 @@ async fn a_named_environment_runs_in_that_environment() {
 
     let mut request = local_request("echo $0");
     request.host = format!("{LOCAL_TARGET_ID}:cmd");
-    let cmd = exec_local_core(request).await.expect("cmd exec");
-    assert_eq!(cmd.exit_code, Some(0), "stderr: {}", cmd.stderr);
-    assert_eq!(
-        cmd.stdout.trim(),
-        "$0",
-        "cmd must not substitute $0, so this shell is not a POSIX one"
-    );
+    // The cmd half is Windows evidence — cmd does not exist elsewhere, so the
+    // assertion only runs where the environment does. The gitbash half above
+    // already proves on every host that a named environment is the one that
+    // ran; the cmd-specific discriminator ($0 echoed literally) is recorded
+    // on Windows, per the outstanding-work split in AGENTS.md.
+    if cfg!(windows) {
+        let cmd = exec_local_core(request).await.expect("cmd exec");
+        assert_eq!(cmd.exit_code, Some(0), "stderr: {}", cmd.stderr);
+        assert_eq!(
+            cmd.stdout.trim(),
+            "$0",
+            "cmd must not substitute $0, so this shell is not a POSIX one"
+        );
+    }
 }
 
 /// The environment has to survive into the audit record, or an operator cannot
 /// tell an MSVC build from one that ran in a plain shell.
+///
+/// The named environment is host-dependent — `cmd` only exists on Windows — so
+/// each platform asserts against one it actually has; the audit contract under
+/// test (the host id records the *named* environment, not the bare `local`) is
+/// the same either way.
 #[tokio::test]
 #[serial_test::serial]
 async fn the_audit_records_which_environment_ran_the_command() {
     let _env = IsolatedEnv::new("named-audit");
 
+    let environment = if cfg!(windows) { "cmd" } else { "gitbash" };
     let mut request = local_request("echo named");
-    request.host = format!("{LOCAL_TARGET_ID}:cmd");
-    exec_local_core(request).await.expect("cmd exec");
+    request.host = format!("{LOCAL_TARGET_ID}:{environment}");
+    exec_local_core(request).await.expect("named exec");
 
     let entries = audit_entries();
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].host, format!("{LOCAL_TARGET_ID}:cmd"));
+    assert_eq!(entries[0].host, format!("{LOCAL_TARGET_ID}:{environment}"));
     assert_eq!(entries[0].target(), ExecTarget::Local);
 }
 

@@ -967,13 +967,16 @@ async fn http_hosts_list_returns_valid_json_array() {
 /// requires a full process lifecycle. Instead we treat the source as the
 /// canonical tool registry and assert on its structure.
 #[test]
-fn mcp_tool_list_contains_exactly_71_tools() {
+fn mcp_tool_list_contains_exactly_75_tools() {
     let registry = include_str!("../src/bin/agent2ssh_mcp/tools.rs");
-    let tool_count = registry.matches("\"name\": \"ssh_").count();
+    // Every tool entry carries a top-level `"name": "..."`; nothing else in the
+    // file uses that exact shape (property schemas name their fields without
+    // the `"name"` key), so the count is the tools/list length.
+    let tool_count = registry.matches("\"name\": \"").count();
 
     assert_eq!(
-        tool_count, 71,
-        "Expected exactly 71 MCP tools, found {tool_count}. \
+        tool_count, 75,
+        "Expected exactly 75 MCP tools, found {tool_count}. \
          If you added or removed a tool, update this count and the expected list below."
     );
 }
@@ -1055,6 +1058,10 @@ fn mcp_tool_list_contains_all_expected_names() {
         "ssh_algo_prefs_get",
         "ssh_algo_prefs_set",
         "ssh_algo_prefs_clear",
+        "local_exec",
+        "resident_session_open",
+        "resident_session_exec",
+        "resident_session_close",
     ];
 
     for tool_name in &expected_tools {
@@ -1143,6 +1150,10 @@ fn mcp_call_tool_handler_covers_all_tools() {
         "ssh_algo_prefs_get",
         "ssh_algo_prefs_set",
         "ssh_algo_prefs_clear",
+        "local_exec",
+        "resident_session_open",
+        "resident_session_exec",
+        "resident_session_close",
     ];
 
     // Find the call_tool function body
@@ -1810,6 +1821,10 @@ fn mcp_tools_match_skills_md_documentation() {
         "ssh_algo_prefs_get",
         "ssh_algo_prefs_set",
         "ssh_algo_prefs_clear",
+        "local_exec",
+        "resident_session_open",
+        "resident_session_exec",
+        "resident_session_close",
     ];
 
     assert_eq!(

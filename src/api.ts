@@ -39,6 +39,7 @@ import type {
   RecordingConfig,
   RecordingContent,
   RecordingInfo,
+  ResidentSessionSummary,
   RiskLevel,
   SftpExchangeRequest,
   SftpExchangeResult,
@@ -456,6 +457,26 @@ export const api = {
     });
     if (!res.ok) throw new Error(`Failed to list daemon sessions: ${res.status}`);
     return (await res.json()) as DaemonSessionInfo[];
+  },
+
+  // Resident sessions: long-lived shells for local environments, owned by the
+  // daemon. Read-only here plus close — opening and exec'ing is what the
+  // daemon API (and the local-exec surfaces) are for.
+  residentListDaemon: async (): Promise<ResidentSessionSummary[]> => {
+    const token = await invoke<string>("get_daemon_token");
+    const res = await fetch(`${daemonUrl}/resident-sessions`, {
+      headers: { Authorization: `Bearer ${token}`, [TRACE_ID_HEADER]: SESSION_TRACE_ID },
+    });
+    if (!res.ok) throw new Error(`Failed to list resident sessions: ${res.status}`);
+    return (await res.json()) as ResidentSessionSummary[];
+  },
+  residentCloseDaemon: async (id: string): Promise<void> => {
+    const token = await invoke<string>("get_daemon_token");
+    const res = await fetch(`${daemonUrl}/resident-sessions/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${token}`, [TRACE_ID_HEADER]: SESSION_TRACE_ID },
+    });
+    if (!res.ok) throw new Error(`Failed to close resident session: ${res.status}`);
   },
   terminalBroadcastPreview: async (
     request: TerminalBroadcastRequest

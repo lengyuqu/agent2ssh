@@ -2427,6 +2427,26 @@ async fn resident_session_list(
     ))
 }
 
+/// Read one resident session: identity fields plus the buffer contents.
+///
+/// This is the "start then collect" half of the story: a command the caller
+/// expects to outlive the HTTP request runs detached inside the shell, its
+/// output accumulates in the session's own rolling buffer, and this read picks
+/// it up later. Read-only — like listing, it consumes nothing, counts no
+/// activity, and sits behind the bearer token but outside the execution gate.
+async fn resident_session_get(
+    State(_s): State<AppState>,
+    Extension(_auth): Extension<AuthContext>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<agent2ssh::resident_session::ResidentSessionDetail>, (StatusCode, Json<ErrorBody>)>
+{
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    agent2ssh::resident_session::resident_get_core(id)
+        .await
+        .map(Json)
+        .map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))
+}
+
 /// Close a resident session, killing its shell.
 async fn resident_session_close(
     State(_s): State<AppState>,
@@ -5622,7 +5642,10 @@ async fn main() -> anyhow::Result<()> {
             post(resident_session_open).get(resident_session_list),
         )
         .route("/resident-sessions/:id/exec", post(resident_session_exec))
-        .route("/resident-sessions/:id", delete(resident_session_close))
+        .route(
+            "/resident-sessions/:id",
+            get(resident_session_get).delete(resident_session_close),
+        )
         .route("/forwards", post(forward_add).get(forward_list))
         .route("/forwards/multi", post(forward_add_multi))
         .route("/forwards/:id", delete(forward_remove))

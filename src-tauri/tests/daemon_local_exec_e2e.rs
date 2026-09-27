@@ -264,7 +264,14 @@ fn local_exec_route_applies_the_risk_classifier() {
 fn local_exec_route_selects_a_named_environment() {
     let daemon = TestDaemon::start("named");
 
-    let host = format!("{LOCAL_TARGET_ID}:cmd");
+    // The discriminator between "the named environment ran" and "a default
+    // shell stood in": cmd echoes `$0` literally (Windows only), a POSIX shell
+    // substitutes itself. Each platform asserts against an environment it has.
+    let (host, expect_literal_dollar_zero) = if cfg!(windows) {
+        (format!("{LOCAL_TARGET_ID}:cmd"), true)
+    } else {
+        (format!("{LOCAL_TARGET_ID}:gitbash"), false)
+    };
     let response = daemon.post_local_exec(serde_json::json!({
         "host": host,
         "command": "echo $0",
@@ -277,9 +284,15 @@ fn local_exec_route_selects_a_named_environment() {
 
     assert_eq!(status, 200, "unexpected response: {body}");
     assert_eq!(body["host"], host, "the environment must be echoed back");
-    // cmd is not a POSIX shell, so `$0` survives literally — proof that the named
-    // environment is the one that ran rather than a default shell standing in.
-    assert_eq!(body["stdout"].as_str().unwrap_or_default().trim(), "$0");
+    let stdout = body["stdout"].as_str().unwrap_or_default().trim();
+    if expect_literal_dollar_zero {
+        assert_eq!(stdout, "$0", "cmd must not substitute $0: {body}");
+    } else {
+        assert!(
+            stdout.to_lowercase().contains("bash"),
+            "a POSIX shell should have substituted $0: {body}"
+        );
+    }
 }
 
 #[test]

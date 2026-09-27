@@ -665,6 +665,17 @@ export type ShellInfo = {
   family: ShellFamily;
 };
 
+// Rust: resident_session.rs — ResidentSessionSummary
+// One long-lived local shell from the daemon's registry. A `dead` session's
+// shell has exited; it disappears once the daemon reclaims it.
+export type ResidentSessionSummary = {
+  id: string;
+  host: string;
+  label: string;
+  idle_secs: number;
+  dead: boolean;
+};
+
 // Rust: ssh_algo.rs — SshAlgoPrefs
 // Each field is a comma-delimited, most-preferred-first list; compression is
 // always `none` because this build of libssh2 has no zlib support.

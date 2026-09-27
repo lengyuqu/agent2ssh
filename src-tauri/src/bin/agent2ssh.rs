@@ -316,6 +316,16 @@ enum Commands {
         #[command(subcommand)]
         command: AlgoCommands,
     },
+    /// Run one command on this machine through the daemon (one-shot local exec)
+    Local {
+        #[command(subcommand)]
+        command: LocalCommands,
+    },
+    /// Manage resident sessions: long-lived shells for local environments
+    Resident {
+        #[command(subcommand)]
+        command: ResidentCommands,
+    },
     /// Run diagnostic checks on the agent2ssh environment
     Doctor {
         /// Output results as JSON
@@ -1159,6 +1169,100 @@ enum RedactCommands {
     },
 }
 
+/// The local-execution commands are daemon clients, never local runners: the
+/// daemon is what can run a high-risk command through an approval prompt, so
+/// even `agent2ssh local exec` on this machine goes through the HTTP route.
+#[derive(Debug, Subcommand)]
+enum LocalCommands {
+    /// Run one command in a one-shot local environment via the daemon
+    Exec {
+        /// Target environment: `local`, `local:<environment>` (`local:pwsh`,
+        /// `local:cmd`, `local:gitbash`, `local:vs`, `local:wsl[:<dist>]`) or
+        /// `local:<runtime>:<container-id>` (`local:docker:abc123`)
+        #[arg(short = 'H', long)]
+        host: String,
+        /// The command line to run
+        command: String,
+        /// Per-command timeout in seconds (default 60)
+        #[arg(long)]
+        timeout_secs: Option<u64>,
+        /// Skip the approval prompt for a high-risk command
+        #[arg(long)]
+        force: bool,
+        /// Why this command runs; recorded in the audit entry
+        #[arg(long)]
+        reason: Option<String>,
+        /// Change/ticket id for the audit entry
+        #[arg(long)]
+        change_id: Option<String>,
+        /// What the command changes, for the audit entry
+        #[arg(long)]
+        side_effect: Option<String>,
+        /// Print the full ExecResult as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ResidentCommands {
+    /// Open a resident session in a `local:<id>` environment (blocks until warm)
+    Open {
+        /// The `local:<id>` environment to live in
+        #[arg(short = 'H', long)]
+        host: String,
+        /// Skip the approval prompt if policy asks for one
+        #[arg(long)]
+        force: bool,
+        /// Why this session is opened; recorded in the audit entry
+        #[arg(long)]
+        reason: Option<String>,
+        /// Change/ticket id for the audit entry
+        #[arg(long)]
+        change_id: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run one command inside an open resident session
+    Exec {
+        /// The session id returned by `resident open`
+        session_id: String,
+        /// The command line to run inside the session's shell
+        command: String,
+        /// Per-command timeout in seconds (default 60); a command that
+        /// outlives it kills the session
+        #[arg(long)]
+        timeout_secs: Option<u64>,
+        /// Skip the approval prompt for a high-risk command
+        #[arg(long)]
+        force: bool,
+        /// Why this command runs; recorded in the audit entry
+        #[arg(long)]
+        reason: Option<String>,
+        /// Change/ticket id for the audit entry
+        #[arg(long)]
+        change_id: Option<String>,
+        /// What the command changes, for the audit entry
+        #[arg(long)]
+        side_effect: Option<String>,
+        /// Print the full ExecResult as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Close a resident session, killing its shell
+    Close {
+        /// The session id to close
+        session_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List open resident sessions
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 #[derive(Debug, Subcommand)]
 enum HighlightCommands {
     /// List every highlight rule
@@ -1543,6 +1647,30 @@ async fn remote_config<R: serde::de::DeserializeOwned>(
 /// per command.
 fn remote_alias(alias: Option<&str>) -> Option<&str> {
     alias.filter(|alias| *alias != "localhost")
+}
+
+/// Print an ExecResult body returned by the daemon's `/local-exec` or
+/// `/resident-sessions/{id}/exec`: with `--json` the whole object, otherwise
+/// the command's stdout (and stderr, if any), with a non-zero process exit so
+/// scripts can branch on the command's own exit code.
+fn print_daemon_exec_result(result: &serde_json::Value, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(result)?);
+        return Ok(());
+    }
+    let stdout = result["stdout"].as_str().unwrap_or_default();
+    print!("{stdout}");
+    if !stdout.is_empty() && !stdout.ends_with('\n') {
+        println!();
+    }
+    let stderr = result["stderr"].as_str().unwrap_or_default();
+    if !stderr.is_empty() {
+        eprintln!("{stderr}");
+    }
+    match result["exit_code"].as_i64() {
+        Some(0) | None => Ok(()),
+        Some(code) => anyhow::bail!("command exited with code {code}"),
+    }
 }
 
 /// Background event subscriber for CLI mode. Prints safety-relevant events
@@ -3700,6 +3828,141 @@ async fn async_main() -> Result<()> {
                     println!("{}", serde_json::to_string_pretty(&rules)?);
                 } else {
                     println!("Restored {} built-in redaction rule(s).", rules.len());
+                }
+            }
+        },
+        Commands::Local { command } => match command {
+            LocalCommands::Exec {
+                host,
+                command,
+                timeout_secs,
+                force,
+                reason,
+                change_id,
+                side_effect,
+                json,
+            } => {
+                let result: serde_json::Value = remote_config(
+                    daemon_alias.as_deref().unwrap_or("localhost"),
+                    reqwest::Method::POST,
+                    "/local-exec",
+                    Some(serde_json::json!({
+                        "host": host,
+                        "command": command,
+                        "timeout_secs": timeout_secs,
+                        "force": force,
+                        "reason": reason,
+                        "change_id": change_id,
+                        "side_effect": side_effect,
+                        "source": "cli",
+                    })),
+                )
+                .await?;
+                print_daemon_exec_result(&result, json)?;
+            }
+        },
+        Commands::Resident { command } => match command {
+            ResidentCommands::Open {
+                host,
+                force,
+                reason,
+                change_id,
+                json,
+            } => {
+                let info: serde_json::Value = remote_config(
+                    daemon_alias.as_deref().unwrap_or("localhost"),
+                    reqwest::Method::POST,
+                    "/resident-sessions",
+                    Some(serde_json::json!({
+                        "host": host,
+                        "force": force,
+                        "reason": reason,
+                        "change_id": change_id,
+                        "source": "cli",
+                    })),
+                )
+                .await?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&info)?);
+                } else {
+                    println!(
+                        "Resident session {} open on {} ({})",
+                        info["id"].as_str().unwrap_or("?"),
+                        info["host"].as_str().unwrap_or("?"),
+                        info["label"].as_str().unwrap_or("?"),
+                    );
+                }
+            }
+            ResidentCommands::Exec {
+                session_id,
+                command,
+                timeout_secs,
+                force,
+                reason,
+                change_id,
+                side_effect,
+                json,
+            } => {
+                let result: serde_json::Value = remote_config(
+                    daemon_alias.as_deref().unwrap_or("localhost"),
+                    reqwest::Method::POST,
+                    &format!("/resident-sessions/{session_id}/exec"),
+                    Some(serde_json::json!({
+                        "command": command,
+                        "timeout_secs": timeout_secs,
+                        "force": force,
+                        "reason": reason,
+                        "change_id": change_id,
+                        "side_effect": side_effect,
+                        "source": "cli",
+                    })),
+                )
+                .await?;
+                print_daemon_exec_result(&result, json)?;
+            }
+            ResidentCommands::Close { session_id, json } => {
+                let body: serde_json::Value = remote_config(
+                    daemon_alias.as_deref().unwrap_or("localhost"),
+                    reqwest::Method::DELETE,
+                    &format!("/resident-sessions/{session_id}"),
+                    None,
+                )
+                .await?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&body)?);
+                } else {
+                    println!("Closed resident session {}.", session_id);
+                }
+            }
+            ResidentCommands::List { json } => {
+                let sessions: Vec<serde_json::Value> = remote_config(
+                    daemon_alias.as_deref().unwrap_or("localhost"),
+                    reqwest::Method::GET,
+                    "/resident-sessions",
+                    None,
+                )
+                .await?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&sessions)?);
+                    return Ok(());
+                }
+                if sessions.is_empty() {
+                    println!("No resident sessions.");
+                    return Ok(());
+                }
+                for session in &sessions {
+                    println!(
+                        "{}  {}  {}  idle {}s{}",
+                        session["id"].as_str().unwrap_or("?"),
+                        session["host"].as_str().unwrap_or("?"),
+                        session["label"].as_str().unwrap_or("?"),
+                        session["idle_secs"].as_u64().unwrap_or(0),
+                        if session["dead"].as_bool().unwrap_or(false) {
+                            "  (dead)"
+                        } else {
+                            ""
+                        },
+                    );
                 }
             }
         },

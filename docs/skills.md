@@ -1,6 +1,6 @@
 # Agent2SSH MCP Tools Reference
 
-Agent2SSH exposes 71 tools via the Model Context Protocol (MCP) stdio server.
+Agent2SSH exposes 75 tools via the Model Context Protocol (MCP) stdio server.
 
 ## Tool List
 
@@ -81,6 +81,10 @@ the `mcp_tools_match_skills_md_documentation` integration test.
 | 69 | `ssh_algo_prefs_get` | Show the SSH algorithm preferences in effect for the next handshake, whether they are an override or the built-in defaults, and the defaults they would fall back to. Read-only. |
 | 70 | `ssh_algo_prefs_set` | Replace one or more SSH algorithm lists; the ones you leave out keep their current value. Each list is checked before it is stored, so a list that could not complete a handshake is rejected rather than written. Takes effect on the next handshake. |
 | 71 | `ssh_algo_prefs_clear` | Drop the SSH algorithm overrides and go back to the built-in safe defaults. |
+| 72 | `local_exec` | Run one command on the machine the daemon runs on, in a one-shot terminal environment: `local`, `local:<environment>` (`local:pwsh`, `local:cmd`, `local:gitbash`, `local:vs`, `local:wsl[:<distribution>]`) or `local:<runtime>:<container-id>` (`local:docker:abc123`). Forwards to the daemon, so the same gate chain as SSH exec applies (scope, risk, approval). For a shell whose state persists across commands use `resident_session_open`. |
+| 73 | `resident_session_open` | Open a resident session: one shell for a `local:<id>` environment that stays alive across commands, so cwd and exported variables persist. Blocks until the shell is warm. Forwards to the daemon; the open is authorized like an exec keyed on the environment's host id. Containers are refused (one-shot targets). |
+| 74 | `resident_session_exec` | Run one command inside a resident session opened by `resident_session_open`. Authorized against the session's own host id, so it pays the same gate chain as a one-shot exec. Output is bounded by the session's rolling window. A command that outlives its timeout kills the session — long-running work belongs in `local_exec`. |
+| 75 | `resident_session_close` | Close a resident session and kill its shell. Closing an already-dead session still reclaims it. To read a session's buffered output without running a command, `GET /resident-sessions/{id}` on the daemon. |
 
 ## Risk Levels
 

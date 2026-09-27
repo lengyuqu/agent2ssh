@@ -76,6 +76,10 @@ pub(super) enum McpTool {
     SshAlgoPrefsGet,
     SshAlgoPrefsSet,
     SshAlgoPrefsClear,
+    LocalExec,
+    ResidentSessionOpen,
+    ResidentSessionExec,
+    ResidentSessionClose,
 }
 
 pub(super) struct ToolCall {
@@ -171,6 +175,10 @@ fn tool_kind(name: &str) -> Option<McpTool> {
         "ssh_algo_prefs_get" => Some(McpTool::SshAlgoPrefsGet),
         "ssh_algo_prefs_set" => Some(McpTool::SshAlgoPrefsSet),
         "ssh_algo_prefs_clear" => Some(McpTool::SshAlgoPrefsClear),
+        "local_exec" => Some(McpTool::LocalExec),
+        "resident_session_open" => Some(McpTool::ResidentSessionOpen),
+        "resident_session_exec" => Some(McpTool::ResidentSessionExec),
+        "resident_session_close" => Some(McpTool::ResidentSessionClose),
         _ => None,
     }
 }
@@ -988,6 +996,65 @@ fn tool_definitions() -> Vec<Value> {
                     "name": "ssh_algo_prefs_clear",
                     "description": "Drop the SSH algorithm overrides and go back to the built-in safe defaults. Modifies configuration.",
                     "inputSchema": { "type": "object", "properties": {} }
+                },
+                {
+                    "name": "local_exec",
+                    "description": "Run one command on the machine the daemon runs on, in a one-shot terminal environment: 'local' for the default shell, 'local:<environment>' for a named one (local:pwsh, local:cmd, local:gitbash, local:vs, local:wsl[:<distribution>]), or 'local:<runtime>:<container-id>' (local:docker:abc123) for one command inside a container. Forwards to the daemon, so the same gate chain as SSH exec applies (scope, risk, approval). For a shell whose state persists across commands use resident_session_open.",
+                    "inputSchema": {
+                        "type": "object",
+                        "required": ["host", "command"],
+                        "properties": {
+                            "host":   { "type": "string", "description": "'local', 'local:<environment>' or 'local:<runtime>:<container-id>'." },
+                            "command": { "type": "string", "description": "The command line to run." },
+                            "timeout_secs": { "type": "integer", "description": "Per-command timeout (default 60)." },
+                            "force": { "type": "boolean", "description": "Skip the approval prompt for a high-risk command." },
+                            "reason": { "type": "string", "description": "Why this command runs; recorded in the audit entry." },
+                            "change_id": { "type": "string", "description": "Change/ticket id for the audit entry." },
+                            "side_effect": { "type": "string", "description": "What the command changes, for the audit entry." }
+                        }
+                    }
+                },
+                {
+                    "name": "resident_session_open",
+                    "description": "Open a resident session: one shell for a 'local:<id>' environment that stays alive across commands, so cwd and exported variables persist. Blocks until the shell is warm. Forwards to the daemon; the open is authorized like an exec keyed on the environment's host id. Containers are refused (one-shot targets).",
+                    "inputSchema": {
+                        "type": "object",
+                        "required": ["host"],
+                        "properties": {
+                            "host":   { "type": "string", "description": "The 'local:<id>' environment to live in." },
+                            "force": { "type": "boolean", "description": "Skip the approval prompt if policy asks for one." },
+                            "reason": { "type": "string", "description": "Why this session is opened; recorded in the audit entry." },
+                            "change_id": { "type": "string", "description": "Change/ticket id for the audit entry." }
+                        }
+                    }
+                },
+                {
+                    "name": "resident_session_exec",
+                    "description": "Run one command inside a resident session opened by resident_session_open. The command is authorized against the session's own host id, so it pays the same gate chain as a one-shot exec. Output is bounded by the session's rolling window. A command that outlives its timeout kills the session — long-running work belongs in local_exec.",
+                    "inputSchema": {
+                        "type": "object",
+                        "required": ["session_id", "command"],
+                        "properties": {
+                            "session_id": { "type": "string", "description": "The id returned by resident_session_open." },
+                            "command": { "type": "string", "description": "The command line to run inside the session's shell." },
+                            "timeout_secs": { "type": "integer", "description": "Per-command timeout (default 60)." },
+                            "force": { "type": "boolean", "description": "Skip the approval prompt for a high-risk command." },
+                            "reason": { "type": "string", "description": "Why this command runs; recorded in the audit entry." },
+                            "change_id": { "type": "string", "description": "Change/ticket id for the audit entry." },
+                            "side_effect": { "type": "string", "description": "What the command changes, for the audit entry." }
+                        }
+                    }
+                },
+                {
+                    "name": "resident_session_close",
+                    "description": "Close a resident session and kill its shell. Closing an already-dead session still reclaims it. To read a session's buffered output without running a command, GET /resident-sessions/{id} on the daemon.",
+                    "inputSchema": {
+                        "type": "object",
+                        "required": ["session_id"],
+                        "properties": {
+                            "session_id": { "type": "string", "description": "The id of the session to close." }
+                        }
+                    }
                 }
             ])
         .as_array()

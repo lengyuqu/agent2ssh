@@ -842,6 +842,19 @@ const zh: Record<string, string> = {
   "No container runtime is available on this host": "本机没有可用的容器运行时",
   "Start a container, then refresh — or include stopped ones.":
     "启动一个容器后刷新，或勾选「含已停止」。",
+  // Resident sessions module (daemon-owned long-lived local shells)
+  "Resident Sessions": "驻留会话",
+  "{count} sessions": "{count} 个会话",
+  "Refresh resident sessions": "刷新驻留会话",
+  "Reading resident sessions...": "正在读取驻留会话…",
+  "No resident sessions": "暂无驻留会话",
+  "Resident sessions are long-lived local shells owned by the daemon. Open one with 'agent2ssh resident open' or the daemon API; they also die with the daemon or after the idle timeout.":
+    "驻留会话是由守护进程持有的长生命周期本地 shell。可通过「agent2ssh resident open」或守护进程 API 打开；守护进程退出或空闲超时后会话也会终止。",
+  "dead": "已退出",
+  "alive": "运行中",
+  "{secs}s idle": "空闲 {secs} 秒",
+  "Close session": "关闭会话",
+  "Closing...": "正在关闭…",
   "Install Docker, WSL containers (wslc) or Apple container on this host, then refresh. Only the runtimes this platform supports are listed.":
     "请在本机安装 Docker、WSL 容器（wslc）或 Apple container 后刷新。列表中只会出现当前平台支持的运行时。",
   "Copy exec command": "复制进入容器的命令",

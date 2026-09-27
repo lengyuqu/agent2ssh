@@ -290,6 +290,34 @@ fn can_fallback_session_error(body: &str) -> bool {
     body.contains("unknown session")
 }
 
+/// Forward one local-execution request to the local daemon and return its JSON
+/// response. These surfaces have no process-local fallback: the daemon is what
+/// runs the gate chain through to an approval prompt, so when it is not
+/// running the honest answer is an error naming that, never a weaker local
+/// path. A `null` body means DELETE; anything else POSTs as JSON.
+async fn daemon_only_request(
+    path: &str,
+    body: &Value,
+    context: &str,
+) -> std::result::Result<Value, McpError> {
+    let Some((client, base_url, token)) = local_daemon_client()? else {
+        return Err(McpError::internal(format!(
+            "{context} requires the agent2ssh daemon (agent2ssh-daemon), which is not running"
+        )));
+    };
+    let request = if body.is_null() {
+        client.delete(format!("{base_url}{path}"))
+    } else {
+        client.post(format!("{base_url}{path}")).json(body)
+    };
+    let response = request
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| McpError::internal(format!("local daemon {context} failed: {e}")))?;
+    response_json(response, &format!("local daemon {context}")).await
+}
+
 async fn try_daemon_session_open(
     host: &str,
 ) -> std::result::Result<DaemonAttempt<Value>, McpError> {
@@ -1904,6 +1932,83 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
         McpTool::SshAlgoPrefsClear => {
             reset_algo_prefs().map_err(McpError::internal)?;
             serde_json::to_value(AlgoPrefsState::snapshot())?
+        }
+        // Local-execution surfaces are daemon-only: the daemon is what can run
+        // the gate chain to an approval prompt, and a non-daemon MCP fallback
+        // would either skip approval or fail closed on every high-risk command.
+        // There is deliberately no process-local fallback arm here, unlike the
+        // PTY session tools above.
+        McpTool::LocalExec => {
+            let host = args["host"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("host required"))?
+                .to_string();
+            let command = args["command"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("command required"))?
+                .to_string();
+            let body = json!({
+                "host": host,
+                "command": command,
+                "timeout_secs": args["timeout_secs"].as_u64(),
+                "force": args["force"].as_bool().unwrap_or(false),
+                "source": mcp_source(),
+                "reason": args["reason"].as_str(),
+                "change_id": args["change_id"].as_str(),
+                "side_effect": args["side_effect"].as_str(),
+            });
+            daemon_only_request("/local-exec", &body, "local exec").await?
+        }
+        McpTool::ResidentSessionOpen => {
+            let host = args["host"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("host required"))?
+                .to_string();
+            let body = json!({
+                "host": host,
+                "force": args["force"].as_bool().unwrap_or(false),
+                "source": mcp_source(),
+                "reason": args["reason"].as_str(),
+                "change_id": args["change_id"].as_str(),
+            });
+            daemon_only_request("/resident-sessions", &body, "resident session open").await?
+        }
+        McpTool::ResidentSessionExec => {
+            let session_id = args["session_id"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("session_id required"))?
+                .to_string();
+            let command = args["command"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("command required"))?
+                .to_string();
+            let body = json!({
+                "command": command,
+                "timeout_secs": args["timeout_secs"].as_u64(),
+                "force": args["force"].as_bool().unwrap_or(false),
+                "source": mcp_source(),
+                "reason": args["reason"].as_str(),
+                "change_id": args["change_id"].as_str(),
+                "side_effect": args["side_effect"].as_str(),
+            });
+            daemon_only_request(
+                &format!("/resident-sessions/{session_id}/exec"),
+                &body,
+                "resident session exec",
+            )
+            .await?
+        }
+        McpTool::ResidentSessionClose => {
+            let session_id = args["session_id"]
+                .as_str()
+                .ok_or_else(|| McpError::internal("session_id required"))?
+                .to_string();
+            daemon_only_request(
+                &format!("/resident-sessions/{session_id}"),
+                &serde_json::Value::Null,
+                "resident session close",
+            )
+            .await?
         }
     };
 

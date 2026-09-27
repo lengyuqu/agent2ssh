@@ -336,6 +336,26 @@ pub struct ResidentSessionSummary {
     pub dead: bool,
 }
 
+/// One session in detail: the summary fields plus what the session's rolling
+/// buffer currently holds. The buffer is the *same* accumulation `exec` reads —
+/// there is no second capture path — so this is the "start then collect" view:
+/// a command left running in the background inside the shell keeps writing
+/// here, and a later read picks it up.
+#[derive(Debug, serde::Serialize)]
+pub struct ResidentSessionDetail {
+    pub id: Uuid,
+    pub host: String,
+    pub label: String,
+    pub idle_secs: u64,
+    pub dead: bool,
+    /// Recent merged output (oldest bytes already rolled off when the window
+    /// filled). Lossy UTF-8: a torn multibyte character decimates rather than
+    /// failing the read.
+    pub output: String,
+    pub truncated: bool,
+    pub dropped_bytes: usize,
+}
+
 /// A container cannot host a resident shell: its capture exec is one-shot by
 /// design and its environment is whatever the image ships. Refuse with the
 /// reason rather than letting the generic environment resolver produce a
@@ -629,6 +649,7 @@ pub(crate) enum ResidentExecError {
 /// Authorization and audit are the *caller's* job — the daemon handler runs
 /// the shared preflight before reaching here and appends the audit entry from
 /// the result, keyed on the session's `local:<id>` host.
+#[allow(clippy::too_many_arguments)]
 pub async fn resident_exec_core(
     session_id: Uuid,
     command: String,
@@ -813,6 +834,40 @@ pub async fn resident_list_core() -> Vec<ResidentSessionSummary> {
             })
         })
         .collect()
+}
+
+/// Read one session: identity fields plus the current buffer contents.
+///
+/// A read is observation only — it does not consume the buffer (exec's
+/// sentinel-driven `consume` stays the only consumer), does not count as
+/// activity for the idle TTL, and does not need the execution gate, exactly
+/// like listing. A session whose shell has exited is reported `dead` here even
+/// if nothing marked it yet, so a collector can stop polling without waiting
+/// for the idle reaper.
+pub async fn resident_get_core(session_id: Uuid) -> Result<ResidentSessionDetail> {
+    let store = registry().lock().await;
+    let handle = store
+        .get(&session_id)
+        .cloned()
+        .ok_or_else(|| anyhow!("unknown resident session: {session_id}"))?;
+    let mut handle = handle.lock().unwrap_or_else(|p| p.into_inner());
+    let mut dead = handle.dead;
+    if !dead {
+        if let Ok(Some(_)) = handle.child.try_wait() {
+            dead = true;
+        }
+    }
+    let buffer = handle.buffer.lock().unwrap_or_else(|p| p.into_inner());
+    Ok(ResidentSessionDetail {
+        id: handle.id,
+        host: handle.host.clone(),
+        label: handle.label.clone(),
+        idle_secs: handle.last_active.elapsed().as_secs(),
+        dead,
+        output: String::from_utf8_lossy(&buffer.data).into_owned(),
+        truncated: buffer.truncated(),
+        dropped_bytes: buffer.dropped_bytes(),
+    })
 }
 
 /// Reclaim every session idle past the TTL. Called periodically by the daemon;
