@@ -13,7 +13,15 @@ export default defineConfig({
   clearScreen: false,
   server: {
     port: 1420,
-    strictPort: true
+    strictPort: true,
+    watch: {
+      // The Rust build writes into src-tauri/target while this watcher runs,
+      // and a freshly linked binary is still locked for a moment: chokidar
+      // then fails with EBUSY, the dev server exits, and `tauri dev` takes the
+      // app down with it. The Tauri CLI watches src-tauri itself, so nothing
+      // is lost by keeping Vite out of it.
+      ignored: ["**/src-tauri/**"],
+    }
   },
   envPrefix: ["VITE_", "TAURI_"],
   build: {
