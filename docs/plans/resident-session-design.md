@@ -159,7 +159,7 @@ open 流程：授权 → `resolve_environment`（失败照旧列出 `SELECTABLE_
 | 阶段 | 内容 | 验收 |
 |---|---|---|
 | P0 | `resident_session.rs`（pwsh+cmd）+ daemon 4 路由 + api.yaml + lifecycle/上限/TTL | 集成测试绿；cd 状态保持差分通过 |
-| P1 | vs + gitbash + wsl 变体；MCP 3 工具（skills.md/计数同步）；CLI | `local:vs` e2e：第二条命令 cl 在 PATH |
+| P1 | vs + gitbash + wsl 变体；MCP 4 工具（71→75：补做遗留的 `local_exec` + resident 3 件套，均转发 daemon）；CLI | `local:vs` e2e：第二条命令 cl 在 PATH |
 | P2 | 桌面会话面板；`GET /:id/read` 拆分（后台长任务：exec 发起、read 回收） | — |
 
 ## 10. 待拍板的开放问题
