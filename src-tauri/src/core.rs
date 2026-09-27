@@ -440,16 +440,23 @@ pub fn classify_risk(command: &str) -> RiskLevel {
 
     // Chain bypass fix: a chained command (`echo hi && rm -rf /`) hides
     // destructive segments from single-head analysis. Re-evaluate each
-    // top-level segment independently and keep the strictest result.
-    let segments = split_commands(command);
-    if segments.len() > 1 {
-        let chained = segments
-            .into_iter()
-            .map(|seg| classify_risk(&seg))
-            .fold(RiskLevel::Low, RiskLevel::max_severity);
-        return base.max_severity(chained);
+    // segment independently and keep the strictest result.
+    //
+    // `split_commands` deliberately yields every `command` node, nested
+    // substitutions included, and for a single-statement input the outer node
+    // spans the whole string — so it comes back as a segment identical to the
+    // input. Recursing on that never terminates: `echo $(pwd)` overflowed the
+    // stack here, in the CLI and therefore in the daemon. Only a strictly
+    // shorter segment is a real sub-part; the input itself is already covered
+    // by `base`, so drop it and classify what is left.
+    let mut strictest = base;
+    for segment in split_commands(command) {
+        if segment.len() >= command.len() {
+            continue;
+        }
+        strictest = strictest.max_severity(classify_risk(&segment));
     }
-    base
+    strictest
 }
 
 /// Single-command risk classification (no chain splitting). Whole-command
@@ -3379,6 +3386,36 @@ mod tests {
         assert_eq!(classify_risk("sudo shutdown"), RiskLevel::Blocked);
         assert_eq!(classify_risk("init 0"), RiskLevel::Blocked);
         assert_eq!(classify_risk("init 6"), RiskLevel::Blocked);
+    }
+
+    /// `split_commands` returns every `command` node, and for a
+    /// single-statement input the outer one spans the whole string. Recursing
+    /// on that segment re-entered this function with the identical input until
+    /// the stack ran out — `echo $(pwd)` crashed the CLI and the daemon.
+    #[test]
+    fn command_substitution_in_arguments_terminates() {
+        assert_eq!(classify_risk("echo $(pwd)"), RiskLevel::Low);
+        assert_eq!(classify_risk("echo $(whoami)"), RiskLevel::Low);
+        assert_eq!(classify_risk("echo $(cat /etc/hosts)"), RiskLevel::Low);
+        // Nested substitutions shrink properly instead of echoing the input.
+        assert_eq!(classify_risk("echo $(echo $(whoami))"), RiskLevel::Low);
+        // An assignment is not a `command` node at all; pinned because the
+        // shape is adjacent and it used to be the only substitution that
+        // happened to survive.
+        assert_eq!(classify_risk("x=$(whoami)"), RiskLevel::Low);
+    }
+
+    /// Dropping the self-echoing segment must not cost the conservatism the
+    /// nested ranges were collected for.
+    #[test]
+    fn nested_substitution_is_still_classified() {
+        assert_eq!(classify_risk("echo $(rm -rf /)"), RiskLevel::Blocked);
+        assert_eq!(
+            classify_risk("echo $(sudo shutdown)"),
+            RiskLevel::Blocked
+        );
+        // The chain case the split was originally added for.
+        assert_eq!(classify_risk("echo hi && rm -rf /"), RiskLevel::Blocked);
     }
 
     fn empty_exec_request() -> ExecMultiRequest {
