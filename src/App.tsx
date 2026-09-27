@@ -140,6 +140,7 @@ const SIDEBAR_ORDER: Array<(typeof MODULES)[number]["id"]> = [
   "topology",
   "recordings",
   "containers",
+  "resident-sessions",
   "help",
 ];
 
