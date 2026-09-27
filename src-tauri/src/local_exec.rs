@@ -857,15 +857,18 @@ fn build_command(plan: &EnvironmentPlan, command: &str) -> Command {
 
 /// Put the child in its own process group so [`kill_process_tree`] can signal
 /// the whole tree at once instead of just the shell.
+///
+/// Shared with `resident_session`, whose long-lived shells need the same
+/// reclamation story.
 #[cfg(unix)]
-fn configure_process_group(process: &mut Command) {
+pub(crate) fn configure_process_group(process: &mut Command) {
     use std::os::unix::process::CommandExt;
     // `0` means "new group whose id is this child's pid".
     process.process_group(0);
 }
 
 #[cfg(windows)]
-fn configure_process_group(process: &mut Command) {
+pub(crate) fn configure_process_group(process: &mut Command) {
     use std::os::windows::process::CommandExt;
     /// Children of this process must not inherit its console group, so a tree
     /// kill does not reach back into the app.
@@ -884,8 +887,11 @@ fn configure_process_group(process: &mut Command) {
 ///
 /// Safe to call once the child has already been reaped — the process group
 /// outlives its leader, so the group kill still reaches survivors.
+///
+/// Shared with `resident_session`: an exec that outlives its deadline there
+/// kills the whole session, which is the same process-group problem.
 #[cfg(unix)]
-fn kill_process_tree(child: &mut Child) {
+pub(crate) fn kill_process_tree(child: &mut Child) {
     let pid = child.id() as i32;
     // Negative pid targets the process group set up by `configure_process_group`.
     unsafe {
@@ -895,7 +901,7 @@ fn kill_process_tree(child: &mut Child) {
 }
 
 #[cfg(windows)]
-fn kill_process_tree(child: &mut Child) {
+pub(crate) fn kill_process_tree(child: &mut Child) {
     // `/T` walks the child tree, `/F` forces it. A Job Object would be the more
     // precise tool but has to be assigned at spawn time; this is the same
     // pid-based form the container path already uses.

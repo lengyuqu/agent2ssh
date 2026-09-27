@@ -67,6 +67,10 @@ pub struct AppState {
     // session.rs — interactive SSH terminal sessions
     pub sessions: TokioMutex<HashMap<Uuid, Arc<Mutex<crate::session::SessionHandle>>>>,
 
+    // resident_session.rs — long-lived local environment shells (`local:<id>`)
+    pub resident_sessions:
+        TokioMutex<HashMap<Uuid, Arc<Mutex<crate::resident_session::ResidentHandle>>>>,
+
     // forward.rs — port forwarding handles
     pub forwards: TokioMutex<HashMap<Uuid, crate::forward::ForwardHandle>>,
 
@@ -144,6 +148,7 @@ impl AppState {
         });
         Self {
             sessions: TokioMutex::new(HashMap::new()),
+            resident_sessions: TokioMutex::new(HashMap::new()),
             forwards: TokioMutex::new(HashMap::new()),
             connections: TokioMutex::new(HashMap::new()),
             host_locks: TokioMutex::new(HashMap::new()),
@@ -210,6 +215,9 @@ pub fn lifecycle() -> Arc<Mutex<crate::lifecycle::LifecycleRegistry>> {
 #[serde(rename_all = "snake_case")]
 pub enum ResourceKind {
     SshSession,
+    /// A long-lived local environment shell (`local:<id>`), see
+    /// `resident_session`.
+    ResidentSession,
     Forward,
     Connection,
     Transfer,

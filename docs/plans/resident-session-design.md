@@ -1,6 +1,6 @@
 # 常驻环境会话（Resident Environment Session）设计
 
-状态：**提案，待评审** · 2026-09-27
+状态：**P0 已实施**（2026-09-27，`feat/resident-session`）· 设计定稿 2026-09-27
 关联：`local_exec.rs`（`local:<id>` 环境）、`session.rs`（SSH PTY 会话）、daemon `/local-exec`
 
 ---
