@@ -208,6 +208,80 @@ async fn quoted_output_survives_the_round_trip() {
     resident_close_core(session.id).await.expect("close");
 }
 
+// ── cmd.exe: the other Windows shell family ────────────────────────────────
+//
+// `local:cmd` is the only environment that exercises the `CmdSlashC` framing:
+// the frame is joined with CRLF (cmd treats a lone LF as a line end too, but
+// the frame stays with the convention), the sentinel reads `%ERRORLEVEL%`, and
+// cmd echoes every line it reads back before running it. These tests pin that
+// the echoed input is skipped rather than captured, and that `%VAR%`
+// expansion — cmd's own syntax, not PowerShell's — reaches the caller.
+
+#[cfg(windows)]
+async fn open_cmd_session() -> ResidentSessionInfo {
+    unlock_session_cap();
+    resident_open_core("local:cmd")
+        .await
+        .expect("cmd.exe is on every Windows install")
+}
+
+#[cfg(windows)]
+#[tokio::test]
+#[serial_test::serial]
+async fn cmd_shell_state_persists_across_commands() {
+    let session = open_cmd_session().await;
+
+    let result = exec(&session, "cd /d %TEMP%").await;
+    assert_eq!(result.exit_code, Some(0), "cd: {}", result.stderr);
+
+    let result = exec(&session, "echo %CD%").await;
+    assert!(
+        result.stdout.to_lowercase().contains("temp"),
+        "cmd's cwd must persist across commands, got: {}",
+        result.stdout
+    );
+
+    // `set` is cmd's export. The value surviving into the *next* command is
+    // what proves one shell is really being reused rather than respawned.
+    exec(&session, "set AGENT2SSH_RESIDENT_TEST=hot-path").await;
+    let result = exec(&session, "echo %AGENT2SSH_RESIDENT_TEST%").await;
+    assert!(
+        result.stdout.contains("hot-path"),
+        "cmd variables must persist across commands, got: {}",
+        result.stdout
+    );
+
+    resident_close_core(session.id).await.expect("close");
+}
+
+#[cfg(windows)]
+#[tokio::test]
+#[serial_test::serial]
+async fn cmd_reports_exit_codes_without_leaking_its_echoed_frame() {
+    let session = open_cmd_session().await;
+
+    let result = exec(&session, "echo marker").await;
+    assert_eq!(result.exit_code, Some(0), "echo: {}", result.stderr);
+    assert!(result.stdout.contains("marker"), "got: {}", result.stdout);
+    assert!(
+        !result.stdout.contains("__A2S_DONE"),
+        "cmd echoes each line it reads, so the sentinel line must be skipped \
+         rather than captured; got: {}",
+        result.stdout
+    );
+
+    // A failing native command reports its code through %ERRORLEVEL% without
+    // taking the shell down — the session stays warm for the next command.
+    let result = exec(&session, "cmd /c exit 7").await;
+    assert_eq!(result.exit_code, Some(7));
+
+    let result = exec(&session, "echo alive").await;
+    assert_eq!(result.exit_code, Some(0));
+    assert!(result.stdout.contains("alive"), "got: {}", result.stdout);
+
+    resident_close_core(session.id).await.expect("close");
+}
+
 #[tokio::test]
 #[serial_test::serial]
 async fn close_removes_the_session() {
