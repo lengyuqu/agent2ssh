@@ -1337,6 +1337,96 @@ async fn exec(
         .map_err(|e| err(StatusCode::BAD_REQUEST, e))
 }
 
+/// Run a command on the machine the daemon itself is running on.
+///
+/// `host` selects the terminal environment: `local` for the shell the app would
+/// open, `local:<environment>` for a named one (`local:pwsh`, `local:cmd`,
+/// `local:gitbash`, `local:vs`, `local:wsl[:<distribution>]`), or
+/// `local:<runtime>:<container-id>` (`local:docker:abc123`) to run one command
+/// inside a container through the runtime CLI's non-TTY exec. The
+/// environment rides in the host id so that everything already keyed on `host` —
+/// the token scope, the approval policy, the audit log — can name one without
+/// learning a new concept.
+///
+/// A separate route rather than a branch inside `/exec`, on purpose. `/exec`
+/// resolves `host` against the configured profiles, and so do `/exec-multi`,
+/// `/exec/compare`, `/exec/preview` and `/exec/stream`; teaching `/exec` that one
+/// particular value means "not a host at all" would leave all four of those
+/// deciding for themselves what to do about it. Keeping the local target on its
+/// own path leaves `host` meaning exactly one thing everywhere else.
+///
+/// What is *not* separate is the gate chain: this handler calls the same
+/// [`preflight_guarded_request`] as `/exec`, so the local target inherits the
+/// execution gate, the rate limiter, the token scope, the risk classifier and the
+/// approval policy. A local exec cannot end up on a weaker path than an SSH one.
+async fn local_exec(
+    State(s): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Json(mut req): Json<ExecRequest>,
+) -> Result<Json<ExecResult>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+
+    // Checked before the gate chain, so the scope and approval checks below are
+    // evaluated against the target that will actually run rather than against an
+    // alias the client typed — which could otherwise borrow that profile's entry
+    // in a token's allowed-hosts list and then execute here. `local:vs` and the
+    // other named environments are local ids too; anything else is a host alias.
+    if !is_local_host(&req.host) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "local exec requires host = '{LOCAL_TARGET_ID}' or \
+                 '{LOCAL_ENV_PREFIX}<environment>', got '{}'",
+                req.host
+            ),
+        ));
+    }
+
+    let source = source_or_env_for_request(req.source.clone(), "daemon")?;
+    req.source = Some(source.clone());
+    ensure_command_length(&req.command)?;
+    let pf = preflight_guarded_request(
+        &s,
+        &auth,
+        &req.host,
+        host_tags(&req.host),
+        source,
+        &req.command,
+        None,
+        req.force,
+        req.reason.clone(),
+        req.change_id.clone(),
+    )
+    .await?;
+    tracing::info!(command = %req.command, "local exec handler invoked");
+    let exec_start = Instant::now();
+    if pf.approved && pf.risk == RiskLevel::High {
+        req.force = true;
+    }
+
+    let cmd_clone = req.command.clone();
+    let result = exec_local_core(req).await;
+    EXEC_COUNT.fetch_add(1, Ordering::Relaxed);
+    EXEC_TOTAL_DURATION_MS.fetch_add(exec_start.elapsed().as_millis() as u64, Ordering::Relaxed);
+    let exit_code = result.as_ref().ok().and_then(|r| r.exit_code);
+    let evt = WebhookEvent {
+        event: "exec_completed".into(),
+        host: LOCAL_TARGET_ID.to_string(),
+        command: cmd_clone,
+        approval_id: None,
+        risk_level: None,
+        exit_code,
+    };
+    tokio::spawn(async move {
+        if let Err(e) = fire_webhook(evt).await {
+            tracing::error!(error = %e, "webhook fire error");
+        }
+    });
+    result
+        .map(Json)
+        .map_err(|e| err(StatusCode::BAD_REQUEST, e))
+}
+
 async fn exec_multi(
     State(s): State<AppState>,
     Extension(auth): Extension<AuthContext>,
@@ -5257,6 +5347,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/ping", post(ping))
         .route("/exec", post(exec))
+        .route("/local-exec", post(local_exec))
         .route("/exec-multi", post(exec_multi))
         .route("/exec/compare", post(exec_compare))
         .route("/exec/stream", get(exec_stream))

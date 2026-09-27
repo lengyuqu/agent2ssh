@@ -2174,6 +2174,65 @@ fn api_yaml_documents_every_daemon_route() {
     );
 }
 
+/// The local exec route must not be reachable without the shared gate chain.
+///
+/// `/exec` and `/local-exec` are separate handlers, so nothing in the type system
+/// stops a later change from giving the local one a "fast path" — and a local
+/// command runs on the machine that holds the config, the audit log and any
+/// stored credentials, which makes it the worst possible place to lose the
+/// execution gate, the rate limiter or the approval policy. The handler body is
+/// therefore checked to still call the shared preflight.
+#[test]
+fn local_exec_route_runs_the_shared_preflight() {
+    let daemon = include_str!("../src/bin/agent2ssh-daemon.rs");
+
+    assert!(
+        daemon.contains(r#".route("/local-exec", post(local_exec))"#),
+        "the /local-exec route is missing, or it no longer points at the local_exec handler"
+    );
+
+    let signature = "async fn local_exec(";
+    let start = daemon
+        .find(signature)
+        .expect("the daemon has no local_exec handler");
+    let rest = &daemon[start + signature.len()..];
+    // The body ends at the next top-level item. Required rather than optional:
+    // silently falling back to "the rest of the file" would make the assertion
+    // below pass on any other handler's preflight call instead of this one's.
+    let end = rest.find("\nasync fn ").expect(
+        "local_exec is no longer followed by another top-level handler, so its body \
+         cannot be isolated and this check would be vacuous",
+    );
+    let body = &rest[..end];
+
+    let preflight = body.find("preflight_guarded_request(");
+    assert!(
+        preflight.is_some(),
+        "local_exec does not run the shared gate chain: a local command would skip \
+         the execution gate, the rate limiter, the token scope and the approval policy"
+    );
+    assert!(
+        body.contains("exec_local_core("),
+        "local_exec no longer delegates to exec_local_core"
+    );
+
+    // Ordering, not just presence. If the reserved-host check ran after the gate
+    // chain, the scope and approval checks would have been evaluated against an
+    // alias the client typed — so a token allowed for that alias could pass them
+    // and the command would still land on this machine. The defensive copy inside
+    // `exec_local_core` rejects the same request either way, which is exactly why
+    // the response alone cannot pin this and the order has to be asserted here.
+    let host_check = body.find("is_local_host(&req.host)");
+    assert!(
+        host_check.is_some(),
+        "local_exec does not check for a local host id at all"
+    );
+    assert!(
+        host_check < preflight,
+        "local_exec must reject a non-local host *before* the gate chain runs"
+    );
+}
+
 #[test]
 fn exec_request_schema_includes_reason_and_change_id() {
     // Verify ExecRequest deserialization accepts reason and change_id fields,

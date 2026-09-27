@@ -12,15 +12,18 @@ pub use team_config::*;
 
 use crate::{
     embedded_ssh::{connect_embedded_ssh, run_command_capture, ExecTimeout},
+    local_exec::{
+        check_exec_depth, resolve_plan_for_host, run_local_command_capture, LocalExecTimeout,
+    },
     path_resolver::expand_tilde,
     sanitize::{analyze_command, split_commands, ShapeRisk},
     session::resolve_host,
     store::{append_audit, list_audit_raw, load_config, save_config_unlocked, store_write_lock},
     types::{
-        default_host_group, source_from_env, AuditEntry, AuditFilter, BatchStrategy,
+        default_host_group, is_local_host, source_from_env, AuditEntry, AuditFilter, BatchStrategy,
         ExecMultiBatchResult, ExecMultiResult, ExecRequest, ExecResult, HostFilter, HostGroup,
         HostProfile, PingResult, ProxyProfile, RiskLevel, SftpDirection, SftpDownloadRequest,
-        SftpResult, SftpUploadRequest, WalkEntry,
+        SftpResult, SftpUploadRequest, WalkEntry, LOCAL_ENV_PREFIX, LOCAL_TARGET_ID,
     },
 };
 
@@ -1036,6 +1039,172 @@ pub(crate) async fn exec_ssh_core_with_risk_override(
     )?;
 
     // Publish ExecCompleted event
+    crate::events::publish_event(
+        crate::events::EventType::ExecCompleted,
+        serde_json::json!({
+            "host": result.host,
+            "command": result.command,
+            "exit_code": result.exit_code,
+            "risk_level": format!("{}", result.risk_level),
+            "duration_ms": result.duration_ms,
+            "reason": request.reason,
+            "change_id": request.change_id,
+            "source": source,
+        }),
+    );
+
+    Ok(result)
+}
+
+/// Run a command on this machine instead of over SSH.
+///
+/// Mirrors [`exec_ssh_core`] on purpose, down to where it writes audit entries:
+/// the local target must not be a second, weaker code path. It validates the
+/// command length, classifies risk through the built-in rules and the user's
+/// own, refuses blocked commands, demands `force` for high-risk ones, and
+/// records the same audit entries an SSH exec would. What differs is the
+/// transport underneath and the absence of a host profile.
+pub async fn exec_local_core(request: ExecRequest) -> Result<ExecResult> {
+    exec_local_core_with_risk_override(request, None).await
+}
+
+/// [`exec_local_core`] with a risk override for trusted callers (a playbook, or
+/// a caller whose scope already vetted the command). An override never downgrades
+/// a blocked command — [`apply_risk_override`] enforces that.
+pub(crate) async fn exec_local_core_with_risk_override(
+    request: ExecRequest,
+    request_risk_override: Option<RiskLevel>,
+) -> Result<ExecResult> {
+    validate_command_length(&request.command)?;
+
+    // The reserved id is enforced, not assumed. A caller that passed a real host
+    // alias here would otherwise have been authorized against that profile —
+    // including its `risk_override` and its tags — and then run the command on
+    // this machine. That is target confusion the audit trail would never reveal,
+    // so it is refused instead. A named environment (`local:vs`) is local too.
+    if !is_local_host(&request.host) {
+        return Err(anyhow!(
+            "local exec requires host = '{LOCAL_TARGET_ID}' or \
+             '{LOCAL_ENV_PREFIX}<environment>', got '{}'",
+            request.host
+        ));
+    }
+
+    let source = request
+        .source
+        .clone()
+        .unwrap_or_else(|| source_from_env("core"));
+
+    let built_in_risk = classify_risk(&request.command);
+    let classified_risk =
+        crate::risk_config::classify_effective_risk(&request.command, built_in_risk).await;
+    let risk = apply_risk_override(classified_risk, request_risk_override);
+
+    if risk == RiskLevel::Blocked {
+        append_rejected_exec_audit(&request, risk, &source, "command blocked by risk policy");
+        return Err(anyhow!(
+            "command blocked (risk=blocked): '{}' is unconditionally dangerous",
+            request.command
+        ));
+    }
+    if risk == RiskLevel::High && !request.force {
+        append_rejected_exec_audit(&request, risk, &source, "command requires force=true");
+        return Err(anyhow!(
+            "command requires force=true (risk=high): '{}'",
+            request.command
+        ));
+    }
+    // Checked here as well as inside the runner so this refusal is audited like
+    // any other rejected exec rather than surfacing as a bare I/O error.
+    if let Err(error) = check_exec_depth() {
+        append_rejected_exec_audit(&request, risk, &source, &error.to_string());
+        return Err(error);
+    }
+    // Resolved here rather than inside the runner for the same reason: an
+    // environment that cannot be built — Git Bash not installed, no Visual
+    // Studio found, a container runtime missing — is a refusal worth recording,
+    // not an I/O error from mid-exec.
+    let plan = match resolve_plan_for_host(&request.host) {
+        Ok(plan) => plan,
+        Err(error) => {
+            append_rejected_exec_audit(&request, risk, &source, &error.to_string());
+            return Err(error);
+        }
+    };
+    // A container capture exec runs without `-i`, so there is no stdin for a
+    // payload to reach. Refusing beats dropping it: a caller that sent one has
+    // no other way to learn it never arrived.
+    if request.stdin.is_some() && !plan.forwards_stdin {
+        let message = format!(
+            "exec in '{}' does not forward stdin: the container capture exec runs without \
+             an interactive stdin, so the payload would be silently dropped",
+            request.host
+        );
+        append_rejected_exec_audit(&request, risk, &source, &message);
+        return Err(anyhow!(message));
+    }
+
+    let started = Instant::now();
+    let timeout_secs = request.timeout_secs.unwrap_or(60);
+
+    const DEFAULT_MAX_OUTPUT: usize = 4 * 1024 * 1024; // 4 MiB
+    let max_bytes = request.max_output_bytes.unwrap_or(DEFAULT_MAX_OUTPUT);
+
+    let local_command = request.command.clone();
+    let local_stdin = request.stdin.clone();
+    let captured = tokio::task::spawn_blocking(move || {
+        run_local_command_capture(
+            &plan,
+            &local_command,
+            local_stdin.as_deref().map(str::as_bytes),
+            timeout_secs,
+            max_bytes,
+        )
+    })
+    .await
+    .context("local exec task failed")?
+    .map_err(|error| {
+        // The runner owns its deadline and reaps the child — and its process
+        // group — before returning, so unlike the SSH path there is no command
+        // still running behind this error.
+        if let Some(timeout) = error.downcast_ref::<LocalExecTimeout>() {
+            let message = format!("command timed out after {}s", timeout.timeout_secs);
+            append_timed_out_exec_audit(
+                &request,
+                risk,
+                &source,
+                &message,
+                started.elapsed().as_millis(),
+            );
+            return anyhow!(
+                "local command timed out after {}s: '{}'",
+                timeout.timeout_secs,
+                request.command
+            );
+        }
+        error
+    })?;
+
+    let result = ExecResult {
+        host: request.host,
+        command: request.command,
+        exit_code: captured.exit_code,
+        stdout: String::from_utf8_lossy(&captured.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&captured.stderr).into_owned(),
+        duration_ms: started.elapsed().as_millis(),
+        risk_level: risk,
+        truncated: captured.truncated,
+        dropped_bytes: captured.dropped_bytes,
+        side_effect: request.side_effect.clone(),
+    };
+    append_audit(
+        &result,
+        risk,
+        request.reason.as_deref(),
+        request.change_id.as_deref(),
+        Some(&source),
+    )?;
+
     crate::events::publish_event(
         crate::events::EventType::ExecCompleted,
         serde_json::json!({

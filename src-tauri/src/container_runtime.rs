@@ -5,11 +5,17 @@
 //! Before this module the discovery code hard-coded `docker`: one binary name,
 //! one set of subcommands, one JSON dialect. That is now a table:
 //!
-//! | runtime | binary | list | exec | remove |
-//! |---------|--------|------|------|--------|
-//! | Docker  | `docker`  | `ps [--all] --format {{json .}}` | `exec -it <id> <shell>` | `rm -f <id>` |
-//! | wslc    | `wslc`    | `ps [--a] --format json`         | `exec -it <id> <shell>` | `rm -f <id>` |
-//! | Apple   | `container` | `list [--all] --format json`   | `exec -it <id> <shell>` | `rm -f <id>` |
+//! | runtime | binary | list | exec (interactive) | exec (capture) | remove |
+//! |---------|--------|------|--------------------|----------------|--------|
+//! | Docker  | `docker`  | `ps [--all] --format {{json .}}` | `exec -it <id> <shell>` | `exec <id> <shell> -c <cmd>` | `rm -f <id>` |
+//! | wslc    | `wslc`    | `ps [--a] --format json`         | `exec -it <id> <shell>` | `exec <id> <shell> -c <cmd>` | `rm -f <id>` |
+//! | Apple   | `container` | `list [--all] --format json`   | `exec -it <id> <shell>` | `exec <id> <shell> -c <cmd>` | `rm -f <id>` |
+//!
+//! The two exec shapes are two semantics, not two spellings of one: `-it`
+//! allocates a TTY for a human at a terminal, and a TTY corrupts captured
+//! output (CRLF translation, prompt echoing), so the capture shape omits both
+//! flags. See [`ContainerRuntime::exec_args`] and
+//! [`ContainerRuntime::exec_capture_args`].
 //!
 //! `wslc rm` and `container rm` are documented aliases of `wslc remove` and
 //! `container delete` (Microsoft's `wslc remove --help` lists `rm`/`delete` as
@@ -185,6 +191,11 @@ impl ContainerRuntime {
     }
 
     /// Arguments that open an interactive shell in a container.
+    ///
+    /// This is the human path (`container_terminal` launches it in a real
+    /// terminal): `-i` keeps stdin open and `-t` allocates a TTY. It must not
+    /// be used for captured execution — the TTY mangles the byte streams — see
+    /// [`Self::exec_capture_args`] for that shape.
     pub fn exec_args(self, container_id: &str, shell: &str) -> Vec<String> {
         // All three runtimes accept the combined `-it` short form, and all three
         // put the container reference before the command.
@@ -194,6 +205,21 @@ impl ContainerRuntime {
             container_id.into(),
             shell.into(),
         ]
+    }
+
+    /// Arguments that run *one command* inside a container with its output
+    /// captured — the agent path, and the non-TTY counterpart of
+    /// [`Self::exec_args`].
+    ///
+    /// No `-i` and no `-t`: there is no terminal to allocate, and a TTY would
+    /// corrupt the captured streams with CRLF translation and prompt echoing.
+    /// The shell is the last argument, so the command reaches it as
+    /// `<shell> -c <command>` — the same shape a POSIX shell takes locally,
+    /// which is what lets a container target share the local exec's invocation
+    /// machinery unchanged. `docker exec` without a `-t` prints the container
+    /// process's stdout and stderr as raw bytes and exits with its status.
+    pub fn exec_capture_args(self, container_id: &str, shell: &str) -> Vec<String> {
+        vec!["exec".into(), container_id.into(), shell.into()]
     }
 
     /// Arguments that force-remove a container.
@@ -432,6 +458,29 @@ mod tests {
                 "{} must accept the shared rm spelling",
                 runtime.id()
             );
+        }
+    }
+
+    #[test]
+    fn capture_exec_args_never_allocate_a_tty() {
+        for runtime in ContainerRuntime::ALL {
+            let args = runtime.exec_capture_args("abc123", CONTAINER_SHELL);
+            assert_eq!(
+                args,
+                vec!["exec", "abc123", "/bin/sh"],
+                "{} capture argv",
+                runtime.id()
+            );
+            // The whole point of the capture shape: no `-t`, no `-it`, no `-i`.
+            // A TTY would CRLF-translate and echo prompts into captured bytes;
+            // `-i` would bind stdin this runner does not forward.
+            for flag in ["-t", "-it", "-i"] {
+                assert!(
+                    !args.iter().any(|arg| arg == flag),
+                    "{} capture argv must not contain {flag}: {args:?}",
+                    runtime.id()
+                );
+            }
         }
     }
 

@@ -623,6 +623,46 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+  /local-exec:
+    post:
+      summary: Execute a command in a terminal environment on the daemon's own machine
+      description: "Runs the command in a shell on the host the daemon is running on, through the same token scope, execution gate, execution limits, risk classifier and approval policy as `/exec`. `host` selects the environment: `local` for the shell the app would open, `local:<environment>` where environment is one of `pwsh`, `cmd`, `gitbash`, `vs` (a Visual Studio developer shell with MSVC on PATH), `wsl` or `wsl:<distribution>` (a WSL login shell), or `local:<runtime>:<container-id>` where runtime is one of `docker`, `wslc`, `apple` to run the command inside that container through the runtime's non-TTY exec (no stdin; a request carrying `stdin` is rejected with 400). Any other value is rejected with 400, so a request cannot borrow another host alias's scope entry and then execute here. Returns the same `ExecResult` shape as `/exec`, with `host` echoing the id that was requested."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ExecRequest" }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExecResult" }
+        "400":
+          description: A host that is not a local id, an unknown environment or container runtime, a malformed container id, an environment that cannot be built, a container request carrying stdin, an over-long command, or a command blocked by risk policy
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Scope denied or approval rejected
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "408":
+          description: Approval timed out
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "423":
+          description: Execution gate paused
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Execution limit exceeded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /exec-multi:
     post:
       summary: Execute a command on multiple hosts

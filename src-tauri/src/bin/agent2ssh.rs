@@ -2666,12 +2666,13 @@ async fn async_main() -> Result<()> {
             } else {
                 for entry in entries {
                     println!(
-                        "{}\t{}\texit={:?}\t{}ms\t[{}]\t{}",
+                        "{}\t{}\texit={:?}\t{}ms\t[{}]\ttarget={}\t{}",
                         entry.ts,
                         entry.host,
                         entry.exit_code,
                         entry.duration_ms,
                         entry.risk_level,
+                        entry.target(),
                         entry.command
                     );
                 }

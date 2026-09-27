@@ -14,6 +14,7 @@ pub mod diagnostics;
 pub mod embedded_ssh;
 pub mod error_codes;
 pub mod events;
+pub mod exec_capture;
 pub mod execution_control;
 pub mod font_list;
 pub mod forward;
@@ -25,6 +26,7 @@ pub mod jump_chain;
 pub mod keys;
 pub mod lifecycle;
 pub mod limits;
+pub mod local_exec;
 pub mod mcp_binding;
 pub mod notify;
 pub mod osc_ipc;
@@ -70,11 +72,11 @@ pub use approval::{
 pub use connection::{connect_host, disconnect_host, list_active_connections};
 pub use core::{
     add_host_core, build_plan_from_profile, classify_risk, compare_exec_results,
-    compare_ssh_configs, delete_host_group_core, delete_proxy_core, exec_multi_core,
-    exec_multi_with_strategy, exec_ssh_core, export_team_config, export_to_ssh_config,
-    export_to_ssh_config_format, filter_hosts, import_ssh_config_core, import_team_config,
-    list_audit_core, list_host_groups_core, list_hosts_core, list_hosts_filtered_core,
-    list_proxies_core, ping_hosts_core, preview_exec, preview_exec_multi,
+    compare_ssh_configs, delete_host_group_core, delete_proxy_core, exec_local_core,
+    exec_multi_core, exec_multi_with_strategy, exec_ssh_core, export_team_config,
+    export_to_ssh_config, export_to_ssh_config_format, filter_hosts, import_ssh_config_core,
+    import_team_config, list_audit_core, list_host_groups_core, list_hosts_core,
+    list_hosts_filtered_core, list_proxies_core, ping_hosts_core, preview_exec, preview_exec_multi,
     preview_team_config_import, remove_host_core, save_host_group_core, save_proxy_core,
     sftp_download_core, sftp_download_core_with_source, sftp_ls_core, sftp_ls_core_with_source,
     sftp_mkdir_core, sftp_mkdir_core_with_source, sftp_remove_dir_all_core,
@@ -117,6 +119,10 @@ pub use health::{
 pub use limits::{
     load_execution_limits, ExecutionLimitConfig, ExecutionLimitRejection, ExecutionLimitRule,
     ExecutionLimiter,
+};
+pub use local_exec::{
+    environment_for_host, LocalEnvironment, LocalEnvironmentRequest,
+    DEPTH_ENV as LOCAL_EXEC_DEPTH_ENV, MAX_LOCAL_EXEC_DEPTH, SHELL_ENV as LOCAL_EXEC_SHELL_ENV,
 };
 pub use mcp_binding::{
     create_mcp_binding_key, mcp_binding_key_is_valid, verify_mcp_binding_from_env,
