@@ -52,10 +52,30 @@ impl TestDaemon {
         std::fs::write(dir.join("daemon.token"), &token).expect("seed daemon.token");
 
         let addr = free_loopback_addr();
-        let child = Command::new(env!("CARGO_BIN_EXE_agent2ssh-daemon"))
+        let mut spawn = Command::new(env!("CARGO_BIN_EXE_agent2ssh-daemon"));
+        spawn
             .env(CONFIG_DIR_ENV, &dir)
             .env("AGENT2SSH_DAEMON_ADDR", &addr)
-            .env("AGENT2SSH_LOG", "warn")
+            .env("AGENT2SSH_LOG", "warn");
+
+        // This suite asserts POSIX shell semantics (`export VAR=...`,
+        // `echo $VAR`, `$?` exit codes). On Windows the default `local`
+        // environment is PowerShell, where `export` is not a command and a
+        // cmdlet-only command has no `$LASTEXITCODE` — those assertions can
+        // never hold. Pin the daemon's default shell to an installed POSIX
+        // shell (Git Bash) so the suite verifies the same contract on every
+        // host; without one the suite still runs and reports the gap.
+        #[cfg(windows)]
+        {
+            if let Some(posix) = agent2ssh::shell_list::list_shells()
+                .into_iter()
+                .find(|shell| shell.family == agent2ssh::shell_list::ShellFamily::Posix)
+            {
+                spawn.env(agent2ssh::local_exec::SHELL_ENV, &posix.path);
+            }
+        }
+
+        let child = spawn
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
