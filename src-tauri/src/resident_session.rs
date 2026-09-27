@@ -195,7 +195,18 @@ fn command_frame(plan: &EnvironmentPlan, command: &str, nonce: &str) -> String {
         ),
         // `\r\n`: cmd treats a lone `\n` as line end too, but staying with the
         // family's own terminator costs nothing.
-        CommandStyle::CmdSlashC => format!("{command}\r\necho {marker}%ERRORLEVEL%\r\n"),
+        //
+        // The leading reset is cmd's counterpart to PowerShell's
+        // `$LASTEXITCODE = $null`: cmd's `%ERRORLEVEL%` is sticky, and commands
+        // like `echo`, `set` and `cd` never touch it, so without this a single
+        // failed command would make every later one report the stale code —
+        // `exit 7` followed by `echo hi` would answer 7 for a command that
+        // cannot fail. `ver >nul` is the way to clear it: a bare `call`, the
+        // other commonly suggested trick, sets it to 1 instead (measured), and
+        // `cmd /c exit /b 0` pays a child process for what `ver` does in-place.
+        CommandStyle::CmdSlashC => {
+            format!("ver >nul\r\n{command}\r\necho {marker}%ERRORLEVEL%\r\n")
+        }
         CommandStyle::PosixDashC | CommandStyle::WslLoginShell => {
             format!("{command}\nprintf '{marker}%s\\n' \"$?\"\n")
         }
@@ -920,9 +931,25 @@ mod tests {
     }
 
     #[test]
-    fn cmd_frame_uses_crlf_and_errorlevel() {
+    fn cmd_frame_clears_stale_errorlevel_and_uses_crlf() {
         let frame = command_frame(&plan(CommandStyle::CmdSlashC), "dir", "abc123");
-        assert_eq!(frame, "dir\r\necho __A2S_DONE_abc123:%ERRORLEVEL%\r\n");
+        // The reset is what keeps a command that cannot fail (`echo`, `set`)
+        // from reporting the previous command's exit code. `call` is not it:
+        // measured, it sets ERRORLEVEL to 1.
+        assert_eq!(
+            frame,
+            "ver >nul\r\ndir\r\necho __A2S_DONE_abc123:%ERRORLEVEL%\r\n"
+        );
+        assert!(!frame.contains("\n\n"), "cmd frames stay CRLF-terminated");
+    }
+
+    #[test]
+    fn cmd_frame_keeps_a_multi_line_command_together() {
+        let command = "if exist . (\r\n  echo here\r\n)";
+        let frame = command_frame(&plan(CommandStyle::CmdSlashC), command, "n1");
+        assert!(frame.starts_with("ver >nul\r\n"));
+        assert!(frame.contains("if exist . (\r\n  echo here\r\n)"));
+        assert!(frame.ends_with("echo __A2S_DONE_n1:%ERRORLEVEL%\r\n"));
     }
 
     #[test]
