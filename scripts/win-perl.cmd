@@ -1,5 +1,5 @@
 @echo off
-rem ─────────────────────────────────────────────────────────────────────────────
+rem -----------------------------------------------------------------------------
 rem Full-Perl resolver for the bundled-OpenSSL Windows build.
 rem
 rem The Windows build compiles OpenSSL from source (see the `ssh2` dependency
@@ -7,7 +7,7 @@ rem comment in src-tauri/Cargo.toml), and that build is driven by OpenSSL's
 rem `Configure`, a Perl program requiring the full core module set.
 rem
 rem Git for Windows ships a *trimmed* Perl. It is missing, among others,
-rem `Locale::Maketext::Simple` — pulled in by `Params::Check` and `IPC::Cmd` —
+rem `Locale::Maketext::Simple` -- pulled in by `Params::Check` and `IPC::Cmd` --
 rem and because Git Bash places its own /usr/bin ahead of every Windows PATH
 rem entry, that trimmed Perl is the one a bare `perl` resolves to inside Git
 rem Bash. `Configure` then dies before generating a single makefile:
@@ -19,8 +19,12 @@ rem `src-tauri/.cargo/config.toml` points OPENSSL_SRC_PERL at this file so that
 rem the build behaves the same from any shell. It finds the first full
 rem distribution present and otherwise fails with a message naming the fix.
 rem
+rem NOTE: keep this file pure ASCII. cmd.exe parses batch files with the ANSI
+rem codepage (GBK on Chinese-locale Windows), and any non-ASCII byte in the
+rem comment lines desyncs the parser before line 1 even executes.
+rem
 rem To pin a specific interpreter, set OPENSSL_SRC_PERL_FULL to its perl.exe.
-rem ─────────────────────────────────────────────────────────────────────────────
+rem -----------------------------------------------------------------------------
 setlocal
 
 if not "%OPENSSL_SRC_PERL_FULL%"=="" goto explicit
