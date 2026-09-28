@@ -11,7 +11,9 @@ type I18nContextValue = {
 
 const STORAGE_KEY = "agent2ssh.language";
 
-const zh: Record<string, string> = {
+/** Chinese strings, keyed by the English source text. Exported so the module
+ * registry test can assert every sidebar label has a translation. */
+export const zh: Record<string, string> = {
   "Broadcast command": "广播命令",
   "Review every target and its effective risk before sending. Delivery is authorization-atomic, not remote execution-atomic.": "发送前请检查每个目标及其有效风险。授权阶段保证全有或全无，但远端执行并非原子操作。",
   "Single command to run on selected terminals": "在所选终端运行的单条命令",
