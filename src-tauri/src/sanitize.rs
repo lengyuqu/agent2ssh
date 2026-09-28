@@ -1327,6 +1327,23 @@ mod tests {
         assert_eq!(split_commands("echo 'x;y'"), vec!["echo 'x;y'"]);
     }
 
+    /// The nested collection above is deliberately conservative, and that has
+    /// a sharp edge: for a single-statement input the *outer* `command` node
+    /// spans the whole string, so the split comes back carrying the input
+    /// itself as its first segment. Pinned here because a caller that recurses
+    /// over the segments without skipping that self-echo never terminates —
+    /// exactly how `classify_risk` used to overflow the stack on `echo $(pwd)`
+    /// (see `command_substitution_in_arguments_terminates` in `core.rs`).
+    #[test]
+    fn split_commands_reports_the_input_itself_when_a_substitution_nests() {
+        assert_eq!(
+            split_commands("echo $(pwd)"),
+            vec!["echo $(pwd)", "pwd"],
+            "the outer segment is the input; callers must not recurse on it"
+        );
+        assert_eq!(split_commands("x=$(whoami)"), vec!["whoami"]);
+    }
+
     #[test]
     fn env_wrapper_skips_unset_value() {
         // Regression: `env -u PATH` must not leave head stuck at "PATH".
