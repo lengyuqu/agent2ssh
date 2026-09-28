@@ -17,6 +17,7 @@
 | E2 | [可靠性与规模](#e2-可靠性与规模报告) | — | 100 host / 1000 event 规模基线 |
 | E3 | [契约一致性 CI](#e3-契约一致性-ci-报告) | — | 契约检查入 CI |
 | I5 | [配置热加载一致性审计](#i5-配置热加载一致性审计) | — | 配置缓存审计 |
+| W1 | [Windows 真机验证与缺陷收口](#w1-windows-真机验证与缺陷收口) | 2026-09-28 | local:vs/wsl/cmd 热启动 + 面板真机验证，收口 4 个缺陷 |
 
 ---
 
@@ -745,3 +746,53 @@ cargo test --no-default-features --test cli_smoke cli_playbook_run_help_shows_re
 - 审计结论落档（本文件）。
 - `hosts.json` 接入 `ConfigCache` + 写后 `invalidate`，含 `load_config_reflects_saved_hosts_via_cache` 单测。
 - 两套 `cargo check`、两套 `cargo test` 全绿。
+
+---
+
+## W1 Windows 真机验证与缺陷收口
+
+### 目标
+
+resident-session / local-exec 表面的「可移植半边」此前只在 macOS 与 CI 上验证，`AGENTS.md` 把四项 Windows 证据列为 outstanding。本次在本机收口这四项（`local:vs` 热启动、`local:wsl` 热启动、cmd 常驻集成测试、桌面面板真机运行），并把过程中暴露的缺陷一并修掉。
+
+### 本次验证范围
+
+- `local:vs` 热启动，以及与 `local:cmd` 的差分对（同一条 `where.exe cl` 必须成功 / 必须失败）。
+- `local:wsl:Ubuntu` 热启动（先安装发行版），含状态保持、单壳证明、退出码透传。
+- cmd 常驻会话集成测试（`cd`/`set` 保持、退出码、回显不泄漏）。
+- 桌面 resident-sessions 面板真机运行（真实 WebView2 窗口 + 真实 daemon）。
+- 顺带：全量前端与 Rust 测试、`scripts/e2e-container.sh`。
+
+### 环境
+
+Windows 11（build 26200）工作站；VS BuildTools 18（MSVC 14.51.36231）；WSL2 + Ubuntu 26.04（内核 6.18.40.1，本次安装）；Docker 29.8.0。
+
+### 证据
+
+| 项 | 结果 |
+|---|---|
+| `local:vs` | `open` 付一次引导（warmup_ms 2551–2799）；此后每条 `where.exe cl` 20 ms（daemon 侧）/ ~0.22 s 端到端，而一次性 `local:vs` 同命令 2530–2667 ms（≈11.6×）；`cl.exe` 解析到 VS 18 BuildTools 的 MSVC 14.51 |
+| `local:cmd` 差分 | 同一 `where.exe cl` 返回 exit=1（找不到）——PATH 来自环境本身，不是巧合 |
+| `local:wsl:Ubuntu` | warmup_ms 255–852；exec 20 ms；`cd /tmp`、`export A2S_HOT=wsl-hot` 保持；`echo $$` 两次均为 11（同一壳，而非每条命令重启）；`sh -c "exit 5"` 报 5 且会话存活；热 ~0.21 s vs 一次性 ~0.58 s |
+| cmd 常驻集成 | `tests/resident_session.rs` 新增 2 例（`cd`/`set` 保持、退出码 + 回显跳过），该套件 12 项全过 |
+| 面板真机 | CDP 驱动真实 WebView2：渲染 2 个会话（host/id/label/空闲秒数）；点「关闭会话」后 daemon 侧由 2 变 1，两侧一致 |
+| 测试总量 | `npm test` 155（22 文件）、`npm run build`、`cargo test --no-default-features --lib` 713、`cargo test --lib` 717、`cli_contract` 39、`resident_session` 12、`local_exec` 19、`daemon_integration` 61、`daemon_local_exec_e2e` 7、`daemon_resident_session_e2e` 6、`e2e-container.sh` 全过 |
+
+### 发现并修复的缺陷
+
+1. **P0 栈溢出（CLI 与 daemon 直接死）**：`split_commands` 有意收集全部 `command` 节点，单语句输入的最外层节点覆盖整串；`classify_risk` 按返回段递归，于是第一段就是输入本身，递归不收敛。`risk 'echo $(pwd)'` 即崩，daemon 内表现为 `thread 'tokio-rt-worker' has overflowed its stack`（首见于 WSL 常驻会话执行 `echo $(whoami) in $(pwd)`，连续三次杀死 daemon）。修法：只递归长度严格更短的段；保守性保留（`echo $(rm -rf /)` 仍判 blocked）。三处测试固化。
+2. **cmd 常驻会话退出码粘滞**：`%ERRORLEVEL%` 不会被回显类命令刷新，一次失败会污染后续所有命令（实测 `exit 7` 之后 `echo after-failure` 报 7）。帧前置 `ver >nul`（实测裸 `call` 会置 1，不可用）。
+3. **resident-sessions 面板侧边栏不可达**：只进了 `MODULES`，未进 `SIDEBAR_ORDER`。修法：注册表收敛到 `src/nav.ts`，`src/nav.test.ts` 固化跨表不变量（侧边栏覆盖、快捷键前九固定、关联只指向已知模块、标签有中文翻译），并做过变异验证。
+4. **`npm run tauri:dev` 在 Windows 起步即崩**：Vite watcher 监视 `src-tauri/target`，新链接的可执行文件短暂被锁 → `EBUSY` → dev server 退出 → `beforeDevCommand` 非零。补上 Tauri 模板默认的 `server.watch.ignored: ["**/src-tauri/**"]`。
+5. **`cargo test --lib`（Windows）无法启动**：`0xc0000139`，根因是 tauri 特性直接导入 `comctl32!TaskDialogIndirect`（仅 v6 并行程序集有），测试二进制没有 manifest，于是绑定 System32 的 5.82 版本。`build.rs` 对 Windows 全目标 delay-load comctl32（注意 `rustc-link-arg-tests` 不覆盖 lib 单元测试目标）。
+6. **approvals 过期即死锁**：`AppState::new()` 内加载 approvals，其保留期清理会写诊断日志 → 读 `diagnostic_lock`（正在构造的结构体字段）→ 同线程重入 `app_state()` → `OnceLock` 死锁；触发条件只是配置目录里的 approvals 存在超 30 天条目，表现为所有 CLI 命令无输出挂死。加 thread-local 初始化标志，初始化期不落盘。
+
+### 环境前提（非代码问题，已写入 AGENTS.md）
+
+- WSL 发行版必须完成 OOBE：被中断的安装会让每次无命令启动打印 `Provisioning the new WSL instance …`，常驻预热必然跑满 `OPEN_TIMEOUT_SECS=120` 并留下 dead session。修法：`/etc/wsl.conf` 设 `[user] default=`，删除 `/etc/wsl-distribution.conf` 的 `[oobe]` 段，然后 `wsl --terminate <distro>`。
+- `tauri dev` 会把 `src-tauri/binaries/<name>-<triple>` 覆盖到 `target/debug/<name>.exe`：陈旧 sidecar 会静默成为 CLI 实际对话的 daemon，症状是「源码里明明有的新路由返回 404」。诊断：`strings target/debug/<name>.exe | grep -c <route>`。
+
+### 验收
+
+- 证据与缺陷修复均已提交并推送（`9b67924`…`0574276`）；`AGENTS.md` 的 outstanding 清单转为验证状态，`CHANGELOG.md` 补齐 Fixed/Verified，`docs/plans/resident-session-design.md` 的契约清单勾选完毕。
+- 前端 155 测试 + 构建、Rust 两套 lib 测试、6 个集成套件、容器 e2e 全绿。

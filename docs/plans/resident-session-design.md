@@ -133,14 +133,14 @@ open 流程：授权 → `resolve_environment`（失败照旧列出 `SELECTABLE_
 - CLI（P1）：`agent2ssh resident open/exec/close`，薄封装 daemon HTTP。
 - 桌面 UI（P2）：会话面板，复用现有 sessions UI 骨架。
 
-## 7. 契约同步清单（实施时逐项打勾）
+## 7. 契约同步清单（全部落地，2026-09-28 复查）
 
-- [ ] `docs/api.yaml`：4 条路由（`api_yaml_documents_every_daemon_route` 强制）。
-- [ ] `src/bin/agent2ssh_mcp/tools.rs` + 工具数断言 71→74 + `docs/skills.md`（三处同步）。
-- [ ] `AGENTS.md` `## Execution Targets`：补 resident session 规则（含"不得走更弱路径"）。
-- [ ] `docs/architecture.md` 传输矩阵：本地环境行加"常驻"列。
-- [ ] `CHANGELOG.md`。
-- [ ] daemon 文件第 6 处 `preflight_guarded_request` 调用点（open 与 exec 各一，或合并为一个 handler 内两次）——现有防护测试若断言"5 处"需同步改为 6/7。
+- [x] `docs/api.yaml`：路由齐备（`POST|GET /resident-sessions`、`POST /:id/exec`、`GET /:id`、`DELETE /:id`；`api_yaml_documents_every_daemon_route` 强制）。
+- [x] `src/bin/agent2ssh_mcp/tools.rs` + 工具数断言 71→75 + `docs/skills.md`（三处同步；`mcp_tool_list_contains_exactly_75_tools` 与 `mcp_tools_match_skills_md_documentation` 强制）。
+- [x] `AGENTS.md` 执行目标段：补 resident session 规则（含"不得走更弱路径"，由 `resident_session_routes_run_the_shared_preflight` 源码级断言固化）。
+- [x] `docs/architecture.md` 传输矩阵：本地环境第三种形态（常驻）已写入。
+- [x] `CHANGELOG.md`：Added + Verified 均已记录。
+- [x] daemon `preflight_guarded_request` 调用点（open 与 exec 各自一次，共 18 处）；防护测试改为断言*顺序*（会话 host 必须先从 registry 读出再进闸门链），而非计数。
 
 ## 8. 测试计划
 
@@ -152,7 +152,7 @@ open 流程：授权 → `resolve_environment`（失败照旧列出 `SELECTABLE_
 | 授权 | open/exec 未授权拒绝 + 拒绝审计；host scope 不含 `local:vs` 的 token 开会话被拒 |
 | 契约/变异 | api.yaml 路由防护、MCP 计数；新防护测试按惯例做变异验证（改 handler 指向/删 preflight 调用必须变红） |
 
-注意本机 `cargo test --lib`（默认特性）不可用（0xc0000139），验证走 `--no-default-features`。
+本机 `cargo test --lib`（默认特性）曾因 `comctl32!TaskDialogIndirect` 的 v6 导入在测试二进制里无法解析而报 `0xc0000139`；`build.rs` 现已对 Windows 全目标 delay-load comctl32，该命令可正常跑（717 通过），验证不必再退到 `--no-default-features`。
 
 ## 9. 实施分期
 
