@@ -39,7 +39,12 @@
 //!   persistence this feature exists for. `$LASTEXITCODE` is reset before each
 //!   command, so a cmdlet-only command reports "no exit code" rather than a
 //!   stale one left by an earlier native command.
-//! * cmd — `echo __A2S_DONE_<nonce>:%ERRORLEVEL%`.
+//! * cmd — `ver >nul` then `echo __A2S_DONE_<nonce>:%ERRORLEVEL%`. The reset
+//!   is the same idea as PowerShell's: cmd's `%ERRORLEVEL%` is sticky and
+//!   `echo`, `set` and `cd` never touch it, so without it one failed command
+//!   would make every later one report that code. `ver >nul` is the way to
+//!   clear it — a bare `call`, the other commonly suggested trick, sets it to
+//!   1 (measured on Windows 11).
 //! * POSIX / WSL — `printf '__A2S_DONE_<nonce>:%s\n' "$?"`.
 //!
 //! ## Semantics that differ from a one-shot exec
