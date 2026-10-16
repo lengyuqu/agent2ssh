@@ -10,6 +10,8 @@
 //!    request/response semantics (auth, routing, JSON serialization, status
 //!    codes) without spawning a real TCP server.
 
+mod common;
+
 use agent2ssh::approval::*;
 use agent2ssh::core::*;
 use agent2ssh::risk_config::*;
@@ -556,6 +558,7 @@ fn test_audit_filter_serialization() {
         host_env: None,
         host_role: None,
         host_owner: None,
+        host_scope: None,
     };
     let json = serde_json::to_string(&filter).unwrap();
     assert!(json.contains("\"host\":\"prod\""));
@@ -1849,7 +1852,7 @@ fn mcp_tools_match_skills_md_documentation() {
 /// client, so a tool that quietly changes tier — or a new tool that is never
 /// classified at all — is a privilege decision made by omission. Nothing in the
 /// codebase referenced the file, so nothing could catch that drift: it happened
-/// to be correct (36 + 36 = 72 listings, 71 unique, `ssh_webhook_config` being
+/// to be correct (34 + 38 = 72 listings, 71 unique, `ssh_webhook_config` being
 /// the one tool with both a `(get)` and a `(set)` form) rather than being kept
 /// correct.
 ///
@@ -1910,7 +1913,7 @@ fn risk_tiers_match_mcp_tool_registry() {
     // The published read-only tier. `ssh_webhook_config` is the only tool that
     // also appears in `WRITE`, because it exposes both a `(get)` and a `(set)`
     // form.
-    const READ_ONLY: [&str; 36] = [
+    const READ_ONLY: [&str; 34] = [
         "ssh_list_hosts",
         "ssh_list_daemons",
         "ssh_ping",
@@ -1935,14 +1938,12 @@ fn risk_tiers_match_mcp_tool_registry() {
         "ssh_metrics",
         "ssh_metrics_trend",
         "ssh_preview_exec",
-        "ssh_health_snapshot",
         "ssh_gate_status",
         "ssh_daemon_diagnose",
         "ssh_daemon_version_check",
         "ssh_daemons_view",
         "ssh_events_subscribe",
         "ssh_sync_diff",
-        "ssh_sync_export",
         "ssh_snippet_list",
         "ssh_redact_rule_list",
         "ssh_highlight_rule_list",
@@ -1950,7 +1951,7 @@ fn risk_tiers_match_mcp_tool_registry() {
     ];
 
     // The published write tier.
-    const WRITE: [&str; 36] = [
+    const WRITE: [&str; 38] = [
         "ssh_exec",
         "ssh_exec_multi",
         "ssh_exec_compare",
@@ -1987,6 +1988,8 @@ fn risk_tiers_match_mcp_tool_registry() {
         "ssh_highlight_rule_reset",
         "ssh_algo_prefs_set",
         "ssh_algo_prefs_clear",
+        "ssh_health_snapshot",
+        "ssh_sync_export",
     ];
 
     let doc = include_str!("../../docs/skill-distribution.md");

@@ -580,9 +580,8 @@ pub fn check_daemon_scope(
     host_tags: &[String],
     command: &str,
 ) -> Result<(), String> {
-    let scope = match scope {
-        Some(s) => s,
-        None => return Ok(()),
+    let Some(scope) = scope else {
+        return Ok(());
     };
 
     // Check denied commands first
@@ -595,31 +594,22 @@ pub fn check_daemon_scope(
         }
     }
 
-    // Check allowed hosts
-    if !scope.allowed_hosts.is_empty()
-        && !scope
-            .allowed_hosts
-            .iter()
-            .any(|h| h.eq_ignore_ascii_case(host_name))
-    {
-        return Err(format!(
-            "host '{}' is not in the allowed hosts list",
-            host_name
-        ));
-    }
-
-    // Check allowed tags
-    if !scope.allowed_tags.is_empty() {
-        let has_matching_tag = scope
-            .allowed_tags
-            .iter()
-            .any(|allowed| host_tags.iter().any(|t| t.eq_ignore_ascii_case(allowed)));
-        if !has_matching_tag {
+    if !daemon_scope_allows_host(scope, host_name, host_tags) {
+        if !scope.allowed_hosts.is_empty()
+            && !scope
+                .allowed_hosts
+                .iter()
+                .any(|h| h.eq_ignore_ascii_case(host_name))
+        {
             return Err(format!(
-                "host '{}' has no tags matching allowed tags {:?}",
-                host_name, scope.allowed_tags
+                "host '{}' is not in the allowed hosts list",
+                host_name
             ));
         }
+        return Err(format!(
+            "host '{}' has no tags matching allowed tags {:?}",
+            host_name, scope.allowed_tags
+        ));
     }
 
     // Check allowed commands
@@ -637,6 +627,28 @@ pub fn check_daemon_scope(
     }
 
     Ok(())
+}
+
+/// Return whether a token may observe or target a host based on its host/tag
+/// scope. Command patterns are intentionally not considered here: a read-only
+/// listing has no command to authorize, while host and tag boundaries still
+/// must apply to returned data.
+pub fn daemon_scope_allows_host(
+    scope: &DaemonScope,
+    host_name: &str,
+    host_tags: &[String],
+) -> bool {
+    (scope.allowed_hosts.is_empty()
+        || scope
+            .allowed_hosts
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(host_name)))
+        && (scope.allowed_tags.is_empty()
+            || scope.allowed_tags.iter().any(|allowed| {
+                host_tags
+                    .iter()
+                    .any(|tag| tag.eq_ignore_ascii_case(allowed))
+            }))
 }
 
 // ── Daemon Diagnostic Types (F5-1) ──────────────────────────────────────────
@@ -1470,6 +1482,31 @@ mod tests {
 
         // Host with no tags should fail
         assert!(check_daemon_scope(&scope, "bare-host", &[], "ls").is_err());
+    }
+
+    #[test]
+    fn test_daemon_scope_host_visibility_uses_host_and_tag_boundaries() {
+        let scope = DaemonScope {
+            allowed_hosts: vec!["prod-web-1".to_string()],
+            allowed_tags: vec!["production".to_string()],
+            ..Default::default()
+        };
+
+        assert!(daemon_scope_allows_host(
+            &scope,
+            "PROD-WEB-1",
+            &["production".to_string()]
+        ));
+        assert!(!daemon_scope_allows_host(
+            &scope,
+            "prod-web-1",
+            &["staging".to_string()]
+        ));
+        assert!(!daemon_scope_allows_host(
+            &scope,
+            "prod-web-2",
+            &["production".to_string()]
+        ));
     }
 
     #[test]

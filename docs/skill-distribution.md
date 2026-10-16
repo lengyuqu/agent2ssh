@@ -108,10 +108,10 @@ ssh_playbook_dry_run    ssh_config_export
 ssh_config_import_preview   ssh_webhook_config (get)
 ssh_doctor              ssh_metrics
 ssh_metrics_trend       ssh_preview_exec
-ssh_health_snapshot     ssh_gate_status
+ssh_gate_status
 ssh_daemon_diagnose     ssh_daemon_version_check
 ssh_daemons_view        ssh_events_subscribe
-ssh_sync_diff           ssh_sync_export
+ssh_sync_diff
 ssh_snippet_list
 ssh_redact_rule_list    ssh_highlight_rule_list
 ssh_algo_prefs_get
@@ -140,6 +140,7 @@ ssh_redact_rule_remove   ssh_redact_rule_reset
 ssh_highlight_rule_add   ssh_highlight_rule_update
 ssh_highlight_rule_remove  ssh_highlight_rule_reset
 ssh_algo_prefs_set       ssh_algo_prefs_clear
+ssh_health_snapshot      ssh_sync_export
 ```
 
 `ssh_redact_rule_remove` 与 `ssh_highlight_rule_remove` 另外要求 `force: true`：删除一条脱敏规则会让该类机密不再出现在此后所有的审计记录、Webhook 通知、Playbook 结果和诊断导出中；删除一条高亮规则不会隐藏任何本应用写出的内容，但仍要求确认，以免拼错的关键字悄悄删掉一条本想保留的规则。缺少 `force` 的调用会被拒绝且不产生任何变更，`..._reset` 可恢复内置集合。三个规则库的写入都会落到 `~/.agent2ssh` 下的私有文件（`0600`）。

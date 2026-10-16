@@ -1036,3 +1036,10 @@ A22 的 `SshAlgoPrefs` 是**单例结构体**（8 个算法列表字段），不
 ```sh
 python3 ~/.workbuddy/skills/agent2ssh-add-operation/scripts/redundancy_scan.py /Users/yuqu/Vbercodeing/agent2ssh
 ```
+
+## 后续处理（2026-09-15）
+
+上表中的 5 处 `Button` 手写 `w-full` 已全部收口为共享 `block` 属性：
+`ForwardPanel`、`ExecPanel`、`ProxyPanel`、`AddHostForm` 和 `MultiExecPanel`。
+当前扫描不再发现 `Button` 组件上的手写 `w-full`；其余 `w-full` 用法属于
+容器、输入框或普通按钮/菜单项，不纳入这项去重。

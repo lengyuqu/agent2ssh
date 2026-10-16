@@ -311,8 +311,10 @@ denied_commands = ["rm -rf *", "mkfs *"]
 - `token_env` 优先于 `token`
 - scope 会在风险审批之前检查；未命中 scope 的请求不会进入审批队列
 - `allowed_commands` 和 `denied_commands` 使用 glob 风格匹配，`denied_commands` 优先
-- scope 覆盖 exec、playbook、SFTP、session、forward 和 connection 的 mutation 操作；非命令操作会使用类似 `sftp upload a -> b`、`session_open`、`session_close`、`connect` 的操作字符串做匹配
-- PTY session 写入按已完成的输入行做授权和审计；daemon session 和 desktop 本地 session 都会缓存未完成输入，直到换行后再按完整命令授权；`session_read`、`session_list`、`forward_list` 这类观察操作主要通过 token/scope 和事件流控制，不默认写入 `audit.jsonl`
+- scope 覆盖 ping、exec、playbook、SFTP、session、forward 和 connection 的按主机操作；非命令操作会使用类似 `ping`、`sftp upload a -> b`、`session_open`、`session_close`、`connect` 的操作字符串做匹配
+- scoped token 只用于按主机绑定的操作；gate、主机/片段、策略、脱敏/高亮、算法、审批、webhook、团队配置和本地配置变更等全局控制面操作必须使用 unrestricted admin token
+- 主机列表、审计、健康快照、连接、会话、转发和审批列表会按 scoped token 的 allowed hosts/tags 过滤；审计导出、趋势指标、事件流、待处理 OTP prompt 和 SSH sync diff 属于敏感全局读取，仅 unrestricted admin 可用
+- PTY session 写入按已完成的输入行做授权和审计；daemon session 和 desktop 本地 session 都会缓存未完成输入，直到换行后再按完整命令授权；`session_read`、`session_list`、`forward_list` 这类观察操作通过 token/scope 控制，不默认写入 `audit.jsonl`
 
 ---
 

@@ -13,6 +13,8 @@
 //! the session drops and the peer observes EOF. While the worker was leaked the
 //! peer never did, which is how this was reproduced before the fix.
 
+mod common;
+
 use agent2ssh::store::CONFIG_DIR_ENV;
 
 use std::io::Read;
@@ -72,7 +74,7 @@ fn isolated_config(port: u16, label: &str) -> PathBuf {
 }
 
 fn release_config(dir: PathBuf) {
-    std::env::remove_var(CONFIG_DIR_ENV);
+    common::restore_default_config_env();
     let _ = std::fs::remove_dir_all(dir);
 }
 

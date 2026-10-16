@@ -2541,6 +2541,7 @@ async fn async_main() -> Result<()> {
                 host_env: env,
                 host_role: role,
                 host_owner: owner,
+                host_scope: None,
             };
 
             // Handle --format export mode

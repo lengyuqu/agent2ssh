@@ -34,6 +34,7 @@ pub mod recording;
 pub mod redaction;
 pub mod remote;
 pub mod risk_config;
+mod risk_extra;
 pub mod sanitize;
 pub mod secrets;
 pub mod session;
@@ -78,10 +79,10 @@ pub use core::{
     sftp_remove_dir_all_core_with_source, sftp_remove_dir_core, sftp_remove_dir_core_with_source,
     sftp_remove_file_core, sftp_remove_file_core_with_source, sftp_rename_core,
     sftp_rename_core_with_source, sftp_stat_core, sftp_stat_core_with_source, sftp_upload_core,
-    sftp_upload_core_with_source, update_host_core, ConfigDiffPreview, ExecComparison,
-    ExecMultiBatchRequest, ExecMultiRequest, ExecPlan, ExecPlanTarget, ExitCodeGroup, ImportResult,
-    OutputComparison, OutputDiff, SshSyncDiff, SshSyncHostConflict, SshSyncHostDiff,
-    SshSyncStrategy, TeamConfigExport,
+    sftp_upload_core_with_source, update_host_core, validate_mcp_ssh_export_path,
+    ConfigDiffPreview, ExecComparison, ExecMultiBatchRequest, ExecMultiRequest, ExecPlan,
+    ExecPlanTarget, ExitCodeGroup, ImportResult, OutputComparison, OutputDiff, SshSyncDiff,
+    SshSyncHostConflict, SshSyncHostDiff, SshSyncStrategy, TeamConfigExport,
 };
 pub use diagnostics::{
     app_log_path, append_diagnostic_log, append_diagnostic_log_no_sink, clear_diagnostic_logs,

@@ -99,6 +99,7 @@
   - 抽取前端 `t("...")` 字面量和动态模块 label，确认中文表无缺译
   - 检查翻译前后 `{placeholder}` 集合一致
 - [ ] 确认 CI 的 `Contract consistency` job 通过；该 job 显式运行上述 S3 契约检查，且 `build` matrix 依赖它。
+- [ ] 配置 GitHub Secrets `TAURI_SIGNING_PRIVATE_KEY`、`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 和对应的 `TAURI_SIGNING_PUBLIC_KEY`；release bundle 会在缺少任一 updater signing key 时直接失败。
 - [ ] 如需完整本机验收，可运行：
   ```bash
   ./scripts/e2e-local.sh
@@ -126,6 +127,7 @@ git push git233 main --tags
 - [ ] 确认 `build` job 已通过（3 平台编译：macOS aarch64、Linux x86_64、Windows x86_64；Intel Mac 已不再支持）
 - [ ] 确认 `tauri-bundle` job 已产出安装包（`.dmg` / `.AppImage` / `.msi`）
 - [ ] 检查 GitHub Releases 页面，确认所有构建资产完整
+- [ ] 确认 `latest.json` 已上传，并包含 `darwin-aarch64`、`linux-x86_64`、`windows-x86_64` 的签名和下载地址
 - [ ] 确认每个平台的 `CHECKSUMS-SHA256.txt` 已上传为 release asset
 
 ### 2.4 校验和验证（Checksum Verification）

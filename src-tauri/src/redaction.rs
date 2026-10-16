@@ -376,13 +376,9 @@ pub fn seed_default_rules() -> Result<(), RedactRuleError> {
     write_rules_file(&path, &default_rules())
 }
 
-/// A24: Load user-editable rules from the config file. If the file doesn't
-/// exist yet, seed it first (one-time) and then load.
-///
-/// Returns the rules from the file, which may differ from the hardcoded
-/// defaults if the user edited them. A missing, unreadable or malformed file
-/// falls back to `default_rules()` — redaction must never be *weaker* because
-/// the config is broken.
+/// Load user-editable rules from the config file, returning an error when the
+/// file cannot be trusted. If the file doesn't exist yet, seed it first
+/// (one-time) and then load.
 ///
 /// This is deliberately uncached. It reads and recompiles on every call, which
 /// is what `default_rules()` already did on the same path, and it keeps an
@@ -390,16 +386,20 @@ pub fn seed_default_rules() -> Result<(), RedactRuleError> {
 /// have to cope with filesystem mtime granularity, where "write the file then
 /// read it back in the same tick" is not guaranteed to invalidate — the exact
 /// shape that makes a test flaky.
+fn load_user_rules_checked() -> Result<Vec<RedactRule>, RedactRuleError> {
+    seed_default_rules()?;
+    let path = redact_rules_path()?;
+    let json = std::fs::read_to_string(&path)
+        .map_err(|error| RedactRuleError::IoError(error.to_string()))?;
+    load_rules_from_json(&json)
+}
+
+/// Load the rules for list/edit surfaces. A broken file is represented as the
+/// built-in set for backwards compatibility with the existing list API; the
+/// live redaction path uses `load_user_rules_checked` directly and fails closed
+/// instead of making this fallback a security decision.
 pub fn load_user_rules() -> Vec<RedactRule> {
-    let _ = seed_default_rules();
-    let path = match redact_rules_path() {
-        Ok(p) => p,
-        Err(_) => return default_rules(),
-    };
-    match std::fs::read_to_string(&path) {
-        Ok(json) => load_rules_from_json(&json).unwrap_or_else(|_| default_rules()),
-        Err(_) => default_rules(),
-    }
+    load_user_rules_checked().unwrap_or_else(|_| default_rules())
 }
 
 /// A24: Reset the rules file to the hardcoded defaults, discarding any user
@@ -419,13 +419,19 @@ pub fn reset_default_rules() -> Result<(), RedactRuleError> {
     write_rules_file(&path, &default_rules())
 }
 
-/// A24: Redact using the user-editable rules (loaded from file), falling
-/// back to hardcoded defaults if the file is missing or corrupt.
+/// A24: Redact using the user-editable rules loaded from file.
+///
+/// If the file is missing, unreadable or malformed, the input is discarded
+/// rather than passed through with a weaker rule set. This is deliberately
+/// fail-closed: a custom rule may be the only protection for a secret format
+/// that is not covered by the built-in rules.
 ///
 /// This is what the live path calls — see `store::redact_sensitive_text`.
 pub fn redact_with_user_rules(text: &str) -> String {
-    let rules = load_user_rules();
-    redact_with_rules(text, &rules)
+    match load_user_rules_checked() {
+        Ok(rules) => redact_with_rules(text, &rules),
+        Err(_) => "[REDACTION UNAVAILABLE]".to_string(),
+    }
 }
 
 // ── A24: Editing the rule set ────────────────────────────────────────────────
@@ -455,7 +461,7 @@ pub fn insert_rule(
     // Validate before touching the file, so a bad pattern cannot leave a
     // half-written set behind.
     let rule = RedactRule::new(pattern, replacement)?;
-    let mut rules = load_user_rules();
+    let mut rules = load_user_rules_checked()?;
     if rules.iter().any(|r| r.pattern.as_str() == pattern) {
         return Err(RedactRuleError::Duplicate(pattern.to_string()));
     }
@@ -474,7 +480,7 @@ pub fn update_rule(
     replacement: &str,
 ) -> Result<Vec<crate::types::RedactRuleInfo>, RedactRuleError> {
     let rule = RedactRule::new(pattern, replacement)?;
-    let mut rules = load_user_rules();
+    let mut rules = load_user_rules_checked()?;
     let index = rules
         .iter()
         .position(|r| r.pattern.as_str() == old_pattern)
@@ -497,7 +503,7 @@ pub fn update_rule(
 /// file is an empty rule set, so *nothing* is redacted afterwards. Callers are
 /// expected to say so rather than present an empty list as a neutral state.
 pub fn delete_rule(pattern: &str) -> Result<Vec<crate::types::RedactRuleInfo>, RedactRuleError> {
-    let mut rules = load_user_rules();
+    let mut rules = load_user_rules_checked()?;
     let index = rules
         .iter()
         .position(|r| r.pattern.as_str() == pattern)
@@ -1002,15 +1008,16 @@ mod tests {
     }
 
     #[test]
-    fn redact_sensitive_text_falls_back_to_defaults_on_corrupt_file() {
+    fn redact_sensitive_text_fails_closed_on_corrupt_file() {
         let dir = crate::store::TestConfigDir::new("a24livebad");
         std::fs::write(dir.join(REDACT_RULES_FILE), "{{not json").unwrap();
 
-        let result = crate::store::redact_sensitive_text("connect to 10.0.0.5");
+        let result = crate::store::redact_sensitive_text("connect to 10.0.0.5 with MY_SECRET_42");
         assert!(
-            result.contains("<REDACTED:ip>"),
-            "a broken rules file must not weaken redaction, got {result}"
+            !result.contains("10.0.0.5") && !result.contains("MY_SECRET_42"),
+            "a broken rules file must not allow input through, got {result}"
         );
+        assert_eq!(result, "[REDACTION UNAVAILABLE]");
     }
 
     // ── A24: Editing the rule set ─────────────────────────────────────────

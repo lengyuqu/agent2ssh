@@ -25,11 +25,10 @@ const buttonVariants = cva(
       },
       /**
        * Fills the container. Buttons are otherwise sized by their label, so
-       * this needed naming: five call sites (`ForwardPanel`, `ProxyPanel`,
-       * `ExecPanel`, `AddHostForm`, `MultiExecPanel`) already spelled it by
-       * hand as `className="w-full"`, and the settings panel adds nineteen
-       * more. Those five are left as they are, not converted. See `align` for
-       * the other half of the row shape.
+       * this needed naming: the settings panel and the five legacy call sites
+       * (`ForwardPanel`, `ProxyPanel`, `ExecPanel`, `AddHostForm`,
+       * `MultiExecPanel`) now all express full-width layout through this axis.
+       * See `align` for the other half of the row shape.
        */
       block: { true: "w-full" },
       /**
@@ -61,4 +60,3 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
   )
 );
 Button.displayName = "Button";
-

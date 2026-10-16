@@ -430,6 +430,11 @@ jobs:
       - name: Tauri bundle
         shell: bash
         run: |
+          if [ -z "$A2S_TAURI_SIGNING_PRIVATE_KEY" ] || [ -z "$A2S_TAURI_SIGNING_PUBLIC_KEY" ]; then
+            echo "Updater signing keys are required for release bundles."
+            exit 1
+          fi
+          export TAURI_CONFIG="$(node -e 'process.stdout.write(JSON.stringify({bundle:{createUpdaterArtifacts:true},plugins:{updater:{pubkey:process.env.A2S_TAURI_SIGNING_PUBLIC_KEY}}}))')"
           if [ -n "$A2S_TAURI_SIGNING_PRIVATE_KEY" ]; then
             export TAURI_SIGNING_PRIVATE_KEY="$A2S_TAURI_SIGNING_PRIVATE_KEY"
           fi
@@ -454,6 +459,7 @@ jobs:
           # Updater signing (signs the artifacts the in-app updater verifies).
           A2S_TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           A2S_TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          A2S_TAURI_SIGNING_PUBLIC_KEY: ${{ secrets.TAURI_SIGNING_PUBLIC_KEY }}
           # macOS Developer ID signing + notarization. When these are empty the
           # config's ad-hoc identity ("-") is used and notarization is skipped.
           A2S_APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
@@ -464,14 +470,21 @@ jobs:
           # in tauri.conf.json, or use Azure Trusted Signing via these vars).
           A2S_WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.WINDOWS_CERTIFICATE_THUMBPRINT }}
 
-      # K3: publish the updater manifest (latest.json) and signatures so the
-      # in-app updater endpoint can serve them.
-      - name: Upload updater manifest
-        if: contains(matrix.target, 'apple-darwin')
+      # K3: publish one platform fragment. The final latest.json is merged only
+      # after every platform bundle has uploaded its signed artifact.
+      - name: Generate updater platform manifest
+        shell: bash
+        run: |
+          mkdir -p dist
+          node scripts/generate-updater-manifest.mjs \
+            --target "${{ matrix.target }}" \
+            --output "dist/updater-${{ matrix.target }}.json"
+
+      - name: Upload updater platform manifest
         uses: softprops/action-gh-release@v3
         with:
           files: |
-            src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz.sig
+            dist/updater-${{ matrix.target }}.json
 
       - name: Upload macOS bundle
         if: contains(matrix.target, 'apple-darwin')
@@ -495,6 +508,35 @@ jobs:
         with:
           files: |
             src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.exe*
+
+  release-updater-manifest:
+    needs: tauri-bundle
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download platform updater manifests
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p dist
+          gh release download "${{ github.event.release.tag_name }}" \
+            --repo "${{ github.repository }}" \
+            --pattern 'updater-*.json' \
+            --dir dist
+
+      - name: Merge updater manifest
+        run: node scripts/merge-updater-manifests.mjs --input-dir dist --output dist/latest.json
+
+      - name: Upload latest updater manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" \
+            --repo "${{ github.repository }}" \
+            --clobber \
+            dist/latest.json
 
   # K4: real-SSH end-to-end against a containerized OpenSSH server. Runs on every
   # push/PR (Linux runners ship Docker) to close the "runtime-unverified" gaps in

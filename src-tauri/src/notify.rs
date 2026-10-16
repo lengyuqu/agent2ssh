@@ -55,7 +55,7 @@ pub fn save_webhook_config(config: &WebhookConfig) -> Result<()> {
     let path = webhook_config_path()?;
     crate::store::ensure_config_dir()?;
     let raw = toml::to_string_pretty(config)?;
-    std::fs::write(&path, raw)?;
+    crate::store::write_private_text(&path, &raw)?;
     // Drop the cached value so this process reads the new config immediately,
     // independent of filesystem mtime granularity.
     WEBHOOK_CACHE.invalidate();

@@ -100,6 +100,14 @@ pub(super) fn is_public_path(path: &str) -> bool {
     matches!(path, "/" | "/console" | "/health" | "/metrics")
 }
 
+/// Routes that may authenticate via `?token=`: only the WebSocket upgrades,
+/// because browsers cannot attach an `Authorization` header to those. Anywhere
+/// else a URL token would leak into proxy logs, browser history and referrers
+/// for no benefit, so it is ignored.
+pub(super) fn accepts_query_token(path: &str) -> bool {
+    matches!(path, "/terminal" | "/exec/stream")
+}
+
 pub(super) fn bearer_token(headers: &HeaderMap) -> Option<String> {
     headers
         .get("authorization")
@@ -117,8 +125,8 @@ pub(super) fn query_token(uri: &axum::http::Uri) -> Option<String> {
 }
 
 /// Central authentication gate. Every request to a non-public route must present
-/// a valid admin or scoped token (via `Authorization: Bearer` or a `?token=`
-/// query parameter); otherwise it is rejected with 401 before reaching any
+/// a valid admin or scoped token (via `Authorization: Bearer`, or a `?token=`
+/// query parameter on the WebSocket routes only); otherwise it is rejected with 401 before reaching any
 /// handler. The resolved `AuthContext` is inserted into request extensions so
 /// handlers can perform per-target scope authorization without re-reading token
 /// storage.
@@ -131,7 +139,11 @@ pub(super) async fn auth_middleware(
         return next.run(request).await;
     }
     let token = bearer_token(request.headers())
-        .or_else(|| query_token(request.uri()))
+        .or_else(|| {
+            accepts_query_token(request.uri().path())
+                .then(|| query_token(request.uri()))
+                .flatten()
+        })
         .unwrap_or_default();
     match authenticate_token(&state, &token) {
         Ok(auth) => {
@@ -145,7 +157,17 @@ pub(super) async fn auth_middleware(
 
 #[cfg(test)]
 mod tests {
-    use super::token_matches;
+    use super::{accepts_query_token, token_matches};
+
+    #[test]
+    fn query_token_is_limited_to_websocket_routes() {
+        assert!(accepts_query_token("/terminal"));
+        assert!(accepts_query_token("/exec/stream"));
+        assert!(!accepts_query_token("/hosts"));
+        assert!(!accepts_query_token("/exec"));
+        assert!(!accepts_query_token("/events/stream"));
+        assert!(!accepts_query_token("/terminal/broadcast"));
+    }
 
     #[test]
     fn token_matches_exact() {

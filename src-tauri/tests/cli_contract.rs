@@ -8,6 +8,8 @@
 //! Mirrors rssh's `tests/cli_contract.rs` pattern, adapted to agent2ssh's
 //! command structure.
 
+mod common;
+
 use agent2ssh::store::CONFIG_DIR_ENV;
 
 /// Path to the CLI binary, resolved at compile time by cargo.
@@ -530,6 +532,58 @@ async fn b39_risk_command_exits_zero() {
         result.get("risk_level").is_some() || result.get("risk").is_some(),
         "risk output must contain risk level"
     );
+}
+
+/// Regression: `AppState::new` loads approvals inside the `APP_STATE` OnceLock
+/// initialiser while holding `.approvals.lock`. A populated store with an
+/// expired entry (or a malformed line) made the loader log through diagnostics,
+/// which re-entered `app_state()` and hung the CLI forever.
+#[tokio::test]
+async fn b39_cli_survives_populated_approval_store() {
+    let dir = unique_temp_dir("approvals-populated");
+    let now = chrono::Utc::now();
+    let entry = |age_days: i64, status: &str| {
+        serde_json::json!({
+            "id": uuid::Uuid::new_v4(),
+            "host": "web-1",
+            "command": "systemctl restart nginx",
+            "risk_level": "high",
+            "requested_at": now - chrono::Duration::days(age_days),
+            "ttl_secs": 300,
+            "status": status,
+        })
+        .to_string()
+    };
+    let store = [
+        entry(400, "approved"), // beyond retention: triggers the "dropped" log + compaction
+        "{ not json".to_string(), // malformed: triggers the "skipping" log
+        entry(1, "pending"),
+    ]
+    .join("\n");
+    std::fs::write(dir.join("approvals.jsonl"), store + "\n").expect("write approvals.jsonl");
+
+    let child = tokio::process::Command::new(cli_bin())
+        .env(CONFIG_DIR_ENV, &dir)
+        .args(["risk", "ls -la", "--json"])
+        .kill_on_drop(true)
+        .output();
+    let output = tokio::time::timeout(std::time::Duration::from_secs(30), child)
+        .await
+        .expect("CLI hung with a populated approvals.jsonl (lock-order inversion)")
+        .expect("failed to run CLI binary");
+    assert_eq!(output.status.code(), Some(0));
+
+    // Expired entry was compacted away; the live one survives.
+    let after = std::fs::read_to_string(dir.join("approvals.jsonl")).unwrap();
+    assert_eq!(after.lines().count(), 1, "unexpected store: {after}");
+
+    // The deferred diagnostics still reach app.log.
+    let log = std::fs::read_to_string(dir.join("app.log")).unwrap_or_default();
+    assert!(
+        log.contains("dropped expired approval entries"),
+        "deferred approval diagnostic was lost; app.log: {log}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]

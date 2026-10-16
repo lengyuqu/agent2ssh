@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    store::{config_dir, load_config, save_config_unlocked, store_write_lock},
+    store::{config_dir, load_config, save_config_unlocked, store_write_lock, write_private_text},
     types::HostProfile,
 };
 
@@ -108,13 +108,13 @@ pub fn import_team_config(export: &TeamConfigExport) -> Result<ImportResult> {
 
     if let Some(ref rules) = export.risk_rules {
         let path = config_dir.join("risk_rules.toml");
-        std::fs::write(&path, rules)
+        write_private_text(&path, rules)
             .with_context(|| format!("failed to write {}", path.display()))?;
     }
 
     if let Some(ref pbs) = export.playbooks {
         let path = config_dir.join("playbooks.toml");
-        std::fs::write(&path, pbs)
+        write_private_text(&path, pbs)
             .with_context(|| format!("failed to write {}", path.display()))?;
     }
 

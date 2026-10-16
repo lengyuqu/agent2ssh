@@ -41,8 +41,9 @@ use agent2ssh::redaction::{
     list_rules as list_redact_rules, reset_default_rules, update_rule as update_redact_rule,
 };
 use agent2ssh::remote::{
-    check_daemon_scope, check_daemon_version, diagnose_daemon, get_daemon_with_scope,
-    get_daemons_unified_view, list_daemons_core, tags_for_remote_scope_check, DaemonScope,
+    check_daemon_scope, check_daemon_version, daemon_scope_allows_host, diagnose_daemon,
+    get_daemon_with_scope, get_daemons_unified_view, list_daemons_core,
+    tags_for_remote_scope_check, DaemonScope,
 };
 use agent2ssh::risk_config::classify_with_user_rules;
 use agent2ssh::session::*;
@@ -70,7 +71,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Mutex};
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use uuid::Uuid;
 
 #[path = "agent2ssh_daemon/auth.rs"]
@@ -318,6 +319,35 @@ fn reject_if_gate_paused(
 
 fn host_tags(host: &str) -> Vec<String> {
     command_authorization_target(host).tags
+}
+
+fn scope_allows_observe_host(auth: &AuthContext, host: &str) -> bool {
+    match &auth.scope {
+        None => true,
+        Some(scope) => daemon_scope_allows_host(scope, host, &host_tags(host)),
+    }
+}
+
+fn audit_host_scope(auth: &AuthContext) -> Option<Vec<String>> {
+    let scope = auth.scope.as_ref()?;
+    if scope.allowed_hosts.is_empty() && scope.allowed_tags.is_empty() {
+        return None;
+    }
+
+    let configured = load_config().unwrap_or_default();
+    let mut names: HashSet<String> = configured
+        .hosts
+        .iter()
+        .filter(|host| daemon_scope_allows_host(scope, &host.name, &host.tags))
+        .map(|host| host.name.clone())
+        .collect();
+
+    // An allowed-host-only token may still inspect historical audit entries
+    // after the host profile has been removed from the current config.
+    if scope.allowed_tags.is_empty() {
+        names.extend(scope.allowed_hosts.iter().cloned());
+    }
+    Some(names.into_iter().collect())
 }
 
 fn host_risk_override(host: &str) -> Option<RiskLevel> {
@@ -921,10 +951,11 @@ async fn gate_status(
 
 async fn gate_pause(
     State(_s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
     Json(body): Json<GateUpdateBody>,
 ) -> Result<Json<ExecutionGateStatus>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    require_admin(&auth)?;
     let source = source_or_env(body.source, "daemon");
     let status = save_execution_gate(ExecutionGateMode::Paused, Some(source.clone()), body.reason)
         .map_err(|e| {
@@ -947,10 +978,11 @@ async fn gate_pause(
 
 async fn gate_resume(
     State(_s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
     Json(body): Json<GateUpdateBody>,
 ) -> Result<Json<ExecutionGateStatus>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    require_admin(&auth)?;
     let source = source_or_env(body.source, "daemon");
     let status = save_execution_gate(ExecutionGateMode::Active, Some(source.clone()), body.reason)
         .map_err(|e| {
@@ -973,7 +1005,7 @@ async fn gate_resume(
 
 async fn list_hosts(
     State(_s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
 ) -> Result<Json<Vec<HostProfile>>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     list_hosts_core()
@@ -981,6 +1013,11 @@ async fn list_hosts(
             Json(
                 hosts
                     .into_iter()
+                    .filter(|host| {
+                        auth.scope.as_ref().is_none_or(|scope| {
+                            daemon_scope_allows_host(scope, &host.name, &host.tags)
+                        })
+                    })
                     .map(HostProfile::redacted_for_transport)
                     .collect(),
             )
@@ -990,10 +1027,11 @@ async fn list_hosts(
 
 async fn add_host(
     State(_s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
     Json(host): Json<HostProfile>,
 ) -> Result<Json<HostProfile>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    require_admin(&auth)?;
     add_host_core(host)
         .map(|host| Json(host.redacted_for_transport()))
         .map_err(|e| err(StatusCode::BAD_REQUEST, e))
@@ -1001,10 +1039,11 @@ async fn add_host(
 
 async fn remove_host(
     State(_s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
     Path(name): Path<String>,
 ) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    require_admin(&auth)?;
     remove_host_core(&name)
         .map(|_| Json(OkBody { ok: true }))
         .map_err(|e| err(StatusCode::NOT_FOUND, e))
@@ -1012,9 +1051,10 @@ async fn remove_host(
 
 async fn import_config(
     State(_s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
 ) -> Result<Json<Vec<HostProfile>>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    require_admin(&auth)?;
     import_ssh_config_core(None)
         .map(Json)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))
@@ -1037,10 +1077,11 @@ async fn list_snippets(
 
 async fn save_snippet(
     State(_s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
     Json(snippet): Json<Snippet>,
 ) -> Result<Json<Vec<Snippet>>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    require_admin(&auth)?;
     add_snippet(
         &snippet.name,
         &snippet.command,
@@ -1057,10 +1098,11 @@ async fn save_snippet(
 
 async fn delete_snippet(
     State(_s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
     Path(name): Path<String>,
 ) -> Result<Json<bool>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    require_admin(&auth)?;
     remove_snippet(&name).map(Json).map_err(|error| {
         err(
             StatusCode::BAD_REQUEST,
@@ -1143,10 +1185,11 @@ async fn redact_rules_list(
 
 async fn redact_rules_add(
     State(_s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
     Json(body): Json<RedactAddBody>,
 ) -> Result<Json<Vec<RedactRuleInfo>>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    require_admin(&auth)?;
     insert_redact_rule(&body.pattern, &body.replacement)
         .map(Json)
         .map_err(|error| err(StatusCode::BAD_REQUEST, error.to_string()))
@@ -1154,10 +1197,11 @@ async fn redact_rules_add(
 
 async fn redact_rules_update(
     State(_s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
     Json(body): Json<RedactUpdateBody>,
 ) -> Result<Json<Vec<RedactRuleInfo>>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    require_admin(&auth)?;
     let pattern = body.new_pattern.as_deref().unwrap_or(&body.pattern);
     update_redact_rule(&body.pattern, pattern, &body.replacement)
         .map(Json)
@@ -1166,10 +1210,11 @@ async fn redact_rules_update(
 
 async fn redact_rules_delete(
     State(_s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
     Json(body): Json<RedactDeleteBody>,
 ) -> Result<Json<Vec<RedactRuleInfo>>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    require_admin(&auth)?;
     if !body.force {
         return Err(force_required(
             &body.pattern,
@@ -1183,9 +1228,10 @@ async fn redact_rules_delete(
 
 async fn redact_rules_reset(
     State(_s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
 ) -> Result<Json<Vec<RedactRuleInfo>>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    require_admin(&auth)?;
     reset_default_rules()
         .map_err(|error| err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
     Ok(Json(list_redact_rules()))
@@ -1201,10 +1247,11 @@ async fn highlight_rules_list(
 
 async fn highlight_rules_add(
     State(_s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
     Json(rule): Json<HighlightRule>,
 ) -> Result<Json<Vec<HighlightRule>>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    require_admin(&auth)?;
     insert_highlight_rule(rule)
         .map(Json)
         .map_err(|error| err(StatusCode::BAD_REQUEST, error.to_string()))
@@ -1212,10 +1259,11 @@ async fn highlight_rules_add(
 
 async fn highlight_rules_update(
     State(_s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
     Json(body): Json<HighlightUpdateBody>,
 ) -> Result<Json<Vec<HighlightRule>>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    require_admin(&auth)?;
     update_highlight_rule(&body.keyword, body.rule)
         .map(Json)
         .map_err(|error| err(StatusCode::BAD_REQUEST, error.to_string()))
@@ -1223,10 +1271,11 @@ async fn highlight_rules_update(
 
 async fn highlight_rules_delete(
     State(_s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
     Json(body): Json<HighlightDeleteBody>,
 ) -> Result<Json<Vec<HighlightRule>>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    require_admin(&auth)?;
     if !body.force {
         return Err(force_required(
             &body.keyword,
@@ -1240,9 +1289,10 @@ async fn highlight_rules_delete(
 
 async fn highlight_rules_reset(
     State(_s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
 ) -> Result<Json<Vec<HighlightRule>>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    require_admin(&auth)?;
     reset_highlight_rules()
         .map(Json)
         .map_err(|error| err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
@@ -1258,19 +1308,21 @@ async fn algo_prefs_get(
 
 async fn algo_prefs_set(
     State(_s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
     Json(prefs): Json<SshAlgoPrefs>,
 ) -> Result<Json<AlgoPrefsState>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    require_admin(&auth)?;
     save_algo_prefs(&prefs).map_err(|error| err(StatusCode::BAD_REQUEST, error.to_string()))?;
     Ok(Json(AlgoPrefsState::snapshot()))
 }
 
 async fn algo_prefs_clear(
     State(_s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
 ) -> Result<Json<AlgoPrefsState>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    require_admin(&auth)?;
     reset_algo_prefs()
         .map_err(|error| err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
     Ok(Json(AlgoPrefsState::snapshot()))
@@ -1278,10 +1330,14 @@ async fn algo_prefs_clear(
 
 async fn ping(
     State(_s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
     Json(body): Json<PingBody>,
 ) -> Result<Json<Vec<PingResult>>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    for host in &body.hosts {
+        check_daemon_scope(&auth.scope, host, &host_tags(host), "ping")
+            .map_err(|e| err(StatusCode::FORBIDDEN, e))?;
+    }
     Ok(Json(ping_hosts_core(body.hosts, body.timeout_secs).await))
 }
 
@@ -1424,7 +1480,7 @@ async fn exec_compare(
 
 async fn audit(
     State(_s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
     Query(q): Query<AuditQuery>,
 ) -> Result<Json<Vec<AuditEntry>>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -1440,6 +1496,7 @@ async fn audit(
         host_env: q.host_env,
         host_role: q.host_role,
         host_owner: q.host_owner,
+        host_scope: audit_host_scope(&auth),
     };
     list_audit_core(filter)
         .map(Json)
@@ -1450,11 +1507,12 @@ async fn audit(
 
 async fn audit_export(
     State(_s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
     Query(q): Query<AuditExportQuery>,
 ) -> Result<axum::response::Response, (StatusCode, Json<ErrorBody>)> {
     use axum::response::IntoResponse;
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    require_admin(&auth)?;
     let filter = AuditFilter {
         host: q.host,
         risk_level: q.risk_level,
@@ -1467,6 +1525,7 @@ async fn audit_export(
         host_env: q.host_env,
         host_role: q.host_role,
         host_owner: q.host_owner,
+        host_scope: None,
     };
     let format = q.format.unwrap_or_else(|| "jsonl".to_string());
     match format.to_lowercase().as_str() {
@@ -2133,13 +2192,14 @@ async fn session_close(
 }
 async fn session_list(
     State(_s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
 ) -> Result<Json<Vec<SessionListItem>>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     Ok(Json(
         session_list_core()
             .await
             .into_iter()
+            .filter(|(_, host)| scope_allows_observe_host(&auth, host))
             .map(|(id, host)| SessionListItem {
                 id: id.to_string(),
                 host,
@@ -2220,10 +2280,16 @@ async fn forward_add(
 }
 async fn forward_list(
     State(_s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
 ) -> Result<Json<Vec<ForwardRule>>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    Ok(Json(forward_list_core().await))
+    Ok(Json(
+        forward_list_core()
+            .await
+            .into_iter()
+            .filter(|rule| scope_allows_observe_host(&auth, &rule.host))
+            .collect(),
+    ))
 }
 async fn forward_remove(
     State(s): State<AppState>,
@@ -2501,17 +2567,24 @@ async fn forward_add_multi(
 
 async fn approvals_list(
     State(_s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
 ) -> Result<Json<Vec<ApprovalRequestType>>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    Ok(Json(approval_list().await))
+    Ok(Json(
+        approval_list()
+            .await
+            .into_iter()
+            .filter(|request| scope_allows_observe_host(&auth, &request.host))
+            .collect(),
+    ))
 }
 async fn approval_approve(
     State(_s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    require_admin(&auth)?;
     let uuid = Uuid::parse_str(&id).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
     approval_respond(uuid, true)
         .await
@@ -2520,10 +2593,11 @@ async fn approval_approve(
 }
 async fn approval_reject(
     State(_s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    require_admin(&auth)?;
     let uuid = Uuid::parse_str(&id).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
     approval_respond(uuid, false)
         .await
@@ -2540,11 +2614,12 @@ struct ApprovalRespondBody {
 /// Accepts a JSON body with `approved: bool`.
 async fn approval_respond_generic(
     State(_s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
     Json(body): Json<ApprovalRespondBody>,
 ) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    require_admin(&auth)?;
     let uuid = Uuid::parse_str(&id).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
     approval_respond(uuid, body.approved)
         .await
@@ -2579,10 +2654,11 @@ async fn list_policies(
 
 async fn put_policies(
     State(_s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
     Json(policies): Json<Vec<ApprovalPolicy>>,
 ) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    require_admin(&auth)?;
     save_approval_policies(&policies)
         .map(|_| Json(OkBody { ok: true }))
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))
@@ -2590,12 +2666,14 @@ async fn put_policies(
 
 async fn approval_check(
     State(_s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
     Json(body): Json<ApprovalCheckBody>,
 ) -> Result<Json<ApprovalCheckResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     ensure_command_length(&body.command)?;
     let target = command_authorization_target(&body.host);
+    check_daemon_scope(&auth.scope, &body.host, &target.tags, &body.command)
+        .map_err(|e| err(StatusCode::FORBIDDEN, e))?;
     let risk = apply_risk_override(
         effective_command_risk(&body.command).await,
         target.risk_override,
@@ -2622,11 +2700,16 @@ async fn approval_check(
 
 async fn risk_check(
     State(_s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
     Json(body): Json<RiskCheckBody>,
 ) -> Result<Json<RiskCheckResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     ensure_command_length(&body.command)?;
+    if let Some(host) = body.host.as_deref() {
+        let tags = host_tags(host);
+        check_daemon_scope(&auth.scope, host, &tags, &body.command)
+            .map_err(|e| err(StatusCode::FORBIDDEN, e))?;
+    }
     let host_override = body
         .host
         .as_deref()
@@ -2645,12 +2728,17 @@ async fn risk_check(
 
 async fn exec_preview(
     State(_s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
     Json(body): Json<ExecPreviewBody>,
 ) -> Result<Json<ExecPlan>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    ensure_command_length(&body.command)?;
 
     if let Some(hosts) = body.hosts {
+        for (host, tags) in targets_for_exec_multi(&hosts, &body.tags) {
+            check_daemon_scope(&auth.scope, &host, &tags, &body.command)
+                .map_err(|e| err(StatusCode::FORBIDDEN, e))?;
+        }
         // Multi-host preview
         preview_exec_multi(hosts, &body.command, body.tags, body.timeout_secs)
             .await
@@ -2658,6 +2746,9 @@ async fn exec_preview(
             .map_err(|e| err(StatusCode::BAD_REQUEST, e))
     } else if let Some(host) = body.host {
         // Single-host preview
+        let tags = host_tags(&host);
+        check_daemon_scope(&auth.scope, &host, &tags, &body.command)
+            .map_err(|e| err(StatusCode::FORBIDDEN, e))?;
         preview_exec(&host, &body.command, body.timeout_secs)
             .await
             .map(Json)
@@ -2671,10 +2762,16 @@ async fn exec_preview(
 
 async fn connection_status(
     State(_s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
 ) -> Result<Json<Vec<ConnectionStatus>>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    Ok(Json(list_active_connections().await))
+    Ok(Json(
+        list_active_connections()
+            .await
+            .into_iter()
+            .filter(|status| scope_allows_observe_host(&auth, &status.host))
+            .collect(),
+    ))
 }
 async fn ssh_connect(
     State(s): State<AppState>,
@@ -2810,10 +2907,11 @@ async fn get_webhook_config(
 
 async fn set_webhook_config(
     State(_s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
     Json(config): Json<WebhookConfig>,
 ) -> Result<Json<WebhookConfig>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    require_admin(&auth)?;
     save_webhook_config(&config).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(config))
 }
@@ -3012,8 +3110,9 @@ async fn version_check_alias(
 
 async fn config_export(
     State(_s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
 ) -> Result<Json<TeamConfigExport>, (StatusCode, Json<ErrorBody>)> {
+    require_admin(&auth)?;
     export_team_config()
         .map(Json)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))
@@ -3021,9 +3120,10 @@ async fn config_export(
 
 async fn config_import(
     State(_s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
     Json(export): Json<TeamConfigExport>,
 ) -> Result<Json<ImportResult>, (StatusCode, Json<ErrorBody>)> {
+    require_admin(&auth)?;
     import_team_config(&export)
         .map(Json)
         .map_err(|e| err(StatusCode::BAD_REQUEST, e))
@@ -3149,10 +3249,11 @@ struct TrendQuery {
 
 async fn metrics_trend(
     State(_s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
     Query(q): Query<TrendQuery>,
 ) -> Result<Json<MetricsTrend>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    require_admin(&auth)?;
     let period = match q.period.as_deref().unwrap_or("24h") {
         "24h" | "last24h" => TrendPeriod::Last24h,
         "7d" | "last7d" => TrendPeriod::Last7d,
@@ -3174,12 +3275,13 @@ async fn metrics_trend(
 
 async fn events_stream(
     State(_s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
 ) -> Result<
     Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>>,
     (StatusCode, Json<ErrorBody>),
 > {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    require_admin(&auth)?;
     let _ = append_diagnostic_log(
         "info",
         "daemon",
@@ -3223,9 +3325,10 @@ async fn events_stream(
 
 async fn ssh_sync_diff(
     State(_s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    require_admin(&auth)?;
     let diff = agent2ssh::compare_ssh_configs(None).map_err(|e| {
         err(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -3237,9 +3340,10 @@ async fn ssh_sync_diff(
 
 async fn ssh_sync_export_handler(
     State(_s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    require_admin(&auth)?;
     let (path, count) = agent2ssh::export_to_ssh_config(None, None).map_err(|e| {
         err(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -3256,9 +3360,10 @@ async fn ssh_sync_export_handler(
 /// T2-16: List all pending 2FA/OTP prompts that are waiting for external responses.
 async fn get_pending_prompts(
     State(s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    require_admin(&auth)?;
     let nonces = s.prompt_waiter.pending_nonces_blocking();
     let prompts: Vec<serde_json::Value> = nonces
         .iter()
@@ -3288,10 +3393,11 @@ struct RespondPromptRequest {
 
 async fn post_respond_prompt(
     State(s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
     Json(req): Json<RespondPromptRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    require_admin(&auth)?;
     s.prompt_waiter
         .respond_blocking(&req.nonce, req.answer)
         .map_err(|e| {
@@ -3687,6 +3793,19 @@ struct RecordingDeleteParams {
     confirm: Option<String>,
 }
 
+/// Scoped tokens are limited to host-bound operations. Global control-plane
+/// mutations and sensitive local capabilities must use the unrestricted admin
+/// token, even though the authentication middleware accepts both token types.
+fn require_admin(auth: &AuthContext) -> Result<(), (StatusCode, Json<ErrorBody>)> {
+    if auth.scope.is_some() {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "this endpoint requires the unrestricted admin token",
+        ));
+    }
+    Ok(())
+}
+
 fn require_recording_admin(auth: &AuthContext) -> Result<(), (StatusCode, Json<ErrorBody>)> {
     if auth.scope.is_some() {
         return Err(err(
@@ -3773,6 +3892,29 @@ fn terminal_resize_from_message(text: &str) -> Option<(u32, u32)> {
         return None;
     }
     Some((u32::from(cols), u32::from(rows)))
+}
+
+/// Origins the daemon answers cross-origin requests for: the Tauri webview
+/// (`tauri://localhost`, `http(s)://tauri.localhost`) and loopback dev servers.
+fn is_trusted_cors_origin(origin: &str) -> bool {
+    if matches!(
+        origin,
+        "tauri://localhost" | "http://tauri.localhost" | "https://tauri.localhost"
+    ) {
+        return true;
+    }
+    let Some(rest) = origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
+    else {
+        return false;
+    };
+    let host = rest.split(':').next().unwrap_or(rest);
+    let port_ok = match rest.split_once(':') {
+        None => true,
+        Some((_, port)) => !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()),
+    };
+    port_ok && matches!(host, "localhost" | "127.0.0.1")
 }
 
 /// Attach an interactive shell to a host over a WebSocket. Unlike the buffered
@@ -4559,11 +4701,16 @@ fn preview_text(value: &str, max_chars: usize) -> String {
 
 async fn get_health_snapshot(
     State(_s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     match load_health_snapshot() {
-        Ok(snapshot) => Ok(Json(serde_json::to_value(snapshot).unwrap_or_default())),
+        Ok(mut snapshot) => {
+            snapshot
+                .hosts
+                .retain(|host| scope_allows_observe_host(&auth, &host.host));
+            Ok(Json(serde_json::to_value(snapshot).unwrap_or_default()))
+        }
         Err(_) => Ok(Json(serde_json::json!({
             "error": "no health snapshot available",
             "hint": "POST /health-snapshot to collect a fresh one"
@@ -4573,10 +4720,11 @@ async fn get_health_snapshot(
 
 async fn post_health_snapshot(
     State(_s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
     body: Option<Json<HealthSnapshotBody>>,
 ) -> Result<Json<agent2ssh::health::HealthSnapshot>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    require_admin(&auth)?;
 
     let (hosts, timeout_secs) = match body {
         Some(Json(b)) => (b.hosts, b.timeout_secs),
@@ -4608,6 +4756,20 @@ async fn serve_console() -> axum::response::Html<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cors_origin_allowlist_is_desktop_and_loopback_only() {
+        use super::is_trusted_cors_origin as ok;
+        assert!(ok("tauri://localhost"));
+        assert!(ok("http://tauri.localhost"));
+        assert!(ok("http://localhost:1420"));
+        assert!(ok("http://127.0.0.1:7722"));
+        assert!(!ok("https://evil.example"));
+        assert!(!ok("http://localhost.evil.example"));
+        assert!(!ok("http://127.0.0.1.evil.example:80"));
+        assert!(!ok("http://localhost:abc"));
+        assert!(!ok("null"));
+    }
+
     use super::*;
 
     fn broadcast_request(command: &str) -> TerminalBroadcastRequest {
@@ -4655,6 +4817,28 @@ mod tests {
             principal: [0; 32],
         })
         .is_err());
+    }
+
+    #[test]
+    fn global_control_plane_requires_unrestricted_admin_token() {
+        let admin = AuthContext {
+            scope: None,
+            principal: [0; 32],
+        };
+        let scoped = AuthContext {
+            scope: Some(DaemonScope::default()),
+            principal: [0; 32],
+        };
+
+        assert!(require_admin(&admin).is_ok());
+        let Err((status, Json(body))) = require_admin(&scoped) else {
+            panic!("scoped token unexpectedly passed the admin gate");
+        };
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            body.error,
+            "this endpoint requires the unrestricted admin token"
+        );
     }
     use agent2ssh::limits::ExecutionLimitConfig;
     use std::sync::{Mutex, OnceLock};
@@ -5213,8 +5397,13 @@ async fn main() -> anyhow::Result<()> {
     let shutdown_clone = state.shutdown.clone();
     let drain_registry = state.drain_registry.clone();
 
+    // Only the desktop webview and local dev servers have a reason to call the
+    // daemon cross-origin; the bundled /console page is same-origin. Every route
+    // still needs a bearer token, so this narrows exposure rather than gating it.
     let cors = CorsLayer::new()
-        .allow_origin(Any)
+        .allow_origin(AllowOrigin::predicate(|origin, _| {
+            origin.to_str().is_ok_and(is_trusted_cors_origin)
+        }))
         .allow_methods(Any)
         .allow_headers(Any);
 

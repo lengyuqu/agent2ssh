@@ -160,7 +160,7 @@ export default function ForwardPanel({ hosts, initialHost = "", onChanged }: Pro
               />
             </label>
           </div>
-          <Button onClick={addForward} disabled={busy || !canAdd} className="w-full">
+          <Button onClick={addForward} disabled={busy || !canAdd} block>
             {busy ? <Spinner size={14} /> : <Plus size={14} />}
             {busy ? t("Adding...") : t("Add tunnel")}
           </Button>
@@ -261,4 +261,3 @@ function TunnelEndpoint({ label, value }: { label: string; value: string }) {
 function isValidPort(port: number): boolean {
   return Number.isInteger(port) && port >= 1 && port <= 65535;
 }
-

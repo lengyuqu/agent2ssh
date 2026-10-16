@@ -1060,6 +1060,7 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
                 host_env: args["host_env"].as_str().map(str::to_string),
                 host_role: args["host_role"].as_str().map(str::to_string),
                 host_owner: args["host_owner"].as_str().map(str::to_string),
+                host_scope: None,
             };
             serde_json::to_value(list_audit_core(filter).map_err(McpError::from)?)?
         }
@@ -1082,6 +1083,7 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
                 host_env: args["host_env"].as_str().map(str::to_string),
                 host_role: args["host_role"].as_str().map(str::to_string),
                 host_owner: args["host_owner"].as_str().map(str::to_string),
+                host_scope: None,
             };
             let exported = match format {
                 "jsonl" => export_audit_jsonl(&filter).map_err(McpError::from)?,
@@ -1759,6 +1761,8 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
         }
         McpTool::SshSyncExport => {
             let path = args["path"].as_str();
+            agent2ssh::validate_mcp_ssh_export_path(path)
+                .map_err(|e| McpError::internal(format!("ssh sync export path rejected: {e}")))?;
             let (out_path, count) = export_to_ssh_config(path, None)
                 .map_err(|e| McpError::internal(format!("ssh sync export failed: {e}")))?;
             json!({ "path": out_path, "hosts_exported": count })
