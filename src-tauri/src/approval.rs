@@ -166,6 +166,47 @@ fn approval_retention_days() -> i64 {
 /// Also runs a one-time migration from the legacy `approvals.json` array
 /// format if it exists, and cleans up entries older than the retention window.
 pub fn load_persisted_approval_store() -> Result<ApprovalStore> {
+    let mut logs = Vec::new();
+    let result = load_persisted_approval_store_deferred(&mut logs);
+    // The file lock was released when the loader returned, so emitting here
+    // cannot invert the lock order.
+    flush_deferred_logs(logs);
+    result
+}
+
+/// A diagnostic line the loader wants to emit but must not write immediately.
+pub struct DeferredLog {
+    level: &'static str,
+    message: &'static str,
+    fields: Option<serde_json::Value>,
+}
+
+/// Emit loader diagnostics. Only call with no approval file lock held and with
+/// `AppState` fully initialised: `append_diagnostic_log_no_sink` reaches for
+/// `app_state()`.
+pub(crate) fn flush_deferred_logs(logs: Vec<DeferredLog>) {
+    for log in logs {
+        let _ = crate::diagnostics::append_diagnostic_log_no_sink(
+            log.level,
+            "approval",
+            log.message,
+            log.fields,
+        );
+    }
+}
+
+/// Same as [`load_persisted_approval_store`] but collects diagnostics into
+/// `logs` instead of writing them.
+///
+/// `AppState::new` calls this from inside the `APP_STATE` `OnceLock`
+/// initialiser, and the body holds the cross-process `.approvals.lock` flock.
+/// Writing a diagnostic there calls `app_state()` again, which blocks on the
+/// initialiser still running on the same thread — and every other process or
+/// thread that then wants the flock queues behind it. Callers flush `logs`
+/// after init has finished and the lock is gone.
+pub(crate) fn load_persisted_approval_store_deferred(
+    logs: &mut Vec<DeferredLog>,
+) -> Result<ApprovalStore> {
     if !approval_persistence_enabled() {
         return Ok(ApprovalStore {
             requests: HashMap::new(),
@@ -175,7 +216,7 @@ pub fn load_persisted_approval_store() -> Result<ApprovalStore> {
     crate::store::ensure_config_dir()?;
 
     // One-time migration from legacy JSON-array format.
-    migrate_legacy_approvals_unlocked()?;
+    migrate_legacy_approvals_unlocked(logs)?;
 
     let path = approval_store_path()?;
     if !path.exists() {
@@ -200,12 +241,11 @@ pub fn load_persisted_approval_store() -> Result<ApprovalStore> {
             Err(e) => {
                 // Skip malformed lines rather than failing the whole load —
                 // a corrupted line shouldn't prevent the daemon from starting.
-                let _ = crate::diagnostics::append_diagnostic_log_no_sink(
-                    "warn",
-                    "approval",
-                    "skipping malformed approval line",
-                    Some(serde_json::json!({ "error": e.to_string() })),
-                );
+                logs.push(DeferredLog {
+                    level: "warn",
+                    message: "skipping malformed approval line",
+                    fields: Some(serde_json::json!({ "error": e.to_string() })),
+                });
             }
         }
     }
@@ -220,12 +260,13 @@ pub fn load_persisted_approval_store() -> Result<ApprovalStore> {
     requests.retain(|_, req| req.requested_at > cutoff);
     let dropped = before - requests.len();
     if dropped > 0 {
-        let _ = crate::diagnostics::append_diagnostic_log_no_sink(
-            "info",
-            "approval",
-            "dropped expired approval entries during load",
-            Some(serde_json::json!({ "dropped": dropped, "retention_days": retention_days })),
-        );
+        logs.push(DeferredLog {
+            level: "info",
+            message: "dropped expired approval entries during load",
+            fields: Some(
+                serde_json::json!({ "dropped": dropped, "retention_days": retention_days }),
+            ),
+        });
         // Rewrite the file without the expired entries. Best-effort — if it
         // fails, we'll just reload them next time, which is fine.
         let _ = compact_approvals_unlocked(&requests);
@@ -237,7 +278,7 @@ pub fn load_persisted_approval_store() -> Result<ApprovalStore> {
 /// One-time migration from the legacy `approvals.json` (JSON array) format to
 /// the current `approvals.jsonl` (JSONL) format. After a successful migration,
 /// the legacy file is renamed to `approvals.json.migrated` so this is idempotent.
-fn migrate_legacy_approvals_unlocked() -> Result<()> {
+fn migrate_legacy_approvals_unlocked(logs: &mut Vec<DeferredLog>) -> Result<()> {
     let legacy = legacy_approval_store_path()?;
     if !legacy.exists() {
         return Ok(());
@@ -266,12 +307,11 @@ fn migrate_legacy_approvals_unlocked() -> Result<()> {
     let migrated = legacy.with_extension("json.migrated");
     let _ = std::fs::rename(&legacy, &migrated);
 
-    let _ = crate::diagnostics::append_diagnostic_log_no_sink(
-        "info",
-        "approval",
-        "migrated legacy approvals.json to approvals.jsonl",
-        Some(serde_json::json!({ "entries": existing.len() })),
-    );
+    logs.push(DeferredLog {
+        level: "info",
+        message: "migrated legacy approvals.json to approvals.jsonl",
+        fields: Some(serde_json::json!({ "entries": existing.len() })),
+    });
     Ok(())
 }
 

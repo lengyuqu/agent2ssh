@@ -41,6 +41,7 @@
 //! entry as `Closed` automatically, preventing orphaned `Pending` entries.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use serde::Serialize;
@@ -137,11 +138,17 @@ pub struct AppState {
 impl AppState {
     fn new() -> Self {
         let (event_tx, _) = broadcast::channel(1024);
-        let approvals = crate::approval::load_persisted_approval_store().unwrap_or_else(|_| {
-            crate::approval::ApprovalStore {
+        // Runs inside the `APP_STATE` initialiser: diagnostics must wait until
+        // init is done (see `load_persisted_approval_store_deferred`).
+        let mut startup_logs = Vec::new();
+        let approvals = crate::approval::load_persisted_approval_store_deferred(&mut startup_logs)
+            .unwrap_or_else(|_| crate::approval::ApprovalStore {
                 requests: HashMap::new(),
-            }
-        });
+            });
+        if !startup_logs.is_empty() {
+            *STARTUP_LOGS.lock().unwrap_or_else(|e| e.into_inner()) = startup_logs;
+            STARTUP_LOGS_PENDING.store(true, Ordering::Release);
+        }
         Self {
             sessions: TokioMutex::new(HashMap::new()),
             forwards: TokioMutex::new(HashMap::new()),
@@ -171,9 +178,23 @@ impl AppState {
 
 static APP_STATE: OnceLock<AppState> = OnceLock::new();
 
+/// Diagnostics produced while `AppState::new` was running, written by the first
+/// `app_state()` call that returns after init (see below).
+static STARTUP_LOGS: Mutex<Vec<crate::approval::DeferredLog>> = Mutex::new(Vec::new());
+static STARTUP_LOGS_PENDING: AtomicBool = AtomicBool::new(false);
+
 /// Get the process-wide `AppState`. Initializes on first call.
 pub fn app_state() -> &'static AppState {
-    APP_STATE.get_or_init(AppState::new)
+    let state = APP_STATE.get_or_init(AppState::new);
+    // Flag is cleared before flushing, so the flush's own `app_state()` calls
+    // (via diagnostics) don't recurse.
+    if STARTUP_LOGS_PENDING.load(Ordering::Acquire)
+        && STARTUP_LOGS_PENDING.swap(false, Ordering::AcqRel)
+    {
+        let logs = std::mem::take(&mut *STARTUP_LOGS.lock().unwrap_or_else(|e| e.into_inner()));
+        crate::approval::flush_deferred_logs(logs);
+    }
+    state
 }
 
 /// Get the active transport `Host`. Defaults to `Host::Cli` until a binary
