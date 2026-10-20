@@ -218,6 +218,37 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # The Windows legs compile OpenSSL from source instead of linking an
+      # installed copy: src-tauri/Cargo.toml enables `ssh2`'s `openssl-on-win32`
+      # together with `vendored-openssl`, because a WinCNG-backed build shares no
+      # key-exchange algorithm with OpenSSH 10.0+ and stalls before
+      # authentication. `openssl-src` drives that build with `nmake` and the MSVC
+      # toolchain (both already in the image) plus NASM and a Perl.
+      #
+      # Perl is the part that must not be assumed. Git for Windows ships a
+      # trimmed Perl lacking `Locale::Maketext::Simple`, and `openssl-src`
+      # resolves `perl` from PATH, so a build can fail on one Windows shell and
+      # succeed on another. `.cargo/config.toml` pins `OPENSSL_SRC_PERL` to
+      # `scripts/win-perl.cmd`; running that resolver here turns a missing or
+      # incomplete Perl into one readable line instead of
+      # `Can't locate .../Simple.pm in @INC` from inside OpenSSL's configure step.
+      #
+      # NASM is optional — without it `openssl-src` falls back to `no-asm` and
+      # still produces a working OpenSSL — but installing it keeps these
+      # artifacts identical to a developer's rather than merely equivalent, so a
+      # difference in crypto throughput never becomes a surprise later.
+      - name: Add build tools for the bundled OpenSSL (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          choco install nasm --no-progress -y
+          $nasm = @("C:\Program Files\NASM", "C:\Program Files (x86)\NASM") |
+            Where-Object { Test-Path (Join-Path $_ "nasm.exe") } |
+            Select-Object -First 1
+          if (-not $nasm) { throw "nasm.exe not found after 'choco install nasm'" }
+          $nasm | Out-File -FilePath $env:GITHUB_PATH -Append
+          & "$env:GITHUB_WORKSPACE\scripts\win-perl.cmd" -e "use Locale::Maketext::Simple; print qq(perl-ok)"
+
       - name: Add Rust cargo to PATH
         if: contains(matrix.target, 'apple-darwin')
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
@@ -361,6 +392,37 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      # The Windows legs compile OpenSSL from source instead of linking an
+      # installed copy: src-tauri/Cargo.toml enables `ssh2`'s `openssl-on-win32`
+      # together with `vendored-openssl`, because a WinCNG-backed build shares no
+      # key-exchange algorithm with OpenSSH 10.0+ and stalls before
+      # authentication. `openssl-src` drives that build with `nmake` and the MSVC
+      # toolchain (both already in the image) plus NASM and a Perl.
+      #
+      # Perl is the part that must not be assumed. Git for Windows ships a
+      # trimmed Perl lacking `Locale::Maketext::Simple`, and `openssl-src`
+      # resolves `perl` from PATH, so a build can fail on one Windows shell and
+      # succeed on another. `.cargo/config.toml` pins `OPENSSL_SRC_PERL` to
+      # `scripts/win-perl.cmd`; running that resolver here turns a missing or
+      # incomplete Perl into one readable line instead of
+      # `Can't locate .../Simple.pm in @INC` from inside OpenSSL's configure step.
+      #
+      # NASM is optional — without it `openssl-src` falls back to `no-asm` and
+      # still produces a working OpenSSL — but installing it keeps these
+      # artifacts identical to a developer's rather than merely equivalent, so a
+      # difference in crypto throughput never becomes a surprise later.
+      - name: Add build tools for the bundled OpenSSL (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          choco install nasm --no-progress -y
+          $nasm = @("C:\Program Files\NASM", "C:\Program Files (x86)\NASM") |
+            Where-Object { Test-Path (Join-Path $_ "nasm.exe") } |
+            Select-Object -First 1
+          if (-not $nasm) { throw "nasm.exe not found after 'choco install nasm'" }
+          $nasm | Out-File -FilePath $env:GITHUB_PATH -Append
+          & "$env:GITHUB_WORKSPACE\scripts\win-perl.cmd" -e "use Locale::Maketext::Simple; print qq(perl-ok)"
 
       - name: Add Rust cargo to PATH
         if: contains(matrix.target, 'apple-darwin')
@@ -541,7 +603,9 @@ jobs:
   # K4: real-SSH end-to-end against a containerized OpenSSH server. Runs on every
   # push/PR (Linux runners ship Docker) to close the "runtime-unverified" gaps in
   # the native transport: real exec, SFTP round-trip, recursive transfer (J4),
-  # and resume (K6).
+  # and resume (K6). The harness picks its runtime through
+  # `agent2ssh containers runtime`, so the same script also runs on a Windows
+  # host with wslc or an Apple-silicon Mac with Apple's container runtime.
   real-ssh-e2e:
     needs: contract-consistency
     runs-on: ubuntu-latest
@@ -565,5 +629,5 @@ jobs:
         run: cargo build --release --no-default-features --bin agent2ssh
         working-directory: src-tauri
 
-      - name: Run dockerized SSH E2E
-        run: scripts/e2e-docker.sh
+      - name: Run containerized SSH E2E
+        run: scripts/e2e-container.sh

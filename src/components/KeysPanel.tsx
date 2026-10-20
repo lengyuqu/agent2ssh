@@ -1,8 +1,8 @@
-import { Key, Plus, Trash2, Copy, Download, Check } from "lucide-react";
+import { Key, Plus, Trash2, Copy, Download, Check, AlertTriangle } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
-import type { SshKeyInfo } from "../types";
+import type { KeyAlgorithm, SshKeyInfo } from "../types";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
 import { IconButton } from "./ui/icon-button";
@@ -23,6 +23,15 @@ export default function KeysPanel({ onChanged }: Props) {
   const [showForm, setShowForm] = useState(false);
   const [newName, setNewName] = useState("");
   const [newComment, setNewComment] = useState("");
+  const [algorithm, setAlgorithm] = useState<KeyAlgorithm>("ed25519");
+  // Whether the user actually picked an algorithm. Until they do, the backend
+  // is left to decide, so a build whose recommendation we have not learned yet
+  // still generates a key it can use.
+  const [algorithmChosen, setAlgorithmChosen] = useState(false);
+  // What this build recommends. `null` means it has not answered yet — either
+  // an older backend or a test stub — in which case Ed25519 stays selected and
+  // no warning is shown, since we cannot tell whether the warning applies.
+  const [preferredAlgorithm, setPreferredAlgorithm] = useState<KeyAlgorithm | null>(null);
   const [importPath, setImportPath] = useState("");
   const [importName, setImportName] = useState("");
   const [mode, setMode] = useState<"generate" | "import">("generate");
@@ -38,6 +47,19 @@ export default function KeysPanel({ onChanged }: Props) {
 
   useEffect(() => {
     refresh();
+    // The recommended algorithm is a property of the linked SSH library, so
+    // only the backend can answer it.
+    Promise.resolve(api.defaultKeyAlgorithm?.())
+      .then((value) => {
+        if (value) {
+          setPreferredAlgorithm(value);
+          setAlgorithm(value);
+        }
+      })
+      .catch(() => {
+        // Keep the Ed25519 default; the backend still picks correctly on its
+        // own when no algorithm is sent.
+      });
   }, []);
 
   async function handleGenerate() {
@@ -46,7 +68,11 @@ export default function KeysPanel({ onChanged }: Props) {
       return;
     }
     try {
-      await api.generateKey(newName.trim(), newComment.trim() || undefined);
+      await api.generateKey(
+        newName.trim(),
+        newComment.trim() || undefined,
+        algorithmChosen ? algorithm : undefined
+      );
       setNewName("");
       setNewComment("");
       setShowForm(false);
@@ -148,7 +174,39 @@ export default function KeysPanel({ onChanged }: Props) {
                 value={newComment}
                 onChange={(e) => setNewComment(e.target.value)}
               />
-              <Button onClick={handleGenerate}>{t("Generate Ed25519 Key")}</Button>
+              <div className="flex gap-1">
+                {(["ed25519", "rsa"] as const).map((value) => (
+                  <button
+                    key={value}
+                    className={tabCls(algorithm === value)}
+                    onClick={() => {
+                      setAlgorithm(value);
+                      setAlgorithmChosen(true);
+                    }}
+                  >
+                    {value === "ed25519" ? "Ed25519" : t("RSA (traditional PEM)")}
+                    {preferredAlgorithm === value && (
+                      <span className="ml-1 text-[10px] opacity-80">{t("recommended")}</span>
+                    )}
+                  </button>
+                ))}
+              </div>
+              {algorithm === "ed25519" && preferredAlgorithm === "rsa" && (
+                <p className="flex items-start gap-1.5 text-[11px] text-muted-foreground">
+                  <AlertTriangle size={12} className="mt-0.5 shrink-0" />
+                  {t(
+                    "This platform's SSH library cannot read Ed25519 keys, so a key generated here will not authenticate. Choose RSA to get a usable key."
+                  )}
+                </p>
+              )}
+              {algorithm === "rsa" && (
+                <p className="text-[11px] text-muted-foreground">
+                  {t(
+                    "RSA keys are written as traditional PEM (`-----BEGIN RSA PRIVATE KEY-----`) because that is the only private-key encoding this platform's SSH library can read."
+                  )}
+                </p>
+              )}
+              <Button onClick={handleGenerate}>{t("Generate Key")}</Button>
             </>
           ) : (
             <>

@@ -67,6 +67,10 @@ pub struct AppState {
     // session.rs — interactive SSH terminal sessions
     pub sessions: TokioMutex<HashMap<Uuid, Arc<Mutex<crate::session::SessionHandle>>>>,
 
+    // resident_session.rs — long-lived local environment shells (`local:<id>`)
+    pub resident_sessions:
+        TokioMutex<HashMap<Uuid, Arc<Mutex<crate::resident_session::ResidentHandle>>>>,
+
     // forward.rs — port forwarding handles
     pub forwards: TokioMutex<HashMap<Uuid, crate::forward::ForwardHandle>>,
 
@@ -136,6 +140,7 @@ impl AppState {
         let (event_tx, _) = broadcast::channel(1024);
         Self {
             sessions: TokioMutex::new(HashMap::new()),
+            resident_sessions: TokioMutex::new(HashMap::new()),
             forwards: TokioMutex::new(HashMap::new()),
             connections: TokioMutex::new(HashMap::new()),
             host_locks: TokioMutex::new(HashMap::new()),
@@ -162,9 +167,28 @@ impl AppState {
 
 static APP_STATE: OnceLock<AppState> = OnceLock::new();
 
+thread_local! {
+    /// True while this thread is running `AppState::new()` inside
+    /// `get_or_init`. `AppState::new` itself loads the persisted approval
+    /// store, whose best-effort log calls go through `diagnostics`, which
+    /// reads `diagnostic_lock` — a field of the very struct being built.
+    /// A same-thread re-entrant `app_state()` on a `OnceLock` in
+    /// initialization deadlocks, so re-entrant callers must detect this
+    /// flag and degrade gracefully instead.
+    static INIT_IN_PROGRESS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// True while `AppState` is being constructed on the current thread.
+pub fn app_state_initializing() -> bool {
+    INIT_IN_PROGRESS.with(std::cell::Cell::get)
+}
+
 /// Get the process-wide `AppState`. Initializes on first call.
 pub fn app_state() -> &'static AppState {
-    APP_STATE.get_or_init(AppState::new)
+    INIT_IN_PROGRESS.with(|c| c.set(true));
+    let state = APP_STATE.get_or_init(AppState::new);
+    INIT_IN_PROGRESS.with(|c| c.set(false));
+    state
 }
 
 /// Get the active transport `Host`. Defaults to `Host::Cli` until a binary
@@ -201,6 +225,9 @@ pub fn lifecycle() -> Arc<Mutex<crate::lifecycle::LifecycleRegistry>> {
 #[serde(rename_all = "snake_case")]
 pub enum ResourceKind {
     SshSession,
+    /// A long-lived local environment shell (`local:<id>`), see
+    /// `resident_session`.
+    ResidentSession,
     Forward,
     Connection,
     Transfer,

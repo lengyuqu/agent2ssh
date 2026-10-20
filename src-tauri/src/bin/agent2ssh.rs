@@ -316,6 +316,16 @@ enum Commands {
         #[command(subcommand)]
         command: AlgoCommands,
     },
+    /// Run one command on this machine through the daemon (one-shot local exec)
+    Local {
+        #[command(subcommand)]
+        command: LocalCommands,
+    },
+    /// Manage resident sessions: long-lived shells for local environments
+    Resident {
+        #[command(subcommand)]
+        command: ResidentCommands,
+    },
     /// Run diagnostic checks on the agent2ssh environment
     Doctor {
         /// Output results as JSON
@@ -333,6 +343,17 @@ enum Commands {
         /// Hosts to collect health from (default: all configured hosts)
         #[arg(long, add = ArgValueCandidates::new(host_candidates))]
         hosts: Option<Vec<String>>,
+    },
+    /// Discover containers running under Docker, wslc, Apple container or
+    /// Kubernetes that can be used as exec targets
+    Containers {
+        #[command(subcommand)]
+        command: ContainerCommands,
+    },
+    /// Manage the SSH key pairs in the agent2ssh keys directory
+    Keys {
+        #[command(subcommand)]
+        command: KeyCommands,
     },
     /// Manage approval policies for high-risk command authorization
     Policy {
@@ -467,6 +488,90 @@ enum KnownHostsCommands {
         /// Port the entry was recorded under
         #[arg(long, default_value_t = 22)]
         port: u16,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ContainerCommands {
+    /// List containers that can be exec'd into
+    List {
+        /// Include containers that are not running
+        #[arg(long)]
+        all: bool,
+        /// Limit discovery to one runtime: auto (default), docker, wslc, apple, k8s
+        #[arg(long, value_name = "RUNTIME")]
+        runtime: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show which local container runtime agent2ssh drives, and how it was chosen
+    Runtime {
+        /// Pin a runtime instead of auto-detecting: docker, wslc, apple
+        #[arg(long, value_name = "RUNTIME")]
+        runtime: Option<String>,
+        /// Print only the resolved binary path (for scripts)
+        #[arg(long)]
+        binary: bool,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// A key algorithm the CLI accepts. Deliberately a clap enum rather than a
+/// free-form string: it gives shell completion, a parse error that names the
+/// accepted values, and an exhaustive match onto `KeyAlgorithm` so the two can
+/// never disagree about what the CLI can ask for.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum KeyTypeArg {
+    Ed25519,
+    Rsa,
+}
+
+impl KeyTypeArg {
+    fn algorithm(self) -> agent2ssh::keys::KeyAlgorithm {
+        match self {
+            Self::Ed25519 => agent2ssh::keys::KeyAlgorithm::Ed25519,
+            Self::Rsa => agent2ssh::keys::KeyAlgorithm::Rsa,
+        }
+    }
+}
+
+#[derive(Debug, Subcommand)]
+enum KeyCommands {
+    /// Show the key algorithm this build can authenticate with
+    ///
+    /// This is a property of the SSH library agent2ssh links, not of the host
+    /// OS: a build whose libssh2 uses the WinCNG backend cannot read the OpenSSH
+    /// private-key container, so it recommends RSA written as traditional PEM
+    /// (`-----BEGIN RSA PRIVATE KEY-----`). Scripts that provision a key should
+    /// ask here rather than assume a type, or the key they generate may be one
+    /// this build cannot use.
+    Algorithm {
+        /// Print only the algorithm name (for scripts)
+        #[arg(long)]
+        name: bool,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Generate a key pair in the agent2ssh keys directory
+    Generate {
+        /// Key name, used as the private key filename
+        name: String,
+        /// Algorithm to generate: ed25519 or rsa
+        ///
+        /// Defaults to `keys algorithm`, i.e. whichever type this build can
+        /// actually authenticate with.
+        #[arg(long = "type", value_name = "ALGORITHM")]
+        key_type: Option<KeyTypeArg>,
+        /// Comment written into the public key
+        #[arg(long)]
+        comment: Option<String>,
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -1064,6 +1169,100 @@ enum RedactCommands {
     },
 }
 
+/// The local-execution commands are daemon clients, never local runners: the
+/// daemon is what can run a high-risk command through an approval prompt, so
+/// even `agent2ssh local exec` on this machine goes through the HTTP route.
+#[derive(Debug, Subcommand)]
+enum LocalCommands {
+    /// Run one command in a one-shot local environment via the daemon
+    Exec {
+        /// Target environment: `local`, `local:<environment>` (`local:pwsh`,
+        /// `local:cmd`, `local:gitbash`, `local:vs`, `local:wsl[:<dist>]`) or
+        /// `local:<runtime>:<container-id>` (`local:docker:abc123`)
+        #[arg(short = 'H', long)]
+        host: String,
+        /// The command line to run
+        command: String,
+        /// Per-command timeout in seconds (default 60)
+        #[arg(long)]
+        timeout_secs: Option<u64>,
+        /// Skip the approval prompt for a high-risk command
+        #[arg(long)]
+        force: bool,
+        /// Why this command runs; recorded in the audit entry
+        #[arg(long)]
+        reason: Option<String>,
+        /// Change/ticket id for the audit entry
+        #[arg(long)]
+        change_id: Option<String>,
+        /// What the command changes, for the audit entry
+        #[arg(long)]
+        side_effect: Option<String>,
+        /// Print the full ExecResult as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ResidentCommands {
+    /// Open a resident session in a `local:<id>` environment (blocks until warm)
+    Open {
+        /// The `local:<id>` environment to live in
+        #[arg(short = 'H', long)]
+        host: String,
+        /// Skip the approval prompt if policy asks for one
+        #[arg(long)]
+        force: bool,
+        /// Why this session is opened; recorded in the audit entry
+        #[arg(long)]
+        reason: Option<String>,
+        /// Change/ticket id for the audit entry
+        #[arg(long)]
+        change_id: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run one command inside an open resident session
+    Exec {
+        /// The session id returned by `resident open`
+        session_id: String,
+        /// The command line to run inside the session's shell
+        command: String,
+        /// Per-command timeout in seconds (default 60); a command that
+        /// outlives it kills the session
+        #[arg(long)]
+        timeout_secs: Option<u64>,
+        /// Skip the approval prompt for a high-risk command
+        #[arg(long)]
+        force: bool,
+        /// Why this command runs; recorded in the audit entry
+        #[arg(long)]
+        reason: Option<String>,
+        /// Change/ticket id for the audit entry
+        #[arg(long)]
+        change_id: Option<String>,
+        /// What the command changes, for the audit entry
+        #[arg(long)]
+        side_effect: Option<String>,
+        /// Print the full ExecResult as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Close a resident session, killing its shell
+    Close {
+        /// The session id to close
+        session_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List open resident sessions
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 #[derive(Debug, Subcommand)]
 enum HighlightCommands {
     /// List every highlight rule
@@ -1448,6 +1647,30 @@ async fn remote_config<R: serde::de::DeserializeOwned>(
 /// per command.
 fn remote_alias(alias: Option<&str>) -> Option<&str> {
     alias.filter(|alias| *alias != "localhost")
+}
+
+/// Print an ExecResult body returned by the daemon's `/local-exec` or
+/// `/resident-sessions/{id}/exec`: with `--json` the whole object, otherwise
+/// the command's stdout (and stderr, if any), with a non-zero process exit so
+/// scripts can branch on the command's own exit code.
+fn print_daemon_exec_result(result: &serde_json::Value, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(result)?);
+        return Ok(());
+    }
+    let stdout = result["stdout"].as_str().unwrap_or_default();
+    print!("{stdout}");
+    if !stdout.is_empty() && !stdout.ends_with('\n') {
+        println!();
+    }
+    let stderr = result["stderr"].as_str().unwrap_or_default();
+    if !stderr.is_empty() {
+        eprintln!("{stderr}");
+    }
+    match result["exit_code"].as_i64() {
+        Some(0) | None => Ok(()),
+        Some(code) => anyhow::bail!("command exited with code {code}"),
+    }
 }
 
 /// Background event subscriber for CLI mode. Prints safety-relevant events
@@ -2572,12 +2795,13 @@ async fn async_main() -> Result<()> {
             } else {
                 for entry in entries {
                     println!(
-                        "{}\t{}\texit={:?}\t{}ms\t[{}]\t{}",
+                        "{}\t{}\texit={:?}\t{}ms\t[{}]\ttarget={}\t{}",
                         entry.ts,
                         entry.host,
                         entry.exit_code,
                         entry.duration_ms,
                         entry.risk_level,
+                        entry.target(),
                         entry.command
                     );
                 }
@@ -3092,6 +3316,87 @@ async fn async_main() -> Result<()> {
                 }
             }
         }
+        Commands::Containers { command } => match command {
+            ContainerCommands::List { all, runtime, json } => {
+                let targets =
+                    agent2ssh::container_discovery::discover_containers(all, runtime.as_deref())?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&targets)?);
+                } else {
+                    print_container_targets(&targets);
+                }
+            }
+            ContainerCommands::Runtime {
+                runtime,
+                binary,
+                json,
+            } => {
+                let resolved = agent2ssh::container_runtime::select(runtime.as_deref())?;
+                if binary {
+                    println!("{}", resolved.binary.display());
+                } else if json {
+                    println!("{}", serde_json::to_string_pretty(&resolved.info(true))?);
+                } else {
+                    println!(
+                        "{}  {}  ({})",
+                        resolved.runtime.id(),
+                        resolved.binary.display(),
+                        resolved.runtime.display_name()
+                    );
+                }
+            }
+        },
+        Commands::Keys { command } => match command {
+            KeyCommands::Algorithm { name, json } => {
+                let algorithm = agent2ssh::keys::KeyAlgorithm::default_for_build();
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "algorithm": algorithm.as_str(),
+                            // Only meaningful for RSA, which is the one type the
+                            // app sizes itself.
+                            "bits": (algorithm == agent2ssh::keys::KeyAlgorithm::Rsa)
+                                .then_some(agent2ssh::keys::RSA_BITS),
+                            // The probe the recommendation is derived from, so a
+                            // surprising answer can be explained from the output.
+                            "reads_openssh_private_keys":
+                                agent2ssh::ssh_key_format::reads_openssh_private_keys(),
+                        }))?
+                    );
+                } else if name {
+                    println!("{}", algorithm.as_str());
+                } else {
+                    println!("{}", algorithm.as_str());
+                    if algorithm == agent2ssh::keys::KeyAlgorithm::Rsa {
+                        println!(
+                            "  this build cannot read OpenSSH-format private keys, so RSA is \
+                             written as traditional PEM"
+                        );
+                    }
+                }
+            }
+            KeyCommands::Generate {
+                name,
+                key_type,
+                comment,
+                json,
+            } => {
+                let algorithm = match key_type {
+                    Some(key_type) => key_type.algorithm(),
+                    None => agent2ssh::keys::KeyAlgorithm::default_for_build(),
+                };
+                let key =
+                    agent2ssh::keys::generate_key_core_with(&name, comment.as_deref(), algorithm)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&key)?);
+                } else {
+                    // The private key path alone: this is what a script needs to
+                    // feed `--key`, `ssh -i` or `AGENT2SSH_TEST_SSH_KEY`.
+                    println!("{}", key.private_path);
+                }
+            }
+        },
         Commands::Policy { command } => match command {
             PolicyCommands::Validate { path, json } => {
                 let policy = validate_policy_path(path.as_deref())?;
@@ -3524,6 +3829,141 @@ async fn async_main() -> Result<()> {
                     println!("{}", serde_json::to_string_pretty(&rules)?);
                 } else {
                     println!("Restored {} built-in redaction rule(s).", rules.len());
+                }
+            }
+        },
+        Commands::Local { command } => match command {
+            LocalCommands::Exec {
+                host,
+                command,
+                timeout_secs,
+                force,
+                reason,
+                change_id,
+                side_effect,
+                json,
+            } => {
+                let result: serde_json::Value = remote_config(
+                    daemon_alias.as_deref().unwrap_or("localhost"),
+                    reqwest::Method::POST,
+                    "/local-exec",
+                    Some(serde_json::json!({
+                        "host": host,
+                        "command": command,
+                        "timeout_secs": timeout_secs,
+                        "force": force,
+                        "reason": reason,
+                        "change_id": change_id,
+                        "side_effect": side_effect,
+                        "source": "cli",
+                    })),
+                )
+                .await?;
+                print_daemon_exec_result(&result, json)?;
+            }
+        },
+        Commands::Resident { command } => match command {
+            ResidentCommands::Open {
+                host,
+                force,
+                reason,
+                change_id,
+                json,
+            } => {
+                let info: serde_json::Value = remote_config(
+                    daemon_alias.as_deref().unwrap_or("localhost"),
+                    reqwest::Method::POST,
+                    "/resident-sessions",
+                    Some(serde_json::json!({
+                        "host": host,
+                        "force": force,
+                        "reason": reason,
+                        "change_id": change_id,
+                        "source": "cli",
+                    })),
+                )
+                .await?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&info)?);
+                } else {
+                    println!(
+                        "Resident session {} open on {} ({})",
+                        info["id"].as_str().unwrap_or("?"),
+                        info["host"].as_str().unwrap_or("?"),
+                        info["label"].as_str().unwrap_or("?"),
+                    );
+                }
+            }
+            ResidentCommands::Exec {
+                session_id,
+                command,
+                timeout_secs,
+                force,
+                reason,
+                change_id,
+                side_effect,
+                json,
+            } => {
+                let result: serde_json::Value = remote_config(
+                    daemon_alias.as_deref().unwrap_or("localhost"),
+                    reqwest::Method::POST,
+                    &format!("/resident-sessions/{session_id}/exec"),
+                    Some(serde_json::json!({
+                        "command": command,
+                        "timeout_secs": timeout_secs,
+                        "force": force,
+                        "reason": reason,
+                        "change_id": change_id,
+                        "side_effect": side_effect,
+                        "source": "cli",
+                    })),
+                )
+                .await?;
+                print_daemon_exec_result(&result, json)?;
+            }
+            ResidentCommands::Close { session_id, json } => {
+                let body: serde_json::Value = remote_config(
+                    daemon_alias.as_deref().unwrap_or("localhost"),
+                    reqwest::Method::DELETE,
+                    &format!("/resident-sessions/{session_id}"),
+                    None,
+                )
+                .await?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&body)?);
+                } else {
+                    println!("Closed resident session {}.", session_id);
+                }
+            }
+            ResidentCommands::List { json } => {
+                let sessions: Vec<serde_json::Value> = remote_config(
+                    daemon_alias.as_deref().unwrap_or("localhost"),
+                    reqwest::Method::GET,
+                    "/resident-sessions",
+                    None,
+                )
+                .await?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&sessions)?);
+                    return Ok(());
+                }
+                if sessions.is_empty() {
+                    println!("No resident sessions.");
+                    return Ok(());
+                }
+                for session in &sessions {
+                    println!(
+                        "{}  {}  {}  idle {}s{}",
+                        session["id"].as_str().unwrap_or("?"),
+                        session["host"].as_str().unwrap_or("?"),
+                        session["label"].as_str().unwrap_or("?"),
+                        session["idle_secs"].as_u64().unwrap_or(0),
+                        if session["dead"].as_bool().unwrap_or(false) {
+                            "  (dead)"
+                        } else {
+                            ""
+                        },
+                    );
                 }
             }
         },
@@ -4496,6 +4936,69 @@ fn print_redact_rules(rules: &[RedactRuleInfo], json: bool) -> Result<()> {
         println!("{origin:<8}  {}\t{}", rule.pattern, rule.replacement);
     }
     Ok(())
+}
+
+/// Truncate a table cell to `width` characters, marking the cut with an ellipsis.
+/// Counts characters, not bytes, so a container image with non-ASCII characters
+/// does not get cut mid-codepoint.
+fn truncate_cell(value: &str, width: usize) -> String {
+    if value.chars().count() <= width {
+        return value.to_string();
+    }
+    let kept: String = value.chars().take(width.saturating_sub(1)).collect();
+    format!("{kept}…")
+}
+
+/// Print discovered container targets as a table, or explain why the list is
+/// empty. The empty case lists every runtime with its state, so "no containers
+/// running" is distinguishable from "no runtime installed".
+fn print_container_targets(targets: &[agent2ssh::ContainerDiscoveryTarget]) {
+    if !targets.is_empty() {
+        println!(
+            "{:<8} {:<24} {:<30} {:<18} CONTEXT",
+            "PLATFORM", "NAME", "IMAGE", "STATUS"
+        );
+        println!("{:-<100}", "");
+        for target in targets {
+            println!(
+                "{:<8} {:<24} {:<30} {:<18} {}",
+                target.platform.id(),
+                truncate_cell(&target.container_name, 24),
+                truncate_cell(&target.image, 30),
+                truncate_cell(&target.status, 18),
+                target.context
+            );
+        }
+        println!(
+            "\n{} target(s). Use --json for the exec argv of each target.",
+            targets.len()
+        );
+        return;
+    }
+
+    println!("No containers found.");
+    let infos = agent2ssh::container_runtime::infos();
+    let any_available = infos.iter().any(|info| info.available);
+    if any_available {
+        println!("\nChecked runtimes:");
+    } else {
+        println!("\nNo container runtime is available on this host:");
+    }
+    for info in &infos {
+        let state = match (&info.binary, &info.unsupported_reason) {
+            (Some(binary), _) => binary.clone(),
+            (None, Some(reason)) => format!("unavailable — {reason}"),
+            (None, None) => "not installed".to_string(),
+        };
+        let marker = if info.selected { "*" } else { " " };
+        println!(
+            "{marker} {:<8} {:<22} {}",
+            info.runtime.id(),
+            info.display_name,
+            state
+        );
+    }
+    println!("\nPass --all to include stopped containers, or --runtime <id> to narrow discovery.");
 }
 
 /// Print a highlight rule set for a terminal.

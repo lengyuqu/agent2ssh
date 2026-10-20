@@ -1,0 +1,35 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Full-Perl pin for the bundled-OpenSSL Windows build.
+#
+# The Windows build compiles OpenSSL from source: `src-tauri/Cargo.toml` enables
+# `ssh2`'s `openssl-on-win32` + `vendored-openssl`, and the latter makes
+# `openssl-src` build OpenSSL rather than link an installed copy. That build is
+# driven by OpenSSL's `Configure`, a Perl program that needs the full core module
+# set, and `openssl-src` resolves the interpreter as
+# `OPENSSL_SRC_PERL`, then `PERL`, then a bare `perl` on PATH.
+#
+# A bare `perl` is not good enough on Windows. Git for Windows ships a *trimmed*
+# Perl with no `Locale::Maketext::Simple` (which `Params::Check` and `IPC::Cmd`
+# need), and Git Bash puts its own /usr/bin ahead of every Windows PATH entry, so
+# inside Git Bash that trimmed Perl always wins. `Configure` then fails before
+# writing a makefile:
+#
+#     Can't locate Locale/Maketext/Simple.pm in @INC
+#     Error configuring OpenSSL build: 'perl' reported failure with exit code: 2
+#
+# Pointing the variable at a small resolver — `scripts/win-perl.cmd`, which finds
+# the first full distribution or explains what to install — makes the build
+# independent of the shell it was started from. `relative = true` resolves the
+# value against the parent directory of this `.cargo` directory, i.e. against
+# `src-tauri/`.
+#
+# This is inert on Linux and macOS rather than merely harmless: `openssl-src` is
+# only compiled when `openssl-sys/vendored` is enabled, and the only thing that
+# enables it is the `cfg(windows)` `ssh2` entry, so the variable is never read
+# there and the file it names is never executed.
+#
+# Cargo has no per-target `[env]` table, so this cannot be scoped to Windows.
+# The consequence is the one described above: an unused variable elsewhere.
+# ─────────────────────────────────────────────────────────────────────────────
+[env]
+OPENSSL_SRC_PERL = { value = "../scripts/win-perl.cmd", relative = true }

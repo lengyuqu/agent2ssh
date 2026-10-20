@@ -1,5 +1,6 @@
 use crate::keys::{
-    delete_key_core, generate_key_core, import_key_core, list_keys_core, SshKeyInfo,
+    delete_key_core, generate_key_core_with, import_key_core, list_keys_core, KeyAlgorithm,
+    SshKeyInfo,
 };
 use crate::notify::{load_webhook_config, save_webhook_config, WebhookConfig};
 use crate::{
@@ -1505,12 +1506,38 @@ pub fn redact_for_clipboard(text: String) -> String {
     crate::copy_redact::redact_for_clipboard(&text)
 }
 
-/// B33: Discover Docker containers and Kubernetes pods that can be used
-/// as exec targets.
+/// B33: Discover container exec targets — Docker, wslc, Apple container and
+/// Kubernetes pods.
+///
+/// Both arguments are optional so the historical no-argument call keeps
+/// working: `all` defaults to false (running containers only) and `runtime`
+/// defaults to auto-detection across every installed runtime.
 #[tauri::command]
 pub fn discover_containers(
+    all: Option<bool>,
+    runtime: Option<String>,
 ) -> Result<Vec<crate::container_discovery::ContainerDiscoveryTarget>, String> {
-    crate::container_discovery::discover_containers().map_err(|e| e.to_string())
+    crate::container_discovery::discover_containers(all.unwrap_or(false), runtime.as_deref())
+        .map_err(|e| e.to_string())
+}
+
+/// State of every container runtime this build knows about on this host
+/// (supported / installed / selected), so the UI can explain an empty list
+/// instead of showing nothing.
+#[tauri::command]
+pub fn container_runtimes() -> Vec<crate::container_runtime::ContainerRuntimeInfo> {
+    crate::container_runtime::infos()
+}
+
+/// Open a discovered container target in the user's terminal.
+///
+/// The argv is the one discovery produced (`exec_binary` + `exec_args`) and is
+/// validated against the runtimes this process resolved before anything is
+/// spawned — see `container_terminal` for what that check does and does not
+/// cover.
+#[tauri::command]
+pub fn launch_container_target(exec_binary: String, exec_args: Vec<String>) -> Result<(), String> {
+    crate::container_terminal::launch(&exec_binary, &exec_args)
 }
 
 /// Enumerate system fonts for terminal font selection.
@@ -2732,9 +2759,31 @@ pub fn list_keys() -> Result<Vec<SshKeyInfo>, String> {
     list_keys_core().map_err(|e| e.to_string())
 }
 
+/// The key algorithm this build recommends, so the UI can preselect it.
+///
+/// Resolved on this side because it is a property of the linked SSH library,
+/// not of the host OS: see [`KeyAlgorithm::default_for_build`].
 #[tauri::command]
-pub fn generate_key(name: String, comment: Option<String>) -> Result<SshKeyInfo, String> {
-    generate_key_core(&name, comment.as_deref()).map_err(|e| e.to_string())
+pub fn default_key_algorithm() -> String {
+    KeyAlgorithm::default_for_build().as_str().to_string()
+}
+
+/// Generate a key pair. `algorithm` is `"ed25519"` or `"rsa"`; `None` uses the
+/// algorithm this build can actually authenticate with.
+#[tauri::command]
+pub fn generate_key(
+    name: String,
+    comment: Option<String>,
+    algorithm: Option<String>,
+) -> Result<SshKeyInfo, String> {
+    let algorithm = match algorithm.as_deref() {
+        None => KeyAlgorithm::default_for_build(),
+        Some(requested) => KeyAlgorithm::from_name(requested).ok_or_else(|| {
+            format!("unknown key algorithm '{requested}': expected 'ed25519' or 'rsa'")
+        })?,
+    };
+
+    generate_key_core_with(&name, comment.as_deref(), algorithm).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -3240,6 +3289,8 @@ pub fn run_tauri() {
             reset_redact_rules,
             // B33: Container Discovery
             discover_containers,
+            container_runtimes,
+            launch_container_target,
             // Font + Shell enumeration
             list_fonts,
             list_shells,
@@ -3248,6 +3299,7 @@ pub fn run_tauri() {
             redact_for_clipboard,
             // SSH Keys
             list_keys,
+            default_key_algorithm,
             generate_key,
             import_key,
             delete_key,

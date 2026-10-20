@@ -471,6 +471,11 @@ export type SshKeyInfo = {
   created_at?: string | null;
 };
 
+// Rust: keys.rs — KeyAlgorithm
+// "rsa" means traditional PKCS#1 PEM, which is the only private-key encoding
+// libssh2's WinCNG backend can read. "ed25519" uses the OpenSSH container.
+export type KeyAlgorithm = "ed25519" | "rsa";
+
 // Rust: types.rs — ConnectionStatus
 export type ConnectionStatus = {
   host: string;
@@ -616,7 +621,8 @@ export type Snippet = {
 
 // Rust: container_discovery.rs — ContainerDiscoveryTarget
 // Rust: container_discovery.rs — ContainerPlatform
-export type ContainerPlatform = "docker" | "k8s";
+// "docker" | "wslc" | "apple" are local runtimes; "k8s" is the orchestrator.
+export type ContainerPlatform = "docker" | "wslc" | "apple" | "k8s";
 
 export type ContainerDiscoveryTarget = {
   id: string;
@@ -624,10 +630,24 @@ export type ContainerDiscoveryTarget = {
   context: string;
   container_id: string;
   container_name: string;
+  image: string;
   status: string;
   exec_args: string[];
   exec_binary: string;
   namespace: string | null;
+};
+
+// Rust: container_runtime.rs — ContainerRuntimeInfo
+// One entry per runtime the build knows about, whether or not this host has it,
+// so the UI can explain an empty container list instead of showing nothing.
+export type ContainerRuntimeInfo = {
+  runtime: "docker" | "wslc" | "apple";
+  display_name: string;
+  binary: string | null;
+  supported: boolean;
+  available: boolean;
+  selected: boolean;
+  unsupported_reason: string | null;
 };
 
 // Rust: font_list.rs — FontInfo
@@ -643,6 +663,17 @@ export type ShellInfo = {
   name: string;
   path: string;
   family: ShellFamily;
+};
+
+// Rust: resident_session.rs — ResidentSessionSummary
+// One long-lived local shell from the daemon's registry. A `dead` session's
+// shell has exited; it disappears once the daemon reclaims it.
+export type ResidentSessionSummary = {
+  id: string;
+  host: string;
+  label: string;
+  idle_secs: number;
+  dead: boolean;
 };
 
 // Rust: ssh_algo.rs — SshAlgoPrefs

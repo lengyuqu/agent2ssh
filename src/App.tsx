@@ -1,37 +1,22 @@
 import {
-  Activity,
-  ArrowLeftRight,
-  Bot,
-  BookOpen,
-  Camera,
-  Clapperboard,
-  Cloud,
-  FolderOpen,
-  HelpCircle,
-  History,
-  Key,
   KeyRound,
-  LayoutDashboard,
-  Network,
   PanelLeftClose,
   PanelLeftOpen,
-  Play,
   Plus,
   RefreshCw,
-  Server,
-  ShieldCheck,
-  Terminal,
-  Waypoints,
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, reportError } from "./api";
+import { MODULES, RELATED_MODULES, SIDEBAR_ORDER } from "./nav";
 import AddHostForm from "./components/AddHostForm";
 import ApprovalWorkbench from "./components/approval/ApprovalWorkbench";
 import AuditCharts from "./components/AuditCharts";
 import AuditPanel from "./components/AuditPanel";
 import Breadcrumb from "./components/Breadcrumb";
 import ConfigSnapshotsPanel from "./components/ConfigSnapshotsPanel";
+import ContainersPanel from "./components/ContainersPanel";
+import ResidentSessionsPanel from "./components/ResidentSessionsPanel";
 import ConnectionTopology from "./components/ConnectionTopology";
 import CommandPalette, {
   type CommandPaletteModule,
@@ -90,71 +75,6 @@ type ConnectionProgress = {
   variant?: "active" | "success" | "error";
 };
 
-const MODULES = [
-  { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
-  { id: "hosts", label: "Host Management", icon: Server },
-  { id: "proxies", label: "Proxies", icon: Network },
-  { id: "terminal", label: "Terminal", icon: Terminal },
-  { id: "execute", label: "Execution", icon: Play },
-  { id: "files-sessions", label: "Files", icon: FolderOpen },
-  { id: "tunnels", label: "Tunnels", icon: ArrowLeftRight },
-  { id: "activity", label: "Activity", icon: Activity },
-  { id: "mcp-agents", label: "MCP Agents", icon: Bot },
-  { id: "sync", label: "Sync", icon: Cloud },
-  { id: "keys", label: "Keys", icon: Key },
-  { id: "playbooks", label: "Playbooks", icon: BookOpen },
-  { id: "audit", label: "Audit", icon: History },
-  { id: "help", label: "Help", icon: HelpCircle },
-  // V2-2/V4-3: appended (not inserted) so the existing Ctrl/⌘+1..9 module
-  // shortcuts (V2-5) keep pointing at the same modules.
-  { id: "approvals", label: "Approvals", icon: ShieldCheck },
-  { id: "config", label: "Config Snapshots", icon: Camera },
-  { id: "topology", label: "Topology", icon: Waypoints },
-  { id: "recordings", label: "Recordings", icon: Clapperboard },
-] as const;
-
-// v3 3.1: sidebar render order (approvals on top). MODULES order above is
-// frozen by the Ctrl/⌘+1..9 shortcuts; only the sidebar display order changes.
-const SIDEBAR_ORDER: Array<(typeof MODULES)[number]["id"]> = [
-  "approvals",
-  "hosts",
-  "audit",
-  "mcp-agents",
-  "dashboard",
-  "terminal",
-  "execute",
-  "files-sessions",
-  "tunnels",
-  "activity",
-  "proxies",
-  "sync",
-  "keys",
-  "playbooks",
-  "config",
-  "topology",
-  "recordings",
-  "help",
-];
-
-// V3-4: mesh navigation, not a tab trail — each module lists a handful of the
-// other modules an operator is likely to jump to from here.
-const RELATED_MODULES: Partial<Record<(typeof MODULES)[number]["id"], Array<(typeof MODULES)[number]["id"]>>> = {
-  hosts: ["execute", "files-sessions", "tunnels", "terminal", "audit", "topology"],
-  topology: ["hosts", "tunnels"],
-  proxies: ["hosts"],
-  terminal: ["hosts"],
-  recordings: ["terminal", "audit"],
-  execute: ["hosts", "audit"],
-  "files-sessions": ["hosts"],
-  tunnels: ["hosts"],
-  activity: ["audit"],
-  keys: ["hosts"],
-  playbooks: ["hosts", "execute"],
-  audit: ["hosts", "approvals"],
-  approvals: ["execute", "audit"],
-  sync: ["config"],
-  config: ["sync"],
-};
 
 export default function App() {
   const { t } = useI18n();
@@ -1278,6 +1198,9 @@ export default function App() {
           )}
 
           {activeModule === "config" && <ConfigSnapshotsPanel />}
+
+          {activeModule === "containers" && <ContainersPanel />}
+          {activeModule === "resident-sessions" && <ResidentSessionsPanel />}
 
           {activeModule === "topology" && (
             <ConnectionTopology

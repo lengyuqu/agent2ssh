@@ -11,7 +11,9 @@ type I18nContextValue = {
 
 const STORAGE_KEY = "agent2ssh.language";
 
-const zh: Record<string, string> = {
+/** Chinese strings, keyed by the English source text. Exported so the module
+ * registry test can assert every sidebar label has a translation. */
+export const zh: Record<string, string> = {
   "Broadcast command": "广播命令",
   "Review every target and its effective risk before sending. Delivery is authorization-atomic, not remote execution-atomic.": "发送前请检查每个目标及其有效风险。授权阶段保证全有或全无，但远端执行并非原子操作。",
   "Single command to run on selected terminals": "在所选终端运行的单条命令",
@@ -487,6 +489,12 @@ const zh: Record<string, string> = {
   "Key name (e.g. id-work)": "密钥名称（例如 id-work）",
   "Comment (optional)": "备注（可选）",
   "Generate Ed25519 Key": "生成 Ed25519 密钥",
+  "RSA (traditional PEM)": "RSA（传统 PEM）",
+  "recommended": "推荐",
+  "This platform's SSH library cannot read Ed25519 keys, so a key generated here will not authenticate. Choose RSA to get a usable key.":
+    "当前平台的 SSH 库无法读取 Ed25519 密钥，在这里生成的此类密钥无法用于认证。请选择 RSA 以获得可用的密钥。",
+  "RSA keys are written as traditional PEM (`-----BEGIN RSA PRIVATE KEY-----`) because that is the only private-key encoding this platform's SSH library can read.":
+    "RSA 密钥以传统 PEM（`-----BEGIN RSA PRIVATE KEY-----`）写出，因为这是当前平台 SSH 库唯一能读取的私钥格式。",
   "Path to private key (e.g. ~/.ssh/id_rsa)": "私钥路径（例如 ~/.ssh/id_rsa）",
   "Name (optional, defaults to filename)": "名称（可选，默认文件名）",
   "Import Key": "导入密钥",
@@ -821,6 +829,39 @@ const zh: Record<string, string> = {
   "No changes to save": "没有需要保存的改动",
   "Saved. New connections will use these algorithms.": "已保存。新连接将使用这些算法。",
   "Reverted to the built-in safe defaults.": "已恢复为内置安全默认值。",
+  // Container discovery module (Docker / wslc / Apple container / Kubernetes)
+  "Containers": "容器",
+  "{count} targets": "{count} 个目标",
+  "Include stopped": "含已停止",
+  "Include stopped containers": "包含已停止的容器",
+  "Refresh containers": "刷新容器",
+  "detected (auto)": "已检测（自动选择）",
+  // "detected" already exists above (McpAgentsPanel); reused, not redeclared.
+  "not installed": "未安装",
+  "unsupported here": "本平台不支持",
+  "Reading container runtimes...": "正在读取容器运行时…",
+  "No containers found": "未发现容器",
+  "No container runtime is available on this host": "本机没有可用的容器运行时",
+  "Start a container, then refresh — or include stopped ones.":
+    "启动一个容器后刷新，或勾选「含已停止」。",
+  // Resident sessions module (daemon-owned long-lived local shells)
+  "Resident Sessions": "驻留会话",
+  "{count} sessions": "{count} 个会话",
+  "Refresh resident sessions": "刷新驻留会话",
+  "Reading resident sessions...": "正在读取驻留会话…",
+  "No resident sessions": "暂无驻留会话",
+  "Resident sessions are long-lived local shells owned by the daemon. Open one with 'agent2ssh resident open' or the daemon API; they also die with the daemon or after the idle timeout.":
+    "驻留会话是由守护进程持有的长生命周期本地 shell。可通过「agent2ssh resident open」或守护进程 API 打开；守护进程退出或空闲超时后会话也会终止。",
+  "dead": "已退出",
+  "alive": "运行中",
+  "{secs}s idle": "空闲 {secs} 秒",
+  "Close session": "关闭会话",
+  "Closing...": "正在关闭…",
+  "Install Docker, WSL containers (wslc) or Apple container on this host, then refresh. Only the runtimes this platform supports are listed.":
+    "请在本机安装 Docker、WSL 容器（wslc）或 Apple container 后刷新。列表中只会出现当前平台支持的运行时。",
+  "Copy exec command": "复制进入容器的命令",
+  "Open in terminal": "在终端中打开",
+  "Opening...": "正在打开…",
 };
 
 const I18nContext = createContext<I18nContextValue | null>(null);

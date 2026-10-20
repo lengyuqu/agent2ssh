@@ -138,7 +138,7 @@ JSON 格式，包含 `hosts` 数组，也可以包含由桌面端代理管理页
 | `passphrase` | string/null | 否 | 私钥口令引用；由凭据库管理，不应手工写入明文 |
 | `user` | string | 否 | SSH 用户名 |
 | `port` | integer | 否 | SSH 端口，默认 22 |
-| `key_path` | string | 否 | SSH 私钥路径 |
+| `key_path` | string | 否 | SSH 私钥路径；Windows 上私钥的文件格式有额外限制，见注意事项 |
 | `jump_host` | string | 否 | ProxyJump 跳板机别名 |
 | `proxy_id` | string | 否 | 代理配置 ID，用于通过 HTTP CONNECT 或 SOCKS5 建立 SSH TCP 连接 |
 | `risk_override` | string | 否 | 覆盖该主机非 blocked 命令的风险等级（low/medium/high） |
@@ -159,6 +159,8 @@ JSON 格式，包含 `hosts` 数组，也可以包含由桌面端代理管理页
 - `risk_override` 设置为 `"low"` 可以降低该主机上非 `blocked` 命令的风险等级
 - `risk_override` 不能降级 `blocked` 命令；内置或用户规则判定为 `blocked` 的命令仍会被拒绝；显式审批策略、scope、gate 和限额仍会生效
 - `env`、`role`、`owner` 和 `tags` 可用于桌面端主机视图过滤，也可用于 CLI `host list` 过滤
+- **Windows 链接的密码学后端是随包静态构建的 OpenSSL，不再是 WinCNG**：`src-tauri/Cargo.toml` 为 `ssh2` 同时开启 `openssl-on-win32` 与 `vendored-openssl`，因此 Windows 构建与 Linux/macOS 能力一致——支持 `curve25519-sha256`、`ssh-ed25519`/ECDSA 主机密钥、`aes256-gcm` 与 `chacha20-poly1305`，也能读取 OpenSSH 私钥容器格式。这不仅解决了密钥格式问题，也解决了握手问题：WinCNG 只提供 `diffie-hellman-group*` 系列，而 OpenSSH 10.0 起已移除这些组，交集为空，会在**认证之前**就失败（`key exchange failure`）。OpenSSL 为静态链入，二进制不依赖任何 `libssl*.dll`/`libcrypto*.dll`。用 `agent2ssh algo get` 查看本构建实际可协商的算法，用 `agent2ssh keys algorithm` 查看推荐密钥类型（该构建下为 `ed25519`）
+- **认证失败时的可操作诊断仍然保留**：若某个构建的 libssh2 链接的是 WinCNG（已不是 Windows 的默认情形），其私钥读取器只认传统 PEM（`-----BEGIN RSA PRIVATE KEY-----` 与 `-----BEGIN DSA PRIVATE KEY-----`）；而 `ssh-keygen` 自 OpenSSH 7.8 起**默认**写出 OpenSSH 容器格式（`-----BEGIN OPENSSH PRIVATE KEY-----`，`-t rsa` 也一样），该格式在那种构建上无法用于认证，Ed25519 私钥则任何格式都不可用。此时认证失败会直接给出这一结论而不是笼统的 `unknown error`，并建议用 `ssh-keygen -p -m PEM -f <私钥>` 就地转换（仅 RSA/DSA）。**应用内生成的密钥总是采用本构建可用的类型**，无需手工转换：`agent2ssh keys algorithm` 查询推荐类型，`keys generate <名称>` 直接生成
 
 ---
 
@@ -866,7 +868,17 @@ events = ["approval_required", "exec_blocked", "exec_completed", "anomaly_detect
 
 **生成新密钥**
 
-通过 Desktop App 的 Keys 标签页生成 Ed25519 密钥对。生成过程由 Agent2SSH 后端实现，不调用系统 `ssh-keygen`。
+通过 Desktop App 的 Keys 标签页生成，或用 CLI：
+
+```bash
+agent2ssh keys algorithm          # 本构建推荐的类型（ed25519 或 rsa）
+agent2ssh keys generate id-work   # 按推荐类型生成；只输出私钥路径
+agent2ssh keys generate id-work --type rsa --json
+```
+
+生成过程由 Agent2SSH 后端实现，不调用系统 `ssh-keygen`。**默认类型由本构建的 SSH 库能力决定，而不是由操作系统决定**：能读取 OpenSSH 私钥容器的构建用 Ed25519，不能的用 RSA 并直接写成传统 PEM（3072 位）。Windows 现在属于前者——它链接的是 OpenSSL——因此推荐 `ed25519`；只有 WinCNG 构建（在 Windows 上需要显式关闭 vendored OpenSSL 才会出现）仍会退回 RSA。因此本应用生成的密钥一定可用于本应用的认证——这正是 `keys algorithm` 存在的理由，脚本应当询问而不是假定。
+
+> 若桌面端选择的是本构建无法读取的类型（例如在 WinCNG 构建上选 Ed25519），表单会在生成前给出提示；未手动选择时，请求不带类型，由后端决定。
 
 **导入现有密钥**
 
@@ -887,7 +899,7 @@ agent2ssh host add web1 --host 192.168.1.10 --key ~/.agent2ssh/keys/my_key
 - 私钥文件权限必须为 `0600`（仅所有者可读写），Agent2SSH 自动设置正确权限
 - 密钥删除后，引用该密钥的主机配置不会自动更新
 - 建议为不同用途使用不同的密钥（工作、个人、部署等）
-- 支持的密钥类型：ed25519、rsa、ecdsa
+- 可生成/导入的密钥类型：ed25519、rsa(PEM)、ecdsa；在 Windows 上实际可认证的只有 `rsa` 的传统 PEM 形式
 
 ---
 
@@ -1169,5 +1181,6 @@ shasum -a 256 -c <checksum> team-config.json
 | `AGENT2SSH_WEBDAV_URL` | CLI | 无 | WebDAV 同步 collection URL。也可写入 `webdav.toml` 或用 `agent2ssh webdav * --url` 传入。 |
 | `AGENT2SSH_WEBDAV_USERNAME` | CLI | 无 | WebDAV Basic Auth 用户名。 |
 | `AGENT2SSH_WEBDAV_PASSWORD` | CLI | 无 | WebDAV Basic Auth 密码。也可在 `webdav.toml` 中用 `password_env` 指向自定义环境变量。 |
+| `AGENT2SSH_CONTAINER_RUNTIME` | CLI / 桌面 | 自动探测 | 固定容器发现使用的本地运行时：`docker`、`wslc`（Windows 的 WSL 容器 CLI）或 `apple`（Apple container）。不设时按 `docker → wslc → apple` 取第一个已安装的运行时，未安装的自动跳过；桌面端的容器面板与 e2e 脚本共用这一条选择逻辑。 |
 
 > 说明：`remotes.toml` 与 `daemon_tokens.toml` 中的 `token_env` 字段引用的是**用户自定义**的环境变量名（如示例中的 `AGENT2SSH_PROD_TOKEN`），由你自行设置，不属于上表的内置变量。

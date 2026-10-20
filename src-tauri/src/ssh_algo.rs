@@ -12,6 +12,22 @@
 //! their own preferences, they are validated against libssh2's supported
 //! algorithms list — fail-closed if any preference is unknown.
 //!
+//! Fail-closed also means the defaults themselves must be **negotiable by the
+//! libssh2 this binary links**, not merely well-formed. That set is not
+//! portable — `libssh2-sys` selects a crypto backend at build time, and a WinCNG
+//! build has no curve25519, no ed25519 host keys and no AES-GCM, whereas an
+//! OpenSSL one has all three — so [`safe_defaults`] filters its wish list
+//! through the build's actual capabilities. Without that filter the defaults
+//! name algorithms the build cannot provide and *every* connection fails at the
+//! first method, which is exactly what happened on the WinCNG-backed Windows
+//! build between A22 and this fix.
+//!
+//! The Windows build no longer takes that path: `src-tauri/Cargo.toml` enables
+//! `ssh2`'s `openssl-on-win32`, so it links OpenSSL and negotiates the same
+//! defaults as Linux and macOS. The filter stays because it is what makes that
+//! a configuration change rather than a code change — see
+//! [`supported_algorithms`].
+//!
 //! Mirrors rssh's `ssh/algorithms.rs` design, adapted to the `ssh2` crate
 //! (libssh2 bindings) which uses `MethodType` + comma-delimited string
 //! preferences rather than rssh's structured `AlgorithmList`.
@@ -19,6 +35,7 @@
 use anyhow::{anyhow, Result};
 use ssh2::{MethodType, Session};
 use std::collections::HashSet;
+use std::sync::OnceLock;
 
 /// User-configurable SSH algorithm preferences.
 ///
@@ -44,11 +61,10 @@ pub struct SshAlgoPrefs {
     pub comp_sc: String,
 }
 
-/// Safe default algorithm preferences that exclude weak/legacy algorithms.
+/// The algorithms the built-in defaults *aspire* to, in preference order.
 ///
-/// These are applied when the user has not set custom preferences. They
-/// prioritize modern algorithms (curve25519, ed25519, aes256-gcm, etc.)
-/// and explicitly exclude:
+/// This is where the security intent lives, independent of what any particular
+/// build can do: modern algorithms first, and these explicitly excluded:
 /// - DSA host keys (ssh-dss)
 /// - 3DES-CBC cipher
 /// - hmac-sha1-96 MAC
@@ -56,7 +72,11 @@ pub struct SshAlgoPrefs {
 ///   `ssh2` crate) only supports the `none` compression method, so listing
 ///   `zlib@openssh.com`/`zlib` here fails the fail-closed validation against
 ///   a real sshd ("unsupported SSH algorithm 'zlib@openssh.com' ...").
-pub fn safe_defaults() -> SshAlgoPrefs {
+///
+/// Do not hand this list to a session — it may name algorithms the linked
+/// libssh2 cannot negotiate. [`safe_defaults`] is the filtered form that is
+/// actually applied.
+fn desired_defaults() -> SshAlgoPrefs {
     SshAlgoPrefs {
         kex: "curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group16-sha512,diffie-hellman-group-exchange-sha256,diffie-hellman-group14-sha256".into(),
         hostkey: "ssh-ed25519,ecdsa-sha2-nistp256,rsa-sha2-512,rsa-sha2-256,ssh-rsa".into(),
@@ -67,6 +87,111 @@ pub fn safe_defaults() -> SshAlgoPrefs {
         comp_cs: "none".into(),
         comp_sc: "none".into(),
     }
+}
+
+/// Safe default algorithm preferences that exclude weak/legacy algorithms, as
+/// far as the libssh2 this binary links allows.
+///
+/// These are applied when the user has not set custom preferences. The wish
+/// list comes from [`desired_defaults`]; each field is then narrowed to the
+/// algorithms this build can actually negotiate, because the fail-closed check
+/// in [`apply_method`] treats an unknown name as fatal — including one the
+/// *defaults* named. See [`supported_algorithms`] for why that set is
+/// platform-dependent and [`narrow_to_supported`] for the rule.
+///
+/// A field whose entries are all unavailable becomes an empty string, which
+/// means "use libssh2's own list" rather than an equally fatal empty
+/// preference.
+pub fn safe_defaults() -> SshAlgoPrefs {
+    let desired = desired_defaults();
+    SshAlgoPrefs {
+        kex: narrow(MethodType::Kex, &desired.kex),
+        hostkey: narrow(MethodType::HostKey, &desired.hostkey),
+        cipher_cs: narrow(MethodType::CryptCs, &desired.cipher_cs),
+        cipher_sc: narrow(MethodType::CryptSc, &desired.cipher_sc),
+        mac_cs: narrow(MethodType::MacCs, &desired.mac_cs),
+        mac_sc: narrow(MethodType::MacSc, &desired.mac_sc),
+        comp_cs: narrow(MethodType::CompCs, &desired.comp_cs),
+        comp_sc: narrow(MethodType::CompSc, &desired.comp_sc),
+    }
+}
+
+/// The algorithms the linked libssh2 build can negotiate for one method type.
+///
+/// Not portable, and that is the whole point: `libssh2-sys` picks a crypto
+/// backend at build time. OpenSSL — what Linux, macOS and, since `ssh2`'s
+/// `openssl-on-win32` feature was enabled here, Windows all link — offers
+/// curve25519, ed25519 host keys and AES-GCM; a WinCNG build offers only the
+/// `diffie-hellman-group*` exchanges, RSA host keys and AES-CBC/CTR. A default
+/// list written against the first will fail closed on the second.
+///
+/// `Session::new()` does not connect, so this needs no server; `OnceLock` keeps
+/// it to one query per method type per process instead of one per connection.
+/// `None` means the probe itself failed, which callers must treat as "no
+/// preference" rather than as "nothing is supported".
+///
+/// The host-key list doubles as this build's capability signal for *file
+/// formats*: [`crate::ssh_key_format::reads_openssh_private_keys`] reads it
+/// through here, because the backends that can parse OpenSSH-container private
+/// keys are exactly the ones that advertise ed25519/ECDSA host keys. Keep this
+/// crate-visible for that reason.
+pub(crate) fn supported_algorithms(method: MethodType) -> Option<&'static HashSet<String>> {
+    static KEX: OnceLock<Option<HashSet<String>>> = OnceLock::new();
+    static HOSTKEY: OnceLock<Option<HashSet<String>>> = OnceLock::new();
+    static CRYPT_CS: OnceLock<Option<HashSet<String>>> = OnceLock::new();
+    static CRYPT_SC: OnceLock<Option<HashSet<String>>> = OnceLock::new();
+    static MAC_CS: OnceLock<Option<HashSet<String>>> = OnceLock::new();
+    static MAC_SC: OnceLock<Option<HashSet<String>>> = OnceLock::new();
+    static COMP_CS: OnceLock<Option<HashSet<String>>> = OnceLock::new();
+    static COMP_SC: OnceLock<Option<HashSet<String>>> = OnceLock::new();
+
+    let cell = match method {
+        MethodType::Kex => &KEX,
+        MethodType::HostKey => &HOSTKEY,
+        MethodType::CryptCs => &CRYPT_CS,
+        MethodType::CryptSc => &CRYPT_SC,
+        MethodType::MacCs => &MAC_CS,
+        MethodType::MacSc => &MAC_SC,
+        MethodType::CompCs => &COMP_CS,
+        MethodType::CompSc => &COMP_SC,
+        // `LangCs`/`LangSc`/`SignAlgo` have no field in `SshAlgoPrefs`.
+        _ => return None,
+    };
+
+    cell.get_or_init(|| {
+        let session = Session::new().ok()?;
+        let algs = session.supported_algs(method).ok()?;
+        Some(algs.iter().map(|a| (*a).to_string()).collect())
+    })
+    .as_ref()
+}
+
+/// Keep only the entries `supported` knows, preserving `wanted`'s order.
+///
+/// `None` means nothing survived — the caller then sends no preference at all,
+/// so libssh2 falls back to its own list rather than being told to use
+/// something it cannot do. Order is preserved because it is the preference.
+fn narrow_to_supported(supported: &HashSet<String>, wanted: &str) -> Option<String> {
+    let kept: Vec<&str> = wanted
+        .split(',')
+        .map(str::trim)
+        .filter(|algo| !algo.is_empty() && supported.contains(*algo))
+        .collect();
+
+    if kept.is_empty() {
+        None
+    } else {
+        Some(kept.join(","))
+    }
+}
+
+/// [`narrow_to_supported`] against this build's capabilities, as the preference
+/// string to apply: the survivors, or `""` (libssh2's own list) if there are
+/// none or the capability probe failed.
+fn narrow(method: MethodType, wanted: &str) -> String {
+    supported_algorithms(method)
+        .and_then(|supported| narrow_to_supported(supported, wanted))
+        .unwrap_or_default()
 }
 
 /// Apply algorithm preferences to a session **before** the handshake.
@@ -221,7 +346,7 @@ pub fn validate_algo_prefs(prefs: &SshAlgoPrefs) -> Result<()> {
             if !is_plausible_algorithm_name(entry) {
                 return Err(anyhow!(
                     "unsupported SSH algorithm '{entry}' in {label}: names may only contain \
-                     letters, digits and . _ - @"
+                     letters, digits and . _ - @ +"
                 ));
             }
             if !seen.insert(entry) {
@@ -250,15 +375,27 @@ pub fn validate_algo_prefs(prefs: &SshAlgoPrefs) -> Result<()> {
     Ok(())
 }
 
+/// The punctuation an algorithm name may contain.
+///
+/// One constant rather than a `matches!` pattern plus a prose list, because the
+/// two drifted: the check was widened to accept `+` and the rejection message
+/// was not, so the message described a smaller set than the check enforced.
+/// `rejection_message_lists_every_allowed_character` pins the pairing.
+const ALGORITHM_NAME_PUNCTUATION: &str = "._-@+";
+
 /// A conservative syntax check — this is not a guarantee that libssh2 knows the
 /// algorithm. It keeps the file to well-formed tokens (so it can round-trip
 /// through the settings dialog and the comma-delimited parser) without
 /// pretending to be an offline capability probe.
+///
+/// Capability is [`supported_algorithms`]' job, and the two are deliberately
+/// separate: this one must accept a name that this build cannot do, because
+/// `ssh_algos.json` is shared between machines with different backends.
 fn is_plausible_algorithm_name(name: &str) -> bool {
     !name.is_empty()
         && name
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '@' | '+'))
+            .all(|c| c.is_ascii_alphanumeric() || ALGORITHM_NAME_PUNCTUATION.contains(c))
 }
 
 /// Save algorithm preferences to the config file.
@@ -326,9 +463,15 @@ mod tests {
         );
     }
 
+    /// The *wish list* leads with modern algorithms. Asserted on
+    /// `desired_defaults` rather than `safe_defaults` because the latter is
+    /// narrowed to this build's capabilities: a WinCNG build has no curve25519
+    /// and no ed25519 host key, so those can never be first there.
+    /// What must hold on every platform is that no *weak* algorithm is ever
+    /// promoted — see `safe_defaults_exclude_weak_algos`.
     #[test]
-    fn safe_defaults_prioritize_modern_algos() {
-        let d = safe_defaults();
+    fn desired_defaults_prioritize_modern_algos() {
+        let d = desired_defaults();
         // curve25519 should be the first kex.
         assert!(
             d.kex.starts_with("curve25519-sha256"),
@@ -344,6 +487,115 @@ mod tests {
             d.cipher_cs.starts_with("chacha20-poly1305"),
             "chacha20-poly1305 should be the most preferred cipher"
         );
+    }
+
+    /// `safe_defaults` may only *drop* entries from the wish list — never add
+    /// one, never reorder — so the security ordering survives the narrowing.
+    #[test]
+    fn safe_defaults_are_an_order_preserving_subset_of_desired() {
+        let desired = desired_defaults();
+        let safe = safe_defaults();
+        let pairs = [
+            ("kex", &desired.kex, &safe.kex),
+            ("hostkey", &desired.hostkey, &safe.hostkey),
+            ("cipher_cs", &desired.cipher_cs, &safe.cipher_cs),
+            ("cipher_sc", &desired.cipher_sc, &safe.cipher_sc),
+            ("mac_cs", &desired.mac_cs, &safe.mac_cs),
+            ("mac_sc", &desired.mac_sc, &safe.mac_sc),
+            ("comp_cs", &desired.comp_cs, &safe.comp_cs),
+            ("comp_sc", &desired.comp_sc, &safe.comp_sc),
+        ];
+        for (label, wanted, got) in pairs {
+            let wanted: Vec<&str> = wanted.split(',').map(str::trim).collect();
+            let mut cursor = 0usize;
+            for entry in got.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+                let at = wanted[cursor..]
+                    .iter()
+                    .position(|w| *w == entry)
+                    .unwrap_or_else(|| panic!("{label}: '{entry}' was not in the wish list"));
+                cursor += at + 1;
+            }
+        }
+    }
+
+    /// The regression for the WinCNG outage: `apply_algo_prefs` is
+    /// fail-closed, so a default naming an algorithm this build cannot
+    /// negotiate does not degrade gracefully — it kills every connection before
+    /// the handshake. The wish list names curve25519, ed25519 and AES-GCM, none
+    /// of which a WinCNG build can do, so this test would fail on one unless
+    /// `safe_defaults` filters. That is why it runs on every platform rather
+    /// than being skipped where the backend happens to be OpenSSL: the filter is
+    /// the invariant, and this is what pins it.
+    #[test]
+    fn safe_defaults_are_negotiable_by_this_build() {
+        let safe = safe_defaults();
+        let pairs = [
+            ("kex", MethodType::Kex, &safe.kex),
+            ("hostkey", MethodType::HostKey, &safe.hostkey),
+            (
+                "cipher client->server",
+                MethodType::CryptCs,
+                &safe.cipher_cs,
+            ),
+            (
+                "cipher server->client",
+                MethodType::CryptSc,
+                &safe.cipher_sc,
+            ),
+            ("mac client->server", MethodType::MacCs, &safe.mac_cs),
+            ("mac server->client", MethodType::MacSc, &safe.mac_sc),
+            (
+                "compression client->server",
+                MethodType::CompCs,
+                &safe.comp_cs,
+            ),
+            (
+                "compression server->client",
+                MethodType::CompSc,
+                &safe.comp_sc,
+            ),
+        ];
+
+        for (label, method, value) in pairs {
+            let supported = supported_algorithms(method).expect("capability probe must work");
+            for entry in value.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+                assert!(
+                    supported.contains(entry),
+                    "{label}: default '{entry}' is not negotiable by this libssh2 build"
+                );
+            }
+        }
+
+        // And the shape the connection path actually uses must succeed.
+        let session = Session::new().expect("session");
+        apply_algo_prefs(&session, Some(&safe))
+            .expect("safe defaults must be applicable to this build");
+    }
+
+    #[test]
+    fn narrow_to_supported_keeps_order_and_drops_unknown() {
+        let supported: HashSet<String> = ["b", "a", "c"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            narrow_to_supported(&supported, "c,a,zzz").as_deref(),
+            Some("c,a")
+        );
+        assert_eq!(
+            narrow_to_supported(&supported, " zzz , b ").as_deref(),
+            Some("b")
+        );
+        // Nothing survives, or nothing was asked for: no preference at all.
+        assert_eq!(narrow_to_supported(&supported, "zzz"), None);
+        assert_eq!(narrow_to_supported(&supported, "  "), None);
+    }
+
+    /// A failed probe must not be read as "nothing is supported" against a
+    /// non-empty wish list, and must not panic.
+    #[test]
+    fn narrow_degrades_to_libssh2_defaults_never_panics() {
+        // `MethodType::SignAlgo` has no `SshAlgoPrefs` field, so the probe
+        // returns `None` — the same shape as a failed query.
+        assert!(supported_algorithms(MethodType::SignAlgo).is_none());
+        assert_eq!(narrow(MethodType::SignAlgo, "a,b"), "");
     }
 
     #[test]
@@ -394,6 +646,23 @@ mod tests {
         prefs.cipher_cs = "aes256-ctr,not an algorithm".into();
         let err = validate_algo_prefs(&prefs).unwrap_err().to_string();
         assert!(err.contains("unsupported SSH algorithm"), "got: {err}");
+    }
+
+    /// The rejection message must describe the set the check enforces, in both
+    /// directions — it did not, having omitted `+` after the check was widened
+    /// to accept it.
+    #[test]
+    fn rejection_message_lists_every_allowed_character() {
+        let mut prefs = safe_defaults();
+        prefs.kex = "not a name".into();
+        let err = validate_algo_prefs(&prefs).unwrap_err().to_string();
+        for allowed in ALGORITHM_NAME_PUNCTUATION.chars() {
+            assert!(err.contains(allowed), "message omits '{allowed}': {err}");
+            assert!(
+                is_plausible_algorithm_name(&format!("a{allowed}b")),
+                "'{allowed}' is listed in the message but rejected by the check"
+            );
+        }
     }
 
     #[test]

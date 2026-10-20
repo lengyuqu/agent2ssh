@@ -382,6 +382,53 @@ agent2ssh ping web1 --timeout-secs 3 --json
 
 ---
 
+## 容器发现 (containers)
+
+列出可 exec 进入的本地容器（Docker / wslc / Apple container）与 Kubernetes Pod：
+
+```bash
+agent2ssh containers list [--all] [--runtime <id>] [--json]
+agent2ssh containers runtime [--runtime <id>] [--json | --binary]
+```
+
+- `--all`：同时列出已停止的容器（默认只列运行中的）。
+- `--runtime`：`auto`（默认，扫描所有已安装的运行时）、`docker`、`wslc`（Windows 的 WSL 容器 CLI）、`apple`（Apple container，需 macOS 26+ Apple 芯片）或 `k8s`。显式指定的运行时若缺失或本平台不支持会直接报错，而不是静默返回空列表。
+- `containers runtime --binary`：只输出运行时二进制路径，便于脚本使用（`scripts/e2e-container.sh` 即通过它选择运行时）。
+
+```bash
+agent2ssh containers list
+agent2ssh containers list --all --json
+agent2ssh containers list --runtime wslc
+agent2ssh containers runtime --json
+```
+
+列表为空时，命令会打印每个运行时的状态（已检测 / 未安装 / 本平台不支持），因此「没有容器在跑」与「本机没有容器运行时」不会混淆。可用环境变量 `AGENT2SSH_CONTAINER_RUNTIME` 固定运行时选择。桌面端的「Containers」模块使用同一套选择逻辑。
+
+---
+
+## SSH 密钥 (keys)
+
+管理 `~/.agent2ssh/keys/` 下的密钥对：
+
+```bash
+agent2ssh keys algorithm [--name | --json]
+agent2ssh keys generate <名称> [--type ed25519|rsa] [--comment <备注>] [--json]
+```
+
+- `keys algorithm`：输出**本构建实际可用于认证**的类型（`ed25519` 或 `rsa`）。这是 SSH 库（libssh2）编译期选择加密后端的结果，与操作系统无关：链接 WinCNG 的构建读不了 OpenSSH 私钥容器，只能推荐 RSA 并以传统 PEM 写出；本项目各平台构建（Windows 含在内）都链接 OpenSSL，因此推荐 `ed25519`。`--json` 额外给出 `bits` 与 `reads_openssh_private_keys`，便于解释这个结论从何而来。
+- `keys generate`：不带 `--type` 时按 `keys algorithm` 生成，**只输出私钥路径**，因此可以直接喂给别的命令：
+
+```bash
+agent2ssh keys algorithm
+agent2ssh keys generate id-work
+agent2ssh host add web1 --host 10.0.0.5 --key "$(agent2ssh keys generate web1)"
+agent2ssh keys generate id-rsa --type rsa --json
+```
+
+RSA 默认 3072 位（128 位安全强度的最小尺寸），私钥写成传统 PEM（`-----BEGIN RSA PRIVATE KEY-----`），公钥仍是 `authorized_keys` 认识的标准单行 `ssh-rsa …`。低于 2048 位会被拒绝；同名密钥已存在时生成失败而不是覆盖。私钥权限自动设为 `0600`。
+
+---
+
 ## SSH 主机指纹
 
 Agent2SSH 首次连接主机时会自动信任 SSH host key，并保存到 `~/.agent2ssh/known_hosts.json`。后续连接会校验保存的 SHA256 指纹；如果指纹变化，连接会失败并提示主机指纹已改变。

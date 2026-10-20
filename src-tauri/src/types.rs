@@ -216,6 +216,141 @@ pub struct HostFilter {
     pub owner: Option<String>,
     pub tag: Option<String>,
 }
+/// Which kind of target a command ran on.
+///
+/// Derived from the audited `host` rather than stored beside it. The mapping is
+/// this one function, so a stored copy could only ever disagree with the host it
+/// came from — and entries written before the local target existed still
+/// classify correctly, because everything that is not the reserved id below was
+/// an SSH host.
+///
+/// A future target that is *not* recoverable from the host string must not be
+/// folded in here: it needs a field of its own, because no amount of
+/// host-string inspection can find it. (A container is recoverable — its id
+/// rides in `local:<runtime>:<container-id>` — so it classifies as `Local`.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExecTarget {
+    /// A configured host alias, reached over SSH.
+    Ssh,
+    /// This machine. See `local_exec`.
+    Local,
+}
+
+impl ExecTarget {
+    /// Stable id: what appears in output and in prose.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Ssh => "ssh",
+            Self::Local => "local",
+        }
+    }
+
+    /// Classify an audited host.
+    ///
+    /// Case-sensitive on purpose, like [`is_local_host`]: the local entry point
+    /// requires the id to match exactly, so an alias spelled `Local` is an
+    /// ordinary SSH host rather than a local exec.
+    pub fn from_host(host: &str) -> Self {
+        if is_local_host(host) {
+            Self::Local
+        } else {
+            Self::Ssh
+        }
+    }
+}
+
+impl std::fmt::Display for ExecTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.id())
+    }
+}
+
+/// The reserved host id naming the local exec target.
+///
+/// Enforced, not conventional: `exec_local_core` refuses any other host, and
+/// that check is what stops an SSH profile's `risk_override` and tags from being
+/// applied to a command that then runs on this machine. Never resolved against
+/// the configured hosts, so it cannot collide with a real profile.
+pub const LOCAL_TARGET_ID: &str = "local";
+
+/// Prefix that names a local *terminal environment*, e.g. `local:pwsh`,
+/// `local:gitbash`, `local:vs`, a WSL distribution (`local:wsl:<distro>`), or
+/// a container (`local:<runtime>:<container-id>`, e.g. `local:docker:abc123`).
+///
+/// The environment is part of the host id rather than a separate request field
+/// so that everything already keyed on `host` — the token scope's allowed-hosts
+/// list, the approval policy's host patterns, the audit log — can name a local
+/// environment without any of them learning a new concept. A container id in
+/// the host string is what makes a container target recoverable from the wire
+/// form, which is why containers never needed a third `ExecTarget` variant.
+pub const LOCAL_ENV_PREFIX: &str = "local:";
+
+/// Whether `host` names the local target, either plainly (`local`) or as a named
+/// environment (`local:<id>`).
+///
+/// Case-sensitive deliberately: the local entry point requires this exact
+/// spelling, so an SSH alias named `Local:vs` is a host and must be reported as
+/// one. An empty environment (`local:`) is not local either — it names nothing.
+pub fn is_local_host(host: &str) -> bool {
+    host == LOCAL_TARGET_ID
+        || host
+            .strip_prefix(LOCAL_ENV_PREFIX)
+            .is_some_and(|environment| !environment.is_empty())
+}
+
+#[cfg(test)]
+mod exec_target_tests {
+    use super::*;
+
+    #[test]
+    fn the_reserved_id_classifies_as_local() {
+        assert_eq!(ExecTarget::from_host(LOCAL_TARGET_ID), ExecTarget::Local);
+    }
+
+    #[test]
+    fn every_other_host_is_an_ssh_target() {
+        assert_eq!(ExecTarget::from_host("prod-db"), ExecTarget::Ssh);
+        assert_eq!(ExecTarget::from_host("localhost"), ExecTarget::Ssh);
+        assert_eq!(ExecTarget::from_host(""), ExecTarget::Ssh);
+    }
+
+    #[test]
+    fn a_named_environment_is_still_the_local_target() {
+        assert!(is_local_host("local:pwsh"));
+        assert!(is_local_host("local:vs"));
+        assert_eq!(ExecTarget::from_host("local:gitbash"), ExecTarget::Local);
+        assert_eq!(ExecTarget::from_host("local:cmd"), ExecTarget::Local);
+    }
+
+    #[test]
+    fn a_bare_prefix_or_a_wrong_case_names_nothing_local() {
+        // `local:` names no environment, and an alias spelled `Local:vs` is an
+        // SSH host — the entry point demands the exact spelling, so reporting it
+        // as local would be a lie about where the command ran.
+        assert!(!is_local_host("local:"));
+        assert!(!is_local_host("Local:vs"));
+        assert!(!is_local_host("LOCAL:VS"));
+        assert_eq!(ExecTarget::from_host("local:"), ExecTarget::Ssh);
+        assert_eq!(ExecTarget::from_host("Local:vs"), ExecTarget::Ssh);
+    }
+
+    #[test]
+    fn classification_is_case_sensitive_because_enforcement_is() {
+        // `exec_local_core` demands an exact match, so an alias spelled `Local`
+        // is a host — and has to be reported as one.
+        assert_eq!(ExecTarget::from_host("Local"), ExecTarget::Ssh);
+        assert_eq!(ExecTarget::from_host("LOCAL"), ExecTarget::Ssh);
+    }
+
+    #[test]
+    fn ids_match_their_variants() {
+        assert_eq!(ExecTarget::Ssh.to_string(), "ssh");
+        assert_eq!(ExecTarget::Local.to_string(), "local");
+        assert_eq!(ExecTarget::Local.id(), LOCAL_TARGET_ID);
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecRequest {
     pub host: String,
@@ -363,6 +498,14 @@ pub struct ExecResult {
     pub side_effect: Option<String>,
 }
 
+impl ExecResult {
+    /// Which kind of target produced this result. Derived from `host`, which the
+    /// local entry point pins to the reserved id.
+    pub fn target(&self) -> ExecTarget {
+        ExecTarget::from_host(&self.host)
+    }
+}
+
 #[cfg(test)]
 impl AuditEntry {
     /// An audit entry with every optional field empty and a fresh id/timestamp.
@@ -431,6 +574,15 @@ pub struct AuditEntry {
     /// or "timeout". Derived from exit_code and risk_level.
     #[serde(default)]
     pub outcome: Option<String>,
+}
+
+impl AuditEntry {
+    /// Which kind of target this entry was recorded against. Derived from `host`
+    /// rather than stored, so entries written before the local target existed
+    /// still classify correctly.
+    pub fn target(&self) -> ExecTarget {
+        ExecTarget::from_host(&self.host)
+    }
 }
 
 fn default_risk() -> RiskLevel {

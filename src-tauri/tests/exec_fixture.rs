@@ -17,16 +17,16 @@
 //!     --test exec_fixture -- --test-threads=1 --nocapture
 //! ```
 //!
-//! `scripts/e2e-docker.sh` also runs it, against the container that script has
-//! already started, with the throwaway key it generated.
+//! `scripts/e2e-container.sh` also runs it, against the container that script
+//! has already started, with the throwaway key it generated.
 //!
 //! Optional overrides: `AGENT2SSH_TEST_SSH_HOST` (default `127.0.0.1`),
 //! `AGENT2SSH_TEST_SSH_USER` (default `root`), and either
 //! `AGENT2SSH_TEST_SSH_KEY` — a private key path, which is what CI and
-//! `scripts/e2e-docker.sh` use — or `AGENT2SSH_TEST_SSH_PASSWORD` (default
+//! `scripts/e2e-container.sh` use — or `AGENT2SSH_TEST_SSH_PASSWORD` (default
 //! `a2s-fixture`, matching `scripts/sshd-fixture`). Key auth is preferred where
 //! both are available: it keeps the encrypted credential-store path out of the
-//! suite, for the same reason `scripts/e2e-docker.sh` avoids passwords.
+//! suite, for the same reason `scripts/e2e-container.sh` avoids passwords.
 
 mod common;
 

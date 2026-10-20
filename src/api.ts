@@ -39,9 +39,11 @@ import type {
   RecordingConfig,
   RecordingContent,
   RecordingInfo,
+  ResidentSessionSummary,
   RiskLevel,
   SftpExchangeRequest,
   SftpExchangeResult,
+  KeyAlgorithm,
   SessionInfo,
   Snippet,
   SftpResult,
@@ -56,6 +58,7 @@ import type {
   WebDavSyncStatus,
   WebhookConfig,
   ContainerDiscoveryTarget,
+  ContainerRuntimeInfo,
   FontInfo,
   ShellInfo,
 } from "./types";
@@ -360,8 +363,22 @@ export const api = {
     invoke<RedactRuleInfo[]>("remove_redact_rule", { pattern }),
   resetRedactRules: () => invoke<RedactRuleInfo[]>("reset_redact_rules"),
 
-  // B33: Container Discovery
-  discoverContainers: () => invoke<ContainerDiscoveryTarget[]>("discover_containers"),
+  // B33: Container Discovery. `all` includes stopped containers; `runtime`
+  // narrows discovery to one runtime ("docker" | "wslc" | "apple" | "k8s"),
+  // omitted or "auto" scans every installed one.
+  discoverContainers: (options?: { all?: boolean; runtime?: string }) =>
+    invoke<ContainerDiscoveryTarget[]>("discover_containers", {
+      all: options?.all ?? false,
+      runtime: options?.runtime ?? null,
+    }),
+  // Which container runtimes this build knows about on this host, and which one
+  // auto-detection picked. Readable when nothing is installed, so the UI can
+  // say why the list is empty.
+  containerRuntimes: () => invoke<ContainerRuntimeInfo[]>("container_runtimes"),
+  // Open a discovered target in the user's terminal. The backend re-validates
+  // the argv against the runtimes it resolved itself before spawning anything.
+  launchContainerTarget: (execBinary: string, execArgs: string[]) =>
+    invoke<void>("launch_container_target", { execBinary, execArgs }),
 
   // Font + Shell enumeration
   listFonts: () => invoke<FontInfo[]>("list_fonts"),
@@ -440,6 +457,26 @@ export const api = {
     });
     if (!res.ok) throw new Error(`Failed to list daemon sessions: ${res.status}`);
     return (await res.json()) as DaemonSessionInfo[];
+  },
+
+  // Resident sessions: long-lived shells for local environments, owned by the
+  // daemon. Read-only here plus close — opening and exec'ing is what the
+  // daemon API (and the local-exec surfaces) are for.
+  residentListDaemon: async (): Promise<ResidentSessionSummary[]> => {
+    const token = await invoke<string>("get_daemon_token");
+    const res = await fetch(`${daemonUrl}/resident-sessions`, {
+      headers: { Authorization: `Bearer ${token}`, [TRACE_ID_HEADER]: SESSION_TRACE_ID },
+    });
+    if (!res.ok) throw new Error(`Failed to list resident sessions: ${res.status}`);
+    return (await res.json()) as ResidentSessionSummary[];
+  },
+  residentCloseDaemon: async (id: string): Promise<void> => {
+    const token = await invoke<string>("get_daemon_token");
+    const res = await fetch(`${daemonUrl}/resident-sessions/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${token}`, [TRACE_ID_HEADER]: SESSION_TRACE_ID },
+    });
+    if (!res.ok) throw new Error(`Failed to close resident session: ${res.status}`);
   },
   terminalBroadcastPreview: async (
     request: TerminalBroadcastRequest
@@ -531,8 +568,15 @@ export const api = {
 
   // SSH Keys
   listKeys: () => invoke<SshKeyInfo[]>("list_keys"),
-  generateKey: (name: string, comment?: string) =>
-    invoke<SshKeyInfo>("generate_key", { name, comment: comment ?? null }),
+  // The algorithm this build can actually authenticate with, so the form can
+  // preselect it instead of guessing from the host OS.
+  defaultKeyAlgorithm: () => invoke<KeyAlgorithm>("default_key_algorithm"),
+  generateKey: (name: string, comment?: string, algorithm?: KeyAlgorithm) =>
+    invoke<SshKeyInfo>("generate_key", {
+      name,
+      comment: comment ?? null,
+      algorithm: algorithm ?? null,
+    }),
   importKey: (sourcePath: string, name?: string) =>
     invoke<SshKeyInfo>("import_key", { sourcePath, name: name ?? null }),
   deleteKey: (name: string) => invoke<void>("delete_key", { name }),
