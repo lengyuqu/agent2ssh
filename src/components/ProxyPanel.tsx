@@ -249,7 +249,7 @@ export default function ProxyPanel({ proxies, hosts, onChanged }: Props) {
               />
             </label>
           </div>
-          <Button variant="secondary" type="submit" className="w-full" disabled={saving}>
+          <Button variant="secondary" type="submit" block disabled={saving}>
             <Save size={16} />
             {saving ? t("Saving...") : editingId ? t("Update proxy") : t("Save proxy")}
           </Button>

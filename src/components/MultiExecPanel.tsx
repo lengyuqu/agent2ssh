@@ -129,7 +129,7 @@ export default function MultiExecPanel({ hosts, onExecComplete }: Props) {
       <Button
         onClick={runMulti}
         disabled={busy || selected.length === 0 || !command.trim()}
-        className="w-full"
+        block
       >
         <Play size={14} />
         {busy

@@ -15,7 +15,10 @@ use crate::{
     path_resolver::expand_tilde,
     sanitize::{analyze_command, split_commands, ShapeRisk},
     session::resolve_host,
-    store::{append_audit, list_audit_raw, load_config, save_config_unlocked, store_write_lock},
+    store::{
+        append_audit, list_audit_raw, load_config, save_config_unlocked, store_write_lock,
+        write_private_text,
+    },
     types::{
         default_host_group, source_from_env, AuditEntry, AuditFilter, BatchStrategy,
         ExecMultiBatchResult, ExecMultiResult, ExecRequest, ExecResult, HostFilter, HostGroup,
@@ -429,11 +432,25 @@ pub fn list_audit_core(filter: AuditFilter) -> Result<Vec<AuditEntry>> {
 }
 
 pub fn classify_risk(command: &str) -> RiskLevel {
+    classify_risk_at_depth(command, 0)
+}
+
+/// `depth` counts how many `sh -c` / `eval` / `find -exec` layers were unwrapped
+/// to reach `command`; `risk_extra` fails closed past `MAX_DEPTH`.
+fn classify_risk_at_depth(command: &str, depth: usize) -> RiskLevel {
     // First pass: whole-command analysis. This must run before chain
     // splitting so whole-command substring patterns that span segments
     // (fork bombs like `:(){ :|:& };:`, mkfs, ...) cannot evade by being
     // split apart.
     let base = classify_risk_single(command);
+
+    // Token-level pass: option spellings, quoting and wrapped commands that the
+    // substring rules above cannot see. It only ever escalates.
+    let base = base.max_severity(crate::risk_extra::classify_extra(
+        command,
+        depth,
+        &classify_risk_at_depth,
+    ));
 
     // Chain bypass fix: a chained command (`echo hi && rm -rf /`) hides
     // destructive segments from single-head analysis. Re-evaluate each
@@ -442,7 +459,7 @@ pub fn classify_risk(command: &str) -> RiskLevel {
     if segments.len() > 1 {
         let chained = segments
             .into_iter()
-            .map(|seg| classify_risk(&seg))
+            .map(|seg| classify_risk_single(&seg))
             .fold(RiskLevel::Low, RiskLevel::max_severity);
         return base.max_severity(chained);
     }
@@ -3092,7 +3109,7 @@ pub fn export_to_ssh_config(
         let content = export_to_ssh_config_format(&filtered);
         let count = filtered.len();
         let out_path = resolve_ssh_export_path(path)?;
-        std::fs::write(&out_path, &content)
+        write_private_text(&out_path, &content)
             .with_context(|| format!("failed to write {}", out_path.display()))?;
         return Ok((out_path.display().to_string(), count));
     }
@@ -3100,9 +3117,43 @@ pub fn export_to_ssh_config(
     let content = export_to_ssh_config_format(&config.hosts);
     let count = config.hosts.len();
     let out_path = resolve_ssh_export_path(path)?;
-    std::fs::write(&out_path, &content)
+    write_private_text(&out_path, &content)
         .with_context(|| format!("failed to write {}", out_path.display()))?;
     Ok((out_path.display().to_string(), count))
+}
+
+/// Validate a user-supplied MCP export destination.
+///
+/// The CLI intentionally accepts an explicit path because it is an interactive
+/// local command. MCP calls may be initiated by an agent, so keep that surface
+/// inside the user's SSH include directory and reject symlink destinations.
+pub fn validate_mcp_ssh_export_path(path: Option<&str>) -> Result<()> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    let home = dirs::home_dir().ok_or_else(|| anyhow!("cannot locate home directory"))?;
+    let allowed_dir = home.join(".ssh").join("config.d");
+    let requested: PathBuf = expand_tilde(path).into();
+
+    if requested.parent() != Some(allowed_dir.as_path()) {
+        return Err(anyhow!(
+            "MCP SSH export path must be directly inside {}",
+            allowed_dir.display()
+        ));
+    }
+    if std::fs::symlink_metadata(&allowed_dir)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err(anyhow!("MCP SSH export directory must not be a symlink"));
+    }
+    if std::fs::symlink_metadata(&requested)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err(anyhow!("MCP SSH export destination must not be a symlink"));
+    }
+    Ok(())
 }
 
 fn resolve_ssh_export_path(path: Option<&str>) -> Result<std::path::PathBuf> {
@@ -4378,6 +4429,14 @@ mod tests {
         assert_eq!(s.conflict_resolution, "keep_agent2ssh");
         assert!(s.export_missing);
         assert!(s.import_missing);
+    }
+
+    #[test]
+    fn mcp_ssh_export_path_is_confined_to_ssh_config_directory() {
+        assert!(validate_mcp_ssh_export_path(Some("/tmp/agent2ssh-export")).is_err());
+        assert!(validate_mcp_ssh_export_path(Some("relative/config")).is_err());
+        assert!(validate_mcp_ssh_export_path(Some("~/.ssh/config.d/agent2ssh-test.conf")).is_ok());
+        assert!(validate_mcp_ssh_export_path(None).is_ok());
     }
 
     #[test]

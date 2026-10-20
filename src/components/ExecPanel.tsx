@@ -196,7 +196,7 @@ export default function ExecPanel({ hosts, initialHost = "", onExecComplete }: P
         <ShieldAlert size={14} />
         {t("Force (allow high-risk commands)")}
       </label>
-      <Button onClick={handleRun} disabled={busy || !targetHost} className="w-full">
+      <Button onClick={handleRun} disabled={busy || !targetHost} block>
         <Play size={16} />
         {busy ? t("Running") : t("Run over SSH")}
       </Button>

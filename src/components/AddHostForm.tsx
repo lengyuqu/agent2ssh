@@ -363,7 +363,7 @@ export default function AddHostForm({
             ))}
           </Select>
         </label>
-        <Button variant="secondary" type="submit" className="w-full" disabled={saving}>
+        <Button variant="secondary" type="submit" block disabled={saving}>
           <FileKey size={16} />
           {saving ? t("Saving...") : isEditing ? t("Update host") : t("Save host")}
         </Button>

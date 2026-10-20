@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use tokio::task::JoinSet;
 
 use crate::embedded_ssh::run_command_capture;
-use crate::store::{config_dir, load_config};
+use crate::store::{config_dir, load_config, write_private_json};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostHealthSnapshot {
@@ -159,9 +159,7 @@ pub async fn collect_health_snapshot(
     // Persist to disk
     if let Ok(path) = config_dir() {
         let snapshot_path = path.join("health_snapshot.json");
-        if let Ok(json) = serde_json::to_string_pretty(&snapshot) {
-            let _ = std::fs::write(&snapshot_path, json);
-        }
+        let _ = write_private_json(&snapshot_path, &snapshot);
     }
 
     snapshot

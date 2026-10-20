@@ -854,7 +854,7 @@ fn tool_definitions() -> Vec<Value> {
                 },
                 {
                     "name": "ssh_sync_export",
-                    "description": "Export Agent2SSH hosts to SSH config format file.",
+                    "description": "Export Agent2SSH hosts to an SSH config file. MCP exports with an explicit path are restricted to ~/.ssh/config.d/; omit path to use the default file.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {

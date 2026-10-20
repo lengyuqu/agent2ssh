@@ -5,6 +5,8 @@
 //! exercising clap argument parsing end-to-end without requiring any SSH
 //! connectivity.
 
+mod common;
+
 use agent2ssh::store::CONFIG_DIR_ENV;
 
 /// Path to the CLI binary, resolved at compile time by cargo.

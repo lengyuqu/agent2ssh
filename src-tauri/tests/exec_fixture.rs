@@ -28,6 +28,8 @@
 //! both are available: it keeps the encrypted credential-store path out of the
 //! suite, for the same reason `scripts/e2e-docker.sh` avoids passwords.
 
+mod common;
+
 use agent2ssh::store::CONFIG_DIR_ENV;
 
 use std::path::PathBuf;
@@ -110,7 +112,7 @@ fn isolated_config(fixture: &Fixture, label: &str) -> PathBuf {
 }
 
 fn release_config(dir: PathBuf) {
-    std::env::remove_var(CONFIG_DIR_ENV);
+    common::restore_default_config_env();
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -288,6 +290,7 @@ async fn timeout_is_recorded_in_the_audit_log() {
         host_env: None,
         host_role: None,
         host_owner: None,
+        host_scope: None,
     })
     .expect("audit log must be readable");
 

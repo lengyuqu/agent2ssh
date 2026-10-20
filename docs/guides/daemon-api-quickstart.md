@@ -47,6 +47,12 @@ denied_commands = ["rm *", "sudo *"]
 
 客户端仍然使用同一个 `Authorization: Bearer <token>` 请求头。scope 会在审批前执行，拒绝项不会进入审批队列。
 
+Scoped token 只适用于按主机绑定的 ping、执行、SFTP、session、forward、connection
+和 playbook 操作；主机、审计、健康、连接、session、forward、approval 列表会按
+allowed hosts/tags 过滤。修改 gate、主机、策略、脱敏/高亮、算法、审批、webhook、
+团队配置、健康快照或 SSH 配置导出等全局控制面能力，以及读取审计导出、趋势、
+事件流、待处理 OTP prompt、SSH sync diff 时，必须使用 unrestricted admin token。
+
 ---
 
 ## 端点总览

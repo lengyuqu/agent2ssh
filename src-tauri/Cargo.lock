@@ -92,6 +92,7 @@ dependencies = [
  "chrono",
  "clap",
  "clap_complete",
+ "ctor",
  "dirs 5.0.1",
  "fontdb",
  "fs2",

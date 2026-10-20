@@ -12,6 +12,8 @@ use agent2ssh::approval::{cleanup_expired_approvals, load_persisted_approval_sto
 use agent2ssh::store::{lock_config_file, lock_config_file_shared, CONFIG_DIR_ENV};
 use std::time::Duration;
 
+mod common;
+
 fn entry(age_days: i64, status: &str) -> String {
     serde_json::json!({
         "id": uuid::Uuid::new_v4(),
@@ -79,5 +81,6 @@ fn load_is_read_only_and_cleanup_compacts() {
     let after = std::fs::read_to_string(&path).unwrap();
     assert_eq!(after.lines().count(), 1, "unexpected store: {after}");
 
+    common::restore_default_config_env();
     let _ = std::fs::remove_dir_all(&dir);
 }

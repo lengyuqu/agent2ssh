@@ -238,6 +238,66 @@ pub fn ensure_config_dir() -> Result<()> {
     fs::create_dir_all(config_dir()?).context("failed to create ~/.agent2ssh")
 }
 
+/// Write sensitive bytes with owner-only permissions and crash-safe replacement.
+///
+/// The temporary file is created beside the destination, flushed before the
+/// rename, and removed when the operation fails. Readers therefore see either
+/// the previous complete file or the new complete file, never a truncated
+/// intermediate value. Replacing a destination also removes an existing
+/// symlink instead of following it.
+pub fn write_private_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file".to_string());
+    let tmp_path = path.with_file_name(format!(
+        ".{file_name}.tmp-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+
+    let result = (|| -> Result<()> {
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&tmp_path)
+            .with_context(|| format!("failed to open temp file {}", tmp_path.display()))?;
+        file.write_all(bytes)
+            .with_context(|| format!("failed to write temp file {}", tmp_path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("failed to sync temp file {}", tmp_path.display()))?;
+        drop(file);
+        restrict_file_to_owner(&tmp_path)?;
+        fs::rename(&tmp_path, path)
+            .with_context(|| format!("failed to replace {}", path.display()))?;
+        restrict_file_to_owner(path)?;
+
+        // Best-effort directory fsync makes the rename durable across power
+        // loss on platforms that support syncing directories.
+        if let Some(parent) = path.parent() {
+            if let Ok(dir) = File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp_path);
+    }
+    result
+}
+
+/// Write sensitive UTF-8 text using [`write_private_bytes`].
+pub fn write_private_text(path: &Path, text: &str) -> Result<()> {
+    write_private_bytes(path, text.as_bytes())
+}
+
 /// Write a small config-adjacent JSON file with the owner-only permissions every
 /// other file under `~/.agent2ssh/` already gets.
 ///
@@ -253,13 +313,8 @@ pub fn ensure_config_dir() -> Result<()> {
 /// concerns for `hosts.json`, where several processes may write and a recoverable
 /// previous version matters; a rule file is written by one user action at a time.
 pub fn write_private_json<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
     let json = serde_json::to_string_pretty(value)?;
-    fs::write(path, json).with_context(|| format!("failed to write {}", path.display()))?;
-    restrict_file_to_owner(path)
+    write_private_text(path, &json)
 }
 
 /// Restrict a sensitive file (tokens, keys, host config) to owner-only access.
@@ -971,6 +1026,7 @@ pub fn compute_metrics_trend(period: TrendPeriod) -> Result<MetricsTrend> {
         host_env: None,
         host_role: None,
         host_owner: None,
+        host_scope: None,
     };
 
     let entries = list_audit_raw(&filter)?;
@@ -1071,8 +1127,9 @@ pub fn redact_sensitive_text(input: &str) -> String {
     // the text (e.g. `echo '<REDACTED:ip> 10.0.0.1'` must still redact the IP).
 
     // First pass: the rule set from `redact_rules.json`, seeded from
-    // `redaction::default_rules()` (IP, API keys, JWT, hex blobs) and falling
-    // back to it whenever the file is missing or malformed.
+    // `redaction::default_rules()` (IP, API keys, JWT, hex blobs). If that
+    // file is missing or malformed, the redaction module returns a fixed safe
+    // marker instead of allowing the input through without custom rules.
     //
     // This reads the file rather than calling `redact_default` directly, which
     // is what makes the rule set user-editable at all: the file is the source
@@ -1269,6 +1326,14 @@ pub fn list_audit_raw(filter: &AuditFilter) -> Result<Vec<AuditEntry>> {
     let search_lower = filter.search.as_deref().map(|s| s.to_lowercase());
 
     let matches = |e: &AuditEntry| -> bool {
+        if let Some(host_scope) = &filter.host_scope {
+            if !host_scope
+                .iter()
+                .any(|host| host.eq_ignore_ascii_case(&e.host))
+            {
+                return false;
+            }
+        }
         if let Some(h) = &filter.host {
             if !e.host.eq_ignore_ascii_case(h) {
                 return false;
@@ -1527,6 +1592,36 @@ mod tests {
 
         assert_eq!(mode, 0o600);
         assert_eq!(written, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_write_private_text_replaces_atomically_and_cleans_temp_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("agent2ssh-wpt-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("config.toml");
+
+        write_private_text(&path, "first\n").unwrap();
+        write_private_text(&path, "second\n").unwrap();
+
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        let content = fs::read_to_string(&path).unwrap();
+        let temp_files = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".config.toml.tmp-")
+            })
+            .count();
+        let _ = fs::remove_dir_all(&dir);
+
+        assert_eq!(mode, 0o600);
+        assert_eq!(content, "second\n");
+        assert_eq!(temp_files, 0);
     }
 
     #[test]
@@ -2116,6 +2211,16 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(windowed, vec!["cmd 4999", "cmd 4998", "cmd 4997"]);
+
+        // A daemon scope must be applied during the reverse scan, before the
+        // result limit, or a burst of entries for another host could hide the
+        // scoped host's older entries.
+        let scoped = commands(&AuditFilter {
+            host_scope: Some(vec!["beta".into()]),
+            limit: 2,
+            ..Default::default()
+        });
+        assert_eq!(scoped, vec!["cmd 4999", "cmd 4997"]);
 
         std::env::remove_var(CONFIG_DIR_ENV);
         let _ = std::fs::remove_dir_all(&dir);

@@ -67,7 +67,7 @@ the `mcp_tools_match_skills_md_documentation` integration test.
 | 55 | `ssh_metrics_trend` | Show execution metrics trends: volume, failure rate, risk distribution, top hosts, hourly breakdown. Supports `24h` / `7d` / `30d` / `all` period selection. |
 | 56 | `ssh_events_subscribe` | Subscribe to the real-time event stream. Returns the latest events from the event bus. For continuous streaming, use the daemon's SSE endpoint `GET /events/stream`. |
 | 57 | `ssh_sync_diff` | Compare Agent2SSH hosts with `~/.ssh/config`. Shows hosts only on one side and conflicts. |
-| 58 | `ssh_sync_export` | Export Agent2SSH hosts to SSH config format file (default `~/.ssh/config.d/agent2ssh.conf`). |
+| 58 | `ssh_sync_export` | Export Agent2SSH hosts to SSH config format file (default `~/.ssh/config.d/agent2ssh.conf`). MCP explicit paths must stay directly inside `~/.ssh/config.d/`. |
 | 59 | `ssh_redact_rule_list` | List the sensitive-data redaction rules this instance applies before it writes an audit record, webhook notification, playbook result or diagnostic export. Each rule is marked when it is one of the built-in defaults. Read-only. |
 | 60 | `ssh_redact_rule_add` | Add a redaction rule. A rule's pattern is its identity, so adding a pattern that is already present fails instead of overwriting it, and an invalid regex is rejected before anything is written. The replacement is literal. |
 | 61 | `ssh_redact_rule_update` | Replace the redaction rule identified by `pattern`. Omit `new_pattern` to keep the current pattern, which is the usual case of changing only the replacement. |

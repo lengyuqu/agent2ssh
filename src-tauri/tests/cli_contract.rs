@@ -8,6 +8,8 @@
 //! Mirrors rssh's `tests/cli_contract.rs` pattern, adapted to agent2ssh's
 //! command structure.
 
+mod common;
+
 use agent2ssh::store::CONFIG_DIR_ENV;
 
 /// Path to the CLI binary, resolved at compile time by cargo.

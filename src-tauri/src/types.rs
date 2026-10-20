@@ -321,6 +321,11 @@ pub struct AuditFilter {
     /// Host group: filter by owner label
     #[serde(default)]
     pub host_owner: Option<String>,
+    /// Internal daemon authorization boundary. This is not part of the wire
+    /// filter; the daemon fills it before reading so scope filtering happens
+    /// before the result limit is applied.
+    #[serde(skip)]
+    pub host_scope: Option<Vec<String>>,
 }
 
 fn default_audit_limit() -> usize {

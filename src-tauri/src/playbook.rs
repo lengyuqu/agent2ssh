@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use crate::{
     core::exec_ssh_core_with_risk_override,
-    store::config_dir,
+    store::{config_dir, write_private_text},
     types::{source_from_env, ExecRequest, ExecResult, RiskLevel},
 };
 
@@ -116,7 +116,7 @@ fn save_playbooks(playbooks: &[Playbook]) -> Result<()> {
     let raw = toml::to_string_pretty(&PlaybookFile {
         playbooks: playbooks.to_vec(),
     })?;
-    std::fs::write(&path, raw).map_err(|e| anyhow!("failed to write {}: {e}", path.display()))
+    write_private_text(&path, &raw).map_err(|e| anyhow!("failed to write {}: {e}", path.display()))
 }
 
 fn normalize_playbook(mut playbook: Playbook) -> Result<Playbook> {

@@ -293,6 +293,13 @@ The daemon authenticates requests using a Bearer token stored at `~/.agent2ssh/d
 
 For least-privilege daemon clients, add scoped tokens in `~/.agent2ssh/daemon_tokens.toml`. The legacy `daemon.token` remains the unrestricted local admin token.
 
+Scoped tokens are limited to host-bound ping, execution, SFTP, session, forwarding,
+connection, and playbook authorization. Host lists, audit entries, health
+snapshots, connections, sessions, forwards, and approvals are filtered by the
+token's allowed hosts/tags. Global or sensitive surfaces such as audit export,
+metrics trends, event streams, pending OTP prompts, SSH sync diff, and local
+configuration mutations require the unrestricted admin token.
+
 ```toml
 [[tokens]]
 name = "prod-readonly"

@@ -566,6 +566,7 @@ paths:
   /ping:
     post:
       summary: Check host reachability
+      description: Applies bearer-token host/tag/command scope before probing; scoped tokens can only ping hosts allowed by their scope.
       requestBody:
         required: true
         content:
@@ -583,6 +584,11 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/PingResult" }
+        "403":
+          description: Scoped token does not allow one of the requested hosts or the ping operation
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /exec:
     post:
@@ -760,7 +766,8 @@ paths:
         Upgrade to WebSocket and attach to an embedded-SSH interactive PTY.
         Query parameters are `host` and `token`; the token is passed in the
         query string because browser WebSocket handshakes cannot set an
-        Authorization header. The server first sends a JSON text frame:
+        Authorization header. This route and `/exec/stream` are the only ones
+        that accept `?token=`; every other route requires `Authorization: Bearer`. The server first sends a JSON text frame:
         {"type":"connected","host":"...","address":"...","username":"...","fingerprint_sha256":"SHA256:...","host_key_algorithm":"...","server_banner":"..."}.
         Terminal input/output then streams as binary frames. Resize control is
         sent as a JSON text frame: {"type":"resize","cols":120,"rows":36}.
@@ -1975,7 +1982,7 @@ paths:
   /exec/preview:
     post:
       summary: Preview effective risk and approval requirements without executing
-      description: Returns the execution plan (per-target effective risk, overall risk, approval requirement, warnings) for a single host or a multi-host/tag selection.
+      description: Returns the execution plan (per-target effective risk, overall risk, approval requirement, warnings) for a single host or a multi-host/tag selection. Applies bearer-token host/tag/command scope before generating the plan.
       requestBody:
         required: true
         content:
@@ -2018,6 +2025,11 @@ paths:
                     items: { type: string }
         "400":
           description: Missing host/hosts, unknown target, or an empty multi-host/tag selection
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Scoped token does not allow one of the requested targets or the command
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
