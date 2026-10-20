@@ -53,6 +53,22 @@ fn audit_write_lock() -> Result<FileLockGuard> {
 /// the CLI/MCP/daemon/desktop processes, so concurrent writers cannot interleave
 /// or race a rotation.
 pub fn lock_config_file(name: &str) -> Result<FileLockGuard> {
+    let (file, path) = open_lock_file(name)?;
+    file.lock_exclusive()
+        .with_context(|| format!("failed to lock {}", path.display()))?;
+    Ok(FileLockGuard { _file: file })
+}
+
+/// Shared (reader) variant of [`lock_config_file`]: many holders at once, but
+/// excluded while a writer holds the exclusive lock on the same file.
+pub fn lock_config_file_shared(name: &str) -> Result<FileLockGuard> {
+    let (file, path) = open_lock_file(name)?;
+    file.lock_shared()
+        .with_context(|| format!("failed to lock {}", path.display()))?;
+    Ok(FileLockGuard { _file: file })
+}
+
+fn open_lock_file(name: &str) -> Result<(File, PathBuf)> {
     ensure_config_dir()?;
     let path = config_dir()?.join(name);
     let file = OpenOptions::new()
@@ -63,9 +79,7 @@ pub fn lock_config_file(name: &str) -> Result<FileLockGuard> {
         .open(&path)
         .with_context(|| format!("failed to open lock file {}", path.display()))?;
     restrict_file_to_owner(&path)?;
-    file.lock_exclusive()
-        .with_context(|| format!("failed to lock {}", path.display()))?;
-    Ok(FileLockGuard { _file: file })
+    Ok((file, path))
 }
 
 /// Environment variable that overrides the configuration directory.

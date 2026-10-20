@@ -1,11 +1,10 @@
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, path::PathBuf, sync::OnceLock};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use crate::app_state::app_state;
 use crate::store::glob_match;
 use crate::types::RiskLevel;
 
@@ -102,8 +101,24 @@ pub struct ApprovalStore {
     pub requests: HashMap<Uuid, ApprovalRequest>,
 }
 
+/// The in-memory approval store, loaded from disk on first use.
+///
+/// Deliberately **not** a field of `AppState`: loading takes the cross-process
+/// `.approvals.lock` flock and may log through diagnostics, and `AppState::new`
+/// runs inside the `APP_STATE` `OnceLock` initialiser. Doing both there meant a
+/// diagnostic line called `app_state()` re-entrantly and hung the process (and
+/// every other process queued on the flock). Here the init closure only ever
+/// needs `app_state()` after it is fully built, and commands that never touch
+/// approvals (`risk`, `ping`, `--help`) skip the disk read altogether.
 fn store() -> &'static Mutex<ApprovalStore> {
-    &app_state().approvals
+    static STORE: OnceLock<Mutex<ApprovalStore>> = OnceLock::new();
+    STORE.get_or_init(|| {
+        Mutex::new(
+            load_persisted_approval_store().unwrap_or_else(|_| ApprovalStore {
+                requests: HashMap::new(),
+            }),
+        )
+    })
 }
 
 /// Whether approval state is persisted to `approvals.json` and shared across
@@ -146,6 +161,12 @@ fn approval_file_lock() -> Result<crate::store::FileLockGuard> {
     crate::store::lock_config_file(".approvals.lock")
 }
 
+/// Shared counterpart of [`approval_file_lock`] for readers: any number of
+/// processes can load concurrently, while writers still get exclusivity.
+fn approval_file_lock_shared() -> Result<crate::store::FileLockGuard> {
+    crate::store::lock_config_file_shared(".approvals.lock")
+}
+
 /// Maximum age (in days) of approval records kept on disk. Entries older than
 /// this are removed during `cleanup_expired_approvals` (called at startup and
 /// periodically by the daemon). Tune via `AGENT2SSH_APPROVAL_RETENTION_DAYS`.
@@ -164,27 +185,30 @@ fn approval_retention_days() -> i64 {
 /// so an append of a status update naturally supersedes the original request.
 ///
 /// Also runs a one-time migration from the legacy `approvals.json` array
-/// format if it exists, and cleans up entries older than the retention window.
+/// format if it exists, and ignores entries older than the retention window.
 pub fn load_persisted_approval_store() -> Result<ApprovalStore> {
+    if !approval_persistence_enabled() {
+        return Ok(ApprovalStore {
+            requests: HashMap::new(),
+        });
+    }
     let mut logs = Vec::new();
-    let result = load_persisted_approval_store_deferred(&mut logs);
-    // The file lock was released when the loader returned, so emitting here
-    // cannot invert the lock order.
+    let result = load_approvals_from_disk(&mut logs);
+    // Both file locks are released by now; diagnostics take their own locks
+    // and must not nest inside the approval flock.
     flush_deferred_logs(logs);
     result
 }
 
-/// A diagnostic line the loader wants to emit but must not write immediately.
-pub struct DeferredLog {
+/// A diagnostic line collected while a file lock is held, written once it is
+/// released.
+struct DeferredLog {
     level: &'static str,
     message: &'static str,
     fields: Option<serde_json::Value>,
 }
 
-/// Emit loader diagnostics. Only call with no approval file lock held and with
-/// `AppState` fully initialised: `append_diagnostic_log_no_sink` reaches for
-/// `app_state()`.
-pub(crate) fn flush_deferred_logs(logs: Vec<DeferredLog>) {
+fn flush_deferred_logs(logs: Vec<DeferredLog>) {
     for log in logs {
         let _ = crate::diagnostics::append_diagnostic_log_no_sink(
             log.level,
@@ -195,29 +219,22 @@ pub(crate) fn flush_deferred_logs(logs: Vec<DeferredLog>) {
     }
 }
 
-/// Same as [`load_persisted_approval_store`] but collects diagnostics into
-/// `logs` instead of writing them.
-///
-/// `AppState::new` calls this from inside the `APP_STATE` `OnceLock`
-/// initialiser, and the body holds the cross-process `.approvals.lock` flock.
-/// Writing a diagnostic there calls `app_state()` again, which blocks on the
-/// initialiser still running on the same thread — and every other process or
-/// thread that then wants the flock queues behind it. Callers flush `logs`
-/// after init has finished and the lock is gone.
-pub(crate) fn load_persisted_approval_store_deferred(
-    logs: &mut Vec<DeferredLog>,
-) -> Result<ApprovalStore> {
-    if !approval_persistence_enabled() {
-        return Ok(ApprovalStore {
-            requests: HashMap::new(),
-        });
-    }
-    let _guard = approval_file_lock()?;
+/// Read-only apart from the one-time legacy migration: expired entries are
+/// filtered out in memory, but never rewritten to disk here. Compaction is the
+/// job of [`cleanup_expired_approvals`] (daemon, hourly), so a one-shot CLI
+/// command cannot truncate the shared store as a side effect of reading it, and
+/// readers only need a shared lock.
+fn load_approvals_from_disk(logs: &mut Vec<DeferredLog>) -> Result<ApprovalStore> {
     crate::store::ensure_config_dir()?;
 
-    // One-time migration from legacy JSON-array format.
-    migrate_legacy_approvals_unlocked(logs)?;
+    // One-time migration from legacy JSON-array format needs the exclusive
+    // lock; it is skipped entirely (no lock taken) once migrated.
+    if legacy_approval_store_path()?.exists() {
+        let _guard = approval_file_lock()?;
+        migrate_legacy_approvals_unlocked(logs)?;
+    }
 
+    let _guard = approval_file_lock_shared()?;
     let path = approval_store_path()?;
     if !path.exists() {
         return Ok(ApprovalStore {
@@ -250,27 +267,8 @@ pub(crate) fn load_persisted_approval_store_deferred(
         }
     }
 
-    // Drop entries beyond the retention window so the file doesn't grow
-    // unboundedly across months of daemon uptime. We do this in-memory after
-    // loading; the next `append_approval` of any entry will trigger a
-    // compaction that rewrites the file without the dropped entries.
-    let retention_days = approval_retention_days();
-    let cutoff = Utc::now() - chrono::Duration::days(retention_days);
-    let before = requests.len();
+    let cutoff = Utc::now() - chrono::Duration::days(approval_retention_days());
     requests.retain(|_, req| req.requested_at > cutoff);
-    let dropped = before - requests.len();
-    if dropped > 0 {
-        logs.push(DeferredLog {
-            level: "info",
-            message: "dropped expired approval entries during load",
-            fields: Some(
-                serde_json::json!({ "dropped": dropped, "retention_days": retention_days }),
-            ),
-        });
-        // Rewrite the file without the expired entries. Best-effort — if it
-        // fails, we'll just reload them next time, which is fine.
-        let _ = compact_approvals_unlocked(&requests);
-    }
 
     Ok(ApprovalStore { requests })
 }
@@ -315,9 +313,8 @@ fn migrate_legacy_approvals_unlocked(logs: &mut Vec<DeferredLog>) -> Result<()> 
     Ok(())
 }
 
-/// Rewrite the JSONL file from scratch from the given entries. Used by
-/// `load_persisted_approval_store` after dropping expired entries, and by
-/// `cleanup_expired_approvals`. The caller must hold `approval_file_lock`.
+/// Rewrite the JSONL file from scratch from the given entries. Used by the
+/// legacy migration and by `cleanup_expired_approvals`. The caller must hold `approval_file_lock`.
 fn compact_approvals_unlocked(requests: &HashMap<Uuid, ApprovalRequest>) -> Result<()> {
     let path = approval_store_path()?;
     let mut entries: Vec<&ApprovalRequest> = requests.values().collect();
