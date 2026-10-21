@@ -49,12 +49,28 @@
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::path_resolver::resolve_executable_in;
 
 /// Environment variable that pins the container runtime by id, for hosts where
 /// auto-detection would pick the wrong one.
 pub const RUNTIME_ENV: &str = "AGENT2SSH_CONTAINER_RUNTIME";
+
+/// When set to a truthy value (`1`, `true`, `yes`, `on`), discovery starts a
+/// stopped runtime service itself instead of reporting that it is stopped.
+/// Off by default: starting a system service is a side effect a listing
+/// command should not have unasked. `agent2ssh containers start` is the
+/// explicit way.
+pub const AUTOSTART_ENV: &str = "AGENT2SSH_CONTAINER_AUTOSTART";
+
+/// How long a service status probe may take before the service counts as
+/// unresponsive. Apple's answers in well under 100 ms when it is up.
+const SERVICE_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long `start` waits for the service to come up.
+const SERVICE_START_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The shell used for `exec` targets. Every runtime here is a Linux container
 /// runtime, so `sh` is the portable choice.
@@ -227,12 +243,149 @@ impl ContainerRuntime {
         vec!["rm".into(), "-f".into(), container_id.into()]
     }
 
+    /// Arguments that ask a runtime's background service whether it is up, for
+    /// the runtimes that have one. Apple's `container` is a CLI over an
+    /// `apiserver` that must be started first (`container system start`); every
+    /// command, `list` included, fails while it is down. Docker and wslc manage
+    /// their daemon through their own desktop tooling and are not probed here.
+    const fn service_status_args(self) -> Option<&'static [&'static str]> {
+        match self {
+            Self::Apple => Some(&["system", "status"]),
+            Self::Docker | Self::Wslc => None,
+        }
+    }
+
+    /// Arguments that start the service, for the runtimes that have one.
+    const fn service_start_args(self) -> Option<&'static [&'static str]> {
+        match self {
+            Self::Apple => Some(&["system", "start"]),
+            Self::Docker | Self::Wslc => None,
+        }
+    }
+
+    /// The command a person types to start the service, for hints and the UI.
+    pub fn service_start_command(self) -> Option<String> {
+        let args = self.service_start_args()?;
+        Some(format!(
+            "{} {}",
+            self.binary_candidates()[0],
+            args.join(" ")
+        ))
+    }
+
+    /// Whether the runtime's service answers: `Some(true)` up, `Some(false)`
+    /// down or unresponsive, `None` when the runtime has no service to probe.
+    pub fn service_running(self, binary: &Path) -> Option<bool> {
+        let args = self.service_status_args()?;
+        Some(run_to_exit(binary, args, SERVICE_PROBE_TIMEOUT).is_some_and(|ok| ok))
+    }
+
+    /// Start the runtime's service and wait until it answers. A no-op for
+    /// runtimes without one, and for a service that is already up.
+    pub fn start_service(self, binary: &Path) -> Result<()> {
+        let Some(args) = self.service_start_args() else {
+            return Ok(());
+        };
+        if self.service_running(binary) == Some(true) {
+            return Ok(());
+        }
+        match run_to_exit(binary, args, SERVICE_START_TIMEOUT) {
+            Some(true) => {}
+            Some(false) => {
+                return Err(anyhow!(
+                    "`{}` failed; run it in a terminal to see its output or answer its prompts",
+                    self.service_start_command().unwrap_or_default()
+                ))
+            }
+            None => {
+                return Err(anyhow!(
+                    "`{}` did not finish within {}s",
+                    self.service_start_command().unwrap_or_default(),
+                    SERVICE_START_TIMEOUT.as_secs()
+                ))
+            }
+        }
+        if self.service_running(binary) == Some(true) {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "{} was started but its service is still not responding",
+                self.display_name()
+            ))
+        }
+    }
+
+    /// Fail with an actionable message when the runtime is installed but its
+    /// service is down, optionally starting it first (see [`AUTOSTART_ENV`]).
+    pub fn ensure_ready(self, binary: &Path) -> Result<()> {
+        self.ensure_ready_with(binary, autostart_enabled())
+    }
+
+    fn ensure_ready_with(self, binary: &Path, autostart: bool) -> Result<()> {
+        if self.service_running(binary) != Some(false) {
+            return Ok(());
+        }
+        let start = self.service_start_command().unwrap_or_default();
+        if autostart {
+            return self.start_service(binary).map_err(|e| {
+                anyhow!(
+                    "{} service was not running and could not be started: {e}",
+                    self.display_name()
+                )
+            });
+        }
+        Err(anyhow!(
+            "{} is installed but its service is not running; start it with `{start}` \
+             (or `agent2ssh containers start --runtime {}`, or set {AUTOSTART_ENV}=1 to start it on demand)",
+            self.display_name(),
+            self.id()
+        ))
+    }
+
     /// Prefix of a discovered target's id, e.g. `docker_exec`.
     pub const fn exec_id_prefix(self) -> &'static str {
         match self {
             Self::Docker => "docker_exec",
             Self::Wslc => "wslc_exec",
             Self::Apple => "apple_exec",
+        }
+    }
+}
+
+fn autostart_enabled() -> bool {
+    std::env::var(AUTOSTART_ENV)
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+/// Run `binary args` with no stdin and discarded output. `Some(success)` when
+/// it exited within `timeout`; `None` when it could not be spawned or had to be
+/// killed for running over.
+fn run_to_exit(binary: &Path, args: &[&str], timeout: Duration) -> Option<bool> {
+    let mut child = Command::new(binary)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status.success()),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
         }
     }
 }
@@ -281,6 +434,8 @@ impl ResolvedRuntime {
             available: true,
             selected,
             unsupported_reason: None,
+            service_running: self.runtime.service_running(&self.binary),
+            start_command: self.runtime.service_start_command(),
         }
     }
 }
@@ -302,6 +457,13 @@ pub struct ContainerRuntimeInfo {
     pub selected: bool,
     /// Platform-level explanation when `supported` is false.
     pub unsupported_reason: Option<String>,
+    /// Is the runtime's background service up? `None` when the runtime is not
+    /// installed or has no service to probe (Docker, wslc).
+    #[serde(default)]
+    pub service_running: Option<bool>,
+    /// Command that starts the service, when it has one.
+    #[serde(default)]
+    pub start_command: Option<String>,
 }
 
 /// Every installed runtime, in auto-detection priority order.
@@ -390,6 +552,8 @@ pub fn infos() -> Vec<ContainerRuntimeInfo> {
                 binary: binary.as_ref().map(|path| path.display().to_string()),
                 selected: binary.is_some() && selected == Some(runtime),
                 unsupported_reason: reason.map(|r| r.to_string()),
+                service_running: binary.as_deref().and_then(|b| runtime.service_running(b)),
+                start_command: runtime.service_start_command(),
             }
         })
         .collect()
@@ -622,5 +786,85 @@ mod tests {
         assert!(found.is_some(), "expected to find {name} in {dir:?}");
         assert_eq!(resolve_in_dirs(bare, &[]), None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A stand-in `container` whose service is "up" once `started` exists.
+    #[cfg(unix)]
+    fn fake_apple_cli(dir: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let started = dir.join("started");
+        let script = dir.join("container");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\ncase \"$1 $2\" in\n  \"system status\") [ -e '{0}' ];;\n  \"system start\") touch '{0}';;\n  *) exit 2;;\nesac\n",
+                started.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stopped_service_is_reported_with_the_command_that_starts_it() {
+        let dir = tempfile_dir("svc-stopped");
+        let cli = fake_apple_cli(&dir);
+        assert_eq!(ContainerRuntime::Apple.service_running(&cli), Some(false));
+        let err = ContainerRuntime::Apple
+            .ensure_ready_with(&cli, false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("container system start"), "{err}");
+        assert!(err.contains(AUTOSTART_ENV), "{err}");
+        // Reporting must not start anything.
+        assert!(!dir.join("started").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autostart_and_the_explicit_start_bring_the_service_up() {
+        let dir = tempfile_dir("svc-start");
+        let cli = fake_apple_cli(&dir);
+        ContainerRuntime::Apple
+            .ensure_ready_with(&cli, true)
+            .unwrap();
+        assert_eq!(ContainerRuntime::Apple.service_running(&cli), Some(true));
+        // Idempotent once it is up.
+        ContainerRuntime::Apple.start_service(&cli).unwrap();
+        ContainerRuntime::Apple
+            .ensure_ready_with(&cli, false)
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn runtimes_without_a_service_are_never_probed() {
+        let nowhere = Path::new("/nonexistent/docker");
+        for runtime in [ContainerRuntime::Docker, ContainerRuntime::Wslc] {
+            assert_eq!(runtime.service_running(nowhere), None);
+            assert!(runtime.service_start_command().is_none());
+            runtime.ensure_ready_with(nowhere, false).unwrap();
+        }
+        assert_eq!(
+            ContainerRuntime::Apple.service_start_command().as_deref(),
+            Some("container system start")
+        );
+    }
+
+    #[test]
+    fn a_missing_binary_counts_as_a_service_that_is_not_running() {
+        assert_eq!(
+            ContainerRuntime::Apple.service_running(Path::new("/nonexistent/container")),
+            Some(false)
+        );
+    }
+
+    fn tempfile_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("agent2ssh-{label}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 }

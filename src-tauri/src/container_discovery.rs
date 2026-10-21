@@ -423,6 +423,9 @@ fn discover_local_targets(
     binary: &std::path::Path,
     all: bool,
 ) -> Result<Vec<ContainerDiscoveryTarget>> {
+    // Name a stopped service up front: `list` against a down Apple apiserver
+    // fails with an opaque XPC error that says nothing about `system start`.
+    runtime.ensure_ready(binary)?;
     let args = runtime.list_args(all);
     let raw = run_capture(binary, args).with_context(|| {
         format!(
@@ -1075,7 +1078,12 @@ mod tests {
         // on this host wslc/Apple may legitimately be absent.
         for runtime in ContainerRuntime::ALL {
             let result = discover_containers(false, Some(runtime.id()));
-            if runtime.supported_on_host() && runtime.resolve().is_some() {
+            // An installed runtime whose service is down is reported, not
+            // listed: that depends on the host, so it is not asserted as Ok.
+            let ready = runtime
+                .resolve()
+                .is_some_and(|binary| runtime.service_running(&binary) != Some(false));
+            if runtime.supported_on_host() && ready {
                 assert!(result.is_ok(), "{} should be discoverable", runtime.id());
             } else {
                 assert!(result.is_err(), "{} should report why", runtime.id());

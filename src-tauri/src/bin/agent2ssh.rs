@@ -520,6 +520,12 @@ enum ContainerCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Start a container runtime's background service (Apple: `container system start`)
+    Start {
+        /// Runtime to start: apple (default: the auto-selected runtime that has a service)
+        #[arg(long, value_name = "RUNTIME")]
+        runtime: Option<String>,
+    },
 }
 
 /// A key algorithm the CLI accepts. Deliberately a clap enum rather than a
@@ -3326,6 +3332,25 @@ async fn async_main() -> Result<()> {
                     print_container_targets(&targets);
                 }
             }
+            ContainerCommands::Start { runtime } => {
+                let resolved = match runtime.as_deref() {
+                    Some(id) => agent2ssh::container_runtime::select(Some(id))?,
+                    None => agent2ssh::container_runtime::available()
+                        .into_iter()
+                        .find(|r| r.runtime.service_running(&r.binary).is_some())
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("no installed container runtime has a service to start")
+                        })?,
+                };
+                if resolved.runtime.service_running(&resolved.binary).is_none() {
+                    anyhow::bail!(
+                        "{} has no separate service to start",
+                        resolved.runtime.display_name()
+                    );
+                }
+                resolved.runtime.start_service(&resolved.binary)?;
+                println!("{} service is running", resolved.runtime.display_name());
+            }
             ContainerCommands::Runtime {
                 runtime,
                 binary,
@@ -4986,6 +5011,12 @@ fn print_container_targets(targets: &[agent2ssh::ContainerDiscoveryTarget]) {
     }
     for info in &infos {
         let state = match (&info.binary, &info.unsupported_reason) {
+            (Some(binary), _) if info.service_running == Some(false) => format!(
+                "{binary} — service not running; start it with `{}`",
+                info.start_command
+                    .as_deref()
+                    .unwrap_or("agent2ssh containers start")
+            ),
             (Some(binary), _) => binary.clone(),
             (None, Some(reason)) => format!("unavailable — {reason}"),
             (None, None) => "not installed".to_string(),

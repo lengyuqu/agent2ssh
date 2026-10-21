@@ -648,6 +648,10 @@ export type ContainerRuntimeInfo = {
   available: boolean;
   selected: boolean;
   unsupported_reason: string | null;
+  /** Is the runtime's background service up? null when it has none or is not installed. */
+  service_running?: boolean | null;
+  /** Command that starts the service, when it has one. */
+  start_command?: string | null;
 };
 
 // Rust: font_list.rs — FontInfo
