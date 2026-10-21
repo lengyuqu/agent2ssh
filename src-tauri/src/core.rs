@@ -1874,8 +1874,12 @@ pub async fn sftp_upload_core_with_source(
                 sftp.create(Path::new(&remote_path))
                     .with_context(|| format!("failed to create remote file {remote_path}"))?
             };
-            let copied =
-                crate::sftp_transfer::copy_cancellable(&mut local_file, &mut remote_file, &cancel)?;
+            let copied = crate::sftp_transfer::copy_cancellable_with_chunk(
+                &mut local_file,
+                &mut remote_file,
+                &cancel,
+                crate::sftp_transfer::upload_chunk_for_server(session.banner()),
+            )?;
             Ok(offset + copied)
         })();
         if let Some(id) = &transfer_id {

@@ -265,7 +265,7 @@ fn probe_host_fingerprint(host: &HostProfile, timeout_secs: u64) -> Result<(Stri
     tcp.set_write_timeout(Some(Duration::from_secs(timeout_secs)))?;
     session.set_tcp_stream(tcp);
     crate::ssh_algo::apply_algo_prefs(&session, crate::ssh_algo::load_algo_prefs().as_ref())?;
-    session.handshake()?;
+    handshake_with_hint(&mut session, host)?;
     match session.host_key() {
         Some((_, kind)) => Ok((
             host_key_algorithm(kind).to_string(),
@@ -1332,7 +1332,7 @@ fn connect_embedded_ssh_inner(
     // session the same budget the socket has so blocking calls fail instead.
     session.set_timeout(session_timeout_ms(timeout_secs));
     crate::ssh_algo::apply_algo_prefs(&session, crate::ssh_algo::load_algo_prefs().as_ref())?;
-    session.handshake()?;
+    handshake_with_hint(&mut session, host)?;
 
     let host_address = format_host_port(&host.host, host.port.unwrap_or(22));
     let (host_key_algorithm, host_key_fingerprint) = match session.host_key() {
@@ -1693,6 +1693,25 @@ fn authenticate(
                 return Ok("publickey_file".into());
             }
             Err(e) => {
+                // A server old enough to accept only the SHA-1 `ssh-rsa` signature
+                // (OpenSSH before 7.2, many embedded devices) rejects the
+                // rsa-sha2-* signature libssh2 prefers; the key looks unauthorized
+                // although it is not. Offer the legacy signature once, and only
+                // after the modern ones were refused.
+                if is_publickey_refused(&e)
+                    && retry_with_legacy_rsa_signature(
+                        session,
+                        username,
+                        pubkey,
+                        Path::new(&path),
+                        passphrase.as_deref(),
+                    )
+                {
+                    if let Some(pw) = passphrase {
+                        passphrase_cache_set(&cache_key, &pw);
+                    }
+                    return Ok("publickey_file".into());
+                }
                 passphrase_cache_evict(&cache_key);
                 // If the key is encrypted and no passphrase was provided,
                 // try the host.passphrase directly (first-use cache miss).
@@ -1774,6 +1793,61 @@ fn authenticate(
         "SSH authentication failed for '{}': no key_path, password, ssh-agent identity, or default key (~/.ssh/id_rsa, id_ed25519, id_ecdsa) succeeded",
         host.name
     ))
+}
+
+/// `session.handshake()`, with the one failure that has an actionable cause
+/// spelled out. libssh2 reports "no algorithm both sides support" as
+/// `-5 Unable to exchange encryption keys`, which says nothing about *why*. The
+/// built-in defaults are deliberately modern (see `ssh_algo::safe_defaults`), so
+/// an old server or device that only offers SHA-1 key exchange, CBC ciphers or
+/// SHA-1 MACs lands here, and the way out is a named override.
+fn handshake_with_hint(session: &mut Session, host: &HostProfile) -> Result<()> {
+    session.handshake().map_err(|error| {
+        if matches!(error.code(), ssh2::ErrorCode::Session(-5)) {
+            anyhow!(
+                "SSH key exchange with {} ({}:{}) failed: {error}. No key-exchange, cipher or MAC \
+                 algorithm is common to both sides; the server may only offer legacy algorithms. \
+                 Compare `agent2ssh algo get` with the server's `sshd -T`, and allow what it needs \
+                 with `agent2ssh algo set`.",
+                host.name,
+                host.host,
+                host.port.unwrap_or(22)
+            )
+        } else {
+            error.into()
+        }
+    })
+}
+
+/// libssh2's "the server said no to this key" codes: authentication failed (-18)
+/// and public-key unverified (-19).
+fn is_publickey_refused(error: &ssh2::Error) -> bool {
+    matches!(
+        error.code(),
+        ssh2::ErrorCode::Session(-18) | ssh2::ErrorCode::Session(-19)
+    )
+}
+
+/// Retry public-key authentication with `ssh-rsa` (RSA over SHA-1) as the
+/// signature algorithm. Returns whether it authenticated. Harmless for non-RSA
+/// keys, which ignore the preference.
+fn retry_with_legacy_rsa_signature(
+    session: &Session,
+    username: &str,
+    pubkey: Option<&Path>,
+    private_key: &Path,
+    passphrase: Option<&str>,
+) -> bool {
+    if session
+        .method_pref(ssh2::MethodType::SignAlgo, "ssh-rsa")
+        .is_err()
+    {
+        return false;
+    }
+    session
+        .userauth_pubkey_file(username, pubkey, private_key, passphrase)
+        .is_ok()
+        && session.authenticated()
 }
 
 /// `<key>-cert.pub`, the file name `ssh-keygen -s` writes and OpenSSH looks for.

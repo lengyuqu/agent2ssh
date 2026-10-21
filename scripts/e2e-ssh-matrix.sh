@@ -18,6 +18,15 @@
 #   user certificate             accepted   (OpenSSH only: Dropbear has none)
 #   certificate, wrong principal rejected
 #   certificate, expired         rejected
+#   every key type (ed25519, RSA, ECDSA P-256/384/521, OpenSSH and PEM
+#   containers) as plain key, encrypted key and certificate   accepted
+#   ssh-agent identity           accepted
+#   SFTP upload/download         byte-identical
+#
+# Plus one legacy server (OpenSSH 8.3 limited to SHA-1 key exchange, CBC, HMAC-SHA1,
+# ssh-rsa host keys and ssh-rsa public-key signatures): refused with a pointer to
+# `algo set` by default, usable once the algorithms are allowed explicitly.
+# AGENT2SSH_MATRIX_LEGACY=0 skips it.
 #
 # Servers (AGENT2SSH_MATRIX_SERVERS, space separated):
 #   openssh:<version>   linuxserver/openssh-server pinned to that OpenSSH
@@ -44,13 +53,23 @@ BASE_PORT="${AGENT2SSH_MATRIX_PORT:-22130}"
 USER_NAME=tester
 USER_PASSWORD=s3cret-pw
 KEY_PASSPHRASE=key-pass-phrase
+# label:ssh-keygen arguments. The -pem entries use the traditional PEM container.
+KEYTYPES=(
+  "ed25519:-t ed25519"
+  "rsa3072:-t rsa -b 3072"
+  "rsa3072-pem:-t rsa -b 3072 -m PEM"
+  "ecdsa256:-t ecdsa -b 256"
+  "ecdsa384:-t ecdsa -b 384"
+  "ecdsa521:-t ecdsa -b 521"
+  "ecdsa256-pem:-t ecdsa -b 256 -m PEM"
+)
 
 WORK="$(mktemp -d)"
 export AGENT2SSH_CONFIG_DIR="$WORK/config"
 # Passwords are stored in the app's encrypted store; a fixed master password keeps
 # it unlockable across the separate CLI processes this script spawns.
 export AGENT2SSH_MASTER_PASSWORD="matrix-master-pw"
-mkdir -p "$AGENT2SSH_CONFIG_DIR"
+mkdir -p "$AGENT2SSH_CONFIG_DIR" "$WORK/home"
 
 PASS=0
 FAIL=0
@@ -121,7 +140,24 @@ if [[ "$HAVE_KEYGEN" == 1 ]]; then
   ssh-keygen -q -s "$WORK/ca" -I matrix-ok -n "$USER_NAME" -V +1h "$WORK/cert_ok.pub"
   ssh-keygen -q -s "$WORK/ca" -I matrix-principal -n somebody-else -V +1h "$WORK/cert_principal.pub"
   ssh-keygen -q -s "$WORK/ca" -I matrix-expired -n "$USER_NAME" -V -2h:-1h "$WORK/cert_expired.pub"
-  echo "  keys: app-generated ed25519 x2, encrypted ed25519, CA + 3 certificates"
+  # One plain key, one encrypted key and one certificate-only key per type. The
+  # `-pem` variants write the traditional PEM container instead of OpenSSH's, a
+  # different parser in libssh2 and the only form some backends can read.
+  : > "$WORK/authorized_extra"
+  for spec in "${KEYTYPES[@]}"; do
+    label="${spec%%:*}"; args="${spec#*:}"
+    # shellcheck disable=SC2086
+    ssh-keygen -q $args -N '' -C "matrix-k-$label" -f "$WORK/k_$label"
+    # shellcheck disable=SC2086
+    ssh-keygen -q $args -N "$KEY_PASSPHRASE" -C "matrix-e-$label" -f "$WORK/e_$label"
+    # shellcheck disable=SC2086
+    ssh-keygen -q $args -N '' -C "matrix-c-$label" -f "$WORK/c_$label"
+    ssh-keygen -q -s "$WORK/ca" -I "matrix-c-$label" -n "$USER_NAME" -V +1h "$WORK/c_$label.pub"
+    cat "$WORK/k_$label.pub" "$WORK/e_$label.pub" >> "$WORK/authorized_extra"   # not the c_ keys
+  done
+  AUTHORIZED_EXTRA_B64="$(base64 < "$WORK/authorized_extra" | tr -d '\n')"
+  echo "  keys: app-generated ed25519 x2, encrypted ed25519, CA + 3 certificates,"
+  echo "        and plain/encrypted/certificate keys for: ${KEYTYPES[*]%%:*}"
 else
   echo "  note: no ssh-keygen on this host; encrypted-key and certificate cases will be skipped"
 fi
@@ -130,7 +166,9 @@ fi
 # Does `agent2ssh exec <host>` run a command? 0 = connected and ran it.
 connects() {
   local out
-  out="$("$CLI" exec "$1" 'echo matrix-ok' --json 2>&1)" || return 1
+  # HOME points at an empty directory so the app's fallback to ~/.ssh/id_* cannot
+  # turn a rejection into an acceptance with the developer's own keys.
+  out="$(HOME="$WORK/home" "$CLI" exec "$1" 'echo matrix-ok' --json 2>&1)" || return 1
   [[ "$out" == *matrix-ok* ]]
 }
 
@@ -162,12 +200,12 @@ start_dropbear() { # <port>
   # Alpine's Dropbear. -R generates the host keys on first use, -E logs to stderr.
   "$RT_BIN" run -d --name "$CONTAINER" \
     -e PK="$(cat "$KEY_PLAIN.pub")" -e ENCPK="$([[ "$HAVE_KEYGEN" == 1 ]] && cat "$KEY_ENC.pub")" \
-    -e UN="$USER_NAME" -e UP="$USER_PASSWORD" \
+    -e UN="$USER_NAME" -e UP="$USER_PASSWORD" -e AK64="$AUTHORIZED_EXTRA_B64" \
     -p "$1:2222" alpine:3.20 sh -c '
-      apk add --no-cache dropbear >/dev/null &&
+      apk add --no-cache dropbear openssh-sftp-server >/dev/null &&
       adduser -D -s /bin/sh "$UN" && echo "$UN:$UP" | chpasswd &&
       install -d -m 700 -o "$UN" -g "$UN" /home/$UN/.ssh &&
-      printf "%s\n%s\n" "$PK" "$ENCPK" > /home/$UN/.ssh/authorized_keys &&
+      { printf "%s\n%s\n" "$PK" "$ENCPK"; echo "$AK64" | base64 -d; } > /home/$UN/.ssh/authorized_keys &&
       chown "$UN:$UN" /home/$UN/.ssh/authorized_keys && chmod 600 /home/$UN/.ssh/authorized_keys &&
       exec dropbear -F -E -R -p 2222' >/dev/null
 }
@@ -179,6 +217,14 @@ wait_ready() { # <host-profile>
   done
   return 1
 }
+
+# An agent holding the ed25519 key from the plain set, for the identity case.
+AGENT_OK=0
+if [[ "$HAVE_KEYGEN" == 1 ]] && command -v ssh-agent >/dev/null && command -v ssh-add >/dev/null; then
+  eval "$(ssh-agent -s)" >/dev/null
+  trap 'ssh-agent -k >/dev/null 2>&1; cleanup' EXIT
+  ssh-add -q "$WORK/k_ed25519" 2>/dev/null && AGENT_OK=1
+fi
 
 # ── The matrix ───────────────────────────────────────────────────────────────
 idx=0
@@ -212,7 +258,8 @@ for server in $SERVERS; do
   # sshd with flags and read /etc/ssh/sshd_config, so look for the live file.
   SETUP_OK=1
   if [[ "$HAVE_KEYGEN" == 1 && "$kind" == openssh ]]; then
-    rt_exec sh -c "echo '$(cat "$KEY_ENC.pub")' >> /config/.ssh/authorized_keys" || SETUP_OK=0
+    rt_exec sh -c "echo '$(cat "$KEY_ENC.pub")' >> /config/.ssh/authorized_keys &&
+      echo '$AUTHORIZED_EXTRA_B64' | base64 -d >> /config/.ssh/authorized_keys" || SETUP_OK=0
     rt_exec sh -c "
       cfg=/config/sshd/sshd_config; [ -f \$cfg ] || cfg=/etc/ssh/sshd_config
       echo '$(cat "$WORK/ca.pub")' > /config/ca.pub && chmod 644 /config/ca.pub &&
@@ -259,9 +306,99 @@ for server in $SERVERS; do
     # therefore proves the certificate was presented, not just the key.
   fi
 
+  # ssh-agent: a profile with neither key nor password falls through to the agent.
+  if [[ "$AGENT_OK" == 1 ]]; then
+    add_host "$idx-agent" "$port"
+    expect_accept "$idx-agent" "ssh-agent identity"
+  else
+    skip "ssh-agent identity (no ssh-agent / ssh-keygen)"
+  fi
+
+  # SFTP round trip over the key profile (upload then download, compared).
+  remote_dir=/config; [[ "$kind" == dropbear ]] && remote_dir="/home/$USER_NAME"
+  # 1 MiB: past 128 KiB, where a stall against Dropbear used to show up.
+  head -c 1048576 /dev/urandom > "$WORK/sftp.in"
+  if "$CLI" sftp put "$idx-key" "$WORK/sftp.in" "$remote_dir/sftp.bin" >/dev/null 2>&1 &&
+     "$CLI" sftp get "$idx-key" "$remote_dir/sftp.bin" "$WORK/sftp.out" >/dev/null 2>&1 &&
+     cmp -s "$WORK/sftp.in" "$WORK/sftp.out"; then
+    ok "SFTP upload/download byte-identical"
+  else
+    bad "SFTP upload/download byte-identical"
+  fi
+  rm -f "$WORK/sftp.out"
+
+  # Every key type, as a plain key, an encrypted key and (OpenSSH) a certificate.
+  if [[ "$HAVE_KEYGEN" == 1 ]]; then
+    for spec in "${KEYTYPES[@]}"; do
+      label="${spec%%:*}"
+      add_host "$idx-k-$label" "$port" --key "$WORK/k_$label"
+      expect_accept "$idx-k-$label" "$label key"
+      add_host "$idx-e-$label" "$port" --key "$WORK/e_$label" --passphrase "$KEY_PASSPHRASE"
+      expect_accept "$idx-e-$label" "$label key, encrypted"
+      if [[ "$kind" == openssh ]]; then
+        add_host "$idx-c-$label" "$port" --key "$WORK/c_$label"
+        expect_accept "$idx-c-$label" "$label user certificate"
+      fi
+    done
+  fi
+
   "$RT_BIN" rm -f "$CONTAINER" >/dev/null 2>&1
   CONTAINER=""
 done
+
+# ── Legacy server ────────────────────────────────────────────────────────────
+if [[ "${AGENT2SSH_MATRIX_LEGACY:-1}" == 1 && "$HAVE_KEYGEN" == 1 ]]; then
+  CURRENT="openssh:8.3+legacy"
+  port=$((BASE_PORT + idx)); idx=$((idx + 1))
+  CONTAINER="agent2ssh-matrix-legacy"
+  note "$CURRENT on port $port"
+  "$RT_BIN" rm -f "$CONTAINER" >/dev/null 2>&1
+  if ! start_openssh 8.3 "$port"; then
+    bad "start $CURRENT (image pull or run failed)"
+  else
+    # Wait for sshd without going through the app: the app pins the first host key
+    # it sees, and that must be the legacy RSA one, not the default ed25519.
+    up=0
+    for _ in $(seq 1 60); do
+      rt_exec test -s /config/sshd.pid >/dev/null 2>&1 && { up=1; break; }
+      sleep 2
+    done
+    rt_exec sh -c "
+      echo '$AUTHORIZED_EXTRA_B64' | base64 -d >> /config/.ssh/authorized_keys
+      cfg=/config/sshd/sshd_config; [ -f \$cfg ] || cfg=/etc/ssh/sshd_config
+      {
+        echo 'HostKey /config/ssh_host_keys/ssh_host_rsa_key'
+        echo 'HostKeyAlgorithms ssh-rsa'
+        echo 'KexAlgorithms diffie-hellman-group14-sha1'
+        echo 'Ciphers aes128-cbc'
+        echo 'MACs hmac-sha1'
+        echo 'PubkeyAcceptedKeyTypes ssh-rsa'
+      } >> \$cfg
+      kill -HUP \$(cat /config/sshd.pid)" >/dev/null 2>&1
+    sleep 2
+    add_host legacy-pw "$port" --password "$USER_PASSWORD"
+    add_host legacy-rsa "$port" --key "$WORK/k_rsa3072"
+    add_host legacy-ed "$port" --key "$WORK/k_ed25519"
+
+    # Default algorithms cannot meet this server, and the failure says what to do.
+    err="$(HOME="$WORK/home" "$CLI" exec legacy-pw true 2>&1)"
+    if [[ $? -ne 0 && "$err" == *"algo set"* ]]; then
+      ok "default algorithms are refused, with a pointer to \`algo set\`"
+    else
+      bad "default algorithms are refused, with a pointer to \`algo set\`"; echo "        $err" | cut -c1-200
+    fi
+
+    "$CLI" algo set --kex diffie-hellman-group14-sha1 --hostkey ssh-rsa \
+      --cipher-cs aes128-cbc --cipher-sc aes128-cbc --mac-cs hmac-sha1 --mac-sc hmac-sha1 >/dev/null
+    expect_accept legacy-pw "password once the legacy algorithms are allowed"
+    expect_accept legacy-rsa "RSA key signed with ssh-rsa (SHA-1) for a server that accepts nothing newer"
+    expect_reject legacy-ed "ed25519 key is refused by a server that accepts only ssh-rsa keys"
+    "$CLI" algo clear >/dev/null
+    expect_reject legacy-pw "defaults apply again after \`algo clear\`"
+  fi
+  "$RT_BIN" rm -f "$CONTAINER" >/dev/null 2>&1
+  CONTAINER=""
+fi
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 note "Summary"

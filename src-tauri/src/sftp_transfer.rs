@@ -204,6 +204,27 @@ pub fn walk_local_dir(root: &Path) -> io::Result<Vec<WalkEntry>> {
 /// small enough that a cancel is observed within a few hundred KB.
 const COPY_CHUNK: usize = 64 * 1024;
 
+/// Largest write that is safe against every SFTP server measured, and the floor
+/// below which a refused write is a real error.
+///
+/// Dropbear is the reason. Its SFTP channel takes packets of at most 32 KiB, and
+/// libssh2 packetises a write at 30000 bytes: a write over 32 KiB comes back as
+/// zero bytes written, and a stream of 30000-byte writes stalls for good after
+/// the first 128 KiB (measured against Dropbear 2024.85: 1 MiB uploads hung with
+/// the remote file stuck at 131072 bytes, and completed with writes of 16 KiB).
+/// OpenSSH has no such limit, and 64 KiB writes are about 2.6x faster than 16 KiB
+/// ones against it (28 vs 11 MB/s over loopback), so the small size is used only
+/// where it is needed — see [`upload_chunk_for_server`].
+const SFTP_SAFE_WRITE: usize = 16 * 1024;
+
+/// Write size to use for an upload to the server that sent `banner`.
+pub fn upload_chunk_for_server(banner: Option<&str>) -> usize {
+    match banner {
+        Some(banner) if banner.to_ascii_lowercase().contains("dropbear") => SFTP_SAFE_WRITE,
+        _ => COPY_CHUNK,
+    }
+}
+
 fn registry() -> &'static Mutex<HashMap<String, Arc<AtomicBool>>> {
     &app_state().transfer_cancels
 }
@@ -259,6 +280,39 @@ pub fn active_count() -> usize {
     registry().lock().unwrap().len()
 }
 
+/// `write_all` that survives a peer which accepts only smaller writes.
+///
+/// A second line of defence behind [`upload_chunk_for_server`], for servers that
+/// are not recognised by banner.
+///
+/// A write that reports zero bytes is not progress, and for a plain file it would
+/// mean the disk is gone; for an SFTP handle it can also mean "this write is
+/// larger than the server's packet size". On `Ok(0)` the limit is halved (down to
+/// [`SFTP_SAFE_WRITE`]) and the same data retried, and the smaller limit sticks in
+/// `limit` so the rest of the transfer does not repeat the discovery.
+fn write_all_shrinking<W: Write>(
+    writer: &mut W,
+    mut data: &[u8],
+    limit: &mut usize,
+) -> io::Result<()> {
+    while !data.is_empty() {
+        let take = data.len().min(*limit);
+        match writer.write(&data[..take]) {
+            Ok(0) if *limit > SFTP_SAFE_WRITE => *limit = (*limit / 2).max(SFTP_SAFE_WRITE),
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "failed to write whole buffer",
+                ))
+            }
+            Ok(n) => data = &data[n..],
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
 /// Copy `reader` into `writer` in chunks, aborting with an `Interrupted` error
 /// as soon as `cancel` is set. Returns the number of bytes copied this call (the
 /// caller adds any pre-existing resume offset to get the file's total length).
@@ -267,7 +321,20 @@ pub fn copy_cancellable<R: Read, W: Write>(
     writer: &mut W,
     cancel: &AtomicBool,
 ) -> io::Result<u64> {
-    let mut buf = vec![0u8; COPY_CHUNK];
+    copy_cancellable_with_chunk(reader, writer, cancel, COPY_CHUNK)
+}
+
+/// [`copy_cancellable`] with an explicit chunk size, for peers that need smaller
+/// writes than the default (see [`upload_chunk_for_server`]).
+pub fn copy_cancellable_with_chunk<R: Read, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    cancel: &AtomicBool,
+    chunk: usize,
+) -> io::Result<u64> {
+    let chunk = chunk.max(1);
+    let mut buf = vec![0u8; chunk];
+    let mut write_limit = chunk;
     let mut total: u64 = 0;
     loop {
         if cancel.load(Ordering::SeqCst) {
@@ -280,7 +347,7 @@ pub fn copy_cancellable<R: Read, W: Write>(
         if n == 0 {
             break;
         }
-        writer.write_all(&buf[..n])?;
+        write_all_shrinking(writer, &buf[..n], &mut write_limit)?;
         total += n as u64;
     }
     writer.flush()?;
@@ -309,6 +376,62 @@ pub fn resume_offset(resume: bool, existing: u64, total: Option<u64>) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    /// A writer that, like an SFTP handle on a server with small packets, accepts
+    /// nothing at all when handed more than `max` bytes.
+    struct PickyWriter {
+        max: usize,
+        written: Vec<u8>,
+    }
+    impl std::io::Write for PickyWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if buf.len() > self.max {
+                return Ok(0);
+            }
+            self.written.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn copy_adapts_to_a_peer_that_refuses_large_writes() {
+        let data: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+        let mut writer = PickyWriter {
+            max: 32_000,
+            written: Vec::new(),
+        };
+        let flag = AtomicBool::new(false);
+        let n = copy_cancellable(&mut data.as_slice(), &mut writer, &flag).unwrap();
+        assert_eq!(n, data.len() as u64);
+        assert_eq!(writer.written, data);
+    }
+
+    #[test]
+    fn dropbear_gets_small_upload_writes_and_everything_else_the_default() {
+        assert_eq!(
+            upload_chunk_for_server(Some("SSH-2.0-dropbear_2024.85")),
+            16 * 1024
+        );
+        assert_eq!(
+            upload_chunk_for_server(Some("SSH-2.0-OpenSSH_10.3")),
+            64 * 1024
+        );
+        assert_eq!(upload_chunk_for_server(None), 64 * 1024);
+    }
+
+    #[test]
+    fn copy_still_fails_when_even_small_writes_are_refused() {
+        let mut writer = PickyWriter {
+            max: 0,
+            written: Vec::new(),
+        };
+        let flag = AtomicBool::new(false);
+        let err = copy_cancellable(&mut [1u8; 10].as_slice(), &mut writer, &flag).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::WriteZero);
+    }
+
     use super::*;
     use std::io::Cursor;
 
