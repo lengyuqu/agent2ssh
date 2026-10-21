@@ -138,7 +138,7 @@ JSON 格式，包含 `hosts` 数组，也可以包含由桌面端代理管理页
 | `passphrase` | string/null | 否 | 私钥口令引用；由凭据库管理，不应手工写入明文 |
 | `user` | string | 否 | SSH 用户名 |
 | `port` | integer | 否 | SSH 端口，默认 22 |
-| `key_path` | string | 否 | SSH 私钥路径；Windows 上私钥的文件格式有额外限制，见注意事项 |
+| `key_path` | string | 否 | SSH 私钥路径；Windows 上私钥的文件格式有额外限制，见注意事项。私钥旁存在 `<key_path>-cert.pub`（`ssh-keygen -s` 的默认输出）时，自动改用该 OpenSSH 用户证书认证，无需额外字段 |
 | `jump_host` | string | 否 | ProxyJump 跳板机别名 |
 | `proxy_id` | string | 否 | 代理配置 ID，用于通过 HTTP CONNECT 或 SOCKS5 建立 SSH TCP 连接 |
 | `risk_override` | string | 否 | 覆盖该主机非 blocked 命令的风险等级（low/medium/high） |

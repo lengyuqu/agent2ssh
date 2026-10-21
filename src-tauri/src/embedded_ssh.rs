@@ -1664,8 +1664,28 @@ fn authenticate(
                     crate::ssh_key_format::reads_openssh_private_keys(),
             })),
         );
-        match session.userauth_pubkey_file(username, None, Path::new(&path), passphrase.as_deref())
-        {
+        // An OpenSSH user certificate sits next to its key as `<key>-cert.pub`.
+        // Handing it to libssh2 as the public-key file makes the handshake offer
+        // the certificate instead of the bare key, which is what a server that
+        // only trusts a CA (`TrustedUserCAKeys`) will accept.
+        let cert = user_certificate_for(Path::new(&path));
+        let pubkey = cert.as_deref();
+        if let Some(cert) = &cert {
+            let _ = crate::diagnostics::append_diagnostic_log(
+                "info",
+                "embedded_ssh",
+                "ssh user certificate found next to key",
+                Some(
+                    serde_json::json!({ "host": host.name, "certificate": cert.display().to_string() }),
+                ),
+            );
+        }
+        match session.userauth_pubkey_file(
+            username,
+            pubkey,
+            Path::new(&path),
+            passphrase.as_deref(),
+        ) {
             Ok(()) => {
                 if let Some(pw) = passphrase {
                     passphrase_cache_set(&cache_key, &pw);
@@ -1754,6 +1774,14 @@ fn authenticate(
         "SSH authentication failed for '{}': no key_path, password, ssh-agent identity, or default key (~/.ssh/id_rsa, id_ed25519, id_ecdsa) succeeded",
         host.name
     ))
+}
+
+/// `<key>-cert.pub`, the file name `ssh-keygen -s` writes and OpenSSH looks for.
+fn user_certificate_for(key: &Path) -> Option<std::path::PathBuf> {
+    let mut name = key.file_name()?.to_os_string();
+    name.push("-cert.pub");
+    let cert = key.with_file_name(name);
+    cert.is_file().then_some(cert)
 }
 
 fn connection_info(
@@ -1910,6 +1938,23 @@ fn run_terminal(
 mod tests {
     use super::*;
     use crate::store::CONFIG_DIR_ENV;
+
+    #[test]
+    fn a_user_certificate_is_found_next_to_its_key_by_the_openssh_name() {
+        let dir = std::env::temp_dir().join(format!("agent2ssh-cert-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let key = dir.join("id_ed25519");
+        // No certificate yet: the key is offered on its own.
+        assert_eq!(user_certificate_for(&key), None);
+        // A `.pub` next to the key is not a certificate.
+        std::fs::write(dir.join("id_ed25519.pub"), "ssh-ed25519 AAAA").unwrap();
+        assert_eq!(user_certificate_for(&key), None);
+        // `ssh-keygen -s` writes `<key>-cert.pub`; that is what OpenSSH looks for.
+        let cert = dir.join("id_ed25519-cert.pub");
+        std::fs::write(&cert, "ssh-ed25519-cert-v01@openssh.com AAAA").unwrap();
+        assert_eq!(user_certificate_for(&key), Some(cert));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn test_host() -> HostProfile {
         HostProfile {

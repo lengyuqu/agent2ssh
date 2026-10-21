@@ -584,6 +584,8 @@ enum KeyCommands {
     },
 }
 
+// Parsed once at startup; boxing `Add`'s fields would only obscure the clap derive.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Subcommand)]
 enum HostCommands {
     List {
@@ -611,6 +613,10 @@ enum HostCommands {
         /// SSH password for password-based authentication. Prefer keys for production.
         #[arg(long)]
         password: Option<String>,
+        /// Passphrase of the encrypted private key given with --key. A user
+        /// certificate stored next to the key as <key>-cert.pub is picked up automatically.
+        #[arg(long)]
+        passphrase: Option<String>,
         /// Host profile alias to use as ProxyJump bastion
         #[arg(long, add = ArgValueCandidates::new(host_candidates))]
         jump: Option<String>,
@@ -1903,6 +1909,7 @@ async fn async_main() -> Result<()> {
                 port,
                 key,
                 password,
+                passphrase,
                 jump,
                 risk_override,
                 tags,
@@ -1935,7 +1942,7 @@ async fn async_main() -> Result<()> {
                     role: clean_optional(role),
                     owner: clean_optional(owner),
                     init_command: clean_optional(init_command),
-                    passphrase: None,
+                    passphrase: clean_optional(passphrase),
                 })?
                 .redacted_for_transport();
                 if json {
