@@ -13,6 +13,8 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+mod common;
+
 use agent2ssh::container_runtime::{available as available_runtimes, ContainerRuntime};
 use agent2ssh::store::{list_audit_raw, CONFIG_DIR_ENV};
 use agent2ssh::types::{AuditEntry, AuditFilter, ExecRequest};
@@ -68,7 +70,9 @@ impl IsolatedEnv {
 
 impl Drop for IsolatedEnv {
     fn drop(&mut self) {
-        std::env::remove_var(CONFIG_DIR_ENV);
+        // Back to the isolated default, not unset: unset would send later tests
+        // to the real config directory.
+        common::restore_default_config_env();
         std::env::remove_var(LOCAL_EXEC_SHELL_ENV);
         std::env::remove_var(LOCAL_EXEC_DEPTH_ENV);
         let _ = std::fs::remove_dir_all(&self.dir);

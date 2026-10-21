@@ -13,6 +13,9 @@ use agent2ssh::resident_session::{
     ResidentSessionInfo,
 };
 use uuid::Uuid;
+
+// Keeps the audit log and config of these tests off the real `~/.agent2ssh`.
+mod common;
 fn unlock_session_cap() {
     // 0 = unlimited: keep parallel tests from colliding on the default cap of
     // 8. Read per call, like every other AGENT2SSH_* knob.

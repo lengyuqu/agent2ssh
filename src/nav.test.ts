@@ -47,7 +47,7 @@ describe("module registry", () => {
   it("relates only known modules, never to itself", () => {
     for (const [from, to] of Object.entries(RELATED_MODULES)) {
       expect(ids).toContain(from);
-      expect(to && to.length).toBeTruthy();
+      expect(to?.length).toBeTruthy();
       for (const target of to ?? []) {
         expect(ids).toContain(target);
         expect(target).not.toBe(from);
