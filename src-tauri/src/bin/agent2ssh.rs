@@ -1754,22 +1754,26 @@ fn print_completion_registration(shell: CompletionShell) -> Result<()> {
 }
 
 fn main() -> Result<()> {
-    // Dynamic shell completion must run before normal startup. In particular,
-    // it must not migrate secrets, create ~/.agent2ssh, or start the daemon.
-    clap_complete::CompleteEnv::with_factory(Cli::command)
-        .bin("agent2ssh")
-        .completer("agent2ssh")
-        .complete();
-
-    // Run the CLI future itself on a larger stack. Configuring Tokio's worker
-    // stack alone is insufficient because Runtime::block_on polls the future
-    // on the calling thread, whose default Windows stack is too small for the
-    // unoptimized clap-generated state machine in debug builds.
+    // Everything below runs on a larger stack than the process's main thread
+    // gets. Building the clap command tree is itself deep enough to overflow
+    // the 1 MiB default Windows main-thread stack in an unoptimized build, and
+    // dynamic completion builds it before anything else runs. Configuring
+    // Tokio's worker stack alone is insufficient too, because
+    // Runtime::block_on polls the future on the calling thread, which needs the
+    // room for the unoptimized clap-generated state machine.
     const CLI_STACK_SIZE: usize = 8 * 1024 * 1024;
     std::thread::Builder::new()
         .name("agent2ssh-cli".to_string())
         .stack_size(CLI_STACK_SIZE)
         .spawn(|| {
+            // Dynamic shell completion must run before normal startup. In
+            // particular, it must not migrate secrets, create ~/.agent2ssh, or
+            // start the daemon.
+            clap_complete::CompleteEnv::with_factory(Cli::command)
+                .bin("agent2ssh")
+                .completer("agent2ssh")
+                .complete();
+
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .thread_stack_size(CLI_STACK_SIZE)
