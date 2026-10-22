@@ -57,3 +57,5 @@
 ## 4. 没有覆盖、与平台无关的缺口
 
 供对照，避免把它们误认为 Windows 问题：多轮 keyboard-interactive（二次验证）、FIDO/安全密钥、跳板机矩阵、OpenSSH 7.x 之前的真实旧版本（目前用限制算法的 8.3 模拟）、除 OpenSSH 与 Dropbear 外的服务端实现（Windows 自带 OpenSSH、网络设备等）。
+
+与平台无关的已知问题汇总在 [../KNOWN-ISSUES.md](../KNOWN-ISSUES.md)。
