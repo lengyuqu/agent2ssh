@@ -28,10 +28,17 @@
 //! The `transport-ssh2` / `transport-russh` features arrive in S1, when a second
 //! backend exists to select between.
 
+#[cfg(not(feature = "transport-russh"))]
 mod legacy_ssh2;
-mod types;
-
+#[cfg(not(feature = "transport-russh"))]
 pub use legacy_ssh2::{Agent, Channel, File, Listener, PublicKey, Session, Sftp, Stderr};
+
+#[cfg(feature = "transport-russh")]
+mod russh_impl;
+#[cfg(feature = "transport-russh")]
+pub use russh_impl::{Agent, Channel, File, Listener, Session, Sftp, Stderr};
+
+mod types;
 pub use types::{
     DisconnectCode, Error, ErrorKind, FileStat, HashType, HostKeyKind, KeyboardInteractivePrompt,
     MethodType, OpenFlags, OpenType, Prompt,

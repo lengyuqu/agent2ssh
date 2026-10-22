@@ -229,14 +229,19 @@ impl Session {
         self.inner.banner()
     }
 
-    pub fn host_key(&self) -> Option<(&[u8], HostKeyKind)> {
+    /// Owned rather than borrowed: the russh backend can only produce a copy
+    /// (it captures the key during the handshake), so the facade takes copies
+    /// from both and the two backends keep one signature.
+    pub fn host_key(&self) -> Option<(Vec<u8>, HostKeyKind)> {
         self.inner
             .host_key()
-            .map(|(key, kind)| (key, host_key_kind(kind)))
+            .map(|(key, kind)| (key.to_vec(), host_key_kind(kind)))
     }
 
-    pub fn host_key_hash(&self, hash: HashType) -> Option<&[u8]> {
-        self.inner.host_key_hash(hash_type(hash))
+    pub fn host_key_hash(&self, hash: HashType) -> Option<Vec<u8>> {
+        self.inner
+            .host_key_hash(hash_type(hash))
+            .map(<[u8]>::to_vec)
     }
 
     pub fn disconnect(

@@ -163,7 +163,7 @@ fn host_key_algorithm(kind: HostKeyKind) -> &'static str {
 
 fn fingerprint_sha256(session: &Session) -> Option<String> {
     if let Some(hash) = session.host_key_hash(HashType::Sha256) {
-        return Some(format!("SHA256:{}", STANDARD_NO_PAD.encode(hash)));
+        return Some(format!("SHA256:{}", STANDARD_NO_PAD.encode(&hash)));
     }
     let (key, _) = session.host_key()?;
     let digest = Sha256::digest(key);
