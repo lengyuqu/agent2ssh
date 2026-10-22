@@ -25,10 +25,10 @@ git clone → npm install → cargo test        # 无 Perl / nmake / NASM / cmak
 
 验收不是"能编译"，而是这四条同时成立：
 
-1. `cargo test --lib --no-default-features` = **741 passed**，`TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo test --lib` = **749 passed**（2026-10-22 于 `275a119` 实测，均 0 failed，不许下降）。**开工前用 §9 的命令重测一次并把结果写回本节**——数字会漂，写死的基线只能当参考，不能当门禁；735/743 是旧值，按旧值放行会漏掉一次恰好掉 6 个测试的回归。
+1. `cargo test --lib --no-default-features` = **747 passed**，`TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo test --lib` = **755 passed**（2026-10-22 S0 完成后实测，均 0 failed）。演进：735/743（原始方案，已过期）→ 741/749（S0 前）→ **747/755**（S0 后，多出的 6 条是门面自己的测试）。**每阶段开工前用 §9 的命令重测一次并把结果写回本节**——数字会漂，写死的基线只能当参考，不能当门禁；用旧值当"不许下降"的地板会放过真实回归（735 那次就刚好差 6 条）。
 2. `npm test` = 22 文件 / **155 tests passed**（实测不变）。
 3. `scripts/e2e-container.sh` 对真实 OpenSSH 服务端跑通 exec / SFTP / resume，且在 Windows 上握手成功（这正是当前被迫引入 OpenSSL 的原因）。
-4. §4.5 的接口清单逐项有实现——`Session` 22 个方法、`Channel` 14 个（含 `Read`/`Write` 两个 trait）、`Sftp` 10 个、`FileStat` 4 个谓词 + 5 个字段。**缺一项就不算迁完**，这一条取代"只换类型"这种无法验收的表述。
+4. §4.5 的接口清单逐项有实现——`Session` 22 个方法、`Channel` 14 个（含 `Read`/`Write` 两个 trait）、`Sftp` 9 个、`File` 4 个（含 `Seek`）、`FileStat` 4 个谓词 + 6 个字段。**缺一项就不算迁完**，这一条取代"只换类型"这种无法验收的表述。
 
 ---
 
@@ -179,9 +179,13 @@ src/transport/
 | 状态 | `eof()` ← §4.2-4、`exit_status()`、`wait_close()`、`close()`、`send_eof()` |
 | 开启 | `exec()`、`shell()`、`request_pty()`、`request_pty_size()` |
 
-**Sftp：10 个** —— `open` / `create` / `open_mode` / `stat` / `readdir` / `mkdir` / `rmdir` / `unlink` / `rename` / `shutdown`
+**Sftp：9 个** —— `open` / `create` / `open_mode` / `stat` / `readdir` / `mkdir` / `rmdir` / `unlink` / `rename`
 
-**FileStat：4 谓词 + 5 字段** —— `is_file` / `is_dir` / `is_symlink` / `file_type`；`perm` / `size` / `mtime` / `uid` / `gid`（字段名与语义逐字保持，`core.rs:2118` 起的 5 个格式化函数与它们的测试是现成的对拍集）
+> 生成清单时 `shutdown` 曾被算进 Sftp，那是 `TcpStream::shutdown` 的同名噪声，实际没有调用点；`lstat` / `setstat` / `symlink` / `readlink` / `realpath` 也都未使用。S0 落地时按真实调用点收敛到 9 个。
+
+**File：4 个** —— `read` / `write` / `seek`（三个 trait）/ `stat`。`core.rs` 的续传路径对远端文件做了 `seek`，所以门面的 `File` 必须实现 `Seek`，这一点原文整类漏掉了。
+
+**FileStat：4 谓词 + 6 字段** —— `is_file` / `is_dir` / `is_symlink` / `file_type`；`perm` / `size` / `mtime` / **`atime`** / `uid` / `gid`（`core.rs:2204` 有 `stat.atime` 的读取，字段名与语义逐字保持；`core.rs:2118` 起的 5 个格式化函数与它们的测试是现成的对拍集）
 
 **三个"删得掉但要补位"的点**（放这里，比放 §7 更不容易丢）：
 
@@ -195,13 +199,15 @@ src/transport/
 
 每阶段结束都必须 **两条 cargo 测试命令全绿 + `npm test` 全绿**，否则不进下一阶段。
 
-### S0 — 立缝（**不动任何依赖**）
+### S0 — 立缝（**不动任何依赖**）· ✅ 已完成 2026-10-22
 
 1. 建 `src/transport/`，`legacy_ssh2.rs` 里包一层今天的 `ssh2::*`，对外只暴露自有类型。
 2. 逐个文件把 `use ssh2::...` 换成 `use crate::transport::...`。
 3. 自有 `Channel` 用 `impl Read/Write` 包住 `ssh2::Channel`，`eof/exit_status/wait_close/send_eof/close/request_pty/shell/exec` 一一转发。
 
-**DoD**：`grep -rn "ssh2::" src/ | grep -v "src/transport/legacy_ssh2.rs"` 输出为空；741/749/155 全绿（现场重测值）；`Cargo.toml` 未新增任何依赖；**§4.5 的 22+14+10 个方法逐个有门面落点**。
+**落地结果**：`src/transport/{mod,types,legacy_ssh2}.rs` 共 989 行；23 个 `Session` 方法、14 个 `Channel` 成员、9 个 `Sftp` 方法、带 `Seek` 的 `File`、`FileStat` 六个字段全部到位。libssh2 的 5 个数字码收敛成 `legacy_ssh2::From<ssh2::Error>` 的一处 match。`Cargo.toml`/`Cargo.lock` 零改动。**注意 `Channel::stderr()` 在这里就定成了 `&mut self`**，S1 不必再改两个排空循环。
+
+**DoD**：`grep -rn "ssh2::" src/ | grep -v "src/transport/"` 输出为空——即**模块之外没有任何代码命名后端**（不能只排 `legacy_ssh2.rs`：`mod.rs` 的 `pub use legacy_ssh2::…` 也会命中，而 `types.rs` 的文档注释是刻意写明"镜像 ssh2 的哪个类型"的，属于要保留的记录）；741/749/155 全绿（现场重测值）；`Cargo.toml` 未新增任何依赖；**§4.5 的 22+14+9+4 个方法逐个有门面落点**。
 **价值**：这一步在 Mac 和 Windows 上都成立，等于把 9500 行的风险提前清掉；之后换后端只改一个目录。
 
 ### S1 — 接 russh（双后端并存）
@@ -247,7 +253,7 @@ elliptic-curve = { version = "=0.14.0-rc.28", default-features = false }
 |---|---|---|---|---|
 | `src/transport/*` | 新增 | — | 见 §4.4 | §4.2 六条契约逐条实现；**两旋钮（阻塞/超时）+ stderr 双缓冲**是主要工作量 |
 | `src/embedded_ssh.rs` | 2254 | 认证（4 路，含 agent）、host key 校验、exec、PTY、`bridge_tcp_and_channel` | 换类型；`host_key_algorithm()`（`:152`）的 `HostKeyType` → 自有 `HostKeyKind`，**字符串保持原样**（写进 `known_hosts.json`）。**但 `host_key()` 的 4 个调用点要重排**：`probe_host_fingerprint`（`:261`）与 `trust_host_fingerprint_core`（`:307`）是"连上不认证只看密钥"的探针，russh 下探针必须在 `check_server_key` 里返回 `Ok(true)` 才能拿到未知密钥；正式连接的比对要在回调里返回 `Ok(false)` 中止。见 §4.2-6 | 高：认证状态机 + host key 控制流 + 41 个调用点 |
-| `src/core.rs` | 4759 | SFTP 批量操作、`FileStat` 格式化（`:2118`–`:2236`）、`create_sftp_dir_all` | `ssh2::FileStat` → `transport::FileStat`（字段对齐 `perm/size/mtime/uid/gid`）；`OpenFlags/OpenType` → 自有枚举 | 中：5 个格式化函数 + 1 处测试构造 |
+| `src/core.rs` | 4759 | SFTP 批量操作、`FileStat` 格式化（`:2118`–`:2236`）、`create_sftp_dir_all`、续传路径的远端 `seek` | `ssh2::FileStat` → `transport::FileStat`（字段逐字对齐，**含 `atime`**）；`OpenFlags/OpenType` → 自有枚举/位集；`File` 需带 `Seek` | 中：5 个格式化函数 + 1 处测试构造 |
 | `src/forward.rs` | 1071 | `Arc<Mutex<Option<Session>>>`、双向桥、`-37` 分类 | Session 换成门面（内部是 `Handle` + tokio Mutex）；`ssh_error_is_would_block` → `ErrorKind::WouldBlock` | 高：转发是阻塞线程 + 非阻塞语义混合 |
 | `src/ssh_algo.rs` | 689 | `Session::method_pref()` 字符串偏好 + `supported_algs()` 能力探测 | `apply_algo_prefs()` 改成产出 `client::Config.preferred.{kex,key,cipher,mac,compression}`（`Cow<Vec<Name>>`）；**配置 JSON 里的算法名不许变**。两处 `supported_algs()`（`:163` 缓存探测、`:228` fail-closed 校验）都要换：russh 无运行期能力查询，改为静态白名单 + `Name::try_from` 的 `Err` 作为"拼错算法名"的等价失败（现文案会列出 supported 列表，需换成静态表内容） | 中：`kex-strict-*` 这类协议标记要过滤（参考 `algorithms.rs:141`）；**`narrow()` 的过滤语义不能丢** |
 | `src/ssh_key_format.rs` | 421 | 整套 libssh2 密钥格式探测（WinCNG 只认两种 PEM 头）；`reads_openssh_private_keys()`（`:134`）读 `ssh_algo::supported_algorithms(HostKey)` 当能力信号 | **整文件删除**；`inspect_key_file` 若 UI 还要，改用 `russh::keys::decode_secret_key` 试解析。**删之前先补位**：`reads_openssh_private_keys()` 有 3 个调用点（`keys.rs:821`、`embedded_ssh.rs:1664`、`bin/agent2ssh.rs:3399`），最后一个是 **CLI 的 JSON 字段名**，russh 恒支持 ed25519/ECDSA，保留字段恒 `true` | 低（删代码），但漏一个调用点就是编译错、删字段则是 CLI 契约变更 |
@@ -320,8 +326,8 @@ export TAURI_CONFIG='{"bundle":{"externalBin":[]}}'
 
 # 4. 基线（先确认起点干净，再动手；数字以本次实测为准，写回 §1）
 npm test
-cargo test --lib --no-default-features   # 2026-10-22 于 275a119 = 741
-TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo test --lib   # 同上 = 749
+cargo test --lib --no-default-features   # S0 后 = 747（S0 前 741，原始方案 735）
+TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo test --lib   # S0 后 = 755（S0 前 749）
 ```
 
 > 第 3 步的 `TAURI_CONFIG` 与第 4 步的第二条要一起用，否则 `build.rs` 会去找不存在的 sidecar（§2 第 5 项）。**基线必须现场重测再写进 §1**：验收门禁认的是当场数字，不是这份文档里的历史值。
@@ -374,8 +380,8 @@ Mac 上**无法**完成的，逐条验收：
 | 验证项 | macOS | Windows | CI |
 |---|---|---|---|
 | `npm test`（155） | ✅ | ✅ | ✅ ubuntu / win / mac |
-| `cargo test --lib --no-default-features`（741） | ✅ | ✅ | ✅ |
-| `cargo test --lib`（749，tauri feature） | ✅ 需 `TAURI_CONFIG` 或 sidecar | ✅ | ✅ `tauri-unit-tests`（ubuntu） |
+| `cargo test --lib --no-default-features`（747） | ✅ | ✅ | ✅ |
+| `cargo test --lib`（755，tauri feature） | ✅ 需 `TAURI_CONFIG` 或 sidecar | ✅ | ✅ `tauri-unit-tests`（ubuntu） |
 | `cargo check --features daemon` | ✅ | ✅ | ✅ |
 | `exec_fixture`（真实 sshd） | ✅ 容器 | ✅ wslc/docker | ✅ `real-ssh-e2e` |
 | `daemon_local_exec_e2e` / `daemon_resident_session_e2e` | 部分 | ✅ | ❌ 未覆盖 |
