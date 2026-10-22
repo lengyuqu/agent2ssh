@@ -270,10 +270,43 @@ impl Session {
             forwards: Arc::clone(&self.inner.forwards),
         };
 
+        // The deadline has to bound the handshake itself, not just channel I/O.
+        // A peer that accepts TCP and then says nothing leaves `connect_stream`
+        // awaiting the banner forever; the callers that wrap a connect in
+        // `tokio::time::timeout` (`ping_hosts_core`, `collect_health_snapshot`)
+        // then return on schedule while the `spawn_blocking` worker stays parked
+        // on this future, holding both a thread and the socket — once per host,
+        // per poll. Dropping the future drops the stream, which is what closes
+        // it and releases the worker; `connect_deadline.rs` asserts exactly that
+        // by watching for EOF on the peer side.
+        let deadline = self.inner.settings.timeout();
+
         let handle = block_on(async move {
-            stream.set_nonblocking(true)?;
-            let stream = tokio::net::TcpStream::from_std(stream)?;
-            russh::client::connect_stream(Arc::new(config), stream, handler).await
+            // `?` cannot convert these two: the block's error type is the
+            // facade's, and only `russh::Error` has a `From` impl for it.
+            stream.set_nonblocking(true).map_err(|error| {
+                other(format!(
+                    "the socket could not be made non-blocking: {error}"
+                ))
+            })?;
+            let stream = tokio::net::TcpStream::from_std(stream).map_err(|error| {
+                other(format!("the socket could not be handed to tokio: {error}"))
+            })?;
+            let connect = russh::client::connect_stream(Arc::new(config), stream, handler);
+            let connected: Result<Handle<ClientHandler>, russh::Error> = match deadline {
+                Some(limit) => match tokio::time::timeout(limit, connect).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        return Err(other(format!(
+                            "the SSH handshake did not finish within {} ms; the peer accepted \
+                             the TCP connection but never completed the exchange",
+                            limit.as_millis()
+                        )))
+                    }
+                },
+                None => connect.await,
+            };
+            connected.map_err(Error::from)
         })?;
 
         *self.inner.handle.blocking_lock() = Some(handle);
