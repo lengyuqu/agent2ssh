@@ -24,18 +24,23 @@
 //!
 //! # Backend selection
 //!
-//! S0 (now): `legacy_ssh2` is the only backend and is compiled unconditionally.
-//! The `transport-ssh2` / `transport-russh` features arrive in S1, when a second
-//! backend exists to select between.
+//! russh is the default and is compiled unconditionally. The `transport-ssh2`
+//! feature swaps the backend back to libssh2 for one release; it is the only
+//! thing that pulls libssh2 and its OpenSSL into the build.
 
-#[cfg(not(feature = "transport-russh"))]
+// S2: russh is the default and is compiled unconditionally; `transport-ssh2`
+// swaps the whole backend back to libssh2 for one release, which is also the
+// only way to pull libssh2 and its OpenSSL into the build. Keeping russh
+// unconditional is what leaves `--no-default-features` (how CI builds the CLI
+// without tauri) still producing a working binary.
+#[cfg(feature = "transport-ssh2")]
 mod legacy_ssh2;
-#[cfg(not(feature = "transport-russh"))]
+#[cfg(feature = "transport-ssh2")]
 pub use legacy_ssh2::{Agent, Channel, File, Listener, PublicKey, Session, Sftp, Stderr};
 
-#[cfg(feature = "transport-russh")]
+#[cfg(not(feature = "transport-ssh2"))]
 mod russh_impl;
-#[cfg(feature = "transport-russh")]
+#[cfg(not(feature = "transport-ssh2"))]
 pub use russh_impl::{Agent, Channel, File, Listener, Session, Sftp, Stderr};
 
 mod types;

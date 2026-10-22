@@ -101,6 +101,13 @@ jobs:
         run: cargo clippy --no-default-features --features daemon --bin agent2ssh-daemon -- -D warnings
         working-directory: src-tauri
 
+      # S2: russh is the default transport. The previous backend stays
+      # buildable for one release so a regression can be bisected against it;
+      # this leg is what keeps it from rotting before S3 deletes it.
+      - name: Rust clippy (legacy ssh2 transport)
+        run: cargo clippy --no-default-features --features transport-ssh2 --bin agent2ssh --bin agent2ssh-mcp -- -D warnings
+        working-directory: src-tauri
+
       - name: Install Node.js
         uses: actions/setup-node@v7
         with:
@@ -278,6 +285,10 @@ jobs:
 
       - name: Rust unit tests
         run: cargo test --no-default-features --lib
+        working-directory: src-tauri
+
+      - name: Rust unit tests (legacy ssh2 transport)
+        run: cargo test --no-default-features --features transport-ssh2 --lib
         working-directory: src-tauri
 
       - name: Rust integration tests (daemon)
