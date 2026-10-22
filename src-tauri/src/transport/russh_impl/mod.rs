@@ -177,6 +177,34 @@ impl russh::Signer for LocalKeySigner {
     }
 }
 
+/// Load a private key, decrypting a legacy-encrypted PEM first.
+///
+/// The transport's loader decrypts `Proc-Type: 4,ENCRYPTED` itself but then
+/// parses whatever it got as PKCS#1, so an encrypted *EC* key comes back as
+/// `Pkcs1: PKCS#1 ASN.1 error`. `legacy_pem` decrypts that container here and
+/// hands back a plaintext PEM, which the same loader parses for every key type —
+/// so this is a pre-step, not a second code path.
+fn load_private_key(
+    path: &std::path::Path,
+    passphrase: Option<&str>,
+) -> Result<std::sync::Arc<russh::keys::PrivateKey>, Error> {
+    let text = std::fs::read_to_string(path).map_err(|error| {
+        other(format!(
+            "the private key at {} could not be read: {error}",
+            path.display()
+        ))
+    })?;
+    let decrypted = crate::legacy_pem::decrypt(&text, passphrase).map_err(other)?;
+    match decrypted {
+        Some(plain) => Ok(std::sync::Arc::new(russh::keys::decode_secret_key(
+            &plain, None,
+        )?)),
+        None => Ok(std::sync::Arc::new(russh::keys::decode_secret_key(
+            &text, passphrase,
+        )?)),
+    }
+}
+
 /// Read an OpenSSH user certificate (`<key>-cert.pub`).
 ///
 /// `Certificate::from_openssh` wants one line, and the file `ssh-keygen -s`
@@ -569,7 +597,7 @@ impl Session {
         self.ensure_connected()?;
         // russh derives the public half from the private key, so a mismatched
         // separate `.pub` file is ignored rather than rejected.
-        let key = std::sync::Arc::new(russh::keys::load_secret_key(privatekey, passphrase)?);
+        let key = load_private_key(privatekey, passphrase)?;
 
         // `pubkey` is the `-cert.pub` sibling when the app found one
         // (`embedded_ssh::user_certificate_for`). It is a *certificate*, not a

@@ -398,16 +398,11 @@ for server in $SERVERS; do
       label="${spec%%:*}"
       add_host "$idx-k-$label" "$port" --key "$WORK/k_$label"
       expect_accept "$idx-k-$label" "$label key"
-      case "$label" in
-        ecdsa*-pem)
-          # The key loader decrypts PKCS#1 and OpenSSH containers but not the legacy
-          # `Proc-Type: 4,ENCRYPTED` EC PEM that `ssh-keygen -m PEM` writes: the
-          # decrypted body reaches the PKCS#1 RSA parser. See docs/KNOWN-ISSUES.md.
-          known "an encrypted traditional-PEM EC key is not supported (convert with ssh-keygen -p -m OpenSSH)" ;;
-        *)
-          add_host "$idx-e-$label" "$port" --key "$WORK/e_$label" --passphrase "$KEY_PASSPHRASE"
-          expect_accept "$idx-e-$label" "$label key, encrypted" ;;
-      esac
+      # Encrypted legacy-PEM EC keys used to be a known limitation: the transport
+      # decrypted the container and then parsed the plaintext as PKCS#1. They go
+      # through `legacy_pem` now, so this is a normal case.
+      add_host "$idx-e-$label" "$port" --key "$WORK/e_$label" --passphrase "$KEY_PASSPHRASE"
+      expect_accept "$idx-e-$label" "$label key, encrypted"
       if [[ "$kind" == openssh ]]; then
         # RSA certificates used to be reported as a known limitation: the
         # transport signed them with the legacy `ssh-rsa-cert-v01` type, which

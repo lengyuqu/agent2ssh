@@ -9,6 +9,7 @@ pub mod container_runtime;
 pub mod container_terminal;
 pub mod copy_redact;
 pub mod core;
+// Crate-private: the transport is the only caller.
 pub mod daemon_control;
 pub mod diagnostics;
 pub mod embedded_ssh;
@@ -24,6 +25,7 @@ pub mod highlight;
 pub mod integrate;
 pub mod jump_chain;
 pub mod keys;
+mod legacy_pem;
 pub mod lifecycle;
 pub mod limits;
 pub mod local_exec;

@@ -80,6 +80,14 @@ rsa = "0.9"
 # is involved. The pin went from `=3.0.0-pre.6` to the finished `3` when the
 # transport moved to russh 0.64, which depends on the release.
 ed25519-dalek = "3"
+# Legacy `Proc-Type: 4,ENCRYPTED` PEM: the transport decrypts PKCS#1 (RSA) keys
+# itself but then parses the plaintext as PKCS#1 whatever the label says, so an
+# EC key in that container fails. `legacy_pem` decrypts the container here and
+# hands the transport a plaintext PEM instead. `aes` is already in the graph via
+# the transport's ciphers; `md-5` is the one addition, and it is the KDF the
+# OpenSSL format specifies.
+aes = "0.8"
+md-5 = "0.10"
 # The signature trait, for the local-key signer behind RSA certificates.
 # `russh` already depends on this exact major, so naming it adds nothing to the
 # build; it only makes `Signer` nameable, which `ssh-key` does not re-export.
