@@ -64,11 +64,9 @@ toml = "0.8"
 reqwest = { version = "0.12", features = ["json", "blocking"] }
 ssh2 = "0.9"
 # Key generation for the one RSA encoding libssh2's WinCNG backend can read.
-# `ssh-key` generates RSA but cannot write a private key as traditional PEM —
-# it only emits the OpenSSH container, whose parser is absent from WinCNG — so
-# the PKCS#1 encoder has to come from `rsa` itself. Pinned to 0.9 on purpose:
-# `ssh-key` 0.7.0-rc.10 asks for `rsa 0.10.0-rc.18`, and `rand_core` 0.10, both
-# pre-releases, for a code path this crate does not use.
+# `rsa` stays on 0.9 because the PKCS#1 PEM encoder this path needs is the 0.9
+# API. russh brings its own `rsa 0.10.0-rc` for signing; the two majors coexist
+# in the tree and never exchange types, so that duplication is deliberate.
 rsa = "0.9"
 # Ed25519 key generation. Replaces `ssh-key`, whose exact pins on RustCrypto
 # pre-releases cannot coexist with russh 0.60 (see docs/plans/russh-migration.md
@@ -77,7 +75,7 @@ rsa = "0.9"
 ed25519-dalek = "=3.0.0-pre.6"
 russh = { version = "0.60.3", default-features = false, features = ["rsa", "ring"], optional = true }
 russh-sftp = { version = "2", default-features = false, optional = true }
-# russh 0.60.1 was written against RustCrypto pre-releases whose API was
+# russh 0.60.3 was written against RustCrypto pre-releases whose API was
 # renamed and re-generalised before those versions went final (pkcs5 0.8.1
 # renamed pbkdf2_sha256_aes256cbc, pkcs1 0.8.0-rc.5 regeneralised
 # RsaPrivateKey<B>). Pinning the exact pre-releases russh declares is what

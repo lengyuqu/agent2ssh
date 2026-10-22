@@ -25,7 +25,7 @@ git clone → npm install → cargo test        # 无 Perl / nmake / NASM / cmak
 
 验收不是"能编译"，而是这四条同时成立：
 
-1. `cargo test --lib --no-default-features` = **747 passed**，`TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo test --lib` = **755 passed**（2026-10-22 S0 完成后实测，均 0 failed）。演进：735/743（原始方案，已过期）→ 741/749（S0 前）→ **747/755**（S0 后，多出的 6 条是门面自己的测试）。**每阶段开工前用 §9 的命令重测一次并把结果写回本节**——数字会漂，写死的基线只能当参考，不能当门禁；用旧值当"不许下降"的地板会放过真实回归（735 那次就刚好差 6 条）。
+1. `cargo test --lib --no-default-features` = **755 passed**，`TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo test --lib` = **763 passed**（2026-10-22 实测，均 0 failed）。演进：735/743（原始方案，已过期）→ 741/749（S0 前）→ 747/755（S0 后，+6 条门面测试）→ **755/763**（移除 ssh-key 后，+8 条 `openssh_key` 测试）。**每阶段开工前用 §9 的命令重测一次并把结果写回本节**——数字会漂，写死的基线只能当参考，不能当门禁；用旧值当"不许下降"的地板会放过真实回归（735 那次就刚好差 6 条）。
 2. `npm test` = 22 文件 / **155 tests passed**（实测不变）。
 3. `scripts/e2e-container.sh` 对真实 OpenSSH 服务端跑通 exec / SFTP / resume，且在 Windows 上握手成功（这正是当前被迫引入 OpenSSL 的原因）。
 4. §4.5 的接口清单逐项有实现——`Session` 22 个方法、`Channel` 14 个（含 `Read`/`Write` 两个 trait）、`Sftp` 9 个、`File` 4 个（含 `Seek`）、`FileStat` 4 个谓词 + 6 个字段。**缺一项就不算迁完**，这一条取代"只换类型"这种无法验收的表述。
@@ -210,22 +210,21 @@ src/transport/
 **DoD**：`grep -rn "ssh2::" src/ | grep -v "src/transport/"` 输出为空——即**模块之外没有任何代码命名后端**（不能只排 `legacy_ssh2.rs`：`mod.rs` 的 `pub use legacy_ssh2::…` 也会命中，而 `types.rs` 的文档注释是刻意写明"镜像 ssh2 的哪个类型"的，属于要保留的记录）；741/749/155 全绿（现场重测值）；`Cargo.toml` 未新增任何依赖；**§4.5 的 22+14+9+4 个方法逐个有门面落点**。
 **价值**：这一步在 Mac 和 Windows 上都成立，等于把 9500 行的风险提前清掉；之后换后端只改一个目录。
 
-### S1 — 接 russh（双后端并存）· ⛔ **阻塞：依赖无法解析（2026-10-22 探针）**
+### S1 — 接 russh（双后端并存）· 🟡 依赖已就绪，待实现后端
 
-> 风险 #8 要求的第一步（`cargo add` + `cargo check`）已执行，结论是**当前组合解析不出来**，而且不是加几行 pin 能解决的。证据链见本节末「探针结果」。**在决定出路之前不要动 `Cargo.toml`。**
+> 依赖层已经在树上（`transport-russh` feature + 五条钉版），`cargo check --features transport-russh` 通过。**剩下的全部工作是 `russh_impl/` 本身**，见本节末「探针结果」。
 
-1. 加依赖，**以下四行 pin 是权威值，直接抄进 `src-tauri/Cargo.toml`**：
+1. 依赖已就位，不必再抄任何 pin：
 
 ```toml
-russh = "0.60.1"
-russh-sftp = "2"
-# russh 0.60.x 依赖 RustCrypto 预发布 API，必须锁死，否则依赖解析漂到不兼容的 pkcs8
-ecdsa = { version = "=0.17.0-rc.16", default-features = false }
-ed25519 = { version = "=3.0.0-rc.4", default-features = false }
-elliptic-curve = { version = "=0.14.0-rc.28", default-features = false }
+russh = { version = "0.60.3", default-features = false, features = ["rsa", "ring"], optional = true }
+russh-sftp = { version = "2", default-features = false, optional = true }
+ed25519-dalek = "=3.0.0-pre.6"
+pkcs1 = { version = "=0.8.0-rc.4", default-features = false, optional = true }
+pkcs5 = { version = "=0.8.0-rc.13", default-features = false, optional = true }
 ```
 
-> 原文写的是"逐字照抄 `demo/rssh-main/src-tauri/Cargo.toml`"，但 **`demo/` 被 `.gitignore:13` 忽略且本机不存在**，这条指令在新克隆上无法执行。以本节的四行 pin 为准；`demo/rssh-main` 只作为**可选的** API 样板（§8），不影响开工。
+> 三个必须记住的坑，理由都在本节末：**必须是 0.60.3 而不是 0.60.1**（0.60.1 的 caret 依赖解不出可行集）；**必须 `default-features = false`**（默认带 `aws-lc-rs`，要 cmake/NASM）；**`ring` 是唯一可选的密码后端**（关掉默认后无后端会 `compile_error!`）。`demo/rssh-main` 仍只作可选读物（§8）。
 
 2. 实现 `russh_impl/`，feature 名 `transport-russh`，默认仍是 ssh2。
 3. **认证有四种，不是三种**（已核）：
@@ -239,35 +238,31 @@ elliptic-curve = { version = "=0.14.0-rc.28", default-features = false }
 
 **DoD**：`cargo test --no-default-features --features transport-russh --lib` 与 ssh2 版结果一致；`scripts/e2e-container.sh` 在两套后端下都通过。
 
-#### 探针结果（2026-10-22，实测，`Cargo.toml` 已回滚）
+#### 探针结果（2026-10-22，实测）· ✅ 已解除，走的是 A
 
-三个发现，前两个改变方案措辞，第三个是硬阻塞。
+依赖层已经能装了，但结论与原文差得很远，逐条记下来，免得下次重走。
 
-1. **默认 feature 会把 C 工具链带回来。** `russh 0.60.1` 的默认 feature 是 `["flate2", "aws-lc-rs", "rsa"]`，而 `aws-lc-rs` 要 cmake + NASM——正是这次迁移要摆脱的东西。必须 `default-features = false`。原文没提这一点，照抄"`russh = "0.60.1"`"会直接踩回去。
+1. **必须用 russh 0.60.3，不能是 0.60.1。** 0.60.1 对 `ed25519-dalek` 用的是 caret（`^3.0.0-pre.6`），cargo 会解析到某个 pre-release，而那个 pre-release 又钉死 `curve25519-dalek =5.0.0-pre.6`，与 russh 自己要的 `^5.0.0-pre.6`（解析到正式版 5.0.0）冲突。0.60.3 把整套 RustCrypto 都钉死了（`elliptic-curve 0.14.0-rc.28` / `primefield 0.14.0-rc.7` / `ecdsa 0.17.0-rc.16` …），**这才是那三行 pin 的真实出处**——它们描述的是 0.60.3 的锁定集，不是应用层要额外加的东西。
 
-2. **没有纯 Rust 密码后端。** `default-features = false` 会命中 `compile_error!("russh requires enabling either the ring or aws-lc-rs")`。只能二选一，选 `ring`：`ring 0.17.14` 的 `pregenerated/` 里带 `*-nasm.o` 预编译对象，`build.rs` 里没有任何 `nasm` 调用，Windows 上只需 MSVC 工具链。**所以"纯 Rust"这个说法不成立**（§1 已改），但"Windows 只需 MSVC"这个目标仍然成立。
+2. **`default-features = false` 是必须的，`ring` 是唯一可选项。** 默认 feature 是 `["flate2", "aws-lc-rs", "rsa"]`，其中 `aws-lc-rs` 要 cmake + NASM——正是要摆脱的东西。关掉默认后 russh 会 `compile_error!`，只能选 `ring`；`ring 0.17.14` 携带 `*-nasm.o` 预编译对象、build.rs 不调 nasm，**Windows 仍只需 MSVC**。所以 §1 的"纯 Rust"改成"Rust 实现 + ring"，但"Windows 只需 MSVC"的目标仍成立。
 
-3. **与本仓既有依赖硬冲突，这是阻塞点。** 本仓已有 `ssh-key 0.7.0-rc.10`（`keys.rs` 用它做密钥生成）。russh 0.60.x 建立在另一套 RustCrypto 预发布钉版上，两者**没有交集**：
+3. **真正的阻塞是 `ssh-key`，已按 A 方案移除。** `ssh-key 0.7.0-rc.10` 与 russh 钉的 RustCrypto 预发布集**没有交集**（`curve25519-dalek` / `ed25519-dalek` / `pkcs8` 三处都撞），不是加 pin 能解决的。改用 `src/openssh_key.rs`（150 行）自己写 OpenSSH 私钥容器，公开钥派生仍交给 `ed25519-dalek`。
 
-   | 组合 | 结果 |
-   |---|---|
-   | `russh 0.60.1` 原样 | `ed25519-dalek ^3.0.0-pre.6` 解析到 `3.0.0-pre.6`，它要求 `curve25519-dalek =5.0.0-pre.6`，而 russh 自己要 `^5.0.0-pre.6`（解析到 `5.0.0`）→ 不可满足 |
-   | 强钉 `ed25519-dalek =3.0.0` | `ed25519 3.0.0` 要 `pkcs8 ^0.11`（只有 `0.11.0`），russh 要 `^0.11.0-rc.11` → 不可满足 |
-   | `russh 0.60.3` | 它把 `ed25519-dalek` 钉成 `=3.0.0-pre.6`，与 `ssh-key 0.7.0-rc.11` 的 `^3.0.0-rc.1` 无交集 |
+4. **现在实际生效的依赖面**（写进 `Cargo.toml`，都带注释）：
 
-   连 `pkcs1 =0.8.0-rc.4` / `pkcs5 =0.8.0-rc.13` 这类"让 russh 自己编译通过"的钉版加进去之后，冲突只是往后挪一层（`aead`、`rand_core` 依次成为新的卡点）。
+   ```toml
+   russh = { version = "0.60.3", default-features = false, features = ["rsa", "ring"], optional = true }
+   russh-sftp = { version = "2", default-features = false, optional = true }
+   ed25519-dalek = "=3.0.0-pre.6"   # 跟着 russh 的钉版，否则 curve25519-dalek 无解
+   pkcs1 = { version = "=0.8.0-rc.4", default-features = false, optional = true }
+   pkcs5 = { version = "=0.8.0-rc.13", default-features = false, optional = true }
+   ```
 
-4. **原文的四行 pin 打偏了。** `ecdsa` / `ed25519` / `elliptic-curve` 不是冲突点——真正卡住的是 `ssh-key` 自带的预发布钉版（`curve25519-dalek` / `ed25519-dalek` / `pkcs8`）。照抄那四行解决不了任何问题，必须处理 `ssh-key` 本身。
+   `pkcs1` / `pkcs5` 是**为了让 russh 自己编译过**而钉的：它们转正后改了 API（`pbkdf2_sha256_aes256cbc` 改名、`RsaPrivateKey<B>` 重新泛型化），不钉就是 `russh` 编译失败。
 
-**三条出路，需要拍板**：
+5. **`cargo tree -d` 结果**：`ed25519` / `curve25519-dalek` / `ecdsa` / `elliptic-curve` / `pkcs5` 全部单副本；只有 `pkcs1` 有 0.7.5（`rsa 0.9`，本仓用它写 PKCS#1）和 0.8.0-rc.4（russh）两份，属于可接受的并行。
 
-| 选项 | 做法 | 代价 |
-|---|---|---|
-| **A（先做可行性核查）** | 去掉 `ssh-key` 依赖，改用别的途径生成 ed25519 密钥 | 先看 `keys.rs` 到底用了它什么；若用途窄，这是最轻的路。风险是会把自己绑到 russh 的预发布树上 |
-| **B** | 把 russh 后端放进**独立 crate / sidecar 进程**，两套依赖图物理隔离 | 多一个二进制和一层 IPC，但与 `agent2ssh-daemon` 同构，工程上是有先例的 |
-| **C** | 等 russh 出基于正式版 RustCrypto 的版本 | 当前最新 0.60.3 仍钉预发布，时间不可控 |
-
-**建议**：先花半天做 A 的核查（`keys.rs` 对 `ssh-key` 的 API 依赖有多少），能替代就走 A；替代不了走 B——B 的代价是确定的，而 C 是无期限。
+**还剩下的活**：`transport-russh` 目前只拉依赖，`russh_impl/` 尚未实现。§4.2 那六条契约全部落在这一层。
 
 ### S2 — 切默认
 
@@ -358,8 +353,8 @@ export TAURI_CONFIG='{"bundle":{"externalBin":[]}}'
 
 # 4. 基线（先确认起点干净，再动手；数字以本次实测为准，写回 §1）
 npm test
-cargo test --lib --no-default-features   # S0 后 = 747（S0 前 741，原始方案 735）
-TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo test --lib   # S0 后 = 755（S0 前 749）
+cargo test --lib --no-default-features   # 当前 = 755（S0 后 747，S0 前 741，原始方案 735）
+TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo test --lib   # 当前 = 763（S0 后 755，S0 前 749）
 ```
 
 > 第 3 步的 `TAURI_CONFIG` 与第 4 步的第二条要一起用，否则 `build.rs` 会去找不存在的 sidecar（§2 第 5 项）。**基线必须现场重测再写进 §1**：验收门禁认的是当场数字，不是这份文档里的历史值。
@@ -412,8 +407,8 @@ Mac 上**无法**完成的，逐条验收：
 | 验证项 | macOS | Windows | CI |
 |---|---|---|---|
 | `npm test`（155） | ✅ | ✅ | ✅ ubuntu / win / mac |
-| `cargo test --lib --no-default-features`（747） | ✅ | ✅ | ✅ |
-| `cargo test --lib`（755，tauri feature） | ✅ 需 `TAURI_CONFIG` 或 sidecar | ✅ | ✅ `tauri-unit-tests`（ubuntu） |
+| `cargo test --lib --no-default-features`（755） | ✅ | ✅ | ✅ |
+| `cargo test --lib`（763，tauri feature） | ✅ 需 `TAURI_CONFIG` 或 sidecar | ✅ | ✅ `tauri-unit-tests`（ubuntu） |
 | `cargo check --features daemon` | ✅ | ✅ | ✅ |
 | `exec_fixture`（真实 sshd） | ✅ 容器 | ✅ wslc/docker | ✅ `real-ssh-e2e` |
 | `daemon_local_exec_e2e` / `daemon_resident_session_e2e` | 部分 | ✅ | ❌ 未覆盖 |
@@ -432,7 +427,7 @@ Mac 上**无法**完成的，逐条验收：
 |---|---|---|
 | 1 | **`WouldBlock` 与阻塞标志的语义复刻不准** → 转发桥静默卡死、空转，或 exec 收尾坏掉 | S0 就把 `bridge_tcp_and_channel` 的读写路径用门面跑一遍，单测要覆盖**非阻塞下无数据即刻返回 `WouldBlock`**（不是"等超时再返回"），以及**阻塞模式下 `wait_close()` 不被 `WouldBlock` 短路** |
 | 2 | **runtime 边界**：daemon async 里调同步门面会 panic | `transport/mod.rs` 顶部写死规则；逐个标注调用点，加 `spawn_blocking` |
-| 3 | `russh` 0.60 的 RustCrypto 预发布锁 | **实测已升级为 S1 的硬阻塞**，见 §5「探针结果」。不是加四行 pin 能解决的：冲突在 `ssh-key` 那一侧，`cargo tree -d` 只能用来确认，不能用来解决 |
+| 3 | `russh` 0.60 的 RustCrypto 预发布锁 | **已解决**：必须 `russh 0.60.3`（0.60.1 的 caret 依赖解不出可行集）+ `default-features = false` + `ring` + `pkcs1/pkcs5` 钉版。理由与实测见 §5「探针结果」 |
 | 4 | 算法名字符串兼容性 | `SshAlgoPrefs` 的 JSON 是用户配置，**名字不许变**；`kex-strict-*` 是协议标记要过滤；`narrow()` 的白名单语义要保留 |
 | 5 | host key 算法名兼容性 | 已写进 `known_hosts.json`，`ssh-rsa` / `ecdsa-sha2-nistp256` 等字符串必须逐字保持 |
 | 6 | RSA / SHA-1 遗留路径 | 现在靠 `method_pref(SignAlgo, "ssh-rsa")`（`embedded_ssh.rs:1842`）→ russh 用 `PrivateKeyWithHashAlg` + `best_supported_rsa_hash()` |
@@ -444,7 +439,7 @@ Mac 上**无法**完成的，逐条验收：
 | 12 | **`host_key` 的时点变更** → 探针拿不到未知主机密钥；或比对挪进回调后安全语义被改坏 | §4.2-6；把 §10 的 TOFU 三段式列入验收，不只跑单测 |
 | 13 | **`supported_algs` 无等价物** → 用户拼错算法名从"报错"退化成"静默忽略" | 静态白名单 + `Name::try_from` 的 `Err`；`reads_openssh_private_keys` 恒 `true` 且保留 CLI JSON 字段 |
 | 14 | **agent 认证横跨传输层与平台层** → Mac 上测通不等于 Windows 上通 | §5 S1-3、§10 第 1/2 条；Windows 上用真实 Pageant 实测 |
-| 15 | **`ssh-key` 与 russh 的预发布钉版互斥** → S1 根本装不上 | §5「探针结果」。三条出路（换掉 ssh-key / 独立 crate / 等新版本）需先拍板，在此之前不要动 `Cargo.toml` |
+| 15 | **`ssh-key` 与 russh 的预发布钉版互斥** → S1 装不上 | **已解决（走 A）**：`ssh-key` 已从依赖里删除，私钥容器改由 `src/openssh_key.rs` 自写，公开钥派生仍用 `ed25519-dalek`。验证方式是对 `ssh-keygen -y` 对拍，不是对我们自己的解析器 |
 
 ---
 
