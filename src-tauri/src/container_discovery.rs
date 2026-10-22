@@ -1095,8 +1095,14 @@ mod tests {
                         runtime.id()
                     );
                 }
+                // Case-insensitively: the messages use the product name
+                // ("Apple container", "Docker") while `id()` is the lowercase
+                // token.
                 Err(error) => assert!(
-                    error.to_string().contains(runtime.id()),
+                    error
+                        .to_string()
+                        .to_lowercase()
+                        .contains(&runtime.id().to_lowercase()),
                     "{} failed without naming itself: {error}",
                     runtime.id()
                 ),
