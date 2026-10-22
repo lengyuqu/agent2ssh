@@ -90,4 +90,4 @@
 | clippy ×3 | CLI+MCP / daemon / tauri lib | 全绿，`-D warnings` |
 | agent 认证（真机） | `ssh-agent` + `ssh-add` 两个身份，只授权第二个 | exit 0，且负对照失败 |
 
-**没有跑过的**：PuTTY Pageant 本身（未安装，代码里 Pageant 优先、`\.\pipe\openssh-ssh-agent` 兜底，只有兜底路径有运行时证据）；`e2e-ssh-matrix.sh` 的全矩阵（依赖 Git for Windows 的 `ssh-keygen`/`ssh-agent`/`cmp`，本轮未执行）。
+**没有跑过的**：PuTTY Pageant 本身（2026-10-23 装好 PuTTY 0.85 再试，仍未能验证——空 Pageant 下 `plink -agent` 能立即返回，一旦挂上密钥两条客户端都卡在 `Requesting keys`，详见 [../KNOWN-ISSUES.md](../KNOWN-ISSUES.md) §3.1；代码里现在是命名管道优先、Pageant 兜底）；`e2e-ssh-matrix.sh` 的全矩阵（2026-10-22 已在本机跑通：OpenSSH 8.3/8.8/9.3/9.9/10.3 + Dropbear + legacy，**190 passed / 0 failed**，见 [../KNOWN-ISSUES.md](../KNOWN-ISSUES.md) §3）。

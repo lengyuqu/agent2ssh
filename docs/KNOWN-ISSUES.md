@@ -54,6 +54,34 @@
 | Apple container 上的完整矩阵 | 只跑了 OpenSSH 10.3 与 Dropbear；8.x / 9.x 和旧算法服务端只在 Docker 上跑过 |
 | Windows（包含矩阵脚本、证书、`ssh-rsa` 重试、密钥格式探测） | 见 [reports/WINDOWS-HANDOVER.md](reports/WINDOWS-HANDOVER.md)；CI 上 Windows 任务在 `4d24c11` 全部通过，但那不等于真机验证 |
 | 懒加载审批存储在桌面 / daemon 里的实际表现 | 单测与 daemon 集成测试通过，没有在真实桌面应用里手动试过 |
+| PuTTY **Pageant** 认证 | 代码路径存在且已编译（`agent.rs`：命名管道优先、Pageant 兜底），但**没有一次成功的运行时证据**。2026-10-23 在 WinR9 上装了 PuTTY 0.85 实测过，卡在加载密钥这一步，详见下方。反向证据倒是有了：Pageant 未加载密钥时 `plink -agent` 立即返回 `No supported authentication methods`，说明 agent 通道本身可用；一旦挂上密钥，`plink` 和本应用都会卡在 `Requesting keys` |
+
+### 3.1 Pageant 这一条为什么停在这里
+
+2026-10-23 的实测记录（Windows，PuTTY 0.85，`C:\Program Files\PuTTY`，不在 `PATH`）：
+
+| 步骤 | 结果 |
+|------|------|
+| `pageant.exe`（不带密钥）启动 + `plink -agent` 连容器 | ✅ 立即返回 `No supported authentication methods available` —— **agent 通道能通** |
+| `pageant.exe <某个密钥>` 后同样的 plink | ❌ 停在 `Pageant is running. Requesting keys.` 直到超时；容器日志只有 `Connection closed [preauth]`，请求从未到达 sshd |
+| `plink -i <OpenSSH 新格式私钥>` | ❌ `Unable to use key file (... (new format))` |
+| `plink -i <传统 PEM>` | ❌ `Unable to use key file (... (old PEM format))` |
+| 手工合成 PuTTY v3 的 `.ppk`（三种私有块布局）后 `pageant.exe <ppk>` | ❌ 三种都一样：plink 能用该 ppk 读密钥（不报 `Unable to use key file`），但 Pageant 挂上它之后就不再应答 |
+| `puttygen.exe --help` | ❌ 该构建是纯 GUI，任何参数都开窗，无法在无头环境里转换密钥 |
+
+结论：**问题不在本项目的传输层**（通道在空 Pageant 下是通的），而在「把密钥装进 Pageant」这一步——挂上密钥后 Pageant 停止应答，最可能是弹了模态对话框（加载失败或需要确认），而无头环境既点不掉也读不到。本机 GUI 截屏、`Add-Type` 枚举窗口都被沙箱拦截，所以无法进一步定位。
+
+要完成这条验证，需要一个**人工**动作：托盘图标 → **Add Key** → 选择 `.ppk`（PuTTY 只吃 ppk）。放行后本仓库的自动验证只需一条命令：
+
+```bash
+docker run -d --name a2s-pg -e PUID=1000 -e PGID=1000 -e USER_NAME=tester \
+  -e PUBLIC_KEY="<那把密钥的 .pub>" -e PASSWORD_ACCESS=false -p 22197:2222 \
+  lscr.io/linuxserver/openssh-server:version-10.3_p1-r1
+# 注意不给 --key：让认证落到 agent 上
+agent2ssh host add pageant-test --host 127.0.0.1 --port 22197 --user tester
+agent2ssh exec pageant-test "echo pageant-ok"
+# 负对照：结束 Pageant 后同一条命令必须失败，报 "no ... ssh-agent identity ... succeeded"
+```
 
 ## 4. 维护约定
 
