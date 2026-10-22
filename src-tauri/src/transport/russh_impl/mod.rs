@@ -19,7 +19,6 @@
 //! These return a named error rather than pretending to work; they are the
 //! remaining S1 work, listed in `docs/plans/russh-migration.md`:
 //!
-//! - `Sftp` — needs `russh-sftp` wiring, so `core.rs`'s SFTP paths fail here.
 //! - `channel_forward_listen` — russh pushes forwarded channels into the
 //!   handler; that is a different accept model, not a rename.
 //! - `agent` — the Windows Pageant branch cannot be verified on this machine,

@@ -268,11 +268,16 @@ pkcs5 = { version = "=0.8.0-rc.13", default-features = false, optional = true }
 - **门面签名调整**：`host_key` / `host_key_hash` 改为返回 owned 字节——libssh2 能从会话里借出切片，russh 只能在握手回调里拿到 key，门面统一持有副本。
 - **基线**：`--features transport-russh` = 752（755 − 3，少掉的正好是 `legacy_ssh2` 自己的映射测试，该后端在 feature 下不编译）；默认后端仍 755。
 
-**剩余五个缺口**（都在 `russh_impl` 顶部列出，各自返回明确的 unsupported 错误，不假装可用）：
+**SFTP 已接通（2026-10-22）**：`russh-sftp` 接线完成，1 MiB 上传/下载逐字节相同，下载与上传的断点续传各自对拍通过，`sftp ls` 输出与旧后端逐字一致。
+
+**踩坑记录（值得记住）**：`Channel::into_stream()` 只交出字节流，**不会请求子系统**。少了 `request_subsystem("sftp")`，sshd 会启动一个 shell，SFTP 的 INIT 包被当成 shell 输入，之后每个请求都死在 russh-sftp 的 10 秒超时上——表现是裸 `Timeout`，看着像协议卡死，其实是少发了一个请求。
+
+两处**有意的语义损失**，代码里已注明：`mkdir` 忽略 `mode`（russh-sftp 的 SFTP mkdir 不带属性，由服务端决定），`rename` 忽略 `overwrite`（SFTP v3 的 rename 在目标存在时失败，POSIX 语义要扩展协商）。唯一调用点传 `false`，当下无行为差异。
+
+**剩余四个缺口**（都在 `russh_impl` 顶部列出，各自返回明确的 unsupported 错误，不假装可用）：
 
 | 缺口 | 影响 | 说明 |
 |---|---|---|
-| `Sftp` | `core.rs` 的 SFTP 路径全部失败 | 需要接 `russh-sftp`，并把 `File` 的 Read/Write/Seek 包在 `block_on` 上 |
 | `channel_forward_listen` | 远程转发不可用 | russh 把转发的通道**推进 handler**，不是发 listener，是模型差异不是改名 |
 | `agent` | agent / Pageant 认证不可用 | Windows 分支无法在本机验证，盲写比明示更糟 |
 | `auth_methods` | 「服务端没广告 password 就不试」的短路消失 | russh 不暴露该列表 |
