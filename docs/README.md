@@ -32,4 +32,5 @@
 - [发布与版本](RELEASE.md) — 版本策略与发布清单
 - [缺陷检查报告](DEFECTS.md) — 测试状态与已知缺陷跟踪
 - [回归与研究报告](reports/REGRESSION-LOG.md) — 11 份历史回归/研究证据合集
+- [Windows 验证交接](reports/WINDOWS-HANDOVER.md) — 未在 Windows 上验证的改动、CI 上的 Windows 现象与复核做法
 - [RSSH 设计分析与可吸收清单](rssh-design-analysis.md) — 对比 RSSH 与 Agent2SSH，梳理已吸收能力与可吸收 gap（含落点/优先级/验收）

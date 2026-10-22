@@ -46,6 +46,13 @@
 #   AGENT2SSH_CONTAINER_RUNTIME=apple scripts/e2e-ssh-matrix.sh
 set -uo pipefail
 
+# Git Bash on Windows rewrites arguments that look like POSIX paths before a native
+# binary sees them, which would turn the *remote* paths below (/config/..., and
+# /home/<user>/... on Dropbear) into C:/Program Files/Git/... Exclude them, as
+# e2e-container.sh does. On Linux and macOS this is an unused name. Not yet run on
+# Windows: see docs/reports/WINDOWS-HANDOVER.md.
+export MSYS2_ARG_CONV_EXCL='/config;/home/'
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CLI="${AGENT2SSH_CLI:-$REPO_ROOT/src-tauri/target/release/agent2ssh}"
 SERVERS="${AGENT2SSH_MATRIX_SERVERS:-openssh:8.3 openssh:8.8 openssh:9.3 openssh:9.9 openssh:10.3 dropbear}"
