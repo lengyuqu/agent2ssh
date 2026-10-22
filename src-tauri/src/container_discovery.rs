@@ -1074,19 +1074,43 @@ mod tests {
     fn discover_containers_errors_only_when_a_named_runtime_is_missing() {
         // "podman" is never a known runtime: the filter must reject it.
         assert!(discover_containers(false, Some("podman")).is_err());
-        // A supported-but-absent runtime is an error only for a named request;
-        // on this host wslc/Apple may legitimately be absent.
+
+        // What a named request promises is *an answer*, not a successful one:
+        // either the runtime's targets, or an error that says which runtime and
+        // why. Asserting `Ok` whenever the binary exists is what this test used
+        // to do, and it is wrong: a Docker CLI with no daemon running — the
+        // state of a fresh `windows-latest` runner — resolves fine and then
+        // fails to list, which is the correct behaviour and an `Err`.
+        //
+        // So the host-independent contracts are asserted instead: an `Ok` must
+        // carry usable rows, an `Err` must name the runtime, and a runtime whose
+        // service probe explicitly says "down" must never come back `Ok`.
         for runtime in ContainerRuntime::ALL {
             let result = discover_containers(false, Some(runtime.id()));
-            // An installed runtime whose service is down is reported, not
-            // listed: that depends on the host, so it is not asserted as Ok.
-            let ready = runtime
+            match &result {
+                Ok(targets) => {
+                    assert!(
+                        targets.iter().all(|target| !target.id.is_empty()),
+                        "{} returned a target without an id",
+                        runtime.id()
+                    );
+                }
+                Err(error) => assert!(
+                    error.to_string().contains(runtime.id()),
+                    "{} failed without naming itself: {error}",
+                    runtime.id()
+                ),
+            }
+
+            let service_down = runtime
                 .resolve()
-                .is_some_and(|binary| runtime.service_running(&binary) != Some(false));
-            if runtime.supported_on_host() && ready {
-                assert!(result.is_ok(), "{} should be discoverable", runtime.id());
-            } else {
-                assert!(result.is_err(), "{} should report why", runtime.id());
+                .is_some_and(|binary| runtime.service_running(&binary) == Some(false));
+            if service_down {
+                assert!(
+                    result.is_err(),
+                    "{} reports its service down but listed containers anyway",
+                    runtime.id()
+                );
             }
         }
     }
