@@ -121,7 +121,7 @@ impl Write for Channel { ... }
 src/transport/
 ├── mod.rs          # Session / Channel / Sftp / Error / FileStat 的对外形状 + runtime 规则注释
 ├── legacy_ssh2.rs  # S0 阶段：现有 ssh2 实现（feature = "transport-ssh2"）
-├── russh_impl/     # S1 阶段：russh 实现（feature = "transport-russh"）
+├── russh_impl/     # russh 实现（S2 起为默认后端）
 │   ├── mod.rs
 │   ├── session.rs  # 连接、认证、Config.preferred
 │   ├── channel.rs  # Read/Write 门面 + reader/writer task + eof/exit_status
@@ -212,7 +212,7 @@ src/transport/
 
 ### S1 — 接 russh（双后端并存）· 🟢 主干已实现并通过真实 sshd，剩余五个缺口
 
-> 依赖层已经在树上（`transport-russh` feature + 五条钉版），`cargo check --features transport-russh` 通过。**剩下的全部工作是 `russh_impl/` 本身**，见本节末「探针结果」。
+> 依赖层已经在树上（五条钉版；S1 阶段用 `transport-russh` feature 开关，S2 起 russh 为默认）。**剩下的全部工作是 `russh_impl/` 本身**，见本节末「探针结果」。
 
 1. 依赖已就位，不必再抄任何 pin：
 
@@ -226,7 +226,7 @@ pkcs5 = { version = "=0.8.0-rc.13", default-features = false, optional = true }
 
 > 三个必须记住的坑，理由都在本节末：**必须是 0.60.3 而不是 0.60.1**（0.60.1 的 caret 依赖解不出可行集）；**必须 `default-features = false`**（默认带 `aws-lc-rs`，要 cmake/NASM）；**`ring` 是唯一可选的密码后端**（关掉默认后无后端会 `compile_error!`）。`demo/rssh-main` 仍只作可选读物（§8）。
 
-2. 实现 `russh_impl/`，feature 名 `transport-russh`，默认仍是 ssh2。
+2. 实现 `russh_impl/`（S1 阶段与 ssh2 并存；S2 起 russh 成为默认，ssh2 退到 `transport-ssh2`）。
 3. **认证有四种，不是三种**（已核）：
    - `userauth_pubkey_file`（4 处：`embedded_ssh.rs:1683/1721/1778/1848`）
    - `userauth_password`（`:1583`）
@@ -236,7 +236,7 @@ pkcs5 = { version = "=0.8.0-rc.13", default-features = false, optional = true }
    另有两个能力探测要一起处理，否则认证路径静默降级：`auth_methods()` 无 russh 等价物（§4.5 补位点 3）、`supported_algs()` 需换静态表（§4.5 补位点 1）。
 4. 每条测试在两种 feature 下各跑一遍。
 
-**DoD**：`cargo test --no-default-features --features transport-russh --lib` 与 ssh2 版结果一致；`scripts/e2e-container.sh` 在两套后端下都通过。
+**DoD**：`cargo test --no-default-features --lib`（默认即 russh）与 `--features transport-ssh2` 版结果一致；`scripts/e2e-container.sh` 在两套后端下都通过。
 
 #### 探针结果（2026-10-22，实测）· ✅ 已解除，走的是 A
 
@@ -266,7 +266,7 @@ pkcs5 = { version = "=0.8.0-rc.13", default-features = false, optional = true }
 
 - **真实 sshd 验证通过**：`exec_fixture` 四条全绿（含 `drains_stdout_and_stderr_off_one_channel_without_deadlocking` 与超时截止那条）。这两条正是双缓冲解复用和"两旋钮"写错时最先倒的用例。
 - **门面签名调整**：`host_key` / `host_key_hash` 改为返回 owned 字节——libssh2 能从会话里借出切片，russh 只能在握手回调里拿到 key，门面统一持有副本。
-- **基线**：`--features transport-russh` = 752（755 − 3，少掉的正好是 `legacy_ssh2` 自己的映射测试，该后端在 feature 下不编译）；默认后端仍 755。
+- **基线**：默认（russh）= 752，`--features transport-ssh2` = 755。差 3 条是 `legacy_ssh2` 自己的映射测试——哪个后端参与编译，哪边的三条才会跑。
 
 **SFTP 已接通（2026-10-22）**：`russh-sftp` 接线完成，1 MiB 上传/下载逐字节相同，下载与上传的断点续传各自对拍通过，`sftp ls` 输出与旧后端逐字一致。
 
@@ -289,9 +289,38 @@ pkcs5 = { version = "=0.8.0-rc.13", default-features = false, optional = true }
 
 `set_keepalive` 另有半缺口：握手后设置不再生效（russh 在 connect 时固定 interval），`keepalive_send()` 仍可用。
 
-### S2 — 切默认
+### S2 — 切默认 · ✅ 已完成 2026-10-22
 
-把默认后端改成 `transport-russh`，ssh2 保留一个 feature 便于回滚。至少经过一次 release 观察再删。
+**做法**：不是给 russh 加一个默认 feature，而是把两者关系倒过来——**russh 成为无条件依赖**，`ssh2` 变成可选，`transport-ssh2` 是唯一能把它拉回来的开关。
+
+**为什么倒过来**：CI 与发行构建大量用 `--no-default-features`（为的是不要 tauri）。若按"`default = [.., "transport-russh"]` + `transport-ssh2`"来写，`--no-default-features` 会两个后端都没有，直接撞 `compile_error!`，等于要改二十多处 CI 与发布脚本。倒过来之后，`--no-default-features` 自然落到 russh，一处没改就全绿。
+
+```toml
+# russh 家族不再 optional；ssh2 才是
+russh = { version = "0.60.3", default-features = false, features = ["rsa", "ring"] }
+ssh2 = { version = "0.9", optional = true }
+transport-ssh2 = ["dep:ssh2"]
+```
+
+```rust
+#[cfg(feature = "transport-ssh2")] mod legacy_ssh2;   // 回滚用
+#[cfg(not(feature = "transport-ssh2"))] mod russh_impl; // 默认
+```
+
+**实测结果**：
+
+| 项 | 结果 |
+|---|---|
+| 默认构建的 SSH 依赖 | 只剩 `russh`；**`ssh2` / `libssh2-sys` / `openssl-sys` 全部消失** |
+| `--features transport-ssh2` | 两者都在（russh 无条件，故旧腿也会编 russh 的 crate，但不编其代码） |
+| 默认（russh）单测 | 752 |
+| `transport-ssh2` 单测 | 755 |
+| `exec_fixture` 真实 sshd | 两套后端各 4/4 |
+| CLI+MCP / daemon / lib(tauri) | 三目标默认后端下均通过 |
+
+**代价（可接受，S3 会消掉）**：`transport-ssh2` 腿仍会编译 russh 的 crate（依赖无条件），只是 `russh_impl` 模块不参与编译。旧腿只为回滚与对拍存在一个 release。
+
+**CI 同步**：新增两条腿（clippy 旧后端 CLI+MCP、单测旧后端），其余 `--no-default-features` 调用一处未改——这正是选"倒过来"换来的。
 
 ### S3 — 删
 
