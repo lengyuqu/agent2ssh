@@ -74,19 +74,26 @@ reqwest = { version = "0.12", features = ["json", "blocking"] }
 # without exchanging types, so that duplication is deliberate.
 rsa = "0.9"
 # Ed25519 key generation. Replaces `ssh-key`, whose exact pins on RustCrypto
-# pre-releases cannot coexist with russh 0.60 (see docs/plans/russh-migration.md
-# §5). Only the public-key derivation is needed from it; the OpenSSH container
-# is written by `openssh_key` so no second parser is involved.
-ed25519-dalek = "=3.0.0-pre.6"
-russh = { version = "0.60.3", default-features = false, features = ["rsa", "ring"] }
+# pre-releases could not coexist with the transport (see
+# docs/plans/russh-migration.md §5). Only the public-key derivation is needed
+# from it; the OpenSSH container is written by `openssh_key` so no second parser
+# is involved. The pin went from `=3.0.0-pre.6` to the finished `3` when the
+# transport moved to russh 0.64, which depends on the release.
+ed25519-dalek = "3"
+# The signature trait, for the local-key signer behind RSA certificates.
+# `russh` already depends on this exact major, so naming it adds nothing to the
+# build; it only makes `Signer` nameable, which `ssh-key` does not re-export.
+signature = "3"
+russh = { version = "0.64.1", default-features = false, features = ["rsa", "ring"] }
 russh-sftp = { version = "2", default-features = false }
-# russh 0.60.3 was written against RustCrypto pre-releases whose API was
-# renamed and re-generalised before those versions went final (pkcs5 0.8.1
-# renamed pbkdf2_sha256_aes256cbc, pkcs1 0.8.0-rc.5 regeneralised
-# RsaPrivateKey<B>). Pinning the exact pre-releases russh declares is what
-# keeps it compiling; a plain `cargo update` drifts past them again.
+# `pkcs1` is still pinned to the exact release candidate `russh` declares, and
+# has to be: 0.8.0-rc.5 re-generalised `RsaPrivateKey<B>` and dropped the API
+# this crate's PEM writer calls, so a plain `cargo update` would drift into a
+# build that no longer compiles. `pkcs5` is only pinned to the 0.8 line now;
+# russh 0.64 accepts the finished 0.8.1, which is why the old `=0.8.0-rc.13`
+# pin is gone.
 pkcs1 = { version = "=0.8.0-rc.4", default-features = false }
-pkcs5 = { version = "=0.8.0-rc.13", default-features = false }
+pkcs5 = { version = "0.8", default-features = false }
 # Traits only: `rsa` requires a `CryptoRngCore`, and the adapter in `keys.rs`
 # fulfils it from the crate's existing `fill_entropy`. The `getrandom` feature is
 # deliberately left off so this does not add a second entropy source — nor a

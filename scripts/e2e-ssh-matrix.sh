@@ -409,17 +409,12 @@ for server in $SERVERS; do
           expect_accept "$idx-e-$label" "$label key, encrypted" ;;
       esac
       if [[ "$kind" == openssh ]]; then
-        case "$label" in
-          rsa*)
-            # russh signs certificates through `signature::Signer::try_sign`, which
-            # for an RSA key is the legacy `ssh-rsa-cert-v01@openssh.com` (SHA-1).
-            # OpenSSH 8.8+ does not offer it and the certificate API takes no hash
-            # to override it. ed25519/ECDSA certificates work. See KNOWN-ISSUES.
-            known "an RSA user certificate uses the legacy ssh-rsa-cert-v01 algorithm (use ed25519/ECDSA)" ;;
-          *)
-            add_host "$idx-c-$label" "$port" --key "$WORK/c_$label"
-            expect_accept "$idx-c-$label" "$label user certificate" ;;
-        esac
+        # RSA certificates used to be reported as a known limitation: the
+        # transport signed them with the legacy `ssh-rsa-cert-v01` type, which
+        # OpenSSH 8.8+ does not offer. They are exercised now — the transport
+        # upgrade plus a hash-carrying signer is what made that possible.
+        add_host "$idx-c-$label" "$port" --key "$WORK/c_$label"
+        expect_accept "$idx-c-$label" "$label user certificate"
       fi
     done
   fi

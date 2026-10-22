@@ -2,10 +2,13 @@
 //!
 //! ## Why this exists
 //!
-//! Key generation used to go through the `ssh-key` crate. That crate pins exact
-//! RustCrypto pre-releases (`curve25519-dalek`, `ed25519-dalek`, `pkcs8`) which
-//! cannot coexist with the ones russh 0.60 pins — the two sets have no common
-//! version, so simply having both crates in the graph fails to resolve. Since
+//! Key generation used to go through the `ssh-key` crate. That crate pinned
+//! exact RustCrypto pre-releases (`curve25519-dalek`, `ed25519-dalek`, `pkcs8`)
+//! which could not coexist with the ones the transport pinned — the two sets
+//! had no common version, so simply having both crates in the graph failed to
+//! resolve. (The transport has since moved to a `ssh-key` whose pins are
+//! narrower, but the reason this module exists is the same: the container and
+//! the derivation are the only parts this crate needs.) Since
 //! this crate only ever needed three things from `ssh-key` — derive the public
 //! key from a seed, write the container, read it back — and the container format
 //! is a short, fully specified structure (`PROTOCOL.key` in OpenSSH), it is

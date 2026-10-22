@@ -40,7 +40,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use russh::client::{Config, Handle};
-use russh::keys::PublicKey as RhPublicKey;
 use russh::Disconnect;
 
 pub use agent::{Agent, PublicKey};
@@ -97,6 +96,85 @@ fn unsupported(what: &str) -> Error {
     other(format!(
         "the russh transport backend does not implement {what} yet"
     ))
+}
+
+/// A private key on disk, used as a `Signer` with the hash the caller chooses.
+///
+/// Needed because russh's own certificate path signs through
+/// `signature::Signer::try_sign`, which for an RSA key means the legacy
+/// `ssh-rsa` (SHA-1) signature and cannot be told otherwise. OpenSSH has refused
+/// SHA-1 RSA since 8.8, so an RSA certificate has to be signed with
+/// rsa-sha2-256 or -512. `authenticate_openssh_cert` takes no hash;
+/// `authenticate_certificate_with` takes one and a `Signer`, and this is that
+/// signer. For non-RSA keys the hash is ignored, which is why the same type
+/// serves ed25519 and ECDSA certificates too.
+struct LocalKeySigner {
+    key: std::sync::Arc<russh::keys::PrivateKey>,
+}
+
+/// What a [`LocalKeySigner`] can fail with.
+///
+/// `russh::auth::Signer` requires `From<russh::SendError>`; the others are
+/// reported through the same string because nothing above the transport
+/// distinguishes them.
+#[derive(Debug)]
+struct SignerFailed(String);
+
+impl std::fmt::Display for SignerFailed {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for SignerFailed {}
+
+impl From<russh::SendError> for SignerFailed {
+    fn from(_: russh::SendError) -> Self {
+        Self("the session ended while the key was signing".to_string())
+    }
+}
+
+impl russh::Signer for LocalKeySigner {
+    type Error = SignerFailed;
+
+    fn auth_sign(
+        &mut self,
+        _identity: &russh::keys::agent::AgentIdentity,
+        hash_alg: Option<russh::keys::HashAlg>,
+        to_sign: Vec<u8>,
+    ) -> impl std::future::Future<Output = Result<Vec<u8>, Self::Error>> + Send {
+        use signature::Signer as _;
+
+        let key = std::sync::Arc::clone(&self.key);
+        async move {
+            use russh::keys::ssh_key::encoding::Encode;
+
+            let signature = match key.key_data() {
+                russh::keys::ssh_key::private::KeypairData::Rsa(keypair) => {
+                    (keypair, hash_alg).try_sign(&to_sign)
+                }
+                // Every other key type ignores `hash_alg`, exactly as
+                // `PrivateKeyWithHashAlg::new` does.
+                other => other.try_sign(&to_sign),
+            }
+            .map_err(|error| SignerFailed(format!("the key could not sign: {error}")))?;
+
+            // The caller appends this buffer to the packet verbatim, so the
+            // signature has to arrive in its wire form: one SSH `string`
+            // holding `string algorithm || string signature`.
+            let mut body = Vec::new();
+            signature.encode(&mut body).map_err(|error| {
+                SignerFailed(format!("the signature could not be encoded: {error}"))
+            })?;
+            let length = u32::try_from(body.len())
+                .map_err(|_| SignerFailed("the signature is too large to encode".to_string()))?;
+
+            let mut signed = to_sign;
+            signed.extend_from_slice(&length.to_be_bytes());
+            signed.extend_from_slice(&body);
+            Ok(signed)
+        }
+    }
 }
 
 /// Read an OpenSSH user certificate (`<key>-cert.pub`).
@@ -193,7 +271,19 @@ struct ClientHandler {
 impl russh::client::Handler for ClientHandler {
     type Error = russh::Error;
 
-    async fn check_server_key(&mut self, key: &RhPublicKey) -> Result<bool, Self::Error> {
+    async fn check_server_key(
+        &mut self,
+        key: &russh::keys::PublicKeyOrCertificate,
+    ) -> Result<bool, Self::Error> {
+        // A server may present a host certificate rather than a bare key. What
+        // the fingerprint on record names is the key the certificate vouches
+        // for, so that is what gets captured either way.
+        let key = match key {
+            russh::keys::PublicKeyOrCertificate::PublicKey { key, .. } => key.clone(),
+            russh::keys::PublicKeyOrCertificate::Certificate(cert) => {
+                cert.public_key().clone().into()
+            }
+        };
         if let Ok(blob) = key.to_bytes() {
             let kind = match key.algorithm() {
                 russh::keys::Algorithm::Ed25519 => HostKeyKind::Ed25519,
@@ -236,8 +326,13 @@ impl russh::client::Handler for ClientHandler {
         connected_port: u32,
         _originator_address: &str,
         _originator_port: u32,
+        reply: russh::client::ChannelOpenHandle,
         _session: &mut russh::client::Session,
     ) -> Result<(), Self::Error> {
+        // The open must be answered explicitly: dropping this handle sends an
+        // administrative rejection, which would tell the server the forward is
+        // closed while the registry holds the other end.
+        reply.accept().await;
         self.forwards.push(connected_port, channel);
         Ok(())
     }
@@ -483,16 +578,31 @@ impl Session {
         // `TrustedUserCAKeys` setup this exists for.
         if let Some(cert_path) = pubkey {
             let cert = read_certificate(cert_path)?;
+            let is_rsa = key.algorithm().is_rsa();
+            let mut signer = LocalKeySigner {
+                key: std::sync::Arc::clone(&key),
+            };
             let result = block_on(async {
                 let mut guard = self.inner.handle.lock().await;
                 let Some(handle) = guard.as_mut() else {
                     return Err(other("handshake has not run"));
                 };
-                Ok::<_, Error>(
-                    handle
-                        .authenticate_openssh_cert(username, key.clone(), cert)
-                        .await?,
-                )
+                // A certificate is never signed with SHA-1. OpenSSH 8.8+ does not
+                // offer the legacy `ssh-rsa-cert-v01` type at all, so an RSA
+                // certificate gets SHA-2 even when the server advertised
+                // nothing; `rsa_hash_alg`'s `None` means exactly that legacy
+                // signature, which is right for a bare key and wrong here.
+                let hash_alg = match rsa_hash_alg(handle, is_rsa).await? {
+                    Some(algorithm) => Some(algorithm),
+                    None if is_rsa => Some(russh::keys::HashAlg::Sha512),
+                    None => None,
+                };
+                handle
+                    .authenticate_certificate_with(username, cert, hash_alg, &mut signer)
+                    .await
+                    .map_err(|error| {
+                        other(format!("the key could not sign the certificate: {error}"))
+                    })
             })?;
             return Self::auth_result(result, &self.inner.authenticated);
         }

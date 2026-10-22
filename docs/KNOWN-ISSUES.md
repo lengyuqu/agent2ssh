@@ -1,6 +1,6 @@
 # 已知问题与未覆盖范围
 
-日期：2026-10-22（晚间在 Windows 开发机上按 `aaa5a66` 复核并增补 K10–K12）。基线：macOS 开发机 + WinR9，Docker / wslc / Apple container；GitHub Actions。
+日期：2026-10-22（晚间在 Windows 开发机上复核并增补 K11/K12；K10 当日已修复）。基线：macOS 开发机 + WinR9，Docker / wslc / Apple container；GitHub Actions。
 
 本文只记录 **已经知道、尚未解决** 的事项，以及 **没有验证过所以不能下结论** 的范围，按处理价值排序。已修复的问题在 `CHANGELOG.md`；历史缺陷快照在 `DEFECTS.md`（0.2.1 时代，已归档）；Windows 相关的细节在 [reports/WINDOWS-HANDOVER.md](reports/WINDOWS-HANDOVER.md)，此处只列条目。
 
@@ -19,7 +19,7 @@
 | K7 | 限制 | 证书认证只认私钥旁边的 `<key>-cert.pub` | 没有 `cert_path` 之类的主机字段，桌面界面也没有入口；证书不在私钥旁边时无法使用。主机证书（CA 签发的服务器主机密钥）没有做校验 | `embedded_ssh.rs` `user_certificate_for` |
 | K8 | 限制 | `host add --passphrase` 的值会出现在进程参数里 | 与已有的 `--password` 一样，同机其他用户可通过进程列表看到。MCP / daemon 设置口令的路径没有逐个核对 | `bin/agent2ssh.rs`。可以补从环境变量或标准输入读取 |
 | K9 | 限制 | 内置算法默认值刻意只含较新的算法 | 只提供 SHA-1 密钥交换、CBC 加密或 HMAC-SHA1 的旧服务器默认连不上，必须用 `agent2ssh algo set` 显式放开（现在错误信息会指路） | `ssh_algo.rs` `safe_defaults`，这是安全取舍，不是缺陷 |
-| K10 | 限制 | RSA 用户证书用的是 legacy `ssh-rsa-cert-v01@openssh.com` 签名 | OpenSSH 8.8+ 默认不再提供该算法，因此**RSA 证书在 8.8 及以上一律被拒**（`userauth_pubkey: signature algorithm ssh-rsa-cert-v01@openssh.com not in PubkeyAcceptedAlgorithms`）。ed25519 与 ECDSA 证书正常。根因在 `russh`：证书认证走 `signature::Signer::try_sign`，RSA 即 SHA-1，且 `authenticate_openssh_cert` 不接受哈希参数 | `transport/russh_impl/mod.rs` 证书分支。两条出路：① 换 ed25519/ECDSA 证书（已可用）；② 服务器侧 `PubkeyAcceptedAlgorithms +ssh-rsa-cert-v01@openssh.com`。要根治得给本地密钥写一个带哈希的 `Signer` 并改用 `authenticate_certificate_with`，尚未实现 |
+| K10 | 已解决 | RSA 用户证书曾被签成 legacy `ssh-rsa-cert-v01@openssh.com` | OpenSSH 8.8+ 不提供该算法，RSA 证书一律被拒。2026-10-22 修复：传输层升级到 `russh 0.64.1`（其 `client_make_to_sign` 现在把哈希带进证书类型名），证书改用 `authenticate_certificate_with` + 本仓库的 `LocalKeySigner`（按调用方给的哈希签名，RSA 证书用 SHA-2）。矩阵里 5 个 OpenSSH 版本的 RSA 证书用例均通过，服务端日志为 `Accepted … RSA-CERT … CA` | `transport/russh_impl/mod.rs` `LocalKeySigner` / 证书分支。回归由 `scripts/e2e-ssh-matrix.sh` 的 `rsa* user certificate` 用例覆盖 |
 | K11 | 限制 | 加密的传统 PEM EC 私钥无法读取 | `ssh-keygen -m PEM -N <pass>` 生成的 ECDSA 密钥（`Proc-Type: 4,ENCRYPTED`）在解密后交给 PKCS#1 的 RSA 解析器，报 `Pkcs1: PKCS#1 ASN.1 error: expected INTEGER, got OCTET STRING`。加密的 RSA PEM 和 OpenSSH 容器的 EC 密钥都正常 | 迁移前 libssh2+OpenSSL 能读。用户侧用 `ssh-keygen -p -m OpenSSH -f <key>` 转换即可；代码侧需要实现 DEK-Info 解密（AES-CBC + MD5 KDF）后交给 SEC1 解析器 |
 | K12 | 限制 | 不再支持 SHA-1 密钥交换，只提供 `diffie-hellman-group14-sha1` 的服务器连不上 | 传输层（russh）没有实现任何 SHA-1 KEX，`algo set` 会把该值存下来，连接时才报 `unsupported SSH algorithm 'diffie-hellman-group14-sha1' in preference list (supported: ...)`。受影响的是 OpenSSH 6.5 以前默认配置的设备 | `transport/russh_impl/mod.rs` `apply_prefs` / `russh::kex`。libssh2 时代可用。没有本地修复路径，只能等上游或换后端；错误信息已明确指出 |
 

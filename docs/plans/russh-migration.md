@@ -505,6 +505,32 @@ agent::tests::an_unconnected_agent_refuses_instead_of_pretending   两平台都�
 
 ---
 
+### 10.3 后续：传输层升到 0.64.1（2026-10-22 晚）
+
+本文前面所有关于 0.60.3 的结论都是迁移当时的实测记录，保留不动；但**依赖已经不在 0.60.3**。
+
+升级的原因是 K10（RSA 用户证书）：0.60 的 `client_make_to_sign` 用
+`cert.algorithm().to_certificate_type()` 拼证书的算法名，而 `Certificate::algorithm()`
+返回的是证书里那把公钥的算法（`ssh-rsa`），所以 RSA 证书永远发出
+`ssh-rsa-cert-v01@openssh.com` —— OpenSSH 8.8+ 直接拒，连签名都没看。0.64.1 给这个函数加了
+`certificate_hash_alg` 参数并 `with_hash_alg(...)`，同一个证书 blob 就能以
+`rsa-sha2-512-cert-v01@openssh.com` 发出。
+
+同时取消的两条限制/代价：
+
+- 0.60 要求的那排 RustCrypto 预发布 pin 收窄了：`ed25519-dalek` 从 `=3.0.0-pre.6` 到正式版 `3`，
+  `pkcs5` 从 `=0.8.0-rc.13` 到 `0.8` 线；`pkcs1` 仍是 `=0.8.0-rc.4`，因为 0.64.1 自己也钉着它。
+- `Signer` 的公开路径从 `russh::auth::Signer`（模块私有）变成 `russh::Signer`。
+
+API 变更只有两处，都在 `ClientHandler`：`check_server_key` 现在收
+`PublicKeyOrCertificate`（主机证书要解出它担保的那把公钥再记指纹），
+`server_channel_open_forwarded_tcpip` 多了一个 `ChannelOpenHandle`，**必须显式 `accept()`**
+——丢弃它会发出一个管理性拒绝，而转发注册表还握着另一端。
+
+验证：`scripts/e2e-ssh-matrix.sh` 在 OpenSSH 8.3/8.8/9.3/9.9/10.3 + Dropbear 上
+**184 passed / 0 failed**，其中每个 OpenSSH 版本的 `rsa3072`、`rsa3072-pem` 证书用例都通过；
+服务端日志为 `Accepted publickey ... RSA-CERT ... CA ED25519`。
+
 ## 11. 验证矩阵
 
 | 验证项 | macOS | Windows | CI |

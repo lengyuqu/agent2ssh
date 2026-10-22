@@ -13,7 +13,7 @@
 //!
 //! # No wrapper signer is needed
 //!
-//! `docs/plans/russh-migration.md` §10.3 says russh 0.60 ships no `Signer`
+//! `docs/plans/russh-migration.md` §10.3 said the transport shipped no `Signer`
 //! and that an `AgentSigner` must be written. That is a grep artifact: the
 //! implementation exists at `auth.rs:180`, but its header wraps —
 //!
