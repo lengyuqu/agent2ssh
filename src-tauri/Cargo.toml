@@ -34,6 +34,8 @@ required-features = ["daemon"]
 default = ["tauri"]
 tauri = ["dep:tauri", "dep:tauri-plugin-shell", "dep:tauri-plugin-dialog", "dep:tauri-plugin-updater", "dep:tauri-plugin-single-instance", "dep:tauri-build"]
 daemon = ["dep:axum", "dep:tower", "dep:tower-http", "dep:futures-util", "dep:tracing", "dep:tracing-subscriber"]
+# Second SSH backend. Off by default: `legacy_ssh2` still ships.
+transport-russh = ["dep:russh", "dep:russh-sftp", "dep:pkcs1", "dep:pkcs5"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [], optional = true }
@@ -61,7 +63,6 @@ tower-http = { version = "0.5", features = ["cors"], optional = true }
 toml = "0.8"
 reqwest = { version = "0.12", features = ["json", "blocking"] }
 ssh2 = "0.9"
-ssh-key = { version = "0.7.0-rc.10", features = ["ed25519"] }
 # Key generation for the one RSA encoding libssh2's WinCNG backend can read.
 # `ssh-key` generates RSA but cannot write a private key as traditional PEM —
 # it only emits the OpenSSH container, whose parser is absent from WinCNG — so
@@ -69,6 +70,20 @@ ssh-key = { version = "0.7.0-rc.10", features = ["ed25519"] }
 # `ssh-key` 0.7.0-rc.10 asks for `rsa 0.10.0-rc.18`, and `rand_core` 0.10, both
 # pre-releases, for a code path this crate does not use.
 rsa = "0.9"
+# Ed25519 key generation. Replaces `ssh-key`, whose exact pins on RustCrypto
+# pre-releases cannot coexist with russh 0.60 (see docs/plans/russh-migration.md
+# §5). Only the public-key derivation is needed from it; the OpenSSH container
+# is written by `openssh_key` so no second parser is involved.
+ed25519-dalek = "=3.0.0-pre.6"
+russh = { version = "0.60.3", default-features = false, features = ["rsa", "ring"], optional = true }
+russh-sftp = { version = "2", default-features = false, optional = true }
+# russh 0.60.1 was written against RustCrypto pre-releases whose API was
+# renamed and re-generalised before those versions went final (pkcs5 0.8.1
+# renamed pbkdf2_sha256_aes256cbc, pkcs1 0.8.0-rc.5 regeneralised
+# RsaPrivateKey<B>). Pinning the exact pre-releases russh declares is what
+# keeps it compiling; a plain `cargo update` drifts past them again.
+pkcs1 = { version = "=0.8.0-rc.4", default-features = false, optional = true }
+pkcs5 = { version = "=0.8.0-rc.13", default-features = false, optional = true }
 # Traits only: `rsa` requires a `CryptoRngCore`, and the adapter in `keys.rs`
 # fulfils it from the crate's existing `fill_entropy`. The `getrandom` feature is
 # deliberately left off so this does not add a second entropy source — nor a

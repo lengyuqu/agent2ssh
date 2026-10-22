@@ -29,6 +29,7 @@ pub mod limits;
 pub mod local_exec;
 pub mod mcp_binding;
 pub mod notify;
+pub mod openssh_key;
 pub mod osc_ipc;
 pub mod path_resolver;
 pub mod playbook;

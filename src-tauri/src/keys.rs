@@ -5,10 +5,6 @@ use rsa::pkcs1::{EncodeRsaPrivateKey, LineEnding as PemLineEnding};
 use rsa::traits::PublicKeyParts;
 use rsa::RsaPrivateKey;
 use serde::{Deserialize, Serialize};
-use ssh_key::{
-    private::{Ed25519Keypair, KeypairData},
-    LineEnding, PrivateKey,
-};
 use std::path::PathBuf;
 use zeroize::Zeroizing;
 
@@ -339,15 +335,20 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
 }
 
 /// Generate an Ed25519 pair in the OpenSSH container format.
+///
+/// The container is written by [`crate::openssh_key`] rather than a library:
+/// the only crate that could do it here (`ssh-key`) pins RustCrypto
+/// pre-releases that cannot coexist with russh's, and the format is short
+/// enough to own. The public key is still derived by `ed25519-dalek`, so no key
+/// arithmetic is hand-rolled.
 fn generate_ed25519_pair(comment: &str) -> Result<GeneratedKeyPair> {
-    let mut seed = [0u8; ssh_key::private::Ed25519PrivateKey::BYTE_SIZE];
+    let mut seed = [0u8; 32];
     fill_entropy(&mut seed)?;
-    let keypair = Ed25519Keypair::from_seed(&seed);
-    let private_key = PrivateKey::new(KeypairData::from(keypair), comment)?;
+    let material = crate::openssh_key::ed25519_material(seed, comment);
 
     Ok(GeneratedKeyPair {
-        private_pem: private_key.to_openssh(LineEnding::LF)?,
-        public_openssh: private_key.public_key().to_openssh()?,
+        private_pem: Zeroizing::new(crate::openssh_key::encode_private(&material)),
+        public_openssh: crate::openssh_key::encode_public(&material.public, comment),
         key_type: KeyAlgorithm::Ed25519.as_str(),
     })
 }
@@ -691,6 +692,7 @@ mod tests {
     use super::*;
     use crate::ssh_key_format::{detect_private_key_format, format_name, PrivateKeyFormat};
     use crate::store::CONFIG_DIR_ENV;
+    use rsa::pkcs1::DecodeRsaPrivateKey;
     use std::path::Path;
 
     #[cfg(test)]
@@ -754,14 +756,14 @@ mod tests {
             let private_raw = std::fs::read_to_string(&result.private_path).unwrap();
             let public_raw = std::fs::read_to_string(&result.public_path).unwrap();
 
-            let private_key = PrivateKey::from_openssh(&private_raw).unwrap();
-            assert_eq!(private_key.algorithm(), ssh_key::Algorithm::Ed25519);
-            assert_eq!(private_key.comment().as_str().unwrap(), "agent2ssh-test");
+            let parsed = crate::openssh_key::parse_private(&private_raw)
+                .expect("the container this app writes must parse back");
+            assert_eq!(parsed.comment, "agent2ssh-test");
             assert!(private_raw.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----"));
             assert!(public_raw.starts_with("ssh-ed25519 "));
             assert_eq!(
                 public_raw.trim(),
-                private_key.public_key().to_openssh().unwrap()
+                crate::openssh_key::encode_public(&parsed.public, &parsed.comment)
             );
             assert_eq!(result.key_type, "ed25519");
         });
@@ -795,11 +797,32 @@ mod tests {
             assert!(public_raw.starts_with("ssh-rsa "));
             assert!(public_raw.ends_with("agent2ssh-test\n"), "{public_raw}");
 
-            // Cross-check the hand-rolled encoding against the library parser
-            // the rest of the app reads keys with, so the two cannot drift.
-            let parsed = ssh_key::PublicKey::from_openssh(public_raw.trim()).unwrap();
-            assert_eq!(parsed.algorithm(), ssh_key::Algorithm::Rsa { hash: None });
-            assert_eq!(parsed.comment().as_str().unwrap(), "agent2ssh-test");
+            // Cross-check the hand-rolled public encoding against the private
+            // key the `rsa` crate produced: both sides decode independently, so
+            // an error in either the exponent or the modulus shows up here
+            // rather than at authentication time.
+            let private = rsa::RsaPrivateKey::from_pkcs1_pem(&private_raw)
+                .expect("the PEM we wrote must decode as PKCS#1");
+            let parsed = crate::openssh_key::parse_public_key_line(public_raw.trim()).unwrap();
+            assert_eq!(parsed.algorithm, "ssh-rsa");
+            assert_eq!(parsed.comment, "agent2ssh-test");
+            let (exponent, modulus) =
+                crate::openssh_key::rsa_exponent_and_modulus(&parsed.blob).unwrap();
+            let strip_leading_zeros = |bytes: &[u8]| {
+                bytes
+                    .iter()
+                    .skip_while(|b| **b == 0)
+                    .copied()
+                    .collect::<Vec<u8>>()
+            };
+            assert_eq!(
+                strip_leading_zeros(&exponent),
+                strip_leading_zeros(&private.e().to_bytes_be())
+            );
+            assert_eq!(
+                strip_leading_zeros(&modulus),
+                strip_leading_zeros(&private.n().to_bytes_be())
+            );
         });
     }
 
