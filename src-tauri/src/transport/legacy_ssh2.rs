@@ -225,8 +225,10 @@ impl Session {
         Ok(self.inner.auth_methods(username)?)
     }
 
-    pub fn banner(&self) -> Option<&str> {
-        self.inner.banner()
+    /// Owned for the same reason as `host_key`: the russh backend captures the
+    /// text in a handler callback and cannot lend it out of the session.
+    pub fn banner(&self) -> Option<String> {
+        self.inner.banner().map(str::to_string)
     }
 
     /// Owned rather than borrowed: the russh backend can only produce a copy

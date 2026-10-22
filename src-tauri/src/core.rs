@@ -1878,7 +1878,7 @@ pub async fn sftp_upload_core_with_source(
                 &mut local_file,
                 &mut remote_file,
                 &cancel,
-                crate::sftp_transfer::upload_chunk_for_server(session.banner()),
+                crate::sftp_transfer::upload_chunk_for_server(session.banner().as_deref()),
             )?;
             Ok(offset + copied)
         })();

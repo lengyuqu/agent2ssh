@@ -20,10 +20,13 @@
 //! remaining S1 work, listed in `docs/plans/russh-migration.md`:
 //!
 //! - `agent` — the Windows Pageant branch cannot be verified on this machine,
-//!   and writing it blind is worse than naming it.
+//!   and writing it blind is worse than naming it. See the Windows checklist in
+//!   `docs/plans/russh-migration.md` §10; the work is a `Signer` wrapper because
+//!   russh 0.60 ships none.
 //! - `auth_methods` — russh does not expose the server's advertised list, so the
 //!   "do not attempt a method the server never offered" short-circuit is gone.
-//! - `banner` — always `None`; the handler would have to capture it.
+//!   `embedded_ssh` prints "[unknown]" and tries anyway, which fails closed at
+//!   the server.
 //! - `set_keepalive` — only effective before `handshake()`; russh fixes the
 //!   interval at connect time. `keepalive_send()` still works afterwards.
 
@@ -133,6 +136,7 @@ struct CapturedKey {
 /// before the caller can compare it.
 struct ClientHandler {
     host_key: Arc<Mutex<Option<CapturedKey>>>,
+    banner: Arc<Mutex<Option<String>>>,
     forwards: Arc<forward::Registry>,
 }
 
@@ -155,6 +159,19 @@ impl russh::client::Handler for ClientHandler {
             *self.host_key.lock().unwrap() = Some(CapturedKey { blob, kind });
         }
         Ok(true)
+    }
+
+    /// The server's pre-authentication banner (RFC 4252 §5.4).
+    ///
+    /// Captured rather than ignored: `core.rs` feeds it to the SFTP chunk-size
+    /// heuristic, which sizes transfers by the server implementation.
+    async fn auth_banner(
+        &mut self,
+        banner: &str,
+        _session: &mut russh::client::Session,
+    ) -> Result<(), Self::Error> {
+        *self.banner.lock().unwrap() = Some(banner.to_string());
+        Ok(())
     }
 
     /// An inbound connection for a forward we asked for.
@@ -187,6 +204,7 @@ struct Pending {
 struct Inner {
     settings: Arc<channel::Settings>,
     host_key: Arc<Mutex<Option<CapturedKey>>>,
+    banner: Arc<Mutex<Option<String>>>,
     authenticated: AtomicBool,
     pending: Mutex<Pending>,
     forwards: Arc<forward::Registry>,
@@ -211,6 +229,7 @@ impl Session {
                 forwards: Arc::new(forward::Registry::new(Arc::clone(&settings))),
                 settings,
                 host_key: Arc::new(Mutex::new(None)),
+                banner: Arc::new(Mutex::new(None)),
                 authenticated: AtomicBool::new(false),
                 pending: Mutex::new(Pending::default()),
                 handle: tokio::sync::Mutex::new(None),
@@ -245,6 +264,7 @@ impl Session {
 
         let handler = ClientHandler {
             host_key: Arc::clone(&self.inner.host_key),
+            banner: Arc::clone(&self.inner.banner),
             forwards: Arc::clone(&self.inner.forwards),
         };
 
@@ -473,8 +493,8 @@ impl Session {
         Err(unsupported("auth_methods"))
     }
 
-    pub fn banner(&self) -> Option<&str> {
-        None
+    pub fn banner(&self) -> Option<String> {
+        self.inner.banner.lock().unwrap().clone()
     }
 
     pub fn host_key(&self) -> Option<(Vec<u8>, HostKeyKind)> {
