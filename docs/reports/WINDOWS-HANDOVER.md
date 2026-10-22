@@ -90,4 +90,6 @@
 | clippy ×3 | CLI+MCP / daemon / tauri lib | 全绿，`-D warnings` |
 | agent 认证（真机） | `ssh-agent` + `ssh-add` 两个身份，只授权第二个 | exit 0，且负对照失败 |
 
-**没有跑过的**：PuTTY Pageant 本身（2026-10-23 装好 PuTTY 0.85 再试，仍未能验证——空 Pageant 下 `plink -agent` 能立即返回，一旦挂上密钥两条客户端都卡在 `Requesting keys`，详见 [../KNOWN-ISSUES.md](../KNOWN-ISSUES.md) §3.1；代码里现在是命名管道优先、Pageant 兜底）；`e2e-ssh-matrix.sh` 的全矩阵（2026-10-22 已在本机跑通：OpenSSH 8.3/8.8/9.3/9.9/10.3 + Dropbear + legacy，**190 passed / 0 failed**，见 [../KNOWN-ISSUES.md](../KNOWN-ISSUES.md) §3）。
+**Pageant 补充验收（2026-10-23）已通过**：Windows 11 上的 PuTTY / Pageant / plink 0.85 对 Docker 中的 OpenSSH 10.3，通过 Ed25519、仅授权第二个身份、RSA-3072（服务端对 RSA 签名仅接受 SHA-2）及 1 MiB SFTP 往返；空 agent、未授权密钥和关闭 Pageant 均按预期失败，重新加载后恢复。全新配置目录和不含密钥文件 / 密码的 host 隔离了本轮配置，OpenSSH agent 服务保持停止且禁用，诊断日志确认 `auth_method = agent`。密钥由应用生成，经临时 Alpine 容器的 `putty` 包所提供的 `puttygen` 转为 PPK。此前加载后卡住的现象没有复现，旧根因未查明；本轮未修改传输实现。OpenSSH 命名管道可打开但无可用身份时仍不会再试 Pageant，不能把本轮结果扩大为两种 agent 共存时的自动回退保证。完整证据见 [Pageant 验收报告](PAGEANT-ACCEPTANCE-2026-10-23.md)。
+
+`e2e-ssh-matrix.sh` 的全矩阵（2026-10-22 已在本机跑通：OpenSSH 8.3/8.8/9.3/9.9/10.3 + Dropbear + legacy，**190 passed / 0 failed**，见 [../KNOWN-ISSUES.md](../KNOWN-ISSUES.md) §3）。

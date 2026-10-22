@@ -1,0 +1,329 @@
+{
+  "date": "2026-10-23",
+  "timezone": "Asia/Shanghai",
+  "commit": "a56d2d9c0aaf7bf60636eb073c6ad6e9eeb675d9",
+  "os": {
+    "Caption": "Microsoft Windows 11 专业版",
+    "Version": "10.0.26300",
+    "BuildNumber": "26300"
+  },
+  "putty_version": "0.85",
+  "ssh_server": "OpenSSH_10.3",
+  "container_image": "lscr.io/linuxserver/openssh-server:version-10.3_p1-r1",
+  "container_binding": "127.0.0.1:22197 -> 2222",
+  "openssh_agent_service": "Stopped / Disabled",
+  "openssh_pipe_open": false,
+  "binary_sha256": "0223688DFB1FFE8E4882193FDE7AC62A8D476F07B9F35CBD7601405560EC043E",
+  "host_profile": {
+    "schema_version": 1,
+    "groups": [
+      {
+        "id": "default",
+        "name": "Default",
+        "color": "#4A6CF7",
+        "sort_order": 0
+      }
+    ],
+    "proxies": [],
+    "hosts": [
+      {
+        "name": "pageant-test",
+        "host": "127.0.0.1",
+        "user": "tester",
+        "port": 22197,
+        "key_path": null,
+        "password": null,
+        "jump_host": null,
+        "proxy_id": null,
+        "risk_override": null,
+        "tags": [],
+        "group": "default",
+        "env": null,
+        "role": null,
+        "owner": null,
+        "init_command": null,
+        "passphrase": null
+      }
+    ]
+  },
+  "server_pubkey_algorithms": "pubkeyacceptedalgorithms ssh-ed25519-cert-v01@openssh.com,ecdsa-sha2-nistp256-cert-v01@openssh.com,ecdsa-sha2-nistp384-cert-v01@openssh.com,ecdsa-sha2-nistp521-cert-v01@openssh.com,sk-ssh-ed25519-cert-v01@openssh.com,sk-ecdsa-sha2-nistp256-cert-v01@openssh.com,webauthn-sk-ecdsa-sha2-nistp256-cert-v01@openssh.com,rsa-sha2-512-cert-v01@openssh.com,rsa-sha2-256-cert-v01@openssh.com,ssh-ed25519,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,ecdsa-sha2-nistp521,sk-ssh-ed25519@openssh.com,sk-ecdsa-sha2-nistp256@openssh.com,webauthn-sk-ecdsa-sha2-nistp256@openssh.com,rsa-sha2-512,rsa-sha2-256",
+  "cases": [
+    {
+      "name": "00-no-pageant",
+      "exit_code": 1,
+      "timed_out": false,
+      "elapsed_ms": 888,
+      "stdout": "",
+      "stderr": "Error: SSH authentication failed for 'pageant-test': no key_path, password, ssh-agent identity, or default key (~/.ssh/id_rsa, id_ed25519, id_ecdsa) succeeded\n"
+    },
+    {
+      "name": "01-empty-agent-identities",
+      "exit_code": 0,
+      "timed_out": false,
+      "elapsed_ms": 561,
+      "stdout": "\nrunning 1 test\nidentities: 0\ntest transport::russh_impl::agent::tests::pageant_lists_identities ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 744 filtered out; finished in 0.04s\n\n",
+      "stderr": ""
+    },
+    {
+      "name": "02-empty-agent-exec",
+      "exit_code": 1,
+      "timed_out": false,
+      "elapsed_ms": 1994,
+      "stdout": "",
+      "stderr": "Error: SSH authentication failed for 'pageant-test': no key_path, password, ssh-agent identity, or default key (~/.ssh/id_rsa, id_ed25519, id_ecdsa) succeeded\n"
+    },
+    {
+      "name": "03-denied-key-identities",
+      "exit_code": 0,
+      "timed_out": false,
+      "elapsed_ms": 173,
+      "stdout": "\nrunning 1 test\nidentities: 1\n  ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIIeNTZvRlhYO0SD6PbcdtbkVGgwIOyGFkZCUiu3xb57 pageant-denied-20261023\ntest transport::russh_impl::agent::tests::pageant_lists_identities ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 744 filtered out; finished in 0.01s\n\n",
+      "stderr": ""
+    },
+    {
+      "name": "04-denied-key-exec",
+      "exit_code": 1,
+      "timed_out": false,
+      "elapsed_ms": 692,
+      "stdout": "",
+      "stderr": "Error: SSH authentication failed for 'pageant-test': no key_path, password, ssh-agent identity, or default key (~/.ssh/id_rsa, id_ed25519, id_ecdsa) succeeded\n"
+    },
+    {
+      "name": "05-two-keys-identities",
+      "exit_code": 0,
+      "timed_out": false,
+      "elapsed_ms": 112,
+      "stdout": "\nrunning 1 test\nidentities: 2\n  ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGX4p0zpaIXlMFTlZmFC9gkVhRTOMLy1iTl6S8ilOIdw pageant-acceptance-20261023\n  ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIIeNTZvRlhYO0SD6PbcdtbkVGgwIOyGFkZCUiu3xb57 pageant-denied-20261023\ntest transport::russh_impl::agent::tests::pageant_lists_identities ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 744 filtered out; finished in 0.01s\n\n",
+      "stderr": ""
+    },
+    {
+      "name": "06-pageant-agent2ssh-exec",
+      "exit_code": 0,
+      "timed_out": false,
+      "elapsed_ms": 1781,
+      "stdout": "{\r\n  \"host\": \"pageant-test\",\r\n  \"command\": \"echo pageant-ok\",\r\n  \"exit_code\": 0,\r\n  \"stdout\": \"pageant-ok\\n\",\r\n  \"stderr\": \"\",\r\n  \"duration_ms\": 1393,\r\n  \"risk_level\": \"low\",\r\n  \"truncated\": false,\r\n  \"dropped_bytes\": 0,\r\n  \"side_effect\": null\r\n}",
+      "stderr": ""
+    },
+    {
+      "name": "07-pageant-plink-exec",
+      "exit_code": 0,
+      "timed_out": false,
+      "elapsed_ms": 670,
+      "stdout": "plink-pageant-ok\n",
+      "stderr": "Looking up host \"127.0.0.1\" for SSH connection\r\nConnecting to 127.0.0.1 port 22197\r\nWe claim version: SSH-2.0-PuTTY_Release_0.85\r\nConnected to 127.0.0.1 (from 127.0.0.1:57884)\r\nRemote version: SSH-2.0-OpenSSH_10.3\r\nUsing SSH protocol version 2\r\nNo GSSAPI security context available\r\nEnabling strict key exchange semantics\r\nDoing NTRU Prime / Curve25519 hybrid key exchange, using hash SHA-512 (unaccelerated)\r\nServer also has ecdsa-sha2-nistp256/rsa-sha2-512/rsa-sha2-256 host keys, but we don't know any of them\r\nHost key fingerprint is:\r\nssh-ed25519 255 SHA256:Bn/rOiOrhWwJVZ1pmkjNiGlAEMFrGJiMNhDLnkhXfuE\r\nInitialised AES-256 SDCTR (AES-NI accelerated) outbound encryption\r\nInitialised HMAC-SHA-256 (SHA-NI accelerated) outbound MAC algorithm\r\nInitialised AES-256 SDCTR (AES-NI accelerated) inbound encryption\r\nInitialised HMAC-SHA-256 (SHA-NI accelerated) inbound MAC algorithm\r\nPageant is running. Requesting keys.\r\nPageant has 2 SSH-2 keys\r\nUsing username \"tester\".\r\nTrying Pageant key #0\r\nAuthenticating with public key \"pageant-acceptance-20261023\" from agent\r\nSending Pageant's response\r\nAccess granted\r\nOpening main session channel\r\nRemote debug message: /config/.ssh/authorized_keys:1: key options: agent-forwarding port-forwarding pty user-rc x11-forwarding\r\nRemote debug message: /config/.ssh/authorized_keys:1: key options: agent-forwarding port-forwarding pty user-rc x11-forwarding\r\nOpened main channel\r\nStarted a shell/command\r\n"
+    },
+    {
+      "name": "08-second-identity-agent2ssh",
+      "exit_code": 0,
+      "timed_out": false,
+      "elapsed_ms": 1250,
+      "stdout": "{\r\n  \"host\": \"pageant-test\",\r\n  \"command\": \"echo pageant-second-key-ok\",\r\n  \"exit_code\": 0,\r\n  \"stdout\": \"pageant-second-key-ok\\n\",\r\n  \"stderr\": \"\",\r\n  \"duration_ms\": 966,\r\n  \"risk_level\": \"low\",\r\n  \"truncated\": false,\r\n  \"dropped_bytes\": 0,\r\n  \"side_effect\": null\r\n}",
+      "stderr": ""
+    },
+    {
+      "name": "09-second-identity-plink",
+      "exit_code": 0,
+      "timed_out": false,
+      "elapsed_ms": 262,
+      "stdout": "plink-second-key-ok\n",
+      "stderr": "Looking up host \"127.0.0.1\" for SSH connection\r\nConnecting to 127.0.0.1 port 22197\r\nWe claim version: SSH-2.0-PuTTY_Release_0.85\r\nConnected to 127.0.0.1 (from 127.0.0.1:56165)\r\nRemote version: SSH-2.0-OpenSSH_10.3\r\nUsing SSH protocol version 2\r\nNo GSSAPI security context available\r\nEnabling strict key exchange semantics\r\nDoing NTRU Prime / Curve25519 hybrid key exchange, using hash SHA-512 (unaccelerated)\r\nServer also has ecdsa-sha2-nistp256/rsa-sha2-512/rsa-sha2-256 host keys, but we don't know any of them\r\nHost key fingerprint is:\r\nssh-ed25519 255 SHA256:Bn/rOiOrhWwJVZ1pmkjNiGlAEMFrGJiMNhDLnkhXfuE\r\nInitialised AES-256 SDCTR (AES-NI accelerated) outbound encryption\r\nInitialised HMAC-SHA-256 (SHA-NI accelerated) outbound MAC algorithm\r\nInitialised AES-256 SDCTR (AES-NI accelerated) inbound encryption\r\nInitialised HMAC-SHA-256 (SHA-NI accelerated) inbound MAC algorithm\r\nPageant is running. Requesting keys.\r\nPageant has 2 SSH-2 keys\r\nUsing username \"tester\".\r\nTrying Pageant key #0\r\nServer refused our key\r\nTrying Pageant key #1\r\nAuthenticating with public key \"pageant-denied-20261023\" from agent\r\nSending Pageant's response\r\nAccess granted\r\nOpening main session channel\r\nRemote debug message: /config/.ssh/authorized_keys:1: key options: agent-forwarding port-forwarding pty user-rc x11-forwarding\r\nRemote debug message: /config/.ssh/authorized_keys:1: key options: agent-forwarding port-forwarding pty user-rc x11-forwarding\r\nOpened main channel\r\nStarted a shell/command\r\nSession sent command exit status 0\r\nMain session channel closed\r\nAll channels closed\r\n"
+    },
+    {
+      "name": "10-pageant-sftp-put",
+      "exit_code": 0,
+      "timed_out": false,
+      "elapsed_ms": 1299,
+      "stdout": "{\r\n  \"host\": \"pageant-test\",\r\n  \"local_path\": \"<acceptance-dir>/sftp-source.bin\",\r\n  \"remote_path\": \"/tmp/pageant-roundtrip.bin\",\r\n  \"direction\": \"upload\",\r\n  \"duration_ms\": 1039,\r\n  \"bytes\": 1048576\r\n}",
+      "stderr": ""
+    },
+    {
+      "name": "11-pageant-sftp-get",
+      "exit_code": 0,
+      "timed_out": false,
+      "elapsed_ms": 1262,
+      "stdout": "{\r\n  \"host\": \"pageant-test\",\r\n  \"local_path\": \"<acceptance-dir>/sftp-returned.bin\",\r\n  \"remote_path\": \"/tmp/pageant-roundtrip.bin\",\r\n  \"direction\": \"download\",\r\n  \"duration_ms\": 1035,\r\n  \"bytes\": 1048576\r\n}",
+      "stderr": ""
+    },
+    {
+      "name": "13-rsa-agent2ssh",
+      "exit_code": 0,
+      "timed_out": false,
+      "elapsed_ms": 2189,
+      "stdout": "{\r\n  \"host\": \"pageant-test\",\r\n  \"command\": \"echo pageant-rsa-ok\",\r\n  \"exit_code\": 0,\r\n  \"stdout\": \"pageant-rsa-ok\\n\",\r\n  \"stderr\": \"\",\r\n  \"duration_ms\": 1937,\r\n  \"risk_level\": \"low\",\r\n  \"truncated\": false,\r\n  \"dropped_bytes\": 0,\r\n  \"side_effect\": null\r\n}",
+      "stderr": ""
+    },
+    {
+      "name": "14-rsa-plink",
+      "exit_code": 0,
+      "timed_out": false,
+      "elapsed_ms": 205,
+      "stdout": "plink-rsa-ok\n",
+      "stderr": "Looking up host \"127.0.0.1\" for SSH connection\r\nConnecting to 127.0.0.1 port 22197\r\nWe claim version: SSH-2.0-PuTTY_Release_0.85\r\nConnected to 127.0.0.1 (from 127.0.0.1:63561)\r\nRemote version: SSH-2.0-OpenSSH_10.3\r\nUsing SSH protocol version 2\r\nNo GSSAPI security context available\r\nEnabling strict key exchange semantics\r\nDoing NTRU Prime / Curve25519 hybrid key exchange, using hash SHA-512 (unaccelerated)\r\nServer also has ecdsa-sha2-nistp256/rsa-sha2-512/rsa-sha2-256 host keys, but we don't know any of them\r\nHost key fingerprint is:\r\nssh-ed25519 255 SHA256:Bn/rOiOrhWwJVZ1pmkjNiGlAEMFrGJiMNhDLnkhXfuE\r\nInitialised AES-256 SDCTR (AES-NI accelerated) outbound encryption\r\nInitialised HMAC-SHA-256 (SHA-NI accelerated) outbound MAC algorithm\r\nInitialised AES-256 SDCTR (AES-NI accelerated) inbound encryption\r\nInitialised HMAC-SHA-256 (SHA-NI accelerated) inbound MAC algorithm\r\nPageant is running. Requesting keys.\r\nPageant has 3 SSH-2 keys\r\nUsing username \"tester\".\r\nTrying Pageant key #0\r\nAuthenticating with public key \"imported-openssh-key\" from agent\r\nSending Pageant's response\r\nAccess granted\r\nOpening main session channel\r\nRemote debug message: /config/.ssh/authorized_keys:1: key options: agent-forwarding port-forwarding pty user-rc x11-forwarding\r\nRemote debug message: /config/.ssh/authorized_keys:1: key options: agent-forwarding port-forwarding pty user-rc x11-forwarding\r\nOpened main channel\r\nStarted a shell/command\r\nSession sent command exit status 0\r\nMain session channel closed\r\nAll channels closed\r\n"
+    },
+    {
+      "name": "15-pageant-stopped-negative",
+      "exit_code": 1,
+      "timed_out": false,
+      "elapsed_ms": 653,
+      "stdout": "",
+      "stderr": "Error: SSH authentication failed for 'pageant-test': no key_path, password, ssh-agent identity, or default key (~/.ssh/id_rsa, id_ed25519, id_ecdsa) succeeded\n"
+    },
+    {
+      "name": "16-pageant-restarted-positive",
+      "exit_code": 0,
+      "timed_out": false,
+      "elapsed_ms": 2289,
+      "stdout": "{\r\n  \"host\": \"pageant-test\",\r\n  \"command\": \"echo pageant-restored-ok\",\r\n  \"exit_code\": 0,\r\n  \"stdout\": \"pageant-restored-ok\\n\",\r\n  \"stderr\": \"\",\r\n  \"duration_ms\": 2047,\r\n  \"risk_level\": \"low\",\r\n  \"truncated\": false,\r\n  \"dropped_bytes\": 0,\r\n  \"side_effect\": null\r\n}",
+      "stderr": ""
+    }
+  ],
+  "sftp_hashes": [
+    {
+      "Hash": "D6BC953819DF8CE55873697D9D23630B54601E14270D191152E7403F3A28467D",
+      "Path": "<acceptance-dir>\\sftp-source.bin"
+    },
+    {
+      "Hash": "D6BC953819DF8CE55873697D9D23630B54601E14270D191152E7403F3A28467D",
+      "Path": "<acceptance-dir>\\sftp-returned.bin"
+    }
+  ],
+  "authentication_records": [
+    {
+      "id": "55ba247c-08cf-4d88-8230-6c2f0ca25680",
+      "ts": "2026-10-22T19:37:43.099100900+00:00",
+      "level": "info",
+      "component": "embedded_ssh",
+      "message": "ssh connection authenticated",
+      "fields": {
+        "address": "127.0.0.1:22197",
+        "auth_method": "agent",
+        "fingerprint_sha256": "[REDACTED]",
+        "host": "pageant-test",
+        "host_key_algorithm": "ssh-ed25519",
+        "jump_host": null,
+        "username": "tester"
+      }
+    },
+    {
+      "id": "6d46556a-48fe-4060-aff2-92e247296d7f",
+      "ts": "2026-10-22T19:38:37.684937200+00:00",
+      "level": "info",
+      "component": "embedded_ssh",
+      "message": "ssh connection authenticated",
+      "fields": {
+        "address": "127.0.0.1:22197",
+        "auth_method": "agent",
+        "fingerprint_sha256": "[REDACTED]",
+        "host": "pageant-test",
+        "host_key_algorithm": "ssh-ed25519",
+        "jump_host": null,
+        "username": "tester"
+      }
+    },
+    {
+      "id": "7228c43c-a2c7-4985-9564-2a23304e14a2",
+      "ts": "2026-10-22T19:38:57.265425500+00:00",
+      "level": "info",
+      "component": "embedded_ssh",
+      "message": "ssh connection authenticated",
+      "fields": {
+        "address": "127.0.0.1:22197",
+        "auth_method": "agent",
+        "fingerprint_sha256": "[REDACTED]",
+        "host": "pageant-test",
+        "host_key_algorithm": "ssh-ed25519",
+        "jump_host": null,
+        "username": "tester"
+      }
+    },
+    {
+      "id": "0ea01a7a-e783-4aab-bf8e-e1edf6054294",
+      "ts": "2026-10-22T19:38:58.559736900+00:00",
+      "level": "info",
+      "component": "embedded_ssh",
+      "message": "ssh connection authenticated",
+      "fields": {
+        "address": "127.0.0.1:22197",
+        "auth_method": "agent",
+        "fingerprint_sha256": "[REDACTED]",
+        "host": "pageant-test",
+        "host_key_algorithm": "ssh-ed25519",
+        "jump_host": null,
+        "username": "tester"
+      }
+    },
+    {
+      "id": "783d12d1-3fb6-4915-ad9e-a7fa4f00469a",
+      "ts": "2026-10-22T19:39:21.516683200+00:00",
+      "level": "info",
+      "component": "embedded_ssh",
+      "message": "ssh connection authenticated",
+      "fields": {
+        "address": "127.0.0.1:22197",
+        "auth_method": "agent",
+        "fingerprint_sha256": "[REDACTED]",
+        "host": "pageant-test",
+        "host_key_algorithm": "ssh-ed25519",
+        "jump_host": null,
+        "username": "tester"
+      }
+    },
+    {
+      "id": "39180011-0b41-412c-bd9f-179bd791fce4",
+      "ts": "2026-10-22T19:39:48.034272800+00:00",
+      "level": "info",
+      "component": "embedded_ssh",
+      "message": "ssh connection authenticated",
+      "fields": {
+        "address": "127.0.0.1:22197",
+        "auth_method": "agent",
+        "fingerprint_sha256": "[REDACTED]",
+        "host": "pageant-test",
+        "host_key_algorithm": "ssh-ed25519",
+        "jump_host": null,
+        "username": "tester"
+      }
+    }
+  ],
+  "library_tests": {
+    "command": "cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib",
+    "passed": 744,
+    "seconds": 75.47,
+    "failed": 0,
+    "ignored": 1
+  },
+  "notes": [
+    "Existing uncommitted ignored identity probe was preserved.",
+    "All child probes had a 25-second outer process watchdog.",
+    "Historical stuck key load was not reproduced; its root cause remains unconfirmed."
+  ],
+  "cleanup": {
+    "test_container_removed": true,
+    "test_private_keys_and_ppk_removed": true,
+    "test_pageant_stopped": true,
+    "original_ssh_agent_service_unchanged": true
+  },
+  "test_public_keys": [
+    {
+      "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGX4p0zpaIXlMFTlZmFC9gkVhRTOMLy1iTl6S8ilOIdw pageant-acceptance-20261023",
+      "fingerprint": "256 SHA256:9a9BLaWZdRdzH27OLglmL1Fsb2WHNAmtgqf+j0B5MfI pageant-acceptance-20261023 (ED25519)",
+      "name": "pageant-accept"
+    },
+    {
+      "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIIeNTZvRlhYO0SD6PbcdtbkVGgwIOyGFkZCUiu3xb57 pageant-denied-20261023",
+      "fingerprint": "256 SHA256:mzh0tF73OQ01OfF5QznqmOzz/2PNt5Ysjma/iekKhxs pageant-denied-20261023 (ED25519)",
+      "name": "pageant-denied"
+    },
+    {
+      "public_key": "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC1ErN6m9AlUjlc3rDVlWNVNTE1o1hv3oSBsVfmmUgb7Umqbr+S3sV+4nQ4ZStm6AkXyPfID4ZA6E9IqfyB8VpuhNDbODtEeRPpM/9dxS8Qw5gHQcPxgCMJRHjfXNCyKbb4D/0haRbN5NKTXY5ejeJRjDcyZd3ko9O+z6mf17Z7/QEuBPRt06o5C/H7o5wDwa9YhPjnYqpuH897BeB7bC/NPjIihJ5rjpbc4hA8BMo6TciDFuOoQdlHTNWZeP8TLK1mDDiNVoMHSfZuai0uHcTX+qZXP+QqaQAQEahykNO/icP3GfHrNHRNM2uxpMGwEXiQAgal9E1kEFwLVZK1YkrhYrgM4PxSxqnk4gVrdC+NV+S8E0INJ/+HBz/uoxXbkDqgmTZnB8jdjaHDt2YzxrVzcQhHkgyByq2DtDupjqmafIFEzLeE7I7k/f3hrYtkcbQ3ahsF0t8Mil41V6edkyyBo1GBPjmOHxigKao0KnuWDoprcfDliuJtfzV7LQ0WJtk= pageant-rsa-20261023",
+      "fingerprint": "3072 SHA256:KIH6amfD4NQUfJnnYSx/PBFBoF3ruXfoKHfcBEl4ElE pageant-rsa-20261023 (RSA)",
+      "name": "pageant-rsa"
+    }
+  ],
+  "fixture_authorization_setup_record": {
+    "case13_through_case16": "Only pageant-rsa.pub authorized",
+    "initial_through_case07": "Only pageant-accept.pub authorized",
+    "description": "Summary of executed setup commands, not a post-cleanup server snapshot. Each docker cp replaced the complete authorized_keys file, followed by chown tester:users and chmod 600.",
+    "case08_through_case11": "Only pageant-denied.pub authorized (second identity in captured case05 order)"
+  }
+}

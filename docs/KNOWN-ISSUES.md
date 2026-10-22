@@ -54,34 +54,24 @@
 | Apple container 上的完整矩阵 | 只跑了 OpenSSH 10.3 与 Dropbear；8.x / 9.x 和旧算法服务端只在 Docker 上跑过 |
 | Windows（包含矩阵脚本、证书、`ssh-rsa` 重试、密钥格式探测） | 见 [reports/WINDOWS-HANDOVER.md](reports/WINDOWS-HANDOVER.md)；CI 上 Windows 任务在 `4d24c11` 全部通过，但那不等于真机验证 |
 | 懒加载审批存储在桌面 / daemon 里的实际表现 | 单测与 daemon 集成测试通过，没有在真实桌面应用里手动试过 |
-| PuTTY **Pageant** 认证 | 代码路径存在且已编译（`agent.rs`：命名管道优先、Pageant 兜底），但**没有一次成功的运行时证据**。2026-10-23 在 WinR9 上装了 PuTTY 0.85 实测过，卡在加载密钥这一步，详见下方。反向证据倒是有了：Pageant 未加载密钥时 `plink -agent` 立即返回 `No supported authentication methods`，说明 agent 通道本身可用；一旦挂上密钥，`plink` 和本应用都会卡在 `Requesting keys` |
 
-### 3.1 Pageant 这一条为什么停在这里
+### 3.1 Pageant 已完成真实验收（2026-10-23）
 
-2026-10-23 的实测记录（Windows，PuTTY 0.85，`C:\Program Files\PuTTY`，不在 `PATH`）：
+Windows 11 上的 PuTTY / Pageant / plink 0.85 对本地 Docker 中的 OpenSSH 10.3 完成认证和传输验收，详情见 [Pageant 验收报告](reports/PAGEANT-ACCEPTANCE-2026-10-23.md)。本轮使用全新的 `AGENT2SSH_CONFIG_DIR`，host 不配置密钥文件或密码；Windows OpenSSH `ssh-agent` 服务保持 `Stopped` / `Disabled`，实际打开其命名管道也超时。应用生成的 Ed25519 和 RSA-3072 测试密钥通过临时 Alpine 容器的 `putty` 包所提供的 `puttygen` 转为 PPK 后，Pageant 正常列举密钥并完成签名；应用诊断日志确认实际认证方式为 `agent`。
 
-| 步骤 | 结果 |
+| 验收项 | 结果 |
 |------|------|
-| `pageant.exe`（不带密钥）启动 + `plink -agent` 连容器 | ✅ 立即返回 `No supported authentication methods available` —— **agent 通道能通** |
-| `pageant.exe <某个密钥>` 后同样的 plink | ❌ 停在 `Pageant is running. Requesting keys.` 直到超时；容器日志只有 `Connection closed [preauth]`，请求从未到达 sshd |
-| `plink -i <OpenSSH 新格式私钥>` | ❌ `Unable to use key file (... (new format))` |
-| `plink -i <传统 PEM>` | ❌ `Unable to use key file (... (old PEM format))` |
-| 手工合成 PuTTY v3 的 `.ppk`（三种私有块布局）后 `pageant.exe <ppk>` | ❌ 三种都一样：plink 能用该 ppk 读密钥（不报 `Unable to use key file`），但 Pageant 挂上它之后就不再应答 |
-| `puttygen.exe --help` | ❌ 该构建是纯 GUI，任何参数都开窗，无法在无头环境里转换密钥 |
+| Ed25519 认证和命令执行 | 通过 |
+| 多身份，仅授权第二把密钥 | 通过；探针核实了身份顺序，plink 明确先拒绝 key #0，再接受 key #1 |
+| 1 MiB SFTP 上传、下载 | 通过；往返 SHA-256 相同 |
+| RSA-3072 认证 | 通过；服务端有效配置对 RSA 签名仅接受 `rsa-sha2-256` / `rsa-sha2-512`，不包含 `ssh-rsa` |
+| 空 Pageant、未授权密钥、关闭 Pageant | 同一隔离 host 均按预期认证失败 |
+| 重新加载密钥 | 恢复成功 |
+| 无默认 feature 的 Rust library tests | 744 passed / 0 failed / 1 ignored；实机探针按预期忽略 |
 
-结论：**问题不在本项目的传输层**（通道在空 Pageant 下是通的），而在「把密钥装进 Pageant」这一步——挂上密钥后 Pageant 停止应答，最可能是弹了模态对话框（加载失败或需要确认），而无头环境既点不掉也读不到。本机 GUI 截屏、`Add-Type` 枚举窗口都被沙箱拦截，所以无法进一步定位。
+此前“加载密钥后停在 `Requesting keys`”的现象本轮没有复现，旧根因尚未查明，不能据此断言是模态对话框或排除某一层。本轮没有修改 SSH 传输实现。
 
-要完成这条验证，需要一个**人工**动作：托盘图标 → **Add Key** → 选择 `.ppk`（PuTTY 只吃 ppk）。放行后本仓库的自动验证只需一条命令：
-
-```bash
-docker run -d --name a2s-pg -e PUID=1000 -e PGID=1000 -e USER_NAME=tester \
-  -e PUBLIC_KEY="<那把密钥的 .pub>" -e PASSWORD_ACCESS=false -p 22197:2222 \
-  lscr.io/linuxserver/openssh-server:version-10.3_p1-r1
-# 注意不给 --key：让认证落到 agent 上
-agent2ssh host add pageant-test --host 127.0.0.1 --port 22197 --user tester
-agent2ssh exec pageant-test "echo pageant-ok"
-# 负对照：结束 Pageant 后同一条命令必须失败，报 "no ... ssh-agent identity ... succeeded"
-```
+**共存边界仍然存在**：Windows 上优先打开 OpenSSH agent 命名管道，仅在打开失败时尝试 Pageant；如果该管道能打开，但 agent 为空或没有匹配密钥，当前实现不会再尝试 Pageant。本轮验证的是 OpenSSH agent 不可用时的 Pageant 路径。
 
 ## 4. 维护约定
 
