@@ -29,12 +29,12 @@
 //! This module turns that into a diagnosis. See [`unusable_key_hint`].
 
 use anyhow::Result;
-use ssh2::MethodType;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::sync::OnceLock;
 
 use crate::ssh_algo::supported_algorithms;
+use crate::transport::{Error, ErrorKind, MethodType};
 
 /// How many lines to scan for the PEM armour header.
 ///
@@ -154,8 +154,8 @@ pub fn reads_openssh_private_keys() -> bool {
 /// the generic `unknown error`. A failure the library *could* describe (`-18`
 /// "Username/PublicKey combination invalid", for instance) is deliberately
 /// **not** treated as opaque: it already tells the user what went wrong.
-fn is_opaque_failure(error: &ssh2::Error) -> bool {
-    matches!(error.code(), ssh2::ErrorCode::Session(-1))
+fn is_opaque_failure(error: &Error) -> bool {
+    error.kind() == ErrorKind::Opaque
 }
 
 /// The decision behind [`unusable_key_hint`], separated so every combination can
@@ -193,7 +193,7 @@ fn hint_decision(format: PrivateKeyFormat, readable: bool, opaque: bool) -> Opti
 ///
 /// Call this only after `userauth_pubkey_file` has failed; it inspects the key
 /// file on disk and this build's capabilities, never the network.
-pub fn unusable_key_hint(path: &Path, error: &ssh2::Error) -> Option<String> {
+pub fn unusable_key_hint(path: &Path, error: &Error) -> Option<String> {
     hint_decision(
         detect_private_key_format(path),
         reads_openssh_private_keys(),
@@ -346,13 +346,13 @@ mod tests {
 
     #[test]
     fn opaque_failures_are_the_undescribed_ones() {
-        let opaque = ssh2::Error::new(ssh2::ErrorCode::Session(-1), "unknown error");
+        let opaque = Error::new(ErrorKind::Opaque, "unknown error");
         assert!(is_opaque_failure(&opaque));
 
         // -18 carries libssh2's own message ("Username/PublicKey combination
         // invalid"), so it is not opaque and must not be re-diagnosed.
-        let described = ssh2::Error::new(
-            ssh2::ErrorCode::Session(-18),
+        let described = Error::new(
+            ErrorKind::PublicKeyRefused,
             "Username/PublicKey combination invalid",
         );
         assert!(!is_opaque_failure(&described));
@@ -361,14 +361,14 @@ mod tests {
     #[test]
     fn hint_is_silent_for_a_pem_rsa_key() {
         let path = write_temp("pem-silent", "-----BEGIN RSA PRIVATE KEY-----\nAAAA\n");
-        let opaque = ssh2::Error::new(ssh2::ErrorCode::Session(-1), "unknown error");
+        let opaque = Error::new(ErrorKind::Opaque, "unknown error");
         assert!(unusable_key_hint(&path, &opaque).is_none());
 
         // A container-format key only produces a hint together with an opaque
         // failure; with a described failure it stays silent on every platform.
         let container = write_temp("container-silent", "-----BEGIN OPENSSH PRIVATE KEY-----\n");
-        let described = ssh2::Error::new(
-            ssh2::ErrorCode::Session(-18),
+        let described = Error::new(
+            ErrorKind::PublicKeyRefused,
             "Username/PublicKey combination invalid",
         );
         assert!(unusable_key_hint(&container, &described).is_none());
@@ -383,7 +383,7 @@ mod tests {
             "container-conditional",
             "-----BEGIN OPENSSH PRIVATE KEY-----\n",
         );
-        let opaque = ssh2::Error::new(ssh2::ErrorCode::Session(-1), "unknown error");
+        let opaque = Error::new(ErrorKind::Opaque, "unknown error");
         let hint = unusable_key_hint(&path, &opaque);
 
         // Tie the expectation to the probe, not to a hard-coded platform, so

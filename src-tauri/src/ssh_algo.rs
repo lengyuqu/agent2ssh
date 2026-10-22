@@ -1,7 +1,7 @@
 //! SSH algorithm preference configuration (A22).
 //!
 //! Allows users to configure preferred SSH key exchange, cipher, MAC, hostkey,
-//! and compression algorithms. Uses `ssh2::Session::method_pref()` which maps
+//! and compression algorithms. Uses the transport facade's `method_pref()` which maps
 //! to `libssh2_session_method_pref()` — the preference must be set **before**
 //! the handshake.
 //!
@@ -32,8 +32,8 @@
 //! (libssh2 bindings) which uses `MethodType` + comma-delimited string
 //! preferences rather than rssh's structured `AlgorithmList`.
 
+use crate::transport::{MethodType, Session};
 use anyhow::{anyhow, Result};
-use ssh2::{MethodType, Session};
 use std::collections::HashSet;
 use std::sync::OnceLock;
 

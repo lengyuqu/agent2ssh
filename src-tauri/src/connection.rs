@@ -1,5 +1,5 @@
+use crate::transport::Session;
 use anyhow::{anyhow, Result};
-use ssh2::Session;
 use std::{
     collections::HashMap,
     sync::{

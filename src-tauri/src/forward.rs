@@ -195,7 +195,7 @@ pub struct ForwardHandle {
     /// Storing it here allows Drop to call `session.disconnect()` before
     /// joining the worker, sending SSH_MSG_DISCONNECT to the server so it
     /// can clean up immediately rather than leaking a half-open session.
-    session: Arc<Mutex<Option<ssh2::Session>>>,
+    session: Arc<Mutex<Option<crate::transport::Session>>>,
     worker: Option<thread::JoinHandle<()>>,
 }
 
@@ -421,7 +421,7 @@ async fn start_forward_worker(host: HostProfile, rule: ForwardRule) -> Result<Fo
         .map_err(|e| anyhow!("forward SSH task failed: {e}"))??;
 
     let stop = Arc::new(AtomicBool::new(false));
-    let session_slot: Arc<Mutex<Option<ssh2::Session>>> = Arc::new(Mutex::new(None));
+    let session_slot: Arc<Mutex<Option<crate::transport::Session>>> = Arc::new(Mutex::new(None));
     let control = RuleControl::new();
     let worker_stop = stop.clone();
     let worker_session_slot = session_slot.clone();
@@ -622,10 +622,10 @@ fn handle_local_connection(
 }
 
 fn run_remote_forward(
-    session: ssh2::Session,
+    session: crate::transport::Session,
     rule: ForwardRule,
     stop: Arc<AtomicBool>,
-    session_slot: Arc<Mutex<Option<ssh2::Session>>>,
+    session_slot: Arc<Mutex<Option<crate::transport::Session>>>,
     control: RuleControl,
     ready: std::sync::mpsc::Sender<std::result::Result<(), String>>,
 ) -> Result<()> {
@@ -712,8 +712,8 @@ fn run_remote_forward(
     Ok(())
 }
 
-fn ssh_error_is_would_block(error: &ssh2::Error) -> bool {
-    matches!(error.code(), ssh2::ErrorCode::Session(-37))
+fn ssh_error_is_would_block(error: &crate::transport::Error) -> bool {
+    error.kind() == crate::transport::ErrorKind::WouldBlock
 }
 
 /// Feeds a forward rule's live byte counters from the shared bridge.

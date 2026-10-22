@@ -52,6 +52,7 @@ pub mod ssh_config;
 pub mod ssh_key_format;
 pub mod store;
 pub mod telemetry;
+pub mod transport;
 pub mod types;
 pub mod url_safety;
 pub mod wayland;

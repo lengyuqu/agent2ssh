@@ -1,3 +1,4 @@
+use crate::transport::{Error, HashType, HostKeyKind, KeyboardInteractivePrompt, Prompt, Session};
 use anyhow::{anyhow, Context, Result};
 use base64::{
     engine::general_purpose::{STANDARD, STANDARD_NO_PAD},
@@ -5,7 +6,6 @@ use base64::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use ssh2::{HashType, KeyboardInteractivePrompt, Prompt, Session};
 use std::{
     collections::HashMap,
     io::{ErrorKind, Read, Write},
@@ -149,15 +149,15 @@ fn validate_key_path(path: &str) -> Result<()> {
     Ok(())
 }
 
-fn host_key_algorithm(kind: ssh2::HostKeyType) -> &'static str {
+fn host_key_algorithm(kind: HostKeyKind) -> &'static str {
     match kind {
-        ssh2::HostKeyType::Rsa => "ssh-rsa",
-        ssh2::HostKeyType::Dss => "ssh-dss",
-        ssh2::HostKeyType::Ecdsa256 => "ecdsa-sha2-nistp256",
-        ssh2::HostKeyType::Ecdsa384 => "ecdsa-sha2-nistp384",
-        ssh2::HostKeyType::Ecdsa521 => "ecdsa-sha2-nistp521",
-        ssh2::HostKeyType::Ed25519 => "ssh-ed25519",
-        ssh2::HostKeyType::Unknown => "unknown",
+        HostKeyKind::Rsa => "ssh-rsa",
+        HostKeyKind::Dss => "ssh-dss",
+        HostKeyKind::Ecdsa256 => "ecdsa-sha2-nistp256",
+        HostKeyKind::Ecdsa384 => "ecdsa-sha2-nistp384",
+        HostKeyKind::Ecdsa521 => "ecdsa-sha2-nistp521",
+        HostKeyKind::Ed25519 => "ssh-ed25519",
+        HostKeyKind::Unknown => "unknown",
     }
 }
 
@@ -999,7 +999,7 @@ fn bridge_stopped(stop: Option<&AtomicBool>) -> bool {
 /// flag was raised is a clean stop rather than an error.
 pub(crate) fn bridge_tcp_and_channel(
     mut stream: TcpStream,
-    mut channel: ssh2::Channel,
+    mut channel: crate::transport::Channel,
     stop: Option<&AtomicBool>,
     counters: Option<&dyn BridgeCounters>,
 ) -> Result<()> {
@@ -1086,7 +1086,7 @@ fn write_all_tcp(stream: &mut TcpStream, mut data: &[u8], stop: Option<&AtomicBo
 }
 
 fn write_all_channel(
-    channel: &mut ssh2::Channel,
+    channel: &mut crate::transport::Channel,
     mut data: &[u8],
     stop: Option<&AtomicBool>,
 ) -> Result<()> {
@@ -1222,12 +1222,12 @@ pub(crate) fn run_command_capture(
 ///   its own writes; reading stdout to EOF first deadlocks. `ssh2` follows
 ///   libssh2 in returning `Ok(0)` for "nothing buffered right now" rather than
 ///   for EOF — the same convention `bridge_tcp_and_channel` relies on — so EOF
-///   has to come from [`ssh2::Channel::eof`].
+///   has to come from [`crate::transport::Channel::eof`].
 /// * **The deadline is enforced here.** On expiry the caller tears the
 ///   connection down so the local worker returns promptly. That does not stop
 ///   a pty-less remote command — see `ExecRequest::timeout_secs`.
 fn drain_channel_output(
-    channel: &mut ssh2::Channel,
+    channel: &mut crate::transport::Channel,
     stdout: &mut BoundedCapture,
     stderr: &mut BoundedCapture,
     deadline: Instant,
@@ -1283,7 +1283,7 @@ fn drain_channel_output(
 
 /// libssh2's blocking-mode budget for a session, in milliseconds.
 ///
-/// `ssh2::Session::set_timeout` treats `0` as "wait forever", so a zero-second
+/// The transport's `set_timeout` treats `0` as "wait forever", so a zero-second
 /// caller budget is clamped to 1 ms rather than disabling the bound.
 fn session_timeout_ms(timeout_secs: u64) -> u32 {
     timeout_secs.saturating_mul(1000).clamp(1, u32::MAX as u64) as u32
@@ -1803,7 +1803,7 @@ fn authenticate(
 /// SHA-1 MACs lands here, and the way out is a named override.
 fn handshake_with_hint(session: &mut Session, host: &HostProfile) -> Result<()> {
     session.handshake().map_err(|error| {
-        if matches!(error.code(), ssh2::ErrorCode::Session(-5)) {
+        if error.kind() == crate::transport::ErrorKind::KeyExchange {
             anyhow!(
                 "SSH key exchange with {} ({}:{}) failed: {error}. No key-exchange, cipher or MAC \
                  algorithm is common to both sides; the server may only offer legacy algorithms. \
@@ -1821,11 +1821,8 @@ fn handshake_with_hint(session: &mut Session, host: &HostProfile) -> Result<()> 
 
 /// libssh2's "the server said no to this key" codes: authentication failed (-18)
 /// and public-key unverified (-19).
-fn is_publickey_refused(error: &ssh2::Error) -> bool {
-    matches!(
-        error.code(),
-        ssh2::ErrorCode::Session(-18) | ssh2::ErrorCode::Session(-19)
-    )
+fn is_publickey_refused(error: &Error) -> bool {
+    error.kind() == crate::transport::ErrorKind::PublicKeyRefused
 }
 
 /// Retry public-key authentication with `ssh-rsa` (RSA over SHA-1) as the
@@ -1839,7 +1836,7 @@ fn retry_with_legacy_rsa_signature(
     passphrase: Option<&str>,
 ) -> bool {
     if session
-        .method_pref(ssh2::MethodType::SignAlgo, "ssh-rsa")
+        .method_pref(crate::transport::MethodType::SignAlgo, "ssh-rsa")
         .is_err()
     {
         return false;

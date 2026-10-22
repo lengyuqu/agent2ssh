@@ -1865,9 +1865,9 @@ pub async fn sftp_upload_core_with_source(
                 local_file.seek(SeekFrom::Start(offset))?;
                 sftp.open_mode(
                     Path::new(&remote_path),
-                    ssh2::OpenFlags::WRITE | ssh2::OpenFlags::APPEND,
+                    crate::transport::OpenFlags::WRITE | crate::transport::OpenFlags::APPEND,
                     0o644,
-                    ssh2::OpenType::File,
+                    crate::transport::OpenType::File,
                 )
                 .with_context(|| format!("failed to open remote file for resume {remote_path}"))?
             } else {
@@ -2115,7 +2115,7 @@ fn sftp_operation_command(operation: &str, path: &str) -> String {
     format!("sftp {operation} {path}")
 }
 
-fn sftp_file_type_char(stat: &ssh2::FileStat) -> char {
+fn sftp_file_type_char(stat: &crate::transport::FileStat) -> char {
     match stat.perm.map(|perm| perm & SFTP_FILE_TYPE_MASK) {
         Some(SFTP_FILE_TYPE_DIRECTORY) => 'd',
         Some(SFTP_FILE_TYPE_SYMLINK) => 'l',
@@ -2124,13 +2124,13 @@ fn sftp_file_type_char(stat: &ssh2::FileStat) -> char {
     }
 }
 
-fn sftp_is_directory(stat: &ssh2::FileStat) -> bool {
+fn sftp_is_directory(stat: &crate::transport::FileStat) -> bool {
     stat.perm
         .map(|perm| (perm & SFTP_FILE_TYPE_MASK) == SFTP_FILE_TYPE_DIRECTORY)
         .unwrap_or(false)
 }
 
-fn sftp_permission_string(stat: &ssh2::FileStat) -> String {
+fn sftp_permission_string(stat: &crate::transport::FileStat) -> String {
     let Some(perm) = stat.perm else {
         return format!("{}?????????", sftp_file_type_char(stat));
     };
@@ -2173,7 +2173,7 @@ fn sftp_entry_name(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
-fn format_sftp_ls_entry(path: &Path, stat: &ssh2::FileStat) -> String {
+fn format_sftp_ls_entry(path: &Path, stat: &crate::transport::FileStat) -> String {
     format!(
         "{} 1 {} {} {:>8} Jan 01 00:00 {}\n",
         sftp_permission_string(stat),
@@ -2184,7 +2184,7 @@ fn format_sftp_ls_entry(path: &Path, stat: &ssh2::FileStat) -> String {
     )
 }
 
-fn format_sftp_stat(path: &str, stat: &ssh2::FileStat) -> String {
+fn format_sftp_stat(path: &str, stat: &crate::transport::FileStat) -> String {
     let file_type = match sftp_file_type_char(stat) {
         'd' => "directory",
         'l' => "symlink",
@@ -2233,7 +2233,7 @@ fn sftp_parent_paths(path: &str) -> Vec<PathBuf> {
     out
 }
 
-fn create_sftp_dir_all(sftp: &ssh2::Sftp, path: &str) -> Result<()> {
+fn create_sftp_dir_all(sftp: &crate::transport::Sftp, path: &str) -> Result<()> {
     for next in sftp_parent_paths(path) {
         match sftp.stat(&next) {
             Ok(stat) if sftp_is_directory(&stat) => continue,
@@ -2485,7 +2485,7 @@ pub async fn sftp_rename_core_with_source(
             }
             let session = connect_embedded_ssh(&host, timeout)?;
             let sftp = session.sftp()?;
-            sftp.rename(Path::new(parts[0]), Path::new(parts[1]), None)
+            sftp.rename(Path::new(parts[0]), Path::new(parts[1]), false)
                 .with_context(|| format!("failed to rename {} to {}", parts[0], parts[1]))?;
             Ok(format!("renamed {} to {}\n", parts[0], parts[1]))
         },
@@ -2680,14 +2680,14 @@ pub async fn sftp_read_text_core_with_source(
 /// symlink loops or pathologically deep trees. (J4)
 const MAX_WALK_DEPTH: usize = 64;
 
-fn sftp_is_symlink(stat: &ssh2::FileStat) -> bool {
+fn sftp_is_symlink(stat: &crate::transport::FileStat) -> bool {
     stat.perm
         .map(|perm| (perm & SFTP_FILE_TYPE_MASK) == SFTP_FILE_TYPE_SYMLINK)
         .unwrap_or(false)
 }
 
 fn walk_remote_dir(
-    sftp: &ssh2::Sftp,
+    sftp: &crate::transport::Sftp,
     abs_dir: &str,
     rel_prefix: &str,
     depth: usize,
@@ -3827,7 +3827,7 @@ mod tests {
 
     #[test]
     fn test_format_sftp_ls_entry_preserves_name_without_shell_prefix() {
-        let stat = ssh2::FileStat {
+        let stat = crate::transport::FileStat {
             size: Some(12),
             uid: Some(1000),
             gid: Some(1000),
