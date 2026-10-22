@@ -276,15 +276,16 @@ pkcs5 = { version = "=0.8.0-rc.13", default-features = false, optional = true }
 
 **远程转发已接通（2026-10-22）**：russh 的推送模型（`Handler::server_channel_open_forwarded_tcpip`）用一层注册表折回 `Listener::accept` 的拉取模型；端到端验证为 `curl` 经隧道取回本地目标的内容，且先用系统 `ssh -R` 做对照组。
 
+**banner 已接通（2026-10-22）**：`Handler::auth_banner` 捕获、`banner()` 取值，改 owned 返回（与 `host_key` 同理由）。验证方式：服务端配 `Banner /etc/issue.net`，先确认系统 `ssh` 能看到该横幅（对照组），再确认我方 handler 捕获到同一字符串、且 `core.rs` 的上传路径确实读到了它。
+
 **踩坑记录**：`tcpip_forward` **只在请求端口为 0 时返回服务端分配的端口**，显式端口时按约定返回 `0`。照字面使用会把 listener 记在 0 端口下，而到达的通道按 19000 入队，`accept()` 永远空转——现象是 TCP 连上了、一个字节都不回。另：夹具镜像默认 `AllowTcpForwarding no`，没有对照组时这种拒绝看起来像自己的 bug。
 
-**剩余三个缺口**（都在 `russh_impl` 顶部列出，各自返回明确的 unsupported 错误，不假装可用）：
+**剩余两个缺口**（都在 `russh_impl` 顶部列出，各自返回明确的 unsupported 错误，不假装可用）：
 
 | 缺口 | 影响 | 说明 |
 |---|---|---|
 | `agent` | agent / Pageant 认证不可用 | Windows 分支无法在本机验证，盲写比明示更糟 |
-| `auth_methods` | 「服务端没广告 password 就不试」的短路消失 | russh 不暴露该列表 |
-| `banner` | `core.rs:1881` 拿不到登录横幅 | 需要在 handler 里捕获 |
+| `auth_methods` | 「服务端没广告 password 就不试」的短路消失 | russh 不暴露该列表；`embedded_ssh` 打印 `[unknown]` 后照常尝试，服务端会拒绝，属**失败关闭**，不是安全回退 |
 
 `set_keepalive` 另有半缺口：握手后设置不再生效（russh 在 connect 时固定 interval），`keepalive_send()` 仍可用。
 
@@ -418,6 +419,15 @@ Mac 上**无法**完成的，逐条验收：
 
    - **四条认证路径各通一次**：公钥文件、密码、keyboard-interactive、**agent（Pageant）**。第四条是原文漏掉的那条，它在 Windows 上是独立代码路径，Mac 上只跑得通 `SSH_AUTH_SOCK` 那一半。
    - **TOFU 三段式**：先连一台未知主机 → 应弹指纹确认（不是直接拒绝也不是直接信任）→ 确认后再连应通过 → 手改 `known_hosts.json` 里的指纹后再连应报 "fingerprint changed"。这条验的是 §4.2-6 那个"探针必须故意接受未知密钥"的改法没有把安全语义改坏。
+
+3. **agent 认证（Windows 专属收尾，Mac 上故意留白）**。`russh_impl` 里 `agent()` 目前返回 `unsupported`，**不是遗漏而是分工**：Pageant 分支只能在本机验证，盲写等于制造一个看起来能用、实际没验过的认证路径。到 Windows 上按这个顺序做：
+
+   - **先写 `Signer`**。`russh 0.60.3` **一个 `Signer` 实现都没有**（`grep "Signer for"` 为空），所以 `authenticate_publickey_with` 无法直接调用。要包一个 `AgentSigner` 持有 `AgentClient`，`auth_sign` 里转发到 `sign_request_signature()`。约 40 行，这是本项的主体工作量。
+   - **两条连接路径**：Windows 走 `AgentClient::connect_pageant()`（`pageant` crate 已在依赖树里）；Unix 走 `connect_env()`。用 `cfg` 分派，但**两条都要在 Windows 上各测一次**（Pageant 用 PuTTY 的真实 agent，Unix 半条可用 WSL 或 `SSH_AUTH_SOCK` 命名管道）。
+   - **映射门面**：`Agent::connect` → 连接；`list_identities` → `request_identities()`；`identities` → 返回自有 `PublicKey` 包装（`blob()`/`comment()` 从 `AgentIdentity` 取）；`userauth` → `authenticate_publickey_with(user, key, hash, &mut signer)`。
+   - **验收**：四条认证路径各通一次，其中 agent 这条要**在没有私钥文件、只有 Pageant 持有密钥**的机器上通过；再补一次 TOFU 三段式。
+
+   > 留白期间的行为是**明确的失败**：`agent()` 返回 `unsupported`，`embedded_ssh` 的 agent 尝试被 `if let Ok(...)` 跳过，后续认证路径照常进行——不会卡死，也不会静默降级成别的认证方式。
 
 3. **sidecar 兜底（第 5 项缺口，与传输层无关）**。干净克隆时 `src-tauri/binaries/*` 不存在 → `tauri_build::build()` abort。建议在 `build.rs` 里先探测，缺失时注入 `TAURI_CONFIG={"bundle":{"externalBin":[]}}`（打包任务里 sidecar 一定已存在，行为不变）。修完 `cargo test --lib` 才算真的"克隆即可编译"。
 4. **锁工具链**。当前无 `rust-toolchain.toml`（各机 rustc 漂移）、`package.json` 无 `engines`、无 `.nvmrc`（CI 用 node 20）。
