@@ -1,6 +1,6 @@
 # russh 迁移（P2）交接文档
 
-状态：**待执行** · 2026-10-22 · 开发机：macOS（`MbpM1Max`）· 收尾机：Windows（`WinR9`）
+状态：**待执行**（方案已按源码逐条对账复核，2026-10-22 修订） · 开发机：macOS（`MbpM1Max`）· 收尾机：Windows（`WinR9`）
 关联：`docs/reports/WINDOWS-HANDOVER.md`（Windows 未验证面）、`src-tauri/src/ssh_key_format.rs`（迁移后删除）
 
 ---
@@ -8,8 +8,10 @@
 ## 0. 这份文档怎么用
 
 - **在 Mac 上开工**：读 §4 建立目标架构 → §5 按阶段推进 → §6 逐文件改 → §9 跑前置与验证。
+- **"迁移完成"的判据是 §4.5 那张接口清单**，不是"能编译"也不是"测试没红"。S0 结束时它应当全部有门面落点，S3 结束时全部有 russh 落点。
 - **回 Windows 收尾**：直接跳 §10，那是必须在这台机器上做的事，Mac 上做不到。
 - 一切"我猜的"都标了 **【待验证】**，落地前先验证，别当结论用。
+- **2026-10-22 复核修订**：本版按源码逐条对账，改了四处事实错误（测试基线、agent 认证、`set_timeout` 语义、`cfg(windows)` 计数）、补了 §4.2 的三条契约与 §4.5 的接口清单、补了 `src/bin/agent2ssh-daemon.rs` 这一行、把 `demo/rssh-main` 降级为可选读物。原方案的行号引用与依赖事实经抽查全部准确，未改动。
 
 ---
 
@@ -21,11 +23,12 @@
 git clone → npm install → cargo test        # 无 Perl / nmake / NASM / cmake / Homebrew OpenSSL
 ```
 
-验收不是"能编译"，而是这三条同时成立：
+验收不是"能编译"，而是这四条同时成立：
 
-1. `cargo test --lib --no-default-features` = **735 passed**，`cargo test --lib` = **743 passed**（当前基线，不许下降）。
-2. `npm test` = 22 文件 / **155 tests passed**（不变）。
+1. `cargo test --lib --no-default-features` = **741 passed**，`TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo test --lib` = **749 passed**（2026-10-22 于 `275a119` 实测，均 0 failed，不许下降）。**开工前用 §9 的命令重测一次并把结果写回本节**——数字会漂，写死的基线只能当参考，不能当门禁；735/743 是旧值，按旧值放行会漏掉一次恰好掉 6 个测试的回归。
+2. `npm test` = 22 文件 / **155 tests passed**（实测不变）。
 3. `scripts/e2e-container.sh` 对真实 OpenSSH 服务端跑通 exec / SFTP / resume，且在 Windows 上握手成功（这正是当前被迫引入 OpenSSL 的原因）。
+4. §4.5 的接口清单逐项有实现——`Session` 22 个方法、`Channel` 14 个（含 `Read`/`Write` 两个 trait）、`Sftp` 10 个、`FileStat` 4 个谓词 + 5 个字段。**缺一项就不算迁完**，这一条取代"只换类型"这种无法验收的表述。
 
 ---
 
@@ -33,11 +36,11 @@ git clone → npm install → cargo test        # 无 Perl / nmake / NASM / cmak
 
 | # | 缺口 | 证据 |
 |---|---|---|
-| 1 | `.cargo/config.toml` 只按 **cwd** 被发现，与 `--manifest-path` 无关 | 仓库根跑 `cargo test --manifest-path src-tauri/Cargo.toml ...` 必炸；CI 全部用 `working-directory: src-tauri`，所以 CI 掩盖了这个坑 |
+| 1 | `.cargo/config.toml` 只按 **cwd** 被发现，与 `--manifest-path` 无关 | **只在 Windows 上炸**：仓库根跑 `cargo test --manifest-path src-tauri/Cargo.toml ...` 找不到 `[env]`，退回 Git Bash 的精简 Perl。macOS 不踩（该 config 只有一条 Windows 专用 `[env]`，见 §9 末注）。CI 全部用 `working-directory: src-tauri`，所以 CI 掩盖了这个坑 |
 | 2 | `OPENSSL_SRC_PERL` 需要**完整** Perl | Git for Windows 自带精简版缺 `Locale::Maketext::Simple`，且 `which -a perl` 首选就是它 |
 | 3 | 环境变量一变就触发 OpenSSL 全量重建 | `openssl-sys` 声明 `rerun-if-env-changed=OPENSSL_SRC_PERL`；同一哈希目录 `543c2086` 先失败后成功＝两次 10 分钟重建 |
 | 4 | macOS 侧依赖完全没被记录 | `libssh2-sys` 有 `[target."cfg(unix)".dependencies.openssl-sys]` → 干净 Mac 需 `brew install openssl@3 pkg-config`，README/AGENTS 一个字没提 |
-| 5 | sidecar 是 gitignore 的构建产物 | `.gitignore:4` 忽略 `src-tauri/binaries/*`，而 `tauri_build::build()` 要求它存在 → 干净克隆跑不了默认 feature 的 `cargo test --lib` |
+| 5 | sidecar 是 gitignore 的构建产物 | `.gitignore:4` 忽略 `src-tauri/binaries/*`；第 5 行 `!src-tauri/binaries/.gitkeep` 只保住占位文件，不满足 `tauri_build::build()`（它要的是 `binaries/<name>-<triple>` 这个具体路径）→ 干净克隆跑不了默认 feature 的 `cargo test --lib` |
 
 第 1/2/3/4 项**全部由 P2 自然消除**（不再有 OpenSSL，就没有 `[env]` 要发现、没有 Perl 要解析）。第 5 项与传输层无关，迁移后仍需修（见 §10）。
 
@@ -82,13 +85,27 @@ impl Read  for Channel { ... }
 impl Write for Channel { ... }
 ```
 
-`bridge_tcp_and_channel()`（`embedded_ssh.rs:1000`）和所有读循环只用到 `read / write / flush / send_eof / eof / exit_status / wait_close / close`。**只要门面的 `Channel` 实现这两个 trait，这 66 个调用点几乎不用改。** 这是整次迁移最重要的杠杆。
+**这个杠杆的边界要说清，否则会低估工作量。** `bridge_tcp_and_channel()`（`embedded_ssh.rs:1000`）确实只用 `read / write / write_all / flush / send_eof / eof / exit_status / wait_close / close` 九个，这九个靠 `Read`/`Write` + 五个同名方法就能原样兜住。但"66 个调用点几乎不用改"是**不成立的**，有两处出在 trait 之外：
 
-### 4.2 必须复刻的三个行为（否则现有代码静默失效）
+1. **`channel.stderr()`**——`embedded_ssh.rs:1253` 与 `bin/agent2ssh-daemon.rs:4637` 的排空循环各调一次。它不在 `Read`/`Write` 里。russh 把 stdout 与 stderr 放在**同一条**消息流（`Data` / `ExtendedData`），因此借出式 `stderr()` 游标无法存在；门面必须在 reader task 里双缓冲解复用（见 §4.2 第 3 条）。
+2. **`session.host_key()`**——4 个调用点，全部在握手**之后**读。russh 只在 `check_server_key` 回调里给 key，校验时点因此改变（见 §4.2 第 6 条）。
 
-1. **`WouldBlock` 语义**。`forward.rs:715` 用 `ErrorCode::Session(-37)` 判"暂时没数据"；`bridge_tcp_and_channel` 把 TCP 设成非阻塞，靠 `channel.read()` 返回 `WouldBlock` 驱动双工轮转。门面的 `read` 必须：**超时内无数据 → `io::ErrorKind::WouldBlock`**，实现上用 `mpsc::recv_timeout(session_timeout)`，不能用无限 `recv()`。
-2. **`set_timeout` 是会话级全局量**（`embedded_ssh.rs:1286` 注释：`0` = 永不超时）。门面要把它变成门面自己的字段，所有阻塞原语都按它取超时。
-3. **`exit_status` 在 `wait_close` 之后才可靠**。`ChannelMsg::ExitStatus` 可能在 `Close` 之后才到，门面要在 `wait_close()` 里等齐再返回。
+所以准确的说法是：`Read`/`Write` 兜住了**转发桥**这一条最热的路径，其余按 §4.5 的清单逐项对表。全量清单见 §4.5。
+
+### 4.2 必须复刻的六条契约（否则现有代码静默失效）
+
+这六条是门面的规格书。**没有一条能从 russh 的默认行为里"自然获得"**，全部要显式实现并各配一条单测。
+
+1. **阻塞标志与超时是正交的两个旋钮，不是一回事。** 今天 `set_blocking()` 有 9 个调用点（`embedded_ssh.rs` 5、`forward.rs` 2、`bin/agent2ssh-daemon.rs` 2），`set_timeout()` 有 4 个，两者独立使用。`WouldBlock` 是 `set_blocking(false)` 的产物，**不是超时的产物**；把二者合成"`mpsc::recv_timeout(session_timeout)` → WouldBlock"会让 `embedded_ssh.rs:1202` 那个 `set_blocking(true)` 之后的 `wait_close()`（`:1204`）误返 WouldBlock，exec 收尾直接坏掉。门面必须同时暴露 `set_blocking(bool)` 与 `set_timeout(Duration)`，并在 `read`/`write`/`wait_close` 里分别按"是否阻塞"选不同的等待策略。
+2. **`WouldBlock` 语义**。`forward.rs:715` 用 `ErrorCode::Session(-37)` 判"暂时没数据"；`bridge_tcp_and_channel` 把 TCP 设成非阻塞，靠 `channel.read()` 返回 `WouldBlock` 驱动双工轮转。非阻塞模式下**无数据即刻**返回 `io::ErrorKind::WouldBlock`（不是等一个超时再返回），这是空转率问题。
+3. **`stderr` 必须与 stdout 分开可读，且两者互不阻塞。** `drain_channel_output`（`embedded_ssh.rs`）与 `bin/agent2ssh-daemon.rs:4637` 是"轮流读两个流、任一有进展就继续"的写法。russh 只有一条消息流，所以 reader task 要把 `ChannelMsg::Data` 与 `ChannelMsg::ExtendedData` 分发到两个 `VecDeque`，门面的 `read()` 与 `stderr().read()` 各自从自己的队列取；两者都空且未知 EOF 时才返回 WouldBlock。
+4. **`eof()` 是"EOF 已到 **且** 两个缓冲都空"**，不是"收到 `ChannelMsg::Eof`"。排空循环的退出条件明写这个前提（源码注释：`eof()` stays false while stderr data is still buffered, so this is the normal exit），配 `DRAIN_IDLE_PASSES_AFTER_EOF` 吸收尾包。若门面在收到 Eof 消息时就置真，stderr 会被截断。
+5. **`exit_status` 在 `wait_close` 之后才可靠**。`ChannelMsg::ExitStatus` 可能在 `Close` 之后才到，门面要在 `wait_close()` 里等齐再返回。
+6. **`host_key` 的时点变了，这是控制流改变而非类型替换。** 本仓是 TOFU 三段式：`probe_host_fingerprint`（`embedded_ssh.rs:261`）连上但不认证、读 `host_key()` 拿指纹 → 展示给用户 → `trust_host_fingerprint_core`（`:307`，内部在 `:316` 再探一次）落盘 → 正式连接由 `trust_or_verify_host_fingerprint`（`:214`）比对。russh 只在 `check_server_key` 回调里给 key，所以：**探针必须故意返回 `Ok(true)` 才能读到未知主机密钥**，读完后不认证即断开；正式连接则必须在回调里完成比对并返回 `Ok(false)` 中止。门面的 `Session` 要携带回调期间捕获的 key，`host_key()` 只读这份快照。
+
+> 关于 `set_timeout(0)`：**本仓不存在"永不超时"这种模式**。`session_timeout_ms()`（`embedded_ssh.rs:1288`）把 0 夹到 1 ms，注释写明 "rather than disabling the bound"。门面照此实现，不要引入 russh 侧的"永不超时"分支——那会把现在被刻意消掉的一种挂死重新放回来。
+
+> 关于超时值：`set_timeout` 不是会话级常量，而是**可重设的 per-call 预算**。三个真实用途：`:1333` 命令自身预算（由 `timeout_secs` 派生）、`:1203` `TEARDOWN_TIMEOUT_MS`（注释明确"不是命令的预算"）、`forward.rs:222/263` 的 500 ms（`disconnect()` 前的瞬时预算）。门面按"可随时重设的字段"实现，不要做成初始化时捕获一次。
 
 ### 4.3 runtime 边界（最容易踩的坑）
 
@@ -122,6 +139,56 @@ src/transport/
 | `Session(-37)`（would block，`forward.rs:716`） | `ErrorKind::WouldBlock` |
 | `Session(-1)`（opaque，`ssh_key_format.rs:158`） | `ErrorKind::Opaque` |
 
+### 4.5 完整接口清单——这就是"整体迁移"的定义
+
+清单的生成方式可复核：取 `ssh2 0.9.5` 的 `src/session.rs` / `src/channel.rs` / `src/sftp.rs` 全部 `pub fn`，与 `src-tauri/src/` 内实际调用求交。**S0 的 DoD 是这张表逐项勾满**；勾不满就是缝没立完。
+
+**Session：22 个**
+
+| # | 方法 | 调用点 | russh 落点 | 备注 |
+|---|---|---|---|---|
+| 1 | `sftp()` | 11 | `channel_open_session()` + `SftpSession::new` | 见 §6 `core.rs` |
+| 2 | `set_blocking()` | 9 | 门面字段 | §4.2-1，**不可与超时合并** |
+| 3 | `authenticated()` | 8 | 门面状态 | |
+| 4 | `userauth_pubkey_file()` | 4 | `authenticate_publickey_with` | RSA 走 `PrivateKeyWithHashAlg` + `best_supported_rsa_hash()` |
+| 5 | `set_timeout()` | 4 | 门面字段（可重设） | §4.2 末注 |
+| 6 | `host_key()` | 4 | `check_server_key` 回调快照 | §4.2-6，**控制流改变** |
+| 7 | `disconnect()` | 4 | `disconnect(reason, lang)` | `forward.rs:222/263` 的 500 ms 预算在此生效 |
+| 8 | `channel_session()` | 3 | `channel_open_session()` | |
+| 9 | `supported_algs()` | 2 | **无等价物** | 改静态表 + `Name::try_from` 的 fail-closed 校验 |
+| 10 | `set_tcp_stream()` | 2 | `connect_stream(stream)` | 跳板/proxy 路径（`embedded_ssh.rs:721`） |
+| 11 | `method_pref()` | 2 | `Config.preferred.{kex,key,cipher,mac,compression}` | 见 §6 `ssh_algo.rs` |
+| 12 | `handshake()` | 2 | `connect` / `connect_stream` 内部 | 主机密钥校验的挂点在回调里 |
+| 13 | `channel_direct_tcpip()` | 2 | `channel_open_direct_tcpip()` | 转发（`forward.rs:614`）+ 跳板 |
+| 14 | `userauth_password()` | 1 | `authenticate_password` | |
+| 15 | `userauth_keyboard_interactive()` | 1 | `KeyboardInteractiveAuthResponse` 状态机 | 见 §6 `prompt_waiter.rs` |
+| 16 | `set_keepalive()` | 1 | `Config.keepalive_interval` | `connection.rs:102` |
+| 17 | `keepalive_send()` | 1 | `send_keepalive()` | `connection.rs:264` 的手动心跳 |
+| 18 | `host_key_hash()` | 1 | 从快照自算 SHA256 | `embedded_ssh.rs:165` |
+| 19 | `channel_forward_listen()` | 1 | `channel_open_forward_listen()` | **accept 模型不同**：russh 返回 `(Channel, ChannelOpenFailure)` 流，不是 libssh2 的 listener 轮询（`forward.rs:638`） |
+| 20 | `banner()` | 1 | 【待验证】 | `core.rs:1881` 把它传给 SFTP 传输，需确认 russh 是否暴露 |
+| 21 | `auth_methods()` | 1 | **无等价物** | 现用于短路"服务端没广告 password 就不试"（`embedded_ssh.rs:1580`），需改写 |
+| 22 | `agent()` | 1 | `russh::keys::agent::client::AgentClient` | `embedded_ssh.rs:1749`，**含 Windows Pageant**，见 §10 |
+
+**Channel：14 个**
+
+| 类别 | 方法 |
+|---|---|
+| trait | `read` / `write` / `write_all` / `flush` |
+| 流 | `stderr()` ← §4.2-3 |
+| 状态 | `eof()` ← §4.2-4、`exit_status()`、`wait_close()`、`close()`、`send_eof()` |
+| 开启 | `exec()`、`shell()`、`request_pty()`、`request_pty_size()` |
+
+**Sftp：10 个** —— `open` / `create` / `open_mode` / `stat` / `readdir` / `mkdir` / `rmdir` / `unlink` / `rename` / `shutdown`
+
+**FileStat：4 谓词 + 5 字段** —— `is_file` / `is_dir` / `is_symlink` / `file_type`；`perm` / `size` / `mtime` / `uid` / `gid`（字段名与语义逐字保持，`core.rs:2118` 起的 5 个格式化函数与它们的测试是现成的对拍集）
+
+**三个"删得掉但要补位"的点**（放这里，比放 §7 更不容易丢）：
+
+1. `supported_algs` 没有 russh 等价物，而它今天**同时承担两件事**：`narrow()` 用它过滤用户配置（`ssh_algo.rs:191`），以及充当"本构建能不能读 OpenSSH 私钥容器"的**能力信号**——`ssh_key_format::reads_openssh_private_keys()`（`:134`）读的就是它的 HostKey 列表（见 `ssh_algo.rs:129-137` 注释）。russh 恒支持 ed25519/ECDSA，后者应直接返回 `true`。
+2. `reads_openssh_private_keys()` 有 3 个真实调用点：`keys.rs:821`、`embedded_ssh.rs:1664`、`bin/agent2ssh.rs:3399`。**最后一个是 CLI 的 JSON 字段名**——删函数可以，删字段是 CLI 契约变更，要么保留字段恒 `true`，要么按弃用规则走。
+3. `auth_methods` 无等价物。`embedded_ssh.rs:1545/1580/1632` 用它决定要不要尝试密码认证、并拼错误文案。删掉后行为由"不尝试"变成"尝试并失败"，文案要重写。
+
 ---
 
 ## 5. 分阶段执行
@@ -134,12 +201,12 @@ src/transport/
 2. 逐个文件把 `use ssh2::...` 换成 `use crate::transport::...`。
 3. 自有 `Channel` 用 `impl Read/Write` 包住 `ssh2::Channel`，`eof/exit_status/wait_close/send_eof/close/request_pty/shell/exec` 一一转发。
 
-**DoD**：`grep -rn "ssh2::" src/ | grep -v "src/transport/legacy_ssh2.rs"` 输出为空；735/743/155 全绿；`Cargo.toml` 未新增任何依赖。
+**DoD**：`grep -rn "ssh2::" src/ | grep -v "src/transport/legacy_ssh2.rs"` 输出为空；741/749/155 全绿（现场重测值）；`Cargo.toml` 未新增任何依赖；**§4.5 的 22+14+10 个方法逐个有门面落点**。
 **价值**：这一步在 Mac 和 Windows 上都成立，等于把 9500 行的风险提前清掉；之后换后端只改一个目录。
 
 ### S1 — 接 russh（双后端并存）
 
-1. 加依赖，**版本与锁必须逐字照抄 `demo/rssh-main/src-tauri/Cargo.toml`**：
+1. 加依赖，**以下四行 pin 是权威值，直接抄进 `src-tauri/Cargo.toml`**：
 
 ```toml
 russh = "0.60.1"
@@ -150,8 +217,16 @@ ed25519 = { version = "=3.0.0-rc.4", default-features = false }
 elliptic-curve = { version = "=0.14.0-rc.28", default-features = false }
 ```
 
+> 原文写的是"逐字照抄 `demo/rssh-main/src-tauri/Cargo.toml`"，但 **`demo/` 被 `.gitignore:13` 忽略且本机不存在**，这条指令在新克隆上无法执行。以本节的四行 pin 为准；`demo/rssh-main` 只作为**可选的** API 样板（§8），不影响开工。
+
 2. 实现 `russh_impl/`，feature 名 `transport-russh`，默认仍是 ssh2。
-3. 认证只需三种（已核）：`userauth_pubkey_file`(×5)、`userauth_password`、`userauth_keyboard_interactive`。**没有 SSH agent 依赖**，不用迁 `russh::keys::agent`。
+3. **认证有四种，不是三种**（已核）：
+   - `userauth_pubkey_file`（4 处：`embedded_ssh.rs:1683/1721/1778/1848`）
+   - `userauth_password`（`:1583`）
+   - `userauth_keyboard_interactive`（`:1601`，回调改状态机）
+   - **`session.agent()`（`:1749-1760`）**——`connect()` → `list_identities()` → 逐个 `userauth`，成功时返回认证方式字符串 `"agent"`，源码注释明写"includes Windows Pageant via ssh2's agent connector"。**必须迁 `russh::keys::agent`**，这不是可选项，且它的 Windows 分支（Pageant / 命名管道）是本次唯一横跨传输层与平台层的位置，见 §10。
+
+   另有两个能力探测要一起处理，否则认证路径静默降级：`auth_methods()` 无 russh 等价物（§4.5 补位点 3）、`supported_algs()` 需换静态表（§4.5 补位点 1）。
 4. 每条测试在两种 feature 下各跑一遍。
 
 **DoD**：`cargo test --no-default-features --features transport-russh --lib` 与 ssh2 版结果一致；`scripts/e2e-container.sh` 在两套后端下都通过。
@@ -170,35 +245,50 @@ elliptic-curve = { version = "=0.14.0-rc.28", default-features = false }
 
 | 文件 | 行数 | 现状 | 改法 | 风险 |
 |---|---|---|---|---|
-| `src/transport/*` | 新增 | — | 见 §4.4 | 门面的 `WouldBlock`/`set_timeout` 语义 |
-| `src/embedded_ssh.rs` | 2254 | 认证、host key 校验、exec、PTY、`bridge_tcp_and_channel` | 只换类型；`host_key_algorithm()`（`:152`）的 `HostKeyType` → 自有 `HostKeyKind`，**字符串保持原样**（写进 `known_hosts.json`） | 高：认证状态机 + 41 个调用点 |
+| `src/transport/*` | 新增 | — | 见 §4.4 | §4.2 六条契约逐条实现；**两旋钮（阻塞/超时）+ stderr 双缓冲**是主要工作量 |
+| `src/embedded_ssh.rs` | 2254 | 认证（4 路，含 agent）、host key 校验、exec、PTY、`bridge_tcp_and_channel` | 换类型；`host_key_algorithm()`（`:152`）的 `HostKeyType` → 自有 `HostKeyKind`，**字符串保持原样**（写进 `known_hosts.json`）。**但 `host_key()` 的 4 个调用点要重排**：`probe_host_fingerprint`（`:261`）与 `trust_host_fingerprint_core`（`:307`）是"连上不认证只看密钥"的探针，russh 下探针必须在 `check_server_key` 里返回 `Ok(true)` 才能拿到未知密钥；正式连接的比对要在回调里返回 `Ok(false)` 中止。见 §4.2-6 | 高：认证状态机 + host key 控制流 + 41 个调用点 |
 | `src/core.rs` | 4759 | SFTP 批量操作、`FileStat` 格式化（`:2118`–`:2236`）、`create_sftp_dir_all` | `ssh2::FileStat` → `transport::FileStat`（字段对齐 `perm/size/mtime/uid/gid`）；`OpenFlags/OpenType` → 自有枚举 | 中：5 个格式化函数 + 1 处测试构造 |
 | `src/forward.rs` | 1071 | `Arc<Mutex<Option<Session>>>`、双向桥、`-37` 分类 | Session 换成门面（内部是 `Handle` + tokio Mutex）；`ssh_error_is_would_block` → `ErrorKind::WouldBlock` | 高：转发是阻塞线程 + 非阻塞语义混合 |
-| `src/ssh_algo.rs` | 689 | `Session::method_pref()` 字符串偏好 | `apply_algo_prefs()` 改成产出 `client::Config.preferred.{kex,key,cipher,mac,compression}`（`Cow<Vec<Name>>`，`Name::try_from(&str)`）；**配置 JSON 里的算法名不许变** | 中：`kex-strict-*` 这类协议标记要过滤掉（参考 `algorithms.rs:141`） |
-| `src/ssh_key_format.rs` | 421 | 整套 libssh2 密钥格式探测（WinCNG 只认两种 PEM 头） | **整文件删除**；`inspect_key_file` 若 UI 还要，改成用 `russh::keys::decode_secret_key` 试解析 | 低（删代码），但要同步删调用点 |
+| `src/ssh_algo.rs` | 689 | `Session::method_pref()` 字符串偏好 + `supported_algs()` 能力探测 | `apply_algo_prefs()` 改成产出 `client::Config.preferred.{kex,key,cipher,mac,compression}`（`Cow<Vec<Name>>`）；**配置 JSON 里的算法名不许变**。两处 `supported_algs()`（`:163` 缓存探测、`:228` fail-closed 校验）都要换：russh 无运行期能力查询，改为静态白名单 + `Name::try_from` 的 `Err` 作为"拼错算法名"的等价失败（现文案会列出 supported 列表，需换成静态表内容） | 中：`kex-strict-*` 这类协议标记要过滤（参考 `algorithms.rs:141`）；**`narrow()` 的过滤语义不能丢** |
+| `src/ssh_key_format.rs` | 421 | 整套 libssh2 密钥格式探测（WinCNG 只认两种 PEM 头）；`reads_openssh_private_keys()`（`:134`）读 `ssh_algo::supported_algorithms(HostKey)` 当能力信号 | **整文件删除**；`inspect_key_file` 若 UI 还要，改用 `russh::keys::decode_secret_key` 试解析。**删之前先补位**：`reads_openssh_private_keys()` 有 3 个调用点（`keys.rs:821`、`embedded_ssh.rs:1664`、`bin/agent2ssh.rs:3399`），最后一个是 **CLI 的 JSON 字段名**，russh 恒支持 ed25519/ECDSA，保留字段恒 `true` | 低（删代码），但漏一个调用点就是编译错、删字段则是 CLI 契约变更 |
 | `src/session.rs` | 351 | PTY 会话注册表 | 跟随类型改名 | 低 |
 | `src/resident_session.rs` | 1049 | 常驻会话 | 跟随 | 低 |
 | `src/prompt_waiter.rs` | 581 | keyboard-interactive 交互 | libssh2 回调 → russh 的 `KeyboardInteractiveAuthResponse` 状态机 | 中：回调变状态机，时序不同 |
 | `src/sftp_transfer.rs` | 599 | 传输调度 | 跟随 | 低 |
-| `src/connection.rs` | 400 | 连接与 deadline | 换门面；deadline 用 tokio timeout | 低 |
+| `src/connection.rs` | 400 | 连接与 deadline、`set_keepalive(true, SSH_KEEPALIVE_SECS)`（`:102`）、手动 `keepalive_send()`（`:264`） | 换门面；deadline 用 tokio timeout；keepalive 拆成 `Config.keepalive_interval`（自动）与 `send_keepalive()`（手动）两处 | 低 |
+| **`src/bin/agent2ssh-daemon.rs`** | **5928** | **原文漏了这一行。** 自带一条 exec 流式排空循环：`:4615/:4667` 切 `set_blocking`、`:4637` 读 `channel.stderr()`、按 `WouldBlock` 分派 | 跟随门面类型；**这是 §4.2-3 与 §4.2-1 的第二个消费者**，双缓冲与阻塞标志改错会在这里表现为事件流卡住或丢 stderr | 中：文件大、测试覆盖靠 `daemon_local_exec_e2e` |
 | `tests/exec_fixture.rs`、`tests/local_exec.rs` | — | 需真实 sshd（`AGENT2SSH_TEST_SSH_PORT` / `AGENT2SSH_TEST_SSH_KEY`） | 不改断言，靠环境跑 | — |
 
 ---
 
 ## 7. 迁移完成后可以删掉的东西
 
+**删除前必须先补位的三处**（否则不是删代码，是删能力）：
+
+- `ssh_algo::supported_algorithms()` 与它喂出来的 `ssh_key_format::reads_openssh_private_keys()`：换成"恒 `true`"的常量实现，3 个调用点见 §4.5 补位点 1、2。**`bin/agent2ssh.rs:3399` 那个 JSON 字段名要保留**。
+- `ssh_algo::apply_method()` 里那圈 `supported_algs()` fail-closed 校验：改成静态白名单，保留"拼错的算法名必须报错、不许静默通过"的语义。
+- `embedded_ssh` 里 `auth_methods()` 驱动的"没广告 password 就不尝试"短路：改成尝试后失败，并重写错误文案（§4.5 补位点 3）。
+
+之后可以删：
+
 - `src-tauri/src/ssh_key_format.rs`（421 行）
-- `src-tauri/Cargo.toml`：`ssh2`、`[target.'cfg(windows)'.dependencies]` 里那条 `ssh2 = { features = ["openssl-on-win32","vendored-openssl"] }` 及其 40 余行注释
+- `src-tauri/Cargo.toml`：`ssh2`、`[target.'cfg(windows)'.dependencies]` 里那条 `ssh2 = { features = ["openssl-on-win32","vendored-openssl"] }` 及其 40 余行注释（第 114–162 行）
 - `src-tauri/.cargo/config.toml`（`OPENSSL_SRC_PERL` 的 `[env]`）
 - `scripts/win-perl.cmd`
-- `.github/workflows/ci.yml`：两处 `Add build tools for the bundled OpenSSL (Windows)` 步骤（`choco install nasm` + `win-perl.cmd` 自检，第 240–250、415–425 行），以及第 221–239、396–414 行的解释性注释
+- `.github/workflows/ci.yml`：两处 `Add build tools for the bundled OpenSSL (Windows)` 步骤（`choco install nasm` + `win-perl.cmd` 自检，第 240–250、415–425 行，已核），以及第 221–239、396–414 行的解释性注释
 - `AGENTS.md` 中关于 vendored OpenSSL / Perl / NASM 的全部段落，改为一条"Windows 只需 MSVC 工具链"
 
-净减：约 500 行代码 + 一次 10–15 分钟的源码构建 + 一个未记录的平台依赖。
+净减：约 500 行代码 + 一次 10–15 分钟的源码构建 + 一个未记录的平台依赖。**但净增的是门面本身**（`src/transport/` 预计 1200–1800 行，双缓冲解复用与"阻塞/超时两旋钮"占大头）。"净减 500 行"不是整次迁移的收益口径，别拿它当立项理由。
 
 ---
 
-## 8. 参考实现：`demo/rssh-main`（同仓库，已是 russh 0.60）
+## 8. 参考实现：`demo/rssh-main`（**本机不存在，属可选读物**）
+
+**先纠正一个前提**：`demo/` 在 `.gitignore:13`，`git ls-files` 里没有任何条目，本机也没有这个目录。所以：
+
+- 不要在 §5 的依赖 pin 上依赖它——四行 pin 已内联到 §5 S1 第 1 步，那是权威值。
+- 下面这张表是**读代码时的索引**，不是开工前置。拿不到 `demo/rssh-main` 不影响 S0，也不阻塞 S1 的骨架。
+- 想补齐的话从 rssh 上游取对应版本；`docs/rssh-design-analysis.md`（已跟踪，37 KB）**替代不了**它——那份是能力 gap 分析，没有 russh 版本号、没有 `Config.preferred` 的用法记录。
 
 不要加 path 依赖，只当**读的样板**。对应关系：
 
@@ -228,11 +318,13 @@ npm install && npm run build
 # 3. 默认 feature 的 lib 测试需要 sidecar；Mac 上没有 aarch64-apple-darwin 的那三个
 export TAURI_CONFIG='{"bundle":{"externalBin":[]}}'
 
-# 4. 基线（先确认起点干净，再动手）
+# 4. 基线（先确认起点干净，再动手；数字以本次实测为准，写回 §1）
 npm test
-cargo test --manifest-path src-tauri/Cargo.toml --lib --no-default-features   # 期望 735
-cargo test --manifest-path src-tauri/Cargo.toml --lib                          # 期望 743
+cargo test --lib --no-default-features   # 2026-10-22 于 275a119 = 741
+TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo test --lib   # 同上 = 749
 ```
+
+> 第 3 步的 `TAURI_CONFIG` 与第 4 步的第二条要一起用，否则 `build.rs` 会去找不存在的 sidecar（§2 第 5 项）。**基线必须现场重测再写进 §1**：验收门禁认的是当场数字，不是这份文档里的历史值。
 
 真实握手验证需要一个容器运行时（`agent2ssh containers runtime` 会自动选 Docker Desktop 或 Apple `container`）：
 
@@ -256,12 +348,20 @@ Mac 上**无法**完成的，逐条验收：
    cargo check --manifest-path src-tauri/Cargo.toml --no-default-features --features daemon --bin agent2ssh-daemon
    cargo test --manifest-path src-tauri/Cargo.toml --lib
    ```
-   44 处 `#[cfg(windows)]` 已核：**没有一处属于 SSH 传输层**（集中在 `local_exec.rs` 10 / `tauri_commands.rs` 8 / `store.rs` 3 / `shell_list.rs` 3 / `path_resolver.rs` 3 / `daemon_control.rs` 2 及对应 tests），所以这些在 Mac 上跳过是安全的。
+   `#[cfg(windows)]` **`src/` 内实为 33 处**（原文写 44，不可复现）：`local_exec.rs` 10 / `tauri_commands.rs` 8 / `store.rs` 3 / `shell_list.rs` 3 / `path_resolver.rs` 3 / `daemon_control.rs` 2 / `bin/agent2ssh.rs` 2 / `container_terminal.rs` 1 / `container_discovery.rs` 1。**结论仍然成立**：没有一处落在传输层那 10 个文件里，所以 Mac 上跳过这些是安全的。但注意——
+
+   **`agent` 认证是这条结论的唯一例外。** `embedded_ssh.rs:1749` 的 `session.agent()` 注释明写"includes Windows Pageant"，迁到 `russh::keys::agent::AgentClient` 后，Windows 侧要走 Pageant / `SSH_AUTH_SOCK` 命名管道那条分支。它在 `embedded_ssh.rs` 里，靠 `cfg(windows)` 之外的条件（运行期探测）分派，所以上面那 33 处计数并没有覆盖它。**这一项必须在 Windows 上用真实 Pageant 实测**，见本节第 2 条的验收补充。
 2. **真实 OpenSSH ≥10 握手**。这是当初引入 OpenSSL 的唯一理由（WinCNG 只有 MODP DH，OpenSSH 10 删光了 `diffie-hellman-group*`）。换成 russh 后要在 Windows 上实测：ed25519 公钥、curve25519 KEX、chacha20-poly1305、AES-GCM 全部可用。
    ```bash
    ./scripts/e2e-container.sh          # 或 wslc / docker
    ```
    **反向验证**：`agent2ssh keys algorithm` 应仍回答 `ed25519`。
+
+   **同一轮还要验两条容易被漏的**：
+
+   - **四条认证路径各通一次**：公钥文件、密码、keyboard-interactive、**agent（Pageant）**。第四条是原文漏掉的那条，它在 Windows 上是独立代码路径，Mac 上只跑得通 `SSH_AUTH_SOCK` 那一半。
+   - **TOFU 三段式**：先连一台未知主机 → 应弹指纹确认（不是直接拒绝也不是直接信任）→ 确认后再连应通过 → 手改 `known_hosts.json` 里的指纹后再连应报 "fingerprint changed"。这条验的是 §4.2-6 那个"探针必须故意接受未知密钥"的改法没有把安全语义改坏。
+
 3. **sidecar 兜底（第 5 项缺口，与传输层无关）**。干净克隆时 `src-tauri/binaries/*` 不存在 → `tauri_build::build()` abort。建议在 `build.rs` 里先探测，缺失时注入 `TAURI_CONFIG={"bundle":{"externalBin":[]}}`（打包任务里 sidecar 一定已存在，行为不变）。修完 `cargo test --lib` 才算真的"克隆即可编译"。
 4. **锁工具链**。当前无 `rust-toolchain.toml`（各机 rustc 漂移）、`package.json` 无 `engines`、无 `.nvmrc`（CI 用 node 20）。
 5. **清 CI**。删掉两处 OpenSSL 工具链步骤后，确认 `windows-latest` 腿仍绿。
@@ -274,13 +374,17 @@ Mac 上**无法**完成的，逐条验收：
 | 验证项 | macOS | Windows | CI |
 |---|---|---|---|
 | `npm test`（155） | ✅ | ✅ | ✅ ubuntu / win / mac |
-| `cargo test --lib --no-default-features`（735） | ✅ | ✅ | ✅ |
-| `cargo test --lib`（743，tauri feature） | ✅ 需 `TAURI_CONFIG` 或 sidecar | ✅ | ✅ `tauri-unit-tests`（ubuntu） |
+| `cargo test --lib --no-default-features`（741） | ✅ | ✅ | ✅ |
+| `cargo test --lib`（749，tauri feature） | ✅ 需 `TAURI_CONFIG` 或 sidecar | ✅ | ✅ `tauri-unit-tests`（ubuntu） |
 | `cargo check --features daemon` | ✅ | ✅ | ✅ |
 | `exec_fixture`（真实 sshd） | ✅ 容器 | ✅ wslc/docker | ✅ `real-ssh-e2e` |
 | `daemon_local_exec_e2e` / `daemon_resident_session_e2e` | 部分 | ✅ | ❌ 未覆盖 |
 | Windows `cfg` 编译 | ❌ | ✅ | ✅ |
 | OpenSSH 10 握手 | ✅ | ✅ 必须 | ✅ |
+| **四条认证路径**（公钥/密码/kbd-interactive/**agent**） | agent 只覆盖 `SSH_AUTH_SOCK` | ✅ **含 Pageant** | ❌ 无 agent 夹具 |
+| **`stderr` 与 stdout 分离**（`drain_channel_output` / daemon 事件流） | ✅ 单测 | ✅ | ✅ |
+| **阻塞标志 × 超时预算两旋钮** | ✅ 单测 | ✅ | ✅ |
+| **TOFU 三段式**（未知 → 确认 → 变更检测） | ✅ | ✅ | ❌ 需交互 |
 
 ---
 
@@ -288,16 +392,20 @@ Mac 上**无法**完成的，逐条验收：
 
 | # | 项 | 处理 |
 |---|---|---|
-| 1 | **`WouldBlock` 语义复刻不准** → 转发桥静默卡死或空转 | S0 就把 `bridge_tcp_and_channel` 的读写路径用门面跑一遍，加一个"超时无数据返回 WouldBlock"的单测 |
+| 1 | **`WouldBlock` 与阻塞标志的语义复刻不准** → 转发桥静默卡死、空转，或 exec 收尾坏掉 | S0 就把 `bridge_tcp_and_channel` 的读写路径用门面跑一遍，单测要覆盖**非阻塞下无数据即刻返回 `WouldBlock`**（不是"等超时再返回"），以及**阻塞模式下 `wait_close()` 不被 `WouldBlock` 短路** |
 | 2 | **runtime 边界**：daemon async 里调同步门面会 panic | `transport/mod.rs` 顶部写死规则；逐个标注调用点，加 `spawn_blocking` |
-| 3 | `russh` 0.60 的 RustCrypto 预发布锁 | 逐字照抄 rssh 的四行 pin；`cargo tree -d` 检查没有第二份 ecdsa/ed25519 |
-| 4 | 算法名字符串兼容性 | `SshAlgoPrefs` 的 JSON 是用户配置，**名字不许变**；`kex-strict-*` 是协议标记要过滤 |
+| 3 | `russh` 0.60 的 RustCrypto 预发布锁 | 照抄 §5 内联的四行 pin；`cargo tree -d` 检查没有第二份 ecdsa/ed25519 |
+| 4 | 算法名字符串兼容性 | `SshAlgoPrefs` 的 JSON 是用户配置，**名字不许变**；`kex-strict-*` 是协议标记要过滤；`narrow()` 的白名单语义要保留 |
 | 5 | host key 算法名兼容性 | 已写进 `known_hosts.json`，`ssh-rsa` / `ecdsa-sha2-nistp256` 等字符串必须逐字保持 |
 | 6 | RSA / SHA-1 遗留路径 | 现在靠 `method_pref(SignAlgo, "ssh-rsa")`（`embedded_ssh.rs:1842`）→ russh 用 `PrivateKeyWithHashAlg` + `best_supported_rsa_hash()` |
 | 7 | 性能 | RustCrypto 弱于 OpenSSL，但用在控制面；如未来有吞吐诉求再单独评估 aws-lc（**会引入 cmake/NASM，等于回到今天的坑，不轻易换**）|
 | 8 | 【待验证】russh 0.60 的 MSRV 与当前工具链 | S1 第一步先 `cargo add` 后 `cargo check` 探一次 |
 | 9 | 【待验证】`russh-sftp` 与 libssh2 SFTP 的权限位语义差异 | 用 `core.rs:2118` 那 5 个格式化函数的现有测试对拍 |
-| 10 | 【待验证】`set_timeout(0)` 在 russh 下的等价物 | 需要 russh 侧显式"永不超时"分支 |
+| 10 | ~~`set_timeout(0)` 等价物~~ | **这一条撤销。** 本仓把 0 夹到 1 ms（`session_timeout_ms()`，注释 "rather than disabling the bound"），**不存在"永不超时"模式**。按原写法加"永不超时分支"会重新引入现在被刻意消掉的挂死 |
+| 11 | **`stderr` 双缓冲解复用** → 做错表现为 stderr 静默丢失，或 `read()` 与 `stderr().read()` 互相阻塞 | §4.2-3；`drain_channel_output`（`embedded_ssh.rs`）与 daemon 事件流（`bin/agent2ssh-daemon.rs:4637`）各一条单测，断言 stdout/stderr 都完整 |
+| 12 | **`host_key` 的时点变更** → 探针拿不到未知主机密钥；或比对挪进回调后安全语义被改坏 | §4.2-6；把 §10 的 TOFU 三段式列入验收，不只跑单测 |
+| 13 | **`supported_algs` 无等价物** → 用户拼错算法名从"报错"退化成"静默忽略" | 静态白名单 + `Name::try_from` 的 `Err`；`reads_openssh_private_keys` 恒 `true` 且保留 CLI JSON 字段 |
+| 14 | **agent 认证横跨传输层与平台层** → Mac 上测通不等于 Windows 上通 | §5 S1-3、§10 第 1/2 条；Windows 上用真实 Pageant 实测 |
 
 ---
 
@@ -305,4 +413,9 @@ Mac 上**无法**完成的，逐条验收：
 
 S1/S2 阶段 SSH 后端由 feature 切换，回滚只需改默认 feature（或 `--features transport-ssh2`），**不涉及数据迁移**。S3 之后回滚等于 revert 一个提交，`ssh2` 相关代码在历史里可查。
 
-唯一不可逆的是 `ssh_key_format.rs` 删除 —— 它只是提示文案的辅助，`unusable_key_hint()` 的调用点要在 S3 一并清理，别留悬空引用。
+S3 里有两类东西**不能靠 revert 恢复干净**，删之前先想清：
+
+1. `ssh_key_format.rs` 的删除。它不只是提示文案的辅助——`unusable_key_hint()` 的调用点要一并清理，且 `reads_openssh_private_keys()` 的**能力信号身份**（`ssh_algo.rs:129-137` 的注释就是为它写的）和 **CLI JSON 字段**（`bin/agent2ssh.rs:3399`）都要有替代物。删完再 revert 会把 `supported_algorithms` 一起带回来，与 russh 后端并存时那套"libssh2 能力探测"已经没有意义。
+2. §7 里那三处"先补位再删"的替换（静态白名单、恒 `true` 的能力信号、`auth_methods` 短路改写）。它们是**行为等价性**的载体，回滚单独一笔提交容易只回滚一半，留下"没有 libssh2 却还在查 libssh2 能力"的半截状态。
+
+门面（S0）本身是可回滚的：`legacy_ssh2.rs` 保留在 S2 之后，`--features transport-ssh2` 一直是那条退路。
