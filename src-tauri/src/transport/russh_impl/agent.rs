@@ -219,7 +219,7 @@ impl Agent {
             };
             // Same nest as the file-based path: outer "the server said
             // nothing", inner "any hash".
-            let hash_alg = handle.best_supported_rsa_hash().await?.flatten();
+            let hash_alg = super::rsa_hash_alg(handle, key.algorithm().is_rsa()).await?;
             handle
                 .authenticate_publickey_with(
                     username,
@@ -240,24 +240,23 @@ impl Agent {
 async fn connect_stream() -> Result<AgentClient<AgentStream>, Error> {
     #[cfg(windows)]
     {
-        match pageant::PageantStream::new().await {
-            Ok(stream) => Ok(AgentClient::connect(AgentStream::Pageant(stream))),
-            Err(pageant_error) => {
-                // Win32-OpenSSH's agent lives on a fixed pipe name; PuTTY's
-                // Pageant does not, which is why the pipe is the fallback
-                // rather than the other way round (a named-pipe probe that
-                // fails costs a syscall, a Pageant probe that fails costs a
-                // window-message handshake).
-                match tokio::net::windows::named_pipe::ClientOptions::new()
-                    .open(r"\\.\pipe\openssh-ssh-agent")
-                {
-                    Ok(stream) => Ok(AgentClient::connect(AgentStream::NamedPipe(stream))),
-                    Err(pipe_error) => Err(other(format!(
-                        "no SSH agent answered (Pageant: {pageant_error}; \
-                         OpenSSH pipe: {pipe_error})"
-                    ))),
-                }
-            }
+        // The OpenSSH named pipe is tried **first**, and the order is not
+        // arbitrary. `pageant::PageantStream::new()` reports success even when
+        // no Pageant is running — its WM_COPYDATA transport is created before
+        // anything can tell — so the first real request is where it fails, with
+        // `early eof`. Probing Pageant first therefore breaks the common case on
+        // a modern Windows host: no Pageant, OpenSSH agent service running. The
+        // pipe answers immediately by failing to open when nothing listens.
+        match tokio::net::windows::named_pipe::ClientOptions::new()
+            .open(r"\\.\pipe\openssh-ssh-agent")
+        {
+            Ok(stream) => Ok(AgentClient::connect(AgentStream::NamedPipe(stream))),
+            Err(pipe_error) => match pageant::PageantStream::new().await {
+                Ok(stream) => Ok(AgentClient::connect(AgentStream::Pageant(stream))),
+                Err(pageant_error) => Err(other(format!(
+                    "no SSH agent answered (OpenSSH pipe: {pipe_error}; Pageant: {pageant_error})"
+                ))),
+            },
         }
     }
     #[cfg(unix)]

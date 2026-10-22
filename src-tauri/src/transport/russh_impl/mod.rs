@@ -99,6 +99,54 @@ fn unsupported(what: &str) -> Error {
     ))
 }
 
+/// Read an OpenSSH user certificate (`<key>-cert.pub`).
+///
+/// `Certificate::from_openssh` wants one line, and the file `ssh-keygen -s`
+/// writes is exactly that; trailing newlines are tolerated by the parser.
+fn read_certificate(path: &std::path::Path) -> Result<russh::keys::Certificate, Error> {
+    let text = std::fs::read_to_string(path).map_err(|error| {
+        other(format!(
+            "the certificate at {} could not be read: {error}",
+            path.display()
+        ))
+    })?;
+    russh::keys::Certificate::from_openssh(text.trim()).map_err(|error| {
+        other(format!(
+            "{} is not a user certificate: {error}",
+            path.display()
+        ))
+    })
+}
+
+/// The RSA signature hash to use for this server.
+///
+/// `best_supported_rsa_hash` returns `Option<Option<HashAlg>>`, and the two
+/// levels mean different things: the outer one is "did the server advertise
+/// `server-sig-algs` at all", the inner one "is a SHA-2 variant in the list".
+///
+/// Flattening the two — which the first version of this code did — turns
+/// *unknown* into *SHA-1*, and `PrivateKeyWithHashAlg::new(key, None)` really
+/// does mean the legacy `ssh-rsa`: its own documentation says so, and
+/// `userauth_pubkey: signature algorithm ssh-rsa not in PubkeyAcceptedAlgorithms`
+/// in an OpenSSH 10.3 server's log is what that produces. OpenSSH has refused
+/// SHA-1 RSA by default since 8.8, so the unknown case has to resolve to SHA-2.
+///
+/// `None` survives in one place only: a server that advertised the extension
+/// *without* any SHA-2 entry, which is a server old enough to need `ssh-rsa`.
+async fn rsa_hash_alg(
+    handle: &mut Handle<ClientHandler>,
+    is_rsa: bool,
+) -> Result<Option<russh::keys::HashAlg>, Error> {
+    if !is_rsa {
+        return Ok(None);
+    }
+    Ok(match handle.best_supported_rsa_hash().await? {
+        Some(Some(alg)) => Some(alg),
+        Some(None) => None,
+        None => Some(russh::keys::HashAlg::Sha256),
+    })
+}
+
 impl From<russh::Error> for Error {
     fn from(error: russh::Error) -> Self {
         let kind = match &error {
@@ -419,7 +467,7 @@ impl Session {
     pub fn userauth_pubkey_file(
         &self,
         username: &str,
-        _pubkey: Option<&std::path::Path>,
+        pubkey: Option<&std::path::Path>,
         privatekey: &std::path::Path,
         passphrase: Option<&str>,
     ) -> Result<(), Error> {
@@ -428,19 +476,46 @@ impl Session {
         // separate `.pub` file is ignored rather than rejected.
         let key = std::sync::Arc::new(russh::keys::load_secret_key(privatekey, passphrase)?);
 
-        // `authenticate_publickey` rather than the `_with` variant: russh 0.60
-        // ships no `Signer` implementation at all, so the signer-taking API
-        // cannot be called without writing one. This path picks the RSA hash
-        // itself.
+        // `pubkey` is the `-cert.pub` sibling when the app found one
+        // (`embedded_ssh::user_certificate_for`). It is a *certificate*, not a
+        // plain public key, and the server only accepts the certificate form
+        // when the key itself is not authorized — which is exactly the
+        // `TrustedUserCAKeys` setup this exists for.
+        if let Some(cert_path) = pubkey {
+            let cert = read_certificate(cert_path)?;
+            let result = block_on(async {
+                let mut guard = self.inner.handle.lock().await;
+                let Some(handle) = guard.as_mut() else {
+                    return Err(other("handshake has not run"));
+                };
+                Ok::<_, Error>(
+                    handle
+                        .authenticate_openssh_cert(username, key.clone(), cert)
+                        .await?,
+                )
+            })?;
+            return Self::auth_result(result, &self.inner.authenticated);
+        }
+
+        // `authenticate_publickey` takes a `PrivateKeyWithHashAlg`, which is the
+        // signer here; the `_with` variant would need a caller-supplied `Signer`
+        // and buys nothing for a key that is on disk.
         let result = block_on(async {
             let mut guard = self.inner.handle.lock().await;
             let Some(handle) = guard.as_mut() else {
                 return Err(other("handshake has not run"));
             };
-            // `best_supported_rsa_hash` nests once more than it looks: the outer
-            // option is "the server said nothing", the inner one is "any hash".
-            let hash_alg = handle.best_supported_rsa_hash().await?.flatten();
-            let signer = russh::keys::PrivateKeyWithHashAlg::new(key, hash_alg);
+            let hash_alg = rsa_hash_alg(handle, key.algorithm().is_rsa()).await?;
+            let signer = russh::keys::PrivateKeyWithHashAlg::new(key.clone(), hash_alg);
+            let first = handle.authenticate_publickey(username, signer).await?;
+            if first.success() || !key.algorithm().is_rsa() || hash_alg.is_none() {
+                return Ok(first);
+            }
+            // A server old enough that `server-sig-algs` lists only `ssh-rsa`,
+            // or one that never sent the extension, may refuse the SHA-2
+            // attempt. One legacy retry is what a pre-7.2 server needs, and it
+            // is attempted only after the modern signature was refused.
+            let signer = russh::keys::PrivateKeyWithHashAlg::new(key.clone(), None);
             Ok(handle.authenticate_publickey(username, signer).await?)
         })?;
 
