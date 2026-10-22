@@ -25,7 +25,7 @@ git clone → npm install → cargo test        # 无 Perl / nmake / NASM / cmak
 
 验收不是"能编译"，而是这四条同时成立：
 
-1. `cargo test --lib --no-default-features` = **755 passed**，`TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo test --lib` = **763 passed**（2026-10-22 实测，均 0 failed）。演进：735/743（原始方案，已过期）→ 741/749（S0 前）→ 747/755（S0 后，+6 条门面测试）→ **755/763**（移除 ssh-key 后，+8 条 `openssh_key` 测试）。**每阶段开工前用 §9 的命令重测一次并把结果写回本节**——数字会漂，写死的基线只能当参考，不能当门禁；用旧值当"不许下降"的地板会放过真实回归（735 那次就刚好差 6 条）。
+1. `cargo test --lib --no-default-features` = **741 passed**，`TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo test --lib` = **749 passed**（2026-10-22 S3 完成后实测，均 0 failed）。演进：735/743（原始方案，已过期）→ 741/749（S0 前）→ 747/755（S0 后，+6 条门面测试）→ 755/763（移除 ssh-key 后，+8 条 `openssh_key` 测试）→ **741/749**（S3 删掉 `legacy_ssh2` 与 `ssh_key_format`，−14 = 3 条旧后端映射测试 + 11 条密钥格式模块测试）。**每阶段开工前用 §9 的命令重测一次并把结果写回本节**——数字会漂，写死的基线只能当参考，不能当门禁；用旧值当"不许下降"的地板会放过真实回归（735 那次就刚好差 6 条）。
 2. `npm test` = 22 文件 / **155 tests passed**（实测不变）。
 3. `scripts/e2e-container.sh` 对真实 OpenSSH 服务端跑通 exec / SFTP / resume，且在 Windows 上握手成功（这正是当前被迫引入 OpenSSL 的原因）。
 4. §4.5 的接口清单逐项有实现——`Session` 22 个方法、`Channel` 14 个（含 `Read`/`Write` 两个 trait）、`Sftp` 9 个、`File` 4 个（含 `Seek`）、`FileStat` 4 个谓词 + 6 个字段。**缺一项就不算迁完**，这一条取代"只换类型"这种无法验收的表述。
@@ -426,8 +426,8 @@ export TAURI_CONFIG='{"bundle":{"externalBin":[]}}'
 
 # 4. 基线（先确认起点干净，再动手；数字以本次实测为准，写回 §1）
 npm test
-cargo test --lib --no-default-features   # 当前 = 755（S0 后 747，S0 前 741，原始方案 735）
-TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo test --lib   # 当前 = 763（S0 后 755，S0 前 749）
+cargo test --lib --no-default-features   # 当前 = 741（S2 后 752，S0 后 747，原始方案 735）
+TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo test --lib   # 当前 = 749（S2 后 763，S0 后 755）
 ```
 
 > 第 3 步的 `TAURI_CONFIG` 与第 4 步的第二条要一起用，否则 `build.rs` 会去找不存在的 sidecar（§2 第 5 项）。**基线必须现场重测再写进 §1**：验收门禁认的是当场数字，不是这份文档里的历史值。
@@ -489,8 +489,8 @@ Mac 上**无法**完成的，逐条验收：
 | 验证项 | macOS | Windows | CI |
 |---|---|---|---|
 | `npm test`（155） | ✅ | ✅ | ✅ ubuntu / win / mac |
-| `cargo test --lib --no-default-features`（755） | ✅ | ✅ | ✅ |
-| `cargo test --lib`（763，tauri feature） | ✅ 需 `TAURI_CONFIG` 或 sidecar | ✅ | ✅ `tauri-unit-tests`（ubuntu） |
+| `cargo test --lib --no-default-features`（741） | ✅ | ✅ | ✅ |
+| `cargo test --lib`（749，tauri feature） | ✅ 需 `TAURI_CONFIG` 或 sidecar | ✅ | ✅ `tauri-unit-tests`（ubuntu） |
 | `cargo check --features daemon` | ✅ | ✅ | ✅ |
 | `exec_fixture`（真实 sshd） | ✅ 容器 | ✅ wslc/docker | ✅ `real-ssh-e2e` |
 | `daemon_local_exec_e2e` / `daemon_resident_session_e2e` | 部分 | ✅ | ❌ 未覆盖 |
