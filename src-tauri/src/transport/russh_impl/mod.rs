@@ -31,6 +31,7 @@
 //!   interval at connect time. `keepalive_send()` still works afterwards.
 
 mod channel;
+mod sftp;
 
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -41,10 +42,11 @@ use russh::keys::PublicKey as RhPublicKey;
 use russh::Disconnect;
 
 pub use channel::{Channel, Stderr};
+pub use sftp::{File, Sftp};
 
 use super::types::{
-    DisconnectCode, Error, ErrorKind, FileStat, HashType, HostKeyKind, KeyboardInteractivePrompt,
-    MethodType, OpenFlags, OpenType, Prompt,
+    DisconnectCode, Error, ErrorKind, HashType, HostKeyKind, KeyboardInteractivePrompt, MethodType,
+    Prompt,
 };
 
 static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
@@ -494,7 +496,21 @@ impl Session {
     }
 
     pub fn sftp(&self) -> Result<Sftp, Error> {
-        Err(unsupported("SFTP"))
+        self.ensure_connected()?;
+        let session = block_on(async {
+            let guard = self.inner.handle.lock().await;
+            let Some(handle) = guard.as_ref() else {
+                return Err(other("handshake has not run"));
+            };
+            let channel = handle.channel_open_session().await?;
+            // `into_stream` hands over raw bytes; the subsystem request is what
+            // turns the channel into an SFTP conversation. Without it sshd starts
+            // a shell, the INIT packet is read as shell input, and every request
+            // ends in russh-sftp's ten-second timeout.
+            channel.request_subsystem(false, "sftp").await?;
+            Ok::<_, Error>(russh_sftp::client::SftpSession::new(channel.into_stream()).await?)
+        })?;
+        Ok(Sftp::new(session))
     }
 
     pub fn channel_session(&self) -> Result<Channel, Error> {
@@ -670,93 +686,3 @@ impl Listener {
         Err(unsupported("remote forwarding"))
     }
 }
-
-/// Not implemented; SFTP is the next slice, see the module-level gap list.
-pub struct Sftp;
-
-impl Sftp {
-    pub fn open(&self, _path: &std::path::Path) -> Result<File, Error> {
-        Err(unsupported("SFTP"))
-    }
-
-    pub fn create(&self, _path: &std::path::Path) -> Result<File, Error> {
-        Err(unsupported("SFTP"))
-    }
-
-    pub fn open_mode(
-        &self,
-        _path: &std::path::Path,
-        _flags: OpenFlags,
-        _mode: i32,
-        _open_type: OpenType,
-    ) -> Result<File, Error> {
-        Err(unsupported("SFTP"))
-    }
-
-    pub fn stat(&self, _path: &std::path::Path) -> Result<FileStat, Error> {
-        Err(unsupported("SFTP"))
-    }
-
-    pub fn readdir(
-        &self,
-        _path: &std::path::Path,
-    ) -> Result<Vec<(std::path::PathBuf, FileStat)>, Error> {
-        Err(unsupported("SFTP"))
-    }
-
-    pub fn mkdir(&self, _path: &std::path::Path, _mode: i32) -> Result<(), Error> {
-        Err(unsupported("SFTP"))
-    }
-
-    pub fn rmdir(&self, _path: &std::path::Path) -> Result<(), Error> {
-        Err(unsupported("SFTP"))
-    }
-
-    pub fn rename(
-        &self,
-        _src: &std::path::Path,
-        _dst: &std::path::Path,
-        _overwrite: bool,
-    ) -> Result<(), Error> {
-        Err(unsupported("SFTP"))
-    }
-
-    pub fn unlink(&self, _path: &std::path::Path) -> Result<(), Error> {
-        Err(unsupported("SFTP"))
-    }
-}
-
-/// SFTP file handles are not implemented yet; the type exists so the facade's
-/// signatures line up.
-pub struct File;
-
-impl File {
-    pub fn stat(&mut self) -> Result<FileStat, Error> {
-        Err(unsupported("SFTP"))
-    }
-}
-
-impl std::io::Read for File {
-    fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
-        Err(std::io::Error::other("SFTP is not implemented yet"))
-    }
-}
-
-impl std::io::Write for File {
-    fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
-        Err(std::io::Error::other("SFTP is not implemented yet"))
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl std::io::Seek for File {
-    fn seek(&mut self, _pos: std::io::SeekFrom) -> std::io::Result<u64> {
-        Err(std::io::Error::other("SFTP is not implemented yet"))
-    }
-}
-
-#[allow(dead_code)]
-fn keep_types_used(_: FileStat, _: OpenFlags, _: OpenType) {}
