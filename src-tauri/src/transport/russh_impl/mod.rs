@@ -20,17 +20,17 @@
 //! These return a named error rather than pretending to work; they are the
 //! remaining S1 work, listed in `docs/plans/russh-migration.md`:
 //!
-//! - `agent` — the Windows Pageant branch cannot be verified on this machine,
-//!   and writing it blind is worse than naming it. See the Windows checklist in
-//!   `docs/plans/russh-migration.md` §10; the work is a `Signer` wrapper because
-//!   russh 0.60 ships none.
-//! - `auth_methods` — russh does not expose the server's advertised list, so the
-//!   "do not attempt a method the server never offered" short-circuit is gone.
-//!   `embedded_ssh` prints "[unknown]" and tries anyway, which fails closed at
-//!   the server.
+//! - `auth_methods` — russh does not expose the server's advertised list, so
+//!   the "do not attempt a method the server never offered" short-circuit is
+//!   gone. `embedded_ssh` prints "[unknown]" and tries anyway, which fails
+//!   closed at the server.
 //! - `set_keepalive` — only effective before `handshake()`; russh fixes the
 //!   interval at connect time. `keepalive_send()` still works afterwards.
+//!
+//! `agent` is no longer one of them: see `agent.rs`, including why the note
+//! that called for a wrapper `Signer` was reading a grep artifact.
 
+mod agent;
 mod channel;
 mod forward;
 mod sftp;
@@ -43,6 +43,7 @@ use russh::client::{Config, Handle};
 use russh::keys::PublicKey as RhPublicKey;
 use russh::Disconnect;
 
+pub use agent::{Agent, PublicKey};
 pub use channel::{Channel, Stderr};
 pub use forward::Listener;
 pub use sftp::{File, Sftp};
@@ -487,7 +488,10 @@ impl Session {
     }
 
     pub fn agent(&self) -> Result<Agent, Error> {
-        Err(unsupported("the SSH agent"))
+        // No fallible step here: the connection to the agent happens in
+        // `Agent::connect`, because libssh2's two-step shape is what the
+        // caller in `embedded_ssh` follows.
+        Ok(Agent::new(self.clone()))
     }
 
     pub fn auth_methods(&self, _username: &str) -> Result<&str, Error> {
@@ -719,39 +723,5 @@ fn supported_names(method: MethodType) -> Vec<&'static str> {
         MethodType::MacCs | MethodType::MacSc => MAC.to_vec(),
         MethodType::CompCs | MethodType::CompSc => COMP.to_vec(),
         MethodType::LangCs | MethodType::LangSc | MethodType::SignAlgo => Vec::new(),
-    }
-}
-
-/// Not implemented; see the module-level gap list.
-pub struct Agent;
-
-impl Agent {
-    pub fn connect(&mut self) -> Result<(), Error> {
-        Err(unsupported("the SSH agent"))
-    }
-
-    pub fn list_identities(&mut self) -> Result<(), Error> {
-        Err(unsupported("the SSH agent"))
-    }
-
-    pub fn identities(&self) -> Result<Vec<PublicKey>, Error> {
-        Err(unsupported("the SSH agent"))
-    }
-
-    pub fn userauth(&self, _username: &str, _identity: &PublicKey) -> Result<(), Error> {
-        Err(unsupported("the SSH agent"))
-    }
-}
-
-/// One agent identity. Only used by `Agent`, which is not implemented here.
-pub struct PublicKey;
-
-impl PublicKey {
-    pub fn blob(&self) -> &[u8] {
-        &[]
-    }
-
-    pub fn comment(&self) -> &str {
-        ""
     }
 }

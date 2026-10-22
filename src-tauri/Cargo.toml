@@ -4,6 +4,12 @@ version = "0.3.0"
 description = "SSH capability layer for general-purpose agents"
 authors = ["agent2ssh"]
 edition = "2021"
+# The floor comes from `russh`, which is edition 2024 and declares 1.85, but this
+# crate needs 1.89 of its own: `store.rs` calls `File::lock_shared`, which only
+# became stable there. `clippy::incompatible_msrv` enforces the number below, so
+# raising it is a compile-time signal rather than a guess — declaring 1.85 first
+# and being told about 1.89 is how this value was found.
+rust-version = "1.89"
 default-run = "agent2ssh-app"
 
 [lib]
@@ -53,7 +59,7 @@ tauri-plugin-shell = { version = "2", optional = true }
 tauri-plugin-dialog = { version = "2", optional = true }
 tauri-plugin-updater = { version = "2", optional = true }
 tauri-plugin-single-instance = { version = "2", optional = true }
-tokio = { version = "1", features = ["macros", "process", "rt-multi-thread", "time", "io-util", "sync", "signal"] }
+tokio = { version = "1", features = ["macros", "net", "process", "rt-multi-thread", "time", "io-util", "sync", "signal"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 axum = { version = "0.7", features = ["ws"], optional = true }
 tower = { version = "0.4", optional = true }
@@ -123,6 +129,12 @@ fontdb = "0.23"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.48", features = ["Win32_System_Console", "Win32_Foundation"] }
+# Pageant's transport, for the SSH agent. `russh` already pulls this in on
+# Windows, so naming it here adds no crate to the build — but it does make
+# `PageantStream` nameable, which `russh` does not re-export and which the
+# agent module needs in order to put Pageant and the OpenSSH named pipe behind
+# one `AsyncRead + AsyncWrite` type.
+pageant = "0.2"
 
 [dev-dependencies]
 axum = "0.7"

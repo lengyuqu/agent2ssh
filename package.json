@@ -2,6 +2,9 @@
   "name": "agent2ssh",
   "version": "0.3.0",
   "private": true,
+  "engines": {
+    "node": ">=20"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite",

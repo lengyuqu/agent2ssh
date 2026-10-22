@@ -1,7 +1,7 @@
 # russh 迁移（P2）交接文档
 
-状态：**待执行**（方案已按源码逐条对账复核，2026-10-22 修订） · 开发机：macOS（`MbpM1Max`）· 收尾机：Windows（`WinR9`）
-关联：`docs/reports/WINDOWS-HANDOVER.md`（Windows 未验证面）、`src-tauri/src/ssh_key_format.rs`（迁移后删除）
+状态：**S0–S3 已完成并合入 main；Windows 收尾 2026-10-22 在 `WinR9` 完成**（见 §10） · 开发机：macOS（`MbpM1Max`）· 收尾机：Windows（`WinR9`）
+关联：`docs/reports/WINDOWS-HANDOVER.md`（Windows 未验证面）、`src-tauri/src/ssh_key_format.rs`（**已删除**）
 
 ---
 
@@ -27,7 +27,9 @@ git clone → npm install → cargo test        # 无 Perl / nmake / NASM / cmak
 
 1. `cargo test --lib --no-default-features` = **741 passed**，`TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo test --lib` = **749 passed**（2026-10-22 S3 完成后实测，均 0 failed）。演进：735/743（原始方案，已过期）→ 741/749（S0 前）→ 747/755（S0 后，+6 条门面测试）→ 755/763（移除 ssh-key 后，+8 条 `openssh_key` 测试）→ **741/749**（S3 删掉 `legacy_ssh2` 与 `ssh_key_format`，−14 = 3 条旧后端映射测试 + 11 条密钥格式模块测试）。**每阶段开工前用 §9 的命令重测一次并把结果写回本节**——数字会漂，写死的基线只能当参考，不能当门禁；用旧值当"不许下降"的地板会放过真实回归（735 那次就刚好差 6 条）。
 2. `npm test` = 22 文件 / **155 tests passed**（实测不变）。
-3. `scripts/e2e-container.sh` 对真实 OpenSSH 服务端跑通 exec / SFTP / resume，且在 Windows 上握手成功（这正是当前被迫引入 OpenSSL 的原因）。
+3. `scripts/e2e-container.sh` 对真实 OpenSSH 服务端跑通 exec / SFTP / resume，且在 Windows 上握手成功（这正是当初被迫引入 OpenSSL 的原因）。
+
+> **Windows 的数字与上表不同，是平台差异不是回归**：2026-10-22 在 `WinR9` 实测 **738 / 746**，三条 agent 认证测试只在特定平台展开（见 §10.2）。写回基线时请带上平台名，否则下一次会有人把 `741` 当跨平台门槛。
 4. §4.5 的接口清单逐项有实现——`Session` 22 个方法、`Channel` 14 个（含 `Read`/`Write` 两个 trait）、`Sftp` 9 个、`File` 4 个（含 `Seek`）、`FileStat` 4 个谓词 + 6 个字段。**缺一项就不算迁完**，这一条取代"只换类型"这种无法验收的表述。
 
 ---
@@ -444,43 +446,62 @@ AGENT2SSH_TEST_SSH_PORT=2222 cargo test --manifest-path src-tauri/Cargo.toml \
 
 ---
 
-## 10. 回到 Windows 必须做的事
+## 10. Windows 收尾（2026-10-22 已在 WinR9 完成）
 
-Mac 上**无法**完成的，逐条验收：
+状态：**已完成**。下表每一行都是在这台机器上跑出来的，不是推断。
 
-1. **`cfg(windows)` 半边编译**。Mac 上没有 `x86_64-pc-windows-msvc` 链接器，交叉 `cargo check` 不成立。必须在 WinR9 或 CI 的 `windows-latest` 腿跑：
-   ```bash
-   cargo check --manifest-path src-tauri/Cargo.toml --no-default-features --bin agent2ssh --bin agent2ssh-mcp
-   cargo check --manifest-path src-tauri/Cargo.toml --no-default-features --features daemon --bin agent2ssh-daemon
-   cargo test --manifest-path src-tauri/Cargo.toml --lib
-   ```
-   `#[cfg(windows)]` **`src/` 内实为 33 处**（原文写 44，不可复现）：`local_exec.rs` 10 / `tauri_commands.rs` 8 / `store.rs` 3 / `shell_list.rs` 3 / `path_resolver.rs` 3 / `daemon_control.rs` 2 / `bin/agent2ssh.rs` 2 / `container_terminal.rs` 1 / `container_discovery.rs` 1。**结论仍然成立**：没有一处落在传输层那 10 个文件里，所以 Mac 上跳过这些是安全的。但注意——
+| # | 项 | 结果 | 做法 / 证据 |
+|---|---|---|---|
+| 1 | `cfg(windows)` 编译 | ✅ | `cargo check --no-default-features --bin agent2ssh --bin agent2ssh-mcp`（40s）、同参数 `--features daemon --bin agent2ssh-daemon`（19s）均通过 |
+| 2 | 单元测试 | ✅ | `--no-default-features --lib` = **738 passed**，`--lib` = **746 passed**，`npm test` = 155。比 macOS 的 741/749 低 3/3，差值是 agent 模块在 macOS 上的门禁测试 —— 见下 |
+| 3 | ring 的工具链要求 | ✅ 无额外依赖 | 全程没有 Perl / NASM / cmake 参与；`cargo build` 直接用 MSVC。这回答了迁移方案里最大的不确定项 |
+| 4 | 真实 OpenSSH ≥10 握手 | ✅ | `AGENT2SSH_CONTAINER_RUNTIME=docker scripts/e2e-container.sh` = **9 passed, 0 failed**，镜像 `lscr.io/linuxserver/openssh-server:latest`；同一脚本 `wslc` 再跑一遍同样 9/0 |
+| 5 | `keys algorithm` | ✅ | 输出 `ed25519` |
+| 6 | 四条认证路径 | ✅ 三条脚本化 + ⚠️ 一条人工 | 公钥文件走 E2E；agent 走真机（见 §10.1）；密码与 keyboard-interactive 由 `cli_smoke` / `embedded_ssh` 单测覆盖，未对真实服务端跑 |
+| 7 | TOFU 三段式 | ✅ 单元级 | `embedded_ssh.rs:2074` 覆盖「指纹变更即拒绝」；未知主机确认→信任的交互路径无自动化，靠人工 |
+| 8 | agent 认证（原 §10.3） | ✅ | 见 §10.1，含**多身份迭代**实测 |
+| 9 | sidecar 兜底 | ✅ | `build.rs` 新增 `blank_missing_sidecars()`；把 `binaries/*.exe` 移走后 `cargo test --lib` 仍构建成功 |
+| 10 | 锁工具链 | ✅ | `rust-toolchain.toml`（stable + rustfmt/clippy）、`rust-version = "1.89"`、`.nvmrc`、`package.json engines` |
+| 11 | 清 CI | ✅ 无需改动 | 两处 OpenSSL 步骤已在 `48b1d17` 随 S3 删除；`ci.yml` 里只剩 `openssl rand`（macOS 钥匙串口令，与此无关） |
+| 12 | 既有 Windows 问题 | ✅ 不复现 | `cli_smoke` = **33 passed, 0 failed**（栈溢出消失）；`cargo test --lib` 1m46s（曾记录 50 分钟无输出） |
 
-   **`agent` 认证是这条结论的唯一例外。** `embedded_ssh.rs:1749` 的 `session.agent()` 注释明写"includes Windows Pageant"，迁到 `russh::keys::agent::AgentClient` 后，Windows 侧要走 Pageant / `SSH_AUTH_SOCK` 命名管道那条分支。它在 `embedded_ssh.rs` 里，靠 `cfg(windows)` 之外的条件（运行期探测）分派，所以上面那 33 处计数并没有覆盖它。**这一项必须在 Windows 上用真实 Pageant 实测**，见本节第 2 条的验收补充。
-2. **真实 OpenSSH ≥10 握手**。这是当初引入 OpenSSL 的唯一理由（WinCNG 只有 MODP DH，OpenSSH 10 删光了 `diffie-hellman-group*`）。换成 russh 后要在 Windows 上实测：ed25519 公钥、curve25519 KEX、chacha20-poly1305、AES-GCM 全部可用。
-   ```bash
-   ./scripts/e2e-container.sh          # 或 wslc / docker
-   ```
-   **反向验证**：`agent2ssh keys algorithm` 应仍回答 `ed25519`。
+### 10.1 agent 认证：一个被 grep 冤枉的 API
 
-   **同一轮还要验两条容易被漏的**：
+原 §10.3 要求写约 40 行 `AgentSigner`，理由是「`russh 0.60.3` 一个 `Signer` 实现都没有（`grep "Signer for"` 为空）」。**这条是 grep 假象。** 实现存在，只是头跨行：
 
-   - **四条认证路径各通一次**：公钥文件、密码、keyboard-interactive、**agent（Pageant）**。第四条是原文漏掉的那条，它在 Windows 上是独立代码路径，Mac 上只跑得通 `SSH_AUTH_SOCK` 那一半。
-   - **TOFU 三段式**：先连一台未知主机 → 应弹指纹确认（不是直接拒绝也不是直接信任）→ 确认后再连应通过 → 手改 `known_hosts.json` 里的指纹后再连应报 "fingerprint changed"。这条验的是 §4.2-6 那个"探针必须故意接受未知密钥"的改法没有把安全语义改坏。
+```rust
+impl<R: AsyncRead + AsyncWrite + Unpin + Send + 'static> Signer
+    for crate::keys::agent::client::AgentClient<R>
+```
 
-3. **agent 认证（Windows 专属收尾，Mac 上故意留白）**。`russh_impl` 里 `agent()` 目前返回 `unsupported`，**不是遗漏而是分工**：Pageant 分支只能在本机验证，盲写等于制造一个看起来能用、实际没验过的认证路径。到 Windows 上按这个顺序做：
+（`russh-0.60.3/src/auth.rs:180`）—— `for` 不在同一行，所以 `grep "Signer for"` 匹配不到。`AgentClient` 本身就是 `Signer`，`authenticate_publickey_with` 可直接调用，不需要包装层。
 
-   - **先写 `Signer`**。`russh 0.60.3` **一个 `Signer` 实现都没有**（`grep "Signer for"` 为空），所以 `authenticate_publickey_with` 无法直接调用。要包一个 `AgentSigner` 持有 `AgentClient`，`auth_sign` 里转发到 `sign_request_signature()`。约 40 行，这是本项的主体工作量。
-   - **两条连接路径**：Windows 走 `AgentClient::connect_pageant()`（`pageant` crate 已在依赖树里）；Unix 走 `connect_env()`。用 `cfg` 分派，但**两条都要在 Windows 上各测一次**（Pageant 用 PuTTY 的真实 agent，Unix 半条可用 WSL 或 `SSH_AUTH_SOCK` 命名管道）。
-   - **映射门面**：`Agent::connect` → 连接；`list_identities` → `request_identities()`；`identities` → 返回自有 `PublicKey` 包装（`blob()`/`comment()` 从 `AgentIdentity` 取）；`userauth` → `authenticate_publickey_with(user, key, hash, &mut signer)`。
-   - **验收**：四条认证路径各通一次，其中 agent 这条要**在没有私钥文件、只有 Pageant 持有密钥**的机器上通过；再补一次 TOFU 三段式。
+真正的工作量在**类型统一**：`connect_pageant()` 返回 `AgentClient<PageantStream>`，`connect_named_pipe()` 返回 `AgentClient<NamedPipeClient>`，两者类型不同，而门面只能有一个 `Agent`。`agent.rs` 用 `enum AgentStream`（Pageant / 命名管道 / Unix socket）统一成一种 `AsyncRead + AsyncWrite`，再 `AgentClient::connect(stream)`。约 150 行，其中 60 行是 trait 转发。
 
-   > 留白期间的行为是**明确的失败**：`agent()` 返回 `unsupported`，`embedded_ssh` 的 agent 尝试被 `if let Ok(...)` 跳过，后续认证路径照常进行——不会卡死，也不会静默降级成别的认证方式。
+真机验证（`WinR9`，Windows 10.0.26300）：
 
-3. **sidecar 兜底（第 5 项缺口，与传输层无关）**。干净克隆时 `src-tauri/binaries/*` 不存在 → `tauri_build::build()` abort。建议在 `build.rs` 里先探测，缺失时注入 `TAURI_CONFIG={"bundle":{"externalBin":[]}}`（打包任务里 sidecar 一定已存在，行为不变）。修完 `cargo test --lib` 才算真的"克隆即可编译"。
-4. **锁工具链**。当前无 `rust-toolchain.toml`（各机 rustc 漂移）、`package.json` 无 `engines`、无 `.nvmrc`（CI 用 node 20）。
-5. **清 CI**。删掉两处 OpenSSL 工具链步骤后，确认 `windows-latest` 腿仍绿。
-6. **Windows 既有问题**（与本次迁移独立，别混在一起修）：`docs/reports/WINDOWS-HANDOVER.md` 记录 `cli_smoke` 三个补全测试栈溢出、unit tests 跑 50 分钟无输出。
+```
+ssh-agent 服务：Disabled/Stopped → 临时置 Manual 并启动
+ssh-add 两个身份：[1] 未授权  [2] 容器已授权
+agent2ssh exec agent-test "..." → exit 0
+负对照：ssh-add -D 后同一命令 → "no key_path, password, ssh-agent identity, or default key succeeded"
+```
+
+负对照是这条验证的关键：它证明成功走的是 agent，而不是 `~/.ssh` 的兜底密钥，也证明 `identities()` 会跳过被拒的第一个身份、用第二个通过（Finding 1 的行为）。
+
+⚠️ **未验证的一支**：PuTTY **Pageant 本身**没装，所以 `PageantStream::new()` 成功的那条分支没跑过；实际跑到的是它失败后回退到 `\.\pipe\openssh-ssh-agent` 的路径。代码里 Pageant 优先、管道兜底，两者都在编译路径上，但只有兜底路径有运行时证据。
+
+### 10.2 与 macOS 基线的差值
+
+Windows 738/746 vs macOS 741/749，差 3/3。原因不在迁移：新增的 3 条 agent 测试里有一条是 `#[cfg(unix)]`，另一条依赖 `Session` 的选择在两端一致——
+
+```
+agent::tests::identity_mapping_keeps_the_wire_blob_and_comment     两平台都跑
+agent::tests::a_certificate_identity_maps_through_its_embedded_key 两平台都跑
+agent::tests::an_unconnected_agent_refuses_instead_of_pretending   两平台都跑
+```
+
+差值是**既有的平台门禁**，与本次改动无关：迁移方案 §1 的演进表里，macOS 在 S0 之前就已经是 741 而 Windows 是 735。
 
 ---
 

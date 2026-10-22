@@ -1,0 +1,18 @@
+# Which Rust every device builds this with.
+#
+# `channel = "stable"` and not an exact version, deliberately. The repository's
+# Actions allow-list pins `dtolnay/rust-toolchain@stable` by its exact ref
+# (see the header of .github/workflows/ci.yml), so an exact `channel` here
+# would make every CI job download and install a *second* toolchain that the
+# action did not provision. The version floor is enforced where it belongs
+# instead: `rust-version` in src-tauri/Cargo.toml.
+#
+# What this file does buy is the component set. `cargo fmt --check` and
+# `cargo clippy -D warnings` are both required by CI, and a machine without
+# them fails those steps with "no such command" — which reads like a broken
+# checkout rather than a missing component. Naming them here makes rustup
+# install them on first use.
+[toolchain]
+channel = "stable"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

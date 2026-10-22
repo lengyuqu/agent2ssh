@@ -2,8 +2,8 @@
 #
 # K4 — real-SSH end-to-end test against a containerized OpenSSH server.
 #
-# Unlike the mock/embedded smokes (e1/e2/e2e-local), this exercises the actual
-# libssh2 transport against a real sshd: key-based auth, remote exec, an SFTP
+# Unlike the mock/embedded smokes (e1/e2/e2e-local), this exercises the real SSH
+# transport against a real sshd: key-based auth, remote exec, an SFTP
 # round-trip (upload → download → byte-compare), recursive directory transfer
 # (J4: build a tree remotely + pull it back), resume (K6), mkdir/ls, and the
 # exec runtime suite (src-tauri/tests/exec_fixture.rs: stderr drain, the timeout
@@ -20,25 +20,27 @@
 # ## Why the client key comes from `agent2ssh keys generate`
 #
 # Not from `ssh-keygen`. The key the app hands a user has to be a key the app can
-# authenticate with, and that is not automatic: the private-key file formats
-# libssh2 accepts depend on the crypto backend it was built against, so a key
-# this app generates on one platform may be unusable on another. Generating the
-# client key with the app makes every step below — and the whole exec runtime
-# suite — a regression test for that, and the app's own public-key encoding gets
-# checked against a real sshd when the key is authorized through `PUBLIC_KEY`.
+# authenticate with, and asserting that with the app's own generator makes every
+# step below — and the whole exec runtime suite — a regression test for it: the
+# app's public-key encoding gets checked against a real sshd when the key is
+# authorized through `PUBLIC_KEY`, and its private-key writer gets checked at
+# the same time. The transport (`russh`) parses the OpenSSH container itself on
+# every platform, so the format is no longer platform-dependent — but "we
+# generate it, we can use it" is still a property worth holding.
 #
 # ## Which sshd image?
 #
 # `AGENT2SSH_E2E_IMAGE` defaults to the newest release of the fixture image —
 # currently OpenSSH 10.3 — and that default is what should be exercised, because
-# every platform this repository builds links the same libssh2 crypto backend,
-# OpenSSL.
+# every platform this repository builds runs the same transport and therefore
+# offers the same modern key-exchange set.
 #
-# The override exists for the build that still differs. A WinCNG build offers only
-# MODP Diffie-Hellman key exchange, and OpenSSH 10.0 dropped those groups, so such
-# a build and a modern server share no KEX algorithm at all and every connection
-# fails before authentication. To point the fixture at a server that build can
-# negotiate with:
+# The override exists for a server, not for a build. An old server that only
+# offers MODP Diffie-Hellman cannot negotiate with this client at all, since the
+# transport's defaults are modern by design (see `ssh_algo::safe_defaults`); the
+# supported way to talk to such a host is `agent2ssh algo set` on that host
+# profile, not a different client. To point the fixture at an OpenSSH 9.x server
+# anyway:
 #
 #   AGENT2SSH_E2E_IMAGE=lscr.io/linuxserver/openssh-server:9.9_p2-r0-ls198 \
 #     scripts/e2e-container.sh
@@ -137,10 +139,8 @@ RT_ID="$("$CLI" containers runtime --json | sed -n 's/.*"runtime": "\([a-z]*\)".
 echo "  runtime: ${RT_ID:-unknown} ($RT_BIN)"
 
 # ── Generate the client keypair with the app ──────────────────────────────────
-# The app decides the type: on a build whose libssh2 cannot read the OpenSSH
-# private-key container it generates RSA as traditional PEM, which is the only
-# form that can authenticate there. Asking the app rather than hard-coding a
-# type here keeps the harness and the product on one rule.
+# The type is whatever `keys algorithm` reports for this build (a property of
+# the transport), so the harness and the product cannot disagree about it.
 note "Generating the client key with agent2ssh + starting the sshd container"
 KEY_TYPE="$("$CLI" keys algorithm --name)"
 KEY_DIR="$AGENT2SSH_CONFIG_DIR/keys"
@@ -184,11 +184,11 @@ done
 if [[ "$READY" != 1 ]]; then
   echo "sshd never became reachable through the app"
   "$RT_BIN" logs "$CONTAINER" | tail -40
-  echo "  hint: a build linking libssh2's WinCNG backend needs an OpenSSH 9.x server,"
-  echo "        because OpenSSH 10.0 removed the MODP Diffie-Hellman groups that are"
-  echo "        all WinCNG offers. Every platform this repository builds links OpenSSL"
-  echo "        instead, so on such a build the image is not the explanation — check"
-  echo "        the container log above. To rule the backend out:"
+  echo "  hint: an old server that only offers MODP Diffie-Hellman shares no"
+  echo "        key-exchange algorithm with this client, whose defaults are modern"
+  echo "        by design. That is the server's limitation, not the client's: allow"
+  echo "        the legacy algorithm on the host profile with 'agent2ssh algo set'."
+  echo "        To confirm it is the image rather than the client:"
   echo "        AGENT2SSH_E2E_IMAGE=lscr.io/linuxserver/openssh-server:9.9_p2-r0-ls198"
   exit 1
 fi

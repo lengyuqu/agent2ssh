@@ -59,3 +59,35 @@
 供对照，避免把它们误认为 Windows 问题：多轮 keyboard-interactive（二次验证）、FIDO/安全密钥、跳板机矩阵、OpenSSH 7.x 之前的真实旧版本（目前用限制算法的 8.3 模拟）、除 OpenSSH 与 Dropbear 外的服务端实现（Windows 自带 OpenSSH、网络设备等）。
 
 与平台无关的已知问题汇总在 [../KNOWN-ISSUES.md](../KNOWN-ISSUES.md)。
+
+## 5. 附记：2026-10-22 在 WinR9 上的复核结果
+
+本节由 Windows 侧的实测补充，不改动上文任何结论，只回答"这些条目现在是什么状态"。
+
+### 5.1 第 1 节记录的两个 CI 症状：均不复现
+
+| 症状 | 记录时的现象 | 2026-10-22 实测 |
+|---|---|---|
+| `cli_smoke` 三个补全测试 | `thread 'main' has overflowed its stack` | `cargo test --no-default-features --test cli_smoke` = **33 passed, 0 failed**（0.44s） |
+| "Rust unit tests" 步骤 | 约 50 分钟无输出后取消 | `cargo test --lib` = **746 passed**，28s；含编译 1m46s |
+
+`cargo test --lib`（默认 tauri feature）在 2026-10-22 之前需要 `TAURI_CONFIG` 或预先存在 sidecar，现在两条路都不用：`build.rs` 会在 `binaries/` 里找不到本 target 的 sidecar 时自行注入 `bundle.externalBin: []`，并打印一行指出 `scripts/prepare-sidecars.sh`。把 `binaries/*.exe` 全部移走后重跑 `cargo test --lib` 验证过。
+
+### 5.2 第 3 节里已经过时的条目
+
+- **`reads_openssh_private_keys` 字段已不存在**：`ssh_key_format.rs` 随 libssh2 后端一起删除，因为它存在的理由（WinCNG 只认两种 PEM 头）随后端消失了。`keys algorithm --name` 仍回答 `ed25519`，但不再有"本构建能不能读 OpenSSH 容器"这个问题。
+- **`HOME` 隔离在 Windows 上不可靠**那条仍然成立，而且现在更容易观察到：agent 认证是 `embedded_ssh` 的第一顺位，`~/.ssh/id_*` 是最后一顺位。要证明某个用例走的是 agent 而不是默认密钥，做法不是挪 `HOME`（`dirs::home_dir()` 走 Known Folder API），而是**清空 agent 后看同一命令是否失败**——2026-10-22 用这个负对照验证了 agent 路径。
+
+### 5.3 本轮真实跑过的内容
+
+| 项 | 命令 | 结果 |
+|---|---|---|
+| Docker 容器化 E2E | `AGENT2SSH_CONTAINER_RUNTIME=docker ./scripts/e2e-container.sh` | 9 passed, 0 failed |
+| wslc 容器化 E2E | `AGENT2SSH_CONTAINER_RUNTIME=wslc ./scripts/e2e-container.sh` | 9 passed, 0 failed |
+| 单元测试（无默认 feature） | `cargo test --lib --no-default-features` | 738 passed |
+| 单元测试（tauri feature） | `cargo test --lib` | 746 passed |
+| CLI smoke | `--test cli_smoke` | 33 passed |
+| clippy ×3 | CLI+MCP / daemon / tauri lib | 全绿，`-D warnings` |
+| agent 认证（真机） | `ssh-agent` + `ssh-add` 两个身份，只授权第二个 | exit 0，且负对照失败 |
+
+**没有跑过的**：PuTTY Pageant 本身（未安装，代码里 Pageant 优先、`\.\pipe\openssh-ssh-agent` 兜底，只有兜底路径有运行时证据）；`e2e-ssh-matrix.sh` 的全矩阵（依赖 Git for Windows 的 `ssh-keygen`/`ssh-agent`/`cmp`，本轮未执行）。
