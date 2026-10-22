@@ -210,7 +210,7 @@ src/transport/
 **DoD**：`grep -rn "ssh2::" src/ | grep -v "src/transport/"` 输出为空——即**模块之外没有任何代码命名后端**（不能只排 `legacy_ssh2.rs`：`mod.rs` 的 `pub use legacy_ssh2::…` 也会命中，而 `types.rs` 的文档注释是刻意写明"镜像 ssh2 的哪个类型"的，属于要保留的记录）；741/749/155 全绿（现场重测值）；`Cargo.toml` 未新增任何依赖；**§4.5 的 22+14+9+4 个方法逐个有门面落点**。
 **价值**：这一步在 Mac 和 Windows 上都成立，等于把 9500 行的风险提前清掉；之后换后端只改一个目录。
 
-### S1 — 接 russh（双后端并存）· 🟡 依赖已就绪，待实现后端
+### S1 — 接 russh（双后端并存）· 🟢 主干已实现并通过真实 sshd，剩余五个缺口
 
 > 依赖层已经在树上（`transport-russh` feature + 五条钉版），`cargo check --features transport-russh` 通过。**剩下的全部工作是 `russh_impl/` 本身**，见本节末「探针结果」。
 
@@ -262,7 +262,23 @@ pkcs5 = { version = "=0.8.0-rc.13", default-features = false, optional = true }
 
 5. **`cargo tree -d` 结果**：`ed25519` / `curve25519-dalek` / `ecdsa` / `elliptic-curve` / `pkcs5` 全部单副本；只有 `pkcs1` 有 0.7.5（`rsa 0.9`，本仓用它写 PKCS#1）和 0.8.0-rc.4（russh）两份，属于可接受的并行。
 
-**还剩下的活**：`transport-russh` 目前只拉依赖，`russh_impl/` 尚未实现。§4.2 那六条契约全部落在这一层。
+**实现进度（2026-10-22）**：`src/transport/russh_impl/` 已落地，Session 与 Channel 的六条契约全部实现。
+
+- **真实 sshd 验证通过**：`exec_fixture` 四条全绿（含 `drains_stdout_and_stderr_off_one_channel_without_deadlocking` 与超时截止那条）。这两条正是双缓冲解复用和"两旋钮"写错时最先倒的用例。
+- **门面签名调整**：`host_key` / `host_key_hash` 改为返回 owned 字节——libssh2 能从会话里借出切片，russh 只能在握手回调里拿到 key，门面统一持有副本。
+- **基线**：`--features transport-russh` = 752（755 − 3，少掉的正好是 `legacy_ssh2` 自己的映射测试，该后端在 feature 下不编译）；默认后端仍 755。
+
+**剩余五个缺口**（都在 `russh_impl` 顶部列出，各自返回明确的 unsupported 错误，不假装可用）：
+
+| 缺口 | 影响 | 说明 |
+|---|---|---|
+| `Sftp` | `core.rs` 的 SFTP 路径全部失败 | 需要接 `russh-sftp`，并把 `File` 的 Read/Write/Seek 包在 `block_on` 上 |
+| `channel_forward_listen` | 远程转发不可用 | russh 把转发的通道**推进 handler**，不是发 listener，是模型差异不是改名 |
+| `agent` | agent / Pageant 认证不可用 | Windows 分支无法在本机验证，盲写比明示更糟 |
+| `auth_methods` | 「服务端没广告 password 就不试」的短路消失 | russh 不暴露该列表 |
+| `banner` | `core.rs:1881` 拿不到登录横幅 | 需要在 handler 里捕获 |
+
+`set_keepalive` 另有半缺口：握手后设置不再生效（russh 在 connect 时固定 interval），`keepalive_send()` 仍可用。
 
 ### S2 — 切默认
 
