@@ -30,7 +30,7 @@
 | 密钥交换失败提示 | `embedded_ssh.rs` `handshake_with_hint` | 只改了错误文案，但 `-5` 的触发条件取决于后端算法集 |
 | `host add --passphrase` | `bin/agent2ssh.rs` | 口令走凭据库；Windows 的文件权限 ACL（`icacls`）路径需确认没有影响 |
 | Dropbear 上传使用 16 KiB 写入 | `sftp_transfer.rs` `upload_chunk_for_server` | 与平台无关，但 Windows 上的 Dropbear/嵌入式设备实测可补一次 |
-| 各密钥类型（ed25519、RSA-3072、ECDSA 256/384/521，OpenSSH 与 PEM 容器；明文、带口令、证书） | 矩阵脚本 | `ssh_key_format::reads_openssh_private_keys()` 与 `keys algorithm` 的推荐在 Windows 上取决于后端，需在真机核对 |
+| 各密钥类型（ed25519、RSA-3072、ECDSA 256/384/521，OpenSSH 与 PEM 容器；明文、带口令、证书） | 矩阵脚本 | 后端换成 russh 后所有格式都可读，`keys algorithm` 的推荐恒为 ed25519；仍需在真机跑一遍矩阵确认 |
 | 旧算法服务端（仅 SHA-1 DH、CBC、HMAC-SHA1、`ssh-rsa`） | 矩阵脚本 legacy 段 | `algo set` 能放开哪些算法取决于后端的 `supported_algs` |
 | `known_hosts.json` 按 `host:port` 只记一个主机密钥类型 | `embedded_ssh.rs` `trust_or_verify_host_fingerprint` | 已知限制，与平台无关：改了主机密钥算法偏好或服务器新增更优先的密钥类型，会被报 "fingerprint changed"，需要重新信任 |
 
@@ -49,7 +49,7 @@
 
 ### 3.2 其它建议在 Windows 上单独确认的点
 
-- `agent2ssh keys algorithm --name` 与 `ssh_key_format::reads_openssh_private_keys()` 在当前 OpenSSL 后端下的结果。
+- `agent2ssh keys algorithm --name` 的输出（当前恒为 ed25519，`reads_openssh_private_keys` 字段恒为 true）。
 - 带 `-cert.pub` 的密钥在 Windows 路径（含反斜杠、含空格的用户目录）下是否仍被识别：`user_certificate_for` 用 `file_name()` 拼接，应当无关路径风格，但没实测。
 - `cli_contract` 里起子进程的测试（见第 1 节的挂起怀疑）。
 - `local:vs`、`local:wsl`、`local:cmd` 等 Windows 专有环境不在本轮改动范围内，沿用 `REGRESSION-LOG.md` 的 W1 记录。

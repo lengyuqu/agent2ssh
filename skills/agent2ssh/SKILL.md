@@ -341,33 +341,17 @@ Seven things to know before calling these:
   built-in defaults are narrowed to what the build can actually negotiate, which
   is what makes `algo set` safe on either. `algo clear` is the way back. Ask
   `algo get` rather than assuming a list is portable.
-- **A private key the server accepts can still be unusable here, and it is an
-  encoding problem, not a key problem.** The linked libssh2 reads private keys
-  through whichever crypto backend it was built with: a WinCNG build understands
-  only traditional PEM, `-----BEGIN RSA PRIVATE KEY-----` and
-  `-----BEGIN DSA PRIVATE KEY-----`, so a key in the OpenSSH container format
-  (`-----BEGIN OPENSSH PRIVATE KEY-----`, which `ssh-keygen` has written by
-  default since OpenSSH 7.8, `-t rsa` included) cannot authenticate there at all,
-  and Ed25519 keys cannot be used by it in any format. The failure names this
-  rather than reporting `unknown error`; the fix is `ssh-keygen -p -m PEM -f
-  <key>` on an RSA or DSA key, or importing one that is already PEM. Do not
-  hand-build a key for this app: `keys algorithm` reports the type this build can
-  authenticate with and `keys generate` produces it, so the key the app generates
-  is always one the app can use.
-- **Windows links OpenSSL, not WinCNG.** `src-tauri/Cargo.toml` enables `ssh2`'s
-  `openssl-on-win32` together with `vendored-openssl`, so every platform this
-  project builds now offers curve25519, ed25519/ECDSA host keys, AES-GCM and
-  `chacha20-poly1305`, reads the OpenSSH container format, and completes a
-  handshake with an OpenSSH 10.0+ server. A WinCNG build could not reach that
-  last point at all: it offers only the `diffie-hellman-group*` exchanges, which
-  OpenSSH 10.0 removed, so the negotiation had no common algorithm and failed
-  before authentication with `Session(-5) Unable to exchange encryption keys` —
-  a failure that looks nothing like a key problem. The bundled OpenSSL is built
-  from source and linked statically, so no `libssl*.dll`/`libcrypto*.dll` needs
-  to ship. Building it needs `nmake` plus a *full* Perl, which is why
-  `.cargo/config.toml` pins `OPENSSL_SRC_PERL` to `scripts/win-perl.cmd` — the
-  Perl bundled with Git for Windows is trimmed and cannot drive OpenSSL's
-  `Configure`. NASM is optional and only turns on OpenSSL's assembly routines.
+- **Every key format the app can generate, it can also use.** The SSH transport
+  is `russh`, whose parser reads the OpenSSH container, PKCS#1 and PKCS#8 alike,
+  so a key written by `ssh-keygen` works without conversion — the old advice to
+  run `ssh-keygen -p -m PEM` described a libssh2 limit that no longer exists.
+  `keys algorithm` reports the type this build generates by default (Ed25519) and
+  `keys generate` produces it; RSA is still available as a choice.
+- **No OpenSSL, Perl or NASM on any platform.** The Windows build used to compile
+  OpenSSL from source to escape WinCNG's MODP-only key exchange, which cost a C
+  toolchain, a full Perl and an `OPENSSL_SRC_PERL` indirection. The transport now
+  uses `ring`, so nothing in the default build links OpenSSL and there is no
+  `libssl*.dll`/`libcrypto*.dll` to ship.
 
 ---
 

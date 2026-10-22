@@ -322,9 +322,28 @@ transport-ssh2 = ["dep:ssh2"]
 
 **CI 同步**：新增两条腿（clippy 旧后端 CLI+MCP、单测旧后端），其余 `--no-default-features` 调用一处未改——这正是选"倒过来"换来的。
 
-### S3 — 删
+### S3 — 删 · ✅ 已完成 2026-10-22
 
-见 §7。
+按 §7 全量执行，实际删除与补位如下：
+
+| 删除 | 补位 |
+|---|---|
+| `src/transport/legacy_ssh2.rs`（整份 libssh2 后端） | 无——门面直接 `pub use russh_impl::*`，`mod.rs` 里只剩一个模块 |
+| `src/ssh_key_format.rs`（421 行） | 见下 |
+| `Cargo.toml` 的 `ssh2`（两处）、`transport-ssh2` feature、Windows 的 `openssl-on-win32`/`vendored-openssl` 整段 | 无 |
+| `src-tauri/.cargo/config.toml`（只有 `OPENSSL_SRC_PERL` 一条）、`scripts/win-perl.cmd` | 无 |
+| CI 的 Windows NASM/Perl 安装步骤 ×2、S2 新增的旧后端腿 ×2 | 无 |
+
+`ssh_key_format` 的四个调用点的归宿：
+
+- `keys.rs::default_for_build` → 恒 `Ed25519`（不再探能力）。
+- `embedded_ssh.rs` 的 "key format inspected" 诊断与 `unusable_key_hint` 分支 → **删除**。它们存在的唯一理由是"后端读不懂这种编码"，该理由已不存在；留着会让人以为还有这种失败模式。
+- `bin/agent2ssh.rs` 的 JSON 字段 `reads_openssh_private_keys` → **保留字段名、恒 `true`**（CLI 契约不能断），注释写明原因。
+- `keys.rs` 的测试 `the_default_algorithm_produces_a_key_this_build_can_read` → 改名为 `..._the_transport_can_read`，断言从"能力探针同意"换成"用 `russh::keys::load_secret_key` 真的解一遍"，比原来更强。
+
+**顺带清掉的死代码**：`ErrorKind::Opaque`（只有 libssh2 会产生"无法描述的错误"，russh 每个失败都有类型）、`transport/types.rs` 整段 S0 措辞。
+
+**结果**：`cargo tree` 默认图中 `ssh2`/`libssh2-sys`/`openssl-sys` 归零；默认 `--lib` 单测 **741**（752 − 11，少掉的 11 条是随 `ssh_key_format` 一起删掉的模块测试）。
 
 ---
 
