@@ -208,13 +208,17 @@ const COPY_CHUNK: usize = 64 * 1024;
 /// below which a refused write is a real error.
 ///
 /// Dropbear is the reason. Its SFTP channel takes packets of at most 32 KiB, and
-/// libssh2 packetises a write at 30000 bytes: a write over 32 KiB comes back as
-/// zero bytes written, and a stream of 30000-byte writes stalls for good after
-/// the first 128 KiB (measured against Dropbear 2024.85: 1 MiB uploads hung with
-/// the remote file stuck at 131072 bytes, and completed with writes of 16 KiB).
+/// a write above that limit came back as zero bytes written: with the previous
+/// transport, 1 MiB uploads hung with the remote file stuck at 131072 bytes and
+/// completed once writes were cut to 16 KiB (measured against Dropbear 2024.85).
 /// OpenSSH has no such limit, and 64 KiB writes are about 2.6x faster than 16 KiB
 /// ones against it (28 vs 11 MB/s over loopback), so the small size is used only
 /// where it is needed — see [`upload_chunk_for_server`].
+///
+/// The limit is the server's, so it survives the transport swap; what changed is
+/// the client-side packing that turned it into a stall. 16 KiB is still the
+/// conservative choice, but it has not been re-measured against Dropbear on the
+/// current transport — if that run happens, this number is what to revisit.
 const SFTP_SAFE_WRITE: usize = 16 * 1024;
 
 /// Write size to use for an upload to the server that sent `banner`.

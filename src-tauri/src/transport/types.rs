@@ -1,45 +1,39 @@
 //! Backend-neutral types for the SSH transport facade.
 //!
-//! Nothing here mentions `ssh2`, `libssh2` or `russh`. That is the point: the
-//! rest of the crate talks to these types, so swapping the backend is a change
-//! inside [`super::legacy_ssh2`] (S0) or a new backend module (S1) rather than a
-//! change in 9.5k lines of session code.
+//! Nothing here mentions `russh`. That was the point when the facade was
+//! introduced — it let the libssh2 backend be replaced without touching 9.5k
+//! lines of session code — and it is still worth keeping, because the boundary
+//! is where the transport's async model stops.
 //!
-//! When a type here mirrors one from `ssh2`, the shape is deliberate: identical
-//! field names and enum spellings, so S0 can be a pure seam and the compiler can
-//! prove that no behaviour moved.
+//! The shapes were originally chosen to mirror `ssh2`'s exactly, so that
+//! introducing the seam could not move behaviour. Those spellings are kept even
+//! though the crate they mirrored is gone: every call site above already speaks
+//! them, and renaming on the way out would be churn with no reader.
 
 use std::fmt;
 
 /// Which broad category a transport failure falls into.
 ///
-/// Replaces libssh2's numeric `ErrorCode::Session(-N)` codes. The four named
-/// variants are the ones call sites actually discriminate on; everything else is
-/// [`ErrorKind::Other`], which keeps [`Error::message`] as the only thing a user
-/// sees.
+/// The named variants are the ones call sites actually discriminate on;
+/// everything else is [`ErrorKind::Other`], which keeps [`Error::message`] as the
+/// only thing a user sees.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
-    /// Key exchange failed: no common KEX, cipher or MAC algorithm.
-    /// libssh2 `-5`.
+    /// Key exchange failed: no common KEX, cipher or MAC algorithm. This is the
+    /// one the user-facing "your server is too new" hint keys off.
     KeyExchange,
-    /// The server rejected the offered public key.
-    /// libssh2 `-18` and `-19`.
+    /// The server rejected the offered credentials.
     PublicKeyRefused,
-    /// Non-blocking call with no data available yet. libssh2 `-37`.
+    /// Non-blocking call with no data available yet.
     WouldBlock,
-    /// A failure the backend could not describe, so the message is generic.
-    /// libssh2 `-1`. Under russh this can never occur — every failure is typed —
-    /// which is also why the key-format hint built on it stops firing there.
-    Opaque,
     /// Anything the facade does not need to name.
     Other,
 }
 
-/// A transport error: a category plus the backend's own description.
+/// A transport error: a category plus the transport's own description.
 ///
-/// The message is kept verbatim (for libssh2 that is `"[Session(-5)] <text>"`,
-/// the same string the `ssh2` crate's `Display` produced) so user-facing text
-/// does not shift underneath this refactor.
+/// The message is the transport's `Display` verbatim, so what a user reads comes
+/// from the code that actually failed rather than from a translation table here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error {
     kind: ErrorKind,

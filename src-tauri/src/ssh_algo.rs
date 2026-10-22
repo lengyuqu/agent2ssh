@@ -130,11 +130,10 @@ pub fn safe_defaults() -> SshAlgoPrefs {
 /// `None` means the probe itself failed, which callers must treat as "no
 /// preference" rather than as "nothing is supported".
 ///
-/// The host-key list doubles as this build's capability signal for *file
-/// formats*: [`crate::ssh_key_format::reads_openssh_private_keys`] reads it
-/// through here, because the backends that can parse OpenSSH-container private
-/// keys are exactly the ones that advertise ed25519/ECDSA host keys. Keep this
-/// crate-visible for that reason.
+/// This used to double as the capability signal for *file formats* as well —
+/// the backends that could parse OpenSSH-container private keys were exactly the
+/// ones advertising ed25519 host keys. With one transport and one parser that
+/// question is gone; what remains is the negotiated algorithm list.
 pub(crate) fn supported_algorithms(method: MethodType) -> Option<&'static HashSet<String>> {
     static KEX: OnceLock<Option<HashSet<String>>> = OnceLock::new();
     static HOSTKEY: OnceLock<Option<HashSet<String>>> = OnceLock::new();

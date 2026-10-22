@@ -1,8 +1,8 @@
 //! The russh backend for the transport facade.
 //!
-//! The default backend since S2: the same synchronous facade as the libssh2 one
-//! that preceded it, so nothing above `src/transport/` changed. Selecting
-//! `transport-ssh2` swaps this module out for `legacy_ssh2`.
+//! The only backend. It replaced a libssh2 implementation behind the same
+//! synchronous facade, which is why nothing above `src/transport/` had to
+//! change when it did.
 //!
 //! # Shape
 //!

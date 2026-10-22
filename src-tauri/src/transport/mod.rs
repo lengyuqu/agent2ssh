@@ -22,26 +22,15 @@
 //! they always did, so nothing new is at risk — but the rule is written down
 //! here because the backend swap is what makes it non-obvious.
 //!
-//! # Backend selection
+//! # Backend
 //!
-//! russh is the default and is compiled unconditionally. The `transport-ssh2`
-//! feature swaps the backend back to libssh2 for one release; it is the only
-//! thing that pulls libssh2 and its OpenSSL into the build.
+//! There is one: `russh_impl`. The libssh2 backend this facade was built around
+//! is gone, and with it every libssh2/OpenSSL dependency. The facade stayed
+//! because it is what kept that swap from reaching the 900-odd lines of session
+//! code above it.
 
-// S2: russh is the default and is compiled unconditionally; `transport-ssh2`
-// swaps the whole backend back to libssh2 for one release, which is also the
-// only way to pull libssh2 and its OpenSSL into the build. Keeping russh
-// unconditional is what leaves `--no-default-features` (how CI builds the CLI
-// without tauri) still producing a working binary.
-#[cfg(feature = "transport-ssh2")]
-mod legacy_ssh2;
-#[cfg(feature = "transport-ssh2")]
-pub use legacy_ssh2::{Agent, Channel, File, Listener, PublicKey, Session, Sftp, Stderr};
-
-#[cfg(not(feature = "transport-ssh2"))]
 mod russh_impl;
-#[cfg(not(feature = "transport-ssh2"))]
-pub use russh_impl::{Agent, Channel, File, Listener, Session, Sftp, Stderr};
+pub use russh_impl::{Agent, Channel, File, Listener, PublicKey, Session, Sftp, Stderr};
 
 mod types;
 pub use types::{

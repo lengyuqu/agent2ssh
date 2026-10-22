@@ -158,42 +158,37 @@ const RSA_BITS_MIN: usize = 2048;
 
 /// A key algorithm this app can generate.
 ///
-/// The set is deliberately tiny, and the default is derived from what the
-/// linked libssh2 can authenticate with — not from the host OS. See
-/// [`KeyAlgorithm::default_for_build`].
+/// The set is deliberately tiny. The default used to be derived from what the
+/// linked libssh2 could authenticate with; the russh transport reads every
+/// format, so it is now simply Ed25519. See [`KeyAlgorithm::default_for_build`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum KeyAlgorithm {
     /// Ed25519, written in the OpenSSH private-key container.
     ///
     /// The better key: smaller, faster, and not dependent on prime generation.
-    /// Unusable on a WinCNG build, which cannot read the container format.
     Ed25519,
     /// RSA, written as traditional PKCS#1 PEM (`-----BEGIN RSA PRIVATE KEY-----`).
     ///
-    /// The only key that authenticates on a WinCNG build, because that backend
-    /// reads exactly two PEM headers and cannot parse the OpenSSH container —
-    /// see [`crate::ssh_key_format`].
+    /// The old WinCNG-backed transport could not read the OpenSSH container, so
+    /// this was the only form that authenticated there; that constraint is gone
+    /// and the variant survives because RSA is still a choice a user can make.
     Rsa,
 }
 
 impl KeyAlgorithm {
     /// The algorithm to use when the caller expresses no preference.
     ///
-    /// Driven by [`crate::ssh_key_format::generated_key_type_is_usable`], so a
-    /// build that can read OpenSSH containers gets Ed25519 and a WinCNG build
-    /// gets the RSA-PEM form it can actually use. Because the probe reads the
-    /// build's own algorithm list, enabling `ssh2`'s `openssl-on-win32` feature
-    /// flips this to Ed25519 without any change here.
+    /// Always Ed25519 now. It used to consult a capability probe because the old
+    /// transport could only read whichever key formats its crypto backend
+    /// supplied — a WinCNG build had to fall back to the RSA-PEM form. The russh
+    /// transport reads every format this crate writes, so there is nothing left
+    /// to probe and no build where the answer differs.
     ///
-    /// Deliberately not `impl Default`: this consults a capability probe, and a
-    /// silent default that can pick RSA is worth spelling out at each call site.
+    /// Kept as a named function rather than folded into call sites: the choice
+    /// is still a product decision worth locating in one place.
     pub fn default_for_build() -> Self {
-        if crate::ssh_key_format::generated_key_type_is_usable() {
-            Self::Ed25519
-        } else {
-            Self::Rsa
-        }
+        Self::Ed25519
     }
 
     /// Parse an algorithm name from a UI or IPC payload, case-insensitively.
@@ -353,12 +348,13 @@ fn generate_ed25519_pair(comment: &str) -> Result<GeneratedKeyPair> {
     })
 }
 
-/// Generate an RSA pair in the one encoding libssh2's WinCNG backend can read.
+/// Generate an RSA pair.
 ///
 /// The private key is traditional PKCS#1 PEM rather than the OpenSSH container
-/// `ssh-keygen` would write, because the container is unreadable on Windows. A
-/// key this app generates is the only kind a Windows user can be handed that
-/// actually authenticates, so the format matters more here than novelty.
+/// `ssh-keygen` would write, simply because that is what the `rsa` crate emits;
+/// the transport reads both. The OpenSSH container would have to be hand-rolled,
+/// and the previous reason for caring — a WinCNG backend that could not parse
+/// it — no longer exists.
 ///
 /// The public key is still the standard single-line `ssh-rsa …` form, which is
 /// what every `authorized_keys` file and every server expects.
@@ -690,10 +686,8 @@ pub fn delete_key_core(name: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ssh_key_format::{detect_private_key_format, format_name, PrivateKeyFormat};
     use crate::store::CONFIG_DIR_ENV;
     use rsa::pkcs1::DecodeRsaPrivateKey;
-    use std::path::Path;
 
     #[cfg(test)]
     fn entropy_source_name() -> &'static str {
@@ -779,18 +773,14 @@ mod tests {
             let private_raw = std::fs::read_to_string(&result.private_path).unwrap();
             let public_raw = std::fs::read_to_string(&result.public_path).unwrap();
 
-            // The whole point of this path: a header the WinCNG backend can
-            // load, and the container format it cannot.
+            // PKCS#1 PEM, not the OpenSSH container: that is what `rsa` writes
+            // natively, and the transport reads it like any other format.
             assert!(
                 private_raw.starts_with("-----BEGIN RSA PRIVATE KEY-----"),
                 "unexpected private key header: {}",
                 private_raw.lines().next().unwrap_or_default()
             );
             assert!(!private_raw.contains("OPENSSH PRIVATE KEY"));
-            assert_eq!(
-                detect_private_key_format(Path::new(&result.private_path)),
-                PrivateKeyFormat::PemRsa
-            );
 
             assert_eq!(result.key_type, "rsa");
             assert_eq!(public_raw.trim(), result.public_key);
@@ -826,27 +816,19 @@ mod tests {
         });
     }
 
-    /// The invariant that ties generation to [`crate::ssh_key_format`]: whatever
-    /// the app generates by default, this build must be able to read back. On
-    /// Windows that is the whole feature — Ed25519 would be generated, stored,
-    /// and then rejected by libssh2 at authentication time.
+    /// The invariant that used to tie generation to the build's crypto backend:
+    /// whatever the app generates by default must be readable by the transport
+    /// that will authenticate with it. It is now checked against that transport's
+    /// own parser instead of a capability probe, which is a stronger question —
+    /// the previous version asked "does this build claim to understand the
+    /// format", this one asks "can the code that logs in actually open the file".
     #[test]
     #[serial_test::serial]
-    fn the_default_algorithm_produces_a_key_this_build_can_read() {
+    fn the_default_algorithm_produces_a_key_the_transport_can_read() {
         with_temp_config_dir(|| {
             let result = generate_key_core("id_default", None).unwrap();
-            let format = detect_private_key_format(Path::new(&result.private_path));
-
-            match format {
-                // Traditional PEM, readable by every backend libssh2 ships.
-                PrivateKeyFormat::PemRsa | PrivateKeyFormat::PemDsa => {}
-                PrivateKeyFormat::OpensshContainer => assert!(
-                    crate::ssh_key_format::reads_openssh_private_keys(),
-                    "generated an OpenSSH container on a build that cannot read one"
-                ),
-                other => panic!("unexpected generated key format: {}", format_name(other)),
-            }
-
+            russh::keys::load_secret_key(&result.private_path, None)
+                .expect("the transport must be able to read the key we generated");
             assert_eq!(result.key_type, KeyAlgorithm::default_for_build().as_str());
         });
     }

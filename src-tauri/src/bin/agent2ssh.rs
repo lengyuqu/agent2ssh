@@ -3394,10 +3394,13 @@ async fn async_main() -> Result<()> {
                             // app sizes itself.
                             "bits": (algorithm == agent2ssh::keys::KeyAlgorithm::Rsa)
                                 .then_some(agent2ssh::keys::RSA_BITS),
-                            // The probe the recommendation is derived from, so a
-                            // surprising answer can be explained from the output.
-                            "reads_openssh_private_keys":
-                                agent2ssh::ssh_key_format::reads_openssh_private_keys(),
+                            // Kept for the JSON contract, now constant: the
+                            // transport reads every key format this app writes,
+                            // so the answer cannot be false. Dropping the key
+                            // would break scripts that parse it; keeping it
+                            // without saying why would invite a reader to look
+                            // for a probe that no longer exists.
+                            "reads_openssh_private_keys": true,
                         }))?
                     );
                 } else if name {
