@@ -64,7 +64,7 @@ impl Settings {
             .store(u64::from(timeout_ms), Ordering::SeqCst);
     }
 
-    fn timeout(&self) -> Option<Duration> {
+    pub(super) fn timeout(&self) -> Option<Duration> {
         match self.timeout_ms.load(Ordering::SeqCst) {
             0 => None,
             ms => Some(Duration::from_millis(ms)),

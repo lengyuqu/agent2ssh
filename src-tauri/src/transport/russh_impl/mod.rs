@@ -30,6 +30,7 @@
 //!   interval at connect time. `keepalive_send()` still works afterwards.
 
 mod channel;
+mod forward;
 mod sftp;
 
 use std::net::TcpStream;
@@ -41,6 +42,7 @@ use russh::keys::PublicKey as RhPublicKey;
 use russh::Disconnect;
 
 pub use channel::{Channel, Stderr};
+pub use forward::Listener;
 pub use sftp::{File, Sftp};
 
 use super::types::{
@@ -133,6 +135,7 @@ struct CapturedKey {
 /// before the caller can compare it.
 struct ClientHandler {
     host_key: Arc<Mutex<Option<CapturedKey>>>,
+    forwards: Arc<forward::Registry>,
 }
 
 impl russh::client::Handler for ClientHandler {
@@ -155,6 +158,24 @@ impl russh::client::Handler for ClientHandler {
         }
         Ok(true)
     }
+
+    /// An inbound connection for a forward we asked for.
+    ///
+    /// Keeping the channel *is* the accept: dropping it would tell the server
+    /// the connection was refused. The consumer pulls it out of the registry
+    /// from `Listener::accept`.
+    async fn server_channel_open_forwarded_tcpip(
+        &mut self,
+        channel: russh::Channel<russh::client::Msg>,
+        _connected_address: &str,
+        connected_port: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        _session: &mut russh::client::Session,
+    ) -> Result<(), Self::Error> {
+        self.forwards.push(connected_port, channel);
+        Ok(())
+    }
 }
 
 /// State that exists before the socket is connected.
@@ -170,6 +191,7 @@ struct Inner {
     host_key: Arc<Mutex<Option<CapturedKey>>>,
     authenticated: AtomicBool,
     pending: Mutex<Pending>,
+    forwards: Arc<forward::Registry>,
     /// `Handle` is not `Clone`, and authentication needs `&mut`, so this is a
     /// tokio mutex: its guard is `Send` and can be held across an await.
     handle: tokio::sync::Mutex<Option<Handle<ClientHandler>>>,
@@ -185,9 +207,11 @@ pub struct Session {
 
 impl Session {
     pub fn new() -> Result<Self, Error> {
+        let settings = Arc::new(channel::Settings::new());
         Ok(Self {
             inner: Arc::new(Inner {
-                settings: Arc::new(channel::Settings::new()),
+                forwards: Arc::new(forward::Registry::new(Arc::clone(&settings))),
+                settings,
                 host_key: Arc::new(Mutex::new(None)),
                 authenticated: AtomicBool::new(false),
                 pending: Mutex::new(Pending::default()),
@@ -223,6 +247,7 @@ impl Session {
 
         let handler = ClientHandler {
             host_key: Arc::clone(&self.inner.host_key),
+            forwards: Arc::clone(&self.inner.forwards),
         };
 
         let handle = block_on(async move {
@@ -547,11 +572,45 @@ impl Session {
 
     pub fn channel_forward_listen(
         &self,
-        _remote_port: u16,
-        _host: Option<&str>,
+        remote_port: u16,
+        host: Option<&str>,
         _queue_maxsize: Option<u32>,
     ) -> Result<(Listener, u16), Error> {
-        Err(unsupported("remote forwarding"))
+        self.ensure_connected()?;
+        let address = host.unwrap_or("0.0.0.0").to_string();
+        let bound = block_on(async {
+            let guard = self.inner.handle.lock().await;
+            let Some(handle) = guard.as_ref() else {
+                return Err(other("handshake has not run"));
+            };
+            Ok::<_, Error>(
+                handle
+                    .tcpip_forward(address, u32::from(remote_port))
+                    .await?,
+            )
+        })?;
+        // russh's `tcpip_forward` reports the server's port **only when we asked
+        // for 0** (dynamic allocation); for an explicit port it returns 0. Taking
+        // that literally binds the listener to port 0, so every arriving channel
+        // is filed under 0 and `accept()` never sees it -- the connection hangs
+        // open with no data. Prefer a non-zero answer, otherwise trust the port
+        // we asked for.
+        let effective = if bound != 0 {
+            bound
+        } else if remote_port != 0 {
+            u32::from(remote_port)
+        } else {
+            return Err(other("the server did not report a bound port"));
+        };
+        let port = u16::try_from(effective).map_err(|_| {
+            other(format!(
+                "the server reported an unrepresentable bound port {effective}"
+            ))
+        })?;
+        Ok((
+            Listener::new(u32::from(port), Arc::clone(&self.inner.forwards)),
+            port,
+        ))
     }
 
     pub fn set_keepalive(&self, _want_reply: bool, interval: u32) {
@@ -675,13 +734,5 @@ impl PublicKey {
 
     pub fn comment(&self) -> &str {
         ""
-    }
-}
-
-pub struct Listener;
-
-impl Listener {
-    pub fn accept(&mut self) -> Result<Channel, Error> {
-        Err(unsupported("remote forwarding"))
     }
 }
