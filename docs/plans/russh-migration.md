@@ -274,11 +274,14 @@ pkcs5 = { version = "=0.8.0-rc.13", default-features = false, optional = true }
 
 两处**有意的语义损失**，代码里已注明：`mkdir` 忽略 `mode`（russh-sftp 的 SFTP mkdir 不带属性，由服务端决定），`rename` 忽略 `overwrite`（SFTP v3 的 rename 在目标存在时失败，POSIX 语义要扩展协商）。唯一调用点传 `false`，当下无行为差异。
 
-**剩余四个缺口**（都在 `russh_impl` 顶部列出，各自返回明确的 unsupported 错误，不假装可用）：
+**远程转发已接通（2026-10-22）**：russh 的推送模型（`Handler::server_channel_open_forwarded_tcpip`）用一层注册表折回 `Listener::accept` 的拉取模型；端到端验证为 `curl` 经隧道取回本地目标的内容，且先用系统 `ssh -R` 做对照组。
+
+**踩坑记录**：`tcpip_forward` **只在请求端口为 0 时返回服务端分配的端口**，显式端口时按约定返回 `0`。照字面使用会把 listener 记在 0 端口下，而到达的通道按 19000 入队，`accept()` 永远空转——现象是 TCP 连上了、一个字节都不回。另：夹具镜像默认 `AllowTcpForwarding no`，没有对照组时这种拒绝看起来像自己的 bug。
+
+**剩余三个缺口**（都在 `russh_impl` 顶部列出，各自返回明确的 unsupported 错误，不假装可用）：
 
 | 缺口 | 影响 | 说明 |
 |---|---|---|
-| `channel_forward_listen` | 远程转发不可用 | russh 把转发的通道**推进 handler**，不是发 listener，是模型差异不是改名 |
 | `agent` | agent / Pageant 认证不可用 | Windows 分支无法在本机验证，盲写比明示更糟 |
 | `auth_methods` | 「服务端没广告 password 就不试」的短路消失 | russh 不暴露该列表 |
 | `banner` | `core.rs:1881` 拿不到登录横幅 | 需要在 handler 里捕获 |

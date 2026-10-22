@@ -19,8 +19,6 @@
 //! These return a named error rather than pretending to work; they are the
 //! remaining S1 work, listed in `docs/plans/russh-migration.md`:
 //!
-//! - `channel_forward_listen` — russh pushes forwarded channels into the
-//!   handler; that is a different accept model, not a rename.
 //! - `agent` — the Windows Pageant branch cannot be verified on this machine,
 //!   and writing it blind is worse than naming it.
 //! - `auth_methods` — russh does not expose the server's advertised list, so the
