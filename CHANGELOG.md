@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-10-23
+
+Same content as 0.4.2 — the 147 commits since 0.3.0 — rebuilt with working
+updater signing. This is the first release that ships desktop installers, and
+the first whose in-app updater can verify them.
+
+### Fixed
+- **Update artifacts were never signed**: the release job set
+  `createUpdaterArtifacts` through the `TAURI_CONFIG` environment variable,
+  which did not take effect. `tauri build` therefore produced bundles with no
+  `.sig` next to them, and the updater-manifest step killed the job on the Linux
+  runner — taking the macOS and Windows packaging with it through matrix
+  fail-fast, which is why 0.4.2 shipped binaries but no installers. The flag is
+  now written into `tauri.conf.json` by the job, and a post-build assertion
+  fails on the bundle directory itself instead of on a missing file path three
+  steps later.
+- **The updater public key was a placeholder**: `tauri.conf.json` still read
+  `REPLACE_WITH_TAURI_SIGNER_PUBLIC_KEY`, so any locally built app shipped an
+  updater that could never verify a single release. The real key is now in the
+  file; the private half lives only in GitHub Secrets and in
+  `~/.tauri/agent2ssh.key` on the maintainer's machine, never in the repository.
+
 ## [0.4.2] - 2026-10-23
 
 ### Added
