@@ -47,6 +47,7 @@ function renderHostList(overrides: Partial<HostListProps> = {}) {
     onDisconnect: vi.fn(),
     onImportOpensshTrust: vi.fn(),
     onForgetOpenssh: vi.fn(),
+    onImportNetcatty: vi.fn(),
     ...overrides,
   };
   const view = render(

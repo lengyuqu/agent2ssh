@@ -1,5 +1,6 @@
 import {
   Edit3,
+  FileUp,
   Folder,
   Plug,
   PlugZap,
@@ -55,6 +56,8 @@ type Props = {
   onImportOpensshTrust: () => void;
   /** G13: drop this host's keys from the system OpenSSH `~/.ssh/known_hosts`. */
   onForgetOpenssh: (host: HostProfile) => void;
+  /** Open the Netcatty vault-backup importer. */
+  onImportNetcatty: () => void;
 };
 
 type ConnState = { connected: boolean; dotClass: string; label: string };
@@ -88,6 +91,7 @@ export default function HostList({
   onDisconnect,
   onImportOpensshTrust,
   onForgetOpenssh,
+  onImportNetcatty,
 }: Props) {
   const { t } = useI18n();
   const [confirmTarget, setConfirmTarget] = useState<string | null>(null);
@@ -330,6 +334,9 @@ export default function HostList({
           title={t("Import trust from OpenSSH (~/.ssh/known_hosts)")}
         >
           <ShieldCheck size={15} />
+        </IconButton>
+        <IconButton onClick={onImportNetcatty} title={t("Import hosts from a Netcatty backup")}>
+          <FileUp size={15} />
         </IconButton>
       </div>
 

@@ -656,6 +656,22 @@ enum HostCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Import hosts, keys and snippets from a Netcatty vault backup
+    ImportNetcatty {
+        /// Path to the backup file (safeStorage-encrypted, plain-json, or a bare payload)
+        path: String,
+        /// Decode and map everything, write nothing
+        #[arg(long)]
+        dry_run: bool,
+        /// Credential-store service name (default: "netcatty Safe Storage")
+        #[arg(long)]
+        service: Option<String>,
+        /// Import hosts but leave passwords and private keys behind
+        #[arg(long)]
+        skip_credentials: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Open an interactive shell in the current terminal (raw PTY, like ssh)
     Open {
         #[arg(add = ArgValueCandidates::new(host_candidates))]
@@ -1999,6 +2015,72 @@ async fn async_main() -> Result<()> {
                     println!("Imported {} host(s):", added.len());
                     for h in &added {
                         println!("  {} → {}:{}", h.name, h.host, h.port.unwrap_or(22));
+                    }
+                }
+            }
+            HostCommands::ImportNetcatty {
+                path,
+                dry_run,
+                service,
+                skip_credentials,
+                json,
+            } => {
+                let options = agent2ssh::netcatty_import::ImportOptions {
+                    service,
+                    dry_run,
+                    skip_credentials,
+                };
+                let report = agent2ssh::netcatty_import::import_netcatty_core(
+                    std::path::Path::new(&path),
+                    &options,
+                )?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    let prefix = if report.dry_run { "[dry run] " } else { "" };
+                    println!(
+                        "{prefix}hosts: {} imported, {} skipped (already present), {} renamed",
+                        report.hosts_imported.len(),
+                        report.hosts_skipped_existing.len(),
+                        report.hosts_renamed.len()
+                    );
+                    if !report.hosts_renamed.is_empty() {
+                        for (from, to) in &report.hosts_renamed {
+                            println!("  renamed {from} → {to} (label repeated in the backup)");
+                        }
+                    }
+                    println!(
+                        "{prefix}keys: {} written, {} skipped",
+                        report.keys_written.len(),
+                        report.keys_skipped_existing.len()
+                    );
+                    println!(
+                        "{prefix}snippets: {} imported, {} skipped",
+                        report.snippets_imported.len(),
+                        report.snippets_skipped_existing.len()
+                    );
+                    if report.passwords_sealed > 0 {
+                        println!(
+                            "{prefix}passwords sealed into the credential store: {}",
+                            report.passwords_sealed
+                        );
+                    }
+                    if report.jump_hosts_linked > 0 {
+                        println!("{prefix}jump hosts linked: {}", report.jump_hosts_linked);
+                    }
+                    if !report.warnings.is_empty() {
+                        println!("{prefix}warnings:");
+                        for warning in &report.warnings {
+                            println!("  - {warning}");
+                        }
+                    }
+                    if !report.forwards_not_imported.is_empty() {
+                        println!(
+                            "{prefix}port forwards are not stored in configuration; recreate with:"
+                        );
+                        for command in &report.forwards_not_imported {
+                            println!("  {command}");
+                        }
                     }
                 }
             }

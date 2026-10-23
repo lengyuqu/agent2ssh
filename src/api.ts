@@ -18,6 +18,7 @@ import type {
   ExecMultiResult,
   ExecRequest,
   ExecResult,
+  NetcattyImportReport,
   ForwardDirection,
   ForwardRule,
   HighlightRule,
@@ -155,6 +156,19 @@ export const api = {
   deleteProxy: (id: string) => invoke<boolean>("delete_proxy", { id }),
   importSshConfig: (path?: string) =>
     invoke<HostProfile[]>("import_ssh_config", { path: path ?? null }),
+
+  // Netcatty vault import. `dryRun` maps and counts without writing, which is
+  // what the dialog shows before the user commits.
+  netcattyImport: (
+    path: string,
+    options?: { dryRun?: boolean; service?: string; skipCredentials?: boolean },
+  ) =>
+    invoke<NetcattyImportReport>("netcatty_import", {
+      path,
+      dryRun: options?.dryRun ?? false,
+      service: options?.service ?? null,
+      skipCredentials: options?.skipCredentials ?? false,
+    }),
 
   // WebDAV sync
   getWebDavSyncConfig: () => invoke<WebDavSyncConfig>("get_webdav_sync_config"),

@@ -31,6 +31,7 @@ pub mod lifecycle;
 pub mod limits;
 pub mod local_exec;
 pub mod mcp_binding;
+pub mod netcatty_import;
 pub mod notify;
 pub mod openssh_key;
 pub mod osc_ipc;

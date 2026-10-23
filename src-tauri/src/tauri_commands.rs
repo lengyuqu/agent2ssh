@@ -2,6 +2,7 @@ use crate::keys::{
     delete_key_core, generate_key_core_with, import_key_core, list_keys_core, KeyAlgorithm,
     SshKeyInfo,
 };
+use crate::netcatty_import::{import_netcatty_core, ImportOptions, ImportReport};
 use crate::notify::{load_webhook_config, save_webhook_config, WebhookConfig};
 use crate::{
     connection::{connect_host, disconnect_host, list_active_connections},
@@ -368,6 +369,26 @@ pub fn delete_proxy(id: String) -> Result<bool, String> {
 #[tauri::command]
 pub fn import_ssh_config(path: Option<String>) -> Result<Vec<HostProfile>, String> {
     import_ssh_config_core(path.as_deref()).map_err(|e| e.to_string())
+}
+
+/// Import hosts, private keys and snippets from a Netcatty vault backup.
+///
+/// `dry_run` maps and counts without writing, which is what the UI shows before
+/// the user confirms. The report is returned either way so the caller can render
+/// warnings (dropped fields, unsupported port forwards) rather than a bare count.
+#[tauri::command]
+pub fn netcatty_import(
+    path: String,
+    dry_run: Option<bool>,
+    service: Option<String>,
+    skip_credentials: Option<bool>,
+) -> Result<ImportReport, String> {
+    let options = ImportOptions {
+        service,
+        dry_run: dry_run.unwrap_or(false),
+        skip_credentials: skip_credentials.unwrap_or(false),
+    };
+    import_netcatty_core(std::path::Path::new(&path), &options).map_err(|e| e.to_string())
 }
 
 // ── Command execution ────────────────────────────────────────────────────────
@@ -3418,6 +3439,7 @@ pub fn run_tauri() {
             save_proxy,
             delete_proxy,
             import_ssh_config,
+            netcatty_import,
             get_webdav_sync_config,
             set_webdav_sync_config,
             get_webdav_sync_status,

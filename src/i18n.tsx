@@ -874,6 +874,28 @@ export const zh: Record<string, string> = {
   "Copy exec command": "复制进入容器的命令",
   "Open in terminal": "在终端中打开",
   "Opening...": "正在打开…",
+  "Import from Netcatty": "从 Netcatty 导入",
+  "Import hosts from a Netcatty backup": "从 Netcatty 备份导入主机",
+  "Reads a Netcatty vault backup (encrypted or plain JSON) and adds its hosts, private keys and command snippets. Existing hosts are skipped, never overwritten.":
+    "读取 Netcatty 保险库备份（加密或明文 JSON），导入其中的主机、私钥与命令片段。同名主机只会跳过，绝不覆盖。",
+  "Choose backup file…": "选择备份文件…",
+  "Reading the backup…": "正在读取备份…",
+  "Import hosts only — leave passwords and private keys behind":
+    "仅导入主机，不导入密码与私钥",
+  "Importing…": "正在导入…",
+  "Done": "完成",
+  "Port forwards are not part of the configuration. Recreate them with:":
+    "端口转发不属于配置内容，可用以下命令重建：",
+  "Imported {hosts} host(s) and {keys} key(s) from Netcatty.":
+    "已从 Netcatty 导入 {hosts} 个主机、{keys} 个密钥。",
+  "{count} host(s)": "{count} 个主机",
+  "{count} private key(s)": "{count} 个私钥",
+  "{count} group(s)": "{count} 个分组",
+  "{count} snippet(s)": "{count} 个片段",
+  "{count} host(s) already exist and will be skipped": "{count} 个主机已存在，将被跳过",
+  "{count} host(s) use a jump host": "{count} 个主机使用跳板",
+  "{count} password(s) stored in the encrypted credential store":
+    "{count} 个密码已存入加密凭据库",
 };
 
 const I18nContext = createContext<I18nContextValue | null>(null);

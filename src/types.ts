@@ -716,3 +716,25 @@ export type AlgoPrefsState = {
   custom: boolean;
   defaults: SshAlgoPrefs;
 };
+
+// Rust: netcatty_import.rs — ImportReport
+// What a Netcatty vault import actually did (or would do, when `dryRun`).
+// `warnings` carries every dropped field rather than a silent summary, and
+// `forwardsNotImported` holds one ready-to-run `forward start` command per rule
+// because forwarding rules are runtime state here, not configuration.
+export type NetcattyImportReport = {
+  dryRun: boolean;
+  hostsPlanned: number;
+  hostsImported: string[];
+  hostsSkippedExisting: string[];
+  hostsRenamed: [string, string][];
+  keysWritten: string[];
+  keysSkippedExisting: string[];
+  passwordsSealed: number;
+  groupsCreated: string[];
+  snippetsImported: string[];
+  snippetsSkippedExisting: string[];
+  jumpHostsLinked: number;
+  warnings: string[];
+  forwardsNotImported: string[];
+};

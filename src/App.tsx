@@ -27,6 +27,7 @@ import ExecPanel from "./components/ExecPanel";
 import ForwardPanel from "./components/ForwardPanel";
 import HelpPanel from "./components/HelpPanel";
 import HostList from "./components/HostList";
+import NetcattyImportDialog from "./components/NetcattyImportDialog";
 import KeysPanel from "./components/KeysPanel";
 import LiveActivityPanel from "./components/LiveActivityPanel";
 import McpAgentsPanel from "./components/McpAgentsPanel";
@@ -85,6 +86,7 @@ export default function App() {
   const [selectedHost, setSelectedHost] = useState("");
   const [selectedGroup, setSelectedGroup] = useState("default");
   const [editingHost, setEditingHost] = useState<HostProfile | null>(null);
+  const [netcattyOpen, setNetcattyOpen] = useState(false);
   const [activeModule, setActiveModule] = useState<(typeof MODULES)[number]["id"]>("approvals");
   const [audit, setAudit] = useState<AuditEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -1120,6 +1122,12 @@ export default function App() {
                 onDisconnect={handleDisconnect}
                 onImportOpensshTrust={handleImportOpensshTrust}
                 onForgetOpenssh={handleForgetOpenssh}
+                onImportNetcatty={() => setNetcattyOpen(true)}
+              />
+              <NetcattyImportDialog
+                open={netcattyOpen}
+                onClose={() => setNetcattyOpen(false)}
+                onImported={refresh}
               />
               <AddHostForm
                 hosts={hosts}

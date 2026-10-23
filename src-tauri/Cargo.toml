@@ -124,6 +124,14 @@ argon2 = "0.5"
 # B43: In-memory passphrase cache — Zeroizing<String> wipes bytes on drop,
 # reducing plaintext exposure in memory dumps / swap.
 zeroize = { version = "1", features = ["derive"] }
+# `netcatty_import`: Electron's `safeStorage` wraps its payload with Chromium's
+# OSCrypt, whose macOS/Linux key derivation is PBKDF2-HMAC-**SHA-1** (1003
+# iterations, salt `saltysalt`) — the hash is fixed by the format, not chosen
+# here. Already in the graph (`sha2`'s sibling, pulled in by the transport), so
+# naming it adds no crate to the build; PBKDF2 itself is ~20 lines over this
+# plus `hmac`, which keeps us off a second KDF crate whose digest major would
+# have to agree with ours.
+sha1 = "0.10"
 # AST-based command analysis for risk classification (P0-2): tree-sitter-bash
 # parses shell commands into a syntax tree, allowing canonical command head
 # extraction that is resilient to flag reordering, wrapper stacking, and
@@ -143,7 +151,16 @@ libc = "0.2"
 fontdb = "0.23"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.48", features = ["Win32_System_Console", "Win32_Foundation"] }
+windows-sys = { version = "0.48", features = [
+    "Win32_System_Console",
+    "Win32_Foundation",
+    # `netcatty_import`: Electron's `safeStorage` on Windows is DPAPI, so the
+    # Windows path needs `CryptUnprotectData` rather than another cipher.
+    "Win32_Security_Cryptography",
+    # ...and `LocalFree`, which windows-sys keeps under System::Memory even
+    # though it is Foundation's `HLOCAL` that it takes and returns.
+    "Win32_System_Memory",
+] }
 # Pageant's transport, for the SSH agent. `russh` already pulls this in on
 # Windows, so naming it here adds no crate to the build — but it does make
 # `PageantStream` nameable, which `russh` does not re-export and which the
