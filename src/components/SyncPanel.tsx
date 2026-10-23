@@ -12,7 +12,7 @@ import {
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
-import type { WebDavSyncConfig, WebDavSyncStatus } from "../types";
+import type { WebDavRecoveryResult, WebDavSyncConfig, WebDavSyncStatus } from "../types";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
@@ -209,7 +209,7 @@ export default function SyncPanel({ onRestored }: { onRestored?: () => Promise<v
     setBusy(restore ? "restore" : "download");
     setRecoveryMessage("");
     try {
-      let result;
+      let result: WebDavRecoveryResult;
       if (restore) {
         result = await api.restoreWebDavSync();
       } else {
