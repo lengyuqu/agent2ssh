@@ -434,7 +434,12 @@ jobs:
             echo "Updater signing keys are required for release bundles."
             exit 1
           fi
-          export TAURI_CONFIG="$(node -e 'process.stdout.write(JSON.stringify({bundle:{createUpdaterArtifacts:true},plugins:{updater:{pubkey:process.env.A2S_TAURI_SIGNING_PUBLIC_KEY}}}))')"
+          # `TAURI_CONFIG` was tried first and did not take effect: the release
+          # bundles came out with no `.sig` beside them, so `createUpdaterArtifacts`
+          # stayed false and the manifest step then died on a missing signature.
+          # Writing the flag into the config file removes the question of how a
+          # JSON patch merges. The pubkey is already in the file (it is public).
+          node -e 'const fs=require("node:fs"),p="src-tauri/tauri.conf.json";const c=JSON.parse(fs.readFileSync(p,"utf8"));c.bundle={...c.bundle,createUpdaterArtifacts:true};fs.writeFileSync(p,JSON.stringify(c,null,2)+"\n");console.log("createUpdaterArtifacts="+c.bundle.createUpdaterArtifacts);'
           if [ -n "$A2S_TAURI_SIGNING_PRIVATE_KEY" ]; then
             export TAURI_SIGNING_PRIVATE_KEY="$A2S_TAURI_SIGNING_PRIVATE_KEY"
           fi
@@ -455,6 +460,16 @@ jobs:
             export WINDOWS_CERTIFICATE_THUMBPRINT="$A2S_WINDOWS_CERTIFICATE_THUMBPRINT"
           fi
           npx @tauri-apps/cli build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+          # Assert here rather than let the manifest step fail with a path: a
+          # missing signature is either a config regression or a key problem, and
+          # this message names neither bundle nor artifact to go hunting for.
+          signature="$(find "src-tauri/target/${{ matrix.target }}/release/bundle" -name '*.sig' -print -quit)"
+          if [ -z "$signature" ]; then
+            echo "No updater signature was produced under src-tauri/target/${{ matrix.target }}/release/bundle."
+            echo "Either createUpdaterArtifacts did not apply or the signing key was rejected."
+            exit 1
+          fi
+          echo "updater signature: $signature"
         env:
           # Updater signing (signs the artifacts the in-app updater verifies).
           A2S_TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
