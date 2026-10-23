@@ -47,6 +47,7 @@ import type {
   SessionInfo,
   Snippet,
   SftpResult,
+  SftpDirEntry,
   SshAlgoPrefs,
   SshKeyInfo,
   TeamConfigExport,
@@ -56,6 +57,7 @@ import type {
   WebDavSyncConfig,
   WebDavSyncSaveRequest,
   WebDavSyncStatus,
+  WebDavRecoveryResult,
   WebhookConfig,
   ContainerDiscoveryTarget,
   ContainerRuntimeInfo,
@@ -161,6 +163,8 @@ export const api = {
   getWebDavSyncStatus: () => invoke<WebDavSyncStatus>("get_webdav_sync_status"),
   testWebDavSync: () => invoke<WebDavSyncStatus>("test_webdav_sync"),
   pushWebDavSync: () => invoke<WebDavSyncStatus>("push_webdav_sync"),
+  downloadWebDavSync: (outputPath: string) => invoke<WebDavRecoveryResult>("download_webdav_sync", { outputPath }),
+  restoreWebDavSync: () => invoke<WebDavRecoveryResult>("restore_webdav_sync"),
 
   // Local-only terminal recordings. These files may contain secrets and are
   // intentionally excluded from WebDAV configuration snapshots.
@@ -265,6 +269,12 @@ export const api = {
     }),
   sftpLs: (host: string, path: string, timeoutSecs?: number) =>
     invoke<ExecResult>("sftp_ls", {
+      host,
+      path,
+      timeoutSecs: timeoutSecs ?? null,
+    }),
+  sftpReadDir: (host: string, path: string, timeoutSecs?: number) =>
+    invoke<SftpDirEntry[]>("sftp_read_dir", {
       host,
       path,
       timeoutSecs: timeoutSecs ?? null,

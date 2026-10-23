@@ -313,17 +313,31 @@ pub struct ResidentHandle {
     pub(crate) label: String,
     pub(crate) plan: EnvironmentPlan,
     pub(crate) child: Child,
-    /// `None` while a command is being written, restored right after, so a
-    /// second writer can never interleave into the middle of a frame.
-    pub(crate) stdin: Option<ChildStdin>,
+    /// Command serialization and pipe writes must not hold the handle lock:
+    /// close needs the child while a command is running or blocked on stdin.
+    stdin: Arc<StdMutex<Option<ChildStdin>>>,
+    command_lock: Arc<tokio::sync::Mutex<()>>,
     pub(crate) buffer: Arc<StdMutex<SessionBuffer>>,
     pub(crate) last_active: Instant,
     pub(crate) dead: bool,
+    running: bool,
+    closed: bool,
+    tree_killed: bool,
+}
+
+impl ResidentHandle {
+    fn kill_tree(&mut self) {
+        if !self.tree_killed {
+            kill_process_tree(&mut self.child);
+            self.tree_killed = true;
+        }
+        self.dead = true;
+    }
 }
 
 impl Drop for ResidentHandle {
     fn drop(&mut self) {
-        kill_process_tree(&mut self.child);
+        self.kill_tree();
     }
 }
 
@@ -491,6 +505,7 @@ fn spawn_and_warm(
 
     let buffer = Arc::new(StdMutex::new(SessionBuffer::new(SESSION_MAX_OUTPUT)));
     spawn_readers(&mut child, Arc::clone(&buffer));
+    let stdin = child.stdin.take();
 
     let mut handle = ResidentHandle {
         id: Uuid::new_v4(), // replaced by the caller with the lifecycle id
@@ -498,12 +513,15 @@ fn spawn_and_warm(
         label: plan.label.clone(),
         plan,
         child,
-        stdin: None,
+        stdin: Arc::new(StdMutex::new(stdin)),
+        command_lock: Arc::new(tokio::sync::Mutex::new(())),
         buffer,
         last_active: Instant::now(),
         dead: false,
+        running: false,
+        closed: false,
+        tree_killed: false,
     };
-    handle.stdin = handle.child.stdin.take();
 
     // Warm the shell: the prelude runs inside the very shell that will serve
     // later commands, so `Launch-VsDevShell.ps1` pays its cost exactly once.
@@ -512,7 +530,13 @@ fn spawn_and_warm(
         None => warmup_command(handle.plan.style).to_string(),
     };
     let nonce = new_nonce();
-    write_frame(&mut handle, &warm_command, &nonce)?;
+    write_frame(
+        &handle.stdin,
+        &handle.plan,
+        &handle.host,
+        &warm_command,
+        &nonce,
+    )?;
     wait_for_sentinel(&mut handle, &nonce, Duration::from_secs(OPEN_TIMEOUT_SECS))
         .map_err(|error| anyhow!("resident session failed to warm up: {error}"))?;
 
@@ -553,19 +577,22 @@ fn spawn_one_reader<R: Read + Send + 'static>(source: R, buffer: Arc<StdMutex<Se
     });
 }
 
-fn write_frame(handle: &mut ResidentHandle, command: &str, nonce: &str) -> Result<()> {
-    let frame = command_frame(&handle.plan, command, nonce);
-    let mut stdin = handle
-        .stdin
-        .take()
+fn write_frame(
+    stdin: &StdMutex<Option<ChildStdin>>,
+    plan: &EnvironmentPlan,
+    host: &str,
+    command: &str,
+    nonce: &str,
+) -> Result<()> {
+    let frame = command_frame(plan, command, nonce);
+    let mut sink = stdin.lock().unwrap_or_else(|p| p.into_inner());
+    let stdin = sink
+        .as_mut()
         .ok_or_else(|| anyhow!("resident session shell has no stdin (already dead?)"))?;
-    let result = stdin
+    stdin
         .write_all(frame.as_bytes())
         .and_then(|_| stdin.flush())
-        .with_context(|| format!("failed to write to resident shell for '{}'", handle.host));
-    handle.stdin = Some(stdin);
-    handle.last_active = Instant::now();
-    result
+        .with_context(|| format!("failed to write to resident shell for '{host}'"))
 }
 
 /// What waiting for a sentinel can end in.
@@ -582,6 +609,8 @@ pub(crate) enum WaitOutcome {
     TimedOut { timeout_secs: u64 },
     /// The shell itself exited before the sentinel appeared.
     ShellExited { code: Option<i32> },
+    /// An explicit close cancelled the command.
+    Closed,
 }
 
 /// Read the session buffer until `nonce`'s sentinel appears, the deadline
@@ -599,50 +628,68 @@ fn wait_for_sentinel(
     let mut exited_at: Option<Instant> = None;
 
     loop {
-        {
-            let mut buffer = handle.buffer.lock().unwrap_or_else(|p| p.into_inner());
-            if let Some((start, end, exit_code)) = find_sentinel(&buffer.data, nonce) {
-                let output = buffer.data[..start].to_vec();
-                let truncated = buffer.truncated();
-                let dropped_bytes = buffer.dropped_bytes();
-                buffer.consume(end);
-                handle.last_active = Instant::now();
-                return Ok(WaitOutcome::Completed {
-                    output,
-                    exit_code,
-                    truncated,
-                    dropped_bytes,
-                });
-            }
+        if let Some(outcome) = poll_sentinel(handle, nonce, &mut exited_at, deadline, timeout)? {
+            return Ok(outcome);
         }
-
-        if let Some(status) = handle.child.try_wait()? {
-            // Buffered output may still be in flight; give it a moment before
-            // declaring the session dead.
-            let since = *exited_at.get_or_insert(Instant::now());
-            if since.elapsed() > EXIT_GRACE {
-                handle.dead = true;
-                return Ok(WaitOutcome::ShellExited {
-                    code: status.code(),
-                });
-            }
-        }
-
-        if Instant::now() >= deadline {
-            kill_process_tree(&mut handle.child);
-            handle.dead = true;
-            let timeout_secs = timeout.as_secs();
-            return Ok(WaitOutcome::TimedOut { timeout_secs });
-        }
-
         std::thread::sleep(POLL_INTERVAL);
     }
+}
+
+/// One non-waiting observation. Registered sessions release the handle lock
+/// between polls so metadata, buffer reads and cancellation remain available.
+fn poll_sentinel(
+    handle: &mut ResidentHandle,
+    nonce: &str,
+    exited_at: &mut Option<Instant>,
+    deadline: Instant,
+    timeout: Duration,
+) -> Result<Option<WaitOutcome>> {
+    if handle.closed {
+        return Ok(Some(WaitOutcome::Closed));
+    }
+    {
+        let mut buffer = handle.buffer.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some((start, end, exit_code)) = find_sentinel(&buffer.data, nonce) {
+            let output = buffer.data[..start].to_vec();
+            let truncated = buffer.truncated();
+            let dropped_bytes = buffer.dropped_bytes();
+            buffer.consume(end);
+            handle.last_active = Instant::now();
+            return Ok(Some(WaitOutcome::Completed {
+                output,
+                exit_code,
+                truncated,
+                dropped_bytes,
+            }));
+        }
+    }
+
+    if let Some(status) = handle.child.try_wait()? {
+        // Buffered output may still be in flight; give it a moment before
+        // declaring the session dead.
+        let since = *exited_at.get_or_insert(Instant::now());
+        if since.elapsed() > EXIT_GRACE {
+            handle.dead = true;
+            return Ok(Some(WaitOutcome::ShellExited {
+                code: status.code(),
+            }));
+        }
+    }
+
+    if Instant::now() >= deadline {
+        handle.kill_tree();
+        return Ok(Some(WaitOutcome::TimedOut {
+            timeout_secs: timeout.as_secs(),
+        }));
+    }
+    Ok(None)
 }
 
 // ── Exec / close / list / reap ──────────────────────────────────────────────
 
 /// How a command inside a session can fail.
 pub(crate) enum ResidentExecError {
+    Closed,
     /// Deadline passed; the session has been killed.
     Timeout {
         timeout_secs: u64,
@@ -658,9 +705,8 @@ pub(crate) enum ResidentExecError {
 
 /// Run one command in a resident session and capture its output.
 ///
-/// Commands on one session are serialized: the handle lock is held for the
-/// duration, so a second concurrent `exec` waits rather than interleaving its
-/// frame into the first one's.
+/// Commands on one session are serialized by a dedicated command lock. The
+/// handle stays available to close and observation while a command is running.
 ///
 /// Authorization and audit are the *caller's* job — the daemon handler runs
 /// the shared preflight before reaching here and appends the audit entry from
@@ -685,13 +731,25 @@ pub async fn resident_exec_core(
     let timeout = Duration::from_secs(timeout_secs.unwrap_or(60));
     let command_for_run = command.clone();
     let started = Instant::now();
-    let outcome =
-        tokio::task::spawn_blocking(move || exec_in_session(&handle, &command_for_run, timeout))
-            .await
-            .map_err(|e| anyhow!("resident exec task failed: {e}"))?;
+    let command_lock = {
+        let handle = handle.lock().unwrap_or_else(|p| p.into_inner());
+        Arc::clone(&handle.command_lock)
+    };
+    // Queue on the async side. Waiting commands must not fill the blocking
+    // pool needed to terminate the child when close arrives.
+    let command_guard = command_lock.lock_owned().await;
+    let outcome = tokio::task::spawn_blocking(move || {
+        let _command = command_guard;
+        exec_in_session(&handle, &command_for_run, timeout)
+    })
+    .await
+    .map_err(|e| anyhow!("resident exec task failed: {e}"))?;
 
     let (captured, host) = match outcome {
         Ok((captured, host)) => (captured, host),
+        Err(ResidentExecError::Closed) => {
+            return Err(anyhow!("resident session was closed; command cancelled"));
+        }
         Err(ResidentExecError::Timeout { timeout_secs }) => {
             return Err(anyhow!(
                 "resident command timed out after {timeout_secs}s: '{command}'. The session \
@@ -763,20 +821,56 @@ fn exec_in_session(
     command: &str,
     timeout: Duration,
 ) -> Result<(CommandCapture, String), ResidentExecError> {
-    let mut handle = handle.lock().unwrap_or_else(|p| p.into_inner());
-    if handle.dead {
-        return Err(ResidentExecError::Dead);
-    }
-    if let Ok(Some(_)) = handle.child.try_wait() {
-        handle.dead = true;
-        return Err(ResidentExecError::Dead);
-    }
+    let (stdin, plan, host) = {
+        let mut handle = handle.lock().unwrap_or_else(|p| p.into_inner());
+        if handle.closed {
+            return Err(ResidentExecError::Closed);
+        }
+        if handle.dead {
+            return Err(ResidentExecError::Dead);
+        }
+        if let Ok(Some(_)) = handle.child.try_wait() {
+            handle.dead = true;
+            return Err(ResidentExecError::Dead);
+        }
+        handle.running = true;
+        handle.last_active = Instant::now();
+        (
+            Arc::clone(&handle.stdin),
+            handle.plan.clone(),
+            handle.host.clone(),
+        )
+    };
 
     let nonce = new_nonce();
-    write_frame(&mut handle, command, &nonce).map_err(ResidentExecError::Failed)?;
-
-    let outcome = wait_for_sentinel(&mut handle, nonce.as_str(), timeout)
-        .map_err(ResidentExecError::Failed)?;
+    let outcome = (|| {
+        // Pipe writes may block too; keep them outside the handle lock so a
+        // close can kill the shell and release a writer waiting on stdin.
+        write_frame(&stdin, &plan, &host, command, &nonce)?;
+        let deadline = Instant::now() + timeout;
+        let mut exited_at = None;
+        loop {
+            let outcome = {
+                let mut handle = handle.lock().unwrap_or_else(|p| p.into_inner());
+                poll_sentinel(&mut handle, &nonce, &mut exited_at, deadline, timeout)?
+            };
+            if let Some(outcome) = outcome {
+                return Ok(outcome);
+            }
+            std::thread::sleep(POLL_INTERVAL);
+        }
+    })();
+    {
+        let mut handle = handle.lock().unwrap_or_else(|p| p.into_inner());
+        handle.running = false;
+        handle.last_active = Instant::now();
+        // Killing the shell may interrupt write_all before the sentinel loop
+        // notices close. Report cancellation instead of an incidental pipe error.
+        if handle.closed {
+            return Err(ResidentExecError::Closed);
+        }
+    }
+    let outcome = outcome.map_err(ResidentExecError::Failed)?;
     let capture = match outcome {
         WaitOutcome::Completed {
             output,
@@ -789,24 +883,20 @@ fn exec_in_session(
             truncated,
             dropped_bytes,
         },
-        // Unreachable in practice — TimedOut and ShellExited are terminal for
-        // the session and are matched again by the caller above; mapping them
-        // here keeps `wait_for_sentinel` reusable by the warmup path, which
-        // has no result to build.
+        WaitOutcome::Closed => return Err(ResidentExecError::Closed),
         WaitOutcome::TimedOut { timeout_secs } => {
             return Err(ResidentExecError::Timeout { timeout_secs })
         }
         WaitOutcome::ShellExited { code } => return Err(ResidentExecError::ShellExited { code }),
     };
-    Ok((capture, handle.host.clone()))
+    Ok((capture, host))
 }
 
 /// The `local:<id>` host a session was opened for, or `None` if the id is
 /// unknown. Read-only lookup so the daemon can authorize a command against
 /// the session's own host id rather than anything the client claims.
 pub async fn session_host(session_id: Uuid) -> Option<String> {
-    let store = registry().lock().await;
-    let handle = store.get(&session_id)?;
+    let handle = registry().lock().await.get(&session_id).cloned()?;
     let handle = handle.lock().ok()?;
     Some(handle.host.clone())
 }
@@ -820,25 +910,38 @@ pub async fn resident_close_core(session_id: Uuid) -> Result<String> {
         .await
         .remove(&session_id)
         .ok_or_else(|| anyhow!("unknown resident session: {session_id}"))?;
-    let host = {
+    {
         let mut handle = handle.lock().unwrap_or_else(|p| p.into_inner());
+        handle.closed = true;
         handle.dead = true;
-        kill_process_tree(&mut handle.child);
-        handle.host.clone()
-    };
-    drop(handle); // Drop impl runs the process-group kill again; harmless.
-    let _ = crate::app_state::lifecycle()
-        .lock()
-        .unwrap()
-        .close(&session_id.to_string(), None);
+    }
+    // taskkill can take time on Windows. Perform process-tree teardown on a
+    // blocking worker, without a registry lock or the command-serialization lock.
+    let host = tokio::task::spawn_blocking(move || {
+        let host = {
+            let mut handle = handle.lock().unwrap_or_else(|p| p.into_inner());
+            handle.kill_tree();
+            let _ = handle.child.wait();
+            handle.host.clone()
+        };
+        // This worker continues if its caller cancels while awaiting teardown.
+        // Keep lifecycle cleanup here too, after releasing the handle lock.
+        let _ = crate::app_state::lifecycle()
+            .lock()
+            .unwrap()
+            .close(&session_id.to_string(), None);
+        host
+    })
+    .await
+    .map_err(|e| anyhow!("resident close task failed: {e}"))?;
     Ok(host)
 }
 
 /// List sessions, oldest activity first not guaranteed — registry order.
 pub async fn resident_list_core() -> Vec<ResidentSessionSummary> {
-    let store = registry().lock().await;
-    store
-        .values()
+    let handles: Vec<_> = registry().lock().await.values().cloned().collect();
+    handles
+        .iter()
         .filter_map(|handle| {
             let handle = handle.lock().ok()?;
             Some(ResidentSessionSummary {
@@ -861,8 +964,9 @@ pub async fn resident_list_core() -> Vec<ResidentSessionSummary> {
 /// if nothing marked it yet, so a collector can stop polling without waiting
 /// for the idle reaper.
 pub async fn resident_get_core(session_id: Uuid) -> Result<ResidentSessionDetail> {
-    let store = registry().lock().await;
-    let handle = store
+    let handle = registry()
+        .lock()
+        .await
         .get(&session_id)
         .cloned()
         .ok_or_else(|| anyhow!("unknown resident session: {session_id}"))?;
@@ -891,12 +995,13 @@ pub async fn resident_get_core(session_id: Uuid) -> Result<ResidentSessionDetail
 pub async fn reap_idle_sessions() -> usize {
     let ttl = Duration::from_secs(idle_ttl_secs());
     let expired: Vec<Uuid> = {
-        let store = registry().lock().await;
-        store
-            .values()
+        let handles: Vec<_> = registry().lock().await.values().cloned().collect();
+        handles
+            .iter()
             .filter_map(|handle| {
                 let handle = handle.lock().ok()?;
-                (!handle.dead && handle.last_active.elapsed() > ttl).then_some(handle.id)
+                (!handle.dead && !handle.running && handle.last_active.elapsed() > ttl)
+                    .then_some(handle.id)
             })
             .collect()
     };

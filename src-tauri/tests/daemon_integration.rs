@@ -2256,8 +2256,8 @@ fn local_exec_route_runs_the_shared_preflight() {
 /// opened under one authorization, and a later command might hope to ride on
 /// that. It must not: every command pays the same gate chain as a one-shot
 /// exec, keyed on the session's own host id (read from the registry, not from
-/// the request). The open must equally be a preflight-guarded action. Both
-/// facts live only in the handler bodies, so they are pinned at the source
+/// the request). Open and close must equally be preflight-guarded actions.
+/// These facts live only in the handler bodies, so they are pinned at the source
 /// level, the same way `local_exec_route_runs_the_shared_preflight` does.
 #[test]
 fn resident_session_routes_run_the_shared_preflight() {
@@ -2302,6 +2302,71 @@ fn resident_session_routes_run_the_shared_preflight() {
          chain runs, so the command is authorized against the environment the \
          session actually lives in"
     );
+
+    assert!(
+        resident_close_has_ordered_preflight(daemon),
+        "resident_session_close must be wired to DELETE and look up the \
+         session's own host before preflight, then finish preflight before \
+         resident_close_core can kill the shell"
+    );
+}
+
+fn resident_close_has_ordered_preflight(daemon: &str) -> bool {
+    if !daemon.contains("get(resident_session_get).delete(resident_session_close)") {
+        return false;
+    }
+    let close = handler_body(daemon, "async fn resident_session_close(");
+    match (
+        close.find("session_host(id)"),
+        close.find("preflight_guarded_request("),
+        close.find("resident_close_core(id)"),
+    ) {
+        (Some(host), Some(preflight), Some(kill)) => host < preflight && preflight < kill,
+        _ => false,
+    }
+}
+
+#[test]
+fn resident_session_close_source_guard_detects_compilable_mutations() {
+    let daemon = include_str!("../src/bin/agent2ssh-daemon.rs");
+    assert!(resident_close_has_ordered_preflight(daemon));
+
+    // A different real handler still compiles as an Axum route, but must not
+    // satisfy the resident close guard merely because the old function exists.
+    let misrouted = daemon.replacen(
+        "get(resident_session_get).delete(resident_session_close)",
+        "get(resident_session_get).delete(session_close)",
+        1,
+    );
+    assert_ne!(misrouted, daemon);
+    assert!(!resident_close_has_ordered_preflight(&misrouted));
+
+    // Comments between an identifier and '(' are valid Rust. Each mutation
+    // removes one expected literal while leaving the handler compilable, so
+    // the source check proves it can fail instead of finding another handler.
+    let start = daemon.find("async fn resident_session_close(").unwrap();
+    let (before, close_and_rest) = daemon.split_at(start);
+    for (needle, replacement) in [
+        ("session_host(id)", "session_host /* guard probe */(id)"),
+        (
+            "preflight_guarded_request(",
+            "preflight_guarded_request /* guard probe */(",
+        ),
+        (
+            "resident_close_core(id)",
+            "resident_close_core /* guard probe */(id)",
+        ),
+    ] {
+        let mutated = format!(
+            "{before}{}",
+            close_and_rest.replacen(needle, replacement, 1)
+        );
+        assert_ne!(mutated, daemon);
+        assert!(
+            !resident_close_has_ordered_preflight(&mutated),
+            "source guard ignored a missing close-handler marker: {needle}"
+        );
+    }
 }
 
 /// Extract one handler's body, ending at the next top-level async fn. Required

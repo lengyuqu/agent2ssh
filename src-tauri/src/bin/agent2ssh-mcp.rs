@@ -184,12 +184,22 @@ fn mcp_host_tags(host: &str) -> Vec<String> {
 
 fn local_daemon_client() -> std::result::Result<Option<(reqwest::Client, String, String)>, McpError>
 {
+    local_daemon_client_with_timeout(Some(std::time::Duration::from_secs(30)))
+}
+
+fn local_daemon_client_with_timeout(
+    request_timeout: Option<std::time::Duration>,
+) -> std::result::Result<Option<(reqwest::Client, String, String)>, McpError> {
     let (url, token) = get_daemon("localhost")
         .map_err(|e| McpError::internal(format!("local daemon lookup failed: {e}")))?;
     let Some(token) = token else {
         return Ok(None);
     };
-    let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30));
+    let mut builder =
+        reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(10));
+    if let Some(timeout) = request_timeout {
+        builder = builder.timeout(timeout);
+    }
     // Propagate the MCP process's correlation id so daemon-side logs for forwarded
     // requests stay linked to the originating agent operation.
     if let Some(trace_id) = agent2ssh::current_trace_id() {
@@ -300,7 +310,11 @@ async fn daemon_only_request(
     body: &Value,
     context: &str,
 ) -> std::result::Result<Value, McpError> {
-    let Some((client, base_url, token)) = local_daemon_client()? else {
+    // The daemon owns execution, shell warmup and approval deadlines. An HTTP
+    // deadline cannot be inferred from timeout_secs alone: an approval may wait
+    // longer than the command itself. Keep a bounded connection attempt, but
+    // allow the daemon to return the command result or its own timeout error.
+    let Some((client, base_url, token)) = local_daemon_client_with_timeout(None)? else {
         return Err(McpError::internal(format!(
             "{context} requires the agent2ssh daemon (agent2ssh-daemon), which is not running"
         )));

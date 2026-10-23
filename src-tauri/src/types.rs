@@ -692,6 +692,16 @@ pub struct WalkEntry {
     pub size: u64,
 }
 
+/// A directory entry for structured SFTP consumers. Names are never parsed
+/// from an ls-like display line, which cannot represent every legal filename.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SftpDirEntry {
+    pub name: String,
+    pub is_dir: bool,
+    pub size: Option<u64>,
+    pub modified_unix: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SftpExchangeResult {
     pub downloaded: SftpResult,

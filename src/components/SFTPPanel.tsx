@@ -19,7 +19,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
 import { labelCls } from "../lib/ui-classes";
-import type { HostProfile, LocalDirListing } from "../types";
+import type { HostProfile, SftpDirEntry } from "../types";
 import HostSelector from "./HostSelector";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
@@ -77,9 +77,8 @@ type TransferProgress = {
   current: string;
   bytesDone: number;
   bytesTotal: number;
-  // K6: id of the file currently transferring, so a Cancel button can abort it.
-  transferId?: string | null;
   cancelling?: boolean;
+  cancellable: boolean;
 };
 
 type PendingTransfer = {
@@ -115,18 +114,20 @@ function makeSide(kind: LocationKind, host: string): SideState {
 
 // ── Path helpers ─────────────────────────────────────────────────────────────
 
-function trimPath(path: string): string {
-  return path.trim();
-}
-
-function basenameOf(path: string): string {
-  const normalized = trimPath(path).replace(/[\\/]+$/, "");
-  const parts = normalized.split(/[\\/]/).filter(Boolean);
+function basenameOf(path: string, kind: LocationKind): string {
+  // Remote paths are POSIX paths: a backslash or edge whitespace can be part
+  // of a filename. Only interpret backslashes as separators for local Windows
+  // paths, and never trim names received from a directory listing.
+  const isWindows = kind === "local" && (/\\/.test(path) || /^[A-Za-z]:/.test(path));
+  const separator = isWindows ? /[\\/]/ : /\//;
+  const normalized = path.replace(isWindows ? /[\\/]+$/ : /\/+$/, "");
+  const parts = normalized.split(separator).filter(Boolean);
   return parts.length > 0 ? parts[parts.length - 1] : normalized;
 }
 
 function remoteParent(path: string): string {
-  const normalized = trimPath(path).replace(/\/+$/, "");
+  if (/^\/+$/u.test(path)) return "/";
+  const normalized = path.replace(/\/+$/, "");
   if (!normalized || normalized === ".") return ".";
   if (normalized === "/") return "/";
   const idx = normalized.lastIndexOf("/");
@@ -134,9 +135,9 @@ function remoteParent(path: string): string {
 }
 
 function remoteJoin(base: string, child: string): string {
-  const normalized = trimPath(base).replace(/\/+$/, "");
+  if (/^\/+$/u.test(base)) return `/${child}`;
+  const normalized = base.replace(/\/+$/, "");
   if (!normalized || normalized === ".") return child;
-  if (normalized === "/") return `/${child}`;
   return `${normalized}/${child}`;
 }
 
@@ -145,7 +146,8 @@ function remoteJoin(base: string, child: string): string {
 // backslash or a drive letter) joins with `\` and converts the child's `/`
 // separators to `\`, so reconstructed download paths aren't mixed-separator.
 function localJoin(base: string, child: string): string {
-  const normalized = trimPath(base).replace(/[\\/]+$/, "");
+  if (/^\/+$/u.test(base)) return `/${child}`;
+  const normalized = base.replace(/[\\/]+$/, "");
   if (!normalized) return child;
   const isWindows = /\\/.test(normalized) || /^[A-Za-z]:/.test(normalized);
   if (isWindows) {
@@ -159,7 +161,7 @@ function joinForKind(kind: LocationKind, base: string, child: string): string {
 }
 
 function buildBreadcrumbs(path: string): Array<{ label: string; path: string }> {
-  const base = trimPath(path).replace(/\/+$/, "");
+  const base = path.replace(/\/+$/, "");
   if (!base || base === ".") return [{ label: "⌂", path: "/" }];
   const isAbsolute = base.startsWith("/");
   const parts = base.split("/").filter(Boolean);
@@ -174,77 +176,10 @@ function buildBreadcrumbs(path: string): Array<{ label: string; path: string }> 
 
 // ── Listing parse / format ───────────────────────────────────────────────────
 
-const LS_MONTHS: Record<string, number> = {
-  jan: 0,
-  feb: 1,
-  mar: 2,
-  apr: 3,
-  may: 4,
-  jun: 5,
-  jul: 6,
-  aug: 7,
-  sep: 8,
-  oct: 9,
-  nov: 10,
-  dec: 11,
-};
-
-function parseLsMtime(month: string, day: string, timeOrYear: string): number | null {
-  const monthIndex = LS_MONTHS[month.toLowerCase()];
-  const dayOfMonth = Number.parseInt(day, 10);
-  if (monthIndex === undefined || !Number.isFinite(dayOfMonth)) return null;
-  const now = new Date();
-  if (/^\d{4}$/.test(timeOrYear)) {
-    return Math.floor(Date.UTC(Number(timeOrYear), monthIndex, dayOfMonth) / 1000);
-  }
-  const match = /^(\d{1,2}):(\d{2})$/.exec(timeOrYear);
-  if (!match) return null;
-  return Math.floor(
-    Date.UTC(
-      now.getUTCFullYear(),
-      monthIndex,
-      dayOfMonth,
-      Number(match[1]),
-      Number(match[2])
-    ) / 1000
-  );
-}
-
-function parseLsEntries(stdout: string): FileEntry[] {
-  const parsed: FileEntry[] = [];
-  for (const line of stdout.split("\n")) {
-    const text = line.trim();
-    if (!text) continue;
-    if (/^total\s+\d+/i.test(text)) continue;
-
-    const fields = text.split(/\s+/);
-    if (fields.length >= 9) {
-      const mode = fields[0];
-      if (!mode) continue;
-      const trailing = fields.slice(8).join(" ");
-      const name = (trailing.split(" -> ")[0] ?? "").trim();
-      if (!name || name === "." || name === "..") continue;
-
-      const size = Number.parseInt(fields[4], 10);
-      const parsedDate = parseLsMtime(fields[5], fields[6], fields[7]);
-      parsed.push({
-        name,
-        isDir: mode.startsWith("d"),
-        size: Number.isNaN(size) ? null : size,
-        mtime: parsedDate,
-      });
-      continue;
-    }
-
-    if (!text.includes(" -> ") && !text.startsWith("d") && !text.startsWith("-") && text !== "..") {
-      parsed.push({ name: text, isDir: false, size: null, mtime: null });
-    }
-  }
-  return parsed;
-}
-
-function listingToEntries(listing: LocalDirListing): FileEntry[] {
-  return listing.entries.map((entry) => ({
+// Use structured SFTP entries: presentation-oriented ls output cannot encode
+// filenames containing newlines, and whitespace/arrow parsing changes names.
+function listingToEntries(entries: SftpDirEntry[]): FileEntry[] {
+  return entries.map((entry) => ({
     name: entry.name,
     isDir: entry.is_dir,
     size: entry.is_dir ? null : entry.size,
@@ -353,15 +288,15 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
     }
     patchSide(side, { loading: true, error: null });
     try {
-      const result = await api.sftpLs(host, path);
+      const entries = await api.sftpReadDir(host, path);
       patchSide(side, {
-        entries: parseLsEntries(result.stdout),
+        entries: listingToEntries(entries),
         path,
         loading: false,
         loaded: true,
         selected: [],
         viewCap: VIEW_CAP_STEP,
-        error: result.exit_code === 0 ? null : result.stderr || t("Could not read this folder"),
+        error: null,
       });
     } catch (err) {
       patchSide(side, { loading: false, error: String(err) });
@@ -374,7 +309,7 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
     try {
       const listing = await api.localLs(path);
       patchSide(side, {
-        entries: listingToEntries(listing),
+        entries: listingToEntries(listing.entries),
         path: listing.path,
         localParent: listing.parent,
         localHome: listing.home,
@@ -475,7 +410,7 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
     const s = getSide(side);
     const name = window.prompt(t("New folder name"));
     if (!name) return;
-    const target = joinForKind(s.kind, s.path, name.trim());
+    const target = joinForKind(s.kind, s.path, name);
     try {
       if (s.kind === "remote") {
         if (!s.host) return;
@@ -498,7 +433,7 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
     const from = joinForKind(s.kind, s.path, entry.name);
     const next = window.prompt(t("Rename to"), entry.name);
     if (next === null) return;
-    const name = next.trim();
+    const name = next;
     // A no-op rename would still round-trip to the server and land in the audit
     // log as a write, so skip it.
     if (!name || name === entry.name) return;
@@ -580,7 +515,7 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
       return null;
     }
     const destNames = new Set(d.entries.map((e) => e.name));
-    const conflicts = s.selected.map(basenameOf).filter((name) => destNames.has(name));
+    const conflicts = s.selected.map((path) => basenameOf(path, s.kind)).filter((name) => destNames.has(name));
     return { sourceSide, destSide, paths: [...s.selected], conflicts };
   }
 
@@ -611,7 +546,8 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
     const files: Array<{ src: string; dest: string; size: number }> = [];
 
     for (const path of paths) {
-      const name = basenameOf(path);
+      if (transferCancelRequested.current) break;
+      const name = basenameOf(path, s.kind);
       const entry = entryByName.get(name);
       if (!entry?.isDir) {
         files.push({ src: path, dest: joinForKind(d.kind, d.path, name), size: entry?.size ?? 0 });
@@ -619,6 +555,7 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
       }
       // Directory: enumerate its tree and recreate it under dest/<name>.
       const walk = s.kind === "local" ? await api.localWalk(path) : await api.sftpWalk(s.host, path);
+      if (transferCancelRequested.current) break;
       const destRoot = joinForKind(d.kind, d.path, name);
       dirs.push(destRoot);
       for (const w of walk) {
@@ -630,11 +567,11 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
     return { dirs, files };
   }
 
-  // K6: ask the backend to abort every in-flight transfer. The awaited calls in
-  // the transfer workers then reject, surfacing through the catch in executeTransfer.
+  // Stop scheduling work even during discovery/mkdir, before any transfer has
+  // an id. File transfers already in flight also receive a backend cancel.
   async function cancelTransfer() {
+    if (!transfer?.cancellable) return;
     const ids = [...activeTransferIds.current];
-    if (ids.length === 0) return;
     transferCancelRequested.current = true;
     setTransfer((prev) => (prev ? { ...prev, cancelling: true } : prev));
     try {
@@ -650,11 +587,11 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
     s: SideState,
     d: SideState,
     f: { src: string; dest: string; size: number }
-  ): Promise<number> {
-    if (transferCancelRequested.current) return 0;
+  ): Promise<number | null> {
+    if (transferCancelRequested.current) return null;
     const transferId = `sftp-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     activeTransferIds.current.add(transferId);
-    setTransfer((prev) => (prev ? { ...prev, current: basenameOf(f.src), transferId } : prev));
+    setTransfer((prev) => (prev ? { ...prev, current: basenameOf(f.src, s.kind) } : prev));
     try {
       if (s.kind === "local" && d.kind === "remote") {
         return (await api.sftpUpload(d.host, f.src, f.dest, { transferId })).bytes;
@@ -676,19 +613,24 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
     const s = getSide(plan.sourceSide);
     const d = getSide(plan.destSide);
     const started = performance.now();
+    let completed = 0;
     transferCancelRequested.current = false;
-    setTransfer({ total: 0, done: 0, current: t("Preparing…"), bytesDone: 0, bytesTotal: 0 });
+    setLastResult(null);
+    setTransfer({ total: 0, done: 0, current: t("Preparing…"), bytesDone: 0, bytesTotal: 0, cancellable: true });
     try {
       const { dirs, files } = await buildTransferUnits(plan.sourceSide, plan.destSide, plan.paths);
+      if (transferCancelRequested.current) return;
       const bytesTotal = files.reduce((sum, f) => sum + f.size, 0);
-      setTransfer({ total: files.length, done: 0, current: "", bytesDone: 0, bytesTotal });
+      setTransfer({ total: files.length, done: 0, current: "", bytesDone: 0, bytesTotal, cancellable: true });
 
       // Create destination directories first (the walk lists parents before
       // children; mkdir is `-p`/create_dir_all so order and repeats are safe).
       for (const dir of dirs) {
+        if (transferCancelRequested.current) return;
         if (d.kind === "remote") await api.sftpMkdir(d.host, dir);
         else await api.localMkdir(dir);
       }
+      if (transferCancelRequested.current) return;
 
       // K6: transfer files through a bounded worker pool. Concurrency is 1 when
       // parallel mode is off (preserving the old serial behavior) and
@@ -705,6 +647,8 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
           if (i >= files.length) return;
           try {
             const bytes = await transferOneFile(s, d, files[i]);
+            if (bytes === null) return;
+            completed += 1;
             setTransfer((prev) =>
               prev ? { ...prev, done: prev.done + 1, bytesDone: prev.bytesDone + bytes } : prev
             );
@@ -715,9 +659,16 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
           }
         }
       };
-      await Promise.all(Array.from({ length: Math.max(1, concurrency) }, worker));
+      // Keep the batch active until every worker settles. Promise.all would
+      // release the UI on the first failure while other workers could still
+      // write progress into the next batch or start more files after a cancel.
+      const results = await Promise.allSettled(Array.from({ length: Math.max(1, concurrency) }, worker));
+      if (transferCancelRequested.current) return;
+      const failure = results.find((result) => result.status === "rejected");
+      if (failure?.status === "rejected") throw failure.reason;
+      setTransfer((prev) => (prev ? { ...prev, cancellable: false } : prev));
       setLastResult({
-        count: files.length,
+        count: completed,
         dest: d.path,
         ms: Math.round(performance.now() - started),
       });
@@ -725,6 +676,7 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
       patchSide(plan.sourceSide, { selected: [] });
       await refreshSide(plan.destSide);
     } catch (err) {
+      if (transferCancelRequested.current) return;
       showToast("error", String(err));
       reportFailure("transfer failed", err, {
         sourceKind: s.kind,
@@ -733,6 +685,10 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
         destHost: d.host,
       });
     } finally {
+      if (transferCancelRequested.current) {
+        showToast("warning", t("Transfer cancelled after {count} file(s)", { count: completed }));
+        await refreshSide(plan.destSide);
+      }
       transferCancelRequested.current = false;
       setTransfer(null);
     }
@@ -781,7 +737,7 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
         return;
       }
       const destNames = new Set(d.entries.map((e) => e.name));
-      const conflicts = paths.map(basenameOf).filter((name) => destNames.has(name));
+      const conflicts = paths.map((path) => basenameOf(path, getSide(sourceSide).kind)).filter((name) => destNames.has(name));
       const plan: PendingTransfer = { sourceSide, destSide, paths, conflicts };
       if (conflicts.length > 0) setPending(plan);
       else void executeTransfer(plan);
@@ -1163,7 +1119,7 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
               </span>
             )}
             {transfer.current && <span className="truncate text-primary/80">· {transfer.current}</span>}
-            {transfer.transferId && (
+            {transfer.cancellable && (
               <button
                 type="button"
                 className="ml-auto shrink-0 rounded border border-primary/40 px-2 py-0.5 text-xs font-medium text-primary hover:bg-primary/15 disabled:opacity-50"

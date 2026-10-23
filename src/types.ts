@@ -194,6 +194,7 @@ export type WebDavSyncConfig = {
   username?: string | null;
   remotePath: string;
   passwordConfigured: boolean;
+  syncPasswordConfigured: boolean;
 };
 
 export type WebDavSyncSaveRequest = {
@@ -201,6 +202,7 @@ export type WebDavSyncSaveRequest = {
   url: string;
   username?: string | null;
   password?: string | null;
+  syncPassword?: string | null;
   remotePath: string;
 };
 
@@ -216,6 +218,12 @@ export type WebDavSyncStatus = {
   portableDigest?: string | null;
   syncState: "in_sync" | "local_ahead" | "remote_ahead" | "diverged" | "unknown";
   syncSummary: string;
+};
+
+export type WebDavRecoveryResult = {
+  fileCount: number;
+  localPath?: string | null;
+  backupId?: string | null;
 };
 
 // Rust: webdav_sync.rs — ConfigSnapshotInfo (V4-3)
@@ -306,6 +314,14 @@ export type LocalDirEntry = {
   name: string;
   is_dir: boolean;
   size: number;
+  modified_unix: number | null;
+};
+
+// Rust: types.rs — SftpDirEntry (sftp_read_dir command)
+export type SftpDirEntry = {
+  name: string;
+  is_dir: boolean;
+  size: number | null;
   modified_unix: number | null;
 };
 

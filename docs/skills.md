@@ -84,7 +84,9 @@ the `mcp_tools_match_skills_md_documentation` integration test.
 | 72 | `local_exec` | Run one command on the machine the daemon runs on, in a one-shot terminal environment: `local`, `local:<environment>` (`local:pwsh`, `local:cmd`, `local:gitbash`, `local:vs`, `local:wsl[:<distribution>]`) or `local:<runtime>:<container-id>` (`local:docker:abc123`). Forwards to the daemon, so the same gate chain as SSH exec applies (scope, risk, approval). For a shell whose state persists across commands use `resident_session_open`. |
 | 73 | `resident_session_open` | Open a resident session: one shell for a `local:<id>` environment that stays alive across commands, so cwd and exported variables persist. Blocks until the shell is warm. Forwards to the daemon; the open is authorized like an exec keyed on the environment's host id. Containers are refused (one-shot targets). |
 | 74 | `resident_session_exec` | Run one command inside a resident session opened by `resident_session_open`. Authorized against the session's own host id, so it pays the same gate chain as a one-shot exec. Output is bounded by the session's rolling window. A command that outlives its timeout kills the session — long-running work belongs in `local_exec`. |
-| 75 | `resident_session_close` | Close a resident session and kill its shell. Closing an already-dead session still reclaims it. To read a session's buffered output without running a command, `GET /resident-sessions/{id}` on the daemon. |
+| 75 | `resident_session_close` | Close a resident session and kill its shell. Authorized as `resident-session close` against the session's own host through scope, execution gate, limits, risk and approval. Closing an already-dead session still reclaims it. To read a session's buffered output without running a command, use `GET /resident-sessions/{id}` on the daemon, authorized as `resident-session read`. |
+
+The local-execution tools above wait for the daemon's execution, shell-warmup and approval deadlines, rather than imposing a separate 30-second HTTP timeout. Connecting to the daemon is limited to 10 seconds; command `timeout_secs` still applies.
 
 ## Risk Levels
 

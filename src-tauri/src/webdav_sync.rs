@@ -11,7 +11,8 @@ use std::{
 };
 
 use crate::store::{
-    config_dir, ensure_config_dir, lock_config_file, restrict_file_to_owner, FileLockGuard,
+    config_dir, ensure_config_dir, lock_config_file, restrict_file_to_owner, write_private_bytes,
+    FileLockGuard,
 };
 
 const SYNC_VERSION_FILE: &str = "sync_version.json";
@@ -131,7 +132,8 @@ pub struct WebDavSyncOptions {
     /// Password for encrypting the sync backup before upload.
     /// If set, each file is encrypted with AES-256-GCM before being
     /// sent to the WebDAV server, and decrypted after download.
-    /// If None, files are uploaded as plaintext (backward compatible).
+    /// Uploads require a non-empty password (directly or via the environment);
+    /// there is no plaintext upload fallback.
     pub sync_password: Option<String>,
     pub sync_password_env: Option<String>,
     /// Explicitly allow overwriting configuration when the remote and local
@@ -778,6 +780,27 @@ fn read_backup_manifest(dir: &Path) -> Result<ConfigSnapshotInfo> {
         .with_context(|| format!("failed to read {}", manifest_path.display()))?;
     let value: serde_json::Value = serde_json::from_str(&raw)
         .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
+    // A missing or malformed list must not become an empty snapshot: absence
+    // now means that restoring removes that file from the live config.
+    let files: Vec<String> = serde_json::from_value(
+        value
+            .get("files")
+            .cloned()
+            .ok_or_else(|| anyhow!("snapshot manifest is missing its files list"))?,
+    )
+    .context("snapshot manifest files must be an array of file names")?;
+    let mut seen = HashSet::new();
+    for name in &files {
+        // Local backups also contain the local version marker. Remote
+        // manifests have a different allowlist (including ignored legacy
+        // names), so their validation cannot be reused here.
+        if !SYNCABLE_FILES.contains(&name.as_str()) && name != SYNC_VERSION_FILE {
+            return Err(anyhow!("snapshot contains unsupported file: {name}"));
+        }
+        if !seen.insert(name) {
+            return Err(anyhow!("snapshot contains duplicate file: {name}"));
+        }
+    }
     let id = dir
         .file_name()
         .and_then(|name| name.to_str())
@@ -794,15 +817,7 @@ fn read_backup_manifest(dir: &Path) -> Result<ConfigSnapshotInfo> {
             .and_then(|v| v.as_str())
             .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
             .map(|dt| dt.with_timezone(&Utc)),
-        files: value
-            .get("files")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|f| f.as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default(),
+        files,
     })
 }
 
@@ -847,26 +862,67 @@ pub fn create_named_snapshot(label: &str) -> Result<ConfigSnapshotInfo> {
 
 /// V4-3: restore a config snapshot. Takes a fresh "pre-restore" safety
 /// snapshot of the CURRENT state first (so restoring is itself undoable), then
-/// copies back only the files the target snapshot actually captured.
+/// restores both the contents and absence of files in the snapshot's scope.
 pub fn restore_config_snapshot(id: &str) -> Result<ConfigSnapshotInfo> {
     let source_dir = backup_dir_for_id(id)?;
     let info = read_backup_manifest(&source_dir)?;
-    create_sync_backup(Some("pre-restore"))?;
-    let dest_dir = config_dir()?;
+    // Verify and read the entire snapshot before touching live configuration.
+    // A missing captured file is corruption, not an instruction to delete it.
+    let mut contents = Vec::with_capacity(info.files.len());
     for rel in &info.files {
         let source = source_dir.join(rel);
-        if !source.is_file() {
-            continue;
+        let metadata = fs::symlink_metadata(&source)
+            .with_context(|| format!("failed to read snapshot file {}", source.display()))?;
+        if !metadata.file_type().is_file() {
+            return Err(anyhow!(
+                "snapshot entry is not a regular file: {}",
+                source.display()
+            ));
         }
+        let bytes = fs::read(&source)
+            .with_context(|| format!("failed to read snapshot file {}", source.display()))?;
+        contents.push((rel, bytes));
+    }
+    let dest_dir = config_dir()?;
+    let scope = SYNCABLE_FILES
+        .iter()
+        .copied()
+        .chain(std::iter::once(SYNC_VERSION_FILE));
+    let mut removals = Vec::new();
+    for rel in scope {
         let dest = dest_dir.join(rel);
-        fs::copy(&source, &dest).with_context(|| {
+        match fs::symlink_metadata(&dest) {
+            Ok(metadata) if !metadata.file_type().is_file() => {
+                return Err(anyhow!(
+                    "cannot restore over a non-regular config file: {}",
+                    dest.display()
+                ));
+            }
+            Ok(_) => {
+                if !info.files.iter().any(|name| name == rel) {
+                    removals.push(dest);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to inspect {}", dest.display()));
+            }
+        }
+    }
+
+    create_sync_backup(Some("pre-restore"))?;
+    for (rel, bytes) in contents {
+        let dest = dest_dir.join(rel);
+        write_private_bytes(&dest, &bytes)
+            .with_context(|| format!("failed to restore {}", dest.display()))?;
+    }
+    for dest in removals {
+        fs::remove_file(&dest).with_context(|| {
             format!(
-                "failed to restore {} to {}",
-                source.display(),
+                "failed to remove config file absent from snapshot: {}",
                 dest.display()
             )
         })?;
-        restrict_file_to_owner(&dest)?;
     }
     Ok(info)
 }
@@ -1752,6 +1808,174 @@ mod tests {
 
         std::env::remove_var(CONFIG_DIR_ENV);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn snapshot_restore_undoes_new_template_files_and_preserves_local_state() {
+        let dir = crate::store::TestConfigDir::new("snapshot-undo-template");
+        let local_files = [
+            "secrets.enc",
+            "known_hosts.json",
+            "daemon.token",
+            "snippets.json",
+            "approval_policies.toml",
+            "keys/id_ed25519",
+        ];
+        fs::create_dir_all(dir.join("keys")).unwrap();
+        for name in local_files {
+            fs::write(dir.join(name), format!("local {name}")).unwrap();
+        }
+        let before = apply_config_template(&[
+            ("policy.toml".into(), "template-policy".into()),
+            ("execution_limits.toml".into(), "template-limits".into()),
+        ])
+        .unwrap();
+        assert!(before.files.is_empty());
+        fs::write(dir.join(SYNC_VERSION_FILE), "new-marker").unwrap();
+
+        restore_config_snapshot(&before.id).unwrap();
+
+        for name in SYNCABLE_FILES
+            .iter()
+            .copied()
+            .chain(std::iter::once(SYNC_VERSION_FILE))
+        {
+            assert!(!dir.join(name).exists(), "new file {name} must be removed");
+        }
+        for name in local_files {
+            assert_eq!(
+                fs::read_to_string(dir.join(name)).unwrap(),
+                format!("local {name}")
+            );
+        }
+        let safety = list_config_snapshots()
+            .unwrap()
+            .into_iter()
+            .find(|snapshot| snapshot.label.as_deref() == Some("pre-restore"))
+            .unwrap();
+        assert!(safety.files.contains(&"policy.toml".to_string()));
+        assert!(safety.files.contains(&"execution_limits.toml".to_string()));
+        assert!(safety.files.contains(&SYNC_VERSION_FILE.to_string()));
+        restore_config_snapshot(&safety.id).unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.join("policy.toml")).unwrap(),
+            "template-policy"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join(SYNC_VERSION_FILE)).unwrap(),
+            "new-marker"
+        );
+    }
+
+    #[test]
+    fn snapshot_restore_accepts_existing_manifest_format_and_version_marker() {
+        let dir = crate::store::TestConfigDir::new("snapshot-existing-format");
+        let backup = dir.join(BACKUP_DIR).join("legacy");
+        fs::create_dir_all(&backup).unwrap();
+        fs::write(
+            backup.join("backup_manifest.json"),
+            serde_json::json!({
+                "created_at": "2026-01-01T00:00:00Z",
+                "source": "old-machine",
+                "files": ["hosts.json", SYNC_VERSION_FILE],
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(backup.join("hosts.json"), "old-hosts").unwrap();
+        fs::write(backup.join(SYNC_VERSION_FILE), "old-marker").unwrap();
+        fs::write(dir.join("hosts.json"), "new-hosts").unwrap();
+        fs::write(dir.join(SYNC_VERSION_FILE), "new-marker").unwrap();
+        fs::write(dir.join("policy.toml"), "new-policy").unwrap();
+
+        restore_config_snapshot("legacy").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(dir.join("hosts.json")).unwrap(),
+            "old-hosts"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join(SYNC_VERSION_FILE)).unwrap(),
+            "old-marker"
+        );
+        assert!(!dir.join("policy.toml").exists());
+    }
+
+    #[test]
+    fn snapshot_restore_rejects_missing_captured_file_before_any_change() {
+        let dir = crate::store::TestConfigDir::new("snapshot-missing-file");
+        fs::write(dir.join("hosts.json"), "old-hosts").unwrap();
+        fs::write(dir.join("policy.toml"), "old-policy").unwrap();
+        let before = create_named_snapshot("before").unwrap();
+        fs::remove_file(backup_dir_for_id(&before.id).unwrap().join("policy.toml")).unwrap();
+        fs::write(dir.join("hosts.json"), "current-hosts").unwrap();
+        fs::write(dir.join("policy.toml"), "current-policy").unwrap();
+        fs::write(dir.join("execution_limits.toml"), "current-limits").unwrap();
+
+        let error = restore_config_snapshot(&before.id).unwrap_err().to_string();
+
+        assert!(error.contains("failed to read snapshot file"), "{error}");
+        assert!(error.contains("policy.toml"), "{error}");
+        assert_eq!(
+            fs::read_to_string(dir.join("hosts.json")).unwrap(),
+            "current-hosts"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join("policy.toml")).unwrap(),
+            "current-policy"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join("execution_limits.toml")).unwrap(),
+            "current-limits"
+        );
+        assert_eq!(fs::read_dir(dir.join(BACKUP_DIR)).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn snapshot_restore_rejects_invalid_manifests_without_touching_live_or_outside_files() {
+        let sandbox = crate::store::TestConfigDir::new("snapshot-invalid-manifest");
+        let dir = sandbox.join("live");
+        fs::create_dir_all(&dir).unwrap();
+        crate::store::set_test_config_dir(&dir);
+        fs::write(dir.join("hosts.json"), "current-hosts").unwrap();
+        fs::write(dir.join("policy.toml"), "current-policy").unwrap();
+        let outside = sandbox.join("victim.txt");
+        fs::write(&outside, "outside-original").unwrap();
+        let backup = dir.join(BACKUP_DIR).join("invalid");
+        fs::create_dir_all(&backup).unwrap();
+        fs::write(backup.join("hosts.json"), "snapshot-hosts").unwrap();
+        // If traversal were accepted, ../victim.txt would copy this payload
+        // over sandbox/victim.txt, outside the live configuration directory.
+        fs::write(dir.join(BACKUP_DIR).join("victim.txt"), "bad-payload").unwrap();
+        let invalid = [
+            serde_json::json!({}),
+            serde_json::json!({"files": null}),
+            serde_json::json!({"files": "hosts.json"}),
+            serde_json::json!({"files": ["hosts.json", 7]}),
+            serde_json::json!({"files": ["hosts.json", "hosts.json"]}),
+            serde_json::json!({"files": ["hosts.json", "../victim.txt"]}),
+            serde_json::json!({"files": ["hosts.json", outside.to_str().unwrap()]}),
+            serde_json::json!({"files": ["hosts.json", "known_hosts.json"]}),
+            serde_json::json!({"files": ["hosts.json", "secrets.enc"]}),
+            serde_json::json!({"files": ["hosts.json", "keys/id_ed25519"]}),
+        ];
+        for manifest in invalid {
+            fs::write(backup.join("backup_manifest.json"), manifest.to_string()).unwrap();
+            let error = restore_config_snapshot("invalid").unwrap_err().to_string();
+            assert!(error.contains("snapshot"), "{error}");
+            assert_eq!(
+                fs::read_to_string(dir.join("hosts.json")).unwrap(),
+                "current-hosts",
+                "invalid manifest must not partially restore: {manifest}"
+            );
+            assert_eq!(
+                fs::read_to_string(dir.join("policy.toml")).unwrap(),
+                "current-policy",
+                "invalid manifest must not remove absent files: {manifest}"
+            );
+            assert_eq!(fs::read_to_string(&outside).unwrap(), "outside-original");
+            assert_eq!(fs::read_dir(dir.join(BACKUP_DIR)).unwrap().count(), 2);
+        }
     }
 
     #[test]

@@ -158,6 +158,7 @@ JSON 格式，包含 `hosts` 数组，也可以包含由桌面端代理管理页
 - CLI `host add` 当前不提供代理参数；请通过桌面端 **Proxies** 页面和主机编辑表单维护代理，或在 `hosts.json` 中手动写入 `proxies` 与主机 `proxy_id`
 - `risk_override` 设置为 `"low"` 可以降低该主机上非 `blocked` 命令的风险等级
 - `risk_override` 不能降级 `blocked` 命令；内置或用户规则判定为 `blocked` 的命令仍会被拒绝；显式审批策略、scope、gate 和限额仍会生效
+- SSH 握手、密码/密钥/agent 认证、agent 身份枚举与签名请求、通道建立均受会话传输超时约束。对端或 agent 不应答时返回对应操作的超时错误；agent 连接和身份枚举超时只丢弃 agent 连接，保留 SSH 连接供默认密钥回退认证，已发起 SSH 认证的签名超时则关闭 SSH 连接以避免迟到回复；服务器明确拒绝 exec、shell、PTY 或 subsystem 请求时立即返回拒绝原因，不会把请求已发送当作建立成功。
 - `env`、`role`、`owner` 和 `tags` 可用于桌面端主机视图过滤，也可用于 CLI `host list` 过滤
 - **Windows 链接的密码学后端是随包静态构建的 OpenSSL，不再是 WinCNG**：`src-tauri/Cargo.toml` 为 `ssh2` 同时开启 `openssl-on-win32` 与 `vendored-openssl`，因此 Windows 构建与 Linux/macOS 能力一致——支持 `curve25519-sha256`、`ssh-ed25519`/ECDSA 主机密钥、`aes256-gcm` 与 `chacha20-poly1305`，也能读取 OpenSSH 私钥容器格式。这不仅解决了密钥格式问题，也解决了握手问题：WinCNG 只提供 `diffie-hellman-group*` 系列，而 OpenSSH 10.0 起已移除这些组，交集为空，会在**认证之前**就失败（`key exchange failure`）。OpenSSL 为静态链入，二进制不依赖任何 `libssl*.dll`/`libcrypto*.dll`。用 `agent2ssh algo get` 查看本构建实际可协商的算法，用 `agent2ssh keys algorithm` 查看推荐密钥类型（该构建下为 `ed25519`）
 - **认证失败时的可操作诊断仍然保留**：若某个构建的 libssh2 链接的是 WinCNG（已不是 Windows 的默认情形），其私钥读取器只认传统 PEM（`-----BEGIN RSA PRIVATE KEY-----` 与 `-----BEGIN DSA PRIVATE KEY-----`）；而 `ssh-keygen` 自 OpenSSH 7.8 起**默认**写出 OpenSSH 容器格式（`-----BEGIN OPENSSH PRIVATE KEY-----`，`-t rsa` 也一样），该格式在那种构建上无法用于认证，Ed25519 私钥则任何格式都不可用。此时认证失败会直接给出这一结论而不是笼统的 `unknown error`，并建议用 `ssh-keygen -p -m PEM -f <私钥>` 就地转换（仅 RSA/DSA）。**应用内生成的密钥总是采用本构建可用的类型**，无需手工转换：`agent2ssh keys algorithm` 查询推荐类型，`keys generate <名称>` 直接生成
@@ -316,6 +317,10 @@ denied_commands = ["rm -rf *", "mkfs *"]
 - scope 覆盖 ping、exec、playbook、SFTP、session、forward 和 connection 的按主机操作；非命令操作会使用类似 `ping`、`sftp upload a -> b`、`session_open`、`session_close`、`connect` 的操作字符串做匹配
 - scoped token 只用于按主机绑定的操作；gate、主机/片段、策略、脱敏/高亮、算法、审批、webhook、团队配置和本地配置变更等全局控制面操作必须使用 unrestricted admin token
 - 主机列表、审计、健康快照、连接、会话、转发和审批列表会按 scoped token 的 allowed hosts/tags 过滤；审计导出、趋势指标、事件流、待处理 OTP prompt 和 SSH sync diff 属于敏感全局读取，仅 unrestricted admin 可用
+- resident session 列表同样按会话自身的 `local:<id>` 主机和标签过滤。读取缓冲输出使用操作字符串 `resident-session read` 检查主机、标签和命令 scope；关闭使用 `resident-session close`，并经过执行 gate、限流、风险和审批。列表和读取在 gate 暂停时仍可使用，但关闭会被拒绝。
+- resident 命令执行期间仍可读取会话元数据与滚动输出。通过授权的关闭请求会取消当前命令及同一会话中排队的命令，结束 shell 并回收其进程树；关闭不必等到当前命令的执行超时。
+- 桌面 SFTP 删除目录先请求 daemon 的 `POST /sftp/rm-rf/authorize`，完成 scope、gate、限额、风险和审批检查。daemon 只授权，不连接 SSH；桌面校验响应中的主机和路径一致后，在自身进程执行删除，使用桌面已解锁的凭据，不跨进程传递密码。普通路径默认属于高风险，确认删除后仍需在审批队列批准；`/`、`/*`、`/.` 被直接阻断。没有 `force` 或绕过审批的回退，daemon 未运行时应先启动服务。原 `POST /sftp/rm-rf` 仍由 daemon 授权并执行，供需要在 daemon 中执行的客户端使用；其 `timeout_secs`（默认 60 秒）约束 SSH/SFTP 传输操作，审批等待使用独立的审批 TTL。
+- MCP 的 `local_exec` 和 `resident_session_*` 请求由 daemon 管理执行、预热及审批期限，不再受客户端固定 30 秒总超时限制；建立 HTTP 连接仍限时 10 秒。命令的 `timeout_secs` 继续生效，resident 命令超时仍会结束整个会话。
 - PTY session 写入按已完成的输入行做授权和审计；daemon session 和 desktop 本地 session 都会缓存未完成输入，直到换行后再按完整命令授权；`session_read`、`session_list`、`forward_list` 这类观察操作通过 token/scope 控制，不默认写入 `audit.jsonl`
 
 ---
@@ -926,9 +931,31 @@ chmod 600 ~/.agent2ssh/keys/my_key
 
 ## WebDAV 同步
 
-Agent2SSH 可以把可迁移配置同步到一个 WebDAV collection。同步范围是保守的：包含 `hosts.json`、`secrets.enc`、策略文件、执行限额、异常检测、playbook 和命令片段；不包含 `known_hosts.json`、`daemon.token`、`daemon_tokens.toml`、`remotes.toml`、`webhook.toml`、`audit.jsonl`、`app.log`、`recording.json`、`recordings/`、`keys/` 私钥目录等本机敏感或运行时文件。
+Agent2SSH 的桌面上传与 CLI/daemon 同步共用 `webdav_sync::SYNCABLE_FILES` 白名单：`hosts.json`、`playbooks.toml`、`risk_rules.toml`、`policy.toml`、`policy.json`、`execution_limits.toml`、`anomaly.toml`、`webhook.toml`、`app_preferences.json`。
 
-### 配置
+不包含 `keys/` 私钥目录、`secrets.enc` 凭据库、`known_hosts.json` 信任库、`snippets.json`、`approval_policies.toml`、`daemon.token`、`daemon_tokens.toml`、`remotes.toml`、审计/日志、录制、活动转发等本机状态。白名单里的 `hosts.json` 或 `webhook.toml` 仍可能含有旧格式凭据或 webhook secret，因此上传要求加密。
+
+### 桌面端加密上传
+
+桌面端 **WebDAV Sync** 页面需要单独设置“同步加密密码”；它与 WebDAV 登录密码、应用主密码用途不同。先设置或解锁应用主密码，再保存同步加密密码；该密码存入加密凭据库，配置读取只返回“已配置”状态，不回传密码。保存成功后输入框清空，之后留空保存会保留已有密码。保管好同步加密密码，解密已上传备份仍需要它。
+
+没有同步密码的旧启用配置不会继续上传明文。凭据库未解锁或同步密码不可读取时，也会在收集文件和发起网络请求前拒绝上传。连接测试只验证 WebDAV 可访问性，不代表已具备上传所需的加密密码。
+
+桌面把白名单文件封装为一个 JSON 快照，再用 Argon2id 派生密钥和 AES-256-GCM 加密，作为 `application/octet-stream` 上传到配置的远端文件路径。默认路径仍为 `agent2ssh/agent2ssh-sync.json`，文件后缀不代表内容是明文 JSON。这个单文件备份格式不能作为下述 CLI/daemon 版本化同步的 `sync_version.json` 使用。自动上传同样经过上述密码和加密检查。
+
+桌面同步面板提供“下载备份”和“从云端恢复”：先保存远端地址及同步加密密码，无需开启自动上传。下载会验证备份后将原始密文保存到选定的本地位置；取消保存对话框不会下载。恢复确认后会重新获取云端备份，完整解密并校验版本、时间戳、文件白名单、重复路径、字节数和 JSON/TOML 格式，上传和下载统一限制为 20 MiB（包括加密封装），超限上传在联系 WebDAV 前拒绝，避免产生无法下载恢复的备份。错误密码、篡改、非法文件或下载失败均不会修改现有配置。
+
+恢复前会自动创建 `pre-cloud-restore` 快照，恢复后界面显示撤销快照 ID，可在“配置快照”面板恢复之前的状态。恢复精确替换可移植配置集合，移除备份中不存在的白名单文件及失效的 `sync_version.json`；私钥、凭据库、信任记录、daemon token 和同步连接设置保留。写入中途失败会尝试回滚，若回滚也失败，错误中会保留恢复快照 ID。恢复后立即刷新主机、分组和代理列表，偏好设置需重启应用生效。桌面上传、下载和恢复串行执行，避免与自动上传重叠。
+
+需要恢复备份内容时，先自行从 WebDAV 下载上述密文文件，再用上传时保存的独立同步加密密码在本地解密：
+
+```text
+agent2ssh webdav decrypt <input> <output> [--sync-password-env VAR]
+```
+
+`<input>` 是已下载的密文文件，`<output>` 是解密后的原始 JSON 快照。命令默认从 `AGENT2SSH_SYNC_PASSWORD` 环境变量读取同步加密密码，也可以用 `--sync-password-env VAR` 指定其他变量名；请将保存的同步密码提供给该变量。输出文件必须尚不存在，命令会拒绝覆盖已有文件。整个解密过程离线运行，不访问 WebDAV，也不会把快照应用到当前配置。
+
+### CLI/daemon 版本化同步配置
 
 可以使用环境变量：
 
@@ -936,6 +963,7 @@ Agent2SSH 可以把可迁移配置同步到一个 WebDAV collection。同步范�
 export AGENT2SSH_WEBDAV_URL="https://dav.example.com/agent2ssh"
 export AGENT2SSH_WEBDAV_USERNAME="alice"
 export AGENT2SSH_WEBDAV_PASSWORD="app-password"
+export AGENT2SSH_SYNC_PASSWORD="separate-backup-password"
 ```
 
 也可以写入 `~/.agent2ssh/webdav.toml`：
@@ -944,9 +972,12 @@ export AGENT2SSH_WEBDAV_PASSWORD="app-password"
 url = "https://dav.example.com/agent2ssh"
 username = "alice"
 password_env = "AGENT2SSH_WEBDAV_PASSWORD"
+sync_password_env = "AGENT2SSH_SYNC_PASSWORD"
 ```
 
-### 命令
+CLI/daemon 从自己的选项、环境变量或 `webdav.toml` 读取同步密码，不自动读取桌面保存的同步密码。上传必须配置同步密码，每个文件分别加密；拉取加密版本时必须提供对应密码。
+
+### CLI 命令
 
 ```bash
 # 上传本地可同步配置。成功后远端 sync_version.json 的 global_version +1。
@@ -963,18 +994,24 @@ agent2ssh webdav push --force
 agent2ssh webdav pull --force
 ```
 
-三个命令都支持 `--url`、`--username`、`--password`、`--password-env`、`--config` 和 `--json`；`push`/`pull` 还支持显式冲突覆盖 `--force`。
+三个命令都支持 `--url`、`--username`、`--password`、`--password-env`、`--sync-password`、`--sync-password-env`、`--config` 和 `--json`；`push`/`pull` 还支持显式冲突覆盖 `--force`。
 
-### 备份与版本标记
+### CLI/daemon 备份与版本标记
 
 - 每次 `push` 或 `pull` 前都会在 `~/.agent2ssh/backups/sync-<timestamp>-<id>/` 创建本地版本备份。
 - 同步状态使用稳定的 portable-config SHA-256 摘要区分 `in_sync`、`local_ahead`、`remote_ahead`、`diverged` 和 `unknown`；摘要只包含排序后的路径与文件哈希，不受时间、方向和 sync id 影响。
 - schema v2 `push` 会把文件上传到按 `sync_id` 命名的不可变 `versions/` 对象，最后用 WebDAV ETag 条件写入 `sync_version.json`。远端并发变化会中止 marker 提交，不会让当前版本指向混合文件。
 - `pull` 会先把完整远端版本下载到内存并校验每个文件的 SHA-256，再创建本地备份并原子替换文件，避免校验失败留下半应用状态。
 - 默认拒绝覆盖 `diverged` 或较新的一侧；只有用户检查 `status` 后显式传入 `--force` 才允许覆盖。
-- `pull` 兼容旧版本远端 manifest 中的 `known_hosts.json`，但会跳过该文件，不会覆盖本机 SSH 主机指纹信任库。
-- schema v1 远端缺少后来新增的 `snippets.json` 时会保留本地 snippets；schema v2 中缺少可同步文件才表示删除。
+- `pull` 兼容旧版本远端 manifest 中的 `known_hosts.json`、`secrets.enc`、`snippets.json`、`approval_policies.toml`，但会跳过它们，不覆盖本机数据。
+- schema v2 中缺少白名单里的可同步文件表示删除；不在白名单的本机文件不受影响。
 - daemon 的 `GET /webdav/status` 返回相同的版本、摘要、冲突状态和 metadata 警告字段。
+
+### 本地配置快照与模板恢复
+
+桌面“配置快照”独立于 WebDAV，无需配置远端。快照保存白名单文件及本机 `sync_version.json` 的内容和存在状态。恢复会删除快照中原本不存在、后来新增的可迁移文件，因此从空配置应用模板后，恢复自动生成的 `pre-template` 快照可以移除新增的策略与执行限额。
+
+恢复前先验证完整 manifest、文件名白名单及所有捕获文件，并读取完全部文件；非法、重复或缺失条目会报错，不会部分应用。通过检查后先保存当前状态的 `pre-restore` 安全备份，再恢复文件并删除快照范围内的新增项。私钥、凭据库、主机信任等非同步文件不参与恢复，也不会因快照中缺失而被删除。既有 `backup_manifest.json` 格式仍可使用；执行限额修改后需要重启 daemon 才生效。
 
 ---
 
@@ -1181,6 +1218,7 @@ shasum -a 256 -c <checksum> team-config.json
 | `AGENT2SSH_WEBDAV_URL` | CLI | 无 | WebDAV 同步 collection URL。也可写入 `webdav.toml` 或用 `agent2ssh webdav * --url` 传入。 |
 | `AGENT2SSH_WEBDAV_USERNAME` | CLI | 无 | WebDAV Basic Auth 用户名。 |
 | `AGENT2SSH_WEBDAV_PASSWORD` | CLI | 无 | WebDAV Basic Auth 密码。也可在 `webdav.toml` 中用 `password_env` 指向自定义环境变量。 |
+| `AGENT2SSH_SYNC_PASSWORD` | CLI / daemon 版本化同步 | 无 | 同步文件的 AES-256-GCM 加密密码，密钥由 Argon2id 派生；上传必须提供，拉取加密备份需使用相同密码。可用 `sync_password_env` 指向自定义变量；桌面上传改用凭据库里的独立同步密码。 |
 | `AGENT2SSH_CONTAINER_RUNTIME` | CLI / 桌面 | 自动探测 | 固定容器发现使用的本地运行时：`docker`、`wslc`（Windows 的 WSL 容器 CLI）或 `apple`（Apple container）。不设时按 `docker → wslc → apple` 取第一个已安装的运行时，未安装的自动跳过；桌面端的容器面板与 e2e 脚本共用这一条选择逻辑。 |
 
 > 说明：`remotes.toml` 与 `daemon_tokens.toml` 中的 `token_env` 字段引用的是**用户自定义**的环境变量名（如示例中的 `AGENT2SSH_PROD_TOKEN`），由你自行设置，不属于上表的内置变量。

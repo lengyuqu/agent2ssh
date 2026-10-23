@@ -2,6 +2,8 @@ import {
   AlertTriangle,
   CheckCircle2,
   Cloud,
+  Download,
+  RotateCcw,
   RefreshCw,
   Save,
   UploadCloud,
@@ -18,8 +20,10 @@ import { Input } from "./ui/input";
 import { InlineAlert, Spinner } from "./ui/state";
 import { useToast } from "./ui/toast";
 import { formatBytes, formatDateTime } from "../lib/format";
+import { save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { ConfirmDialog } from "./ui/dialog";
 
-type SyncAction = "load" | "save" | "test" | "push" | "refresh";
+type SyncAction = "load" | "save" | "test" | "push" | "refresh" | "download" | "restore";
 
 const defaultForm: WebDavSyncConfig = {
   enabled: false,
@@ -27,15 +31,19 @@ const defaultForm: WebDavSyncConfig = {
   username: "",
   remotePath: "agent2ssh/agent2ssh-sync.json",
   passwordConfigured: false,
+  syncPasswordConfigured: false,
 };
 
-export default function SyncPanel() {
+export default function SyncPanel({ onRestored }: { onRestored?: () => Promise<void> } = {}) {
   const { t } = useI18n();
   const { showToast } = useToast();
   const [form, setForm] = useState<WebDavSyncConfig>(defaultForm);
   const [password, setPassword] = useState("");
+  const [syncPassword, setSyncPassword] = useState("");
   const [status, setStatus] = useState<WebDavSyncStatus | null>(null);
   const [busy, setBusy] = useState<SyncAction | null>(null);
+  const [confirmRestore, setConfirmRestore] = useState(false);
+  const [recoveryMessage, setRecoveryMessage] = useState("");
 
   // T1-7: _setLocally tracks whether the form was edited locally and not
   // yet confirmed by the server. If the component re-mounts and fetches
@@ -55,7 +63,8 @@ export default function SyncPanel() {
     () => form.url.trim().length > 0 && form.remotePath.trim().length > 0,
     [form.remotePath, form.url]
   );
-  const canUpload = form.enabled && canTest;
+  const canUpload = form.enabled && canTest && form.syncPasswordConfigured;
+  const canRecover = canTest && form.syncPasswordConfigured && !formDirtyRef.current;
 
   async function load() {
     setBusy("load");
@@ -69,6 +78,7 @@ export default function SyncPanel() {
       if (!savingRef.current && !formDirtyRef.current) {
         setForm(config);
         setPassword("");
+        setSyncPassword("");
       }
       setStatus(nextStatus);
     } catch (err) {
@@ -119,10 +129,12 @@ export default function SyncPanel() {
         url: form.url,
         username: form.username,
         password: password.trim().length > 0 ? password : null,
+        syncPassword: syncPassword.length > 0 ? syncPassword : null,
         remotePath: form.remotePath,
       });
       setForm(saved);
       setPassword("");
+      setSyncPassword("");
       setStatus(await api.getWebDavSyncStatus());
       showToast("success", t("WebDAV sync settings saved."));
     } catch (err) {
@@ -190,6 +202,41 @@ export default function SyncPanel() {
       reportError("sync-panel", "push webdav sync failed", err);
     } finally {
       setBusy(null);
+    }
+  }
+
+  async function recover(restore: boolean) {
+    setBusy(restore ? "restore" : "download");
+    setRecoveryMessage("");
+    try {
+      let result;
+      if (restore) {
+        result = await api.restoreWebDavSync();
+      } else {
+        const outputPath = await saveDialog({ defaultPath: "agent2ssh-cloud-backup.a2s", filters: [{ name: "Agent2SSH encrypted backup", extensions: ["a2s"] }] });
+        if (!outputPath) return;
+        result = await api.downloadWebDavSync(outputPath);
+      }
+      const message = restore
+        ? `${t("Cloud backup restored. Undo snapshot:")} ${result.backupId}`
+        : `${t("Encrypted backup downloaded:")} ${result.localPath}`;
+      setRecoveryMessage(message);
+      showToast("success", message);
+      // Recovery already succeeded: a refresh error must not imply rollback.
+      try {
+        setStatus(await api.getWebDavSyncStatus());
+        if (restore) await onRestored?.();
+      } catch (err) {
+        showToast("error", t("Recovery completed, but refreshing the view failed. Reload the app."));
+        reportError("sync-panel", "refresh after recovery failed", err);
+      }
+    } catch (err) {
+      showToast("error", String(err));
+      reportError("sync-panel", "cloud recovery failed", err);
+      try { setStatus(await api.getWebDavSyncStatus()); } catch { /* Keep the original recovery error. */ }
+    } finally {
+      setBusy(null);
+      setConfirmRestore(false);
     }
   }
 
@@ -263,7 +310,10 @@ export default function SyncPanel() {
               <Input
                 type="password"
                 value={password}
-                onChange={(event) => setPassword(event.target.value)}
+                onChange={(event) => {
+                  formDirtyRef.current = true;
+                  setPassword(event.target.value);
+                }}
                 placeholder={
                   form.passwordConfigured
                     ? t("Saved. Leave blank to keep it.")
@@ -271,6 +321,29 @@ export default function SyncPanel() {
                 }
                 disabled={isBusy}
               />
+            </label>
+
+            <label className="space-y-1.5 md:col-span-2">
+              <span className="text-xs font-semibold text-muted-foreground">
+                {t("Sync encryption password")}
+              </span>
+              <Input
+                type="password"
+                value={syncPassword}
+                onChange={(event) => {
+                  formDirtyRef.current = true;
+                  setSyncPassword(event.target.value);
+                }}
+                placeholder={
+                  form.syncPasswordConfigured
+                    ? t("Saved. Leave blank to keep it.")
+                    : t("Required for uploads")
+                }
+                disabled={isBusy}
+              />
+              <p className="text-xs text-muted-foreground">
+                {t("Stored in the credential vault. Set or unlock your master password first. Keep this sync password to decrypt your backups.")}
+              </p>
             </label>
 
             <label className="space-y-1.5 md:col-span-2">
@@ -292,12 +365,12 @@ export default function SyncPanel() {
             <div className="grid gap-1 leading-snug">
               <p>
                 {t(
-                  "Sync uploads a local configuration snapshot. Host records may include credentials if they are saved locally."
+                  "Sync uploads an encrypted configuration snapshot. Private SSH keys, credentials in the vault, and local trust records are excluded."
                 )}
               </p>
               <p>
                 {t(
-                  "When enabled, sync runs every 10 minutes and after hosts, proxies, tunnels, or keys change."
+                  "When enabled, sync runs every 10 minutes and after configuration changes."
                 )}
               </p>
             </div>
@@ -328,7 +401,16 @@ export default function SyncPanel() {
               )}
               {busy === "push" ? t("Uploading...") : t("Upload now")}
             </Button>
+            <Button variant="secondary" onClick={() => recover(false)} disabled={isBusy || !canRecover}>
+              {busy === "download" ? <Spinner size={14} /> : <Download size={14} />}
+              {t("Download backup")}
+            </Button>
+            <Button variant="secondary" onClick={() => setConfirmRestore(true)} disabled={isBusy || !canRecover}>
+              <RotateCcw size={14} />{t("Restore from cloud")}
+            </Button>
           </div>
+          <p className="text-xs text-muted-foreground">{t("Save settings before downloading or restoring. Automatic upload can remain disabled.")}</p>
+          {recoveryMessage && <p className="break-all text-xs" role="status">{recoveryMessage}</p>}
         </form>
       </Card>
 
@@ -424,6 +506,15 @@ export default function SyncPanel() {
           </div>
         </div>
       </Card>
+      {confirmRestore && <ConfirmDialog
+        title={t("Restore from cloud")}
+        description={t("Replace portable configuration with the cloud backup? Files absent from the backup will be removed. A local undo snapshot is saved first. Credentials, private keys, and trust records are kept. Restart the app to apply restored preferences.")}
+        confirmLabel={busy === "restore" ? t("Restoring...") : t("Restore")}
+        confirmDisabled={isBusy}
+        danger
+        onConfirm={() => recover(true)}
+        onCancel={() => { if (!isBusy) setConfirmRestore(false); }}
+      />}
     </div>
   );
 }

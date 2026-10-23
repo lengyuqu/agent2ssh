@@ -11,12 +11,12 @@ use crate::{
         import_team_config, list_audit_core, list_host_groups_core, list_hosts_core,
         list_proxies_core, ping_hosts_core, remove_host_core, save_host_group_core,
         save_proxy_core, sftp_download_core_with_source, sftp_ls_core_with_source,
-        sftp_mkdir_core_with_source, sftp_read_text_core_with_source,
-        sftp_remove_dir_all_core_with_source, sftp_remove_dir_core_with_source,
-        sftp_remove_file_core_with_source, sftp_rename_core_with_source,
-        sftp_stat_core_with_source, sftp_upload_core_with_source, sftp_walk_core_with_source,
-        update_host_core, validate_command_length, ExecMultiRequest, ImportResult,
-        TeamConfigExport, MAX_COMMAND_BYTES,
+        sftp_mkdir_core_with_source, sftp_read_dir_core_with_source,
+        sftp_read_text_core_with_source, sftp_remove_dir_all_core_with_source,
+        sftp_remove_dir_core_with_source, sftp_remove_file_core_with_source,
+        sftp_rename_core_with_source, sftp_stat_core_with_source, sftp_upload_core_with_source,
+        sftp_walk_core_with_source, update_host_core, validate_command_length, ExecMultiRequest,
+        ImportResult, TeamConfigExport, MAX_COMMAND_BYTES,
     },
     diagnostics::{
         append_diagnostic_log, clear_diagnostic_logs as clear_diagnostic_logs_core,
@@ -698,6 +698,20 @@ pub async fn sftp_ls(
 }
 
 #[tauri::command]
+pub async fn sftp_read_dir(
+    host: String,
+    path: String,
+    timeout_secs: Option<u64>,
+) -> Result<Vec<crate::types::SftpDirEntry>, String> {
+    let source = source_from_transport();
+    let command = format!("sftp ls {}", path);
+    authorize_desktop_operation(&host, &command, false, &source).await?;
+    sftp_read_dir_core_with_source(&host, &path, timeout_secs, Some(source))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub async fn sftp_stat(
     host: String,
     path: String,
@@ -808,12 +822,74 @@ pub async fn sftp_remove_dir_all(
     path: String,
     timeout_secs: Option<u64>,
 ) -> Result<ExecResult, String> {
-    let source = source_from_transport();
-    let command = format!("sftp rm-rf {}", path);
-    authorize_desktop_operation(&host, &command, false, &source).await?;
-    sftp_remove_dir_all_core_with_source(&host, &path, timeout_secs, Some(source))
+    // Only the daemon owns a live approval queue. Ask its complete preflight
+    // chain first, then execute here so the desktop's unlocked SSH credentials
+    // (including jump hosts and proxy passwords) remain available. No secrets
+    // cross processes and an unavailable/rejecting daemon is a hard failure.
+    let token = get_daemon_token()?;
+    authorize_directory_through_daemon(
+        &crate::local_daemon_url(),
+        &token,
+        &host,
+        &path,
+        timeout_secs,
+    )
+    .await?;
+    sftp_remove_dir_all_core_with_source(&host, &path, timeout_secs, Some(source_from_transport()))
         .await
         .map_err(|e| e.to_string())
+}
+
+async fn authorize_directory_through_daemon(
+    daemon_url: &str,
+    token: &str,
+    host: &str,
+    path: &str,
+    timeout_secs: Option<u64>,
+) -> Result<(), String> {
+    // Do not impose a short HTTP deadline on a request waiting for a human.
+    // The daemon bounds approval waiting; local SFTP has its own deadline.
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let response = client
+        .post(format!(
+            "{}/sftp/rm-rf/authorize",
+            daemon_url.trim_end_matches('/')
+        ))
+        .bearer_auth(token)
+        .json(&serde_json::json!({ "host": host, "path": path, "timeout_secs": timeout_secs }))
+        .send()
+        .await
+        .map_err(|e| {
+            format!("Directory deletion requires the running daemon approval service: {e}")
+        })?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        let message = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned)
+            })
+            .unwrap_or(body);
+        return Err(format!("Directory deletion failed ({status}): {message}"));
+    }
+    let receipt: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("Invalid daemon deletion authorization response: {e}"))?;
+    if receipt.get("authorized").and_then(|v| v.as_bool()) != Some(true)
+        || receipt.get("host").and_then(|v| v.as_str()) != Some(host)
+        || receipt.get("path").and_then(|v| v.as_str()) != Some(path)
+    {
+        return Err("Daemon did not authorize this directory deletion.".to_string());
+    }
+    Ok(())
 }
 
 /// One entry in a local filesystem directory listing for the desktop file
@@ -2106,6 +2182,7 @@ pub struct WebDavSyncConfigView {
     pub username: Option<String>,
     pub remote_path: String,
     pub password_configured: bool,
+    pub sync_password_configured: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2115,6 +2192,8 @@ pub struct WebDavSyncSaveRequest {
     pub url: String,
     pub username: Option<String>,
     pub password: Option<String>,
+    /// Write-only; kept in the encrypted credential vault, never in this config.
+    pub sync_password: Option<String>,
     pub remote_path: String,
 }
 
@@ -2140,6 +2219,18 @@ struct WebDavSyncFile {
     path: String,
     content: String,
     bytes: u64,
+}
+
+const DESKTOP_SYNC_PASSWORD_ACCOUNT: &str = "webdav:desktop-sync-password";
+// Includes automatic uploads: a restore cannot overlap a desktop upload.
+static DESKTOP_SYNC_OPERATION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebDavRecoveryResult {
+    pub file_count: usize,
+    pub local_path: Option<String>,
+    pub backup_id: Option<String>,
 }
 
 fn default_webdav_remote_path() -> String {
@@ -2174,6 +2265,7 @@ impl WebDavSyncConfig {
                 .as_deref()
                 .map(|value| !value.is_empty())
                 .unwrap_or(false),
+            sync_password_configured: crate::secrets::secret_exists(DESKTOP_SYNC_PASSWORD_ACCOUNT),
         }
     }
 }
@@ -2436,15 +2528,22 @@ async fn propfind_webdav_parent(
     }
 }
 
-async fn build_webdav_sync_payload() -> Result<(Vec<u8>, usize), String> {
+fn build_webdav_sync_payload() -> Result<(Vec<u8>, usize), String> {
     let dir = config_dir().map_err(|e| e.to_string())?;
     let mut files = Vec::new();
+    let limit = crate::desktop_sync::MAX_BACKUP_BYTES;
+    let mut content_bytes = 0u64;
     // Single source of truth for the portable config file list: `webdav_sync::SYNCABLE_FILES`.
     for name in SYNCABLE_FILES {
         let path = dir.join(name);
         if !path.is_file() {
             continue;
         }
+        let size = fs::metadata(&path).map_err(|e| e.to_string())?.len();
+        if size > (limit as u64).saturating_sub(content_bytes) {
+            return Err("cloud backup exceeds the 20 MiB limit".into());
+        }
+        content_bytes += size;
         let content = fs::read_to_string(&path)
             .map_err(|e| format!("failed to read sync file {name}: {e}"))?;
         files.push(WebDavSyncFile {
@@ -2453,36 +2552,6 @@ async fn build_webdav_sync_payload() -> Result<(Vec<u8>, usize), String> {
             content,
         });
     }
-    let keys_dir = dir.join("keys");
-    if keys_dir.is_dir() {
-        for entry in fs::read_dir(&keys_dir).map_err(|e| format!("failed to read keys dir: {e}"))? {
-            let entry = entry.map_err(|e| format!("failed to read key entry: {e}"))?;
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            if name.starts_with('.') {
-                continue;
-            }
-            let content = fs::read_to_string(&path)
-                .map_err(|e| format!("failed to read sync key file {name}: {e}"))?;
-            files.push(WebDavSyncFile {
-                path: format!("keys/{name}"),
-                bytes: content.len() as u64,
-                content,
-            });
-        }
-    }
-    let forwards = forward_list_core().await;
-    let content = serde_json::to_string_pretty(&forwards).map_err(|e| e.to_string())?;
-    files.push(WebDavSyncFile {
-        path: "active_forwards.json".to_string(),
-        bytes: content.len() as u64,
-        content,
-    });
     if files.is_empty() {
         return Err("no Agent2SSH configuration files are available to sync".to_string());
     }
@@ -2493,6 +2562,9 @@ async fn build_webdav_sync_payload() -> Result<(Vec<u8>, usize), String> {
         "files": files,
     });
     let bytes = serde_json::to_vec_pretty(&payload).map_err(|e| e.to_string())?;
+    if bytes.len() > limit {
+        return Err("cloud backup exceeds the 20 MiB limit".into());
+    }
     Ok((bytes, file_count))
 }
 
@@ -2522,7 +2594,28 @@ async fn test_webdav_sync_inner(config: &WebDavSyncConfig) -> Result<WebDavSyncS
 
 async fn push_webdav_sync_inner(config: &WebDavSyncConfig) -> Result<WebDavSyncStatus, String> {
     require_webdav_config(config, true)?;
-    let (payload, file_count) = build_webdav_sync_payload().await?;
+    // Resolve the vault entry before collecting files or making any request.
+    // An old enabled configuration with no sync password must fail closed.
+    let password = crate::secrets::get_secret(DESKTOP_SYNC_PASSWORD_ACCOUNT)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            "Set a sync encryption password and unlock the credential vault before uploading."
+                .to_string()
+        })?;
+    let (payload, file_count) = build_webdav_sync_payload()?;
+    let payload = tokio::task::spawn_blocking(move || {
+        let password = zeroize::Zeroizing::new(password);
+        let plaintext = zeroize::Zeroizing::new(payload);
+        crate::backup_crypto::encrypt_backup(password.as_bytes(), &plaintext)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    // Encryption adds an envelope and authentication tag. Apply the same cap
+    // as download, so every uploaded backup remains recoverable by this app.
+    if payload.len() > crate::desktop_sync::MAX_BACKUP_BYTES {
+        return Err("cloud backup exceeds the 20 MiB limit".into());
+    }
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(45))
         .build()
@@ -2531,7 +2624,7 @@ async fn push_webdav_sync_inner(config: &WebDavSyncConfig) -> Result<WebDavSyncS
     let target_url = webdav_target_url(config)?;
     let uploaded_bytes = payload.len() as u64;
     let response = webdav_request_auth(client.put(target_url.clone()), config)
-        .header("Content-Type", "application/json")
+        .header("Content-Type", "application/octet-stream")
         .body(payload)
         .send()
         .await
@@ -2586,6 +2679,18 @@ pub fn set_webdav_sync_config(
     } else {
         validate_remote_path(&next.remote_path)?;
     }
+    let sync_password = config.sync_password.filter(|value| !value.is_empty());
+    if next.enabled
+        && sync_password.is_none()
+        && !crate::secrets::secret_exists(DESKTOP_SYNC_PASSWORD_ACCOUNT)
+    {
+        return Err("Set a sync encryption password before enabling WebDAV sync.".to_string());
+    }
+    if let Some(password) = sync_password {
+        let password = zeroize::Zeroizing::new(password);
+        crate::secrets::store_secret(DESKTOP_SYNC_PASSWORD_ACCOUNT, &password)
+            .map_err(|e| e.to_string())?;
+    }
     save_webdav_sync_config_core(&next)?;
     let mut status = load_webdav_sync_status_core(&next);
     status.configured = next.configured();
@@ -2616,6 +2721,7 @@ pub async fn test_webdav_sync() -> Result<WebDavSyncStatus, String> {
 
 #[tauri::command]
 pub async fn push_webdav_sync() -> Result<WebDavSyncStatus, String> {
+    let _operation = DESKTOP_SYNC_OPERATION.lock().await;
     let config = load_webdav_sync_config_core();
     let status = match push_webdav_sync_inner(&config).await {
         Ok(status) => status,
@@ -2623,6 +2729,130 @@ pub async fn push_webdav_sync() -> Result<WebDavSyncStatus, String> {
     };
     save_webdav_sync_status_core(&status)?;
     Ok(status)
+}
+
+async fn fetch_desktop_backup(
+    config: &WebDavSyncConfig,
+) -> Result<(Vec<u8>, crate::desktop_sync::Snapshot), String> {
+    require_webdav_config(config, false)?;
+    let password = zeroize::Zeroizing::new(crate::secrets::get_secret(DESKTOP_SYNC_PASSWORD_ACCOUNT)
+        .filter(|s| !s.is_empty()).ok_or("Set a sync encryption password and unlock the credential vault before downloading.")?);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let mut response = webdav_request_auth(client.get(webdav_target_url(config)?), config)
+        .send()
+        .await
+        .map_err(|e| format!("WebDAV download failed: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "WebDAV download failed: HTTP {}",
+            response.status()
+        ));
+    }
+    let limit = crate::desktop_sync::MAX_BACKUP_BYTES;
+    if response.content_length().is_some_and(|n| n > limit as u64) {
+        return Err("cloud backup exceeds the 20 MiB limit".into());
+    }
+    let mut encrypted = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| format!("WebDAV download interrupted: {e}"))?
+    {
+        if chunk.len() > limit.saturating_sub(encrypted.len()) {
+            return Err("cloud backup exceeds the 20 MiB limit".into());
+        }
+        encrypted.extend_from_slice(&chunk);
+    }
+    tokio::task::spawn_blocking(move || {
+        let snapshot = crate::desktop_sync::decode(&password, &encrypted)
+            .map_err(|e| format!("Invalid cloud backup: {e:#}"))?;
+        Ok((encrypted, snapshot))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+async fn recover_desktop_backup(
+    config: &WebDavSyncConfig,
+    output: Option<PathBuf>,
+) -> Result<WebDavRecoveryResult, String> {
+    let (encrypted, snapshot) = fetch_desktop_backup(config).await?;
+    let config_root = config_dir()
+        .map_err(|e| e.to_string())?
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    tokio::task::spawn_blocking(move || {
+        let file_count = snapshot.file_count();
+        if let Some(path) = output {
+            // Downloads must never overwrite live configuration or the vault.
+            let parent = path
+                .parent()
+                .ok_or("invalid download path")?
+                .canonicalize()
+                .map_err(|e| e.to_string())?;
+            if parent.starts_with(config_root) {
+                return Err(
+                    "Choose a download location outside the Agent2SSH configuration directory."
+                        .into(),
+                );
+            }
+            crate::store::write_private_bytes(&path, &encrypted).map_err(|e| e.to_string())?;
+            Ok(WebDavRecoveryResult {
+                file_count,
+                local_path: Some(path.to_string_lossy().into_owned()),
+                backup_id: None,
+            })
+        } else {
+            let backup_id = snapshot.restore().map_err(|e| format!("{e:#}"))?;
+            Ok(WebDavRecoveryResult {
+                file_count,
+                local_path: None,
+                backup_id: Some(backup_id),
+            })
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+async fn desktop_recovery_action(output: Option<PathBuf>) -> Result<WebDavRecoveryResult, String> {
+    let _operation = DESKTOP_SYNC_OPERATION.lock().await;
+    let config = load_webdav_sync_config_core();
+    let action = if output.is_some() {
+        "download"
+    } else {
+        "restore"
+    };
+    let result = recover_desktop_backup(&config, output).await;
+    let status = match &result {
+        Ok(_) => {
+            let mut status = WebDavSyncStatus::from_config(&config);
+            status.last_action = Some(action.into());
+            status.last_success = Some(true);
+            status.last_sync_at = Some(chrono::Utc::now().to_rfc3339());
+            status.last_message = Some(format!("WebDAV {action} completed."));
+            status
+        }
+        Err(error) => webdav_failure_status(&config, action, error.clone()),
+    };
+    // A status-log failure must not misreport an already completed restore.
+    if let Err(error) = save_webdav_sync_status_core(&status) {
+        eprintln!("WebDAV status could not be saved: {error}");
+    }
+    result
+}
+
+#[tauri::command]
+pub async fn download_webdav_sync(output_path: String) -> Result<WebDavRecoveryResult, String> {
+    desktop_recovery_action(Some(PathBuf::from(output_path))).await
+}
+
+#[tauri::command]
+pub async fn restore_webdav_sync() -> Result<WebDavRecoveryResult, String> {
+    desktop_recovery_action(None).await
 }
 
 // ── Config snapshots (V4-3) ─────────────────────────────────────────────────
@@ -3193,6 +3423,8 @@ pub fn run_tauri() {
             get_webdav_sync_status,
             test_webdav_sync,
             push_webdav_sync,
+            download_webdav_sync,
+            restore_webdav_sync,
             list_config_snapshots_cmd,
             create_config_snapshot,
             restore_config_snapshot_cmd,
@@ -3214,6 +3446,7 @@ pub fn run_tauri() {
             sftp_cancel,
             sftp_exchange,
             sftp_ls,
+            sftp_read_dir,
             sftp_stat,
             sftp_mkdir,
             sftp_rename,
@@ -3342,6 +3575,371 @@ pub fn run_tauri() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[serial_test::serial(desktop_webdav)]
+    async fn cloud_download_preserves_ciphertext_checks_auth_and_rejects_bad_responses() {
+        use axum::{
+            body::Body,
+            http::{HeaderMap, Response, StatusCode},
+            routing::get,
+            Router,
+        };
+        use std::sync::{
+            atomic::{AtomicU8, Ordering},
+            Arc,
+        };
+        let _config = crate::store::TestConfigDir::new("desktop-cloud-download");
+        let live = config_dir().unwrap().join("policy.toml");
+        fs::write(&live, "mode = 'local'").unwrap();
+        let plain = br#"{"version":1,"exportedAt":"2026-10-23T00:00:00Z","files":[{"path":"policy.toml","content":"x=1","bytes":3}]}"#;
+        let encrypted =
+            Arc::new(crate::backup_crypto::encrypt_backup(b"test-cloud-password", plain).unwrap());
+        let mode = Arc::new(AtomicU8::new(0));
+        let app_mode = mode.clone();
+        let blob = encrypted.clone();
+        let app = Router::new().route(
+            "/dav/cloud.a2s",
+            get(move |headers: HeaderMap| {
+                let mode = app_mode.clone();
+                let blob = blob.clone();
+                async move {
+                    assert_eq!(headers["authorization"], "Basic dXNlcjpwYXNz");
+                    match mode.load(Ordering::SeqCst) {
+                        1 => Response::builder()
+                            .status(StatusCode::NOT_FOUND)
+                            .body(Body::empty())
+                            .unwrap(),
+                        2 => Response::new(Body::from(blob[..blob.len() / 2].to_vec())),
+                        3 => Response::builder()
+                            .header("content-length", crate::desktop_sync::MAX_BACKUP_BYTES + 1)
+                            .body(Body::from(vec![
+                                0u8;
+                                crate::desktop_sync::MAX_BACKUP_BYTES + 1
+                            ]))
+                            .unwrap(),
+                        _ => Response::new(Body::from(blob.to_vec())),
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let config = WebDavSyncConfig {
+            enabled: false,
+            url: format!("http://{}/dav", listener.local_addr().unwrap()),
+            username: Some("user".into()),
+            password: Some("pass".into()),
+            remote_path: "cloud.a2s".into(),
+        };
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        crate::secrets::store_secret(DESKTOP_SYNC_PASSWORD_ACCOUNT, "test-cloud-password").unwrap();
+        let output_dir = tempfile::tempdir().unwrap();
+        let output = output_dir.path().join("download.a2s");
+        let result = recover_desktop_backup(&config, Some(output.clone()))
+            .await
+            .unwrap();
+        assert_eq!(result.file_count, 1);
+        assert_eq!(fs::read(&output).unwrap(), *encrypted);
+        assert_eq!(fs::read_to_string(&live).unwrap(), "mode = 'local'");
+        assert!(recover_desktop_backup(&config, Some(live.clone()))
+            .await
+            .unwrap_err()
+            .contains("outside"));
+        for (value, reason) in [(1, "404"), (2, "Invalid cloud backup"), (3, "20 MiB")] {
+            mode.store(value, Ordering::SeqCst);
+            let error = recover_desktop_backup(&config, Some(output.clone()))
+                .await
+                .unwrap_err();
+            assert!(error.contains(reason), "{error}");
+            assert_eq!(fs::read(&output).unwrap(), *encrypted);
+            assert_eq!(fs::read_to_string(&live).unwrap(), "mode = 'local'");
+        }
+        mode.store(0, Ordering::SeqCst);
+        // A server without Content-Length must be bounded while streaming too.
+        let chunks = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let chunk_config = WebDavSyncConfig {
+            url: format!("http://{}", chunks.local_addr().unwrap()),
+            ..config.clone()
+        };
+        let chunk_server = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (mut stream, _) = chunks.accept().await.unwrap();
+            let mut request = [0; 4096];
+            let _ = stream.read(&mut request).await;
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            let block = vec![0u8; 1024 * 1024];
+            for _ in 0..21 {
+                if stream.write_all(b"100000\r\n").await.is_err() {
+                    return;
+                }
+                if stream.write_all(&block).await.is_err() {
+                    return;
+                }
+                if stream.write_all(b"\r\n").await.is_err() {
+                    return;
+                }
+            }
+            let _ = stream.write_all(b"0\r\n\r\n").await;
+        });
+        assert!(fetch_desktop_backup(&chunk_config)
+            .await
+            .err()
+            .unwrap()
+            .contains("20 MiB"));
+        chunk_server.abort();
+        crate::secrets::store_secret(DESKTOP_SYNC_PASSWORD_ACCOUNT, "wrong").unwrap();
+        assert!(fetch_desktop_backup(&config)
+            .await
+            .err()
+            .unwrap()
+            .contains("wrong password"));
+        crate::secrets::delete_secret(DESKTOP_SYNC_PASSWORD_ACCOUNT);
+        assert!(fetch_desktop_backup(&config)
+            .await
+            .err()
+            .unwrap()
+            .contains("unlock"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(desktop_webdav)]
+    async fn desktop_webdav_requires_encryption_and_excludes_private_files() {
+        use axum::{
+            body::Bytes,
+            http::{HeaderMap, Method, StatusCode},
+            routing::any,
+            Router,
+        };
+        use std::sync::{Arc, Mutex as StdMutex};
+
+        let _config = crate::store::TestConfigDir::new("desktop-webdav-encrypted");
+        crate::secrets::delete_secret(DESKTOP_SYNC_PASSWORD_ACCOUNT);
+        let dir = config_dir().unwrap();
+        fs::create_dir_all(dir.join("keys")).unwrap();
+        fs::write(
+            dir.join("keys/private-test-key"),
+            "FAKE_PRIVATE_KEY_DO_NOT_UPLOAD",
+        )
+        .unwrap();
+        fs::write(dir.join("known_hosts.json"), "LOCAL_TRUST_DO_NOT_UPLOAD").unwrap();
+        fs::write(dir.join("secrets.enc"), "VAULT_DO_NOT_UPLOAD").unwrap();
+        fs::write(
+            dir.join("hosts.json"),
+            r#"{"marker":"HOST_CREDENTIAL_MARKER"}"#,
+        )
+        .unwrap();
+
+        let upload = Arc::new(StdMutex::new(None));
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let captured = upload.clone();
+        let count = requests.clone();
+        let app = Router::new().fallback(any(
+            move |method: Method, headers: HeaderMap, body: Bytes| {
+                let captured = captured.clone();
+                let count = count.clone();
+                async move {
+                    count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if method == Method::PUT {
+                        assert_eq!(headers["content-type"], "application/octet-stream");
+                        *captured.lock().unwrap() = Some(body.to_vec());
+                    }
+                    StatusCode::CREATED
+                }
+            },
+        ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let config = WebDavSyncConfig {
+            enabled: true,
+            url: url.clone(),
+            ..Default::default()
+        };
+        let error = push_webdav_sync_inner(&config).await.unwrap_err();
+        assert!(error.contains("sync encryption password"), "{error}");
+        assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        let password = "test-sync-password-kept-in-vault";
+        let view = set_webdav_sync_config(WebDavSyncSaveRequest {
+            enabled: true,
+            url,
+            username: None,
+            password: None,
+            sync_password: Some(password.into()),
+            remote_path: config.remote_path.clone(),
+        })
+        .unwrap();
+        assert!(view.sync_password_configured);
+        assert!(!serde_json::to_string(&view).unwrap().contains(password));
+        assert!(!fs::read_to_string(webdav_sync_config_path().unwrap())
+            .unwrap()
+            .contains(password));
+        assert_eq!(
+            crate::secrets::get_secret(DESKTOP_SYNC_PASSWORD_ACCOUNT).as_deref(),
+            Some(password)
+        );
+
+        let status = push_webdav_sync_inner(&config).await.unwrap();
+        assert_eq!(status.last_success, Some(true));
+        let payload = upload
+            .lock()
+            .unwrap()
+            .take()
+            .expect("an actual PUT request");
+        assert!(crate::backup_crypto::is_encrypted_backup(&payload));
+        assert!(!payload
+            .windows(b"HOST_CREDENTIAL_MARKER".len())
+            .any(|w| w == b"HOST_CREDENTIAL_MARKER"));
+        let plaintext =
+            crate::backup_crypto::decrypt_backup(password.as_bytes(), &payload).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&plaintext).unwrap();
+        let files = value["files"].as_array().unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0]["path"], "hosts.json");
+        assert!(files[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("HOST_CREDENTIAL_MARKER"));
+        for marker in [
+            "FAKE_PRIVATE_KEY_DO_NOT_UPLOAD",
+            "LOCAL_TRUST_DO_NOT_UPLOAD",
+            "VAULT_DO_NOT_UPLOAD",
+        ] {
+            assert!(!String::from_utf8_lossy(&plaintext).contains(marker));
+        }
+        let requests_before = requests.load(std::sync::atomic::Ordering::SeqCst);
+        fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(dir.join("hosts.json"))
+            .unwrap()
+            .set_len(crate::desktop_sync::MAX_BACKUP_BYTES as u64 + 1)
+            .unwrap();
+        assert!(push_webdav_sync_inner(&config)
+            .await
+            .unwrap_err()
+            .contains("20 MiB"));
+        assert_eq!(
+            requests.load(std::sync::atomic::Ordering::SeqCst),
+            requests_before,
+            "oversized uploads must fail before contacting WebDAV"
+        );
+        crate::secrets::delete_secret(DESKTOP_SYNC_PASSWORD_ACCOUNT);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn directory_delete_requests_daemon_authorization_without_bypassing_approval() {
+        use axum::{
+            http::{HeaderMap, StatusCode},
+            routing::post,
+            Json, Router,
+        };
+        let app = Router::new().route(
+            "/sftp/rm-rf/authorize",
+            post(
+                |headers: HeaderMap, Json(body): Json<serde_json::Value>| async move {
+                    assert_eq!(headers["authorization"], "Bearer desktop-test-token");
+                    assert_eq!(
+                        body,
+                        serde_json::json!({
+                            "host": "server", "path": "/some  directory", "timeout_secs": 75
+                        })
+                    );
+                    (
+                        StatusCode::FORBIDDEN,
+                        Json(serde_json::json!({ "error": "approval rejected" })),
+                    )
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let error = authorize_directory_through_daemon(
+            &url,
+            "desktop-test-token",
+            "server",
+            "/some  directory",
+            Some(75),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("403"), "{error}");
+        assert!(error.contains("approval rejected"), "{error}");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn directory_delete_requires_explicit_authorization_for_the_exact_target() {
+        use axum::{routing::post, Json, Router};
+        for (receipt, accepted) in [
+            (
+                serde_json::json!({"authorized": true, "host": "server", "path": "/some  directory"}),
+                true,
+            ),
+            (
+                serde_json::json!({"authorized": false, "host": "server", "path": "/some  directory"}),
+                false,
+            ),
+            (
+                serde_json::json!({"authorized": true, "host": "other", "path": "/some  directory"}),
+                false,
+            ),
+            (
+                serde_json::json!({"authorized": true, "host": "server", "path": "/some directory"}),
+                false,
+            ),
+            (serde_json::json!({"exit_code": 0}), false),
+        ] {
+            let app = Router::new().route(
+                "/sftp/rm-rf/authorize",
+                post(move || async move { Json(receipt) }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let result = authorize_directory_through_daemon(
+                &url,
+                "desktop-test-token",
+                "server",
+                "/some  directory",
+                Some(75),
+            )
+            .await;
+            server.abort();
+            assert_eq!(result.is_ok(), accepted, "{result:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn structured_sftp_listing_requires_desktop_authorization_before_connecting() {
+        let _config = crate::store::TestConfigDir::new("desktop-sftp-list-authorization");
+        crate::approval::save_approval_policies(&[crate::approval::ApprovalPolicy {
+            name: "approve directory reads".into(),
+            hosts: vec!["listing-test".into()],
+            tags: vec![],
+            min_risk: None,
+            command_pattern: Some("sftp ls *".into()),
+            requires_approval: true,
+            ttl_secs: Some(60),
+        }])
+        .unwrap();
+
+        // This host deliberately has no profile: bypassing authorization would
+        // fail in host resolution instead, so assert the reason, not just Err.
+        let error = sftp_read_dir("listing-test".into(), "/a  directory".into(), Some(1))
+            .await
+            .unwrap_err();
+        assert!(error.contains("approval required"), "{error}");
+        assert!(error.contains("daemon approval flow"), "{error}");
+    }
 
     #[test]
     fn expand_local_path_handles_tilde_and_empty() {

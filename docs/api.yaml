@@ -1391,6 +1391,11 @@ paths:
         and approval policy using an `sftp rm-rf ...` operation string. This is the
         remote equivalent of `rm -rf`: the built-in classifier rates the operation
         high risk, and blocks it outright when `path` is `/`, `/*` or `/.`.
+        This route authorizes and executes the deletion in the daemon process.
+        It waits for any required approval before connecting to the SSH host.
+        Approval waiting uses the approval TTL, independently of the SSH/SFTP
+        transport timeout below. The desktop uses `/sftp/rm-rf/authorize` instead
+        so execution can use credentials unlocked in the desktop process.
       requestBody:
         required: true
         content:
@@ -1401,18 +1406,95 @@ paths:
               properties:
                 host: { type: string }
                 path: { type: string }
+                timeout_secs:
+                  type: integer
+                  format: uint64
+                  default: 60
+                  description: Timeout in seconds for SSH/SFTP transport operations; does not replace the approval TTL.
       responses:
         "200":
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ExecResult" }
         "400":
-          description: Recursive delete rejected by the SSH/SFTP layer
+          description: Blocked by risk policy or recursive delete failed in the SSH/SFTP layer
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "403":
-          description: Scope denied, blocked by risk policy, or approval rejected
+          description: Scope denied or approval rejected
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "408":
+          description: Approval timed out
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "423":
+          description: Execution gate paused
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Execution limit exceeded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /sftp/rm-rf/authorize:
+    post:
+      summary: Authorize a recursive SFTP deletion for desktop execution
+      description: |
+        Runs the same bearer-token scope, execution gate, execution limits,
+        effective risk and approval checks as `/sftp/rm-rf`, without connecting
+        to SSH or deleting anything. Blocked roots are rejected; operations
+        requiring approval wait for the decision under the approval TTL.
+        The desktop checks `authorized` and verifies that the returned host and
+        path match its request before executing the deletion in its own process.
+        This preserves access to the desktop's unlocked credential vault without
+        sending credentials to the daemon. There is no force parameter or
+        approval-bypassing fallback. A successful response is an authorization
+        result, not an ExecResult or evidence that a deletion has completed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [host, path]
+              properties:
+                host: { type: string }
+                path: { type: string }
+                timeout_secs:
+                  type: integer
+                  format: uint64
+                  description: Accepted for compatibility with the delete request; unused by this authorization-only endpoint.
+      responses:
+        "200":
+          description: Authorization succeeded for the returned host and path; no SSH operation was performed
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [authorized, host, path, risk_level]
+                properties:
+                  authorized: { type: boolean, enum: [true] }
+                  host: { type: string }
+                  path: { type: string }
+                  risk_level: { $ref: "#/components/schemas/RiskLevel" }
+        "400":
+          description: Blocked by risk policy or invalid request
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Scope denied or approval rejected
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1607,6 +1689,7 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
     get:
       summary: List resident sessions
+      description: Filters sessions by the caller token's allowed hosts and tags using each session's own host id. Available while the execution gate is paused.
       responses:
         "200":
           content:
@@ -1671,6 +1754,10 @@ paths:
         (start-then-collect) can be picked up later. Consumes nothing and does
         not count as activity for the idle TTL. A session whose shell has exited
         is reported `dead` even before the idle reaper reclaims it.
+        Checks the caller token's host, tag and command scope using
+        `resident-session read` before returning output. Available while the
+        execution gate is paused. Metadata and buffered-output reads also remain
+        available while a command is running in the session.
       parameters:
         - name: id
           in: path
@@ -1696,8 +1783,18 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Token scope does not permit reading this session
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
     delete:
       summary: Close a resident session, killing its shell
+      description: |
+        Authorizes `resident-session close` against the session's own host through
+        token scope, execution gate, execution limits, risk and approval policy.
+        Once authorized, cancels active and queued commands and kills the shell's
+        process tree without waiting for the active command's execution timeout.
       parameters:
         - name: id
           in: path
@@ -1714,6 +1811,26 @@ paths:
                   id: { type: string, format: uuid }
         "400":
           description: Unknown session
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Token scope or authorization policy refuses closing this session
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "408":
+          description: Approval timed out
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "423":
+          description: Execution gate is paused
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Execution rate limit exceeded
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }

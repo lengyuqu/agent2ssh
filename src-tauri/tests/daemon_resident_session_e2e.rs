@@ -36,6 +36,10 @@ struct TestDaemon {
 
 impl TestDaemon {
     fn start(label: &str) -> Self {
+        Self::start_with_scopes(label, "")
+    }
+
+    fn start_with_scopes(label: &str, scoped_tokens: &str) -> Self {
         let dir = std::env::temp_dir().join(format!(
             "a2s-daemon-resident-e2e-{label}-{}-{}",
             std::process::id(),
@@ -50,6 +54,10 @@ impl TestDaemon {
         // non-empty token, so the test knows it without racing the daemon.
         let token = format!("resident-e2e-token-{}", std::process::id());
         std::fs::write(dir.join("daemon.token"), &token).expect("seed daemon.token");
+        if !scoped_tokens.is_empty() {
+            std::fs::write(dir.join("daemon_tokens.toml"), scoped_tokens)
+                .expect("seed isolated scoped-token configuration");
+        }
 
         let addr = free_loopback_addr();
         let mut spawn = Command::new(env!("CARGO_BIN_EXE_agent2ssh-daemon"));
@@ -123,9 +131,13 @@ impl TestDaemon {
     }
 
     fn get(&self, path: &str) -> reqwest::blocking::Response {
+        self.get_with_token(path, &self.token)
+    }
+
+    fn get_with_token(&self, path: &str, token: &str) -> reqwest::blocking::Response {
         self.client()
             .get(self.url(path))
-            .bearer_auth(&self.token)
+            .bearer_auth(token)
             .send()
             .expect("GET {path}")
     }
@@ -140,9 +152,13 @@ impl TestDaemon {
     }
 
     fn delete(&self, path: &str) -> reqwest::blocking::Response {
+        self.delete_with_token(path, &self.token)
+    }
+
+    fn delete_with_token(&self, path: &str, token: &str) -> reqwest::blocking::Response {
         self.client()
             .delete(self.url(path))
-            .bearer_auth(&self.token)
+            .bearer_auth(token)
             .send()
             .expect("DELETE {path}")
     }
@@ -371,4 +387,254 @@ fn resident_session_read_rejects_an_unknown_session() {
         body.contains("unknown resident session"),
         "expected the unknown-session refusal, got {body}"
     );
+}
+
+// Synthetic tokens are accepted only by each test's temporary daemon. The
+// local session has no tags, so a tag-only scope must also hide/refuse it.
+const RESIDENT_SCOPED_TOKENS: &str = r#"
+[[tokens]]
+token = "resident-test-other-host"
+[tokens.scope]
+allowed_hosts = ["other-host"]
+
+[[tokens]]
+token = "resident-test-other-tag"
+[tokens.scope]
+allowed_tags = ["production"]
+
+[[tokens]]
+token = "resident-test-local"
+[tokens.scope]
+allowed_hosts = ["local"]
+
+[[tokens]]
+token = "resident-test-reader"
+[tokens.scope]
+allowed_hosts = ["local"]
+allowed_commands = ["resident-session read"]
+
+[[tokens]]
+token = "resident-test-closer"
+[tokens.scope]
+allowed_hosts = ["local"]
+allowed_commands = ["resident-session close"]
+
+[[tokens]]
+token = "resident-test-denied-actions"
+[tokens.scope]
+allowed_hosts = ["local"]
+allowed_commands = ["resident-session *"]
+denied_commands = ["resident-session read", "resident-session close"]
+"#;
+
+fn assert_scope_denied(response: reqwest::blocking::Response, reason: &str) {
+    let status = response.status();
+    let body = response.text().expect("read scope refusal");
+    assert_eq!(status, 403, "expected scoped refusal: {body}");
+    assert!(body.contains(reason), "expected {reason:?}, got {body}");
+}
+
+#[test]
+fn resident_session_observation_and_close_enforce_host_and_tag_scopes() {
+    let daemon = TestDaemon::start_with_scopes("host-scope", RESIDENT_SCOPED_TOKENS);
+    let session = daemon.open_default_session("host-scope");
+    let id = session["id"].as_str().expect("session id");
+    let path = format!("/resident-sessions/{id}");
+
+    for (token, reason) in [
+        ("resident-test-other-host", "not in the allowed hosts list"),
+        ("resident-test-other-tag", "no tags matching allowed tags"),
+    ] {
+        let listed = daemon.get_with_token("/resident-sessions", token);
+        assert_eq!(listed.status(), 200, "{}", body_text(listed));
+        let listed: serde_json::Value = listed.json().expect("read scoped session list");
+        assert_eq!(listed, serde_json::json!([]));
+        assert_scope_denied(daemon.get_with_token(&path, token), reason);
+        assert_scope_denied(daemon.delete_with_token(&path, token), reason);
+    }
+
+    // A rejected close must leave the original session present and usable.
+    let read = daemon.get_with_token(&path, "resident-test-local");
+    assert_eq!(read.status(), 200, "{}", body_text(read));
+    let detail: serde_json::Value = read.json().expect("read allowed session");
+    assert_eq!(detail["id"], id);
+    assert_eq!(detail["dead"], false);
+    let listed: serde_json::Value = daemon
+        .get_with_token("/resident-sessions", "resident-test-local")
+        .json()
+        .expect("read allowed list");
+    assert_eq!(listed.as_array().expect("session list").len(), 1);
+    assert_eq!(listed[0]["id"], id);
+    let exec = daemon.post(
+        &format!("{path}/exec"),
+        serde_json::json!({ "command": "echo scope-positive-control", "force": true }),
+    );
+    assert_eq!(exec.status(), 200, "{}", body_text(exec));
+    let result: serde_json::Value = exec.json().expect("read positive-control command");
+    assert_eq!(result["exit_code"], 0);
+    assert!(result["stdout"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("scope-positive-control"));
+
+    let closed = daemon.delete_with_token(&path, "resident-test-local");
+    assert_eq!(closed.status(), 200, "{}", body_text(closed));
+}
+
+#[test]
+fn resident_session_read_and_close_enforce_action_scopes() {
+    let daemon = TestDaemon::start_with_scopes("action-scope", RESIDENT_SCOPED_TOKENS);
+    let session = daemon.open_default_session("action-scope");
+    let id = session["id"].as_str().expect("session id");
+    let path = format!("/resident-sessions/{id}");
+
+    let read = daemon.get_with_token(&path, "resident-test-reader");
+    assert_eq!(read.status(), 200, "{}", body_text(read));
+    assert_scope_denied(
+        daemon.delete_with_token(&path, "resident-test-reader"),
+        "command 'resident-session close' does not match any allowed command pattern",
+    );
+    assert_scope_denied(
+        daemon.get_with_token(&path, "resident-test-closer"),
+        "command 'resident-session read' does not match any allowed command pattern",
+    );
+    for (response, command) in [
+        (
+            daemon.get_with_token(&path, "resident-test-denied-actions"),
+            "read",
+        ),
+        (
+            daemon.delete_with_token(&path, "resident-test-denied-actions"),
+            "close",
+        ),
+    ] {
+        assert_scope_denied(
+            response,
+            &format!("command 'resident-session {command}' is denied by pattern"),
+        );
+    }
+
+    // Listing is observation scoped by host/tags; it has no command to run.
+    let listed: serde_json::Value = daemon
+        .get_with_token("/resident-sessions", "resident-test-reader")
+        .json()
+        .expect("list visible sessions with a read-only token");
+    assert_eq!(listed[0]["id"], id);
+    let closed = daemon.delete_with_token(&path, "resident-test-closer");
+    assert_eq!(closed.status(), 200, "{}", body_text(closed));
+    let after = daemon.get(&path);
+    assert_eq!(after.status(), 400, "{}", body_text(after));
+    assert!(after
+        .text()
+        .unwrap_or_default()
+        .contains("unknown resident session"));
+}
+
+#[test]
+fn resident_session_close_respects_the_gate_while_reads_remain_available() {
+    let daemon = TestDaemon::start("close-gate");
+    let session = daemon.open_default_session("close-gate");
+    let id = session["id"].as_str().expect("session id");
+    let path = format!("/resident-sessions/{id}");
+    let paused = daemon.post("/gate/pause", serde_json::json!({}));
+    assert_eq!(paused.status(), 200, "{}", body_text(paused));
+
+    let close = daemon.delete(&path);
+    assert_eq!(close.status(), 423, "{}", body_text(close));
+    assert!(close
+        .text()
+        .unwrap_or_default()
+        .contains("execution gate paused"));
+    let read = daemon.get(&path);
+    assert_eq!(read.status(), 200, "{}", body_text(read));
+    let detail: serde_json::Value = read.json().expect("read while paused");
+    assert_eq!(detail["dead"], false);
+    let listed: serde_json::Value = daemon
+        .get("/resident-sessions")
+        .json()
+        .expect("list while paused");
+    assert_eq!(listed[0]["id"], id);
+
+    let resumed = daemon.post("/gate/resume", serde_json::json!({}));
+    assert_eq!(resumed.status(), 200, "{}", body_text(resumed));
+    let close = daemon.delete(&path);
+    assert_eq!(close.status(), 200, "{}", body_text(close));
+}
+
+#[test]
+fn resident_session_close_waits_for_approval_before_killing_the_shell() {
+    let daemon = TestDaemon::start("close-approval");
+    let session = daemon.open_default_session("close-approval");
+    let id = session["id"].as_str().expect("session id");
+    let path = format!("/resident-sessions/{id}");
+    let policy = daemon
+        .client()
+        .put(daemon.url("/approval/policies"))
+        .bearer_auth(&daemon.token)
+        .json(&serde_json::json!([{
+            "name": "approve-resident-close",
+            "hosts": ["local"],
+            "command_pattern": "resident-session close",
+            "requires_approval": true,
+            "ttl_secs": 20,
+        }]))
+        .send()
+        .expect("configure an isolated close approval policy");
+    assert_eq!(policy.status(), 200, "{}", body_text(policy));
+
+    // First reject, then approve. Each request must remain pending while the
+    // session is still alive; rejection must leave it usable for another try.
+    for approved in [false, true] {
+        std::thread::scope(|scope| {
+            let close = scope.spawn(|| daemon.delete(&path));
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let approval_id = loop {
+                let response = daemon.get("/approvals");
+                assert_eq!(response.status(), 200, "{}", body_text(response));
+                let pending: serde_json::Value = response.json().expect("read approvals");
+                if let Some(request) =
+                    pending
+                        .as_array()
+                        .expect("approval list")
+                        .iter()
+                        .find(|request| {
+                            request["host"] == "local"
+                                && request["command"] == "resident-session close"
+                                && request["status"] == "pending"
+                        })
+                {
+                    break request["id"].as_str().expect("approval id").to_string();
+                }
+                assert!(Instant::now() < deadline, "close never requested approval");
+                std::thread::sleep(Duration::from_millis(100));
+            };
+            let read = daemon.get(&path);
+            assert_eq!(read.status(), 200, "{}", body_text(read));
+            let detail: serde_json::Value = read.json().expect("read before approval");
+            assert_eq!(detail["dead"], false);
+            assert!(!close.is_finished(), "close completed before approval");
+
+            let action = if approved { "approve" } else { "reject" };
+            let decision = daemon.post(
+                &format!("/approvals/{approval_id}/{action}"),
+                serde_json::json!({}),
+            );
+            assert_eq!(decision.status(), 200, "{}", body_text(decision));
+            let close = close.join().expect("close worker finished");
+            if approved {
+                assert_eq!(close.status(), 200, "{}", body_text(close));
+            } else {
+                assert_scope_denied(close, "command rejected by approver");
+                let read = daemon.get(&path);
+                assert_eq!(read.status(), 200, "{}", body_text(read));
+            }
+        });
+    }
+
+    let after = daemon.get(&path);
+    assert_eq!(after.status(), 400, "{}", body_text(after));
+    assert!(after
+        .text()
+        .unwrap_or_default()
+        .contains("unknown resident session"));
 }

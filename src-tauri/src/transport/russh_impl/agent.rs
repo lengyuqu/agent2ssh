@@ -38,10 +38,9 @@ use std::task::{Context, Poll};
 
 use russh::keys::agent::client::AgentClient;
 use russh::keys::agent::AgentIdentity;
-use russh::keys::PublicKey as RhPublicKey;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-use super::{block_on, other, Session};
+use super::{other, Session};
 use crate::transport::types::Error;
 
 /// The agent transports, behind one type.
@@ -49,6 +48,8 @@ use crate::transport::types::Error;
 /// `Send` matters as much as the I/O traits: the future that uses this holds
 /// it across an `.await` and `block_on` requires `Send`.
 enum AgentStream {
+    #[cfg(test)]
+    Test(tokio::io::DuplexStream),
     #[cfg(windows)]
     Pageant(pageant::PageantStream),
     /// Win32-OpenSSH serves its agent on this pipe rather than on a socket.
@@ -65,6 +66,8 @@ impl AsyncRead for AgentStream {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
         match self.get_mut() {
+            #[cfg(test)]
+            AgentStream::Test(stream) => Pin::new(stream).poll_read(cx, buf),
             #[cfg(windows)]
             AgentStream::Pageant(stream) => Pin::new(stream).poll_read(cx, buf),
             #[cfg(windows)]
@@ -82,6 +85,8 @@ impl AsyncWrite for AgentStream {
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
         match self.get_mut() {
+            #[cfg(test)]
+            AgentStream::Test(stream) => Pin::new(stream).poll_write(cx, buf),
             #[cfg(windows)]
             AgentStream::Pageant(stream) => Pin::new(stream).poll_write(cx, buf),
             #[cfg(windows)]
@@ -93,6 +98,8 @@ impl AsyncWrite for AgentStream {
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         match self.get_mut() {
+            #[cfg(test)]
+            AgentStream::Test(stream) => Pin::new(stream).poll_flush(cx),
             #[cfg(windows)]
             AgentStream::Pageant(stream) => Pin::new(stream).poll_flush(cx),
             #[cfg(windows)]
@@ -104,6 +111,8 @@ impl AsyncWrite for AgentStream {
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         match self.get_mut() {
+            #[cfg(test)]
+            AgentStream::Test(stream) => Pin::new(stream).poll_shutdown(cx),
             #[cfg(windows)]
             AgentStream::Pageant(stream) => Pin::new(stream).poll_shutdown(cx),
             #[cfg(windows)]
@@ -120,7 +129,7 @@ impl AsyncWrite for AgentStream {
 /// because the facade's accessors return borrowed slices.
 #[derive(Clone)]
 pub struct PublicKey {
-    key: RhPublicKey,
+    identity: AgentIdentity,
     blob: Vec<u8>,
     comment: String,
 }
@@ -135,15 +144,46 @@ impl PublicKey {
     }
 
     fn from_identity(identity: &AgentIdentity) -> Self {
-        // A certificate identity signs with the key inside the certificate, so
-        // `public_key()` is the one to keep either way.
-        let key = identity.public_key().into_owned();
-        let blob = key.to_bytes().unwrap_or_default();
+        // The certificate, including its CA signature and principals, is the
+        // identity the server and agent must see. Extracting its public key
+        // here would silently turn certificate authentication into plain-key
+        // authentication.
+        let blob = match identity {
+            AgentIdentity::PublicKey { key, .. } => key.to_bytes(),
+            AgentIdentity::Certificate { certificate, .. } => certificate.to_bytes(),
+        }
+        .unwrap_or_default();
         Self {
-            key,
+            identity: identity.clone(),
             blob,
             comment: identity.comment().to_string(),
         }
+    }
+
+    async fn authenticate<S: russh::Signer>(
+        &self,
+        username: &str,
+        handle: &mut russh::client::Handle<super::ClientHandler>,
+        signer: &mut S,
+    ) -> Result<russh::client::AuthResult, Error>
+    where
+        S::Error: std::fmt::Display,
+    {
+        let is_rsa = self.identity.public_key().algorithm().is_rsa();
+        let hash_alg = super::rsa_hash_alg(handle, is_rsa).await?;
+        match &self.identity {
+            AgentIdentity::PublicKey { key, .. } => {
+                handle
+                    .authenticate_publickey_with(username, key.clone(), hash_alg, signer)
+                    .await
+            }
+            AgentIdentity::Certificate { certificate, .. } => {
+                handle
+                    .authenticate_certificate_with(username, certificate.clone(), hash_alg, signer)
+                    .await
+            }
+        }
+        .map_err(|error| other(format!("the SSH agent could not sign: {error}")))
     }
 }
 
@@ -172,7 +212,11 @@ impl Agent {
     /// unreachable agent as "this method is unavailable" and moves on to the
     /// next authentication path.
     pub fn connect(&mut self) -> Result<(), Error> {
-        let client = block_on(connect_stream())?;
+        let client = self
+            .session
+            .inner
+            .settings
+            .run_independent("agent connection", connect_stream())?;
         *self.client.try_lock().expect("no other caller holds this") = Some(client);
         Ok(())
     }
@@ -180,15 +224,27 @@ impl Agent {
     /// Fetch the agent's identity list. Separate from [`Self::identities`]
     /// because the facade mirrors libssh2's two-step shape.
     pub fn list_identities(&mut self) -> Result<(), Error> {
-        let fetched = block_on(async {
-            let mut guard = self.client.lock().await;
-            let client = guard
-                .as_mut()
-                .ok_or_else(|| other("the SSH agent is not connected"))?;
-            client.request_identities().await.map_err(|error| {
-                other(format!("the SSH agent refused to list identities: {error}"))
-            })
-        })?;
+        let fetched =
+            self.session
+                .inner
+                .settings
+                .run_independent("agent identity listing", async {
+                    let mut guard = self.client.lock().await;
+                    let client = guard
+                        .as_mut()
+                        .ok_or_else(|| other("the SSH agent is not connected"))?;
+                    client.request_identities().await.map_err(|error| {
+                        other(format!("the SSH agent refused to list identities: {error}"))
+                    })
+                });
+        if fetched.is_err() {
+            // An interrupted agent packet cannot be resumed on this stream.
+            *self
+                .client
+                .try_lock()
+                .expect("listing released the agent lock") = None;
+        }
+        let fetched = fetched?;
         *self.identities.lock().unwrap() = fetched
             .iter()
             .map(PublicKey::from_identity)
@@ -205,10 +261,9 @@ impl Agent {
     /// The agent signs; this crate never sees a private key.
     pub fn userauth(&self, username: &str, identity: &PublicKey) -> Result<(), Error> {
         self.session.ensure_connected()?;
-        let key = identity.key.clone();
         let session = self.session.clone();
 
-        let result = block_on(async {
+        let result = session.run("agent authentication", async {
             let mut client_guard = self.client.lock().await;
             if client_guard.is_none() {
                 return Err(other("the SSH agent is not connected"));
@@ -217,20 +272,15 @@ impl Agent {
             let Some(handle) = handle_guard.as_mut() else {
                 return Err(other("handshake has not run"));
             };
-            // Same nest as the file-based path: outer "the server said
-            // nothing", inner "any hash".
-            let hash_alg = super::rsa_hash_alg(handle, key.algorithm().is_rsa()).await?;
-            handle
-                .authenticate_publickey_with(
+            identity
+                .authenticate(
                     username,
-                    key,
-                    hash_alg,
+                    handle,
                     client_guard
                         .as_mut()
                         .expect("checked above that the agent is connected"),
                 )
                 .await
-                .map_err(|error| other(format!("the SSH agent could not sign: {error}")))
         })?;
 
         Session::auth_result(result, &session.inner.authenticated)
@@ -273,6 +323,7 @@ async fn connect_stream() -> Result<AgentClient<AgentStream>, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use russh::keys::PublicKey as RhPublicKey;
 
     /// A fixed key rather than a generated one: the assertion below is about
     /// the mapping, and a random key would only add an RNG dependency to it.
@@ -283,6 +334,231 @@ mod tests {
         AgentIdentity::PublicKey {
             key: RhPublicKey::from_openssh(TEST_KEY).unwrap(),
             comment: comment.to_string(),
+        }
+    }
+
+    fn test_private_key(seed: u8) -> russh::keys::PrivateKey {
+        russh::keys::ssh_key::private::Ed25519Keypair::from_seed(&[seed; 32]).into()
+    }
+
+    fn certificate_fixture() -> (
+        russh::keys::PrivateKey,
+        russh::keys::PrivateKey,
+        russh::keys::Certificate,
+    ) {
+        let ca_key = test_private_key(1);
+        let user_key = test_private_key(2);
+        let mut builder = russh::keys::ssh_key::certificate::Builder::new(
+            vec![3; 32],
+            user_key.public_key().key_data().clone(),
+            0,
+            u64::MAX,
+        )
+        .unwrap();
+        builder.key_id("agent-certificate-regression").unwrap();
+        builder.valid_principal("testuser").unwrap();
+        let certificate = builder.sign(&ca_key).unwrap();
+        (ca_key, user_key, certificate)
+    }
+
+    #[tokio::test]
+    async fn stalled_agent_identity_listing_obeys_the_session_timeout() {
+        let session = Session::new().unwrap();
+        session.set_timeout(100);
+        let mut agent = Agent::new(session);
+        let (stream, _silent_peer) = tokio::io::duplex(4096);
+        *agent.client.lock().await = Some(AgentClient::connect(AgentStream::Test(stream)));
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            tokio::task::spawn_blocking(move || agent.list_identities()),
+        )
+        .await
+        .expect("identity listing leaked its blocking worker")
+        .unwrap()
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("agent identity listing timed out"));
+    }
+
+    #[tokio::test]
+    async fn stalled_agent_listing_still_allows_ssh_authentication_fallback() {
+        use std::{sync::Arc, time::Duration};
+        struct Server;
+        impl russh::server::Handler for Server {
+            type Error = russh::Error;
+            async fn auth_password(
+                &mut self,
+                _: &str,
+                _: &str,
+            ) -> Result<russh::server::Auth, Self::Error> {
+                Ok(russh::server::Auth::Accept)
+            }
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let session = Session::new().unwrap();
+            let (client, peer) = tokio::io::duplex(64 * 1024);
+            let config = russh::server::Config {
+                keys: vec![test_private_key(24)],
+                ..Default::default()
+            };
+            let server = tokio::spawn(async move {
+                if let Ok(server) = russh::server::run_stream(Arc::new(config), peer, Server).await
+                {
+                    let _ = server.await;
+                }
+            });
+            let handler = super::super::ClientHandler {
+                host_key: session.inner.host_key.clone(),
+                banner: session.inner.banner.clone(),
+                forwards: session.inner.forwards.clone(),
+            };
+            let handle = russh::client::connect_stream(
+                Arc::new(russh::client::Config::default()),
+                client,
+                handler,
+            )
+            .await
+            .unwrap();
+            *session.inner.handle.lock().await = Some(handle);
+            session
+                .inner
+                .connected
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            session.set_timeout(150);
+            let mut agent = Agent::new(session.clone());
+            let (agent_stream, _silent_agent) = tokio::io::duplex(4096);
+            *agent.client.lock().await =
+                Some(AgentClient::connect(AgentStream::Test(agent_stream)));
+            tokio::task::spawn_blocking(move || {
+                assert!(agent
+                    .list_identities()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("timed out"));
+                assert!(agent.client.try_lock().unwrap().is_none());
+                session
+                    .userauth_password("fallback-user", "fallback-password")
+                    .unwrap();
+                assert!(session.authenticated());
+            })
+            .await
+            .unwrap();
+            server.abort();
+        })
+        .await
+        .expect("agent fallback did not finish");
+    }
+
+    #[tokio::test]
+    async fn stalled_agent_signature_obeys_the_session_timeout() {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        use tokio::io::AsyncReadExt;
+
+        struct Server;
+        impl russh::server::Handler for Server {
+            type Error = russh::Error;
+        }
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let session = Session::new().unwrap();
+            let (client_stream, server_stream) = tokio::io::duplex(64 * 1024);
+            let config = russh::server::Config {
+                keys: vec![test_private_key(21)],
+                ..Default::default()
+            };
+            let server_task = tokio::spawn(async move {
+                if let Ok(server) =
+                    russh::server::run_stream(Arc::new(config), server_stream, Server).await
+                {
+                    let _ = server.await;
+                }
+            });
+            let handler = super::super::ClientHandler {
+                host_key: Arc::clone(&session.inner.host_key),
+                banner: Arc::clone(&session.inner.banner),
+                forwards: Arc::clone(&session.inner.forwards),
+            };
+            let handle = russh::client::connect_stream(
+                Arc::new(russh::client::Config::default()),
+                client_stream,
+                handler,
+            )
+            .await
+            .unwrap();
+            *session.inner.handle.lock().await = Some(handle);
+            session
+                .inner
+                .connected
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            session.set_timeout(300);
+            let agent = Agent::new(session);
+            let (agent_stream, mut silent_agent) = tokio::io::duplex(4096);
+            *agent.client.lock().await =
+                Some(AgentClient::connect(AgentStream::Test(agent_stream)));
+            let identity = PublicKey::from_identity(&AgentIdentity::PublicKey {
+                key: test_private_key(22).public_key().clone(),
+                comment: "test signing identity".to_string(),
+            });
+            let worker = tokio::task::spawn_blocking(move || agent.userauth("testuser", &identity));
+            let length = silent_agent.read_u32().await.unwrap() as usize;
+            let mut request = vec![0; length];
+            silent_agent.read_exact(&mut request).await.unwrap();
+            assert_eq!(
+                request[0], 13,
+                "the fake agent must receive a signing request"
+            );
+            // Deliberately send no signature response.
+            let error = worker.await.unwrap().unwrap_err();
+            assert!(error.to_string().contains("agent authentication timed out"));
+            server_task.abort();
+            let _ = server_task.await;
+        })
+        .await
+        .expect("agent authentication leaked its blocking worker");
+    }
+
+    /// Real-machine probe: what does the local agent actually hold?
+    ///
+    /// `#[ignore]`d because it needs an agent to exist and answers about this
+    /// host, not about the code — the same reason `container_terminal_manual`
+    /// is ignored. Run it when a Windows agent has to be checked by hand:
+    ///
+    /// ```text
+    /// cargo test --no-default-features --lib pageant_lists_identities -- --ignored --nocapture
+    /// ```
+    ///
+    /// A hang here is itself the answer: `connect_stream` reports which transport
+    /// it chose, so a wedged Pageant shows up as the pipe failing and Pageant
+    /// never replying.
+    #[tokio::test]
+    #[ignore = "needs a running agent on this machine"]
+    async fn pageant_lists_identities() {
+        let mut client = tokio::time::timeout(std::time::Duration::from_secs(10), connect_stream())
+            .await
+            .expect("connchose a transport within 10s")
+            .expect("an agent answered");
+
+        let identities = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            client.request_identities(),
+        )
+        .await
+        .expect("the agent replied within 10s")
+        .expect("identities");
+
+        println!("identities: {}", identities.len());
+        for identity in identities {
+            match identity {
+                AgentIdentity::PublicKey { key, comment } => {
+                    println!("  {} {}", key.to_openssh().unwrap(), comment)
+                }
+                AgentIdentity::Certificate { certificate, .. } => {
+                    println!("  certificate {:?}", certificate.algorithm())
+                }
+            }
         }
     }
 
@@ -308,15 +584,150 @@ mod tests {
     }
 
     #[test]
-    fn a_certificate_identity_maps_through_its_embedded_key() {
-        // Same shape a certificate-backed identity takes: `public_key()`
-        // unwraps to the certified key, which is what the server knows.
-        let certificate_identity = identity("cert");
-        let mapped = PublicKey::from_identity(&certificate_identity);
-        assert_eq!(
-            mapped.key.algorithm(),
-            RhPublicKey::from_openssh(TEST_KEY).unwrap().algorithm()
-        );
+    fn certificate_identity_preserves_the_certificate_wire_blob_and_comment() {
+        let (_, _, certificate) = certificate_fixture();
+        let mapped = PublicKey::from_identity(&AgentIdentity::Certificate {
+            certificate: certificate.clone(),
+            comment: "CA-issued identity".to_string(),
+        });
+        assert_eq!(mapped.comment(), "CA-issued identity");
+        assert_eq!(mapped.blob(), certificate.to_bytes().unwrap());
+        assert!(matches!(mapped.identity, AgentIdentity::Certificate { .. }));
+        let decoded = russh::keys::Certificate::from_bytes(mapped.blob()).unwrap();
+        assert_eq!(decoded, certificate);
+        assert_eq!(decoded.valid_principals(), &["testuser".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn agent_certificate_authenticates_against_a_ca_only_server() {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        use russh::keys::ssh_key::encoding::Decode;
+        use russh::Signer;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        struct CaOnlyServer {
+            ca: russh::keys::ssh_key::Fingerprint,
+        }
+
+        impl russh::server::Handler for CaOnlyServer {
+            type Error = russh::Error;
+
+            // Plain public keys retain the default rejection. Only a valid
+            // certificate issued by this CA for this user can authenticate.
+            async fn auth_openssh_certificate(
+                &mut self,
+                user: &str,
+                certificate: &russh::keys::Certificate,
+            ) -> Result<russh::server::Auth, Self::Error> {
+                let valid = certificate.validate_at(1, &[self.ca]).is_ok()
+                    && certificate.valid_principals().iter().any(|p| p == user);
+                Ok(if valid {
+                    russh::server::Auth::Accept
+                } else {
+                    russh::server::Auth::reject()
+                })
+            }
+        }
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let (ca_key, user_key, certificate) = certificate_fixture();
+            let identity = AgentIdentity::Certificate {
+                certificate: certificate.clone(),
+                comment: "CA-issued identity".to_string(),
+            };
+            let mapped = PublicKey::from_identity(&identity);
+            let (client_stream, server_stream) = tokio::io::duplex(64 * 1024);
+            let config = russh::server::Config {
+                keys: vec![test_private_key(4)],
+                auth_rejection_time: Duration::ZERO,
+                auth_rejection_time_initial: Some(Duration::ZERO),
+                ..Default::default()
+            };
+            let server_task = tokio::spawn(async move {
+                russh::server::run_stream(
+                    Arc::new(config),
+                    server_stream,
+                    CaOnlyServer {
+                        ca: ca_key.fingerprint(Default::default()),
+                    },
+                )
+                .await
+                .unwrap()
+                .await
+                .unwrap();
+            });
+            let handler = super::super::ClientHandler {
+                host_key: Arc::new(Mutex::new(None)),
+                banner: Arc::new(Mutex::new(None)),
+                forwards: Arc::new(super::super::forward::Registry::new(Arc::new(
+                    super::super::channel::Settings::new(),
+                ))),
+            };
+            let mut handle = russh::client::connect_stream(
+                Arc::new(russh::client::Config::default()),
+                client_stream,
+                handler,
+            )
+            .await
+            .unwrap();
+
+            // Prove that this server does not accept the same key without its
+            // CA certificate before exercising the agent-backed certificate.
+            let bare_result = handle
+                .authenticate_publickey(
+                    "testuser",
+                    russh::keys::PrivateKeyWithHashAlg::new(Arc::new(user_key.clone()), None),
+                )
+                .await
+                .unwrap();
+            assert!(!bare_result.success());
+
+            let (agent_stream, mut agent_peer) = tokio::io::duplex(64 * 1024);
+            let mut agent = AgentClient::connect(agent_stream);
+            let agent_task = tokio::spawn(async move {
+                let length = agent_peer.read_u32().await.unwrap() as usize;
+                let mut request = vec![0; length];
+                agent_peer.read_exact(&mut request).await.unwrap();
+                assert_eq!(request[0], 13, "SSH2_AGENTC_SIGN_REQUEST");
+                let mut fields = &request[1..];
+                let blob = Vec::<u8>::decode(&mut fields).unwrap();
+                assert_eq!(blob, certificate.to_bytes().unwrap());
+                let data = Vec::<u8>::decode(&mut fields).unwrap();
+                assert_eq!(u32::decode(&mut fields).unwrap(), 0);
+                assert!(fields.is_empty());
+
+                let mut signer = super::super::LocalKeySigner {
+                    key: Arc::new(user_key),
+                };
+                let signed = signer
+                    .auth_sign(&identity, None, data.clone())
+                    .await
+                    .unwrap();
+                let mut response = vec![14]; // SSH2_AGENT_SIGN_RESPONSE
+                response.extend_from_slice(&signed[data.len()..]);
+                agent_peer.write_u32(response.len() as u32).await.unwrap();
+                agent_peer.write_all(&response).await.unwrap();
+            });
+
+            let result = mapped
+                .authenticate("testuser", &mut handle, &mut agent)
+                .await
+                .unwrap();
+            assert!(
+                result.success(),
+                "CA-only server rejected agent certificate"
+            );
+            agent_task.await.unwrap();
+            handle
+                .disconnect(russh::Disconnect::ByApplication, "test complete", "")
+                .await
+                .unwrap();
+            server_task.await.unwrap();
+        })
+        .await
+        .expect("in-memory agent authentication must finish within ten seconds");
     }
 
     #[test]

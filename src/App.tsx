@@ -1166,7 +1166,7 @@ export default function App() {
 
           {activeModule === "mcp-agents" && <McpAgentsPanel />}
 
-          {activeModule === "sync" && <SyncPanel />}
+          {activeModule === "sync" && <SyncPanel onRestored={refresh} />}
 
           {activeModule === "keys" && <KeysPanel onChanged={handleKeyChanged} />}
 

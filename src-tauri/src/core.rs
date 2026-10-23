@@ -25,8 +25,9 @@ use crate::{
     types::{
         default_host_group, is_local_host, source_from_env, AuditEntry, AuditFilter, BatchStrategy,
         ExecMultiBatchResult, ExecMultiResult, ExecRequest, ExecResult, HostFilter, HostGroup,
-        HostProfile, PingResult, ProxyProfile, RiskLevel, SftpDirection, SftpDownloadRequest,
-        SftpResult, SftpUploadRequest, WalkEntry, LOCAL_ENV_PREFIX, LOCAL_TARGET_ID,
+        HostProfile, PingResult, ProxyProfile, RiskLevel, SftpDirEntry, SftpDirection,
+        SftpDownloadRequest, SftpResult, SftpUploadRequest, WalkEntry, LOCAL_ENV_PREFIX,
+        LOCAL_TARGET_ID,
     },
 };
 
@@ -2167,10 +2168,22 @@ fn sftp_permission_string(stat: &crate::transport::FileStat) -> String {
 }
 
 fn sftp_entry_name(path: &Path) -> String {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .map(str::to_string)
-        .unwrap_or_else(|| path.display().to_string())
+    // Remote paths use '/' even when the client runs on Windows. A backslash
+    // is a legal remote filename character, not a local path separator.
+    path.to_string_lossy()
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn sftp_dir_entry(path: &Path, stat: &crate::transport::FileStat) -> SftpDirEntry {
+    SftpDirEntry {
+        name: sftp_entry_name(path),
+        is_dir: sftp_is_directory(stat),
+        size: stat.size,
+        modified_unix: stat.mtime,
+    }
 }
 
 fn format_sftp_ls_entry(path: &Path, stat: &crate::transport::FileStat) -> String {
@@ -2264,6 +2277,30 @@ async fn sftp_dir_operation_core<F>(
 where
     F: FnOnce(HostProfile, String, u64) -> Result<String> + Send + 'static,
 {
+    sftp_dir_operation_with_value_core(
+        host_name,
+        path,
+        timeout_secs,
+        operation,
+        source,
+        move |host, path, timeout| task(host, path, timeout).map(|stdout| (stdout, ())),
+    )
+    .await
+    .map(|(result, ())| result)
+}
+
+async fn sftp_dir_operation_with_value_core<F, T>(
+    host_name: &str,
+    path: &str,
+    timeout_secs: Option<u64>,
+    operation: &str,
+    source: Option<String>,
+    task: F,
+) -> Result<(ExecResult, T)>
+where
+    F: FnOnce(HostProfile, String, u64) -> Result<(String, T)> + Send + 'static,
+    T: Send + 'static,
+{
     let host = resolve_host(host_name)?;
     let source = source.unwrap_or_else(|| source_from_env("core"));
     let command = sftp_operation_command(operation, path);
@@ -2298,7 +2335,7 @@ where
     let duration_ms = started.elapsed().as_millis();
 
     match task_result {
-        Ok(stdout) => {
+        Ok((stdout, value)) => {
             let result = ExecResult {
                 host: host_name.to_string(),
                 command,
@@ -2312,7 +2349,7 @@ where
                 side_effect: None,
             };
             let _ = append_audit(&result, risk, None, None, Some(&source));
-            Ok(result)
+            Ok((result, value))
         }
         Err(error) => {
             let message = error.to_string();
@@ -2355,18 +2392,7 @@ pub async fn sftp_ls_core_with_source(
         "ls",
         source,
         |host, path, timeout| {
-            let session = connect_embedded_ssh(&host, timeout)?;
-            let sftp = session.sftp()?;
-            let mut entries = sftp
-                .readdir(Path::new(&path))
-                .with_context(|| format!("failed to list remote directory {path}"))?;
-            entries.sort_by(|(left, left_stat), (right, right_stat)| {
-                let left_dir = sftp_is_directory(left_stat);
-                let right_dir = sftp_is_directory(right_stat);
-                right_dir
-                    .cmp(&left_dir)
-                    .then_with(|| sftp_entry_name(left).cmp(&sftp_entry_name(right)))
-            });
+            let entries = read_sftp_directory(&host, &path, timeout)?;
             Ok(entries
                 .into_iter()
                 .map(|(entry_path, stat)| format_sftp_ls_entry(&entry_path, &stat))
@@ -2375,6 +2401,56 @@ pub async fn sftp_ls_core_with_source(
         },
     )
     .await
+}
+
+fn read_sftp_directory(
+    host: &HostProfile,
+    path: &str,
+    timeout: u64,
+) -> Result<Vec<(PathBuf, crate::transport::FileStat)>> {
+    let session = connect_embedded_ssh(host, timeout)?;
+    let sftp = session.sftp()?;
+    let mut entries = sftp
+        .readdir(Path::new(path))
+        .with_context(|| format!("failed to list remote directory {path}"))?;
+    entries.retain(|(path, _)| !matches!(sftp_entry_name(path).as_str(), "." | ".."));
+    entries.sort_by(|(left, left_stat), (right, right_stat)| {
+        sftp_is_directory(right_stat)
+            .cmp(&sftp_is_directory(left_stat))
+            .then_with(|| sftp_entry_name(left).cmp(&sftp_entry_name(right)))
+    });
+    Ok(entries)
+}
+
+/// Typed listing for file operations. Uses the same authorization/audit
+/// operation as the legacy text listing without reparsing its display output.
+pub async fn sftp_read_dir_core_with_source(
+    host_name: &str,
+    path: &str,
+    timeout_secs: Option<u64>,
+    source: Option<String>,
+) -> Result<Vec<SftpDirEntry>> {
+    let (_, entries) = sftp_dir_operation_with_value_core(
+        host_name,
+        path,
+        timeout_secs,
+        "ls",
+        source,
+        |host, path, timeout| {
+            let entries = read_sftp_directory(&host, &path, timeout)?;
+            let stdout = entries
+                .iter()
+                .map(|(path, stat)| format_sftp_ls_entry(path, stat))
+                .collect();
+            let entries = entries
+                .iter()
+                .map(|(path, stat)| sftp_dir_entry(path, stat))
+                .collect::<Vec<_>>();
+            Ok((stdout, entries))
+        },
+    )
+    .await?;
+    Ok(entries)
 }
 
 pub async fn sftp_stat_core(
@@ -3840,6 +3916,45 @@ mod tests {
         assert!(line.ends_with("payload.txt\n"));
         assert!(!line.contains("ls -la"));
         assert!(!line.contains("mkdir -p"));
+    }
+
+    #[test]
+    fn structured_sftp_entries_preserve_names_and_real_metadata() {
+        let stat = crate::transport::FileStat {
+            size: Some(12),
+            uid: Some(1000),
+            gid: Some(1000),
+            perm: Some(0o100644),
+            atime: None,
+            mtime: Some(1_700_000_000),
+        };
+        for name in [
+            "backup  copy.tar",
+            "report -> old",
+            " leading and trailing ",
+            "two\nlines\t.txt",
+            "literal\\backslash",
+            "文件.txt",
+        ] {
+            let entry = sftp_dir_entry(Path::new(&format!("/tmp/{name}")), &stat);
+            let wire = serde_json::to_string(&vec![entry]).unwrap();
+            let entries: Vec<SftpDirEntry> = serde_json::from_str(&wire).unwrap();
+            assert_eq!(entries.len(), 1, "one filename must remain one row");
+            assert_eq!(entries[0].name, name);
+            assert_eq!(entries[0].size, Some(12));
+            assert_eq!(entries[0].modified_unix, Some(1_700_000_000));
+            assert!(!entries[0].is_dir);
+        }
+        let directory = crate::transport::FileStat {
+            perm: Some(0o040755),
+            size: None,
+            mtime: None,
+            ..stat
+        };
+        let entry = sftp_dir_entry(Path::new("/tmp/a directory"), &directory);
+        assert!(entry.is_dir);
+        assert_eq!(entry.size, None);
+        assert_eq!(entry.modified_unix, None);
     }
 
     #[test]

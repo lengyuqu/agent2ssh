@@ -424,6 +424,10 @@ impl Session {
             .stream
             .take()
             .ok_or_else(|| other("no TCP stream was provided"))?;
+        self.inner
+            .settings
+            .set_socket(&stream)
+            .map_err(|error| other(format!("could not retain the SSH shutdown handle: {error}")))?;
 
         let mut config = Config::default();
         {
@@ -450,7 +454,8 @@ impl Session {
         // per poll. Dropping the future drops the stream, which is what closes
         // it and releases the worker; `connect_deadline.rs` asserts exactly that
         // by watching for EOF on the peer side.
-        let deadline = self.inner.settings.timeout();
+        let settings = Arc::clone(&self.inner.settings);
+        let deadline = settings.timeout();
 
         let handle = block_on(async move {
             // `?` cannot convert these two: the block's error type is the
@@ -468,11 +473,12 @@ impl Session {
                 Some(limit) => match tokio::time::timeout(limit, connect).await {
                     Ok(result) => result,
                     Err(_) => {
+                        settings.abort();
                         return Err(other(format!(
                             "the SSH handshake did not finish within {} ms; the peer accepted \
                              the TCP connection but never completed the exchange",
                             limit.as_millis()
-                        )))
+                        )));
                     }
                 },
                 None => connect.await,
@@ -494,15 +500,27 @@ impl Session {
     }
 
     pub fn authenticated(&self) -> bool {
-        self.inner.authenticated.load(Ordering::SeqCst)
+        !self.inner.settings.aborted() && self.inner.authenticated.load(Ordering::SeqCst)
     }
 
     fn ensure_connected(&self) -> Result<(), Error> {
-        if self.inner.connected.load(Ordering::SeqCst) {
+        if self.inner.settings.aborted() {
+            Err(other(
+                "SSH connection was closed after an operation timed out",
+            ))
+        } else if self.inner.connected.load(Ordering::SeqCst) {
             Ok(())
         } else {
             Err(other("handshake has not run"))
         }
+    }
+
+    pub(super) fn run<T, F>(&self, operation: &str, future: F) -> Result<T, Error>
+    where
+        T: Send,
+        F: std::future::Future<Output = Result<T, Error>> + Send,
+    {
+        self.inner.settings.run(operation, future)
     }
 }
 
@@ -610,7 +628,7 @@ impl Session {
             let mut signer = LocalKeySigner {
                 key: std::sync::Arc::clone(&key),
             };
-            let result = block_on(async {
+            let result = self.run("certificate authentication", async {
                 let mut guard = self.inner.handle.lock().await;
                 let Some(handle) = guard.as_mut() else {
                     return Err(other("handshake has not run"));
@@ -638,7 +656,7 @@ impl Session {
         // `authenticate_publickey` takes a `PrivateKeyWithHashAlg`, which is the
         // signer here; the `_with` variant would need a caller-supplied `Signer`
         // and buys nothing for a key that is on disk.
-        let result = block_on(async {
+        let result = self.run("public-key authentication", async {
             let mut guard = self.inner.handle.lock().await;
             let Some(handle) = guard.as_mut() else {
                 return Err(other("handshake has not run"));
@@ -662,7 +680,7 @@ impl Session {
 
     pub fn userauth_password(&self, username: &str, password: &str) -> Result<(), Error> {
         self.ensure_connected()?;
-        let result = block_on(async {
+        let result = self.run("password authentication", async {
             let mut guard = self.inner.handle.lock().await;
             let handle = guard
                 .as_mut()
@@ -680,7 +698,7 @@ impl Session {
         use russh::client::KeyboardInteractiveAuthResponse as Response;
 
         self.ensure_connected()?;
-        let mut response = block_on(async {
+        let mut response = self.run("keyboard-interactive authentication", async {
             let mut guard = self.inner.handle.lock().await;
             let handle = guard
                 .as_mut()
@@ -717,7 +735,7 @@ impl Session {
                         })
                         .collect();
                     let answers = prompter.prompt(&name, &instructions, &converted);
-                    response = block_on(async {
+                    response = self.run("keyboard-interactive authentication response", async {
                         let mut guard = self.inner.handle.lock().await;
                         let handle = guard
                             .as_mut()
@@ -790,17 +808,26 @@ impl Session {
 
     pub fn sftp(&self) -> Result<Sftp, Error> {
         self.ensure_connected()?;
-        let session = block_on(async {
+        let session = self.run("SFTP session open", async {
             let guard = self.inner.handle.lock().await;
             let Some(handle) = guard.as_ref() else {
                 return Err(other("handshake has not run"));
             };
-            let channel = handle.channel_open_session().await?;
+            let mut channel = handle.channel_open_session().await?;
             // `into_stream` hands over raw bytes; the subsystem request is what
             // turns the channel into an SFTP conversation. Without it sshd starts
             // a shell, the INIT packet is read as shell input, and every request
             // ends in russh-sftp's ten-second timeout.
-            channel.request_subsystem(false, "sftp").await?;
+            channel.request_subsystem(true, "sftp").await?;
+            loop {
+                match channel.wait().await {
+                    Some(russh::ChannelMsg::Success) => break,
+                    Some(russh::ChannelMsg::Failure) => return Err(other("the SSH server rejected the SFTP subsystem request")),
+                    Some(russh::ChannelMsg::Eof | russh::ChannelMsg::Close) | None => return Err(other("SSH channel closed before the server replied to the SFTP subsystem request")),
+                    Some(russh::ChannelMsg::Data { .. } | russh::ChannelMsg::ExtendedData { .. }) => return Err(other("SSH server sent SFTP data before acknowledging the subsystem request")),
+                    _ => (),
+                }
+            }
             Ok::<_, Error>(russh_sftp::client::SftpSession::new(channel.into_stream()).await?)
         })?;
         Ok(Sftp::new(session))
@@ -808,7 +835,7 @@ impl Session {
 
     pub fn channel_session(&self) -> Result<Channel, Error> {
         self.ensure_connected()?;
-        let channel = block_on(async {
+        let channel = self.run("session channel open", async {
             let guard = self.inner.handle.lock().await;
             let Some(handle) = guard.as_ref() else {
                 return Err(other("handshake has not run"));
@@ -825,7 +852,7 @@ impl Session {
         _src: Option<(&str, u16)>,
     ) -> Result<Channel, Error> {
         self.ensure_connected()?;
-        let channel = block_on(async {
+        let channel = self.run("direct-tcpip channel open", async {
             let guard = self.inner.handle.lock().await;
             let Some(handle) = guard.as_ref() else {
                 return Err(other("handshake has not run"));
@@ -847,7 +874,7 @@ impl Session {
     ) -> Result<(Listener, u16), Error> {
         self.ensure_connected()?;
         let address = host.unwrap_or("0.0.0.0").to_string();
-        let bound = block_on(async {
+        let bound = self.run("remote forwarding request", async {
             let guard = self.inner.handle.lock().await;
             let Some(handle) = guard.as_ref() else {
                 return Err(other("handshake has not run"));

@@ -54,7 +54,8 @@ use clap_complete::engine::ArgValueCandidates;
 use clap_complete::env::{Bash, EnvCompleter, Fish, Powershell, Zsh};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use zeroize::Zeroizing;
 
 #[path = "agent2ssh/completion.rs"]
 mod agent2ssh_completion;
@@ -910,6 +911,16 @@ impl WebDavCliOptions {
 
 #[derive(Debug, Subcommand)]
 enum WebDavCommands {
+    /// Decrypt a downloaded backup to a new local file without applying it
+    Decrypt {
+        /// Downloaded encrypted backup
+        input: PathBuf,
+        /// New plaintext output file (must not already exist)
+        output: PathBuf,
+        /// Environment variable holding the sync password (default: AGENT2SSH_SYNC_PASSWORD)
+        #[arg(long)]
+        sync_password_env: Option<String>,
+    },
     /// Upload local syncable config to WebDAV and increment the global version
     Push {
         #[command(flatten)]
@@ -1797,6 +1808,22 @@ async fn async_main() -> Result<()> {
 
     if let Commands::Completions { shell } = &cli.command {
         print_completion_registration(*shell)?;
+        return Ok(());
+    }
+
+    // Offline recovery must also work before the local vault is initialized,
+    // and must not migrate or otherwise modify the current configuration.
+    if let Commands::Webdav {
+        command:
+            WebDavCommands::Decrypt {
+                input,
+                output,
+                sync_password_env,
+            },
+    } = &cli.command
+    {
+        decrypt_webdav_backup(input, output, sync_password_env.as_deref())?;
+        println!("Decrypted backup written to {}", output.display());
         return Ok(());
     }
 
@@ -3249,6 +3276,7 @@ async fn async_main() -> Result<()> {
             }
         }
         Commands::Webdav { command } => match command {
+            WebDavCommands::Decrypt { .. } => unreachable!("handled before CLI startup"),
             WebDavCommands::Push { options } => {
                 let json = options.json;
                 let result = agent2ssh::webdav_push(options.into_sync_options()).await?;
@@ -5230,6 +5258,55 @@ fn print_comparison(comparison: &ExecComparison) {
         }
     }
     println!("\nSummary: {}", comparison.summary);
+}
+
+fn decrypt_webdav_backup(
+    input: &Path,
+    output: &Path,
+    sync_password_env: Option<&str>,
+) -> Result<()> {
+    use std::io::Write;
+
+    let password_env = sync_password_env.unwrap_or("AGENT2SSH_SYNC_PASSWORD");
+    let password = Zeroizing::new(std::env::var(password_env).map_err(|_| {
+        anyhow::anyhow!("set {password_env} to the sync password before decrypting a backup")
+    })?);
+    if password.is_empty() {
+        anyhow::bail!("set {password_env} to a non-empty sync password before decrypting a backup");
+    }
+    let encrypted = std::fs::read(input)
+        .with_context(|| format!("failed to read encrypted backup {}", input.display()))?;
+    let plaintext = Zeroizing::new(
+        agent2ssh::decrypt_backup(password.as_bytes(), &encrypted)
+            .context("failed to decrypt backup")?,
+    );
+
+    // Authenticate the complete input before creating anything. create_new
+    // rejects existing files, including the input itself and symlinks.
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(output)
+        .with_context(|| format!("failed to create new output file {}", output.display()))?;
+    let result = (|| -> Result<()> {
+        // On Windows, drop inherited access before writing plaintext.
+        restrict_file_to_owner(output)?;
+        file.write_all(&plaintext)
+            .with_context(|| format!("failed to write decrypted backup {}", output.display()))?;
+        file.sync_all()
+            .with_context(|| format!("failed to sync decrypted backup {}", output.display()))?;
+        Ok(())
+    })();
+    drop(file);
+    if result.is_err() {
+        let _ = std::fs::remove_file(output);
+    }
+    result
 }
 
 fn print_webdav_result(result: &agent2ssh::WebDavSyncResult) {

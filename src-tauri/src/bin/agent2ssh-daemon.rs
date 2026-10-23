@@ -773,6 +773,8 @@ struct ExecCompareBody {
 struct SftpDirBody {
     host: String,
     path: String,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
 }
 /// Body for `/sftp/rename`, which needs both endpoints.
 #[derive(Deserialize)]
@@ -1940,10 +1942,30 @@ async fn sftp_rm_rf(
     Json(body): Json<SftpDirBody>,
 ) -> Result<Json<ExecResult>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    let (command, PreflightResult { source, risk, .. }) =
+        preflight_sftp_rm_rf(&s, &auth, &body).await?;
+    let started = Instant::now();
+    let outcome = sftp_remove_dir_all_core_with_source(
+        &body.host,
+        &body.path,
+        body.timeout_secs,
+        Some(source.clone()),
+    )
+    .await;
+    finish_sftp_operation(outcome, &source, &body.host, &command, risk, started)
+}
+
+/// Both executing and authorizing a recursive delete use exactly the same
+/// target, operation string, gate, limits, scope, risk and approval checks.
+async fn preflight_sftp_rm_rf(
+    state: &AppState,
+    auth: &AuthContext,
+    body: &SftpDirBody,
+) -> Result<(String, PreflightResult), (StatusCode, Json<ErrorBody>)> {
     let command = format!("sftp rm-rf {}", body.path);
-    let PreflightResult { source, risk, .. } = preflight_guarded_request(
-        &s,
-        &auth,
+    let preflight = preflight_guarded_request(
+        state,
+        auth,
         &body.host,
         host_tags(&body.host),
         source_from_transport(),
@@ -1954,11 +1976,33 @@ async fn sftp_rm_rf(
         None,
     )
     .await?;
-    let started = Instant::now();
-    let outcome =
-        sftp_remove_dir_all_core_with_source(&body.host, &body.path, None, Some(source.clone()))
-            .await;
-    finish_sftp_operation(outcome, &source, &body.host, &command, risk, started)
+    Ok((command, preflight))
+}
+
+#[derive(Serialize)]
+struct SftpDeleteAuthorization {
+    authorized: bool,
+    host: String,
+    path: String,
+    risk_level: RiskLevel,
+}
+
+/// Authorize only: the desktop then runs the same operation with its own
+/// unlocked credentials. This response neither executes SSH nor creates a
+/// reusable approval token. A later daemon delete still pays its own preflight.
+async fn sftp_rm_rf_authorize(
+    State(s): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Json(body): Json<SftpDirBody>,
+) -> Result<Json<SftpDeleteAuthorization>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    let (_, preflight) = preflight_sftp_rm_rf(&s, &auth, &body).await?;
+    Ok(Json(SftpDeleteAuthorization {
+        authorized: true,
+        host: body.host,
+        path: body.path,
+        risk_level: preflight.risk,
+    }))
 }
 
 /// Record the audit entry and shape the HTTP result for the destructive SFTP
@@ -2339,6 +2383,7 @@ struct ResidentExecBody {
 /// itself a shell command, so it is authorized and audited under a stable
 /// action string rather than borrowing some command's risk classification.
 const RESIDENT_OPEN_COMMAND: &str = "resident-session open";
+const RESIDENT_READ_COMMAND: &str = "resident-session read";
 const RESIDENT_CLOSE_COMMAND: &str = "resident-session close";
 
 /// Open a resident session in a `local:<id>` environment.
@@ -2476,14 +2521,18 @@ async fn resident_session_exec(
 /// List resident sessions.
 async fn resident_session_list(
     State(_s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
 ) -> Result<
     Json<Vec<agent2ssh::resident_session::ResidentSessionSummary>>,
     (StatusCode, Json<ErrorBody>),
 > {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     Ok(Json(
-        agent2ssh::resident_session::resident_list_core().await,
+        agent2ssh::resident_session::resident_list_core()
+            .await
+            .into_iter()
+            .filter(|session| scope_allows_observe_host(&auth, &session.host))
+            .collect(),
     ))
 }
 
@@ -2493,14 +2542,25 @@ async fn resident_session_list(
 /// expects to outlive the HTTP request runs detached inside the shell, its
 /// output accumulates in the session's own rolling buffer, and this read picks
 /// it up later. Read-only — like listing, it consumes nothing, counts no
-/// activity, and sits behind the bearer token but outside the execution gate.
+/// activity, and checks the token's host and command scope while remaining
+/// outside the execution gate, just like an SSH session read.
 async fn resident_session_get(
     State(_s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<agent2ssh::resident_session::ResidentSessionDetail>, (StatusCode, Json<ErrorBody>)>
 {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    let host = agent2ssh::resident_session::session_host(id)
+        .await
+        .ok_or_else(|| {
+            err(
+                StatusCode::BAD_REQUEST,
+                format!("unknown resident session: {id}"),
+            )
+        })?;
+    check_daemon_scope(&auth.scope, &host, &host_tags(&host), RESIDENT_READ_COMMAND)
+        .map_err(|e| err(StatusCode::FORBIDDEN, e))?;
     agent2ssh::resident_session::resident_get_core(id)
         .await
         .map(Json)
@@ -2509,19 +2569,40 @@ async fn resident_session_get(
 
 /// Close a resident session, killing its shell.
 async fn resident_session_close(
-    State(_s): State<AppState>,
-    Extension(_auth): Extension<AuthContext>,
+    State(s): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    let host = agent2ssh::resident_session::session_host(id)
+        .await
+        .ok_or_else(|| {
+            err(
+                StatusCode::BAD_REQUEST,
+                format!("unknown resident session: {id}"),
+            )
+        })?;
+    let PreflightResult { source, risk, .. } = preflight_guarded_request(
+        &s,
+        &auth,
+        &host,
+        host_tags(&host),
+        source_from_transport(),
+        RESIDENT_CLOSE_COMMAND,
+        None,
+        false,
+        None,
+        None,
+    )
+    .await?;
     let started = Instant::now();
     match agent2ssh::resident_session::resident_close_core(id).await {
         Ok(host) => {
             append_operation_audit(
-                &source_from_transport(),
+                &source,
                 &host,
                 RESIDENT_CLOSE_COMMAND,
-                RiskLevel::Low,
+                risk,
                 Some(0),
                 started.elapsed().as_millis(),
                 None,
@@ -5822,6 +5903,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/sftp/rm", post(sftp_rm))
         .route("/sftp/rmdir", post(sftp_rmdir))
         .route("/sftp/rm-rf", post(sftp_rm_rf))
+        .route("/sftp/rm-rf/authorize", post(sftp_rm_rf_authorize))
         .route("/sessions", post(session_open).get(session_list))
         .route("/sessions/:id/write", post(session_write))
         .route("/sessions/:id/read", get(session_read))
