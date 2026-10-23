@@ -3,6 +3,7 @@ name = "agent2ssh-app"
 version = "0.4.3"
 description = "SSH capability layer for general-purpose agents"
 authors = ["agent2ssh"]
+license = "MIT"
 edition = "2021"
 # The floor comes from `russh`, which is edition 2024 and declares 1.85, but this
 # crate needs 1.89 of its own: `store.rs` calls `File::lock_shared`, which only

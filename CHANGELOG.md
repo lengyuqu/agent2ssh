@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+- **MIT license**: the repository had no `LICENSE` file, no `license` field in `package.json`, and none in `Cargo.toml`, so the terms under which the code could be used, modified or redistributed were never stated — which under default copyright means no rights are granted at all, however public the repository is. `LICENSE` now carries the standard MIT text, both manifests declare `MIT` so npm and cargo report it, and the README ends with a License section pointing at the file.
+
 ## [0.4.3] - 2026-10-23
 
 Same content as 0.4.2 — the 147 commits since 0.3.0 — rebuilt with working

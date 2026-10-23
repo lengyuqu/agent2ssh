@@ -1,6 +1,7 @@
 {
   "name": "agent2ssh",
   "version": "0.4.3",
+  "license": "MIT",
   "private": true,
   "engines": {
     "node": ">=20"
