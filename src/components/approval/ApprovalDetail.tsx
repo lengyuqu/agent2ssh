@@ -1,19 +1,21 @@
-import { Check, Copy } from "lucide-react";
-import { useState } from "react";
+import { Check, Copy, Pencil } from "lucide-react";
+import { useEffect, useState } from "react";
 import { useI18n } from "../../i18n";
 import type { ApprovalRequest, RiskLevel } from "../../types";
 import RiskBadge from "../RiskBadge";
 import { Button } from "../ui/button";
+import { Textarea } from "../ui/textarea";
 import { cn } from "../../lib/utils";
 import { formatDateTime } from "../../lib/format";
 
 type Props = {
   approval: ApprovalRequest | null;
   busy: boolean;
-  onApprove: () => void;
+  /** `command` is set when the approver edited the command first. */
+  onApprove: (command?: string) => void;
   onReject: () => void;
-  /** Plan §5 risk #4: no "edit then execute" backend — copy the command and
-   * drop the operator into the Execution module instead. */
+  /** For requests that cannot be rewritten: copy the command and drop the
+   * operator into the Execution module instead. */
   onCopyAndExecute: () => void;
 };
 
@@ -38,6 +40,16 @@ export default function ApprovalDetail({
 }: Props) {
   const { t } = useI18n();
   const [copied, setCopied] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+
+  // A different request starts from its own command, not a stale draft.
+  const approvalId = approval?.id;
+  const approvalCommand = approval?.command ?? "";
+  useEffect(() => {
+    setEditing(false);
+    setDraft(approvalCommand);
+  }, [approvalId, approvalCommand]);
 
   if (!approval) {
     return (
@@ -48,6 +60,7 @@ export default function ApprovalDetail({
   }
 
   const ctx = approval.context;
+  const rewritable = Boolean(ctx?.rewritable);
   const candidateRows: Array<[string, string | null | undefined]> = [
     ["Requested by", ctx?.source],
     ["Matched policy", ctx?.risk_details?.matched_policy],
@@ -79,15 +92,31 @@ export default function ApprovalDetail({
       </div>
 
       <div className="rounded-xl border border-line bg-canvas-0 p-4">
-        <code
-          className={cn(
-            "block break-all font-mono text-[13px] leading-relaxed",
-            COMMAND_TINT[approval.risk_level]
-          )}
-        >
-          {approval.command}
-        </code>
+        {editing ? (
+          <Textarea
+            autoFocus
+            rows={Math.min(8, Math.max(2, draft.split("\n").length))}
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            aria-label={t("Edited command")}
+            className="font-mono text-[13px] leading-relaxed"
+          />
+        ) : (
+          <code
+            className={cn(
+              "block break-all font-mono text-[13px] leading-relaxed",
+              COMMAND_TINT[approval.risk_level]
+            )}
+          >
+            {approval.command}
+          </code>
+        )}
       </div>
+      {editing && (
+        <p className="text-xs text-faint">
+          {t("The edited command is re-checked: it cannot be blocked or riskier than this request.")}
+        </p>
+      )}
 
       {contextRows.length > 0 && (
         <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 rounded-xl border border-line px-4 py-3 text-xs">
@@ -104,13 +133,36 @@ export default function ApprovalDetail({
         <Button variant="outline" disabled={busy} onClick={onReject} className="text-risk-high">
           {t("Reject")}
         </Button>
-        <Button variant="secondary" disabled={busy} onClick={onCopyAndExecute}>
-          {copied ? <Check size={14} /> : <Copy size={14} />}
-          {t("Copy command and go to Execution")}
-        </Button>
-        <Button disabled={busy} onClick={onApprove} className="ml-auto">
-          {t("Approve and execute")}
-        </Button>
+        {rewritable ? (
+          editing ? (
+            <Button variant="secondary" disabled={busy} onClick={() => setEditing(false)}>
+              {t("Cancel edit")}
+            </Button>
+          ) : (
+            <Button variant="secondary" disabled={busy} onClick={() => setEditing(true)}>
+              <Pencil size={14} />
+              {t("Edit then execute")}
+            </Button>
+          )
+        ) : (
+          <Button variant="secondary" disabled={busy} onClick={onCopyAndExecute}>
+            {copied ? <Check size={14} /> : <Copy size={14} />}
+            {t("Copy command and go to Execution")}
+          </Button>
+        )}
+        {editing ? (
+          <Button
+            disabled={busy || draft.trim() === ""}
+            onClick={() => onApprove(draft.trim() === approval.command ? undefined : draft.trim())}
+            className="ml-auto"
+          >
+            {t("Approve edited command")}
+          </Button>
+        ) : (
+          <Button disabled={busy} onClick={() => onApprove()} className="ml-auto">
+            {t("Approve and execute")}
+          </Button>
+        )}
       </div>
 
       <p className="font-mono text-[11px] text-faint">

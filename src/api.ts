@@ -781,14 +781,33 @@ export const api = {
     }
   },
 
-  /** Approve a pending approval request via the daemon. */
-  approvalApprove: async (id: string): Promise<void> => {
+  /**
+   * Approve a pending approval request via the daemon. With `command` the
+   * approver approves that text instead of the requested one; the daemon
+   * re-assesses it and refuses a blocked or riskier command.
+   */
+  approvalApprove: async (id: string, command?: string): Promise<void> => {
     const token = await invoke<string>("get_daemon_token");
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${token}`,
+      [TRACE_ID_HEADER]: SESSION_TRACE_ID,
+    };
+    if (command !== undefined) headers["Content-Type"] = "application/json";
     const res = await fetch(`${daemonUrl}/approvals/${id}/approve`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${token}`, [TRACE_ID_HEADER]: SESSION_TRACE_ID },
+      headers,
+      body: command !== undefined ? JSON.stringify({ command }) : undefined,
     });
-    if (!res.ok) throw new Error(`Failed to approve request: ${res.status}`);
+    if (!res.ok) {
+      let detail = String(res.status);
+      try {
+        const body = (await res.json()) as { error?: string };
+        if (body.error) detail = body.error;
+      } catch {
+        // keep the status code
+      }
+      throw new Error(`Failed to approve request: ${detail}`);
+    }
   },
 
   /** Reject a pending approval request via the daemon. */

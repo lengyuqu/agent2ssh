@@ -23,9 +23,10 @@ const IN_FLIGHT_WINDOW_MS = 15 * 60 * 1000;
 
 type Props = {
   pending: ApprovalRequest[];
-  onApprove: (approval: ApprovalRequest) => void | Promise<void>;
+  /** `command` approves that text instead of the requested one. */
+  onApprove: (approval: ApprovalRequest, command?: string) => void | Promise<void>;
   onReject: (approval: ApprovalRequest) => void | Promise<void>;
-  /** Plan §5 risk #4: "edit then execute" degrades to copy + jump to Execution. */
+  /** Fallback for requests that cannot be rewritten: copy + jump to Execution. */
   onGoExecute: (approval: ApprovalRequest) => void;
 };
 
@@ -54,6 +55,8 @@ export default function ApprovalWorkbench({ pending, onApprove, onReject, onGoEx
   const { t } = useI18n();
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [confirmTarget, setConfirmTarget] = useState<ApprovalRequest | null>(null);
+  // Set when the pending confirmation is for an edited command.
+  const [confirmCommand, setConfirmCommand] = useState<string | undefined>(undefined);
   const [busy, setBusy] = useState(false);
   const [history, setHistory] = useState<ApprovalRequest[]>([]);
   const [auditToday, setAuditToday] = useState<number>(0);
@@ -126,13 +129,14 @@ export default function ApprovalWorkbench({ pending, onApprove, onReject, onGoEx
 
   /** high/blocked approvals must pass the two-step confirm dialog first. */
   const requestApprove = useCallback(
-    (approval: ApprovalRequest) => {
+    (approval: ApprovalRequest, command?: string) => {
       if (!approval) return;
       if (approval.risk_level === "high" || approval.risk_level === "blocked") {
+        setConfirmCommand(command);
         setConfirmTarget(approval);
         return;
       }
-      void onApprove(approval);
+      void onApprove(approval, command);
     },
     [onApprove]
   );
@@ -184,10 +188,12 @@ export default function ApprovalWorkbench({ pending, onApprove, onReject, onGoEx
   async function handleConfirmApprove() {
     if (!confirmTarget) return;
     const target = confirmTarget;
+    const command = confirmCommand;
     setConfirmTarget(null);
+    setConfirmCommand(undefined);
     setBusy(true);
     try {
-      await onApprove(target);
+      await onApprove(target, command);
     } finally {
       setBusy(false);
     }
@@ -229,7 +235,7 @@ export default function ApprovalWorkbench({ pending, onApprove, onReject, onGoEx
           <ApprovalDetail
             approval={selected}
             busy={busy}
-            onApprove={() => requestApprove(selected)}
+            onApprove={(command) => selected && requestApprove(selected, command)}
             onReject={handleReject}
             onCopyAndExecute={() => selected && onGoExecute(selected)}
           />
@@ -284,10 +290,13 @@ export default function ApprovalWorkbench({ pending, onApprove, onReject, onGoEx
       {/* High/blocked two-step confirmation (⌘↵ path included) */}
       {confirmTarget && (
         <ApprovalDialog
-          command={confirmTarget.command}
+          command={confirmCommand ?? confirmTarget.command}
           riskLevel={confirmTarget.risk_level}
           onConfirm={handleConfirmApprove}
-          onCancel={() => setConfirmTarget(null)}
+          onCancel={() => {
+            setConfirmTarget(null);
+            setConfirmCommand(undefined);
+          }}
         />
       )}
     </div>

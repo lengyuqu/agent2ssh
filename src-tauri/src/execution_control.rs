@@ -10,7 +10,7 @@ use crate::{
     core::{apply_risk_override, classify_risk},
     remote::{check_daemon_scope, DaemonScope},
     risk_config::{classify_effective_risk, load_risk_rules},
-    store::{append_audit_with_decision, load_config, note_human_approval},
+    store::{append_audit_with_decision, load_config, note_human_approval, note_human_rewrite},
     types::{AuditDecision, ExecResult, RiskLevel},
 };
 
@@ -32,6 +32,9 @@ pub struct CommandAuthorizationInput<'a> {
 pub struct CommandAuthorization {
     pub risk: RiskLevel,
     pub approved: bool,
+    /// The command to run instead of the requested one, when an approver
+    /// rewrote it. `None` means run the command as requested.
+    pub command: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,9 +57,12 @@ pub struct ApprovalPrompt {
     pub source: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApprovalOutcome {
     Approved,
+    /// Approved, but the approver substituted this command for the requested
+    /// one. Only produced for requests raised as rewritable.
+    ApprovedRewritten(String),
     Rejected,
     TimedOut,
 }
@@ -451,6 +457,7 @@ where
         return Ok(CommandAuthorization {
             risk,
             approved: false,
+            command: None,
         });
     }
 
@@ -479,6 +486,37 @@ where
             Ok(CommandAuthorization {
                 risk,
                 approved: true,
+                command: None,
+            })
+        }
+        ApprovalOutcome::ApprovedRewritten(rewritten) => {
+            // The approver already re-assessed this text, but it is about to be
+            // executed, so check once more rather than trust the handler.
+            let rewritten_risk = apply_risk_override(
+                effective_command_risk(&rewritten).await,
+                input.risk_override,
+            );
+            if rewritten_risk == RiskLevel::Blocked || rewritten_risk.max_severity(risk) != risk {
+                let message = "rewritten command is blocked or riskier than the request";
+                append_decided_exec_audit(
+                    input.source,
+                    input.host,
+                    &rewritten,
+                    rewritten_risk,
+                    message,
+                    change_id.as_deref(),
+                    Some((AuditDecision::Blocked, "rule")),
+                );
+                return Err(CommandAuthorizationError::Blocked {
+                    risk: rewritten_risk,
+                    message: format!("{message}: '{rewritten}'"),
+                });
+            }
+            note_human_rewrite(input.host, &rewritten, input.command);
+            Ok(CommandAuthorization {
+                risk,
+                approved: true,
+                command: Some(rewritten),
             })
         }
         ApprovalOutcome::Rejected => {
@@ -584,6 +622,75 @@ mod tests {
         .unwrap();
         assert_eq!(refused.len(), 3);
         assert!(refused.iter().all(|entry| entry.host == "vault"));
+    }
+
+    #[tokio::test]
+    async fn rewritten_approval_returns_the_new_command_and_audits_both() {
+        let _dir = crate::store::TestConfigDir::new("rewriteaudit");
+        crate::approval::save_approval_policies(&[crate::approval::ApprovalPolicy {
+            name: "all".into(),
+            hosts: vec![],
+            tags: vec![],
+            min_risk: Some(RiskLevel::Medium),
+            command_pattern: None,
+            requires_approval: true,
+            ttl_secs: None,
+        }])
+        .unwrap();
+        let scope = None;
+        let mut input = input_for(&scope, "mcp", "web");
+        input.command = "rm -rf /tmp/build";
+
+        let authorization = authorize_command_with_approval(input, |_| async {
+            Ok(ApprovalOutcome::ApprovedRewritten("ls /tmp/build".into()))
+        })
+        .await
+        .unwrap();
+        assert!(authorization.approved);
+        assert_eq!(authorization.command.as_deref(), Some("ls /tmp/build"));
+
+        // The caller runs the new command; its audit entry carries the verdict
+        // and remembers what was originally asked for.
+        let ran = ExecResult {
+            host: "web".into(),
+            command: "ls /tmp/build".into(),
+            exit_code: Some(0),
+            stdout: String::new(),
+            stderr: String::new(),
+            duration_ms: 1,
+            risk_level: RiskLevel::Low,
+            truncated: false,
+            dropped_bytes: 0,
+            side_effect: None,
+        };
+        append_audit_with_decision(&ran, RiskLevel::Low, None, None, Some("mcp"), None).unwrap();
+        let entries = crate::store::list_audit_raw(&crate::types::AuditFilter {
+            limit: 5,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(entries[0].command, "ls /tmp/build");
+        assert_eq!(entries[0].decision, Some(AuditDecision::Approved));
+        assert_eq!(
+            entries[0].original_command.as_deref(),
+            Some("rm -rf /tmp/build")
+        );
+
+        // A rewrite that is riskier than the request is refused here too, even
+        // if a handler let it through.
+        assert_eq!(classify_risk("systemctl restart nginx"), RiskLevel::Medium);
+        let mut input = input_for(&scope, "mcp", "web");
+        input.command = "systemctl restart nginx";
+        let refused = authorize_command_with_approval(input, |_| async {
+            Ok(ApprovalOutcome::ApprovedRewritten(
+                "rm -rf /tmp/build".into(),
+            ))
+        })
+        .await;
+        assert!(matches!(
+            refused,
+            Err(CommandAuthorizationError::Blocked { .. })
+        ));
     }
 
     #[tokio::test]

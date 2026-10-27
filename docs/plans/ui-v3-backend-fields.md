@@ -40,6 +40,12 @@
 
 ## B4 · 「编辑后执行」审批改写
 
+- 状态（2026-10-27）：已落地，范围限于 daemon `POST /exec`。`POST /approvals/{id}/approve` 可带 `{"command": "..."}`，批准的是改写后的文本并由它执行；空 body 仍是原样批准，格式错误的 body 返回 400（不会当成普通批准）。
+- 重新评估：改写命令必须不是 `blocked`、风险不高于原请求（同样应用主机 `risk_override`），否则拒绝并让请求方重新发起；`authorize_command_with_approval` 在执行前再核一次，不信任 handler。
+- 只有 `/exec` 允许改写（审批 `context.rewritable`）：exec-multi、playbook、SFTP、会话、转发等路径批准的是它们自己拼出的文本，替换会让「批准的」与「执行的」脱节，所以这些请求拒绝改写，前端仍显示「复制命令并前往执行」。
+- 审计：执行条目的 `command` 是实际执行的命令，`original_command` 记录原请求，`decision=approved`、`decided_by=human`；审批记录的 `rewritten_command` 与 `approved_command_snapshot` 为改写后的文本。
+- 未做：MCP/CLI 的 `ssh_approval_respond` 暂不支持带命令批准；其他执行路径的改写支持。
+
 - 现状：审批端点仅 approve/reject，前端「编辑后执行」降级为复制命令 + 跳转执行面板。
 - 任务：
   - [ ] 审批响应增加 `approve_with_command(new_command: String)`（或 approve 请求体可选 `override_command`），改写后的命令需重走风险评估并在审计中记录原始命令与改写命令

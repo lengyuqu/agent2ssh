@@ -4,8 +4,9 @@ use agent2ssh::approval::{
     list_approval_policies, save_approval_policies, ApprovalPolicy,
 };
 use agent2ssh::approval::{
-    approval_list, approval_request_with_context, approval_request_with_ttl, approval_respond,
-    approval_wait, ApprovalStatus,
+    approval_approve_rewritten, approval_list, approval_request_with_context,
+    approval_request_with_ttl, approval_respond, approval_rewritten_command, approval_wait,
+    ApprovalStatus,
 };
 use agent2ssh::connection::{connect_host, disconnect_host, list_active_connections};
 use agent2ssh::core::*;
@@ -14,7 +15,8 @@ use agent2ssh::events::{publish_event, subscribe_events, Agent2SSHEvent, EventTy
 use agent2ssh::execution_control::{
     append_rejected_exec_audit, authorize_command_with_approval, command_authorization_target,
     effective_command_risk, expand_exec_targets, host_policy_summary, ApprovalOutcome,
-    ApprovalPrompt, CommandAuthorizationError, CommandAuthorizationInput, HostPolicySummary,
+    ApprovalPrompt, CommandAuthorization, CommandAuthorizationError, CommandAuthorizationInput,
+    HostPolicySummary,
 };
 use agent2ssh::forward::*;
 use agent2ssh::gate::{
@@ -364,6 +366,9 @@ struct PreflightResult {
     /// high-risk command into a forced execution (`pf.approved && pf.risk ==
     /// RiskLevel::High`), so this field must stay readable.
     approved: bool,
+    /// Set when an approver rewrote the command: run this instead of the
+    /// requested one. Only populated by [`preflight_rewritable_request`].
+    command: Option<String>,
 }
 
 /// Run the gate chain every single-host mutating daemon handler shares:
@@ -391,10 +396,72 @@ async fn preflight_guarded_request(
     reason: Option<String>,
     change_id: Option<String>,
 ) -> Result<PreflightResult, (StatusCode, Json<ErrorBody>)> {
+    preflight_guarded_request_inner(
+        state,
+        auth,
+        host,
+        tags,
+        source,
+        command,
+        risk_override,
+        force,
+        reason,
+        change_id,
+        false,
+    )
+    .await
+}
+
+/// [`preflight_guarded_request`] for a handler that runs whatever command the
+/// result carries, so the approver may approve a rewritten one. A handler that
+/// calls this must apply `PreflightResult::command` before executing.
+#[allow(clippy::too_many_arguments)]
+async fn preflight_rewritable_request(
+    state: &AppState,
+    auth: &AuthContext,
+    host: &str,
+    tags: Vec<String>,
+    source: String,
+    command: &str,
+    risk_override: Option<RiskLevel>,
+    force: bool,
+    reason: Option<String>,
+    change_id: Option<String>,
+) -> Result<PreflightResult, (StatusCode, Json<ErrorBody>)> {
+    preflight_guarded_request_inner(
+        state,
+        auth,
+        host,
+        tags,
+        source,
+        command,
+        risk_override,
+        force,
+        reason,
+        change_id,
+        true,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn preflight_guarded_request_inner(
+    state: &AppState,
+    auth: &AuthContext,
+    host: &str,
+    tags: Vec<String>,
+    source: String,
+    command: &str,
+    risk_override: Option<RiskLevel>,
+    force: bool,
+    reason: Option<String>,
+    change_id: Option<String>,
+    rewritable: bool,
+) -> Result<PreflightResult, (StatusCode, Json<ErrorBody>)> {
     reject_if_gate_paused(&source, host, command)?;
     let targets = vec![(host.to_string(), tags)];
     reject_if_rate_limited(state, &source, &targets, command).await?;
-    let (risk, approved) = authorize_command(
+    let authorization = authorize_command_inner(
         &auth.scope,
         &source,
         host,
@@ -404,16 +471,21 @@ async fn preflight_guarded_request(
         force,
         reason,
         change_id,
+        rewritable,
     )
     .await?;
     Ok(PreflightResult {
         source,
-        risk,
-        approved,
+        risk: authorization.risk,
+        approved: authorization.approved,
+        command: authorization.command,
     })
 }
 
-async fn request_and_wait_for_approval(prompt: ApprovalPrompt) -> Result<ApprovalOutcome, String> {
+async fn request_and_wait_for_approval(
+    prompt: ApprovalPrompt,
+    rewritable: bool,
+) -> Result<ApprovalOutcome, String> {
     APPROVAL_COUNT.fetch_add(1, Ordering::Relaxed);
     let approval_ctx = build_approval_context_with_effective_risk(
         &prompt.host,
@@ -426,6 +498,7 @@ async fn request_and_wait_for_approval(prompt: ApprovalPrompt) -> Result<Approva
     .map(|mut ctx| {
         ctx.reason = prompt.reason.clone();
         ctx.change_id = prompt.change_id.clone();
+        ctx.rewritable = rewritable;
         ctx
     });
     let approval_id = if let Some(ctx) = approval_ctx {
@@ -472,7 +545,10 @@ async fn request_and_wait_for_approval(prompt: ApprovalPrompt) -> Result<Approva
     });
 
     match approval_wait(approval_id).await {
-        ApprovalStatus::Approved => Ok(ApprovalOutcome::Approved),
+        ApprovalStatus::Approved => Ok(match approval_rewritten_command(approval_id).await {
+            Some(command) => ApprovalOutcome::ApprovedRewritten(command),
+            None => ApprovalOutcome::Approved,
+        }),
         ApprovalStatus::Rejected => Ok(ApprovalOutcome::Rejected),
         ApprovalStatus::TimedOut => Ok(ApprovalOutcome::TimedOut),
         _ => Err("unexpected approval status".to_string()),
@@ -491,6 +567,35 @@ async fn authorize_command(
     reason: Option<String>,
     change_id: Option<String>,
 ) -> Result<(RiskLevel, bool), (StatusCode, Json<ErrorBody>)> {
+    authorize_command_inner(
+        auth_scope,
+        source,
+        host,
+        tags,
+        risk_override,
+        command,
+        force,
+        reason,
+        change_id,
+        false,
+    )
+    .await
+    .map(|authorization| (authorization.risk, authorization.approved))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn authorize_command_inner(
+    auth_scope: &Option<DaemonScope>,
+    source: &str,
+    host: &str,
+    tags: &[String],
+    risk_override: Option<RiskLevel>,
+    command: &str,
+    force: bool,
+    reason: Option<String>,
+    change_id: Option<String>,
+    rewritable: bool,
+) -> Result<CommandAuthorization, (StatusCode, Json<ErrorBody>)> {
     let input = CommandAuthorizationInput {
         auth_scope,
         source,
@@ -504,8 +609,12 @@ async fn authorize_command(
         side_effect: None,
     };
 
-    match authorize_command_with_approval(input, request_and_wait_for_approval).await {
-        Ok(result) => Ok((result.risk, result.approved)),
+    match authorize_command_with_approval(input, move |prompt| {
+        request_and_wait_for_approval(prompt, rewritable)
+    })
+    .await
+    {
+        Ok(result) => Ok(result),
         Err(CommandAuthorizationError::ScopeDenied(message)) => {
             Err(err(StatusCode::FORBIDDEN, message))
         }
@@ -1374,7 +1483,7 @@ async fn exec(
     let source = source_or_env_for_request(req.source.clone(), "daemon")?;
     req.source = Some(source.clone());
     ensure_command_length(&req.command)?;
-    let pf = preflight_guarded_request(
+    let pf = preflight_rewritable_request(
         &s,
         &auth,
         &req.host,
@@ -1387,6 +1496,10 @@ async fn exec(
         req.change_id.clone(),
     )
     .await?;
+    if let Some(rewritten) = pf.command {
+        // The approver approved this text instead of the one requested.
+        req.command = rewritten;
+    }
     tracing::info!(host = %req.host, command = %req.command, "exec handler invoked");
     let exec_start = Instant::now();
     if pf.approved && pf.risk == RiskLevel::High {
@@ -3011,16 +3124,45 @@ async fn approvals_list(
             .collect(),
     ))
 }
+#[derive(Deserialize)]
+struct ApprovalApproveBody {
+    /// Approve this command instead of the requested one.
+    command: Option<String>,
+}
+
+/// Approve a pending request. An empty body approves the command as requested;
+/// `{"command": "..."}` approves that text instead (re-assessed, and only
+/// for requests that can run a different command). A malformed body is an
+/// error, never a plain approval.
 async fn approval_approve(
     State(_s): State<AppState>,
     Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
+    body: axum::body::Bytes,
 ) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     require_admin(&auth)?;
     let uuid = Uuid::parse_str(&id).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
-    approval_respond(uuid, true)
-        .await
+    let rewritten = if body.iter().all(u8::is_ascii_whitespace) {
+        None
+    } else {
+        serde_json::from_slice::<ApprovalApproveBody>(&body)
+            .map_err(|e| {
+                err(
+                    StatusCode::BAD_REQUEST,
+                    format!("invalid approve body: {e}"),
+                )
+            })?
+            .command
+    };
+    let result = match rewritten {
+        Some(command) => {
+            ensure_command_length(&command)?;
+            approval_approve_rewritten(uuid, &command).await
+        }
+        None => approval_respond(uuid, true).await,
+    };
+    result
         .map(|_| Json(OkBody { ok: true }))
         .map_err(|e| err(StatusCode::BAD_REQUEST, e))
 }

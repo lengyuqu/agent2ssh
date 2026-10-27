@@ -217,6 +217,10 @@ components:
           type: string
           nullable: true
           description: "human, rule or timeout"
+        original_command:
+          type: string
+          nullable: true
+          description: "The command as requested, when the approver ran a rewritten one (then `command` is what ran)"
 
     AgentEvent:
       type: object
@@ -337,6 +341,7 @@ components:
         requested_at: { type: string, format: date-time }
         ttl_secs:     { type: integer, description: "TTL in seconds before auto-expiry" }
         status:       { type: string, enum: [pending, approved, rejected, timed_out] }
+        rewritten_command: { type: string, nullable: true, description: "Set when the approver approved a different command; that is what ran" }
         context:
           type: object
           nullable: true
@@ -348,6 +353,7 @@ components:
             source:       { type: string, nullable: true, description: "Requesting client label (cli, mcp, daemon, AGENT2SSH_SOURCE)" }
             reason:       { type: string, nullable: true }
             change_id:    { type: string, nullable: true }
+            rewritable:   { type: boolean, description: "The approver may approve a rewritten command instead (POST /approvals/{id}/approve with a body)" }
             risk_details:
               type: object
               nullable: true
@@ -2089,11 +2095,26 @@ paths:
   /approvals/{id}/approve:
     post:
       summary: Approve a pending request
+      description: >
+        With an empty body the command is approved as requested. With
+        `{"command": "..."}` the approver approves that text instead, and it is
+        the text that runs. The rewrite is re-assessed: it is refused (400) if
+        it is blocked, riskier than the request, empty, or if the request was
+        not raised as rewritable (`context.rewritable`; currently only
+        `POST /exec`). A malformed body is a 400, never a plain approval.
       parameters:
         - name: id
           in: path
           required: true
           schema: { type: string, format: uuid }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                command: { type: string, description: "Command to approve instead of the requested one" }
       responses:
         "200":
           content:

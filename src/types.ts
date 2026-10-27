@@ -450,6 +450,8 @@ export type AuditEntry = {
   decision?: AuditDecision | null;
   /** "human", "rule" or "timeout". */
   decided_by?: string | null;
+  /** The command as requested, when the approver ran a rewritten one (then `command` is what ran). */
+  original_command?: string | null;
 };
 
 export type AgentEventType =
@@ -511,6 +513,8 @@ export type ApprovalContext = {
   risk_details?: ApprovalRiskDetails | null;
   reason?: string | null;
   change_id?: string | null;
+  /** The approver may approve a rewritten command instead of the requested one. */
+  rewritable?: boolean;
 };
 
 export type ApprovalRequest = {
@@ -522,6 +526,8 @@ export type ApprovalRequest = {
   ttl_secs: number;
   status: ApprovalStatus;
   context?: ApprovalContext | null;
+  /** Set when the approver ran a rewritten command instead of `command`. */
+  rewritten_command?: string | null;
 };
 
 // Rust: keys.rs — SshKeyInfo

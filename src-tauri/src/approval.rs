@@ -43,6 +43,12 @@ pub struct ApprovalContext {
     /// Optional change/ticket ID
     #[serde(default)]
     pub change_id: Option<String>,
+    /// Whether the approver may approve a rewritten command instead of the
+    /// requested one. Only set by call sites that run whatever command the
+    /// authorization hands back (currently the daemon's `/exec`); anywhere
+    /// else the approved text is the only thing that can run.
+    #[serde(default)]
+    pub rewritable: bool,
 }
 
 /// A single historical execution entry used in approval context.
@@ -84,6 +90,10 @@ pub struct ApprovalRequest {
     /// verify what was actually approved.
     #[serde(default)]
     pub approved_command_snapshot: Option<String>,
+    /// Set when the approver approved a rewritten command: that text runs
+    /// instead of `command`, and is what `approved_command_snapshot` holds.
+    #[serde(default)]
+    pub rewritten_command: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -447,6 +457,7 @@ pub async fn approval_request_with_ttl(
         context: None,
         revoked_at: None,
         approved_command_snapshot: None,
+        rewritten_command: None,
     };
     {
         let mut s = store().lock().await;
@@ -491,6 +502,7 @@ pub async fn approval_request_with_context(
         context: Some(context),
         revoked_at: None,
         approved_command_snapshot: None,
+        rewritten_command: None,
     };
     {
         let mut s = store().lock().await;
@@ -543,6 +555,60 @@ pub async fn approval_poll(id: Uuid) -> Option<ApprovalStatus> {
 }
 
 pub async fn approval_respond(id: Uuid, approved: bool) -> Result<()> {
+    approval_respond_inner(id, approved, None).await
+}
+
+/// Approve `id`, but run `new_command` instead of the requested command.
+///
+/// The rewrite is re-assessed here, not trusted: the request must have been
+/// raised by a call site that can run a different command (see
+/// [`ApprovalContext::rewritable`]), and the new command must classify as
+/// neither `blocked` nor riskier than the request it replaces, with the host's
+/// risk override applied the same way the original was. Anything stricter
+/// would need its own approval, so the approver rejects and the requester
+/// asks again instead.
+pub async fn approval_approve_rewritten(id: Uuid, new_command: &str) -> Result<()> {
+    let new_command = new_command.trim();
+    if new_command.is_empty() {
+        return Err(anyhow!("rewritten command is empty"));
+    }
+    let (host, original, requested_risk, rewritable) = {
+        let s = store().lock().await;
+        let req = s
+            .requests
+            .get(&id)
+            .ok_or_else(|| anyhow!("unknown approval: {id}"))?;
+        (
+            req.host.clone(),
+            req.command.clone(),
+            req.risk_level,
+            req.context.as_ref().is_some_and(|ctx| ctx.rewritable),
+        )
+    };
+    if !rewritable {
+        return Err(anyhow!(
+            "approval {id} cannot be rewritten: this request runs only the command it asked for"
+        ));
+    }
+    if new_command != original {
+        let risk = crate::core::apply_risk_override(
+            crate::execution_control::effective_command_risk(new_command).await,
+            crate::execution_control::command_authorization_target(&host).risk_override,
+        );
+        if risk == RiskLevel::Blocked {
+            return Err(anyhow!("rewritten command is blocked by risk policy"));
+        }
+        if risk_ordinal(risk) > risk_ordinal(requested_risk) {
+            return Err(anyhow!(
+                "rewritten command is riskier ({risk}) than the request ({requested_risk}); reject it and ask for a new request"
+            ));
+        }
+    }
+    let rewrite = (new_command != original).then(|| new_command.to_string());
+    approval_respond_inner(id, true, rewrite).await
+}
+
+async fn approval_respond_inner(id: Uuid, approved: bool, rewrite: Option<String>) -> Result<()> {
     let (status, to_persist) = {
         let mut s = store().lock().await;
         let req = s
@@ -568,8 +634,10 @@ pub async fn approval_respond(id: Uuid, approved: bool) -> Result<()> {
         }
 
         let status = if approved {
-            // T2-14: Save command snapshot at approval time
-            req.approved_command_snapshot = Some(req.command.clone());
+            // T2-14: Save command snapshot at approval time. For a rewrite
+            // this is the rewritten text: it is what was actually approved.
+            req.approved_command_snapshot = Some(rewrite.clone().unwrap_or(req.command.clone()));
+            req.rewritten_command = rewrite.clone();
             ApprovalStatus::Approved
         } else {
             ApprovalStatus::Rejected
@@ -586,9 +654,18 @@ pub async fn approval_respond(id: Uuid, approved: bool) -> Result<()> {
             "id": id.to_string(),
             "approved": approved,
             "status": format!("{:?}", status),
+            "rewritten_command": rewrite,
         }),
     );
     Ok(())
+}
+
+/// The command an approver substituted for the requested one, if any.
+pub async fn approval_rewritten_command(id: Uuid) -> Option<String> {
+    let s = store().lock().await;
+    s.requests
+        .get(&id)
+        .and_then(|req| req.rewritten_command.clone())
 }
 
 /// T2-14: Revoke a previously approved command.
@@ -1555,6 +1632,7 @@ mod tests {
             }),
             reason: Some("deploying hotfix".into()),
             change_id: Some("CHG-1234".into()),
+            rewritable: false,
         };
 
         let json = serde_json::to_string(&ctx).unwrap();
@@ -1616,6 +1694,7 @@ mod tests {
             risk_details: None,
             reason: Some("testing".into()),
             change_id: None,
+            rewritable: false,
         };
 
         let id =
@@ -1665,6 +1744,99 @@ mod tests {
             req.approved_command_snapshot.as_deref(),
             Some("sudo reboot")
         );
+    }
+
+    async fn rewritable_request(host: &str, command: &str, risk: RiskLevel) -> Uuid {
+        approval_request_with_context(
+            host,
+            command,
+            risk,
+            120,
+            ApprovalContext {
+                rewritable: true,
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn rewritten_approval_runs_the_new_command_and_snapshots_it() {
+        let _dir = crate::store::TestConfigDir::new("rewriteok");
+        assert_eq!(
+            crate::core::classify_risk("rm -rf /tmp/build"),
+            RiskLevel::High
+        );
+        assert_eq!(crate::core::classify_risk("ls /tmp/build"), RiskLevel::Low);
+
+        let id = rewritable_request("rw-host", "rm -rf /tmp/build", RiskLevel::High).await;
+        approval_approve_rewritten(id, "  ls /tmp/build  ")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            approval_rewritten_command(id).await.as_deref(),
+            Some("ls /tmp/build")
+        );
+        // What was approved is the new text, not the request.
+        assert_eq!(
+            get_approved_command_snapshot(id).await.as_deref(),
+            Some("ls /tmp/build")
+        );
+        let s = store().lock().await;
+        let req = s.requests.get(&id).unwrap();
+        assert_eq!(req.command, "rm -rf /tmp/build");
+        assert_eq!(req.status, ApprovalStatus::Approved);
+    }
+
+    #[tokio::test]
+    async fn rewriting_to_the_same_command_is_a_plain_approval() {
+        let _dir = crate::store::TestConfigDir::new("rewritesame");
+        let id = rewritable_request("rw-same", "ls /tmp", RiskLevel::Low).await;
+        approval_approve_rewritten(id, "ls /tmp").await.unwrap();
+        assert_eq!(approval_rewritten_command(id).await, None);
+        assert_eq!(
+            get_approved_command_snapshot(id).await.as_deref(),
+            Some("ls /tmp")
+        );
+    }
+
+    #[tokio::test]
+    async fn rewrite_is_refused_when_riskier_blocked_empty_or_not_rewritable() {
+        let _dir = crate::store::TestConfigDir::new("rewritebad");
+        assert_eq!(
+            crate::core::classify_risk("rm -rf /tmp/build"),
+            RiskLevel::High
+        );
+        assert_eq!(crate::core::classify_risk("rm -rf /"), RiskLevel::Blocked);
+
+        // Riskier than the request: reject and ask again instead.
+        let id = rewritable_request("rw-up", "ls /tmp", RiskLevel::Low).await;
+        let error = approval_approve_rewritten(id, "rm -rf /tmp/build")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("riskier"), "{error}");
+        // A refused rewrite leaves the request pending for another answer.
+        assert_eq!(approval_poll(id).await, Some(ApprovalStatus::Pending));
+
+        let error = approval_approve_rewritten(id, "rm -rf /")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("blocked"), "{error}");
+        assert!(approval_approve_rewritten(id, "   ").await.is_err());
+        assert_eq!(approval_poll(id).await, Some(ApprovalStatus::Pending));
+
+        // A request raised by a call site that runs only the command it asked
+        // for cannot take a different one, however harmless.
+        let fixed = approval_request("rw-fixed", "rm -rf /tmp/build", RiskLevel::High).await;
+        let error = approval_approve_rewritten(fixed, "ls /tmp/build")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("cannot be rewritten"), "{error}");
+        assert_eq!(approval_poll(fixed).await, Some(ApprovalStatus::Pending));
     }
 
     #[tokio::test]

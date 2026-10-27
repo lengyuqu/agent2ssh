@@ -752,7 +752,16 @@ fn normalize_config(mut config: AppConfig) -> AppConfig {
 /// command they unlocked. Authorization and audit writing are separate steps
 /// owned by different call sites, so this is how an executed entry learns it
 /// ran on a human's say-so rather than on policy alone.
-static GRANTED_APPROVALS: std::sync::Mutex<Vec<(String, String, std::time::Instant)>> =
+/// One human approval waiting for its audit entry. `original` is the command
+/// that was requested when the approver substituted another one.
+struct GrantedApproval {
+    host: String,
+    command: String,
+    original: Option<String>,
+    at: std::time::Instant,
+}
+
+static GRANTED_APPROVALS: std::sync::Mutex<Vec<GrantedApproval>> =
     std::sync::Mutex::new(Vec::new());
 
 /// An approval nobody audited within this window is dropped, so a command that
@@ -762,28 +771,35 @@ const GRANTED_APPROVAL_TTL: std::time::Duration = std::time::Duration::from_secs
 /// Remember that a human approved `command` on `host`; the next executed audit
 /// entry for the same pair is recorded as `approved` by `human`.
 pub fn note_human_approval(host: &str, command: &str) {
-    let mut granted = GRANTED_APPROVALS.lock().unwrap_or_else(|e| e.into_inner());
-    granted.retain(|(_, _, at)| at.elapsed() < GRANTED_APPROVAL_TTL);
-    granted.push((
-        host.to_string(),
-        command.to_string(),
-        std::time::Instant::now(),
-    ));
+    note_granted(host, command, None);
 }
 
-fn take_human_approval(host: &str, command: &str) -> bool {
+/// Like [`note_human_approval`], for an approver who substituted `command` for
+/// the requested `original`: the executed entry records both.
+pub fn note_human_rewrite(host: &str, command: &str, original: &str) {
+    note_granted(host, command, Some(original.to_string()));
+}
+
+fn note_granted(host: &str, command: &str, original: Option<String>) {
     let mut granted = GRANTED_APPROVALS.lock().unwrap_or_else(|e| e.into_inner());
-    granted.retain(|(_, _, at)| at.elapsed() < GRANTED_APPROVAL_TTL);
-    match granted
+    granted.retain(|entry| entry.at.elapsed() < GRANTED_APPROVAL_TTL);
+    granted.push(GrantedApproval {
+        host: host.to_string(),
+        command: command.to_string(),
+        original,
+        at: std::time::Instant::now(),
+    });
+}
+
+/// Consume the approval for `command` on `host`: `Some(original)` when one was
+/// waiting (`original` is the requested command if it was rewritten).
+fn take_human_approval(host: &str, command: &str) -> Option<Option<String>> {
+    let mut granted = GRANTED_APPROVALS.lock().unwrap_or_else(|e| e.into_inner());
+    granted.retain(|entry| entry.at.elapsed() < GRANTED_APPROVAL_TTL);
+    let index = granted
         .iter()
-        .position(|(h, c, _)| h == host && c == command)
-    {
-        Some(index) => {
-            granted.remove(index);
-            true
-        }
-        None => false,
-    }
+        .position(|entry| entry.host == host && entry.command == command)?;
+    Some(granted.remove(index).original)
 }
 
 pub fn append_audit(
@@ -816,13 +832,16 @@ pub fn append_audit_with_decision(
                                                         // Finding 16: Derive action and outcome from the ExecResult.
     let action = derive_audit_action(&result.command);
     let outcome = derive_audit_outcome(result.exit_code, risk_level);
+    let mut original_command = None;
     let (decision, decided_by) = match decision {
         Some((decision, by)) => (Some(decision), Some(by.to_string())),
         None if result.exit_code.is_some() => {
-            if take_human_approval(&result.host, &result.command) {
-                (Some(AuditDecision::Approved), Some("human".to_string()))
-            } else {
-                (Some(AuditDecision::AutoAllowed), Some("rule".to_string()))
+            match take_human_approval(&result.host, &result.command) {
+                Some(original) => {
+                    original_command = original.map(|command| redact_sensitive_text(&command));
+                    (Some(AuditDecision::Approved), Some("human".to_string()))
+                }
+                None => (Some(AuditDecision::AutoAllowed), Some("rule".to_string())),
             }
         }
         None => (None, None),
@@ -843,6 +862,7 @@ pub fn append_audit_with_decision(
         outcome,
         decision,
         decided_by,
+        original_command,
     };
     let mut file = OpenOptions::new()
         .create(true)

@@ -459,9 +459,9 @@ export default function App() {
     }
   }
 
-  async function handleApprove(approval: ApprovalRequest) {
+  async function handleApprove(approval: ApprovalRequest, command?: string) {
     try {
-      await api.approvalApprove(approval.id);
+      await api.approvalApprove(approval.id, command);
       setPendingApprovals((prev) => prev.filter((a) => a.id !== approval.id));
       // v3 §3.4: raise the terminal drawer as a live viewport onto the host.
       // The daemon runs the approved command itself (the original exec caller

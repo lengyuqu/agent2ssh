@@ -557,6 +557,7 @@ impl AuditEntry {
             outcome: None,
             decision: None,
             decided_by: None,
+            original_command: None,
         }
     }
 }
@@ -601,6 +602,10 @@ pub struct AuditEntry {
     /// let it through or blocked it with no human involved) or `timeout`.
     #[serde(default)]
     pub decided_by: Option<String>,
+    /// The command as requested, when an approver ran a rewritten one instead.
+    /// `command` then holds what actually ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_command: Option<String>,
 }
 
 /// Authorization verdict recorded on an [`AuditEntry`].

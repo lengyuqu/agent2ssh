@@ -2589,6 +2589,7 @@ fn audit_export_response_contract() {
         outcome: None,
         decision: None,
         decided_by: None,
+        original_command: None,
     }];
 
     // JSONL format: each line is a valid AuditEntry JSON

@@ -815,6 +815,12 @@ export const zh: Record<string, string> = {
   "Change ID": "变更单号",
   "Approve and execute": "批准执行",
   "Copy command and go to Execution": "复制命令并前往执行",
+  "Edit then execute": "编辑后执行",
+  "Approver rewrote: {original}": "审批人已改写，原命令：{original}",
+  "Cancel edit": "取消编辑",
+  "Approve edited command": "批准编辑后的命令",
+  "Edited command": "编辑后的命令",
+  "The edited command is re-checked: it cannot be blocked or riskier than this request.": "编辑后的命令会重新评估：不能是被阻止的命令，风险也不能高于本次请求。",
   "Keyboard: ↑↓ select · ↵ review · ⌘↵ approve · ⌫ reject": "键盘：↑↓ 选择 · ↵ 查看 · ⌘↵ 批准 · ⌫ 拒绝",
   "Confirm execution": "确认执行",
   // v3 T05: terminal drawer

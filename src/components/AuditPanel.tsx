@@ -144,6 +144,11 @@ export default function AuditPanel({ audit, onRefresh, onReplay }: Props) {
               "block truncate font-mono text-sm",
               COMMAND_TINT[info.row.original.risk_level ?? "low"]
             )}
+            title={
+              info.row.original.original_command
+                ? t("Approver rewrote: {original}", { original: info.row.original.original_command })
+                : undefined
+            }
           >
             {info.getValue()}
           </code>
