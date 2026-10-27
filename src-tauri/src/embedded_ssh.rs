@@ -2004,6 +2004,7 @@ mod tests {
 
     fn test_host() -> HostProfile {
         HostProfile {
+            ai_allowed: true,
             name: "target".into(),
             host: "example.internal".into(),
             user: None,

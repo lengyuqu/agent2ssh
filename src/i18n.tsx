@@ -824,6 +824,14 @@ export const zh: Record<string, string> = {
   "low auto-approve": "low 自动放行",
   "med/high need approval": "med/high 需审批",
   "deletion forbidden": "删除类禁止",
+  "deletion forbidden +{count} custom": "删除类禁止 +{count} 条自定义",
+  "auto-approve": "自动放行",
+  "need approval": "需审批",
+  "depends on command": "视命令而定",
+  "Human only": "仅人工",
+  "AI and automation sources are refused on this host": "此主机拒绝 AI 与自动化来源",
+  "Human operators only": "仅限人工操作",
+  "Refuse MCP, daemon and other AI sources on this host. The desktop app and CLI stay allowed.": "拒绝此主机上来自 MCP、daemon 等 AI 来源的操作；桌面端与 CLI 仍可使用。",
   // A22: SSH algorithm preferences
   "SSH algorithms": "SSH 算法",
   "Negotiation preferences passed to libssh2 before the handshake. Most-preferred first, comma-separated.":

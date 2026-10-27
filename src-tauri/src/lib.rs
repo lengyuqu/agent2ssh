@@ -74,7 +74,7 @@ pub use approval::{
     approval_action_url, approval_request_with_context, build_approval_context,
     build_approval_context_with_effective_risk, check_approval_required, cleanup_expired_approvals,
     list_approval_policies, load_approval_policies, save_approval_policies, ApprovalContext,
-    ApprovalHistoryEntry, ApprovalPolicy, ApprovalPolicyFile, RiskDetails,
+    ApprovalHistoryEntry, ApprovalMode, ApprovalPolicy, ApprovalPolicyFile, RiskDetails,
 };
 pub use connection::{connect_host, disconnect_host, list_active_connections};
 pub use core::{
@@ -108,8 +108,9 @@ pub use events::{event_bus, publish_event, subscribe_events, Agent2SSHEvent, Eve
 pub use execution_control::{
     append_rejected_exec_audit, authorize_command_with_approval, command_authorization_target,
     effective_command_risk, expand_exec_authorization_targets, expand_exec_targets,
-    ApprovalOutcome, ApprovalPrompt, CommandAuthorization, CommandAuthorizationError,
-    CommandAuthorizationInput, CommandAuthorizationTarget,
+    host_allows_source, host_policy_summary, ApprovalOutcome, ApprovalPrompt, CommandAuthorization,
+    CommandAuthorizationError, CommandAuthorizationInput, CommandAuthorizationTarget,
+    HostPolicySummary, HUMAN_SOURCES,
 };
 pub use forward::{
     forward_add_core, forward_add_core_via, forward_add_multi_core, forward_add_multi_core_via,

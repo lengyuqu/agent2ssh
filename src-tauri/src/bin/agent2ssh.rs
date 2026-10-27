@@ -1970,6 +1970,7 @@ async fn async_main() -> Result<()> {
                     _ => None,
                 });
                 let profile = add_host_core(HostProfile {
+                    ai_allowed: true,
                     name,
                     host,
                     user,

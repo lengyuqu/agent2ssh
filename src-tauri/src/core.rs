@@ -2887,6 +2887,7 @@ pub fn import_ssh_config_core(path: Option<&str>) -> Result<Vec<HostProfile>> {
             no_user.split(':').next().unwrap_or(no_user).to_string()
         });
         profiles.push(HostProfile {
+            ai_allowed: true,
             name: alias.to_string(),
             host: hn.to_string(),
             user: u.clone(),
@@ -3216,6 +3217,7 @@ fn parse_ssh_config_file(path: &std::path::Path) -> Result<Vec<HostProfile>> {
             no_user.split(':').next().unwrap_or(no_user).to_string()
         });
         out.push(HostProfile {
+            ai_allowed: true,
             name: alias.to_string(),
             host: hn.to_string(),
             user: u.clone(),
@@ -3732,6 +3734,7 @@ mod tests {
     fn test_filter_hosts_by_metadata_and_tag() {
         let hosts = vec![
             HostProfile {
+                ai_allowed: true,
                 name: "prod-web-1".into(),
                 host: "10.0.0.1".into(),
                 user: None,
@@ -3750,6 +3753,7 @@ mod tests {
                 passphrase: None,
             },
             HostProfile {
+                ai_allowed: true,
                 name: "stage-db-1".into(),
                 host: "10.0.1.1".into(),
                 user: None,
@@ -3974,6 +3978,7 @@ mod tests {
 
     fn make_test_host(name: &str) -> HostProfile {
         HostProfile {
+            ai_allowed: true,
             name: name.to_string(),
             host: "10.0.0.1".to_string(),
             user: Some("ubuntu".to_string()),
@@ -4094,6 +4099,7 @@ mod tests {
             groups: vec![],
             proxies: vec![],
             hosts: vec![HostProfile {
+                ai_allowed: true,
                 name: "password-host".into(),
                 host: "10.0.0.1".into(),
                 user: Some("ubuntu".into()),
@@ -4140,6 +4146,7 @@ mod tests {
         })
         .unwrap();
         add_host_core(HostProfile {
+            ai_allowed: true,
             name: "proxied".into(),
             host: "10.0.0.1".into(),
             user: None,
@@ -4203,6 +4210,7 @@ mod tests {
             groups: vec![],
             proxies: vec![],
             hosts: vec![HostProfile {
+                ai_allowed: true,
                 name: "existing-host".into(),
                 host: "10.0.0.1".into(),
                 user: Some("ubuntu".into()),
@@ -4227,6 +4235,7 @@ mod tests {
             hosts: vec![
                 // New host
                 HostProfile {
+                    ai_allowed: true,
                     name: "new-host".into(),
                     host: "10.0.0.2".into(),
                     user: None,
@@ -4246,6 +4255,7 @@ mod tests {
                 },
                 // Duplicate (same name, same host/port/user)
                 HostProfile {
+                    ai_allowed: true,
                     name: "existing-host".into(),
                     host: "10.0.0.1".into(),
                     user: Some("ubuntu".into()),
@@ -4293,6 +4303,7 @@ mod tests {
             groups: vec![],
             proxies: vec![],
             hosts: vec![HostProfile {
+                ai_allowed: true,
                 name: "existing-host".into(),
                 host: "10.0.0.1".into(),
                 user: Some("ubuntu".into()),
@@ -4315,6 +4326,7 @@ mod tests {
 
         let export = TeamConfigExport {
             hosts: vec![HostProfile {
+                ai_allowed: true,
                 name: "existing-host".into(),
                 host: "10.0.0.2".into(),
                 user: Some("admin".into()),
@@ -4765,6 +4777,7 @@ mod tests {
     fn test_export_to_ssh_config_format() {
         let hosts = vec![
             HostProfile {
+                ai_allowed: true,
                 name: "prod-web".into(),
                 host: "10.0.0.1".into(),
                 user: Some("ubuntu".into()),
@@ -4783,6 +4796,7 @@ mod tests {
                 passphrase: None,
             },
             HostProfile {
+                ai_allowed: true,
                 name: "staging-db".into(),
                 host: "10.0.1.1".into(),
                 user: None,
@@ -4818,6 +4832,7 @@ mod tests {
     #[test]
     fn test_export_to_ssh_config_format_default_port_omitted() {
         let hosts = vec![HostProfile {
+            ai_allowed: true,
             name: "test".into(),
             host: "10.0.0.1".into(),
             user: None,

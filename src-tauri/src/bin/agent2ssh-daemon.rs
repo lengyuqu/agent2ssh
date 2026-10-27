@@ -13,8 +13,8 @@ use agent2ssh::diagnostics::append_diagnostic_log;
 use agent2ssh::events::{publish_event, subscribe_events, Agent2SSHEvent, EventType};
 use agent2ssh::execution_control::{
     append_rejected_exec_audit, authorize_command_with_approval, command_authorization_target,
-    effective_command_risk, expand_exec_targets, ApprovalOutcome, ApprovalPrompt,
-    CommandAuthorizationError, CommandAuthorizationInput,
+    effective_command_risk, expand_exec_targets, host_policy_summary, ApprovalOutcome,
+    ApprovalPrompt, CommandAuthorizationError, CommandAuthorizationInput, HostPolicySummary,
 };
 use agent2ssh::forward::*;
 use agent2ssh::gate::{
@@ -1052,6 +1052,24 @@ async fn remove_host(
     require_admin(&auth)?;
     remove_host_core(&name)
         .map(|_| Json(OkBody { ok: true }))
+        .map_err(|e| err(StatusCode::NOT_FOUND, e))
+}
+
+async fn host_policy(
+    State(_s): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(name): Path<String>,
+) -> Result<Json<HostPolicySummary>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    if !scope_allows_observe_host(&auth, &name) {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            format!("token scope does not allow host '{name}'"),
+        ));
+    }
+    host_policy_summary(&name)
+        .await
+        .map(Json)
         .map_err(|e| err(StatusCode::NOT_FOUND, e))
 }
 
@@ -5857,6 +5875,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/hosts", get(list_hosts).post(add_host))
         .route("/hosts/import", post(import_config))
         .route("/hosts/:name", delete(remove_host))
+        .route("/hosts/:name/policy", get(host_policy))
         .route("/snippets", get(list_snippets).post(save_snippet))
         .route("/snippets/:name", delete(delete_snippet))
         .route(

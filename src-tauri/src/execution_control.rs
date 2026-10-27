@@ -3,10 +3,13 @@ use std::future::Future;
 use anyhow::Result;
 
 use crate::{
-    approval::check_approval_required,
+    approval::{
+        approval_mode_for_risk, approval_policy_applies_to_host, check_approval_required,
+        load_approval_policies, ApprovalMode,
+    },
     core::{apply_risk_override, classify_risk},
     remote::{check_daemon_scope, DaemonScope},
-    risk_config::classify_effective_risk,
+    risk_config::{classify_effective_risk, load_risk_rules},
     store::{append_audit_with_decision, load_config, note_human_approval},
     types::{AuditDecision, ExecResult, RiskLevel},
 };
@@ -65,6 +68,81 @@ pub enum CommandAuthorizationError {
     ApprovalRejected,
     ApprovalTimedOut,
     Internal(String),
+}
+
+/// Sources that stand for a person at the keyboard: the desktop app and the
+/// CLI. Everything else (MCP, daemon, custom `AGENT2SSH_SOURCE` labels) counts
+/// as AI/automation. An agent can still drive the CLI from a shell, so a
+/// human-only host is a guard rail against agent clients, not a boundary
+/// against a determined local process.
+pub const HUMAN_SOURCES: &[&str] = &["desktop", "cli"];
+
+/// Whether `source` may operate `host`. Hosts default to AI-allowed, and an
+/// unknown host is left to the later stages to reject.
+pub fn host_allows_source(host: &str, source: &str) -> bool {
+    let human = HUMAN_SOURCES
+        .iter()
+        .any(|allowed| allowed.eq_ignore_ascii_case(source.trim()));
+    human
+        || load_config()
+            .ok()
+            .and_then(|config| {
+                config
+                    .hosts
+                    .into_iter()
+                    .find(|profile| profile.name == host)
+            })
+            .is_none_or(|profile| profile.ai_allowed)
+}
+
+/// What the authorization layer will do with commands on one host, for the
+/// host card's policy summary. Computed from the live configuration, not from
+/// a copy of the rules.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HostPolicySummary {
+    pub host: String,
+    /// `false` when AI/automation sources are refused on this host.
+    pub ai_allowed: bool,
+    /// Host-level risk downgrade/upgrade, if any.
+    pub risk_override: Option<RiskLevel>,
+    /// Approval requirement per risk level. High always needs approval unless
+    /// the caller passes `force`, even when no policy asks for it.
+    pub low: ApprovalMode,
+    pub medium: ApprovalMode,
+    pub high: ApprovalMode,
+    /// Names of the approval policies that apply to this host.
+    pub policies: Vec<String>,
+    /// User-defined patterns that classify a command as blocked. The built-in
+    /// blocked rules (destructive commands) apply on top of these.
+    pub blocked_patterns: Vec<String>,
+}
+
+pub async fn host_policy_summary(host: &str) -> Result<HostPolicySummary> {
+    let profile = load_config()?
+        .hosts
+        .into_iter()
+        .find(|profile| profile.name == host)
+        .ok_or_else(|| anyhow::anyhow!("host '{host}' not found"))?;
+    let policies = load_approval_policies()?;
+    let mode = |risk| approval_mode_for_risk(&policies, &profile.name, &profile.tags, risk);
+    let high = match mode(RiskLevel::High) {
+        ApprovalMode::Auto => ApprovalMode::Required,
+        other => other,
+    };
+    Ok(HostPolicySummary {
+        host: profile.name.clone(),
+        ai_allowed: profile.ai_allowed,
+        risk_override: profile.risk_override,
+        low: mode(RiskLevel::Low),
+        medium: mode(RiskLevel::Medium),
+        high,
+        policies: policies
+            .iter()
+            .filter(|policy| approval_policy_applies_to_host(policy, &profile.name, &profile.tags))
+            .map(|policy| policy.name.clone())
+            .collect(),
+        blocked_patterns: load_risk_rules().await?.blocked.patterns,
+    })
 }
 
 pub async fn effective_command_risk(command: &str) -> RiskLevel {
@@ -333,6 +411,22 @@ where
         effective_command_risk(input.command).await,
         input.risk_override,
     );
+    if !host_allows_source(input.host, input.source) {
+        let message = "host is restricted to human operators";
+        append_decided_exec_audit(
+            input.source,
+            input.host,
+            input.command,
+            risk,
+            message,
+            input.change_id.as_deref(),
+            Some((AuditDecision::Blocked, "rule")),
+        );
+        return Err(CommandAuthorizationError::Blocked {
+            risk: RiskLevel::Blocked,
+            message: format!("{message}: '{}'", input.host),
+        });
+    }
     if risk == RiskLevel::Blocked {
         let message = "command blocked by risk policy";
         append_decided_exec_audit(
@@ -417,6 +511,121 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn host_json(value: serde_json::Value) -> crate::types::HostProfile {
+        serde_json::from_value(value).expect("host profile")
+    }
+
+    fn input_for<'a>(
+        scope: &'a Option<DaemonScope>,
+        source: &'a str,
+        host: &'a str,
+    ) -> CommandAuthorizationInput<'a> {
+        CommandAuthorizationInput {
+            auth_scope: scope,
+            source,
+            host,
+            tags: &[],
+            risk_override: None,
+            command: "uptime",
+            force: false,
+            reason: None,
+            change_id: None,
+            side_effect: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn human_only_host_refuses_ai_sources_and_audits_the_refusal() {
+        let _dir = crate::store::TestConfigDir::new("humanonly");
+        crate::store::save_config(&crate::types::AppConfig {
+            hosts: vec![
+                host_json(
+                    serde_json::json!({"name": "vault", "host": "10.0.0.1", "ai_allowed": false}),
+                ),
+                host_json(serde_json::json!({"name": "web", "host": "10.0.0.2"})),
+            ],
+            ..Default::default()
+        })
+        .unwrap();
+        let scope = None;
+
+        for source in ["mcp", "daemon", "my-agent"] {
+            let result =
+                authorize_command_with_approval(input_for(&scope, source, "vault"), |_| async {
+                    panic!("a refused host must not reach approval")
+                })
+                .await;
+            assert!(
+                matches!(result, Err(CommandAuthorizationError::Blocked { .. })),
+                "{source} must be refused on a human-only host"
+            );
+        }
+        for source in ["desktop", "CLI"] {
+            let result =
+                authorize_command_with_approval(input_for(&scope, source, "vault"), |_| async {
+                    panic!("uptime needs no approval")
+                })
+                .await;
+            assert!(result.is_ok(), "{source} is a human source");
+        }
+        // The flag is per host: the default stays open to agents.
+        let result = authorize_command_with_approval(input_for(&scope, "mcp", "web"), |_| async {
+            panic!("uptime needs no approval")
+        })
+        .await;
+        assert!(result.is_ok());
+
+        let refused = crate::store::list_audit_raw(&crate::types::AuditFilter {
+            decision: Some(AuditDecision::Blocked),
+            limit: 10,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(refused.len(), 3);
+        assert!(refused.iter().all(|entry| entry.host == "vault"));
+    }
+
+    #[tokio::test]
+    async fn host_policy_summary_reflects_live_policies() {
+        let _dir = crate::store::TestConfigDir::new("policysummary");
+        crate::store::save_config(&crate::types::AppConfig {
+            hosts: vec![host_json(
+                serde_json::json!({"name": "db-1", "host": "10.0.0.3", "tags": ["prod"], "ai_allowed": false}),
+            )],
+            ..Default::default()
+        })
+        .unwrap();
+        crate::approval::save_approval_policies(&[
+            crate::approval::ApprovalPolicy {
+                name: "prod-medium".into(),
+                hosts: vec![],
+                tags: vec!["prod".into()],
+                min_risk: Some(RiskLevel::Medium),
+                command_pattern: None,
+                requires_approval: true,
+                ttl_secs: None,
+            },
+            crate::approval::ApprovalPolicy {
+                name: "staging-only".into(),
+                hosts: vec![],
+                tags: vec!["staging".into()],
+                min_risk: None,
+                command_pattern: None,
+                requires_approval: true,
+                ttl_secs: None,
+            },
+        ])
+        .unwrap();
+
+        let summary = host_policy_summary("db-1").await.unwrap();
+        assert!(!summary.ai_allowed);
+        assert_eq!(summary.low, ApprovalMode::Auto);
+        assert_eq!(summary.medium, ApprovalMode::Required);
+        assert_eq!(summary.high, ApprovalMode::Required);
+        assert_eq!(summary.policies, vec!["prod-medium".to_string()]);
+        assert!(host_policy_summary("missing").await.is_err());
+    }
 
     #[tokio::test]
     async fn scope_denial_happens_before_approval() {

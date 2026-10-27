@@ -28,6 +28,10 @@
 
 ## B3 · 主机配置补充「仅人工」标记与策略摘要数据源
 
+- 状态（2026-10-27）：已落地。`HostProfile.ai_allowed`（默认 true）；授权层 `authorize_command_with_approval` 对 `ai_allowed=false` 的主机拒绝非人工来源（`execution_control::HUMAN_SOURCES` = `desktop`、`cli`；`mcp`、`daemon` 及自定义 `AGENT2SSH_SOURCE` 一律拒绝），拒绝记入审计（`decision=blocked`）。新增 `GET /hosts/{name}/policy`（`HostPolicySummary`：每个风险级别的审批要求 `auto/required/conditional`、适用的审批策略名、用户自定义 blocked 规则），主机页策略摘要行在选中单台主机时显示该主机的实时策略，主机表显示「仅人工」徽标，编辑表单有对应开关。
+- 已知边界：agent 若在 shell 里调用 CLI，来源是 `cli`，不会被拦——这是与「人在终端用 CLI」无法区分的取舍（已与需求方确认）。含 `command_pattern` 的策略无法按主机静态判断，摘要标为 `conditional`。
+- 未做：CLI/MCP 暴露 `ai_allowed`（`host add` 参数、工具入参）、主机策略的 MCP 工具。
+
 - 现状：主机卡「AI 可用 / 仅人工」chip 与策略摘要行（low 自动放行 / med-high 需审批 / 删除类禁止）目前是前端常量文案。
 - 任务：
   - [ ] Host 配置增加 `ai_allowed: bool`（默认 true）

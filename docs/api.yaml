@@ -37,6 +37,7 @@ components:
         env:       { type: string, nullable: true }
         role:      { type: string, nullable: true }
         owner:     { type: string, nullable: true }
+        ai_allowed: { type: boolean, default: true, description: "false = human-only host; AI/automation sources are refused" }
 
     ExecRequest:
       type: object
@@ -356,6 +357,28 @@ components:
                 final_risk:         { $ref: "#/components/schemas/RiskLevel" }
                 matched_policy:     { type: string, nullable: true }
 
+    HostPolicySummary:
+      type: object
+      properties:
+        host:       { type: string }
+        ai_allowed: { type: boolean, description: "false = AI/automation sources are refused (desktop and cli stay allowed)" }
+        risk_override: { $ref: "#/components/schemas/RiskLevel", nullable: true }
+        low:    { $ref: "#/components/schemas/ApprovalMode" }
+        medium: { $ref: "#/components/schemas/ApprovalMode" }
+        high:   { $ref: "#/components/schemas/ApprovalMode" }
+        policies:
+          type: array
+          description: Names of approval policies that apply to this host
+          items: { type: string }
+        blocked_patterns:
+          type: array
+          description: User-defined patterns classified as blocked; built-in rules apply on top
+          items: { type: string }
+
+    ApprovalMode:
+      type: string
+      enum: [auto, required, conditional]
+
     ApprovalResponse:
       type: object
       required: [approved]
@@ -586,6 +609,34 @@ paths:
                 type: object
                 properties:
                   ok: { type: boolean }
+        "404":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /hosts/{name}/policy:
+    get:
+      summary: Summarise the authorization policy that applies to one host
+      description: >
+        Computed from the live configuration. `low`/`medium`/`high` say whether
+        a human must approve at that risk level; `conditional` means a
+        command-pattern policy applies, so it depends on the command. High
+        always needs approval unless the caller passes `force`. Scoped tokens
+        can only read hosts their scope allows.
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HostPolicySummary" }
+        "403":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "404":
           content:
             application/json:

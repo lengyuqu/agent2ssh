@@ -1759,6 +1759,7 @@ mod tests {
 
         let first = AppConfig {
             hosts: vec![crate::types::HostProfile {
+                ai_allowed: true,
                 name: "alpha".into(),
                 host: "alpha.example".into(),
                 user: None,
@@ -1809,6 +1810,7 @@ mod tests {
         std::env::set_var(CONFIG_DIR_ENV, &dir);
 
         let host = crate::types::HostProfile {
+            ai_allowed: true,
             name: "kc-host".into(),
             host: "10.0.0.9".into(),
             user: Some("root".into()),

@@ -30,6 +30,7 @@ import { Card } from "./ui/card";
 import { ColumnVisibilityMenu, DataTable, selectColumn } from "./ui/data-table";
 import { ConfirmDialog } from "./ui/dialog";
 import { IconButton } from "./ui/icon-button";
+import HostPolicyLine from "./HostPolicyLine";
 import { Input } from "./ui/input";
 import { EmptyState, InlineAlert } from "./ui/state";
 import { cn } from "../lib/utils";
@@ -227,9 +228,15 @@ export default function HostList({
         header: t("Details"),
         cell: ({ row }) => {
           const host = row.original.host;
-          if (!host.env && !host.role && !host.owner) return null;
+          const humanOnly = host.ai_allowed === false;
+          if (!humanOnly && !host.env && !host.role && !host.owner) return null;
           return (
-            <span className="flex flex-wrap gap-1.5 text-[10px] text-muted-foreground">
+            <span className="flex flex-wrap items-center gap-1.5 text-[10px] text-muted-foreground">
+              {humanOnly && (
+                <Badge variant="warning" title={t("AI and automation sources are refused on this host")}>
+                  {t("Human only")}
+                </Badge>
+              )}
               {host.env && <span>{t("env={value}", { value: host.env })}</span>}
               {host.role && <span>{t("role={value}", { value: host.role })}</span>}
               {host.owner && <span>{t("owner={value}", { value: host.owner })}</span>}
@@ -340,29 +347,7 @@ export default function HostList({
         </IconButton>
       </div>
 
-      {/* v3 3.2: the policy summary line — the soul of this page. Frontend
-          constants only (no backend field); the three segments reuse the risk
-          families so they always match RiskBadge. */}
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-line bg-canvas-1 px-3 py-2 font-mono text-[11px] uppercase tracking-wide">
-        <span className="flex items-center gap-1.5 text-risk-low">
-          <span className="size-1.5 rounded-full bg-risk-low" aria-hidden />
-          {t("low auto-approve")}
-        </span>
-        <span className="text-faint" aria-hidden>
-          ·
-        </span>
-        <span className="flex items-center gap-1.5 text-risk-medium">
-          <span className="size-1.5 rounded-full bg-risk-medium" aria-hidden />
-          {t("med/high need approval")}
-        </span>
-        <span className="text-faint" aria-hidden>
-          ·
-        </span>
-        <span className="flex items-center gap-1.5 text-risk-high">
-          <span className="size-1.5 rounded-full bg-risk-high" aria-hidden />
-          {t("deletion forbidden")}
-        </span>
-      </div>
+      <HostPolicyLine host={selectedNames.length === 1 ? selectedNames[0] : null} />
 
       <div className="rounded-lg border border-border bg-muted/40 p-3">
         <div className="mb-2 flex items-center gap-1.5 text-xs font-bold text-muted-foreground">

@@ -88,6 +88,15 @@ pub struct HostProfile {
     /// the plaintext lives only in the unlocked secrets store and memory cache.
     #[serde(default)]
     pub passphrase: Option<String>,
+    /// `false` marks the host human-only: operations from AI/automation
+    /// sources (MCP, daemon, custom `AGENT2SSH_SOURCE` labels) are refused by
+    /// the authorization layer. See `execution_control::HUMAN_SOURCES`.
+    #[serde(default = "default_ai_allowed")]
+    pub ai_allowed: bool,
+}
+
+fn default_ai_allowed() -> bool {
+    true
 }
 
 impl HostProfile {

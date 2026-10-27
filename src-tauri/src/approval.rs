@@ -929,6 +929,81 @@ fn check_approval_required_with(
     Ok(None)
 }
 
+/// Whether a command at some risk level needs a human on a host, as far as the
+/// host and risk level alone can tell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalMode {
+    /// No policy asks for approval.
+    Auto,
+    /// A policy asks for approval whatever the command is.
+    Required,
+    /// The answer depends on the command text (a `command_pattern` policy
+    /// applies), so it cannot be stated for the host alone.
+    Conditional,
+}
+
+/// True when `policy` applies to this host, ignoring the risk level and the
+/// command text.
+pub fn approval_policy_applies_to_host(
+    policy: &ApprovalPolicy,
+    host: &str,
+    host_tags: &[String],
+) -> bool {
+    if !policy.hosts.is_empty()
+        && !policy
+            .hosts
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(host))
+    {
+        return false;
+    }
+    policy.tags.is_empty()
+        || host_tags.iter().any(|tag| {
+            policy
+                .tags
+                .iter()
+                .any(|policy_tag| policy_tag.eq_ignore_ascii_case(tag))
+        })
+}
+
+/// Mirror of [`check_approval_required_with`] for a host and risk level with
+/// no command: a policy gated by `command_pattern` makes the answer
+/// [`ApprovalMode::Conditional`] instead of being guessed.
+pub fn approval_mode_for_risk(
+    policies: &[ApprovalPolicy],
+    host: &str,
+    host_tags: &[String],
+    risk_level: RiskLevel,
+) -> ApprovalMode {
+    let mut conditional = false;
+    for policy in policies {
+        if !approval_policy_applies_to_host(policy, host, host_tags) {
+            continue;
+        }
+        if let Some(min_risk) = policy.min_risk {
+            if risk_ordinal(risk_level) < risk_ordinal(min_risk) {
+                continue;
+            }
+        }
+        if policy.command_pattern.is_some() {
+            conditional = true;
+            continue;
+        }
+        // First policy that applies without looking at the command decides.
+        return match (policy.requires_approval, conditional) {
+            (_, true) => ApprovalMode::Conditional,
+            (true, false) => ApprovalMode::Required,
+            (false, false) => ApprovalMode::Auto,
+        };
+    }
+    if conditional {
+        ApprovalMode::Conditional
+    } else {
+        ApprovalMode::Auto
+    }
+}
+
 /// List all configured approval policies.
 pub fn list_approval_policies() -> Result<Vec<ApprovalPolicy>> {
     load_approval_policies()
@@ -937,6 +1012,72 @@ pub fn list_approval_policies() -> Result<Vec<ApprovalPolicy>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mode_policy(name: &str) -> ApprovalPolicy {
+        ApprovalPolicy {
+            name: name.into(),
+            hosts: vec![],
+            tags: vec![],
+            min_risk: None,
+            command_pattern: None,
+            requires_approval: true,
+            ttl_secs: None,
+        }
+    }
+
+    #[test]
+    fn approval_mode_follows_policy_order_and_flags_command_patterns() {
+        let tags = vec!["prod".to_string()];
+        let medium_up = ApprovalPolicy {
+            min_risk: Some(RiskLevel::Medium),
+            ..mode_policy("medium-up")
+        };
+        let patterned = ApprovalPolicy {
+            command_pattern: Some("rm *".into()),
+            ..mode_policy("rm-only")
+        };
+        let allow_all = ApprovalPolicy {
+            requires_approval: false,
+            ..mode_policy("allow")
+        };
+
+        // No policies: nothing asks for approval.
+        assert_eq!(
+            approval_mode_for_risk(&[], "web", &tags, RiskLevel::Medium),
+            ApprovalMode::Auto
+        );
+        // min_risk gates by level.
+        let policies = [medium_up.clone()];
+        assert_eq!(
+            approval_mode_for_risk(&policies, "web", &tags, RiskLevel::Low),
+            ApprovalMode::Auto
+        );
+        assert_eq!(
+            approval_mode_for_risk(&policies, "web", &tags, RiskLevel::Medium),
+            ApprovalMode::Required
+        );
+        // A command-pattern policy ahead of the decider makes it depend on the command.
+        let policies = [patterned.clone(), medium_up.clone()];
+        assert_eq!(
+            approval_mode_for_risk(&policies, "web", &tags, RiskLevel::Medium),
+            ApprovalMode::Conditional
+        );
+        // An explicit auto-approve policy first wins over later ones.
+        let policies = [allow_all, medium_up];
+        assert_eq!(
+            approval_mode_for_risk(&policies, "web", &tags, RiskLevel::High),
+            ApprovalMode::Auto
+        );
+        // A policy for other hosts or tags does not apply.
+        let other = ApprovalPolicy {
+            hosts: vec!["db".into()],
+            ..mode_policy("db-only")
+        };
+        assert_eq!(
+            approval_mode_for_risk(&[other], "web", &tags, RiskLevel::High),
+            ApprovalMode::Auto
+        );
+    }
 
     // All approval tests share the process-global AppState.approvals store.
     // Mark them serial so concurrent test runs don't interleave mutations to

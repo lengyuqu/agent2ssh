@@ -506,6 +506,7 @@ async fn test_user_risk_rules_classification() {
 fn test_host_profile_tags_serialization() {
     // Verify HostProfile with tags serializes/deserializes correctly
     let host = HostProfile {
+        ai_allowed: true,
         name: "test".to_string(),
         host: "10.0.0.1".to_string(),
         user: Some("ubuntu".to_string()),

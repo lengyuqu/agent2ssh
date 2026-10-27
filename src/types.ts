@@ -91,6 +91,23 @@ export type HostProfile = {
   env?: string | null;
   role?: string | null;
   owner?: string | null;
+  /** false = human-only: AI/automation sources are refused (default true). */
+  ai_allowed?: boolean;
+};
+
+// Rust: approval.rs — ApprovalMode (rename_all = "snake_case")
+export type ApprovalMode = "auto" | "required" | "conditional";
+
+// Rust: execution_control.rs — HostPolicySummary
+export type HostPolicySummary = {
+  host: string;
+  ai_allowed: boolean;
+  risk_override: RiskLevel | null;
+  low: ApprovalMode;
+  medium: ApprovalMode;
+  high: ApprovalMode;
+  policies: string[];
+  blocked_patterns: string[];
 };
 
 export type HostGroup = {

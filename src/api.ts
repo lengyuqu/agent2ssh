@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AlgoPrefsState,
   ApprovalRequest,
+  HostPolicySummary,
   AuditEntry,
   AuditFilter,
   AgentEvent,
@@ -751,6 +752,20 @@ export const api = {
   exportTeamConfig: () => invoke<TeamConfigExport>("export_team_config_cmd"),
   importTeamConfig: (config: TeamConfigExport) =>
     invoke<ImportResult>("import_team_config_cmd", { config }),
+
+  /** Policy summary for one host from the running daemon. Null if unavailable. */
+  fetchHostPolicy: async (host: string): Promise<HostPolicySummary | null> => {
+    try {
+      const token = await invoke<string>("get_daemon_token");
+      const res = await fetch(`${daemonUrl}/hosts/${encodeURIComponent(host)}/policy`, {
+        headers: { Authorization: `Bearer ${token}`, [TRACE_ID_HEADER]: SESSION_TRACE_ID },
+      });
+      if (!res.ok) return null;
+      return (await res.json()) as HostPolicySummary;
+    } catch {
+      return null; // daemon not running — silent
+    }
+  },
 
   /** Fetch pending approvals from the running daemon. Returns [] if daemon is unreachable. */
   fetchApprovals: async (): Promise<ApprovalRequest[]> => {

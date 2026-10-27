@@ -102,6 +102,7 @@ mod tests {
 
     fn make_host(name: &str, jump: Option<&str>) -> HostProfile {
         HostProfile {
+            ai_allowed: true,
             name: name.into(),
             host: format!("10.0.0.{}", name.len()),
             user: Some("root".into()),

@@ -29,6 +29,7 @@ const emptyForm = {
   env: "",
   role: "",
   owner: "",
+  ai_allowed: true,
 };
 
 type Props = {
@@ -60,6 +61,7 @@ function formFromHost(host: HostProfile) {
     env: host.env ?? "",
     role: host.role ?? "",
     owner: host.owner ?? "",
+    ai_allowed: host.ai_allowed ?? true,
   };
 }
 
@@ -121,6 +123,7 @@ export default function AddHostForm({
       env: form.env.trim() || null,
       role: form.role.trim() || null,
       owner: form.owner.trim() || null,
+      ai_allowed: form.ai_allowed,
     };
     setSaving(true);
     try {
@@ -339,6 +342,20 @@ export default function AddHostForm({
             />
           </label>
         </div>
+        <label className="flex items-start gap-2 text-sm text-foreground/90">
+          <input
+            type="checkbox"
+            className="mt-0.5"
+            checked={!form.ai_allowed}
+            onChange={(event) => setForm({ ...form, ai_allowed: !event.target.checked })}
+          />
+          <span className="grid gap-0.5">
+            <span className="font-medium">{t("Human operators only")}</span>
+            <span className="text-xs font-normal leading-snug text-muted-foreground">
+              {t("Refuse MCP, daemon and other AI sources on this host. The desktop app and CLI stay allowed.")}
+            </span>
+          </span>
+        </label>
         <HostSelector
           hosts={otherHosts}
           value={form.jump_host}

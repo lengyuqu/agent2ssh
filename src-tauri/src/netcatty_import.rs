@@ -811,6 +811,7 @@ fn plan_hosts(
         }
 
         profiles.push(HostProfile {
+            ai_allowed: true,
             name,
             host: host.hostname.clone(),
             user: non_empty(&host.username),
