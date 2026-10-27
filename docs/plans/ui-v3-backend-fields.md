@@ -6,8 +6,9 @@
 
 ## B1 · 审批请求补充 Agent 来源与命中规则
 
-- 现状：`ApprovalRequest`（`src-tauri` 侧结构体）缺少 agent 标识与策略命中详情，前端工作台只能显示主机/命令/风险级。
-- 任务：
+- 现状（2026-10-27 更正）：后端 `ApprovalRequest.context`（`ApprovalContext`）已携带 `source`（请求方标签）、`risk_details.matched_policy`、`reason`、`change_id`，`/approvals` 与审批持久化均已返回；缺口原本在前端类型与界面。前端已接线（`src/types.ts` 补 `context`，队列卡显示「来自」，详情栏显示请求方 / 命中策略 / 原因 / 变更单号，`docs/api.yaml` 补 schema）。
+- 仍未做：独立的 `session_id`、`matched_snippet`（命令内高危片段偏移）。风险分类走 AST 与多层解包（`core.rs::classify_risk`、`risk_extra`），没有现成的命中位置可取，需要先让分类器返回命中证据，工作量较大，未随本次改动处理。
+- 原任务清单（以下 `agent_name` 项已由 `context.source` 覆盖）：
   - [ ] `ApprovalRequest` 增加 `agent_name: String`（或 `source: AgentSource` 枚举，与 MCP agent 注册对齐）与 `session_id`
   - [ ] 增加可选 `matched_rule: Option<String>`（命中策略规则名）与可选 `matched_snippet: Option<String>`（命令中的高危片段及起止偏移，用于片段级着色）
   - [ ] REST `/approvals` 与事件总线 `approval_requested` 事件同步携带新字段

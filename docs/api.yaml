@@ -327,6 +327,25 @@ components:
         requested_at: { type: string, format: date-time }
         ttl_secs:     { type: integer, description: "TTL in seconds before auto-expiry" }
         status:       { type: string, enum: [pending, approved, rejected, timed_out] }
+        context:
+          type: object
+          nullable: true
+          description: "Rich review context captured when the request was raised"
+          properties:
+            host_address: { type: string, nullable: true }
+            host_env:     { type: string, nullable: true }
+            host_role:    { type: string, nullable: true }
+            source:       { type: string, nullable: true, description: "Requesting client label (cli, mcp, daemon, AGENT2SSH_SOURCE)" }
+            reason:       { type: string, nullable: true }
+            change_id:    { type: string, nullable: true }
+            risk_details:
+              type: object
+              nullable: true
+              properties:
+                built_in_risk:      { $ref: "#/components/schemas/RiskLevel" }
+                user_risk_override: { $ref: "#/components/schemas/RiskLevel", nullable: true }
+                final_risk:         { $ref: "#/components/schemas/RiskLevel" }
+                matched_policy:     { type: string, nullable: true }
 
     ApprovalResponse:
       type: object

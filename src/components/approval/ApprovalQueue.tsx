@@ -16,6 +16,7 @@ export type ApprovalRequestLite = {
   command: string;
   risk_level: RiskLevel;
   requested_at: string;
+  context?: { source?: string | null } | null;
 };
 
 /** Per-plan §4.2: the left edge carries the risk-family color. blocked reuses high. */
@@ -72,6 +73,11 @@ export default function ApprovalQueue({ items, selectedIndex, onSelect }: Props)
             >
               {item.command}
             </code>
+            {item.context?.source && (
+              <span className="mt-1.5 block truncate font-mono text-[11px] text-faint">
+                {t("From")} {item.context.source}
+              </span>
+            )}
           </button>
         );
       })}

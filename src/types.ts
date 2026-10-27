@@ -466,6 +466,26 @@ export type ApprovalStatus = "pending" | "approved" | "rejected" | "timed_out";
 
 // Rust: approval.rs — ApprovalRequest
 // id is uuid::Uuid; requested_at is DateTime<Utc>.
+// Rust: approval.rs — RiskDetails
+export type ApprovalRiskDetails = {
+  built_in_risk: RiskLevel;
+  user_risk_override?: RiskLevel | null;
+  final_risk: RiskLevel;
+  matched_policy?: string | null;
+};
+
+// Rust: approval.rs — ApprovalContext (every field is #[serde(default)])
+export type ApprovalContext = {
+  host_address?: string | null;
+  host_env?: string | null;
+  host_role?: string | null;
+  /** Requesting client label (cli / mcp / daemon / AGENT2SSH_SOURCE value). */
+  source?: string | null;
+  risk_details?: ApprovalRiskDetails | null;
+  reason?: string | null;
+  change_id?: string | null;
+};
+
 export type ApprovalRequest = {
   id: string;
   host: string;
@@ -474,6 +494,7 @@ export type ApprovalRequest = {
   requested_at: string;
   ttl_secs: number;
   status: ApprovalStatus;
+  context?: ApprovalContext | null;
 };
 
 // Rust: keys.rs — SshKeyInfo

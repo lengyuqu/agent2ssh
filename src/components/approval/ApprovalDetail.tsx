@@ -17,8 +17,9 @@ type Props = {
   onCopyAndExecute: () => void;
 };
 
-/** Per-plan §5 risk #5: no matched_rule/fragment data from the backend, so the
- * whole command row is tinted with the risk-family color (no span-level dye). */
+/** The backend reports which policy matched but not which fragment of the
+ * command triggered it, so the whole command row is tinted with the
+ * risk-family color (no span-level dye). */
 const COMMAND_TINT: Record<RiskLevel, string> = {
   low: "text-risk-low",
   medium: "text-risk-medium",
@@ -45,6 +46,15 @@ export default function ApprovalDetail({
       </div>
     );
   }
+
+  const ctx = approval.context;
+  const candidateRows: Array<[string, string | null | undefined]> = [
+    ["Requested by", ctx?.source],
+    ["Matched policy", ctx?.risk_details?.matched_policy],
+    ["Reason", ctx?.reason],
+    ["Change ID", ctx?.change_id],
+  ];
+  const contextRows = candidateRows.filter((row): row is [string, string] => Boolean(row[1]));
 
   function handleCopy() {
     navigator.clipboard
@@ -78,6 +88,17 @@ export default function ApprovalDetail({
           {approval.command}
         </code>
       </div>
+
+      {contextRows.length > 0 && (
+        <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 rounded-xl border border-line px-4 py-3 text-xs">
+          {contextRows.map(([label, value]) => (
+            <div key={label} className="contents">
+              <dt className="text-faint">{t(label)}</dt>
+              <dd className="min-w-0 break-words font-mono text-foreground">{value}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
 
       <div className="flex flex-wrap items-center gap-2">
         <Button variant="outline" disabled={busy} onClick={onReject} className="text-risk-high">
