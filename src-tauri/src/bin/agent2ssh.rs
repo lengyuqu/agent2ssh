@@ -2890,6 +2890,8 @@ async fn async_main() -> Result<()> {
                 host_env: env,
                 host_role: role,
                 host_owner: owner,
+                decision: None,
+                agent: None,
                 host_scope: None,
             };
 

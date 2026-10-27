@@ -1102,6 +1102,8 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
                 host_env: args["host_env"].as_str().map(str::to_string),
                 host_role: args["host_role"].as_str().map(str::to_string),
                 host_owner: args["host_owner"].as_str().map(str::to_string),
+                decision: None,
+                agent: None,
                 host_scope: None,
             };
             serde_json::to_value(list_audit_core(filter).map_err(McpError::from)?)?
@@ -1125,6 +1127,8 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
                 host_env: args["host_env"].as_str().map(str::to_string),
                 host_role: args["host_role"].as_str().map(str::to_string),
                 host_owner: args["host_owner"].as_str().map(str::to_string),
+                decision: None,
+                agent: None,
                 host_scope: None,
             };
             let exported = match format {

@@ -10,8 +10,8 @@ use std::{
 
 use crate::app_state::app_state;
 use crate::types::{
-    default_host_group, default_host_groups, AppConfig, AuditEntry, AuditFilter, ExecResult,
-    RiskLevel,
+    default_host_group, default_host_groups, AppConfig, AuditDecision, AuditEntry, AuditFilter,
+    ExecResult, RiskLevel,
 };
 
 // Process-local config file write lock, delegated to AppState (P2 #5).
@@ -748,12 +748,64 @@ fn normalize_config(mut config: AppConfig) -> AppConfig {
     config
 }
 
+/// Human approvals granted but not yet matched to the audit entry of the
+/// command they unlocked. Authorization and audit writing are separate steps
+/// owned by different call sites, so this is how an executed entry learns it
+/// ran on a human's say-so rather than on policy alone.
+static GRANTED_APPROVALS: std::sync::Mutex<Vec<(String, String, std::time::Instant)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// An approval nobody audited within this window is dropped, so a command that
+/// was approved but never ran cannot label a later identical command.
+const GRANTED_APPROVAL_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Remember that a human approved `command` on `host`; the next executed audit
+/// entry for the same pair is recorded as `approved` by `human`.
+pub fn note_human_approval(host: &str, command: &str) {
+    let mut granted = GRANTED_APPROVALS.lock().unwrap_or_else(|e| e.into_inner());
+    granted.retain(|(_, _, at)| at.elapsed() < GRANTED_APPROVAL_TTL);
+    granted.push((
+        host.to_string(),
+        command.to_string(),
+        std::time::Instant::now(),
+    ));
+}
+
+fn take_human_approval(host: &str, command: &str) -> bool {
+    let mut granted = GRANTED_APPROVALS.lock().unwrap_or_else(|e| e.into_inner());
+    granted.retain(|(_, _, at)| at.elapsed() < GRANTED_APPROVAL_TTL);
+    match granted
+        .iter()
+        .position(|(h, c, _)| h == host && c == command)
+    {
+        Some(index) => {
+            granted.remove(index);
+            true
+        }
+        None => false,
+    }
+}
+
 pub fn append_audit(
     result: &ExecResult,
     risk_level: RiskLevel,
     reason: Option<&str>,
     change_id: Option<&str>,
     source: Option<&str>,
+) -> Result<()> {
+    append_audit_with_decision(result, risk_level, reason, change_id, source, None)
+}
+
+/// Like [`append_audit`], but with an explicit authorization verdict. With
+/// `None` the verdict is derived: only a command that actually ran gets one,
+/// `approved` if a human approval is waiting for it and `auto_allowed` if not.
+pub fn append_audit_with_decision(
+    result: &ExecResult,
+    risk_level: RiskLevel,
+    reason: Option<&str>,
+    change_id: Option<&str>,
+    source: Option<&str>,
+    decision: Option<(AuditDecision, &str)>,
 ) -> Result<()> {
     use chrono::Utc;
     use uuid::Uuid;
@@ -764,6 +816,17 @@ pub fn append_audit(
                                                         // Finding 16: Derive action and outcome from the ExecResult.
     let action = derive_audit_action(&result.command);
     let outcome = derive_audit_outcome(result.exit_code, risk_level);
+    let (decision, decided_by) = match decision {
+        Some((decision, by)) => (Some(decision), Some(by.to_string())),
+        None if result.exit_code.is_some() => {
+            if take_human_approval(&result.host, &result.command) {
+                (Some(AuditDecision::Approved), Some("human".to_string()))
+            } else {
+                (Some(AuditDecision::AutoAllowed), Some("rule".to_string()))
+            }
+        }
+        None => (None, None),
+    };
     let entry = AuditEntry {
         id: Uuid::new_v4(),
         ts: Utc::now(),
@@ -778,6 +841,8 @@ pub fn append_audit(
         source: source.map(str::to_string),
         action,
         outcome,
+        decision,
+        decided_by,
     };
     let mut file = OpenOptions::new()
         .create(true)
@@ -1026,6 +1091,8 @@ pub fn compute_metrics_trend(period: TrendPeriod) -> Result<MetricsTrend> {
         host_env: None,
         host_role: None,
         host_owner: None,
+        decision: None,
+        agent: None,
         host_scope: None,
     };
 
@@ -1346,6 +1413,20 @@ pub fn list_audit_raw(filter: &AuditFilter) -> Result<Vec<AuditEntry>> {
         }
         if let Some(code) = filter.exit_code {
             if e.exit_code != Some(code) {
+                return false;
+            }
+        }
+        if let Some(decision) = filter.decision {
+            if e.decision != Some(decision) {
+                return false;
+            }
+        }
+        if let Some(agent) = &filter.agent {
+            if !e
+                .source
+                .as_deref()
+                .is_some_and(|source| source.eq_ignore_ascii_case(agent))
+            {
                 return false;
             }
         }
@@ -2424,6 +2505,109 @@ mod tests {
                 host
             );
         }
+    }
+
+    fn executed(host: &str, command: &str) -> ExecResult {
+        ExecResult {
+            host: host.into(),
+            command: command.into(),
+            exit_code: Some(0),
+            stdout: String::new(),
+            stderr: String::new(),
+            duration_ms: 1,
+            risk_level: RiskLevel::Medium,
+            truncated: false,
+            dropped_bytes: 0,
+            side_effect: None,
+        }
+    }
+
+    #[test]
+    fn audit_records_decision_and_filters_by_decision_and_agent() {
+        let _dir = TestConfigDir::new("auditdecision");
+
+        // A command a human approved: the approval is matched to its entry once.
+        note_human_approval("web-1", "systemctl restart app");
+        append_audit(
+            &executed("web-1", "systemctl restart app"),
+            RiskLevel::Medium,
+            None,
+            None,
+            Some("claude-code"),
+        )
+        .unwrap();
+        // The same command again has no approval waiting, so it ran on policy.
+        append_audit(
+            &executed("web-1", "systemctl restart app"),
+            RiskLevel::Medium,
+            None,
+            None,
+            Some("cursor"),
+        )
+        .unwrap();
+        // A command that never ran carries only an explicit verdict.
+        let mut rejected = executed("web-1", "rm -rf /srv");
+        rejected.exit_code = None;
+        append_audit_with_decision(
+            &rejected,
+            RiskLevel::High,
+            Some("command rejected by approver"),
+            None,
+            Some("claude-code"),
+            Some((AuditDecision::Rejected, "human")),
+        )
+        .unwrap();
+        // ...and without a verdict it records none rather than guessing.
+        append_audit(
+            &rejected,
+            RiskLevel::High,
+            Some("scope denied"),
+            None,
+            Some("cursor"),
+        )
+        .unwrap();
+
+        let all = list_audit_raw(&AuditFilter {
+            limit: 10,
+            ..Default::default()
+        })
+        .unwrap();
+        // Newest first: scope-denied, rejected, auto-allowed, approved.
+        assert_eq!(all.len(), 4);
+        assert_eq!(all[0].decision, None);
+        assert_eq!(all[0].decided_by, None);
+        assert_eq!(all[1].decision, Some(AuditDecision::Rejected));
+        assert_eq!(all[1].decided_by.as_deref(), Some("human"));
+        assert_eq!(all[2].decision, Some(AuditDecision::AutoAllowed));
+        assert_eq!(all[2].decided_by.as_deref(), Some("rule"));
+        assert_eq!(all[3].decision, Some(AuditDecision::Approved));
+        assert_eq!(all[3].decided_by.as_deref(), Some("human"));
+
+        let approved = list_audit_raw(&AuditFilter {
+            decision: Some(AuditDecision::Approved),
+            limit: 10,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(approved.len(), 1);
+        assert_eq!(approved[0].source.as_deref(), Some("claude-code"));
+
+        let cursor = list_audit_raw(&AuditFilter {
+            agent: Some("CURSOR".into()),
+            limit: 10,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(cursor.len(), 2);
+
+        let both = list_audit_raw(&AuditFilter {
+            agent: Some("claude-code".into()),
+            decision: Some(AuditDecision::Rejected),
+            limit: 10,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(both.len(), 1);
     }
 
     #[test]

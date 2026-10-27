@@ -408,7 +408,13 @@ export type AuditFilter = {
   since?: string | null;
   until?: string | null;
   limit?: number;
+  decision?: AuditDecision | null;
+  /** Requesting client label (matches AuditEntry.source, case-insensitive). */
+  agent?: string | null;
 };
+
+// Rust: types.rs — AuditDecision (rename_all = "snake_case")
+export type AuditDecision = "approved" | "rejected" | "timed_out" | "auto_allowed" | "blocked";
 
 // Rust: types.rs — AuditEntry
 // id is uuid::Uuid; ts is DateTime<Utc> (ISO-8601 string).
@@ -423,6 +429,10 @@ export type AuditEntry = {
   reason?: string | null;
   change_id?: string | null;
   source?: string | null;
+  /** Absent on entries written before decisions were recorded. */
+  decision?: AuditDecision | null;
+  /** "human", "rule" or "timeout". */
+  decided_by?: string | null;
 };
 
 export type AgentEventType =

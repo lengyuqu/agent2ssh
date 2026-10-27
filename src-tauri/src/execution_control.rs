@@ -7,8 +7,8 @@ use crate::{
     core::{apply_risk_override, classify_risk},
     remote::{check_daemon_scope, DaemonScope},
     risk_config::classify_effective_risk,
-    store::{append_audit, load_config},
-    types::{ExecResult, RiskLevel},
+    store::{append_audit_with_decision, load_config, note_human_approval},
+    types::{AuditDecision, ExecResult, RiskLevel},
 };
 
 #[derive(Debug, Clone)]
@@ -153,6 +153,34 @@ pub fn append_rejected_exec_audit(
     reason: &str,
     change_id: Option<&str>,
 ) {
+    // Callers of this form stopped the command on policy alone, with no
+    // approver involved; the approver paths record their own verdict.
+    let decision = if risk == RiskLevel::Blocked {
+        AuditDecision::Blocked
+    } else {
+        AuditDecision::Rejected
+    };
+    append_decided_exec_audit(
+        source,
+        host,
+        command,
+        risk,
+        reason,
+        change_id,
+        Some((decision, "rule")),
+    );
+}
+
+/// Audit a command that did not run, recording who or what stopped it.
+fn append_decided_exec_audit(
+    source: &str,
+    host: &str,
+    command: &str,
+    risk: RiskLevel,
+    reason: &str,
+    change_id: Option<&str>,
+    decision: Option<(AuditDecision, &str)>,
+) {
     let result = ExecResult {
         host: host.to_string(),
         command: command.to_string(),
@@ -165,7 +193,14 @@ pub fn append_rejected_exec_audit(
         dropped_bytes: 0,
         side_effect: None,
     };
-    let _ = append_audit(&result, risk, Some(reason), change_id, Some(source));
+    let _ = append_audit_with_decision(
+        &result,
+        risk,
+        Some(reason),
+        change_id,
+        Some(source),
+        decision,
+    );
 }
 
 /// Authorize a command for call sites that have no local approval UI.
@@ -300,13 +335,14 @@ where
     );
     if risk == RiskLevel::Blocked {
         let message = "command blocked by risk policy";
-        append_rejected_exec_audit(
+        append_decided_exec_audit(
             input.source,
             input.host,
             input.command,
             risk,
             message,
             input.change_id.as_deref(),
+            Some((AuditDecision::Blocked, "rule")),
         );
         return Err(CommandAuthorizationError::Blocked {
             risk,
@@ -344,29 +380,34 @@ where
         .await
         .map_err(CommandAuthorizationError::Internal)?
     {
-        ApprovalOutcome::Approved => Ok(CommandAuthorization {
-            risk,
-            approved: true,
-        }),
+        ApprovalOutcome::Approved => {
+            note_human_approval(input.host, input.command);
+            Ok(CommandAuthorization {
+                risk,
+                approved: true,
+            })
+        }
         ApprovalOutcome::Rejected => {
-            append_rejected_exec_audit(
+            append_decided_exec_audit(
                 input.source,
                 input.host,
                 input.command,
                 risk,
                 "command rejected by approver",
                 change_id.as_deref(),
+                Some((AuditDecision::Rejected, "human")),
             );
             Err(CommandAuthorizationError::ApprovalRejected)
         }
         ApprovalOutcome::TimedOut => {
-            append_rejected_exec_audit(
+            append_decided_exec_audit(
                 input.source,
                 input.host,
                 input.command,
                 risk,
                 "approval request timed out",
                 change_id.as_deref(),
+                Some((AuditDecision::TimedOut, "timeout")),
             );
             Err(CommandAuthorizationError::ApprovalTimedOut)
         }

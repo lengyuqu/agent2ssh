@@ -821,6 +821,8 @@ struct AuditQuery {
     host_env: Option<String>,
     host_role: Option<String>,
     host_owner: Option<String>,
+    decision: Option<AuditDecision>,
+    agent: Option<String>,
 }
 #[derive(Deserialize)]
 struct AuditExportQuery {
@@ -835,6 +837,8 @@ struct AuditExportQuery {
     host_env: Option<String>,
     host_role: Option<String>,
     host_owner: Option<String>,
+    decision: Option<AuditDecision>,
+    agent: Option<String>,
     format: Option<String>,
 }
 #[derive(Deserialize)]
@@ -1588,6 +1592,8 @@ async fn audit(
         host_env: q.host_env,
         host_role: q.host_role,
         host_owner: q.host_owner,
+        decision: q.decision,
+        agent: q.agent,
         host_scope: audit_host_scope(&auth),
     };
     list_audit_core(filter)
@@ -1617,6 +1623,8 @@ async fn audit_export(
         host_env: q.host_env,
         host_role: q.host_role,
         host_owner: q.host_owner,
+        decision: q.decision,
+        agent: q.agent,
         host_scope: None,
     };
     let format = q.format.unwrap_or_else(|| "jsonl".to_string());

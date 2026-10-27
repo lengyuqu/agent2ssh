@@ -9,8 +9,9 @@ import {
   type SortingState,
 } from "@tanstack/react-table";
 import { useI18n } from "../i18n";
-import type { AuditEntry, AuditFilter, RiskLevel } from "../types";
+import type { AuditDecision, AuditEntry, AuditFilter, RiskLevel } from "../types";
 import RiskBadge from "./RiskBadge";
+import { Badge, type BadgeProps } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
 import { ColumnVisibilityMenu, DataTable, selectColumn } from "./ui/data-table";
@@ -29,6 +30,22 @@ const RESULT_DOT: Record<"ok" | "fail" | "none", string> = {
   ok: "bg-risk-low",
   fail: "bg-risk-high",
   none: "bg-muted-foreground/50",
+};
+
+const DECISION_LABEL: Record<AuditDecision, string> = {
+  approved: "Approved",
+  rejected: "Rejected",
+  timed_out: "Timed out",
+  auto_allowed: "Auto-allowed",
+  blocked: "Blocked",
+};
+
+const DECISION_VARIANT: Record<AuditDecision, NonNullable<BadgeProps["variant"]>> = {
+  approved: "success",
+  rejected: "destructive",
+  timed_out: "warning",
+  auto_allowed: "secondary",
+  blocked: "destructive",
 };
 
 // Command cells are tinted with the risk family of the entry (full-row, since
@@ -150,6 +167,21 @@ export default function AuditPanel({ audit, onRefresh, onReplay }: Props) {
       columnHelper.accessor("risk_level", {
         header: t("Risk level"),
         cell: (info) => <RiskBadge level={info.getValue() ?? "low"} hideLow />,
+      }),
+      columnHelper.accessor("decision", {
+        header: t("Decision"),
+        cell: (info) => {
+          const decision = info.getValue();
+          if (!decision) return null;
+          return (
+            <Badge
+              variant={DECISION_VARIANT[decision]}
+              title={info.row.original.decided_by ?? undefined}
+            >
+              {t(DECISION_LABEL[decision])}
+            </Badge>
+          );
+        },
       }),
       // v3: replay raises the terminal drawer and re-runs the command (§3.4).
       ...(onReplay

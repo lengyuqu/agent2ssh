@@ -207,6 +207,15 @@ components:
         reason:      { type: string, nullable: true }
         change_id:   { type: string, nullable: true }
         source:      { type: string, nullable: true }
+        decision:
+          type: string
+          nullable: true
+          enum: [approved, rejected, timed_out, auto_allowed, blocked]
+          description: "Authorization verdict; absent on older entries and on operations that never ran"
+        decided_by:
+          type: string
+          nullable: true
+          description: "human, rule or timeout"
 
     AgentEvent:
       type: object
@@ -1014,6 +1023,13 @@ paths:
         - name: host_owner
           in: query
           schema: { type: string }
+        - name: decision
+          in: query
+          schema: { type: string, enum: [approved, rejected, timed_out, auto_allowed, blocked] }
+        - name: agent
+          in: query
+          description: Requesting client label, exact case-insensitive match on source
+          schema: { type: string }
       responses:
         "200":
           content:
@@ -1062,6 +1078,13 @@ paths:
           schema: { type: string }
         - name: host_owner
           in: query
+          schema: { type: string }
+        - name: decision
+          in: query
+          schema: { type: string, enum: [approved, rejected, timed_out, auto_allowed, blocked] }
+        - name: agent
+          in: query
+          description: Requesting client label, exact case-insensitive match on source
           schema: { type: string }
       responses:
         "200":

@@ -16,6 +16,10 @@
 
 ## B2 · 审计条目补充裁决结果与执行上下文
 
+- 状态（2026-10-27）：后端与审计页已落地。`AuditEntry` 新增 `decision`（`approved / rejected / timed_out / auto_allowed`，另加 `blocked` 表示被风险规则直接拒绝）与 `decided_by`（`human / rule / timeout`）；`AuditFilter`、`GET /audit`、`GET /audit/export` 支持 `decision` 与 `agent`（按 `source` 精确匹配，忽略大小写）；审计表新增「裁决」列。
+- 取舍：执行成功条目的 `approved`/`auto_allowed` 由进程内「已批准账本」（`store::note_human_approval`，10 分钟过期）与审计写入配对得出，避免改动 70 余处 `append_audit` 调用点；没有执行（`exit_code` 为空）且无明确裁决的条目保持 `None`，不猜测。旧条目同样为 `None`。
+- 未做：CLI/MCP 的审计过滤参数、CSV 导出新列、工作台「今日已审」改用 `decision` 统计。
+
 - 现状：审计结果三态（approved/rejected/自动放行）前端靠 exit_code 等近似推断。
 - 任务：
   - [ ] 审计条目增加 `decision: Decision`（approved / rejected / timed_out / auto_allowed）与 `decided_by: String`（人工/规则）

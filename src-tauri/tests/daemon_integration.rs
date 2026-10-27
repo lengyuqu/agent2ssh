@@ -558,6 +558,8 @@ fn test_audit_filter_serialization() {
         host_env: None,
         host_role: None,
         host_owner: None,
+        decision: None,
+        agent: None,
         host_scope: None,
     };
     let json = serde_json::to_string(&filter).unwrap();
@@ -2584,6 +2586,8 @@ fn audit_export_response_contract() {
         source: Some("daemon".into()),
         action: None,
         outcome: None,
+        decision: None,
+        decided_by: None,
     }];
 
     // JSONL format: each line is a valid AuditEntry JSON

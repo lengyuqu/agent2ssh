@@ -290,6 +290,8 @@ async fn timeout_is_recorded_in_the_audit_log() {
         host_env: None,
         host_role: None,
         host_owner: None,
+        decision: None,
+        agent: None,
         host_scope: None,
     })
     .expect("audit log must be readable");

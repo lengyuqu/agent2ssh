@@ -456,6 +456,13 @@ pub struct AuditFilter {
     /// Host group: filter by owner label
     #[serde(default)]
     pub host_owner: Option<String>,
+    /// Only entries with this authorization verdict.
+    #[serde(default)]
+    pub decision: Option<AuditDecision>,
+    /// Only entries from this requesting client (exact, case-insensitive match
+    /// on `source`).
+    #[serde(default)]
+    pub agent: Option<String>,
     /// Internal daemon authorization boundary. This is not part of the wire
     /// filter; the daemon fills it before reading so scope filtering happens
     /// before the result limit is applied.
@@ -539,6 +546,8 @@ impl AuditEntry {
             source: None,
             action: None,
             outcome: None,
+            decision: None,
+            decided_by: None,
         }
     }
 }
@@ -574,6 +583,31 @@ pub struct AuditEntry {
     /// or "timeout". Derived from exit_code and risk_level.
     #[serde(default)]
     pub outcome: Option<String>,
+    /// How the authorization layer resolved this operation. `None` for entries
+    /// written before decisions were recorded, and for entries that never ran
+    /// (control-plane failures that are not an authorization verdict).
+    #[serde(default)]
+    pub decision: Option<AuditDecision>,
+    /// Who made the call: `human` (an approver), `rule` (risk/approval policy
+    /// let it through or blocked it with no human involved) or `timeout`.
+    #[serde(default)]
+    pub decided_by: Option<String>,
+}
+
+/// Authorization verdict recorded on an [`AuditEntry`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditDecision {
+    /// A human approved the command in the approval queue.
+    Approved,
+    /// A human rejected the command in the approval queue.
+    Rejected,
+    /// The approval request expired with no answer.
+    TimedOut,
+    /// No approval was required, so the command ran on policy alone.
+    AutoAllowed,
+    /// Refused by the built-in or user risk rules; never reaches an approver.
+    Blocked,
 }
 
 impl AuditEntry {
