@@ -76,7 +76,8 @@ use std::{
     path::{Path, PathBuf},
     time::Instant,
 };
-use tauri::{AppHandle, Manager, WindowEvent};
+use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -1813,6 +1814,17 @@ pub fn daemon_start(app: AppHandle) -> Result<DaemonControlResult, String> {
     let daemon_bin = bundled_daemon_binary_path()?;
     let started =
         crate::daemon_control::start_daemon_background(&daemon_bin).map_err(|e| e.to_string())?;
+    // Recorded so quitting the app stops this daemon and no other: one started
+    // elsewhere (the CLI, an MCP client, a person) may be in use by agents that
+    // have nothing to do with this window.
+    if let Err(e) = crate::daemon_control::mark_daemon_owned(started.pid) {
+        let _ = append_diagnostic_log(
+            "warn",
+            "tauri",
+            "could not record daemon ownership; quitting the app will leave it running",
+            Some(serde_json::json!({ "pid": started.pid, "error": e.to_string() })),
+        );
+    }
     let _ = append_diagnostic_log(
         "info",
         "tauri",
@@ -1838,7 +1850,7 @@ pub fn daemon_start(app: AppHandle) -> Result<DaemonControlResult, String> {
 pub fn daemon_stop() -> Result<DaemonControlResult, String> {
     match crate::daemon_control::read_daemon_pid().map_err(|e| e.to_string())? {
         Some(pid) if crate::daemon_control::process_is_alive(pid) => {
-            crate::daemon_control::terminate_process(pid).map_err(|e| e.to_string())?;
+            crate::daemon_control::stop_daemon_process(pid).map_err(|e| e.to_string())?;
             crate::daemon_control::remove_daemon_pid_file();
             let _ = append_diagnostic_log(
                 "info",
@@ -1882,7 +1894,7 @@ pub fn daemon_stop() -> Result<DaemonControlResult, String> {
 pub fn daemon_restart(app: AppHandle) -> Result<DaemonControlResult, String> {
     if let Some(pid) = crate::daemon_control::read_daemon_pid().map_err(|e| e.to_string())? {
         if crate::daemon_control::process_is_alive(pid) {
-            crate::daemon_control::terminate_process(pid).map_err(|e| e.to_string())?;
+            crate::daemon_control::stop_daemon_process(pid).map_err(|e| e.to_string())?;
             let _ = append_diagnostic_log(
                 "info",
                 "tauri",
@@ -1895,10 +1907,185 @@ pub fn daemon_restart(app: AppHandle) -> Result<DaemonControlResult, String> {
     daemon_start(app)
 }
 
+/// Stop the daemon at quit time — but only one this app started.
+///
+/// The explicit Stop button and `agent2ssh daemon stop` stop whatever daemon is
+/// running; quitting a window is a weaker statement than that, and a daemon the
+/// CLI or an MCP client started is serving agents that never opened this app.
+fn stop_owned_daemon() {
+    let Ok(Some(pid)) = crate::daemon_control::read_daemon_pid() else {
+        return;
+    };
+    if !crate::daemon_control::process_is_alive(pid) {
+        return;
+    }
+    if !crate::daemon_control::daemon_is_owned(pid) {
+        let _ = append_diagnostic_log(
+            "info",
+            "tauri",
+            "quit leaves the daemon running: it was not started by the desktop app",
+            Some(serde_json::json!({ "pid": pid })),
+        );
+        return;
+    }
+    match crate::daemon_control::stop_daemon_process(pid) {
+        Ok(()) => {
+            crate::daemon_control::remove_daemon_pid_file();
+            let _ = append_diagnostic_log(
+                "info",
+                "tauri",
+                "quit stopped the daemon the desktop app started",
+                Some(serde_json::json!({ "pid": pid })),
+            );
+        }
+        Err(e) => {
+            let _ = append_diagnostic_log(
+                "warn",
+                "tauri",
+                "quit could not stop the daemon",
+                Some(serde_json::json!({ "pid": pid, "error": e.to_string() })),
+            );
+        }
+    }
+}
+
+/// Wording for the "this will end live work" confirmation. The frontend owns
+/// the language, so it hands these over with the tray labels; the English
+/// defaults cover the moments before it has.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuitConfirmLabels {
+    pub title: String,
+    /// `{items}` is replaced with the comma-separated list of what will end.
+    pub body: String,
+    pub quit: String,
+    pub cancel: String,
+    /// Each count label carries an `{n}` placeholder.
+    pub pty_sessions: String,
+    pub resident_sessions: String,
+    pub forwards: String,
+    pub pending_approvals: String,
+}
+
+impl Default for QuitConfirmLabels {
+    fn default() -> Self {
+        Self {
+            title: "Quit Agent2SSH?".into(),
+            body: "Quitting stops the background service, which ends: {items}.".into(),
+            quit: "Quit".into(),
+            cancel: "Cancel".into(),
+            pty_sessions: "Terminal sessions: {n}".into(),
+            resident_sessions: "Resident shells: {n}".into(),
+            forwards: "Port forwards: {n}".into(),
+            pending_approvals: "Pending approvals: {n}".into(),
+        }
+    }
+}
+
+static QUIT_CONFIRM_LABELS: std::sync::Mutex<Option<QuitConfirmLabels>> =
+    std::sync::Mutex::new(None);
+
+fn quit_confirm_labels() -> QuitConfirmLabels {
+    QUIT_CONFIRM_LABELS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+        .unwrap_or_default()
+}
+
+/// The confirmation text for `activity`, or `None` when nothing would be lost.
+fn quit_confirm_message(
+    activity: &crate::daemon_activity::DaemonActivity,
+    labels: &QuitConfirmLabels,
+) -> Option<String> {
+    let items: Vec<String> = [
+        (activity.pty_sessions, &labels.pty_sessions),
+        (activity.resident_sessions, &labels.resident_sessions),
+        (activity.forwards, &labels.forwards),
+        (activity.pending_approvals, &labels.pending_approvals),
+    ]
+    .into_iter()
+    .filter(|(count, _)| *count > 0)
+    .map(|(count, label)| label.replace("{n}", &count.to_string()))
+    .collect();
+    if items.is_empty() {
+        None
+    } else {
+        Some(labels.body.replace("{items}", &items.join(", ")))
+    }
+}
+
+/// Whether to go ahead and quit. Asks only when quitting would actually stop a
+/// daemon that is holding live work; everything else just quits.
+///
+/// Must run off the main thread: it blocks on the daemon and on the dialog.
+fn confirm_quit(app: &AppHandle) -> bool {
+    let Ok(Some(pid)) = crate::daemon_control::read_daemon_pid() else {
+        return true;
+    };
+    // A daemon this app would leave running loses nothing, so there is nothing
+    // to ask about.
+    if !crate::daemon_control::process_is_alive(pid) || !crate::daemon_control::daemon_is_owned(pid)
+    {
+        return true;
+    }
+    let Some(activity) = crate::daemon_activity::fetch_daemon_activity() else {
+        // Unknown, not idle. Asking about work we cannot name would be noise, and
+        // refusing to quit over it would trap the user in the app.
+        let _ = append_diagnostic_log(
+            "warn",
+            "tauri",
+            "quit could not read daemon activity; quitting without a confirmation",
+            Some(serde_json::json!({ "pid": pid })),
+        );
+        return true;
+    };
+    let labels = quit_confirm_labels();
+    let Some(message) = quit_confirm_message(&activity, &labels) else {
+        return true;
+    };
+    app.dialog()
+        .message(message)
+        .title(labels.title.clone())
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            labels.quit.clone(),
+            labels.cancel.clone(),
+        ))
+        .blocking_show()
+}
+
+fn finish_quit(app: &AppHandle) {
+    stop_owned_daemon();
+    app.exit(0);
+}
+
+static QUIT_IN_PROGRESS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The one way every quit path ends: confirm if live work would be lost, then
+/// stop the daemon this app started and exit.
+///
+/// Returns at once. The confirmation blocks on a dialog, and the callers run on
+/// the main thread (tray menu, window close, exit request), where blocking would
+/// freeze the event loop the dialog needs to be drawn on.
+fn request_quit(app: &AppHandle) {
+    // A second request while a dialog is open (a second Cmd+Q, say) is the same
+    // question; it must not stack another dialog.
+    if QUIT_IN_PROGRESS.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        if confirm_quit(&app) {
+            finish_quit(&app);
+        } else {
+            QUIT_IN_PROGRESS.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
+}
+
 #[tauri::command]
 pub fn quit_app(app: AppHandle) {
-    let _ = daemon_stop();
-    app.exit(0);
+    request_quit(&app);
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
@@ -2930,8 +3117,7 @@ fn reveal_main_window(app: &AppHandle) {
 }
 
 fn quit_from_tray(app: &AppHandle) {
-    let _ = daemon_stop();
-    app.exit(0);
+    request_quit(app);
 }
 
 fn build_system_tray(
@@ -2993,7 +3179,13 @@ pub fn set_tray_labels(
     open_label: String,
     quit_label: String,
     tooltip: Option<String>,
+    quit_confirm: Option<QuitConfirmLabels>,
 ) {
+    if let Some(labels) = quit_confirm {
+        *QUIT_CONFIRM_LABELS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(labels);
+    }
     let _ = app.remove_tray_by_id(TRAY_ID);
     let _ = build_system_tray(
         &app,
@@ -3421,7 +3613,10 @@ pub fn run_tauri() {
                         }
                     }
                     CloseWindowAction::QuitApplication => {
-                        let _ = daemon_stop();
+                        // Held open until the confirmation settles: closing now
+                        // and asking afterwards would leave nothing to cancel.
+                        api.prevent_close();
+                        request_quit(app.app_handle());
                     }
                 }
             }
@@ -3590,13 +3785,83 @@ pub fn run_tauri() {
             // Audit rotation
             rotate_audit,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| match event {
+            // An exit nobody on our side asked for — Cmd+Q, the last window
+            // going away — takes the same confirm-then-stop route as the tray's
+            // Quit. `finish_quit` exits with an explicit code, which is what lets
+            // it through here instead of being intercepted again.
+            RunEvent::ExitRequested { api, code, .. } if code.is_none() => {
+                api.prevent_exit();
+                request_quit(app);
+            }
+            // Backstop for exits that never asked first (an updater restart):
+            // the daemon this app started must not outlive it.
+            RunEvent::Exit => stop_owned_daemon(),
+            _ => {}
+        });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn activity(
+        pty: usize,
+        resident: usize,
+        forwards: usize,
+        approvals: usize,
+    ) -> crate::daemon_activity::DaemonActivity {
+        crate::daemon_activity::DaemonActivity {
+            pty_sessions: pty,
+            resident_sessions: resident,
+            forwards,
+            pending_approvals: approvals,
+        }
+    }
+
+    #[test]
+    fn an_idle_daemon_needs_no_quit_confirmation() {
+        assert_eq!(
+            quit_confirm_message(&activity(0, 0, 0, 0), &QuitConfirmLabels::default()),
+            None
+        );
+    }
+
+    #[test]
+    fn the_confirmation_lists_only_what_would_end() {
+        let message =
+            quit_confirm_message(&activity(2, 0, 1, 0), &QuitConfirmLabels::default()).unwrap();
+        assert_eq!(
+            message,
+            "Quitting stops the background service, which ends: Terminal sessions: 2, Port forwards: 1."
+        );
+    }
+
+    #[test]
+    fn the_confirmation_uses_the_wording_the_frontend_supplied() {
+        let labels = QuitConfirmLabels {
+            body: "将结束：{items}".into(),
+            pending_approvals: "待审批：{n}".into(),
+            ..QuitConfirmLabels::default()
+        };
+        assert_eq!(
+            quit_confirm_message(&activity(0, 0, 0, 3), &labels).unwrap(),
+            "将结束：待审批：3"
+        );
+    }
+
+    #[test]
+    fn the_frontend_label_payload_deserializes_in_camel_case() {
+        let labels: QuitConfirmLabels = serde_json::from_str(
+            r#"{"title":"t","body":"b {items}","quit":"q","cancel":"c","ptySessions":"p {n}",
+                "residentSessions":"r {n}","forwards":"f {n}","pendingApprovals":"a {n}"}"#,
+        )
+        .expect("the shape src/api.ts sends");
+        assert_eq!(labels.pty_sessions, "p {n}");
+        assert_eq!(labels.pending_approvals, "a {n}");
+    }
 
     #[tokio::test]
     #[serial_test::serial(desktop_webdav)]

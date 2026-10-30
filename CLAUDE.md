@@ -79,7 +79,7 @@ SSH transport is embedded-first. Exec against an SSH host, SFTP, WebSocket `/ter
 
 ## Data & config layout
 
-All runtime state is under `~/.agent2ssh/`: `hosts.json`, `audit.jsonl`, `policy.toml`/`.json`, `playbooks.toml`, `remotes.toml`, `webhook.toml`, `environments.toml` (user-defined `local:<id>` environments — loaded once at daemon start, never hot-reloaded), `daemon.token` (admin bearer, auto-`0600`), `daemon_tokens.toml` (scoped tokens), `secrets.enc` (K1 app-managed encrypted credential store, `0600`), `keys/` (`0600`). See `docs/guides/configuration-guide.md` for the full format.
+All runtime state is under `~/.agent2ssh/`: `hosts.json`, `audit.jsonl`, `policy.toml`/`.json`, `playbooks.toml`, `remotes.toml`, `webhook.toml`, `environments.toml` (user-defined `local:<id>` environments — loaded once at daemon start, never hot-reloaded), `daemon.token` (admin bearer, auto-`0600`), `daemon.owner` (which daemon the desktop started — quit stops only that one), `daemon_tokens.toml` (scoped tokens), `secrets.enc` (K1 app-managed encrypted credential store, `0600`), `keys/` (`0600`). See `docs/guides/configuration-guide.md` for the full format.
 
 ## Docs worth reading before changing related code
 

@@ -10,6 +10,7 @@ Agent2SSH 的所有配置和数据文件存储在 `~/.agent2ssh/` 目录下。�
   daemon.token     # 守护进程认证令牌（自动生成）
   daemon_tokens.toml # 可选的 scoped Bearer Token
   daemon.pid       # 守护进程 PID（自动管理）
+  daemon.owner     # 记录哪个 daemon 是桌面应用启动的（自动管理）
   audit.jsonl      # 执行审计日志（自动追加）
   app.log          # 结构化诊断日志（JSONL，自动轮转）
   secrets.enc      # App 自建加密凭据库（主密码派生密钥，自动管理）
@@ -345,6 +346,29 @@ denied_commands = ["rm -rf *", "mkfs *"]
 - 守护进程启动时自动写入
 - 守护进程正常退出时自动删除
 - 如果守护进程异常退出，此文件可能残留；`daemon status` 会检查进程是否仍然存活
+
+---
+
+## daemon.owner
+
+### 用途
+
+记录"哪个 daemon 是桌面应用自己启动的"。桌面应用退出时只会停止它启动的 daemon；由 CLI（`agent2ssh daemon start`）、MCP 客户端或手动启动的 daemon 不属于桌面应用，退出应用时会保持运行，以免中断正在使用它的 agent。
+
+### 文件格式
+
+```json
+{"pid":12345,"start_time":1761800000}
+```
+
+`start_time` 用来防止 PID 被系统回收后误认：只有 PID 和进程启动时间都对得上才算桌面应用启动的。
+
+### 注意事项
+
+- 由桌面应用在启动 daemon 时写入，停止 daemon 时删除；无需手动维护
+- 文件缺失、损坏或与当前 daemon 对不上，都视为"不是桌面应用启动的"，退出应用时不会停止它
+- 设置里的"停止 Daemon"按钮和 `agent2ssh daemon stop` 是明确的停止指令，不受此文件限制
+- 桌面应用退出前，如果它启动的 daemon 里还有终端会话、常驻 shell、端口转发或待审批请求，会先弹窗确认，因为这些都只存在于 daemon 内存里，停止即丢失
 
 ---
 

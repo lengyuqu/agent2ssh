@@ -56,6 +56,12 @@ export const zh: Record<string, string> = {
   "Stop daemon": "停止 Daemon",
   "Restart daemon": "重启 Daemon",
   "Quit application": "退出应用",
+  "Quit Agent2SSH?": "退出 Agent2SSH？",
+  "Quitting stops the background service, which ends: {items}.": "退出会停止后台服务，以下内容将随之结束：{items}。",
+  "Terminal sessions: {n}": "终端会话：{n}",
+  "Resident shells: {n}": "常驻 shell：{n}",
+  "Port forwards: {n}": "端口转发：{n}",
+  "Pending approvals: {n}": "待审批：{n}",
   "Exiting...": "退出中...",
   "Starting...": "启动中...",
   "Stopping...": "停止中...",
@@ -950,10 +956,21 @@ export function I18nProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const openLabel = language === "zh" ? zh["Open"] : "Open";
     const quitLabel = language === "zh" ? zh["Quit"] : "Quit";
+    const label = (text: string) => (language === "zh" ? zh[text] ?? text : text);
     api.setTrayLabels({
       openLabel,
       quitLabel,
       tooltip: "Agent2SSH",
+      quitConfirm: {
+        title: label("Quit Agent2SSH?"),
+        body: label("Quitting stops the background service, which ends: {items}."),
+        quit: quitLabel,
+        cancel: label("Cancel"),
+        ptySessions: label("Terminal sessions: {n}"),
+        residentSessions: label("Resident shells: {n}"),
+        forwards: label("Port forwards: {n}"),
+        pendingApprovals: label("Pending approvals: {n}"),
+      },
     }).catch(() => {
       // Ignore tray label sync failures when running outside tray-capable environment.
     });

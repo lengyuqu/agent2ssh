@@ -565,6 +565,29 @@ paths:
                     description: Backward-compatible alias; runtime SSH uses the embedded backend.
                   pid: { type: integer }
 
+  /shutdown:
+    post:
+      summary: Shut the daemon down
+      description: >
+        Asks the daemon to shut down the way `SIGTERM` does: it stops accepting
+        connections, drains open WebSocket connections (up to five seconds) and
+        removes `daemon.pid`. Everything the daemon holds in memory ends with it —
+        PTY sessions, resident shells, port forwards and pending approvals.
+        Windows has no `SIGTERM`, so the desktop app and `agent2ssh daemon stop`
+        use this route there instead of terminating the process. Requires the
+        unrestricted admin token; a scoped token gets 403.
+      responses:
+        "200":
+          description: Shutdown has been requested; the daemon exits after the response.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+        "403":
+          description: The token is scoped; stopping the daemon needs the admin token.
+
   /hosts:
     get:
       summary: List host profiles

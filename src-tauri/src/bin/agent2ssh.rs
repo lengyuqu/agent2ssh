@@ -4,7 +4,7 @@ use agent2ssh::approval::{
 };
 use agent2ssh::daemon_control::{
     process_is_alive as daemon_process_is_alive, read_daemon_pid, remove_daemon_pid_file,
-    start_daemon_background, terminate_process,
+    start_daemon_background, stop_daemon_process,
 };
 use agent2ssh::embedded_ssh::{
     import_known_hosts_from_ssh, remove_system_known_host, spawn_terminal, TerminalCommand,
@@ -2987,7 +2987,7 @@ async fn async_main() -> Result<()> {
                         println!("Daemon is not running (no PID file).");
                         return Ok(());
                     };
-                    terminate_process(pid)?;
+                    stop_daemon_process(pid)?;
                     remove_daemon_pid_file();
                     println!("Daemon stopped (pid={}).", pid);
                 }
@@ -3018,9 +3018,10 @@ async fn async_main() -> Result<()> {
                 }
                 DaemonCommands::Restart => {
                     if let Some(pid) = read_daemon_pid()? {
-                        terminate_process(pid)?;
+                        // Waits for the old daemon to exit, so the new one can
+                        // bind the port it was still holding while it drained.
+                        stop_daemon_process(pid)?;
                         remove_daemon_pid_file();
-                        std::thread::sleep(std::time::Duration::from_secs(1));
                     }
                     let daemon_bin = daemon_binary_path()?;
                     let started = start_daemon_background(&daemon_bin)?;

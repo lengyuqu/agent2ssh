@@ -142,6 +142,18 @@ function stringField(value: unknown, field: string, context: string): string {
   return value;
 }
 
+/** Wording for the native "quitting ends live work" confirmation. Count labels carry an `{n}` placeholder; `body` carries `{items}`. */
+export interface QuitConfirmLabels {
+  title: string;
+  body: string;
+  quit: string;
+  cancel: string;
+  ptySessions: string;
+  residentSessions: string;
+  forwards: string;
+  pendingApprovals: string;
+}
+
 export const api = {
   // Host management
   listHosts: () => invoke<HostProfile[]>("list_hosts"),
@@ -702,11 +714,17 @@ export const api = {
   getCliPathStatus: () => invoke<CliPathStatus>("get_cli_path_status"),
   installCliToPath: () => invoke<CliPathStatus>("install_cli_to_path"),
   removeCliFromPath: () => invoke<CliPathStatus>("remove_cli_from_path"),
-  setTrayLabels: (params: { openLabel: string; quitLabel: string; tooltip?: string | null }) =>
+  setTrayLabels: (params: {
+    openLabel: string;
+    quitLabel: string;
+    tooltip?: string | null;
+    quitConfirm?: QuitConfirmLabels | null;
+  }) =>
     invoke<void>("set_tray_labels", {
       openLabel: params.openLabel,
       quitLabel: params.quitLabel,
       tooltip: params.tooltip ?? null,
+      quitConfirm: params.quitConfirm ?? null,
     }),
   listMcpAgentConfigs: () => invoke<McpAgentConfigStatus[]>("list_mcp_agent_configs"),
   configureMcpAgent: (agentId: string) =>

@@ -56,7 +56,13 @@ pub fn process_is_alive(pid: u32) -> bool {
     system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
     system
         .process(pid)
-        .map(process_looks_like_daemon)
+        // A daemon that has exited but whose parent never waited on it stays in
+        // the process table as a zombie. The desktop app spawns the daemon and
+        // drops the handle, so that is exactly what a stopped daemon looks like
+        // to it — and "still listed" would make every stop wait out its timeout.
+        .map(|process| {
+            process.status() != sysinfo::ProcessStatus::Zombie && process_looks_like_daemon(process)
+        })
         .unwrap_or(false)
 }
 
@@ -285,4 +291,208 @@ pub fn start_daemon_background(daemon_bin: &Path) -> Result<DaemonStartResult> {
         pid,
         log_path: daemon_log_path()?,
     })
+}
+
+// ── Ownership ───────────────────────────────────────────────────────────────
+//
+// The desktop app is not the only thing that starts the daemon: the CLI does, an
+// MCP client's setup does, and a person may simply have left one running. All of
+// them write the same `daemon.pid`, so the pid alone cannot say who started it —
+// and "quit the app" must not take down a daemon that agents outside the app are
+// in the middle of using. The desktop records the daemons *it* spawned here and
+// stops only those when it quits; stopping any daemon on request (the explicit
+// Stop button, `agent2ssh daemon stop`) is unaffected.
+
+const DAEMON_OWNER_FILE: &str = "daemon.owner";
+
+/// `pid` alone is not enough to name a process for long: the OS recycles them.
+/// The start time makes a marker left behind by an earlier daemon fail to match
+/// a later, unrelated process that happens to get the same pid.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct OwnerMarker {
+    pid: u32,
+    start_time: u64,
+}
+
+fn daemon_owner_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join(DAEMON_OWNER_FILE))
+}
+
+fn process_start_time(pid: u32) -> Option<u64> {
+    let pid = sysinfo::Pid::from_u32(pid);
+    let mut system = sysinfo::System::new();
+    system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+    system.process(pid).map(|process| process.start_time())
+}
+
+/// Record that the calling process started the daemon with this `pid`.
+pub fn mark_daemon_owned(pid: u32) -> Result<()> {
+    let start_time =
+        process_start_time(pid).ok_or_else(|| anyhow!("process {pid} is not running"))?;
+    let path = daemon_owner_path()?;
+    std::fs::write(
+        path,
+        serde_json::to_string(&OwnerMarker { pid, start_time })?,
+    )
+    .context("failed to record daemon ownership")
+}
+
+/// Whether the daemon with this `pid` is the one the desktop started.
+pub fn daemon_is_owned(pid: u32) -> bool {
+    let Ok(path) = daemon_owner_path() else {
+        return false;
+    };
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(marker) = serde_json::from_str::<OwnerMarker>(&raw) else {
+        return false;
+    };
+    marker.pid == pid && process_start_time(pid) == Some(marker.start_time)
+}
+
+pub fn clear_daemon_owner() {
+    if let Ok(path) = daemon_owner_path() {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+// ── Stopping ────────────────────────────────────────────────────────────────
+
+/// How long a stopped daemon gets to drain before it is killed outright. The
+/// daemon waits up to five seconds for WebSocket connections to finish, so this
+/// has to be longer than that or a graceful stop would be cut short by the very
+/// timeout meant to catch a hung one.
+const GRACEFUL_STOP_WAIT: Duration = Duration::from_secs(8);
+
+fn wait_for_exit(pid: u32, within: Duration) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < within {
+        if !process_is_alive(pid) {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    !process_is_alive(pid)
+}
+
+fn kill_process(pid: u32) -> Result<()> {
+    let sys_pid = sysinfo::Pid::from_u32(pid);
+    let mut system = sysinfo::System::new();
+    system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[sys_pid]), true);
+    match system.process(sys_pid) {
+        None => Ok(()),
+        Some(process) if process.kill() => Ok(()),
+        Some(_) => Err(anyhow!("failed to kill daemon process {pid}")),
+    }
+}
+
+/// Ask the running daemon to shut itself down, over its own admin API.
+///
+/// Windows has no `SIGTERM`: `terminate_process` falls back to
+/// `TerminateProcess` there, which skips the drain that closes WebSocket
+/// connections cleanly and removes the pid file. Asking the daemon does what
+/// the signal does elsewhere. `true` only when the daemon accepted the request.
+pub fn request_graceful_shutdown() -> bool {
+    let Some(token) = crate::daemon_activity::read_admin_token() else {
+        return false;
+    };
+    crate::daemon_activity::local_daemon_request(
+        "POST",
+        "/shutdown",
+        Some(&token),
+        Duration::from_secs(2),
+    )
+    .is_ok_and(|response| response.status == 200)
+}
+
+/// Stop the daemon with this `pid` and wait until it is gone.
+///
+/// Gracefully first (`SIGTERM`, or the shutdown route on Windows), then by force
+/// if it has not exited within [`GRACEFUL_STOP_WAIT`]. Returning only once the
+/// process has exited is what makes a restart safe — the old daemon still holds
+/// the listening port while it drains, so starting the new one straight away
+/// would fail to bind.
+pub fn stop_daemon_process(pid: u32) -> Result<()> {
+    if !process_is_alive(pid) {
+        clear_daemon_owner();
+        return Ok(());
+    }
+    let asked_nicely = cfg!(windows) && request_graceful_shutdown();
+    if !asked_nicely {
+        terminate_process(pid)?;
+    }
+    if !wait_for_exit(pid, GRACEFUL_STOP_WAIT) {
+        let _ = crate::diagnostics::append_diagnostic_log(
+            "warn",
+            "daemon_control",
+            "daemon did not exit after a graceful stop; killing it",
+            Some(serde_json::json!({ "pid": pid })),
+        );
+        kill_process(pid)?;
+        if !wait_for_exit(pid, Duration::from_secs(2)) {
+            return Err(anyhow!("daemon process {pid} would not exit"));
+        }
+    }
+    clear_daemon_owner();
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_marker_names_the_process_that_wrote_it() {
+        let _config = crate::store::TestConfigDir::new("daemon-owner");
+        let me = std::process::id();
+
+        assert!(!daemon_is_owned(me), "no marker yet");
+        mark_daemon_owned(me).expect("mark");
+        assert!(daemon_is_owned(me));
+        // Another pid is not covered by this marker.
+        assert!(!daemon_is_owned(me.wrapping_add(1)));
+
+        clear_daemon_owner();
+        assert!(!daemon_is_owned(me));
+    }
+
+    #[test]
+    fn a_marker_does_not_survive_pid_reuse() {
+        let _config = crate::store::TestConfigDir::new("daemon-owner-reuse");
+        let me = std::process::id();
+        // The same pid with a start time that is not this process's: what a
+        // marker left by an earlier daemon looks like once the OS recycles its
+        // pid for something else.
+        let stale = OwnerMarker {
+            pid: me,
+            start_time: process_start_time(me).unwrap().wrapping_add(10_000),
+        };
+        std::fs::write(
+            daemon_owner_path().unwrap(),
+            serde_json::to_string(&stale).unwrap(),
+        )
+        .unwrap();
+        assert!(!daemon_is_owned(me));
+    }
+
+    #[test]
+    fn a_corrupt_marker_means_not_owned() {
+        let _config = crate::store::TestConfigDir::new("daemon-owner-corrupt");
+        std::fs::write(daemon_owner_path().unwrap(), "not json").unwrap();
+        assert!(!daemon_is_owned(std::process::id()));
+    }
+
+    #[test]
+    fn marking_a_process_that_is_not_running_fails() {
+        let _config = crate::store::TestConfigDir::new("daemon-owner-missing");
+        // Far above any pid the OS hands out.
+        assert!(mark_daemon_owned(u32::MAX - 1).is_err());
+    }
+
+    #[test]
+    fn stopping_a_process_that_is_not_running_is_a_no_op() {
+        let _config = crate::store::TestConfigDir::new("daemon-stop-missing");
+        stop_daemon_process(u32::MAX - 1).expect("nothing to stop");
+    }
 }

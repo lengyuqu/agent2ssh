@@ -104,6 +104,24 @@ fn uptime_secs() -> u64 {
     START_TIME.get_or_init(Instant::now).elapsed().as_secs()
 }
 
+/// Woken by `POST /shutdown`. Windows has no `SIGTERM`, so without this the only
+/// way for the desktop app or the CLI to stop the daemon there is
+/// `TerminateProcess`, which skips the drain below. `notify_one` stores a permit
+/// when nothing is waiting yet, so a request that races the listener still lands.
+static SHUTDOWN_REQUESTED: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+/// Ask the daemon to shut down the way a termination signal would. Admin-only:
+/// stopping the daemon ends every session and forward it holds.
+async fn daemon_shutdown(
+    Extension(auth): Extension<AuthContext>,
+) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    require_admin(&auth)?;
+    tracing::info!("shutdown requested over HTTP");
+    SHUTDOWN_REQUESTED.notify_one();
+    Ok(Json(OkBody { ok: true }))
+}
+
 /// Resolve once a shutdown signal arrives: Ctrl-C on every platform, plus
 /// `SIGTERM` on Unix (how service managers and `kill` stop the daemon). Used to
 /// drive `axum`'s graceful shutdown so the PID file is cleaned up instead of left
@@ -115,6 +133,7 @@ async fn shutdown_signal(shutdown_token: agent2ssh::ws_drain::ShutdownToken) {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
     };
+    let requested = SHUTDOWN_REQUESTED.notified();
 
     #[cfg(unix)]
     let terminate = async {
@@ -132,6 +151,7 @@ async fn shutdown_signal(shutdown_token: agent2ssh::ws_drain::ShutdownToken) {
     tokio::select! {
         _ = ctrl_c => {}
         _ = terminate => {}
+        _ = requested => {}
     }
 
     // T2-15: Broadcast shutdown to all WS handlers
@@ -6088,6 +6108,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/sftp/rmdir", post(sftp_rmdir))
         .route("/sftp/rm-rf", post(sftp_rm_rf))
         .route("/sftp/rm-rf/authorize", post(sftp_rm_rf_authorize))
+        .route("/shutdown", post(daemon_shutdown))
         .route("/sessions", post(session_open).get(session_list))
         .route("/sessions/:id/write", post(session_write))
         .route("/sessions/:id/read", get(session_read))
