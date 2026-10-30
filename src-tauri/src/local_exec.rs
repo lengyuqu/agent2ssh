@@ -91,6 +91,7 @@ use std::{
 use crate::{
     container_runtime::{ContainerRuntime, CONTAINER_SHELL},
     exec_capture::{BoundedCapture, CapturedExec},
+    local_environments::{self, CustomEnvironment, ENVIRONMENTS_FILE},
     shell_list::{default_shell, list_shells, ShellFamily, ShellInfo},
 };
 
@@ -418,6 +419,12 @@ pub(crate) struct EnvironmentPlan {
     pub(crate) forwards_stdin: bool,
     /// Human label used in error messages.
     pub(crate) label: String,
+    /// Process environment variables set on the spawned shell. Only a
+    /// user-defined environment carries any; applied by [`apply_plan_context`]
+    /// *before* the recursion-guard marker, so a definition cannot override it.
+    pub(crate) env: Vec<(String, String)>,
+    /// Directory the shell is spawned in. `None` inherits the daemon's.
+    pub(crate) cwd: Option<PathBuf>,
 }
 
 impl EnvironmentPlan {
@@ -429,6 +436,8 @@ impl EnvironmentPlan {
             prelude: None,
             forwards_stdin: true,
             label: shell.name.clone(),
+            env: Vec::new(),
+            cwd: None,
         }
     }
 }
@@ -586,6 +595,8 @@ fn vs_dev_shell_plan(installed: &[ShellInfo]) -> Result<EnvironmentPlan> {
         )),
         forwards_stdin: true,
         label: format!("{} + Visual Studio developer shell", shell.name),
+        env: Vec::new(),
+        cwd: None,
     })
 }
 
@@ -618,6 +629,8 @@ fn wsl_plan(distro: Option<&str>, installed: &[ShellInfo]) -> Result<Environment
             Some(distro) => format!("WSL distribution '{distro}'"),
             None => "the default WSL distribution".to_string(),
         },
+        env: Vec::new(),
+        cwd: None,
     })
 }
 
@@ -740,6 +753,8 @@ fn container_plan(runtime: ContainerRuntime, container_id: &str) -> Result<Envir
         prelude: None,
         forwards_stdin: false,
         label: format!("{} container {container_id}", runtime.display_name()),
+        env: Vec::new(),
+        cwd: None,
     })
 }
 
@@ -750,9 +765,105 @@ fn container_plan(runtime: ContainerRuntime, container_id: &str) -> Result<Envir
 /// rules in one place (an unknown name is refused and listed, never defaulted)
 /// whether the name selected a shell or a container.
 pub(crate) fn resolve_plan_for_host(host: &str) -> Result<EnvironmentPlan> {
-    match container_target_for_host(host) {
-        Some((runtime, container_id)) => container_plan(runtime, container_id),
-        None => environment_for_host(host).and_then(resolve_environment),
+    if let Some((runtime, container_id)) = container_target_for_host(host) {
+        return container_plan(runtime, container_id);
+    }
+
+    // `environments.toml` is consulted only for a name no built-in owns:
+    // `is_reserved_id` is also what stops a definition from taking one, so a
+    // rejected `pwsh` entry can never shadow `local:pwsh`.
+    let registry = local_environments::current();
+    let kind = host
+        .strip_prefix(crate::types::LOCAL_ENV_PREFIX)
+        .map(|rest| rest.split_once(':').map_or(rest, |(kind, _)| kind));
+    if let Some(kind) = kind.filter(|kind| !local_environments::is_reserved_id(kind)) {
+        if let Some(reason) = registry.rejection(kind) {
+            return Err(anyhow!(
+                "environment '{kind}' is defined in {ENVIRONMENTS_FILE} but was rejected: {reason}"
+            ));
+        }
+        if let Some(environment) = registry.get(kind) {
+            // Same rule as the built-ins: a suffix nothing can consume is
+            // refused rather than left looking as though it had asked for
+            // something.
+            if let Some((_, argument)) = host
+                .strip_prefix(crate::types::LOCAL_ENV_PREFIX)
+                .and_then(|rest| rest.split_once(':'))
+            {
+                return Err(anyhow!("'{kind}' takes no argument, but got '{argument}'"));
+            }
+            return custom_environment_plan(environment);
+        }
+    }
+
+    environment_for_host(host)
+        .and_then(resolve_environment)
+        .map_err(|error| match kind {
+            Some(kind) => registry.annotate_unknown(kind, error),
+            None => error,
+        })
+}
+
+/// Build the plan for a user-defined environment: its base environment,
+/// resolved exactly as if the base had been named directly, with the
+/// definition's directory, variables and prelude layered on top.
+fn custom_environment_plan(environment: &CustomEnvironment) -> Result<EnvironmentPlan> {
+    let base = resolve_environment(LocalEnvironmentRequest {
+        environment: environment.base,
+        distro: environment.distro.clone(),
+    })
+    .map_err(|error| {
+        anyhow!(
+            "environment '{}' is based on {}, which is not usable: {error}",
+            environment.id,
+            environment.base.label()
+        )
+    })?;
+
+    // Checked per call rather than at load: a drive or mount can come and go
+    // between starting the daemon and the command, and a spawn failure here
+    // would name the shell instead of the directory.
+    if let Some(cwd) = &environment.cwd {
+        if !cwd.is_dir() {
+            return Err(anyhow!(
+                "environment '{}': working directory '{}' does not exist",
+                environment.id,
+                cwd.display()
+            ));
+        }
+    }
+    Ok(layer_custom_environment(base, environment))
+}
+
+/// Layer a definition over its resolved base. Pure, so the composition rules can
+/// be tested without a shell installed.
+///
+/// The definition's prelude runs *after* the base's own setup: the Visual Studio
+/// bootstrap has to put `cl.exe` on `PATH` before a prelude that calls it.
+fn layer_custom_environment(
+    mut plan: EnvironmentPlan,
+    environment: &CustomEnvironment,
+) -> EnvironmentPlan {
+    plan.prelude = match (plan.prelude.take(), environment.prelude.as_deref()) {
+        (Some(base), Some(own)) => Some(format!("{base}{}{own}", plan.style.prelude_separator())),
+        (Some(base), None) => Some(base),
+        (None, own) => own.map(str::to_string),
+    };
+    plan.env = environment.env.clone();
+    plan.cwd = environment.cwd.clone();
+    plan.label = format!("environment '{}' ({})", environment.id, plan.label);
+    plan
+}
+
+/// Apply a plan's working directory and variables to a command about to be
+/// spawned. Shared by the one-shot path and `resident_session`.
+///
+/// Callers set [`DEPTH_ENV`] *after* this, so the recursion guard always wins
+/// over anything a definition carries.
+pub(crate) fn apply_plan_context(process: &mut Command, plan: &EnvironmentPlan) {
+    process.envs(plan.env.iter().map(|(name, value)| (name, value)));
+    if let Some(cwd) = &plan.cwd {
+        process.current_dir(cwd);
     }
 }
 
@@ -858,6 +969,7 @@ fn build_command(plan: &EnvironmentPlan, command: &str) -> Command {
         process.arg(&command);
     }
     configure_process_group(&mut process);
+    apply_plan_context(&mut process, plan);
     process
 }
 
@@ -1305,6 +1417,90 @@ mod tests {
         assert!(named.label.contains("Ubuntu-22.04"));
     }
 
+    fn custom(prelude: Option<&str>, env: &[(&str, &str)]) -> CustomEnvironment {
+        CustomEnvironment {
+            id: "mine".into(),
+            description: None,
+            base: LocalEnvironment::Default,
+            distro: None,
+            cwd: Some(PathBuf::from("/work")),
+            prelude: prelude.map(str::to_string),
+            env: env
+                .iter()
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect(),
+        }
+    }
+
+    fn base_plan(style: CommandStyle, prelude: Option<&str>) -> EnvironmentPlan {
+        EnvironmentPlan {
+            program: PathBuf::from("shell"),
+            prefix: Vec::new(),
+            style,
+            prelude: prelude.map(str::to_string),
+            forwards_stdin: true,
+            label: "base".into(),
+            env: Vec::new(),
+            cwd: None,
+        }
+    }
+
+    #[test]
+    fn a_custom_prelude_runs_after_the_bases_own_setup() {
+        let layered = layer_custom_environment(
+            base_plan(CommandStyle::PowerShellCommand, Some("& 'vs.ps1'")),
+            &custom(Some("$env:X = '1'"), &[]),
+        );
+        // The bootstrap has to put the toolchain on PATH before anything of ours
+        // calls it.
+        assert_eq!(layered.prelude.as_deref(), Some("& 'vs.ps1'; $env:X = '1'"));
+
+        let cmd = layer_custom_environment(
+            base_plan(CommandStyle::CmdSlashC, None),
+            &custom(Some("call venv\\activate.bat"), &[]),
+        );
+        assert_eq!(cmd.prelude.as_deref(), Some("call venv\\activate.bat"));
+
+        let only_base = layer_custom_environment(
+            base_plan(CommandStyle::PosixDashC, Some(". ./base.sh")),
+            &custom(None, &[]),
+        );
+        assert_eq!(only_base.prelude.as_deref(), Some(". ./base.sh"));
+    }
+
+    #[test]
+    fn a_custom_environment_carries_its_directory_variables_and_a_label() {
+        let layered = layer_custom_environment(
+            base_plan(CommandStyle::PosixDashC, None),
+            &custom(None, &[("A", "1")]),
+        );
+        assert_eq!(layered.env, vec![("A".to_string(), "1".to_string())]);
+        assert_eq!(layered.cwd, Some(PathBuf::from("/work")));
+        assert!(layered.label.contains("mine") && layered.label.contains("base"));
+    }
+
+    #[test]
+    fn plan_context_sets_variables_and_directory_on_the_command() {
+        let mut plan = base_plan(CommandStyle::PosixDashC, None);
+        plan.env = vec![("A2S_TEST_VAR".into(), "v".into())];
+        plan.cwd = Some(PathBuf::from("/work"));
+        let command = build_command(&plan, "true");
+        let envs: Vec<_> = command.get_envs().collect();
+        assert!(
+            envs.iter()
+                .any(|(name, value)| *name == "A2S_TEST_VAR" && *value == Some("v".as_ref())),
+            "{envs:?}"
+        );
+        assert_eq!(command.get_current_dir(), Some(Path::new("/work")));
+    }
+
+    #[test]
+    fn a_plain_environment_sets_neither() {
+        let command = build_command(&base_plan(CommandStyle::PosixDashC, None), "true");
+        assert_eq!(command.get_envs().count(), 0);
+        assert_eq!(command.get_current_dir(), None);
+    }
+
     #[test]
     fn a_prelude_is_joined_with_the_separator_its_shell_understands() {
         let plan = |style, prelude: Option<&str>| EnvironmentPlan {
@@ -1314,6 +1510,8 @@ mod tests {
             prelude: prelude.map(str::to_string),
             forwards_stdin: true,
             label: "test".into(),
+            env: Vec::new(),
+            cwd: None,
         };
 
         assert_eq!(

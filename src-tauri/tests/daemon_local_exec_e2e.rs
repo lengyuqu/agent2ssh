@@ -39,6 +39,17 @@ struct TestDaemon {
 
 impl TestDaemon {
     fn start(label: &str) -> Self {
+        Self::start_seeded(label, None)
+    }
+
+    /// Start a daemon whose config dir already holds an `environments.toml`.
+    /// Seeded before the process exists because the daemon reads that file once,
+    /// at start — which is exactly what the tests below depend on.
+    fn start_with_environments(label: &str, environments: &str) -> Self {
+        Self::start_seeded(label, Some(environments))
+    }
+
+    fn start_seeded(label: &str, environments: Option<&str>) -> Self {
         let dir = std::env::temp_dir().join(format!(
             "a2s-daemon-local-exec-{label}-{}-{}",
             std::process::id(),
@@ -54,6 +65,13 @@ impl TestDaemon {
         // racing the daemon to the file.
         let token = format!("local-exec-e2e-token-{}", std::process::id());
         std::fs::write(dir.join("daemon.token"), &token).expect("seed daemon.token");
+        if let Some(environments) = environments {
+            std::fs::write(
+                dir.join(agent2ssh::local_environments::ENVIRONMENTS_FILE),
+                environments,
+            )
+            .expect("seed environments.toml");
+        }
 
         let addr = free_loopback_addr();
         let child = Command::new(env!("CARGO_BIN_EXE_agent2ssh-daemon"))
@@ -293,6 +311,99 @@ fn local_exec_route_selects_a_named_environment() {
             "a POSIX shell should have substituted $0: {body}"
         );
     }
+}
+
+/// The end-to-end version of the user-defined environment: a real daemon reads
+/// `environments.toml` at start and a real `/local-exec` request runs in it.
+#[test]
+fn local_exec_route_runs_a_user_defined_environment() {
+    let (base, show) = if cfg!(windows) {
+        ("cmd", "echo %A2S_CUSTOM%")
+    } else {
+        ("default", "echo \"$A2S_CUSTOM\"")
+    };
+    let daemon = TestDaemon::start_with_environments(
+        "custom-env",
+        &format!(
+            "[[environment]]\nid = \"e2e-env\"\nbase = \"{base}\"\n\
+             [environment.env]\nA2S_CUSTOM = \"from-the-file\"\n"
+        ),
+    );
+
+    let host = format!("{LOCAL_TARGET_ID}:e2e-env");
+    let response = daemon.post_local_exec(serde_json::json!({
+        "host": host,
+        "command": show,
+        "force": true,
+    }));
+    let status = response.status();
+    let body: serde_json::Value = response
+        .json()
+        .unwrap_or_else(|error| panic!("expected an ExecResult, got {error} and status {status}"));
+
+    assert_eq!(status, 200, "unexpected response: {body}");
+    assert_eq!(body["host"], host);
+    assert!(
+        body["stdout"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("from-the-file"),
+        "the variable from environments.toml should reach the command: {body}"
+    );
+
+    // The daemon read the file at start. Changing it now must change nothing —
+    // the environment this daemon serves is the one it started with.
+    std::fs::write(
+        daemon
+            .dir
+            .join(agent2ssh::local_environments::ENVIRONMENTS_FILE),
+        "[[environment]]\nid = \"e2e-env\"\n[environment.env]\nA2S_CUSTOM = \"tampered\"\n\
+         [[environment]]\nid = \"late\"\n",
+    )
+    .expect("rewrite environments.toml");
+    let again = daemon.post_local_exec(serde_json::json!({
+        "host": host,
+        "command": show,
+        "force": true,
+    }));
+    let body: serde_json::Value = again.json().expect("an ExecResult");
+    let stdout = body["stdout"].as_str().unwrap_or_default();
+    assert!(
+        stdout.contains("from-the-file") && !stdout.contains("tampered"),
+        "an edit after start must not take effect: {body}"
+    );
+    let late = daemon.post_local_exec(serde_json::json!({
+        "host": format!("{LOCAL_TARGET_ID}:late"),
+        "command": "echo hi",
+        "force": true,
+    }));
+    assert_eq!(late.status(), 400, "{}", body_text(late));
+}
+
+/// A definition the daemon rejected is refused over the wire with its reason.
+#[test]
+fn local_exec_route_refuses_a_rejected_user_defined_environment() {
+    let daemon = TestDaemon::start_with_environments(
+        "custom-env-rejected",
+        "[[environment]]\nid = \"risky\"\nbase = \"gitbash\"\nprelude = \"sudo true\"\n",
+    );
+
+    let response = daemon.post_local_exec(serde_json::json!({
+        "host": format!("{LOCAL_TARGET_ID}:risky"),
+        "command": "echo should-not-run",
+        "force": true,
+    }));
+
+    assert_eq!(response.status(), 400, "{}", body_text(response));
+    let body = response.text().unwrap_or_default();
+    assert!(
+        body.contains("rejected") && body.contains("risk"),
+        "expected the refusal to carry the reason: {body}"
+    );
+    assert!(
+        !body.contains("should-not-run"),
+        "the command must not have run: {body}"
+    );
 }
 
 #[test]

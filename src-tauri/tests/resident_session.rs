@@ -368,3 +368,53 @@ async fn unknown_session_ids_are_refused() {
     .expect_err("no such session");
     assert!(error.to_string().contains("unknown resident session"));
 }
+
+/// A custom environment's variables, directory and prelude reach a resident
+/// session too: its shell is spawned once with them and they persist.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_custom_environment_reaches_a_resident_session() {
+    use agent2ssh::store::CONFIG_DIR_ENV;
+
+    unlock_session_cap();
+    let dir = std::env::temp_dir().join(format!("a2s-resident-env-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (prelude, show, base) = if cfg!(windows) {
+        (
+            "$env:A2S_FROM_PRELUDE = 'pre'",
+            "\"$env:A2S_CUSTOM:$env:A2S_FROM_PRELUDE\"",
+            "pwsh",
+        )
+    } else {
+        (
+            "export A2S_FROM_PRELUDE=pre",
+            "echo \"$A2S_CUSTOM:$A2S_FROM_PRELUDE\"",
+            "default",
+        )
+    };
+    std::fs::write(
+        dir.join(agent2ssh::local_environments::ENVIRONMENTS_FILE),
+        format!(
+            "[[environment]]\nid = \"resident-env\"\nbase = \"{base}\"\nprelude = \"{prelude}\"\n\
+             [environment.env]\nA2S_CUSTOM = \"from-config\"\n"
+        ),
+    )
+    .unwrap();
+    std::env::set_var(CONFIG_DIR_ENV, &dir);
+    agent2ssh::local_environments::reload();
+
+    let session = resident_open_core("local:resident-env")
+        .await
+        .expect("a custom environment should open as a resident session");
+    let result = exec(&session, show).await;
+    assert!(
+        result.stdout.contains("from-config:pre"),
+        "the session shell should carry the variable and the prelude: {:?}",
+        result.stdout
+    );
+    resident_close_core(session.id).await.expect("close");
+
+    common::restore_default_config_env();
+    agent2ssh::local_environments::reload();
+    let _ = std::fs::remove_dir_all(&dir);
+}

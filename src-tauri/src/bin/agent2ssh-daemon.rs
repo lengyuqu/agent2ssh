@@ -5901,6 +5901,21 @@ async fn main() -> anyhow::Result<()> {
     }
     install_hangup_handler();
 
+    // User-defined local environments are read here, once, and not again for the
+    // life of this process (see `local_environments`): an edit to the file
+    // becomes effective only by restarting the daemon, which a request cannot do.
+    // Problems are logged now so a bad definition is seen before an agent hits it.
+    let custom_environments = agent2ssh::local_environments::reload();
+    if !custom_environments.is_empty() {
+        tracing::info!(
+            environments = %custom_environments.ids().join(", "),
+            "loaded user-defined local environments"
+        );
+    }
+    for problem in custom_environments.problems() {
+        tracing::warn!("{problem}");
+    }
+
     // Periodic approval cleanup: drop entries older than the retention window
     // (default 30 days) and compact the JSONL file. Runs every hour. Failures
     // are logged but never abort the daemon. The first run happens 1 minute

@@ -28,6 +28,7 @@ Agent2SSH 的所有配置和数据文件存储在 `~/.agent2ssh/` 目录下。�
   playbooks.toml   # Playbook 命令模板定义
   remotes.toml     # 远程守护进程注册表
   webhook.toml     # Webhook 通知配置
+  environments.toml # 可选的自定义本地终端环境（local:<id>）
   webdav.toml      # 可选 WebDAV 同步配置
   redact_rules.json      # A24 脱敏规则（seed-once，权威；设置面板可增删改）
   highlight_rules.json   # B24 终端高亮规则（设置面板可增删改）
@@ -569,6 +570,57 @@ tags = ["database"]
 - `risk_override` 可以统一设置所有步骤的非 `blocked` 风险等级
 - `risk_override` 不能降级 `blocked` 命令；内置或用户规则判定为 `blocked` 的步骤仍会被拒绝
 - 文件不存在时返回空 Playbook 列表（不会报错）
+
+---
+
+## environments.toml
+
+### 用途
+
+定义自己的本地终端环境，用 `local:<id>` 寻址，和内置的 `local:pwsh`、`local:gitbash` 等走同一条执行路径（一次性 `/local-exec` 和常驻会话 `/resident-sessions` 都支持）。一个环境 = 一个内置基础环境 + 可选的工作目录、进程环境变量和一行 prelude（每条命令前在同一个 shell 里先执行）。
+
+因为 host id 就是环境名，token scope 的 `allowed_hosts`、审批策略的 host 模式和审计日志都能直接按 `local:<id>` 区分，不需要新的概念。
+
+### 文件格式
+
+```toml
+[[environment]]
+id = "py-ml"                          # 通过 local:py-ml 使用
+description = "ML 工具链"              # 可选
+base = "gitbash"                      # default | pwsh | cmd | gitbash | vs | wsl，默认 default
+cwd = "D:/work/ml"                    # 可选；必须是绝对路径，开头的 ~/ 会展开
+prelude = "source .venv/Scripts/activate"   # 可选；单行，用 ; 串联多条（cmd 用 &&）
+
+[environment.env]                     # 可选；设置到 shell 进程上的环境变量
+CUDA_VISIBLE_DEVICES = "0"
+
+[[environment]]
+id = "ubuntu-dev"
+base = "wsl"
+distro = "Ubuntu-22.04"               # 仅 base = "wsl" 可用
+prelude = "export JAVA_HOME=/opt/jdk-21"   # WSL 的变量写在这里，不能用 env 表
+```
+
+### 字段说明
+
+| 字段 | 必填 | 说明 |
+|------|------|------|
+| `id` | 是 | 1–32 个字符，`[a-z0-9_-]`，以字母或数字开头。区分大小写、精确匹配。不能与内置环境（含别名）、容器 runtime（`docker`/`wslc`/`apple`）、`local`、`default` 冲突 |
+| `base` | 否 | 基础环境，默认 `default`（应用默认 shell） |
+| `distro` | 否 | WSL 发行版名，仅 `base = "wsl"` |
+| `cwd` | 否 | shell 的启动目录，必须是绝对路径；每次执行时检查目录存在 |
+| `prelude` | 否 | 单行，最长 4 KiB，在基础环境自己的初始化（如 VS 开发者 shell）之后、命令之前执行 |
+| `env` | 否 | 最多 64 个变量；名称 `[A-Za-z_][A-Za-z0-9_]*`；不能设置 `AGENT2SSH_LOCAL_EXEC_DEPTH` |
+
+### 注意事项
+
+- **只在守护进程启动时读取一次，不会热重载。** 修改文件后需要重启 daemon 才生效。这是有意的：prelude 和环境变量在命令之前执行，风险分类器看不到它们，所以不允许运行中的进程被一条本地命令改写的文件影响。
+- **prelude 在加载时做风险分类**，评级为 `high`/`blocked` 的定义会被拒绝。但分类器解析的是 bash，因此只对 `gitbash`、`wsl` 以及非 Windows 上的 `default` 生效；`pwsh`、`cmd`、`vs` 不做这个检查（对 PowerShell 它会把 `$env:FOO = 'bar'` 判成 high、把 `Remove-Item -Recurse -Force` 判成 low），只依赖"不热重载"这一条。请只写你自己审过的 prelude。
+- `base = "wsl"` 时不能写 `env`：`wsl.exe` 不会把自己的进程环境传进发行版。把变量写成 prelude 里的 `export`。
+- 单个定义校验失败只会拒绝它自己，其他定义照常加载；使用被拒绝的环境会返回具体原因，不会退化成普通 shell。整个文件解析失败只会让自定义环境不可用，内置环境不受影响。daemon 启动时会把这些问题写入日志。
+- 未知字段会被当作错误（防止把 `env` 拼成 `envs` 而静默丢失变量）。
+- 文件不存在表示没有自定义环境，不会报错。
+- 值是明文存储；不要把密钥直接写进去。
 
 ---
 

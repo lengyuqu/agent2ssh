@@ -97,8 +97,8 @@ use crate::{
     container_runtime::ContainerRuntime,
     events::{publish_event, EventType},
     local_exec::{
-        check_exec_depth, configure_process_group, kill_process_tree, resolve_plan_for_host,
-        CommandStyle, EnvironmentPlan, DEPTH_ENV,
+        apply_plan_context, check_exec_depth, configure_process_group, kill_process_tree,
+        resolve_plan_for_host, CommandStyle, EnvironmentPlan, DEPTH_ENV,
     },
     store::append_audit,
     types::{ExecResult, RiskLevel, LOCAL_ENV_PREFIX},
@@ -491,6 +491,7 @@ fn spawn_and_warm(
     process.args(&plan.prefix);
     process.args(resident_args(plan.style));
     configure_process_group(&mut process);
+    apply_plan_context(&mut process, &plan);
     process
         .env(DEPTH_ENV, depth.to_string())
         .stdin(Stdio::piped())
@@ -1028,6 +1029,8 @@ mod tests {
             prelude: None,
             forwards_stdin: true,
             label: "test".into(),
+            env: Vec::new(),
+            cwd: None,
         }
     }
 

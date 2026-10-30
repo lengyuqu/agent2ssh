@@ -29,6 +29,7 @@ pub mod keys;
 mod legacy_pem;
 pub mod lifecycle;
 pub mod limits;
+pub mod local_environments;
 pub mod local_exec;
 pub mod mcp_binding;
 pub mod netcatty_import;
