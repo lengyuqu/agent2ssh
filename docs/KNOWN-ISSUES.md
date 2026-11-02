@@ -1,6 +1,6 @@
 # 已知问题与未覆盖范围
 
-日期：2026-11-02（K10、K11 均已修复；K12 为上游限制；E1、E2、E5 已解决并按维护约定移入 `CHANGELOG.md`）。基线：macOS 开发机 + WinR9，Docker / wslc / Apple container；GitHub Actions。
+日期：2026-11-02（K10、K11 均已修复；K12 为上游限制；K13 为设计限制；E1、E2、E5 已解决并按维护约定移入 `CHANGELOG.md`）。基线：macOS 开发机 + WinR9，Docker / wslc / Apple container；GitHub Actions。
 
 本文只记录 **已经知道、尚未解决** 的事项，以及 **没有验证过所以不能下结论** 的范围，按处理价值排序。已修复的问题在 `CHANGELOG.md`；历史缺陷快照在 `DEFECTS.md`（0.2.1 时代，已归档）；Windows 相关的细节在 [reports/WINDOWS-HANDOVER.md](reports/WINDOWS-HANDOVER.md)，此处只列条目。
 
@@ -22,6 +22,7 @@
 | K10 | 已解决 | RSA 用户证书曾被签成 legacy `ssh-rsa-cert-v01@openssh.com` | OpenSSH 8.8+ 不提供该算法，RSA 证书一律被拒。2026-10-22 修复：传输层升级到 `russh 0.64.1`（其 `client_make_to_sign` 现在把哈希带进证书类型名），证书改用 `authenticate_certificate_with` + 本仓库的 `LocalKeySigner`（按调用方给的哈希签名，RSA 证书用 SHA-2）。矩阵里 5 个 OpenSSH 版本的 RSA 证书用例均通过，服务端日志为 `Accepted … RSA-CERT … CA` | `transport/russh_impl/mod.rs` `LocalKeySigner` / 证书分支。回归由 `scripts/e2e-ssh-matrix.sh` 的 `rsa* user certificate` 用例覆盖 |
 | K11 | 已解决 | 加密的传统 PEM EC 私钥曾无法读取 | `ssh-keygen -m PEM -N <pass>` 的 ECDSA 密钥解密后仍是 SEC1，而传输层的加载器把解密结果一律按 PKCS#1 解析，报 `Pkcs1: PKCS#1 ASN.1 error: expected INTEGER, got OCTET STRING`。2026-10-23 修复：新增 `legacy_pem`，自己按 OpenSSL 的 `DEK-Info` 方案解密（AES-128/192/256-CBC + MD5 `EVP_BytesToKey`），再把明文 PEM 交回 `russh::keys::decode_secret_key`——不写临时文件，也不引入第二个密钥解析器。错误口令现在会明确说「padding 不合法」而不是 ASN.1 错误 | `src/legacy_pem.rs`、`transport/russh_impl/mod.rs` 的 `load_private_key`。矩阵里 `ecdsa256-pem key, encrypted` 由 SKIP 变为 PASS |
 | K12 | 限制 | 不再支持 SHA-1 密钥交换，只提供 `diffie-hellman-group14-sha1` 的服务器连不上 | 传输层（russh）没有实现任何 SHA-1 KEX，`algo set` 会把该值存下来，连接时才报 `unsupported SSH algorithm 'diffie-hellman-group14-sha1' in preference list (supported: ...)`。受影响的是 OpenSSH 6.5 以前默认配置的设备 | `transport/russh_impl/mod.rs` `apply_prefs` / `russh::kex`。上一代 libssh2 后端可用。没有本地修复路径，只能等上游或换后端；错误信息已明确指出 |
+| K13 | 限制 | `ai_allowed`（主机“仅人工”）只约束 `hosts.json` 里的 SSH 主机，`local:*` 永远放行 | 这是刻意的，不是遗漏。主机标为仅人工，限制的是一项 agent 本来必须被**授予**的能力：凭据、网络可达性、跳板机。本地目标什么也限制不了——agent 进程本来就跑在这台机器上，不需要本服务也能起一个 shell（`sh -c`、`Command::new`、`subprocess`），所以拒绝 `local:gitbash` 不会让命令不发生，只会让它换一条路走，同时多出一个看起来像防护、实际不是的设置。本地路径真正提供的是捕获、超时、进程树回收和审计，这些与发起者是谁无关。**两个真正的边界不在这个开关的职责内**：① `local:docker:<id>` 之类的容器目标进入的是另一个隔离域，agent 没有本服务就得用它自己的运行时凭据才能到达；② `local:*` 被转发到**远程 daemon** 时命令跑在那台机器上，而不是调用方机器上——正常使用不会出现，除非是刻意要绕过的 agent。 | `execution_control.rs` `host_allows_source` 的文档注释写了理由，`a_local_target_is_not_gated_by_the_human_only_flag` 钉住行为。若将来要管 ①②，需要单独设计，不是在这里补一个判断 |
 
 ## 2. 环境与工程问题
 

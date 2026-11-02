@@ -93,6 +93,29 @@ pub const HUMAN_SOURCES: &[&str] = &["desktop", "cli"];
 
 /// Whether `source` may operate `host`. Hosts default to AI-allowed, and an
 /// unknown host is left to the later stages to reject.
+///
+/// ## Why a local target is always allowed
+///
+/// `local` and `local:<id>` are never in `hosts.json`, so the lookup below
+/// misses and the `is_none_or` default allows them. That is the intended
+/// answer, not an oversight, and it is worth stating because the code reads like
+/// a gap:
+///
+/// A human-only SSH host gates a capability the agent would otherwise have to be
+/// *given* — credentials, reachability, a bastion. A local target gates
+/// nothing. The agent process already runs on that machine and can start a shell
+/// — `sh -c`, `Command::new`, `subprocess` — without this service, so refusing
+/// `local:gitbash` to an MCP client would not stop the command; it would only
+/// make the agent take a different route, while adding a setting that looks like
+/// protection and is not. What the local path gives the user is capture,
+/// timeouts, process-tree reclamation and an audit entry, and those are worth
+/// having regardless of who asked.
+///
+/// The two remaining differences are real but are not this flag's business: a
+/// *container* target (`local:docker:<id>`) runs in a domain the agent would
+/// otherwise have to reach with its own runtime credentials, and a `local:*`
+/// request forwarded to a *remote* daemon runs on that daemon's machine, not the
+/// caller's. See K13 in `docs/KNOWN-ISSUES.md`.
 pub fn host_allows_source(host: &str, source: &str) -> bool {
     let human = HUMAN_SOURCES
         .iter()
@@ -632,6 +655,39 @@ mod tests {
         .unwrap();
         assert_eq!(refused.len(), 3);
         assert!(refused.iter().all(|entry| entry.host == "vault"));
+    }
+    /// A local target is not a host the flag can gate, and that is deliberate:
+    /// the agent runs on the same machine and can start a shell without this
+    /// service, so refusing it here would move the command rather than stop it.
+    ///
+    /// Pinned because the code reads like an omission — `local:gitbash` misses
+    /// the `hosts.json` lookup and is allowed by the `is_none_or` default — and
+    /// the next reader should not "fix" it into a gate that protects nothing.
+    #[tokio::test]
+    async fn a_local_target_is_not_gated_by_the_human_only_flag() {
+        let _dir = crate::store::TestConfigDir::new("localhumanonly");
+        crate::store::save_config(&crate::types::AppConfig {
+            hosts: vec![host_json(
+                serde_json::json!({"name": "vault", "host": "10.0.0.1", "ai_allowed": false}),
+            )],
+            ..Default::default()
+        })
+        .unwrap();
+        let scope = None;
+
+        for host in ["local", "local:gitbash", "local:cmd", "local:docker:abc123"] {
+            for source in ["mcp", "daemon", "desktop"] {
+                let result =
+                    authorize_command_with_approval(input_for(&scope, source, host), |_| async {
+                        panic!("uptime needs no approval")
+                    })
+                    .await;
+                assert!(
+                    result.is_ok(),
+                    "{source} must not be blocked on {host}: a human-only SSH host does not make the local machine off-limits"
+                );
+            }
+        }
     }
 
     #[tokio::test]
