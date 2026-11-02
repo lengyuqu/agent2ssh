@@ -2479,6 +2479,7 @@ fn exec_multi_batch_result_schema_matches_contract() {
                 truncated: false,
                 dropped_bytes: 0,
                 side_effect: None,
+                risk_unclassified: false,
             }),
             error: None,
         }],
@@ -2590,6 +2591,7 @@ fn audit_export_response_contract() {
         decision: None,
         decided_by: None,
         original_command: None,
+        risk_unclassified: false,
     }];
 
     // JSONL format: each line is a valid AuditEntry JSON

@@ -118,6 +118,14 @@ export default function ApprovalDetail({
         </p>
       )}
 
+      {ctx?.risk_details?.risk_unclassified && (
+        <p className="rounded-lg border border-risk-medium/40 bg-risk-medium/10 px-3 py-2 text-xs text-risk-medium">
+          {t(
+            "This host runs a shell the risk classifier cannot read (cmd.exe or PowerShell), so the level above may understate the real risk. Judge the command itself.",
+          )}
+        </p>
+      )}
+
       {contextRows.length > 0 && (
         <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 rounded-xl border border-line px-4 py-3 text-xs">
           {contextRows.map(([label, value]) => (

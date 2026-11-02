@@ -318,6 +318,7 @@ fn reject_if_gate_paused(
         truncated: false,
         dropped_bytes: 0,
         side_effect: None,
+        risk_unclassified: false,
     };
     let _ = append_audit(
         &result,
@@ -791,6 +792,7 @@ fn write_limit_rejection_audit(
         truncated: false,
         dropped_bytes: 0,
         side_effect: None,
+        risk_unclassified: false,
     };
     let reason = format!(
         "execution limit exceeded: {} current={} limit={}",
@@ -5236,6 +5238,7 @@ async fn exec_stream(
             duration_ms,
             risk_level: risk,
             truncated: false, dropped_bytes: 0, side_effect: None,
+                risk_unclassified: false,
         };
         let _ = append_audit(
             &audit_result,

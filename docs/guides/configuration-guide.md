@@ -640,6 +640,7 @@ prelude = "export JAVA_HOME=/opt/jdk-21"   # WSL 的变量写在这里，不能�
 
 - **只在守护进程启动时读取一次，不会热重载。** 修改文件后需要重启 daemon 才生效。这是有意的：prelude 和环境变量在命令之前执行，风险分类器看不到它们，所以不允许运行中的进程被一条本地命令改写的文件影响。
 - **prelude 在加载时做风险分类**，评级为 `high`/`blocked` 的定义会被拒绝。但分类器解析的是 bash，因此只对 `gitbash`、`wsl` 以及非 Windows 上的 `default` 生效；`pwsh`、`cmd`、`vs` 不做这个检查（对 PowerShell 它会把 `$env:FOO = 'bar'` 判成 high、把 `Remove-Item -Recurse -Force` 判成 low），只依赖"不热重载"这一条。请只写你自己审过的 prelude。
+- **同一个语言限制也适用于命令本身，而且现在可见了**：`agent2ssh exec`、`local_exec` 与常驻会话在 `pwsh`/`cmd`/`vs` 环境里跑的命令，其风险等级仍是 bash 分类器的结论。这个结论**不会被用来放行或拦截**以外的任何判断（策略、执行门、审计照旧用它），但结果和审计条目会带上 `risk_unclassified: true`，`agent2ssh risk --host local:cmd` 会在输出里给出说明，审批卡片上也会显示一条提示。`gitbash`、`wsl` 和 SSH 主机不带这个标记。把它当成"这条命令没有被真正评估过"，而不是"它被评估为低风险"。
 - `base = "wsl"` 时不能写 `env`：`wsl.exe` 不会把自己的进程环境传进发行版。把变量写成 prelude 里的 `export`。
 - 单个定义校验失败只会拒绝它自己，其他定义照常加载；使用被拒绝的环境会返回具体原因，不会退化成普通 shell。整个文件解析失败只会让自定义环境不可用，内置环境不受影响。daemon 启动时会把这些问题写入日志。
 - 未知字段会被当作错误（防止把 `env` 拼成 `envs` 而静默丢失变量）。

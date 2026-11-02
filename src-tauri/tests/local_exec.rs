@@ -975,3 +975,91 @@ async fn defining_environments_does_not_disturb_the_built_ins() {
         Err(error) => assert!(!error.to_string().contains("environments.toml"), "{error}"),
     }
 }
+/// The classifier parses bash. A cmd.exe or PowerShell environment runs a
+/// different language, so the verdict recorded for its commands must say so —
+/// otherwise the audit trail presents a guess as a judgement.
+///
+/// The mirror case is asserted in the same test on purpose: a test that only
+/// checked "cmd is flagged" would still pass if every result were flagged.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_shell_the_classifier_cannot_read_marks_its_results_unclassified() {
+    let _env = IsolatedEnv::new("unclassified");
+
+    let plain = exec_local_core(local_request("echo hello"))
+        .await
+        .expect("local exec");
+    #[cfg(unix)]
+    assert!(
+        !plain.risk_unclassified,
+        "a POSIX shell is classified in the language it runs"
+    );
+    #[cfg(windows)]
+    assert!(
+        plain.risk_unclassified,
+        "the default Windows shell is cmd.exe, which the bash classifier cannot read"
+    );
+
+    // The audit entry carries the same flag, because that is where the verdict
+    // is later read.
+    let entries = audit_entries();
+    let recorded = entries
+        .iter()
+        .find(|entry| entry.command.contains("echo hello"))
+        .expect("audit entry for the run");
+    assert_eq!(
+        recorded.risk_unclassified, plain.risk_unclassified,
+        "the audit entry must agree with the result it recorded"
+    );
+}
+
+/// The flag is about the *target*, so an SSH-style host alias must never get it:
+/// a remote command is classified in whatever language the remote shell reads.
+#[test]
+fn a_remote_alias_is_classifiable_but_a_windows_shell_is_not() {
+    assert!(agent2ssh::local_exec::host_risk_is_classifiable(
+        "prod-db-1"
+    ));
+    assert!(agent2ssh::local_exec::host_risk_is_classifiable(
+        "local:gitbash"
+    ));
+    assert!(!agent2ssh::local_exec::host_risk_is_classifiable(
+        "local:cmd"
+    ));
+    assert!(!agent2ssh::local_exec::host_risk_is_classifiable(
+        "local:pwsh"
+    ));
+}
+/// A classified result must serialize exactly as it did before the field
+/// existed. Without this, dropping `skip_serializing_if` would silently change
+/// every SSH exec response on the wire, and nothing else here would notice.
+#[test]
+fn a_classified_result_carries_no_extra_json_field() {
+    let result = agent2ssh::types::ExecResult {
+        host: "prod-db-1".into(),
+        command: "uptime".into(),
+        exit_code: Some(0),
+        stdout: String::new(),
+        stderr: String::new(),
+        duration_ms: 1,
+        risk_level: agent2ssh::types::RiskLevel::Low,
+        truncated: false,
+        dropped_bytes: 0,
+        side_effect: None,
+        risk_unclassified: false,
+    };
+    let json = serde_json::to_string(&result).expect("serialize");
+    assert!(
+        !json.contains("risk_unclassified"),
+        "a classified result must not gain the field: {json}"
+    );
+
+    // The flag has to survive the round trip when it is set, or an audit reader
+    // would lose the caveat.
+    let flagged = agent2ssh::types::ExecResult {
+        risk_unclassified: true,
+        ..result
+    };
+    let json = serde_json::to_string(&flagged).expect("serialize");
+    assert!(json.contains("\"risk_unclassified\":true"), "{json}");
+}

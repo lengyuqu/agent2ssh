@@ -2950,17 +2950,30 @@ async fn async_main() -> Result<()> {
             } else {
                 effective_command_risk(&command).await
             };
+            // A host whose shell is cmd.exe or PowerShell gets a bash verdict, so
+            // say that rather than printing a number that reads as a judgement.
+            let unclassified = host
+                .as_deref()
+                .is_some_and(|host| !agent2ssh::local_exec::host_risk_is_classifiable(host));
             if json {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
                         "command": command,
                         "risk_level": risk,
+                        "risk_unclassified": unclassified,
                     }))?
                 );
             } else {
                 println!("Command: {}", command);
                 println!("Risk:    {}", risk);
+                if unclassified {
+                    println!(
+                        "Note:    the classifier parses bash. This host runs a cmd.exe or \
+                         PowerShell shell, so the level above may under- or over-state the \
+                         real risk (measured: 'Remove-Item -Recurse -Force' is rated low)."
+                    );
+                }
             }
         }
         Commands::Daemon { command } => {

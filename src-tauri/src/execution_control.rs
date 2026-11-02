@@ -55,6 +55,14 @@ pub struct ApprovalPrompt {
     pub change_id: Option<String>,
     pub side_effect: Option<String>,
     pub source: String,
+    /// True when `risk` is a bash verdict about a command the target runs in
+    /// another language, so the approver should not read it as the whole story.
+    ///
+    /// This is the surface where it matters most: an approval card is the one
+    /// place a person decides on a command, and a PowerShell
+    /// `Remove-Item -Recurse -Force` shown as "low" with no caveat invites the
+    /// person to wave through exactly what the classifier missed.
+    pub risk_unclassified: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -276,6 +284,7 @@ fn append_decided_exec_audit(
         truncated: false,
         dropped_bytes: 0,
         side_effect: None,
+        risk_unclassified: false,
     };
     let _ = append_audit_with_decision(
         &result,
@@ -476,6 +485,7 @@ where
         change_id: change_id.clone(),
         side_effect: input.side_effect.clone(),
         source: input.source.to_string(),
+        risk_unclassified: !crate::local_exec::host_risk_is_classifiable(input.host),
     };
     match approval(prompt)
         .await
@@ -662,6 +672,7 @@ mod tests {
             truncated: false,
             dropped_bytes: 0,
             side_effect: None,
+            risk_unclassified: false,
         };
         append_audit_with_decision(&ran, RiskLevel::Low, None, None, Some("mcp"), None).unwrap();
         let entries = crate::store::list_audit_raw(&crate::types::AuditFilter {

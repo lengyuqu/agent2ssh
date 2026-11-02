@@ -773,6 +773,11 @@ pub async fn resident_exec_core(
         Err(ResidentExecError::Failed(error)) => return Err(error),
     };
 
+    // The session's own host id decides this, not the caller's request: a
+    // resident shell for `local:cmd` interprets cmd syntax however the command
+    // was written. Read from the handle, which was resolved when the shell was
+    // opened.
+    let risk_unclassified = !crate::local_exec::host_risk_is_classifiable(&host);
     let result = ExecResult {
         host,
         command,
@@ -784,6 +789,7 @@ pub async fn resident_exec_core(
         truncated: captured.truncated,
         dropped_bytes: captured.dropped_bytes,
         side_effect,
+        risk_unclassified,
     };
     append_audit(
         &result,

@@ -157,6 +157,13 @@ export type ExecResult = {
   duration_ms: number;
   risk_level: RiskLevel;
   truncated?: boolean;
+  /**
+   * True when risk_level is a bash verdict about a command the target ran in
+   * another language (cmd.exe, PowerShell), so it may under- or over-state the
+   * real risk. Absent for a classified result — the Rust side skips it when
+   * false.
+   */
+  risk_unclassified?: boolean;
 };
 
 // Rust: types.rs — ExecMultiResult
@@ -501,6 +508,8 @@ export type ApprovalRiskDetails = {
   user_risk_override?: RiskLevel | null;
   final_risk: RiskLevel;
   matched_policy?: string | null;
+  /** The levels above came from the bash classifier applied to another language. */
+  risk_unclassified?: boolean;
 };
 
 // Rust: approval.rs — ApprovalContext (every field is #[serde(default)])

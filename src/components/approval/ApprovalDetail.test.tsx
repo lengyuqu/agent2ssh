@@ -69,3 +69,32 @@ describe("ApprovalDetail edit then execute", () => {
     expect(button.disabled).toBe(true);
   });
 });
+describe("ApprovalDetail unclassified risk", () => {
+  const warning =
+    "This host runs a shell the risk classifier cannot read (cmd.exe or PowerShell), so the level above may understate the real risk. Judge the command itself.";
+
+  function withRisk(riskUnclassified: boolean): ApprovalRequest {
+    const approval = request(true);
+    return {
+      ...approval,
+      context: {
+        rewritable: true,
+        risk_details: {
+          built_in_risk: "low",
+          final_risk: "low",
+          risk_unclassified: riskUnclassified,
+        },
+      },
+    };
+  }
+
+  it("says the level is a bash verdict when the shell is not bash", () => {
+    renderDetail(withRisk(true));
+    expect(screen.getByText(warning)).toBeTruthy();
+  });
+
+  it("stays quiet for a shell the classifier can read", () => {
+    renderDetail(withRisk(false));
+    expect(screen.queryByText(warning)).toBeNull();
+  });
+});

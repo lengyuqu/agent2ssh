@@ -863,6 +863,7 @@ pub fn append_audit_with_decision(
         decision,
         decided_by,
         original_command,
+        risk_unclassified: result.risk_unclassified,
     };
     let mut file = OpenOptions::new()
         .create(true)
@@ -902,6 +903,7 @@ pub fn append_operation_audit(
         truncated: false,
         dropped_bytes: 0,
         side_effect: None,
+        risk_unclassified: false,
     };
     let _ = append_audit(&result, risk, reason, None, Some(source));
 }
@@ -2481,6 +2483,7 @@ mod tests {
                 truncated: false,
                 dropped_bytes: 0,
                 side_effect: None,
+                risk_unclassified: false,
             };
             // Mirror the AuditEntry construction in append_audit
             let entry = AuditEntry {
@@ -2541,6 +2544,7 @@ mod tests {
             truncated: false,
             dropped_bytes: 0,
             side_effect: None,
+            risk_unclassified: false,
         }
     }
 

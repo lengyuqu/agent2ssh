@@ -850,6 +850,7 @@ required = false
                 truncated: false,
                 dropped_bytes: 0,
                 side_effect: None,
+                risk_unclassified: false,
             };
             // Mirror append_audit's AuditEntry construction
             let entry = AuditEntry {

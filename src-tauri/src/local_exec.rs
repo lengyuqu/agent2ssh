@@ -330,6 +330,16 @@ impl LocalEnvironment {
     }
 
     /// How this environment is described in prose and in error messages.
+    /// Whether a command this environment interprets is bash, so the risk
+    /// classifier — which parses bash — reads the same language.
+    ///
+    /// `local:wsl` counts: the id enters a Unix shell inside the distribution.
+    /// `GitBash` counts for the same reason. The rest do not, and that is the
+    /// whole point of the question.
+    pub const fn is_bash_compatible(self) -> bool {
+        matches!(self, Self::Default | Self::GitBash | Self::Wsl)
+    }
+
     pub const fn label(self) -> &'static str {
         match self {
             Self::Default => "the default shell",
@@ -443,6 +453,16 @@ pub(crate) struct EnvironmentPlan {
 }
 
 impl EnvironmentPlan {
+    /// Whether a risk verdict about this plan's command means what it says.
+    ///
+    /// See [`CommandStyle::classifier_reads_this_language`]. When this is
+    /// `false` the classifier's answer is a bash verdict about a cmd.exe or
+    /// PowerShell command line; callers must report it as unclassified rather
+    /// than pass it off as authoritative.
+    pub(crate) fn risk_is_classifiable(&self) -> bool {
+        self.style.classifier_reads_this_language()
+    }
+
     fn plain(shell: &ShellInfo) -> Self {
         Self {
             program: PathBuf::from(&shell.path),
@@ -779,6 +799,42 @@ fn container_plan(runtime: ContainerRuntime, container_id: &str) -> Result<Envir
 /// This is the one resolution entry callers should use: it keeps the refusal
 /// rules in one place (an unknown name is refused and listed, never defaulted)
 /// whether the name selected a shell or a container.
+/// Whether a risk verdict about a command for `host` means what it says, using
+/// only the host id — for paths that cannot resolve a plan (a refusal that
+/// happens *because* the environment is unusable).
+///
+/// Resolving the plan here would make the caller's error path fail differently
+/// from its success path, so this answers from the id and, for a user-defined
+/// environment, from its declared base. An id it cannot place is treated as
+/// classifiable: the uncertainty is about a name that will be refused anyway,
+/// and guessing "unclassified" would put the flag on entries that never named a
+/// language at all.
+pub fn host_risk_is_classifiable(host: &str) -> bool {
+    if container_target_for_host(host).is_some() {
+        // A container capture exec runs `/bin/sh -c`, so the classifier reads
+        // the right language.
+        return true;
+    }
+    let registry = local_environments::current();
+    if let Some(kind) = host
+        .strip_prefix(crate::types::LOCAL_ENV_PREFIX)
+        .and_then(|rest| {
+            rest.split_once(':')
+                .map_or(Some(rest), |(kind, _)| Some(kind))
+        })
+    {
+        if let Some(environment) = registry.get(kind) {
+            return environment.base.is_bash_compatible();
+        }
+        if let Some(environment) = LocalEnvironment::from_id(kind) {
+            return environment.is_bash_compatible();
+        }
+    }
+    // Plain `local`: whatever the app would open as a terminal, which on Unix is
+    // a POSIX shell and on Windows is not.
+    !cfg!(windows)
+}
+
 pub(crate) fn resolve_plan_for_host(host: &str) -> Result<EnvironmentPlan> {
     if let Some((runtime, container_id)) = container_target_for_host(host) {
         return container_plan(runtime, container_id);
@@ -969,6 +1025,24 @@ impl CommandStyle {
             ShellFamily::Cmd => Self::CmdSlashC,
             ShellFamily::PowerShell => Self::PowerShellCommand,
         }
+    }
+
+    /// Whether the risk classifier reads the language this style interprets.
+    ///
+    /// `core::classify_risk` parses **bash**. Run over another language it
+    /// answers about that other language, and it is wrong in both directions:
+    /// measured, `$env:FOO = 'bar'` comes back `high` while
+    /// `Remove-Item -Recurse -Force` and `del /s /q` come back `low`. A verdict
+    /// that is wrong both ways is worse than none, because it is acted on — the
+    /// approval policy, the execution gate and the audit trail all treat it as a
+    /// fact about the command.
+    ///
+    /// `local:wsl` is the non-obvious case: the id selects a *Unix* shell
+    /// (`sh -c` inside the distribution), so the classifier reads the right
+    /// language there even though the host is Windows. What decides this is the
+    /// interpreter the command reaches, not the OS the daemon runs on.
+    pub(crate) fn classifier_reads_this_language(self) -> bool {
+        matches!(self, Self::PosixDashC | Self::WslLoginShell)
     }
 }
 
@@ -1804,5 +1878,40 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("not a shell"), "{message}");
         assert!(message.contains("local:wsl"), "{message}");
+    }
+
+    /// The classifier parses bash, so only the interpreters that read bash can
+    /// be called classified. The two that do not are exactly the two this was
+    /// written for.
+    #[test]
+    fn only_bash_readable_environments_are_classifiable() {
+        assert!(CommandStyle::PosixDashC.classifier_reads_this_language());
+        assert!(CommandStyle::WslLoginShell.classifier_reads_this_language());
+        assert!(!CommandStyle::CmdSlashC.classifier_reads_this_language());
+        assert!(!CommandStyle::PowerShellCommand.classifier_reads_this_language());
+    }
+
+    /// The *base* decides, not the platform the test runs on. `local:gitbash` is
+    /// bash on Windows too, and `local:cmd` is not bash on any host.
+    #[test]
+    fn the_environment_base_decides_not_the_operating_system() {
+        assert!(LocalEnvironment::GitBash.is_bash_compatible());
+        assert!(LocalEnvironment::Wsl.is_bash_compatible());
+        assert!(!LocalEnvironment::Cmd.is_bash_compatible());
+        assert!(!LocalEnvironment::Pwsh.is_bash_compatible());
+        assert!(!LocalEnvironment::VsDevShell.is_bash_compatible());
+    }
+
+    /// A host id nobody defined — an SSH alias — must not be flagged. The flag
+    /// says "this ran in a language the classifier does not read", and a remote
+    /// host is classified by the command it actually runs.
+    #[test]
+    fn a_host_alias_is_never_reported_as_unclassified() {
+        assert!(host_risk_is_classifiable("prod-web-1"));
+        assert!(host_risk_is_classifiable("local:gitbash"));
+        assert!(host_risk_is_classifiable("local:wsl:Ubuntu"));
+        assert!(!host_risk_is_classifiable("local:cmd"));
+        assert!(!host_risk_is_classifiable("local:pwsh"));
+        assert!(!host_risk_is_classifiable("local:vs"));
     }
 }

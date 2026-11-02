@@ -827,6 +827,8 @@ export const zh: Record<string, string> = {
   "Approve edited command": "批准编辑后的命令",
   "Edited command": "编辑后的命令",
   "The edited command is re-checked: it cannot be blocked or riskier than this request.": "编辑后的命令会重新评估：不能是被阻止的命令，风险也不能高于本次请求。",
+  "This host runs a shell the risk classifier cannot read (cmd.exe or PowerShell), so the level above may understate the real risk. Judge the command itself.":
+    "该主机使用风险分类器读不懂的 shell（cmd.exe 或 PowerShell），上面的风险等级可能低估真实风险。请直接判断命令本身。",
   "Keyboard: ↑↓ select · ↵ review · ⌘↵ approve · ⌫ reject": "键盘：↑↓ 选择 · ↵ 查看 · ⌘↵ 批准 · ⌫ 拒绝",
   "Confirm execution": "确认执行",
   // v3 T05: terminal drawer

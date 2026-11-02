@@ -512,6 +512,22 @@ pub struct ExecResult {
     /// audit trail so operators can see the declared impact of a command.
     #[serde(default)]
     pub side_effect: Option<String>,
+    /// True when `risk_level` is a bash verdict about a command the target
+    /// interprets in another language, so it may under- or over-state the real
+    /// risk.
+    ///
+    /// Set only for local targets whose interpreter is cmd.exe or PowerShell
+    /// (see `local_exec::EnvironmentPlan::risk_is_classifiable`). It is a *flag*
+    /// rather than a fifth `RiskLevel` on purpose: every comparison in the
+    /// authorization layer, the anomaly detector and the audit queries is an
+    /// equality against one of the four levels, and a new variant would silently
+    /// fall through all of them.
+    ///
+    /// Skipped when false, so an SSH exec result — which is classified in the
+    /// language it runs in — is byte-identical to what it was before this field
+    /// existed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub risk_unclassified: bool,
 }
 
 impl ExecResult {
@@ -558,6 +574,7 @@ impl AuditEntry {
             decision: None,
             decided_by: None,
             original_command: None,
+            risk_unclassified: false,
         }
     }
 }
@@ -606,6 +623,15 @@ pub struct AuditEntry {
     /// `command` then holds what actually ran.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_command: Option<String>,
+    /// True when `risk_level` was produced by the bash classifier for a command
+    /// the target ran in another language, so it is not a trustworthy verdict.
+    ///
+    /// Carried onto the audit trail because that is where the verdict is *read*:
+    /// a reviewer filtering for "high risk" is looking at these rows, and a
+    /// PowerShell `Remove-Item -Recurse -Force` recorded as `low` without this
+    /// flag would read as a considered judgement rather than an absence of one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub risk_unclassified: bool,
 }
 
 /// Authorization verdict recorded on an [`AuditEntry`].

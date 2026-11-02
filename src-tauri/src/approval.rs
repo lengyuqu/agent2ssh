@@ -67,6 +67,15 @@ pub struct RiskDetails {
     pub user_risk_override: Option<RiskLevel>,
     pub final_risk: RiskLevel,
     pub matched_policy: Option<String>,
+    /// True when these levels came from the bash classifier applied to a command
+    /// the target runs in another language (cmd.exe, PowerShell).
+    ///
+    /// Shown on the approval card so the person deciding knows the number is not
+    /// a verdict about the language the command is written in: measured, the
+    /// same classifier calls `Remove-Item -Recurse -Force` `low` and
+    /// `$env:FOO = 'bar'` `high`.
+    #[serde(default)]
+    pub risk_unclassified: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -822,6 +831,7 @@ pub fn build_approval_context_with_effective_risk(
         user_risk_override: risk_override,
         final_risk,
         matched_policy,
+        risk_unclassified: !crate::local_exec::host_risk_is_classifiable(host_name),
     };
     ctx.risk_details = Some(risk_details);
 
@@ -1629,6 +1639,7 @@ mod tests {
                 user_risk_override: None,
                 final_risk: RiskLevel::High,
                 matched_policy: Some("high-risk-only".into()),
+                risk_unclassified: false,
             }),
             reason: Some("deploying hotfix".into()),
             change_id: Some("CHG-1234".into()),

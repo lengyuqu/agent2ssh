@@ -1054,6 +1054,7 @@ pub(crate) async fn exec_ssh_core_with_risk_override(
         truncated: embedded_output.truncated,
         dropped_bytes: embedded_output.dropped_bytes,
         side_effect: request.side_effect.clone(),
+        risk_unclassified: false,
     };
     append_audit(
         &result,
@@ -1175,6 +1176,10 @@ pub(crate) async fn exec_local_core_with_risk_override(
     const DEFAULT_MAX_OUTPUT: usize = 4 * 1024 * 1024; // 4 MiB
     let max_bytes = request.max_output_bytes.unwrap_or(DEFAULT_MAX_OUTPUT);
 
+    // Read before `plan` is moved into the blocking task, and before the command
+    // runs: the flag describes how the verdict was reached, not what happened.
+    let risk_unclassified = !plan.risk_is_classifiable();
+
     let local_command = request.command.clone();
     let local_stdin = request.stdin.clone();
     let captured = tokio::task::spawn_blocking(move || {
@@ -1221,6 +1226,13 @@ pub(crate) async fn exec_local_core_with_risk_override(
         truncated: captured.truncated,
         dropped_bytes: captured.dropped_bytes,
         side_effect: request.side_effect.clone(),
+        // The verdict above came from the bash classifier. For a cmd.exe or
+        // PowerShell environment it is a statement about a different language —
+        // measured to call `Remove-Item -Recurse -Force` low and
+        // `$env:FOO = 'bar'` high — so the result says so instead of presenting
+        // it as a considered judgement. Reporting, not re-rating: this change
+        // deliberately leaves the risk level and every gate that reads it alone.
+        risk_unclassified,
     };
     append_audit(
         &result,
@@ -1259,6 +1271,12 @@ fn append_rejected_exec_audit(request: &ExecRequest, risk: RiskLevel, source: &s
         truncated: false,
         dropped_bytes: 0,
         side_effect: None,
+        // A refusal is a decision too, and it carries the same caveat: a
+        // PowerShell command recorded as "low, ran" and the same one recorded as
+        // "blocked" both rest on a bash reading. The plan may not resolve here
+        // (that is one of the reasons this function exists), so the flag asks the
+        // host id instead of a resolved environment.
+        risk_unclassified: !crate::local_exec::host_risk_is_classifiable(&request.host),
     };
     let _ = append_audit(
         &result,
@@ -1292,6 +1310,7 @@ fn append_timed_out_exec_audit(
         truncated: false,
         dropped_bytes: 0,
         side_effect: None,
+        risk_unclassified: false,
     };
     let _ = append_audit(
         &result,
@@ -1832,6 +1851,7 @@ pub async fn sftp_upload_core_with_source(
             truncated: false,
             dropped_bytes: 0,
             side_effect: None,
+            risk_unclassified: false,
         };
         let _ = append_audit(&result, risk, Some(message), None, Some(&source));
         return Err(anyhow!(message));
@@ -1907,6 +1927,7 @@ pub async fn sftp_upload_core_with_source(
                 truncated: false,
                 dropped_bytes: 0,
                 side_effect: None,
+                risk_unclassified: false,
             };
             let _ = append_audit(&result, risk, Some(&message), None, Some(&source));
             return Err(error);
@@ -1932,6 +1953,7 @@ pub async fn sftp_upload_core_with_source(
         truncated: false,
         dropped_bytes: 0,
         side_effect: None,
+        risk_unclassified: false,
     };
     let _ = append_audit(&audit_result, risk, None, None, Some(&source));
     Ok(result)
@@ -1969,6 +1991,7 @@ pub async fn sftp_download_core_with_source(
             truncated: false,
             dropped_bytes: 0,
             side_effect: None,
+            risk_unclassified: false,
         };
         let _ = append_audit(&result, risk, Some(message), None, Some(&source));
         return Err(anyhow!(message));
@@ -2075,6 +2098,7 @@ pub async fn sftp_download_core_with_source(
                 truncated: false,
                 dropped_bytes: 0,
                 side_effect: None,
+                risk_unclassified: false,
             };
             let _ = append_audit(&result, risk, Some(&message), None, Some(&source));
             return Err(error);
@@ -2100,6 +2124,7 @@ pub async fn sftp_download_core_with_source(
         truncated: false,
         dropped_bytes: 0,
         side_effect: None,
+        risk_unclassified: false,
     };
     let _ = append_audit(&audit_result, risk, None, None, Some(&source));
     Ok(result)
@@ -2321,6 +2346,7 @@ where
             truncated: false,
             dropped_bytes: 0,
             side_effect: None,
+            risk_unclassified: false,
         };
         let _ = append_audit(&result, risk, Some(&message), None, Some(&source));
         return Err(anyhow!(message));
@@ -2347,6 +2373,7 @@ where
                 truncated: false,
                 dropped_bytes: 0,
                 side_effect: None,
+                risk_unclassified: false,
             };
             let _ = append_audit(&result, risk, None, None, Some(&source));
             Ok((result, value))
@@ -2364,6 +2391,7 @@ where
                 truncated: false,
                 dropped_bytes: 0,
                 side_effect: None,
+                risk_unclassified: false,
             };
             let _ = append_audit(&result, risk, Some(&message), None, Some(&source));
             Err(error)
@@ -4574,6 +4602,7 @@ mod tests {
                     truncated: false,
                     dropped_bytes: 0,
                     side_effect: None,
+                    risk_unclassified: false,
                 }),
                 error: None,
             },
@@ -4590,6 +4619,7 @@ mod tests {
                     truncated: false,
                     dropped_bytes: 0,
                     side_effect: None,
+                    risk_unclassified: false,
                 }),
                 error: None,
             },
@@ -4627,6 +4657,7 @@ mod tests {
                     truncated: false,
                     dropped_bytes: 0,
                     side_effect: None,
+                    risk_unclassified: false,
                 }),
                 error: None,
             },
@@ -4643,6 +4674,7 @@ mod tests {
                     truncated: false,
                     dropped_bytes: 0,
                     side_effect: None,
+                    risk_unclassified: false,
                 }),
                 error: None,
             },
@@ -4700,6 +4732,7 @@ mod tests {
                     truncated: false,
                     dropped_bytes: 0,
                     side_effect: None,
+                    risk_unclassified: false,
                 }),
                 error: None,
             },
@@ -4716,6 +4749,7 @@ mod tests {
                     truncated: false,
                     dropped_bytes: 0,
                     side_effect: None,
+                    risk_unclassified: false,
                 }),
                 error: None,
             },
