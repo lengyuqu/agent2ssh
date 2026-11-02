@@ -646,6 +646,17 @@ prelude = "export JAVA_HOME=/opt/jdk-21"   # WSL 的变量写在这里，不能�
 - 文件不存在表示没有自定义环境，不会报错。
 - 值是明文存储；不要把密钥直接写进去。
 
+### `local:wsl` 的命令是怎么执行的
+
+`local:wsl`（默认发行版）和 `local:wsl:<发行版>` 都是**一次性 exec**：`wsl.exe` 先按 `--shell-type login` 建立该发行版的登录环境（`/etc/profile.d`、它自己的 `PATH` 和工具链），再由发行版的 `/bin/sh` 解释命令字符串。
+
+两条由此而来的规则：
+
+- **命令体由 `sh` 执行，不是 bash。** `sh` 是 Linux 发行版必须提供的解释器（Alpine 只有 `ash`，没有 `bash`），所以 `local:wsl` 不假设 bash 存在。需要 bash 语法（`[[ ]]`、数组）时显式调用：`bash -c '[[ -f x ]] && echo yes'`。
+- **一次 exec 只跑一条命令字符串。** 命令作为单个参数传给 `sh -c`，其中的引号、`;`、管道都由那个 shell 解释，和 `local`、`local:gitbash` 一致。
+
+常驻会话（`agent2ssh resident open -H local:wsl`）走另一条路径：它不带命令，直接打开发行版的交互式登录 shell，之后每条命令写进同一个 shell 的 stdin，所以 `cd`、`export` 的状态跨命令保留，bash 语法在那里也可用。
+
 ---
 
 ## remotes.toml

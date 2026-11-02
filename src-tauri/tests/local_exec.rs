@@ -664,6 +664,125 @@ async fn a_container_exec_runs_inside_that_container() {
     assert_eq!(entries[0].exit_code, Some(0));
 }
 
+// ── WSL as a local environment ──────────────────────────────────────────────
+//
+// `wsl.exe` execs its arguments instead of tokenizing them, so a command only
+// reaches a shell if one is named. That made every multi-word command fail with
+// `echo hi: command not found` while single-word commands (`whoami`) passed —
+// which is why the tests below always use a command with arguments rather than a
+// bare word. No fixture is needed: the "server" is this machine's own WSL.
+
+/// The first installed distribution, or `None` where WSL or a distribution is
+/// missing. `wsl.exe -l -q` writes UTF-16, so the NUL bytes are dropped rather
+/// than the text being decoded.
+#[cfg(windows)]
+fn first_wsl_distribution() -> Option<String> {
+    let output = std::process::Command::new("wsl.exe")
+        .args(["-l", "-q"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .replace('\0', "")
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_string)
+}
+
+/// A command with arguments reaches the distribution's shell.
+///
+/// The regression this pins: `wsl.exe --shell-type login <command>` was handed
+/// the command as a single executable name, so `echo hello` exited 127 with
+/// `echo hello: command not found` while `whoami` — no arguments, so no
+/// tokenizing needed — passed. A single-word command therefore cannot be the
+/// assertion here.
+///
+/// The environment assertion is the other half: `--shell-type login` is what
+/// supplies the distribution's profile, and it has to survive the added shell.
+#[cfg(windows)]
+#[tokio::test]
+#[serial_test::serial]
+async fn local_wsl_runs_a_command_with_arguments() {
+    let _env = IsolatedEnv::new("wsl-args");
+    let Some(distro) = first_wsl_distribution() else {
+        eprintln!("skipping: no WSL distribution is installed");
+        return;
+    };
+
+    let mut request = local_request("echo hello from wsl");
+    request.host = format!("{LOCAL_TARGET_ID}:wsl:{distro}");
+    request.timeout_secs = Some(120);
+    let result = exec_local_core(request).await.expect("wsl exec");
+
+    assert_eq!(
+        result.exit_code,
+        Some(0),
+        "the command should have reached a shell; stderr: {}",
+        result.stderr
+    );
+    assert!(
+        result.stdout.contains("hello from wsl"),
+        "the arguments were not passed through: {:?}",
+        result.stdout
+    );
+}
+
+/// The login environment is the reason `local:wsl` exists, so it has to survive
+/// the shell that now interprets the command. `$HOME` is set by the
+/// distribution's own login setup rather than by `wsl.exe`, so a non-empty value
+/// proves the profile ran.
+#[cfg(windows)]
+#[tokio::test]
+#[serial_test::serial]
+async fn local_wsl_keeps_the_distributions_login_environment() {
+    let _env = IsolatedEnv::new("wsl-profile");
+    let Some(distro) = first_wsl_distribution() else {
+        eprintln!("skipping: no WSL distribution is installed");
+        return;
+    };
+
+    let mut request = local_request("echo home=$HOME && echo shell=$0");
+    request.host = format!("{LOCAL_TARGET_ID}:wsl:{distro}");
+    request.timeout_secs = Some(120);
+    let result = exec_local_core(request).await.expect("wsl exec");
+
+    assert_eq!(result.exit_code, Some(0), "stderr: {}", result.stderr);
+    assert!(
+        !result.stdout.contains("home=\n") && !result.stdout.trim().eq("home="),
+        "the distribution's login environment did not apply: {:?}",
+        result.stdout
+    );
+    // A nonzero exit code has to come back from the command, not be swallowed by
+    // the shell this crate started.
+    let mut request = local_request("exit 42");
+    request.host = format!("{LOCAL_TARGET_ID}:wsl:{distro}");
+    request.timeout_secs = Some(120);
+    let result = exec_local_core(request).await.expect("wsl exec");
+    assert_eq!(result.exit_code, Some(42), "stderr: {}", result.stderr);
+}
+
+/// The rejection paths need no WSL at all: an unknown runtime-shaped id is still
+/// refused as a container, and a malformed distribution name never reaches a
+/// spawn.
+#[cfg(windows)]
+#[tokio::test]
+#[serial_test::serial]
+async fn local_wsl_without_a_distribution_name_shape_is_refused() {
+    let _env = IsolatedEnv::new("wsl-shape");
+
+    let mut request = local_request("echo hi");
+    request.host = format!("{LOCAL_TARGET_ID}:wsl:");
+    let message = exec_local_core(request)
+        .await
+        .expect_err("an empty distribution must be refused")
+        .to_string();
+    assert!(message.contains("names no distribution"), "{message}");
+}
+
 // ── User-defined environments (environments.toml) ───────────────────────────
 
 /// Write `environments.toml` into the isolated config dir and load it the way

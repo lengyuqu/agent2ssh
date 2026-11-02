@@ -48,12 +48,16 @@
 //!
 //! `wsl.exe` is a launcher. Handing it a command through a shell flag is the
 //! mistake this target exists to avoid, and it is not even valid: WSL takes
-//! `-e/--exec`, `--shell-type`, `-d` and `--`, and has no `-c`. Picking a shell
-//! here would defeat the point anyway — what a caller naming WSL wants is the
-//! *distribution's* environment, and only WSL knows which shell that is. The plan
-//! therefore asks WSL for its own login shell (`--shell-type login`) and hands it
-//! nothing but the command, which is the one form that gets the distribution's
-//! `PATH`, profile and toolchains.
+//! `-e/--exec`, `--shell-type`, `-d` and `--`, and has no `-c` of its own. What
+//! the plan asks WSL for instead is the distribution's login *environment*
+//! (`--shell-type login`), which is what supplies its `PATH`, profile and
+//! toolchains.
+//!
+//! That flag establishes the environment but does not interpret the command: the
+//! remaining arguments are exec'd, not tokenized by a shell, so
+//! `--shell-type login "echo hi"` tries to run a program literally named
+//! `echo hi`. A shell therefore has to be named explicitly — `--shell-type login
+//! sh -c <command>` — and the command reaches that shell as one string.
 //!
 //! ## Recursion guard
 //!
@@ -107,6 +111,17 @@ pub const DEPTH_ENV: &str = "AGENT2SSH_LOCAL_EXEC_DEPTH";
 /// enough: an agent that drives agent2ssh gets a shell, and a shell that tries
 /// to drive agent2ssh again is the loop this exists to stop.
 pub const MAX_LOCAL_EXEC_DEPTH: u32 = 1;
+
+/// The shell a `local:wsl` command is run in inside the distribution.
+///
+/// `wsl.exe` does not tokenize its arguments — a command handed to
+/// `--shell-type login` without a shell named is treated as one executable name
+/// — so a shell has to be named for the command string to be parsed at all. `sh`
+/// is the portable choice for the same reason [`CONTAINER_SHELL`] is: it is the
+/// one interpreter a Linux distribution is required to ship (Alpine provides
+/// `ash` and no `bash`). Bash-only syntax therefore needs `bash -c '...'` in the
+/// command itself; see `docs/guides/configuration-guide.md`.
+const WSL_SHELL: &str = "sh";
 
 /// Overrides the shell for the *default* local environment. Accepts a path or a
 /// bare name resolved from `PATH`; unset means "whatever the app would open as a
@@ -883,10 +898,24 @@ pub(crate) enum CommandStyle {
     CmdSlashC,
     /// `-Command <command>`, behind the flags that keep a user profile out of it.
     PowerShellCommand,
-    /// `--shell-type login <command>` — WSL runs it in the distribution's login
-    /// shell. Preferred over naming a shell here because only WSL knows which
-    /// shell a distribution uses and how to start it as a login one, and getting
-    /// that environment's own profile is the entire point of this target.
+    /// `--shell-type login sh -c <command>` — WSL establishes the distribution's
+    /// login environment and then runs the command string in the distribution's
+    /// `/bin/sh`.
+    ///
+    /// The shell has to be named explicitly. `wsl.exe` does not run its
+    /// arguments through a shell: with no shell named, `--shell-type login
+    /// "echo hi"` hands the *whole string* to the login shell as one executable
+    /// name, so it fails with `echo hi: command not found` — every multi-word
+    /// command, which is to say nearly all of them. `--shell-type login` stays
+    /// because it is what establishes the profile (`/etc/profile.d`, the
+    /// distribution's `PATH`), and the shell it starts is an outer one whose
+    /// environment this command inherits.
+    ///
+    /// `/bin/sh` rather than `bash`: it is the one interpreter a Linux
+    /// distribution is required to provide (Alpine ships `ash`, not `bash`), and
+    /// it is the same shell [`Self::PosixDashC`] reaches for on a Unix host. The
+    /// cost is that bash-only syntax has to be spelled `bash -c '...'` by the
+    /// caller, which is documented in `docs/guides/configuration-guide.md`.
     WslLoginShell,
 }
 
@@ -910,7 +939,16 @@ impl CommandStyle {
                 false,
             ),
             Self::WslLoginShell => (
-                vec!["--shell-type".into(), "login".into(), command.into()],
+                vec![
+                    "--shell-type".into(),
+                    "login".into(),
+                    // The shell is named so the command string reaches a shell at
+                    // all; see the variant's doc for why omitting it breaks every
+                    // multi-word command.
+                    WSL_SHELL.into(),
+                    "-c".into(),
+                    command.into(),
+                ],
                 false,
             ),
         }
@@ -1405,16 +1443,49 @@ mod tests {
 
         let default = wsl_plan(None, &installed).expect("a plan");
         assert_eq!(default.prefix, Vec::<String>::new());
-        // `--shell-type login` is what makes the distribution's own profile apply.
-        // A `-c` flag this crate chose could not reach that environment at all,
-        // which is exactly the bug this environment exists to avoid.
+        // `--shell-type login` establishes the distribution's own profile and
+        // `PATH`. The shell is named after it because `wsl.exe` execs its
+        // remaining arguments instead of tokenizing them: without a shell, the
+        // command string is looked up as one executable name and every
+        // multi-word command dies with "echo hi: command not found".
         let (args, raw) = default.style.invocation("echo $PATH");
-        assert_eq!(args, vec!["--shell-type", "login", "echo $PATH"]);
+        assert_eq!(
+            args,
+            vec!["--shell-type", "login", "sh", "-c", "echo $PATH"]
+        );
         assert!(!raw);
 
         let named = wsl_plan(Some("Ubuntu-22.04"), &installed).expect("a plan");
         assert_eq!(named.prefix, vec!["-d", "Ubuntu-22.04"]);
         assert!(named.label.contains("Ubuntu-22.04"));
+    }
+
+    /// The command has to stay a *single* argument behind `-c`. If the shell's
+    /// own flags swallowed it as separate words, `echo hi` would reach `sh` as
+    /// two arguments and `sh` would take `hi` as a script file to read.
+    #[test]
+    fn a_wsl_command_reaches_the_shell_as_one_argument() {
+        let (args, _) = CommandStyle::WslLoginShell.invocation("echo hi; pwd");
+
+        let separator = args
+            .iter()
+            .position(|arg| arg == "-c")
+            .expect("a WSL command is passed through -c");
+        assert_eq!(
+            &args[separator + 1..],
+            ["echo hi; pwd"],
+            "everything after -c must be the one command string, got {args:?}"
+        );
+        // `-d <distribution>` is the prefix's job, so it must not be baked in
+        // here where a named distribution would end up with two.
+        assert!(!args.iter().any(|arg| arg == "-d"), "{args:?}");
+    }
+
+    /// A prelude is chained with `;` for this style, which `sh` reads as a
+    /// statement separator — the same rule as a POSIX shell, unlike cmd's `&&`.
+    #[test]
+    fn a_wsl_prelude_is_chained_the_way_sh_reads_it() {
+        assert_eq!(CommandStyle::WslLoginShell.prelude_separator(), "; ");
     }
 
     fn custom(prelude: Option<&str>, env: &[(&str, &str)]) -> CustomEnvironment {
