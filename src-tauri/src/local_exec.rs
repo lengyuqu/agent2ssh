@@ -829,10 +829,24 @@ pub fn host_risk_is_classifiable(host: &str) -> bool {
         if let Some(environment) = LocalEnvironment::from_id(kind) {
             return environment.is_bash_compatible();
         }
+        // A `local:` id nothing defines. It will be refused by name when it is
+        // used, so the answer here cannot change what runs — but it *is* a local
+        // target, and calling it classifiable would be asserting something about
+        // a shell that does not exist.
+        return true;
     }
-    // Plain `local`: whatever the app would open as a terminal, which on Unix is
-    // a POSIX shell and on Windows is not.
-    !cfg!(windows)
+
+    if crate::types::is_local_host(host) {
+        // Plain `local`: whatever the app would open as a terminal, which on
+        // Unix is a POSIX shell and on Windows is not.
+        return !cfg!(windows);
+    }
+
+    // Anything else is an SSH host alias, which this function knows nothing
+    // about. It must not inherit the Windows answer above: a remote command is
+    // classified in whatever language the remote shell reads, and flagging every
+    // SSH exec on Windows as unclassified would make the flag meaningless.
+    true
 }
 
 pub(crate) fn resolve_plan_for_host(host: &str) -> Result<EnvironmentPlan> {
@@ -1913,5 +1927,15 @@ mod tests {
         assert!(!host_risk_is_classifiable("local:cmd"));
         assert!(!host_risk_is_classifiable("local:pwsh"));
         assert!(!host_risk_is_classifiable("local:vs"));
+    }
+    /// The Windows answer for a bare `local` must not leak onto remote hosts.
+    /// It did once: the helper fell through to `!cfg!(windows)` for every id it
+    /// could not place, so on Windows *every* SSH exec was flagged unclassified.
+    /// macOS could not see it — the fallback is `true` there — which is exactly
+    /// why the discriminator is asserted on both sides rather than one.
+    #[test]
+    fn a_bare_local_follows_the_platform_but_a_remote_host_never_does() {
+        assert_eq!(host_risk_is_classifiable("local"), !cfg!(windows));
+        assert!(host_risk_is_classifiable("prod-web-1"));
     }
 }
