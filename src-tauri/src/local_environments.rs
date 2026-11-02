@@ -504,26 +504,46 @@ mod tests {
             .to_string()
     }
 
+    /// An absolute working directory for the platform running the test.
+    ///
+    /// A POSIX literal such as `/work/ml` is absolute on Unix only: on Windows it
+    /// is a root with no prefix, so `Path::is_absolute` is false and `expand_cwd`
+    /// rejects the definition — correctly. Two tests in this module asserted one
+    /// anyway, which is why they failed on the Windows CI leg alone. Keeping the
+    /// discriminator in one helper lets every assertion below stay identical on
+    /// both platforms, the pattern `tests/local_exec.rs` uses for named
+    /// environments.
+    fn absolute_cwd(segment: &str) -> String {
+        if cfg!(windows) {
+            format!(r"C:\{segment}")
+        } else {
+            format!("/{segment}")
+        }
+    }
+
     #[test]
     fn a_full_definition_loads_with_every_field() {
-        let registry = EnvironmentRegistry::parse(
+        let cwd = absolute_cwd("work/ml");
+        // A TOML *literal* string (single quotes), because a basic string would
+        // read the backslashes in the Windows form as escapes.
+        let registry = EnvironmentRegistry::parse(&format!(
             r#"
 [[environment]]
 id = "py-ml"
 description = "ML toolchain"
 base = "gitbash"
-cwd = "/work/ml"
+cwd = '{cwd}'
 prelude = "source .venv/bin/activate"
 
 [environment.env]
 ZED = "1"
 CUDA_VISIBLE_DEVICES = "0"
-"#,
-        );
+"#
+        ));
         assert!(registry.problems().is_empty(), "{:?}", registry.problems());
         let env = registry.get("py-ml").expect("loaded");
         assert_eq!(env.base, LocalEnvironment::GitBash);
-        assert_eq!(env.cwd, Some(PathBuf::from("/work/ml")));
+        assert_eq!(env.cwd, Some(PathBuf::from(&cwd)));
         assert_eq!(env.prelude.as_deref(), Some("source .venv/bin/activate"));
         // Name order, not file order.
         assert_eq!(
@@ -607,10 +627,15 @@ CUDA_VISIBLE_DEVICES = "0"
 
     #[test]
     fn a_duplicate_id_keeps_the_first_definition() {
-        let registry = EnvironmentRegistry::parse(
-            "[[environment]]\nid = \"a\"\ncwd = \"/one\"\n[[environment]]\nid = \"a\"\ncwd = \"/two\"\n",
-        );
-        assert_eq!(registry.get("a").unwrap().cwd, Some(PathBuf::from("/one")));
+        // Both must be absolute on this platform, or the second definition would
+        // be rejected for its cwd instead of for the duplicate id — and the
+        // "first wins" assertion would never run.
+        let first = absolute_cwd("one");
+        let second = absolute_cwd("two");
+        let registry = EnvironmentRegistry::parse(&format!(
+            "[[environment]]\nid = \"a\"\ncwd = '{first}'\n[[environment]]\nid = \"a\"\ncwd = '{second}'\n"
+        ));
+        assert_eq!(registry.get("a").unwrap().cwd, Some(PathBuf::from(&first)));
         assert!(registry.rejection("a").unwrap().contains("duplicate"));
     }
 
