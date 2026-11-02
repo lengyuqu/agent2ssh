@@ -66,9 +66,23 @@ permissions:
   contents: write
 
 jobs:
+  # Every job carries an explicit `timeout-minutes`. GitHub's default is 360
+  # minutes, and the Windows legs have twice stalled with no output at all (the
+  # unit tests once, `cli_contract` once) — hours burned, and cancelling lost the
+  # logs. A bounded timeout turns a hang into an ordinary failure that still
+  # uploads its logs. See docs/reports/WINDOWS-HANDOVER.md section 1.
+  #
+  # The numbers are at least 2.5x the slowest observed run of each job, measured
+  # over the 0.4.3 release run (39983100417) and the 2026-10-27 and 2026-11-02
+  # pushes: contract-consistency 1m51s, tauri-unit-tests 7m11s, build 17m59s
+  # (Windows, release), tauri-bundle 14m41s (Windows NSIS), real-ssh-e2e 5m01s,
+  # release-updater-manifest 7s. They are deliberately not the default 360: the
+  # two stalls that motivated this were cancelled by hand at 30-50 minutes, so a
+  # bound above that would still let a hang outlast the human who notices it.
   contract-consistency:
     name: Contract consistency
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -143,6 +157,7 @@ jobs:
     name: Tauri feature unit tests
     needs: contract-consistency
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       # `tauri_build::build()` refuses to run unless every `bundle.externalBin`
       # sidecar exists as src-tauri/binaries/<name>-<host-triple>. Those are
@@ -198,6 +213,7 @@ jobs:
 
   build:
     needs: contract-consistency
+    timeout-minutes: 45
     strategy:
       matrix:
         include:
@@ -341,6 +357,7 @@ jobs:
   tauri-bundle:
     needs: contract-consistency
     if: github.event_name == 'release'
+    timeout-minutes: 60
     strategy:
       matrix:
         include:
@@ -528,6 +545,7 @@ jobs:
     needs: tauri-bundle
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -562,6 +580,7 @@ jobs:
   real-ssh-e2e:
     needs: contract-consistency
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
 

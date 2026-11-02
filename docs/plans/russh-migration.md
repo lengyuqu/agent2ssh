@@ -212,8 +212,10 @@ src/transport/
 **DoD**：`grep -rn "ssh2::" src/ | grep -v "src/transport/"` 输出为空——即**模块之外没有任何代码命名后端**（不能只排 `legacy_ssh2.rs`：`mod.rs` 的 `pub use legacy_ssh2::…` 也会命中，而 `types.rs` 的文档注释是刻意写明"镜像 ssh2 的哪个类型"的，属于要保留的记录）；741/749/155 全绿（现场重测值）；`Cargo.toml` 未新增任何依赖；**§4.5 的 22+14+9+4 个方法逐个有门面落点**。
 **价值**：这一步在 Mac 和 Windows 上都成立，等于把 9500 行的风险提前清掉；之后换后端只改一个目录。
 
-### S1 — 接 russh（双后端并存）· 🟢 主干已实现并通过真实 sshd，剩余五个缺口
+### S1 — 接 russh（双后端并存）· ✅ 已完成 2026-10-22，主干经真实 sshd 验证；遗留两个已知缺口
 
+> **归档说明（2026-11-02 补）**：本节与 §S2 保留的是迁移当时的状态和决策记录，不是当前可用的开关。文中反复出现的 `transport-russh` / `transport-ssh2` feature 随 S3（2026-10-22）与 `legacy_ssh2.rs` 一并删除——`src-tauri/Cargo.toml` 现在既无 `transport-ssh2` feature 也无 `ssh2` 依赖，`default = ["tauri"]`，**russh 是唯一后端**。下文的 feature 对照表、`--features transport-ssh2` 命令和"回滚改默认 feature"的说法都请按历史记录读（S3 之后的回滚方式见 §13）。
+>
 > 依赖层已经在树上（五条钉版；S1 阶段用 `transport-russh` feature 开关，S2 起 russh 为默认）。**剩下的全部工作是 `russh_impl/` 本身**，见本节末「探针结果」。
 
 1. 依赖已就位，不必再抄任何 pin：
@@ -581,4 +583,4 @@ S3 里有两类东西**不能靠 revert 恢复干净**，删之前先想清：
 1. `ssh_key_format.rs` 的删除。它不只是提示文案的辅助——`unusable_key_hint()` 的调用点要一并清理，且 `reads_openssh_private_keys()` 的**能力信号身份**（`ssh_algo.rs:129-137` 的注释就是为它写的）和 **CLI JSON 字段**（`bin/agent2ssh.rs:3399`）都要有替代物。删完再 revert 会把 `supported_algorithms` 一起带回来，与 russh 后端并存时那套"libssh2 能力探测"已经没有意义。
 2. §7 里那三处"先补位再删"的替换（静态白名单、恒 `true` 的能力信号、`auth_methods` 短路改写）。它们是**行为等价性**的载体，回滚单独一笔提交容易只回滚一半，留下"没有 libssh2 却还在查 libssh2 能力"的半截状态。
 
-门面（S0）本身是可回滚的：`legacy_ssh2.rs` 保留在 S2 之后，`--features transport-ssh2` 一直是那条退路。
+门面（S0）本身是可回滚的：`legacy_ssh2.rs` 一直保留到 S2 之后，`--features transport-ssh2` 在 S1–S2 期间是那条退路——**该 feature 与 `legacy_ssh2.rs` 都已在 S3（2026-10-22）删除，2026-11-02 复核时树上已不存在**，其后的回滚改为本节上一条所述的 revert 一个提交。

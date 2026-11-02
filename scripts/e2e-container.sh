@@ -35,14 +35,21 @@
 # every platform this repository builds runs the same transport and therefore
 # offers the same modern key-exchange set.
 #
+# The default *registry* follows the container runtime. Apple container rejects
+# lscr.io's cross-registry token exchange (`authorization server ghcr.io is not
+# in the same registrable domain as registry lscr.io`), so an Apple-container run
+# pulls the same image from `ghcr.io/linuxserver/openssh-server`; Docker and
+# wslc keep `lscr.io`. `AGENT2SSH_E2E_IMAGE` overrides both, registry included.
+#
 # The override exists for a server, not for a build. An old server that only
 # offers MODP Diffie-Hellman cannot negotiate with this client at all, since the
 # transport's defaults are modern by design (see `ssh_algo::safe_defaults`); the
 # supported way to talk to such a host is `agent2ssh algo set` on that host
 # profile, not a different client. To point the fixture at an OpenSSH 9.x server
-# anyway:
+# anyway (the repo follows the runtime as described above; `lscr.io` shown here,
+# use `ghcr.io/linuxserver/openssh-server` on an Apple-container host):
 #
-#   AGENT2SSH_E2E_IMAGE=lscr.io/linuxserver/openssh-server:9.9_p2-r0-ls198 \
+#   AGENT2SSH_E2E_IMAGE=lscr.io/linuxserver/openssh-server:version-9.9_p2-r0 \
 #     scripts/e2e-container.sh
 #
 # ## Which runtime?
@@ -82,7 +89,9 @@ export MSYS2_ARG_CONV_EXCL='/config'
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONTAINER=agent2ssh-e2e-sshd
 SSH_PORT=22122
-IMAGE="${AGENT2SSH_E2E_IMAGE:-lscr.io/linuxserver/openssh-server:latest}"
+# `IMAGE` is resolved further down, once the container runtime is known: Apple
+# container refuses lscr.io's cross-registry token exchange, so it is served the
+# same image from ghcr.io instead. See "Which sshd image?" above.
 WORK="$(mktemp -d)"
 export AGENT2SSH_CONFIG_DIR="$WORK/config"
 mkdir -p "$AGENT2SSH_CONFIG_DIR"
@@ -138,6 +147,18 @@ fi
 RT_ID="$("$CLI" containers runtime --json | sed -n 's/.*"runtime": "\([a-z]*\)".*/\1/p')"
 echo "  runtime: ${RT_ID:-unknown} ($RT_BIN)"
 
+# Apple container refuses lscr.io's cross-registry token exchange
+# (`authorization server ghcr.io is not in the same registrable domain as
+# registry lscr.io`), so the default repo follows the runtime and Apple gets the
+# same image from ghcr.io. `scripts/e2e-ssh-matrix.sh` makes the identical
+# choice; `AGENT2SSH_E2E_IMAGE` still overrides both.
+if [[ "$RT_ID" == apple ]]; then
+  E2E_REPO="ghcr.io/linuxserver/openssh-server"
+else
+  E2E_REPO="lscr.io/linuxserver/openssh-server"
+fi
+IMAGE="${AGENT2SSH_E2E_IMAGE:-$E2E_REPO:latest}"
+
 # ── Generate the client keypair with the app ──────────────────────────────────
 # The type is whatever `keys algorithm` reports for this build (a property of
 # the transport), so the harness and the product cannot disagree about it.
@@ -189,7 +210,7 @@ if [[ "$READY" != 1 ]]; then
   echo "        by design. That is the server's limitation, not the client's: allow"
   echo "        the legacy algorithm on the host profile with 'agent2ssh algo set'."
   echo "        To confirm it is the image rather than the client:"
-  echo "        AGENT2SSH_E2E_IMAGE=lscr.io/linuxserver/openssh-server:9.9_p2-r0-ls198"
+  echo "        AGENT2SSH_E2E_IMAGE=$E2E_REPO:version-9.9_p2-r0"
   exit 1
 fi
 ok "sshd reachable with the app-generated key"
