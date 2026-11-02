@@ -176,7 +176,7 @@ Configure Agent2SSH as an MCP server in your agent's config:
 Set `AGENT2SSH_SOURCE` to the client label you want to see in Activity, such as
 `workbuddy`, `qoder_work`, `trae`, `codex`, or `claude_desktop`.
 
-See [docs/skills.md](docs/skills.md) for the full list of 71 MCP tools.
+See [docs/skills.md](docs/skills.md) for the full list of 75 MCP tools.
 
 For first-time external users, follow the [10-minute CLI and MCP setup guide](docs/guides/external-user-10min.md). It covers host import, low-risk command verification, Codex/Claude-style MCP configuration, and sanitized feedback submission.
 
@@ -201,12 +201,14 @@ For first-time external users, follow the [10-minute CLI and MCP setup guide](do
 - Multi-host execution by tag
 - Connectivity check (`ping`) with latency reporting
 - Retained embedded SSH connections for connection status and preconnect workflows
+- Local execution on the daemon's machine in a named environment (`local`, `local:pwsh`, `local:cmd`, `local:gitbash`, `local:vs`, `local:wsl[:<distro>]`, user-defined `local:<id>`, or `local:<runtime>:<container-id>` for capture exec inside a container), through the same authorization chain as an SSH exec
+- Resident shell sessions that keep one `local:<id>` environment alive across commands, so cwd and exported variables persist; a command that outlives its timeout kills the session
 
 ### SSH Backend Boundary
 
-- SSH transport is implemented in the Rust/Tauri backend with the `ssh2` / libssh2 stack.
+- SSH transport is implemented in the Rust/Tauri backend with `russh` (crypto backend `ring`) — pure Rust, no libssh2 and no OpenSSL.
 - Exec, ping, health probes, SFTP, WebSocket exec streaming, WebSocket terminal, persistent PTY sessions, HTTP/SOCKS5 proxy dialing, jump-host / ProxyJump-style bastion channels, retained connections, and local/remote port forwards do not call system `ssh`, `scp`, or `sshpass`.
-- Local Ed25519 key generation is also implemented in Rust and uses the operating system CSPRNG directly; it does not call system `ssh-keygen`.
+- Local SSH key generation is also implemented in Rust and uses the operating system CSPRNG directly; it does not call system `ssh-keygen`.
 - Daemon process status/stop and health checks use Rust process/HTTP APIs, not shelling out to `kill`, `taskkill`, `tasklist`, or `curl`.
 - SSH config import/export reads and writes local config text, but connection execution remains embedded.
 
@@ -253,6 +255,7 @@ For first-time external users, follow the [10-minute CLI and MCP setup guide](do
 ### Desktop And Web UI
 
 - Desktop host manager, exec panel, audit viewer, approval dialog, key manager, playbooks, tunnels, sessions, and connection status
+- Desktop Resident Sessions panel listing the daemon's resident shells with a close action, and a Containers panel for container exec targets
 - Desktop Proxies page for HTTP CONNECT and SOCKS5 proxy profiles, including optional username/password authentication
 - Desktop Terminal supports selectable terminal themes including app-matched, GitHub Dark, Tokyo Night, Dracula, Nord, Solarized Light, High Contrast, and Amber
 - Desktop Help page links bundled guides and shows first-run checklist, useful commands, and safety notes
@@ -275,9 +278,9 @@ For first-time external users, follow the [10-minute CLI and MCP setup guide](do
 - MCP tools for local and remote operation
 - Bounded event previews for session input/output and streaming exec output, suitable for local agent activity monitoring
 
-## MCP Tools (71)
+## MCP Tools (75)
 
-Agent2SSH exposes **71 MCP tools** covering host management, command snippets, command execution, SFTP, persistent sessions, port forwarding, playbooks, audit, approval workflows, execution gate visibility, daemon management, secret redaction rules, terminal highlight rules, and SSH algorithm preferences.
+Agent2SSH exposes **75 MCP tools** covering host management, command snippets, command execution, SFTP, persistent sessions, local execution (one-shot `local:<environment>` commands and long-lived resident shell sessions), port forwarding, playbooks, audit, approval workflows, execution gate visibility, daemon management, secret redaction rules, terminal highlight rules, and SSH algorithm preferences.
 
 For the complete tool reference with descriptions and parameters, see [docs/skills.md](docs/skills.md).
 

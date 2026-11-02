@@ -28,7 +28,7 @@
 | 主要用户 | 人类运维/开发者 | Codex / Claude / IDE 等外部 Agent |
 | AI 角色 | **内置**排障助手，四道墙 + BYOK | **不内置 LLM**，通过 MCP 把 SSH 暴露给外部 Agent |
 | 前端 | Svelte + xterm.js | React/Vite + xterm.js |
-| 后端 | Rust + Tauri 2 + `russh`（纯 Rust SSH） | Rust + Tauri + `ssh2`/libssh2（内嵌） |
+| 后端 | Rust + Tauri 2 + `russh`（纯 Rust SSH） | Rust + Tauri + `russh`（纯 Rust SSH，内嵌）—— 2026 年从 `ssh2`/libssh2 迁移，两边现在同源 |
 | 存储 | SQLite（`rusqlite` bundled，GUI/CLI 共享） | JSON 文件 + 跨进程文件锁（`hosts.json` 等） |
 | 秘密保管 | OS keychain（`keyring` v3）+ ChaCha20-Poly1305 备份 | `secrets.enc`（Argon2id + AES-256-GCM 主密码保险库） |
 | 同步 | GitHub 私有仓库 + WebDAV 双通道 | WebDAV 单通道（版本化 commit + ETag CAS） |
@@ -349,7 +349,7 @@ Agent2SSH 是一个 Rust core，通过四个 surface 暴露：Tauri 桌面、CLI
 |----|------|
 | 内置 LLM / BYOK AI 助手 | Agent2SSH 定位是**能力层**，AI 由外部 Agent（MCP）承载，内置 LLM 会与定位冲突、引入计费/数据边界问题 |
 | 自建 keychain 替代 secrets.enc | Agent2SSH 的 `secrets.enc` 主密码保险库已解决无 keychain 环境（headless CLI/MCP/daemon）的问题，比 rssh 的 keyring 更契合 daemon 场景 |
-| Telnet / Serial | `ssh2` 内嵌传输 scope 外，且与"SSH 能力层"定位无关 |
+| Telnet / Serial | 内嵌 SSH 传输 scope 外，且与"SSH 能力层"定位无关 |
 | 移动端 / JetBrains 插件 | 分发形态差异，非当前协作者任务 |
 | 存储迁到 SQLite | Agent2SSH 的 JSON + 跨进程文件锁已解决并发，迁移成本 > 收益 |
 
@@ -357,7 +357,7 @@ Agent2SSH 是一个 Rust core，通过四个 surface 暴露：Tauri 桌面、CLI
 
 ## 6. 给协作者的吸收原则
 
-1. **吸收"抽象"，不吸收"代码"**：RSSH 是 Svelte + russh，Agent2SSH 是 React + ssh2，直接拷代码会水土不服。要搬的是"块是对象、能力是消费者"、"四道墙"、"source≠result"这些**元设计**。
+1. **吸收"抽象"，不吸收"代码"**：RSSH 是 Svelte + russh，Agent2SSH 是 React + russh（传输层同源，前端与产品形态不同），直接拷代码仍会水土不服。要搬的是"块是对象、能力是消费者"、"四道墙"、"source≠result"这些**元设计**。
 2. **数据结构优先**：G1/G2/G4 都是同一个 `block.start..end` 切片的消费者。先把"块对象"这个数据结构做完整，派生能力自然长出。不要各自为政地写独立功能。
 3. **安全不靠 prompt 自律**：任何"让 Agent 自觉别跑危险命令"的想法都是错的。形态校验、脱敏、截断、审批都要在 Rust 进程内 enforce（G5/G6/G7/G8 都遵循这条）。
 4. **维护 No-Go 清单**：RSSH 的"刻意不做"清单约束了攻击面。Agent2SSH 也应维护自己的 No-Go（本表第 5 节"明确不吸收"就是起点）。

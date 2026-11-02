@@ -34,8 +34,8 @@
 
 **技术栈现状（写 V 阶段任务前核对过代码，避免任务描述与实际栈脱节）**：
 - 前端是 **Tailwind v4 + shadcn 风格 token/primitive 体系**（`src/index.css` + `src/components/ui/`），**没有 MUI 依赖**（`package.json` 无 `@mui/*`）。下文所有任务描述已按此纠正，不再出现"MUI Snackbar / MUI ThemeProvider / MUI DataGrid"字样——新增交互一律基于现有 `ui/` primitives 或轻量 headless 库（如 TanStack Table），避免引入第二套设计系统。
-- **主题系统已经上线**，不是待办项：`src/theme.tsx` + `src/index.css` 已实现 6 套主题（system/light/dark/dracula/nord/solarized-light），通过 `<html data-theme>` + CSS 变量切换，`SettingsMenu` 里已有选择器。原 V2-4"暗色模式"任务已按此改写为覆盖度审查，而不是从零实现。
-- Recharts / Monaco / TanStack Table / D3-force-graph / react-diff-viewer 目前均未引入，V2-V4 中提到它们时确实是新增依赖，评审时按"新依赖引入"对待（打包体积、许可证、维护成本）。
+- **主题系统已经上线**，不是待办项：`src/theme.tsx` + `src/index.css` 已实现 6 套主题（midnight-ops/light/dark/dracula/nord/solarized-light），通过 `<html data-theme>` + CSS 变量切换，`SettingsMenu` 里已有选择器（UI v3 之后 `system` 已从选择器移除，语义并入 midnight-ops）。原 V2-4"暗色模式"任务已按此改写为覆盖度审查，而不是从零实现。
+- 依赖现状：Recharts / Monaco / TanStack Table / D3-force / js-yaml / diff 均已按 V2-V4 引入并按 feature 懒加载分包（`vite.config.ts` 的 `manualChunks`）；`react-diff-viewer` 是唯一被评估后**没有**引入的候选（主题系统难与 6 套主题对齐，改用 `diff` + 手写配色）。新增依赖仍按"新依赖引入"对待（打包体积、许可证、维护成本）。
 
 ### 2. 优先级总览
 

@@ -52,7 +52,7 @@ Remote hosts
 | `src-tauri/src/types.rs` | Shared types: `HostProfile`, `ExecRequest`, `ExecResult`, `RiskLevel`, etc. |
 | `src-tauri/src/tauri_commands.rs` | Tauri IPC commands wrapping the core |
 | `src-tauri/src/bin/agent2ssh.rs` | CLI binary |
-| `src-tauri/src/bin/agent2ssh-mcp.rs` | MCP stdio server (JSON-RPC 2.0, 71 tools) |
+| `src-tauri/src/bin/agent2ssh-mcp.rs` | MCP stdio server (JSON-RPC 2.0, 75 tools) |
 | `src-tauri/src/bin/agent2ssh-daemon.rs` | Local HTTP/WebSocket daemon and browser console server |
 | `src/App.tsx` | Desktop console |
 | `src-tauri/web/console.html` | Daemon-served browser console |
@@ -78,7 +78,7 @@ Remote hosts
                                   browser console
 ```
 
-The desktop app, CLI, MCP server, and daemon share the same Rust core library. The MCP server exposes 71 tools and speaks JSON-RPC 2.0 over stdio, making it compatible with any MCP-capable agent host.
+The desktop app, CLI, MCP server, and daemon share the same Rust core library. The MCP server exposes 75 tools and speaks JSON-RPC 2.0 over stdio, making it compatible with any MCP-capable agent host.
 
 ## Local Activity Visibility
 
@@ -98,7 +98,7 @@ Connected WebSocket terminals receive an ephemeral `terminal_id`. The desktop ca
 
 - **Frontend** routes uncaught errors, unhandled promise rejections, and a top-level React `ErrorBoundary` (plus per-panel `catch` blocks via the `reportError` helper in `src/api.ts`) into the backend `write_diagnostic_log` command.
 - **MCP** logs every failed tool dispatch (method + tool name) before returning the JSON-RPC error.
-- **Daemon** composes a `tracing` layer that forwards `WARN`/`ERROR` events whose target starts with `agent2ssh` into `app.log`, so the daemon's structured logs are observable even when its stdout/stderr are not captured. Setting `AGENT2SSH_BRIDGE_DEPS` additionally bridges dependency-layer (`hyper`/`reqwest`/`ssh2`/…) warnings/errors for debugging transport issues (`1`/`true`/`all` = built-in prefix set, or a comma-separated custom list); those dependency entries are written via `append_diagnostic_log_no_sink` so they never re-enter the error-alert path (the webhook itself uses `reqwest`, which would otherwise loop). Its redirected stdout/stderr still land in `daemon.log`, which `daemon_control.rs` rotates at (re)start time.
+- **Daemon** composes a `tracing` layer that forwards `WARN`/`ERROR` events whose target starts with `agent2ssh` into `app.log`, so the daemon's structured logs are observable even when its stdout/stderr are not captured. Setting `AGENT2SSH_BRIDGE_DEPS` additionally bridges dependency-layer (`hyper`/`reqwest`/`russh`/…) warnings/errors for debugging transport issues (`1`/`true`/`all` = built-in prefix set, or a comma-separated custom list); those dependency entries are written via `append_diagnostic_log_no_sink` so they never re-enter the error-alert path (the webhook itself uses `reqwest`, which would otherwise loop). Its redirected stdout/stderr still land in `daemon.log`, which `daemon_control.rs` rotates at (re)start time.
 - **All binaries** install a process-wide panic hook (`install_panic_hook`) that records panics to `app.log` before the default stderr behavior.
 
 Error-level entries also fan out to an optional sink: the daemon registers one via `set_error_sink` that (a) fires the `diagnostic_error` notify webhook (opt-in through the webhook `events` list) and (b) feeds `anomaly::record_diagnostic_error`, a sliding-window detector that raises a single aggregate `anomaly_detected` alert when the error rate spikes (`diagnostic_error_threshold` within `window_secs`, gated by `diagnostic_cooldown_secs`) instead of one webhook per error. The desktop Settings → Diagnostics panel lists, exports (bundle), and clears these logs.
@@ -139,23 +139,23 @@ The daemon approval handler creates an approval request and waits for approval, 
 
 ## SSH Transport Status
 
-Command execution against an SSH host, SFTP, ping/health probes, WebSocket exec streaming, the WebSocket terminal, persistent PTY sessions, HTTP/SOCKS5 proxy dialing, jump-host proxying, retained connections, and port forwards use the in-process `ssh2` transport in `embedded_ssh.rs`. The one exec target that does not is the local one, described below the matrix. The embedded transport records connection diagnostics including authentication method, server banner, host-key algorithm, SHA256 host-key fingerprint, and jump-host alias when present. SSH host fingerprints are trusted automatically on first use in `~/.agent2ssh/known_hosts.json`; later algorithm or fingerprint changes for the same `host:port` identity are rejected. The terminal/session path requests a remote PTY and forwards resize changes through libssh2 rather than relying on a local system PTY process. HTTP proxies use CONNECT, SOCKS5 proxies support no-auth and username/password authentication, and jump hosts are implemented by opening an embedded `direct-tcpip` channel through the bastion and using that channel as the transport for the target SSH session.
+Command execution against an SSH host, SFTP, ping/health probes, WebSocket exec streaming, the WebSocket terminal, persistent PTY sessions, HTTP/SOCKS5 proxy dialing, jump-host proxying, retained connections, and port forwards use the in-process `russh` transport (`transport/russh_impl/`, driven from `embedded_ssh.rs`). The one exec target that does not is the local one, described below the matrix. The embedded transport records connection diagnostics including authentication method, server banner, host-key algorithm, SHA256 host-key fingerprint, and jump-host alias when present. SSH host fingerprints are trusted automatically on first use in `~/.agent2ssh/known_hosts.json`; later algorithm or fingerprint changes for the same `host:port` identity are rejected. The terminal/session path requests a remote PTY and forwards resize changes through the embedded SSH channel rather than relying on a local system PTY process. HTTP proxies use CONNECT, SOCKS5 proxies support no-auth and username/password authentication, and jump hosts are implemented by opening an embedded `direct-tcpip` channel through the bastion and using that channel as the transport for the target SSH session.
 
 Runtime SSH transport and local Ed25519 key generation do not depend on system `ssh`, `scp`, `sshpass`, or `ssh-keygen`. Key generation is implemented in Rust and reads entropy from the operating system CSPRNG. Daemon lifecycle status/stop checks use Rust process APIs and HTTP clients instead of shelling out to `kill`, `taskkill`, `tasklist`, or `curl`. SSH config import/export reads and writes local config text, but connection execution remains embedded.
 
 | Path | Current backend |
 |------|-----------------|
-| Exec, exec-multi, ping, and health snapshots (SSH hosts) | Embedded `ssh2` |
+| Exec, exec-multi, ping, and health snapshots (SSH hosts) | Embedded `russh` |
 | `/local-exec` (`local`, `local:<environment>`, `local:<runtime>:<container-id>`) | Local process spawn with bounded capture (`local_exec.rs` + `exec_capture.rs`); a container id spawns the runtime CLI's non-TTY exec |
 | `/resident-sessions` (long-lived `local:<environment>` shells) | Resident shell process in `resident_session.rs`: commands over stdin, per-command sentinel demarcation, rolling bounded capture |
-| SFTP list/stat/mkdir/upload/download | Embedded `ssh2` SFTP |
-| WebSocket `/exec/stream` | Embedded `ssh2` exec channel |
-| WebSocket `/terminal` and REST/MCP/Tauri PTY sessions | Embedded `ssh2` terminal worker |
+| SFTP list/stat/mkdir/upload/download | Embedded `russh-sftp` over `russh` |
+| WebSocket `/exec/stream` | Embedded `russh` exec channel |
+| WebSocket `/terminal` and REST/MCP/Tauri PTY sessions | Embedded `russh` terminal worker |
 | HTTP CONNECT / SOCKS5 proxy connections | Embedded TCP proxy handshake before SSH session handshake |
 | Jump-host / ProxyJump-style connections | Embedded `direct-tcpip` bastion channel |
-| Connection status/connect/disconnect | Retained embedded `ssh2` sessions |
+| Connection status/connect/disconnect | Retained embedded `russh` sessions |
 | Local and remote port forwards | Embedded `direct-tcpip` forwarding |
-| Local Ed25519 SSH key generation | Embedded Rust key generator + OS CSPRNG |
+| Local SSH key generation | Embedded Rust key generator + OS CSPRNG |
 | Daemon process status/stop and health check | Rust process APIs + Rust HTTP client |
 
 `/local-exec` is the second exec target, and the only one that does not go over the wire: it spawns a shell on the machine the daemon itself runs on, in a named terminal environment (`pwsh`, `cmd`, `gitbash`, `vs` for a Visual Studio developer shell, or `wsl[:<distribution>]` for a WSL login shell). The environment rides in the request's `host` id — `local` or `local:<environment>` — so the token scope's allowed hosts, the approval policy's host patterns and the audit log can each name one without learning a new concept. It shares everything that is not the transport: the same `execution_control` authorization chain, the same bounded-capture contract from `exec_capture.rs` (so `truncated` and `dropped_bytes` mean the same thing whichever target produced a result), and the same audit writer. It is also where the two targets genuinely diverge: a timed-out local command has its whole process group killed, whereas the SSH path documents that a pty-less exec channel cannot be reaped remotely at all.

@@ -16,7 +16,7 @@ Agent2SSH 是本机使用的 SSH 能力层，覆盖桌面操作、CLI 自动化�
    agent2ssh exec mybox "hostname && uptime"
    ```
 
-3. 使用持久会话、端口转发、SFTP、Web 控制台或 MCP 前，先启动本地 daemon：
+3. 需要本机执行（`agent2ssh local exec`）、常驻 shell 会话（`agent2ssh resident`）、持久 PTY 会话、端口转发、SFTP、Web 控制台或 MCP 前，先启动本地 daemon：
 
    ```bash
    agent2ssh daemon start
@@ -39,6 +39,10 @@ Agent2SSH 是本机使用的 SSH 能力层，覆盖桌面操作、CLI 自动化�
 - **Activity / Audit**：查看 daemon 实时事件、最近审计记录、拒绝记录和异常提示。
 - **Keys**：生成或导入本地 SSH 密钥。
 - **Playbooks**：运行可复用命令序列。
+- **Approvals**：审批工作台，查看待处理与历史审批并可批量处理。
+- **Resident Sessions**：列出 daemon 持有的常驻 shell 会话（`local:<id>`），可关闭；shell 状态跨命令保持。
+- **Containers**：发现 Docker / wslc / Apple container 运行时的容器，并可作为 `local:<runtime>:<id>` 的本地执行目标。
+- **Config Snapshots / Topology / Recordings**：配置快照与模板、连接拓扑图、终端录制回放。
 - **Help**：查看首次使用清单、常用命令、安全说明和文档索引。
 
 ## 安全模型
@@ -67,7 +71,7 @@ SSH 主机指纹不再要求人工确认。首次连接时会自动信任并写�
 - [Agent2SSH 计划（合并版）](../PLAN.md) — 唯一规划源（活跃 Plan 2 + 历史归档）
 - [发布与版本](../RELEASE.md) — 版本策略与发布清单
 - [架构说明](../architecture.md) — 组件、安全模型与控制面
-- [MCP Tools Reference](../skills.md) — 71 个 MCP 工具定义
+- [MCP Tools Reference](../skills.md) — 75 个 MCP 工具定义
 - [Skill 分发指南](../skill-distribution.md) — 安装、权限与更新
 - [缺陷检查报告](../DEFECTS.md) — 测试状态与缺陷清理
 - [回归与研究报告](../reports/REGRESSION-LOG.md) — 历史回归/研究证据合集

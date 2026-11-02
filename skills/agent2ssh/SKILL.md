@@ -1,7 +1,7 @@
 ---
 name: agent2ssh
-description: Operate remote machines over SSH through Agent2SSH — host management, command execution with risk classification and approvals, SFTP transfers, persistent PTY sessions, port forwards, playbooks, audit, and the local redaction / highlight / SSH-algorithm rule sets. Use when asked to run commands on remote servers, transfer files, manage SSH hosts or tunnels, tune what gets redacted or highlighted, or automate multi-host operations via the agent2ssh CLI or its MCP tools.
-version: 0.3.3
+description: Operate remote machines over SSH through Agent2SSH — host management, command execution with risk classification and approvals, SFTP transfers, persistent PTY sessions, port forwards, playbooks, audit, the local redaction / highlight / SSH-algorithm rule sets, and local execution on the daemon's own machine (one-shot `local_exec` environments and long-lived resident shell sessions). Use when asked to run commands on remote servers, transfer files, manage SSH hosts or tunnels, run a command in a local terminal environment, keep shell state across commands, tune what gets redacted or highlighted, or automate multi-host operations via the agent2ssh CLI or its MCP tools.
+version: 0.4.3
 ---
 
 # Agent2SSH Skill
@@ -26,6 +26,8 @@ don't read the whole file for a single task):
 | Generate a key that will actually authenticate | `agent2ssh keys generate` | SSH Keys |
 | Review past executions | `ssh_audit` | Audit Log |
 | Tune redaction / highlight / SSH algorithms | `ssh_redact_rule_*` / `ssh_highlight_rule_*` / `ssh_algo_prefs_*` | Local Configuration |
+| Run a command on this machine, not over SSH | `local_exec` / `agent2ssh local exec` | Local Execution |
+| Keep shell state (cwd, exports) across commands | `resident_session_open` / `_exec` / `_close` | Resident Sessions |
 | High-risk command (sudo/rm/kill) | `force: true` + user confirmation | Risk Levels |
 
 ## Discovery Checklist
@@ -72,6 +74,8 @@ the client config.
 | Port forward | `agent2ssh forward add/list/rm` / `ssh_forward_*` |
 | View audit log | `agent2ssh audit --json` / `ssh_audit` |
 | Generate a usable key | `agent2ssh keys generate <name>` / `agent2ssh keys algorithm` |
+| Run locally, one shot | `agent2ssh local exec --host local:vs --command "..."` / `local_exec` |
+| Run locally, shell kept warm | `agent2ssh resident open/exec/close` / `resident_session_*` |
 
 ---
 
@@ -121,16 +125,15 @@ agent2ssh host add web1 --host 10.0.0.5 --key "$(agent2ssh keys generate web1)"
 Three things matter before generating:
 
 - **Ask, do not assume.** `keys algorithm` is the only correct source for the
-  type, because it depends on the crypto backend the SSH library was built with
-  rather than on the platform. Generating Ed25519 on a build that cannot read the
-  OpenSSH container produces a key that is stored, listed, and then rejected at
+  type, because it depends on what the SSH library can read rather than on the
+  platform. Generating Ed25519 on a build that cannot read the OpenSSH container
+  would produce a key that is stored, listed, and then rejected at
   authentication time. `keys generate` with no `--type` follows that
   recommendation on its own, which is what makes the one-liner above safe.
-- **RSA here means traditional PEM.** 3072-bit, `-----BEGIN RSA PRIVATE KEY-----`,
-  which is the only RSA encoding a WinCNG build can load — writing it as PEM is
-  what keeps an RSA key usable whichever backend the build links. The public
-  half is still the standard single-line `ssh-rsa …` that `authorized_keys`
-  expects. Sizes below 2048 are refused.
+- **RSA here means traditional PEM.** 3072-bit, `-----BEGIN RSA PRIVATE KEY-----`
+  (the shape `rsa` itself emits, which `russh` reads like any other format). The
+  public half is still the standard single-line `ssh-rsa …` that
+  `authorized_keys` expects. Sizes below 2048 are refused.
 - **Replacing an existing name fails** rather than overwriting it, and the
   generated private key is restricted to its owner (0600). Deleting a key does
   not update hosts that reference it.
@@ -334,13 +337,12 @@ Seven things to know before calling these:
   open keeps the algorithms it negotiated.
 - **An algorithm this build cannot negotiate is accepted at save time and then
   fails every connection.** `algo set` checks the shape of a name, not whether
-  the linked libssh2 can do it, and the preferences are applied fail-closed
-  immediately before each handshake — so `--kex curve25519-sha256` is a no-op on
-  this project's builds, which link OpenSSL, and an outage on one that links
-  WinCNG, which has no curve25519, no ed25519 host key and no AES-GCM. The
-  built-in defaults are narrowed to what the build can actually negotiate, which
-  is what makes `algo set` safe on either. `algo clear` is the way back. Ask
-  `algo get` rather than assuming a list is portable.
+  the linked transport can do it, and the preferences are applied fail-closed
+  immediately before each handshake. `russh` has no SHA-1 key exchange at all, so
+  `--kex diffie-hellman-group14-sha1` saves fine and then every connection reports
+  it as unsupported. The built-in defaults are narrowed to what the build can
+  actually negotiate. `algo clear` is the way back. Ask `algo get` rather than
+  assuming a list is portable.
 - **Every key format the app can generate, it can also use.** The SSH transport
   is `russh`, whose parser reads the OpenSSH container, PKCS#1 and PKCS#8 alike,
   so a key written by `ssh-keygen` works without conversion — the old advice to
@@ -352,6 +354,92 @@ Seven things to know before calling these:
   toolchain, a full Perl and an `OPENSSL_SRC_PERL` indirection. The transport now
   uses `ring`, so nothing in the default build links OpenSSL and there is no
   `libssl*.dll`/`libcrypto*.dll` to ship.
+
+---
+
+## Local Execution
+
+Not every command belongs on a remote host. `local_exec` runs one command on
+the machine the daemon itself runs on, in a named terminal environment, and
+returns the same bounded-capture shape as an SSH exec (`stdout`, `stderr`,
+`exit_code`, `truncated`, `dropped_bytes`):
+
+```bash
+agent2ssh local exec --host local            "uname -a" --json
+agent2ssh local exec --host local:pwsh       "Get-Process | Select -First 5" --json
+agent2ssh local exec --host local:vs         "where.exe cl" --json
+agent2ssh local exec --host local:wsl:Ubuntu "cd /tmp && pwd" --json
+agent2ssh local exec --host local:docker:abc123 "cat /etc/os-release" --json
+# MCP: local_exec  host: "local:gitbash"  command: "..."
+```
+
+The environment rides in `host` — `local`, `local:<environment>` (`pwsh`,
+`cmd`, `gitbash`, `vs`, `wsl[:<distribution>]`), a user-defined `local:<id>`
+from `~/.agent2ssh/environments.toml`, or `local:<runtime>:<container-id>` for
+capture exec inside a container. Because it is still a host id, scope,
+approval host patterns and the audit log can each name it without learning a
+new concept.
+
+Three things to know:
+
+- **It is authorized like an SSH exec, not like a local shell.** The daemon
+  runs the same preflight chain (scope, gate, limits, risk, approval) keyed on
+  the environment's host id. Only the daemon can prompt for approval, so this
+  route fails closed from a CLI or MCP process that has no daemon.
+- **A timed-out command is reaped, not abandoned.** The whole process group is
+  killed — unlike the SSH path, where a pty-less exec channel cannot be reaped
+  remotely.
+- **A request carrying `stdin` is refused for container targets** rather than
+  silently dropped, because the capture exec binds no interactive stdin.
+
+---
+
+## Resident Sessions
+
+When the point is that shell state survives between commands — a Visual Studio
+developer shell whose bootstrap costs seconds, a `cd` you want to keep, an
+exported variable — open a resident session instead of paying that cost per
+command:
+
+```bash
+agent2ssh resident open --host local:vs --json    # blocks until the shell is warm
+agent2ssh resident exec <session-id> "where.exe cl" --json
+agent2ssh resident exec <session-id> "cd /src && export A2S=1" --json
+agent2ssh resident list --json
+agent2ssh resident close <session-id>
+# MCP: resident_session_open / resident_session_exec / resident_session_close
+```
+
+The daemon keeps one shell alive per session and writes each command to its
+stdin, followed by a sentinel line carrying a per-command nonce and the exit
+code. What that buys and what it costs:
+
+- **State persists by design** — cwd, exported variables and the warmed
+  environment survive across commands, which is the whole reason to use one.
+- **A command that outlives its timeout kills the session.** A shell without a
+  console cannot be interrupted, so honesty beats a fake resume; long-running
+  work belongs in `local_exec`, which reaps its own process tree.
+- **A command that exits the shell kills the session too**, and reports the
+  shell's exit code — `exit` is an authorized command that does what it says.
+- **Open and every command pay the same preflight chain** as a one-shot exec,
+  keyed on the session's own `local:<id>` host. Containers are refused at open:
+  they are one-shot exec targets.
+- **State is daemon-owned.** CLI, MCP and the desktop panel are thin clients
+  over `/resident-sessions`; there is deliberately no process-local fallback, so
+  a call with no daemon running fails with an error naming what to start.
+
+For a command backgrounded inside the shell (`(sleep 1; ls) &`), read the
+session's rolling buffer without consuming it — this consumes nothing, counts
+no idle activity, and reports `dead` for a shell that exited on its own, so a
+collector can stop polling before the idle reaper runs:
+
+```bash
+curl -H "Authorization: Bearer $(cat ~/.agent2ssh/daemon.token)" \
+  http://127.0.0.1:7722/resident-sessions/<session-id>
+```
+
+Bounds: `AGENT2SSH_MAX_RESIDENT_SESSIONS` (default 8) and
+`AGENT2SSH_RESIDENT_IDLE_TTL_SECS` (default 600, reaped by a daemon sweep).
 
 ---
 

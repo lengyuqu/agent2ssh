@@ -162,8 +162,8 @@ JSON 格式，包含 `hosts` 数组，也可以包含由桌面端代理管理页
 - `risk_override` 不能降级 `blocked` 命令；内置或用户规则判定为 `blocked` 的命令仍会被拒绝；显式审批策略、scope、gate 和限额仍会生效
 - SSH 握手、密码/密钥/agent 认证、agent 身份枚举与签名请求、通道建立均受会话传输超时约束。对端或 agent 不应答时返回对应操作的超时错误；agent 连接和身份枚举超时只丢弃 agent 连接，保留 SSH 连接供默认密钥回退认证，已发起 SSH 认证的签名超时则关闭 SSH 连接以避免迟到回复；服务器明确拒绝 exec、shell、PTY 或 subsystem 请求时立即返回拒绝原因，不会把请求已发送当作建立成功。
 - `env`、`role`、`owner` 和 `tags` 可用于桌面端主机视图过滤，也可用于 CLI `host list` 过滤
-- **Windows 链接的密码学后端是随包静态构建的 OpenSSL，不再是 WinCNG**：`src-tauri/Cargo.toml` 为 `ssh2` 同时开启 `openssl-on-win32` 与 `vendored-openssl`，因此 Windows 构建与 Linux/macOS 能力一致——支持 `curve25519-sha256`、`ssh-ed25519`/ECDSA 主机密钥、`aes256-gcm` 与 `chacha20-poly1305`，也能读取 OpenSSH 私钥容器格式。这不仅解决了密钥格式问题，也解决了握手问题：WinCNG 只提供 `diffie-hellman-group*` 系列，而 OpenSSH 10.0 起已移除这些组，交集为空，会在**认证之前**就失败（`key exchange failure`）。OpenSSL 为静态链入，二进制不依赖任何 `libssl*.dll`/`libcrypto*.dll`。用 `agent2ssh algo get` 查看本构建实际可协商的算法，用 `agent2ssh keys algorithm` 查看推荐密钥类型（该构建下为 `ed25519`）
-- **认证失败时的可操作诊断仍然保留**：若某个构建的 libssh2 链接的是 WinCNG（已不是 Windows 的默认情形），其私钥读取器只认传统 PEM（`-----BEGIN RSA PRIVATE KEY-----` 与 `-----BEGIN DSA PRIVATE KEY-----`）；而 `ssh-keygen` 自 OpenSSH 7.8 起**默认**写出 OpenSSH 容器格式（`-----BEGIN OPENSSH PRIVATE KEY-----`，`-t rsa` 也一样），该格式在那种构建上无法用于认证，Ed25519 私钥则任何格式都不可用。此时认证失败会直接给出这一结论而不是笼统的 `unknown error`，并建议用 `ssh-keygen -p -m PEM -f <私钥>` 就地转换（仅 RSA/DSA）。**应用内生成的密钥总是采用本构建可用的类型**，无需手工转换：`agent2ssh keys algorithm` 查询推荐类型，`keys generate <名称>` 直接生成
+- **各平台的密码学能力一致，且没有任何平台需要 OpenSSL**：SSH 传输层是 `russh`，密码学后端是 `ring`——两者都是纯 Rust，默认构建里没有 `ssh2`、`libssh2-sys` 或 `openssl-sys`，因此也没有 `libssl*.dll`/`libcrypto*.dll` 要随包分发。支持 `curve25519-sha256`、`ssh-ed25519`/ECDSA 主机密钥、`aes256-gcm` 与 `chacha20-poly1305`，并能读取 OpenSSH 私钥容器格式；Windows 与 Linux/macOS 不再有差异（旧版 Windows 构建曾用 WinCNG，只提供 `diffie-hellman-group*`，与 OpenSSH 10.0+ 交集为空，会在**认证之前**失败——那段历史已随旧后端一起消失）。用 `agent2ssh algo get` 查看本构建实际可协商的算法，用 `agent2ssh keys algorithm` 查看推荐密钥类型（该构建下为 `ed25519`）
+- **密钥格式不再是认证失败的原因**：`russh` 的密钥解析器同时读取 OpenSSH 容器（`-----BEGIN OPENSSH PRIVATE KEY-----`，`ssh-keygen` 自 OpenSSH 7.8 起默认写出的格式）、PKCS#1 与 PKCS#8，所以 `ssh-keygen` 产出的密钥无需转换即可使用；过去那条 `ssh-keygen -p -m PEM` 的转换建议描述的是旧 libssh2 后端的限制，已不再适用。加密的传统 PEM（含 EC/SEC1）由 `legacy_pem` 按 OpenSSL 的 `DEK-Info` 方案解密，口令错误会明确报「padding 不合法」而不是 ASN.1 错误。**应用内生成的密钥总是采用本构建可用的类型**：`agent2ssh keys algorithm` 查询推荐类型，`keys generate <名称>` 直接生成
 
 ---
 
@@ -957,9 +957,9 @@ agent2ssh keys generate id-work   # 按推荐类型生成；只输出私钥路�
 agent2ssh keys generate id-work --type rsa --json
 ```
 
-生成过程由 Agent2SSH 后端实现，不调用系统 `ssh-keygen`。**默认类型由本构建的 SSH 库能力决定，而不是由操作系统决定**：能读取 OpenSSH 私钥容器的构建用 Ed25519，不能的用 RSA 并直接写成传统 PEM（3072 位）。Windows 现在属于前者——它链接的是 OpenSSL——因此推荐 `ed25519`；只有 WinCNG 构建（在 Windows 上需要显式关闭 vendored OpenSSL 才会出现）仍会退回 RSA。因此本应用生成的密钥一定可用于本应用的认证——这正是 `keys algorithm` 存在的理由，脚本应当询问而不是假定。
+生成过程由 Agent2SSH 后端实现，不调用系统 `ssh-keygen`。**默认类型由本构建的 SSH 库能力决定，而不是由操作系统决定**：`russh` 能读取 OpenSSH 私钥容器，因此各平台的默认推荐都是 `ed25519`；`--type rsa` 仍然可用，写出的是 3072 位传统 PKCS#1 PEM（`-----BEGIN RSA PRIVATE KEY-----`），公钥仍是标准的单行 `ssh-rsa …`。因此本应用生成的密钥一定可用于本应用的认证——这正是 `keys algorithm` 存在的理由，脚本应当询问而不是假定。
 
-> 若桌面端选择的是本构建无法读取的类型（例如在 WinCNG 构建上选 Ed25519），表单会在生成前给出提示；未手动选择时，请求不带类型，由后端决定。
+> 未手动选择类型时，请求不带类型，由后端按 `keys algorithm` 的结论决定。
 
 **导入现有密钥**
 
@@ -1288,7 +1288,7 @@ shasum -a 256 -c <checksum> team-config.json
 | `AGENT2SSH_TRACE_ID` | CLI / MCP | 自动生成 | 由上游调用方（如 agent）注入的关联 ID，写入诊断 `trace_id` 字段并随转发请求透传，便于跨 surface 串联一次操作。 |
 | `AGENT2SSH_LOG` | daemon | `info` | daemon `tracing` 的 `EnvFilter` 级别（如 `debug`、`agent2ssh=debug,info`）。 |
 | `AGENT2SSH_LOG_FORMAT` | daemon | `text` | daemon 控制台日志格式：`text` 或 `json`。 |
-| `AGENT2SSH_BRIDGE_DEPS` | daemon | 关闭（仅转 `agent2ssh*`） | 是否把依赖层（hyper/reqwest/ssh2/…）的 `WARN`/`ERROR` 也桥接进 `app.log`：`1`/`true`/`all` 用内置传输层前缀集，逗号分隔则自定义前缀，未设/`0`/`false` 关闭。依赖层事件不触发 error 告警（防回环），仅落盘排查传输问题用。 |
+| `AGENT2SSH_BRIDGE_DEPS` | daemon | 关闭（仅转 `agent2ssh*`） | 是否把依赖层（hyper/reqwest/russh/…）的 `WARN`/`ERROR` 也桥接进 `app.log`：`1`/`true`/`all` 用内置传输层前缀集，逗号分隔则自定义前缀，未设/`0`/`false` 关闭。依赖层事件不触发 error 告警（防回环），仅落盘排查传输问题用。 |
 | `AGENT2SSH_MASTER_PASSWORD` | CLI / MCP / daemon | 无 | 解锁 App 自建加密凭据库（`secrets.enc`，Argon2id + AES-256-GCM）的主密码（K1）。设置后这些无界面 surface 才能解密密码型主机的 SSH 密码；未设置时密码型主机不可用（密钥型/agent 认证不受影响）。桌面端改用启动解锁对话框，不读此变量。首次写入凭据时若已设此变量会用它初始化库。 |
 | `AGENT2SSH_SECRETS_BACKEND` | 全部 | 生产 `encrypted`，测试 `memory` | 凭据库后端：`encrypted` 用真实加密库，`memory` 用进程内内存库（仅测试/无界面隔离用，重启即丢）。一般无需设置。 |
 | `AGENT2SSH_WEBDAV_URL` | CLI | 无 | WebDAV 同步 collection URL。也可写入 `webdav.toml` 或用 `agent2ssh webdav * --url` 传入。 |

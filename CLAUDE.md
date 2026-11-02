@@ -8,7 +8,7 @@ Agent2SSH is a local SSH capability layer for general-purpose agents. One Rust c
 
 - `agent2ssh-app` — Tauri desktop app (React/TS frontend in `src/`, Rust commands in `src-tauri/src/tauri_commands.rs`)
 - `agent2ssh` — CLI (`src-tauri/src/bin/agent2ssh.rs`)
-- `agent2ssh-mcp` — stdio MCP server, 71 tools (`src-tauri/src/bin/agent2ssh-mcp.rs`)
+- `agent2ssh-mcp` — stdio MCP server, 75 tools (`src-tauri/src/bin/agent2ssh-mcp.rs`)
 - `agent2ssh-daemon` — local HTTP/WebSocket/SSE server on `127.0.0.1:7722` (`src-tauri/src/bin/agent2ssh-daemon.rs`)
 
 ## Build / check / test
@@ -28,7 +28,7 @@ E2E / smoke: `scripts/e2e-local.sh`, `scripts/e1-mcp-client-smoke.py`, `scripts/
 
 The React/TS UI in `src/` uses **Tailwind v4** (`@tailwindcss/vite`) with a **shadcn-style token + primitive** system — there is **no global stylesheet** (the old hand-written `styles.css` was removed; all styling is token-driven so light/dark "just works").
 
-- `src/index.css` — design-system entry. Defines semantic CSS variables (`--background`, `--card`, `--primary`, `--muted`, `--border`, `--sidebar`, `--success`/`--warning`/`--destructive`, …) in **two themes: light by default, dark via `@media (prefers-color-scheme: dark)`** (follows the OS). `@theme inline` maps them onto Tailwind utilities (`bg-card`, `text-muted-foreground`, `rounded-lg`, …). Only Tailwind's `theme` + `utilities` layers are imported, plus a small hand-written `base` layer — **preflight is intentionally not enabled** (so the `ui/` primitives explicitly reset native control styles with `appearance-none`).
+- `src/index.css` — design-system entry. Defines semantic CSS variables (`--background`, `--card`, `--primary`, `--muted`, `--border`, `--sidebar`, `--success`/`--warning`/`--destructive`, …) per theme — **six app themes driven by `<html data-theme>`** (Midnight Ops is the default `:root` skin; `light`, `dark`, `dracula`, `nord`, `solarized-light` are `:root[data-theme=…]` blocks; there is no `prefers-color-scheme` branch, the picker lives in `src/theme.tsx`). `@theme inline` maps them onto Tailwind utilities (`bg-card`, `text-muted-foreground`, `rounded-lg`, …). Only Tailwind's `theme` + `utilities` layers are imported, plus a small hand-written `base` layer — **preflight is intentionally not enabled** (so the `ui/` primitives explicitly reset native control styles with `appearance-none`).
 - `src/components/ui/` — shadcn-style primitives: `button`, `icon-button`, `card`, `input`, `textarea`, `select`, `badge`, `dialog`, `toast` (title/actions/sticky support), `data-table` (shared TanStack Table sort/column-visibility helpers), `state`. Built with `cva` variants + the `cn()` helper in `src/lib/utils.ts` (clsx + tailwind-merge).
 - Every panel in `src/components/` is composed from those primitives + Tailwind utilities that consume the tokens.
 - `src/eventsBus.tsx` — one shared `EventsProvider` SSE subscription to the daemon; panels that need live events (LiveActivityPanel, Dashboard, NotificationCenter) consume it instead of opening their own SSE connections.
@@ -75,7 +75,7 @@ Other core modules: `store.rs` (config + JSONL audit persistence under `~/.agent
 
 Note: `session.rs` and `forward.rs` state is **process-local**. MCP routes sessions through the local daemon when it is reachable, so those sessions are visible in the daemon registry and desktop; if MCP falls back to local mode, its sessions remain local to that MCP process. Forwards are still process-local.
 
-SSH transport is embedded-first. Exec against an SSH host, SFTP, WebSocket `/terminal`, persistent PTY sessions, jump-host ProxyJump-style hops, retained connections, and local/remote port forwards use in-process libssh2 via the `ssh2` crate (`connect_embedded_ssh`, `exec_ssh_embedded`, `spawn_terminal`). Jump hosts are implemented with embedded `direct-tcpip` proxy channels. **Exec also has a second, non-SSH target**: `/local-exec` runs a command on the daemon's own machine inside a named terminal environment (`local`, `local:pwsh`, `local:cmd`, `local:gitbash`, `local:vs`, `local:wsl[:<distro>]`, or `local:<runtime>:<container-id>` for capture exec inside a Docker/wslc/Apple container). It shares the `execution_control` authorization chain and the bounded-capture contract but not the transport — see `local_exec.rs`, `exec_capture.rs`, and the Execution Targets section of `AGENTS.md`. Keep the transport matrix in `docs/architecture.md` in sync when changing this boundary.
+SSH transport is embedded-first. Exec against an SSH host, SFTP, WebSocket `/terminal`, persistent PTY sessions, jump-host ProxyJump-style hops, retained connections, and local/remote port forwards use the in-process `russh` transport (`transport/russh_impl/`, entry points `connect_embedded_ssh`, `exec_ssh_embedded`, `spawn_terminal`). Jump hosts are implemented with embedded `direct-tcpip` proxy channels. **Exec also has a second, non-SSH target**: `/local-exec` runs a command on the daemon's own machine inside a named terminal environment (`local`, `local:pwsh`, `local:cmd`, `local:gitbash`, `local:vs`, `local:wsl[:<distro>]`, or `local:<runtime>:<container-id>` for capture exec inside a Docker/wslc/Apple container). It shares the `execution_control` authorization chain and the bounded-capture contract but not the transport — see `local_exec.rs`, `exec_capture.rs`, and the Execution Targets section of `AGENTS.md`. Keep the transport matrix in `docs/architecture.md` in sync when changing this boundary.
 
 ## Data & config layout
 
@@ -85,5 +85,5 @@ All runtime state is under `~/.agent2ssh/`: `hosts.json`, `audit.jsonl`, `policy
 
 - `docs/architecture.md` — system design
 - `docs/api.yaml` — daemon REST/WS contract; `api_yaml_documents_every_daemon_route` fails in both directions, so a new route and its spec entry have to land together
-- `docs/skills.md` — full reference for the 71 MCP tools; `mcp_tools_match_skills_md_documentation` and `mcp_tool_list_contains_exactly_71_tools` fail when the count and the table drift apart
+- `docs/skills.md` — full reference for the 75 MCP tools; `mcp_tools_match_skills_md_documentation` and `mcp_tool_list_contains_exactly_75_tools` fail when the count and the table drift apart
 - [PLAN.md](docs/PLAN.md) — 单一规划源（活跃 Plan 2 + 历史归档）

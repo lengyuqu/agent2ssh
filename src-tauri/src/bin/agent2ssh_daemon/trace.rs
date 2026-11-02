@@ -69,8 +69,17 @@ impl tracing::field::Visit for DiagnosticFieldVisitor {
 /// Default dependency targets opened up when `AGENT2SSH_BRIDGE_DEPS` is enabled
 /// without an explicit list. These are the transport layers whose `WARN`/`ERROR`
 /// output is worth surfacing when chasing a connectivity issue.
-const DEFAULT_DEP_PREFIXES: &[&str] =
-    &["hyper", "reqwest", "ssh2", "h2", "rustls", "tower", "axum"];
+const DEFAULT_DEP_PREFIXES: &[&str] = &[
+    "hyper",
+    "reqwest",
+    "russh",
+    "russh_sftp",
+    "russh_keys",
+    "h2",
+    "rustls",
+    "tower",
+    "axum",
+];
 
 /// A tracing layer that forwards `WARN`/`ERROR` events into the shared
 /// diagnostic log (`app.log`). This unifies the daemon's rich `tracing` output
@@ -78,7 +87,7 @@ const DEFAULT_DEP_PREFIXES: &[&str] =
 /// observable even when the daemon's stdout/stderr are not captured.
 ///
 /// By default only our own (`agent2ssh*`) events are bridged. Setting
-/// `AGENT2SSH_BRIDGE_DEPS` opens up dependency-layer (`hyper`/`reqwest`/`ssh2`/…)
+/// `AGENT2SSH_BRIDGE_DEPS` opens up dependency-layer (`hyper`/`reqwest`/`russh`/…)
 /// warnings/errors as well, for debugging transport problems (H7):
 /// - `1`/`true`/`all` → the built-in [`DEFAULT_DEP_PREFIXES`] set,
 /// - a comma-separated list (e.g. `ssh2,reqwest`) → exactly those target prefixes,
@@ -189,10 +198,10 @@ mod tests {
 
         let all = DiagnosticBridgeLayer::parse_dep_prefixes("all");
         assert_eq!(all.len(), DEFAULT_DEP_PREFIXES.len());
-        assert!(all.iter().any(|p| p == "ssh2"));
+        assert!(all.iter().any(|p| p == "russh"));
         assert_eq!(DiagnosticBridgeLayer::parse_dep_prefixes("1"), all);
 
-        let custom = DiagnosticBridgeLayer::parse_dep_prefixes(" ssh2 , reqwest ");
-        assert_eq!(custom, vec!["ssh2".to_string(), "reqwest".to_string()]);
+        let custom = DiagnosticBridgeLayer::parse_dep_prefixes(" russh , reqwest ");
+        assert_eq!(custom, vec!["russh".to_string(), "reqwest".to_string()]);
     }
 }

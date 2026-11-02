@@ -415,7 +415,7 @@ agent2ssh keys algorithm [--name | --json]
 agent2ssh keys generate <名称> [--type ed25519|rsa] [--comment <备注>] [--json]
 ```
 
-- `keys algorithm`：输出**本构建实际可用于认证**的类型（`ed25519` 或 `rsa`）。这是 SSH 库（libssh2）编译期选择加密后端的结果，与操作系统无关：链接 WinCNG 的构建读不了 OpenSSH 私钥容器，只能推荐 RSA 并以传统 PEM 写出；本项目各平台构建（Windows 含在内）都链接 OpenSSL，因此推荐 `ed25519`。`--json` 额外给出 `bits` 与 `reads_openssh_private_keys`，便于解释这个结论从何而来。
+- `keys algorithm`：输出**本构建实际可用于认证**的类型（`ed25519` 或 `rsa`）。这是 SSH 库（`russh` + `ring`）能读取哪些私钥格式的结果，与操作系统无关：能读 OpenSSH 私钥容器的构建推荐 Ed25519，读不了的才会退回 RSA 并写成传统 PEM。当前各平台构建（Windows 含在内）都能读，因此回答 `ed25519`。`--json` 额外给出 `bits` 与 `reads_openssh_private_keys`，便于解释这个结论从何而来。
 - `keys generate`：不带 `--type` 时按 `keys algorithm` 生成，**只输出私钥路径**，因此可以直接喂给别的命令：
 
 ```bash

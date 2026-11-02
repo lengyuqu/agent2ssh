@@ -261,7 +261,7 @@ pub fn append_diagnostic_log(
 
 /// Like [`append_diagnostic_log`] but never fans the entry out to the error
 /// sink, even at `error` level. Used by the daemon's dependency-layer log bridge
-/// so third-party `hyper`/`reqwest`/`ssh2` warnings/errors stay observable in
+/// so third-party `hyper`/`reqwest`/`russh` warnings/errors stay observable in
 /// `app.log` without re-triggering the error-alert webhook — which itself talks
 /// over `reqwest` and could otherwise loop a transport error back into more
 /// transport errors. (H7 anti-loop)
