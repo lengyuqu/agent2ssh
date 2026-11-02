@@ -428,7 +428,11 @@ async fn mcp_stdio_end_to_end_initialize_tools_and_risk() {
     )
     .unwrap();
     let tool_count = tools["result"]["tools"].as_array().unwrap().len();
-    assert_eq!(tool_count, 75);
+    // A second, independent place the tool count is pinned: `daemon_integration`
+    // counts the registry text and `docs/skills.md`, this one counts what a real
+    // `tools/list` returns over stdio. Both have to move together — the daemon
+    // suite passing is not evidence that this one will.
+    assert_eq!(tool_count, 76);
 
     let risk: serde_json::Value = serde_json::from_str(
         &lines
