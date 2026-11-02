@@ -1,7 +1,7 @@
 ---
 name: agent2ssh
 description: Operate remote machines over SSH through Agent2SSH — host management, command execution with risk classification and approvals, SFTP transfers, persistent PTY sessions, port forwards, playbooks, audit, the local redaction / highlight / SSH-algorithm rule sets, and local execution on the daemon's own machine (one-shot `local_exec` environments and long-lived resident shell sessions). Use when asked to run commands on remote servers, transfer files, manage SSH hosts or tunnels, run a command in a local terminal environment, keep shell state across commands, tune what gets redacted or highlighted, or automate multi-host operations via the agent2ssh CLI or its MCP tools.
-version: 0.4.4
+version: 0.4.5
 ---
 
 # Agent2SSH Skill
@@ -137,6 +137,33 @@ Three things matter before generating:
 - **Replacing an existing name fails** rather than overwriting it, and the
   generated private key is restricted to its owner (0600). Deleting a key does
   not update hosts that reference it.
+
+---
+
+## Credentials
+
+Host passwords and key passphrases live in `~/.agent2ssh/secrets.enc`, an
+app-managed store opened with a master password (Argon2id + AES-256-GCM).
+`hosts.json` holds only a `$agent2ssh-secret$` reference, so that file is safe to
+sync while the store is not — and the asymmetry produces the one failure that
+looks like data loss:
+
+- **On a machine that has never unlocked the store**, every password host fails
+  and appears to be "missing its password". Nothing is lost: the reference is all
+  that ever synced, and `secrets.enc` is excluded from WebDAV sync on purpose —
+  uploading it would put offline-guessable material for every credential on a
+  third-party server.
+- **Key and agent authentication are unaffected.** They never touch this store,
+  so a key-based host keeps working on a fresh machine.
+- **Headless surfaces need `AGENT2SSH_MASTER_PASSWORD`.** The desktop prompts;
+  CLI, MCP and the daemon read the variable and cannot prompt, so without it
+  password hosts are unavailable there (and the error says so). Do not put the
+  master password in a command line — it would land in the process list.
+
+To restore password hosts on a new machine, copy `secrets.enc` from the old one
+by hand (same path, mode `0600`) and use the same master password. Treat that file
+as a secret: it is encrypted, but losing it still means re-entering every
+password.
 
 ---
 
