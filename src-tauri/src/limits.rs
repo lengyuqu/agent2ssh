@@ -6,7 +6,7 @@ use std::fs;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionLimitConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -32,7 +32,7 @@ pub struct ExecutionLimitConfig {
     pub tag: HashMap<String, ExecutionLimitRule>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionLimitRule {
     #[serde(default)]
     pub per_minute: Option<usize>,
@@ -67,6 +67,28 @@ pub struct ExecutionLimiter {
     config: ExecutionLimitConfig,
     events: Vec<ExecutionEvent>,
     sessions: HashMap<Uuid, SessionLimitRecord>,
+}
+
+impl ExecutionLimiter {
+    /// Replace the limits in force, keeping the observation window.
+    ///
+    /// The daemon calls this before every check, because the config file is
+    /// meant to be edited while it runs — `policy.toml` has always behaved that
+    /// way, and a person who tightens a limit expects it to take effect rather
+    /// than to discover at the next restart that it never did. Only the
+    /// *configuration* is replaced: the recorded events and open sessions are
+    /// what the limits are measured against, and discarding them would hand
+    /// every caller a fresh allowance on every edit.
+    ///
+    /// Returns whether anything actually changed, so the daemon can log the
+    /// reload instead of doing it silently.
+    pub fn apply_config(&mut self, config: ExecutionLimitConfig) -> bool {
+        if self.config == config {
+            return false;
+        }
+        self.config = config;
+        true
+    }
 }
 
 impl ExecutionLimiter {
@@ -435,6 +457,63 @@ mod tests {
         assert!(config.source.contains_key("mcp"));
         assert!(config.host.contains_key("web"));
         assert!(config.tag.contains_key("prod"));
+    }
+
+    /// A tightened limit takes effect on the next check, without a restart.
+    #[test]
+    fn applying_a_new_config_changes_the_limit_in_force() {
+        let mut limiter = limiter_with_config(ExecutionLimitConfig {
+            default_source_per_minute: 5,
+            default_host_per_minute: 0,
+            default_tag_per_minute: 0,
+            ..Default::default()
+        });
+        let targets = vec![("web".to_string(), vec![])];
+        assert!(limiter.check_execution_batch("mcp", &targets).is_ok());
+        assert!(limiter.check_execution_batch("mcp", &targets).is_ok());
+
+        let tightened = ExecutionLimitConfig {
+            default_source_per_minute: 1,
+            default_host_per_minute: 0,
+            default_tag_per_minute: 0,
+            ..Default::default()
+        };
+        assert!(
+            limiter.apply_config(tightened.clone()),
+            "a change is reported"
+        );
+        assert!(
+            !limiter.apply_config(tightened),
+            "an identical config is not"
+        );
+
+        // The third call now exceeds the new limit of one.
+        let err = limiter.check_execution_batch("mcp", &targets).unwrap_err();
+        assert_eq!(err.scope, "source:mcp rate");
+        assert_eq!(err.limit, 1);
+    }
+
+    /// Reloading must not hand out a fresh allowance. The recorded events are what
+    /// the limit is measured against; if `apply_config` discarded them, every edit
+    /// to the file would reset the window and let a burst through.
+    #[test]
+    fn applying_a_config_keeps_the_observation_window() {
+        let config = ExecutionLimitConfig {
+            default_source_per_minute: 1,
+            default_host_per_minute: 0,
+            default_tag_per_minute: 0,
+            ..Default::default()
+        };
+        let mut limiter = limiter_with_config(config.clone());
+        let targets = vec![("web".to_string(), vec![])];
+        assert!(limiter.check_execution_batch("mcp", &targets).is_ok());
+
+        // Same limits, re-applied: the previous event still counts.
+        limiter.apply_config(config);
+        assert!(
+            limiter.check_execution_batch("mcp", &targets).is_err(),
+            "a reload must not refill the allowance"
+        );
     }
 
     #[test]

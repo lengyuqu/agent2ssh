@@ -818,6 +818,30 @@ fn write_limit_rejection_audit(
     );
 }
 
+/// Re-read `execution_limits.toml` if it changed since the last check.
+///
+/// The file is configuration, and every other configuration file in this app is
+/// live: `policy.toml` re-reads on an mtime change, so a person who tightens a
+/// limit expects it to take effect. Before this, the limiter kept the copy it was
+/// constructed with and the only way to apply an edit was to restart the daemon —
+/// and nothing said so, so the edit silently did nothing until the next restart.
+///
+/// A failed read keeps the previous limits rather than failing the request: a
+/// malformed file must not turn every exec into a 500, and the old limits are the
+/// last ones the operator stated.
+fn refresh_execution_limits(limiter: &mut ExecutionLimiter) {
+    match load_execution_limits() {
+        Ok(config) => {
+            if limiter.apply_config(config) {
+                tracing::info!("execution limits reloaded from execution_limits.toml");
+            }
+        }
+        Err(error) => {
+            tracing::warn!(%error, "execution_limits.toml could not be read; keeping the previous limits");
+        }
+    }
+}
+
 async fn reject_if_rate_limited(
     state: &AppState,
     source: &str,
@@ -825,6 +849,7 @@ async fn reject_if_rate_limited(
     command: &str,
 ) -> Result<(), (StatusCode, Json<ErrorBody>)> {
     let mut limiter = state.limiter.lock().await;
+    refresh_execution_limits(&mut limiter);
     if let Err(rejection) = limiter.check_execution_batch(source, targets) {
         let host = targets
             .iter()
@@ -852,6 +877,7 @@ async fn register_limited_session_for_command(
 ) -> Result<Uuid, (StatusCode, Json<ErrorBody>)> {
     let id = Uuid::new_v4();
     let mut limiter = state.limiter.lock().await;
+    refresh_execution_limits(&mut limiter);
     if let Err(rejection) = limiter.try_register_session(id, source, host, tags) {
         write_limit_rejection_audit(&rejection, source, host, command);
         return Err(err(
