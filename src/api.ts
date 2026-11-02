@@ -63,6 +63,7 @@ import type {
   WebhookConfig,
   ContainerDiscoveryTarget,
   ContainerRuntimeInfo,
+  ContainerServiceStart,
   FontInfo,
   ShellInfo,
 } from "./types";
@@ -412,6 +413,10 @@ export const api = {
   // auto-detection picked. Readable when nothing is installed, so the UI can
   // say why the list is empty.
   containerRuntimes: () => invoke<ContainerRuntimeInfo[]>("container_runtimes"),
+  // Start a runtime's background service. `started: false` means it was already
+  // up, so the caller can say that instead of claiming to have done something.
+  containersStartService: (runtime?: string) =>
+    invoke<ContainerServiceStart>("containers_start_service", { runtime: runtime ?? null }),
   // Open a discovered target in the user's terminal. The backend re-validates
   // the argv against the runtimes it resolved itself before spawning anything.
   launchContainerTarget: (execBinary: string, execArgs: string[]) =>

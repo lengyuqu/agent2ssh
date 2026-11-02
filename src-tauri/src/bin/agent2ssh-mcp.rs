@@ -2042,6 +2042,16 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
             )
             .await?
         }
+        McpTool::ContainersStartService => {
+            // Local to this process on purpose: the service it starts is on this
+            // machine, and the CLI could always do it. Routing through the daemon
+            // would make the tool fail when no daemon runs, which is exactly when a
+            // person is likely to be bringing the machine up.
+            let runtime = args["runtime"].as_str().map(str::to_string);
+            let outcome = agent2ssh::container_runtime::start_local_service(runtime.as_deref())
+                .map_err(|error| McpError::internal(error.to_string()))?;
+            json!(outcome)
+        }
     };
 
     Ok(json!({

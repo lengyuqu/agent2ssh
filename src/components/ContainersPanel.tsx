@@ -1,4 +1,4 @@
-import { Boxes, Check, Copy, RefreshCw, SquareTerminal } from "lucide-react";
+import { Boxes, Check, Copy, Play, RefreshCw, SquareTerminal } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
@@ -48,6 +48,12 @@ function runtimeState(
   t: (text: string, vars?: Record<string, string | number>) => string
 ): string {
   if (info.available) {
+    // A runtime whose binary is present but whose background service is down is
+    // not usable yet, and saying only "detected" sends the user looking for a
+    // different problem. Apple container is the runtime this happens with.
+    if (info.service_running === false && info.start_command) {
+      return t("service stopped");
+    }
     return info.selected ? t("detected (auto)") : t("detected");
   }
   return info.supported ? t("not installed") : t("unsupported here");
@@ -63,6 +69,7 @@ export default function ContainersPanel() {
   const [loaded, setLoaded] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
   const [launching, setLaunching] = useState<string | null>(null);
+  const [startingService, setStartingService] = useState(false);
 
   async function refresh(includeStoppedNow = includeStopped) {
     setBusy(true);
@@ -88,6 +95,31 @@ export default function ContainersPanel() {
     refresh(false);
     // Mount only, matching the other panels: the refresh button owns re-reads.
   }, []);
+
+  // The one runtime that is installed, has a service, and has it down. At most
+  // one in practice (Apple container), and offering several start buttons would
+  // ask a question the user cannot answer without knowing which one they need.
+  const stoppable =
+    runtimes.find((info) => info.service_running === false && info.start_command) ?? null;
+
+  async function startService(runtime: string) {
+    setStartingService(true);
+    try {
+      const outcome = await api.containersStartService(runtime);
+      showToast(
+        "success",
+        outcome.started
+          ? t("{name} service is running", { name: outcome.display_name })
+          : t("{name} service was already running", { name: outcome.display_name }),
+      );
+      await refresh();
+    } catch (err) {
+      showToast("error", String(err));
+      reportError("containers-panel", "starting the runtime service failed", err);
+    } finally {
+      setStartingService(false);
+    }
+  }
 
   function toggleIncludeStopped() {
     const next = !includeStopped;
@@ -164,6 +196,17 @@ export default function ContainersPanel() {
               <span className="opacity-75">{runtimeState(info, t)}</span>
             </Badge>
           ))}
+          {stoppable !== null && (
+            <Button
+              variant="outline"
+              disabled={busy || startingService}
+              title={stoppable.start_command ?? undefined}
+              onClick={() => void startService(stoppable.runtime)}
+            >
+              {startingService ? <Spinner /> : <Play size={14} />}
+              {t("Start {name} service", { name: stoppable.display_name })}
+            </Button>
+          )}
         </div>
       )}
 

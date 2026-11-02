@@ -973,7 +973,7 @@ async fn http_hosts_list_returns_valid_json_array() {
 /// requires a full process lifecycle. Instead we treat the source as the
 /// canonical tool registry and assert on its structure.
 #[test]
-fn mcp_tool_list_contains_exactly_75_tools() {
+fn mcp_tool_list_contains_exactly_76_tools() {
     let registry = include_str!("../src/bin/agent2ssh_mcp/tools.rs");
     // Every tool entry carries a top-level `"name": "..."`; nothing else in the
     // file uses that exact shape (property schemas name their fields without
@@ -981,8 +981,8 @@ fn mcp_tool_list_contains_exactly_75_tools() {
     let tool_count = registry.matches("\"name\": \"").count();
 
     assert_eq!(
-        tool_count, 75,
-        "Expected exactly 75 MCP tools, found {tool_count}. \
+        tool_count, 76,
+        "Expected exactly 76 MCP tools, found {tool_count}. \
          If you added or removed a tool, update this count and the expected list below."
     );
 }
@@ -1068,6 +1068,7 @@ fn mcp_tool_list_contains_all_expected_names() {
         "resident_session_open",
         "resident_session_exec",
         "resident_session_close",
+        "containers_start_service",
     ];
 
     for tool_name in &expected_tools {
@@ -1160,6 +1161,7 @@ fn mcp_call_tool_handler_covers_all_tools() {
         "resident_session_open",
         "resident_session_exec",
         "resident_session_close",
+        "containers_start_service",
     ];
 
     // Find the call_tool function body
@@ -1831,6 +1833,7 @@ fn mcp_tools_match_skills_md_documentation() {
         "resident_session_open",
         "resident_session_exec",
         "resident_session_close",
+        "containers_start_service",
     ];
 
     assert_eq!(

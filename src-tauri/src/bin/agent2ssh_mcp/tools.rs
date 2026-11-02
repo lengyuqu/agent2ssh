@@ -80,6 +80,7 @@ pub(super) enum McpTool {
     ResidentSessionOpen,
     ResidentSessionExec,
     ResidentSessionClose,
+    ContainersStartService,
 }
 
 pub(super) struct ToolCall {
@@ -179,6 +180,7 @@ fn tool_kind(name: &str) -> Option<McpTool> {
         "resident_session_open" => Some(McpTool::ResidentSessionOpen),
         "resident_session_exec" => Some(McpTool::ResidentSessionExec),
         "resident_session_close" => Some(McpTool::ResidentSessionClose),
+        "containers_start_service" => Some(McpTool::ContainersStartService),
         _ => None,
     }
 }
@@ -1042,6 +1044,16 @@ fn tool_definitions() -> Vec<Value> {
                             "reason": { "type": "string", "description": "Why this command runs; recorded in the audit entry." },
                             "change_id": { "type": "string", "description": "Change/ticket id for the audit entry." },
                             "side_effect": { "type": "string", "description": "What the command changes, for the audit entry." }
+                        }
+                    }
+                },
+                {
+                    "name": "containers_start_service",
+                    "description": "Start the local container runtime's background service, the step that has to happen before a stopped runtime can be discovered or exec'd into. Apple container is the runtime with one; Docker and wslc have none and are refused rather than silently accepted. Reports whether the service was already running, so started=false means nothing was spawned.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "runtime": { "type": "string", "description": "Runtime to start: apple, docker or wslc. Omitted: the first installed runtime that actually has a service." }
                         }
                     }
                 },

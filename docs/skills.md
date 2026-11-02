@@ -1,6 +1,6 @@
 # Agent2SSH MCP Tools Reference
 
-Agent2SSH exposes 75 tools via the Model Context Protocol (MCP) stdio server.
+Agent2SSH exposes 76 tools via the Model Context Protocol (MCP) stdio server.
 
 ## Tool List
 
@@ -85,6 +85,7 @@ the `mcp_tools_match_skills_md_documentation` integration test.
 | 73 | `resident_session_open` | Open a resident session: one shell for a `local:<id>` environment that stays alive across commands, so cwd and exported variables persist. Blocks until the shell is warm. Forwards to the daemon; the open is authorized like an exec keyed on the environment's host id. Containers are refused (one-shot targets). |
 | 74 | `resident_session_exec` | Run one command inside a resident session opened by `resident_session_open`. Authorized against the session's own host id, so it pays the same gate chain as a one-shot exec. Output is bounded by the session's rolling window. A command that outlives its timeout kills the session — long-running work belongs in `local_exec`. |
 | 75 | `resident_session_close` | Close a resident session and kill its shell. Authorized as `resident-session close` against the session's own host through scope, execution gate, limits, risk and approval. Closing an already-dead session still reclaims it. To read a session's buffered output without running a command, use `GET /resident-sessions/{id}` on the daemon, authorized as `resident-session read`. |
+| 76 | `containers_start_service` | Start the local container runtime's background service — the step a stopped runtime needs before discovery or exec can work. Apple container is the runtime with one; Docker and wslc have none and are refused rather than silently accepted. Reports `started`: `false` means the service was already up, so nothing was spawned. Local to the caller, like the CLI command: the service it starts is on this machine, so it does not need a daemon. |
 
 The local-execution tools above wait for the daemon's execution, shell-warmup and approval deadlines, rather than imposing a separate 30-second HTTP timeout. Connecting to the daemon is limited to 10 seconds; command `timeout_secs` still applies.
 

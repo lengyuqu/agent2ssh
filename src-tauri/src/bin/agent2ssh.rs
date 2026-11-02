@@ -3471,23 +3471,15 @@ async fn async_main() -> Result<()> {
                 }
             }
             ContainerCommands::Start { runtime } => {
-                let resolved = match runtime.as_deref() {
-                    Some(id) => agent2ssh::container_runtime::select(Some(id))?,
-                    None => agent2ssh::container_runtime::available()
-                        .into_iter()
-                        .find(|r| r.runtime.service_running(&r.binary).is_some())
-                        .ok_or_else(|| {
-                            anyhow::anyhow!("no installed container runtime has a service to start")
-                        })?,
-                };
-                if resolved.runtime.service_running(&resolved.binary).is_none() {
-                    anyhow::bail!(
-                        "{} has no separate service to start",
-                        resolved.runtime.display_name()
-                    );
+                // One core function for every surface; the CLI used to own this
+                // logic and the other three could not reach it at all.
+                let outcome =
+                    agent2ssh::container_runtime::start_local_service(runtime.as_deref())?;
+                if outcome.started {
+                    println!("{} service is running", outcome.display_name);
+                } else {
+                    println!("{} service was already running", outcome.display_name);
                 }
-                resolved.runtime.start_service(&resolved.binary)?;
-                println!("{} service is running", resolved.runtime.display_name());
             }
             ContainerCommands::Runtime {
                 runtime,

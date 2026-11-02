@@ -1627,6 +1627,20 @@ pub fn container_runtimes() -> Vec<crate::container_runtime::ContainerRuntimeInf
     crate::container_runtime::infos()
 }
 
+/// Start a container runtime's background service from the desktop.
+///
+/// The list above already reported `service_running` and `start_command`, but
+/// the panel could only *describe* a stopped service and tell the user to run the
+/// command themselves. This wraps the same core function the CLI and the MCP tool
+/// call, so the three cannot drift.
+#[tauri::command]
+pub fn containers_start_service(
+    runtime: Option<String>,
+) -> Result<crate::container_runtime::ServiceStartOutcome, String> {
+    crate::container_runtime::start_local_service(runtime.as_deref())
+        .map_err(|error| error.to_string())
+}
+
 /// Open a discovered container target in the user's terminal.
 ///
 /// The argv is the one discovery produced (`exec_binary` + `exec_args`) and is
@@ -3740,6 +3754,7 @@ pub fn run_tauri() {
             // B33: Container Discovery
             discover_containers,
             container_runtimes,
+            containers_start_service,
             launch_container_target,
             // Font + Shell enumeration
             list_fonts,

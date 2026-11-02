@@ -826,6 +826,10 @@ export const zh: Record<string, string> = {
   "Cancel edit": "取消编辑",
   "Approve edited command": "批准编辑后的命令",
   "Edited command": "编辑后的命令",
+  "service stopped": "服务未启动",
+  "Start {name} service": "启动 {name} 服务",
+  "{name} service is running": "{name} 服务已启动",
+  "{name} service was already running": "{name} 服务本来就在运行",
   "The edited command is re-checked: it cannot be blocked or riskier than this request.": "编辑后的命令会重新评估：不能是被阻止的命令，风险也不能高于本次请求。",
   "This host runs a shell the risk classifier cannot read (cmd.exe or PowerShell), so the level above may understate the real risk. Judge the command itself.":
     "该主机使用风险分类器读不懂的 shell（cmd.exe 或 PowerShell），上面的风险等级可能低估真实风险。请直接判断命令本身。",

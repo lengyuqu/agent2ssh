@@ -732,6 +732,14 @@ export type ContainerRuntimeInfo = {
   /** Command that starts the service, when it has one. */
   start_command?: string | null;
 };
+// Rust: container_runtime.rs — ServiceStartOutcome
+export type ContainerServiceStart = {
+  runtime: string;
+  display_name: string;
+  /** false when the service was already up, so nothing was spawned. */
+  started: boolean;
+  start_command: string | null;
+};
 
 // Rust: font_list.rs — FontInfo
 export type FontInfo = {

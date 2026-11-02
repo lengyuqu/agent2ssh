@@ -19,6 +19,15 @@ components:
       description: Bearer token from `~/.agent2ssh/daemon.token` or a scoped token configured in `~/.agent2ssh/daemon_tokens.toml`.
 
   schemas:
+    ContainerServiceStart:
+      type: object
+      required: [runtime, display_name, started]
+      properties:
+        runtime:      { type: string }
+        display_name: { type: string }
+        started:      { type: boolean, description: "false when the service was already up, so nothing was spawned" }
+        start_command: { type: string, nullable: true }
+
     HostProfile:
       type: object
       required: [name, host]
@@ -853,6 +862,45 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "429":
           description: Execution limit exceeded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /containers/start-service:
+    post:
+      summary: Start the local container runtime's background service
+      description: |
+        Admin token only. Changes machine state on the host the daemon runs on, so a
+        token scoped to a few hosts cannot call it. `started: false` in the response
+        means the service was already up and nothing was spawned; a runtime without a
+        background service (Docker, wslc) is refused rather than silently accepted.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                runtime:
+                  type: string
+                  description: "apple, docker or wslc. Omitted: the first installed runtime that has a service."
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ContainerServiceStart" }
+        "400":
+          description: Unknown runtime, no runtime with a service, or the service failed to start
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid token
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: The token is not the unrestricted admin token
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }

@@ -489,6 +489,53 @@ fn auto_selected_runtime() -> Option<ContainerRuntime> {
 /// The explicit and environment paths are strict on purpose: a caller that
 /// named a runtime wants to know that it is missing or unsupported rather than
 /// silently getting a different one. Only the auto path falls back.
+/// Start the local container runtime's background service — the one action a
+/// person cannot take from inside an agent, because it may prompt.
+///
+/// This exists as one function so every surface agrees about which runtime it
+/// means and what "already running" is worth saying. The CLI had this inline
+/// and the MCP server, the daemon and the desktop panel had no way to reach it
+/// at all, which is the shape AGENTS.md calls a broken core: an action reachable
+/// from one entry point and not the others.
+///
+/// `explicit` names a runtime (`apple`, `docker`, `wslc`). Without it, the
+/// runtime is the first installed one that has a service to start — Docker and
+/// wslc have none, so an auto-selection that lands on them is a refusal rather
+/// than a silent no-op.
+pub fn start_local_service(explicit: Option<&str>) -> Result<ServiceStartOutcome> {
+    let resolved = match explicit.filter(|id| !id.trim().is_empty()) {
+        Some(id) => select(Some(id))?,
+        None => available()
+            .into_iter()
+            .find(|r| r.runtime.service_running(&r.binary).is_some())
+            .ok_or_else(|| anyhow!("no installed container runtime has a service to start"))?,
+    };
+    let display_name = resolved.runtime.display_name().to_string();
+    if resolved.runtime.service_running(&resolved.binary).is_none() {
+        return Err(anyhow!("{display_name} has no separate service to start"));
+    }
+    // Asked after the check above, so "already running" is a fact rather than a
+    // guess: a caller that gets `started: false` knows nothing was spawned.
+    let already_running = resolved.runtime.service_running(&resolved.binary) == Some(true);
+    resolved.runtime.start_service(&resolved.binary)?;
+    Ok(ServiceStartOutcome {
+        runtime: resolved.runtime.id().to_string(),
+        display_name,
+        started: !already_running,
+        start_command: resolved.runtime.service_start_command(),
+    })
+}
+
+/// What [`start_local_service`] did, for surfaces that report rather than print.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ServiceStartOutcome {
+    pub runtime: String,
+    pub display_name: String,
+    /// `false` when the service was already up, so nothing was spawned.
+    pub started: bool,
+    /// The command that was run, for a caller that wants to show or repeat it.
+    pub start_command: Option<String>,
+}
 pub fn select(explicit: Option<&str>) -> Result<ResolvedRuntime> {
     let requested = match explicit {
         Some(id) if !id.trim().is_empty() => Some((id.trim().to_string(), "requested runtime")),

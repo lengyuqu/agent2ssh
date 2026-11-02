@@ -842,6 +842,31 @@ fn refresh_execution_limits(limiter: &mut ExecutionLimiter) {
     }
 }
 
+/// Start a local container runtime's background service.
+///
+/// Admin-only, like the other control-plane routes: it changes machine state on
+/// the host the daemon runs on, and a token scoped to a few hosts has no business
+/// turning a runtime on. The core function is the same one the CLI, the MCP tool
+/// and the desktop command call.
+async fn containers_start_service(
+    State(_s): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Json(body): Json<ContainerStartBody>,
+) -> Result<Json<agent2ssh::container_runtime::ServiceStartOutcome>, (StatusCode, Json<ErrorBody>)>
+{
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    require_admin(&auth)?;
+    agent2ssh::container_runtime::start_local_service(body.runtime.as_deref())
+        .map(Json)
+        .map_err(|error| err(StatusCode::BAD_REQUEST, error.to_string()))
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ContainerStartBody {
+    #[serde(default)]
+    runtime: Option<String>,
+}
+
 async fn reject_if_rate_limited(
     state: &AppState,
     source: &str,
@@ -5585,6 +5610,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/health", get(health))
         .route("/metrics", get(metrics))
         .route("/metrics/trend", get(metrics_trend))
+        .route("/containers/start-service", post(containers_start_service))
         .route("/gate", get(gate_status))
         .route("/gate/pause", post(gate_pause))
         .route("/gate/resume", post(gate_resume))
