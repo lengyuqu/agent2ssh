@@ -571,6 +571,11 @@ async fn try_daemon_forward_list() -> std::result::Result<DaemonAttempt<Vec<Valu
                     "target_host": rule.target_host,
                     "target_port": rule.target_port,
                     "backend": "daemon",
+                    // Owned by the daemon, so it outlives the caller. `backend`
+                    // already distinguished the two, but a caller reading the
+                    // array had to know that "process" means the tunnel dies with
+                    // the MCP server; this states it instead of implying it.
+                    "durable": true,
                 })
             })
             .collect(),
@@ -1317,6 +1322,11 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
                     "target_host": rule.target_host,
                     "target_port": rule.target_port,
                     "backend": "process",
+                    // Lives in *this* process: when the daemon was unreachable the
+                    // add fell back here, so the tunnel ends with the MCP server.
+                    // Nothing else in the response lets a caller tell this apart
+                    // from a daemon-owned tunnel in the same array.
+                    "durable": false,
                 })
             }));
             json!(items)

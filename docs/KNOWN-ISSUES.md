@@ -1,6 +1,6 @@
 # 已知问题与未覆盖范围
 
-日期：2026-11-02（K10、K11 均已修复；K12 为上游限制；K13 为设计限制；E1、E2、E5 已解决并按维护约定移入 `CHANGELOG.md`）。基线：macOS 开发机 + WinR9，Docker / wslc / Apple container；GitHub Actions。
+日期：2026-11-03（K1 已修复；K10、K11 均已修复；K12 为上游限制；K13 为设计限制；E1、E2、E5 已解决并按维护约定移入 `CHANGELOG.md`）。基线：macOS 开发机 + WinR9，Docker / wslc / Apple container；GitHub Actions。
 
 本文只记录 **已经知道、尚未解决** 的事项，以及 **没有验证过所以不能下结论** 的范围，按处理价值排序。已修复的问题在 `CHANGELOG.md`；历史缺陷快照在 `DEFECTS.md`（0.2.1 时代，已归档）；Windows 相关的细节在 [reports/WINDOWS-HANDOVER.md](reports/WINDOWS-HANDOVER.md)，此处只列条目。
 
@@ -10,7 +10,6 @@
 
 | # | 状态 | 问题 | 影响 | 位置 / 下一步 |
 |---|------|------|------|---------------|
-| K1 | 待修 | 已知主机指纹按 `host:port` 只存一个条目（一种密钥类型） | 服务器同时有多种主机密钥时，一旦主机密钥算法偏好变了（`algo set --hostkey`）或服务器新增了更优先的密钥类型，会误报 `SSH host fingerprint changed`，必须手动重新信任。方向是安全的（拒绝连接），但会误伤正常使用 | `embedded_ssh.rs` `trust_or_verify_host_fingerprint`、`known_hosts.json`。要改成按密钥类型存储（类似 OpenSSH `known_hosts`），会牵动存储格式、`HostFingerprintStatus` 以及 daemon / MCP / 桌面三处调用 |
 | K2 | 待修 | Dropbear 上传的规避靠 banner 里的 "dropbear" 字样 | 其它在 SFTP 上限制写入大小的服务器不会被识别：写入返回 0 字节时能自动减半重试，但像 Dropbear 在 30000 字节写入下"卡死在 128 KiB"那种失败是**挂起**而不是错误，无法兜底。SFTP 写入为什么会停住没有查明（原记录写作 libssh2，现在的传输层是 `russh-sftp`，同一现象尚未在新后端上复测），只测得 16 KiB 写入可行 | `sftp_transfer.rs` `upload_chunk_for_server`。若遇到新的卡死服务器，需要找根因（SFTP 写入流水线与小窗口的交互）或给上传加进度超时 |
 | K3 | 待修 | 证书认证被拒时，错误信息不区分原因 | 证书过期、principal 不匹配、CA 不被信任，客户端都只看到 `the server rejected these credentials`，用户无法判断是证书问题。矩阵只断言了"被拒绝"，没有核对文案 | `transport/russh_impl/mod.rs` `userauth_pubkey_file`（证书分支）。可以在失败时读取证书有效期 / principal，给出提示 |
 | K4 | 待修 | RSA 的 `ssh-rsa`（SHA-1）回退没有任何记录 | 回退到 SHA-1 签名发生时，`app.log` 和审计里都看不出来，事后无法知道哪些主机在用旧签名。迁到 russh 后回退逻辑在传输层内部（`userauth_pubkey_file` 的第二次尝试），同样不打日志 | `transport/russh_impl/mod.rs`：成功时应写一条诊断日志；也可以考虑提供关闭它的开关 |

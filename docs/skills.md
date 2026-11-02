@@ -36,7 +36,7 @@ the `mcp_tools_match_skills_md_documentation` integration test.
 | 24 | `ssh_session_close` | Close and terminate a PTY session. |
 | 25 | `ssh_session_list` | List open PTY sessions. Defaults to the local daemon registry and includes MCP process-local fallback sessions when present. |
 | 26 | `ssh_forward_add` | Start an SSH port forward tunnel (`-L` local or `-R` remote). Returns a `forward_id`. |
-| 27 | `ssh_forward_list` | List active SSH port forward tunnels. |
+| 27 | `ssh_forward_list` | List active SSH port forward tunnels. Each entry carries `durable`: `true` when the daemon owns it (it outlives this client), `false` when it lives in the MCP server's own process and ends with it. |
 | 28 | `ssh_forward_remove` | Stop and remove an SSH port forward by ID. |
 | 29 | `ssh_risk_check` | Check the risk level of a command using built-in rules and user-defined `risk_rules.toml`. |
 | 30 | `ssh_gate_status` | Read the local daemon execution gate status. When paused, non-desktop daemon execution is rejected until resumed from CLI or desktop. |

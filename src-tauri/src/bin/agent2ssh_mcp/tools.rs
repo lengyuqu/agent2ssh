@@ -561,7 +561,7 @@ fn tool_definitions() -> Vec<Value> {
                 },
                 {
                     "name": "ssh_forward_list",
-                    "description": "List active SSH port forward tunnels.",
+                    "description": "List active SSH port forward tunnels. Each entry carries `durable`: true when the daemon owns the tunnel and it outlives this client, false when it lives in the MCP server's own process and ends with it.",
                     "inputSchema": { "type": "object", "properties": {} }
                 },
                 {

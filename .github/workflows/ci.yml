@@ -280,6 +280,21 @@ jobs:
       - name: Rust connect deadline tests
         run: cargo test --no-default-features --test connect_deadline
         working-directory: src-tauri
+      # The local target and resident sessions run against real shells on this
+      # machine, so they need no fixture — and they are the two suites that used
+      # to be run only by hand. Everything they caught was found late: a
+      # `local:wsl` argv shape that made every multi-word command fail, two
+      # assertions that could never pass on Windows, and a `cwd` validation
+      # probed with POSIX literals on a platform that does not accept them.
+      # They are `#[serial]` and isolate their config dir, so the runner needs
+      # nothing beyond the shell it already has.
+      - name: Rust local exec tests
+        run: cargo test --no-default-features --test local_exec
+        working-directory: src-tauri
+
+      - name: Rust resident session tests
+        run: cargo test --no-default-features --test resident_session
+        working-directory: src-tauri
 
       # ── Compilation checks ────────────────────────────────────────────────
 

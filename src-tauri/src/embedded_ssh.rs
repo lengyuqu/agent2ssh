@@ -185,6 +185,30 @@ fn known_host_identity(host: &HostProfile) -> String {
     format!("{}:{}", host.host.trim(), host.port.unwrap_or(22))
 }
 
+/// The map key for one host *and* one key type.
+///
+/// OpenSSH's `known_hosts` keeps a line per (host, key type) pair, and this
+/// store has to do the same: a server offers several host keys, and which one is
+/// used depends on the negotiated algorithm. Keying by `host:port` alone meant
+/// that choosing a different `--hostkey` preference — or a server that started
+/// advertising a stronger key — looked exactly like a changed fingerprint, and
+/// the connection was refused until the user re-trusted by hand.
+///
+/// The identity stays a readable prefix rather than the key becoming a nested
+/// structure, so `known_hosts.json` can still be grepped for a host.
+fn known_host_key(identity: &str, host_key_algorithm: &str) -> String {
+    format!("{identity}|{host_key_algorithm}")
+}
+
+/// Split a stored key back into (identity, algorithm). Entries written before
+/// this split existed have no `|` and carry their algorithm in the value.
+fn split_known_host_key(key: &str) -> (&str, Option<&str>) {
+    match key.split_once('|') {
+        Some((identity, algorithm)) => (identity, Some(algorithm)),
+        None => (key, None),
+    }
+}
+
 fn load_known_host_fingerprints_unlocked() -> Result<HashMap<String, TrustedHostFingerprint>> {
     let path = known_hosts_path()?;
     if !path.exists() {
@@ -195,8 +219,23 @@ fn load_known_host_fingerprints_unlocked() -> Result<HashMap<String, TrustedHost
     if raw.trim().is_empty() {
         return Ok(HashMap::new());
     }
-    serde_json::from_str(&raw)
-        .with_context(|| format!("failed to parse known host fingerprints {}", path.display()))
+    let stored: HashMap<String, TrustedHostFingerprint> = serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse known host fingerprints {}", path.display()))?;
+    // Entries written before keys carried the algorithm are re-keyed in memory.
+    // Every write goes through `save_known_host_fingerprints_unlocked`, so the
+    // next successful connection migrates the file in place; a host that is
+    // never contacted again keeps its old entry and still verifies, because the
+    // lookup below tries both shapes.
+    Ok(stored
+        .into_iter()
+        .map(|(key, entry)| {
+            let migrated = match split_known_host_key(&key) {
+                (_, Some(_)) => key.clone(),
+                (identity, None) => known_host_key(identity, &entry.host_key_algorithm),
+            };
+            (migrated, entry)
+        })
+        .collect())
 }
 
 fn save_known_host_fingerprints_unlocked(
@@ -221,12 +260,17 @@ fn trust_or_verify_host_fingerprint(
     let _guard = crate::store::lock_config_file(".known_hosts.lock")?;
     let mut trusted = load_known_host_fingerprints_unlocked()?;
     let identity = known_host_identity(host);
+    let key = known_host_key(&identity, host_key_algorithm);
     let now = now_unix_secs();
 
-    if let Some(existing) = trusted.get_mut(&identity) {
-        if existing.fingerprint_sha256 != fingerprint_sha256
-            || existing.host_key_algorithm != host_key_algorithm
-        {
+    // Only the entry for *this* key type is compared. A server that offers both
+    // an ED25519 and an RSA host key legitimately has two fingerprints, and which
+    // one a connection sees follows the negotiated algorithm — so treating the
+    // second as a change of the first is the false positive this store used to
+    // produce. A same-algorithm difference is still a real change and still
+    // refused.
+    if let Some(existing) = trusted.get_mut(&key) {
+        if existing.fingerprint_sha256 != fingerprint_sha256 {
             return Err(anyhow!(
                 "SSH host fingerprint changed for {} ({}): expected {} {}, got {} {}",
                 host.name,
@@ -245,7 +289,7 @@ fn trust_or_verify_host_fingerprint(
     }
 
     trusted.insert(
-        identity,
+        key,
         TrustedHostFingerprint {
             host: host.name.clone(),
             address: address.to_string(),
@@ -285,13 +329,15 @@ pub fn get_host_fingerprint_status_core(
     let (host_key_algorithm, fingerprint_sha256) = probe_host_fingerprint(&host, timeout_secs)?;
     let _guard = crate::store::lock_config_file(".known_hosts.lock")?;
     let trusted = load_known_host_fingerprints_unlocked()?;
-    let existing = trusted.get(&known_host_identity(&host));
+    // The status is about the key type the server just presented, not about the
+    // host in general: another key type stored beside it is not a conflict.
+    let existing = trusted.get(&known_host_key(
+        &known_host_identity(&host),
+        &host_key_algorithm,
+    ));
     let expected_host_key_algorithm = existing.map(|entry| entry.host_key_algorithm.clone());
     let expected_fingerprint_sha256 = existing.map(|entry| entry.fingerprint_sha256.clone());
-    let trusted = existing.is_some_and(|entry| {
-        entry.host_key_algorithm == host_key_algorithm
-            && entry.fingerprint_sha256 == fingerprint_sha256
-    });
+    let trusted = existing.is_some_and(|entry| entry.fingerprint_sha256 == fingerprint_sha256);
 
     Ok(HostFingerprintStatus {
         host: host.name,
@@ -329,8 +375,8 @@ pub fn trust_host_fingerprint_core(
     let _guard = crate::store::lock_config_file(".known_hosts.lock")?;
     let mut trusted = load_known_host_fingerprints_unlocked()?;
     let identity = known_host_identity(&host);
-    if let (Some(expected), Some(existing)) = (expected_fingerprint_sha256, trusted.get(&identity))
-    {
+    let key = known_host_key(&identity, host_key_algorithm);
+    if let (Some(expected), Some(existing)) = (expected_fingerprint_sha256, trusted.get(&key)) {
         if existing.fingerprint_sha256 != expected {
             return Err(anyhow!(
                 "saved SSH host fingerprint for {} changed before confirmation",
@@ -341,11 +387,11 @@ pub fn trust_host_fingerprint_core(
 
     let now = now_unix_secs();
     let first_seen_unix = trusted
-        .get(&identity)
+        .get(&key)
         .map(|entry| entry.first_seen_unix)
         .unwrap_or(now);
     trusted.insert(
-        identity,
+        key,
         TrustedHostFingerprint {
             host: host.name,
             address,
@@ -377,7 +423,13 @@ pub fn remove_known_host_core(host_name_or_identity: &str) -> Result<bool> {
     };
 
     let mut trusted = load_known_host_fingerprints_unlocked()?;
-    let removed = trusted.remove(&identity).is_some();
+    // Forgetting a host drops every key type stored for it. Leaving the others
+    // behind would make `forget` look like it worked — the next connection would
+    // still be verified against a key the user asked to forget — and which type
+    // is offered next time is the server's choice, not the caller's.
+    let before = trusted.len();
+    trusted.retain(|key, _| split_known_host_key(key).0 != identity);
+    let removed = trusted.len() != before;
     if removed {
         save_known_host_fingerprints_unlocked(&trusted)?;
     }
@@ -460,8 +512,9 @@ pub fn import_known_hosts_from_ssh(path: Option<&str>) -> Result<KnownHostImport
         let first_host = host_field.split(',').next().unwrap_or(host_field);
         let (hostname, port) = split_host_port(first_host);
         let identity = format!("{hostname}:{port}");
+        let key = known_host_key(&identity, key_type);
 
-        if let Some(existing) = trusted.get_mut(&identity) {
+        if let Some(existing) = trusted.get_mut(&key) {
             if existing.fingerprint_sha256 != fingerprint {
                 // Conflicting fingerprint — keep the existing trust, skip.
                 skipped += 1;
@@ -475,7 +528,7 @@ pub fn import_known_hosts_from_ssh(path: Option<&str>) -> Result<KnownHostImport
         }
 
         trusted.insert(
-            identity,
+            key,
             TrustedHostFingerprint {
                 host: hostname.clone(),
                 address: hostname.clone(),
@@ -2060,7 +2113,9 @@ mod tests {
         )
         .unwrap();
         let trusted = load_known_host_fingerprints_unlocked().unwrap();
-        let entry = trusted.get("example.internal:22").unwrap();
+        let entry = trusted
+            .get(&known_host_key("example.internal:22", "ssh-ed25519"))
+            .unwrap();
         assert_eq!(entry.fingerprint_sha256, "SHA256:first");
         assert_eq!(entry.host_key_algorithm, "ssh-ed25519");
 
@@ -2084,6 +2139,107 @@ mod tests {
             mismatch.contains("SSH host fingerprint changed"),
             "unexpected mismatch error: {mismatch}"
         );
+
+        std::env::remove_var(CONFIG_DIR_ENV);
+        let _ = std::fs::remove_dir_all(&config_dir);
+    }
+
+    /// A server that offers two host keys has two fingerprints, and which one a
+    /// connection sees follows the negotiated algorithm. Keying by `host:port`
+    /// alone made the second type look like a change of the first, so switching
+    /// `algo set --hostkey` locked the user out until they re-trusted by hand.
+    #[test]
+    #[serial_test::serial]
+    fn two_host_key_types_for_one_host_coexist() {
+        let config_dir =
+            std::env::temp_dir().join(format!("agent2ssh-known-types-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::env::set_var(CONFIG_DIR_ENV, &config_dir);
+        let host = test_host();
+
+        trust_or_verify_host_fingerprint(&host, "example.internal:22", "ssh-ed25519", "SHA256:ed")
+            .unwrap();
+        // A different key type is a new entry, not a conflict.
+        trust_or_verify_host_fingerprint(
+            &host,
+            "example.internal:22",
+            "rsa-sha2-256",
+            "SHA256:rsa",
+        )
+        .unwrap();
+        // And both keep verifying afterwards, in either order.
+        trust_or_verify_host_fingerprint(&host, "example.internal:22", "ssh-ed25519", "SHA256:ed")
+            .unwrap();
+        trust_or_verify_host_fingerprint(
+            &host,
+            "example.internal:22",
+            "rsa-sha2-256",
+            "SHA256:rsa",
+        )
+        .unwrap();
+
+        let trusted = load_known_host_fingerprints_unlocked().unwrap();
+        assert_eq!(trusted.len(), 2, "one entry per key type: {trusted:?}");
+
+        // A different fingerprint for the *same* type is still a real change.
+        let mismatch = trust_or_verify_host_fingerprint(
+            &host,
+            "example.internal:22",
+            "ssh-ed25519",
+            "SHA256:other",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            mismatch.contains("SSH host fingerprint changed"),
+            "{mismatch}"
+        );
+
+        // Forgetting the host drops all of its key types, so the next connection
+        // is trusted afresh instead of matching a key the user asked to forget.
+        assert!(remove_known_host_core("example.internal:22").unwrap());
+        assert!(load_known_host_fingerprints_unlocked().unwrap().is_empty());
+
+        std::env::remove_var(CONFIG_DIR_ENV);
+        let _ = std::fs::remove_dir_all(&config_dir);
+    }
+
+    /// Entries written before keys carried the algorithm must keep working: the
+    /// loader re-keys them, so the first connection after an upgrade verifies
+    /// against the entry the previous version wrote.
+    #[test]
+    #[serial_test::serial]
+    fn a_legacy_entry_without_an_algorithm_still_verifies() {
+        let config_dir =
+            std::env::temp_dir().join(format!("agent2ssh-known-legacy-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::env::set_var(CONFIG_DIR_ENV, &config_dir);
+
+        // Exactly what the previous version wrote: keyed by identity alone.
+        let legacy = serde_json::json!({
+            "example.internal:22": {
+                "host": "legacy",
+                "address": "example.internal:22",
+                "host_key_algorithm": "ssh-ed25519",
+                "fingerprint_sha256": "SHA256:legacy",
+                "first_seen_unix": 1,
+                "last_seen_unix": 1
+            }
+        });
+        std::fs::write(
+            known_hosts_path().unwrap(),
+            serde_json::to_string(&legacy).unwrap(),
+        )
+        .unwrap();
+
+        let host = test_host();
+        trust_or_verify_host_fingerprint(
+            &host,
+            "example.internal:22",
+            "ssh-ed25519",
+            "SHA256:legacy",
+        )
+        .expect("a legacy entry must still verify for the same key type");
 
         std::env::remove_var(CONFIG_DIR_ENV);
         let _ = std::fs::remove_dir_all(&config_dir);
@@ -2180,9 +2336,9 @@ mod tests {
         trust_or_verify_host_fingerprint(&host, "example.internal:22", "ssh-ed25519", "SHA256:abc")
             .unwrap();
 
-        // Verify it exists
+        // Verify it exists, under the per-key-type form the store now writes.
         let trusted = load_known_host_fingerprints_unlocked().unwrap();
-        assert!(trusted.contains_key("example.internal:22"));
+        assert!(trusted.contains_key(&known_host_key("example.internal:22", "ssh-ed25519")));
 
         // T2-13: Remove by identity string
         let removed = remove_known_host_core("example.internal:22").unwrap();
@@ -2190,7 +2346,7 @@ mod tests {
 
         // Verify it's gone
         let trusted = load_known_host_fingerprints_unlocked().unwrap();
-        assert!(!trusted.contains_key("example.internal:22"));
+        assert!(!trusted.contains_key(&known_host_key("example.internal:22", "ssh-ed25519")));
 
         // Removing again returns false
         let removed_again = remove_known_host_core("example.internal:22").unwrap();
