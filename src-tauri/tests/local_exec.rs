@@ -799,8 +799,30 @@ fn define_environments(env: &IsolatedEnv, body: &str) {
 
 #[cfg(unix)]
 const SHOW_CUSTOM_ENV: &str = "echo \"$A2S_CUSTOM:$A2S_FROM_PRELUDE\" && pwd";
+/// cmd expands every `%VAR%` of a command line at parse time, before any of it
+/// runs, so a variable the prelude creates cannot be read back with `%VAR%` in
+/// the command it is chained to — the expansion would be the literal text.
+/// `set NAME` prints the variable's *live* value instead, which is what observes
+/// the prelude here. (A prelude that only changes `PATH` needs no such care:
+/// program resolution happens at execution time, so `call activate.bat` works.)
 #[cfg(windows)]
-const SHOW_CUSTOM_ENV: &str = "echo %A2S_CUSTOM%:%A2S_FROM_PRELUDE% && cd";
+const SHOW_CUSTOM_ENV: &str = "echo %A2S_CUSTOM% && set A2S_FROM_PRELUDE && cd";
+
+/// What [`SHOW_CUSTOM_ENV`] must show once the variable and the prelude have
+/// both been applied — the two platforms print it in different shapes.
+#[cfg(unix)]
+const PRELUDE_EVIDENCE: &str = "from-config:pre";
+#[cfg(windows)]
+const PRELUDE_EVIDENCE: &str = "A2S_FROM_PRELUDE=pre";
+
+/// The same observation without reading the prelude's variable, for the test
+/// whose definition deliberately has no prelude: `set NAME` on an undefined
+/// variable exits 1 in cmd, which would turn the command's own exit code into a
+/// failure the test never meant to assert.
+#[cfg(unix)]
+const SHOW_CUSTOM_ENV_ONLY: &str = "echo \"$A2S_CUSTOM\" && pwd";
+#[cfg(windows)]
+const SHOW_CUSTOM_ENV_ONLY: &str = "echo %A2S_CUSTOM% && cd";
 
 #[cfg(unix)]
 const SET_FROM_PRELUDE: &str = "export A2S_FROM_PRELUDE=pre";
@@ -829,8 +851,9 @@ async fn a_custom_environment_applies_its_variables_directory_and_prelude() {
 
     assert_eq!(result.exit_code, Some(0), "stderr: {}", result.stderr);
     assert!(
-        result.stdout.contains("from-config:pre"),
-        "the variable and the prelude's export should both be visible: {:?}",
+        result.stdout.contains("from-config") && result.stdout.contains(PRELUDE_EVIDENCE),
+        "the variable and the prelude's export should both be visible \
+         (expected {PRELUDE_EVIDENCE:?}): {:?}",
         result.stdout
     );
     let dir_name = env.dir.file_name().unwrap().to_string_lossy().into_owned();
@@ -905,7 +928,9 @@ async fn editing_the_file_does_not_change_the_running_registry() {
     )
     .unwrap();
 
-    let mut request = local_request(SHOW_CUSTOM_ENV);
+    // No prelude in this definition, so the observation must not read one back:
+    // `set NAME` on an undefined variable exits 1 in cmd.
+    let mut request = local_request(SHOW_CUSTOM_ENV_ONLY);
     request.host = format!("{LOCAL_TARGET_ID}:mine");
     let result = exec_local_core(request).await.expect("custom env exec");
     assert!(

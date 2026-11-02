@@ -382,7 +382,10 @@ async fn a_custom_environment_reaches_a_resident_session() {
     let (prelude, show, base) = if cfg!(windows) {
         (
             "$env:A2S_FROM_PRELUDE = 'pre'",
-            "\"$env:A2S_CUSTOM:$env:A2S_FROM_PRELUDE\"",
+            // Braced, because `$env:NAME:` is ambiguous to PowerShell's parser:
+            // it reads `NAME:` as the variable name and expands to nothing, so
+            // the unbraced form silently drops the variable before the colon.
+            "\"${env:A2S_CUSTOM}:${env:A2S_FROM_PRELUDE}\"",
             "pwsh",
         )
     } else {
