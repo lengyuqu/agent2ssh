@@ -1,7 +1,7 @@
 ---
 name: agent2ssh
 description: Operate remote machines over SSH through Agent2SSH — host management, command execution with risk classification and approvals, SFTP transfers, persistent PTY sessions, port forwards, playbooks, audit, the local redaction / highlight / SSH-algorithm rule sets, and local execution on the daemon's own machine (one-shot `local_exec` environments and long-lived resident shell sessions). Use when asked to run commands on remote servers, transfer files, manage SSH hosts or tunnels, run a command in a local terminal environment, keep shell state across commands, tune what gets redacted or highlighted, or automate multi-host operations via the agent2ssh CLI or its MCP tools.
-version: 0.4.3
+version: 0.4.4
 ---
 
 # Agent2SSH Skill

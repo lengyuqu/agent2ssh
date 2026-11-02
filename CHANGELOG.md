@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-11-02
+
+The first release since 0.4.3. It is mostly the daemon's local-exec story:
+user-defined environments, a quit that stops only a daemon the desktop started,
+and the Windows verification that closes the portability split 0.4.3 left open —
+including two test assertions and a `local:wsl` argv shape that had been wrong
+since the environments landed, none of which was visible from macOS.
+
 ### Added
 - **User-defined local environments** (`~/.agent2ssh/environments.toml`): a person can now define their own `local:<id>` terminal environments — a built-in base (`default`, `pwsh`, `cmd`, `gitbash`, `vs`, `wsl`) plus a working directory, process environment variables and a one-line prelude. They resolve through the same `resolve_plan_for_host` as the built-ins, so one-shot `/local-exec` and `/resident-sessions` both support them, and scope, approval host patterns and audit name them by host id with no new route, MCP tool or protocol field. Because the prelude and variables run before the command and are invisible to the risk classifier, the registry is loaded once per daemon start and never hot-reloaded, a definition is validated on its own (a bad one is refused by name with its reason, never run as a plain shell), and a bash-readable prelude is classified at load with `high`/`blocked` rejected. The classifier is skipped for `pwsh`/`cmd`/`vs` bases, where it answers about the wrong language. `env` on a `wsl` base is rejected because `wsl.exe` does not forward its environment into the distribution.
 - **A local exec in a shell the risk classifier cannot read now says so**: `classify_risk` parses bash, and a `local:cmd`, `local:pwsh` or `local:vs` target interprets a different language, where the same classifier is wrong in both directions — measured, `Remove-Item -Recurse -Force C:\Users\me\Documents` and `del /s /q C:\Windows\System32` come back `low`, while the harmless `$env:FOO = 'bar'` comes back `high`. Every local exec result and audit entry now carries `risk_unclassified: true` for those environments, `agent2ssh risk --host local:cmd` explains it instead of printing the number alone, and the approval card states that the level may understate the risk. The field is omitted when false, so a classified result — every SSH exec, plus `local:gitbash` and `local:wsl` — serializes byte-identically to before. This is deliberately **reporting only**: the risk level, approval policy, execution gate and limits all still act on the bash verdict, so who may run what has not changed. Making it fail-closed is a separate decision with its own migration cost.
