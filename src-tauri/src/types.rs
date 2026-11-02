@@ -638,8 +638,18 @@ pub struct AuditEntry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditDecision {
-    /// A human approved the command in the approval queue.
+    /// A human approved the command in the approval queue, as requested.
     Approved,
+    /// A human approved a *different* command than the one requested.
+    ///
+    /// Kept separate from `Approved` because the two say different things about
+    /// the reviewer. `original_command` already records what was asked for, but
+    /// with `Approved` beside it the entry reads as "a person approved this", and
+    /// what happened is that a person substituted it. The check that allowed the
+    /// substitution compares risk *levels*, so an edit can change what the command
+    /// does without changing how it ranks — which makes the distinction the part
+    /// worth recording, not the flags.
+    ApprovedRewritten,
     /// A human rejected the command in the approval queue.
     Rejected,
     /// The approval request expired with no answer.

@@ -34,6 +34,7 @@ const RESULT_DOT: Record<"ok" | "fail" | "none", string> = {
 
 const DECISION_LABEL: Record<AuditDecision, string> = {
   approved: "Approved",
+  approved_rewritten: "Approved (edited)",
   rejected: "Rejected",
   timed_out: "Timed out",
   auto_allowed: "Auto-allowed",
@@ -42,6 +43,9 @@ const DECISION_LABEL: Record<AuditDecision, string> = {
 
 const DECISION_VARIANT: Record<AuditDecision, NonNullable<BadgeProps["variant"]>> = {
   approved: "success",
+  // Same colour as a plain approval: it ran, a person allowed it. The label
+  // carries the difference, which is what a reviewer scanning the column needs.
+  approved_rewritten: "success",
   rejected: "destructive",
   timed_out: "warning",
   auto_allowed: "secondary",

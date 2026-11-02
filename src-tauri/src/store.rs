@@ -838,8 +838,18 @@ pub fn append_audit_with_decision(
         None if result.exit_code.is_some() => {
             match take_human_approval(&result.host, &result.command) {
                 Some(original) => {
+                    // A waiting approval that carried the requested command means
+                    // the approver edited it into something else. Recording that as
+                    // plain `Approved` would read as "a person approved this", when
+                    // what happened is that a person replaced it.
+                    let rewritten = original.is_some();
                     original_command = original.map(|command| redact_sensitive_text(&command));
-                    (Some(AuditDecision::Approved), Some("human".to_string()))
+                    let decision = if rewritten {
+                        AuditDecision::ApprovedRewritten
+                    } else {
+                        AuditDecision::Approved
+                    };
+                    (Some(decision), Some("human".to_string()))
                 }
                 None => (Some(AuditDecision::AutoAllowed), Some("rule".to_string())),
             }

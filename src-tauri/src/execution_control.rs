@@ -737,11 +737,36 @@ mod tests {
         })
         .unwrap();
         assert_eq!(entries[0].command, "ls /tmp/build");
-        assert_eq!(entries[0].decision, Some(AuditDecision::Approved));
+        // `ApprovedRewritten`, not `Approved`: a person replaced the command
+        // rather than approving the one that was asked for, and the entry has to
+        // say which — the rewrite check compares risk *levels*, so an edit can
+        // change what the command does while ranking the same.
+        assert_eq!(entries[0].decision, Some(AuditDecision::ApprovedRewritten));
         assert_eq!(
             entries[0].original_command.as_deref(),
             Some("rm -rf /tmp/build")
         );
+
+        // An approval that kept the command is still plain `Approved`: the two
+        // decisions have to stay distinguishable, or the new one says nothing.
+        let unchanged = ExecResult {
+            host: "web".into(),
+            command: "uptime".into(),
+            exit_code: Some(0),
+            risk_level: RiskLevel::Low,
+            ..ran.clone()
+        };
+        crate::store::note_human_approval("web", "uptime");
+        append_audit_with_decision(&unchanged, RiskLevel::Low, None, None, Some("mcp"), None)
+            .unwrap();
+        let entries = crate::store::list_audit_raw(&crate::types::AuditFilter {
+            limit: 5,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(entries[0].command, "uptime");
+        assert_eq!(entries[0].decision, Some(AuditDecision::Approved));
+        assert_eq!(entries[0].original_command, None);
 
         // A rewrite that is riskier than the request is refused here too, even
         // if a handler let it through.

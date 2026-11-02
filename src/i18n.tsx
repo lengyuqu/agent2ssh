@@ -703,6 +703,7 @@ export const zh: Record<string, string> = {
   "Approvals": "审批",
   "pending": "待处理",
   "approved": "已批准",
+  "Approved (edited)": "已批准（已改写）",
   "rejected": "已拒绝",
   "timed_out": "已超时",
   // V2-3: audit visualization charts

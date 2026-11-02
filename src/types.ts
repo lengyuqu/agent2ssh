@@ -438,7 +438,14 @@ export type AuditFilter = {
 };
 
 // Rust: types.rs — AuditDecision (rename_all = "snake_case")
-export type AuditDecision = "approved" | "rejected" | "timed_out" | "auto_allowed" | "blocked";
+export type AuditDecision =
+  | "approved"
+  /** A human approved a different command than the one requested. */
+  | "approved_rewritten"
+  | "rejected"
+  | "timed_out"
+  | "auto_allowed"
+  | "blocked";
 
 // Rust: types.rs — AuditEntry
 // id is uuid::Uuid; ts is DateTime<Utc> (ISO-8601 string).
