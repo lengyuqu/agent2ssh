@@ -5349,6 +5349,381 @@ async fn serve_console() -> axum::response::Html<&'static str> {
     axum::response::Html(include_str!("../../web/console.html"))
 }
 
+// ── Main ─────────────────────────────────────────────────────────────────────
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    std::env::set_var("AGENT2SSH_APPROVAL_PERSIST", "1");
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    // ── P9-1: Initialize structured logging ──────────────────────────────────
+    let log_level = std::env::var("AGENT2SSH_LOG").unwrap_or_else(|_| "info".to_string());
+    let log_format = std::env::var("AGENT2SSH_LOG_FORMAT").unwrap_or_else(|_| "text".to_string());
+
+    let env_filter = tracing_subscriber::EnvFilter::try_new(&log_level)
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
+    // Record panics to app.log so a daemon thread crash is observable even when
+    // stdout/stderr are not being captured (e.g. standalone runs).
+    agent2ssh::install_panic_hook("daemon");
+
+    // K1: migrate any legacy plaintext passwords into the app-managed encrypted store (no-op once clean).
+    if let Err(e) = agent2ssh::migrate_plaintext_secrets() {
+        eprintln!("warning: secret migration skipped: {e}");
+    }
+
+    // K6: PTY sessions, port forwards, and in-flight SFTP transfers are
+    // process-local — a daemon restart drops them. Make that explicit at startup
+    // so operators (and the desktop reconnect logic) know prior sessions/forwards
+    // must be re-opened rather than silently assumed alive.
+    let _ = agent2ssh::append_diagnostic_log(
+        "info",
+        "daemon_startup",
+        "PTY sessions, port forwards, and in-flight SFTP transfers do not survive a daemon restart; re-open as needed",
+        None,
+    );
+
+    // Forward error-level diagnostics to the notify webhook (opt-in: only fires
+    // when "diagnostic_error" is in the configured webhook events). Spawned onto
+    // the tokio runtime; skipped if called from a non-runtime thread.
+    agent2ssh::set_error_sink(|entry| {
+        // 1) Per-error webhook (opt-in via the "diagnostic_error" event).
+        let evt = WebhookEvent {
+            event: "diagnostic_error".into(),
+            host: entry.component.clone(),
+            command: entry.message.clone(),
+            approval_id: None,
+            risk_level: None,
+            exit_code: None,
+        };
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let _ = fire_webhook(evt).await;
+            });
+        }
+
+        // Aggregate diagnostic-error anomaly detection is handled in the shared
+        // append path so CLI/MCP/Tauri/daemon writes all feed the same app.log
+        // window. The sink only handles daemon-owned per-error delivery.
+    });
+
+    let registry = tracing_subscriber::registry()
+        .with(env_filter)
+        .with(DiagnosticBridgeLayer::from_env());
+
+    // `try_init` instead of `init`: if a global subscriber is somehow already
+    // installed (e.g. a future in-process re-init), make that explicit via a
+    // diagnostic rather than panicking or silently swallowing it. (H9)
+    let trace_init = match log_format.as_str() {
+        "json" => registry
+            .with(tracing_subscriber::fmt::layer().json())
+            .try_init(),
+        _ => registry.with(tracing_subscriber::fmt::layer()).try_init(),
+    };
+    if let Err(err) = trace_init {
+        let _ = agent2ssh::append_diagnostic_log(
+            "warn",
+            "daemon",
+            "tracing subscriber already initialized; keeping the existing global subscriber",
+            Some(serde_json::json!({ "error": err.to_string() })),
+        );
+    }
+    install_hangup_handler();
+
+    // User-defined local environments are read here, once, and not again for the
+    // life of this process (see `local_environments`): an edit to the file
+    // becomes effective only by restarting the daemon, which a request cannot do.
+    // Problems are logged now so a bad definition is seen before an agent hits it.
+    let custom_environments = agent2ssh::local_environments::reload();
+    if !custom_environments.is_empty() {
+        tracing::info!(
+            environments = %custom_environments.ids().join(", "),
+            "loaded user-defined local environments"
+        );
+    }
+    for problem in custom_environments.problems() {
+        tracing::warn!("{problem}");
+    }
+
+    // Periodic approval cleanup: drop entries older than the retention window
+    // (default 30 days) and compact the JSONL file. Runs every hour. Failures
+    // are logged but never abort the daemon. The first run happens 1 minute
+    // after startup so a busy startup isn't immediately hit by file compaction.
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        loop {
+            if let Err(e) = agent2ssh::cleanup_expired_approvals() {
+                let _ = agent2ssh::append_diagnostic_log(
+                    "warn",
+                    "daemon",
+                    "periodic approval cleanup failed",
+                    Some(serde_json::json!({ "error": e.to_string() })),
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+        }
+    });
+
+    // Resident environment sessions: reclaim shells no one has commanded for
+    // longer than the idle TTL (AGENT2SSH_RESIDENT_IDLE_TTL_SECS). A cheap
+    // sweep — sessions store their own last-active time; closing one kills
+    // its process group.
+    tokio::spawn(async {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            let reclaimed = agent2ssh::resident_session::reap_idle_sessions().await;
+            if reclaimed > 0 {
+                let _ = agent2ssh::append_diagnostic_log(
+                    "info",
+                    "resident_session",
+                    "reclaimed idle resident sessions",
+                    Some(serde_json::json!({ "count": reclaimed })),
+                );
+            }
+        }
+    });
+
+    // Set the transport to Headless — the daemon serves via HTTP/SSE/WS.
+    let _ = agent2ssh::set_host(agent2ssh::Host::Headless {
+        sink: std::sync::Arc::new(|_event, _payload| true),
+    });
+
+    // Record start time for uptime calculation
+    START_TIME.get_or_init(Instant::now);
+
+    // Listen address is configurable (H8) via AGENT2SSH_DAEMON_ADDR, resolved by
+    // the shared core helper so clients (CLI/MCP/Tauri) dial the same place (I1);
+    // default stays loopback so the daemon is not exposed unless an operator opts
+    // in. Useful for port conflicts or running multiple instances.
+    let addr = agent2ssh::local_daemon_addr();
+    let addr = addr.as_str();
+    if !agent2ssh::is_loopback_addr(addr) {
+        // Binding beyond loopback exposes the control plane to the network; the
+        // bearer-token auth still applies, but make the exposure loud.
+        let _ = agent2ssh::append_diagnostic_log(
+            "warn",
+            "daemon",
+            "daemon bound to a non-loopback address; control plane is reachable off-host",
+            Some(serde_json::json!({ "addr": addr })),
+        );
+    }
+    let config_dir = config_dir()?;
+    std::fs::create_dir_all(&config_dir)?;
+
+    // Token
+    let token = load_or_create_daemon_token(&config_dir)?;
+
+    // PID
+    let pid_path = config_dir.join("daemon.pid");
+    std::fs::write(&pid_path, std::process::id().to_string())?;
+
+    let limits = load_execution_limits()?;
+    // T2-16: Initialize the global prompt waiter for 2FA/OTP keyboard-interactive prompts
+    let prompt_waiter = agent2ssh::prompt_waiter::PromptWaiter::new();
+    agent2ssh::embedded_ssh::set_prompt_waiter(prompt_waiter.clone());
+    let state = AppState {
+        token: token.clone(),
+        limiter: Arc::new(Mutex::new(ExecutionLimiter::new(limits))),
+        session_input_buffers: Arc::new(Mutex::new(HashMap::new())),
+        terminal_inputs: Arc::new(Mutex::new(HashMap::new())),
+        shutdown: agent2ssh::ws_drain::ShutdownToken::new(),
+        drain_registry: agent2ssh::ws_drain::DrainRegistry::new(),
+        prompt_waiter,
+    };
+
+    // T2-15: Clone shutdown token & drain registry before state is moved into axum Router
+    let shutdown_clone = state.shutdown.clone();
+    let drain_registry = state.drain_registry.clone();
+
+    // Only the desktop webview and local dev servers have a reason to call the
+    // daemon cross-origin; the bundled /console page is same-origin. Every route
+    // still needs a bearer token, so this narrows exposure rather than gating it.
+    let cors = CorsLayer::new()
+        .allow_origin(AllowOrigin::predicate(|origin, _| {
+            origin.to_str().is_ok_and(is_trusted_cors_origin)
+        }))
+        .allow_methods(Any)
+        .allow_headers(Any);
+
+    let app = Router::new()
+        .route(
+            "/",
+            get(|| async { axum::response::Redirect::to("/console") }),
+        )
+        .route("/console", get(serve_console))
+        .route("/health", get(health))
+        .route("/metrics", get(metrics))
+        .route("/metrics/trend", get(metrics_trend))
+        .route("/gate", get(gate_status))
+        .route("/gate/pause", post(gate_pause))
+        .route("/gate/resume", post(gate_resume))
+        .route("/hosts", get(list_hosts).post(add_host))
+        .route("/hosts/import", post(import_config))
+        .route("/hosts/:name", delete(remove_host))
+        .route("/hosts/:name/policy", get(host_policy))
+        .route("/snippets", get(list_snippets).post(save_snippet))
+        .route("/snippets/:name", delete(delete_snippet))
+        .route(
+            "/redact/rules",
+            get(redact_rules_list).post(redact_rules_add),
+        )
+        .route("/redact/rules/update", post(redact_rules_update))
+        .route("/redact/rules/delete", post(redact_rules_delete))
+        .route("/redact/rules/reset", post(redact_rules_reset))
+        .route(
+            "/highlight/rules",
+            get(highlight_rules_list).post(highlight_rules_add),
+        )
+        .route("/highlight/rules/update", post(highlight_rules_update))
+        .route("/highlight/rules/delete", post(highlight_rules_delete))
+        .route("/highlight/rules/reset", post(highlight_rules_reset))
+        .route(
+            "/algo/prefs",
+            get(algo_prefs_get)
+                .put(algo_prefs_set)
+                .delete(algo_prefs_clear),
+        )
+        .route("/ping", post(ping))
+        .route("/exec", post(exec))
+        .route("/local-exec", post(local_exec))
+        .route("/exec-multi", post(exec_multi))
+        .route("/exec/compare", post(exec_compare))
+        .route("/exec/stream", get(exec_stream))
+        .route("/terminal", get(terminal_attach))
+        .route(
+            "/terminal/broadcast/preview",
+            post(terminal_broadcast_preview),
+        )
+        .route("/terminal/broadcast", post(terminal_broadcast_run))
+        .route(
+            "/recordings/config",
+            get(recordings_config_get).put(recordings_config_put),
+        )
+        .route("/recordings", get(recordings_list))
+        .route(
+            "/recordings/:id",
+            get(recordings_read).delete(recordings_delete),
+        )
+        .route("/audit", get(audit))
+        .route("/audit/export", get(audit_export))
+        .route("/sftp/upload", post(sftp_upload))
+        .route("/sftp/download", post(sftp_download))
+        .route("/sftp/ls", post(sftp_ls))
+        .route("/sftp/stat", post(sftp_stat))
+        .route("/sftp/mkdir", post(sftp_mkdir))
+        .route("/sftp/rename", post(sftp_rename))
+        .route("/sftp/rm", post(sftp_rm))
+        .route("/sftp/rmdir", post(sftp_rmdir))
+        .route("/sftp/rm-rf", post(sftp_rm_rf))
+        .route("/sftp/rm-rf/authorize", post(sftp_rm_rf_authorize))
+        .route("/shutdown", post(daemon_shutdown))
+        .route("/sessions", post(session_open).get(session_list))
+        .route("/sessions/:id/write", post(session_write))
+        .route("/sessions/:id/read", get(session_read))
+        .route("/sessions/:id", delete(session_close))
+        .route(
+            "/resident-sessions",
+            post(resident_session_open).get(resident_session_list),
+        )
+        .route("/resident-sessions/:id/exec", post(resident_session_exec))
+        .route(
+            "/resident-sessions/:id",
+            get(resident_session_get).delete(resident_session_close),
+        )
+        .route("/forwards", post(forward_add).get(forward_list))
+        .route("/forwards/multi", post(forward_add_multi))
+        .route("/forwards/:id", delete(forward_remove))
+        .route("/forwards/:id/stop", post(forward_stop))
+        .route("/forwards/:id/start", post(forward_start))
+        .route("/approvals", get(approvals_list))
+        .route("/approvals/:id/approve", post(approval_approve))
+        .route("/approvals/:id/reject", post(approval_reject))
+        .route("/approval/:id/respond", post(approval_respond_generic))
+        .route("/approval/policies", get(list_policies).put(put_policies))
+        .route("/approval/check", post(approval_check))
+        .route("/risk/check", post(risk_check))
+        .route("/exec/preview", post(exec_preview))
+        .route("/connections", get(connection_status))
+        .route("/connections/:host/connect", post(ssh_connect))
+        .route("/connections/:host/disconnect", post(ssh_disconnect))
+        .route("/playbooks", get(list_playbooks))
+        .route("/playbooks/run", post(run_playbook))
+        .route("/playbooks/:name/dry-run", post(dry_run_playbook_handler))
+        .route("/daemons", get(list_daemons))
+        .route("/daemons/view", get(daemons_view))
+        .route("/daemons/:alias/exec", post(proxy_exec))
+        .route("/diagnostics", get(diagnose_all))
+        .route("/diagnostics/:alias", get(diagnose_alias))
+        .route("/version-check/:alias", get(version_check_alias))
+        .route("/config/export", get(config_export))
+        .route("/config/import", post(config_import))
+        .route("/config/import/preview", post(config_import_preview))
+        .route(
+            "/webhook/config",
+            get(get_webhook_config).put(set_webhook_config),
+        )
+        .route(
+            "/health-snapshot",
+            get(get_health_snapshot).post(post_health_snapshot),
+        )
+        .route("/events/stream", get(events_stream))
+        .route("/ssh-sync/diff", get(ssh_sync_diff))
+        .route("/ssh-sync/export", post(ssh_sync_export_handler))
+        .route("/webdav/status", get(webdav_sync_status_handler))
+        // T2-16: Prompt waiter endpoints for 2FA/OTP responses
+        .route("/prompts/pending", get(get_pending_prompts))
+        .route("/prompts/respond", post(post_respond_prompt))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ))
+        .layer(axum::middleware::from_fn(trace_id_middleware))
+        .layer(cors)
+        .with_state(state);
+
+    tracing::info!(addr = %addr, "Agent2SSH daemon listening");
+    tracing::info!(url = %format!("http://{addr}/console"), "Web console available");
+    let _ = append_diagnostic_log(
+        "info",
+        "daemon",
+        "daemon listening",
+        Some(serde_json::json!({
+            "addr": addr,
+            "pid": std::process::id(),
+            "console_url": format!("http://{addr}/console"),
+        })),
+    );
+    let listener = TcpListener::bind(addr).await?;
+    // T2-15: Graceful shutdown with WS drain: on Ctrl-C / SIGTERM,
+    // 1. Stop accepting new HTTP connections (axum graceful shutdown)
+    // 2. Broadcast shutdown to all active WS handlers (ShutdownToken)
+    // 3. WS handlers drain pending messages, then send Close frames
+    // 4. DrainRegistry waits for all connections to finish draining
+    // 5. PID file cleaned up
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal(shutdown_clone))
+        .await?;
+
+    // T2-15: Wait for active WS connections to drain (max 5 seconds)
+    let drained = drain_registry
+        .drain_all(std::time::Duration::from_secs(5))
+        .await;
+    if drained > 0 {
+        tracing::info!("drained {} WS connections", drained);
+    }
+
+    let _ = std::fs::remove_file(&pid_path);
+    let _ = append_diagnostic_log(
+        "info",
+        "daemon",
+        "daemon shut down; pid file removed",
+        Some(serde_json::json!({ "pid": std::process::id() })),
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -5837,379 +6212,4 @@ denied_commands = ["rm *"]
             })
         });
     }
-}
-
-// ── Main ─────────────────────────────────────────────────────────────────────
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    std::env::set_var("AGENT2SSH_APPROVAL_PERSIST", "1");
-    use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::util::SubscriberInitExt;
-
-    // ── P9-1: Initialize structured logging ──────────────────────────────────
-    let log_level = std::env::var("AGENT2SSH_LOG").unwrap_or_else(|_| "info".to_string());
-    let log_format = std::env::var("AGENT2SSH_LOG_FORMAT").unwrap_or_else(|_| "text".to_string());
-
-    let env_filter = tracing_subscriber::EnvFilter::try_new(&log_level)
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-
-    // Record panics to app.log so a daemon thread crash is observable even when
-    // stdout/stderr are not being captured (e.g. standalone runs).
-    agent2ssh::install_panic_hook("daemon");
-
-    // K1: migrate any legacy plaintext passwords into the app-managed encrypted store (no-op once clean).
-    if let Err(e) = agent2ssh::migrate_plaintext_secrets() {
-        eprintln!("warning: secret migration skipped: {e}");
-    }
-
-    // K6: PTY sessions, port forwards, and in-flight SFTP transfers are
-    // process-local — a daemon restart drops them. Make that explicit at startup
-    // so operators (and the desktop reconnect logic) know prior sessions/forwards
-    // must be re-opened rather than silently assumed alive.
-    let _ = agent2ssh::append_diagnostic_log(
-        "info",
-        "daemon_startup",
-        "PTY sessions, port forwards, and in-flight SFTP transfers do not survive a daemon restart; re-open as needed",
-        None,
-    );
-
-    // Forward error-level diagnostics to the notify webhook (opt-in: only fires
-    // when "diagnostic_error" is in the configured webhook events). Spawned onto
-    // the tokio runtime; skipped if called from a non-runtime thread.
-    agent2ssh::set_error_sink(|entry| {
-        // 1) Per-error webhook (opt-in via the "diagnostic_error" event).
-        let evt = WebhookEvent {
-            event: "diagnostic_error".into(),
-            host: entry.component.clone(),
-            command: entry.message.clone(),
-            approval_id: None,
-            risk_level: None,
-            exit_code: None,
-        };
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move {
-                let _ = fire_webhook(evt).await;
-            });
-        }
-
-        // Aggregate diagnostic-error anomaly detection is handled in the shared
-        // append path so CLI/MCP/Tauri/daemon writes all feed the same app.log
-        // window. The sink only handles daemon-owned per-error delivery.
-    });
-
-    let registry = tracing_subscriber::registry()
-        .with(env_filter)
-        .with(DiagnosticBridgeLayer::from_env());
-
-    // `try_init` instead of `init`: if a global subscriber is somehow already
-    // installed (e.g. a future in-process re-init), make that explicit via a
-    // diagnostic rather than panicking or silently swallowing it. (H9)
-    let trace_init = match log_format.as_str() {
-        "json" => registry
-            .with(tracing_subscriber::fmt::layer().json())
-            .try_init(),
-        _ => registry.with(tracing_subscriber::fmt::layer()).try_init(),
-    };
-    if let Err(err) = trace_init {
-        let _ = agent2ssh::append_diagnostic_log(
-            "warn",
-            "daemon",
-            "tracing subscriber already initialized; keeping the existing global subscriber",
-            Some(serde_json::json!({ "error": err.to_string() })),
-        );
-    }
-    install_hangup_handler();
-
-    // User-defined local environments are read here, once, and not again for the
-    // life of this process (see `local_environments`): an edit to the file
-    // becomes effective only by restarting the daemon, which a request cannot do.
-    // Problems are logged now so a bad definition is seen before an agent hits it.
-    let custom_environments = agent2ssh::local_environments::reload();
-    if !custom_environments.is_empty() {
-        tracing::info!(
-            environments = %custom_environments.ids().join(", "),
-            "loaded user-defined local environments"
-        );
-    }
-    for problem in custom_environments.problems() {
-        tracing::warn!("{problem}");
-    }
-
-    // Periodic approval cleanup: drop entries older than the retention window
-    // (default 30 days) and compact the JSONL file. Runs every hour. Failures
-    // are logged but never abort the daemon. The first run happens 1 minute
-    // after startup so a busy startup isn't immediately hit by file compaction.
-    tokio::spawn(async {
-        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-        loop {
-            if let Err(e) = agent2ssh::cleanup_expired_approvals() {
-                let _ = agent2ssh::append_diagnostic_log(
-                    "warn",
-                    "daemon",
-                    "periodic approval cleanup failed",
-                    Some(serde_json::json!({ "error": e.to_string() })),
-                );
-            }
-            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
-        }
-    });
-
-    // Resident environment sessions: reclaim shells no one has commanded for
-    // longer than the idle TTL (AGENT2SSH_RESIDENT_IDLE_TTL_SECS). A cheap
-    // sweep — sessions store their own last-active time; closing one kills
-    // its process group.
-    tokio::spawn(async {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-        loop {
-            interval.tick().await;
-            let reclaimed = agent2ssh::resident_session::reap_idle_sessions().await;
-            if reclaimed > 0 {
-                let _ = agent2ssh::append_diagnostic_log(
-                    "info",
-                    "resident_session",
-                    "reclaimed idle resident sessions",
-                    Some(serde_json::json!({ "count": reclaimed })),
-                );
-            }
-        }
-    });
-
-    // Set the transport to Headless — the daemon serves via HTTP/SSE/WS.
-    let _ = agent2ssh::set_host(agent2ssh::Host::Headless {
-        sink: std::sync::Arc::new(|_event, _payload| true),
-    });
-
-    // Record start time for uptime calculation
-    START_TIME.get_or_init(Instant::now);
-
-    // Listen address is configurable (H8) via AGENT2SSH_DAEMON_ADDR, resolved by
-    // the shared core helper so clients (CLI/MCP/Tauri) dial the same place (I1);
-    // default stays loopback so the daemon is not exposed unless an operator opts
-    // in. Useful for port conflicts or running multiple instances.
-    let addr = agent2ssh::local_daemon_addr();
-    let addr = addr.as_str();
-    if !agent2ssh::is_loopback_addr(addr) {
-        // Binding beyond loopback exposes the control plane to the network; the
-        // bearer-token auth still applies, but make the exposure loud.
-        let _ = agent2ssh::append_diagnostic_log(
-            "warn",
-            "daemon",
-            "daemon bound to a non-loopback address; control plane is reachable off-host",
-            Some(serde_json::json!({ "addr": addr })),
-        );
-    }
-    let config_dir = config_dir()?;
-    std::fs::create_dir_all(&config_dir)?;
-
-    // Token
-    let token = load_or_create_daemon_token(&config_dir)?;
-
-    // PID
-    let pid_path = config_dir.join("daemon.pid");
-    std::fs::write(&pid_path, std::process::id().to_string())?;
-
-    let limits = load_execution_limits()?;
-    // T2-16: Initialize the global prompt waiter for 2FA/OTP keyboard-interactive prompts
-    let prompt_waiter = agent2ssh::prompt_waiter::PromptWaiter::new();
-    agent2ssh::embedded_ssh::set_prompt_waiter(prompt_waiter.clone());
-    let state = AppState {
-        token: token.clone(),
-        limiter: Arc::new(Mutex::new(ExecutionLimiter::new(limits))),
-        session_input_buffers: Arc::new(Mutex::new(HashMap::new())),
-        terminal_inputs: Arc::new(Mutex::new(HashMap::new())),
-        shutdown: agent2ssh::ws_drain::ShutdownToken::new(),
-        drain_registry: agent2ssh::ws_drain::DrainRegistry::new(),
-        prompt_waiter,
-    };
-
-    // T2-15: Clone shutdown token & drain registry before state is moved into axum Router
-    let shutdown_clone = state.shutdown.clone();
-    let drain_registry = state.drain_registry.clone();
-
-    // Only the desktop webview and local dev servers have a reason to call the
-    // daemon cross-origin; the bundled /console page is same-origin. Every route
-    // still needs a bearer token, so this narrows exposure rather than gating it.
-    let cors = CorsLayer::new()
-        .allow_origin(AllowOrigin::predicate(|origin, _| {
-            origin.to_str().is_ok_and(is_trusted_cors_origin)
-        }))
-        .allow_methods(Any)
-        .allow_headers(Any);
-
-    let app = Router::new()
-        .route(
-            "/",
-            get(|| async { axum::response::Redirect::to("/console") }),
-        )
-        .route("/console", get(serve_console))
-        .route("/health", get(health))
-        .route("/metrics", get(metrics))
-        .route("/metrics/trend", get(metrics_trend))
-        .route("/gate", get(gate_status))
-        .route("/gate/pause", post(gate_pause))
-        .route("/gate/resume", post(gate_resume))
-        .route("/hosts", get(list_hosts).post(add_host))
-        .route("/hosts/import", post(import_config))
-        .route("/hosts/:name", delete(remove_host))
-        .route("/hosts/:name/policy", get(host_policy))
-        .route("/snippets", get(list_snippets).post(save_snippet))
-        .route("/snippets/:name", delete(delete_snippet))
-        .route(
-            "/redact/rules",
-            get(redact_rules_list).post(redact_rules_add),
-        )
-        .route("/redact/rules/update", post(redact_rules_update))
-        .route("/redact/rules/delete", post(redact_rules_delete))
-        .route("/redact/rules/reset", post(redact_rules_reset))
-        .route(
-            "/highlight/rules",
-            get(highlight_rules_list).post(highlight_rules_add),
-        )
-        .route("/highlight/rules/update", post(highlight_rules_update))
-        .route("/highlight/rules/delete", post(highlight_rules_delete))
-        .route("/highlight/rules/reset", post(highlight_rules_reset))
-        .route(
-            "/algo/prefs",
-            get(algo_prefs_get)
-                .put(algo_prefs_set)
-                .delete(algo_prefs_clear),
-        )
-        .route("/ping", post(ping))
-        .route("/exec", post(exec))
-        .route("/local-exec", post(local_exec))
-        .route("/exec-multi", post(exec_multi))
-        .route("/exec/compare", post(exec_compare))
-        .route("/exec/stream", get(exec_stream))
-        .route("/terminal", get(terminal_attach))
-        .route(
-            "/terminal/broadcast/preview",
-            post(terminal_broadcast_preview),
-        )
-        .route("/terminal/broadcast", post(terminal_broadcast_run))
-        .route(
-            "/recordings/config",
-            get(recordings_config_get).put(recordings_config_put),
-        )
-        .route("/recordings", get(recordings_list))
-        .route(
-            "/recordings/:id",
-            get(recordings_read).delete(recordings_delete),
-        )
-        .route("/audit", get(audit))
-        .route("/audit/export", get(audit_export))
-        .route("/sftp/upload", post(sftp_upload))
-        .route("/sftp/download", post(sftp_download))
-        .route("/sftp/ls", post(sftp_ls))
-        .route("/sftp/stat", post(sftp_stat))
-        .route("/sftp/mkdir", post(sftp_mkdir))
-        .route("/sftp/rename", post(sftp_rename))
-        .route("/sftp/rm", post(sftp_rm))
-        .route("/sftp/rmdir", post(sftp_rmdir))
-        .route("/sftp/rm-rf", post(sftp_rm_rf))
-        .route("/sftp/rm-rf/authorize", post(sftp_rm_rf_authorize))
-        .route("/shutdown", post(daemon_shutdown))
-        .route("/sessions", post(session_open).get(session_list))
-        .route("/sessions/:id/write", post(session_write))
-        .route("/sessions/:id/read", get(session_read))
-        .route("/sessions/:id", delete(session_close))
-        .route(
-            "/resident-sessions",
-            post(resident_session_open).get(resident_session_list),
-        )
-        .route("/resident-sessions/:id/exec", post(resident_session_exec))
-        .route(
-            "/resident-sessions/:id",
-            get(resident_session_get).delete(resident_session_close),
-        )
-        .route("/forwards", post(forward_add).get(forward_list))
-        .route("/forwards/multi", post(forward_add_multi))
-        .route("/forwards/:id", delete(forward_remove))
-        .route("/forwards/:id/stop", post(forward_stop))
-        .route("/forwards/:id/start", post(forward_start))
-        .route("/approvals", get(approvals_list))
-        .route("/approvals/:id/approve", post(approval_approve))
-        .route("/approvals/:id/reject", post(approval_reject))
-        .route("/approval/:id/respond", post(approval_respond_generic))
-        .route("/approval/policies", get(list_policies).put(put_policies))
-        .route("/approval/check", post(approval_check))
-        .route("/risk/check", post(risk_check))
-        .route("/exec/preview", post(exec_preview))
-        .route("/connections", get(connection_status))
-        .route("/connections/:host/connect", post(ssh_connect))
-        .route("/connections/:host/disconnect", post(ssh_disconnect))
-        .route("/playbooks", get(list_playbooks))
-        .route("/playbooks/run", post(run_playbook))
-        .route("/playbooks/:name/dry-run", post(dry_run_playbook_handler))
-        .route("/daemons", get(list_daemons))
-        .route("/daemons/view", get(daemons_view))
-        .route("/daemons/:alias/exec", post(proxy_exec))
-        .route("/diagnostics", get(diagnose_all))
-        .route("/diagnostics/:alias", get(diagnose_alias))
-        .route("/version-check/:alias", get(version_check_alias))
-        .route("/config/export", get(config_export))
-        .route("/config/import", post(config_import))
-        .route("/config/import/preview", post(config_import_preview))
-        .route(
-            "/webhook/config",
-            get(get_webhook_config).put(set_webhook_config),
-        )
-        .route(
-            "/health-snapshot",
-            get(get_health_snapshot).post(post_health_snapshot),
-        )
-        .route("/events/stream", get(events_stream))
-        .route("/ssh-sync/diff", get(ssh_sync_diff))
-        .route("/ssh-sync/export", post(ssh_sync_export_handler))
-        .route("/webdav/status", get(webdav_sync_status_handler))
-        // T2-16: Prompt waiter endpoints for 2FA/OTP responses
-        .route("/prompts/pending", get(get_pending_prompts))
-        .route("/prompts/respond", post(post_respond_prompt))
-        .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            auth_middleware,
-        ))
-        .layer(axum::middleware::from_fn(trace_id_middleware))
-        .layer(cors)
-        .with_state(state);
-
-    tracing::info!(addr = %addr, "Agent2SSH daemon listening");
-    tracing::info!(url = %format!("http://{addr}/console"), "Web console available");
-    let _ = append_diagnostic_log(
-        "info",
-        "daemon",
-        "daemon listening",
-        Some(serde_json::json!({
-            "addr": addr,
-            "pid": std::process::id(),
-            "console_url": format!("http://{addr}/console"),
-        })),
-    );
-    let listener = TcpListener::bind(addr).await?;
-    // T2-15: Graceful shutdown with WS drain: on Ctrl-C / SIGTERM,
-    // 1. Stop accepting new HTTP connections (axum graceful shutdown)
-    // 2. Broadcast shutdown to all active WS handlers (ShutdownToken)
-    // 3. WS handlers drain pending messages, then send Close frames
-    // 4. DrainRegistry waits for all connections to finish draining
-    // 5. PID file cleaned up
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal(shutdown_clone))
-        .await?;
-
-    // T2-15: Wait for active WS connections to drain (max 5 seconds)
-    let drained = drain_registry
-        .drain_all(std::time::Duration::from_secs(5))
-        .await;
-    if drained > 0 {
-        tracing::info!("drained {} WS connections", drained);
-    }
-
-    let _ = std::fs::remove_file(&pid_path);
-    let _ = append_diagnostic_log(
-        "info",
-        "daemon",
-        "daemon shut down; pid file removed",
-        Some(serde_json::json!({ "pid": std::process::id() })),
-    );
-    Ok(())
 }
