@@ -862,6 +862,12 @@ mod tests {
         );
     }
 
+    /// A scratch directory for a test that needs a real file on disk.
+    ///
+    /// `unix` only, because both of its users are: they drive a fake `container`
+    /// script through `unix` file permissions, and Apple's runtime is the only
+    /// service-backed one.
+    #[cfg(unix)]
     fn tempfile_dir(label: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("agent2ssh-{label}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();

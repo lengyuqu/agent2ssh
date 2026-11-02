@@ -414,6 +414,12 @@ fn decode_safe_storage(payload: &[u8], service: &str) -> Result<Vec<u8>> {
 /// PBKDF2-HMAC-SHA1, the derivation Chromium fixes for its OSCrypt key. ~20
 /// lines over `hmac` beats adding a KDF crate whose digest major would have to
 /// agree with ours.
+///
+/// `unix` or `test`, because those are its only users: macOS and Linux derive
+/// their OSCrypt key this way, while Windows hands the payload to DPAPI and
+/// never derives anything. The tests call it directly to pin the RFC 6070
+/// vectors, which is the one reason it is still compiled on Windows.
+#[cfg(any(unix, test))]
 fn pbkdf2_hmac_sha1(password: &[u8], salt: &[u8], iterations: u32, output: &mut [u8]) {
     use hmac::{Hmac, Mac};
     use sha1::Sha1;
@@ -623,7 +629,9 @@ fn dpapi_unprotect(blob: &[u8]) -> Result<Vec<u8>> {
     use windows_sys::Win32::Security::Cryptography::{CryptUnprotectData, CRYPT_INTEGER_BLOB};
     use windows_sys::Win32::System::Memory::LocalFree;
 
-    let mut input = CRYPT_INTEGER_BLOB {
+    // Not `mut`: the API takes this blob by `*const`, so only the cast to the
+    // struct's `*mut u8` field type is needed, not a mutable binding.
+    let input = CRYPT_INTEGER_BLOB {
         cbData: blob.len() as u32,
         pbData: blob.as_ptr() as *mut u8,
     };
