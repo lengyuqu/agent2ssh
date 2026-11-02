@@ -378,6 +378,15 @@ struct Inner {
     settings: Arc<channel::Settings>,
     host_key: Arc<Mutex<Option<CapturedKey>>>,
     banner: Arc<Mutex<Option<String>>>,
+    /// Set when RSA authentication fell back to the SHA-1 `ssh-rsa` signature.
+    ///
+    /// Kept on the connection because that is where it is discovered: the server
+    /// refused a SHA-2 signature, or advertised no SHA-2 algorithm at all, and the
+    /// retry with `None` succeeded. The fact has to survive to the caller, which is
+    /// the only layer that knows the host name and can write it somewhere a person
+    /// will look — otherwise the fallback is silent and an operator cannot find out
+    /// which hosts still demand a signature OpenSSH has refused since 8.8.
+    legacy_sha1_signature: AtomicBool,
     authenticated: AtomicBool,
     pending: Mutex<Pending>,
     forwards: Arc<forward::Registry>,
@@ -403,6 +412,7 @@ impl Session {
                 settings,
                 host_key: Arc::new(Mutex::new(None)),
                 banner: Arc::new(Mutex::new(None)),
+                legacy_sha1_signature: AtomicBool::new(false),
                 authenticated: AtomicBool::new(false),
                 pending: Mutex::new(Pending::default()),
                 handle: tokio::sync::Mutex::new(None),
@@ -665,6 +675,14 @@ impl Session {
             let signer = russh::keys::PrivateKeyWithHashAlg::new(key.clone(), hash_alg);
             let first = handle.authenticate_publickey(username, signer).await?;
             if first.success() || !key.algorithm().is_rsa() || hash_alg.is_none() {
+                // `hash_alg.is_none()` on a successful RSA auth means the server
+                // advertised no SHA-2 algorithm, so this connection went out with
+                // the legacy signature rather than being downgraded to it.
+                if first.success() && hash_alg.is_none() {
+                    self.inner
+                        .legacy_sha1_signature
+                        .store(true, Ordering::Relaxed);
+                }
                 return Ok(first);
             }
             // A server old enough that `server-sig-algs` lists only `ssh-rsa`,
@@ -672,7 +690,16 @@ impl Session {
             // attempt. One legacy retry is what a pre-7.2 server needs, and it
             // is attempted only after the modern signature was refused.
             let signer = russh::keys::PrivateKeyWithHashAlg::new(key.clone(), None);
-            Ok(handle.authenticate_publickey(username, signer).await?)
+            let retried = handle.authenticate_publickey(username, signer).await?;
+            // Only when the fallback is what succeeded: the first attempt was
+            // already recorded as clean, and a second failure leaves nothing to
+            // report.
+            if retried.success() {
+                self.inner
+                    .legacy_sha1_signature
+                    .store(true, Ordering::Relaxed);
+            }
+            Ok(retried)
         })?;
 
         Self::auth_result(result, &self.inner.authenticated)
@@ -764,6 +791,15 @@ impl Session {
 
     pub fn banner(&self) -> Option<String> {
         self.inner.banner.lock().unwrap().clone()
+    }
+
+    /// Whether this connection authenticated with the legacy SHA-1 `ssh-rsa`
+    /// signature. Reported once, by the layer that knows the host name.
+    ///
+    /// False covers both "SHA-2 worked" and "no RSA key was used", which are the
+    /// same thing to a caller deciding whether to warn.
+    pub fn used_legacy_sha1_signature(&self) -> bool {
+        self.inner.legacy_sha1_signature.load(Ordering::Relaxed)
     }
 
     pub fn host_key(&self) -> Option<(Vec<u8>, HostKeyKind)> {

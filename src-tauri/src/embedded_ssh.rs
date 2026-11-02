@@ -1730,6 +1730,12 @@ fn authenticate(
                 if let Some(pw) = passphrase {
                     passphrase_cache_set(&cache_key, &pw);
                 }
+                // The transport retries SHA-1 internally and says so afterwards;
+                // this is the first of the two places the fact reaches a caller
+                // that knows the host name.
+                if session.used_legacy_sha1_signature() {
+                    note_legacy_sha1_signature(host, "transport fallback");
+                }
                 return Ok("publickey_file".into());
             }
             Err(e) => {
@@ -1750,6 +1756,10 @@ fn authenticate(
                     if let Some(pw) = passphrase {
                         passphrase_cache_set(&cache_key, &pw);
                     }
+                    // The second way a connection lands on SHA-1: this layer
+                    // forced `ssh-rsa` with `method_pref` after the modern
+                    // signature was refused.
+                    note_legacy_sha1_signature(host, "legacy retry");
                     return Ok("publickey_file".into());
                 }
                 passphrase_cache_evict(&cache_key);
@@ -1856,6 +1866,11 @@ fn is_publickey_refused(error: &Error) -> bool {
 /// Retry public-key authentication with `ssh-rsa` (RSA over SHA-1) as the
 /// signature algorithm. Returns whether it authenticated. Harmless for non-RSA
 /// keys, which ignore the preference.
+///
+/// A `true` here is the second way a connection can end up on SHA-1, and the
+/// caller records it for the same reason it records the transport's own
+/// fallback: an operator who cannot find out which hosts still demand `ssh-rsa`
+/// cannot plan an upgrade.
 fn retry_with_legacy_rsa_signature(
     session: &Session,
     username: &str,
@@ -1873,6 +1888,25 @@ fn retry_with_legacy_rsa_signature(
         .userauth_pubkey_file(username, pubkey, private_key, passphrase)
         .is_ok()
         && session.authenticated()
+}
+
+/// Record that `host` authenticated with the legacy SHA-1 `ssh-rsa` signature.
+///
+/// Written at `warn` and once per connection: the signature works, so this is not
+/// an error, but OpenSSH has refused SHA-1 by default since 8.8 and an operator
+/// needs to know which hosts still require it before tightening anything.
+fn note_legacy_sha1_signature(host: &HostProfile, how: &str) {
+    let _ = crate::diagnostics::append_diagnostic_log(
+        "warn",
+        "embedded_ssh",
+        "ssh authenticated with the legacy ssh-rsa (SHA-1) signature",
+        Some(serde_json::json!({
+            "host": host.name,
+            "address": format_host_port(&host.host, host.port.unwrap_or(22)),
+            "signature": "ssh-rsa",
+            "detected_by": how,
+        })),
+    );
 }
 
 /// `<key>-cert.pub`, the file name `ssh-keygen -s` writes and OpenSSH looks for.
@@ -2037,6 +2071,15 @@ fn run_terminal(
 mod tests {
     use super::*;
     use crate::store::CONFIG_DIR_ENV;
+    /// A fresh connection has not used the legacy signature, and asking does not
+    /// change that. The negative case matters more than the positive one: a flag
+    /// that defaulted to true would put a warning on every connection and be
+    /// trained away by the reader within a day.
+    #[test]
+    fn a_new_connection_has_not_used_the_legacy_signature() {
+        let session = Session::new().expect("a session needs no connection to exist");
+        assert!(!session.used_legacy_sha1_signature());
+    }
 
     #[test]
     fn a_user_certificate_is_found_next_to_its_key_by_the_openssh_name() {

@@ -1,6 +1,6 @@
 # 已知问题与未覆盖范围
 
-日期：2026-11-03（K1、K6 已修复；K10、K11 均已修复；K12 为上游限制；K13 为设计限制；E1、E2、E5 已解决并按维护约定移入 `CHANGELOG.md`）。基线：macOS 开发机 + WinR9，Docker / wslc / Apple container；GitHub Actions。
+日期：2026-11-03（K1、K4、K6 已修复；K10、K11 均已修复；K12 为上游限制；K13 为设计限制；E1、E2、E5 已解决并按维护约定移入 `CHANGELOG.md`）。基线：macOS 开发机 + WinR9，Docker / wslc / Apple container；GitHub Actions。
 
 本文只记录 **已经知道、尚未解决** 的事项，以及 **没有验证过所以不能下结论** 的范围，按处理价值排序。已修复的问题在 `CHANGELOG.md`；历史缺陷快照在 `DEFECTS.md`（0.2.1 时代，已归档）；Windows 相关的细节在 [reports/WINDOWS-HANDOVER.md](reports/WINDOWS-HANDOVER.md)，此处只列条目。
 
@@ -12,7 +12,6 @@
 |---|------|------|------|---------------|
 | K2 | 待修 | Dropbear 上传的规避靠 banner 里的 "dropbear" 字样 | 其它在 SFTP 上限制写入大小的服务器不会被识别：写入返回 0 字节时能自动减半重试，但像 Dropbear 在 30000 字节写入下"卡死在 128 KiB"那种失败是**挂起**而不是错误，无法兜底。SFTP 写入为什么会停住没有查明（原记录写作 libssh2，现在的传输层是 `russh-sftp`，同一现象尚未在新后端上复测），只测得 16 KiB 写入可行 | `sftp_transfer.rs` `upload_chunk_for_server`。若遇到新的卡死服务器，需要找根因（SFTP 写入流水线与小窗口的交互）或给上传加进度超时 |
 | K3 | 待修 | 证书认证被拒时，错误信息不区分原因 | 证书过期、principal 不匹配、CA 不被信任，客户端都只看到 `the server rejected these credentials`，用户无法判断是证书问题。矩阵只断言了"被拒绝"，没有核对文案 | `transport/russh_impl/mod.rs` `userauth_pubkey_file`（证书分支）。可以在失败时读取证书有效期 / principal，给出提示 |
-| K4 | 待修 | RSA 的 `ssh-rsa`（SHA-1）回退没有任何记录 | 回退到 SHA-1 签名发生时，`app.log` 和审计里都看不出来，事后无法知道哪些主机在用旧签名。迁到 russh 后回退逻辑在传输层内部（`userauth_pubkey_file` 的第二次尝试），同样不打日志 | `transport/russh_impl/mod.rs`：成功时应写一条诊断日志；也可以考虑提供关闭它的开关 |
 | K5 | 待修 | 审批文件只有 daemon 会压缩，且过期条目每次加载都重新过滤 | 只用一次性 CLI、从不启动 daemon 的用户，`approvals.jsonl` 里的过期记录永远不会被清理，文件会一直增长 | `approval.rs`：加载刻意改成只读（避免 CLI 命令截断共享存储），压缩只在 `cleanup_expired_approvals`（daemon 启动后 1 分钟起，每小时一次）。可以在 CLI 提供显式清理命令 |
 | K7 | 限制 | 证书认证只认私钥旁边的 `<key>-cert.pub` | 没有 `cert_path` 之类的主机字段，桌面界面也没有入口；证书不在私钥旁边时无法使用。主机证书（CA 签发的服务器主机密钥）没有做校验 | `embedded_ssh.rs` `user_certificate_for` |
 | K8 | 限制 | `host add --passphrase` 的值会出现在进程参数里 | 与已有的 `--password` 一样，同机其他用户可通过进程列表看到。MCP / daemon 设置口令的路径没有逐个核对 | `bin/agent2ssh.rs`。可以补从环境变量或标准输入读取 |
