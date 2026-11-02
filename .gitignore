@@ -9,6 +9,7 @@ linux-bin/
 .agent2ssh-test.env
 .workbuddy/
 .qoder/
+.claude/
 .tmp-sync/
 demo/
 scripts/extract_git233_token.py
