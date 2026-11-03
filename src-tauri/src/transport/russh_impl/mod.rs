@@ -224,6 +224,81 @@ fn read_certificate(path: &std::path::Path) -> Result<russh::keys::Certificate, 
     })
 }
 
+/// Why a certificate the app holds would be refused, when the server says only
+/// "no".
+///
+/// The server never says which rule a certificate broke — that is deliberate on
+/// its side (an oracle would let an attacker probe the CA policy), and the result
+/// is the message this exists to replace: `the server rejected these credentials`
+/// for an expired certificate, a wrong principal and a CA the server does not
+/// trust alike. The certificate is on *our* disk, so the two local answers are
+/// cheap and exact: an expired certificate and a principal the client did not ask
+/// for are both decidable without a second connection.
+///
+/// The third case — a CA the server does not trust — is what remains when the
+/// certificate is valid and names the right principal, and it is reported as a
+/// possibility rather than a fact, because a revoked serial looks the same from
+/// here.
+fn explain_certificate_refusal(cert: &russh::keys::Certificate, username: &str) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
+    let valid_after = cert.valid_after();
+    let valid_before = cert.valid_before();
+
+    let base = format!("the server rejected the user certificate for '{username}'");
+
+    // Unix seconds are not a message a person can act on: `1577894400` needs a
+    // converter, and the certificate names the same instant in a form everyone
+    // already reads. `None` only when the value is out of range, in which case the
+    // number is still better than nothing.
+    let when = |secs: u64| {
+        chrono::DateTime::<chrono::Utc>::from_timestamp(i64::try_from(secs).unwrap_or(i64::MAX), 0)
+            .map(|moment| moment.to_rfc3339())
+            .unwrap_or_else(|| secs.to_string())
+    };
+
+    if now < valid_after {
+        return format!(
+            "{base}: it is not valid yet (valid from {}). Check the clock on this \
+             machine and on the CA host before signing again.",
+            when(valid_after)
+        );
+    }
+    let never = u64::MAX;
+    if valid_before != never && now > valid_before {
+        return format!(
+            "{base}: it expired at {}. Sign a new one with \
+             'ssh-keygen -s <ca> -I <id> -n {username} -V +1h <key>.pub'.",
+            when(valid_before)
+        );
+    }
+
+    // An empty list means *any* principal, not *none*: `all_principals_valid`
+    // writes the empty set and OpenSSH reads it that way. Treating it as a
+    // mismatch would blame the certificate for what is a CA problem — the exact
+    // confusion this message exists to remove. A test caught it doing so.
+    let principals = cert.valid_principals();
+    let any_principal = principals.is_empty() || principals.iter().any(|p| p == "*");
+    if !any_principal && !principals.iter().any(|principal| principal == username) {
+        return format!(
+            "{base}: the certificate is valid for {principals:?}, not for '{username}'. \
+             Re-sign it with '-n {username}', or connect as one of the listed names."
+        );
+    }
+
+    format!(
+        "{base}, although the certificate is valid and names '{username}'. The most \
+         likely cause is that the server does not trust the CA that signed it: check \
+         TrustedUserCAKeys on the server, and that the certificate is the one signed by \
+         that CA. A revoked serial is refused the same way, so check the KRL if one is \
+         configured."
+    )
+}
+
 /// The RSA signature hash to use for this server.
 ///
 /// `best_supported_rsa_hash` returns `Option<Option<HashAlg>>`, and the two
@@ -660,7 +735,21 @@ impl Session {
                         other(format!("the key could not sign the certificate: {error}"))
                     })
             })?;
-            return Self::auth_result(result, &self.inner.authenticated);
+            // A refusal here is the case K3 exists for: the server says only
+            // "rejected", and the certificate on disk can answer two of the three
+            // reasons — expired, or issued for another user — without asking it
+            // again.
+            return match Self::auth_result(result, &self.inner.authenticated) {
+                // `auth_result` rebuilt the certificate; keep the one already read.
+                Err(error) if error.kind() == ErrorKind::PublicKeyRefused => {
+                    let cert = read_certificate(cert_path)?;
+                    Err(Error::new(
+                        ErrorKind::PublicKeyRefused,
+                        explain_certificate_refusal(&cert, username),
+                    ))
+                }
+                other => other,
+            };
         }
 
         // `authenticate_publickey` takes a `PrivateKeyWithHashAlg`, which is the
@@ -1032,5 +1121,115 @@ fn supported_names(method: MethodType) -> Vec<&'static str> {
         MethodType::MacCs | MethodType::MacSc => MAC.to_vec(),
         MethodType::CompCs | MethodType::CompSc => COMP.to_vec(),
         MethodType::LangCs | MethodType::LangSc | MethodType::SignAlgo => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use russh::keys::ssh_key::certificate::{Builder, CertType};
+    use russh::keys::ssh_key::{private::Ed25519Keypair, PrivateKey};
+
+    /// A certificate naming `principals`, valid between two instants.
+    ///
+    /// Built through the crate the transport already parses with, so the test
+    /// needs no `ssh-keygen` and no fixture. What is asserted is our reading of
+    /// the fields; generating the input some other way would test the generator.
+    fn certificate_for(
+        principals: &[&str],
+        valid_after: u64,
+        valid_before: u64,
+    ) -> russh::keys::Certificate {
+        let ca = key_from_seed(7);
+        let subject = key_from_seed(9);
+        let mut builder = Builder::new(
+            b"nonce-nonce-non".to_vec(),
+            subject.public_key().key_data().clone(),
+            valid_after,
+            valid_before,
+        )
+        .expect("a valid window");
+        builder.cert_type(CertType::User).expect("user cert");
+        builder.key_id("test").expect("key id");
+        for principal in principals {
+            builder.valid_principal(*principal).expect("principal");
+        }
+        builder.sign(&ca).expect("signed")
+    }
+
+    /// A deterministic Ed25519 key: no entropy source, no ssh-keygen.
+    fn key_from_seed(seed: u8) -> PrivateKey {
+        let keypair = Ed25519Keypair::from_seed(&[seed; 32]);
+        PrivateKey::from(keypair)
+    }
+
+    fn now() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("a clock after 1970")
+            .as_secs()
+    }
+
+    /// The three refusals a server will not distinguish. If any two of these read
+    /// the same, this is the message it replaced.
+    #[test]
+    fn a_refusal_says_why_the_certificate_could_not_be_used() {
+        let now = now();
+
+        let expired = certificate_for(&["alice"], now - 7200, now - 3600);
+        let message = explain_certificate_refusal(&expired, "alice");
+        assert!(message.contains("expired at"), "{message}");
+        assert!(
+            message.contains("ssh-keygen -s"),
+            "must say how to fix it: {message}"
+        );
+
+        let future = certificate_for(&["alice"], now + 3600, now + 7200);
+        let message = explain_certificate_refusal(&future, "alice");
+        assert!(message.contains("not valid yet"), "{message}");
+        assert!(
+            message.contains("clock"),
+            "a future window is usually a clock: {message}"
+        );
+
+        let wrong = certificate_for(&["bob"], now - 60, now + 3600);
+        let message = explain_certificate_refusal(&wrong, "alice");
+        assert!(message.contains("bob"), "{message}");
+        assert!(message.contains("alice"), "{message}");
+
+        // The remaining case: valid, right principal, still refused.
+        let fine = certificate_for(&["alice"], now - 60, now + 3600);
+        let message = explain_certificate_refusal(&fine, "alice");
+        assert!(message.contains("TrustedUserCAKeys"), "{message}");
+        assert!(
+            message.contains("revoked"),
+            "a revoked serial looks the same: {message}"
+        );
+    }
+
+    /// An all-principals certificate is valid for any user, so the principal check
+    /// must not blame the certificate for what is a CA problem.
+    #[test]
+    fn an_all_principals_certificate_does_not_report_a_principal_mismatch() {
+        let now = now();
+        let ca = key_from_seed(7);
+        let subject = key_from_seed(9);
+        let mut builder = Builder::new(
+            b"nonce-nonce-non".to_vec(),
+            subject.public_key().key_data().clone(),
+            now - 60,
+            now + 3600,
+        )
+        .expect("a valid window");
+        builder.cert_type(CertType::User).expect("user cert");
+        builder.key_id("test").expect("key id");
+        builder.all_principals_valid().expect("any principal");
+        let certificate = builder.sign(&ca).expect("signed");
+
+        let message = explain_certificate_refusal(&certificate, "anyone");
+        assert!(
+            message.contains("TrustedUserCAKeys"),
+            "a valid any-principal certificate is a CA problem, not a principal one: {message}"
+        );
     }
 }
