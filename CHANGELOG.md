@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-11-03
+
 ### Fixed
 - **The daemon binary's unit tests run again, and CI now runs them**: the limits hot-reload change made every limit check re-read `execution_limits.toml` from disk before deciding, but the tests still injected their limits through the constructor alone — so the file (absent in the isolated config dir) answered with the defaults, the expected 429 never happened, and eight tests failed. Seven of the eight never showed a real failure message: the first test to fail panicked while holding the config-dir lock and poisoned it, so the rest died on `PoisonError` — a cascade that hides which test found the bug. `test_state` now writes the injected config to `execution_limits.toml` in the isolated directory, which is also the honest shape: a daemon starts from the file. The lock itself is poison-tolerant now, so one panicking test cannot costume seven others as the same failure. And no CI job ran `--bin agent2ssh-daemon` at all — `daemon_integration` drives a mirrored router, the e2e suites spawn the binary but never its `#[test]`s — so the breakage was invisible to every push since the reload landed. CI runs the target on every push now.
 - **Release bundles and CLI tarballs now carry the LICENSE**: the repository is MIT, and MIT requires the copyright notice to travel with every copy distributed — but `bundle.resources` was empty, so the dmg, exe, AppImage and deb contained no license file, and the CLI tar.gz packed only the three binaries. The notice is now a bundle resource on every desktop platform and a file inside the tarball a server operator unpacks.
