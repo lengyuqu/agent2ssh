@@ -296,6 +296,15 @@ jobs:
         run: cargo test --no-default-features --test resident_session
         working-directory: src-tauri
 
+      # The daemon binary's own unit tests (auth gates, rate/session limits,
+      # audit). No job here ran this target, so the limits hot-reload change
+      # landed with eight failing tests that only a local `--bin agent2ssh-daemon`
+      # run could see — CI stayed green the whole time. They need no fixture:
+      # they isolate their config dir per test.
+      - name: Rust daemon unit tests
+        run: cargo test --no-default-features --features daemon --bin agent2ssh-daemon
+        working-directory: src-tauri
+
       # ── Compilation checks ────────────────────────────────────────────────
 
       - name: Rust check (CLI + MCP)
@@ -342,6 +351,9 @@ jobs:
           cp "src-tauri/target/${{ matrix.target }}/release/agent2ssh${EXT}" "dist/package-${{ matrix.target }}/agent2ssh${EXT}"
           cp "src-tauri/target/${{ matrix.target }}/release/agent2ssh-mcp${EXT}" "dist/package-${{ matrix.target }}/agent2ssh-mcp${EXT}"
           cp "src-tauri/target/${{ matrix.target }}/release/agent2ssh-daemon${EXT}" "dist/package-${{ matrix.target }}/agent2ssh-daemon${EXT}"
+          # MIT requires the copyright notice to travel with every copy that is
+          # distributed, and the tarball is the copy a server operator unpacks.
+          cp LICENSE "dist/package-${{ matrix.target }}/LICENSE"
           tar -czf "dist/agent2ssh-${{ matrix.target }}.tar.gz" -C "dist/package-${{ matrix.target }}" .
           rm -rf "dist/package-${{ matrix.target }}"
           bash scripts/generate-checksums.sh dist

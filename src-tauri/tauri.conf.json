@@ -40,6 +40,9 @@
       "binaries/agent2ssh-daemon",
       "binaries/agent2ssh-mcp"
     ],
+    "resources": {
+      "../LICENSE": "LICENSE"
+    },
     "macOS": {
       "minimumSystemVersion": "10.15",
       "signingIdentity": "-",

@@ -5870,7 +5870,13 @@ mod tests {
 
     fn with_temp_config<T>(f: impl FnOnce() -> T) -> T {
         static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        // Poison-tolerant: a test that panics while holding this lock must not
+        // turn every later with_temp_config test into a PoisonError, because a
+        // cascade of identical failures hides the one test that found the bug.
+        let _guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let temp =
             std::env::temp_dir().join(format!("agent2ssh-daemon-gate-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp).unwrap();
@@ -5882,6 +5888,15 @@ mod tests {
     }
 
     fn test_state(config: ExecutionLimitConfig) -> AppState {
+        // The daemon re-reads execution_limits.toml before every limit check
+        // (refresh_execution_limits), so the config a test injects here only
+        // survives if it is the one on disk in the isolated config directory.
+        // Writing it also mirrors the real path: a daemon starts from the file,
+        // not from a config handed to it in memory.
+        let path = agent2ssh::store::config_dir()
+            .expect("test_state must run inside with_temp_config")
+            .join("execution_limits.toml");
+        std::fs::write(&path, toml::to_string(&config).unwrap()).unwrap();
         AppState {
             token: "test-token".into(),
             limiter: Arc::new(tokio::sync::Mutex::new(ExecutionLimiter::new(config))),
