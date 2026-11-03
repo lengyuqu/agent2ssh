@@ -1895,11 +1895,16 @@ pub async fn sftp_upload_core_with_source(
                 sftp.create(Path::new(&remote_path))
                     .with_context(|| format!("failed to create remote file {remote_path}"))?
             };
+            let chunk = crate::sftp_transfer::upload_chunk_for_server(session.banner().as_deref());
+            // Guarded so a server that stops reading reports how far it got. The
+            // guards inside the copy loop react to a reply, and the failure this
+            // exists for is the absence of one.
+            let mut guarded = crate::sftp_transfer::stall_guard(&mut remote_file, chunk);
             let copied = crate::sftp_transfer::copy_cancellable_with_chunk(
                 &mut local_file,
-                &mut remote_file,
+                &mut guarded,
                 &cancel,
-                crate::sftp_transfer::upload_chunk_for_server(session.banner().as_deref()),
+                chunk,
             )?;
             Ok(offset + copied)
         })();

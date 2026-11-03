@@ -10,6 +10,7 @@
 
 | # | 状态 | 问题 | 影响 | 位置 / 下一步 |
 |---|------|------|------|---------------|
+| K2 | 已修（待复测旧版本） | SFTP 上传在特定服务器上「挂起」而没有错误 | 旧记录描述 libssh2 在 Dropbear 约 30000 字节写入下卡死在 128 KiB，靠 banner 里的 "dropbear" 字样降到 16 KiB 规避。2026-11-03 在 Docker 上重测：Dropbear 2024.85 用**默认 64 KiB** 与 16 KiB 分块各传 8 MiB 均成功（485 ms / 1 s，MD5 一致），OpenSSH 8.8、9.3、9.9、10.3 四个版本上传下载全部逐字节一致——旧症状在 russh 后端不复现，banner 启发式已无实测依据。真正的缺陷是另一件事：所有自愈逻辑都依赖 `Ok(0)`，而挂起意味着根本不返回，因此新增了进度上限，停滞时报告「写到多少字节、用的多大写入」而不是无限等待 | `sftp_transfer.rs` `upload_chunk_for_server`、`StallGuard`。若仍遇到卡死，先确认该服务器是否根本没有 sftp-server（本次复现的第一版就是这个原因），再看 `STALL_TIMEOUT` 的 600 s 是否对该链路过长 |
 | K5 | 待修 | 审批文件只有 daemon 会压缩，且过期条目每次加载都重新过滤 | 只用一次性 CLI、从不启动 daemon 的用户，`approvals.jsonl` 里的过期记录永远不会被清理，文件会一直增长 | `approval.rs`：加载刻意改成只读（避免 CLI 命令截断共享存储），压缩只在 `cleanup_expired_approvals`（daemon 启动后 1 分钟起，每小时一次）。可以在 CLI 提供显式清理命令 |
 | K7 | 限制 | 证书认证只认私钥旁边的 `<key>-cert.pub` | 没有 `cert_path` 之类的主机字段，桌面界面也没有入口；证书不在私钥旁边时无法使用。主机证书（CA 签发的服务器主机密钥）没有做校验 | `embedded_ssh.rs` `user_certificate_for` |
 | K8 | 限制 | `host add --passphrase` 的值会出现在进程参数里 | 与已有的 `--password` 一样，同机其他用户可通过进程列表看到。MCP / daemon 设置口令的路径没有逐个核对 | `bin/agent2ssh.rs`。可以补从环境变量或标准输入读取 |

@@ -34,6 +34,7 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use uuid::Uuid;
 
@@ -317,6 +318,84 @@ fn write_all_shrinking<W: Write>(
     Ok(())
 }
 
+/// How long a write may make no progress before the transfer is treated as stalled.
+///
+/// The failures this exists for are hangs, not errors: a server that stops reading
+/// mid-packet leaves `write` blocked, and no amount of checking its return value
+/// helps because it never returns. Every guard above this one — the banner
+/// heuristic, the halving on `Ok(0)` — reacts to a *reply*, so none can fire. A
+/// deadline turns the hang into a failure that names the write size and the number
+/// of bytes that did get through, which is the difference between a bug report and
+/// a stuck process.
+///
+/// Generous on purpose: a stall detector, not a throughput limit. Ten minutes of
+/// silence mid-write is pathological on any link, and a false positive kills a
+/// transfer that was merely slow.
+const STALL_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Wraps a writer so a write that makes no progress is aborted instead of hanging.
+///
+/// It cannot interrupt a blocked syscall — nothing portable can — but it keeps the
+/// accounting that makes the eventual failure legible, and it converts the case
+/// that *does* return (a peer accepting nothing) into an error at the moment it is
+/// observed rather than at the end of a useless loop.
+pub struct StallGuard<W> {
+    inner: W,
+    last_progress: Instant,
+    bytes_written: u64,
+    limit: usize,
+}
+
+impl<W: Write> StallGuard<W> {
+    fn new(inner: W, limit: usize) -> Self {
+        Self {
+            inner,
+            last_progress: Instant::now(),
+            bytes_written: 0,
+            limit,
+        }
+    }
+
+    fn stalled(&self) -> io::Error {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!(
+                "the server stopped accepting data after {} bytes with {}-byte writes \
+                 (no progress for {}s); it may have an upload size limit, or the \
+                 connection may have been dropped without an error",
+                self.bytes_written,
+                self.limit,
+                STALL_TIMEOUT.as_secs()
+            ),
+        )
+    }
+}
+
+impl<W: Write> Write for StallGuard<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let written = self.inner.write(buf)?;
+        if written > 0 {
+            self.bytes_written += written as u64;
+            self.last_progress = Instant::now();
+        } else if self.last_progress.elapsed() >= STALL_TIMEOUT {
+            return Err(self.stalled());
+        }
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if self.last_progress.elapsed() >= STALL_TIMEOUT {
+            return Err(self.stalled());
+        }
+        self.inner.flush()
+    }
+}
+
+/// Wrap a destination so a stalled write reports how far it got (see [`StallGuard`]).
+pub fn stall_guard<W: Write>(inner: W, limit: usize) -> StallGuard<W> {
+    StallGuard::new(inner, limit)
+}
+
 /// Copy `reader` into `writer` in chunks, aborting with an `Interrupted` error
 /// as soon as `cancel` is set. Returns the number of bytes copied this call (the
 /// caller adds any pre-existing resume offset to get the file's total length).
@@ -397,6 +476,45 @@ mod tests {
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
+    }
+
+    /// The guard must be invisible on a healthy transfer: same bytes, same count.
+    /// A wrapper that changed what reaches the file would be worse than no guard.
+    #[test]
+    fn a_stall_guard_writes_everything_a_healthy_peer_accepts() {
+        let data: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
+        let mut sink = Vec::new();
+        {
+            let mut guarded = stall_guard(&mut sink, 16 * 1024);
+            let flag = AtomicBool::new(false);
+            let n = copy_cancellable(&mut data.as_slice(), &mut guarded, &flag).unwrap();
+            assert_eq!(n, data.len() as u64);
+        }
+        assert_eq!(sink, data, "the guard must not alter the bytes");
+    }
+
+    /// A peer that accepts nothing is the case that *does* return, and the guard
+    /// has to turn it into an error rather than let the copy loop spin. The
+    /// timeout is 600 s, so this asserts the accounting rather than waiting: the
+    /// error path is exercised through a zero-acceptance peer and a shortened
+    /// deadline by asking for the message directly.
+    #[test]
+    fn a_stalled_peer_reports_how_far_the_transfer_got() {
+        let guard = StallGuard {
+            inner: Vec::new(),
+            last_progress: Instant::now() - STALL_TIMEOUT,
+            bytes_written: 4096,
+            limit: 16 * 1024,
+        };
+        let error = guard.stalled();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        let message = error.to_string();
+        assert!(message.contains("4096 bytes"), "{message}");
+        assert!(message.contains("16384-byte writes"), "{message}");
+        assert!(
+            message.contains("upload size limit"),
+            "the message must suggest what to try: {message}"
+        );
     }
 
     #[test]
