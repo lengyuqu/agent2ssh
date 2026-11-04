@@ -1,6 +1,6 @@
 # Windows 验证交接记录
 
-日期：2026-10-22（macOS 开发机；Windows 部分由维护者在 Windows 上用独立 harness 验证）
+日期：2026-10-22（macOS 开发机；Windows 部分由维护者在 Windows 上用独立 harness 验证）；2026-11-04 更新见第 6 节。
 
 本文记录 **没有在 Windows 上验证过** 的部分、CI 上观察到的现象，以及在 Windows 上复核时的做法。所有结论都只来自 macOS（Docker / Apple container）和 GitHub Actions 的 `windows-latest`，**没有任何一项是在 Windows 真机上跑出来的**。
 
@@ -19,7 +19,7 @@
 
 - **补全栈溢出已修复并在 CI 验证**。原因是 `CompleteEnv::complete()` 在进程主线程（Windows 默认 1 MiB 栈）上构建 clap 命令树，未优化构建装不下；现在整段放进 8 MiB 线程（`src-tauri/src/bin/agent2ssh.rs` 的 `main`）。macOS 上用 `ulimit -s 1024` 复现并验证过同一机制。
 - **两次"无输出挂起"原因未查明**。它们发生在不同步骤（库单元测试、`cli_contract`），同一批代码下一轮又全部通过，所以更像偶发（runner 或某个带子进程/网络的测试），而不是确定性死锁。GitHub 不提供进行中任务的日志，取消后日志也没有拿到。**如果在 Windows 上能复现，优先怀疑会起 CLI 子进程或做网络/DNS 解析的测试**（例如 `cli_contract` 里的 `ping` 不存在主机、`b39_*` 系列）。建议在 CI 上给 Windows 任务加 `timeout-minutes`，让挂起变成带日志的失败。
-- Windows 构建使用 OpenSSL 后端（`ssh2` 的 `openssl-on-win32` + `vendored-openssl`，见 `src-tauri/Cargo.toml`），不是 WinCNG；此前文档里关于 WinCNG 的限制（无 curve25519、读不了 OpenSSH 私钥容器）对当前构建不适用，但下面第 2 节的内容仍需在真机上确认。
+- Windows 构建使用 OpenSSL 后端（`ssh2` 的 `openssl-on-win32` + `vendored-openssl`，见 `src-tauri/Cargo.toml`），不是 WinCNG；此前文档里关于 WinCNG 的限制（无 curve25519、读不了 OpenSSH 私钥容器）对当前构建不适用，但下面第 2 节的内容仍需在真机上确认。（**已过时，见第 6 节**：russh 迁移后 `ssh2`/`openssl-sys` 不再编译或链接，传输层是 `russh` + `ring`，三平台同一算法集。）
 
 ## 2. 本轮改动中依赖平台、需要在 Windows 上验证的部分
 
@@ -93,3 +93,18 @@
 **Pageant 补充验收（2026-10-23）已通过**：Windows 11 上的 PuTTY / Pageant / plink 0.85 对 Docker 中的 OpenSSH 10.3，通过 Ed25519、仅授权第二个身份、RSA-3072（服务端对 RSA 签名仅接受 SHA-2）及 1 MiB SFTP 往返；空 agent、未授权密钥和关闭 Pageant 均按预期失败，重新加载后恢复。全新配置目录和不含密钥文件 / 密码的 host 隔离了本轮配置，OpenSSH agent 服务保持停止且禁用，诊断日志确认 `auth_method = agent`。密钥由应用生成，经临时 Alpine 容器的 `putty` 包所提供的 `puttygen` 转为 PPK。此前加载后卡住的现象没有复现，旧根因未查明；本轮未修改传输实现。OpenSSH 命名管道可打开但无可用身份时仍不会再试 Pageant，不能把本轮结果扩大为两种 agent 共存时的自动回退保证。完整证据见 [Pageant 验收报告](PAGEANT-ACCEPTANCE-2026-10-23.md)。
 
 `e2e-ssh-matrix.sh` 的全矩阵（2026-10-22 已在本机跑通：OpenSSH 8.3/8.8/9.3/9.9/10.3 + Dropbear + legacy，**190 passed / 0 failed**，见 [../KNOWN-ISSUES.md](../KNOWN-ISSUES.md) §3）。
+
+## 6. 2026-11-04 交接更新（基线 `e312166` / v0.4.5）
+
+第 1、2 节写于 libssh2 时代，其中三处与当前 main 的事实矛盾，先纠正再列 Windows 侧待办：
+
+**已过时的描述（勿据此建模）**：
+- §1 的「Windows 构建使用 OpenSSL 后端」：russh 迁移（`2658b5e`，2026-10-22）后传输层是 `russh` + `ring`，`ssh2`/`libssh2-sys`/`openssl-sys` 不再编译或链接。原 §2 表格中「不同 libssh2 加密后端对证书公钥文件的处理可能不同」的验证理由随之失效。
+- §2 的「known_hosts.json 按 host:port 只记一个主机密钥类型」：v0.4.5 已改为按 `host:port|<算法>` 键控，双算法主机切换 hostkey 偏好不再误报「fingerprint changed」——该条从已知限制变成待验证的新行为。
+- §2 的「RSA 被拒后 ssh-rsa 重试」：v0.4.5 两条回退路径都设 `used_legacy_sha1_signature` 并写 warn 日志；10-22 的 K10（RSA 证书 legacy 签名）已随 russh 0.64.1 解决。
+
+**Windows 真机待办（按优先级）**：
+1. **基线**：`main` 拉到 `e312166` 后跑 `cargo test --lib --no-default-features`、`cargo test --lib`、`--test cli_smoke`（34 项，含新 `cli_approvals_clean_dry_run_then_compact`）、`--no-default-features --features daemon --bin agent2ssh-daemon`（24 项，新增的 CI 目标）、clippy ×3。
+2. **v0.4.5 新行为**（11-02/03 的提交均未经 Windows 真机）：SFTP stall guard（Dropbear/OpenSSH 上传停滞报进度，K2 复测）；known_hosts 双算法键控；证书拒绝三因可辨；SHA-1 回退的 warn；`execution_limits.toml` 热加载；`approvals clean --dry-run`；0.4.4 的用户自定义环境（`environments.toml` 的 `cmd`/`pwsh`/`vs` 基座）。
+3. **矩阵**：Git Bash 下 `./scripts/e2e-ssh-matrix.sh`（§3.1 的注意事项仍有效：`HOME` 隔离在 Windows 不可靠，用清空 agent 的负对照法；`MSYS2_ARG_CONV_EXCL` 未在 Windows 验证）。
+4. **§3.2 的点**：带空格/反斜杠路径下 `-cert.pub` 的识别；`cli_contract` 起子进程测试的挂起复现尝试。
