@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+- **`agent2ssh approvals clean` compacts the approval store on demand (K5)**: `approvals.jsonl` was compacted only by the daemon's hourly task, so a person who never starts a daemon — the one-shot CLI user — had a store that only ever grew, because loading is deliberately read-only (a one-shot command must not truncate a store a daemon may be sharing). The command runs the same compaction the daemon runs, under the same file lock, so it is safe while a daemon is live. `--dry-run` reports what would be dropped without rewriting the file, and it takes the *shared* lock — a preview must never queue behind writers, and must never be one. Preview and compaction share one classifier, so the dry-run numbers are the numbers the real run reports; `--json` gives `{"dry_run", "dropped", "kept"}`. The compaction now also returns what it did (`ApprovalsCleanup`), which is how the command can print `dropped 1, kept 2` instead of reporting success in the abstract.
+
 ## [0.4.5] - 2026-11-03
 
 ### Fixed
