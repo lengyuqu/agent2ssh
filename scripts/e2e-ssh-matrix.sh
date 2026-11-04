@@ -324,10 +324,12 @@ for server in $SERVERS; do
       sshd_bin=/usr/sbin/sshd; [ -x \$sshd_bin ] || sshd_bin=/usr/sbin/sshd.pam
       echo 'PerSourcePenalties no' >> \$cfg
       echo 'MaxStartups 100:30:200' >> \$cfg
-      # Both lines are fixture tuning, and only `PerSourcePenalties` is
+      # Both lines are fixture tuning, and only PerSourcePenalties is
       # version-gated (9.8+). An sshd that predates it refuses the whole file,
-      # so on failure both appended lines are removed — `MaxStartups` is valid
-      # everywhere, so losing it costs nothing but a wider queue.
+      # so on failure both appended lines are removed — MaxStartups is valid
+      # everywhere, so losing it costs nothing but a wider queue. No backticks
+      # here: this comment lives inside a double-quoted argument, and the outer
+      # shell would run them as command substitutions.
       \$sshd_bin -t -f \$cfg 2>/dev/null || { sed -i '\$ d' \$cfg; sed -i '\$ d' \$cfg; }
       kill -HUP \$(cat /config/sshd.pid)" || SETUP_OK=0
     sleep 2
