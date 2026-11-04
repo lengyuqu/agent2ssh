@@ -1,6 +1,6 @@
 # Windows 验证交接记录
 
-日期：2026-10-22（macOS 开发机；Windows 部分由维护者在 Windows 上用独立 harness 验证）；2026-11-04 更新见第 6 节。
+日期：2026-10-22（macOS 开发机；Windows 部分由维护者在 Windows 上用独立 harness 验证）；2026-11-04 更新见第 6 节，同日在 Windows 真机完成第 6 节待办，结果见第 7 节。
 
 本文记录 **没有在 Windows 上验证过** 的部分、CI 上观察到的现象，以及在 Windows 上复核时的做法。所有结论都只来自 macOS（Docker / Apple container）和 GitHub Actions 的 `windows-latest`，**没有任何一项是在 Windows 真机上跑出来的**。
 
@@ -108,3 +108,55 @@
 2. **v0.4.5 新行为**（11-02/03 的提交均未经 Windows 真机）：SFTP stall guard（Dropbear/OpenSSH 上传停滞报进度，K2 复测）；known_hosts 双算法键控；证书拒绝三因可辨；SHA-1 回退的 warn；`execution_limits.toml` 热加载；`approvals clean --dry-run`；0.4.4 的用户自定义环境（`environments.toml` 的 `cmd`/`pwsh`/`vs` 基座）。
 3. **矩阵**：Git Bash 下 `./scripts/e2e-ssh-matrix.sh`（§3.1 的注意事项仍有效：`HOME` 隔离在 Windows 不可靠，用清空 agent 的负对照法；`MSYS2_ARG_CONV_EXCL` 未在 Windows 验证）。
 4. **§3.2 的点**：带空格/反斜杠路径下 `-cert.pub` 的识别；`cli_contract` 起子进程测试的挂起复现尝试。
+
+## 7. 2026-11-04 Windows 真机验证结果（基线 `6606621` / v0.4.5）
+
+第 6 节四项待办已在 Windows 11（10.0.26300，rustc 1.99.1，Docker 29.9.2，Git Bash）上完成。`6606621` 相对 `e312166` 只多两个文档提交，代码相同。
+
+### 7.1 基线
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test --lib --no-default-features` | 826 passed / 0 failed / 1 ignored（28.5 s）；修复下条缺陷后 827 |
+| `cargo test --lib`（tauri feature） | 843 passed / 0 failed / 1 ignored（36.4 s）；修复后 844 |
+| `--test cli_smoke` | 34 passed（0.42 s，含 `cli_approvals_clean_dry_run_then_compact`） |
+| `--no-default-features --features daemon --bin agent2ssh-daemon` | 24 passed（1.08 s） |
+| clippy ×3（CLI+MCP / daemon / tauri lib，`-D warnings`） | 全绿 |
+| `--test cli_contract` | **40 passed / 0 failed（6.64 s）**，未复现挂起 |
+
+### 7.2 v0.4.5 新行为
+
+| 项 | 结果 |
+|---|---|
+| SFTP 8 MiB 往返（K2 复测） | OpenSSH 10.3：上传 648 ms / 下载 1077 ms；Dropbear 2024.85（Alpine 3.20）：上传 827 ms / 下载 1077 ms；两侧 SHA-256 均一致，无停滞。停滞报告本身由 `a_stalled_peer_reports_how_far_the_transfer_got` 覆盖；真机未诱导 600 s 超时 |
+| known_hosts 双算法键控 | 同一 127.0.0.1:22222 下 `…\|ssh-ed25519` 与 `…\|ssh-rsa` 两条目共存；把 ed25519 条目的指纹改坏后仍报 `SSH host fingerprint changed`（负对照） |
+| 证书拒绝三因 | 容器 sshd 只信任测试 CA：合法证书通过；错误 principal、过期、不受信 CA 分别给出各自的文案（`valid for ["somebody-else"]` / `expired at …` / 提示 `TrustedUserCAKeys`） |
+| SHA-1 回退 warn | 见 7.3：发现并修复误报；真阳性为 `PubkeyAcceptedAlgorithms ssh-rsa` 下 RSA 认证，记录 `detected_by: "transport fallback"` |
+| `execution_limits.toml` 热加载 | `per_minute = 1` 时第 2 次 `/local-exec` 得 429；改为 100 后**不重启** daemon，第 3 次通过，日志出现 `execution limits reloaded` |
+| `approvals clean --dry-run` | `{dropped:1, kept:1, dry_run:true}`，文件哈希不变；真实清理后 1 行 |
+| 用户自定义环境 | `cmd`/`pwsh`/`vs` 三种基座的 prelude、env、cwd 均生效（vs 的 `where.exe cl` 指向 MSVC 14.51.36231）；daemon 运行中新增的环境被拒（加载一次、不热更新），重启后生效 |
+
+### 7.3 发现并修复的缺陷：非 RSA 登录被误报为 SHA-1 回退
+
+`used_legacy_sha1_signature` 的记录条件是 `first.success() && hash_alg.is_none()`，而 `rsa_hash_alg` 对任何非 RSA 密钥都返回 `None` —— 所以每次 ed25519/ECDSA 认证成功都会写一条 `ssh authenticated with the legacy ssh-rsa (SHA-1) signature`（真机日志两次连续出现，其中第二次的连接还因指纹变化并未完成认证）。这与该功能提交说明「no RSA key was used 应为 false」直接矛盾，属实现缺陷，与平台无关。
+
+修复：条件加上密钥类型（`first_succeeded && is_rsa && hash_alg.is_none()`，抽成纯函数并加 `only_rsa_without_a_sha2_choice_counts_as_legacy`）。真机复验：ed25519 与现代 RSA 不再告警；对只接受 `ssh-rsa` 的 sshd，RSA 认证仍正确记录 warn。`CHANGELOG.md` 已记。
+
+### 7.4 矩阵
+
+`./scripts/e2e-ssh-matrix.sh`（Docker，Git Bash）：**190 passed / 0 failed / 8 skipped**，与 macOS 基线一致。
+
+| 服务器 | 结果 |
+|---|---|
+| openssh:8.3 / 8.8 / 9.3 / 9.9 / 10.3 | 各 33 passed / 0 failed / 1 skipped（ssh-agent identity） |
+| dropbear | 22 passed / 0 failed / 2 skipped（证书不支持、ssh-agent） |
+| openssh:8.3+legacy | 3 passed / 0 failed / 1 skipped（K12：russh 无 SHA-1 kex） |
+
+- `MSYS2_ARG_CONV_EXCL='/config;/home/'` 确实必需：未设置时 Git Bash 把远端 `/config/...` 改写成 `C:/Program Files/Git/config/...`（本次实测）。设置后矩阵正常。
+- `HOME` 隔离在 Windows 仍不可靠，但矩阵使用独立 `AGENT2SSH_CONFIG_DIR`，真实 `~/.agent2ssh` 未被触碰；agent 用例因本机 OpenSSH agent 服务未运行而跳过，Pageant 路径沿用 2026-10-23 验收结论。
+- 矩阵脚本另有一处小瑕疵已修：内层 `sh -c` 脚本的注释里用了反引号（`` `PerSourcePenalties` ``），整段在双引号内，外层 bash 会把它当命令替换执行，日志出现两行无害的 `command not found`。改为无反引号注释后单跑 8.3 复验：36 passed / 0 failed / 2 skipped，噪音消失。
+
+### 7.5 §3.2 遗留点
+
+- 带空格与反斜杠的证书路径（`…\work dir with spaces\cert key` + `cert key-cert.pub`）下证书被正确识别并认证成功。
+- `cli_contract` 40 项在 6.64 s 内跑完，起子进程的测试未复现 CI 上的无输出挂起。CI 已为每个 job 加 `timeout-minutes`，再发生会变成带日志的失败。
