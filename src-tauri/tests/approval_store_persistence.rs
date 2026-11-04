@@ -8,7 +8,9 @@
 //! Single `#[test]` because it points the whole process at a temp config dir
 //! through an environment variable.
 
-use agent2ssh::approval::{cleanup_expired_approvals, load_persisted_approval_store};
+use agent2ssh::approval::{
+    cleanup_expired_approvals, load_persisted_approval_store, preview_expired_approvals,
+};
 use agent2ssh::store::{lock_config_file, lock_config_file_shared, CONFIG_DIR_ENV};
 use std::time::Duration;
 
@@ -76,8 +78,20 @@ fn load_is_read_only_and_cleanup_compacts() {
     drop(writer);
     assert_eq!(rx.recv_timeout(Duration::from_secs(20)).unwrap(), 1);
 
+    // A preview reports what cleanup would drop without rewriting anything —
+    // the file must be byte-identical after it, and the numbers it reports are
+    // the numbers the real run reports (K5: the CLI-only user's compactor).
+    // One expired line, one malformed line (ignored, not counted), one kept.
+    let preview = within("preview", || preview_expired_approvals().unwrap());
+    assert_eq!((preview.dropped, preview.kept), (1, 1));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+
     // Only the periodic cleanup rewrites the file.
-    within("cleanup", || cleanup_expired_approvals().unwrap());
+    let cleaned = within("cleanup", || cleanup_expired_approvals().unwrap());
+    assert_eq!(
+        (cleaned.dropped, cleaned.kept),
+        (preview.dropped, preview.kept)
+    );
     let after = std::fs::read_to_string(&path).unwrap();
     assert_eq!(after.lines().count(), 1, "unexpected store: {after}");
 

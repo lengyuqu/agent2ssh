@@ -1124,6 +1124,96 @@ requires_approval = true
 }
 
 #[test]
+fn cli_approvals_clean_dry_run_then_compact() {
+    // K5: a CLI-only user has no daemon to run the hourly compaction, so
+    // `approvals clean` is the compactor on demand. The dry run must not touch
+    // the file, and its numbers must match what the real run reports.
+    let dir = unique_temp_config_dir("approvals-clean");
+    std::fs::create_dir_all(&dir).expect("create temp config dir");
+    let path = dir.join("approvals.jsonl");
+    let expired = serde_json::json!({
+        "id": uuid::Uuid::new_v4(),
+        "host": "web-1",
+        "command": "systemctl restart nginx",
+        "risk_level": "high",
+        "requested_at": chrono::Utc::now() - chrono::Duration::days(400),
+        "ttl_secs": 300,
+        "status": "approved",
+    })
+    .to_string();
+    let fresh = serde_json::json!({
+        "id": uuid::Uuid::new_v4(),
+        "host": "web-1",
+        "command": "uptime",
+        "risk_level": "low",
+        "requested_at": chrono::Utc::now() - chrono::Duration::days(1),
+        "ttl_secs": 300,
+        "status": "pending",
+    })
+    .to_string();
+    let original = format!("{expired}\n{fresh}\n");
+    std::fs::write(&path, &original).expect("write approvals store");
+
+    let dry = std::process::Command::new(cli_bin())
+        .env(CONFIG_DIR_ENV, &dir)
+        .args(["approvals", "clean", "--dry-run", "--json"])
+        .output()
+        .expect("failed to run approvals clean --dry-run");
+    assert!(
+        dry.status.success(),
+        "dry-run should exit 0, stderr: {}",
+        String::from_utf8_lossy(&dry.stderr)
+    );
+    let dry_stdout = String::from_utf8_lossy(&dry.stdout);
+    assert!(
+        dry_stdout.contains("\"dropped\": 1"),
+        "dry-run should drop 1, got:\n{dry_stdout}"
+    );
+    assert!(
+        dry_stdout.contains("\"kept\": 1"),
+        "dry-run should keep 1, got:\n{dry_stdout}"
+    );
+    assert!(
+        dry_stdout.contains("\"dry_run\": true"),
+        "dry-run should report itself, got:\n{dry_stdout}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        original,
+        "dry-run must not rewrite the file"
+    );
+
+    let run = std::process::Command::new(cli_bin())
+        .env(CONFIG_DIR_ENV, &dir)
+        .args(["approvals", "clean", "--json"])
+        .output()
+        .expect("failed to run approvals clean");
+    assert!(
+        run.status.success(),
+        "clean should exit 0, stderr: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let run_stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        run_stdout.contains("\"dropped\": 1"),
+        "clean should drop 1, got:\n{run_stdout}"
+    );
+
+    let after = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(
+        after.lines().count(),
+        1,
+        "cleaned store should hold 1 entry, got: {after}"
+    );
+    assert!(
+        after.contains("uptime"),
+        "the fresh entry should survive, got: {after}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn cli_policy_test_returns_block_for_unified_risk_rule() {
     let dir = unique_temp_config_dir("policy-test");
     std::fs::create_dir_all(&dir).expect("create temp config dir");

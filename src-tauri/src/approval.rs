@@ -381,21 +381,81 @@ fn append_approval_unlocked(req: &ApprovalRequest) -> Result<()> {
     Ok(())
 }
 
+/// What a compaction run did (or, for [`preview_expired_approvals`], would do):
+/// how many expired lines would be dropped and how many entries survive —
+/// `kept` counts unique IDs the way the compacted file will store them, while
+/// `dropped` counts lines, so a superseded line counts as dropped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ApprovalsCleanup {
+    pub dropped: usize,
+    pub kept: usize,
+}
+
 /// Periodic cleanup: drop entries older than the retention window and compact
 /// the file. Safe to call from a daemon background task on an interval (e.g.
 /// once per hour). Acquires the file lock, so concurrent appends block briefly.
-pub fn cleanup_expired_approvals() -> Result<()> {
+///
+/// Returns what it did, so a caller a person is looking at can say how much
+/// space the run bought instead of reporting success in the abstract. The
+/// daemon ignores the numbers; the `approvals clean` CLI command is their
+/// consumer.
+pub fn cleanup_expired_approvals() -> Result<ApprovalsCleanup> {
     if !approval_persistence_enabled() {
-        return Ok(());
+        return Ok(approvals_cleanup_noop());
     }
     let _guard = approval_file_lock()?;
     let path = approval_store_path()?;
     if !path.exists() {
-        return Ok(());
+        return Ok(approvals_cleanup_noop());
     }
     let raw = std::fs::read_to_string(&path)?;
-    let mut kept: HashMap<Uuid, ApprovalRequest> = HashMap::new();
+    let outcome = classify_approvals(&raw);
+    if outcome.dropped > 0 {
+        compact_approvals_unlocked(&outcome.kept)?;
+        let _ = crate::diagnostics::append_diagnostic_log_no_sink(
+            "info",
+            "approval",
+            "periodic cleanup dropped expired approvals",
+            Some(serde_json::json!({ "dropped": outcome.dropped, "kept": outcome.kept.len() })),
+        );
+    }
+    Ok(ApprovalsCleanup {
+        dropped: outcome.dropped,
+        kept: outcome.kept.len(),
+    })
+}
+
+/// Read-only counterpart of [`cleanup_expired_approvals`]: reports exactly what
+/// a cleanup would drop and keep, without rewriting the file. Takes the shared
+/// lock, because a preview must never queue behind writers — and must never be
+/// one, either: the whole point is to look before compacting a shared store.
+pub fn preview_expired_approvals() -> Result<ApprovalsCleanup> {
+    if !approval_persistence_enabled() {
+        return Ok(approvals_cleanup_noop());
+    }
+    let _guard = approval_file_lock_shared()?;
+    let path = approval_store_path()?;
+    if !path.exists() {
+        return Ok(approvals_cleanup_noop());
+    }
+    let raw = std::fs::read_to_string(&path)?;
+    let outcome = classify_approvals(&raw);
+    Ok(ApprovalsCleanup {
+        dropped: outcome.dropped,
+        kept: outcome.kept.len(),
+    })
+}
+
+/// The classification both cleanup and preview share, so the preview cannot
+/// disagree with the real run about what would be dropped.
+struct ApprovalsClassification {
+    dropped: usize,
+    kept: HashMap<Uuid, ApprovalRequest>,
+}
+
+fn classify_approvals(raw: &str) -> ApprovalsClassification {
     let cutoff = Utc::now() - chrono::Duration::days(approval_retention_days());
+    let mut kept: HashMap<Uuid, ApprovalRequest> = HashMap::new();
     let mut dropped = 0;
     for line in raw.lines() {
         if let Ok(req) = serde_json::from_str::<ApprovalRequest>(line.trim()) {
@@ -406,16 +466,14 @@ pub fn cleanup_expired_approvals() -> Result<()> {
             }
         }
     }
-    if dropped > 0 {
-        compact_approvals_unlocked(&kept)?;
-        let _ = crate::diagnostics::append_diagnostic_log_no_sink(
-            "info",
-            "approval",
-            "periodic cleanup dropped expired approvals",
-            Some(serde_json::json!({ "dropped": dropped, "kept": kept.len() })),
-        );
+    ApprovalsClassification { dropped, kept }
+}
+
+fn approvals_cleanup_noop() -> ApprovalsCleanup {
+    ApprovalsCleanup {
+        dropped: 0,
+        kept: 0,
     }
-    Ok(())
 }
 
 /// Persist a single approval entry by appending it to the JSONL store. This

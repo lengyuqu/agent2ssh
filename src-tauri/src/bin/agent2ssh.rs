@@ -1,6 +1,6 @@
 use agent2ssh::approval::{
-    check_approval_required, list_approval_policies, load_approval_policies,
-    save_approval_policies, ApprovalPolicy,
+    check_approval_required, cleanup_expired_approvals, list_approval_policies,
+    load_approval_policies, preview_expired_approvals, save_approval_policies, ApprovalPolicy,
 };
 use agent2ssh::daemon_control::{
     process_is_alive as daemon_process_is_alive, read_daemon_pid, remove_daemon_pid_file,
@@ -360,6 +360,11 @@ enum Commands {
     Policy {
         #[command(subcommand)]
         command: PolicyCommands,
+    },
+    /// Maintain the persisted approval store (approvals.jsonl)
+    Approvals {
+        #[command(subcommand)]
+        command: ApprovalsCommands,
     },
     /// Run or dry-run a named playbook (sequence of SSH commands)
     Playbook {
@@ -1009,6 +1014,29 @@ enum DaemonCommands {
     },
     /// Show unified view of all daemons with health and metrics
     View {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// Commands over the approval *records* (approvals.jsonl) — distinct from
+/// `Policy`, which manages the rules. The store is compacted by the daemon's
+/// hourly `cleanup_expired_approvals` task, but a person who never starts a
+/// daemon has no compactor at all: their file only ever grows. The clean
+/// subcommand is that compactor on demand (K5).
+#[derive(Debug, Subcommand)]
+enum ApprovalsCommands {
+    /// Drop approvals older than the retention window and compact the file.
+    ///
+    /// Runs the same compaction the daemon runs hourly, on demand: entries
+    /// older than the retention window (30 days by default, overridable with
+    /// AGENT2SSH_APPROVAL_RETENTION_DAYS) are removed and the file is rewritten.
+    /// Safe while a daemon is running — it takes the same file lock.
+    Clean {
+        /// Report what would be dropped without rewriting the file
+        #[arg(long)]
+        dry_run: bool,
+        /// Output JSON instead of text
         #[arg(long)]
         json: bool,
     },
@@ -3751,6 +3779,42 @@ async fn async_main() -> Result<()> {
                                 command, host, risk
                             );
                         }
+                    }
+                }
+            }
+        },
+        Commands::Approvals { command } => match command {
+            ApprovalsCommands::Clean { dry_run, json } => {
+                // Preview and clean share the classification, so a dry-run
+                // number is the number the real run will report.
+                let outcome = if dry_run {
+                    preview_expired_approvals()?
+                } else {
+                    cleanup_expired_approvals()?
+                };
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "dry_run": dry_run,
+                            "dropped": outcome.dropped,
+                            "kept": outcome.kept,
+                        }))?
+                    );
+                } else {
+                    let verb = if dry_run { "would drop" } else { "dropped" };
+                    println!(
+                        "{verb} {} expired approval {}, kept {}.",
+                        outcome.dropped,
+                        if outcome.dropped == 1 {
+                            "entry"
+                        } else {
+                            "entries"
+                        },
+                        outcome.kept
+                    );
+                    if dry_run && outcome.dropped > 0 {
+                        println!("Run again without --dry-run to rewrite the file.");
                     }
                 }
             }
