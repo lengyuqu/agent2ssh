@@ -328,6 +328,20 @@ async fn rsa_hash_alg(
     })
 }
 
+/// Whether a successful first attempt used the legacy SHA-1 `ssh-rsa` signature.
+///
+/// `hash_alg` is `None` for every non-RSA key by construction (`rsa_hash_alg`
+/// answers `None` without asking the server), so the key type has to be part of
+/// the question: without it, every successful ed25519/ECDSA authentication was
+/// recorded as a SHA-1 fallback.
+fn used_legacy_sha1_signature(
+    first_succeeded: bool,
+    is_rsa: bool,
+    hash_alg: Option<russh::keys::HashAlg>,
+) -> bool {
+    first_succeeded && is_rsa && hash_alg.is_none()
+}
+
 impl From<russh::Error> for Error {
     fn from(error: russh::Error) -> Self {
         let kind = match &error {
@@ -760,14 +774,16 @@ impl Session {
             let Some(handle) = guard.as_mut() else {
                 return Err(other("handshake has not run"));
             };
-            let hash_alg = rsa_hash_alg(handle, key.algorithm().is_rsa()).await?;
+            let is_rsa = key.algorithm().is_rsa();
+            let hash_alg = rsa_hash_alg(handle, is_rsa).await?;
             let signer = russh::keys::PrivateKeyWithHashAlg::new(key.clone(), hash_alg);
             let first = handle.authenticate_publickey(username, signer).await?;
-            if first.success() || !key.algorithm().is_rsa() || hash_alg.is_none() {
-                // `hash_alg.is_none()` on a successful RSA auth means the server
+            if first.success() || !is_rsa || hash_alg.is_none() {
+                // `hash_alg.is_none()` on a successful *RSA* auth means the server
                 // advertised no SHA-2 algorithm, so this connection went out with
-                // the legacy signature rather than being downgraded to it.
-                if first.success() && hash_alg.is_none() {
+                // the legacy signature rather than being downgraded to it. A
+                // non-RSA key never gets here with a hash at all.
+                if used_legacy_sha1_signature(first.success(), is_rsa, hash_alg) {
                     self.inner
                         .legacy_sha1_signature
                         .store(true, Ordering::Relaxed);
@@ -1168,6 +1184,34 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .expect("a clock after 1970")
             .as_secs()
+    }
+
+    /// A healthy ed25519/ECDSA login must not be reported as a SHA-1 fallback.
+    ///
+    /// `hash_alg` is `None` for those key types by construction, so the first
+    /// version of this check — `first.success() && hash_alg.is_none()` — warned
+    /// on every non-RSA connection. Measured against OpenSSH 10.3: an ed25519
+    /// key produced "ssh authenticated with the legacy ssh-rsa (SHA-1)
+    /// signature" in `app.log` twice in a row.
+    #[test]
+    fn only_rsa_without_a_sha2_choice_counts_as_legacy() {
+        use russh::keys::HashAlg;
+        assert!(
+            !used_legacy_sha1_signature(true, false, None),
+            "a non-RSA key has no hash choice; that is not a fallback"
+        );
+        assert!(
+            used_legacy_sha1_signature(true, true, None),
+            "RSA with no SHA-2 offered really is the legacy signature"
+        );
+        assert!(
+            !used_legacy_sha1_signature(true, true, Some(HashAlg::Sha256)),
+            "a SHA-2 signature is not legacy"
+        );
+        assert!(
+            !used_legacy_sha1_signature(false, true, None),
+            "a failed attempt reports nothing"
+        );
     }
 
     /// The three refusals a server will not distinguish. If any two of these read
