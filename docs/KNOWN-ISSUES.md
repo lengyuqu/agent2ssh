@@ -1,6 +1,6 @@
 # 已知问题与未覆盖范围
 
-日期：2026-11-03（K1、K3、K4、K5、K6 已修复；K10、K11 均已修复；K12 为上游限制；K13 为设计限制；E1、E2、E5 已解决并按维护约定移入 `CHANGELOG.md`）。基线：macOS 开发机 + WinR9，Docker / wslc / Apple container；GitHub Actions。
+日期：2026-11-04（K1、K3、K4、K5、K6 已修复；K10、K11 均已修复；K12 为上游限制；K13 为设计限制；E1、E2、E5、E7 已解决并按维护约定移入 `CHANGELOG.md`）。基线：macOS 开发机 + WinR9，Docker / wslc / Apple container；GitHub Actions。
 
 本文只记录 **已经知道、尚未解决** 的事项，以及 **没有验证过所以不能下结论** 的范围，按处理价值排序。已修复的问题在 `CHANGELOG.md`；历史缺陷快照在 `DEFECTS.md`（0.2.1 时代，已归档）；Windows 相关的细节在 [reports/WINDOWS-HANDOVER.md](reports/WINDOWS-HANDOVER.md)，此处只列条目。
 
@@ -25,7 +25,6 @@
 |---|------|------|------|
 | E3 | 限制 | Apple container 拉取镜像又慢又不稳 | 实测首次拉取约 8 分钟（几十 KB/s），中途出现过一次 `HTTP2 StreamClosed`，重试后成功。属于网络环境 |
 | E6 | 限制 | `container_discovery` 的库测试依赖本机服务状态 | Apple `container` 已安装但服务没启动时，已安装的运行时会被报告为"未运行"而不是列出容器，测试对这种情况已放宽；设置了 `AGENT2SSH_CONTAINER_AUTOSTART=1` 的环境里行为会不同 |
-| E7 | 已发生 | 之前几次集成测试没有隔离配置目录，写入过真实的 `~/.agent2ssh` | 一次运行清空了真实的 `approvals.jsonl`（无备份，无法恢复）；`resident_session` 测试在隔离前向真实的 `audit.jsonl` 追加过 `source: "test"` 的记录（`cd /tmp`、`pwd` 等，host 为 `local`），这些行仍留在文件里。现在所有集成测试都经 `tests/common` 隔离并拒绝真实目录；残留记录需要手动按 `source":"test"` 过滤 |
 | E8 | 限制 | 真实 Apple container 服务"从停止到启动"的路径没有实测 | `containers start` 与 `AGENT2SSH_CONTAINER_AUTOSTART` 只用假的 `container` 脚本测过，因为实测需要先停掉正在使用的服务 |
 
 ## 3. 未验证的范围（不能说"支持得好"）
