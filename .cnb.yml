@@ -1,0 +1,19 @@
+# Linux regression gate on the primary CNB remote. GitHub Actions retains the
+# macOS/Windows and packaged-app checks; this pipeline does not replace them.
+main:
+  push: &regression
+    - name: daemon-regressions
+      docker:
+        image: rust:bookworm
+      stages:
+        - name: fixture-free Rust regression suites
+          script: |
+            set -eu
+            export AGENT2SSH_CONFIG_DIR="$(mktemp -d)"
+            trap 'rm -rf "$AGENT2SSH_CONFIG_DIR"' EXIT
+            cd src-tauri
+            cargo test --locked --no-default-features --lib
+            cargo test --locked --no-default-features --features daemon --bin agent2ssh-daemon
+            cargo test --locked --no-default-features --features daemon --test daemon_local_exec_e2e --test daemon_resident_session_e2e --test daemon_sftp_approval_e2e --test daemon_stop_e2e -- --test-threads=1
+            cargo test --locked --no-default-features --test ssh_operation_deadline --test mcp_local_deadlines --test approval_store_persistence --test desktop_backup_decrypt --test resident_close
+  pull_request: *regression

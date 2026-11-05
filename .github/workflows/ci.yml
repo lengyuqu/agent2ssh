@@ -305,6 +305,16 @@ jobs:
         run: cargo test --no-default-features --features daemon --bin agent2ssh-daemon
         working-directory: src-tauri
 
+      # Real daemon processes and fixture-free regression suites. These exercise
+      # handlers that the mirrored daemon_integration router cannot cover.
+      - name: Real daemon end-to-end tests
+        run: cargo test --no-default-features --features daemon --test daemon_local_exec_e2e --test daemon_resident_session_e2e --test daemon_sftp_approval_e2e --test daemon_stop_e2e -- --test-threads=1
+        working-directory: src-tauri
+
+      - name: Deadline and approval persistence tests
+        run: cargo test --no-default-features --test ssh_operation_deadline --test mcp_local_deadlines --test approval_store_persistence --test desktop_backup_decrypt --test resident_close
+        working-directory: src-tauri
+
       # ── Compilation checks ────────────────────────────────────────────────
 
       - name: Rust check (CLI + MCP)

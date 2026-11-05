@@ -40,6 +40,10 @@ impl TestDaemon {
     }
 
     fn start_with_scopes(label: &str, scoped_tokens: &str) -> Self {
+        Self::start_with_address(label, scoped_tokens, free_loopback_addr())
+    }
+
+    fn start_with_address(label: &str, scoped_tokens: &str, addr: String) -> Self {
         let dir = std::env::temp_dir().join(format!(
             "a2s-daemon-resident-e2e-{label}-{}-{}",
             std::process::id(),
@@ -59,11 +63,32 @@ impl TestDaemon {
                 .expect("seed isolated scoped-token configuration");
         }
 
-        let addr = free_loopback_addr();
+        let child = Self::spawn(&dir, &addr);
+        let mut daemon = Self {
+            child,
+            dir,
+            addr,
+            token,
+        };
+        for attempt in 0..5 {
+            match daemon.wait_until_serving() {
+                Ok(()) => return daemon,
+                Err((true, detail)) if attempt < 4 => {
+                    eprintln!("retrying daemon after port collision: {detail}");
+                    daemon.addr = free_loopback_addr();
+                    daemon.child = Self::spawn(&daemon.dir, &daemon.addr);
+                }
+                Err((_, detail)) => panic!("{detail}"),
+            }
+        }
+        unreachable!()
+    }
+
+    fn spawn(dir: &std::path::Path, addr: &str) -> Child {
         let mut spawn = Command::new(env!("CARGO_BIN_EXE_agent2ssh-daemon"));
         spawn
             .env(CONFIG_DIR_ENV, &dir)
-            .env("AGENT2SSH_DAEMON_ADDR", &addr)
+            .env("AGENT2SSH_DAEMON_ADDR", addr)
             .env("AGENT2SSH_LOG", "warn");
 
         // This suite asserts POSIX shell semantics (`export VAR=...`,
@@ -83,21 +108,14 @@ impl TestDaemon {
             }
         }
 
-        let child = spawn
+        let stderr =
+            std::fs::File::create(dir.join("daemon.stderr")).expect("create daemon stderr log");
+        spawn
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(stderr))
             .spawn()
-            .expect("spawn agent2ssh-daemon");
-
-        let daemon = Self {
-            child,
-            dir,
-            addr,
-            token,
-        };
-        daemon.wait_until_serving();
-        daemon
+            .expect("spawn agent2ssh-daemon")
     }
 
     fn url(&self, path: &str) -> String {
@@ -113,7 +131,7 @@ impl TestDaemon {
 
     /// Block until `/health` answers — no token needed, so this cannot
     /// accidentally pass on a 401.
-    fn wait_until_serving(&self) {
+    fn wait_until_serving(&mut self) -> Result<(), (bool, String)> {
         let probe = reqwest::blocking::Client::builder()
             .timeout(Duration::from_millis(500))
             .build()
@@ -122,12 +140,33 @@ impl TestDaemon {
         while Instant::now() < deadline {
             if let Ok(response) = probe.get(self.url("/health")).send() {
                 if response.status().is_success() {
-                    return;
+                    if let Ok(body) = response.json::<serde_json::Value>() {
+                        if body["pid"].as_u64() == Some(u64::from(self.child.id())) {
+                            return Ok(());
+                        }
+                    }
                 }
+            }
+            if let Some(status) = self.child.try_wait().expect("check daemon process") {
+                let stderr =
+                    std::fs::read_to_string(self.dir.join("daemon.stderr")).unwrap_or_default();
+                // These OS codes are EADDRINUSE on Linux, macOS and Windows.
+                // Never retry an unrelated crash or a startup timeout.
+                let collision = ["os error 48", "os error 98", "os error 10048"]
+                    .iter()
+                    .any(|code| stderr.contains(code));
+                return Err((
+                    collision,
+                    format!(
+                        "daemon exited before health check at {}: {status}; stderr: {stderr}",
+                        self.addr
+                    ),
+                ));
             }
             std::thread::sleep(Duration::from_millis(100));
         }
-        panic!("the daemon did not answer /health within {STARTUP_BUDGET:?}");
+        Err((false, format!("daemon did not answer /health at {} within {STARTUP_BUDGET:?}; child: {:?}; stderr: {}", self.addr,
+            self.child.try_wait(), std::fs::read_to_string(self.dir.join("daemon.stderr")).unwrap_or_default())))
     }
 
     fn get(&self, path: &str) -> reqwest::blocking::Response {
@@ -194,9 +233,8 @@ impl Drop for TestDaemon {
 
 /// A port nothing is listening on.
 ///
-/// Bound and released immediately, which is inherently racy — but the
-/// alternative is a fixed port that collides with a developer's own running
-/// daemon, and the window here is a few microseconds wide.
+/// The daemon binds after this listener is released, so the address can be
+/// claimed in between. Startup retries only an observed address-in-use error.
 fn free_loopback_addr() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
     let addr = listener.local_addr().expect("read the bound port");
@@ -208,6 +246,14 @@ fn body_text(response: reqwest::blocking::Response) -> String {
     let status = response.status();
     let text = response.text().unwrap_or_default();
     format!("status={status} body={text}")
+}
+
+#[test]
+fn startup_retries_when_the_selected_port_is_already_bound() {
+    let occupied = TcpListener::bind("127.0.0.1:0").expect("bind occupied port");
+    let addr = occupied.local_addr().unwrap().to_string();
+    let daemon = TestDaemon::start_with_address("occupied-port", "", addr.clone());
+    assert_ne!(daemon.addr, addr);
 }
 
 #[test]
