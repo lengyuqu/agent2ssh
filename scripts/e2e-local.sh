@@ -28,6 +28,12 @@ cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --test cli
 echo "==> Daemon integration tests"
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features daemon --test daemon_integration
 
+echo "==> Daemon lifecycle end-to-end tests"
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features daemon --test daemon_stop_e2e -- --test-threads=1
+
+echo "==> Desktop daemon lifecycle end-to-end tests"
+TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo test --manifest-path src-tauri/Cargo.toml --features daemon --test daemon_stop_e2e -- --test-threads=1
+
 echo "==> Sidecar dry-run build"
 TARGET="$(rustc -vV | sed -n 's/^host: //p')"
 cargo build --manifest-path src-tauri/Cargo.toml --release --target "$TARGET" --no-default-features --bin agent2ssh --bin agent2ssh-mcp

@@ -561,6 +561,7 @@ paths:
             application/json:
               schema:
                 type: object
+                required: [ok, pid]
                 properties:
                   ok: { type: boolean }
                   version: { type: string }
@@ -582,9 +583,10 @@ paths:
         connections, drains open WebSocket connections (up to five seconds) and
         removes `daemon.pid`. Everything the daemon holds in memory ends with it —
         PTY sessions, resident shells, port forwards and pending approvals.
-        Windows has no `SIGTERM`, so the desktop app and `agent2ssh daemon stop`
-        use this route there instead of terminating the process. Requires the
-        unrestricted admin token; a scoped token gets 403.
+        The desktop app and `agent2ssh daemon stop` use this route on all
+        platforms after checking the health PID; if shutdown was accepted but
+        the process does not exit, they may terminate it after the drain timeout.
+        Requires the unrestricted admin token; a scoped token gets 403.
       responses:
         "200":
           description: Shutdown has been requested; the daemon exits after the response.

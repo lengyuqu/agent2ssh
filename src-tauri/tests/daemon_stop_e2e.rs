@@ -334,6 +334,10 @@ fn wrong_admin_token_never_signals_the_real_daemon() {
     let mut daemon = RunningDaemon::start("wrong-token", &[]);
     let pid = daemon.child.id();
     std::fs::write(daemon.dir.join("daemon.token"), "wrong-token").unwrap();
+    assert_eq!(
+        agent2ssh::daemon_control::daemon_pid_state(pid),
+        agent2ssh::daemon_control::DaemonPidState::Unverified
+    );
     let result = stop_daemon_process(pid);
     let alive = daemon.child.try_wait().unwrap().is_none();
     let pid_retained = daemon.pid_file().exists();
@@ -397,6 +401,36 @@ fn competing_daemon_cannot_overwrite_the_running_daemon_pid() {
     assert!(process_is_alive(pid));
 }
 
+#[cfg(unix)]
+#[test]
+#[serial_test::serial]
+fn recognized_process_with_a_different_health_pid_is_unverified() {
+    use agent2ssh::daemon_control::{daemon_pid_state, DaemonPidState};
+    use std::os::unix::fs::symlink;
+    let daemon = RunningDaemon::start("different-health-pid", &[]);
+    let executable = daemon.dir.join("agent2ssh-daemon");
+    symlink("/bin/sleep", &executable).unwrap();
+    let mut child = Command::new(executable).arg("30").spawn().unwrap();
+    let pid = child.id();
+    let recognized = process_is_alive(pid);
+    let state = daemon_pid_state(pid);
+    let result = stop_daemon_process(pid);
+    let still_running = child.try_wait().unwrap().is_none();
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(
+        recognized,
+        "test process must match the daemon executable name"
+    );
+    assert_eq!(state, DaemonPidState::Unverified);
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("could not be authenticated"));
+    assert!(still_running);
+    assert!(process_is_alive(daemon.child.id()));
+}
+
 #[test]
 #[serial_test::serial]
 fn other_daemons_health_is_not_reported_as_our_pid() {
@@ -450,31 +484,49 @@ fn background_start_verifies_and_stops_its_own_daemon() {
 #[cfg(unix)]
 #[test]
 #[serial_test::serial]
-fn failed_health_does_not_discard_the_pid_of_a_live_unrecognized_child() {
+fn failed_start_reaps_its_unrecognized_child_and_clears_its_pid() {
     use std::os::unix::fs::PermissionsExt;
-    let dir = tempfile::tempdir().unwrap();
-    let stub = dir.path().join("renamed-child");
-    std::fs::write(&stub, "#!/bin/sh\nprintf '%s' \"$$\" > \"$AGENT2SSH_CONFIG_DIR/daemon.pid\"\nexec /bin/sleep 15\n").unwrap();
-    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let port = TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap();
-    std::env::set_var(CONFIG_DIR_ENV, dir.path());
-    std::env::set_var(ADDR_ENV, port.to_string());
-    let result = agent2ssh::daemon_control::start_daemon_background(&stub);
-    let pid = std::fs::read_to_string(dir.path().join("daemon.pid"))
-        .ok()
-        .and_then(|text| text.parse::<i32>().ok());
-    if let Some(pid) = pid {
-        unsafe {
-            libc::kill(pid, libc::SIGTERM);
+    for publish_pid in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let stub = dir.path().join("renamed-child");
+        let publish = if publish_pid {
+            "printf '%s' \"$$\" > \"$AGENT2SSH_CONFIG_DIR/daemon.pid\"\n"
+        } else {
+            ""
+        };
+        let script = format!("#!/bin/sh\nprintf '%s' \"$$\" > \"$AGENT2SSH_CONFIG_DIR/child.pid\"\n{publish}exec /bin/sleep 15\n");
+        std::fs::write(&stub, script).unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let port = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        std::env::set_var(CONFIG_DIR_ENV, dir.path());
+        std::env::set_var(ADDR_ENV, port.to_string());
+        let result = agent2ssh::daemon_control::start_daemon_background(&stub);
+        let pid = std::fs::read_to_string(dir.path().join("child.pid"))
+            .expect("stub recorded child PID")
+            .parse::<i32>()
+            .unwrap();
+        let pid_retained = dir.path().join("daemon.pid").exists();
+        let child_alive = unsafe { libc::kill(pid, 0) } == 0;
+        if child_alive {
+            unsafe {
+                libc::kill(pid, libc::SIGTERM);
+            }
         }
+        common::restore_default_config_env();
+        std::env::remove_var(ADDR_ENV);
+        assert!(result.unwrap_err().to_string().contains("was stopped"));
+        assert!(
+            !child_alive,
+            "failed startup must not leave its child running (published={publish_pid})"
+        );
+        assert!(
+            !pid_retained,
+            "the stopped child's PID must be removed (published={publish_pid})"
+        );
     }
-    common::restore_default_config_env();
-    std::env::remove_var(ADDR_ENV);
-    assert!(result.is_err());
-    assert!(pid.is_some(), "the live child's PID must be retained");
 }
 
 #[test]

@@ -227,8 +227,12 @@ fn pid_definitely_missing(_pid: u32) -> bool {
 
 pub fn daemon_pid_state(pid: u32) -> DaemonPidState {
     let health_pid = daemon_health_pid();
-    if health_pid == Some(pid) && daemon_matches_config(pid) {
-        return DaemonPidState::Healthy;
+    if let Some(health_pid) = health_pid {
+        return if health_pid == pid && daemon_matches_config(pid) {
+            DaemonPidState::Healthy
+        } else {
+            DaemonPidState::Unverified
+        };
     }
     if process_is_alive(pid) {
         return DaemonPidState::RunningUnhealthy;
@@ -236,9 +240,6 @@ pub fn daemon_pid_state(pid: u32) -> DaemonPidState {
     let sys_pid = sysinfo::Pid::from_u32(pid);
     let mut system = sysinfo::System::new();
     system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[sys_pid]), true);
-    if health_pid.is_some() {
-        return DaemonPidState::Unverified;
-    }
     match system.process(sys_pid) {
         Some(process) if process.status() == sysinfo::ProcessStatus::Zombie => {
             DaemonPidState::Stale
@@ -385,41 +386,57 @@ pub fn start_daemon_background(daemon_bin: &Path) -> Result<DaemonStartResult> {
         })),
     );
     if !wait_for_daemon_pid(pid, Duration::from_secs(3)) {
+        // This is the exact child just spawned by this call, not a PID read
+        // from disk. Do not abandon it when startup could not be verified.
         if child
             .try_wait()
-            .context("failed to check daemon child; PID file retained")?
-            .is_some()
+            .with_context(|| {
+                format!("failed to check daemon child (pid={pid}); check it manually")
+            })?
+            .is_none()
         {
-            if read_daemon_pid().ok().flatten() == Some(pid) {
-                remove_daemon_pid_file();
+            if let Err(kill_error) = child.kill() {
+                if child
+                    .try_wait()
+                    .with_context(|| {
+                        format!("failed to recheck daemon child (pid={pid}); check it manually")
+                    })?
+                    .is_none()
+                {
+                    // Preserve a recoverable PID if the unverified child never
+                    // published one. Never overwrite another process's file.
+                    if let Ok(path) = daemon_pid_path() {
+                        if let Ok(mut file) =
+                            OpenOptions::new().write(true).create_new(true).open(path)
+                        {
+                            let _ = write!(file, "{pid}");
+                        }
+                    }
+                    return Err(anyhow!("daemon child (pid={pid}) did not become ready and could not be stopped: {kill_error}; PID file retained when possible"));
+                }
             }
-            let _ = crate::diagnostics::append_diagnostic_log(
-                "error",
-                "daemon_control",
-                "daemon exited before health endpoint became reachable",
-                Some(serde_json::json!({
-                    "pid": pid,
-                    "log_path": daemon_log_path()?.display().to_string(),
-                })),
-            );
-            return Err(anyhow!(
-                "daemon process exited before health endpoint became reachable; see {}",
-                daemon_log_path()?.display()
-            ));
+            child.wait().with_context(|| {
+                format!("failed to wait for daemon child (pid={pid}); check it manually")
+            })?;
+        }
+        // Do not use read_daemon_pid here: it removes malformed/partial files
+        // that could belong to another concurrently starting process.
+        let recorded_pid = daemon_pid_path()
+            .ok()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .and_then(|raw| raw.trim().parse::<u32>().ok());
+        if recorded_pid == Some(pid) {
+            remove_daemon_pid_file();
         }
         let _ = crate::diagnostics::append_diagnostic_log(
             "error",
             "daemon_control",
             "daemon child did not provide an authenticated health response",
-            Some(serde_json::json!({
-                "pid": pid,
-                "log_path": daemon_log_path()?.display().to_string(),
-            })),
+            Some(
+                serde_json::json!({ "pid": pid, "log_path": daemon_log_path()?.display().to_string() }),
+            ),
         );
-        return Err(anyhow!(
-            "daemon child (pid={pid}) did not provide an authenticated health response; PID file retained; see {}",
-            daemon_log_path()?.display()
-        ));
+        return Err(anyhow!("daemon child (pid={pid}) did not provide an authenticated health response and was stopped; see {}", daemon_log_path()?.display()));
     }
 
     let _ = crate::diagnostics::append_diagnostic_log(
