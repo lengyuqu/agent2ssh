@@ -5569,6 +5569,10 @@ async fn main() -> anyhow::Result<()> {
     // Token
     let token = load_or_create_daemon_token(&config_dir)?;
 
+    // Claim the listening address before publishing a PID. A competing daemon
+    // must not overwrite the running instance's PID file when bind fails.
+    let listener = TcpListener::bind(addr).await?;
+
     // PID
     let pid_path = config_dir.join("daemon.pid");
     std::fs::write(&pid_path, std::process::id().to_string())?;
@@ -5750,7 +5754,6 @@ async fn main() -> anyhow::Result<()> {
             "console_url": format!("http://{addr}/console"),
         })),
     );
-    let listener = TcpListener::bind(addr).await?;
     // T2-15: Graceful shutdown with WS drain: on Ctrl-C / SIGTERM,
     // 1. Stop accepting new HTTP connections (axum graceful shutdown)
     // 2. Broadcast shutdown to all active WS handlers (ShutdownToken)

@@ -150,12 +150,14 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn is_inside_desktop_false_when_unset() {
         std::env::remove_var(AGENT2SSH_APP_ENV);
         assert!(!is_inside_desktop());
     }
 
     #[test]
+    #[serial_test::serial]
     fn is_inside_desktop_true_when_set() {
         std::env::set_var(AGENT2SSH_APP_ENV, "1");
         assert!(is_inside_desktop());
@@ -163,6 +165,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn is_inside_desktop_false_when_empty() {
         std::env::set_var(AGENT2SSH_APP_ENV, "");
         assert!(!is_inside_desktop(), "empty value means not inside desktop");

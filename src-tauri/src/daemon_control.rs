@@ -103,24 +103,6 @@ fn process_looks_like_daemon(process: &sysinfo::Process) -> bool {
             .is_some_and(|arg| is_daemon_executable(arg))
 }
 
-pub fn terminate_process(pid: u32) -> Result<()> {
-    let sys_pid = sysinfo::Pid::from_u32(pid);
-    let mut system = sysinfo::System::new();
-    system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[sys_pid]), true);
-    let Some(process) = system.process(sys_pid) else {
-        return Ok(());
-    };
-
-    let terminated = process
-        .kill_with(sysinfo::Signal::Term)
-        .unwrap_or_else(|| process.kill());
-    if terminated {
-        Ok(())
-    } else {
-        Err(anyhow!("failed to terminate daemon process {pid}"))
-    }
-}
-
 pub fn daemon_health_ok() -> bool {
     // Resolve the configured local daemon address (honors AGENT2SSH_DAEMON_ADDR,
     // mapping a wildcard bind back to loopback) into a concrete socket address.
@@ -160,6 +142,122 @@ pub fn wait_for_daemon_health(timeout: Duration) -> bool {
         thread::sleep(Duration::from_millis(100));
     }
     daemon_health_ok()
+}
+
+/// Identity of the process recorded in daemon.pid. An unrecognized live PID
+/// is not proof that the daemon is gone and must never be signalled or erased.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaemonPidState {
+    Healthy,
+    RunningUnhealthy,
+    Unverified,
+    Stale,
+}
+
+pub fn daemon_health_pid() -> Option<u32> {
+    let response = crate::daemon_activity::local_daemon_request(
+        "GET",
+        "/health",
+        None,
+        Duration::from_millis(500),
+    )
+    .ok()?;
+    if response.status != 200 {
+        return None;
+    }
+    let body: serde_json::Value = serde_json::from_str(&response.body).ok()?;
+    if !body.get("ok")?.as_bool()? {
+        return None;
+    }
+    u32::try_from(body.get("pid")?.as_u64()?).ok()
+}
+
+/// Verify the health PID and that the daemon accepts this config's token.
+/// Rechecking the PID narrows a listener-replacement race between requests.
+pub fn daemon_matches_config(pid: u32) -> bool {
+    if daemon_health_pid() != Some(pid) {
+        return false;
+    }
+    let Some(token) = crate::daemon_activity::read_admin_token() else {
+        return false;
+    };
+    let authenticated = crate::daemon_activity::local_daemon_request(
+        "GET",
+        "/gate",
+        Some(&token),
+        Duration::from_millis(500),
+    )
+    .is_ok_and(|response| response.status == 200);
+    authenticated && daemon_health_pid() == Some(pid)
+}
+
+// A missing sysinfo entry can also mean the OS denied inspection. Only treat
+// the PID as absent when the platform explicitly reports that it does not exist.
+#[cfg(unix)]
+fn pid_definitely_missing(pid: u32) -> bool {
+    let Ok(pid) = i32::try_from(pid) else {
+        return true;
+    };
+    if pid <= 0 {
+        return false;
+    }
+    let result = unsafe { libc::kill(pid, 0) };
+    result == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
+#[cfg(windows)]
+fn pid_definitely_missing(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_INVALID_PARAMETER};
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle != 0 {
+            CloseHandle(handle);
+            false
+        } else {
+            GetLastError() == ERROR_INVALID_PARAMETER
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn pid_definitely_missing(_pid: u32) -> bool {
+    false
+}
+
+pub fn daemon_pid_state(pid: u32) -> DaemonPidState {
+    let health_pid = daemon_health_pid();
+    if health_pid == Some(pid) && daemon_matches_config(pid) {
+        return DaemonPidState::Healthy;
+    }
+    if process_is_alive(pid) {
+        return DaemonPidState::RunningUnhealthy;
+    }
+    let sys_pid = sysinfo::Pid::from_u32(pid);
+    let mut system = sysinfo::System::new();
+    system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[sys_pid]), true);
+    if health_pid.is_some() {
+        return DaemonPidState::Unverified;
+    }
+    match system.process(sys_pid) {
+        Some(process) if process.status() == sysinfo::ProcessStatus::Zombie => {
+            DaemonPidState::Stale
+        }
+        Some(_) => DaemonPidState::Unverified,
+        None if pid_definitely_missing(pid) => DaemonPidState::Stale,
+        None => DaemonPidState::Unverified,
+    }
+}
+
+fn wait_for_daemon_pid(pid: u32, timeout: Duration) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if daemon_matches_config(pid) {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    daemon_matches_config(pid)
 }
 
 /// Rotate daemon.log if it has grown past `max_size_bytes`, keeping two prior
@@ -204,25 +302,37 @@ pub fn start_daemon_background(daemon_bin: &Path) -> Result<DaemonStartResult> {
     }
 
     if let Some(pid) = read_daemon_pid()? {
-        if process_is_alive(pid) && daemon_health_ok() {
-            let _ = crate::diagnostics::append_diagnostic_log(
-                "info",
-                "daemon_control",
-                "reusing healthy daemon process",
-                Some(serde_json::json!({ "pid": pid })),
-            );
-            return Ok(DaemonStartResult {
-                pid,
-                log_path: daemon_log_path()?,
-            });
+        match daemon_pid_state(pid) {
+            DaemonPidState::Healthy => {
+                let _ = crate::diagnostics::append_diagnostic_log(
+                    "info",
+                    "daemon_control",
+                    "reusing healthy daemon process",
+                    Some(serde_json::json!({ "pid": pid })),
+                );
+                return Ok(DaemonStartResult {
+                    pid,
+                    log_path: daemon_log_path()?,
+                });
+            }
+            DaemonPidState::Stale => {
+                let _ = crate::diagnostics::append_diagnostic_log(
+                    "warn",
+                    "daemon_control",
+                    "removing stale daemon pid before start",
+                    Some(serde_json::json!({ "pid": pid })),
+                );
+                remove_daemon_pid_file();
+            }
+            DaemonPidState::RunningUnhealthy | DaemonPidState::Unverified => {
+                return Err(anyhow!(
+                    "daemon PID {pid} is live or cannot be verified; PID file retained"
+                ));
+            }
         }
-        let _ = crate::diagnostics::append_diagnostic_log(
-            "warn",
-            "daemon_control",
-            "removing stale daemon pid before start",
-            Some(serde_json::json!({ "pid": pid })),
-        );
-        remove_daemon_pid_file();
+    }
+    if let Some(pid) = daemon_health_pid() {
+        return Err(anyhow!("daemon health endpoint is already served by pid {pid}; refusing to start another daemon"));
     }
 
     let log = append_log_file()?;
@@ -259,7 +369,7 @@ pub fn start_daemon_background(daemon_bin: &Path) -> Result<DaemonStartResult> {
             });
         }
     }
-    let child = command
+    let mut child = command
         .spawn()
         .with_context(|| format!("failed to start daemon: {}", daemon_bin.display()))?;
 
@@ -274,9 +384,15 @@ pub fn start_daemon_background(daemon_bin: &Path) -> Result<DaemonStartResult> {
             "log_path": daemon_log_path()?.display().to_string(),
         })),
     );
-    if !wait_for_daemon_health(Duration::from_secs(3)) {
-        if !process_is_alive(pid) {
-            remove_daemon_pid_file();
+    if !wait_for_daemon_pid(pid, Duration::from_secs(3)) {
+        if child
+            .try_wait()
+            .context("failed to check daemon child; PID file retained")?
+            .is_some()
+        {
+            if read_daemon_pid().ok().flatten() == Some(pid) {
+                remove_daemon_pid_file();
+            }
             let _ = crate::diagnostics::append_diagnostic_log(
                 "error",
                 "daemon_control",
@@ -294,14 +410,14 @@ pub fn start_daemon_background(daemon_bin: &Path) -> Result<DaemonStartResult> {
         let _ = crate::diagnostics::append_diagnostic_log(
             "error",
             "daemon_control",
-            "daemon health endpoint did not become reachable",
+            "daemon child did not provide an authenticated health response",
             Some(serde_json::json!({
                 "pid": pid,
                 "log_path": daemon_log_path()?.display().to_string(),
             })),
         );
         return Err(anyhow!(
-            "daemon started (pid={pid}) but health endpoint is not reachable; see {}",
+            "daemon child (pid={pid}) did not provide an authenticated health response; PID file retained; see {}",
             daemon_log_path()?.display()
         ));
     }
@@ -437,7 +553,7 @@ fn signal_daemon(pid: u32, expected_start: u64, force: bool) -> Result<()> {
 
 /// Ask the running daemon to shut itself down, over its own admin API.
 ///
-/// Windows has no `SIGTERM`: `terminate_process` falls back to
+/// Windows has no `SIGTERM`: signalling falls back to
 /// `TerminateProcess` there, which skips the drain that closes WebSocket
 /// connections cleanly and removes the pid file. Asking the daemon does what
 /// the signal does elsewhere. `true` only when the daemon accepted the request.
@@ -456,19 +572,28 @@ pub fn request_graceful_shutdown() -> bool {
 
 /// Stop the daemon with this `pid` and wait until it is gone.
 ///
-/// Gracefully first (`SIGTERM`, or the shutdown route on Windows), then by force
-/// if it has not exited within [`GRACEFUL_STOP_WAIT`]. Returning only once the
+/// Authenticate the local daemon and request shutdown through its admin route,
+/// then signal it by force if it has not exited within [`GRACEFUL_STOP_WAIT`]. Returning only once the
 /// process has exited is what makes a restart safe — the old daemon still holds
 /// the listening port while it drains, so starting the new one straight away
 /// would fail to bind.
 pub fn stop_daemon_process(pid: u32) -> Result<()> {
     let Some(start_time) = daemon_process_start_time(pid) else {
+        if daemon_pid_state(pid) != DaemonPidState::Stale {
+            return Err(anyhow!(
+                "daemon PID {pid} cannot be safely identified; PID file retained"
+            ));
+        }
         clear_daemon_owner();
         return Ok(());
     };
-    let asked_nicely = cfg!(windows) && request_graceful_shutdown();
-    if !asked_nicely {
-        signal_daemon(pid, start_time, false)?;
+    // A matching executable name is not proof that this is our daemon: an
+    // unrelated process can reuse the PID or spoof argv[0]. Require both the
+    // matching health PID and this config's admin token before any signal.
+    if daemon_health_pid() != Some(pid) || !request_graceful_shutdown() {
+        return Err(anyhow!(
+            "daemon PID {pid} could not be authenticated for shutdown; PID file retained"
+        ));
     }
     if !wait_for_exit(pid, start_time, GRACEFUL_STOP_WAIT) {
         let _ = crate::diagnostics::append_diagnostic_log(
@@ -489,6 +614,12 @@ pub fn stop_daemon_process(pid: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_definitely_absent_pids_are_treated_as_missing() {
+        assert!(!pid_definitely_missing(std::process::id()));
+        assert!(pid_definitely_missing(u32::MAX - 1));
+    }
 
     #[test]
     fn daemon_executable_names_are_not_substring_matches() {

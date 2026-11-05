@@ -491,13 +491,15 @@ pub fn export_diagnostic_bundle() -> Result<PathBuf> {
     let daemon_pid = config_dir.join("daemon.pid");
 
     let pid = crate::daemon_control::read_daemon_pid().ok().flatten();
-    let health_ok = crate::daemon_control::daemon_health_ok();
+    let endpoint_pid = crate::daemon_control::daemon_health_pid();
+    let health_ok = pid.is_some_and(crate::daemon_control::daemon_matches_config);
     let summary = json!({
         "generated_at": Utc::now().to_rfc3339(),
         "config_dir": config_dir.display().to_string(),
         "daemon_pid": pid,
         "daemon_process_alive": pid.map(crate::daemon_control::process_is_alive),
         "daemon_health_ok": health_ok,
+        "daemon_health_endpoint_pid": endpoint_pid,
         "files": [
             file_metadata(app_log.clone()),
             file_metadata(daemon_log.clone()),
@@ -590,7 +592,8 @@ pub fn generate_system_report() -> Result<serde_json::Value> {
     // 5. Daemon status
     let daemon_pid = crate::daemon_control::read_daemon_pid().ok().flatten();
     let daemon_alive = daemon_pid.map(crate::daemon_control::process_is_alive);
-    let daemon_health_ok = crate::daemon_control::daemon_health_ok();
+    let endpoint_pid = crate::daemon_control::daemon_health_pid();
+    let daemon_health_ok = daemon_pid.is_some_and(crate::daemon_control::daemon_matches_config);
 
     // 6. Health snapshot
     let health_snapshot = crate::health::load_health_snapshot()
@@ -641,6 +644,7 @@ pub fn generate_system_report() -> Result<serde_json::Value> {
             "pid": daemon_pid,
             "process_alive": daemon_alive,
             "health_ok": daemon_health_ok,
+            "health_endpoint_pid": endpoint_pid,
         },
         "health_snapshot": health_snapshot,
         "recent_logs": log_entries,

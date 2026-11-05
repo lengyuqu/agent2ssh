@@ -3,8 +3,8 @@ use agent2ssh::approval::{
     load_approval_policies, preview_expired_approvals, save_approval_policies, ApprovalPolicy,
 };
 use agent2ssh::daemon_control::{
-    process_is_alive as daemon_process_is_alive, read_daemon_pid, remove_daemon_pid_file,
-    start_daemon_background, stop_daemon_process,
+    daemon_health_pid, daemon_pid_state, read_daemon_pid, remove_daemon_pid_file,
+    start_daemon_background, stop_daemon_process, DaemonPidState,
 };
 use agent2ssh::embedded_ssh::{
     import_known_hosts_from_ssh, remove_system_known_host, spawn_terminal, TerminalCommand,
@@ -3009,11 +3009,10 @@ async fn async_main() -> Result<()> {
             match command {
                 DaemonCommands::Start => {
                     if let Some(pid) = read_daemon_pid()? {
-                        if daemon_process_is_alive(pid) {
-                            println!("Daemon is already running (pid={})", pid);
+                        if daemon_pid_state(pid) == DaemonPidState::Healthy {
+                            println!("Daemon is already running (pid={pid})");
                             return Ok(());
                         }
-                        remove_daemon_pid_file();
                     }
                     let daemon_bin = daemon_binary_path()?;
                     let started = start_daemon_background(&daemon_bin)?;
@@ -3025,6 +3024,9 @@ async fn async_main() -> Result<()> {
                 }
                 DaemonCommands::Stop => {
                     let Some(pid) = read_daemon_pid()? else {
+                        if let Some(pid) = daemon_health_pid() {
+                            anyhow::bail!("daemon health endpoint is active (pid={pid}) but PID file is missing; cannot verify or stop it");
+                        }
                         println!("Daemon is not running (no PID file).");
                         return Ok(());
                     };
@@ -3034,27 +3036,21 @@ async fn async_main() -> Result<()> {
                 }
                 DaemonCommands::Status => {
                     let Some(pid) = read_daemon_pid()? else {
-                        println!("Daemon is not running.");
+                        if let Some(pid) = daemon_health_pid() {
+                            println!("Daemon health endpoint is active (pid={pid}) but PID file is missing; identity cannot be verified.");
+                        } else {
+                            println!("Daemon is not running.");
+                        }
                         return Ok(());
                     };
-                    if !daemon_process_is_alive(pid) {
-                        println!(
-                            "Daemon PID file exists (pid={}) but process is not running.",
-                            pid
-                        );
-                        return Ok(());
-                    }
-                    match daemon_health_body().await {
-                        Ok(body) => {
-                            println!("Daemon is running (pid={}).", pid);
-                            println!("{body}");
+                    match daemon_pid_state(pid) {
+                        DaemonPidState::Healthy => {
+                            println!("Daemon is running (pid={pid}).");
+                            if let Ok(body) = daemon_health_body().await { println!("{body}"); }
                         }
-                        Err(_) => {
-                            println!(
-                                "Daemon PID file exists (pid={}) but health check failed.",
-                                pid
-                            );
-                        }
+                        DaemonPidState::RunningUnhealthy => println!("Daemon PID file exists (pid={pid}) but health check failed."),
+                        DaemonPidState::Unverified => println!("Daemon PID file exists (pid={pid}) but the process identity cannot be verified."),
+                        DaemonPidState::Stale => println!("Daemon PID file exists (pid={pid}) but process is not running."),
                     }
                 }
                 DaemonCommands::Restart => {
@@ -3074,12 +3070,13 @@ async fn async_main() -> Result<()> {
                 }
                 DaemonCommands::RotateToken { json } => {
                     if let Some(pid) = read_daemon_pid()? {
-                        if daemon_process_is_alive(pid) {
-                            anyhow::bail!(
-                                "daemon is running (pid={pid}); stop it before rotating daemon.token"
-                            );
+                        if daemon_pid_state(pid) != DaemonPidState::Stale {
+                            anyhow::bail!("daemon PID {pid} is live or cannot be verified; refusing to rotate token");
                         }
                         remove_daemon_pid_file();
+                    }
+                    if daemon_health_pid().is_some() {
+                        anyhow::bail!("daemon health endpoint is active; refusing to rotate token");
                     }
                     std::fs::create_dir_all(&config_dir)?;
                     let token_path = config_dir.join("daemon.token");
@@ -4971,14 +4968,18 @@ async fn run_doctor(output_json: bool) -> Result<()> {
     }
 
     // 6. Check daemon is running (hit /health)
-    let daemon_running = check_daemon_health().await;
+    let recorded_pid = read_daemon_pid().ok().flatten();
+    let daemon_running = recorded_pid.is_some_and(agent2ssh::daemon_control::daemon_matches_config);
     checks.push(DoctorCheck {
         name: "daemon health".into(),
         status: if daemon_running { "pass" } else { "warn" }.into(),
         detail: if daemon_running {
-            "GET /health returned 200".into()
+            "daemon PID and config token verified".into()
         } else {
-            format!("daemon not reachable on {}", agent2ssh::local_daemon_url())
+            format!(
+                "daemon PID or config token could not be verified on {}",
+                agent2ssh::local_daemon_url()
+            )
         },
     });
 
@@ -5507,21 +5508,6 @@ fn print_webdav_status(status: &agent2ssh::WebDavSyncStatus) {
     }
     if let Some(error) = &status.metadata_error {
         println!("Metadata warning: {error}");
-    }
-}
-
-async fn check_daemon_health() -> bool {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(2))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
-    match client
-        .get(format!("{}/health", agent2ssh::local_daemon_url()))
-        .send()
-        .await
-    {
-        Ok(resp) => resp.status().is_success(),
-        Err(_) => false,
     }
 }
 

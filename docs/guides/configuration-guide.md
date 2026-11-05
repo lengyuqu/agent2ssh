@@ -345,7 +345,9 @@ denied_commands = ["rm -rf *", "mkfs *"]
 
 - 守护进程启动时自动写入
 - 守护进程正常退出时自动删除
-- 如果守护进程异常退出，此文件可能残留；`daemon status` 会检查进程是否仍然存活
+- 如果守护进程异常退出，此文件可能残留；状态检查会核对健康响应里的 PID 与文件中的 PID，并确认当前配置的 token 能访问 daemon
+- 进程仍存在但身份不明，或守护进程存活但健康检查失败时，启动和停止会拒绝猜测并保留 PID 文件；停止要求健康响应 PID 匹配并使用当前配置的管理员 token 成功请求 `/shutdown`，先检查进程和监听地址后再处理。重命名的 daemon 可以通过匹配 PID 且接受当前 token 的健康响应显示为运行中，但不会仅凭该响应向其发送进程信号
+- daemon 成功绑定地址后才写 PID；已有健康端点或其他进程占用端口时，启动不会报告新进程已就绪
 
 ---
 
@@ -1307,7 +1309,7 @@ shasum -a 256 -c <checksum> team-config.json
 
 | 变量 | 作用域 | 默认值 | 说明 |
 |------|--------|--------|------|
-| `AGENT2SSH_CONFIG_DIR` | 全部 | `~/.agent2ssh` | 覆盖配置与数据目录（`hosts.json`、`audit.jsonl`、`keys/`、`app.log` 等）。测试与多实例隔离常用。 |
+| `AGENT2SSH_CONFIG_DIR` | 全部 | `~/.agent2ssh` | 覆盖配置与数据目录（`hosts.json`、`audit.jsonl`、`keys/`、`app.log` 等）。测试与多实例隔离常用；相对路径按各进程当前工作目录解析，跨目录启动 CLI 和 daemon 时应使用同一绝对路径。 |
 | `AGENT2SSH_SOURCE` | CLI / MCP / Tauri | 各 surface 自带标签（如 `cli`、`mcp`、`desktop`） | 覆盖审计与 Live Activity 中的来源标签，用于区分是哪个 agent/客户端发起的操作。 |
 | `AGENT2SSH_DAEMON_ADDR` | daemon（绑定）+ 全部 client（拨号） | `127.0.0.1:7722` | 本地 daemon 的监听地址。daemon 按此绑定；CLI/MCP/Tauri/Webhook 链接经同一解析器拨号，绑定到通配地址（`0.0.0.0`/`::`）时 client 自动回退到回环。绑定非回环地址会写一条 `warn` 诊断提示对外暴露。 |
 | `AGENT2SSH_TRACE_ID` | CLI / MCP | 自动生成 | 由上游调用方（如 agent）注入的关联 ID，写入诊断 `trace_id` 字段并随转发请求透传，便于跨 surface 串联一次操作。 |

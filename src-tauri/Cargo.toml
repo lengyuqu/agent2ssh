@@ -155,6 +155,7 @@ fontdb = "0.23"
 windows-sys = { version = "0.48", features = [
     "Win32_System_Console",
     "Win32_Foundation",
+    "Win32_System_Threading",
     # `netcatty_import`: Electron's `safeStorage` on Windows is DPAPI, so the
     # Windows path needs `CryptUnprotectData` rather than another cipher.
     "Win32_Security_Cryptography",

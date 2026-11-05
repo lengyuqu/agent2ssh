@@ -1756,43 +1756,37 @@ pub fn reset_redact_rules() -> Result<Vec<crate::types::RedactRuleInfo>, String>
 
 #[tauri::command]
 pub fn daemon_status() -> Result<DaemonControlResult, String> {
+    use crate::daemon_control::{daemon_pid_state, DaemonPidState};
     match crate::daemon_control::read_daemon_pid().map_err(|e| e.to_string())? {
-        Some(pid)
-            if crate::daemon_control::process_is_alive(pid)
-                && crate::daemon_control::daemon_health_ok() =>
-        {
+        Some(pid) => {
+            let state = daemon_pid_state(pid);
             let _ = append_diagnostic_log(
                 "debug",
                 "tauri",
-                "daemon status healthy",
-                Some(serde_json::json!({ "pid": pid })),
+                "daemon status checked",
+                Some(serde_json::json!({ "pid": pid, "state": format!("{state:?}") })),
             );
+            let (running, message) = match state {
+                DaemonPidState::Healthy => (true, format!("Daemon is running (pid={pid}).")),
+                DaemonPidState::RunningUnhealthy => (false, format!("Daemon PID {pid} is running but the health check failed; PID file retained.")),
+                DaemonPidState::Unverified => (false, format!("Daemon PID {pid} cannot be verified; PID file retained.")),
+                DaemonPidState::Stale => (false, format!("Daemon PID {pid} is stale; PID file retained.")),
+            };
             Ok(DaemonControlResult {
-                running: true,
+                running,
                 pid: Some(pid),
-                message: format!("Daemon is running (pid={pid})."),
-            })
-        }
-        Some(pid) => {
-            crate::daemon_control::remove_daemon_pid_file();
-            let _ = append_diagnostic_log(
-                "warn",
-                "tauri",
-                "removed stale daemon pid file",
-                Some(serde_json::json!({ "pid": pid })),
-            );
-            Ok(DaemonControlResult {
-                running: false,
-                pid: Some(pid),
-                message: format!("Removed stale daemon PID file (pid={pid})."),
+                message,
             })
         }
         None => {
-            let _ = append_diagnostic_log("debug", "tauri", "daemon status not running", None);
+            let endpoint_pid = crate::daemon_control::daemon_health_pid();
             Ok(DaemonControlResult {
                 running: false,
-                pid: None,
-                message: "Daemon is not running.".into(),
+                pid: endpoint_pid,
+                message: endpoint_pid.map_or_else(
+                    || "Daemon is not running.".into(),
+                    |pid| format!("Daemon health endpoint is active (pid={pid}) but PID file is missing; identity cannot be verified."),
+                ),
             })
         }
     }
@@ -1802,7 +1796,8 @@ pub fn daemon_status() -> Result<DaemonControlResult, String> {
 pub fn daemon_start(app: AppHandle) -> Result<DaemonControlResult, String> {
     let _ = app;
     if let Some(pid) = crate::daemon_control::read_daemon_pid().map_err(|e| e.to_string())? {
-        if crate::daemon_control::process_is_alive(pid) && crate::daemon_control::daemon_health_ok()
+        if crate::daemon_control::daemon_pid_state(pid)
+            == crate::daemon_control::DaemonPidState::Healthy
         {
             let _ = append_diagnostic_log(
                 "info",
@@ -1816,13 +1811,6 @@ pub fn daemon_start(app: AppHandle) -> Result<DaemonControlResult, String> {
                 message: format!("Daemon is already running (pid={pid})."),
             });
         }
-        let _ = append_diagnostic_log(
-            "warn",
-            "tauri",
-            "daemon start removing stale pid",
-            Some(serde_json::json!({ "pid": pid })),
-        );
-        crate::daemon_control::remove_daemon_pid_file();
     }
 
     let daemon_bin = bundled_daemon_binary_path()?;
@@ -1863,7 +1851,7 @@ pub fn daemon_start(app: AppHandle) -> Result<DaemonControlResult, String> {
 #[tauri::command]
 pub fn daemon_stop() -> Result<DaemonControlResult, String> {
     match crate::daemon_control::read_daemon_pid().map_err(|e| e.to_string())? {
-        Some(pid) if crate::daemon_control::process_is_alive(pid) => {
+        Some(pid) => {
             crate::daemon_control::stop_daemon_process(pid).map_err(|e| e.to_string())?;
             crate::daemon_control::remove_daemon_pid_file();
             let _ = append_diagnostic_log(
@@ -1878,23 +1866,10 @@ pub fn daemon_stop() -> Result<DaemonControlResult, String> {
                 message: format!("Daemon stopped (pid={pid})."),
             })
         }
-        Some(pid) => {
-            crate::daemon_control::remove_daemon_pid_file();
-            let _ = append_diagnostic_log(
-                "warn",
-                "tauri",
-                "daemon stop removed stale pid",
-                Some(serde_json::json!({ "pid": pid })),
-            );
-            Ok(DaemonControlResult {
-                running: false,
-                pid: Some(pid),
-                message: format!("Removed stale daemon PID file (pid={pid})."),
-            })
-        }
         None => {
-            let _ =
-                append_diagnostic_log("info", "tauri", "daemon stop skipped; not running", None);
+            if let Some(pid) = crate::daemon_control::daemon_health_pid() {
+                return Err(format!("Daemon health endpoint is active (pid={pid}) but PID file is missing; cannot verify or stop it."));
+            }
             Ok(DaemonControlResult {
                 running: false,
                 pid: None,
@@ -1907,15 +1882,13 @@ pub fn daemon_stop() -> Result<DaemonControlResult, String> {
 #[tauri::command]
 pub fn daemon_restart(app: AppHandle) -> Result<DaemonControlResult, String> {
     if let Some(pid) = crate::daemon_control::read_daemon_pid().map_err(|e| e.to_string())? {
-        if crate::daemon_control::process_is_alive(pid) {
-            crate::daemon_control::stop_daemon_process(pid).map_err(|e| e.to_string())?;
-            let _ = append_diagnostic_log(
-                "info",
-                "tauri",
-                "daemon restart terminated existing process",
-                Some(serde_json::json!({ "pid": pid })),
-            );
-        }
+        crate::daemon_control::stop_daemon_process(pid).map_err(|e| e.to_string())?;
+        let _ = append_diagnostic_log(
+            "info",
+            "tauri",
+            "daemon restart terminated existing process",
+            Some(serde_json::json!({ "pid": pid })),
+        );
         crate::daemon_control::remove_daemon_pid_file();
     }
     daemon_start(app)

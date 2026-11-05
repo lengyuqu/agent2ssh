@@ -35,6 +35,10 @@ struct RunningDaemon {
 
 impl RunningDaemon {
     fn start(label: &str, extra_files: &[(&str, &str)]) -> Self {
+        Self::start_with_name(label, extra_files, false)
+    }
+
+    fn start_with_name(label: &str, extra_files: &[(&str, &str)], renamed: bool) -> Self {
         let dir = std::env::temp_dir().join(format!(
             "a2s-daemon-stop-{label}-{}-{}",
             std::process::id(),
@@ -58,31 +62,83 @@ impl RunningDaemon {
         std::env::set_var(CONFIG_DIR_ENV, &dir);
         std::env::set_var(ADDR_ENV, &addr);
 
-        let child = Command::new(env!("CARGO_BIN_EXE_agent2ssh-daemon"))
-            .env(CONFIG_DIR_ENV, &dir)
-            .env(ADDR_ENV, &addr)
+        let original = std::path::Path::new(env!("CARGO_BIN_EXE_agent2ssh-daemon"));
+        let binary = if renamed {
+            let copy = dir.join(format!("renamed-daemon{}", std::env::consts::EXE_SUFFIX));
+            std::fs::copy(original, &copy).expect("copy daemon under a different name");
+            copy
+        } else {
+            original.to_path_buf()
+        };
+        let child = Self::spawn(&binary, &dir);
+        let mut daemon = Self { child, dir, token };
+        for attempt in 0..5 {
+            match daemon.wait_until_serving() {
+                Ok(()) => return daemon,
+                Err((true, detail)) if attempt < 4 => {
+                    eprintln!("retrying daemon after port collision: {detail}");
+                    let listener =
+                        TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
+                    let addr = listener.local_addr().unwrap().to_string();
+                    drop(listener);
+                    std::env::set_var(ADDR_ENV, addr);
+                    daemon.child = Self::spawn(&binary, &daemon.dir);
+                }
+                Err((_, detail)) => panic!("{detail}"),
+            }
+        }
+        unreachable!()
+    }
+
+    fn spawn(binary: &std::path::Path, dir: &std::path::Path) -> Child {
+        let stderr =
+            std::fs::File::create(dir.join("daemon.stderr")).expect("create daemon stderr");
+        Command::new(binary)
+            .env(CONFIG_DIR_ENV, dir)
+            .env(ADDR_ENV, std::env::var(ADDR_ENV).expect("daemon address"))
             .env("AGENT2SSH_LOG", "warn")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(stderr))
             .spawn()
-            .expect("spawn agent2ssh-daemon");
-        let daemon = Self { child, dir, token };
-        daemon.wait_until_serving();
-        daemon
+            .expect("spawn agent2ssh-daemon")
     }
 
-    fn wait_until_serving(&self) {
+    fn wait_until_serving(&mut self) -> Result<(), (bool, String)> {
         let deadline = Instant::now() + STARTUP_BUDGET;
         while Instant::now() < deadline {
-            if local_daemon_request("GET", "/health", None, Duration::from_millis(500))
-                .is_ok_and(|response| response.status == 200)
+            if let Ok(response) =
+                local_daemon_request("GET", "/health", None, Duration::from_millis(500))
             {
-                return;
+                if response.status == 200 {
+                    if let Ok(body) = serde_json::from_str::<serde_json::Value>(&response.body) {
+                        if body["pid"].as_u64() == Some(u64::from(self.child.id())) {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+            if let Some(status) = self.child.try_wait().expect("check daemon child") {
+                let stderr =
+                    std::fs::read_to_string(self.dir.join("daemon.stderr")).unwrap_or_default();
+                let collision = ["os error 48", "os error 98", "os error 10048"]
+                    .iter()
+                    .any(|code| stderr.contains(code));
+                return Err((
+                    collision,
+                    format!("daemon exited before health check: {status}; stderr: {stderr}"),
+                ));
             }
             std::thread::sleep(Duration::from_millis(100));
         }
-        panic!("the daemon did not answer /health within {STARTUP_BUDGET:?}");
+        Err((
+            false,
+            format!(
+                "daemon did not answer /health within {STARTUP_BUDGET:?}; child: {:?}; stderr: {}",
+                self.child.try_wait(),
+                std::fs::read_to_string(self.dir.join("daemon.stderr")).unwrap_or_default()
+            ),
+        ))
     }
 
     fn pid_file(&self) -> PathBuf {
@@ -159,11 +215,325 @@ fn stop_does_not_signal_a_process_with_daemon_name_in_an_argument() {
         !process_is_alive(pid),
         "an argument is not the executable name"
     );
-    stop_daemon_process(pid).expect("unrelated process is ignored");
+    let error = stop_daemon_process(pid).expect_err("unrelated process is not safely identified");
+    assert!(error.to_string().contains("cannot be safely identified"));
     let still_running = child.try_wait().expect("check unrelated process").is_none();
     let _ = child.kill();
     let _ = child.wait();
     assert!(still_running, "stop must not signal the unrelated process");
+}
+
+#[cfg(unix)]
+#[test]
+#[serial_test::serial]
+fn stop_refuses_a_daemon_named_process_without_authenticated_health() {
+    use std::os::unix::fs::symlink;
+    let dir = tempfile::tempdir().unwrap();
+    let executable = dir.path().join("agent2ssh-daemon");
+    symlink("/bin/sleep", &executable).unwrap();
+    let mut child = Command::new(executable).arg("30").spawn().unwrap();
+    let pid = child.id();
+    let silent = TcpListener::bind("127.0.0.1:0").unwrap();
+    std::env::set_var(CONFIG_DIR_ENV, dir.path());
+    std::env::set_var(ADDR_ENV, silent.local_addr().unwrap().to_string());
+    std::fs::write(dir.path().join("daemon.pid"), pid.to_string()).unwrap();
+    let result = stop_daemon_process(pid);
+    let still_running = child.try_wait().unwrap().is_none();
+    let pid_retained = dir.path().join("daemon.pid").exists();
+    let _ = child.kill();
+    let _ = child.wait();
+    common::restore_default_config_env();
+    std::env::remove_var(ADDR_ENV);
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("could not be authenticated"));
+    assert!(still_running && pid_retained);
+}
+
+#[test]
+#[serial_test::serial]
+fn renamed_daemon_is_reported_healthy_but_not_unsafely_stopped() {
+    use agent2ssh::daemon_control::{daemon_pid_state, DaemonPidState};
+    let daemon = RunningDaemon::start_with_name("renamed", &[], true);
+    let pid = daemon.child.id();
+    assert!(!process_is_alive(pid));
+    assert_eq!(daemon_pid_state(pid), DaemonPidState::Healthy);
+    #[cfg(feature = "tauri")]
+    {
+        let status = agent2ssh::tauri_commands::daemon_status().expect("desktop status");
+        assert!(status.running);
+        assert_eq!(status.pid, Some(pid));
+        assert!(agent2ssh::tauri_commands::daemon_stop().is_err());
+        assert_eq!(
+            std::fs::read_to_string(daemon.pid_file()).unwrap(),
+            pid.to_string()
+        );
+    }
+    let cli = |action| {
+        Command::new(env!("CARGO_BIN_EXE_agent2ssh"))
+            .args(["daemon", action])
+            .env(CONFIG_DIR_ENV, &daemon.dir)
+            .output()
+            .expect("run CLI")
+    };
+    let status = cli("status");
+    assert!(status.status.success());
+    assert!(String::from_utf8_lossy(&status.stdout).contains("Daemon is running"));
+    let start = cli("start");
+    assert!(start.status.success());
+    assert!(String::from_utf8_lossy(&start.stdout).contains("already running"));
+    let stop = cli("stop");
+    assert!(!stop.status.success());
+    assert!(String::from_utf8_lossy(&stop.stderr).contains("cannot be safely identified"));
+    assert_eq!(
+        std::fs::read_to_string(daemon.pid_file()).unwrap(),
+        pid.to_string()
+    );
+    assert_eq!(daemon_pid_state(pid), DaemonPidState::Healthy);
+
+    // A matching PID alone is not enough if this config has a different token.
+    std::fs::write(daemon.dir.join("daemon.token"), "wrong-token").unwrap();
+    assert_eq!(daemon_pid_state(pid), DaemonPidState::Unverified);
+    #[cfg(feature = "tauri")]
+    assert!(!agent2ssh::tauri_commands::daemon_status().unwrap().running);
+    assert!(!cli("start").status.success());
+    assert!(!cli("stop").status.success());
+    assert_eq!(
+        std::fs::read_to_string(daemon.pid_file()).unwrap(),
+        pid.to_string()
+    );
+    std::fs::write(daemon.dir.join("daemon.token"), &daemon.token).unwrap();
+    assert_eq!(daemon_pid_state(pid), DaemonPidState::Healthy);
+
+    // A live renamed daemon with an unavailable health endpoint is uncertain,
+    // not stale. No desktop or CLI path may silently discard its PID.
+    let previous_addr = std::env::var(ADDR_ENV).unwrap();
+    let silent = TcpListener::bind("127.0.0.1:0").unwrap();
+    std::env::set_var(ADDR_ENV, silent.local_addr().unwrap().to_string());
+    assert_eq!(daemon_pid_state(pid), DaemonPidState::Unverified);
+    #[cfg(feature = "tauri")]
+    {
+        let status = agent2ssh::tauri_commands::daemon_status().expect("desktop status");
+        assert!(!status.running);
+        assert!(status.message.contains("cannot be verified"));
+        assert!(agent2ssh::tauri_commands::daemon_stop().is_err());
+    }
+    assert!(!cli("start").status.success());
+    assert!(!cli("stop").status.success());
+    assert_eq!(
+        std::fs::read_to_string(daemon.pid_file()).unwrap(),
+        pid.to_string()
+    );
+    std::env::set_var(ADDR_ENV, previous_addr);
+}
+
+#[test]
+#[serial_test::serial]
+fn wrong_admin_token_never_signals_the_real_daemon() {
+    let mut daemon = RunningDaemon::start("wrong-token", &[]);
+    let pid = daemon.child.id();
+    std::fs::write(daemon.dir.join("daemon.token"), "wrong-token").unwrap();
+    let result = stop_daemon_process(pid);
+    let alive = daemon.child.try_wait().unwrap().is_none();
+    let pid_retained = daemon.pid_file().exists();
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("could not be authenticated"));
+    assert!(alive && pid_retained);
+}
+
+#[test]
+#[serial_test::serial]
+fn start_refuses_to_claim_an_existing_health_endpoint_without_a_pid_file() {
+    use agent2ssh::daemon_control::start_daemon_background;
+    let daemon = RunningDaemon::start("existing-health", &[]);
+    std::fs::remove_file(daemon.pid_file()).unwrap();
+    let cli = |action| {
+        Command::new(env!("CARGO_BIN_EXE_agent2ssh"))
+            .args(["daemon", action])
+            .env(CONFIG_DIR_ENV, &daemon.dir)
+            .output()
+            .unwrap()
+    };
+    let status = cli("status");
+    assert!(String::from_utf8_lossy(&status.stdout).contains("PID file is missing"));
+    assert!(!cli("stop").status.success());
+    #[cfg(feature = "tauri")]
+    {
+        let status = agent2ssh::tauri_commands::daemon_status().unwrap();
+        assert!(!status.running && status.message.contains("PID file is missing"));
+        assert!(agent2ssh::tauri_commands::daemon_stop().is_err());
+    }
+    let error =
+        start_daemon_background(std::path::Path::new(env!("CARGO_BIN_EXE_agent2ssh-daemon")))
+            .expect_err("must not start over an existing endpoint");
+    assert!(
+        error.to_string().contains("already served by pid"),
+        "{error}"
+    );
+    assert!(process_is_alive(daemon.child.id()));
+}
+
+#[test]
+#[serial_test::serial]
+fn competing_daemon_cannot_overwrite_the_running_daemon_pid() {
+    let daemon = RunningDaemon::start("competing", &[]);
+    let pid = daemon.child.id();
+    let output = Command::new(env!("CARGO_BIN_EXE_agent2ssh-daemon"))
+        .env(CONFIG_DIR_ENV, &daemon.dir)
+        .env(ADDR_ENV, std::env::var(ADDR_ENV).unwrap())
+        .output()
+        .expect("launch competing daemon");
+    assert!(
+        !output.status.success(),
+        "competing daemon must fail to bind"
+    );
+    assert_eq!(
+        std::fs::read_to_string(daemon.pid_file()).unwrap(),
+        pid.to_string()
+    );
+    assert!(process_is_alive(pid));
+}
+
+#[test]
+#[serial_test::serial]
+fn other_daemons_health_is_not_reported_as_our_pid() {
+    use agent2ssh::daemon_control::{daemon_pid_state, DaemonPidState};
+    let daemon = RunningDaemon::start("health-mismatch", &[]);
+    let actual_pid = daemon.child.id();
+    let other_pid = u32::MAX - 1;
+    std::fs::write(daemon.pid_file(), other_pid.to_string()).unwrap();
+    assert_eq!(daemon_pid_state(other_pid), DaemonPidState::Unverified);
+    let report = agent2ssh::diagnostics::generate_system_report().expect("diagnostics");
+    assert_eq!(report["daemon"]["health_ok"], false);
+    assert_eq!(report["daemon"]["health_endpoint_pid"], actual_pid);
+    #[cfg(feature = "tauri")]
+    {
+        let status = agent2ssh::tauri_commands::daemon_status().unwrap();
+        assert!(!status.running);
+        assert!(status.message.contains("cannot be verified"));
+    }
+    assert_eq!(
+        std::fs::read_to_string(daemon.pid_file()).unwrap(),
+        other_pid.to_string()
+    );
+    std::fs::write(daemon.pid_file(), actual_pid.to_string()).unwrap();
+}
+
+#[test]
+#[serial_test::serial]
+fn background_start_verifies_and_stops_its_own_daemon() {
+    use agent2ssh::daemon_control::{daemon_pid_state, start_daemon_background, DaemonPidState};
+    let dir = tempfile::tempdir().unwrap();
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    std::env::set_var(CONFIG_DIR_ENV, dir.path());
+    std::env::set_var(ADDR_ENV, port.to_string());
+    // A definitely absent PID is still cleaned up so restart remains usable.
+    std::fs::write(dir.path().join("daemon.pid"), (u32::MAX - 1).to_string()).unwrap();
+    let started =
+        start_daemon_background(std::path::Path::new(env!("CARGO_BIN_EXE_agent2ssh-daemon")))
+            .expect("start real daemon");
+    let state = daemon_pid_state(started.pid);
+    let stopped = stop_daemon_process(started.pid);
+    common::restore_default_config_env();
+    std::env::remove_var(ADDR_ENV);
+    assert_eq!(state, DaemonPidState::Healthy);
+    stopped.expect("stop the started daemon");
+    assert!(!dir.path().join("daemon.pid").exists());
+}
+
+#[cfg(unix)]
+#[test]
+#[serial_test::serial]
+fn failed_health_does_not_discard_the_pid_of_a_live_unrecognized_child() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let stub = dir.path().join("renamed-child");
+    std::fs::write(&stub, "#!/bin/sh\nprintf '%s' \"$$\" > \"$AGENT2SSH_CONFIG_DIR/daemon.pid\"\nexec /bin/sleep 15\n").unwrap();
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    std::env::set_var(CONFIG_DIR_ENV, dir.path());
+    std::env::set_var(ADDR_ENV, port.to_string());
+    let result = agent2ssh::daemon_control::start_daemon_background(&stub);
+    let pid = std::fs::read_to_string(dir.path().join("daemon.pid"))
+        .ok()
+        .and_then(|text| text.parse::<i32>().ok());
+    if let Some(pid) = pid {
+        unsafe {
+            libc::kill(pid, libc::SIGTERM);
+        }
+    }
+    common::restore_default_config_env();
+    std::env::remove_var(ADDR_ENV);
+    assert!(result.is_err());
+    assert!(pid.is_some(), "the live child's PID must be retained");
+}
+
+#[test]
+#[serial_test::serial]
+fn startup_does_not_accept_another_process_health_response() {
+    use std::io::{Read, Write};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    std::env::set_var(CONFIG_DIR_ENV, dir.path());
+    std::env::set_var(ADDR_ENV, listener.local_addr().unwrap().to_string());
+    let done = Arc::new(AtomicBool::new(false));
+    let stop = done.clone();
+    let other_pid = std::process::id();
+    let server = std::thread::spawn(move || {
+        let mut requests = 0;
+        while !stop.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((mut socket, _)) => {
+                    let mut buf = [0; 2048];
+                    let _ = socket.set_read_timeout(Some(Duration::from_secs(1)));
+                    let _ = socket.read(&mut buf);
+                    requests += 1;
+                    // The address becomes healthy only after startup's preflight.
+                    let body = if requests == 1 {
+                        "{}".to_string()
+                    } else {
+                        format!(r#"{{"ok":true,"pid":{other_pid}}}"#)
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = socket.write_all(response.as_bytes());
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                Err(error) => panic!("accept fake health: {error}"),
+            }
+        }
+    });
+    let result = agent2ssh::daemon_control::start_daemon_background(std::path::Path::new(env!(
+        "CARGO_BIN_EXE_agent2ssh-daemon"
+    )));
+    done.store(true, Ordering::Relaxed);
+    server.join().unwrap();
+    common::restore_default_config_env();
+    std::env::remove_var(ADDR_ENV);
+    assert!(
+        result.is_err(),
+        "another process's health must not confirm startup"
+    );
+    assert!(!dir.path().join("daemon.pid").exists());
 }
 
 /// The route the Windows stop uses, exercised here on every platform: the daemon
