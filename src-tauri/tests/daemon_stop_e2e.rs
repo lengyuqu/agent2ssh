@@ -638,6 +638,16 @@ fn the_shutdown_route_is_closed_to_anonymous_and_scoped_callers() {
     .expect("scoped request");
     assert_eq!(scoped.status, 403, "{}", scoped.body);
 
+    let anonymous_guarded = agent2ssh::daemon_activity::local_daemon_request_for_pid(
+        "POST",
+        "/shutdown/guarded",
+        None,
+        Duration::from_secs(2),
+        daemon.child.id(),
+    )
+    .expect("anonymous guarded shutdown");
+    assert_eq!(anonymous_guarded.status, 401, "{}", anonymous_guarded.body);
+
     let missing = local_daemon_request(
         "POST",
         "/shutdown/guarded",
