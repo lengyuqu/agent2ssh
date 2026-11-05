@@ -141,6 +141,31 @@ fn stop_daemon_process_waits_for_a_graceful_exit() {
     );
 }
 
+// A stale PID can point to any process. Mentioning the daemon in an argument
+// must not make that process a candidate for the stop path.
+#[cfg(unix)]
+#[test]
+#[serial_test::serial]
+fn stop_does_not_signal_a_process_with_daemon_name_in_an_argument() {
+    let mut child = Command::new("sh")
+        .args(["-c", "read ignored", "agent2ssh-daemon"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn unrelated shell");
+    let pid = child.id();
+    assert!(
+        !process_is_alive(pid),
+        "an argument is not the executable name"
+    );
+    stop_daemon_process(pid).expect("unrelated process is ignored");
+    let still_running = child.try_wait().expect("check unrelated process").is_none();
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(still_running, "stop must not signal the unrelated process");
+}
+
 /// The route the Windows stop uses, exercised here on every platform: the daemon
 /// accepts the request and then shuts down by itself, cleaning up.
 #[test]

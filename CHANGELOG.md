@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Fixed
+- **Daemon process detection on Linux and safe stop**: Linux truncates process names, so detection now reads the command line. Only the executable name is considered, preventing an unrelated process from matching merely because an argument mentions `agent2ssh-daemon`. Stop also rechecks the observed process start time before signalling and while waiting, reducing PID reuse risk without making PID-based signalling atomic. The stop test covers both the real daemon and an unrelated shell.
 - **The real `~/.agent2ssh/audit.jsonl` no longer carries test records (E7)**: before integration tests isolated their config directory, several runs wrote to the real store — one wiped the real `approvals.jsonl` (unrecoverable, no backup existed), and the resident-session tests appended `source: "test"` records to the real `audit.jsonl`, where 50 of them stayed for months next to 119 real entries. The isolation itself was fixed long ago (every integration test now runs under `tests/common` and refuses the real directory); what remained was the residue. The 50 test lines are gone from the file, kept are the 119 real records — verified line-by-line before rewriting, with a copy left at `~/.agent2ssh/audit.jsonl.backup-before-test-cleanup` (delete it once satisfied; the app never reads that name). The malformed-line policy matches the loader's: anything unparsable stays untouched.
 
 ### Added

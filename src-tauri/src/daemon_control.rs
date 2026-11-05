@@ -51,6 +51,10 @@ pub fn remove_daemon_pid_file() {
 }
 
 pub fn process_is_alive(pid: u32) -> bool {
+    daemon_process_start_time(pid).is_some()
+}
+
+fn daemon_process_start_time(pid: u32) -> Option<u64> {
     let pid = sysinfo::Pid::from_u32(pid);
     let mut system = sysinfo::System::new();
     // Linux truncates process names to 15 bytes, so the daemon's full name
@@ -66,21 +70,37 @@ pub fn process_is_alive(pid: u32) -> bool {
         // the process table as a zombie. The desktop app spawns the daemon and
         // drops the handle, so that is exactly what a stopped daemon looks like
         // to it — and "still listed" would make every stop wait out its timeout.
-        .map(|process| {
+        .filter(|process| {
             process.status() != sysinfo::ProcessStatus::Zombie && process_looks_like_daemon(process)
         })
-        .unwrap_or(false)
+        .map(|process| process.start_time())
+}
+
+// Only the executable name identifies a daemon. An unrelated shell or editor
+// can carry "agent2ssh-daemon" in a later argument and must never match.
+fn is_daemon_executable(value: &std::ffi::OsStr) -> bool {
+    let name = std::path::Path::new(value)
+        .file_name()
+        .unwrap_or(value)
+        .to_string_lossy();
+    let name = name.strip_suffix(".exe").unwrap_or(&name);
+    matches!(
+        name,
+        "agent2ssh-daemon"
+            | "agent2ssh-daemon-aarch64-apple-darwin"
+            | "agent2ssh-daemon-x86_64-unknown-linux-gnu"
+            | "agent2ssh-daemon-x86_64-pc-windows-msvc"
+    )
 }
 
 fn process_looks_like_daemon(process: &sysinfo::Process) -> bool {
-    let name = process.name().to_string_lossy();
-    if name.contains("agent2ssh-daemon") {
-        return true;
-    }
-    process
-        .cmd()
-        .iter()
-        .any(|part| part.to_string_lossy().contains("agent2ssh-daemon"))
+    // The name remains useful on Windows when reading the command line is
+    // denied; on Linux it may be truncated, so also inspect argv[0].
+    is_daemon_executable(process.name())
+        || process
+            .cmd()
+            .first()
+            .is_some_and(|arg| is_daemon_executable(arg))
 }
 
 pub fn terminate_process(pid: u32) -> Result<()> {
@@ -371,25 +391,47 @@ pub fn clear_daemon_owner() {
 /// timeout meant to catch a hung one.
 const GRACEFUL_STOP_WAIT: Duration = Duration::from_secs(8);
 
-fn wait_for_exit(pid: u32, within: Duration) -> bool {
+fn wait_for_exit(pid: u32, expected_start: u64, within: Duration) -> bool {
     let start = Instant::now();
     while start.elapsed() < within {
-        if !process_is_alive(pid) {
+        if daemon_process_start_time(pid) != Some(expected_start) {
             return true;
         }
         thread::sleep(Duration::from_millis(50));
     }
-    !process_is_alive(pid)
+    daemon_process_start_time(pid) != Some(expected_start)
 }
 
-fn kill_process(pid: u32) -> Result<()> {
+// Recheck identity immediately before signalling. This narrows the PID reuse
+// window but cannot make a PID-based signal atomic with this inspection.
+fn signal_daemon(pid: u32, expected_start: u64, force: bool) -> Result<()> {
     let sys_pid = sysinfo::Pid::from_u32(pid);
     let mut system = sysinfo::System::new();
-    system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[sys_pid]), true);
-    match system.process(sys_pid) {
-        None => Ok(()),
-        Some(process) if process.kill() => Ok(()),
-        Some(_) => Err(anyhow!("failed to kill daemon process {pid}")),
+    system.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::Some(&[sys_pid]),
+        true,
+        sysinfo::ProcessRefreshKind::nothing().with_cmd(sysinfo::UpdateKind::OnlyIfNotSet),
+    );
+    let Some(process) = system.process(sys_pid) else {
+        return Ok(());
+    };
+    if process.start_time() != expected_start
+        || process.status() == sysinfo::ProcessStatus::Zombie
+        || !process_looks_like_daemon(process)
+    {
+        return Ok(());
+    }
+    let sent = if force {
+        process.kill()
+    } else {
+        process
+            .kill_with(sysinfo::Signal::Term)
+            .unwrap_or_else(|| process.kill())
+    };
+    if sent {
+        Ok(())
+    } else {
+        Err(anyhow!("failed to signal daemon process {pid}"))
     }
 }
 
@@ -420,23 +462,23 @@ pub fn request_graceful_shutdown() -> bool {
 /// the listening port while it drains, so starting the new one straight away
 /// would fail to bind.
 pub fn stop_daemon_process(pid: u32) -> Result<()> {
-    if !process_is_alive(pid) {
+    let Some(start_time) = daemon_process_start_time(pid) else {
         clear_daemon_owner();
         return Ok(());
-    }
+    };
     let asked_nicely = cfg!(windows) && request_graceful_shutdown();
     if !asked_nicely {
-        terminate_process(pid)?;
+        signal_daemon(pid, start_time, false)?;
     }
-    if !wait_for_exit(pid, GRACEFUL_STOP_WAIT) {
+    if !wait_for_exit(pid, start_time, GRACEFUL_STOP_WAIT) {
         let _ = crate::diagnostics::append_diagnostic_log(
             "warn",
             "daemon_control",
             "daemon did not exit after a graceful stop; killing it",
             Some(serde_json::json!({ "pid": pid })),
         );
-        kill_process(pid)?;
-        if !wait_for_exit(pid, Duration::from_secs(2)) {
+        signal_daemon(pid, start_time, true)?;
+        if !wait_for_exit(pid, start_time, Duration::from_secs(2)) {
             return Err(anyhow!("daemon process {pid} would not exit"));
         }
     }
@@ -447,6 +489,37 @@ pub fn stop_daemon_process(pid: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn daemon_executable_names_are_not_substring_matches() {
+        use std::ffi::OsStr;
+        assert!(is_daemon_executable(OsStr::new("/tmp/agent2ssh-daemon")));
+        assert!(is_daemon_executable(OsStr::new("agent2ssh-daemon.exe")));
+        assert!(is_daemon_executable(OsStr::new(
+            "agent2ssh-daemon-x86_64-unknown-linux-gnu"
+        )));
+        assert!(!is_daemon_executable(OsStr::new("not-agent2ssh-daemon")));
+        assert!(!is_daemon_executable(OsStr::new("agent2ssh-daemon-helper")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_changed_start_time_is_not_signalled_or_waited_on() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("agent2ssh-daemon");
+        symlink("/bin/sleep", &executable).unwrap();
+        let mut child = Command::new(executable).arg("30").spawn().unwrap();
+        let pid = child.id();
+        let start = daemon_process_start_time(pid).expect("identify spawned process");
+        let stale_start = start.wrapping_add(1);
+        let ignored = signal_daemon(pid, stale_start, true).is_ok();
+        let considered_exited = wait_for_exit(pid, stale_start, Duration::from_millis(1));
+        let still_running = child.try_wait().unwrap().is_none();
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(ignored && considered_exited && still_running);
+    }
 
     #[test]
     fn a_marker_names_the_process_that_wrote_it() {
