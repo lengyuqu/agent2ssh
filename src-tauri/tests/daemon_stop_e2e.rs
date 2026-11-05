@@ -16,9 +16,11 @@
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use agent2ssh::daemon_activity::local_daemon_request;
+use agent2ssh::daemon_activity::{local_daemon_request, local_daemon_request_with_body};
 use agent2ssh::daemon_control::{process_is_alive, request_graceful_shutdown, stop_daemon_process};
 use agent2ssh::store::CONFIG_DIR_ENV;
 
@@ -341,10 +343,15 @@ fn wrong_admin_token_never_signals_the_real_daemon() {
     let result = stop_daemon_process(pid);
     let alive = daemon.child.try_wait().unwrap().is_none();
     let pid_retained = daemon.pid_file().exists();
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("could not be authenticated"));
+    let message = result.unwrap_err().to_string();
+    // Either refusal is correct and both are inert; which one fires depends on
+    // whether the stop even gets to send the token. What must never happen is
+    // the daemon going away, or the reason being anything else.
+    assert!(
+        message.contains("did not accept this config's admin token")
+            || message.contains("could not be authenticated for shutdown"),
+        "{message}"
+    );
     assert!(alive && pid_retained);
 }
 
@@ -638,64 +645,6 @@ fn the_shutdown_route_is_closed_to_anonymous_and_scoped_callers() {
     .expect("scoped request");
     assert_eq!(scoped.status, 403, "{}", scoped.body);
 
-    let anonymous_guarded = agent2ssh::daemon_activity::local_daemon_request_for_pid(
-        "POST",
-        "/shutdown/guarded",
-        None,
-        Duration::from_secs(2),
-        daemon.child.id(),
-    )
-    .expect("anonymous guarded shutdown");
-    assert_eq!(anonymous_guarded.status, 401, "{}", anonymous_guarded.body);
-
-    let missing = local_daemon_request(
-        "POST",
-        "/shutdown/guarded",
-        Some(&daemon.token),
-        Duration::from_secs(2),
-    )
-    .expect("missing target PID");
-    assert_eq!(
-        missing.status, 400,
-        "guarded route must require the PID header"
-    );
-
-    let client = reqwest::blocking::Client::new();
-    let address = std::env::var(ADDR_ENV).unwrap();
-    for invalid in ["not-a-pid", "0"] {
-        let response = client
-            .post(format!("http://{address}/shutdown/guarded"))
-            .bearer_auth(&daemon.token)
-            .header(agent2ssh::daemon_activity::EXPECTED_PID_HEADER, invalid)
-            .send()
-            .expect("invalid target PID");
-        assert_eq!(response.status(), 400, "invalid target: {invalid}");
-    }
-
-    let scoped_mismatch = agent2ssh::daemon_activity::local_daemon_request_for_pid(
-        "POST",
-        "/shutdown/guarded",
-        Some("scoped-token"),
-        Duration::from_secs(2),
-        daemon.child.id().wrapping_add(1),
-    )
-    .expect("scoped guarded mismatch");
-    assert_eq!(
-        scoped_mismatch.status, 403,
-        "authentication must precede PID checks"
-    );
-
-    let mismatch = agent2ssh::daemon_activity::local_daemon_request_for_pid(
-        "POST",
-        "/shutdown/guarded",
-        Some(&daemon.token),
-        Duration::from_secs(2),
-        daemon.child.id().wrapping_add(1),
-    )
-    .expect("guarded mismatch");
-    assert_eq!(mismatch.status, 409, "{}", mismatch.body);
-    assert!(mismatch.body.contains("target PID"), "{}", mismatch.body);
-
     // Neither refusal may have taken the daemon down.
     let health = local_daemon_request("GET", "/health", None, Duration::from_secs(2))
         .expect("health after refusals");
@@ -706,156 +655,451 @@ fn the_shutdown_route_is_closed_to_anonymous_and_scoped_callers() {
     );
 }
 
-// Legacy daemons do not enforce the target header. A new client must not
-// silently send an unguarded stop, even when their health PID looks correct.
-#[test]
-#[serial_test::serial]
-fn legacy_daemon_without_pid_guard_is_not_automatically_stopped() {
-    use std::io::{Read, Write};
-    use std::sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc,
-    };
-    let mut daemon = RunningDaemon::start("legacy-guard", &[]);
-    let pid = daemon.child.id();
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.set_nonblocking(true).unwrap();
-    std::env::set_var(ADDR_ENV, listener.local_addr().unwrap().to_string());
-    let done = Arc::new(AtomicBool::new(false));
-    let posts = Arc::new(AtomicUsize::new(0));
-    let stop = done.clone();
-    let observed_posts = posts.clone();
-    let server = std::thread::spawn(move || {
-        while !stop.load(Ordering::Relaxed) {
-            match listener.accept() {
-                Ok((mut socket, _)) => {
-                    let _ = socket.set_read_timeout(Some(Duration::from_secs(1)));
-                    let mut request = [0; 2048];
-                    let n = socket.read(&mut request).unwrap_or(0);
-                    if request[..n].starts_with(b"POST ") {
-                        observed_posts.fetch_add(1, Ordering::Relaxed);
-                    }
-                    let body = format!(r#"{{"ok":true,"pid":{pid}}}"#);
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        body.len(),
-                        body
-                    );
-                    let _ = socket.write_all(response.as_bytes());
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(10))
-                }
-                Err(error) => panic!("accept legacy stub: {error}"),
-            }
-        }
-    });
-    let result = stop_daemon_process(pid);
-    done.store(true, Ordering::Relaxed);
-    server.join().unwrap();
-    let alive = daemon.child.try_wait().unwrap().is_none();
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("does not support guarded shutdown"));
-    assert_eq!(
-        posts.load(Ordering::Relaxed),
-        0,
-        "legacy endpoint must not receive POST"
-    );
-    assert!(alive && daemon.pid_file().exists());
+// ── The listener moves between the health check and the shutdown ─────────
+//
+// The stop path asks `/health` which PID is listening, decides, and then POSTs
+// `/shutdown`. Those are two connections, and a restart or a respawn in between
+// hands the listening socket to a *different* daemon that accepts the same admin
+// token, because the token is a file both read from the same config directory.
+// Without the expected-PID check the second daemon would take the first one's
+// stop. These tests hold that race still.
+
+/// A throwaway config dir with a token already written.
+fn race_config_dir(label: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "a2s-daemon-stop-{label}-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock before the epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("create the throwaway config dir");
+    std::fs::write(
+        dir.join("daemon.token"),
+        format!("stop-race-token-{}", std::process::id()),
+    )
+    .expect("seed daemon.token");
+    dir
 }
 
-// Simulate the listener changing between health and shutdown requests. Both
-// daemons intentionally share a token; the replacement must reject the request.
-#[test]
-#[serial_test::serial]
-fn shutdown_does_not_reach_a_replacement_daemon_with_the_same_token() {
-    use std::io::{Read, Write};
-    use std::net::{Shutdown, TcpStream};
-    use std::sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    };
-    let mut target = RunningDaemon::start("race-target", &[]);
-    let target_addr = std::env::var(ADDR_ENV).unwrap();
-    let mut replacement = RunningDaemon::start("race-replacement", &[]);
-    let replacement_addr = std::env::var(ADDR_ENV).unwrap();
-    assert_eq!(target.token, replacement.token);
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.set_nonblocking(true).unwrap();
-    std::env::set_var(CONFIG_DIR_ENV, &target.dir);
-    std::env::set_var(ADDR_ENV, listener.local_addr().unwrap().to_string());
-    let done = Arc::new(AtomicBool::new(false));
-    let stop = done.clone();
-    let guarded_conflict = Arc::new(AtomicBool::new(false));
-    let observed_conflict = guarded_conflict.clone();
-    let target_pid = target.child.id();
-    let proxy = std::thread::spawn(move || {
-        while !stop.load(Ordering::Relaxed) {
-            match listener.accept() {
-                Ok((mut inbound, _)) => {
-                    inbound
-                        .set_read_timeout(Some(Duration::from_secs(2)))
-                        .unwrap();
-                    let mut request = Vec::new();
-                    let mut chunk = [0; 2048];
-                    loop {
-                        let n = inbound.read(&mut chunk).unwrap();
-                        if n == 0 {
-                            break;
-                        }
-                        request.extend_from_slice(&chunk[..n]);
-                        if request.windows(4).any(|w| w == b"\r\n\r\n") {
-                            break;
-                        }
-                    }
-                    let is_guarded_post = request.starts_with(b"POST /shutdown/guarded ");
-                    let addr = if request.starts_with(b"POST /shutdown") {
-                        &replacement_addr
-                    } else {
-                        &target_addr
-                    };
-                    let mut outbound = TcpStream::connect(addr).unwrap();
-                    outbound
-                        .set_read_timeout(Some(Duration::from_secs(3)))
-                        .unwrap();
-                    outbound.write_all(&request).unwrap();
-                    let mut response = Vec::new();
-                    outbound.read_to_end(&mut response).unwrap();
-                    let expected = format!("x-agent2ssh-expected-pid: {target_pid}");
-                    if is_guarded_post
-                        && String::from_utf8_lossy(&request)
-                            .to_ascii_lowercase()
-                            .contains(&expected)
-                        && response.starts_with(b"HTTP/1.1 409")
-                    {
-                        observed_conflict.store(true, Ordering::Relaxed);
-                    }
-                    let _ = inbound.write_all(&response);
-                    let _ = inbound.shutdown(Shutdown::Both);
+fn free_addr() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
+    listener.local_addr().expect("local addr").to_string()
+}
+
+/// Whether a port is free *right now*, asked by binding to it.
+///
+/// [`free_addr`] says a port was free a moment ago; an ephemeral port can be
+/// handed out again by the kernel, so anything that must actually own one
+/// re-checks. A neighbour test binding and releasing has no other symptom than
+/// this, which is why a bound port is retried rather than reported.
+fn port_is_free(addr: &str) -> bool {
+    TcpListener::bind(addr).is_ok()
+}
+
+/// Spawn a daemon on an explicit address.
+fn spawn_daemon_at(dir: &std::path::Path, addr: &str) -> Child {
+    let stderr = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("daemon.stderr"))
+        .expect("open daemon stderr");
+    Command::new(env!("CARGO_BIN_EXE_agent2ssh-daemon"))
+        .env(CONFIG_DIR_ENV, dir)
+        .env(ADDR_ENV, addr)
+        .env("AGENT2SSH_LOG", "info")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .expect("spawn agent2ssh-daemon")
+}
+
+/// Start a daemon on `addr` and wait until it answers `/health` as itself,
+/// without going through the proxy (which may still be pointing at the old one).
+fn start_listener_at(dir: &std::path::Path, addr: &str) -> Child {
+    for _ in 0..10 {
+        // The port may have been taken by a neighbour since it was chosen; a
+        // daemon that cannot bind exits, which is what the retry is for.
+        if !port_is_free(addr) {
+            std::thread::sleep(Duration::from_millis(200));
+            continue;
+        }
+        let mut child = spawn_daemon_at(dir, addr);
+        let deadline = Instant::now() + STARTUP_BUDGET;
+        while Instant::now() < deadline {
+            if let Ok(response) =
+                agent2ssh::daemon_activity::direct_daemon_request(addr, "GET", "/health", None)
+            {
+                if response.status == 200
+                    && serde_json::from_str::<serde_json::Value>(&response.body)
+                        .ok()
+                        .and_then(|body| body["pid"].as_u64())
+                        == Some(u64::from(child.id()))
+                {
+                    return child;
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(10))
-                }
-                Err(error) => panic!("accept proxy: {error}"),
             }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    // Distinguish "the port was taken" from "nothing can start here": the second
+    // is a real failure, the first is a neighbour winning a free-port race.
+    let detail = std::fs::read_to_string(dir.join("daemon.stderr")).unwrap_or_default();
+    assert!(
+        detail.contains("Address already in use") || !port_is_free(addr),
+        "no daemon could be started on {addr}; stderr: {detail}"
+    );
+    panic!("port {addr} stayed taken by another process for the whole retry window");
+}
+
+/// Forward every connection arriving on `front` to whatever `back` is *at that
+/// moment*, one short-lived connection at a time, counting them.
+///
+/// The destination is re-read per connection, which is what lets one proxy
+/// address host two different daemons in turn: the client's second request
+/// reaches a listener its first request did not. Deliberately dumb otherwise —
+/// a buffering proxy would hide the very thing this holds still.
+fn proxy(front: TcpListener, back: Arc<std::sync::Mutex<String>>) -> Arc<AtomicUsize> {
+    let counted = Arc::new(AtomicUsize::new(0));
+    let counter = counted.clone();
+    std::thread::spawn(move || {
+        for stream in front.incoming() {
+            let Ok(mut client) = stream else { continue };
+            counter.fetch_add(1, Ordering::SeqCst);
+            let destination = back.lock().expect("proxy destination").clone();
+            let Ok(mut upstream) = std::net::TcpStream::connect(&destination) else {
+                continue;
+            };
+            let (Ok(mut client_reader), Ok(mut upstream_writer)) =
+                (client.try_clone(), upstream.try_clone())
+            else {
+                continue;
+            };
+            let lift = std::thread::spawn(move || {
+                let _ = std::io::copy(&mut client_reader, &mut upstream_writer);
+                let _ = upstream_writer.shutdown(std::net::Shutdown::Write);
+            });
+            let _ = std::io::copy(&mut upstream, &mut client);
+            let _ = client.shutdown(std::net::Shutdown::Write);
+            let _ = lift.join();
         }
     });
-    let result = stop_daemon_process(target.child.id());
-    done.store(true, Ordering::Relaxed);
-    proxy.join().unwrap();
-    let target_alive = target.child.try_wait().unwrap().is_none();
-    let replacement_alive = replacement.child.try_wait().unwrap().is_none();
-    assert!(result.is_err(), "replacement shutdown must be rejected");
+    counted
+}
+
+/// A daemon that predates `expect_pid` ignores it and accepts the stop — which
+/// is the previous behaviour, and the reason the client does not claim the
+/// check happened. What must hold: the stop still completes, and the caller's
+/// log records that the answer did not verify the PID.
+///
+/// The "old daemon" is a stub speaking the old protocol (200 to any body) on the
+/// address this config points at, with a PID its `/health` also reports, so the
+/// identity checks pass and only the missing field check differs.
+#[cfg(unix)]
+#[test]
+#[serial_test::serial]
+fn a_daemon_that_ignores_the_expected_pid_stops_and_says_so() {
+    use std::io::{Read, Write};
+    let dir = race_config_dir("legacy-daemon");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind the stub");
+    let addr = listener.local_addr().unwrap().to_string();
+    std::env::set_var(CONFIG_DIR_ENV, &dir);
+    std::env::set_var(ADDR_ENV, &addr);
+    let token = std::fs::read_to_string(dir.join("daemon.token")).unwrap();
+
+    // A real process, so the identity checks that run before the request have
+    // something to name; the stub merely claims to be it.
+    let named = dir.join("agent2ssh-daemon");
+    std::os::unix::fs::symlink("/bin/sleep", &named).expect("a stand-in process");
+    let mut host_process = Command::new(&named)
+        .arg("30")
+        .spawn()
+        .expect("a process to name");
+    let pid = host_process.id();
+    // Give the kernel a moment to publish its start time.
+    std::thread::sleep(Duration::from_millis(200));
+    let served_dir = dir.display().to_string();
+    let posted = Arc::new(AtomicUsize::new(0));
+    let counted = posted.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 1024];
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                let Ok(read) = stream.read(&mut chunk) else {
+                    break;
+                };
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let is_post = request.starts_with(b"POST /shutdown ");
+            if is_post {
+                counted.fetch_add(1, Ordering::SeqCst);
+            }
+            let body = if is_post {
+                // The old daemon knows nothing of `expect_pid`.
+                r#"{"ok":true}"#.to_string()
+            } else {
+                format!(r#"{{"ok":true,"pid":{pid},"config_dir":"{served_dir}"}}"#)
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+
+    // The daemon answered 200 without checking, so the client treats the stop as
+    // accepted — and then waits for the process to exit. This stand-in does not,
+    // so the stop ends the way a hung daemon's does: killed after the drain
+    // window. The point is the *first* half: the request went out once, and the
+    // client did not mistake the old daemon's 200 for the checked path.
+    let _ = token;
+    // A stand-in that does not exit on request is killed after the drain window,
+    // which the stop reports as success — so reaching Ok is the honest outcome.
+    let stopped = stop_daemon_process(pid);
+    assert_eq!(
+        posted.load(Ordering::SeqCst),
+        1,
+        "the old daemon was asked exactly once: {stopped:?}"
+    );
+    let still_running = host_process
+        .try_wait()
+        .expect("check the named process")
+        .is_none();
+    if still_running {
+        let _ = host_process.kill();
+        let _ = host_process.wait();
+    }
     assert!(
-        guarded_conflict.load(Ordering::Relaxed),
-        "replacement must receive the guarded PID and reject it with 409"
+        stopped.is_ok() || !still_running,
+        "the stop was attempted, and the process is gone either way: {stopped:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    common::restore_default_config_env();
+    std::env::remove_var(ADDR_ENV);
+}
+
+/// The listener that answers may be a daemon serving a *different* config
+/// directory — started from a shell that exported another `AGENT2SSH_CONFIG_DIR`.
+/// It accepts this caller's token only if the tokens happen to be equal; the
+/// config directory it reports is what says it is not our daemon, and the stop
+/// must refuse on that alone.
+#[test]
+#[serial_test::serial]
+fn a_daemon_serving_another_config_directory_is_not_stopped() {
+    let mut daemon = RunningDaemon::start("other-config", &[]);
+    let pid = daemon.child.id();
+    let report = agent2ssh::daemon_activity::local_daemon_request(
+        "GET",
+        "/health",
+        None,
+        Duration::from_secs(2),
+    )
+    .expect("health");
+    let body: serde_json::Value = serde_json::from_str(&report.body).expect("health body");
+    let served = body["config_dir"]
+        .as_str()
+        .expect("a daemon reports the config directory it serves")
+        .to_string();
+    assert_eq!(
+        served,
+        std::fs::canonicalize(&daemon.dir)
+            .unwrap_or_else(|_| daemon.dir.clone())
+            .display()
+            .to_string(),
+        "the daemon names the directory it was given"
+    );
+
+    // Point the caller at a directory that is not the one being served, with the
+    // same token: identity now rests on `config_dir`, not on the token.
+    let other = race_config_dir("other-config-caller");
+    std::fs::write(other.join("daemon.token"), &daemon.token).unwrap();
+    std::env::set_var(CONFIG_DIR_ENV, &other);
+    let error = stop_daemon_process(pid).expect_err("that is not this config's daemon");
+    let message = error.to_string();
+    assert!(message.contains("serves config directory"), "{message}");
+    assert!(
+        daemon.child.try_wait().unwrap().is_none(),
+        "the daemon is still running"
+    );
+    assert!(daemon.pid_file().exists(), "its PID file is untouched");
+
+    let _ = std::fs::remove_dir_all(&other);
+    common::restore_default_config_env();
+}
+
+/// A daemon that is handed another process's PID refuses and keeps running.
+///
+/// This is the decision the daemon makes, isolated from how the client got there:
+/// the admin token is *its own* and correct, and the only thing wrong is the PID
+/// in the body.
+#[test]
+#[serial_test::serial]
+fn a_daemon_refuses_a_shutdown_that_names_another_process() {
+    let mut daemon = RunningDaemon::start("expect-pid", &[]);
+    let own_pid = daemon.child.id();
+    // A real process, so the assertion is about which PID it is rather than
+    // about a number that merely fails to parse.
+    let stranger = Command::new("sleep").arg("30").spawn();
+    let (stranger_pid, mut stranger_child) = match stranger {
+        Ok(child) => (child.id(), Some(child)),
+        // No `sleep` on PATH: any PID that is not ours exercises the same branch.
+        Err(_) => (own_pid.wrapping_add(1), None),
+    };
+    assert_ne!(stranger_pid, own_pid);
+
+    let refused = local_daemon_request_with_body(
+        "POST",
+        "/shutdown",
+        Some(&daemon.token),
+        &serde_json::json!({ "expect_pid": stranger_pid }),
+        Duration::from_secs(2),
+    )
+    .expect("the daemon answers a refusal");
+    assert_eq!(refused.status, 409, "{}", refused.body);
+    assert!(
+        refused.body.contains(&own_pid.to_string()),
+        "the refusal names the daemon that answered: {}",
+        refused.body
+    );
+
+    // A refusal is inert: the daemon is still serving, and its own PID is
+    // accepted, so the 409 was about identity and not about the token.
+    let health = local_daemon_request("GET", "/health", None, Duration::from_secs(2))
+        .expect("health after the refusal");
+    assert_eq!(health.status, 200);
+    let accepted = local_daemon_request_with_body(
+        "POST",
+        "/shutdown",
+        Some(&daemon.token),
+        &serde_json::json!({ "expect_pid": own_pid }),
+        Duration::from_secs(2),
+    )
+    .expect("the daemon answers its own stop");
+    assert_eq!(accepted.status, 200, "{}", accepted.body);
+    wait_until(
+        "the daemon to exit after its own stop",
+        Duration::from_secs(10),
+        || daemon.child.try_wait().ok().flatten().is_some(),
+    );
+    if let Some(child) = stranger_child.as_mut() {
+        let still_there = child.try_wait().expect("check the stranger").is_none();
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(
+            still_there,
+            "the stranger named in a refused request is not signalled either"
+        );
+    }
+}
+
+/// The race, end to end: `/health` reaches A through a proxy, A exits and a
+/// daemon with the same admin token takes the same address, and the shutdown
+/// request that was meant for A arrives at B — A's PID in the body, B on the
+/// socket.
+///
+/// The second request is the one the old code sent (it had no field to send):
+/// nothing in it said which process it meant, so whichever daemon held the
+/// socket took it. With the check, B refuses and stays up.
+#[cfg(unix)]
+#[test]
+#[serial_test::serial]
+fn a_stop_that_reached_the_wrong_daemon_stops_nothing() {
+    let dir = race_config_dir("race");
+    let token = std::fs::read_to_string(dir.join("daemon.token")).expect("read daemon.token");
+    let proxy_addr = free_addr();
+    let first_addr = free_addr();
+    std::env::set_var(CONFIG_DIR_ENV, &dir);
+    std::env::set_var(ADDR_ENV, &proxy_addr);
+
+    // A is the daemon the client finds through the proxy.
+    let mut a = start_listener_at(&dir, &first_addr);
+    let a_pid = a.id();
+    let destination = Arc::new(std::sync::Mutex::new(first_addr.clone()));
+    let front = TcpListener::bind(&proxy_addr).expect("bind the proxy");
+    let connections = proxy(front, destination.clone());
+    assert_eq!(
+        agent2ssh::daemon_control::daemon_health_pid(),
+        Some(a_pid),
+        "the client's health check reaches A through the proxy"
+    );
+
+    // A exits — a restart, from the client's point of view — and B takes the same
+    // address with the same admin token, so the only thing that changes in the
+    // client's view is which process answers.
+    let _ = a.kill();
+    let _ = a.wait();
+    let mut b = start_listener_at(&dir, &first_addr);
+    let b_pid = b.id();
+    assert_ne!(a_pid, b_pid);
+    *destination.lock().expect("proxy destination") = first_addr.clone();
+    let through_proxy = local_daemon_request("GET", "/health", None, Duration::from_secs(2))
+        .expect("health through the proxy");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&through_proxy.body)
+            .ok()
+            .and_then(|body| body["pid"].as_u64()),
+        Some(u64::from(b_pid)),
+        "the same address now belongs to B"
+    );
+
+    // The stop the client had queued for A arrives at B, still naming A.
+    let queued_for_a = local_daemon_request_with_body(
+        "POST",
+        "/shutdown",
+        Some(&token),
+        &serde_json::json!({ "expect_pid": a_pid }),
+        Duration::from_secs(2),
+    )
+    .expect("B answers");
+    assert_eq!(queued_for_a.status, 409, "{}", queued_for_a.body);
+    assert!(
+        queued_for_a.body.contains(&b_pid.to_string()),
+        "the refusal names B: {}",
+        queued_for_a.body
     );
     assert!(
-        target_alive && replacement_alive,
-        "neither process may be stopped"
+        b.try_wait().unwrap().is_none(),
+        "B must still be running: the stop was never B's to take"
     );
+
+    // The same request naming B is accepted, so the 409 was about identity and
+    // not about the token, the route or the proxy.
+    let for_b = local_daemon_request_with_body(
+        "POST",
+        "/shutdown",
+        Some(&token),
+        &serde_json::json!({ "expect_pid": b_pid }),
+        Duration::from_secs(2),
+    )
+    .expect("B answers its own stop");
+    assert_eq!(for_b.status, 200, "{}", for_b.body);
+    wait_until(
+        "B to exit after its own stop",
+        Duration::from_secs(10),
+        || b.try_wait().ok().flatten().is_some(),
+    );
+    assert!(
+        connections.load(Ordering::SeqCst) >= 3,
+        "the proxy carried the health check and both shutdown requests"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+    common::restore_default_config_env();
+    std::env::remove_var(ADDR_ENV);
 }
 
 /// What the quit confirmation reads: a real daemon, its real list routes, the

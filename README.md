@@ -147,6 +147,8 @@ open http://127.0.0.1:7722/console
 
 Authenticated requests use the bearer token stored at `~/.agent2ssh/daemon.token`.
 
+`daemon stop` names the process it means to stop (`expect_pid` on `POST /shutdown`) and the daemon re-checks it, so a listener that was replaced by another daemon between the health check and the stop refuses instead of shutting down. If you see `the daemon listening now is pid B, not the pid A the stop was for`, the stop found a different daemon: run it again to address pid B.
+
 ## Data
 
 Local data is stored under `~/.agent2ssh/`. See [docs/guides/configuration-guide.md](docs/guides/configuration-guide.md) for the full file layout, configuration format, and storage details.
