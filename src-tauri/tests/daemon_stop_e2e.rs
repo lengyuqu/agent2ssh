@@ -394,6 +394,13 @@ fn competing_daemon_cannot_overwrite_the_running_daemon_pid() {
         !output.status.success(),
         "competing daemon must fail to bind"
     );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        ["os error 48", "os error 98", "os error 10048"]
+            .iter()
+            .any(|code| stderr.contains(code)),
+        "expected an address-in-use error, got: {stderr}"
+    );
     assert_eq!(
         std::fs::read_to_string(daemon.pid_file()).unwrap(),
         pid.to_string()
