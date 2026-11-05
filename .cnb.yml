@@ -15,6 +15,29 @@ main:
             cargo test --locked --no-default-features --lib
             cargo test --locked --no-default-features --features daemon --bin agent2ssh-daemon
             cargo test --locked --no-default-features --test daemon_integration
+            cargo test --locked --no-default-features --test e2e_harness_safety
             cargo test --locked --no-default-features --features daemon --test daemon_local_exec_e2e --test daemon_resident_session_e2e --test daemon_sftp_approval_e2e --test daemon_stop_e2e -- --test-threads=1
             cargo test --locked --no-default-features --test ssh_operation_deadline --test mcp_local_deadlines --test approval_store_persistence --test desktop_backup_decrypt --test resident_close
+    # The fixture uses its own temporary config, key and uniquely named container.
+    # Pin the server version so a green run identifies the implementation tested.
+    - name: real-ssh-e2e
+      docker:
+        image: rust:bookworm
+      services:
+        - docker
+      stages:
+        - name: real SSH and SFTP fixture
+          timeout: 30m
+          script: |
+            set -eu
+            if ! command -v ssh >/dev/null 2>&1; then
+              apt-get update
+              apt-get install -y openssh-client
+            fi
+            command -v ssh
+            docker info --format '{{.ServerVersion}}'
+            export AGENT2SSH_CONTAINER_RUNTIME=docker
+            export AGENT2SSH_E2E_IMAGE=lscr.io/linuxserver/openssh-server:version-10.3_p1-r1
+            cargo build --locked --manifest-path src-tauri/Cargo.toml --release --no-default-features --bin agent2ssh
+            bash scripts/e2e-container.sh
   pull_request: *regression

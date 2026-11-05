@@ -44,6 +44,8 @@
 # Usage: scripts/e2e-ssh-matrix.sh
 #   AGENT2SSH_MATRIX_SERVERS="openssh:9.9 dropbear" scripts/e2e-ssh-matrix.sh
 #   AGENT2SSH_CONTAINER_RUNTIME=apple scripts/e2e-ssh-matrix.sh
+#   AGENT2SSH_MATRIX_WINDOWS_AGENT=1 scripts/e2e-ssh-matrix.sh  # opt in to a system-agent key
+#   AGENT2SSH_MATRIX_REQUIRE_FULL=1 scripts/e2e-ssh-matrix.sh   # require keygen and agent
 set -uo pipefail
 
 # Git Bash on Windows rewrites arguments that look like POSIX paths before a native
@@ -72,6 +74,8 @@ KEYTYPES=(
 )
 
 WORK="$(mktemp -d)"
+# Names are per run, not shared with existing or concurrent containers.
+RUN_SUFFIX="${WORK##*/}"
 export AGENT2SSH_CONFIG_DIR="$WORK/config"
 # Passwords are stored in the app's encrypted store; a fixed master password keeps
 # it unlockable across the separate CLI processes this script spawns.
@@ -92,11 +96,26 @@ skip() { SKIP=$((SKIP+1)); RESULTS+=("skip  $CURRENT  $*"); printf '  \033[33mSK
 known() { SKIP=$((SKIP+1)); RESULTS+=("skip  $CURRENT  $*"); printf '  \033[33mSKIP\033[0m %s\n' "$*"; }
 
 CONTAINER=""
+CID_FILE=""
+cleanup_container() {
+  if [[ -n "${RT_BIN:-}" && -n "$CID_FILE" && -f "$CID_FILE" ]]; then
+    local id
+    id="$(cat "$CID_FILE")"
+    id="${id%$'\r'}"
+    if [[ "$id" =~ ^[[:alnum:]][[:alnum:]_.-]*$ ]]; then
+      "$RT_BIN" rm -f "$id" >/dev/null 2>&1 || true
+    fi
+    rm -f "$CID_FILE"
+  fi
+  CONTAINER=""
+  CID_FILE=""
+}
+
 cleanup() {
   # The system agent keeps a copy of the key after this script exits, so the key
   # is withdrawn before the directory holding the file is removed.
   [[ -n "${AGENT_ADDED_KEY:-}" ]] && "${NATIVE_ADD:-/bin/false}" -d "$AGENT_ADDED_KEY" >/dev/null 2>&1
-  [[ -n "${RT_BIN:-}" && -n "$CONTAINER" ]] && "$RT_BIN" rm -f "$CONTAINER" >/dev/null 2>&1
+  cleanup_container
   rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -143,6 +162,10 @@ KEY_STRANGER="$AGENT2SSH_CONFIG_DIR/keys/stranger"
 
 HAVE_KEYGEN=0
 command -v ssh-keygen >/dev/null 2>&1 && HAVE_KEYGEN=1
+if [[ "${AGENT2SSH_MATRIX_REQUIRE_FULL:-0}" == 1 && "$HAVE_KEYGEN" != 1 ]]; then
+  echo "Full matrix requires ssh-keygen; no server was started." >&2
+  exit 1
+fi
 if [[ "$HAVE_KEYGEN" == 1 ]]; then
   KEY_ENC="$WORK/enc"
   ssh-keygen -q -t ed25519 -N "$KEY_PASSPHRASE" -C matrix-enc -f "$KEY_ENC"
@@ -203,7 +226,7 @@ rt_exec() { "$RT_BIN" exec "$CONTAINER" "$@"; }
 
 start_openssh() { # <version> <port>
   local tag; tag="$(openssh_tag "$1")"
-  "$RT_BIN" run -d --name "$CONTAINER" \
+  "$RT_BIN" run -d --name "$CONTAINER" --cidfile "$CID_FILE" \
     -e PUID=1000 -e PGID=1000 -e USER_NAME="$USER_NAME" \
     -e PUBLIC_KEY="$(cat "$KEY_PLAIN.pub")" \
     -e PASSWORD_ACCESS=true -e USER_PASSWORD="$USER_PASSWORD" -e SUDO_ACCESS=false \
@@ -212,7 +235,7 @@ start_openssh() { # <version> <port>
 
 start_dropbear() { # <port>
   # Alpine's Dropbear. -R generates the host keys on first use, -E logs to stderr.
-  "$RT_BIN" run -d --name "$CONTAINER" \
+  "$RT_BIN" run -d --name "$CONTAINER" --cidfile "$CID_FILE" \
     -e PK="$(cat "$KEY_PLAIN.pub")" -e ENCPK="$([[ "$HAVE_KEYGEN" == 1 ]] && cat "$KEY_ENC.pub")" \
     -e UN="$USER_NAME" -e UP="$USER_PASSWORD" -e AK64="$AUTHORIZED_EXTRA_B64" \
     -p "$1:2222" alpine:3.20 sh -c '
@@ -240,6 +263,8 @@ wait_ready() { # <host-profile>
 # client under test cannot see, and the case would fail for a reason that has
 # nothing to do with the code. The system agent is used instead, and it has to be
 # running already: starting a Windows service is not something a test should do.
+# Adding a key to that shared agent is opt-in, since abrupt termination may
+# prevent the key from being removed.
 # On Unix the scripted agent is the one the app talks to, so it starts its own.
 AGENT_OK=0
 AGENT_ADDED_KEY=""
@@ -253,7 +278,7 @@ case "$(uname -s)" in
     # while printing an UNPROTECTED PRIVATE KEY banner. Replacing the ACL with
     # one entry for the current user is the same thing `chmod 600` achieves on
     # Unix; the directory is a throwaway.
-    if [[ "$HAVE_KEYGEN" == 1 && -x "$NATIVE_ADD" ]] &&
+    if [[ "${AGENT2SSH_MATRIX_WINDOWS_AGENT:-0}" == 1 && "$HAVE_KEYGEN" == 1 && -x "$NATIVE_ADD" ]] &&
        command -v icacls >/dev/null 2>&1 &&
        icacls "$KEY_WIN" //inheritance:r //grant:r "$USERNAME:F" >/dev/null 2>&1 &&
        "$NATIVE_ADD" "$KEY_WIN" >/dev/null 2>&1; then
@@ -262,13 +287,21 @@ case "$(uname -s)" in
     fi
     ;;
   *)
+    # Never fall back to the caller's agent if starting the disposable one fails.
+    unset SSH_AUTH_SOCK SSH_AGENT_PID
     if [[ "$HAVE_KEYGEN" == 1 ]] && command -v ssh-agent >/dev/null && command -v ssh-add >/dev/null; then
-      eval "$(ssh-agent -s)" >/dev/null
-      trap 'ssh-agent -k >/dev/null 2>&1; cleanup' EXIT
-      ssh-add -q "$WORK/k_ed25519" 2>/dev/null && AGENT_OK=1
+      if AGENT_OUTPUT="$(ssh-agent -s)" && eval "$AGENT_OUTPUT" >/dev/null &&
+         [[ -n "${SSH_AUTH_SOCK:-}" && -n "${SSH_AGENT_PID:-}" ]]; then
+        trap 'ssh-agent -k >/dev/null 2>&1; cleanup' EXIT
+        ssh-add -q "$WORK/k_ed25519" 2>/dev/null && AGENT_OK=1
+      fi
     fi
     ;;
 esac
+if [[ "${AGENT2SSH_MATRIX_REQUIRE_FULL:-0}" == 1 && "$AGENT_OK" != 1 ]]; then
+  echo "Full matrix requires a usable test SSH agent; no server was started." >&2
+  exit 1
+fi
 
 # ── The matrix ───────────────────────────────────────────────────────────────
 idx=0
@@ -276,17 +309,26 @@ for server in $SERVERS; do
   CURRENT="$server"
   port=$((BASE_PORT + idx)); idx=$((idx + 1))
   kind="${server%%:*}"
-  CONTAINER="agent2ssh-matrix-$idx"
+  cleanup_container
+  CONTAINER="agent2ssh-matrix-${RUN_SUFFIX}-$idx"
+  CID_FILE="$WORK/container-$idx.cid"
   note "$server on port $port"
-  "$RT_BIN" rm -f "$CONTAINER" >/dev/null 2>&1
 
   case "$kind" in
     openssh)
-      if ! start_openssh "${server#*:}" "$port"; then bad "start $server (image pull or run failed)"; continue; fi ;;
+      if ! start_openssh "${server#*:}" "$port"; then bad "start $server (image pull or run failed)"; cleanup_container; continue; fi ;;
     dropbear)
-      if ! start_dropbear "$port"; then bad "start $server (image pull or run failed)"; continue; fi ;;
-    *) echo "unknown server kind: $kind"; continue ;;
+      if ! start_dropbear "$port"; then bad "start $server (image pull or run failed)"; cleanup_container; continue; fi ;;
+    *) bad "unknown server kind: $kind"; cleanup_container; continue ;;
   esac
+  id="$(cat "$CID_FILE" 2>/dev/null || true)"
+  id="${id%$'\r'}"
+  if ! [[ "$id" =~ ^[[:alnum:]][[:alnum:]_.-]*$ ]]; then
+    bad "runtime did not record a usable fixture ID; inspect $CONTAINER manually"
+    cleanup_container
+    continue
+  fi
+  echo "  fixture: $CONTAINER ($id)"
 
   # Baseline profile doubles as the readiness probe.
   add_host "$idx-key" "$port" --key "$KEY_PLAIN"
@@ -317,6 +359,8 @@ for server in $SERVERS; do
   if [[ "$HAVE_KEYGEN" == 1 && "$kind" == openssh ]]; then
     rt_exec sh -c "echo '$(cat "$KEY_ENC.pub")' >> /config/.ssh/authorized_keys &&
       echo '$AUTHORIZED_EXTRA_B64' | base64 -d >> /config/.ssh/authorized_keys" || SETUP_OK=0
+    # An older sshd rejects PerSourcePenalties; remove both added tuning lines
+    # if validation fails so the server keeps its original configuration.
     rt_exec sh -c "
       cfg=/config/sshd/sshd_config; [ -f \$cfg ] || cfg=/etc/ssh/sshd_config
       echo '$(cat "$WORK/ca.pub")' > /config/ca.pub && chmod 644 /config/ca.pub &&
@@ -324,10 +368,6 @@ for server in $SERVERS; do
       sshd_bin=/usr/sbin/sshd; [ -x \$sshd_bin ] || sshd_bin=/usr/sbin/sshd.pam
       echo 'PerSourcePenalties no' >> \$cfg
       echo 'MaxStartups 100:30:200' >> \$cfg
-      # Both lines are fixture tuning, and only `PerSourcePenalties` is
-      # version-gated (9.8+). An sshd that predates it refuses the whole file,
-      # so on failure both appended lines are removed — `MaxStartups` is valid
-      # everywhere, so losing it costs nothing but a wider queue.
       \$sshd_bin -t -f \$cfg 2>/dev/null || { sed -i '\$ d' \$cfg; sed -i '\$ d' \$cfg; }
       kill -HUP \$(cat /config/sshd.pid)" || SETUP_OK=0
     sleep 2
@@ -376,7 +416,7 @@ for server in $SERVERS; do
     add_host "$idx-agent" "$port"
     expect_accept "$idx-agent" "ssh-agent identity"
   else
-    skip "ssh-agent identity (no reachable agent; on Windows: Start-Service ssh-agent)"
+    skip "ssh-agent identity (no isolated agent; Windows system agent requires AGENT2SSH_MATRIX_WINDOWS_AGENT=1)"
   fi
 
   # SFTP round trip over the key profile (upload then download, compared).
@@ -412,22 +452,38 @@ for server in $SERVERS; do
         expect_accept "$idx-c-$label" "$label user certificate"
       fi
     done
+  else
+    for spec in "${KEYTYPES[@]}"; do
+      label="${spec%%:*}"
+      skip "$label key (no ssh-keygen)"
+      skip "$label encrypted key (no ssh-keygen)"
+      if [[ "$kind" == openssh ]]; then
+        skip "$label user certificate (no ssh-keygen)"
+      fi
+    done
   fi
 
-  "$RT_BIN" rm -f "$CONTAINER" >/dev/null 2>&1
-  CONTAINER=""
+  cleanup_container
 done
 
 # ── Legacy server ────────────────────────────────────────────────────────────
 if [[ "${AGENT2SSH_MATRIX_LEGACY:-1}" == 1 && "$HAVE_KEYGEN" == 1 ]]; then
   CURRENT="openssh:8.3+legacy"
   port=$((BASE_PORT + idx)); idx=$((idx + 1))
-  CONTAINER="agent2ssh-matrix-legacy"
+  cleanup_container
+  CONTAINER="agent2ssh-matrix-${RUN_SUFFIX}-legacy"
+  CID_FILE="$WORK/container-legacy.cid"
   note "$CURRENT on port $port"
-  "$RT_BIN" rm -f "$CONTAINER" >/dev/null 2>&1
   if ! start_openssh 8.3 "$port"; then
     bad "start $CURRENT (image pull or run failed)"
   else
+    id="$(cat "$CID_FILE" 2>/dev/null || true)"
+    id="${id%$'\r'}"
+    if ! [[ "$id" =~ ^[[:alnum:]][[:alnum:]_.-]*$ ]]; then
+      bad "runtime did not record a usable fixture ID; inspect $CONTAINER manually"
+      cleanup_container
+      exit 1
+    fi
     # Wait for sshd without going through the app: the app pins the first host key
     # it sees, and that must be the legacy RSA one, not the default ed25519.
     up=0
@@ -488,11 +544,17 @@ if [[ "${AGENT2SSH_MATRIX_LEGACY:-1}" == 1 && "$HAVE_KEYGEN" == 1 ]]; then
     "$CLI" algo clear >/dev/null
     expect_reject legacy-pw "defaults apply again after \`algo clear\`"
   fi
-  "$RT_BIN" rm -f "$CONTAINER" >/dev/null 2>&1
-  CONTAINER=""
+  cleanup_container
+elif [[ "${AGENT2SSH_MATRIX_LEGACY:-1}" == 1 && "$HAVE_KEYGEN" != 1 ]]; then
+  CURRENT="openssh:8.3+legacy"
+  skip "legacy server cases (no ssh-keygen)"
 fi
 
 # ── Summary ──────────────────────────────────────────────────────────────────
+if [[ "$PASS" == 0 && "$FAIL" == 0 ]]; then
+  CURRENT="matrix"
+  bad "no checks were executed"
+fi
 note "Summary"
 printf '  runtime: %s (%s)\n' "${RT_ID:-unknown}" "$RT_BIN"
 printf '%s\n' "${RESULTS[@]}" | awk '

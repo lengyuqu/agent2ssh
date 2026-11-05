@@ -277,6 +277,11 @@ jobs:
         run: cargo test --no-default-features --test cli_smoke
         working-directory: src-tauri
 
+      - name: SSH E2E harness safety tests
+        if: runner.os != 'Windows'
+        run: cargo test --no-default-features --test e2e_harness_safety
+        working-directory: src-tauri
+
       - name: Rust CLI contract tests
         run: cargo test --no-default-features --test cli_contract
         working-directory: src-tauri

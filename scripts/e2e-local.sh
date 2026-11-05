@@ -25,6 +25,11 @@ cargo check --manifest-path src-tauri/Cargo.toml --no-default-features --feature
 echo "==> CLI/MCP smoke tests"
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --test cli_smoke
 
+echo "==> SSH E2E harness safety tests"
+if [[ "$(uname -s)" != MINGW* && "$(uname -s)" != MSYS* && "$(uname -s)" != CYGWIN* ]]; then
+  cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --test e2e_harness_safety
+fi
+
 echo "==> Daemon integration tests"
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features daemon --test daemon_integration
 

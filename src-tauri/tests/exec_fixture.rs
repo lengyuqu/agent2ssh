@@ -18,7 +18,8 @@
 //! ```
 //!
 //! `scripts/e2e-container.sh` also runs it, against the container that script
-//! has already started, with the throwaway key it generated.
+//! has already started, with the throwaway key it generated. It sets
+//! `AGENT2SSH_TEST_REQUIRE_SSH=1` so a missing fixture cannot silently pass.
 //!
 //! Optional overrides: `AGENT2SSH_TEST_SSH_HOST` (default `127.0.0.1`),
 //! `AGENT2SSH_TEST_SSH_USER` (default `root`), and either
@@ -56,12 +57,34 @@ struct Fixture {
     password: String,
 }
 
+fn fixture_port(raw: Option<&str>, required: bool) -> Result<Option<u16>, &'static str> {
+    match raw {
+        None if required => Err("AGENT2SSH_TEST_SSH_PORT is required"),
+        None => Ok(None),
+        Some(raw) => raw
+            .trim()
+            .parse::<u16>()
+            .ok()
+            .filter(|port| *port != 0)
+            .map(Some)
+            .ok_or("AGENT2SSH_TEST_SSH_PORT must be a valid nonzero port"),
+    }
+}
+
+#[test]
+fn fixture_port_is_required_when_requested_and_rejects_invalid_values() {
+    assert_eq!(fixture_port(None, false), Ok(None));
+    assert!(fixture_port(None, true).is_err());
+    assert!(fixture_port(Some("invalid"), false).is_err());
+    assert!(fixture_port(Some("0"), true).is_err());
+    assert_eq!(fixture_port(Some(" 2222 "), true), Ok(Some(2222)));
+}
+
 fn fixture() -> Option<Fixture> {
-    let port = std::env::var("AGENT2SSH_TEST_SSH_PORT")
-        .ok()?
-        .trim()
-        .parse()
-        .ok()?;
+    let raw_port = std::env::var("AGENT2SSH_TEST_SSH_PORT").ok();
+    let required = std::env::var("AGENT2SSH_TEST_REQUIRE_SSH").as_deref() == Ok("1");
+    let port =
+        fixture_port(raw_port.as_deref(), required).unwrap_or_else(|error| panic!("{error}"))?;
     let key = std::env::var("AGENT2SSH_TEST_SSH_KEY")
         .ok()
         .map(|value| value.trim().to_string())

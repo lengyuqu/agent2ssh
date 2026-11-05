@@ -42,8 +42,8 @@
 
 - 用 Git Bash。脚本已 `export MSYS2_ARG_CONV_EXCL='/config;/home/'`（与 `e2e-container.sh` 同一做法），防止 Git Bash 把远端路径改写成 `C:/Program Files/Git/...`，**这一行也没有在 Windows 上验证过**。
 - 运行时由 `agent2ssh containers runtime` 选择（Docker → wslc → Apple）。Apple container 无法拉取 `lscr.io`（跨域认证被拒），脚本会自动换成 `ghcr.io` 地址；wslc 上的镜像拉取没试过。
-- 依赖 Git for Windows 自带的 `ssh-keygen`（含 `-m PEM`）、`ssh-agent`、`ssh-add`、`base64`、`head -c`、`cmp`。缺 `ssh-keygen` 时加密密钥和证书用例会跳过并提示，缺 `ssh-agent` 时 agent 用例跳过。
-- `connects()` 把 `HOME` 指向空目录，避免应用回退到真实的 `~/.ssh/id_*`（`embedded_ssh.rs` 在密钥失败后会依次尝试默认密钥）。**这个隔离在 Windows 上不可靠**：`dirs::home_dir()` 在 Windows 走 Known Folder API，不读 `HOME` 或 `USERPROFILE`。因此在 Windows 上，"应被拒绝"的用例有可能被开发者自己 `%USERPROFILE%\.ssh` 下的密钥放行。复核时要么在没有默认密钥的账号/虚拟机里跑，要么先把该目录挪走；更稳妥的做法是给应用加一个仅测试使用的 home 覆盖变量（目前没有）。
+- 依赖 Git for Windows 自带的 `ssh-keygen`（含 `-m PEM`）、`ssh-agent`、`ssh-add`、`base64`、`head -c`、`cmp`。缺 `ssh-keygen` 或 agent 时相关用例会计入 SKIP；`AGENT2SSH_MATRIX_REQUIRE_FULL=1` 会在开容器前拒绝缺失的 keygen/agent。Windows 系统 agent 默认不修改；只有显式设置 `AGENT2SSH_MATRIX_WINDOWS_AGENT=1` 才会加入测试密钥，异常中断可能阻止清理。
+- `connects()` 将 `HOME` 指向空目录，但不能假定该覆盖在 Windows 上隔离 `dirs::home_dir()`；应在无个人默认密钥的隔离账号或虚拟机中验证。显式 `key_path` 认证失败后直接返回错误，不会继续尝试默认密钥；默认密钥回退只可能影响没有显式 key/password 的 profile。Windows 实际路径、agent 和 `--cidfile` 行为仍未实测。
 - 临时目录里的私钥 ACL：系统 `ssh.exe` 会拒绝权限过宽的私钥（`e2e-container.sh` 已为此跳过独立校验）。矩阵里的私钥由 `ssh-keygen` 写在 `mktemp -d` 下，应用本身读取不受影响，但如果换用系统 `ssh` 做交叉校验会遇到。
 - 服务端镜像：`lscr.io/linuxserver/openssh-server` 的 `version-8.3_p1-r1`、`8.8_p1-r1`、`9.3_p2-r1`、`9.9_p2-r0`、`10.3_p1-r1`，加 `alpine:3.20`（Dropbear + `openssh-sftp-server`）。端口从 22130 起。
 
@@ -106,5 +106,5 @@
 **Windows 真机待办（按优先级）**：
 1. **基线**：`main` 拉到 `e312166` 后跑 `cargo test --lib --no-default-features`、`cargo test --lib`、`--test cli_smoke`（34 项，含新 `cli_approvals_clean_dry_run_then_compact`）、`--no-default-features --features daemon --bin agent2ssh-daemon`（24 项，新增的 CI 目标）、clippy ×3。
 2. **v0.4.5 新行为**（11-02/03 的提交均未经 Windows 真机）：SFTP stall guard（Dropbear/OpenSSH 上传停滞报进度，K2 复测）；known_hosts 双算法键控；证书拒绝三因可辨；SHA-1 回退的 warn；`execution_limits.toml` 热加载；`approvals clean --dry-run`；0.4.4 的用户自定义环境（`environments.toml` 的 `cmd`/`pwsh`/`vs` 基座）。
-3. **矩阵**：Git Bash 下 `./scripts/e2e-ssh-matrix.sh`（§3.1 的注意事项仍有效：`HOME` 隔离在 Windows 不可靠，用清空 agent 的负对照法；`MSYS2_ARG_CONV_EXCL` 未在 Windows 验证）。
+3. **矩阵**：Git Bash 下 `./scripts/e2e-ssh-matrix.sh`（§3.1 的注意事项仍有效：不要依赖 `HOME` 隔离，使用隔离账号或虚拟机；系统 agent 默认不修改，明确同意后才可选择 opt-in；`MSYS2_ARG_CONV_EXCL` 未在 Windows 验证）。
 4. **§3.2 的点**：带空格/反斜杠路径下 `-cert.pub` 的识别；`cli_contract` 起子进程测试的挂起复现尝试。
