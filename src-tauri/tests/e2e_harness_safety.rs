@@ -33,7 +33,8 @@ if [[ "$1" == run ]]; then
   while [[ $# -gt 0 ]]; do
     case "$1" in --name) name="$2"; shift 2 ;; --cidfile) cidfile="$2"; shift 2 ;; *) shift ;; esac
   done
-  if [[ -f "$FAKE_DIR/no-cid" ]]; then echo no-id; exit 0; fi
+  if [[ -f "$FAKE_DIR/fail-second" && "$name" == *-2 ]]; then exit 71; fi
+  if [[ -f "$FAKE_DIR/no-cid" || ( -f "$FAKE_DIR/legacy-no-cid" && "$name" == *-legacy ) ]]; then echo no-id; exit 0; fi
   if [[ -f "$FAKE_DIR/crlf-cid" ]]; then printf 'fake-id-%s\r\n' "$name" > "$cidfile"; else printf 'fake-id-%s\n' "$name" > "$cidfile"; fi
   if [[ -f "$FAKE_DIR/fail-after-create" ]]; then exit 72; fi
   echo "fake-id-$name"
@@ -49,7 +50,7 @@ case "$1 $2" in
   'keys algorithm') echo ed25519 ;;
   'keys generate') mkdir -p "$AGENT2SSH_CONFIG_DIR/keys"; : > "$AGENT2SSH_CONFIG_DIR/keys/$3"; printf 'ssh-ed25519 fake\n' > "$AGENT2SSH_CONFIG_DIR/keys/$3.pub" ;;
   'host add') [[ "${FAKE_FIXTURE:-0}" != 1 ]] ;;
-  'exec '*) if [[ -f "$FAKE_DIR/matrix-ready" ]]; then echo matrix-ok; else exit 1; fi ;;
+  'exec '*) if [[ -f "$FAKE_DIR/agent-success" ]]; then printf '%s\n' "${SSH_AUTH_SOCK:-none}" >> "$FAKE_CLI_AGENT_LOG"; fi; if [[ -f "$FAKE_DIR/matrix-ready" ]]; then echo matrix-ok; else exit 1; fi ;;
   *) exit 0 ;;
 esac
 "#,
@@ -67,10 +68,24 @@ if [[ -n "$file" ]]; then : > "$file"; printf 'ssh-ed25519 fake\n' > "$file.pub"
 exit 0
 "#,
         );
-        script(&bin.join("ssh-agent"), "#!/bin/bash\nexit 1\n");
+        script(
+            &bin.join("ssh-agent"),
+            r#"#!/bin/bash
+if [[ -f "$FAKE_DIR/agent-success" ]]; then
+  if [[ "$1" == -s ]]; then
+    printf 'SSH_AUTH_SOCK=%q; export SSH_AUTH_SOCK; SSH_AGENT_PID=98765; export SSH_AGENT_PID;\n' "$FAKE_DIR/owned-agent.sock"
+  fi
+  exit 0
+fi
+exit 1
+"#,
+        );
         script(
             &bin.join("ssh-add"),
-            "#!/bin/bash\nprintf called >> \"$FAKE_AGENT_LOG\"\nexit 1\n",
+            r#"#!/bin/bash
+printf '%s\n' "${SSH_AUTH_SOCK:-none}" >> "$FAKE_AGENT_LOG"
+[[ -f "$FAKE_DIR/agent-success" ]]
+"#,
         );
         script(&bin.join("sleep"), "#!/bin/bash\nexit 0\n");
         for command in ["PerSourcePenalties", "MaxStartups"] {
@@ -126,6 +141,7 @@ exit 0
             .env("FAKE_RUNTIME", self.dir.path().join("bin/runtime"))
             .env("FAKE_LOG", &self.log)
             .env("FAKE_AGENT_LOG", self.dir.path().join("agent.log"))
+            .env("FAKE_CLI_AGENT_LOG", self.dir.path().join("cli-agent.log"))
             .env(
                 "FAKE_SUBSTITUTION_LOG",
                 self.dir.path().join("substitution.log"),
@@ -134,7 +150,14 @@ exit 0
             .env("FAKE_RUN_FAIL", if fail_run { "1" } else { "0" })
             .env("FAKE_FIXTURE", if fixture { "1" } else { "0" })
             .env("AGENT2SSH_MATRIX_SERVERS", servers)
-            .env("AGENT2SSH_MATRIX_LEGACY", "0")
+            .env(
+                "AGENT2SSH_MATRIX_LEGACY",
+                if self.dir.path().join("legacy-on").exists() {
+                    "1"
+                } else {
+                    "0"
+                },
+            )
             .env("AGENT2SSH_E2E_PORT", "32123")
             .env(
                 "AGENT2SSH_MATRIX_REQUIRE_FULL",
@@ -148,6 +171,7 @@ exit 0
             .output()
             .expect("run harness script");
         fs::write(self.dir.path().join("stderr.log"), &result.stderr).unwrap();
+        fs::write(self.dir.path().join("stdout.log"), &result.stdout).unwrap();
         let log = fs::read_to_string(&self.log).unwrap_or_default();
         fs::write(&self.log, "").unwrap();
         (
@@ -280,6 +304,103 @@ fn matrix_cleans_each_owned_container_and_never_removes_failed_runs() {
         log.iter().position(|line| line == removals[0]).unwrap()
             < log.iter().position(|line| line == runs[1]).unwrap(),
         "first fixture must be removed before the next starts: {log:?}"
+    );
+}
+
+#[test]
+fn matrix_cleans_first_fixture_when_the_second_run_fails() {
+    let harness = Harness::new();
+    fs::write(harness.dir.path().join("fail-second"), "").unwrap();
+    let (success, log) = harness.run(
+        "e2e-ssh-matrix.sh",
+        false,
+        false,
+        "openssh:10.3 openssh:9.9",
+    );
+    assert!(!success, "the second runtime run must fail");
+    let runs: Vec<_> = log.iter().filter(|line| line.starts_with("run ")).collect();
+    let removals: Vec<_> = log
+        .iter()
+        .filter(|line| line.starts_with("rm -f "))
+        .collect();
+    assert_eq!(runs.len(), 2, "{log:?}");
+    assert_eq!(
+        removals,
+        vec![&format!("rm -f fake-id-{}", run_name(runs[0]))],
+        "{log:?}"
+    );
+    assert!(
+        log.iter().position(|line| line == removals[0]).unwrap()
+            < log.iter().position(|line| line == runs[1]).unwrap(),
+        "{log:?}"
+    );
+}
+
+#[test]
+fn legacy_missing_id_cleans_previous_fixture_without_removing_by_name() {
+    let harness = Harness::new();
+    fs::write(harness.dir.path().join("legacy-on"), "").unwrap();
+    fs::write(harness.dir.path().join("legacy-no-cid"), "").unwrap();
+    let (success, log) = harness.run("e2e-ssh-matrix.sh", false, false, "openssh:10.3");
+    let output = fs::read_to_string(harness.dir.path().join("stdout.log")).unwrap();
+    assert!(
+        !success && output.contains("runtime did not record a usable fixture ID"),
+        "{output}"
+    );
+    assert!(
+        output.contains("Summary"),
+        "failed legacy fixture must still report the summary: {output}"
+    );
+    let runs: Vec<_> = log.iter().filter(|line| line.starts_with("run ")).collect();
+    let removals: Vec<_> = log
+        .iter()
+        .filter(|line| line.starts_with("rm -f "))
+        .collect();
+    assert_eq!(runs.len(), 2, "{log:?}");
+    assert_eq!(
+        removals,
+        vec![&format!("rm -f fake-id-{}", run_name(runs[0]))],
+        "{log:?}"
+    );
+    assert!(
+        log.iter().position(|line| line == removals[0]).unwrap()
+            < log.iter().position(|line| line == runs[1]).unwrap(),
+        "{log:?}"
+    );
+}
+
+#[test]
+fn matrix_exports_only_the_disposable_agent_to_children() {
+    let harness = Harness::new();
+    fs::write(harness.dir.path().join("agent-success"), "").unwrap();
+    let (success, log) =
+        harness.run_with_strict("e2e-ssh-matrix.sh", false, false, "openssh:10.3", true);
+    assert!(!success, "mocked SSH readiness fails deliberately");
+    assert!(
+        log.iter().any(|line| line.starts_with("run ")),
+        "preflight should accept the test agent: {log:?}"
+    );
+    let agent_log = fs::read_to_string(harness.dir.path().join("agent.log")).unwrap();
+    assert_eq!(
+        agent_log.trim(),
+        harness
+            .dir
+            .path()
+            .join("owned-agent.sock")
+            .to_str()
+            .unwrap()
+    );
+    let cli_log = fs::read_to_string(harness.dir.path().join("cli-agent.log")).unwrap();
+    assert!(!cli_log.is_empty(), "readiness must invoke the CLI");
+    assert!(
+        cli_log.lines().all(|socket| socket
+            == harness
+                .dir
+                .path()
+                .join("owned-agent.sock")
+                .to_str()
+                .unwrap()),
+        "CLI children must receive the disposable agent, never the caller's socket: {cli_log}"
     );
 }
 

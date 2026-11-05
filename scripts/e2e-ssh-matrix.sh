@@ -481,68 +481,67 @@ if [[ "${AGENT2SSH_MATRIX_LEGACY:-1}" == 1 && "$HAVE_KEYGEN" == 1 ]]; then
     id="${id%$'\r'}"
     if ! [[ "$id" =~ ^[[:alnum:]][[:alnum:]_.-]*$ ]]; then
       bad "runtime did not record a usable fixture ID; inspect $CONTAINER manually"
-      cleanup_container
-      exit 1
-    fi
-    # Wait for sshd without going through the app: the app pins the first host key
-    # it sees, and that must be the legacy RSA one, not the default ed25519.
-    up=0
-    for _ in $(seq 1 60); do
-      rt_exec test -s /config/sshd.pid >/dev/null 2>&1 && { up=1; break; }
+    else
+      # Wait for sshd without going through the app: the app pins the first host key
+      # it sees, and that must be the legacy RSA one, not the default ed25519.
+      up=0
+      for _ in $(seq 1 60); do
+        rt_exec test -s /config/sshd.pid >/dev/null 2>&1 && { up=1; break; }
+        sleep 2
+      done
+      rt_exec sh -c "
+        echo '$AUTHORIZED_EXTRA_B64' | base64 -d >> /config/.ssh/authorized_keys
+        cfg=/config/sshd/sshd_config; [ -f \$cfg ] || cfg=/etc/ssh/sshd_config
+        {
+          echo 'HostKey /config/ssh_host_keys/ssh_host_rsa_key'
+          echo 'HostKeyAlgorithms ssh-rsa'
+          echo 'KexAlgorithms diffie-hellman-group14-sha1'
+          echo 'Ciphers aes128-cbc'
+          echo 'MACs hmac-sha1'
+          echo 'PubkeyAcceptedKeyTypes ssh-rsa'
+        } >> \$cfg
+        kill -HUP \$(cat /config/sshd.pid)" >/dev/null 2>&1
       sleep 2
-    done
-    rt_exec sh -c "
-      echo '$AUTHORIZED_EXTRA_B64' | base64 -d >> /config/.ssh/authorized_keys
-      cfg=/config/sshd/sshd_config; [ -f \$cfg ] || cfg=/etc/ssh/sshd_config
-      {
-        echo 'HostKey /config/ssh_host_keys/ssh_host_rsa_key'
-        echo 'HostKeyAlgorithms ssh-rsa'
-        echo 'KexAlgorithms diffie-hellman-group14-sha1'
-        echo 'Ciphers aes128-cbc'
-        echo 'MACs hmac-sha1'
-        echo 'PubkeyAcceptedKeyTypes ssh-rsa'
-      } >> \$cfg
-      kill -HUP \$(cat /config/sshd.pid)" >/dev/null 2>&1
-    sleep 2
-    add_host legacy-pw "$port" --password "$USER_PASSWORD"
-    add_host legacy-rsa "$port" --key "$WORK/k_rsa3072"
-    add_host legacy-ed "$port" --key "$WORK/k_ed25519"
+      add_host legacy-pw "$port" --password "$USER_PASSWORD"
+      add_host legacy-rsa "$port" --key "$WORK/k_rsa3072"
+      add_host legacy-ed "$port" --key "$WORK/k_ed25519"
 
-    # Default algorithms cannot meet this server, and the failure says what to do.
-    err="$(HOME="$WORK/home" "$CLI" exec legacy-pw true 2>&1)"
-    if [[ $? -ne 0 && "$err" == *"algo set"* ]]; then
-      ok "default algorithms are refused, with a pointer to \`algo set\`"
-    else
-      bad "default algorithms are refused, with a pointer to \`algo set\`"; echo "        $err" | cut -c1-200
-    fi
+      # Default algorithms cannot meet this server, and the failure says what to do.
+      err="$(HOME="$WORK/home" "$CLI" exec legacy-pw true 2>&1)"
+      if [[ $? -ne 0 && "$err" == *"algo set"* ]]; then
+        ok "default algorithms are refused, with a pointer to \`algo set\`"
+      else
+        bad "default algorithms are refused, with a pointer to \`algo set\`"; echo "        $err" | cut -c1-200
+      fi
 
-    # `algo set` is where this stops, and that is the honest outcome: the
-    # transport implements no SHA-1 key exchange at all, so a server restricted
-    # to `diffie-hellman-group14-sha1` cannot be reached by allowing it. What the
-    # case pins is the refusal — it must name the algorithm and list what the
-    # build does offer, rather than accept the value and fail later at the
-    # handshake with `No common algorithm` and no way to tell why.
-    #
-    # Servers offering only SHA-1 KEX are pre-OpenSSH-6.5 configurations. The
-    # libssh2 backend this replaced could negotiate them; the russh backend
-    # cannot. Recorded in docs/KNOWN-ISSUES.md.
-    # `algo set` stores what it is given — the value is only checked when a
-    # connection applies it. The refusal therefore has to be pinned at the
-    # connect, where it names the algorithm and lists what this build offers.
-    "$CLI" algo set --kex diffie-hellman-group14-sha1 --hostkey ssh-rsa \
-      --cipher-cs aes128-cbc --cipher-sc aes128-cbc --mac-cs hmac-sha1 --mac-sc hmac-sha1 >/dev/null 2>&1
-    err="$(HOME="$WORK/home" "$CLI" exec legacy-pw true 2>&1)"
-    if [[ $? -ne 0 && "$err" == *"unsupported SSH algorithm"* && "$err" == *"supported:"* ]]; then
-      known "a SHA-1 key exchange (diffie-hellman-group14-sha1) cannot be used: the connect names it as unsupported"
-    else
-      bad "a SHA-1 key exchange is refused with the supported list"; echo "        $err" | cut -c1-200
+      # `algo set` is where this stops, and that is the honest outcome: the
+      # transport implements no SHA-1 key exchange at all, so a server restricted
+      # to `diffie-hellman-group14-sha1` cannot be reached by allowing it. What the
+      # case pins is the refusal — it must name the algorithm and list what the
+      # build does offer, rather than accept the value and fail later at the
+      # handshake with `No common algorithm` and no way to tell why.
+      #
+      # Servers offering only SHA-1 KEX are pre-OpenSSH-6.5 configurations. The
+      # libssh2 backend this replaced could negotiate them; the russh backend
+      # cannot. Recorded in docs/KNOWN-ISSUES.md.
+      # `algo set` stores what it is given — the value is only checked when a
+      # connection applies it. The refusal therefore has to be pinned at the
+      # connect, where it names the algorithm and lists what this build offers.
+      "$CLI" algo set --kex diffie-hellman-group14-sha1 --hostkey ssh-rsa \
+        --cipher-cs aes128-cbc --cipher-sc aes128-cbc --mac-cs hmac-sha1 --mac-sc hmac-sha1 >/dev/null 2>&1
+      err="$(HOME="$WORK/home" "$CLI" exec legacy-pw true 2>&1)"
+      if [[ $? -ne 0 && "$err" == *"unsupported SSH algorithm"* && "$err" == *"supported:"* ]]; then
+        known "a SHA-1 key exchange (diffie-hellman-group14-sha1) cannot be used: the connect names it as unsupported"
+      else
+        bad "a SHA-1 key exchange is refused with the supported list"; echo "        $err" | cut -c1-200
+      fi
+      # With no legacy preferences applied, the server must still refuse this
+      # client's defaults — which is what says the refusal above was about the
+      # algorithm and not about the host.
+      expect_reject legacy-ed "ed25519 key is refused by a server that accepts only ssh-rsa keys"
+      "$CLI" algo clear >/dev/null
+      expect_reject legacy-pw "defaults apply again after \`algo clear\`"
     fi
-    # With no legacy preferences applied, the server must still refuse this
-    # client's defaults — which is what says the refusal above was about the
-    # algorithm and not about the host.
-    expect_reject legacy-ed "ed25519 key is refused by a server that accepts only ssh-rsa keys"
-    "$CLI" algo clear >/dev/null
-    expect_reject legacy-pw "defaults apply again after \`algo clear\`"
   fi
   cleanup_container
 elif [[ "${AGENT2SSH_MATRIX_LEGACY:-1}" == 1 && "$HAVE_KEYGEN" != 1 ]]; then
