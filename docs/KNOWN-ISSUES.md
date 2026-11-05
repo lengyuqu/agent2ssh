@@ -1,6 +1,6 @@
 # 已知问题与未覆盖范围
 
-日期：2026-11-04（K1、K3、K4、K5、K6 已修复；K10、K11 均已修复；K12 为上游限制；K13 为设计限制；E1、E2、E5、E7 已解决并按维护约定移入 `CHANGELOG.md`）。基线：macOS 开发机 + WinR9，Docker / wslc / Apple container；GitHub Actions。
+日期：2026-11-05（K1、K3、K4、K5、K6 已修复；K10、K11 均已修复；K12 为上游限制；K13、K14、K15 为设计限制；E1、E2、E5、E7 已解决并按维护约定移入 `CHANGELOG.md`）。基线：macOS 开发机 + WinR9，Docker / wslc / Apple container；GitHub Actions。
 
 本文只记录 **已经知道、尚未解决** 的事项，以及 **没有验证过所以不能下结论** 的范围，按处理价值排序。已修复的问题在 `CHANGELOG.md`；历史缺陷快照在 `DEFECTS.md`（0.2.1 时代，已归档）；Windows 相关的细节在 [reports/WINDOWS-HANDOVER.md](reports/WINDOWS-HANDOVER.md)，此处只列条目。
 
@@ -20,6 +20,7 @@
 | K13 | 限制 | `ai_allowed`（主机“仅人工”）只约束 `hosts.json` 里的 SSH 主机，`local:*` 永远放行 | 这是刻意的，不是遗漏。主机标为仅人工，限制的是一项 agent 本来必须被**授予**的能力：凭据、网络可达性、跳板机。本地目标什么也限制不了——agent 进程本来就跑在这台机器上，不需要本服务也能起一个 shell（`sh -c`、`Command::new`、`subprocess`），所以拒绝 `local:gitbash` 不会让命令不发生，只会让它换一条路走，同时多出一个看起来像防护、实际不是的设置。本地路径真正提供的是捕获、超时、进程树回收和审计，这些与发起者是谁无关。**两个真正的边界不在这个开关的职责内**：① `local:docker:<id>` 之类的容器目标进入的是另一个隔离域，agent 没有本服务就得用它自己的运行时凭据才能到达；② `local:*` 被转发到**远程 daemon** 时命令跑在那台机器上，而不是调用方机器上——正常使用不会出现，除非是刻意要绕过的 agent。 | `execution_control.rs` `host_allows_source` 的文档注释写了理由，`a_local_target_is_not_gated_by_the_human_only_flag` 钉住行为。若将来要管 ①②，需要单独设计，不是在这里补一个判断 |
 
 | K14 | 限制 | daemon 停止仍依赖 PID 快照 | `daemon.pid` 只存 PID，没有最初启动时间；进程名和 argv 可伪造。停止前需健康响应 PID 匹配且管理员令牌获准关闭，信号前再核对启动时间；共享或被复制的令牌不能证明配置目录的唯一身份，检查与发信号也不是原子操作，秒级启动时间可能碰撞。无法识别或健康检查不可用时会保留 PID 并拒绝停止，需人工检查。重命名或新平台后缀的 daemon 也可能不在名称白名单。 | `daemon_control.rs`；后续需设计可绑定进程身份的跨平台停止协议，并考虑旧 PID 文件兼容。 |
+| K15 | 限制 | `AGENT2SSH_CONFIG_DIR` 用相对路径时，跨工作目录看到的是两个目录 | 这个值由**读取它的进程**按自己的工作目录解析（`daemon_control` 用它定位 `daemon.pid` / `daemon.log`，路径按此解析成绝对路径报出，`./cfg` 不会多出一级）。但两个进程工作目录不同时，同一个相对值就是两个目录：daemon 在 A 写的 `cfg/daemon.pid`，从 B 启动的 CLI 读不到，`daemon status` / `stop` 会如实报「健康端点有 pid，但 PID 文件缺失，无法核实」而**不会**去猜或去停。这不是可以修好的缺陷——相对路径的含义本来就取决于工作目录。 | 用绝对路径即可。回归：`daemon_stop_e2e.rs` 的 `a_relative_config_dir_in_one_working_directory_names_one_daemon`（同目录下不多一级、路径为绝对）与 `a_relative_config_dir_from_another_working_directory_is_a_different_daemon`（跨目录时读到的是另一个文件）；文档见 `configuration-guide.md` 的环境变量表 |
 
 ## 2. 环境与工程问题
 

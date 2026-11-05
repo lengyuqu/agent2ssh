@@ -156,6 +156,37 @@ impl Drop for RunningDaemon {
     }
 }
 
+/// Kills and reaps a child when the test leaves the scope, so a failed assertion
+/// cannot leave a daemon holding a port for the rest of the run.
+struct ChildGuard<'a>(&'a mut Child);
+
+impl Drop for ChildGuard<'_> {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+impl ChildGuard<'_> {
+    /// The test stopped the child itself; do not touch it again.
+    fn forget(self) {
+        std::mem::forget(self);
+    }
+
+    /// Stop and reap the child now, for a path that cannot use the daemon's own
+    /// shutdown route.
+    fn drop_child(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// An ephemeral loopback address nothing is listening on yet.
+fn free_address() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
+    listener.local_addr().expect("local addr").to_string()
+}
+
 fn wait_until(what: &str, within: Duration, mut done: impl FnMut() -> bool) {
     let deadline = Instant::now() + within;
     while Instant::now() < deadline {
@@ -680,4 +711,183 @@ fn activity_counts_a_resident_session() {
     let activity = agent2ssh::daemon_activity::fetch_daemon_activity().expect("activity");
     assert_eq!(activity.resident_sessions, 1, "{activity:?}");
     assert!(!activity.is_idle());
+}
+
+// ── A relative AGENT2SSH_CONFIG_DIR ─────────────────────────────────────────
+//
+// The setting is read by whichever process needs it, resolved against *that*
+// process's working directory. So there are two facts to pin, and only one of
+// them is good news: in one working directory the daemon and the tool that stops
+// it mean the same folder and everything above works; across two working
+// directories the same value means two folders and no stop can happen. The
+// second is documented (`docs/KNOWN-ISSUES.md` K15) rather than papered over,
+// because making it "work" would mean changing what a relative path means.
+
+/// Both sides working from the same directory: `./cfg` is one folder, the paths
+/// this module reports are absolute, and no extra level appears under it.
+#[test]
+#[serial_test::serial]
+fn a_relative_config_dir_in_one_working_directory_names_one_daemon() {
+    let root = std::env::temp_dir().join(format!(
+        "a2s-relative-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock before the epoch")
+            .as_nanos()
+    ));
+    let config = root.join("cfg");
+    std::fs::create_dir_all(&config).expect("create the relative config dir");
+    let token = format!("relative-token-{}", std::process::id());
+    std::fs::write(config.join("daemon.token"), &token).expect("seed daemon.token");
+    let addr = free_address();
+    let previous = std::env::current_dir().expect("cwd");
+    std::env::set_current_dir(&root).expect("stand in the working directory");
+    std::env::set_var(CONFIG_DIR_ENV, "cfg");
+    std::env::set_var(ADDR_ENV, &addr);
+
+    // Asked of the library, not of the filesystem. The daemon resolves the same
+    // value from the same directory, so this is the one place the two readings
+    // meet — and `cfg/daemon.pid` existing proves nothing, because the daemon's
+    // own file is there whether or not this process agrees where "cfg" is.
+    assert_eq!(
+        agent2ssh::daemon_control::daemon_pid_path().ok(),
+        Some(config.join("daemon.pid")),
+        "one level: cfg/daemon.pid, not cfg/cfg/daemon.pid"
+    );
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_agent2ssh-daemon"))
+        .env(CONFIG_DIR_ENV, "cfg")
+        .env(ADDR_ENV, &addr)
+        .env("AGENT2SSH_LOG", "warn")
+        .current_dir(&root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn the daemon from the working directory");
+    let pid = child.id();
+    // A panic here would otherwise leave a daemon running on the configured
+    // address for the rest of the suite — and with `AGENT2SSH_DAEMON_ADDR` gone
+    // it would be squatting the default port where every other test looks.
+    let guard = ChildGuard(&mut child);
+    wait_until("the daemon to serve", STARTUP_BUDGET, || {
+        local_daemon_request("GET", "/health", None, Duration::from_millis(200))
+            .is_ok_and(|response| response.status == 200)
+    });
+
+    assert!(
+        !config.join("cfg").exists(),
+        "a relative path must not nest"
+    );
+    assert_eq!(
+        agent2ssh::daemon_control::daemon_pid_path()
+            .ok()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .and_then(|raw| raw.trim().parse::<u32>().ok()),
+        Some(pid),
+        "the pid file this process reads is the one the daemon wrote"
+    );
+    assert_eq!(
+        agent2ssh::daemon_control::daemon_pid_state(pid),
+        agent2ssh::daemon_control::DaemonPidState::Healthy
+    );
+    stop_daemon_process(pid).expect("stop it");
+    guard.forget();
+
+    std::env::set_current_dir(previous).expect("restore the working directory");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The same relative value from a different working directory is a different
+/// folder: the daemon is answering but this process has no pid file for it, so
+/// the honest answer is "cannot be verified" — never a stop, and never a
+/// deletion of whatever pid file *this* folder's `cfg` would hold.
+#[test]
+#[serial_test::serial]
+fn a_relative_config_dir_from_another_working_directory_is_a_different_daemon() {
+    let root = std::env::temp_dir().join(format!(
+        "a2s-relative-split-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock before the epoch")
+            .as_nanos()
+    ));
+    let daemon_dir = root.join("home");
+    let elsewhere = root.join("elsewhere");
+    std::fs::create_dir_all(daemon_dir.join("cfg")).expect("daemon config dir");
+    std::fs::create_dir_all(&elsewhere).expect("other working directory");
+    std::fs::write(
+        daemon_dir.join("cfg").join("daemon.token"),
+        "relative-token",
+    )
+    .expect("seed daemon.token");
+    let addr = free_address();
+    // The child gets these on its command; this process needs them too before it
+    // probes anything, or it looks for the daemon on the default port while the
+    // daemon it just started listens somewhere else.
+    std::env::set_var(CONFIG_DIR_ENV, "cfg");
+    std::env::set_var(ADDR_ENV, &addr);
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_agent2ssh-daemon"))
+        .env(CONFIG_DIR_ENV, "cfg")
+        .env(ADDR_ENV, &addr)
+        .env("AGENT2SSH_LOG", "warn")
+        .current_dir(&daemon_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn the daemon from its own working directory");
+    let pid = child.id();
+    let mut guard = ChildGuard(&mut child);
+    // `wait_for_daemon_pid`, not a bare `/health` probe: with this config
+    // directory the test cannot use `RunningDaemon::wait_until_serving`, and the
+    // probe has to name *this* child — the previous test's daemon may still be
+    // answering on another port while /health here is not up yet.
+    wait_until("the daemon to report its pid", STARTUP_BUDGET, || {
+        agent2ssh::daemon_control::daemon_health_pid() == Some(pid)
+    });
+
+    // This is the test's whole point: the daemon is up and answering, so
+    // anything that goes wrong from here must not be read as "not started".
+    assert_eq!(
+        agent2ssh::daemon_control::daemon_health_pid(),
+        Some(pid),
+        "the daemon is answering before the working directory changes"
+    );
+
+    let previous = std::env::current_dir().expect("cwd");
+    std::env::set_current_dir(&elsewhere).expect("stand in the other directory");
+
+    assert_eq!(
+        agent2ssh::daemon_control::daemon_pid_path().ok(),
+        Some(elsewhere.join("cfg").join("daemon.pid")),
+        "the same value names a different file here"
+    );
+    assert!(
+        agent2ssh::daemon_control::read_daemon_pid()
+            .expect("read")
+            .is_none(),
+        "and nothing has written it — the daemon's file is in the other directory"
+    );
+    assert_eq!(
+        agent2ssh::daemon_control::daemon_health_pid(),
+        Some(pid),
+        "while the daemon itself is still the one answering"
+    );
+    assert!(
+        agent2ssh::daemon_control::daemon_pid_state(pid)
+            != agent2ssh::daemon_control::DaemonPidState::Healthy,
+        "so this directory cannot call it healthy: there is no pid file to agree with"
+    );
+
+    // Deliberately no stop: `stop_daemon_process` is not reachable from here
+    // without a pid file, and the child is this process's own, so clean it up
+    // directly. A daemon left behind would keep the port alive past the test.
+    guard.drop_child();
+
+    std::env::set_current_dir(previous).expect("restore the working directory");
+    let _ = std::fs::remove_dir_all(&root);
 }
