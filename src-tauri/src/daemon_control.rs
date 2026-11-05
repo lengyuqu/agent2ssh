@@ -53,7 +53,13 @@ pub fn remove_daemon_pid_file() {
 pub fn process_is_alive(pid: u32) -> bool {
     let pid = sysinfo::Pid::from_u32(pid);
     let mut system = sysinfo::System::new();
-    system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+    // Linux truncates process names to 15 bytes, so the daemon's full name
+    // must also be read from its command line for the identity check below.
+    system.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::Some(&[pid]),
+        true,
+        sysinfo::ProcessRefreshKind::nothing().with_cmd(sysinfo::UpdateKind::OnlyIfNotSet),
+    );
     system
         .process(pid)
         // A daemon that has exited but whose parent never waited on it stays in
