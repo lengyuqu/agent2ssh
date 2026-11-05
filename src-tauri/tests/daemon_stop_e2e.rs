@@ -638,6 +638,54 @@ fn the_shutdown_route_is_closed_to_anonymous_and_scoped_callers() {
     .expect("scoped request");
     assert_eq!(scoped.status, 403, "{}", scoped.body);
 
+    let missing = local_daemon_request(
+        "POST",
+        "/shutdown/guarded",
+        Some(&daemon.token),
+        Duration::from_secs(2),
+    )
+    .expect("missing target PID");
+    assert_eq!(
+        missing.status, 400,
+        "guarded route must require the PID header"
+    );
+
+    let client = reqwest::blocking::Client::new();
+    let address = std::env::var(ADDR_ENV).unwrap();
+    for invalid in ["not-a-pid", "0"] {
+        let response = client
+            .post(format!("http://{address}/shutdown/guarded"))
+            .bearer_auth(&daemon.token)
+            .header(agent2ssh::daemon_activity::EXPECTED_PID_HEADER, invalid)
+            .send()
+            .expect("invalid target PID");
+        assert_eq!(response.status(), 400, "invalid target: {invalid}");
+    }
+
+    let scoped_mismatch = agent2ssh::daemon_activity::local_daemon_request_for_pid(
+        "POST",
+        "/shutdown/guarded",
+        Some("scoped-token"),
+        Duration::from_secs(2),
+        daemon.child.id().wrapping_add(1),
+    )
+    .expect("scoped guarded mismatch");
+    assert_eq!(
+        scoped_mismatch.status, 403,
+        "authentication must precede PID checks"
+    );
+
+    let mismatch = agent2ssh::daemon_activity::local_daemon_request_for_pid(
+        "POST",
+        "/shutdown/guarded",
+        Some(&daemon.token),
+        Duration::from_secs(2),
+        daemon.child.id().wrapping_add(1),
+    )
+    .expect("guarded mismatch");
+    assert_eq!(mismatch.status, 409, "{}", mismatch.body);
+    assert!(mismatch.body.contains("target PID"), "{}", mismatch.body);
+
     // Neither refusal may have taken the daemon down.
     let health = local_daemon_request("GET", "/health", None, Duration::from_secs(2))
         .expect("health after refusals");
@@ -645,6 +693,158 @@ fn the_shutdown_route_is_closed_to_anonymous_and_scoped_callers() {
     assert!(
         daemon.token.starts_with("stop-e2e"),
         "admin token untouched"
+    );
+}
+
+// Legacy daemons do not enforce the target header. A new client must not
+// silently send an unguarded stop, even when their health PID looks correct.
+#[test]
+#[serial_test::serial]
+fn legacy_daemon_without_pid_guard_is_not_automatically_stopped() {
+    use std::io::{Read, Write};
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    };
+    let mut daemon = RunningDaemon::start("legacy-guard", &[]);
+    let pid = daemon.child.id();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    std::env::set_var(ADDR_ENV, listener.local_addr().unwrap().to_string());
+    let done = Arc::new(AtomicBool::new(false));
+    let posts = Arc::new(AtomicUsize::new(0));
+    let stop = done.clone();
+    let observed_posts = posts.clone();
+    let server = std::thread::spawn(move || {
+        while !stop.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((mut socket, _)) => {
+                    let _ = socket.set_read_timeout(Some(Duration::from_secs(1)));
+                    let mut request = [0; 2048];
+                    let n = socket.read(&mut request).unwrap_or(0);
+                    if request[..n].starts_with(b"POST ") {
+                        observed_posts.fetch_add(1, Ordering::Relaxed);
+                    }
+                    let body = format!(r#"{{"ok":true,"pid":{pid}}}"#);
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = socket.write_all(response.as_bytes());
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                Err(error) => panic!("accept legacy stub: {error}"),
+            }
+        }
+    });
+    let result = stop_daemon_process(pid);
+    done.store(true, Ordering::Relaxed);
+    server.join().unwrap();
+    let alive = daemon.child.try_wait().unwrap().is_none();
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("does not support guarded shutdown"));
+    assert_eq!(
+        posts.load(Ordering::Relaxed),
+        0,
+        "legacy endpoint must not receive POST"
+    );
+    assert!(alive && daemon.pid_file().exists());
+}
+
+// Simulate the listener changing between health and shutdown requests. Both
+// daemons intentionally share a token; the replacement must reject the request.
+#[test]
+#[serial_test::serial]
+fn shutdown_does_not_reach_a_replacement_daemon_with_the_same_token() {
+    use std::io::{Read, Write};
+    use std::net::{Shutdown, TcpStream};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    let mut target = RunningDaemon::start("race-target", &[]);
+    let target_addr = std::env::var(ADDR_ENV).unwrap();
+    let mut replacement = RunningDaemon::start("race-replacement", &[]);
+    let replacement_addr = std::env::var(ADDR_ENV).unwrap();
+    assert_eq!(target.token, replacement.token);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    std::env::set_var(CONFIG_DIR_ENV, &target.dir);
+    std::env::set_var(ADDR_ENV, listener.local_addr().unwrap().to_string());
+    let done = Arc::new(AtomicBool::new(false));
+    let stop = done.clone();
+    let guarded_conflict = Arc::new(AtomicBool::new(false));
+    let observed_conflict = guarded_conflict.clone();
+    let target_pid = target.child.id();
+    let proxy = std::thread::spawn(move || {
+        while !stop.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((mut inbound, _)) => {
+                    inbound
+                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
+                    let mut request = Vec::new();
+                    let mut chunk = [0; 2048];
+                    loop {
+                        let n = inbound.read(&mut chunk).unwrap();
+                        if n == 0 {
+                            break;
+                        }
+                        request.extend_from_slice(&chunk[..n]);
+                        if request.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    let is_guarded_post = request.starts_with(b"POST /shutdown/guarded ");
+                    let addr = if request.starts_with(b"POST /shutdown") {
+                        &replacement_addr
+                    } else {
+                        &target_addr
+                    };
+                    let mut outbound = TcpStream::connect(addr).unwrap();
+                    outbound
+                        .set_read_timeout(Some(Duration::from_secs(3)))
+                        .unwrap();
+                    outbound.write_all(&request).unwrap();
+                    let mut response = Vec::new();
+                    outbound.read_to_end(&mut response).unwrap();
+                    let expected = format!("x-agent2ssh-expected-pid: {target_pid}");
+                    if is_guarded_post
+                        && String::from_utf8_lossy(&request)
+                            .to_ascii_lowercase()
+                            .contains(&expected)
+                        && response.starts_with(b"HTTP/1.1 409")
+                    {
+                        observed_conflict.store(true, Ordering::Relaxed);
+                    }
+                    let _ = inbound.write_all(&response);
+                    let _ = inbound.shutdown(Shutdown::Both);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                Err(error) => panic!("accept proxy: {error}"),
+            }
+        }
+    });
+    let result = stop_daemon_process(target.child.id());
+    done.store(true, Ordering::Relaxed);
+    proxy.join().unwrap();
+    let target_alive = target.child.try_wait().unwrap().is_none();
+    let replacement_alive = replacement.child.try_wait().unwrap().is_none();
+    assert!(result.is_err(), "replacement shutdown must be rejected");
+    assert!(
+        guarded_conflict.load(Ordering::Relaxed),
+        "replacement must receive the guarded PID and reject it with 409"
+    );
+    assert!(
+        target_alive && replacement_alive,
+        "neither process may be stopped"
     );
 }
 

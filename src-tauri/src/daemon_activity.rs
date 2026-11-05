@@ -45,6 +45,28 @@ pub fn local_daemon_request(
         path,
         token,
         timeout,
+        None,
+    )
+}
+
+/// Header used by guarded shutdown requests to identify the intended daemon.
+pub const EXPECTED_PID_HEADER: &str = "X-Agent2SSH-Expected-Pid";
+
+/// Send a local request that the recipient must bind to `expected_pid`.
+pub fn local_daemon_request_for_pid(
+    method: &str,
+    path: &str,
+    token: Option<&str>,
+    timeout: Duration,
+    expected_pid: u32,
+) -> Result<LocalResponse> {
+    request_at(
+        &crate::local_daemon_connect_addr(),
+        method,
+        path,
+        token,
+        timeout,
+        Some(expected_pid),
     )
 }
 
@@ -55,6 +77,7 @@ fn request_at(
     path: &str,
     token: Option<&str>,
     timeout: Duration,
+    expected_pid: Option<u32>,
 ) -> Result<LocalResponse> {
     let addr = addr
         .to_socket_addrs()?
@@ -67,10 +90,13 @@ fn request_at(
     let authorization = token
         .map(|token| format!("Authorization: Bearer {token}\r\n"))
         .unwrap_or_default();
+    let expected = expected_pid
+        .map(|pid| format!("{EXPECTED_PID_HEADER}: {pid}\r\n"))
+        .unwrap_or_default();
     // One write: `write!` straight to the socket issues a write per format
     // fragment, and a server that reads the request in one go sees only the first.
     let request = format!(
-        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{authorization}Content-Length: 0\r\n\
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{authorization}{expected}Content-Length: 0\r\n\
          Connection: close\r\n\r\n"
     );
     stream.write_all(request.as_bytes())?;
@@ -246,6 +272,7 @@ mod tests {
             "/shutdown",
             Some("tok"),
             Duration::from_secs(2),
+            Some(42),
         );
 
         let response = response.unwrap();
@@ -254,5 +281,9 @@ mod tests {
         let request = server.join().unwrap();
         assert!(request.starts_with("POST /shutdown HTTP/1.1"), "{request}");
         assert!(request.contains("Authorization: Bearer tok"), "{request}");
+        assert!(
+            request.contains("X-Agent2SSH-Expected-Pid: 42"),
+            "{request}"
+        );
     }
 }

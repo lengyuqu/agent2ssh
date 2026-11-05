@@ -154,7 +154,13 @@ pub enum DaemonPidState {
     Stale,
 }
 
-pub fn daemon_health_pid() -> Option<u32> {
+#[derive(Debug, Clone, Copy)]
+struct DaemonHealth {
+    pid: u32,
+    shutdown_pid_guard: bool,
+}
+
+fn daemon_health() -> Option<DaemonHealth> {
     let response = crate::daemon_activity::local_daemon_request(
         "GET",
         "/health",
@@ -169,7 +175,17 @@ pub fn daemon_health_pid() -> Option<u32> {
     if !body.get("ok")?.as_bool()? {
         return None;
     }
-    u32::try_from(body.get("pid")?.as_u64()?).ok()
+    Some(DaemonHealth {
+        pid: u32::try_from(body.get("pid")?.as_u64()?).ok()?,
+        shutdown_pid_guard: body
+            .get("shutdown_pid_guard")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    })
+}
+
+pub fn daemon_health_pid() -> Option<u32> {
+    daemon_health().map(|health| health.pid)
 }
 
 /// Verify the health PID and that the daemon accepts this config's token.
@@ -633,7 +649,10 @@ fn signal_daemon(pid: u32, expected_start: u64, force: bool) -> Result<()> {
     }
 }
 
-/// Ask the running daemon to shut itself down, over its own admin API.
+/// Ask the running daemon to shut itself down using the legacy admin API.
+///
+/// This compatibility helper does not bind the request to a PID. The normal
+/// lifecycle stop path uses the guarded route instead.
 ///
 /// Windows has no `SIGTERM`: signalling falls back to
 /// `TerminateProcess` there, which skips the drain that closes WebSocket
@@ -672,10 +691,30 @@ pub fn stop_daemon_process(pid: u32) -> Result<()> {
     // A matching executable name is not proof that this is our daemon: an
     // unrelated process can reuse the PID or spoof argv[0]. Require both the
     // matching health PID and this config's admin token before any signal.
-    if daemon_health_pid() != Some(pid) || !request_graceful_shutdown() {
+    let health = daemon_health().ok_or_else(|| {
+        anyhow!("daemon PID {pid} could not be authenticated for shutdown; PID file retained")
+    })?;
+    if health.pid != pid {
         return Err(anyhow!(
             "daemon PID {pid} could not be authenticated for shutdown; PID file retained"
         ));
+    }
+    if !health.shutdown_pid_guard {
+        return Err(anyhow!("daemon PID {pid} does not support guarded shutdown; update the daemon or stop it manually after verifying its identity; PID file retained"));
+    }
+    let token = crate::daemon_activity::read_admin_token().ok_or_else(|| {
+        anyhow!("daemon PID {pid} could not be authenticated for shutdown; PID file retained")
+    })?;
+    let accepted = crate::daemon_activity::local_daemon_request_for_pid(
+        "POST",
+        "/shutdown/guarded",
+        Some(&token),
+        Duration::from_secs(2),
+        pid,
+    )
+    .is_ok_and(|response| response.status == 200);
+    if !accepted {
+        return Err(anyhow!("daemon PID {pid} could not be authenticated for shutdown or target changed; PID file retained"));
     }
     match wait_for_exit(pid, start_time, GRACEFUL_STOP_WAIT) {
         ProcessObservation::Exited => {}

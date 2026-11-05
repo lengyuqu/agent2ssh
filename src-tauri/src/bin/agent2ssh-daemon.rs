@@ -56,7 +56,7 @@ use agent2ssh::types::*;
 
 use axum::{
     extract::{Extension, Path, Query, State, WebSocketUpgrade},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse,
@@ -85,8 +85,6 @@ use agent2ssh_daemon_auth::{auth_middleware, AuthContext};
 #[cfg(test)]
 use agent2ssh_daemon_auth::{bearer_token, check_auth, is_public_path, query_token, token_matches};
 use agent2ssh_daemon_trace::{trace_id_middleware, DiagnosticBridgeLayer};
-#[cfg(test)]
-use axum::http::HeaderMap;
 
 // ── Metrics counters ─────────────────────────────────────────────────────────
 
@@ -114,9 +112,47 @@ static SHUTDOWN_REQUESTED: tokio::sync::Notify = tokio::sync::Notify::const_new(
 /// stopping the daemon ends every session and forward it holds.
 async fn daemon_shutdown(
     Extension(auth): Extension<AuthContext>,
+    headers: HeaderMap,
+) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
+    shutdown_with_pid_guard(auth, headers, false)
+}
+
+/// Unlike the legacy route, this route requires an explicit target PID.
+async fn daemon_shutdown_guarded(
+    Extension(auth): Extension<AuthContext>,
+    headers: HeaderMap,
+) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
+    shutdown_with_pid_guard(auth, headers, true)
+}
+
+fn shutdown_with_pid_guard(
+    auth: AuthContext,
+    headers: HeaderMap,
+    required: bool,
 ) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     require_admin(&auth)?;
+    let header = headers.get(agent2ssh::daemon_activity::EXPECTED_PID_HEADER);
+    if required && header.is_none() {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "expected daemon PID is required",
+        ));
+    }
+    if let Some(value) = header {
+        let expected = value
+            .to_str()
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok())
+            .filter(|pid| *pid != 0)
+            .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid expected daemon PID"))?;
+        if expected != std::process::id() {
+            return Err(err(
+                StatusCode::CONFLICT,
+                "shutdown target PID does not match this daemon",
+            ));
+        }
+    }
     tracing::info!("shutdown requested over HTTP");
     SHUTDOWN_REQUESTED.notify_one();
     Ok(Json(OkBody { ok: true }))
@@ -1107,6 +1143,7 @@ async fn health() -> Json<serde_json::Value> {
         "version": env!("CARGO_PKG_VERSION"),
         "uptime_secs": uptime_secs(),
         "config_dir_available": config_ok,
+        "shutdown_pid_guard": true,
         "embedded_ssh_available": true,
         "embedded_keygen_available": true,
         "ssh_available": true,
@@ -5678,6 +5715,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/sftp/rm-rf", post(sftp_rm_rf))
         .route("/sftp/rm-rf/authorize", post(sftp_rm_rf_authorize))
         .route("/shutdown", post(daemon_shutdown))
+        .route("/shutdown/guarded", post(daemon_shutdown_guarded))
         .route("/sessions", post(session_open).get(session_list))
         .route("/sessions/:id/write", post(session_write))
         .route("/sessions/:id/read", get(session_read))
