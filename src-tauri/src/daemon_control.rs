@@ -73,7 +73,7 @@ fn daemon_process_start_time(pid: u32) -> Option<u64> {
         .filter(|process| {
             process.status() != sysinfo::ProcessStatus::Zombie && process_looks_like_daemon(process)
         })
-        .map(|process| process.start_time())
+        .and_then(|process| (process.start_time() != 0).then_some(process.start_time()))
 }
 
 // Only the executable name identifies a daemon. An unrelated shell or editor
@@ -507,15 +507,80 @@ pub fn clear_daemon_owner() {
 /// timeout meant to catch a hung one.
 const GRACEFUL_STOP_WAIT: Duration = Duration::from_secs(8);
 
-fn wait_for_exit(pid: u32, expected_start: u64, within: Duration) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProcessObservation {
+    Exited,
+    Running,
+    Unknown,
+}
+
+fn classify_process_observation(
+    snapshot: Option<(u64, bool)>,
+    definitely_missing: bool,
+    expected_start: u64,
+) -> ProcessObservation {
+    match snapshot {
+        Some((_, true)) => ProcessObservation::Exited,
+        Some((0, false)) => ProcessObservation::Unknown,
+        Some((start, false)) if start != expected_start => ProcessObservation::Exited,
+        Some(_) => ProcessObservation::Running,
+        None if definitely_missing => ProcessObservation::Exited,
+        None => ProcessObservation::Unknown,
+    }
+}
+
+// macOS can omit an unreaped zombie from sysinfo while kill(pid, 0) still
+// succeeds. Observe our own exited children without consuming their wait status.
+#[cfg(unix)]
+fn child_has_exited(pid: u32) -> bool {
+    let Ok(pid_signed) = i32::try_from(pid) else {
+        return false;
+    };
+    if pid_signed <= 0 {
+        return false;
+    }
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let result = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            pid as libc::id_t,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    result == 0 && unsafe { info.si_pid() } == pid_signed
+}
+
+#[cfg(not(unix))]
+fn child_has_exited(_pid: u32) -> bool {
+    false
+}
+
+fn observe_process(pid: u32, expected_start: u64) -> ProcessObservation {
+    let sys_pid = sysinfo::Pid::from_u32(pid);
+    let mut system = sysinfo::System::new();
+    system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[sys_pid]), true);
+    let snapshot = system.process(sys_pid).map(|process| {
+        (
+            process.start_time(),
+            process.status() == sysinfo::ProcessStatus::Zombie,
+        )
+    });
+    let definitely_missing =
+        snapshot.is_none() && (child_has_exited(pid) || pid_definitely_missing(pid));
+    classify_process_observation(snapshot, definitely_missing, expected_start)
+}
+
+fn wait_for_exit(pid: u32, expected_start: u64, within: Duration) -> ProcessObservation {
     let start = Instant::now();
     while start.elapsed() < within {
-        if daemon_process_start_time(pid) != Some(expected_start) {
-            return true;
+        let observation = observe_process(pid, expected_start);
+        if observation == ProcessObservation::Exited {
+            return observation;
         }
         thread::sleep(Duration::from_millis(50));
     }
-    daemon_process_start_time(pid) != Some(expected_start)
+    observe_process(pid, expected_start)
 }
 
 // Recheck identity immediately before signalling. This narrows the PID reuse
@@ -595,16 +660,34 @@ pub fn stop_daemon_process(pid: u32) -> Result<()> {
             "daemon PID {pid} could not be authenticated for shutdown; PID file retained"
         ));
     }
-    if !wait_for_exit(pid, start_time, GRACEFUL_STOP_WAIT) {
-        let _ = crate::diagnostics::append_diagnostic_log(
-            "warn",
-            "daemon_control",
-            "daemon did not exit after a graceful stop; killing it",
-            Some(serde_json::json!({ "pid": pid })),
-        );
-        signal_daemon(pid, start_time, true)?;
-        if !wait_for_exit(pid, start_time, Duration::from_secs(2)) {
-            return Err(anyhow!("daemon process {pid} would not exit"));
+    match wait_for_exit(pid, start_time, GRACEFUL_STOP_WAIT) {
+        ProcessObservation::Exited => {}
+        ProcessObservation::Unknown => {
+            return Err(anyhow!(
+                "daemon PID {pid} exit cannot be verified; PID file retained"
+            ));
+        }
+        ProcessObservation::Running => {
+            let _ = crate::diagnostics::append_diagnostic_log(
+                "warn",
+                "daemon_control",
+                "daemon did not exit after a graceful stop; killing it",
+                Some(serde_json::json!({ "pid": pid })),
+            );
+            signal_daemon(pid, start_time, true)?;
+            match wait_for_exit(pid, start_time, Duration::from_secs(2)) {
+                ProcessObservation::Exited => {}
+                ProcessObservation::Running => {
+                    return Err(anyhow!(
+                        "daemon process {pid} would not exit; PID file retained"
+                    ))
+                }
+                ProcessObservation::Unknown => {
+                    return Err(anyhow!(
+                        "daemon PID {pid} exit cannot be verified; PID file retained"
+                    ))
+                }
+            }
         }
     }
     clear_daemon_owner();
@@ -633,6 +716,66 @@ mod tests {
         assert!(!is_daemon_executable(OsStr::new("agent2ssh-daemon-helper")));
     }
 
+    #[test]
+    fn exit_observation_distinguishes_unknown_from_absent_or_reused_pid() {
+        assert_eq!(
+            classify_process_observation(None, false, 12),
+            ProcessObservation::Unknown
+        );
+        assert_eq!(
+            classify_process_observation(None, true, 12),
+            ProcessObservation::Exited
+        );
+        assert_eq!(
+            classify_process_observation(Some((0, false)), false, 12),
+            ProcessObservation::Unknown
+        );
+        assert_eq!(
+            classify_process_observation(Some((12, false)), false, 12),
+            ProcessObservation::Running
+        );
+        assert_eq!(
+            classify_process_observation(Some((13, false)), false, 12),
+            ProcessObservation::Exited
+        );
+        assert_eq!(
+            classify_process_observation(Some((12, true)), false, 12),
+            ProcessObservation::Exited
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exit_observation_handles_unreaped_child_without_consuming_status() {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !child_has_exited(pid) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let observed = child_has_exited(pid);
+        let result = observe_process(pid, 1);
+        let reaped = child.wait().unwrap();
+        assert!(observed, "child exit should be observable without reaping");
+        assert_eq!(result, ProcessObservation::Exited);
+        assert!(reaped.success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exit_wait_does_not_mistake_an_unrecognized_live_process_for_exit() {
+        let mut child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let pid = child.id();
+        let start = process_start_time(pid).expect("inspect child");
+        let result = wait_for_exit(pid, start, Duration::ZERO);
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(result, ProcessObservation::Running);
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_changed_start_time_is_not_signalled_or_waited_on() {
@@ -649,7 +792,7 @@ mod tests {
         let still_running = child.try_wait().unwrap().is_none();
         let _ = child.kill();
         let _ = child.wait();
-        assert!(ignored && considered_exited && still_running);
+        assert!(ignored && considered_exited == ProcessObservation::Exited && still_running);
     }
 
     #[test]
