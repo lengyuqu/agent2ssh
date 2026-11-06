@@ -706,10 +706,69 @@ fn the_shutdown_route_is_closed_to_anonymous_and_scoped_callers() {
     );
 }
 
-// Legacy daemons do not enforce the target header. A new client must not
-// silently send an unguarded stop, even when their health PID looks correct.
+// An endpoint can claim to have accepted a shutdown while the actual daemon
+// remains alive; the client must not turn that response into a PID-based kill.
 #[test]
 #[serial_test::serial]
+fn an_accepted_shutdown_that_does_not_stop_the_daemon_never_signals_it() {
+    use std::io::{Read, Write};
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    };
+
+    let mut daemon = RunningDaemon::start("unresponsive-stop", &[]);
+    let pid = daemon.child.id();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    std::env::set_var(ADDR_ENV, listener.local_addr().unwrap().to_string());
+    let done = Arc::new(AtomicBool::new(false));
+    let posts = Arc::new(AtomicUsize::new(0));
+    let stop = done.clone();
+    let observed_posts = posts.clone();
+    let server = std::thread::spawn(move || {
+        while !stop.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((mut socket, _)) => {
+                    socket
+                        .set_read_timeout(Some(Duration::from_secs(1)))
+                        .unwrap();
+                    let mut request = [0; 4096];
+                    let n = socket.read(&mut request).unwrap_or(0);
+                    if request[..n].starts_with(b"POST /shutdown/guarded ") {
+                        observed_posts.fetch_add(1, Ordering::Relaxed);
+                    }
+                    let body = format!(r#"{{"ok":true,"pid":{pid},"shutdown_pid_guard":true}}"#);
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = socket.write_all(response.as_bytes());
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                Err(error) => panic!("accept shutdown stub: {error}"),
+            }
+        }
+    });
+    let result = stop_daemon_process(pid);
+    done.store(true, Ordering::Relaxed);
+    server.join().unwrap();
+    assert!(result.unwrap_err().to_string().contains("no signal sent"));
+    assert_eq!(posts.load(Ordering::Relaxed), 1);
+    assert!(
+        daemon.child.try_wait().unwrap().is_none(),
+        "the real daemon must remain alive"
+    );
+    assert!(daemon.pid_file().exists(), "the PID file must be retained");
+}
+
+#[test]
+#[serial_test::serial]
+// Legacy daemons do not enforce the target header. A new client must not
+// silently send an unguarded stop, even when their health PID looks correct.
 fn legacy_daemon_without_pid_guard_is_not_automatically_stopped() {
     use std::io::{Read, Write};
     use std::sync::{

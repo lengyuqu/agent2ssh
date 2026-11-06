@@ -19,7 +19,7 @@
 | K12 | 限制 | 不再支持 SHA-1 密钥交换，只提供 `diffie-hellman-group14-sha1` 的服务器连不上 | 传输层（russh）没有实现任何 SHA-1 KEX，`algo set` 会把该值存下来，连接时才报 `unsupported SSH algorithm 'diffie-hellman-group14-sha1' in preference list (supported: ...)`。受影响的是 OpenSSH 6.5 以前默认配置的设备 | `transport/russh_impl/mod.rs` `apply_prefs` / `russh::kex`。上一代 libssh2 后端可用。没有本地修复路径，只能等上游或换后端；错误信息已明确指出 |
 | K13 | 限制 | `ai_allowed`（主机“仅人工”）只约束 `hosts.json` 里的 SSH 主机，`local:*` 永远放行 | 这是刻意的，不是遗漏。主机标为仅人工，限制的是一项 agent 本来必须被**授予**的能力：凭据、网络可达性、跳板机。本地目标什么也限制不了——agent 进程本来就跑在这台机器上，不需要本服务也能起一个 shell（`sh -c`、`Command::new`、`subprocess`），所以拒绝 `local:gitbash` 不会让命令不发生，只会让它换一条路走，同时多出一个看起来像防护、实际不是的设置。本地路径真正提供的是捕获、超时、进程树回收和审计，这些与发起者是谁无关。**两个真正的边界不在这个开关的职责内**：① `local:docker:<id>` 之类的容器目标进入的是另一个隔离域，agent 没有本服务就得用它自己的运行时凭据才能到达；② `local:*` 被转发到**远程 daemon** 时命令跑在那台机器上，而不是调用方机器上——正常使用不会出现，除非是刻意要绕过的 agent。 | `execution_control.rs` `host_allows_source` 的文档注释写了理由，`a_local_target_is_not_gated_by_the_human_only_flag` 钉住行为。若将来要管 ①②，需要单独设计，不是在这里补一个判断 |
 
-| K14 | 限制 | daemon 停止仍依赖 PID 快照 | `daemon.pid` 只存 PID，没有最初启动时间；进程名和 argv 可伪造。停止前需健康响应 PID 匹配、管理员令牌获准且接收端通过目标 PID 校验，信号前再核对启动时间；共享或被复制的令牌不能证明配置目录的唯一身份，检查与发信号也不是原子操作，秒级启动时间可能碰撞。无法识别或健康检查不可用时会保留 PID 并拒绝停止，需人工检查。重命名或新平台后缀的 daemon 也可能不在名称白名单。 | `daemon_control.rs`；后续需设计可绑定进程身份的跨平台停止协议，并考虑旧 PID 文件兼容。 |
+| K14 | 限制 | daemon 停止仍依赖 PID 快照 | `daemon.pid` 只存 PID，没有最初启动时间；进程名和 argv 可伪造。停止前需健康响应 PID 匹配、管理员令牌获准且接收端通过目标 PID 校验；共享或被复制的令牌不能证明配置目录的唯一身份，秒级启动时间可能碰撞。自动停止超时后不再按 PID 强制发信号；无法识别、健康检查不可用或退出无法确认时会保留 PID 并拒绝停止，需人工检查。重命名或新平台后缀的 daemon 也可能不在名称白名单。 | `daemon_control.rs`；后续需设计可绑定进程身份的跨平台停止协议，并考虑旧 PID 文件兼容。 |
 
 ## 2. 环境与工程问题
 

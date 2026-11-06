@@ -616,39 +616,6 @@ fn wait_for_exit(pid: u32, expected_start: u64, within: Duration) -> ProcessObse
     observe_process(pid, expected_start)
 }
 
-// Recheck identity immediately before signalling. This narrows the PID reuse
-// window but cannot make a PID-based signal atomic with this inspection.
-fn signal_daemon(pid: u32, expected_start: u64, force: bool) -> Result<()> {
-    let sys_pid = sysinfo::Pid::from_u32(pid);
-    let mut system = sysinfo::System::new();
-    system.refresh_processes_specifics(
-        sysinfo::ProcessesToUpdate::Some(&[sys_pid]),
-        true,
-        sysinfo::ProcessRefreshKind::nothing().with_cmd(sysinfo::UpdateKind::OnlyIfNotSet),
-    );
-    let Some(process) = system.process(sys_pid) else {
-        return Ok(());
-    };
-    if process.start_time() != expected_start
-        || process.status() == sysinfo::ProcessStatus::Zombie
-        || !process_looks_like_daemon(process)
-    {
-        return Ok(());
-    }
-    let sent = if force {
-        process.kill()
-    } else {
-        process
-            .kill_with(sysinfo::Signal::Term)
-            .unwrap_or_else(|| process.kill())
-    };
-    if sent {
-        Ok(())
-    } else {
-        Err(anyhow!("failed to signal daemon process {pid}"))
-    }
-}
-
 /// Ask the running daemon to shut itself down using the legacy admin API.
 ///
 /// This compatibility helper does not bind the request to a PID. The normal
@@ -673,8 +640,8 @@ pub fn request_graceful_shutdown() -> bool {
 
 /// Stop the daemon with this `pid` and wait until it is gone.
 ///
-/// Authenticate the local daemon and request shutdown through its admin route,
-/// then signal it by force if it has not exited within [`GRACEFUL_STOP_WAIT`]. Returning only once the
+/// Authenticate the local daemon and request shutdown through its admin route.
+/// A timeout is an error, not permission to signal an unbound PID. Returning only once the
 /// process has exited is what makes a restart safe — the old daemon still holds
 /// the listening port while it drains, so starting the new one straight away
 /// would fail to bind.
@@ -690,7 +657,7 @@ pub fn stop_daemon_process(pid: u32) -> Result<()> {
     };
     // A matching executable name is not proof that this is our daemon: an
     // unrelated process can reuse the PID or spoof argv[0]. Require both the
-    // matching health PID and this config's admin token before any signal.
+    // matching health PID and this config's admin token before requesting shutdown.
     let health = daemon_health().ok_or_else(|| {
         anyhow!("daemon PID {pid} could not be authenticated for shutdown; PID file retained")
     })?;
@@ -727,23 +694,10 @@ pub fn stop_daemon_process(pid: u32) -> Result<()> {
             let _ = crate::diagnostics::append_diagnostic_log(
                 "warn",
                 "daemon_control",
-                "daemon did not exit after a graceful stop; killing it",
+                "daemon did not exit after a guarded shutdown; leaving it running",
                 Some(serde_json::json!({ "pid": pid })),
             );
-            signal_daemon(pid, start_time, true)?;
-            match wait_for_exit(pid, start_time, Duration::from_secs(2)) {
-                ProcessObservation::Exited => {}
-                ProcessObservation::Running => {
-                    return Err(anyhow!(
-                        "daemon process {pid} would not exit; PID file retained"
-                    ))
-                }
-                ProcessObservation::Unknown => {
-                    return Err(anyhow!(
-                        "daemon PID {pid} exit cannot be verified; PID file retained"
-                    ))
-                }
-            }
+            return Err(anyhow!("daemon PID {pid} did not exit after guarded shutdown; no signal sent and PID file retained; inspect the process and daemon log before manual recovery"));
         }
     }
     clear_daemon_owner();
@@ -850,25 +804,6 @@ mod tests {
         let _ = child.kill();
         let _ = child.wait();
         assert_eq!(result, ProcessObservation::Running);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_changed_start_time_is_not_signalled_or_waited_on() {
-        use std::os::unix::fs::symlink;
-        let dir = tempfile::tempdir().unwrap();
-        let executable = dir.path().join("agent2ssh-daemon");
-        symlink("/bin/sleep", &executable).unwrap();
-        let mut child = Command::new(executable).arg("30").spawn().unwrap();
-        let pid = child.id();
-        let start = daemon_process_start_time(pid).expect("identify spawned process");
-        let stale_start = start.wrapping_add(1);
-        let ignored = signal_daemon(pid, stale_start, true).is_ok();
-        let considered_exited = wait_for_exit(pid, stale_start, Duration::from_millis(1));
-        let still_running = child.try_wait().unwrap().is_none();
-        let _ = child.kill();
-        let _ = child.wait();
-        assert!(ignored && considered_exited == ProcessObservation::Exited && still_running);
     }
 
     #[test]
