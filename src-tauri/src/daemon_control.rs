@@ -30,18 +30,18 @@ pub fn daemon_log_path() -> Result<PathBuf> {
 
 pub fn read_daemon_pid() -> Result<Option<u32>> {
     let pid_path = daemon_pid_path()?;
-    if !pid_path.exists() {
-        return Ok(None);
-    }
-
-    let raw = std::fs::read_to_string(&pid_path)?;
-    match raw.trim().parse::<u32>() {
-        Ok(pid) => Ok(Some(pid)),
-        Err(_) => {
-            let _ = std::fs::remove_file(pid_path);
-            Ok(None)
-        }
-    }
+    let raw = match std::fs::read_to_string(&pid_path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("failed to read daemon PID file"),
+    };
+    let pid = raw.trim().parse::<u32>().ok().filter(|pid| *pid != 0);
+    pid.map(Some).ok_or_else(|| {
+        anyhow!(
+            "invalid daemon PID file {}; file retained, inspect it before starting or stopping the daemon",
+            pid_path.display()
+        )
+    })
 }
 
 pub fn remove_daemon_pid_file() {
@@ -435,8 +435,8 @@ pub fn start_daemon_background(daemon_bin: &Path) -> Result<DaemonStartResult> {
                 format!("failed to wait for daemon child (pid={pid}); check it manually")
             })?;
         }
-        // Do not use read_daemon_pid here: it removes malformed/partial files
-        // that could belong to another concurrently starting process.
+        // A malformed/partial file could belong to another concurrently
+        // starting process; only remove a file naming this exact child.
         let recorded_pid = daemon_pid_path()
             .ok()
             .and_then(|path| std::fs::read_to_string(path).ok())
@@ -753,6 +753,26 @@ pub fn stop_daemon_process(pid: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_or_partial_pid_files_are_retained_and_block_start() {
+        let _config = crate::store::TestConfigDir::new("daemon-invalid-pid");
+        let path = daemon_pid_path().unwrap();
+        assert_eq!(read_daemon_pid().unwrap(), None);
+        for raw in ["", "not-a-pid", "0", "4294967296"] {
+            std::fs::write(&path, raw).unwrap();
+            let error = read_daemon_pid().unwrap_err().to_string();
+            assert!(error.contains("file retained"), "{error}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
+            let error = start_daemon_background(&std::env::current_exe().unwrap())
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("file retained"), "{error}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
+        }
+        std::fs::write(&path, "123\n").unwrap();
+        assert_eq!(read_daemon_pid().unwrap(), Some(123));
+    }
 
     #[test]
     fn only_definitely_absent_pids_are_treated_as_missing() {
