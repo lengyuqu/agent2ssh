@@ -1183,6 +1183,19 @@ impl std::fmt::Display for ExecTimeout {
 
 impl std::error::Error for ExecTimeout {}
 
+#[derive(Debug)]
+pub(crate) struct ExecShutdown;
+
+impl std::fmt::Display for ExecShutdown {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "SSH request interrupted during daemon shutdown; remote command outcome unknown"
+        )
+    }
+}
+impl std::error::Error for ExecShutdown {}
+
 /// Idle passes tolerated after the channel reports EOF before the drain ends.
 /// Covers a trailing extended-data (stderr) packet still in flight.
 const DRAIN_IDLE_PASSES_AFTER_EOF: u8 = 2;
@@ -1205,8 +1218,23 @@ pub(crate) fn run_command_capture(
     stdin: Option<&[u8]>,
     timeout_secs: u64,
     max_bytes: usize,
+    shutdown: Option<crate::ws_drain::ShutdownToken>,
 ) -> Result<CapturedExec> {
+    if shutdown
+        .as_ref()
+        .is_some_and(|token| token.is_cancelled_now())
+    {
+        return Err(ExecShutdown.into());
+    }
     let session = connect_embedded_ssh(host, timeout_secs)?;
+    if shutdown
+        .as_ref()
+        .is_some_and(|token| token.is_cancelled_now())
+    {
+        session.set_blocking(false);
+        let _ = session.disconnect(None, "daemon shutting down", None);
+        return Err(ExecShutdown.into());
+    }
     let mut channel = session.channel_session()?;
     channel.exec(command)?;
     if let Some(data) = stdin {
@@ -1228,6 +1256,7 @@ pub(crate) fn run_command_capture(
         &mut stderr,
         deadline,
         timeout_secs,
+        shutdown.as_ref(),
     );
 
     if let Err(error) = drained {
@@ -1242,9 +1271,33 @@ pub(crate) fn run_command_capture(
         // command: a pty-less exec channel's process group is only reaped on
         // the pty path. Stopping it for real needs a PTY or a server-side
         // `timeout` wrapper — see `ExecRequest::timeout_secs`.
+        let interrupted = error.is::<ExecShutdown>()
+            || shutdown
+                .as_ref()
+                .is_some_and(|token| token.is_cancelled_now());
         let _ = channel.close();
-        let _ = session.disconnect(None, "command timed out", None);
-        return Err(error);
+        let reason = if interrupted {
+            "daemon shutting down"
+        } else {
+            "command timed out"
+        };
+        let _ = session.disconnect(None, reason, None);
+        return if interrupted {
+            Err(ExecShutdown.into())
+        } else {
+            Err(error)
+        };
+    }
+
+    // Cancellation can arrive after the last output poll but before the
+    // blocking close exchange. Do not enter that exchange in this case.
+    if shutdown
+        .as_ref()
+        .is_some_and(|token| token.is_cancelled_now())
+    {
+        let _ = channel.close();
+        let _ = session.disconnect(None, "daemon shutting down", None);
+        return Err(ExecShutdown.into());
     }
 
     // The command has been drained to EOF, so the remaining blocking exchanges
@@ -1285,12 +1338,16 @@ fn drain_channel_output(
     stderr: &mut BoundedCapture,
     deadline: Instant,
     timeout_secs: u64,
+    shutdown: Option<&crate::ws_drain::ShutdownToken>,
 ) -> Result<()> {
     let mut stdout_buf = [0u8; 8192];
     let mut stderr_buf = [0u8; 8192];
     let mut idle_after_eof = 0u8;
 
     loop {
+        if shutdown.is_some_and(|token| token.is_cancelled_now()) {
+            return Err(ExecShutdown.into());
+        }
         let mut progressed = false;
 
         match channel.read(&mut stdout_buf) {

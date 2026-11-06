@@ -2262,6 +2262,26 @@ fn local_exec_route_runs_the_shared_preflight() {
     );
 }
 
+#[test]
+fn ssh_exec_route_runs_preflight_before_shutdown_aware_execution() {
+    let daemon = include_str!("../src/bin/agent2ssh-daemon.rs");
+    assert!(daemon.contains(r#".route("/exec", post(exec))"#));
+    let start = daemon.find("async fn exec(").expect("exec handler");
+    let rest = &daemon[start..];
+    let end = rest.find("\nasync fn local_exec(").expect("next handler");
+    let body = &rest[..end];
+    let preflight = body
+        .find("preflight_rewritable_request(")
+        .expect("shared preflight");
+    let execute = body
+        .find("exec_ssh_core_with_shutdown(req, s.shutdown.clone())")
+        .expect("shutdown-aware SSH execution");
+    assert!(
+        preflight < execute,
+        "authorization must precede SSH execution"
+    );
+}
+
 /// A resident session is a shell that stays alive between commands, which
 /// makes it *more* tempting to treat as a trusted channel — the session was
 /// opened under one authorization, and a later command might hope to ride on

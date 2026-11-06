@@ -179,7 +179,14 @@ fn run_health_command(
     // deadlock `exec_ssh_embedded` hit — a remote that filled stderr while
     // holding stdout open blocked its own writes. It also had no deadline of its
     // own, relying entirely on the caller's outer `tokio::time::timeout`.
-    let captured = run_command_capture(host, HEALTH_COMMAND, None, timeout, HEALTH_OUTPUT_LIMIT)?;
+    let captured = run_command_capture(
+        host,
+        HEALTH_COMMAND,
+        None,
+        timeout,
+        HEALTH_OUTPUT_LIMIT,
+        None,
+    )?;
     Ok((
         String::from_utf8_lossy(&captured.stdout).into_owned(),
         String::from_utf8_lossy(&captured.stderr).into_owned(),

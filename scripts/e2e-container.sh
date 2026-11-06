@@ -343,6 +343,19 @@ case "$(uname -s)" in
     ;;
 esac
 
+note "Daemon shutdown with an active SSH request"
+if ( cd "$REPO_ROOT/src-tauri" && \
+     AGENT2SSH_TEST_REQUIRE_SSH=1 \
+     AGENT2SSH_TEST_SSH_PORT="$SSH_PORT" \
+     AGENT2SSH_TEST_SSH_HOST=127.0.0.1 \
+     AGENT2SSH_TEST_SSH_USER=tester \
+     AGENT2SSH_TEST_SSH_KEY="$KEY_PATH" \
+     cargo test --no-default-features --features daemon --test daemon_stop_e2e shutdown_interrupts_an_active_ssh_request -- --exact ); then
+  ok_optional "daemon interrupts active SSH request"
+else
+  bad "daemon interrupts active SSH request"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 # The independent system-ssh cross-check cannot substitute for a required check.
 if [[ "$REQUIRED_PASS" != 8 ]]; then

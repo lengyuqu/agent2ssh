@@ -11,7 +11,7 @@ mod team_config;
 pub use team_config::*;
 
 use crate::{
-    embedded_ssh::{connect_embedded_ssh, run_command_capture, ExecTimeout},
+    embedded_ssh::{connect_embedded_ssh, run_command_capture, ExecShutdown, ExecTimeout},
     local_exec::{
         check_exec_depth, resolve_plan_for_host, run_local_command_capture, LocalExecShutdown,
         LocalExecTimeout,
@@ -972,6 +972,14 @@ pub async fn exec_ssh_core(request: ExecRequest) -> Result<ExecResult> {
     exec_ssh_core_with_risk_override(request, None).await
 }
 
+/// Daemon variant: interrupt the local SSH worker when shutdown begins.
+pub async fn exec_ssh_core_with_shutdown(
+    request: ExecRequest,
+    shutdown: crate::ws_drain::ShutdownToken,
+) -> Result<ExecResult> {
+    exec_ssh_core_impl(request, None, Some(shutdown)).await
+}
+
 pub fn apply_risk_override(classified: RiskLevel, override_level: Option<RiskLevel>) -> RiskLevel {
     if classified == RiskLevel::Blocked {
         RiskLevel::Blocked
@@ -983,6 +991,14 @@ pub fn apply_risk_override(classified: RiskLevel, override_level: Option<RiskLev
 pub(crate) async fn exec_ssh_core_with_risk_override(
     request: ExecRequest,
     request_risk_override: Option<RiskLevel>,
+) -> Result<ExecResult> {
+    exec_ssh_core_impl(request, request_risk_override, None).await
+}
+
+async fn exec_ssh_core_impl(
+    request: ExecRequest,
+    request_risk_override: Option<RiskLevel>,
+    shutdown: Option<crate::ws_drain::ShutdownToken>,
 ) -> Result<ExecResult> {
     validate_command_length(&request.command)?;
     let host = resolve_host(&request.host)?;
@@ -1031,6 +1047,7 @@ pub(crate) async fn exec_ssh_core_with_risk_override(
             embedded_stdin.as_deref().map(str::as_bytes),
             timeout_secs,
             max_bytes,
+            shutdown,
         )
     })
     .await
@@ -1039,6 +1056,18 @@ pub(crate) async fn exec_ssh_core_with_risk_override(
         // `run_command_capture` owns its deadline, so the blocking task always
         // finishes: dropping a `tokio::time::timeout` handle around it used to
         // leave the SSH channel — and the remote command — running.
+        if error.is::<ExecShutdown>() {
+            let message =
+                "SSH request interrupted during daemon shutdown; remote command outcome unknown";
+            append_incomplete_exec_audit(
+                &request,
+                risk,
+                &source,
+                message,
+                started.elapsed().as_millis(),
+            );
+            return error;
+        }
         if let Some(timeout) = error.downcast_ref::<ExecTimeout>() {
             let message = format!("command timed out after {}s", timeout.timeout_secs);
             append_incomplete_exec_audit(

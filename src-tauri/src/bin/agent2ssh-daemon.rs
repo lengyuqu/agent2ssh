@@ -1658,7 +1658,7 @@ async fn exec(
 
     let host_clone = req.host.clone();
     let cmd_clone = req.command.clone();
-    let result = exec_ssh_core(req).await;
+    let result = exec_ssh_core_with_shutdown(req, s.shutdown.clone()).await;
     EXEC_COUNT.fetch_add(1, Ordering::Relaxed);
     EXEC_TOTAL_DURATION_MS.fetch_add(exec_start.elapsed().as_millis() as u64, Ordering::Relaxed);
     let exit_code = result.as_ref().ok().and_then(|r| r.exit_code);

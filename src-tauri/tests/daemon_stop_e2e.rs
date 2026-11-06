@@ -390,6 +390,63 @@ fn stop_exits_when_exec_websocket_peer_stops_reading() {
 
 #[test]
 #[serial_test::serial]
+fn shutdown_interrupts_an_active_ssh_request() {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    let Some(port) = std::env::var("AGENT2SSH_TEST_SSH_PORT").ok() else {
+        assert_ne!(
+            std::env::var("AGENT2SSH_TEST_REQUIRE_SSH").as_deref(),
+            Ok("1"),
+            "SSH fixture required"
+        );
+        eprintln!("skipping: SSH fixture not configured");
+        return;
+    };
+    let mut host = serde_json::json!({"name":"fixture", "host":std::env::var("AGENT2SSH_TEST_SSH_HOST").unwrap_or_else(|_| "127.0.0.1".into()), "port":port.parse::<u16>().unwrap(), "user":std::env::var("AGENT2SSH_TEST_SSH_USER").unwrap_or_else(|_| "root".into())});
+    if let Ok(key) = std::env::var("AGENT2SSH_TEST_SSH_KEY") {
+        host["key_path"] = serde_json::json!(key);
+    } else {
+        host["password"] =
+            serde_json::json!(std::env::var("AGENT2SSH_TEST_SSH_PASSWORD")
+                .unwrap_or_else(|_| "a2s-fixture".into()));
+    }
+    let hosts = serde_json::json!({"schema_version":1,"hosts":[host]}).to_string();
+    let daemon = RunningDaemon::start("stop-ssh-exec", &[("hosts.json", &hosts)]);
+    let marker = format!("/tmp/a2s-stop-{}", uuid::Uuid::new_v4());
+    let command = format!("printf ready > {marker}; sleep 30");
+    let body =
+        serde_json::json!({"host":"fixture","command":command,"force":true,"timeout_secs":60})
+            .to_string();
+    let mut request = TcpStream::connect(std::env::var(ADDR_ENV).unwrap()).unwrap();
+    request
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    write!(request, "POST /exec HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", daemon.token, body.len(), body).unwrap();
+    let probe = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .unwrap();
+    let url = format!("http://{}/exec", std::env::var(ADDR_ENV).unwrap());
+    wait_until("remote command marker", Duration::from_secs(20), || {
+        probe.post(&url).bearer_auth(&daemon.token)
+            .json(&serde_json::json!({"host":"fixture","command":format!("test -f {marker}"),"force":true,"timeout_secs":3}))
+            .send().ok().and_then(|response| response.json::<serde_json::Value>().ok())
+            .is_some_and(|body| body["exit_code"] == 0)
+    });
+    stop_daemon_process(daemon.child.id()).expect("stop while SSH command is running");
+    let mut response = String::new();
+    request.read_to_string(&mut response).unwrap();
+    assert!(
+        response.contains("remote command outcome unknown"),
+        "{response}"
+    );
+    let audit = std::fs::read_to_string(daemon.dir.join("audit.jsonl")).unwrap();
+    assert!(audit.contains("remote command outcome unknown"));
+    assert!(!daemon.pid_file().exists());
+}
+
+#[test]
+#[serial_test::serial]
 fn shutdown_cancels_a_request_waiting_for_approval() {
     use std::io::Write;
     use std::net::TcpStream;
