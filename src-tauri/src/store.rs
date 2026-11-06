@@ -640,11 +640,6 @@ pub(crate) fn save_config_unlocked_strict_host(
 ) -> Result<()> {
     ensure_config_dir()?;
     let mut normalized = normalize_config(config.clone());
-    // K1: encrypt real passwords into the app-managed store, leaving only a
-    // reference marker on disk. Operates on the clone, so the caller's `config`
-    // (and any value it shares with the in-memory cache) keeps the real secrets.
-    externalize_secrets(&mut normalized, strict_host)?;
-    let raw = serde_json::to_string_pretty(&normalized)?;
     let path = config_path()?;
     let tmp_path = path.with_extension(format!("json.tmp.{}", std::process::id()));
     let write_result = (|| -> Result<()> {
@@ -654,6 +649,11 @@ pub(crate) fn save_config_unlocked_strict_host(
             .truncate(true)
             .open(&tmp_path)
             .with_context(|| format!("failed to open temp config {}", tmp_path.display()))?;
+        // Reserve the configuration output before mutating the credential
+        // store. If opening it fails, the previous credentials are untouched.
+        // Later write/rename failures can still occur after secret updates.
+        externalize_secrets(&mut normalized, strict_host)?;
+        let raw = serde_json::to_string_pretty(&normalized)?;
         file.write_all(raw.as_bytes())
             .with_context(|| format!("failed to write temp config {}", tmp_path.display()))?;
         file.sync_all()

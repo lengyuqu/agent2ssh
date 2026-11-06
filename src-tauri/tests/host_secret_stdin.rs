@@ -25,6 +25,39 @@ fn no_marker(output: &Output, marker: &str) {
     assert!(!String::from_utf8_lossy(&output.stderr).contains(marker));
 }
 
+fn run_with_blocked_config_temp(dir: &std::path::Path, name: &str) -> Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_agent2ssh"))
+        .args([
+            "host",
+            "add",
+            name,
+            "--host",
+            "127.0.0.7",
+            "--password-stdin",
+        ])
+        .env("AGENT2SSH_CONFIG_DIR", dir)
+        .env("AGENT2SSH_SECRETS_BACKEND", "encrypted")
+        .env("AGENT2SSH_MASTER_PASSWORD", "test-master-only")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // The CLI blocks reading stdin while we make its per-process temp path
+    // unopenable, deterministically exercising the config-open failure.
+    let blocked = dir.join(format!("hosts.json.tmp.{}", child.id()));
+    std::fs::create_dir(&blocked).unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"failed-write-marker")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    std::fs::remove_dir(&blocked).unwrap();
+    output
+}
+
 #[test]
 fn redirected_credentials_are_encrypted_and_fail_closed() {
     let dir = tempfile::tempdir().unwrap();
@@ -78,6 +111,22 @@ fn redirected_credentials_are_encrypted_and_fail_closed() {
         assert!(!bytes
             .windows(b"stdin-passphrase-marker".len())
             .any(|v| v == b"stdin-passphrase-marker"));
+    }
+    let before_hosts = std::fs::read(dir.path().join("hosts.json")).unwrap();
+    let before_secrets = std::fs::read(dir.path().join("secrets.enc")).unwrap();
+    for name in ["a", "new-host"] {
+        let output = run_with_blocked_config_temp(dir.path(), name);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("failed to open temp config"));
+        no_marker(&output, "failed-write-marker");
+        assert_eq!(
+            std::fs::read(dir.path().join("hosts.json")).unwrap(),
+            before_hosts
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("secrets.enc")).unwrap(),
+            before_secrets
+        );
     }
     std::env::set_var("AGENT2SSH_CONFIG_DIR", dir.path());
     std::env::set_var("AGENT2SSH_SECRETS_BACKEND", "encrypted");
