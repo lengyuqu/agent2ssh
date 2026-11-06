@@ -1,6 +1,8 @@
 node_modules/
 dist/
-src-tauri/target/
+# 不带尾斜杠：target 可能是目录，也可能是指向外置盘的符号链接。
+# 带尾斜杠的规则只匹配目录，符号链接会被 git 当成普通文件跟踪。
+src-tauri/target
 src-tauri/binaries/*
 !src-tauri/binaries/.gitkeep
 linux-bin/
