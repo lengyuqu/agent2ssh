@@ -277,6 +277,10 @@ jobs:
         run: cargo test --no-default-features --test cli_smoke
         working-directory: src-tauri
 
+      - name: Host credential stdin tests
+        run: cargo test --no-default-features --test host_secret_stdin
+        working-directory: src-tauri
+
       - name: SSH E2E harness safety tests
         if: runner.os != 'Windows'
         run: cargo test --no-default-features --test e2e_harness_safety

@@ -616,13 +616,18 @@ enum HostCommands {
         port: Option<u16>,
         #[arg(long)]
         key: Option<String>,
-        /// SSH password for password-based authentication. Prefer keys for production.
-        #[arg(long)]
+        /// SSH password (visible in process arguments); prefer --password-stdin.
+        #[arg(long, conflicts_with = "password_stdin")]
         password: Option<String>,
-        /// Passphrase of the encrypted private key given with --key. A user
-        /// certificate stored next to the key as <key>-cert.pub is picked up automatically.
-        #[arg(long)]
+        /// Read the SSH password from redirected stdin, up to EOF; requires an unlocked credential store.
+        #[arg(long, conflicts_with_all = ["password", "passphrase_stdin"])]
+        password_stdin: bool,
+        /// Key passphrase (visible in process arguments); prefer --passphrase-stdin.
+        #[arg(long, conflicts_with = "passphrase_stdin")]
         passphrase: Option<String>,
+        /// Read the key passphrase from redirected stdin, up to EOF; requires an unlocked credential store.
+        #[arg(long, conflicts_with_all = ["passphrase", "password_stdin"])]
+        passphrase_stdin: bool,
         /// Host profile alias to use as ProxyJump bastion
         #[arg(long, add = ArgValueCandidates::new(host_candidates))]
         jump: Option<String>,
@@ -1980,7 +1985,9 @@ async fn async_main() -> Result<()> {
                 port,
                 key,
                 password,
+                password_stdin,
                 passphrase,
+                passphrase_stdin,
                 jump,
                 risk_override,
                 tags,
@@ -1997,14 +2004,24 @@ async fn async_main() -> Result<()> {
                     "blocked" => Some(RiskLevel::Blocked),
                     _ => None,
                 });
-                let profile = add_host_core(HostProfile {
+                let stdin_secret = if password_stdin || passphrase_stdin {
+                    let value = read_redirected_host_secret()?;
+                    Some(value)
+                } else {
+                    None
+                };
+                let host_profile = HostProfile {
                     ai_allowed: true,
                     name,
                     host,
                     user,
                     port,
                     key_path: key,
-                    password: clean_optional(password),
+                    password: if password_stdin {
+                        stdin_secret.as_ref().map(|s| s.to_string())
+                    } else {
+                        clean_optional(password)
+                    },
                     jump_host: jump,
                     proxy_id: None,
                     risk_override,
@@ -2014,8 +2031,17 @@ async fn async_main() -> Result<()> {
                     role: clean_optional(role),
                     owner: clean_optional(owner),
                     init_command: clean_optional(init_command),
-                    passphrase: clean_optional(passphrase),
-                })?
+                    passphrase: if passphrase_stdin {
+                        stdin_secret.as_ref().map(|s| s.to_string())
+                    } else {
+                        clean_optional(passphrase)
+                    },
+                };
+                let profile = if password_stdin || passphrase_stdin {
+                    agent2ssh::add_host_core_without_plaintext_password(host_profile)?
+                } else {
+                    add_host_core(host_profile)?
+                }
                 .redacted_for_transport();
                 if json {
                     println!("{}", serde_json::to_string_pretty(&profile)?);
@@ -5100,6 +5126,41 @@ async fn run_daemon_doctor(alias: &str, output_json: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn read_redirected_host_secret() -> Result<Zeroizing<String>> {
+    use std::io::{IsTerminal, Read};
+    const LIMIT: u64 = 64 * 1024;
+    let stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        anyhow::bail!(
+            "secret input requires redirected stdin; use a no-echo shell prompt and pipe the value"
+        );
+    }
+    let mut bytes = Zeroizing::new(Vec::new());
+    stdin
+        .lock()
+        .take(LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .context("failed to read secret from stdin")?;
+    if bytes.len() > LIMIT as usize {
+        anyhow::bail!("secret input exceeds 65536 bytes");
+    }
+    let size = bytes.len();
+    if bytes.ends_with(b"\r\n") {
+        bytes.truncate(size - 2);
+    } else if bytes.ends_with(b"\n") {
+        bytes.truncate(size - 1);
+    }
+    if bytes.is_empty() {
+        anyhow::bail!("secret input is empty");
+    }
+    let value =
+        std::str::from_utf8(&bytes).map_err(|_| anyhow::anyhow!("secret input must be UTF-8"))?;
+    if agent2ssh::secrets::is_secret_ref(value) {
+        anyhow::bail!("secret input is a reserved credential reference");
+    }
+    Ok(Zeroizing::new(value.to_owned()))
 }
 
 fn clean_optional(value: Option<String>) -> Option<String> {

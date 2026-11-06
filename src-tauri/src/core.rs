@@ -19,8 +19,8 @@ use crate::{
     sanitize::{analyze_command, split_commands, ShapeRisk},
     session::resolve_host,
     store::{
-        append_audit, list_audit_raw, load_config, save_config_unlocked, store_write_lock,
-        write_private_text,
+        append_audit, list_audit_raw, load_config, save_config_unlocked,
+        save_config_unlocked_strict_host, store_write_lock, write_private_text,
     },
     types::{
         default_host_group, is_local_host, source_from_env, AuditEntry, AuditFilter, BatchStrategy,
@@ -155,6 +155,15 @@ fn normalized_filter(value: Option<&str>) -> Option<String> {
 }
 
 pub fn add_host_core(host: HostProfile) -> Result<HostProfile> {
+    add_host_core_impl(host, false)
+}
+
+/// Add a host without falling back to plaintext for its password.
+pub fn add_host_core_without_plaintext_password(host: HostProfile) -> Result<HostProfile> {
+    add_host_core_impl(host, true)
+}
+
+fn add_host_core_impl(host: HostProfile, strict: bool) -> Result<HostProfile> {
     validate_host(&host)?;
     let _guard = store_write_lock()?;
     let mut config = load_config()?;
@@ -165,7 +174,11 @@ pub fn add_host_core(host: HostProfile) -> Result<HostProfile> {
         config.hosts.push(host.clone());
     }
     config.hosts.sort_by(|a, b| a.name.cmp(&b.name));
-    save_config_unlocked(&config)?;
+    if strict {
+        save_config_unlocked_strict_host(&config, Some(&host.name))?;
+    } else {
+        save_config_unlocked(&config)?;
+    }
     Ok(host)
 }
 

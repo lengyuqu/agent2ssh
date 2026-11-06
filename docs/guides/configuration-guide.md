@@ -327,6 +327,23 @@ denied_commands = ["rm -rf *", "mkfs *"]
 
 ---
 
+## CLI 主机凭据输入
+
+`agent2ssh host add` 支持 `--password-stdin` 或 `--passphrase-stdin`：从重定向的标准输入读到 EOF，去掉末尾一个 LF 或 CRLF，保留其余空格和换行。两者不能同时使用，且不能与对应的 `--password` 或 `--passphrase` 同时使用。空输入、非 UTF-8 和超过 65536 字节的输入会被拒绝；标准输入直接连接终端时也会拒绝，避免输入被回显。
+
+例如在 Bash 中交互输入密码（不要将实际密码写进命令或脚本）：
+
+```bash
+read -rs -p 'SSH password: ' ssh_password
+printf '\n' >&2
+printf '%s' "$ssh_password" | agent2ssh host add example --host example.com --password-stdin
+unset ssh_password
+```
+
+新输入方式要求凭据能够写入加密凭据库：例如在无头环境设置 `AGENT2SSH_MASTER_PASSWORD` 以初始化或解锁库；库不可用时操作失败，不会把新密码写成明文。主密码环境变量本身也可能被同用户进程或子进程读取，应按运行环境保护。旧 `--password` 和 `--passphrase` 保持兼容，它们的值可能出现在进程参数中；旧密码入口的锁库明文回退行为不变。`--password-stdin` 与 `--passphrase-stdin` 使用同一个标准输入，需在一次调用中选择一个。
+
+---
+
 ## daemon.pid
 
 ### 用途
