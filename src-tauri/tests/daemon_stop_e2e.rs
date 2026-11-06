@@ -200,33 +200,15 @@ fn stop_daemon_process_waits_for_a_graceful_exit() {
 #[test]
 #[serial_test::serial]
 fn exiting_old_daemon_preserves_replacement_pid_in_the_same_config() {
-    struct ChildGuard(Child);
-    impl Drop for ChildGuard {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
-
     let old = RunningDaemon::start("pid-replacement", &[]);
     let old_pid = old.child.id();
     let old_addr = std::env::var(ADDR_ENV).unwrap();
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let replacement_addr = listener.local_addr().unwrap().to_string();
-    drop(listener);
-    std::env::set_var(ADDR_ENV, &replacement_addr);
-    let binary = std::path::Path::new(env!("CARGO_BIN_EXE_agent2ssh-daemon"));
-    let mut replacement = ChildGuard(RunningDaemon::spawn(binary, &old.dir));
-    let replacement_pid = replacement.0.id();
-    wait_until("replacement health and PID", STARTUP_BUDGET, || {
-        local_daemon_request("GET", "/health", None, Duration::from_millis(500))
-            .ok()
-            .and_then(|response| serde_json::from_str::<serde_json::Value>(&response.body).ok())
-            .and_then(|body| body["pid"].as_u64())
-            == Some(u64::from(replacement_pid))
-            && std::fs::read_to_string(old.pid_file()).ok().as_deref()
-                == Some(replacement_pid.to_string().as_str())
-    });
+    let mut replacement = RunningDaemon::start("pid-replacement-other", &[]);
+    let replacement_pid = replacement.child.id();
+    // Simulate a legacy or external writer which does not follow the lock
+    // protocol. A new daemon no longer overwrites an existing live PID.
+    std::env::set_var(CONFIG_DIR_ENV, &old.dir);
+    std::fs::write(old.pid_file(), replacement_pid.to_string()).unwrap();
     agent2ssh::daemon_control::mark_daemon_owned(replacement_pid).expect("mark replacement owned");
     std::env::set_var(ADDR_ENV, old_addr);
     stop_daemon_process(old_pid).expect("stop old daemon");
@@ -235,11 +217,49 @@ fn exiting_old_daemon_preserves_replacement_pid_in_the_same_config() {
         std::fs::read_to_string(old.pid_file()).unwrap(),
         replacement_pid.to_string()
     );
-    assert!(replacement.0.try_wait().unwrap().is_none());
+    assert!(replacement.child.try_wait().unwrap().is_none());
     assert!(
         agent2ssh::daemon_control::daemon_is_owned(replacement_pid),
         "stopping the old daemon must preserve the replacement's owner marker"
     );
+}
+
+#[test]
+#[serial_test::serial]
+fn direct_daemon_with_another_port_cannot_replace_a_live_pid() {
+    let mut old = RunningDaemon::start("same-config-live", &[]);
+    let old_pid = old.child.id();
+    let old_addr = std::env::var(ADDR_ENV).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let replacement_addr = listener.local_addr().unwrap().to_string();
+    drop(listener);
+    std::env::set_var(ADDR_ENV, replacement_addr);
+    let binary = std::path::Path::new(env!("CARGO_BIN_EXE_agent2ssh-daemon"));
+    let mut replacement = RunningDaemon::spawn(binary, &old.dir);
+    wait_until("competing daemon exit", STARTUP_BUDGET, || {
+        replacement.try_wait().unwrap().is_some()
+    });
+    let status = replacement.wait().unwrap();
+    let stderr = std::fs::read_to_string(old.dir.join("daemon.stderr")).unwrap();
+    std::env::set_var(ADDR_ENV, old_addr);
+    assert!(!status.success());
+    assert!(stderr.contains("live or cannot be verified"), "{stderr}");
+    assert_eq!(
+        std::fs::read_to_string(old.pid_file()).unwrap(),
+        old_pid.to_string()
+    );
+    assert!(old.child.try_wait().unwrap().is_none());
+}
+
+#[test]
+#[serial_test::serial]
+fn direct_daemon_recovers_a_definitely_absent_pid() {
+    let daemon = RunningDaemon::start("direct-stale", &[("daemon.pid", "4294967294")]);
+    assert_eq!(
+        std::fs::read_to_string(daemon.pid_file()).unwrap(),
+        daemon.child.id().to_string()
+    );
+    assert!(process_is_alive(daemon.child.id()));
 }
 
 // A stale PID can point to any process. Mentioning the daemon in an argument

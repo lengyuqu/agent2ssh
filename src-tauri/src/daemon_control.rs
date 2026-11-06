@@ -50,6 +50,11 @@ const DAEMON_PID_LOCK: &str = ".daemon-pid.lock";
 /// This lock is for file coordination, not proof of a process's identity.
 pub fn write_daemon_pid(pid: u32) -> Result<()> {
     let _guard = crate::store::lock_config_file(DAEMON_PID_LOCK)?;
+    if let Some(previous) = read_daemon_pid()? {
+        if !pid_definitely_missing(previous) {
+            return Err(anyhow!("daemon PID file names process {previous}, which is live or cannot be verified; file retained"));
+        }
+    }
     std::fs::write(daemon_pid_path()?, pid.to_string()).context("failed to write daemon PID file")
 }
 
@@ -745,10 +750,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pid_publication_refuses_live_or_invalid_records_and_recovers_absent_processes() {
+        let _config = crate::store::TestConfigDir::new("daemon-pid-publication");
+        let path = daemon_pid_path().unwrap();
+        let me = std::process::id();
+        std::fs::write(&path, me.to_string()).unwrap();
+        assert!(write_daemon_pid(me)
+            .unwrap_err()
+            .to_string()
+            .contains("file retained"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), me.to_string());
+        std::fs::write(&path, "broken").unwrap();
+        assert!(write_daemon_pid(me).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "broken");
+        std::fs::write(&path, (u32::MAX - 1).to_string()).unwrap();
+        write_daemon_pid(me).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), me.to_string());
+    }
+
+    #[test]
     fn pid_cleanup_preserves_replacement_and_invalid_files() {
         let _config = crate::store::TestConfigDir::new("daemon-pid-cleanup");
         let path = daemon_pid_path().unwrap();
-        write_daemon_pid(123).unwrap();
+        std::fs::write(&path, "123").unwrap();
         assert!(write_daemon_pid_if_absent(456).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "123");
         assert!(!remove_daemon_pid_file_if(456).unwrap());
@@ -756,7 +780,7 @@ mod tests {
         std::fs::write(&path, "partial").unwrap();
         assert!(!remove_daemon_pid_file_if(123).unwrap());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "partial");
-        write_daemon_pid(123).unwrap();
+        std::fs::write(&path, "123").unwrap();
         assert!(remove_daemon_pid_file_if(123).unwrap());
         assert!(!path.exists());
         assert!(!remove_daemon_pid_file_if(123).unwrap());
