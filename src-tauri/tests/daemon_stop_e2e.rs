@@ -596,6 +596,79 @@ fn other_daemons_health_is_not_reported_as_our_pid() {
 
 #[test]
 #[serial_test::serial]
+fn a_forged_endpoint_cannot_report_an_absent_pid_as_running() {
+    use agent2ssh::daemon_control::{daemon_matches_config, daemon_pid_state, DaemonPidState};
+    use std::io::{Read, Write};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let pid = u32::MAX - 1;
+    std::fs::write(dir.path().join("daemon.pid"), pid.to_string()).unwrap();
+    std::fs::write(dir.path().join("daemon.token"), "test-only-token").unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    std::env::set_var(CONFIG_DIR_ENV, dir.path());
+    std::env::set_var(ADDR_ENV, listener.local_addr().unwrap().to_string());
+    let done = Arc::new(AtomicBool::new(false));
+    let stopping = done.clone();
+    let server = std::thread::spawn(move || {
+        while !stopping.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((mut socket, _)) => {
+                    socket
+                        .set_read_timeout(Some(Duration::from_secs(1)))
+                        .unwrap();
+                    let mut request = [0; 4096];
+                    let _ = socket.read(&mut request);
+                    let body = format!(r#"{{"ok":true,"pid":{pid},"shutdown_pid_guard":true}}"#);
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = socket.write_all(response.as_bytes());
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                Err(e) => panic!("accept fake daemon: {e}"),
+            }
+        }
+    });
+    let state = daemon_pid_state(pid);
+    let matches = daemon_matches_config(pid);
+    #[cfg(feature = "tauri")]
+    let desktop_status = agent2ssh::tauri_commands::daemon_status().unwrap();
+    let status = Command::new(env!("CARGO_BIN_EXE_agent2ssh"))
+        .env(CONFIG_DIR_ENV, dir.path())
+        .env(ADDR_ENV, std::env::var(ADDR_ENV).unwrap())
+        .args(["daemon", "status"])
+        .output()
+        .unwrap();
+    done.store(true, Ordering::Relaxed);
+    server.join().unwrap();
+    common::restore_default_config_env();
+    std::env::remove_var(ADDR_ENV);
+    assert_eq!(state, DaemonPidState::Unverified);
+    assert!(!matches);
+    #[cfg(feature = "tauri")]
+    {
+        assert!(!desktop_status.running);
+        assert!(desktop_status.message.contains("cannot be verified"));
+    }
+    assert!(status.status.success());
+    assert!(String::from_utf8_lossy(&status.stdout).contains("identity cannot be verified"));
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("daemon.pid")).unwrap(),
+        pid.to_string()
+    );
+}
+
+#[test]
+#[serial_test::serial]
 fn background_start_verifies_and_stops_its_own_daemon() {
     use agent2ssh::daemon_control::{daemon_pid_state, start_daemon_background, DaemonPidState};
     let dir = tempfile::tempdir().unwrap();

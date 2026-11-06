@@ -223,9 +223,25 @@ pub fn daemon_health_pid() -> Option<u32> {
     daemon_health().map(|health| health.pid)
 }
 
-/// Verify the health PID and that the daemon accepts this config's token.
-/// Rechecking the PID narrows a listener-replacement race between requests.
+// A health response alone can be forged. This observation is deliberately
+// independent of the executable name so a renamed daemon remains visible.
+// It is still a seconds-resolution snapshot, not proof of daemon identity.
+fn observable_live_start_time(pid: u32) -> Option<u64> {
+    let sys_pid = sysinfo::Pid::from_u32(pid);
+    let mut system = sysinfo::System::new();
+    system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[sys_pid]), true);
+    system.process(sys_pid).and_then(|process| {
+        (process.status() != sysinfo::ProcessStatus::Zombie && process.start_time() != 0)
+            .then_some(process.start_time())
+    })
+}
+
+/// Verify that the claimed process is observable before and after the health
+/// and token checks. Neither a process snapshot nor the endpoint proves identity.
 pub fn daemon_matches_config(pid: u32) -> bool {
+    let Some(start_time) = observable_live_start_time(pid) else {
+        return false;
+    };
     if daemon_health_pid() != Some(pid) {
         return false;
     }
@@ -239,7 +255,9 @@ pub fn daemon_matches_config(pid: u32) -> bool {
         Duration::from_millis(500),
     )
     .is_ok_and(|response| response.status == 200);
-    authenticated && daemon_health_pid() == Some(pid)
+    authenticated
+        && daemon_health_pid() == Some(pid)
+        && observable_live_start_time(pid) == Some(start_time)
 }
 
 // A missing sysinfo entry can also mean the OS denied inspection. Only treat
