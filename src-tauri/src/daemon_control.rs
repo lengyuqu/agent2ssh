@@ -526,6 +526,7 @@ fn process_start_time(pid: u32) -> Option<u64> {
 pub fn mark_daemon_owned(pid: u32) -> Result<()> {
     let start_time =
         process_start_time(pid).ok_or_else(|| anyhow!("process {pid} is not running"))?;
+    let _guard = crate::store::lock_config_file(DAEMON_PID_LOCK)?;
     let path = daemon_owner_path()?;
     std::fs::write(
         path,
@@ -548,10 +549,22 @@ pub fn daemon_is_owned(pid: u32) -> bool {
     marker.pid == pid && process_start_time(pid) == Some(marker.start_time)
 }
 
-pub fn clear_daemon_owner() {
-    if let Ok(path) = daemon_owner_path() {
-        let _ = std::fs::remove_file(path);
+fn clear_daemon_owner_if(pid: u32, start_time: u64) -> Result<bool> {
+    let _guard = crate::store::lock_config_file(DAEMON_PID_LOCK)?;
+    let path = daemon_owner_path()?;
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error).context("failed to read daemon owner marker"),
+    };
+    let Ok(marker) = serde_json::from_str::<OwnerMarker>(&raw) else {
+        return Ok(false);
+    };
+    if marker.pid != pid || marker.start_time != start_time {
+        return Ok(false);
     }
+    std::fs::remove_file(path).context("failed to remove daemon owner marker")?;
+    Ok(true)
 }
 
 // ── Stopping ────────────────────────────────────────────────────────────────
@@ -674,7 +687,8 @@ pub fn stop_daemon_process(pid: u32) -> Result<()> {
                 "daemon PID {pid} cannot be safely identified; PID file retained"
             ));
         }
-        clear_daemon_owner();
+        // With no start time we cannot distinguish an old marker from a
+        // replacement process; a stale marker is safer than removing it.
         return Ok(());
     };
     // A matching executable name is not proof that this is our daemon: an
@@ -722,7 +736,7 @@ pub fn stop_daemon_process(pid: u32) -> Result<()> {
             return Err(anyhow!("daemon PID {pid} did not exit after guarded shutdown; no signal sent and PID file retained; inspect the process and daemon log before manual recovery"));
         }
     }
-    clear_daemon_owner();
+    clear_daemon_owner_if(pid, start_time)?;
     Ok(())
 }
 
@@ -858,8 +872,11 @@ mod tests {
         assert!(daemon_is_owned(me));
         // Another pid is not covered by this marker.
         assert!(!daemon_is_owned(me.wrapping_add(1)));
+        let start = process_start_time(me).unwrap();
+        assert!(!clear_daemon_owner_if(me, start.wrapping_add(1)).unwrap());
+        assert!(daemon_is_owned(me));
 
-        clear_daemon_owner();
+        assert!(clear_daemon_owner_if(me, start).unwrap());
         assert!(!daemon_is_owned(me));
     }
 

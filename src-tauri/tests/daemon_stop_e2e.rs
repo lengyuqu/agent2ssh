@@ -227,6 +227,7 @@ fn exiting_old_daemon_preserves_replacement_pid_in_the_same_config() {
             && std::fs::read_to_string(old.pid_file()).ok().as_deref()
                 == Some(replacement_pid.to_string().as_str())
     });
+    agent2ssh::daemon_control::mark_daemon_owned(replacement_pid).expect("mark replacement owned");
     std::env::set_var(ADDR_ENV, old_addr);
     stop_daemon_process(old_pid).expect("stop old daemon");
     assert!(!agent2ssh::daemon_control::remove_daemon_pid_file_if(old_pid).unwrap());
@@ -235,6 +236,10 @@ fn exiting_old_daemon_preserves_replacement_pid_in_the_same_config() {
         replacement_pid.to_string()
     );
     assert!(replacement.0.try_wait().unwrap().is_none());
+    assert!(
+        agent2ssh::daemon_control::daemon_is_owned(replacement_pid),
+        "stopping the old daemon must preserve the replacement's owner marker"
+    );
 }
 
 // A stale PID can point to any process. Mentioning the daemon in an argument
