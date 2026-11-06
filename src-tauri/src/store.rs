@@ -642,13 +642,14 @@ pub(crate) fn save_config_unlocked_strict_host(
     let mut normalized = normalize_config(config.clone());
     let path = config_path()?;
     let tmp_path = path.with_extension(format!("json.tmp.{}", std::process::id()));
+    let mut created_temp = false;
     let write_result = (|| -> Result<()> {
         let mut file = OpenOptions::new()
-            .create(true)
+            .create_new(true)
             .write(true)
-            .truncate(true)
             .open(&tmp_path)
             .with_context(|| format!("failed to open temp config {}", tmp_path.display()))?;
+        created_temp = true;
         // Reserve the configuration output before mutating the credential
         // store. If opening it fails, the previous credentials are untouched.
         // Later write/rename failures can still occur after secret updates.
@@ -680,9 +681,9 @@ pub(crate) fn save_config_unlocked_strict_host(
         restrict_file_to_owner(&path)?;
         Ok(())
     })();
-    if write_result.is_err() {
+    if write_result.is_err() && created_temp {
         let _ = fs::remove_file(&tmp_path);
-    } else {
+    } else if write_result.is_ok() {
         // Drop the cached value so this process reads the new hosts immediately,
         // independent of filesystem mtime granularity. (I5)
         HOSTS_CACHE.invalidate();

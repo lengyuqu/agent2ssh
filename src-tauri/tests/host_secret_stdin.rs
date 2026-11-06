@@ -25,7 +25,7 @@ fn no_marker(output: &Output, marker: &str) {
     assert!(!String::from_utf8_lossy(&output.stderr).contains(marker));
 }
 
-fn run_with_blocked_config_temp(dir: &std::path::Path, name: &str) -> Output {
+fn run_with_blocked_config_temp(dir: &std::path::Path, name: &str, regular_file: bool) -> Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_agent2ssh"))
         .args([
             "host",
@@ -46,7 +46,11 @@ fn run_with_blocked_config_temp(dir: &std::path::Path, name: &str) -> Output {
     // The CLI blocks reading stdin while we make its per-process temp path
     // unopenable, deterministically exercising the config-open failure.
     let blocked = dir.join(format!("hosts.json.tmp.{}", child.id()));
-    std::fs::create_dir(&blocked).unwrap();
+    if regular_file {
+        std::fs::write(&blocked, b"preexisting-file-marker").unwrap();
+    } else {
+        std::fs::create_dir(&blocked).unwrap();
+    }
     child
         .stdin
         .take()
@@ -54,7 +58,12 @@ fn run_with_blocked_config_temp(dir: &std::path::Path, name: &str) -> Output {
         .write_all(b"failed-write-marker")
         .unwrap();
     let output = child.wait_with_output().unwrap();
-    std::fs::remove_dir(&blocked).unwrap();
+    if regular_file {
+        assert_eq!(std::fs::read(&blocked).unwrap(), b"preexisting-file-marker");
+        std::fs::remove_file(&blocked).unwrap();
+    } else {
+        std::fs::remove_dir(&blocked).unwrap();
+    }
     output
 }
 
@@ -114,8 +123,13 @@ fn redirected_credentials_are_encrypted_and_fail_closed() {
     }
     let before_hosts = std::fs::read(dir.path().join("hosts.json")).unwrap();
     let before_secrets = std::fs::read(dir.path().join("secrets.enc")).unwrap();
-    for name in ["a", "new-host"] {
-        let output = run_with_blocked_config_temp(dir.path(), name);
+    for (name, regular_file) in [
+        ("a", false),
+        ("new-host", false),
+        ("a", true),
+        ("new-host", true),
+    ] {
+        let output = run_with_blocked_config_temp(dir.path(), name, regular_file);
         assert!(!output.status.success());
         assert!(String::from_utf8_lossy(&output.stderr).contains("failed to open temp config"));
         no_marker(&output, "failed-write-marker");
