@@ -5,7 +5,7 @@
 //! This module provides:
 //!
 //! - `ShutdownToken`: A clone-able cancellation token that propagates shutdown
-//!   to all active WS handlers.
+//!   to active WebSocket and event-stream handlers.
 //! - `DrainHandle`: Per-connection handle that tracks pending messages and
 //!   signals when draining is complete.
 //!
@@ -21,7 +21,7 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, Notify};
 use uuid::Uuid;
 
-/// T2-15: Shutdown token for propagating graceful shutdown to WS handlers.
+/// T2-15: Shutdown token for propagating graceful shutdown to stream handlers.
 ///
 /// Cloning the token creates a new handle to the same cancellation source.
 /// When `cancel()` is called, all clones see the cancellation.
@@ -67,6 +67,10 @@ impl ShutdownToken {
         }
         loop {
             let notified = self.inner.notify.notified();
+            tokio::pin!(notified);
+            // notify_waiters does not retain a permit: register before checking
+            // the flag so cancellation cannot be lost between check and await.
+            notified.as_mut().enable();
             if self.is_cancelled().await {
                 return;
             }
@@ -228,6 +232,26 @@ mod tests {
         // Should return immediately, not hang
         let result = tokio::time::timeout(Duration::from_millis(100), token.cancelled()).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_waiters_observe_cancellation() {
+        for _ in 0..100 {
+            let token = ShutdownToken::new();
+            let mut waiters = Vec::new();
+            for _ in 0..8 {
+                let clone = token.clone();
+                waiters.push(tokio::spawn(async move { clone.cancelled().await }));
+            }
+            tokio::task::yield_now().await;
+            token.cancel().await;
+            for waiter in waiters {
+                tokio::time::timeout(Duration::from_secs(1), waiter)
+                    .await
+                    .expect("waiter missed shutdown")
+                    .expect("waiter task failed");
+            }
+        }
     }
 
     #[tokio::test]

@@ -199,6 +199,72 @@ fn stop_daemon_process_waits_for_a_graceful_exit() {
 
 #[test]
 #[serial_test::serial]
+fn stop_closes_an_active_event_stream_and_exits() {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+
+    let daemon = RunningDaemon::start("stop-with-events", &[]);
+    let pid = daemon.child.id();
+    let mut stream = TcpStream::connect(std::env::var(ADDR_ENV).unwrap()).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    write!(
+        stream,
+        "GET /events/stream HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\n\r\n",
+        daemon.token
+    )
+    .unwrap();
+    let mut received = Vec::new();
+    let mut chunk = [0u8; 1024];
+    while !received
+        .windows(b"stream_connected".len())
+        .any(|w| w == b"stream_connected")
+    {
+        let n = stream.read(&mut chunk).expect("SSE initial event");
+        assert!(n > 0, "stream closed before initial event");
+        received.extend_from_slice(&chunk[..n]);
+        assert!(received.len() < 65536, "initial SSE response too large");
+    }
+    assert!(received.starts_with(b"HTTP/1.1 200"));
+    let started = Instant::now();
+    stop_daemon_process(pid).expect("stop with an active SSE subscriber");
+    assert!(started.elapsed() < Duration::from_secs(8));
+    assert!(!process_is_alive(pid));
+    assert!(!daemon.pid_file().exists());
+    loop {
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(_) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => break,
+            Err(error) => panic!("SSE stream did not close: {error}"),
+        }
+    }
+    struct ChildGuard(Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut restarted = ChildGuard(RunningDaemon::spawn(
+        std::path::Path::new(env!("CARGO_BIN_EXE_agent2ssh-daemon")),
+        &daemon.dir,
+    ));
+    let restarted_pid = restarted.0.id();
+    wait_until("restarted daemon", STARTUP_BUDGET, || {
+        agent2ssh::daemon_control::daemon_health_pid() == Some(restarted_pid)
+            || restarted.0.try_wait().unwrap().is_some()
+    });
+    assert!(
+        restarted.0.try_wait().unwrap().is_none(),
+        "restart must remain alive"
+    );
+    stop_daemon_process(restarted_pid).expect("stop restarted daemon");
+}
+
+#[test]
+#[serial_test::serial]
 fn exiting_old_daemon_preserves_replacement_pid_in_the_same_config() {
     let old = RunningDaemon::start("pid-replacement", &[]);
     let old_pid = old.child.id();

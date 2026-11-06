@@ -3959,7 +3959,7 @@ async fn metrics_trend(
 // ── Event Stream SSE (F6-4) ─────────────────────────────────────────────────
 
 async fn events_stream(
-    State(_s): State<AppState>,
+    State(s): State<AppState>,
     Extension(auth): Extension<AuthContext>,
 ) -> Result<
     Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>>,
@@ -4001,7 +4001,12 @@ async fn events_stream(
             Err(_) => None,
         }
     });
-    let stream = initial.chain(live);
+    // Hyper waits for active response bodies during graceful shutdown. End the
+    // SSE body on the same cancellation signal used by WebSocket handlers.
+    let shutdown = s.shutdown.clone();
+    let stream = initial.chain(live).take_until(async move {
+        shutdown.cancelled().await;
+    });
 
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }

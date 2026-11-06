@@ -574,7 +574,7 @@ fn clear_daemon_owner_if(pid: u32, start_time: u64) -> Result<bool> {
 
 // ── Stopping ────────────────────────────────────────────────────────────────
 
-/// How long a stopped daemon gets to drain before it is killed outright. The
+/// How long a stopped daemon gets to drain before stop returns an error. The
 /// daemon waits up to five seconds for WebSocket connections to finish, so this
 /// has to be longer than that or a graceful stop would be cut short by the very
 /// timeout meant to catch a hung one.
@@ -661,10 +661,8 @@ fn wait_for_exit(pid: u32, expected_start: u64, within: Duration) -> ProcessObse
 /// This compatibility helper does not bind the request to a PID. The normal
 /// lifecycle stop path uses the guarded route instead.
 ///
-/// Windows has no `SIGTERM`: signalling falls back to
-/// `TerminateProcess` there, which skips the drain that closes WebSocket
-/// connections cleanly and removes the pid file. Asking the daemon does what
-/// the signal does elsewhere. `true` only when the daemon accepted the request.
+/// Asking the daemon lets it drain connections and remove its PID file on all
+/// platforms. `true` only means the daemon accepted the request.
 pub fn request_graceful_shutdown() -> bool {
     let Some(token) = crate::daemon_activity::read_admin_token() else {
         return false;

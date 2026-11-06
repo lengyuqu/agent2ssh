@@ -583,13 +583,13 @@ paths:
       summary: Shut the daemon down
       description: >
         Asks the daemon to shut down the way `SIGTERM` does: it stops accepting
-        connections, drains open WebSocket connections (up to five seconds) and
+        connections, ends event streams, drains open WebSocket connections (up to five seconds) and
         removes `daemon.pid`. Everything the daemon holds in memory ends with it —
         PTY sessions, resident shells, port forwards and pending approvals.
-        The desktop app and `agent2ssh daemon stop` use this route on all
-        platforms using /shutdown/guarded after checking the health PID; if
-        shutdown was accepted but the process does not exit, they may terminate
-        it after the drain timeout. Requires the unrestricted admin token; a
+        The desktop app and `agent2ssh daemon stop` use /shutdown/guarded after
+        checking the health PID; if the process does not exit after the drain
+        timeout, they report an error and retain the PID without sending a signal.
+        Requires the unrestricted admin token; a
         scoped token gets 403. This legacy route accepts requests without a PID
         header for compatibility with older API clients.
       parameters:
