@@ -27,6 +27,10 @@ impl Harness {
             &runtime,
             r#"#!/bin/bash
 printf '%s\n' "$*" >> "$FAKE_LOG"
+if [[ "$1" == exec && "$*" == *"OpenSSH_"* ]]; then
+  if [[ -f "$FAKE_DIR/version-match" ]]; then echo OpenSSH_10.3p1; else echo OpenSSH_FAKE; fi
+fi
+if [[ "$1" == exec && -f "$FAKE_DIR/legacy-not-ready" && "$*" == *"test -s /config/sshd.pid"* ]]; then exit 1; fi
 if [[ "$1" == run ]]; then
   if [[ "${FAKE_RUN_FAIL:-0}" == 1 ]]; then exit 71; fi
   name=""; cidfile=""
@@ -119,7 +123,10 @@ printf '%s\n' "${SSH_AUTH_SOCK:-none}" >> "$FAKE_AGENT_LOG"
         let path = if self.dir.path().join("no-keygen").exists() {
             let isolated = self.dir.path().join("isolated-path");
             fs::create_dir_all(&isolated).unwrap();
-            for name in ["dirname", "mktemp", "mkdir", "sed", "cat", "rm"] {
+            for name in [
+                "dirname", "mktemp", "mkdir", "sed", "cat", "rm", "awk", "uname", "head", "cmp",
+                "tr", "seq", "cut",
+            ] {
                 let executable =
                     std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
                         .map(|dir| dir.join(name))
@@ -337,6 +344,33 @@ fn matrix_cleans_first_fixture_when_the_second_run_fails() {
 }
 
 #[test]
+fn legacy_server_that_never_becomes_ready_fails_and_reports_summary() {
+    let harness = Harness::new();
+    fs::write(harness.dir.path().join("legacy-on"), "").unwrap();
+    fs::write(harness.dir.path().join("legacy-not-ready"), "").unwrap();
+    let (success, log) = harness.run("e2e-ssh-matrix.sh", false, false, " ");
+    let output = fs::read_to_string(harness.dir.path().join("stdout.log")).unwrap();
+    assert!(
+        !success && output.contains("legacy sshd did not become ready"),
+        "{output}"
+    );
+    assert!(
+        output.contains("MATRIX_RESULT passed=0 failed=1 skipped=0"),
+        "{output}"
+    );
+    let run = log.iter().find(|line| line.starts_with("run ")).unwrap();
+    assert!(
+        log.iter()
+            .any(|line| line == &format!("rm -f fake-id-{}", run_name(run))),
+        "{log:?}"
+    );
+    assert!(
+        !log.iter().any(|line| line.contains("HostKeyAlgorithms")),
+        "unready server must not be configured: {log:?}"
+    );
+}
+
+#[test]
 fn legacy_missing_id_cleans_previous_fixture_without_removing_by_name() {
     let harness = Harness::new();
     fs::write(harness.dir.path().join("legacy-on"), "").unwrap();
@@ -417,11 +451,97 @@ fn matrix_does_not_execute_remote_comment_words_on_the_host() {
         log.iter().any(|line| line.starts_with("exec ")),
         "server setup must be reached: {log:?}"
     );
+    let output = fs::read_to_string(harness.dir.path().join("stdout.log")).unwrap();
+    assert!(output.contains("server version: OpenSSH_FAKE"), "{output}");
+    assert!(output.contains("MATRIX_RESULT passed="), "{output}");
     assert!(
         fs::read_to_string(harness.dir.path().join("substitution.log"))
             .unwrap_or_default()
             .is_empty(),
         "remote comments must not invoke host commands"
+    );
+}
+
+#[test]
+fn partial_dropbear_run_without_keygen_reports_failure_instead_of_unbound_variable() {
+    let harness = Harness::new();
+    fs::write(harness.dir.path().join("no-keygen"), "").unwrap();
+    let (success, log) = harness.run("e2e-ssh-matrix.sh", true, false, "dropbear");
+    let stderr = fs::read_to_string(harness.dir.path().join("stderr.log")).unwrap();
+    let output = fs::read_to_string(harness.dir.path().join("stdout.log")).unwrap();
+    assert!(!success && !stderr.contains("unbound variable"), "{stderr}");
+    assert!(
+        output.contains("start dropbear") && output.contains("MATRIX_RESULT"),
+        "{output}"
+    );
+    assert_eq!(
+        log.iter().filter(|line| line.starts_with("run ")).count(),
+        1,
+        "{log:?}"
+    );
+    assert!(
+        !log.iter().any(|line| line.starts_with("rm -f ")),
+        "failed run must not remove an existing container: {log:?}"
+    );
+}
+
+#[test]
+fn partial_dropbear_without_keygen_counts_each_missing_key_case() {
+    let harness = Harness::new();
+    fs::write(harness.dir.path().join("no-keygen"), "").unwrap();
+    fs::write(harness.dir.path().join("matrix-ready"), "").unwrap();
+    let (success, _) = harness.run("e2e-ssh-matrix.sh", false, false, "dropbear");
+    let output = fs::read_to_string(harness.dir.path().join("stdout.log")).unwrap();
+    let stderr = fs::read_to_string(harness.dir.path().join("stderr.log")).unwrap();
+    assert!(
+        !success,
+        "the fake client deliberately fails negative cases"
+    );
+    assert!(!stderr.contains("unbound variable"), "{stderr}");
+    assert!(
+        output.contains("SKIP") && output.contains("ecdsa256-pem encrypted key (no ssh-keygen)"),
+        "{output}"
+    );
+    assert!(
+        output.contains("MATRIX_RESULT") && output.contains("skipped=17"),
+        "{output}"
+    );
+}
+
+#[test]
+fn strict_matrix_rejects_an_unexpected_server_version() {
+    let harness = Harness::new();
+    fs::write(harness.dir.path().join("agent-success"), "").unwrap();
+    fs::write(harness.dir.path().join("matrix-ready"), "").unwrap();
+    let (success, _) =
+        harness.run_with_strict("e2e-ssh-matrix.sh", false, false, "openssh:10.3", true);
+    let output = fs::read_to_string(harness.dir.path().join("stdout.log")).unwrap();
+    assert!(
+        !success && output.contains("server version does not match expected OpenSSH 10.3"),
+        "{output}"
+    );
+}
+
+#[test]
+fn strict_matrix_accepts_a_matching_server_version() {
+    let harness = Harness::new();
+    fs::write(harness.dir.path().join("agent-success"), "").unwrap();
+    fs::write(harness.dir.path().join("matrix-ready"), "").unwrap();
+    fs::write(harness.dir.path().join("version-match"), "").unwrap();
+    let (success, _) =
+        harness.run_with_strict("e2e-ssh-matrix.sh", false, false, "openssh:10.3", true);
+    let output = fs::read_to_string(harness.dir.path().join("stdout.log")).unwrap();
+    assert!(
+        !success,
+        "the fake client deliberately fails negative cases"
+    );
+    assert!(
+        output.contains("server version: OpenSSH_10.3p1"),
+        "{output}"
+    );
+    assert!(
+        !output.contains("server version does not match"),
+        "{output}"
     );
 }
 

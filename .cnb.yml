@@ -41,3 +41,35 @@ main:
             cargo build --locked --manifest-path src-tauri/Cargo.toml --release --no-default-features --bin agent2ssh
             bash scripts/e2e-container.sh
   pull_request: *regression
+
+  # Explicitly requested full matrix; no automatic schedule or PR gate.
+  api_trigger_ssh_matrix: &ssh_matrix
+    - name: full-ssh-matrix
+      docker:
+        image: rust:bookworm
+      services:
+        - docker
+      stages:
+        - name: multi-version SSH compatibility matrix
+          timeout: 60m
+          lock:
+            key: agent2ssh-ssh-matrix
+            expires: 3900
+            wait: true
+            timeout: 3600
+          script: |
+            set -eu
+            if ! command -v ssh-keygen >/dev/null 2>&1 || ! command -v ssh-agent >/dev/null 2>&1 || ! command -v ssh-add >/dev/null 2>&1; then
+              apt-get update
+              apt-get install -y openssh-client
+            fi
+            for tool in ssh-keygen ssh-agent ssh-add; do command -v "$tool"; done
+            docker info --format '{{.ServerVersion}}'
+            export AGENT2SSH_CONTAINER_RUNTIME=docker
+            export AGENT2SSH_MATRIX_REQUIRE_FULL=1
+            export AGENT2SSH_MATRIX_SERVERS='openssh:8.3 openssh:8.8 openssh:9.3 openssh:9.9 openssh:10.3 dropbear'
+            export AGENT2SSH_MATRIX_LEGACY=1
+            unset SSH_AUTH_SOCK SSH_AGENT_PID
+            cargo build --locked --manifest-path src-tauri/Cargo.toml --release --no-default-features --bin agent2ssh
+            bash scripts/e2e-ssh-matrix.sh
+  web_trigger_ssh_matrix: *ssh_matrix
