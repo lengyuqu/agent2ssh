@@ -5611,8 +5611,7 @@ async fn main() -> anyhow::Result<()> {
     let listener = TcpListener::bind(addr).await?;
 
     // PID
-    let pid_path = config_dir.join("daemon.pid");
-    std::fs::write(&pid_path, std::process::id().to_string())?;
+    agent2ssh::daemon_control::write_daemon_pid(std::process::id())?;
 
     let limits = load_execution_limits()?;
     // T2-16: Initialize the global prompt waiter for 2FA/OTP keyboard-interactive prompts
@@ -5810,12 +5809,12 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("drained {} WS connections", drained);
     }
 
-    let _ = std::fs::remove_file(&pid_path);
+    let pid_removed = agent2ssh::daemon_control::remove_daemon_pid_file_if(std::process::id())?;
     let _ = append_diagnostic_log(
         "info",
         "daemon",
-        "daemon shut down; pid file removed",
-        Some(serde_json::json!({ "pid": std::process::id() })),
+        "daemon shut down",
+        Some(serde_json::json!({ "pid": std::process::id(), "pid_file_removed": pid_removed })),
     );
     Ok(())
 }

@@ -197,6 +197,46 @@ fn stop_daemon_process_waits_for_a_graceful_exit() {
     );
 }
 
+#[test]
+#[serial_test::serial]
+fn exiting_old_daemon_preserves_replacement_pid_in_the_same_config() {
+    struct ChildGuard(Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let old = RunningDaemon::start("pid-replacement", &[]);
+    let old_pid = old.child.id();
+    let old_addr = std::env::var(ADDR_ENV).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let replacement_addr = listener.local_addr().unwrap().to_string();
+    drop(listener);
+    std::env::set_var(ADDR_ENV, &replacement_addr);
+    let binary = std::path::Path::new(env!("CARGO_BIN_EXE_agent2ssh-daemon"));
+    let mut replacement = ChildGuard(RunningDaemon::spawn(binary, &old.dir));
+    let replacement_pid = replacement.0.id();
+    wait_until("replacement health and PID", STARTUP_BUDGET, || {
+        local_daemon_request("GET", "/health", None, Duration::from_millis(500))
+            .ok()
+            .and_then(|response| serde_json::from_str::<serde_json::Value>(&response.body).ok())
+            .and_then(|body| body["pid"].as_u64())
+            == Some(u64::from(replacement_pid))
+            && std::fs::read_to_string(old.pid_file()).ok().as_deref()
+                == Some(replacement_pid.to_string().as_str())
+    });
+    std::env::set_var(ADDR_ENV, old_addr);
+    stop_daemon_process(old_pid).expect("stop old daemon");
+    assert!(!agent2ssh::daemon_control::remove_daemon_pid_file_if(old_pid).unwrap());
+    assert_eq!(
+        std::fs::read_to_string(old.pid_file()).unwrap(),
+        replacement_pid.to_string()
+    );
+    assert!(replacement.0.try_wait().unwrap().is_none());
+}
+
 // A stale PID can point to any process. Mentioning the daemon in an argument
 // must not make that process a candidate for the stop path.
 #[cfg(unix)]

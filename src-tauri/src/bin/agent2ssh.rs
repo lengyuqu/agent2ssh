@@ -3,7 +3,7 @@ use agent2ssh::approval::{
     load_approval_policies, preview_expired_approvals, save_approval_policies, ApprovalPolicy,
 };
 use agent2ssh::daemon_control::{
-    daemon_health_pid, daemon_pid_state, read_daemon_pid, remove_daemon_pid_file,
+    daemon_health_pid, daemon_pid_state, read_daemon_pid, remove_daemon_pid_file_if,
     start_daemon_background, stop_daemon_process, DaemonPidState,
 };
 use agent2ssh::embedded_ssh::{
@@ -3031,7 +3031,7 @@ async fn async_main() -> Result<()> {
                         return Ok(());
                     };
                     stop_daemon_process(pid)?;
-                    remove_daemon_pid_file();
+                    remove_daemon_pid_file_if(pid)?;
                     println!("Daemon stopped (pid={}).", pid);
                 }
                 DaemonCommands::Status => {
@@ -3058,7 +3058,7 @@ async fn async_main() -> Result<()> {
                         // Waits for the old daemon to exit, so the new one can
                         // bind the port it was still holding while it drained.
                         stop_daemon_process(pid)?;
-                        remove_daemon_pid_file();
+                        remove_daemon_pid_file_if(pid)?;
                     }
                     let daemon_bin = daemon_binary_path()?;
                     let started = start_daemon_background(&daemon_bin)?;
@@ -3073,7 +3073,11 @@ async fn async_main() -> Result<()> {
                         if daemon_pid_state(pid) != DaemonPidState::Stale {
                             anyhow::bail!("daemon PID {pid} is live or cannot be verified; refusing to rotate token");
                         }
-                        remove_daemon_pid_file();
+                        if !remove_daemon_pid_file_if(pid)? {
+                            anyhow::bail!(
+                                "daemon PID file changed during cleanup; retry after inspecting it"
+                            );
+                        }
                     }
                     if daemon_health_pid().is_some() {
                         anyhow::bail!("daemon health endpoint is active; refusing to rotate token");

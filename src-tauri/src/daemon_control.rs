@@ -44,10 +44,40 @@ pub fn read_daemon_pid() -> Result<Option<u32>> {
     })
 }
 
-pub fn remove_daemon_pid_file() {
-    if let Ok(pid_path) = daemon_pid_path() {
-        let _ = std::fs::remove_file(pid_path);
+const DAEMON_PID_LOCK: &str = ".daemon-pid.lock";
+
+/// Serialize PID publication and conditional cleanup between current versions.
+/// This lock is for file coordination, not proof of a process's identity.
+pub fn write_daemon_pid(pid: u32) -> Result<()> {
+    let _guard = crate::store::lock_config_file(DAEMON_PID_LOCK)?;
+    std::fs::write(daemon_pid_path()?, pid.to_string()).context("failed to write daemon PID file")
+}
+
+fn write_daemon_pid_if_absent(pid: u32) -> Result<()> {
+    let _guard = crate::store::lock_config_file(DAEMON_PID_LOCK)?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(daemon_pid_path()?)?;
+    write!(file, "{pid}")?;
+    Ok(())
+}
+
+/// Remove only the PID we observed, preserving a replacement or malformed file.
+/// Older clients and daemons do not honor this advisory lock.
+pub fn remove_daemon_pid_file_if(pid: u32) -> Result<bool> {
+    let _guard = crate::store::lock_config_file(DAEMON_PID_LOCK)?;
+    let path = daemon_pid_path()?;
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error).context("failed to read daemon PID file for cleanup"),
+    };
+    if raw.trim().parse::<u32>().ok() != Some(pid) {
+        return Ok(false);
     }
+    std::fs::remove_file(path).context("failed to remove daemon PID file")?;
+    Ok(true)
 }
 
 pub fn process_is_alive(pid: u32) -> bool {
@@ -339,7 +369,11 @@ pub fn start_daemon_background(daemon_bin: &Path) -> Result<DaemonStartResult> {
                     "removing stale daemon pid before start",
                     Some(serde_json::json!({ "pid": pid })),
                 );
-                remove_daemon_pid_file();
+                if !remove_daemon_pid_file_if(pid)? {
+                    return Err(anyhow!(
+                        "daemon PID file changed during cleanup; retry after inspecting it"
+                    ));
+                }
             }
             DaemonPidState::RunningUnhealthy | DaemonPidState::Unverified => {
                 return Err(anyhow!(
@@ -421,13 +455,7 @@ pub fn start_daemon_background(daemon_bin: &Path) -> Result<DaemonStartResult> {
                 {
                     // Preserve a recoverable PID if the unverified child never
                     // published one. Never overwrite another process's file.
-                    if let Ok(path) = daemon_pid_path() {
-                        if let Ok(mut file) =
-                            OpenOptions::new().write(true).create_new(true).open(path)
-                        {
-                            let _ = write!(file, "{pid}");
-                        }
-                    }
+                    let _ = write_daemon_pid_if_absent(pid);
                     return Err(anyhow!("daemon child (pid={pid}) did not become ready and could not be stopped: {kill_error}; PID file retained when possible"));
                 }
             }
@@ -437,13 +465,7 @@ pub fn start_daemon_background(daemon_bin: &Path) -> Result<DaemonStartResult> {
         }
         // A malformed/partial file could belong to another concurrently
         // starting process; only remove a file naming this exact child.
-        let recorded_pid = daemon_pid_path()
-            .ok()
-            .and_then(|path| std::fs::read_to_string(path).ok())
-            .and_then(|raw| raw.trim().parse::<u32>().ok());
-        if recorded_pid == Some(pid) {
-            remove_daemon_pid_file();
-        }
+        let _ = remove_daemon_pid_file_if(pid);
         let _ = crate::diagnostics::append_diagnostic_log(
             "error",
             "daemon_control",
@@ -707,6 +729,26 @@ pub fn stop_daemon_process(pid: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pid_cleanup_preserves_replacement_and_invalid_files() {
+        let _config = crate::store::TestConfigDir::new("daemon-pid-cleanup");
+        let path = daemon_pid_path().unwrap();
+        write_daemon_pid(123).unwrap();
+        assert!(write_daemon_pid_if_absent(456).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "123");
+        assert!(!remove_daemon_pid_file_if(456).unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "123");
+        std::fs::write(&path, "partial").unwrap();
+        assert!(!remove_daemon_pid_file_if(123).unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "partial");
+        write_daemon_pid(123).unwrap();
+        assert!(remove_daemon_pid_file_if(123).unwrap());
+        assert!(!path.exists());
+        assert!(!remove_daemon_pid_file_if(123).unwrap());
+        write_daemon_pid_if_absent(456).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "456");
+    }
 
     #[test]
     fn invalid_or_partial_pid_files_are_retained_and_block_start() {
