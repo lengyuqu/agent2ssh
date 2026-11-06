@@ -265,6 +265,223 @@ fn stop_closes_an_active_event_stream_and_exits() {
 
 #[test]
 #[serial_test::serial]
+fn stop_exits_with_an_idle_exec_websocket() {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    let daemon = RunningDaemon::start("stop-with-idle-ws", &[]);
+    let mut stream = TcpStream::connect(std::env::var(ADDR_ENV).unwrap()).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    write!(stream, "GET /exec/stream HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n", daemon.token).unwrap();
+    let mut response = Vec::new();
+    let mut chunk = [0u8; 1024];
+    while !response.windows(4).any(|w| w == b"\r\n\r\n") {
+        let n = stream.read(&mut chunk).unwrap();
+        assert!(n > 0);
+        response.extend_from_slice(&chunk[..n]);
+        assert!(response.len() < 8192);
+    }
+    assert!(
+        response.starts_with(b"HTTP/1.1 101"),
+        "{}",
+        String::from_utf8_lossy(&response)
+    );
+    // Deliberately keep the upgraded socket open without sending a request.
+    stop_daemon_process(daemon.child.id()).expect("stop with idle WebSocket");
+    assert!(!daemon.pid_file().exists());
+}
+
+// Real network backpressure: opt in with the existing isolated SSH fixture.
+#[cfg(unix)]
+#[test]
+#[serial_test::serial]
+fn stop_exits_when_exec_websocket_peer_stops_reading() {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::os::fd::AsRawFd;
+    let Some(port) = std::env::var("AGENT2SSH_TEST_SSH_PORT").ok() else {
+        assert_ne!(
+            std::env::var("AGENT2SSH_TEST_REQUIRE_SSH").as_deref(),
+            Ok("1"),
+            "SSH fixture required"
+        );
+        eprintln!("skipping: SSH fixture not configured");
+        return;
+    };
+    let port: u16 = port.parse().unwrap();
+    let mut host = serde_json::json!({"name":"fixture", "host":std::env::var("AGENT2SSH_TEST_SSH_HOST").unwrap_or_else(|_| "127.0.0.1".into()), "port":port, "user":std::env::var("AGENT2SSH_TEST_SSH_USER").unwrap_or_else(|_| "root".into())});
+    if let Ok(key) = std::env::var("AGENT2SSH_TEST_SSH_KEY") {
+        host["key_path"] = serde_json::json!(key);
+    } else {
+        host["password"] =
+            serde_json::json!(std::env::var("AGENT2SSH_TEST_SSH_PASSWORD")
+                .unwrap_or_else(|_| "a2s-fixture".into()));
+    }
+    let hosts = serde_json::json!({"schema_version":1,"hosts":[host]}).to_string();
+    let daemon = RunningDaemon::start("stop-ws-backpressure", &[("hosts.json", &hosts)]);
+    let mut stream = TcpStream::connect(std::env::var(ADDR_ENV).unwrap()).unwrap();
+    let size: libc::c_int = 4096;
+    let result = unsafe {
+        libc::setsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_RCVBUF,
+            &size as *const _ as *const _,
+            std::mem::size_of_val(&size) as libc::socklen_t,
+        )
+    };
+    assert_eq!(result, 0, "set receive buffer");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(20)))
+        .unwrap();
+    write!(stream, "GET /exec/stream HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n", daemon.token).unwrap();
+    let mut response = Vec::new();
+    let mut byte = [0u8; 1];
+    while !response.ends_with(b"\r\n\r\n") {
+        stream.read_exact(&mut byte).unwrap();
+        response.push(byte[0]);
+        assert!(response.len() < 8192);
+    }
+    assert!(response.starts_with(b"HTTP/1.1 101"));
+    let message = br#"{"host":"fixture","command":"yes aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","force":true,"timeout_secs":120}"#;
+    let mask = [1u8, 2, 3, 4];
+    let mut frame = vec![0x81, 0x80 | 126];
+    frame.extend_from_slice(&(message.len() as u16).to_be_bytes());
+    frame.extend_from_slice(&mask);
+    frame.extend(message.iter().enumerate().map(|(i, b)| b ^ mask[i % 4]));
+    stream.write_all(&frame).unwrap();
+    let mut header = [0u8; 2];
+    stream
+        .read_exact(&mut header)
+        .expect("first WebSocket frame");
+    let length = match header[1] & 0x7f {
+        126 => {
+            let mut b = [0; 2];
+            stream.read_exact(&mut b).unwrap();
+            u16::from_be_bytes(b) as usize
+        }
+        127 => {
+            let mut b = [0; 8];
+            stream.read_exact(&mut b).unwrap();
+            usize::try_from(u64::from_be_bytes(b)).unwrap()
+        }
+        n => n as usize,
+    };
+    assert!(length < 1_000_000);
+    let mut payload = vec![0u8; length];
+    stream.read_exact(&mut payload).unwrap();
+    let event: serde_json::Value = serde_json::from_slice(&payload).expect("stream event JSON");
+    assert_eq!(event["type"], "stdout", "SSH stream did not start: {event}");
+    // The peer stops reading while the remote command floods output.
+    std::thread::sleep(Duration::from_secs(2));
+    let started = Instant::now();
+    stop_daemon_process(daemon.child.id()).expect("stop with backpressured WebSocket");
+    assert!(started.elapsed() < Duration::from_secs(7));
+    assert!(!daemon.pid_file().exists());
+    let diagnostics = std::fs::read_to_string(daemon.dir.join("app.log")).unwrap();
+    assert!(
+        diagnostics.contains("WebSocket drain deadline expired"),
+        "the stalled send did not reach the deadline"
+    );
+    let audit = std::fs::read_to_string(daemon.dir.join("audit.jsonl")).unwrap();
+    assert!(audit.contains("daemon shutdown interrupted stream; remote outcome unknown"));
+}
+
+#[test]
+#[serial_test::serial]
+fn shutdown_cancels_a_request_waiting_for_approval() {
+    use std::io::Write;
+    use std::net::TcpStream;
+    let policy = "[[policies]]\nname = 'test'\nhosts = ['local']\nrequires_approval = true\nttl_secs = 120\n";
+    let daemon = RunningDaemon::start(
+        "stop-pending-approval",
+        &[("approval_policies.toml", policy)],
+    );
+    let mut request = TcpStream::connect(std::env::var(ADDR_ENV).unwrap()).unwrap();
+    let body = r#"{"host":"local","command":"echo approval-pending-marker","force":false}"#;
+    write!(request, "POST /local-exec HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", daemon.token, body.len(), body).unwrap();
+    wait_until("pending approval", Duration::from_secs(10), || {
+        local_daemon_request(
+            "GET",
+            "/approvals",
+            Some(&daemon.token),
+            Duration::from_secs(1),
+        )
+        .ok()
+        .and_then(|response| serde_json::from_str::<serde_json::Value>(&response.body).ok())
+        .and_then(|items| {
+            items
+                .as_array()
+                .map(|items| items.iter().any(|item| item["status"] == "pending"))
+        })
+        .unwrap_or(false)
+    });
+    stop_daemon_process(daemon.child.id()).expect("stop while approval is pending");
+    assert!(!daemon.pid_file().exists());
+    let records = std::fs::read_to_string(daemon.dir.join("approvals.jsonl")).unwrap();
+    let final_record = records
+        .lines()
+        .last()
+        .and_then(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .unwrap();
+    assert_eq!(final_record["status"], "rejected");
+    let audit = std::fs::read_to_string(daemon.dir.join("audit.jsonl")).unwrap();
+    assert!(audit.contains("daemon shutting down; approval wait cancelled"));
+}
+
+#[cfg(unix)]
+#[test]
+#[serial_test::serial]
+fn shutdown_reaps_a_running_local_command_and_its_child() {
+    use std::io::Write;
+    use std::net::TcpStream;
+    let daemon = RunningDaemon::start("stop-local-command", &[]);
+    let marker = daemon.dir.join("running-pids");
+    let command = format!(
+        "sleep 60 & child=$!; printf '%s %s' $$ \"$child\" > '{}'; wait \"$child\"",
+        marker.display()
+    );
+    let body =
+        serde_json::json!({"host":"local", "command":command, "force":true, "timeout_secs":120})
+            .to_string();
+    let mut request = TcpStream::connect(std::env::var(ADDR_ENV).unwrap()).unwrap();
+    write!(request, "POST /local-exec HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", daemon.token, body.len(), body).unwrap();
+    wait_until("local process started", Duration::from_secs(10), || {
+        marker.exists()
+    });
+    let pids = std::fs::read_to_string(marker)
+        .unwrap()
+        .split_whitespace()
+        .map(|value| value.parse::<i32>().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(pids.len(), 2);
+    let stopped = stop_daemon_process(daemon.child.id());
+    if stopped.is_err() {
+        // Only the process group spawned by this test is targeted.
+        unsafe {
+            libc::kill(-pids[0], libc::SIGKILL);
+        }
+    }
+    stopped.expect("stop during a local command");
+    let alive = |pid: i32| {
+        let mut system = sysinfo::System::new();
+        let sys_pid = sysinfo::Pid::from_u32(pid as u32);
+        system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[sys_pid]), true);
+        system
+            .process(sys_pid)
+            .is_some_and(|p| p.status() != sysinfo::ProcessStatus::Zombie)
+    };
+    wait_until("local process tree to exit", Duration::from_secs(5), || {
+        pids.iter().all(|pid| !alive(*pid))
+    });
+    let audit = std::fs::read_to_string(daemon.dir.join("audit.jsonl")).unwrap();
+    assert!(audit.contains("local command stopped during daemon shutdown"));
+    assert!(!daemon.pid_file().exists());
+}
+
+#[test]
+#[serial_test::serial]
 fn exiting_old_daemon_preserves_replacement_pid_in_the_same_config() {
     let old = RunningDaemon::start("pid-replacement", &[]);
     let old_pid = old.child.id();

@@ -13,7 +13,8 @@ pub use team_config::*;
 use crate::{
     embedded_ssh::{connect_embedded_ssh, run_command_capture, ExecTimeout},
     local_exec::{
-        check_exec_depth, resolve_plan_for_host, run_local_command_capture, LocalExecTimeout,
+        check_exec_depth, resolve_plan_for_host, run_local_command_capture, LocalExecShutdown,
+        LocalExecTimeout,
     },
     path_resolver::expand_tilde,
     sanitize::{analyze_command, split_commands, ShapeRisk},
@@ -1040,7 +1041,7 @@ pub(crate) async fn exec_ssh_core_with_risk_override(
         // leave the SSH channel — and the remote command — running.
         if let Some(timeout) = error.downcast_ref::<ExecTimeout>() {
             let message = format!("command timed out after {}s", timeout.timeout_secs);
-            append_timed_out_exec_audit(
+            append_incomplete_exec_audit(
                 &request,
                 risk,
                 &source,
@@ -1107,12 +1108,28 @@ pub async fn exec_local_core(request: ExecRequest) -> Result<ExecResult> {
     exec_local_core_with_risk_override(request, None).await
 }
 
+/// Daemon variant: cancel and reap the local process tree during shutdown.
+pub async fn exec_local_core_with_shutdown(
+    request: ExecRequest,
+    shutdown: crate::ws_drain::ShutdownToken,
+) -> Result<ExecResult> {
+    exec_local_core_impl(request, None, Some(shutdown)).await
+}
+
 /// [`exec_local_core`] with a risk override for trusted callers (a playbook, or
 /// a caller whose scope already vetted the command). An override never downgrades
 /// a blocked command — [`apply_risk_override`] enforces that.
 pub(crate) async fn exec_local_core_with_risk_override(
     request: ExecRequest,
     request_risk_override: Option<RiskLevel>,
+) -> Result<ExecResult> {
+    exec_local_core_impl(request, request_risk_override, None).await
+}
+
+async fn exec_local_core_impl(
+    request: ExecRequest,
+    request_risk_override: Option<RiskLevel>,
+    shutdown: Option<crate::ws_drain::ShutdownToken>,
 ) -> Result<ExecResult> {
     validate_command_length(&request.command)?;
 
@@ -1202,6 +1219,7 @@ pub(crate) async fn exec_local_core_with_risk_override(
             local_stdin.as_deref().map(str::as_bytes),
             timeout_secs,
             max_bytes,
+            shutdown,
         )
     })
     .await
@@ -1210,9 +1228,20 @@ pub(crate) async fn exec_local_core_with_risk_override(
         // The runner owns its deadline and reaps the child — and its process
         // group — before returning, so unlike the SSH path there is no command
         // still running behind this error.
+        if error.is::<LocalExecShutdown>() {
+            let message = "local command stopped during daemon shutdown";
+            append_incomplete_exec_audit(
+                &request,
+                risk,
+                &source,
+                message,
+                started.elapsed().as_millis(),
+            );
+            return anyhow!(message);
+        }
         if let Some(timeout) = error.downcast_ref::<LocalExecTimeout>() {
             let message = format!("command timed out after {}s", timeout.timeout_secs);
-            append_timed_out_exec_audit(
+            append_incomplete_exec_audit(
                 &request,
                 risk,
                 &source,
@@ -1300,12 +1329,12 @@ fn append_rejected_exec_audit(request: &ExecRequest, risk: RiskLevel, source: &s
     );
 }
 
-/// Records an exec that was cut short by its own timeout.
+/// Records an exec that started but was cut short by timeout or shutdown.
 ///
 /// Distinct from [`append_rejected_exec_audit`]: this command *did* run, and the
-/// timeout is the fact worth recording, so the message is the reason rather than
+/// interruption is the fact worth recording, so the message is the reason rather than
 /// the caller-supplied note.
-fn append_timed_out_exec_audit(
+fn append_incomplete_exec_audit(
     request: &ExecRequest,
     risk: RiskLevel,
     source: &str,

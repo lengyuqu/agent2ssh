@@ -218,6 +218,23 @@ pub async fn session_write_core(id: Uuid, input: &str) -> Result<()> {
 }
 
 pub async fn session_read_core(id: Uuid, timeout_ms: u64) -> Result<String> {
+    session_read_impl(id, timeout_ms, None).await
+}
+
+/// Daemon read variant that can finish its blocking worker on shutdown.
+pub async fn session_read_core_with_shutdown(
+    id: Uuid,
+    timeout_ms: u64,
+    shutdown: crate::ws_drain::ShutdownToken,
+) -> Result<String> {
+    session_read_impl(id, timeout_ms, Some(shutdown)).await
+}
+
+async fn session_read_impl(
+    id: Uuid,
+    timeout_ms: u64,
+    shutdown: Option<crate::ws_drain::ShutdownToken>,
+) -> Result<String> {
     let handle = sessions()
         .lock()
         .await
@@ -225,7 +242,7 @@ pub async fn session_read_core(id: Uuid, timeout_ms: u64) -> Result<String> {
         .cloned()
         .ok_or_else(|| anyhow!("unknown session: {id}"))?;
 
-    tokio::task::spawn_blocking(move || read_session_handle(id, handle, timeout_ms))
+    tokio::task::spawn_blocking(move || read_session_handle(id, handle, timeout_ms, shutdown))
         .await
         .map_err(|e| anyhow!("session read task failed: {e}"))?
 }
@@ -234,6 +251,7 @@ fn read_session_handle(
     id: Uuid,
     handle: Arc<StdMutex<SessionHandle>>,
     timeout_ms: u64,
+    shutdown: Option<crate::ws_drain::ShutdownToken>,
 ) -> Result<String> {
     let mut handle = handle
         .lock()
@@ -246,8 +264,24 @@ fn read_session_handle(
         SESSION_READ_QUIET_PERIOD
     };
 
+    let mut wait_started = Instant::now();
     loop {
-        match handle.rx.recv_timeout(wait) {
+        if shutdown
+            .as_ref()
+            .is_some_and(|token| token.is_cancelled_now())
+        {
+            // Preserve anything already consumed if the caller is cancelled.
+            output.extend_from_slice(&handle.pending_output);
+            handle.pending_output = output;
+            return Err(anyhow!("session read cancelled during daemon shutdown"));
+        }
+        let remaining = wait.saturating_sub(wait_started.elapsed());
+        let slice = if shutdown.is_some() {
+            remaining.min(Duration::from_millis(100))
+        } else {
+            remaining
+        };
+        match handle.rx.recv_timeout(slice) {
             Ok(event) => {
                 let had_output = matches!(event, TerminalEvent::Output(_));
                 apply_session_event(&mut handle, event)?;
@@ -260,8 +294,10 @@ fn read_session_handle(
                     handle.pending_output.clear();
                     break;
                 }
+                wait_started = Instant::now();
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) if wait_started.elapsed() >= wait => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 handle.closed = true;
                 break;
@@ -333,6 +369,43 @@ pub fn split_completed_session_commands(pending: &str, input: &str) -> (Vec<Stri
 #[cfg(test)]
 mod tests {
     use super::split_completed_session_commands;
+
+    #[tokio::test]
+    async fn shutdown_interrupts_blocking_session_read_and_preserves_output() {
+        use std::sync::{mpsc, Arc, Mutex};
+        let (command_tx, _command_rx) = mpsc::channel();
+        let (_event_tx, event_rx) = mpsc::channel();
+        let id = uuid::Uuid::new_v4();
+        let handle = Arc::new(Mutex::new(super::SessionHandle {
+            id,
+            host: "test".into(),
+            tx: command_tx,
+            rx: event_rx,
+            pending_output: b"retained".to_vec(),
+            connected: true,
+            closed: false,
+        }));
+        let shutdown = crate::ws_drain::ShutdownToken::new();
+        let worker_token = shutdown.clone();
+        let worker_handle = handle.clone();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let worker = tokio::task::spawn_blocking(move || {
+            let _ = ready_tx.send(());
+            super::read_session_handle(id, worker_handle, 120_000, Some(worker_token))
+        });
+        ready_rx.await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        shutdown.cancel().await;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), worker)
+            .await
+            .expect("worker did not stop")
+            .unwrap();
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("cancelled during daemon shutdown"));
+        assert_eq!(handle.lock().unwrap().pending_output, b"retained");
+    }
 
     /// A command may be typed in fragments. Each newline must close a command so
     /// the caller can authorize it, and the trailing partial line must come back

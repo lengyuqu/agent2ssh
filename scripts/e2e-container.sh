@@ -323,6 +323,26 @@ else
   bad "exec runtime suite (drain + timeout + timeout audit + health)"
 fi
 
+# The peer deliberately stops reading while a real SSH command streams output.
+# This regression uses Unix SO_RCVBUF; Windows coverage remains separate.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) skip "WebSocket backpressure test requires Unix sockets" ;;
+  *)
+    note "Daemon shutdown under WebSocket backpressure"
+    if ( cd "$REPO_ROOT/src-tauri" && \
+         AGENT2SSH_TEST_REQUIRE_SSH=1 \
+         AGENT2SSH_TEST_SSH_PORT="$SSH_PORT" \
+         AGENT2SSH_TEST_SSH_HOST=127.0.0.1 \
+         AGENT2SSH_TEST_SSH_USER=tester \
+         AGENT2SSH_TEST_SSH_KEY="$KEY_PATH" \
+         cargo test --no-default-features --features daemon --test daemon_stop_e2e stop_exits_when_exec_websocket_peer_stops_reading -- --exact ); then
+      ok_optional "daemon closes a backpressured WebSocket"
+    else
+      bad "daemon closes a backpressured WebSocket"
+    fi
+    ;;
+esac
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 # The independent system-ssh cross-check cannot substitute for a required check.
 if [[ "$REQUIRED_PASS" != 8 ]]; then

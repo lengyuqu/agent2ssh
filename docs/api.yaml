@@ -586,6 +586,9 @@ paths:
         connections, ends event streams, drains open WebSocket connections (up to five seconds) and
         removes `daemon.pid`. Everything the daemon holds in memory ends with it —
         PTY sessions, resident shells, port forwards and pending approvals.
+        Pending approval waits are rejected; local one-shot commands are stopped
+        and their process trees reaped, and session reads are interrupted.
+        Other in-flight operations, including SSH exec, may delay shutdown.
         The desktop app and `agent2ssh daemon stop` use /shutdown/guarded after
         checking the health PID; if the process does not exit after the drain
         timeout, they report an error and retain the PID without sending a signal.
@@ -1139,7 +1142,8 @@ paths:
         Authenticated Server-Sent Events stream. Each event uses event name
         `agent2ssh`; the data payload is an AgentEvent JSON object. Used by
         the desktop Live Agent Activity panel to observe local daemon/session
-        activity and streaming exec output.
+        activity and streaming exec output. The stream ends when the daemon
+        shuts down; an EOF alone does not distinguish shutdown from disconnection.
       responses:
         "200":
           description: Event stream

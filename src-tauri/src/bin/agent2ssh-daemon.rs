@@ -107,6 +107,24 @@ fn uptime_secs() -> u64 {
 /// `TerminateProcess`, which skips the drain below. `notify_one` stores a permit
 /// when nothing is waiting yet, so a request that races the listener still lands.
 static SHUTDOWN_REQUESTED: tokio::sync::Notify = tokio::sync::Notify::const_new();
+// The daemon has one shutdown lifecycle. Approval waiters must leave their
+// HTTP handlers when it starts, rather than holding graceful shutdown open.
+static DAEMON_SHUTDOWN: std::sync::OnceLock<agent2ssh::ws_drain::ShutdownToken> =
+    std::sync::OnceLock::new();
+
+/// Allow a WebSocket handler to drain briefly after shutdown, then drop its
+/// I/O future so a peer that stops reading cannot block its cleanup forever.
+async fn run_ws_with_shutdown_deadline<F: std::future::Future<Output = ()>>(
+    shutdown: &agent2ssh::ws_drain::ShutdownToken,
+    future: F,
+    grace: std::time::Duration,
+) -> bool {
+    tokio::pin!(future);
+    tokio::select! {
+        _ = &mut future => true,
+        _ = shutdown.cancelled() => tokio::time::timeout(grace, &mut future).await.is_ok(),
+    }
+}
 
 /// Ask the daemon to shut down the way a termination signal would. Admin-only:
 /// stopping the daemon ends every session and forward it holds.
@@ -601,7 +619,29 @@ async fn request_and_wait_for_approval(
         }
     });
 
-    match approval_wait(approval_id).await {
+    let status = if let Some(shutdown) = DAEMON_SHUTDOWN.get() {
+        tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => {
+                // Invalidate the pending card so it cannot later appear to
+                // authorize a request which no longer has a caller.
+                let result = approval_respond(approval_id, false).await;
+                append_rejected_exec_audit(
+                    &prompt.source, &prompt.host, &prompt.command, prompt.risk,
+                    "daemon shutting down; approval wait cancelled", prompt.change_id.as_deref(),
+                );
+                let _ = append_diagnostic_log(
+                    "info", "daemon", "approval wait cancelled during shutdown",
+                    Some(serde_json::json!({ "approval_id": approval_id.to_string(), "rejected": result.is_ok() })),
+                );
+                return Err("daemon shutting down; approval wait cancelled".to_string());
+            }
+            status = approval_wait(approval_id) => status,
+        }
+    } else {
+        approval_wait(approval_id).await
+    };
+    match status {
         ApprovalStatus::Approved => Ok(match approval_rewritten_command(approval_id).await {
             Some(command) => ApprovalOutcome::ApprovedRewritten(command),
             None => ApprovalOutcome::Approved,
@@ -1708,7 +1748,7 @@ async fn local_exec(
     }
 
     let cmd_clone = req.command.clone();
-    let result = exec_local_core(req).await;
+    let result = exec_local_core_with_shutdown(req, s.shutdown.clone()).await;
     EXEC_COUNT.fetch_add(1, Ordering::Relaxed);
     EXEC_TOTAL_DURATION_MS.fetch_add(exec_start.elapsed().as_millis() as u64, Ordering::Relaxed);
     let exit_code = result.as_ref().ok().and_then(|r| r.exit_code);
@@ -2501,23 +2541,27 @@ async fn session_read(
         .unwrap_or_else(|| (format!("session:{id}"), Vec::new()));
     check_daemon_scope(&auth.scope, &session_host, &session_tags, "session_read")
         .map_err(|e| err(StatusCode::FORBIDDEN, e))?;
-    session_read_core(uuid, q.timeout_ms.unwrap_or(2000))
-        .await
-        .map(|output| {
-            if !output.is_empty() {
-                publish_event(
-                    EventType::SessionOutput,
-                    serde_json::json!({
-                        "source": source,
-                        "session_id": id,
-                        "output_preview": preview_text(&output, 4096),
-                        "output_bytes": output.len(),
-                    }),
-                );
-            }
-            Json(OutputBody { output })
-        })
-        .map_err(|e| err(StatusCode::BAD_REQUEST, e))
+    agent2ssh::session::session_read_core_with_shutdown(
+        uuid,
+        q.timeout_ms.unwrap_or(2000),
+        s.shutdown.clone(),
+    )
+    .await
+    .map(|output| {
+        if !output.is_empty() {
+            publish_event(
+                EventType::SessionOutput,
+                serde_json::json!({
+                    "source": source,
+                    "session_id": id,
+                    "output_preview": preview_text(&output, 4096),
+                    "output_bytes": output.len(),
+                }),
+            );
+        }
+        Json(OutputBody { output })
+    })
+    .map_err(|e| err(StatusCode::BAD_REQUEST, e))
 }
 async fn session_close(
     State(s): State<AppState>,
@@ -4681,11 +4725,18 @@ async fn handle_terminal(
     };
     let recording_id = recorder.as_ref().map(|active| active.id().to_string());
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<TerminalEvent>(128);
-    let event_task = tokio::task::spawn_blocking(move || {
-        while let Ok(event) = terminal_rx.recv() {
-            if event_tx.blocking_send(event).is_err() {
-                break;
+    let event_task = tokio::task::spawn_blocking(move || loop {
+        if event_tx.is_closed() {
+            break;
+        }
+        match terminal_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(event) => {
+                if event_tx.blocking_send(event).is_err() {
+                    break;
+                }
             }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
     });
 
@@ -4713,6 +4764,7 @@ async fn handle_terminal(
     let (mut ws_tx, mut ws_rx) = socket.split();
     let mut pending_input = String::new();
 
+    let drained = run_ws_with_shutdown_deadline(&shutdown_token, async {
     loop {
         tokio::select! {
             // T2-15: Listen for shutdown signal — enter drain mode
@@ -4908,8 +4960,19 @@ async fn handle_terminal(
             }
         }
     }
+    }, std::time::Duration::from_secs(2)).await;
+    if !drained {
+        tracing::warn!(%terminal_id, "terminal WebSocket did not drain before shutdown deadline");
+        let _ = append_diagnostic_log(
+            "warn",
+            "daemon_terminal",
+            "WebSocket drain deadline expired",
+            Some(serde_json::json!({"terminal_id": terminal_id})),
+        );
+    }
 
     let _ = terminal_tx.send(TerminalCommand::Close);
+    drop(event_rx);
     let _ = event_task.await;
     if let Some(active) = recorder {
         if let Err(error) = active.finish() {
@@ -4924,8 +4987,6 @@ async fn handle_terminal(
             );
         }
     }
-    // T2-15: Unregister from drain registry (connection closed normally)
-    drain_handle.unregister().await;
     state.terminal_inputs.lock().await.remove(&terminal_id);
     state.limiter.lock().await.unregister_session(&terminal_id);
 
@@ -4947,6 +5008,7 @@ async fn handle_terminal(
             })),
         );
     }
+    drain_handle.unregister().await;
 }
 
 // ── WebSocket streaming exec ─────────────────────────────────────────────────
@@ -5205,6 +5267,7 @@ async fn exec_stream(
         let connection_owner = agent2ssh::ResourceOwner::Headless(Uuid::new_v4());
         let (drop_tx, _drop_rx) = tokio::sync::watch::channel(true);
 
+        let drained = run_ws_with_shutdown_deadline(&shutdown_token, async {
         loop {
             tokio::select! {
                 // T2-15: On shutdown, drain remaining output then close
@@ -5269,8 +5332,7 @@ async fn exec_stream(
                     .is_err()
                     {
                         drain_handle.end_send().await;
-                        drain_handle.unregister().await;
-                        return;
+                        break;
                     }
                     drain_handle.end_send().await;
                 }
@@ -5295,8 +5357,7 @@ async fn exec_stream(
                     .is_err()
                     {
                         drain_handle.end_send().await;
-                        drain_handle.unregister().await;
-                        return;
+                        break;
                     }
                     drain_handle.end_send().await;
                 }
@@ -5318,10 +5379,23 @@ async fn exec_stream(
                 }
             }
         }
-        drain_handle.unregister().await;
+        }, std::time::Duration::from_secs(2)).await;
+        if !drained {
+            tracing::warn!("exec WebSocket did not drain before shutdown deadline");
+            let _ = append_diagnostic_log("warn", "daemon_exec_stream", "WebSocket drain deadline expired", None);
+        }
         let duration_ms = started.elapsed().as_millis();
         let completed_host = req.host.clone();
         let completed_command = req.command.clone();
+        let interrupted = shutdown_token.is_cancelled_now() && code.is_none();
+        let audit_reason = if interrupted {
+            Some(match req.reason.as_deref() {
+                Some(reason) => format!("{reason}; daemon shutdown interrupted stream; remote outcome unknown"),
+                None => "daemon shutdown interrupted stream; remote outcome unknown".to_string(),
+            })
+        } else {
+            req.reason.clone()
+        };
         let audit_result = ExecResult {
             host: completed_host.clone(),
             command: completed_command.clone(),
@@ -5336,7 +5410,7 @@ async fn exec_stream(
         let _ = append_audit(
             &audit_result,
             risk,
-            req.reason.as_deref(),
+            audit_reason.as_deref(),
             req.change_id.as_deref(),
             Some(&source),
         );
@@ -5349,16 +5423,16 @@ async fn exec_stream(
                 "exit_code": code,
                 "risk_level": format!("{}", risk),
                 "duration_ms": duration_ms,
+                "interrupted": interrupted,
             }),
         );
 
-        let mut s = socket.lock().await;
-        let _ = s
-            .send(Message::Text(
-                serde_json::json!({"type":"exit","code":code,"duration_ms":duration_ms})
-                    .to_string(),
-            ))
-            .await;
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), async {
+            let mut s = socket.lock().await;
+            let _ = s.send(Message::Text(
+                serde_json::json!({"type":"exit","code":code,"duration_ms":duration_ms}).to_string(),
+            )).await;
+        }).await;
 
         // A1: Broadcast connection drop and clean up owned resources.
         let _ = drop_tx.send(false);
@@ -5376,6 +5450,7 @@ async fn exec_stream(
                 })),
             );
         }
+        drain_handle.unregister().await;
     })
 }
 
@@ -5622,12 +5697,16 @@ async fn main() -> anyhow::Result<()> {
     // T2-16: Initialize the global prompt waiter for 2FA/OTP keyboard-interactive prompts
     let prompt_waiter = agent2ssh::prompt_waiter::PromptWaiter::new();
     agent2ssh::embedded_ssh::set_prompt_waiter(prompt_waiter.clone());
+    let shutdown = agent2ssh::ws_drain::ShutdownToken::new();
+    DAEMON_SHUTDOWN
+        .set(shutdown.clone())
+        .map_err(|_| anyhow::anyhow!("daemon shutdown already initialized"))?;
     let state = AppState {
         token: token.clone(),
         limiter: Arc::new(Mutex::new(ExecutionLimiter::new(limits))),
         session_input_buffers: Arc::new(Mutex::new(HashMap::new())),
         terminal_inputs: Arc::new(Mutex::new(HashMap::new())),
-        shutdown: agent2ssh::ws_drain::ShutdownToken::new(),
+        shutdown,
         drain_registry: agent2ssh::ws_drain::DrainRegistry::new(),
         prompt_waiter,
     };
@@ -5806,12 +5885,13 @@ async fn main() -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown_signal(shutdown_clone))
         .await?;
 
-    // T2-15: Wait for active WS connections to drain (max 5 seconds)
-    let drained = drain_registry
-        .drain_all(std::time::Duration::from_secs(5))
-        .await;
-    if drained > 0 {
-        tracing::info!("drained {} WS connections", drained);
+    // Upgraded WebSockets can outlive axum's HTTP serve future. Wait for their
+    // handlers to unregister after cleanup, with one bound below the stop wait.
+    if !drain_registry
+        .wait_until_empty(std::time::Duration::from_secs(4))
+        .await
+    {
+        tracing::warn!("WebSocket handlers did not finish before shutdown deadline");
     }
 
     let pid_removed = agent2ssh::daemon_control::remove_daemon_pid_file_if(std::process::id())?;
@@ -5826,6 +5906,49 @@ async fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn stalled_websocket_future_is_dropped_after_shutdown_deadline() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        struct DropMarker(Arc<AtomicBool>);
+        impl Drop for DropMarker {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let shutdown = agent2ssh::ws_drain::ShutdownToken::new();
+        let flag = Arc::new(AtomicBool::new(false));
+        let marker = flag.clone();
+        let token = shutdown.clone();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            super::run_ws_with_shutdown_deadline(
+                &token,
+                async move {
+                    let _marker = DropMarker(marker);
+                    let _ = ready_tx.send(());
+                    std::future::pending::<()>().await;
+                },
+                std::time::Duration::from_millis(50),
+            )
+            .await
+        });
+        ready_rx.await.unwrap();
+        shutdown.cancel().await;
+        assert!(
+            !tokio::time::timeout(std::time::Duration::from_secs(1), task)
+                .await
+                .unwrap()
+                .unwrap()
+        );
+        assert!(
+            flag.load(Ordering::SeqCst),
+            "stalled future must be dropped before cleanup"
+        );
+    }
+
     #[test]
     fn cors_origin_allowlist_is_desktop_and_loopback_only() {
         use super::is_trusted_cors_origin as ok;

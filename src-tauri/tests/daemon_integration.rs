@@ -2235,9 +2235,14 @@ fn local_exec_route_runs_the_shared_preflight() {
         "local_exec does not run the shared gate chain: a local command would skip \
          the execution gate, the rate limiter, the token scope and the approval policy"
     );
+    let execute = body.find("exec_local_core_with_shutdown(req, s.shutdown.clone())");
     assert!(
-        body.contains("exec_local_core("),
-        "local_exec no longer delegates to exec_local_core"
+        execute.is_some(),
+        "local_exec must pass its shutdown token to the local executor"
+    );
+    assert!(
+        preflight < execute,
+        "local execution must follow the shared preflight"
     );
 
     // Ordering, not just presence. If the reserved-host check ran after the gate

@@ -902,7 +902,7 @@ Daemon 提供认证后的 Server-Sent Events 流，用于本机安全可视化�
 curl -N -H "$AUTH" http://127.0.0.1:7722/events/stream
 ```
 
-事件格式为 SSE `event: agent2ssh`，`data` 字段是 JSON：
+事件格式为 SSE `event: agent2ssh`，`data` 字段是 JSON。daemon 正常关闭时会结束事件流；客户端需要处理流结束及重连：
 
 ```json
 {
