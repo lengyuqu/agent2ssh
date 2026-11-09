@@ -111,6 +111,28 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
   - D5 `/exec/compare` 的限流 `source` 恒为传输层默认值，限流实为单桶且与文档不对称
   - E1–E4 文档漂移：api.yaml 与源码注释的 "five seconds" 与代码 2s/4s 不符；指南「不再强制结束」与硬杀行为矛盾；K14 缺 config_dir 拒止路径记载
   - F1–F5 测试缺口：强杀分支、kill 失败、`AcceptedUnchecked`、start_time=0 组合断言、2s/4s 字面量无常量）
-- 6 轮进度：0 / 6（待消费任务更新）
+- 6 轮进度：1 / 6（第 1 轮 2026-11-10 03:32，评论 `2119875798445228032`）
 
 **批次说明（消费者必读）**：本批次 issue 正文发出时 ledger 尚不存在，故正文里「不成立清单」写的是「暂无」；但 ledger 在首条分析到达前已由 preflight 建立，含 2 条不成立判定（`signal_daemon` 第三条 `Ok(())` 吞错、`daemon_stop_e2e.rs:1443` 断言弱）。已核对首条分析未重复这两条；**从第 2 轮起，回帖须把上述 2 条不成立原文喂给 CodeBuddy**。
+
+### consume 1 / 6 · 2026-11-10
+
+- **指摘来源**：issue #7 首条分析（评论 `2119859466353930240`），26 条（A1-A6 / B1-B2 / C1-C4 / D1-D5 / E1-E4 / F1-F5）。
+- **判定**：成立 14 / 部分成立 8 / 不成立 4。回帖 `2119875798445228032`。
+- **动作**：`2a7dde2`（`daemon_control.rs` 的 `GRACEFUL_STOP_WAIT` 理由注释：五秒 → 2s/连接 + 4s/registry）、`15922ee`（`api.yaml` 同一处数字、指南 `:375` 与 K14 的 warn 语义、`OPT-LOOP-L2-PENDING.md` 追加 L2-3…L2-18）。推 `cnb main`，**未推 github**。
+- **验证**：`npm run build` 6.43s；`cargo test --no-default-features --lib` 856 passed / 0 failed / 1 ignored（17.66s）。
+- **本轮最有价值的一条**：A1 被指为「`AcceptedUnchecked` 是死分支」，实测相反——`daemon_shutdown` 核对通过也回 200 `{"ok":true}`，`request_shutdown` 的 `200 && expected_pid.is_none()` 守卫使带 `expect_pid` 的停止必然落到 `AcceptedUnchecked`，于是 `:1001` 那条「daemon predates it」的 warn 在**每次正常停止**时都会响。指摘的结论方向错了，但它指的「无法区分检查是否发生」是真的，而且比它说的更严重：日志里那句是稳定的假阳性。
+
+### 第 1 轮新增的不成立条目（原文保留，请勿重复提）
+
+5. **「D3：停止期的 503 被 `request_shutdown` 归为 `not accepted`/`could not be sent`，与实际送达语义相悖」— 不成立。**
+   `/shutdown` 没有任何 503 分支：全仓 `SERVICE_UNAVAILABLE` 只有 `bin/agent2ssh-daemon.rs:1720` 一处，属 `/exec` 的 `shutdown_outcome`。且 `request_shutdown` 对非 200/409 的响应走 `:893` 的 `"the daemon answered the shutdown request with {status}"`；`:898` 的 `"could not be sent"` 只接连接层 `Err`。指摘的两个前提都不成立。
+
+6. **「E3：`docs/guides/configuration-guide.md:377` 仍写『不再按 PID 强制结束进程』，与硬杀行为矛盾」— 不成立（依据已过时）。**
+   该句已由 `53d2af1` 替换为「8 秒宽限内没退出 → 重新核对身份 → 核对通过才尝试强制终止 → 再等 2 秒」。现存段落里没有那句话。
+
+7. **「E4：K14 未记载旧 daemon 不报 `config_dir` 就拒绝停止」— 不成立。**
+   K14 已有原文：「`/health` 的 `config_dir` 缺失（旧 daemon）同样按『无法识别』拒绝，并提示先 `agent2ssh daemon restart` 升级后重试」。
+
+8. **「F4：`classify_process_observation` 未覆盖 `Some((0,false))` 与 `expected_start` 的组合」— 不成立。**
+   `daemon_control.rs:1143-1146` 明确断言 `classify_process_observation(Some((0, false)), false, 12) == Unknown`，`:632` 早于 `:633` 的顺序已被钉住；`expected_start=0` 不会出现（`daemon_process_start_time` 在 `:111` 已过滤 0）。
