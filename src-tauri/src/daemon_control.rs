@@ -647,6 +647,33 @@ fn child_has_exited(_pid: u32) -> bool {
     false
 }
 
+// A Windows process object remains openable while another process holds its
+// handle, even after it exits. A signaled process handle proves termination
+// without consuming the Child's exit status. Failed/denied queries are not
+// evidence of exit. Waiting on the handle also handles exit code 259, which
+// GetExitCodeProcess cannot distinguish from STILL_ACTIVE by itself.
+#[cfg(windows)]
+fn process_handle_is_signaled(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+    };
+    unsafe {
+        let handle = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
+        if handle == 0 {
+            return false;
+        }
+        let signaled = WaitForSingleObject(handle, 0) == WAIT_OBJECT_0;
+        CloseHandle(handle);
+        signaled
+    }
+}
+
+#[cfg(not(windows))]
+fn process_handle_is_signaled(_pid: u32) -> bool {
+    false
+}
+
 fn observe_process(pid: u32, expected_start: u64) -> ProcessObservation {
     let sys_pid = sysinfo::Pid::from_u32(pid);
     let mut system = sysinfo::System::new();
@@ -657,8 +684,10 @@ fn observe_process(pid: u32, expected_start: u64) -> ProcessObservation {
             process.status() == sysinfo::ProcessStatus::Zombie,
         )
     });
-    let definitely_missing =
-        snapshot.is_none() && (child_has_exited(pid) || pid_definitely_missing(pid));
+    let definitely_missing = snapshot.is_none()
+        && (child_has_exited(pid)
+            || process_handle_is_signaled(pid)
+            || pid_definitely_missing(pid));
     classify_process_observation(snapshot, definitely_missing, expected_start)
 }
 
@@ -888,6 +917,34 @@ mod tests {
         assert!(observed, "child exit should be observable without reaping");
         assert_eq!(result, ProcessObservation::Exited);
         assert!(reaped.success());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn exit_observation_handles_exited_child_with_retained_handle() {
+        // Exit code 259 is STILL_ACTIVE when queried through GetExitCodeProcess;
+        // the signaled handle must nevertheless establish that this child exited.
+        let mut child = Command::new("cmd.exe")
+            .args(["/C", "exit", "/B", "259"])
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !process_handle_is_signaled(pid) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let signaled = process_handle_is_signaled(pid);
+        let observation = observe_process(pid, 1);
+        let status = child.wait().unwrap();
+        assert!(signaled, "exited child handle should be signaled");
+        assert_eq!(observation, ProcessObservation::Exited);
+        assert_eq!(status.code(), Some(259));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_live_process_handle_is_not_signaled() {
+        assert!(!process_handle_is_signaled(std::process::id()));
     }
 
     #[cfg(unix)]
