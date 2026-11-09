@@ -125,3 +125,20 @@ enum DrainOutcome {
 - `:4813`、`:5316` 的 `let drained` 必须改名 `let outcome`，否则 L2-33 的混用原样保留。
 - **`:5986` 的 `!timeout(...).unwrap().unwrap()` 会编译不过**（`!` 没有枚举实现），这是全仓唯一被类型改动打中的断言；`:5992` 的 `flag.load` 语义不变，保留。
 - 现在只有 `Dropped` 一条用例，枚举另两臂零覆盖，需补 `Completed`（不 cancel、future 自己结束）与 `Drained`（cancel 后 grace 内返回）两条。
+
+**追加一条级别问题（比命名更重要）**：`daemon_control.rs:1006` 现在用 `warn` 记的是一次**成功**的停止（请求被接受，只是没有检查回执）。加 `checked_pid` 之后，剩下走这条的只有「旧 daemon」与「回了字段但值不符」，但仍然是成功。落地时把它降成 `info`，并让 `component` 承担区分职责（客户端侧是 `daemon_control`，WS 侧是 `daemon_exec_stream` / `daemon_terminal`），比继续在文案里堆形容词有效。
+
+---
+
+## 2026-11-10 · 第 5 轮：线程比它服务的 future 活得久
+
+第 5 轮给 6 条，核实后 **成立 4 / 部分成立 1 / 不成立 1**。N-1 与 N-3 是同一个模式的两次复发：**线程持有资源的时间长于调用方以为的时长**。两者都建议共用「`Arc<AtomicBool>` + 循环内检查」这一套，同批做。
+
+| 编号 | 位置 | 判断 | 建议改法 |
+|---|---|---|---|
+| N-1 | `forward.rs:298-308`（`join_timeout` 返回 `()`）、调用点 `:231`（`stop_worker`）、`:275`（`Drop`）、`:483`/`:488`（启动失败回滚） | 成立（它说「三处」，实际是**四处**） | `join_timeout` 返回 `bool`；`false` 时 `set_state(StoppingError)` + 诊断。`:231` 之后 `:241`/`:285` 无条件写 `Stopped`，而 worker 可能正阻塞在每连接 60s 的 `connect_embedded_ssh` 里，监听套接字还在 → 立刻 `daemon`/规则重启会 `EADDRINUSE`。已在 `stop_worker` 加注释说明这个状态是「意图」不是「事实」（本轮 L1） |
+| N-2 | `embedded_ssh.rs:2089`（`connect_embedded_ssh(&host, 60)`）、`:2072` 的 `thread::spawn`、`:2073-2076` 无条件 `send(Closed)` | 成立 | `spawn_terminal` 加 `stop: Arc<AtomicBool>`，`run_terminal` 的循环在 `WouldBlock` 分支检查；daemon 在 `:5017` 之后置位。顺带的观测缺口：线程失败与正常关闭都发 `Closed`，`Error` 是唯一区分且不带 `terminal_id` |
+| N-3 | `bin/agent2ssh-daemon.rs:5079` 线程、`:5111` 截止、`:5122` 检查、`:5291` 默认 60s | 成立 | 同一个 `stop` 标志；`:5316` 的 future 收口后立刻置位。安静远端（`sleep 600`）时线程会空转到自己的 `timeout_secs` 才退——daemon 已退出、PID 文件已删，但进程还持着 SSH 会话 |
+| N-4 | `forward.rs`：10 个异步公开函数（`:344`…`:855`）与 `grep -c "tokio::test"` = **0** | 成立 | 最小一条：直接插一个 `RuleState::Starting` 且 `worker: None` 的 `ForwardHandle` 进 `forwards()`，断言 `forward_remove_core` 后列表变短、lifecycle 变 `Closed`。`AppState` 是进程级共享，需要 `#[serial]` + `TestConfigDir` |
+| N-5 | `daemon_activity.rs:127` 的 `read_to_end` | 部分成立（**与 L2-12 同一处**） | 「缺 `Content-Length` 时读到上限为止」这半句已写在 L2-12 的改法里，不重复登记；它新提供的价值是「即使地址是本机，`/health` 与 `/gate` 都带 `Content-Length`，所以修法可以比 L2-12 更轻、不必动地址可达性」。并入 L2-12 的说明 |
+| N-6 | `ci.yml:214-217`、`:323-325`；`daemon_stop_e2e.rs:317` | **不成立（建议项已存在）** | 事实对：那两处 CI 调用都不设 `AGENT2SSH_TEST_SSH_PORT`，`stop_exits_when_exec_websocket_peer_stops_reading` 在两处都会早退并记 `ok`。但它建议「在报告 `:49` 旁注明」——`CNB-ISSUE-2-WINDOWS-RETEST-2026-11-09.md:59` 已写「23 项不含该用例（`cfg(unix)`），0 项不算通过」，`:122` 又写「CI 没有该场景的 Windows 回归覆盖」。要补的东西已经在了 |
