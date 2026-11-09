@@ -648,10 +648,9 @@ fn child_has_exited(_pid: u32) -> bool {
 }
 
 // A Windows process object remains openable while another process holds its
-// handle, even after it exits. A signaled process handle proves termination
-// without consuming the Child's exit status. Failed/denied queries are not
-// evidence of exit. Waiting on the handle also handles exit code 259, which
-// GetExitCodeProcess cannot distinguish from STILL_ACTIVE by itself.
+// handle, even after it exits, so an openable handle is not evidence of life.
+// A signaled handle proves termination without consuming the Child's exit
+// status; a failed or denied query is not evidence of exit either.
 #[cfg(windows)]
 fn process_handle_is_signaled(pid: u32) -> bool {
     use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
@@ -922,8 +921,9 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn exit_observation_handles_exited_child_with_retained_handle() {
-        // Exit code 259 is STILL_ACTIVE when queried through GetExitCodeProcess;
-        // the signaled handle must nevertheless establish that this child exited.
+        // The child exits with 259 on purpose: that value is indistinguishable
+        // from "still active" to an exit-code query, so the handle state has to
+        // decide whether it ended.
         let mut child = Command::new("cmd.exe")
             .args(["/C", "exit", "/B", "259"])
             .spawn()

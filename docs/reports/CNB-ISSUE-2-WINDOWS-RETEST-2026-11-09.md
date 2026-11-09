@@ -9,6 +9,8 @@
 
 `c011b52` 修好了参考报告 §7 记录的 5 项停止测试：`daemon_stop_e2e` 从 **18 passed / 5 failed（76.16 s）** 变为 **23 passed / 0 failed（34.94 s）**，全程无 `exit cannot be verified`。真实 SSH 关闭用例首次在 Windows 上**跑通**（1 项，越过原 `stop_daemon_process` 失败点）。未发现新缺陷；保守分支（查询失败）只做了代码核对与部分实证，见 §5。
 
+后续复核发现一处归因分歧：复核意见认为上一轮失败属于进程快照层，本机突变实验证明决定层是句柄判据层，见 §5.1。`5af3e8d` 本身只改测试与 CHANGELOG，其新增断言在合并树上通过。
+
 ## 2. 基线与仓库状态
 
 | 项 | 值 |
@@ -19,7 +21,9 @@
 | 工作区 | 拉取前后均 clean；未 reset / clean / stash；已有未提交文件：无 |
 | 变更规模 | 5 文件 +107/−6（`daemon_control.rs` +61，`store.rs`、`host_secret_stdin.rs`、文档） |
 
-CNB 远端 `https://cnb.cool/zdzso/agent2ssh.git` 仍无可用凭据（上一轮 `ls-remote` 报 `could not read Username`），本轮沿用 git233，代码一致。
+CNB 远端 `https://cnb.cool/zdzso/agent2ssh.git` 在复测时无可用凭据（`ls-remote` 报 `could not read Username`），当时沿用 git233，代码一致。
+
+复测完成后远端出现 `5af3e8d Verify daemon exit through retained child`（只改 `CHANGELOG.md` 与 `daemon_stop_e2e.rs`，不动产品代码），已合并为 `cad69a6`；本报告的结论对应 c011b52 的产品代码，5af3e8d 的新增断言已在合并树上单独验证（§5.1）。
 
 ## 3. 环境
 
@@ -91,6 +95,18 @@ child exit status: Some(259)
 - **活着的进程**（自身、4、5168 等）：signaled=false —— 不会误判为退出。
 - **查询失败**：`pid 0` 触发 `ERROR_INVALID_PARAMETER`，返回 false。**权限不足**这一支本轮**未能实测**：本会话以管理员运行，`csrss`/`lsass`/`MsMpEng` 的 `PROCESS_SYNCHRONIZE` 都打开成功，构造不出 `ACCESS_DENIED`。该分支仅有代码级证据（`handle == 0 → false`，随后 `pid_definitely_missing` 在拒绝时同样返回 false → `Unknown`），与需求「查询失败或权限不足时保持保守」一致，但**不是实测结论**。
 
+### 5.1 失败层级归因（核对 CodeBuddy 的 5af3e8d 复核意见）
+
+复核意见认为 `stop_daemon_process` 只经 `daemon_process_start_time` / `daemon_matches_config` / `observable_live_start_time`，不经过 `observe_process`，因此上一轮的失败应归因于进程快照的僵尸过滤，而不是句柄层。**本机实测与该判断相反**：
+
+- 代码路径：`/shutdown/guarded` 被接受后，`stop_daemon_process` 调 `wait_for_exit(pid, start_time, GRACEFUL_STOP_WAIT)`，后者每 50 ms 调一次 `observe_process`；`daemon_process_start_time` 只是进入停止流程之前的前置校验。
+- 突变实验（本地临时改动，未提交）：把 `process_handle_is_signaled(pid)` 从 `definitely_missing` 里移除、其余不动，单跑 `stop_daemon_process_waits_for_a_graceful_exit` → **FAILED**，8.70 s 后报 `daemon PID 38980 exit cannot be verified; PID file retained`，与上一轮逐字相同；改回即通过（0.83 s）。日志：`M1-mutation-no-handle.txt`。
+- 结论：决定这一层的是 `observe_process` 的 `definitely_missing → process_handle_is_signaled`，不是 `daemon_process_start_time` 的 zombie 过滤；§4.2 的 5 项转绿确实来自 c011b52 的句柄判据。
+
+另：`5af3e8d` 新增的「stop 返回后再用 `try_wait` 检查保留的 Child」断言，在它与 `c011b52` 合并后的树上单跑通过（**1 passed / 0.83 s**），与「断言可合入」的判断一致。
+
+清理两条过时注释（`process_handle_is_signaled` 的头部注释与用例里的 259 说明不再引用代码中没有的 `GetExitCodeProcess`）后，按同一组命令复跑：`daemon_control::tests` 两组各 13 passed、daemon 单元 25 passed、`daemon_stop_e2e` 单线程 **23 passed / 0 failed，35.46 s**（`D1`–`D4` 日志）。改动仅注释与文档，行为不变。
+
 ## 6. 补充：Windows 背压探针（非仓库用例）
 
 按要求，参考报告里的探针结果属旧提交证据，本轮已**重新运行**：`probe-ws-backpressure.mjs` 在 c011b52 上 101 升级 → 首帧 `stdout`（8347 B）→ 对端停读 3 s → `/shutdown/guarded` 200 → daemon **2940 ms** 退出、`daemon.pid` 删除、`app.log` 有 `WebSocket drain deadline expired`、审计有中断记录 → **PASS**（`C1-ws-backpressure.txt`）。
@@ -102,6 +118,7 @@ child exit status: Some(259)
 - 连接建立、通道启动、阻塞写入阶段的关闭延迟；`/exec-multi`、本机代理执行、playbook、健康快照等路由（K15 剩余项）——本轮未覆盖。
 - GUI（桌面端 Stop 按钮、退出时停 daemon）未跑；Windows 自带 OpenSSH 作服务端未跑；PTY 会话、多轮 keyboard-interactive 未跑。
 - 权限不足分支未实测（见 §5）。
+- `process_is_alive` 在 Windows 上仍只依据 sysinfo 快照；对「已退出但句柄仍被持有」的进程返回 `false`。所以 `daemon_stop_e2e` 里的 `assert!(!process_is_alive(pid))` 在 Windows 上只能证明「快照里没有了」——它仍能捕获「daemon 还在跑」（那时 sysinfo 会列出），不是恒真断言，但不能当作句柄层已修复的证据；本轮的证据是 §4.2 的用例转绿与 §5.1 的突变实验。
 - 非 PTY 远端命令本地断开后可能继续运行，「结果未知不得自动重试」的语义未因本轮通过而改变。
 
 ## 8. 真实用户数据
@@ -119,6 +136,8 @@ child exit status: Some(259)
 | `A4-daemon_stop_e2e.txt` | 23 项全量单线程运行（5 项原失败用例转绿） |
 | `B1-exec_fixture.txt` / `B2-shutdown-ssh-request.txt` | 真实 SSH fixture 与关闭路径 |
 | `C1-ws-backpressure.txt` | 背压探针本轮结果 |
+| `M1-mutation-no-handle.txt` | 突变实验：移除句柄判据后同一用例复现 `exit cannot be verified`（§5.1） |
+| `D1`–`D4` | 注释清理后的复跑：`daemon_control::tests` ×2、daemon 单元、`daemon_stop_e2e` 单线程 |
 | `probe-handle-signaled.rs` / `.txt` | 句柄 signaled / 保守分支探针与输出 |
 
 本轮未提交、未推送，未改动产品代码。原始日志同时保留在 `.workbuddy/issue2-retest/`（gitignored）。
