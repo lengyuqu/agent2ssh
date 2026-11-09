@@ -174,7 +174,7 @@ fn wait_until(what: &str, within: Duration, mut done: impl FnMut() -> bool) {
 #[test]
 #[serial_test::serial]
 fn stop_daemon_process_waits_for_a_graceful_exit() {
-    let daemon = RunningDaemon::start("graceful", &[]);
+    let mut daemon = RunningDaemon::start("graceful", &[]);
     let pid = daemon.child.id();
     assert!(daemon.pid_file().exists(), "the daemon writes its pid file");
     assert!(process_is_alive(pid));
@@ -194,6 +194,17 @@ fn stop_daemon_process_waits_for_a_graceful_exit() {
     assert!(
         !daemon.pid_file().exists(),
         "the daemon's own shutdown removes its pid file; a kill would have left it"
+    );
+    // Query the retained Child only after the stop returns: doing so earlier
+    // could hide failures in stop's handling of an unreaped Windows process.
+    let status = daemon
+        .child
+        .try_wait()
+        .expect("inspect the retained daemon child")
+        .expect("stop returned while the daemon child was still running");
+    assert!(
+        status.success(),
+        "daemon did not exit successfully: {status}"
     );
 }
 
