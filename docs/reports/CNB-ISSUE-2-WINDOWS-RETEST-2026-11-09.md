@@ -109,6 +109,8 @@ child exit status: Some(259)
 
 清理两条过时注释（`process_handle_is_signaled` 的头部注释与用例里的 259 说明不再引用代码中没有的 `GetExitCodeProcess`）后，按同一组命令复跑：`daemon_control::tests` 两组各 13 passed、daemon 单元 25 passed、`daemon_stop_e2e` 单线程 **23 passed / 0 failed，35.46 s**（`D1`–`D4` 日志）。改动仅注释与文档，行为不变。
 
+注意 `D4` 那次**没有配置 SSH fixture**：其中的 `shutdown_interrupts_an_active_ssh_request` 与 §4.2 一样按「跳过计通过」处理，日志本身不打印这件事；真实执行结果见 §4.3 的 `B2`（带 fixture，1 passed / 2.76 s）。单看 `D4` 的 23 passed 不能当作该用例在那一轮真跑过。
+
 ## 6. 补充：Windows 背压探针（非仓库用例）
 
 按要求，参考报告里的探针结果属旧提交证据，本轮已**重新运行**：`probe-ws-backpressure.mjs` 在 c011b52 上 101 升级 → 首帧 `stdout`（8347 B）→ 对端停读 3 s → `/shutdown/guarded` 200 → daemon **2940 ms** 退出、`daemon.pid` 删除、`app.log` 有 `WebSocket drain deadline expired`、审计有中断记录 → **PASS**（`C1-ws-backpressure.txt`）。
