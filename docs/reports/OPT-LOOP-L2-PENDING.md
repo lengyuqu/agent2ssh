@@ -162,3 +162,25 @@ enum DrainOutcome {
 - **`get_daemons_unified_view` 自指向（成立，并入 L2-10）**：`/daemons/view` 的 handler（`bin/agent2ssh-daemon.rs:4007-4016`）在 daemon 内部调 `remote.rs:460-553`，那里对每个 connected daemon 串行发 3 个 5s 请求（`:479`/`:497`/`:517`/`:537`），无总预算。与 `fetch_daemon_activity` 同族但不同函数——L2-10 的修法要覆盖两处。
 - **「`0e88d7c` 把 unregister 挪出 future」这条它判互斥（**不成立**）**：`git show 0e88d7c` 的 diff 里有 `-        drain_handle.unregister().await;`（旧位置，正是新 future 块内的位置）与 `+        drain_handle.unregister().await;`（清理之后、块外）两次改动，同笔还插入了 `+        }, Duration::from_secs(2)).await;`。所以「引入包装器的同一次提交把它放在包装器外面」是准确描述，两个结论不互斥。
 - **`resident_sessions` 的 `dead` 口径（部分成立，记录不改）**：`resident_session.rs:658` 在 `wait_for_sentinel` 轮询里刷 `last_active`，所以跑着长命令的会话不会被判空闲（这是对的）；但 `resident_get_core` 的 `dead` 判定（`:978-982`）在 `try_wait` 之后不看 `running`，「shell 端口仍在、命令在跑、parent 已 exit」这一瞬与 `DaemonActivity` 的口径不覆盖。已知可接受，但不要写成「`dead` 就代表没有开销」。
+
+---
+
+## 2026-11-10 · batch 2（issue #8）第 1 轮：russh 传输、known_hosts 与认证
+
+首轮 18 条指摘：**成立 8 / 部分成立 5 / 不成立 5**。落到 L1 的只有注释与文档（`ssh_algo.rs` 模块文档整体重写、`SFTP_SAFE_WRITE` 与 K2 对齐、五处契约注释）；行为级的全在下面。
+
+**行号是本轮核实时的编号**（改动前，基线 `a8f9519`）。本轮的注释改动会让同一文件里的行号下移 5–10 行，按函数名定位。
+
+| 编号 | 位置 | 判断 | 建议改法 |
+|---|---|---|---|
+| A2 | `embedded_ssh.rs:152` `host_key_algorithm`；`known_host_key` 的槽位组成 | 部分成立（核心结论错：RSA 归一槽是**对的**，见本轮 L1 注释） | 残留的是覆盖缺口：没有任何测试用 RSA 主机键跑 `trust_host_fingerprint_core` / `get_host_fingerprint_status_core`，唯一覆盖者用 ed25519。补一条：RSA 主机键信任一次后，切 `--hostkey` 在 `rsa-sha2-512`/`rsa-sha2-256`/`ssh-rsa` 之间移动，`trusted` 必须仍为 `true`、`known_hosts.json` 里仍只有一条 `host|ssh-rsa`。需要能配 RSA 主机键的本地 sshd（`scripts/sshd-fixture` 可注入 host key）；若只做 in-memory，退化为 `host_key_algorithm` + `known_host_key` 的单元断言，强度不足以钉住端到端 |
+| B1 | `agent.rs:290-311`（pipe 优先）、`:238-247`（`list_identities` 失败置 `None`）；`embedded_ssh.rs:1909`（单次 `connect()`） | 成立 | 两件事一起改：①`connect_stream` 返回候选链（pipe → Pageant），让「管道开着但没有可用身份」能落到第二个 agent；②`list_identities` 失败后允许重连（重建 client），不要把 `None` 变成该连接生命周期内的永久失败。①改的是**认证语义**且在 `#[cfg(windows)]` 里，只能在 Windows 实机验证（装 Pageant、不装 OpenSSH agent 服务），故不进 main |
+| B2 | `embedded_ssh.rs:2155-2156`、`:2187`；对照 `:1345-1373` | 部分成立（结构成立；「永久挂死 / 最坏 49.7 天」不成立——终端会话的 `session_timeout_ms(60)` 把上界压在 60 s） | 照 exec 路径做：teardown 前 `set_blocking(true)` + `set_timeout(TEARDOWN_TIMEOUT_MS)`（30 s），再把 `wait_close` 的三种结果分别处理。与 C1 合成一处改，否则改了也不观测 |
+| B3 | `embedded_ssh.rs:2064-2080`（`spawn_terminal`）、`run_terminal` 的 `try_recv` 循环 | 成立 | 加 `stop: Arc<AtomicBool>` 并返回 `JoinHandle`；同时把 `try_recv` 的 `Disconnected` 当作 `Close` 处理——现在 drop 掉 `cmd_tx` 后 `Close` 分支永不执行，线程只能靠 `eof()` 或错误退出。与既有的 N-2（daemon 侧同一缺陷）合并做，共用一套标志 |
+| B4 | `embedded_ssh.rs:1062-1119`（bridge 主循环）、`:1394-1456`（`drain_channel_output`） | 成立 | bridge 没有总预算也没有「无进展」计数，`Ok(0)` 且未 `eof()` 时 5 ms 一轮空转到进程结束。**判据不能选「一段时间没有字节」**——空闲隧道是合法的；只能选「连续 N 轮 `WouldBlock` 且 `eof()` 仍为假」并配一个足够大的 N（或对端 keepalive 失联）。需要能注入假通道才测得出，建议把 `bridge_tcp_and_channel` 的 `Read` 侧参数化 |
+| C1 | `embedded_ssh.rs:1119-1120`、`:2155-2156`、`:2187`；对照 `:1348-1373` | 成立 | 三处 `let _ =` 把「通道没关成功」与「关成功」压成同一个成功返回，而同文件的 exec 路径对 `Ok(true)`/`Ok(false)`/`Err` 分别处理并 `session.abort()`。改成同一套：`Ok(false)` 与 `Err` 都要 `abort()` 并让调用方看到（终端路径的对外语义需先定：关闭失败要不要报给用户） |
+| C2 | `mod.rs` `Session::auth_methods`（改动前 `:898-900`）；下游 `embedded_ssh.rs:1719`、`:1785`、`:1797-1803` | 成立 | 二选一，都要拍板：①实现它（只能从失败 `userauth` 的 `remaining_methods` 取，即事后信息）；②删掉下游两处分支与诊断字段，别再每台主机写 `auth_methods: ""`。选②会改变诊断日志的可观测字段，属对外契约 |
+| C5 | `sftp_transfer.rs:322-345`（`StallGuard`）、`russh_impl/sftp.rs` 的 `File::write` | 部分成立（行为描述成立，但注释已自述「cannot interrupt a blocked syscall」，不是未披露缺陷） | `File::write` 是 `block_on` 一个无超时的 future，服务器收下连接却不应答 SFTP 包时永不返回，`STALL_TIMEOUT` 无从判定。真正的修法是给 SFTP 会话加写超时（`SftpSession` 的 stream 上套 `tokio::time::timeout`），不是调 `STALL_TIMEOUT`。需要「接受连接但静默」的假服务器才验得了 |
+| C6 | `embedded_ssh.rs:563-608`（`remove_system_known_host`）；对照 `:619-633`（`split_host_port`） | 成立 | 两侧地址形态不一致：`port == 22` 只拼裸名、否则只拼 `[host]:port`，而 OpenSSH 对 IPv6 字面量写 `[::1]:22`、对本机名可写 `localhost,127.0.0.1`，且 hashed 条目（`\|1\|salt\|hash`）永远匹配不上。改法：用 `split_host_port` 归一化两侧再比，hashed 条目单独计数并报告「N 条无法匹配」，`removed == 0` 时返回明确的「未找到」而不是静默 0。单测可做（临时 HOME + 手写四种形态的 known_hosts） |
+| D1 | `sftp_transfer.rs:484-512` | 成立 | `Write for StallGuard` 的状态机（`written > 0` 刷新 `last_progress`、`written == 0` 且超时返回 `TimedOut`、未超时继续）零测试；现有两条一条只比字节、一条直接调私有 `stalled()`。需要可注入时钟（`Instant` 不能伪造），建议加 `#[cfg(test)] with_last_progress` 或把「现在」抽成字段 |
+| D5 | `mod.rs` `SignerFailed` 的 `From<SendError>`（改动前 `:131-136`）与 `u32::try_from` 分支（`:170`） | 成立 | `From` 臂可直测；`u32::try_from` 臂实际不可达（签名 > 4 GiB），建议改成注释写明不可达并去掉错误分支，而不是留着一条永远测不到的路 |
