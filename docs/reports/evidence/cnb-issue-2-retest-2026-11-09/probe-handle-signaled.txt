@@ -1,6 +1,8 @@
+access=PROCESS_SYNCHRONIZE (process_handle_is_signaled)
 pid 0: OpenProcess=false GetLastError=87 signaled=false
+pid 65534: OpenProcess=false GetLastError=87 signaled=false
 pid 4: OpenProcess=true GetLastError=0 signaled=false
 pid 5168: OpenProcess=true GetLastError=0 signaled=false
 self: OpenProcess=true GetLastError=0 signaled=false
-exited child 13252: OpenProcess=true GetLastError=0 signaled=true sysinfo_listed=false
+exited child 39344: OpenProcess=true GetLastError=0 signaled=true sysinfo_listed=false
 child exit status: Some(259)

@@ -27,8 +27,14 @@ fn handle_state(pid: u32) -> (bool, u32, bool) {
 fn main() {
     #[cfg(windows)]
     {
+        // Same access mask as `process_handle_is_signaled`: this is not the
+        // `PROCESS_QUERY_LIMITED_INFORMATION` probe that `pid_definitely_missing`
+        // performs, and the two functions must not be conflated when reading the
+        // access-denied boundary.
+        println!("access=PROCESS_SYNCHRONIZE (process_handle_is_signaled)");
         let extra: Vec<u32> = std::env::args().skip(1).filter_map(|a| a.parse().ok()).collect();
-        for pid in [0u32, 4].into_iter().chain(extra) {
+        // 0 is rejected with ERROR_INVALID_PARAMETER; 0xFFFE does not exist.
+        for pid in [0u32, 0xFFFEu32, 4].into_iter().chain(extra) {
             let (opened, err, signaled) = handle_state(pid);
             println!("pid {pid}: OpenProcess={opened} GetLastError={err} signaled={signaled}");
         }

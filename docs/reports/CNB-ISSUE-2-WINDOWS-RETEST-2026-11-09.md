@@ -83,7 +83,9 @@ fixture：仓库 `scripts/sshd-fixture`（`alpine:3.20`）构建的 `a2s-sshd:is
 独立探针 `probe-handle-signaled.rs`（同版本 windows-sys，非仓库代码）在本机结果：
 
 ```
+access=PROCESS_SYNCHRONIZE (process_handle_is_signaled)
 pid 0:     OpenProcess=false GetLastError=87 signaled=false
+pid 65534: OpenProcess=false GetLastError=87 signaled=false
 pid 4:     OpenProcess=true  GetLastError=0  signaled=false
 pid 5168:  OpenProcess=true  GetLastError=0  signaled=false
 self:      OpenProcess=true  GetLastError=0  signaled=false
@@ -93,14 +95,14 @@ child exit status: Some(259)
 
 - **已退出的子进程**（退出码 259，`GetExitCodeProcess` 会误认 STILL_ACTIVE）：句柄 signaled=true、sysinfo 不列出 —— 正是修复要判定的情形，独立复现成功。
 - **活着的进程**（自身、4、5168 等）：signaled=false —— 不会误判为退出。
-- **查询失败**：`pid 0` 触发 `ERROR_INVALID_PARAMETER`，返回 false。**权限不足**这一支本轮**未能实测**：本会话以管理员运行，`csrss`/`lsass`/`MsMpEng` 的 `PROCESS_SYNCHRONIZE` 都打开成功，构造不出 `ACCESS_DENIED`。该分支仅有代码级证据（`handle == 0 → false`，随后 `pid_definitely_missing` 在拒绝时同样返回 false → `Unknown`），与需求「查询失败或权限不足时保持保守」一致，但**不是实测结论**。
+- **查询失败**：探针用的是 `PROCESS_SYNCHRONIZE`——与 `process_handle_is_signaled` 相同的访问掩码，**不是** `pid_definitely_missing` 的 `PROCESS_QUERY_LIMITED_INFORMATION`。`pid 0` 与不存在的 `pid 65534` 都得到 `OpenProcess=false, GetLastError=87`，函数按 `handle == 0` 分支返回 false。**权限不足（`ACCESS_DENIED`）这一支本轮仍未实测**：本会话以管理员运行，`csrss`/`lsass`/`MsMpEng` 的 `PROCESS_SYNCHRONIZE` 都打开成功，构造不出拒绝。该分支走的是同一个 `handle == 0` 分支（`process_handle_is_signaled` 返回 false），保守链条为 `handle == 0 → false` → `pid_definitely_missing` 同样返回 false → `Unknown`；这条链**只有代码依据**，不是实测结论。
 
 ### 5.1 失败层级归因（核对 CodeBuddy 的 5af3e8d 复核意见）
 
 复核意见认为 `stop_daemon_process` 只经 `daemon_process_start_time` / `daemon_matches_config` / `observable_live_start_time`，不经过 `observe_process`，因此上一轮的失败应归因于进程快照的僵尸过滤，而不是句柄层。**本机实测与该判断相反**：
 
 - 代码路径：`/shutdown/guarded` 被接受后，`stop_daemon_process` 调 `wait_for_exit(pid, start_time, GRACEFUL_STOP_WAIT)`，后者每 50 ms 调一次 `observe_process`；`daemon_process_start_time` 只是进入停止流程之前的前置校验。
-- 突变实验（本地临时改动，未提交）：把 `process_handle_is_signaled(pid)` 从 `definitely_missing` 里移除、其余不动，单跑 `stop_daemon_process_waits_for_a_graceful_exit` → **FAILED**，8.70 s 后报 `daemon PID 38980 exit cannot be verified; PID file retained`，与上一轮逐字相同；改回即通过（0.83 s）。日志：`M1-mutation-no-handle.txt`。
+- 突变实验（本地临时改动，未提交）：把 `process_handle_is_signaled(pid)` 从 `definitely_missing` 里移除、其余不动，单跑 `stop_daemon_process_waits_for_a_graceful_exit` → **FAILED**，8.70 s 后报 `daemon PID 38980 exit cannot be verified; PID file retained`，与上一轮逐字相同；改回即通过（0.83 s）。日志：`M1-mutation-no-handle.txt`。失败位置是 `daemon_stop_e2e.rs:183`（`stop_daemon_process` 的 `.expect`），不是 `:186` 的 `elapsed < 7s`，即「停止没有等到退出」，不是「等得太久」；同一次编译还打出 `warning: function process_handle_is_signaled is never used`，证明突变确实生效。
 - 结论：决定这一层的是 `observe_process` 的 `definitely_missing → process_handle_is_signaled`，不是 `daemon_process_start_time` 的 zombie 过滤；§4.2 的 5 项转绿确实来自 c011b52 的句柄判据。
 
 另：`5af3e8d` 新增的「stop 返回后再用 `try_wait` 检查保留的 Child」断言，在它与 `c011b52` 合并后的树上单跑通过（**1 passed / 0.83 s**），与「断言可合入」的判断一致。
