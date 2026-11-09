@@ -142,3 +142,23 @@ enum DrainOutcome {
 | N-4 | `forward.rs`：10 个异步公开函数（`:344`…`:855`）与 `grep -c "tokio::test"` = **0** | 成立 | 最小一条：直接插一个 `RuleState::Starting` 且 `worker: None` 的 `ForwardHandle` 进 `forwards()`，断言 `forward_remove_core` 后列表变短、lifecycle 变 `Closed`。`AppState` 是进程级共享，需要 `#[serial]` + `TestConfigDir` |
 | N-5 | `daemon_activity.rs:127` 的 `read_to_end` | 部分成立（**与 L2-12 同一处**） | 「缺 `Content-Length` 时读到上限为止」这半句已写在 L2-12 的改法里，不重复登记；它新提供的价值是「即使地址是本机，`/health` 与 `/gate` 都带 `Content-Length`，所以修法可以比 L2-12 更轻、不必动地址可达性」。并入 L2-12 的说明 |
 | N-6 | `ci.yml:214-217`、`:323-325`；`daemon_stop_e2e.rs:317` | **不成立（建议项已存在）** | 事实对：那两处 CI 调用都不设 `AGENT2SSH_TEST_SSH_PORT`，`stop_exits_when_exec_websocket_peer_stops_reading` 在两处都会早退并记 `ok`。但它建议「在报告 `:49` 旁注明」——`CNB-ISSUE-2-WINDOWS-RETEST-2026-11-09.md:59` 已写「23 项不含该用例（`cfg(unix)`），0 项不算通过」，`:122` 又写「CI 没有该场景的 Windows 回归覆盖」。要补的东西已经在了 |
+
+---
+
+## 2026-11-10 · 第 6 轮（末轮）：授权了但没做，说重启了但其实没有
+
+第 6 轮 5 条：**成立 2 / 部分成立 2 / 不成立 1**，另有两处对我前几轮结论的更正（一成立一不成立）。这一批的共同点是**检查与执行之间隔着一次 `await`**。
+
+| 编号 | 位置 | 判断 | 建议改法 |
+|---|---|---|---|
+| P-1 | `forward.rs:775-786`（`forward_stop_core`）、`:789-805`（`forward_start_core`）；`tauri_commands.rs:1428`、`:1475`；`bin/agent2ssh-daemon.rs:3116-3140`、`:3168-3190` | 成立 | 两处都是「先 `forward_list_core()` 查、再授权（会 `await`，审批可到 300s）、再调 core，而 core 重新拿锁重判状态」。并发两条请求时：stop 的后到者作用在 worker 已 `take()` 的句柄上空转；start 的后到者 `store.insert` 覆盖先到者的句柄，被覆盖的那个 `Drop` 会 `stop.store(true)`。桌面双击即可触发。修法：把状态判定移到授权之前的同一次加锁里，或在 core 里用「版本号/CAS」拒绝第二次 |
+| P-2 | `bin/agent2ssh.rs:3062`、`:3089-3090`、`:3098-3102` | 部分成立 | `remove_daemon_pid_file_if(pid)?` 的 `bool` 被 `?` 丢掉（`?` 只传播 `Err`），stop/restart 两条路都不看 `false`——这点属实。但它推的后果（活着的 daemon + 过期的 PID 文件 + 已打印「restarted」）被 `start_daemon_background` 自己的 `:391-424` 挡住了：那条路会先看 PID 状态，`RunningUnhealthy`/`Unverified` 直接报错返回。所以真实影响只是「清理结果不可观测」，与 L2-9 同族，不新立 |
+| P-3 | `bin/agent2ssh-daemon.rs:3127-3128`、`:3175-3176`；`execution_control.rs:446`、`:454` | 部分成立 | 「`/forward/:id` 的 scope 拒绝不写审计」属实。但它的对照错：`authorize_command_with_approval` 的 `:446` 是 `check_daemon_scope(...).map_err(...)?`，`?` 提前返回，`:454` 的 `append_decided_exec_audit` 在 scope 拒绝时同样跑不到——两条路一样沉默，不存在「另一条会审计」的不对称。要补的是两边一起补 |
+| P-4 | `daemon_control.rs:478-505` | **不成立** | 超时路径**确实会 kill**：`:481` `try_wait()` 为 `None` → `:488` `child.kill()` → `:502` `child.wait()`。只有 `kill()` 返回 `Err` 时才可能留下活着的 child，那正是 L2-9 已登记的那条。它说的「Child 的 Drop 不 kill 所以成孤儿」在 `kill` 成功路径上不会发生 |
+| P-5 | `ws_drain.rs:154-184`（实现）、`:326-398`（4 条测试） | 部分成立 | 三点：①`drain_all` 全仓无生产调用点（只有 `ws_drain.rs` 自己与测试）→ 死代码，成立；②`count` 是 `entries.len()`，不看谁真的完成——但 doc 注释已写明「including timed-out ones」，不算缺陷；③`drain_timeout_is_shared_across_connections`（`:390-398`）只断言返回值 `== 3` 与 `elapsed < 500ms`，超时路径同样满足，**测不出它想证明的事**，成立。它说「第一个 entry 超时后其余根本没被等」——技术上对，但 deadline 已过，等也立刻返回，无可观测后果。建议：删掉 `drain_all` 与两条对应测试，或改成「收集仍在 pending 的 id」并断言 |
+
+**两处对我前几轮的更正**：
+
+- **`get_daemons_unified_view` 自指向（成立，并入 L2-10）**：`/daemons/view` 的 handler（`bin/agent2ssh-daemon.rs:4007-4016`）在 daemon 内部调 `remote.rs:460-553`，那里对每个 connected daemon 串行发 3 个 5s 请求（`:479`/`:497`/`:517`/`:537`），无总预算。与 `fetch_daemon_activity` 同族但不同函数——L2-10 的修法要覆盖两处。
+- **「`0e88d7c` 把 unregister 挪出 future」这条它判互斥（**不成立**）**：`git show 0e88d7c` 的 diff 里有 `-        drain_handle.unregister().await;`（旧位置，正是新 future 块内的位置）与 `+        drain_handle.unregister().await;`（清理之后、块外）两次改动，同笔还插入了 `+        }, Duration::from_secs(2)).await;`。所以「引入包装器的同一次提交把它放在包装器外面」是准确描述，两个结论不互斥。
+- **`resident_sessions` 的 `dead` 口径（部分成立，记录不改）**：`resident_session.rs:658` 在 `wait_for_sentinel` 轮询里刷 `last_active`，所以跑着长命令的会话不会被判空闲（这是对的）；但 `resident_get_core` 的 `dead` 判定（`:978-982`）在 `try_wait` 之后不看 `running`，「shell 端口仍在、命令在跑、parent 已 exit」这一瞬与 `DaemonActivity` 的口径不覆盖。已知可接受，但不要写成「`dead` 就代表没有开销」。
