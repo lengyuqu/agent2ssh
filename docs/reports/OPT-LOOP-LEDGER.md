@@ -111,7 +111,7 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
   - D5 `/exec/compare` 的限流 `source` 恒为传输层默认值，限流实为单桶且与文档不对称
   - E1–E4 文档漂移：api.yaml 与源码注释的 "five seconds" 与代码 2s/4s 不符；指南「不再强制结束」与硬杀行为矛盾；K14 缺 config_dir 拒止路径记载
   - F1–F5 测试缺口：强杀分支、kill 失败、`AcceptedUnchecked`、start_time=0 组合断言、2s/4s 字面量无常量）
-- 6 轮进度：4 / 6（第 1 轮 03:32 评论 `2119875798445228032`；第 2 轮 03:41 评论 `2119878023099891712`；第 3 轮 03:46 评论 `2119879303922892800`；第 4 轮 03:53 评论 `2119881205414801408`）
+- 6 轮进度：5 / 6（第 1 轮 03:32 评论 `2119875798445228032`；第 2 轮 03:41 评论 `2119878023099891712`；第 3 轮 03:46 评论 `2119879303922892800`；第 4 轮 03:53 评论 `2119881205414801408`；第 5 轮 04:01 评论 `2119883153081802752`）
 
 **批次说明（消费者必读）**：本批次 issue 正文发出时 ledger 尚不存在，故正文里「不成立清单」写的是「暂无」；但 ledger 在首条分析到达前已由 preflight 建立，含 2 条不成立判定（`signal_daemon` 第三条 `Ok(())` 吞错、`daemon_stop_e2e.rs:1443` 断言弱）。已核对首条分析未重复这两条；**从第 2 轮起，回帖须把上述 2 条不成立原文喂给 CodeBuddy**。
 
@@ -180,3 +180,17 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
 
 12. **「`stop_daemon_process_waits_for_a_graceful_exit`（`daemon_stop_e2e.rs:180`）已读 `app.log` 并断言不含 `daemon predates it`，所以配套断言已存在」— 不成立。**
     `git grep "daemon predates"` 全仓只命中实现处 `daemon_control.rs:1006`，`tests/` 零命中。`daemon_stop_e2e.rs` 里唯一读 `app.log` 的是 `:397`，断言的是 `WebSocket drain deadline expired`；`:180` 那条用例断言耗时、PID 文件与退出码，不读日志。该断言需要**新建**。
+
+### consume 5 / 6 · 2026-11-10
+
+- **指摘来源**：CodeBuddy 对第 4 轮的回答 + 新一批（评论 `2119882346487767040`），10.6 KB。
+- **判定**：成立 4（N-1…N-4）/ 部分成立 1（N-5，与 L2-12 同一处）/ 不成立 1（N-6，建议项已存在）。回帖 `2119883153081802752`。
+- **动作**：`5b1d4d1`（`forward.rs` 的 `stop_worker` 加注释：紧随 `join_timeout` 的 `Stopped` 是意图不是套接字）、`cb6d807`（`OPT-LOOP-L2-PENDING.md` 新增第 5 轮一节 + 把「`warn` 记成功应降 `info`」追加进 L2-3）。推 `cnb main`。
+- **验证**：`npm run build` 6.38s；`cargo test --no-default-features --lib` 856 passed / 0 failed / 1 ignored（18.10s）。
+- **本轮最有价值的一条是级别不是命名**：`daemon_control.rs:1006` 用 `warn` 记的是一次**成功**的停止。命名怎么调都还在这个级别上打转；把它降 `info`、让 `component` 承担区分，才是「日志难读」的解。
+- **与前一阶段的呼应**：N-1（`forward.rs` 的 worker）与 N-3（exec stream 线程）是同一个缺陷模式——线程持有的资源比调用方以为的存活时间长。两者都建议用 `Arc<AtomicBool>` + 循环内检查这一套同批做。
+
+### 第 5 轮新增的不成立条目（原文保留，请勿重复提）
+
+13. **「N-6：CI 的两处 `daemon_stop_e2e` 不设 `AGENT2SSH_TEST_SSH_PORT`，`stop_exits_when_exec_websocket_peer_stops_reading` 在 CI 被跳过计通过，所以报告 `:49` 的『23 passed』需要加注」— 不成立（建议项已存在）。**
+    事实部分成立：`ci.yml:214-217` 与 `:323-325` 都不设该变量，`daemon_stop_e2e.rs:317` 会早退并记 `ok`。但注释已在：`docs/reports/CNB-ISSUE-2-WINDOWS-RETEST-2026-11-09.md:59` 写明「23 项不含该用例（`cfg(unix)`），0 项不算通过」，`:122` 写明「CI 没有该场景的 Windows 回归覆盖」。不需要动作。
