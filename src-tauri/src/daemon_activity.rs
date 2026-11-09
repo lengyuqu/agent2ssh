@@ -3,7 +3,10 @@
 //!
 //! PTY sessions, resident shells, port forwards and pending approvals live in
 //! the daemon's memory (see `session.rs`, `resident_session.rs`, `forward.rs`,
-//! `approval.rs`), so stopping the daemon ends all of them without a trace.
+//! `approval.rs`), so stopping the daemon ends all of them. The first three go
+//! silently; a pending approval does not — the daemon records it as rejected and
+//! leaves an audit line before exiting, because "the daemon was stopped" must not
+//! be indistinguishable from "nobody ever answered".
 //! The desktop app uses [`fetch_daemon_activity`] to tell the person that
 //! before it does.
 //!
