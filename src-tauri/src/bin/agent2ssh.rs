@@ -3056,6 +3056,9 @@ async fn async_main() -> Result<()> {
                         println!("Daemon is not running (no PID file).");
                         return Ok(());
                     };
+                    // A refusal is a typed error, and its text is the whole
+                    // point: "the daemon listening now is pid B, not the pid A"
+                    // tells a person what to do, where "stop failed" does not.
                     stop_daemon_process(pid)?;
                     remove_daemon_pid_file_if(pid)?;
                     println!("Daemon stopped (pid={}).", pid);

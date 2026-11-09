@@ -56,7 +56,7 @@ use agent2ssh::types::*;
 
 use axum::{
     extract::{Extension, Path, Query, State, WebSocketUpgrade},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse,
@@ -85,6 +85,8 @@ use agent2ssh_daemon_auth::{auth_middleware, AuthContext};
 #[cfg(test)]
 use agent2ssh_daemon_auth::{bearer_token, check_auth, is_public_path, query_token, token_matches};
 use agent2ssh_daemon_trace::{trace_id_middleware, DiagnosticBridgeLayer};
+#[cfg(test)]
+use axum::http::HeaderMap;
 
 // ── Metrics counters ─────────────────────────────────────────────────────────
 
@@ -126,52 +128,82 @@ async fn run_ws_with_shutdown_deadline<F: std::future::Future<Output = ()>>(
     }
 }
 
+/// Absolute path of the config directory this daemon serves — the thing a
+/// request can be checked against without trusting the caller's PID. Two
+/// daemons given the same `AGENT2SSH_CONFIG_DIR` will answer identically, which
+/// is the honest limit of this check (K14).
+fn serving_config_dir() -> String {
+    config_dir()
+        .map(|dir| {
+            std::fs::canonicalize(&dir)
+                .unwrap_or(dir)
+                .display()
+                .to_string()
+        })
+        .unwrap_or_else(|error| format!("<unavailable: {error}>"))
+}
+
+#[derive(serde::Deserialize)]
+struct ShutdownRequest {
+    /// The PID the caller believed it was addressing. Optional so a hand-written
+    /// `curl -X POST` keeps working; every first-party caller sends it.
+    expect_pid: Option<u32>,
+}
+
 /// Ask the daemon to shut down the way a termination signal would. Admin-only:
 /// stopping the daemon ends every session and forward it holds.
+///
+/// The caller usually found this daemon through `/health` and then decided to
+/// stop it. That is two requests, and by the second one the listening socket may
+/// belong to a *different* daemon — a restart, a respawn — that accepts the same
+/// admin token, because the token is a file in the shared config directory. So
+/// `expect_pid` is re-checked here instead of trusted from the caller's earlier
+/// look: a request that names another process is refused and this daemon keeps
+/// running, which is the difference between "the stop failed" and "the wrong
+/// daemon is gone". The check narrows the race and cannot close it — no shared
+/// clock, no atomic swap between the two processes. See K14.
 async fn daemon_shutdown(
     Extension(auth): Extension<AuthContext>,
-    headers: HeaderMap,
-) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
-    shutdown_with_pid_guard(auth, headers, false)
-}
-
-/// Unlike the legacy route, this route requires an explicit target PID.
-async fn daemon_shutdown_guarded(
-    Extension(auth): Extension<AuthContext>,
-    headers: HeaderMap,
-) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
-    shutdown_with_pid_guard(auth, headers, true)
-}
-
-fn shutdown_with_pid_guard(
-    auth: AuthContext,
-    headers: HeaderMap,
-    required: bool,
+    body: Option<Json<ShutdownRequest>>,
 ) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     require_admin(&auth)?;
-    let header = headers.get(agent2ssh::daemon_activity::EXPECTED_PID_HEADER);
-    if required && header.is_none() {
-        return Err(err(
-            StatusCode::BAD_REQUEST,
-            "expected daemon PID is required",
-        ));
-    }
-    if let Some(value) = header {
-        let expected = value
-            .to_str()
-            .ok()
-            .and_then(|value| value.parse::<u32>().ok())
-            .filter(|pid| *pid != 0)
-            .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid expected daemon PID"))?;
-        if expected != std::process::id() {
+    let own_pid = std::process::id();
+    match body {
+        Some(Json(ShutdownRequest {
+            expect_pid: Some(expected),
+        })) if expected != own_pid => {
+            let _ = append_diagnostic_log(
+                "warn",
+                "daemon",
+                "refused a shutdown request that named another process",
+                Some(serde_json::json!({ "expect_pid": expected, "pid": own_pid })),
+            );
             return Err(err(
                 StatusCode::CONFLICT,
-                "shutdown target PID does not match this daemon",
+                format!(
+                    "this daemon is pid {own_pid}, not the pid {expected} the request named; \
+                     refusing to shut down"
+                ),
             ));
         }
+        // The PID matched this process: the request is about this daemon, so
+        // honour it.
+        Some(Json(ShutdownRequest {
+            expect_pid: Some(_),
+        })) => {}
+        // An explicit `expect_pid: null` asks for an unchecked stop. Dropping
+        // the check is not the same as making no claim, so say so rather than
+        // quietly honouring it; leaving the field out is what a `curl` does.
+        Some(Json(ShutdownRequest { expect_pid: None })) => {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "expect_pid must be a PID when present; omit the field to stop without a check",
+            ))
+        }
+        None => {}
     }
-    tracing::info!("shutdown requested over HTTP");
+    tracing::info!(pid = own_pid, "shutdown requested over HTTP");
     SHUTDOWN_REQUESTED.notify_one();
     Ok(Json(OkBody { ok: true }))
 }
@@ -1158,7 +1190,7 @@ struct RiskCheckResult {
     risk_level: RiskLevel,
     matched_rule: Option<String>,
 }
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 struct OkBody {
     ok: bool,
 }
@@ -1185,11 +1217,15 @@ async fn health() -> Json<serde_json::Value> {
         "version": env!("CARGO_PKG_VERSION"),
         "uptime_secs": uptime_secs(),
         "config_dir_available": config_ok,
-        "shutdown_pid_guard": true,
         "embedded_ssh_available": true,
         "embedded_keygen_available": true,
         "ssh_available": true,
         "pid": std::process::id(),
+        // Which config directory this daemon serves. A stop decision is made on
+        // a PID read from *a* config dir, and the listener that answers may
+        // belong to a daemon serving a different one; naming it here is what the
+        // stop path can compare before it asks for a shutdown (K14).
+        "config_dir": serving_config_dir(),
     }))
 }
 
@@ -5809,7 +5845,6 @@ async fn main() -> anyhow::Result<()> {
         .route("/sftp/rm-rf", post(sftp_rm_rf))
         .route("/sftp/rm-rf/authorize", post(sftp_rm_rf_authorize))
         .route("/shutdown", post(daemon_shutdown))
-        .route("/shutdown/guarded", post(daemon_shutdown_guarded))
         .route("/sessions", post(session_open).get(session_list))
         .route("/sessions/:id/write", post(session_write))
         .route("/sessions/:id/read", get(session_read))
@@ -5975,6 +6010,93 @@ mod tests {
     }
 
     use super::*;
+
+    /// `/health` has to say which config directory it serves, or a stop cannot
+    /// tell this daemon from one started elsewhere with the same token. A
+    /// missing field would silently downgrade every stop to a guess.
+    #[test]
+    fn health_reports_the_config_directory_it_serves() {
+        with_temp_config(|| {
+            let body = tokio::runtime::Runtime::new().unwrap().block_on(health()).0;
+            let reported = body["config_dir"]
+                .as_str()
+                .expect("health names the config directory");
+            let expected = agent2ssh::config_dir().unwrap();
+            assert_eq!(
+                reported,
+                std::fs::canonicalize(&expected)
+                    .unwrap_or(expected)
+                    .display()
+                    .to_string()
+            );
+        });
+    }
+
+    /// A shutdown request that names another process must be refused by the
+    /// daemon that actually answered. The full race — health hits A, the
+    /// listener becomes B, the client's shutdown goes to B — is driven with two
+    /// real processes in `tests/daemon_stop_e2e.rs`; this pins the branch itself.
+    #[tokio::test]
+    async fn a_shutdown_that_names_another_pid_is_refused() {
+        let admin = AuthContext {
+            scope: None,
+            principal: [0; 32],
+        };
+        let (status, Json(body)) = daemon_shutdown(
+            Extension(admin),
+            Some(Json(ShutdownRequest {
+                expect_pid: Some(std::process::id().wrapping_add(1)),
+            })),
+        )
+        .await
+        .expect_err("a request for another PID must not be honoured");
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(body.error.contains("refusing to shut down"), "{body:?}");
+    }
+
+    /// `expect_pid: null` asks for an unchecked stop. Accepting it silently
+    /// would be the same hole with a different spelling.
+    #[tokio::test]
+    async fn an_explicitly_empty_expect_pid_is_a_bad_request() {
+        let admin = AuthContext {
+            scope: None,
+            principal: [0; 32],
+        };
+        let (status, _) = daemon_shutdown(
+            Extension(admin),
+            Some(Json(ShutdownRequest { expect_pid: None })),
+        )
+        .await
+        .expect_err("an explicit null must not mean 'no opinion'");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    /// The naming form only works for the daemon it names; this daemon's own PID
+    /// is accepted (and the notify below is what the other tests would race on,
+    /// so this one stops short of asserting the wakeup).
+    #[tokio::test]
+    async fn a_shutdown_that_names_this_daemon_is_accepted() {
+        let admin = AuthContext {
+            scope: None,
+            principal: [0; 32],
+        };
+        let accepted = daemon_shutdown(
+            Extension(admin),
+            Some(Json(ShutdownRequest {
+                expect_pid: Some(std::process::id()),
+            })),
+        )
+        .await;
+        match accepted {
+            Ok(Json(body)) => assert!(body.ok, "a named request for this PID is accepted"),
+            Err((status, Json(body))) => {
+                panic!(
+                    "this daemon's own PID must be accepted; got {status}: {:?}",
+                    body.error
+                )
+            }
+        }
+    }
 
     fn broadcast_request(command: &str) -> TerminalBroadcastRequest {
         TerminalBroadcastRequest {

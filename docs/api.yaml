@@ -567,9 +567,6 @@ paths:
                   version: { type: string }
                   uptime_secs: { type: integer }
                   config_dir_available: { type: boolean }
-                  shutdown_pid_guard:
-                    type: boolean
-                    description: True when the daemon supports POST /shutdown/guarded; absent on older daemons.
                   embedded_ssh_available: { type: boolean }
                   embedded_keygen_available: { type: boolean }
                   ssh_available:
@@ -577,6 +574,14 @@ paths:
                     deprecated: true
                     description: Backward-compatible alias; runtime SSH uses the embedded backend.
                   pid: { type: integer }
+                  config_dir:
+                    type: string
+                    description: >
+                      Absolute path of the config directory this daemon serves.
+                      The stop path compares it with its own before requesting a
+                      shutdown, so a daemon started with a different
+                      `AGENT2SSH_CONFIG_DIR` is told apart from the one the caller
+                      started.
 
   /shutdown:
     post:
@@ -586,21 +591,31 @@ paths:
         connections, ends event streams, drains open WebSocket connections (up to five seconds) and
         removes `daemon.pid`. Everything the daemon holds in memory ends with it —
         PTY sessions, resident shells, port forwards and pending approvals.
-        Pending approval waits are rejected; local one-shot commands are stopped
-        and their process trees reaped, and session reads are interrupted.
-        Other in-flight operations, including SSH exec, may delay shutdown.
-        The desktop app and `agent2ssh daemon stop` use /shutdown/guarded after
-        checking the health PID; if the process does not exit after the drain
-        timeout, they report an error and retain the PID without sending a signal.
-        Requires the unrestricted admin token; a
-        scoped token gets 403. This legacy route accepts requests without a PID
-        header for compatibility with older API clients.
-      parameters:
-        - in: header
-          name: X-Agent2SSH-Expected-Pid
-          required: false
-          schema: { type: integer, minimum: 1 }
-          description: Expected receiving daemon PID; a different PID is rejected before shutdown.
+        The desktop app and `agent2ssh daemon stop` use this route on all
+        platforms after checking the health PID; if shutdown was accepted but
+        the process does not exit, they may terminate it after the drain timeout.
+        Requires the unrestricted admin token; a scoped token gets 403.
+
+        The optional `expect_pid` names the process the caller means to stop. It
+        is re-checked here rather than trusted: the listener can change hands
+        between a health check and this request — a restart, a respawn — and the
+        daemon that answers the second request accepts the same admin token
+        because the token is a file in the shared config directory. A request
+        naming a different PID is refused with 409 and this daemon keeps running.
+        `expect_pid: null` is a 400 rather than an unchecked stop; omit the field
+        entirely to stop without a check, which is what a hand-written `curl`
+        does. The check narrows the race and cannot close it — see K14 in
+        `docs/KNOWN-ISSUES.md`.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                expect_pid:
+                  type: integer
+                  description: The PID the caller believes it is addressing.
       responses:
         "200":
           description: Shutdown has been requested; the daemon exits after the response.
@@ -611,34 +626,16 @@ paths:
                 properties:
                   ok: { type: boolean }
         "400":
-          description: The expected PID header is invalid.
+          description: >
+            `expect_pid` was present but not a PID. Omitting the field is how a
+            caller stops without a check.
         "403":
           description: The token is scoped; stopping the daemon needs the admin token.
         "409":
-          description: The expected PID does not match the receiving daemon.
-
-  /shutdown/guarded:
-    post:
-      summary: Shut down a specific daemon PID
-      description: >
-        Requires the unrestricted admin token and the expected PID header.
-        A missing or mismatched PID cannot trigger shutdown. New local lifecycle
-        clients use this route only when /health advertises shutdown_pid_guard.
-      parameters:
-        - in: header
-          name: X-Agent2SSH-Expected-Pid
-          required: true
-          schema: { type: integer, minimum: 1 }
-          description: PID of the intended receiving daemon.
-      responses:
-        "200":
-          description: Shutdown has been requested.
-        "400":
-          description: The expected PID header is missing or invalid.
-        "403":
-          description: The token is scoped; stopping the daemon needs the admin token.
-        "409":
-          description: The expected PID does not match the receiving daemon.
+          description: >
+            `expect_pid` names another process. The daemon that answered is not
+            the one the caller meant to stop, so it is still running; the error
+            names the PID that did answer.
 
   /hosts:
     get:
