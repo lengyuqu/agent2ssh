@@ -83,3 +83,45 @@
 | L2-33 | `:119-130` | 部分成立 | 改名/注释 | 返回值语义是「future 是否在 deadline 前走完」，调用点却当「drain 是否完整」用。改名或补注释，否则 L2-22 的两种 `false` 永远混在一起 |
 
 **L2-26 已撤回**（第 3 轮核实为不成立）：`drain_handle.unregister()` 在 `ws.on_upgrade` 闭包内、`run_ws_with_shutdown_deadline` 的 future 之外——future 在 `:5428` 收口（缩进 8），`unregister` 在 `:5499`（缩进 8），`:5500` 的 `})` 关的是 `on_upgrade`。`0e88d7c` 正是把它从块内挪出来的那笔提交。所以 2s 超时 drop 之后它照常执行，registry 不泄漏，「每次关闭多烧 4 秒」这个前提不存在。详见 ledger 第 11 条。
+
+---
+
+## 2026-11-10 · 第 4 轮：三条 L2 的落地形状（已核实）
+
+第 4 轮不是新缺陷，是对上文三个待拍板项的答复。以下是核实后可以照着做的规格；**行号一律以本轮结束时的树为准**（`daemon_control.rs` 因 `2a7dde2`/`cf09e2c` 的注释扩写整体下移 5 行，上文 L2-1…L2-26 里引用该文件的裸行号需 +5）。
+
+### L2-3 的落地形状：加字段，不换状态码
+
+**否掉换状态码**：`request_shutdown` 里 200 只有两个分支（`:872` 无 body、`:887` 带 body），非 200 全落 `:891/:896` 的 `NotAccepted`，`:1002` 那条 warn 根本不执行。换状态码等于把 warn 变成静默，且只读 status 的旧调用方会把一次成功的停止报成失败。
+
+**采用加字段**，三条理由都已核对：
+- `OkBody`（`:1194-1196`）在该文件里出现 **30 次**，是共用类型，不要动它；新增 `ShutdownAccepted { ok: bool, checked_pid: u32 }`，只给 `daemon_shutdown`（`:168`）用。
+- 到 `:208` 的三条路径（`Some(Some(_))` 匹配、无 body、省略字段）回的都 `own_pid`，所以「有字段」与「核对过」等价。
+- `version` 不动：判据是字段本身，不是版本号——同版本的两个构建也可能一个有 `checked_pid` 一个没有（L2-31 的顾虑就此消掉）。
+
+客户端侧：`:887` 改为按 body 里的 `checked_pid` 与 `expected_pid` 比较分叉，**不要复用 `:910` 的 `reported_pid`**（那是解析 409 错误文案的）。`:1006` 的文案同步改成「accepted the shutdown without reporting which PID it checked」。
+
+**配套断言目前不存在**：全仓 `git grep "daemon predates"` 只命中实现处 `:1006`，`tests/` 里一条断言也没有；`daemon_stop_e2e.rs` 唯一读 `app.log` 的地方在 `:397`，断言的是 `WebSocket drain deadline expired`。要做的是在 `stop_daemon_process_waits_for_a_graceful_exit`（`:180`，它 `Drop` 时会删掉整个临时目录，读日志必须在删之前）里先读 `app.log` 再断言**不含**该句。
+
+**未定的一项**：`:872` 的守卫让 `Accepted` 臂在带 body 的路径上不可达。只做「加字段」就能消掉假阳性；要不要顺手清掉这条不可达臂（会牵动 `request_graceful_shutdown` 的 `matches!` 语义）需要单独拍板。
+
+### L2-25 的落地形状：只加诊断，不改返回值
+
+不改 `wait_until_empty` 的 bool：`ws_drain.rs:402` 断言 `!wait_until_empty(...)`、`:406-407` 直接 `unwrap` 结果，`bin/agent2ssh-daemon.rs:5936-5941` 是 `if !…`——换类型是零收益的破坏。
+
+要加的是诊断：`ws_drain.rs:187` 的 `active_count()` 已经是 `pub`，在 `:5936` 前后各取一次，`tracing::warn!` 带两个数，并让 `append_diagnostic_log` 带同样的 JSON（可 grep）。**文案必须写 `still registered after the deadline`，不能写 `did not drain`**——超时那一刻 handler 的 cleanup 还在跑，计数不等于「没排空的连接数」。
+
+### L2-22 / L2-33 的落地形状：枚举 + 改名的调用点
+
+```rust
+enum DrainOutcome {
+    Completed,  // future 自己跑完，shutdown 没打断
+    Drained,    // 取消后在 grace 内跑完
+    Dropped,    // 取消后 grace 用完，future 被 drop
+}
+```
+
+- `:5010` 与 `:5429` 的 `if !drained` 改成 `matches!(outcome, DrainOutcome::Dropped)`：只对 `Dropped` 记 warn。这顺手修掉一处现有噪声——连接自己先结束时也会记「did not drain before shutdown deadline」。
+- `:4813`、`:5316` 的 `let drained` 必须改名 `let outcome`，否则 L2-33 的混用原样保留。
+- **`:5986` 的 `!timeout(...).unwrap().unwrap()` 会编译不过**（`!` 没有枚举实现），这是全仓唯一被类型改动打中的断言；`:5992` 的 `flag.load` 语义不变，保留。
+- 现在只有 `Dropped` 一条用例，枚举另两臂零覆盖，需补 `Completed`（不 cancel、future 自己结束）与 `Drained`（cancel 后 grace 内返回）两条。
