@@ -662,8 +662,7 @@ mod remove_system_known_host_matching {
     impl Home {
         /// A `$HOME` with `~/.ssh/known_hosts` holding `body`.
         fn with_known_hosts(body: &str) -> Self {
-            let dir = std::env::temp_dir()
-                .join(format!("agent2ssh-home-{}", uuid::Uuid::new_v4()));
+            let dir = std::env::temp_dir().join(format!("agent2ssh-home-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir_all(dir.join(".ssh")).unwrap();
             std::fs::write(dir.join(".ssh").join("known_hosts"), body).unwrap();
             Self { dir }
@@ -2009,9 +2008,19 @@ fn authenticate(
             Err(e) => {
                 // A server old enough to accept only the SHA-1 `ssh-rsa` signature
                 // (OpenSSH before 7.2, many embedded devices) rejects the
-                // rsa-sha2-* signature libssh2 prefers; the key looks unauthorized
-                // although it is not. Offer the legacy signature once, and only
-                // after the modern ones were refused.
+                // rsa-sha2-* signature this transport prefers; the key looks
+                // unauthorized although it is not.
+                //
+                // This branch cannot rescue it. User authentication runs after the
+                // handshake, and `method_pref` refuses a preference once the
+                // handshake is done (`russh_impl::Session::method_pref`), so
+                // `retry_with_legacy_rsa_signature` returns `false` without
+                // offering anything. The fallback that works is inside the
+                // transport: `userauth_pubkey_file` retries with
+                // `PrivateKeyWithHashAlg::new(key, None)` after a refused SHA-2
+                // attempt, which is why the only reachable `detected_by` value is
+                // "transport fallback". Removing the dead branch is a behaviour
+                // decision, recorded as L2-13.
                 if is_publickey_refused(&e)
                     && retry_with_legacy_rsa_signature(
                         session,
@@ -2125,20 +2134,37 @@ fn handshake_with_hint(session: &mut Session, host: &HostProfile) -> Result<()> 
     })
 }
 
-/// libssh2's "the server said no to this key" codes: authentication failed (-18)
-/// and public-key unverified (-19).
+/// "The server said no to this key".
+///
+/// The numeric libssh2 codes this used to test went with that backend (-18 and
+/// -19 both arrived as `ssh2::Error`, which no longer exists); the transport
+/// reports the same condition as [`ErrorKind::PublicKeyRefused`], set where a
+/// pubkey attempt comes back refused.
 fn is_publickey_refused(error: &Error) -> bool {
     error.kind() == crate::transport::ErrorKind::PublicKeyRefused
 }
 
 /// Retry public-key authentication with `ssh-rsa` (RSA over SHA-1) as the
-/// signature algorithm. Returns whether it authenticated. Harmless for non-RSA
-/// keys, which ignore the preference.
+/// signature algorithm. Returns whether it authenticated.
 ///
-/// A `true` here is the second way a connection can end up on SHA-1, and the
-/// caller records it for the same reason it records the transport's own
-/// fallback: an operator who cannot find out which hosts still demand `ssh-rsa`
-/// cannot plan an upgrade.
+/// It cannot today, and the reason is structural rather than a missing server:
+/// `method_pref` rejects any preference set after the handshake
+/// (`russh_impl::Session::method_pref`), and this runs during user
+/// authentication, which is later. Even if it got through, `apply_prefs` has an
+/// empty arm for `SignAlgo` — signature algorithms are chosen per attempt, not
+/// negotiated as a list — so the preference would be dropped in silence.
+///
+/// The comment this used to carry ("harmless for non-RSA keys, which ignore the
+/// preference") was wrong on both counts: the preference is never applied, so
+/// nothing gets the chance to ignore it, and `apply_prefs` would drop it for RSA
+/// keys just the same. Kept, together with the caller's branch, because deleting
+/// it is a behaviour decision — recorded as L2-13 in `OPT-LOOP-L2-PENDING.md`.
+///
+/// If it could return `true` it would be the second way a connection lands on
+/// SHA-1, and the caller would record it for the same reason it records the
+/// transport's own fallback: an operator who cannot find out which hosts still
+/// demand `ssh-rsa` cannot plan an upgrade. That sentence is the reason the dead
+/// branch is worth a decision rather than silent deletion.
 fn retry_with_legacy_rsa_signature(
     session: &Session,
     username: &str,

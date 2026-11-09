@@ -607,6 +607,13 @@ mod tests {
         // returns `None` — the same shape as a failed one.
         assert!(supported_algorithms(MethodType::SignAlgo).is_none());
         assert_eq!(narrow(MethodType::SignAlgo, "a,b"), "");
+        // `LangCs`/`LangSc` are in the same group, and pinning them here is what
+        // keeps `MethodType`'s doc honest: it used to claim they were kept so
+        // `supported_algs` could answer for them the way libssh2 did, while this
+        // function returns `None` before any backend is asked. If a future change
+        // gives them a real query, this assertion is the place to notice.
+        assert!(supported_algorithms(MethodType::LangCs).is_none());
+        assert!(supported_algorithms(MethodType::LangSc).is_none());
     }
 
     #[test]

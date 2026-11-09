@@ -555,14 +555,14 @@ impl KeyTypeArg {
 
 #[derive(Debug, Subcommand)]
 enum KeyCommands {
-    /// Show the key algorithm this build can authenticate with
+    /// Show the key algorithm this build recommends
     ///
-    /// This is a property of the SSH library agent2ssh links, not of the host
-    /// OS: a build whose libssh2 uses the WinCNG backend cannot read the OpenSSH
-    /// private-key container, so it recommends RSA written as traditional PEM
-    /// (`-----BEGIN RSA PRIVATE KEY-----`). Scripts that provision a key should
-    /// ask here rather than assume a type, or the key they generate may be one
-    /// this build cannot use.
+    /// Always `ed25519`. The question this command was added to answer — whether
+    /// a build can read an OpenSSH private-key container — has one answer on
+    /// every platform now that the transport is `russh`, which reads every format
+    /// this app writes. It stays because scripts provision keys through it, and
+    /// because `--json` still carries `reads_openssh_private_keys` (constant
+    /// `true`) for the parsers written against the old answer.
     Algorithm {
         /// Print only the algorithm name (for scripts)
         #[arg(long)]
@@ -3593,10 +3593,15 @@ async fn async_main() -> Result<()> {
                     println!("{}", algorithm.as_str());
                 } else {
                     println!("{}", algorithm.as_str());
+                    // Unreachable while `default_for_build` answers Ed25519, kept
+                    // so the sentence does not have to be reinvented if a build
+                    // ever recommends RSA again. The format is a property of what
+                    // this crate writes, not of what the transport can read:
+                    // `russh` parses the PEM form and the OpenSSH container alike.
                     if algorithm == agent2ssh::keys::KeyAlgorithm::Rsa {
                         println!(
-                            "  this build cannot read OpenSSH-format private keys, so RSA is \
-                             written as traditional PEM"
+                            "  RSA keys are written as traditional PEM \
+                             (-----BEGIN RSA PRIVATE KEY-----); this transport reads both forms"
                         );
                     }
                 }

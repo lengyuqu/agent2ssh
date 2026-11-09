@@ -1165,6 +1165,11 @@ fn supported_names(method: MethodType) -> Vec<&'static str> {
         MethodType::CryptCs | MethodType::CryptSc => CIPHER.to_vec(),
         MethodType::MacCs | MethodType::MacSc => MAC.to_vec(),
         MethodType::CompCs | MethodType::CompSc => COMP.to_vec(),
+        // Never configured and never queried: `SshAlgoPrefs` has no field for
+        // these three, and `ssh_algo::supported_algorithms` returns `None` before
+        // reaching this function. The empty list is the shape of the match, not a
+        // claim that the build supports no language algorithm — a reader who took
+        // it that way would go looking for a query that does not exist.
         MethodType::LangCs | MethodType::LangSc | MethodType::SignAlgo => Vec::new(),
     }
 }

@@ -916,17 +916,19 @@ async fn b41_containers_runtime_binary_is_a_single_plain_line() {
 
 // ── Key generation surface ─────────────────────────────────────────────────
 
-/// The key algorithms libssh2 accepts depend on the crypto backend the SSH
-/// library was built against, so "generate a key" is not portable: a build whose
-/// libssh2 uses WinCNG cannot read the OpenSSH private-key container that
-/// `ssh-keygen` writes, and Ed25519 is impossible there in any form. `keys
-/// algorithm` exists so a script can ask instead of guess, and `keys generate`
-/// so it can act on the answer.
+/// `keys algorithm` exists so a script can ask which type to generate instead of
+/// guessing, and `keys generate` so it can act on the answer. The answer used to
+/// be a property of the linked libssh2's crypto backend — a WinCNG build could not
+/// read the OpenSSH private-key container `ssh-keygen` writes, so it recommended
+/// RSA in traditional PEM — and it is constant `ed25519` now that one transport
+/// reads every format this build writes. Both the command and the
+/// `reads_openssh_private_keys` field are kept: the field can no longer be
+/// `false`, but dropping a JSON key is a contract break, not a cleanup.
 ///
-/// Pinned here: the recommendation never contradicts the readability probe
-/// reported beside it, `generate` with no `--type` produces a key matching the
-/// recommendation, and it prints the private key path on stdout as its only
-/// output — which is what makes `--key "$(agent2ssh keys generate …)"` work.
+/// Pinned here: the recommendation agrees with that field, `generate` with no
+/// `--type` produces a key matching the recommendation, and it prints the private
+/// key path on stdout as its only output — which is what makes
+/// `--key "$(agent2ssh keys generate …)"` work.
 #[tokio::test]
 async fn keys_help_algorithm_and_generate_contract() {
     let (stdout, _stderr, code) = run_cli(&["keys", "--help"]).await;
