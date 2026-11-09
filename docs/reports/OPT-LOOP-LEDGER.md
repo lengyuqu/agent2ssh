@@ -257,5 +257,20 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
   - D4 `channel.rs:700-720` 测试注释易把「2s 上界」读成「2s 等待」
   - D5 `LocalKeySigner` 两条错误臂零测试（`russh_impl/mod.rs:104-116`）
   - 范围外 2 条：`Settings::run` 的 disconnect abort 语义；`core.rs` 上传/下载无 session 超时（与 C5 同根因）
-- 6 轮进度：0 / 6（待消费任务更新）
+- 6 轮进度：1 / 6（待消费任务更新）
 - 正文已喂给 CodeBuddy：12 条「不成立」原文（preflight 2 + 第 1–6 轮新增 10）+ K2/K7/K9/K12 与 §3 未验证范围空档
+
+### consume 1 / 6 · 2026-11-10 05:20–05:26 (GMT+8)
+
+- **判定**：18 条（A1-A2 / B1-B4 / C1-C7 / D1-D5）→ **成立 11 / 部分成立 5 / 不成立 2**。
+  - 成立：B1 B3 C1 C2 C3 C4 C5 C6 D1 D3 D5
+  - 部分成立：A1（核心不成立，只有「verbatim」那句措辞误导）A2（核心结论错，残留是 RSA 主机键无测试）B2（结构成立，「49.7 天」错，本路径上界 60 s）B4（bridge 成立，drain 已有一半保护）C7（缺句属实，行号偏 44 行）
+  - 不成立：D2（两分支都是 log + 退避 + 继续，remote 不 return；且 accept 循环在 `src/forward.rs`，不在本批清单的 `transport/russh_impl/forward.rs`）D4（`:705` 就是那行注释）
+- **A1 的关键证据**（判据方向被推翻）：`russh 0.64.1` 的 `keys/agent/client.rs:345-367` `sign_request_pk` 是 `write_signature(&mut data)?; Ok(data)`，契约是「返回 `to_sign` 且签名已追加」，不是「只返回签名」。`client/encrypted.rs:277-306` 只把 `buffer[i..]` 入包，`i` = `client_make_to_sign` 返回的 session_id 之后偏移（`:1512-1543`），故无「重复 USERAUTH_REQUEST」。测试里的 `&signed[data.len()..]` 是 buffer→agent SIGN_RESPONSE 的翻译，若实现真只返回签名该行会越界 panic。
+- **动作**：`02f936b`（L1 注释/文档，6 文件：`ssh_algo.rs` 模块文档重写 + `SFTP_SAFE_WRITE` 对齐 K2 + `auth_sign`/`host_key_algorithm`/`check_server_key`/`agent.rs`/`sftp.rs` 五处契约注释）、`562340a`（`OPT-LOOP-L2-PENDING.md` 11 条）。
+- **验证**：`npm run build` 6.48s；`cargo test --no-default-features --lib` 856 passed / 0 failed / 1 ignored（17.42s，与改动前同数）。
+- **回帖**：`2119904212174680064`。推送 `cnb main`（`a8f9519..562340a`），未推 github。
+- **操作异常（需处理）**：进入本轮时 `/tmp/agent2ssh-opt-loop.lock` 是 04:22 生产任务建立后**未释放**的孤儿锁（mtime 停在 04:22、目录为空、无 pid 文件）。按协议重试 3 次（120 s 间隔）全失败后做了存活核验：`ps` 无其它 codebuddy/claude 进程，`lsof -d cwd` 显示仓库内进程全部属于本会话，生产任务自己的记忆记着 04:30 已完成并推送。结论是「上一批仍在运行」这一前提不成立，遂接管（`rm -rf` + `mkdir`）并在本轮结束时释放。**生产者任务需要补锁释放**，否则每次生产后消费者会被卡 240 分钟。
+- **自查**：`02f936b` 正文把「1 个测试改名 + 2 条消息」写成「2 个测试名 + 3 条断言消息」，已在本轮回帖里更正，未改历史（提交已推送）。
+- **第 2 轮未开始**：回帖后按 60 s × 5 次轮询，`total` 一直是 2（无新评论）。按「不空等」的规则，本可拿已有材料推进，但查过两处：①`docs/`、`skills/` 里 `WinCNG`/`libssh2` 的残留都写成历史（`configuration-guide.md:168-169`、`skills/agent2ssh/SKILL.md:376/380`），user-facing 文档无第二处「运行时 capability 探测」的描述，`reads_openssh_private_keys` 已不存在（`bin/agent2ssh.rs:3580` 直接输出 `true`）——C3 的尾巴是干净的；②其余待办全是 L2（不得动 main）。**所以本轮没有可合法推进的 L1 材料，也不发一个只占位、无内容的 `## 第 2 轮收尾`**——评论数就是轮次计数器，空发等于白烧 6 轮里的一轮。
+- **下次运行**：从 C=1 → 第 2 轮起，直接消费 CodeBuddy 对本轮回帖的回复（届时必已在）。
