@@ -189,7 +189,7 @@ src/transport/
 
 **FileStat：4 谓词 + 6 字段** —— `is_file` / `is_dir` / `is_symlink` / `file_type`；`perm` / `size` / `mtime` / **`atime`** / `uid` / `gid`（`core.rs:2204` 有 `stat.atime` 的读取，字段名与语义逐字保持；`core.rs:2118` 起的 5 个格式化函数与它们的测试是现成的对拍集）
 
-**三个"删得掉但要补位"的点**（放这里，比放 §7 更不容易丢）：
+**三个"删得掉但要补位"的点**（放这里，比放 §7 更不容易丢）——**历史段：迁移已完成，三点都落了地；下面的行号与调用点是迁移前的，今天按名字找**：
 
 1. `supported_algs` 没有 russh 等价物，而它今天**同时承担两件事**：`narrow()` 用它过滤用户配置（`ssh_algo.rs:191`），以及充当"本构建能不能读 OpenSSH 私钥容器"的**能力信号**——`ssh_key_format::reads_openssh_private_keys()`（`:134`）读的就是它的 HostKey 列表（见 `ssh_algo.rs:129-137` 注释）。russh 恒支持 ed25519/ECDSA，后者应直接返回 `true`。
 2. `reads_openssh_private_keys()` 有 3 个真实调用点：`keys.rs:821`、`embedded_ssh.rs:1664`、`bin/agent2ssh.rs:3399`。**最后一个是 CLI 的 JSON 字段名**——删函数可以，删字段是 CLI 契约变更，要么保留字段恒 `true`，要么按弃用规则走。

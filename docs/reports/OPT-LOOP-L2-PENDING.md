@@ -224,4 +224,18 @@ enum DrainOutcome {
 
 **N2 不新立**：它推的那件事（`remove_system_known_host` 的返回值形状拿不到「有 N 条无法匹配」）就是 `C6` 的第二件事，CLI 文案已改、`usize` 返回值未变，仍在 `C6`。
 
+---
+
+### 2026-11-10 · batch 2 第 3 轮追加（基线 `2c4221a`）
+
+第 3 轮 9 条新编号（19–27）核实后：**成立 3 / 部分成立 3 / 不成立 3**（26 是范围外线索、27 是信息性）。本轮 L1 只动 `skills/`、`docs/` 与两处测试注释，行为项如下。
+
+| 编号 | 位置 | 判断 | 为什么不能自动落 | 建议改法 |
+|---|---|---|---|---|
+| L2-18 | `bin/agent2ssh.rs:1928-1931`（`known-hosts forget` 的未命中提示） | 部分成立 | 句子本身是条件式 caveat（"entries stored in the hashed form cannot be matched"），不是「你的条目被哈希了」的因果断言；但实测 `HOME=<tmp> agent2ssh known-hosts forget ::1 --port 2222` 在只含明文 `[::1]:22` 的文件上就打印这句——用户最可能的两个真实原因（端口不符、方括号形态）都没被点名，唯一被点名的恰恰是他几乎踩不到的那一个 | 先只改成 `no known_hosts entry matched {host} (port {port})`，把 hashed 半句留给「文件里确实有 `\|1\|` 行」时。那要求函数把「没找到」与「有但读不到」分开返回（与 C6 同一件事），不是改字面量能做完的 |
+| L2-19 | `bin/agent2ssh.rs:1903-1906`；计数来源 `embedded_ssh.rs:500-518` | 成立 | `skipped` 把五种情况压成一个数：hashed 行、字段不足三列、base64 解不开、指纹冲突、其余怪行。实测 `printf 'bad.example ssh-ed25519 !!notbase64!!\n'` → `imported 0 host(s), skipped 1 (hashed or conflicting)`，括号里两个原因都不是它 | `KnownHostImportSummary` 按原因分字段（hashed / malformed / undecodable / conflicting），CLI 分行打印。`--json` 的形状会变，属对外契约，需要拍板 |
+| L2-20 | `core.rs:3077-3086`（`import_ssh_config_core` 尾段） | 成立（信息性） | `existing` 是导入前的一次快照，`config.hosts.push(p)` 不回写它，所以**同一次导入**里两个同名 profile 都会落盘（`~/.ssh/config` 里 `Include` 两个文件各有 `Host j1` 即可复现）。`resolve_host`（`session.rs:57-62`）`.find()` 取第一条、`host list` 显示两条、`host rm j1` 一条命令删光——「哪条生效」因此被掩盖。两端都不崩，故记为信息性 | `existing.insert(p.name.clone())` 一行即可让「同名跳过」对同批生效；要保留两条则照 `netcatty_import.rs:181-185` 加 `-2` 后缀（那要改 `flush` 的返回形状） |
+
+**对 L2-15 的补充**：第 3 轮复核给出的证据独立地指向同一结论——「`[::1]:22` 不是 OpenSSH 写出的形态」（对方自建 sshd 实测：`:22` 写裸 `::1`，`:2222` 写 `[::1]:2222`），所以选项 ① 的可信度上升。同时选项 ② 的括注需要收紧：**「两种形态都匹配」只能加在 `port == 22` 分支里**，放到所有端口会打碎 `forgetting_one_port_leaves_the_other_port_alone`（它断言 `:22` 那行逐字节保留）；同效的另一种写法是拿 `split_host_port` 解析后比 `(host, port)`。两条已写进该模块的测试注释。
+
 **N6 是给 `C2` 用的新证据，不是缺陷**：`russh` 的 `authenticate_none` 可用（`channel.rs:809` 的测试已经在调它），所以「实现 `auth_methods`」不必等一次真正的认证失败——可以在 `authenticate` 开头先发一次 `none` 探测。代价是每次连接多一个往返，且老服务器可能把 `none` 记成一次失败尝试（`MaxAuthTries`）。这条只写在这里，供 `C2` 拍板时对照。

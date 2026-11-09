@@ -323,3 +323,27 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
 
 18. **「N7：`list_identities` 第二次失败的文案与第一次相同，区分不出来」— 后半句不成立（该条其余部分成立，见 L2-17）。**
     第一次是 `the SSH agent refused to list identities: {error}`（`agent.rs:237`），第二次是 `the SSH agent is not connected`（`agent.rs:235`，因为 `client` 已置 `None`），两者不同。真正的问题是**第二次与「从未连过」不可区分**——那是该条前半句说的，后半句把它说成了另一件事。
+
+### consume 3 / 6 · 2026-11-10 07:52–08:05 (GMT+8)
+
+- **指摘来源**：CodeBuddy 对第 2 轮回帖的复核（评论 `2119927131357495296`），9 条新编号（19–27）。
+- **判定**：**成立 3 / 部分成立 3 / 不成立 3**（其中 26 是范围外线索、27 是信息性成立）。
+  - 成立：19（`SKILL.md:127-132` 与两份指南仍在解释「取决于 SSH 库能读什么」）、24（`known-hosts import` 把解不开 base64 的 key 归给 `hashed or conflicting`）、27（同一次 `import-config` 内的重名会双双落盘）。
+  - 部分成立：20（提示语是条件式 caveat 而非因果断言，但它把唯一被点名的原因给了用户最难踩到的那一个）、22（朴素修法会打碎邻居属实；「不存在能同时满足两条断言的实现」不成立，见下）、25（断言确实恒真，但它自己建议的处置就是只改注释，已照此执行）。
+  - 不成立：21、23、26（原文见下方 19–21 条）。
+- **本轮最值钱的一条**：19。第 1 轮这句被判「不成立」是因为它跟着「applied fail-closed before each handshake」还能读通；`f23f006` 把 clap 长帮助从「按构建探测」改成「恒 ed25519」之后，同一句话的前提句留在原地，于是指向 agent 的那份说明书成了全仓唯一还在讲「取决于库能读什么」的地方——而且它比 `--help` 更常被读，因为 agent 是照它决定要不要先问一句。
+- **我自己多查出来的两条**：①`cli_contract.rs:976` 的「a script that skipped `keys algorithm` would generate a key this build cannot authenticate with」是同一族的第三处，同笔改掉；②`docs/plans/russh-migration.md:194-195` 是全仓最后一处按旧行号列 `reads_openssh_private_keys` 调用点的地方（计划文档的「补位点」历史段），加了一句「迁移前行号、按名字找」的标记，避免下次 grep 又从这里读到 `keys.rs:821`。
+- **动作**：`3ea8f70`（`cli_contract.rs` 两处注释 + 一处断言消息、`embedded_ssh.rs` 两处测试文档）、本笔（`SKILL.md` 两处 + `cli-quickstart.md` + `configuration-guide.md` + `russh-migration.md` 标记 + `OPT-LOOP-L2-PENDING.md` 三条与 L2-15 补充 + 本 ledger）。
+- **验证**：`npm run build` 6.42s；`cargo fmt --check` 绿；`cargo test --no-default-features --lib` **861 passed / 1 failed / 1 ignored**（失败项仍是基线那条红测，本轮只改了它的文档注释）；`cargo test --no-default-features --test cli_contract` **40 passed / 0 failed**。
+- **回帖**：`<comment-id>`（`## 第 3 轮收尾`）。
+- **第 4 轮未开始**：回帖后按 60 s × 5 轮询。下次运行从 C=3 → 第 4 轮起，指摘在 CodeBuddy 对本轮回帖的回复里。
+- **锁**：进入时又是孤儿锁（mtime 06:52、空目录、无 pid）。这次先做存活核验（`ps` 无其它 agent，`lsof -d cwd` 全属本会话；上一轮记忆写着 06:52 结束），再接管，绕过了「3×120 s 重试」——连续三轮都是孤儿锁，重试只是在等一个不会释放的目录。**释放仍然是薄弱点，这是第三次记录。**
+
+### 第 3 轮新增的不成立条目（原文保留，请勿重复提）
+
+19. **「第 3 轮 #21：IPv6 的非标准端口永远删不掉——`host` 传进来已是方括号形式，拼出 `[[::1]]:2222`」— 不成立。**
+    实测 `HOME=<tmp> agent2ssh known-hosts forget ::1 --port 2222`，文件含 `[::1]:2222` 与 `other.example`：输出 `removed 1 known_hosts entry for ::1 (port 2222)`，文件只剩 `other.example`。原因是 CLI 传的是裸 `::1`——clap 的 `host: String` 没有值解析器（`bin/agent2ssh.rs:491-500`），桌面侧 `App.tsx:536` 传的 `host.host` 也是裸地址；`format!("[{}]:{}", "::1", 2222)` 得到的是正确的 `[::1]:2222`。所以这条「唯一存在的理由正好失效的那一半」并不成立：非标准端口这一半是好的，坏的是 22 端口那一半（L2-15）。
+20. **「第 3 轮 #23：删成空文件时丢掉尾换行，与 `ssh-keygen -R` 不符」— 不成立。**
+    三种形态与 `ssh-keygen -R` **逐字节相同**：①单行文件删掉唯一一行 → 两边都是 0 字节；②两行文件删最后一行 → 两边都剩 `…\n`（55 字节，hex 一致）；③注释 + 空行 + 一行，删那一行 → 两边都是 `# comment\n\n`（11 字节）。`raw.lines()` 丢掉文件末尾的换行、`kept` 对每个保留行补 `\n`，合起来的结果与 `ssh-keygen -R` 的重写方式一致。它表格里「`ssh-keygen` 重写后文件仍以换行结尾」这一格是错的，那一格错了整条结论就反了。
+21. **「第 3 轮 #26：`components:` 是 main 在 fmt 门上一直红的机制解释」— 前提属实，推论不成立。**
+    `rust-toolchain.toml` 与 `.github/workflows/ci.yml:90-92` 确实都把 `rustfmt`/`clippy` 列进 `components`，也确实没有第二步 `cargo install`——但这只说明「CI 装得上 fmt」，它恰好推出**相反**的方向：CI 只要跑过就会红。真正没被解释的是「那一笔是否触发了 CI」，那需要 Actions 的运行记录，不是读 YAML 能得到的。`.github/**` 属禁区，本条只作线索交给人。

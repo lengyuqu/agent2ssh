@@ -998,7 +998,7 @@ agent2ssh keys generate id-work   # 按推荐类型生成；只输出私钥路�
 agent2ssh keys generate id-work --type rsa --json
 ```
 
-生成过程由 Agent2SSH 后端实现，不调用系统 `ssh-keygen`。**默认类型由本构建的 SSH 库能力决定，而不是由操作系统决定**：`russh` 能读取 OpenSSH 私钥容器，因此各平台的默认推荐都是 `ed25519`；`--type rsa` 仍然可用，写出的是 3072 位传统 PKCS#1 PEM（`-----BEGIN RSA PRIVATE KEY-----`），公钥仍是标准的单行 `ssh-rsa …`。因此本应用生成的密钥一定可用于本应用的认证——这正是 `keys algorithm` 存在的理由，脚本应当询问而不是假定。
+生成过程由 Agent2SSH 后端实现，不调用系统 `ssh-keygen`。**默认类型现在是常量，不由构建能力也不由操作系统决定**：`default_for_build()` 直接返回 `ed25519`，理由是 `russh` 能读取本应用写出的所有私钥格式，没有任何构建会给出不同答案；`--type rsa` 仍然可用，写出的是 3072 位传统 PKCS#1 PEM（`-----BEGIN RSA PRIVATE KEY-----`），公钥仍是标准的单行 `ssh-rsa …`。因此本应用生成的密钥一定可用于本应用的认证——`keys algorithm` 保留下来，是给脚本一个不会漂移的接口，脚本仍应询问而不是假定。
 
 > 未手动选择类型时，请求不带类型，由后端按 `keys algorithm` 的结论决定。
 
