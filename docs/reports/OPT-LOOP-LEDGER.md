@@ -111,7 +111,7 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
   - D5 `/exec/compare` 的限流 `source` 恒为传输层默认值，限流实为单桶且与文档不对称
   - E1–E4 文档漂移：api.yaml 与源码注释的 "five seconds" 与代码 2s/4s 不符；指南「不再强制结束」与硬杀行为矛盾；K14 缺 config_dir 拒止路径记载
   - F1–F5 测试缺口：强杀分支、kill 失败、`AcceptedUnchecked`、start_time=0 组合断言、2s/4s 字面量无常量）
-- 6 轮进度：1 / 6（第 1 轮 2026-11-10 03:32，评论 `2119875798445228032`）
+- 6 轮进度：2 / 6（第 1 轮 03:32 评论 `2119875798445228032`；第 2 轮 03:41 评论 `2119878023099891712`）
 
 **批次说明（消费者必读）**：本批次 issue 正文发出时 ledger 尚不存在，故正文里「不成立清单」写的是「暂无」；但 ledger 在首条分析到达前已由 preflight 建立，含 2 条不成立判定（`signal_daemon` 第三条 `Ok(())` 吞错、`daemon_stop_e2e.rs:1443` 断言弱）。已核对首条分析未重复这两条；**从第 2 轮起，回帖须把上述 2 条不成立原文喂给 CodeBuddy**。
 
@@ -136,3 +136,20 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
 
 8. **「F4：`classify_process_observation` 未覆盖 `Some((0,false))` 与 `expected_start` 的组合」— 不成立。**
    `daemon_control.rs:1143-1146` 明确断言 `classify_process_observation(Some((0, false)), false, 12) == Unknown`，`:632` 早于 `:633` 的顺序已被钉住；`expected_start=0` 不会出现（`daemon_process_start_time` 在 `:111` 已过滤 0）。
+
+### consume 2 / 6 · 2026-11-10
+
+- **指摘来源**：CodeBuddy 对第 1 轮的复核（评论 `2119876512399654912`），15 条（L2-19…L2-33）。
+- **判定**：成立 7 / 部分成立 6 / 不成立 2。回帖 `2119878023099891712`。
+- **动作**：`cf09e2c`（`daemon_control.rs` 注释补三处行号、串行关系、50ms 轮询粒度）、`6f9ba45`（指南 `:375` 三处自纠 + `api.yaml` 改成 best effort + K14 补「健康响应可伪造」与 409 限定 + L2-19…L2-33 入表）。推 `cnb main`。
+- **验证**：`npm run build` 6.56s；`cargo test --no-default-features --lib` 856 passed / 0 failed / 1 ignored（17.66s）。
+- **自纠三处**（第 1 轮自己写的）：①「看 daemon 侧日志有没有核对记录」——daemon 只在 409 写日志，核对通过不留痕，这句话把人指向一个不存在的证据；②「先 `daemon restart` 升级」——restart 内部就是 `stop_daemon_process`，旧 daemon 同样被 `:970` 拒，出路是死循环；③「两者都会落进同一条 warn」——无 body 的 `request_graceful_shutdown` 走 `:867` 那一支，不记 warn（该函数在生产代码里无调用点，仅测试用）。
+- **本轮最有价值的一条**：`L2-26`。exec handler 的 `drain_handle.unregister()` 写在 `run_ws_with_shutdown_deadline` 的 async 块**内部**（`:5499`，块在 `:5500` 收口），2s 超时 drop 后不执行 → registry 条目残留 → 每次关闭 `wait_until_empty` 烧满 4s。terminal handler 的 `unregister` 在块外（`:5057`），不受影响。所以「关闭要 6 秒」不是设计余量，是泄漏的代价。
+
+### 第 2 轮新增的不成立条目（原文保留，请勿重复提）
+
+9. **「L2-24：`DaemonStopError::Other` 可能把 `anyhow::Error` 二次包装，需要确认显示的是原文」— 不成立。**
+   `daemon_control.rs:806` 是 `Self::Other(error) => write!(f, "{error}")`，内层错误原文直通，不存在包装层。
+
+10. **「L2-32：中止路径上 `terminal_inputs` 与 `limiter` 也泄漏」— 不成立。**
+   `terminal_inputs` 的 insert（`:4800`）与 remove（`:5036`）、`limiter.unregister_session`（`:5037`）全在 terminal handler，且都在 `:5009` 收口的 async 块之外，超时返回 `false` 后照常执行；exec handler 不碰这两个 map（全仓 `terminal_inputs` 只有 `:280,4296,4511,4800,5036`）。与 L2-26 是同一个作用域误读。
