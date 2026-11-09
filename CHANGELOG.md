@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Fixed
+- **Bound SSH cancellation teardown**: an interrupted or timed-out command aborts its owned socket instead of waiting for SSH close messages. Disconnect and channel-close honor configured timeouts, and the close wait observes daemon shutdown without resetting its deadline on wakeups. The remote command may still continue without a PTY.
 - **Interrupt active SSH exec waits on daemon shutdown**: `/exec` stops its local worker and closes the established SSH channel when cancellation is observed; the error and audit say the remote outcome is unknown, since closing a non-PTY channel does not guarantee termination of the remote command. Connection and setup phases can still delay shutdown.
 - **Bound WebSocket shutdown draining and cancel pending work**: a single deadline applies to registry draining, upgraded handlers receive a bounded drain window, and approval waiters are rejected with an audit reason. Daemon shutdown also interrupts session reads and reaps local one-shot process trees; running SSH requests can still delay shutdown.
 - **Daemon stops with event subscribers connected**: graceful shutdown cancels the event stream as well as WebSocket handlers, so an open desktop SSE subscription no longer prevents the daemon from exiting.

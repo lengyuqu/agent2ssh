@@ -1231,11 +1231,17 @@ pub(crate) fn run_command_capture(
         .as_ref()
         .is_some_and(|token| token.is_cancelled_now())
     {
-        session.set_blocking(false);
-        let _ = session.disconnect(None, "daemon shutting down", None);
+        session.abort();
         return Err(ExecShutdown.into());
     }
     let mut channel = session.channel_session()?;
+    if shutdown
+        .as_ref()
+        .is_some_and(|token| token.is_cancelled_now())
+    {
+        session.abort();
+        return Err(ExecShutdown.into());
+    }
     channel.exec(command)?;
     if let Some(data) = stdin {
         channel.write_all(data)?;
@@ -1260,12 +1266,8 @@ pub(crate) fn run_command_capture(
     );
 
     if let Err(error) = drained {
-        // Still non-blocking here on purpose. Blocking-mode `close` waits for a
-        // server acknowledgement that only arrives once the remote command has
-        // exited, so calling it after `set_blocking(true)` made the timeout path
-        // block for the command's full remaining runtime — a 1 s deadline on an
-        // 8 s command took 8 s to return. Tearing the connection down in
-        // non-blocking mode returns promptly instead.
+        // Abort the owned socket directly. Sending SSH close/disconnect frames
+        // can itself wait on a backpressured peer, including in nonblocking mode.
         //
         // Measured against OpenSSH 9.7 this does **not** kill the remote
         // command: a pty-less exec channel's process group is only reaped on
@@ -1275,13 +1277,7 @@ pub(crate) fn run_command_capture(
             || shutdown
                 .as_ref()
                 .is_some_and(|token| token.is_cancelled_now());
-        let _ = channel.close();
-        let reason = if interrupted {
-            "daemon shutting down"
-        } else {
-            "command timed out"
-        };
-        let _ = session.disconnect(None, reason, None);
+        session.abort();
         return if interrupted {
             Err(ExecShutdown.into())
         } else {
@@ -1295,8 +1291,7 @@ pub(crate) fn run_command_capture(
         .as_ref()
         .is_some_and(|token| token.is_cancelled_now())
     {
-        let _ = channel.close();
-        let _ = session.disconnect(None, "daemon shutting down", None);
+        session.abort();
         return Err(ExecShutdown.into());
     }
 
@@ -1307,7 +1302,29 @@ pub(crate) fn run_command_capture(
     // `timeout_secs`.
     session.set_blocking(true);
     session.set_timeout(TEARDOWN_TIMEOUT_MS);
-    channel.wait_close()?;
+    let closed = if let Some(token) = shutdown.as_ref() {
+        channel.wait_close_cancellable(&|| token.is_cancelled_now())
+    } else {
+        channel.wait_close().map(|()| true)
+    };
+    match closed {
+        Ok(true) => {}
+        Ok(false) => {
+            session.abort();
+            return Err(ExecShutdown.into());
+        }
+        Err(error) => {
+            session.abort();
+            return if shutdown
+                .as_ref()
+                .is_some_and(|token| token.is_cancelled_now())
+            {
+                Err(ExecShutdown.into())
+            } else {
+                Err(error.into())
+            };
+        }
+    }
 
     Ok(CapturedExec {
         exit_code: Some(channel.exit_status()?),

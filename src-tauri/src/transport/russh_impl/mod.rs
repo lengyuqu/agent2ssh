@@ -594,6 +594,11 @@ impl Session {
         self.inner.settings.set_timeout(timeout_ms);
     }
 
+    /// Abort the owned connection socket without waiting for the peer.
+    pub(crate) fn abort(&self) {
+        self.inner.settings.abort();
+    }
+
     pub fn set_blocking(&self, blocking: bool) {
         self.inner.settings.set_blocking(blocking);
     }
@@ -935,7 +940,7 @@ impl Session {
         if !self.inner.connected.load(Ordering::SeqCst) {
             return Ok(());
         }
-        block_on(async {
+        self.run("disconnect", async {
             let guard = self.inner.handle.lock().await;
             let Some(handle) = guard.as_ref() else {
                 return Err(other("handshake has not run"));
@@ -1145,6 +1150,51 @@ mod tests {
     use super::*;
     use russh::keys::ssh_key::certificate::{Builder, CertType};
     use russh::keys::ssh_key::{private::Ed25519Keypair, PrivateKey};
+
+    #[test]
+    fn disconnect_obeys_timeout_when_connection_lock_stalls() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let session = Session::new().unwrap();
+        session.inner.connected.store(true, Ordering::SeqCst);
+        session.set_timeout(100);
+        let inner = session.inner.clone();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let holder = runtime().spawn(async move {
+            let _guard = inner.handle.lock().await;
+            ready_tx.send(()).unwrap();
+            let _ = release_rx.await;
+        });
+        ready_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (result_tx, result_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _ = result_tx.send(session.disconnect(None, "test", None));
+        });
+        let result = result_rx.recv_timeout(Duration::from_millis(500));
+        let _ = release_tx.send(());
+        worker.join().unwrap();
+        block_on(holder).unwrap();
+        let error = result.expect("disconnect ignored its timeout").unwrap_err();
+        assert!(error.to_string().contains("timed out"), "{error}");
+    }
+
+    #[test]
+    fn abort_closes_the_owned_socket_without_waiting_for_peer() {
+        use std::io::Read;
+        use std::net::TcpListener;
+        use std::time::Duration;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        let session = Session::new().unwrap();
+        session.inner.settings.set_socket(&socket).unwrap();
+        session.abort();
+        assert_eq!(peer.read(&mut [0u8; 1]).unwrap(), 0);
+        assert!(session.inner.settings.aborted());
+    }
 
     /// A certificate naming `principals`, valid between two instants.
     ///

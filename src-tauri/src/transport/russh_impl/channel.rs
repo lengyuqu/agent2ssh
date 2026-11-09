@@ -24,7 +24,7 @@ use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use russh::client::Msg;
 use russh::{ChannelMsg, ChannelWriteHalf};
@@ -184,6 +184,40 @@ impl Shared {
             changed: Condvar::new(),
             request_changed: tokio::sync::Notify::new(),
             settings,
+        }
+    }
+
+    fn wait_closed(&self, cancelled: Option<&dyn Fn() -> bool>) -> Result<bool, Error> {
+        let deadline = self
+            .settings
+            .timeout()
+            .and_then(|limit| Instant::now().checked_add(limit));
+        let mut state = self.state.lock().unwrap();
+        loop {
+            if state.closed {
+                return Ok(true);
+            }
+            if cancelled.is_some_and(|check| check()) {
+                return Ok(false);
+            }
+            let remaining = deadline.map(|end| end.saturating_duration_since(Instant::now()));
+            if remaining.is_some_and(|value| value.is_zero()) {
+                return Err(Error::new(
+                    super::super::types::ErrorKind::Other,
+                    "timed out waiting for the channel to close",
+                ));
+            }
+            let interval = match (remaining, cancelled.is_some()) {
+                (Some(value), true) => Some(value.min(Duration::from_millis(100))),
+                (Some(value), false) => Some(value),
+                (None, true) => Some(Duration::from_millis(100)),
+                (None, false) => None,
+            };
+            state = if let Some(interval) = interval {
+                self.changed.wait_timeout(state, interval).unwrap().0
+            } else {
+                self.changed.wait(state).unwrap()
+            };
         }
     }
 
@@ -419,32 +453,22 @@ impl Channel {
 
     /// Wait for the server to close the channel.
     pub fn wait_close(&mut self) -> Result<(), Error> {
-        let mut state = self.shared.state.lock().unwrap();
-        while !state.closed {
-            let waited = match self.shared.settings.timeout() {
-                Some(limit) => {
-                    let (guard, result) = self.shared.changed.wait_timeout(state, limit).unwrap();
-                    state = guard;
-                    result.timed_out()
-                }
-                None => {
-                    state = self.shared.changed.wait(state).unwrap();
-                    false
-                }
-            };
-            if waited && !state.closed {
-                return Err(Error::new(
-                    super::super::types::ErrorKind::Other,
-                    "timed out waiting for the channel to close",
-                ));
-            }
-        }
-        Ok(())
+        self.shared.wait_closed(None).map(|_| ())
+    }
+
+    /// Returns false if cancellation interrupts the close wait.
+    pub(crate) fn wait_close_cancellable(
+        &mut self,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<bool, Error> {
+        self.shared.wait_closed(Some(cancelled))
     }
 
     pub fn close(&mut self) -> Result<(), Error> {
         let writer = Arc::clone(&self.writer);
-        block_on(async move { writer.close().await }).map_err(Error::from)
+        self.shared.settings.run("channel close", async move {
+            writer.close().await.map_err(Error::from)
+        })
     }
 
     pub fn send_eof(&mut self) -> Result<(), Error> {
@@ -556,6 +580,23 @@ pub(super) fn open(channel: russh::Channel<Msg>, settings: Arc<Settings>) -> Cha
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stalled_teardown_times_out_and_closes_the_socket() {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        let settings = Settings::new();
+        settings.set_socket(&socket).unwrap();
+        settings.set_timeout(100);
+        let result: Result<(), Error> =
+            settings.run("channel close", async { std::future::pending().await });
+        assert!(result.unwrap_err().to_string().contains("timed out"));
+        assert!(settings.aborted());
+        assert_eq!(peer.read(&mut [0u8; 1]).unwrap(), 0);
+    }
 
     #[test]
     fn close_without_eof_drains_both_streams_before_reporting_eof() {
@@ -741,5 +782,60 @@ mod tests {
         })
         .await
         .expect("close and reader disappearance must not leave drain loops running");
+    }
+    #[test]
+    fn close_wait_observes_cancellation_without_peer_notification() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc;
+        let settings = Arc::new(Settings::new());
+        settings.set_timeout(30_000);
+        let shared = Arc::new(Shared::new(settings));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let flag = cancelled.clone();
+        let worker_shared = shared.clone();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            let result = worker_shared.wait_closed(Some(&|| flag.load(Ordering::Acquire)));
+            result_tx.send(result).unwrap();
+        });
+        ready_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        std::thread::sleep(Duration::from_millis(30));
+        cancelled.store(true, Ordering::Release);
+        let result = result_rx.recv_timeout(Duration::from_secs(1));
+        // Always wake and join, including on failure, so the test leaks no worker.
+        shared.mark_closed();
+        worker.join().unwrap();
+        assert!(!result.expect("close wait ignored cancellation").unwrap());
+    }
+
+    #[test]
+    fn close_wait_uses_one_deadline_despite_spurious_wakeups() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc;
+        let settings = Arc::new(Settings::new());
+        settings.set_timeout(100);
+        let shared = Arc::new(Shared::new(settings));
+        let stop = Arc::new(AtomicBool::new(false));
+        let notifier_shared = shared.clone();
+        let notifier_stop = stop.clone();
+        let notifier = std::thread::spawn(move || {
+            while !notifier_stop.load(Ordering::Acquire) {
+                notifier_shared.changed.notify_all();
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+        let worker_shared = shared.clone();
+        let (result_tx, result_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _ = result_tx.send(worker_shared.wait_closed(None));
+        });
+        let result = result_rx.recv_timeout(Duration::from_secs(1));
+        stop.store(true, Ordering::Release);
+        notifier.join().unwrap();
+        shared.mark_closed();
+        worker.join().unwrap();
+        assert!(result.expect("close timeout was repeatedly reset").is_err());
     }
 }
