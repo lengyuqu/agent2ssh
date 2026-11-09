@@ -7,7 +7,7 @@
 
 ## 1. 结论
 
-`c011b52` 修好了参考报告 §7 记录的 5 项停止测试：`daemon_stop_e2e` 从 **18 passed / 5 failed（76.16 s）** 变为 **23 passed / 0 failed（34.94 s）**，全程无 `exit cannot be verified`。真实 SSH 关闭用例首次在 Windows 上**跑通**（1 项，越过原 `stop_daemon_process` 失败点）。未发现新缺陷；保守分支（查询失败）只做了代码核对与部分实证，见 §5。
+`c011b52` 修好了参考报告 §7 记录的 5 项停止测试：`daemon_stop_e2e` 从 **18 passed / 5 failed（76.16 s）** 变为 **23 passed / 0 failed（34.94 s）**，全程无 `exit cannot be verified`。真实 SSH 关闭用例首次在 Windows 上**跑通**（1 项，越过原 `stop_daemon_process` 失败点）。未发现新缺陷；保守分支（查询失败 / 权限不足）已在 2026-11-10 用受限令牌实测，见 §5。
 
 后续复核发现一处归因分歧：复核意见认为上一轮失败属于进程快照层，本机突变实验证明决定层是句柄判据层，见 §5.1。`5af3e8d` 本身只改测试与 CHANGELOG，其新增断言在合并树上通过。
 
@@ -95,7 +95,10 @@ child exit status: Some(259)
 
 - **已退出的子进程**（退出码 259，`GetExitCodeProcess` 会误认 STILL_ACTIVE）：句柄 signaled=true、sysinfo 不列出 —— 正是修复要判定的情形，独立复现成功。
 - **活着的进程**（自身、4、5168 等）：signaled=false —— 不会误判为退出。
-- **查询失败**：探针用的是 `PROCESS_SYNCHRONIZE`——与 `process_handle_is_signaled` 相同的访问掩码，**不是** `pid_definitely_missing` 的 `PROCESS_QUERY_LIMITED_INFORMATION`。`pid 0` 与不存在的 `pid 65534` 都得到 `OpenProcess=false, GetLastError=87`，函数按 `handle == 0` 分支返回 false。**权限不足（`ACCESS_DENIED`）这一支本轮仍未实测**：本会话以管理员运行，`csrss`/`lsass`/`MsMpEng` 的 `PROCESS_SYNCHRONIZE` 都打开成功，构造不出拒绝。该分支走的是同一个 `handle == 0` 分支（`process_handle_is_signaled` 返回 false），保守链条为 `handle == 0 → false` → `pid_definitely_missing` 同样返回 false → `Unknown`；这条链**只有代码依据**，不是实测结论。
+- **查询失败**：探针用的是 `PROCESS_SYNCHRONIZE`——与 `process_handle_is_signaled` 相同的访问掩码，**不是** `pid_definitely_missing` 的 `PROCESS_QUERY_LIMITED_INFORMATION`。`pid 0` 与不存在的 `pid 65534` 都得到 `OpenProcess=false, GetLastError=87`，函数按 `handle == 0` 分支返回 false。
+- **权限不足（`ACCESS_DENIED`）**：本轮（2026-11-09）未实测，2026-11-10 补上了。用受限令牌（deny-only Administrators + Everyone/Users 限制 SID）启动同一探针，对 `services.exe`（1680）与 `lsass.exe`（1712）的 `OpenProcess(PROCESS_SYNCHRONIZE)` 稳定返回 `ACCESS_DENIED(5)`，函数即为 false；同一子进程对自己仍能打开，排除「令牌本身失效」。三轮一致。日志：`evidence/cnb-issue-2-denied-2026-11-10/P4-restricted-token.txt`。保守链条（`handle == 0 → false` → `pid_definitely_missing` 亦 false → `Unknown` → 保留 PID 并报无法确认）因此是实测行为，不再只有代码依据。
+
+补测方法（2026-11-10）：`probe-restricted-token.rs` 用当前令牌 `CreateRestrictedToken`（deny-only Administrators，限制 SID 取 Everyone、Users、当前用户），再 `CreateProcessAsUser` 启动自身子进程；子进程对 `services.exe`、`lsass.exe` 调 `OpenProcess(PROCESS_SYNCHRONIZE)` 并写结果文件（受限子进程的 stdout 不接到父控制台）。依赖 `windows-sys` 的 `Win32_Security`、`Win32_Security_Authorization`、`Win32_System_Threading`；`cargo run -- 1680 1712` 即可复现。
 
 ### 5.1 失败层级归因（核对 CodeBuddy 的 5af3e8d 复核意见）
 
@@ -121,7 +124,7 @@ child exit status: Some(259)
 
 - 连接建立、通道启动、阻塞写入阶段的关闭延迟；`/exec-multi`、本机代理执行、playbook、健康快照等路由（K15 剩余项）——本轮未覆盖。
 - GUI（桌面端 Stop 按钮、退出时停 daemon）未跑；Windows 自带 OpenSSH 作服务端未跑；PTY 会话、多轮 keyboard-interactive 未跑。
-- 权限不足分支未实测（见 §5）。
+- 权限不足分支已实测（见 §5，2026-11-10 补）：拒绝时判为「无法确认」并保留 PID，不会误判为已退出。实测用的是受限令牌下的拒绝，不等同于跨账户生产部署的全部情形。
 - `process_is_alive` 在 Windows 上仍只依据 sysinfo 快照；对「已退出但句柄仍被持有」的进程返回 `false`。所以 `daemon_stop_e2e` 里的 `assert!(!process_is_alive(pid))` 在 Windows 上只能证明「快照里没有了」——它仍能捕获「daemon 还在跑」（那时 sysinfo 会列出），不是恒真断言，但不能当作句柄层已修复的证据；本轮的证据是 §4.2 的用例转绿与 §5.1 的突变实验。
 - 非 PTY 远端命令本地断开后可能继续运行，「结果未知不得自动重试」的语义未因本轮通过而改变。
 
@@ -143,5 +146,6 @@ child exit status: Some(259)
 | `M1-mutation-no-handle.txt` | 突变实验：移除句柄判据后同一用例复现 `exit cannot be verified`（§5.1） |
 | `D1`–`D4` | 注释清理后的复跑：`daemon_control::tests` ×2、daemon 单元、`daemon_stop_e2e` 单线程 |
 | `probe-handle-signaled.rs` / `.txt` | 句柄 signaled / 保守分支探针与输出 |
+| `../evidence/cnb-issue-2-denied-2026-11-10/probe-restricted-token.rs` / `P4-restricted-token.txt` | 受限令牌下的 `ACCESS_DENIED` 实测（2026-11-10 补） |
 
 本轮未提交、未推送，未改动产品代码。原始日志同时保留在 `.workbuddy/issue2-retest/`（gitignored）。
