@@ -415,7 +415,7 @@ fn shutdown_interrupts_an_active_ssh_request() {
     let marker = format!("/tmp/a2s-stop-{}", uuid::Uuid::new_v4());
     let command = format!("printf ready > {marker}; sleep 30");
     let body =
-        serde_json::json!({"host":"fixture","command":command,"force":true,"timeout_secs":60})
+        serde_json::json!({"host":"fixture","command":command,"force":true,"timeout_secs":60,"reason":"test change","side_effect":"test effect","change_id":"test-42"})
             .to_string();
     let mut request = TcpStream::connect(std::env::var(ADDR_ENV).unwrap()).unwrap();
     request
@@ -436,12 +436,26 @@ fn shutdown_interrupts_an_active_ssh_request() {
     stop_daemon_process(daemon.child.id()).expect("stop while SSH command is running");
     let mut response = String::new();
     request.read_to_string(&mut response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 503"), "{response}");
     assert!(
         response.contains("remote command outcome unknown"),
         "{response}"
     );
     let audit = std::fs::read_to_string(daemon.dir.join("audit.jsonl")).unwrap();
-    assert!(audit.contains("remote command outcome unknown"));
+    let interrupted = audit
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|entry| entry["change_id"] == "test-42")
+        .expect("interrupted command audit");
+    assert!(interrupted["reason"]
+        .as_str()
+        .unwrap()
+        .contains("remote command outcome unknown"));
+    assert!(interrupted["reason"]
+        .as_str()
+        .unwrap()
+        .contains("test change"));
+    assert_eq!(interrupted["side_effect"], "test effect");
     assert!(!daemon.pid_file().exists());
 }
 

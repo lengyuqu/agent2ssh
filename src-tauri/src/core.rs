@@ -972,6 +972,13 @@ pub async fn exec_ssh_core(request: ExecRequest) -> Result<ExecResult> {
     exec_ssh_core_with_risk_override(request, None).await
 }
 
+/// Whether a shutdown interrupted SSH, and whether the remote outcome is unknown.
+pub fn ssh_shutdown_outcome(error: &anyhow::Error) -> Option<bool> {
+    error
+        .downcast_ref::<ExecShutdown>()
+        .map(|interruption| interruption.outcome_unknown())
+}
+
 /// Daemon variant: interrupt the local SSH worker when shutdown begins.
 pub async fn exec_ssh_core_with_shutdown(
     request: ExecRequest,
@@ -1057,13 +1064,12 @@ async fn exec_ssh_core_impl(
         // finishes: dropping a `tokio::time::timeout` handle around it used to
         // leave the SSH channel — and the remote command — running.
         if error.is::<ExecShutdown>() {
-            let message =
-                "SSH request interrupted during daemon shutdown; remote command outcome unknown";
+            let message = error.to_string();
             append_incomplete_exec_audit(
                 &request,
                 risk,
                 &source,
-                message,
+                &message,
                 started.elapsed().as_millis(),
             );
             return error;
@@ -1358,11 +1364,10 @@ fn append_rejected_exec_audit(request: &ExecRequest, risk: RiskLevel, source: &s
     );
 }
 
-/// Records an exec that started but was cut short by timeout or shutdown.
+/// Records an exec request interrupted by timeout or shutdown.
 ///
-/// Distinct from [`append_rejected_exec_audit`]: this command *did* run, and the
-/// interruption is the fact worth recording, so the message is the reason rather than
-/// the caller-supplied note.
+/// The interruption and the caller's reason are both retained; the command may
+/// not have started if shutdown was observed before dispatch.
 fn append_incomplete_exec_audit(
     request: &ExecRequest,
     risk: RiskLevel,
@@ -1380,13 +1385,21 @@ fn append_incomplete_exec_audit(
         risk_level: risk,
         truncated: false,
         dropped_bytes: 0,
-        side_effect: None,
+        side_effect: request.side_effect.clone(),
         risk_unclassified: false,
+    };
+    let reason = match request
+        .reason
+        .as_deref()
+        .filter(|reason| !reason.is_empty())
+    {
+        Some(reason) => format!("{reason}; {message}"),
+        None => message.to_string(),
     };
     let _ = append_audit(
         &result,
         risk,
-        Some(message),
+        Some(&reason),
         request.change_id.as_deref(),
         Some(source),
     );
@@ -3611,6 +3624,36 @@ mod tests {
     use super::*;
     use crate::store::CONFIG_DIR_ENV;
     use crate::types::AppConfig;
+
+    #[test]
+    fn interrupted_exec_audit_preserves_reason_and_side_effect() {
+        let _config = crate::store::TestConfigDir::new("interrupted-exec-audit");
+        let request: ExecRequest = serde_json::from_value(serde_json::json!({
+            "host": "fixture", "command": "echo test", "reason": "change requested",
+            "side_effect": "service reload", "change_id": "change-42"
+        }))
+        .unwrap();
+        append_incomplete_exec_audit(
+            &request,
+            RiskLevel::Low,
+            "test",
+            "remote command outcome unknown",
+            123,
+        );
+        let entries = list_audit_raw(&AuditFilter {
+            limit: 20,
+            ..Default::default()
+        })
+        .unwrap();
+        let entry = entries.last().unwrap();
+        assert_eq!(
+            entry.reason.as_deref(),
+            Some("change requested; remote command outcome unknown")
+        );
+        assert_eq!(entry.side_effect.as_deref(), Some("service reload"));
+        assert_eq!(entry.change_id.as_deref(), Some("change-42"));
+        assert_eq!(entry.exit_code, None);
+    }
 
     #[test]
     fn test_classify_risk_blocked() {

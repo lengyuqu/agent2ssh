@@ -290,6 +290,7 @@ fn fire_anomaly_webhook(finding: AnomalyFinding) {
             approval_id: None,
             risk_level: Some(format!("{:?}", finding.severity).to_lowercase()),
             exit_code: None,
+            remote_outcome_unknown: None,
         };
         if let Err(e) = crate::notify::fire_webhook(event).await {
             tracing::error!(error = %e, "anomaly webhook error");

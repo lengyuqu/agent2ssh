@@ -200,6 +200,12 @@ impl Shared {
             if cancelled.is_some_and(|check| check()) {
                 return Ok(false);
             }
+            if self.settings.aborted() {
+                return Err(Error::new(
+                    super::super::types::ErrorKind::Other,
+                    "SSH connection was aborted while waiting for channel close",
+                ));
+            }
             let remaining = deadline.map(|end| end.saturating_duration_since(Instant::now()));
             if remaining.is_some_and(|value| value.is_zero()) {
                 return Err(Error::new(
@@ -207,17 +213,12 @@ impl Shared {
                     "timed out waiting for the channel to close",
                 ));
             }
-            let interval = match (remaining, cancelled.is_some()) {
-                (Some(value), true) => Some(value.min(Duration::from_millis(100))),
-                (Some(value), false) => Some(value),
-                (None, true) => Some(Duration::from_millis(100)),
-                (None, false) => None,
-            };
-            state = if let Some(interval) = interval {
-                self.changed.wait_timeout(state, interval).unwrap().0
-            } else {
-                self.changed.wait(state).unwrap()
-            };
+            // An abort may happen without a channel notification. Poll its
+            // flag as well as cancellation, even when no timeout is configured.
+            let interval = remaining
+                .unwrap_or(Duration::from_millis(100))
+                .min(Duration::from_millis(100));
+            state = self.changed.wait_timeout(state, interval).unwrap().0;
         }
     }
 
@@ -389,24 +390,39 @@ impl Write for Channel {
             return Ok(0);
         }
         let writer = Arc::clone(&self.writer);
-        let timeout = self.shared.settings.timeout();
-        let sent = block_on(async move {
-            match timeout {
-                Some(limit) => tokio::time::timeout(limit, writer.data(buf)).await,
-                None => Ok(writer.data(buf).await),
-            }
-        });
-        match sent {
-            Ok(Ok(())) => Ok(buf.len()),
-            Ok(Err(error)) => Err(io::Error::other(error.to_string())),
-            Err(_) => Err(timed_out()),
-        }
+        write_with_timeout(&self.shared.settings, async move { writer.data(buf).await })?;
+        Ok(buf.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
         // russh has no buffered writer here; every `data` call is already a
         // completed send.
         Ok(())
+    }
+}
+
+fn write_with_timeout<F>(settings: &Settings, future: F) -> io::Result<()>
+where
+    F: std::future::Future<Output = Result<(), russh::Error>> + Send,
+{
+    if settings.aborted() {
+        return Err(io::Error::other("SSH connection is closed"));
+    }
+    let sent = block_on(async {
+        match settings.timeout() {
+            Some(limit) => tokio::time::timeout(limit, future).await,
+            None => Ok(future.await),
+        }
+    });
+    match sent {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(io::Error::other(error.to_string())),
+        Err(_) => {
+            // The peer may have received part of the write. Never reuse this
+            // connection after an indeterminate partial send.
+            settings.abort();
+            Err(timed_out())
+        }
     }
 }
 
@@ -451,7 +467,9 @@ impl Channel {
             })
     }
 
-    /// Wait for the server to close the channel.
+    /// Wait for the server to close the channel. The configured timeout is a
+    /// separate budget from a preceding `close()` call; callers that need a
+    /// combined deadline must account for both operations.
     pub fn wait_close(&mut self) -> Result<(), Error> {
         self.shared.wait_closed(None).map(|_| ())
     }
@@ -473,7 +491,9 @@ impl Channel {
 
     pub fn send_eof(&mut self) -> Result<(), Error> {
         let writer = Arc::clone(&self.writer);
-        block_on(async move { writer.eof().await }).map_err(Error::from)
+        self.shared.settings.run("channel EOF", async move {
+            writer.eof().await.map_err(Error::from)
+        })
     }
 
     pub fn exec(&mut self, command: &str) -> Result<(), Error> {
@@ -580,6 +600,45 @@ pub(super) fn open(channel: russh::Channel<Msg>, settings: Arc<Settings>) -> Cha
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timed_out_write_aborts_the_connection() {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        let settings = Settings::new();
+        settings.set_socket(&socket).unwrap();
+        settings.set_timeout(100);
+        let error =
+            write_with_timeout(&settings, async { std::future::pending().await }).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(settings.aborted());
+        assert_eq!(peer.read(&mut [0u8; 1]).unwrap(), 0);
+    }
+
+    #[test]
+    fn close_wait_observes_external_abort_without_peer_notification() {
+        use std::sync::mpsc;
+        let settings = Arc::new(Settings::new());
+        settings.set_timeout(30_000);
+        let shared = Arc::new(Shared::new(settings.clone()));
+        let other = shared.clone();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            let _ = result_tx.send(other.wait_closed(None));
+        });
+        ready_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        std::thread::sleep(Duration::from_millis(30));
+        settings.abort();
+        let result = result_rx.recv_timeout(Duration::from_secs(1));
+        shared.mark_closed();
+        worker.join().unwrap();
+        assert!(result.expect("close wait ignored external abort").is_err());
+    }
 
     #[test]
     fn stalled_teardown_times_out_and_closes_the_socket() {

@@ -601,6 +601,7 @@ async fn request_and_wait_for_approval(
         approval_id: Some(approval_id_notify.clone()),
         risk_level: Some(risk_notify.clone()),
         exit_code: None,
+        remote_outcome_unknown: None,
     };
     tokio::spawn(async move {
         if let Err(e) = notify_approval_pending(
@@ -724,6 +725,7 @@ async fn authorize_command_inner(
                 approval_id: None,
                 risk_level: Some(format!("{risk}")),
                 exit_code: None,
+                remote_outcome_unknown: None,
             };
             tokio::spawn(async move {
                 if let Err(e) = fire_webhook(evt).await {
@@ -1659,6 +1661,7 @@ async fn exec(
     let host_clone = req.host.clone();
     let cmd_clone = req.command.clone();
     let result = exec_ssh_core_with_shutdown(req, s.shutdown.clone()).await;
+    let shutdown_outcome = result.as_ref().err().and_then(ssh_shutdown_outcome);
     EXEC_COUNT.fetch_add(1, Ordering::Relaxed);
     EXEC_TOTAL_DURATION_MS.fetch_add(exec_start.elapsed().as_millis() as u64, Ordering::Relaxed);
     let exit_code = result.as_ref().ok().and_then(|r| r.exit_code);
@@ -1669,15 +1672,21 @@ async fn exec(
         approval_id: None,
         risk_level: None,
         exit_code,
+        remote_outcome_unknown: shutdown_outcome,
     };
     tokio::spawn(async move {
         if let Err(e) = fire_webhook(evt).await {
             tracing::error!(error = %e, "webhook fire error");
         }
     });
-    result
-        .map(Json)
-        .map_err(|e| err(StatusCode::BAD_REQUEST, e))
+    result.map(Json).map_err(|e| {
+        let status = if shutdown_outcome.is_some() {
+            StatusCode::SERVICE_UNAVAILABLE
+        } else {
+            StatusCode::BAD_REQUEST
+        };
+        err(status, e)
+    })
 }
 
 /// Run a command on the machine the daemon itself is running on.
@@ -1759,6 +1768,7 @@ async fn local_exec(
         approval_id: None,
         risk_level: None,
         exit_code,
+        remote_outcome_unknown: None,
     };
     tokio::spawn(async move {
         if let Err(e) = fire_webhook(evt).await {
@@ -5567,6 +5577,7 @@ async fn main() -> anyhow::Result<()> {
             approval_id: None,
             risk_level: None,
             exit_code: None,
+            remote_outcome_unknown: None,
         };
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {

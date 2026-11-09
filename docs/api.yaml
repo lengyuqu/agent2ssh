@@ -753,7 +753,11 @@ paths:
   /exec:
     post:
       summary: Execute a command over SSH
-      description: Applies bearer-token scope, execution gate, execution limits, effective risk, and approval policy before running.
+      description: >
+        Applies bearer-token scope, execution gate, execution limits, effective risk,
+        and approval policy before running. Shutdown interruption returns 503;
+        if the command was sent, its remote outcome is unknown and clients must
+        not automatically retry it.
       requestBody:
         required: true
         content:
@@ -775,6 +779,11 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "408":
           description: Approval timed out
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503":
+          description: Daemon shutdown interrupted the request; inspect the error before any retry.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }

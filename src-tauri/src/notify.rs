@@ -25,6 +25,9 @@ pub struct WebhookEvent {
     pub risk_level: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
+    /// Present for shutdown-interrupted SSH requests; true means remote outcome is unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_outcome_unknown: Option<bool>,
 }
 
 fn webhook_config_path() -> Result<PathBuf> {
@@ -286,13 +289,15 @@ pub async fn fire_webhook(event: WebhookEvent) -> Result<()> {
 /// Format event as Slack Block Kit message.
 #[allow(dead_code)]
 fn format_slack_message(event: &WebhookEvent) -> serde_json::Value {
-    let event_name = match event.event.as_str() {
-        "approval_required" => "Approval Required",
-        "exec_blocked" => "Command Blocked",
-        "exec_completed" => "Command Completed",
-        "anomaly_detected" => "Anomaly Detected",
-        "diagnostic_error" => "Diagnostic Error",
-        other => other,
+    let event_name = match (event.event.as_str(), event.remote_outcome_unknown) {
+        ("approval_required", _) => "Approval Required",
+        ("exec_blocked", _) => "Command Blocked",
+        ("exec_completed", Some(true)) => "SSH Outcome Unknown",
+        ("exec_completed", Some(false)) => "SSH Command Not Sent",
+        ("exec_completed", None) => "Command Completed",
+        ("anomaly_detected", _) => "Anomaly Detected",
+        ("diagnostic_error", _) => "Diagnostic Error",
+        (other, _) => other,
     };
 
     let mut fields = vec![
@@ -420,6 +425,7 @@ mod tests {
             approval_id: Some("abc-123".into()),
             risk_level: Some("high".into()),
             exit_code: None,
+            remote_outcome_unknown: None,
         };
         let msg = format_slack_message(&event);
         let blocks = msg["blocks"].as_array().unwrap();
@@ -438,6 +444,7 @@ mod tests {
             approval_id: None,
             risk_level: Some("low".into()),
             exit_code: Some(0),
+            remote_outcome_unknown: None,
         };
         let msg = format_slack_message(&event);
         let blocks = msg["blocks"].as_array().unwrap();
@@ -454,11 +461,22 @@ mod tests {
             approval_id: None,
             risk_level: None,
             exit_code: None,
+            remote_outcome_unknown: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(!json.contains("approval_id"));
         assert!(!json.contains("risk_level"));
         assert!(!json.contains("exit_code"));
+        assert!(!json.contains("remote_outcome_unknown"));
+        let mut interrupted = event;
+        interrupted.remote_outcome_unknown = Some(true);
+        assert_eq!(
+            serde_json::to_value(&interrupted).unwrap()["remote_outcome_unknown"],
+            true
+        );
+        assert!(format_slack_message(&interrupted)
+            .to_string()
+            .contains("SSH Outcome Unknown"));
     }
 
     #[test]
@@ -542,6 +560,7 @@ mod tests {
             approval_id: Some("test-id".into()),
             risk_level: Some("high".into()),
             exit_code: None,
+            remote_outcome_unknown: None,
         }
     }
 

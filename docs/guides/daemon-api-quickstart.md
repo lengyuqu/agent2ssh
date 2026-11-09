@@ -874,6 +874,8 @@ curl -X PUT -H "$AUTH" \
 
 当 URL 包含 `hooks.slack.com` 时，自动使用 Slack Block Kit 格式发送消息。配置了 `secret` 时，请求头包含 `X-Agent2SSH-Signature: sha256=<hex>` 签名。
 
+普通 SSH `/exec` 因 daemon 关闭而中断时，`exec_completed` webhook 会携带 `remote_outcome_unknown`：`true` 表示命令可能已发送、远端结果未知；`false` 表示关闭前尚未发送命令。结果未知时不要自动重试。其他事件不包含该字段。
+
 ---
 
 ## Web Console

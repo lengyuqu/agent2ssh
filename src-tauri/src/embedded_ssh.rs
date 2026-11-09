@@ -1183,18 +1183,52 @@ impl std::fmt::Display for ExecTimeout {
 
 impl std::error::Error for ExecTimeout {}
 
-#[derive(Debug)]
-pub(crate) struct ExecShutdown;
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ExecShutdown {
+    dispatched: bool,
+}
+
+impl ExecShutdown {
+    const BEFORE_DISPATCH: Self = Self { dispatched: false };
+    const OUTCOME_UNKNOWN: Self = Self { dispatched: true };
+
+    pub(crate) fn outcome_unknown(self) -> bool {
+        self.dispatched
+    }
+}
 
 impl std::fmt::Display for ExecShutdown {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "SSH request interrupted during daemon shutdown; remote command outcome unknown"
-        )
+        if self.dispatched {
+            write!(
+                f,
+                "SSH request interrupted during daemon shutdown; remote command outcome unknown"
+            )
+        } else {
+            write!(
+                f,
+                "SSH request cancelled before the remote command was sent"
+            )
+        }
     }
 }
 impl std::error::Error for ExecShutdown {}
+
+fn map_shutdown_error<E: Into<anyhow::Error>>(
+    error: E,
+    shutdown: Option<&crate::ws_drain::ShutdownToken>,
+    session: Option<&Session>,
+    dispatched: bool,
+) -> anyhow::Error {
+    if shutdown.is_some_and(|token| token.is_cancelled_now()) {
+        if let Some(session) = session {
+            session.abort();
+        }
+        ExecShutdown { dispatched }.into()
+    } else {
+        error.into()
+    }
+}
 
 /// Idle passes tolerated after the channel reports EOF before the drain ends.
 /// Covers a trailing extended-data (stderr) packet still in flight.
@@ -1224,28 +1258,37 @@ pub(crate) fn run_command_capture(
         .as_ref()
         .is_some_and(|token| token.is_cancelled_now())
     {
-        return Err(ExecShutdown.into());
+        return Err(ExecShutdown::BEFORE_DISPATCH.into());
     }
-    let session = connect_embedded_ssh(host, timeout_secs)?;
+    let session = connect_embedded_ssh(host, timeout_secs)
+        .map_err(|error| map_shutdown_error(error, shutdown.as_ref(), None, false))?;
     if shutdown
         .as_ref()
         .is_some_and(|token| token.is_cancelled_now())
     {
         session.abort();
-        return Err(ExecShutdown.into());
+        return Err(ExecShutdown::BEFORE_DISPATCH.into());
     }
-    let mut channel = session.channel_session()?;
+    let mut channel = session
+        .channel_session()
+        .map_err(|error| map_shutdown_error(error, shutdown.as_ref(), Some(&session), false))?;
     if shutdown
         .as_ref()
         .is_some_and(|token| token.is_cancelled_now())
     {
         session.abort();
-        return Err(ExecShutdown.into());
+        return Err(ExecShutdown::BEFORE_DISPATCH.into());
     }
-    channel.exec(command)?;
+    channel
+        .exec(command)
+        .map_err(|error| map_shutdown_error(error, shutdown.as_ref(), Some(&session), true))?;
     if let Some(data) = stdin {
-        channel.write_all(data)?;
-        channel.send_eof()?;
+        channel
+            .write_all(data)
+            .map_err(|error| map_shutdown_error(error, shutdown.as_ref(), Some(&session), true))?;
+        channel
+            .send_eof()
+            .map_err(|error| map_shutdown_error(error, shutdown.as_ref(), Some(&session), true))?;
     }
 
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
@@ -1279,7 +1322,7 @@ pub(crate) fn run_command_capture(
                 .is_some_and(|token| token.is_cancelled_now());
         session.abort();
         return if interrupted {
-            Err(ExecShutdown.into())
+            Err(ExecShutdown::OUTCOME_UNKNOWN.into())
         } else {
             Err(error)
         };
@@ -1292,7 +1335,7 @@ pub(crate) fn run_command_capture(
         .is_some_and(|token| token.is_cancelled_now())
     {
         session.abort();
-        return Err(ExecShutdown.into());
+        return Err(ExecShutdown::OUTCOME_UNKNOWN.into());
     }
 
     // The command has been drained to EOF, so the remaining blocking exchanges
@@ -1311,7 +1354,7 @@ pub(crate) fn run_command_capture(
         Ok(true) => {}
         Ok(false) => {
             session.abort();
-            return Err(ExecShutdown.into());
+            return Err(ExecShutdown::OUTCOME_UNKNOWN.into());
         }
         Err(error) => {
             session.abort();
@@ -1319,7 +1362,7 @@ pub(crate) fn run_command_capture(
                 .as_ref()
                 .is_some_and(|token| token.is_cancelled_now())
             {
-                Err(ExecShutdown.into())
+                Err(ExecShutdown::OUTCOME_UNKNOWN.into())
             } else {
                 Err(error.into())
             };
@@ -1327,7 +1370,11 @@ pub(crate) fn run_command_capture(
     }
 
     Ok(CapturedExec {
-        exit_code: Some(channel.exit_status()?),
+        exit_code: Some(
+            channel.exit_status().map_err(|error| {
+                map_shutdown_error(error, shutdown.as_ref(), Some(&session), true)
+            })?,
+        ),
         truncated: stdout.truncated() || stderr.truncated(),
         dropped_bytes: stdout.dropped_bytes() + stderr.dropped_bytes(),
         stdout: stdout.into_bytes(),
@@ -1363,7 +1410,7 @@ fn drain_channel_output(
 
     loop {
         if shutdown.is_some_and(|token| token.is_cancelled_now()) {
-            return Err(ExecShutdown.into());
+            return Err(ExecShutdown::OUTCOME_UNKNOWN.into());
         }
         let mut progressed = false;
 
@@ -2145,6 +2192,23 @@ fn run_terminal(
 mod tests {
     use super::*;
     use crate::store::CONFIG_DIR_ENV;
+
+    #[tokio::test]
+    async fn setup_errors_preserve_original_or_report_shutdown_phase() {
+        let shutdown = crate::ws_drain::ShutdownToken::new();
+        let original =
+            map_shutdown_error(anyhow!("original failure"), Some(&shutdown), None, false);
+        assert_eq!(original.to_string(), "original failure");
+        shutdown.cancel().await;
+        let before = map_shutdown_error(anyhow!("socket failure"), Some(&shutdown), None, false);
+        assert!(before.is::<ExecShutdown>());
+        assert!(before
+            .to_string()
+            .contains("before the remote command was sent"));
+        let after = map_shutdown_error(anyhow!("socket failure"), Some(&shutdown), None, true);
+        assert!(after.is::<ExecShutdown>());
+        assert!(after.to_string().contains("remote command outcome unknown"));
+    }
     /// A fresh connection has not used the legacy signature, and asking does not
     /// change that. The negative case matters more than the positive one: a flag
     /// that defaulted to true would put a warning on every connection and be
