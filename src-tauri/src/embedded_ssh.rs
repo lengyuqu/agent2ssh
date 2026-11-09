@@ -695,10 +695,15 @@ mod remove_system_known_host_matching {
         result
     }
 
-    /// OpenSSH writes an IPv6 literal as `[::1]:22`, so port 22 does **not** mean
-    /// a bare host name for that form. Today only the bare form is built for port
-    /// 22, so this is `Ok(0)`: the CLI then prints its idempotent miss line and
-    /// the entry stays. Pinned as a failure so the fix has a target.
+    /// Its premise does not hold: OpenSSH writes a bare `::1` at port 22 and only
+    /// brackets the address for a *non-standard* port (`man 8 sshd`; observed from
+    /// both `ssh` and `ssh-keyscan` against a local sshd). So `[::1]:22` is a form
+    /// no OpenSSH produces, and only the bare form is built for port 22, which is
+    /// `Ok(0)` here — the CLI then prints its idempotent miss line and the entry
+    /// stays. **Pinned as a failure while the question is open**: whether `forget`
+    /// should also sweep the bracketed form is L2-15 in
+    /// `docs/reports/OPT-LOOP-L2-PENDING.md`, and deleting this test is one
+    /// resolution of it, not a maintenance edit.
     #[test]
     #[serial_test::serial]
     fn an_ipv6_literal_at_port_22_is_removed() {
@@ -720,6 +725,13 @@ mod remove_system_known_host_matching {
     /// `example.internal:2222` must not take the port-22 line with it. Removing
     /// it would be the harmless-sounding reading of "match any form of this
     /// host", and it is wrong: the two lines are two different endpoints.
+    ///
+    /// This is also the constraint that rules out the obvious fix for the case
+    /// above: matching "the bare name *and* `[name]:port`" at **every** port
+    /// makes this line a casualty, so that version cannot satisfy both cases.
+    /// Two shapes can: adding `[name]:22` only under the `port == 22` branch, or
+    /// comparing `split_host_port(host_field)` against `(host_name, port)` — the
+    /// parse `the_address_forms_this_file_must_handle` already pins.
     #[test]
     #[serial_test::serial]
     fn forgetting_one_port_leaves_the_other_port_alone() {
