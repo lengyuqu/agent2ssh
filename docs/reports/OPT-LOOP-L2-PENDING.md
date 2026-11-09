@@ -78,7 +78,8 @@
 | L2-22 | `:4999-5001`、`:5417-5420`、`:119-130` | 成立 | 改返回类型 + 诊断 | `drained == false` 同时表示「取消后没排空」与「超时被 drop」，`is_ok()` 把两者折成一个 bool。建议让 `run_ws_with_shutdown_deadline` 返回枚举（`Completed` / `Drained` / `Dropped`），两条 warn 分开写 |
 | L2-23 | `daemon_control.rs:488-500`、`61-68` | 成立（并入 L2-9） | 同 L2-9 | 比 L2-9 更紧的一层：`child.kill()` 失败 → `write_daemon_pid_if_absent` 返回 `AlreadyExists` 被吞时，状态是「child 仍活着 + PID 文件写的是别人」，没有任何路径能发现。修 L2-9 时一并处理 |
 | L2-25 | `:5934-5945` | 成立 | 改返回/诊断 + 契约 | `wait_until_empty` 返回 false 时只 warn，函数仍 `Ok(())`；所以「drains open WebSocket connections」在超时情形下不成立。文档已改成 best effort（L1）；代码侧应把「有几个连接没排空」写进诊断，或让关闭结果带上这个事实 |
-| L2-26 | `:5499`（exec）vs `:5057`（terminal） | **部分成立，且是真缺陷** | 改 handler 的清理时序 | exec 的 `drain_handle.unregister().await` 在传给 `run_ws_with_shutdown_deadline` 的 async 块**内部**（`:5500` 收口），2s 超时 drop 后它永远不执行 → registry 条目残留 → 每次关闭 `wait_until_empty` 都要烧满 4s。terminal 的 `unregister` 在块**外**（`:5009` 收口，`:5057` 在其后），超时后照常执行。修法：把 exec 的清理移到 future 外，或给 `DrainHandle` 加 `Drop` guard |
 | L2-30 | `daemon_stop_e2e.rs:1315`（`#[cfg(unix)]`）vs `:1412` | 成立 | 测试夹具 | Windows 上「409 分支」有覆盖、「200 → AcceptedUnchecked」零覆盖，而 L2-3 要改的正是后者。补一个在 `cfg(windows)` 下也成立的等价用例，至少断言「新 daemon 的停止不产生 predates warn」 |
 | L2-31 | `:1212-1228` vs `api.yaml:565` | 部分成立 | 契约 | `health()` 恒回 `version`，`api.yaml` 把它列为可选，`health_identity` 不读。若要用版本号区分新旧 daemon，得先提为必填并让客户端读——但同版本的两个构建仍可能一个有 `checked_pid` 一个没有，所以最终判据只能是字段本身 |
 | L2-33 | `:119-130` | 部分成立 | 改名/注释 | 返回值语义是「future 是否在 deadline 前走完」，调用点却当「drain 是否完整」用。改名或补注释，否则 L2-22 的两种 `false` 永远混在一起 |
+
+**L2-26 已撤回**（第 3 轮核实为不成立）：`drain_handle.unregister()` 在 `ws.on_upgrade` 闭包内、`run_ws_with_shutdown_deadline` 的 future 之外——future 在 `:5428` 收口（缩进 8），`unregister` 在 `:5499`（缩进 8），`:5500` 的 `})` 关的是 `on_upgrade`。`0e88d7c` 正是把它从块内挪出来的那笔提交。所以 2s 超时 drop 之后它照常执行，registry 不泄漏，「每次关闭多烧 4 秒」这个前提不存在。详见 ledger 第 11 条。

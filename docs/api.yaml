@@ -591,10 +591,12 @@ paths:
         connections, ends event streams, and drains open WebSocket connections on
         a budget — up to two seconds for each connection (they drain in parallel),
         then up to four seconds for the registry that tracks them. A connection
-        that misses its deadline is dropped rather than waited for, so the drain
-        is best effort, not a guarantee. It then removes `daemon.pid`. Everything
-        the daemon holds in memory ends with it — PTY sessions, resident shells,
-        port forwards and pending approvals.
+        that misses its deadline stops being waited for: its drain loop is
+        dropped and the handler finishes its own cleanup, which can take up to
+        another half second. The drain is therefore best effort, not a guarantee.
+        It then removes `daemon.pid`. Everything the daemon holds in memory ends
+        with it — PTY sessions, resident shells, port forwards and pending
+        approvals.
         The desktop app and `agent2ssh daemon stop` use this route on all
         platforms after checking the health PID; if shutdown was accepted but
         the process does not exit, they may terminate it after the drain timeout.
