@@ -111,7 +111,7 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
   - D5 `/exec/compare` 的限流 `source` 恒为传输层默认值，限流实为单桶且与文档不对称
   - E1–E4 文档漂移：api.yaml 与源码注释的 "five seconds" 与代码 2s/4s 不符；指南「不再强制结束」与硬杀行为矛盾；K14 缺 config_dir 拒止路径记载
   - F1–F5 测试缺口：强杀分支、kill 失败、`AcceptedUnchecked`、start_time=0 组合断言、2s/4s 字面量无常量）
-- 6 轮进度：2 / 6（第 1 轮 03:32 评论 `2119875798445228032`；第 2 轮 03:41 评论 `2119878023099891712`）
+- 6 轮进度：3 / 6（第 1 轮 03:32 评论 `2119875798445228032`；第 2 轮 03:41 评论 `2119878023099891712`；第 3 轮 03:46 评论 `2119879303922892800`）
 
 **批次说明（消费者必读）**：本批次 issue 正文发出时 ledger 尚不存在，故正文里「不成立清单」写的是「暂无」；但 ledger 在首条分析到达前已由 preflight 建立，含 2 条不成立判定（`signal_daemon` 第三条 `Ok(())` 吞错、`daemon_stop_e2e.rs:1443` 断言弱）。已核对首条分析未重复这两条；**从第 2 轮起，回帖须把上述 2 条不成立原文喂给 CodeBuddy**。
 
@@ -153,3 +153,17 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
 
 10. **「L2-32：中止路径上 `terminal_inputs` 与 `limiter` 也泄漏」— 不成立。**
    `terminal_inputs` 的 insert（`:4800`）与 remove（`:5036`）、`limiter.unregister_session`（`:5037`）全在 terminal handler，且都在 `:5009` 收口的 async 块之外，超时返回 `false` 后照常执行；exec handler 不碰这两个 map（全仓 `terminal_inputs` 只有 `:280,4296,4511,4800,5036`）。与 L2-26 是同一个作用域误读。
+
+### consume 3 / 6 · 2026-11-10
+
+- **指摘来源**：CodeBuddy 对第 2 轮的复核（评论 `2119878811184422912`）。主题不是新发现，是**推翻我上一轮的 L2-26**。
+- **判定**：我上一轮错 1 条（L2-26 撤回）；新指摘 3 条中成立 1（Windows 平台划分）、部分成立 1（注释理由，核对后无需改）、不成立 1（「必删 daemon.pid」）。回帖 `2119879303922892800`。
+- **动作**：`f669326`（`api.yaml` 的 `is dropped` → `stops being waited for`；指南带外停止分 Unix/Windows；`OPT-LOOP-L2-PENDING.md` 删除 L2-26 行并注明撤回）。推 `cnb main`。
+- **验证**：`npm run build` 6.56s；`cargo test --no-default-features --lib` 856 passed / 0 failed / 1 ignored（17.20s）。
+- **怎么错的**：把 `:5500` 的 `})` 当成 `run_ws_with_shutdown_deadline` 那个 future 的收口，于是把 `:5499` 的 `unregister` 判在块内。实际 future 收在 `:5428`（ind=8），`:5500`（ind=4）关的是 `on_upgrade` 闭包。**教训：判作用域不能只读到「看起来像收口」的那一行，要量缩进并找到外层构造的起点**（`ws.on_upgrade(|socket| async move {`，`:5161`）。
+- **连带**：上一轮「关闭要 6 秒是泄漏的代价」这个因果作废；6s 上界仍成立，但理由只是「2s 与 4s 两笔预算串行」，无需额外解释。
+
+### 第 3 轮新增的不成立条目（原文保留，请勿重复提）
+
+11. **「L2-26：exec 的 `drain_handle.unregister()` 在 `run_ws_with_shutdown_deadline` 的 future 内（`:5500` 收口），2s 超时 drop 后不执行，registry 条目残留，每次关闭 `wait_until_empty` 烧满 4s」— 不成立。**
+    future 收在 `:5428`（`}, Duration::from_secs(2)).await;`，ind=8），`unregister` 在 `:5499`（ind=8）属 `on_upgrade` 闭包、在 future 之外，`:5500`（ind=4）关的是 `on_upgrade`。`0e88d7c` 正是把它从块内挪到块外的那笔提交（同笔还把两处 `unregister().await; return;` 改成 `break`）。terminal 侧同理（`:5009` 收口 / `:5057` 执行）。两条都不泄漏，「每次关闭多烧 4 秒」的前提不存在。
