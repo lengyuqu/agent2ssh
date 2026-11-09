@@ -274,3 +274,19 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
 - **自查**：`02f936b` 正文把「1 个测试改名 + 2 条消息」写成「2 个测试名 + 3 条断言消息」，已在本轮回帖里更正，未改历史（提交已推送）。
 - **第 2 轮未开始**：回帖后按 60 s × 5 次轮询，`total` 一直是 2（无新评论）。按「不空等」的规则，本可拿已有材料推进，但查过两处：①`docs/`、`skills/` 里 `WinCNG`/`libssh2` 的残留都写成历史（`configuration-guide.md:168-169`、`skills/agent2ssh/SKILL.md:376/380`），user-facing 文档无第二处「运行时 capability 探测」的描述，`reads_openssh_private_keys` 已不存在（`bin/agent2ssh.rs:3580` 直接输出 `true`）——C3 的尾巴是干净的；②其余待办全是 L2（不得动 main）。**所以本轮没有可合法推进的 L1 材料，也不发一个只占位、无内容的 `## 第 2 轮收尾`**——评论数就是轮次计数器，空发等于白烧 6 轮里的一轮。
 - **下次运行**：从 C=1 → 第 2 轮起，直接消费 CodeBuddy 对本轮回帖的回复（届时必已在）。
+
+#### 本轮进行中发生的并发写入（下次运行必读）
+
+推送 ledger 时发现 `cnb main` 已被**另一个写入者**推进了两笔（作者 `cnb.lengyuqu <…@noreply.cnb.cool>`，时间 05:30，本机 git 身份是 `zdz945244799@gmail.com`，所以不是本机任何一个进程）：
+
+- `8e16f40` — 改了 `src-tauri/src/bin/agent2ssh.rs`、`embedded_ssh.rs`（+173，全是测试）、`sftp_transfer.rs`（+43）。提交正文自述 **`Verified: not run`**，理由是那个容器里没有 Rust 工具链、也没有网络装。
+- `09d49ea` — 往 `OPT-LOOP-L2-PENDING.md` 追加 23 行（两条新发现）。
+
+我用本机工具链替它跑了 `cargo test --no-default-features --lib`：**861 passed / 1 failed / 1 ignored**。失败的是它自己新增的
+`embedded_ssh::remove_system_known_host_matching::an_ipv6_literal_at_port_22_is_removed`，断言 `[::1]:22` 应被删掉而实现只拼裸名。看代码这是**有意为之**——测试注释写着「Pinned as a failure so the fix has a target」，也就是说它是一个没有配套修复的红测试，直接进了 main。
+
+由此三件事，下次运行必须知道：
+
+1. **main 当前是红的**（截至 `09d49ea`）。在它变绿之前，本流程任何「全部通过」的验证声明都要注明基线含这一条已知失败，否则会被误当成自己改坏。
+2. **锁挡不住跨机写入**。`/tmp/agent2ssh-opt-loop.lock` 只在同一台机器上有效；这次的另一个写入者不在本机进程表里，我的孤儿锁判定在「本机无持有者」这个层面上是对的，在「全局无并发」这个层面上是错的。两个消费者同时跑同一批，就会出现这种一方在写 L2、另一方直接改源码的情况。
+3. **待决策项多了一条**：那个红测试要么配一个 `remove_system_known_host` 的修复（`src-tauri/src/**` 行为改动，属 L2），要么降级为 `#[ignore]` 并写清原因。我不动它——它不是我写的，且改它就是我要越过的同一条 L2 线。
