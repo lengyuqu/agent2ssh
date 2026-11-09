@@ -64,3 +64,21 @@
 | L2-16 | `bin/agent2ssh-daemon.rs:1213-1229`；`daemon_control.rs:141-169` | 部分成立 | 改健康语义（对外契约） | `health()` 的 `ok` 恒为 true，`config_dir_available` 才是真实状态；`daemon_health_ok` 只认 `"ok":true`。是否让 `ok` 表示「能服务」是契约决策（`api.yaml` 把 `ok` 列为必填），先拍板再动 |
 | L2-17 | `bin/agent2ssh-daemon.rs:1067-1076`、`:1863-1900` | 成立 | 改请求体或文档契约 | `ExecCompareBody` 没有 `source`，限流的 source 维度对它恒为传输层默认值，与 `ExecMultiBody` 的 `source: Option<String>` 不对称。补字段会改 API，至少要先把「compare 恒按传输层身份计」写进 `api.yaml` |
 | L2-18 | `bin/agent2ssh-daemon.rs:5009,5428,5937` | 成立（建议） | 加常量要改 src | 2s/4s 只以字面量存在，`GRACEFUL_STOP_WAIT`（8s）与 daemon 的 drain 预算无法靠代码互相验证。提成 `WS_DRAIN_PER_CONNECTION` / `WS_DRAIN_REGISTRY` 并加一条 `assert!(GRACEFUL_STOP_WAIT > 两者之和)` 的测试 |
+
+---
+
+## 2026-11-10 · 来自 issue #7 第 2 轮（CodeBuddy 复核后的新一批）
+
+第二轮指摘 15 条（L2-19…L2-33），核实后**成立 6 / 部分成立 5 / 不成立 2**（另有 2 条已在第 2 轮的 L1 改动里做掉）。这一批里有两条是真正的代码缺陷，其余是观测与措辞问题。
+
+| 编号 | 位置 | 判断 | 为什么不能自动落 | 建议改法 |
+|---|---|---|---|---|
+| L2-19 | `:4824`、`:5326`；`:5009`、`:5428` | 部分成立 | 措辞 + 两处实现不一致 | 「每连接 2s」不等于「N 条叠加成 2N」：两个 handler 各跑一个 2s 上限，连接之间**并行**。而 500ms 在两处语义不同——terminal（`:4824`）是**每次 recv 重置**的 500ms 空闲超时，exec（`:5326`）是取消时刻起的**绝对 500ms 截止**。所以「共享一个 500ms 窗口、最短 0.5s」不成立（terminal 的循环在 `event_rx` 立即关闭时根本不等）。文档已按「并行 + best effort」改写（L1）；两处语义是否统一属设计取舍 |
+| L2-20 | `:5937` vs `:5926-5929` | 部分成立 | 结论影响常量推导 | 「串行」成立：`with_graceful_shutdown(...).await` 先结束，之后才 `wait_until_empty(4s)`。但「最坏 4s 不是 6s」不成立——2s 的 per-connection 上限在 graceful 阶段已经跑完，registry 再单独计时 4s，**最坏仍是约 6s**。4s 之所以每次都烧满，根因是 L2-26 的 entry 泄漏，那是缺陷，不能用它把上界改小 |
+| L2-22 | `:4999-5001`、`:5417-5420`、`:119-130` | 成立 | 改返回类型 + 诊断 | `drained == false` 同时表示「取消后没排空」与「超时被 drop」，`is_ok()` 把两者折成一个 bool。建议让 `run_ws_with_shutdown_deadline` 返回枚举（`Completed` / `Drained` / `Dropped`），两条 warn 分开写 |
+| L2-23 | `daemon_control.rs:488-500`、`61-68` | 成立（并入 L2-9） | 同 L2-9 | 比 L2-9 更紧的一层：`child.kill()` 失败 → `write_daemon_pid_if_absent` 返回 `AlreadyExists` 被吞时，状态是「child 仍活着 + PID 文件写的是别人」，没有任何路径能发现。修 L2-9 时一并处理 |
+| L2-25 | `:5934-5945` | 成立 | 改返回/诊断 + 契约 | `wait_until_empty` 返回 false 时只 warn，函数仍 `Ok(())`；所以「drains open WebSocket connections」在超时情形下不成立。文档已改成 best effort（L1）；代码侧应把「有几个连接没排空」写进诊断，或让关闭结果带上这个事实 |
+| L2-26 | `:5499`（exec）vs `:5057`（terminal） | **部分成立，且是真缺陷** | 改 handler 的清理时序 | exec 的 `drain_handle.unregister().await` 在传给 `run_ws_with_shutdown_deadline` 的 async 块**内部**（`:5500` 收口），2s 超时 drop 后它永远不执行 → registry 条目残留 → 每次关闭 `wait_until_empty` 都要烧满 4s。terminal 的 `unregister` 在块**外**（`:5009` 收口，`:5057` 在其后），超时后照常执行。修法：把 exec 的清理移到 future 外，或给 `DrainHandle` 加 `Drop` guard |
+| L2-30 | `daemon_stop_e2e.rs:1315`（`#[cfg(unix)]`）vs `:1412` | 成立 | 测试夹具 | Windows 上「409 分支」有覆盖、「200 → AcceptedUnchecked」零覆盖，而 L2-3 要改的正是后者。补一个在 `cfg(windows)` 下也成立的等价用例，至少断言「新 daemon 的停止不产生 predates warn」 |
+| L2-31 | `:1212-1228` vs `api.yaml:565` | 部分成立 | 契约 | `health()` 恒回 `version`，`api.yaml` 把它列为可选，`health_identity` 不读。若要用版本号区分新旧 daemon，得先提为必填并让客户端读——但同版本的两个构建仍可能一个有 `checked_pid` 一个没有，所以最终判据只能是字段本身 |
+| L2-33 | `:119-130` | 部分成立 | 改名/注释 | 返回值语义是「future 是否在 deadline 前走完」，调用点却当「drain 是否完整」用。改名或补注释，否则 L2-22 的两种 `false` 永远混在一起 |
