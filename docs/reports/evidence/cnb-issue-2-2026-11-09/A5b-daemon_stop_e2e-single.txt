@@ -1,0 +1,476 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.56s
+     Running tests\daemon_stop_e2e.rs (src-tauri\target\debug\deps\daemon_stop_e2e-f450dfd9b9924054.exe)
+
+running 23 tests
+test a_forged_endpoint_cannot_report_an_absent_pid_as_running ... ok
+test activity_counts_a_resident_session ... ok
+test activity_reads_an_idle_daemon_as_idle ... ok
+test an_accepted_shutdown_that_does_not_stop_the_daemon_never_signals_it ... ok
+test background_start_verifies_and_stops_its_own_daemon ... ok
+test competing_daemon_cannot_overwrite_the_running_daemon_pid ... ok
+test direct_daemon_recovers_a_definitely_absent_pid ... ok
+test direct_daemon_with_another_port_cannot_replace_a_live_pid ... ok
+test exiting_old_daemon_preserves_replacement_pid_in_the_same_config ... FAILED
+test legacy_daemon_without_pid_guard_is_not_automatically_stopped ... ok
+test other_daemons_health_is_not_reported_as_our_pid ... ok
+test renamed_daemon_is_reported_healthy_but_not_unsafely_stopped ... ok
+test shutdown_cancels_a_request_waiting_for_approval ... FAILED
+test shutdown_does_not_reach_a_replacement_daemon_with_the_same_token ... ok
+test shutdown_interrupts_an_active_ssh_request ... ok
+test start_refuses_to_claim_an_existing_health_endpoint_without_a_pid_file ... ok
+test startup_does_not_accept_another_process_health_response ... ok
+test stop_closes_an_active_event_stream_and_exits ... FAILED
+test stop_daemon_process_waits_for_a_graceful_exit ... FAILED
+test stop_exits_with_an_idle_exec_websocket ... FAILED
+test the_shutdown_route_is_closed_to_anonymous_and_scoped_callers ... ok
+test the_shutdown_route_stops_the_daemon_gracefully ... ok
+test wrong_admin_token_never_signals_the_real_daemon ... ok
+
+failures:
+
+---- exiting_old_daemon_preserves_replacement_pid_in_the_same_config stdout ----
+
+thread 'exiting_old_daemon_preserves_replacement_pid_in_the_same_config' (39728) panicked at tests\daemon_stop_e2e.rs:568:34:
+stop old daemon: daemon PID 26932 exit cannot be verified; PID file retained
+
+Stack backtrace:
+   0: std::backtrace_rs::backtrace::win64::trace
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\..\..\backtrace\src\backtrace\win64.rs:85
+   1: std::backtrace_rs::backtrace::trace_unsynchronized
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\..\..\backtrace\src\backtrace\mod.rs:66
+   2: std::backtrace::Backtrace::create
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\backtrace.rs:331
+   3: std::backtrace::Backtrace::capture
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\backtrace.rs:296
+   4: anyhow::Error::msg<alloc::string::String>
+             at C:\Users\Administrator\.cargo\registry\src\192.168.77.6-cbda80bc204e16f7\anyhow-1.0.102\src\backtrace.rs:10
+   5: anyhow::__private::format_err
+             at C:\Users\Administrator\.cargo\registry\src\192.168.77.6-cbda80bc204e16f7\anyhow-1.0.102\src\lib.rs:690
+   6: agent2ssh::daemon_control::stop_daemon_process
+             at .\src\daemon_control.rs:746
+   7: daemon_stop_e2e::exiting_old_daemon_preserves_replacement_pid_in_the_same_config::closure$0
+             at .\tests\daemon_stop_e2e.rs:568
+   8: core::ops::function::FnOnce::call_once<daemon_stop_e2e::exiting_old_daemon_preserves_replacement_pid_in_the_same_config::closure_env$0,tuple$<> >
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\ops\function.rs:250
+   9: serial_test::serial_code_lock::local_serial_core
+             at C:\Users\Administrator\.cargo\registry\src\192.168.77.6-cbda80bc204e16f7\serial_test-3.5.0\src\serial_code_lock.rs:36
+  10: daemon_stop_e2e::exiting_old_daemon_preserves_replacement_pid_in_the_same_config
+             at .\tests\daemon_stop_e2e.rs:555
+  11: daemon_stop_e2e::exiting_old_daemon_preserves_replacement_pid_in_the_same_config::closure$0
+             at .\tests\daemon_stop_e2e.rs:556
+  12: core::ops::function::FnOnce::call_once<daemon_stop_e2e::exiting_old_daemon_preserves_replacement_pid_in_the_same_config::closure_env$0,tuple$<> >
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\ops\function.rs:250
+  13: core::ops::function::FnOnce::call_once
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\ops\function.rs:250
+  14: test::__rust_begin_short_backtrace<enum2$<core::result::Result<tuple$<>,alloc::string::String> >,enum2$<core::result::Result<tuple$<>,alloc::string::String> > (*)()>
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\test\src\lib.rs:733
+  15: test::run_test_in_process
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\test\src\lib.rs:756
+  16: test::run_test::closure$0
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\test\src\lib.rs:677
+  17: test::run_test::closure$1
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\test\src\lib.rs:707
+  18: std::sys::backtrace::__rust_begin_short_backtrace<test::run_test::closure_env$1,tuple$<> >
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\sys\backtrace.rs:166
+  19: std::thread::lifecycle::spawn_unchecked::closure$1::closure$0
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\thread\lifecycle.rs:70
+  20: core::panic::unwind_safe::impl$25::call_once
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\panic\unwind_safe.rs:275
+  21: std::panicking::catch_unwind::do_call
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\panicking.rs:576
+  22: std::panicking::catch_unwind
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\panicking.rs:544
+  23: std::panic::catch_unwind
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\panic.rs:359
+  24: std::thread::lifecycle::spawn_unchecked::closure$1
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\thread\lifecycle.rs:68
+  25: core::ops::function::FnOnce::call_once<std::thread::lifecycle::spawn_unchecked::closure_env$1<test::run_test::closure_env$1,tuple$<> >,tuple$<> >
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\ops\function.rs:250
+  26: std::sys::thread::windows::impl$0::new::thread_start
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\sys\thread\windows.rs:58
+  27: BaseThreadInitThunk
+  28: RtlUserThreadStart
+stack backtrace:
+   0: std::panicking::panic_handler
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\panicking.rs:679
+   1: core::panicking::panic_fmt
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\panicking.rs:80
+   2: core::result::unwrap_failed
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\result.rs:1871
+   3: enum2$<core::result::Result<tuple$<>,anyhow::Error> >::expect<tuple$<>,anyhow::Error>
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\result.rs:1184
+   4: daemon_stop_e2e::exiting_old_daemon_preserves_replacement_pid_in_the_same_config::closure$0
+             at .\tests\daemon_stop_e2e.rs:568
+   5: core::ops::function::FnOnce::call_once<daemon_stop_e2e::exiting_old_daemon_preserves_replacement_pid_in_the_same_config::closure_env$0,tuple$<> >
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\ops\function.rs:250
+   6: serial_test::serial_code_lock::local_serial_core
+             at C:\Users\Administrator\.cargo\registry\src\192.168.77.6-cbda80bc204e16f7\serial_test-3.5.0\src\serial_code_lock.rs:36
+   7: daemon_stop_e2e::exiting_old_daemon_preserves_replacement_pid_in_the_same_config
+             at .\tests\daemon_stop_e2e.rs:555
+   8: daemon_stop_e2e::exiting_old_daemon_preserves_replacement_pid_in_the_same_config::closure$0
+             at .\tests\daemon_stop_e2e.rs:556
+   9: core::ops::function::FnOnce::call_once<daemon_stop_e2e::exiting_old_daemon_preserves_replacement_pid_in_the_same_config::closure_env$0,tuple$<> >
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\ops\function.rs:250
+  10: core::ops::function::FnOnce::call_once
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\ops\function.rs:250
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+---- shutdown_cancels_a_request_waiting_for_approval stdout ----
+
+thread 'shutdown_cancels_a_request_waiting_for_approval' (17608) panicked at tests\daemon_stop_e2e.rs:491:44:
+stop while approval is pending: daemon PID 39736 exit cannot be verified; PID file retained
+
+Stack backtrace:
+   0: std::backtrace_rs::backtrace::win64::trace
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\..\..\backtrace\src\backtrace\win64.rs:85
+   1: std::backtrace_rs::backtrace::trace_unsynchronized
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\..\..\backtrace\src\backtrace\mod.rs:66
+   2: std::backtrace::Backtrace::create
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\backtrace.rs:331
+   3: std::backtrace::Backtrace::capture
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\backtrace.rs:296
+   4: anyhow::Error::msg<alloc::string::String>
+             at C:\Users\Administrator\.cargo\registry\src\192.168.77.6-cbda80bc204e16f7\anyhow-1.0.102\src\backtrace.rs:10
+   5: anyhow::__private::format_err
+             at C:\Users\Administrator\.cargo\registry\src\192.168.77.6-cbda80bc204e16f7\anyhow-1.0.102\src\lib.rs:690
+   6: agent2ssh::daemon_control::stop_daemon_process
+             at .\src\daemon_control.rs:746
+   7: daemon_stop_e2e::shutdown_cancels_a_request_waiting_for_approval::closure$0
+             at .\tests\daemon_stop_e2e.rs:491
+   8: core::ops::function::FnOnce::call_once<daemon_stop_e2e::shutdown_cancels_a_request_waiting_for_approval::closure_env$0,tuple$<> >
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\ops\function.rs:250
+   9: serial_test::serial_code_lock::local_serial_core
+             at C:\Users\Administrator\.cargo\registry\src\192.168.77.6-cbda80bc204e16f7\serial_test-3.5.0\src\serial_code_lock.rs:36
+  10: daemon_stop_e2e::shutdown_cancels_a_request_waiting_for_approval
+             at .\tests\daemon_stop_e2e.rs:463
+  11: daemon_stop_e2e::shutdown_cancels_a_request_waiting_for_approval::closure$0
+             at .\tests\daemon_stop_e2e.rs:464
+  12: core::ops::function::FnOnce::call_once<daemon_stop_e2e::shutdown_cancels_a_request_waiting_for_approval::closure_env$0,tuple$<> >
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\ops\function.rs:250
+  13: core::ops::function::FnOnce::call_once
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\ops\function.rs:250
+  14: test::__rust_begin_short_backtrace<enum2$<core::result::Result<tuple$<>,alloc::string::String> >,enum2$<core::result::Result<tuple$<>,alloc::string::String> > (*)()>
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\test\src\lib.rs:733
+  15: test::run_test_in_process
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\test\src\lib.rs:756
+  16: test::run_test::closure$0
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\test\src\lib.rs:677
+  17: test::run_test::closure$1
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\test\src\lib.rs:707
+  18: std::sys::backtrace::__rust_begin_short_backtrace<test::run_test::closure_env$1,tuple$<> >
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\sys\backtrace.rs:166
+  19: std::thread::lifecycle::spawn_unchecked::closure$1::closure$0
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\thread\lifecycle.rs:70
+  20: core::panic::unwind_safe::impl$25::call_once
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\panic\unwind_safe.rs:275
+  21: std::panicking::catch_unwind::do_call
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\panicking.rs:576
+  22: std::panicking::catch_unwind
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\panicking.rs:544
+  23: std::panic::catch_unwind
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\panic.rs:359
+  24: std::thread::lifecycle::spawn_unchecked::closure$1
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\thread\lifecycle.rs:68
+  25: core::ops::function::FnOnce::call_once<std::thread::lifecycle::spawn_unchecked::closure_env$1<test::run_test::closure_env$1,tuple$<> >,tuple$<> >
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\ops\function.rs:250
+  26: std::sys::thread::windows::impl$0::new::thread_start
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\sys\thread\windows.rs:58
+  27: BaseThreadInitThunk
+  28: RtlUserThreadStart
+stack backtrace:
+   0: std::panicking::panic_handler
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\panicking.rs:679
+   1: core::panicking::panic_fmt
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\panicking.rs:80
+   2: core::result::unwrap_failed
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\result.rs:1871
+   3: enum2$<core::result::Result<tuple$<>,anyhow::Error> >::expect<tuple$<>,anyhow::Error>
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\result.rs:1184
+   4: daemon_stop_e2e::shutdown_cancels_a_request_waiting_for_approval::closure$0
+             at .\tests\daemon_stop_e2e.rs:491
+   5: core::ops::function::FnOnce::call_once<daemon_stop_e2e::shutdown_cancels_a_request_waiting_for_approval::closure_env$0,tuple$<> >
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\ops\function.rs:250
+   6: serial_test::serial_code_lock::local_serial_core
+             at C:\Users\Administrator\.cargo\registry\src\192.168.77.6-cbda80bc204e16f7\serial_test-3.5.0\src\serial_code_lock.rs:36
+   7: daemon_stop_e2e::shutdown_cancels_a_request_waiting_for_approval
+             at .\tests\daemon_stop_e2e.rs:463
+   8: daemon_stop_e2e::shutdown_cancels_a_request_waiting_for_approval::closure$0
+             at .\tests\daemon_stop_e2e.rs:464
+   9: core::ops::function::FnOnce::call_once<daemon_stop_e2e::shutdown_cancels_a_request_waiting_for_approval::closure_env$0,tuple$<> >
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\ops\function.rs:250
+  10: core::ops::function::FnOnce::call_once
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\ops\function.rs:250
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+---- stop_closes_an_active_event_stream_and_exits stdout ----
+
+thread 'stop_closes_an_active_event_stream_and_exits' (39848) panicked at tests\daemon_stop_e2e.rs:231:30:
+stop with an active SSE subscriber: daemon PID 39392 exit cannot be verified; PID file retained
+
+Stack backtrace:
+   0: std::backtrace_rs::backtrace::win64::trace
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\..\..\backtrace\src\backtrace\win64.rs:85
+   1: std::backtrace_rs::backtrace::trace_unsynchronized
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\..\..\backtrace\src\backtrace\mod.rs:66
+   2: std::backtrace::Backtrace::create
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\backtrace.rs:331
+   3: std::backtrace::Backtrace::capture
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\backtrace.rs:296
+   4: anyhow::Error::msg<alloc::string::String>
+             at C:\Users\Administrator\.cargo\registry\src\192.168.77.6-cbda80bc204e16f7\anyhow-1.0.102\src\backtrace.rs:10
+   5: anyhow::__private::format_err
+             at C:\Users\Administrator\.cargo\registry\src\192.168.77.6-cbda80bc204e16f7\anyhow-1.0.102\src\lib.rs:690
+   6: agent2ssh::daemon_control::stop_daemon_process
+             at .\src\daemon_control.rs:746
+   7: daemon_stop_e2e::stop_closes_an_active_event_stream_and_exits::closure$0
+             at .\tests\daemon_stop_e2e.rs:231
+   8: core::ops::function::FnOnce::call_once<daemon_stop_e2e::stop_closes_an_active_event_stream_and_exits::closure_env$0,tuple$<> >
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\ops\function.rs:250
+   9: serial_test::serial_code_lock::local_serial_core
+             at C:\Users\Administrator\.cargo\registry\src\192.168.77.6-cbda80bc204e16f7\serial_test-3.5.0\src\serial_code_lock.rs:36
+  10: daemon_stop_e2e::stop_closes_an_active_event_stream_and_exits
+             at .\tests\daemon_stop_e2e.rs:201
+  11: daemon_stop_e2e::stop_closes_an_active_event_stream_and_exits::closure$0
+             at .\tests\daemon_stop_e2e.rs:202
+  12: core::ops::function::FnOnce::call_once<daemon_stop_e2e::stop_closes_an_active_event_stream_and_exits::closure_env$0,tuple$<> >
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\ops\function.rs:250
+  13: core::ops::function::FnOnce::call_once
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\ops\function.rs:250
+  14: test::__rust_begin_short_backtrace<enum2$<core::result::Result<tuple$<>,alloc::string::String> >,enum2$<core::result::Result<tuple$<>,alloc::string::String> > (*)()>
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\test\src\lib.rs:733
+  15: test::run_test_in_process
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\test\src\lib.rs:756
+  16: test::run_test::closure$0
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\test\src\lib.rs:677
+  17: test::run_test::closure$1
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\test\src\lib.rs:707
+  18: std::sys::backtrace::__rust_begin_short_backtrace<test::run_test::closure_env$1,tuple$<> >
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\sys\backtrace.rs:166
+  19: std::thread::lifecycle::spawn_unchecked::closure$1::closure$0
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\thread\lifecycle.rs:70
+  20: core::panic::unwind_safe::impl$25::call_once
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\panic\unwind_safe.rs:275
+  21: std::panicking::catch_unwind::do_call
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\panicking.rs:576
+  22: std::panicking::catch_unwind
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\panicking.rs:544
+  23: std::panic::catch_unwind
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\panic.rs:359
+  24: std::thread::lifecycle::spawn_unchecked::closure$1
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\thread\lifecycle.rs:68
+  25: core::ops::function::FnOnce::call_once<std::thread::lifecycle::spawn_unchecked::closure_env$1<test::run_test::closure_env$1,tuple$<> >,tuple$<> >
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\ops\function.rs:250
+  26: std::sys::thread::windows::impl$0::new::thread_start
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\sys\thread\windows.rs:58
+  27: BaseThreadInitThunk
+  28: RtlUserThreadStart
+stack backtrace:
+   0: std::panicking::panic_handler
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\panicking.rs:679
+   1: core::panicking::panic_fmt
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\panicking.rs:80
+   2: core::result::unwrap_failed
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\result.rs:1871
+   3: enum2$<core::result::Result<tuple$<>,anyhow::Error> >::expect<tuple$<>,anyhow::Error>
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\result.rs:1184
+   4: daemon_stop_e2e::stop_closes_an_active_event_stream_and_exits::closure$0
+             at .\tests\daemon_stop_e2e.rs:231
+   5: core::ops::function::FnOnce::call_once<daemon_stop_e2e::stop_closes_an_active_event_stream_and_exits::closure_env$0,tuple$<> >
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\ops\function.rs:250
+   6: serial_test::serial_code_lock::local_serial_core
+             at C:\Users\Administrator\.cargo\registry\src\192.168.77.6-cbda80bc204e16f7\serial_test-3.5.0\src\serial_code_lock.rs:36
+   7: daemon_stop_e2e::stop_closes_an_active_event_stream_and_exits
+             at .\tests\daemon_stop_e2e.rs:201
+   8: daemon_stop_e2e::stop_closes_an_active_event_stream_and_exits::closure$0
+             at .\tests\daemon_stop_e2e.rs:202
+   9: core::ops::function::FnOnce::call_once<daemon_stop_e2e::stop_closes_an_active_event_stream_and_exits::closure_env$0,tuple$<> >
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\ops\function.rs:250
+  10: core::ops::function::FnOnce::call_once
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\ops\function.rs:250
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+---- stop_daemon_process_waits_for_a_graceful_exit stdout ----
+
+thread 'stop_daemon_process_waits_for_a_graceful_exit' (38660) panicked at tests\daemon_stop_e2e.rs:183:30:
+stop the daemon: daemon PID 39112 exit cannot be verified; PID file retained
+
+Stack backtrace:
+   0: std::backtrace_rs::backtrace::win64::trace
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\..\..\backtrace\src\backtrace\win64.rs:85
+   1: std::backtrace_rs::backtrace::trace_unsynchronized
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\..\..\backtrace\src\backtrace\mod.rs:66
+   2: std::backtrace::Backtrace::create
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\backtrace.rs:331
+   3: std::backtrace::Backtrace::capture
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\backtrace.rs:296
+   4: anyhow::Error::msg<alloc::string::String>
+             at C:\Users\Administrator\.cargo\registry\src\192.168.77.6-cbda80bc204e16f7\anyhow-1.0.102\src\backtrace.rs:10
+   5: anyhow::__private::format_err
+             at C:\Users\Administrator\.cargo\registry\src\192.168.77.6-cbda80bc204e16f7\anyhow-1.0.102\src\lib.rs:690
+   6: agent2ssh::daemon_control::stop_daemon_process
+             at .\src\daemon_control.rs:746
+   7: daemon_stop_e2e::stop_daemon_process_waits_for_a_graceful_exit::closure$0
+             at .\tests\daemon_stop_e2e.rs:183
+   8: core::ops::function::FnOnce::call_once<daemon_stop_e2e::stop_daemon_process_waits_for_a_graceful_exit::closure_env$0,tuple$<> >
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\ops\function.rs:250
+   9: serial_test::serial_code_lock::local_serial_core
+             at C:\Users\Administrator\.cargo\registry\src\192.168.77.6-cbda80bc204e16f7\serial_test-3.5.0\src\serial_code_lock.rs:36
+  10: daemon_stop_e2e::stop_daemon_process_waits_for_a_graceful_exit
+             at .\tests\daemon_stop_e2e.rs:175
+  11: daemon_stop_e2e::stop_daemon_process_waits_for_a_graceful_exit::closure$0
+             at .\tests\daemon_stop_e2e.rs:176
+  12: core::ops::function::FnOnce::call_once<daemon_stop_e2e::stop_daemon_process_waits_for_a_graceful_exit::closure_env$0,tuple$<> >
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\ops\function.rs:250
+  13: core::ops::function::FnOnce::call_once
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\ops\function.rs:250
+  14: test::__rust_begin_short_backtrace<enum2$<core::result::Result<tuple$<>,alloc::string::String> >,enum2$<core::result::Result<tuple$<>,alloc::string::String> > (*)()>
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\test\src\lib.rs:733
+  15: test::run_test_in_process
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\test\src\lib.rs:756
+  16: test::run_test::closure$0
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\test\src\lib.rs:677
+  17: test::run_test::closure$1
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\test\src\lib.rs:707
+  18: std::sys::backtrace::__rust_begin_short_backtrace<test::run_test::closure_env$1,tuple$<> >
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\sys\backtrace.rs:166
+  19: std::thread::lifecycle::spawn_unchecked::closure$1::closure$0
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\thread\lifecycle.rs:70
+  20: core::panic::unwind_safe::impl$25::call_once
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\panic\unwind_safe.rs:275
+  21: std::panicking::catch_unwind::do_call
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\panicking.rs:576
+  22: std::panicking::catch_unwind
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\panicking.rs:544
+  23: std::panic::catch_unwind
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\panic.rs:359
+  24: std::thread::lifecycle::spawn_unchecked::closure$1
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\thread\lifecycle.rs:68
+  25: core::ops::function::FnOnce::call_once<std::thread::lifecycle::spawn_unchecked::closure_env$1<test::run_test::closure_env$1,tuple$<> >,tuple$<> >
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\ops\function.rs:250
+  26: std::sys::thread::windows::impl$0::new::thread_start
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\sys\thread\windows.rs:58
+  27: BaseThreadInitThunk
+  28: RtlUserThreadStart
+stack backtrace:
+   0: std::panicking::panic_handler
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\panicking.rs:679
+   1: core::panicking::panic_fmt
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\panicking.rs:80
+   2: core::result::unwrap_failed
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\result.rs:1871
+   3: enum2$<core::result::Result<tuple$<>,anyhow::Error> >::expect<tuple$<>,anyhow::Error>
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\result.rs:1184
+   4: daemon_stop_e2e::stop_daemon_process_waits_for_a_graceful_exit::closure$0
+             at .\tests\daemon_stop_e2e.rs:183
+   5: core::ops::function::FnOnce::call_once<daemon_stop_e2e::stop_daemon_process_waits_for_a_graceful_exit::closure_env$0,tuple$<> >
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\ops\function.rs:250
+   6: serial_test::serial_code_lock::local_serial_core
+             at C:\Users\Administrator\.cargo\registry\src\192.168.77.6-cbda80bc204e16f7\serial_test-3.5.0\src\serial_code_lock.rs:36
+   7: daemon_stop_e2e::stop_daemon_process_waits_for_a_graceful_exit
+             at .\tests\daemon_stop_e2e.rs:175
+   8: daemon_stop_e2e::stop_daemon_process_waits_for_a_graceful_exit::closure$0
+             at .\tests\daemon_stop_e2e.rs:176
+   9: core::ops::function::FnOnce::call_once<daemon_stop_e2e::stop_daemon_process_waits_for_a_graceful_exit::closure_env$0,tuple$<> >
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\ops\function.rs:250
+  10: core::ops::function::FnOnce::call_once
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\ops\function.rs:250
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+---- stop_exits_with_an_idle_exec_websocket stdout ----
+
+thread 'stop_exits_with_an_idle_exec_websocket' (24076) panicked at tests\daemon_stop_e2e.rs:291:44:
+stop with idle WebSocket: daemon PID 21300 exit cannot be verified; PID file retained
+
+Stack backtrace:
+   0: std::backtrace_rs::backtrace::win64::trace
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\..\..\backtrace\src\backtrace\win64.rs:85
+   1: std::backtrace_rs::backtrace::trace_unsynchronized
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\..\..\backtrace\src\backtrace\mod.rs:66
+   2: std::backtrace::Backtrace::create
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\backtrace.rs:331
+   3: std::backtrace::Backtrace::capture
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\backtrace.rs:296
+   4: anyhow::Error::msg<alloc::string::String>
+             at C:\Users\Administrator\.cargo\registry\src\192.168.77.6-cbda80bc204e16f7\anyhow-1.0.102\src\backtrace.rs:10
+   5: anyhow::__private::format_err
+             at C:\Users\Administrator\.cargo\registry\src\192.168.77.6-cbda80bc204e16f7\anyhow-1.0.102\src\lib.rs:690
+   6: agent2ssh::daemon_control::stop_daemon_process
+             at .\src\daemon_control.rs:746
+   7: daemon_stop_e2e::stop_exits_with_an_idle_exec_websocket::closure$0
+             at .\tests\daemon_stop_e2e.rs:291
+   8: core::ops::function::FnOnce::call_once<daemon_stop_e2e::stop_exits_with_an_idle_exec_websocket::closure_env$0,tuple$<> >
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\ops\function.rs:250
+   9: serial_test::serial_code_lock::local_serial_core
+             at C:\Users\Administrator\.cargo\registry\src\192.168.77.6-cbda80bc204e16f7\serial_test-3.5.0\src\serial_code_lock.rs:36
+  10: daemon_stop_e2e::stop_exits_with_an_idle_exec_websocket
+             at .\tests\daemon_stop_e2e.rs:267
+  11: daemon_stop_e2e::stop_exits_with_an_idle_exec_websocket::closure$0
+             at .\tests\daemon_stop_e2e.rs:268
+  12: core::ops::function::FnOnce::call_once<daemon_stop_e2e::stop_exits_with_an_idle_exec_websocket::closure_env$0,tuple$<> >
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\ops\function.rs:250
+  13: core::ops::function::FnOnce::call_once
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\ops\function.rs:250
+  14: test::__rust_begin_short_backtrace<enum2$<core::result::Result<tuple$<>,alloc::string::String> >,enum2$<core::result::Result<tuple$<>,alloc::string::String> > (*)()>
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\test\src\lib.rs:733
+  15: test::run_test_in_process
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\test\src\lib.rs:756
+  16: test::run_test::closure$0
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\test\src\lib.rs:677
+  17: test::run_test::closure$1
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\test\src\lib.rs:707
+  18: std::sys::backtrace::__rust_begin_short_backtrace<test::run_test::closure_env$1,tuple$<> >
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\sys\backtrace.rs:166
+  19: std::thread::lifecycle::spawn_unchecked::closure$1::closure$0
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\thread\lifecycle.rs:70
+  20: core::panic::unwind_safe::impl$25::call_once
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\panic\unwind_safe.rs:275
+  21: std::panicking::catch_unwind::do_call
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\panicking.rs:576
+  22: std::panicking::catch_unwind
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\panicking.rs:544
+  23: std::panic::catch_unwind
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\panic.rs:359
+  24: std::thread::lifecycle::spawn_unchecked::closure$1
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\thread\lifecycle.rs:68
+  25: core::ops::function::FnOnce::call_once<std::thread::lifecycle::spawn_unchecked::closure_env$1<test::run_test::closure_env$1,tuple$<> >,tuple$<> >
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\ops\function.rs:250
+  26: std::sys::thread::windows::impl$0::new::thread_start
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\sys\thread\windows.rs:58
+  27: BaseThreadInitThunk
+  28: RtlUserThreadStart
+stack backtrace:
+   0: std::panicking::panic_handler
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\panicking.rs:679
+   1: core::panicking::panic_fmt
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\panicking.rs:80
+   2: core::result::unwrap_failed
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\result.rs:1871
+   3: enum2$<core::result::Result<tuple$<>,anyhow::Error> >::expect<tuple$<>,anyhow::Error>
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\result.rs:1184
+   4: daemon_stop_e2e::stop_exits_with_an_idle_exec_websocket::closure$0
+             at .\tests\daemon_stop_e2e.rs:291
+   5: core::ops::function::FnOnce::call_once<daemon_stop_e2e::stop_exits_with_an_idle_exec_websocket::closure_env$0,tuple$<> >
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\ops\function.rs:250
+   6: serial_test::serial_code_lock::local_serial_core
+             at C:\Users\Administrator\.cargo\registry\src\192.168.77.6-cbda80bc204e16f7\serial_test-3.5.0\src\serial_code_lock.rs:36
+   7: daemon_stop_e2e::stop_exits_with_an_idle_exec_websocket
+             at .\tests\daemon_stop_e2e.rs:267
+   8: daemon_stop_e2e::stop_exits_with_an_idle_exec_websocket::closure$0
+             at .\tests\daemon_stop_e2e.rs:268
+   9: core::ops::function::FnOnce::call_once<daemon_stop_e2e::stop_exits_with_an_idle_exec_websocket::closure_env$0,tuple$<> >
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\ops\function.rs:250
+  10: core::ops::function::FnOnce::call_once
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\ops\function.rs:250
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+
+failures:
+    exiting_old_daemon_preserves_replacement_pid_in_the_same_config
+    shutdown_cancels_a_request_waiting_for_approval
+    stop_closes_an_active_event_stream_and_exits
+    stop_daemon_process_waits_for_a_graceful_exit
+    stop_exits_with_an_idle_exec_websocket
+
+test result: FAILED. 18 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 75.69s
+
+error: test failed, to rerun pass `--test daemon_stop_e2e`

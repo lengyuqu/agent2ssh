@@ -1,0 +1,13 @@
+   Compiling agent2ssh-app v0.4.5 (D:\vibercodeing\agent2ssh\src-tauri)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.73s
+     Running tests\exec_fixture.rs (src-tauri\target\debug\deps\exec_fixture-eb10cc8bb387b80b.exe)
+
+running 5 tests
+test drains_stdout_and_stderr_off_one_channel_without_deadlocking ... ok
+test fixture_port_is_required_when_requested_and_rejects_invalid_values ... ok
+test health_snapshot_collects_over_the_shared_capture_path ... ok
+test timeout_is_recorded_in_the_audit_log ... ok
+test timeout_returns_promptly_without_terminating_a_pty_less_command ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 16.76s
+

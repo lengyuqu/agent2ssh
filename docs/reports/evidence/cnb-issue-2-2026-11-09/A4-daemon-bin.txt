@@ -1,0 +1,85 @@
+ Downloading crates ...
+  Downloaded matchers v0.2.0 (registry `local-mirror`)
+  Downloaded thread_local v1.1.9 (registry `local-mirror`)
+  Downloaded nu-ansi-term v0.50.3 (registry `local-mirror`)
+  Downloaded tracing-serde v0.2.0 (registry `local-mirror`)
+  Downloaded tokio-tungstenite v0.24.0 (registry `local-mirror`)
+  Downloaded tungstenite v0.24.0 (registry `local-mirror`)
+  Downloaded tracing-subscriber v0.3.23 (registry `local-mirror`)
+  Downloaded sharded-slab v0.1.7 (registry `local-mirror`)
+  Downloaded tower-http v0.5.2 (registry `local-mirror`)
+  Downloaded tracing-log v0.2.0 (registry `local-mirror`)
+   Compiling log v0.4.32
+   Compiling tracing-core v0.1.36
+   Compiling tracing-attributes v0.1.31
+   Compiling ppv-lite86 v0.2.21
+   Compiling thiserror v1.0.69
+   Compiling regex-automata v0.4.14
+   Compiling thiserror-impl v1.0.69
+   Compiling utf-8 v0.7.6
+   Compiling sharded-slab v0.1.7
+   Compiling nu-ansi-term v0.50.3
+   Compiling thread_local v1.1.9
+   Compiling agent2ssh-app v0.4.5 (D:\vibercodeing\agent2ssh\src-tauri)
+   Compiling tower-http v0.5.2
+   Compiling pageant v0.2.4
+   Compiling russh-cryptovec v0.62.0
+   Compiling russh-sftp v2.3.0
+   Compiling fontdb v0.23.0
+   Compiling serial_test v3.5.0
+   Compiling rand_chacha v0.3.1
+   Compiling russh v0.64.1
+   Compiling tracing-log v0.2.0
+   Compiling tracing-serde v0.2.0
+   Compiling rand v0.8.6
+   Compiling tracing v0.1.44
+   Compiling tungstenite v0.24.0
+   Compiling num-bigint-dig v0.8.6
+   Compiling h2 v0.4.14
+   Compiling tower v0.5.3
+   Compiling axum-core v0.4.5
+   Compiling tower v0.4.13
+   Compiling tower-http v0.6.11
+   Compiling tokio-tungstenite v0.24.0
+   Compiling rsa v0.9.10
+   Compiling regex v1.12.4
+   Compiling matchers v0.2.0
+   Compiling tracing-subscriber v0.3.23
+   Compiling tree-sitter v0.25.10
+   Compiling hyper v1.10.1
+   Compiling hyper-util v0.1.20
+   Compiling hyper-tls v0.6.0
+   Compiling axum v0.7.9
+   Compiling reqwest v0.12.28
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 01s
+     Running unittests src\bin\agent2ssh-daemon.rs (src-tauri\target\debug\deps\agent2ssh_daemon-6db4b487e8282cdc.exe)
+
+running 25 tests
+test agent2ssh_daemon_auth::tests::query_token_is_limited_to_websocket_routes ... ok
+test agent2ssh_daemon_auth::tests::token_matches_empty_expected_never_matches ... ok
+test agent2ssh_daemon_auth::tests::token_matches_exact ... ok
+test tests::cors_origin_allowlist_is_desktop_and_loopback_only ... ok
+test agent2ssh_daemon_auth::tests::token_matches_rejects_wrong ... ok
+test agent2ssh_daemon_trace::tests::dep_prefixes_parse_modes ... ok
+test tests::recording_endpoints_require_unrestricted_admin_token ... ok
+test tests::remote_request_source_cannot_claim_desktop ... ok
+test tests::global_control_plane_requires_unrestricted_admin_token ... ok
+test tests::public_allowlist_is_exact_and_excludes_authed_siblings ... ok
+test tests::auth_token_extracted_from_header_and_query ... ok
+test tests::terminal_broadcast_rejects_control_input_and_duplicate_targets ... ok
+test tests::terminal_broadcast_accepts_a_frozen_unique_target_set ... ok
+test tests::token_match_requires_exact_non_empty_value ... ok
+test tests::daemon_token_loader_preserves_existing_non_empty_token ... ok
+test tests::daemon_token_loader_replaces_empty_token_file ... ok
+test tests::stalled_websocket_future_is_dropped_after_shutdown_deadline ... ok
+test tests::limited_session_registration_reserves_capacity_until_unregistered ... ok
+test tests::operation_audit_records_successful_control_operation ... ok
+test tests::paused_gate_allows_desktop_source ... ok
+test tests::paused_gate_rejects_non_desktop_source_and_writes_audit ... ok
+test tests::rate_limit_rejects_with_429_and_writes_audit ... ok
+test tests::scoped_token_auth_restricts_authorized_commands ... ok
+test tests::session_limit_rejects_with_429 ... ok
+test tests::terminal_session_limit_uses_terminal_open_audit_command ... ok
+
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.10s
+
