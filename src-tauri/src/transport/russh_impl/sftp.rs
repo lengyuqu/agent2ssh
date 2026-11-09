@@ -126,6 +126,13 @@ impl Sftp {
         mode: i32,
         _open_type: OpenType,
     ) -> Result<File, Error> {
+        // `OpenType` is ignored rather than rejected, and that is the one place
+        // this file does so without saying why: `russh-sftp` has no directory
+        // handle, every open is a file open, so the enum's only distinction
+        // (`Dir` vs `File`) cannot be expressed. No caller passes anything but
+        // `File`. Compare `channel.rs::request_pty`, which takes the opposite
+        // call for the same kind of gap and refuses — a PTY mode string would
+        // silently change terminal behaviour, while this cannot change anything.
         let session = Arc::clone(&self.session);
         let path = path_string(path);
         let flags = rh_flags(flags);

@@ -205,24 +205,32 @@ pub fn walk_local_dir(root: &Path) -> io::Result<Vec<WalkEntry>> {
 /// small enough that a cancel is observed within a few hundred KB.
 const COPY_CHUNK: usize = 64 * 1024;
 
-/// Largest write that is safe against every SFTP server measured, and the floor
-/// below which a refused write is a real error.
+/// The floor for a refused write, and the size used for a server that announces
+/// itself as Dropbear.
 ///
-/// Dropbear is the reason. Its SFTP channel takes packets of at most 32 KiB, and
-/// a write above that limit came back as zero bytes written: with the previous
-/// transport, 1 MiB uploads hung with the remote file stuck at 131072 bytes and
-/// completed once writes were cut to 16 KiB (measured against Dropbear 2024.85).
-/// OpenSSH has no such limit, and 64 KiB writes are about 2.6x faster than 16 KiB
-/// ones against it (28 vs 11 MB/s over loopback), so the small size is used only
-/// where it is needed — see [`upload_chunk_for_server`].
+/// The number came from a libssh2-era measurement: Dropbear's SFTP channel takes
+/// packets of at most 32 KiB, and a write above that came back as zero bytes
+/// written — 1 MiB uploads hung with the remote file stuck at 131072 bytes and
+/// completed once writes were cut to 16 KiB (Dropbear 2024.85, previous
+/// transport).
 ///
-/// The limit is the server's, so it survives the transport swap; what changed is
-/// the client-side packing that turned it into a stall. 16 KiB is still the
-/// conservative choice, but it has not been re-measured against Dropbear on the
-/// current transport — if that run happens, this number is what to revisit.
+/// It is **not** a current limitation. Re-measured on 2026-11-03 on this
+/// transport, Dropbear 2024.85 accepted both the default 64 KiB and 16 KiB for an
+/// 8 MiB upload (485 ms and 1 s, matching checksums), so the banner heuristic in
+/// [`upload_chunk_for_server`] has no measured basis left and is kept only as
+/// belt-and-braces against an older Dropbear. It is not free: against OpenSSH,
+/// 64 KiB writes are about 2.6x faster than 16 KiB ones (28 vs 11 MB/s over
+/// loopback).
+///
+/// What protects the transfer now is [`StallGuard`]'s progress bound, because the
+/// failure K2 describes is a hang rather than a refused write. See
+/// `docs/KNOWN-ISSUES.md` K2.
 const SFTP_SAFE_WRITE: usize = 16 * 1024;
 
 /// Write size to use for an upload to the server that sent `banner`.
+///
+/// The match is belt-and-braces, not a measured requirement — see
+/// [`SFTP_SAFE_WRITE`].
 pub fn upload_chunk_for_server(banner: Option<&str>) -> usize {
     match banner {
         Some(banner) if banner.to_ascii_lowercase().contains("dropbear") => SFTP_SAFE_WRITE,

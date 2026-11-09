@@ -149,6 +149,18 @@ fn validate_key_path(path: &str) -> Result<()> {
     Ok(())
 }
 
+/// The name a host key is stored and reported under.
+///
+/// RSA maps to `ssh-rsa` even when the handshake used `rsa-sha2-256` or
+/// `rsa-sha2-512`: those are *signature* algorithms, while the key blob — the
+/// thing a user compares against `ssh-keyscan` or OpenSSH's own `known_hosts` —
+/// is `ssh-rsa`. `HostKeyKind` is derived from the key itself
+/// (`russh_impl::ClientHandler::check_server_key`), not from the negotiated
+/// signature algorithm, so one RSA key occupies exactly one slot in
+/// `known_hosts.json` no matter which SHA-2 variant won. That is deliberate: a
+/// key keyed by signature algorithm would have produced a false untrusted-host
+/// verdict — and one stale entry per variant — whenever the negotiation moved
+/// between `rsa-sha2-512` and `ssh-rsa` for the same key.
 fn host_key_algorithm(kind: HostKeyKind) -> &'static str {
     match kind {
         HostKeyKind::Rsa => "ssh-rsa",

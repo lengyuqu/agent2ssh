@@ -297,6 +297,16 @@ async fn connect_stream() -> Result<AgentClient<AgentStream>, Error> {
         // `early eof`. Probing Pageant first therefore breaks the common case on
         // a modern Windows host: no Pageant, OpenSSH agent service running. The
         // pipe answers immediately by failing to open when nothing listens.
+        //
+        // The price of that order, which the paragraph above does not cover: a
+        // pipe that opens but holds no key the server accepts is indistinguishable
+        // from "there is an agent" here, so Pageant is never consulted in that
+        // case. The caller (`embedded_ssh::authenticate`) then walks this agent's
+        // identities, finds none that work, and falls through to the default key
+        // files — it does not try a second agent. Recorded as a boundary in
+        // `docs/KNOWN-ISSUES.md` §3.1; changing the order would trade a noisy
+        // failure on agents that hold the wrong key for a silent one on every
+        // host without Pageant, so it needs a decision, not a patch.
         match tokio::net::windows::named_pipe::ClientOptions::new()
             .open(r"\\.\pipe\openssh-ssh-agent")
         {

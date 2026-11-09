@@ -159,9 +159,15 @@ impl russh::Signer for LocalKeySigner {
             }
             .map_err(|error| SignerFailed(format!("the key could not sign: {error}")))?;
 
-            // The caller appends this buffer to the packet verbatim, so the
-            // signature has to arrive in its wire form: one SSH `string`
-            // holding `string algorithm || string signature`.
+            // `russh` does not take a bare signature here. It takes the whole
+            // buffer back and appends `buffer[i..]` to the userauth packet, where
+            // `i` is the offset just past the session id — so `to_sign` has to
+            // come back with the signature already appended, in its wire form:
+            // one SSH `string` holding `string algorithm || string signature`.
+            // Returning the signature alone leaves `buffer.len() < i`, the tail
+            // slice empty, and the packet without a signature.
+            // `keys::agent::client::AgentClient::sign_request` (the other impl of
+            // this trait) returns the same shape, by appending to `data`.
             let mut body = Vec::new();
             signature.encode(&mut body).map_err(|error| {
                 SignerFailed(format!("the signature could not be encoded: {error}"))
@@ -395,6 +401,15 @@ impl russh::client::Handler for ClientHandler {
         // A server may present a host certificate rather than a bare key. What
         // the fingerprint on record names is the key the certificate vouches
         // for, so that is what gets captured either way.
+        //
+        // What is *not* checked: the certificate's CA chain and its validity
+        // period. Unwrapping it means a CA-signed host key and the bare key
+        // `ssh-keyscan` reported are indistinguishable in `known_hosts.json`, so
+        // a certificate from an unexpected CA, or an expired one, is accepted as
+        // long as the key it vouches for is the key on record. That is the TOFU
+        // trade-off, not an oversight — but it is the half of K7 this file does
+        // not cover, and a reader should not infer the check from the comment
+        // above.
         let key = match key {
             russh::keys::PublicKeyOrCertificate::PublicKey { key, .. } => key.clone(),
             russh::keys::PublicKeyOrCertificate::Certificate(cert) => {
@@ -895,6 +910,15 @@ impl Session {
         Ok(Agent::new(self.clone()))
     }
 
+    /// Not implemented, and the error is not inert downstream.
+    ///
+    /// `embedded_ssh::authenticate` reads this through `unwrap_or("")`, so the
+    /// diagnostic log records `auth_methods: ""` for every host and the two
+    /// branches that consult the advertised set — the `keyboard-interactive`
+    /// label and the `advertised methods [unknown]` wording — can never see a
+    /// real value. Reading it needs the server's list out of `russh`, which
+    /// reports it only as `remaining_methods` on a failed `userauth`, i.e. after
+    /// the attempt this would be describing.
     pub fn auth_methods(&self, _username: &str) -> Result<&str, Error> {
         Err(unsupported("auth_methods"))
     }
