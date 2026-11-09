@@ -1,0 +1,12 @@
+config dir : C:\Users\ADMINI~1\AppData\Local\Temp\a2s-ws-backpressure-WwDJM1
+daemon pid : 34724  addr: 127.0.0.1:52751
+health     : 200, pid matches
+upgrade    : 101 Switching Protocols
+stream     : first frame type=stdout (8347 bytes)
+peer       : paused 3000 ms without reading
+shutdown   : HTTP 200 {"ok":true}
+exit       : code=0 signal=null after 2940 ms
+pid file   : removed
+app.log    : 1 drain-deadline record(s)
+audit      : 1 interrupted-stream record(s): {"id":"47b47a04-d840-4a4d-9e66-63c48b0710d4","ts":"2026-11-09T13:50:12.633310800Z","host":"fixture","command":"yes <REDACTED:hex>","exit_code":null,"duration_ms":5991,"risk_level":"low","reason":"daemon shutdown interrupted stream; remote outcome unknown","change_id":null,"side_effect":null,"source"
+RESULT=PASS
