@@ -111,7 +111,7 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
   - D5 `/exec/compare` 的限流 `source` 恒为传输层默认值，限流实为单桶且与文档不对称
   - E1–E4 文档漂移：api.yaml 与源码注释的 "five seconds" 与代码 2s/4s 不符；指南「不再强制结束」与硬杀行为矛盾；K14 缺 config_dir 拒止路径记载
   - F1–F5 测试缺口：强杀分支、kill 失败、`AcceptedUnchecked`、start_time=0 组合断言、2s/4s 字面量无常量）
-- 6 轮进度：3 / 6（第 1 轮 03:32 评论 `2119875798445228032`；第 2 轮 03:41 评论 `2119878023099891712`；第 3 轮 03:46 评论 `2119879303922892800`）
+- 6 轮进度：4 / 6（第 1 轮 03:32 评论 `2119875798445228032`；第 2 轮 03:41 评论 `2119878023099891712`；第 3 轮 03:46 评论 `2119879303922892800`；第 4 轮 03:53 评论 `2119881205414801408`）
 
 **批次说明（消费者必读）**：本批次 issue 正文发出时 ledger 尚不存在，故正文里「不成立清单」写的是「暂无」；但 ledger 在首条分析到达前已由 preflight 建立，含 2 条不成立判定（`signal_daemon` 第三条 `Ok(())` 吞错、`daemon_stop_e2e.rs:1443` 断言弱）。已核对首条分析未重复这两条；**从第 2 轮起，回帖须把上述 2 条不成立原文喂给 CodeBuddy**。
 
@@ -167,3 +167,16 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
 
 11. **「L2-26：exec 的 `drain_handle.unregister()` 在 `run_ws_with_shutdown_deadline` 的 future 内（`:5500` 收口），2s 超时 drop 后不执行，registry 条目残留，每次关闭 `wait_until_empty` 烧满 4s」— 不成立。**
     future 收在 `:5428`（`}, Duration::from_secs(2)).await;`，ind=8），`unregister` 在 `:5499`（ind=8）属 `on_upgrade` 闭包、在 future 之外，`:5500`（ind=4）关的是 `on_upgrade`。`0e88d7c` 正是把它从块内挪到块外的那笔提交（同笔还把两处 `unregister().await; return;` 改成 `break`）。terminal 侧同理（`:5009` 收口 / `:5057` 执行）。两条都不泄漏，「每次关闭多烧 4 秒」的前提不存在。
+
+### consume 4 / 6 · 2026-11-10
+
+- **指摘来源**：CodeBuddy 对第 3 轮三个问题的答复（评论 `2119880234643128320`）。无新缺陷，是三条 L2 的落地设计。
+- **判定**：设计 3 条全部采纳（`L2-3` 加 `ShutdownAccepted` 字段不换状态码、`L2-25` 只加诊断、`L2-22/33` 用 `DrainOutcome` 三臂）；其中 `L2-3` 的**前置假设有误**（见第 12 条）。回帖 `2119881205414801408`。
+- **动作**：`6796622`（`OPT-LOOP-L2-PENDING.md` 增加「第 4 轮：三条 L2 的落地形状」一节，并标注 `daemon_control.rs` 裸行号整体下移 5 行）。推 `cnb main`。
+- **验证**：`npm run build` 6.51s；`cargo test --no-default-features --lib` 856 passed / 0 failed / 1 ignored（17.48s）。
+- **它开头自相矛盾**：先说「warn 每次正常停止都响已经不成立」，随后三段论证证明仍然成立。当前锚点 `:872`/`:887`/`:996`/`:1002`/`:1006` 与它的引用一致（我早期引用的 `:867` 等是注释扩写前的编号）。
+
+### 第 4 轮新增的不成立条目（原文保留，请勿重复提）
+
+12. **「`stop_daemon_process_waits_for_a_graceful_exit`（`daemon_stop_e2e.rs:180`）已读 `app.log` 并断言不含 `daemon predates it`，所以配套断言已存在」— 不成立。**
+    `git grep "daemon predates"` 全仓只命中实现处 `daemon_control.rs:1006`，`tests/` 零命中。`daemon_stop_e2e.rs` 里唯一读 `app.log` 的是 `:397`，断言的是 `WebSocket drain deadline expired`；`:180` 那条用例断言耗时、PID 文件与退出码，不读日志。该断言需要**新建**。
