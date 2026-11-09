@@ -1,0 +1,15 @@
+   Compiling agent2ssh-app v0.4.5 (D:\vibercodeing\agent2ssh\src-tauri)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.28s
+     Running tests\ssh_operation_deadline.rs (src-tauri\target\debug\deps\ssh_operation_deadline-19472eb753a28d79.exe)
+
+running 7 tests
+test close_before_request_reply_is_reported_immediately ... ok
+test exec_shell_and_pty_report_server_rejection_without_waiting_for_timeout ... ok
+test accepted_pty_shell_and_exec_replies_leave_output_intact ... ok
+test missing_request_reply_times_out_and_closes_the_connection ... ok
+test sftp_subsystem_acknowledgements_are_checked_before_initialization ... ok
+test channel_and_forward_setup_deadlines_release_the_socket_and_worker ... ok
+test post_handshake_authentication_deadlines_release_the_socket_and_worker ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.57s
+

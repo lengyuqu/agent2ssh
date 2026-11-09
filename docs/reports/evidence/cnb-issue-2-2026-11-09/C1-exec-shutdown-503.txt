@@ -1,0 +1,13 @@
+config dir : C:\Users\ADMINI~1\AppData\Local\Temp\a2s-exec-shutdown-sFNnpa
+daemon pid : 41272  addr: 127.0.0.1:50572
+health     : 200, pid matches
+exec       : started (marker /tmp/a2s-issue2-1794230293863)
+remote     : marker exists, command still running
+shutdown   : HTTP 200 {"ok":true}
+exit       : code=0 after 203 ms
+response   : HTTP 503
+response   : body explains the unknown remote outcome
+pid file   : removed
+audit      : reason="test change; SSH request interrupted during daemon shutdown; remote command outcome unknown"
+audit      : side_effect="test effect" change_id="test-42" exit_code=null
+RESULT=PASS
