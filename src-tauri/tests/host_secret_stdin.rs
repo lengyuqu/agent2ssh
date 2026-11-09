@@ -25,6 +25,44 @@ fn no_marker(output: &Output, marker: &str) {
     assert!(!String::from_utf8_lossy(&output.stderr).contains(marker));
 }
 
+#[test]
+fn password_reference_does_not_bypass_passphrase_encryption() {
+    let dir = tempfile::tempdir().unwrap();
+    let args = [
+        "host",
+        "add",
+        "reference-host",
+        "--host",
+        "127.0.0.9",
+        "--password",
+        agent2ssh::secrets::SECRET_REF,
+        "--passphrase-stdin",
+    ];
+    let marker = "private-key-passphrase-test-marker";
+    let locked = run(dir.path(), &args, marker.as_bytes(), false);
+    assert!(
+        !locked.status.success(),
+        "locked store must refuse passphrase"
+    );
+    no_marker(&locked, marker);
+    assert!(!dir.path().join("hosts.json").exists());
+
+    let unlocked = run(dir.path(), &args, marker.as_bytes(), true);
+    assert!(
+        unlocked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&unlocked.stderr)
+    );
+    no_marker(&unlocked, marker);
+    let hosts = std::fs::read_to_string(dir.path().join("hosts.json")).unwrap();
+    assert!(!hosts.contains(marker));
+    let parsed: serde_json::Value = serde_json::from_str(&hosts).unwrap();
+    assert_eq!(
+        parsed["hosts"][0]["passphrase"],
+        agent2ssh::secrets::SECRET_REF
+    );
+}
+
 fn run_with_blocked_config_temp(dir: &std::path::Path, name: &str, regular_file: bool) -> Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_agent2ssh"))
         .args([

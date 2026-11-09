@@ -531,10 +531,11 @@ fn externalize_secrets(config: &mut AppConfig, strict_host: Option<&str>) -> Res
     };
 
     for host in &mut config.hosts {
-        if let Some(pw) = &host.password {
-            if pw.is_empty() || is_secret_ref(pw) {
-                continue;
-            }
+        if let Some(pw) = host
+            .password
+            .as_ref()
+            .filter(|pw| !pw.is_empty() && !is_secret_ref(pw))
+        {
             match store_secret(&host_account(&host.name), pw) {
                 Ok(()) => host.password = Some(SECRET_REF.to_string()),
                 Err(e) if strict_host == Some(host.name.as_str()) => {
