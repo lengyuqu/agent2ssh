@@ -1,5 +1,3 @@
-BATCH_COMPLETE · 2026-11-10 · issue #7（daemon 控制与停止协议）6 / 6 轮已闭环，issue 已关闭。下一次消费任务只输出一行状态，不开新批次；新批次由生产任务另开 `[opt-round]` issue 后在顶部把我这行删掉。
-
 # 优化轮次账本（OPT-LOOP）
 
 这份文件是「优化批次生产 / 消费」两个定时任务之间**唯一的跨轮记忆**。约定：
@@ -234,3 +232,30 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
 - **L2 待拍板清单**：`docs/reports/OPT-LOOP-L2-PENDING.md`，29 行——`L2-3`…`L2-33` 共 24 行（编号不连续，缺号是并入或撤回的），加本轮的 `P-1`…`P-5`。优先级：`P-1`（授权与执行之间隔一次 `await`）、`L2-3`（`warn` 记成功 → 降 `info`）、`L2-10`（`fetch_daemon_activity` 与 `get_daemons_unified_view` 两处都要总预算）、`L2-9`（启动失败清理不可观测）。
 - **本批最值钱的两条**都不是单个缺陷，而是**级别**与**位置**：`:1006` 用 `warn` 记一次成功的停止（改一个级别就少查半小时）；`:5499` 的 `unregister` 在 `on_upgrade` 闭包里而不在 future 里（我第 2 轮把「看起来像收口」的那一行当成作用域边界，第 3 轮才量缩进纠正）。
 - **给下一批的方法学**：①判作用域要量缩进并找到外层构造起点，不能读「看起来像收口」的那一行；②判「检查是否发生」要看守卫让哪条路径成为**唯一**路径，不是看分支数量；③计数用四列（成立/部分成立/不成立/已并入），折算会把「提法错但实质成立」这类抹掉。
+
+---
+
+### batch 2026-11-10 · SSH 传输、known_hosts 与认证（russh 侧）
+- issue #8 / 开批时间 2026-11-10 04:23 (GMT+8)
+- CodeBuddy 首条分析：已到（18 条指摘 + 2 条范围外登记，索引：
+  - A1 `LocalKeySigner::auth_sign` 返回 `to_sign||len||sig`，疑与 russh `Signer` 契约相反，钉住它的测试按实现写故恒绿（`russh_impl/mod.rs:128-158`）
+  - A2 RSA 主机键在 `host_key_algorithm`（`Rsa => "ssh-rsa"`）与默认 hostkey 列表 `rsa-sha2-256/512` 之间不自洽，疑真机切换即误报指纹改变（`embedded_ssh.rs:152-161`）
+  - B1 Windows agent 管道可打开但无匹配身份时永不回落 Pageant，源码零注释（`russh_impl/agent.rs:302-320`）
+  - B2 终端路径两处在 `set_blocking(false)` 后调阻塞 `wait_close`，`session_timeout_ms` 可夹到 `u32::MAX`（`embedded_ssh.rs:2155/2187`）
+  - B3 `spawn_terminal` 线程无 stop 标志无 JoinHandle，drop `cmd_tx` 后 `Close` 分支永不执行（`embedded_ssh.rs:2064-2080`）
+  - B4 读循环无「单次无进展」上限，死通道+无 eof 时 bridge 空转 / drain 挂满 deadline（`embedded_ssh.rs:1394-1416`）
+  - C1 终端/exec 三处 `let _ =` 丢弃 `wait_close` 结果，与 exec 路径的核对写法矛盾（`embedded_ssh.rs:1119/2155/2187`）
+  - C2 `auth_methods()` 空实现使「按服务器通告方法」的两条分支恒死、日志恒空串（`russh_impl/mod.rs:898-900`）
+  - C3 `ssh_algo.rs` 模块文档仍描述已删除的 libssh2/WinCNG/openssl-on-win32 世界（`ssh_algo.rs:1-33`）
+  - C4 `sftp_transfer.rs` 注释仍以「Dropbear 16 KiB」为据，与 K2 复测结论相反（`sftp_transfer.rs:229-247`）
+  - C5 `STALL_TIMEOUT` 只在 `write` 返回后检查，「阻塞不返回」形态下永不判定（`sftp_transfer.rs:293-345`）
+  - C6 `remove_system_known_host` 不支持 IPv6 `[addr]:port` 形式且 0 命中静默返回 0（`embedded_ssh.rs:585-591`）
+  - C7 主机证书在 `check_server_key` 静默按裸键比对，注释未写 CA 信任/有效期一概不查（`russh_impl/mod.rs:435-459`）
+  - D1 `StallGuard` 状态机本体零测试（`sftp_transfer.rs:521-558`）
+  - D2 `forward.rs` remote 分支把 `WouldBlock` 当错误 return，local 分支退避重试，两分支不对称（`russh_impl/forward.rs:688-693`）
+  - D3 「参数无法表达」三种规格并存：报错 / 注释后忽略 / 直接忽略（`channel.rs:479-489` vs `sftp.rs:143-149`）
+  - D4 `channel.rs:700-720` 测试注释易把「2s 上界」读成「2s 等待」
+  - D5 `LocalKeySigner` 两条错误臂零测试（`russh_impl/mod.rs:104-116`）
+  - 范围外 2 条：`Settings::run` 的 disconnect abort 语义；`core.rs` 上传/下载无 session 超时（与 C5 同根因）
+- 6 轮进度：0 / 6（待消费任务更新）
+- 正文已喂给 CodeBuddy：12 条「不成立」原文（preflight 2 + 第 1–6 轮新增 10）+ K2/K7/K9/K12 与 §3 未验证范围空档
