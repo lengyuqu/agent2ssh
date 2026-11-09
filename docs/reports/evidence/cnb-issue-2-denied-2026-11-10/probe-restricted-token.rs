@@ -5,8 +5,6 @@
 // Runs itself twice: the parent keeps its own token, creates a restricted one
 // (DISABLE_MAX_PRIVILEGE, no extra SIDs) and launches the child with it. The
 // child reports what it can open and what WaitForSingleObject says.
-use std::process::Command;
-
 #[cfg(windows)]
 mod win {
     use windows_sys::Win32::Foundation::{
@@ -209,9 +207,9 @@ fn main() {
         }
     }
 
-    // A control: the child's own process is reachable to itself only through the
-    // restricted token, so the same call must still succeed there.
+    // The control is in the child branch above: the restricted child opens its
+    // own process successfully, which is what rules out a broken token. Here the
+    // parent only reports itself, so the two sides can be compared.
     let me = std::process::id();
     println!("[elevated ] {}", win::probe(me));
-    let _ = Command::new("cmd").args(["/C", "exit", "0"]).status();
 }
