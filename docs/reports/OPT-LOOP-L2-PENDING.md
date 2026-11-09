@@ -171,6 +171,13 @@ enum DrainOutcome {
 
 **行号是本轮核实时的编号**（改动前，基线 `a8f9519`）。本轮的注释改动会让同一文件里的行号下移 5–10 行，按函数名定位。
 
+> **2026-11-10 第 2 轮复核后追加（基线 `8e16f40`）**
+>
+> - A2 的残留覆盖缺口**仍然开着**，但形状变了：`host_key_algorithm` 的注释现在有据可依（`host_key_algorithm` 由密钥本身推导，`Algorithm::Rsa{..}` 对 `rsa-sha2-256/512`/`ssh-rsa` 一律匹配），仍未验证的是**端到端**——需要一把 RSA 主机键跑完 `trust_host_fingerprint_core` + `get_host_fingerprint_status_core`。现成的可以借力点：`scripts/e2e-ssh-matrix.sh` 的 legacy 段已经把 OpenSSH 8.3 限制成 `HostKey /config/ssh_host_keys/ssh_host_rsa_key` + `HostKeyAlgorithms ssh-rsa`（脚本 `:527-528`），那一台就是 RSA 主机键服务端；矩阵目前只对它跑 exec/拒绝用例，没有 trust→换 hostkey→status 这套断言。
+> - C6 的「三件事」已经拆开处理：两侧归一化（仍是 L2，见下）、hashed 条目不可匹配（CLI 文案已改，`remove_system_known_host` 的行为未变）、测试（**已进 main**：`embedded_ssh.rs` 的 `remove_system_known_host_matching` 模块）。其中 `an_ipv6_literal_at_port_22_is_removed` 现在就是红的，它是要修的 `Ok(0)` 的失败断言。
+> - D5 的 `u32::try_from` 不可达分支仍未处理（删掉或注明）；`From<SendError>` 臂同样仍无测试。
+> - 新增两条本轮复核发现、需要拍板的行为项，见文末「第 2 轮追加」。
+
 | 编号 | 位置 | 判断 | 建议改法 |
 |---|---|---|---|
 | A2 | `embedded_ssh.rs:152` `host_key_algorithm`；`known_host_key` 的槽位组成 | 部分成立（核心结论错：RSA 归一槽是**对的**，见本轮 L1 注释） | 残留的是覆盖缺口：没有任何测试用 RSA 主机键跑 `trust_host_fingerprint_core` / `get_host_fingerprint_status_core`，唯一覆盖者用 ed25519。补一条：RSA 主机键信任一次后，切 `--hostkey` 在 `rsa-sha2-512`/`rsa-sha2-256`/`ssh-rsa` 之间移动，`trusted` 必须仍为 `true`、`known_hosts.json` 里仍只有一条 `host|ssh-rsa`。需要能配 RSA 主机键的本地 sshd（`scripts/sshd-fixture` 可注入 host key）；若只做 in-memory，退化为 `host_key_algorithm` + `known_host_key` 的单元断言，强度不足以钉住端到端 |
@@ -184,3 +191,19 @@ enum DrainOutcome {
 | C6 | `embedded_ssh.rs:563-608`（`remove_system_known_host`）；对照 `:619-633`（`split_host_port`） | 成立 | 两侧地址形态不一致：`port == 22` 只拼裸名、否则只拼 `[host]:port`，而 OpenSSH 对 IPv6 字面量写 `[::1]:22`、对本机名可写 `localhost,127.0.0.1`，且 hashed 条目（`\|1\|salt\|hash`）永远匹配不上。改法：用 `split_host_port` 归一化两侧再比，hashed 条目单独计数并报告「N 条无法匹配」，`removed == 0` 时返回明确的「未找到」而不是静默 0。单测可做（临时 HOME + 手写四种形态的 known_hosts） |
 | D1 | `sftp_transfer.rs:484-512` | 成立 | `Write for StallGuard` 的状态机（`written > 0` 刷新 `last_progress`、`written == 0` 且超时返回 `TimedOut`、未超时继续）零测试；现有两条一条只比字节、一条直接调私有 `stalled()`。需要可注入时钟（`Instant` 不能伪造），建议加 `#[cfg(test)] with_last_progress` 或把「现在」抽成字段 |
 | D5 | `mod.rs` `SignerFailed` 的 `From<SendError>`（改动前 `:131-136`）与 `u32::try_from` 分支（`:170`） | 成立 | `From` 臂可直测；`u32::try_from` 臂实际不可达（签名 > 4 GiB），建议改成注释写明不可达并去掉错误分支，而不是留着一条永远测不到的路 |
+
+### 2026-11-10 · batch 2 第 2 轮复核：两条新发现（都需拍板）
+
+复核人（CodeBuddy）按 `8e16f40` 的代码给出，两条都在 `src-tauri/src/**`，一条是注释与代码不符（属 L1 但影响的是诊断可信度），一条是行为（L2）。
+
+| 编号 | 位置 | 判断 | 为什么不能自动落 | 建议改法 |
+|---|---|---|---|---|
+| L2-13 | `embedded_ssh.rs` `authenticate` 里 `is_publickey_refused` 分支的注释（`:1876-1881`，`8e16f40` 基线）；被调用的 `retry_with_legacy_rsa_signature`（`:2007-2022`）；守卫来源 `transport/russh_impl/mod.rs` `method_pref`（`:1107-1116`） | 成立 | 这一条本身是注释改动（L1），但它现在有了失败断言（`the_legacy_rsa_retry_is_dead_because_the_preference_cannot_be_set`），也就是说**代码事实被钉住了、注释还在说反话**。用户可见的后果不是注释而是行为：对只接受 `ssh-rsa` 的老服务器，真正生效的回退是 `russh_impl` 内部那条（`authenticate_publickey` → `PrivateKeyWithHashAlg::new(key, None)`，`:808-827`），而 `note_legacy_sha1_signature(host, "legacy retry")` 永远写不出来——`detected_by` 只剩 `"transport fallback"` 一个取值，运维按文档去分辨「哪条路回退的」会得出错误结论 | 二选一：①删掉 `retry_with_legacy_rsa_signature` 与整段 `is_publickey_refused` 分支，把注释改成「回退由传输层内部完成，见 `russh_impl`」；②保留分支但注释与 `detected_by` 取值改成「无效分支，永不命中」。两种都要改 `docs/plans/russh-migration.md:564` 第 6 条（它现在写的是「现在靠 `method_pref(SignAlgo, \"ssh-rsa\")`」，与实现相反） |
+
+**最小验证口径**：`cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib`（现有断言即覆盖两条分支的取舍，不需要服务端）；真机口径可复用 `scripts/e2e-ssh-matrix.sh` legacy 段那台 `PubkeyAcceptedKeyTypes ssh-rsa` 的主机，但那是 8.3 + `KexAlgorithms diffie-hellman-group14-sha1`，本仓根本不握手，不能用；要真机验就得另起一台只限 `PubkeyAcceptedAlgorithms ssh-rsa` 而 KEX 现代的 sshd。
+
+| 编号 | 位置 | 判断 | 为什么不能自动落 | 建议改法 |
+|---|---|---|---|---|
+| L2-14 | `embedded_ssh.rs:1520`（`apply_algo_prefs(...)?`）；`transport/types.rs:96-98`（`MethodType::LangCs/LangSc` 的文档）；`ssh_algo.rs:164-166`、`:155-176`（`supported_algorithms` 的 `_ => return None`）；`russh_impl/mod.rs:1168` | 成立（低危，但是对外契约） | `MethodType::LangCs`/`LangSc` 的文档写「kept so `supported_algs` can answer for them the way libssh2 does」，实际 `supported_algs` **从不**回答它们：`supported_names` 对三者返回空 `Vec`（不是 `Err`），而 `ssh_algo::supported_algorithms` 的 `_ => return None` 从不到达后端——它的 `match` 先按 `MethodType` 分派到 8 个 `OnceLock`，`LangCs/LangSc/SignAlgo` 直接 `None`。所以那句文档描述的是一个不可能发生的调用，读代码的人会以为 `LangCs` 有静态表 | 改 `types.rs:96-98` 的文档，说明这三个变体在 facade 层就被挡掉、后端返回空表只是形状上的兜底；或让 `supported_algorithms` 真的走一次 `supported_algs`（会更慢且仍然得到空表，不推荐） |
+
+**最小验证口径**：`supported_algorithms(MethodType::LangCs)` 已经是 `None`（`narrow_degrades_to_no_preference_never_panics` 对 `SignAlgo` 断言了），补一句同形状的断言到同一个测试里即可，不需要服务端。
