@@ -644,6 +644,141 @@ fn split_host_port(host_field: &str) -> (String, u16) {
     (host_field.to_string(), 22)
 }
 
+#[cfg(test)]
+mod remove_system_known_host_matching {
+    use super::{remove_system_known_host, split_host_port};
+    use std::path::PathBuf;
+
+    /// One `known_hosts` line, far enough from a real key to be unreadable as
+    /// one — the function compares host fields and never parses the key.
+    fn line(host_field: &str) -> String {
+        format!("{host_field} ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample\n")
+    }
+
+    struct Home {
+        dir: PathBuf,
+    }
+
+    impl Home {
+        /// A `$HOME` with `~/.ssh/known_hosts` holding `body`.
+        fn with_known_hosts(body: &str) -> Self {
+            let dir = std::env::temp_dir()
+                .join(format!("agent2ssh-home-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(dir.join(".ssh")).unwrap();
+            std::fs::write(dir.join(".ssh").join("known_hosts"), body).unwrap();
+            Self { dir }
+        }
+
+        fn known_hosts(&self) -> String {
+            std::fs::read_to_string(self.dir.join(".ssh").join("known_hosts")).unwrap()
+        }
+    }
+
+    impl Drop for Home {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// `remove_system_known_host` resolves the file through `dirs::home_dir()`,
+    /// which reads the process environment, so these cases cannot run beside each
+    /// other — nor beside anything else that rewrites `HOME`. `serial` is what
+    /// keeps them honest instead of flaky.
+    fn with_home<R>(body: &str, run: impl FnOnce(&Home) -> R) -> R {
+        let home = Home::with_known_hosts(body);
+        let previous = std::env::var_os("HOME");
+        std::env::set_var("HOME", &home.dir);
+        let result = run(&home);
+        match previous {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        result
+    }
+
+    /// OpenSSH writes an IPv6 literal as `[::1]:22`, so port 22 does **not** mean
+    /// a bare host name for that form. Today only the bare form is built for port
+    /// 22, so this is `Ok(0)`: the CLI then prints its idempotent miss line and
+    /// the entry stays. Pinned as a failure so the fix has a target.
+    #[test]
+    #[serial_test::serial]
+    fn an_ipv6_literal_at_port_22_is_removed() {
+        let body = line("[::1]:22") + &line("other.example");
+        let removed = with_home(&body, |home| {
+            let removed = remove_system_known_host("::1", 22).unwrap();
+            assert!(
+                !home.known_hosts().contains("[::1]:22"),
+                "the [::1]:22 line survived: {}",
+                home.known_hosts()
+            );
+            removed
+        });
+        assert_eq!(removed, 1, "one line matched, not zero");
+    }
+
+    /// The other direction of the same asymmetry, and a latent data-loss one: a
+    /// *bare* host name is port 22 and nothing else, so forgetting
+    /// `example.internal:2222` must not take the port-22 line with it. Removing
+    /// it would be the harmless-sounding reading of "match any form of this
+    /// host", and it is wrong: the two lines are two different endpoints.
+    #[test]
+    #[serial_test::serial]
+    fn forgetting_one_port_leaves_the_other_port_alone() {
+        let body = line("example.internal") + &line("[example.internal]:2222");
+        let removed = with_home(&body, |home| {
+            let removed = remove_system_known_host("example.internal", 2222).unwrap();
+            let left = home.known_hosts();
+            assert_eq!(
+                left,
+                line("example.internal"),
+                "forgetting :2222 must leave the :22 line byte-identical"
+            );
+            removed
+        });
+        assert_eq!(removed, 1);
+    }
+
+    /// A hashed entry stores `|1|<salt>|<hmac>`, so there is no host field to
+    /// compare and no plaintext to compare it against. It cannot be matched
+    /// without hashing, so the honest contract is a *reportable* miss: the caller
+    /// has to be able to tell "nothing matched" from "the entry exists but this
+    /// cannot see it". Today both are `Ok(0)` and the CLI prints the idempotent
+    /// miss line, which is true and useless.
+    #[test]
+    #[serial_test::serial]
+    fn a_hashed_entry_is_reported_as_unmatched_rather_than_removed() {
+        let hashed = "|1|F1e1Ke1yqYqYqYqYqYqYqY=|AbCdEfGhIjKlMnOpQrStUvWxYz0123456789=\n";
+        let removed = with_home(hashed, |home| {
+            let removed = remove_system_known_host("example.internal", 22).unwrap();
+            assert_eq!(
+                home.known_hosts(),
+                hashed,
+                "a hashed line must be left alone"
+            );
+            removed
+        });
+        assert_eq!(removed, 0);
+    }
+
+    /// `split_host_port` is the function that already knows the four address
+    /// forms; whatever `remove_system_known_host` compares has to agree with it.
+    /// Pinned separately so a change to one without the other fails here rather
+    /// than only in an end-to-end case.
+    #[test]
+    fn the_address_forms_this_file_must_handle() {
+        assert_eq!(
+            split_host_port("example.internal"),
+            ("example.internal".into(), 22)
+        );
+        assert_eq!(
+            split_host_port("[example.internal]:2222"),
+            ("example.internal".into(), 2222)
+        );
+        assert_eq!(split_host_port("[::1]:22"), ("::1".into(), 22));
+        assert_eq!(split_host_port("127.0.0.1"), ("127.0.0.1".into(), 22));
+    }
+}
+
 fn default_username() -> String {
     std::env::var("USER").unwrap_or_else(|_| "root".to_string())
 }
@@ -2246,6 +2381,44 @@ mod tests {
         std::fs::write(&cert, "ssh-ed25519-cert-v01@openssh.com AAAA").unwrap();
         assert_eq!(user_certificate_for(&key), Some(cert));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `retry_with_legacy_rsa_signature` cannot succeed, and the code does not
+    /// say so.
+    ///
+    /// It asks the transport for `method_pref(SignAlgo, "ssh-rsa")` and treats
+    /// `Err` as "no retry". The facade documents that a preference may only be
+    /// set *before* the handshake — by the time a public key is refused, the
+    /// handshake has succeeded — and the backend refuses it there
+    /// (`russh_impl/mod.rs`, "algorithm preferences must be set before the
+    /// handshake"). So the call always returns `Err`, the function always returns
+    /// false, and the SHA-1 fallback a pre-7.2 server needs is the transport's own
+    /// internal one, which the comment above the call site credits to `libssh2`
+    /// rather than to `russh`.
+    ///
+    /// A source assertion, because the alternative is a fixture sshd restricted to
+    /// `ssh-rsa` and an `algo set` that should be refused — and this pins the whole
+    /// shape in three lines: the call site exists, it still returns `false` on
+    /// `Err`, and the backend still rejects a preference after connect.
+    #[test]
+    fn the_legacy_rsa_retry_is_dead_because_the_preference_cannot_be_set() {
+        let caller = include_str!("embedded_ssh.rs");
+        // Matched as source text rather than as one long literal, so rustfmt's
+        // wrapping cannot make the assertion pass or fail by accident.
+        assert!(
+            caller.contains("fn retry_with_legacy_rsa_signature("),
+            "the retry seam moved; re-read this assertion before deleting it"
+        );
+        assert!(
+            caller.contains("SignAlgo") && caller.contains("\"ssh-rsa\""),
+            "the retry no longer names the legacy signature algorithm; if it was replaced by a \
+             working fallback, this assertion is the thing to delete"
+        );
+        let backend = include_str!("transport/russh_impl/mod.rs");
+        assert!(
+            backend.contains("algorithm preferences must be set before the handshake"),
+            "the backend guard this depends on is gone; the retry may now be reachable"
+        );
     }
 
     fn test_host() -> HostProfile {

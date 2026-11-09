@@ -1918,8 +1918,17 @@ async fn async_main() -> Result<()> {
                     );
                 } else if removed == 0 {
                     // `ssh-keygen -R` is idempotent and exits 0 on a miss, so
-                    // this is a report, not an error.
-                    println!("no known_hosts entry matched {host} (port {port})");
+                    // this is a report, not an error. But "no line matched" and
+                    // "a line is there and this cannot read it" print the same
+                    // sentence today, and the second one is the case a user will
+                    // hit after `HashKnownHosts yes` — the entry is present, the
+                    // removal silently did nothing, and the message says nothing
+                    // matched. Naming the hashed form is what makes the second
+                    // case diagnosable without opening the file.
+                    println!(
+                        "no known_hosts entry matched {host} (port {port}); entries stored in \
+                         the hashed form (|1|…) cannot be matched by name"
+                    );
                 } else {
                     let noun = if removed == 1 { "entry" } else { "entries" };
                     println!("removed {removed} known_hosts {noun} for {host} (port {port})");

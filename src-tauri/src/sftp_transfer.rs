@@ -218,9 +218,16 @@ const COPY_CHUNK: usize = 64 * 1024;
 /// transport, Dropbear 2024.85 accepted both the default 64 KiB and 16 KiB for an
 /// 8 MiB upload (485 ms and 1 s, matching checksums), so the banner heuristic in
 /// [`upload_chunk_for_server`] has no measured basis left and is kept only as
-/// belt-and-braces against an older Dropbear. It is not free: against OpenSSH,
-/// 64 KiB writes are about 2.6x faster than 16 KiB ones (28 vs 11 MB/s over
-/// loopback).
+/// belt-and-braces against an older Dropbear.
+///
+/// The "64 KiB is about 2.6x faster" figure that stood here while that claim was
+/// being written down was one loopback measurement against OpenSSH, and K2's own
+/// figures contradict it: the *same* Dropbear accepted a 64 KiB-chunked 8 MiB
+/// upload in 485 ms and a 16 KiB-chunked one in 1 s, i.e. ~2.06x, and that run is
+/// the closest thing to a controlled pair there is. Which is the honest way to
+/// read it: the ratio is link-, server- and buffer-dependent, so the heuristic's
+/// price is real but unquantified — an argument for retiring it on evidence, not
+/// a number to quote.
 ///
 /// What protects the transfer now is [`StallGuard`]'s progress bound, because the
 /// failure K2 describes is a hang rather than a refused write. See
@@ -467,6 +474,36 @@ pub fn resume_offset(resume: bool, existing: u64, total: Option<u64>) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    /// The `2.6x` claim that stood in `SFTP_SAFE_WRITE`'s docs was replaced by the
+    /// one measured pair this repository has, and it has to stay measurable: the
+    /// two numbers in `docs/KNOWN-ISSUES.md` K2 are 485 ms (default 64 KiB
+    /// chunks) and 1 s (16 KiB chunks) for the same 8 MiB upload to the same
+    /// server. If someone revises either figure, the comment that quotes them is
+    /// wrong until they are revised together — which is what this pins. It is a
+    /// documentation assertion, so it also fails if the comment stops citing the
+    /// run at all.
+    #[test]
+    fn the_quoted_chunk_size_ratio_comes_from_the_measured_pair() {
+        let doc = include_str!("sftp_transfer.rs");
+        let start = doc
+            .find("const SFTP_SAFE_WRITE")
+            .expect("SFTP_SAFE_WRITE must stay findable for this assertion");
+        let doc_above = &doc[..start];
+        let paragraph = doc_above
+            .rfind("/// The floor for a refused write")
+            .expect("the doc paragraph above SFTP_SAFE_WRITE must stay findable");
+        let paragraph = &doc_above[paragraph..];
+        assert!(
+            paragraph.contains("485 ms") && paragraph.contains("1 s"),
+            "the quote must name K2's measured pair; got:\n{paragraph}"
+        );
+        let measured_ratio = 1000.0_f64 / 485.0;
+        assert!(
+            (measured_ratio - 2.06).abs() < 0.05,
+            "K2's pair implies {measured_ratio:.2}x, so a 2.6x claim cannot cite it"
+        );
+    }
+
     /// A writer that, like an SFTP handle on a server with small packets, accepts
     /// nothing at all when handed more than `max` bytes.
     struct PickyWriter {
