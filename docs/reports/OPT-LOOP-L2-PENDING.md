@@ -206,4 +206,22 @@ enum DrainOutcome {
 |---|---|---|---|---|
 | L2-14 | `embedded_ssh.rs:1520`（`apply_algo_prefs(...)?`）；`transport/types.rs:96-98`（`MethodType::LangCs/LangSc` 的文档）；`ssh_algo.rs:164-166`、`:155-176`（`supported_algorithms` 的 `_ => return None`）；`russh_impl/mod.rs:1168` | 成立（低危，但是对外契约） | `MethodType::LangCs`/`LangSc` 的文档写「kept so `supported_algs` can answer for them the way libssh2 does」，实际 `supported_algs` **从不**回答它们：`supported_names` 对三者返回空 `Vec`（不是 `Err`），而 `ssh_algo::supported_algorithms` 的 `_ => return None` 从不到达后端——它的 `match` 先按 `MethodType` 分派到 8 个 `OnceLock`，`LangCs/LangSc/SignAlgo` 直接 `None`。所以那句文档描述的是一个不可能发生的调用，读代码的人会以为 `LangCs` 有静态表 | 改 `types.rs:96-98` 的文档，说明这三个变体在 facade 层就被挡掉、后端返回空表只是形状上的兜底；或让 `supported_algorithms` 真的走一次 `supported_algs`（会更慢且仍然得到空表，不推荐） |
 
-**最小验证口径**：`supported_algorithms(MethodType::LangCs)` 已经是 `None`（`narrow_degrades_to_no_preference_never_panics` 对 `SignAlgo` 断言了），补一句同形状的断言到同一个测试里即可，不需要服务端。
+**最小验证口径**：`supported_algorithms(MethodType::LangCs)` 已经是 `None`（`narrow_degrades_to_no_preference_never_panics` 对 `SignAlgo` 断言了），补一句同形状的断言到同一个测试里即可，不需要服务端。（**2026-11-10 第 2 轮已补**：`LangCs`/`LangSc` 两条断言已进入该测试，`MethodType` 的文档同笔改写，L2-14 关闭。）
+
+---
+
+### 2026-11-10 · batch 2 第 2 轮追加（基线 `09d49ea`）
+
+第 2 轮 11 条独立指摘：**成立 4 / 部分成立 3 / 不成立 3**，另 1 条信息性成立（N6）、1 条已由 `8e16f40` 修掉（C4）。本轮 L1 只动注释与文档，行为项如下。
+
+**本轮已由 L1 关闭的**：`L2-14`（见上）；`L2-13` 的**注释那一半**——`retry_with_legacy_rsa_signature` 的文档与调用点注释已改成「此路不可达，且有两重独立原因」。`L2-13` 剩下的只有「删不删死分支」。
+
+| 编号 | 位置 | 判断 | 为什么不能自动落 | 建议改法 |
+|---|---|---|---|---|
+| L2-15 | `embedded_ssh.rs` `remove_system_known_host` 的 `patterns` 构造（`port == 22` 只拼裸名）；`remove_system_known_host_matching::an_ipv6_literal_at_port_22_is_removed`（**当前红**） | 行为项，且它配套的那条测试**前提已被实测推翻** | 测试的前提是「OpenSSH 把 IPv6 字面量写成 `[::1]:22`，`ssh-keygen -R` 会删掉它」。两半都测过：本机对含 `[::1]:22` 与 `::1` 的文件跑 `ssh-keygen -R ::1`，**只删后者**，前者原样保留——实现与参照一致，不是静默 no-op；`man 8 sshd` 也写明方括号只用于**非标准端口**。所以「实现漏了一种 OpenSSH 会写的形态」不成立，缺的是一种**别的工具**才写得出的形态 | 两条路，先拍板再动。**①对齐参照（推荐）**：删掉或改写这条红测试，注释写清 `[host]:22` 是其他工具写出的形态、`ssh-keygen -R` 同样不删、代价是这类残留只能手工清。**②产品口径「forget 就是删干净」**：`port == 22` 时同时匹配裸名与 `[host]:22`，并把 doc 注释「Equivalent to `ssh-keygen -R`」改成「superset of it」——`forgetting_one_port_leaves_the_other_port_alone` 不受影响（它用 2222，验证过）。**无论选哪条，这条红测试都不该留在 main**：它让 CI 常红，此后每个「全绿」声明都得附带解释，也是本流程唯一必须每次都带的噪声 |
+| L2-16 | `russh_impl::ClientHandler::check_server_key` 的 `if let Ok(blob) = key.to_bytes()`（`:415` 起，函数末尾无条件 `Ok(true)`）；上层 `embedded_ssh.rs:331`、`:1665` 的 `None => Err("SSH server did not provide a host key")` | 成立（结构），但触发条件近乎不可达 | 序列化失败时不记 `host_key`、仍返回 `Ok(true)`，`host_key` 留在 `None`，于是上层把「无法序列化这把键」报成「服务器没给主机键」。代价是诊断指向错误方向；但 `PublicKey::to_bytes()` 对已解析的公钥几乎不可能失败，所以这是**错误分类**问题，不是会踩到的 bug | 二选一：①`to_bytes()` 失败时记一条 `warn`（带算法名）再返回 `Ok(true)`，至少留下痕迹；②给 `host_key` 加 `Unserializable` 态并让上层单独成句。两条都改对外文案，需拍板。验证不需要服务端：直接构造 `ClientHandler` 调 `check_server_key` |
+| L2-17 | `russh_impl/agent.rs` `list_identities` 的 `if fetched.is_err() { *self.client.try_lock()… = None }`（`:240-246`）；现有测试 `an_unconnected_agent_refuses_instead_of_pretending`（`:748`）只覆盖「从未连过」 | 部分成立（结构成立；`docs/KNOWN-ISSUES.md` §3.1 的共存边界只写了 Windows 的 pipe/Pageant 顺序，但这段代码是跨平台的） | 「连过、`request_identities` 失败一次」之后，本连接生命周期内 `list_identities` 永久 `Err`，且错误串退化成 `the SSH agent is not connected`——与「从未连过」不可区分（`ssh-agent` 中途重启就会踩到）。修它要加状态，改的是对外错误文案；补的测试会**先红**，不能直接进 main | `client` 从 `Option` 换成三态（`NeverConnected` / `Connected` / `Failed(原因)`），或在置 `None` 前存下错误、下次返回时带上；测试：连上 → 让 `request_identities` 失败一次 → 再调，断言第二次文案含原错误。`KNOWN-ISSUES` §3.1 同时补 unix 侧 |
+
+**N2 不新立**：它推的那件事（`remove_system_known_host` 的返回值形状拿不到「有 N 条无法匹配」）就是 `C6` 的第二件事，CLI 文案已改、`usize` 返回值未变，仍在 `C6`。
+
+**N6 是给 `C2` 用的新证据，不是缺陷**：`russh` 的 `authenticate_none` 可用（`channel.rs:809` 的测试已经在调它），所以「实现 `auth_methods`」不必等一次真正的认证失败——可以在 `authenticate` 开头先发一次 `none` 探测。代价是每次连接多一个往返，且老服务器可能把 `none` 记成一次失败尝试（`MaxAuthTries`）。这条只写在这里，供 `C2` 拍板时对照。

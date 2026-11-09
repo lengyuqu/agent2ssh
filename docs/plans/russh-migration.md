@@ -561,7 +561,7 @@ API 变更只有两处，都在 `ClientHandler`：`check_server_key` 现在收
 | 3 | `russh` 0.60 的 RustCrypto 预发布锁 | **已解决**：必须 `russh 0.60.3`（0.60.1 的 caret 依赖解不出可行集）+ `default-features = false` + `ring` + `pkcs1/pkcs5` 钉版。理由与实测见 §5「探针结果」 |
 | 4 | 算法名字符串兼容性 | `SshAlgoPrefs` 的 JSON 是用户配置，**名字不许变**；`kex-strict-*` 是协议标记要过滤；`narrow()` 的白名单语义要保留 |
 | 5 | host key 算法名兼容性 | 已写进 `known_hosts.json`，`ssh-rsa` / `ecdsa-sha2-nistp256` 等字符串必须逐字保持 |
-| 6 | RSA / SHA-1 遗留路径 | 现在靠 `method_pref(SignAlgo, "ssh-rsa")`（`embedded_ssh.rs:1842`）→ russh 用 `PrivateKeyWithHashAlg` + `best_supported_rsa_hash()` |
+| 6 | RSA / SHA-1 遗留路径 | **回退不在这一层。** `embedded_ssh.rs` 里那段 `method_pref(SignAlgo, "ssh-rsa")` 重试跑在握手之后，而 `russh_impl::Session::method_pref` 在 `connected` 置位后一律拒绝，`apply_prefs` 对 `SignAlgo` 也是空臂——所以它恒 `false`，只留下一个永不可达的 `detected_by: "legacy retry"`（记作 `OPT-LOOP-L2-PENDING.md` L2-13）。真正生效的 SHA-1 回退在传输层内部：`userauth_pubkey_file` 先用 `PrivateKeyWithHashAlg` + `best_supported_rsa_hash()`，被拒后再以 `PrivateKeyWithHashAlg::new(key, None)` 重试一次 |
 | 7 | 性能 | 控制面，不是吞吐路径。`aws-lc-rs` 会引入 cmake/NASM，**默认 feature 里就带着它**，必须显式关掉 |
 | 8 | ~~【待验证】russh 0.60 的 MSRV~~ | **已执行**：rustc 1.98.1 下 `russh 0.60.1` 与 `0.60.3` 均可解析到编译阶段（失败点是依赖冲突，不是 MSRV） |
 | 9 | 【待验证】`russh-sftp` 与 libssh2 SFTP 的权限位语义差异 | 用 `core.rs:2118` 那 5 个格式化函数的现有测试对拍 |

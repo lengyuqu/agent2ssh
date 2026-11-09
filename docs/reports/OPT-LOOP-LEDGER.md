@@ -257,7 +257,7 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
   - D4 `channel.rs:700-720` 测试注释易把「2s 上界」读成「2s 等待」
   - D5 `LocalKeySigner` 两条错误臂零测试（`russh_impl/mod.rs:104-116`）
   - 范围外 2 条：`Settings::run` 的 disconnect abort 语义；`core.rs` 上传/下载无 session 超时（与 C5 同根因）
-- 6 轮进度：1 / 6（待消费任务更新）
+- 6 轮进度：2 / 6（第 1 轮见下方 `consume 1 / 6`，第 2 轮见 `consume 2 / 6`）
 - 正文已喂给 CodeBuddy：12 条「不成立」原文（preflight 2 + 第 1–6 轮新增 10）+ K2/K7/K9/K12 与 §3 未验证范围空档
 
 ### consume 1 / 6 · 2026-11-10 05:20–05:26 (GMT+8)
@@ -294,3 +294,31 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
 #### 自我更正：2.6x 这个数字我抄错了
 
 `SFTP_SAFE_WRITE` 原注释说「64 KiB 比 16 KiB 快约 2.6x（28 vs 11 MB/s over loopback）」，我在 `02f936b` 里把它原样保留（只在提交正文里引了一次）。K2 自己记的那一对是同一个 Dropbear、同一次 8 MiB 上传的 485 ms 与 1 s，比值 **2.06x**；2.6x 来自另一个（loopback/OpenSSH）测量，不能和 K2 的这对并列引用。`8e16f40` 已把它改掉，并加了一条 `include_str!` 断言钉住「注释里引的必须就是 K2 的那两个数」。以后引用这个代价用 2.06x，或者干脆说「真实但未量化」。
+
+### consume 2 / 6 · 2026-11-10 06:34–06:58 (GMT+8)
+
+- **指摘来源**：CodeBuddy 对第 1 轮回帖的复核（评论 `2119905678654341120`）。11 条独立指摘（C3-1…C3-4、C4、N1…N7；N4 与 C3-2 同条）+ 1 条自查计数。
+- **判定**：**成立 4 / 部分成立 3 / 不成立 3**，另 1 条信息性成立（N6）、1 条已由 `8e16f40` 修掉（C4，本轮无待办）。
+  - 成立：C3-1（`keys algorithm` 的 clap 文档仍在描述 libssh2/WinCNG，而 `keys.rs:180-192` 已把同一件事写对，两处相反）、C3-2=N4（`MethodType::LangCs/LangSc` 文档声称 `supported_algs` 会替它们回答）、N2（forget 文案把「没有这行」与「有这行但读不到」压成一句）、N3（legacy RSA 重试是死分支）。
+  - 部分成立：N1（代码形状与红测试属实，**前提被实测推翻**，见不成立 17）、N5（静默丢 `to_bytes` 失败属实，触发条件近乎不可达）、N7（`client` 置 `None` 属实，后半句说错，见不成立 18）。
+  - 不成立：C3-3、C3-4、C4。
+- **本轮最值钱的一条**：C3-1。`--help` 是用户直接读的界面，它还在解释一个被删掉的实现，而同仓 `keys.rs` 已经写对——两处结论相反的文本比一处孤立的错更贵，因为读的人不知道信哪个。
+- **我自己多查出来的两条**：①`bin/agent2ssh.rs` 里 `keys algorithm` 的 RSA 分支不可达（`default_for_build()` 恒 Ed25519），那句「this build cannot read OpenSSH-format private keys」永远不会打印，但属同一族过期表述；②`apply_prefs` 对 `SignAlgo` 是空臂（`russh_impl/mod.rs:704`），所以 legacy 重试**即使绕过守卫也会被静默丢弃**——比指摘给的「恒 `return false`」多一重原因。
+- **动作**：`f23f006`（6 文件：clap 文档、CLI 死分支文案、`MethodType` 文档、`supported_names` 空臂注释、`embedded_ssh` 三处注释、`cli_contract` 文档、`ssh_algo` 两条断言）+ 本笔（本 ledger、L2 三条、迁移文档第 6 条）。
+- **验证**：`npm run build` 6.49s；`cargo test --no-default-features --lib` **861 passed / 1 failed / 1 ignored**（17.77s）——失败项是基线就有的 `an_ipv6_literal_at_port_22_is_removed`（`8e16f40` 留下的故意红测），非本轮引入；`cargo fmt --check` 本轮**之前是红的**（`embedded_ssh.rs:662` 一行未格式化，同属 `8e16f40`），归位后为绿。
+- **回帖**：`2119924514724155392`（`## 第 2 轮收尾`）。
+- **锁**：进入时 `/tmp/agent2ssh-opt-loop.lock` 又是孤儿锁（mtime 05:34、目录空、无 pid）。按协议重试 3×120 s 全失败 → 存活核验（`ps` 无其它 agent；`lsof -d cwd` 仓库内进程全属本会话）→ 接管，结束释放。**这次上一轮消费者自己的记录说「结束时已释放」，锁却还在**，所以不只是生产任务的问题：释放本身不可靠，建议把释放写进 shell `trap`，而不是流程末尾一句。
+
+### 第 2 轮新增的不成立条目（原文保留，请勿重复提）
+
+15. **「C3-3：`skills/agent2ssh/SKILL.md:368-371` 那句『`algo set` checks the shape of a name, not whether the linked transport can do it』在 russh 下已不成立」— 不成立。**
+    原句是复合句，后半句紧接「and the preferences are applied fail-closed immediately before each handshake」，两句合起来正是当前实现：写文件那步只做 `is_plausible_algorithm_name`（`ssh_algo.rs:403`，加非空/去重/compression 约束），硬失败发生在 `apply_algo_prefs` → `apply_method` → `apply_prefs`。指摘自己给的证据（`apply_method` 握手前 fail-closed、`algo set` 写文件无校验）就是这句话的内容，所以是把「只查形状」读成了「什么都不查」。（附带更正：`apply_method` 比对的 `session.supported_algs` **不是**运行时能力查询，`russh_impl::supported_names` 是静态白名单，其注释自述 "It is a snapshot, not a query"。）SKILL.md 不改。
+
+16. **「C3-4：`docs/reports/WINDOWS-HANDOVER.md:34` 的『`algo set` 能放开哪些算法取决于后端的 `supported_algs`』依赖一个不存在的前提」— 不成立。**
+    `apply_method`（`ssh_algo.rs:229-244`）确实调用 `session.supported_algs(method_type)`；`Session::supported_algs` 存在（`russh_impl/mod.rs:1103`）且返回 `Ok(...)`。它点名的那些方法族（Kex/HostKey/Cipher/Mac/Comp）上「后端有个可查询的集合」成立，只是集合是静态快照而非运行时探测——那是 C3-2 的落点，不是这一条。该行属 libssh2 时代的 Windows 验证清单，不改。
+
+17. **「N1：`remove_system_known_host` 对 IPv6 字面量在 22 端口是静默 no-op，且 `ssh-keygen -R` 是参照、它会删掉 `[::1]:22`」— 核心前提不成立（代码形状与那条红测试属实，处置见 L2-15）。**
+    本机实测：known_hosts 写入 `[::1]:22`、`::1`、`other.example` 三行，`ssh-keygen -R ::1` 输出 `# Host ::1 found: line 2`，**只删第二行**，`[::1]:22` 原样保留；`ssh-keygen -R '[::1]:22'` 才删第一行。所以「`-R ::1` 会删 `[::1]:22`」是错的，本仓实现与它自己声明的参照一致。`man 8 sshd` 同句写明方括号 + `:port` 只用于**非标准端口**。真实缺口仅是「别的工具可能写出 `[host]:22`，这类残留只能手工清」——那是产品口径（L2-15），不是「漏了一种 OpenSSH 会写的形态」。
+
+18. **「N7：`list_identities` 第二次失败的文案与第一次相同，区分不出来」— 后半句不成立（该条其余部分成立，见 L2-17）。**
+    第一次是 `the SSH agent refused to list identities: {error}`（`agent.rs:237`），第二次是 `the SSH agent is not connected`（`agent.rs:235`，因为 `client` 已置 `None`），两者不同。真正的问题是**第二次与「从未连过」不可区分**——那是该条前半句说的，后半句把它说成了另一件事。
