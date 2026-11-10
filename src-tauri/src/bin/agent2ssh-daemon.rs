@@ -3489,6 +3489,11 @@ async fn risk_check(
         .host
         .as_deref()
         .and_then(|host| command_authorization_target(host).risk_override);
+    // A marker, not the pattern. `classify_with_user_rules` answers only whether
+    // *some* user rule matched — it returns the level, not the rule — so every
+    // match collapses to this one literal and `matched_rule` has exactly two
+    // possible values: `null`, or `"user_rule"`. `docs/api.yaml` states that
+    // domain, and the caller cannot learn which pattern fired.
     let matched_rule = classify_with_user_rules(&body.command)
         .await
         .map(|_| "user_rule".to_string());
@@ -5121,6 +5126,13 @@ fn spawn_embedded_exec_stream(
                     Err(error) if error.kind() == ErrorKind::WouldBlock => {}
                     Err(error) => return Err(error.into()),
                 }
+                // Checked only after both queues were drained above, and that
+                // order is load-bearing. `eof()` is `state.eof && stdout empty
+                // && stderr empty` (`transport/russh_impl/channel.rs`), so it can
+                // turn true only once this loop has read both streams to the end.
+                // Hoisting the check above the two reads would let it fire while
+                // stderr still holds bytes, and the exit status below would then
+                // be reported with the tail of stderr silently missing.
                 if channel.eof() {
                     break;
                 }
