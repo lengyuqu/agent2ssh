@@ -23,9 +23,7 @@
 
 ---
 
-**BATCH_COMPLETE · issue #15 · batch 9 · 2026-11-11 05:41**（六轮闭环，issue 已关闭；生产任务开 batch 10 时按 #8–#14 先例删除本行）
-
-<!-- 七条 BATCH_COMPLETE 状态行（#8/#9/#10/#11/#12/#13/#14）已由生产运行先后删除：#8–#10 于 2026-11-10 14:2x（按 #10 批次遗留要求），#11 于 2026-11-10 18:4x（batch 6 开批后同样会让消费任务误判「只报告不执行」），#12/#13 于 2026-11-10 23:5x（batch 8 开批后：#13 那条按其自述「下一批（B=8）由生产任务开 issue 时删除本行」执行，#12 虽无自述指示但同属已关闭批次留痕，沿用 #8–#11 先例一并删除），#14 于 2026-11-11 04:1x（batch 9 开批后，按该行自述「下一批（B=9）由生产任务开 issue 时删除本行」执行）。批次史实见各批次小节与 git 历史；batch 5（#11）的「批次汇总」小节已被消费者收尾复核（`7175314`）重写为「第 6 轮之后」小节。 -->
+<!-- 八条 BATCH_COMPLETE 状态行（#8/#9/#10/#11/#12/#13/#14/#15）已由生产运行先后删除：#8–#10 于 2026-11-10 14:2x（按 #10 批次遗留要求），#11 于 2026-11-10 18:4x（batch 6 开批后同样会让消费任务误判「只报告不执行」），#12/#13 于 2026-11-10 23:5x（batch 8 开批后：#13 那条按其自述「下一批（B=8）由生产任务开 issue 时删除本行」执行，#12 虽无自述指示但同属已关闭批次留痕，沿用 #8–#11 先例一并删除），#14 于 2026-11-11 04:1x（batch 9 开批后，按该行自述「下一批（B=9）由生产任务开 issue 时删除本行」执行），#15 于 2026-11-11 06:4x（batch 10 开批后，按该行自述「按 #8–#14 先例删除本行」执行）。批次史实见各批次小节与 git 历史；batch 5（#11）的「批次汇总」小节已被消费者收尾复核（`7175314`）重写为「第 6 轮之后」小节。 -->
 
 ---
 
@@ -1829,3 +1827,14 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 1. **五个路由都带审批处理器：是。** 五个都调 `authorize_command`（`bin/agent2ssh-daemon.rs:689`），它转 `authorize_command_inner` → `authorize_command_with_approval` + `request_and_wait_for_approval`（`:742-745`），与 `session_open` / `forward_add` 同一条链。`session_write` 是逐个「已完成的命令」判（`split_completed_session_commands`），`session_close` / 三条 forward 用的是合成命令串（`"session_close"`、`"forward remove {dir} {bind} -> {host}:{port}"`），所以出卡时的 host 名是对的。**但顺手核出一个形状**（不在既有条目里，请按 L2 决定要不要立条）：`session_close`、`forward_remove`、`forward_stop`、`forward_start` 四个都在 `authorize_command` 之后**忽略了 `approved` 返回值**（`let (risk, _) = …`），而 `session_open` / `session_write` 也忽略。在本仓的语义里这没问题——`authorize_command_with_approval` 只有走到「不需要审批」才返回 `approved == false`，需要审批的三种结局是 Ok(approved) / Rejected / TimedOut——但 `/exec` 那一支为此专门写了 `if pf.approved && pf.risk == High { req.force = true }`，两边不一致，读代码的人会以为某条路径漏了一次 force 翻转。
 2. **L2-108 的「导出包缺 `risk_rules.toml`」：现有行为就是「什么都不做」，不用拍板。** `import_team_config` 写 `risk_rules.toml` 的整支包在 `if let Some(ref rules) = export.risk_rules` 内，`playbooks` 同理，`ImportResult::risk_rules_imported` 就是 `is_some()`；`preview_team_config_import` 在 `None` 时 `risk_rules_change` 也是 `None`，`summary` 不出现那一段。所以 ① 要落地的是「保持这个 no-op」，不是「实现清空」。已把那半句写进 `export_team_config` / `import_team_config` 的 `///`。**真正仍卡住的只有「目标带 `[risk.*]` 时整段替换还是并集」**。
 3. **L2-109 改判「是设计，不是滞后」**，证据在 `OPT-LOOP-L2-PENDING.md` 该行下方：`CHANGELOG.md:248`（`06fa58c`）把「neither the MCP schema nor the daemon body schema has a `force` field, so those surfaces cannot override the verdict at all」写成契约；`rm-rf` 的 clap 文档只说审批；同文件里 `exec`/`exec-multi`/`playbook run`/`redact remove`/`highlight remove`/`webdav` 都有 `--force`，`SftpCommands` 九个变体一个也没有；`authorize_local_operation` 的拒绝提示本来就写着「sftp has neither --force nor daemon forwarding」。→ 方案 ①（删形参），仍然是签名改动，未执行。
+
+### batch 2026-11-11 · 前端与 i18n 文案键完整性（第二批，B=10）
+- issue #16 / 开批时间 2026-11-11 06:20 (GMT+8)
+- CodeBuddy 首条分析：**未到（等待中）**——issue 发出后 60 s × 5 次轮询（06:21–06:26）+ 结束前即时复核（≈06:27）+ 7 分钟处延时复核（≈06:28）均 0 评论（batch 9 的首条在 18 分钟处才到，窗口不可靠，消费者下次运行重新等）。
+- 6 轮进度：0 / 6（待消费任务更新）
+- 正文已喂给 CodeBuddy：**93 条「不成立」原文**（编号 54：preflight 2 + batch1 六轮 10 + batch2 编号 15–31 十七条 + batch4 第 1/5/6 轮 10 + batch6 第 1 轮 5 + batch8 第 1 轮加粗伪标题 4 条子断言 + 手工/单发消费 11-11 的 6 条；行内判定行 35：batch2 D2/D4、batch3 A5/E、batch5 六条、batch6 五条、batch7 八条、手工 11-10 一条、batch8 第 2–6 轮五条、**batch9 七条**（§四.1/§四.2/§五.1/§五.3/d574676 第一处 hunk/B 结论/行号 485）；摘录 4：batch8 补记两条 + 收尾之后撞号描述一条 + batch9 汇总增量计数一条）+ 首查项（`src/types.ts`/`src/api.ts` ↔ `docs/api.yaml` 在 batch 5–9 大量补齐后的漂移；桌面审批 UI 文案与「全仓只有 daemon 带审批处理器」事实的一致性）+ KNOWN-ISSUES 空档（K7/K13/K15/§3 懒加载审批在桌面的实际表现）+ 前端口径（i18n 未加引号键 `From:`/`Decision:`、字面量契约 948/747/860 MISSING=0 已闭环、属性访问 15 + 裸变量 8 不重提、1rem=14px、无 preflight、Button/IconButton 原语、L2-55…L2-74 勿重提、npm test 213/27 本日 06:17 实测）。正文由 `/tmp/build-opt-issue-b10.py` 按 ledger 锚点切片生成（复用 b9 骨架，新增 batch9 区域锚点、7 条判定行与 1 条摘录；全部锚点唯一性校验通过，计数复验 93）。
+- **开批后更正（消费者必读）**：正文「上批遗留的两个问题（请先答这两问）」一节**已过时**——两问在开批前一小时（05:18，`dae017e`/`ce1b22e`）就由消费者侧在 ledger 末尾补答：①五个路由都带审批处理器（都走 `authorize_command` → `authorize_command_with_approval`），顺手核出新形状：六个调用点全部忽略 `approved` 返回值，与 `/exec` 的 `if pf.approved && pf.risk == High { req.force = true }` 不一致（是否立 L2 待判）；②L2-108 的「导出包缺 `risk_rules.toml`」现行行为就是 no-op，真正待拍板的只剩「目标带 `[risk.*]` 时整段替换还是并集」；③附带 L2-109 改判「是设计不是滞后」。生产任务已发更正评论 `2120283018706182144`（06:30:39 GMT+8；**#16 现有这条评论是生产任务的更正，不是 CodeBuddy 分析——判定「已到」须按作者区分**），**第 1 轮起以更正评论与 ledger 当前版为准，勿按正文旧文执行**。根因是生产任务开批前未 `git fetch`——本地 HEAD 停在 `a3504a9`（05:16），漏了消费者 05:18 的两笔。**下次开批前必须先 fetch cnb main 并重读 ledger 尾部。**
+- 同主题第一批（#10）已 6 轮闭环；此后 `src/` 仅 `628e9f3` 一笔注释改动（ApprovalDetail.tsx）。本批重点：前端镜像类型 ↔ api.yaml 漂移、桌面审批文案、第一批未点名组件（approval/ 子目录、NetcattyImportDialog、CommandPalette、monaco 相关、main.tsx/ErrorBoundary 链）。
+- 顺手按 #15 批次条目与 BATCH_COMPLETE 行自述删除顶部 `BATCH_COMPLETE · issue #15` 状态行（HTML 注释同步为八条）。
+- 下一批（B=11）：11 % 6 = 5 → 主题 5：`docs/` 声称与代码实际行为是否相符（第二批，#11 已闭环）。开 issue 前先 fetch cnb main 重读 ledger（本批消费期间会新增不成立条目，行内判定行锚点会漂移，b10 脚本可改造复用）。
+- 若 #16 仍 open 则按背压闸门跳过；锁沿用「保留在位、消费者侧自行清理」先例。
