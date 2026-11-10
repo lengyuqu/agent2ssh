@@ -369,7 +369,10 @@ fn write_all_shrinking<W: Write>(
 /// regains control. `File::flush` waits on the same queue: `poll_drain_writes`
 /// empties `write_acks` before the optional fsync, so a deadline wrapped around
 /// `write` alone would leave the tail of every transfer — the final flush —
-/// still unbounded.
+/// still unbounded. `poll_shutdown` drains the same queue, but this wrapper
+/// never calls it; `Drop for File` sends the CLOSE with `close_nowait` and
+/// throws the reply away, so the handle is released without anything waiting
+/// for those acks.
 /// What still bounds that peer is the socket write timeout set in
 /// `connect_embedded_ssh`, and only for the case where TCP itself stops
 /// accepting bytes. The gap is recorded as L2-96.
