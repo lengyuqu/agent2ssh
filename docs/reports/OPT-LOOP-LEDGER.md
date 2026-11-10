@@ -887,7 +887,7 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 ### batch 2026-11-10 · docs/ 声称与代码实际行为是否相符
 - issue #11 / 开批时间 2026-11-10 14:14 (GMT+8)
 - CodeBuddy 首条分析：**未到（等待中）**——issue 发出后 60 s × 5 次轮询 + 结束前即时复核均 0 评论。消费者下次运行重新等（沿用 #9/#10 先例：等待超时不空等，按协议记「未到」）。
-- 6 轮进度：**1 / 6**（consume 1 见下；issue #11 保持 open）
+- 6 轮进度：**3 / 6**（consume 1–3 见下；issue #11 保持 open）
 - 正文喂给 CodeBuddy：**43 条「不成立」原文**（preflight 2 + batch 1 六轮 10 + batch 2 行内 D2/D4 2 条与编号 15–28 共 16 + batch 3 行内 A5/E 2 条与编号 29–31 共 5 + batch 4 第 1/5/6 轮共 10；编号 39 条 + 行内 4 条）+ KNOWN-ISSUES 空档（K2 / K7 / K8 / K9+K12 / K13 / K14 / K15 / §3 全部未验证行）+ 口径提醒（基线红测 861/1/1 与 npm 213/27、「时点快照不是缺陷」、判据按 feature 组合、扫描器反例自检、`.github/**` 禁区、越权推送重申、`[跑]` 标注不可采信）。范围：`README.md` / `overview.md` / `AGENTS.md` / `CLAUDE.md` / `docs/guides/**` / `docs/KNOWN-ISSUES.md` / `docs/` 其余说明文档与 `.txt` / `CHANGELOG.md`（仅当声称当前行为）；`api.yaml` / `docs/skills.md` / SKILL.md / clap help 已在 #9 对齐，除非回归勿重扫。
 - 批次口径说明（消费者必读）：本条是 ledger `###/## batch` 条目口径下的**第 5 批**（#7–#10 为第 1–4 批）。此前顶部状态行把 #9 称「batch 4」、#10 称「batch 5」，是消费者按自己口径的误称；那三条 `BATCH_COMPLETE` 状态行已由本次生产运行按 #10 批次的遗留要求删除（#11 开批后它们会让消费任务误判「只报告不执行」），史实在各「批次汇总」小节与 git 历史。
 - 编号陷阱沿用：ledger 原编号 1–31 跨节连续，29–31 物理落在 batch 2 末节但内容属 batch 3 第 5 轮；batch 4 的三组「新增不成立」在各自小节内重新从 1 编号，喂给 CodeBuddy 时已按来源分组标注，勿按物理位置归批。
@@ -943,3 +943,26 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 **F1 的方法学价值**：四份文档一起错同一件事，是因为 `api_yaml_documents_every_daemon_route` 比**路由**不比**帧字段**，而 README/architecture 的散文无测试可见。上一轮 CodeBuddy 建议的「优先找测试看不见的散文」在本轮给出了最大一条。
 
 **第 3 轮未开始**：回帖后 60 s × 5 无回复 → 从 C=2 → 第 3 轮起，指摘在 CodeBuddy 对 `2120075128699527168` 的回复里。
+
+#### consume 3 / 6（基线 `2fd70bc`，回帖 `2120094624084570112`）
+
+**判定：8 条 → 成立 4 / 部分成立 2 / 不成立 2。**
+
+| 项 | 判定 | 关键证据 |
+|---|---|---|
+| F5 脱敏「回落到内置集合」 | 成立（两处） | `redaction.rs` 的 `redact_with_user_rules` 在 `load_user_rules_checked` 出错时返回字面量 `[REDACTION UNAVAILABLE]`，注释自陈 fail-closed；回落 `default_rules()` 只在 `load_user_rules`（列表/编辑面）。`configuration-guide.md:1210` 与 `CHANGELOG.md:120` 都在说回落。**补一条它没说的**：文件**缺失**时两条路径结果相同（`seed_default_rules` 先落盘），真正的分岔只有「不可读/损坏」 |
+| F6 K7「主机证书没有做校验」 | 部分成立 | 不校验的是 CA 链与有效期；`check_server_key` 对 `PublicKeyOrCertificate::Certificate` 只取 `cert.public_key()`，与 `known_hosts.json` 比对的就是这把裸 key，注释自己写着这是「the half of K7 this file does not cover」。**但它说「没有一句区分用户证书与主机证书」不成立**——K7 那格原文就是「主机证书（CA 签发的服务器主机密钥）」，K10 讲的是用户证书 |
+| F7 `/audit` 参数表 | 成立（比它说的更短） | quickstart 实际只有 **6** 行（它说 8 行）；`AuditQuery` 13 个字段、`api.yaml` 也 13 个。缺 7 个：`search` / `command_pattern` / `host_env` / `host_role` / `host_owner` / `decision` / `agent`。语义逐条读了实现：`search` 是大小写不敏感子串、`command_pattern` 是 **glob 不是正则**、`host_*` 匹配主机档案标签、`agent` 精确匹配 `source` |
+| F8 `/approvals` 示例与状态值 | 成立 | `ApprovalRequest` 序列化 **11** 个键（示例 7 个，它说 6 个），缺 `context` / `revoked_at` / `approved_command_snapshot` / `rewritten_command`；状态枚举 5 个值，指南列 4 个。**它没提的第二处**：`api.yaml` 的 `ApprovalRequest` 也缺 `revoked_at`、`approved_command_snapshot`、`context.recent_commands`、`risk_details.risk_unclassified` |
+| F9 `/terminal` 缺 423 | 成立，但**判据是错的** | 缺 423/429 属实（`locked_status()`=423、`too_many_requests_status()`=429，且都在 `on_upgrade` **之前**判）。但它给的 `curl` 判据跑不出 423：`WebSocketUpgrade` 是提取器，缺 `Connection: upgrade` 时先被拒（axum 0.7.9 `InvalidConnectionHeader` → 400），处理器根本没进。正确判据是带 upgrade 头做一次握手。**同族第二处不存在**：`/exec/stream` 把 gate 与限额判在 `on_upgrade` 之后、用 error 帧回，所以它只有 101 是对的 |
+| F10 `targets` 声称的下限不存在 | **不成立** | `validate_terminal_broadcast_request` 里有 `if request.targets.len() < 2`（`daemon.rs:4270`），与 `api.yaml` 的 `minItems: 2` 逐字对应。它自标「没读完」，确实没读到这里 |
+| F11 备份清单漏 `policy.json` | 部分成立 | `policy.json` 确实漏（`existing_policy_path` 先 `.toml` 后 `.json`）。**后半不成立**：那句的主体是「后者」（`SYNCABLE_FILES`），不是本清单，`webdav_sync.rs:38-46` 也确实不含 `daemon_tokens.toml` / `keys/`。顺带核实另外 7 个按需生成的配置文件（三个规则文件、`ssh_algos.json`、`telemetry.toml`、`webdav.toml`、`snippets.json`）同样不在这条 tar 里，改用散文写明而不是塞进命令——多一个不存在的路径 tar 会直接失败，而 `policy.toml`/`policy.json` 恰好二者必缺其一 |
+| F12 架构表把两种缓存形态写成同一个 | **不成立** | `architecture.md:46` 是 `diagnostics.rs` 那行，`redaction.rs` / `highlight.rs` 在整张表里**没有行**；它引的「rule set + `write_private_json`」出自 `configuration-guide.md:1075`，不是 architecture。结论方向（表里没有「读一次 vs 每次重读」的区分）站得住，但做法是**补三行**，不是改一行；本轮已补，并写明 `redaction.rs` 是刻意不缓存 + fail-closed |
+
+**L1**：`abb63d9`（6 文件：`configuration-guide.md`、`CHANGELOG.md`、`KNOWN-ISSUES.md`、`daemon-api-quickstart.md`、`api.yaml`、`architecture.md`）。推 `cnb main`，未推 github。
+
+**验证**：`npm run build` 7.10s；`cargo fmt --check` 绿；`--no-default-features --lib` **861 passed / 1 failed / 1 ignored**（失败项仍是那条故意红的 IPv6）；`--features daemon --test daemon_integration api_yaml` **1 passed**。
+
+**新增 L2：0 条。** 本轮八条全是文档事实，没有触到 `src-tauri/src/**`。
+
+**方法论**：它自标 `[读]` 的八条里，有两条在读完对应函数/整份表之后反转（F10、F12）。F12 是「文件名 + 行号都对不上」的老形态；F10 是它自己写了「没读完」。下一批首项建议：把 `api_yaml_documents_every_daemon_route` 从「只比路径」扩到「比方法 + responses 状态码集合」——F9 这类缺状态码的条目今天没有任何守卫。
