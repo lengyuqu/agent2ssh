@@ -23,7 +23,9 @@
 
 ---
 
-**BATCH_COMPLETE** · 2026-11-10 · issue #8 · batch 2「SSH 传输、known_hosts 与认证（russh 侧）」6 / 6 轮已闭环，issue 已关闭。批次汇总见文末「批次汇总 · 2026-11-10 · issue #8」。消费任务此后只报告状态。
+**BATCH_COMPLETE** · 2026-11-10 · issue #9 · batch 4「MCP 契约与 CLI 文档一致性」6 / 6 轮已闭环，issue 已关闭。批次汇总见文末「批次汇总 · 2026-11-10 · issue #9」。消费任务此后只报告状态，直到生产任务开出下一条 `[opt-round]`。
+
+**BATCH_COMPLETE** · 2026-11-10 · issue #8 · batch 2「SSH 传输、known_hosts 与认证（russh 侧）」6 / 6 轮已闭环，issue 已关闭。批次汇总见文末「批次汇总 · 2026-11-10 · issue #8」。
 
 ---
 
@@ -261,7 +263,6 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
   - D4 `channel.rs:700-720` 测试注释易把「2s 上界」读成「2s 等待」
   - D5 `LocalKeySigner` 两条错误臂零测试（`russh_impl/mod.rs:104-116`）
   - 范围外 2 条：`Settings::run` 的 disconnect abort 语义；`core.rs` 上传/下载无 session 超时（与 C5 同根因）
-- 6 轮进度：5 / 6（第 1 轮见下方 `consume 1 / 6`，第 2 轮 `consume 2 / 6`，第 3 轮 `consume 3 / 6`，第 4 轮 `consume 4 / 6`，第 5 轮 `consume 5 / 6`）
 - 正文已喂给 CodeBuddy：12 条「不成立」原文（preflight 2 + 第 1–6 轮新增 10）+ K2/K7/K9/K12 与 §3 未验证范围空档
 
 ### consume 1 / 6 · 2026-11-10 05:20–05:26 (GMT+8)
@@ -475,8 +476,8 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
 ### batch 2026-11-10 · MCP 契约与 CLI 文档一致性
 - issue #9 / 开批时间 2026-11-10 09:48 (GMT+8)
 - CodeBuddy 首条分析：未到（等待中，issue 发出后 5 分钟内 5 次轮询均 0 评论；消费者下次运行重新等）
-- 6 轮进度：2 / 6
-- 正文已喂给 CodeBuddy：**28 条「不成立」原文**（preflight 2 + batch 1 六轮 10 + batch 2 第 1 轮行内 D2/D4 两条 + batch 2 第 2–6 轮 14）+ K7/K8/K9/K12/K13 相关空档 + 口径提醒（基线红测、`.github/**` 禁区、四列计数）。范围：`docs/skills.md`、`docs/api.yaml`、`bin/agent2ssh.rs` clap help、`bin/agent2ssh-mcp.rs`、`skills/agent2ssh/SKILL.md` 及 guides 相关段落。
+- 6 轮进度：6 / 6（第 1 轮 `consume 1 / 6` · 回帖 `2119990687696330752`；第 2 轮 `consume 2 / 6` · `2119994949708967936`；第 3 轮 `consume 3 / 6` · `2119998853859422208`；第 4 轮 `consume 4 / 6` · `2120001436644700160`；第 5 轮 `consume 5 / 6` · `2120003384483667968`；第 6 轮 `consume 6 / 6` · `2120004587762384896`）
+- 正文已喂给 CodeBuddy：**35 条「不成立」原文**（preflight 2 + batch 1 六轮 10 + batch 2 第 1 轮行内 D2/D4 两条 + batch 2 第 2–6 轮 14）+ K7/K8/K9/K12/K13 相关空档 + 口径提醒（基线红测、`.github/**` 禁区、四列计数）。范围：`docs/skills.md`、`docs/api.yaml`、`bin/agent2ssh.rs` clap help、`bin/agent2ssh-mcp.rs`、`skills/agent2ssh/SKILL.md` 及 guides 相关段落。
 
 #### consume 1 / 6（基线 `db60643`，回帖 `2119990687696330752`）
 
@@ -590,3 +591,58 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
 2. **路由数我数成 106**：脚本只认 `get(标识符)`，漏掉 `GET /` 的闭包形式。C9 说的 107 是对的，我此前在回帖里写的「105 operation」也一直没错——错的是我把「route 数」当成 106。两个数现在都带单位写进文档。
 
 **流程观察（补充上一轮那条）**：上一轮说「先扫描再回帖」，这一轮补一条：**扫描器本身要先用反例自检**。两次假阳性（i18n 键、路由数）都是脚本的正则比代码的真实形态更窄，而两者都被我当成结论写进了草稿。
+
+#### consume 6 / 6（基线 `b680233`，回帖 `2120004587762384896`，末轮）
+
+指摘是 CodeBuddy 03:58:44 那条（对 `6d1fb71` 的复核 + A–H 八条），它落在我第 5 轮回帖（03:59:29）**之前**，属于「队列里还有未消化的材料」。按协议先轮询 5 分钟（12:01:13 / 12:02:14 / 12:03:14 三次 `total=10`）确认没有新回复，再用它推进。判定 **成立 6（A B C D F G）/ 部分成立 1（对 `comp_cs` 的更正）/ 不成立 1（E）**；另外它对我三条指认里有两条已经不成立。落地 `0a79492`（纯文档）。
+
+| 项 | 判定 | 关键证据 | 落地 |
+|---|---|---|---|
+| A | 成立 | `events.rs:20-39` 18 变体 vs 契约 17，缺 `stream_connected`；`daemon.rs:4072-4084` 每个订阅首帧就发它；`src/types.ts:472` 前端已有 | 补为枚举第一位 + 描述「首帧即它」 |
+| B | 成立 | `EventType::Host{Connected,Disconnected}` / `ConfigChanged` 只有 `events.rs:92/93/99` 测试引用，零发布点；`App.tsx:135`、`NotificationCenter.tsx:18` 的注释自认 | 契约写明「不要等它们」；削/补 → **L2-54** |
+| C | 成立（数字改） | `/audit` 13 参数、`/audit/export` 14；`types.rs:443-478` 的 `AuditFilter` **14** 字段（13 线上 + `host_scope` 的 `#[serde(skip)]`），契约只写 6 个 | 补到 13 + 说明 `host_scope` 不上线 |
+| D | 成立 | `playbook.rs:37-47` 六字段 vs 契约五字段，缺 `advanced_steps`；`effective_steps`（`:245-259`）优先用它，`steps` 可为空。`configuration-guide.md` 的字段表同样五行 | 加 `advanced_steps` + `PlaybookStep`/`PlaybookParam`；指南补一行与一个 `[[playbooks.advanced_steps]]` 例子 |
+| E | **不成立** | 契约里 `/events/stream` 的 200 已经是 `content: text/event-stream`，schema 描述写着「SSE frames containing AgentEvent JSON in data lines」；它引的 `:1473-1478` 是旧版 | 无改动 |
+| F | 成立 | `remote.rs:145-155` 的 `scope` 带 `skip_serializing_if` → 键缺席；契约写 `nullable`（键在值 null） | 改成「省略而非 null」+ 与 `WebDavSyncStatus` 互指 |
+| G | 成立 | `load_algo_prefs`（`ssh_algo.rs:259-267`）= 存在 **且** 解析成功，`has_custom_algo_prefs` 就是 `.is_some()` | `custom` 语义改成「存在且能解析」 |
+| H | 成立（补判据） | `tauri_commands.rs:2404-2416` 11 字段、9 个 `Option` 无 skip、camelCase；`src/types.ts:233-245` 对得上 | 不改；L2-48 的落地范围按它补上「`types.ts`/`api.ts` 的 IPC 名」 |
+
+**验证**：`npm run build` 6.53s；`cargo fmt --check` 绿；`--no-default-features --lib` = 861 passed / 1 failed / 1 ignored（已知红测）；`api_yaml` 1 passed；`yaml.safe_load` 90 path / **69** schema / 悬空 `$ref` 0；`event_type` 17 → 18、`AuditFilter` 6 → 13、`Playbook` 5 → 6。
+
+**自我更正 ×3**：
+
+1. **`nullable: true` 是 136 处，不是 142**：我上次用的是 `grep -c null`（把 `nullable` 以外含 null 的行也算进去），这次用 `grep -c "nullable: true"` 现算。L2-46 的定量依据已改。
+2. **前四轮我一直把进度行改错了地方**：`- 6 轮进度：K / 6` 在文件里出现两次，我每轮都改到**上面那一行**（它坐落在 issue #8 的小节里，却引用着只存在于 issue #9 段内的 `consume K / 6` 锚点）。本轮把错位那行删掉、把 issue #9 自己那行补到 6 / 6 并逐轮写上回帖 id。教训：**改计数器之前先确认它属于哪一节**——`grep` 得到唯一匹配，不等于匹配到了正确的那一条；位置错了四周都没人发现，是因为它「看起来」一直在递增。
+3. **`$ref` 兄弟键那处它说得对**：上一轮我在 `/highlight/rules/update` 的 `rule` 上留了 `$ref` + `description`，是全文唯一一处这样写的；已把句子挪进 `HighlightRule` 的组件描述。本轮新增的三处 `$ref` + `description`（`local`/`remote`/`scope`）是**故意**的：它们表达「省略 vs null」这种 `type` 说不清的东西，属 L2-46 拍板后一起收。
+
+---
+
+## 批次汇总 · 2026-11-10 · issue #9 · MCP 契约与 CLI 文档一致性
+
+- **批次日期**：2026-11-10（09:48 开批，12:0x 收尾，GMT+8）
+- **主题**：MCP 契约与 CLI 文档一致性
+- **issue**：#9 `[opt-round] batch 2026-11-10 · MCP 契约与 CLI 文档一致性`（已关闭）
+- **总量**：6 轮共核实 **60 条** → 成立 51 / 部分成立 7 / 不成立 2（另有 7 次「对上一轮的回帖指认」被推翻，记在下面的不成立清单里，不重复计入）
+- **提交**：15 笔（`db60643..0a79492`），全部推 `cnb main`，**未推 github**。代码注释 2 笔（`3c30287`、`95461ff`）/ 文档 8 笔 / ledger 与 L2 5 笔。**零行为改动**——凡是会改语义的都留在 L2
+
+| 轮 | 指摘 | 判定 | 本轮提交 | 回帖 |
+|---|---|---|---|---|
+| 1 | 7（A1-A5 / Q1 / P1） | 成立 4 / 部分 2 / 不成立 1 | `3c30287`（承重的 `#[allow(dead_code)]`）、`1a36f7d`（admin 门文档）、`b86a18e`（ledger） | `2119990687696330752` |
+| 2 | 9（G1–G9） | 成立 7 / 部分 2 | `0b2bb5c`（六个审计判决）、`38eb70b`（403 位置与文案）、`b756fb5`（ledger） | `2119994949708967936` |
+| 3 | 9（B1–B9） | 成立 9 | `684d471`（`writeOnly`、6 个新组件、`/shutdown` 重写） | `2119998853859422208` |
+| 4 | 18 个空 schema（自扫） | 成立 18 | `6d1fb71`（11 个组件，53 → 64） | `2120001436644700160` |
+| 5 | 9（C1–C9） | 成立 7 / 部分 2 | `95461ff`（11 字段的注释）、`6b6cf1d`（recording 组件、health-snapshot） | `2120003384483667968` |
+| 6 | 8（A–H） | 成立 6 / 部分 1 / 不成立 1 | `0a79492`（事件枚举、审计过滤、playbook 形状） | `2120004587762384896` |
+
+**这批真正交付的东西**（不是条数）：
+
+1. **契约第一次和实现对得上**：`api.yaml` 的 schema 从 47 增加到 69，`type: object` 无形状的节点从 18 降到 0，`$ref` 悬空 0。第 4 轮的全量扫描是关键——前两轮只修了复核者点到的那几处，剩下的 18 个一直是空白。
+2. **两套权限模型被写清**：`require_admin` 与 `require_recording_admin` 的 403 从 30 处缺到 0/39，描述里说清了两者的区别。
+3. **L2-53**：发现 `tests/daemon_integration.rs` 里有 20 个 handler 副本，且副本已与真身分叉（`approval_approve` 少了 `body: Bytes`）。**这是这批最值钱的一条**：它意味着「集成测试绿」在这条链路上不构成证据。
+4. **L2-46**：`api.yaml` 自称 3.1 却用了 136 处 3.0 的 `nullable`，在严格 3.1 校验下可空性完全没被表达。这条不修，上面那些 schema 在机器可读的层面仍然是错的。
+
+**给下一批的方法学**
+
+1. **扫描器先用反例自检**：本批有三次假阳性（`Decision`/`From` 两个「缺翻译」、路由数 106、`nullable` 142），全是脚本的正则比代码的真实形态更窄。规律是同一个：**正则认不出的写法，被当成了缺陷不存在**。
+2. **改计数器之前确认它属于哪一节**：`grep` 的唯一匹配可能落在错误的标题下。本批的进度行错了四轮才被发现，因为它一直在「合理地」递增。
+3. **复核者的判据也要核**：CodeBuddy 的 60 条里有 9 条（15%）自带错误——`hosts_updated` 说成恒 0、`RecordingInfo` 说成 snake_case、`/events/stream` 说成 `application/json`、`comp_*` 说成 6/2 分叉。它们的共同点是**先看结构名再看字段**，而字段上的 `serde` 属性才是真相。

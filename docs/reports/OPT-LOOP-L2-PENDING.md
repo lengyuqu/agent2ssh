@@ -339,3 +339,13 @@ enum DrainOutcome {
 | L2-51 | `bin/agent2ssh-daemon.rs:1924`（`/audit` 的 `host_scope: audit_host_scope(&auth)`）与 `:1955`（`/audit/export` 的 `host_scope: None`） | 成立 | 两个端点的筛选参数逐字相同（`api.yaml` 的 `/audit` 与 `/audit/export`），但 `/audit` 接受 scoped token 并按 host 过滤，`/audit/export` 只接受 admin 且**不做任何过滤**。今天 scoped token 过不了 `/audit/export`（403），所以不是当场泄漏；问题是**以后放宽权限时导出会漏过 `/audit` 的 scope**，而契约上看不出这两个端点权限模型不同 | ①`/audit/export` 复用 `audit_host_scope`（改了权限语义）；②在 `api.yaml` 的描述里写明「只用 admin token，且不套 host scope」（纯文档）。②更保守，①更一致 |
 | L2-52 | `bin/agent2ssh-daemon.rs:3040-3094`（`forward_remove`） | 成立 | 命中分支（`:3048-3089`）走 gate / rate limit / scope / risk + `append_operation_audit`；未命中分支（`:3090-3093`）直接 `forward_remove_core(uuid)` → `BAD_REQUEST`，**不写审计、不查 scope**。于是同一条路由有两种「记不记录」的语义，且未知 id 回 400 而不是 404 | ①未知 id 统一 404；②抽 `find_forward_rule(id)` 让两条分支共用同一段前置检查与审计。都在 handler 层，需拍板 |
 | L2-53 | `src-tauri/tests/daemon_integration.rs:129-393`（**20 个 handler 副本**）、`:410`（`build_test_router` 挂副本） | 成立（**结构性，优先级最高**） | 这个测试文件重新实现了 20 个 handler 并在 `build_test_router()` 里挂这些副本，而 daemon 有 107 条路由。副本**已经开始与真身分叉**：`approval_approve` 副本（`:175`）只有 `State/headers/Path` 三个参数，真身（`daemon.rs:3337`）多一个 `body: Bytes` —— 所以真身的「空 body = 按原样批准」与改写路径两条语义，副本里根本不存在；`get_health_snapshot_handler` 副本回 `{error}`，真身回 `{error, hint}`。C2 想补的那条测试如果加在这里，测到的仍然是副本。**推论**：任何「集成测试绿了所以 HTTP 面没问题」的说法，在这个文件上都不成立 | ①用 `#[path = "../src/bin/agent2ssh-daemon.rs"]` 之类引入真 bin 并给 handler 加可见性（axum handler 是普通 `async fn`，可行但要把 bin 改成 lib+bin 结构）；②把 HTTP 面整体交给真 daemon 起的 e2e（`daemon_local_exec_e2e.rs` 那套已经在跑真二进制），删掉副本路由；③保持现状并在文件头写明「这是契约形状的镜像，不是实现测试」。③是零成本的诚实做法，但下次还会有人把它当实现测试读。需拍板 |
+
+### 2026-11-10 · batch 4（issue #9）第 6 轮追加（基线 `b680233`，末轮）
+
+第 6 轮 8 条（A–H）里 6 条成立、1 条部分成立、1 条不成立（E，依据已过时）。文档面已随 `0a79492` 落地；只剩下面这条是产品能力取舍。
+
+| 编号 | 位置 | 判断 | 为什么不能自动落 | 建议改法 |
+|---|---|---|---|---|
+| L2-54 | `src-tauri/src/events.rs:20-39` 的 `EventType::HostConnected`（`:29`）、`HostDisconnected`（`:30`）、`ConfigChanged`（`:34`） | 成立 | 全仓 `EventType::HostConnected` / `HostDisconnected` / `ConfigChanged` 只有 `events.rs:92/93/99` 三处**测试**引用，**零生产发布点**；`git log -S` 显示这三个值只有引入、没有「曾经发过后来丢了」。前端早就在注释里承认了：`src/App.tsx:135`、`src/components/NotificationCenter.tsx:18`。契约把三个从未实现的值当既有行为列出来（本轮已在 `api.yaml` 的 `event_type` 描述里加「不要等它们」，但枚举还在） | ①**削**：从 `events.rs` 与 `api.yaml` 删掉三个值，前端两处注释跟着删、`src/types.ts:478/479/485` 的三个字面量一起删。这才符合「不给不存在的行为写契约」。②**补**：连接建立/关闭走 `connection.rs`/`forward.rs`，`config_changed` 挂在 `save_config` 成功之后——但 `App.tsx` 现有的 5s 轮询会与事件重复，得同时改掉轮询。①更诚实、②更有用，需拍板 |
+
+**批次收尾提示**：本批 6 轮已跑完（`BATCH_COMPLETE`），issue #9 关闭。待拍板项累计 **L2-1 ~ L2-54**（编号不连续，缺号是早期批次合并掉的）。下一批开工前应先处理 L2-53（集成测试测副本）与 L2-46（3.1 合规），这两条会影响后续所有契约工作的可信度。
