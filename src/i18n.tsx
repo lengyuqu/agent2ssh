@@ -946,6 +946,18 @@ function interpolate(text: string, vars?: Record<string, string | number>): stri
   );
 }
 
+/** Read the stored choice, else the browser's.
+ *
+ * No try/catch, unlike `theme.tsx`'s `initialTheme()` and `App`'s
+ * `sidebarCollapsed`: both of those guard `localStorage.getItem` because a
+ * disabled or opaque-origin store throws `SecurityError`, and the getter here
+ * throws nothing the caller can absorb — it runs inside a `useState`
+ * initialiser during `I18nProvider`'s first render, while our own
+ * `<ErrorBoundary>` is mounted *inside* that provider (`main.tsx`), so a throw
+ * here takes the whole tree down before the boundary exists. Guarding it is a
+ * two-line change; it is parked as L2-57 because it alters startup behaviour.
+ * The `setItem` in the effect below has the same exposure.
+ */
 function initialLanguage(): Language {
   const saved = localStorage.getItem(STORAGE_KEY);
   if (saved === "en" || saved === "zh") return saved;
