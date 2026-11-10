@@ -1039,7 +1039,7 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 - 下一批（B=7）：7 % 6 = 1 → 主题 1：daemon 控制与停止协议（`daemon_control.rs` / `daemon_activity.rs` / `bin/agent2ssh-daemon.rs`）。开 issue 前重读 ledger 不成立清单（批次 6 消费期间可能新增，且 #12 更正评论已把 3 条转回「可重提」）。
 - 锁沿用「保留在位、消费者侧自行清理」先例。
 
-### consume 1 / 6 · 2026-11-10 19:25–20:55 (GMT+8) · issue #12
+### consume 1 / 6 · 2026-11-10 19:25–19:43 (GMT+8) · issue #12
 
 - **指摘来源**：CodeBuddy 对 issue 正文的首条分析（评论 `2120104226712895488`，18:40 发出）。它自述**本工作区没有 Rust 工具链**，全部标 `[读]`。
 - **判定：9 组 → 成立 5 / 部分成立 2 / 不成立 2**（另有 1 条它自己撤回）。
@@ -1067,7 +1067,7 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 | §5.2 | resident 列表断言对「过滤被删」不够敏感，建议开第二条 session 加固 | **部分成立（建议，非缺陷）** | 越权侧断言 `[]`、admin 侧 `len()==1`，删掉过滤会得到 1 条 → 现有断言**会红**，今天有效。加固可做但不必 |
 | §5.3 | `api_yaml` 的 path 解析对 `:` 无防御 | **不成立（它自撤）** | 它自己核完改为「路径比对双向且冗余正确」 |
 
-**L1 落地**（一笔）：`bcca25c`
+**L1 落地**（一笔）：`bcca25c`；回帖 `2120119679749369856`（`## 第 1 轮收尾`）
 - `docs/api.yaml`：98 个 operation 补 `"401"`（中间件在 handler 之前就拒，属全站性质）；`POST /resident-sessions`、`POST /resident-sessions/{id}/exec`、`DELETE /resident-sessions/{id}` 补 `"500"`；`/exec-multi` 与 `/exec/compare` 的 400 描述补「risk policy blocked」。
 - `src-tauri/tests/daemon_integration.rs`：`api_yaml_documents_every_daemon_route` 增两条断言（方法一致、非公开 operation 必须有 401），抽出 `normalized_route_path` / `mounted_methods` 两个 helper；文件头把「mirrors」改成「18 of 92 + 副本无 scope/admin」。
 - `src-tauri/tests/daemon_resident_session_e2e.rs`：新增 `resident_session_open_and_exec_respect_the_gate`（gate 暂停 → open 423、exec 423、读仍 200）。
@@ -1096,7 +1096,7 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 5. **「`api_yaml_documents_every_daemon_route` 的 path 解析对 `:` 与前缀星号无防御，会静默放宽」— 不成立（提出者自撤）。**
    `split(':').next()` 取第一个冒号之前，而 path 里目前没有冒号；`/` 两侧的排除与 `path.is_empty()` 分支使比对双向冗余正确。它自己核完改成「路径比对本身是双向的、冗余正确的」。
 
-### consume 2 / 6 · 2026-11-10 21:00–21:25 (GMT+8) · issue #12
+### consume 2 / 6 · 2026-11-10 19:44–19:56 (GMT+8) · issue #12
 
 - **指摘来源**：CodeBuddy 对本轮第 1 轮收尾的复核（评论 `2120120687485419520`，19:45）。它这轮同样没有 Rust 工具链，但做了一件对的事：**用 Python 复刻我的解析逻辑，先复现出与 HEAD 相同的结果（90 routes / 107 mounts / 105 ops / 0 缺失），再做变异**。这比它上一批「读一遍就断言」可靠得多。
 - **判定：(a)(b)(d) 成立（且给出了比我的说法更精确的数），(c) 部分成立**——它指出 `/exec-multi` 的 400 还有**第四种**来源，我第 1 轮写的三分不完整。
@@ -1114,7 +1114,7 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 
 **它给的 18 个 500 缺口，我测出来是 21 个。** 差异在 handler 切分口径上（它按 29 个函数算，我按 `.route(` 里挂的名字逐个回溯），但两个数都比它上一批说的「20 处左右」更接近真相。**我自己第 1 轮说的「26 个 handler / 10 个 operation」也不准**：实测 handler 内自带 `INTERNAL_SERVER_ERROR` 的有 28 个函数，映射到 21 个 operation 缺 500。
 
-**L1 落地**（一笔）：`ac8de91`
+**L1 落地**（一笔）：`ac8de91`；回帖 `2120122180045262848`（`## 第 2 轮收尾`）
 - `docs/api.yaml`：21 个 operation 补 `"500"`（逐条读 handler 的 500 那一行，按各自真实原因写描述）；`/exec-multi`/`/exec/compare` 的 400 补第四种来源、并补 `"500"`（经 `authorize_targets` 透传）；`POST /resident-sessions` 的 429 删掉错引的 helper；`POST /hosts` 补 `"400"`。
 - `src-tauri/tests/daemon_integration.rs`：新增 `api_yaml_documents_the_500_each_handler_can_return`——**handler→operation 映射由源码现推，不写死表**（`.route(` 里的 handler 名 → 该函数体是否含 `INTERNAL_SERVER_ERROR`）。共用解析器抽成 `daemon_routes`，两条测试同源。
 
