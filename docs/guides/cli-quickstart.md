@@ -168,7 +168,7 @@ agent2ssh exec <host> "<command>" [--json] [--force] [--timeout-secs N]
 | `host` | - | 主机别名 |
 | `command` | - | 远程命令 |
 | `--json` | 关 | 以 JSON 格式输出（含 stdout、stderr、exit_code、duration_ms、risk_level） |
-| `--force` | 关 | 在没有 daemon 审批流时执行高风险命令；仍受策略限制 |
+| `--force` | 关 | 跳过**高风险**命令的确认；命中 `approval_policies` 时无效（本地 CLI 没有审批者，照样失败关闭） |
 | `--timeout-secs` | 60 | 超时秒数 |
 | `--stdin` | 无 | 将字符串传递到远程命令的 stdin |
 | `--plan` | 关 | 显示执行计划而不实际运行命令 |
@@ -190,11 +190,13 @@ agent2ssh exec myserver "long-running-task" --timeout-secs 300
 # 传递 stdin
 agent2ssh exec myserver "cat > /tmp/data.txt" --stdin "hello world"
 
-# 高风险命令可在策略允许时使用 --force
+# 高风险命令用 --force 跳过风险确认（命中审批策略时 --force 无效）
 agent2ssh exec myserver "sudo systemctl restart nginx" --force
 ```
 
-如果统一策略命中显式审批规则，本地 CLI 会失败关闭；需要通过 daemon 路由执行并在审批接口或控制台中批准，或调整策略后再执行。
+CLI 侧没有审批者，所以命中 `approval_policies` 时一律失败关闭，`--force` 也绕不过去（`--force` 只覆盖「高风险未获批」这一种拒绝）。想拿到审批只有一条路：`exec` 加 `--daemon <远端别名>`，把请求转发到那台远端 daemon 的 `/exec`，在它的审批接口或控制台里批准 —— **本地 daemon 不参与 CLI 执行路径**，它正在运行也一样，`--daemon localhost`（默认值）走的就是本地分支。
+
+`exec-multi`、`sftp`、`session`、`forward`、`connect`、`playbook` 都没有转发路径，命中审批策略时只能改策略，或用桌面端/HTTP 接口执行。
 
 ### 多主机并发执行
 
@@ -208,7 +210,7 @@ agent2ssh exec-multi <h1> <h2> --command "<cmd>" [--force] [--tags <tag>]
 |------|--------|------|
 | `hosts` | - | 一个或多个主机别名 |
 | `--command` | - | 远程命令 |
-| `--force` | 关 | 在没有 daemon 审批流时执行高风险命令；仍受策略限制 |
+| `--force` | 关 | 跳过**高风险**命令的确认；命中 `approval_policies` 时无效（本地 CLI 没有审批者，照样失败关闭） |
 | `--tags` | 无 | 按标签筛选主机（逗号分隔） |
 | `--timeout-secs` | 60 | 超时秒数 |
 | `--json` | 关 | JSON 输出 |

@@ -13,7 +13,7 @@
 **引用规则（立即生效）：**
 
 - 引用撞号条目时**必须带主题限定**，写成 `L2-15（known_hosts 形态）` / `L2-15（shutdown 后仍 200）` 这种形式。这个文件里凡出现裸 `L2-13`…`L2-30` 而无主题限定的引用，都是旧引用，需按上下文重判。
-- **新条目从 `L2-100` 起编号**，不再取 13–99 的空号——空号看起来安全，实际每次都挑到别人用过的号。**已用：`L2-100`（`forward.rs` accept 循环）、`L2-101`（SFTP 审批用标签快照）、`L2-102`（三条 forward 单条路由的 scope 越权返 403）、`L2-103`（MCP `ssh_events_subscribe` 结构上恒空）。下一个是 `L2-104`。**
+- **新条目从 `L2-100` 起编号**，不再取 13–99 的空号——空号看起来安全，实际每次都挑到别人用过的号。**已用：`L2-100`（`forward.rs` accept 循环）、`L2-101`（SFTP 审批用标签快照）、`L2-102`（三条 forward 单条路由的 scope 越权返 403）、`L2-103`（MCP `ssh_events_subscribe` 结构上恒空）、`L2-104`（`tools.rs` 的 `tools/list` 文案）、`L2-105`（daemon 侧 `transfer_id`）、`L2-106`（`ResourceKind::Transfer` 条目从未建成）、`L2-107`（`--risk-override` 的取值与静默丢弃）、`L2-108`（`team_config` 的风险规则路径没跟上 policy）。下一个是 `L2-109`。**
 - **上一轮的教训（关帖后补记）**：`L2-100` 立条时我写的是「`/local-exec` 的 webhook 恒说结果已知」——那是错的，`/local-exec` 的 `remote_outcome_unknown: None`（`daemon.rs:1807`）的确恒真，但它**不是**没人做过：同一形状在 `:1711` 的 `/exec` 上工作，两边差的是 `:1700` 那一次 `ssh_shutdown_outcome()`，而 local 侧的类型在 `core.rs:1267` 就被折成了字符串。所以那件事的条目是 **L2-27**，不是新号。**立条前先 `grep` 一遍已经有了什么**，这一条是从「差一点就重复登记」里换来的。
 - **同号 + 括号后缀**（目前只有 `L2-23（收窄）`）视为对同号条目的**修订**，不计入撞号，但正文必须写明它在修订哪一条、撤掉了哪个选项。否则下一次按首列扫表的脚本会把它当成一个独立条目。
 - 全量重编号要同时改 ledger 里六批的引用，属人拍板项，不在这里做。半途重编号会让「按编号追溯」比现在更坏。
@@ -686,3 +686,12 @@ CodeBuddy 的复核 `2120255506575945728` 新批 4 条 → **成立 2 / 不成�
 | L2-107 | `bin/agent2ssh.rs:635`（`--risk-override` 的 clap 文档）、`:2010-2016`（`risk_override.and_then(|s| match ... _ => None)`） | 成立 | 两件事：①文档（clap 的 `(low/medium/high)` 与 `cli-quickstart.md:97`）把取值说成闭集，而 `match` 接受 `blocked`——`apply_risk_override`（`core.rs:990-996`）会把它当成覆盖值，于是该主机**每条命令都被拒**，这是文档里从未出现的能力；②**无法识别的值是静默丢弃**：`_ => None` 之后 `HostProfile.risk_override` 为 `None`，程序照样打印 `Saved host 'x'.`。一个拼错的 `--risk-override hihg` 会得到一台没有任何覆盖的主机，且没有任何提示。本轮只按①改文档（`(low/medium/high/blocked)`），②属行为，未动 | ①先定「`blocked` 该不该作为覆盖值」：该留就把 `cli-quickstart.md:97` 与 clap 文档写成事实（本轮已写，若决定不接受则要改回并改代码）；②把 `_ => None` 换成 `bail!("unknown risk level {s}: expected low/medium/high/blocked")`，或至少 `eprintln!` 一条警告。改的是 `host add` 的失败语义（今天永不失败），要配一条 `try_parse` 级用例 |
 
 
+
+## 2026-11-11 · batch 9 第 4 轮（issue #15，基线 `99ec6b4`→`d574676`）
+
+CodeBuddy 的复核 `2120258070138740736` 新批 3 条 → **成立 1（§五.2）/ 不成立 2（§五.1、§五.3）**；三个提问（Q1 重新推导、Q2 新文案、Q3 `--risk-override blocked`）均已答复并采纳。它自己推的 `d574676` 里有一处**新引入的错事实**，本轮已回退（见 ledger「不成立」清单第 3 条）。L1 动了 `api.yaml` 两处（回退 + `requestBody.required`）、`cli-quickstart.md` 四处、`bin/agent2ssh.rs` 四处提示、`daemon_integration.rs` 一条断言。
+
+| 编号 | 位置 | 判断 | 为什么不能自动落 | 建议改法 |
+|---|---|---|---|---|
+| L2-108 | `core/team_config.rs:36-46`（导出只读 `risk_rules.toml`）、`:109-113`（导入无条件覆盖 `risk_rules.toml`）、`:186-191`（预览按 `risk_rules.toml` 是否存在报 `overwrite`/`new`）；对照 `risk_config.rs:42-43`（`existing_policy_path()?.unwrap_or_else(risk_rules_path)`） | 成立 | `policy.toml` 存在时 `load_risk_rules` **根本不读** `risk_rules.toml`（`README.md:224`/`:352`、`mcp-quickstart.md:583` 都写着 policy 优先、它是 legacy）。于是团队配置的两半都错位：①导出在 policy 时代恒为 `None`，报「未配置」，哪怕对方策略里有一整套 `[risk.*]`；②导入把 `risk_rules.toml` 覆盖掉——用户手写的 legacy 文件被冲掉，而 `summary` 还宣布「risk rules: overwrite」，看起来像生效了。同一函数对 host 的处理是「合并」，对风险规则是「覆盖」，两者都不是「写进当前生效的那份」 | 二选一：①导出/导入都改走 `existing_policy_path()` 优先的那份（导出时把 `[risk.*]` 段落取出；导入时若目标不存在则新建 `policy.toml`），legacy 只在没有 policy 时才碰；②明确只在 legacy 语义下工作：`summary` 加一句「written to `risk_rules.toml`, which `policy.toml` shadows」，并在 `configuration-guide.md` 的团队配置一节写明这条边界。①更符合「团队配置导出的是能用的东西」，代价是要处理 `policy.toml` 里 `[risk.*]` 与 `approval_policies` 同文件的合并 |
+| L2-107（补充） | `bin/agent2ssh.rs:2010-2016`（`host add --risk-override`）只改这一处；**:1085** 的 `policy add --min-risk` 保持接受 `blocked` | 同上，补充证据 | 复核给了一条本轮没抓到的证据：`f345a92` 同一笔既加了 clap 文档 `(low/medium/high)` 又加了 `"blocked" => Some(...)`，**没有任何一处文档同时说过 `blocked` 是合法的覆盖值**；`core.rs:3869` 只锁「不能降级 blocked」这一个方向，`cli_smoke.rs:1257` 只用 `--risk-override low`，没有一条正例。所以更可能是顺手多写了一个枚举值，而不是有意的「隔离主机」能力。**但两处 `match` 是同一段代码的两份拷贝，语义不同**：`policy add --min-risk blocked`（「连 blocked 都要审批」）是真的需要这个值，全局禁掉会砍掉它 | 若拍板「拒绝」：`host add` 那处把 `Some("blocked")` 改成走错误分支，`policy add --min-risk` 保留；两处都把 `_ => None` 换成显式报错（拼错返回非零退出，而不是静默存成 `None`）。若拍板「保留」：本轮已把 `cli-quickstart.md:97` 与 clap 文档写成 `(low/medium/high/blocked)`，无需再动，但要把「该主机的命令会被全部拒绝」写进 `configuration-guide.md` 的字段表，否则它仍是一条靠读代码才能发现的能力 |

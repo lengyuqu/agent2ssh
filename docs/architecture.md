@@ -138,7 +138,7 @@ For multi-host execution and playbooks, high-risk approvals are applied only to 
 5. Enforce approval policy or high-risk approval/force requirements.
 6. Execute the operation with approved-host or approved-step force only where applicable, then append the final audit entry for exec/mutation paths.
 
-The daemon approval handler creates an approval request and waits for approval, rejection, or timeout. Local CLI/MCP and desktop-local paths without an approval handler fail closed and instruct the caller to use the daemon approval flow or `--force` when policy permits. WebSocket exec streaming uses the same embedded SSH transport as non-streaming exec, so password, key, jump-host, and fingerprint behavior stay aligned.
+The daemon approval handler creates an approval request and waits for approval, rejection, or timeout. Local CLI/MCP and desktop-local paths without an approval handler fail closed, and the instruction each one prints names only what that path can actually do: `--force` for the high-risk branch where the subcommand has the flag, a remote `--daemon` alias where the subcommand forwards (only `exec` does), and the desktop app where it does not. A local daemon is not part of the CLI execution path even when it is running. WebSocket exec streaming uses the same embedded SSH transport as non-streaming exec, so password, key, jump-host, and fingerprint behavior stay aligned.
 
 ## SSH Transport Status
 

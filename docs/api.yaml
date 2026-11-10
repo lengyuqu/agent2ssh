@@ -27,16 +27,19 @@ info:
     body that is not JSON at all as 400, all before the handler runs.
     `axum::body::Bytes` hands the raw bytes to the handler, which parses them
     itself: `/approvals/{id}/approve` is the only one, and a malformed body there
-    is its own 400 rather than 415 or 422. `Option<Json<T>>` is neither, and
-    `/containers/start-service` is its only user: it takes the body that way so a
-    call can omit it and name no runtime. axum's
+    is its own 400 rather than 415 or 422. `Option<Json<T>>` is neither. axum's
     rejection for the `Option` wrapper is `Infallible`, so the `.ok()` the
     handlers use turns *every* extraction error into "no body was sent" — a
     wrong content type, invalid JSON, or a field of the wrong type all read as an
-    absent body. Four operations read their body that way — `/shutdown`,
-    `/playbooks/{name}/dry-run`, `/health-snapshot` and
-    `/containers/start-service` — so for those four a malformed body is
-    ignored instead of refused, and the operation's own 400 does not cover it.
+    absent body. Three operations read their body that way — `/shutdown`,
+    `/playbooks/{name}/dry-run` and `/health-snapshot` — so for those three a
+    malformed body is ignored instead of refused, and the operation's own 400
+    does not cover it. `/containers/start-service` looks like a fourth and is
+    not: its body is a plain `Json<ContainerStartBody>`, so a malformed body
+    there is refused like any other `Json<T>` handler. This list names paths,
+    and `api_yaml_documents_how_each_handler_reads_its_body` checks it against
+    the handlers, because a path added here while its handler reads `Json<T>`
+    tells a client that a refuse-that-body endpoint ignores it.
 
     Two consequences for a client. First, the extractor's own answers are
     `text/plain` carrying axum's message, not the `Error` object: 415 and 422 are
@@ -1637,7 +1640,8 @@ paths:
         means the service was already up and nothing was spawned; a runtime without a
         background service (Docker, wslc) is refused rather than silently accepted.
       requestBody:
-        required: false
+        required: true
+        description: "`{}` is the whole body a caller needs to ask for detection. It cannot be left out: the handler reads `Json<ContainerStartBody>`, so a request with no body at all is the extractor's 400 (415 if it also declares no JSON content type), never the handler's own 400 and never a silent detection."
         content:
           application/json:
             schema:
@@ -1645,14 +1649,7 @@ paths:
               properties:
                 runtime:
                   type: string
-                  description: |
-                    `apple`, `docker` or `wslc`. Omitted: the first installed runtime
-                    that has a service. Because the body is read as
-                    `Option<Json<T>>`, a body that is invalid JSON, has the wrong
-                    content type, or carries `runtime` as a non-string is treated as
-                    *no body at all* — the runtime is then chosen by detection
-                    rather than rejected, so `{"runtime": 7}` starts whichever
-                    runtime detection picks instead of answering 400.
+                  description: "`apple`, `docker` or `wslc`. Omitted (send `{}`): the first installed runtime that has a service. This default is reached only by a body that parses: invalid JSON is 400, a `runtime` that is not a string is 422, and an absent body is 400 — all from the extractor, before this field is read."
       responses:
         "200":
           content:

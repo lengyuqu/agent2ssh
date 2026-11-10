@@ -635,7 +635,7 @@ required = false
 - 任何步骤失败（非零退出码或错误）时停止执行，返回已完成步骤的部分结果
 - 返回 `success` 状态和 `total_duration_ms` 总耗时
 - 使用 MCP 工具 `ssh_playbook_run` 或 Daemon API `POST /playbooks/run` 执行
-- 高风险步骤需要 daemon 审批或 `force: true` 才能执行；本地 CLI/MCP 没有可用审批处理器时会失败关闭，并提示改走 daemon 审批流或在策略允许时使用 `--force`
+- 高风险步骤需要 daemon 审批或 `force: true` 才能执行；本地 CLI/MCP 没有可用审批处理器时会失败关闭。CLI 的 `playbook run` 没有 daemon 转发，命中策略时只能改策略，或到桌面端/HTTP 接口 `POST /playbooks/run` 上审批
 - daemon 审批只对被批准的具体步骤生效；不会因为前一个高风险步骤获批而自动放行后续高风险步骤。显式 `force: true` 仍表示调用方请求放行整个 playbook。
 
 ### 注意事项

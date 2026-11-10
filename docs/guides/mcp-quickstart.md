@@ -131,7 +131,7 @@ MCP 服务器以 `agent2ssh-mcp` 二进制运行，通过标准输入/输出与 
 |------|------|------|
 | `host` | 是 | 主机别名 |
 | `command` | 是 | 远程命令 |
-| `force` | 否 | 在没有 daemon 审批流时执行高风险命令；仍受策略限制 |
+| `force` | 否 | 跳过**高风险**命令的确认；命中 `approval_policies` 时无效（策略命中要审批，`force` 不免除） |
 | `timeout_secs` | 否 | 超时秒数，默认 60 |
 | `stdin` | 否 | 传递到远程命令 stdin 的字符串 |
 | `max_output_bytes` | 否 | 输出截断阈值，默认 4 MiB |
