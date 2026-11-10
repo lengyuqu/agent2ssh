@@ -1280,7 +1280,7 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 ### batch 2026-11-10 · daemon 控制与停止协议（第二批，B=7）
 - issue #13 / 开批时间 2026-11-10 20:57 (GMT+8)
 - CodeBuddy 首条分析：`2120141279483817984`（2026-11-10 21:07:26 GMT+8，比开批晚 10 分钟、比生产任务的 5 分钟轮询窗口晚 6 分钟；8 条指摘）
-- 6 轮进度：3 / 6（第 1–3 轮已收尾，见下）
+- 6 轮进度：4 / 6（第 1–4 轮已收尾，见下）
 - 正文已喂给 CodeBuddy：**58 条「不成立」原文**（编号 44：preflight 2 + batch1 六轮 10 + batch2 编号 15–31 十七条 + batch4 第 1/5/6 轮 10 + batch6 第 1 轮 5；行内 14：batch2 D2/D4、batch3 A5/E、batch5 D6 后半/D8/F6 后半/F10/F11 后半/F12、batch6 a1 后果/a3.2/a5/c 附更正/#10）+ KNOWN-ISSUES 空档（K14 全部未解项、K15、§3 懒加载审批）+ 口径提醒（基线红测 861/1/1、npm 213/27、feature 组合不可相加、`daemon_*_e2e` 需显式 `--features daemon`、`exec_fixture` 空跑、`.github/**` 禁区、api.yaml 已在 #12 对齐、四列计数）。正文由 `/tmp/build-opt-issue-b7.py` 按 ledger 锚点切片生成（块级正则 + 行内唯一子串校验，16 块 / 44+14 条复验通过）。
 - **3 条已转可重提的注明**：`/exec/stream` 401 语义、`app_preferences.json` 归组、`total_ms` 补 `format: int64`（原 #12 正文的不成立被更正评论 `2120103682455814144` 撤销）已单独注明「无需主动重提」，未计入 58 条。
 - 背景已写进正文：同主题第一批（#7）已 6 轮闭环，已修复项与已登记 L2（L2-1…L2-18、L2-82）勿重提；本批重点找 #7 闭环后新增/残留的问题。
@@ -1368,5 +1368,29 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 **未做（L2，需拍板）**：**L2-89**（`force` 恒真 / SIGTERM 分支死代码）、**L2-90**（`/shutdown` 请求失败后不退回强杀，要不要区分传输层失败与语义拒绝）。`L2-84/85/86/87/88` 维持。
 
 **下一轮首项**：第 4 轮先按上面的固定扫法把 `src-tauri/src/**` 的私有 bool 参数过一遍（`daemon_control.rs`、`daemon_activity.rs`、`bin/agent2ssh-daemon.rs` 三个文件），再回 CodeBuddy 的复核（若到）。若 CodeBuddy 在第 4 轮给了可核实断言，优先它。
+
+### consume 4 / 6 · 2026-11-10 22:02–22:20 (GMT+8) · issue #13 · 回帖（见下一条记录）
+
+- **指摘来源**：CodeBuddy 对第 3 轮的复核 `2120155093726027776`（22:02:19）。**这一轮它第一次直接改 main 并推了两次提交**（`4dee4d1` 改 `docs/api.yaml`、`4296376` 改 `daemon_control.rs` 的注释行号），所以本轮开场先 `git fetch` + `--ff-only` 对齐，再在它之上动手。**流程含义**：从这轮起，消费任务每次开跑和每次推送前都必须 fetch，否则 push 会被拒且容易把它的改动顶掉。
+- **判定：5 项 → 成立 3 / 部分成立 1 / 不成立 1**，另有 1 条它自取的修正（成立）。
+
+| # | 项 | 判定 | 证据要点 |
+|---|---|---|---|
+| a | `signal_daemon` 的 `force` 恒真、SIGTERM 分支死 | **成立（并补充）** | 它补的「这个二进制里根本没有 SIGTERM 发送方」核实为真：去掉 transport 后只剩 `:750` 本身、三处注释、`local_exec.rs:1138`；daemon 端**接收** SIGTERM 的 `shutdown_signal`（`:223-238`）也是真的，所以「外部 `kill` 走 SIGTERM 且会 drain」这句准，不准的只是「停止路径发 SIGTERM」 |
+| b | 停止路径全平台走 `POST /shutdown`，无 `cfg(windows)` | **成立** | `:853-872` 两个调用都不带 `cfg`；`daemon_control.rs` 的 `cfg(` 全落在进程观测 helper 上 |
+| c | 「`401` 在停止路径上永远见不到」 | **不成立** | `:991` 只在 token 文件**缺失或读不出**时早退（`read_admin_token` = `read_to_string(...).ok()?`）；文件存在但值与 daemon 启动时加载的**不同**时，`:991` 返回 `Some`，请求照发，daemon 比的是内存里的 `state.token`（`auth.rs:44`，只在 `:5748` 加载一次）→ **401**。这正是 `tests/daemon_stop_e2e.rs:766` 的 `wrong_admin_token_never_signals_the_real_daemon` 构造的场景，它断言的那句「did not accept this config's admin token for a shutdown」就是 401 支的文案。**它据此改了 `4dee4d1`，本轮已把那段改正**（409 / 401-403 / 前置拒绝三分） |
+| d | 我自验的第二句「`:4851` 证明 send 失败结束 drain」只是「整段 drain 最多一帧」 | **不成立（前两句成立）** | drain 里 `Output` 分支 send **成功**后是 `continue`（`:4853` 之后回到 `while`），只有 `is_err()` 才 `break`（`:4850-4851`）——它说的「send 成功在那里本来也 break」是误读。`:4930` 是**正常转发**分支的同类出口，两处各自证明各自的句子，不冲突 |
+| 自取 | `GRACEFUL_STOP_WAIT` 注释里的三个行号全漂 | **成立** | 它改的 `:5014`（`/terminal` 2 s）、`:5442`（`/exec/stream` 2 s）、`:5951`（registry 4 s）逐个核对正确。这条与 `force` 同病：常量旁的行号没人核，就成了下一句谎 |
+
+**L1 落地（本轮）**：`docs/api.yaml` 的 `/shutdown` 段落重写——把「请求未答上」拆成三类：`409`＝另一个 daemon 占有监听（`expect_pid` 不符）、`401`（或 admin gate 的 `403`，调用方同等处理）＝这条路确实答了、只是 `daemon.token` 里的值不是 daemon 认的 admin、以及停止路径自己的**前置拒绝**（无 `/health`、PID 不符、config_dir 不符、无 token 文件）——这三种从不建连，没有任何状态码描述它们。
+
+**L2 收窄**：`L2-89` 定 ①（删 `force` 与 `kill_with(Term)`），理由三条已写进台账（② 在 Windows 上等于 ①；Unix 上只是多一次可忽略信号；K14 的真正收窄是 409 那条原子比较）。`L2-90` 维持不退回强杀，但理由换成「可诊断性」与「`NotAccepted` 混装两类失败」，并把它的反例（监听卡死时技术上可安全强杀）照实记下。
+
+**验证**：`cargo fmt --all -- --check` 绿；`daemon_integration` **71 passed**；`--no-default-features --lib` **861 passed / 1 failed / 1 ignored**；PyYAML 90 paths / 105 operations。它那两个提交只动 `description` 与注释，rc 与测试口径不变。
+
+**本轮工艺观察（第四种「读得短」）**：它这次错在两处**把分支条件当成了全部条件**——`:991` 被读成「没有 token 就早退」（对）却推成「停止路径见不到 401」（错，漏了「有 token 但不匹配」）；`:4850` 的 `is_err()` 被读成「无论如何都 break」（错，漏了成功路径的 `continue`）。与前几轮同一族：**读到 `if` 只记了它的一个分支**。
+
+**下一轮首项**：第 5 轮验「我这次改的 `/shutdown` 三分表是否与代码逐条对得上」（重点是 `403` 是否真的会被 `request_shutdown` 当成 401 同等处理，以及 `:991` 的「读不出」包含哪些 errno）；若 CodeBuddy 有复核，优先它。第 6 轮（末轮）按协议写批次汇总并关 issue。
+
 
 
