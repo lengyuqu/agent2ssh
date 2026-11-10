@@ -74,7 +74,7 @@ the client config.
 | Port forward | `agent2ssh forward add/list/rm` / `ssh_forward_*` |
 | View audit log | `agent2ssh audit --json` / `ssh_audit` |
 | Generate a usable key | `agent2ssh keys generate <name>` / `agent2ssh keys algorithm` |
-| Run locally, one shot | `agent2ssh local exec --host local:vs --command "..."` / `local_exec` |
+| Run locally, one shot | `agent2ssh local exec --host local:vs "..."` / `local_exec` |
 | Run locally, shell kept warm | `agent2ssh resident open/exec/close` / `resident_session_*` |
 
 ---

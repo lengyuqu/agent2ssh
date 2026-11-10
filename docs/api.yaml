@@ -1,8 +1,18 @@
 openapi: "3.1.0"
 info:
   title: Agent2SSH Daemon API
-  version: "0.3.0"
-  description: Local HTTP API for the Agent2SSH capability layer.
+  version: "0.4.5"
+  description: >
+    Local HTTP API for the Agent2SSH capability layer.
+
+    Two different mechanisms answer 403, and the response text tells them apart.
+    An operation documented as `Requires the unrestricted admin token` is gated
+    by `require_admin`: only the token in `~/.agent2ssh/daemon.token` passes, and
+    any scoped token from `daemon_tokens.toml` is refused regardless of what its
+    scope allows. The recording routes carry the sibling gate
+    `require_recording_admin`, whose message names terminal recordings. An
+    operation whose 403 description names a *scope* or an *approval* instead is a
+    per-host permission denial or a rejected approval, not an admin gate.
 servers:
   - url: http://127.0.0.1:7722
     description: Local daemon
@@ -675,6 +685,8 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/HostProfile" }
       responses:
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           content:
             application/json:
@@ -684,6 +696,8 @@ paths:
     post:
       summary: Import hosts from ~/.ssh/config
       responses:
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           content:
             application/json:
@@ -700,6 +714,8 @@ paths:
           required: true
           schema: { type: string }
       responses:
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           content:
             application/json:
@@ -992,6 +1008,8 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/GateUpdate" }
       responses:
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           content:
             application/json:
@@ -1006,6 +1024,8 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/GateUpdate" }
       responses:
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           content:
             application/json:
@@ -1106,6 +1126,8 @@ paths:
     get:
       summary: Read the opt-in terminal recording setting
       responses:
+        "403":
+          description: Terminal recordings require the unrestricted admin token; a scoped token gets 403.
         "200":
           description: Recording configuration
           content:
@@ -1127,6 +1149,8 @@ paths:
               properties:
                 enabled: { type: boolean }
       responses:
+        "403":
+          description: Terminal recordings require the unrestricted admin token; a scoped token gets 403.
         "200": { description: Updated recording configuration }
 
   /recordings:
@@ -1134,6 +1158,8 @@ paths:
       summary: List local asciicast v2 terminal recordings
       description: Recordings may contain sensitive terminal output and are not included in WebDAV sync.
       responses:
+        "403":
+          description: Terminal recordings require the unrestricted admin token; a scoped token gets 403.
         "200":
           description: Recording metadata, newest first
 
@@ -1147,6 +1173,8 @@ paths:
     get:
       summary: Read recording metadata and asciicast v2 JSONL content
       responses:
+        "403":
+          description: Terminal recordings require the unrestricted admin token; a scoped token gets 403.
         "200": { description: Recording metadata and content }
         "404": { description: Missing or invalid recording }
     delete:
@@ -1158,6 +1186,8 @@ paths:
           required: true
           schema: { type: string, const: delete }
       responses:
+        "403":
+          description: Terminal recordings require the unrestricted admin token; a scoped token gets 403.
         "200": { description: Deleted recording metadata }
         "400": { description: Confirmation missing or recording id invalid }
 
@@ -1171,6 +1201,8 @@ paths:
         activity and streaming exec output. The stream ends when the daemon
         shuts down; an EOF alone does not distinguish shutdown from disconnection.
       responses:
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           description: Event stream
           content:
@@ -1285,6 +1317,8 @@ paths:
           description: Requesting client label, exact case-insensitive match on source
           schema: { type: string }
       responses:
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           content:
             application/x-ndjson:
@@ -2257,6 +2291,8 @@ paths:
               properties:
                 command: { type: string, description: "Command to approve instead of the requested one" }
       responses:
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           content:
             application/json:
@@ -2274,6 +2310,8 @@ paths:
           required: true
           schema: { type: string, format: uuid }
       responses:
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           content:
             application/json:
@@ -2529,6 +2567,8 @@ paths:
           in: query
           schema: { type: string, enum: [24h, 7d, 30d, all], default: 24h }
       responses:
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           content:
             application/json:
@@ -2683,6 +2723,8 @@ paths:
               properties:
                 approved: { type: boolean }
       responses:
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           content:
             application/json:
@@ -2787,6 +2829,8 @@ paths:
       summary: Export shareable team configuration
       description: Hosts are exported with `key_path` and `password` stripped; includes raw `risk_rules.toml` and `playbooks.toml` content when present.
       responses:
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           content:
             application/json:
@@ -2801,6 +2845,8 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/TeamConfigExport" }
       responses:
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           content:
             application/json:
@@ -2845,6 +2891,8 @@ paths:
     get:
       summary: Compare Agent2SSH hosts against `~/.ssh/config`
       responses:
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           content:
             application/json:
@@ -2854,6 +2902,8 @@ paths:
     post:
       summary: Export Agent2SSH hosts to an SSH config include file
       responses:
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           content:
             application/json:
@@ -3014,6 +3064,8 @@ paths:
                 command:     { type: string }
                 description: { type: string, nullable: true }
       responses:
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           description: The full snippet list after the write.
           content:
@@ -3033,6 +3085,8 @@ paths:
           required: true
           schema: { type: string }
       responses:
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           description: Whether a snippet was removed.
           content:
@@ -3071,6 +3125,8 @@ paths:
                 pattern:     { type: string, description: "Regular expression to match; also the rule's identity." }
                 replacement: { type: string, description: "Literal replacement text, used verbatim." }
       responses:
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           description: The full rule list after the write.
           content:
@@ -3096,6 +3152,8 @@ paths:
                 replacement: { type: string }
                 new_pattern: { type: string, description: "Rename the rule to this pattern (default: keep)." }
       responses:
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           description: The full rule list after the write.
           content:
@@ -3121,6 +3179,8 @@ paths:
                 pattern: { type: string }
                 force:   { type: boolean, description: "Must be true." }
       responses:
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           description: The full rule list after the write.
           content:
@@ -3136,6 +3196,8 @@ paths:
       summary: Restore the built-in redaction rule set
       description: Discards every edit. This is the way back from a removal, because it only ever adds rules back.
       responses:
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           description: The restored rule list.
           content:
@@ -3182,6 +3244,8 @@ paths:
                 is_regex:          { type: boolean, default: true }
                 is_case_sensitive: { type: boolean, default: false }
       responses:
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           description: The full rule list after the write.
           content:
@@ -3207,6 +3271,8 @@ paths:
                 keyword: { type: string, description: "The keyword that identifies the rule to replace." }
                 rule:    { type: object, description: "The rule as it should be afterwards." }
       responses:
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           description: The full rule list after the write.
           content:
@@ -3232,6 +3298,8 @@ paths:
                 keyword: { type: string }
                 force:   { type: boolean, description: "Must be true." }
       responses:
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           description: The full rule list after the write.
           content:
@@ -3247,6 +3315,8 @@ paths:
       summary: Restore the built-in terminal highlight rules
       description: Discards every edit.
       responses:
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           description: The restored rule list.
           content:
@@ -3291,6 +3361,8 @@ paths:
                 comp_cs:   { type: string }
                 comp_sc:   { type: string }
       responses:
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           description: The preferences in effect after the write.
           content:
@@ -3302,6 +3374,8 @@ paths:
       summary: Drop the SSH algorithm overrides
       description: Goes back to the built-in safe defaults.
       responses:
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           description: The preferences in effect after the change.
           content:
@@ -3321,6 +3395,8 @@ paths:
     get:
       summary: List prompts waiting for an answer
       responses:
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           content:
             application/json:
@@ -3350,6 +3426,8 @@ paths:
                 nonce:  { type: string }
                 answer: { type: string }
       responses:
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           content:
             application/json:

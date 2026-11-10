@@ -5,7 +5,7 @@
 ## 适用范围
 
 - 已经有一台能用普通 `ssh` 登录的机器。
-- 本机可以安装或下载 Agent2SSH `v0.3.0`。
+- 本机可以安装或下载 Agent2SSH `v0.4.5`。
 - 先验证低风险命令，例如 `hostname`、`uptime`、`whoami`。
 - 不要求配置远程 daemon、审批流、playbook 或桌面端。
 
@@ -208,9 +208,9 @@ agent2ssh audit --limit 5 --json
 
 ## 隐私与匿名反馈
 
-`v0.3.0` 默认不包含自动遥测，也不会自动上传 audit、命令、主机列表或 MCP 调用记录。
+`v0.4.5` 默认不包含自动遥测，也不会自动上传 audit、命令、主机列表或 MCP 调用记录。
 
-当前的匿名反馈是手动 opt-in：用户主动通过 issue、私信或其他渠道提交脱敏信息。后续如果引入运行时遥测，必须满足：
+本仓的 `telemetry` 模块**默认关闭**（`telemetry.enabled = false`）；即便开启，它也只把崩溃与使用事件追加到本地 `~/.agent2ssh/telemetry.jsonl`（2 MiB 上限），代码里没有网络出口。后续若要引入会外发的遥测，必须满足：
 
 - 默认关闭。
 - 配置项清晰，例如 `telemetry.enabled = false`。
