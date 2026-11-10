@@ -1765,4 +1765,4 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 - **新断言按「先证能红」验收**：把第四个名字写回 `api.yaml` 后重跑，失败信息逐字为 `the file-level note names 4 operations that swallow a malformed body (["/shutdown", "/playbooks/{name}/dry-run", "/health-snapshot", "/containers/start-service"]), but 3 handlers read Option<Json<T>> ([...])`；改回三个后 `ok`。**只跑绿的那一次不算验过。**
 - **未做**：`agent2ssh_mcp/auth.rs:26/54/91/121` 与 `tauri_commands.rs:442/480/515/545` 也有同一句「run through the daemon approval flow」，本轮**没有核**这两个宿主里 daemon 审批是否可达（MCP 是否真的能把 exec 转到 daemon、桌面端是否本身就是审批方），所以一句没动。若下一轮要改，先读这两条路径再动，别按 CLI 的结论外推。
 - **验证**：`npm run build` 6.31s；`cargo fmt --check` 绿；`--no-default-features --lib` **861 / 1 / 1**（红项仍是 `embedded_ssh::remove_system_known_host_matching::an_ipv6_literal_at_port_22_is_removed`，与本轮无关）；`--features daemon --test daemon_integration` **71 / 0**；`--test cli_contract` **40 / 0**；`--test cli_smoke` **34 / 0**；`yaml.safe_load` 90 paths / 105 operations 不变。
-- **回帖**：见下一笔提交回写的 id。**#15 保持 open**，进度 4 / 6。
+- **回帖**：`2120260430760140800`（05:00:53 GMT+8）。**#15 保持 open**，进度 4 / 6。
