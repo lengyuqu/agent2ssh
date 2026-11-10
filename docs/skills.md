@@ -131,7 +131,7 @@ When the daemon is running, high-risk commands can be routed through an approval
 
 ## Policy-as-Code (Recommended)
 
-Define unified security policies in `~/.agent2ssh/policy.toml`. This file supports risk rules and approval policies in one versionable place. Execution gate, execution limits, and anomaly detection use their own files: `execution_gate.toml`, `execution_limits.toml`, and `anomaly.toml`.
+Define unified security policies in `~/.agent2ssh/policy.toml`. This file supports risk rules and approval policies in one versionable place. Execution gate, execution limits, and anomaly detection use their own files: `execution_gate.json`, `execution_limits.toml`, and `anomaly.toml`.
 
 ```toml
 [risk.blocked]

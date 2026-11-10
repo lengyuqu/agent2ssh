@@ -299,11 +299,9 @@ Hosts 是默认激活的标签页，分为两个区域。
 
 ### Slack 集成
 
-当 URL 包含 `hooks.slack.com` 时，自动使用 Slack Block Kit 格式发送消息：
+当 URL 包含 `hooks.slack.com` 时，自动使用 Slack Block Kit 格式发送消息。**字段与按钮的完整差异不在这里重复**——Slack 有「审批那条」与「通用那条」两个渲染器，它们各自的字段与按钮见 `configuration-guide.md` 的「Slack 集成」一节（那里有一张对照表）。
 
-- 标题显示事件类型
-- 字段显示主机、命令、风险等级、退出码
-- 审批请求消息包含打开本地 Approvals 控制台的按钮；实际批准或拒绝仍通过已认证的控制台/API 完成
+这里只记一条与本控制台直接相关的事实：**一次待审批会发两条 Slack 消息**，其中审批那条的 Approve / Reject 按钮点不动（拼出来的 URL 不是路由，且要 bearer token）。所以审批请在本控制台做，不要点 Slack 上的按钮；`/console#approvals` 是已认证入口，实际批准或拒绝仍由它完成。
 
 ### HMAC 签名
 

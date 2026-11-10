@@ -84,7 +84,7 @@ The desktop app, CLI, MCP server, and daemon share the same Rust core library. T
 
 Agent2SSH is also a local observation surface for agent-driven SSH activity. The daemon exposes an authenticated SSE endpoint at `/events/stream`, and the desktop app subscribes to it through the Live Agent Activity panel.
 
-Current live events cover daemon-managed PTY session open/write/read/close, WebSocket exec start/output/exit, approvals, audit rotation, execution gate changes/rejections, execution limit rejections, anomaly detections, and connection/config changes. The panel also polls recent audit records, so completed CLI/MCP execs that write to the same config directory are visible even when they did not originate from the desktop UI.
+Current live events cover daemon-managed PTY session open/write/read/close, WebSocket exec start/output/exit, approvals, audit rotation, execution gate changes/rejections, execution limit rejections, and anomaly detections. `HostConnected`, `HostDisconnected` and `ConfigChanged` exist in the event enum and the desktop notification filters know them, but **nothing publishes them today** — `docs/api.yaml` and `docs/guides/daemon-api-quickstart.md` say the same, so do not wait on them. The panel also polls recent audit records, so completed CLI/MCP execs that write to the same config directory are visible even when they did not originate from the desktop UI.
 
 MCP PTY sessions route to the local daemon registry by default when the daemon is reachable and the local token is available. If the daemon is unavailable, MCP falls back to the process-local session store so basic PTY usage still works. Both daemon-managed and process-local sessions use the embedded SSH terminal worker, so password, key-file, ssh-agent, and jump-host authentication do not require system `ssh` or `sshpass`. The desktop Session panel also connects to the daemon session registry, so daemon-managed MCP sessions can be listed, attached, tailed, read, written to, and closed from the UI. Read-only attach and high-risk input confirmation provide a conservative default for observing externally created PTY sessions.
 
@@ -178,7 +178,7 @@ The current control-plane layer is enforced at the daemon/audit boundary rather 
 
 | Capability | Config / entry point | Behaviour |
 |------------|----------------------|-----------|
-| Execution gate | `agent2ssh pause/resume/status`, `execution_gate.toml` | Pauses non-desktop daemon mutation/execution paths and returns HTTP 423 for blocked sources |
+| Execution gate | `agent2ssh pause/resume/status`, `execution_gate.json` | Pauses non-desktop daemon mutation/execution paths and returns HTTP 423 for blocked sources |
 | Execution limits | `execution_limits.toml` | Enforces per-source, per-host, and per-tag execution rate plus session concurrency limits; returns HTTP 429 on limit rejection |
 | Policy dry-run | `policy.toml` / `policy.json`, `agent2ssh policy validate/test` | Validates policy-as-code and predicts `allow` / `approve` / `block` decisions |
 | Anomaly detection | `anomaly.toml` | Detects source bursts, sensitive command patterns, and after-hours high-risk activity from audit windows |

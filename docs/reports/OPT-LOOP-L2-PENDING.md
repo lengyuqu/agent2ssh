@@ -405,3 +405,11 @@ enum DrainOutcome {
 | **C 死代码三选一** | L2-58/59/21/47/26 | **只采纳「删 KeysPanel 的 rsa 分支」** | 「一次决策管到底」听着对，但这 5 条生命周期不同：L2-58 是**文案已过期**的死分支（删了没人怀念）；L2-59 的 `folds` 是**写完但没接线**的功能（删掉 517 行测试等于承认那个功能不做）。绑在一个决策上，等于让最简单的那个（删死分支）替最需要判断的那个（折叠做不做）背书 |
 | **D 契约单方向漂移** | L2-38/42/48/74 | **部分采纳** | L2-74 并入 A（它本质是一个字段的接线）；L2-38/42/48 是「三份清单没有守卫」，选型（源码扫 / 手写清单 / 属性宏）要一次定，但那是**生产批次**的活，不是本循环能落地的 |
 | **E 时间与 locale 一个来源** | L2-55 + L2-71 | **不采纳为本批改动** | 它是唯一一条「产品要决定日期跟随应用语言还是跟随系统」的。这个问题不该由我在循环里替用户答。5 个 `toLocale*` 面已写进 L2-55 正文，等拍板 |
+
+## 2026-11-10 · issue #11 第 1 轮追加（`docs/` 声称 vs 代码行为）
+
+第 1 轮 9 条指摘，核实 **成立 6 / 部分成立 2 / 不成立 1**。文档侧（L1）已全部落 main；只剩下面这一条是行为改动。
+
+| 编号 | 位置 | 判断 | 为什么不能自动落 | 建议改法 |
+|---|---|---|---|---|
+| L2-75 | `bin/agent2ssh-daemon.rs:637-654`（同一个 `tokio::spawn` 里先后调 `notify_approval_pending` 与 `fire_webhook`）；`notify.rs:74-150`、`:229-282`（两条路径都各自读订阅列表、各自 POST） | 成立 | 一次 `approval_required` 会**发两条** webhook：`notify_approval_pending` 与 `fire_webhook` 都读同一份 `webhook.toml` 的订阅列表，都对 `approval_required` 判过 `events.contains`，于是两条都发。Slack URL 下是两条不同卡片（审批那条四字段 + 死按钮，通用那条两字段 + `Open Approvals`）；非 Slack URL 下是两条 JSON（一条带 `approval_url`，一条是 `WebhookEvent` 形状）。收 Slack 的人会看到重复告警，收自建端点的人会收到两次 POST——按「一次事件一次投递」写幂等的下游会以为审批被提交了两次 | 二选一：①让 `fire_webhook` 跳过 `approval_required`（审批事件由 `notify_approval_pending` 专管），把 `format_slack_message` 里 `:350` 那段 `approval_required` 分支一并删掉；②反过来，把 `notify_approval_pending` 收敛成「只给 `fire_webhook` 补按钮参数」的一个格式函数，投递只留一处。①改动小但会丢掉通用那条的 `Open Approvals` 按钮（那是**可用**的那个），所以实际推荐②：先让 `format_slack_message` 接 `approval_url`，再删掉 `notify_approval_pending` 的发送。属对外投递次数与载荷形状的双重改动，需拍板 |

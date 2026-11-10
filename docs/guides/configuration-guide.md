@@ -23,7 +23,7 @@ Agent2SSH 的所有配置和数据文件存储在 `~/.agent2ssh/` 目录下。�
   policy.toml      # 统一策略文件（推荐）
   risk_rules.toml  # 旧版用户自定义风险规则（兼容）
   approval_policies.toml # 旧版审批策略（兼容）
-  execution_gate.toml    # 全局执行急停状态
+  execution_gate.json    # 全局执行急停状态
   execution_limits.toml  # 执行速率和 session 并发限额
   anomaly.toml     # audit 异常检测阈值
   playbooks.toml   # Playbook 命令模板定义
@@ -851,13 +851,28 @@ secret = "my-secret-key"
 
 ### Slack 集成
 
-当 URL 包含 `hooks.slack.com` 时，自动使用 Slack Block Kit 格式：
+当 URL 包含 `hooks.slack.com` 时，自动使用 Slack Block Kit 格式。**这里有两个渲染器，不是一套模板**：
+`notify_approval_pending` 走 `format_slack_approval_notification`（`notify.rs:162`），`fire_webhook` 走
+`format_slack_message`（`notify.rs:299`）。对 `approval_required` 事件**两者都会发**——`bin/agent2ssh-daemon.rs`
+里同一个 `tokio::spawn` 先 `notify_approval_pending` 再 `fire_webhook`——所以一次待审批在 Slack 里是
+**两条消息**。这条重复发送是已知缺口，记在 `OPT-LOOP-L2-PENDING.md` 的 L2-75。读下文时先分辨是哪一条：
 
-- 标题显示事件类型（Approval Required / Command Blocked / Command Completed / Anomaly Detected）
-- 每条消息固定带两个字段：`Host` 与 `Command`（命令装在围栏代码块里）
-- `Risk Level` 与 `Exit Code` 是**条件字段**，只有事件带了非空值才出现。所以 `diagnostic_error` 的卡片只有 `Host` 与 `Command` 两个 field（它的 `risk_level` 与 `exit_code` 都是 `None`）；命令没执行时（例如被 gate 拦下）`exec_completed` 也没有 `Exit Code`
-- 对 `diagnostic_error`，`Host` 里装的是**组件名**、`Command` 里装的是错误文本（见上一节的字段说明），在 Slack 里读起来就是「一个组件名 + 一段错误消息」，不是「一台主机 + 一条命令」
-- `approval_required` 事件带 Approve / Reject 两个按钮，但**这两个按钮当前点不动**，不要把它们当操作入口：URL 由 daemon 的解析地址拼出（默认 `127.0.0.1:7722`），路径是 `.../approve` 与 `.../reject`，而路由只有 `POST /approvals/:id/approve` 与 `POST /approvals/:id/reject`（且要 bearer token）；换个机器点开时，`127.0.0.1` 指的是**点的人自己的机器**。请改用 `/console#approvals` 处理，实际批准或拒绝仍通过已认证的控制台/API 完成。这是已知缺口，已在 `docs/reports/OPT-LOOP-L2-PENDING.md` 的 L2-44 登记
+| | 审批那条（`format_slack_approval_notification`） | 通用那条（`format_slack_message`） |
+|---|---|---|
+| 标题 | `Agent2SSH: Approval Required` | 按事件与 `remote_outcome_unknown` 选（Approval Required / Command Blocked / Command Completed / Anomaly Detected） |
+| 字段 | `Host`、`Command`、`Risk Level`、`Approval ID` 四个固定字段 | `Host` 与 `Command` 固定；`Risk Level`、`Exit Code` 是**条件字段**，只有事件带了非空值才出现 |
+| 按钮 | Approve / Reject，**点不动**（见下） | `approval_required` 时给 `Open Approvals`，URL 是 `{daemon}/console#approvals-<id>`，可用 |
+
+通用那条的两个条件字段还有两处已知读法：`diagnostic_error` 的卡片只有 `Host` 与 `Command` 两个 field
+（它的 `risk_level` 与 `exit_code` 都是 `None`），而且 `Host` 里装的是**组件名**、`Command` 里装的是错误文本
+（见上一节的字段说明），在 Slack 里读起来就是「一个组件名 + 一段错误消息」，不是「一台主机 + 一条命令」；
+命令没执行时（例如被 gate 拦下）`exec_completed` 也没有 `Exit Code`。
+
+审批那条的 Approve / Reject 按钮**当前点不动**，不要把它们当操作入口：URL 由 daemon 的解析地址拼出（默认
+`127.0.0.1:7722`），路径是 `.../approve` 与 `.../reject`，而路由只有 `POST /approvals/:id/approve` 与
+`POST /approvals/:id/reject`（且要 bearer token）；换个机器点开时，`127.0.0.1` 指的是**点的人自己的机器**。
+实际批准或拒绝请用 `Open Approvals` 按钮或 `/console#approvals`。这是已知缺口，已在
+`docs/reports/OPT-LOOP-L2-PENDING.md` 的 L2-44 登记
 
 ### 自定义 Webhook
 
@@ -1043,7 +1058,7 @@ agent2ssh host add web1 --host 192.168.1.10 --key ~/.agent2ssh/keys/my_key
 - 私钥文件权限必须为 `0600`（仅所有者可读写），Agent2SSH 自动设置正确权限
 - 密钥删除后，引用该密钥的主机配置不会自动更新
 - 建议为不同用途使用不同的密钥（工作、个人、部署等）
-- 可生成/导入的密钥类型：ed25519、rsa(PEM)、ecdsa；在 Windows 上实际可认证的只有 `rsa` 的传统 PEM 形式
+- 可生成/导入的密钥类型：ed25519、rsa、ecdsa；**各平台一致，Windows 没有额外限制**。旧版曾写「Windows 上实际可认证的只有 `rsa` 的传统 PEM 形式」，那是 libssh2 + WinCNG 后端的限制，已随该后端一起移除（见本节上方「各平台的密码学能力一致」，以及 `AGENTS.md` 与 `CHANGELOG` 的 Removed 段）。`russh` 的解析器直接读 OpenSSH 容器、PKCS#1 与 PKCS#8，`ssh-keygen` 产出的密钥无需任何转换
 
 ---
 
@@ -1208,7 +1223,12 @@ A24：应用在脱敏时使用的正则规则集。它是**权威的**而不是�
 - **删空是允许的，但后果很重**：空规则集意味着审计记录、通知与诊断导出**原样写出**。
   面板把这个状态渲染成警示而不是空列表，「恢复默认」是唯一的回退路径。
 
-CLI、MCP 与 daemon 目前**不**暴露这些操作，只有桌面端可以编辑。
+四个界面**都能编辑**这套规则，行为一致：CLI 是 `agent2ssh redact list|add|update|remove|reset`，MCP 是
+`ssh_redact_rule_list|add|update|remove|reset` 五个工具，daemon 是 `GET|POST /redact/rules` 与
+`/redact/rules/{update,delete,reset}`（逐行见 `daemon-api-quickstart.md` 的端点表），桌面端是 Redaction 面板。
+**删除需要显式确认**：`redact remove` / `ssh_redact_rule_remove` / `POST /redact/rules/delete` 少了
+`--force` / `force: true` 会被拒绝且什么都不改（CLI 退出码 2，daemon 与 MCP 返回 400），
+`reset` 是唯一的回退路径——这是为了让「删空规则集 = 审计与通知原样写出」不能由一次误触达成。
 规则文件也**不参与 WebDAV 同步**（不在 `webdav_sync::SYNCABLE_FILES` 里，与另两个规则文件一致），
 因此在 A 机器上改的规则不会带到 B 机器。
 
@@ -1241,7 +1261,7 @@ CLI、MCP 与 daemon 目前**不**暴露这些操作，只有桌面端可以编�
 # 备份整个配置目录
 tar -czf agent2ssh-backup.tar.gz ~/.agent2ssh/
 
-# 仅备份配置文件（排除运行时文件和审计日志）
+# 仅备份配置文件（排除运行时文件、审计日志、信任库与急停状态）
 tar -czf agent2ssh-config.tar.gz \
   ~/.agent2ssh/hosts.json \
   ~/.agent2ssh/policy.toml \
@@ -1249,10 +1269,20 @@ tar -czf agent2ssh-config.tar.gz \
   ~/.agent2ssh/approval_policies.toml \
   ~/.agent2ssh/playbooks.toml \
   ~/.agent2ssh/remotes.toml \
+  ~/.agent2ssh/execution_limits.toml \
+  ~/.agent2ssh/anomaly.toml \
+  ~/.agent2ssh/environments.toml \
+  ~/.agent2ssh/app_preferences.json \
   ~/.agent2ssh/daemon_tokens.toml \
   ~/.agent2ssh/webhook.toml \
   ~/.agent2ssh/keys/
 ```
+
+这份清单**不等于** WebDAV 同步的 `webdav_sync::SYNCABLE_FILES`：后者刻意不含凭据
+（`daemon_tokens.toml`、`secrets.enc`、`keys/`），也不含 `environments.toml` 与
+`approval_policies.toml`——前者是执行前的信任边界，后者是「谁能批准什么」。反过来，本清单刻意
+**不含** `known_hosts.json`（换机器应当重新信任，而不是继承）与 `execution_gate.json`
+（急停状态属于机器当前处境，不该被备份带回新机器）。
 
 ### 迁移到新机器
 
@@ -1266,9 +1296,15 @@ tar -xzf agent2ssh-config.tar.gz -C ~/
 # 确保权限正确
 chmod 600 ~/.agent2ssh/keys/* 2>/dev/null || true
 
-# 启动守护进程（自动生成新的 daemon.token）
+# 启动守护进程（daemon.token 非空则原样复用，只在文件缺失或为空时才生成新的）
 agent2ssh daemon start
 ```
+
+`daemon start` **不会**无条件换 token：`load_or_create_daemon_token` 读到非空的 `daemon.token` 就只
+`chmod 600` 再原样返回；文件存在但为空时才重新生成并打一条 warn，文件根本不存在时直接新建（不告警）。
+所以用上面「备份整个配置目录」的
+`tar` 连同 `daemon.token` 一起搬到新机器时，**旧 token 继续有效**——已经配好 token 的客户端不必改配置，
+反过来说，token 泄露后靠「重启一次」是换不掉的，要显式删掉该文件再启动。
 
 ### 注意事项
 

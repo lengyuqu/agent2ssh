@@ -300,6 +300,9 @@ agent2ssh session open <host> [--json]
 agent2ssh session write <session-id> "<input>"
 ```
 
+这条**没有 `--json`**，也不打印结构化结果——它是唯一一个不跟随本组「`[--json]`」口径的会话子命令
+（`SessionCommands::Write` 只有 `input: String`）。写脚本时按「写入成功即退出码 0」判定，需要结果就读 `session read`。
+
 ### 读取会话输出
 
 ```bash
