@@ -492,5 +492,15 @@ enum DrainOutcome {
 1. **「`handler_body_of(daemon, "exec_stream")` 拿到的是整个文件（形参括号让 `opening_brace` 的 depth 停在 1），所以新断言会静默变松」— 不成立。**
    实测（临时探针，跑完即删）：`exec_stream` 的 body **13 702 B**、`handle_terminal` **14 261 B**，而源文件 **235 983 B**；两者都不含 `\nasync fn `。原因：`opening_brace` 从 `async fn exec_stream(` 起扫，形参表的 `(` 加 1、其 `)` 减 1，回到 0 之后才在 `-> impl IntoResponse {` 上命中。**不过它指出的失效形态值得防**：本轮已在新断言里加一条守卫（body 内不得出现另一个 `\nasync fn `），并做了破坏性验证——把 `handler_body_of` 临时改成 `&rest[..]`，断言立刻点名 `exec_stream`。
 
+## 2026-11-10 · batch 2（issue #13）第 3 轮追加（自取）
+
+CodeBuddy 在第 2 轮回帖后 5 分钟（21:53–21:58，60 s × 5 轮询）无回复，按协议自取上轮公布的两个靶（`wait_for_exit` / `signal_daemon`）+ 自验上轮两笔 L1。**自验两条通过**（`/exec/stream` 的「sends its one exit after the loop」在非停机路径同样成立——`:5450` 的 `Exit` 臂先 `break`、`:5493` 再发帧，该路径全程无 `Message::Close`；`/terminal` 的 send 失败只结束 drain，`:4851` 之后还有 `:4859` 的 Close 与 `:4860` 的 break，清理照跑）。**新发现两条代码侧问题**：
+
+| 编号 | 位置 | 判断 | 为什么不能自动落 | 建议改法 |
+|---|---|---|---|---|
+| L2-89 | `daemon_control.rs:729-758`（`signal_daemon(pid, start_time, force)`）、唯一调用点 `:1030`（`force = true`）；`grep -rn "signal_daemon("` 全仓 1 个调用 | 成立（死分支） | `force == false` 的 `kill_with(Signal::Term)`（`:750`）与它的 `unwrap_or_else(|| process.kill())`（`:751`）永远不会执行——也就是说「先 SIGTERM、不退出再强杀」的策略在代码里**不存在**，只有一个恒真参数让人以为存在。它已经骗到过一次文档（本轮 `docs/architecture.md:191` 原文就写「`stop_daemon_process` sends `SIGTERM`」，已改） | 二选一：①删掉 `force` 参数与 `kill_with(Signal::Term)` 分支，函数改名 `force_kill_daemon`，把「停止路径只做强杀」写成事实；②接上 SIGTERM-first：`wait_for_exit` 超时后先 `signal_daemon(force=false)`、再等 2 s、仍 `Running` 才强杀。②更贴合「优雅优先」，但一次停止最坏多等 2 s，且 Windows 上 `kill_with(Term)` 返回 `None` 会落到 `process.kill()`（`TerminateProcess`），语义要写进契约。属 `src-tauri/src/**` 行为改动 |
+| L2-90 | `daemon_control.rs:996-1016`（`NotAccepted(detail) => return Err(...)`）、`:1019-1035`（只有 `Accepted*` 之后才可能进强杀分支） | 部分成立（口径待定） | `/shutdown` 请求**本身失败**时（连接被拒、读超时、401、409），停止立即以错误结束，**不会**退回强杀——即使身份已在 `:958-990` 核过（pid 与 config_dir 都对）。所以「HTTP 监听卡死但进程还活着」这一种情况，`agent2ssh daemon stop` 只能报错，用户得自己 `kill -9`。契约原文（`api.yaml` 的 `/shutdown`）读起来像无条件两步，本轮已改成「only once a daemon has accepted it」并写明 401/409/连接被拒都不发信号（L1 已落）。**剩下的问题是要不要对传输层失败强杀** | 先定口径：①维持现状（拒绝里含 401/409，强杀会把「发错对象」变成「杀掉对的进程」），只补 `NotAccepted` 的文案给出下一步（`kill <pid>` / `taskkill /PID <pid> /F`）；②把 `NotAccepted` 拆成 `Unreachable`（超时、连接重置）与 `Refused`（4xx），只对 `Unreachable` 且身份已核过的情况允许一次强杀。推荐 ①——身份核过不等于此刻仍是同一个进程（K14 的窗口）。属 `src-tauri/src/**` 行为 + 文案 |
+
+
 2. **「本地没有 `daemon.token` 时 `stop_daemon_process` 根本到不了 `:991`，会停在 `request_shutdown` 自己的守卫 `:846-849` 上，所以我给 L2-4 的拆分方案会红」— 不成立。**
    `:991` 在 `:996` 的 `request_shutdown(Some(pid))` **之前**执行（同一函数、语句顺序，`:942` 起）。`request_shutdown` 的守卫只有两个入口：`:932` 的 `request_graceful_shutdown()`（传 `None`，无 pid 的旧调用方）与「`:991` 读到 token、`:846` 再读时文件已被删」的竞态窗口（`read_admin_token` 每次重读文件，`daemon_activity.rs:145`）。所以删掉 `daemon.token` 调 `stop_daemon_process` 确实停在 `:991`，得到 `NotAuthenticated`——而它说「daemon 不接受这个 token」时一个请求都没发出去。**它那张表的方向是对的**（两个变体都偏、偏法相反），只是把「哪条路径到哪一支」接反了；`L2-4` 的备注按上句补了入口清单与竞态说明。

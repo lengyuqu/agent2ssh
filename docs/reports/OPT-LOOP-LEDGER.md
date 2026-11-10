@@ -1280,7 +1280,7 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 ### batch 2026-11-10 · daemon 控制与停止协议（第二批，B=7）
 - issue #13 / 开批时间 2026-11-10 20:57 (GMT+8)
 - CodeBuddy 首条分析：`2120141279483817984`（2026-11-10 21:07:26 GMT+8，比开批晚 10 分钟、比生产任务的 5 分钟轮询窗口晚 6 分钟；8 条指摘）
-- 6 轮进度：2 / 6（第 1、2 轮已收尾，见下）
+- 6 轮进度：3 / 6（第 1–3 轮已收尾，见下）
 - 正文已喂给 CodeBuddy：**58 条「不成立」原文**（编号 44：preflight 2 + batch1 六轮 10 + batch2 编号 15–31 十七条 + batch4 第 1/5/6 轮 10 + batch6 第 1 轮 5；行内 14：batch2 D2/D4、batch3 A5/E、batch5 D6 后半/D8/F6 后半/F10/F11 后半/F12、batch6 a1 后果/a3.2/a5/c 附更正/#10）+ KNOWN-ISSUES 空档（K14 全部未解项、K15、§3 懒加载审批）+ 口径提醒（基线红测 861/1/1、npm 213/27、feature 组合不可相加、`daemon_*_e2e` 需显式 `--features daemon`、`exec_fixture` 空跑、`.github/**` 禁区、api.yaml 已在 #12 对齐、四列计数）。正文由 `/tmp/build-opt-issue-b7.py` 按 ledger 锚点切片生成（块级正则 + 行内唯一子串校验，16 块 / 44+14 条复验通过）。
 - **3 条已转可重提的注明**：`/exec/stream` 401 语义、`app_preferences.json` 归组、`total_ms` 补 `format: int64`（原 #12 正文的不成立被更正评论 `2120103682455814144` 撤销）已单独注明「无需主动重提」，未计入 58 条。
 - 背景已写进正文：同主题第一批（#7）已 6 轮闭环，已修复项与已登记 L2（L2-1…L2-18、L2-82）勿重提；本批重点找 #7 闭环后新增/残留的问题。
@@ -1344,4 +1344,29 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 **未做（L2，需拍板）**：**L2-87**（Close 之后仍发 `{"type":"exit"}`）、**L2-88**（worker 线程的 teardown 不派生自 teardown 预算、也不可取消）。`L2-84/85/86` 维持，`L2-4` 补入口清单。
 
 **下一轮首项**：第 3 轮该验的是「我这两笔 L1 有没有把契约写成第三种错」——具体是 `/exec/stream` 那句「the handler sends its one exit after the loop」是否在**非停机**路径上也成立（那里 exit 事件先 break，再发帧，客户端在 Close 之前收到），以及 `/terminal` 的「send 失败」出口在 drain 里是否真的只结束 drain 而不终止 handler。若 CodeBuddy 无回复，转 `wait_for_exit` / `signal_daemon`（L2-1 的落地形状，本批唯一没被任何一轮碰过的停止路径代码）。
+
+### consume 3 / 6 · 2026-11-10 21:53–22:05 (GMT+8) · issue #13 · 回帖（见下一条记录）
+
+- **指摘来源：自取。** 第 2 轮回帖 21:52 发出，60 s × 5 次轮询到 21:58 评论数一直是 4 → 按协议标「等待超时」，改取上轮公布的靶：`wait_for_exit` / `signal_daemon`（L2-1 的落地形状），外加自验上轮两笔 L1。
+- **判定：自取 6 项，成立 6**，其中 2 项是自验通过（无需改动）、3 项 L1、2 项 L2。
+
+| # | 项 | 判定 | 证据与动作 |
+|---|---|---|---|
+| 1 | 自验：`/exec/stream` 的「sends its one exit after the loop」在**非停机**路径也成立吗 | 成立（无需改） | `:5450` 的 `Exit` 臂写 `code` 后 `break`，`:5493` 再发帧；该路径全程没有 `Message::Close`（停机路径的 Close 在 `:5365`，只在取消分支里）。所以「one exit，after the loop」两条路径都对 |
+| 2 | 自验：`/terminal` 的「send 失败」只结束 drain、不终止 handler 吗 | 成立（无需改） | `:4851` 的 `break` 只出内层 `while`，之后 `:4859` 发 Close、`:4860` 跳出 select，`:5016` 起的 `recorder.finish()` / `terminal_inputs.remove` / `limiter.unregister_session` 照跑 |
+| 3 | `signal_daemon` 的 `force` 参数恒为 `true`，`kill_with(Signal::Term)` 分支是死代码 | **成立（新）** | `grep -rn "signal_daemon("` 全仓 **1 个调用**（`:1030`，`true`）。`force == false` 那条（`:750` 的 `kill_with(Term)` 与 `:751` 的兜底）永不执行——「先 SIGTERM、再强杀」的策略在代码里不存在 → **L2-89** |
+| 4 | `docs/architecture.md:191` 说 `stop_daemon_process` 在 Unix 发 `SIGTERM` | **成立（新，文档）** | 实际路径（`:958-1035`）是：`/health` 核对 → `POST /shutdown`（全平台，`local_daemon_request_with_body`，无 `cfg(windows)` 分支）→ 等 8 s → **强杀**（`process.kill()` = SIGKILL）→ 等 2 s。SIGTERM 一次都没发。**已改 L1**：写成「全平台先 POST /shutdown（它才带 `expect_pid`）→ 8 s → 强杀 → 2 s」，并注明外部 `kill <pid>` 仍可走 SIGTERM 且 daemon 会 drain |
+| 5 | `daemon_control.rs:921-926` 的注释把 HTTP 路线写成 Windows 的兜底 | **成立（新，注释）** | 原文「Windows has no `SIGTERM`: signalling falls back to `TerminateProcess` there… Asking the daemon does what the signal does elsewhere」——这句话正是第 4 条误写的来源。**已改 L1**：改成「这是所有平台停止 daemon 的方式，没有 SIGTERM 分支可退；Windows 只是这条路由存在的原因，而 Unix 也走它，因为它才带 `expect_pid`」 |
+| 6 | `api.yaml` 的 `/shutdown` 把「请求 + 强杀」写成无条件两步 | **成立（新，契约）** | 原文「this request, then — if the process is still running — a force-terminate」读起来无条件；实际 `:996-1016` 里 `NotAccepted` 直接 `return Err`，**不发任何信号**，401/409/连接被拒都是这一支。**已改 L1**：改成「only once a daemon has accepted it…」，并写明三种拒绝都不发信号。剩下的「传输层失败要不要强杀」→ **L2-90** |
+
+**L1 落地（本轮，4 文件）**：`docs/architecture.md`（SIGTERM → 真实两步）、`docs/api.yaml`（`/shutdown` 的两步条件化）、`src-tauri/src/daemon_control.rs`（只改注释，`:921-926`）。
+
+**验证**：`cargo fmt --all -- --check` 绿（纯注释）；`daemon_integration` **71 passed**；PyYAML 90 paths / 105 operations。本轮没有新断言——三条都是文档与注释，其中第 4 条的失效形态（文档说发 SIGTERM）**无法用测试钉**：它描述的是一个不存在的调用，扫描 `signal_daemon(` 只能证明调用点唯一，不能证明文档没写反。这一条记在这里，以免下一轮以为它被测过。
+
+**本轮工艺观察**：死分支是靠「参数只有一个取值」发现的——`signal_daemon(pid, start, force)` 长得像有两条策略，`grep` 一次就塌。同类形状（布尔参数只有一种传法）值得作为下一批的固定扫法：**对每个带 bool 参数的私有函数，先数调用点的实参取值**，再看文档里有没有第二种说法。
+
+**未做（L2，需拍板）**：**L2-89**（`force` 恒真 / SIGTERM 分支死代码）、**L2-90**（`/shutdown` 请求失败后不退回强杀，要不要区分传输层失败与语义拒绝）。`L2-84/85/86/87/88` 维持。
+
+**下一轮首项**：第 4 轮先按上面的固定扫法把 `src-tauri/src/**` 的私有 bool 参数过一遍（`daemon_control.rs`、`daemon_activity.rs`、`bin/agent2ssh-daemon.rs` 三个文件），再回 CodeBuddy 的复核（若到）。若 CodeBuddy 在第 4 轮给了可核实断言，优先它。
+
 
