@@ -1234,6 +1234,13 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "404":
+          description: >-
+            No host profile named this — or the config could not be written.
+            `remove_host_core` lets the write lock, `load_config` and
+            `save_config_unlocked` fail through the same `?` chain the "not found"
+            error takes, and `remove_host` maps the whole chain onto 404. So a
+            read-only config directory answers 404 while the host is still there.
+            Retrying is safe; treating 404 as "it is gone" is not.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1263,10 +1270,20 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "403":
+          description: >-
+            The token's scope does not allow observing this host. The summary is
+            computed from the host metadata, so a scoped token cannot read the
+            policy of a host it cannot see — the same rule every other read obeys.
+            `scope_allows_observe_host` is checked before the summary is built.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "404":
+          description: >-
+            No host profile named this, or its policy could not be computed:
+            `host_policy_summary` reads the config, the risk rules and the
+            approval policy, and every failure it reports — including an
+            unreadable `risk_rules.toml` — arrives as this code.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1332,6 +1349,15 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ExecResult" }
         "400":
+          description: >-
+            Two unrelated failures. The command exceeded `MAX_COMMAND_BYTES`
+            (`ensure_command_length`), which is a client mistake and needs no
+            retry. Or the execution itself failed: this operation has no 5xx of
+            its own beyond 503, so a timeout, a connection failure, an unknown
+            host at the SSH layer and a non-zero exit the runner reports as an
+            error all arrive here. The 503 below is the one case that is
+            separated — a shutdown during the run, where the remote side may
+            still be executing.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1718,6 +1744,10 @@ paths:
         path as `/exec`: bearer-token scope, execution gate, execution limits,
         effective risk, and approval policy are enforced before output streams.
         Server pushes: {"type":"stdout","data":"..."}, {"type":"stderr","data":"..."}, {"type":"exit","code":0,"duration_ms":1234}
+        When the daemon is stopping — `POST /shutdown` or a signal — it pushes
+        {"type":"shutdown"} with no other field, drains for up to 500 ms, and closes.
+        That frame is the client's only notice that the daemon is going away; it is not
+        an error, and reconnecting immediately will race the shutdown.
         Every authorization refusal after the upgrade — scope, execution gate, rate limit, approval — arrives as
         {"type":"error","error":"..."} over the socket, not as an HTTP status: the handler body only counts the
         request and then hands the socket to `on_upgrade`. The only HTTP-level failure is the handshake itself.
@@ -1746,6 +1776,10 @@ paths:
         and its version — and the transport keeps it only to size SFTP writes.
         Terminal input/output then streams as binary frames. Resize control is
         sent as a JSON text frame: {"type":"resize","cols":120,"rows":36}.
+        When the daemon is stopping — `POST /shutdown` or a signal — it sends
+        {"type":"shutdown","message":"server shutting down"}, drains for up to 500 ms,
+        and closes. Note the `message` field: `/exec/stream`'s shutdown frame has
+        none, so a client that handles both routes has to accept the two shapes.
         Terminal connections use the embedded SSH transport, including
         jump-host proxy channels, and do not require system `ssh` or `sshpass`.
         Completed input lines are

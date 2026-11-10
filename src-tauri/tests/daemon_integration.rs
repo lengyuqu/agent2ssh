@@ -3033,6 +3033,135 @@ fn api_yaml_documents_how_each_handler_reads_its_body() {
     );
 }
 
+/// An error response without a description tells a client the shape of a
+/// failure and nothing about what happened.
+///
+/// Four were in that state, and they were the four a client most needs prose
+/// for: `DELETE /hosts/{name}`'s 404 also covers a failed write (a read-only
+/// config directory answers "no such host" while the host is right there),
+/// `GET /hosts/{name}/policy` answered 403 and 404 with neither a description
+/// nor a hint, and `POST /exec`'s 400 covers both a too-long command and every
+/// execution failure the runner reports — with no 5xx beside it to separate
+/// them.
+///
+/// Only 4xx and 5xx are required to describe themselves. A 2xx carries a schema
+/// and its `description` would restate it; 78 of those are terse by choice.
+#[test]
+fn api_yaml_describes_every_error_response() {
+    let spec = include_str!("../../docs/api.yaml");
+
+    let mut missing: Vec<String> = Vec::new();
+    let mut path = String::new();
+    let mut operation = String::new();
+    // `(code, has_description)` for the response being read.
+    let mut pending: Option<(String, bool)> = None;
+
+    fn flush(pending: &mut Option<(String, bool)>, operation: &str, missing: &mut Vec<String>) {
+        if let Some((code, described)) = pending.take() {
+            if !described && (code.starts_with('4') || code.starts_with('5')) {
+                missing.push(format!("{code} {operation}"));
+            }
+        }
+    }
+
+    for line in spec.lines() {
+        let body = line.trim_start();
+        let indent = line.len() - body.len();
+        if let Some(rest) = line.strip_prefix("  /") {
+            flush(&mut pending, &operation, &mut missing);
+            let name = rest.split(':').next().unwrap_or_default();
+            path = if name.is_empty() {
+                "/".to_string()
+            } else {
+                format!("/{name}")
+            };
+            operation.clear();
+            continue;
+        }
+        if indent == 4 {
+            flush(&mut pending, &operation, &mut missing);
+            if let Some(name) = body.strip_suffix(':') {
+                if METHOD_BUILDERS.iter().any(|(_, known)| *known == name) {
+                    operation = format!("{} {path}", name.to_uppercase());
+                }
+            }
+            continue;
+        }
+        if indent == 8 {
+            flush(&mut pending, &operation, &mut missing);
+            if let Some(code) = body
+                .strip_prefix('"')
+                .and_then(|rest| rest.split('"').next())
+            {
+                if !code.is_empty() && code.chars().all(|ch| ch.is_ascii_digit()) {
+                    pending = Some((code.to_string(), false));
+                }
+            }
+            continue;
+        }
+        if indent >= 10 && body.starts_with("description:") {
+            if let Some((_, described)) = pending.as_mut() {
+                *described = true;
+            }
+        }
+    }
+    flush(&mut pending, &operation, &mut missing);
+
+    assert!(
+        missing.is_empty(),
+        "these error responses have no description: {missing:?}. An error a client cannot \
+         read about is one it can only retry blindly — and several of these codes cover more \
+         than one cause, which is the part that needs saying."
+    );
+}
+
+/// Every WebSocket frame the daemon can push is named in the contract.
+///
+/// `{"type":"shutdown"}` was pushed by both socket routes and appeared nowhere in
+/// `docs/api.yaml`: a client that switches on `type` and does not know it would
+/// log an unknown frame at exactly the moment the daemon is going away, which is
+/// the moment it needs to back off rather than reconnect.
+///
+/// The check is by type name, so it catches a *new* frame and not a changed
+/// shape — `/terminal` sends `{"type":"shutdown","message":…}` while
+/// `/exec/stream` sends `{"type":"shutdown"}`, and that difference is prose, not
+/// something this can see.
+#[test]
+fn every_websocket_frame_the_daemon_sends_is_documented() {
+    let daemon = include_str!("../src/bin/agent2ssh-daemon.rs");
+    let spec = include_str!("../../docs/api.yaml");
+
+    const MARKER: &str = "json!({\"type\":\"";
+    let mut frame_types: Vec<&str> = Vec::new();
+    let mut rest = daemon;
+    while let Some(at) = rest.find(MARKER) {
+        let after = &rest[at + MARKER.len()..];
+        if let Some(end) = after.find('"') {
+            let name = &after[..end];
+            if !frame_types.contains(&name) {
+                frame_types.push(name);
+            }
+        }
+        rest = after;
+    }
+
+    assert!(
+        !frame_types.is_empty(),
+        "no WebSocket frames were found in the daemon source, so this check would pass \
+         for the wrong reason"
+    );
+    let undocumented: Vec<&&str> = frame_types
+        .iter()
+        .filter(|name| !spec.contains(&format!("\"type\":\"{name}\"")))
+        .collect();
+    assert!(
+        undocumented.is_empty(),
+        "these WebSocket frame types are pushed but never named in docs/api.yaml: \
+         {undocumented:?}. A client switches on `type`; an unexpected one at shutdown or \
+         on error is read as a protocol violation."
+    );
+}
+
 /// A plain YAML scalar may not contain `: `, and prose about status codes does.
 ///
 /// `description: … forwarded verbatim: when the remote answers …,` is not a
