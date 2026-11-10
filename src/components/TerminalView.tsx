@@ -168,6 +168,13 @@ const TerminalView = forwardRef<TerminalViewHandle, Props>(function TerminalView
           return { ok: false, reason: "clipboard_failed" };
         }
         if (!navigator.clipboard?.writeText) return { ok: false, reason: "clipboard_unavailable" };
+        // An empty `text` here is not "nothing to copy", it is "the block is no
+        // longer in the buffer": `extractCommandBlockText` returns "" when
+        // `resolveCommandBlockRange` yields null (`block-content.ts:85`), and
+        // this path still writes that empty string to the clipboard and returns
+        // `ok: true`. `TerminalPanel` then reports "copied". Distinguishing the
+        // two needs a new `reason` ("block_scrolled_away") and a UI string, so
+        // it is parked as L2-61 rather than fixed here.
         try {
           // G4: redact tokens/keys before the copied block reaches the
           // clipboard. This is its own rule set (`copy_redact_rules.json`),

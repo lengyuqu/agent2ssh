@@ -402,6 +402,15 @@ export default function PlaybooksPanel({ hosts }: Props) {
             <div className="flex items-center justify-between">
               <span className={cn(fieldCls, "text-xs")}>{t("Steps")}</span>
               <div className="inline-flex overflow-hidden rounded-md border border-border">
+                {/* This tab switch does not run `applyYamlToForm`, unlike the
+                    "Apply YAML to step editor" button at :492. Clicking it
+                    while `editorMode === "yaml"` therefore shows the stale form
+                    — the YAML text is kept in state and `handleSave` re-applies
+                    it before persisting (:250-253), so nothing is lost, but the
+                    step editor visibly disagrees with the YAML the user just
+                    typed. Fixing it means either calling `switchToVisual` here
+                    or disabling this tab while `yamlError` is set; both change
+                    what a click does, so it is L2-62. */}
                 <button
                   type="button"
                   onClick={() => setEditorMode("visual")}
