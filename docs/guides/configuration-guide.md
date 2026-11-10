@@ -1226,6 +1226,9 @@ A24：应用在脱敏时使用的正则规则集。它是**权威的**而不是�
 四个界面**都能编辑**这套规则，行为一致：CLI 是 `agent2ssh redact list|add|update|remove|reset`，MCP 是
 `ssh_redact_rule_list|add|update|remove|reset` 五个工具，daemon 是 `GET|POST /redact/rules` 与
 `/redact/rules/{update,delete,reset}`（逐行见 `daemon-api-quickstart.md` 的端点表），桌面端是 Redaction 面板。
+daemon 侧有个权限差：`GET /redact/rules` 只要有效 token，而四个**写**端点（add / update / delete / reset）
+额外要求**无 scope 的 admin token**——host-scoped token 会拿到 403（`require_admin`），这与
+`POST /containers/start-service` 同一条理由：改的是本机行为，不是某台主机上的事。
 **删除需要显式确认**：`redact remove` / `ssh_redact_rule_remove` / `POST /redact/rules/delete` 少了
 `--force` / `force: true` 会被拒绝且什么都不改（CLI 退出码 2，daemon 与 MCP 返回 400），
 `reset` 是唯一的回退路径——这是为了让「删空规则集 = 审计与通知原样写出」不能由一次误触达成。
