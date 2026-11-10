@@ -13,7 +13,7 @@
 **引用规则（立即生效）：**
 
 - 引用撞号条目时**必须带主题限定**，写成 `L2-15（known_hosts 形态）` / `L2-15（shutdown 后仍 200）` 这种形式。这个文件里凡出现裸 `L2-13`…`L2-30` 而无主题限定的引用，都是旧引用，需按上下文重判。
-- **新条目从 `L2-100` 起编号**，不再取 13–99 的空号——空号看起来安全，实际每次都挑到别人用过的号。**已用：`L2-100`（`forward.rs` accept 循环）、`L2-101`（SFTP 审批用标签快照）。下一个是 `L2-102`。**
+- **新条目从 `L2-100` 起编号**，不再取 13–99 的空号——空号看起来安全，实际每次都挑到别人用过的号。**已用：`L2-100`（`forward.rs` accept 循环）、`L2-101`（SFTP 审批用标签快照）、`L2-102`（三条 forward 单条路由的 scope 越权返 403）、`L2-103`（MCP `ssh_events_subscribe` 结构上恒空）。下一个是 `L2-104`。**
 - **上一轮的教训（关帖后补记）**：`L2-100` 立条时我写的是「`/local-exec` 的 webhook 恒说结果已知」——那是错的，`/local-exec` 的 `remote_outcome_unknown: None`（`daemon.rs:1807`）的确恒真，但它**不是**没人做过：同一形状在 `:1711` 的 `/exec` 上工作，两边差的是 `:1700` 那一次 `ssh_shutdown_outcome()`，而 local 侧的类型在 `core.rs:1267` 就被折成了字符串。所以那件事的条目是 **L2-27**，不是新号。**立条前先 `grep` 一遍已经有了什么**，这一条是从「差一点就重复登记」里换来的。
 - **同号 + 括号后缀**（目前只有 `L2-23（收窄）`）视为对同号条目的**修订**，不计入撞号，但正文必须写明它在修订哪一条、撤掉了哪个选项。否则下一次按首列扫表的脚本会把它当成一个独立条目。
 - 全量重编号要同时改 ledger 里六批的引用，属人拍板项，不在这里做。半途重编号会让「按编号追溯」比现在更坏。
@@ -567,7 +567,7 @@ CodeBuddy 在第 2 轮回帖后 5 分钟（21:53–21:58，60 s × 5 轮询）�
 | 编号 | 位置 | 判断 | 为什么不能自动落 | 建议改法 |
 |---|---|---|---|---|
 | L2-92 | `daemon_activity.rs` 的 `request_at`：`:103` `to_socket_addrs()?`、`:106` `connect_timeout`、`:107-108` 两个 per-syscall 超时、`:124` `write_all`、`:127` `read_to_end` | 部分成立 | 「没有总时限」属实，但承重的那一半是**地址解析**：`to_socket_addrs` 走系统解析器，不吃 `timeout`；`AGENT2SSH_DAEMON_ADDR` 允许主机名（`remote.rs:34` 只把通配符映回 loopback），所以停止线程可以被 DNS 挂住。它给的另一半机制不成立：`/shutdown` 的 handler 是 `Option<Json<ShutdownRequest>>`，axum 在 `require_admin` **之前**就抽完 body，所以「服务端不读 body、客户端阻塞在 4 KiB 写」在这条路径上不会发生；那条 body 实际是 19 字节的 `{"expect_pid":N}`。`read_to_end` / `write_all` 的「对手逐字节滴灌就能越过单个超时」是可构造的，但需要一个病态对端 | 给 `request_at` 一个总 deadline（`Instant + remaining()` 逐次收窄两个 socket 超时），并把解析交给带超时的解析路径（或先试 `SocketAddr::from_str`，失败再解析）。属 `src-tauri/src/**` 行为改动 |
-| L2-93 | `bin/agent2ssh-daemon.rs:655-671`（`shutdown.cancelled()` 分支） | 成立（竞态窗口） | `approval_respond(id, false)` 的返回值只用于 `:668` 的日志字段，不参与分支。若此刻审批已因 TTL 被 `approval_poll` 提前置 `timed_out`（`:699-701` 的「已非 pending」），`approvals.jsonl` 末条停在 `timed_out`，而 `:662` 的 `audit.jsonl` 仍写 `daemon shutting down; approval wait cancelled`——两个文件对同一件事给出不同结论 | 二选一：①把 `result` 接进审计文案（`is_ok()` 时写 cancelled、否则写「already timed out when the daemon stopped」）；②维持两笔记录，但在 `api.yaml` / 指南里写明「停机取消与 TTL 超时可能并存，以 `approvals.jsonl` 的状态为准」。属 `src-tauri/src/**` 行为 + 文案 |
+| L2-93 | `bin/agent2ssh-daemon.rs:655-671`（`shutdown.cancelled()` 分支） | 成立（竞态窗口） | `approval_respond(id, false)` 的返回值只用于 `:668` 的日志字段（`"rejected": result.is_ok()`），不参与分支。**窗口比本行原稿写的宽**——`approval_respond_inner`（`approval.rs:678-725`）返 `Err` 有三种原因，都不需要竞态：①`unknown approval: {id}`（内存表里没有，例如 daemon 重启过）；②`has timed out`（TTL，`approval_poll` 可能已把它置 `timed_out`）；③`already {:?}`（已非 `pending`，含已被别人批过）。更糟的是第四种：`append_approval`（`:486-503`）把写盘错误吞进一条 `warn` 诊断，`approval_respond_inner` 仍返 `Ok(())`——于是 `:668` 写 `rejected: true`、`:662` 的 `audit.jsonl` 写 `daemon shutting down; approval wait cancelled`，而 `approvals.jsonl` 末条还停在 `pending`，**没有任何一方说它被回答过**。所以判据不能是 `is_ok()`，必须看 `result` 的**错误原因** | 二选一：①把错误原因接进审计文案（`is_ok()` 时写 cancelled；`Err` 时按三类分别写「已超时」「已被回答」「记录不存在」，写盘失败那条要单独可见）；②维持两笔记录，但在 `api.yaml` / 指南里写明「停机取消与 TTL 超时可能并存，以 `approvals.jsonl` 的状态为准」。属 `src-tauri/src/**` 行为 + 文案 |
 | L2-94 | `bin/agent2ssh-daemon.rs:596`（`request_and_wait_for_approval` 第一句 `APPROVAL_COUNT.fetch_add`）、`:1238` 的 `/metrics` 输出 | 成立（命名与语义不符，非缺陷） | 计数发生在**等待开始**，所以拒绝、超时、停机取消都 +1，而低风险与「`force` 越过风险门且无 policy」都不 +1。名字叫 `approvals_total`，读者会当成「批了多少次」或「问了多少次」——两种读法都能自证矛盾。本轮 L1 只补了 `api.yaml` 的描述，没有改代码 | ①改名 `approval_requests_total` 并保留旧键一个版本；或②拆成 `approval_requests_total` / `approval_rejected_total` 两个计数器。属 `src-tauri/src/**` 行为面（`/metrics` 的键集合），需拍板 |
 
 ## 2026-11-11 · batch 8 第 1 轮（issue #14，基线 `46a92c4`）
@@ -637,3 +637,18 @@ CodeBuddy 首条分析 6 条，核实后 **成立 3 / 部分成立 3 / 不成立
 | 编号 | 位置 | 判断 | 为什么不能自动落 | 建议改法 |
 |---|---|---|---|---|
 | L2-101 | `bin/agent2ssh-daemon.rs:1990-2001`（upload）、`:2016-2028`（download）把 `host_tags(&req.host)` 传进 `preflight_guarded_request`；`:569-583` 用它组 `targets` 再进 `authorize_command_inner`（`:717-737` 把 `tags` 塞进 `CommandAuthorizationInput`），`:743` 起等审批，TTL 可到 300 s。执行侧 `core.rs:1910`/`:2055` 的 `*_core_with_source` 签名里**没有** tags，风险只由 `classify_effective_risk(command)` + `host.risk_override` 决定（`:1921-1924`、`:2067-2068`） | 部分成立 | **机制成立**：标签快照取自审批之前，等待窗口最长 300 s，执行侧从不重读标签，也不接收标签。**框架说反了一半**：它称「`/exec` 把标签一路传进执行、SFTP 少传一层」，但在 `core.rs` 里 `tags` 只服务目标展开（`expand_hosts_by_tags`/`resolve_exec_targets`，`:798-826`、`:841`、`:1420`、`:1488`），从不参与风险重判——`/exec` 与 SFTP 有**同一个**「授权按快照、执行按当时事实」的性质，不是 SFTP 独有的少传一层。它的失败模式①（审批期间摘掉 `prod`，已批准的传输照跑）方向上是**更宽松但不构成漏洞**：批准的对象是那条命令，标签消失只是让审批不再必需；失败模式②（审批期间加上 `prod`，于是不经审批就执行）才是真窗口，但那是「审批有时限」这一设计的固有代价，与 L2-77 同族 | 二选一：①审批返回后、执行前用**当前**配置重算一次 `tags` 并要求与审批时一致，不一致即 403（引入一次重读与新错误码）；②维持现状，在 `docs/api.yaml` 的 `/sftp/upload`、`/sftp/download` 与 `configuration-guide.md` 的审批段写明「审批依据是请求时刻的标签快照；审批期间标签变更不会让已批准的请求失效」。属产品口径，需拍板；写 e2e 时用 `daemon_sftp_approval_e2e.rs` 现成的 `assert_no_ssh_connection` 工具即可 |
+
+### 2026-11-11 · 模式 B 单发（issue #2，基线 `b83b9c1`）
+
+CodeBuddy 对上一轮收尾（`2120172790916468736`）的复核 `2120173738653020160`，5 条新指摘 N1–N5。核实后 **成立 3 / 部分成立 2 / 不成立 0**；另有 3 条子断言判为不成立（见 ledger）。本轮 L1 只动 `docs/**`，下面两条是必须由人拍板的。
+
+| 编号 | 位置 | 判断 | 为什么不能自动落 | 建议改法 |
+|---|---|---|---|---|
+| L2-102 | `bin/agent2ssh-daemon.rs:3040-3095`（`forward_remove`）、`:3098-3152`（`forward_stop`）、`:3154-3210`（`forward_start`）：三条 handler 都先 `forward_list_core()` 再 `.find(id)`，而 `forward_list_core`（`forward.rs:739-746`）返回**全部** rule、没有 scope 过滤；`check_daemon_scope` 到 `:3062`/`:3119`/`:3175` 才按 `rule.host` 判 | 成立 | 越权结果是 **403 `scope denied`**，不是「像未知 id 一样 400」。于是 scoped token 可以用 403 与 400 之差**枚举**某条隧道是否存在——`api.yaml` 原来那句「an id the token cannot see is answered like an unknown one (400), not with a 403 that would confirm the tunnel exists」正好把这件事说反了（本轮已改正描述）。要变成 400 必须动 handler 的取数顺序 | 二选一：①先给 `forward_list_core` 加 scope 过滤，或把 `.find(id)` 换成「找不到**或不在 scope 内**一律 400 unknown forward」，代价是删掉 403 这条分支、`api.yaml` 与相关测试一起改；②承认这条泄露并在契约里写明（本轮已按②改写 `api.yaml`，若选①要把它改回去）。与 L2-81（广播全拒绝仍 200）同族：都是「handler 的取数范围大于授权范围」 |
+| L2-103 | `bin/agent2ssh-mcp.rs:1798-1812`（`McpTool::SshEventsSubscribe`）、`bin/agent2ssh_mcp/tools.rs:851-855`（工具描述）、`events.rs:57-64`（`event_bus` / `subscribe_events`） | 成立（结构上恒空） | 工具自己 `subscribe_events()` 建一个**新** `broadcast` receiver，紧接着在同一个同步块里 `try_recv()` 抽干。`tokio::broadcast` 的新 receiver 没有历史，所以除「订阅与抽干之间恰好有别的线程 publish」外永远是 `[]`；`event_bus()` 又是 `app_state().event_tx`（进程内静态），MCP 进程的 bus 与 daemon 的 bus 是两份。`docs/skills.md` 已按实际行为改写，但工具描述（属 `src-tauri/src/**`）与工具本身仍在承诺「latest events」 | 三选一：①在 daemon 侧给事件加环形缓冲（`publish_event` 目前是纯 `send`，要另存一份 ring），MCP 工具改为查 `GET /events/stream` 或新加的 `GET /events/recent`；②如实改工具描述为「总是空」并把工具标成 deprecated；③删掉工具（MCP 契约破坏，要版本号配合）。属 `src-tauri/src/**` 行为 + 对外契约 |
+
+另外三条不新立（已在别处登记）：
+
+- **N1 的「gate / blocked 只算不拒、应回 423」→ 是 L2-81 的同一件事。** `api.yaml` 早已写明「每目标授权拒绝不改 HTTP 状态」，所以这一条只有「广播目标三个布尔字段没有描述」这半是新的；本轮已在 schema 里补上 `requires_approval` / `authorized` / `approval_granted` 的语义（preview 不发字节、不产生审批卡，`authorized: true` 只表示「暂时没人拒绝」）。
+- **N4 的「`approval_count` 与 `approvals_total` 同名不同义」→ 改名/拆分是 L2-94。** 本轮只给 `DaemonMetricsSummary.approval_count` 补了描述，与 `/metrics` 里 `approvals_total` 那段对齐。
+- **N5 的「L2-93 窗口比记录的宽」→ 已就地扩写 L2-93**（三种 `Err` 原因 + 被吞掉的写盘失败），未开新号。

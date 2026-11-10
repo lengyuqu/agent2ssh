@@ -76,7 +76,7 @@ the `mcp_tools_match_skills_md_documentation` integration test.
 | 53 | `ssh_daemon_version_check` | Check version compatibility between this build and a remote daemon. Returns local version, remote version, compatibility status, and a human-readable message. |
 | 54 | `ssh_daemons_view` | Get a unified view of all daemons (localhost + remotes) with their health, metrics, and host counts. |
 | 55 | `ssh_metrics_trend` | Show execution metrics trends: volume, failure rate, risk distribution, top hosts, hourly breakdown. Supports `24h` / `7d` / `30d` / `all` period selection. |
-| 56 | `ssh_events_subscribe` | Subscribe to the real-time event stream. Returns the latest events from the event bus. For continuous streaming, use the daemon's SSE endpoint `GET /events/stream`. |
+| 56 | `ssh_events_subscribe` | Subscribe to the event bus. Returns an `events` array that is empty in practice: the call creates a fresh `broadcast` receiver and drains it a few statements later in the same synchronous call, so the only events it can see are those published inside that window — a new receiver gets no backlog. Use the daemon's SSE endpoint `GET /events/stream` for actual events. |
 | 57 | `ssh_sync_diff` | Compare Agent2SSH hosts with `~/.ssh/config`. Shows hosts only on one side and conflicts. |
 | 58 | `ssh_sync_export` | Export Agent2SSH hosts to SSH config format file (default `~/.ssh/config.d/agent2ssh.conf`). MCP explicit paths must stay directly inside `~/.ssh/config.d/`. |
 | 59 | `ssh_redact_rule_list` | List the sensitive-data redaction rules this instance applies before it writes an audit record, webhook notification, playbook result or diagnostic export. Each rule is marked when it is one of the built-in defaults. Read-only. |
