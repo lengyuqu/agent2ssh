@@ -1280,7 +1280,7 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 ### batch 2026-11-10 · daemon 控制与停止协议（第二批，B=7）
 - issue #13 / 开批时间 2026-11-10 20:57 (GMT+8)
 - CodeBuddy 首条分析：`2120141279483817984`（2026-11-10 21:07:26 GMT+8，比开批晚 10 分钟、比生产任务的 5 分钟轮询窗口晚 6 分钟；8 条指摘）
-- 6 轮进度：1 / 6（第 1 轮已收尾，见下）
+- 6 轮进度：2 / 6（第 1、2 轮已收尾，见下）
 - 正文已喂给 CodeBuddy：**58 条「不成立」原文**（编号 44：preflight 2 + batch1 六轮 10 + batch2 编号 15–31 十七条 + batch4 第 1/5/6 轮 10 + batch6 第 1 轮 5；行内 14：batch2 D2/D4、batch3 A5/E、batch5 D6 后半/D8/F6 后半/F10/F11 后半/F12、batch6 a1 后果/a3.2/a5/c 附更正/#10）+ KNOWN-ISSUES 空档（K14 全部未解项、K15、§3 懒加载审批）+ 口径提醒（基线红测 861/1/1、npm 213/27、feature 组合不可相加、`daemon_*_e2e` 需显式 `--features daemon`、`exec_fixture` 空跑、`.github/**` 禁区、api.yaml 已在 #12 对齐、四列计数）。正文由 `/tmp/build-opt-issue-b7.py` 按 ledger 锚点切片生成（块级正则 + 行内唯一子串校验，16 块 / 44+14 条复验通过）。
 - **3 条已转可重提的注明**：`/exec/stream` 401 语义、`app_preferences.json` 归组、`total_ms` 补 `format: int64`（原 #12 正文的不成立被更正评论 `2120103682455814144` 撤销）已单独注明「无需主动重提」，未计入 58 条。
 - 背景已写进正文：同主题第一批（#7）已 6 轮闭环，已修复项与已登记 L2（L2-1…L2-18、L2-82）勿重提；本批重点找 #7 闭环后新增/残留的问题。
@@ -1320,3 +1320,28 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 **未做（L2，需拍板）**：**L2-84**（终端 drain 是空闲超时，与 exec 的绝对 500 ms 语义不一致）、**L2-85**（`UnverifiedIdentity` 括号列了两种不可能的成因）、**L2-86**（在途 `/exec` 对退出确认不可见）。另更正 **L2-4**（触发点 `:991`、`Display :792-796`、`||` 的真实问题）与 **L2-3**（变体要带载荷，落地四步）。
 
 **下一轮首项**：按第 1 条判否时留下的窗口——`spawn_embedded_exec_stream` 线程侧（`:5074-5165`）的 `blocking_send` 与 `session.set_blocking(false)` 切换、`channel.eof()` 之后 `wait_close()` 的阻塞可能，是这道题唯一还没被逐行读过的部分；其次 `daemon_stop_e2e.rs` 里那条「`||` 两文案」用例可以拆成两条可达断言（L2-4 的落地前提）。若 CodeBuddy 第 2 轮能给出「Stop 路径在 Windows 腿无覆盖」以外的可核实断言，优先它。
+
+### consume 2 / 6 · 2026-11-10 21:39–21:52 (GMT+8) · issue #13 · 回帖（见下一条记录）
+
+- **指摘来源**：CodeBuddy 对第 1 轮四个复核问题的答复 `2120149377556582400`（21:39:36）。不是新一批扫描，而是对我本轮改动的复核 + 两处对我的反驳。
+- **判定：6 项 → 成立 3 / 部分成立 3 / 不成立 0**，另单列**两条被推翻的子断言**（下节「原文保留」）。
+
+| # | 项 | 判定 | 证据要点 |
+|---|---|---|---|
+| a | `/terminal` 的 2 s 上界没有第三种出口，但句子少写「send 失败」这条 | **成立** | `:4822-4861` 的三个出口：`:4851`（`ws_tx.send` 失败）、`:4855`（`Error`/`Closed`）、`:4860`（循环结束后 break）。**已补**「or a send that fails」。它顺带算的「上限是 2 s − 那次 send」也对：计时起点是 `shutdown.cancelled()` resolve，不是 shutdown 帧发出 |
+| b | `path_block` 不会切短 `/terminal`；附带：`handler_body_of(exec_stream)` 拿到整个文件 | **部分成立（边界对，附带事实错）** | 边界那半我复核同意（块内无以 `  /` 开头的行；`head` 带 `path + ":"` 不会命中 `  /terminal/broadcast`）。附带那半**不成立**：临时探针实测 `exec_stream` body **13 702 B**、`handle_terminal` **14 261 B**，源文件 **235 983 B**，两者都不含 `\nasync fn `——`opening_brace` 在形参表闭合后回到 depth 0 才命中 body 的 `{`。**但它说的失效形态值得防**：本轮加了守卫 + 破坏性验证（把 `&rest[..close]` 改成 `&rest[..]`，断言立刻点名 `exec_stream`） |
+| c | 「drain 期间不发 exit 帧」字面成立、句子不精确：exit 在循环之后发，且在 Close 之后 | **成立（并指出一个真缺陷）** | `grep -n '"type":"exit"'` 全仓只有 `:5493` 一处，位于 `select!` 之后；停机路径 `:5365` 已发 `Message::Close(None)`。所以「客户端看到 close 而不是 exit」成立，但真实因果是「**exit 在 Close 之后被发出**」——RFC 6455 §5.5.1 禁止 Close 之后再发数据帧。已把契约改成按现状描述并指向 **L2-87** |
+| d | 第 3 条（33/105）判否成立 | **成立** | 它独立复算了 90 paths / 105 operations，并重读了 `:19-21` 与那条 500（`:3740-3747`）。与我的判否一致 |
+| d' | 第 4 条 Stale 那半判否成立；但「删 `daemon.token` 到不了 `:991`，L2-4 的拆分方案会红」 | **部分成立（前半对，后半错）** | Stale 那半一致。后半**不成立**：`:991` 在 `:996` 的 `request_shutdown(Some(pid))` **之前**（同函数语句顺序）；`request_shutdown` 的 `:846-849` 守卫只有 `:932` 的 `request_graceful_shutdown()`（传 `None`）与「两次读之间文件被删」的竞态两个入口。所以删 token 确实停在 `:991` → `NotAuthenticated`。**它那张「两个变体都偏、偏法相反」的表是对的**，只是把哪条路径到哪一支接反了；L2-4 备注已补入口清单 |
+| 附 | `/exec` 结束后 worker 线程的泄漏「以事件为界」 | **部分成立** | 前半对（drop receiver 后线程在下次 `blocking_send` 失败时退）。**上界不是「下一事件」**：eof 之后线程还要走 `:5153-5155`，`set_blocking(true)` + `wait_close()` 无取消入口（`channel.rs:473` 传 `None`），上界只剩 `session_timeout_ms(timeout_secs)`（默认 60 s，且 `timeout_secs` 无上界）。库里的 `embedded_ssh.rs:1505-1510` 已经做对（teardown 30 s + 可取消）→ **L2-88** |
+
+**L1 落地（本轮）**：`docs/api.yaml`（`/terminal` 的出口清单补「send 失败」；`/exec/stream` 把 exit 帧的真实时序写成「循环之后、Close 之后」，并注明这是 L2-87）、`src-tauri/tests/daemon_integration.rs`（新断言加 body-span 守卫）。
+
+**验证**：`cargo fmt --all -- --check` 绿；`daemon_integration` **71 passed**；PyYAML 90 paths 解析通过。**破坏性验证一条**：把 `handler_body_of` 临时改成返回 `&rest[..]` → 断言红并点名 `exec_stream`；改回后复跑绿。
+
+**本轮工艺观察**：它这轮的**结论质量明显高于第 1 轮**——四个问题里三问答得准，且主动复算了分母（90/105）。两次失手都发生在「顺着一个真现象往外推一步」：`handler_body_of` 那步是**只读了函数的前半段**（看到 `depth` 在形参行为 1，没读到它会在 `)` 处减回去），`NotAuthenticated` 那步是**只读了调用点、没读语句顺序**（看到了 `request_shutdown` 自己的守卫，没注意 `:991` 在它之前）。规则与第 1 轮的 (c) 同源：**引用一段控制流，必须读到它的出口或下一处分支**，否则现象为真、因果接反。
+
+**未做（L2，需拍板）**：**L2-87**（Close 之后仍发 `{"type":"exit"}`）、**L2-88**（worker 线程的 teardown 不派生自 teardown 预算、也不可取消）。`L2-84/85/86` 维持，`L2-4` 补入口清单。
+
+**下一轮首项**：第 3 轮该验的是「我这两笔 L1 有没有把契约写成第三种错」——具体是 `/exec/stream` 那句「the handler sends its one exit after the loop」是否在**非停机**路径上也成立（那里 exit 事件先 break，再发帧，客户端在 Close 之前收到），以及 `/terminal` 的「send 失败」出口在 drain 里是否真的只结束 drain 而不终止 handler。若 CodeBuddy 无回复，转 `wait_for_exit` / `signal_daemon`（L2-1 的落地形状，本批唯一没被任何一轮碰过的停止路径代码）。
+

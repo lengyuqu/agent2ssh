@@ -470,8 +470,27 @@ enum DrainOutcome {
 
 `L2-4` 记的两件事仍然成立，但位置和措辞要按当前树更正：`NotAuthenticated` 的唯一触发点是 `daemon_control.rs:991` 的 `crate::daemon_activity::read_admin_token().is_none()`（**一个请求都没发**），不是 `:986-988`；`Display` 在 `:792-796`。所以它说「the daemon that answered did not accept this config's admin token」时，事实上既没有 daemon 答话、也没有 token 被拒。
 
+**入口清单（第 2 轮补，用以定位落地用例）**：`:991` 在 `:996` 的 `request_shutdown(Some(pid))` 之前，而 `request_shutdown` 自己的 `:846-849` 守卫只有两个入口——`:932` 的 `request_graceful_shutdown()`（传 `None`，无 pid 的旧调用方）与「`:991` 读到 token 之后、`:846` 再读之前文件被删」的竞态（`read_admin_token` 每次重读文件，`daemon_activity.rs:145`）。所以「删 `daemon.token` → `stop_daemon_process`」落在 `:991`，得到 `NotAuthenticated`；而「token 在 daemon 起来之后被换掉」落在 `request_shutdown` 的 401 支，得到 `NotAccepted`（文案反而准确）。**两个变体都偏、偏法相反**，这正是 `L2-4` 要修的那一件事。
+
 `tests/daemon_stop_e2e.rs:772-788` 的 `||` 正是它查不出来的原因：`wrong_admin_token_never_signals_the_real_daemon` 造的是「token 文件被换成错值」，走的是 `request_shutdown` 的 401 支（`NotAccepted`，文案 `did not accept this config's admin token for a shutdown`），**根本到不了** `:991`。两条文案都含 `did not accept this config's admin token`，`||` 两边都能过。落地时要拆成两条用例：删 `daemon.token` → `NotAuthenticated`（文案应说「本配置没有 admin token」）；写错 token → `NotAccepted`（保留现文案）。
 
 ### L2-3 的落地形状补一步：`Accepted` 要能带 pid
 
 `L2-3` 那段（`### L2-3 的落地形状：加字段，不换状态码`）只写了「客户端侧 `:887` 改为按 body 里的 `checked_pid` 与 `expected_pid` 比较分叉」，漏了类型这一层：`:887` 返回的 `ShutdownRequest::AcceptedUnchecked` **不带载荷**（`daemon_control.rs:827-843`，`Accepted` 也不带），要比较就得把该臂改成 `AcceptedUnchecked { checked_pid: Option<u32> }`（或新加一臂），并让 `request_shutdown` 的 200 分支先解析 body 再分叉——`reported_pid`（`:910`）解析的是 409 的错误文案，不能复用。落地时按「变体带字段 → 200 分支解析 → 比较 → `:1006` 的 warn 改文案」四步做，缺任何一步都会静默退回原形。
+
+## 2026-11-10 · batch 2（issue #13）第 2 轮追加
+
+第 2 轮是 CodeBuddy 对我上轮四个复核问题的答复，顺带带出两条代码侧问题。逐条核实 **成立 3 / 部分成立 1 / 不成立 2**（其中「不成立」两条都是它对我上轮判断的反驳，见下）。
+
+| 编号 | 位置 | 判断 | 为什么不能自动落 | 建议改法 |
+|---|---|---|---|---|
+| L2-87 | `bin/agent2ssh-daemon.rs:5365`（取消分支先发 `Message::Close(None)`）、`:5490-5495`（循环结束后**无条件**再发 `{"type":"exit",…}`，外面套 500 ms timeout）；`grep -n '"type":"exit"'` 全仓只有 `:5493` 一处 | 成立（协议层，不是文案） | RFC 6455 §5.5.1：端点发出 Close 之后**不得**再发数据帧。停机路径上 handler 先 Close、再 break 出 `select!`，然后在 `:5490` 发 exit——客户端按规范应忽略，服务端也可能写进一个已关闭的 socket。后果：客户端拿不到退出码，而「服务端发了但被协议吞了」与「服务端没发」在客户端一侧不可区分；审计里 `exit_code` 仍有值（drain 读到 `Exit` 时），两份记录于是不一致 | 三选一：①（推荐）把 exit 帧移进循环：正常路径在 `Exit` 事件上先发帧再 break，取消路径在 drain 里读到 `Exit` 时先发帧、再 Close；②停机路径干脆不发 exit（契约本轮已写「treat the close as final」），只保留审计；③保留现状。①改客户端可见顺序，需拍板。配一条 e2e：`/exec/stream` 收到 `exit` 后立即 `/shutdown`，断言「close 之后没有 text 帧」 |
+| L2-88 | `bin/agent2ssh-daemon.rs:5153-5155`（`session.set_blocking(true); let _ = channel.wait_close(); let code = channel.exit_status().ok();`）；对照 `embedded_ssh.rs:1505-1510`（库里同一件事：`set_timeout(TEARDOWN_TIMEOUT_MS)` + `wait_close_cancellable(&\|\| token.is_cancelled_now())`）、`embedded_ssh.rs:1620`（`session_timeout_ms`） | 成立（资源生命周期，严重度中） | handler 结束时只 drop 了 `stream_rx`，worker 线程要等下一次 `blocking_send` 失败才退（`:5100/:5109/:5122`）——但它在 eof 之后还要走 `:5153-5155`：`set_blocking(true)` 之后 `wait_close()` **没有取消入口**（`channel.rs:473` 传 `None`，而 `:478` 就有可取消变体），上界只剩 `session_timeout_ms(timeout_secs)`（默认 60 s，且 `ExecRequest.timeout_secs` 是 `Option<u64>` 无上界）。所以一次 `/exec` 结束后线程最长还能活 `timeout_secs`，且不响应停机。**库里那段已经把两件事都做对了**（teardown 单独 30 s 且不派生自 `timeout_secs`，并且可取消），daemon 这份是复刻时漏的 | 照 `embedded_ssh.rs:1505-1510` 改：`set_timeout(TEARDOWN_TIMEOUT_MS)` + 把 shutdown token 传进线程闭包并用 `wait_close_cancellable`。断言：停机时进程退出耗时不得随 `timeout_secs` 变长（现有 `stop_exits_when_exec_websocket_peer_stops_reading` 可加一条耗时上界） |
+
+### 第 2 轮里两条「不成立」的反驳（原文保留，请勿重复提）
+
+1. **「`handler_body_of(daemon, "exec_stream")` 拿到的是整个文件（形参括号让 `opening_brace` 的 depth 停在 1），所以新断言会静默变松」— 不成立。**
+   实测（临时探针，跑完即删）：`exec_stream` 的 body **13 702 B**、`handle_terminal` **14 261 B**，而源文件 **235 983 B**；两者都不含 `\nasync fn `。原因：`opening_brace` 从 `async fn exec_stream(` 起扫，形参表的 `(` 加 1、其 `)` 减 1，回到 0 之后才在 `-> impl IntoResponse {` 上命中。**不过它指出的失效形态值得防**：本轮已在新断言里加一条守卫（body 内不得出现另一个 `\nasync fn `），并做了破坏性验证——把 `handler_body_of` 临时改成 `&rest[..]`，断言立刻点名 `exec_stream`。
+
+2. **「本地没有 `daemon.token` 时 `stop_daemon_process` 根本到不了 `:991`，会停在 `request_shutdown` 自己的守卫 `:846-849` 上，所以我给 L2-4 的拆分方案会红」— 不成立。**
+   `:991` 在 `:996` 的 `request_shutdown(Some(pid))` **之前**执行（同一函数、语句顺序，`:942` 起）。`request_shutdown` 的守卫只有两个入口：`:932` 的 `request_graceful_shutdown()`（传 `None`，无 pid 的旧调用方）与「`:991` 读到 token、`:846` 再读时文件已被删」的竞态窗口（`read_admin_token` 每次重读文件，`daemon_activity.rs:145`）。所以删掉 `daemon.token` 调 `stop_daemon_process` 确实停在 `:991`，得到 `NotAuthenticated`——而它说「daemon 不接受这个 token」时一个请求都没发出去。**它那张表的方向是对的**（两个变体都偏、偏法相反），只是把「哪条路径到哪一支」接反了；`L2-4` 的备注按上句补了入口清单与竞态说明。
