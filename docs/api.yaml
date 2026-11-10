@@ -725,7 +725,7 @@ components:
           description: "Host tags; any match applies the policy. Empty means every tag."
         min_risk:       { $ref: "#/components/schemas/RiskLevel", nullable: true, description: "Lowest risk level that triggers approval. Absent means any level." }
         command_pattern: { type: string, nullable: true, description: "Glob pattern (`*`, `?`) the command must match for the policy to apply" }
-        requires_approval: { type: boolean, default: true, description: "true routes the match to an approver; false auto-approves it" }
+        requires_approval: { type: boolean, default: true, description: "true routes the match to an approver. false makes this policy ask for nothing *and stops the search*, so a later policy that would have demanded approval is never consulted — the first matching policy decides. Neither value overrides the high-risk rule: `/exec` still demands an approval (or `force: true`) for a high-risk command, whatever a policy says." }
         ttl_secs:       { type: integer, nullable: true, description: "Approval TTL for requests created by this policy" }
 
     DaemonHealthSummary:
@@ -4334,7 +4334,7 @@ paths:
                         jump_host:    { type: string, nullable: true }
                         timeout_secs: { type: integer }
                   overall_risk:      { $ref: "#/components/schemas/RiskLevel" }
-                  requires_approval: { type: boolean }
+                  requires_approval: { type: boolean, description: "True only when the overall risk is `high` — this preview reports the force/approval rule and does not consult `approval_policies`, so a medium-risk command that a policy gates still answers false here while `/exec` creates an approval. Use `/approval/check` for the policy answer and this field for the risk answer." }
                   warnings:
                     type: array
                     items: { type: string }
@@ -4384,7 +4384,7 @@ paths:
               schema:
                 type: object
                 properties:
-                  requires_approval: { type: boolean }
+                  requires_approval: { type: boolean, description: "True when a policy in `approval_policies` matches this host/command/risk. False means no policy asks for an approval — it does **not** mean `/exec` will run unapproved: this check takes no `force` input, and `/exec` demands an approval or `force: true` for a high-risk command regardless of policies. Read it together with `risk_level`." }
                   matched_policy:    { type: string, nullable: true }
                   risk_level:        { $ref: "#/components/schemas/RiskLevel" }
                   ttl_secs:          { type: integer, nullable: true }
