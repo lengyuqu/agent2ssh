@@ -767,3 +767,24 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
 - **L2 新增**：L2-58（KeysPanel 死告警分支，建议删）、L2-59（折叠功能未接线，接线/标/删三选一，②已落）。
 - **验证**：`npm test` **209 passed / 27 files**（204 → 209）；`npm run build` 6.53s；两次变异（`contextRows=[]`、`COMMAND_TINT` 置空）各自变红后还原；`ContainersPanel` 吞错变异变红后还原；`cargo test --no-default-features --lib` 861 passed / 1 failed（已知故意红）/ 1 ignored；`cargo fmt --check` 绿。
 - **回帖**：`2120027442654920704`（`## 第 3 轮收尾`，2026-11-10T05:35:05Z）。
+
+### consume 4 / 6 · 2026-11-10 13:46–14:05 (GMT+8)
+
+- 指摘来源：CodeBuddy 第 4 轮（`2026-11-10T05:46:13Z`），含对第 3 轮 Q1/Q2 的答复 + 7 条产品行为指摘（B-1…B-7）。确认只读（`git status` 干净）。
+- **判定：7 条 → 成立 5 / 部分成立 2 / 不成立 0；另有 Q2 的一条反问成立。**
+
+| # | 指摘 | 判定 | 核实要点 |
+|---|---|---|---|
+| Q2 | `candidateRows` 漏了 `host_address` | **成立** | `api.yaml:426` 与 `types.ts:524` 都声明，`candidateRows` 只有四项。`host_env`/`host_role` 也声明在 `ApprovalContext`，但 `api.yaml` 未列、UI 未读——那两条是纯冗余，不作为缺陷 |
+| B-1 | SFTP remote→remote 用 `\|\| f.size` 冒充目标写入量 | **部分成立** | `return uploaded.bytes \|\| downloaded.bytes \|\| f.size` 第三段确是源大小。但只有后端把两个 bytes 都填 0 才走到；真·空文件时 `f.size` 也是 0。语义错、触发面窄。另一半（`sftp_exchange` 中间态无测试）属实：`grep sftp_exchange src-tauri/tests/` 零命中 |
+| B-2 | `switchToVisual` 零调用点、YAML 编辑静默丢失 | **部分成立** | 两条核心断言都不成立：`switchToVisual` 在 `:492`（「Apply YAML to step editor」按钮）**有调用点**；`handleSave`（`:250-253`）在 yaml 模式下**先 `applyYamlToForm()` 再保存**，内容会落盘。成立的是：`:407` 的 Steps 标签直接 `setEditorMode("visual")`，绕过 apply，于是表单显示旧值、两视图不一致 |
+| B-3 | `SyncPanel.save` 保存成功但 status 失败 → 假「保存失败」 | **成立** | `:127` `setWebDavSyncConfig` → `:132` `setForm(saved)` → `:136` `setStatus(await api.getWebDavSyncStatus())`；最后一步抛错进 `:137` catch，弹红 toast，而配置已存盘 |
+| B-4 | 审批 toast 成功路径不消失，依赖 SSE | **成立** | `:44-49` 只有 `.catch`，无 `.then(dismiss)`；消除靠 `:69-77` 的 `approval_responded`。指摘说「`toastId` 在 `onClick` 闭包里拿不到」**也正确**：`const toastId = showToast({… onClick …})` 是自引用 |
+| B-5 | `SetupWizard` 的「No new hosts found」覆盖了「还没点」 | **成立** | `:199` 的条件 `!importing && !importError && importedHosts.length === 0` 在初始状态即成立，用户没点就已经看到结论 |
+| B-6 | `Dashboard` 的 `"…"` 承担三种含义 | **成立** | `:106-108` catch 里 `setExecCount24h(null)`，与「加载中」同形；`:155` `?? "…"` |
+| B-7 | `copyBlock` 空串返回 `ok: true` | **成立** | `block-content.ts:85` `if (!range) return ""`；`TerminalView.tsx:176` 仍 `writeText("")` 并 `return { ok: true, characters: 0 }`；`TerminalPanel:315-320` 显示 copied |
+
+- **L1 已落**：`ea1e378`（4 文件，纯注释）。在 B-7 / Q2 / B-2 / B-6 四处加现场注释（都指向对应 L2 编号），因为四处都是「UI 对用户说了不实的话」，注释留在现场比只记台账有用。
+- **L2 新增**：L2-60（`host_address`）、L2-61（copyBlock 空串）、L2-62（Playbooks Steps 标签）、L2-63（Dashboard `"…"`）、L2-64（SetupWizard `attempted` 缺失）、L2-65（toast 消除依赖 SSE，结构性改动）、L2-66（SyncPanel 假失败）、L2-67（SFTP `|| f.size`）——共 8 条。
+- **验证**：`npm test` 209 passed / 27 files；`npm run build` 6.41s；本轮无行为改动，`cargo` 侧未跑（未触碰 `src-tauri`，上一轮基线仍适用）。
+- **回帖**：`（待填）`。
