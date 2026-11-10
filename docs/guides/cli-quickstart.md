@@ -243,7 +243,7 @@ agent2ssh exec-multi web1 web2 --command "uptime" --json
 
 ## 文件传输 (sftp)
 
-SFTP 操作会写入审计日志；daemon 路由下还会经过 scope、gate、limits、风险和审批检查。用于策略匹配的操作字符串类似 `sftp upload <local> -> <remote>`、`sftp download <remote> -> <local>`、`sftp ls <path>`。
+SFTP 操作会写入审计日志。CLI 这条路径**只做风险与审批检查**：它把 `auth_scope` 置空（`execution_control.rs:350`），也不经过 gate 暂停与执行限流——scope、gate、limits 三项只在 daemon 的 `/sftp/*` 路由上。用于策略匹配的操作字符串类似 `sftp upload <local> -> <remote>`、`sftp download <remote> -> <local>`、`sftp ls <path>`。
 
 桌面端 **Files** 页面提供左右双栏文件管理器，可浏览远程目录、点击文件夹进入、点击文件选择、新建目录，并通过 **Copy to right** / **Copy to left** 做双向传输。
 
@@ -285,7 +285,7 @@ agent2ssh sftp mkdir <host> <path> [--json]
 
 持久化 PTY 会话允许保持交互式 SSH 连接，适合需要多次输入输出的场景。
 
-CLI 会话由 daemon 持有生命周期，使用前先启动本地 daemon：
+CLI 会话由 daemon 持有生命周期，使用前先启动本地 daemon；`--daemon <远端别名>` 把会话放到那台 daemon 上（会话本来就只能在 daemon 里存在，`--daemon` 换的是哪一台）：
 
 ```bash
 agent2ssh daemon start
@@ -336,7 +336,7 @@ agent2ssh session close <session-id> [--json]
 
 管理 SSH 端口转发隧道（本地转发 `-L` 或远程转发 `-R`）。
 
-CLI 转发由 daemon 持有生命周期，使用前先启动本地 daemon：
+CLI 转发由 daemon 持有生命周期，使用前先启动本地 daemon；`--daemon <远端别名>` 把隧道建在那台 daemon 上：
 
 ```bash
 agent2ssh daemon start

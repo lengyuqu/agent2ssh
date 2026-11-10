@@ -697,3 +697,11 @@ CodeBuddy 的复核 `2120258070138740736` 新批 3 条 → **成立 1（§五.2�
 | L2-107（补充） | `bin/agent2ssh.rs:2010-2016`（`host add --risk-override`）只改这一处；**:1085** 的 `policy add --min-risk` 保持接受 `blocked` | 同上，补充证据 | 复核给了一条本轮没抓到的证据：`f345a92` 同一笔既加了 clap 文档 `(low/medium/high)` 又加了 `"blocked" => Some(...)`，**没有任何一处文档同时说过 `blocked` 是合法的覆盖值**；`core.rs:3869` 只锁「不能降级 blocked」这一个方向，`cli_smoke.rs:1257` 只用 `--risk-override low`，没有一条正例。所以更可能是顺手多写了一个枚举值，而不是有意的「隔离主机」能力。**但两处 `match` 是同一段代码的两份拷贝，语义不同**：`policy add --min-risk blocked`（「连 blocked 都要审批」）是真的需要这个值，全局禁掉会砍掉它 | 若拍板「拒绝」：`host add` 那处把 `Some("blocked")` 改成走错误分支，`policy add --min-risk` 保留；两处都把 `_ => None` 换成显式报错（拼错返回非零退出，而不是静默存成 `None`）。若拍板「保留」：本轮已把 `cli-quickstart.md:97` 与 clap 文档写成 `(low/medium/high/blocked)`，无需再动，但要把「该主机的命令会被全部拒绝」写进 `configuration-guide.md` 的字段表，否则它仍是一条靠读代码才能发现的能力 |
 
 **第 5 轮复核对 L2-108 拍了方向：选 ①，不走 ②。** 理由按分量：②把一个「导出说 not configured、导入把用户手写文件冲掉还报 overwrite」的错位写进 `summary` 当规范；①两半一起修好，且 `policy.rs:117` 的 `save_policy_approval_policies` 已经是「load → 改 `approval.policies` → save」的形状，`[risk.*]` 照抄即可，不用新建文件。**但它留了一个子问题没定**：导入时若 `policy.toml` 已存在且带 `[risk.*]`，是**整段替换**还是**与现有条目求并集**。复核倾向整段替换（把「导出→导入」当一次完整搬运，与今天 `risk_rules.toml` 的覆盖行为一致，只是目标换对了）。**这一条仍需人拍板**：整段替换意味着从别的机器导入会清掉本机原有的自定义风险规则，而并集意味着同一条规则两边定义不同时无法表达「以哪边为准」。**L2-108 维持 open，等这个子问题定了一起做。**
+
+## 2026-11-11 · batch 9 第 6 轮（issue #15，基线 `418c6db`）· 自取
+
+本轮 5 次轮询（60 秒 × 5）没有新复核，转自取：两处人读文档 + 一条签名级清理。**判定全部成立（自取不涉及「指摘」）**，L1 已落，下面的进 L2。
+
+| 编号 | 位置 | 判断 | 为什么不能自动落 | 建议改法 |
+|---|---|---|---|---|
+| L2-109 | `bin/agent2ssh.rs:1585-1606`（`authorize_local_operation` 的 `force: bool` 形参）、9 个调用点 `:2412`…`:2555` | 成立（残留形参） | 9 个调用点**全部**传字面 `false`，而 `SftpCommands::*` 没有任何 `--force` 标志；形参与 `--force` 同名，读代码的人会以为「某天会传 true」。本轮复核独立指出同一点（它说「是设计，不是漏传」——这点我核过也对：`sftp` 从来没有 force 能力）。但**删形参是签名改动**，且要先确认「`sftp` 永不允许 force」是设计而不是待补的功能：daemon 侧 9 个 SFTP handler 也把 `force` 硬编码 `false`，两边一致，看起来是「SFTP 只能靠审批，不能靠 force」的有意设计 | 二选一：①承认设计——删掉 `authorize_local_operation` 的 `force` 形参（内部传 `false`），并在 daemon 侧把 `preflight_guarded_request(..., false, ...)` 的注释写明「SFTP 不接受 force」；②这其实是个功能缺口——给 `sftp` 加 `--force`，同时给 daemon 的 SFTP 请求体加 `force` 字段。①只动签名，②要动契约（`api.yaml` 九条路由的 requestBody + `types.rs` 三个请求结构） |
