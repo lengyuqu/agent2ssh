@@ -1032,7 +1032,7 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 ### batch 2026-11-10 · 测试覆盖缺口（只有代码依据、无断言的分支）
 - issue #12 / 开批时间 2026-11-10 18:29 (GMT+8)
 - CodeBuddy 首条分析：**未到**（等待中——issue 发出后 60 s × 5 次轮询（18:30–18:34）与结束前即时复核均 0 条 CodeBuddy 评论；消费者下次运行重新等。**注意**：#12 现有 1 条评论 `2120103682455814144` 是**生产任务的更正**（见下），不是 CodeBuddy 分析，判定「已到」须按作者区分）
-- 6 轮进度：4 / 6（第 4 轮于 20:07–20:5x 完成，见文末 `consume 4 / 6`；第 5 轮待跑）
+- 6 轮进度：5 / 6（第 4 轮于 20:07–20:19 完成，见 `consume 4 / 6`；第 5 轮于 20:20–20:4x 完成，见文末 `consume 5 / 6`；第 6 轮待跑）
 - 正文喂给 CodeBuddy：**49 条「不成立」原文**（preflight 2 + batch 1 六轮 10 + batch 2 行内 D2/D4 2 条、编号 15–28 十四条与物理落在其末节的 29–31 三条共 19 + batch 3 行内 A5/E 2 条 + batch 4 第 1/5/6 轮 10 条 + batch 5 行内 6 条；29–31 内容属 batch 3 第 5 轮，正文已标注来源）+ KNOWN-ISSUES 空档 7 项（§3 反向用例只对 ed25519 做过、§3 多轮 keyboard-interactive、§3 端口转发/PTY 按服务端版本、K14 `pid_definitely_missing`/`Unknown` 纯代码路径、K15 终端 WebSocket 背压、E6/E8 Apple container、K2 `STALL_TIMEOUT` 复测）+ 基线口径（861/1/1 故意红测勿再提、npm 213/27、feature 组合不可相加、`exec_fixture` 空跑、`daemon_*_e2e` 需显式 `--features daemon`、`.github/**` 禁区、L2-29/L2-53 前置依赖注明即可、i18n 键覆盖已闭环勿重扫）。正文由脚本按 ledger 锚点切片生成（`/tmp/build-opt-issue-b6.py`），避免转写误差；脚本初版 `find()` 未按批次区域定位，batch 1 第 2–6 轮与 batch 4 第 5/6 轮错配到 batch 2 同名小节，已修并复验 49 条。
 - **开批后竞态（消费者必读）**：18:37 rebase 时发现消费者侧在 #11 收尾复核推了 `7175314` / `b5483c3` 两笔，**重写 batch 5 第 6 轮记录并推翻 3 条不成立**（「/exec/stream 在 on_upgrade 前判 gate，应有 423」——gate/限额确在闭包内走 error 帧，但 401 在中间件层成立、已补；「app_preferences.json 归进按需组」——消费者自认第 3 轮归组错误；「F22 total_ms」——改判该补 `format: int64`）。生产任务已发更正评论 `2120103682455814144`（18:38）：**撤销该 3 条（恢复为可重提），其余 46 条维持**，并同步首项状态——F19 `/forwards/{id}/start|stop` 已补全、F14 补一半（`POST /resident-sessions` 与 `/{id}/exec` 已补，列表/读取两条只补 400 描述）、**F13 `/exec-multi` 仍未做**；下一批真正首项 = 把「方法 + responses 状态码集合 + 401/403/500 三处共享签名」加进 `api_yaml_documents_every_daemon_route`。**第 1 轮起以更正评论与 ledger 当前版为准，勿按 issue 正文旧文执行。**
 - 顶部 `BATCH_COMPLETE · issue #11` 状态行已由本次生产运行删除（沿用 #10 遗留要求，#12 开批后它会让消费任务误判「只报告不执行」）。
@@ -1186,3 +1186,34 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 **没加断言的两件事（故意的）**：响应码升序是**风格**不是契约，加 lint 会把「先 4xx 后 5xx 的阅读顺序」也禁掉；`locked_status`/`too_many_requests_status` 这类 helper 产生的码不在扫描内，这是第 3 轮已写明的边界，扩表解决不了。
 
 **下一轮首项**：`api.yaml` 里成串的 JSON 帧样例仍无覆盖（batch 5 的四份文档同时错就长在这条缝里），而 `api_yaml_documents_every_daemon_route` 只比路由与方法。第 5 轮若 CodeBuddy 还能给出「契约写了但代码不会那么答」的具体条目，优先核那一类；否则转 `/health-snapshot` 与 `/config/import` 的 400/500 描述逐条对源码。
+
+### consume 5 / 6 · 2026-11-10 20:20–20:45 (GMT+8) · issue #12
+
+- **指摘来源：自取。** 第 4 轮回帖 20:19 发出，60 s × 5 次轮询到 20:23 该 issue 评论数一直是 9（无 CodeBuddy 回复）→ 按协议标「等待超时」，改从第 4 轮回帖里自己点名的两项（`/health-snapshot` 与 `/config/*` 的 400/500 未逐条对源码；`api.yaml` 里 JSON 帧样例零覆盖）继续。
+- **判定：9 项 → 成立 9 / 部分成立 0 / 不成立 0。** 其中第 9 项是**我自己的错**，被本轮新加的断言当场抓出。
+
+| # | 项 | 判定 | 证据要点 |
+|---|---|---|---|
+| 1 | `POST /config/import` 的 400 说「payload 无效」 | 成立 | `core/team_config.rs:67` `import_team_config` **不校验 payload**；400 的真实来源是 `store_write_lock()`、`load_config`、`save_config_unlocked`、写 `risk_rules.toml`、写 `playbooks.toml` 五种 I/O。已按源码重写 |
+| 2 | `POST /config/import/preview` 的 400 同上 | 成立 | `:162` `preview_team_config_import` 只做 `load_config` + `config_dir`，两者都是 I/O 失败 |
+| 3 | `GET /config/export` 的 500 说「bundle 解析失败」 | 成立 | `:21` `export_team_config` **从不解析**：两份文件 `read_to_string` 原样塞进 bundle，500 只有读文件失败 |
+| 4 | `GET /health-snapshot` 的 200 schema 只有 snapshot 一支 | 成立 | `get_health_snapshot` 在未采集过时以 `{"error","hint"}` 返 200（`api.yaml` 自己的 description 都写了），schema 却是 `type: object`。已改 `oneOf` |
+| 5 | `ApprovalDetail.tsx` 注释引 `api.yaml:426` | 成立（我第 4 轮写的） | `e414b63` 时 426 行是 `requested_at`，`host_address` 在 434；第 4 轮后漂到 441。跨文件引用改按 schema 名 |
+| 6 | 105 个 operation 里 415/422 各出现 **0** 次 | 成立 | `grep -c '"415"'`=0、`'"422"'`=0；47 个 handler 取 `Json<T>`，三个拒绝码全由提取器产出，而 `api_yaml_documents_the_codes_each_handler_can_return` 只读 handler 体内的 `StatusCode::` 常量，**结构上看不见**——与第 1 轮「98 个 401 缺失」同族、同因 |
+| 7 | `Option<Json<T>>` 吞掉全部提取错误 | 成立 | `axum-core-0.4.5/src/extract/mod.rs:119-129`：`type Rejection = Infallible` + `Ok(T::from_request(..).await.ok())`。三处受影响，`/shutdown` 最重：`{"expect_pid":"abc"}` → `None` → `:204` 的 `None => {}` → 跳过 `:182` 的 409 与 `:199` 的 400 → `:207` 关机。登记 **L2-82** |
+| 8 | 提取器拒绝的响应体不是 `Error` 对象 | 成立 | `axum-core-0.4.5/src/macros.rs:50-59` `(self.status(), $body).into_response()` → `text/plain; charset=utf-8`。我第一版按 `application/json` + `Error` 写的 47×2 处全错，且「body 不是 JSON」会以 400 到达、与 handler 自己的 400 同码不同体裁。登记 **L2-83** |
+| 9 | 我按 `requestBody` 批量补 415/422，把 `POST /approvals/{id}/approve` 也补了 | 成立（自我更正） | 它取的是 `body: axum::body::Bytes`（`:3341`），**没有** `Json` 提取器，手写 `serde_json::from_slice` 并回自己的 400。新断言当场点名 `post /approvals/{id}/approve (approval_approve) has no Json<T> extractor` |
+
+**L1 落地（三笔）**：`628e9f3`（`/config/*` 三条描述 + `GET /health-snapshot` 的 `oneOf` + `ApprovalDetail.tsx` 注释）、`6fff9f1`（47 组 415/422 + 派生式断言 + 三处 `Option<Json<T>>` 的吞错说明）、`c1ecc72`（94 个拒绝改成 `text/plain` + 断言）。
+
+**新增断言 `api_yaml_documents_how_each_handler_reads_its_body`**：从每个 handler 的**参数表**（新 helper `handler_params_of`，走括号配平）现推它属于 `Json<T>` / `Option<Json<T>>` / `Bytes` / 无 四种之一，再按该形态要求契约——`Json<T>` 必须有 415/422 **且必须是 `text/plain`**、必须有 `requestBody`；`Option<Json<T>>` **不许**有 415/422 且描述里必须出现「does not parse」；`Bytes` 与无 body 的不许有 415/422。不写死任何表。
+
+**验证**：`npm run build` 6.82 s；`cargo fmt --all -- --check` 绿；`cargo test --features daemon --test daemon_integration` **67 passed**（66 → +1）；`cargo test --no-default-features --lib` **861 passed / 1 failed / 1 ignored**（红的仍是 `an_ipv6_literal_at_port_22_is_removed`，main 自 `09d49ea` 起故意红，与本次无关）；PyYAML：90 paths / 105 operations / 47 有 415 / 47 有 422 / 0 个拒绝不是 `text/plain` / 0 个 responses 缺 `content` / 0 个乱序。
+
+**四条破坏性验证**：①删 `POST /exec` 的 `"422"` → 红并点名 `post /exec (exec)`；②给 approve 补回 `"415"` → 红并点名它「没有 `Json<T>` 提取器」，**正好复现我 20 分钟前犯的错**；③把 `/shutdown` 的 caveat 改写掉 → 红并点名 `post /shutdown`；④把某个 415 的 `text/plain` 改回 `application/json` → 红并点名 `post /hosts (add_host)`。
+
+**方法论（本批第二次同型错）**：我又用「扫 `requestBody` 就补状态码」代替「读签名」。上一轮的同型错是「拿同族一个成员代表整族」（脱敏那次），这次是「拿一个字段的存在代表一个行为的存在」。规则收紧：**凡是「某字段存在 ⇒ 某状态码存在」的批量推导，落盘前必须对每个成员读一遍真正的产出点**——本例里产出点不在 `api.yaml`、不在 handler 体，而在**签名**。
+
+**未做（L2，需拍板）**：**L2-82**（`Option<Json<T>>` 吞错，`/shutdown` 可被 `{"expect_pid":"abc"}` 绕过 409/400）与 **L2-83**（提取器拒绝返 `text/plain`，且语法错与 handler 自己的 400 同码）。
+
+**下一轮首项**：第 6 轮是末轮，取靶顺序——①`api.yaml` 的 JSON 帧样例（`/terminal` 的 `{"type":"connected"}`、`/exec/stream` 的 `{"type":"stdout"}`）是否有「契约写了而代码不产」的字段；②`/daemons/*` 与 `/sftp/*` 的 502/400 描述是否与 `proxy_exec` 的透传一致；③若 CodeBuddy 已在第 5 轮回帖下回话，优先它的可核实断言。
