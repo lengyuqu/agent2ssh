@@ -138,6 +138,28 @@ describe("SyncPanel encrypted upload settings", () => {
     expect(encryptionPassword().placeholder).toBe("Saved. Leave blank to keep it.");
   });
 
+  it("tells the user a saved config failed when the status read throws", async () => {
+    // L2-66: `await api.getWebDavSyncStatus()` sits inside the same try as the
+    // save, and `showToast("success", …)` is on the line *after* it. So when
+    // only the status read fails, the config is already persisted, the green
+    // toast never runs, and the red one claims the save failed. Exactly one
+    // toast is emitted and it is the wrong one — there is no second green toast
+    // to contradict it. Flipping this expectation is what fixing L2-66 means.
+    let statusReads = 0;
+    mockApi.getWebDavSyncStatus.mockImplementation(() => {
+      statusReads += 1;
+      return statusReads === 1
+        ? Promise.resolve(readyStatus)
+        : Promise.reject(new Error("status read failed"));
+    });
+    await renderPanel();
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(screen.getByText("Error: status read failed")).toBeTruthy());
+    expect(mockApi.setWebDavSyncConfig).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText("WebDAV sync settings saved.")).toBeNull();
+  });
+
   it("preserves saved passwords by sending null when password fields are left blank", async () => {
     await renderPanel();
     fireEvent.change(screen.getByLabelText("Username"), { target: { value: "renamed-user" } });
