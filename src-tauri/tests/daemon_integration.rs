@@ -749,7 +749,16 @@ async fn http_risk_check_blocked_command() {
     assert_eq!(response.status(), 200);
     let result: serde_json::Value = response_json(response).await;
     assert_eq!(result["risk_level"], "blocked");
-    assert!(result["matched_rule"].is_null());
+    // Narrow on purpose: this router does not isolate its config directory, so
+    // there is no `risk_rules.toml` and `classify_with_user_rules` can only
+    // answer `None`. The test therefore says "built-in rules leave matched_rule
+    // empty", which is true and falsifiable — it says nothing about the
+    // `"user_rule"` value a user rule produces (L2-29; covering that needs the
+    // harness to own its config dir first).
+    assert!(
+        result["matched_rule"].is_null(),
+        "built-in rules must not claim a user rule name: {result}"
+    );
 }
 
 #[tokio::test]

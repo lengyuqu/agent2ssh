@@ -287,7 +287,6 @@ pub async fn fire_webhook(event: WebhookEvent) -> Result<()> {
 }
 
 /// Format event as Slack Block Kit message.
-#[allow(dead_code)]
 fn format_slack_message(event: &WebhookEvent) -> serde_json::Value {
     let event_name = match (event.event.as_str(), event.remote_outcome_unknown) {
         ("approval_required", _) => "Approval Required",

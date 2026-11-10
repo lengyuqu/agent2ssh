@@ -306,7 +306,21 @@ components:
       type: object
       required: [input]
       properties:
-        input: { type: string }
+        input:
+          type: string
+          description: >
+            Raw keystrokes for the session's shell. There is no `command`
+            field: the handler derives one by splitting `input` at newlines and
+            running scope, gate, limits, risk and approval over the last
+            complete line before it writes anything. Any other field in the
+            body is ignored rather than rejected (`SessionWriteBody` in the
+            daemon does not use `deny_unknown_fields`), so a client that sends
+            `command` gets its input through with the risk derived from
+            `input`, not from what it sent.
+        force:
+          type: boolean
+          default: false
+          description: Applied to the command risk of the split-out input.
         source: { type: string, nullable: true }
 
     ForwardAddRequest:
@@ -2894,21 +2908,33 @@ paths:
           description: SSH connection timeout in seconds.
       responses:
         "200":
+          description: >-
+            A `HealthSnapshot` object, not a bare array: `get_health_snapshot`
+            serializes `health::HealthSnapshot`, and this route only reads the
+            snapshot file — it never collects one, so a 200 body can predate the
+            call by any amount of time.
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  type: object
-                  properties:
-                    host:        { type: string }
-                    reachable:   { type: boolean }
-                    uptime:      { type: string, nullable: true }
-                    disk:        { type: string, nullable: true }
-                    memory:      { type: string, nullable: true }
-                    load:        { type: string, nullable: true }
-                    latency_ms:  { type: integer, nullable: true }
-                    error:       { type: string, nullable: true }
+                type: object
+                required: [hosts, collected_at]
+                properties:
+                  hosts:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        host:         { type: string }
+                        reachable:    { type: boolean }
+                        latency_ms:   { type: integer, nullable: true }
+                        uptime:       { type: string, nullable: true }
+                        load_avg:     { type: string, nullable: true }
+                        disk_usage:   { type: string, nullable: true }
+                        memory_usage: { type: string, nullable: true }
+                        collected_at: { type: string, format: date-time }
+                        error:        { type: string, nullable: true }
+                  collected_at: { type: string, format: date-time }
+                  total_ms:     { type: integer }
     post:
       summary: Collect health snapshot for specified hosts
       description: Triggers a concurrent health collection for the given hosts (or all configured hosts if omitted).
@@ -2923,21 +2949,36 @@ paths:
                 timeout_secs: { type: integer, default: 10 }
       responses:
         "200":
+          description: The snapshot that was just collected (same `HealthSnapshot` shape as `GET`).
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  type: object
-                  properties:
-                    host:        { type: string }
-                    reachable:   { type: boolean }
-                    uptime:      { type: string, nullable: true }
-                    disk:        { type: string, nullable: true }
-                    memory:      { type: string, nullable: true }
-                    load:        { type: string, nullable: true }
-                    latency_ms:  { type: integer, nullable: true }
-                    error:       { type: string, nullable: true }
+                type: object
+                required: [hosts, collected_at]
+                properties:
+                  hosts:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        host:         { type: string }
+                        reachable:    { type: boolean }
+                        latency_ms:   { type: integer, nullable: true }
+                        uptime:       { type: string, nullable: true }
+                        load_avg:     { type: string, nullable: true }
+                        disk_usage:   { type: string, nullable: true }
+                        memory_usage: { type: string, nullable: true }
+                        collected_at: { type: string, format: date-time }
+                        error:        { type: string, nullable: true }
+                  collected_at: { type: string, format: date-time }
+                  total_ms:     { type: integer }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403
+        "500":
+          description: >-
+            Only when the host list is expanded from the config file and that read
+            fails. Naming explicit `hosts` avoids it: an unknown alias is not an
+            error but a per-host row with `reachable: false`.
 
   # ── Local configuration lifecycles ─────────────────────────────────────────
   #
