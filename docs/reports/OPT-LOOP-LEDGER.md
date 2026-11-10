@@ -1095,3 +1095,32 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 
 5. **「`api_yaml_documents_every_daemon_route` 的 path 解析对 `:` 与前缀星号无防御，会静默放宽」— 不成立（提出者自撤）。**
    `split(':').next()` 取第一个冒号之前，而 path 里目前没有冒号；`/` 两侧的排除与 `path.is_empty()` 分支使比对双向冗余正确。它自己核完改成「路径比对本身是双向的、冗余正确的」。
+
+### consume 2 / 6 · 2026-11-10 21:00–21:25 (GMT+8) · issue #12
+
+- **指摘来源**：CodeBuddy 对本轮第 1 轮收尾的复核（评论 `2120120687485419520`，19:45）。它这轮同样没有 Rust 工具链，但做了一件对的事：**用 Python 复刻我的解析逻辑，先复现出与 HEAD 相同的结果（90 routes / 107 mounts / 105 ops / 0 缺失），再做变异**。这比它上一批「读一遍就断言」可靠得多。
+- **判定：(a)(b)(d) 成立（且给出了比我的说法更精确的数），(c) 部分成立**——它指出 `/exec-multi` 的 400 还有**第四种**来源，我第 1 轮写的三分不完整。
+
+| 项 | 它的指摘 | 判定 | 证据 |
+|---|---|---|---|
+| (a) | 98 个 401 覆盖完整、`/health` `/metrics` 未被误加 | **成立（更强）** | 逐 operation 解析：105 ops / 2 公开 / 103 带 401 / 0 缺失。它另查了 103 行 `"401":` 的缩进全是 8 且都在 `paths:` 之后 |
+| (a) 附 | `is_public_path` 有**四个**公开路径，`api.yaml` 只有两个 `security: []`；`/` 与 `/console` 靠 `NON_API_ROUTES` 豁免，所以「由 `security: []` 声明、非硬编码」只对一半成立 | **成立（措辞批评，非缺陷）** | `auth.rs:99` 是 `matches!(path, "/" \| "/console" \| "/health" \| "/metrics")`。我的 commit message 确实只覆盖了两个 |
+| (b) | 方法断言可证伪、链尾不丢 | **成立** | 它跑了两个变异：`/gate/pause` 的 `post→put`、`/algo/prefs` 多行链尾的 `delete→patch`，两个都被点名。后者是关键（多行链） |
+| (b) 附 | `.with_state(` 那个 clamp 今天完全不起作用，且 `find` 是从 `start` 搜到**文件尾**而不是当前段——多 router 链时会静默截断 | **成立（未来隐患，不改）** | 全文件只有一处 `.with_state(`（5924），在最后一条 route 之后。同意它的判断：不为假想的多链改代码 |
+| (c) | `/exec-multi` 的 400 有第四种：`resolve_exec_targets` → `expand_hosts_by_tags` → **`load_config()?`**，`hosts.json` 坏掉时 400 文案是 `failed to read hosts config` | **成立（本轮唯一没解决项）** | `core.rs:798-807` 的 `load_config()?` 只在 `tags` 非空时执行；`:1419`/`:1488` 的 `resolve_exec_targets(...)?` 由 handler 的 `.map_err(BAD_REQUEST)` 收。已补进两条 400 描述 |
+| (d) | resident 的 500 有两个站点，不止 `Internal`：`reject_if_gate_paused` → `load_execution_gate()` 失败也返 500 | **成立；但 `api.yaml` 的文案本来就覆盖了** | `daemon.rs:382-391`。我写的 description 是「a config file could not be read, or the authorization chain hit an internal error」——两个站点都在内。**错的是我的 commit message 归因，不是契约文案** |
+| (d) 附 | `POST /resident-sessions` 的 429 引用了 `register_limited_session_for_command`，而该 handler 从不调用它（那是 `session_open` 的预约助手） | **成立** | 该符号只在 `:2397`（`session_open`）与 `:4727`（terminal）及测试里出现；resident 链上的 429 只可能来自 `reject_if_rate_limited`（`preflight_guarded_request_inner:571`） |
+| (d) 附 | `POST /hosts` 连 400 都没写，而 `add_host` 对校验失败与 `save_config` 失败都返 400 | **成立** | `daemon.rs:1331-1338` 是 `.map_err(|e| err(BAD_REQUEST, e))`；契约原来只有 200/401/403 |
+
+**它给的 18 个 500 缺口，我测出来是 21 个。** 差异在 handler 切分口径上（它按 29 个函数算，我按 `.route(` 里挂的名字逐个回溯），但两个数都比它上一批说的「20 处左右」更接近真相。**我自己第 1 轮说的「26 个 handler / 10 个 operation」也不准**：实测 handler 内自带 `INTERNAL_SERVER_ERROR` 的有 28 个函数，映射到 21 个 operation 缺 500。
+
+**L1 落地**（一笔）：`ac8de91`
+- `docs/api.yaml`：21 个 operation 补 `"500"`（逐条读 handler 的 500 那一行，按各自真实原因写描述）；`/exec-multi`/`/exec/compare` 的 400 补第四种来源、并补 `"500"`（经 `authorize_targets` 透传）；`POST /resident-sessions` 的 429 删掉错引的 helper；`POST /hosts` 补 `"400"`。
+- `src-tauri/tests/daemon_integration.rs`：新增 `api_yaml_documents_the_500_each_handler_can_return`——**handler→operation 映射由源码现推，不写死表**（`.route(` 里的 handler 名 → 该函数体是否含 `INTERNAL_SERVER_ERROR`）。共用解析器抽成 `daemon_routes`，两条测试同源。
+
+**验证**：`npm run build` 6.45s；`cargo fmt --check` 绿；`--no-default-features --lib` **861 / 1 failed / 1 ignored**（基线红）；`--features daemon --test daemon_integration` **64 passed**（63 + 新增 1）；`--features daemon --test daemon_resident_session_e2e` **12 passed**。
+**三条断言全部做了破坏性验证**：删 `/gate` 的 500 → 红并点名 `["get /gate (gate_status)"]`；删 `/hosts` 的 401 → 红并点名 `["get /hosts"]`；`/gate/pause` 改 `get` → 红并点名 `["post /gate/pause"]`。
+
+**这一轮的方法论收获**：`daemon_routes` 抽出来之后，两条测试读同一份解析结果——之前「一个测试里内联解析、另一个测试另写一套」才是漂移来源。CodeBuddy 的复刻法（先复现基线再做变异）值得记下来：**它这次能给出可信结论，是因为它先证明了自己的复刻是忠实的。**
+
+**下一轮首项**：`/exec-multi` 的目标解析顺序（L2-77）仍是本批最值钱的行为改动；若仍不能拍板，就转去 `src-tauri/tests/**` 里「跑了真 daemon 但只断状态码不断 reason」的用例。
