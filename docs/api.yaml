@@ -2289,7 +2289,14 @@ paths:
                 type: object
                 properties:
                   risk_level: { $ref: "#/components/schemas/RiskLevel" }
-                  matched_rule: { type: string, nullable: true }
+                  matched_rule:
+                    type: string
+                    nullable: true
+                    description: >-
+                      `"user_rule"` when a user-defined risk rule matched, else
+                      `null`. The value is a marker, not a rule name: the matched
+                      pattern is not carried, so the two possible values are `null`
+                      and the literal `"user_rule"`.
 
   /connections:
     get:

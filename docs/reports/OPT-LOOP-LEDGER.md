@@ -370,3 +370,24 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
     循环是 `while response.len() < 16 * 1024 { read_exact(1 byte)?; push; if ends_with(b"\r\n\r\n") { return } }`，条件在**每次读之前**判：对端持续发送超过 16 KiB 且不给 `\r\n\r\n`、连接不断开时，第 16384 次 `push` 之后 `len == 16 * 1024`，循环退出并返回 `Err("...exceeded 16 KiB")`。`read_exact` 只有在 EOF/超时时才 `?` 早退，所以「上限不可达」的推理把「对端先 EOF」当成了唯一路径。**成立的是更窄的一条**：对端只发 LF 头然后关闭时，报的是 `read_exact` 的 I/O 错（`early eof` 一类），而不是「头过长」——错误分类确实不可区分，但那是可观测性问题，不是上限不可达。
 24. **「第 4 轮 A.2 后半：第三列里有 `|` 会让 `split_known_host_key` 截短 identity」— 不成立（两处错）。**
     ①`split_once('|')` 切在**第一个** `|`，而 key 的形状是 `{identity}|{algorithm}`，第一个 `|` 就是分隔符本身，identity 在它之前，永远不会被截短；被污染的是 algorithm 那一段。②第三列是 base64 的 key blob，不是算法名——算法名是第二列 `key_type`。A.2 前半（只做 `STANDARD.decode`、不验解出来的公钥结构）成立，已记 L2-22。
+
+### consume 5 / 6 · 2026-11-10 09:22–09:30 (GMT+8)
+
+- **指摘来源**：CodeBuddy 对第 4 轮回帖的复核（评论 `2119947109238460416`，「第 4 轮复核（基线 `f8bc228`）」）。5 条新编号（N-1…N-5）+ 一节措辞确认（四），确认部分无新问题。
+- **判定**：**成立 2 / 部分成立 2 / 观察 1 / 不成立 0**。
+  - 成立：N-1（`/risk/check` 的 `matched_rule` 恒为 `"user_rule"`，`api.yaml` 却声明成任意字符串）、N-5（把 `HostKeyKind::Unknown` 引到 `to_bytes` 失败那条路，只会把「unknown」换成一句假话）。
+  - 部分成立：N-2（两处对 `eof()` 的用法确实不同，但「与模块头契约相反」不成立，见不成立 25）、N-3（webhook 与状态码不对称属实，「同构」与「handler 一行可改」不成立，见不成立 26）。
+  - 观察：N-4（`raise` 成功后 `*guard = Some(s)` 直接替换旧会话、不 `disconnect`）。采纳它自己的判断**不进 L2**：`Session` 被 drop 即关 socket，服务端会回收；与 `forward.rs` 的 `stop_worker` 只是风格差异，不是行为缺陷。
+- **本轮最值钱的一处**：N-3 的落点与指摘预期相反。`core.rs` 的 `exec_local_core_impl` 已经把 `LocalExecShutdown` 降级成一句字符串错误，并在同一处写明「local runner 自己持有 deadline 并收割子进程及其进程组，所以不像 SSH 路径那样后面还挂着一个在跑的命令」。所以那条「在 handler 里把 `None` 换成计算结果」的修法**恒等于 `None`**：类型在上游就没了。这一条把 L2-27 从「一行」改成「先透类型、再统一算 outcome」，也顺带固定了语义口径——local 中断时未知的只是「已产生的副作用」，不是「命令可能还在跑」。
+- **我自己多查出来的两条**：①`/risk/check` 每个请求把 `classify_with_user_rules` 调**两次**（`:3492` 直接调，`:3495` 经 `effective_command_risk` → `classify_effective_risk` 再调一次），两次各自 `load_risk_rules()`；规则文件在两次读之间变更或读失败时，`matched_rule` 与 `risk_level` 可以互相矛盾。②指摘说「全仓 grep `matched_rule` 只有测试与 `api.yaml`」，漏了 `console.html:1052`——而那是唯一把它呈现给人的地方，渲染成 `Matched: user_rule`，正好把这个常量的误导性放大到用户可见。
+- **动作**：`ed72760`（`daemon.rs` 两处 landmark 注释：`eof()` 的判定顺序为何承重、`matched_rule` 的取值域为何是两个值）；本笔（`api.yaml` 写出取值域 + `daemon-api-quickstart.md` 一句「固定字面量，不是命中的 pattern」+ `OPT-LOOP-L2-PENDING.md` 的 L2-26/L2-27 与 L2-23 收窄 + 本 ledger）。
+- **验证**：`npm run build` 6.51s；`cargo fmt --check` 绿；`cargo test --no-default-features --lib` **861 passed / 1 failed / 1 ignored**（失败项仍是基线那条故意红测，本轮只加注释，未触碰它）；因改了 `api.yaml`，另跑 `cargo test --no-default-features --features daemon --test daemon_integration api_yaml` → **1 passed / 0 failed**（`api_yaml_documents_every_daemon_route`）。
+- **回帖**：见本轮 `## 第 5 轮收尾`。
+- **锁**：进入时又是孤儿锁（mtime 08:14、空目录、无 pid，上一轮记录写着「结束释放」）。这次直接存活核验（`ps` 无 cargo/cnb/vite 进程；`lsof -d cwd` 仓库内无进程）→ 接管，并写入 `owner.txt`（pid + 起始时刻）让下一次能区分「活着的持有者」与「残骸」。**释放仍是薄弱点，第四次记录。**
+
+### 第 5 轮新增的不成立条目（原文保留，请勿重复提）
+
+25. **「N-2：`spawn_embedded_exec_stream` 的 `if channel.eof() { break; }` 与 `channel.rs` 模块头那句『returning true before both queues drain truncates stderr』相反；它靠抽干才让 `eof()` 变真，抽干前 `eof()` 一直为假」— 不成立（「相反」这一半）。**
+    `eof()` 就是 `drained()`（`channel.rs:315-320` = `state.eof && stdout 空 && stderr 空`，`:452-454` 的 `pub fn eof` 直接转调），模块头那句是对**实现或改动 `eof()` 的人**的约束（别让它在队列没抽干时返回 true），不是「消费者必须在读之前调用它」。此处检查位于两个读循环**之后**（`daemon.rs:5124`），队列刚被抽干，`state.eof` 一为真它就转 true——正是这个谓词要表达的意思。至于「抽干前 `eof()` 一直为假」：流未结束时它为假的原因是 `state.eof == false`，与队列是否为空无关（队列本来就每轮被抽干）。**成立的是更窄的一条**：判定顺序是承重的且先前无注释，已补 landmark 注释。另一半「两处对同一谓词的用法不同」也成立（`bridge_tcp_and_channel` 只在 `Ok(0)` 之后用它来关写端），但那是两种正当用法，不是不一致。
+26. **「N-3：`/local-exec` 拿到的是同一个 shutdown token、同一种『命令发出去了、进程被杀了、不知道远端副作用有没有发生』的处境，所以在 webhook 里写 `remote_outcome_unknown: None` 是一处可以一行改掉的不对称」— 「同构」与「一行可改」两点不成立（不对称本身成立，见 L2-27）。**
+    ①`exec_local_core_impl` 的 `map_err` 已经把 `LocalExecShutdown` 转成字符串错误（"local command stopped during daemon shutdown"），并记了 `append_incomplete_exec_audit`；`ssh_shutdown_outcome` 走 `downcast_ref::<ExecShutdown>()`，在那个点之后永远 `None`——**在 handler 里改一行不会产生任何效果**。②同处注释写明 local runner 自己持有 deadline 并收割子进程**及其进程组**，「unlike the SSH path there is no command still running behind this error」，所以两种处境不同构：SSH 未知的是「命令是否还在远端跑」，local 未知的只是「已经产生的副作用」。要改先透类型，且 `true` 的文案需要为 local 补一句，否则会把「进程已收割」说成「可能还在跑」。

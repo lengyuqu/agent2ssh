@@ -731,7 +731,7 @@ curl -X POST -H "$AUTH" \
 {"risk_level": "high", "matched_rule": null}
 ```
 
-匹配用户自定义规则时，`matched_rule` 为 `user_rule`。用户规则只能升级内置风险；如果传入了 `host`，非 `blocked` 命令还会应用该主机的 trusted `risk_override`：
+匹配用户自定义规则时，`matched_rule` 为 `user_rule`。它是**固定字面量，不是命中的那条 pattern**——分类函数只回答「有没有命中用户规则」，命中的规则名在函数内部就被丢掉了，所以该字段的取值域只有 `null` 与 `"user_rule"` 两个。用户规则只能升级内置风险；如果传入了 `host`，非 `blocked` 命令还会应用该主机的 trusted `risk_override`：
 
 ```json
 {"risk_level": "blocked", "matched_rule": "user_rule"}
