@@ -62,12 +62,13 @@ export default function ApprovalDetail({
   const ctx = approval.context;
   const rewritable = Boolean(ctx?.rewritable);
   // Four of the five context fields the contract declares. `host_address` is
-  // in `api.yaml:426` and `types.ts:524` and is not rendered here, so an
-  // approver working inside the approvals module cannot see which address
-  // `prod-web` resolves to. Adding `["Address", ctx?.host_address]` is one
-  // line; doing it changes what the panel shows, so it is L2-60 rather than
-  // something this batch slips in. `host_env`/`host_role` are declared on
-  // `ApprovalContext` but appear in no contract and no UI — leave them.
+  // in `ApprovalRequest.context` in `docs/api.yaml` and on `ApprovalContext` in
+  // `src/types.ts`, and is not rendered here, so an approver working inside the
+  // approvals module cannot see which address `prod-web` resolves to. Adding
+  // `["Address", ctx?.host_address]` is one line; doing it changes what the
+  // panel shows, so it is L2-60 rather than something this batch slips in.
+  // `host_env`/`host_role` are declared in both places as well and no panel
+  // shows either — leave them.
   const candidateRows: Array<[string, string | null | undefined]> = [
     ["Requested by", ctx?.source],
     ["Matched policy", ctx?.risk_details?.matched_policy],

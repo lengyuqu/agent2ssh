@@ -4201,7 +4201,13 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "500":
-          description: Building the export failed (config directory unreadable or a rules file cannot be parsed).
+          description: |
+            `export_team_config` failed: the config directory could not be
+            resolved, `hosts.json` could not be read or parsed, or
+            `risk_rules.toml` / `playbooks.toml` could not be read. Those two are
+            copied into the bundle as raw text and never parsed here, so a
+            syntactically broken rules file exports without complaint and only
+            fails on the machine that imports it.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -4227,7 +4233,14 @@ paths:
                   risk_rules_imported: { type: boolean }
                   playbooks_imported:  { type: boolean }
         "400":
-          description: The import payload is not a valid configuration bundle.
+          description: |
+            `import_team_config` failed. It does not validate the payload — a
+            bundle is merged as given — so this is never "your JSON is wrong".
+            The causes are `store_write_lock`, `load_config` (an unreadable or
+            unparseable `hosts.json`), `save_config_unlocked`, and writing the
+            bundled `risk_rules.toml` / `playbooks.toml`. A write failure answers
+            400 rather than 500, so the status alone cannot tell a rejected
+            bundle from a disk problem; the message names the file.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -4271,7 +4284,12 @@ paths:
                   summary:           { type: string }
 
         "400":
-          description: The import payload is not a valid configuration bundle.
+          description: |
+            `preview_team_config_import` failed, which it does without touching
+            the payload: `load_config` (an unreadable or unparseable
+            `hosts.json`) or `config_dir` failed. Nothing is written, so a 400
+            here never means "this bundle would be rejected" — a bundle with no
+            valid hosts at all previews as an empty diff and answers 200.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -4379,25 +4397,37 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                required: [hosts, collected_at]
-                properties:
-                  hosts:
-                    type: array
-                    items:
-                      type: object
-                      properties:
-                        host:         { type: string }
-                        reachable:    { type: boolean }
-                        latency_ms:   { type: integer, nullable: true }
-                        uptime:       { type: string, nullable: true }
-                        load_avg:     { type: string, nullable: true }
-                        disk_usage:   { type: string, nullable: true }
-                        memory_usage: { type: string, nullable: true }
-                        collected_at: { type: string, format: date-time }
-                        error:        { type: string, nullable: true }
-                  collected_at: { type: string, format: date-time }
-                  total_ms:     { type: integer }
+                oneOf:
+                  - type: object
+                    description: A snapshot that was collected at some point.
+                    required: [hosts, collected_at]
+                    properties:
+                      hosts:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            host:         { type: string }
+                            reachable:    { type: boolean }
+                            latency_ms:   { type: integer, nullable: true }
+                            uptime:       { type: string, nullable: true }
+                            load_avg:     { type: string, nullable: true }
+                            disk_usage:   { type: string, nullable: true }
+                            memory_usage: { type: string, nullable: true }
+                            collected_at: { type: string, format: date-time }
+                            error:        { type: string, nullable: true }
+                      collected_at: { type: string, format: date-time }
+                      total_ms:     { type: integer }
+                  - type: object
+                    description: >-
+                      No collection has run yet. `get_health_snapshot` answers
+                      `Err(_)` with this shape under the same 200, so a client
+                      that requires `hosts` and `collected_at` rejects a
+                      legitimate response.
+                    required: [error, hint]
+                    properties:
+                      error: { type: string }
+                      hint:  { type: string }
         "401":
           description: Missing or invalid bearer token.
           content:
