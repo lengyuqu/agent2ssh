@@ -89,7 +89,8 @@ type ConfirmDialogProps = ConfirmOptions & {
  *
  * Division of labour for the two label props: a caller that passes one is
  * expected to have translated it already (`confirmLabel: t("Delete")`), which
- * all 21 call sites currently do. The component deliberately does not re-run
+ * all 17 call sites currently do (7 `confirmDialog()` calls and 10
+ * `<ConfirmDialog>` elements). The component deliberately does not re-run
  * `t()` over a supplied label — that would double-translate a caller that
  * passed an already-Chinese string. Keep the rule when adding a call site.
  *

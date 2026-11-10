@@ -16,8 +16,8 @@
  * spelled explicitly. Whether the two signals should be joined is a product
  * decision, not a bug fix — recorded as L2-55 in `OPT-LOOP-L2-PENDING.md`.
  * Consumers: AuditPanel, FilePreview, SyncPanel, ConfigSnapshotsPanel,
- * RecordingsPanel, LiveActivityPanel, AuditCharts, SettingsMenu,
- * ApprovalWorkbench.
+ * RecordingsPanel, LiveActivityPanel, AuditCharts, SettingsMenu, ApprovalDetail,
+ * ApprovalQueue, ApprovalWorkbench.
  */
 export function formatDateTime(value?: string | number | Date | null): string {
   if (value === null || value === undefined || value === "") return "";

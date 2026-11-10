@@ -46,20 +46,27 @@ const CALL = /\bt\(\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)')/g;
 
 type CallSite = { key: string; where: string };
 
+/** Line number for a character offset, so a hit can be reported where it starts. */
+function lineOf(text: string, offset: number): number {
+  return text.slice(0, offset).split("\n").length;
+}
+
 function literalCallSites(): CallSite[] {
   const sites: CallSite[] = [];
   for (const [file, text] of Object.entries(SOURCES)) {
     if (/\.test\.(ts|tsx)$/.test(file)) continue;
-    text.split("\n").forEach((line, index) => {
-      CALL.lastIndex = 0;
-      let match: RegExpExecArray | null;
-      while ((match = CALL.exec(line)) !== null) {
-        sites.push({
-          key: unescape(match[1] ?? match[2] ?? ""),
-          where: `${file.replace(/^\.\//, "")}:${index + 1}`,
-        });
-      }
-    });
+    // Scan the whole file, not line by line: `t(` and its literal are
+    // routinely split across lines by prettier (26 sites did when this was
+    // written, all in long help strings), and a per-line scan drops them
+    // without a word -- the key then goes unchecked for good.
+    CALL.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = CALL.exec(text)) !== null) {
+      sites.push({
+        key: unescape(match[1] ?? match[2] ?? ""),
+        where: `${file.replace(/^\.\//, "")}:${lineOf(text, match.index)}`,
+      });
+    }
   }
   return sites;
 }
@@ -75,8 +82,20 @@ describe("i18n dictionary", () => {
   it("finds the call sites it is supposed to check", () => {
     // A guard that silently scans nothing is worth less than no guard: this
     // pins the scanner. The exact count moves as the UI grows; the floor is
-    // what matters.
-    expect(literalCallSites().length).toBeGreaterThan(600);
+    // what matters. 900 rather than 600 because a per-line scan (the shape
+    // this replaced) sees only 922 of the 948 sites, so a floor of 600 has
+    // enough headroom to hide that whole class of regression.
+    expect(literalCallSites().length).toBeGreaterThan(900);
+  });
+
+  it("checks a t() call whose literal starts on the next line", () => {
+    // The scan is whole-file for this reason: prettier splits long help
+    // strings after `t(`, and a per-line scan silently skips them.
+    const sites = literalCallSites();
+    const multiline = sites.filter((site) =>
+      site.key.startsWith("The saved SSH fingerprint for this host")
+    );
+    expect(multiline).toHaveLength(1);
   });
 
   it("has a zh entry for every literal t() key", () => {
