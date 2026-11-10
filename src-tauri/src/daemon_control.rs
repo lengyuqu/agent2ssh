@@ -920,10 +920,11 @@ fn reported_pid(body: &str) -> Option<u32> {
 
 /// Ask the running daemon to shut itself down, over its own admin API.
 ///
-/// Windows has no `SIGTERM`: signalling falls back to
-/// `TerminateProcess` there, which skips the drain that closes WebSocket
-/// connections cleanly and removes the pid file. Asking the daemon does what
-/// the signal does elsewhere.
+/// This is how every platform stops a daemon; there is no `SIGTERM` branch to
+/// fall back to. Windows is why the route exists at all — signalling there means
+/// `TerminateProcess`, which skips the drain that closes WebSocket connections
+/// cleanly and removes the pid file — but the stop path sends this request on
+/// Unix too, because it is what carries `expect_pid`.
 ///
 /// Without a PID to name this sends the old, unchecked request, which is all it
 /// can do. [`stop_daemon_process`] — the path every real stop takes — names its

@@ -1042,8 +1042,11 @@ paths:
         with it — PTY sessions, resident shells, port forwards and pending
         approvals.
         The desktop app and `agent2ssh daemon stop` use this route on all
-        platforms, but stopping is two steps rather than one: this request, then —
-        if the process is still running — a force-terminate. The caller waits
+        platforms, but stopping is two steps rather than one: this request, and —
+        only once a daemon has accepted it and is still running when the wait ends —
+        a force-terminate. A request that never gets an accepted answer ends the
+        attempt instead: the caller reports why and sends no signal, so `401`, `409`
+        and a refused connection all leave the process alone. The caller waits
         `GRACEFUL_STOP_WAIT` (8 s) for the process to exit; on `Running` it records
         a warning, signals the process by force, then waits 2 more seconds, and a
         `StillRunning` observation at that point is an error rather than a silent
