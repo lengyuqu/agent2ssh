@@ -1683,7 +1683,7 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 ### batch 2026-11-11 · MCP 契约与 CLI 文档一致性（第二批，B=9）
 - issue #15 / 开批时间 2026-11-11 04:05 (GMT+8)
 - CodeBuddy 首条分析：**未到（等待中）**——60 s × 5 次轮询（04:06–04:10）+ 结束前即时复核（≈04:11）+ 6.5 分钟处最后一次延时复核（≈04:12）均 0 评论。消费者下次运行重新等（#13/#14 的首条都在 6–6.5 分钟晚到，本轮超出该窗口仍未到）。
-- 6 轮进度：**3 / 6 → 4 / 6**（第 1 轮 04:28、第 2 轮 04:44、第 3 轮 04:55、第 4 轮 05:1x 收尾，见文末 `consume 1 / 6`…`consume 4 / 6`）
+- 6 轮进度：**3 / 6 → 5 / 6**（第 1 轮 04:28、第 2 轮 04:44、第 3 轮 04:55、第 4 轮 05:01、第 5 轮 05:2x 收尾，见文末 `consume 1 / 6`…`consume 5 / 6`）
 - 正文已喂给 CodeBuddy：**85 条「不成立」原文**（编号 54：preflight 2 + batch1 六轮 10 + batch2 编号 15–31 十七条（29–31 物理落 batch 2 末节、内容属 batch 3 第 5 轮，正文已标注）+ batch4 第 1/5/6 轮 10 + batch6 第 1 轮 5 + **batch8 第 1 轮加粗伪标题小节 4 条子断言** + **手工/单发消费 11-11（#2 模式 B）6 条**；行内判定行 28：batch2 D2/D4、batch3 A5/E、batch5 六条、batch6 五条、batch7 八条、手工 11-10 一条、batch8 第 2–6 轮五条；摘录 3：batch8 补记两条 + 收尾之后撞号描述一条）+ 首查项（#2 模式 B 刚落地的 N2/N3/N4 及 L2-103/L2-102/L2-94）+ KNOWN-ISSUES 空档（K2 存量限制 / K7 / K8 / K9 / K12 / K13）+ 口径提醒（基线 861/1/1、`--lib` 878/1/1、`daemon_integration` 71、`--lib --tests --no-fail-fast` 1084/1/3、npm 213/27；**四条派生断言守不住 description/schema/示例层——本批重点**；L2-PENDING 撞号 13 对、新条目从 L2-102 之后起、L2-94/102/103 勿重提；feature 组合不可相加；`.github/**` 禁区；四列计数；行号现算；`[跑]` 不可采信；MCP bin 的 grep 作用域陷阱——只 grep bin 不 grep 它调的 lib）。正文由 `/tmp/build-opt-issue-b9.py` 按 ledger 锚点切片生成（块级正则 + 加粗伪标题特例 + 行内唯一子串校验：17 个编号块 50 条 + 加粗 4 条 + 判定行 28 条 + 摘录 3 条 = 85，复验通过；初版两个 bug 已修——order 漏 preflight、行内标签误用 `split(" · ")[0]` 全等匹配导致 batch3/5/7 行内条目全部丢失，改为 `startswith` 后恢复）。
 - 同主题第一批（#9）已 6 轮闭环；此后 #12/#13 两批给 api.yaml 配了派生式断言并对齐路由与状态码集合，#2 模式 B（`30264bb`）又改过 api.yaml 三处与 skills.md 一处。本批重点找对齐之后新增/残留、且派生断言守不住的 description/schema 层问题。
 - 顺手按 #14 批次条目与 BATCH_COMPLETE 行自述删除顶部 `BATCH_COMPLETE · issue #14` 状态行（HTML 注释同步为七条）。
@@ -1766,3 +1766,21 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 - **未做**：`agent2ssh_mcp/auth.rs:26/54/91/121` 与 `tauri_commands.rs:442/480/515/545` 也有同一句「run through the daemon approval flow」，本轮**没有核**这两个宿主里 daemon 审批是否可达（MCP 是否真的能把 exec 转到 daemon、桌面端是否本身就是审批方），所以一句没动。若下一轮要改，先读这两条路径再动，别按 CLI 的结论外推。
 - **验证**：`npm run build` 6.31s；`cargo fmt --check` 绿；`--no-default-features --lib` **861 / 1 / 1**（红项仍是 `embedded_ssh::remove_system_known_host_matching::an_ipv6_literal_at_port_22_is_removed`，与本轮无关）；`--features daemon --test daemon_integration` **71 / 0**；`--test cli_contract` **40 / 0**；`--test cli_smoke` **34 / 0**；`yaml.safe_load` 90 paths / 105 operations 不变。
 - **回帖**：`2120260430760140800`（05:00:53 GMT+8）。**#15 保持 open**，进度 4 / 6。
+
+### consume 5 / 6 · 2026-11-11 05:01–05:2x (GMT+8) · batch 9（issue #15）
+
+- **指摘来源**：CodeBuddy 的复核 `2120261242357960704`（05:04 到，第 4 轮回帖后 3 分钟）。它先用 `--ff-only` 对齐了我随后推的 `5fd854b`（只改 ledger 一行），然后答 Q1/Q2/Q3，并附上两处「我上一轮写错」的指认（A、B）。**判定：A 成立 / B 部分成立（前提成立、结论不成立）/ Q1 成立 / Q3 采纳方向但留了未定子问题。**
+
+| 编号 | 判定 | 我核到的 |
+|---|---|---|
+| A `session`/`forward` 有 daemon 路径，`cli-quickstart.md:199` 那句是假话 | **成立** | `SessionCommands::*`（`:2570`/`:2590`/`:2607`/`:2627`/`:2644`）与 `ForwardCommands::*`（`:2686`/`:2763`/`:2797`/`:2824`）全部走 `daemon_client(daemon_alias.as_deref())`，`daemon_client`（`bin/agent2ssh.rs:5656-5658`）里 `unwrap_or("localhost")`，所以默认打本地 daemon、`--daemon <远端别名>` 换远端。它们**没有本地直连路径**——不是「不能转发」，是「只有 daemon 一条路」。更要紧的是：我把 `connect` 也列进去了，而 `Commands` 枚举（`bin/agent2ssh.rs:80-399`）里**没有 `connect`**，那个词是从第 4 轮它的措辞里抄来的 |
+| B daemon 侧 SFTP 也把 `force` 硬编码 `false`，所以「去 HTTP 接口执行」也是死路 | **部分成立** | 前提成立：9 个 daemon SFTP handler 调 `preflight_guarded_request(..., false, ...)`（`bin/agent2ssh-daemon.rs:1989`/`:2229`/`:2274` 与 `preflight_sftp_rm_rf` …），`SftpUploadRequest`（`types.rs:711-723`）也没有 `force` 字段。**结论不成立**：`preflight_guarded_request` → `preflight_guarded_request_inner` → `authorize_command_inner` → `authorize_command_with_approval` + `request_and_wait_for_approval`（`:742-745`），**daemon 是仓里唯一带审批处理器的一侧**，`force: false` 只影响「高风险且未获批」那一支，不影响策略命中时出卡。所以 daemon 的 `/sftp/*` **能**批准。它把「不能 `force`」当成了「不能审批」。反过来它没看出我那句的另一半才是错的：`authorize_desktop_operation`（`tauri_commands.rs:527`）也没有审批处理器，「或用桌面端」是死路 |
+| Q1 MCP 只有 `ssh_exec` 能到 daemon | **成立** | `daemon_alias` 在 `bin/agent2ssh-mcp.rs` 只出现两次（`:785` 取值、`:805` 判 `!= "localhost"`），都在 `McpTool::SshExec` 分支里；`SshExecMulti`（`:859`）与 `SshExecCompare`（`:931`）各读 `hosts` 后直接就地执行。转发目标 `get_daemon_with_scope` → 远端 `/exec` → `authorize_command`（真审批）。所以五处 MCP 文档的「daemon 路由可走审批」对 `ssh_exec` 真、对多主机与 playbook 假 |
+| Q3 L2-108 选 ① | **采纳** | 理由见 L2-PENDING 的补记。它留的**子问题未定**：导入时 `policy.toml` 已有 `[risk.*]` 是整段替换还是并集。整段替换会清掉导入方原有的自定义规则，并集又表达不了「冲突时以哪边为准」——这条不进代码，等人拍板 |
+| （它的行号）`execution_control.rs:485` | **不成立** | `needs_approval` 在 `:487`。它这一批唯一引错的行号，记在这里以免下一轮我按 485 去找 |
+
+- **我自己的一处错（本轮修正）**：`cli-quickstart.md:199`（第 4 轮写的）把 `session`/`forward` 与 `exec-multi`/`sftp`/`playbook` 并成一类，还列了不存在的 `connect`。**错法值得记：我把「有没有 `--daemon` 转发分支」当成了「能不能拿到审批」的判据**，而真正的判据是「这条路径是否终止在一个带审批处理器的组件上」。前者是我在 CLI 源码里能 `grep` 到的形状，后者才是读者要知道的事实。
+- **新的判据（写进文档的骨架）**：本仓只有 daemon 带审批处理器（`authorize_command_inner` → `authorize_command_with_approval`）；CLI、MCP、桌面端全部走 `*_without_approval_handler`。于是每条命令只有三种命运：①能到 daemon（`exec --daemon <远端别名>`、`session`/`forward` 的 daemon 路径、MCP 的 `ssh_exec` + `daemon_alias`）→ 可审批；②到不了但自己有 `--force`（`exec-multi`、`playbook run`、`exec` 本地分支）→ 只能过「高风险」那一关；③两样都没有（`sftp`）→ 命中策略只能改策略或改走 daemon 的 HTTP 路由。
+- **L1 落地**：`273beff`（`cli-quickstart.md` 改成分档叙述、`mcp-quickstart.md` 三处、`skills.md:112`、`skill-distribution.md:198`、`architecture.md:141`、L2-108 补记）、`804a2db`（`sftp` 的 CLI 提示去掉「桌面端」这个死路）。
+- **验证**：`npm run build` 6.39s；`cargo fmt --check` 绿；`--no-default-features --lib` **861 / 1 / 1**；`--test cli_smoke` **34 / 0**；`--features daemon --test daemon_integration` **71 / 0**（本轮没动 `api.yaml`，跑它是为了确认第 4 轮那条新断言在干净的树上仍然绿）。
+- **回帖**：见下一笔提交回写的 id。**#15 保持 open**，进度 5 / 6。
