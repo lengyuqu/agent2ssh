@@ -23,6 +23,10 @@
 
 ---
 
+**BATCH_COMPLETE** · 2026-11-10 · issue #8 · batch 2「SSH 传输、known_hosts 与认证（russh 侧）」6 / 6 轮已闭环，issue 已关闭。批次汇总见文末「批次汇总 · 2026-11-10 · issue #8」。消费任务此后只报告状态。
+
+---
+
 ## preflight · 2026-11-10 · issue #2 最后一轮的预核实
 
 非本流程轮次，是流程上线前对手工核实结论的固化。来源：issue #2 评论 `2119853755255377920`（2026-11-09T18:04:54Z，作者 CodeBuddy）。
@@ -391,3 +395,59 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
     `eof()` 就是 `drained()`（`channel.rs:315-320` = `state.eof && stdout 空 && stderr 空`，`:452-454` 的 `pub fn eof` 直接转调），模块头那句是对**实现或改动 `eof()` 的人**的约束（别让它在队列没抽干时返回 true），不是「消费者必须在读之前调用它」。此处检查位于两个读循环**之后**（`daemon.rs:5124`），队列刚被抽干，`state.eof` 一为真它就转 true——正是这个谓词要表达的意思。至于「抽干前 `eof()` 一直为假」：流未结束时它为假的原因是 `state.eof == false`，与队列是否为空无关（队列本来就每轮被抽干）。**成立的是更窄的一条**：判定顺序是承重的且先前无注释，已补 landmark 注释。另一半「两处对同一谓词的用法不同」也成立（`bridge_tcp_and_channel` 只在 `Ok(0)` 之后用它来关写端），但那是两种正当用法，不是不一致。
 26. **「N-3：`/local-exec` 拿到的是同一个 shutdown token、同一种『命令发出去了、进程被杀了、不知道远端副作用有没有发生』的处境，所以在 webhook 里写 `remote_outcome_unknown: None` 是一处可以一行改掉的不对称」— 「同构」与「一行可改」两点不成立（不对称本身成立，见 L2-27）。**
     ①`exec_local_core_impl` 的 `map_err` 已经把 `LocalExecShutdown` 转成字符串错误（"local command stopped during daemon shutdown"），并记了 `append_incomplete_exec_audit`；`ssh_shutdown_outcome` 走 `downcast_ref::<ExecShutdown>()`，在那个点之后永远 `None`——**在 handler 里改一行不会产生任何效果**。②同处注释写明 local runner 自己持有 deadline 并收割子进程**及其进程组**，「unlike the SSH path there is no command still running behind this error」，所以两种处境不同构：SSH 未知的是「命令是否还在远端跑」，local 未知的只是「已经产生的副作用」。要改先透类型，且 `true` 的文案需要为 local 补一句，否则会把「进程已收割」说成「可能还在跑」。
+
+### consume 6 / 6 · 2026-11-10 09:40–10:05 (GMT+8)
+
+- **指摘来源**：CodeBuddy 对第 5 轮回帖的复核（评论 `2119968114631675904`，基线 `e984c35`）。7 条新编号（N6…N12）+ 1 条不编号的留痕 + 1 处对我的措辞更正。
+- **判定**：**成立 4 / 部分成立 1 / 不成立 2 / 信息性 1**。
+  - 成立：N9（我上一轮 L2-27 写的「恒 400」不准确——preflight 的 403/423/429 走更早的 `?`，只有执行本身失败是 400；已改措辞）、N10（三处 `api.yaml` 契约缺页：两个 PUT 有 `require_admin` 却不写 403，`GET /health-snapshot` 按 scope 过滤却不提）、N11（`policy.rs` / `approval.rs` 用 `std::fs::write`，与同目录其余文件的 `0o600` + 临时文件 + rename 不一致）、N12（`http_risk_check_blocked_command` 对 `matched_rule` 取值域零覆盖）。
+  - 部分成立：N8（两个 handler 行为上都过门，但「契约测试守不住」只对 `terminal_broadcast_run` 成立——`run_playbook` 正文里有 `reject_if_gate_paused`，所以照抄那条断言会绿）。
+  - 不成立：N6、N7（原文见下方 27–28 条）。
+  - 信息性：留痕（`read_side` 在 `state.eof` 时无条件返回 0）**成立**，但它推出的结论方向要反过来读——正因为 `read()` 可能不代表队列空了，才必须以 `eof()` 为退出条件；见本轮的自我更正。
+- **本轮最值钱的一条**：N11。它把两件本该分开说的事压在一处：**权限**（`policy.toml` / `approval_policies.toml` 落到 umask 决定的模式）与**原子性**（写一半崩溃会留下截断文件，而加载失败的策略文件在语义上等于「什么都不需要审批」）。这两个文件描述的正是「谁能批准什么」，所以它不是风格问题。
+- **自我更正（我上一轮写错了）**：`ed72760` 的注释说「把 `eof()` 检查提到两个读之前会让 stderr 尾部静默丢失」——**不可能**，`eof()` 含「两个队列都空」，只要 stderr 还有字节它就是假，检查的位置无关。真实的承重条件是「不能拿 `read() == 0` 当退出条件」：`read_side` 在流结束后无条件返回 0，哪怕**另一个**队列还有数据（`:352-355` 明写这是 libssh2 的行为，drain 循环依赖它）。`a04e99d` 已按此改写。CodeBuddy 给的理由（「那个循环根本不会带着退出码返回」）同样不成立，但它指出这句话会误导下一个人，这一点是对的。
+- **动作**：`a04e99d`（`daemon.rs` 注释改写）；本笔（`api.yaml` 三处契约缺页 + `OPT-LOOP-L2-PENDING.md` 的 L2-28/29/30 与 L2-27 措辞更正 + 本 ledger 的第 6 轮记录与批次汇总）。
+- **验证**：`npm run build` 6.36s；`cargo fmt --check` 绿；`cargo test --no-default-features --lib` **861 passed / 1 failed / 1 ignored**（仍是基线那条故意红测）；`cargo test --no-default-features --features daemon --test daemon_integration api_yaml` **1 passed**；`api.yaml` 可解析、path 数仍为 90，三处新增（两个 `403` + `health-snapshot` 的 scope 句）读回确认。
+- **回帖**：见本轮 `## 第 6 轮收尾`（末轮）。
+- **issue 状态**：本轮结束后按协议关闭 #8，顶部写 `BATCH_COMPLETE`。
+
+### 第 6 轮新增的不成立条目（原文保留，请勿重复提）
+
+27. **「N6：Slack 的 `exec_completed` 到不了任何 URL，内容是空的；`exec_blocked` 干脆没人发，`fire_webhook` 的三个调用点没有它」— 不成立（两处事实错）。**
+    ①`exec_blocked` 有发送点：`daemon.rs:754` 构造 `event: "exec_blocked"`，`:763` 交给 `fire_webhook`；`fire_webhook` 在 daemon 里有 5 个调用点（`:650`、`:763`、`:1714`、`:1810`、`:5632`）加 `anomaly.rs:295`，不是三个。②Slack 载荷不是空的：`format_slack_message`（`notify.rs:283-357`）先按 `remote_outcome_unknown` 选 header 文案（"SSH Outcome Unknown" / "SSH Command Not Sent" / "Command Completed"），再带 Host / Command / Risk Level / Exit Code 四个 field，approval 事件还带按钮。它确实没有 `event` / `remote_outcome_unknown` 这类**机器键**——但 Block Kit 是给人看的，`daemon-api-quickstart.md:877` 讲 `remote_outcome_unknown` 的那段指的是默认 JSON 载荷，不是 Slack 渲染。把「没有机器键」说成「告警靠的字段没了、内容是空的」是把两种载荷混为一谈。顺带：`format_slack_message` 上还标着 `#[allow(dead_code)]`，而它在 `:251` 被调用——这个标记本身过期，但不影响行为，不单独立项。
+28. **「N7：`*Command:*\n\`\`\`<cmd>\`\`\`` 在 Slack 里是一行内联代码而不是代码块，所以 `|`、`>`、`_`、反引号会原样进入审批卡」— 机制与推论都不成立。**
+    ①这是对 Slack 解析器的断言，本仓无法验证，也不该由本仓的测试来钉；②即便按它的读法成立，推论也是反的——Slack 的内联 code span 与 fenced code block **同样**抑制 `|`、`>`、`_` 这些 mrkdwn 标记，所以「漏进审批卡」在两种解析下都不会发生；③它给的证伪断言自相矛盾（要求 `field.split('\n')[1]` 不以 ``` 开头又「以它结尾」，而该行两者都成立）。**成立的是另一件它没提的事**：`format!("*Command:*\n```{}```", command)` 对命令内容**不做转义**，命令自身含有三个连续反引号时会提前闭合围栏——这类命令极罕见，属文案硬化，不立 L2。
+
+## 批次汇总 · 2026-11-10 · issue #8 · SSH 传输、known_hosts 与认证（russh 侧）
+
+6 轮全部完成，issue 已关闭。指摘来源始终是 CodeBuddy 对本流程上一轮回帖的复核，每轮的指摘都带文件路径与行号，核实后按 L1 / L2 分流。
+
+| 轮 | 条数 | 判定 | 动作（L1） | 回帖 id |
+|---|---|---|---|---|
+| 1 | 18（A1-A2 / B1-B4 / C1-C7 / D1-D5） | 成立 11 / 部分 5 / 不成立 2 | `02f936b`（`ssh_algo.rs` 模块文档整段重写 + 五处契约注释）、`562340a`（L2 清单 11 条） | `2119904212174680064` |
+| 2 | 11（C3-1…C3-4 / C4 / N1…N7） | 成立 4 / 部分 3 / 不成立 3 | `f23f006`（clap 文档、`MethodType` 文档、空臂注释、`cli_contract` 断言消息等 6 文件）、`724cca6`、`2c4221a` | `2119924514724155392` |
+| 3 | 9（19–27） | 成立 3 / 部分 3 / 不成立 3 | `3ea8f70`（两处测试注释 + 断言消息）、`bf26f8c`（`SKILL.md` / 两份指南 / 迁移文档标记 / L2 三条） | `2119943001739788288` |
+| 4 | 11（R4-1…R4-2 / A.1-A.3 / B.4-B.5 / C.6-C.7 / D.8） | 成立 4 / 部分 4 / 不成立 2 | `c41df69`（`Generate.key_type` clap 帮助）、`f8bc228`（config-guide 注释 + L2 五条 + L2-15 补充）、`6ac8834`、`60f8262` | `2119945160132812800` |
+| 5 | 5（N-1…N-5） | 成立 2 / 部分 2 / 观察 1 / 不成立 0 | `ed72760`（两处 landmark 注释）、`e984c35`（`api.yaml` 取值域 + 指南 + L2-26/27 + L2-23 收窄） | `2119965165029343232` |
+| 6 | 7（N6…N12）+ 1 留痕 | 成立 4 / 部分 1 / 不成立 2 / 信息性 1 | `a04e99d`（注释更正：承重的是「不以 `read()==0` 退出」）、本笔（`api.yaml` 三处契约缺页 + L2-28/29/30） | 本轮 `## 第 6 轮收尾` |
+
+**总量**：6 轮共核实 **61 条** → 成立 24 / 部分成立 18 / 不成立 12 / 观察与信息性 7。L1 落了 12 笔提交，全部推 `cnb main`，未推 github。
+
+**L2 待拍板清单（按该先问的顺序）**
+
+| 编号 | 一句话 | 需要谁拍板 |
+|---|---|---|
+| L2-15 | `[host]:22` 这条形态要不要支持；main 上那条**故意红**的测试（`an_ipv6_literal_at_port_22_is_removed`）是配修复还是降 `#[ignore]` | 产品 + 我（红测试一直在基线里，每次验证都得带注） |
+| L2-21 | `remove_known_host_core` 是死代码：删掉，还是补一个「忘记应用内信任」的 UI 入口 | 产品 |
+| L2-26 | `matched_rule` 要不要真的带回命中的规则（顺带消掉 `/risk/check` 每请求两次规则读） | 产品 / 契约 |
+| L2-27 | `/local-exec` 中断时的 `remote_outcome_unknown` 与状态码：先透类型，再定「未知」在 local 语境下的措辞 | 产品 |
+| L2-28 | `policy.toml` / `approval_policies.toml` 换成 `write_private_text`（权限 + 原子性） | 我看是安全向的纯改进，但属行为改动 |
+| L2-29 | 给 `/risk/check` 的 `matched_rule` 补覆盖，前提是先隔离测试的配置目录 | 工程（结构性改动） |
+| L2-30 | 两个 handler 的执行门只有间接来源：补一次判定，还是改断言的判定口径 | 工程 / 口径 |
+| 其余 | L2-16…L2-25（错误分类、文案、TOFU 记录顺序、`import` 校验、`Unknown` 命名等）见上文各轮表格 | 逐条已写明代价 |
+
+**给下一批的方法学（新增三条，接前一批的三条）**
+
+1. **先看「谁在消费这个字段」，再看它的取值域**：`matched_rule` 那一族的问题不是名字错，而是三处消费者（`api.yaml`、`console.html`、集成测试）各自以为它是不同的东西，其中测试以为它是「恒 null」。
+2. **同一目录下有两种写入方式时，先分清它们各自保证了什么**（`write_private_text` 保证权限与原子性，`std::fs::write` 两样都不保证），再判断是不是漏用——「两个文件都能读回来」证明不了任何一层。
+3. **对自己上一轮写下的注释要按同一把尺子复核**：`ed72760` 的错误不是笔误，是把「谓词的含义」与「检查的位置」混成了一件事；它躲过了我自己的核验，却被下一轮的一句反问照出来。

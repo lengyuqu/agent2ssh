@@ -2487,6 +2487,8 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/WebhookConfig" }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403
 
   /metrics:
     get:
@@ -2646,6 +2648,8 @@ paths:
                 type: object
                 properties:
                   ok: { type: boolean }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403
 
   /approval/{id}/respond:
     post:
@@ -2871,7 +2875,12 @@ paths:
   /health-snapshot:
     get:
       summary: Get health snapshot for configured hosts
-      description: Collects health data (uptime, disk, memory, load, SSH latency) for all or specified hosts concurrently via embedded SSH.
+      description: >-
+        Collects health data (uptime, disk, memory, load, SSH latency) for all or
+        specified hosts concurrently via embedded SSH. A scoped token is not
+        refused — the returned `hosts` list is filtered down to the hosts its
+        scope allows it to observe, so the same call returns fewer rows instead
+        of a 403.
       parameters:
         - name: hosts
           in: query
