@@ -514,6 +514,16 @@ CodeBuddy 在第 2 轮回帖后 5 分钟（21:53–21:58，60 s × 5 轮询）�
 
 **反例照实记下**：唯一值得退的是「daemon 活着但 HTTP 监听卡死」——`:958` 的 `/health` 在 ≤2 s 前刚答过（它是同一轮里更早的一次请求），`signal_daemon` 又会用 `start_time` 挡住复用，所以技术上安全。若将来要做，须同时满足三条：`Unreachable` 分支 + 身份已核过 + `signal_daemon` 复核通过。
 
+## 2026-11-10 · batch 2（issue #13）第 5 轮追加
+
+第 5 轮是对第 3 轮四问的复核（`2120156142427869184`），逐条核实 **成立 2 / 部分成立 2 / 不成立 2**（其中 1 条它主动撤回、1 条它自己改名）。新发现一条代码缺陷：
+
+| 编号 | 位置 | 判断 | 为什么不能自动落 | 建议改法 |
+|---|---|---|---|---|
+| L2-91 | `bin/agent2ssh-daemon.rs:4849-4853`（drain 里 `begin_send()` → `send()` 失败 → `break`，**没有 `end_send()`**）对照 `:4893-4898`（正常转发的两条路径都 `end_send`） | 成立（资源计数泄漏） | 停机时对端已关，drain 里第一帧 send 失败就 `break`，`drain_handle` 的 pending 计数**留在 1**；`DrainRegistry::drain_all` 只看 `pending == 0`，于是它要等满 deadline（`post_shutdown` 的 4 s registry 等待正好在这条路径上），而 `handle_terminal` 自己的清理照跑。只在「停机 + 对端已断开」这个交叉点出现，现有 `daemon_stop_e2e` 的背压用例覆盖的是 exec 那条，不覆盖 terminal | 失败分支补一次 `end_send()` 再 `break`（与 `:4894-4897` 同形），或把 `end_send` 做成 guard 让两条路径自动配对。属 `src-tauri/src/**` 行为修复，配一条 e2e：停机时对端断开 → 断言 registry 在 100 ms 内空而不是等 4 s |
+
+**L2-87 补一条（同轮）**：`exec_stream` 有 **8 个**「命令还没开始就返回」的路径（`:5198` `:5210` `:5221` `:5230` `:5242` `:5275` `:5285` `:5300`：body 不是 ExecRequest、source 非法、命令超长、gate 暂停、限流、授权失败、缺 `force`、未知主机），每条都只发一个 `{"type":"error"}` 就 `return`，**一条 exit 帧都不发**。所以 L2-87 的 ①（把 exit 移进循环）若只改停机路径，这 8 条仍然没有 exit；做 ① 时要顺带定「拒绝要不要有 exit 帧」——本轮已按「没有」写进契约（`api.yaml` 的 `/exec/stream` 新增一句），代码侧维持现状即可。
+
 
 2. **「本地没有 `daemon.token` 时 `stop_daemon_process` 根本到不了 `:991`，会停在 `request_shutdown` 自己的守卫 `:846-849` 上，所以我给 L2-4 的拆分方案会红」— 不成立。**
    `:991` 在 `:996` 的 `request_shutdown(Some(pid))` **之前**执行（同一函数、语句顺序，`:942` 起）。`request_shutdown` 的守卫只有两个入口：`:932` 的 `request_graceful_shutdown()`（传 `None`，无 pid 的旧调用方）与「`:991` 读到 token、`:846` 再读时文件已被删」的竞态窗口（`read_admin_token` 每次重读文件，`daemon_activity.rs:145`）。所以删掉 `daemon.token` 调 `stop_daemon_process` 确实停在 `:991`，得到 `NotAuthenticated`——而它说「daemon 不接受这个 token」时一个请求都没发出去。**它那张表的方向是对的**（两个变体都偏、偏法相反），只是把「哪条路径到哪一支」接反了；`L2-4` 的备注按上句补了入口清单与竞态说明。
