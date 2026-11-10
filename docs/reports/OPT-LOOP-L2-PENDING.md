@@ -674,3 +674,15 @@ CodeBuddy 的复核（`2120253081072848896`）判「第 1 轮问题全部真实�
 |---|---|---|---|---|
 | L2-106 | `sftp_transfer.rs:263-272`（`register` 的 `if let Ok(reservation) = reserve(...)`）、`lifecycle.rs:77`（`Uuid::parse_str(id).is_err() → InvalidId`）、`diagnostics.rs:570-573`（`active_resources` = `Ready` + `Pending`） | 成立 | `reserve` 要求 id 是合法 UUID，而 `transfer_id` 全来自调用方：桌面端 `SFTPPanel.tsx:592` 生成 `sftp-<毫秒>-<随机>`，CLI（`bin/agent2ssh.rs:2419`/`:2449`）与 MCP（`tools.rs:472-490` 的 schema 根本没有该字段）都传 `None`，单测用 `k6-test-transfer`（`sftp_transfer.rs:665`）。**本仓没有一个调用点传合法 UUID**，所以 `if let Ok(...)` 每次都在吞 `InvalidId`，`ResourceKind::Transfer` 条目从未建成 → 在途传输在 `/health-snapshot` 的 `active_resources` 里永远不出现。指摘说「从未被记录」**过强**：裸 HTTP 调用方若传合法 UUID 就会被记录，准确说法是「本仓所有调用点都不是 UUID」 | 二选一：①`register` 里把 `if let Ok` 换成 `match`，`Err` 打一条 warn（承认降级，`active_resources` 仍不含传输）；②不再拿 `transfer_id` 当 lifecycle id，内部另生成 `Uuid::new_v4()` 并维护 `transfer_id → lifecycle_id` 映射，`unregister` 反查。②能真正让传输出现在健康快照里，代价是 `unregister` 多一次查表与「映射丢了怎么办」的处理。另：`ResourceOwner::Headless(Uuid::new_v4())` 使 `close_owner` 永远匹配不上，条目只能靠 `unregister` 的 `close(id, None)` 关——②落地时这条要一并想清 |
 
+## 2026-11-11 · batch 9 第 3 轮（issue #15，基线 `1bcadb5`→`f6f3afd`）
+
+CodeBuddy 的复核 `2120255506575945728` 新批 4 条 → **成立 2 / 不成立 2**（§四.1 与 §四.2 见 ledger 的不成立清单）。另本轮自取 1 条。L1 动了 `approval.rs` 的 rustdoc、`bin/agent2ssh.rs` 的四处提示与一处 clap 文档、`skills.md` 两条、`cli-quickstart.md` 一行。
+
+**「CLI 散文 vs MCP 契约」的分类规则（本轮确立，后续沿用）**：同样是 `src-tauri/src/**` 里的字符串，**人读的**（clap 帮助、CLI 错误提示、rustdoc）判 L1，**机器读的**（`tools/list` 的 `description`、MCP 返回的 schema 文本）判 L2。理由是后者是 agent 的输入契约，改它等于改对外协议；前者只影响人。这也解释了为什么第 1 轮把 `tools.rs` 三处判 L2、本轮把 `bin/agent2ssh.rs` 的提示判 L1。
+
+| 编号 | 位置 | 判断 | 为什么不能自动落 | 建议改法 |
+|---|---|---|---|---|
+| L2-104（扩写） | 追加 `bin/agent2ssh_mcp/tools.rs:772`（`ssh_preview_exec` 描述）、`:792`（`ssh_approval_check` 描述） | 成立 | 本轮新发现：`api.yaml` 里写的字段描述**不会进 MCP 响应**——`ssh_preview_exec` 走 `serde_json::to_value(preview_exec(...))`（`bin/agent2ssh-mcp.rs:1675-1690`），`ExecPlan` 是纯 `derive(Serialize)`，serde 不读 OpenAPI。所以 `783cfb3` 修好的是读 `api.yaml` 的人，**读 MCP 响应的 agent 看到的仍是裸 `requires_approval: false`**。`docs/skills.md:48`/`:50` 本轮已补上「false 不代表 `/exec` 会放行」，与 `api.yaml` 对齐；剩 `tools.rs` 两处 | 两处各补一句「`false` only answers this question; `/exec` still demands `force` or an approval for a high-risk command」。与 `L2-103`/`L2-104` 前三处同笔提交即可（同一文件、同一类文字、同一次决策）|
+| L2-107 | `bin/agent2ssh.rs:635`（`--risk-override` 的 clap 文档）、`:2010-2016`（`risk_override.and_then(|s| match ... _ => None)`） | 成立 | 两件事：①文档（clap 的 `(low/medium/high)` 与 `cli-quickstart.md:97`）把取值说成闭集，而 `match` 接受 `blocked`——`apply_risk_override`（`core.rs:990-996`）会把它当成覆盖值，于是该主机**每条命令都被拒**，这是文档里从未出现的能力；②**无法识别的值是静默丢弃**：`_ => None` 之后 `HostProfile.risk_override` 为 `None`，程序照样打印 `Saved host 'x'.`。一个拼错的 `--risk-override hihg` 会得到一台没有任何覆盖的主机，且没有任何提示。本轮只按①改文档（`(low/medium/high/blocked)`），②属行为，未动 | ①先定「`blocked` 该不该作为覆盖值」：该留就把 `cli-quickstart.md:97` 与 clap 文档写成事实（本轮已写，若决定不接受则要改回并改代码）；②把 `_ => None` 换成 `bail!("unknown risk level {s}: expected low/medium/high/blocked")`，或至少 `eprintln!` 一条警告。改的是 `host add` 的失败语义（今天永不失败），要配一条 `try_parse` 级用例 |
+
+

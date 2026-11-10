@@ -1683,7 +1683,7 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 ### batch 2026-11-11 · MCP 契约与 CLI 文档一致性（第二批，B=9）
 - issue #15 / 开批时间 2026-11-11 04:05 (GMT+8)
 - CodeBuddy 首条分析：**未到（等待中）**——60 s × 5 次轮询（04:06–04:10）+ 结束前即时复核（≈04:11）+ 6.5 分钟处最后一次延时复核（≈04:12）均 0 评论。消费者下次运行重新等（#13/#14 的首条都在 6–6.5 分钟晚到，本轮超出该窗口仍未到）。
-- 6 轮进度：**2 / 6**（第 1 轮 04:28 收尾、第 2 轮 04:44 收尾，见文末 `consume 1 / 6`…`consume 2 / 6`）
+- 6 轮进度：**3 / 6**（第 1 轮 04:28、第 2 轮 04:44、第 3 轮 04:55 收尾，见文末 `consume 1 / 6`…`consume 3 / 6`）
 - 正文已喂给 CodeBuddy：**85 条「不成立」原文**（编号 54：preflight 2 + batch1 六轮 10 + batch2 编号 15–31 十七条（29–31 物理落 batch 2 末节、内容属 batch 3 第 5 轮，正文已标注）+ batch4 第 1/5/6 轮 10 + batch6 第 1 轮 5 + **batch8 第 1 轮加粗伪标题小节 4 条子断言** + **手工/单发消费 11-11（#2 模式 B）6 条**；行内判定行 28：batch2 D2/D4、batch3 A5/E、batch5 六条、batch6 五条、batch7 八条、手工 11-10 一条、batch8 第 2–6 轮五条；摘录 3：batch8 补记两条 + 收尾之后撞号描述一条）+ 首查项（#2 模式 B 刚落地的 N2/N3/N4 及 L2-103/L2-102/L2-94）+ KNOWN-ISSUES 空档（K2 存量限制 / K7 / K8 / K9 / K12 / K13）+ 口径提醒（基线 861/1/1、`--lib` 878/1/1、`daemon_integration` 71、`--lib --tests --no-fail-fast` 1084/1/3、npm 213/27；**四条派生断言守不住 description/schema/示例层——本批重点**；L2-PENDING 撞号 13 对、新条目从 L2-102 之后起、L2-94/102/103 勿重提；feature 组合不可相加；`.github/**` 禁区；四列计数；行号现算；`[跑]` 不可采信；MCP bin 的 grep 作用域陷阱——只 grep bin 不 grep 它调的 lib）。正文由 `/tmp/build-opt-issue-b9.py` 按 ledger 锚点切片生成（块级正则 + 加粗伪标题特例 + 行内唯一子串校验：17 个编号块 50 条 + 加粗 4 条 + 判定行 28 条 + 摘录 3 条 = 85，复验通过；初版两个 bug 已修——order 漏 preflight、行内标签误用 `split(" · ")[0]` 全等匹配导致 batch3/5/7 行内条目全部丢失，改为 `startswith` 后恢复）。
 - 同主题第一批（#9）已 6 轮闭环；此后 #12/#13 两批给 api.yaml 配了派生式断言并对齐路由与状态码集合，#2 模式 B（`30264bb`）又改过 api.yaml 三处与 skills.md 一处。本批重点找对齐之后新增/残留、且派生断言守不住的 description/schema 层问题。
 - 顺手按 #14 批次条目与 BATCH_COMPLETE 行自述删除顶部 `BATCH_COMPLETE · issue #14` 状态行（HTML 注释同步为七条）。
@@ -1727,3 +1727,21 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 - **L2 新增一条**：**L2-106**（`ResourceKind::Transfer` 条目从未建成）。L2-104/105 维持；L2-105 的「选②零代价」理由按它的提醒改准：不是「没东西要清」，而是「从没建成过」。
 - **未做**：它提的 `requires_approval=false` 短路语义我只写进契约，没有把它做成 L2——因为 `approval.rs` 的行为是对的，错的只有 `api.yaml` 一句描述。
 - **验证**：`npm run build` 6.34s；`cargo fmt --check` 绿；`--no-default-features --lib` **861 / 1 / 1**；`--features daemon --test daemon_integration` **71 / 0**；`yaml.safe_load` 仍 90 paths / 105 operations。
+
+### consume 3 / 6 · 2026-11-11 04:41–04:55 (GMT+8) · batch 9（issue #15）
+
+- **指摘来源**：CodeBuddy 的复核 `2120255506575945728`（04:41 到，我第 2 轮回帖后 8 分钟）。**新批 4 条 → 成立 2 / 不成立 2**；另自取 1 条。它对第 2 轮三条判「全部落地成立」，并把 Q1/Q2/Q3 答完。
+
+| 编号 | 判定 | 我核到的 |
+|---|---|---|
+| §四.1 `ExecPlan` schema 少 4 个字段 | **不成立** | `ExecPlanTarget`（`core.rs:60-69`）就是 8 个字段：`host`/`host_address`/`command`/`risk_level`/`needs_force`/`blocked`/`jump_host`/`timeout_secs`，而 `api.yaml:4328-4335` 列的正是这 8 个。`stdin`/`max_output_bytes`/`side_effect` 属**请求**类型（`ExecRequest`/`ExecMultiRequest`），`risk_unclassified` 在 `approval.rs:78` 的 `ApprovalPrompt` 里，三者都不在 `ExecPlanTarget`。这是「把两份不同载荷当成同一份」的老形态。「没有 `required` 数组」属实，但那是取舍不是漏字段——8 个字段都无 `skip_serializing_if`，恒出现 |
+| §四.2 `src/types.ts:722/737` 说可取消 | **不成立** | `git grep "cancel this in-flight" -- src` → **0 命中**；`src/types.ts:722` 是 `exec_binary: string;`，`:737` 是 `ContainerRuntimeInfo` 里 `service_running` 上方的那行注释，两处都与 `transfer_id` 无关。前端确实没有这处文案，所以不存在「与 api.yaml 矛盾的另一侧消费者」 |
+| §四.3 rustdoc + 四处 CLI 提示 | **成立** | ①`approval.rs:1000-1004` 的 rustdoc 只说「返回第一条 `requires_approval` 为 true 的政策」，漏了「命中 false 也返回 `None` 并终止」，按它实现会写成 `continue`；②`bin/agent2ssh.rs:1509/1537/1573/1603` 四处同句「or use --force when policy allows」，而四处都走 `authorize_command_without_approval_handler`，其闭包（`execution_control.rs:366-377`）**无条件 `Err`**：`--force` 只解 `(risk == High && !force)` 那一半，policy 命中时任何 flag 都过不去。「when policy allows」在这四条路径上不可能成立 |
+| §四.4 契约描述不进 MCP 响应 | **成立** | `ssh_preview_exec` 是 `serde_json::to_value(plan)`（`bin/agent2ssh-mcp.rs:1678`/`:1686`），`ExecPlan` 纯 `derive(Serialize)`——serde 不读 OpenAPI，所以 `783cfb3` 那两句只修好了读契约的人，agent 拿到的仍是裸 `requires_approval: false`。`tools.rs:792` 与 `api.yaml:4387` 现在口径不同（一处写了反面、一处没写）。L1 修 `skills.md:48`/`:50`，`tools.rs:772`/`:792` 扩进 **L2-104** |
+| 自取：`--risk-override` 的取值说明 | **成立** | clap 文档与 `cli-quickstart.md:97` 都把取值说成 `low/medium/high`，而 `match`（`bin/agent2ssh.rs:2010-2016`）接受 `blocked`——`apply_risk_override`（`core.rs:990-996`）会照单全收，于是该主机**每条命令都被拒**；`_ => None` 则把拼错的值**静默丢弃**，仍打印 `Saved host 'x'.` → **L2-107** |
+
+- **分类规则（本轮确立）**：同样是 `src-tauri/src/**` 的字符串，**人读的**（clap 帮助 / CLI 错误提示 / rustdoc）判 L1，**机器读的**（`tools/list` 的 `description`、MCP 返回的 schema 文本）判 L2。这样第 1 轮把 `tools.rs` 三处判 L2、本轮把 `bin/agent2ssh.rs` 的提示判 L1 就不再矛盾。
+- **L1 落地**：`2569e9e`（`approval.rs` rustdoc + 四处提示 + `--risk-override` 的 clap 文档）、`0f168c3`（`skills.md:48`/`:50` + `cli-quickstart.md:97`）。
+- **它给的两条判断我采纳但不改代码**：①Q1——`/exec/preview` 不该合并政策维度，因为 `GET /hosts/:name/policy`（`execution_control.rs:156-181`）已经是「政策 × 风险」的正确答案且前端在消费（`HostPolicyLine.tsx:23-30`），要加就加**新字段**；②Q2——`app_state.rs` 里没有按 kind 的索引，`LifecycleRegistry` 只有一张 `HashMap<String, ResourceRecord>`，`register` 与 `lifecycle` **不是同一把锁**，所以 L2-106 选②必须解的是反向中间态（`unregister` 反查不到 → 条目永久停在 `Pending` → `active_resources` 凭空多一条不消失的 Active）。两条都写进了 L2-106 的备注。
+- **验证**：`npm run build` 6.38s；`cargo fmt --check` 绿；`--no-default-features --lib` **861 / 1 / 1**；`--features daemon --test daemon_integration` **71 / 0**；`--test cli_contract` **40 / 0**；`--test cli_smoke` **34 / 0**（新加这两项，因为改了 CLI 文案与 clap 文档）。
+- **回帖**：见下一笔提交回写的 id。**#15 保持 open**，进度 3 / 6。
