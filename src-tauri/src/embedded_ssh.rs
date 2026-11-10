@@ -521,6 +521,18 @@ pub fn import_known_hosts_from_ssh(path: Option<&str>) -> Result<KnownHostImport
             STANDARD_NO_PAD.encode(Sha256::digest(&key_blob))
         );
 
+        // `key_type` is the file's second column, which is a *public key*
+        // algorithm (`ssh-rsa`, `ecdsa-sha2-*`, `ssh-ed25519`) and never a
+        // signature algorithm — `rsa-sha2-256` does not appear there — so it is
+        // the same name `host_key_algorithm` produces for the store.
+        //
+        // Only OpenSSH's `[host]:port` form is parsed. A bare `host:port` comes
+        // back from `split_host_port` unchanged with the port defaulted to 22,
+        // so the format below appends a second one (`host:2222:22`): the entry
+        // is filed under an identity no `HostProfile` resolves to, and still
+        // counts as `imported`. OpenSSH brackets every non-22 port, so reaching
+        // this needs a hand-edited or foreign `known_hosts`; the fix changes
+        // what gets stored and is recorded as L2-89.
         let first_host = host_field.split(',').next().unwrap_or(host_field);
         let (hostname, port) = split_host_port(first_host);
         let identity = format!("{hostname}:{port}");
@@ -1984,9 +1996,9 @@ fn authenticate(
         // failures caused by the backend not understanding a key's encoding, and
         // the current transport reads every format this crate writes.
         // An OpenSSH user certificate sits next to its key as `<key>-cert.pub`.
-        // Handing it to libssh2 as the public-key file makes the handshake offer
-        // the certificate instead of the bare key, which is what a server that
-        // only trusts a CA (`TrustedUserCAKeys`) will accept.
+        // Handing it to the transport as the public-key file makes the handshake
+        // offer the certificate instead of the bare key, which is what a server
+        // that only trusts a CA (`TrustedUserCAKeys`) will accept.
         let cert = user_certificate_for(Path::new(&path));
         let pubkey = cert.as_deref();
         if let Some(cert) = &cert {
@@ -2071,7 +2083,10 @@ fn authenticate(
         }
     }
 
-    // T2-9: Try SSH agent first (includes Windows Pageant via ssh2's agent connector)
+    // T2-9: Try SSH agent first. "First" is this function's order, not the
+    // connector's: the transport's agent facade opens the OpenSSH named pipe
+    // before Pageant on Windows (`russh_impl::agent::connect_stream`), so a
+    // running-but-useless Pageant is not consulted first either.
     // Finding 1: Iterate ALL agent identities, not just the first one.
     if let Ok(mut agent) = session.agent() {
         if agent.connect().is_ok() && agent.list_identities().is_ok() {
@@ -2123,9 +2138,9 @@ fn authenticate(
 }
 
 /// `session.handshake()`, with the one failure that has an actionable cause
-/// spelled out. libssh2 reports "no algorithm both sides support" as
-/// `-5 Unable to exchange encryption keys`, which says nothing about *why*. The
-/// built-in defaults are deliberately modern (see `ssh_algo::safe_defaults`), so
+/// spelled out. The transport reports "no algorithm both sides support" as
+/// [`crate::transport::ErrorKind::KeyExchange`], which says nothing about *why*.
+/// The built-in defaults are deliberately modern (see `ssh_algo::safe_defaults`), so
 /// an old server or device that only offers SHA-1 key exchange, CBC ciphers or
 /// SHA-1 MACs lands here, and the way out is a named override.
 fn handshake_with_hint(session: &mut Session, host: &HostProfile) -> Result<()> {
@@ -2431,8 +2446,8 @@ mod tests {
     /// (`russh_impl/mod.rs`, "algorithm preferences must be set before the
     /// handshake"). So the call always returns `Err`, the function always returns
     /// false, and the SHA-1 fallback a pre-7.2 server needs is the transport's own
-    /// internal one, which the comment above the call site credits to `libssh2`
-    /// rather than to `russh`.
+    /// internal one — the comment above the call site says so, and it stopped
+    /// naming `libssh2` when that backend was removed.
     ///
     /// A source assertion, because the alternative is a fixture sshd restricted to
     /// `ssh-rsa` and an `algo set` that should be refused — and this pins the whole

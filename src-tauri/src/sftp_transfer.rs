@@ -310,6 +310,11 @@ pub fn active_count() -> usize {
 /// larger than the server's packet size". On `Ok(0)` the limit is halved (down to
 /// [`SFTP_SAFE_WRITE`]) and the same data retried, and the smaller limit sticks in
 /// `limit` so the rest of the transfer does not repeat the discovery.
+///
+/// The `Ok(0)` arm is reachable only from a caller that answers zero bytes: the
+/// current transport's handle returns `Ok(min(buf, max_write_len))` or `Err`,
+/// never `Ok(0)`, so on a real upload only the halving guard's synthetic test
+/// writer reaches it.
 fn write_all_shrinking<W: Write>(
     writer: &mut W,
     mut data: &[u8],
@@ -346,14 +351,27 @@ fn write_all_shrinking<W: Write>(
 /// Generous on purpose: a stall detector, not a throughput limit. Ten minutes of
 /// silence mid-write is pathological on any link, and a false positive kills a
 /// transfer that was merely slow.
+///
+/// **It does not fire on the current transport.** The deadline is only consulted
+/// when a write reports zero bytes, and an SFTP handle never does: the
+/// transport's `File::write` returns `Ok(min(buf, max_write_len))` or `Err`. A
+/// peer that keeps the connection open but stops answering SFTP `WRITE` is
+/// waited on inside `russh_sftp` — once `max_concurrent_writes` (8) requests are
+/// outstanding, `poll_write` blocks on the oldest ack, and `write_nowait`'s
+/// receiver carries no deadline of its own — so this guard never regains
+/// control. What still bounds that peer is the socket write timeout set in
+/// `connect_embedded_ssh`, and only for the case where TCP itself stops
+/// accepting bytes. The gap is recorded as L2-90.
 const STALL_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Wraps a writer so a write that makes no progress is aborted instead of hanging.
 ///
 /// It cannot interrupt a blocked syscall — nothing portable can — but it keeps the
-/// accounting that makes the eventual failure legible, and it converts the case
-/// that *does* return (a peer accepting nothing) into an error at the moment it is
-/// observed rather than at the end of a useless loop.
+/// accounting that makes the eventual failure legible, and it turns a peer that
+/// reports zero accepted bytes into an error at the moment it is observed rather
+/// than at the end of a useless loop. Both are conditional on `write` returning
+/// at all: see [`STALL_TIMEOUT`] for why the current transport takes neither
+/// path.
 pub struct StallGuard<W> {
     inner: W,
     last_progress: Instant,
