@@ -27,6 +27,10 @@
 
 ---
 
+**BATCH_COMPLETE · issue #14** —— 2026-11-10 · 主题「SSH 传输、known_hosts 与认证（russh 侧，第二批）」(B=8)。6 / 6 轮闭环，issue 已关闭（`state_reason: completed`）。见文末「batch 2026-11-10 · SSH 传输、known_hosts 与认证（russh 侧，第二批，B=8）· 批次汇总」。此后每次运行只输出一行状态；下一批（B=9）由生产任务开 issue 时删除本行。
+
+---
+
 ## preflight · 2026-11-10 · issue #2 最后一轮的预核实
 
 非本流程轮次，是流程上线前对手工核实结论的固化。来源：issue #2 评论 `2119853755255377920`（2026-11-09T18:04:54Z，作者 CodeBuddy）。
@@ -1496,7 +1500,7 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
   - 5 `russh-migration.md:494` 仍写「Pageant 优先、管道兜底」，`e67fd04` 已把代码翻成管道优先（部分成立，`agent.rs:317-327`；KNOWN-ISSUES.md:69 那句是对的）
   - 6 `embedded_ssh.rs:2074-2086` 的 T2-9 注释仍记 ssh2/libssh2 接线方式，`:1987` 同族残留（部分成立）
   - 另自验 3 条不成立（`bridge_tcp_and_channel` 空转烧 CPU / `channel.rs` request 混同超时与拒绝文案 / `legacy_pem` 尾随空格误判），并声明未重复 ledger 既有不成立与 L2-15/16/17/19/22/24/25/88 条目、未跑测试（环境无 cargo）
-- 6 轮进度：**5 / 6**（第 5 轮 2026-11-11 00:52 收尾，见文末 `consume 1 / 6`…`consume 5 / 6`；issue 保持 open）
+- 6 轮进度：**6 / 6（已闭环，issue 已关闭）**（第 5 轮 2026-11-11 00:52 收尾、第 6 轮 00:58 收尾，见文末 `consume 1 / 6`…`consume 6 / 6` 与批次汇总）
 - 正文已喂给 CodeBuddy：**67 条「不成立」原文**（编号 44：preflight 2 + batch1 六轮 10 + batch2 编号 15–31 十七条（29–31 物理落 batch 2 末节、内容属 batch 3 第 5 轮，正文已标注）+ batch4 第 1/5/6 轮 10 + batch6 第 1 轮 5；行内判定行 23：batch2 D2/D4、batch3 A5/E、batch5 D6 后半/D8/F6 后半/F10/F11 后半/F12、batch6 a1 后果/a3.2/a5/c 附更正/#10、batch7 第 1/2/4/5 轮 8 条、手工单发消费（#2）1 条含 3 项）+ KNOWN-ISSUES 空档（K2/K7/K9/K12 + §3 未验证范围 + §3.1 Pageant 共存边界）+ 口径提醒（基线红测 861/1/1、npm 213/27、feature 组合不可相加、`daemon_*_e2e` 需显式 `--features daemon`、`exec_fixture` 空跑、`.github/**` 禁区、四列计数、`[跑]` 标注不可采信、行号一律现算、L2-15/L2-16…L2-25/L2-37/L2-73/L2-88 勿重提、api.yaml 已在 #9/#12 对齐）。正文由 `/tmp/build-opt-issue-b8.py` 按 ledger 锚点切片生成（块级正则 + 行内唯一子串校验：16 个编号块 44 条 + 23 条判定行，复验通过）
 - 同主题第一批（#8）已 6 轮闭环；正文已写明 #8 落地的 L1 与已登记 L2 勿重提，本批重点找 **#8 闭环后新增/残留**的问题
 - 顺手按 #13 批次条目的指示删除顶部 `BATCH_COMPLETE · issue #12` 与 `#13` 两条状态行（#13 那条明写「下一批（B=8）由生产任务开 issue 时删除本行」；#12 无指示但同属已关闭批次留痕，沿用 #8–#11 先例一并删除；顶部 HTML 注释已同步为六条）
@@ -1578,3 +1582,49 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 - **自取新发现（L2 编号撞号）**：`OPT-LOOP-L2-PENDING.md` 里 **12 个编号各出现两次**（`L2-13`…`L2-20`、`L2-22`、`L2-23`、`L2-25`、`L2-30`），两处指完全不同的事——多批各自从 13 起编号的后果。这直接击穿「按编号追溯」这个唯一工作方式，而我在第 3 轮还拿它当理由拒绝合并 L2-15/L2-95。已在文件顶部加「撞号登记」与引用规则（引用必须带主题限定；新条目从 `L2-100` 起；全量重编号属人拍板，不在自动路径做）。
 - **L1**：`60d46b9`（`sftp_transfer.rs` 补 shutdown/close 的一层）。文档笔：L2-96 落点与取消语义、第 5 轮小节、顶部撞号登记。
 - **验证**：`cargo test --no-default-features --lib --tests --no-fail-fast` → 22 targets，**1084 passed / 1 failed / 3 ignored**；`cargo fmt --check` 绿。
+
+### consume 6 / 6 · 2026-11-11 00:5x (GMT+8) · batch 8（issue #14）· 末轮
+
+- **指摘来源**：CodeBuddy 对第 3 轮收尾的复核 `2120195699743555584`（00:43:40）。它发出时我已在跑第 4 轮（自取），随后被 `2120196198978994176`（00:45:39，对第 4 轮的复核）压在下面，直到第 5 轮收尾前才翻到——所以它自称「第 3 轮复核」，实际是第 4 轮之后才被消费的那一条。本轮拿它当末轮靶，基线 `7d561d3`。
+- **判定：4 条 → 成立 2 / 部分成立 1 / 不成立 1**；另 1 条「部分成立但不新立」。
+  - **成立**：`forward.rs` 的 accept 循环无条件 `thread::spawn`（`:555-590`），且 `handle_local_connection` 先 `connect_embedded_ssh(&host, 60)` 再碰客户端字节（`:606-617`）——只 connect 不说话的对端（`nc`、端口探活、容器 healthcheck）每条占一个线程 60 s，无并发上限（`control.connections` 只是计数器）。立 **L2-100**。
+  - **成立（打在我自己第 1 轮写的注释上）**：`STALL_TIMEOUT` 首段「a deadline … names the write size」**是假的**。`StallGuard::write` 的 `self.inner.write(buf)?` 先返回，`stalled()` 永不在真错误上被调用，所以「命名写了多少字节」这条路径**修完 deadline 之后也不经过 `StallGuard`**。已改注释，并把这条并进 L2-96 的 (b) 半：deadline 必须自己读 `bytes_written` 组文案。
+  - **部分成立**：L2-98 的「为什么不能自动落」里「`russh-migration.md:489` 要同步」不存在——它引的是不带括号的旧串 `"...or default key succeeded"`。理由已缩半（只剩「用户可见字符串 + 四份历史证据不改写」）。
+  - **不成立**：`bridge_tcp_and_channel` 把 `TimedOut` 当错误上报、安静隧道 60 s 后被 `:1266` 断开。三个调用点都在非阻塞模式下跑（`embedded_ssh.rs:976` 显式 `set_blocking(false)`、`forward.rs:618`/`:668` 同样，且 `bridge_tcp_and_channel` 自己第一句就 `set_nonblocking(true)`），非阻塞的 `read_side` 返回 `WouldBlock`（`channel.rs:356-358`），不是 `timed_out()`。`write_with_timeout` 的 `TimedOut` 是写入超时、本就有意 abort，与「空闲」不是一回事。
+  - **部分成立、不新立**：`jump_chain.rs:88` 每跳一次 `load_config()`。机制成立，但 `load_config` 有缓存、代价可忽略；危害只是「一次连接里不止一份配置快照」的可观测后果（错误信息可能指向已删掉的 profile 名），它自己也说不是 bug。改善项记在 L2-PENDING 第 6 轮小节，不占编号。
+- **L1**：`37fbd7b`（`sftp_transfer.rs` 的 `STALL_TIMEOUT` 首段改写）。文档笔：`L2-PENDING` 第 6 轮小节（L2-100 表行、`STALL_TIMEOUT` 那句「本轮之前是假的」、L2-98 理由缩半、`jump_chain` 不新立、`bridge` 不成立）、L2-96 与 L2-98 两行订正；本文件 6 / 6 + 批次汇总 + 顶部 `BATCH_COMPLETE`。
+- **验证**：`cargo test --no-default-features --lib --tests --no-fail-fast` → 22 targets，**1084 passed / 1 failed / 3 ignored**（唯一红是那条故意红的 `an_ipv6_literal_at_port_22_is_removed`）；`cargo fmt --check` 绿；本轮未动 `src/`，`npm run build` 沿用第 3 轮的 6.32s（同一棵树）。
+- **回帖**：见下方批次汇总里的评论号。
+- **issue #14**：本轮结束后关闭（`state_reason: completed`）。
+
+### batch 2026-11-10 · SSH 传输、known_hosts 与认证（russh 侧，第二批，B=8）· 批次汇总（6 轮闭环）
+
+| 轮 | 指摘来源 | 判定（成立 / 部分 / 不成立） | 落地 |
+|---|---|---|---|
+| 1 | 首条分析 `2120184256348471296` | 6 条：3 / 3 / 0 | `4c82aa5`（代码）+ `b7bf48f`（文档） |
+| 2 | 复核 `2120191019055497216` | 6 条：3 / 2 / 1 | `3ee366c` + `ad5a1b6` |
+| 3 | 复核 `2120192394497798144` | 3 条：1 / 2 / 0 | `78f850e` + `ebb4b3e` |
+| 4 | 自取（CodeBuddy 5 分钟静默） | 3 条：2 / 0 / 1 | `81ce265` + `150bced` |
+| 5 | 复核 `2120196198978994176` | 5 条：3 / 1 / 1（另有自取 1：编号撞号） | `60d46b9` + `7d561d3` |
+| 6 | 迟到的第 3 轮复核 `2120195699743555584` | 4 条：2 / 1 / 1 | `37fbd7b` + 本次提交 |
+| **合计** | 6 次取指摘（4 次 CodeBuddy、1 次自取、1 次迟到件） | **27 条：14 / 9 / 4** | **6 笔代码 + 6 笔文档** |
+
+**本批最值钱的四个发现**（都不是「注释写错」级别的）：
+
+1. **K2 的「已修」其实没兜住**（→ L2-96）。`StallGuard` 的 600 s deadline 与 `write_all_shrinking` 的 `Ok(0)` 减半分支在当前传输上**都不可达**：`File::write` 只返回 `Ok(min(buf, max_write_len))` 或 `Err`，永不返回 `Ok(0)`。对端不 ACK 时真实的闸门只有 `write_acks` 的 8 个在途 ack（前置是 `mpsc::unbounded_channel`，没有背压），`request_timeout_secs` 只服务 `request()`，`block_on` 无超时 ⇒ 写路径**没有截止时间**。
+2. **`STALL_TIMEOUT` 首段那句承诺是假的**（第 6 轮才被打掉）。第 1 轮我把它当成「已修的那一半」写进注释与 KNOWN-ISSUES，五轮后才发现解释路径根本不经过 `StallGuard`。
+3. **L2 编号 12 处撞号**（第 5 轮自取）。`L2-13`…`L2-20`、`L2-22`、`L2-23`、`L2-25`、`L2-30` 各出现两次、指两件事——直接击穿「按编号追溯」这个唯一工作方式，而我在第 3 轮还拿它当理由拒绝合并 L2-15/L2-95。已在 `L2-PENDING.md` 顶部登记，规则：引用必须带主题限定、新条目从 `L2-100` 起、全量重编号属人拍板。
+4. **`/terminal` 停机 drain 分支吞 `TerminalEvent::Error`**（→ L2-99）。客户端先收 `connected`、再收 `shutdown`，失败原因一个字都没有；窗口只有停机那一两秒，最难复现也最容易被当成「连上了但没反应」。
+
+**L2 待拍板（按建议执行顺序）**：
+
+1. **L2-99** — drain 分支补发 error 帧再 `break`（一行，与 `:4900-4904` 同形），配一条「停机窗口内让 shell 请求失败」的 e2e。
+2. **L2-96** — 给 SFTP 写路径真截止时间。落点必须是 `transport/russh_impl/sftp.rs:223` 的 `impl Write for File`；`write` 与 `flush` **两处都要包**（`poll_drain_writes` 抽同一队列）；不能在 `core.rs` 的 `spawn_blocking` 闭包里包（同步闭包无 reactor）；`timeout` 不取消内部 future，超时后必须 abort session；文案自己读 `bytes_written`。
+3. **L2-97** — `/terminal` 的 `connected` 帧形状：补 `auth_method`（且换成 `authenticate` 的返回值，不是按 host 预测）或写进契约；顺带写明 `recording_id` 可为 `null`。
+4. **L2-98** — 认证失败文案补 `_sk` 变体与 `keyboard-interactive`；四份 `pageant-acceptance-2026-10-23.json` 不改写，在报告里注明「该次运行是旧版文案」。
+5. **L2-19 → L2-22 → L2-95 / L2-15（known_hosts 形态）** — 一次性把导入、删除、identity 三处的形态假设用 `split_host_port` 解析后比 `(host, port)` 收口。**顺序不能反**：先把 `skipped` 按四个原因拆字段（hashed / 三列不足 / base64 解不开 / 指纹冲突，没有第五个兜底桶），再动计数分布，否则只是往五合一计数器里加第六种原因、CLI 文案会给错归因。
+6. **L2-100** — `forward.rs` 在拨 SSH 之前先对客户端做带超时的首字节 `peek`（5 s 量级），另加并发上限（与 `JumpThreadGuard` 同形）。
+
+**不成立**：本批 4 条正式判定不成立 + 首轮 4 条子断言，原文都保留在各轮小节（issue 正文另有 67 条历史清单，本批已逐条避开，未重复）。
+
+**下一批（B=9）**：9 % 6 = 3 → 主题 3「MCP 契约与 CLI 文档一致性」（`docs/skills.md`、`docs/api.yaml`、CLI help；第二批，#9 已闭环）。生产任务开 issue 时删除顶部 `BATCH_COMPLETE · issue #14` 一行。
