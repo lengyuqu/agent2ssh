@@ -1496,7 +1496,7 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
   - 5 `russh-migration.md:494` 仍写「Pageant 优先、管道兜底」，`e67fd04` 已把代码翻成管道优先（部分成立，`agent.rs:317-327`；KNOWN-ISSUES.md:69 那句是对的）
   - 6 `embedded_ssh.rs:2074-2086` 的 T2-9 注释仍记 ssh2/libssh2 接线方式，`:1987` 同族残留（部分成立）
   - 另自验 3 条不成立（`bridge_tcp_and_channel` 空转烧 CPU / `channel.rs` request 混同超时与拒绝文案 / `legacy_pem` 尾随空格误判），并声明未重复 ledger 既有不成立与 L2-15/16/17/19/22/24/25/88 条目、未跑测试（环境无 cargo）
-- 6 轮进度：**2 / 6**（第 2 轮 2026-11-11 00:34 收尾，见文末 `consume 1 / 6` 与 `consume 2 / 6`；issue 保持 open）
+- 6 轮进度：**3 / 6**（第 3 轮 2026-11-11 00:40 收尾，见文末 `consume 1 / 6`…`consume 3 / 6`；issue 保持 open）
 - 正文已喂给 CodeBuddy：**67 条「不成立」原文**（编号 44：preflight 2 + batch1 六轮 10 + batch2 编号 15–31 十七条（29–31 物理落 batch 2 末节、内容属 batch 3 第 5 轮，正文已标注）+ batch4 第 1/5/6 轮 10 + batch6 第 1 轮 5；行内判定行 23：batch2 D2/D4、batch3 A5/E、batch5 D6 后半/D8/F6 后半/F10/F11 后半/F12、batch6 a1 后果/a3.2/a5/c 附更正/#10、batch7 第 1/2/4/5 轮 8 条、手工单发消费（#2）1 条含 3 项）+ KNOWN-ISSUES 空档（K2/K7/K9/K12 + §3 未验证范围 + §3.1 Pageant 共存边界）+ 口径提醒（基线红测 861/1/1、npm 213/27、feature 组合不可相加、`daemon_*_e2e` 需显式 `--features daemon`、`exec_fixture` 空跑、`.github/**` 禁区、四列计数、`[跑]` 标注不可采信、行号一律现算、L2-15/L2-16…L2-25/L2-37/L2-73/L2-88 勿重提、api.yaml 已在 #9/#12 对齐）。正文由 `/tmp/build-opt-issue-b8.py` 按 ledger 锚点切片生成（块级正则 + 行内唯一子串校验：16 个编号块 44 条 + 23 条判定行，复验通过）
 - 同主题第一批（#8）已 6 轮闭环；正文已写明 #8 落地的 L1 与已登记 L2 勿重提，本批重点找 **#8 闭环后新增/残留**的问题
 - 顺手按 #13 批次条目的指示删除顶部 `BATCH_COMPLETE · issue #12` 与 `#13` 两条状态行（#13 那条明写「下一批（B=8）由生产任务开 issue 时删除本行」；#12 无指示但同属已关闭批次留痕，沿用 #8–#11 先例一并删除；顶部 HTML 注释已同步为六条）
@@ -1543,3 +1543,14 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
   - 「验证用例把 timeout 设成 1 s」的建议建立在上面那条错误机制上：设 `request_timeout_secs` 对写路径没有任何影响。挂在 L2-96 下，不采纳。
 - **L1**：`3ee366c`（两处编号 + `request_timeout_secs` 的归属）。文档笔：`KNOWN-ISSUES.md` K2 状态列改为「已修（旧症状不复现，待复测旧版本）；存量限制见右」、`write_nowait` 那句补上「`request_timeout_secs` 只服务 `request()`」、`L2-PENDING` 记反驳与 L2-99。
 - **验证**：`npm run build` 6.37s；`--no-default-features --lib` 861/1/1；`--lib` 878/1/1；`cargo fmt --check` 绿。
+
+### consume 3 / 6 · 2026-11-11 · batch 8（issue #14）
+
+- **指摘来源**：CodeBuddy 对第 2 轮收尾的复核 `2120192394497798144`（00:30:32）。基线 `ad5a1b6`。它**全盘接受**第 2 轮的反驳，并自认上轮机制是编的。
+- **判定**：3 条 → **成立 1 / 部分成立 2 / 不成立 0**（另它主动声明「`878/861` 这台机器无法复算，只按文本接受」，属实：它没有 cargo）。
+- **成立**：`remove_system_known_host` 的字符串全等有两个盲区，`[host]:22` 与裸 `host:port` 都逃过匹配（`removed 0`）；`[host]:22` 与 `[::1]:22` 红测同根因，裸 `host:22` 才是第二类。它建议把 L2-15 / L2-95 与删除侧合成一次「形态归一」决策，用 `split_host_port` 解析后比 `(host, port)`——采纳为「一次决策」，但**条目编号不合并**（合并会让 ledger 历史引用全部指错）。
+- **部分成立**：
+  - 「注释写反了」——**不成立**，我的注释只写「阻塞在 oldest ack」，没提 mpsc 背压；但它补的事实成立：前置通道是 `mpsc::unbounded_channel`（`client/mod.rs:85`），`send()` 永不阻塞，所以 `write_acks` 的 8 是**唯一**闸门。已写进注释，L2-96 的修法据此收敛为「`File::write` 外包 `tokio::time::timeout`」，原「给 `request_timeout_secs` 设值」已从建议里删掉。
+  - `recording_id` / `terminal_id`：`Uuid` 的 serde 与 `.to_string()` 逐字节相同，所以不是 bug；真正不对称的是 `recording_id` 未录制时为 `null`（键在、值 null）。已写进 daemon 注释并挂 L2-97，不新立。
+- **L1**：`78f850e`（三处注释：唯一闸门、`remove` 的两个盲区与三条同根因、`connected` 帧的 null 语义）。文档笔：`L2-PENDING` 的 L2-96 建议改法订正 + 新增第 3 轮小节（形态归一合并建议、两条补正）。
+- **验证**：`npm run build` 6.32s；`--no-default-features --lib` 861/1/1；`--lib` 878/1/1；`cargo fmt --check` 绿。
