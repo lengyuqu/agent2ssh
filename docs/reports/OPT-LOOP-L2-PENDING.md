@@ -4,6 +4,20 @@
 
 ---
 
+## 编号撞号登记（2026-11-11，batch 8 第 5 轮核实）
+
+本文件由多批各自从头编号写成，**12 个编号各出现两次、指两件不同的事**：`L2-13`、`L2-14`、`L2-15`、`L2-16`、`L2-17`、`L2-18`、`L2-19`、`L2-20`、`L2-22`、`L2-23`、`L2-25`、`L2-30`。两处散在不同日期的小节里，多数是「daemon 路由/关闭路径」对「`known_hosts`/主机键/认证」，但也有例外（`L2-30` 的两处都是 daemon 侧）。
+
+例：`L2-15` 既是「daemon 在 `shutdown.cancel()` 之后进 handler 的请求仍回 200」，也是「`remove_system_known_host` 的 `patterns` 只认 `[host]:port` 一种形态」。后者在本批被反复引用，前者与本批无关——只写编号会让读者跳到错的那一条。
+
+**引用规则（立即生效）：**
+
+- 引用撞号条目时**必须带主题限定**，写成 `L2-15（known_hosts 形态）` / `L2-15（shutdown 后仍 200）` 这种形式。这个文件里凡出现裸 `L2-13`…`L2-30` 而无主题限定的引用，都是旧引用，需按上下文重判。
+- **新条目从 `L2-100` 起编号**，不再取 13–99 的空号——空号看起来安全，实际每次都挑到别人用过的号。
+- 全量重编号要同时改 ledger 里六批的引用，属人拍板项，不在这里做。半途重编号会让「按编号追溯」比现在更坏。
+
+---
+
 ## 2026-11-10 · 来自 issue #2 的消费（文档行为一致性）
 
 ### L2-1 诊断文案与它描述的控制流不符
@@ -555,7 +569,7 @@ CodeBuddy 首条分析 6 条，核实后 **成立 3 / 部分成立 3 / 不成立
 | 编号 | 位置 | 判断 | 为什么不能自动落 | 建议改法 |
 |---|---|---|---|---|
 | L2-95 | `embedded_ssh.rs:536-540`（`import_known_hosts_from_ssh` 的 identity 构造） | 部分成立 | 裸 `host:port` 经 `split_host_port`（`:643-657`）原样返回、端口写死 22，于是 `format!("{hostname}:{port}")` 拼出 `host:2222:22`：条目按一个没有 `HostProfile` 解析得到的 identity 落盘，计数仍是 `imported`。触发面窄——OpenSSH 对所有非 22 端口都写 `[host]:port`，只有手工编辑或外来 `known_hosts` 才有裸形式。指摘同时给的两条叠加问题（`key_type` 是签名算法、`[host]` 与存储层括号形态不等）核实为**不成立** | 让 `split_host_port` 认识裸 `host:port`（或把这种行计入 `skipped` 而非 `imported`），identity 改用 `format_host_port`。改的是落盘内容，需要一条覆盖 `host` / `[host]:port` / 裸 `host:port` 三形态的测试 |
-| L2-96 | `sftp_transfer.rs:365`（`STALL_TIMEOUT`）、`:407-416`（`StallGuard::write`）、`russh_impl/sftp.rs:223-231`（`File::write`） | 成立（结论对，机制说反） | `Ok(0)` 在当前传输上不出现：`File::write` 返回 `Ok(min(buf, max_write_len))` 或 `Err`，所以 600 s 分支与 `write_all_shrinking` 的减半分支都不可达。对端不 ACK 时 `russh_sftp` 的 `poll_write` 在 8 个在途 ack 上阻塞，`write_nowait` 的接收端没有被 `request_timeout_secs` 包住，`block_on` 也没有超时 ⇒ 仍然是「无错误地挂着」。指摘把上界说成 60 s 会话超时，但 `write_with_timeout` 只服务 `Channel::write`（shell/exec），不服务 SFTP 句柄 | 给 SFTP 写路径一个真截止时间：在 `File::write` 外面包 `tokio::time::timeout`（**不要**用 `request_timeout_secs`——它只服务 `request()`，对写 ack 无效）。闸门只有 `write_acks` 的 8 个在途请求一处（`russh_sftp` 的 `mpsc::unbounded_channel` 没有背压），所以要包住 **`write` 与 `flush` 两处**——`File::flush` 的 `poll_drain_writes` 抽的是同一个队列；文案仍由 `StallGuard` 负责「已写多少字节」。需一条能复现「读 TCP、不应答 SFTP」的集成测试 |
+| L2-96 | `sftp_transfer.rs:365`（`STALL_TIMEOUT`）、`:407-416`（`StallGuard::write`）、`russh_impl/sftp.rs:223-231`（`File::write`） | 成立（结论对，机制说反） | `Ok(0)` 在当前传输上不出现：`File::write` 返回 `Ok(min(buf, max_write_len))` 或 `Err`，所以 600 s 分支与 `write_all_shrinking` 的减半分支都不可达。对端不 ACK 时 `russh_sftp` 的 `poll_write` 在 8 个在途 ack 上阻塞，`write_nowait` 的接收端没有被 `request_timeout_secs` 包住，`block_on` 也没有超时 ⇒ 仍然是「无错误地挂着」。指摘把上界说成 60 s 会话超时，但 `write_with_timeout` 只服务 `Channel::write`（shell/exec），不服务 SFTP 句柄 | 给 SFTP 写路径一个真截止时间：在 `File::write` 外面包 `tokio::time::timeout`（**不要**用 `request_timeout_secs`——它只服务 `request()`，对写 ack 无效）。闸门只有 `write_acks` 的 8 个在途请求一处（`russh_sftp` 的 `mpsc::unbounded_channel` 没有背压），所以要包住 **`write` 与 `flush` 两处**——`File::flush` 的 `poll_drain_writes` 抽的是同一个队列（`poll_shutdown` 也是，但本仓的 `impl Write for File` 没有 `shutdown`）；文案仍由 `StallGuard` 负责「已写多少字节」。**落点必须在 `transport/russh_impl/sftp.rs:223` 的 `impl Write for File`**：那里是 `StallGuard` 唯一能等到的地方；在 `core.rs` 的 `spawn_blocking` 闭包里包 `tokio::time::timeout` 无效（同步闭包里没有 reactor，`block_on` 会互相等）。另注意 `timeout` **不取消**内部 future——超时后 `File` 仍攥着那 8 个 ack，必须先 abort session，否则下一个请求在同一个队列上继续卡。需一条能复现「读 TCP、不应答 SFTP」的集成测试 |
 | L2-97 | `bin/agent2ssh-daemon.rs:4864-4875`（`/terminal` 的 `connected` 帧）；`embedded_ssh.rs:899`（`auth_method_for_host`）、`:2291-2292` | 部分成立 | `auth_method` 在 `connection_info` 里算出来，终端路径只在诊断日志里用它，`connected` 帧没有这个键；且 `auth_method_for_host` 是**按 host 预测**（password > key_path > agent），不是 `authenticate` 的返回值。指摘称「README 与 `/health-snapshot` 都回」核实为**不成立**：`README.md`、该 daemon、`api.yaml` 三处都没有 `auth_method`。改帧形状属对外契约 | 二选一：①帧里补 `auth_method`，同时把预测值换成 `authenticate` 的返回值（要先把该返回值从 `connect_embedded_ssh` 传出来）；②维持现状，在 `api.yaml` 的 `/terminal` 帧说明里写明「`auth_method` 只进诊断日志」 |
 | L2-98 | `embedded_ssh.rs:2134-2136`（认证失败文案） | 成立 | 文案只列 `~/.ssh/id_rsa, id_ed25519, id_ecdsa`，而循环还试 `id_ed25519_sk`/`id_ecdsa_sk`（`:2111-2112`），`keyboard-interactive`（`:1947`）也在尝试列表里。这串字面量被 `docs/plans/russh-migration.md:489` 当负对照原文引用，`docs/reports/evidence/pageant-acceptance-2026-10-23.json` 还留 4 份带原文的历史证据（不可改写） | 改成「…or a default key in `~/.ssh`…」并同步 `russh-migration.md:489` 的引用；历史证据 JSON 不动，在报告里注明「该次运行的文案是旧版」。属 `src-tauri/src/**` 的用户可见字符串 |
 
@@ -580,3 +594,10 @@ CodeBuddy 首条分析 6 条，核实后 **成立 3 / 部分成立 3 / 不成立
 1. **`flush` 也要包进 L2-96 的修法——成立，且把范围扩大了。** `copy_cancellable_with_chunk` 末尾有 `writer.flush()?`，而 `russh_sftp` 的 `File::flush` 第一句就是 `ready!(poll_drain_writes(&mut self.state.write_acks, cx))?`（`fs/file.rs:299-301`），抽干的正是 `write` 用的同一个队列。所以只把 `File::write` 包进 `tokio::time::timeout`，**每次传输的最后一次 flush 仍然可能无界等待**，而它恰好是最容易卡住的地方（队列里还有 8 个未回 ack 时对端沉默）。L2-96 的修法改为「`write` + `flush` 同一处 deadline」。
 2. **L2-19 必须先于 L2-95 落地——成立，是顺序约束不是新缺陷。** L2-19 要把 `KnownHostImportSummary.skipped` 按原因拆字段（hashed / malformed / undecodable / conflicting），L2-95 要把裸 `host:port` 计入 `skipped`。后者单独做只是往一个五合一计数器里再塞第六种原因，CLI 文案（`imported N, skipped M (hashed or conflicting)`）会继续给错归因。**先拆后加**，否则 L2-95 会制造一个「数字对了、解释更错」的状态。
 3. **`known_hosts.bak` 每次覆盖不是缺陷——不成立，记此以免后续重提。** 实测 `ssh-keygen -R` 同样每次覆盖 `known_hosts.old`：两次连续 `-R` 之后 `.old` 只保留**最后一次调用之前**的状态，与 OpenSSH 逐字一致。本仓 `remove_system_known_host` 写 `known_hosts.bak` 的语义相同，属「与上游一致」，不立项。
+
+### 2026-11-11 · batch 8 第 5 轮（复核第 4 轮 + 撞号登记）
+
+1. **命令是 `L2-19 → L2-22 → L2-95 / L2-15 → L2-96`，第 3 步之前还有一条。** L2-22 那行原文就写着「会改变 `imported`/`skipped` 的计数分布（**与 L2-19 同批做**）」，所以只给 L2-95 加顺序约束是不够的：同一个计数点上有三个条目。另确认 `skipped` 的取值是 **4 个可命名原因 + 0 个兜底**——`embedded_ssh.rs` 的导入循环里 `skipped += 1` 只有四处（hashed、三列不足、base64 解不开、指纹冲突），「其余怪行」被并进「三列不足」那一支，所以 L2-19 的字段集就是四个，不要凭空造第五个或 `other`。
+2. **`known_hosts.bak` 的两点澄清（不改代码）**：本仓只有一个 `known_hosts` 文件，所以 `with_extension("bak")` 恒为 `known_hosts.bak`，不存在「第二个文件撞名」的问题；`removed > 0` 才写备份，与 `ssh-keygen -R` 未命中时不产生 `.old` 一致。
+3. **L2-96 的落点与取消语义**（已写进条目正文）：必须落在 `transport/russh_impl/sftp.rs:223` 的 `impl Write for File`；不能在 `core.rs` 的 `spawn_blocking` 闭包里包 `tokio::time::timeout`；`timeout` 不取消内部 future，超时后必须 abort session，否则下一个请求在同一个 `write_acks` 队列上继续卡。
+4. **撞号登记**见本文件顶部。这是本轮唯一一处「本仓自己的记录坏掉」的发现，优先级高于上面三条代码事项——因为它让「按编号追溯」这个唯一的工作方式失效。

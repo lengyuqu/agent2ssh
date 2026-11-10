@@ -1496,7 +1496,7 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
   - 5 `russh-migration.md:494` 仍写「Pageant 优先、管道兜底」，`e67fd04` 已把代码翻成管道优先（部分成立，`agent.rs:317-327`；KNOWN-ISSUES.md:69 那句是对的）
   - 6 `embedded_ssh.rs:2074-2086` 的 T2-9 注释仍记 ssh2/libssh2 接线方式，`:1987` 同族残留（部分成立）
   - 另自验 3 条不成立（`bridge_tcp_and_channel` 空转烧 CPU / `channel.rs` request 混同超时与拒绝文案 / `legacy_pem` 尾随空格误判），并声明未重复 ledger 既有不成立与 L2-15/16/17/19/22/24/25/88 条目、未跑测试（环境无 cargo）
-- 6 轮进度：**4 / 6**（第 4 轮 2026-11-11 00:45 收尾，见文末 `consume 1 / 6`…`consume 4 / 6`；issue 保持 open）
+- 6 轮进度：**5 / 6**（第 5 轮 2026-11-11 00:52 收尾，见文末 `consume 1 / 6`…`consume 5 / 6`；issue 保持 open）
 - 正文已喂给 CodeBuddy：**67 条「不成立」原文**（编号 44：preflight 2 + batch1 六轮 10 + batch2 编号 15–31 十七条（29–31 物理落 batch 2 末节、内容属 batch 3 第 5 轮，正文已标注）+ batch4 第 1/5/6 轮 10 + batch6 第 1 轮 5；行内判定行 23：batch2 D2/D4、batch3 A5/E、batch5 D6 后半/D8/F6 后半/F10/F11 后半/F12、batch6 a1 后果/a3.2/a5/c 附更正/#10、batch7 第 1/2/4/5 轮 8 条、手工单发消费（#2）1 条含 3 项）+ KNOWN-ISSUES 空档（K2/K7/K9/K12 + §3 未验证范围 + §3.1 Pageant 共存边界）+ 口径提醒（基线红测 861/1/1、npm 213/27、feature 组合不可相加、`daemon_*_e2e` 需显式 `--features daemon`、`exec_fixture` 空跑、`.github/**` 禁区、四列计数、`[跑]` 标注不可采信、行号一律现算、L2-15/L2-16…L2-25/L2-37/L2-73/L2-88 勿重提、api.yaml 已在 #9/#12 对齐）。正文由 `/tmp/build-opt-issue-b8.py` 按 ledger 锚点切片生成（块级正则 + 行内唯一子串校验：16 个编号块 44 条 + 23 条判定行，复验通过）
 - 同主题第一批（#8）已 6 轮闭环；正文已写明 #8 落地的 L1 与已登记 L2 勿重提，本批重点找 **#8 闭环后新增/残留**的问题
 - 顺手按 #13 批次条目的指示删除顶部 `BATCH_COMPLETE · issue #12` 与 `#13` 两条状态行（#13 那条明写「下一批（B=8）由生产任务开 issue 时删除本行」；#12 无指示但同属已关闭批次留痕，沿用 #8–#11 先例一并删除；顶部 HTML 注释已同步为六条）
@@ -1564,3 +1564,17 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
   - **不成立**：`known_hosts.bak` 每次覆盖不是缺陷。实测 `ssh-keygen -R` 两次连续调用后 `known_hosts.old` 同样只保留「最后一次调用之前」的状态（`/tmp/kh-test` 实测），本仓语义与上游一致。
 - **L1**：`81ce265`（`sftp_transfer.rs` 注释补 flush 同队列）。文档笔：L2-96 建议改法补 flush、新增第 4 轮小节。
 - **验证**：`--no-default-features --lib` 861/1/1；`cargo fmt --check` 绿；本轮未动前端，`npm run build` 沿用第 3 轮的 6.32s（同一棵树、无 `src/` 改动）。
+
+### consume 5 / 6 · 2026-11-11 · batch 8（issue #14）
+
+- **指摘来源**：CodeBuddy 对第 3/4 轮的复核 `2120196198978994176`（00:45:39）。基线 `150bced`。
+- **判定：5 条 → 成立 3 / 部分成立 1 / 不成立 1**；另**自取发现 1 条**（L2 编号撞号），是本轮最值钱的一条。
+- **成立**：
+  - 顺序约束漏了 **L2-22**：它那行原文就写着「会改变 `imported`/`skipped` 的计数分布（与 L2-19 同批做）」，所以同一计数点上有三个条目，顺序是 `L2-19 → L2-22 → L2-95/L2-15 → L2-96`。另确认 `skipped += 1` 只有四处，**4 个可命名原因、没有兜底桶**（「其余怪行」并进「三列不足」），L2-19 的字段集就是四个。
+  - `--lib` 的覆盖口径：成立。实测更硬——`cargo test --lib --tests`（不加 `--no-fail-fast`）在 lib 先红时**直接中断**，后面的 15 个测试目标一个都没跑。加 `--no-fail-fast` 后才是 22 个 target：**1084 passed / 1 failed / 3 ignored**，唯一失败仍是那条 IPv6 红测。`exec_fixture` 的 5 条在无 `AGENT2SSH_TEST_SSH_PORT` 时是 skip-as-pass，不算覆盖。
+  - L2-96 的落点：必须落在 `transport/russh_impl/sftp.rs:223` 的 `impl Write for File`；`core.rs` 的 `spawn_blocking` 闭包里包 `tokio::time::timeout` 无效（同步闭包无 reactor，`block_on` 互相等）；`timeout` 不取消内部 future，超时后必须 abort session。
+- **部分成立**：`flush` 同队列成立、「同一队列、同等无界」是字面事实，但「`write` + `flush` 两处」数漏了 `poll_shutdown`——本仓 `impl Write for File` 没有 `shutdown`，`Drop for File` 用 `close_nowait`。已把这一层写进注释与 L2-96。
+- **不成立**：「`Drop for File` 不发 close」——`close_nowait`（`rawsession.rs:316-322`）**会发** `Close` 包，只是把应答接收端丢掉。语义是「发了不等」，不是「没发」。
+- **自取新发现（L2 编号撞号）**：`OPT-LOOP-L2-PENDING.md` 里 **12 个编号各出现两次**（`L2-13`…`L2-20`、`L2-22`、`L2-23`、`L2-25`、`L2-30`），两处指完全不同的事——多批各自从 13 起编号的后果。这直接击穿「按编号追溯」这个唯一工作方式，而我在第 3 轮还拿它当理由拒绝合并 L2-15/L2-95。已在文件顶部加「撞号登记」与引用规则（引用必须带主题限定；新条目从 `L2-100` 起；全量重编号属人拍板，不在自动路径做）。
+- **L1**：`60d46b9`（`sftp_transfer.rs` 补 shutdown/close 的一层）。文档笔：L2-96 落点与取消语义、第 5 轮小节、顶部撞号登记。
+- **验证**：`cargo test --no-default-features --lib --tests --no-fail-fast` → 22 targets，**1084 passed / 1 failed / 3 ignored**；`cargo fmt --check` 绿。
