@@ -887,7 +887,7 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 ### batch 2026-11-10 · docs/ 声称与代码实际行为是否相符
 - issue #11 / 开批时间 2026-11-10 14:14 (GMT+8)
 - CodeBuddy 首条分析：**未到（等待中）**——issue 发出后 60 s × 5 次轮询 + 结束前即时复核均 0 评论。消费者下次运行重新等（沿用 #9/#10 先例：等待超时不空等，按协议记「未到」）。
-- 6 轮进度：**3 / 6**（consume 1–3 见下；issue #11 保持 open）
+- 6 轮进度：**4 / 6**（consume 1–4 见下；issue #11 保持 open）
 - 正文喂给 CodeBuddy：**43 条「不成立」原文**（preflight 2 + batch 1 六轮 10 + batch 2 行内 D2/D4 2 条与编号 15–28 共 16 + batch 3 行内 A5/E 2 条与编号 29–31 共 5 + batch 4 第 1/5/6 轮共 10；编号 39 条 + 行内 4 条）+ KNOWN-ISSUES 空档（K2 / K7 / K8 / K9+K12 / K13 / K14 / K15 / §3 全部未验证行）+ 口径提醒（基线红测 861/1/1 与 npm 213/27、「时点快照不是缺陷」、判据按 feature 组合、扫描器反例自检、`.github/**` 禁区、越权推送重申、`[跑]` 标注不可采信）。范围：`README.md` / `overview.md` / `AGENTS.md` / `CLAUDE.md` / `docs/guides/**` / `docs/KNOWN-ISSUES.md` / `docs/` 其余说明文档与 `.txt` / `CHANGELOG.md`（仅当声称当前行为）；`api.yaml` / `docs/skills.md` / SKILL.md / clap help 已在 #9 对齐，除非回归勿重扫。
 - 批次口径说明（消费者必读）：本条是 ledger `###/## batch` 条目口径下的**第 5 批**（#7–#10 为第 1–4 批）。此前顶部状态行把 #9 称「batch 4」、#10 称「batch 5」，是消费者按自己口径的误称；那三条 `BATCH_COMPLETE` 状态行已由本次生产运行按 #10 批次的遗留要求删除（#11 开批后它们会让消费任务误判「只报告不执行」），史实在各「批次汇总」小节与 git 历史。
 - 编号陷阱沿用：ledger 原编号 1–31 跨节连续，29–31 物理落在 batch 2 末节但内容属 batch 3 第 5 轮；batch 4 的三组「新增不成立」在各自小节内重新从 1 编号，喂给 CodeBuddy 时已按来源分组标注，勿按物理位置归批。
@@ -966,3 +966,20 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 **新增 L2：0 条。** 本轮八条全是文档事实，没有触到 `src-tauri/src/**`。
 
 **方法论**：它自标 `[读]` 的八条里，有两条在读完对应函数/整份表之后反转（F10、F12）。F12 是「文件名 + 行号都对不上」的老形态；F10 是它自己写了「没读完」。下一批首项建议：把 `api_yaml_documents_every_daemon_route` 从「只比路径」扩到「比方法 + responses 状态码集合」——F9 这类缺状态码的条目今天没有任何守卫。
+
+#### consume 4 / 6（基线 `7f12de8`，回帖 `2120097004817657856`）
+
+**指摘来源：自取。** 第 3 轮收尾后 60 s × 5 轮询，issue 停在 5 条评论，CodeBuddy 未回（自本轮起它已连续两轮静默）。按上一轮自己写下的口径取靶：「测试看不见的散文」里没人核过的两处。
+
+**判定：2 条 → 成立 1 / 部分成立 1。**
+
+| 项 | 判定 | 关键证据 |
+|---|---|---|
+| W1 `WINDOWS-HANDOVER.md` §5.2 称 `reads_openssh_private_keys`「字段已不存在」 | 成立（**文件自相矛盾**） | `bin/agent2ssh.rs:3590` 仍输出 `"reads_openssh_private_keys": true`；删 libssh2 的 `48b1d17`（2026-10-22 17:56）提交信息自陈「JSON field stays, hardcoded true, because scripts」。同文件 §3.2 与 §7.5 两处都写「恒为 true」——**错的是 §5.2**，且 §5 开头声明「只回答这些条目现在是什么状态」，是现状声称而非历史记录 |
+| W2 `web-console-guide.md` 的 Webhook URL「支持 Slack、Discord 等」 | 部分成立 | `notify.rs` 只有一个分支 `url.contains("hooks.slack.com")`；其余 `serde_json::to_value(&event)`。`WebhookEvent` 的键 `event`/`host`/`command`（+按需四项）没有 Discord 必需的 `content`/`embeds`，填 Discord URL 不会得到消息。代码里不存在 Discord 支持，「等」也没有落点 |
+
+**L1**：`3dceb0b`（2 文件）。推 `cnb main`。**验证**：`npm run build` 6.68s；`--lib` **861 / 1 failed / 1 ignored**（只动 `.md`，`api.yaml` 未改，未重跑 `api_yaml`）。
+
+**顺手核干净（下次别重做）**：`/audit/export` 的 13 个过滤参数 + `format` 齐（**我一开始只读到 `limit` 差点误判成第二个 F7，教训：读到块结尾再判**）；`/health` 九键与 `/metrics` 六计数器逐字对；`/sessions`、`/sessions/{id}/read`、`/gate` 的形状对；`ExecResult` 11 键、`AgentEvent` 18 个 `event_type` 与 `EventType` 逐一相同；quickstart 的「105 operation / 107 route」成立（`api.yaml` 105 个 operation、`.route(` 92 次 = 90 + `GET /` + `GET /console`）；web-console-guide 的 6 个 Tab、Daemon 切换器、`type="password"`、三个事件复选框全部与 `console.html` 行号吻合。
+
+**新增 L2：0 条。**
