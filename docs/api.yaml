@@ -3062,6 +3062,10 @@ paths:
                         host_address: { type: string }
                         command:      { type: string }
                         risk_level:   { $ref: "#/components/schemas/RiskLevel" }
+                        needs_force:  { type: boolean, description: "True when the effective risk is high or blocked — the same condition that makes `/exec` demand `force: true`" }
+                        blocked:      { type: boolean, description: "True when the effective risk is `blocked`: the command cannot be executed at all" }
+                        jump_host:    { type: string, nullable: true }
+                        timeout_secs: { type: integer }
                   overall_risk:      { $ref: "#/components/schemas/RiskLevel" }
                   requires_approval: { type: boolean }
                   warnings:
@@ -3269,6 +3273,11 @@ paths:
               schema: { $ref: "#/components/schemas/TeamConfigExport" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
+        "500":
+          description: Building the export failed (config directory unreadable or a rules file cannot be parsed).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /config/import:
     post:
@@ -3346,6 +3355,11 @@ paths:
                   hosts_exported: { type: integer }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
+        "500":
+          description: Rendering the SSH config failed; the message names the reason.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /webdav/status:
     get:
