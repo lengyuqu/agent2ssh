@@ -18,6 +18,12 @@
  * Consumers: AuditPanel, FilePreview, SyncPanel, ConfigSnapshotsPanel,
  * RecordingsPanel, LiveActivityPanel, AuditCharts, SettingsMenu, ApprovalDetail,
  * ApprovalQueue, ApprovalWorkbench.
+ *
+ * Two more `toLocale*` calls bypass these helpers entirely, so fixing only the
+ * two functions above would leave a Chinese UI with English dates in exactly the
+ * places users stare at: `SFTPPanel.tsx:207` (`toLocaleString(undefined, …)` for
+ * the mtime column) and `AuditCharts.tsx:143` (`toLocaleDateString([], …)` for
+ * the bucket axis). Any fix has to take all four call sites in one change.
  */
 export function formatDateTime(value?: string | number | Date | null): string {
   if (value === null || value === undefined || value === "") return "";

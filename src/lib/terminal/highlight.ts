@@ -145,10 +145,19 @@ export function findMatches(
     }
   }
 
-  // Sort by start position, then by rule order (earlier wins for overlaps)
+  // Sort by start position. The `|| 0` makes ties a no-op, which is deliberate:
+  // Array#sort is stable, so equal starts keep rule order. Note what this means
+  // — "earlier rule wins" only holds for matches that *start* at the same
+  // offset; a later rule whose match begins further left is considered first.
   matches.sort((a, b) => a.start - b.start || 0);
 
-  // Resolve overlaps: earlier match wins
+  // Resolve overlaps by keeping a maximal non-overlapping set (interval
+  // scheduling): a match survives only if it starts at or after the end of the
+  // last kept one. This is NOT "trim the overlapping tail" — a later match that
+  // sits wholly inside an earlier span vanishes outright, and one that merely
+  // straddles it is dropped rather than clipped. So the result is not the union
+  // of everything that matched; only `planLine`/`highlight-decorations` consume
+  // it, and neither may read it as "all hits".
   const result: HighlightMatch[] = [];
   let lastEnd = 0;
   for (const m of matches) {

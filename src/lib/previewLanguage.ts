@@ -51,6 +51,13 @@ const EXT_LANGUAGE: Record<string, string> = {
   dockerfile: "dockerfile",
 };
 
+// Whole-filename rules. Three entries, so a dotfile never reaches this table:
+// `".gitignore"` falls through to the extension lookup below with
+// `ext = "gitignore"`, which is not in `EXT_LANGUAGE`, so it renders as
+// `plaintext` — same for `".bashrc"`, `".env"`, `".npmrc"`. Multi-suffix names
+// fare no better: `"archive.tar.gz"` resolves on `gz`, `"Makefile.am"` on `am`.
+// Recorded as L2-72; adding entries is cheap, but *which* dotfiles deserve a
+// highlight is a product call, not a bug fix.
 const NAME_LANGUAGE: Record<string, string> = {
   dockerfile: "dockerfile",
   makefile: "shell",
