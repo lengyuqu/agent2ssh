@@ -287,6 +287,15 @@ pub async fn fire_webhook(event: WebhookEvent) -> Result<()> {
 }
 
 /// Format event as Slack Block Kit message.
+///
+/// The only production caller is [`fire_webhook`], which is itself
+/// `#[cfg(feature = "daemon")]`. In a `--no-default-features` build there is
+/// therefore no caller at all, and the `#[allow(dead_code)]` below is
+/// load-bearing rather than a leftover: dropping it brings back
+/// `warning: function format_slack_message is never used`. The tests further down
+/// are `cfg(test)` and do not count as callers for a plain build. `compute_signature`
+/// carries the same attribute for the same reason.
+#[allow(dead_code)]
 fn format_slack_message(event: &WebhookEvent) -> serde_json::Value {
     let event_name = match (event.event.as_str(), event.remote_outcome_unknown) {
         ("approval_required", _) => "Approval Required",
