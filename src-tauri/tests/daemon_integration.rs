@@ -2802,6 +2802,10 @@ fn api_yaml_documents_how_each_handler_reads_its_body() {
         method: &'static str,
         path: String,
         codes: Vec<String>,
+        /// `(status code, media type)` pairs, so a code documented with the wrong
+        /// kind of body can be caught: axum's rejections answer `text/plain`,
+        /// not the daemon's `Error` object.
+        media: Vec<(String, String)>,
         has_request_body: bool,
         /// The operation's own lines, so the prose can be checked for the
         /// caveat a swallowed body needs.
@@ -2814,6 +2818,7 @@ fn api_yaml_documents_how_each_handler_reads_its_body() {
     // without this, a path-level `description:` would be read as the previous
     // operation's and could satisfy its caveat check.
     let mut current_operation: Option<usize> = None;
+    let mut current_code = String::new();
     for line in spec.lines() {
         let body = line.trim_start();
         let indent = line.len() - body.len();
@@ -2835,10 +2840,12 @@ fn api_yaml_documents_how_each_handler_reads_its_body() {
                         method,
                         path: current_path.clone(),
                         codes: Vec::new(),
+                        media: Vec::new(),
                         has_request_body: false,
                         text: String::new(),
                     });
                     current_operation = Some(documented.len() - 1);
+                    current_code.clear();
                 }
             }
             continue;
@@ -2857,8 +2864,15 @@ fn api_yaml_documents_how_each_handler_reads_its_body() {
                 .strip_prefix('"')
                 .and_then(|rest| rest.split('"').next())
             {
+                current_code = code.to_string();
                 operation.codes.push(code.to_string());
             }
+        }
+        // `content:` sits ten spaces in under a response, its media type twelve.
+        if indent == 12 && (body == "text/plain:" || body == "application/json:") {
+            operation
+                .media
+                .push((current_code.clone(), body.trim_end_matches(':').to_string()));
         }
     }
 
@@ -2911,6 +2925,22 @@ fn api_yaml_documents_how_each_handler_reads_its_body() {
                         violations.push(format!(
                             "{label} reads `Json<T>`, so the extractor answers {code} before \
                              the handler runs, but the operation does not document it"
+                        ));
+                        continue;
+                    }
+                    // axum answers a rejection as `(status, String)`, which is
+                    // `text/plain`; claiming the daemon's `Error` object here
+                    // would have a generated client parse a message as JSON.
+                    let media: Vec<&str> = operation
+                        .media
+                        .iter()
+                        .filter(|(known, _)| known == code)
+                        .map(|(_, media)| media.as_str())
+                        .collect();
+                    if media != ["text/plain"] {
+                        violations.push(format!(
+                            "{label} documents {code} with {media:?} as its body; the extractor \
+                             answers a plain-text message, so this must be `text/plain`"
                         ));
                     }
                 }

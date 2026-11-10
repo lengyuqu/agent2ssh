@@ -35,6 +35,17 @@ info:
     `/playbooks/{name}/dry-run` and `/health-snapshot` — so for those three a
     malformed body is ignored instead of refused, and the operation's own 400
     does not cover it.
+
+    Two consequences for a client. First, the extractor's own answers are
+    `text/plain` carrying axum's message, not the `Error` object: 415 and 422 are
+    documented that way on every operation that can produce them, and a body sent
+    without a content type is the likeliest way to meet one. Second, a body that
+    is not JSON at all reaches the caller as the operation's 400 with that same
+    plain-text body, so a client cannot tell "your body was not JSON" from "the
+    handler refused what was in it" by the status code — and a client that
+    parses every 4xx as `Error` will fail to parse this one. Normalising the
+    rejections into the `Error` shape is a daemon change, not a documentation
+    one; it is L2-83 in `docs/reports/OPT-LOOP-L2-PENDING.md`.
 servers:
   - url: http://127.0.0.1:7722
     description: Local daemon
@@ -1163,13 +1174,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
   /hosts/import:
     post:
       summary: Import hosts from ~/.ssh/config
@@ -1295,13 +1306,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
   /exec:
     post:
       summary: Execute a command over SSH
@@ -1342,13 +1353,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "423":
           description: Execution gate paused
           content:
@@ -1402,13 +1413,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "423":
           description: Execution gate paused
           content:
@@ -1460,13 +1471,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "423":
           description: Execution gate paused
           content:
@@ -1524,13 +1535,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "423":
           description: Execution gate paused
           content:
@@ -1590,13 +1601,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
   /gate:
     get:
       summary: Read the global execution gate status
@@ -1645,13 +1656,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "500":
           description: "`execution_gate.json` could not be written (`save_execution_gate`); the gate is not paused."
           content:
@@ -1685,13 +1696,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "500":
           description: "`execution_gate.json` could not be written (`save_execution_gate`); the gate stays paused."
           content:
@@ -1808,13 +1819,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
   /terminal/broadcast:
     post:
       summary: Authorize and enqueue a multi-terminal command
@@ -1856,13 +1867,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
   /recordings/config:
     description: Recording endpoints require the unrestricted admin token; scoped tokens are rejected.
     get:
@@ -1914,13 +1925,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "500":
           description: The recording configuration could not be written.
           content:
@@ -2224,13 +2235,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "423":
           description: Execution gate paused
           content:
@@ -2279,13 +2290,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "423":
           description: Execution gate paused
           content:
@@ -2339,13 +2350,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "423":
           description: Execution gate paused
           content:
@@ -2399,13 +2410,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "423":
           description: Execution gate paused
           content:
@@ -2459,13 +2470,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "423":
           description: Execution gate paused
           content:
@@ -2520,13 +2531,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "423":
           description: Execution gate paused
           content:
@@ -2580,13 +2591,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "423":
           description: Execution gate paused
           content:
@@ -2640,13 +2651,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "423":
           description: Execution gate paused
           content:
@@ -2714,13 +2725,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "423":
           description: Execution gate paused
           content:
@@ -2796,13 +2807,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "423":
           description: Execution gate paused
           content:
@@ -2854,13 +2865,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "423":
           description: Execution gate paused
           content:
@@ -2936,13 +2947,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "423":
           description: Execution gate paused
           content:
@@ -3100,13 +3111,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "423":
           description: Execution gate paused.
           content:
@@ -3207,13 +3218,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "423":
           description: Execution gate paused.
           content:
@@ -3374,13 +3385,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "423":
           description: Execution gate paused
           content:
@@ -3504,13 +3515,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "423":
           description: Execution gate paused
           content:
@@ -3773,13 +3784,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
   /connections:
     get:
       summary: List retained embedded SSH connection states
@@ -3938,13 +3949,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "423":
           description: Execution gate paused
           content:
@@ -4026,13 +4037,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "423":
           description: Execution gate paused
           content:
@@ -4100,13 +4111,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "500":
           description: "`webhook.toml` could not be written."
           content:
@@ -4232,13 +4243,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
   /approval/check:
     post:
       summary: Check whether a command on a host would require approval
@@ -4278,13 +4289,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "500":
           description: The approval policy configuration could not be read.
           content:
@@ -4343,13 +4354,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "500":
           description: |
             `save_approval_policies` failed. Two stages share this code and the
@@ -4406,13 +4417,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
   /playbooks/{name}/dry-run:
     post:
       summary: Resolve playbook step templates against params without executing
@@ -4652,13 +4663,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
   /config/import/preview:
     post:
       summary: Preview what a team configuration import would change
@@ -4706,13 +4717,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
   /ssh-sync/diff:
     get:
       summary: Compare Agent2SSH hosts against `~/.ssh/config`
@@ -4976,13 +4987,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
   /snippets/{name}:
     delete:
       summary: Remove a command snippet
@@ -5071,13 +5082,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
   /redact/rules/update:
     post:
       summary: Replace the redaction rule identified by pattern
@@ -5120,13 +5131,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
   /redact/rules/delete:
     post:
       summary: Remove a redaction rule
@@ -5169,13 +5180,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
   /redact/rules/reset:
     post:
       summary: Restore the built-in redaction rule set
@@ -5264,13 +5275,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
   /highlight/rules/update:
     post:
       summary: Replace the terminal highlight rule identified by keyword
@@ -5313,13 +5324,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
   /highlight/rules/delete:
     post:
       summary: Remove a terminal highlight rule
@@ -5362,13 +5373,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
   /highlight/rules/reset:
     post:
       summary: Restore the built-in terminal highlight rules
@@ -5444,13 +5455,13 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
     delete:
       summary: Drop the SSH algorithm overrides
       description: Goes back to the built-in safe defaults.
@@ -5554,10 +5565,10 @@ paths:
         "415":
           description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
         "422":
           description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
           content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+            text/plain:
+              schema: { type: string }
