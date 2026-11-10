@@ -1839,7 +1839,7 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 - 下一批（B=11）：11 % 6 = 5 → 主题 5：`docs/` 声称与代码实际行为是否相符（第二批，#11 已闭环）。开 issue 前先 fetch cnb main 重读 ledger（本批消费期间会新增不成立条目，行内判定行锚点会漂移，b10 脚本可改造复用）。
 - 若 #16 仍 open 则按背压闸门跳过；锁沿用「保留在位、消费者侧自行清理」先例。
 
-### consume 1 / 6 · 2026-11-11 06:33–06:5x (GMT+8) · batch 10（issue #16）
+### consume 1 / 6 · 2026-11-11 06:33–06:50 (GMT+8) · batch 10（issue #16）
 
 - **首条分析到了，但比我的轮询窗口晚 40 秒**：60 s × 5（06:33–06:38）+ 即时复核（06:39 前）都只有生产任务那条更正；CodeBuddy 的分析落在 **06:39:18**（评论 `2120285197013790720`，基线 `ce1b22e`，19 258 字符）。**教训同 batch 8**：结束「等待」判断前多复核一次，能省掉一整轮自取。
 - **判定 15 条 → 成立 9 / 部分成立 3 / 不成立 1 / 已并入 2。最值钱的是那条不成立。**
@@ -1852,5 +1852,6 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
   1. **`POST /forwards` 的 `via` 是 query 参数**（`params.get("via")`，`daemon.rs:2965`），请求体里的 `via`/`name`/`group_id`/`id` 被静默忽略——因为 handler 收的就是 `Json<ForwardRule>` 却只取 5 个字段。同一份 `api.yaml` 里 `/forwards/multi` **写了** `via` 参数与 `name`/`group_id`，单条路由漏了。
   2. **前端用户可见文案还在把 libssh2 当事实**：`i18n.tsx:856/873`（算法偏好对话框的两段说明）与 `types.ts:562/779`、`AlgoPrefsDialog.tsx:12`。`Cargo.toml` 已无 `ssh2`，`ssh_algo.rs:28/79-82/311-317` 明写「russh 未启 `flate2`，`none` 是唯一可协商值」——**行为结论不变，归因全错**。batch 2 清了 docs/SKILL/`ssh_algo.rs`，漏了 `src/`。
 - **L2 新增八条**（L2-110…L2-117）：`side_effect` 三处镜像缺、`max_mb` 桌面不可达、审批动词口径（C1+C3）、TTL 过期不发 `approval_responded` 导致 toast 常驻、`Decided today`/`In flight` 两个统计口径错、复制失败静默、`CommandPalette` 的 16 条缺口与守卫、活动流不渲染 `decision`。
+- **回帖**：`2120287487317688320`（`## 第 1 轮收尾`，06:48）。**#16 保持 open，6 轮进度 1 / 6。**
 - **验证**：`npm run build` 6.51 s；`npm test` **213 passed / 27 files**（与基线同）；`cargo test --no-default-features --lib` **861 passed / 1 failed / 1 ignored**（红项仍是那条故意红的 IPv6）；改 `api.yaml` 后加跑 `--features daemon --test daemon_integration api_yaml` **6 passed**；`yaml.safe_load` 90 paths 通过。Rust 源码本轮一行未动。
 - **CodeBuddy 本轮的失效形态**：①**把函数内的解构写法记混**（A1：`let (risk, approved)` 当成 `let (risk, _)`，据此推出「恒定失败路径」）；②**把自己的编号当既有编号**（它自拟 L2-110…116，而本仓最大是 L2-109）。A1 是本批第一次「它给出可复现反例、复核后完全反转」的条目，记下来供下一轮提防。
