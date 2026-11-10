@@ -1987,6 +1987,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/SftpResult" }
+        "400":
+          description: The transfer request is invalid, or the upload failed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "401":
           description: Missing or invalid bearer token.
           content:
@@ -2027,6 +2032,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/SftpResult" }
+        "400":
+          description: The transfer request is invalid, or the SFTP transfer failed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "401":
           description: Missing or invalid bearer token.
           content:
@@ -2072,6 +2082,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ExecResult" }
+        "400":
+          description: The listing request is invalid, or the directory could not be read.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "401":
           description: Missing or invalid bearer token.
           content:
@@ -2117,6 +2132,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ExecResult" }
+        "400":
+          description: The request is invalid, or the path could not be inspected.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "401":
           description: Missing or invalid bearer token.
           content:
@@ -2162,6 +2182,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ExecResult" }
+        "400":
+          description: The request is invalid, or the directory could not be created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "401":
           description: Missing or invalid bearer token.
           content:
@@ -2492,6 +2517,11 @@ paths:
                 type: object
                 properties:
                   id: { type: string, format: uuid }
+        "400":
+          description: The host is unknown, or the session could not be opened.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "401":
           description: Missing or invalid bearer token.
           content:
@@ -2559,6 +2589,11 @@ paths:
                 type: object
                 properties:
                   ok: { type: boolean }
+        "400":
+          description: The id is not a UUID, the session is unknown or dead, or the write failed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "401":
           description: Missing or invalid bearer token.
           content:
@@ -2962,6 +2997,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ForwardRule" }
+        "400":
+          description: The rule is rejected by validation, or the tunnel could not be started.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "401":
           description: Missing or invalid bearer token.
           content:
@@ -3020,8 +3060,19 @@ paths:
                 properties:
                   ok: { type: boolean }
 
+        "400":
+          description: The id is not a UUID, no rule has it, or removing it failed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "401":
           description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "403":
+          description: "Scope denied: the rule's host is outside the token's allowed hosts and tags."
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -3333,6 +3384,12 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+        "403":
+          description: A `host` was supplied and it lies outside the token's allowed hosts and tags.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /connections:
     get:
       summary: List retained embedded SSH connection states
@@ -3367,6 +3424,11 @@ paths:
                 type: object
                 properties:
                   ok: { type: boolean }
+        "400":
+          description: The SSH connection could not be established; the message carries the transport error.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "401":
           description: Missing or invalid bearer token.
           content:
@@ -3405,6 +3467,11 @@ paths:
                 type: object
                 properties:
                   ok: { type: boolean }
+        "400":
+          description: There is no active connection for this host, or closing it failed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "401":
           description: Missing or invalid bearer token.
           content:
@@ -3458,6 +3525,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/PlaybookRunResult" }
+        "400":
+          description: The playbook is unknown, is not a playbook for this host, or its steps failed to start.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "401":
           description: Missing or invalid bearer token.
           content:
@@ -3526,6 +3598,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ExecResult" }
+        "400":
+          description: A local alias was requested and the local command failed, or the request is malformed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "401":
           description: Missing or invalid bearer token.
           content:
@@ -3533,6 +3610,11 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scope denied or approval rejected
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: No remote daemon is registered under this alias, or the token cannot see the one that is.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -3554,6 +3636,12 @@ paths:
 
         "500":
           description: The HTTP client used to reach the remote daemon could not be built.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "502":
+          description: The remote daemon could not be reached, or answered with an unreadable response.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -3741,6 +3829,11 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+        "403":
+          description: The token's allowed hosts and tags do not cover the `host` named in the body.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "500":
           description: The approval policy configuration could not be read.
           content:
@@ -3881,6 +3974,11 @@ paths:
                           type: array
                           items: { type: string }
 
+        "400":
+          description: The playbook path is invalid, or the playbook does not exist.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "401":
           description: Missing or invalid bearer token.
           content:
@@ -3945,6 +4043,11 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/DaemonDiagnostic" }
 
+        "400":
+          description: The alias does not resolve to a remote daemon the token can see.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "401":
           description: Missing or invalid bearer token.
           content:
@@ -3965,6 +4068,11 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/VersionCompatibility" }
 
+        "400":
+          description: The alias does not resolve to a remote daemon the token can see.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "401":
           description: Missing or invalid bearer token.
           content:
@@ -4013,6 +4121,11 @@ paths:
                   hosts_updated:       { type: integer, description: "Name matched and at least one of host, user, port, jump_host, proxy_id, risk_override, tags, group, env, role or owner differed; that host was then replaced in place. A name that matches and is otherwise identical counts as `hosts_skipped`, not here." }
                   risk_rules_imported: { type: boolean }
                   playbooks_imported:  { type: boolean }
+        "400":
+          description: The import payload is not a valid configuration bundle.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "401":
           description: Missing or invalid bearer token.
           content:
@@ -4049,6 +4162,11 @@ paths:
                   playbooks_change:  { type: string, nullable: true }
                   summary:           { type: string }
 
+        "400":
+          description: The import payload is not a valid configuration bundle.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "401":
           description: Missing or invalid bearer token.
           content:
@@ -4114,6 +4232,12 @@ paths:
 
         "401":
           description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "502":
+          description: The WebDAV endpoint could not be reached, or answered with an error.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }

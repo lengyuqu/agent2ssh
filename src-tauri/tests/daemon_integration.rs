@@ -2168,6 +2168,25 @@ fn normalized_route_path(path: &str) -> String {
     normalized
 }
 
+/// Status codes a handler can answer with on its own, keyed by the
+/// `StatusCode::` constant that names them in source.
+///
+/// `UNAUTHORIZED` is deliberately absent: 401 is answered by the middleware for
+/// the whole route, and the contract test above already requires it on every
+/// non-public operation.
+const HANDLER_STATUS: [(&str, &str); 10] = [
+    ("BAD_REQUEST", "400"),
+    ("FORBIDDEN", "403"),
+    ("NOT_FOUND", "404"),
+    ("REQUEST_TIMEOUT", "408"),
+    ("CONFLICT", "409"),
+    ("LOCKED", "423"),
+    ("TOO_MANY_REQUESTS", "429"),
+    ("INTERNAL_SERVER_ERROR", "500"),
+    ("BAD_GATEWAY", "502"),
+    ("SERVICE_UNAVAILABLE", "503"),
+];
+
 /// The methods one `.route(...)` call mounts, in source order, with their handler.
 ///
 /// `get(a).post(b)` mounts two, and a builder chain that wraps across lines
@@ -2425,16 +2444,17 @@ fn api_yaml_documents_every_daemon_route() {
     );
 }
 
-/// Every operation whose handler can answer 500 documents it.
+/// Every status code a handler answers with on its own is documented.
 ///
 /// 401 is a property of the route (the middleware rejects before a handler
-/// runs); 500 is a property of the *handler*, which knows what it had to read.
-/// That is what made it invisible: 21 operations answered 500 for an
-/// unreadable config while the spec listed only a 200, and a client generated
-/// from the spec treats an undocumented 500 as an unknown error — `GET /gate`
-/// being the worst case, since the one question a broken gate file must still
-/// answer is "is the gate paused", and the answer arrives as an undocumented
-/// 500.
+/// runs); every other code is a property of the *handler*, which knows what it
+/// had to read and what it refused. That is what made them invisible: 21
+/// operations answered 500 for an unreadable config while the spec listed only
+/// a 200, `/forwards/{id}` answered both 400 and 403 while documenting neither,
+/// and `/daemons/{alias}/exec` answered 404 and 502 with no trace in the spec.
+/// A client generated from the spec reads each of those as an unknown failure —
+/// `GET /gate` being the worst case, since the one question a broken gate file
+/// must still answer is "is the gate paused".
 ///
 /// The handler→operation map is derived rather than written down: the handler
 /// named in each `.route(...)` call is looked up in the same source text and
@@ -2444,7 +2464,7 @@ fn api_yaml_documents_every_daemon_route() {
 /// failing, not its own branch — `/exec-multi` and `/exec/compare` document
 /// theirs by hand.
 #[test]
-fn api_yaml_documents_the_500_each_handler_can_return() {
+fn api_yaml_documents_the_codes_each_handler_can_return() {
     let daemon = include_str!("../src/bin/agent2ssh-daemon.rs");
     let spec = include_str!("../../docs/api.yaml");
 
@@ -2489,31 +2509,31 @@ fn api_yaml_documents_the_500_each_handler_can_return() {
 
     let undocumented: Vec<String> = daemon_routes(daemon)
         .into_iter()
-        .filter_map(|(path, method, handler)| {
-            let body = handler_body_of(daemon, &handler)?;
-            if !body.contains("INTERNAL_SERVER_ERROR") {
-                return None;
-            }
+        .flat_map(|(path, method, handler)| {
+            let Some(body) = handler_body_of(daemon, &handler) else {
+                return Vec::new();
+            };
             // An entirely undocumented operation is the route test's finding.
-            let codes = documented
+            let Some((_, _, codes)) = documented.iter().find(|(known_path, known_method, _)| {
+                *known_path == path && *known_method == method
+            }) else {
+                return Vec::new();
+            };
+            HANDLER_STATUS
                 .iter()
-                .find(|(known_path, known_method, _)| {
-                    *known_path == path && *known_method == method
-                })?
-                .2
-                .clone();
-            if codes.iter().any(|code| code == "500") {
-                None
-            } else {
-                Some(format!("{method} {path} ({handler})"))
-            }
+                .filter(|(constant, code)| {
+                    body.contains(&format!("StatusCode::{constant}"))
+                        && !codes.iter().any(|documented| documented == code)
+                })
+                .map(|(_, code)| format!("{code} {method} {path} ({handler})"))
+                .collect()
         })
         .collect();
     assert!(
         undocumented.is_empty(),
-        "these operations answer 500 but do not document it: {undocumented:?}. \
-         The handler's own body returns INTERNAL_SERVER_ERROR, so a client that programs \
-         against the spec cannot tell this failure from an unknown one."
+        "these operations answer a status code they do not document: {undocumented:?}. \
+         The code comes from the handler's own body, so a client that programs against \
+         the spec cannot tell this failure from an unknown one."
     );
 }
 
