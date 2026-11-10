@@ -4015,7 +4015,15 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "401":
-          description: Missing or invalid bearer token.
+          description: >-
+            Two different failures share this code. The usual one is the
+            middleware's — a missing or invalid bearer token — and its body is
+            `{"error": "unauthorized"}`. The other comes from the handler, after
+            the middleware has already accepted the caller: this machine holds no
+            token for the named remote daemon (`proxy_exec`), so the forward
+            cannot authenticate *to* it. That body names the alias, so a client
+            that retries a 401 as if its own credentials were wrong will retry
+            forever.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
