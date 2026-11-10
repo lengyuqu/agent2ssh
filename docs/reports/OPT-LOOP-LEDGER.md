@@ -1171,7 +1171,7 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 
 **本轮最该记住的一件事：它整份 (a) 的量化表是自造的。** 它自己也写了「同一份常量，只是把终点也算出来」，但 `proxy_exec` 的「3 092 = 3 092」说明它比较的是**两次相同的计算**，而不是「配平体 vs 断点体」。它点名的 `/sftp/*` 3 300–4 100 B 在我这里有 7 个是 748–1 407 B 且 over=0。**方向对、实例错、量级错**——与 batch 5 的 F1、本轮 (b2) 的「全库就一处」是同一个失效形态：**它抓到一个真现象后，用印象补全了细节**。凡它的表格里出现「A = B」或「每个 X 都…」，一律自己重算。
 
-**L1 落地**（一笔）：`7dddb51`；回帖见下
+**L1 落地**（一笔）：`7dddb51`；回帖 `2120129241487405056`（`## 第 4 轮收尾`，20:19）
 - `src-tauri/tests/daemon_integration.rs`：`handler_body_of` 改成花括号配平（跳过字符串/字符字面量/行注释/块注释/raw string `r#"…"#`），查不到 handler 或配平失败一律 `panic!`，返回类型由 `Option<&str>` 改成 `&str`，调用点的 `else { return Vec::new() }` 随之删掉（**a2 的静默跳过就此消失**）。新增 `api_yaml_declares_a_body_for_every_response`（除 101 外每条 response 必须有 `content`）与 `api_yaml_descriptions_with_a_colon_are_quoted`（plain `description:` 值不得含 `: `）。
 - `docs/api.yaml`：57 个 response 补 `content`；18 个 operation 的响应码改为升序；两条 flow 写法（`{ description: … }`）展开成块写法才能挂 `content`；`/daemons/{alias}/exec` 的 502 写明**远端拒绝会原样透传**；`/terminal/broadcast` 写明**每目标授权失败不改 HTTP 状态**（operation 描述 + 200 两条）；`GET /diagnostics` 的 500 列出 `validate_remotes` 的五条语义校验；`PUT /approval/policies` 的 500 拆开「序列化 / 写盘」两个阶段；`info.description` 增一段讲 `daemon_tokens.toml` 坏掉时的全站 500；`/hosts/import` 的空行清掉。
 - **第 3 轮预核的两条（`GET /diagnostics` 与 `PUT /approval/policies`）本轮全部兑现**，判定均为成立。
