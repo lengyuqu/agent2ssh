@@ -652,3 +652,16 @@ CodeBuddy 对上一轮收尾（`2120172790916468736`）的复核 `21201737386530
 - **N1 的「gate / blocked 只算不拒、应回 423」→ 是 L2-81 的同一件事。** `api.yaml` 早已写明「每目标授权拒绝不改 HTTP 状态」，所以这一条只有「广播目标三个布尔字段没有描述」这半是新的；本轮已在 schema 里补上 `requires_approval` / `authorized` / `approval_granted` 的语义（preview 不发字节、不产生审批卡，`authorized: true` 只表示「暂时没人拒绝」）。
 - **N4 的「`approval_count` 与 `approvals_total` 同名不同义」→ 改名/拆分是 L2-94。** 本轮只给 `DaemonMetricsSummary.approval_count` 补了描述，与 `/metrics` 里 `approvals_total` 那段对齐。
 - **N5 的「L2-93 窗口比记录的宽」→ 已就地扩写 L2-93**（三种 `Err` 原因 + 被吞掉的写盘失败），未开新号。
+
+---
+
+## 2026-11-11 · batch 9 第 1 轮（issue #15，基线 `f376ee5`）
+
+首条分析 7 条 + 3 条已并入。核实后 **成立 4 / 部分成立 3 / 不成立 0**。本轮 L1 只动 `docs/**`（`api.yaml` 两处 `transfer_id`、`skills.md` 三处、`daemon-api-quickstart.md` 两处），下面两条是必须由人拍板的。
+
+**分类说明（供复核，不同意可整笔回退）**：`tools.rs` 里三处**工具描述字符串**没按 clap 文档先例判 L1，而是登记 L2——依据是本文件 `L2-103` 自己把 `bin/agent2ssh_mcp/tools.rs:851-855` 的「工具描述」标成「属 `src-tauri/src/**`」。同一类东西两套判法会让「按编号追溯」失效，所以本轮沿用 L2-103 的口径：`docs/skills.md` 先改成事实，`tools/list` 的文案等这里拍板后同笔改。
+
+| 编号 | 位置 | 判断 | 为什么不能自动落 | 建议改法 |
+|---|---|---|---|---|
+| L2-104 | `bin/agent2ssh_mcp/tools.rs:276`（`max_output_bytes` 描述）、`:546`（`ssh_session_list` 描述）、`:582`（`ssh_risk_check` 描述） | 三处成立，且都是**与 `docs/skills.md` 同一句话的两个版本** | 三处都是发给客户端的 `tools/list` 文案，属 `src-tauri/src/**`（见上方分类说明）。①`:276` 写「Truncate stdout to this many bytes」，而 `types.rs:384-386` 是「stdout **and stderr** … **each**」，且截断保留首尾、中间的字节数记进 `dropped_bytes`；②`:546` 漏了 `backend`——`bin/agent2ssh-mcp.rs:1256-1268` 的 `process` 支与 `:492-513` 的 `daemon` 支**每行都带**，而它是「这条会话会不会随 MCP 进程死掉」的唯一机器可读信号（`skills.md:48` 本轮已补）；③`:582` 把用户规则说成只来自 `risk_rules.toml`，实际 `risk_config.rs:42-45` 先取 `existing_policy_path()`（`policy.rs:54-64` 先 `.toml` 后 `.json`），**policy 存在就根本不读 `risk_rules.toml`**——照契约去改规则文件的 agent 会改到一个不生效的文件（`README.md:224`/`:352` 本来就写着 policy 优先、`risk_rules.toml` 是 legacy） | 三处各改一句，与 `docs/skills.md` 的现行措辞对齐即可。改完只需 `cargo check --no-default-features --bin agent2ssh-mcp`；`cli_smoke` 的 `tool_count == 76` 与 `daemon_integration` 的 `mcp_tools_match_skills_md_documentation` 都只比名字与数量，不受文案影响（已核实） |
+| L2-105 | `bin/agent2ssh-daemon.rs:1982-2007`（`sftp_upload`）、`:2008-2034`（`sftp_download`）收到的 `transfer_id`；`core.rs:1949-1952`/`:2094-2100` 的 `sftp_transfer::register`、`:1995`/`:2166` 的 `unregister`；`sftp_transfer.rs:288-297` 的 `cancel_transfer` 全仓唯一调用点是 `tauri_commands.rs:650-651` | 成立（`transfer_id` 在 daemon 侧是死字段） | 取消靠 `register` 放进 `registry()` 的 `Arc<AtomicBool>`，而 `registry()` 是**进程内静态**。daemon 是独立进程（`bin/agent2ssh-daemon.rs`），它注册的 flag 只有 `cancel_transfer` 能翻，而 `cancel_transfer` 的唯一入口是桌面端的 Tauri IPC——**跨进程够不到**。结果：daemon 的 `/sftp/upload` 收下 `transfer_id`、注册一个永远无人翻转的 flag、跑完 `unregister`。桌面端自己的传输不受影响（走 `tauri_commands.rs:628` 的 in-process 路径）。`types.rs:720`/`:735` 的注释「cancel this in-flight transfer via `sftp_cancel`」对 daemon 路径同样不成立 | 二选一：①给 daemon 加取消路由（`POST /sftp/cancel` + admin/scope 校验），顺带把 `api.yaml` 的两处描述改回「另一请求可取消」；②承认不可取消：daemon 的 handler 拒收非 `None` 的 `transfer_id`（400），或忽略并清空，同时改 `types.rs` 两处注释。本轮已把 `api.yaml` 的两处描述按②的事实改写（HTTP 侧没有取消路由）；选①要把那两处再改回去 |

@@ -1683,9 +1683,30 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 ### batch 2026-11-11 · MCP 契约与 CLI 文档一致性（第二批，B=9）
 - issue #15 / 开批时间 2026-11-11 04:05 (GMT+8)
 - CodeBuddy 首条分析：**未到（等待中）**——60 s × 5 次轮询（04:06–04:10）+ 结束前即时复核（≈04:11）+ 6.5 分钟处最后一次延时复核（≈04:12）均 0 评论。消费者下次运行重新等（#13/#14 的首条都在 6–6.5 分钟晚到，本轮超出该窗口仍未到）。
-- 6 轮进度：0 / 6（待消费任务更新）
+- 6 轮进度：**1 / 6**（第 1 轮 04:28 收尾，见文末 `consume 1 / 6`）
 - 正文已喂给 CodeBuddy：**85 条「不成立」原文**（编号 54：preflight 2 + batch1 六轮 10 + batch2 编号 15–31 十七条（29–31 物理落 batch 2 末节、内容属 batch 3 第 5 轮，正文已标注）+ batch4 第 1/5/6 轮 10 + batch6 第 1 轮 5 + **batch8 第 1 轮加粗伪标题小节 4 条子断言** + **手工/单发消费 11-11（#2 模式 B）6 条**；行内判定行 28：batch2 D2/D4、batch3 A5/E、batch5 六条、batch6 五条、batch7 八条、手工 11-10 一条、batch8 第 2–6 轮五条；摘录 3：batch8 补记两条 + 收尾之后撞号描述一条）+ 首查项（#2 模式 B 刚落地的 N2/N3/N4 及 L2-103/L2-102/L2-94）+ KNOWN-ISSUES 空档（K2 存量限制 / K7 / K8 / K9 / K12 / K13）+ 口径提醒（基线 861/1/1、`--lib` 878/1/1、`daemon_integration` 71、`--lib --tests --no-fail-fast` 1084/1/3、npm 213/27；**四条派生断言守不住 description/schema/示例层——本批重点**；L2-PENDING 撞号 13 对、新条目从 L2-102 之后起、L2-94/102/103 勿重提；feature 组合不可相加；`.github/**` 禁区；四列计数；行号现算；`[跑]` 不可采信；MCP bin 的 grep 作用域陷阱——只 grep bin 不 grep 它调的 lib）。正文由 `/tmp/build-opt-issue-b9.py` 按 ledger 锚点切片生成（块级正则 + 加粗伪标题特例 + 行内唯一子串校验：17 个编号块 50 条 + 加粗 4 条 + 判定行 28 条 + 摘录 3 条 = 85，复验通过；初版两个 bug 已修——order 漏 preflight、行内标签误用 `split(" · ")[0]` 全等匹配导致 batch3/5/7 行内条目全部丢失，改为 `startswith` 后恢复）。
 - 同主题第一批（#9）已 6 轮闭环；此后 #12/#13 两批给 api.yaml 配了派生式断言并对齐路由与状态码集合，#2 模式 B（`30264bb`）又改过 api.yaml 三处与 skills.md 一处。本批重点找对齐之后新增/残留、且派生断言守不住的 description/schema 层问题。
 - 顺手按 #14 批次条目与 BATCH_COMPLETE 行自述删除顶部 `BATCH_COMPLETE · issue #14` 状态行（HTML 注释同步为七条）。
 - 下一批（B=10）：10 % 6 = 4 → 主题 4：前端与 i18n 文案键完整性（`src/`；第二批，#10 已闭环）。开 issue 前重读 ledger 不成立清单（本批消费期间会新增，行内判定行锚点会漂移，b9 脚本可改造复用——注意 batch8 的加粗伪标题与摘录条目形态）。
 - 若 #15 仍 open 则按背压闸门跳过；锁沿用「保留在位、消费者侧自行清理」先例。
+
+### consume 1 / 6 · 2026-11-11 04:19–04:28 (GMT+8) · batch 9（issue #15）
+
+- **指摘来源**：CodeBuddy 首条分析 `2120250827418804224`，**04:23:25 到达**——开批后 **18 分钟**，远超 #13/#14 的 6–6.5 分钟晚到窗口。生产任务在 04:12 做的「6.5 分钟处最后一次延时复核」看到的仍是 0 评论，所以它记的「未到」在当时是对的；本轮 60 s × 5 轮询到第 5 次才命中。**结论：这个窗口不可靠，最晚一次在 18 分钟处，下次不要按 6.5 分钟判「不会来了」。**
+- **计数：7 条 + 3 条已并入 → 成立 4 / 部分成立 3 / 不成立 0。** 它对 api.yaml 的 90 paths / 105 operation、107 route handler 全部复算正确；「105 operation 状态码全部有序」「415/422 覆盖」「每条 response 都有 body」这些自证项也与既有断言一致。
+
+| 编号 | 判定 | 我核到的（与它的差异写在证据里） |
+|---|---|---|
+| C1 | **成立** | `grep sftp/cancel` 全仓只命中 `api.yaml:367`/`:377` 两行；daemon 的 `/sftp/*` 十条路由止于 `rm-rf/authorize`（`daemon.rs:5857-5866`）。它说「能力只存在于另一个界面」只说对一半：`transfer_id` **确实被用**（`core.rs:1949-1952` 的 `register`、`:1995` 的 `unregister`），只是 flag 落在**跑传输的那个进程**里，而 `cancel_transfer` 的唯一调用点是 `tauri_commands.rs:650-651` 的桌面 IPC。daemon 是独立进程，于是这个字段在 HTTP 侧**收得下、永远翻转不了** → 新 **L2-105** |
+| C2 | **成立** | `risk_config.rs:42-45` 先 `existing_policy_path()`（`policy.rs:54-64`：先 `.toml` 后 `.json`），命中就**不再读** `risk_rules.toml`。补充它没引的一条：`README.md:224`/`:352` 早就写着「policy-as-code，`risk_rules.toml` 是 legacy」——错话只在 `skills.md:29` 与 `tools.rs:582` 两处 |
+| C3 | **成立** | `auth.rs:52-58` 的 `load_scoped_daemon_tokens().map_err(→500)?` 在 admin 判定（`:45-51`）**之后**，所以「全员 500」只对外来 token 成立，admin 照旧工作——它说「所有非 admin 请求」措辞是对的。`api.yaml` 的 info 第二段确实写全了，指南的 Scoped Token 段确实只讲怎么配 |
+| C4 | **成立** | `bin/agent2ssh-mcp.rs:1256-1268`（`process`）与 `:492-513`（`daemon`）两支**每行都带 `backend`**。它的「对照组」也成立：`skills.md:49` 的 `durable` 语义就是从 `:1325-1329` 那段注释来的，同一张表里两种待遇 |
+| D1 | **部分成立** | `types.rs:384-386` 是「stdout **and stderr** … **each**」+ 保留首尾、中间记进 `dropped_bytes`；`tools.rs:276` 只写 stdout。它判「部分」的理由（4 MiB 是一路还是一共）我同意保留原判 |
+| D2 | **部分成立** | `agent2ssh-mcp.rs:185-188` 的 `local_daemon_client()` 传 `Some(30s)`，`:193-213` 装 `connect_timeout(10s)` + `timeout(30s)`；`daemon_only_request`（`:308-333`）传 `None`。用 30 s 那条的是 `try_daemon_session_{open,write,read,close,list}`、`try_daemon_forward_{add,list,remove}`、`try_daemon_gate_status`（`:338`–`:588`）——与它列的清单逐个对得上。**它给的行号 `:198-199`/`:308-333`/`:185-188` 全部准确**，这一批它没有漂 |
+| D3 | **部分成立（但它漏了更硬的一半）** | 行号是 **`:326`** 不是 `:327`。它说「300 s 只对审批准」成立（`execution_control.rs:496-499`，policy 的 `ttl_secs` 可覆盖）。**它没提的**：那句的主语是「不携带 `force: true` 时」——`execution_control.rs:487` 是 `needs_approval = approval_policy.is_some() \|\| (risk == High && !input.force)`，**低/中风险不携带 force 也不产生审批**。这才是可证伪的那半，已按它改写 |
+
+- **L1 落地**：`77861b5`（`api.yaml` 两处 `transfer_id`、`skills.md` 三处、`daemon-api-quickstart.md` 的两处：Scoped Token 段补 500 失败形态 + 审批示例补「高风险」限定与 `ttl_secs`）。推 `cnb main`，未推 github。
+- **L2 新增两条**：**L2-104**（`tools.rs:276`/`:546`/`:582` 三处工具描述与实现不同步，按 `L2-103` 自己的口径把「工具描述」算 `src-tauri/src/**`）、**L2-105**（daemon 侧的 `transfer_id` 是死字段，取消 flag 跨进程够不到）。`L2-102`/`L2-103`/`L2-94` 维持，无变化。
+- **验证**：`npm run build` 6.37s；`cargo fmt --check` 绿；`--no-default-features --lib` **861 / 1 failed / 1 ignored**（失败项仍是那条故意红的 IPv6）；`--features daemon --test daemon_integration` **71 passed / 0 failed**；`yaml.safe_load` 仍 90 paths / 105 operations。
+- **回帖**：见下一笔提交回写的 id。**#15 保持 open**，进度 1 / 6。
+- **锁**：进入时是 04:01 的孤儿锁（空目录、无 `owner.txt`、mtime 未动），3 × 120 s 重试全失败后做存活核验——生产任务自己的记忆文件在 04:14 写完、末行明写「锁沿用『保留在位、消费者侧自行清理』先例」，仓库自 04:13 起无新改动 → 判定孤儿，接管并写 `owner.txt`，结束已释放。**这是第 N 次；生产任务的不释放是设计不是意外。**
