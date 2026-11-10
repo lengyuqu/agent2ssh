@@ -75,7 +75,7 @@
 
 ### 5.2 第 3 节里已经过时的条目
 
-- **`reads_openssh_private_keys` 字段已不存在**：`ssh_key_format.rs` 随 libssh2 后端一起删除，因为它存在的理由（WinCNG 只认两种 PEM 头）随后端消失了。`keys algorithm --name` 仍回答 `ed25519`，但不再有"本构建能不能读 OpenSSH 容器"这个问题。
+- **`reads_openssh_private_keys` 字段仍在，值恒为 `true`**：`ssh_key_format.rs` 确实随 libssh2 后端一起删除了，但这个 JSON 键被保留在 `bin/agent2ssh.rs` 里、硬编码 `true`——`48b1d17` 的提交信息写明「JSON field stays, hardcoded true, because scripts」，理由是不破坏已经在解析它的脚本（`docs/plans/russh-migration.md` §4.5 也是这么定的）。本节此前写成「字段已不存在」是错的，与同文件 §3.2、§7.5 两处「恒为 true」互相矛盾；2026-11-10 按代码更正。`keys algorithm --name` 仍回答 `ed25519`；「本构建能不能读 OpenSSH 容器」这个问题确实没有了，字段留在那里只是因为 CLI 契约，不是因为还有东西可探测。
 - **`HOME` 隔离在 Windows 上不可靠**那条仍然成立，而且现在更容易观察到：agent 认证是 `embedded_ssh` 的第一顺位，`~/.ssh/id_*` 是最后一顺位。要证明某个用例走的是 agent 而不是默认密钥，做法不是挪 `HOME`（`dirs::home_dir()` 走 Known Folder API），而是**清空 agent 后看同一命令是否失败**——2026-10-22 用这个负对照验证了 agent 路径。
 
 ### 5.3 本轮真实跑过的内容

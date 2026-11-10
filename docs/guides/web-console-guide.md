@@ -283,7 +283,7 @@ Hosts 是默认激活的标签页，分为两个区域。
 
 | 控件 | 说明 |
 |------|------|
-| Webhook URL | Webhook 接收端点（支持 Slack、Discord 等） |
+| Webhook URL | Webhook 接收端点。只有 URL 含 `hooks.slack.com` 时才走 Slack Block Kit 渲染器，其余端点收到的是 `WebhookEvent` 的原始 JSON |
 | Events | 事件订阅复选框 |
 | HMAC-SHA256 Secret | 可选，用于签名验证 |
 | Save | 保存配置 |
@@ -312,6 +312,12 @@ X-Agent2SSH-Signature: sha256=<hex-encoded-hmac-sha256>
 ```
 
 接收方可以使用相同的 Secret 验证签名，确保请求来源可信。
+
+**没有 Discord 专用格式**：`notify.rs` 里只有一条 `url.contains("hooks.slack.com")` 分支，其余一律
+`serde_json::to_value(&event)`，载荷键是 `event` / `host` / `command`（外加按需的 `approval_id`、
+`risk_level`、`exit_code`、`remote_outcome_unknown`）。Discord 的 webhook 要求载荷里有 `content` 或
+`embeds`，这七个键一个都没有，所以把 Discord webhook URL 直接填进来不会得到一条消息——要接 Discord
+需要在中间放一个转换层。自建端点只要会解析上面这组键，就能直接收。
 
 ---
 
