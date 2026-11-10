@@ -471,7 +471,7 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
 ### batch 2026-11-10 · MCP 契约与 CLI 文档一致性
 - issue #9 / 开批时间 2026-11-10 09:48 (GMT+8)
 - CodeBuddy 首条分析：未到（等待中，issue 发出后 5 分钟内 5 次轮询均 0 评论；消费者下次运行重新等）
-- 6 轮进度：1 / 6
+- 6 轮进度：2 / 6
 - 正文已喂给 CodeBuddy：**28 条「不成立」原文**（preflight 2 + batch 1 六轮 10 + batch 2 第 1 轮行内 D2/D4 两条 + batch 2 第 2–6 轮 14）+ K7/K8/K9/K12/K13 相关空档 + 口径提醒（基线红测、`.github/**` 禁区、四列计数）。范围：`docs/skills.md`、`docs/api.yaml`、`bin/agent2ssh.rs` clap help、`bin/agent2ssh-mcp.rs`、`skills/agent2ssh/SKILL.md` 及 guides 相关段落。
 
 #### consume 1 / 6（基线 `db60643`，回帖 `2119990687696330752`）
@@ -491,3 +491,23 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
 **验证**：`npm run build` 6.77s；`cargo fmt --check` 绿；`--no-default-features --lib` = 861 passed / 1 failed / 1 ignored（已知红测）；`--features daemon --test daemon_integration api_yaml` = 1 passed；`yaml.safe_load` 仍 90 path，gated op 缺 403 由 30 → 0/39。
 
 **方法学**：`#[allow(dead_code)]` 是否过期必须按**每个 feature 组合**判——第 6 轮只看了 default 的调用图，把一个承重属性当成残留删掉了，还写进 ledger 当成"修复"。这是本流程第一次出现「我自己的更正被下一轮当成新缺陷」的反向事故。
+
+#### consume 2 / 6（基线 `38eb70b`，回帖 `2119994949708967936`）
+
+9 条指摘（G1–G9）→ **成立 7 / 部分成立 2（G1、G5）/ 不成立 0**，但**两处数字/位置要改**。落地一笔 `0b2bb5c`（纯文档，无 `src-tauri/src/**` 改动）。
+
+| 项 | 判定 | 关键证据 | 落地 |
+|---|---|---|---|
+| G1 | 部分成立 | 指摘自称「一处事实错」又自述「这不是错，是口径窄了一层」。`skip_serializing_if` + 四个构造点都写 `None` → 原句成立；成立的是 Slack 侧 `("exec_blocked", _)` 臂忽略该字段 | `0b2bb5c` 补半句 Slack 口径 |
+| G2 | 成立 | `types.rs:640-659` 六个变体 vs `api.yaml` 三处各五个（`:233` schema + `:1258`/`:1314` 两个 query enum） | `0b2bb5c` 三处全补 + 写清与 `approved` 分开的理由 |
+| G3 | 成立 | `core.rs:3165-3192` 五字段 + 两嵌套；指摘列的另 5 处空 schema **独立扫描完全一致** | `0b2bb5c` 补 4 个组件（`SshSyncDiff`/`SshSyncHostDiff`/`SshSyncHostConflict`/`AlgoPrefsState`），`/algo/prefs` 三方法统一 `$ref`；`/prompts/respond` 返 `serde_json::Value`，保持 `type: object` 不硬编 |
+| G4 | 成立 | `grep -c decision src-tauri/web/console.html` = 0；桌面端 `AuditPanel.tsx:37` 有 | **L2-39**（表头 + 行 + 两处 `colspan` 必须一起改） |
+| G5 | 成立，位置要改 | 不该改 `SKILL.md:29`（那行不含地址）；真问题是 `docs/skills.md` 里 `AGENT2SSH_DAEMON_ADDR` 只出现 1 次（第 59 行） | `0b2bb5c` 新增 `## Daemon address` 小节，第 59 行改为引用 |
+| G6 | 成立 | `notify.rs:322-329`、`:331-337` 条件 push → `diagnostic_error` 只有 2 个 field | `0b2bb5c` 改成「固定 2 + 条件 2」并补 `diagnostic_error` 的读法 |
+| G7 | 成立 | 四条出站测试（`:643`/`:668`/`:697`/`:725`）只断言 `is_ok()`，无一读请求体；三条 `format_slack_message` 测试绕过三元 | **L2-41**（干净解法是抽 `payload_for()` 纯函数，属 src 重构） |
+| G8 | 成立 | `team_config.rs:31-38` 只剥三凭据，`:81-95` 也只补回三个，`:96` 的 `*existing = next` 让 `proxy_id: None` 落地 | **L2-40**（产品语义）；连带半条已 L1：`HostProfile` 补 `proxy_id`/`group`/`init_command`/`passphrase`，13 → 17 字段 |
+| G9 | 成立，**数字要改：36 不是 52** | 路由 105 operation（`/`、`/console` 除外）vs 表 70 行；第 37 条是 `/recordings/:id?confirm=delete` 带查询参数的假阳性 | `0b2bb5c` 补齐，**双向差集为空**（106 行 = 105 API + `/console`） |
+
+**验证**：`npm run build` 6.44s；`fmt --check` 绿；`--lib` 861/1/1（已知红）；`api_yaml` 1 passed；`yaml.safe_load` 90 path / 47 schema；`HostProfile` 17 字段；端点表 ↔ 路由双向为空。
+
+**自我更正**：`0b2bb5c` 第一次写成「51 schemas」，实际 47（4 个是本轮新增）。未推送前 `--amend` 修正。教训：`Verified:` 行里的每个数字都要现算，不能从「加了几个」的心算推总数。
