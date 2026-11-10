@@ -598,6 +598,7 @@ export const zh: Record<string, string> = {
   "Useful commands": "常用命令",
   "Safety model": "安全模型",
   "High-risk commands require explicit approval or force, while blocked commands cannot be bypassed.": "高风险命令需要明确审批或强制执行；已阻止命令不能绕过。",
+  "The approval card comes from the daemon: commands this app runs itself raise no card, so a high-risk command here needs force or has to run through the daemon.": "审批卡由 daemon 发起：本应用自己执行的命令不会弹卡，因此高风险命令在这里要么加 force，要么走 daemon。",
   "SSH host fingerprints are trusted automatically on first use and blocked if they change later.": "SSH 主机指纹首次使用时自动信任；后续发生变化会被阻止。",
   "Local runtime data is stored under ~/.agent2ssh/. Do not share that directory.": "本地运行数据保存在 ~/.agent2ssh/ 下。不要共享该目录。",
   "Documentation index": "文档索引",
@@ -706,6 +707,7 @@ export const zh: Record<string, string> = {
   "Approved (edited)": "已批准（已改写）",
   "rejected": "已拒绝",
   "timed_out": "已超时",
+  "revoked": "已撤销",
   // V2-3: audit visualization charts
   "Audit trends": "审计趋势",
   "No executions in this range": "该时间范围内没有执行记录",
@@ -821,7 +823,7 @@ export const zh: Record<string, string> = {
   Reason: "原因",
   "Change ID": "变更单号",
   "Approve and execute": "批准执行",
-  "Copy command and go to Execution": "复制命令并前往执行",
+  "Copy command and open Execution": "复制命令并打开执行页",
   "Edit then execute": "编辑后执行",
   "Approver rewrote: {original}": "审批人已改写，原命令：{original}",
   "Cancel edit": "取消编辑",
@@ -853,8 +855,8 @@ export const zh: Record<string, string> = {
   "Refuse MCP, daemon and other AI sources on this host. The desktop app and CLI stay allowed.": "拒绝此主机上来自 MCP、daemon 等 AI 来源的操作；桌面端与 CLI 仍可使用。",
   // A22: SSH algorithm preferences
   "SSH algorithms": "SSH 算法",
-  "Negotiation preferences passed to libssh2 before the handshake. Most-preferred first, comma-separated.":
-    "握手前传给 libssh2 的协商偏好。最优先的排在最前，逗号分隔。",
+  "Negotiation preferences applied to a new SSH session before the handshake. Most-preferred first, comma-separated.":
+    "握手前应用到新 SSH 会话的协商偏好。最优先的排在最前，逗号分隔。",
   "Using custom algorithm preferences.": "正在使用自定义算法偏好。",
   "Using the built-in safe defaults.": "正在使用内置安全默认值。",
   "Negotiation preferences for new connections.": "新连接的协商偏好。",
@@ -870,8 +872,8 @@ export const zh: Record<string, string> = {
   "Compression (client → server)": "压缩（客户端 → 服务端）",
   "Compression (server → client)": "压缩（服务端 → 客户端）",
   "Differs from defaults": "与默认值不同",
-  "This build of libssh2 has no zlib support, so both compression fields must stay `none`. Any other value is rejected instead of silently breaking every connection.":
-    "此版本的 libssh2 未编译 zlib 支持，因此两个压缩字段必须保持 `none`。填入其他值会被拒绝，而不是静默地让所有连接失败。",
+  "This build has no zlib support — the SSH transport is compiled without its compression feature — so both compression fields must stay `none`. Any other value is rejected instead of silently breaking every connection.":
+    "此构建未编译 zlib 支持（SSH 传输层没有启用压缩特性），因此两个压缩字段必须保持 `none`。填入其他值会被拒绝，而不是静默地让所有连接失败。",
   "Applies to new connections; open sessions keep their negotiated algorithms.":
     "对新连接生效；已打开的会话保持其已协商的算法。",
   "Reset to defaults": "恢复默认值",

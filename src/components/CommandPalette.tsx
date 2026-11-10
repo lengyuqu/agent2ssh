@@ -21,10 +21,23 @@ export type PaletteQuickAction = {
   run: () => void;
 };
 
-/** Frontend mirror of the daemon's ssh_* MCP tool names (see
- *  src-tauri/src/bin/agent2ssh_mcp/tools.rs — keep in sync manually). The
- *  palette cannot invoke tools (they need arguments); activating one jumps to
- *  the module that exercises the same capability. */
+/** Frontend mirror of the `ssh_*` MCP tool names that have a desktop module to
+ *  jump to (see `src-tauri/src/bin/agent2ssh_mcp/tools.rs`). The palette cannot
+ *  invoke tools (they need arguments); activating one opens the module that
+ *  exercises the same capability.
+ *
+ *  This is deliberately a subset, not a mirror: the registry has 76 tools and
+ *  this list has 60. The sixteen absent ones are absent for a reason —
+ *  `ssh_algo_prefs_{get,set,clear}`, `ssh_highlight_rule_*` and
+ *  `ssh_redact_rule_*` (13) are edited inside `SettingsMenu` dialogs, which
+ *  have no module id, and `local_exec`, `resident_session_open` and
+ *  `resident_session_exec` (3) have no desktop surface at all: the Resident
+ *  Sessions module is read-only apart from closing a session.
+ *
+ *  Nothing pins the gap — it stood at 18 until the two entries at the end of
+ *  this array were added, and no test compares the list against the registry.
+ *  A guard needs a decision about those sixteen (leave them out, or give the
+ *  palette a "no module" form); that is L2-116. */
 const MCP_TOOLS: { name: string; moduleId: string }[] = [
   { name: "ssh_list_hosts", moduleId: "hosts" },
   { name: "ssh_add_host", moduleId: "hosts" },
@@ -84,6 +97,11 @@ const MCP_TOOLS: { name: string; moduleId: string }[] = [
   { name: "ssh_doctor", moduleId: "mcp-agents" },
   { name: "ssh_events_subscribe", moduleId: "mcp-agents" },
   { name: "ssh_webhook_config", moduleId: "mcp-agents" },
+  // The two of the former eighteen that do have a surface, so the promise above
+  // holds literally: Containers starts a stopped runtime service, Resident
+  // Sessions closes a session.
+  { name: "containers_start_service", moduleId: "containers" },
+  { name: "resident_session_close", moduleId: "resident-sessions" },
 ];
 
 type PaletteItem =

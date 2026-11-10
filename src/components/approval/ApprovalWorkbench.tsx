@@ -34,6 +34,11 @@ const STATUS_BADGE: Record<Exclude<ApprovalStatus, "pending">, "success" | "dest
   approved: "success",
   rejected: "destructive",
   timed_out: "secondary",
+  // Fifth variant of `ApprovalStatus`: an approved request that was withdrawn.
+  // No producer today (see `src/types.ts`), so this only keeps the record
+  // exhaustive — without it `STATUS_BADGE[item.status]` would be `undefined`
+  // and the badge would silently lose its colour the day one appears.
+  revoked: "secondary",
 };
 
 function isSameLocalDay(iso: string): boolean {

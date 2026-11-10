@@ -505,7 +505,11 @@ export type ExecutionGateStatus = {
 };
 
 // Rust: approval.rs — ApprovalStatus (rename_all = "snake_case")
-export type ApprovalStatus = "pending" | "approved" | "rejected" | "timed_out";
+// `revoked` is the fifth variant: written when an already-approved request is
+// withdrawn (`revoke_approval`, `approval.rs`). Nothing produces it today —
+// the only callers are tests and there is no HTTP route — but the contract
+// lists it, so the mirror does too.
+export type ApprovalStatus = "pending" | "approved" | "rejected" | "timed_out" | "revoked";
 
 // Rust: approval.rs — ApprovalRequest
 // id is uuid::Uuid; requested_at is DateTime<Utc>.
@@ -558,8 +562,10 @@ export type SshKeyInfo = {
 };
 
 // Rust: keys.rs — KeyAlgorithm
-// "rsa" means traditional PKCS#1 PEM, which is the only private-key encoding
-// libssh2's WinCNG backend can read. "ed25519" uses the OpenSSH container.
+// "rsa" means traditional PKCS#1 PEM (`-----BEGIN RSA PRIVATE KEY-----`);
+// "ed25519" uses the OpenSSH container. The PEM form is no longer a
+// compatibility requirement — the transport reads both — it is simply how the
+// RSA variant writes its key (see `keys.rs::KeyAlgorithm::Rsa`).
 export type KeyAlgorithm = "ed25519" | "rsa";
 
 // Rust: types.rs — ConnectionStatus
@@ -775,8 +781,9 @@ export type ResidentSessionSummary = {
 };
 
 // Rust: ssh_algo.rs — SshAlgoPrefs
-// Each field is a comma-delimited, most-preferred-first list; compression is
-// always `none` because this build of libssh2 has no zlib support.
+// Each field is a comma-delimited, most-preferred-first list. Compression is
+// always `none`: the transport is built without its compression feature, so
+// `ssh_algo.rs::SUPPORTED_COMPRESSION` is the only accepted value.
 export type SshAlgoPrefs = {
   kex: string;
   hostkey: string;

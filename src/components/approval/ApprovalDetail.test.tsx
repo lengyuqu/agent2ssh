@@ -55,10 +55,10 @@ describe("ApprovalDetail edit then execute", () => {
     expect(onApprove).toHaveBeenCalledWith(undefined);
   });
 
-  it("falls back to copy-and-go when the request cannot be rewritten", () => {
+  it("falls back to copy-and-open when the request cannot be rewritten", () => {
     renderDetail(request(false));
     expect(screen.queryByText("Edit then execute")).toBeNull();
-    expect(screen.getByText("Copy command and go to Execution")).toBeTruthy();
+    expect(screen.getByText("Copy command and open Execution")).toBeTruthy();
   });
 
   it("does not offer approval of an emptied command", () => {

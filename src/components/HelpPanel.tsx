@@ -117,6 +117,17 @@ export default function HelpPanel() {
                 "High-risk commands require explicit approval or force, while blocked commands cannot be bypassed."
               )}
             </p>
+            {/* The sentence above is true of the product, not of this window:
+                `exec` here goes through `authorize_command_without_approval_handler`
+                (`tauri_commands.rs`, `authorize_desktop_operation`), whose refusal
+                message is "approval required but no desktop approval handler is
+                available" — the only way past a high-risk command in the app is
+                `force`. The Approvals page approves daemon requests, not local ones. */}
+            <p>
+              {t(
+                "The approval card comes from the daemon: commands this app runs itself raise no card, so a high-risk command here needs force or has to run through the daemon."
+              )}
+            </p>
             <p>
               {t(
                 "SSH host fingerprints are trusted automatically on first use and blocked if they change later."

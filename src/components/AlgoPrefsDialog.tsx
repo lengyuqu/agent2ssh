@@ -9,7 +9,8 @@ import { cn } from "../lib/utils";
 import { InlineAlert, Spinner } from "./ui/state";
 
 // A22: the eight `SshAlgoPrefs` fields, in the order they are negotiated. Each
-// is a comma-delimited, most-preferred-first list handed to libssh2.
+// is a comma-delimited, most-preferred-first list applied to the SSH session
+// before the handshake (`ssh_algo.rs::apply_algo_prefs`).
 const FIELDS: Array<{ key: keyof SshAlgoPrefs; label: string }> = [
   { key: "kex", label: "Key exchange" },
   { key: "hostkey", label: "Host key" },
@@ -132,7 +133,7 @@ export default function AlgoPrefsDialog({ onClose }: Props) {
           </strong>
           <span className="text-xs leading-snug text-muted-foreground">
             {t(
-              "Negotiation preferences passed to libssh2 before the handshake. Most-preferred first, comma-separated."
+              "Negotiation preferences applied to a new SSH session before the handshake. Most-preferred first, comma-separated."
             )}
           </span>
         </div>
@@ -185,7 +186,7 @@ export default function AlgoPrefsDialog({ onClose }: Props) {
 
         <p className="rounded-md border border-border bg-muted/35 px-2.5 py-2 text-xs leading-snug text-muted-foreground">
           {t(
-            "This build of libssh2 has no zlib support, so both compression fields must stay `none`. Any other value is rejected instead of silently breaking every connection."
+            "This build has no zlib support — the SSH transport is compiled without its compression feature — so both compression fields must stay `none`. Any other value is rejected instead of silently breaking every connection."
           )}
         </p>
 

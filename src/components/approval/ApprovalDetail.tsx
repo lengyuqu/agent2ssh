@@ -61,14 +61,12 @@ export default function ApprovalDetail({
 
   const ctx = approval.context;
   const rewritable = Boolean(ctx?.rewritable);
-  // Four of the five context fields the contract declares. `host_address` is
-  // in `ApprovalRequest.context` in `docs/api.yaml` and on `ApprovalContext` in
-  // `src/types.ts`, and is not rendered here, so an approver working inside the
-  // approvals module cannot see which address `prod-web` resolves to. Adding
-  // `["Address", ctx?.host_address]` is one line; doing it changes what the
-  // panel shows, so it is L2-60 rather than something this batch slips in.
-  // `host_env`/`host_role` are declared in both places as well and no panel
-  // shows either — leave them.
+  // Four of the nine fields `ApprovalContext` declares. The five left out, and
+  // why: `host_address` is rendered nowhere, which is L2-60 (one added line);
+  // `host_env`/`host_role` are declared in both `docs/api.yaml` and
+  // `src/types.ts` and shown by no panel; `recent_commands` is an array the
+  // panel cannot lay out (L2-74); `rewritable` is the flag read two lines above
+  // and is a control, not a value. `risk_details` supplies the matched policy.
   const candidateRows: Array<[string, string | null | undefined]> = [
     ["Requested by", ctx?.source],
     ["Matched policy", ctx?.risk_details?.matched_policy],
@@ -163,7 +161,7 @@ export default function ApprovalDetail({
         ) : (
           <Button variant="secondary" disabled={busy} onClick={onCopyAndExecute}>
             {copied ? <Check size={14} /> : <Copy size={14} />}
-            {t("Copy command and go to Execution")}
+            {t("Copy command and open Execution")}
           </Button>
         )}
         {editing ? (
