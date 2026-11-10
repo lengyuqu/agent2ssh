@@ -1683,7 +1683,7 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 ### batch 2026-11-11 · MCP 契约与 CLI 文档一致性（第二批，B=9）
 - issue #15 / 开批时间 2026-11-11 04:05 (GMT+8)
 - CodeBuddy 首条分析：**未到（等待中）**——60 s × 5 次轮询（04:06–04:10）+ 结束前即时复核（≈04:11）+ 6.5 分钟处最后一次延时复核（≈04:12）均 0 评论。消费者下次运行重新等（#13/#14 的首条都在 6–6.5 分钟晚到，本轮超出该窗口仍未到）。
-- 6 轮进度：**1 / 6**（第 1 轮 04:28 收尾，见文末 `consume 1 / 6`）
+- 6 轮进度：**2 / 6**（第 1 轮 04:28 收尾、第 2 轮 04:44 收尾，见文末 `consume 1 / 6`…`consume 2 / 6`）
 - 正文已喂给 CodeBuddy：**85 条「不成立」原文**（编号 54：preflight 2 + batch1 六轮 10 + batch2 编号 15–31 十七条（29–31 物理落 batch 2 末节、内容属 batch 3 第 5 轮，正文已标注）+ batch4 第 1/5/6 轮 10 + batch6 第 1 轮 5 + **batch8 第 1 轮加粗伪标题小节 4 条子断言** + **手工/单发消费 11-11（#2 模式 B）6 条**；行内判定行 28：batch2 D2/D4、batch3 A5/E、batch5 六条、batch6 五条、batch7 八条、手工 11-10 一条、batch8 第 2–6 轮五条；摘录 3：batch8 补记两条 + 收尾之后撞号描述一条）+ 首查项（#2 模式 B 刚落地的 N2/N3/N4 及 L2-103/L2-102/L2-94）+ KNOWN-ISSUES 空档（K2 存量限制 / K7 / K8 / K9 / K12 / K13）+ 口径提醒（基线 861/1/1、`--lib` 878/1/1、`daemon_integration` 71、`--lib --tests --no-fail-fast` 1084/1/3、npm 213/27；**四条派生断言守不住 description/schema/示例层——本批重点**；L2-PENDING 撞号 13 对、新条目从 L2-102 之后起、L2-94/102/103 勿重提；feature 组合不可相加；`.github/**` 禁区；四列计数；行号现算；`[跑]` 不可采信；MCP bin 的 grep 作用域陷阱——只 grep bin 不 grep 它调的 lib）。正文由 `/tmp/build-opt-issue-b9.py` 按 ledger 锚点切片生成（块级正则 + 加粗伪标题特例 + 行内唯一子串校验：17 个编号块 50 条 + 加粗 4 条 + 判定行 28 条 + 摘录 3 条 = 85，复验通过；初版两个 bug 已修——order 漏 preflight、行内标签误用 `split(" · ")[0]` 全等匹配导致 batch3/5/7 行内条目全部丢失，改为 `startswith` 后恢复）。
 - 同主题第一批（#9）已 6 轮闭环；此后 #12/#13 两批给 api.yaml 配了派生式断言并对齐路由与状态码集合，#2 模式 B（`30264bb`）又改过 api.yaml 三处与 skills.md 一处。本批重点找对齐之后新增/残留、且派生断言守不住的 description/schema 层问题。
 - 顺手按 #14 批次条目与 BATCH_COMPLETE 行自述删除顶部 `BATCH_COMPLETE · issue #14` 状态行（HTML 注释同步为七条）。
@@ -1711,3 +1711,19 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 - **验证**：`npm run build` 6.37s；`cargo fmt --check` 绿；`--no-default-features --lib` **861 / 1 failed / 1 ignored**（失败项仍是那条故意红的 IPv6）；`--features daemon --test daemon_integration` **71 passed / 0 failed**；`yaml.safe_load` 仍 90 paths / 105 operations。
 - **回帖**：`2120252564804370432`（`## 第 1 轮收尾`，04:29:38）。**#15 保持 open**，进度 1 / 6。
 - **锁**：进入时是 04:01 的孤儿锁（空目录、无 `owner.txt`、mtime 未动），3 × 120 s 重试全失败后做存活核验——生产任务自己的记忆文件在 04:14 写完、末行明写「锁沿用『保留在位、消费者侧自行清理』先例」，仓库自 04:13 起无新改动 → 判定孤儿，接管并写 `owner.txt`，结束已释放。**这是第 N 次；生产任务的不释放是设计不是意外。**
+
+### consume 2 / 6 · 2026-11-11 04:32–04:44 (GMT+8) · batch 9（issue #15）
+
+- **指摘来源**：CodeBuddy 对我第 1 轮收尾的复核 `2120253081072848896`，**04:31:53 到达**——回帖后 **2 分钟**，与它首条分析的 18 分钟形成对照（它首轮要先扫全表，之后只核改动的几处就快）。**这条对排程有直接影响：不要去等「平均值」。**
+- **它的复核结论：第 1 轮 7 条全部真实解决**，三问逐条确认——C1 无第三处入口、L2-105 无反例（并补了 `daemon_control.rs:462-495` 的 `spawn`+`setsid` 与 `app_state.rs:82` 的 `transfer_cancels` 作证）、`9be53e4` 的方向对。**判定：它新批 1 条 → 成立 1 / 不成立 0**，另自取 2 条（都来自它给的边角）。
+
+| 编号 | 判定 | 我核到的 |
+|---|---|---|
+| D4 | **成立** | `lifecycle.rs:77` 的 `Uuid::parse_str(id).is_err() → InvalidId`，`sftp_transfer.rs:263` 的 `if let Ok(reservation) = reserve(...)` 把它吞掉。真实的 `transfer_id` 是 `SFTPPanel.tsx:592` 的 `sftp-<毫秒>-<随机>`；CLI 两处传 `None`（`bin/agent2ssh.rs:2419`/`:2449`），MCP 的 `ssh_sftp_upload/download` schema 里**没有**这个字段（`tools.rs:472-490`），单测用 `k6-test-transfer`（`:665`）。`diagnostics.rs:570-573` 的 `active_resources` 只数 `Ready`+`Pending` → 在途传输永不出现。**它说「从未被记录」过强**：裸 HTTP 调用方传合法 UUID 就会被记录，准确说法是「本仓所有调用点都不是 UUID」→ **L2-106** |
+| 自取 1 | **成立（它的边角）** | `api.yaml` 的 `ApprovalPolicy.requires_approval` 原写「false auto-approves it」，两处都错：①`approval.rs:1068-1071` 命中 `requires_approval=false` 是 `return Ok(None)` 并**停止搜索**，一条 auto-approve 政策能屏蔽其后所有政策；②`Ok(None)` 只表示「没有政策要求审批」，`execution_control.rs:487` 的 `(risk == High && !force)` 照样成立——CLI 的 `test_policy_decision`（`bin/agent2ssh.rs:1469-1471`）与广播的 `:4376-4377` 都按「High 或 policy」判 Approve，三处口径一致。已改 |
+| 自取 2 | **成立（两处无描述字段）** | `/exec/preview` 的 `requires_approval` 由 `core.rs:793` 的 `requires_approval: risk == RiskLevel::High` 给出——**完全不查 `approval_policies`**，所以中风险但被政策点名的命令在 preview 里是 `false`、`/exec` 却会开审批；`/approval/check` 的 `requires_approval` 由 `approval_check`（`daemon.rs:3442-3467`）给出，只反映政策、且 `ApprovalCheckBody`（`:3408-3411`）**没有 `force` 字段**，高风险命令照样 `false`。两处原来都只是裸 `{ type: boolean }`，已各补一句并写明「false 不等于 /exec 会放行」 |
+
+- **L1 落地**：`api.yaml` 三处字段描述（`ApprovalPolicy.requires_approval`、`/exec/preview` 与 `/approval/check` 的响应字段），见下一笔提交。
+- **L2 新增一条**：**L2-106**（`ResourceKind::Transfer` 条目从未建成）。L2-104/105 维持；L2-105 的「选②零代价」理由按它的提醒改准：不是「没东西要清」，而是「从没建成过」。
+- **未做**：它提的 `requires_approval=false` 短路语义我只写进契约，没有把它做成 L2——因为 `approval.rs` 的行为是对的，错的只有 `api.yaml` 一句描述。
+- **验证**：`npm run build` 6.34s；`cargo fmt --check` 绿；`--no-default-features --lib` **861 / 1 / 1**；`--features daemon --test daemon_integration` **71 / 0**；`yaml.safe_load` 仍 90 paths / 105 operations。
