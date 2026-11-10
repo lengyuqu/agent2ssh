@@ -366,7 +366,10 @@ fn write_all_shrinking<W: Write>(
 /// `client/mod.rs` builds an `mpsc::unbounded_channel`), so `send()` never
 /// blocks either — eight outstanding acks are the whole of the back pressure,
 /// and nothing downstream of them imposes a deadline. So this guard never
-/// regains control.
+/// regains control. `File::flush` waits on the same queue: `poll_drain_writes`
+/// empties `write_acks` before the optional fsync, so a deadline wrapped around
+/// `write` alone would leave the tail of every transfer — the final flush —
+/// still unbounded.
 /// What still bounds that peer is the socket write timeout set in
 /// `connect_embedded_ssh`, and only for the case where TCP itself stops
 /// accepting bytes. The gap is recorded as L2-96.
