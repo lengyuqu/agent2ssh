@@ -1286,7 +1286,7 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 - 背景已写进正文：同主题第一批（#7）已 6 轮闭环，已修复项与已登记 L2（L2-1…L2-18、L2-82）勿重提；本批重点找 #7 闭环后新增/残留的问题。
 - 下一批（B=8）：8 % 6 = 2 → 主题 2：SSH 传输、known_hosts 与认证（russh 侧）。开 issue 前重读 ledger 不成立清单（批次 7 消费期间可能新增），行内子串锚点会因消费者编辑 ledger 而漂移——届时重新定位。
 
-### consume 1 / 6 · 2026-11-10 21:07–21:40 (GMT+8) · issue #13 · 回帖（见下一条记录）
+### consume 1 / 6 · 2026-11-10 21:07–21:37 (GMT+8) · issue #13 · 回帖 `2120148713845710848`（21:36:58）
 
 - **指摘来源**：CodeBuddy 首条分析 `2120141279483817984`（21:07:26，基线 `8d86fe0`）。8 条，全部落在 batch 1（issue #7）闭环之后，没有重放已判否条目。
 - **判定：8 条 → 成立 2 / 部分成立 3 / 不成立 3。**
@@ -1301,6 +1301,8 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 | 6 | `daemon stop` 在 `read_admin_token()` 为 `None` 时给 `NotAuthenticated`，而 doc 说的是别的事 | **成立（已登记 L2-4，行号需更正）** | 触发点其实是 `:991`（它说 `:1006`，那是 "daemon predates" 的 warn 行），`Display` 在 `:792-796`。**L2-4 记的正是这一条**，本轮把行号与触发条件写进 L2-4 的备注。它补的一点对：`:772-788` 的 `\|\|` 让这条分支永远看不出走哪边——但那条用例构造的是「token 文件写错」，走的是 401 支（`NotAccepted`），**根本到不了** `:991`；所以 `\|\|` 的问题不是「两个分支都可能」，而是两条文案太像 |
 | 7 | 健康 PID 不匹配时的文案把四种原因压成一句 | **成立** | `:986-989` 的括号列了三种原因，但这一支的入口是 `:982` 的 `else`：`config_dir` 的比对在 `:959-981` 的 `if` 分支，`admin token` 在 `:991` 之后。打印这句话时括号里后两种原因不可能成立 → **L2-85** |
 | 8 | `L2-3` 的落地形状与 `stop_daemon_process` 的读法不自洽 | **部分成立** | 类型那半对：`Accepted` / `AcceptedUnchecked` 都不带载荷（`:827-843`），要比较 `checked_pid` 必须改变体、并让 `request_shutdown` 的 200 分支先解析 body，`L2-3` 那段没写这一层（已在 L2 文件里补成四步）。**行号那半错**：当前树 `grep -n "expected_pid.is_none()"` → `:872`、`grep -n "daemon predates"` → `:1006`、`:200`（另一处文档注释），与 `L2-3` 的引用一致；它给的 `:901` 是 `response.body.trim()`、`:1020` 是 `ProcessObservation::Unknown` 臂 |
+
+**推送**：`876c869` + `5384a0f` 推 `cnb main` 与 `git233 main`。git233 此前停在 `7a623e2`（2026-11-10 02:04，落后 **126 个提交**——整个优化循环都没同步过），这次一并对齐，是本流程第一次双远端推送。
 
 **L1 落地（两笔）**：`docs/api.yaml`（`/terminal` 的 500 ms 改写为「空闲超时 + 2 s 上限 + `Closed`/error 提前结束」；`/exec/stream` 补「drain 只转发 stdout/stderr，drain 期间到的 exit 只进审计、不发 `{"type":"exit"}`」；info 的 summary 句改「any caller that does not present the admin token」）、`src-tauri/tests/daemon_integration.rs`（新增 `a_websocket_drain_budget_claim_matches_the_loop_it_describes`）。
 
