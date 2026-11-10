@@ -2929,6 +2929,13 @@ fn api_yaml_documents_how_each_handler_reads_its_body() {
     let mut violations: Vec<String> = Vec::new();
     let mut required = 0usize;
     let mut swallowed = 0usize;
+    // The file-level note names the swallowed operations one path at a time, and
+    // until this was derived nothing checked the names against the handlers: a
+    // path was added to that sentence while its handler read `Json<T>`, which
+    // told a client that `/containers/start-service` ignores a malformed body
+    // instead of refusing it. Prose that enumerates is a derived fact in a
+    // costume, so derive it.
+    let mut swallowed_paths: Vec<String> = Vec::new();
 
     for (path, method, handler) in daemon_routes(daemon) {
         if NON_API_ROUTES.contains(&path.as_str()) {
@@ -2937,6 +2944,7 @@ fn api_yaml_documents_how_each_handler_reads_its_body() {
         let params = handler_params_of(daemon, &handler);
         let reader = if params.contains("Option<Json<") {
             swallowed += 1;
+            swallowed_paths.push(path.clone());
             BodyReader::Swallowed
         } else if params.contains(": Json<") {
             required += 1;
@@ -3030,6 +3038,38 @@ fn api_yaml_documents_how_each_handler_reads_its_body() {
         "these operations document a body contract the handler does not have: {violations:?}. \
          `Json<T>` answers 415/422 by itself, `Option<Json<T>>` cannot answer either, and \
          `Bytes` answers only what the handler writes."
+    );
+
+    // The sentence in `info.description` that enumerates the swallowed
+    // operations, joined back into one line so the list can be read out of it.
+    let note = spec
+        .lines()
+        .skip_while(|line| !line.contains("operations read their body that way"))
+        .take_while(|line| !line.contains("does not cover it"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let named: Vec<&str> = note
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .filter(|token| token.starts_with('/'))
+        .collect();
+    assert_eq!(
+        named.len(),
+        swallowed,
+        "the file-level note names {} operations that swallow a malformed body ({named:?}), but \
+         {swallowed} handlers read `Option<Json<T>>` ({swallowed_paths:?}). A name in that list \
+         whose handler reads `Json<T>` tells a client that a refusing endpoint ignores the body",
+        named.len()
+    );
+    let unexpected: Vec<&&str> = named
+        .iter()
+        .filter(|name| !swallowed_paths.iter().any(|path| path == *name))
+        .collect();
+    assert!(
+        unexpected.is_empty(),
+        "the file-level note names {unexpected:?} as operations that swallow a malformed body, \
+         but no handler for them reads `Option<Json<T>>` (that list is {swallowed_paths:?})"
     );
 }
 
