@@ -422,6 +422,12 @@ components:
 
     ForwardAddRequest:
       type: object
+      description: >-
+        The five fields the handler reads. The body is deserialized into the
+        server's own `ForwardRule`, so `id`, `name`, `group_id` and `via` are
+        accepted without a 400 and then ignored: a jump host goes in the `via`
+        query parameter, and a named or grouped rule goes through
+        `POST /forwards/multi` or the desktop app.
       required: [host, direction, bind_port, target_host, target_port]
       properties:
         host:        { type: string }
@@ -439,6 +445,9 @@ components:
         bind_port:   { type: integer }
         target_host: { type: string }
         target_port: { type: integer }
+        name:        { type: string, nullable: true, description: "Human-readable label, serialized as null when unset (`ForwardRule.name` is an `Option`, with no `skip_serializing_if`). Rules created by `POST /forwards` always carry null here, because that handler reads five fields and ignores this one; `/forwards/multi` and the desktop app can set it." }
+        group_id:    { type: string, nullable: true, description: "Optional group id, mirroring host groups; null when unset. Same caveats as `name`: `POST /forwards` ignores it, `/forwards/multi` accepts it." }
+        via:         { type: string, nullable: true, description: "Jump-host alias captured when the tunnel was created through `?via=`, so `/forwards/{id}/start` re-establishes the same path after a stop. Null means the host profile's own `jump_host` applies." }
 
     ConnectionStatus:
       type: object
@@ -3452,6 +3461,11 @@ paths:
     post:
       summary: Add a port forward tunnel
       description: Applies bearer-token scope, execution gate, execution limits, effective risk, and approval policy using a `forward ...` operation string.
+      parameters:
+        - name: via
+          in: query
+          schema: { type: string }
+          description: Optional jump host the tunnel is established through. The only way to set it on this route — `via` inside the request body is ignored.
       requestBody:
         required: true
         content:
@@ -3735,7 +3749,17 @@ paths:
 
   /approvals:
     get:
-      summary: List pending approval requests
+      summary: List approval requests
+      description: >-
+        Every request the daemon still holds, not only the pending ones:
+        `approval_list` sweeps expired pending entries to `timed_out`, then
+        returns the whole store in `HashMap` iteration order, so the array is
+        neither filtered nor sorted. Clients that want the queue must filter
+        `status == "pending"` themselves — the desktop polling loop does exactly
+        that — and must not rely on the order. There is no pagination and no
+        query parameter: the array is whatever the in-memory store holds, which
+        is `approvals.jsonl` as loaded at startup plus everything recorded
+        since, minus what compaction dropped.
       responses:
         "200":
           content:

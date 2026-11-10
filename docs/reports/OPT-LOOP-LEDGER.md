@@ -1831,10 +1831,26 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 ### batch 2026-11-11 · 前端与 i18n 文案键完整性（第二批，B=10）
 - issue #16 / 开批时间 2026-11-11 06:20 (GMT+8)
 - CodeBuddy 首条分析：**未到（等待中）**——issue 发出后 60 s × 5 次轮询（06:21–06:26）+ 结束前即时复核（≈06:27）+ 7 分钟处延时复核（≈06:28）均 0 评论（batch 9 的首条在 18 分钟处才到，窗口不可靠，消费者下次运行重新等）。
-- 6 轮进度：0 / 6（待消费任务更新）
+- 6 轮进度：1 / 6（第 1 轮 06:33–06:5x 完成，判定与 SHA 见下方 consume 1 小节）
 - 正文已喂给 CodeBuddy：**93 条「不成立」原文**（编号 54：preflight 2 + batch1 六轮 10 + batch2 编号 15–31 十七条 + batch4 第 1/5/6 轮 10 + batch6 第 1 轮 5 + batch8 第 1 轮加粗伪标题 4 条子断言 + 手工/单发消费 11-11 的 6 条；行内判定行 35：batch2 D2/D4、batch3 A5/E、batch5 六条、batch6 五条、batch7 八条、手工 11-10 一条、batch8 第 2–6 轮五条、**batch9 七条**（§四.1/§四.2/§五.1/§五.3/d574676 第一处 hunk/B 结论/行号 485）；摘录 4：batch8 补记两条 + 收尾之后撞号描述一条 + batch9 汇总增量计数一条）+ 首查项（`src/types.ts`/`src/api.ts` ↔ `docs/api.yaml` 在 batch 5–9 大量补齐后的漂移；桌面审批 UI 文案与「全仓只有 daemon 带审批处理器」事实的一致性）+ KNOWN-ISSUES 空档（K7/K13/K15/§3 懒加载审批在桌面的实际表现）+ 前端口径（i18n 未加引号键 `From:`/`Decision:`、字面量契约 948/747/860 MISSING=0 已闭环、属性访问 15 + 裸变量 8 不重提、1rem=14px、无 preflight、Button/IconButton 原语、L2-55…L2-74 勿重提、npm test 213/27 本日 06:17 实测）。正文由 `/tmp/build-opt-issue-b10.py` 按 ledger 锚点切片生成（复用 b9 骨架，新增 batch9 区域锚点、7 条判定行与 1 条摘录；全部锚点唯一性校验通过，计数复验 93）。
 - **开批后更正（消费者必读）**：正文「上批遗留的两个问题（请先答这两问）」一节**已过时**——两问在开批前一小时（05:18，`dae017e`/`ce1b22e`）就由消费者侧在 ledger 末尾补答：①五个路由都带审批处理器（都走 `authorize_command` → `authorize_command_with_approval`），顺手核出新形状：六个调用点全部忽略 `approved` 返回值，与 `/exec` 的 `if pf.approved && pf.risk == High { req.force = true }` 不一致（是否立 L2 待判）；②L2-108 的「导出包缺 `risk_rules.toml`」现行行为就是 no-op，真正待拍板的只剩「目标带 `[risk.*]` 时整段替换还是并集」；③附带 L2-109 改判「是设计不是滞后」。生产任务已发更正评论 `2120283018706182144`（06:30:39 GMT+8；**#16 现有这条评论是生产任务的更正，不是 CodeBuddy 分析——判定「已到」须按作者区分**），**第 1 轮起以更正评论与 ledger 当前版为准，勿按正文旧文执行**。根因是生产任务开批前未 `git fetch`——本地 HEAD 停在 `a3504a9`（05:16），漏了消费者 05:18 的两笔。**下次开批前必须先 fetch cnb main 并重读 ledger 尾部。**
 - 同主题第一批（#10）已 6 轮闭环；此后 `src/` 仅 `628e9f3` 一笔注释改动（ApprovalDetail.tsx）。本批重点：前端镜像类型 ↔ api.yaml 漂移、桌面审批文案、第一批未点名组件（approval/ 子目录、NetcattyImportDialog、CommandPalette、monaco 相关、main.tsx/ErrorBoundary 链）。
 - 顺手按 #15 批次条目与 BATCH_COMPLETE 行自述删除顶部 `BATCH_COMPLETE · issue #15` 状态行（HTML 注释同步为八条）。
 - 下一批（B=11）：11 % 6 = 5 → 主题 5：`docs/` 声称与代码实际行为是否相符（第二批，#11 已闭环）。开 issue 前先 fetch cnb main 重读 ledger（本批消费期间会新增不成立条目，行内判定行锚点会漂移，b10 脚本可改造复用）。
 - 若 #16 仍 open 则按背压闸门跳过；锁沿用「保留在位、消费者侧自行清理」先例。
+
+### consume 1 / 6 · 2026-11-11 06:33–06:5x (GMT+8) · batch 10（issue #16）
+
+- **首条分析到了，但比我的轮询窗口晚 40 秒**：60 s × 5（06:33–06:38）+ 即时复核（06:39 前）都只有生产任务那条更正；CodeBuddy 的分析落在 **06:39:18**（评论 `2120285197013790720`，基线 `ce1b22e`，19 258 字符）。**教训同 batch 8**：结束「等待」判断前多复核一次，能省掉一整轮自取。
+- **判定 15 条 → 成立 9 / 部分成立 3 / 不成立 1 / 已并入 2。最值钱的是那条不成立。**
+  - **A1 不成立**：它说 `authorize_targets`（`bin/agent2ssh-daemon.rs:835-882`）里的 `if approved && risk == High` 恒为假、`/exec-multi` 与 `/exec/compare` 会拒掉一次已批准的高风险执行。实际该函数两处解构都是 `let (risk, approved) = authorize_command(...)`（`:847`、`:866`），两个 handler（`:1833`、`:1862`）都把返回的 `approved_hosts` 塞进 `ExecMultiRequest`，`core.rs:1425` 据此翻 `force_for_host`。**它把 `let (risk, _)` 的 8 处（session/forward/connect）与这个函数记混了**；那 8 处 + terminal WS 的 `Ok((risk, _))`（`:4952`）确实忽略，但那 9 条路径没有 force 概念。它据此建议的 L2-110 因此不立条。
+  - **A2 部分成立**：我第 1 轮更正里写「六个调用点」，实际 `let (risk, _)` 8 处 + terminal WS 1 处 = **9**。个数它对，但它把这半与 A1 混在一条里。
+  - **C1 部分成立**：「Approve and execute」不是假话——广播路径批准后 daemon 确实把 `format!("{}\r", command)` 写进目标 PTY（`daemon.rs:4521-4547`），`/exec` 路径由 daemon 自己跑；错的是宾语（执行发生在发起方会话，不是本窗口）。按「无判据不认」不判缺陷，立 L2-112 供拍板。
+  - **D4 部分成立**：`ApprovalDetail.tsx:71-84` 原注释「Four of the five context fields the contract declares」——`ApprovalContext` 实际 **9** 个字段，前提错、结论对。已改写为「四个，另外五个各自为何不显示」。
+- **L1 落地**（两笔，按「代码与文档分家」）：`2254d13`（`src/**`：`i18n.tsx` 两条 libssh2 文案改 russh + 新增 `revoked`/审批分工两条键、`types.ts` 两处过时注释 + `ApprovalStatus` 补 `revoked`、`AlgoPrefsDialog.tsx` 注释与两处键、`HelpPanel.tsx` 增一段「审批卡由 daemon 发起」、`ApprovalWorkbench.tsx` 补 badge 变体、`ApprovalDetail.tsx` 按钮改名 + 上下文注释、`CommandPalette.tsx` 注释重写 + 补 2 条、`ApprovalDetail.test.tsx` 断言同步）、本笔（`docs/api.yaml`：`ForwardRule` 补 3 字段、`ForwardAddRequest` 说明 body 只读 5 个字段、`POST /forwards` 补 `?via=` 参数、`/approvals` 的 summary/description 改成「全量 + 无序 + 无分页」，加 L2 八条 + 本小节）。
+- **本轮最重要的两条自取**（不在它的清单里）：
+  1. **`POST /forwards` 的 `via` 是 query 参数**（`params.get("via")`，`daemon.rs:2965`），请求体里的 `via`/`name`/`group_id`/`id` 被静默忽略——因为 handler 收的就是 `Json<ForwardRule>` 却只取 5 个字段。同一份 `api.yaml` 里 `/forwards/multi` **写了** `via` 参数与 `name`/`group_id`，单条路由漏了。
+  2. **前端用户可见文案还在把 libssh2 当事实**：`i18n.tsx:856/873`（算法偏好对话框的两段说明）与 `types.ts:562/779`、`AlgoPrefsDialog.tsx:12`。`Cargo.toml` 已无 `ssh2`，`ssh_algo.rs:28/79-82/311-317` 明写「russh 未启 `flate2`，`none` 是唯一可协商值」——**行为结论不变，归因全错**。batch 2 清了 docs/SKILL/`ssh_algo.rs`，漏了 `src/`。
+- **L2 新增八条**（L2-110…L2-117）：`side_effect` 三处镜像缺、`max_mb` 桌面不可达、审批动词口径（C1+C3）、TTL 过期不发 `approval_responded` 导致 toast 常驻、`Decided today`/`In flight` 两个统计口径错、复制失败静默、`CommandPalette` 的 16 条缺口与守卫、活动流不渲染 `decision`。
+- **验证**：`npm run build` 6.51 s；`npm test` **213 passed / 27 files**（与基线同）；`cargo test --no-default-features --lib` **861 passed / 1 failed / 1 ignored**（红项仍是那条故意红的 IPv6）；改 `api.yaml` 后加跑 `--features daemon --test daemon_integration api_yaml` **6 passed**；`yaml.safe_load` 90 paths 通过。Rust 源码本轮一行未动。
+- **CodeBuddy 本轮的失效形态**：①**把函数内的解构写法记混**（A1：`let (risk, approved)` 当成 `let (risk, _)`，据此推出「恒定失败路径」）；②**把自己的编号当既有编号**（它自拟 L2-110…116，而本仓最大是 L2-109）。A1 是本批第一次「它给出可复现反例、复核后完全反转」的条目，记下来供下一轮提防。
