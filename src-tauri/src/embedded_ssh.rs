@@ -532,7 +532,7 @@ pub fn import_known_hosts_from_ssh(path: Option<&str>) -> Result<KnownHostImport
         // is filed under an identity no `HostProfile` resolves to, and still
         // counts as `imported`. OpenSSH brackets every non-22 port, so reaching
         // this needs a hand-edited or foreign `known_hosts`; the fix changes
-        // what gets stored and is recorded as L2-89.
+        // what gets stored and is recorded as L2-95.
         let first_host = host_field.split(',').next().unwrap_or(host_field);
         let (hostname, port) = split_host_port(first_host);
         let identity = format!("{hostname}:{port}");
