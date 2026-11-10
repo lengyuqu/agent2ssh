@@ -698,6 +698,8 @@ CodeBuddy 的复核 `2120258070138740736` 新批 3 条 → **成立 1（§五.2�
 
 **第 5 轮复核对 L2-108 拍了方向：选 ①，不走 ②。** 理由按分量：②把一个「导出说 not configured、导入把用户手写文件冲掉还报 overwrite」的错位写进 `summary` 当规范；①两半一起修好，且 `policy.rs:117` 的 `save_policy_approval_policies` 已经是「load → 改 `approval.policies` → save」的形状，`[risk.*]` 照抄即可，不用新建文件。**但它留了一个子问题没定**：导入时若 `policy.toml` 已存在且带 `[risk.*]`，是**整段替换**还是**与现有条目求并集**。复核倾向整段替换（把「导出→导入」当一次完整搬运，与今天 `risk_rules.toml` 的覆盖行为一致，只是目标换对了）。**这一条仍需人拍板**：整段替换意味着从别的机器导入会清掉本机原有的自定义风险规则，而并集意味着同一条规则两边定义不同时无法表达「以哪边为准」。**L2-108 维持 open，等这个子问题定了一起做。**
 
+**第 6 轮补答（CodeBuddy，issue #15 收尾轮的遗留问题之一）：`risk_rules` 缺省该「什么都不做」，不是「清空段落」。** 这条其实不用等拍板——**现状已经是「什么都不做」**，`import_team_config`（`core/team_config.rs`）里写 `risk_rules.toml` 的整个分支包在 `if let Some(ref rules) = export.risk_rules` 内，`playbooks` 同理；`ImportResult::risk_rules_imported` 就是 `is_some()`。所以「导出包里没有 `risk_rules`」时，本地 `risk_rules.toml` 原样保留，`summary` 也不出现 `risk rules:` 一段（`preview_team_config_import` 的 `risk_rules_change` 在 `export.risk_rules.is_none()` 时是 `None`）。**选 ① 之后要做的是「保持这个 no-op」而不是「实现它」**：目标文件从 `risk_rules.toml` 换成 policy，缺省语义不变——文件不动、段落不动、`summary` 不出这一段。已把这条边界写进 `export_team_config` / `import_team_config` 的文档注释，免得下一次又把「缺省」当成「清空」重新讨论。**仍未定的只有一条**：目标带 `[risk.*]` 时整段替换还是求并集。
+
 ## 2026-11-11 · batch 9 第 6 轮（issue #15，基线 `418c6db`）· 自取
 
 本轮 5 次轮询（60 秒 × 5）没有新复核，转自取：两处人读文档 + 一条签名级清理。**判定全部成立（自取不涉及「指摘」）**，L1 已落，下面的进 L2。
@@ -705,3 +707,16 @@ CodeBuddy 的复核 `2120258070138740736` 新批 3 条 → **成立 1（§五.2�
 | 编号 | 位置 | 判断 | 为什么不能自动落 | 建议改法 |
 |---|---|---|---|---|
 | L2-109 | `bin/agent2ssh.rs:1585-1606`（`authorize_local_operation` 的 `force: bool` 形参）、9 个调用点 `:2412`…`:2555` | 成立（残留形参） | 9 个调用点**全部**传字面 `false`，而 `SftpCommands::*` 没有任何 `--force` 标志；形参与 `--force` 同名，读代码的人会以为「某天会传 true」。本轮复核独立指出同一点（它说「是设计，不是漏传」——这点我核过也对：`sftp` 从来没有 force 能力）。但**删形参是签名改动**，且要先确认「`sftp` 永不允许 force」是设计而不是待补的功能：daemon 侧 9 个 SFTP handler 也把 `force` 硬编码 `false`，两边一致，看起来是「SFTP 只能靠审批，不能靠 force」的有意设计 | 二选一：①承认设计——删掉 `authorize_local_operation` 的 `force` 形参（内部传 `false`），并在 daemon 侧把 `preflight_guarded_request(..., false, ...)` 的注释写明「SFTP 不接受 force」；②这其实是个功能缺口——给 `sftp` 加 `--force`，同时给 daemon 的 SFTP 请求体加 `force` 字段。①只动签名，②要动契约（`api.yaml` 九条路由的 requestBody + `types.rs` 三个请求结构） |
+
+**第 6 轮定级（CodeBuddy，issue #15 收尾）：** L2-109 **是设计，不是滞后**，证据四条，都能自己验：
+
+1. `CHANGELOG.md:248`（`06fa58c`，2026-09-11）——加 SFTP 四件套的那一笔自己写的：CLI / MCP / 桌面「refuse `high` and `blocked` at the authorisation step before any connection is opened」，**并且**「neither the MCP schema nor the daemon body schema has a `force` field, so those surfaces cannot override the verdict at all」。这是 `f345a92`（2026-06-11）之后、唯一一处直接谈「sftp + force」的文字，它把「没有 force」写成契约，不是写成待办。
+2. `cli-quickstart.md:97` 与 `SftpCommands::RmRf` 的 clap 文档（`bin/agent2ssh.rs`）——`rm-rf` 的注释只说「rated high risk … so it can require approval」，**只说审批**，`--force` 一个字没有；同文件里 `exec`、`exec-multi`、`playbook run`、`redact remove`、`highlight remove`、`webdav` 全都有 `--force`，`sftp` 九个变体一个也没有。不是漏了一个，是整组都不一样。
+3. `authorize_local_operation`（`bin/agent2ssh.rs:1585`）的 `force` 形参**没有调用点能传 true**：九个调用点全是字面 `false`（`:2412`…`:2555`），`SftpCommands::*` 没有任何 `force` 字段。形参是 `authorize_command_without_approval_handler` 签名（`execution_control.rs:337`，11 个形参）带过来的，不是需求。
+4. daemon 侧同向：九个 SFTP handler 调 `preflight_guarded_request(..., false, ...)`，而 `preflight_guarded_request` 的 `force` 形参在 `preflight_guarded_request_inner` 里原样交给 `authorize_command_inner`；`SftpUploadRequest` 等三个请求结构（`types.rs`）都没有 `force` 字段。`api.yaml` 的九条 `/sftp/*` requestBody 也没有。
+
+反面证据也查了：`f345a92` 之后没有任何提交或文档出现「给 sftp 加 `--force`」「sftp force」这类说法；`CHANGELOG.md:342`（桌面 mutation parity）说的是 session / forward / connection 跟着 daemon 的 high-risk approval/force **语义**走，`CHANGELOG.md:177`（rm-rf 走 daemon 审批）更是明写「there is no force or approval-bypassing fallback」。且 `authorize_local_operation` 的拒绝提示自己写着「sftp has neither --force nor daemon forwarding」——**这句话是本轮之前就有的**，即代码自己早就把「没有 force」当既定事实。
+
+**所以选 ①**：删形参、内部传 `false`，并在九个 daemon SFTP handler 旁注明「SFTP 不接受 force」。②（给 `sftp` 加 `--force`）与上面四条正面冲突，且要动 `api.yaml` 九条路由 + `types.rs` 三个结构，属于新功能而不是修缺陷。
+
+

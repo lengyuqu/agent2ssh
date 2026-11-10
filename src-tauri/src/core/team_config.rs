@@ -18,6 +18,19 @@ pub struct TeamConfigExport {
 
 /// Export team configuration: hosts (without private key paths), risk rules,
 /// and playbooks. Suitable for sharing within a team.
+///
+/// The risk-rules half is still read from `risk_rules.toml` only. When a
+/// `policy.toml` exists, `load_risk_rules` never opens that file — it reads
+/// `[risk.*]` out of the policy instead — so this export reports "not
+/// configured" for a machine whose risk rules are very much in force, and the
+/// import that follows overwrites a legacy file nothing reads. Tracked as
+/// L2-108 in `docs/reports/OPT-LOOP-L2-PENDING.md`, which fixes the target
+/// file (the policy, via `existing_policy_path()`) and leaves one question
+/// open: whether an import replaces the whole `[risk.*]` section or merges
+/// into it. "When the export carries no `risk_rules`" is *not* open — the
+/// import already answers it, by touching nothing: every branch below is
+/// inside `if let Some(...)`, so an export without that half neither rewrites
+/// nor clears the local section.
 pub fn export_team_config() -> Result<TeamConfigExport> {
     let config = load_config()?;
 
@@ -64,6 +77,13 @@ pub fn export_team_config() -> Result<TeamConfigExport> {
 
 /// Import team configuration: merge hosts (skip duplicates by name), and
 /// optionally overwrite risk rules and playbooks.
+///
+/// "Optionally" is decided by the export, not by the caller: a missing
+/// `risk_rules` / `playbooks` key in the payload leaves the local file alone,
+/// and `ImportResult` reports the difference through `risk_rules_imported` /
+/// `playbooks_imported`. An import that carries `None` is therefore a no-op for
+/// that half rather than a clear — which is the behaviour L2-108's fix has to
+/// preserve when it moves the target from `risk_rules.toml` to the policy file.
 pub fn import_team_config(export: &TeamConfigExport) -> Result<ImportResult> {
     let _guard = store_write_lock()?;
     let mut config = load_config()?;
