@@ -1757,6 +1757,12 @@ paths:
         path as `/exec`: bearer-token scope, execution gate, execution limits,
         effective risk, and approval policy are enforced before output streams.
         Server pushes: {"type":"stdout","data":"..."}, {"type":"stderr","data":"..."}, {"type":"exit","code":0,"duration_ms":1234}
+        The exit frame is sent once the command has run. A request refused
+        before it starts — a body that is not an ExecRequest, an unknown source,
+        a command over the length limit, a paused gate, a rate limit, a failed
+        authorization, `force` missing for a high-risk command, an unknown host —
+        answers with a single {"type":"error"} frame and closes the socket, so
+        there is no exit frame to wait for after one.
         When the daemon is stopping — `POST /shutdown` or a signal — it pushes
         {"type":"shutdown"} with no other field, drains for up to 500 ms, and closes.
         That frame is the client's only notice that the daemon is going away; it is not
@@ -1799,8 +1805,9 @@ paths:
         output until 500 ms pass with no new terminal event, and closes. That 500 ms
         is an idle timeout, not a budget: a terminal that keeps producing output is
         drained until the two-second per-connection deadline in `POST /shutdown`
-        drops the loop; a `Closed` or error event, or a send that fails, ends the
-        drain early.
+        drops the loop; a `Closed` or error event, a send that fails, or the
+        terminal's event stream ending all end the drain early — the last of those
+        sends no diagnostic and looks like a clean finish.
         Note the `message` field: `/exec/stream`'s shutdown frame has
         none, so a client that handles both routes has to accept the two shapes —
         and the same 500 ms means something else there: an absolute deadline
