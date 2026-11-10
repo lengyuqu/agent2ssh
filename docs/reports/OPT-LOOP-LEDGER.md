@@ -1496,7 +1496,7 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
   - 5 `russh-migration.md:494` 仍写「Pageant 优先、管道兜底」，`e67fd04` 已把代码翻成管道优先（部分成立，`agent.rs:317-327`；KNOWN-ISSUES.md:69 那句是对的）
   - 6 `embedded_ssh.rs:2074-2086` 的 T2-9 注释仍记 ssh2/libssh2 接线方式，`:1987` 同族残留（部分成立）
   - 另自验 3 条不成立（`bridge_tcp_and_channel` 空转烧 CPU / `channel.rs` request 混同超时与拒绝文案 / `legacy_pem` 尾随空格误判），并声明未重复 ledger 既有不成立与 L2-15/16/17/19/22/24/25/88 条目、未跑测试（环境无 cargo）
-- 6 轮进度：**1 / 6**（第 1 轮 2026-11-11 00:25 收尾，见文末 `consume 1 / 6`；issue 保持 open）
+- 6 轮进度：**2 / 6**（第 2 轮 2026-11-11 00:34 收尾，见文末 `consume 1 / 6` 与 `consume 2 / 6`；issue 保持 open）
 - 正文已喂给 CodeBuddy：**67 条「不成立」原文**（编号 44：preflight 2 + batch1 六轮 10 + batch2 编号 15–31 十七条（29–31 物理落 batch 2 末节、内容属 batch 3 第 5 轮，正文已标注）+ batch4 第 1/5/6 轮 10 + batch6 第 1 轮 5；行内判定行 23：batch2 D2/D4、batch3 A5/E、batch5 D6 后半/D8/F6 后半/F10/F11 后半/F12、batch6 a1 后果/a3.2/a5/c 附更正/#10、batch7 第 1/2/4/5 轮 8 条、手工单发消费（#2）1 条含 3 项）+ KNOWN-ISSUES 空档（K2/K7/K9/K12 + §3 未验证范围 + §3.1 Pageant 共存边界）+ 口径提醒（基线红测 861/1/1、npm 213/27、feature 组合不可相加、`daemon_*_e2e` 需显式 `--features daemon`、`exec_fixture` 空跑、`.github/**` 禁区、四列计数、`[跑]` 标注不可采信、行号一律现算、L2-15/L2-16…L2-25/L2-37/L2-73/L2-88 勿重提、api.yaml 已在 #9/#12 对齐）。正文由 `/tmp/build-opt-issue-b8.py` 按 ledger 锚点切片生成（块级正则 + 行内唯一子串校验：16 个编号块 44 条 + 23 条判定行，复验通过）
 - 同主题第一批（#8）已 6 轮闭环；正文已写明 #8 落地的 L1 与已登记 L2 勿重提，本批重点找 **#8 闭环后新增/残留**的问题
 - 顺手按 #13 批次条目的指示删除顶部 `BATCH_COMPLETE · issue #12` 与 `#13` 两条状态行（#13 那条明写「下一批（B=8）由生产任务开 issue 时删除本行」；#12 无指示但同属已关闭批次留痕，沿用 #8–#11 先例一并删除；顶部 HTML 注释已同步为六条）
@@ -1525,3 +1525,21 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
   - 文档笔：`russh-migration.md:494` 顺序改正 + `KNOWN-ISSUES.md` K2 撤掉「停滞时报告写到多少字节」+ `OPT-LOOP-L2-PENDING.md` 删 L2-17 空分支、新增 L2-95…L2-98。
 - **验证**：`npm run build` 6.36s；`cargo test --no-default-features --lib` **861 passed / 1 failed / 1 ignored**（失败项仍是那条故意红的 `an_ipv6_literal_at_port_22_is_removed`）；`cargo fmt --check` 绿。
 - **L2 待拍板**：L2-95（导入 identity 形态）、L2-96（SFTP 写无截止时间，K2 的「已修」其实没兜住）、L2-97（`/terminal` 帧形状）、L2-98（失败文案）。
+
+### consume 2 / 6 · 2026-11-11 · batch 8（issue #14）
+
+- **指摘来源**：CodeBuddy 对第 1 轮收尾的复核 `2120191019055497216`（00:25:04，第 1 轮发帖后 3 分钟）。基线 `b7bf48f`。
+- **判定**：它的复核表 6 行（认定到位 3.5 条）+ 下一批 6 条 → **成立 3 / 部分成立 2 / 不成立 1**。
+- **成立**：
+  - #1 我上一轮的注释把 `L2-95` 写成 **`L2-89`**（那是 `daemon_control.rs` 的 `force` 死分支）——我自己的错，已改。同一批我还在 `STALL_TIMEOUT` 注释里把 `L2-96` 写成 `L2-90`，一并改。
+  - #2 `/terminal` 停机 drain 分支 `TerminalEvent::Error(_) | Closed => break`（`:4855`）吞掉错误帧，正常分支 `:4900-4904` 会发 `{"type":"error"}`。→ **L2-99**，它建议排在其他四条 L2 之前（一行、且发生在最难复现的时刻），同意。
+  - #6 上轮漏跑 `cargo test --lib`（default feature）。本轮补：**878 passed / 1 failed / 1 ignored**，失败项同一条红测。（`--no-default-features --lib` 是 861/1/1，两者差 17 条 = `tauri_commands`。）
+- **不成立（头条一句，必须记）**：
+  - **「`russh_sftp` 有 10 s 读超时，写路径因此以 `BrokenPipe` 失败」— 不成立。** 它引 `rawsession.rs:406-414` 的 `run`，但该文件里**没有** `run`；连接任务在 `client/mod.rs:80`，循环体是 `process_handler(&mut rd, &mut handler)`，无超时。`rawsession.rs` 全文件唯一的 `runtime::timeout` 在 `:215` 的 `request()` 内，而 `write_nowait`（`:379-400`）只调 `send()`、原样返回接收端。`request_timeout_secs` 默认 10 s 属实（`client/mod.rs:46`），但它只约束 `stat`/`open`/`readdir`。`check_write_result → BrokenPipe`（`fs/file.rs:96-110`）确实存在，触发条件是**读任务结束**（EOF/关闭），不是「10 s 沉默」。⇒ 写路径仍无截止时间，L2-96 不变。
+  - 这是它**第二次引用一个不存在的形状**（上轮把 `split_host_port` 的返回说成括号形态）。凡是它给「某 crate 某个函数体每包都包了 timeout」这类断言，先去 crate 源码里确认那个函数是否在该文件。
+- **部分成立 / 备查（不新立）**：
+  - `fingerprint_sha256` / `host_key_algorithm` 的 `Option` 形状只服务理论分支——`:1688` 已把「没给主机键」当错误抛掉，正常连接不可能为 `None`。
+  - `import` 与 `remove` 对同一份 `known_hosts` 的形态假设**其实一致**（都只认 `[host]:port`），真正的不一致在入参类型（文件 vs `(host, port)`），与 L2-15 同一件事的两面。
+  - 「验证用例把 timeout 设成 1 s」的建议建立在上面那条错误机制上：设 `request_timeout_secs` 对写路径没有任何影响。挂在 L2-96 下，不采纳。
+- **L1**：`3ee366c`（两处编号 + `request_timeout_secs` 的归属）。文档笔：`KNOWN-ISSUES.md` K2 状态列改为「已修（旧症状不复现，待复测旧版本）；存量限制见右」、`write_nowait` 那句补上「`request_timeout_secs` 只服务 `request()`」、`L2-PENDING` 记反驳与 L2-99。
+- **验证**：`npm run build` 6.37s；`--no-default-features --lib` 861/1/1；`--lib` 878/1/1；`cargo fmt --check` 绿。
