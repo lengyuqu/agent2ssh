@@ -609,11 +609,13 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
 
 **验证**：`npm run build` 6.53s；`cargo fmt --check` 绿；`--no-default-features --lib` = 861 passed / 1 failed / 1 ignored（已知红测）；`api_yaml` 1 passed；`yaml.safe_load` 90 path / **69** schema / 悬空 `$ref` 0；`event_type` 17 → 18、`AuditFilter` 6 → 13、`Playbook` 5 → 6。
 
-**自我更正 ×3**：
+**自我更正 ×4**：
 
 1. **`nullable: true` 是 136 处，不是 142**：我上次用的是 `grep -c null`（把 `nullable` 以外含 null 的行也算进去），这次用 `grep -c "nullable: true"` 现算。L2-46 的定量依据已改。
 2. **前四轮我一直把进度行改错了地方**：`- 6 轮进度：K / 6` 在文件里出现两次，我每轮都改到**上面那一行**（它坐落在 issue #8 的小节里，却引用着只存在于 issue #9 段内的 `consume K / 6` 锚点）。本轮把错位那行删掉、把 issue #9 自己那行补到 6 / 6 并逐轮写上回帖 id。教训：**改计数器之前先确认它属于哪一节**——`grep` 得到唯一匹配，不等于匹配到了正确的那一条；位置错了四周都没人发现，是因为它「看起来」一直在递增。
 3. **`$ref` 兄弟键那处它说得对**：上一轮我在 `/highlight/rules/update` 的 `rule` 上留了 `$ref` + `description`，是全文唯一一处这样写的；已把句子挪进 `HighlightRule` 的组件描述。本轮新增的三处 `$ref` + `description`（`local`/`remote`/`scope`）是**故意**的：它们表达「省略 vs null」这种 `type` 说不清的东西，属 L2-46 拍板后一起收。
+
+4. **提交信息里那个「three lines」又不准**：`dabff2d` 写的是 `grep -n '6 轮进度'` = three lines，实测是 **4** 行——第 4 行是文件头的约定说明（「6 轮进度留 `0 / 6`」），不是数据行。数字本身没错（3 条数据行），但写成了命令的输出，读者照抄会得到 4。这已经是本批第二次「提交信息里的数字与命令输出不一致」（上一次是 `0b2bb5c` 的 51 schemas）。规则收紧：**`Verified:` 行里的每个数字，要么贴命令与输出，要么不写数**。
 
 ---
 
