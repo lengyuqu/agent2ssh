@@ -20,12 +20,37 @@ pub struct DaemonStartResult {
     pub log_path: PathBuf,
 }
 
+/// The config directory as an absolute path.
+///
+/// `AGENT2SSH_CONFIG_DIR` is the one setting every surface of this project reads
+/// and none of them shares a working directory: the desktop sidecar is started
+/// by the app, the daemon by the CLI or by that app, an MCP server by its client.
+/// A relative value only means something against the directory of the process
+/// that read it, so resolving one here keeps each of them on its own reading and
+/// makes the paths this module reports absolute — a relative `daemon.pid` path
+/// says nothing about which file was actually read.
+///
+/// It does *not* make `AGENT2SSH_CONFIG_DIR=./cfg` mean one file to two processes
+/// started from different places: each resolves `./cfg` against its own working
+/// directory, and those are two directories. Nothing can reconcile that without
+/// changing what a relative path means, so the guide says to use an absolute one
+/// (`docs/guides/configuration-guide.md`).
+fn config_dir_absolute() -> Result<PathBuf> {
+    let dir = config_dir()?;
+    if dir.is_absolute() {
+        return Ok(dir);
+    }
+    Ok(std::env::current_dir()
+        .context("failed to resolve the working directory for a relative AGENT2SSH_CONFIG_DIR")?
+        .join(dir))
+}
+
 pub fn daemon_pid_path() -> Result<PathBuf> {
-    Ok(config_dir()?.join("daemon.pid"))
+    Ok(config_dir_absolute()?.join("daemon.pid"))
 }
 
 pub fn daemon_log_path() -> Result<PathBuf> {
-    Ok(config_dir()?.join("daemon.log"))
+    Ok(config_dir_absolute()?.join("daemon.log"))
 }
 
 pub fn read_daemon_pid() -> Result<Option<u32>> {
@@ -281,6 +306,10 @@ pub fn daemon_matches_config(pid: u32) -> bool {
 // the PID as absent when the platform explicitly reports that it does not exist.
 #[cfg(unix)]
 fn pid_definitely_missing(pid: u32) -> bool {
+    // `u32::MAX - 1` — the pid a test uses for "certainly nothing" — does not
+    // fit an `i32`, and `as i32` would make it -2, i.e. a *group* signal
+    // target rather than a missing process. Anything that cannot be named as a
+    // single positive pid is not a pid this process could be.
     let Ok(pid) = i32::try_from(pid) else {
         return true;
     };
