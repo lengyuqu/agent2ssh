@@ -343,10 +343,15 @@ fn write_all_shrinking<W: Write>(
 /// The failures this exists for are hangs, not errors: a server that stops reading
 /// mid-packet leaves `write` blocked, and no amount of checking its return value
 /// helps because it never returns. Every guard above this one — the banner
-/// heuristic, the halving on `Ok(0)` — reacts to a *reply*, so none can fire. A
-/// deadline turns the hang into a failure that names the write size and the number
-/// of bytes that did get through, which is the difference between a bug report and
-/// a stuck process.
+/// heuristic, the halving on `Ok(0)` — reacts to a *reply*, so none can fire.
+///
+/// The byte accounting this struct keeps does **not** reach the message on the
+/// path that matters. `StallGuard::write` propagates `inner.write`'s `Err` with
+/// `?` before any deadline check, so a real transport failure — including the
+/// `BrokenPipe` a killed SFTP session produces — leaves with the transport's
+/// wording and none of the counters. A deadline added around the SFTP handle has
+/// to read `bytes_written` itself and put it in its own error; nothing here will
+/// do it. See L2-96.
 ///
 /// Generous on purpose: a stall detector, not a throughput limit. Ten minutes of
 /// silence mid-write is pathological on any link, and a false positive kills a
