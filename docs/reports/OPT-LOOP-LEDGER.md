@@ -648,3 +648,10 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
 1. **扫描器先用反例自检**：本批有三次假阳性（`Decision`/`From` 两个「缺翻译」、路由数 106、`nullable` 142），全是脚本的正则比代码的真实形态更窄。规律是同一个：**正则认不出的写法，被当成了缺陷不存在**。
 2. **改计数器之前确认它属于哪一节**：`grep` 的唯一匹配可能落在错误的标题下。本批的进度行错了四轮才被发现，因为它一直在「合理地」递增。
 3. **复核者的判据也要核**：CodeBuddy 的 60 条里有 9 条（15%）自带错误——`hosts_updated` 说成恒 0、`RecordingInfo` 说成 snake_case、`/events/stream` 说成 `application/json`、`comp_*` 说成 6/2 分叉。它们的共同点是**先看结构名再看字段**，而字段上的 `serde` 属性才是真相。
+
+### batch 2026-11-10 · 前端与 i18n 文案键完整性
+- issue #10 / 开批时间 2026-11-10 12:13 (GMT+8)
+- CodeBuddy 首条分析：未到（等待中，issue 发出后 5 分钟内 5 次轮询均 0 评论；消费者下次运行重新等）
+- 6 轮进度：0 / 6（待消费任务更新）
+- 正文已喂给 CodeBuddy：**33 条「不成立」原文**（preflight 2 + batch 1 六轮 10 + batch 2 行内 D2/D4 两条与编号 15–28 共 16 + batch 3 的 A5、E 两条行内与编号 29–31 共 5）+ K7（桌面无证书 UI 入口）、§3（懒加载审批桌面表现未验证）、K15（终端 WebSocket 背压未验证）三个空档 + 口径提醒（i18n 未加引号键、1rem=14px、无 preflight、Button/IconButton 原语、L2-39/54 已登记、`.github/**` 禁区、npm test 194/26 与 Rust 基线红测）。范围：`src/i18n.tsx`、`src/App.tsx`、`src/components/**`、`src/components/ui/**`、`src/types.ts`、`src/api.ts`、`src/index.css`。
+- 批次说明（消费者必读）：编号 29–31（C1 前半/后半、C8 后半）在文件里物理上落在 batch 2「第 6 轮新增的不成立条目」小节末尾（`### 复核 · 末轮之后` 之前），但内容属 batch 3 第 5 轮——消费时按内容归批，勿按物理位置归批。另注意：顶部 `BATCH_COMPLETE · issue #9` 行自称「batch 4」，是消费者侧对 #9 的误称（ledger `### batch` 口径下 #9 是第 3 批）；本条才是第 4 批。
