@@ -47,7 +47,7 @@ components:
         user:      { type: string, nullable: true }
         port:      { type: integer, nullable: true }
         key_path:  { type: string, nullable: true }
-        password:  { type: string, nullable: true }
+        password:  { type: string, nullable: true, writeOnly: true, description: "Accepted on write; every read path calls `redacted_for_transport`, so this is always null in a response." }
         jump_host: { type: string, nullable: true }
         risk_override: { $ref: "#/components/schemas/RiskLevel", nullable: true }
         tags:
@@ -59,7 +59,7 @@ components:
         proxy_id:  { type: string, nullable: true, description: "Proxy profile id used for the TCP connection to this host." }
         group:     { type: string, description: "UI grouping bucket. A value that is not one of the configured group ids is reset to `default` when the config is normalized, so a group must be registered before a host can name it." }
         init_command: { type: string, nullable: true, description: "Command run in the remote shell immediately after connect (OpenSSH `RemoteCommand`)." }
-        passphrase: { type: string, nullable: true, description: "Passphrase for an encrypted private key; persisted as a secret reference in hosts.json, like password." }
+        passphrase: { type: string, nullable: true, writeOnly: true, description: "Passphrase for an encrypted private key; accepted on write, persisted as a secret reference in hosts.json, and always null in a response for the same reason as password." }
         ai_allowed: { type: boolean, default: true, description: "false = human-only host; AI/automation sources are refused" }
 
     ExecRequest:
@@ -74,6 +74,7 @@ components:
         max_output_bytes: { type: integer, nullable: true }
         reason:           { type: string, nullable: true }
         change_id:        { type: string, nullable: true }
+        side_effect:      { type: string, nullable: true, description: "Caller-declared impact, e.g. `triggers a Full GC, 100-300ms pause`. Surfaced on the approval card and recorded in the audit trail." }
         source:           { type: string, nullable: true }
 
     ExecResult:
@@ -87,6 +88,9 @@ components:
         duration_ms: { type: integer }
         risk_level:  { $ref: "#/components/schemas/RiskLevel" }
         truncated:   { type: boolean }
+        dropped_bytes: { type: integer, default: 0, description: "Bytes removed by truncation. Truncation keeps the head and the tail and drops the middle, so this is the exact size of the gap." }
+        side_effect:   { type: string, nullable: true, description: "Echoed from the request so the caller sees what was recorded in the audit trail." }
+        risk_unclassified: { type: boolean, description: "Present only when true: `risk_level` is a bash verdict about a command the target interprets in another language, so it is a flag rather than a trustworthy level." }
 
     ExecMultiResult:
       type: object
@@ -250,6 +254,10 @@ components:
           type: string
           nullable: true
           description: "The command as requested, when the approver ran a rewritten one (then `command` is what ran)"
+        side_effect: { type: string, nullable: true, description: "Caller-declared impact for this entry" }
+        action:      { type: string, nullable: true, description: "Operation category, e.g. exec, sftp_upload, forward_add, config_update" }
+        outcome:     { type: string, nullable: true, description: "success, blocked, error or timeout, derived from exit_code and risk_level" }
+        risk_unclassified: { type: boolean, description: "Present only when true: the recorded risk level is not a trustworthy verdict (see ExecResult)" }
 
     AgentEvent:
       type: object
@@ -383,7 +391,7 @@ components:
         risk_level:   { $ref: "#/components/schemas/RiskLevel" }
         requested_at: { type: string, format: date-time }
         ttl_secs:     { type: integer, description: "TTL in seconds before auto-expiry" }
-        status:       { type: string, enum: [pending, approved, rejected, timed_out] }
+        status:       { type: string, enum: [pending, approved, rejected, timed_out, revoked], description: "`revoked` is written when an already-approved request is withdrawn; today only in-process callers produce it, there is no HTTP route for it." }
         rewritten_command: { type: string, nullable: true, description: "Set when the approver approved a different command; that is what ran" }
         context:
           type: object
@@ -532,7 +540,7 @@ components:
 
     TeamConfigExport:
       type: object
-      description: Shareable configuration bundle. Host profiles are exported with `key_path` and `password` stripped.
+      description: Shareable configuration bundle. Host profiles are exported with `key_path`, `password` and `passphrase` stripped; everything else, including `proxy_id`, is carried as-is.
       properties:
         hosts:
           type: array
@@ -582,6 +590,69 @@ components:
       type: object
       properties:
         error: { type: string }
+
+    ApprovalPolicy:
+      type: object
+      required: [name]
+      properties:
+        name:         { type: string, description: "Human-readable policy name" }
+        hosts:
+          type: array
+          items: { type: string }
+          description: "Host names this policy applies to; empty means every host. Matching is case-insensitive."
+        tags:
+          type: array
+          items: { type: string }
+          description: "Host tags; any match applies the policy. Empty means every tag."
+        min_risk:       { $ref: "#/components/schemas/RiskLevel", nullable: true, description: "Lowest risk level that triggers approval. Absent means any level." }
+        command_pattern: { type: string, nullable: true, description: "Glob pattern (`*`, `?`) the command must match for the policy to apply" }
+        requires_approval: { type: boolean, default: true, description: "true routes the match to an approver; false auto-approves it" }
+        ttl_secs:       { type: integer, nullable: true, description: "Approval TTL for requests created by this policy" }
+
+    DaemonHealthSummary:
+      type: object
+      properties:
+        version:     { type: string, nullable: true }
+        uptime_secs: { type: integer, nullable: true }
+        pid:         { type: integer, nullable: true }
+
+    DaemonMetricsSummary:
+      type: object
+      properties:
+        request_count:       { type: integer, nullable: true }
+        exec_count:          { type: integer, nullable: true }
+        exec_blocked_count:  { type: integer, nullable: true }
+        approval_count:      { type: integer, nullable: true }
+
+    DaemonViewEntry:
+      type: object
+      required: [alias, url, connected]
+      properties:
+        alias:      { type: string }
+        url:        { type: string }
+        connected:  { type: boolean }
+        host_count: { type: integer, nullable: true, description: "Absent while the daemon is unreachable" }
+        health:     { $ref: "#/components/schemas/DaemonHealthSummary", nullable: true }
+        metrics:    { $ref: "#/components/schemas/DaemonMetricsSummary", nullable: true }
+
+    DaemonUnifiedView:
+      type: object
+      required: [daemons, total_hosts, total_connected]
+      properties:
+        daemons:
+          type: array
+          items: { $ref: "#/components/schemas/DaemonViewEntry" }
+        total_hosts:     { type: integer }
+        total_connected: { type: integer }
+
+    VersionCompatibility:
+      type: object
+      required: [local_version, compatible, message]
+      properties:
+        local_version:  { type: string }
+        remote_version: { type: string, nullable: true, description: "Absent when the remote daemon did not answer /health" }
+        compatible:     { type: boolean }
+        message:        { type: string }
 
     AlgoPrefsState:
       type: object
@@ -668,8 +739,15 @@ paths:
         with it — PTY sessions, resident shells, port forwards and pending
         approvals.
         The desktop app and `agent2ssh daemon stop` use this route on all
-        platforms after checking the health PID; if shutdown was accepted but
-        the process does not exit, they may terminate it after the drain timeout.
+        platforms, but stopping is two steps rather than one: this request, then —
+        if the process is still running — a force-terminate. The caller waits
+        `GRACEFUL_STOP_WAIT` (8 s) for the process to exit; on `Running` it records
+        a warning, signals the process by force, then waits 2 more seconds, and a
+        `StillRunning` observation at that point is an error rather than a silent
+        success. Before the request it compares the PID `/health` reports with the
+        PID it was asked to stop, and with the config directory that daemon says it
+        serves; a disagreement ends the attempt as an identity error without
+        waiting, so this is not "always check health, then stop".
         Requires the unrestricted admin token; a scoped token gets 403.
 
         The optional `expect_pid` names the process the caller means to stop. It
@@ -2730,16 +2808,17 @@ paths:
             application/json:
               schema:
                 type: array
-                items: { type: object }
+                items: { $ref: "#/components/schemas/ApprovalPolicy" }
     put:
       summary: Replace approval policies
+      description: Sent whole rather than field by field. These policies decide which commands need a human, so a replace that omits a policy removes it.
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: array
-              items: { type: object }
+              items: { $ref: "#/components/schemas/ApprovalPolicy" }
       responses:
         "200":
           content:
@@ -2829,7 +2908,7 @@ paths:
         "200":
           content:
             application/json:
-              schema: { type: object }
+              schema: { $ref: "#/components/schemas/DaemonUnifiedView" }
 
   /diagnostics:
     get:
@@ -2868,12 +2947,12 @@ paths:
         "200":
           content:
             application/json:
-              schema: { type: object }
+              schema: { $ref: "#/components/schemas/VersionCompatibility" }
 
   /config/export:
     get:
       summary: Export shareable team configuration
-      description: Hosts are exported with `key_path` and `password` stripped; includes raw `risk_rules.toml` and `playbooks.toml` content when present.
+      description: Hosts are exported with `key_path`, `password` and `passphrase` stripped; includes raw `risk_rules.toml` and `playbooks.toml` content when present.
       responses:
         "200":
           content:
@@ -3470,7 +3549,12 @@ paths:
         "200":
           content:
             application/json:
-              schema: { type: object }
+              schema:
+                type: object
+                required: [status, nonce]
+                properties:
+                  status: { type: string, enum: [responded] }
+                  nonce:  { type: string }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
         "404":

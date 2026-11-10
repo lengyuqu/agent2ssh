@@ -83,7 +83,7 @@ allowed hosts/tags 过滤。修改 gate、主机、策略、脱敏/高亮、算�
 | PUT | `/recordings/config` | 更新终端录制开关（仅影响新会话） |
 | GET | `/recordings` | 列出本地终端录制 |
 | GET | `/recordings/:id` | 读取 asciicast v2 录制 |
-| DELETE | `/recordings/:id?confirm=delete` | 明确确认后删除录制并写审计 |
+| DELETE | `/recordings/:id` | 删除录制并写审计；必须带 `?confirm=delete`，缺了回 400 |
 | GET | `/gate` | 查询全局执行 gate |
 | POST | `/gate/pause` | 暂停非桌面来源执行 |
 | POST | `/gate/resume` | 恢复执行 |

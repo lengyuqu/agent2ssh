@@ -837,7 +837,7 @@ secret = "my-secret-key"
 - 每条消息固定带两个字段：`Host` 与 `Command`（命令装在围栏代码块里）
 - `Risk Level` 与 `Exit Code` 是**条件字段**，只有事件带了非空值才出现。所以 `diagnostic_error` 的卡片只有 `Host` 与 `Command` 两个 field（它的 `risk_level` 与 `exit_code` 都是 `None`）；命令没执行时（例如被 gate 拦下）`exec_completed` 也没有 `Exit Code`
 - 对 `diagnostic_error`，`Host` 里装的是**组件名**、`Command` 里装的是错误文本（见上一节的字段说明），在 Slack 里读起来就是「一个组件名 + 一段错误消息」，不是「一台主机 + 一条命令」
-- `approval_required` 事件包含打开本地 Approvals 控制台的按钮；实际批准或拒绝仍通过已认证的控制台/API 完成
+- `approval_required` 事件带 Approve / Reject 两个按钮，但**这两个按钮当前点不动**，不要把它们当操作入口：URL 由 daemon 的解析地址拼出（默认 `127.0.0.1:7722`），路径是 `.../approve` 与 `.../reject`，而路由只有 `POST /approvals/:id/approve` 与 `POST /approvals/:id/reject`（且要 bearer token）；换个机器点开时，`127.0.0.1` 指的是**点的人自己的机器**。请改用 `/console#approvals` 处理，实际批准或拒绝仍通过已认证的控制台/API 完成。这是已知缺口，已在 `docs/reports/OPT-LOOP-L2-PENDING.md` 的 L2-44 登记
 
 ### 自定义 Webhook
 
