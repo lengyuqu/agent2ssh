@@ -527,9 +527,12 @@ wscat -c "ws://127.0.0.1:7722/terminal?host=web1&token=$TOKEN"
   "username": "ubuntu",
   "fingerprint_sha256": "SHA256:...",
   "host_key_algorithm": "ssh-ed25519",
-  "server_banner": "SSH-2.0-OpenSSH_9.6"
+  "recording_id": null,
+  "terminal_id": "6f1c2a58-2f4e-4a1d-9c77-1b2f0f4a3d10"
 }
 ```
+
+`recording_id` 在终端录制关闭时为 `null`；`terminal_id` 是 `/terminal/broadcast` 系列路由接受的临时 ID。**这一帧不含服务器 banner**：banner 会暴露 SSH 实现与版本，传输层只把它留着给 SFTP 决定写入分块，不对外发。
 
 随后终端输入输出使用 binary frame 传输原始字节。调整窗口大小时发送文本控制帧：
 

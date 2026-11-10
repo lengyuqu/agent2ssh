@@ -143,7 +143,7 @@ JSON 格式，包含 `hosts` 数组，也可以包含由桌面端代理管理页
 | `passphrase` | string/null | 否 | 私钥口令引用；由凭据库管理，不应手工写入明文 |
 | `user` | string | 否 | SSH 用户名 |
 | `port` | integer | 否 | SSH 端口，默认 22 |
-| `key_path` | string | 否 | SSH 私钥路径；Windows 上私钥的文件格式有额外限制，见注意事项。私钥旁存在 `<key_path>-cert.pub`（`ssh-keygen -s` 的默认输出）时，自动改用该 OpenSSH 用户证书认证，无需额外字段 |
+| `key_path` | string | 否 | SSH 私钥路径；各平台可读的私钥格式一致，没有 Windows 专属限制（见本节「注意事项」）。私钥旁存在 `<key_path>-cert.pub`（`ssh-keygen -s` 的默认输出）时，自动改用该 OpenSSH 用户证书认证，无需额外字段 |
 | `jump_host` | string | 否 | ProxyJump 跳板机别名 |
 | `proxy_id` | string | 否 | 代理配置 ID，用于通过 HTTP CONNECT 或 SOCKS5 建立 SSH TCP 连接 |
 | `risk_override` | string | 否 | 覆盖该主机非 blocked 命令的风险等级（low/medium/high） |
@@ -1058,7 +1058,8 @@ agent2ssh host add web1 --host 192.168.1.10 --key ~/.agent2ssh/keys/my_key
 - 私钥文件权限必须为 `0600`（仅所有者可读写），Agent2SSH 自动设置正确权限
 - 密钥删除后，引用该密钥的主机配置不会自动更新
 - 建议为不同用途使用不同的密钥（工作、个人、部署等）
-- 可生成/导入的密钥类型：ed25519、rsa、ecdsa；**各平台一致，Windows 没有额外限制**。旧版曾写「Windows 上实际可认证的只有 `rsa` 的传统 PEM 形式」，那是 libssh2 + WinCNG 后端的限制，已随该后端一起移除（见本节上方「各平台的密码学能力一致」，以及 `AGENTS.md` 与 `CHANGELOG` 的 Removed 段）。`russh` 的解析器直接读 OpenSSH 容器、PKCS#1 与 PKCS#8，`ssh-keygen` 产出的密钥无需任何转换
+- **能生成的类型只有 `ed25519` 与 `rsa`**：`keys generate --type` 只接受这两个值（不指定时用 `keys algorithm` 的结论，恒为 `ed25519`），CLI 的 `keys` 也只有 `algorithm` 与 `generate` 两个子命令。**能导入的类型更宽**：桌面端 Keys 页的导入只做文件复制、按 `.pub` 前缀标类型，所以 `russh` 能读的格式（含 ECDSA P-256/384/521）都可以导入并用于认证——但本应用**不能生成**它们
+- **各平台一致，Windows 没有额外限制**。旧版曾写「Windows 上实际可认证的只有 `rsa` 的传统 PEM 形式」，那是 libssh2 + WinCNG 后端的限制，已随该后端一起移除（见本节上方「各平台的密码学能力一致」，以及 `AGENTS.md` 与 `CHANGELOG` 的 Removed 段）。`russh` 的解析器直接读 OpenSSH 容器、PKCS#1 与 PKCS#8，`ssh-keygen` 产出的密钥无需任何转换
 
 ---
 

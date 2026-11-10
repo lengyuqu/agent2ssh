@@ -1427,7 +1427,11 @@ paths:
         query string because browser WebSocket handshakes cannot set an
         Authorization header. This route and `/exec/stream` are the only ones
         that accept `?token=`; every other route requires `Authorization: Bearer`. The server first sends a JSON text frame:
-        {"type":"connected","host":"...","address":"...","username":"...","fingerprint_sha256":"SHA256:...","host_key_algorithm":"...","server_banner":"..."}.
+        {"type":"connected","host":"...","address":"...","username":"...","fingerprint_sha256":"SHA256:...","host_key_algorithm":"...","recording_id":null,"terminal_id":"..."}.
+        `recording_id` is null unless terminal recording is enabled, and `terminal_id`
+        is the ephemeral ID the broadcast routes accept. The server's pre-authentication
+        banner is deliberately not part of this frame — it names the SSH implementation
+        and its version — and the transport keeps it only to size SFTP writes.
         Terminal input/output then streams as binary frames. Resize control is
         sent as a JSON text frame: {"type":"resize","cols":120,"rows":36}.
         Terminal connections use the embedded SSH transport, including
