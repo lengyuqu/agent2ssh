@@ -239,3 +239,19 @@ enum DrainOutcome {
 **对 L2-15 的补充**：第 3 轮复核给出的证据独立地指向同一结论——「`[::1]:22` 不是 OpenSSH 写出的形态」（对方自建 sshd 实测：`:22` 写裸 `::1`，`:2222` 写 `[::1]:2222`），所以选项 ① 的可信度上升。同时选项 ② 的括注需要收紧：**「两种形态都匹配」只能加在 `port == 22` 分支里**，放到所有端口会打碎 `forgetting_one_port_leaves_the_other_port_alone`（它断言 `:22` 那行逐字节保留）；同效的另一种写法是拿 `split_host_port` 解析后比 `(host, port)`。两条已写进该模块的测试注释。
 
 **N6 是给 `C2` 用的新证据，不是缺陷**：`russh` 的 `authenticate_none` 可用（`channel.rs:809` 的测试已经在调它），所以「实现 `auth_methods`」不必等一次真正的认证失败——可以在 `authenticate` 开头先发一次 `none` 探测。代价是每次连接多一个往返，且老服务器可能把 `none` 记成一次失败尝试（`MaxAuthTries`）。这条只写在这里，供 `C2` 拍板时对照。
+
+---
+
+### 2026-11-10 · batch 2 第 4 轮追加（基线 `bf26f8c`）
+
+第 4 轮（CodeBuddy 第 3 轮复核）11 条：**成立 4 / 部分成立 4 / 不成立 2**，1 条只作观察。L1 只动了 `--help` 与指南里两处「按构建判断」的残留；行为项如下。
+
+| 编号 | 位置 | 判断 | 为什么不能自动落 | 建议改法 |
+|---|---|---|---|---|
+| L2-21 | `embedded_ssh.rs` 的 `remove_known_host_core`（`:424-446`）与 `known_host_identity`（`:196-198`） | 部分成立，且**比指摘说的更彻底** | 形态不一致属实：identity 是 `host:port`（IPv6 即 `::1:22`），而 UI 拿到的 `TrustedHostFingerprint.address` 是 `format_host_port` 的 `[::1]:22`，两者互不匹配。但**这个函数没有任何生产调用点**——`tauri_commands` 只暴露 `forget_system_known_host`（写系统 `~/.ssh/known_hosts`），CLI 的 `known-hosts` 只有 `import`/`forget`，前端的 `api.ts` 也没有对应命令；全仓引用只剩它自己和两条测试（`:2604`、`:2748`/`:2756`）。所以「用户在 Hosts 面板点 Forget 删不掉」这条路径不存在——它是一段死代码 | 二选一：①删函数 + 两条测试（并删 `known_host_identity` 在删除路径上的用法）；②保留但让它先 `split_host_port` 归一化再比，同时补一个生产调用点（UI 的「Forget in app store」）。选①还是②是产品决定：现在 UI 上根本没有「忘记应用内信任」的入口 |
+| L2-22 | `embedded_ssh.rs` 的 `import_known_hosts_from_ssh`（`:500-522`） | 部分成立（前半成立，后半不成立，见 ledger 23） | 只做 `STANDARD.decode(key_b64)`，不校验解出来的是不是一个 SSH 公钥：截断的合法 base64（20 字节）会被导入并算出一个与真实密钥不同的 `SHA256:` 指纹，而 `ssh-keygen -l` 对同一行报 `is not a public key file`。后果是下一次连接必然报「指纹已变」，用户看到的是自己从没连过的主机 | 解码后加一层结构校验：`russh::keys::PublicKey::from_bytes(&blob)` 能过才收，或至少校验首字段长度前缀与算法名。属输入校验的行为改动，且会改变 `imported`/`skipped` 的计数分布（与 L2-19 同批做） |
+| L2-23 | `transport/russh_impl/mod.rs` 的 `check_server_key`（`:420-430`）；`embedded_ssh.rs` 的 `host_key_algorithm`（`:165-175`） | 部分成立（「不可达」不成立） | `HostKeyKind::Unknown` **可达**：`ssh_key::Algorithm` 有 `SkEd25519` 与 `SkEcdsaSha2NistP256` 两个变体（`ssh-key 0.7.0-rc.10/11` 的 `algorithm.rs:119-122`），它们落进 `_ => Unknown`；只是现实里没有服务端用 FIDO 主机键。真问题是 `host_key_algorithm(Unknown)` 返回字面量 `"unknown"`，一旦走到就以 `host:port\|unknown` 落盘并被 `Inspect`/终端横幅原样显示 | 把 `"unknown"` 改成能自解释的值（`"unknown-<algorithm>"`）或让 `Unknown` 走 `to_bytes` 失败那条路（不落盘 + warn），二选一需要拍板；最小改动是给 `_` 臂补一条 `warn` 并保留现有字符串 |
+| L2-24 | `embedded_ssh.rs` 的 `trust_or_verify_host_fingerprint` 调用点（`authenticate` 之前） | 成立（设计确认项） | 指纹在**认证之前**取得并落盘，所以「密码写错」这种最常见的失败也会在 `known_hosts.json` 里留下一台从没成功连过的主机的记录。这符合 TOFU 的定义，但与 `2fa_required`/认证结果无关这件事没有任何文字说明 | 要么在 `docs/KNOWN-ISSUES.md` 记一句「信任记录先于认证，失败也会留痕」，要么改成认证成功后才落盘（会改变 TOFU 的语义，需拍板）。**不改代码**的选项更好：这是 TOFU 的正常代价 |
+| L2-25 | `ssh_algo.rs`/`embedded_ssh.rs` 的「指纹已变」错误文案 | 成立（低危） | 主机证书场景下，换一把新钥匙 + 陌生 CA 签的证书会被报成 `SSH host fingerprint changed`，而事实是「这张证书的 CA 不认识」。CA 与有效期不检查这件事已在 `check_server_key` 的注释里写明（第 1 轮），缺的只是**错误分类** | 文案加一句「(a certificate from an unexpected CA also lands here)」，或在 `check_server_key` 记下「presented a certificate」，让上层能分叉。改对外文案，需拍板 |
+
+**并入 L2-15 的一条**：`remove_system_known_host` 的重写循环会把 **CRLF 折成 LF**（实测：两行 CRLF 删第一行后本仓 55 字节、`ssh-keygen -R` 56 字节，后者保留 `\r\n`）。这与「Equivalent to `ssh-keygen -R`」矛盾，而 L2-15 无论选①还是②都要动同一个重写循环，**同批做**。它表格里的另一格（删中间行会留一个空行）**不成立**——实测两边字节完全相同。

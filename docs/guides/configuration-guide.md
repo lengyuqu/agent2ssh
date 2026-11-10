@@ -993,7 +993,7 @@ events = ["approval_required", "exec_blocked", "exec_completed", "anomaly_detect
 通过 Desktop App 的 Keys 标签页生成，或用 CLI：
 
 ```bash
-agent2ssh keys algorithm          # 本构建推荐的类型（ed25519 或 rsa）
+agent2ssh keys algorithm          # 推荐类型，恒为 ed25519（脚本的稳定接口）
 agent2ssh keys generate id-work   # 按推荐类型生成；只输出私钥路径
 agent2ssh keys generate id-work --type rsa --json
 ```

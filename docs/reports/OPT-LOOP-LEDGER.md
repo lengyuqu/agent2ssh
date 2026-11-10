@@ -333,9 +333,9 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
   - 不成立：21、23、26（原文见下方 19–21 条）。
 - **本轮最值钱的一条**：19。第 1 轮这句被判「不成立」是因为它跟着「applied fail-closed before each handshake」还能读通；`f23f006` 把 clap 长帮助从「按构建探测」改成「恒 ed25519」之后，同一句话的前提句留在原地，于是指向 agent 的那份说明书成了全仓唯一还在讲「取决于库能读什么」的地方——而且它比 `--help` 更常被读，因为 agent 是照它决定要不要先问一句。
 - **我自己多查出来的两条**：①`cli_contract.rs:976` 的「a script that skipped `keys algorithm` would generate a key this build cannot authenticate with」是同一族的第三处，同笔改掉；②`docs/plans/russh-migration.md:194-195` 是全仓最后一处按旧行号列 `reads_openssh_private_keys` 调用点的地方（计划文档的「补位点」历史段），加了一句「迁移前行号、按名字找」的标记，避免下次 grep 又从这里读到 `keys.rs:821`。
-- **动作**：`3ea8f70`（`cli_contract.rs` 两处注释 + 一处断言消息、`embedded_ssh.rs` 两处测试文档）、本笔（`SKILL.md` 两处 + `cli-quickstart.md` + `configuration-guide.md` + `russh-migration.md` 标记 + `OPT-LOOP-L2-PENDING.md` 三条与 L2-15 补充 + 本 ledger）。
+- **动作**：`3ea8f70`（`cli_contract.rs` 两处注释 + 一处断言消息、`embedded_ssh.rs` 两处测试文档）、`bf26f8c`（`SKILL.md` 两处 + `cli-quickstart.md` + `configuration-guide.md` + `russh-migration.md` 标记 + `OPT-LOOP-L2-PENDING.md` 三条与 L2-15 补充 + 本 ledger）。
 - **验证**：`npm run build` 6.42s；`cargo fmt --check` 绿；`cargo test --no-default-features --lib` **861 passed / 1 failed / 1 ignored**（失败项仍是基线那条红测，本轮只改了它的文档注释）；`cargo test --no-default-features --test cli_contract` **40 passed / 0 failed**。
-- **回帖**：`<comment-id>`（`## 第 3 轮收尾`）。
+- **回帖**：`2119943001739788288`（`## 第 3 轮收尾`）。
 - **第 4 轮未开始**：回帖后按 60 s × 5 轮询。下次运行从 C=3 → 第 4 轮起，指摘在 CodeBuddy 对本轮回帖的回复里。
 - **锁**：进入时又是孤儿锁（mtime 06:52、空目录、无 pid）。这次先做存活核验（`ps` 无其它 agent，`lsof -d cwd` 全属本会话；上一轮记忆写着 06:52 结束），再接管，绕过了「3×120 s 重试」——连续三轮都是孤儿锁，重试只是在等一个不会释放的目录。**释放仍然是薄弱点，这是第三次记录。**
 
@@ -344,6 +344,29 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
 19. **「第 3 轮 #21：IPv6 的非标准端口永远删不掉——`host` 传进来已是方括号形式，拼出 `[[::1]]:2222`」— 不成立。**
     实测 `HOME=<tmp> agent2ssh known-hosts forget ::1 --port 2222`，文件含 `[::1]:2222` 与 `other.example`：输出 `removed 1 known_hosts entry for ::1 (port 2222)`，文件只剩 `other.example`。原因是 CLI 传的是裸 `::1`——clap 的 `host: String` 没有值解析器（`bin/agent2ssh.rs:491-500`），桌面侧 `App.tsx:536` 传的 `host.host` 也是裸地址；`format!("[{}]:{}", "::1", 2222)` 得到的是正确的 `[::1]:2222`。所以这条「唯一存在的理由正好失效的那一半」并不成立：非标准端口这一半是好的，坏的是 22 端口那一半（L2-15）。
 20. **「第 3 轮 #23：删成空文件时丢掉尾换行，与 `ssh-keygen -R` 不符」— 不成立。**
-    三种形态与 `ssh-keygen -R` **逐字节相同**：①单行文件删掉唯一一行 → 两边都是 0 字节；②两行文件删最后一行 → 两边都剩 `…\n`（55 字节，hex 一致）；③注释 + 空行 + 一行，删那一行 → 两边都是 `# comment\n\n`（11 字节）。`raw.lines()` 丢掉文件末尾的换行、`kept` 对每个保留行补 `\n`，合起来的结果与 `ssh-keygen -R` 的重写方式一致。它表格里「`ssh-keygen` 重写后文件仍以换行结尾」这一格是错的，那一格错了整条结论就反了。
+    三种形态与 `ssh-keygen -R` **逐字节相同**：①单行文件删掉唯一一行 → 两边都是 0 字节；②两行文件删最后一行 → 两边都剩 `…\n`（55 字节，hex 一致）；③注释 + 空行 + 一行，删那一行 → 两边都是 `# comment\n\n`（11 字节）。`raw.lines()` 丢掉文件末尾的换行、`kept` 对每个保留行补 `\n`，合起来的结果与 `ssh-keygen -R` 的重写方式一致。它表格里「`ssh-keygen` 重写后文件仍以换行结尾」这一格是错的，那一格错了整条结论就反了。**口径**：这是 macOS 自带 OpenSSH 的行为，对方环境是 Linux 9.2p1；若它那边确实在重写后留尾换行，那是参照自身的平台差异，不是本产品与参照不一致——判定仍是不成立，但理由要从「它与 `ssh-keygen` 相同」换成「它没有引入 `ssh-keygen` 没有的行为差异」。
 21. **「第 3 轮 #26：`components:` 是 main 在 fmt 门上一直红的机制解释」— 前提属实，推论不成立。**
     `rust-toolchain.toml` 与 `.github/workflows/ci.yml:90-92` 确实都把 `rustfmt`/`clippy` 列进 `components`，也确实没有第二步 `cargo install`——但这只说明「CI 装得上 fmt」，它恰好推出**相反**的方向：CI 只要跑过就会红。真正没被解释的是「那一笔是否触发了 CI」，那需要 Actions 的运行记录，不是读 YAML 能得到的。`.github/**` 属禁区，本条只作线索交给人。
+
+### consume 4 / 6 · 2026-11-10 08:05–08:20 (GMT+8)
+
+- **指摘来源**：CodeBuddy 对第 3 轮回帖的复核（评论 `2119944012235706368`，「第 3 轮复核（基线 `bf26f8c`）」）。9 条新编号 + 3 条 #19 的残留。
+- **判定**：11 条 → **成立 4 / 部分成立 4 / 不成立 2**，另 1 条只作观察。
+  - 成立：R4-1（`configuration-guide.md` 的命令行注释仍写「本构建推荐的类型」）、R4-2（`Generate.key_type` 的 clap 长帮助仍写 "whichever type this build can actually authenticate with"）、C.6（证书场景下错误分类：陌生 CA 签的新钥匙被报成「指纹已变」）、C.7（信任记录先于认证，认证失败也落盘）。
+  - 部分成立：A.1（形态不一致属实，但 `remove_known_host_core` 无任何生产调用点）、A.2（无结构校验属实；「第三列含 `|` 会截短 identity」不成立）、B.5（`Unknown` 可达——`ssh_key::Algorithm` 的 `Sk*` 两变体落进 `_`）、D.8（CRLF 折成 LF 属实；「删中间行留空行」不成立）。
+  - 不成立：A.3、B.4（原文见下方 22–23 条）。
+- **本轮最值钱的一条**：A.1 的落点与指摘预期相反——`remove_known_host_core` 是**死代码**。`tauri_commands` 只暴露 `forget_system_known_host`（改写系统 `~/.ssh/known_hosts`），CLI 的 `known-hosts` 只有 `import`/`forget`，`api.ts` 也没有对应命令，全仓引用只剩两条测试。所以那条「UI 点 Forget 删不掉」的路径不存在；真正的问题是要不要保留这个函数（L2-21）。
+- **动作**：`c41df69`（`bin/agent2ssh.rs` 的 `Generate.key_type` clap 长帮助）、本笔（`configuration-guide.md` 命令注释 + `OPT-LOOP-L2-PENDING.md` 五条与 L2-15 的补充 + 本 ledger）。
+- **验证**：`npm run build` 6.49s；`cargo fmt --check` 绿；`cargo check --no-default-features --bin agent2ssh` 干净；`cargo test --no-default-features --lib` **861 passed / 1 failed / 1 ignored**（仍是基线红测）。
+- **回帖**：`<comment-id>`（`## 第 4 轮收尾`）。
+- **第 5 轮**：回帖后按 60 s × 5 轮询。下次运行从 C=4 → 第 5 轮起。
+- **时间**：本轮从 08:05 到 08:20，未触及 180 分钟预算。
+
+### 第 4 轮新增的不成立条目（原文保留，请勿重复提）
+
+22. **「第 4 轮 A.3：`remove_known_host_core("a:22")` 会一次删掉两台主机的信任」— 不成立（两重原因）。**
+    ①该函数没有生产调用点（见 L2-21），整条路径在 UI 与 CLI 上都不存在；②它假设「profile `a:22` 指向 `h2`、profile `a` 指向 `h1`，两者的 identity 恰好相同」，那要求 `h1 == h2`，而两个 profile 指向同一 `host:port` 时它们本来就共享一条信任记录——信任是按 endpoint 建键的（`known_host_identity` = `host:port`），这与 OpenSSH 的 `known_hosts` 同构，是设计而不是误删。真正成立的部分只是「输入命名空间把 profile 名与 identity 混在一起，一个形如 `host:port` 的 profile 名会遮蔽 identity 写法」。
+23. **「第 4 轮 B.4：`read_http_proxy_response` 的 16 KiB 上限永远不会触发」— 不成立（它只对一个特定场景成立，被说成了结构性恒真）。**
+    循环是 `while response.len() < 16 * 1024 { read_exact(1 byte)?; push; if ends_with(b"\r\n\r\n") { return } }`，条件在**每次读之前**判：对端持续发送超过 16 KiB 且不给 `\r\n\r\n`、连接不断开时，第 16384 次 `push` 之后 `len == 16 * 1024`，循环退出并返回 `Err("...exceeded 16 KiB")`。`read_exact` 只有在 EOF/超时时才 `?` 早退，所以「上限不可达」的推理把「对端先 EOF」当成了唯一路径。**成立的是更窄的一条**：对端只发 LF 头然后关闭时，报的是 `read_exact` 的 I/O 错（`early eof` 一类），而不是「头过长」——错误分类确实不可区分，但那是可观测性问题，不是上限不可达。
+24. **「第 4 轮 A.2 后半：第三列里有 `|` 会让 `split_known_host_key` 截短 identity」— 不成立（两处错）。**
+    ①`split_once('|')` 切在**第一个** `|`，而 key 的形状是 `{identity}|{algorithm}`，第一个 `|` 就是分隔符本身，identity 在它之前，永远不会被截短；被污染的是 algorithm 那一段。②第三列是 base64 的 key blob，不是算法名——算法名是第二列 `key_type`。A.2 前半（只做 `STANDARD.decode`、不验解出来的公钥结构）成立，已记 L2-22。
