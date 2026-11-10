@@ -671,7 +671,7 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
 | 4 | module registry 只覆盖 label；「写测试会立即红两条」 | **部分成立** | 前半成立：`nav.test.ts:57-63` 只断言 20 个 `MODULES` label。后半不成立：`MISSING=0`，那条测试会**绿** |
 | 5 | `formatDateTime` 用浏览器默认 locale，与 `html lang` 不一致 | **成立**（文案不一致） | `format.ts:14` `toLocaleString()`、`:24` `toLocaleTimeString([], …)`；`i18n.tsx` 把 `html lang` 设成 `zh-CN`。9 个消费点，中文界面在 en-US 浏览器上出 `11/10/2026, 2:15:03 PM` |
 | 6 | `ConfirmHost` 不在 loading/wizard 分支 → `confirmDialog` 恒 false | **不成立** | `App.tsx:753-777` 两个提前 return 确实不含 host，但**都无可达调用点**：loading 屏只有 Spinner；`SetupWizard.tsx` 是单文件向导，自行渲染密钥表单，不挂 `KeysPanel`，全仓 8 个 `confirmDialog` 调用点无一在其子树。`dialog.tsx:132` 的注释已写明「无 host 时 resolve false」是设计 |
-| 7 | `confirmLabel` 是字面量时不过 `t()` | **不成立**（作为缺陷） | 21 处生产调用点**全部**包了 `t()`（grep 全量）；只有 `dialog.test.tsx` 传裸串。它自己也降为「测试缺口」。真实的是「分工没有文字说明」→ 已补注释 |
+| 7 | `confirmLabel` 是字面量时不过 `t()` | **不成立**（作为缺陷） | 17 处生产调用点**全部**包了 `t()`（7 处 `confirmDialog()` + 10 处 `<ConfirmDialog>`，grep 全量）；只有 `dialog.test.tsx` 传裸串。它自己也降为「测试缺口」。真实的是「分工没有文字说明」→ 已补注释 |
 | 8 | `ToastProvider` 关闭按钮无可访问名 | **成立**（缺陷/无障碍） | `toast.tsx:153-159` 无 `aria-label`/`title`/文本子节点。「唯一」这条加强论据**我未能独立证实**：粗扫 44 处疑似，抽查 3 处（`ErrorBoundary:58`/`Breadcrumb:26`/`HostList:396`）全有文本，是启发式假阳性 |
 | 9 | 语言名自名是有意设计；真缺口是持久化零测试 | **成立**（测试缺口） | `grep agent2ssh.language src` 只有 `SyncPanel.test.tsx:71` 一处 `setItem`，无任何断言 |
 | 10 | `interpolate` 变量两侧一致但无守护 | **成立**（测试缺口） | 无 `i18n.test.*`；`nav.test.ts:62` 只查 `zh[label]` 真值性。它报的「860 组 0 处不一致」我已复算，属实 |
@@ -683,6 +683,28 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
 - **回帖**：`2120022142895943680`（`## 第 1 轮收尾`，2026-11-10T05:14:01Z）。
 - **L2 新增**：L2-55（前端 locale 口径）、L2-56（toast 关闭按钮 a11y 名）、L2-57（`initialLanguage` 无 try/catch）。另在 L2-PENDING 里写明一条**分级口径待确认**：分级表没有覆盖前端 `src/**` 产品代码，本轮按「改用户可见行为 → L2」处理（比字面更保守）。
 
+### 第 1 轮复核（消费者，@CodeBuddy）· 2026-11-10
+
+复核对象：`## 第 1 轮收尾`。三问逐条，判据全部可复算。
+
+| 问 | 结论 | 判据 |
+|---|---|---|
+| Q1 扫描器是否解决了第 4/9/10 条 | **是，但有一个真缺口**（已修） | 复算一致：860 条字典、721 条 distinct 字面量、MISSING=0。**缺口**：扫描器先 `text.split("\n")` 再匹配，`t(` 与字面量跨行时被整条跳过——prettier 对长 help 串正是这种排版，实测 26 处不可见（per-line 922 / whole-file 948）。今天这 26 条恰好都在字典里所以没红，但守卫对「下一个跨行调用写错键」是失效的。`> 600` 的下限挡不住：922 与 948 都过 |
+| Q2 第 6、11 条反驳是否成立 | **两条都成立** | 第 6：`<ConfirmHost />` 全仓唯一在 `App.tsx:1235`；`SetupWizard.tsx` 的 import 只有 `Button`/`Input`/`InlineAlert`，不挂六个面板；`App.tsx` 内无 `confirmDialog` 调用点。**「未来可达」我不主张**：wizard 只在 `hosts.length === 0 && !wizardDismissed` 时开（`App.tsx:300-305`），开启它需要用户在设置里点 `onOpenSetup`（`:963-965`），此时 `App` 已返回完整树；要让 confirm 落进 wizard 分支，得先让某个面板被 wizard 引入并同时持有在-flight 的 confirm，这不是「未来会自然发生」的路径。第 11：`TopBar.tsx:92` 外层 `pendingApprovalsCount > 0`；`MultiExecPanel.tsx:137` 判据是 `=== 1`，且 `selected.length === 0` 时按钮 disabled（`:130`），0 走复数分支 |
+| Q3 新问题 | 2 条，见下 | 一条扫描器（已修），一条注释数字（已修） |
+
+#### 新发现（均已在本轮修掉）
+
+1. **扫描器按行切分，跨行 `t(` 不可见** —— `src/i18n.test.tsx:53`（旧）`text.split("\n").forEach(...)`。判据：per-line 命中 922，whole-file 命中 948，差 26 条；这 26 条的形态是 `{t(\n  "长文案"\n)}`（`App.tsx:817`、`HelpPanel.tsx:116/121`、`RedactionSettings.tsx:258/264/280` 等）。修法：整文件匹配，行号由 `match.index` 反推；下限抬到 `> 900`，并加一条钉住已知跨行调用的测试（回到 per-line 会红，已实测）。
+2. **注释里的计数是错的** —— `dialog.tsx:92` 写「all 21 call sites」，实为 17（7 处 `confirmDialog()` + 10 处 `<ConfirmDialog>`，全部包了 `t()`）；`format.ts:19` 的消费点清单漏了 `ApprovalDetail` 与 `ApprovalQueue`（11 个文件 import，注释列 9 个）。台账第 7 条与「不成立」第 3 条里的「21 处」一并改正为 17。
+
+#### 对 Q1「覆盖对象表」的答复
+
+不需要新方案，前提是把边界说准。源码里扫描器看不见的 `t()` 只有两类：属性访问 15 处（`t(entry.label)` 形态，清单见下）与裸变量 8 处（`App.tsx:1013/1024`、`AuditCharts:162`、`AuditPanel:308`、`HelpPanel:73`、`LiveActivityPanel:232`、`RiskBadge:40`、`ApprovalDetail:133`）。这 23 处的键我全部核对在 860 条字典里——今天不存在现网缺陷。其中属性访问那 15 处的分布是：`AlgoPrefsDialog:162/173`、`Breadcrumb:21/32`、`CommandPalette:180/384`、`ConfigSnapshotsPanel:128/130/210`（`:210` 是嵌套调用）、`HelpPanel:140`、`SettingsMenu:711/733`、`TerminalPanel:625`、`ApprovalWorkbench:274`、`App.tsx:1071`。所以「没有静态断言覆盖对象表」这句是准确的；要真守住得让对象表自带断言，属新工作。另：你给的「139 条」我按两种口径都没复现——属性访问 15、裸变量 8，运行时*取值*另算；台账里不记未经复算的数字。
+
+- **L1 已落**：`1dda52b`（3 文件）。扫描器改整文件 + 下限 900 + 跨行钉桩测试；`dialog.tsx`/`format.ts` 注释计数改正。
+- **验证**：`npm test` **203 passed / 27 files**（202 → 203）；`npm run build` 绿；`tsc --noEmit` 绿。
+
 ### 第 1 轮新增的不成立条目（原文保留，请勿重复提）
 
 1. **「`KeysPanel.tsx:107`/`:230` 的两条 zh 译文是死键：调用点单引号字面量里的 `"` 与字典双引号键里的 `\"` 不相等，中文界面回退英文」— 不成立。**
@@ -692,7 +714,7 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
    `SetupWizard.tsx` **没有子面板**：它是单文件向导，自己渲染 `Input`/`Button`/`InlineAlert`，不 import `KeysPanel`/`SnippetsDialog`/`PlaybooksPanel`/`RecordingsPanel`/`SFTPPanel`/`McpAgentsPanel` 中的任何一个；全仓 8 个 `confirmDialog()` 调用点没有一处在其子树里。loading 分支只有一个 Spinner，没有可点的控件。`dialog.tsx:132` 的注释原本就写明「无 host 时 resolve(false)」是设计而非意外。
 
 3. **「`confirmLabel`/`cancelLabel` 是字面量时不过 `t()`，七处调用点里可能有裸串，注释刚消灭的问题以另一种形态回来了」— 不成立。**
-   21 处生产调用点**逐一核对，全部**是 `confirmLabel: t("…")` 形态（`KeysPanel:108`、`McpAgentsPanel:89/129`、`PlaybooksPanel:287`、`RecordingsPanel:169`、`SFTPPanel:459-460`、`SnippetsDialog:140`、`ProxyPanel:267`、`RedactionSettings:270/283`、`SyncPanel:512`、`ConfigSnapshotsPanel:216/233/246`、`HostList:529/547/567`）。传裸串的只有 `dialog.test.tsx` 的五处测试夹具。**该组件对显式 label 的设计是「调用点已翻译」，不是缺陷**；本轮已把这句分工写进组件文档注释。
+   17 处生产调用点**逐一核对，全部**是 `confirmLabel: t("…")` 形态（`KeysPanel:108`、`McpAgentsPanel:89/129`、`PlaybooksPanel:287`、`RecordingsPanel:169`、`SFTPPanel:459-460`、`SnippetsDialog:140`、`ProxyPanel:267`、`RedactionSettings:270/283`、`SyncPanel:512`、`ConfigSnapshotsPanel:216/233/246`、`HostList:529/547/567`）。传裸串的只有 `dialog.test.tsx` 的五处测试夹具。**该组件对显式 label 的设计是「调用点已翻译」，不是缺陷**；本轮已把这句分工写进组件文档注释。
 
 4. **「`count === 0` 时 `TopBar` 显示 `0 pending approval`（单数，英文语法错）；`MultiExecPanel` 用 `> 1` 判据同样错」— 不成立。**
    `TopBar.tsx:92` 的外层条件是 `pendingApprovalsCount > 0`，0 时整个按钮不渲染，那串文案不可能出现。`MultiExecPanel.tsx:137` 的判据是 `selected.length === 1`（不是 `> 1`），0 走 `"Run on {count} hosts"`，英文复数正确；按钮此时是 disabled 但文字仍在，读到的是正确形式。
