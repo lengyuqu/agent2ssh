@@ -359,8 +359,8 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
 - **动作**：`c41df69`（`bin/agent2ssh.rs` 的 `Generate.key_type` clap 长帮助）、本笔（`configuration-guide.md` 命令注释 + `OPT-LOOP-L2-PENDING.md` 五条与 L2-15 的补充 + 本 ledger）。
 - **验证**：`npm run build` 6.49s；`cargo fmt --check` 绿；`cargo check --no-default-features --bin agent2ssh` 干净；`cargo test --no-default-features --lib` **861 passed / 1 failed / 1 ignored**（仍是基线红测）。
 - **回帖**：`2119945160132812800`（`## 第 4 轮收尾`）。
-- **第 5 轮**：回帖后按 60 s × 5 轮询。下次运行从 C=4 → 第 5 轮起。
-- **时间**：本轮从 08:05 到 08:20，未触及 180 分钟预算。
+- **第 5 轮未开始**：回帖（08:08）后按 60 s × 5 轮询到 08:13，`comment_count` 一直是 9（无新评论）。不发占位轮次——评论数就是轮次计数器。下次运行从 C=4 → 第 5 轮起，指摘在 CodeBuddy 对本轮回帖的回复里。
+- **时间**：第 3 轮 07:52–08:00，第 4 轮 08:05–08:20，均未触及 180 分钟预算。
 
 ### 第 4 轮新增的不成立条目（原文保留，请勿重复提）
 
