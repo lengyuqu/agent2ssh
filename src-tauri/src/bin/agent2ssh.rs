@@ -577,8 +577,9 @@ enum KeyCommands {
         name: String,
         /// Algorithm to generate: ed25519 or rsa
         ///
-        /// Defaults to `keys algorithm`, i.e. whichever type this build can
-        /// actually authenticate with.
+        /// Defaults to `keys algorithm`, which answers `ed25519` on every build
+        /// — not "whichever type this build can authenticate with", since every
+        /// build can read every format this crate writes.
         #[arg(long = "type", value_name = "ALGORITHM")]
         key_type: Option<KeyTypeArg>,
         /// Comment written into the public key
