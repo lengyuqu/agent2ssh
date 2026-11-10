@@ -293,6 +293,7 @@ enum DrainOutcome {
 | 编号 | 位置 | 判断 | 为什么不能自动落 | 建议改法 |
 |---|---|---|---|---|
 | L2-37 | `container_runtime.rs:505-512`（`start_local_service`）与 `:539-546`（`select`） | 成立（口径待定，也可能只是文档问题） | `AGENT2SSH_CONTAINER_RUNTIME` 只在 `select` 的 `_` 臂（`:542`）被读，而 `select(None)` 在生产代码里**没有调用点**：daemon 的 `containers_start_service`（`:961`）与 MCP 工具都直接把 `runtime` 交给 `start_local_service`，后者 `explicit` 为 `None` 时走 `available().first()`（`:470-479`），从不读 env。于是同一个 pin 会出现两种结果：`agent2ssh containers runtime` 经 `select(None)`（`bin/agent2ssh.rs:3557`）显示 `wslc`，而 `containers start-service` 仍可能去启动 `apple`。`configuration-guide.md:1352` 把这条 env 的范围写成「容器发现」，所以文档本身没撒谎 | 二选一：①把 `start_local_service` 的 `None` 分支改成 `select(None)`——pin 之后 start-service 会跟着走，但同时会把 `select` 的严格性带进来：env 写了一个不存在的 id 时，从「静默按 `available()` 挑」变成 `Err`；②保持现状，在两处工具描述里写明「这条 env 只影响 `containers runtime` 与发现，不影响 `start-service`」。①更一致但改了失败模式，需拍板 |
+| L2-38 | `docs/api.yaml` 的 403 与 `bin/agent2ssh-daemon.rs` 的 `require_admin` / `require_recording_admin` | 本轮已补齐 30 个操作，但**没有任何东西阻止它再次漂移** | 本轮把 36 个 admin 门 path（33 `require_admin` + 3 `require_recording_admin`，共 39 个 operation）逐个补了 403，此前只有 6 个 path 提过。手写清单会漂：新加一个 `require_admin` 调用，`api_yaml_documents_every_daemon_route` 只查 path 在不在，照样绿——这正是这条指摘能存在两个批次的原因 | 三选一：①在路由表旁加一份 `ADMIN_GATED: &[(&str, &str)]` 常量，测试拿它对比 `api.yaml` 的 403 集合（单一来源在代码里，但那张表仍要人维护）；②测试直接扫 `agent2ssh-daemon.rs` 源码找 `require_admin(` / `require_recording_admin(`（零维护，但测试依赖源码文本，改函数名就断）；③给 handler 加 `#[admin_gated]` 属性宏，路由注册时自动派生（最干净，代价是引入 proc-macro） |
 
 ### 2026-11-10 · batch 4（issue #9）第 2 轮追加（基线 `38eb70b`）
 
@@ -316,4 +317,13 @@ enum DrainOutcome {
 | L2-45 | `src-tauri/web/console.html:670`（`API` 初值）、`:816`（connect 后用 `/daemons` 的 `url` 覆盖） | 成立（低危） | 静态打开 console.html 时 `API` 初值是写死的 `http://127.0.0.1:7722`，要等 connect 之后才被 `/daemons` 返回的 `url` 覆盖。所以「daemon 换了端口 + 用文件方式打开 console」这一种组合会在 connect 那一步失败；同源 `GET /console` 不受影响（相对 URL 走这个绝对前缀）。属可发现性，优先级低于 L2-44 | 把 `API` 初值改成同源相对（`""`），仅在需要跨源时才回落到写死地址；或让页面先请求 `/health` 探测当前 origin。属 UI 行为改动，需拍板 |
 
 **关于 B1 牵出的 `daemon_control.rs:1027`**：那句 `"daemon did not exit after a guarded shutdown; leaving it running"` 与紧随其后的 `signal_daemon(pid, start_time, true)` 相反（记完 warn 就强杀），本轮改 `api.yaml` 时顺手改过一版，随后**按门禁撤销**——它在 `src-tauri/src/**` 里，且 **L2-1 早已登记**同一处。它仍待拍板，改法就是一句话：把文案换成「did not exit within the graceful window; terminating it by force」。
-| L2-38 | `docs/api.yaml` 的 403 与 `bin/agent2ssh-daemon.rs` 的 `require_admin` / `require_recording_admin` | 本轮已补齐 30 个操作，但**没有任何东西阻止它再次漂移** | 本轮把 36 个 admin 门 path（33 `require_admin` + 3 `require_recording_admin`，共 39 个 operation）逐个补了 403，此前只有 6 个 path 提过。手写清单会漂：新加一个 `require_admin` 调用，`api_yaml_documents_every_daemon_route` 只查 path 在不在，照样绿——这正是这条指摘能存在两个批次的原因 | 三选一：①在路由表旁加一份 `ADMIN_GATED: &[(&str, &str)]` 常量，测试拿它对比 `api.yaml` 的 403 集合（单一来源在代码里，但那张表仍要人维护）；②测试直接扫 `agent2ssh-daemon.rs` 源码找 `require_admin(` / `require_recording_admin(`（零维护，但测试依赖源码文本，改函数名就断）；③给 handler 加 `#[admin_gated]` 属性宏，路由注册时自动派生（最干净，代价是引入 proc-macro） |
+
+### 2026-11-10 · batch 4（issue #9）第 4 轮追加（基线 `684d471`）
+
+第 4 轮的指摘**不是 CodeBuddy 给的**：它对本流程第 3 轮回帖超过协议窗口没有回复（60 秒 × 5 次，第 6 次到 11:46:38 仍是 `total=6`），按「等待超时 → 用已有材料推进、不空等」处理。已有材料是第 2、3 轮同一类缺陷的收尾——把 `docs/api.yaml` 里所有 `type: object` 且无 `properties` 的节点数了一遍：**18 个，5 组**，已全部补成实体（53 → 64 schema，`$ref` 61 个、0 悬空）。补的过程里牵出三件不在「补个 `properties`」射程内的事。
+
+| 编号 | 位置 | 判断 | 为什么不能自动落 | 建议改法 |
+|---|---|---|---|---|
+| L2-46 | `docs/api.yaml` 全文 **142 处** `nullable: true` | 成立（口径待定） | 文档头写的是 `openapi: "3.1.0"`，而 `nullable` 是 **3.0** 的关键字：3.1 里空值要写成 `type: [x, "null"]`。严格按 3.1 校验的解析器会**忽略** `nullable`，也就是这 142 处的可空性目前并没有被表达，只是被宽容的渲染器放过了。本轮新增的 `WebDavSyncStatus.local`/`remote` 改用 `$ref` + 描述写可空，没有再加一处 `nullable`；既有的 142 处原样未动 | 二选一：①全量换成 `type: [x, "null"]`（142 处，机械但面积大，`$ref` 与 `$ref` 带兄弟关键字两种形态要分别处理）；②保持 `nullable`（Swagger UI 与多数 codegen 仍认它，代价是文档自称 3.1 却不合规）。取值口径问题，不该我单方面定 |
+| L2-47 | `docs/api.yaml` 的 `AgentEvent` / `ApprovalResponse` / `AuditFilter` | 成立（低危） | 本轮把 61 个 `$ref` 全核了一遍：0 个悬空，但有 **3 个组件从来没有被引用过**。不是本轮新加的，是更早批次留下的。可能真的没人用了，也可能有外部工具按名字取用 | ①删掉（schema 数 64 → 61）；②留着并在描述里注明「保留给外部消费者，本仓不引用」；③真接上。选哪个都行，但要一次定，否则下一轮还会被当成新发现 |
+| L2-48 | `src-tauri/src/webdav_sync.rs:104` vs `src-tauri/src/tauri_commands.rs:2404` | 成立 | **两个 `pub struct WebDavSyncStatus`**：前者 8 字段、snake_case、daemon 用；后者 11 字段、`rename_all = "camelCase"`、桌面端用。同名不同形，`grep -rn "struct WebDavSyncStatus"` 同时命中两条。本轮已在 `api.yaml` 的组件描述里点名「这是 daemon 序列化的那个，不是桌面端那个」，但代码侧的歧义还在 | 把桌面端那个改名（如 `DesktopSyncStatus`），属 `src-tauri/src/**` 改名 + 调用点替换，需拍板。风险低但要一次改完 |

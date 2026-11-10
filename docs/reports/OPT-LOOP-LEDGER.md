@@ -261,7 +261,7 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
   - D4 `channel.rs:700-720` 测试注释易把「2s 上界」读成「2s 等待」
   - D5 `LocalKeySigner` 两条错误臂零测试（`russh_impl/mod.rs:104-116`）
   - 范围外 2 条：`Settings::run` 的 disconnect abort 语义；`core.rs` 上传/下载无 session 超时（与 C5 同根因）
-- 6 轮进度：3 / 6（第 1 轮见下方 `consume 1 / 6`，第 2 轮见 `consume 2 / 6`，第 3 轮见 `consume 3 / 6`）
+- 6 轮进度：4 / 6（第 1 轮见下方 `consume 1 / 6`，第 2 轮 `consume 2 / 6`，第 3 轮 `consume 3 / 6`，第 4 轮 `consume 4 / 6`）
 - 正文已喂给 CodeBuddy：12 条「不成立」原文（preflight 2 + 第 1–6 轮新增 10）+ K2/K7/K9/K12 与 §3 未验证范围空档
 
 ### consume 1 / 6 · 2026-11-10 05:20–05:26 (GMT+8)
@@ -536,3 +536,26 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
 
 1. **`?confirm=delete` 从「假阳性」改判为「写法错」**：第 2 轮我把它当成本轮唯一的假阳性写进本 ledger，CodeBuddy 指出那一格把查询串写进了路径列，`(method, path)` 守卫会永远红一条；判据是 `api.yaml` 里 `confirm` 是 `in: query`。已修，回帖里明说接受这次反纠正。教训：**「守卫和人对不上」不等于「守卫错」**，先看是哪一列放错了（这条推翻了上面 G9 那句「假阳性」的定性，G9 的 36 仍是「35 真缺 + 1 写法错」）。
 2. **`daemon_control.rs:1027` 改后按门禁撤销**：B1 沿调用链牵出那句 `"…leaving it running"`（记完 warn 就强杀），我改了一版才想起 `git grep "leaving it running"` 命中 `OPT-LOOP-L2-PENDING.md:14` 与 `LEDGER.md:52`——**L2-1 早已登记同一处**，且属 `src-tauri/src/**`。已 `git checkout --` 撤回，并在 L2 清单与回帖里写明「改过一版、按门禁撤回」，避免下一轮把 `api.yaml` 的描述改动误读成代码侧也修了。
+
+#### consume 4 / 6（基线 `684d471`，回帖 `2120001436644700160`）
+
+**指摘来源：等待超时后的自扫。** 第 3 轮回帖 `2119998853859422208` 之后按 60 s 轮询 6 次（11:41:35 → 11:46:38），`total` 一直是 6，CodeBuddy 没有回复。按协议「仍未到 → 标等待超时，用已有材料推进，不空等」，本轮把第 2、3 轮同一类缺陷收尾：数 `docs/api.yaml` 里所有 `type: object` 且无 `properties` 的节点。**18 个，5 组，全部成立**，落地 `6d1fb71`（仅 `docs/api.yaml`）。
+
+| 组 | 原状 | 真值来源 | 落地 |
+|---|---|---|---|
+| `AlgoPrefsState.prefs` / `.defaults` | 两个匿名对象 | `ssh_algo.rs:53-70` 八字段全无 `skip_serializing_if`；`safe_defaults()`（`:110-124`）逐个 `narrow()`，`SUPPORTED_COMPRESSION = "none"`（`:295`）⇒ `comp_*` 恒为 `none` | 新增 `SshAlgoPrefs`；`/algo/prefs` 的 PUT body 从内联八字段换成同一个 `$ref`（内联正是它与 `AlgoPrefsState` 漂开的源头） |
+| `/snippets` GET + POST | 两处 `items: { type: object }`，POST body 内联 | `snippets.rs:31-40`；`add_snippet`（`:141-156`）用 `*existing = snippet` **整体替换**，省略 `description` 会清空旧描述 | 新增 `Snippet`，三处统一；把「省略即清空」写进描述 |
+| `/redact/rules` 5 op | GET 内联三字段（对），其余 4 处空对象 | `types.rs:893-901` `RedactRuleInfo` | 抽 `RedactRuleInfo`，5 处统一 |
+| `/highlight/rules` 5 op | GET 内联六字段（对），其余 4 处空；`/update` 的 `rule` 是 `required` 的空对象 | `types.rs:869-891` `HighlightRule` | 抽 `HighlightRule`，6 处统一 |
+| `/webdav/status` | `local`/`remote` 空对象；`required` 只有 `[state, summary]` | `webdav_sync.rs:104-114` 八字段 → `WebDavSyncMarker:74-91` 十字段 → `WebDavSyncFile:67-71` 三字段。五个 `Option` 都**没有** `skip_serializing_if`，键恒在 | 新增三个组件，`required` 补到 8 个 |
+| `/metrics/trend` | `risk_distribution`、`top_hosts[]`、`hourly_breakdown[]` 空 | `store.rs:1080-1117` 四个结构；`failure_rate` 是 0–1 比值（`:1156-1160`） | 新增 `MetricsTrend`/`RiskDistribution`/`HostExecutionCount`/`HourlyBucket` |
+
+**自扫掉出来的一条（不是指摘）**：请求收 `24h`，响应用 `last24h`。`TrendPeriod` 带 `rename_all = "lowercase"`（`store.rs:1090-1098`），`store.rs:2216-2219` 的测试把 `"last24h"` 钉死；handler 解析两种拼写都收（`bin/agent2ssh-daemon.rs:4037-4047`）。所以拿响应值回填请求安全，但拿它和自己发出去的字面量比对会误判「参数被忽略」。已写进 `MetricsTrend.period` 的描述。
+
+**验证**：`npm run build` 6.51s；`cargo fmt --check` 绿；`--no-default-features --lib` = 861 passed / 1 failed / 1 ignored（已知红测）；`api_yaml` 1 passed；`yaml.safe_load` 90 path / 64 schema；`type: object` 无 `properties` 的节点 **18 → 0**；`$ref` 61 个、悬空 0。
+
+**L2 新增 3 条**：L2-46（`nullable` 是 3.0 关键字而文档自称 3.1，全文 142 处）、L2-47（`AgentEvent`/`ApprovalResponse`/`AuditFilter` 三个组件从未被引用）、L2-48（两个同名 `pub struct WebDavSyncStatus`）。
+
+**顺手修的排版错**：`OPT-LOOP-L2-PENDING.md` 里 L2-38 那行被第 1 轮插到了文件末尾（「关于 B1」段之后），离开了第 1 轮的表格；已挪回 L2-37 下面。表格断行会让拍板的人以为 L2-38 不存在。
+
+**流程观察（下次运行该改）**：第 2、3 轮的指摘都是 CodeBuddy 复核，所以每轮只修「它点到的那几处」。这一轮自扫才发现同类缺陷还剩 18 个——**复核的覆盖度取决于复核者挑了几条，不取决于缺陷有多少**。以后每轮收尾前应先跑一遍全量扫描（空 schema、`$ref` 悬空、端点表 ↔ 路由、403 ↔ `require_admin`），把扫描结果而不是回帖里的条目当下一轮的输入。
