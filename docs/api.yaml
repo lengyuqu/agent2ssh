@@ -660,7 +660,7 @@ paths:
             `expect_pid` was present but not a PID. Omitting the field is how a
             caller stops without a check.
         "403":
-          description: The token is scoped; stopping the daemon needs the admin token.
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "409":
           description: >
             `expect_pid` names another process. The daemon that answered is not
@@ -685,25 +685,25 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/HostProfile" }
       responses:
-        "403":
-          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           content:
             application/json:
               schema: { $ref: "#/components/schemas/HostProfile" }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
 
   /hosts/import:
     post:
       summary: Import hosts from ~/.ssh/config
       responses:
-        "403":
-          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           content:
             application/json:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/HostProfile" }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
 
   /hosts/{name}:
     delete:
@@ -714,8 +714,6 @@ paths:
           required: true
           schema: { type: string }
       responses:
-        "403":
-          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           content:
             application/json:
@@ -723,6 +721,8 @@ paths:
                 type: object
                 properties:
                   ok: { type: boolean }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "404":
           content:
             application/json:
@@ -985,7 +985,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "403":
-          description: The token is not the unrestricted admin token
+          description: Requires the unrestricted admin token; a scoped token gets 403.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1008,12 +1008,12 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/GateUpdate" }
       responses:
-        "403":
-          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ExecutionGateStatus" }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
 
   /gate/resume:
     post:
@@ -1024,12 +1024,12 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/GateUpdate" }
       responses:
-        "403":
-          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ExecutionGateStatus" }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
 
   /exec/stream:
     get:
@@ -1126,8 +1126,6 @@ paths:
     get:
       summary: Read the opt-in terminal recording setting
       responses:
-        "403":
-          description: Terminal recordings require the unrestricted admin token; a scoped token gets 403.
         "200":
           description: Recording configuration
           content:
@@ -1137,6 +1135,8 @@ paths:
                 required: [enabled]
                 properties:
                   enabled: { type: boolean, default: false }
+        "403":
+          description: Terminal recordings require the unrestricted admin token; a scoped token gets 403.
     put:
       summary: Enable or disable recording for new terminal sessions
       requestBody:
@@ -1149,19 +1149,19 @@ paths:
               properties:
                 enabled: { type: boolean }
       responses:
+        "200": { description: Updated recording configuration }
         "403":
           description: Terminal recordings require the unrestricted admin token; a scoped token gets 403.
-        "200": { description: Updated recording configuration }
 
   /recordings:
     get:
       summary: List local asciicast v2 terminal recordings
       description: Recordings may contain sensitive terminal output and are not included in WebDAV sync.
       responses:
-        "403":
-          description: Terminal recordings require the unrestricted admin token; a scoped token gets 403.
         "200":
           description: Recording metadata, newest first
+        "403":
+          description: Terminal recordings require the unrestricted admin token; a scoped token gets 403.
 
   /recordings/{id}:
     parameters:
@@ -1173,9 +1173,9 @@ paths:
     get:
       summary: Read recording metadata and asciicast v2 JSONL content
       responses:
+        "200": { description: Recording metadata and content }
         "403":
           description: Terminal recordings require the unrestricted admin token; a scoped token gets 403.
-        "200": { description: Recording metadata and content }
         "404": { description: Missing or invalid recording }
     delete:
       summary: Permanently delete a sensitive recording
@@ -1186,9 +1186,9 @@ paths:
           required: true
           schema: { type: string, const: delete }
       responses:
+        "200": { description: Deleted recording metadata }
         "403":
           description: Terminal recordings require the unrestricted admin token; a scoped token gets 403.
-        "200": { description: Deleted recording metadata }
         "400": { description: Confirmation missing or recording id invalid }
 
   /events/stream:
@@ -1201,8 +1201,6 @@ paths:
         activity and streaming exec output. The stream ends when the daemon
         shuts down; an EOF alone does not distinguish shutdown from disconnection.
       responses:
-        "403":
-          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           description: Event stream
           content:
@@ -1210,6 +1208,8 @@ paths:
               schema:
                 type: string
                 description: SSE frames containing AgentEvent JSON in data lines.
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "401":
           content:
             application/json:
@@ -1317,14 +1317,14 @@ paths:
           description: Requesting client label, exact case-insensitive match on source
           schema: { type: string }
       responses:
-        "403":
-          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           content:
             application/x-ndjson:
               schema: { type: string }
             text/csv:
               schema: { type: string }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "400":
           description: Unsupported format
           content:
@@ -2291,8 +2291,6 @@ paths:
               properties:
                 command: { type: string, description: "Command to approve instead of the requested one" }
       responses:
-        "403":
-          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           content:
             application/json:
@@ -2300,6 +2298,8 @@ paths:
                 type: object
                 properties:
                   ok: { type: boolean }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
 
   /approvals/{id}/reject:
     post:
@@ -2310,8 +2310,6 @@ paths:
           required: true
           schema: { type: string, format: uuid }
       responses:
-        "403":
-          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           content:
             application/json:
@@ -2319,6 +2317,8 @@ paths:
                 type: object
                 properties:
                   ok: { type: boolean }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
 
   /risk/check:
     post:
@@ -2567,8 +2567,6 @@ paths:
           in: query
           schema: { type: string, enum: [24h, 7d, 30d, all], default: 24h }
       responses:
-        "403":
-          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           content:
             application/json:
@@ -2589,6 +2587,8 @@ paths:
                   hourly_breakdown:
                     type: array
                     items: { type: object }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "400":
           description: Unknown period
           content:
@@ -2723,8 +2723,6 @@ paths:
               properties:
                 approved: { type: boolean }
       responses:
-        "403":
-          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           content:
             application/json:
@@ -2732,6 +2730,8 @@ paths:
                 type: object
                 properties:
                   ok: { type: boolean }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
 
   /playbooks/{name}/dry-run:
     post:
@@ -2829,12 +2829,12 @@ paths:
       summary: Export shareable team configuration
       description: Hosts are exported with `key_path` and `password` stripped; includes raw `risk_rules.toml` and `playbooks.toml` content when present.
       responses:
-        "403":
-          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           content:
             application/json:
               schema: { $ref: "#/components/schemas/TeamConfigExport" }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
 
   /config/import:
     post:
@@ -2845,8 +2845,6 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/TeamConfigExport" }
       responses:
-        "403":
-          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           content:
             application/json:
@@ -2858,6 +2856,8 @@ paths:
                   hosts_updated:       { type: integer }
                   risk_rules_imported: { type: boolean }
                   playbooks_imported:  { type: boolean }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
 
   /config/import/preview:
     post:
@@ -2891,19 +2891,17 @@ paths:
     get:
       summary: Compare Agent2SSH hosts against `~/.ssh/config`
       responses:
-        "403":
-          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           content:
             application/json:
               schema: { type: object }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
 
   /ssh-sync/export:
     post:
       summary: Export Agent2SSH hosts to an SSH config include file
       responses:
-        "403":
-          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           content:
             application/json:
@@ -2912,6 +2910,8 @@ paths:
                 properties:
                   path:           { type: string }
                   hosts_exported: { type: integer }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
 
   /webdav/status:
     get:
@@ -3064,8 +3064,6 @@ paths:
                 command:     { type: string }
                 description: { type: string, nullable: true }
       responses:
-        "403":
-          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           description: The full snippet list after the write.
           content:
@@ -3073,6 +3071,8 @@ paths:
               schema:
                 type: array
                 items: { type: object }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "400":
           description: Invalid snippet name or command.
 
@@ -3085,13 +3085,13 @@ paths:
           required: true
           schema: { type: string }
       responses:
-        "403":
-          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           description: Whether a snippet was removed.
           content:
             application/json:
               schema: { type: boolean }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "400":
           description: Invalid snippet name.
 
@@ -3125,8 +3125,6 @@ paths:
                 pattern:     { type: string, description: "Regular expression to match; also the rule's identity." }
                 replacement: { type: string, description: "Literal replacement text, used verbatim." }
       responses:
-        "403":
-          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           description: The full rule list after the write.
           content:
@@ -3134,6 +3132,8 @@ paths:
               schema:
                 type: array
                 items: { type: object }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "400":
           description: The pattern does not compile, matches the empty string, or is already in the set. An empty replacement is allowed — it deletes the matched text rather than substituting it.
 
@@ -3152,8 +3152,6 @@ paths:
                 replacement: { type: string }
                 new_pattern: { type: string, description: "Rename the rule to this pattern (default: keep)." }
       responses:
-        "403":
-          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           description: The full rule list after the write.
           content:
@@ -3161,6 +3159,8 @@ paths:
               schema:
                 type: array
                 items: { type: object }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "400":
           description: No rule matches the pattern, or the new pattern does not compile, matches the empty string, or is already taken by another rule.
 
@@ -3179,8 +3179,6 @@ paths:
                 pattern: { type: string }
                 force:   { type: boolean, description: "Must be true." }
       responses:
-        "403":
-          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           description: The full rule list after the write.
           content:
@@ -3188,6 +3186,8 @@ paths:
               schema:
                 type: array
                 items: { type: object }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "400":
           description: Missing `force`, or no rule matches the pattern.
 
@@ -3196,8 +3196,6 @@ paths:
       summary: Restore the built-in redaction rule set
       description: Discards every edit. This is the way back from a removal, because it only ever adds rules back.
       responses:
-        "403":
-          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           description: The restored rule list.
           content:
@@ -3205,6 +3203,8 @@ paths:
               schema:
                 type: array
                 items: { type: object }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "500":
           description: The built-in set could not be written.
 
@@ -3244,8 +3244,6 @@ paths:
                 is_regex:          { type: boolean, default: true }
                 is_case_sensitive: { type: boolean, default: false }
       responses:
-        "403":
-          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           description: The full rule list after the write.
           content:
@@ -3253,6 +3251,8 @@ paths:
               schema:
                 type: array
                 items: { type: object }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "400":
           description: Empty keyword, a missing or over-long name, a color that is not `#RRGGBB`, or a keyword already in the set. The keyword's regex syntax is deliberately not checked here — the renderer compiles it with JavaScript, whose grammar differs from the one a Rust-side check would use.
 
@@ -3271,8 +3271,6 @@ paths:
                 keyword: { type: string, description: "The keyword that identifies the rule to replace." }
                 rule:    { type: object, description: "The rule as it should be afterwards." }
       responses:
-        "403":
-          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           description: The full rule list after the write.
           content:
@@ -3280,6 +3278,8 @@ paths:
               schema:
                 type: array
                 items: { type: object }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "400":
           description: No rule matches the keyword, or the replacement rule fails the same checks as an added one.
 
@@ -3298,8 +3298,6 @@ paths:
                 keyword: { type: string }
                 force:   { type: boolean, description: "Must be true." }
       responses:
-        "403":
-          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           description: The full rule list after the write.
           content:
@@ -3307,6 +3305,8 @@ paths:
               schema:
                 type: array
                 items: { type: object }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "400":
           description: Missing `force`, or no rule matches the keyword.
 
@@ -3315,8 +3315,6 @@ paths:
       summary: Restore the built-in terminal highlight rules
       description: Discards every edit.
       responses:
-        "403":
-          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           description: The restored rule list.
           content:
@@ -3324,6 +3322,8 @@ paths:
               schema:
                 type: array
                 items: { type: object }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "500":
           description: The built-in set could not be written.
 
@@ -3361,26 +3361,26 @@ paths:
                 comp_cs:   { type: string }
                 comp_sc:   { type: string }
       responses:
-        "403":
-          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           description: The preferences in effect after the write.
           content:
             application/json:
               schema: { type: object }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "400":
           description: A list is empty, repeats an entry, or contains an implausible algorithm name.
     delete:
       summary: Drop the SSH algorithm overrides
       description: Goes back to the built-in safe defaults.
       responses:
-        "403":
-          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           description: The preferences in effect after the change.
           content:
             application/json:
               schema: { type: object }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "500":
           description: The stored override could not be removed.
 
@@ -3395,8 +3395,6 @@ paths:
     get:
       summary: List prompts waiting for an answer
       responses:
-        "403":
-          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           content:
             application/json:
@@ -3411,6 +3409,8 @@ paths:
                         nonce:       { type: string, description: "Identifies this prompt when answering it." }
                         prompt_text: { type: string, description: "The question as the server asked it." }
                   count: { type: integer }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
 
   /prompts/respond:
     post:
@@ -3426,11 +3426,11 @@ paths:
                 nonce:  { type: string }
                 answer: { type: string }
       responses:
-        "403":
-          description: Requires the unrestricted admin token; a scoped token gets 403.
         "200":
           content:
             application/json:
               schema: { type: object }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
         "404":
           description: No prompt is waiting under that nonce.
