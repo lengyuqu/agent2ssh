@@ -325,7 +325,7 @@ curl -X POST -H "$AUTH" \
 
 ### 高风险命令（审批模式）
 
-**高风险**命令不携带 `force: true` 时，Daemon 会创建审批请求并阻塞等待（等待上限由 `policy.toml` 的 `ttl_secs` 决定，默认 300 秒）；低风险与中风险命令不携带 `force` 也直接执行，不会产生审批请求：
+**高风险**命令不携带 `force: true` 时，Daemon 会创建审批请求并阻塞等待（等待上限由 `policy.toml` 的 `ttl_secs` 决定，默认 300 秒）；低风险与中风险命令不会**因为风险等级**产生审批，命中 `approval_policies` 的除外：
 
 ```bash
 # 此请求会阻塞，等待审批
