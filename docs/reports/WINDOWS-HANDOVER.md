@@ -106,7 +106,7 @@
 **Windows 真机待办（按优先级）—— 2026-11-04 已全部完成，结果见第 7 节**：
 1. **基线**：`main` 拉到 `e312166` 后跑 `cargo test --lib --no-default-features`、`cargo test --lib`、`--test cli_smoke`（34 项，含新 `cli_approvals_clean_dry_run_then_compact`）、`--no-default-features --features daemon --bin agent2ssh-daemon`（24 项，新增的 CI 目标）、clippy ×3。
 2. **v0.4.5 新行为**（11-02/03 的提交均未经 Windows 真机）：SFTP stall guard（Dropbear/OpenSSH 上传停滞报进度，K2 复测）；known_hosts 双算法键控；证书拒绝三因可辨；SHA-1 回退的 warn；`execution_limits.toml` 热加载；`approvals clean --dry-run`；0.4.4 的用户自定义环境（`environments.toml` 的 `cmd`/`pwsh`/`vs` 基座）。
-3. **矩阵**：Git Bash 下 `./scripts/e2e-ssh-matrix.sh`（§3.1 的注意事项仍有效：不要依赖 `HOME` 隔离，使用隔离账号或虚拟机；系统 agent 默认不修改，明确同意后才可选择 opt-in；`MSYS2_ARG_CONV_EXCL` 未在 Windows 验证）。
+3. **矩阵**：Git Bash 下 `./scripts/e2e-ssh-matrix.sh`（§3.1 的注意事项仍有效：不要依赖 `HOME` 隔离，使用隔离账号或虚拟机；系统 agent 默认不修改，明确同意后才可选择 opt-in；`MSYS2_ARG_CONV_EXCL` 已在 2026-11-04 实测确认必需，见 §7.4）。
 4. **§3.2 的点**：带空格/反斜杠路径下 `-cert.pub` 的识别；`cli_contract` 起子进程测试的挂起复现尝试。
 
 ## 7. 2026-11-04 Windows 真机验证结果（基线 `6606621` / v0.4.5）

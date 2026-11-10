@@ -868,15 +868,18 @@ secret = "my-secret-key"
 （见上一节的字段说明），在 Slack 里读起来就是「一个组件名 + 一段错误消息」，不是「一台主机 + 一条命令」；
 命令没执行时（例如被 gate 拦下）`exec_completed` 也没有 `Exit Code`。
 
-审批那条的 Approve / Reject 按钮**当前点不动**，不要把它们当操作入口：URL 由 daemon 的解析地址拼出（默认
-`127.0.0.1:7722`），路径是 `.../approve` 与 `.../reject`，而路由只有 `POST /approvals/:id/approve` 与
-`POST /approvals/:id/reject`（且要 bearer token）；换个机器点开时，`127.0.0.1` 指的是**点的人自己的机器**。
+审批那条的 Approve / Reject 按钮**当前点不动**，不要把它们当操作入口。URL 由 `approval_action_url`
+（`approval.rs:901`）拼出：基址是 daemon 的解析地址（默认 `127.0.0.1:7722`），中间是
+`/approval/{id}/respond`，按钮再各接一段 `/approve` 与 `/reject`——**后两段不存在**，点开是 404。
+即使去掉后缀，`/approval/{id}/respond` 也只是 `POST` + `{"approved": bool}` 的 admin 路由，浏览器的
+GET 一样打不动；换个机器点开时，`127.0.0.1` 还指向**点的人自己的机器**。
 实际批准或拒绝请用 `Open Approvals` 按钮或 `/console#approvals`。这是已知缺口，已在
 `docs/reports/OPT-LOOP-L2-PENDING.md` 的 L2-44 登记
 
 ### 自定义 Webhook
 
-非 Slack URL 发送原始 JSON payload：
+非 Slack URL 发送原始 JSON，**但审批事件有两个形状、而且会投递两次**（`notify_approval_pending` 先发，
+`fire_webhook` 再发；见上文 Slack 对照表与 L2-75）。审批那条的形状：
 
 ```json
 {
@@ -884,9 +887,15 @@ secret = "my-secret-key"
   "host": "web1",
   "command": "sudo rm -rf /tmp/cache",
   "approval_id": "550e8400-e29b-41d4-a716-446655440000",
-  "risk_level": "high"
+  "risk_level": "high",
+  "approval_url": "http://127.0.0.1:7722/approval/550e8400-e29b-41d4-a716-446655440000/respond"
 }
 ```
+
+六个键，**没有** `exit_code` 与 `remote_outcome_unknown`。通用那条是 `WebhookEvent` 直出：固定
+`event` / `host` / `command`，按需出现 `approval_id`、`risk_level`、`exit_code`、
+`remote_outcome_unknown`。按「一个形状」写解析器，会在审批那条上拿到永远不出现的 `exit_code`，
+并丢掉实际存在的 `approval_url`。
 
 如果配置了 `secret`，请求头包含 HMAC-SHA256 签名：
 
