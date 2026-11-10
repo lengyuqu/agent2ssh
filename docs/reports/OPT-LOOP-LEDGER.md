@@ -787,4 +787,4 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
 - **L1 已落**：`ea1e378`（4 文件，纯注释）。在 B-7 / Q2 / B-2 / B-6 四处加现场注释（都指向对应 L2 编号），因为四处都是「UI 对用户说了不实的话」，注释留在现场比只记台账有用。
 - **L2 新增**：L2-60（`host_address`）、L2-61（copyBlock 空串）、L2-62（Playbooks Steps 标签）、L2-63（Dashboard `"…"`）、L2-64（SetupWizard `attempted` 缺失）、L2-65（toast 消除依赖 SSE，结构性改动）、L2-66（SyncPanel 假失败）、L2-67（SFTP `|| f.size`）——共 8 条。
 - **验证**：`npm test` 209 passed / 27 files；`npm run build` 6.41s；本轮无行为改动，`cargo` 侧未跑（未触碰 `src-tauri`，上一轮基线仍适用）。
-- **回帖**：`（待填）`。
+- **回帖**：`2120030896584572928`（`## 第 4 轮收尾`，2026-11-10T05:48:48Z）。
