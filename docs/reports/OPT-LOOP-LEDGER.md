@@ -1705,7 +1705,8 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 | D2 | **部分成立** | `agent2ssh-mcp.rs:185-188` 的 `local_daemon_client()` 传 `Some(30s)`，`:193-213` 装 `connect_timeout(10s)` + `timeout(30s)`；`daemon_only_request`（`:308-333`）传 `None`。用 30 s 那条的是 `try_daemon_session_{open,write,read,close,list}`、`try_daemon_forward_{add,list,remove}`、`try_daemon_gate_status`（`:338`–`:588`）——与它列的清单逐个对得上。**它给的行号 `:198-199`/`:308-333`/`:185-188` 全部准确**，这一批它没有漂 |
 | D3 | **部分成立（但它漏了更硬的一半）** | 行号是 **`:326`** 不是 `:327`。它说「300 s 只对审批准」成立（`execution_control.rs:496-499`，policy 的 `ttl_secs` 可覆盖）。**它没提的**：那句的主语是「不携带 `force: true` 时」——`execution_control.rs:487` 是 `needs_approval = approval_policy.is_some() \|\| (risk == High && !input.force)`，**低/中风险不携带 force 也不产生审批**。这才是可证伪的那半，已按它改写 |
 
-- **L1 落地**：`77861b5`（`api.yaml` 两处 `transfer_id`、`skills.md` 三处、`daemon-api-quickstart.md` 的两处：Scoped Token 段补 500 失败形态 + 审批示例补「高风险」限定与 `ttl_secs`）。推 `cnb main`，未推 github。
+- **自我更正**：`9be53e4`。我在 `77861b5` 里把那句改成「低/中风险不携带 `force` 也直接执行，不会产生审批请求」，**漏了 `approval_policy.is_some()` 那一支**——命中 `approval_policies` 时任意风险都审批。已改成「不会**因为风险等级**产生审批，命中 `approval_policies` 的除外」。**同一个错法**：修一句过宽的条件句时，把新的条件句又写宽了一个从句。
+- **L1 落地**：`77861b5`（`api.yaml` 两处 `transfer_id`、`skills.md` 三处、`daemon-api-quickstart.md` 的两处：Scoped Token 段补 500 失败形态 + 审批示例补「高风险」限定与 `ttl_secs`）+ `9be53e4`（上条自我更正）。推 `cnb main`，未推 github。
 - **L2 新增两条**：**L2-104**（`tools.rs:276`/`:546`/`:582` 三处工具描述与实现不同步，按 `L2-103` 自己的口径把「工具描述」算 `src-tauri/src/**`）、**L2-105**（daemon 侧的 `transfer_id` 是死字段，取消 flag 跨进程够不到）。`L2-102`/`L2-103`/`L2-94` 维持，无变化。
 - **验证**：`npm run build` 6.37s；`cargo fmt --check` 绿；`--no-default-features --lib` **861 / 1 failed / 1 ignored**（失败项仍是那条故意红的 IPv6）；`--features daemon --test daemon_integration` **71 passed / 0 failed**；`yaml.safe_load` 仍 90 paths / 105 operations。
 - **回帖**：见下一笔提交回写的 id。**#15 保持 open**，进度 1 / 6。
