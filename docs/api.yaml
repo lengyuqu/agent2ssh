@@ -17,9 +17,9 @@ info:
     One 500 sits outside every operation's own list. `auth_middleware` reads
     `daemon_tokens.toml` for any token that is not the admin token, so a file
     that does not parse answers 500 to that request before any handler runs:
-    every non-public route returns 500 to a scoped caller while the admin token
-    keeps working. `/approvals/{id}/approve` states this once in full rather than
-    repeating it on a hundred operations.
+    every non-public route answers 500 to a caller that does not present the
+    admin token, while the admin token keeps working. `/approvals/{id}/approve`
+    states this once in full rather than repeating it on a hundred operations.
 
     A request body is read one of three ways, and the three fail differently.
     `Json<T>` — 47 handlers — rejects a body with no `application/json` content
@@ -1747,7 +1747,10 @@ paths:
         When the daemon is stopping — `POST /shutdown` or a signal — it pushes
         {"type":"shutdown"} with no other field, drains for up to 500 ms, and closes.
         That frame is the client's only notice that the daemon is going away; it is not
-        an error, and reconnecting immediately will race the shutdown.
+        an error, and reconnecting immediately will race the shutdown. The drain
+        forwards stdout and stderr only: an exit that arrives after the shutdown frame
+        is recorded for the audit and not sent as {"type":"exit"}, so a client waiting
+        for that frame sees the close instead.
         Every authorization refusal after the upgrade — scope, execution gate, rate limit, approval — arrives as
         {"type":"error","error":"..."} over the socket, not as an HTTP status: the handler body only counts the
         request and then hands the socket to `on_upgrade`. The only HTTP-level failure is the handshake itself.
@@ -1777,9 +1780,15 @@ paths:
         Terminal input/output then streams as binary frames. Resize control is
         sent as a JSON text frame: {"type":"resize","cols":120,"rows":36}.
         When the daemon is stopping — `POST /shutdown` or a signal — it sends
-        {"type":"shutdown","message":"server shutting down"}, drains for up to 500 ms,
-        and closes. Note the `message` field: `/exec/stream`'s shutdown frame has
-        none, so a client that handles both routes has to accept the two shapes.
+        {"type":"shutdown","message":"server shutting down"}, then keeps forwarding
+        output until 500 ms pass with no new terminal event, and closes. That 500 ms
+        is an idle timeout, not a budget: a terminal that keeps producing output is
+        drained until the two-second per-connection deadline in `POST /shutdown`
+        drops the loop, and a `Closed` or error event ends the drain early.
+        Note the `message` field: `/exec/stream`'s shutdown frame has
+        none, so a client that handles both routes has to accept the two shapes —
+        and the same 500 ms means something else there: an absolute deadline
+        measured from the cancellation rather than an idle timeout.
         Terminal connections use the embedded SSH transport, including
         jump-host proxy channels, and do not require system `ssh` or `sshpass`.
         Completed input lines are

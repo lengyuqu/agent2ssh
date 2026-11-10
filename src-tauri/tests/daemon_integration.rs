@@ -3162,6 +3162,65 @@ fn every_websocket_frame_the_daemon_sends_is_documented() {
     );
 }
 
+/// A "drains for up to 500 ms" claim is a budget, so the loop needs one deadline.
+///
+/// Both socket routes keep the same number of milliseconds and spend it
+/// differently. `exec_stream` computes one deadline and a chatty command gets
+/// 500 ms in total; `handle_terminal` re-arms `timeout(500 ms, recv)` on every
+/// event, so its number is an *idle* timeout and the only bound left is the
+/// two-second per-connection grace that `POST /shutdown` documents. The terminal
+/// description used to make the budget claim for the idle timeout, which told a
+/// client its `tail -f` would be cut half a second after the shutdown frame when
+/// it can keep draining for two seconds.
+///
+/// The claim is compared against the shape of the loop, so the two cannot drift
+/// apart again. Unifying the loops is fine — change the prose with it.
+#[test]
+fn a_websocket_drain_budget_claim_matches_the_loop_it_describes() {
+    let daemon = include_str!("../src/bin/agent2ssh-daemon.rs");
+    let spec = include_str!("../../docs/api.yaml");
+
+    // One path's block, from its `  /name:` line to the next path key.
+    fn path_block<'a>(spec: &'a str, path: &str) -> &'a str {
+        let head = format!("\n  {path}:");
+        let at = spec
+            .find(&head)
+            .unwrap_or_else(|| panic!("docs/api.yaml has no `{path}` for this check to read"));
+        let rest = &spec[at + 1..];
+        let end = rest
+            .find("\n  /")
+            .map(|next| next + 1)
+            .unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    for (path, handler) in [
+        ("/exec/stream", "exec_stream"),
+        ("/terminal", "handle_terminal"),
+    ] {
+        let claims_budget = path_block(spec, path).contains("drains for up to 500 ms");
+        let measures_one_deadline = handler_body_of(daemon, handler).contains("timeout_at(");
+        assert_eq!(
+            claims_budget,
+            measures_one_deadline,
+            "`{path}` {} a 500 ms budget, but `{handler}` {} a single deadline. The number \
+             is honest only when the loop computes the deadline once: a `timeout(500 ms, \
+             recv)` re-armed per event is an idle timeout, and the drain can then run for \
+             the whole per-connection grace.",
+            if claims_budget {
+                "claims"
+            } else {
+                "does not claim"
+            },
+            if measures_one_deadline {
+                "computes"
+            } else {
+                "does not compute"
+            },
+        );
+    }
+}
+
 /// A plain YAML scalar may not contain `: `, and prose about status codes does.
 ///
 /// `description: … forwarded verbatim: when the remote answers …,` is not a
