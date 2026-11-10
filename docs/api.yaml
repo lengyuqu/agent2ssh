@@ -340,7 +340,7 @@ components:
         host:        { type: string }
         remote_path: { type: string }
         local_path:  { type: string }
-        resume:      { type: boolean, default: false, description: "K6: append from the local file's current length instead of re-fetching from byte 0" }
+        resume:      { type: boolean, default: false, description: "K6: continue an interrupted download from the bytes already on disk instead of re-fetching from byte 0. The partial file is `<local_path>.part`; when there is none, a `<local_path>` left by an earlier run is renamed to it and continued. When the bytes on disk already reach or exceed the remote size, the transfer restarts from 0 rather than appending a corrupt tail." }
         transfer_id: { type: string, nullable: true, description: "K6: opaque id another request can pass to `/sftp/cancel`" }
         max_mb:      { type: integer, nullable: true, description: "G8: hard cap on the remote file size in MiB (100 when absent); larger files are refused with advice to use scp/rsync" }
 
@@ -1440,7 +1440,10 @@ paths:
         "101":
           description: Switching Protocols
         "401":
-          description: Missing or invalid token (Authorization header or `?token=`).
+          description: "Missing or invalid token: `Authorization: Bearer`, or `?token=` on the upgrade; the same handshake-level check every non-public route runs."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /terminal:
     get:
@@ -1642,9 +1645,13 @@ paths:
               schema:
                 type: string
                 description: SSE frames containing AgentEvent JSON in data lines.
+        "401":
+          description: Missing or invalid token. `require_admin` cannot make this a 403 for an unknown token either — an unknown token never reaches the handler.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
-        "401":
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -2335,6 +2342,16 @@ paths:
                 type: object
                 properties:
                   output: { type: string }
+        "400":
+          description: The id is not a UUID, or it names no live session.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Scope denied — the token's allowed hosts, tags and `session_read` command scope do not cover the host this session was opened on.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /sessions/{id}:
     delete:
@@ -2352,6 +2369,31 @@ paths:
                 type: object
                 properties:
                   ok: { type: boolean }
+        "400":
+          description: The id is not a UUID, or it names no live session.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Scope denied, or the approval policy refused `session_close`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "408":
+          description: Approval timed out.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "423":
+          description: Execution gate paused.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Execution limit exceeded.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /resident-sessions:
     post:
@@ -2391,7 +2433,31 @@ paths:
                   label: { type: string }
                   warmup_ms: { type: integer }
         "400":
-          description: Unknown environment, container host, session cap reached, or authorization refused
+          description: |
+            The `host` is not a `local:<id>` environment, names a container, or cannot be
+            built; the concurrent-session cap is reached
+            (`AGENT2SSH_MAX_RESIDENT_SESSIONS`, default 8); the warm-up failed; or the
+            command was refused by risk policy (blocked) or by the approver.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Scope denied — the token's allowed hosts and tags do not cover this environment id.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "408":
+          description: Approval timed out.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "423":
+          description: Execution gate paused.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: A session or execution limit was exceeded (`register_limited_session_for_command`, or the source's session cap).
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -2448,7 +2514,31 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ExecResult" }
         "400":
-          description: Unknown or dead session, command timed out (session killed), or authorization refused
+          description: |
+            Unknown session id (including one whose host the token cannot see), a dead
+            session, a command that outlived `timeout_secs` (the whole session is killed),
+            an over-long command, a closed session whose queued command was cancelled, or a
+            command refused by risk policy (blocked) or by the approver.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Scope denied — the command is outside the token's allowed hosts, tags or command patterns for the session's own environment id.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "408":
+          description: Approval timed out.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "423":
+          description: Execution gate paused.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Execution limit exceeded.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -2487,7 +2577,7 @@ paths:
                   truncated: { type: boolean }
                   dropped_bytes: { type: integer }
         "400":
-          description: Unknown session
+          description: Unknown session id, including one whose host this token cannot see.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -2518,7 +2608,7 @@ paths:
                   closed: { type: boolean }
                   id: { type: string, format: uuid }
         "400":
-          description: Unknown session
+          description: Unknown session id, including one whose host this token cannot see, or the shell could not be reaped.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -2644,8 +2734,28 @@ paths:
                   ids:   { type: array, items: { type: string, format: uuid }, description: "The started rules, in the order they were requested." }
                   host:  { type: string }
                   count: { type: integer }
+        "400":
+          description: A rule has an unknown `direction`, or starting the rules failed — the host does not resolve, the SSH connection failed, a bind port is taken, or a `remote` rule's `target_host` is not loopback. The message names the failing rule, and the rules already started are rolled back.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scope denied or approval rejected
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "408":
+          description: Approval timed out
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "423":
+          description: Execution gate paused
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Execution limit exceeded
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -2668,7 +2778,34 @@ paths:
                 properties:
                   ok: { type: boolean }
         "400":
-          description: The id is not a UUID.
+          description: The id is not a UUID, no rule has it, or the rule still exists but its worker could not be started (the SSH connection or the listener failed; the message names which).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: |
+            Scope denied, or the approval policy refused the restart. A scoped token can only
+            reach this route when the rule's host is in its allowed hosts or tags; an id the
+            token cannot see is answered like an unknown one (400), not with a 403 that would
+            confirm the tunnel exists.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "408":
+          description: Approval timed out.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "423":
+          description: Execution gate paused.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Execution limit exceeded.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /forwards/{id}/stop:
     post:
@@ -2688,7 +2825,30 @@ paths:
                 properties:
                   ok: { type: boolean }
         "400":
-          description: The id is not a UUID.
+          description: The id is not a UUID, or no rule has it. Stopping a rule that is already stopped succeeds, so an id that exists never answers 400 for its state.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Scope denied, or the approval policy refused the stop. A rule outside the token's hosts and tags is answered like an unknown id (400).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "408":
+          description: Approval timed out.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "423":
+          description: Execution gate paused.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Execution limit exceeded.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /approvals:
     get:
@@ -2736,6 +2896,15 @@ paths:
           description: Requires the unrestricted admin token; a scoped token gets 403.
         "400":
           description: The id is not a UUID, or an approve body is malformed / asks for a rewrite that is refused.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          description: |
+            The authentication middleware could not read `daemon_tokens.toml` while validating a
+            non-admin token, so it could not tell a scoped token from an unknown one. Applies to
+            every authed route, not just this one — a broken `daemon_tokens.toml` answers 500 to
+            any token that is not the admin token, until the file parses again.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }

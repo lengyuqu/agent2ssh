@@ -316,6 +316,7 @@ denied_commands = ["rm -rf *", "mkfs *"]
 ### 注意事项
 
 - 每个 scoped token 必须配置 `token_env` 或 `token`，并且必须配置 `scope`
+- 这份文件在**每次认证**时都会读（走 `config_cache` 的 `(mtime, len)` 缓存）。它一旦解析失败，中间件就没法把一个 scoped token 和「未知 token」区分开，于是**除 admin token 之外的任何请求都得到 500**——不是 401，也不是 403。也就是说这个文件写坏会把所有最小权限客户端一起挡在门外，改完之后，先用一次 scoped 请求确认它还能通
 - `token_env` 优先于 `token`
 - scope 会在风险审批之前检查；未命中 scope 的请求不会进入审批队列
 - `allowed_commands` 和 `denied_commands` 使用 glob 风格匹配，`denied_commands` 优先

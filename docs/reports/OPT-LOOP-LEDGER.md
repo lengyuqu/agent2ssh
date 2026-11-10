@@ -986,60 +986,43 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 
 **新增 L2：0 条。**
 
-#### consume 5 / 6（基线 `5b2ceac`，回帖 `2120098682207903744`）
+#### consume 6 / 6（基线 `46ee9ef`，第 6 轮收尾 · 复核 `2120098330247057408`，末轮）
 
-**指摘来源**：CodeBuddy 对第 4 轮的复核 `2120097702972145664`。判定 **6 条 → 成立 5 / 部分成立 1**。
+**指摘来源**：我对第 3 轮（`abb63d9`）的复核 `2120098330247057408`，在第 5 轮收尾之后才到，按协议归本轮消费。逐条复核它对 `a82f9d2` + `46ee9ef` 的判定，并对**它落地的那两笔提交本身**取证。
 
-| 项 | 判定 | 关键证据 |
+**对它的判定：成立 8 / 部分成立 1 / 不成立 0（含两处「判对但缺一半」）。**
+
+| 它的判定 | 复核 | 关键证据 |
 |---|---|---|
-| A `approval_url` 漏了（**我第 4 轮自己写的**） | 成立 | `notify_approval_pending` 非 Slack 分支是独立匿名对象：`event`/`approval_id`/`host`/`command`/`risk_level`/`approval_url` **六键**，无 `exit_code`、无 `remote_outcome_unknown`。我上一轮把 `WebhookEvent` 的七键并集当成「载荷」 |
-| B/N1 控制台「所有 Tab 都路由到选中的 daemon」 | 成立 | `console.html:812-819` 远程分支 `API = localDaemon.url`，注释「… For now」；`api()` 只拼 `API`；`/daemons/` 全文只有 `:836` 一次探针；daemon 侧只有 `POST /daemons/:alias/exec` 一条代理 |
-| C/N2 `WINDOWS-HANDOVER.md` §6 待办 3「`MSYS2_ARG_CONV_EXCL` 未在 Windows 验证」 | 成立 | 同文件 `:43`、`:155` 两处实测记录，`:106` 段首「已全部完成」。与 W1 同病：**待办清单不跟结果更新** |
-| D/N3 `configuration-guide.md` 自定义 Webhook 示例缺 `approval_url` | 成立 | 原示例五键；审批那条必然带 `approval_url`（`approval_action_url` → `{daemon}/approval/{id}/respond`） |
-| E Reject「返回 403」 | 部分成立 | 动作本身 `200 {"ok":true}`；403 是**被挂起的那次执行**拿到（`ApprovalRejected`） |
-| F（**我核 E 时发现，它没提**）「路由只有 approve / reject 两条」 | 成立 | 第三条 `POST /approval/:id/respond`（`daemon.rs:5883`，`api.yaml:3112` 与 quickstart `:124` 都收了）；按钮 URL 是 `{action_url}/approve`，多出来的那两段才是 404 的原因 |
+| `/exec/stream` 的 gate 在 `on_upgrade` **之后**，403/423 只能是 error 帧，不会以 HTTP 状态出现 | **成立（我第 3 轮那句「只有 101 是对的」在 401 上错、在 403/423 上对）** | `exec_stream`（`daemon.rs:5167`）函数体两行，`:5175` 就是 `ws.on_upgrade(\|socket\| async move {`；它引的 `:5201`（`source_or_env_for_request`）与 `:5223`（`reject_if_gate_paused`）**都在闭包内**，失败即发 `{"type":"error"}` 帧并 `return`。闭包没有任何名字，所以「闭包在哪一行结束」这个问题没有短答案——它结束在 `exec_stream` 的下一个顶层项之前，但**边界由 `:5175` 与 `:5860` 的行号对给出**，见下 |
+| `app_preferences.json` 不在「只在用过之后才存在」那七个文件里 | **成立** | 那七个是 `redact_rules.json`/`highlight_rules.json`/`copy_redact_rules.json`/`ssh_algos.json`/`telemetry.toml`/`webdav.toml`/`snippets.json`（`configuration-guide.md:1306-1308`）；`app_preferences.json` 只在 tar 命令里（`:1291`）。我第 3 轮把它归进那组是错的 |
+| 广播两个路由没有路由级 403 | **成立** | `terminal_broadcast_preview`（`:4386`）/`terminal_broadcast_run`（`:4402`）都不调 `check_daemon_scope`；越权在 `terminal_broadcast_preview_results`（`:4344`）里变成逐目标 `authorized:false` + `error`。**补一句它没说的**：`validate_terminal_broadcast_request` 也**不会**对非 UUID 的 `terminal_id` 返 400——`Uuid::parse_str` 在 `:4306` 是 `.ok()`，解析失败走「terminal is not connected」。所以 `a82f9d2` 的提交信息与 `api.yaml` 里「`terminal_id` 是重复**或不是 UUID** → 400」的**后半是错的**，只有 `all_or_none` 的重复检查（`:4282-4292`）返 400 |
+| `total_ms: integer` 不是类型错，2^53 是客户端精度问题 | **成立** | 契约层该补 `format: int64`，不改类型。未动 |
 
-**L1**：`36389f0`（3 文件：web-console-guide、configuration-guide、WINDOWS-HANDOVER）。**验证**：`npm run build` 6.49s；`--lib` 861 / 1 failed / 1 ignored。
+**它落地的那两笔，还能再往下挖三层（本轮 L1 就是这三层）：**
 
-**观察（不提 L2）**：`GET /daemons/view`（`daemon.rs:5895`）没有任何调用点——`src/` 与 `src-tauri/web/` 全仓零命中。有端点、无消费者，接不接或删不删是产品决定。
+| # | 项 | 判定 | 证据 |
+|---|---|---|---|
+| N1 | `a82f9d2` 补 `/exec/stream` 的 401 时写的是「Missing or invalid token (Authorization header 或 `?token=`)」且**没有 `content`**，而它自己说「401 来自中间件」 | **成立（自相矛盾）** | `auth.rs:89-99` 的 `authenticate_token` 返回 `(StatusCode, Json<ErrorBody>)`，`bearer_token`（`:118`）只认 `Authorization: Bearer`，query token 走 `query_token`（`:126`），两者都汇到同一个 `Err`——**5 个带 401 的路由签名应当完全相同**。全 `api.yaml` 105 个 operation 里只有 5 个写了 401（`containers/start-service`、`exec/stream`、`terminal`、`events/stream`、`sftp/rm-rf/authorize`），其中 `containers/start-service`/`sftp/rm-rf/authorize` 带 `Error` schema，`/events/stream` 的 401 **连 description 都没有**、还排在 403 后面 |
+| N2 | `/forwards/{id}/start`、`/forwards/{id}/stop` 只有 `200` + 「400: The id is not a UUID」 | **成立（本轮最值钱）** | 这两个 handler 是 `forward_remove` 的复制：gate（`daemon.rs:3116`/`:3172`）→ 限流（`:3118`/`:3174`）→ `check_daemon_scope`（`:3119`/`:3175`）→ `authorize_command`（`:3121`/`:3177`），四步都能返回 423/429/403/408，`forward_start_core` 失败还有 400 的非 UUID 原因（`forward.rs:810` 的 `resolve_host_with_jump`、`:812` 的 `start_forward_worker`）。它是本轮点名要的**下一批首项**，但它就在已经打开的两条路由旁边 |
+| N3 | `/resident-sessions/{id}/exec`、`/sessions/{id}/read`、`/sessions/{id}`（DELETE）只写了 `200` | **成立** | 三个 handler 都走 `preflight_guarded_request`/`check_daemon_scope` + `authorize_command`：`resident_session_exec`（`:2808`）；`session_read`（`:2573`，`session_read` 命令 scope）；`session_close`（`:2612`，四步全有）。`/sessions/{id}/read` 与 `DELETE /sessions/{id}` 在 `api.yaml` 里**只有 200**，连 400 都没有，而两者都对 `Uuid::parse_str` 失败返 400 |
+| N4 | `authenticate_token` 对 `daemon_tokens.toml` 的解析失败返 **500** | **成立（新发现，不在它任何一条里）** | `auth.rs:51-56`：`load_scoped_daemon_tokens().map_err(INTERNAL_SERVER_ERROR)`，而该文件**每次认证都读**（`remote.rs:203-214` 走 `config_cache` 的 `(mtime,len)` 缓存）。于是文件写坏时，**除 admin token 外的每个请求都是 500**——不是 401/403，且客户端会把它读成「daemon 挂了」。`api.yaml` 与 `configuration-guide.md` 都没有这一句 |
 
-#### consume 6 / 6（基线 `36389f0`，回帖 `2120100036875800576`，末轮）
+**L1**：`api.yaml`（+179/−9）+ `configuration-guide.md`（+1）：修 N1 的两处 401（补 `content`、给 `/events/stream` 的 401 补 description 并挪到 403 之前）、N2、N3（`/sessions/*` 三条 + `/resident-sessions/{id}/exec` + `/forwards/{id}/start|stop` + `/forwards/multi` 的 400/408/423/429）、N4（三条审批路由的 500 + 指南里一句「写坏 `daemon_tokens.toml` = 全员 500」），并把 `a82f9d2` 的 `SftpDownloadRequest.resume` 描述改准（真正被查的是 `<local_path>.part`，`<local_path>` 只在 `.part` 不存在时被 rename 过来续传，`resume_offset` 在 `existing >= total` 时退回 0 —— `sftp_transfer.rs:464-472`、`core.rs:2121-2141`）。
 
-**指摘来源**：CodeBuddy 对第 3 轮（`abb63d9`）的复核 `2120098330247057408`（第 5 轮收尾后才到，故归本轮）。判定 **成立 6 / 部分成立 2 / 不成立 3 / 未做 3**。
+**验证**：`npm run build` 12.71s（绿）；`api.yaml` 重新解析 **90 paths / 105 operations**，与 `api_yaml_documents_every_daemon_route` 的两条断言同形（`92` 次 `.route(` = 90 + `GET /` + `GET /console`，无 missing / 无 phantom）。`cargo` 在本容器**不可用**（`cargo: not found`），`api_yaml` 那条 Rust 测试本轮**没能跑**，故只做了等价的 Python 复核并在此标明——这一点不能算「测试通过」。
 
-| 项 | 判定 | 关键证据 |
-|---|---|---|
-| 「`/exec/stream` 在 `on_upgrade` 前判 gate，应有 423」 | **不成立** | 函数体只有两行（计数 + 克隆），`:5177` 即 `ws.on_upgrade(\|socket\| async move {`；`source_or_env_for_request`（`:5201`）与 `reject_if_gate_paused`（`:5223`）**都在闭包内**，失败发 `{"type":"error"}` 帧。403/423 从不以 HTTP 出现。**但 401 它说对了**（中间件层）→ 已补 |
-| 「`configuration-guide.md` 把 `app_preferences.json` 归进『按需』那组」 | **不成立** | 那组列的是七个文件（`redact_rules`/`highlight_rules`/`copy_redact_rules`/`ssh_algos`/`telemetry.toml`/`webdav.toml`/`snippets.json`）；`app_preferences.json` 在 tar 命令里（`:1291`） |
-| F17 `/exec/stream` 缺码 | 部分成立 | 401 已补；403/423 不成立（同上）。description 补「升级后的拒绝一律走 error 帧」 |
-| F18 审批三条路由缺 400 | 成立 | 非 UUID / body 解析失败 / 未知 id / 不在 pending，全部 400。已补 |
-| F21 广播缺 400/403 | 部分成立 | 400 已补（空命令、超长、控制字符、`<2`、`>32`、重复或非 UUID）；**403 不成立**——两个 handler 不调 `check_daemon_scope`，越权是逐目标 `authorized:false` |
-| F16 SFTP 三处字段 | 成立 | `SftpResult.bytes`；upload `resume`+`transfer_id`；download 再加 `max_mb`。已补 |
-| F15 `/exec/preview` 少 4 个键 | 成立 | `needs_force`（`risk == High \|\| Blocked`，与 `/exec` 的 force 条件同一个）、`blocked`、`jump_host`、`timeout_secs`。已补 |
-| F20 两个导出缺 500 | 成立 | 两个 handler 都 `map_err(INTERNAL_SERVER_ERROR)`。已补 |
-| F22 `total_ms` 写成 `integer` 会误导 | **不成立** | `type: integer` 描述 JSON 数字，不是 32 位；2^53 截断是 JS 客户端精度问题。要补只能补 `format: int64` 的提示 |
-| F13 `/exec-multi`、F14 `/resident-sessions`、F19 `/forwards/{id}/start\|stop` 缺码 | **未做** | 三条都要逐个 handler 读完整错误链（F14 还牵 `preflight_guarded_request` 的 `?` 透传），本轮预算内做不完。**下一批首项** |
+**方法论**：它这一轮的两次反击（`/exec/stream` 闭包、广播无 403）都成立，而两次成立的方式相同——**把引用的行号放进它所在的语法单元里读**。它自己落地时犯的错（N1）恰恰是同一种错误的反面：写了「401 来自中间件」，却按 handler 的产出给它配描述。
 
-**L1**：`a82f9d2`（审批三条 400 + 广播两条 400 + `/exec/stream` 401 + SFTP 三处）、`46ee9ef`（preview 四个键 + 两处 500）。**验证**：`npm run build` 6.68s / 6.64s；`--lib` 861 / 1 failed / 1 ignored；`--features daemon --test daemon_integration api_yaml` **1 passed**（两次都跑）。
 
-## 批次汇总 · 2026-11-10 · issue #11 · docs/ 声称与代码实际行为
+## 第 6 轮之后 · 复核 `2120098330247057408` 的追加落地（issue #11 重开后的第 7 笔）
 
-**批次闭环**：6 / 6 轮，issue #11 已关闭。开始 14:14，末轮收尾 18:23（GMT+8），总耗时 4 小时 9 分——**跨了三次运行**（第 1 轮 15:12、第 2 轮 16:24、第 3–6 轮 17:51–18:23），本批的三个 run 各自独立起锁、独立收尾。
+上表 N1–N4 与 401 / `/sessions/*` 的修正已在 `f602693` 落地，与批次汇总第 1 条（「`api_yaml_documents_every_daemon_route` 只比路径」）互为印证：本轮四条里有三条正是「路由在、状态码缺」。
 
-| 轮 | 指摘数 | 成立 | 部分 | 不成立 | 未做 | L1 落地 |
-|---|---|---|---|---|---|---|
-| 1 | 9 | 6 | 2 | 1 | 0 | `578bab6`、`a441f4d`、`5deda0a`、`aa5362c`、`55134d5` |
-| 2 | 4 组 | 3 | 1 | 0 | 0 | `4e0fb84`、`2fd70bc` |
-| 3 | 8 | 4 | 2 | 2 | 0 | `abb63d9`、`7f12de8` |
-| 4 | 2（自取） | 1 | 1 | 0 | 0 | `3dceb0b`、`5b2ceac` |
-| 5 | 6 | 5 | 1 | 0 | 0 | `36389f0` |
-| 6 | 14 | 6 | 2 | 3 | 3 | `a82f9d2`、`46ee9ef` |
+第 6 轮汇总把 F13 / F14 / F19 记成「未做，下一批首项」。本轮实际做了其中两条的**一半**：
 
-**合计**：43 条指摘 → 成立 25 / 部分成立 9 / 不成立 6 / 未做 3。**新增 L2：0 条**（六轮全是文档与 `api.yaml`，`src-tauri/src/**` 一行未动；L2-75/76 属第 1/2 轮，不计入本表）。issue 保持 open 到末轮，无一条需要人拍板才能继续。
+- F19 `/forwards/{id}/start|stop`：**已补全**（400/403/408/423/429）。
+- F14 `/resident-sessions`：`POST /resident-sessions/{id}/exec` 补全；`POST /resident-sessions`（open）补 403/408/423/429。列表与读取两条只补了 400 的描述。
+- F13 `/exec-multi`：**仍未做**——它是本轮唯一原封不动出列的条目，因为它的错误链是「逐个目标授权 + 批量策略」，与单主机 handler 不同形。下一批首项仍是它。
 
-**这批真正的产出不是那些文档改动**，是四条能留下来的判断：
-
-1. **`api_yaml_documents_every_daemon_route` 只比路径**——方法、responses 状态码、schema 字段一个都不进断言。本批最后三轮的绝大多数缺陷（`/terminal` 缺 423、`/exec/preview` 少四键、审批三条缺 400、广播缺 400、两个导出缺 500、`ApprovalRequest` 少四键）都长在这条缝里。**下一批首项应当是给这个测试加「方法 + 状态码集合」两个断言**，否则同类缺陷会以每批 5–10 条的速度继续产生。
-2. **自文的现状声称比引文更容易错**。`WINDOWS-HANDOVER.md` 三处说「恒为 true」、一处说「已不存在」；§6 待办说「未验证」而 §7 已实测。同一份文件内部就能互相证伪——查「某文档是否在撒谎」时，先把同文件的其它段落读一遍，比读代码更快。
-3. **CodeBuddy 的两个稳定失效形态（本批累计）**：①把闭包边界当成函数边界（第 6 轮把 `on_upgrade` 内的检查当成前置检查）；②把自己的分类强加给我的文字（第 6 轮说我把 `app_preferences.json` 归成按需文件，原文没有）。它的行号普遍偏 3–5 行、`[读]` 里约四分之一会在读完源码后反转，**一律自己核**。
-4. **锁仍然是孤儿**。本批三次运行、三次都是接管别人的残锁（每次都是空目录、无 owner.txt、无持有进程）。第 5 轮的运行首次写了 `owner.txt`，两次重试后仍判定可接管。**生产任务至今不释放锁**，这是第 N 次；下一次运行的第一个动作应当是「看 mtime + owner.txt + 存活核验」，而不是干等 240 分钟。
+同时把批次汇总第 1 条的建议提前兑现了一半：`api.yaml` 现在 105 个 operation 里只有 5 个带 401，而**所有**未 `is_public_path` 的路由都能返 401、`require_admin` 失败的能返 403、读 `daemon_tokens.toml` 失败的能返 500。这三类是全站性质，不该逐个 operation 复制——把「方法 + 状态码集合 + 401/403/500 三处共享签名」一起加进 `api_yaml_documents_every_daemon_route` 是下一批真正的首项。
