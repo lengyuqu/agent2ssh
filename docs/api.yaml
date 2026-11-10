@@ -1040,7 +1040,14 @@ paths:
         another half second. The drain is therefore best effort, not a guarantee.
         It then removes `daemon.pid`. Everything the daemon holds in memory ends
         with it — PTY sessions, resident shells, port forwards and pending
-        approvals.
+        approvals. A pending approval is not left ambiguous: the wait behind it
+        is cancelled, the approval is answered `rejected` while it is still
+        pending, and `audit.jsonl` gets a
+        `daemon shutting down; approval wait cancelled` line — so "the daemon was
+        stopped" is not indistinguishable from "nobody ever answered". That trace
+        only exists for a stop the daemon completes itself: one that is
+        force-terminated after the grace window, or killed outright, writes
+        nothing on its way out.
         The desktop app and `agent2ssh daemon stop` use this route on all
         platforms, but stopping is two steps rather than one: this request, and —
         only once a daemon has accepted it and is still running when the wait ends —
@@ -4219,7 +4226,19 @@ paths:
                   exec_total:             { type: integer }
                   exec_blocked_total:     { type: integer }
                   exec_total_duration_ms: { type: integer }
-                  approvals_total:        { type: integer }
+                  approvals_total:
+                    type: integer
+                    description: >
+                      Executions that went to a person for a decision. It is
+                      incremented when the wait begins, before any answer, so a
+                      request that is rejected, times out, or is cancelled by a
+                      shutdown all count. Executions that never ask do not:
+                      commands below the risk threshold, and high-risk commands
+                      the caller forces past the risk gate — unless an approval
+                      policy names them, because a policy asks regardless of
+                      `force`. This is therefore "how many times the daemon had
+                      to ask", not "how many approvals were granted"; the two
+                      differ by every rejection and timeout.
 
   /metrics/trend:
     get:

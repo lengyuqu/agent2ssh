@@ -537,3 +537,13 @@ CodeBuddy 在第 2 轮回帖后 5 分钟（21:53–21:58，60 s × 5 轮询）�
 
 2. **「本地没有 `daemon.token` 时 `stop_daemon_process` 根本到不了 `:991`，会停在 `request_shutdown` 自己的守卫 `:846-849` 上，所以我给 L2-4 的拆分方案会红」— 不成立。**
    `:991` 在 `:996` 的 `request_shutdown(Some(pid))` **之前**执行（同一函数、语句顺序，`:942` 起）。`request_shutdown` 的守卫只有两个入口：`:932` 的 `request_graceful_shutdown()`（传 `None`，无 pid 的旧调用方）与「`:991` 读到 token、`:846` 再读时文件已被删」的竞态窗口（`read_admin_token` 每次重读文件，`daemon_activity.rs:145`）。所以删掉 `daemon.token` 调 `stop_daemon_process` 确实停在 `:991`，得到 `NotAuthenticated`——而它说「daemon 不接受这个 token」时一个请求都没发出去。**它那张表的方向是对的**（两个变体都偏、偏法相反），只是把「哪条路径到哪一支」接反了；`L2-4` 的备注按上句补了入口清单与竞态说明。
+
+## 2026-11-10 · 手工/单发消费（issue #2）
+
+对 CodeBuddy 复核 `2119861268247908352` 的核实结果中，需要行为改动或产品口径的三条。
+
+| 编号 | 位置 | 判断 | 为什么不能自动落 | 建议改法 |
+|---|---|---|---|---|
+| L2-92 | `daemon_activity.rs` 的 `request_at`：`:103` `to_socket_addrs()?`、`:106` `connect_timeout`、`:107-108` 两个 per-syscall 超时、`:124` `write_all`、`:127` `read_to_end` | 部分成立 | 「没有总时限」属实，但承重的那一半是**地址解析**：`to_socket_addrs` 走系统解析器，不吃 `timeout`；`AGENT2SSH_DAEMON_ADDR` 允许主机名（`remote.rs:34` 只把通配符映回 loopback），所以停止线程可以被 DNS 挂住。它给的另一半机制不成立：`/shutdown` 的 handler 是 `Option<Json<ShutdownRequest>>`，axum 在 `require_admin` **之前**就抽完 body，所以「服务端不读 body、客户端阻塞在 4 KiB 写」在这条路径上不会发生；那条 body 实际是 19 字节的 `{"expect_pid":N}`。`read_to_end` / `write_all` 的「对手逐字节滴灌就能越过单个超时」是可构造的，但需要一个病态对端 | 给 `request_at` 一个总 deadline（`Instant + remaining()` 逐次收窄两个 socket 超时），并把解析交给带超时的解析路径（或先试 `SocketAddr::from_str`，失败再解析）。属 `src-tauri/src/**` 行为改动 |
+| L2-93 | `bin/agent2ssh-daemon.rs:655-671`（`shutdown.cancelled()` 分支） | 成立（竞态窗口） | `approval_respond(id, false)` 的返回值只用于 `:668` 的日志字段，不参与分支。若此刻审批已因 TTL 被 `approval_poll` 提前置 `timed_out`（`:699-701` 的「已非 pending」），`approvals.jsonl` 末条停在 `timed_out`，而 `:662` 的 `audit.jsonl` 仍写 `daemon shutting down; approval wait cancelled`——两个文件对同一件事给出不同结论 | 二选一：①把 `result` 接进审计文案（`is_ok()` 时写 cancelled、否则写「already timed out when the daemon stopped」）；②维持两笔记录，但在 `api.yaml` / 指南里写明「停机取消与 TTL 超时可能并存，以 `approvals.jsonl` 的状态为准」。属 `src-tauri/src/**` 行为 + 文案 |
+| L2-94 | `bin/agent2ssh-daemon.rs:596`（`request_and_wait_for_approval` 第一句 `APPROVAL_COUNT.fetch_add`）、`:1238` 的 `/metrics` 输出 | 成立（命名与语义不符，非缺陷） | 计数发生在**等待开始**，所以拒绝、超时、停机取消都 +1，而低风险与「`force` 越过风险门且无 policy」都不 +1。名字叫 `approvals_total`，读者会当成「批了多少次」或「问了多少次」——两种读法都能自证矛盾。本轮 L1 只补了 `api.yaml` 的描述，没有改代码 | ①改名 `approval_requests_total` 并保留旧键一个版本；或②拆成 `approval_requests_total` / `approval_rejected_total` 两个计数器。属 `src-tauri/src/**` 行为面（`/metrics` 的键集合），需拍板 |
