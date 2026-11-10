@@ -1783,4 +1783,4 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 - **新的判据（写进文档的骨架）**：本仓只有 daemon 带审批处理器（`authorize_command_inner` → `authorize_command_with_approval`）；CLI、MCP、桌面端全部走 `*_without_approval_handler`。于是每条命令只有三种命运：①能到 daemon（`exec --daemon <远端别名>`、`session`/`forward` 的 daemon 路径、MCP 的 `ssh_exec` + `daemon_alias`）→ 可审批；②到不了但自己有 `--force`（`exec-multi`、`playbook run`、`exec` 本地分支）→ 只能过「高风险」那一关；③两样都没有（`sftp`）→ 命中策略只能改策略或改走 daemon 的 HTTP 路由。
 - **L1 落地**：`273beff`（`cli-quickstart.md` 改成分档叙述、`mcp-quickstart.md` 三处、`skills.md:112`、`skill-distribution.md:198`、`architecture.md:141`、L2-108 补记）、`804a2db`（`sftp` 的 CLI 提示去掉「桌面端」这个死路）。
 - **验证**：`npm run build` 6.39s；`cargo fmt --check` 绿；`--no-default-features --lib` **861 / 1 / 1**；`--test cli_smoke` **34 / 0**；`--features daemon --test daemon_integration` **71 / 0**（本轮没动 `api.yaml`，跑它是为了确认第 4 轮那条新断言在干净的树上仍然绿）。
-- **回帖**：见下一笔提交回写的 id。**#15 保持 open**，进度 5 / 6。
+- **回帖**：`2120262366636969984`（05:25 GMT+8）。**#15 保持 open**，进度 5 / 6。
