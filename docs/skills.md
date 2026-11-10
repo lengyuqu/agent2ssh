@@ -109,7 +109,7 @@ Commands are classified into four risk levels:
 - **high** — potentially destructive commands (sudo, rm -rf, chmod 777, etc.)
 - **blocked** — unconditionally dangerous commands (mkfs, rm -rf /, shutdown, fork bomb, etc.)
 
-High-risk commands require daemon approval or `force: true` when policy allows. Local MCP paths that do not have an approval handler fail closed and should be routed through the daemon approval flow. Blocked commands are always rejected.
+High-risk commands require daemon approval or `force: true` when policy allows. Only `ssh_exec` can reach a daemon (pass `daemon_alias` with a remote alias — `localhost` is the local branch); every other MCP tool has no approval handler, so a policy match fails closed. Blocked commands are always rejected.
 
 ## Execution Authorization
 

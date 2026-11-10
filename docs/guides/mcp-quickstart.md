@@ -399,7 +399,7 @@ MCP 的 exec、exec-multi、playbook、SFTP、session open/write/close、forward
 
 MCP 的 exec、SFTP、session、terminal 相关 daemon 路径、jump-host、端口转发和连接保留都使用内置 SSH 传输，不依赖系统 `ssh`、`scp` 或 `sshpass`。SSH 主机指纹首次连接时会自动写入 `~/.agent2ssh/known_hosts.json`，后续算法或指纹变化会被拒绝。
 
-高风险命令可通过 daemon 审批流处理。未路由到 daemon、且没有本地审批处理器时，MCP 会失败关闭；此时应改用 daemon 路由，或在策略允许时传入 `force: true`。
+高风险命令只有 `ssh_exec` 能拿到审批：它读 `daemon_alias`，别名不是 `localhost` 时把请求转发到那台 daemon 的 `/exec`（`bin/agent2ssh-mcp.rs:785`/`:805`），审批在 daemon 侧完成。`ssh_exec_multi`、`ssh_exec_compare` 与其余工具**没有**这个参数，本地分支也没有审批处理器，所以命中策略时 `force: true` 同样不管用：要么改策略，要么改用 `ssh_exec` 并带上 `daemon_alias`。
 
 **ssh_risk_check** -- 检查命令风险等级（不执行命令）
 
@@ -567,10 +567,10 @@ Agent2SSH 对每条命令进行风险分级，并根据分级结果决定是否�
 |----------|----------|----------|-----------------|
 | **low** | 直接执行 | 直接执行 | 直接执行 |
 | **medium** | 直接执行 | 直接执行 | 直接执行 |
-| **high** | 本地执行需要 `--force`；daemon 路由可走审批 | 本地路径需要 `force: true`；daemon 路由可走审批 | 可走审批，或在策略允许时使用 `force: true` |
+| **high** | 本地执行需要 `--force`；`exec --daemon <远端别名>` 可走审批 | 本地路径需要 `force: true`；只有 `ssh_exec` 传 `daemon_alias`（远端别名）时可走审批 | 可走审批，或在策略允许时使用 `force: true` |
 | **blocked** | 拒绝执行 | 拒绝执行 | 拒绝执行，并写入 blocked audit |
 
-**MCP 中的处理方式：** MCP 本地路径不持有 Daemon 审批队列。高风险命令未携带 `force: true` 且没有 daemon 审批处理器时会失败关闭；需要审批的场景应通过本地或远程 daemon 路由执行。
+**MCP 中的处理方式：** MCP 本地路径不持有 Daemon 审批队列，也没有审批处理器。要审批只有一条路：`ssh_exec` 加 `daemon_alias`（远端别名，不是 `localhost`）。`ssh_exec_multi`、`ssh_exec_compare`、`ssh_playbook_run` 等没有这个参数，命中策略时改策略或用 `ssh_exec`。
 
 **Daemon API 审批流程：**
 

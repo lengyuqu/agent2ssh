@@ -194,9 +194,12 @@ agent2ssh exec myserver "cat > /tmp/data.txt" --stdin "hello world"
 agent2ssh exec myserver "sudo systemctl restart nginx" --force
 ```
 
-CLI 侧没有审批者，所以命中 `approval_policies` 时一律失败关闭，`--force` 也绕不过去（`--force` 只覆盖「高风险未获批」这一种拒绝）。想拿到审批只有一条路：`exec` 加 `--daemon <远端别名>`，把请求转发到那台远端 daemon 的 `/exec`，在它的审批接口或控制台里批准 —— **本地 daemon 不参与 CLI 执行路径**，它正在运行也一样，`--daemon localhost`（默认值）走的就是本地分支。
+CLI 侧没有审批者，所以命中 `approval_policies` 时一律失败关闭，`--force` 也绕不过去（`--force` 只覆盖「高风险未获批」这一种拒绝）。**本仓只有 daemon 带审批处理器**（`authorize_command_inner` → `authorize_command_with_approval`，`bin/agent2ssh-daemon.rs:689-713`），所以能不能拿到审批，取决于这条命令有没有通往 daemon 的路：
 
-`exec-multi`、`sftp`、`session`、`forward`、`connect`、`playbook` 都没有转发路径，命中审批策略时只能改策略，或用桌面端/HTTP 接口执行。
+- `exec`：加 `--daemon <远端别名>`，请求转发到那台远端 daemon 的 `/exec`，审批在它那边完成。**本地 daemon 不参与 CLI 执行路径**，它正在运行也一样；`--daemon localhost`（默认值）走的就是本地分支。
+- `session` / `forward`：**只有 daemon 路径**——默认打本地 daemon，`--daemon <远端别名>` 换成远端（`daemon_client`，`bin/agent2ssh.rs:2570-2840` 九处）。它们本来就能被审批，也没有 `--force`。
+- `exec-multi` / `playbook run`：有 `--force`，但没有 daemon 转发；命中策略只能改策略。
+- `sftp`：既没有转发也没有 `--force`（九个调用点都传 `false`）。要审批只能走 daemon 的 HTTP `/sftp/*` 路由；**桌面端不算出路**，它的 `authorize_desktop_operation`（`tauri_commands.rs:527`）同样没有审批处理器，和 CLI 一样失败关闭。
 
 ### 多主机并发执行
 
