@@ -5126,13 +5126,15 @@ fn spawn_embedded_exec_stream(
                     Err(error) if error.kind() == ErrorKind::WouldBlock => {}
                     Err(error) => return Err(error.into()),
                 }
-                // Checked only after both queues were drained above, and that
-                // order is load-bearing. `eof()` is `state.eof && stdout empty
-                // && stderr empty` (`transport/russh_impl/channel.rs`), so it can
-                // turn true only once this loop has read both streams to the end.
-                // Hoisting the check above the two reads would let it fire while
-                // stderr still holds bytes, and the exit status below would then
-                // be reported with the tail of stderr silently missing.
+                // `eof()` is `state.eof && stdout empty && stderr empty`
+                // (`transport/russh_impl/channel.rs`), so it cannot turn true
+                // while either queue still holds bytes: where the check sits in
+                // the loop does not matter. What does matter is that the loop
+                // stops on this predicate rather than on `read() == 0` —
+                // `read_side` answers 0 as soon as the stream has ended, even
+                // when the *other* queue still has bytes (the libssh2 drain
+                // loops relied on that), so an `Ok(0)` break would drop the tail
+                // of stderr.
                 if channel.eof() {
                     break;
                 }
