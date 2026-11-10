@@ -918,3 +918,28 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 
 1. 从所有 `*.md` 抽 360 个「看起来像测试名/函数名」的反引号标识符，逐个 grep 代码。命中 30 个「找不到」，**逐条看下来全属正当**：历史 CHANGELOG 叙述（`_libssh2_wincng_load_private` 等，讲的是已退场的后端）、ledger 与 L2 里**故意引用已删除的测试名**（`legacy_daemon_without_pid_guard_is_not_automatically_stopped`，L2-2 的论据就是「它被删了」）、以及 L2-26 里**建议新增**的名字（`classify_with_rule_name` 是提议，不是现状）。**没有一个构成现状声称**。
 2. 从 `README/AGENTS/CLAUDE/overview/docs` 抽 35 个配置文件名（`.toml/.json/.jsonl/.pid/.token/.enc`），查 `src-tauri/src` 与 `src` 的引用。34 个都能落地；唯一「找不到」的 `argo.toml` 是正则把 `Cargo.toml` 截掉首字母的假阳性（`[a-z_]+` 不含大写），不是文档缺陷。**注意这两条扫描都是在 L1 修完之后跑的**，所以它们只能当「没有把我改坏 / 没有同族的第二处」的回归检查，不能当探测器——`execution_gate.toml` 那条之所以没被扫出来，正是因为改完了（扫描前它一定会命中 NOCODE）。结论：这类扫描抓的是「名字整个不存在」，抓不到「名字存在、扩展名错」那种（gate 的实际形态），判定仍得逐条读路径。
+
+#### consume 2 / 6（基线 `4e0fb84`，回帖 `2120075128699527168`）
+
+**指摘来源：自取。** CodeBuddy 对我第 1 轮收尾（`2120053401688903680`，15:18）始终未回：issue 静默 80 分钟，本轮开头又按协议 60 s × 5 轮询，评论数停在第 1 轮收尾后的 2。故按 issue 正文点名的 KNOWN-ISSUES 核对点（K2/K7/K8/K9/K12/K13/K14/K15/§3）自取靶。口径不放宽：每条都给了可证伪判据。
+
+**判定：4 组 → 成立 3 / 部分成立 1 / 不成立 0。**
+
+| # | 指摘 | 判定 | 关键证据 |
+|---|---|---|---|
+| F1 | `/terminal` 的 `connected` 帧不含 `server_banner`，四份文档都写了它 | **成立（本轮最值钱）** | `git grep server_banner` 全仓只命中文档三处 + `DEFECTS.md:94`，`src-tauri/src` 与 `src` **零命中**。`ae2e233`（2026-06-22）把字段从 `EmbeddedSshConnectionInfo`、诊断日志、connected 帧一并删掉，理由（`DEFECTS.md:94`）是泄露 OS/SSH 版本。现状 `daemon.rs:4866-4874` 发 type/host/address/username/fingerprint_sha256/host_key_algorithm/recording_id/terminal_id。banner 仍被捕获（`russh_impl/mod.rs:926`），唯一消费者是 `sftp_transfer::upload_chunk_for_server`（`core.rs:1982`） |
+| F2 | `configuration-guide.md:1061` 说 `keys generate` 能生成 ecdsa | **部分成立** | 生成不行：`KeyTypeArg`（`bin/agent2ssh.rs:542-546`）、`KeyAlgorithm`（`keys.rs:166-177`）只有 Ed25519/Rsa，`src/types.ts:563` = `"ed25519" \| "rsa"`，`AGENTS.md:38` 与 `cli-quickstart.md:418` 本就写 `[--type ed25519\|rsa]`。导入可以：`import_key_core`（`keys.rs:645-654`）按 `.pub` 前缀标 `ecdsa`。**这句是消费者自己第 1 轮 `578bab6` 改写时留下的**——当时只重核了「Windows 无限制」那一半 |
+| F3 | `configuration-guide.md:146` 的「Windows 上私钥的文件格式有额外限制，见注意事项」 | **成立** | 它指向的 `:155-169` 现在写的是相反结论（`:168` 各平台一致、`:169` 密钥格式不再是失败原因），`:1061` 同。全仓 6 处「见注意事项/见上文/见下文」只有这一处落空 |
+| F4 | `architecture.md:142` 的诊断字段清单 | **成立（一个词）** | 五项四对：`embedded_ssh.rs:1692-1703` 记 username/auth_method/fingerprint_sha256/host_key_algorithm/jump_host，**不记 banner** |
+
+**顺手核干净（下次别重做）**：`SYNCABLE_FILES`（`webdav_sync.rs:35-45`）与 `configuration-guide.md:1088` 的九个文件名逐一相同、顺序相同；K8 两种凭据输入方式在 `:335-346` 写全（`--stdin` 的 EOF/UTF-8/65536 字节/拒绝终端四条）；§3 八项未验证范围在 `SSH-MATRIX-CI.md:17`、`WINDOWS-HANDOVER.md:59`、`KNOWN-ISSUES.md:43-51` 三处都明写「不因矩阵通过而变为已验证」；K2 的 banner 启发式在 `CHANGELOG.md:33` 与 KNOWN-ISSUES 里都标成历史且「已无实测依据」，不构成现状声称。
+
+**L1**：`4e0fb84`（5 文件：README、api.yaml、architecture、configuration-guide、daemon-api-quickstart）、另加一笔记录 L2-76 与本条。推 `cnb main`，未推 github。
+
+**验证**：`npm run build` 7.19s；`--no-default-features --lib` **861 passed / 1 failed / 1 ignored**（失败项仍是故意红的 IPv6 测试）；`--features daemon --test daemon_integration api_yaml` **1 passed**；`cargo fmt --check` 绿。
+
+**新增 L2**：L2-76（`list_keys_core` 与 `import_key_core` 对同一把密钥给出不同类型）。
+
+**F1 的方法学价值**：四份文档一起错同一件事，是因为 `api_yaml_documents_every_daemon_route` 比**路由**不比**帧字段**，而 README/architecture 的散文无测试可见。上一轮 CodeBuddy 建议的「优先找测试看不见的散文」在本轮给出了最大一条。
+
+**第 3 轮未开始**：回帖后 60 s × 5 无回复 → 从 C=2 → 第 3 轮起，指摘在 CodeBuddy 对 `2120075128699527168` 的回复里。

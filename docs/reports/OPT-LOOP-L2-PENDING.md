@@ -413,3 +413,11 @@ enum DrainOutcome {
 | 编号 | 位置 | 判断 | 为什么不能自动落 | 建议改法 |
 |---|---|---|---|---|
 | L2-75 | `bin/agent2ssh-daemon.rs:637-654`（同一个 `tokio::spawn` 里先后调 `notify_approval_pending` 与 `fire_webhook`）；`notify.rs:74-150`、`:229-282`（两条路径都各自读订阅列表、各自 POST） | 成立 | 一次 `approval_required` 会**发两条** webhook：`notify_approval_pending` 与 `fire_webhook` 都读同一份 `webhook.toml` 的订阅列表，都对 `approval_required` 判过 `events.contains`，于是两条都发。Slack URL 下是两条不同卡片（审批那条四字段 + 死按钮，通用那条两字段 + `Open Approvals`）；非 Slack URL 下是两条 JSON（一条带 `approval_url`，一条是 `WebhookEvent` 形状）。收 Slack 的人会看到重复告警，收自建端点的人会收到两次 POST——按「一次事件一次投递」写幂等的下游会以为审批被提交了两次 | 二选一：①让 `fire_webhook` 跳过 `approval_required`（审批事件由 `notify_approval_pending` 专管），把 `format_slack_message` 里 `:350` 那段 `approval_required` 分支一并删掉；②反过来，把 `notify_approval_pending` 收敛成「只给 `fire_webhook` 补按钮参数」的一个格式函数，投递只留一处。①改动小但会丢掉通用那条的 `Open Approvals` 按钮（那是**可用**的那个），所以实际推荐②：先让 `format_slack_message` 接 `approval_url`，再删掉 `notify_approval_pending` 的发送。属对外投递次数与载荷形状的双重改动，需拍板 |
+
+### 第 2 轮新增（L2-76）· 2026-11-10
+
+第 2 轮 CodeBuddy 未回帖（等待 5 分钟 + issue 静默 80 分钟），按 issue 正文的 KNOWN-ISSUES 核对点自取靶，核实 **成立 3 组 / 部分成立 1**。文档侧（L1）已全部落 main；下面这条是核 K7/密钥类型时顺带读出来的代码不一致。
+
+| 编号 | 位置 | 判断 | 为什么不能自动落 | 建议改法 |
+|---|---|---|---|---|
+| L2-76 | `src-tauri/src/keys.rs:113-124`（`list_keys_core` 的类型判定）对 `:645-654`（`import_key_core` 的类型判定） | 成立 | 两处对**同一把密钥**给出不同类型。`import_key_core` 只看 `.pub` 前缀，有 `ecdsa` 分支；`list_keys_core` **先看文件名子串**（`name.contains("ed25519"/"rsa"/"ecdsa")`），且它的 pub 前缀分支**没有 `ecdsa`**。后果两条：①导入一把 ECDSA 密钥、文件名不含 `ecdsa`（例如 `p256-work`），导入响应说 `ecdsa`、Keys 面板列表说 `unknown`；②一把 ed25519 密钥若文件名含 `ecdsa`（例如 `migrated-ecdsa-backup`），列表把它标成 `ecdsa`。桌面 Keys 页的类型是给用户看「这把是什么」，错标会让人拿错密钥去配主机 | 合成一个分类函数：**先按 `.pub` 前缀判**（补 `ecdsa-sha2-` 分支），前缀认不出才退回文件名子串，最后 `unknown`。`list_keys_core` 与 `import_key_core` 都调它，并补两条断言（`p256_work` → `ecdsa`；`migrated-ecdsa-backup` 但 pub 是 `ssh-ed25519` → `ed25519`）。属 `src-tauri/src/**` 行为改动 / IPC 字符串变化，按 L2 处理 |
