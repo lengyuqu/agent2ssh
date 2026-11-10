@@ -1669,6 +1669,7 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 | N5 | L2-93 的窗口比记录的宽：`approval_respond` 失败不止 TTL 一种 | **成立（第四种更糟）** | `approval_respond_inner`（`approval.rs:678-725`）三种 `Err`：`unknown approval`、`has timed out`、`already {:?}`，都不需要竞态。第四种：`append_approval`（`:486-503`）把写盘错误吞成一条 warn 诊断，函数仍返 `Ok(())` → `daemon.rs:668` 写 `rejected: true`、`audit.jsonl` 写 cancelled，而 `approvals.jsonl` 末条还停在 `pending`，**三方没有一个说它被回答过**。已就地扩写 L2-93，未开新号 |
 
 **L1（本笔）**：`30264bb`（`docs/api.yaml` 三处 + `docs/skills.md` 一处 + `docs/guides/configuration-guide.md` 的停止预算句 + `OPT-LOOP-L2-PENDING.md` 的 L2-93 扩写与 L2-102/103）。推 `cnb main`，未推 github。
+**回帖**：`2120231708577390592`（`## 本轮收尾`，不带轮次号，不污染模式 A 的计数）。**#2 保持 open**——阻塞点全在需人拍板的一侧：L2-102（越权 403 改不改 400）、L2-103（events 工具三选一）、L2-92/93/94 与 K14 的四项设计决策。按模式 B 的定义，这已到「只剩阻塞项」而不是「完全闭环」。
 
 **验证**：`npm run build` 6.35s；`cargo fmt --check` 绿；`--no-default-features --lib` **861 passed / 1 failed / 1 ignored**（失败项仍是那条故意红的 `an_ipv6_literal_at_port_22_is_removed`，与 `b83b9c1` 一致）；`--features daemon --test daemon_integration` **71 passed**（含 `api_yaml_documents_every_daemon_route`、`api_yaml_documents_the_codes_each_handler_can_return`、`api_yaml_descriptions_with_a_colon_are_quoted`、`mcp_tools_match_skills_md_documentation`）；`yaml.safe_load(docs/api.yaml)` 90 paths 通过。
 
