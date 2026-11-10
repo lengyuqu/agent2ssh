@@ -1038,3 +1038,60 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 - 顶部 `BATCH_COMPLETE · issue #11` 状态行已由本次生产运行删除（沿用 #10 遗留要求，#12 开批后它会让消费任务误判「只报告不执行」）。
 - 下一批（B=7）：7 % 6 = 1 → 主题 1：daemon 控制与停止协议（`daemon_control.rs` / `daemon_activity.rs` / `bin/agent2ssh-daemon.rs`）。开 issue 前重读 ledger 不成立清单（批次 6 消费期间可能新增，且 #12 更正评论已把 3 条转回「可重提」）。
 - 锁沿用「保留在位、消费者侧自行清理」先例。
+
+### consume 1 / 6 · 2026-11-10 19:25–20:55 (GMT+8) · issue #12
+
+- **指摘来源**：CodeBuddy 对 issue 正文的首条分析（评论 `2120104226712895488`，18:40 发出）。它自述**本工作区没有 Rust 工具链**，全部标 `[读]`。
+- **判定：9 组 → 成立 5 / 部分成立 2 / 不成立 2**（另有 1 条它自己撤回）。
+- **本轮最重要的事实：它整条分析跑在过时的行号基线上。** 8 条带状态码的指摘里有 4 条在 batch 5 收尾（`7175314` / `b5483c3`）已经修掉，而生产任务的更正评论 `2120103682455814144`（18:38，早于它 2 分钟）点名的正是这批。它没读那一帖，也没重读 `api.yaml`。
+- **它给的数量全部偏小**（方向对、量级错，已按实测重算）：
+  - 带 401 的 operation：它说 17 个，实测 **5 个**；缺 401：它说 72，实测 **98**（105 个 operation − 5 已写 − 2 个 `security: []`）。
+  - 带 500 的 operation：它说 6，实测 **7**；`INTERNAL_SERVER_ERROR` 出现点 30 处（这一点它给对了）。
+  - 路由数：92 次 `.route(` = 90 个 path + `GET /` + `GET /console`，方法对撞 90 个 path 全一致（它这条也对）。
+
+| 组 | 指摘 | 判定 | 证据 |
+|---|---|---|---|
+| §0-a | 方法/路径已全在契约里，真缺口只在 error response 集合 | **成立（后半）** | 我用 `.route(` 段与 yaml 方法键逐条对撞：107 个挂载对 = 105 documented + `/` + `/console`，零不一致。这正好是「补一条断言把它钉住」的理由 |
+| §0-b | 89 个 authed operation 里 72 个没写 401 | **部分成立** | 方向对，数字错（98 / 103）。补法一致 |
+| §0-c | `/exec-multi:1281`、`/exec/compare:1321` 的 400 漏了「blocked by risk policy」 | **成立** | `authorize_targets` → `authorize_command` 的 `Blocked` 分支在 `daemon.rs:767` 返 400；两条路由的 400 描述只写了「命令太长」与「没有匹配的主机」 |
+| §1 | `exec_multi` 的 `authorize_targets`（`:1833`）早于 `exec_multi_with_strategy`（`:1844`），匹配不到的主机也会被审一次；空 hosts+tags 会用伪造的 `no-targets` 去 authorize | **成立（行为，L2-77）** | `targets_for_exec_multi:791-812` 解析失败即用客户端自报名字兜底；`authorize_targets:846` 的 `targets.is_empty()` 分支用 `target_host_label` 的 `"no-targets"`（`:827-828`）。`core.rs` 的三条测试只到 core 层 |
+| §2-a | `POST /resident-sessions` 与 `/{id}/exec` 只有 200+400，缺 403/408/423/429/500 | **不成立（除 500）** | 两条都已有 200/400/403/408/423/429（`api.yaml` 的 `/resident-sessions` 与 `/{id}/exec` 段）。**只剩 500 确实缺**（`authorize_command` 的 `Internal` 分支 `daemon.rs:777` 会返它） |
+| §2-b | 400 描述里的「or authorization refused」与 403 自相矛盾 | **不成立** | 现文已无该短语（`/resident-sessions/{id}/exec` 的 400 只列 unknown/dead/timeout/too-long/blocked），403 也在 |
+| §2-c | gate 暂停下 `open` 与 `exec` 没有任何断言，只有 `delete` 有 | **成立** | `daemon_resident_session_e2e.rs:580` 只断 DELETE 的 423；新增 `resident_session_open_and_exec_respect_the_gate` 补上两条 |
+| §3-a | `/forwards/{id}/start|stop` 的 423/429/403/408 契约一条没写 | **不成立** | 两条路由都已写全（本批实测：start 有 200/400/401/403/408/423/429，stop 同） |
+| §3-b | 未知 id 的 400 文案是 `unknown forward`，契约却写「不是 UUID」 | **不成立** | 现文已写「no rule has it」（start 400、stop 400 都有），stop 还写明「对已停的规则再停会成功」 |
+| §3-c | 已在跑的规则再 start / 已停的再 stop 与真动作在 200 与审计里同形；`stop_worker` 的 `StoppingError` 被吞 | **成立（观测面，L2-78）** | `forward.rs:783-790`、`:795-804` 两处短路 `Ok(())`；`:241-245` 置 `StoppingError` 而 handler 只看 `is_ok()`；两处都写 `Some(0)` → `derive_audit_outcome` 判 `success` |
+| §4-i | 副本 `check_auth` 不产生 `AuthContext`，四个只用 admin 的 handler 副本没有 `require_admin`，`tests/daemon_integration.rs:855` 的 200 是在副本上拿的 | **成立** | 副本 `:66-83` 只比固定 token；真身 `require_admin` 在 `:3344`/`:3375`/`:3436`/`:3694`（它给的 3439/3695 偏 3/1 行） |
+| §4-ii | 副本只挂 18 条、真身 92 条，文件头「mirrors」是过度声称 | **成立** | `build_test_router` 18 条 vs 92 次 `.route(`；文件头已改写为「shape-mirror for 18 of 92」并写明副本无 scope/admin |
+| §5.1 | `auth_middleware` 的 `bearer_token().or_else(accepts_query_token…)` 组合零测试；换 `and_then` 8 条单测全绿 | **成立（L2-79）** | `auth.rs:133-158` 是唯一组合点，`grep` 只有定义与挂载两处；零件各有测试、组合没有 |
+| §5.2 | resident 列表断言对「过滤被删」不够敏感，建议开第二条 session 加固 | **部分成立（建议，非缺陷）** | 越权侧断言 `[]`、admin 侧 `len()==1`，删掉过滤会得到 1 条 → 现有断言**会红**，今天有效。加固可做但不必 |
+| §5.3 | `api_yaml` 的 path 解析对 `:` 无防御 | **不成立（它自撤）** | 它自己核完改为「路径比对双向且冗余正确」 |
+
+**L1 落地**（一笔）：`bcca25c`
+- `docs/api.yaml`：98 个 operation 补 `"401"`（中间件在 handler 之前就拒，属全站性质）；`POST /resident-sessions`、`POST /resident-sessions/{id}/exec`、`DELETE /resident-sessions/{id}` 补 `"500"`；`/exec-multi` 与 `/exec/compare` 的 400 描述补「risk policy blocked」。
+- `src-tauri/tests/daemon_integration.rs`：`api_yaml_documents_every_daemon_route` 增两条断言（方法一致、非公开 operation 必须有 401），抽出 `normalized_route_path` / `mounted_methods` 两个 helper；文件头把「mirrors」改成「18 of 92 + 副本无 scope/admin」。
+- `src-tauri/tests/daemon_resident_session_e2e.rs`：新增 `resident_session_open_and_exec_respect_the_gate`（gate 暂停 → open 423、exec 423、读仍 200）。
+
+**验证**：`npm run build` 6.93s；`cargo fmt --check` 绿；`--no-default-features --lib` **861 passed / 1 failed / 1 ignored**（基线那条故意红测）；`--features daemon --test daemon_integration` **63 passed**；`--features daemon --test daemon_resident_session_e2e` **12 passed**（原 11 + 新增 1）。
+**两条新断言都做了破坏性验证**：删掉 `/hosts` 的 401 → 红并点名 `["get /hosts"]`；把 `/gate/pause` 改成 `get` → 红并点名 `["post /gate/pause"]`。恢复后绿。**没做这一步的断言不算断言。**
+
+**下一轮首项**：26 个 handler 会返 500，契约里只有 10 个 operation 写了。逐个读错误链再补，比本轮机械补 401 慢，但这是同一类缺口的剩余部分。
+
+**锁**：进入时 18:25 的孤儿锁（空目录、无 owner.txt、无持锁进程，仓库 25 分钟无改动）。重试 3×120 s 全失败 → 存活核验 → 接管并写 `owner.txt`（pid + reason）。**ledger 里生产任务自己写明「锁沿用『保留在位、消费者侧自行清理』先例」**——所以这不是 bug，是约定；以后不必再走 3×120 s，直接核验后接管即可。
+
+### 第 1 轮新增的不成立条目（原文保留，请勿重复提）
+
+1. **「`POST /resident-sessions` 与 `POST /resident-sessions/{id}/exec` 只有 200 和 400，缺 403/408/423/429/500」— 不成立（除 500）。**
+   两条路由的 responses 都已有 200/400/403/408/423/429；`/resident-sessions` 段的 403 写「Scope denied — the token's allowed hosts and tags do not cover this environment id」，408/423/429 齐全；`/{id}/exec` 同。**只有 500 确实缺**，本轮已补。
+
+2. **「`/resident-sessions/{id}/exec` 的 400 描述里『or authorization refused』与真正的 403 自相矛盾」— 不成立。**
+   现文 400 只列 unknown session / dead session / timeout / over-long command / cancelled queued command / blocked or rejected，没有 `authorization refused`；403 单独一行，写着 command scope。
+
+3. **「`/forwards/{id}/start|stop` 的 423/429/403/408 契约一条都没写」— 不成立。**
+   两条都是 200/400/401/403/408/423/429。`403` 还分段写了「scoped token 只有规则主机在其 allowed hosts/tags 内才够得着这条路由；看不见的 id 按未知处理返 400，不返 403 以免确认隧道存在」。
+
+4. **「`forward_start`/`forward_stop` 对未知 id 返 400 `unknown forward`，而契约写的是『The id is not a UUID』」— 不成立。**
+   start 的 400 原文是「The id is not a UUID, **no rule has it**, or the rule still exists but its worker could not be started」；stop 的 400 是「The id is not a UUID, **or no rule has it**. Stopping a rule that is already stopped succeeds, so an id that exists never answers 400 for its state.」
+
+5. **「`api_yaml_documents_every_daemon_route` 的 path 解析对 `:` 与前缀星号无防御，会静默放宽」— 不成立（提出者自撤）。**
+   `split(':').next()` 取第一个冒号之前，而 path 里目前没有冒号；`/` 两侧的排除与 `path.is_empty()` 分支使比对双向冗余正确。它自己核完改成「路径比对本身是双向的、冗余正确的」。
