@@ -1,5 +1,7 @@
 # 优化轮次账本（OPT-LOOP）
 
+BATCH_COMPLETE · 2026-11-10 · issue #11「docs/ 声称与代码实际行为」6/6 轮闭环，汇总见文末。
+
 这份文件是「优化批次生产 / 消费」两个定时任务之间**唯一的跨轮记忆**。约定：
 
 - 生产任务追加 `### batch <日期> · <主题>`：记 issue 号与 CodeBuddy 首条分析索引，6 轮进度留 `0 / 6`。
@@ -887,7 +889,7 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 ### batch 2026-11-10 · docs/ 声称与代码实际行为是否相符
 - issue #11 / 开批时间 2026-11-10 14:14 (GMT+8)
 - CodeBuddy 首条分析：**未到（等待中）**——issue 发出后 60 s × 5 次轮询 + 结束前即时复核均 0 评论。消费者下次运行重新等（沿用 #9/#10 先例：等待超时不空等，按协议记「未到」）。
-- 6 轮进度：**4 / 6**（consume 1–4 见下；issue #11 保持 open）
+- 6 轮进度：**6 / 6（批次闭环，issue #11 已关闭）**
 - 正文喂给 CodeBuddy：**43 条「不成立」原文**（preflight 2 + batch 1 六轮 10 + batch 2 行内 D2/D4 2 条与编号 15–28 共 16 + batch 3 行内 A5/E 2 条与编号 29–31 共 5 + batch 4 第 1/5/6 轮共 10；编号 39 条 + 行内 4 条）+ KNOWN-ISSUES 空档（K2 / K7 / K8 / K9+K12 / K13 / K14 / K15 / §3 全部未验证行）+ 口径提醒（基线红测 861/1/1 与 npm 213/27、「时点快照不是缺陷」、判据按 feature 组合、扫描器反例自检、`.github/**` 禁区、越权推送重申、`[跑]` 标注不可采信）。范围：`README.md` / `overview.md` / `AGENTS.md` / `CLAUDE.md` / `docs/guides/**` / `docs/KNOWN-ISSUES.md` / `docs/` 其余说明文档与 `.txt` / `CHANGELOG.md`（仅当声称当前行为）；`api.yaml` / `docs/skills.md` / SKILL.md / clap help 已在 #9 对齐，除非回归勿重扫。
 - 批次口径说明（消费者必读）：本条是 ledger `###/## batch` 条目口径下的**第 5 批**（#7–#10 为第 1–4 批）。此前顶部状态行把 #9 称「batch 4」、#10 称「batch 5」，是消费者按自己口径的误称；那三条 `BATCH_COMPLETE` 状态行已由本次生产运行按 #10 批次的遗留要求删除（#11 开批后它们会让消费任务误判「只报告不执行」），史实在各「批次汇总」小节与 git 历史。
 - 编号陷阱沿用：ledger 原编号 1–31 跨节连续，29–31 物理落在 batch 2 末节但内容属 batch 3 第 5 轮；batch 4 的三组「新增不成立」在各自小节内重新从 1 编号，喂给 CodeBuddy 时已按来源分组标注，勿按物理位置归批。
@@ -983,3 +985,61 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 **顺手核干净（下次别重做）**：`/audit/export` 的 13 个过滤参数 + `format` 齐（**我一开始只读到 `limit` 差点误判成第二个 F7，教训：读到块结尾再判**）；`/health` 九键与 `/metrics` 六计数器逐字对；`/sessions`、`/sessions/{id}/read`、`/gate` 的形状对；`ExecResult` 11 键、`AgentEvent` 18 个 `event_type` 与 `EventType` 逐一相同；quickstart 的「105 operation / 107 route」成立（`api.yaml` 105 个 operation、`.route(` 92 次 = 90 + `GET /` + `GET /console`）；web-console-guide 的 6 个 Tab、Daemon 切换器、`type="password"`、三个事件复选框全部与 `console.html` 行号吻合。
 
 **新增 L2：0 条。**
+
+#### consume 5 / 6（基线 `5b2ceac`，回帖 `2120098682207903744`）
+
+**指摘来源**：CodeBuddy 对第 4 轮的复核 `2120097702972145664`。判定 **6 条 → 成立 5 / 部分成立 1**。
+
+| 项 | 判定 | 关键证据 |
+|---|---|---|
+| A `approval_url` 漏了（**我第 4 轮自己写的**） | 成立 | `notify_approval_pending` 非 Slack 分支是独立匿名对象：`event`/`approval_id`/`host`/`command`/`risk_level`/`approval_url` **六键**，无 `exit_code`、无 `remote_outcome_unknown`。我上一轮把 `WebhookEvent` 的七键并集当成「载荷」 |
+| B/N1 控制台「所有 Tab 都路由到选中的 daemon」 | 成立 | `console.html:812-819` 远程分支 `API = localDaemon.url`，注释「… For now」；`api()` 只拼 `API`；`/daemons/` 全文只有 `:836` 一次探针；daemon 侧只有 `POST /daemons/:alias/exec` 一条代理 |
+| C/N2 `WINDOWS-HANDOVER.md` §6 待办 3「`MSYS2_ARG_CONV_EXCL` 未在 Windows 验证」 | 成立 | 同文件 `:43`、`:155` 两处实测记录，`:106` 段首「已全部完成」。与 W1 同病：**待办清单不跟结果更新** |
+| D/N3 `configuration-guide.md` 自定义 Webhook 示例缺 `approval_url` | 成立 | 原示例五键；审批那条必然带 `approval_url`（`approval_action_url` → `{daemon}/approval/{id}/respond`） |
+| E Reject「返回 403」 | 部分成立 | 动作本身 `200 {"ok":true}`；403 是**被挂起的那次执行**拿到（`ApprovalRejected`） |
+| F（**我核 E 时发现，它没提**）「路由只有 approve / reject 两条」 | 成立 | 第三条 `POST /approval/:id/respond`（`daemon.rs:5883`，`api.yaml:3112` 与 quickstart `:124` 都收了）；按钮 URL 是 `{action_url}/approve`，多出来的那两段才是 404 的原因 |
+
+**L1**：`36389f0`（3 文件：web-console-guide、configuration-guide、WINDOWS-HANDOVER）。**验证**：`npm run build` 6.49s；`--lib` 861 / 1 failed / 1 ignored。
+
+**观察（不提 L2）**：`GET /daemons/view`（`daemon.rs:5895`）没有任何调用点——`src/` 与 `src-tauri/web/` 全仓零命中。有端点、无消费者，接不接或删不删是产品决定。
+
+#### consume 6 / 6（基线 `36389f0`，回帖 `2120100036875800576`，末轮）
+
+**指摘来源**：CodeBuddy 对第 3 轮（`abb63d9`）的复核 `2120098330247057408`（第 5 轮收尾后才到，故归本轮）。判定 **成立 6 / 部分成立 2 / 不成立 3 / 未做 3**。
+
+| 项 | 判定 | 关键证据 |
+|---|---|---|
+| 「`/exec/stream` 在 `on_upgrade` 前判 gate，应有 423」 | **不成立** | 函数体只有两行（计数 + 克隆），`:5177` 即 `ws.on_upgrade(\|socket\| async move {`；`source_or_env_for_request`（`:5201`）与 `reject_if_gate_paused`（`:5223`）**都在闭包内**，失败发 `{"type":"error"}` 帧。403/423 从不以 HTTP 出现。**但 401 它说对了**（中间件层）→ 已补 |
+| 「`configuration-guide.md` 把 `app_preferences.json` 归进『按需』那组」 | **不成立** | 那组列的是七个文件（`redact_rules`/`highlight_rules`/`copy_redact_rules`/`ssh_algos`/`telemetry.toml`/`webdav.toml`/`snippets.json`）；`app_preferences.json` 在 tar 命令里（`:1291`） |
+| F17 `/exec/stream` 缺码 | 部分成立 | 401 已补；403/423 不成立（同上）。description 补「升级后的拒绝一律走 error 帧」 |
+| F18 审批三条路由缺 400 | 成立 | 非 UUID / body 解析失败 / 未知 id / 不在 pending，全部 400。已补 |
+| F21 广播缺 400/403 | 部分成立 | 400 已补（空命令、超长、控制字符、`<2`、`>32`、重复或非 UUID）；**403 不成立**——两个 handler 不调 `check_daemon_scope`，越权是逐目标 `authorized:false` |
+| F16 SFTP 三处字段 | 成立 | `SftpResult.bytes`；upload `resume`+`transfer_id`；download 再加 `max_mb`。已补 |
+| F15 `/exec/preview` 少 4 个键 | 成立 | `needs_force`（`risk == High \|\| Blocked`，与 `/exec` 的 force 条件同一个）、`blocked`、`jump_host`、`timeout_secs`。已补 |
+| F20 两个导出缺 500 | 成立 | 两个 handler 都 `map_err(INTERNAL_SERVER_ERROR)`。已补 |
+| F22 `total_ms` 写成 `integer` 会误导 | **不成立** | `type: integer` 描述 JSON 数字，不是 32 位；2^53 截断是 JS 客户端精度问题。要补只能补 `format: int64` 的提示 |
+| F13 `/exec-multi`、F14 `/resident-sessions`、F19 `/forwards/{id}/start\|stop` 缺码 | **未做** | 三条都要逐个 handler 读完整错误链（F14 还牵 `preflight_guarded_request` 的 `?` 透传），本轮预算内做不完。**下一批首项** |
+
+**L1**：`a82f9d2`（审批三条 400 + 广播两条 400 + `/exec/stream` 401 + SFTP 三处）、`46ee9ef`（preview 四个键 + 两处 500）。**验证**：`npm run build` 6.68s / 6.64s；`--lib` 861 / 1 failed / 1 ignored；`--features daemon --test daemon_integration api_yaml` **1 passed**（两次都跑）。
+
+## 批次汇总 · 2026-11-10 · issue #11 · docs/ 声称与代码实际行为
+
+**批次闭环**：6 / 6 轮，issue #11 已关闭。开始 14:14，末轮收尾 18:23（GMT+8），总耗时 4 小时 9 分——**跨了三次运行**（第 1 轮 15:12、第 2 轮 16:24、第 3–6 轮 17:51–18:23），本批的三个 run 各自独立起锁、独立收尾。
+
+| 轮 | 指摘数 | 成立 | 部分 | 不成立 | 未做 | L1 落地 |
+|---|---|---|---|---|---|---|
+| 1 | 9 | 6 | 2 | 1 | 0 | `578bab6`、`a441f4d`、`5deda0a`、`aa5362c`、`55134d5` |
+| 2 | 4 组 | 3 | 1 | 0 | 0 | `4e0fb84`、`2fd70bc` |
+| 3 | 8 | 4 | 2 | 2 | 0 | `abb63d9`、`7f12de8` |
+| 4 | 2（自取） | 1 | 1 | 0 | 0 | `3dceb0b`、`5b2ceac` |
+| 5 | 6 | 5 | 1 | 0 | 0 | `36389f0` |
+| 6 | 14 | 6 | 2 | 3 | 3 | `a82f9d2`、`46ee9ef` |
+
+**合计**：43 条指摘 → 成立 25 / 部分成立 9 / 不成立 6 / 未做 3。**新增 L2：0 条**（六轮全是文档与 `api.yaml`，`src-tauri/src/**` 一行未动；L2-75/76 属第 1/2 轮，不计入本表）。issue 保持 open 到末轮，无一条需要人拍板才能继续。
+
+**这批真正的产出不是那些文档改动**，是四条能留下来的判断：
+
+1. **`api_yaml_documents_every_daemon_route` 只比路径**——方法、responses 状态码、schema 字段一个都不进断言。本批最后三轮的绝大多数缺陷（`/terminal` 缺 423、`/exec/preview` 少四键、审批三条缺 400、广播缺 400、两个导出缺 500、`ApprovalRequest` 少四键）都长在这条缝里。**下一批首项应当是给这个测试加「方法 + 状态码集合」两个断言**，否则同类缺陷会以每批 5–10 条的速度继续产生。
+2. **自文的现状声称比引文更容易错**。`WINDOWS-HANDOVER.md` 三处说「恒为 true」、一处说「已不存在」；§6 待办说「未验证」而 §7 已实测。同一份文件内部就能互相证伪——查「某文档是否在撒谎」时，先把同文件的其它段落读一遍，比读代码更快。
+3. **CodeBuddy 的两个稳定失效形态（本批累计）**：①把闭包边界当成函数边界（第 6 轮把 `on_upgrade` 内的检查当成前置检查）；②把自己的分类强加给我的文字（第 6 轮说我把 `app_preferences.json` 归成按需文件，原文没有）。它的行号普遍偏 3–5 行、`[读]` 里约四分之一会在读完源码后反转，**一律自己核**。
+4. **锁仍然是孤儿**。本批三次运行、三次都是接管别人的残锁（每次都是空目录、无 owner.txt、无持有进程）。第 5 轮的运行首次写了 `owner.txt`，两次重试后仍判定可接管。**生产任务至今不释放锁**，这是第 N 次；下一次运行的第一个动作应当是「看 mtime + owner.txt + 存活核验」，而不是干等 240 分钟。
