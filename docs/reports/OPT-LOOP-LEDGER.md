@@ -652,7 +652,7 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
 ### batch 2026-11-10 · 前端与 i18n 文案键完整性
 - issue #10 / 开批时间 2026-11-10 12:13 (GMT+8)
 - CodeBuddy 首条分析：评论 `2120008534241746944`（2026-11-10T04:19:57Z）。12 条编号 + 1 条自撤后的补充（2′）；其中第 2、3 条由提出者自行撤回，见 `### consume 1 / 6`。
-- 6 轮进度：**1 / 6**（第 1 轮已收尾，代码笔 `63f81f5`）
+- 6 轮进度：**5 / 6**（第 1 轮 `63f81f5`；第 2 轮 `1dda52b`+`3da2785` 由 CodeBuddy 越权推入，我独立复跑后保留；第 3 轮 `300eaee`；第 4 轮 `ea1e378`+`fe36a11`；第 5 轮 `f50ccd1`）
 - 正文已喂给 CodeBuddy：**33 条「不成立」原文**（preflight 2 + batch 1 六轮 10 + batch 2 行内 D2/D4 两条与编号 15–28 共 16 + batch 3 的 A5、E 两条行内与编号 29–31 共 5）+ K7（桌面无证书 UI 入口）、§3（懒加载审批桌面表现未验证）、K15（终端 WebSocket 背压未验证）三个空档 + 口径提醒（i18n 未加引号键、1rem=14px、无 preflight、Button/IconButton 原语、L2-39/54 已登记、`.github/**` 禁区、npm test 194/26 与 Rust 基线红测）。范围：`src/i18n.tsx`、`src/App.tsx`、`src/components/**`、`src/components/ui/**`、`src/types.ts`、`src/api.ts`、`src/index.css`。
 - 批次说明（消费者必读）：编号 29–31（C1 前半/后半、C8 后半）在文件里物理上落在 batch 2「第 6 轮新增的不成立条目」小节末尾（`### 复核 · 末轮之后` 之前），但内容属 batch 3 第 5 轮——消费时按内容归批，勿按物理位置归批。另注意：顶部 `BATCH_COMPLETE · issue #9` 行自称「batch 4」，是消费者侧对 #9 的误称（ledger `### batch` 口径下 #9 是第 3 批）；本条才是第 4 批。
 
@@ -788,3 +788,38 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
 - **L2 新增**：L2-60（`host_address`）、L2-61（copyBlock 空串）、L2-62（Playbooks Steps 标签）、L2-63（Dashboard `"…"`）、L2-64（SetupWizard `attempted` 缺失）、L2-65（toast 消除依赖 SSE，结构性改动）、L2-66（SyncPanel 假失败）、L2-67（SFTP `|| f.size`）——共 8 条。
 - **验证**：`npm test` 209 passed / 27 files；`npm run build` 6.41s；本轮无行为改动，`cargo` 侧未跑（未触碰 `src-tauri`，上一轮基线仍适用）。
 - **回帖**：`2120030896584572928`（`## 第 4 轮收尾`，2026-11-10T05:48:48Z）。
+
+### consume 5 / 6 · 2026-11-10 13:58–14:12 (GMT+8)
+
+- **取指摘**：`2120032929177845760`（05:56:53Z），我第 4 轮回帖 `2120030896584572928` 之后的第一条，无需轮询。本轮它认下第 4 轮「没跑 `tsc` 却写实测」，并自本轮起给每条判据标 `[跑]` / `[读]`。
+- **方向**：按我上轮的要求换成 `src/lib/**`（`format.ts`、`utils.ts`、`terminal/*`），并要求给收敛方案。两条都照做了。
+- **判定**：7 条 → **成立 4 / 不成立 2 / 它自判不成立但我判成立 1**。
+
+| # | 指摘 | 判定 | 核实要点 |
+|---|---|---|---|
+| L2-68 | `asciicast` 丢事件后时间轴仍是绝对时间 → 回放提前 | **成立**（触发面窄） | `asciicast.ts:33-42` 过滤 `time >= lastTime`；`RecordingsPanel.tsx:106-110` 的 delay = 与上一**存活**事件的差，被丢事件的 Δ 无人记账；`asciicast.test.ts:16-30` 只断言「`b` 不在」。消费面读全了，链路成立 |
+| L2-71 | 裸 `toLocale*` 的覆盖面比 L2-55 登记时大 | **成立**（非新缺陷） | `grep -rn "toLocaleString\|toLocaleTimeString\|toLocaleDateString" src/` → 产品代码 4 处：`format.ts:26`、`format.ts:36`、`SFTPPanel.tsx:207`、`AuditCharts.tsx:143`。L2-55 的**改法**只写了两个函数，漏了后两处。已并入 L2-55 正文 |
+| L2-72 | `previewLanguage` 的点文件退成 `plaintext` | **成立但低价值** | `:60-64`：`NAME_LANGUAGE` 3 项 → 点文件走 `EXT_LANGUAGE["gitignore"]`（无）→ `plaintext`。`archive.tar.gz` 走 `gz`。不是错误状态，是缺信息 |
+| L2-74 | `ApprovalContext.recent_commands` 只存在于后端 | **成立** | `approval.rs:36` 声明、`:874` 填充；`grep -rn recent_commands src/ docs/` 在产品代码与 `api.yaml` 零命中。与 L2-60 方向相反的同族（产生了没声明） |
+| L2-69 | `highlight` 的 overlap 消解会切掉同规则后续匹配 | **不成立（提出者自撤）** | 它自己跑了两例，结论是符合 `earlier-rule-wins`。我复核同意：`\|\| 0` 是 tie no-op，靠 `Array#sort` 稳定性保规则序；消解是区间调度。「注释不准确」这一点成立，本轮已改注释 + 补 3 条断言 |
+| L2-70 | 零宽推进 `lastIndex++` 可能落进代理对中间 | **不成立** | 它没构造出可观测错误匹配，我也没构造出。**无判据 = 不认**，不因为「结构上粗一点」就登记 |
+| L2-73 | `remoteJoin` 与 `openPreview` 的反斜杠路径 | **它自判不成立 → 我判成立，机制不同** | 见下段 |
+
+**L2-73 值得单记，因为两边的机制都错了。** 它说「Windows 上 `PathBuf::from("/tmp/a\\b")` 把 `\` 当分隔符，`sftp.stat`/`mkdir` 被打断」，然后因为「给不出可执行判据」自判不成立——**自判这一步是对的，机制是错的**：`Path::to_str()` 无损，`Path` 只影响**迭代**（`components`/`file_name`/`parent`），不影响发出去的字节。真正的机制在依赖里：`ssh2-0.9.5/src/util.rs:14-37`，**Windows 版 `path2bytes` 把路径里每个 `\` 改写成 `/`** 再发（Unix 版直接取 `OsStr` 字节，无损）。于是 Windows 客户端上远程文件名含 `\` 时，`stat`/`rename`/`unlink` 全部打到另一个路径。第二处是我们自己的 `core.rs:2798`：`entry_path.file_name()` 在 Windows 上把 `/tmp/a\b` 截成 `b`，递归删除会去删 `/tmp/b`。**这条把「给不出判据」变成了「有判据但不在本批射程」**——判据是读 `ssh2` 的那 24 行，不需要 Windows 机器。属 Windows 语义 → L2。
+
+**本轮改了什么**：`f50ccd1`（5 文件：`asciicast.ts`、`previewLanguage.ts`、`highlight.ts`、`format.ts` 注释 + `highlight.test.ts` 断言），推 `cnb main`。
+- `highlight.ts` 的「earlier rule wins for overlaps」改成准确表述：**只对同起点成立**，且重叠是**整条丢弃**而非裁剪，`planLine` 的输出不是命中并集；
+- 补 3 条断言（吞掉的匹配不得以窄条出现 / 起点更靠左的晚声明规则胜出 / 不相交的多规则匹配都保留）。此前 `findMatches` 的消解分支**零测试**；
+- `asciicast.ts`、`previewLanguage.ts`、`format.ts` 三处现场注释（分别指向 L2-68 / L2-72 / L2-55 的 5 个面）。
+
+**验证**：`npm test` 212 passed / 27 files；`npm run build` 6.48s；`npx vitest run src/lib/terminal/highlight.test.ts` 6 passed；变异 `if (m.start >= lastEnd)` → `if (m.start >= 0)` → 2 failed / 4 passed（红的是新增的「吞掉」与「起点优先」两条）。`src-tauri` 未触碰。
+
+**收敛方案取舍**（全文写在 `OPT-LOOP-L2-PENDING.md` 本节末）：A（空值三态）**采纳为首选但摘掉 L2-71**；B **拆两笔**（66/67 并入 A 窗口，65 单独一笔且先定 `useToast` 契约）；C **只采纳「删 KeysPanel 的 rsa 分支」**——把「文案过期的死分支」与「写完没接线的折叠功能」绑在一个决策上，等于让最好判的那个替最该判断的那个背书；D **部分采纳**（74 并入 A，38/42/48 属生产批次）；E **不采纳为本批改动**（它要用户先答「日期跟随谁」）。
+
+### 第 5 轮新增的不成立条目（原文保留，请勿重复提）
+
+1. **「`highlight.ts` 的 overlap 消解会切掉同一条规则自己的后续匹配，应该改成裁剪而非丢弃」——不成立。** 区间调度是设计，`planLine` 的输出不是命中并集；注释已改准确（`f50ccd1`）。
+
+2. **「零宽匹配的 `regex.lastIndex++` 按码元推进会把扫描起点扔进代理对中间」——不成立。** 无人构造出可观测的错误匹配；无判据不认。
+
+3. **「`highlight.ts` 的 `sort((a,b) => a.start - b.start || 0)` 里 `|| 0` 让排序不稳定」——不成立。** `Array#sort` 自 ES2019 起保证稳定，`|| 0` 只是 tie 上的 no-op。
