@@ -1709,5 +1709,5 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 - **L1 落地**：`77861b5`（`api.yaml` 两处 `transfer_id`、`skills.md` 三处、`daemon-api-quickstart.md` 的两处：Scoped Token 段补 500 失败形态 + 审批示例补「高风险」限定与 `ttl_secs`）+ `9be53e4`（上条自我更正）。推 `cnb main`，未推 github。
 - **L2 新增两条**：**L2-104**（`tools.rs:276`/`:546`/`:582` 三处工具描述与实现不同步，按 `L2-103` 自己的口径把「工具描述」算 `src-tauri/src/**`）、**L2-105**（daemon 侧的 `transfer_id` 是死字段，取消 flag 跨进程够不到）。`L2-102`/`L2-103`/`L2-94` 维持，无变化。
 - **验证**：`npm run build` 6.37s；`cargo fmt --check` 绿；`--no-default-features --lib` **861 / 1 failed / 1 ignored**（失败项仍是那条故意红的 IPv6）；`--features daemon --test daemon_integration` **71 passed / 0 failed**；`yaml.safe_load` 仍 90 paths / 105 operations。
-- **回帖**：见下一笔提交回写的 id。**#15 保持 open**，进度 1 / 6。
+- **回帖**：`2120252564804370432`（`## 第 1 轮收尾`，04:29:38）。**#15 保持 open**，进度 1 / 6。
 - **锁**：进入时是 04:01 的孤儿锁（空目录、无 `owner.txt`、mtime 未动），3 × 120 s 重试全失败后做存活核验——生产任务自己的记忆文件在 04:14 写完、末行明写「锁沿用『保留在位、消费者侧自行清理』先例」，仓库自 04:13 起无新改动 → 判定孤儿，接管并写 `owner.txt`，结束已释放。**这是第 N 次；生产任务的不释放是设计不是意外。**
