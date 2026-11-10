@@ -658,9 +658,9 @@ components:
       type: object
       required: [prefs, custom, defaults]
       properties:
-        prefs:    { type: object, description: "The preferences in effect for the next handshake; each field is a comma-separated list in preference order." }
+        prefs:    { $ref: "#/components/schemas/SshAlgoPrefs" }
         custom:   { type: boolean, description: "True when an override is stored rather than the built-in defaults." }
-        defaults: { type: object, description: "The built-in safe defaults, so a caller can offer a reset target." }
+        defaults: { $ref: "#/components/schemas/SshAlgoPrefs" }
 
     SshSyncHostDiff:
       type: object
@@ -689,6 +689,150 @@ components:
         conflicts: { type: array, items: { $ref: "#/components/schemas/SshSyncHostConflict" } }
         matching: { type: array, items: { type: string } }
         summary: { type: string, description: "Human-readable one-liner, not a machine-stable format." }
+
+    SshAlgoPrefs:
+      type: object
+      description: >
+        Eight comma-separated algorithm lists in preference order — what a
+        handshake offers. Validation is fail-closed: one name the backend
+        cannot negotiate makes every connection fail, so the built-in defaults
+        are filtered down to what this build supports rather than copied from
+        a wish list.
+      required: [kex, hostkey, cipher_cs, cipher_sc, mac_cs, mac_sc, comp_cs, comp_sc]
+      properties:
+        kex:       { type: string }
+        hostkey:   { type: string }
+        cipher_cs: { type: string }
+        cipher_sc: { type: string }
+        mac_cs:    { type: string }
+        mac_sc:    { type: string }
+        comp_cs:   { type: string, description: "Always `none`: the transport is built without `flate2`, so any other value is rejected before it is stored." }
+        comp_sc:   { type: string, description: "Always `none`, same reason as `comp_cs`." }
+
+    Snippet:
+      type: object
+      description: >
+        A named command. `POST /snippets` replaces the whole entry when the
+        name already exists, so a caller that omits `description` clears it
+        instead of keeping the previous one.
+      required: [name, command]
+      properties:
+        name:        { type: string, description: "Identity: trimmed, at most 128 characters, no control characters." }
+        command:     { type: string, description: "At most 64 KiB. Deliberately kept out of error messages, because snippets often carry credentials." }
+        description: { type: string, description: "At most 4 KiB. Omitted from responses when unset." }
+
+    RedactRuleInfo:
+      type: object
+      description: The on-disk rule plus `is_builtin`. A rule's identity is its pattern; there is no id.
+      required: [pattern, replacement, is_builtin]
+      properties:
+        pattern:     { type: string, description: "Regex source; also the identity key." }
+        replacement: { type: string, description: "Literal text, used verbatim — capture groups are not expanded." }
+        is_builtin:  { type: boolean, description: "True for one of the patterns the app ships with." }
+
+    HighlightRule:
+      type: object
+      required: [keyword, name, color, enabled, is_regex, is_case_sensitive]
+      properties:
+        keyword:           { type: string, description: "Regex source; also the identity key." }
+        name:              { type: string, description: "Label, at most 100 characters." }
+        color:             { type: string, description: "`#RRGGBB`." }
+        enabled:           { type: boolean }
+        is_regex:          { type: boolean, description: "Always true after migration: legacy plain-text rules were escaped." }
+        is_case_sensitive: { type: boolean }
+
+    WebDavSyncFile:
+      type: object
+      required: [path, bytes, sha256]
+      properties:
+        path:   { type: string }
+        bytes:  { type: integer }
+        sha256: { type: string }
+
+    WebDavSyncMarker:
+      type: object
+      description: One side's sync marker. `digest` and `object_prefix` are the only keys an older marker may omit.
+      required: [schema_version, global_version, sync_id, updated_at, app_version, direction, files]
+      properties:
+        schema_version: { type: integer }
+        global_version: { type: integer }
+        sync_id:        { type: string }
+        updated_at:     { type: string, description: "RFC 3339." }
+        app_version:    { type: string }
+        direction:      { type: string }
+        files:          { type: array, items: { $ref: "#/components/schemas/WebDavSyncFile" } }
+        digest:         { type: string, description: "Stable digest of the configuration `files` describes. Older markers omit it; their digest is derived from the manifest on read." }
+        object_prefix:  { type: string, description: "Prefix for the immutable version objects. Schema v1 omitted it and used the mutable `files/` directory." }
+
+    WebDavSyncStatus:
+      type: object
+      description: >
+        Every key is always present — the optional ones are sent as `null`
+        rather than omitted, so a client never has to distinguish "absent" from
+        "unknown". This is the `webdav_sync` struct the daemon serializes, not
+        the desktop-only `WebDavSyncStatus` in `tauri_commands.rs`, which has
+        different fields and camelCase names.
+      required: [local, remote, state, local_digest, remote_digest, base_digest, summary, metadata_error]
+      properties:
+        local:
+          $ref: "#/components/schemas/WebDavSyncMarker"
+          description: "`null` until this machine has written a marker."
+        remote:
+          $ref: "#/components/schemas/WebDavSyncMarker"
+          description: "`null` until the server has a marker, or when it could not be read — `metadata_error` says which."
+        state:
+          type: string
+          enum: [in_sync, local_ahead, remote_ahead, diverged, unknown]
+        local_digest:   { type: string, nullable: true }
+        remote_digest:  { type: string, nullable: true }
+        base_digest:    { type: string, nullable: true, description: "The last digest both sides agreed on; `null` before a first successful sync." }
+        summary:        { type: string }
+        metadata_error: { type: string, nullable: true }
+
+    RiskDistribution:
+      type: object
+      required: [low, medium, high, blocked]
+      properties:
+        low:     { type: integer }
+        medium:  { type: integer }
+        high:    { type: integer }
+        blocked: { type: integer }
+
+    HostExecutionCount:
+      type: object
+      required: [host, count]
+      properties:
+        host:  { type: string }
+        count: { type: integer }
+
+    HourlyBucket:
+      type: object
+      required: [hour, count, failures]
+      properties:
+        hour:     { type: string, description: "ISO 8601, truncated to the hour." }
+        count:    { type: integer }
+        failures: { type: integer }
+
+    MetricsTrend:
+      type: object
+      required: [period, total_executions, success_count, failure_count, blocked_count, failure_rate, risk_distribution, avg_duration_ms, top_hosts, hourly_breakdown]
+      properties:
+        period:
+          type: string
+          enum: [last24h, last7d, last30d, all]
+          description: >
+            The window covered. The tokens are not the request's: `?period=24h`
+            comes back as `last24h`. The daemon accepts either spelling on the
+            way in, so a caller echoing the response value back still works.
+        total_executions:  { type: integer }
+        success_count:     { type: integer }
+        failure_count:     { type: integer }
+        blocked_count:     { type: integer }
+        failure_rate:      { type: number, description: "A ratio between 0 and 1, not a percentage." }
+        risk_distribution: { $ref: "#/components/schemas/RiskDistribution" }
+        avg_duration_ms:   { type: number }
+        top_hosts:         { type: array, items: { $ref: "#/components/schemas/HostExecutionCount" } }
+        hourly_breakdown:  { type: array, items: { $ref: "#/components/schemas/HourlyBucket" } }
 
 paths:
   /health:
@@ -2694,23 +2838,7 @@ paths:
         "200":
           content:
             application/json:
-              schema:
-                type: object
-                properties:
-                  period:            { type: string }
-                  total_executions:  { type: integer }
-                  success_count:     { type: integer }
-                  failure_count:     { type: integer }
-                  blocked_count:     { type: integer }
-                  failure_rate:      { type: number }
-                  risk_distribution: { type: object }
-                  avg_duration_ms:   { type: number }
-                  top_hosts:
-                    type: array
-                    items: { type: object }
-                  hourly_breakdown:
-                    type: array
-                    items: { type: object }
+              schema: { $ref: "#/components/schemas/MetricsTrend" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
         "400":
@@ -3046,20 +3174,7 @@ paths:
         "200":
           content:
             application/json:
-              schema:
-                type: object
-                required: [state, summary]
-                properties:
-                  state:
-                    type: string
-                    enum: [in_sync, local_ahead, remote_ahead, diverged, unknown]
-                  summary:       { type: string }
-                  local_digest:  { type: string, nullable: true }
-                  remote_digest: { type: string, nullable: true }
-                  base_digest:   { type: string, nullable: true }
-                  metadata_error: { type: string, nullable: true }
-                  local:         { type: object, nullable: true }
-                  remote:        { type: object, nullable: true }
+              schema: { $ref: "#/components/schemas/WebDavSyncStatus" }
 
   /health-snapshot:
     get:
@@ -3174,7 +3289,7 @@ paths:
             application/json:
               schema:
                 type: array
-                items: { type: object }
+                items: { $ref: "#/components/schemas/Snippet" }
     post:
       summary: Create or replace a command snippet, keyed by name
       requestBody:
@@ -3182,12 +3297,7 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              required: [name, command]
-              properties:
-                name:        { type: string }
-                command:     { type: string }
-                description: { type: string, nullable: true }
+              $ref: "#/components/schemas/Snippet"
       responses:
         "200":
           description: The full snippet list after the write.
@@ -3195,7 +3305,7 @@ paths:
             application/json:
               schema:
                 type: array
-                items: { type: object }
+                items: { $ref: "#/components/schemas/Snippet" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
         "400":
@@ -3230,12 +3340,7 @@ paths:
             application/json:
               schema:
                 type: array
-                items:
-                  type: object
-                  properties:
-                    pattern:     { type: string }
-                    replacement: { type: string }
-                    is_builtin:  { type: boolean }
+                items: { $ref: "#/components/schemas/RedactRuleInfo" }
     post:
       summary: Add a redaction rule
       description: A rule's pattern is its identity, so a pattern that is already present is rejected rather than overwritten, and an invalid regex is rejected before anything is written.
@@ -3256,7 +3361,7 @@ paths:
             application/json:
               schema:
                 type: array
-                items: { type: object }
+                items: { $ref: "#/components/schemas/RedactRuleInfo" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
         "400":
@@ -3283,7 +3388,7 @@ paths:
             application/json:
               schema:
                 type: array
-                items: { type: object }
+                items: { $ref: "#/components/schemas/RedactRuleInfo" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
         "400":
@@ -3310,7 +3415,7 @@ paths:
             application/json:
               schema:
                 type: array
-                items: { type: object }
+                items: { $ref: "#/components/schemas/RedactRuleInfo" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
         "400":
@@ -3327,7 +3432,7 @@ paths:
             application/json:
               schema:
                 type: array
-                items: { type: object }
+                items: { $ref: "#/components/schemas/RedactRuleInfo" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
         "500":
@@ -3342,15 +3447,7 @@ paths:
             application/json:
               schema:
                 type: array
-                items:
-                  type: object
-                  properties:
-                    keyword:           { type: string }
-                    name:              { type: string }
-                    color:             { type: string }
-                    enabled:           { type: boolean }
-                    is_regex:          { type: boolean }
-                    is_case_sensitive: { type: boolean }
+                items: { $ref: "#/components/schemas/HighlightRule" }
     post:
       summary: Add a terminal highlight rule
       description: A rule's keyword is its identity, so a duplicate is rejected. Rules are stored as regular expressions, so a caller that wants plain-text matching has to escape the keyword itself before sending it.
@@ -3375,7 +3472,7 @@ paths:
             application/json:
               schema:
                 type: array
-                items: { type: object }
+                items: { $ref: "#/components/schemas/HighlightRule" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
         "400":
@@ -3394,7 +3491,7 @@ paths:
               required: [keyword, rule]
               properties:
                 keyword: { type: string, description: "The keyword that identifies the rule to replace." }
-                rule:    { type: object, description: "The rule as it should be afterwards." }
+                rule:    { $ref: "#/components/schemas/HighlightRule", description: "The rule as it should be afterwards." }
       responses:
         "200":
           description: The full rule list after the write.
@@ -3402,7 +3499,7 @@ paths:
             application/json:
               schema:
                 type: array
-                items: { type: object }
+                items: { $ref: "#/components/schemas/HighlightRule" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
         "400":
@@ -3429,7 +3526,7 @@ paths:
             application/json:
               schema:
                 type: array
-                items: { type: object }
+                items: { $ref: "#/components/schemas/HighlightRule" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
         "400":
@@ -3446,7 +3543,7 @@ paths:
             application/json:
               schema:
                 type: array
-                items: { type: object }
+                items: { $ref: "#/components/schemas/HighlightRule" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
         "500":
@@ -3469,17 +3566,7 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              required: [kex, hostkey, cipher_cs, cipher_sc, mac_cs, mac_sc, comp_cs, comp_sc]
-              properties:
-                kex:       { type: string }
-                hostkey:   { type: string }
-                cipher_cs: { type: string }
-                cipher_sc: { type: string }
-                mac_cs:    { type: string }
-                mac_sc:    { type: string }
-                comp_cs:   { type: string }
-                comp_sc:   { type: string }
+              $ref: "#/components/schemas/SshAlgoPrefs"
       responses:
         "200":
           description: The preferences in effect after the write.
