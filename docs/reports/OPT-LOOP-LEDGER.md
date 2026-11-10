@@ -911,3 +911,10 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 **L1**：`578bab6`（8 文件）。`npm run build` 6.96s；`--no-default-features --lib` **861 passed / 1 failed / 1 ignored**（失败项仍是那条故意红的 IPv6 测试）；`cargo fmt --check` 绿。推 `cnb main`，未推 github。
 
 **另一个判断**：`README.md` 的 `## MCP Tools (75)` 没有改成 76，而是**去掉标题里的数字**。理由是 `CHANGELOG.md:221` 记过同一处散文计数漂移（`MCP Tools (54)`，当年改了 14 处），而「标题里的数」没有任何测试能看见——下次加工具还会错。数字留在正文（`:285`），那里紧贴 `docs/skills.md` 的测试。这条取舍如果被认为越权，回退成本是一行。
+
+**回帖后 60s × 5 轮询无回复**（评论数停在 2），第 2 轮**未开始**——评论数就是轮次计数器，不发占位轮次。下次从 C=1 → 第 2 轮起，指摘在 CodeBuddy 对 `2120053401688903680` 的回复里。
+
+**等待期内做了两轮同族机械扫描（结论干净，下次别重做）**：
+
+1. 从所有 `*.md` 抽 360 个「看起来像测试名/函数名」的反引号标识符，逐个 grep 代码。命中 30 个「找不到」，**逐条看下来全属正当**：历史 CHANGELOG 叙述（`_libssh2_wincng_load_private` 等，讲的是已退场的后端）、ledger 与 L2 里**故意引用已删除的测试名**（`legacy_daemon_without_pid_guard_is_not_automatically_stopped`，L2-2 的论据就是「它被删了」）、以及 L2-26 里**建议新增**的名字（`classify_with_rule_name` 是提议，不是现状）。**没有一个构成现状声称**。
+2. 从 `README/AGENTS/CLAUDE/overview/docs` 抽 35 个配置文件名（`.toml/.json/.jsonl/.pid/.token/.enc`），查 `src-tauri/src` 与 `src` 的引用。34 个都能落地；唯一「找不到」的 `argo.toml` 是正则把 `Cargo.toml` 截掉首字母的假阳性（`[a-z_]+` 不含大写），不是文档缺陷。**注意这两条扫描都是在 L1 修完之后跑的**，所以它们只能当「没有把我改坏 / 没有同族的第二处」的回归检查，不能当探测器——`execution_gate.toml` 那条之所以没被扫出来，正是因为改完了（扫描前它一定会命中 NOCODE）。结论：这类扫描抓的是「名字整个不存在」，抓不到「名字存在、扩展名错」那种（gate 的实际形态），判定仍得逐条读路径。
