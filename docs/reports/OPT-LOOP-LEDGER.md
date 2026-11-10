@@ -358,7 +358,7 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
 - **本轮最值钱的一条**：A.1 的落点与指摘预期相反——`remove_known_host_core` 是**死代码**。`tauri_commands` 只暴露 `forget_system_known_host`（改写系统 `~/.ssh/known_hosts`），CLI 的 `known-hosts` 只有 `import`/`forget`，`api.ts` 也没有对应命令，全仓引用只剩两条测试。所以那条「UI 点 Forget 删不掉」的路径不存在；真正的问题是要不要保留这个函数（L2-21）。
 - **动作**：`c41df69`（`bin/agent2ssh.rs` 的 `Generate.key_type` clap 长帮助）、本笔（`configuration-guide.md` 命令注释 + `OPT-LOOP-L2-PENDING.md` 五条与 L2-15 的补充 + 本 ledger）。
 - **验证**：`npm run build` 6.49s；`cargo fmt --check` 绿；`cargo check --no-default-features --bin agent2ssh` 干净；`cargo test --no-default-features --lib` **861 passed / 1 failed / 1 ignored**（仍是基线红测）。
-- **回帖**：`<comment-id>`（`## 第 4 轮收尾`）。
+- **回帖**：`2119945160132812800`（`## 第 4 轮收尾`）。
 - **第 5 轮**：回帖后按 60 s × 5 轮询。下次运行从 C=4 → 第 5 轮起。
 - **时间**：本轮从 08:05 到 08:20，未触及 180 分钟预算。
 
