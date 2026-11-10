@@ -418,6 +418,8 @@ components:
         ttl_secs:     { type: integer, description: "TTL in seconds before auto-expiry" }
         status:       { type: string, enum: [pending, approved, rejected, timed_out, revoked], description: "`revoked` is written when an already-approved request is withdrawn; today only in-process callers produce it, there is no HTTP route for it." }
         rewritten_command: { type: string, nullable: true, description: "Set when the approver approved a different command; that is what ran" }
+        revoked_at:    { type: string, format: date-time, nullable: true, description: "Set when an already-approved request is withdrawn; no HTTP route produces it today" }
+        approved_command_snapshot: { type: string, nullable: true, description: "Command text captured at approval time, so the approved command survives a later change to `command`; holds the rewritten text when one was approved" }
         context:
           type: object
           nullable: true
@@ -430,6 +432,16 @@ components:
             reason:       { type: string, nullable: true }
             change_id:    { type: string, nullable: true }
             rewritable:   { type: boolean, description: "The approver may approve a rewritten command instead (POST /approvals/{id}/approve with a body)" }
+            recent_commands:
+              type: array
+              description: Recent executions on this host, captured for the reviewer; empty rather than absent when none were collected
+              items:
+                type: object
+                properties:
+                  command:    { type: string }
+                  exit_code:  { type: integer, nullable: true }
+                  risk_level: { $ref: "#/components/schemas/RiskLevel" }
+                  ts:         { type: string, description: "ISO-8601 timestamp string" }
             risk_details:
               type: object
               nullable: true
@@ -438,6 +450,7 @@ components:
                 user_risk_override: { $ref: "#/components/schemas/RiskLevel", nullable: true }
                 final_risk:         { $ref: "#/components/schemas/RiskLevel" }
                 matched_policy:     { type: string, nullable: true }
+                risk_unclassified:  { type: boolean, description: "The levels came from the bash classifier applied to a command written in another language" }
 
     HostPolicySummary:
       type: object
@@ -1458,6 +1471,21 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scope denied
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "400":
+          description: The host is not a configured profile
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "423":
+          description: Execution gate paused. Unlike `/exec/stream`, this route runs the gate check before the upgrade, so the refusal is an HTTP status rather than a WebSocket error frame.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Session concurrency limit exceeded, also checked before the upgrade.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }

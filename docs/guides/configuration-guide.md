@@ -1207,7 +1207,10 @@ A24：应用在脱敏时使用的正则规则集。它是**权威的**而不是�
 - 首次运行时用内置规则播种：私有 IPv4（10/172.16-31/192.168）、IPv6 环回与链路本地、
   Bearer、`sk-` 与 `AKIA`、JWT、32 位以上十六进制块。
 - 之后文件归使用者所有：**删掉的规则不会被重新播种**，只有显式「恢复默认」才会回来。
-- 文件缺失、不可读或 JSON 损坏时**回落到内置集合**——配置坏掉绝不能让脱敏变弱。
+- 文件缺失时按内置规则重新播种。**不可读或 JSON 损坏**时两条路径分岔：列表/编辑面回落到内置集合
+  （`load_user_rules`），而**实时脱敏路径不走这个回落**——`redact_with_user_rules` 直接返回字面量
+  `[REDACTION UNAVAILABLE]`，宁可整条不产出可读内容也不退到更弱的规则集（fail-closed）。所以
+  「配置坏掉不会漏秘密」成立，但代价是那段时间的审计记录、通知与诊断导出一律只有这个标记。
 - 通过 `store::write_private_json` 写入，Unix 上为 `0600`。
 
 ### 桌面端编辑
@@ -1287,6 +1290,13 @@ tar -czf agent2ssh-config.tar.gz \
 `approval_policies.toml`——前者是执行前的信任边界，后者是「谁能批准什么」。反过来，本清单刻意
 **不含** `known_hosts.json`（换机器应当重新信任，而不是继承）与 `execution_gate.json`
 （急停状态属于机器当前处境，不该被备份带回新机器）。
+
+`policy.toml` 与 `policy.json` 是同一个策略文件的两种形态（`policy::existing_policy_path` 先找
+`.toml`，不存在才用 `.json`），所以上面只列了前者：**只用 `policy.json` 的机器要把它补进 tar 命令**，
+否则策略文件根本不会被带走，而使用者会以为备过——恢复后策略为空，等于静默放宽。同一目录下的
+`redact_rules.json`、`highlight_rules.json`、`copy_redact_rules.json`（你编辑过的脱敏/高亮/复制规则）、
+`ssh_algos.json`、`telemetry.toml`、`webdav.toml`、`snippets.json` 也都是配置，只是**只在对应功能
+用过之后才存在**，所以没有放进上面那条命令；改过就先确认文件在，再加进去。
 
 ### 迁移到新机器
 

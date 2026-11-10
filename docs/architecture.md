@@ -25,6 +25,9 @@ Remote hosts
 | `src-tauri/src/embedded_ssh.rs` | In-process SSH transport, authentication, jump-host direct-tcpip proxying, host-key fingerprint capture, PTY shell, resize, and SFTP/exec helpers |
 | `src-tauri/src/execution_control.rs` | Shared execution authorization for scope, effective risk, approval, and rejected audit entries |
 | `src-tauri/src/store.rs` | Host profile persistence and audit log storage under `~/.agent2ssh` |
+| `src-tauri/src/redaction.rs` | The live redaction rule set: `redact_rules.json`, seeded from the built-in patterns and re-read on every call — deliberately uncached, and fail-closed (a malformed file yields `[REDACTION UNAVAILABLE]`, not a weaker rule set) |
+| `src-tauri/src/copy_redact.rs` | Clipboard redaction rules in `copy_redact_rules.json`, applied by `redact_for_clipboard` to text bound for the clipboard |
+| `src-tauri/src/highlight.rs` | Terminal highlight rules in `highlight_rules.json` — persistence only; the ANSI decoration happens in the frontend xterm.js layer, never in the PTY byte stream |
 | `src-tauri/src/session.rs` | Persistent PTY sessions |
 | `src-tauri/src/forward.rs` | SSH port forward tunnel management |
 | `src-tauri/src/connection.rs` | Retained embedded SSH connection management with keepalive/health/auto-reconnect supervisor (K5) and `~/.ssh/config` parser |

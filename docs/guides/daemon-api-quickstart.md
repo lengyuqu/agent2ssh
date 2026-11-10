@@ -562,6 +562,13 @@ curl -H "$AUTH" "http://127.0.0.1:7722/audit?limit=50"
 | `exit_code` | integer | - | 按退出码过滤 |
 | `since` | string | - | ISO-8601 起始时间 |
 | `until` | string | - | ISO-8601 结束时间 |
+| `search` | string | - | 对 command / host / source 做**大小写不敏感的子串**匹配 |
+| `command_pattern` | string | - | 对 command 做 **glob 通配**匹配（如 `kubectl delete *`），不是正则 |
+| `host_env` | string | - | 按主机档案的 env 标签匹配（大小写不敏感） |
+| `host_role` | string | - | 按主机档案的 role 标签匹配（大小写不敏感） |
+| `host_owner` | string | - | 按主机档案的 owner 标签匹配（大小写不敏感） |
+| `decision` | string | - | 授权决定：`approved` / `approved_rewritten` / `rejected` / `timed_out` / `auto_allowed` / `blocked` |
+| `agent` | string | - | 请求方标签，对 source 做大小写不敏感的**精确**匹配 |
 
 组合查询：
 
@@ -732,10 +739,28 @@ curl -H "$AUTH" http://127.0.0.1:7722/approvals
     "risk_level": "high",
     "requested_at": "2025-06-12T10:30:15Z",
     "ttl_secs": 300,
-    "status": "pending"
+    "status": "pending",
+    "context": {
+      "host_address": "10.0.0.11",
+      "host_env": "prod",
+      "host_role": "web",
+      "source": "daemon",
+      "reason": "清理卡住的缓存",
+      "change_id": "CHG-2025-0612",
+      "rewritable": true,
+      "recent_commands": []
+    },
+    "revoked_at": null,
+    "approved_command_snapshot": null,
+    "rewritten_command": null
   }
 ]
 ```
+
+`context`、`revoked_at`、`approved_command_snapshot`、`rewritten_command` 四个键**恒在**，没有值时是
+`null`；`context` 里还可能有 `risk_details`（`built_in_risk` / `user_risk_override` / `final_risk` /
+`matched_policy` / `risk_unclassified`）。`context.rewritable` 为 `true` 表示审批人可以**改写命令后批准**
+——此时真正执行的是 `rewritten_command`，而 `approved_command_snapshot` 记的就是它。
 
 ### 批准请求
 
@@ -751,7 +776,8 @@ curl -X POST -H "$AUTH" \
   http://127.0.0.1:7722/approvals/<approval-id>/reject
 ```
 
-审批状态值：`pending`、`approved`、`rejected`、`timed_out`。默认超时 300 秒。
+审批状态值：`pending`、`approved`、`rejected`、`timed_out`、`revoked`。`revoked` 表示「已批准之后被
+撤回」，只由进程内调用方写入，daemon 没有对应路由。默认超时 300 秒。
 
 ---
 
