@@ -1496,7 +1496,7 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
   - 5 `russh-migration.md:494` 仍写「Pageant 优先、管道兜底」，`e67fd04` 已把代码翻成管道优先（部分成立，`agent.rs:317-327`；KNOWN-ISSUES.md:69 那句是对的）
   - 6 `embedded_ssh.rs:2074-2086` 的 T2-9 注释仍记 ssh2/libssh2 接线方式，`:1987` 同族残留（部分成立）
   - 另自验 3 条不成立（`bridge_tcp_and_channel` 空转烧 CPU / `channel.rs` request 混同超时与拒绝文案 / `legacy_pem` 尾随空格误判），并声明未重复 ledger 既有不成立与 L2-15/16/17/19/22/24/25/88 条目、未跑测试（环境无 cargo）
-- 6 轮进度：**3 / 6**（第 3 轮 2026-11-11 00:40 收尾，见文末 `consume 1 / 6`…`consume 3 / 6`；issue 保持 open）
+- 6 轮进度：**4 / 6**（第 4 轮 2026-11-11 00:45 收尾，见文末 `consume 1 / 6`…`consume 4 / 6`；issue 保持 open）
 - 正文已喂给 CodeBuddy：**67 条「不成立」原文**（编号 44：preflight 2 + batch1 六轮 10 + batch2 编号 15–31 十七条（29–31 物理落 batch 2 末节、内容属 batch 3 第 5 轮，正文已标注）+ batch4 第 1/5/6 轮 10 + batch6 第 1 轮 5；行内判定行 23：batch2 D2/D4、batch3 A5/E、batch5 D6 后半/D8/F6 后半/F10/F11 后半/F12、batch6 a1 后果/a3.2/a5/c 附更正/#10、batch7 第 1/2/4/5 轮 8 条、手工单发消费（#2）1 条含 3 项）+ KNOWN-ISSUES 空档（K2/K7/K9/K12 + §3 未验证范围 + §3.1 Pageant 共存边界）+ 口径提醒（基线红测 861/1/1、npm 213/27、feature 组合不可相加、`daemon_*_e2e` 需显式 `--features daemon`、`exec_fixture` 空跑、`.github/**` 禁区、四列计数、`[跑]` 标注不可采信、行号一律现算、L2-15/L2-16…L2-25/L2-37/L2-73/L2-88 勿重提、api.yaml 已在 #9/#12 对齐）。正文由 `/tmp/build-opt-issue-b8.py` 按 ledger 锚点切片生成（块级正则 + 行内唯一子串校验：16 个编号块 44 条 + 23 条判定行，复验通过）
 - 同主题第一批（#8）已 6 轮闭环；正文已写明 #8 落地的 L1 与已登记 L2 勿重提，本批重点找 **#8 闭环后新增/残留**的问题
 - 顺手按 #13 批次条目的指示删除顶部 `BATCH_COMPLETE · issue #12` 与 `#13` 两条状态行（#13 那条明写「下一批（B=8）由生产任务开 issue 时删除本行」；#12 无指示但同属已关闭批次留痕，沿用 #8–#11 先例一并删除；顶部 HTML 注释已同步为六条）
@@ -1554,3 +1554,13 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
   - `recording_id` / `terminal_id`：`Uuid` 的 serde 与 `.to_string()` 逐字节相同，所以不是 bug；真正不对称的是 `recording_id` 未录制时为 `null`（键在、值 null）。已写进 daemon 注释并挂 L2-97，不新立。
 - **L1**：`78f850e`（三处注释：唯一闸门、`remove` 的两个盲区与三条同根因、`connected` 帧的 null 语义）。文档笔：`L2-PENDING` 的 L2-96 建议改法订正 + 新增第 3 轮小节（形态归一合并建议、两条补正）。
 - **验证**：`npm run build` 6.32s；`--no-default-features --lib` 861/1/1；`--lib` 878/1/1；`cargo fmt --check` 绿。
+
+### consume 4 / 6 · 2026-11-11 · batch 8（issue #14）
+
+- **指摘来源：自取**。CodeBuddy 对第 3 轮收尾（`2120193234084204544`，00:33:52）5 分钟内未回（60 s × 5 轮询，评论总数停在 6）。按协议不空等，改用第 3 轮末尾我自己列出的三个待核点。
+- **判定：3 条 → 成立 2 / 不成立 1。**
+  - **成立（范围扩大）**：`File::flush` 的第一句是 `ready!(poll_drain_writes(&mut self.state.write_acks, cx))?`（`fs/file.rs:299-301`），抽的是 `write` 用的同一个队列。所以只包 `File::write` 的 deadline 漏掉**每次传输的最后一次 flush**——而那正是队列里还压着 8 个未回 ack 时最该有界的地方。L2-96 的修法改为 write + flush 两处。
+  - **成立（顺序约束）**：L2-19（把 `skipped` 按原因拆字段）必须先于 L2-95（把裸 `host:port` 计入 `skipped`），否则只是往五合一计数器里加第六种原因，CLI 的 `skipped M (hashed or conflicting)` 会继续给错归因。
+  - **不成立**：`known_hosts.bak` 每次覆盖不是缺陷。实测 `ssh-keygen -R` 两次连续调用后 `known_hosts.old` 同样只保留「最后一次调用之前」的状态（`/tmp/kh-test` 实测），本仓语义与上游一致。
+- **L1**：`81ce265`（`sftp_transfer.rs` 注释补 flush 同队列）。文档笔：L2-96 建议改法补 flush、新增第 4 轮小节。
+- **验证**：`--no-default-features --lib` 861/1/1；`cargo fmt --check` 绿；本轮未动前端，`npm run build` 沿用第 3 轮的 6.32s（同一棵树、无 `src/` 改动）。
