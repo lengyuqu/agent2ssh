@@ -2425,6 +2425,45 @@ fn char_end(source: &str, quote: usize) -> usize {
     }
 }
 
+/// A brace inside a literal, a comment or a raw string is not a brace.
+///
+/// The daemon source has no such shape today, which is exactly why this needs
+/// its own test rather than an argument: a scan that reads `'}'` as syntax
+/// closes a body one brace early, and every check that reads that body then
+/// measures a prefix of it and passes. That is the failure mode the brace walk
+/// was introduced to end, one layer down.
+///
+/// The cases below are the shapes a later edit could plausibly add, including
+/// the one a reviewer reported as already broken — a `'{'` immediately followed
+/// by a second literal, where the claim was that the scanner swallows the
+/// following colon and desynchronises.
+#[test]
+fn a_brace_inside_a_literal_does_not_close_the_body() {
+    let cases = [
+        "fn f() { let close = '}'; }",
+        "fn f() { let quote = '\\''; }",
+        "fn f() { let slash = '\\\\'; }",
+        "fn f() { let pair = ('{', ':'); }",
+        "fn f() { let escaped = '\\u{7D}'; }",
+        "fn f() { let wide = '中'; }",
+        "fn f() { let wide_pair = ('中', '}'); }",
+        "fn f() { let s = r#\"}\"#; }",
+        "fn f() { let s = \"}\"; }",
+        "fn f() { /* } */ let n = 1; }",
+        "fn f() { // }\n let n = 1; }",
+        "fn f() { let t: &'static str = \"a}b\"; }",
+    ];
+    for case in cases {
+        let open = case.find('{').expect("the case has a body");
+        let end = closing_brace(case, open).unwrap_or_else(|| panic!("no end for {case}"));
+        assert_eq!(
+            &case[end..],
+            "",
+            "the scan stopped inside the body of {case:?} instead of at its closing brace"
+        );
+    }
+}
+
 /// Every daemon route is in `docs/api.yaml`, and nothing else is — path,
 /// method, and the 401 that the auth middleware answers with.
 ///
