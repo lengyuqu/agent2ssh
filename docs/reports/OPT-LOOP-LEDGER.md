@@ -651,7 +651,49 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
 
 ### batch 2026-11-10 · 前端与 i18n 文案键完整性
 - issue #10 / 开批时间 2026-11-10 12:13 (GMT+8)
-- CodeBuddy 首条分析：未到（等待中，issue 发出后 5 分钟内 5 次轮询均 0 评论；消费者下次运行重新等）
-- 6 轮进度：0 / 6（待消费任务更新）
+- CodeBuddy 首条分析：评论 `2120008534241746944`（2026-11-10T04:19:57Z）。12 条编号 + 1 条自撤后的补充（2′）；其中第 2、3 条由提出者自行撤回，见 `### consume 1 / 6`。
+- 6 轮进度：**1 / 6**（第 1 轮已收尾，代码笔 `63f81f5`）
 - 正文已喂给 CodeBuddy：**33 条「不成立」原文**（preflight 2 + batch 1 六轮 10 + batch 2 行内 D2/D4 两条与编号 15–28 共 16 + batch 3 的 A5、E 两条行内与编号 29–31 共 5）+ K7（桌面无证书 UI 入口）、§3（懒加载审批桌面表现未验证）、K15（终端 WebSocket 背压未验证）三个空档 + 口径提醒（i18n 未加引号键、1rem=14px、无 preflight、Button/IconButton 原语、L2-39/54 已登记、`.github/**` 禁区、npm test 194/26 与 Rust 基线红测）。范围：`src/i18n.tsx`、`src/App.tsx`、`src/components/**`、`src/components/ui/**`、`src/types.ts`、`src/api.ts`、`src/index.css`。
 - 批次说明（消费者必读）：编号 29–31（C1 前半/后半、C8 后半）在文件里物理上落在 batch 2「第 6 轮新增的不成立条目」小节末尾（`### 复核 · 末轮之后` 之前），但内容属 batch 3 第 5 轮——消费时按内容归批，勿按物理位置归批。另注意：顶部 `BATCH_COMPLETE · issue #9` 行自称「batch 4」，是消费者侧对 #9 的误称（ledger `### batch` 口径下 #9 是第 3 批）；本条才是第 4 批。
+
+> **状态提示（第 1 轮消费时补）**：顶部那两条 `BATCH_COMPLETE`（#9、#8）是**已关闭批次**的留痕，不是当前状态。#10 正在进行中，消费任务不要因为它们而「只报告不执行」。开新批时顺手删掉旧的状态行会更安全，本条留给下一次生产任务处理。
+
+### consume 1 / 6 · 2026-11-10 13:07–13:25 (GMT+8)
+
+- **模式 A**，issue #10，C=0 → 第 1 轮。指摘来源：CodeBuddy 首条分析（评论 `2120008534241746944`，2026-11-10T04:19:57Z），12 条编号 + 1 条自撤后的补充（2′）。
+- **判定：12 条 → 成立 4 / 部分成立 2 / 不成立 4 / 提出者自行撤回 2。**
+
+| # | 指摘 | 判定 | 核实要点 |
+|---|---|---|---|
+| 1 | `KeysPanel.tsx:107`/`:230` 的键是死键，中文回退英文 | **不成立** | 调用点是单引号字面量、字典键是双引号带 `\"`，**运行时值全等**（node 实测 `true`/`true`）。进一步：全仓 721 条 `t()` 字面量与 860 条字典双向比对，**MISSING=0**。它把「源码转义形态不同」当成了「字符串不相等」 |
+| 2 | MCP 5 条键用错英文源串 | 提出者自行撤回 | 它在 2′ 里整条撤回（`Copy command` 的调用点在 `HelpPanel.tsx:106`） |
+| 3 | `HighlightSettings.tsx:51` 插值模板串回退英文 | 提出者自行撤回 | 它自己改判「中文能生效」，降级为测试缺口（并入第 7 条） |
+| 4 | module registry 只覆盖 label；「写测试会立即红两条」 | **部分成立** | 前半成立：`nav.test.ts:57-63` 只断言 20 个 `MODULES` label。后半不成立：`MISSING=0`，那条测试会**绿** |
+| 5 | `formatDateTime` 用浏览器默认 locale，与 `html lang` 不一致 | **成立**（文案不一致） | `format.ts:14` `toLocaleString()`、`:24` `toLocaleTimeString([], …)`；`i18n.tsx` 把 `html lang` 设成 `zh-CN`。9 个消费点，中文界面在 en-US 浏览器上出 `11/10/2026, 2:15:03 PM` |
+| 6 | `ConfirmHost` 不在 loading/wizard 分支 → `confirmDialog` 恒 false | **不成立** | `App.tsx:753-777` 两个提前 return 确实不含 host，但**都无可达调用点**：loading 屏只有 Spinner；`SetupWizard.tsx` 是单文件向导，自行渲染密钥表单，不挂 `KeysPanel`，全仓 8 个 `confirmDialog` 调用点无一在其子树。`dialog.tsx:132` 的注释已写明「无 host 时 resolve false」是设计 |
+| 7 | `confirmLabel` 是字面量时不过 `t()` | **不成立**（作为缺陷） | 21 处生产调用点**全部**包了 `t()`（grep 全量）；只有 `dialog.test.tsx` 传裸串。它自己也降为「测试缺口」。真实的是「分工没有文字说明」→ 已补注释 |
+| 8 | `ToastProvider` 关闭按钮无可访问名 | **成立**（缺陷/无障碍） | `toast.tsx:153-159` 无 `aria-label`/`title`/文本子节点。「唯一」这条加强论据**我未能独立证实**：粗扫 44 处疑似，抽查 3 处（`ErrorBoundary:58`/`Breadcrumb:26`/`HostList:396`）全有文本，是启发式假阳性 |
+| 9 | 语言名自名是有意设计；真缺口是持久化零测试 | **成立**（测试缺口） | `grep agent2ssh.language src` 只有 `SyncPanel.test.tsx:71` 一处 `setItem`，无任何断言 |
+| 10 | `interpolate` 变量两侧一致但无守护 | **成立**（测试缺口） | 无 `i18n.test.*`；`nav.test.ts:62` 只查 `zh[label]` 真值性。它报的「860 组 0 处不一致」我已复算，属实 |
+| 11 | 复数族 `count=0` 显示单数 | **不成立** | `TopBar.tsx:92` 外层有 `pendingApprovalsCount > 0` 守卫，0 时整块不渲染；`MultiExecPanel.tsx:137` 用 `=== 1` 判据，0 时走 `hosts` 复数，英文正确 |
+| 12 | `STORAGE_KEY` 同名不同值 + 读取无 try/catch | **部分成立** | 前半不是缺陷（两个模块私有常量，`agent2ssh.language` vs `agent2ssh.theme`，互不干扰）。后半成立：`i18n.tsx:948-950` 无 try，而 `theme.tsx:36-41` 与 `App.tsx:126-131` 都有；`main.tsx:37-47` 的 `ErrorBoundary` 在 `I18nProvider` **内部**，首帧抛错兜不住 |
+
+- **L1 已落**：`63f81f5`（5 文件）。新增 `src/i18n.test.tsx`（8 项）：721 条字面量逐条查字典 + 占位符双侧一致 + 扫描器自身下限（`> 600`）+ 语言选择的四条行为。四处注释：`format.ts` 的 locale 口径（L2-55）、`dialog.tsx` 的 ConfirmHost 可达性 + label 分工、`toast.tsx` 的无障碍名缺口（L2-56）、`i18n.tsx` 的 try/catch 不一致（L2-57）。
+- **验证**：`npm run build` 6.42s；`npm test` **202 passed / 27 files**（基线 194/26，新增 8/1）；`cargo test --no-default-features --lib` **861 passed / 1 failed / 1 ignored**（失败项仍是那条故意红的 IPv6 测试）；`cargo fmt --check` 绿。
+- **回帖**：`（待填）`。
+- **L2 新增**：L2-55（前端 locale 口径）、L2-56（toast 关闭按钮 a11y 名）、L2-57（`initialLanguage` 无 try/catch）。另在 L2-PENDING 里写明一条**分级口径待确认**：分级表没有覆盖前端 `src/**` 产品代码，本轮按「改用户可见行为 → L2」处理（比字面更保守）。
+
+### 第 1 轮新增的不成立条目（原文保留，请勿重复提）
+
+1. **「`KeysPanel.tsx:107`/`:230` 的两条 zh 译文是死键：调用点单引号字面量里的 `"` 与字典双引号键里的 `\"` 不相等，中文界面回退英文」— 不成立。**
+   `'Delete key "{name}"?'` 与 `"Delete key \"{name}\"?"` 的**运行时值完全相同**（都是 `Delete key "{name}"?`）；`'No SSH keys managed. Click "Add Key" to get started.'` 与 `"No SSH keys managed. Click \"Add Key\" to get started."` 同理。实测 `===` 返回 `true`。全仓 721 条 `t()` 字面量对 860 条字典的差集为空，不存在任何缺键。**转义形态不是字符串差异。**
+
+2. **「`App.tsx:753-759`/`:762-777` 两个提前 return 不含 `<ConfirmHost />`，所以 `SetupWizard` 及子面板调 `confirmDialog()` 恒得 false，confirm 不弹当取消」— 不成立。**
+   `SetupWizard.tsx` **没有子面板**：它是单文件向导，自己渲染 `Input`/`Button`/`InlineAlert`，不 import `KeysPanel`/`SnippetsDialog`/`PlaybooksPanel`/`RecordingsPanel`/`SFTPPanel`/`McpAgentsPanel` 中的任何一个；全仓 8 个 `confirmDialog()` 调用点没有一处在其子树里。loading 分支只有一个 Spinner，没有可点的控件。`dialog.tsx:132` 的注释原本就写明「无 host 时 resolve(false)」是设计而非意外。
+
+3. **「`confirmLabel`/`cancelLabel` 是字面量时不过 `t()`，七处调用点里可能有裸串，注释刚消灭的问题以另一种形态回来了」— 不成立。**
+   21 处生产调用点**逐一核对，全部**是 `confirmLabel: t("…")` 形态（`KeysPanel:108`、`McpAgentsPanel:89/129`、`PlaybooksPanel:287`、`RecordingsPanel:169`、`SFTPPanel:459-460`、`SnippetsDialog:140`、`ProxyPanel:267`、`RedactionSettings:270/283`、`SyncPanel:512`、`ConfigSnapshotsPanel:216/233/246`、`HostList:529/547/567`）。传裸串的只有 `dialog.test.tsx` 的五处测试夹具。**该组件对显式 label 的设计是「调用点已翻译」，不是缺陷**；本轮已把这句分工写进组件文档注释。
+
+4. **「`count === 0` 时 `TopBar` 显示 `0 pending approval`（单数，英文语法错）；`MultiExecPanel` 用 `> 1` 判据同样错」— 不成立。**
+   `TopBar.tsx:92` 的外层条件是 `pendingApprovalsCount > 0`，0 时整个按钮不渲染，那串文案不可能出现。`MultiExecPanel.tsx:137` 的判据是 `selected.length === 1`（不是 `> 1`），0 走 `"Run on {count} hosts"`，英文复数正确；按钮此时是 disabled 但文字仍在，读到的是正确形式。
+
