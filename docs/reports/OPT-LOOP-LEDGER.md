@@ -1125,9 +1125,9 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 
 **下一轮首项**：`/exec-multi` 的目标解析顺序（L2-77）仍是本批最值钱的行为改动；若仍不能拍板，就转去 `src-tauri/tests/**` 里「跑了真 daemon 但只断状态码不断 reason」的用例。
 
-### consume 3 / 6 · 2026-11-10 19:57–20:30 (GMT+8) · issue #12
+### consume 3 / 6 · 2026-11-10 19:57–20:00 (GMT+8) · issue #12
 
-- **指摘来源：自取。** 第 2 轮收尾（19:56）后按 60 s × 5 轮询到 20:01，issue 评论总数一直是 5，CodeBuddy 未回。按协议标「等待超时」并用已有材料推进。
+- **指摘来源：自取。** 第 2 轮收尾（19:56）后按 60 s × 5 轮询，issue 评论总数一直是 5，于是按协议标「等待超时」并用已有材料推进。**更正（20:02 复核发现）**：CodeBuddy 的复核其实在 **20:00:04** 就到了（评论 `2120124329374425088`），正好落在本轮的提交时刻（`39fe366` 19:59:55）之后几十秒，所以本轮确实没读到它；这一条不写清会让下一轮误以为它连续两轮不回。
 - **自取的方向先错了一次，值得记**：我第 2 轮自己点的方向是「`daemon_stop_e2e.rs` / `daemon_local_exec_e2e.rs` 里只断状态码不断 reason 的用例」。实际打开 `daemon_local_exec_e2e.rs` 后发现那批 400 断言**都带 reason**——`:241` 的 `body.contains("requires host")`、`:280` 的 `body.contains("blocked")`，注释还写明「a bare 400 would also come from a failure to resolve any host」。**这条方向没料**，是我上一轮凭印象提的，不是读出来的。
 - **改用的方向**：把第 2 轮那条 500 断言**普适化**。500 只是「handler 自己命名的状态码」里的一行——同一个扫描换成 10 个常量（400/403/404/408/409/423/429/500/502/503，401 除外因为属中间件），差集从 21 处扩到 **21 个 operation、24 个状态码**。
 
@@ -1142,4 +1142,7 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 - **L1 落地**（一笔）：`39fe366`。`api.yaml` 补 24 个状态码（逐条按产生它的那一行写描述，不是套模板）；`daemon_integration.rs` 把 `api_yaml_documents_the_500_each_handler_can_return` 改名为 `api_yaml_documents_the_codes_each_handler_can_return`，扫描表从 1 个常量扩到 10 个。
 - **验证**：`npm run build` 6.92s；`cargo fmt --check` 绿；`--lib` **861 / 1 failed / 1 ignored**（基线红）；`--features daemon --test daemon_integration` **64 passed**。破坏性验证：删 `/forwards/{id}` 的 400 → 红并点名 `["400 delete /forwards/{id} (forward_remove)"]`。
 - **断言的边界（必须写清，否则下一个人会以为它覆盖了一切）**：只见 handler **自己写出**的状态码。经共享 helper 到达的（`preflight_guarded_request` 的 423/429/408/500）看不见——那些已按路由逐条文档化，但**没有再被这条断言守住**。
-- **下一轮首项**：`/forwards/{id}` 的 DELETE 现在还缺 404（未知 id 该不该从 400 改成 404 是 L2-52 那笔待拍板的事），以及 `proxy_exec` 的 404 与 `get_daemon_with_scope` 的语义是否一致。
+- **下一轮首项**：`/forwards/{id}` 的 DELETE 现在还缺 404（未知 id 该不该从 400 改成 404 是 L2-52 那笔待拍板的事），以及 `proxy_exec` 的 404 与 `get_daemon_with_scope` 的语义是否一致。**这两项改用 CodeBuddy 20:00 那条复核里的确认项**（见下）——它的「两条 confirmed finding」比我自己点的方向更具体。
+- **接手过来的两条（20:02 预核，待第 4 轮正式核实）**：
+  1. `GET /diagnostics` 的 500 文案写的是「The remote inventory could not be read」，而 `load_remotes()` 里的 `validate_remotes(&file.remotes)?` 会因**五条语义校验**（alias 空 / alias 是 `localhost` / alias 重复 / url 不是 http(s) / 缺 token_env 与 token）返回 `Err`——这些是人手写错的配置，不是「读不出来」。`bin/agent2ssh-daemon.rs:3847`。**它说三条，实数五条**（`remote.rs:170-198`）。
+  2. `PUT /approval/policies` 的 500 文案是「could not be written」，但 `approval.rs:994` 的 `toml::to_string_pretty(&file)?` 是**序列化**失败，写盘在下一行。同一句文案盖住了两个不同阶段。
