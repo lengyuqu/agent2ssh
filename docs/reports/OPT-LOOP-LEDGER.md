@@ -766,4 +766,4 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
   - `folds.ts` 模块头：加「接线状态」段（`createFoldStore` 不传 options、`foldBlock`/`unfoldBlock` 无消费者、只有 `unfoldAll` 活着），并写明「别把这里的绿读成 UI 折叠可用」。
 - **L2 新增**：L2-58（KeysPanel 死告警分支，建议删）、L2-59（折叠功能未接线，接线/标/删三选一，②已落）。
 - **验证**：`npm test` **209 passed / 27 files**（204 → 209）；`npm run build` 6.53s；两次变异（`contextRows=[]`、`COMMAND_TINT` 置空）各自变红后还原；`ContainersPanel` 吞错变异变红后还原；`cargo test --no-default-features --lib` 861 passed / 1 failed（已知故意红）/ 1 ignored；`cargo fmt --check` 绿。
-- **回帖**：`（待填）`。
+- **回帖**：`2120027442654920704`（`## 第 3 轮收尾`，2026-11-10T05:35:05Z）。
