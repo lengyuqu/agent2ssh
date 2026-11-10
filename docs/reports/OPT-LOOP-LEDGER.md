@@ -1279,9 +1279,42 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 
 ### batch 2026-11-10 · daemon 控制与停止协议（第二批，B=7）
 - issue #13 / 开批时间 2026-11-10 20:57 (GMT+8)
-- CodeBuddy 首条分析：**未到**（等待中——issue 发出后 60 s × 5 次轮询（21:00–21:04）与结束前即时复核均 0 条评论；消费者下次运行重新等）
-- 6 轮进度：0 / 6（待消费任务更新）
+- CodeBuddy 首条分析：`2120141279483817984`（2026-11-10 21:07:26 GMT+8，比开批晚 10 分钟、比生产任务的 5 分钟轮询窗口晚 6 分钟；8 条指摘）
+- 6 轮进度：1 / 6（第 1 轮已收尾，见下）
 - 正文已喂给 CodeBuddy：**58 条「不成立」原文**（编号 44：preflight 2 + batch1 六轮 10 + batch2 编号 15–31 十七条 + batch4 第 1/5/6 轮 10 + batch6 第 1 轮 5；行内 14：batch2 D2/D4、batch3 A5/E、batch5 D6 后半/D8/F6 后半/F10/F11 后半/F12、batch6 a1 后果/a3.2/a5/c 附更正/#10）+ KNOWN-ISSUES 空档（K14 全部未解项、K15、§3 懒加载审批）+ 口径提醒（基线红测 861/1/1、npm 213/27、feature 组合不可相加、`daemon_*_e2e` 需显式 `--features daemon`、`exec_fixture` 空跑、`.github/**` 禁区、api.yaml 已在 #12 对齐、四列计数）。正文由 `/tmp/build-opt-issue-b7.py` 按 ledger 锚点切片生成（块级正则 + 行内唯一子串校验，16 块 / 44+14 条复验通过）。
 - **3 条已转可重提的注明**：`/exec/stream` 401 语义、`app_preferences.json` 归组、`total_ms` 补 `format: int64`（原 #12 正文的不成立被更正评论 `2120103682455814144` 撤销）已单独注明「无需主动重提」，未计入 58 条。
 - 背景已写进正文：同主题第一批（#7）已 6 轮闭环，已修复项与已登记 L2（L2-1…L2-18、L2-82）勿重提；本批重点找 #7 闭环后新增/残留的问题。
 - 下一批（B=8）：8 % 6 = 2 → 主题 2：SSH 传输、known_hosts 与认证（russh 侧）。开 issue 前重读 ledger 不成立清单（批次 7 消费期间可能新增），行内子串锚点会因消费者编辑 ledger 而漂移——届时重新定位。
+
+### consume 1 / 6 · 2026-11-10 21:07–21:40 (GMT+8) · issue #13 · 回帖（见下一条记录）
+
+- **指摘来源**：CodeBuddy 首条分析 `2120141279483817984`（21:07:26，基线 `8d86fe0`）。8 条，全部落在 batch 1（issue #7）闭环之后，没有重放已判否条目。
+- **判定：8 条 → 成立 2 / 部分成立 3 / 不成立 3。**
+
+| # | 项 | 判定 | 证据要点 |
+|---|---|---|---|
+| 1 | `/exec/stream` 的 `interrupted` 把「正常 exit 0 撞上 shutdown」记成「远端结果未知」 | **不成立** | 判据是 `:5450` `cancelled && code.is_none()`，而取消分支的 drain 用 `timeout_at`（`:5340`）把队列里已到的 `Exit` 读出来写进 `code`——`code.is_some()` 时 `interrupted` 必为 false，所以**它标题里那个形态不存在**。能为真的只有「取消后 500 ms 宽限内没收到 `Exit`」，此时 daemon 手里确实没有退出码，`remote outcome unknown` 是对 daemon 已知状态的准确描述。它自己承认前半段是对的；剩下那半是「远端已返回但 `Exit` 未及入队」的窗口——那个窗口里 daemon 不可知，要缩短只能让线程侧另存一份退出码（保真度改进，不是纠错），不立条 |
+| 2 | `handle_terminal` 的 drain 没有绝对截止，500 ms 是每次 recv 重置 | **部分成立** | 机制成立：`:4830` 的 `timeout(500ms, …)` 每次迭代新建，`:4783` 的泵每 100 ms 一次，`Output` 分支只 `continue`；契约那句「drains for up to 500 ms」确是错的（**已改 L1**）。**结论那半错**：它说 2 s 把 future drop 之后 `recorder.finish()` / `terminal_inputs` 的 remove / `limiter.unregister_session` 都跑不到——这三件都在 `run_ws_with_shutdown_deadline` **之后**（`:5016-5045`），future 被 drop 也照跑（第 2 批 batch 1 的 L2-26 撤回就是同一个坑）。所以真实后果只是「drain 可能持续到 2 s」，不是「清理丢失」→ **L2-84** |
+| 3 | info 宣称每条 authed 路由回 500，但 107 个 operation 只有 33 个写 500 | **不成立** | 先纠数：**105** 个 operation，**103** 个有 401（非公开），**33** 个有 500。**关键是它引漏了紧接的一句**：同段原文写着「`/approvals/{id}/approve` states this once in full rather than repeating it on a hundred operations」，而那条 500 的描述确实把整桩事写全了（坏 `daemon_tokens.toml` → 任何非 admin token → 500）。所以 33 是**写明的约定**，不是漏写，「直接矛盾」不成立。它剩下的话（按 operation 生成的客户端看不见）是对这条约定的评价，属设计取舍。顺带把 summary 句的 `a scoped caller` 改成 `a caller that does not present the admin token`——同段第一句本来就写「any token that is not the admin token」，而**无凭据请求同样会 500**，summary 比自己的定义窄 |
+| 4 | Stale 分支静默 `Ok(())` 让 CLI 打印「Daemon stopped」而实际没确认任何事 | **不成立** | 机制在（`:945-952`），但它给的可执行判据是**误读测试**：`background_start_verifies_and_stops_its_own_daemon`（`:985-1003`）把 `u32::MAX-1` 写进 `daemon.pid` **之后启动了一个真 daemon**，`stop_daemon_process(started.pid)` 收到的是真 pid，走健康路径，不是 Stale 分支。而 Stale 的定义是「确定不存在或僵尸」（`:330-335`），此时没有任何活进程持有该 pid，`daemon stop` 的终态（无 daemon、标记清掉）成立；加一句「already gone」更清楚，但那是措辞偏好。preflight 第 1 条判否的是「kill 失败却报成功」，那里有一个**活**进程 |
+| 5 | `fetch_daemon_activity` 漏掉在途 `/exec` | **部分成立** | 机制成立：四次请求（`daemon_activity.rs:205-217`），`exec`（`:1665-1700`）不注册任何 registry，`ResidentSessionSummary`（`resident_session.rs:361-367`）没有「在跑」字段，于是有命令在跑的 daemon 被 `is_idle()` 判成空闲 → 退出确认框不弹。但「要不要把 `/exec` 计入」是产品决策（`/exec` 自带 `timeout_secs`），且要动 daemon 与桌面契约 → **L2-86**。它那句「这条永远测不到（CI 不设 `AGENT2SSH_TEST_SSH_PORT`）」不准确：这条要测的是「有没有计数」，不需要真 SSH |
+| 6 | `daemon stop` 在 `read_admin_token()` 为 `None` 时给 `NotAuthenticated`，而 doc 说的是别的事 | **成立（已登记 L2-4，行号需更正）** | 触发点其实是 `:991`（它说 `:1006`，那是 "daemon predates" 的 warn 行），`Display` 在 `:792-796`。**L2-4 记的正是这一条**，本轮把行号与触发条件写进 L2-4 的备注。它补的一点对：`:772-788` 的 `\|\|` 让这条分支永远看不出走哪边——但那条用例构造的是「token 文件写错」，走的是 401 支（`NotAccepted`），**根本到不了** `:991`；所以 `\|\|` 的问题不是「两个分支都可能」，而是两条文案太像 |
+| 7 | 健康 PID 不匹配时的文案把四种原因压成一句 | **成立** | `:986-989` 的括号列了三种原因，但这一支的入口是 `:982` 的 `else`：`config_dir` 的比对在 `:959-981` 的 `if` 分支，`admin token` 在 `:991` 之后。打印这句话时括号里后两种原因不可能成立 → **L2-85** |
+| 8 | `L2-3` 的落地形状与 `stop_daemon_process` 的读法不自洽 | **部分成立** | 类型那半对：`Accepted` / `AcceptedUnchecked` 都不带载荷（`:827-843`），要比较 `checked_pid` 必须改变体、并让 `request_shutdown` 的 200 分支先解析 body，`L2-3` 那段没写这一层（已在 L2 文件里补成四步）。**行号那半错**：当前树 `grep -n "expected_pid.is_none()"` → `:872`、`grep -n "daemon predates"` → `:1006`、`:200`（另一处文档注释），与 `L2-3` 的引用一致；它给的 `:901` 是 `response.body.trim()`、`:1020` 是 `ProcessObservation::Unknown` 臂 |
+
+**L1 落地（两笔）**：`docs/api.yaml`（`/terminal` 的 500 ms 改写为「空闲超时 + 2 s 上限 + `Closed`/error 提前结束」；`/exec/stream` 补「drain 只转发 stdout/stderr，drain 期间到的 exit 只进审计、不发 `{"type":"exit"}`」；info 的 summary 句改「any caller that does not present the admin token」）、`src-tauri/tests/daemon_integration.rs`（新增 `a_websocket_drain_budget_claim_matches_the_loop_it_describes`）。
+
+**新断言做什么**：把「某路由声称 500 ms 预算」与「它的 handler 里是否只算一次 deadline（`timeout_at(`）」两两比对。`/exec/stream` 声称且有 → 成立；`/terminal` 不声称且用 `timeout(` 重设 → 成立。**这是双向钉**：改回文档会红，把终端循环统一成 `timeout_at` 而不改文档也会红。
+
+**验证**：`cargo fmt --all -- --check` 绿；`cargo test --no-default-features --features daemon --test daemon_integration` **71 passed**（70 → +1）；`cargo test --no-default-features --lib` **861 passed / 1 failed / 1 ignored**（红的仍是基线那条 `an_ipv6_literal_at_port_22_is_removed`，main 自 `09d49ea` 起故意红）；PyYAML：90 paths / 105 operations 解析通过 / 0 个错误响应缺描述 / 0 处 `: ` plain scalar 违规。**`npm run build` 本轮未跑**：该 worktree 无 `node_modules`（`tsc: command not found`），而本轮零前端改动，`--lib` 与 `daemon_integration` 都不需要 `dist/`。
+
+**两条破坏性验证**：①把 `/terminal` 的句子改回「drains for up to 500 ms」→ 断言红并点名 `/terminal`（`left: true, right: false`）；②删掉 `/exec/stream` 的预算短语 → 红并点名 `/exec/stream`（`left: false, right: true`）。两次都改回后复跑绿。
+
+**本轮的工艺观察（三条，都关于「怎么读」）**：
+1. **截断引用**。第 3 条只引了 `info.description` 的前一句，停在第 3 句——而第 4 句正是「这条 500 只在一处写全」的声明。以后凡「文档没写 X」类指摘，必须先读被指段落的**下一句**再判。
+2. **行号不可复现，方向还不一致**。4 条里 3 条行号错（-20 / +15 / +14），不是统一漂移，说明是估算而非读取。原有规则「凡量化表一律自己重算」扩一条：**行号一律重算，形状照抄的部分可以信**——它引的代码块逐字对得上，只有行号错，这个组合已经出现第三批了。
+3. **把块内的结论套到块外的代码上**。第 2 条读的是 future 里的 drain 循环，却断言 future 之外的三件清理「跑不到」——与 batch 1 的 L2-26 撤回完全同型（那次也是把 `unregister` 当成在 future 内）。规则：**凡「X 跑不到」，先确认 X 在不在被 drop 的那个块里**。
+
+**未做（L2，需拍板）**：**L2-84**（终端 drain 是空闲超时，与 exec 的绝对 500 ms 语义不一致）、**L2-85**（`UnverifiedIdentity` 括号列了两种不可能的成因）、**L2-86**（在途 `/exec` 对退出确认不可见）。另更正 **L2-4**（触发点 `:991`、`Display :792-796`、`||` 的真实问题）与 **L2-3**（变体要带载荷，落地四步）。
+
+**下一轮首项**：按第 1 条判否时留下的窗口——`spawn_embedded_exec_stream` 线程侧（`:5074-5165`）的 `blocking_send` 与 `session.set_blocking(false)` 切换、`channel.eof()` 之后 `wait_close()` 的阻塞可能，是这道题唯一还没被逐行读过的部分；其次 `daemon_stop_e2e.rs` 里那条「`||` 两文案」用例可以拆成两条可达断言（L2-4 的落地前提）。若 CodeBuddy 第 2 轮能给出「Stop 路径在 Windows 腿无覆盖」以外的可核实断言，优先它。
