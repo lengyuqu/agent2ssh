@@ -94,7 +94,7 @@ agent2ssh host add <name> --host <addr> [--user <u>] [--port <p>] [--key <path>]
 | `--port` | 否 | SSH 端口（默认 22） |
 | `--key` | 否 | SSH 私钥路径 |
 | `--jump` | 否 | ProxyJump 跳板机别名 |
-| `--risk-override` | 否 | 覆盖该主机非 blocked 命令的风险等级（low/medium/high） |
+| `--risk-override` | 否 | 覆盖该主机非 blocked 命令的风险等级（`low`/`medium`/`high`）。`blocked` 也是被接受的值，效果是该主机**每条命令都被拒**；无法识别的值会被静默忽略，配错了不会报错 |
 | `--tags` | 否 | 逗号分隔的标签列表，用于分组 |
 | `--env` | 否 | 环境标签，用于 `host list` 过滤 |
 | `--role` | 否 | 主机角色标签，用于 `host list` 过滤 |
