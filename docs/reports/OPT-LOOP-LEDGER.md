@@ -414,7 +414,7 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
 ### 第 6 轮新增的不成立条目（原文保留，请勿重复提）
 
 27. **「N6：Slack 的 `exec_completed` 到不了任何 URL，内容是空的；`exec_blocked` 干脆没人发，`fire_webhook` 的三个调用点没有它」— 不成立（两处事实错）。**
-    ①`exec_blocked` 有发送点：`daemon.rs:754` 构造 `event: "exec_blocked"`，`:763` 交给 `fire_webhook`；`fire_webhook` 在 daemon 里有 5 个调用点（`:650`、`:763`、`:1714`、`:1810`、`:5632`）加 `anomaly.rs:295`，不是三个。②Slack 载荷不是空的：`format_slack_message`（`notify.rs:283-357`）先按 `remote_outcome_unknown` 选 header 文案（"SSH Outcome Unknown" / "SSH Command Not Sent" / "Command Completed"），再带 Host / Command / Risk Level / Exit Code 四个 field，approval 事件还带按钮。它确实没有 `event` / `remote_outcome_unknown` 这类**机器键**——但 Block Kit 是给人看的，`daemon-api-quickstart.md:877` 讲 `remote_outcome_unknown` 的那段指的是默认 JSON 载荷，不是 Slack 渲染。把「没有机器键」说成「告警靠的字段没了、内容是空的」是把两种载荷混为一谈。顺带：`format_slack_message` 上标着的 `#[allow(dead_code)]` 已在回帖时删掉——它在 `:250` 被 `fire_webhook` 调用，那条 `allow` 是过期的。
+    ①`exec_blocked` 有发送点：`daemon.rs:754` 构造 `event: "exec_blocked"`，`:763` 交给 `fire_webhook`；`fire_webhook` 在 daemon 里有 5 个调用点（`:650`、`:763`、`:1714`、`:1810`、`:5632`）加 `anomaly.rs:295`，不是三个。②Slack 载荷不是空的：`format_slack_message`（`notify.rs:283-357`）先按 `remote_outcome_unknown` 选 header 文案（"SSH Outcome Unknown" / "SSH Command Not Sent" / "Command Completed"），再带 Host / Command / Risk Level / Exit Code 四个 field，approval 事件还带按钮。它确实没有 `event` / `remote_outcome_unknown` 这类**机器键**——但 Block Kit 是给人看的，`daemon-api-quickstart.md:877` 讲 `remote_outcome_unknown` 的那段指的是默认 JSON 载荷，不是 Slack 渲染。把「没有机器键」说成「告警靠的字段没了、内容是空的」是把两种载荷混为一谈。顺带：`format_slack_message` 上标着的 `#[allow(dead_code)]` 已在回帖时删掉——它在 `:250` 被 `fire_webhook` 调用。**这句附注本身错了，2026-11-10 batch 4 第 1 轮更正并在 `db60643` 之后加回该属性**：`fire_webhook`（`notify.rs:229`）带 `#[cfg(feature = "daemon")]`，所以在 `--no-default-features` 构建里 `format_slack_message` **没有任何调用者**（`cfg(test)` 的测试不算），删掉属性就会重新出现 `warning: function format_slack_message is never used`；`:365` 的 `compute_signature` 至今仍带着同一属性，理由相同。这条更正不动 27 的结论——「`exec_blocked` 有发送点」与「Slack 载荷非空」两点仍然成立。教训：`#[allow(dead_code)]` 是不是过期，要按**每个 feature 组合**判，不能只看 default 那一份调用图。
 28. **「N7：`*Command:*\n\`\`\`<cmd>\`\`\`` 在 Slack 里是一行内联代码而不是代码块，所以 `|`、`>`、`_`、反引号会原样进入审批卡」— 机制与推论都不成立。**
     ①这是对 Slack 解析器的断言，本仓无法验证，也不该由本仓的测试来钉；②即便按它的读法成立，推论也是反的——Slack 的内联 code span 与 fenced code block **同样**抑制 `|`、`>`、`_` 这些 mrkdwn 标记，所以「漏进审批卡」在两种解析下都不会发生；③它给的证伪断言自相矛盾（要求 `field.split('\n')[1]` 不以 ``` 开头又「以它结尾」，而该行两者都成立）。**成立的是另一件它没提的事**：`format!("*Command:*\n```{}```", command)` 对命令内容**不做转义**，命令自身含有三个连续反引号时会提前闭合围栏——这类命令极罕见，属文案硬化，不立 L2。
 
@@ -471,5 +471,23 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
 ### batch 2026-11-10 · MCP 契约与 CLI 文档一致性
 - issue #9 / 开批时间 2026-11-10 09:48 (GMT+8)
 - CodeBuddy 首条分析：未到（等待中，issue 发出后 5 分钟内 5 次轮询均 0 评论；消费者下次运行重新等）
-- 6 轮进度：0 / 6（待消费任务更新）
+- 6 轮进度：1 / 6
 - 正文已喂给 CodeBuddy：**28 条「不成立」原文**（preflight 2 + batch 1 六轮 10 + batch 2 第 1 轮行内 D2/D4 两条 + batch 2 第 2–6 轮 14）+ K7/K8/K9/K12/K13 相关空档 + 口径提醒（基线红测、`.github/**` 禁区、四列计数）。范围：`docs/skills.md`、`docs/api.yaml`、`bin/agent2ssh.rs` clap help、`bin/agent2ssh-mcp.rs`、`skills/agent2ssh/SKILL.md` 及 guides 相关段落。
+
+#### consume 1 / 6（基线 `db60643`，回帖 `2119990687696330752`）
+
+7 条指摘 → **成立 4（A1 / A2 / A4 / P1）/ 部分成立 2（A3 限 Linux、Q1 收窄）/ 不成立 1（A5）**。本轮**没有 `src-tauri/src/**` 行为改动**，只有一条 lint 属性回填。
+
+| 项 | 判定 | 关键证据 | 落地 |
+|---|---|---|---|
+| A1 | 成立 | `bin/agent2ssh.rs:1258` 的 `command: String` 无 `#[arg]`，是位置参数；`--command` 属 `ExecMulti`（`:126-127`） | `1a36f7d` 改 `SKILL.md:77` |
+| A2 | 成立，**数字要改** | 实测 **36 path / 39 operation**（33 path 走 `require_admin`，3 path（6 op）走 `require_recording_admin`，无交集）；api.yaml 原只有 6 个 path 提过 admin → **30 个 operation 未记载**。两个门都是无条件首行调用（抽查 `metrics_trend:4037`、`containers_start_service:968`） | `1a36f7d` 补齐 39 个 403 + 重写 `info.description` 区分两种 403；`info.version` 0.3.0→0.4.5 |
+| A3 | **部分成立（平台分裂）** | `cargo tree --no-default-features --target x86_64-unknown-linux-gnu -i openssl-sys` 命中 `openssl-sys 0.9.116 ← native-tls ← hyper-tls ← reqwest 0.12.28`；同命令 `aarch64-apple-darwin` 为空。所以「No platform」错、「SSH 传输层不需要」对 | `1a36f7d` 把 AGENTS.md 该段收窄到传输层并写清 Linux 形态，regression 判据改成「`ssh2`/`libssh2-sys` 回来或 OpenSSL 回到 SSH 路径」 |
+| A4 | 成立，**行号要改** | 实际 `docs/skills.md:59`（`:47` 是工具编号）；`agent2ssh-mcp.rs:1648` 走 `local_daemon_url()` | `1a36f7d`（`docs/skills.md`）+ `3c30287`（`tools.rs:767`） |
+| A5 | **不成立（机制读反）** | `start_local_service` 的 `None` 分支直接 `available()`（`container_runtime.rs:505-512`），从不调 `select`；env 只在 `select` 的 `_` 臂（`:542`）读，而 `select(None)` 生产代码无调用点（只有 `:786` 测试）。工具描述是准确的。**反向的事成立** → L2-37 | 不改；记 L2-37 |
+| Q1 | 部分成立 | 版本号两处过时属实；`:211` 不是版本号问题是**事实错**（`telemetry.rs` 存在、默认 `enabled=false`、无网络出口） | `1a36f7d` 改两处 0.4.5 + 按 telemetry 实况重写 `:211` |
+| P1 | **成立（推翻我上一批的附注）** | 对照实验：属性在场 `cargo check --no-default-features --lib` = 0 条 `never used`；删掉属性立刻 `warning: function format_slack_message is never used`；还原回 0。根因 `fire_webhook` 带 `#[cfg(feature = "daemon")]`（`:228`），`cfg(test)` 不算调用者 | `3c30287` 加回属性 + 写清理由；上面第 27 条的附注已改 |
+
+**验证**：`npm run build` 6.77s；`cargo fmt --check` 绿；`--no-default-features --lib` = 861 passed / 1 failed / 1 ignored（已知红测）；`--features daemon --test daemon_integration api_yaml` = 1 passed；`yaml.safe_load` 仍 90 path，gated op 缺 403 由 30 → 0/39。
+
+**方法学**：`#[allow(dead_code)]` 是否过期必须按**每个 feature 组合**判——第 6 轮只看了 default 的调用图，把一个承重属性当成残留删掉了，还写进 ledger 当成"修复"。这是本流程第一次出现「我自己的更正被下一轮当成新缺陷」的反向事故。
