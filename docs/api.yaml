@@ -330,6 +330,8 @@ components:
         host:        { type: string }
         local_path:  { type: string }
         remote_path: { type: string }
+        resume:      { type: boolean, default: false, description: "K6: append from the remote file's current length instead of re-sending from byte 0" }
+        transfer_id: { type: string, nullable: true, description: "K6: opaque id another request can pass to `/sftp/cancel`; absent means the transfer cannot be cancelled" }
 
     SftpDownloadRequest:
       type: object
@@ -338,6 +340,9 @@ components:
         host:        { type: string }
         remote_path: { type: string }
         local_path:  { type: string }
+        resume:      { type: boolean, default: false, description: "K6: append from the local file's current length instead of re-fetching from byte 0" }
+        transfer_id: { type: string, nullable: true, description: "K6: opaque id another request can pass to `/sftp/cancel`" }
+        max_mb:      { type: integer, nullable: true, description: "G8: hard cap on the remote file size in MiB (100 when absent); larger files are refused with advice to use scp/rsync" }
 
     SftpResult:
       type: object
@@ -347,6 +352,7 @@ components:
         remote_path: { type: string }
         direction:   { type: string, enum: [upload, download] }
         duration_ms: { type: integer }
+        bytes:       { type: integer, description: "J5: bytes transferred, so a caller can report volume rather than file count" }
 
     SessionOpenRequest:
       type: object
@@ -1427,9 +1433,14 @@ paths:
         path as `/exec`: bearer-token scope, execution gate, execution limits,
         effective risk, and approval policy are enforced before output streams.
         Server pushes: {"type":"stdout","data":"..."}, {"type":"stderr","data":"..."}, {"type":"exit","code":0,"duration_ms":1234}
+        Every authorization refusal after the upgrade — scope, execution gate, rate limit, approval — arrives as
+        {"type":"error","error":"..."} over the socket, not as an HTTP status: the handler body only counts the
+        request and then hands the socket to `on_upgrade`. The only HTTP-level failure is the handshake itself.
       responses:
         "101":
           description: Switching Protocols
+        "401":
+          description: Missing or invalid token (Authorization header or `?token=`).
 
   /terminal:
     get:
@@ -1505,6 +1516,8 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/TerminalBroadcastResponse" }
+        "400":
+          description: The command is empty, over the length cap, or contains control characters; there are fewer than 2 or more than 32 targets; a `terminal_id` is a duplicate or not a UUID.
 
   /terminal/broadcast:
     post:
@@ -1526,6 +1539,8 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/TerminalBroadcastResponse" }
+        "400":
+          description: Same validation as `/terminal/broadcast/preview` — empty command, control characters, fewer than 2 or more than 32 targets, duplicate or non-UUID `terminal_id`.
 
   /recordings/config:
     description: Recording endpoints require the unrestricted admin token; scoped tokens are rejected.
@@ -2719,6 +2734,11 @@ paths:
                   ok: { type: boolean }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
+        "400":
+          description: The id is not a UUID, or an approve body is malformed / asks for a rewrite that is refused.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /approvals/{id}/reject:
     post:
@@ -2738,6 +2758,11 @@ paths:
                   ok: { type: boolean }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
+        "400":
+          description: The id is not a UUID, it names no known request, or the request is no longer pending (already approved, rejected or timed out).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /risk/check:
     post:
@@ -3136,6 +3161,11 @@ paths:
                   ok: { type: boolean }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
+        "400":
+          description: The id is not a UUID, no known request has it, or it is no longer pending.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /playbooks/{name}/dry-run:
     post:
