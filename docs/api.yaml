@@ -364,7 +364,7 @@ components:
         local_path:  { type: string }
         remote_path: { type: string }
         resume:      { type: boolean, default: false, description: "K6: append from the remote file's current length instead of re-sending from byte 0" }
-        transfer_id: { type: string, nullable: true, description: "K6: opaque id another request can pass to `/sftp/cancel`; absent means the transfer cannot be cancelled" }
+        transfer_id: { type: string, nullable: true, description: "K6: opaque id that registers a cancel flag inside the process running the transfer. Nothing in this API can flip that flag — the only entry point is the desktop app's `sftp_cancel` IPC, in the same process — so an id passed to this route does not make the upload cancellable over HTTP. Absent means no flag is registered at all." }
 
     SftpDownloadRequest:
       type: object
@@ -374,7 +374,7 @@ components:
         remote_path: { type: string }
         local_path:  { type: string }
         resume:      { type: boolean, default: false, description: "K6: continue an interrupted download from the bytes already on disk instead of re-fetching from byte 0. The partial file is `<local_path>.part`; when there is none, a `<local_path>` left by an earlier run is renamed to it and continued. When the bytes on disk already reach or exceed the remote size, the transfer restarts from 0 rather than appending a corrupt tail." }
-        transfer_id: { type: string, nullable: true, description: "K6: opaque id another request can pass to `/sftp/cancel`" }
+        transfer_id: { type: string, nullable: true, description: "K6: opaque id that registers a cancel flag inside the process running the transfer. As with uploads, only the desktop app's `sftp_cancel` IPC in that same process can flip it; there is no HTTP cancel route, so passing an id here does not make the download cancellable." }
         max_mb:      { type: integer, nullable: true, description: "G8: hard cap on the remote file size in MiB (100 when absent); larger files are refused with advice to use scp/rsync" }
 
     SftpResult:

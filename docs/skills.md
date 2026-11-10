@@ -45,11 +45,11 @@ the `mcp_tools_match_skills_md_documentation` integration test.
 | 22 | `ssh_session_write` | Send input to an open PTY session (e.g. a command followed by `\n`). |
 | 23 | `ssh_session_read` | Read buffered output from a PTY session. Returns whatever arrived since the last read. |
 | 24 | `ssh_session_close` | Close and terminate a PTY session. |
-| 25 | `ssh_session_list` | List open PTY sessions. Defaults to the local daemon registry and includes MCP process-local fallback sessions when present. |
+| 25 | `ssh_session_list` | List open PTY sessions, merging the local daemon registry with MCP process-local fallback sessions. Every row carries `backend`: `daemon` for a session the daemon owns (it outlives this MCP process), `process` for one living in this process and dying with it — the same distinction `durable` draws for forwards, and the only signal that tells the two kinds apart. |
 | 26 | `ssh_forward_add` | Start an SSH port forward tunnel (`-L` local or `-R` remote). Returns a `forward_id`. |
 | 27 | `ssh_forward_list` | List active SSH port forward tunnels. Each entry carries `durable`: `true` when the daemon owns it (it outlives this client), `false` when it lives in the MCP server's own process and ends with it. |
 | 28 | `ssh_forward_remove` | Stop and remove an SSH port forward by ID. |
-| 29 | `ssh_risk_check` | Check the risk level of a command using built-in rules and user-defined `risk_rules.toml`. |
+| 29 | `ssh_risk_check` | Check the risk level of a command using built-in rules plus user rules. Those user rules come from `policy.toml` (or `policy.json`) when either exists, and only otherwise from the legacy `risk_rules.toml`: a policy file present at all means `risk_rules.toml` is never read, so that is the file to edit when you have one. |
 | 30 | `ssh_gate_status` | Read the local daemon execution gate status. When paused, non-desktop daemon execution is rejected until resumed from CLI or desktop. |
 | 31 | `ssh_approval_list` | List all pending and recent approval requests (for high-risk command authorization). |
 | 32 | `ssh_approval_respond` | Approve or reject a pending approval request by ID. |
@@ -98,7 +98,7 @@ the `mcp_tools_match_skills_md_documentation` integration test.
 | 75 | `resident_session_close` | Close a resident session and kill its shell. Authorized as `resident-session close` against the session's own host through scope, execution gate, limits, risk and approval. Closing an already-dead session still reclaims it. To read a session's buffered output without running a command, use `GET /resident-sessions/{id}` on the daemon, authorized as `resident-session read`. |
 | 76 | `containers_start_service` | Start the local container runtime's background service — the step a stopped runtime needs before discovery or exec can work. Apple container is the runtime with one; Docker and wslc have none and are refused rather than silently accepted. Reports `started`: `false` means the service was already up, so nothing was spawned. Local to the caller, like the CLI command: the service it starts is on this machine, so it does not need a daemon. |
 
-The local-execution tools above wait for the daemon's execution, shell-warmup and approval deadlines, rather than imposing a separate 30-second HTTP timeout. Connecting to the daemon is limited to 10 seconds; command `timeout_secs` still applies.
+The local-execution tools above wait for the daemon's execution, shell-warmup and approval deadlines, rather than imposing a separate 30-second HTTP timeout. Connecting to the daemon is limited to 10 seconds in every case; command `timeout_secs` still applies. The session, forward and gate tools (`ssh_session_*`, `ssh_forward_*`, `ssh_gate_status`) use a second client that also caps the whole request at 30 seconds, so a daemon which accepts the connection and then stalls fails them at that cap rather than at any command deadline.
 
 ## Risk Levels
 

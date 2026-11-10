@@ -53,6 +53,8 @@ allowed hosts/tags 过滤。修改 gate、主机、策略、脱敏/高亮、算�
 团队配置、健康快照或 SSH 配置导出等全局控制面能力，以及读取审计导出、趋势、
 事件流、待处理 OTP prompt、SSH sync diff 时，必须使用 unrestricted admin token。
 
+`daemon_tokens.toml` 存在但解析失败时，`auth_middleware` 对**任何非 admin token** 一律返回 500，一次 handler 都不进——`/approvals/{id}/approve` 的 500 描述把这件事写全了。admin token 在加载 scoped token 之前就已放行，所以它照旧可用；排障时先看 500 的 body 里有没有 `failed to load scoped daemon tokens`，再看是不是 `daemon_tokens.toml` 的语法问题。
+
 ---
 
 ## 端点总览
@@ -323,7 +325,7 @@ curl -X POST -H "$AUTH" \
 
 ### 高风险命令（审批模式）
 
-不携带 `force: true` 时，Daemon 会创建审批请求并阻塞等待（默认超时 300 秒）：
+**高风险**命令不携带 `force: true` 时，Daemon 会创建审批请求并阻塞等待（等待上限由 `policy.toml` 的 `ttl_secs` 决定，默认 300 秒）；低风险与中风险命令不携带 `force` 也直接执行，不会产生审批请求：
 
 ```bash
 # 此请求会阻塞，等待审批
