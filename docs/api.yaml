@@ -27,14 +27,16 @@ info:
     body that is not JSON at all as 400, all before the handler runs.
     `axum::body::Bytes` hands the raw bytes to the handler, which parses them
     itself: `/approvals/{id}/approve` is the only one, and a malformed body there
-    is its own 400 rather than 415 or 422. `Option<Json<T>>` is neither. axum's
+    is its own 400 rather than 415 or 422. `Option<Json<T>>` is neither, and
+    `/containers/start-service` is its only user: it takes the body that way so a
+    call can omit it and name no runtime. axum's
     rejection for the `Option` wrapper is `Infallible`, so the `.ok()` the
     handlers use turns *every* extraction error into "no body was sent" — a
     wrong content type, invalid JSON, or a field of the wrong type all read as an
-    absent body. Three operations read their body that way — `/shutdown`,
-    `/playbooks/{name}/dry-run` and `/health-snapshot` — so for those three a
-    malformed body is ignored instead of refused, and the operation's own 400
-    does not cover it.
+    absent body. Four operations read their body that way — `/shutdown`,
+    `/playbooks/{name}/dry-run`, `/health-snapshot` and
+    `/containers/start-service` — so for those four a malformed body is
+    ignored instead of refused, and the operation's own 400 does not cover it.
 
     Two consequences for a client. First, the extractor's own answers are
     `text/plain` carrying axum's message, not the `Error` object: 415 and 422 are
@@ -1643,7 +1645,14 @@ paths:
               properties:
                 runtime:
                   type: string
-                  description: "apple, docker or wslc. Omitted: the first installed runtime that has a service."
+                  description: |
+                    `apple`, `docker` or `wslc`. Omitted: the first installed runtime
+                    that has a service. Because the body is read as
+                    `Option<Json<T>>`, a body that is invalid JSON, has the wrong
+                    content type, or carries `runtime` as a non-string is treated as
+                    *no body at all* — the runtime is then chosen by detection
+                    rather than rejected, so `{"runtime": 7}` starts whichever
+                    runtime detection picks instead of answering 400.
       responses:
         "200":
           content:
@@ -4333,7 +4342,9 @@ paths:
                         blocked:      { type: boolean, description: "True when the effective risk is `blocked`: the command cannot be executed at all" }
                         jump_host:    { type: string, nullable: true }
                         timeout_secs: { type: integer }
-                  overall_risk:      { $ref: "#/components/schemas/RiskLevel" }
+                  overall_risk:
+                    allOf: [{ $ref: "#/components/schemas/RiskLevel" }]
+                    description: "The highest severity across the per-target `risk_level` values, with `blocked` ranking above `high` (`core.rs: max_severity`). `requires_approval` below is derived from this field, not from the individual targets, so a selection that mixes `blocked` and `high` reports `overall_risk: blocked` and `requires_approval: false` together — `blocked` is refused outright, so no approval is offered for it. Treat a `blocked` in any target as the operative answer."
                   requires_approval: { type: boolean, description: "True only when the overall risk is `high` — this preview reports the force/approval rule and does not consult `approval_policies`, so a medium-risk command that a policy gates still answers false here while `/exec` creates an approval. Use `/approval/check` for the policy answer and this field for the risk answer." }
                   warnings:
                     type: array
@@ -4384,7 +4395,7 @@ paths:
               schema:
                 type: object
                 properties:
-                  requires_approval: { type: boolean, description: "True when a policy in `approval_policies` matches this host/command/risk. False means no policy asks for an approval — it does **not** mean `/exec` will run unapproved: this check takes no `force` input, and `/exec` demands an approval or `force: true` for a high-risk command regardless of policies. Read it together with `risk_level`." }
+                  requires_approval: { type: boolean, description: "True when a policy in `approval_policies` matches this host/command/risk. False means no policy asks for an approval — it does **not** mean `/exec` will run unapproved: this check takes no `force` input, and `/exec` demands an approval or `force: true` for a high-risk command regardless of policies. Read it together with `risk_level`. Because `check_approval_required` stops at the first matching policy, a `false` can also come from an earlier policy matching with `requires_approval: false`: that entry does not merely abstain, it shields every policy declared after it." }
                   matched_policy:    { type: string, nullable: true }
                   risk_level:        { $ref: "#/components/schemas/RiskLevel" }
                   ttl_secs:          { type: integer, nullable: true }
