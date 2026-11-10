@@ -261,7 +261,7 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
   - D4 `channel.rs:700-720` 测试注释易把「2s 上界」读成「2s 等待」
   - D5 `LocalKeySigner` 两条错误臂零测试（`russh_impl/mod.rs:104-116`）
   - 范围外 2 条：`Settings::run` 的 disconnect abort 语义；`core.rs` 上传/下载无 session 超时（与 C5 同根因）
-- 6 轮进度：2 / 6（第 1 轮见下方 `consume 1 / 6`，第 2 轮见 `consume 2 / 6`）
+- 6 轮进度：3 / 6（第 1 轮见下方 `consume 1 / 6`，第 2 轮见 `consume 2 / 6`，第 3 轮见 `consume 3 / 6`）
 - 正文已喂给 CodeBuddy：12 条「不成立」原文（preflight 2 + 第 1–6 轮新增 10）+ K2/K7/K9/K12 与 §3 未验证范围空档
 
 ### consume 1 / 6 · 2026-11-10 05:20–05:26 (GMT+8)
@@ -511,3 +511,28 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
 **验证**：`npm run build` 6.44s；`fmt --check` 绿；`--lib` 861/1/1（已知红）；`api_yaml` 1 passed；`yaml.safe_load` 90 path / 47 schema；`HostProfile` 17 字段；端点表 ↔ 路由双向为空。
 
 **自我更正**：`0b2bb5c` 第一次写成「51 schemas」，实际 47（4 个是本轮新增）。未推送前 `--amend` 修正。教训：`Verified:` 行里的每个数字都要现算，不能从「加了几个」的心算推总数。
+
+#### consume 3 / 6（基线 `b756fb5`，回帖 `2119998853859422208`）
+
+9 条指摘（B1–B9）→ **成立 9 / 不成立 0**。落地一笔 `684d471`（`docs/api.yaml` + 两份 guide，无 `src-tauri/src/**` 改动）。
+
+| 项 | 判定 | 关键证据 | 落地 |
+|---|---|---|---|
+| B1 | 成立 | `daemon_control.rs:1018` 等 `GRACEFUL_STOP_WAIT`（`:621` = 8 s）→ `:1021` 记 warn → `:1027` `signal_daemon(..., true)` 强杀 → 再等 2 s，`StillRunning` 即 `Err`；`health_identity()` 不符时 `:982-987` 直接 `UnverifiedIdentity`，不进入等待 | `684d471` 重写 `/shutdown` 描述（8 s + 2 s + 身份不符即终止，「may terminate」删掉） |
+| B2 | 成立（三重） | `notify.rs:204-221` 拼 `{url}/approve`；路由只有 `POST /approvals/:id/approve`（`daemon.rs:5881-5882`）；`is_public_path`（`auth.rs:99-101`）只放行 `/`、`/console`、`/health`、`/metrics`；且 `127.0.0.1` 在收件人机器上指别人 | 文档改成「这两个按钮点不动」；按钮行为不改 → **L2-44** |
+| B3 | 成立 | `daemon.rs:1324`/`:1339` 都过 `HostProfile::redacted_for_transport`（`types.rs:105-109`）→ 读出恒 null | `writeOnly: true` + 描述；`TeamConfigExport` 与 `/config/export` 的「剥两个」→ 三个（补 `passphrase`） |
+| B4 | 成立 | `approval.rs:930-951` 七字段 vs 两处 `items: { type: object }` | 抽 `ApprovalPolicy` 组件 + 两处 `$ref` |
+| B5 | 成立 | 端点表路径列把 `?confirm=delete` 写进去了，而 `api.yaml` 里 `confirm` 是 `in: query` | 路径列改 `/recordings/:id`，条件移到说明列；重跑双向差集 **105 = 105** |
+| B6 | 成立 | `types.rs:395-399`、`:511-514`、`:597-600`、`:604-637` | 补 `ExecRequest.side_effect`；`ExecResult.side_effect`/`risk_unclassified`；`AuditEntry.side_effect`/`action`/`outcome`/`risk_unclassified` |
+| B7 | 成立 | `types.rs:503-510` 截断保留头尾、丢中间 | 补 `ExecResult.dropped_bytes`，写明丢的是 middle |
+| B8 | 成立（CodeBuddy 自改判） | `remote.rs:427-456`、`:946-951`；`/prompts/respond` 实测只返 `status` + `nonce`（`daemon.rs:4190-4194`） | 两处换 `$ref`（5 个新组件），`/prompts/respond` 就地补形状而不硬编 |
+| B9 | 成立 | `approval.rs:108-117` 五变体、`:761` 写 `Revoked`、`:1931` 有断言；`grep -c revoked docs/api.yaml` 改前 = 0 | 补枚举 + 写「今天只有进程内调用者」；要不要路由 → **L2-43** |
+
+**动作**：`684d471` —— `api.yaml` 108 行：2 个 `writeOnly`、6 个补字段、`status` 补 `revoked`、6 个新组件（47 → 53 schema）、4 处 `type: object` 换实体、`/shutdown` 重写；`daemon-api-quickstart.md` 改路径列；`configuration-guide.md` 改 Slack 按钮那句。
+
+**验证**：`npm run build` 6.54s；`cargo fmt --check` 绿；`--no-default-features --lib` = 861 passed / 1 failed / 1 ignored（已知红测）；`api_yaml` 1 passed；`yaml.safe_load` 90 path / 53 schema；端点表 ↔ 路由 **105 = 105**，双向为空。
+
+**自我更正 ×2**：
+
+1. **`?confirm=delete` 从「假阳性」改判为「写法错」**：第 2 轮我把它当成本轮唯一的假阳性写进本 ledger，CodeBuddy 指出那一格把查询串写进了路径列，`(method, path)` 守卫会永远红一条；判据是 `api.yaml` 里 `confirm` 是 `in: query`。已修，回帖里明说接受这次反纠正。教训：**「守卫和人对不上」不等于「守卫错」**，先看是哪一列放错了（这条推翻了上面 G9 那句「假阳性」的定性，G9 的 36 仍是「35 真缺 + 1 写法错」）。
+2. **`daemon_control.rs:1027` 改后按门禁撤销**：B1 沿调用链牵出那句 `"…leaving it running"`（记完 warn 就强杀），我改了一版才想起 `git grep "leaving it running"` 命中 `OPT-LOOP-L2-PENDING.md:14` 与 `LEDGER.md:52`——**L2-1 早已登记同一处**，且属 `src-tauri/src/**`。已 `git checkout --` 撤回，并在 L2 清单与回帖里写明「改过一版、按门禁撤回」，避免下一轮把 `api.yaml` 的描述改动误读成代码侧也修了。
