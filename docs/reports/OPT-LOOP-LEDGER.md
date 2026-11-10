@@ -1470,3 +1470,20 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 **L1 落地（本机接管）**：`docs/api.yaml` 的三分表补第四类 `429`（写明「按分钟、默认 30/20、可在 `execution_limits.toml` 关掉或改宽」）；`OPT-LOOP-L2-PENDING.md` 追加第 5 轮小节（429 类的复算、行号扫描清单、以及「`GET /health` 公开路径不过 middleware，所以 pre-flight 看不到限流，只有 `POST /shutdown` 与 `/activity` 快照会撞」这一点）。
 
 **下一轮首项（第 6 轮＝末轮）**：按协议写批次汇总并关 issue。若还有一轮复核，优先让它验「`429` 是否该从限流里豁免 `/shutdown`」——那是行为改动，需要拍板，不是文案。
+
+---
+
+## 手工/单发消费 · 2026-11-10 · daemon 停止协议与审批留痕
+
+模式 B（无 `[opt-round]` 容器：#13 于 22:11 以 6/6 轮关闭，现存 open 只剩 #2、#6）。只跑一轮，标题为 `## 本轮收尾`，不占 A 模式的轮次计数。
+
+- **选靶理由**：#2 的最新评论 `2119861268247908352`（2026-11-10 02:34）是对方对上一轮收尾的复核，之后无人回应、未被消费——「有新输入、尚未消化」。#6 仍判 P2（正文写明只讨论、不授权实现 K8），同级 P1 优先于 P2，且 #2 编号更小。
+- **判定：11 条 → 成立 3 / 部分成立 5 / 不成立 3。**
+  - 成立：指南把停止失败写成两种成因（实为三种，第三种可在进入宽限分支前返回）、`rejected` 只在 `approval_respond` 成功时出现、`/shutdown` 缺审批留痕。
+  - 部分成立：2 秒只是五段预算之一（它那张表把 `/health` 说成「两个 socket 各 500 ms」、把进程快照说成「无超时」，两格不实）、`daemon.log` 那条无断言（文件是 `app.log`）、N1（DNS 解析无预算成立，「服务端不读 body」错——axum 先抽 `Option<Json<..>>`，body 19 字节）、N2（命名与语义不符成立，「拒绝与超时不计入」错——`fetch_add` 在等待开始时）、N3（主路径不复用 `daemon_pid_state` 成立，「完全不调」错：`None` 分支就调）。
+  - 不成立：只有 `request_and_wait_for_approval` 的审批才有留痕（唯一生产调用点就是它，前提空转；被强杀那半成立且已写进注释）、`append_diagnostic_log` 在审计之前（源码顺序相反）、`api.yaml` 仍写 `may terminate it`（#13 批次已整段重写）。
+- **本轮自取发现（它没提）**：指南那句「`daemon.log` 能区分这两种」指错文件——区分用的 warn 由 `append_diagnostic_log` 写进 `app.log`（`diagnostics.rs:127`），`daemon.log` 只有 daemon 的 stdout/stderr 重定向。
+- **L1 落地**：`76ac504`（`daemon_activity.rs` 模块注释收窄 + `daemon_control.rs` 第二个身份入口 landmark + `daemon_stop_e2e.rs` 新增 `app.log` 断言）、`d543dab`（`configuration-guide.md` 停止段落重写、`api.yaml` 的 `approvals_total` 描述与 `/shutdown` 留痕、L2-92/93/94）。推 `cnb main`（`e0e7a90..d543dab`），未推 github。
+- **验证**：`npm run build` 6.60s；`cargo fmt --check` 绿；`--no-default-features --lib` **861 / 1 failed / 1 ignored**（基线红测 `an_ipv6_literal_at_port_22_is_removed`）；`--features daemon --test daemon_stop_e2e shutdown_cancels_a_request_waiting_for_approval` **1 passed**；`--features daemon --test daemon_integration api_yaml` **6 passed**。
+- **回帖**：`2120172790916468736`。含 44 条编号不成立索引 + 14 条行内索引。
+- **issue 状态：保持 open**。阻塞点是 L2-92/93/94（各含两条互斥方案）与 K14 的四项设计决策，都需要维护者拍板；本轮不关闭。
