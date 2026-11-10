@@ -1046,11 +1046,16 @@ paths:
         only once a daemon has accepted it and is still running when the wait ends —
         a force-terminate. A request that never gets an accepted answer ends the
         attempt instead: the caller reports why and sends no signal, so a refused
-        connection, and every 4xx this operation can answer, leave the process
-        alone. The 409 is one such answer; on a stop, so are the refusals the
-        caller makes before connecting — no `/health` answer, another PID, another
-        config directory, or no admin token file — which never reach this route, so
-        a reader should not go looking for a 401 on a request that was never sent.
+        connection and every 4xx this operation can answer leave the process
+        alone. Who answered what is worth separating. A `409` means another daemon
+        holds the listener: the PID in `expect_pid` is not the one that replied.
+        A `401` — or the `403` of the admin gate, which the caller treats the same
+        way — means this route did reply: the token in this config's `daemon.token`
+        is not the one the running daemon accepts as admin, which is what a file
+        replaced under it looks like. And the stop path's own
+        pre-flight refusals — no `/health` answer, another PID, another config
+        directory, no token file at all — never connect, so no status code
+        describes them.
         The caller waits
         `GRACEFUL_STOP_WAIT` (8 s) for the process to exit; on `Running` it records
         a warning, signals the process by force, then waits 2 more seconds, and a
