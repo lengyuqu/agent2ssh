@@ -261,7 +261,7 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
   - D4 `channel.rs:700-720` 测试注释易把「2s 上界」读成「2s 等待」
   - D5 `LocalKeySigner` 两条错误臂零测试（`russh_impl/mod.rs:104-116`）
   - 范围外 2 条：`Settings::run` 的 disconnect abort 语义；`core.rs` 上传/下载无 session 超时（与 C5 同根因）
-- 6 轮进度：4 / 6（第 1 轮见下方 `consume 1 / 6`，第 2 轮 `consume 2 / 6`，第 3 轮 `consume 3 / 6`，第 4 轮 `consume 4 / 6`）
+- 6 轮进度：5 / 6（第 1 轮见下方 `consume 1 / 6`，第 2 轮 `consume 2 / 6`，第 3 轮 `consume 3 / 6`，第 4 轮 `consume 4 / 6`，第 5 轮 `consume 5 / 6`）
 - 正文已喂给 CodeBuddy：12 条「不成立」原文（preflight 2 + 第 1–6 轮新增 10）+ K2/K7/K9/K12 与 §3 未验证范围空档
 
 ### consume 1 / 6 · 2026-11-10 05:20–05:26 (GMT+8)
@@ -418,6 +418,10 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
 28. **「N7：`*Command:*\n\`\`\`<cmd>\`\`\`` 在 Slack 里是一行内联代码而不是代码块，所以 `|`、`>`、`_`、反引号会原样进入审批卡」— 机制与推论都不成立。**
     ①这是对 Slack 解析器的断言，本仓无法验证，也不该由本仓的测试来钉；②即便按它的读法成立，推论也是反的——Slack 的内联 code span 与 fenced code block **同样**抑制 `|`、`>`、`_` 这些 mrkdwn 标记，所以「漏进审批卡」在两种解析下都不会发生；③它给的证伪断言自相矛盾（要求 `field.split('\n')[1]` 不以 ``` 开头又「以它结尾」，而该行两者都成立）。**成立的是另一件它没提的事**：`format!("*Command:*\n```{}```", command)` 对命令内容**不做转义**，命令自身含有三个连续反引号时会提前闭合围栏——这类命令极罕见，属文案硬化，不立 L2。
 
+29. **「C1 前半：`hosts_updated` 恒为 0」— 不成立。** `core.rs:4494` 的断言就是 `assert_eq!(result.hosts_updated, 1)`，递增点在 `team_config.rs:100` 的 `else { … updated += 1; }`。这条判据在它自己的正文里被否掉了（原文写着「不是恒 0」），标题却留在那儿。
+30. **「C1 后半：`hosts_updated` 没有任何测试钉住它」— 不成立。** 同一条测试（`core.rs:4490-4496`）钉的是一组三件：`hosts_added == 0`、`hosts_updated == 1`、`hosts_skipped == 0`，构造的正是「同名 + port 不同」。缺的不是测试，是**字段集合**的覆盖——把 `team_host_same` 的 11 个字段各漏一个，没有测试会红，但那属于判据强度不足，不是「没有测试」。
+31. **「C8 后半：`RecordingInfo` 用 snake_case，与 `RecordingContent` 的 camelCase 混在同一个响应里」— 不成立。** `recording.rs:30-32` 两个结构都带 `#[serde(rename_all = "camelCase")]`，所以线上两层**都是** camelCase（`createdAt` / `durationSeconds` / `sizeBytes`），一处混搭都没有。成立的是另一半：`api.yaml` 的四个 recording 200（`:1430`、`:1444`、`:1452` 与 `/recordings/config` 的 PUT）只有 description、没有 schema。
+
 ### 复核 · 末轮之后（基线 `2476ec3`）
 
 - **对象**：本批第 6 轮我自己落的 `a04e99d` / `2476ec3`，以及第 6 轮对 N6 / N7 的两条「不成立」。
@@ -559,3 +563,30 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
 **顺手修的排版错**：`OPT-LOOP-L2-PENDING.md` 里 L2-38 那行被第 1 轮插到了文件末尾（「关于 B1」段之后），离开了第 1 轮的表格；已挪回 L2-37 下面。表格断行会让拍板的人以为 L2-38 不存在。
 
 **流程观察（下次运行该改）**：第 2、3 轮的指摘都是 CodeBuddy 复核，所以每轮只修「它点到的那几处」。这一轮自扫才发现同类缺陷还剩 18 个——**复核的覆盖度取决于复核者挑了几条，不取决于缺陷有多少**。以后每轮收尾前应先跑一遍全量扫描（空 schema、`$ref` 悬空、端点表 ↔ 路由、403 ↔ `require_admin`），把扫描结果而不是回帖里的条目当下一轮的输入。
+
+#### consume 5 / 6（基线 `c3af875`，回帖 `2120003384483667968`）
+
+指摘回到 CodeBuddy 侧：它对第 4 轮回帖给了 9 条（C1–C9），11:53:28 到达。判定 **成立 7 / 部分成立 2（C1、C8）/ 不成立 0**，但两条部分成立里有三处判据被推翻。落地两笔：`95461ff`（只改文档注释）、`6b6cf1d`（`api.yaml` + 端点表 + 本目录 L2）。
+
+| 项 | 判定 | 关键证据 | 落地 |
+|---|---|---|---|
+| C1 | **部分成立** | 「恒为 0」不成立：`core.rs:4494` `assert_eq!(result.hosts_updated, 1)`，递增点 `team_config.rs:100`。「没有测试钉住」不成立：同一条测试钉的是 updated=1 / skipped=0。成立的是注释：`ConfigDiffPreview.hosts_to_update` 写「host/port/user differs」，`team_host_same`（`:226-238`）比 11 字段，preview（`:176-184`）同谓词 | `95461ff` 注释列全 11 字段；`6b6cf1d` 给 `api.yaml` 的 `hosts_updated` 补语义 |
+| C2 | **成立，真因更深** | 空 body 分支在 `daemon.rs:3346`，无真 handler 覆盖。根因是 `tests/daemon_integration.rs:175` 的**副本** `approval_approve` 只有 3 个参数（无 `body`），`:410` 的 `build_test_router` 挂副本；`:854` 那条虽发 `Body::empty()`，打的是副本 | **L2-53**（结构性） |
+| C3 | **成立**，多两处 | `:5537-5543` 失败回 200 `{error, hint}` 与 `required: [hosts, collected_at]` 冲突；**且** `get_health_snapshot`（`:5531`）签名无 `Query`，契约声明的 `hosts`/`timeout_secs` 从未被读；且顶层描述「Collects…」与同一 operation 的 200 描述「never collects」自相矛盾 | `6b6cf1d` 三处同改 |
+| C4 | **成立（口径要准）** | `daemons_view`（`:4012`）`Extension(_auth)` 从不读 auth；计数在 `remote.rs:534-541`，用 daemon 自己的 token 取远端 `/hosts`。所以不是「读到过滤前的本地配置」，而是「调用方 scope 全程没参与」 | **L2-49** |
+| C5 | **成立** | `remote.rs:943`（非 `:394`）`PROTOCOL_VERSION = env!("CARGO_PKG_VERSION")` | **L2-50** |
+| C6 | **成立** | `/audit` `host_scope: audit_host_scope(&auth)` vs `/audit/export` `host_scope: None` | **L2-51** |
+| C7 | **成立** | `forward_remove` 命中走 gate/rate/scope/risk + 审计（`:3079-3087`），未命中直回 400 且无审计（`:3090-3093`） | **L2-52** |
+| C8 | **部分成立** | 「四个 200 无 schema」成立（`api.yaml:1430/1444/1452`）；「camelCase 与 snake_case 混在一个响应里」**不成立**——`RecordingInfo`（`recording.rs:30-32`）自己也带 `rename_all = "camelCase"`，两层都是 camelCase；行号偏 130/134 行 | `6b6cf1d` 加三组件 + 四处接线 |
+| C9 | **成立** | `GET /` 是内联闭包（`daemon.rs:5791-5793`），`get(命名 handler)` 的扫描器数出 106；真值 107 路由 / 105 API operation | `6b6cf1d` 写进表头与 L2-42 |
+
+**验证**：`npm run build` 6.43s（注释那次 6.39s）；`cargo fmt --check` 绿；`--no-default-features --lib` = 861 passed / 1 failed / 1 ignored（已知红测）；`api_yaml` 1 passed；`yaml.safe_load` 90 path / **67** schema / `$ref` 悬空 0；`GET /health-snapshot` 的 `parameters` 键已消失。
+
+**L2 新增 5 条**：L2-49（`/daemons/view` 不看调用方 scope）、L2-50（`PROTOCOL_VERSION` 其实是包版本）、L2-51（`/audit` 与 `/audit/export` 权限模型不同）、L2-52（`DELETE /forwards/{id}` 未命中不写审计）、**L2-53（`daemon_integration` 有 20 个 handler 副本，且副本已与真身分叉）**。
+
+**自我更正 ×2**：
+
+1. **我把两个已存在的翻译当成缺失**：扫 `src/i18n.tsx` 时正则要求键带引号，于是 `Decision: "裁决"` 与 `From: "来自"`（**未加引号**）被判为缺中文。我加了两行，`npm run build` 立刻 `TS1117: An object literal cannot have multiple properties with the same name`，已 `git checkout` 还原。教训与 C9 同源：**扫描器认不出的形态不等于缺陷**；下次扫对象字面量要同时接受 `"k":` 与 `k:`。
+2. **路由数我数成 106**：脚本只认 `get(标识符)`，漏掉 `GET /` 的闭包形式。C9 说的 107 是对的，我此前在回帖里写的「105 operation」也一直没错——错的是我把「route 数」当成 106。两个数现在都带单位写进文档。
+
+**流程观察（补充上一轮那条）**：上一轮说「先扫描再回帖」，这一轮补一条：**扫描器本身要先用反例自检**。两次假阳性（i18n 键、路由数）都是脚本的正则比代码的真实形态更窄，而两者都被我当成结论写进了草稿。
