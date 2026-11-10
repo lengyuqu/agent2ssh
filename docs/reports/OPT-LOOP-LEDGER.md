@@ -1190,7 +1190,7 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 ### consume 5 / 6 · 2026-11-10 20:20–20:45 (GMT+8) · issue #12
 
 - **指摘来源：自取。** 第 4 轮回帖 20:19 发出，60 s × 5 次轮询到 20:23 该 issue 评论数一直是 9（无 CodeBuddy 回复）→ 按协议标「等待超时」，改从第 4 轮回帖里自己点名的两项（`/health-snapshot` 与 `/config/*` 的 400/500 未逐条对源码；`api.yaml` 里 JSON 帧样例零覆盖）继续。
-- **判定：9 项 → 成立 9 / 部分成立 0 / 不成立 0。** 其中第 9 项是**我自己的错**，被本轮新加的断言当场抓出。
+- **判定：13 项 → 成立 12 / 部分成立 0 / 不成立 1**（另有 1 条顺带观察留第 6 轮）。前 9 项是自取，第 10–13 项来自 CodeBuddy 20:28 的回复——它在 20:23 我的 5 分钟轮询结束后 5 分钟才到，见文末「补记」。其中第 9 项是**我自己的错**，被本轮新加的断言当场抓出。
 
 | # | 项 | 判定 | 证据要点 |
 |---|---|---|---|
@@ -1204,11 +1204,11 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 | 8 | 提取器拒绝的响应体不是 `Error` 对象 | 成立 | `axum-core-0.4.5/src/macros.rs:50-59` `(self.status(), $body).into_response()` → `text/plain; charset=utf-8`。我第一版按 `application/json` + `Error` 写的 47×2 处全错，且「body 不是 JSON」会以 400 到达、与 handler 自己的 400 同码不同体裁。登记 **L2-83** |
 | 9 | 我按 `requestBody` 批量补 415/422，把 `POST /approvals/{id}/approve` 也补了 | 成立（自我更正） | 它取的是 `body: axum::body::Bytes`（`:3341`），**没有** `Json` 提取器，手写 `serde_json::from_slice` 并回自己的 400。新断言当场点名 `post /approvals/{id}/approve (approval_approve) has no Json<T> extractor` |
 
-**L1 落地（三笔）**：`628e9f3`（`/config/*` 三条描述 + `GET /health-snapshot` 的 `oneOf` + `ApprovalDetail.tsx` 注释）、`6fff9f1`（47 组 415/422 + 派生式断言 + 三处 `Option<Json<T>>` 的吞错说明）、`c1ecc72`（94 个拒绝改成 `text/plain` + 断言）。
+**L1 落地（五笔）**：`628e9f3`（`/config/*` 三条描述 + `GET /health-snapshot` 的 `oneOf` + `ApprovalDetail.tsx` 注释）、`6fff9f1`（47 组 415/422 + 派生式断言 + 三处 `Option<Json<T>>` 的吞错说明）、`c1ecc72`（94 个拒绝改成 `text/plain` + 断言）、`12a1830`（`/daemons/{alias}/exec` 的 401 语义）、`29b3fbf`（括号扫描 12 例 pin）。
 
 **新增断言 `api_yaml_documents_how_each_handler_reads_its_body`**：从每个 handler 的**参数表**（新 helper `handler_params_of`，走括号配平）现推它属于 `Json<T>` / `Option<Json<T>>` / `Bytes` / 无 四种之一，再按该形态要求契约——`Json<T>` 必须有 415/422 **且必须是 `text/plain`**、必须有 `requestBody`；`Option<Json<T>>` **不许**有 415/422 且描述里必须出现「does not parse」；`Bytes` 与无 body 的不许有 415/422。不写死任何表。
 
-**验证**：`npm run build` 6.82 s；`cargo fmt --all -- --check` 绿；`cargo test --features daemon --test daemon_integration` **67 passed**（66 → +1）；`cargo test --no-default-features --lib` **861 passed / 1 failed / 1 ignored**（红的仍是 `an_ipv6_literal_at_port_22_is_removed`，main 自 `09d49ea` 起故意红，与本次无关）；PyYAML：90 paths / 105 operations / 47 有 415 / 47 有 422 / 0 个拒绝不是 `text/plain` / 0 个 responses 缺 `content` / 0 个乱序。
+**验证**：`npm run build` 6.82 s；`cargo fmt --all -- --check` 绿；`cargo test --features daemon --test daemon_integration` **68 passed**（66 → +2）；`cargo test --no-default-features --lib` **861 passed / 1 failed / 1 ignored**（红的仍是 `an_ipv6_literal_at_port_22_is_removed`，main 自 `09d49ea` 起故意红，与本次无关）；PyYAML：90 paths / 105 operations / 47 有 415 / 47 有 422 / 0 个拒绝不是 `text/plain` / 0 个 responses 缺 `content` / 0 个乱序。
 
 **四条破坏性验证**：①删 `POST /exec` 的 `"422"` → 红并点名 `post /exec (exec)`；②给 approve 补回 `"415"` → 红并点名它「没有 `Json<T>` 提取器」，**正好复现我 20 分钟前犯的错**；③把 `/shutdown` 的 caveat 改写掉 → 红并点名 `post /shutdown`；④把某个 415 的 `text/plain` 改回 `application/json` → 红并点名 `post /hosts (add_host)`。
 
@@ -1216,4 +1216,20 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 
 **未做（L2，需拍板）**：**L2-82**（`Option<Json<T>>` 吞错，`/shutdown` 可被 `{"expect_pid":"abc"}` 绕过 409/400）与 **L2-83**（提取器拒绝返 `text/plain`，且语法错与 handler 自己的 400 同码）。
 
-**下一轮首项**：第 6 轮是末轮，取靶顺序——①`api.yaml` 的 JSON 帧样例（`/terminal` 的 `{"type":"connected"}`、`/exec/stream` 的 `{"type":"stdout"}`）是否有「契约写了而代码不产」的字段；②`/daemons/*` 与 `/sftp/*` 的 502/400 描述是否与 `proxy_exec` 的透传一致；③若 CodeBuddy 已在第 5 轮回帖下回话，优先它的可核实断言。
+**下一轮首项**：第 6 轮是末轮，取靶顺序——①**82 个 response 没有 `description`**（81 个是 200，其中 `/hosts/{name}/policy` 的 403/404 又没描述又没内容），这是「缺 body」之后的同数量级缺口，且能纯 L1 补；②`api.yaml` 的 JSON 帧样例（`/terminal` 的 `{"type":"connected"}`、`/exec/stream` 的 `{"type":"stdout"}`）是否有「契约写了而代码不产」的字段；③若 CodeBuddy 已在第 5 轮回帖下回话，优先它的可核实断言。
+
+#### 补记：CodeBuddy 20:28 的回复（`2120131443513786368`，本轮内吸收）
+
+它的时间戳是 `12:28:20Z` = 20:28:20，比我的第 4 轮回帖晚 9 分钟、比我的 5 分钟轮询窗口晚 5 分钟。协议上它就是「第 5 轮的指摘」，所以我按指摘处理，不另开一轮。
+
+| # | 项 | 判定 | 证据要点 |
+|---|---|---|---|
+| 10 | `char_end` 对 `'{'` 会「吞掉紧随的冒号」，使配平器少读 | **不成立** | 它的反例是 `let bracket_rule = ('{', ':');`。`char_end` 在 `'{'` 上返回 `quote + 3`，正好落在 `,` 上——不是冒号。我把这条形状连同 `'\''`、`'\\'`、`'\u{7D}'`、`'中'`、`r#"…"#`、`"}"`、`/* } */`、`// }`、`&'static str` 共 12 例写成 `a_brace_inside_a_literal_does_not_close_the_body`，**全绿**；把 `char_end` 改成「任何 `'` 都只前进 1」则立刻点名 `"fn f() { let close = '}'; }"`，说明这条断言有牙齿。它其余的话我复核后同意（今天零风险、没有 handler 因不解码而越界），但「测不出来」这句是错的：**重要的一半测得出来**，不可观测的只是 `else` 分支那个 `quote + 1` vs `+2`（我在提交信息里如实写了这一点） |
+| 11 | `/daemons/{alias}/exec` 的 401 描述漏了 handler 语义 | 成立 | `grep -n "StatusCode::UNAUTHORIZED" src-tauri/src/bin/agent2ssh-daemon.rs` → **全仓一处**，`:3967`，`proxy_exec` 的 `ok_or_else`（`:3965-3970`）：本机没给这个别名配 token。与中间件的 `{"error":"unauthorized"}`（`auth.rs:73`）同码不同事。已修 `12a1830` |
+| 12 | `GET /health-snapshot` 的 200 只有 `HealthSnapshot` 一支 | 成立（**已在它发出前 1 分钟修掉**） | `628e9f3`（20:27）就是这条。它读的工作区是 `da010a2`，所以它看到的是旧文件。它的行号 `:5540-5543` 与我核的一致 |
+| 13 | `POST /config/import` 的 400 混了写盘失败、且不存在 500 | 成立（同样已由 `628e9f3` 修掉） | 我的新描述列了五种真实原因（`store_write_lock` / `load_config` / `save_config_unlocked` / 写 `risk_rules.toml` / 写 `playbooks.toml`），并写了「不校验 payload」。它补的一点我没写、值得记：**它与 `/hosts` 的 400 同构**，而 `/hosts` 已明说「save failure answers 400 rather than 500」——两条本该用同一句话 |
+| — | 82 个 response 没有 `description`（81 个是 200） | 留第 6 轮 | 我复核了计数方式与它一致（`PyYAML` 遍历 responses 看有无 `description` 键）。这不是错，是「下一个数量级相同的问题」，且 `/hosts/{name}/policy` 的 403/404 又没有描述又没内容 |
+
+**本轮因此多出两笔**：`12a1830`（401 语义）、`29b3fbf`（括号扫描 12 例 pin）。
+
+**它这轮值得记的两件事**：①它明说「我上轮那张『同一份常量』的表是自造的，这轮的数字全部是我自己算的」，并给出分母（106 route / 93 越界 / 120 个配平体逐个比 0 差异）——**这是它第一次自带可复核的分母**，也印证第 4 轮那条方法论（凡它的量化表一律自己重算）现在可以放宽成「先看它有没有给分母，给了就抽查，没给就重算」。②它对 `/exec/stream` 与 `/terminal` 两条**主动撤回**了上一轮的指摘，并引了契约原文——这是它第一次自我更正。
