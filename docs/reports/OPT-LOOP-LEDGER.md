@@ -887,7 +887,27 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 ### batch 2026-11-10 · docs/ 声称与代码实际行为是否相符
 - issue #11 / 开批时间 2026-11-10 14:14 (GMT+8)
 - CodeBuddy 首条分析：**未到（等待中）**——issue 发出后 60 s × 5 次轮询 + 结束前即时复核均 0 评论。消费者下次运行重新等（沿用 #9/#10 先例：等待超时不空等，按协议记「未到」）。
-- 6 轮进度：0 / 6（待消费任务更新）
+- 6 轮进度：**1 / 6**（consume 1 见下；issue #11 保持 open）
 - 正文喂给 CodeBuddy：**43 条「不成立」原文**（preflight 2 + batch 1 六轮 10 + batch 2 行内 D2/D4 2 条与编号 15–28 共 16 + batch 3 行内 A5/E 2 条与编号 29–31 共 5 + batch 4 第 1/5/6 轮共 10；编号 39 条 + 行内 4 条）+ KNOWN-ISSUES 空档（K2 / K7 / K8 / K9+K12 / K13 / K14 / K15 / §3 全部未验证行）+ 口径提醒（基线红测 861/1/1 与 npm 213/27、「时点快照不是缺陷」、判据按 feature 组合、扫描器反例自检、`.github/**` 禁区、越权推送重申、`[跑]` 标注不可采信）。范围：`README.md` / `overview.md` / `AGENTS.md` / `CLAUDE.md` / `docs/guides/**` / `docs/KNOWN-ISSUES.md` / `docs/` 其余说明文档与 `.txt` / `CHANGELOG.md`（仅当声称当前行为）；`api.yaml` / `docs/skills.md` / SKILL.md / clap help 已在 #9 对齐，除非回归勿重扫。
 - 批次口径说明（消费者必读）：本条是 ledger `###/## batch` 条目口径下的**第 5 批**（#7–#10 为第 1–4 批）。此前顶部状态行把 #9 称「batch 4」、#10 称「batch 5」，是消费者按自己口径的误称；那三条 `BATCH_COMPLETE` 状态行已由本次生产运行按 #10 批次的遗留要求删除（#11 开批后它们会让消费任务误判「只报告不执行」），史实在各「批次汇总」小节与 git 历史。
 - 编号陷阱沿用：ledger 原编号 1–31 跨节连续，29–31 物理落在 batch 2 末节但内容属 batch 3 第 5 轮；batch 4 的三组「新增不成立」在各自小节内重新从 1 编号，喂给 CodeBuddy 时已按来源分组标注，勿按物理位置归批。
+
+#### consume 1 / 6（基线 `1988767`，回帖 `<待填>`）
+
+**判定：9 条 → 成立 6 / 部分成立 2 / 不成立 1。** 三条值得单独记：
+
+| 项 | 判定 | 关键证据 |
+|---|---|---|
+| D1 脱敏规则「只有桌面端能编辑」 | **成立（本批最值钱）** | `configuration-guide.md:1211` 原文「CLI、MCP 与 daemon 目前**不**暴露这些操作」。实测三端都有：`RedactCommands`（`bin/agent2ssh.rs:1195`，5 个子命令）、`ssh_redact_rule_*` 5 个 MCP 工具（`agent2ssh_mcp/tools.rs:876-921`）、`GET|POST /redact/rules` + `{update,delete,reset}`（`agent2ssh-daemon.rs:5809-5814`）。`--force` 门在 `SKILL.md:348-352` 写了、两份指南都没写。危害是「读者按这句不会去找 CLI」 |
+| D4 gate 文件名 `.toml` vs `.json` | **成立** | `gate.rs:42-44` `join("execution_gate.json")`；三处文档写 `.toml`（`configuration-guide.md:26`、`architecture.md:181`、`skills.md:134`）。真正的危害不是名字错，是 `load_execution_gate` 对**不存在的路径**返回 default，于是手建的 `.toml` 不报错、也不生效，`pause` 依然是 active |
+| D6 Slack 两个渲染器 | **部分成立（前提被推翻）** | `web-console-guide.md:305-306` 确实混了两种卡片；但它说「`configuration-guide.md:858-860` 已把两条分支的差别写清」**不成立**——那份也是混的（字段取自通用那条、按钮取自审批那条）。真相是 `bin/agent2ssh-daemon.rs:637-654` 同一个 `tokio::spawn` 里**两条都发**，一次审批 = 两条 Slack 消息 → 新立 **L2-75** |
+
+其余：D2（`AGENTS.md:84` 测试名仍是 `_75_`，实测 `daemon_integration.rs:985` 是 `_76_`；`:66` 同段还写 `71→75`）、D3（`README.md:283` 标题 75 / 正文 76）、D5（`:1269`「自动生成新的 daemon.token」，实测 `load_or_create_daemon_token` 非空即原样返回）、D7（`AGENTS.md:66` 说 6 个测试，`grep -c '#[test]'` = 11）均成立。
+
+**D8 判不成立（前半）**：`cli-quickstart.md:300` 的 `session write` 用法行**本来就没写** `[--json]`，全文也没有「会话子命令都支持 --json」的声称，所以不构成「声称与代码不符」；它的价值是「可以更明确」，本轮按建议补了一句「这条没有 `--json`」，但判定不改。**后半也不成立**：指南里没有把 WebDAV 同步当备份的说法，`SYNCABLE_FILES` 与备份清单是两件事。**顺手发现一个它没提的真缺陷**：标着「仅备份配置文件」的 `tar` 清单漏了 `execution_limits.toml`、`anomaly.toml`、`app_preferences.json`（三个都真实存在），已补。
+
+**D9 成立**：`architecture.md:87` 说事件流覆盖「connection/config changes」，而 `EventType::HostConnected|HostDisconnected|ConfigChanged` 全仓零发布点（排除 `events.rs`），`api.yaml` 自己写着「defined but have no publisher today」。已改成「三个值在枚举里、桌面筛选认识它们，但今天没人发布」，并指向 `api.yaml` 与 daemon-api-quickstart。
+
+**L1**：`578bab6`（8 文件）。`npm run build` 6.96s；`--no-default-features --lib` **861 passed / 1 failed / 1 ignored**（失败项仍是那条故意红的 IPv6 测试）；`cargo fmt --check` 绿。推 `cnb main`，未推 github。
+
+**另一个判断**：`README.md` 的 `## MCP Tools (75)` 没有改成 76，而是**去掉标题里的数字**。理由是 `CHANGELOG.md:221` 记过同一处散文计数漂移（`MCP Tools (54)`，当年改了 14 处），而「标题里的数」没有任何测试能看见——下次加工具还会错。数字留在正文（`:285`），那里紧贴 `docs/skills.md` 的测试。这条取舍如果被认为越权，回退成本是一行。
