@@ -1,0 +1,9 @@
+   Compiling agent2ssh-app v0.4.5 (D:\vibercodeing\agent2ssh\src-tauri)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.45s
+     Running tests\daemon_stop_e2e.rs (src-tauri\target\debug\deps\daemon_stop_e2e-f450dfd9b9924054.exe)
+
+running 1 test
+test shutdown_interrupts_an_active_ssh_request ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 22 filtered out; finished in 2.76s
+

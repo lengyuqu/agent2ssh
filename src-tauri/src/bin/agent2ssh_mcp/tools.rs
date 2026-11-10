@@ -764,7 +764,7 @@ fn tool_definitions() -> Vec<Value> {
                 },
                 {
                     "name": "ssh_metrics",
-                    "description": "Retrieve basic metrics from the local agent2ssh daemon (requests, execs, blocked commands, durations, approvals). Reads from GET /metrics on 127.0.0.1:7722.",
+                    "description": "Retrieve basic metrics from the local agent2ssh daemon (requests, execs, blocked commands, durations, approvals). Reads from GET /metrics on the local daemon — 127.0.0.1:7722 unless AGENT2SSH_DAEMON_ADDR names another address.",
                     "inputSchema": { "type": "object", "properties": {} }
                 },
                 {

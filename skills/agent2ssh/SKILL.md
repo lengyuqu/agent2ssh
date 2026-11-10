@@ -74,7 +74,7 @@ the client config.
 | Port forward | `agent2ssh forward add/list/rm` / `ssh_forward_*` |
 | View audit log | `agent2ssh audit --json` / `ssh_audit` |
 | Generate a usable key | `agent2ssh keys generate <name>` / `agent2ssh keys algorithm` |
-| Run locally, one shot | `agent2ssh local exec --host local:vs --command "..."` / `local_exec` |
+| Run locally, one shot | `agent2ssh local exec --host local:vs "..."` / `local_exec` |
 | Run locally, shell kept warm | `agent2ssh resident open/exec/close` / `resident_session_*` |
 
 ---
@@ -114,7 +114,7 @@ agent2ssh host rm prod --json
 Key pairs live in `~/.agent2ssh/keys/` and are referenced by `key_path` on a host.
 
 ```bash
-agent2ssh keys algorithm            # ed25519 or rsa — what this build can use
+agent2ssh keys algorithm            # always ed25519; the answer scripts should ask for
 agent2ssh keys algorithm --name     # the same, as a bare word for scripts
 agent2ssh keys algorithm --json     # adds bits + reads_openssh_private_keys
 agent2ssh keys generate id-work     # prints the private key path, nothing else
@@ -124,12 +124,13 @@ agent2ssh host add web1 --host 10.0.0.5 --key "$(agent2ssh keys generate web1)"
 
 Three things matter before generating:
 
-- **Ask, do not assume.** `keys algorithm` is the only correct source for the
-  type, because it depends on what the SSH library can read rather than on the
-  platform. Generating Ed25519 on a build that cannot read the OpenSSH container
-  would produce a key that is stored, listed, and then rejected at
-  authentication time. `keys generate` with no `--type` follows that
-  recommendation on its own, which is what makes the one-liner above safe.
+- **Ask, do not assume.** `keys algorithm` is still the interface a script should
+  read, but the answer is now constant: every build recommends `ed25519`, because
+  the transport (`russh` + `ring`) reads every private-key format this app writes
+  and the OS is not a factor. `keys generate` with no `--type` follows that
+  recommendation on its own, which is what makes the one-liner above safe. The
+  old reason — "this build might not read the OpenSSH container" — has no build
+  left to be true of.
 - **RSA here means traditional PEM.** 3072-bit, `-----BEGIN RSA PRIVATE KEY-----`
   (the shape `rsa` itself emits, which `russh` reads like any other format). The
   public half is still the standard single-line `ssh-rsa …` that

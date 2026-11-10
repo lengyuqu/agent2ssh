@@ -1,0 +1,71 @@
+   Compiling agent2ssh-app v0.4.5 (D:\vibercodeing\agent2ssh\src-tauri)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.35s
+     Running tests\daemon_integration.rs (src-tauri\target\debug\deps\daemon_integration-73780777aba183db.exe)
+
+running 63 tests
+test exec_multi_body_schema_matches_contract ... ok
+test exec_request_schema_includes_reason_and_change_id ... ok
+test exec_multi_batch_result_schema_matches_contract ... ok
+test audit_export_response_contract ... ok
+test api_yaml_documents_every_daemon_route ... ok
+test http_auth_rejected_without_token ... ok
+test http_connections_requires_auth ... ok
+test http_approval_policies_requires_auth ... ok
+test http_auth_rejected_with_wrong_token ... ok
+test http_approval_policies_get_returns_array ... ok
+test http_approval_invalid_uuid_returns_400 ... ok
+test http_approval_check_requires_auth ... ok
+test http_auth_succeeds_with_correct_token ... ok
+test http_connections_connect_nonexistent_returns_error ... ok
+test http_connections_returns_valid_json_array ... ok
+test http_daemons_requires_auth ... ok
+test http_console_serves_key_workflow_entrypoints ... ok
+test http_exec_preview_missing_host_returns_400 ... ok
+test http_exec_preview_requires_auth ... ok
+test http_health_returns_ok ... ok
+test http_health_snapshot_requires_auth ... ok
+test http_health_snapshot_get_returns_200 ... ok
+test http_exec_preview_unknown_host_returns_400 ... ok
+test daemon_honors_configured_listen_address_end_to_end ... ok
+test http_playbooks_dry_run_missing_playbook_returns_error ... ok
+test http_approval_check_returns_result ... ok
+test http_playbooks_requires_auth ... ok
+test http_hosts_list_returns_valid_json_array ... ok
+test http_playbooks_returns_valid_json_array ... ok
+test http_playbooks_run_missing_playbook_returns_error ... ok
+test http_risk_check_requires_auth ... ok
+test http_webhook_config_get_returns_config_or_default ... ok
+test http_risk_check_blocked_command ... ok
+test http_risk_check_low_command ... ok
+test http_risk_check_high_command ... ok
+test http_risk_check_medium_command ... ok
+test http_webhook_config_requires_auth ... ok
+test http_webhook_config_put_requires_auth ... ok
+test local_exec_route_runs_the_shared_preflight ... ok
+test playbook_run_body_schema_matches_contract ... ok
+test mcp_tool_list_contains_exactly_76_tools ... ok
+test mcp_tools_match_skills_md_documentation ... ok
+test test_audit_filter_serialization ... ok
+test ssh_exec_route_runs_preflight_before_shutdown_aware_execution ... ok
+test risk_tiers_match_mcp_tool_registry ... ok
+test test_host_profile_default_metadata_empty ... ok
+test test_classify_risk_exec_blocking ... ok
+test test_host_profile_tags_serialization ... ok
+test resident_session_routes_run_the_shared_preflight ... ok
+test test_classify_risk_exec_high_requires_force ... ok
+test test_user_risk_rules_classification ... ok
+test resident_session_close_source_guard_detects_compilable_mutations ... ok
+test mcp_call_tool_handler_covers_all_tools ... ok
+test mcp_tool_list_contains_all_expected_names ... ok
+test http_approval_nonexistent_uuid_returns_400 ... ok
+test http_approvals_list_returns_array ... ok
+test http_webhook_config_put_accepts_and_stores_config ... ok
+test test_approval_full_lifecycle ... ok
+test http_approval_approve_flow ... ok
+test test_approval_reject_and_list ... ok
+test http_approval_reject_flow ... ok
+test test_approval_wait_immediate_approve ... ok
+test http_daemons_returns_valid_json_array ... ok
+
+test result: ok. 63 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.02s
+

@@ -916,17 +916,19 @@ async fn b41_containers_runtime_binary_is_a_single_plain_line() {
 
 // ── Key generation surface ─────────────────────────────────────────────────
 
-/// The key algorithms libssh2 accepts depend on the crypto backend the SSH
-/// library was built against, so "generate a key" is not portable: a build whose
-/// libssh2 uses WinCNG cannot read the OpenSSH private-key container that
-/// `ssh-keygen` writes, and Ed25519 is impossible there in any form. `keys
-/// algorithm` exists so a script can ask instead of guess, and `keys generate`
-/// so it can act on the answer.
+/// `keys algorithm` exists so a script can ask which type to generate instead of
+/// guessing, and `keys generate` so it can act on the answer. The answer used to
+/// be a property of the linked libssh2's crypto backend — a WinCNG build could not
+/// read the OpenSSH private-key container `ssh-keygen` writes, so it recommended
+/// RSA in traditional PEM — and it is constant `ed25519` now that one transport
+/// reads every format this build writes. Both the command and the
+/// `reads_openssh_private_keys` field are kept: the field can no longer be
+/// `false`, but dropping a JSON key is a contract break, not a cleanup.
 ///
-/// Pinned here: the recommendation never contradicts the readability probe
-/// reported beside it, `generate` with no `--type` produces a key matching the
-/// recommendation, and it prints the private key path on stdout as its only
-/// output — which is what makes `--key "$(agent2ssh keys generate …)"` work.
+/// Pinned here: the recommendation agrees with that field, `generate` with no
+/// `--type` produces a key matching the recommendation, and it prints the private
+/// key path on stdout as its only output — which is what makes
+/// `--key "$(agent2ssh keys generate …)"` work.
 #[tokio::test]
 async fn keys_help_algorithm_and_generate_contract() {
     let (stdout, _stderr, code) = run_cli(&["keys", "--help"]).await;
@@ -948,12 +950,17 @@ async fn keys_help_algorithm_and_generate_contract() {
         matches!(algorithm.as_str(), "ed25519" | "rsa"),
         "unexpected algorithm: {algorithm}"
     );
+    // Both halves of this comparison are constants now, so it can no longer fail
+    // on the line it was written to guard: `default_for_build()` answers Ed25519
+    // and the field is hard-coded `true`. It stays because the two have to keep
+    // moving together — a build that re-introduced a capability probe would have
+    // to change both, and this is where the mismatch would surface.
     assert_eq!(
         algorithm == "ed25519",
         reported["reads_openssh_private_keys"]
             .as_bool()
             .expect("reads_openssh_private_keys field"),
-        "the recommendation contradicts the probe it is derived from: {reported}"
+        "the recommendation and the field must move together: {reported}"
     );
 
     // `--name` is the form a script reads; it must not drift from `--json`.
@@ -972,14 +979,18 @@ async fn keys_help_algorithm_and_generate_contract() {
     assert!(public_path.is_file(), "the public key must be written too");
 
     // The pair on disk has to match the recommendation, or a script that skipped
-    // `keys algorithm` would generate a key this build cannot authenticate with.
+    // `keys algorithm` would produce a key of a different shape than the one the
+    // recommendation names.
     let private_raw = std::fs::read_to_string(&private_path).expect("read private key");
     let public_raw = std::fs::read_to_string(&public_path).expect("read public key");
+    // `"rsa"` is unreachable while `default_for_build()` answers Ed25519. Kept
+    // because `--type rsa` still writes that shape (asserted at the end of this
+    // test), and because a build that recommended RSA again would land here.
     match algorithm.as_str() {
         "rsa" => {
             assert!(
                 private_raw.starts_with("-----BEGIN RSA PRIVATE KEY-----"),
-                "a build that cannot read the OpenSSH container must not write one"
+                "an RSA key must be written as traditional PEM"
             );
             assert!(public_raw.starts_with("ssh-rsa "), "{public_raw}");
         }

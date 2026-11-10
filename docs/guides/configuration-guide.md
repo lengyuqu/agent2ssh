@@ -23,7 +23,7 @@ Agent2SSH 的所有配置和数据文件存储在 `~/.agent2ssh/` 目录下。�
   policy.toml      # 统一策略文件（推荐）
   risk_rules.toml  # 旧版用户自定义风险规则（兼容）
   approval_policies.toml # 旧版审批策略（兼容）
-  execution_gate.toml    # 全局执行急停状态
+  execution_gate.json    # 全局执行急停状态
   execution_limits.toml  # 执行速率和 session 并发限额
   anomaly.toml     # audit 异常检测阈值
   playbooks.toml   # Playbook 命令模板定义
@@ -127,6 +127,9 @@ JSON 格式，包含 `hosts` 数组，也可以包含由桌面端代理管理页
 
 私钥口令由桌面端录入后保存在 `secrets.enc`，`hosts.json` 中仅保留
 `$agent2ssh-secret$` 引用；凭据库未解锁时，程序会拒绝新增明文私钥口令。
+旧版本在主机密码已是凭据引用时，可能将同一主机的新私钥口令写入
+`hosts.json` 明文；如曾遇到该场景，应在本机私下检查配置及其备份，避免
+向日志或他人展示口令。修复不会自动清除已有备份中的明文。
 编辑主机时留空会保留原口令，切换为密码认证会清除已保存的私钥口令。
 也可以在编辑表单中勾选“清除已保存的私钥口令”进行显式删除。主机列表、
 新增/更新响应、CLI JSON、守护进程 HTTP 和 MCP 响应都不会回传密码或私钥口令。
@@ -140,7 +143,7 @@ JSON 格式，包含 `hosts` 数组，也可以包含由桌面端代理管理页
 | `passphrase` | string/null | 否 | 私钥口令引用；由凭据库管理，不应手工写入明文 |
 | `user` | string | 否 | SSH 用户名 |
 | `port` | integer | 否 | SSH 端口，默认 22 |
-| `key_path` | string | 否 | SSH 私钥路径；Windows 上私钥的文件格式有额外限制，见注意事项。私钥旁存在 `<key_path>-cert.pub`（`ssh-keygen -s` 的默认输出）时，自动改用该 OpenSSH 用户证书认证，无需额外字段 |
+| `key_path` | string | 否 | SSH 私钥路径；各平台可读的私钥格式一致，没有 Windows 专属限制（见本节「注意事项」）。私钥旁存在 `<key_path>-cert.pub`（`ssh-keygen -s` 的默认输出）时，自动改用该 OpenSSH 用户证书认证，无需额外字段 |
 | `jump_host` | string | 否 | ProxyJump 跳板机别名 |
 | `proxy_id` | string | 否 | 代理配置 ID，用于通过 HTTP CONNECT 或 SOCKS5 建立 SSH TCP 连接 |
 | `risk_override` | string | 否 | 覆盖该主机非 blocked 命令的风险等级（low/medium/high） |
@@ -313,6 +316,7 @@ denied_commands = ["rm -rf *", "mkfs *"]
 ### 注意事项
 
 - 每个 scoped token 必须配置 `token_env` 或 `token`，并且必须配置 `scope`
+- 这份文件在**每次认证**时都会读（走 `config_cache` 的 `(mtime, len)` 缓存）。它一旦解析失败，中间件就没法把一个 scoped token 和「未知 token」区分开，于是**除 admin token 之外的任何请求都得到 500**——不是 401，也不是 403。也就是说这个文件写坏会把所有最小权限客户端一起挡在门外，改完之后，先用一次 scoped 请求确认它还能通
 - `token_env` 优先于 `token`
 - scope 会在风险审批之前检查；未命中 scope 的请求不会进入审批队列
 - `allowed_commands` 和 `denied_commands` 使用 glob 风格匹配，`denied_commands` 优先
@@ -324,6 +328,25 @@ denied_commands = ["rm -rf *", "mkfs *"]
 - 桌面 SFTP 删除目录先请求 daemon 的 `POST /sftp/rm-rf/authorize`，完成 scope、gate、限额、风险和审批检查。daemon 只授权，不连接 SSH；桌面校验响应中的主机和路径一致后，在自身进程执行删除，使用桌面已解锁的凭据，不跨进程传递密码。普通路径默认属于高风险，确认删除后仍需在审批队列批准；`/`、`/*`、`/.` 被直接阻断。没有 `force` 或绕过审批的回退，daemon 未运行时应先启动服务。原 `POST /sftp/rm-rf` 仍由 daemon 授权并执行，供需要在 daemon 中执行的客户端使用；其 `timeout_secs`（默认 60 秒）约束 SSH/SFTP 传输操作，审批等待使用独立的审批 TTL。
 - MCP 的 `local_exec` 和 `resident_session_*` 请求由 daemon 管理执行、预热及审批期限，不再受客户端固定 30 秒总超时限制；建立 HTTP 连接仍限时 10 秒。命令的 `timeout_secs` 继续生效，resident 命令超时仍会结束整个会话。
 - PTY session 写入按已完成的输入行做授权和审计；daemon session 和 desktop 本地 session 都会缓存未完成输入，直到换行后再按完整命令授权；`session_read`、`session_list`、`forward_list` 这类观察操作通过 token/scope 控制，不默认写入 `audit.jsonl`
+
+---
+
+## CLI 主机凭据输入
+
+`agent2ssh host add` 支持 `--password-stdin` 或 `--passphrase-stdin`：从重定向的标准输入读到 EOF，去掉末尾一个 LF 或 CRLF，保留其余空格和换行。两者不能同时使用，且不能与对应的 `--password` 或 `--passphrase` 同时使用。空输入、非 UTF-8 和超过 65536 字节的输入会被拒绝；标准输入直接连接终端时也会拒绝，避免输入被回显。
+
+例如在 Bash 中交互输入密码（不要将实际密码写进命令或脚本）：
+
+```bash
+read -rs -p 'SSH password: ' ssh_password
+printf '\n' >&2
+printf '%s' "$ssh_password" | agent2ssh host add example --host example.com --password-stdin
+unset ssh_password
+```
+
+新输入方式要求凭据能够写入加密凭据库：例如在无头环境设置 `AGENT2SSH_MASTER_PASSWORD` 以初始化或解锁库；库不可用时操作失败，不会把新密码写成明文。主密码环境变量本身也可能被同用户进程或子进程读取，应按运行环境保护。旧 `--password` 和 `--passphrase` 保持兼容，它们的值可能出现在进程参数中；旧密码入口的锁库明文回退行为不变。`--password-stdin` 与 `--passphrase-stdin` 使用同一个标准输入，需在一次调用中选择一个。
+
+保存前会先以独占创建方式打开主机配置的临时文件：若同名文件已存在或无法打开，操作会失败，既不会覆盖或删除已有文件，也不会更新凭据库。凭据库与主机配置仍是两个独立文件；临时文件打开后若发生写入、重命名或进程崩溃，凭据库可能已经更新而配置未完成，目前不能保证自动回滚，需检查原主机和凭据后再重试。
 
 ---
 
@@ -345,9 +368,14 @@ denied_commands = ["rm -rf *", "mkfs *"]
 
 - 守护进程启动时自动写入
 - 守护进程正常退出时自动删除
+- 新版 daemon 与客户端通过配置目录内的 `.daemon-pid.lock` 协调 PID 写入和清理；清理只删除仍记录原 PID 的文件，保留已被其他实例替换的记录。该锁只协调文件操作，不证明进程身份；旧版程序不遵守此锁，混用版本或使用不支持可靠文件锁的存储时仍可能竞争
+- 直接启动新版 daemon 时，若已有 PID 文件损坏、指向存活进程或无法确认进程已退出，启动会报错并保留文件；确认 PID 已不存在后才允许替换。不要仅凭进程名判断文件可以删除
+- PID 文件为空、格式错误或 PID 为 0 时会原样保留并报错；启动和停止都不会把它当作不存在。写入可能尚未完成，可稍后重试；持续报错时先检查 daemon 进程与监听地址，确认没有相关进程后再手动处理文件
 - 如果守护进程异常退出，此文件可能残留；状态检查会核对健康响应里的 PID 与文件中的 PID，并确认当前配置的 token 能访问 daemon。文件位置来自 `AGENT2SSH_CONFIG_DIR`，相对值时按**读取它的进程**的工作目录解析（同一工作目录下 `./cfg` 就是 `cfg/`，不会多出一级；跨工作目录则是两个目录，谁都不会去猜）
-- 进程仍存在但身份不明，或守护进程存活但健康检查失败时，启动和停止会拒绝猜测并保留 PID 文件；停止要求健康响应 PID 匹配并使用当前配置的管理员 token 成功请求 `/shutdown`，先检查进程和监听地址后再处理。重命名的 daemon 可以通过匹配 PID 且接受当前 token 的健康响应显示为运行中，但不会仅凭该响应向其发送进程信号
+- 进程仍存在但身份不明，或守护进程存活但健康检查失败时，启动和停止会拒绝猜测并保留 PID 文件；停止要求健康响应 PID 匹配、健康响应里的 `config_dir` 与本进程的配置目录一致，并使用当前配置的管理员 token 成功请求 `/shutdown`，先检查进程和监听地址后再处理。重命名的 daemon 可以通过匹配 PID 且接受当前 token 的健康响应显示为运行中，但不会仅凭该响应向其发送进程信号
+- `/shutdown` 接受一个可选的 `expect_pid`：调用方在认证通过后声明"我要停的是这个进程"，daemon 核对后不符就回 409 并继续运行。停止路径总是带上它，所以在健康检查和发请求之间监听者被换成另一个用同一 token 的 daemon（重启、重生成）时，停止会失败而不会落到新进程上。旧版本 daemon 不认识该字段、会照旧关闭自己；它的 200 与新版 daemon 核对通过后的 200 在客户端看来完全一样（都是 `{"ok":true}`），**带 `expect_pid` 的那一类 200 都会落进同一条 warn**（不带 body 的 `request_graceful_shutdown` 走另一支，不记 warn），所以这条 warn 只说明"这次停止没有拿到检查回执"，不能反推 daemon 版本——而 daemon 侧也帮不上忙：它只在 409 时写日志，核对通过不留痕，所以"日志里没有核对记录"什么也证明不了；显式传 `expect_pid: null` 会得到 400，想不检查就别带这个字段。健康响应里没有 `config_dir` 的旧 daemon 会被判为无法识别并拒绝停止，`daemon restart` 走的是同一条停止路径、同样会被拒，所以要带外停掉它：Unix 用 `kill <pid>`（SIGTERM 会走正常清理并删掉 PID 文件），Windows 没有 SIGTERM 处理路径、只能 `taskkill /PID <pid> /F`（跳过整个 drain，PID 文件会留在磁盘上），之后 `agent2ssh daemon start` 会把指向已死进程的 PID 文件当作 stale 清掉；若它反过来报「daemon PID N is live or cannot be verified」，说明那个 PID 已被别的进程复用，按上一段的办法核对后再处理。该检查只能收窄竞态，不能消除它：见 `docs/KNOWN-ISSUES.md` 的 K14
 - daemon 成功绑定地址后才写 PID；已有健康端点或其他进程占用端口时，启动不会报告新进程已就绪。新创建的子进程未在启动期限内通过已认证健康检查时，启动器会终止并回收该子进程；若无法终止则保留或记录其 PID 以便人工检查
+- 已接受受保护关闭请求的 daemon 如果在 8 秒宽限内没有退出，自动停止和重启会重新核对它的身份，核对通过才尝试强制终止，然后只等 2 秒；仍未退出就报错并保留 PID 文件。这 2 秒只是**最后一段**：一次停止按顺序还包含身份探测（`/health` 500 毫秒）、关闭请求（2 秒）、8 秒宽限；而进程快照、读 `daemon.token`、地址解析都各有自己的实现，不在这几段之内，所以「一次 stop 最多多久」不能只按 2 秒算。失败也不止两种：除了「进程忽略了终止请求」（强制终止后仍是 `StillRunning`）与「它已无法被确认成这个配置的 daemon」（`UnverifiedIdentity`），还有第三种 `UncertainExit`——读不到进程状态，而这一种可以在**进入宽限分支之前**就返回，此时根本没有任何信号发出去。区分线索在 `app.log`（不是 `daemon.log`：后者是 daemon 自己的 stdout/stderr 重定向）：出现 `daemon did not exit after a guarded shutdown; leaving it running` 说明宽限内它确实还在跑；报 `UncertainExit` 而没有这一条，说明问题在可观测性——从头就判定不出它在不在。检查 `app.log`、监听地址和系统进程信息，确定进程确实属于该配置后，由操作者自行决定如何停止；确认进程已退出后再重试启动。不能仅凭进程名、匿名健康响应或共享 token 确认身份
 
 ---
 
@@ -367,7 +395,7 @@ denied_commands = ["rm -rf *", "mkfs *"]
 
 ### 注意事项
 
-- 由桌面应用在启动 daemon 时写入，停止 daemon 时删除；无需手动维护
+- 由桌面应用在启动 daemon 时写入；停止时仅清理由相同 PID 和启动时间标识的记录，无法确认启动时间时保留；无需手动维护。新版写入和清理使用 `.daemon-pid.lock` 协调，旧版程序不参与此协议
 - 文件缺失、损坏或与当前 daemon 对不上，都视为"不是桌面应用启动的"，退出应用时不会停止它
 - 设置里的"停止 Daemon"按钮和 `agent2ssh daemon stop` 是明确的停止指令，不受此文件限制
 - 桌面应用退出前，如果它启动的 daemon 里还有终端会话、常驻 shell、端口转发或待审批请求，会先弹窗确认，因为这些都只存在于 daemon 内存里，停止即丢失
@@ -571,15 +599,35 @@ steps = [
 tags = ["database"]
 ```
 
+需要模板参数时用 `advanced_steps`。它存在时**优先于** `steps`，两者可以同时出现——此时 `steps` 通常是空的，这不是坏文件：
+
+```toml
+[[playbooks]]
+name = "greet-all"
+description = "带参数的问候"
+steps = []
+
+[[playbooks.advanced_steps]]
+command = "echo {{message}}"
+description = "打印一句问候"
+[[playbooks.advanced_steps.params]]
+name = "message"
+default = "hello"
+required = false
+```
+
+`params` 里的 `name` 会替换命令里的 `{{name}}`；`default` 在调用方没传时使用，`required = true` 则强制调用方必须给值。
+
 ### 字段说明
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `name` | string | 是 | Playbook 唯一名称 |
 | `description` | string | 是 | Playbook 描述 |
-| `steps` | array | 是 | 命令序列，按顺序执行 |
+| `steps` | array | 是 | 命令序列，按顺序执行；用 `advanced_steps` 时可以为空数组 |
 | `tags` | array | 否 | 标签列表 |
 | `risk_override` | string | 否 | 覆盖所有步骤的非 blocked 风险等级 |
+| `advanced_steps` | array | 否 | 带参数的单步定义，存在时优先于 `steps`；每项含 `command`/`description`/`params` |
 
 ### 执行行为
 
@@ -804,15 +852,35 @@ secret = "my-secret-key"
 
 ### Slack 集成
 
-当 URL 包含 `hooks.slack.com` 时，自动使用 Slack Block Kit 格式：
+当 URL 包含 `hooks.slack.com` 时，自动使用 Slack Block Kit 格式。**这里有两个渲染器，不是一套模板**：
+`notify_approval_pending` 走 `format_slack_approval_notification`（`notify.rs:162`），`fire_webhook` 走
+`format_slack_message`（`notify.rs:299`）。对 `approval_required` 事件**两者都会发**——`bin/agent2ssh-daemon.rs`
+里同一个 `tokio::spawn` 先 `notify_approval_pending` 再 `fire_webhook`——所以一次待审批在 Slack 里是
+**两条消息**。这条重复发送是已知缺口，记在 `OPT-LOOP-L2-PENDING.md` 的 L2-75。读下文时先分辨是哪一条：
 
-- 标题显示事件类型（Approval Required / Command Blocked / Command Completed / Anomaly Detected）
-- 字段显示主机名、命令、风险等级、退出码
-- `approval_required` 事件包含打开本地 Approvals 控制台的按钮；实际批准或拒绝仍通过已认证的控制台/API 完成
+| | 审批那条（`format_slack_approval_notification`） | 通用那条（`format_slack_message`） |
+|---|---|---|
+| 标题 | `Agent2SSH: Approval Required` | 按事件与 `remote_outcome_unknown` 选（Approval Required / Command Blocked / Command Completed / Anomaly Detected） |
+| 字段 | `Host`、`Command`、`Risk Level`、`Approval ID` 四个固定字段 | `Host` 与 `Command` 固定；`Risk Level`、`Exit Code` 是**条件字段**，只有事件带了非空值才出现 |
+| 按钮 | Approve / Reject，**点不动**（见下） | `approval_required` 时给 `Open Approvals`，URL 是 `{daemon}/console#approvals-<id>`，可用 |
+
+通用那条的两个条件字段还有两处已知读法：`diagnostic_error` 的卡片只有 `Host` 与 `Command` 两个 field
+（它的 `risk_level` 与 `exit_code` 都是 `None`），而且 `Host` 里装的是**组件名**、`Command` 里装的是错误文本
+（见上一节的字段说明），在 Slack 里读起来就是「一个组件名 + 一段错误消息」，不是「一台主机 + 一条命令」；
+命令没执行时（例如被 gate 拦下）`exec_completed` 也没有 `Exit Code`。
+
+审批那条的 Approve / Reject 按钮**当前点不动**，不要把它们当操作入口。URL 由 `approval_action_url`
+（`approval.rs:901`）拼出：基址是 daemon 的解析地址（默认 `127.0.0.1:7722`），中间是
+`/approval/{id}/respond`，按钮再各接一段 `/approve` 与 `/reject`——**后两段不存在**，点开是 404。
+即使去掉后缀，`/approval/{id}/respond` 也只是 `POST` + `{"approved": bool}` 的 admin 路由，浏览器的
+GET 一样打不动；换个机器点开时，`127.0.0.1` 还指向**点的人自己的机器**。
+实际批准或拒绝请用 `Open Approvals` 按钮或 `/console#approvals`。这是已知缺口，已在
+`docs/reports/OPT-LOOP-L2-PENDING.md` 的 L2-44 登记
 
 ### 自定义 Webhook
 
-非 Slack URL 发送原始 JSON payload：
+非 Slack URL 发送原始 JSON，**但审批事件有两个形状、而且会投递两次**（`notify_approval_pending` 先发，
+`fire_webhook` 再发；见上文 Slack 对照表与 L2-75）。审批那条的形状：
 
 ```json
 {
@@ -820,9 +888,15 @@ secret = "my-secret-key"
   "host": "web1",
   "command": "sudo rm -rf /tmp/cache",
   "approval_id": "550e8400-e29b-41d4-a716-446655440000",
-  "risk_level": "high"
+  "risk_level": "high",
+  "approval_url": "http://127.0.0.1:7722/approval/550e8400-e29b-41d4-a716-446655440000/respond"
 }
 ```
+
+六个键，**没有** `exit_code` 与 `remote_outcome_unknown`。通用那条是 `WebhookEvent` 直出：固定
+`event` / `host` / `command`，按需出现 `approval_id`、`risk_level`、`exit_code`、
+`remote_outcome_unknown`。按「一个形状」写解析器，会在审批那条上拿到永远不出现的 `exit_code`，
+并丢掉实际存在的 `approval_url`。
 
 如果配置了 `secret`，请求头包含 HMAC-SHA256 签名：
 
@@ -966,12 +1040,12 @@ events = ["approval_required", "exec_blocked", "exec_completed", "anomaly_detect
 通过 Desktop App 的 Keys 标签页生成，或用 CLI：
 
 ```bash
-agent2ssh keys algorithm          # 本构建推荐的类型（ed25519 或 rsa）
+agent2ssh keys algorithm          # 推荐类型，恒为 ed25519（脚本的稳定接口）
 agent2ssh keys generate id-work   # 按推荐类型生成；只输出私钥路径
 agent2ssh keys generate id-work --type rsa --json
 ```
 
-生成过程由 Agent2SSH 后端实现，不调用系统 `ssh-keygen`。**默认类型由本构建的 SSH 库能力决定，而不是由操作系统决定**：`russh` 能读取 OpenSSH 私钥容器，因此各平台的默认推荐都是 `ed25519`；`--type rsa` 仍然可用，写出的是 3072 位传统 PKCS#1 PEM（`-----BEGIN RSA PRIVATE KEY-----`），公钥仍是标准的单行 `ssh-rsa …`。因此本应用生成的密钥一定可用于本应用的认证——这正是 `keys algorithm` 存在的理由，脚本应当询问而不是假定。
+生成过程由 Agent2SSH 后端实现，不调用系统 `ssh-keygen`。**默认类型现在是常量，不由构建能力也不由操作系统决定**：`default_for_build()` 直接返回 `ed25519`，理由是 `russh` 能读取本应用写出的所有私钥格式，没有任何构建会给出不同答案；`--type rsa` 仍然可用，写出的是 3072 位传统 PKCS#1 PEM（`-----BEGIN RSA PRIVATE KEY-----`），公钥仍是标准的单行 `ssh-rsa …`。因此本应用生成的密钥一定可用于本应用的认证——`keys algorithm` 保留下来，是给脚本一个不会漂移的接口，脚本仍应询问而不是假定。
 
 > 未手动选择类型时，请求不带类型，由后端按 `keys algorithm` 的结论决定。
 
@@ -994,7 +1068,8 @@ agent2ssh host add web1 --host 192.168.1.10 --key ~/.agent2ssh/keys/my_key
 - 私钥文件权限必须为 `0600`（仅所有者可读写），Agent2SSH 自动设置正确权限
 - 密钥删除后，引用该密钥的主机配置不会自动更新
 - 建议为不同用途使用不同的密钥（工作、个人、部署等）
-- 可生成/导入的密钥类型：ed25519、rsa(PEM)、ecdsa；在 Windows 上实际可认证的只有 `rsa` 的传统 PEM 形式
+- **能生成的类型只有 `ed25519` 与 `rsa`**：`keys generate --type` 只接受这两个值（不指定时用 `keys algorithm` 的结论，恒为 `ed25519`），CLI 的 `keys` 也只有 `algorithm` 与 `generate` 两个子命令。**能导入的类型更宽**：桌面端 Keys 页的导入只做文件复制、按 `.pub` 前缀标类型，所以 `russh` 能读的格式（含 ECDSA P-256/384/521）都可以导入并用于认证——但本应用**不能生成**它们
+- **各平台一致，Windows 没有额外限制**。旧版曾写「Windows 上实际可认证的只有 `rsa` 的传统 PEM 形式」，那是 libssh2 + WinCNG 后端的限制，已随该后端一起移除（见本节上方「各平台的密码学能力一致」，以及 `AGENTS.md` 与 `CHANGELOG` 的 Removed 段）。`russh` 的解析器直接读 OpenSSH 容器、PKCS#1 与 PKCS#8，`ssh-keygen` 产出的密钥无需任何转换
 
 ---
 
@@ -1142,7 +1217,10 @@ A24：应用在脱敏时使用的正则规则集。它是**权威的**而不是�
 - 首次运行时用内置规则播种：私有 IPv4（10/172.16-31/192.168）、IPv6 环回与链路本地、
   Bearer、`sk-` 与 `AKIA`、JWT、32 位以上十六进制块。
 - 之后文件归使用者所有：**删掉的规则不会被重新播种**，只有显式「恢复默认」才会回来。
-- 文件缺失、不可读或 JSON 损坏时**回落到内置集合**——配置坏掉绝不能让脱敏变弱。
+- 文件缺失时按内置规则重新播种。**不可读或 JSON 损坏**时两条路径分岔：列表/编辑面回落到内置集合
+  （`load_user_rules`），而**实时脱敏路径不走这个回落**——`redact_with_user_rules` 直接返回字面量
+  `[REDACTION UNAVAILABLE]`，宁可整条不产出可读内容也不退到更弱的规则集（fail-closed）。所以
+  「配置坏掉不会漏秘密」成立，但代价是那段时间的审计记录、通知与诊断导出一律只有这个标记。
 - 通过 `store::write_private_json` 写入，Unix 上为 `0600`。
 
 ### 桌面端编辑
@@ -1159,7 +1237,15 @@ A24：应用在脱敏时使用的正则规则集。它是**权威的**而不是�
 - **删空是允许的，但后果很重**：空规则集意味着审计记录、通知与诊断导出**原样写出**。
   面板把这个状态渲染成警示而不是空列表，「恢复默认」是唯一的回退路径。
 
-CLI、MCP 与 daemon 目前**不**暴露这些操作，只有桌面端可以编辑。
+四个界面**都能编辑**这套规则，行为一致：CLI 是 `agent2ssh redact list|add|update|remove|reset`，MCP 是
+`ssh_redact_rule_list|add|update|remove|reset` 五个工具，daemon 是 `GET|POST /redact/rules` 与
+`/redact/rules/{update,delete,reset}`（逐行见 `daemon-api-quickstart.md` 的端点表），桌面端是 Redaction 面板。
+daemon 侧有个权限差：`GET /redact/rules` 只要有效 token，而四个**写**端点（add / update / delete / reset）
+额外要求**无 scope 的 admin token**——host-scoped token 会拿到 403（`require_admin`），这与
+`POST /containers/start-service` 同一条理由：改的是本机行为，不是某台主机上的事。
+**删除需要显式确认**：`redact remove` / `ssh_redact_rule_remove` / `POST /redact/rules/delete` 少了
+`--force` / `force: true` 会被拒绝且什么都不改（CLI 退出码 2，daemon 与 MCP 返回 400），
+`reset` 是唯一的回退路径——这是为了让「删空规则集 = 审计与通知原样写出」不能由一次误触达成。
 规则文件也**不参与 WebDAV 同步**（不在 `webdav_sync::SYNCABLE_FILES` 里，与另两个规则文件一致），
 因此在 A 机器上改的规则不会带到 B 机器。
 
@@ -1192,7 +1278,7 @@ CLI、MCP 与 daemon 目前**不**暴露这些操作，只有桌面端可以编�
 # 备份整个配置目录
 tar -czf agent2ssh-backup.tar.gz ~/.agent2ssh/
 
-# 仅备份配置文件（排除运行时文件和审计日志）
+# 仅备份配置文件（排除运行时文件、审计日志、信任库与急停状态）
 tar -czf agent2ssh-config.tar.gz \
   ~/.agent2ssh/hosts.json \
   ~/.agent2ssh/policy.toml \
@@ -1200,10 +1286,27 @@ tar -czf agent2ssh-config.tar.gz \
   ~/.agent2ssh/approval_policies.toml \
   ~/.agent2ssh/playbooks.toml \
   ~/.agent2ssh/remotes.toml \
+  ~/.agent2ssh/execution_limits.toml \
+  ~/.agent2ssh/anomaly.toml \
+  ~/.agent2ssh/environments.toml \
+  ~/.agent2ssh/app_preferences.json \
   ~/.agent2ssh/daemon_tokens.toml \
   ~/.agent2ssh/webhook.toml \
   ~/.agent2ssh/keys/
 ```
+
+这份清单**不等于** WebDAV 同步的 `webdav_sync::SYNCABLE_FILES`：后者刻意不含凭据
+（`daemon_tokens.toml`、`secrets.enc`、`keys/`），也不含 `environments.toml` 与
+`approval_policies.toml`——前者是执行前的信任边界，后者是「谁能批准什么」。反过来，本清单刻意
+**不含** `known_hosts.json`（换机器应当重新信任，而不是继承）与 `execution_gate.json`
+（急停状态属于机器当前处境，不该被备份带回新机器）。
+
+`policy.toml` 与 `policy.json` 是同一个策略文件的两种形态（`policy::existing_policy_path` 先找
+`.toml`，不存在才用 `.json`），所以上面只列了前者：**只用 `policy.json` 的机器要把它补进 tar 命令**，
+否则策略文件根本不会被带走，而使用者会以为备过——恢复后策略为空，等于静默放宽。同一目录下的
+`redact_rules.json`、`highlight_rules.json`、`copy_redact_rules.json`（你编辑过的脱敏/高亮/复制规则）、
+`ssh_algos.json`、`telemetry.toml`、`webdav.toml`、`snippets.json` 也都是配置，只是**只在对应功能
+用过之后才存在**，所以没有放进上面那条命令；改过就先确认文件在，再加进去。
 
 ### 迁移到新机器
 
@@ -1217,9 +1320,15 @@ tar -xzf agent2ssh-config.tar.gz -C ~/
 # 确保权限正确
 chmod 600 ~/.agent2ssh/keys/* 2>/dev/null || true
 
-# 启动守护进程（自动生成新的 daemon.token）
+# 启动守护进程（daemon.token 非空则原样复用，只在文件缺失或为空时才生成新的）
 agent2ssh daemon start
 ```
+
+`daemon start` **不会**无条件换 token：`load_or_create_daemon_token` 读到非空的 `daemon.token` 就只
+`chmod 600` 再原样返回；文件存在但为空时才重新生成并打一条 warn，文件根本不存在时直接新建（不告警）。
+所以用上面「备份整个配置目录」的
+`tar` 连同 `daemon.token` 一起搬到新机器时，**旧 token 继续有效**——已经配好 token 的客户端不必改配置，
+反过来说，token 泄露后靠「重启一次」是换不掉的，要显式删掉该文件再启动。
 
 ### 注意事项
 

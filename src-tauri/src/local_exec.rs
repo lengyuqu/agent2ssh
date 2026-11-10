@@ -157,6 +157,16 @@ impl std::fmt::Display for LocalExecTimeout {
 
 impl std::error::Error for LocalExecTimeout {}
 
+#[derive(Debug)]
+pub(crate) struct LocalExecShutdown;
+
+impl std::fmt::Display for LocalExecShutdown {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "local command stopped during daemon shutdown")
+    }
+}
+impl std::error::Error for LocalExecShutdown {}
+
 // ── Recursion guard ─────────────────────────────────────────────────────────
 
 fn depth_from(value: Option<&str>) -> u32 {
@@ -1252,7 +1262,14 @@ pub(crate) fn run_local_command_capture(
     stdin: Option<&[u8]>,
     timeout_secs: u64,
     max_bytes: usize,
+    shutdown: Option<crate::ws_drain::ShutdownToken>,
 ) -> Result<CapturedExec> {
+    if shutdown
+        .as_ref()
+        .is_some_and(|token| token.is_cancelled_now())
+    {
+        return Err(LocalExecShutdown.into());
+    }
     let child_depth = check_exec_depth()?;
 
     let mut process = build_command(plan, command);
@@ -1299,9 +1316,18 @@ pub(crate) fn run_local_command_capture(
 
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     let mut timed_out = false;
+    let mut cancelled = false;
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break status;
+        }
+        if shutdown
+            .as_ref()
+            .is_some_and(|token| token.is_cancelled_now())
+        {
+            cancelled = true;
+            kill_process_tree(&mut child);
+            break child.wait()?;
         }
         if Instant::now() >= deadline {
             timed_out = true;
@@ -1313,6 +1339,9 @@ pub(crate) fn run_local_command_capture(
 
     let (stdout, stderr) = collect_streams(receiver, readers, max_bytes, &mut child);
 
+    if cancelled {
+        return Err(LocalExecShutdown.into());
+    }
     if timed_out {
         return Err(LocalExecTimeout { timeout_secs }.into());
     }

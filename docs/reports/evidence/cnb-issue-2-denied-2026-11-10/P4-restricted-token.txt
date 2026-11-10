@@ -1,0 +1,30 @@
+== run 1 ==
+[elevated ] pid 1680: OpenProcess=true signaled=false
+[restricted] pid 1680: OpenProcess=false GetLastError=5 => ACCESS_DENIED (conservative)
+[restricted] self=pid 41020: OpenProcess=true signaled=false
+[restricted] done
+[elevated ] pid 1712: OpenProcess=true signaled=false
+[restricted] pid 1712: OpenProcess=false GetLastError=5 => ACCESS_DENIED (conservative)
+[restricted] self=pid 41868: OpenProcess=true signaled=false
+[restricted] done
+[elevated ] pid 35480: OpenProcess=true signaled=false
+== run 2 ==
+[elevated ] pid 1680: OpenProcess=true signaled=false
+[restricted] pid 1680: OpenProcess=false GetLastError=5 => ACCESS_DENIED (conservative)
+[restricted] self=pid 17136: OpenProcess=true signaled=false
+[restricted] done
+[elevated ] pid 1712: OpenProcess=true signaled=false
+[restricted] pid 1712: OpenProcess=false GetLastError=5 => ACCESS_DENIED (conservative)
+[restricted] self=pid 21760: OpenProcess=true signaled=false
+[restricted] done
+[elevated ] pid 26464: OpenProcess=true signaled=false
+== run 3 ==
+[elevated ] pid 1680: OpenProcess=true signaled=false
+[restricted] pid 1680: OpenProcess=false GetLastError=5 => ACCESS_DENIED (conservative)
+[restricted] self=pid 42612: OpenProcess=true signaled=false
+[restricted] done
+[elevated ] pid 1712: OpenProcess=true signaled=false
+[restricted] pid 1712: OpenProcess=false GetLastError=5 => ACCESS_DENIED (conservative)
+[restricted] self=pid 39748: OpenProcess=true signaled=false
+[restricted] done
+[elevated ] pid 42304: OpenProcess=true signaled=false

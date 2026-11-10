@@ -96,7 +96,13 @@ describe("KeysPanel key algorithm", () => {
     );
   });
 
-  it("warns before generating an Ed25519 key this build cannot read", async () => {
+  // Reachable only through this mock: `KeyAlgorithm::default_for_build()`
+  // (`src-tauri/src/keys.rs:190`) returns `Ed25519` unconditionally, so
+  // `preferredAlgorithm === "rsa"` never holds against a real backend. The
+  // warning it triggers is therefore dead UI kept for an older build, and this
+  // test pins the mock path, not a behaviour a user can reach. Deleting the
+  // branch and this test together is parked as L2-58.
+  it("keeps the legacy RSA-build warning, reachable only through a mocked backend", async () => {
     mockApi.defaultKeyAlgorithm.mockResolvedValue("rsa");
     renderPanel();
     await waitFor(() => expect(mockApi.defaultKeyAlgorithm).toHaveBeenCalled());
@@ -104,8 +110,6 @@ describe("KeysPanel key algorithm", () => {
     await openFormWithName("id-work");
     fireEvent.click(screen.getByText("Ed25519"));
 
-    // The recommendation is RSA precisely because this build cannot read the
-    // OpenSSH container Ed25519 keys are written in, so saying so is the point.
     expect(screen.getByText(/cannot read Ed25519 keys/)).toBeTruthy();
   });
 

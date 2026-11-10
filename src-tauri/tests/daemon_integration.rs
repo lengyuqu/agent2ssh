@@ -5,10 +5,22 @@
 //! 1. **Core function tests** — exercise the library functions that the daemon
 //!    HTTP handlers wrap, verifying business logic without going through HTTP.
 //!
-//! 2. **HTTP handler tests** — build a minimal axum `Router` that mirrors the
-//!    daemon's route structure and use axum's `oneshot` test utility to verify
-//!    request/response semantics (auth, routing, JSON serialization, status
-//!    codes) without spawning a real TCP server.
+//! 2. **HTTP handler tests** — build a small axum `Router` that reproduces the
+//!    shape of 18 of the daemon's 92 routes, and use axum's `oneshot` test
+//!    utility to verify request/response semantics (auth, routing, JSON
+//!    serialization, status codes) without spawning a real TCP server.
+//!
+//!    **This layer is a shape-mirror, not an implementation test.** The copies
+//!    carry neither `AuthContext` nor `require_admin` — `check_auth` compares
+//!    one fixed token — so nothing here can say what a *scoped* token gets, and
+//!    a handler that gained or lost an admin gate would keep these assertions
+//!    green. The 74 routes that are not mirrored at all (`/metrics`, `/gate*`,
+//!    `/audit*`, `/sftp/*`, `/sessions*`, `/forwards*`, `/recordings*`,
+//!    `/prompts/*`, `/terminal*`, `/events/stream`) have no coverage here in
+//!    either direction. Behaviour that depends on scope, admin, or a route this
+//!    router does not mount belongs in the real-daemon e2e targets
+//!    (`daemon_local_exec_e2e`, `daemon_resident_session_e2e`, ...), which spawn
+//!    `agent2ssh-daemon` itself.
 
 mod common;
 
@@ -749,7 +761,16 @@ async fn http_risk_check_blocked_command() {
     assert_eq!(response.status(), 200);
     let result: serde_json::Value = response_json(response).await;
     assert_eq!(result["risk_level"], "blocked");
-    assert!(result["matched_rule"].is_null());
+    // Narrow on purpose: this router does not isolate its config directory, so
+    // there is no `risk_rules.toml` and `classify_with_user_rules` can only
+    // answer `None`. The test therefore says "built-in rules leave matched_rule
+    // empty", which is true and falsifiable — it says nothing about the
+    // `"user_rule"` value a user rule produces (L2-29; covering that needs the
+    // harness to own its config dir first).
+    assert!(
+        result["matched_rule"].is_null(),
+        "built-in rules must not claim a user rule name: {result}"
+    );
 }
 
 #[tokio::test]
@@ -2107,13 +2128,356 @@ fn risk_tiers_match_mcp_tool_registry() {
 
 // ── S3-2: OpenAPI / daemon contract checks ──────────────────────────────────
 
-/// Every daemon route is in `docs/api.yaml`, and nothing else is.
+/// The five method builders axum's `routing` module exposes for the verbs the
+/// daemon uses, as they appear in source (with the call paren) and as OpenAPI
+/// spells them (without).
+const METHOD_BUILDERS: [(&str, &str); 5] = [
+    ("get(", "get"),
+    ("post(", "post"),
+    ("put(", "put"),
+    ("delete(", "delete"),
+    ("patch(", "patch"),
+];
+
+/// `:id` (axum) → `{id}` (OpenAPI), trailing slash trimmed.
+///
+/// A `:` starts a parameter that runs to the next `/`, so the whole segment is
+/// renamed at once; anything else is copied verbatim.
+fn normalized_route_path(path: &str) -> String {
+    let mut normalized = String::new();
+    let mut chars = path.chars();
+    while let Some(ch) = chars.next() {
+        if ch == ':' {
+            normalized.push('{');
+            for ch in chars.by_ref() {
+                if ch == '/' {
+                    break;
+                }
+                normalized.push(ch);
+            }
+            normalized.push('}');
+            normalized.push('/');
+        } else {
+            normalized.push(ch);
+        }
+    }
+    // Keep the root path intact; only strip trailing slashes after it.
+    while normalized.len() > 1 && normalized.ends_with('/') {
+        normalized.pop();
+    }
+    normalized
+}
+
+/// Status codes a handler can answer with on its own, keyed by the
+/// `StatusCode::` constant that names them in source.
+///
+/// `UNAUTHORIZED` is deliberately absent: 401 is answered by the middleware for
+/// the whole route, and the contract test above already requires it on every
+/// non-public operation.
+const HANDLER_STATUS: [(&str, &str); 10] = [
+    ("BAD_REQUEST", "400"),
+    ("FORBIDDEN", "403"),
+    ("NOT_FOUND", "404"),
+    ("REQUEST_TIMEOUT", "408"),
+    ("CONFLICT", "409"),
+    ("LOCKED", "423"),
+    ("TOO_MANY_REQUESTS", "429"),
+    ("INTERNAL_SERVER_ERROR", "500"),
+    ("BAD_GATEWAY", "502"),
+    ("SERVICE_UNAVAILABLE", "503"),
+];
+
+/// The methods one `.route(...)` call mounts, in source order, with their handler.
+///
+/// `get(a).post(b)` mounts two, and a builder chain that wraps across lines
+/// still belongs to a single call — so the caller bounds `segment` at the next
+/// `.route(`. A builder is only counted when the character before it is not
+/// part of a name: `algo_prefs_get` ends in `_get` and must not read as a
+/// `get(` call.
+fn mounted_handlers(segment: &str) -> Vec<(&'static str, String)> {
+    let mut mounted = Vec::new();
+    for (needle, method) in METHOD_BUILDERS {
+        let mut from = 0;
+        while let Some(found) = segment[from..].find(needle) {
+            let at = from + found;
+            let preceded_by_name = segment[..at]
+                .chars()
+                .next_back()
+                .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_');
+            if !preceded_by_name {
+                let handler: String = segment[at + needle.len()..]
+                    .chars()
+                    .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+                    .collect();
+                if !handler.is_empty() {
+                    mounted.push((method, handler));
+                }
+            }
+            from = at + needle.len();
+        }
+    }
+    mounted
+}
+
+/// Every `.route(...)` call in the daemon, as (normalized path, method, handler).
+///
+/// Each call is bounded at the next one (or at `.with_state(`, which ends the
+/// router chain) so a multi-line builder chain cannot borrow the methods of the
+/// call that follows it.
+fn daemon_routes(daemon: &str) -> Vec<(String, &'static str, String)> {
+    let starts: Vec<usize> = daemon
+        .match_indices(".route(")
+        .map(|(index, _)| index)
+        .collect();
+    let mut routes = Vec::new();
+    for (position, start) in starts.iter().enumerate() {
+        let mut end = starts.get(position + 1).copied().unwrap_or(daemon.len());
+        if let Some(with_state) = daemon[*start..].find(".with_state(") {
+            end = end.min(start + with_state);
+        }
+        let segment = &daemon[*start..end];
+        let Some(open) = segment.find('"') else {
+            continue;
+        };
+        let Some(close) = segment[open + 1..].find('"') else {
+            continue;
+        };
+        let path = &segment[open + 1..open + 1 + close];
+        if !path.starts_with('/') {
+            continue;
+        }
+        let normalized = normalized_route_path(path);
+        for (method, handler) in mounted_handlers(segment) {
+            routes.push((normalized.clone(), method, handler));
+        }
+    }
+    routes
+}
+
+/// The body of one handler, from its `async fn` line to its closing brace.
+///
+/// The obvious terminator — "the next `async fn` or `fn`" — is wrong in a way
+/// that stayed invisible while it was merely unfortunate: 66 of the 106 route
+/// handlers are followed by a `struct`, a `const`, a doc comment or a helper,
+/// so their "bodies" ran hundreds of bytes past the closing brace. Nothing
+/// foreign happened to carry a `StatusCode::` constant yet, which is exactly
+/// why this could rot unnoticed — the day a neighbouring item gains one, the
+/// scan reports it against the wrong operation. Walking the braces instead
+/// bounds the body at the item it belongs to.
+///
+/// It panics rather than returning the rest of the file, for the reason
+/// `handler_body` below already panics: a body that cannot be isolated makes
+/// every check on it vacuous, and a vacuous check is worse than a red one.
+fn handler_body_of<'a>(daemon: &'a str, handler: &str) -> &'a str {
+    let signature = format!("\nasync fn {handler}(");
+    let Some(at) = daemon.find(&signature) else {
+        panic!(
+            "the route table names `{handler}`, but the daemon has no \
+             `async fn {handler}(` for these checks to read"
+        );
+    };
+    let rest = &daemon[at + 1..];
+    let open = opening_brace(rest)
+        .unwrap_or_else(|| panic!("`{handler}` has no body, so its checks would be vacuous"));
+    let close = closing_brace(rest, open)
+        .unwrap_or_else(|| panic!("`{handler}`'s body has unbalanced braces"));
+    &rest[..close]
+}
+
+/// The parameter list of one handler, between its `fn name(` and its closing `)`.
+///
+/// The extractor lives here and nowhere else. Scanning the whole body for
+/// `Json<` would count the *return* type — every handler that answers with a
+/// body is `Result<Json<T>, (StatusCode, Json<ErrorBody>)>` — so a handler that
+/// reads no body at all would look like one that requires `Json`. Anchoring the
+/// search on `: Json<` narrows it but still answers the wrong question: it
+/// cannot tell `Json<T>` from `Option<Json<T>>`, which is the distinction this
+/// file's body-handling test exists to draw. Walking the parentheses answers it
+/// directly.
+///
+/// Panics for the same reason `handler_body_of` does: a handler whose parameters
+/// cannot be isolated makes every check on them vacuous.
+fn handler_params_of<'a>(daemon: &'a str, handler: &str) -> &'a str {
+    let signature = format!("\nasync fn {handler}(");
+    let Some(at) = daemon.find(&signature) else {
+        panic!(
+            "the route table names `{handler}`, but the daemon has no \
+             `async fn {handler}(` for these checks to read"
+        );
+    };
+    let rest = &daemon[at + 1..];
+    // `signature` starts with the newline at `at`, so `rest` is one byte shorter
+    // and the `(` lands at `signature.len() - 2`. `find` says the same thing and
+    // cannot be off by one.
+    let Some(open) = rest.find('(') else {
+        panic!("`{handler}` has no parameter list");
+    };
+    let mut depth = 0usize;
+    for (offset, ch) in rest[open..].char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &rest[open + 1..open + offset];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("`{handler}`'s parameter list is never closed");
+}
+
+/// The `{` that opens a function body: the first one outside the parameter
+/// list, so a parenthesised return type does not look like the body.
+fn opening_brace(source: &str) -> Option<usize> {
+    let mut depth = 0i32;
+    for (at, ch) in source.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            '{' if depth == 0 => return Some(at),
+            ';' if depth == 0 => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Index just past the `}` closing the block opened at `open`.
+///
+/// String, char and comment contents are skipped: a `}` inside
+/// `format!("… }}")` would otherwise close the body early, and a `{` inside a
+/// comment would open a block that never closes.
+fn closing_brace(source: &str, open: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut depth = 0i32;
+    let mut at = open;
+    while at < bytes.len() {
+        match bytes[at] {
+            b'/' if bytes.get(at + 1) == Some(&b'/') => {
+                at = source[at..].find('\n').map_or(bytes.len(), |n| at + n);
+            }
+            b'/' if bytes.get(at + 1) == Some(&b'*') => {
+                at = source[at + 2..]
+                    .find("*/")
+                    .map_or(bytes.len(), |n| at + 2 + n + 2);
+            }
+            b'"' => at = string_end(source, at)?,
+            b'\'' => at = char_end(source, at),
+            b'{' => {
+                depth += 1;
+                at += 1;
+            }
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(at + 1);
+                }
+                at += 1;
+            }
+            _ => at += 1,
+        }
+    }
+    None
+}
+
+/// Index just past the string literal whose opening quote is at `quote`.
+///
+/// Handles the raw forms (`r"…"`, `r#"…"#`), which the daemon uses in its
+/// `daemon_tokens.toml` fixtures.
+fn string_end(source: &str, quote: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    if quote > 0 && bytes[quote - 1] == b'r' {
+        let hashes = source[quote + 1..]
+            .bytes()
+            .take_while(|byte| *byte == b'#')
+            .count();
+        let closing = format!("\"{}", "#".repeat(hashes));
+        let from = quote + 1 + hashes;
+        return source[from..]
+            .find(&closing)
+            .map(|n| from + n + closing.len());
+    }
+    let mut at = quote + 1;
+    while at < bytes.len() {
+        match bytes[at] {
+            b'\\' => at += 2,
+            b'"' => return Some(at + 1),
+            _ => at += 1,
+        }
+    }
+    None
+}
+
+/// Index just past a char literal; a lifetime (`'a`) advances by one instead.
+fn char_end(source: &str, quote: usize) -> usize {
+    let bytes = source.as_bytes();
+    let width = if bytes.get(quote + 1) == Some(&b'\\') {
+        2
+    } else {
+        1
+    };
+    if bytes.get(quote + width + 1) == Some(&b'\'') {
+        quote + width + 2
+    } else {
+        quote + 1
+    }
+}
+
+/// A brace inside a literal, a comment or a raw string is not a brace.
+///
+/// The daemon source has no such shape today, which is exactly why this needs
+/// its own test rather than an argument: a scan that reads `'}'` as syntax
+/// closes a body one brace early, and every check that reads that body then
+/// measures a prefix of it and passes. That is the failure mode the brace walk
+/// was introduced to end, one layer down.
+///
+/// The cases below are the shapes a later edit could plausibly add, including
+/// the one a reviewer reported as already broken — a `'{'` immediately followed
+/// by a second literal, where the claim was that the scanner swallows the
+/// following colon and desynchronises.
+#[test]
+fn a_brace_inside_a_literal_does_not_close_the_body() {
+    let cases = [
+        "fn f() { let close = '}'; }",
+        "fn f() { let quote = '\\''; }",
+        "fn f() { let slash = '\\\\'; }",
+        "fn f() { let pair = ('{', ':'); }",
+        "fn f() { let escaped = '\\u{7D}'; }",
+        "fn f() { let wide = '中'; }",
+        "fn f() { let wide_pair = ('中', '}'); }",
+        "fn f() { let s = r#\"}\"#; }",
+        "fn f() { let s = \"}\"; }",
+        "fn f() { /* } */ let n = 1; }",
+        "fn f() { // }\n let n = 1; }",
+        "fn f() { let t: &'static str = \"a}b\"; }",
+    ];
+    for case in cases {
+        let open = case.find('{').expect("the case has a body");
+        let end = closing_brace(case, open).unwrap_or_else(|| panic!("no end for {case}"));
+        assert_eq!(
+            &case[end..],
+            "",
+            "the scan stopped inside the body of {case:?} instead of at its closing brace"
+        );
+    }
+}
+
+/// Every daemon route is in `docs/api.yaml`, and nothing else is — path,
+/// method, and the 401 that the auth middleware answers with.
 ///
 /// `docs/api.yaml` is the published contract, so a route that is not in it is a
 /// route no client can discover — and the gap is invisible from either side
 /// alone, which is how `/snippets`, the port-forward batch operations and the
 /// 2FA prompt endpoints all went undocumented at once. The two non-API routes
 /// are the browser console and its root redirect.
+///
+/// Paths alone are only a third of the contract. A handler whose *method*
+/// changed still has its path documented, and an operation with no documented
+/// `401` still looks complete — yet 401 is the one code every non-public route
+/// can return, because `auth_middleware` rejects before any handler runs. It
+/// went missing on 98 of 103 operations without a single test going red.
 #[test]
 fn api_yaml_documents_every_daemon_route() {
     // `/` and `/console` serve the web console, not the API.
@@ -2123,44 +2487,20 @@ fn api_yaml_documents_every_daemon_route() {
     let spec = include_str!("../../docs/api.yaml");
 
     // `Path` parameters are `:id` in axum and `{id}` in OpenAPI.
-    let mut routes: Vec<String> = Vec::new();
-    for (index, _) in daemon.match_indices(".route(") {
-        let rest = &daemon[index..];
-        let Some(open) = rest.find('"') else { continue };
-        let Some(close) = rest[open + 1..].find('"') else {
-            continue;
-        };
-        let path = &rest[open + 1..open + 1 + close];
-        if !path.starts_with('/') {
-            continue;
-        }
-        let mut normalized = String::new();
-        let mut chars = path.chars();
-        while let Some(ch) = chars.next() {
-            if ch == ':' {
-                normalized.push('{');
-                for ch in chars.by_ref() {
-                    if ch == '/' {
-                        break;
-                    }
-                    normalized.push(ch);
-                }
-                normalized.push('}');
-                normalized.push('/');
-            } else {
-                normalized.push(ch);
-            }
-        }
-        // Keep the root path intact; only strip trailing slashes after it.
-        while normalized.len() > 1 && normalized.ends_with('/') {
-            normalized.pop();
-        }
-        if !NON_API_ROUTES.contains(&normalized.as_str()) {
-            routes.push(normalized);
-        }
-    }
+    let parsed = daemon_routes(daemon);
+    let mut routes: Vec<String> = parsed
+        .iter()
+        .map(|(path, _, _)| path.clone())
+        .filter(|path| !NON_API_ROUTES.contains(&path.as_str()))
+        .collect();
     routes.sort();
     routes.dedup();
+    let mut mounted: Vec<(String, &'static str)> = parsed
+        .iter()
+        .map(|(path, method, _)| (path.clone(), *method))
+        .collect();
+    mounted.sort();
+    mounted.dedup();
     assert!(!routes.is_empty(), "no daemon routes were found to compare");
 
     // Top-level OpenAPI paths are indented two spaces under `paths:`.
@@ -2195,6 +2535,734 @@ fn api_yaml_documents_every_daemon_route() {
         phantom.is_empty(),
         "docs/api.yaml documents paths the daemon does not serve: {phantom:?}. \
          Either the route was removed and the spec was not, or the path is misspelled."
+    );
+
+    // ── Methods and the auth code ───────────────────────────────────────────
+    //
+    // A path alone is not the contract: the method is what a client calls, and
+    // the 401 is what every non-public route answers with before a handler
+    // runs. Both drifted while this test stayed green.
+    struct DocumentedOperation {
+        path: String,
+        method: &'static str,
+        has_401: bool,
+        is_public: bool,
+    }
+
+    let mut operations: Vec<DocumentedOperation> = Vec::new();
+    let mut current_path: Option<String> = None;
+    for line in spec.lines() {
+        let body = line.trim_start();
+        let indent = line.len() - body.len();
+        if let Some(rest) = line.strip_prefix("  /") {
+            let path = rest.split(':').next().unwrap_or_default();
+            current_path = Some(if path.is_empty() {
+                "/".to_string()
+            } else {
+                format!("/{path}")
+            });
+            continue;
+        }
+        // Path items and the operation keys under them: methods sit four
+        // spaces in, `security` and the response codes deeper.
+        if indent == 4 {
+            if let Some(name) = body.strip_suffix(':') {
+                if let Some((_, method)) = METHOD_BUILDERS.iter().find(|(_, known)| *known == name)
+                {
+                    operations.push(DocumentedOperation {
+                        path: current_path.clone().unwrap_or_default(),
+                        method,
+                        has_401: false,
+                        is_public: false,
+                    });
+                }
+            }
+            continue;
+        }
+        let Some(operation) = operations.last_mut() else {
+            continue;
+        };
+        if indent == 6 && body == "security: []" {
+            operation.is_public = true;
+        }
+        if indent == 8 && body.starts_with("\"401\":") {
+            operation.has_401 = true;
+        }
+    }
+
+    let undocumented_methods: Vec<String> = mounted
+        .iter()
+        .filter(|(path, method)| {
+            !NON_API_ROUTES.contains(&path.as_str())
+                && !operations
+                    .iter()
+                    .any(|operation| operation.path == *path && operation.method == *method)
+        })
+        .map(|(path, method)| format!("{method} {path}"))
+        .collect();
+    assert!(
+        undocumented_methods.is_empty(),
+        "these daemon route methods are missing from docs/api.yaml: {undocumented_methods:?}. \
+         A client programs against the method as well as the path, so a changed method breaks \
+         it even when the path still matches."
+    );
+
+    let phantom_methods: Vec<String> = operations
+        .iter()
+        .filter(|operation| {
+            !mounted
+                .iter()
+                .any(|(path, method)| *path == operation.path && *method == operation.method)
+        })
+        .map(|operation| format!("{} {}", operation.method, operation.path))
+        .collect();
+    assert!(
+        phantom_methods.is_empty(),
+        "docs/api.yaml documents methods the daemon does not serve: {phantom_methods:?}. \
+         Either the route's method changed and the spec was not, or the spec is wrong."
+    );
+
+    let missing_401: Vec<String> = operations
+        .iter()
+        .filter(|operation| !operation.is_public && !operation.has_401)
+        .map(|operation| format!("{} {}", operation.method, operation.path))
+        .collect();
+    assert!(
+        missing_401.is_empty(),
+        "these operations do not document the 401 the auth middleware returns: {missing_401:?}. \
+         Every route outside `is_public_path` is rejected with 401 before its handler runs, so \
+         the code belongs to the operation, not to the handler body — which is why it went \
+         missing without a test going red."
+    );
+}
+
+/// Every status code a handler answers with on its own is documented.
+///
+/// 401 is a property of the route (the middleware rejects before a handler
+/// runs); every other code is a property of the *handler*, which knows what it
+/// had to read and what it refused. That is what made them invisible: 21
+/// operations answered 500 for an unreadable config while the spec listed only
+/// a 200, `/forwards/{id}` answered both 400 and 403 while documenting neither,
+/// and `/daemons/{alias}/exec` answered 404 and 502 with no trace in the spec.
+/// A client generated from the spec reads each of those as an unknown failure —
+/// `GET /gate` being the worst case, since the one question a broken gate file
+/// must still answer is "is the gate paused".
+///
+/// The handler→operation map is derived rather than written down: the handler
+/// named in each `.route(...)` call is looked up in the same source text and
+/// its own body is checked for every constant in `HANDLER_STATUS`. A code that
+/// arrives through a shared helper (`preflight_guarded_request`,
+/// `authorize_targets`, `locked_status`) is not visible this way, because that
+/// is the handler's *dependency* failing, not its own branch — those routes
+/// document their 408/423/429/500 by hand.
+#[test]
+fn api_yaml_documents_the_codes_each_handler_can_return() {
+    let daemon = include_str!("../src/bin/agent2ssh-daemon.rs");
+    let spec = include_str!("../../docs/api.yaml");
+
+    // Operations and the status codes they document, parsed by indentation:
+    // methods sit four spaces in under their path, response keys eight.
+    let mut documented: Vec<(String, &'static str, Vec<String>)> = Vec::new();
+    let mut current_path: Option<String> = None;
+    for line in spec.lines() {
+        let body = line.trim_start();
+        let indent = line.len() - body.len();
+        if let Some(rest) = line.strip_prefix("  /") {
+            let path = rest.split(':').next().unwrap_or_default();
+            current_path = Some(if path.is_empty() {
+                "/".to_string()
+            } else {
+                format!("/{path}")
+            });
+            continue;
+        }
+        if indent == 4 {
+            if let Some(name) = body.strip_suffix(':') {
+                if let Some((_, method)) = METHOD_BUILDERS.iter().find(|(_, known)| *known == name)
+                {
+                    documented.push((current_path.clone().unwrap_or_default(), method, Vec::new()));
+                }
+            }
+            continue;
+        }
+        if indent != 8 {
+            continue;
+        }
+        let Some(operation) = documented.last_mut() else {
+            continue;
+        };
+        if let Some(code) = body
+            .strip_prefix('"')
+            .and_then(|rest| rest.split('"').next())
+        {
+            operation.2.push(code.to_string());
+        }
+    }
+
+    let undocumented: Vec<String> = daemon_routes(daemon)
+        .into_iter()
+        .flat_map(|(path, method, handler)| {
+            let body = handler_body_of(daemon, &handler);
+            // An entirely undocumented operation is the route test's finding.
+            let Some((_, _, codes)) = documented.iter().find(|(known_path, known_method, _)| {
+                *known_path == path && *known_method == method
+            }) else {
+                return Vec::new();
+            };
+            HANDLER_STATUS
+                .iter()
+                .filter(|(constant, code)| {
+                    body.contains(&format!("StatusCode::{constant}"))
+                        && !codes.iter().any(|documented| documented == code)
+                })
+                .map(|(_, code)| format!("{code} {method} {path} ({handler})"))
+                .collect()
+        })
+        .collect();
+    assert!(
+        undocumented.is_empty(),
+        "these operations answer a status code they do not document: {undocumented:?}. \
+         The code comes from the handler's own body, so a client that programs against \
+         the spec cannot tell this failure from an unknown one."
+    );
+}
+
+/// Every documented response declares a body, because every one of them has one.
+///
+/// The daemon answers every error as `(StatusCode, Json<ErrorBody>)`, so a
+/// response with a `description` and no `content:` documents a body-less reply
+/// that cannot happen. 57 of them were written that way, all 4xx/5xx, and the
+/// omission is invisible from both sides: the value is there at runtime, and a
+/// client generator sees a status with no schema and falls back to "unknown".
+///
+/// `101` is exempt — `Switching Protocols` carries no body by definition.
+#[test]
+fn api_yaml_declares_a_body_for_every_response() {
+    let spec = include_str!("../../docs/api.yaml");
+
+    fn flush(pending: &mut Option<(String, bool)>, operation: &str, missing: &mut Vec<String>) {
+        if let Some((code, has_content)) = pending.take() {
+            if !has_content && code != "101" && code != "204" {
+                missing.push(format!("{code} {operation}"));
+            }
+        }
+    }
+
+    let mut missing: Vec<String> = Vec::new();
+    let mut path = String::new();
+    let mut operation = String::new();
+    let mut pending: Option<(String, bool)> = None;
+
+    for line in spec.lines() {
+        let body = line.trim_start();
+        let indent = line.len() - body.len();
+        if let Some(rest) = line.strip_prefix("  /") {
+            flush(&mut pending, &operation, &mut missing);
+            let name = rest.split(':').next().unwrap_or_default();
+            path = if name.is_empty() {
+                "/".to_string()
+            } else {
+                format!("/{name}")
+            };
+            operation.clear();
+            continue;
+        }
+        if indent == 4 {
+            flush(&mut pending, &operation, &mut missing);
+            if let Some(name) = body.strip_suffix(':') {
+                if METHOD_BUILDERS.iter().any(|(_, known)| *known == name) {
+                    operation = format!("{} {path}", name.to_uppercase());
+                }
+            }
+            continue;
+        }
+        if indent == 8 {
+            flush(&mut pending, &operation, &mut missing);
+            if let Some(rest) = body
+                .strip_prefix('"')
+                .and_then(|rest| rest.split('"').next())
+            {
+                if !rest.is_empty() && rest.chars().all(|ch| ch.is_ascii_digit()) {
+                    pending = Some((rest.to_string(), false));
+                }
+            }
+            continue;
+        }
+        if indent >= 10 && body.starts_with("content:") {
+            if let Some((_, has_content)) = pending.as_mut() {
+                *has_content = true;
+            }
+        }
+    }
+    flush(&mut pending, &operation, &mut missing);
+
+    assert!(
+        missing.is_empty(),
+        "these responses document no body: {missing:?}. The daemon answers them as \
+         `(StatusCode, Json<ErrorBody>)`, so the schema exists at runtime and only the \
+         contract is silent about it."
+    );
+}
+
+/// How a handler reads its request body decides which codes it can answer with,
+/// and the spec has to agree with the *reading*, not with the schema.
+///
+/// Three readings coexist in the daemon and they fail differently:
+///
+/// - `Json<T>` — 47 handlers. axum rejects before the handler runs: 415 when the
+///   request declares no `application/json` content type, 422 when the body
+///   parses but does not fit (`JsonDataError`), 400 when it does not parse at all
+///   (`JsonSyntaxError`). None of those three codes appeared on any of the 105
+///   operations, so a generated client saw every body mistake as an unknown
+///   failure — the same blind spot the missing 401s had, one layer down.
+/// - `axum::body::Bytes` — `approval_approve` only. The handler parses by hand
+///   and answers its own 400, so 415 and 422 cannot happen and must not be
+///   claimed. The spec claimed both for one round, because the response codes
+///   had been added by grepping for `requestBody` instead of reading the
+///   signature.
+/// - `Option<Json<T>>` — 3 handlers. Its rejection type is `Infallible`, so the
+///   `.ok()` these handlers use cannot fail: a wrong content type, invalid JSON
+///   and a mistyped field all arrive as `None`, i.e. "no body was sent". The
+///   dangerous case is `/shutdown`, where a body that was meant to name a PID
+///   silently skips the check instead of failing it.
+///
+/// The reader is derived from each handler's own parameter list, so this stays
+/// correct when a signature changes; the operation is then looked up in the spec
+/// and held to whatever that reading implies.
+#[test]
+fn api_yaml_documents_how_each_handler_reads_its_body() {
+    // `/` and `/console` serve the web console, not the API.
+    const NON_API_ROUTES: [&str; 2] = ["/", "/console"];
+
+    let daemon = include_str!("../src/bin/agent2ssh-daemon.rs");
+    let spec = include_str!("../../docs/api.yaml");
+
+    struct Documented {
+        method: &'static str,
+        path: String,
+        codes: Vec<String>,
+        /// `(status code, media type)` pairs, so a code documented with the wrong
+        /// kind of body can be caught: axum's rejections answer `text/plain`,
+        /// not the daemon's `Error` object.
+        media: Vec<(String, String)>,
+        has_request_body: bool,
+        /// The operation's own lines, so the prose can be checked for the
+        /// caveat a swallowed body needs.
+        text: String,
+    }
+
+    let mut documented: Vec<Documented> = Vec::new();
+    let mut current_path = String::new();
+    // Lines between a path and its first method belong to neither operation;
+    // without this, a path-level `description:` would be read as the previous
+    // operation's and could satisfy its caveat check.
+    let mut current_operation: Option<usize> = None;
+    let mut current_code = String::new();
+    for line in spec.lines() {
+        let body = line.trim_start();
+        let indent = line.len() - body.len();
+        if let Some(rest) = line.strip_prefix("  /") {
+            let path = rest.split(':').next().unwrap_or_default();
+            current_path = if path.is_empty() {
+                "/".to_string()
+            } else {
+                format!("/{path}")
+            };
+            current_operation = None;
+            continue;
+        }
+        if indent == 4 {
+            if let Some(name) = body.strip_suffix(':') {
+                if let Some((_, method)) = METHOD_BUILDERS.iter().find(|(_, known)| *known == name)
+                {
+                    documented.push(Documented {
+                        method,
+                        path: current_path.clone(),
+                        codes: Vec::new(),
+                        media: Vec::new(),
+                        has_request_body: false,
+                        text: String::new(),
+                    });
+                    current_operation = Some(documented.len() - 1);
+                    current_code.clear();
+                }
+            }
+            continue;
+        }
+        let Some(index) = current_operation else {
+            continue;
+        };
+        let operation = &mut documented[index];
+        operation.text.push_str(body);
+        operation.text.push('\n');
+        if indent == 6 && body.starts_with("requestBody:") {
+            operation.has_request_body = true;
+        }
+        if indent == 8 {
+            if let Some(code) = body
+                .strip_prefix('"')
+                .and_then(|rest| rest.split('"').next())
+            {
+                current_code = code.to_string();
+                operation.codes.push(code.to_string());
+            }
+        }
+        // `content:` sits ten spaces in under a response, its media type twelve.
+        if indent == 12 && (body == "text/plain:" || body == "application/json:") {
+            operation
+                .media
+                .push((current_code.clone(), body.trim_end_matches(':').to_string()));
+        }
+    }
+
+    enum BodyReader {
+        /// `Json<T>`: 415 / 422 / 400 all come from the extractor.
+        Required,
+        /// `Option<Json<T>>`: every extraction error becomes "no body".
+        Swallowed,
+        /// `Bytes`: the handler parses the body itself.
+        HandParsed,
+        /// No body parameter at all.
+        Absent,
+    }
+
+    let mut violations: Vec<String> = Vec::new();
+    let mut required = 0usize;
+    let mut swallowed = 0usize;
+
+    for (path, method, handler) in daemon_routes(daemon) {
+        if NON_API_ROUTES.contains(&path.as_str()) {
+            continue;
+        }
+        let params = handler_params_of(daemon, &handler);
+        let reader = if params.contains("Option<Json<") {
+            swallowed += 1;
+            BodyReader::Swallowed
+        } else if params.contains(": Json<") {
+            required += 1;
+            BodyReader::Required
+        } else if params.contains(": axum::body::Bytes") || params.contains(": Bytes,") {
+            BodyReader::HandParsed
+        } else {
+            BodyReader::Absent
+        };
+        // An entirely undocumented operation is the route test's finding.
+        let Some(operation) = documented
+            .iter()
+            .find(|known| known.path == path && known.method == method)
+        else {
+            continue;
+        };
+        let documents = |code: &str| operation.codes.iter().any(|known| known == code);
+        let label = format!("{method} {path} ({handler})");
+
+        for code in ["415", "422"] {
+            let claimed = documents(code);
+            match reader {
+                BodyReader::Required => {
+                    if !claimed {
+                        violations.push(format!(
+                            "{label} reads `Json<T>`, so the extractor answers {code} before \
+                             the handler runs, but the operation does not document it"
+                        ));
+                        continue;
+                    }
+                    // axum answers a rejection as `(status, String)`, which is
+                    // `text/plain`; claiming the daemon's `Error` object here
+                    // would have a generated client parse a message as JSON.
+                    let media: Vec<&str> = operation
+                        .media
+                        .iter()
+                        .filter(|(known, _)| known == code)
+                        .map(|(_, media)| media.as_str())
+                        .collect();
+                    if media != ["text/plain"] {
+                        violations.push(format!(
+                            "{label} documents {code} with {media:?} as its body; the extractor \
+                             answers a plain-text message, so this must be `text/plain`"
+                        ));
+                    }
+                }
+                BodyReader::Swallowed => {
+                    if claimed {
+                        violations.push(format!(
+                            "{label} reads `Option<Json<T>>`, whose rejection is `Infallible`: \
+                             it cannot answer {code}, so documenting it tells a client that a \
+                             malformed body is refused when it is silently ignored"
+                        ));
+                    }
+                }
+                BodyReader::HandParsed | BodyReader::Absent => {
+                    if claimed {
+                        violations.push(format!(
+                            "{label} has no `Json<T>` extractor, so nothing answers {code} \
+                             before the handler runs"
+                        ));
+                    }
+                }
+            }
+        }
+
+        match reader {
+            BodyReader::Required if !operation.has_request_body => violations.push(format!(
+                "{label} requires a JSON body but the operation declares no requestBody, so \
+                 a client has no schema to send against"
+            )),
+            // A swallowed body still needs saying: the operation's own 400 does
+            // not cover it, because a body that does not parse never reaches it.
+            BodyReader::Swallowed if !operation.text.contains("does not parse") => {
+                violations.push(format!(
+                    "{label} silently treats a body that does not parse as no body, and its \
+                     description does not say so"
+                ))
+            }
+            _ => {}
+        }
+    }
+
+    assert!(
+        required > 0 && swallowed > 0,
+        "the extractor shapes were not recognised in the daemon source ({required} `Json<T>`, \
+         {swallowed} `Option<Json<T>>`), so every check here would pass for the wrong reason"
+    );
+    assert!(
+        violations.is_empty(),
+        "these operations document a body contract the handler does not have: {violations:?}. \
+         `Json<T>` answers 415/422 by itself, `Option<Json<T>>` cannot answer either, and \
+         `Bytes` answers only what the handler writes."
+    );
+}
+
+/// An error response without a description tells a client the shape of a
+/// failure and nothing about what happened.
+///
+/// Four were in that state, and they were the four a client most needs prose
+/// for: `DELETE /hosts/{name}`'s 404 also covers a failed write (a read-only
+/// config directory answers "no such host" while the host is right there),
+/// `GET /hosts/{name}/policy` answered 403 and 404 with neither a description
+/// nor a hint, and `POST /exec`'s 400 covers both a too-long command and every
+/// execution failure the runner reports — with no 5xx beside it to separate
+/// them.
+///
+/// Only 4xx and 5xx are required to describe themselves. A 2xx carries a schema
+/// and its `description` would restate it; 78 of those are terse by choice.
+#[test]
+fn api_yaml_describes_every_error_response() {
+    let spec = include_str!("../../docs/api.yaml");
+
+    let mut missing: Vec<String> = Vec::new();
+    let mut path = String::new();
+    let mut operation = String::new();
+    // `(code, has_description)` for the response being read.
+    let mut pending: Option<(String, bool)> = None;
+
+    fn flush(pending: &mut Option<(String, bool)>, operation: &str, missing: &mut Vec<String>) {
+        if let Some((code, described)) = pending.take() {
+            if !described && (code.starts_with('4') || code.starts_with('5')) {
+                missing.push(format!("{code} {operation}"));
+            }
+        }
+    }
+
+    for line in spec.lines() {
+        let body = line.trim_start();
+        let indent = line.len() - body.len();
+        if let Some(rest) = line.strip_prefix("  /") {
+            flush(&mut pending, &operation, &mut missing);
+            let name = rest.split(':').next().unwrap_or_default();
+            path = if name.is_empty() {
+                "/".to_string()
+            } else {
+                format!("/{name}")
+            };
+            operation.clear();
+            continue;
+        }
+        if indent == 4 {
+            flush(&mut pending, &operation, &mut missing);
+            if let Some(name) = body.strip_suffix(':') {
+                if METHOD_BUILDERS.iter().any(|(_, known)| *known == name) {
+                    operation = format!("{} {path}", name.to_uppercase());
+                }
+            }
+            continue;
+        }
+        if indent == 8 {
+            flush(&mut pending, &operation, &mut missing);
+            if let Some(code) = body
+                .strip_prefix('"')
+                .and_then(|rest| rest.split('"').next())
+            {
+                if !code.is_empty() && code.chars().all(|ch| ch.is_ascii_digit()) {
+                    pending = Some((code.to_string(), false));
+                }
+            }
+            continue;
+        }
+        if indent >= 10 && body.starts_with("description:") {
+            if let Some((_, described)) = pending.as_mut() {
+                *described = true;
+            }
+        }
+    }
+    flush(&mut pending, &operation, &mut missing);
+
+    assert!(
+        missing.is_empty(),
+        "these error responses have no description: {missing:?}. An error a client cannot \
+         read about is one it can only retry blindly — and several of these codes cover more \
+         than one cause, which is the part that needs saying."
+    );
+}
+
+/// Every WebSocket frame the daemon can push is named in the contract.
+///
+/// `{"type":"shutdown"}` was pushed by both socket routes and appeared nowhere in
+/// `docs/api.yaml`: a client that switches on `type` and does not know it would
+/// log an unknown frame at exactly the moment the daemon is going away, which is
+/// the moment it needs to back off rather than reconnect.
+///
+/// The check is by type name, so it catches a *new* frame and not a changed
+/// shape — `/terminal` sends `{"type":"shutdown","message":…}` while
+/// `/exec/stream` sends `{"type":"shutdown"}`, and that difference is prose, not
+/// something this can see.
+#[test]
+fn every_websocket_frame_the_daemon_sends_is_documented() {
+    let daemon = include_str!("../src/bin/agent2ssh-daemon.rs");
+    let spec = include_str!("../../docs/api.yaml");
+
+    const MARKER: &str = "json!({\"type\":\"";
+    let mut frame_types: Vec<&str> = Vec::new();
+    let mut rest = daemon;
+    while let Some(at) = rest.find(MARKER) {
+        let after = &rest[at + MARKER.len()..];
+        if let Some(end) = after.find('"') {
+            let name = &after[..end];
+            if !frame_types.contains(&name) {
+                frame_types.push(name);
+            }
+        }
+        rest = after;
+    }
+
+    assert!(
+        !frame_types.is_empty(),
+        "no WebSocket frames were found in the daemon source, so this check would pass \
+         for the wrong reason"
+    );
+    let undocumented: Vec<&&str> = frame_types
+        .iter()
+        .filter(|name| !spec.contains(&format!("\"type\":\"{name}\"")))
+        .collect();
+    assert!(
+        undocumented.is_empty(),
+        "these WebSocket frame types are pushed but never named in docs/api.yaml: \
+         {undocumented:?}. A client switches on `type`; an unexpected one at shutdown or \
+         on error is read as a protocol violation."
+    );
+}
+
+/// A "drains for up to 500 ms" claim is a budget, so the loop needs one deadline.
+///
+/// Both socket routes keep the same number of milliseconds and spend it
+/// differently. `exec_stream` computes one deadline and a chatty command gets
+/// 500 ms in total; `handle_terminal` re-arms `timeout(500 ms, recv)` on every
+/// event, so its number is an *idle* timeout and the only bound left is the
+/// two-second per-connection grace that `POST /shutdown` documents. The terminal
+/// description used to make the budget claim for the idle timeout, which told a
+/// client its `tail -f` would be cut half a second after the shutdown frame when
+/// it can keep draining for two seconds.
+///
+/// The claim is compared against the shape of the loop, so the two cannot drift
+/// apart again. Unifying the loops is fine — change the prose with it.
+#[test]
+fn a_websocket_drain_budget_claim_matches_the_loop_it_describes() {
+    let daemon = include_str!("../src/bin/agent2ssh-daemon.rs");
+    let spec = include_str!("../../docs/api.yaml");
+
+    // One path's block, from its `  /name:` line to the next path key.
+    fn path_block<'a>(spec: &'a str, path: &str) -> &'a str {
+        let head = format!("\n  {path}:");
+        let at = spec
+            .find(&head)
+            .unwrap_or_else(|| panic!("docs/api.yaml has no `{path}` for this check to read"));
+        let rest = &spec[at + 1..];
+        let end = rest
+            .find("\n  /")
+            .map(|next| next + 1)
+            .unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    for (path, handler) in [
+        ("/exec/stream", "exec_stream"),
+        ("/terminal", "handle_terminal"),
+    ] {
+        let claims_budget = path_block(spec, path).contains("drains for up to 500 ms");
+        let body = handler_body_of(daemon, handler);
+        // The span has to stop at this handler's own closing brace: if it ran to
+        // the end of the file, the `timeout_at(` below could belong to another
+        // function and the comparison would answer for the whole daemon.
+        if let Some(at) = body.find("\nasync fn ") {
+            let head: String = body.chars().take(160).collect();
+            panic!(
+                "`{handler}`'s extracted body runs past the function: another `async fn` \
+                 starts at byte {at}, so a `timeout_at(` from elsewhere could satisfy this \
+                 check. The span starts with {head:?}"
+            );
+        }
+        let measures_one_deadline = body.contains("timeout_at(");
+        assert_eq!(
+            claims_budget,
+            measures_one_deadline,
+            "`{path}` {} a 500 ms budget, but `{handler}` {} a single deadline. The number \
+             is honest only when the loop computes the deadline once: a `timeout(500 ms, \
+             recv)` re-armed per event is an idle timeout, and the drain can then run for \
+             the whole per-connection grace.",
+            if claims_budget {
+                "claims"
+            } else {
+                "does not claim"
+            },
+            if measures_one_deadline {
+                "computes"
+            } else {
+                "does not compute"
+            },
+        );
+    }
+}
+
+/// A plain YAML scalar may not contain `: `, and prose about status codes does.
+///
+/// `description: … forwarded verbatim: when the remote answers …,` is not a
+/// string to a YAML parser — the second colon reads as a key and the document
+/// stops parsing there. That happened twice in one round of edits and nothing
+/// noticed: the contract tests above parse `api.yaml` line by line, and no Rust
+/// test loads it as YAML, so a spec every client generates from could not be
+/// loaded at all while the suite stayed green.
+///
+/// Exempt, because none of them is a plain scalar: a quoted value, a `|` or `>`
+/// block, and a `{ … }` / `[ … ]` flow collection.
+#[test]
+fn api_yaml_descriptions_with_a_colon_are_quoted() {
+    let spec = include_str!("../../docs/api.yaml");
+    let offenders: Vec<&str> = spec
+        .lines()
+        .filter(|line| {
+            let Some(value) = line.trim_start().strip_prefix("description: ") else {
+                return false;
+            };
+            let plain = !value.starts_with(['"', '\'', '|', '>', '{', '[']);
+            plain && value.contains(": ")
+        })
+        .map(|line| line.trim())
+        .collect();
+
+    assert!(
+        offenders.is_empty(),
+        "these descriptions would stop a YAML parser at the second colon: {offenders:?}. \
+         Quote the value, or switch it to a `>-` block."
     );
 }
 
@@ -2235,9 +3303,14 @@ fn local_exec_route_runs_the_shared_preflight() {
         "local_exec does not run the shared gate chain: a local command would skip \
          the execution gate, the rate limiter, the token scope and the approval policy"
     );
+    let execute = body.find("exec_local_core_with_shutdown(req, s.shutdown.clone())");
     assert!(
-        body.contains("exec_local_core("),
-        "local_exec no longer delegates to exec_local_core"
+        execute.is_some(),
+        "local_exec must pass its shutdown token to the local executor"
+    );
+    assert!(
+        preflight < execute,
+        "local execution must follow the shared preflight"
     );
 
     // Ordering, not just presence. If the reserved-host check ran after the gate
@@ -2254,6 +3327,26 @@ fn local_exec_route_runs_the_shared_preflight() {
     assert!(
         host_check < preflight,
         "local_exec must reject a non-local host *before* the gate chain runs"
+    );
+}
+
+#[test]
+fn ssh_exec_route_runs_preflight_before_shutdown_aware_execution() {
+    let daemon = include_str!("../src/bin/agent2ssh-daemon.rs");
+    assert!(daemon.contains(r#".route("/exec", post(exec))"#));
+    let start = daemon.find("async fn exec(").expect("exec handler");
+    let rest = &daemon[start..];
+    let end = rest.find("\nasync fn local_exec(").expect("next handler");
+    let body = &rest[..end];
+    let preflight = body
+        .find("preflight_rewritable_request(")
+        .expect("shared preflight");
+    let execute = body
+        .find("exec_ssh_core_with_shutdown(req, s.shutdown.clone())")
+        .expect("shutdown-aware SSH execution");
+    assert!(
+        preflight < execute,
+        "authorization must precede SSH execution"
     );
 }
 

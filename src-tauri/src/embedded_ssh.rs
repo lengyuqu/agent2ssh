@@ -149,6 +149,18 @@ fn validate_key_path(path: &str) -> Result<()> {
     Ok(())
 }
 
+/// The name a host key is stored and reported under.
+///
+/// RSA maps to `ssh-rsa` even when the handshake used `rsa-sha2-256` or
+/// `rsa-sha2-512`: those are *signature* algorithms, while the key blob — the
+/// thing a user compares against `ssh-keyscan` or OpenSSH's own `known_hosts` —
+/// is `ssh-rsa`. `HostKeyKind` is derived from the key itself
+/// (`russh_impl::ClientHandler::check_server_key`), not from the negotiated
+/// signature algorithm, so one RSA key occupies exactly one slot in
+/// `known_hosts.json` no matter which SHA-2 variant won. That is deliberate: a
+/// key keyed by signature algorithm would have produced a false untrusted-host
+/// verdict — and one stale entry per variant — whenever the negotiation moved
+/// between `rsa-sha2-512` and `ssh-rsa` for the same key.
 fn host_key_algorithm(kind: HostKeyKind) -> &'static str {
     match kind {
         HostKeyKind::Rsa => "ssh-rsa",
@@ -509,6 +521,18 @@ pub fn import_known_hosts_from_ssh(path: Option<&str>) -> Result<KnownHostImport
             STANDARD_NO_PAD.encode(Sha256::digest(&key_blob))
         );
 
+        // `key_type` is the file's second column, which is a *public key*
+        // algorithm (`ssh-rsa`, `ecdsa-sha2-*`, `ssh-ed25519`) and never a
+        // signature algorithm — `rsa-sha2-256` does not appear there — so it is
+        // the same name `host_key_algorithm` produces for the store.
+        //
+        // Only OpenSSH's `[host]:port` form is parsed. A bare `host:port` comes
+        // back from `split_host_port` unchanged with the port defaulted to 22,
+        // so the format below appends a second one (`host:2222:22`): the entry
+        // is filed under an identity no `HostProfile` resolves to, and still
+        // counts as `imported`. OpenSSH brackets every non-22 port, so reaching
+        // this needs a hand-edited or foreign `known_hosts`; the fix changes
+        // what gets stored and is recorded as L2-95.
         let first_host = host_field.split(',').next().unwrap_or(host_field);
         let (hostname, port) = split_host_port(first_host);
         let identity = format!("{hostname}:{port}");
@@ -573,6 +597,16 @@ pub fn remove_system_known_host(host_name: &str, port: u16) -> Result<usize> {
         .with_context(|| format!("failed to read {}", ssh_path.display()))?;
 
     // Build the patterns to match: bare hostname and [hostname]:port form.
+    //
+    // The comparison below is textual, so it misses every shape it does not
+    // spell out: with `port == 22` the only pattern is the bare name, and a
+    // line written `[example.internal]:22` — OpenSSH does not write that, but a
+    // hand-edited or foreign file does — survives the `forget` with `removed 0`.
+    // A bare `example.internal:22` misses for the same reason. Both are the same
+    // normalization gap as the IPv6 literal at port 22 (L2-15) and as the
+    // import identity (L2-95), so the three want one decision: parse the host
+    // field with `split_host_port` and compare `(host, port)` instead of
+    // comparing strings.
     let patterns: Vec<String> = if port == 22 {
         vec![host_name.to_string()]
     } else {
@@ -630,6 +664,152 @@ fn split_host_port(host_field: &str) -> (String, u16) {
         }
     }
     (host_field.to_string(), 22)
+}
+
+#[cfg(test)]
+mod remove_system_known_host_matching {
+    use super::{remove_system_known_host, split_host_port};
+    use std::path::PathBuf;
+
+    /// One `known_hosts` line, far enough from a real key to be unreadable as
+    /// one — the function compares host fields and never parses the key.
+    fn line(host_field: &str) -> String {
+        format!("{host_field} ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample\n")
+    }
+
+    struct Home {
+        dir: PathBuf,
+    }
+
+    impl Home {
+        /// A `$HOME` with `~/.ssh/known_hosts` holding `body`.
+        fn with_known_hosts(body: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("agent2ssh-home-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(dir.join(".ssh")).unwrap();
+            std::fs::write(dir.join(".ssh").join("known_hosts"), body).unwrap();
+            Self { dir }
+        }
+
+        fn known_hosts(&self) -> String {
+            std::fs::read_to_string(self.dir.join(".ssh").join("known_hosts")).unwrap()
+        }
+    }
+
+    impl Drop for Home {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// `remove_system_known_host` resolves the file through `dirs::home_dir()`,
+    /// which reads the process environment, so these cases cannot run beside each
+    /// other — nor beside anything else that rewrites `HOME`. `serial` is what
+    /// keeps them honest instead of flaky.
+    fn with_home<R>(body: &str, run: impl FnOnce(&Home) -> R) -> R {
+        let home = Home::with_known_hosts(body);
+        let previous = std::env::var_os("HOME");
+        std::env::set_var("HOME", &home.dir);
+        let result = run(&home);
+        match previous {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        result
+    }
+
+    /// Its premise does not hold: OpenSSH writes a bare `::1` at port 22 and only
+    /// brackets the address for a *non-standard* port (`man 8 sshd`; observed from
+    /// both `ssh` and `ssh-keyscan` against a local sshd). So `[::1]:22` is a form
+    /// no OpenSSH produces, and only the bare form is built for port 22, which is
+    /// `Ok(0)` here — the CLI then prints its idempotent miss line and the entry
+    /// stays. **Pinned as a failure while the question is open**: whether `forget`
+    /// should also sweep the bracketed form is L2-15 in
+    /// `docs/reports/OPT-LOOP-L2-PENDING.md`, and deleting this test is one
+    /// resolution of it, not a maintenance edit.
+    #[test]
+    #[serial_test::serial]
+    fn an_ipv6_literal_at_port_22_is_removed() {
+        let body = line("[::1]:22") + &line("other.example");
+        let removed = with_home(&body, |home| {
+            let removed = remove_system_known_host("::1", 22).unwrap();
+            assert!(
+                !home.known_hosts().contains("[::1]:22"),
+                "the [::1]:22 line survived: {}",
+                home.known_hosts()
+            );
+            removed
+        });
+        assert_eq!(removed, 1, "one line matched, not zero");
+    }
+
+    /// The other direction of the same asymmetry, and a latent data-loss one: a
+    /// *bare* host name is port 22 and nothing else, so forgetting
+    /// `example.internal:2222` must not take the port-22 line with it. Removing
+    /// it would be the harmless-sounding reading of "match any form of this
+    /// host", and it is wrong: the two lines are two different endpoints.
+    ///
+    /// This is also the constraint that rules out the obvious fix for the case
+    /// above: matching "the bare name *and* `[name]:port`" at **every** port
+    /// makes this line a casualty, so that version cannot satisfy both cases.
+    /// Two shapes can: adding `[name]:22` only under the `port == 22` branch, or
+    /// comparing `split_host_port(host_field)` against `(host_name, port)` — the
+    /// parse `the_address_forms_this_file_must_handle` already pins.
+    #[test]
+    #[serial_test::serial]
+    fn forgetting_one_port_leaves_the_other_port_alone() {
+        let body = line("example.internal") + &line("[example.internal]:2222");
+        let removed = with_home(&body, |home| {
+            let removed = remove_system_known_host("example.internal", 2222).unwrap();
+            let left = home.known_hosts();
+            assert_eq!(
+                left,
+                line("example.internal"),
+                "forgetting :2222 must leave the :22 line byte-identical"
+            );
+            removed
+        });
+        assert_eq!(removed, 1);
+    }
+
+    /// A hashed entry stores `|1|<salt>|<hmac>`, so there is no host field to
+    /// compare and no plaintext to compare it against. It cannot be matched
+    /// without hashing, so the honest contract is a *reportable* miss: the caller
+    /// has to be able to tell "nothing matched" from "the entry exists but this
+    /// cannot see it". Today both are `Ok(0)` and the CLI prints the idempotent
+    /// miss line, which is true and useless.
+    #[test]
+    #[serial_test::serial]
+    fn a_hashed_entry_is_reported_as_unmatched_rather_than_removed() {
+        let hashed = "|1|F1e1Ke1yqYqYqYqYqYqYqY=|AbCdEfGhIjKlMnOpQrStUvWxYz0123456789=\n";
+        let removed = with_home(hashed, |home| {
+            let removed = remove_system_known_host("example.internal", 22).unwrap();
+            assert_eq!(
+                home.known_hosts(),
+                hashed,
+                "a hashed line must be left alone"
+            );
+            removed
+        });
+        assert_eq!(removed, 0);
+    }
+
+    /// `split_host_port` is the function that already knows the four address
+    /// forms; whatever `remove_system_known_host` compares has to agree with it.
+    /// Pinned separately so a change to one without the other fails here rather
+    /// than only in an end-to-end case.
+    #[test]
+    fn the_address_forms_this_file_must_handle() {
+        assert_eq!(
+            split_host_port("example.internal"),
+            ("example.internal".into(), 22)
+        );
+        assert_eq!(
+            split_host_port("[example.internal]:2222"),
+            ("example.internal".into(), 2222)
+        );
+        assert_eq!(split_host_port("[::1]:22"), ("::1".into(), 22));
+        assert_eq!(split_host_port("127.0.0.1"), ("127.0.0.1".into(), 22));
+    }
 }
 
 fn default_username() -> String {
@@ -1183,6 +1363,53 @@ impl std::fmt::Display for ExecTimeout {
 
 impl std::error::Error for ExecTimeout {}
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ExecShutdown {
+    dispatched: bool,
+}
+
+impl ExecShutdown {
+    const BEFORE_DISPATCH: Self = Self { dispatched: false };
+    const OUTCOME_UNKNOWN: Self = Self { dispatched: true };
+
+    pub(crate) fn outcome_unknown(self) -> bool {
+        self.dispatched
+    }
+}
+
+impl std::fmt::Display for ExecShutdown {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.dispatched {
+            write!(
+                f,
+                "SSH request interrupted during daemon shutdown; remote command outcome unknown"
+            )
+        } else {
+            write!(
+                f,
+                "SSH request cancelled before the remote command was sent"
+            )
+        }
+    }
+}
+impl std::error::Error for ExecShutdown {}
+
+fn map_shutdown_error<E: Into<anyhow::Error>>(
+    error: E,
+    shutdown: Option<&crate::ws_drain::ShutdownToken>,
+    session: Option<&Session>,
+    dispatched: bool,
+) -> anyhow::Error {
+    if shutdown.is_some_and(|token| token.is_cancelled_now()) {
+        if let Some(session) = session {
+            session.abort();
+        }
+        ExecShutdown { dispatched }.into()
+    } else {
+        error.into()
+    }
+}
+
 /// Idle passes tolerated after the channel reports EOF before the drain ends.
 /// Covers a trailing extended-data (stderr) packet still in flight.
 const DRAIN_IDLE_PASSES_AFTER_EOF: u8 = 2;
@@ -1205,13 +1432,43 @@ pub(crate) fn run_command_capture(
     stdin: Option<&[u8]>,
     timeout_secs: u64,
     max_bytes: usize,
+    shutdown: Option<crate::ws_drain::ShutdownToken>,
 ) -> Result<CapturedExec> {
-    let session = connect_embedded_ssh(host, timeout_secs)?;
-    let mut channel = session.channel_session()?;
-    channel.exec(command)?;
+    if shutdown
+        .as_ref()
+        .is_some_and(|token| token.is_cancelled_now())
+    {
+        return Err(ExecShutdown::BEFORE_DISPATCH.into());
+    }
+    let session = connect_embedded_ssh(host, timeout_secs)
+        .map_err(|error| map_shutdown_error(error, shutdown.as_ref(), None, false))?;
+    if shutdown
+        .as_ref()
+        .is_some_and(|token| token.is_cancelled_now())
+    {
+        session.abort();
+        return Err(ExecShutdown::BEFORE_DISPATCH.into());
+    }
+    let mut channel = session
+        .channel_session()
+        .map_err(|error| map_shutdown_error(error, shutdown.as_ref(), Some(&session), false))?;
+    if shutdown
+        .as_ref()
+        .is_some_and(|token| token.is_cancelled_now())
+    {
+        session.abort();
+        return Err(ExecShutdown::BEFORE_DISPATCH.into());
+    }
+    channel
+        .exec(command)
+        .map_err(|error| map_shutdown_error(error, shutdown.as_ref(), Some(&session), true))?;
     if let Some(data) = stdin {
-        channel.write_all(data)?;
-        channel.send_eof()?;
+        channel
+            .write_all(data)
+            .map_err(|error| map_shutdown_error(error, shutdown.as_ref(), Some(&session), true))?;
+        channel
+            .send_eof()
+            .map_err(|error| map_shutdown_error(error, shutdown.as_ref(), Some(&session), true))?;
     }
 
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
@@ -1228,23 +1485,37 @@ pub(crate) fn run_command_capture(
         &mut stderr,
         deadline,
         timeout_secs,
+        shutdown.as_ref(),
     );
 
     if let Err(error) = drained {
-        // Still non-blocking here on purpose. Blocking-mode `close` waits for a
-        // server acknowledgement that only arrives once the remote command has
-        // exited, so calling it after `set_blocking(true)` made the timeout path
-        // block for the command's full remaining runtime — a 1 s deadline on an
-        // 8 s command took 8 s to return. Tearing the connection down in
-        // non-blocking mode returns promptly instead.
+        // Abort the owned socket directly. Sending SSH close/disconnect frames
+        // can itself wait on a backpressured peer, including in nonblocking mode.
         //
         // Measured against OpenSSH 9.7 this does **not** kill the remote
         // command: a pty-less exec channel's process group is only reaped on
         // the pty path. Stopping it for real needs a PTY or a server-side
         // `timeout` wrapper — see `ExecRequest::timeout_secs`.
-        let _ = channel.close();
-        let _ = session.disconnect(None, "command timed out", None);
-        return Err(error);
+        let interrupted = error.is::<ExecShutdown>()
+            || shutdown
+                .as_ref()
+                .is_some_and(|token| token.is_cancelled_now());
+        session.abort();
+        return if interrupted {
+            Err(ExecShutdown::OUTCOME_UNKNOWN.into())
+        } else {
+            Err(error)
+        };
+    }
+
+    // Cancellation can arrive after the last output poll but before the
+    // blocking close exchange. Do not enter that exchange in this case.
+    if shutdown
+        .as_ref()
+        .is_some_and(|token| token.is_cancelled_now())
+    {
+        session.abort();
+        return Err(ExecShutdown::OUTCOME_UNKNOWN.into());
     }
 
     // The command has been drained to EOF, so the remaining blocking exchanges
@@ -1254,10 +1525,36 @@ pub(crate) fn run_command_capture(
     // `timeout_secs`.
     session.set_blocking(true);
     session.set_timeout(TEARDOWN_TIMEOUT_MS);
-    channel.wait_close()?;
+    let closed = if let Some(token) = shutdown.as_ref() {
+        channel.wait_close_cancellable(&|| token.is_cancelled_now())
+    } else {
+        channel.wait_close().map(|()| true)
+    };
+    match closed {
+        Ok(true) => {}
+        Ok(false) => {
+            session.abort();
+            return Err(ExecShutdown::OUTCOME_UNKNOWN.into());
+        }
+        Err(error) => {
+            session.abort();
+            return if shutdown
+                .as_ref()
+                .is_some_and(|token| token.is_cancelled_now())
+            {
+                Err(ExecShutdown::OUTCOME_UNKNOWN.into())
+            } else {
+                Err(error.into())
+            };
+        }
+    }
 
     Ok(CapturedExec {
-        exit_code: Some(channel.exit_status()?),
+        exit_code: Some(
+            channel.exit_status().map_err(|error| {
+                map_shutdown_error(error, shutdown.as_ref(), Some(&session), true)
+            })?,
+        ),
         truncated: stdout.truncated() || stderr.truncated(),
         dropped_bytes: stdout.dropped_bytes() + stderr.dropped_bytes(),
         stdout: stdout.into_bytes(),
@@ -1285,12 +1582,16 @@ fn drain_channel_output(
     stderr: &mut BoundedCapture,
     deadline: Instant,
     timeout_secs: u64,
+    shutdown: Option<&crate::ws_drain::ShutdownToken>,
 ) -> Result<()> {
     let mut stdout_buf = [0u8; 8192];
     let mut stderr_buf = [0u8; 8192];
     let mut idle_after_eof = 0u8;
 
     loop {
+        if shutdown.is_some_and(|token| token.is_cancelled_now()) {
+            return Err(ExecShutdown::OUTCOME_UNKNOWN.into());
+        }
         let mut progressed = false;
 
         match channel.read(&mut stdout_buf) {
@@ -1705,9 +2006,9 @@ fn authenticate(
         // failures caused by the backend not understanding a key's encoding, and
         // the current transport reads every format this crate writes.
         // An OpenSSH user certificate sits next to its key as `<key>-cert.pub`.
-        // Handing it to libssh2 as the public-key file makes the handshake offer
-        // the certificate instead of the bare key, which is what a server that
-        // only trusts a CA (`TrustedUserCAKeys`) will accept.
+        // Handing it to the transport as the public-key file makes the handshake
+        // offer the certificate instead of the bare key, which is what a server
+        // that only trusts a CA (`TrustedUserCAKeys`) will accept.
         let cert = user_certificate_for(Path::new(&path));
         let pubkey = cert.as_deref();
         if let Some(cert) = &cert {
@@ -1741,9 +2042,19 @@ fn authenticate(
             Err(e) => {
                 // A server old enough to accept only the SHA-1 `ssh-rsa` signature
                 // (OpenSSH before 7.2, many embedded devices) rejects the
-                // rsa-sha2-* signature libssh2 prefers; the key looks unauthorized
-                // although it is not. Offer the legacy signature once, and only
-                // after the modern ones were refused.
+                // rsa-sha2-* signature this transport prefers; the key looks
+                // unauthorized although it is not.
+                //
+                // This branch cannot rescue it. User authentication runs after the
+                // handshake, and `method_pref` refuses a preference once the
+                // handshake is done (`russh_impl::Session::method_pref`), so
+                // `retry_with_legacy_rsa_signature` returns `false` without
+                // offering anything. The fallback that works is inside the
+                // transport: `userauth_pubkey_file` retries with
+                // `PrivateKeyWithHashAlg::new(key, None)` after a refused SHA-2
+                // attempt, which is why the only reachable `detected_by` value is
+                // "transport fallback". Removing the dead branch is a behaviour
+                // decision, recorded as L2-13.
                 if is_publickey_refused(&e)
                     && retry_with_legacy_rsa_signature(
                         session,
@@ -1782,7 +2093,10 @@ fn authenticate(
         }
     }
 
-    // T2-9: Try SSH agent first (includes Windows Pageant via ssh2's agent connector)
+    // T2-9: Try SSH agent first. "First" is this function's order, not the
+    // connector's: the transport's agent facade opens the OpenSSH named pipe
+    // before Pageant on Windows (`russh_impl::agent::connect_stream`), so a
+    // running-but-useless Pageant is not consulted first either.
     // Finding 1: Iterate ALL agent identities, not just the first one.
     if let Ok(mut agent) = session.agent() {
         if agent.connect().is_ok() && agent.list_identities().is_ok() {
@@ -1834,9 +2148,9 @@ fn authenticate(
 }
 
 /// `session.handshake()`, with the one failure that has an actionable cause
-/// spelled out. libssh2 reports "no algorithm both sides support" as
-/// `-5 Unable to exchange encryption keys`, which says nothing about *why*. The
-/// built-in defaults are deliberately modern (see `ssh_algo::safe_defaults`), so
+/// spelled out. The transport reports "no algorithm both sides support" as
+/// [`crate::transport::ErrorKind::KeyExchange`], which says nothing about *why*.
+/// The built-in defaults are deliberately modern (see `ssh_algo::safe_defaults`), so
 /// an old server or device that only offers SHA-1 key exchange, CBC ciphers or
 /// SHA-1 MACs lands here, and the way out is a named override.
 fn handshake_with_hint(session: &mut Session, host: &HostProfile) -> Result<()> {
@@ -1857,20 +2171,37 @@ fn handshake_with_hint(session: &mut Session, host: &HostProfile) -> Result<()> 
     })
 }
 
-/// libssh2's "the server said no to this key" codes: authentication failed (-18)
-/// and public-key unverified (-19).
+/// "The server said no to this key".
+///
+/// The numeric libssh2 codes this used to test went with that backend (-18 and
+/// -19 both arrived as `ssh2::Error`, which no longer exists); the transport
+/// reports the same condition as [`ErrorKind::PublicKeyRefused`], set where a
+/// pubkey attempt comes back refused.
 fn is_publickey_refused(error: &Error) -> bool {
     error.kind() == crate::transport::ErrorKind::PublicKeyRefused
 }
 
 /// Retry public-key authentication with `ssh-rsa` (RSA over SHA-1) as the
-/// signature algorithm. Returns whether it authenticated. Harmless for non-RSA
-/// keys, which ignore the preference.
+/// signature algorithm. Returns whether it authenticated.
 ///
-/// A `true` here is the second way a connection can end up on SHA-1, and the
-/// caller records it for the same reason it records the transport's own
-/// fallback: an operator who cannot find out which hosts still demand `ssh-rsa`
-/// cannot plan an upgrade.
+/// It cannot today, and the reason is structural rather than a missing server:
+/// `method_pref` rejects any preference set after the handshake
+/// (`russh_impl::Session::method_pref`), and this runs during user
+/// authentication, which is later. Even if it got through, `apply_prefs` has an
+/// empty arm for `SignAlgo` — signature algorithms are chosen per attempt, not
+/// negotiated as a list — so the preference would be dropped in silence.
+///
+/// The comment this used to carry ("harmless for non-RSA keys, which ignore the
+/// preference") was wrong on both counts: the preference is never applied, so
+/// nothing gets the chance to ignore it, and `apply_prefs` would drop it for RSA
+/// keys just the same. Kept, together with the caller's branch, because deleting
+/// it is a behaviour decision — recorded as L2-13 in `OPT-LOOP-L2-PENDING.md`.
+///
+/// If it could return `true` it would be the second way a connection lands on
+/// SHA-1, and the caller would record it for the same reason it records the
+/// transport's own fallback: an operator who cannot find out which hosts still
+/// demand `ssh-rsa` cannot plan an upgrade. That sentence is the reason the dead
+/// branch is worth a decision rather than silent deletion.
 fn retry_with_legacy_rsa_signature(
     session: &Session,
     username: &str,
@@ -2071,6 +2402,23 @@ fn run_terminal(
 mod tests {
     use super::*;
     use crate::store::CONFIG_DIR_ENV;
+
+    #[tokio::test]
+    async fn setup_errors_preserve_original_or_report_shutdown_phase() {
+        let shutdown = crate::ws_drain::ShutdownToken::new();
+        let original =
+            map_shutdown_error(anyhow!("original failure"), Some(&shutdown), None, false);
+        assert_eq!(original.to_string(), "original failure");
+        shutdown.cancel().await;
+        let before = map_shutdown_error(anyhow!("socket failure"), Some(&shutdown), None, false);
+        assert!(before.is::<ExecShutdown>());
+        assert!(before
+            .to_string()
+            .contains("before the remote command was sent"));
+        let after = map_shutdown_error(anyhow!("socket failure"), Some(&shutdown), None, true);
+        assert!(after.is::<ExecShutdown>());
+        assert!(after.to_string().contains("remote command outcome unknown"));
+    }
     /// A fresh connection has not used the legacy signature, and asking does not
     /// change that. The negative case matters more than the positive one: a flag
     /// that defaulted to true would put a warning on every connection and be
@@ -2096,6 +2444,44 @@ mod tests {
         std::fs::write(&cert, "ssh-ed25519-cert-v01@openssh.com AAAA").unwrap();
         assert_eq!(user_certificate_for(&key), Some(cert));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `retry_with_legacy_rsa_signature` cannot succeed, and the code does not
+    /// say so.
+    ///
+    /// It asks the transport for `method_pref(SignAlgo, "ssh-rsa")` and treats
+    /// `Err` as "no retry". The facade documents that a preference may only be
+    /// set *before* the handshake — by the time a public key is refused, the
+    /// handshake has succeeded — and the backend refuses it there
+    /// (`russh_impl/mod.rs`, "algorithm preferences must be set before the
+    /// handshake"). So the call always returns `Err`, the function always returns
+    /// false, and the SHA-1 fallback a pre-7.2 server needs is the transport's own
+    /// internal one — the comment above the call site says so, and it stopped
+    /// naming `libssh2` when that backend was removed.
+    ///
+    /// A source assertion, because the alternative is a fixture sshd restricted to
+    /// `ssh-rsa` and an `algo set` that should be refused — and this pins the whole
+    /// shape in three lines: the call site exists, it still returns `false` on
+    /// `Err`, and the backend still rejects a preference after connect.
+    #[test]
+    fn the_legacy_rsa_retry_is_dead_because_the_preference_cannot_be_set() {
+        let caller = include_str!("embedded_ssh.rs");
+        // Matched as source text rather than as one long literal, so rustfmt's
+        // wrapping cannot make the assertion pass or fail by accident.
+        assert!(
+            caller.contains("fn retry_with_legacy_rsa_signature("),
+            "the retry seam moved; re-read this assertion before deleting it"
+        );
+        assert!(
+            caller.contains("SignAlgo") && caller.contains("\"ssh-rsa\""),
+            "the retry no longer names the legacy signature algorithm; if it was replaced by a \
+             working fallback, this assertion is the thing to delete"
+        );
+        let backend = include_str!("transport/russh_impl/mod.rs");
+        assert!(
+            backend.contains("algorithm preferences must be set before the handshake"),
+            "the backend guard this depends on is gone; the retry may now be reachable"
+        );
     }
 
     fn test_host() -> HostProfile {

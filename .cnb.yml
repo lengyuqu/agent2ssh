@@ -14,6 +14,63 @@ main:
             cd src-tauri
             cargo test --locked --no-default-features --lib
             cargo test --locked --no-default-features --features daemon --bin agent2ssh-daemon
+            cargo test --locked --no-default-features --test daemon_integration
+            cargo test --locked --no-default-features --test e2e_harness_safety
+            cargo test --locked --no-default-features --test host_secret_stdin
             cargo test --locked --no-default-features --features daemon --test daemon_local_exec_e2e --test daemon_resident_session_e2e --test daemon_sftp_approval_e2e --test daemon_stop_e2e -- --test-threads=1
             cargo test --locked --no-default-features --test ssh_operation_deadline --test mcp_local_deadlines --test approval_store_persistence --test desktop_backup_decrypt --test resident_close
+    # The fixture uses its own temporary config, key and uniquely named container.
+    # Pin the server version so a green run identifies the implementation tested.
+    - name: real-ssh-e2e
+      docker:
+        image: rust:bookworm
+      services:
+        - docker
+      stages:
+        - name: real SSH and SFTP fixture
+          timeout: 30m
+          script: |
+            set -eu
+            if ! command -v ssh >/dev/null 2>&1; then
+              apt-get update
+              apt-get install -y openssh-client
+            fi
+            command -v ssh
+            docker info --format '{{.ServerVersion}}'
+            export AGENT2SSH_CONTAINER_RUNTIME=docker
+            export AGENT2SSH_E2E_IMAGE=lscr.io/linuxserver/openssh-server:version-10.3_p1-r1
+            cargo build --locked --manifest-path src-tauri/Cargo.toml --release --no-default-features --bin agent2ssh
+            bash scripts/e2e-container.sh
   pull_request: *regression
+
+  # Explicitly requested full matrix; no automatic schedule or PR gate.
+  api_trigger_ssh_matrix: &ssh_matrix
+    - name: full-ssh-matrix
+      docker:
+        image: rust:bookworm
+      services:
+        - docker
+      stages:
+        - name: multi-version SSH compatibility matrix
+          timeout: 60m
+          lock:
+            key: agent2ssh-ssh-matrix
+            expires: 3900
+            wait: true
+            timeout: 3600
+          script: |
+            set -eu
+            if ! command -v ssh-keygen >/dev/null 2>&1 || ! command -v ssh-agent >/dev/null 2>&1 || ! command -v ssh-add >/dev/null 2>&1; then
+              apt-get update
+              apt-get install -y openssh-client
+            fi
+            for tool in ssh-keygen ssh-agent ssh-add; do command -v "$tool"; done
+            docker info --format '{{.ServerVersion}}'
+            export AGENT2SSH_CONTAINER_RUNTIME=docker
+            export AGENT2SSH_MATRIX_REQUIRE_FULL=1
+            export AGENT2SSH_MATRIX_SERVERS='openssh:8.3 openssh:8.8 openssh:9.3 openssh:9.9 openssh:10.3 dropbear'
+            export AGENT2SSH_MATRIX_LEGACY=1
+            unset SSH_AUTH_SOCK SSH_AGENT_PID
+            cargo build --locked --manifest-path src-tauri/Cargo.toml --release --no-default-features --bin agent2ssh
+            bash scripts/e2e-ssh-matrix.sh
+  web_trigger_ssh_matrix: *ssh_matrix

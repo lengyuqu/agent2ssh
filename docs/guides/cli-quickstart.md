@@ -10,7 +10,7 @@ Agent2SSH 提供命令行工具 `agent2ssh`，用于管理 SSH 主机、执行�
 
 ```bash
 agent2ssh --version
-# agent2ssh 0.3.0
+# agent2ssh 0.4.5
 ```
 
 ### 安装方式
@@ -300,6 +300,9 @@ agent2ssh session open <host> [--json]
 agent2ssh session write <session-id> "<input>"
 ```
 
+这条**没有 `--json`**，也不打印结构化结果——它是唯一一个不跟随本组「`[--json]`」口径的会话子命令
+（`SessionCommands::Write` 只有 `input: String`）。写脚本时按「写入成功即退出码 0」判定，需要结果就读 `session read`。
+
 ### 读取会话输出
 
 ```bash
@@ -415,7 +418,7 @@ agent2ssh keys algorithm [--name | --json]
 agent2ssh keys generate <名称> [--type ed25519|rsa] [--comment <备注>] [--json]
 ```
 
-- `keys algorithm`：输出**本构建实际可用于认证**的类型（`ed25519` 或 `rsa`）。这是 SSH 库（`russh` + `ring`）能读取哪些私钥格式的结果，与操作系统无关：能读 OpenSSH 私钥容器的构建推荐 Ed25519，读不了的才会退回 RSA 并写成传统 PEM。当前各平台构建（Windows 含在内）都能读，因此回答 `ed25519`。`--json` 额外给出 `bits` 与 `reads_openssh_private_keys`，便于解释这个结论从何而来。
+- `keys algorithm`：输出推荐类型，现在是**常量 `ed25519`**——传输层是 `russh` + `ring`，各平台同一套算法集，能读本应用写出的所有私钥格式，于是操作系统与构建都不构成差异（历史上「读不了 OpenSSH 私钥容器就退回 RSA」那条分支已随 libssh2 一起删除）。这条命令的价值因此变成**脚本的稳定接口**：仍应询问，不要假定。`--type rsa` 仍可显式指定，写出 3072 位传统 PEM。`--json` 额外给出 `bits`（ed25519 下为 `null`）与 `reads_openssh_private_keys`（恒 `true`；保留这个键是为了不破坏已经解析它的脚本，而不是因为还有东西可探测）。
 - `keys generate`：不带 `--type` 时按 `keys algorithm` 生成，**只输出私钥路径**，因此可以直接喂给别的命令：
 
 ```bash
@@ -521,7 +524,7 @@ agent2ssh policy test "terraform destroy -auto-approve" --host prod-db --json
 agent2ssh daemon start
 ```
 
-守护进程启动后会在 `127.0.0.1:7722` 监听 HTTP API，并提供 Web 控制台。
+守护进程启动后会在 `127.0.0.1:7722` 监听 HTTP API，并提供 Web 控制台。这个地址是默认值，`AGENT2SSH_DAEMON_ADDR` 可以改成别的 `host:port`；客户端（CLI / MCP / 桌面端）都经同一条解析逻辑取地址，改端口不需要另外配置。
 
 ### 停止守护进程
 

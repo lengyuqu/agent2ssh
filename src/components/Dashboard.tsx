@@ -152,6 +152,11 @@ export default function Dashboard({
         <StatCard
           icon={<RadioTower size={13} />}
           label={t("24h executions")}
+          // `null` means three different things here: not loaded yet, loading,
+          // and the audit read failed (`:106-108` sets it to null in `catch`).
+          // All three render "…", so a daemon that is offline shows a spinner
+          // that never resolves rather than an error. Splitting the state is a
+          // type change to `StatCard`'s `value`; parked as L2-63.
           value={execCount24h ?? "…"}
           onClick={() => onNavigateModule("audit")}
         />

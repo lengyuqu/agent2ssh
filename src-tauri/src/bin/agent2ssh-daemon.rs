@@ -109,15 +109,101 @@ fn uptime_secs() -> u64 {
 /// `TerminateProcess`, which skips the drain below. `notify_one` stores a permit
 /// when nothing is waiting yet, so a request that races the listener still lands.
 static SHUTDOWN_REQUESTED: tokio::sync::Notify = tokio::sync::Notify::const_new();
+// The daemon has one shutdown lifecycle. Approval waiters must leave their
+// HTTP handlers when it starts, rather than holding graceful shutdown open.
+static DAEMON_SHUTDOWN: std::sync::OnceLock<agent2ssh::ws_drain::ShutdownToken> =
+    std::sync::OnceLock::new();
+
+/// Allow a WebSocket handler to drain briefly after shutdown, then drop its
+/// I/O future so a peer that stops reading cannot block its cleanup forever.
+async fn run_ws_with_shutdown_deadline<F: std::future::Future<Output = ()>>(
+    shutdown: &agent2ssh::ws_drain::ShutdownToken,
+    future: F,
+    grace: std::time::Duration,
+) -> bool {
+    tokio::pin!(future);
+    tokio::select! {
+        _ = &mut future => true,
+        _ = shutdown.cancelled() => tokio::time::timeout(grace, &mut future).await.is_ok(),
+    }
+}
+
+/// Absolute path of the config directory this daemon serves — the thing a
+/// request can be checked against without trusting the caller's PID. Two
+/// daemons given the same `AGENT2SSH_CONFIG_DIR` will answer identically, which
+/// is the honest limit of this check (K14).
+fn serving_config_dir() -> String {
+    config_dir()
+        .map(|dir| {
+            std::fs::canonicalize(&dir)
+                .unwrap_or(dir)
+                .display()
+                .to_string()
+        })
+        .unwrap_or_else(|error| format!("<unavailable: {error}>"))
+}
+
+#[derive(serde::Deserialize)]
+struct ShutdownRequest {
+    /// The PID the caller believed it was addressing. Optional so a hand-written
+    /// `curl -X POST` keeps working; every first-party caller sends it.
+    expect_pid: Option<u32>,
+}
 
 /// Ask the daemon to shut down the way a termination signal would. Admin-only:
 /// stopping the daemon ends every session and forward it holds.
+///
+/// The caller usually found this daemon through `/health` and then decided to
+/// stop it. That is two requests, and by the second one the listening socket may
+/// belong to a *different* daemon — a restart, a respawn — that accepts the same
+/// admin token, because the token is a file in the shared config directory. So
+/// `expect_pid` is re-checked here instead of trusted from the caller's earlier
+/// look: a request that names another process is refused and this daemon keeps
+/// running, which is the difference between "the stop failed" and "the wrong
+/// daemon is gone". The check narrows the race and cannot close it — no shared
+/// clock, no atomic swap between the two processes. See K14.
 async fn daemon_shutdown(
     Extension(auth): Extension<AuthContext>,
+    body: Option<Json<ShutdownRequest>>,
 ) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     require_admin(&auth)?;
-    tracing::info!("shutdown requested over HTTP");
+    let own_pid = std::process::id();
+    match body {
+        Some(Json(ShutdownRequest {
+            expect_pid: Some(expected),
+        })) if expected != own_pid => {
+            let _ = append_diagnostic_log(
+                "warn",
+                "daemon",
+                "refused a shutdown request that named another process",
+                Some(serde_json::json!({ "expect_pid": expected, "pid": own_pid })),
+            );
+            return Err(err(
+                StatusCode::CONFLICT,
+                format!(
+                    "this daemon is pid {own_pid}, not the pid {expected} the request named; \
+                     refusing to shut down"
+                ),
+            ));
+        }
+        // The PID matched this process: the request is about this daemon, so
+        // honour it.
+        Some(Json(ShutdownRequest {
+            expect_pid: Some(_),
+        })) => {}
+        // An explicit `expect_pid: null` asks for an unchecked stop. Dropping
+        // the check is not the same as making no claim, so say so rather than
+        // quietly honouring it; leaving the field out is what a `curl` does.
+        Some(Json(ShutdownRequest { expect_pid: None })) => {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "expect_pid must be a PID when present; omit the field to stop without a check",
+            ))
+        }
+        None => {}
+    }
+    tracing::info!(pid = own_pid, "shutdown requested over HTTP");
     SHUTDOWN_REQUESTED.notify_one();
     Ok(Json(OkBody { ok: true }))
 }
@@ -547,6 +633,7 @@ async fn request_and_wait_for_approval(
         approval_id: Some(approval_id_notify.clone()),
         risk_level: Some(risk_notify.clone()),
         exit_code: None,
+        remote_outcome_unknown: None,
     };
     tokio::spawn(async move {
         if let Err(e) = notify_approval_pending(
@@ -565,7 +652,29 @@ async fn request_and_wait_for_approval(
         }
     });
 
-    match approval_wait(approval_id).await {
+    let status = if let Some(shutdown) = DAEMON_SHUTDOWN.get() {
+        tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => {
+                // Invalidate the pending card so it cannot later appear to
+                // authorize a request which no longer has a caller.
+                let result = approval_respond(approval_id, false).await;
+                append_rejected_exec_audit(
+                    &prompt.source, &prompt.host, &prompt.command, prompt.risk,
+                    "daemon shutting down; approval wait cancelled", prompt.change_id.as_deref(),
+                );
+                let _ = append_diagnostic_log(
+                    "info", "daemon", "approval wait cancelled during shutdown",
+                    Some(serde_json::json!({ "approval_id": approval_id.to_string(), "rejected": result.is_ok() })),
+                );
+                return Err("daemon shutting down; approval wait cancelled".to_string());
+            }
+            status = approval_wait(approval_id) => status,
+        }
+    } else {
+        approval_wait(approval_id).await
+    };
+    match status {
         ApprovalStatus::Approved => Ok(match approval_rewritten_command(approval_id).await {
             Some(command) => ApprovalOutcome::ApprovedRewritten(command),
             None => ApprovalOutcome::Approved,
@@ -648,6 +757,7 @@ async fn authorize_command_inner(
                 approval_id: None,
                 risk_level: Some(format!("{risk}")),
                 exit_code: None,
+                remote_outcome_unknown: None,
             };
             tokio::spawn(async move {
                 if let Err(e) = fire_webhook(evt).await {
@@ -1080,7 +1190,7 @@ struct RiskCheckResult {
     risk_level: RiskLevel,
     matched_rule: Option<String>,
 }
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 struct OkBody {
     ok: bool,
 }
@@ -1111,6 +1221,11 @@ async fn health() -> Json<serde_json::Value> {
         "embedded_keygen_available": true,
         "ssh_available": true,
         "pid": std::process::id(),
+        // Which config directory this daemon serves. A stop decision is made on
+        // a PID read from *a* config dir, and the listener that answers may
+        // belong to a daemon serving a different one; naming it here is what the
+        // stop path can compare before it asks for a shutdown (K14).
+        "config_dir": serving_config_dir(),
     }))
 }
 
@@ -1581,7 +1696,8 @@ async fn exec(
 
     let host_clone = req.host.clone();
     let cmd_clone = req.command.clone();
-    let result = exec_ssh_core(req).await;
+    let result = exec_ssh_core_with_shutdown(req, s.shutdown.clone()).await;
+    let shutdown_outcome = result.as_ref().err().and_then(ssh_shutdown_outcome);
     EXEC_COUNT.fetch_add(1, Ordering::Relaxed);
     EXEC_TOTAL_DURATION_MS.fetch_add(exec_start.elapsed().as_millis() as u64, Ordering::Relaxed);
     let exit_code = result.as_ref().ok().and_then(|r| r.exit_code);
@@ -1592,15 +1708,21 @@ async fn exec(
         approval_id: None,
         risk_level: None,
         exit_code,
+        remote_outcome_unknown: shutdown_outcome,
     };
     tokio::spawn(async move {
         if let Err(e) = fire_webhook(evt).await {
             tracing::error!(error = %e, "webhook fire error");
         }
     });
-    result
-        .map(Json)
-        .map_err(|e| err(StatusCode::BAD_REQUEST, e))
+    result.map(Json).map_err(|e| {
+        let status = if shutdown_outcome.is_some() {
+            StatusCode::SERVICE_UNAVAILABLE
+        } else {
+            StatusCode::BAD_REQUEST
+        };
+        err(status, e)
+    })
 }
 
 /// Run a command on the machine the daemon itself is running on.
@@ -1671,7 +1793,7 @@ async fn local_exec(
     }
 
     let cmd_clone = req.command.clone();
-    let result = exec_local_core(req).await;
+    let result = exec_local_core_with_shutdown(req, s.shutdown.clone()).await;
     EXEC_COUNT.fetch_add(1, Ordering::Relaxed);
     EXEC_TOTAL_DURATION_MS.fetch_add(exec_start.elapsed().as_millis() as u64, Ordering::Relaxed);
     let exit_code = result.as_ref().ok().and_then(|r| r.exit_code);
@@ -1682,6 +1804,7 @@ async fn local_exec(
         approval_id: None,
         risk_level: None,
         exit_code,
+        remote_outcome_unknown: None,
     };
     tokio::spawn(async move {
         if let Err(e) = fire_webhook(evt).await {
@@ -2464,23 +2587,27 @@ async fn session_read(
         .unwrap_or_else(|| (format!("session:{id}"), Vec::new()));
     check_daemon_scope(&auth.scope, &session_host, &session_tags, "session_read")
         .map_err(|e| err(StatusCode::FORBIDDEN, e))?;
-    session_read_core(uuid, q.timeout_ms.unwrap_or(2000))
-        .await
-        .map(|output| {
-            if !output.is_empty() {
-                publish_event(
-                    EventType::SessionOutput,
-                    serde_json::json!({
-                        "source": source,
-                        "session_id": id,
-                        "output_preview": preview_text(&output, 4096),
-                        "output_bytes": output.len(),
-                    }),
-                );
-            }
-            Json(OutputBody { output })
-        })
-        .map_err(|e| err(StatusCode::BAD_REQUEST, e))
+    agent2ssh::session::session_read_core_with_shutdown(
+        uuid,
+        q.timeout_ms.unwrap_or(2000),
+        s.shutdown.clone(),
+    )
+    .await
+    .map(|output| {
+        if !output.is_empty() {
+            publish_event(
+                EventType::SessionOutput,
+                serde_json::json!({
+                    "source": source,
+                    "session_id": id,
+                    "output_preview": preview_text(&output, 4096),
+                    "output_bytes": output.len(),
+                }),
+            );
+        }
+        Json(OutputBody { output })
+    })
+    .map_err(|e| err(StatusCode::BAD_REQUEST, e))
 }
 async fn session_close(
     State(s): State<AppState>,
@@ -3362,6 +3489,11 @@ async fn risk_check(
         .host
         .as_deref()
         .and_then(|host| command_authorization_target(host).risk_override);
+    // A marker, not the pattern. `classify_with_user_rules` answers only whether
+    // *some* user rule matched — it returns the level, not the rule — so every
+    // match collapses to this one literal and `matched_rule` has exactly two
+    // possible values: `null`, or `"user_rule"`. `docs/api.yaml` states that
+    // domain, and the caller cannot learn which pattern fired.
     let matched_rule = classify_with_user_rules(&body.command)
         .await
         .map(|_| "user_rule".to_string());
@@ -3922,7 +4054,7 @@ async fn metrics_trend(
 // ── Event Stream SSE (F6-4) ─────────────────────────────────────────────────
 
 async fn events_stream(
-    State(_s): State<AppState>,
+    State(s): State<AppState>,
     Extension(auth): Extension<AuthContext>,
 ) -> Result<
     Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>>,
@@ -3964,7 +4096,12 @@ async fn events_stream(
             Err(_) => None,
         }
     });
-    let stream = initial.chain(live);
+    // Hyper waits for active response bodies during graceful shutdown. End the
+    // SSE body on the same cancellation signal used by WebSocket handlers.
+    let shutdown = s.shutdown.clone();
+    let stream = initial.chain(live).take_until(async move {
+        shutdown.cancelled().await;
+    });
 
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
@@ -4639,11 +4776,18 @@ async fn handle_terminal(
     };
     let recording_id = recorder.as_ref().map(|active| active.id().to_string());
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<TerminalEvent>(128);
-    let event_task = tokio::task::spawn_blocking(move || {
-        while let Ok(event) = terminal_rx.recv() {
-            if event_tx.blocking_send(event).is_err() {
-                break;
+    let event_task = tokio::task::spawn_blocking(move || loop {
+        if event_tx.is_closed() {
+            break;
+        }
+        match terminal_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(event) => {
+                if event_tx.blocking_send(event).is_err() {
+                    break;
+                }
             }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
     });
 
@@ -4671,6 +4815,7 @@ async fn handle_terminal(
     let (mut ws_tx, mut ws_rx) = socket.split();
     let mut pending_input = String::new();
 
+    let drained = run_ws_with_shutdown_deadline(&shutdown_token, async {
     loop {
         tokio::select! {
             // T2-15: Listen for shutdown signal — enter drain mode
@@ -4717,6 +4862,12 @@ async fn handle_terminal(
             event = event_rx.recv() => {
                 match event {
                     Some(TerminalEvent::Connected(info)) => {
+                        // `recording_id` is `null` when nothing is being
+                        // recorded: the key is present and null, never absent,
+                        // so a client must not read "no key" as "no recording".
+                        // `terminal_id` is always the hyphenated form —
+                        // `Uuid`'s serde impl produces the same bytes, so the
+                        // `.to_string()` below is for the reader, not the wire.
                         let _ = ws_tx.send(Message::Text(
                             serde_json::json!({
                                 "type": "connected",
@@ -4866,8 +5017,19 @@ async fn handle_terminal(
             }
         }
     }
+    }, std::time::Duration::from_secs(2)).await;
+    if !drained {
+        tracing::warn!(%terminal_id, "terminal WebSocket did not drain before shutdown deadline");
+        let _ = append_diagnostic_log(
+            "warn",
+            "daemon_terminal",
+            "WebSocket drain deadline expired",
+            Some(serde_json::json!({"terminal_id": terminal_id})),
+        );
+    }
 
     let _ = terminal_tx.send(TerminalCommand::Close);
+    drop(event_rx);
     let _ = event_task.await;
     if let Some(active) = recorder {
         if let Err(error) = active.finish() {
@@ -4882,8 +5044,6 @@ async fn handle_terminal(
             );
         }
     }
-    // T2-15: Unregister from drain registry (connection closed normally)
-    drain_handle.unregister().await;
     state.terminal_inputs.lock().await.remove(&terminal_id);
     state.limiter.lock().await.unregister_session(&terminal_id);
 
@@ -4905,6 +5065,7 @@ async fn handle_terminal(
             })),
         );
     }
+    drain_handle.unregister().await;
 }
 
 // ── WebSocket streaming exec ─────────────────────────────────────────────────
@@ -4971,6 +5132,15 @@ fn spawn_embedded_exec_stream(
                     Err(error) if error.kind() == ErrorKind::WouldBlock => {}
                     Err(error) => return Err(error.into()),
                 }
+                // `eof()` is `state.eof && stdout empty && stderr empty`
+                // (`transport/russh_impl/channel.rs`), so it cannot turn true
+                // while either queue still holds bytes: where the check sits in
+                // the loop does not matter. What does matter is that the loop
+                // stops on this predicate rather than on `read() == 0` —
+                // `read_side` answers 0 as soon as the stream has ended, even
+                // when the *other* queue still has bytes (the libssh2 drain
+                // loops relied on that), so an `Ok(0)` break would drop the tail
+                // of stderr.
                 if channel.eof() {
                     break;
                 }
@@ -5163,6 +5333,7 @@ async fn exec_stream(
         let connection_owner = agent2ssh::ResourceOwner::Headless(Uuid::new_v4());
         let (drop_tx, _drop_rx) = tokio::sync::watch::channel(true);
 
+        let drained = run_ws_with_shutdown_deadline(&shutdown_token, async {
         loop {
             tokio::select! {
                 // T2-15: On shutdown, drain remaining output then close
@@ -5227,8 +5398,7 @@ async fn exec_stream(
                     .is_err()
                     {
                         drain_handle.end_send().await;
-                        drain_handle.unregister().await;
-                        return;
+                        break;
                     }
                     drain_handle.end_send().await;
                 }
@@ -5253,8 +5423,7 @@ async fn exec_stream(
                     .is_err()
                     {
                         drain_handle.end_send().await;
-                        drain_handle.unregister().await;
-                        return;
+                        break;
                     }
                     drain_handle.end_send().await;
                 }
@@ -5276,10 +5445,23 @@ async fn exec_stream(
                 }
             }
         }
-        drain_handle.unregister().await;
+        }, std::time::Duration::from_secs(2)).await;
+        if !drained {
+            tracing::warn!("exec WebSocket did not drain before shutdown deadline");
+            let _ = append_diagnostic_log("warn", "daemon_exec_stream", "WebSocket drain deadline expired", None);
+        }
         let duration_ms = started.elapsed().as_millis();
         let completed_host = req.host.clone();
         let completed_command = req.command.clone();
+        let interrupted = shutdown_token.is_cancelled_now() && code.is_none();
+        let audit_reason = if interrupted {
+            Some(match req.reason.as_deref() {
+                Some(reason) => format!("{reason}; daemon shutdown interrupted stream; remote outcome unknown"),
+                None => "daemon shutdown interrupted stream; remote outcome unknown".to_string(),
+            })
+        } else {
+            req.reason.clone()
+        };
         let audit_result = ExecResult {
             host: completed_host.clone(),
             command: completed_command.clone(),
@@ -5294,7 +5476,7 @@ async fn exec_stream(
         let _ = append_audit(
             &audit_result,
             risk,
-            req.reason.as_deref(),
+            audit_reason.as_deref(),
             req.change_id.as_deref(),
             Some(&source),
         );
@@ -5307,16 +5489,16 @@ async fn exec_stream(
                 "exit_code": code,
                 "risk_level": format!("{}", risk),
                 "duration_ms": duration_ms,
+                "interrupted": interrupted,
             }),
         );
 
-        let mut s = socket.lock().await;
-        let _ = s
-            .send(Message::Text(
-                serde_json::json!({"type":"exit","code":code,"duration_ms":duration_ms})
-                    .to_string(),
-            ))
-            .await;
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), async {
+            let mut s = socket.lock().await;
+            let _ = s.send(Message::Text(
+                serde_json::json!({"type":"exit","code":code,"duration_ms":duration_ms}).to_string(),
+            )).await;
+        }).await;
 
         // A1: Broadcast connection drop and clean up owned resources.
         let _ = drop_tx.send(false);
@@ -5334,6 +5516,7 @@ async fn exec_stream(
                 })),
             );
         }
+        drain_handle.unregister().await;
     })
 }
 
@@ -5450,6 +5633,7 @@ async fn main() -> anyhow::Result<()> {
             approval_id: None,
             risk_level: None,
             exit_code: None,
+            remote_outcome_unknown: None,
         };
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
@@ -5574,19 +5758,22 @@ async fn main() -> anyhow::Result<()> {
     let listener = TcpListener::bind(addr).await?;
 
     // PID
-    let pid_path = config_dir.join("daemon.pid");
-    std::fs::write(&pid_path, std::process::id().to_string())?;
+    agent2ssh::daemon_control::write_daemon_pid(std::process::id())?;
 
     let limits = load_execution_limits()?;
     // T2-16: Initialize the global prompt waiter for 2FA/OTP keyboard-interactive prompts
     let prompt_waiter = agent2ssh::prompt_waiter::PromptWaiter::new();
     agent2ssh::embedded_ssh::set_prompt_waiter(prompt_waiter.clone());
+    let shutdown = agent2ssh::ws_drain::ShutdownToken::new();
+    DAEMON_SHUTDOWN
+        .set(shutdown.clone())
+        .map_err(|_| anyhow::anyhow!("daemon shutdown already initialized"))?;
     let state = AppState {
         token: token.clone(),
         limiter: Arc::new(Mutex::new(ExecutionLimiter::new(limits))),
         session_input_buffers: Arc::new(Mutex::new(HashMap::new())),
         terminal_inputs: Arc::new(Mutex::new(HashMap::new())),
-        shutdown: agent2ssh::ws_drain::ShutdownToken::new(),
+        shutdown,
         drain_registry: agent2ssh::ws_drain::DrainRegistry::new(),
         prompt_waiter,
     };
@@ -5764,26 +5951,70 @@ async fn main() -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown_signal(shutdown_clone))
         .await?;
 
-    // T2-15: Wait for active WS connections to drain (max 5 seconds)
-    let drained = drain_registry
-        .drain_all(std::time::Duration::from_secs(5))
-        .await;
-    if drained > 0 {
-        tracing::info!("drained {} WS connections", drained);
+    // Upgraded WebSockets can outlive axum's HTTP serve future. Wait for their
+    // handlers to unregister after cleanup, with one bound below the stop wait.
+    if !drain_registry
+        .wait_until_empty(std::time::Duration::from_secs(4))
+        .await
+    {
+        tracing::warn!("WebSocket handlers did not finish before shutdown deadline");
     }
 
-    let _ = std::fs::remove_file(&pid_path);
+    let pid_removed = agent2ssh::daemon_control::remove_daemon_pid_file_if(std::process::id())?;
     let _ = append_diagnostic_log(
         "info",
         "daemon",
-        "daemon shut down; pid file removed",
-        Some(serde_json::json!({ "pid": std::process::id() })),
+        "daemon shut down",
+        Some(serde_json::json!({ "pid": std::process::id(), "pid_file_removed": pid_removed })),
     );
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn stalled_websocket_future_is_dropped_after_shutdown_deadline() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        struct DropMarker(Arc<AtomicBool>);
+        impl Drop for DropMarker {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let shutdown = agent2ssh::ws_drain::ShutdownToken::new();
+        let flag = Arc::new(AtomicBool::new(false));
+        let marker = flag.clone();
+        let token = shutdown.clone();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            super::run_ws_with_shutdown_deadline(
+                &token,
+                async move {
+                    let _marker = DropMarker(marker);
+                    let _ = ready_tx.send(());
+                    std::future::pending::<()>().await;
+                },
+                std::time::Duration::from_millis(50),
+            )
+            .await
+        });
+        ready_rx.await.unwrap();
+        shutdown.cancel().await;
+        assert!(
+            !tokio::time::timeout(std::time::Duration::from_secs(1), task)
+                .await
+                .unwrap()
+                .unwrap()
+        );
+        assert!(
+            flag.load(Ordering::SeqCst),
+            "stalled future must be dropped before cleanup"
+        );
+    }
+
     #[test]
     fn cors_origin_allowlist_is_desktop_and_loopback_only() {
         use super::is_trusted_cors_origin as ok;
@@ -5799,6 +6030,93 @@ mod tests {
     }
 
     use super::*;
+
+    /// `/health` has to say which config directory it serves, or a stop cannot
+    /// tell this daemon from one started elsewhere with the same token. A
+    /// missing field would silently downgrade every stop to a guess.
+    #[test]
+    fn health_reports_the_config_directory_it_serves() {
+        with_temp_config(|| {
+            let body = tokio::runtime::Runtime::new().unwrap().block_on(health()).0;
+            let reported = body["config_dir"]
+                .as_str()
+                .expect("health names the config directory");
+            let expected = agent2ssh::config_dir().unwrap();
+            assert_eq!(
+                reported,
+                std::fs::canonicalize(&expected)
+                    .unwrap_or(expected)
+                    .display()
+                    .to_string()
+            );
+        });
+    }
+
+    /// A shutdown request that names another process must be refused by the
+    /// daemon that actually answered. The full race — health hits A, the
+    /// listener becomes B, the client's shutdown goes to B — is driven with two
+    /// real processes in `tests/daemon_stop_e2e.rs`; this pins the branch itself.
+    #[tokio::test]
+    async fn a_shutdown_that_names_another_pid_is_refused() {
+        let admin = AuthContext {
+            scope: None,
+            principal: [0; 32],
+        };
+        let (status, Json(body)) = daemon_shutdown(
+            Extension(admin),
+            Some(Json(ShutdownRequest {
+                expect_pid: Some(std::process::id().wrapping_add(1)),
+            })),
+        )
+        .await
+        .expect_err("a request for another PID must not be honoured");
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(body.error.contains("refusing to shut down"), "{body:?}");
+    }
+
+    /// `expect_pid: null` asks for an unchecked stop. Accepting it silently
+    /// would be the same hole with a different spelling.
+    #[tokio::test]
+    async fn an_explicitly_empty_expect_pid_is_a_bad_request() {
+        let admin = AuthContext {
+            scope: None,
+            principal: [0; 32],
+        };
+        let (status, _) = daemon_shutdown(
+            Extension(admin),
+            Some(Json(ShutdownRequest { expect_pid: None })),
+        )
+        .await
+        .expect_err("an explicit null must not mean 'no opinion'");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    /// The naming form only works for the daemon it names; this daemon's own PID
+    /// is accepted (and the notify below is what the other tests would race on,
+    /// so this one stops short of asserting the wakeup).
+    #[tokio::test]
+    async fn a_shutdown_that_names_this_daemon_is_accepted() {
+        let admin = AuthContext {
+            scope: None,
+            principal: [0; 32],
+        };
+        let accepted = daemon_shutdown(
+            Extension(admin),
+            Some(Json(ShutdownRequest {
+                expect_pid: Some(std::process::id()),
+            })),
+        )
+        .await;
+        match accepted {
+            Ok(Json(body)) => assert!(body.ok, "a named request for this PID is accepted"),
+            Err((status, Json(body))) => {
+                panic!(
+                    "this daemon's own PID must be accepted; got {status}: {:?}",
+                    body.error
+                )
+            }
+        }
+    }
 
     fn broadcast_request(command: &str) -> TerminalBroadcastRequest {
         TerminalBroadcastRequest {

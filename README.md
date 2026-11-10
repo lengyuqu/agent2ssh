@@ -147,6 +147,8 @@ open http://127.0.0.1:7722/console
 
 Authenticated requests use the bearer token stored at `~/.agent2ssh/daemon.token`.
 
+`daemon stop` names the process it means to stop (`expect_pid` on `POST /shutdown`) and the daemon re-checks it, so a listener that was replaced by another daemon between the health check and the stop refuses instead of shutting down. If you see `the daemon listening now is pid B, not the pid A the stop was for`, the stop found a different daemon: run it again to address pid B.
+
 ## Data
 
 Local data is stored under `~/.agent2ssh/`. See [docs/guides/configuration-guide.md](docs/guides/configuration-guide.md) for the full file layout, configuration format, and storage details.
@@ -247,7 +249,7 @@ For first-time external users, follow the [10-minute CLI and MCP setup guide](do
 - Browser/WebSocket interactive terminal with remote PTY resize forwarding
 - Marker-backed command blocks with color rails, search, navigation, safe plain-text copy, and structured block metadata
 - Opt-in local asciicast v2 terminal recording with variable-speed desktop playback; recordings are treated as sensitive and excluded from sync
-- Connection diagnostics include authentication method, host-key algorithm, server banner, and SHA256 host-key fingerprint
+- Connection diagnostics include authentication method, host-key algorithm, SHA256 host-key fingerprint, and jump-host alias when present; the server banner is deliberately not among them
 - Local and remote port forwarding with desktop tunnel creation, active tunnel list, host counts, and removal controls
 - Forward list/remove by ID
 - PTY session writes use line-buffered authorization for completed shell input and operation-level audit entries across daemon and desktop-local paths. This is a conservative guard for normal command input, not a full shell parser for arbitrary interactive programs.
@@ -278,7 +280,7 @@ For first-time external users, follow the [10-minute CLI and MCP setup guide](do
 - MCP tools for local and remote operation
 - Bounded event previews for session input/output and streaming exec output, suitable for local agent activity monitoring
 
-## MCP Tools (75)
+## MCP Tools
 
 Agent2SSH exposes **76 MCP tools** covering host management, command snippets, command execution, SFTP, persistent sessions, local execution (one-shot `local:<environment>` commands and long-lived resident shell sessions), port forwarding, playbooks, audit, approval workflows, execution gate visibility, daemon management, secret redaction rules, terminal highlight rules, and SSH algorithm preferences.
 

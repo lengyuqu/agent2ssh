@@ -3,7 +3,7 @@ use agent2ssh::approval::{
     load_approval_policies, preview_expired_approvals, save_approval_policies, ApprovalPolicy,
 };
 use agent2ssh::daemon_control::{
-    daemon_health_pid, daemon_pid_state, read_daemon_pid, remove_daemon_pid_file,
+    daemon_health_pid, daemon_pid_state, read_daemon_pid, remove_daemon_pid_file_if,
     start_daemon_background, stop_daemon_process, DaemonPidState,
 };
 use agent2ssh::embedded_ssh::{
@@ -555,14 +555,14 @@ impl KeyTypeArg {
 
 #[derive(Debug, Subcommand)]
 enum KeyCommands {
-    /// Show the key algorithm this build can authenticate with
+    /// Show the key algorithm this build recommends
     ///
-    /// This is a property of the SSH library agent2ssh links, not of the host
-    /// OS: a build whose libssh2 uses the WinCNG backend cannot read the OpenSSH
-    /// private-key container, so it recommends RSA written as traditional PEM
-    /// (`-----BEGIN RSA PRIVATE KEY-----`). Scripts that provision a key should
-    /// ask here rather than assume a type, or the key they generate may be one
-    /// this build cannot use.
+    /// Always `ed25519`. The question this command was added to answer — whether
+    /// a build can read an OpenSSH private-key container — has one answer on
+    /// every platform now that the transport is `russh`, which reads every format
+    /// this app writes. It stays because scripts provision keys through it, and
+    /// because `--json` still carries `reads_openssh_private_keys` (constant
+    /// `true`) for the parsers written against the old answer.
     Algorithm {
         /// Print only the algorithm name (for scripts)
         #[arg(long)]
@@ -577,8 +577,9 @@ enum KeyCommands {
         name: String,
         /// Algorithm to generate: ed25519 or rsa
         ///
-        /// Defaults to `keys algorithm`, i.e. whichever type this build can
-        /// actually authenticate with.
+        /// Defaults to `keys algorithm`, which answers `ed25519` on every build
+        /// — not "whichever type this build can authenticate with", since every
+        /// build can read every format this crate writes.
         #[arg(long = "type", value_name = "ALGORITHM")]
         key_type: Option<KeyTypeArg>,
         /// Comment written into the public key
@@ -616,13 +617,18 @@ enum HostCommands {
         port: Option<u16>,
         #[arg(long)]
         key: Option<String>,
-        /// SSH password for password-based authentication. Prefer keys for production.
-        #[arg(long)]
+        /// SSH password (visible in process arguments); prefer --password-stdin.
+        #[arg(long, conflicts_with = "password_stdin")]
         password: Option<String>,
-        /// Passphrase of the encrypted private key given with --key. A user
-        /// certificate stored next to the key as <key>-cert.pub is picked up automatically.
-        #[arg(long)]
+        /// Read the SSH password from redirected stdin, up to EOF; requires an unlocked credential store.
+        #[arg(long, conflicts_with_all = ["password", "passphrase_stdin"])]
+        password_stdin: bool,
+        /// Key passphrase (visible in process arguments); prefer --passphrase-stdin.
+        #[arg(long, conflicts_with = "passphrase_stdin")]
         passphrase: Option<String>,
+        /// Read the key passphrase from redirected stdin, up to EOF; requires an unlocked credential store.
+        #[arg(long, conflicts_with_all = ["passphrase", "password_stdin"])]
+        passphrase_stdin: bool,
         /// Host profile alias to use as ProxyJump bastion
         #[arg(long, add = ArgValueCandidates::new(host_candidates))]
         jump: Option<String>,
@@ -1913,8 +1919,17 @@ async fn async_main() -> Result<()> {
                     );
                 } else if removed == 0 {
                     // `ssh-keygen -R` is idempotent and exits 0 on a miss, so
-                    // this is a report, not an error.
-                    println!("no known_hosts entry matched {host} (port {port})");
+                    // this is a report, not an error. But "no line matched" and
+                    // "a line is there and this cannot read it" print the same
+                    // sentence today, and the second one is the case a user will
+                    // hit after `HashKnownHosts yes` — the entry is present, the
+                    // removal silently did nothing, and the message says nothing
+                    // matched. Naming the hashed form is what makes the second
+                    // case diagnosable without opening the file.
+                    println!(
+                        "no known_hosts entry matched {host} (port {port}); entries stored in \
+                         the hashed form (|1|…) cannot be matched by name"
+                    );
                 } else {
                     let noun = if removed == 1 { "entry" } else { "entries" };
                     println!("removed {removed} known_hosts {noun} for {host} (port {port})");
@@ -1980,7 +1995,9 @@ async fn async_main() -> Result<()> {
                 port,
                 key,
                 password,
+                password_stdin,
                 passphrase,
+                passphrase_stdin,
                 jump,
                 risk_override,
                 tags,
@@ -1997,14 +2014,24 @@ async fn async_main() -> Result<()> {
                     "blocked" => Some(RiskLevel::Blocked),
                     _ => None,
                 });
-                let profile = add_host_core(HostProfile {
+                let stdin_secret = if password_stdin || passphrase_stdin {
+                    let value = read_redirected_host_secret()?;
+                    Some(value)
+                } else {
+                    None
+                };
+                let host_profile = HostProfile {
                     ai_allowed: true,
                     name,
                     host,
                     user,
                     port,
                     key_path: key,
-                    password: clean_optional(password),
+                    password: if password_stdin {
+                        stdin_secret.as_ref().map(|s| s.to_string())
+                    } else {
+                        clean_optional(password)
+                    },
                     jump_host: jump,
                     proxy_id: None,
                     risk_override,
@@ -2014,8 +2041,17 @@ async fn async_main() -> Result<()> {
                     role: clean_optional(role),
                     owner: clean_optional(owner),
                     init_command: clean_optional(init_command),
-                    passphrase: clean_optional(passphrase),
-                })?
+                    passphrase: if passphrase_stdin {
+                        stdin_secret.as_ref().map(|s| s.to_string())
+                    } else {
+                        clean_optional(passphrase)
+                    },
+                };
+                let profile = if password_stdin || passphrase_stdin {
+                    agent2ssh::add_host_core_without_plaintext_password(host_profile)?
+                } else {
+                    add_host_core(host_profile)?
+                }
                 .redacted_for_transport();
                 if json {
                     println!("{}", serde_json::to_string_pretty(&profile)?);
@@ -3030,8 +3066,11 @@ async fn async_main() -> Result<()> {
                         println!("Daemon is not running (no PID file).");
                         return Ok(());
                     };
+                    // A refusal is a typed error, and its text is the whole
+                    // point: "the daemon listening now is pid B, not the pid A"
+                    // tells a person what to do, where "stop failed" does not.
                     stop_daemon_process(pid)?;
-                    remove_daemon_pid_file();
+                    remove_daemon_pid_file_if(pid)?;
                     println!("Daemon stopped (pid={}).", pid);
                 }
                 DaemonCommands::Status => {
@@ -3058,7 +3097,7 @@ async fn async_main() -> Result<()> {
                         // Waits for the old daemon to exit, so the new one can
                         // bind the port it was still holding while it drained.
                         stop_daemon_process(pid)?;
-                        remove_daemon_pid_file();
+                        remove_daemon_pid_file_if(pid)?;
                     }
                     let daemon_bin = daemon_binary_path()?;
                     let started = start_daemon_background(&daemon_bin)?;
@@ -3073,7 +3112,11 @@ async fn async_main() -> Result<()> {
                         if daemon_pid_state(pid) != DaemonPidState::Stale {
                             anyhow::bail!("daemon PID {pid} is live or cannot be verified; refusing to rotate token");
                         }
-                        remove_daemon_pid_file();
+                        if !remove_daemon_pid_file_if(pid)? {
+                            anyhow::bail!(
+                                "daemon PID file changed during cleanup; retry after inspecting it"
+                            );
+                        }
                     }
                     if daemon_health_pid().is_some() {
                         anyhow::bail!("daemon health endpoint is active; refusing to rotate token");
@@ -3551,10 +3594,15 @@ async fn async_main() -> Result<()> {
                     println!("{}", algorithm.as_str());
                 } else {
                     println!("{}", algorithm.as_str());
+                    // Unreachable while `default_for_build` answers Ed25519, kept
+                    // so the sentence does not have to be reinvented if a build
+                    // ever recommends RSA again. The format is a property of what
+                    // this crate writes, not of what the transport can read:
+                    // `russh` parses the PEM form and the OpenSSH container alike.
                     if algorithm == agent2ssh::keys::KeyAlgorithm::Rsa {
                         println!(
-                            "  this build cannot read OpenSSH-format private keys, so RSA is \
-                             written as traditional PEM"
+                            "  RSA keys are written as traditional PEM \
+                             (-----BEGIN RSA PRIVATE KEY-----); this transport reads both forms"
                         );
                     }
                 }
@@ -5096,6 +5144,41 @@ async fn run_daemon_doctor(alias: &str, output_json: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn read_redirected_host_secret() -> Result<Zeroizing<String>> {
+    use std::io::{IsTerminal, Read};
+    const LIMIT: u64 = 64 * 1024;
+    let stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        anyhow::bail!(
+            "secret input requires redirected stdin; use a no-echo shell prompt and pipe the value"
+        );
+    }
+    let mut bytes = Zeroizing::new(Vec::new());
+    stdin
+        .lock()
+        .take(LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .context("failed to read secret from stdin")?;
+    if bytes.len() > LIMIT as usize {
+        anyhow::bail!("secret input exceeds 65536 bytes");
+    }
+    let size = bytes.len();
+    if bytes.ends_with(b"\r\n") {
+        bytes.truncate(size - 2);
+    } else if bytes.ends_with(b"\n") {
+        bytes.truncate(size - 1);
+    }
+    if bytes.is_empty() {
+        anyhow::bail!("secret input is empty");
+    }
+    let value =
+        std::str::from_utf8(&bytes).map_err(|_| anyhow::anyhow!("secret input must be UTF-8"))?;
+    if agent2ssh::secrets::is_secret_ref(value) {
+        anyhow::bail!("secret input is a reserved credential reference");
+    }
+    Ok(Zeroizing::new(value.to_owned()))
 }
 
 fn clean_optional(value: Option<String>) -> Option<String> {

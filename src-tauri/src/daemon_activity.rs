@@ -3,7 +3,15 @@
 //!
 //! PTY sessions, resident shells, port forwards and pending approvals live in
 //! the daemon's memory (see `session.rs`, `resident_session.rs`, `forward.rs`,
-//! `approval.rs`), so stopping the daemon ends all of them without a trace.
+//! `approval.rs`), so stopping the daemon ends all of them. The first three go
+//! silently; a pending approval does not — the shutdown cancels the wait,
+//! answers the approval `rejected` while it is still pending, and writes
+//! `daemon shutting down; approval wait cancelled` to `audit.jsonl` before
+//! exiting, because "the daemon was stopped" must not be indistinguishable from
+//! "nobody ever answered". Two limits on that promise: an approval that had
+//! already timed out keeps `timed_out` in `approvals.jsonl` (the audit line is
+//! written either way), and a daemon force-terminated after the grace window
+//! writes nothing at all on its way out.
 //! The desktop app uses [`fetch_daemon_activity`] to tell the person that
 //! before it does.
 //!
@@ -44,8 +52,47 @@ pub fn local_daemon_request(
         method,
         path,
         token,
+        None,
         timeout,
     )
+}
+
+/// [`local_daemon_request`] carrying a JSON body.
+///
+/// A body rather than a query parameter because `/shutdown` names the process it
+/// means (`expect_pid`), and a PID in a URL is the kind of thing that ends up in
+/// a log line. The daemon reads it with axum's `Json` extractor, which accepts
+/// `POST` regardless of an absent `Content-Type`, but the header goes out anyway.
+pub fn local_daemon_request_with_body(
+    method: &str,
+    path: &str,
+    token: Option<&str>,
+    body: &serde_json::Value,
+    timeout: Duration,
+) -> Result<LocalResponse> {
+    let body = serde_json::to_string(body)?;
+    request_at(
+        &crate::local_daemon_connect_addr(),
+        method,
+        path,
+        token,
+        Some(&body),
+        timeout,
+    )
+}
+
+/// [`local_daemon_request`] against an explicit `host:port`, for tests that must
+/// reach one specific daemon without the environment (`AGENT2SSH_DAEMON_ADDR`)
+/// deciding which: two daemons can be running on two addresses, and "which one
+/// answered" is the whole question.
+#[doc(hidden)]
+pub fn direct_daemon_request(
+    addr: &str,
+    method: &str,
+    path: &str,
+    token: Option<&str>,
+) -> Result<LocalResponse> {
+    request_at(addr, method, path, token, None, Duration::from_secs(2))
 }
 
 /// [`local_daemon_request`] against an explicit `host:port`.
@@ -54,6 +101,7 @@ fn request_at(
     method: &str,
     path: &str,
     token: Option<&str>,
+    body: Option<&str>,
     timeout: Duration,
 ) -> Result<LocalResponse> {
     let addr = addr
@@ -67,11 +115,16 @@ fn request_at(
     let authorization = token
         .map(|token| format!("Authorization: Bearer {token}\r\n"))
         .unwrap_or_default();
+    let (content_type, body) = match body {
+        Some(body) => ("Content-Type: application/json\r\n", body),
+        None => ("", ""),
+    };
     // One write: `write!` straight to the socket issues a write per format
     // fragment, and a server that reads the request in one go sees only the first.
     let request = format!(
-        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{authorization}Content-Length: 0\r\n\
-         Connection: close\r\n\r\n"
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{authorization}{content_type}\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
     );
     stream.write_all(request.as_bytes())?;
 
@@ -245,6 +298,7 @@ mod tests {
             "POST",
             "/shutdown",
             Some("tok"),
+            None,
             Duration::from_secs(2),
         );
 
@@ -254,5 +308,63 @@ mod tests {
         let request = server.join().unwrap();
         assert!(request.starts_with("POST /shutdown HTTP/1.1"), "{request}");
         assert!(request.contains("Authorization: Bearer tok"), "{request}");
+    }
+
+    /// The body is what tells the daemon which process the caller means. A
+    /// zero-length body with a stale `Content-Length` would read to a server as
+    /// a truncated request, so the length is asserted, not just the bytes.
+    #[test]
+    fn a_request_can_carry_a_json_body() {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut raw = Vec::new();
+            let mut chunk = [0u8; 512];
+            let (head_len, length) = loop {
+                let read = stream.read(&mut chunk).unwrap();
+                assert!(read > 0, "the client closed before finishing the request");
+                raw.extend_from_slice(&chunk[..read]);
+                let Some(header_end) = raw.windows(4).position(|w| w == b"\r\n\r\n") else {
+                    continue;
+                };
+                let head = String::from_utf8_lossy(&raw[..header_end]).to_string();
+                let length = head
+                    .lines()
+                    .find_map(|line| line.strip_prefix("Content-Length: "))
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+                    .expect("a content length");
+                break (header_end + 4, length);
+            };
+            while raw.len() < head_len + length {
+                let read = stream.read(&mut chunk).unwrap();
+                assert!(read > 0, "the client fell short of its Content-Length");
+                raw.extend_from_slice(&chunk[..read]);
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: close\r\n\r\n{\"ok\":true}\n")
+                .unwrap();
+            let head = String::from_utf8_lossy(&raw[..head_len]).to_string();
+            (head, String::from_utf8_lossy(&raw[head_len..]).to_string())
+        });
+
+        let response = request_at(
+            &format!("127.0.0.1:{port}"),
+            "POST",
+            "/shutdown",
+            Some("tok"),
+            Some("{\"expect_pid\":42}"),
+            Duration::from_secs(2),
+        );
+        let response = response.unwrap();
+        assert_eq!(response.status, 200);
+        let (head, body) = server.join().unwrap();
+        assert_eq!(body, "{\"expect_pid\":42}", "the whole body arrives");
+        assert!(head.contains("Content-Type: application/json"), "{head}");
+        assert!(
+            head.contains(&format!("Content-Length: {}", body.len())),
+            "the declared length is the body's own: {head}"
+        );
     }
 }

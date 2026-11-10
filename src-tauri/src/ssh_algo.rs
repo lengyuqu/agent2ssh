@@ -1,36 +1,43 @@
 //! SSH algorithm preference configuration (A22).
 //!
-//! Allows users to configure preferred SSH key exchange, cipher, MAC, hostkey,
-//! and compression algorithms. Uses the transport facade's `method_pref()` which maps
-//! to `libssh2_session_method_pref()` — the preference must be set **before**
-//! the handshake.
+//! Lets the user choose key exchange, cipher, MAC, hostkey and compression
+//! algorithms. A preference goes through the transport facade's `method_pref()`,
+//! which queues it on the session; the backend applies the queue when the
+//! handshake starts, so a preference set after the connection is up is rejected
+//! rather than silently ignored.
 //!
 //! ## Safe defaults
 //!
-//! The default preferences prioritize modern, secure algorithms and exclude
-//! weak/legacy ones (DSA, 3DES-CBC, hmac-sha1, etc.). If the user provides
-//! their own preferences, they are validated against libssh2's supported
-//! algorithms list — fail-closed if any preference is unknown.
+//! The defaults list modern algorithms first and exclude the weak ones (DSA,
+//! 3DES-CBC, hmac-sha1, …). A user-supplied list is validated against
+//! [`supported_algorithms`] and is **fail-closed**: one unknown name makes every
+//! connection fail before the handshake. That is why the app validates what it
+//! writes ([`validate_algo_prefs`]) and offers [`reset_algo_prefs`] as the way
+//! back.
 //!
-//! Fail-closed also means the defaults themselves must be **negotiable by the
-//! libssh2 this binary links**, not merely well-formed. That set is not
-//! portable — `libssh2-sys` selects a crypto backend at build time, and a WinCNG
-//! build has no curve25519, no ed25519 host keys and no AES-GCM, whereas an
-//! OpenSSL one has all three — so [`safe_defaults`] filters its wish list
-//! through the build's actual capabilities. Without that filter the defaults
-//! name algorithms the build cannot provide and *every* connection fails at the
-//! first method, which is exactly what happened on the WinCNG-backed Windows
-//! build between A22 and this fix.
+//! Fail-closed applies to the defaults too, which is what [`safe_defaults`] is
+//! for. The wish list in [`desired_defaults`] states what modern SSH
+//! implementations offer; it is *not* a claim about what this binary can do. The
+//! capability side comes from the backend:
 //!
-//! The Windows build no longer takes that path: `src-tauri/Cargo.toml` enables
-//! `ssh2`'s `openssl-on-win32`, so it links OpenSSL and negotiates the same
-//! defaults as Linux and macOS. The filter stays because it is what makes that
-//! a configuration change rather than a code change — see
-//! [`supported_algorithms`].
+//! - `Session::supported_algs()` returns a **static snapshot per method type**
+//!   (`transport::russh_impl::supported_names`), deliberately permissive, because
+//!   russh exposes no runtime capability list. A name in the snapshot that russh
+//!   does not know still fails closed in `apply_prefs`; a name *missing* from the
+//!   snapshot is dropped here instead, which is why the snapshot errs generous.
+//! - Compression has one entry, `none`: russh is built without its `flate2`
+//!   feature in this crate, so no other value can be negotiated.
 //!
-//! Mirrors rssh's `ssh/algorithms.rs` design, adapted to the `ssh2` crate
-//! (libssh2 bindings) which uses `MethodType` + comma-delimited string
-//! preferences rather than rssh's structured `AlgorithmList`.
+//! [`safe_defaults`] therefore narrows each wish-list field to the snapshot, and
+//! sends no preference at all for a field where nothing survives. Sending an
+//! empty preference is the difference between "let the backend choose" and
+//! "every connection dies on a name the backend cannot do" — the failure mode
+//! this filter exists to prevent, first seen on the WinCNG-backed Windows build
+//! of the libssh2 era.
+//!
+//! The comma-delimited string shape (`MethodType` plus one preference string per
+//! direction) is inherited from that era rather than chosen: the facade kept its
+//! signature when the backend moved to russh.
 
 use crate::transport::{MethodType, Session};
 use anyhow::{anyhow, Result};
@@ -40,7 +47,8 @@ use std::sync::OnceLock;
 /// User-configurable SSH algorithm preferences.
 ///
 /// Each field is a comma-delimited list of algorithm names in preference
-/// order (most preferred first). An empty string means "use libssh2 defaults".
+/// order (most preferred first). An empty string means "send no preference", so
+/// the backend keeps its own list.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct SshAlgoPrefs {
     /// Key exchange algorithms (e.g. "curve25519-sha256,diffie-hellman-group16-sha512").
@@ -68,14 +76,14 @@ pub struct SshAlgoPrefs {
 /// - DSA host keys (ssh-dss)
 /// - 3DES-CBC cipher
 /// - hmac-sha1-96 MAC
-/// - zlib compression: the embedded transport (libssh2, as built by the
-///   `ssh2` crate) only supports the `none` compression method, so listing
+/// - zlib compression: this build's transport is compiled without the `flate2`
+///   feature, so `none` is the only negotiable value; listing
 ///   `zlib@openssh.com`/`zlib` here fails the fail-closed validation against
 ///   a real sshd ("unsupported SSH algorithm 'zlib@openssh.com' ...").
 ///
-/// Do not hand this list to a session — it may name algorithms the linked
-/// libssh2 cannot negotiate. [`safe_defaults`] is the filtered form that is
-/// actually applied.
+/// Do not hand this list to a session — it may name algorithms the backend
+/// cannot negotiate. [`safe_defaults`] is the filtered form that is actually
+/// applied.
 fn desired_defaults() -> SshAlgoPrefs {
     SshAlgoPrefs {
         kex: "curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group16-sha512,diffie-hellman-group-exchange-sha256,diffie-hellman-group14-sha256".into(),
@@ -90,18 +98,18 @@ fn desired_defaults() -> SshAlgoPrefs {
 }
 
 /// Safe default algorithm preferences that exclude weak/legacy algorithms, as
-/// far as the libssh2 this binary links allows.
+/// far as this build's backend allows.
 ///
 /// These are applied when the user has not set custom preferences. The wish
 /// list comes from [`desired_defaults`]; each field is then narrowed to the
-/// algorithms this build can actually negotiate, because the fail-closed check
-/// in [`apply_method`] treats an unknown name as fatal — including one the
-/// *defaults* named. See [`supported_algorithms`] for why that set is
-/// platform-dependent and [`narrow_to_supported`] for the rule.
+/// algorithms the backend reports, because the fail-closed check in
+/// [`apply_method`] treats an unknown name as fatal — including one the
+/// *defaults* named. See [`supported_algorithms`] for where that set comes from
+/// and [`narrow_to_supported`] for the rule.
 ///
 /// A field whose entries are all unavailable becomes an empty string, which
-/// means "use libssh2's own list" rather than an equally fatal empty
-/// preference.
+/// means "no preference" — the backend keeps its own list — rather than an
+/// equally fatal empty preference.
 pub fn safe_defaults() -> SshAlgoPrefs {
     let desired = desired_defaults();
     SshAlgoPrefs {
@@ -116,18 +124,18 @@ pub fn safe_defaults() -> SshAlgoPrefs {
     }
 }
 
-/// The algorithms the linked libssh2 build can negotiate for one method type.
+/// The algorithms the backend can negotiate for one method type.
 ///
-/// Not portable, and that is the whole point: `libssh2-sys` picks a crypto
-/// backend at build time. OpenSSL — what Linux, macOS and, since `ssh2`'s
-/// `openssl-on-win32` feature was enabled here, Windows all link — offers
-/// curve25519, ed25519 host keys and AES-GCM; a WinCNG build offers only the
-/// `diffie-hellman-group*` exchanges, RSA host keys and AES-CBC/CTR. A default
-/// list written against the first will fail closed on the second.
+/// Not portable, and that is the whole point, but not in the way it used to be:
+/// with one transport on every platform the set is the same everywhere, yet it
+/// is still a **snapshot**, not a query — russh exposes no runtime capability
+/// list, so `transport::russh_impl::supported_names` hard-codes what this
+/// backend accepts. The snapshot is deliberately permissive; see
+/// [`supported_algorithms`] for who pays for a wrong entry in either direction.
 ///
 /// `Session::new()` does not connect, so this needs no server; `OnceLock` keeps
 /// it to one query per method type per process instead of one per connection.
-/// `None` means the probe itself failed, which callers must treat as "no
+/// `None` means the query itself failed, which callers must treat as "no
 /// preference" rather than as "nothing is supported".
 ///
 /// This used to double as the capability signal for *file formats* as well —
@@ -168,8 +176,8 @@ pub(crate) fn supported_algorithms(method: MethodType) -> Option<&'static HashSe
 /// Keep only the entries `supported` knows, preserving `wanted`'s order.
 ///
 /// `None` means nothing survived — the caller then sends no preference at all,
-/// so libssh2 falls back to its own list rather than being told to use
-/// something it cannot do. Order is preserved because it is the preference.
+/// so the backend keeps its own list rather than being told to use something it
+/// cannot do. Order is preserved because it is the preference.
 fn narrow_to_supported(supported: &HashSet<String>, wanted: &str) -> Option<String> {
     let kept: Vec<&str> = wanted
         .split(',')
@@ -185,8 +193,8 @@ fn narrow_to_supported(supported: &HashSet<String>, wanted: &str) -> Option<Stri
 }
 
 /// [`narrow_to_supported`] against this build's capabilities, as the preference
-/// string to apply: the survivors, or `""` (libssh2's own list) if there are
-/// none or the capability probe failed.
+/// string to apply: the survivors, or `""` (no preference) if there are none or
+/// the capability query failed.
 fn narrow(method: MethodType, wanted: &str) -> String {
     supported_algorithms(method)
         .and_then(|supported| narrow_to_supported(supported, wanted))
@@ -196,7 +204,7 @@ fn narrow(method: MethodType, wanted: &str) -> String {
 /// Apply algorithm preferences to a session **before** the handshake.
 ///
 /// If `prefs` is `None`, safe defaults are used. If any preference string
-/// contains an algorithm not supported by libssh2, an error is returned
+/// contains an algorithm the backend does not support, an error is returned
 /// (fail-closed).
 pub fn apply_algo_prefs(session: &Session, prefs: Option<&SshAlgoPrefs>) -> Result<()> {
     let defaults = safe_defaults();
@@ -220,8 +228,8 @@ fn apply_method(session: &Session, method_type: MethodType, prefs: &str) -> Resu
         return Ok(());
     }
 
-    // Validate: each algorithm in the preference list must be supported by
-    // libssh2. This is a fail-closed check — an unknown algorithm name
+    // Validate: each algorithm in the preference list must be one the backend
+    // reports. This is a fail-closed check — an unknown algorithm name
     // (e.g. a typo) must not silently pass.
     let supported: HashSet<String> = session
         .supported_algs(method_type)
@@ -300,9 +308,9 @@ impl AlgoPrefsState {
     }
 }
 
-/// The compression algorithm libssh2 accepts in this build.
+/// The only compression algorithm this build can negotiate.
 ///
-/// The `ssh2` crate does not compile in zlib support, so `none` is the only
+/// russh is compiled without its `flate2` feature here, so `none` is the only
 /// value that survives the fail-closed check in [`apply_algo_prefs`]. Anything
 /// else is rejected here rather than at connect time, where it would break
 /// every connection until the user edited the file by hand.
@@ -365,7 +373,7 @@ pub fn validate_algo_prefs(prefs: &SshAlgoPrefs) -> Result<()> {
             .collect();
         if entries != [SUPPORTED_COMPRESSION] {
             return Err(anyhow!(
-                "{label} must be exactly '{SUPPORTED_COMPRESSION}': this build of libssh2 has no \
+                "{label} must be exactly '{SUPPORTED_COMPRESSION}': this build has no \
                  zlib support, so any other value would make every connection fail"
             ));
         }
@@ -382,14 +390,16 @@ pub fn validate_algo_prefs(prefs: &SshAlgoPrefs) -> Result<()> {
 /// `rejection_message_lists_every_allowed_character` pins the pairing.
 const ALGORITHM_NAME_PUNCTUATION: &str = "._-@+";
 
-/// A conservative syntax check — this is not a guarantee that libssh2 knows the
-/// algorithm. It keeps the file to well-formed tokens (so it can round-trip
+/// A conservative syntax check — this is not a guarantee that the backend knows
+/// the algorithm. It keeps the file to well-formed tokens (so it can round-trip
 /// through the settings dialog and the comma-delimited parser) without
 /// pretending to be an offline capability probe.
 ///
 /// Capability is [`supported_algorithms`]' job, and the two are deliberately
 /// separate: this one must accept a name that this build cannot do, because
-/// `ssh_algos.json` is shared between machines with different backends.
+/// `ssh_algos.json` is plain JSON a user can hand-edit or copy between machines,
+/// and rejecting it here would turn a portable config into one the settings
+/// dialog cannot render.
 fn is_plausible_algorithm_name(name: &str) -> bool {
     !name.is_empty()
         && name
@@ -464,8 +474,9 @@ mod tests {
 
     /// The *wish list* leads with modern algorithms. Asserted on
     /// `desired_defaults` rather than `safe_defaults` because the latter is
-    /// narrowed to this build's capabilities: a WinCNG build has no curve25519
-    /// and no ed25519 host key, so those can never be first there.
+    /// narrowed to the backend's snapshot, and narrowing may drop an entry the
+    /// snapshot lacks — so "first" is a claim about intent, not about what is
+    /// applied.
     /// What must hold on every platform is that no *weak* algorithm is ever
     /// promoted — see `safe_defaults_exclude_weak_algos`.
     #[test]
@@ -517,13 +528,14 @@ mod tests {
         }
     }
 
-    /// The regression for the WinCNG outage: `apply_algo_prefs` is
-    /// fail-closed, so a default naming an algorithm this build cannot
-    /// negotiate does not degrade gracefully — it kills every connection before
-    /// the handshake. The wish list names curve25519, ed25519 and AES-GCM, none
-    /// of which a WinCNG build can do, so this test would fail on one unless
-    /// `safe_defaults` filters. That is why it runs on every platform rather
-    /// than being skipped where the backend happens to be OpenSSL: the filter is
+    /// The regression for the fail-closed defaults outage (first seen on the
+    /// WinCNG-backed Windows build of the libssh2 era): `apply_algo_prefs` is
+    /// fail-closed, so a default naming an algorithm this build cannot negotiate
+    /// does not degrade gracefully — it kills every connection before the
+    /// handshake. The wish list is written for what SSH implementations offer in
+    /// general, so it can name something the backend's snapshot lacks, and this
+    /// test fails unless `safe_defaults` filters. It runs on every platform
+    /// rather than only where the snapshot happens to be narrow: the filter is
     /// the invariant, and this is what pins it.
     #[test]
     fn safe_defaults_are_negotiable_by_this_build() {
@@ -560,7 +572,7 @@ mod tests {
             for entry in value.split(',').map(str::trim).filter(|e| !e.is_empty()) {
                 assert!(
                     supported.contains(entry),
-                    "{label}: default '{entry}' is not negotiable by this libssh2 build"
+                    "{label}: default '{entry}' is not negotiable by this build"
                 );
             }
         }
@@ -587,14 +599,21 @@ mod tests {
         assert_eq!(narrow_to_supported(&supported, "  "), None);
     }
 
-    /// A failed probe must not be read as "nothing is supported" against a
+    /// A failed query must not be read as "nothing is supported" against a
     /// non-empty wish list, and must not panic.
     #[test]
-    fn narrow_degrades_to_libssh2_defaults_never_panics() {
-        // `MethodType::SignAlgo` has no `SshAlgoPrefs` field, so the probe
-        // returns `None` — the same shape as a failed query.
+    fn narrow_degrades_to_no_preference_never_panics() {
+        // `MethodType::SignAlgo` has no `SshAlgoPrefs` field, so the query
+        // returns `None` — the same shape as a failed one.
         assert!(supported_algorithms(MethodType::SignAlgo).is_none());
         assert_eq!(narrow(MethodType::SignAlgo, "a,b"), "");
+        // `LangCs`/`LangSc` are in the same group, and pinning them here is what
+        // keeps `MethodType`'s doc honest: it used to claim they were kept so
+        // `supported_algs` could answer for them the way libssh2 did, while this
+        // function returns `None` before any backend is asked. If a future change
+        // gives them a real query, this assertion is the place to notice.
+        assert!(supported_algorithms(MethodType::LangCs).is_none());
+        assert!(supported_algorithms(MethodType::LangSc).is_none());
     }
 
     #[test]
@@ -672,8 +691,9 @@ mod tests {
         assert!(err.contains("duplicate"), "got: {err}");
     }
 
-    /// libssh2 is built without zlib support, so a compression value other than
-    /// `none` fails closed at connect time. It must be caught at save time.
+    /// russh is built without its `flate2` feature here, so a compression value
+    /// other than `none` fails closed at connect time. It must be caught at save
+    /// time.
     #[test]
     fn validation_rejects_unsupported_compression() {
         let mut prefs = safe_defaults();

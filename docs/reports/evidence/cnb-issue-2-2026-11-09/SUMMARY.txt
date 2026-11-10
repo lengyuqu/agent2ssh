@@ -1,0 +1,6 @@
+[A7-connect_deadline] exit=0 test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.07s 
+[A8-ssh_operation_deadline] exit=0 test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.57s 
+[A4-daemon-bin] exit=0 test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.10s 
+[A5-daemon_stop_e2e] exit=101 test result: FAILED. 18 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 76.16s 
+[A6-daemon_integration] exit=0 test result: ok. 63 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.02s 
+[A3-lib-default] exit=0 test result: ok. 863 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 35.64s 

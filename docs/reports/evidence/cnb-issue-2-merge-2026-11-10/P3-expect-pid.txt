@@ -1,0 +1,11 @@
+config dir : C:\Users\ADMINI~1\AppData\Local\Temp\a2s-expect-pid-PUoFgR
+daemon pid : 15024  addr: 127.0.0.1:60204
+health     : 200, pid matches
+wrong pid  : HTTP 409 {"error":"this daemon is pid 15024, not the pid 15025 the request named; refusing to shut down"}
+refusal    : names the answering daemon pid
+null field : HTTP 400 {"error":"expect_pid must be a PID when present; omit the field to stop without a check"}
+survives   : daemon still serving after the refusals
+right pid  : HTTP 200 {"ok":true}
+exit       : code=0 after 114 ms
+pid file   : removed
+RESULT=PASS

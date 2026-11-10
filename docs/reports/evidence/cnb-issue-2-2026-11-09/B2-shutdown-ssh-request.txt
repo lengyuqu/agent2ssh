@@ -1,0 +1,100 @@
+   Compiling agent2ssh-app v0.4.5 (D:\vibercodeing\agent2ssh\src-tauri)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.47s
+     Running tests\daemon_stop_e2e.rs (src-tauri\target\debug\deps\daemon_stop_e2e-f450dfd9b9924054.exe)
+
+running 1 test
+
+thread 'shutdown_interrupts_an_active_ssh_request' (12204) panicked at tests\daemon_stop_e2e.rs:436:44:
+stop while SSH command is running: daemon PID 38436 exit cannot be verified; PID file retained
+
+Stack backtrace:
+   0: std::backtrace_rs::backtrace::win64::trace
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\..\..\backtrace\src\backtrace\win64.rs:85
+   1: std::backtrace_rs::backtrace::trace_unsynchronized
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\..\..\backtrace\src\backtrace\mod.rs:66
+   2: std::backtrace::Backtrace::create
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\backtrace.rs:331
+   3: std::backtrace::Backtrace::capture
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\backtrace.rs:296
+   4: anyhow::Error::msg<alloc::string::String>
+             at C:\Users\Administrator\.cargo\registry\src\192.168.77.6-cbda80bc204e16f7\anyhow-1.0.102\src\backtrace.rs:10
+   5: anyhow::__private::format_err
+             at C:\Users\Administrator\.cargo\registry\src\192.168.77.6-cbda80bc204e16f7\anyhow-1.0.102\src\lib.rs:690
+   6: agent2ssh::daemon_control::stop_daemon_process
+             at .\src\daemon_control.rs:746
+   7: daemon_stop_e2e::shutdown_interrupts_an_active_ssh_request::closure$0
+             at .\tests\daemon_stop_e2e.rs:436
+   8: core::ops::function::FnOnce::call_once<daemon_stop_e2e::shutdown_interrupts_an_active_ssh_request::closure_env$0,tuple$<> >
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\ops\function.rs:250
+   9: serial_test::serial_code_lock::local_serial_core
+             at C:\Users\Administrator\.cargo\registry\src\192.168.77.6-cbda80bc204e16f7\serial_test-3.5.0\src\serial_code_lock.rs:36
+  10: daemon_stop_e2e::shutdown_interrupts_an_active_ssh_request
+             at .\tests\daemon_stop_e2e.rs:392
+  11: daemon_stop_e2e::shutdown_interrupts_an_active_ssh_request::closure$0
+             at .\tests\daemon_stop_e2e.rs:393
+  12: core::ops::function::FnOnce::call_once<daemon_stop_e2e::shutdown_interrupts_an_active_ssh_request::closure_env$0,tuple$<> >
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\ops\function.rs:250
+  13: core::ops::function::FnOnce::call_once
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\ops\function.rs:250
+  14: test::__rust_begin_short_backtrace<enum2$<core::result::Result<tuple$<>,alloc::string::String> >,enum2$<core::result::Result<tuple$<>,alloc::string::String> > (*)()>
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\test\src\lib.rs:733
+  15: test::run_test_in_process
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\test\src\lib.rs:756
+  16: test::run_test::closure$0
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\test\src\lib.rs:677
+  17: test::run_test::closure$1
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\test\src\lib.rs:707
+  18: std::sys::backtrace::__rust_begin_short_backtrace<test::run_test::closure_env$1,tuple$<> >
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\sys\backtrace.rs:166
+  19: std::thread::lifecycle::spawn_unchecked::closure$1::closure$0
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\thread\lifecycle.rs:70
+  20: core::panic::unwind_safe::impl$25::call_once
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\panic\unwind_safe.rs:275
+  21: std::panicking::catch_unwind::do_call
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\panicking.rs:576
+  22: std::panicking::catch_unwind
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\panicking.rs:544
+  23: std::panic::catch_unwind
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\panic.rs:359
+  24: std::thread::lifecycle::spawn_unchecked::closure$1
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\thread\lifecycle.rs:68
+  25: core::ops::function::FnOnce::call_once<std::thread::lifecycle::spawn_unchecked::closure_env$1<test::run_test::closure_env$1,tuple$<> >,tuple$<> >
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\ops\function.rs:250
+  26: std::sys::thread::windows::impl$0::new::thread_start
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\sys\thread\windows.rs:58
+  27: BaseThreadInitThunk
+  28: RtlUserThreadStart
+stack backtrace:
+   0: std::panicking::panic_handler
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\std\src\panicking.rs:679
+   1: core::panicking::panic_fmt
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\panicking.rs:80
+   2: core::result::unwrap_failed
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\result.rs:1871
+   3: enum2$<core::result::Result<tuple$<>,anyhow::Error> >::expect<tuple$<>,anyhow::Error>
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\result.rs:1184
+   4: daemon_stop_e2e::shutdown_interrupts_an_active_ssh_request::closure$0
+             at .\tests\daemon_stop_e2e.rs:436
+   5: core::ops::function::FnOnce::call_once<daemon_stop_e2e::shutdown_interrupts_an_active_ssh_request::closure_env$0,tuple$<> >
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\ops\function.rs:250
+   6: serial_test::serial_code_lock::local_serial_core
+             at C:\Users\Administrator\.cargo\registry\src\192.168.77.6-cbda80bc204e16f7\serial_test-3.5.0\src\serial_code_lock.rs:36
+   7: daemon_stop_e2e::shutdown_interrupts_an_active_ssh_request
+             at .\tests\daemon_stop_e2e.rs:392
+   8: daemon_stop_e2e::shutdown_interrupts_an_active_ssh_request::closure$0
+             at .\tests\daemon_stop_e2e.rs:393
+   9: core::ops::function::FnOnce::call_once<daemon_stop_e2e::shutdown_interrupts_an_active_ssh_request::closure_env$0,tuple$<> >
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\ops\function.rs:250
+  10: core::ops::function::FnOnce::call_once
+             at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\core\src\ops\function.rs:250
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+test shutdown_interrupts_an_active_ssh_request ... FAILED
+
+failures:
+
+failures:
+    shutdown_interrupts_an_active_ssh_request
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 22 filtered out; finished in 10.18s
+
+error: test failed, to rerun pass `--test daemon_stop_e2e`

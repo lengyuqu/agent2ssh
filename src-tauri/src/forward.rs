@@ -228,6 +228,10 @@ impl ForwardHandle {
 
         // Join the worker thread with a grace period.
         if let Some(worker) = self.worker.take() {
+            // `join_timeout` cannot report whether the thread actually ended, so
+            // the state set below describes intent, not the socket: a worker
+            // parked in a blocking connect keeps its listener bound for up to
+            // that connect's own timeout after this returns.
             worker.join_timeout(DROP_GRACE_PERIOD);
         }
 

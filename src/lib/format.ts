@@ -6,7 +6,25 @@
  * null/empty input falls back at the call site, invalid strings pass through.
  */
 
-/** Locale date + time. `null`/empty -> "" ; an invalid string is returned as-is. */
+/** Locale date + time. `null`/empty -> "" ; an invalid string is returned as-is.
+ *
+ * "Locale" here means the *runtime* locale (`navigator.language`), not the
+ * language the UI is currently in: `I18nProvider` sets `<html lang>` to
+ * `zh-CN`/`en` and translates every label, but these formatters pass no locale
+ * argument, so a Chinese UI on an `en-US` browser renders `11/10/2026, 2:15:03
+ * PM` next to Chinese labels. `formatClockTime`'s `[]` is the same choice
+ * spelled explicitly. Whether the two signals should be joined is a product
+ * decision, not a bug fix — recorded as L2-55 in `OPT-LOOP-L2-PENDING.md`.
+ * Consumers: AuditPanel, FilePreview, SyncPanel, ConfigSnapshotsPanel,
+ * RecordingsPanel, LiveActivityPanel, AuditCharts, SettingsMenu, ApprovalDetail,
+ * ApprovalQueue, ApprovalWorkbench.
+ *
+ * Two more `toLocale*` calls bypass these helpers entirely, so fixing only the
+ * two functions above would leave a Chinese UI with English dates in exactly the
+ * places users stare at: `SFTPPanel.tsx:207` (`toLocaleString(undefined, …)` for
+ * the mtime column) and `AuditCharts.tsx:143` (`toLocaleDateString([], …)` for
+ * the bucket axis). Any fix has to take all four call sites in one change.
+ */
 export function formatDateTime(value?: string | number | Date | null): string {
   if (value === null || value === undefined || value === "") return "";
   const date = value instanceof Date ? value : new Date(value);

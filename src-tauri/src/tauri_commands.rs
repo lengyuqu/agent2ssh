@@ -1853,7 +1853,7 @@ pub fn daemon_stop() -> Result<DaemonControlResult, String> {
     match crate::daemon_control::read_daemon_pid().map_err(|e| e.to_string())? {
         Some(pid) => {
             crate::daemon_control::stop_daemon_process(pid).map_err(|e| e.to_string())?;
-            crate::daemon_control::remove_daemon_pid_file();
+            crate::daemon_control::remove_daemon_pid_file_if(pid).map_err(|e| e.to_string())?;
             let _ = append_diagnostic_log(
                 "info",
                 "tauri",
@@ -1889,7 +1889,7 @@ pub fn daemon_restart(app: AppHandle) -> Result<DaemonControlResult, String> {
             "daemon restart terminated existing process",
             Some(serde_json::json!({ "pid": pid })),
         );
-        crate::daemon_control::remove_daemon_pid_file();
+        crate::daemon_control::remove_daemon_pid_file_if(pid).map_err(|e| e.to_string())?;
     }
     daemon_start(app)
 }
@@ -1917,7 +1917,14 @@ fn stop_owned_daemon() {
     }
     match crate::daemon_control::stop_daemon_process(pid) {
         Ok(()) => {
-            crate::daemon_control::remove_daemon_pid_file();
+            if let Err(e) = crate::daemon_control::remove_daemon_pid_file_if(pid) {
+                let _ = append_diagnostic_log(
+                    "warn",
+                    "tauri",
+                    "could not clean daemon PID file",
+                    Some(serde_json::json!({ "pid": pid, "error": e.to_string() })),
+                );
+            }
             let _ = append_diagnostic_log(
                 "info",
                 "tauri",

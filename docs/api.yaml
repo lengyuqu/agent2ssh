@@ -1,8 +1,51 @@
 openapi: "3.1.0"
 info:
   title: Agent2SSH Daemon API
-  version: "0.3.0"
-  description: Local HTTP API for the Agent2SSH capability layer.
+  version: "0.4.5"
+  description: >
+    Local HTTP API for the Agent2SSH capability layer.
+
+    Two different mechanisms answer 403, and the response text tells them apart.
+    An operation documented as `Requires the unrestricted admin token` is gated
+    by `require_admin`: only the token in `~/.agent2ssh/daemon.token` passes, and
+    any scoped token from `daemon_tokens.toml` is refused regardless of what its
+    scope allows. The recording routes carry the sibling gate
+    `require_recording_admin`, whose message names terminal recordings. An
+    operation whose 403 description names a *scope* or an *approval* instead is a
+    per-host permission denial or a rejected approval, not an admin gate.
+
+    One 500 sits outside every operation's own list. `auth_middleware` reads
+    `daemon_tokens.toml` for any token that is not the admin token, so a file
+    that does not parse answers 500 to that request before any handler runs:
+    every non-public route answers 500 to a caller that does not present the
+    admin token, while the admin token keeps working. `/approvals/{id}/approve`
+    states this once in full rather than repeating it on a hundred operations.
+
+    A request body is read one of three ways, and the three fail differently.
+    `Json<T>` — 47 handlers — rejects a body with no `application/json` content
+    type as 415, a body that parses but does not fit the schema as 422, and a
+    body that is not JSON at all as 400, all before the handler runs.
+    `axum::body::Bytes` hands the raw bytes to the handler, which parses them
+    itself: `/approvals/{id}/approve` is the only one, and a malformed body there
+    is its own 400 rather than 415 or 422. `Option<Json<T>>` is neither. axum's
+    rejection for the `Option` wrapper is `Infallible`, so the `.ok()` the
+    handlers use turns *every* extraction error into "no body was sent" — a
+    wrong content type, invalid JSON, or a field of the wrong type all read as an
+    absent body. Three operations read their body that way — `/shutdown`,
+    `/playbooks/{name}/dry-run` and `/health-snapshot` — so for those three a
+    malformed body is ignored instead of refused, and the operation's own 400
+    does not cover it.
+
+    Two consequences for a client. First, the extractor's own answers are
+    `text/plain` carrying axum's message, not the `Error` object: 415 and 422 are
+    documented that way on every operation that can produce them, and a body sent
+    without a content type is the likeliest way to meet one. Second, a body that
+    is not JSON at all reaches the caller as the operation's 400 with that same
+    plain-text body, so a client cannot tell "your body was not JSON" from "the
+    handler refused what was in it" by the status code — and a client that
+    parses every 4xx as `Error` will fail to parse this one. Normalising the
+    rejections into the `Error` shape is a daemon change, not a documentation
+    one; it is L2-83 in `docs/reports/OPT-LOOP-L2-PENDING.md`.
 servers:
   - url: http://127.0.0.1:7722
     description: Local daemon
@@ -37,7 +80,7 @@ components:
         user:      { type: string, nullable: true }
         port:      { type: integer, nullable: true }
         key_path:  { type: string, nullable: true }
-        password:  { type: string, nullable: true }
+        password:  { type: string, nullable: true, writeOnly: true, description: "Accepted on write; every read path calls `redacted_for_transport`, so this is always null in a response." }
         jump_host: { type: string, nullable: true }
         risk_override: { $ref: "#/components/schemas/RiskLevel", nullable: true }
         tags:
@@ -46,6 +89,10 @@ components:
         env:       { type: string, nullable: true }
         role:      { type: string, nullable: true }
         owner:     { type: string, nullable: true }
+        proxy_id:  { type: string, nullable: true, description: "Proxy profile id used for the TCP connection to this host." }
+        group:     { type: string, description: "UI grouping bucket. A value that is not one of the configured group ids is reset to `default` when the config is normalized, so a group must be registered before a host can name it." }
+        init_command: { type: string, nullable: true, description: "Command run in the remote shell immediately after connect (OpenSSH `RemoteCommand`)." }
+        passphrase: { type: string, nullable: true, writeOnly: true, description: "Passphrase for an encrypted private key; accepted on write, persisted as a secret reference in hosts.json, and always null in a response for the same reason as password." }
         ai_allowed: { type: boolean, default: true, description: "false = human-only host; AI/automation sources are refused" }
 
     ExecRequest:
@@ -60,6 +107,7 @@ components:
         max_output_bytes: { type: integer, nullable: true }
         reason:           { type: string, nullable: true }
         change_id:        { type: string, nullable: true }
+        side_effect:      { type: string, nullable: true, description: "Caller-declared impact, e.g. `triggers a Full GC, 100-300ms pause`. Surfaced on the approval card and recorded in the audit trail." }
         source:           { type: string, nullable: true }
 
     ExecResult:
@@ -73,6 +121,9 @@ components:
         duration_ms: { type: integer }
         risk_level:  { $ref: "#/components/schemas/RiskLevel" }
         truncated:   { type: boolean }
+        dropped_bytes: { type: integer, default: 0, description: "Bytes removed by truncation. Truncation keeps the head and the tail and drops the middle, so this is the exact size of the gap." }
+        side_effect:   { type: string, nullable: true, description: "Echoed from the request so the caller sees what was recorded in the audit trail." }
+        risk_unclassified: { type: boolean, description: "Present only when true: `risk_level` is a bash verdict about a command the target interprets in another language, so it is a flag rather than a trustworthy level." }
 
     ExecMultiResult:
       type: object
@@ -220,8 +271,14 @@ components:
         decision:
           type: string
           nullable: true
-          enum: [approved, rejected, timed_out, auto_allowed, blocked]
-          description: "Authorization verdict; absent on older entries and on operations that never ran"
+          enum: [approved, approved_rewritten, rejected, timed_out, auto_allowed, blocked]
+          description: >
+            Authorization verdict; absent on older entries and on operations that
+            never ran. `approved_rewritten` means a human approved a *different*
+            command than the one requested — read it against `original_command`. It
+            is kept distinct from `approved` because the substitution is checked by
+            risk *level*, so an edit can change what a command does without changing
+            how it ranks.
         decided_by:
           type: string
           nullable: true
@@ -230,6 +287,10 @@ components:
           type: string
           nullable: true
           description: "The command as requested, when the approver ran a rewritten one (then `command` is what ran)"
+        side_effect: { type: string, nullable: true, description: "Caller-declared impact for this entry" }
+        action:      { type: string, nullable: true, description: "Operation category, e.g. exec, sftp_upload, forward_add, config_update" }
+        outcome:     { type: string, nullable: true, description: "success, blocked, error or timeout, derived from exit_code and risk_level" }
+        risk_unclassified: { type: boolean, description: "Present only when true: the recorded risk level is not a trustworthy verdict (see ExecResult)" }
 
     AgentEvent:
       type: object
@@ -237,7 +298,14 @@ components:
         id:         { type: string, format: uuid }
         event_type:
           type: string
+          description: >-
+            The first frame of every `/events/stream` subscription is
+            `stream_connected`, so a `match` that omits it hits an unknown
+            branch on the very first message. `host_connected`,
+            `host_disconnected` and `config_changed` are defined but have no
+            publisher today; do not wait on them.
           enum:
+            - stream_connected
             - exec_started
             - exec_output
             - exec_completed
@@ -262,13 +330,31 @@ components:
 
     AuditFilter:
       type: object
+      description: >-
+        The query-parameter set of `/audit` and `/audit/export` as one object —
+        OpenAPI cannot `$ref` an object into `parameters`, so both routes spell
+        the thirteen fields out and this schema is where they are described
+        once. The struct also carries a fourteenth field, `host_scope`, which
+        the daemon fills from the caller's token before it reads; it is
+        `#[serde(skip)]` and never accepted from the wire.
       properties:
-        host:       { type: string, nullable: true }
-        risk_level: { $ref: "#/components/schemas/RiskLevel", nullable: true }
-        exit_code:  { type: integer, nullable: true }
-        since:      { type: string, format: date-time, nullable: true }
-        until:      { type: string, format: date-time, nullable: true }
-        limit:      { type: integer, default: 20 }
+        host:            { type: string, nullable: true }
+        risk_level:      { $ref: "#/components/schemas/RiskLevel", nullable: true }
+        exit_code:       { type: integer, nullable: true }
+        since:           { type: string, format: date-time, nullable: true }
+        until:           { type: string, format: date-time, nullable: true }
+        limit:           { type: integer, default: 20 }
+        search:          { type: string, nullable: true, description: "Full-text search across the command, host and other text fields." }
+        command_pattern: { type: string, nullable: true, description: "Glob-style match on the command, `*` and `?` only." }
+        host_env:        { type: string, nullable: true, description: "Host `env` label." }
+        host_role:       { type: string, nullable: true, description: "Host `role` label." }
+        host_owner:      { type: string, nullable: true, description: "Host `owner` label." }
+        decision:
+          type: string
+          nullable: true
+          enum: [approved, approved_rewritten, rejected, timed_out, auto_allowed, blocked]
+          description: Only entries with this authorization verdict.
+        agent:           { type: string, nullable: true, description: "Exact, case-insensitive match on the requesting client's `source`." }
 
     SftpUploadRequest:
       type: object
@@ -277,6 +363,8 @@ components:
         host:        { type: string }
         local_path:  { type: string }
         remote_path: { type: string }
+        resume:      { type: boolean, default: false, description: "K6: append from the remote file's current length instead of re-sending from byte 0" }
+        transfer_id: { type: string, nullable: true, description: "K6: opaque id another request can pass to `/sftp/cancel`; absent means the transfer cannot be cancelled" }
 
     SftpDownloadRequest:
       type: object
@@ -285,6 +373,9 @@ components:
         host:        { type: string }
         remote_path: { type: string }
         local_path:  { type: string }
+        resume:      { type: boolean, default: false, description: "K6: continue an interrupted download from the bytes already on disk instead of re-fetching from byte 0. The partial file is `<local_path>.part`; when there is none, a `<local_path>` left by an earlier run is renamed to it and continued. When the bytes on disk already reach or exceed the remote size, the transfer restarts from 0 rather than appending a corrupt tail." }
+        transfer_id: { type: string, nullable: true, description: "K6: opaque id another request can pass to `/sftp/cancel`" }
+        max_mb:      { type: integer, nullable: true, description: "G8: hard cap on the remote file size in MiB (100 when absent); larger files are refused with advice to use scp/rsync" }
 
     SftpResult:
       type: object
@@ -294,6 +385,7 @@ components:
         remote_path: { type: string }
         direction:   { type: string, enum: [upload, download] }
         duration_ms: { type: integer }
+        bytes:       { type: integer, description: "J5: bytes transferred, so a caller can report volume rather than file count" }
 
     SessionOpenRequest:
       type: object
@@ -306,7 +398,21 @@ components:
       type: object
       required: [input]
       properties:
-        input: { type: string }
+        input:
+          type: string
+          description: >
+            Raw keystrokes for the session's shell. There is no `command`
+            field: the handler derives one by splitting `input` at newlines and
+            running scope, gate, limits, risk and approval over the last
+            complete line before it writes anything. Any other field in the
+            body is ignored rather than rejected (`SessionWriteBody` in the
+            daemon does not use `deny_unknown_fields`), so a client that sends
+            `command` gets its input through with the risk derived from
+            `input`, not from what it sent.
+        force:
+          type: boolean
+          default: false
+          description: Applied to the command risk of the split-out input.
         source: { type: string, nullable: true }
 
     ForwardAddRequest:
@@ -349,8 +455,10 @@ components:
         risk_level:   { $ref: "#/components/schemas/RiskLevel" }
         requested_at: { type: string, format: date-time }
         ttl_secs:     { type: integer, description: "TTL in seconds before auto-expiry" }
-        status:       { type: string, enum: [pending, approved, rejected, timed_out] }
+        status:       { type: string, enum: [pending, approved, rejected, timed_out, revoked], description: "`revoked` is written when an already-approved request is withdrawn; today only in-process callers produce it, there is no HTTP route for it." }
         rewritten_command: { type: string, nullable: true, description: "Set when the approver approved a different command; that is what ran" }
+        revoked_at:    { type: string, format: date-time, nullable: true, description: "Set when an already-approved request is withdrawn; no HTTP route produces it today" }
+        approved_command_snapshot: { type: string, nullable: true, description: "Command text captured at approval time, so the approved command survives a later change to `command`; holds the rewritten text when one was approved" }
         context:
           type: object
           nullable: true
@@ -363,6 +471,16 @@ components:
             reason:       { type: string, nullable: true }
             change_id:    { type: string, nullable: true }
             rewritable:   { type: boolean, description: "The approver may approve a rewritten command instead (POST /approvals/{id}/approve with a body)" }
+            recent_commands:
+              type: array
+              description: Recent executions on this host, captured for the reviewer; empty rather than absent when none were collected
+              items:
+                type: object
+                properties:
+                  command:    { type: string }
+                  exit_code:  { type: integer, nullable: true }
+                  risk_level: { $ref: "#/components/schemas/RiskLevel" }
+                  ts:         { type: string, description: "ISO-8601 timestamp string" }
             risk_details:
               type: object
               nullable: true
@@ -371,6 +489,7 @@ components:
                 user_risk_override: { $ref: "#/components/schemas/RiskLevel", nullable: true }
                 final_risk:         { $ref: "#/components/schemas/RiskLevel" }
                 matched_policy:     { type: string, nullable: true }
+                risk_unclassified:  { type: boolean, description: "The levels came from the bash classifier applied to a command written in another language" }
 
     HostPolicySummary:
       type: object
@@ -411,16 +530,47 @@ components:
 
     Playbook:
       type: object
+      description: >-
+        A playbook carries either plain commands in `steps` or parameterised
+        steps in `advanced_steps`; when `advanced_steps` is present it wins and
+        `steps` may be empty. A response with `"steps": []` and a populated
+        `advanced_steps` is valid, not a broken playbook.
       properties:
         name:        { type: string }
         description: { type: string }
         steps:
           type: array
           items: { type: string }
+          description: "Commands run in order. Empty when the playbook uses `advanced_steps`."
         tags:
           type: array
           items: { type: string }
         risk_override: { $ref: "#/components/schemas/RiskLevel", nullable: true }
+        advanced_steps:
+          type: array
+          items: { $ref: "#/components/schemas/PlaybookStep" }
+          nullable: true
+          description: "Omitted when unused. Takes precedence over `steps`."
+
+    PlaybookStep:
+      type: object
+      required: [command]
+      properties:
+        command:     { type: string, description: "Command text; `{{name}}` placeholders are filled from `params`." }
+        description: { type: string, nullable: true }
+        params:
+          type: array
+          items: { $ref: "#/components/schemas/PlaybookParam" }
+          description: "Defaults to an empty list when omitted."
+
+    PlaybookParam:
+      type: object
+      required: [name]
+      properties:
+        name:        { type: string }
+        description: { type: string, nullable: true }
+        default:     { type: string, nullable: true }
+        required:    { type: boolean, default: false }
 
     PlaybookRunRequest:
       type: object
@@ -462,7 +612,12 @@ components:
         alias:     { type: string }
         url:       { type: string }
         connected: { type: boolean }
-        scope:     { $ref: "#/components/schemas/DaemonScope", nullable: true }
+        scope:
+          $ref: "#/components/schemas/DaemonScope"
+          description: >-
+            Omitted entirely when no scope is configured — the key is absent,
+            not `null`. `WebDavSyncStatus` uses the opposite convention, so a
+            reader checking for `scope === null` never sees it.
 
     ExecutionGateStatus:
       type: object
@@ -498,7 +653,7 @@ components:
 
     TeamConfigExport:
       type: object
-      description: Shareable configuration bundle. Host profiles are exported with `key_path` and `password` stripped.
+      description: Shareable configuration bundle. Host profiles are exported with `key_path`, `password` and `passphrase` stripped; everything else, including `proxy_id`, is carried as-is.
       properties:
         hosts:
           type: array
@@ -549,7 +704,296 @@ components:
       properties:
         error: { type: string }
 
+    ApprovalPolicy:
+      type: object
+      required: [name]
+      properties:
+        name:         { type: string, description: "Human-readable policy name" }
+        hosts:
+          type: array
+          items: { type: string }
+          description: "Host names this policy applies to; empty means every host. Matching is case-insensitive."
+        tags:
+          type: array
+          items: { type: string }
+          description: "Host tags; any match applies the policy. Empty means every tag."
+        min_risk:       { $ref: "#/components/schemas/RiskLevel", nullable: true, description: "Lowest risk level that triggers approval. Absent means any level." }
+        command_pattern: { type: string, nullable: true, description: "Glob pattern (`*`, `?`) the command must match for the policy to apply" }
+        requires_approval: { type: boolean, default: true, description: "true routes the match to an approver; false auto-approves it" }
+        ttl_secs:       { type: integer, nullable: true, description: "Approval TTL for requests created by this policy" }
+
+    DaemonHealthSummary:
+      type: object
+      properties:
+        version:     { type: string, nullable: true }
+        uptime_secs: { type: integer, nullable: true }
+        pid:         { type: integer, nullable: true }
+
+    DaemonMetricsSummary:
+      type: object
+      properties:
+        request_count:       { type: integer, nullable: true }
+        exec_count:          { type: integer, nullable: true }
+        exec_blocked_count:  { type: integer, nullable: true }
+        approval_count:      { type: integer, nullable: true }
+
+    DaemonViewEntry:
+      type: object
+      required: [alias, url, connected]
+      properties:
+        alias:      { type: string }
+        url:        { type: string }
+        connected:  { type: boolean }
+        host_count: { type: integer, nullable: true, description: "Absent while the daemon is unreachable" }
+        health:     { $ref: "#/components/schemas/DaemonHealthSummary", nullable: true }
+        metrics:    { $ref: "#/components/schemas/DaemonMetricsSummary", nullable: true }
+
+    DaemonUnifiedView:
+      type: object
+      required: [daemons, total_hosts, total_connected]
+      properties:
+        daemons:
+          type: array
+          items: { $ref: "#/components/schemas/DaemonViewEntry" }
+        total_hosts:     { type: integer }
+        total_connected: { type: integer }
+
+    VersionCompatibility:
+      type: object
+      required: [local_version, compatible, message]
+      properties:
+        local_version:  { type: string }
+        remote_version: { type: string, nullable: true, description: "Absent when the remote daemon did not answer /health" }
+        compatible:     { type: boolean }
+        message:        { type: string }
+
+    AlgoPrefsState:
+      type: object
+      required: [prefs, custom, defaults]
+      properties:
+        prefs:    { $ref: "#/components/schemas/SshAlgoPrefs" }
+        custom:
+          type: boolean
+          description: >-
+            True when `ssh_algos.json` exists **and parses**. A file that
+            exists but fails to parse reports `false` and the connection path
+            falls back to the defaults, so `false` does not prove the file is
+            absent.
+        defaults: { $ref: "#/components/schemas/SshAlgoPrefs" }
+
+    SshSyncHostDiff:
+      type: object
+      required: [name, host]
+      properties:
+        name: { type: string }
+        host: { type: string }
+        user: { type: string, nullable: true }
+        port: { type: integer, nullable: true }
+
+    SshSyncHostConflict:
+      type: object
+      required: [name, field, agent2ssh_value, ssh_config_value]
+      properties:
+        name: { type: string }
+        field: { type: string, description: "The HostProfile field that differs, for example `port`." }
+        agent2ssh_value: { type: string }
+        ssh_config_value: { type: string }
+
+    SshSyncDiff:
+      type: object
+      required: [only_in_agent2ssh, only_in_ssh_config, conflicts, matching, summary]
+      properties:
+        only_in_agent2ssh: { type: array, items: { $ref: "#/components/schemas/SshSyncHostDiff" } }
+        only_in_ssh_config: { type: array, items: { $ref: "#/components/schemas/SshSyncHostDiff" } }
+        conflicts: { type: array, items: { $ref: "#/components/schemas/SshSyncHostConflict" } }
+        matching: { type: array, items: { type: string } }
+        summary: { type: string, description: "Human-readable one-liner, not a machine-stable format." }
+
+    RecordingConfig:
+      type: object
+      required: [enabled]
+      properties:
+        enabled: { type: boolean, default: false, description: "Opt-in: terminal output may contain secrets, so recording stays off until it is turned on." }
+
+    RecordingInfo:
+      type: object
+      description: >
+        Metadata for one asciicast v2 recording. The struct carries
+        `rename_all = "camelCase"`, so the wire names are `createdAt`,
+        `durationSeconds` and `sizeBytes` — not the snake_case the Rust field
+        names would suggest. `id` is the recording's UUID and the only form
+        `/recordings/{id}` accepts; a path or a bare filename is rejected before
+        the filesystem is touched.
+      required: [id, host, createdAt, durationSeconds, width, height, sizeBytes]
+      properties:
+        id:              { type: string, format: uuid }
+        host:            { type: string }
+        createdAt:       { type: string, format: date-time }
+        durationSeconds: { type: number }
+        width:           { type: integer }
+        height:          { type: integer }
+        sizeBytes:       { type: integer }
+
+    RecordingContent:
+      type: object
+      description: A recording read back whole — metadata and body in one response.
+      required: [info, content]
+      properties:
+        info:    { $ref: "#/components/schemas/RecordingInfo" }
+        content: { type: string, description: "The asciicast v2 JSONL body, verbatim." }
+
+    SshAlgoPrefs:
+      type: object
+      description: >
+        Eight comma-separated algorithm lists in preference order — what a
+        handshake offers. Validation is fail-closed: one name the backend
+        cannot negotiate makes every connection fail, so the built-in defaults
+        are filtered down to what this build supports rather than copied from
+        a wish list.
+      required: [kex, hostkey, cipher_cs, cipher_sc, mac_cs, mac_sc, comp_cs, comp_sc]
+      properties:
+        kex:       { type: string }
+        hostkey:   { type: string }
+        cipher_cs: { type: string }
+        cipher_sc: { type: string }
+        mac_cs:    { type: string }
+        mac_sc:    { type: string }
+        comp_cs:   { type: string, description: "Exactly `none` — the only value this build can negotiate. An empty list is rejected here as it is in every other field, so the usual 「empty means default」 reading does not apply." }
+        comp_sc:   { type: string, description: "Exactly `none`, same reason as `comp_cs`." }
+
+    Snippet:
+      type: object
+      description: >
+        A named command. `POST /snippets` replaces the whole entry when the
+        name already exists, so a caller that omits `description` clears it
+        instead of keeping the previous one.
+      required: [name, command]
+      properties:
+        name:        { type: string, description: "Identity: trimmed, at most 128 characters, no control characters." }
+        command:     { type: string, description: "At most 64 KiB. Deliberately kept out of error messages, because snippets often carry credentials." }
+        description: { type: string, description: "At most 4 KiB. Omitted from responses when unset." }
+
+    RedactRuleInfo:
+      type: object
+      description: The on-disk rule plus `is_builtin`. A rule's identity is its pattern; there is no id.
+      required: [pattern, replacement, is_builtin]
+      properties:
+        pattern:     { type: string, description: "Regex source; also the identity key." }
+        replacement: { type: string, description: "Literal text, used verbatim — capture groups are not expanded." }
+        is_builtin:  { type: boolean, description: "True for one of the patterns the app ships with." }
+
+    HighlightRule:
+      type: object
+      description: >-
+        A whole rule. `POST /highlight/rules/update` sends one of these as the
+        `rule` field, so the caller reads the rule first and sends back the
+        fields it wants unchanged — there is no partial update.
+      required: [keyword, name, color, enabled, is_regex, is_case_sensitive]
+      properties:
+        keyword:           { type: string, description: "Regex source; also the identity key." }
+        name:              { type: string, description: "Label, at most 100 characters." }
+        color:             { type: string, description: "`#RRGGBB`." }
+        enabled:           { type: boolean }
+        is_regex:          { type: boolean, description: "Always true after migration: legacy plain-text rules were escaped." }
+        is_case_sensitive: { type: boolean }
+
+    WebDavSyncFile:
+      type: object
+      required: [path, bytes, sha256]
+      properties:
+        path:   { type: string }
+        bytes:  { type: integer }
+        sha256: { type: string }
+
+    WebDavSyncMarker:
+      type: object
+      description: One side's sync marker. `digest` and `object_prefix` are the only keys an older marker may omit.
+      required: [schema_version, global_version, sync_id, updated_at, app_version, direction, files]
+      properties:
+        schema_version: { type: integer }
+        global_version: { type: integer }
+        sync_id:        { type: string }
+        updated_at:     { type: string, description: "RFC 3339." }
+        app_version:    { type: string }
+        direction:      { type: string }
+        files:          { type: array, items: { $ref: "#/components/schemas/WebDavSyncFile" } }
+        digest:         { type: string, description: "Stable digest of the configuration `files` describes. Older markers omit it; their digest is derived from the manifest on read." }
+        object_prefix:  { type: string, description: "Prefix for the immutable version objects. Schema v1 omitted it and used the mutable `files/` directory." }
+
+    WebDavSyncStatus:
+      type: object
+      description: >
+        Every key is always present — the optional ones are sent as `null`
+        rather than omitted, so a client never has to distinguish "absent" from
+        "unknown". This is the `webdav_sync` struct the daemon serializes, not
+        the desktop-only `WebDavSyncStatus` in `tauri_commands.rs`, which has
+        different fields and camelCase names. Every key here is always
+        present and `null` means unknown; `DaemonInfo.scope` is the opposite
+        convention (absent when unset), so do not "unify" the two.
+      required: [local, remote, state, local_digest, remote_digest, base_digest, summary, metadata_error]
+      properties:
+        local:
+          $ref: "#/components/schemas/WebDavSyncMarker"
+          description: "`null` until this machine has written a marker."
+        remote:
+          $ref: "#/components/schemas/WebDavSyncMarker"
+          description: "`null` until the server has a marker, or when it could not be read — `metadata_error` says which."
+        state:
+          type: string
+          enum: [in_sync, local_ahead, remote_ahead, diverged, unknown]
+        local_digest:   { type: string, nullable: true }
+        remote_digest:  { type: string, nullable: true }
+        base_digest:    { type: string, nullable: true, description: "The last digest both sides agreed on; `null` before a first successful sync." }
+        summary:        { type: string }
+        metadata_error: { type: string, nullable: true }
+
+    RiskDistribution:
+      type: object
+      required: [low, medium, high, blocked]
+      properties:
+        low:     { type: integer }
+        medium:  { type: integer }
+        high:    { type: integer }
+        blocked: { type: integer }
+
+    HostExecutionCount:
+      type: object
+      required: [host, count]
+      properties:
+        host:  { type: string }
+        count: { type: integer }
+
+    HourlyBucket:
+      type: object
+      required: [hour, count, failures]
+      properties:
+        hour:     { type: string, description: "ISO 8601, truncated to the hour." }
+        count:    { type: integer }
+        failures: { type: integer }
+
+    MetricsTrend:
+      type: object
+      required: [period, total_executions, success_count, failure_count, blocked_count, failure_rate, risk_distribution, avg_duration_ms, top_hosts, hourly_breakdown]
+      properties:
+        period:
+          type: string
+          enum: [last24h, last7d, last30d, all]
+          description: >
+            The window covered. The tokens are not the request's: `?period=24h`
+            comes back as `last24h`. The daemon accepts either spelling on the
+            way in, so a caller echoing the response value back still works.
+        total_executions:  { type: integer }
+        success_count:     { type: integer }
+        failure_count:     { type: integer }
+        blocked_count:     { type: integer }
+        failure_rate:      { type: number, description: "A ratio between 0 and 1, not a percentage." }
+        risk_distribution: { $ref: "#/components/schemas/RiskDistribution" }
+        avg_duration_ms:   { type: number }
+        top_hosts:         { type: array, items: { $ref: "#/components/schemas/HostExecutionCount" } }
+        hourly_breakdown:  { type: array, items: { $ref: "#/components/schemas/HourlyBucket" } }
+
 paths:
+
   /health:
     get:
       summary: Health check
@@ -574,19 +1018,98 @@ paths:
                     deprecated: true
                     description: Backward-compatible alias; runtime SSH uses the embedded backend.
                   pid: { type: integer }
+                  config_dir:
+                    type: string
+                    description: >
+                      Absolute path of the config directory this daemon serves.
+                      The stop path compares it with its own before requesting a
+                      shutdown, so a daemon started with a different
+                      `AGENT2SSH_CONFIG_DIR` is told apart from the one the caller
+                      started.
 
   /shutdown:
     post:
       summary: Shut the daemon down
       description: >
         Asks the daemon to shut down the way `SIGTERM` does: it stops accepting
-        connections, drains open WebSocket connections (up to five seconds) and
-        removes `daemon.pid`. Everything the daemon holds in memory ends with it —
-        PTY sessions, resident shells, port forwards and pending approvals.
+        connections, ends event streams, and drains open WebSocket connections on
+        a budget — up to two seconds for each connection (they drain in parallel),
+        then up to four seconds for the registry that tracks them. A connection
+        that misses its deadline stops being waited for: its drain loop is
+        dropped and the handler finishes its own cleanup, which can take up to
+        another half second. The drain is therefore best effort, not a guarantee.
+        It then removes `daemon.pid`. Everything the daemon holds in memory ends
+        with it — PTY sessions, resident shells, port forwards and pending
+        approvals. A pending approval is not left ambiguous: the wait behind it
+        is cancelled, the approval is answered `rejected` while it is still
+        pending, and `audit.jsonl` gets a
+        `daemon shutting down; approval wait cancelled` line — so "the daemon was
+        stopped" is not indistinguishable from "nobody ever answered". That trace
+        only exists for a stop the daemon completes itself: one that is
+        force-terminated after the grace window, or killed outright, writes
+        nothing on its way out.
         The desktop app and `agent2ssh daemon stop` use this route on all
-        platforms after checking the health PID; if shutdown was accepted but
-        the process does not exit, they may terminate it after the drain timeout.
+        platforms, but stopping is two steps rather than one: this request, and —
+        only once a daemon has accepted it and is still running when the wait ends —
+        a force-terminate. A request that never gets an accepted answer ends the
+        attempt instead: the caller reports why and sends no signal, so a refused
+        connection and every 4xx this operation can answer leave the process
+        alone. Who answered what is worth separating. A `409` means another daemon
+        holds the listener: the PID in `expect_pid` is not the one that replied.
+        A `401` — or the `403` of the admin gate, which the caller treats the same
+        way — means this route did reply: the token in this config's `daemon.token`
+        is not the one the running daemon accepts as admin, which is what a file
+        replaced under it looks like.
+        A `429` is neither: the request was understood and refused for
+        rate-limiting, before this handler ran, because `/shutdown` is subject to
+        the execution limits like every other route. Those counts are per minute
+        and default to 30 per source and 20 per host — the host being the name the
+        request carries, e.g. `local:vs` — and they are configurable in
+        `execution_limits.toml`, so a busy stop loop meets one before any of the
+        answers above. And the stop path's own pre-flight refusals — no `/health`
+        answer, another PID, another config directory, no token file at all —
+        never connect, so no status code describes them.
+        The caller waits
+        `GRACEFUL_STOP_WAIT` (8 s) for the process to exit; on `Running` it records
+        a warning, signals the process by force, then waits 2 more seconds, and a
+        `StillRunning` observation at that point is an error rather than a silent
+        success. Before the request it compares the PID `/health` reports with the
+        PID it was asked to stop, and with the config directory that daemon says it
+        serves; a disagreement ends the attempt as an identity error without
+        waiting, so this is not "always check health, then stop".
         Requires the unrestricted admin token; a scoped token gets 403.
+
+        The optional `expect_pid` names the process the caller means to stop. It
+        is re-checked here rather than trusted: the listener can change hands
+        between a health check and this request — a restart, a respawn — and the
+        daemon that answers the second request accepts the same admin token
+        because the token is a file in the shared config directory. A request
+        naming a different PID is refused with 409 and this daemon keeps running.
+        `expect_pid: null` is a 400 rather than an unchecked stop; omit the field
+        entirely to stop without a check, which is what a hand-written `curl`
+        does. The check narrows the race and cannot close it — see K14 in
+        `docs/KNOWN-ISSUES.md`.
+
+        The guard is weaker than the paragraphs above suggest, because this
+        operation reads its body as `Option<Json<ShutdownRequest>>` — see the
+        note on body handling at the top of this document. A body that type-checks
+        is checked; a body that does not parse is *dropped*, not refused. So
+        `{"expect_pid": "1234"}` — the string a shell produces from `"$PID"` —
+        stops the daemon without a check and the 409 never fires, and the same
+        goes for a negative or out-of-range PID, or a truncated body. The 400
+        below is reached only by a body that parses *and* carries
+        `expect_pid: null`. Send the field as a bare JSON number, or omit the
+        body entirely.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                expect_pid:
+                  type: integer
+                  description: The PID the caller believes it is addressing.
       responses:
         "200":
           description: Shutdown has been requested; the daemon exits after the response.
@@ -596,8 +1119,31 @@ paths:
                 type: object
                 properties:
                   ok: { type: boolean }
+        "400":
+          description: >
+            `expect_pid` was present but not a PID. Omitting the field is how a
+            caller stops without a check.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
-          description: The token is scoped; stopping the daemon needs the admin token.
+          description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: >
+            `expect_pid` names another process. The daemon that answered is not
+            the one the caller meant to stop, so it is still running; the error
+            names the PID that did answer.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /hosts:
     get:
@@ -609,6 +1155,16 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/HostProfile" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          description: The hosts configuration could not be read, or could not be parsed. Answered with 500 rather than an empty list, so a broken config is distinguishable from no hosts.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
     post:
       summary: Create or update a host profile
       requestBody:
@@ -621,7 +1177,36 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/HostProfile" }
+        "400":
+          description: |
+            The profile is rejected by validation, or the hosts configuration could not be
+            written (`save_config`: a read-only config directory, a full disk). A save
+            failure answers 400 rather than 500, so the status alone cannot tell "your
+            profile is malformed" from "we could not write it" — read the message.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
   /hosts/import:
     post:
       summary: Import hosts from ~/.ssh/config
@@ -632,6 +1217,21 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/HostProfile" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          description: Reading `~/.ssh/config`, or saving the imported hosts, failed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /hosts/{name}:
     delete:
@@ -649,7 +1249,24 @@ paths:
                 type: object
                 properties:
                   ok: { type: boolean }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "404":
+          description: >-
+            No host profile named this — or the config could not be written.
+            `remove_host_core` lets the write lock, `load_config` and
+            `save_config_unlocked` fail through the same `?` chain the "not found"
+            error takes, and `remove_host` maps the whole chain onto 404. So a
+            read-only config directory answers 404 while the host is still there.
+            Retrying is safe; treating 404 as "it is gone" is not.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -673,11 +1290,26 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/HostPolicySummary" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
+          description: >-
+            The token's scope does not allow observing this host. The summary is
+            computed from the host metadata, so a scoped token cannot read the
+            policy of a host it cannot see — the same rule every other read obeys.
+            `scope_allows_observe_host` is checked before the summary is built.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "404":
+          description: >-
+            No host profile named this, or its policy could not be computed:
+            `host_policy_summary` reads the config, the risk rules and the
+            approval policy, and every failure it reports — including an
+            unreadable `risk_rules.toml` — arrives as this code.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -703,16 +1335,35 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/PingResult" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scoped token does not allow one of the requested hosts or the ping operation
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
   /exec:
     post:
       summary: Execute a command over SSH
-      description: Applies bearer-token scope, execution gate, execution limits, effective risk, and approval policy before running.
+      description: >
+        Applies bearer-token scope, execution gate, execution limits, effective risk,
+        and approval policy before running. Shutdown interruption returns 503;
+        if the command was sent, its remote outcome is unknown and clients must
+        not automatically retry it.
       requestBody:
         required: true
         content:
@@ -724,6 +1375,20 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ExecResult" }
         "400":
+          description: >-
+            Two unrelated failures. The command exceeded `MAX_COMMAND_BYTES`
+            (`ensure_command_length`), which is a client mistake and needs no
+            retry. Or the execution itself failed: this operation has no 5xx of
+            its own beyond 503, so a timeout, a connection failure, an unknown
+            host at the SSH layer and a non-zero exit the runner reports as an
+            error all arrive here. The 503 below is the one case that is
+            separated — a shutdown during the run, where the remote side may
+            still be executing.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -737,6 +1402,16 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
         "423":
           description: Execution gate paused
           content:
@@ -748,6 +1423,11 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+        "503":
+          description: Daemon shutdown interrupted the request; inspect the error before any retry.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
   /local-exec:
     post:
       summary: Execute a command in a terminal environment on the daemon's own machine
@@ -767,6 +1447,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scope denied or approval rejected
           content:
@@ -777,6 +1462,16 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
         "423":
           description: Execution gate paused
           content:
@@ -803,7 +1498,15 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ExecMultiBatchResult" }
         "400":
-          description: Command too long, or the requested hosts/tags matched no configured host
+          description: |
+            The command is too long; the hosts configuration could not be read or parsed; no configured host matched the
+            requested hosts/tags; or risk policy blocked the command on at least one target (a blocked target is refused
+            with 400 before anything runs, and the message names the rule).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -817,6 +1520,16 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
         "423":
           description: Execution gate paused
           content:
@@ -824,6 +1537,12 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "429":
           description: Execution limit exceeded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "500":
+          description: The authorization chain hit an internal error, or the hosts configuration could not be read.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -843,7 +1562,15 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ExecComparison" }
         "400":
-          description: Command too long, or the requested hosts/tags matched no configured host
+          description: |
+            The command is too long; the hosts configuration could not be read or parsed; no configured host matched the
+            requested hosts/tags; or risk policy blocked the command on at least one target (a blocked target is refused
+            with 400 before anything runs, and the message names the rule).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -857,6 +1584,16 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
         "423":
           description: Execution gate paused
           content:
@@ -864,6 +1601,12 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "429":
           description: Execution limit exceeded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "500":
+          description: The authorization chain hit an internal error, or the hosts configuration could not be read.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -902,11 +1645,21 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "403":
-          description: The token is not the unrestricted admin token
+          description: Requires the unrestricted admin token; a scoped token gets 403.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
   /gate:
     get:
       summary: Read the global execution gate status
@@ -915,6 +1668,18 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ExecutionGateStatus" }
+
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "500":
+          description: "`execution_gate.json` could not be read (`load_execution_gate`), so the daemon cannot say whether the gate is paused."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /gate/pause:
     post:
@@ -929,6 +1694,32 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ExecutionGateStatus" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
+        "500":
+          description: "`execution_gate.json` could not be written (`save_execution_gate`); the gate is not paused."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /gate/resume:
     post:
@@ -943,6 +1734,32 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ExecutionGateStatus" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
+        "500":
+          description: "`execution_gate.json` could not be written (`save_execution_gate`); the gate stays paused."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /exec/stream:
     get:
@@ -953,9 +1770,32 @@ paths:
         path as `/exec`: bearer-token scope, execution gate, execution limits,
         effective risk, and approval policy are enforced before output streams.
         Server pushes: {"type":"stdout","data":"..."}, {"type":"stderr","data":"..."}, {"type":"exit","code":0,"duration_ms":1234}
+        The exit frame is sent once the command has run. A request refused
+        before it starts — a body that is not an ExecRequest, an unknown source,
+        a command over the length limit, a paused gate, a rate limit, a failed
+        authorization, `force` missing for a high-risk command, an unknown host —
+        answers with a single {"type":"error"} frame and closes the socket, so
+        there is no exit frame to wait for after one.
+        When the daemon is stopping — `POST /shutdown` or a signal — it pushes
+        {"type":"shutdown"} with no other field, drains for up to 500 ms, and closes.
+        That frame is the client's only notice that the daemon is going away; it is not
+        an error, and reconnecting immediately will race the shutdown. The drain
+        forwards stdout and stderr only: an exit that arrives during it is recorded for
+        the audit, not sent there. The handler sends its one {"type":"exit"} after the
+        loop, which on this path is after the Close — so treat the close as final and
+        do not wait for that frame. (A data frame after a close frame is a protocol
+        violation; the ordering is L2-87 in `docs/reports/OPT-LOOP-L2-PENDING.md`.)
+        Every authorization refusal after the upgrade — scope, execution gate, rate limit, approval — arrives as
+        {"type":"error","error":"..."} over the socket, not as an HTTP status: the handler body only counts the
+        request and then hands the socket to `on_upgrade`. The only HTTP-level failure is the handshake itself.
       responses:
         "101":
           description: Switching Protocols
+        "401":
+          description: "Missing or invalid token: `Authorization: Bearer`, or `?token=` on the upgrade; the same handshake-level check every non-public route runs."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /terminal:
     get:
@@ -966,9 +1806,25 @@ paths:
         query string because browser WebSocket handshakes cannot set an
         Authorization header. This route and `/exec/stream` are the only ones
         that accept `?token=`; every other route requires `Authorization: Bearer`. The server first sends a JSON text frame:
-        {"type":"connected","host":"...","address":"...","username":"...","fingerprint_sha256":"SHA256:...","host_key_algorithm":"...","server_banner":"..."}.
+        {"type":"connected","host":"...","address":"...","username":"...","fingerprint_sha256":"SHA256:...","host_key_algorithm":"...","recording_id":null,"terminal_id":"..."}.
+        `recording_id` is null unless terminal recording is enabled, and `terminal_id`
+        is the ephemeral ID the broadcast routes accept. The server's pre-authentication
+        banner is deliberately not part of this frame — it names the SSH implementation
+        and its version — and the transport keeps it only to size SFTP writes.
         Terminal input/output then streams as binary frames. Resize control is
         sent as a JSON text frame: {"type":"resize","cols":120,"rows":36}.
+        When the daemon is stopping — `POST /shutdown` or a signal — it sends
+        {"type":"shutdown","message":"server shutting down"}, then keeps forwarding
+        output until 500 ms pass with no new terminal event, and closes. That 500 ms
+        is an idle timeout, not a budget: a terminal that keeps producing output is
+        drained until the two-second per-connection deadline in `POST /shutdown`
+        drops the loop; a `Closed` or error event, a send that fails, or the
+        terminal's event stream ending all end the drain early — the last of those
+        sends no diagnostic and looks like a clean finish.
+        Note the `message` field: `/exec/stream`'s shutdown frame has
+        none, so a client that handles both routes has to accept the two shapes —
+        and the same 500 ms means something else there: an absolute deadline
+        measured from the cancellation rather than an idle timeout.
         Terminal connections use the embedded SSH transport, including
         jump-host proxy channels, and do not require system `ssh` or `sshpass`.
         Completed input lines are
@@ -986,6 +1842,11 @@ paths:
       responses:
         "101":
           description: Switching Protocols
+        "400":
+          description: The host is not a configured profile
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "401":
           description: Missing or invalid token
           content:
@@ -993,6 +1854,16 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scope denied
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "423":
+          description: Execution gate paused. Unlike `/exec/stream`, this route runs the gate check before the upgrade, so the refusal is an HTTP status rather than a WebSocket error frame.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Session concurrency limit exceeded, also checked before the upgrade.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1012,7 +1883,28 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/TerminalBroadcastResponse" }
+        "400":
+          description: "The command is empty, over the length cap, or contains control characters; there are fewer than 2 or more than 32 targets; or a `terminal_id` is a duplicate. A `terminal_id` that is not a UUID is **not** a 400 — it is resolved to no live endpoint and comes back per target as `authorized: false` with `terminal is not connected`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
   /terminal/broadcast:
     post:
       summary: Authorize and enqueue a multi-terminal command
@@ -1022,6 +1914,10 @@ paths:
         server-owned carriage return. `all_or_nothing` defaults to true. This is
         authorization-atomic, not remote execution-atomic; per-target `sent`
         means accepted by the live terminal queue, not completed remotely.
+        A target whose authorization is refused is reported in the response body
+        with `authorized: false` and an `error`; the HTTP status stays 200 and
+        nothing is sent to that target, so a per-target refusal never surfaces as
+        a 4xx from this operation.
       requestBody:
         required: true
         content:
@@ -1029,11 +1925,34 @@ paths:
             schema: { $ref: "#/components/schemas/TerminalBroadcastRequest" }
       responses:
         "200":
-          description: Per-target authorization and enqueue results
+          description: >-
+            Per-target authorization and enqueue results. A refused target appears
+            here with `authorized: false`, not as a 4xx, so the status code alone
+            says nothing about which targets were authorized.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/TerminalBroadcastResponse" }
+        "400":
+          description: "Same validation as `/terminal/broadcast/preview`: empty command, control characters, fewer than 2 or more than 32 targets, or a duplicate `terminal_id`. A non-UUID `terminal_id` is resolved per target, not rejected here."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
   /recordings/config:
     description: Recording endpoints require the unrestricted admin token; scoped tokens are rejected.
     get:
@@ -1043,11 +1962,17 @@ paths:
           description: Recording configuration
           content:
             application/json:
-              schema:
-                type: object
-                required: [enabled]
-                properties:
-                  enabled: { type: boolean, default: false }
+              schema: { $ref: "#/components/schemas/RecordingConfig" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Terminal recordings require the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
     put:
       summary: Enable or disable recording for new terminal sessions
       requestBody:
@@ -1060,7 +1985,37 @@ paths:
               properties:
                 enabled: { type: boolean }
       responses:
-        "200": { description: Updated recording configuration }
+        "200":
+          description: The configuration as stored.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RecordingConfig" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Terminal recordings require the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
+        "500":
+          description: The recording configuration could not be written.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /recordings:
     get:
@@ -1068,7 +2023,28 @@ paths:
       description: Recordings may contain sensitive terminal output and are not included in WebDAV sync.
       responses:
         "200":
-          description: Recording metadata, newest first
+          description: Recording metadata, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/RecordingInfo" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Terminal recordings require the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "500":
+          description: The recording index could not be read.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /recordings/{id}:
     parameters:
@@ -1080,8 +2056,26 @@ paths:
     get:
       summary: Read recording metadata and asciicast v2 JSONL content
       responses:
-        "200": { description: Recording metadata and content }
-        "404": { description: Missing or invalid recording }
+        "200":
+          description: Metadata plus the asciicast v2 body.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RecordingContent" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Terminal recordings require the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Missing or invalid recording
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
     delete:
       summary: Permanently delete a sensitive recording
       description: Requires `confirm=delete`; successful deletion is appended to the security audit log.
@@ -1091,9 +2085,27 @@ paths:
           required: true
           schema: { type: string, const: delete }
       responses:
-        "200": { description: Deleted recording metadata }
-        "400": { description: Confirmation missing or recording id invalid }
+        "200":
+          description: Metadata of the recording that was deleted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RecordingInfo" }
+        "400":
+          description: Confirmation missing or recording id invalid
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Terminal recordings require the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
   /events/stream:
     get:
       summary: Subscribe to daemon events
@@ -1101,7 +2113,8 @@ paths:
         Authenticated Server-Sent Events stream. Each event uses event name
         `agent2ssh`; the data payload is an AgentEvent JSON object. Used by
         the desktop Live Agent Activity panel to observe local daemon/session
-        activity and streaming exec output.
+        activity and streaming exec output. The stream ends when the daemon
+        shuts down; an EOF alone does not distinguish shutdown from disconnection.
       responses:
         "200":
           description: Event stream
@@ -1111,6 +2124,12 @@ paths:
                 type: string
                 description: SSE frames containing AgentEvent JSON in data lines.
         "401":
+          description: Missing or invalid token. `require_admin` cannot make this a 403 for an unknown token either — an unknown token never reaches the handler.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1155,7 +2174,7 @@ paths:
           schema: { type: string }
         - name: decision
           in: query
-          schema: { type: string, enum: [approved, rejected, timed_out, auto_allowed, blocked] }
+          schema: { type: string, enum: [approved, approved_rewritten, rejected, timed_out, auto_allowed, blocked] }
         - name: agent
           in: query
           description: Requesting client label, exact case-insensitive match on source
@@ -1167,6 +2186,18 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/AuditEntry" }
+
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "500":
+          description: The audit log could not be read.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /audit/export:
     get:
@@ -1211,7 +2242,7 @@ paths:
           schema: { type: string }
         - name: decision
           in: query
-          schema: { type: string, enum: [approved, rejected, timed_out, auto_allowed, blocked] }
+          schema: { type: string, enum: [approved, approved_rewritten, rejected, timed_out, auto_allowed, blocked] }
         - name: agent
           in: query
           description: Requesting client label, exact case-insensitive match on source
@@ -1225,6 +2256,23 @@ paths:
               schema: { type: string }
         "400":
           description: Unsupported format
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          description: The audit log could not be read, or the CSV could not be written.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1243,6 +2291,16 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/SftpResult" }
+        "400":
+          description: The transfer request is invalid, or the upload failed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scope denied or approval rejected
           content:
@@ -1253,6 +2311,16 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
         "423":
           description: Execution gate paused
           content:
@@ -1278,6 +2346,16 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/SftpResult" }
+        "400":
+          description: The transfer request is invalid, or the SFTP transfer failed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scope denied or approval rejected
           content:
@@ -1288,6 +2366,16 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
         "423":
           description: Execution gate paused
           content:
@@ -1318,6 +2406,16 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ExecResult" }
+        "400":
+          description: The listing request is invalid, or the directory could not be read.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scope denied or approval rejected
           content:
@@ -1328,6 +2426,16 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
         "423":
           description: Execution gate paused
           content:
@@ -1358,6 +2466,16 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ExecResult" }
+        "400":
+          description: The request is invalid, or the path could not be inspected.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scope denied or approval rejected
           content:
@@ -1368,6 +2486,16 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
         "423":
           description: Execution gate paused
           content:
@@ -1398,6 +2526,16 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ExecResult" }
+        "400":
+          description: The request is invalid, or the directory could not be created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scope denied or approval rejected
           content:
@@ -1408,6 +2546,16 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
         "423":
           description: Execution gate paused
           content:
@@ -1444,6 +2592,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scope denied or approval rejected
           content:
@@ -1454,6 +2607,16 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
         "423":
           description: Execution gate paused
           content:
@@ -1489,6 +2652,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scope denied or approval rejected
           content:
@@ -1499,6 +2667,16 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
         "423":
           description: Execution gate paused
           content:
@@ -1534,6 +2712,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scope denied or approval rejected
           content:
@@ -1544,6 +2727,16 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
         "423":
           description: Execution gate paused
           content:
@@ -1593,6 +2786,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scope denied or approval rejected
           content:
@@ -1603,6 +2801,16 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
         "423":
           description: Execution gate paused
           content:
@@ -1675,6 +2883,16 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
         "423":
           description: Execution gate paused
           content:
@@ -1703,6 +2921,16 @@ paths:
                 type: object
                 properties:
                   id: { type: string, format: uuid }
+        "400":
+          description: The host is unknown, or the session could not be opened.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scope denied or approval rejected
           content:
@@ -1713,6 +2941,16 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
         "423":
           description: Execution gate paused
           content:
@@ -1737,6 +2975,12 @@ paths:
                     id:   { type: string, format: uuid }
                     host: { type: string }
 
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /sessions/{id}/write:
     post:
       summary: Write input to a session
@@ -1759,8 +3003,13 @@ paths:
                 type: object
                 properties:
                   ok: { type: boolean }
-        "423":
-          description: Execution gate paused
+        "400":
+          description: The id is not a UUID, the session is unknown or dead, or the write failed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1771,6 +3020,21 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "408":
           description: Approval timed out
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
+        "423":
+          description: Execution gate paused
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1799,6 +3063,21 @@ paths:
                 type: object
                 properties:
                   output: { type: string }
+        "400":
+          description: The id is not a UUID, or it names no live session.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Scope denied — the token's allowed hosts, tags and `session_read` command scope do not cover the host this session was opened on.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /sessions/{id}:
     delete:
@@ -1816,6 +3095,36 @@ paths:
                 type: object
                 properties:
                   ok: { type: boolean }
+        "400":
+          description: The id is not a UUID, or it names no live session.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Scope denied, or the approval policy refused `session_close`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "408":
+          description: Approval timed out.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "423":
+          description: Execution gate paused.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Execution limit exceeded.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /resident-sessions:
     post:
@@ -1855,7 +3164,51 @@ paths:
                   label: { type: string }
                   warmup_ms: { type: integer }
         "400":
-          description: Unknown environment, container host, session cap reached, or authorization refused
+          description: |
+            The `host` is not a `local:<id>` environment, names a container, or cannot be
+            built; the concurrent-session cap is reached
+            (`AGENT2SSH_MAX_RESIDENT_SESSIONS`, default 8); the warm-up failed; or the
+            command was refused by risk policy (blocked) or by the approver.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Scope denied — the token's allowed hosts and tags do not cover this environment id.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "408":
+          description: Approval timed out.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
+        "423":
+          description: Execution gate paused.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: A rate or concurrency limit was exceeded (the shared `reject_if_rate_limited` preflight, or the local-environment session cap). The per-command session cap on `/sessions` is a 400 here, not a 429.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          description: Internal failure while serving the request (a config file could not be read, or the authorization chain hit an internal error).
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1876,6 +3229,12 @@ paths:
                     label: { type: string }
                     idle_secs: { type: integer }
                     dead: { type: boolean }
+
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /resident-sessions/{id}/exec:
     post:
@@ -1912,7 +3271,52 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ExecResult" }
         "400":
-          description: Unknown or dead session, command timed out (session killed), or authorization refused
+          description: |
+            Unknown session id (including one whose host the token cannot see), a dead
+            session, a command that outlived `timeout_secs` (the whole session is killed),
+            an over-long command, a closed session whose queued command was cancelled, or a
+            command refused by risk policy (blocked) or by the approver.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Scope denied — the command is outside the token's allowed hosts, tags or command patterns for the session's own environment id.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "408":
+          description: Approval timed out.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
+        "423":
+          description: Execution gate paused.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Execution limit exceeded.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "500":
+          description: Internal failure while serving the request (a config file could not be read, or the authorization chain hit an internal error).
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1951,7 +3355,12 @@ paths:
                   truncated: { type: boolean }
                   dropped_bytes: { type: integer }
         "400":
-          description: Unknown session
+          description: Unknown session id, including one whose host this token cannot see.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1982,7 +3391,12 @@ paths:
                   closed: { type: boolean }
                   id: { type: string, format: uuid }
         "400":
-          description: Unknown session
+          description: Unknown session id, including one whose host this token cannot see, or the shell could not be reaped.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -2007,6 +3421,12 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+        "500":
+          description: Internal failure while serving the request (a config file could not be read, or the authorization chain hit an internal error).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /forwards:
     post:
       summary: Add a port forward tunnel
@@ -2021,6 +3441,16 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ForwardRule" }
+        "400":
+          description: The rule is rejected by validation, or the tunnel could not be started.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scope denied or approval rejected
           content:
@@ -2031,6 +3461,16 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
         "423":
           description: Execution gate paused
           content:
@@ -2051,6 +3491,12 @@ paths:
                 type: array
                 items: { $ref: "#/components/schemas/ForwardRule" }
 
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /forwards/{id}:
     delete:
       summary: Remove a tunnel
@@ -2067,6 +3513,23 @@ paths:
                 type: object
                 properties:
                   ok: { type: boolean }
+
+        "400":
+          description: The id is not a UUID, no rule has it, or removing it failed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "403":
+          description: "Scope denied: the rule's host is outside the token's allowed hosts and tags."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /forwards/multi:
     post:
@@ -2108,8 +3571,43 @@ paths:
                   ids:   { type: array, items: { type: string, format: uuid }, description: "The started rules, in the order they were requested." }
                   host:  { type: string }
                   count: { type: integer }
+        "400":
+          description: A rule has an unknown `direction`, or starting the rules failed — the host does not resolve, the SSH connection failed, a bind port is taken, or a `remote` rule's `target_host` is not loopback. The message names the failing rule, and the rules already started are rolled back.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scope denied or approval rejected
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "408":
+          description: Approval timed out
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
+        "423":
+          description: Execution gate paused
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Execution limit exceeded
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -2132,7 +3630,39 @@ paths:
                 properties:
                   ok: { type: boolean }
         "400":
-          description: The id is not a UUID.
+          description: The id is not a UUID, no rule has it, or the rule still exists but its worker could not be started (the SSH connection or the listener failed; the message names which).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: |
+            Scope denied, or the approval policy refused the restart. A scoped token can only
+            reach this route when the rule's host is in its allowed hosts or tags; an id the
+            token cannot see is answered like an unknown one (400), not with a 403 that would
+            confirm the tunnel exists.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "408":
+          description: Approval timed out.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "423":
+          description: Execution gate paused.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Execution limit exceeded.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /forwards/{id}/stop:
     post:
@@ -2152,7 +3682,35 @@ paths:
                 properties:
                   ok: { type: boolean }
         "400":
-          description: The id is not a UUID.
+          description: The id is not a UUID, or no rule has it. Stopping a rule that is already stopped succeeds, so an id that exists never answers 400 for its state.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Scope denied, or the approval policy refused the stop. A rule outside the token's hosts and tags is answered like an unknown id (400).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "408":
+          description: Approval timed out.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "423":
+          description: Execution gate paused.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Execution limit exceeded.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /approvals:
     get:
@@ -2164,6 +3722,12 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/ApprovalRequest" }
+
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /approvals/{id}/approve:
     post:
@@ -2196,6 +3760,30 @@ paths:
                 type: object
                 properties:
                   ok: { type: boolean }
+        "400":
+          description: The id is not a UUID, or an approve body is malformed / asks for a rewrite that is refused.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          description: |
+            The authentication middleware could not read `daemon_tokens.toml` while validating a
+            non-admin token, so it could not tell a scoped token from an unknown one. Applies to
+            every authed route, not just this one — a broken `daemon_tokens.toml` answers 500 to
+            any token that is not the admin token, until the file parses again.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /approvals/{id}/reject:
     post:
@@ -2213,7 +3801,23 @@ paths:
                 type: object
                 properties:
                   ok: { type: boolean }
+        "400":
+          description: The id is not a UUID, it names no known request, or the request is no longer pending (already approved, rejected or timed out).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
   /risk/check:
     post:
       summary: Check risk level of a command
@@ -2235,8 +3839,37 @@ paths:
                 type: object
                 properties:
                   risk_level: { $ref: "#/components/schemas/RiskLevel" }
-                  matched_rule: { type: string, nullable: true }
+                  matched_rule:
+                    type: string
+                    nullable: true
+                    description: >-
+                      `"user_rule"` when a user-defined risk rule matched, else
+                      `null`. The value is a marker, not a rule name: the matched
+                      pattern is not carried, so the two possible values are `null`
+                      and the literal `"user_rule"`.
 
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "403":
+          description: A `host` was supplied and it lies outside the token's allowed hosts and tags.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
   /connections:
     get:
       summary: List retained embedded SSH connection states
@@ -2247,6 +3880,12 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/ConnectionStatus" }
+
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /connections/{host}/connect:
     post:
@@ -2265,6 +3904,16 @@ paths:
                 type: object
                 properties:
                   ok: { type: boolean }
+        "400":
+          description: The SSH connection could not be established; the message carries the transport error.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scope denied or approval rejected
           content:
@@ -2298,6 +3947,16 @@ paths:
                 type: object
                 properties:
                   ok: { type: boolean }
+        "400":
+          description: There is no active connection for this host, or closing it failed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scope denied or approval rejected
           content:
@@ -2320,6 +3979,18 @@ paths:
                 type: array
                 items: { $ref: "#/components/schemas/Playbook" }
 
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "500":
+          description: The playbook store could not be read.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /playbooks/run:
     post:
       summary: Execute a playbook on a host
@@ -2334,6 +4005,16 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/PlaybookRunResult" }
+        "400":
+          description: The playbook is unknown, is not a playbook for this host, or its steps failed to start.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scope denied or approval rejected
           content:
@@ -2344,6 +4025,16 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
         "423":
           description: Execution gate paused
           content:
@@ -2366,6 +4057,18 @@ paths:
                 type: array
                 items: { $ref: "#/components/schemas/DaemonInfo" }
 
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "500":
+          description: The daemon registry could not be read.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /daemons/{alias}/exec:
     post:
       summary: Execute a command through a configured daemon alias
@@ -2385,8 +4088,31 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ExecResult" }
+        "400":
+          description: A local alias was requested and the local command failed, or the request is malformed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: >-
+            Two different failures share this code. The usual one is the
+            middleware's — a missing or invalid bearer token — and its body is
+            `{"error": "unauthorized"}`. The other comes from the handler, after
+            the middleware has already accepted the caller: this machine holds no
+            token for the named remote daemon (`proxy_exec`), so the forward
+            cannot authenticate *to* it. That body names the alias, so a client
+            that retries a 401 as if its own credentials were wrong will retry
+            forever.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scope denied or approval rejected
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: No remote daemon is registered under this alias, or the token cannot see the one that is.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -2395,6 +4121,16 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
         "423":
           description: Execution gate paused
           content:
@@ -2402,6 +4138,23 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "429":
           description: Execution limit exceeded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "500":
+          description: The HTTP client used to reach the remote daemon could not be built.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "502":
+          description: >-
+            The remote daemon could not be reached, or answered with a body that
+            could not be read. A refusal is forwarded verbatim: when the remote
+            answers non-2xx, this operation returns that same status with the
+            remote's body, so a 4xx here may have originated on the remote rather
+            than on this daemon.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -2414,6 +4167,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/WebhookConfig" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
     put:
       summary: Set webhook notification configuration
       requestBody:
@@ -2426,6 +4184,32 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/WebhookConfig" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
+        "500":
+          description: "`webhook.toml` could not be written."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /metrics:
     get:
@@ -2442,7 +4226,19 @@ paths:
                   exec_total:             { type: integer }
                   exec_blocked_total:     { type: integer }
                   exec_total_duration_ms: { type: integer }
-                  approvals_total:        { type: integer }
+                  approvals_total:
+                    type: integer
+                    description: >
+                      Executions that went to a person for a decision. It is
+                      incremented when the wait begins, before any answer, so a
+                      request that is rejected, times out, or is cancelled by a
+                      shutdown all count. Executions that never ask do not:
+                      commands below the risk threshold, and high-risk commands
+                      the caller forces past the risk gate — unless an approval
+                      policy names them, because a policy asks regardless of
+                      `force`. This is therefore "how many times the daemon had
+                      to ask", not "how many approvals were granted"; the two
+                      differ by every rejection and timeout.
 
   /metrics/trend:
     get:
@@ -2455,25 +4251,26 @@ paths:
         "200":
           content:
             application/json:
-              schema:
-                type: object
-                properties:
-                  period:            { type: string }
-                  total_executions:  { type: integer }
-                  success_count:     { type: integer }
-                  failure_count:     { type: integer }
-                  blocked_count:     { type: integer }
-                  failure_rate:      { type: number }
-                  risk_distribution: { type: object }
-                  avg_duration_ms:   { type: number }
-                  top_hosts:
-                    type: array
-                    items: { type: object }
-                  hourly_breakdown:
-                    type: array
-                    items: { type: object }
+              schema: { $ref: "#/components/schemas/MetricsTrend" }
         "400":
           description: Unknown period
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          description: The audit log could not be read while computing the trend.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -2517,6 +4314,10 @@ paths:
                         host_address: { type: string }
                         command:      { type: string }
                         risk_level:   { $ref: "#/components/schemas/RiskLevel" }
+                        needs_force:  { type: boolean, description: "True when the effective risk is high or blocked — the same condition that makes `/exec` demand `force: true`" }
+                        blocked:      { type: boolean, description: "True when the effective risk is `blocked`: the command cannot be executed at all" }
+                        jump_host:    { type: string, nullable: true }
+                        timeout_secs: { type: integer }
                   overall_risk:      { $ref: "#/components/schemas/RiskLevel" }
                   requires_approval: { type: boolean }
                   warnings:
@@ -2527,12 +4328,27 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scoped token does not allow one of the requested targets or the command
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
   /approval/check:
     post:
       summary: Check whether a command on a host would require approval
@@ -2558,6 +4374,33 @@ paths:
                   risk_level:        { $ref: "#/components/schemas/RiskLevel" }
                   ttl_secs:          { type: integer, nullable: true }
 
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "403":
+          description: The token's allowed hosts and tags do not cover the `host` named in the body.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
+        "500":
+          description: The approval policy configuration could not be read.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /approval/policies:
     get:
       summary: List approval policies
@@ -2567,16 +4410,27 @@ paths:
             application/json:
               schema:
                 type: array
-                items: { type: object }
+                items: { $ref: "#/components/schemas/ApprovalPolicy" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          description: The approval policy configuration could not be read.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
     put:
       summary: Replace approval policies
+      description: Sent whole rather than field by field. These policies decide which commands need a human, so a replace that omits a policy removes it.
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: array
-              items: { type: object }
+              items: { $ref: "#/components/schemas/ApprovalPolicy" }
       responses:
         "200":
           content:
@@ -2585,6 +4439,37 @@ paths:
                 type: object
                 properties:
                   ok: { type: boolean }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
+        "500":
+          description: |
+            `save_approval_policies` failed. Two stages share this code and the
+            status cannot tell them apart: `toml::to_string_pretty` (a policy
+            holding something TOML cannot represent — not reachable with the
+            current string/bool fields) and `std::fs::write` (a read-only config
+            directory, a full disk). In practice this is a write failure.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /approval/{id}/respond:
     post:
@@ -2611,10 +4496,44 @@ paths:
                 type: object
                 properties:
                   ok: { type: boolean }
+        "400":
+          description: The id is not a UUID, no known request has it, or it is no longer pending.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
   /playbooks/{name}/dry-run:
     post:
       summary: Resolve playbook step templates against params without executing
+      description: >-
+        `params` is a flat map of string values substituted into each step's
+        template; the resolved commands come back and nothing runs. The body is
+        read as `Option<Json<…>>`, so a body that does not parse is treated as
+        absent and the steps resolve against an empty map instead of being
+        refused (see the note on body handling at the top of this document).
+        `playbook` duplicates the path parameter and is cross-checked with a 400
+        when it parses and disagrees.
       parameters:
         - name: name
           in: path
@@ -2655,6 +4574,17 @@ paths:
                           type: array
                           items: { type: string }
 
+        "400":
+          description: The playbook path is invalid, or the playbook does not exist.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /daemons/view:
     get:
       summary: Unified view of the local daemon and all configured remote daemons
@@ -2662,7 +4592,19 @@ paths:
         "200":
           content:
             application/json:
-              schema: { type: object }
+              schema: { $ref: "#/components/schemas/DaemonUnifiedView" }
+
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "500":
+          description: The unified view could not be assembled; the daemon registry could not be read.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /diagnostics:
     get:
@@ -2674,6 +4616,24 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/DaemonDiagnostic" }
+
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "500":
+          description: |
+            `remotes.toml` could not be read, or it parsed but failed validation:
+            an empty alias, the reserved alias `localhost`, a duplicate alias, a
+            URL that is not `http://` or `https://`, or a remote that sets neither
+            `token_env` nor `token`. The last four are hand-written mistakes in a
+            file that parsed fine, so the five share one status and only the
+            message tells them apart.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /diagnostics/{alias}:
     get:
@@ -2689,6 +4649,17 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/DaemonDiagnostic" }
 
+        "400":
+          description: The alias does not resolve to a remote daemon the token can see.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /version-check/{alias}:
     get:
       summary: Check protocol/version compatibility with a configured remote daemon
@@ -2701,17 +4672,49 @@ paths:
         "200":
           content:
             application/json:
-              schema: { type: object }
+              schema: { $ref: "#/components/schemas/VersionCompatibility" }
+
+        "400":
+          description: The alias does not resolve to a remote daemon the token can see.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /config/export:
     get:
       summary: Export shareable team configuration
-      description: Hosts are exported with `key_path` and `password` stripped; includes raw `risk_rules.toml` and `playbooks.toml` content when present.
+      description: Hosts are exported with `key_path`, `password` and `passphrase` stripped; includes raw `risk_rules.toml` and `playbooks.toml` content when present.
       responses:
         "200":
           content:
             application/json:
               schema: { $ref: "#/components/schemas/TeamConfigExport" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          description: |
+            `export_team_config` failed: the config directory could not be
+            resolved, `hosts.json` could not be read or parsed, or
+            `risk_rules.toml` / `playbooks.toml` could not be read. Those two are
+            copied into the bundle as raw text and never parsed here, so a
+            syntactically broken rules file exports without complaint and only
+            fails on the machine that imports it.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /config/import:
     post:
@@ -2730,10 +4733,42 @@ paths:
                 properties:
                   hosts_added:         { type: integer }
                   hosts_skipped:       { type: integer }
-                  hosts_updated:       { type: integer }
+                  hosts_updated:       { type: integer, description: "Name matched and at least one of host, user, port, jump_host, proxy_id, risk_override, tags, group, env, role or owner differed; that host was then replaced in place. A name that matches and is otherwise identical counts as `hosts_skipped`, not here." }
                   risk_rules_imported: { type: boolean }
                   playbooks_imported:  { type: boolean }
+        "400":
+          description: |
+            `import_team_config` failed. It does not validate the payload — a
+            bundle is merged as given — so this is never "your JSON is wrong".
+            The causes are `store_write_lock`, `load_config` (an unreadable or
+            unparseable `hosts.json`), `save_config_unlocked`, and writing the
+            bundled `risk_rules.toml` / `playbooks.toml`. A write failure answers
+            400 rather than 500, so the status alone cannot tell a rejected
+            bundle from a disk problem; the message names the file.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
   /config/import/preview:
     post:
       summary: Preview what a team configuration import would change
@@ -2762,6 +4797,32 @@ paths:
                   playbooks_change:  { type: string, nullable: true }
                   summary:           { type: string }
 
+        "400":
+          description: |
+            `preview_team_config_import` failed, which it does without touching
+            the payload: `load_config` (an unreadable or unparseable
+            `hosts.json`) or `config_dir` failed. Nothing is written, so a 400
+            here never means "this bundle would be rejected" — a bundle with no
+            valid hosts at all previews as an empty diff and answers 200.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
   /ssh-sync/diff:
     get:
       summary: Compare Agent2SSH hosts against `~/.ssh/config`
@@ -2769,7 +4830,23 @@ paths:
         "200":
           content:
             application/json:
-              schema: { type: object }
+              schema: { $ref: "#/components/schemas/SshSyncDiff" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "500":
+          description: "`~/.ssh/config` could not be read or compared."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /ssh-sync/export:
     post:
@@ -2783,6 +4860,21 @@ paths:
                 properties:
                   path:           { type: string }
                   hosts_exported: { type: integer }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          description: Rendering the SSH config failed; the message names the reason.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /webdav/status:
     get:
@@ -2792,56 +4884,89 @@ paths:
         "200":
           content:
             application/json:
-              schema:
-                type: object
-                required: [state, summary]
-                properties:
-                  state:
-                    type: string
-                    enum: [in_sync, local_ahead, remote_ahead, diverged, unknown]
-                  summary:       { type: string }
-                  local_digest:  { type: string, nullable: true }
-                  remote_digest: { type: string, nullable: true }
-                  base_digest:   { type: string, nullable: true }
-                  metadata_error: { type: string, nullable: true }
-                  local:         { type: object, nullable: true }
-                  remote:        { type: object, nullable: true }
+              schema: { $ref: "#/components/schemas/WebDavSyncStatus" }
+
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "502":
+          description: The WebDAV endpoint could not be reached, or answered with an error.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /health-snapshot:
     get:
-      summary: Get health snapshot for configured hosts
-      description: Collects health data (uptime, disk, memory, load, SSH latency) for all or specified hosts concurrently via embedded SSH.
-      parameters:
-        - name: hosts
-          in: query
-          schema:
-            type: array
-            items: { type: string }
-          description: "Host aliases to collect health from (default: all configured hosts)."
-        - name: timeout_secs
-          in: query
-          schema: { type: integer, default: 10 }
-          description: SSH connection timeout in seconds.
+      summary: Read the last collected health snapshot
+      description: >-
+        Reads the snapshot file and returns it; it collects nothing. Collection
+        is `POST /health-snapshot`, so a 200 here can predate the call by any
+        amount of time and `collected_at` is the only thing that says how old it
+        is. Takes no query parameters — `hosts` and `timeout_secs` are honoured
+        by the POST, not here. A scoped token is not refused: the `hosts` list
+        is filtered down to the hosts its scope allows it to observe, so the
+        same call returns fewer rows instead of a 403. Before a first
+        collection the status is still 200, but the body is
+        `{"error": "...", "hint": "..."}` rather than a `HealthSnapshot`.
       responses:
         "200":
+          description: >-
+            A `HealthSnapshot` object, not a bare array: `get_health_snapshot`
+            serializes `health::HealthSnapshot`, and this route only reads the
+            snapshot file — it never collects one, so a 200 body can predate the
+            call by any amount of time.
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  type: object
-                  properties:
-                    host:        { type: string }
-                    reachable:   { type: boolean }
-                    uptime:      { type: string, nullable: true }
-                    disk:        { type: string, nullable: true }
-                    memory:      { type: string, nullable: true }
-                    load:        { type: string, nullable: true }
-                    latency_ms:  { type: integer, nullable: true }
-                    error:       { type: string, nullable: true }
+                oneOf:
+                  - type: object
+                    description: A snapshot that was collected at some point.
+                    required: [hosts, collected_at]
+                    properties:
+                      hosts:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            host:         { type: string }
+                            reachable:    { type: boolean }
+                            latency_ms:   { type: integer, nullable: true }
+                            uptime:       { type: string, nullable: true }
+                            load_avg:     { type: string, nullable: true }
+                            disk_usage:   { type: string, nullable: true }
+                            memory_usage: { type: string, nullable: true }
+                            collected_at: { type: string, format: date-time }
+                            error:        { type: string, nullable: true }
+                      collected_at: { type: string, format: date-time }
+                      total_ms:     { type: integer }
+                  - type: object
+                    description: >-
+                      No collection has run yet. `get_health_snapshot` answers
+                      `Err(_)` with this shape under the same 200, so a client
+                      that requires `hosts` and `collected_at` rejects a
+                      legitimate response.
+                    required: [error, hint]
+                    properties:
+                      error: { type: string }
+                      hint:  { type: string }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
     post:
       summary: Collect health snapshot for specified hosts
-      description: Triggers a concurrent health collection for the given hosts (or all configured hosts if omitted).
+      description: >-
+        Triggers a concurrent health collection for the given hosts, or for every
+        configured host when `hosts` is omitted or empty. The body is read as
+        `Option<Json<…>>`, so a body that does not parse — a bare string where
+        the array belongs, a non-numeric `timeout_secs`, invalid JSON — counts as
+        omitted and the request collects *every* host instead of being refused
+        (see the note on body handling at the top of this document). On a large
+        config that is a slow 200 where a 422 was expected.
       requestBody:
         required: false
         content:
@@ -2853,21 +4978,47 @@ paths:
                 timeout_secs: { type: integer, default: 10 }
       responses:
         "200":
+          description: The snapshot that was just collected (same `HealthSnapshot` shape as `GET`).
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  type: object
-                  properties:
-                    host:        { type: string }
-                    reachable:   { type: boolean }
-                    uptime:      { type: string, nullable: true }
-                    disk:        { type: string, nullable: true }
-                    memory:      { type: string, nullable: true }
-                    load:        { type: string, nullable: true }
-                    latency_ms:  { type: integer, nullable: true }
-                    error:       { type: string, nullable: true }
+                type: object
+                required: [hosts, collected_at]
+                properties:
+                  hosts:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        host:         { type: string }
+                        reachable:    { type: boolean }
+                        latency_ms:   { type: integer, nullable: true }
+                        uptime:       { type: string, nullable: true }
+                        load_avg:     { type: string, nullable: true }
+                        disk_usage:   { type: string, nullable: true }
+                        memory_usage: { type: string, nullable: true }
+                        collected_at: { type: string, format: date-time }
+                        error:        { type: string, nullable: true }
+                  collected_at: { type: string, format: date-time }
+                  total_ms:     { type: integer }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          description: >-
+            Only when the host list is expanded from the config file and that read
+            fails. Naming explicit `hosts` avoids it: an unknown alias is not an
+            error but a per-host row with `reachable: false`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   # ── Local configuration lifecycles ─────────────────────────────────────────
   #
@@ -2888,7 +5039,17 @@ paths:
             application/json:
               schema:
                 type: array
-                items: { type: object }
+                items: { $ref: "#/components/schemas/Snippet" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          description: The snippet store could not be read.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
     post:
       summary: Create or replace a command snippet, keyed by name
       requestBody:
@@ -2896,12 +5057,7 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              required: [name, command]
-              properties:
-                name:        { type: string }
-                command:     { type: string }
-                description: { type: string, nullable: true }
+              $ref: "#/components/schemas/Snippet"
       responses:
         "200":
           description: The full snippet list after the write.
@@ -2909,10 +5065,34 @@ paths:
             application/json:
               schema:
                 type: array
-                items: { type: object }
+                items: { $ref: "#/components/schemas/Snippet" }
         "400":
           description: Invalid snippet name or command.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
   /snippets/{name}:
     delete:
       summary: Remove a command snippet
@@ -2929,7 +5109,21 @@ paths:
               schema: { type: boolean }
         "400":
           description: Invalid snippet name.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
   /redact/rules:
     get:
       summary: List sensitive-data redaction rules
@@ -2940,12 +5134,12 @@ paths:
             application/json:
               schema:
                 type: array
-                items:
-                  type: object
-                  properties:
-                    pattern:     { type: string }
-                    replacement: { type: string }
-                    is_builtin:  { type: boolean }
+                items: { $ref: "#/components/schemas/RedactRuleInfo" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
     post:
       summary: Add a redaction rule
       description: A rule's pattern is its identity, so a pattern that is already present is rejected rather than overwritten, and an invalid regex is rejected before anything is written.
@@ -2966,10 +5160,34 @@ paths:
             application/json:
               schema:
                 type: array
-                items: { type: object }
+                items: { $ref: "#/components/schemas/RedactRuleInfo" }
         "400":
           description: The pattern does not compile, matches the empty string, or is already in the set. An empty replacement is allowed — it deletes the matched text rather than substituting it.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
   /redact/rules/update:
     post:
       summary: Replace the redaction rule identified by pattern
@@ -2991,10 +5209,34 @@ paths:
             application/json:
               schema:
                 type: array
-                items: { type: object }
+                items: { $ref: "#/components/schemas/RedactRuleInfo" }
         "400":
           description: No rule matches the pattern, or the new pattern does not compile, matches the empty string, or is already taken by another rule.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
   /redact/rules/delete:
     post:
       summary: Remove a redaction rule
@@ -3016,10 +5258,34 @@ paths:
             application/json:
               schema:
                 type: array
-                items: { type: object }
+                items: { $ref: "#/components/schemas/RedactRuleInfo" }
         "400":
           description: Missing `force`, or no rule matches the pattern.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
   /redact/rules/reset:
     post:
       summary: Restore the built-in redaction rule set
@@ -3031,9 +5297,22 @@ paths:
             application/json:
               schema:
                 type: array
-                items: { type: object }
+                items: { $ref: "#/components/schemas/RedactRuleInfo" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "500":
           description: The built-in set could not be written.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /highlight/rules:
     get:
@@ -3044,15 +5323,12 @@ paths:
             application/json:
               schema:
                 type: array
-                items:
-                  type: object
-                  properties:
-                    keyword:           { type: string }
-                    name:              { type: string }
-                    color:             { type: string }
-                    enabled:           { type: boolean }
-                    is_regex:          { type: boolean }
-                    is_case_sensitive: { type: boolean }
+                items: { $ref: "#/components/schemas/HighlightRule" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
     post:
       summary: Add a terminal highlight rule
       description: A rule's keyword is its identity, so a duplicate is rejected. Rules are stored as regular expressions, so a caller that wants plain-text matching has to escape the keyword itself before sending it.
@@ -3077,10 +5353,34 @@ paths:
             application/json:
               schema:
                 type: array
-                items: { type: object }
+                items: { $ref: "#/components/schemas/HighlightRule" }
         "400":
           description: Empty keyword, a missing or over-long name, a color that is not `#RRGGBB`, or a keyword already in the set. The keyword's regex syntax is deliberately not checked here — the renderer compiles it with JavaScript, whose grammar differs from the one a Rust-side check would use.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
   /highlight/rules/update:
     post:
       summary: Replace the terminal highlight rule identified by keyword
@@ -3094,7 +5394,7 @@ paths:
               required: [keyword, rule]
               properties:
                 keyword: { type: string, description: "The keyword that identifies the rule to replace." }
-                rule:    { type: object, description: "The rule as it should be afterwards." }
+                rule:    { $ref: "#/components/schemas/HighlightRule" }
       responses:
         "200":
           description: The full rule list after the write.
@@ -3102,10 +5402,34 @@ paths:
             application/json:
               schema:
                 type: array
-                items: { type: object }
+                items: { $ref: "#/components/schemas/HighlightRule" }
         "400":
           description: No rule matches the keyword, or the replacement rule fails the same checks as an added one.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
   /highlight/rules/delete:
     post:
       summary: Remove a terminal highlight rule
@@ -3127,10 +5451,34 @@ paths:
             application/json:
               schema:
                 type: array
-                items: { type: object }
+                items: { $ref: "#/components/schemas/HighlightRule" }
         "400":
           description: Missing `force`, or no rule matches the keyword.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
   /highlight/rules/reset:
     post:
       summary: Restore the built-in terminal highlight rules
@@ -3142,9 +5490,22 @@ paths:
             application/json:
               schema:
                 type: array
-                items: { type: object }
+                items: { $ref: "#/components/schemas/HighlightRule" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "500":
           description: The built-in set could not be written.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /algo/prefs:
     get:
@@ -3154,12 +5515,12 @@ paths:
         "200":
           content:
             application/json:
-              schema:
-                type: object
-                properties:
-                  prefs:    { type: object, description: "The effective preferences; each field is a comma-separated list in preference order." }
-                  custom:   { type: boolean, description: "True when an override is stored rather than the defaults." }
-                  defaults: { type: object, description: "The built-in safe defaults." }
+              schema: { $ref: "#/components/schemas/AlgoPrefsState" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
     put:
       summary: Replace the SSH algorithm preferences
       description: Sent whole rather than field by field, so a caller changing one list reads the current value first. Each list must be non-empty, free of duplicates and composed of plausible algorithm names, so a list that could not complete a handshake is rejected rather than written. Takes effect on the next handshake.
@@ -3168,25 +5529,38 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              required: [kex, hostkey, cipher_cs, cipher_sc, mac_cs, mac_sc, comp_cs, comp_sc]
-              properties:
-                kex:       { type: string }
-                hostkey:   { type: string }
-                cipher_cs: { type: string }
-                cipher_sc: { type: string }
-                mac_cs:    { type: string }
-                mac_sc:    { type: string }
-                comp_cs:   { type: string }
-                comp_sc:   { type: string }
+              $ref: "#/components/schemas/SshAlgoPrefs"
       responses:
         "200":
           description: The preferences in effect after the write.
           content:
             application/json:
-              schema: { type: object }
+              schema: { $ref: "#/components/schemas/AlgoPrefsState" }
         "400":
           description: A list is empty, repeats an entry, or contains an implausible algorithm name.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }
     delete:
       summary: Drop the SSH algorithm overrides
       description: Goes back to the built-in safe defaults.
@@ -3195,9 +5569,22 @@ paths:
           description: The preferences in effect after the change.
           content:
             application/json:
-              schema: { type: object }
+              schema: { $ref: "#/components/schemas/AlgoPrefsState" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "500":
           description: The stored override could not be removed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   # ── Interactive prompts (2FA / OTP) ────────────────────────────────────────
   #
@@ -3224,6 +5611,16 @@ paths:
                         nonce:       { type: string, description: "Identifies this prompt when answering it." }
                         prompt_text: { type: string, description: "The question as the server asked it." }
                   count: { type: integer }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /prompts/respond:
     post:
@@ -3242,6 +5639,35 @@ paths:
         "200":
           content:
             application/json:
-              schema: { type: object }
+              schema:
+                type: object
+                required: [status, nonce]
+                properties:
+                  status: { type: string, enum: [responded] }
+                  nonce:  { type: string }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "404":
           description: No prompt is waiting under that nonce.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "415":
+          description: The body did not declare `application/json`. Rejected by the `Json` extractor before the handler runs.
+          content:
+            text/plain:
+              schema: { type: string }
+        "422":
+          description: The body parsed as JSON but did not match this schema. Rejected by the `Json` extractor before the handler runs; a syntax error instead arrives as 400.
+          content:
+            text/plain:
+              schema: { type: string }

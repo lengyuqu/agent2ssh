@@ -1,6 +1,6 @@
 # Daemon API 快速入门
 
-Agent2SSH Daemon 提供本地 HTTP API 和 WebSocket 接口，允许通过 REST 调用所有 SSH 操作。守护进程监听 `127.0.0.1:7722`，使用 Bearer Token 认证。
+Agent2SSH Daemon 提供本地 HTTP API 和 WebSocket 接口，允许通过 REST 调用所有 SSH 操作。守护进程默认监听 `127.0.0.1:7722`（`AGENT2SSH_DAEMON_ADDR` 可改，下文示例都用默认地址），使用 Bearer Token 认证。
 
 ---
 
@@ -57,6 +57,8 @@ allowed hosts/tags 过滤。修改 gate、主机、策略、脱敏/高亮、算�
 
 ## 端点总览
 
+下表覆盖 daemon 的全部 **105 个 operation**。两个数不要混用：daemon 一共注册了 **107 条路由**，多出来的两条是 `GET /`（重定向到 `/console`）与 `GET /console`，都不是 API —— 所以 `operation` 数 105、`route` 数 107。`GET /` 用的是内联闭包而不是命名 handler，凡是按 handler 名扫描路由表的脚本都会漏掉它、数出 106（本流程的扫描脚本就漏过一次）。新增路由时必须同步这张表；目前没有测试守着它，`api_yaml_documents_every_daemon_route` 只核对 `docs/api.yaml`。
+
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/health` | 健康检查（无需认证） |
@@ -66,12 +68,14 @@ allowed hosts/tags 过滤。修改 gate、主机、策略、脱敏/高亮、算�
 | POST | `/hosts` | 添加主机 |
 | POST | `/hosts/import` | 导入 SSH 配置 |
 | DELETE | `/hosts/:name` | 删除主机 |
+| GET | `/hosts/:name/policy` | 汇总该主机适用的授权策略 |
 | POST | `/ping` | 检测连通性 |
 | POST | `/exec` | 执行命令 |
 | POST | `/exec-multi` | 多主机并发执行 |
 | POST | `/exec/compare` | 多主机执行结果对比 |
 | POST | `/exec/preview` | 执行预览（不实际执行） |
 | GET | `/exec/stream` | WebSocket 流式执行 |
+| POST | `/local-exec` | 在 daemon 所在机器上执行命令（本地环境） |
 | GET | `/terminal` | WebSocket 交互式终端 |
 | POST | `/terminal/broadcast/preview` | 预览多终端广播的逐目标风险与审批要求 |
 | POST | `/terminal/broadcast` | 全部授权后向已连接终端广播并执行单条命令 |
@@ -79,7 +83,7 @@ allowed hosts/tags 过滤。修改 gate、主机、策略、脱敏/高亮、算�
 | PUT | `/recordings/config` | 更新终端录制开关（仅影响新会话） |
 | GET | `/recordings` | 列出本地终端录制 |
 | GET | `/recordings/:id` | 读取 asciicast v2 录制 |
-| DELETE | `/recordings/:id?confirm=delete` | 明确确认后删除录制并写审计 |
+| DELETE | `/recordings/:id` | 删除录制并写审计；必须带 `?confirm=delete`，缺了回 400 |
 | GET | `/gate` | 查询全局执行 gate |
 | POST | `/gate/pause` | 暂停非桌面来源执行 |
 | POST | `/gate/resume` | 恢复执行 |
@@ -90,14 +94,30 @@ allowed hosts/tags 过滤。修改 gate、主机、策略、脱敏/高亮、算�
 | POST | `/sftp/ls` | 列出远程目录 |
 | POST | `/sftp/stat` | 查看远程文件信息 |
 | POST | `/sftp/mkdir` | 创建远程目录 |
+| POST | `/sftp/rename` | 重命名或移动远程文件/目录 |
+| POST | `/sftp/rm` | 删除单个远程文件 |
+| POST | `/sftp/rmdir` | 删除空的远程目录 |
+| POST | `/sftp/rm-rf` | 递归删除远程目录树 |
+| POST | `/sftp/rm-rf/authorize` | 为桌面端执行授权一次递归删除 |
 | POST | `/sessions` | 打开会话 |
 | GET | `/sessions` | 列出会话 |
 | POST | `/sessions/:id/write` | 写入会话 |
 | GET | `/sessions/:id/read` | 读取会话 |
 | DELETE | `/sessions/:id` | 关闭会话 |
+| POST | `/resident-sessions` | 打开常驻会话（本地终端环境） |
+| GET | `/resident-sessions` | 列出常驻会话 |
+| POST | `/resident-sessions/:id/exec` | 在常驻会话内执行一条命令 |
+| GET | `/resident-sessions/:id` | 读取常驻会话（含缓冲输出） |
+| DELETE | `/resident-sessions/:id` | 关闭常驻会话并结束其 shell |
 | POST | `/forwards` | 添加端口转发 |
 | GET | `/forwards` | 列出转发 |
 | DELETE | `/forwards/:id` | 删除转发 |
+| POST | `/forwards/multi` | 一次给同一主机批量添加多条转发 |
+| POST | `/forwards/:id/start` | 启动已停止的转发 |
+| POST | `/forwards/:id/stop` | 停止转发但保留记录 |
+| GET | `/snippets` | 列出命令片段 |
+| POST | `/snippets` | 创建或覆盖命令片段（按名字） |
+| DELETE | `/snippets/:name` | 删除命令片段 |
 | GET | `/approvals` | 列出审批请求 |
 | POST | `/approvals/:id/approve` | 批准审批 |
 | POST | `/approvals/:id/reject` | 拒绝审批 |
@@ -112,6 +132,20 @@ allowed hosts/tags 过滤。修改 gate、主机、策略、脱敏/高亮、算�
 | GET | `/playbooks` | 列出 Playbook |
 | POST | `/playbooks/run` | 执行 Playbook |
 | POST | `/playbooks/:name/dry-run` | 预览 Playbook |
+| GET | `/redact/rules` | 列出脱敏规则 |
+| POST | `/redact/rules` | 新增脱敏规则 |
+| POST | `/redact/rules/update` | 按 pattern 替换脱敏规则 |
+| POST | `/redact/rules/delete` | 删除脱敏规则 |
+| POST | `/redact/rules/reset` | 恢复内置脱敏规则 |
+| GET | `/highlight/rules` | 列出终端高亮规则 |
+| POST | `/highlight/rules` | 新增高亮规则 |
+| POST | `/highlight/rules/update` | 按 keyword 替换高亮规则 |
+| POST | `/highlight/rules/delete` | 删除高亮规则 |
+| POST | `/highlight/rules/reset` | 恢复内置高亮规则 |
+| GET | `/algo/prefs` | 查看当前生效的算法偏好 |
+| PUT | `/algo/prefs` | 整体替换算法偏好 |
+| DELETE | `/algo/prefs` | 丢弃算法偏好覆盖，回到内置默认 |
+| POST | `/containers/start-service` | 启动本地容器运行时的后台服务 |
 | GET | `/daemons` | 列出守护进程 |
 | GET | `/daemons/view` | 守护进程统一视图 |
 | POST | `/daemons/:alias/exec` | 代理执行 |
@@ -123,11 +157,15 @@ allowed hosts/tags 过滤。修改 gate、主机、策略、脱敏/高亮、算�
 | POST | `/config/import/preview` | 预览团队配置导入 |
 | GET | `/health-snapshot` | 主机健康快照 |
 | POST | `/health-snapshot` | 收集主机健康快照 |
+| GET | `/prompts/pending` | 列出等待回答的 prompt |
+| POST | `/prompts/respond` | 回答一个待处理 prompt |
 | GET | `/webhook/config` | 获取 Webhook 配置 |
 | PUT | `/webhook/config` | 更新 Webhook 配置 |
 | GET | `/events/stream` | SSE 实时事件流 |
+| GET | `/webdav/status` | 查看版本化便携配置同步状态 |
 | GET | `/ssh-sync/diff` | 与 `~/.ssh/config` 对比 |
 | POST | `/ssh-sync/export` | 导出到 SSH 配置文件 |
+| POST | `/shutdown` | 停止 daemon |
 | GET | `/console` | Web 控制台 |
 
 ---
@@ -489,9 +527,12 @@ wscat -c "ws://127.0.0.1:7722/terminal?host=web1&token=$TOKEN"
   "username": "ubuntu",
   "fingerprint_sha256": "SHA256:...",
   "host_key_algorithm": "ssh-ed25519",
-  "server_banner": "SSH-2.0-OpenSSH_9.6"
+  "recording_id": null,
+  "terminal_id": "6f1c2a58-2f4e-4a1d-9c77-1b2f0f4a3d10"
 }
 ```
+
+`recording_id` 在终端录制关闭时为 `null`；`terminal_id` 是 `/terminal/broadcast` 系列路由接受的临时 ID。**这一帧不含服务器 banner**：banner 会暴露 SSH 实现与版本，传输层只把它留着给 SFTP 决定写入分块，不对外发。
 
 随后终端输入输出使用 binary frame 传输原始字节。调整窗口大小时发送文本控制帧：
 
@@ -521,6 +562,13 @@ curl -H "$AUTH" "http://127.0.0.1:7722/audit?limit=50"
 | `exit_code` | integer | - | 按退出码过滤 |
 | `since` | string | - | ISO-8601 起始时间 |
 | `until` | string | - | ISO-8601 结束时间 |
+| `search` | string | - | 对 command / host / source 做**大小写不敏感的子串**匹配 |
+| `command_pattern` | string | - | 对 command 做 **glob 通配**匹配（如 `kubectl delete *`），不是正则 |
+| `host_env` | string | - | 按主机档案的 env 标签匹配（大小写不敏感） |
+| `host_role` | string | - | 按主机档案的 role 标签匹配（大小写不敏感） |
+| `host_owner` | string | - | 按主机档案的 owner 标签匹配（大小写不敏感） |
+| `decision` | string | - | 授权决定：`approved` / `approved_rewritten` / `rejected` / `timed_out` / `auto_allowed` / `blocked` |
+| `agent` | string | - | 请求方标签，对 source 做大小写不敏感的**精确**匹配 |
 
 组合查询：
 
@@ -691,10 +739,28 @@ curl -H "$AUTH" http://127.0.0.1:7722/approvals
     "risk_level": "high",
     "requested_at": "2025-06-12T10:30:15Z",
     "ttl_secs": 300,
-    "status": "pending"
+    "status": "pending",
+    "context": {
+      "host_address": "10.0.0.11",
+      "host_env": "prod",
+      "host_role": "web",
+      "source": "daemon",
+      "reason": "清理卡住的缓存",
+      "change_id": "CHG-2025-0612",
+      "rewritable": true,
+      "recent_commands": []
+    },
+    "revoked_at": null,
+    "approved_command_snapshot": null,
+    "rewritten_command": null
   }
 ]
 ```
+
+`context`、`revoked_at`、`approved_command_snapshot`、`rewritten_command` 四个键**恒在**，没有值时是
+`null`；`context` 里还可能有 `risk_details`（`built_in_risk` / `user_risk_override` / `final_risk` /
+`matched_policy` / `risk_unclassified`）。`context.rewritable` 为 `true` 表示审批人可以**改写命令后批准**
+——此时真正执行的是 `rewritten_command`，而 `approved_command_snapshot` 记的就是它。
 
 ### 批准请求
 
@@ -710,7 +776,8 @@ curl -X POST -H "$AUTH" \
   http://127.0.0.1:7722/approvals/<approval-id>/reject
 ```
 
-审批状态值：`pending`、`approved`、`rejected`、`timed_out`。默认超时 300 秒。
+审批状态值：`pending`、`approved`、`rejected`、`timed_out`、`revoked`。`revoked` 表示「已批准之后被
+撤回」，只由进程内调用方写入，daemon 没有对应路由。默认超时 300 秒。
 
 ---
 
@@ -731,7 +798,7 @@ curl -X POST -H "$AUTH" \
 {"risk_level": "high", "matched_rule": null}
 ```
 
-匹配用户自定义规则时，`matched_rule` 为 `user_rule`。用户规则只能升级内置风险；如果传入了 `host`，非 `blocked` 命令还会应用该主机的 trusted `risk_override`：
+匹配用户自定义规则时，`matched_rule` 为 `user_rule`。它是**固定字面量，不是命中的那条 pattern**——分类函数只回答「有没有命中用户规则」，命中的规则名在函数内部就被丢掉了，所以该字段的取值域只有 `null` 与 `"user_rule"` 两个。用户规则只能升级内置风险；如果传入了 `host`，非 `blocked` 命令还会应用该主机的 trusted `risk_override`：
 
 ```json
 {"risk_level": "blocked", "matched_rule": "user_rule"}
@@ -874,6 +941,10 @@ curl -X PUT -H "$AUTH" \
 
 当 URL 包含 `hooks.slack.com` 时，自动使用 Slack Block Kit 格式发送消息。配置了 `secret` 时，请求头包含 `X-Agent2SSH-Signature: sha256=<hex>` 签名。
 
+普通 SSH `/exec` 因 daemon 关闭而中断时，`exec_completed` webhook 会携带 `remote_outcome_unknown`：`true` 表示命令可能已发送、远端结果未知；`false` 表示关闭前尚未发送命令。结果未知时不要自动重试。
+
+其他事件不包含该字段——四个非 `exec_completed` 的构造点都写 `None`，而值为 `None` 时默认 JSON 载荷直接省略这个键。Slack 卡片只用它给 `exec_completed` 挑标题文案（"SSH Outcome Unknown" / "SSH Command Not Sent" / "Command Completed"），别的事件即便带上它也不改变输出。
+
 ---
 
 ## Web Console
@@ -902,7 +973,7 @@ Daemon 提供认证后的 Server-Sent Events 流，用于本机安全可视化�
 curl -N -H "$AUTH" http://127.0.0.1:7722/events/stream
 ```
 
-事件格式为 SSE `event: agent2ssh`，`data` 字段是 JSON：
+事件格式为 SSE `event: agent2ssh`，`data` 字段是 JSON。daemon 正常关闭时会结束事件流；客户端需要处理流结束及重连：
 
 ```json
 {

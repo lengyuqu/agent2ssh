@@ -18,6 +18,22 @@
  *   getBlankLine/addMarker, plus `_core._viewport.queueSync` (scrollbar
  *   resync). package.json pins "@xterm/xterm": "^6.0.0". Any xterm bump must
  *   re-run folds.test.ts and re-check these private hooks by hand.
+ *
+ * ⚠️ Wiring status (measured 2026-11-10, batch on issue #10): most of this is
+ *   reachable only through the library, not from the UI. `createFoldStore` is
+ *   called once, from `TerminalView.tsx:261`, and passes no `options` — so
+ *   `maxVisibleLines` stays null, `canAutoFold()` is permanently false, and
+ *   the automatic paths (`foldActiveOverflow`, `foldRecentOverflow`,
+ *   `enforceAutoFold`) never run. `foldBlock`/`unfoldBlock` are declared on
+ *   `TerminalViewHandle` (`:65-66`) and implemented (`:183-184`) but nothing in
+ *   `TerminalPanel`, `TerminalDrawer` or `App` calls them, so `fold()` and
+ *   `unfold()` are likewise unreachable. `unfoldAll` *is* called, once, at
+ *   `TerminalView.tsx:473`.
+ *
+ *   Consequence for anyone reading the 517 lines of `folds.test.ts`: they
+ *   cover a component that works but is not wired to anything a user can
+ *   press. Do not read a green suite here as "folding is fine in the UI".
+ *   Whether to wire it, delete it, or keep it parked is L2-59.
  */
 import type { Terminal, IDisposable, IMarker } from "@xterm/xterm";
 import type { CommandBlock, CommandBlockTracker } from "./command-blocks";

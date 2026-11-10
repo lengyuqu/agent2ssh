@@ -1,0 +1,21 @@
+   Compiling agent2ssh-app v0.4.5 (D:\vibercodeing\agent2ssh\src-tauri)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.83s
+     Running unittests src\lib.rs (src-tauri\target\debug\deps\agent2ssh-c9a10c00f231b15b.exe)
+
+running 13 tests
+test daemon_control::tests::a_live_process_handle_is_not_signaled ... ok
+test daemon_control::tests::exit_observation_distinguishes_unknown_from_absent_or_reused_pid ... ok
+test daemon_control::tests::only_definitely_absent_pids_are_treated_as_missing ... ok
+test daemon_control::tests::daemon_executable_names_are_not_substring_matches ... ok
+test daemon_control::tests::a_corrupt_marker_means_not_owned ... ok
+test daemon_control::tests::invalid_or_partial_pid_files_are_retained_and_block_start ... ok
+test daemon_control::tests::marking_a_process_that_is_not_running_fails ... ok
+test daemon_control::tests::exit_observation_handles_exited_child_with_retained_handle ... ok
+test daemon_control::tests::a_marker_does_not_survive_pid_reuse ... ok
+test daemon_control::tests::pid_publication_refuses_live_or_invalid_records_and_recovers_absent_processes ... ok
+test daemon_control::tests::pid_cleanup_preserves_replacement_and_invalid_files ... ok
+test daemon_control::tests::a_marker_names_the_process_that_wrote_it ... ok
+test daemon_control::tests::stopping_a_process_that_is_not_running_is_a_no_op ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 836 filtered out; finished in 0.57s
+

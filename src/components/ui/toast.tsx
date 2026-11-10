@@ -150,6 +150,14 @@ export function ToastProvider({ children }: { children: ReactNode }) {
                   {item.title && <div className="font-semibold">{item.title}</div>}
                   <span className="break-words text-foreground/90">{item.message}</span>
                 </div>
+                {/* The dismiss affordance is icon-only and carries no
+                    accessible name: no aria-label, no title, no text child, so
+                    a screen reader announces it as "button" and the toast
+                    cannot be dismissed without sight. `zh["Close"]` exists and
+                    every other icon-only control here is either an
+                    <IconButton title=…> or has an aria-label. Left as-is
+                    because adding the name changes the accessibility tree —
+                    recorded as L2-56 in `OPT-LOOP-L2-PENDING.md`. */}
                 <button
                   type="button"
                   className="shrink-0 rounded p-0.5 text-muted-foreground hover:text-foreground"

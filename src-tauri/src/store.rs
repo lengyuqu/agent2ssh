@@ -524,19 +524,23 @@ fn internalize_secrets(config: &mut AppConfig) {
 /// existing marker is left untouched. Legacy password/proxy behavior remains
 /// compatible when the vault is locked, but private-key passphrases fail closed
 /// so they are never newly written to `hosts.json` in plaintext.
-fn externalize_secrets(config: &mut AppConfig) -> Result<()> {
+fn externalize_secrets(config: &mut AppConfig, strict_host: Option<&str>) -> Result<()> {
     use crate::secrets::{
         host_account, host_passphrase_account, is_secret_ref, proxy_account, store_secret,
         SECRET_REF,
     };
 
     for host in &mut config.hosts {
-        if let Some(pw) = &host.password {
-            if pw.is_empty() || is_secret_ref(pw) {
-                continue;
-            }
+        if let Some(pw) = host
+            .password
+            .as_ref()
+            .filter(|pw| !pw.is_empty() && !is_secret_ref(pw))
+        {
             match store_secret(&host_account(&host.name), pw) {
                 Ok(()) => host.password = Some(SECRET_REF.to_string()),
+                Err(e) if strict_host == Some(host.name.as_str()) => {
+                    return Err(e).with_context(|| format!("refusing to persist an unencrypted password for host '{}'", host.name));
+                }
                 Err(e) => eprintln!(
                     "warning: could not encrypt password for host '{}' ({e}); left as plaintext until the credential store is unlocked",
                     host.name
@@ -628,22 +632,30 @@ pub fn save_config(config: &AppConfig) -> Result<()> {
 }
 
 pub(crate) fn save_config_unlocked(config: &AppConfig) -> Result<()> {
+    save_config_unlocked_strict_host(config, None)
+}
+
+pub(crate) fn save_config_unlocked_strict_host(
+    config: &AppConfig,
+    strict_host: Option<&str>,
+) -> Result<()> {
     ensure_config_dir()?;
     let mut normalized = normalize_config(config.clone());
-    // K1: encrypt real passwords into the app-managed store, leaving only a
-    // reference marker on disk. Operates on the clone, so the caller's `config`
-    // (and any value it shares with the in-memory cache) keeps the real secrets.
-    externalize_secrets(&mut normalized)?;
-    let raw = serde_json::to_string_pretty(&normalized)?;
     let path = config_path()?;
     let tmp_path = path.with_extension(format!("json.tmp.{}", std::process::id()));
+    let mut created_temp = false;
     let write_result = (|| -> Result<()> {
         let mut file = OpenOptions::new()
-            .create(true)
+            .create_new(true)
             .write(true)
-            .truncate(true)
             .open(&tmp_path)
             .with_context(|| format!("failed to open temp config {}", tmp_path.display()))?;
+        created_temp = true;
+        // Reserve the configuration output before mutating the credential
+        // store. If opening it fails, the previous credentials are untouched.
+        // Later write/rename failures can still occur after secret updates.
+        externalize_secrets(&mut normalized, strict_host)?;
+        let raw = serde_json::to_string_pretty(&normalized)?;
         file.write_all(raw.as_bytes())
             .with_context(|| format!("failed to write temp config {}", tmp_path.display()))?;
         file.sync_all()
@@ -670,9 +682,9 @@ pub(crate) fn save_config_unlocked(config: &AppConfig) -> Result<()> {
         restrict_file_to_owner(&path)?;
         Ok(())
     })();
-    if write_result.is_err() {
+    if write_result.is_err() && created_temp {
         let _ = fs::remove_file(&tmp_path);
-    } else {
+    } else if write_result.is_ok() {
         // Drop the cached value so this process reads the new hosts immediately,
         // independent of filesystem mtime granularity. (I5)
         HOSTS_CACHE.invalidate();

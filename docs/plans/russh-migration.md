@@ -189,7 +189,7 @@ src/transport/
 
 **FileStat：4 谓词 + 6 字段** —— `is_file` / `is_dir` / `is_symlink` / `file_type`；`perm` / `size` / `mtime` / **`atime`** / `uid` / `gid`（`core.rs:2204` 有 `stat.atime` 的读取，字段名与语义逐字保持；`core.rs:2118` 起的 5 个格式化函数与它们的测试是现成的对拍集）
 
-**三个"删得掉但要补位"的点**（放这里，比放 §7 更不容易丢）：
+**三个"删得掉但要补位"的点**（放这里，比放 §7 更不容易丢）——**历史段：迁移已完成，三点都落了地；下面的行号与调用点是迁移前的，今天按名字找**：
 
 1. `supported_algs` 没有 russh 等价物，而它今天**同时承担两件事**：`narrow()` 用它过滤用户配置（`ssh_algo.rs:191`），以及充当"本构建能不能读 OpenSSH 私钥容器"的**能力信号**——`ssh_key_format::reads_openssh_private_keys()`（`:134`）读的就是它的 HostKey 列表（见 `ssh_algo.rs:129-137` 注释）。russh 恒支持 ed25519/ECDSA，后者应直接返回 `true`。
 2. `reads_openssh_private_keys()` 有 3 个真实调用点：`keys.rs:821`、`embedded_ssh.rs:1664`、`bin/agent2ssh.rs:3399`。**最后一个是 CLI 的 JSON 字段名**——删函数可以，删字段是 CLI 契约变更，要么保留字段恒 `true`，要么按弃用规则走。
@@ -491,7 +491,7 @@ agent2ssh exec agent-test "..." → exit 0
 
 负对照是这条验证的关键：它证明成功走的是 agent，而不是 `~/.ssh` 的兜底密钥，也证明 `identities()` 会跳过被拒的第一个身份、用第二个通过（Finding 1 的行为）。
 
-⚠️ **未验证的一支**：PuTTY **Pageant 本身**没装，所以 `PageantStream::new()` 成功的那条分支没跑过；实际跑到的是它失败后回退到 `\.\pipe\openssh-ssh-agent` 的路径。代码里 Pageant 优先、管道兜底，两者都在编译路径上，但只有兜底路径有运行时证据。
+⚠️ **未验证的一支**：PuTTY **Pageant 本身**没装，所以 `PageantStream::new()` 成功的那条分支没跑过。顺序也不是这里原先写的那个——代码是**管道优先、Pageant 兜底**（`agent.rs:317-327`）：`e67fd04` 同一天把顺序翻了过来，因为 Pageant 在没运行时也会先「连接成功」、等第一次真实请求才报 `early eof`。本节这次运行把 OpenSSH agent 服务临时置为 Manual 并启动过，命名管道能打开，所以它跑的是**第一条**分支，Pageant 根本没被试。「只有兜底路径有运行时证据」这句因此说反了：有运行时证据的是管道；Pageant 侧的证据来自 2026-10-23 的验收（`PAGEANT-ACCEPTANCE-2026-10-23.md`，那次 OpenSSH agent 全程 Stopped、管道打开失败，才走到 Pageant）。
 
 ### 10.2 与 macOS 基线的差值
 
@@ -561,7 +561,7 @@ API 变更只有两处，都在 `ClientHandler`：`check_server_key` 现在收
 | 3 | `russh` 0.60 的 RustCrypto 预发布锁 | **已解决**：必须 `russh 0.60.3`（0.60.1 的 caret 依赖解不出可行集）+ `default-features = false` + `ring` + `pkcs1/pkcs5` 钉版。理由与实测见 §5「探针结果」 |
 | 4 | 算法名字符串兼容性 | `SshAlgoPrefs` 的 JSON 是用户配置，**名字不许变**；`kex-strict-*` 是协议标记要过滤；`narrow()` 的白名单语义要保留 |
 | 5 | host key 算法名兼容性 | 已写进 `known_hosts.json`，`ssh-rsa` / `ecdsa-sha2-nistp256` 等字符串必须逐字保持 |
-| 6 | RSA / SHA-1 遗留路径 | 现在靠 `method_pref(SignAlgo, "ssh-rsa")`（`embedded_ssh.rs:1842`）→ russh 用 `PrivateKeyWithHashAlg` + `best_supported_rsa_hash()` |
+| 6 | RSA / SHA-1 遗留路径 | **回退不在这一层。** `embedded_ssh.rs` 里那段 `method_pref(SignAlgo, "ssh-rsa")` 重试跑在握手之后，而 `russh_impl::Session::method_pref` 在 `connected` 置位后一律拒绝，`apply_prefs` 对 `SignAlgo` 也是空臂——所以它恒 `false`，只留下一个永不可达的 `detected_by: "legacy retry"`（记作 `OPT-LOOP-L2-PENDING.md` L2-13）。真正生效的 SHA-1 回退在传输层内部：`userauth_pubkey_file` 先用 `PrivateKeyWithHashAlg` + `best_supported_rsa_hash()`，被拒后再以 `PrivateKeyWithHashAlg::new(key, None)` 重试一次 |
 | 7 | 性能 | 控制面，不是吞吐路径。`aws-lc-rs` 会引入 cmake/NASM，**默认 feature 里就带着它**，必须显式关掉 |
 | 8 | ~~【待验证】russh 0.60 的 MSRV~~ | **已执行**：rustc 1.98.1 下 `russh 0.60.1` 与 `0.60.3` 均可解析到编译阶段（失败点是依赖冲突，不是 MSRV） |
 | 9 | 【待验证】`russh-sftp` 与 libssh2 SFTP 的权限位语义差异 | 用 `core.rs:2118` 那 5 个格式化函数的现有测试对拍 |

@@ -87,6 +87,13 @@ type ConfirmDialogProps = ConfirmOptions & {
  * default and so shipped an untranslated Cancel button to every non-English
  * locale; the default now cannot be forgotten.
  *
+ * Division of labour for the two label props: a caller that passes one is
+ * expected to have translated it already (`confirmLabel: t("Delete")`), which
+ * all 17 call sites currently do (7 `confirmDialog()` calls and 10
+ * `<ConfirmDialog>` elements). The component deliberately does not re-run
+ * `t()` over a supplied label — that would double-translate a caller that
+ * passed an already-Chinese string. Keep the rule when adding a call site.
+ *
  * The title writes `text-foreground` instead of inheriting the card's
  * `popover-foreground`. That is the repo-wide convention for full-strength
  * text on a popover surface, not an oversight — read <Dialog> above before
@@ -142,7 +149,18 @@ export function confirmDialog(options: ConfirmOptions): Promise<boolean> {
   });
 }
 
-/** Single global host for confirmDialog(). Mount once near the app root. */
+/** Single global host for confirmDialog(). Mount once near the app root.
+ *
+ * "Near the root" is not the same as "in the tree at all times": `App` returns
+ * early for `loading` and for `showWizard`, and neither early return includes
+ * this host. That is survivable today because neither branch can reach a
+ * `confirmDialog()` call site — the loading screen has no controls, and
+ * `SetupWizard` is a single self-contained file that renders its own key form
+ * instead of mounting <KeysPanel>, so none of the seven call sites are in its
+ * subtree. If a confirm is ever needed from a new early-return branch, mount
+ * the host there too: without a listener `confirmDialog()` resolves `false`
+ * (see above) and the user's click silently becomes "cancel".
+ */
 export function ConfirmHost() {
   const [pending, setPending] = useState<PendingConfirm | null>(null);
   const resolverRef = useRef<((ok: boolean) => void) | null>(null);

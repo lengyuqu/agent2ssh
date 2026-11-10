@@ -14,8 +14,9 @@
 //! # No wrapper signer is needed
 //!
 //! `docs/plans/russh-migration.md` §10.3 said the transport shipped no `Signer`
-//! and that an `AgentSigner` must be written. That is a grep artifact: the
-//! implementation exists at `auth.rs:180`, but its header wraps —
+//! and that an `AgentSigner` must be written. That was a grep artifact: the
+//! trait is implemented on the agent client itself, and the impl header wraps
+//! across lines —
 //!
 //! ```text
 //! impl<R: AsyncRead + AsyncWrite + Unpin + Send + 'static> Signer
@@ -25,6 +26,12 @@
 //! — so `grep "Signer for"` finds nothing while `AgentClient` does implement
 //! the trait. `authenticate_publickey_with` is therefore callable directly
 //! and this module forwards the agent's own signing, with no shim.
+//!
+//! (This used to cite `auth.rs:180` as "the implementation". That line is
+//! the `Certificate` arm of the key match, not an `impl`, and nothing here
+//! implements `Signer` for `AgentClient` — the impl lives in `russh-keys`,
+//! which this crate consumes. This crate's own `Signer` is `LocalKeySigner`
+//! in `mod.rs`, not a shim to remove.)
 //!
 //! # Ordering
 //!
@@ -297,6 +304,16 @@ async fn connect_stream() -> Result<AgentClient<AgentStream>, Error> {
         // `early eof`. Probing Pageant first therefore breaks the common case on
         // a modern Windows host: no Pageant, OpenSSH agent service running. The
         // pipe answers immediately by failing to open when nothing listens.
+        //
+        // The price of that order, which the paragraph above does not cover: a
+        // pipe that opens but holds no key the server accepts is indistinguishable
+        // from "there is an agent" here, so Pageant is never consulted in that
+        // case. The caller (`embedded_ssh::authenticate`) then walks this agent's
+        // identities, finds none that work, and falls through to the default key
+        // files — it does not try a second agent. Recorded as a boundary in
+        // `docs/KNOWN-ISSUES.md` §3.1; changing the order would trade a noisy
+        // failure on agents that hold the wrong key for a silent one on every
+        // host without Pageant, so it needs a decision, not a patch.
         match tokio::net::windows::named_pipe::ClientOptions::new()
             .open(r"\\.\pipe\openssh-ssh-agent")
         {

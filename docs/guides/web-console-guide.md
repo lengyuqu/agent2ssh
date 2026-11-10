@@ -66,19 +66,24 @@ Header 横跨页面顶部，包含以下元素：
 
 ### Daemon 切换器
 
-位于标题右侧的下拉选择器，用于在本地和远程守护进程之间切换：
+位于标题右侧的下拉选择器。**它今天只做两件事**：列出已配置的别名、对选中的 daemon 做一次连通性探测。
+不要把它读成「切换后所有操作都打到远程」——那件事还没有做。
 
 - **localhost** -- 本地守护进程（默认）
 - **远程别名** -- 在 `~/.agent2ssh/remotes.toml` 中配置的远程守护进程
 
-切换时：
+选中后的实际行为（`console.html` 的 `switchDaemon`）：
 
-1. 下拉列表显示所有已配置的守护进程别名
-2. 选中后自动更新连接 URL
-3. 状态指示灯显示目标守护进程的连通性（绿色 = 已连接，红色 = 不可达）
-4. URL 文本显示当前连接的目标地址
+1. 下拉列表来自本地 daemon 的 `GET /daemons`（别名 + URL + connected）
+2. `localhost` 分支把 `API` 设为该 daemon 的 URL；**远程分支仍把 `API` 设成本地 daemon 的 URL**，
+   代码注释自陈「All API calls still go to the local daemon, which proxies to remote. … For now」
+3. 远程分支的连通性探测打 `POST /daemons/:alias/exec`（`{host:"__ping__", command:"echo ok"}`）——
+   这是整个控制台**唯一**一次真正落到远程 daemon 上的请求
+4. 状态指示灯反映这次探测的结果；URL 文本显示目标地址（只用于显示，不是请求目标）
 
-切换守护进程后，所有 Tab 中的操作将路由到选中的守护进程。
+所以选中远程别名之后，六个 Tab 读到与执行的**仍然是本地 daemon 的内容**。跨 daemon 的能力在 daemon 侧只有
+`POST /daemons/:alias/exec` 一条，另有一条 `GET /daemons/view` 聚合视图（前端与 Web 控制台目前都没有调用点）；
+控制台没有把这两条接到各个 Tab 上。
 
 ---
 
@@ -224,14 +229,15 @@ Hosts 是默认激活的标签页，分为两个区域。
 | Risk Level | 风险等级 |
 | Requested At | 请求时间 |
 | TTL | 剩余超时时间 |
-| Status | 当前状态（pending/approved/rejected/timed_out） |
+| Status | 当前状态（`pending` / `approved` / `rejected` / `timed_out` / `revoked`） |
 
 ### 操作按钮
 
 每张卡片包含两个操作按钮：
 
 - **Approve** (绿色) -- 批准执行，命令将自动运行
-- **Reject** (红色) -- 拒绝执行，返回 403 错误
+- **Reject** (红色) -- 拒绝执行：这个动作本身返回 `200 {"ok":true}`，而**被挂起的那次执行**以
+  403 `command rejected by approver` 结束（`bin/agent2ssh-daemon.rs` 的 `ApprovalRejected` 分支）
 
 ### 超时行为
 
@@ -283,7 +289,7 @@ Hosts 是默认激活的标签页，分为两个区域。
 
 | 控件 | 说明 |
 |------|------|
-| Webhook URL | Webhook 接收端点（支持 Slack、Discord 等） |
+| Webhook URL | Webhook 接收端点。只有 URL 含 `hooks.slack.com` 时才走 Slack Block Kit 渲染器，其余端点收到的是 `WebhookEvent` 的原始 JSON |
 | Events | 事件订阅复选框 |
 | HMAC-SHA256 Secret | 可选，用于签名验证 |
 | Save | 保存配置 |
@@ -299,11 +305,9 @@ Hosts 是默认激活的标签页，分为两个区域。
 
 ### Slack 集成
 
-当 URL 包含 `hooks.slack.com` 时，自动使用 Slack Block Kit 格式发送消息：
+当 URL 包含 `hooks.slack.com` 时，自动使用 Slack Block Kit 格式发送消息。**字段与按钮的完整差异不在这里重复**——Slack 有「审批那条」与「通用那条」两个渲染器，它们各自的字段与按钮见 `configuration-guide.md` 的「Slack 集成」一节（那里有一张对照表）。
 
-- 标题显示事件类型
-- 字段显示主机、命令、风险等级、退出码
-- 审批请求消息包含打开本地 Approvals 控制台的按钮；实际批准或拒绝仍通过已认证的控制台/API 完成
+这里只记一条与本控制台直接相关的事实：**一次待审批会发两条 Slack 消息**，其中审批那条的 Approve / Reject 按钮点不动（拼出来的 URL 不是路由，且要 bearer token）。所以审批请在本控制台做，不要点 Slack 上的按钮；`/console#approvals` 是已认证入口，实际批准或拒绝仍由它完成。
 
 ### HMAC 签名
 
@@ -314,6 +318,19 @@ X-Agent2SSH-Signature: sha256=<hex-encoded-hmac-sha256>
 ```
 
 接收方可以使用相同的 Secret 验证签名，确保请求来源可信。
+
+**没有 Discord 专用格式**：`notify.rs` 里只有一条 `url.contains("hooks.slack.com")` 分支。**非 Slack 端点上
+有两个不同的形状，而且审批事件会发两次**（`notify_approval_pending` 与 `fire_webhook` 都发，见
+`configuration-guide.md` 的 Slack 对照表与 L2-75）：
+
+| 投递 | 键 |
+|---|---|
+| 审批那条（`notify_approval_pending`） | `event` / `approval_id` / `host` / `command` / `risk_level` / **`approval_url`**（六个，无 `exit_code`、无 `remote_outcome_unknown`） |
+| 通用那条（`fire_webhook`，`WebhookEvent` 直出） | `event` / `host` / `command`，外加按需出现的 `approval_id`、`risk_level`、`exit_code`、`remote_outcome_unknown` |
+
+Discord 的 webhook 要求载荷里有 `content` 或 `embeds`，上面两组键一个都没有，所以把 Discord webhook URL
+直接填进来不会得到一条消息——要接 Discord 需要在中间放一个转换层。自建端点要**同时认这两个形状**：按
+「一个形状七个键」写解析器，会在审批那条上拿到永远不出现的 `exit_code`，并丢掉实际存在的 `approval_url`。
 
 ---
 

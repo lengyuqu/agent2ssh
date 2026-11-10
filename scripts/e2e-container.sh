@@ -69,6 +69,7 @@
 # Usage: scripts/e2e-container.sh
 #   AGENT2SSH_CONTAINER_RUNTIME=wslc scripts/e2e-container.sh   # pin a runtime
 #   AGENT2SSH_E2E_IMAGE=<image> scripts/e2e-container.sh        # pin the sshd
+#   AGENT2SSH_E2E_PORT=22123 scripts/e2e-container.sh           # choose a free host port
 #
 # The first run on a fresh runtime also pulls the sshd image, which can take a
 # few minutes.
@@ -87,12 +88,16 @@ set -euo pipefail
 export MSYS2_ARG_CONV_EXCL='/config'
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CONTAINER=agent2ssh-e2e-sshd
-SSH_PORT=22122
+SSH_PORT="${AGENT2SSH_E2E_PORT:-22122}"
 # `IMAGE` is resolved further down, once the container runtime is known: Apple
 # container refuses lscr.io's cross-registry token exchange, so it is served the
 # same image from ghcr.io instead. See "Which sshd image?" above.
 WORK="$(mktemp -d)"
+# A run must never remove a container created by someone else. The name is
+# unique to this temporary directory. Cleanup uses the runtime-recorded ID;
+# some runtimes (including Apple container) may use the name itself as the ID.
+CONTAINER="agent2ssh-e2e-${WORK##*/}"
+CID_FILE="$WORK/container.cid"
 export AGENT2SSH_CONFIG_DIR="$WORK/config"
 mkdir -p "$AGENT2SSH_CONFIG_DIR"
 
@@ -100,15 +105,24 @@ CLI="${AGENT2SSH_CLI:-$REPO_ROOT/src-tauri/target/release/agent2ssh}"
 
 PASS=0
 FAIL=0
+SKIP=0
+REQUIRED_PASS=0
 note()  { printf '\n\033[1;36m== %s ==\033[0m\n' "$*"; }
-ok()    { PASS=$((PASS+1)); printf '  \033[32mPASS\033[0m %s\n' "$*"; }
+ok()    { PASS=$((PASS+1)); REQUIRED_PASS=$((REQUIRED_PASS+1)); printf '  \033[32mPASS\033[0m %s\n' "$*"; }
+ok_optional() { PASS=$((PASS+1)); printf '  \033[32mPASS\033[0m %s\n' "$*"; }
 bad()   { FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "$*"; }
+skip()  { SKIP=$((SKIP+1)); printf '  SKIP %s\n' "$*"; }
 
 # The runtime is resolved in the precondition block below, before any container
 # is created; cleanup must therefore tolerate an unset RT_BIN.
 cleanup() {
-  if [[ -n "${RT_BIN:-}" ]]; then
-    "$RT_BIN" rm -f "$CONTAINER" >/dev/null 2>&1 || true
+  if [[ -n "${RT_BIN:-}" && -f "$CID_FILE" ]]; then
+    local id
+    id="$(cat "$CID_FILE")"
+    id="${id%$'\r'}"
+    if [[ "$id" =~ ^[[:alnum:]][[:alnum:]_.-]*$ ]]; then
+      "$RT_BIN" rm -f "$id" >/dev/null 2>&1 || true
+    fi
   fi
   rm -rf "$WORK"
 }
@@ -175,15 +189,25 @@ echo "  key:      $KEY_TYPE (${KEY_PATH#"$WORK"/})"
 chmod 600 "$KEY_PATH"
 
 # ── Start the OpenSSH container with our pubkey ───────────────────────────────
-"$RT_BIN" rm -f "$CONTAINER" >/dev/null 2>&1 || true
-"$RT_BIN" run -d --name "$CONTAINER" \
+if "$RT_BIN" run -d --name "$CONTAINER" --cidfile "$CID_FILE" \
   -e PUID=1000 -e PGID=1000 \
   -e USER_NAME=tester \
   -e PUBLIC_KEY="$PUBKEY" \
   -e SUDO_ACCESS=false \
   -e PASSWORD_ACCESS=false \
   -p "$SSH_PORT:2222" \
-  "$IMAGE" >/dev/null
+  "$IMAGE" >/dev/null; then
+  id="$(cat "$CID_FILE" 2>/dev/null || true)"
+  id="${id%$'\r'}"
+  if ! [[ "$id" =~ ^[[:alnum:]][[:alnum:]_.-]*$ ]]; then
+    echo "Runtime did not record a usable fixture ID; inspect $CONTAINER manually." >&2
+    exit 1
+  fi
+  echo "  fixture:  $CONTAINER ($id)"
+else
+  echo "Could not start fixture $CONTAINER; cleanup is limited to its recorded ID." >&2
+  exit 1
+fi
 
 # ── Register the host, then poll readiness through the app ────────────────────
 # The app is the client under test, so it is also the thing that decides whether
@@ -219,22 +243,26 @@ ok "sshd reachable with the app-generated key"
 # key and have it authorized by the same public key. This is what catches a
 # malformed public-key line, which the app alone could paper over.
 if command -v ssh >/dev/null 2>&1; then
-  if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-       -o BatchMode=yes -i "$KEY_PATH" -p "$SSH_PORT" tester@127.0.0.1 true 2>/dev/null; then
-    ok "system ssh accepts the app-generated key (independent check)"
+  SSH_CONFIG_NULL=/dev/null
+  case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) SSH_CONFIG_NULL=NUL ;; esac
+  if ssh -F "$SSH_CONFIG_NULL" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+       -o BatchMode=yes -o IdentitiesOnly=yes -o IdentityAgent=none -i "$KEY_PATH" -p "$SSH_PORT" tester@127.0.0.1 true 2>/dev/null; then
+    ok_optional "system ssh accepts the app-generated key (independent check)"
   else
     case "$(uname -s)" in
       MINGW*|MSYS*|CYGWIN*)
         # Known Windows trap: ssh.exe refuses a private key whose ACLs look
         # world-readable, which is what a temp directory gives it. The app and
         # the readiness check above already proved the key works.
-        echo "  note: system ssh refused the key; on Windows that is the temp-dir ACL check, not the key"
+        skip "system ssh cross-check (Windows temporary key ACL may be rejected)"
         ;;
       *)
         bad "system ssh accepts the app-generated key (independent check)"
         ;;
     esac
   fi
+else
+  skip "system ssh cross-check (ssh client unavailable)"
 fi
 
 # ── 1. Remote exec ────────────────────────────────────────────────────────────
@@ -284,6 +312,7 @@ if cmp -s "$WORK/payload.bin" "$WORK/partial.out"; then ok "resume completed fil
 # one of its tests also proves that key authenticates.
 note "Exec runtime regression suite (stderr drain, timeout deadline, health)"
 if ( cd "$REPO_ROOT/src-tauri" && \
+     AGENT2SSH_TEST_REQUIRE_SSH=1 \
      AGENT2SSH_TEST_SSH_PORT="$SSH_PORT" \
      AGENT2SSH_TEST_SSH_HOST=127.0.0.1 \
      AGENT2SSH_TEST_SSH_USER=tester \
@@ -294,10 +323,47 @@ else
   bad "exec runtime suite (drain + timeout + timeout audit + health)"
 fi
 
+# The peer deliberately stops reading while a real SSH command streams output.
+# This regression uses Unix SO_RCVBUF; Windows coverage remains separate.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) skip "WebSocket backpressure test requires Unix sockets" ;;
+  *)
+    note "Daemon shutdown under WebSocket backpressure"
+    if ( cd "$REPO_ROOT/src-tauri" && \
+         AGENT2SSH_TEST_REQUIRE_SSH=1 \
+         AGENT2SSH_TEST_SSH_PORT="$SSH_PORT" \
+         AGENT2SSH_TEST_SSH_HOST=127.0.0.1 \
+         AGENT2SSH_TEST_SSH_USER=tester \
+         AGENT2SSH_TEST_SSH_KEY="$KEY_PATH" \
+         cargo test --no-default-features --features daemon --test daemon_stop_e2e stop_exits_when_exec_websocket_peer_stops_reading -- --exact ); then
+      ok_optional "daemon closes a backpressured WebSocket"
+    else
+      bad "daemon closes a backpressured WebSocket"
+    fi
+    ;;
+esac
+
+note "Daemon shutdown with an active SSH request"
+if ( cd "$REPO_ROOT/src-tauri" && \
+     AGENT2SSH_TEST_REQUIRE_SSH=1 \
+     AGENT2SSH_TEST_SSH_PORT="$SSH_PORT" \
+     AGENT2SSH_TEST_SSH_HOST=127.0.0.1 \
+     AGENT2SSH_TEST_SSH_USER=tester \
+     AGENT2SSH_TEST_SSH_KEY="$KEY_PATH" \
+     cargo test --no-default-features --features daemon --test daemon_stop_e2e shutdown_interrupts_an_active_ssh_request -- --exact ); then
+  ok_optional "daemon interrupts active SSH request"
+else
+  bad "daemon interrupts active SSH request"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
+# The independent system-ssh cross-check cannot substitute for a required check.
+if [[ "$REQUIRED_PASS" != 8 ]]; then
+  bad "expected 8 mandatory checks to pass, got $REQUIRED_PASS"
+fi
 note "Summary"
 printf '  runtime: %s (%s)\n' "${RT_ID:-unknown}" "$RT_BIN"
 printf '  image:   %s\n' "$IMAGE"
 printf '  key:     %s (generated by agent2ssh)\n' "$KEY_TYPE"
-printf '  %d passed, %d failed\n' "$PASS" "$FAIL"
+printf '  %d passed (%d mandatory), %d failed, %d skipped\n' "$PASS" "$REQUIRED_PASS" "$FAIL" "$SKIP"
 [[ "$FAIL" == 0 ]]

@@ -90,11 +90,16 @@ pub enum HashType {
     Sha256,
 }
 
-/// A negotiable method family. Mirrors `ssh2::MethodType`, minus the numeric
-/// discriminants — the backend maps them.
+/// A negotiable method family. The variant set is the one the removed libssh2
+/// facade exposed, minus the numeric discriminants — the backend maps them.
 ///
-/// `LangCs`/`LangSc` are never configured (no `SshAlgoPrefs` field) but are kept
-/// so `supported_algs` can answer for them the way libssh2 does.
+/// `LangCs`/`LangSc`/`SignAlgo` are never configured: `SshAlgoPrefs` has no field
+/// for them. They are kept for shape, not so a query can be answered —
+/// `ssh_algo::supported_algorithms` returns `None` for all three before any
+/// backend is consulted, and `russh_impl::supported_names` answers them with an
+/// empty list and a comment saying the empty list is the shape, not a capability.
+/// Nothing in the tree asks either question, so a reader should not go looking
+/// for a language-algorithm list to compare against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MethodType {
     Kex,

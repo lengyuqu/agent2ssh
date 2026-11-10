@@ -1,0 +1,7 @@
+# Manual only: the matrix is not scheduled and is not a PR gate.
+branch:
+  - reg: ^main$
+    buttons:
+      - name: SSH 兼容性完整矩阵
+        description: 测试多个 OpenSSH 版本、Dropbear 和 legacy 协商
+        event: web_trigger_ssh_matrix

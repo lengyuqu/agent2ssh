@@ -1,0 +1,33 @@
+   Compiling agent2ssh-app v0.4.5 (D:\vibercodeing\agent2ssh\src-tauri)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.02s
+     Running unittests src\bin\agent2ssh-daemon.rs (src-tauri\target\debug\deps\agent2ssh_daemon-6db4b487e8282cdc.exe)
+
+running 25 tests
+test agent2ssh_daemon_auth::tests::query_token_is_limited_to_websocket_routes ... ok
+test agent2ssh_daemon_auth::tests::token_matches_exact ... ok
+test agent2ssh_daemon_auth::tests::token_matches_rejects_wrong ... ok
+test agent2ssh_daemon_auth::tests::token_matches_empty_expected_never_matches ... ok
+test tests::cors_origin_allowlist_is_desktop_and_loopback_only ... ok
+test tests::global_control_plane_requires_unrestricted_admin_token ... ok
+test agent2ssh_daemon_trace::tests::dep_prefixes_parse_modes ... ok
+test tests::public_allowlist_is_exact_and_excludes_authed_siblings ... ok
+test tests::recording_endpoints_require_unrestricted_admin_token ... ok
+test tests::auth_token_extracted_from_header_and_query ... ok
+test tests::remote_request_source_cannot_claim_desktop ... ok
+test tests::token_match_requires_exact_non_empty_value ... ok
+test tests::terminal_broadcast_accepts_a_frozen_unique_target_set ... ok
+test tests::terminal_broadcast_rejects_control_input_and_duplicate_targets ... ok
+test tests::daemon_token_loader_preserves_existing_non_empty_token ... ok
+test tests::daemon_token_loader_replaces_empty_token_file ... ok
+test tests::stalled_websocket_future_is_dropped_after_shutdown_deadline ... ok
+test tests::limited_session_registration_reserves_capacity_until_unregistered ... ok
+test tests::paused_gate_allows_desktop_source ... ok
+test tests::paused_gate_rejects_non_desktop_source_and_writes_audit ... ok
+test tests::operation_audit_records_successful_control_operation ... ok
+test tests::rate_limit_rejects_with_429_and_writes_audit ... ok
+test tests::scoped_token_auth_restricts_authorized_commands ... ok
+test tests::session_limit_rejects_with_429 ... ok
+test tests::terminal_session_limit_uses_terminal_open_audit_command ... ok
+
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.03s
+

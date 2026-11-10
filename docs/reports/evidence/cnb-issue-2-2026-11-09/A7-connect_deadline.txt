@@ -1,0 +1,10 @@
+   Compiling agent2ssh-app v0.4.5 (D:\vibercodeing\agent2ssh\src-tauri)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 33.27s
+     Running tests\connect_deadline.rs (src-tauri\target\debug\deps\connect_deadline-e93b1c24643953ce.exe)
+
+running 2 tests
+test health_snapshot_releases_its_worker_when_the_peer_never_speaks_ssh ... ok
+test ping_releases_its_worker_when_the_peer_never_speaks_ssh ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.07s
+

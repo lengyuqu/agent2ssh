@@ -1,0 +1,31 @@
+   Compiling agent2ssh-app v0.4.5 (D:\vibercodeing\agent2ssh\src-tauri)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.87s
+     Running tests\daemon_stop_e2e.rs (src-tauri\target\debug\deps\daemon_stop_e2e-f450dfd9b9924054.exe)
+
+running 23 tests
+test a_forged_endpoint_cannot_report_an_absent_pid_as_running ... ok
+test activity_counts_a_resident_session ... ok
+test activity_reads_an_idle_daemon_as_idle ... ok
+test an_accepted_shutdown_that_does_not_stop_the_daemon_never_signals_it ... ok
+test background_start_verifies_and_stops_its_own_daemon ... ok
+test competing_daemon_cannot_overwrite_the_running_daemon_pid ... ok
+test direct_daemon_recovers_a_definitely_absent_pid ... ok
+test direct_daemon_with_another_port_cannot_replace_a_live_pid ... ok
+test exiting_old_daemon_preserves_replacement_pid_in_the_same_config ... ok
+test legacy_daemon_without_pid_guard_is_not_automatically_stopped ... ok
+test other_daemons_health_is_not_reported_as_our_pid ... ok
+test renamed_daemon_is_reported_healthy_but_not_unsafely_stopped ... ok
+test shutdown_cancels_a_request_waiting_for_approval ... ok
+test shutdown_does_not_reach_a_replacement_daemon_with_the_same_token ... ok
+test shutdown_interrupts_an_active_ssh_request ... ok
+test start_refuses_to_claim_an_existing_health_endpoint_without_a_pid_file ... ok
+test startup_does_not_accept_another_process_health_response ... ok
+test stop_closes_an_active_event_stream_and_exits ... ok
+test stop_daemon_process_waits_for_a_graceful_exit ... ok
+test stop_exits_with_an_idle_exec_websocket ... ok
+test the_shutdown_route_is_closed_to_anonymous_and_scoped_callers ... ok
+test the_shutdown_route_stops_the_daemon_gracefully ... ok
+test wrong_admin_token_never_signals_the_real_daemon ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 35.46s
+

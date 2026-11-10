@@ -55,24 +55,59 @@ pub fn daemon_log_path() -> Result<PathBuf> {
 
 pub fn read_daemon_pid() -> Result<Option<u32>> {
     let pid_path = daemon_pid_path()?;
-    if !pid_path.exists() {
-        return Ok(None);
-    }
-
-    let raw = std::fs::read_to_string(&pid_path)?;
-    match raw.trim().parse::<u32>() {
-        Ok(pid) => Ok(Some(pid)),
-        Err(_) => {
-            let _ = std::fs::remove_file(pid_path);
-            Ok(None)
-        }
-    }
+    let raw = match std::fs::read_to_string(&pid_path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("failed to read daemon PID file"),
+    };
+    let pid = raw.trim().parse::<u32>().ok().filter(|pid| *pid != 0);
+    pid.map(Some).ok_or_else(|| {
+        anyhow!(
+            "invalid daemon PID file {}; file retained, inspect it before starting or stopping the daemon",
+            pid_path.display()
+        )
+    })
 }
 
-pub fn remove_daemon_pid_file() {
-    if let Ok(pid_path) = daemon_pid_path() {
-        let _ = std::fs::remove_file(pid_path);
+const DAEMON_PID_LOCK: &str = ".daemon-pid.lock";
+
+/// Serialize PID publication and conditional cleanup between current versions.
+/// This lock is for file coordination, not proof of a process's identity.
+pub fn write_daemon_pid(pid: u32) -> Result<()> {
+    let _guard = crate::store::lock_config_file(DAEMON_PID_LOCK)?;
+    if let Some(previous) = read_daemon_pid()? {
+        if !pid_definitely_missing(previous) {
+            return Err(anyhow!("daemon PID file names process {previous}, which is live or cannot be verified; file retained"));
+        }
     }
+    std::fs::write(daemon_pid_path()?, pid.to_string()).context("failed to write daemon PID file")
+}
+
+fn write_daemon_pid_if_absent(pid: u32) -> Result<()> {
+    let _guard = crate::store::lock_config_file(DAEMON_PID_LOCK)?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(daemon_pid_path()?)?;
+    write!(file, "{pid}")?;
+    Ok(())
+}
+
+/// Remove only the PID we observed, preserving a replacement or malformed file.
+/// Older clients and daemons do not honor this advisory lock.
+pub fn remove_daemon_pid_file_if(pid: u32) -> Result<bool> {
+    let _guard = crate::store::lock_config_file(DAEMON_PID_LOCK)?;
+    let path = daemon_pid_path()?;
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error).context("failed to read daemon PID file for cleanup"),
+    };
+    if raw.trim().parse::<u32>().ok() != Some(pid) {
+        return Ok(false);
+    }
+    std::fs::remove_file(path).context("failed to remove daemon PID file")?;
+    Ok(true)
 }
 
 pub fn process_is_alive(pid: u32) -> bool {
@@ -180,6 +215,20 @@ pub enum DaemonPidState {
 }
 
 pub fn daemon_health_pid() -> Option<u32> {
+    health_identity().map(|identity| identity.pid)
+}
+
+/// What the unchanged `/health` route says about the process that answered it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HealthIdentity {
+    pid: u32,
+    /// `None` when the daemon predates `/health` naming its config directory —
+    /// which is not the same as "some other directory" (see
+    /// [`DaemonStopError::UnverifiedIdentity`]).
+    config_dir: Option<String>,
+}
+
+fn health_identity() -> Option<HealthIdentity> {
     let response = crate::daemon_activity::local_daemon_request(
         "GET",
         "/health",
@@ -194,13 +243,48 @@ pub fn daemon_health_pid() -> Option<u32> {
     if !body.get("ok")?.as_bool()? {
         return None;
     }
-    u32::try_from(body.get("pid")?.as_u64()?).ok()
+    Some(HealthIdentity {
+        pid: u32::try_from(body.get("pid")?.as_u64()?).ok()?,
+        config_dir: body
+            .get("config_dir")
+            .and_then(|dir| dir.as_str())
+            .map(str::to_string),
+    })
 }
 
-/// Verify the health PID and that the daemon accepts this config's token.
-/// Rechecking the PID narrows a listener-replacement race between requests.
+/// The config directory this build's daemons serve, canonicalized the same way
+/// a daemon reports it. `None` when the directory cannot be resolved, which
+/// makes any comparison against it unknown rather than false.
+fn expected_config_dir() -> Option<String> {
+    let dir = config_dir().ok()?;
+    Some(
+        std::fs::canonicalize(&dir)
+            .unwrap_or(dir)
+            .display()
+            .to_string(),
+    )
+}
+
+// A health response alone can be forged. This observation is deliberately
+// independent of the executable name so a renamed daemon remains visible.
+// It is still a seconds-resolution snapshot, not proof of daemon identity.
+fn observable_live_start_time(pid: u32) -> Option<u64> {
+    let sys_pid = sysinfo::Pid::from_u32(pid);
+    let mut system = sysinfo::System::new();
+    system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[sys_pid]), true);
+    system.process(sys_pid).and_then(|process| {
+        (process.status() != sysinfo::ProcessStatus::Zombie && process.start_time() != 0)
+            .then_some(process.start_time())
+    })
+}
+
+/// Verify that the claimed process is observable before and after the health
+/// and token checks. Neither a process snapshot nor the endpoint proves identity.
 pub fn daemon_matches_config(pid: u32) -> bool {
-    if daemon_health_pid() != Some(pid) {
+    let Some(start_time) = observable_live_start_time(pid) else {
+        return false;
+    };
+    if health_identity().map(|identity| identity.pid) != Some(pid) {
         return false;
     }
     let Some(token) = crate::daemon_activity::read_admin_token() else {
@@ -213,7 +297,9 @@ pub fn daemon_matches_config(pid: u32) -> bool {
         Duration::from_millis(500),
     )
     .is_ok_and(|response| response.status == 200);
-    authenticated && daemon_health_pid() == Some(pid)
+    authenticated
+        && daemon_health_pid() == Some(pid)
+        && observable_live_start_time(pid) == Some(start_time)
 }
 
 // A missing sysinfo entry can also mean the OS denied inspection. Only treat
@@ -352,7 +438,11 @@ pub fn start_daemon_background(daemon_bin: &Path) -> Result<DaemonStartResult> {
                     "removing stale daemon pid before start",
                     Some(serde_json::json!({ "pid": pid })),
                 );
-                remove_daemon_pid_file();
+                if !remove_daemon_pid_file_if(pid)? {
+                    return Err(anyhow!(
+                        "daemon PID file changed during cleanup; retry after inspecting it"
+                    ));
+                }
             }
             DaemonPidState::RunningUnhealthy | DaemonPidState::Unverified => {
                 return Err(anyhow!(
@@ -434,13 +524,7 @@ pub fn start_daemon_background(daemon_bin: &Path) -> Result<DaemonStartResult> {
                 {
                     // Preserve a recoverable PID if the unverified child never
                     // published one. Never overwrite another process's file.
-                    if let Ok(path) = daemon_pid_path() {
-                        if let Ok(mut file) =
-                            OpenOptions::new().write(true).create_new(true).open(path)
-                        {
-                            let _ = write!(file, "{pid}");
-                        }
-                    }
+                    let _ = write_daemon_pid_if_absent(pid);
                     return Err(anyhow!("daemon child (pid={pid}) did not become ready and could not be stopped: {kill_error}; PID file retained when possible"));
                 }
             }
@@ -448,15 +532,9 @@ pub fn start_daemon_background(daemon_bin: &Path) -> Result<DaemonStartResult> {
                 format!("failed to wait for daemon child (pid={pid}); check it manually")
             })?;
         }
-        // Do not use read_daemon_pid here: it removes malformed/partial files
-        // that could belong to another concurrently starting process.
-        let recorded_pid = daemon_pid_path()
-            .ok()
-            .and_then(|path| std::fs::read_to_string(path).ok())
-            .and_then(|raw| raw.trim().parse::<u32>().ok());
-        if recorded_pid == Some(pid) {
-            remove_daemon_pid_file();
-        }
+        // A malformed/partial file could belong to another concurrently
+        // starting process; only remove a file naming this exact child.
+        let _ = remove_daemon_pid_file_if(pid);
         let _ = crate::diagnostics::append_diagnostic_log(
             "error",
             "daemon_control",
@@ -517,6 +595,7 @@ fn process_start_time(pid: u32) -> Option<u64> {
 pub fn mark_daemon_owned(pid: u32) -> Result<()> {
     let start_time =
         process_start_time(pid).ok_or_else(|| anyhow!("process {pid} is not running"))?;
+    let _guard = crate::store::lock_config_file(DAEMON_PID_LOCK)?;
     let path = daemon_owner_path()?;
     std::fs::write(
         path,
@@ -539,18 +618,36 @@ pub fn daemon_is_owned(pid: u32) -> bool {
     marker.pid == pid && process_start_time(pid) == Some(marker.start_time)
 }
 
-pub fn clear_daemon_owner() {
-    if let Ok(path) = daemon_owner_path() {
-        let _ = std::fs::remove_file(path);
+fn clear_daemon_owner_if(pid: u32, start_time: u64) -> Result<bool> {
+    let _guard = crate::store::lock_config_file(DAEMON_PID_LOCK)?;
+    let path = daemon_owner_path()?;
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error).context("failed to read daemon owner marker"),
+    };
+    let Ok(marker) = serde_json::from_str::<OwnerMarker>(&raw) else {
+        return Ok(false);
+    };
+    if marker.pid != pid || marker.start_time != start_time {
+        return Ok(false);
     }
+    std::fs::remove_file(path).context("failed to remove daemon owner marker")?;
+    Ok(true)
 }
 
 // ── Stopping ────────────────────────────────────────────────────────────────
 
-/// How long a stopped daemon gets to drain before it is killed outright. The
-/// daemon waits up to five seconds for WebSocket connections to finish, so this
-/// has to be longer than that or a graceful stop would be cut short by the very
-/// timeout meant to catch a hung one.
+/// How long a stopped daemon gets to drain before stop returns an error. The
+/// daemon gives each WebSocket two seconds to finish, then waits up to four
+/// seconds for its drain registry to empty. The two waits run in sequence, so
+/// the worst case is about six seconds and a shorter constant would cut a
+/// graceful stop short. Those numbers are literals in `agent2ssh-daemon.rs` —
+/// the per-connection grace at `:5014` (`/terminal`) and `:5442`
+/// (`/exec/stream`), the registry wait at `:5951` — so a change there has to be
+/// reflected here rather than compiled against; exit is observed on a 50 ms poll
+/// (`wait_for_exit`), which is why the margin over six seconds is measured in
+/// seconds and not milliseconds.
 const GRACEFUL_STOP_WAIT: Duration = Duration::from_secs(8);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -602,6 +699,32 @@ fn child_has_exited(_pid: u32) -> bool {
     false
 }
 
+// A Windows process object remains openable while another process holds its
+// handle, even after it exits, so an openable handle is not evidence of life.
+// A signaled handle proves termination without consuming the Child's exit
+// status; a failed or denied query is not evidence of exit either.
+#[cfg(windows)]
+fn process_handle_is_signaled(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+    };
+    unsafe {
+        let handle = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
+        if handle == 0 {
+            return false;
+        }
+        let signaled = WaitForSingleObject(handle, 0) == WAIT_OBJECT_0;
+        CloseHandle(handle);
+        signaled
+    }
+}
+
+#[cfg(not(windows))]
+fn process_handle_is_signaled(_pid: u32) -> bool {
+    false
+}
+
 fn observe_process(pid: u32, expected_start: u64) -> ProcessObservation {
     let sys_pid = sysinfo::Pid::from_u32(pid);
     let mut system = sysinfo::System::new();
@@ -612,8 +735,10 @@ fn observe_process(pid: u32, expected_start: u64) -> ProcessObservation {
             process.status() == sysinfo::ProcessStatus::Zombie,
         )
     });
-    let definitely_missing =
-        snapshot.is_none() && (child_has_exited(pid) || pid_definitely_missing(pid));
+    let definitely_missing = snapshot.is_none()
+        && (child_has_exited(pid)
+            || process_handle_is_signaled(pid)
+            || pid_definitely_missing(pid));
     classify_process_observation(snapshot, definitely_missing, expected_start)
 }
 
@@ -662,81 +787,294 @@ fn signal_daemon(pid: u32, expected_start: u64, force: bool) -> Result<()> {
     }
 }
 
+/// Why a stop did not happen. These are deliberately distinct: they are three
+/// different situations for the person reading the message, and collapsing them
+/// into one string is how "the wrong process was killed" becomes unarguable.
+#[derive(Debug)]
+pub enum DaemonStopError {
+    /// The PID could not be identified, or the daemon that answered is not this
+    /// config's daemon. Nothing was sent.
+    UnverifiedIdentity(String),
+    /// A daemon answered, but it is not the one that accepts this config's
+    /// admin token.
+    NotAuthenticated,
+    /// A daemon answered and the request was refused because the daemon that
+    /// answered is not the PID the stop was for — the listener moved between
+    /// the health check and the shutdown request. Nothing was stopped.
+    ExpectedPidRefused {
+        expected: u32,
+        actual: u32,
+    },
+    /// The shutdown request could not be sent (connection, protocol, or an
+    /// unexpected answer). Nothing was stopped.
+    NotAccepted(String),
+    /// The shutdown was accepted but the daemon's exit could not be observed.
+    UncertainExit(u32),
+    /// The daemon would not exit, even after being signalled.
+    StillRunning(u32),
+    Other(anyhow::Error),
+}
+
+impl std::fmt::Display for DaemonStopError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnverifiedIdentity(detail) => write!(f, "{detail}"),
+            Self::NotAuthenticated => write!(
+                f,
+                "the daemon that answered did not accept this config's admin token; \
+                 nothing was stopped"
+            ),
+            Self::ExpectedPidRefused { expected, actual } => write!(
+                f,
+                "the daemon listening now is pid {actual}, not the pid {expected} the stop \
+                 was for; it refused and is still running. Retry the stop to address pid \
+                 {actual}."
+            ),
+            Self::NotAccepted(detail) => write!(f, "{detail}"),
+            Self::UncertainExit(pid) => write!(
+                f,
+                "daemon PID {pid} exit cannot be verified; PID file retained"
+            ),
+            Self::StillRunning(pid) => {
+                write!(f, "daemon process {pid} would not exit; PID file retained")
+            }
+            Self::Other(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for DaemonStopError {}
+
+impl From<anyhow::Error> for DaemonStopError {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Other(error)
+    }
+}
+
+/// The outcome of asking the daemon to shut itself down.
+enum ShutdownRequest {
+    Accepted,
+    /// The daemon says it is a different PID than the one asked for.
+    Refused {
+        actual: u32,
+    },
+    /// Refused or unreadable for another reason, with something to print.
+    NotAccepted(String),
+    /// Accepted by a daemon that does not check `expect_pid`, so the answer
+    /// says nothing about which process is stopping. Which is usually fine — the
+    /// health check a moment earlier named this PID — but it is not the checked
+    /// path, and the caller deserves to know which one it got.
+    AcceptedUnchecked,
+}
+
+/// Post `/shutdown`, naming the process this stop is meant to end.
+///
+/// `expected_pid` is `None` only for [`request_graceful_shutdown`], which has no
+/// PID to name: a real stop always names its target, so a daemon that moved
+/// under the caller's feet can refuse instead of exiting.
+fn request_shutdown(expected_pid: Option<u32>) -> ShutdownRequest {
+    let Some(token) = crate::daemon_activity::read_admin_token() else {
+        return ShutdownRequest::NotAccepted(
+            "this config directory has no admin token; nothing was stopped".into(),
+        );
+    };
+    // A request that names nothing sends no body *and* no `Content-Type`: an
+    // empty body with a JSON content type is a parse error, not "no opinion".
+    // `expect_pid: null` is the spelling that means "stop without checking", and
+    // only a caller that writes it gets it.
+    let body = expected_pid.map(|pid| serde_json::json!({ "expect_pid": pid }));
+    let response = match &body {
+        Some(body) => crate::daemon_activity::local_daemon_request_with_body(
+            "POST",
+            "/shutdown",
+            Some(&token),
+            body,
+            Duration::from_secs(2),
+        ),
+        None => crate::daemon_activity::local_daemon_request(
+            "POST",
+            "/shutdown",
+            Some(&token),
+            Duration::from_secs(2),
+        ),
+    };
+    match response {
+        Ok(response) if response.status == 200 && expected_pid.is_none() => {
+            ShutdownRequest::Accepted
+        }
+        Ok(response) if response.status == 409 => match expected_pid {
+            // An older daemon rejects a body it cannot parse with 422, never
+            // 409, so a 409 here is the check answering.
+            Some(_) => ShutdownRequest::Refused {
+                actual: reported_pid(&response.body).unwrap_or(0),
+            },
+            None => ShutdownRequest::NotAccepted(
+                "the daemon refused an unspecified shutdown".to_string(),
+            ),
+        },
+        // A daemon without the check ignores the body, so this is the old
+        // response to a request that asked for more than it can promise.
+        Ok(response) if response.status == 200 => ShutdownRequest::AcceptedUnchecked,
+        // 401 and 403 are the same answer to this caller: the daemon did not
+        // accept the token this config handed it, so it is not our daemon or the
+        // token was replaced under us. Nothing was stopped either way.
+        Ok(response) if response.status == 401 || response.status == 403 => {
+            ShutdownRequest::NotAccepted(
+                "the daemon did not accept this config's admin token for a shutdown; \
+                 nothing was stopped"
+                    .to_string(),
+            )
+        }
+        Ok(response) => ShutdownRequest::NotAccepted(format!(
+            "the daemon answered the shutdown request with {}: {}",
+            response.status,
+            response.body.trim()
+        )),
+        Err(error) => {
+            ShutdownRequest::NotAccepted(format!("the shutdown request could not be sent: {error}"))
+        }
+    }
+}
+
+/// The PID a `409` names, so the error can point at the daemon that refused.
+fn reported_pid(body: &str) -> Option<u32> {
+    let body: serde_json::Value = serde_json::from_str(body).ok()?;
+    let message = body.get("error")?.as_str()?;
+    let rest = message.split("is pid ").nth(1)?;
+    rest.split_whitespace()
+        .next()?
+        .trim_end_matches(',')
+        .parse()
+        .ok()
+}
+
 /// Ask the running daemon to shut itself down, over its own admin API.
 ///
-/// Windows has no `SIGTERM`: signalling falls back to
-/// `TerminateProcess` there, which skips the drain that closes WebSocket
-/// connections cleanly and removes the pid file. Asking the daemon does what
-/// the signal does elsewhere. `true` only when the daemon accepted the request.
+/// This is how every platform stops a daemon; there is no `SIGTERM` branch to
+/// fall back to. Windows is why the route exists at all — signalling there means
+/// `TerminateProcess`, which skips the drain that closes WebSocket connections
+/// cleanly and removes the pid file — but the stop path sends this request on
+/// Unix too, because it is what carries `expect_pid`.
+///
+/// Without a PID to name this sends the old, unchecked request, which is all it
+/// can do. [`stop_daemon_process`] — the path every real stop takes — names its
+/// target instead.
 pub fn request_graceful_shutdown() -> bool {
-    let Some(token) = crate::daemon_activity::read_admin_token() else {
-        return false;
-    };
-    crate::daemon_activity::local_daemon_request(
-        "POST",
-        "/shutdown",
-        Some(&token),
-        Duration::from_secs(2),
-    )
-    .is_ok_and(|response| response.status == 200)
+    matches!(request_shutdown(None), ShutdownRequest::Accepted)
 }
 
 /// Stop the daemon with this `pid` and wait until it is gone.
 ///
 /// Authenticate the local daemon and request shutdown through its admin route,
-/// then signal it by force if it has not exited within [`GRACEFUL_STOP_WAIT`]. Returning only once the
-/// process has exited is what makes a restart safe — the old daemon still holds
-/// the listening port while it drains, so starting the new one straight away
-/// would fail to bind.
-pub fn stop_daemon_process(pid: u32) -> Result<()> {
+/// then signal it by force if it has not exited within [`GRACEFUL_STOP_WAIT`].
+/// Returning only once the process has exited is what makes a restart safe — the
+/// old daemon still holds the listening port while it drains, so starting the
+/// new one straight away would fail to bind.
+pub fn stop_daemon_process(pid: u32) -> std::result::Result<(), DaemonStopError> {
+    use DaemonStopError as Refused;
     let Some(start_time) = daemon_process_start_time(pid) else {
         if daemon_pid_state(pid) != DaemonPidState::Stale {
-            return Err(anyhow!(
+            return Err(Refused::UnverifiedIdentity(format!(
                 "daemon PID {pid} cannot be safely identified; PID file retained"
-            ));
+            )));
         }
-        clear_daemon_owner();
+        // With no start time we cannot distinguish an old marker from a
+        // replacement process; a stale marker is safer than removing it.
         return Ok(());
     };
     // A matching executable name is not proof that this is our daemon: an
-    // unrelated process can reuse the PID or spoof argv[0]. Require both the
-    // matching health PID and this config's admin token before any signal.
-    if daemon_health_pid() != Some(pid) || !request_graceful_shutdown() {
-        return Err(anyhow!(
-            "daemon PID {pid} could not be authenticated for shutdown; PID file retained"
-        ));
+    // unrelated process can reuse the PID or spoof argv[0]. Require the health
+    // PID to match, the daemon to serve *this* config directory, and this
+    // config's admin token to be accepted before asking for anything.
+    //
+    // This is the second identity entry point in this file, not a reuse of
+    // [`daemon_pid_state`]: that one is consulted only in the `None` branch
+    // above (no observable start time) and answers from a `/health` + `/gate`
+    // pair without ever looking at the config directory, while this path
+    // authenticates with `/shutdown` itself and refuses on a `config_dir`
+    // mismatch. Both criteria are deliberate, and changing one will not turn
+    // the other's tests red — change them together.
+    let health = health_identity();
+    if health.as_ref().map(|identity| identity.pid) == Some(pid) {
+        match (
+            health.and_then(|identity| identity.config_dir),
+            expected_config_dir(),
+        ) {
+            (Some(answered), Some(expected)) if answered != expected => {
+                return Err(Refused::UnverifiedIdentity(format!(
+                    "daemon PID {pid} serves config directory {answered}, not {expected}; \
+                     PID file retained"
+                )))
+            }
+            // A daemon that does not say which config directory it serves cannot
+            // be told apart from one that serves another. Refuse by name rather
+            // than guess — and say what to do, since it is not a dead end.
+            (None, _) => {
+                return Err(Refused::UnverifiedIdentity(format!(
+                    "daemon PID {pid} does not report its config directory, so this stop \
+                     cannot verify it is the daemon this config started; PID file retained. \
+                     Upgrade the daemon (agent2ssh daemon restart) and retry"
+                )))
+            }
+            _ => {}
+        }
+    } else {
+        // No daemon answered, or one did and it is not this PID. The listener
+        // may have changed hands, so this says what was seen rather than
+        // repeating the PID the caller already knows.
+        return Err(Refused::UnverifiedIdentity(format!(
+            "the daemon answering for PID {pid} could not be authenticated for shutdown \
+             (health PID, config directory, or admin token did not match); PID file retained"
+        )));
+    }
+    if crate::daemon_activity::read_admin_token().is_none() {
+        return Err(Refused::NotAuthenticated);
+    }
+    // The daemon that answered `/health` above is addressed by name here, so a
+    // listener that changed hands in between refuses instead of exiting.
+    match request_shutdown(Some(pid)) {
+        ShutdownRequest::Accepted => {}
+        // A daemon too old to know `expect_pid` stops anyway. It is still the
+        // daemon that health-checked a moment ago (its config directory matched),
+        // so this is the previous behaviour, not a hole it opened — but `false
+        // compatibility` would be claiming the check happened when it did not.
+        ShutdownRequest::AcceptedUnchecked => {
+            let _ = crate::diagnostics::append_diagnostic_log(
+                "warn",
+                "daemon_control",
+                "the daemon accepted the shutdown without checking expect_pid (daemon predates it)",
+                Some(serde_json::json!({ "pid": pid })),
+            );
+        }
+        ShutdownRequest::Refused { actual } => {
+            return Err(Refused::ExpectedPidRefused {
+                expected: pid,
+                actual,
+            })
+        }
+        ShutdownRequest::NotAccepted(detail) => return Err(Refused::NotAccepted(detail)),
     }
     match wait_for_exit(pid, start_time, GRACEFUL_STOP_WAIT) {
         ProcessObservation::Exited => {}
         ProcessObservation::Unknown => {
-            return Err(anyhow!(
-                "daemon PID {pid} exit cannot be verified; PID file retained"
-            ));
+            return Err(Refused::UncertainExit(pid));
         }
         ProcessObservation::Running => {
             let _ = crate::diagnostics::append_diagnostic_log(
                 "warn",
                 "daemon_control",
-                "daemon did not exit after a graceful stop; killing it",
+                "daemon did not exit after a guarded shutdown; leaving it running",
                 Some(serde_json::json!({ "pid": pid })),
             );
-            signal_daemon(pid, start_time, true)?;
+            signal_daemon(pid, start_time, true).map_err(DaemonStopError::Other)?;
             match wait_for_exit(pid, start_time, Duration::from_secs(2)) {
                 ProcessObservation::Exited => {}
-                ProcessObservation::Running => {
-                    return Err(anyhow!(
-                        "daemon process {pid} would not exit; PID file retained"
-                    ))
-                }
-                ProcessObservation::Unknown => {
-                    return Err(anyhow!(
-                        "daemon PID {pid} exit cannot be verified; PID file retained"
-                    ))
-                }
+                ProcessObservation::Running => return Err(Refused::StillRunning(pid)),
+                ProcessObservation::Unknown => return Err(Refused::UncertainExit(pid)),
             }
         }
     }
-    clear_daemon_owner();
+    clear_daemon_owner_if(pid, start_time)?;
     Ok(())
 }
 
@@ -745,9 +1083,83 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pid_publication_refuses_live_or_invalid_records_and_recovers_absent_processes() {
+        let _config = crate::store::TestConfigDir::new("daemon-pid-publication");
+        let path = daemon_pid_path().unwrap();
+        let me = std::process::id();
+        std::fs::write(&path, me.to_string()).unwrap();
+        assert!(write_daemon_pid(me)
+            .unwrap_err()
+            .to_string()
+            .contains("file retained"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), me.to_string());
+        std::fs::write(&path, "broken").unwrap();
+        assert!(write_daemon_pid(me).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "broken");
+        std::fs::write(&path, (u32::MAX - 1).to_string()).unwrap();
+        write_daemon_pid(me).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), me.to_string());
+    }
+
+    #[test]
+    fn pid_cleanup_preserves_replacement_and_invalid_files() {
+        let _config = crate::store::TestConfigDir::new("daemon-pid-cleanup");
+        let path = daemon_pid_path().unwrap();
+        std::fs::write(&path, "123").unwrap();
+        assert!(write_daemon_pid_if_absent(456).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "123");
+        assert!(!remove_daemon_pid_file_if(456).unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "123");
+        std::fs::write(&path, "partial").unwrap();
+        assert!(!remove_daemon_pid_file_if(123).unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "partial");
+        std::fs::write(&path, "123").unwrap();
+        assert!(remove_daemon_pid_file_if(123).unwrap());
+        assert!(!path.exists());
+        assert!(!remove_daemon_pid_file_if(123).unwrap());
+        write_daemon_pid_if_absent(456).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "456");
+    }
+
+    #[test]
+    fn invalid_or_partial_pid_files_are_retained_and_block_start() {
+        let _config = crate::store::TestConfigDir::new("daemon-invalid-pid");
+        let path = daemon_pid_path().unwrap();
+        assert_eq!(read_daemon_pid().unwrap(), None);
+        for raw in ["", "not-a-pid", "0", "4294967296"] {
+            std::fs::write(&path, raw).unwrap();
+            let error = read_daemon_pid().unwrap_err().to_string();
+            assert!(error.contains("file retained"), "{error}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
+            let error = start_daemon_background(&std::env::current_exe().unwrap())
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("file retained"), "{error}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
+        }
+        std::fs::write(&path, "123\n").unwrap();
+        assert_eq!(read_daemon_pid().unwrap(), Some(123));
+    }
+
+    #[test]
     fn only_definitely_absent_pids_are_treated_as_missing() {
         assert!(!pid_definitely_missing(std::process::id()));
         assert!(pid_definitely_missing(u32::MAX - 1));
+    }
+
+    /// The refusal names the daemon that answered, so the caller can retry
+    /// against it instead of flailing. The message is ours, so this parses it
+    /// rather than guessing from a status code alone.
+    #[test]
+    fn a_refusal_is_read_back_as_the_pid_that_answered() {
+        let body = serde_json::json!({
+            "error": "this daemon is pid 4242, not the pid 111 the request named; \
+                      refusing to shut down"
+        })
+        .to_string();
+        assert_eq!(reported_pid(&body), Some(4242));
+        assert_eq!(reported_pid("{\"error\":\"something else\"}"), None);
+        assert_eq!(reported_pid("not json"), None);
     }
 
     #[test]
@@ -810,6 +1222,35 @@ mod tests {
         assert!(reaped.success());
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn exit_observation_handles_exited_child_with_retained_handle() {
+        // The child exits with 259 on purpose: that value is indistinguishable
+        // from "still active" to an exit-code query, so the handle state has to
+        // decide whether it ended.
+        let mut child = Command::new("cmd.exe")
+            .args(["/C", "exit", "/B", "259"])
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !process_handle_is_signaled(pid) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let signaled = process_handle_is_signaled(pid);
+        let observation = observe_process(pid, 1);
+        let status = child.wait().unwrap();
+        assert!(signaled, "exited child handle should be signaled");
+        assert_eq!(observation, ProcessObservation::Exited);
+        assert_eq!(status.code(), Some(259));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_live_process_handle_is_not_signaled() {
+        assert!(!process_handle_is_signaled(std::process::id()));
+    }
+
     #[cfg(unix)]
     #[test]
     fn exit_wait_does_not_mistake_an_unrecognized_live_process_for_exit() {
@@ -822,25 +1263,6 @@ mod tests {
         assert_eq!(result, ProcessObservation::Running);
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn a_changed_start_time_is_not_signalled_or_waited_on() {
-        use std::os::unix::fs::symlink;
-        let dir = tempfile::tempdir().unwrap();
-        let executable = dir.path().join("agent2ssh-daemon");
-        symlink("/bin/sleep", &executable).unwrap();
-        let mut child = Command::new(executable).arg("30").spawn().unwrap();
-        let pid = child.id();
-        let start = daemon_process_start_time(pid).expect("identify spawned process");
-        let stale_start = start.wrapping_add(1);
-        let ignored = signal_daemon(pid, stale_start, true).is_ok();
-        let considered_exited = wait_for_exit(pid, stale_start, Duration::from_millis(1));
-        let still_running = child.try_wait().unwrap().is_none();
-        let _ = child.kill();
-        let _ = child.wait();
-        assert!(ignored && considered_exited == ProcessObservation::Exited && still_running);
-    }
-
     #[test]
     fn a_marker_names_the_process_that_wrote_it() {
         let _config = crate::store::TestConfigDir::new("daemon-owner");
@@ -851,8 +1273,11 @@ mod tests {
         assert!(daemon_is_owned(me));
         // Another pid is not covered by this marker.
         assert!(!daemon_is_owned(me.wrapping_add(1)));
+        let start = process_start_time(me).unwrap();
+        assert!(!clear_daemon_owner_if(me, start.wrapping_add(1)).unwrap());
+        assert!(daemon_is_owned(me));
 
-        clear_daemon_owner();
+        assert!(clear_daemon_owner_if(me, start).unwrap());
         assert!(!daemon_is_owned(me));
     }
 

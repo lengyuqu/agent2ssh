@@ -1,0 +1,28 @@
+   Compiling agent2ssh-app v0.4.5 (D:\vibercodeing\agent2ssh\src-tauri)
+warning: function `process_handle_is_signaled` is never used
+   --> src\daemon_control.rs:656:4
+    |
+656 | fn process_handle_is_signaled(pid: u32) -> bool {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `agent2ssh-app` (lib) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.20s
+     Running tests\daemon_stop_e2e.rs (src-tauri\target\debug\deps\daemon_stop_e2e-f450dfd9b9924054.exe)
+
+running 1 test
+
+thread 'stop_daemon_process_waits_for_a_graceful_exit' (38276) panicked at tests\daemon_stop_e2e.rs:183:30:
+stop the daemon: daemon PID 38980 exit cannot be verified; PID file retained
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test stop_daemon_process_waits_for_a_graceful_exit ... FAILED
+
+failures:
+
+failures:
+    stop_daemon_process_waits_for_a_graceful_exit
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 22 filtered out; finished in 8.70s
+
+error: test failed, to rerun pass `--test daemon_stop_e2e`

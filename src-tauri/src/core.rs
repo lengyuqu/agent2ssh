@@ -11,16 +11,17 @@ mod team_config;
 pub use team_config::*;
 
 use crate::{
-    embedded_ssh::{connect_embedded_ssh, run_command_capture, ExecTimeout},
+    embedded_ssh::{connect_embedded_ssh, run_command_capture, ExecShutdown, ExecTimeout},
     local_exec::{
-        check_exec_depth, resolve_plan_for_host, run_local_command_capture, LocalExecTimeout,
+        check_exec_depth, resolve_plan_for_host, run_local_command_capture, LocalExecShutdown,
+        LocalExecTimeout,
     },
     path_resolver::expand_tilde,
     sanitize::{analyze_command, split_commands, ShapeRisk},
     session::resolve_host,
     store::{
-        append_audit, list_audit_raw, load_config, save_config_unlocked, store_write_lock,
-        write_private_text,
+        append_audit, list_audit_raw, load_config, save_config_unlocked,
+        save_config_unlocked_strict_host, store_write_lock, write_private_text,
     },
     types::{
         default_host_group, is_local_host, source_from_env, AuditEntry, AuditFilter, BatchStrategy,
@@ -155,6 +156,15 @@ fn normalized_filter(value: Option<&str>) -> Option<String> {
 }
 
 pub fn add_host_core(host: HostProfile) -> Result<HostProfile> {
+    add_host_core_impl(host, false)
+}
+
+/// Add a host without falling back to plaintext for its password.
+pub fn add_host_core_without_plaintext_password(host: HostProfile) -> Result<HostProfile> {
+    add_host_core_impl(host, true)
+}
+
+fn add_host_core_impl(host: HostProfile, strict: bool) -> Result<HostProfile> {
     validate_host(&host)?;
     let _guard = store_write_lock()?;
     let mut config = load_config()?;
@@ -165,7 +175,11 @@ pub fn add_host_core(host: HostProfile) -> Result<HostProfile> {
         config.hosts.push(host.clone());
     }
     config.hosts.sort_by(|a, b| a.name.cmp(&b.name));
-    save_config_unlocked(&config)?;
+    if strict {
+        save_config_unlocked_strict_host(&config, Some(&host.name))?;
+    } else {
+        save_config_unlocked(&config)?;
+    }
     Ok(host)
 }
 
@@ -958,6 +972,21 @@ pub async fn exec_ssh_core(request: ExecRequest) -> Result<ExecResult> {
     exec_ssh_core_with_risk_override(request, None).await
 }
 
+/// Whether a shutdown interrupted SSH, and whether the remote outcome is unknown.
+pub fn ssh_shutdown_outcome(error: &anyhow::Error) -> Option<bool> {
+    error
+        .downcast_ref::<ExecShutdown>()
+        .map(|interruption| interruption.outcome_unknown())
+}
+
+/// Daemon variant: interrupt the local SSH worker when shutdown begins.
+pub async fn exec_ssh_core_with_shutdown(
+    request: ExecRequest,
+    shutdown: crate::ws_drain::ShutdownToken,
+) -> Result<ExecResult> {
+    exec_ssh_core_impl(request, None, Some(shutdown)).await
+}
+
 pub fn apply_risk_override(classified: RiskLevel, override_level: Option<RiskLevel>) -> RiskLevel {
     if classified == RiskLevel::Blocked {
         RiskLevel::Blocked
@@ -969,6 +998,14 @@ pub fn apply_risk_override(classified: RiskLevel, override_level: Option<RiskLev
 pub(crate) async fn exec_ssh_core_with_risk_override(
     request: ExecRequest,
     request_risk_override: Option<RiskLevel>,
+) -> Result<ExecResult> {
+    exec_ssh_core_impl(request, request_risk_override, None).await
+}
+
+async fn exec_ssh_core_impl(
+    request: ExecRequest,
+    request_risk_override: Option<RiskLevel>,
+    shutdown: Option<crate::ws_drain::ShutdownToken>,
 ) -> Result<ExecResult> {
     validate_command_length(&request.command)?;
     let host = resolve_host(&request.host)?;
@@ -1017,6 +1054,7 @@ pub(crate) async fn exec_ssh_core_with_risk_override(
             embedded_stdin.as_deref().map(str::as_bytes),
             timeout_secs,
             max_bytes,
+            shutdown,
         )
     })
     .await
@@ -1025,9 +1063,20 @@ pub(crate) async fn exec_ssh_core_with_risk_override(
         // `run_command_capture` owns its deadline, so the blocking task always
         // finishes: dropping a `tokio::time::timeout` handle around it used to
         // leave the SSH channel — and the remote command — running.
+        if error.is::<ExecShutdown>() {
+            let message = error.to_string();
+            append_incomplete_exec_audit(
+                &request,
+                risk,
+                &source,
+                &message,
+                started.elapsed().as_millis(),
+            );
+            return error;
+        }
         if let Some(timeout) = error.downcast_ref::<ExecTimeout>() {
             let message = format!("command timed out after {}s", timeout.timeout_secs);
-            append_timed_out_exec_audit(
+            append_incomplete_exec_audit(
                 &request,
                 risk,
                 &source,
@@ -1094,12 +1143,28 @@ pub async fn exec_local_core(request: ExecRequest) -> Result<ExecResult> {
     exec_local_core_with_risk_override(request, None).await
 }
 
+/// Daemon variant: cancel and reap the local process tree during shutdown.
+pub async fn exec_local_core_with_shutdown(
+    request: ExecRequest,
+    shutdown: crate::ws_drain::ShutdownToken,
+) -> Result<ExecResult> {
+    exec_local_core_impl(request, None, Some(shutdown)).await
+}
+
 /// [`exec_local_core`] with a risk override for trusted callers (a playbook, or
 /// a caller whose scope already vetted the command). An override never downgrades
 /// a blocked command — [`apply_risk_override`] enforces that.
 pub(crate) async fn exec_local_core_with_risk_override(
     request: ExecRequest,
     request_risk_override: Option<RiskLevel>,
+) -> Result<ExecResult> {
+    exec_local_core_impl(request, request_risk_override, None).await
+}
+
+async fn exec_local_core_impl(
+    request: ExecRequest,
+    request_risk_override: Option<RiskLevel>,
+    shutdown: Option<crate::ws_drain::ShutdownToken>,
 ) -> Result<ExecResult> {
     validate_command_length(&request.command)?;
 
@@ -1189,6 +1254,7 @@ pub(crate) async fn exec_local_core_with_risk_override(
             local_stdin.as_deref().map(str::as_bytes),
             timeout_secs,
             max_bytes,
+            shutdown,
         )
     })
     .await
@@ -1197,9 +1263,20 @@ pub(crate) async fn exec_local_core_with_risk_override(
         // The runner owns its deadline and reaps the child — and its process
         // group — before returning, so unlike the SSH path there is no command
         // still running behind this error.
+        if error.is::<LocalExecShutdown>() {
+            let message = "local command stopped during daemon shutdown";
+            append_incomplete_exec_audit(
+                &request,
+                risk,
+                &source,
+                message,
+                started.elapsed().as_millis(),
+            );
+            return anyhow!(message);
+        }
         if let Some(timeout) = error.downcast_ref::<LocalExecTimeout>() {
             let message = format!("command timed out after {}s", timeout.timeout_secs);
-            append_timed_out_exec_audit(
+            append_incomplete_exec_audit(
                 &request,
                 risk,
                 &source,
@@ -1287,12 +1364,11 @@ fn append_rejected_exec_audit(request: &ExecRequest, risk: RiskLevel, source: &s
     );
 }
 
-/// Records an exec that was cut short by its own timeout.
+/// Records an exec request interrupted by timeout or shutdown.
 ///
-/// Distinct from [`append_rejected_exec_audit`]: this command *did* run, and the
-/// timeout is the fact worth recording, so the message is the reason rather than
-/// the caller-supplied note.
-fn append_timed_out_exec_audit(
+/// The interruption and the caller's reason are both retained; the command may
+/// not have started if shutdown was observed before dispatch.
+fn append_incomplete_exec_audit(
     request: &ExecRequest,
     risk: RiskLevel,
     source: &str,
@@ -1309,13 +1385,21 @@ fn append_timed_out_exec_audit(
         risk_level: risk,
         truncated: false,
         dropped_bytes: 0,
-        side_effect: None,
+        side_effect: request.side_effect.clone(),
         risk_unclassified: false,
+    };
+    let reason = match request
+        .reason
+        .as_deref()
+        .filter(|reason| !reason.is_empty())
+    {
+        Some(reason) => format!("{reason}; {message}"),
+        None => message.to_string(),
     };
     let _ = append_audit(
         &result,
         risk,
-        Some(message),
+        Some(&reason),
         request.change_id.as_deref(),
         Some(source),
     );
@@ -3540,6 +3624,36 @@ mod tests {
     use super::*;
     use crate::store::CONFIG_DIR_ENV;
     use crate::types::AppConfig;
+
+    #[test]
+    fn interrupted_exec_audit_preserves_reason_and_side_effect() {
+        let _config = crate::store::TestConfigDir::new("interrupted-exec-audit");
+        let request: ExecRequest = serde_json::from_value(serde_json::json!({
+            "host": "fixture", "command": "echo test", "reason": "change requested",
+            "side_effect": "service reload", "change_id": "change-42"
+        }))
+        .unwrap();
+        append_incomplete_exec_audit(
+            &request,
+            RiskLevel::Low,
+            "test",
+            "remote command outcome unknown",
+            123,
+        );
+        let entries = list_audit_raw(&AuditFilter {
+            limit: 20,
+            ..Default::default()
+        })
+        .unwrap();
+        let entry = entries.last().unwrap();
+        assert_eq!(
+            entry.reason.as_deref(),
+            Some("change requested; remote command outcome unknown")
+        );
+        assert_eq!(entry.side_effect.as_deref(), Some("service reload"));
+        assert_eq!(entry.change_id.as_deref(), Some("change-42"));
+        assert_eq!(entry.exit_code, None);
+    }
 
     #[test]
     fn test_classify_risk_blocked() {

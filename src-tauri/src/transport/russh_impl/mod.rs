@@ -159,9 +159,15 @@ impl russh::Signer for LocalKeySigner {
             }
             .map_err(|error| SignerFailed(format!("the key could not sign: {error}")))?;
 
-            // The caller appends this buffer to the packet verbatim, so the
-            // signature has to arrive in its wire form: one SSH `string`
-            // holding `string algorithm || string signature`.
+            // `russh` does not take a bare signature here. It takes the whole
+            // buffer back and appends `buffer[i..]` to the userauth packet, where
+            // `i` is the offset just past the session id — so `to_sign` has to
+            // come back with the signature already appended, in its wire form:
+            // one SSH `string` holding `string algorithm || string signature`.
+            // Returning the signature alone leaves `buffer.len() < i`, the tail
+            // slice empty, and the packet without a signature.
+            // `keys::agent::client::AgentClient::sign_request` (the other impl of
+            // this trait) returns the same shape, by appending to `data`.
             let mut body = Vec::new();
             signature.encode(&mut body).map_err(|error| {
                 SignerFailed(format!("the signature could not be encoded: {error}"))
@@ -328,6 +334,20 @@ async fn rsa_hash_alg(
     })
 }
 
+/// Whether a successful first attempt used the legacy SHA-1 `ssh-rsa` signature.
+///
+/// `hash_alg` is `None` for every non-RSA key by construction (`rsa_hash_alg`
+/// answers `None` without asking the server), so the key type has to be part of
+/// the question: without it, every successful ed25519/ECDSA authentication was
+/// recorded as a SHA-1 fallback.
+fn used_legacy_sha1_signature(
+    first_succeeded: bool,
+    is_rsa: bool,
+    hash_alg: Option<russh::keys::HashAlg>,
+) -> bool {
+    first_succeeded && is_rsa && hash_alg.is_none()
+}
+
 impl From<russh::Error> for Error {
     fn from(error: russh::Error) -> Self {
         let kind = match &error {
@@ -381,6 +401,15 @@ impl russh::client::Handler for ClientHandler {
         // A server may present a host certificate rather than a bare key. What
         // the fingerprint on record names is the key the certificate vouches
         // for, so that is what gets captured either way.
+        //
+        // What is *not* checked: the certificate's CA chain and its validity
+        // period. Unwrapping it means a CA-signed host key and the bare key
+        // `ssh-keyscan` reported are indistinguishable in `known_hosts.json`, so
+        // a certificate from an unexpected CA, or an expired one, is accepted as
+        // long as the key it vouches for is the key on record. That is the TOFU
+        // trade-off, not an oversight — but it is the half of K7 this file does
+        // not cover, and a reader should not infer the check from the comment
+        // above.
         let key = match key {
             russh::keys::PublicKeyOrCertificate::PublicKey { key, .. } => key.clone(),
             russh::keys::PublicKeyOrCertificate::Certificate(cert) => {
@@ -580,6 +609,11 @@ impl Session {
         self.inner.settings.set_timeout(timeout_ms);
     }
 
+    /// Abort the owned connection socket without waiting for the peer.
+    pub(crate) fn abort(&self) {
+        self.inner.settings.abort();
+    }
+
     pub fn set_blocking(&self, blocking: bool) {
         self.inner.settings.set_blocking(blocking);
     }
@@ -760,14 +794,16 @@ impl Session {
             let Some(handle) = guard.as_mut() else {
                 return Err(other("handshake has not run"));
             };
-            let hash_alg = rsa_hash_alg(handle, key.algorithm().is_rsa()).await?;
+            let is_rsa = key.algorithm().is_rsa();
+            let hash_alg = rsa_hash_alg(handle, is_rsa).await?;
             let signer = russh::keys::PrivateKeyWithHashAlg::new(key.clone(), hash_alg);
             let first = handle.authenticate_publickey(username, signer).await?;
-            if first.success() || !key.algorithm().is_rsa() || hash_alg.is_none() {
-                // `hash_alg.is_none()` on a successful RSA auth means the server
+            if first.success() || !is_rsa || hash_alg.is_none() {
+                // `hash_alg.is_none()` on a successful *RSA* auth means the server
                 // advertised no SHA-2 algorithm, so this connection went out with
-                // the legacy signature rather than being downgraded to it.
-                if first.success() && hash_alg.is_none() {
+                // the legacy signature rather than being downgraded to it. A
+                // non-RSA key never gets here with a hash at all.
+                if used_legacy_sha1_signature(first.success(), is_rsa, hash_alg) {
                     self.inner
                         .legacy_sha1_signature
                         .store(true, Ordering::Relaxed);
@@ -874,6 +910,15 @@ impl Session {
         Ok(Agent::new(self.clone()))
     }
 
+    /// Not implemented, and the error is not inert downstream.
+    ///
+    /// `embedded_ssh::authenticate` reads this through `unwrap_or("")`, so the
+    /// diagnostic log records `auth_methods: ""` for every host and the two
+    /// branches that consult the advertised set — the `keyboard-interactive`
+    /// label and the `advertised methods [unknown]` wording — can never see a
+    /// real value. Reading it needs the server's list out of `russh`, which
+    /// reports it only as `remaining_methods` on a failed `userauth`, i.e. after
+    /// the attempt this would be describing.
     pub fn auth_methods(&self, _username: &str) -> Result<&str, Error> {
         Err(unsupported("auth_methods"))
     }
@@ -919,7 +964,7 @@ impl Session {
         if !self.inner.connected.load(Ordering::SeqCst) {
             return Ok(());
         }
-        block_on(async {
+        self.run("disconnect", async {
             let guard = self.inner.handle.lock().await;
             let Some(handle) = guard.as_ref() else {
                 return Err(other("handshake has not run"));
@@ -1120,6 +1165,11 @@ fn supported_names(method: MethodType) -> Vec<&'static str> {
         MethodType::CryptCs | MethodType::CryptSc => CIPHER.to_vec(),
         MethodType::MacCs | MethodType::MacSc => MAC.to_vec(),
         MethodType::CompCs | MethodType::CompSc => COMP.to_vec(),
+        // Never configured and never queried: `SshAlgoPrefs` has no field for
+        // these three, and `ssh_algo::supported_algorithms` returns `None` before
+        // reaching this function. The empty list is the shape of the match, not a
+        // claim that the build supports no language algorithm — a reader who took
+        // it that way would go looking for a query that does not exist.
         MethodType::LangCs | MethodType::LangSc | MethodType::SignAlgo => Vec::new(),
     }
 }
@@ -1129,6 +1179,51 @@ mod tests {
     use super::*;
     use russh::keys::ssh_key::certificate::{Builder, CertType};
     use russh::keys::ssh_key::{private::Ed25519Keypair, PrivateKey};
+
+    #[test]
+    fn disconnect_obeys_timeout_when_connection_lock_stalls() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let session = Session::new().unwrap();
+        session.inner.connected.store(true, Ordering::SeqCst);
+        session.set_timeout(100);
+        let inner = session.inner.clone();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let holder = runtime().spawn(async move {
+            let _guard = inner.handle.lock().await;
+            ready_tx.send(()).unwrap();
+            let _ = release_rx.await;
+        });
+        ready_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (result_tx, result_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _ = result_tx.send(session.disconnect(None, "test", None));
+        });
+        let result = result_rx.recv_timeout(Duration::from_millis(500));
+        let _ = release_tx.send(());
+        worker.join().unwrap();
+        block_on(holder).unwrap();
+        let error = result.expect("disconnect ignored its timeout").unwrap_err();
+        assert!(error.to_string().contains("timed out"), "{error}");
+    }
+
+    #[test]
+    fn abort_closes_the_owned_socket_without_waiting_for_peer() {
+        use std::io::Read;
+        use std::net::TcpListener;
+        use std::time::Duration;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        let session = Session::new().unwrap();
+        session.inner.settings.set_socket(&socket).unwrap();
+        session.abort();
+        assert_eq!(peer.read(&mut [0u8; 1]).unwrap(), 0);
+        assert!(session.inner.settings.aborted());
+    }
 
     /// A certificate naming `principals`, valid between two instants.
     ///
@@ -1168,6 +1263,34 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .expect("a clock after 1970")
             .as_secs()
+    }
+
+    /// A healthy ed25519/ECDSA login must not be reported as a SHA-1 fallback.
+    ///
+    /// `hash_alg` is `None` for those key types by construction, so the first
+    /// version of this check — `first.success() && hash_alg.is_none()` — warned
+    /// on every non-RSA connection. Measured against OpenSSH 10.3: an ed25519
+    /// key produced "ssh authenticated with the legacy ssh-rsa (SHA-1)
+    /// signature" in `app.log` twice in a row.
+    #[test]
+    fn only_rsa_without_a_sha2_choice_counts_as_legacy() {
+        use russh::keys::HashAlg;
+        assert!(
+            !used_legacy_sha1_signature(true, false, None),
+            "a non-RSA key has no hash choice; that is not a fallback"
+        );
+        assert!(
+            used_legacy_sha1_signature(true, true, None),
+            "RSA with no SHA-2 offered really is the legacy signature"
+        );
+        assert!(
+            !used_legacy_sha1_signature(true, true, Some(HashAlg::Sha256)),
+            "a SHA-2 signature is not legacy"
+        );
+        assert!(
+            !used_legacy_sha1_signature(false, true, None),
+            "a failed attempt reports nothing"
+        );
     }
 
     /// The three refusals a server will not distinguish. If any two of these read

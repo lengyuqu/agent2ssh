@@ -1,0 +1,8 @@
+child pid: 5312
+while the handle is held:
+  sysinfo lists the process : false None
+  OpenProcess succeeds       : yes (exit code 3 => terminated process object still openable)
+exit status after wait(): exit code: 3
+after wait() reaped it (+3 s):
+  sysinfo lists the process : false None
+  OpenProcess succeeds       : yes (exit code 3 => terminated process object still openable)

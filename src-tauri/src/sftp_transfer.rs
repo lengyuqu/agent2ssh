@@ -205,24 +205,39 @@ pub fn walk_local_dir(root: &Path) -> io::Result<Vec<WalkEntry>> {
 /// small enough that a cancel is observed within a few hundred KB.
 const COPY_CHUNK: usize = 64 * 1024;
 
-/// Largest write that is safe against every SFTP server measured, and the floor
-/// below which a refused write is a real error.
+/// The floor for a refused write, and the size used for a server that announces
+/// itself as Dropbear.
 ///
-/// Dropbear is the reason. Its SFTP channel takes packets of at most 32 KiB, and
-/// a write above that limit came back as zero bytes written: with the previous
-/// transport, 1 MiB uploads hung with the remote file stuck at 131072 bytes and
-/// completed once writes were cut to 16 KiB (measured against Dropbear 2024.85).
-/// OpenSSH has no such limit, and 64 KiB writes are about 2.6x faster than 16 KiB
-/// ones against it (28 vs 11 MB/s over loopback), so the small size is used only
-/// where it is needed — see [`upload_chunk_for_server`].
+/// The number came from a libssh2-era measurement: Dropbear's SFTP channel takes
+/// packets of at most 32 KiB, and a write above that came back as zero bytes
+/// written — 1 MiB uploads hung with the remote file stuck at 131072 bytes and
+/// completed once writes were cut to 16 KiB (Dropbear 2024.85, previous
+/// transport).
 ///
-/// The limit is the server's, so it survives the transport swap; what changed is
-/// the client-side packing that turned it into a stall. 16 KiB is still the
-/// conservative choice, but it has not been re-measured against Dropbear on the
-/// current transport — if that run happens, this number is what to revisit.
+/// It is **not** a current limitation. Re-measured on 2026-11-03 on this
+/// transport, Dropbear 2024.85 accepted both the default 64 KiB and 16 KiB for an
+/// 8 MiB upload (485 ms and 1 s, matching checksums), so the banner heuristic in
+/// [`upload_chunk_for_server`] has no measured basis left and is kept only as
+/// belt-and-braces against an older Dropbear.
+///
+/// The "64 KiB is about 2.6x faster" figure that stood here while that claim was
+/// being written down was one loopback measurement against OpenSSH, and K2's own
+/// figures contradict it: the *same* Dropbear accepted a 64 KiB-chunked 8 MiB
+/// upload in 485 ms and a 16 KiB-chunked one in 1 s, i.e. ~2.06x, and that run is
+/// the closest thing to a controlled pair there is. Which is the honest way to
+/// read it: the ratio is link-, server- and buffer-dependent, so the heuristic's
+/// price is real but unquantified — an argument for retiring it on evidence, not
+/// a number to quote.
+///
+/// What protects the transfer now is [`StallGuard`]'s progress bound, because the
+/// failure K2 describes is a hang rather than a refused write. See
+/// `docs/KNOWN-ISSUES.md` K2.
 const SFTP_SAFE_WRITE: usize = 16 * 1024;
 
 /// Write size to use for an upload to the server that sent `banner`.
+///
+/// The match is belt-and-braces, not a measured requirement — see
+/// [`SFTP_SAFE_WRITE`].
 pub fn upload_chunk_for_server(banner: Option<&str>) -> usize {
     match banner {
         Some(banner) if banner.to_ascii_lowercase().contains("dropbear") => SFTP_SAFE_WRITE,
@@ -295,6 +310,11 @@ pub fn active_count() -> usize {
 /// larger than the server's packet size". On `Ok(0)` the limit is halved (down to
 /// [`SFTP_SAFE_WRITE`]) and the same data retried, and the smaller limit sticks in
 /// `limit` so the rest of the transfer does not repeat the discovery.
+///
+/// The `Ok(0)` arm is reachable only from a caller that answers zero bytes: the
+/// current transport's handle returns `Ok(min(buf, max_write_len))` or `Err`,
+/// never `Ok(0)`, so on a real upload only the halving guard's synthetic test
+/// writer reaches it.
 fn write_all_shrinking<W: Write>(
     writer: &mut W,
     mut data: &[u8],
@@ -323,22 +343,54 @@ fn write_all_shrinking<W: Write>(
 /// The failures this exists for are hangs, not errors: a server that stops reading
 /// mid-packet leaves `write` blocked, and no amount of checking its return value
 /// helps because it never returns. Every guard above this one — the banner
-/// heuristic, the halving on `Ok(0)` — reacts to a *reply*, so none can fire. A
-/// deadline turns the hang into a failure that names the write size and the number
-/// of bytes that did get through, which is the difference between a bug report and
-/// a stuck process.
+/// heuristic, the halving on `Ok(0)` — reacts to a *reply*, so none can fire.
+///
+/// The byte accounting this struct keeps does **not** reach the message on the
+/// path that matters. `StallGuard::write` propagates `inner.write`'s `Err` with
+/// `?` before any deadline check, so a real transport failure — including the
+/// `BrokenPipe` a killed SFTP session produces — leaves with the transport's
+/// wording and none of the counters. A deadline added around the SFTP handle has
+/// to read `bytes_written` itself and put it in its own error; nothing here will
+/// do it. See L2-96.
 ///
 /// Generous on purpose: a stall detector, not a throughput limit. Ten minutes of
 /// silence mid-write is pathological on any link, and a false positive kills a
 /// transfer that was merely slow.
+///
+/// **It does not fire on the current transport.** The deadline is only consulted
+/// when a write reports zero bytes, and an SFTP handle never does: the
+/// transport's `File::write` returns `Ok(min(buf, max_write_len))` or `Err`. A
+/// peer that keeps the connection open but stops answering SFTP `WRITE` is
+/// waited on inside `russh_sftp` — once `max_concurrent_writes` (8) requests are
+/// outstanding, `poll_write` blocks on the oldest ack, and `write_nowait`'s
+/// receiver carries no deadline of its own. `request_timeout_secs` (default
+/// 10 s) does not bound it either: that field is only read by
+/// `RawSftpSession::request`, which `write_nowait` does not call — it times
+/// `stat`/`open`/`readdir`, not write acks. That ack queue is the *only* gate:
+/// the channel in front of the connection task is unbounded (`russh_sftp`'s
+/// `client/mod.rs` builds an `mpsc::unbounded_channel`), so `send()` never
+/// blocks either — eight outstanding acks are the whole of the back pressure,
+/// and nothing downstream of them imposes a deadline. So this guard never
+/// regains control. `File::flush` waits on the same queue: `poll_drain_writes`
+/// empties `write_acks` before the optional fsync, so a deadline wrapped around
+/// `write` alone would leave the tail of every transfer — the final flush —
+/// still unbounded. `poll_shutdown` drains the same queue, but this wrapper
+/// never calls it; `Drop for File` sends the CLOSE with `close_nowait` and
+/// throws the reply away, so the handle is released without anything waiting
+/// for those acks.
+/// What still bounds that peer is the socket write timeout set in
+/// `connect_embedded_ssh`, and only for the case where TCP itself stops
+/// accepting bytes. The gap is recorded as L2-96.
 const STALL_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Wraps a writer so a write that makes no progress is aborted instead of hanging.
 ///
 /// It cannot interrupt a blocked syscall — nothing portable can — but it keeps the
-/// accounting that makes the eventual failure legible, and it converts the case
-/// that *does* return (a peer accepting nothing) into an error at the moment it is
-/// observed rather than at the end of a useless loop.
+/// accounting that makes the eventual failure legible, and it turns a peer that
+/// reports zero accepted bytes into an error at the moment it is observed rather
+/// than at the end of a useless loop. Both are conditional on `write` returning
+/// at all: see [`STALL_TIMEOUT`] for why the current transport takes neither
+/// path.
 pub struct StallGuard<W> {
     inner: W,
     last_progress: Instant,
@@ -459,6 +511,36 @@ pub fn resume_offset(resume: bool, existing: u64, total: Option<u64>) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    /// The `2.6x` claim that stood in `SFTP_SAFE_WRITE`'s docs was replaced by the
+    /// one measured pair this repository has, and it has to stay measurable: the
+    /// two numbers in `docs/KNOWN-ISSUES.md` K2 are 485 ms (default 64 KiB
+    /// chunks) and 1 s (16 KiB chunks) for the same 8 MiB upload to the same
+    /// server. If someone revises either figure, the comment that quotes them is
+    /// wrong until they are revised together — which is what this pins. It is a
+    /// documentation assertion, so it also fails if the comment stops citing the
+    /// run at all.
+    #[test]
+    fn the_quoted_chunk_size_ratio_comes_from_the_measured_pair() {
+        let doc = include_str!("sftp_transfer.rs");
+        let start = doc
+            .find("const SFTP_SAFE_WRITE")
+            .expect("SFTP_SAFE_WRITE must stay findable for this assertion");
+        let doc_above = &doc[..start];
+        let paragraph = doc_above
+            .rfind("/// The floor for a refused write")
+            .expect("the doc paragraph above SFTP_SAFE_WRITE must stay findable");
+        let paragraph = &doc_above[paragraph..];
+        assert!(
+            paragraph.contains("485 ms") && paragraph.contains("1 s"),
+            "the quote must name K2's measured pair; got:\n{paragraph}"
+        );
+        let measured_ratio = 1000.0_f64 / 485.0;
+        assert!(
+            (measured_ratio - 2.06).abs() < 0.05,
+            "K2's pair implies {measured_ratio:.2}x, so a 2.6x claim cannot cite it"
+        );
+    }
+
     /// A writer that, like an SFTP handle on a server with small packets, accepts
     /// nothing at all when handed more than `max` bytes.
     struct PickyWriter {
