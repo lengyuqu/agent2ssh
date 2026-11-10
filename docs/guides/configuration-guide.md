@@ -598,15 +598,35 @@ steps = [
 tags = ["database"]
 ```
 
+需要模板参数时用 `advanced_steps`。它存在时**优先于** `steps`，两者可以同时出现——此时 `steps` 通常是空的，这不是坏文件：
+
+```toml
+[[playbooks]]
+name = "greet-all"
+description = "带参数的问候"
+steps = []
+
+[[playbooks.advanced_steps]]
+command = "echo {{message}}"
+description = "打印一句问候"
+[[playbooks.advanced_steps.params]]
+name = "message"
+default = "hello"
+required = false
+```
+
+`params` 里的 `name` 会替换命令里的 `{{name}}`；`default` 在调用方没传时使用，`required = true` 则强制调用方必须给值。
+
 ### 字段说明
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `name` | string | 是 | Playbook 唯一名称 |
 | `description` | string | 是 | Playbook 描述 |
-| `steps` | array | 是 | 命令序列，按顺序执行 |
+| `steps` | array | 是 | 命令序列，按顺序执行；用 `advanced_steps` 时可以为空数组 |
 | `tags` | array | 否 | 标签列表 |
 | `risk_override` | string | 否 | 覆盖所有步骤的非 blocked 风险等级 |
+| `advanced_steps` | array | 否 | 带参数的单步定义，存在时优先于 `steps`；每项含 `command`/`description`/`params` |
 
 ### 执行行为
 

@@ -265,7 +265,14 @@ components:
         id:         { type: string, format: uuid }
         event_type:
           type: string
+          description: >-
+            The first frame of every `/events/stream` subscription is
+            `stream_connected`, so a `match` that omits it hits an unknown
+            branch on the very first message. `host_connected`,
+            `host_disconnected` and `config_changed` are defined but have no
+            publisher today; do not wait on them.
           enum:
+            - stream_connected
             - exec_started
             - exec_output
             - exec_completed
@@ -290,13 +297,31 @@ components:
 
     AuditFilter:
       type: object
+      description: >-
+        The query-parameter set of `/audit` and `/audit/export` as one object —
+        OpenAPI cannot `$ref` an object into `parameters`, so both routes spell
+        the thirteen fields out and this schema is where they are described
+        once. The struct also carries a fourteenth field, `host_scope`, which
+        the daemon fills from the caller's token before it reads; it is
+        `#[serde(skip)]` and never accepted from the wire.
       properties:
-        host:       { type: string, nullable: true }
-        risk_level: { $ref: "#/components/schemas/RiskLevel", nullable: true }
-        exit_code:  { type: integer, nullable: true }
-        since:      { type: string, format: date-time, nullable: true }
-        until:      { type: string, format: date-time, nullable: true }
-        limit:      { type: integer, default: 20 }
+        host:            { type: string, nullable: true }
+        risk_level:      { $ref: "#/components/schemas/RiskLevel", nullable: true }
+        exit_code:       { type: integer, nullable: true }
+        since:           { type: string, format: date-time, nullable: true }
+        until:           { type: string, format: date-time, nullable: true }
+        limit:           { type: integer, default: 20 }
+        search:          { type: string, nullable: true, description: "Full-text search across the command, host and other text fields." }
+        command_pattern: { type: string, nullable: true, description: "Glob-style match on the command, `*` and `?` only." }
+        host_env:        { type: string, nullable: true, description: "Host `env` label." }
+        host_role:       { type: string, nullable: true, description: "Host `role` label." }
+        host_owner:      { type: string, nullable: true, description: "Host `owner` label." }
+        decision:
+          type: string
+          nullable: true
+          enum: [approved, approved_rewritten, rejected, timed_out, auto_allowed, blocked]
+          description: Only entries with this authorization verdict.
+        agent:           { type: string, nullable: true, description: "Exact, case-insensitive match on the requesting client's `source`." }
 
     SftpUploadRequest:
       type: object
@@ -453,16 +478,47 @@ components:
 
     Playbook:
       type: object
+      description: >-
+        A playbook carries either plain commands in `steps` or parameterised
+        steps in `advanced_steps`; when `advanced_steps` is present it wins and
+        `steps` may be empty. A response with `"steps": []` and a populated
+        `advanced_steps` is valid, not a broken playbook.
       properties:
         name:        { type: string }
         description: { type: string }
         steps:
           type: array
           items: { type: string }
+          description: "Commands run in order. Empty when the playbook uses `advanced_steps`."
         tags:
           type: array
           items: { type: string }
         risk_override: { $ref: "#/components/schemas/RiskLevel", nullable: true }
+        advanced_steps:
+          type: array
+          items: { $ref: "#/components/schemas/PlaybookStep" }
+          nullable: true
+          description: "Omitted when unused. Takes precedence over `steps`."
+
+    PlaybookStep:
+      type: object
+      required: [command]
+      properties:
+        command:     { type: string, description: "Command text; `{{name}}` placeholders are filled from `params`." }
+        description: { type: string, nullable: true }
+        params:
+          type: array
+          items: { $ref: "#/components/schemas/PlaybookParam" }
+          description: "Defaults to an empty list when omitted."
+
+    PlaybookParam:
+      type: object
+      required: [name]
+      properties:
+        name:        { type: string }
+        description: { type: string, nullable: true }
+        default:     { type: string, nullable: true }
+        required:    { type: boolean, default: false }
 
     PlaybookRunRequest:
       type: object
@@ -504,7 +560,12 @@ components:
         alias:     { type: string }
         url:       { type: string }
         connected: { type: boolean }
-        scope:     { $ref: "#/components/schemas/DaemonScope", nullable: true }
+        scope:
+          $ref: "#/components/schemas/DaemonScope"
+          description: >-
+            Omitted entirely when no scope is configured — the key is absent,
+            not `null`. `WebDavSyncStatus` uses the opposite convention, so a
+            reader checking for `scope === null` never sees it.
 
     ExecutionGateStatus:
       type: object
@@ -659,7 +720,13 @@ components:
       required: [prefs, custom, defaults]
       properties:
         prefs:    { $ref: "#/components/schemas/SshAlgoPrefs" }
-        custom:   { type: boolean, description: "True when an override is stored rather than the built-in defaults." }
+        custom:
+          type: boolean
+          description: >-
+            True when `ssh_algos.json` exists **and parses**. A file that
+            exists but fails to parse reports `false` and the connection path
+            falls back to the defaults, so `false` does not prove the file is
+            absent.
         defaults: { $ref: "#/components/schemas/SshAlgoPrefs" }
 
     SshSyncHostDiff:
@@ -739,8 +806,8 @@ components:
         cipher_sc: { type: string }
         mac_cs:    { type: string }
         mac_sc:    { type: string }
-        comp_cs:   { type: string, description: "Always `none`: the transport is built without `flate2`, so any other value is rejected before it is stored." }
-        comp_sc:   { type: string, description: "Always `none`, same reason as `comp_cs`." }
+        comp_cs:   { type: string, description: "Exactly `none` — the only value this build can negotiate. An empty list is rejected here as it is in every other field, so the usual 「empty means default」 reading does not apply." }
+        comp_sc:   { type: string, description: "Exactly `none`, same reason as `comp_cs`." }
 
     Snippet:
       type: object
@@ -765,6 +832,10 @@ components:
 
     HighlightRule:
       type: object
+      description: >-
+        A whole rule. `POST /highlight/rules/update` sends one of these as the
+        `rule` field, so the caller reads the rule first and sends back the
+        fields it wants unchanged — there is no partial update.
       required: [keyword, name, color, enabled, is_regex, is_case_sensitive]
       properties:
         keyword:           { type: string, description: "Regex source; also the identity key." }
@@ -804,7 +875,9 @@ components:
         rather than omitted, so a client never has to distinguish "absent" from
         "unknown". This is the `webdav_sync` struct the daemon serializes, not
         the desktop-only `WebDavSyncStatus` in `tauri_commands.rs`, which has
-        different fields and camelCase names.
+        different fields and camelCase names. Every key here is always
+        present and `null` means unknown; `DaemonInfo.scope` is the opposite
+        convention (absent when unset), so do not "unify" the two.
       required: [local, remote, state, local_digest, remote_digest, base_digest, summary, metadata_error]
       properties:
         local:
@@ -3530,7 +3603,7 @@ paths:
               required: [keyword, rule]
               properties:
                 keyword: { type: string, description: "The keyword that identifies the rule to replace." }
-                rule:    { $ref: "#/components/schemas/HighlightRule", description: "The rule as it should be afterwards." }
+                rule:    { $ref: "#/components/schemas/HighlightRule" }
       responses:
         "200":
           description: The full rule list after the write.
