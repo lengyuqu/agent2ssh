@@ -597,6 +597,16 @@ pub fn remove_system_known_host(host_name: &str, port: u16) -> Result<usize> {
         .with_context(|| format!("failed to read {}", ssh_path.display()))?;
 
     // Build the patterns to match: bare hostname and [hostname]:port form.
+    //
+    // The comparison below is textual, so it misses every shape it does not
+    // spell out: with `port == 22` the only pattern is the bare name, and a
+    // line written `[example.internal]:22` — OpenSSH does not write that, but a
+    // hand-edited or foreign file does — survives the `forget` with `removed 0`.
+    // A bare `example.internal:22` misses for the same reason. Both are the same
+    // normalization gap as the IPv6 literal at port 22 (L2-15) and as the
+    // import identity (L2-95), so the three want one decision: parse the host
+    // field with `split_host_port` and compare `(host, port)` instead of
+    // comparing strings.
     let patterns: Vec<String> = if port == 22 {
         vec![host_name.to_string()]
     } else {

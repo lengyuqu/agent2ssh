@@ -361,7 +361,12 @@ fn write_all_shrinking<W: Write>(
 /// receiver carries no deadline of its own. `request_timeout_secs` (default
 /// 10 s) does not bound it either: that field is only read by
 /// `RawSftpSession::request`, which `write_nowait` does not call — it times
-/// `stat`/`open`/`readdir`, not write acks. So this guard never regains control.
+/// `stat`/`open`/`readdir`, not write acks. That ack queue is the *only* gate:
+/// the channel in front of the connection task is unbounded (`russh_sftp`'s
+/// `client/mod.rs` builds an `mpsc::unbounded_channel`), so `send()` never
+/// blocks either — eight outstanding acks are the whole of the back pressure,
+/// and nothing downstream of them imposes a deadline. So this guard never
+/// regains control.
 /// What still bounds that peer is the socket write timeout set in
 /// `connect_embedded_ssh`, and only for the case where TCP itself stops
 /// accepting bytes. The gap is recorded as L2-96.

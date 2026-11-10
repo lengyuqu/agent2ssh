@@ -4862,6 +4862,12 @@ async fn handle_terminal(
             event = event_rx.recv() => {
                 match event {
                     Some(TerminalEvent::Connected(info)) => {
+                        // `recording_id` is `null` when nothing is being
+                        // recorded: the key is present and null, never absent,
+                        // so a client must not read "no key" as "no recording".
+                        // `terminal_id` is always the hyphenated form —
+                        // `Uuid`'s serde impl produces the same bytes, so the
+                        // `.to_string()` below is for the reader, not the wire.
                         let _ = ws_tx.send(Message::Text(
                             serde_json::json!({
                                 "type": "connected",
