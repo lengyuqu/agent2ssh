@@ -1449,3 +1449,24 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 
 
 
+
+### consume 5 / 6 · 2026-11-10 22:13–22:40 (GMT+8) · issue #13 · 回帖（第 5 轮）
+
+- **开场**：`git fetch` + `--ff-only` 到 `7af45d5`（`960c9f6` 之后只有一笔记录 reply id 的提交），再在它之上动手。CodeBuddy 本轮**没有**新提交，`4dee4d1`/`4296376` 原样在 main 上。
+- **判定：本轮请它验的 3 项 + 扫法 1 项 → 成立 3 / 不成立 0 / 我方漏 1（它抓到）**。
+
+| # | 项 | 判定 | 证据要点 |
+|---|---|---|---|
+| (a) | 第 0 节那条 401 反例 | **成立（本轮唯一带执行的一步）** | 它这边**没有** cargo/rustc（镜像里没有 toolchain），所以改成按 `request_at`（`daemon_activity.rs:94-140`）逐字节回放这段 HTTP：hand-rolled `POST /shutdown` + `Bearer <daemon.token>`，对着一个「`/health` 报 pid 与 config_dir、`/shutdown` 比 `state.token`」的替身，先 `GET /health`（200）再换掉 `daemon.token` → `/shutdown` 回 **401**，daemon 仍在。前提条件关键：`health_identity()` 只 `GET /health` + 比 pid/config_dir，**不发 token**，所以「文件被换掉但 `/health` 仍答」是常态而不是巧合 |
+| (b) | `403` 是否真与 401 同一支 | **成立** | `/shutdown` 上 403 **只有** `require_admin`（`auth.rs:19` 的 `AuthContext` 只有 `scope`/`principal`，403 只由 `scope.is_some()` 触发）；未知 token 在 middleware 就 401，到不了 handler；`require_admin` 不读 body，且 `daemon_shutdown` 的 `Extension(auth)` 只会 `MissingExtension` 500，所以 `:170` 一定先于 400/409 触发 |
+| (c) | `400`（`expect_pid: null`）不计入三分表是否可接受 | **成立** | 它同意这是「策略语句」，不是第四类：调用方写不出 `null`（`request_shutdown` 只在 `Some(pid)` 时才发 body，`None` 时连 `Content-Type` 都不发），而 `request_graceful_shutdown()` 在生产里无调用方（只有 `daemon_stop_e2e.rs:1116` 的测试） |
+| 扫法 | 「行号引用」全扫 | **成立（1 处，它抓到）** | 见下 |
+| **我方漏** | `/shutdown` 也会撞 **429** | **成立（它抓到，本轮必须改）** | `preflight_guarded_request_inner` 第一步就调 `reject_if_rate_limited`（`:568-570`），而它是先读 `req.host`（`:3941`）再 preflight 的，所以**限流在前、也不看 body**；`/shutdown` 的 host 名从 `expect_pid` 派生（`local:vs` 这类常用名），source 是 middleware 的 `source_from_env("daemon")`。默认限额是**开启**的（`enabled:true`、30/min source、20/min host、60 s 窗口），于是同一 source 或同一 host 一分钟内第 21 次 stop → `429` → `request_shutdown` 兜底臂 `NotAccepted("the daemon answered the shutdown request with 429: …")`。按 `check_event_limits` 逐字复算：第 21 次 `host:local:vs rate current=20 limit=20`。这一类的语义是「答了，但既不是 409、也不是 401/403、更不是没建连」 |
+
+**行号扫描结果（它这轮的新扫法，成立）**：`src-tauri/src/**` 里 80 处 `:数字` 候选，扣掉端口/掩码/`duration_ms`/RFC-OSC 编号/JSON 字面量/`0600` 权限后，真正指向别处某行的只有 3 处——`daemon_control.rs` 的 `:5014`/`:5442`/`:5951`（上轮已核，仍对）、`redaction.rs:334` 的 `db/highlight.rs:221`（跨仓库，本仓核不了）、以及 **`transport/russh_impl/agent.rs:18` 的 `auth.rs:180`（过期且论证错）**：`russh-0.60.3/src/auth.rs:180` 是 `AgentIdentity::Certificate { .. } => {` 这条 match 臂，不是 `impl`；本仓 `grep "Signer for"` 只有 `russh_impl/mod.rs:137` 的 `LocalKeySigner`，**没有** `impl Signer for AgentClient`——它在 `russh-keys` 里。结论（不需要包装层）对，错的是「本仓存在那个 impl」+ 那行号。**它已改**。
+
+**L1 落地（CodeBuddy 动手）**：`src-tauri/src/transport/russh_impl/agent.rs` 删掉 `auth.rs:180` 与「the implementation exists」，并把「本仓没有 `impl Signer for AgentClient`、那个 impl 在 `russh-keys`」写清；`docs/plans/russh-migration.md:472-479` 的同一句不改（历史记录）。
+
+**L1 落地（本机接管）**：`docs/api.yaml` 的三分表补第四类 `429`（写明「按分钟、默认 30/20、可在 `execution_limits.toml` 关掉或改宽」）；`OPT-LOOP-L2-PENDING.md` 追加第 5 轮小节（429 类的复算、行号扫描清单、以及「`GET /health` 公开路径不过 middleware，所以 pre-flight 看不到限流，只有 `POST /shutdown` 与 `/activity` 快照会撞」这一点）。
+
+**下一轮首项（第 6 轮＝末轮）**：按协议写批次汇总并关 issue。若还有一轮复核，优先让它验「`429` 是否该从限流里豁免 `/shutdown`」——那是行为改动，需要拍板，不是文案。

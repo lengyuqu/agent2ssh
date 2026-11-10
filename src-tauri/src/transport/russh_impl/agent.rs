@@ -14,8 +14,9 @@
 //! # No wrapper signer is needed
 //!
 //! `docs/plans/russh-migration.md` §10.3 said the transport shipped no `Signer`
-//! and that an `AgentSigner` must be written. That is a grep artifact: the
-//! implementation exists at `auth.rs:180`, but its header wraps —
+//! and that an `AgentSigner` must be written. That was a grep artifact: the
+//! trait is implemented on the agent client itself, and the impl header wraps
+//! across lines —
 //!
 //! ```text
 //! impl<R: AsyncRead + AsyncWrite + Unpin + Send + 'static> Signer
@@ -25,6 +26,12 @@
 //! — so `grep "Signer for"` finds nothing while `AgentClient` does implement
 //! the trait. `authenticate_publickey_with` is therefore callable directly
 //! and this module forwards the agent's own signing, with no shim.
+//!
+//! (This used to cite `auth.rs:180` as "the implementation". That line is
+//! the `Certificate` arm of the key match, not an `impl`, and nothing here
+//! implements `Signer` for `AgentClient` — the impl lives in `russh-keys`,
+//! which this crate consumes. This crate's own `Signer` is `LocalKeySigner`
+//! in `mod.rs`, not a shim to remove.)
 //!
 //! # Ordering
 //!

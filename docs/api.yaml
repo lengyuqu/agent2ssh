@@ -1052,10 +1052,16 @@ paths:
         A `401` — or the `403` of the admin gate, which the caller treats the same
         way — means this route did reply: the token in this config's `daemon.token`
         is not the one the running daemon accepts as admin, which is what a file
-        replaced under it looks like. And the stop path's own
-        pre-flight refusals — no `/health` answer, another PID, another config
-        directory, no token file at all — never connect, so no status code
-        describes them.
+        replaced under it looks like.
+        A `429` is neither: the request was understood and refused for
+        rate-limiting, before this handler ran, because `/shutdown` is subject to
+        the execution limits like every other route. Those counts are per minute
+        and default to 30 per source and 20 per host — the host being the name the
+        request carries, e.g. `local:vs` — and they are configurable in
+        `execution_limits.toml`, so a busy stop loop meets one before any of the
+        answers above. And the stop path's own pre-flight refusals — no `/health`
+        answer, another PID, another config directory, no token file at all —
+        never connect, so no status code describes them.
         The caller waits
         `GRACEFUL_STOP_WAIT` (8 s) for the process to exit; on `Running` it records
         a warning, signals the process by force, then waits 2 more seconds, and a
