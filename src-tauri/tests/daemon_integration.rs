@@ -2284,6 +2284,50 @@ fn handler_body_of<'a>(daemon: &'a str, handler: &str) -> &'a str {
     &rest[..close]
 }
 
+/// The parameter list of one handler, between its `fn name(` and its closing `)`.
+///
+/// The extractor lives here and nowhere else. Scanning the whole body for
+/// `Json<` would count the *return* type — every handler that answers with a
+/// body is `Result<Json<T>, (StatusCode, Json<ErrorBody>)>` — so a handler that
+/// reads no body at all would look like one that requires `Json`. Anchoring the
+/// search on `: Json<` narrows it but still answers the wrong question: it
+/// cannot tell `Json<T>` from `Option<Json<T>>`, which is the distinction this
+/// file's body-handling test exists to draw. Walking the parentheses answers it
+/// directly.
+///
+/// Panics for the same reason `handler_body_of` does: a handler whose parameters
+/// cannot be isolated makes every check on them vacuous.
+fn handler_params_of<'a>(daemon: &'a str, handler: &str) -> &'a str {
+    let signature = format!("\nasync fn {handler}(");
+    let Some(at) = daemon.find(&signature) else {
+        panic!(
+            "the route table names `{handler}`, but the daemon has no \
+             `async fn {handler}(` for these checks to read"
+        );
+    };
+    let rest = &daemon[at + 1..];
+    // `signature` starts with the newline at `at`, so `rest` is one byte shorter
+    // and the `(` lands at `signature.len() - 2`. `find` says the same thing and
+    // cannot be off by one.
+    let Some(open) = rest.find('(') else {
+        panic!("`{handler}` has no parameter list");
+    };
+    let mut depth = 0usize;
+    for (offset, ch) in rest[open..].char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &rest[open + 1..open + offset];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("`{handler}`'s parameter list is never closed");
+}
+
 /// The `{` that opens a function body: the first one outside the parameter
 /// list, so a parenthesised return type does not look like the body.
 fn opening_brace(source: &str) -> Option<usize> {
@@ -2718,6 +2762,205 @@ fn api_yaml_declares_a_body_for_every_response() {
         "these responses document no body: {missing:?}. The daemon answers them as \
          `(StatusCode, Json<ErrorBody>)`, so the schema exists at runtime and only the \
          contract is silent about it."
+    );
+}
+
+/// How a handler reads its request body decides which codes it can answer with,
+/// and the spec has to agree with the *reading*, not with the schema.
+///
+/// Three readings coexist in the daemon and they fail differently:
+///
+/// - `Json<T>` — 47 handlers. axum rejects before the handler runs: 415 when the
+///   request declares no `application/json` content type, 422 when the body
+///   parses but does not fit (`JsonDataError`), 400 when it does not parse at all
+///   (`JsonSyntaxError`). None of those three codes appeared on any of the 105
+///   operations, so a generated client saw every body mistake as an unknown
+///   failure — the same blind spot the missing 401s had, one layer down.
+/// - `axum::body::Bytes` — `approval_approve` only. The handler parses by hand
+///   and answers its own 400, so 415 and 422 cannot happen and must not be
+///   claimed. The spec claimed both for one round, because the response codes
+///   had been added by grepping for `requestBody` instead of reading the
+///   signature.
+/// - `Option<Json<T>>` — 3 handlers. Its rejection type is `Infallible`, so the
+///   `.ok()` these handlers use cannot fail: a wrong content type, invalid JSON
+///   and a mistyped field all arrive as `None`, i.e. "no body was sent". The
+///   dangerous case is `/shutdown`, where a body that was meant to name a PID
+///   silently skips the check instead of failing it.
+///
+/// The reader is derived from each handler's own parameter list, so this stays
+/// correct when a signature changes; the operation is then looked up in the spec
+/// and held to whatever that reading implies.
+#[test]
+fn api_yaml_documents_how_each_handler_reads_its_body() {
+    // `/` and `/console` serve the web console, not the API.
+    const NON_API_ROUTES: [&str; 2] = ["/", "/console"];
+
+    let daemon = include_str!("../src/bin/agent2ssh-daemon.rs");
+    let spec = include_str!("../../docs/api.yaml");
+
+    struct Documented {
+        method: &'static str,
+        path: String,
+        codes: Vec<String>,
+        has_request_body: bool,
+        /// The operation's own lines, so the prose can be checked for the
+        /// caveat a swallowed body needs.
+        text: String,
+    }
+
+    let mut documented: Vec<Documented> = Vec::new();
+    let mut current_path = String::new();
+    // Lines between a path and its first method belong to neither operation;
+    // without this, a path-level `description:` would be read as the previous
+    // operation's and could satisfy its caveat check.
+    let mut current_operation: Option<usize> = None;
+    for line in spec.lines() {
+        let body = line.trim_start();
+        let indent = line.len() - body.len();
+        if let Some(rest) = line.strip_prefix("  /") {
+            let path = rest.split(':').next().unwrap_or_default();
+            current_path = if path.is_empty() {
+                "/".to_string()
+            } else {
+                format!("/{path}")
+            };
+            current_operation = None;
+            continue;
+        }
+        if indent == 4 {
+            if let Some(name) = body.strip_suffix(':') {
+                if let Some((_, method)) = METHOD_BUILDERS.iter().find(|(_, known)| *known == name)
+                {
+                    documented.push(Documented {
+                        method,
+                        path: current_path.clone(),
+                        codes: Vec::new(),
+                        has_request_body: false,
+                        text: String::new(),
+                    });
+                    current_operation = Some(documented.len() - 1);
+                }
+            }
+            continue;
+        }
+        let Some(index) = current_operation else {
+            continue;
+        };
+        let operation = &mut documented[index];
+        operation.text.push_str(body);
+        operation.text.push('\n');
+        if indent == 6 && body.starts_with("requestBody:") {
+            operation.has_request_body = true;
+        }
+        if indent == 8 {
+            if let Some(code) = body
+                .strip_prefix('"')
+                .and_then(|rest| rest.split('"').next())
+            {
+                operation.codes.push(code.to_string());
+            }
+        }
+    }
+
+    enum BodyReader {
+        /// `Json<T>`: 415 / 422 / 400 all come from the extractor.
+        Required,
+        /// `Option<Json<T>>`: every extraction error becomes "no body".
+        Swallowed,
+        /// `Bytes`: the handler parses the body itself.
+        HandParsed,
+        /// No body parameter at all.
+        Absent,
+    }
+
+    let mut violations: Vec<String> = Vec::new();
+    let mut required = 0usize;
+    let mut swallowed = 0usize;
+
+    for (path, method, handler) in daemon_routes(daemon) {
+        if NON_API_ROUTES.contains(&path.as_str()) {
+            continue;
+        }
+        let params = handler_params_of(daemon, &handler);
+        let reader = if params.contains("Option<Json<") {
+            swallowed += 1;
+            BodyReader::Swallowed
+        } else if params.contains(": Json<") {
+            required += 1;
+            BodyReader::Required
+        } else if params.contains(": axum::body::Bytes") || params.contains(": Bytes,") {
+            BodyReader::HandParsed
+        } else {
+            BodyReader::Absent
+        };
+        // An entirely undocumented operation is the route test's finding.
+        let Some(operation) = documented
+            .iter()
+            .find(|known| known.path == path && known.method == method)
+        else {
+            continue;
+        };
+        let documents = |code: &str| operation.codes.iter().any(|known| known == code);
+        let label = format!("{method} {path} ({handler})");
+
+        for code in ["415", "422"] {
+            let claimed = documents(code);
+            match reader {
+                BodyReader::Required => {
+                    if !claimed {
+                        violations.push(format!(
+                            "{label} reads `Json<T>`, so the extractor answers {code} before \
+                             the handler runs, but the operation does not document it"
+                        ));
+                    }
+                }
+                BodyReader::Swallowed => {
+                    if claimed {
+                        violations.push(format!(
+                            "{label} reads `Option<Json<T>>`, whose rejection is `Infallible`: \
+                             it cannot answer {code}, so documenting it tells a client that a \
+                             malformed body is refused when it is silently ignored"
+                        ));
+                    }
+                }
+                BodyReader::HandParsed | BodyReader::Absent => {
+                    if claimed {
+                        violations.push(format!(
+                            "{label} has no `Json<T>` extractor, so nothing answers {code} \
+                             before the handler runs"
+                        ));
+                    }
+                }
+            }
+        }
+
+        match reader {
+            BodyReader::Required if !operation.has_request_body => violations.push(format!(
+                "{label} requires a JSON body but the operation declares no requestBody, so \
+                 a client has no schema to send against"
+            )),
+            // A swallowed body still needs saying: the operation's own 400 does
+            // not cover it, because a body that does not parse never reaches it.
+            BodyReader::Swallowed if !operation.text.contains("does not parse") => {
+                violations.push(format!(
+                    "{label} silently treats a body that does not parse as no body, and its \
+                     description does not say so"
+                ))
+            }
+            _ => {}
+        }
+    }
+
+    assert!(
+        required > 0 && swallowed > 0,
+        "the extractor shapes were not recognised in the daemon source ({required} `Json<T>`, \
+         {swallowed} `Option<Json<T>>`), so every check here would pass for the wrong reason"
+    );
+    assert!(
+        violations.is_empty(),
+        "these operations document a body contract the handler does not have: {violations:?}. \
+         `Json<T>` answers 415/422 by itself, `Option<Json<T>>` cannot answer either, and \
+         `Bytes` answers only what the handler writes."
     );
 }
 
