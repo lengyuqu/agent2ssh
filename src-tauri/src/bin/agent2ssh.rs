@@ -632,7 +632,7 @@ enum HostCommands {
         /// Host profile alias to use as ProxyJump bastion
         #[arg(long, add = ArgValueCandidates::new(host_candidates))]
         jump: Option<String>,
-        /// Override risk level for all commands on this host (low/medium/high)
+        /// Override risk level for all commands on this host (low/medium/high/blocked)
         #[arg(long)]
         risk_override: Option<String>,
         /// Comma-separated tags for grouping
@@ -1506,7 +1506,7 @@ async fn authorize_local_exec_request(req: &mut ExecRequest) -> Result<RiskLevel
         req.change_id.clone(),
         req.side_effect.clone(),
         "approval required but no local approval handler is available",
-        "; run through the daemon approval flow or use --force when policy allows",
+        "; use --force for a high-risk command that no approval policy matches, or run through the daemon approval flow",
     )
     .await
     .map_err(command_authorization_error)?;
@@ -1534,7 +1534,7 @@ async fn authorize_local_exec_targets(
         reason,
         change_id,
         "approval required but no local approval handler is available",
-        "; run through the daemon approval flow or use --force when policy allows",
+        "; use --force for a high-risk command that no approval policy matches, or run through the daemon approval flow",
     )
     .await
     .map_err(command_authorization_error)
@@ -1570,7 +1570,7 @@ async fn authorize_local_playbook_run(
             change_id.clone(),
             None,
             "approval required but no local approval handler is available",
-            "; run through the daemon approval flow or use --force when policy allows",
+            "; use --force for a high-risk command that no approval policy matches, or run through the daemon approval flow",
         )
         .await
         .map_err(command_authorization_error)?;
@@ -1600,7 +1600,7 @@ async fn authorize_local_operation(
         None,
         None,
         "approval required but no local approval handler is available",
-        "; run through the daemon approval flow or use --force when policy allows",
+        "; use --force for a high-risk command that no approval policy matches, or run through the daemon approval flow",
     )
     .await
     .map_err(command_authorization_error)?;

@@ -1001,6 +1001,10 @@ pub fn save_approval_policies(policies: &[ApprovalPolicy]) -> Result<()> {
 /// Returns the **first** matching `ApprovalPolicy` whose `requires_approval`
 /// field is `true`, or `None` when no policy demands approval (auto-approve).
 ///
+/// A policy that matches with `requires_approval: false` also returns `None`,
+/// and it **stops the walk** — the first matching policy decides, so one
+/// auto-approve entry silences every policy declared after it.
+///
 /// Matching rules (ALL must be true for a policy to match):
 /// - `hosts` is empty **or** contains the host name (case-insensitive)
 /// - `tags` is empty **or** any host tag matches any policy tag (case-insensitive)
