@@ -690,6 +690,39 @@ components:
         matching: { type: array, items: { type: string } }
         summary: { type: string, description: "Human-readable one-liner, not a machine-stable format." }
 
+    RecordingConfig:
+      type: object
+      required: [enabled]
+      properties:
+        enabled: { type: boolean, default: false, description: "Opt-in: terminal output may contain secrets, so recording stays off until it is turned on." }
+
+    RecordingInfo:
+      type: object
+      description: >
+        Metadata for one asciicast v2 recording. The struct carries
+        `rename_all = "camelCase"`, so the wire names are `createdAt`,
+        `durationSeconds` and `sizeBytes` — not the snake_case the Rust field
+        names would suggest. `id` is the recording's UUID and the only form
+        `/recordings/{id}` accepts; a path or a bare filename is rejected before
+        the filesystem is touched.
+      required: [id, host, createdAt, durationSeconds, width, height, sizeBytes]
+      properties:
+        id:              { type: string, format: uuid }
+        host:            { type: string }
+        createdAt:       { type: string, format: date-time }
+        durationSeconds: { type: number }
+        width:           { type: integer }
+        height:          { type: integer }
+        sizeBytes:       { type: integer }
+
+    RecordingContent:
+      type: object
+      description: A recording read back whole — metadata and body in one response.
+      required: [info, content]
+      properties:
+        info:    { $ref: "#/components/schemas/RecordingInfo" }
+        content: { type: string, description: "The asciicast v2 JSONL body, verbatim." }
+
     SshAlgoPrefs:
       type: object
       description: >
@@ -1398,11 +1431,7 @@ paths:
           description: Recording configuration
           content:
             application/json:
-              schema:
-                type: object
-                required: [enabled]
-                properties:
-                  enabled: { type: boolean, default: false }
+              schema: { $ref: "#/components/schemas/RecordingConfig" }
         "403":
           description: Terminal recordings require the unrestricted admin token; a scoped token gets 403.
     put:
@@ -1417,7 +1446,11 @@ paths:
               properties:
                 enabled: { type: boolean }
       responses:
-        "200": { description: Updated recording configuration }
+        "200":
+          description: The configuration as stored.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RecordingConfig" }
         "403":
           description: Terminal recordings require the unrestricted admin token; a scoped token gets 403.
 
@@ -1427,7 +1460,12 @@ paths:
       description: Recordings may contain sensitive terminal output and are not included in WebDAV sync.
       responses:
         "200":
-          description: Recording metadata, newest first
+          description: Recording metadata, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/RecordingInfo" }
         "403":
           description: Terminal recordings require the unrestricted admin token; a scoped token gets 403.
 
@@ -1441,7 +1479,11 @@ paths:
     get:
       summary: Read recording metadata and asciicast v2 JSONL content
       responses:
-        "200": { description: Recording metadata and content }
+        "200":
+          description: Metadata plus the asciicast v2 body.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RecordingContent" }
         "403":
           description: Terminal recordings require the unrestricted admin token; a scoped token gets 403.
         "404": { description: Missing or invalid recording }
@@ -1454,7 +1496,11 @@ paths:
           required: true
           schema: { type: string, const: delete }
       responses:
-        "200": { description: Deleted recording metadata }
+        "200":
+          description: Metadata of the recording that was deleted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RecordingInfo" }
         "403":
           description: Terminal recordings require the unrestricted admin token; a scoped token gets 403.
         "400": { description: Confirmation missing or recording id invalid }
@@ -3106,7 +3152,7 @@ paths:
                 properties:
                   hosts_added:         { type: integer }
                   hosts_skipped:       { type: integer }
-                  hosts_updated:       { type: integer }
+                  hosts_updated:       { type: integer, description: "Name matched and at least one of host, user, port, jump_host, proxy_id, risk_override, tags, group, env, role or owner differed; that host was then replaced in place. A name that matches and is otherwise identical counts as `hosts_skipped`, not here." }
                   risk_rules_imported: { type: boolean }
                   playbooks_imported:  { type: boolean }
         "403":
@@ -3178,24 +3224,17 @@ paths:
 
   /health-snapshot:
     get:
-      summary: Get health snapshot for configured hosts
+      summary: Read the last collected health snapshot
       description: >-
-        Collects health data (uptime, disk, memory, load, SSH latency) for all or
-        specified hosts concurrently via embedded SSH. A scoped token is not
-        refused — the returned `hosts` list is filtered down to the hosts its
-        scope allows it to observe, so the same call returns fewer rows instead
-        of a 403.
-      parameters:
-        - name: hosts
-          in: query
-          schema:
-            type: array
-            items: { type: string }
-          description: "Host aliases to collect health from (default: all configured hosts)."
-        - name: timeout_secs
-          in: query
-          schema: { type: integer, default: 10 }
-          description: SSH connection timeout in seconds.
+        Reads the snapshot file and returns it; it collects nothing. Collection
+        is `POST /health-snapshot`, so a 200 here can predate the call by any
+        amount of time and `collected_at` is the only thing that says how old it
+        is. Takes no query parameters — `hosts` and `timeout_secs` are honoured
+        by the POST, not here. A scoped token is not refused: the `hosts` list
+        is filtered down to the hosts its scope allows it to observe, so the
+        same call returns fewer rows instead of a 403. Before a first
+        collection the status is still 200, but the body is
+        `{"error": "...", "hint": "..."}` rather than a `HealthSnapshot`.
       responses:
         "200":
           description: >-

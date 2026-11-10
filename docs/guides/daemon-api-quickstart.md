@@ -57,7 +57,7 @@ allowed hosts/tags 过滤。修改 gate、主机、策略、脱敏/高亮、算�
 
 ## 端点总览
 
-下表覆盖 daemon 的全部 **105 个 operation**（`/` 与 `/console` 两个非 API 路由不计）。新增路由时必须同步这张表；目前没有测试守着它，`api_yaml_documents_every_daemon_route` 只核对 `docs/api.yaml`。
+下表覆盖 daemon 的全部 **105 个 operation**。两个数不要混用：daemon 一共注册了 **107 条路由**，多出来的两条是 `GET /`（重定向到 `/console`）与 `GET /console`，都不是 API —— 所以 `operation` 数 105、`route` 数 107。`GET /` 用的是内联闭包而不是命名 handler，凡是按 handler 名扫描路由表的脚本都会漏掉它、数出 106（本流程的扫描脚本就漏过一次）。新增路由时必须同步这张表；目前没有测试守着它，`api_yaml_documents_every_daemon_route` 只核对 `docs/api.yaml`。
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
