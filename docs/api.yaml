@@ -13,6 +13,13 @@ info:
     `require_recording_admin`, whose message names terminal recordings. An
     operation whose 403 description names a *scope* or an *approval* instead is a
     per-host permission denial or a rejected approval, not an admin gate.
+
+    One 500 sits outside every operation's own list. `auth_middleware` reads
+    `daemon_tokens.toml` for any token that is not the admin token, so a file
+    that does not parse answers 500 to that request before any handler runs:
+    every non-public route returns 500 to a scoped caller while the admin token
+    keeps working. `/approvals/{id}/approve` states this once in full rather than
+    repeating it on a hundred operations.
 servers:
   - url: http://127.0.0.1:7722
     description: Local daemon
@@ -1053,6 +1060,9 @@ paths:
           description: >
             `expect_pid` was present but not a PID. Omitting the field is how a
             caller stops without a check.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "401":
           description: Missing or invalid bearer token.
           content:
@@ -1060,11 +1070,17 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "409":
           description: >
             `expect_pid` names another process. The daemon that answered is not
             the one the caller meant to stop, so it is still running; the error
             names the PID that did answer.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /hosts:
     get:
@@ -1114,6 +1130,9 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /hosts/import:
     post:
@@ -1132,7 +1151,9 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
-
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "500":
           description: Reading `~/.ssh/config`, or saving the imported hosts, failed.
           content:
@@ -1162,6 +1183,9 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "404":
           content:
             application/json:
@@ -1269,11 +1293,6 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
-        "503":
-          description: Daemon shutdown interrupted the request; inspect the error before any retry.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
         "423":
           description: Execution gate paused
           content:
@@ -1285,6 +1304,11 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+        "503":
+          description: Daemon shutdown interrupted the request; inspect the error before any retry.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
   /local-exec:
     post:
       summary: Execute a command in a terminal environment on the daemon's own machine
@@ -1518,6 +1542,9 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
         "500":
           description: "`execution_gate.json` could not be written (`save_execution_gate`); the gate is not paused."
@@ -1545,6 +1572,9 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
         "500":
           description: "`execution_gate.json` could not be written (`save_execution_gate`); the gate stays paused."
@@ -1606,6 +1636,11 @@ paths:
       responses:
         "101":
           description: Switching Protocols
+        "400":
+          description: The host is not a configured profile
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "401":
           description: Missing or invalid token
           content:
@@ -1613,11 +1648,6 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scope denied
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-        "400":
-          description: The host is not a configured profile
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1649,6 +1679,9 @@ paths:
               schema: { $ref: "#/components/schemas/TerminalBroadcastResponse" }
         "400":
           description: "The command is empty, over the length cap, or contains control characters; there are fewer than 2 or more than 32 targets; or a `terminal_id` is a duplicate. A `terminal_id` that is not a UUID is **not** a 400 — it is resolved to no live endpoint and comes back per target as `authorized: false` with `terminal is not connected`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
         "401":
           description: Missing or invalid bearer token.
@@ -1665,6 +1698,10 @@ paths:
         server-owned carriage return. `all_or_nothing` defaults to true. This is
         authorization-atomic, not remote execution-atomic; per-target `sent`
         means accepted by the live terminal queue, not completed remotely.
+        A target whose authorization is refused is reported in the response body
+        with `authorized: false` and an `error`; the HTTP status stays 200 and
+        nothing is sent to that target, so a per-target refusal never surfaces as
+        a 4xx from this operation.
       requestBody:
         required: true
         content:
@@ -1672,13 +1709,18 @@ paths:
             schema: { $ref: "#/components/schemas/TerminalBroadcastRequest" }
       responses:
         "200":
-          description: Per-target authorization and enqueue results
+          description: >-
+            Per-target authorization and enqueue results. A refused target appears
+            here with `authorized: false`, not as a 4xx, so the status code alone
+            says nothing about which targets were authorized.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/TerminalBroadcastResponse" }
         "400":
           description: "Same validation as `/terminal/broadcast/preview`: empty command, control characters, fewer than 2 or more than 32 targets, or a duplicate `terminal_id`. A non-UUID `terminal_id` is resolved per target, not rejected here."
-
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "401":
           description: Missing or invalid bearer token.
           content:
@@ -1702,6 +1744,9 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Terminal recordings require the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
     put:
       summary: Enable or disable recording for new terminal sessions
       requestBody:
@@ -1726,6 +1771,9 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Terminal recordings require the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
         "500":
           description: The recording configuration could not be written.
@@ -1752,6 +1800,9 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Terminal recordings require the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
         "500":
           description: The recording index could not be read.
@@ -1781,7 +1832,14 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Terminal recordings require the unrestricted admin token; a scoped token gets 403.
-        "404": { description: Missing or invalid recording }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Missing or invalid recording
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
     delete:
       summary: Permanently delete a sensitive recording
       description: Requires `confirm=delete`; successful deletion is appended to the security audit log.
@@ -1796,6 +1854,12 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/RecordingInfo" }
+        "400":
+          description: Confirmation missing or recording id invalid
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
         "401":
           description: Missing or invalid bearer token.
           content:
@@ -1803,8 +1867,9 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Terminal recordings require the unrestricted admin token; a scoped token gets 403.
-        "400": { description: Confirmation missing or recording id invalid }
-
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
   /events/stream:
     get:
       summary: Subscribe to daemon events
@@ -1953,8 +2018,6 @@ paths:
               schema: { type: string }
             text/csv:
               schema: { type: string }
-        "403":
-          description: Requires the unrestricted admin token; a scoped token gets 403.
         "400":
           description: Unsupported format
           content:
@@ -1967,6 +2030,11 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "500":
           description: The audit log could not be read, or the CSV could not be written.
           content:
@@ -2599,11 +2667,6 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
-        "423":
-          description: Execution gate paused
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scope denied or approval rejected
           content:
@@ -2611,6 +2674,11 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "408":
           description: Approval timed out
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "423":
+          description: Execution gate paused
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -3296,8 +3364,6 @@ paths:
                 type: object
                 properties:
                   ok: { type: boolean }
-        "403":
-          description: Requires the unrestricted admin token; a scoped token gets 403.
         "400":
           description: The id is not a UUID, or an approve body is malformed / asks for a rewrite that is refused.
           content:
@@ -3305,6 +3371,11 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "401":
           description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -3334,8 +3405,6 @@ paths:
                 type: object
                 properties:
                   ok: { type: boolean }
-        "403":
-          description: Requires the unrestricted admin token; a scoped token gets 403.
         "400":
           description: The id is not a UUID, it names no known request, or the request is no longer pending (already approved, rejected or timed out).
           content:
@@ -3348,6 +3417,11 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
   /risk/check:
     post:
       summary: Check risk level of a command
@@ -3641,7 +3715,12 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
 
         "502":
-          description: The remote daemon could not be reached, or answered with an unreadable response.
+          description: >-
+            The remote daemon could not be reached, or answered with a body that
+            could not be read. A refusal is forwarded verbatim: when the remote
+            answers non-2xx, this operation returns that same status with the
+            remote's body, so a 4xx here may have originated on the remote rather
+            than on this daemon.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -3678,6 +3757,9 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
         "500":
           description: "`webhook.toml` could not be written."
@@ -3714,8 +3796,6 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/MetricsTrend" }
-        "403":
-          description: Requires the unrestricted admin token; a scoped token gets 403.
         "400":
           description: Unknown period
           content:
@@ -3728,6 +3808,11 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "500":
           description: The audit log could not be read while computing the trend.
           content:
@@ -3885,9 +3970,17 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
         "500":
-          description: The approval policy configuration could not be written.
+          description: |
+            `save_approval_policies` failed. Two stages share this code and the
+            status cannot tell them apart: `toml::to_string_pretty` (a policy
+            holding something TOML cannot represent — not reachable with the
+            current string/bool fields) and `std::fs::write` (a read-only config
+            directory, a full disk). In practice this is a write failure.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -3917,8 +4010,6 @@ paths:
                 type: object
                 properties:
                   ok: { type: boolean }
-        "403":
-          description: Requires the unrestricted admin token; a scoped token gets 403.
         "400":
           description: The id is not a UUID, no known request has it, or it is no longer pending.
           content:
@@ -3931,6 +4022,11 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
   /playbooks/{name}/dry-run:
     post:
       summary: Resolve playbook step templates against params without executing
@@ -4024,7 +4120,13 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
 
         "500":
-          description: The remote inventory could not be read.
+          description: |
+            `remotes.toml` could not be read, or it parsed but failed validation:
+            an empty alias, the reserved alias `localhost`, a duplicate alias, a
+            URL that is not `http://` or `https://`, or a remote that sets neither
+            `token_env` nor `token`. The last four are hand-written mistakes in a
+            file that parsed fine, so the five share one status and only the
+            message tells them apart.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -4095,6 +4197,9 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "500":
           description: Building the export failed (config directory unreadable or a rules file cannot be parsed).
           content:
@@ -4133,6 +4238,9 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /config/import/preview:
     post:
@@ -4188,6 +4296,9 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
         "500":
           description: "`~/.ssh/config` could not be read or compared."
@@ -4214,6 +4325,9 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "500":
           description: Rendering the SSH config failed; the message names the reason.
           content:
@@ -4333,11 +4447,17 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "500":
           description: >-
             Only when the host list is expanded from the config file and that read
             fails. Naming explicit `hosts` avoids it: an unknown alias is not an
             error but a per-host row with `reachable: false`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   # ── Local configuration lifecycles ─────────────────────────────────────────
   #
@@ -4385,10 +4505,11 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/Snippet" }
-        "403":
-          description: Requires the unrestricted admin token; a scoped token gets 403.
         "400":
           description: Invalid snippet name or command.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
         "401":
           description: Missing or invalid bearer token.
@@ -4396,6 +4517,11 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
   /snippets/{name}:
     delete:
       summary: Remove a command snippet
@@ -4410,10 +4536,11 @@ paths:
           content:
             application/json:
               schema: { type: boolean }
-        "403":
-          description: Requires the unrestricted admin token; a scoped token gets 403.
         "400":
           description: Invalid snippet name.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
         "401":
           description: Missing or invalid bearer token.
@@ -4421,6 +4548,11 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
   /redact/rules:
     get:
       summary: List sensitive-data redaction rules
@@ -4458,10 +4590,11 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/RedactRuleInfo" }
-        "403":
-          description: Requires the unrestricted admin token; a scoped token gets 403.
         "400":
           description: The pattern does not compile, matches the empty string, or is already in the set. An empty replacement is allowed — it deletes the matched text rather than substituting it.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
         "401":
           description: Missing or invalid bearer token.
@@ -4469,6 +4602,11 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
   /redact/rules/update:
     post:
       summary: Replace the redaction rule identified by pattern
@@ -4491,10 +4629,11 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/RedactRuleInfo" }
-        "403":
-          description: Requires the unrestricted admin token; a scoped token gets 403.
         "400":
           description: No rule matches the pattern, or the new pattern does not compile, matches the empty string, or is already taken by another rule.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
         "401":
           description: Missing or invalid bearer token.
@@ -4502,6 +4641,11 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
   /redact/rules/delete:
     post:
       summary: Remove a redaction rule
@@ -4524,10 +4668,11 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/RedactRuleInfo" }
-        "403":
-          description: Requires the unrestricted admin token; a scoped token gets 403.
         "400":
           description: Missing `force`, or no rule matches the pattern.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
         "401":
           description: Missing or invalid bearer token.
@@ -4535,6 +4680,11 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
   /redact/rules/reset:
     post:
       summary: Restore the built-in redaction rule set
@@ -4554,8 +4704,14 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "500":
           description: The built-in set could not be written.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /highlight/rules:
     get:
@@ -4597,10 +4753,11 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/HighlightRule" }
-        "403":
-          description: Requires the unrestricted admin token; a scoped token gets 403.
         "400":
           description: Empty keyword, a missing or over-long name, a color that is not `#RRGGBB`, or a keyword already in the set. The keyword's regex syntax is deliberately not checked here — the renderer compiles it with JavaScript, whose grammar differs from the one a Rust-side check would use.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
         "401":
           description: Missing or invalid bearer token.
@@ -4608,6 +4765,11 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
   /highlight/rules/update:
     post:
       summary: Replace the terminal highlight rule identified by keyword
@@ -4630,10 +4792,11 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/HighlightRule" }
-        "403":
-          description: Requires the unrestricted admin token; a scoped token gets 403.
         "400":
           description: No rule matches the keyword, or the replacement rule fails the same checks as an added one.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
         "401":
           description: Missing or invalid bearer token.
@@ -4641,6 +4804,11 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
   /highlight/rules/delete:
     post:
       summary: Remove a terminal highlight rule
@@ -4663,10 +4831,11 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/HighlightRule" }
-        "403":
-          description: Requires the unrestricted admin token; a scoped token gets 403.
         "400":
           description: Missing `force`, or no rule matches the keyword.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
         "401":
           description: Missing or invalid bearer token.
@@ -4674,6 +4843,11 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
   /highlight/rules/reset:
     post:
       summary: Restore the built-in terminal highlight rules
@@ -4693,8 +4867,14 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "500":
           description: The built-in set could not be written.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /algo/prefs:
     get:
@@ -4725,12 +4905,18 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/AlgoPrefsState" }
-        "403":
-          description: Requires the unrestricted admin token; a scoped token gets 403.
         "400":
           description: A list is empty, repeats an entry, or contains an implausible algorithm name.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "401":
           description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Requires the unrestricted admin token; a scoped token gets 403.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -4750,8 +4936,14 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "500":
           description: The stored override could not be removed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   # ── Interactive prompts (2FA / OTP) ────────────────────────────────────────
   #
@@ -4785,6 +4977,9 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /prompts/respond:
     post:
@@ -4816,5 +5011,11 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "404":
           description: No prompt is waiting under that nonce.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }

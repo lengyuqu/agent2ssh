@@ -2254,22 +2254,131 @@ fn daemon_routes(daemon: &str) -> Vec<(String, &'static str, String)> {
     routes
 }
 
-/// The body of one handler, from its `async fn` line to the next top-level item.
+/// The body of one handler, from its `async fn` line to its closing brace.
 ///
-/// The panicking `handler_body` further down takes a full signature and is used
-/// by tests that assert on a named handler; this one takes a bare name because
-/// the name comes out of a route table, where the signature is not known.
-fn handler_body_of<'a>(daemon: &'a str, handler: &str) -> Option<&'a str> {
+/// The obvious terminator — "the next `async fn` or `fn`" — is wrong in a way
+/// that stayed invisible while it was merely unfortunate: 66 of the 106 route
+/// handlers are followed by a `struct`, a `const`, a doc comment or a helper,
+/// so their "bodies" ran hundreds of bytes past the closing brace. Nothing
+/// foreign happened to carry a `StatusCode::` constant yet, which is exactly
+/// why this could rot unnoticed — the day a neighbouring item gains one, the
+/// scan reports it against the wrong operation. Walking the braces instead
+/// bounds the body at the item it belongs to.
+///
+/// It panics rather than returning the rest of the file, for the reason
+/// `handler_body` below already panics: a body that cannot be isolated makes
+/// every check on it vacuous, and a vacuous check is worse than a red one.
+fn handler_body_of<'a>(daemon: &'a str, handler: &str) -> &'a str {
     let signature = format!("\nasync fn {handler}(");
-    let start = daemon.find(&signature)? + 1;
-    let rest = &daemon[start..];
-    let end = rest
-        .match_indices("\nasync fn ")
-        .map(|(at, _)| at)
-        .chain(rest.match_indices("\nfn ").map(|(at, _)| at))
-        .min()
-        .unwrap_or(rest.len());
-    Some(&rest[..end])
+    let Some(at) = daemon.find(&signature) else {
+        panic!(
+            "the route table names `{handler}`, but the daemon has no \
+             `async fn {handler}(` for these checks to read"
+        );
+    };
+    let rest = &daemon[at + 1..];
+    let open = opening_brace(rest)
+        .unwrap_or_else(|| panic!("`{handler}` has no body, so its checks would be vacuous"));
+    let close = closing_brace(rest, open)
+        .unwrap_or_else(|| panic!("`{handler}`'s body has unbalanced braces"));
+    &rest[..close]
+}
+
+/// The `{` that opens a function body: the first one outside the parameter
+/// list, so a parenthesised return type does not look like the body.
+fn opening_brace(source: &str) -> Option<usize> {
+    let mut depth = 0i32;
+    for (at, ch) in source.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            '{' if depth == 0 => return Some(at),
+            ';' if depth == 0 => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Index just past the `}` closing the block opened at `open`.
+///
+/// String, char and comment contents are skipped: a `}` inside
+/// `format!("… }}")` would otherwise close the body early, and a `{` inside a
+/// comment would open a block that never closes.
+fn closing_brace(source: &str, open: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut depth = 0i32;
+    let mut at = open;
+    while at < bytes.len() {
+        match bytes[at] {
+            b'/' if bytes.get(at + 1) == Some(&b'/') => {
+                at = source[at..].find('\n').map_or(bytes.len(), |n| at + n);
+            }
+            b'/' if bytes.get(at + 1) == Some(&b'*') => {
+                at = source[at + 2..]
+                    .find("*/")
+                    .map_or(bytes.len(), |n| at + 2 + n + 2);
+            }
+            b'"' => at = string_end(source, at)?,
+            b'\'' => at = char_end(source, at),
+            b'{' => {
+                depth += 1;
+                at += 1;
+            }
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(at + 1);
+                }
+                at += 1;
+            }
+            _ => at += 1,
+        }
+    }
+    None
+}
+
+/// Index just past the string literal whose opening quote is at `quote`.
+///
+/// Handles the raw forms (`r"…"`, `r#"…"#`), which the daemon uses in its
+/// `daemon_tokens.toml` fixtures.
+fn string_end(source: &str, quote: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    if quote > 0 && bytes[quote - 1] == b'r' {
+        let hashes = source[quote + 1..]
+            .bytes()
+            .take_while(|byte| *byte == b'#')
+            .count();
+        let closing = format!("\"{}", "#".repeat(hashes));
+        let from = quote + 1 + hashes;
+        return source[from..]
+            .find(&closing)
+            .map(|n| from + n + closing.len());
+    }
+    let mut at = quote + 1;
+    while at < bytes.len() {
+        match bytes[at] {
+            b'\\' => at += 2,
+            b'"' => return Some(at + 1),
+            _ => at += 1,
+        }
+    }
+    None
+}
+
+/// Index just past a char literal; a lifetime (`'a`) advances by one instead.
+fn char_end(source: &str, quote: usize) -> usize {
+    let bytes = source.as_bytes();
+    let width = if bytes.get(quote + 1) == Some(&b'\\') {
+        2
+    } else {
+        1
+    };
+    if bytes.get(quote + width + 1) == Some(&b'\'') {
+        quote + width + 2
+    } else {
+        quote + 1
+    }
 }
 
 /// Every daemon route is in `docs/api.yaml`, and nothing else is — path,
@@ -2458,11 +2567,11 @@ fn api_yaml_documents_every_daemon_route() {
 ///
 /// The handler→operation map is derived rather than written down: the handler
 /// named in each `.route(...)` call is looked up in the same source text and
-/// its own body is checked for `INTERNAL_SERVER_ERROR`. A 500 that arrives
-/// through a shared helper (`preflight_guarded_request`, `authorize_targets`)
-/// is not visible this way, because that is the handler's *dependency*
-/// failing, not its own branch — `/exec-multi` and `/exec/compare` document
-/// theirs by hand.
+/// its own body is checked for every constant in `HANDLER_STATUS`. A code that
+/// arrives through a shared helper (`preflight_guarded_request`,
+/// `authorize_targets`, `locked_status`) is not visible this way, because that
+/// is the handler's *dependency* failing, not its own branch — those routes
+/// document their 408/423/429/500 by hand.
 #[test]
 fn api_yaml_documents_the_codes_each_handler_can_return() {
     let daemon = include_str!("../src/bin/agent2ssh-daemon.rs");
@@ -2510,9 +2619,7 @@ fn api_yaml_documents_the_codes_each_handler_can_return() {
     let undocumented: Vec<String> = daemon_routes(daemon)
         .into_iter()
         .flat_map(|(path, method, handler)| {
-            let Some(body) = handler_body_of(daemon, &handler) else {
-                return Vec::new();
-            };
+            let body = handler_body_of(daemon, &handler);
             // An entirely undocumented operation is the route test's finding.
             let Some((_, _, codes)) = documented.iter().find(|(known_path, known_method, _)| {
                 *known_path == path && *known_method == method
@@ -2534,6 +2641,116 @@ fn api_yaml_documents_the_codes_each_handler_can_return() {
         "these operations answer a status code they do not document: {undocumented:?}. \
          The code comes from the handler's own body, so a client that programs against \
          the spec cannot tell this failure from an unknown one."
+    );
+}
+
+/// Every documented response declares a body, because every one of them has one.
+///
+/// The daemon answers every error as `(StatusCode, Json<ErrorBody>)`, so a
+/// response with a `description` and no `content:` documents a body-less reply
+/// that cannot happen. 57 of them were written that way, all 4xx/5xx, and the
+/// omission is invisible from both sides: the value is there at runtime, and a
+/// client generator sees a status with no schema and falls back to "unknown".
+///
+/// `101` is exempt — `Switching Protocols` carries no body by definition.
+#[test]
+fn api_yaml_declares_a_body_for_every_response() {
+    let spec = include_str!("../../docs/api.yaml");
+
+    fn flush(pending: &mut Option<(String, bool)>, operation: &str, missing: &mut Vec<String>) {
+        if let Some((code, has_content)) = pending.take() {
+            if !has_content && code != "101" && code != "204" {
+                missing.push(format!("{code} {operation}"));
+            }
+        }
+    }
+
+    let mut missing: Vec<String> = Vec::new();
+    let mut path = String::new();
+    let mut operation = String::new();
+    let mut pending: Option<(String, bool)> = None;
+
+    for line in spec.lines() {
+        let body = line.trim_start();
+        let indent = line.len() - body.len();
+        if let Some(rest) = line.strip_prefix("  /") {
+            flush(&mut pending, &operation, &mut missing);
+            let name = rest.split(':').next().unwrap_or_default();
+            path = if name.is_empty() {
+                "/".to_string()
+            } else {
+                format!("/{name}")
+            };
+            operation.clear();
+            continue;
+        }
+        if indent == 4 {
+            flush(&mut pending, &operation, &mut missing);
+            if let Some(name) = body.strip_suffix(':') {
+                if METHOD_BUILDERS.iter().any(|(_, known)| *known == name) {
+                    operation = format!("{} {path}", name.to_uppercase());
+                }
+            }
+            continue;
+        }
+        if indent == 8 {
+            flush(&mut pending, &operation, &mut missing);
+            if let Some(rest) = body
+                .strip_prefix('"')
+                .and_then(|rest| rest.split('"').next())
+            {
+                if !rest.is_empty() && rest.chars().all(|ch| ch.is_ascii_digit()) {
+                    pending = Some((rest.to_string(), false));
+                }
+            }
+            continue;
+        }
+        if indent >= 10 && body.starts_with("content:") {
+            if let Some((_, has_content)) = pending.as_mut() {
+                *has_content = true;
+            }
+        }
+    }
+    flush(&mut pending, &operation, &mut missing);
+
+    assert!(
+        missing.is_empty(),
+        "these responses document no body: {missing:?}. The daemon answers them as \
+         `(StatusCode, Json<ErrorBody>)`, so the schema exists at runtime and only the \
+         contract is silent about it."
+    );
+}
+
+/// A plain YAML scalar may not contain `: `, and prose about status codes does.
+///
+/// `description: … forwarded verbatim: when the remote answers …,` is not a
+/// string to a YAML parser — the second colon reads as a key and the document
+/// stops parsing there. That happened twice in one round of edits and nothing
+/// noticed: the contract tests above parse `api.yaml` line by line, and no Rust
+/// test loads it as YAML, so a spec every client generates from could not be
+/// loaded at all while the suite stayed green.
+///
+/// Exempt, because none of them is a plain scalar: a quoted value, a `|` or `>`
+/// block, and a `{ … }` / `[ … ]` flow collection.
+#[test]
+fn api_yaml_descriptions_with_a_colon_are_quoted() {
+    let spec = include_str!("../../docs/api.yaml");
+    let offenders: Vec<&str> = spec
+        .lines()
+        .filter(|line| {
+            let Some(value) = line.trim_start().strip_prefix("description: ") else {
+                return false;
+            };
+            let plain = !value.starts_with(['"', '\'', '|', '>', '{', '[']);
+            plain && value.contains(": ")
+        })
+        .map(|line| line.trim())
+        .collect();
+
+    assert!(
+        offenders.is_empty(),
+        "these descriptions would stop a YAML parser at the second colon: {offenders:?}. \
+         Quote the value, or switch it to a `>-` block."
     );
 }
 
