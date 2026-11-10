@@ -57,6 +57,8 @@ allowed hosts/tags 过滤。修改 gate、主机、策略、脱敏/高亮、算�
 
 ## 端点总览
 
+下表覆盖 daemon 的全部 **105 个 operation**（`/` 与 `/console` 两个非 API 路由不计）。新增路由时必须同步这张表；目前没有测试守着它，`api_yaml_documents_every_daemon_route` 只核对 `docs/api.yaml`。
+
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/health` | 健康检查（无需认证） |
@@ -66,12 +68,14 @@ allowed hosts/tags 过滤。修改 gate、主机、策略、脱敏/高亮、算�
 | POST | `/hosts` | 添加主机 |
 | POST | `/hosts/import` | 导入 SSH 配置 |
 | DELETE | `/hosts/:name` | 删除主机 |
+| GET | `/hosts/:name/policy` | 汇总该主机适用的授权策略 |
 | POST | `/ping` | 检测连通性 |
 | POST | `/exec` | 执行命令 |
 | POST | `/exec-multi` | 多主机并发执行 |
 | POST | `/exec/compare` | 多主机执行结果对比 |
 | POST | `/exec/preview` | 执行预览（不实际执行） |
 | GET | `/exec/stream` | WebSocket 流式执行 |
+| POST | `/local-exec` | 在 daemon 所在机器上执行命令（本地环境） |
 | GET | `/terminal` | WebSocket 交互式终端 |
 | POST | `/terminal/broadcast/preview` | 预览多终端广播的逐目标风险与审批要求 |
 | POST | `/terminal/broadcast` | 全部授权后向已连接终端广播并执行单条命令 |
@@ -90,14 +94,30 @@ allowed hosts/tags 过滤。修改 gate、主机、策略、脱敏/高亮、算�
 | POST | `/sftp/ls` | 列出远程目录 |
 | POST | `/sftp/stat` | 查看远程文件信息 |
 | POST | `/sftp/mkdir` | 创建远程目录 |
+| POST | `/sftp/rename` | 重命名或移动远程文件/目录 |
+| POST | `/sftp/rm` | 删除单个远程文件 |
+| POST | `/sftp/rmdir` | 删除空的远程目录 |
+| POST | `/sftp/rm-rf` | 递归删除远程目录树 |
+| POST | `/sftp/rm-rf/authorize` | 为桌面端执行授权一次递归删除 |
 | POST | `/sessions` | 打开会话 |
 | GET | `/sessions` | 列出会话 |
 | POST | `/sessions/:id/write` | 写入会话 |
 | GET | `/sessions/:id/read` | 读取会话 |
 | DELETE | `/sessions/:id` | 关闭会话 |
+| POST | `/resident-sessions` | 打开常驻会话（本地终端环境） |
+| GET | `/resident-sessions` | 列出常驻会话 |
+| POST | `/resident-sessions/:id/exec` | 在常驻会话内执行一条命令 |
+| GET | `/resident-sessions/:id` | 读取常驻会话（含缓冲输出） |
+| DELETE | `/resident-sessions/:id` | 关闭常驻会话并结束其 shell |
 | POST | `/forwards` | 添加端口转发 |
 | GET | `/forwards` | 列出转发 |
 | DELETE | `/forwards/:id` | 删除转发 |
+| POST | `/forwards/multi` | 一次给同一主机批量添加多条转发 |
+| POST | `/forwards/:id/start` | 启动已停止的转发 |
+| POST | `/forwards/:id/stop` | 停止转发但保留记录 |
+| GET | `/snippets` | 列出命令片段 |
+| POST | `/snippets` | 创建或覆盖命令片段（按名字） |
+| DELETE | `/snippets/:name` | 删除命令片段 |
 | GET | `/approvals` | 列出审批请求 |
 | POST | `/approvals/:id/approve` | 批准审批 |
 | POST | `/approvals/:id/reject` | 拒绝审批 |
@@ -112,6 +132,20 @@ allowed hosts/tags 过滤。修改 gate、主机、策略、脱敏/高亮、算�
 | GET | `/playbooks` | 列出 Playbook |
 | POST | `/playbooks/run` | 执行 Playbook |
 | POST | `/playbooks/:name/dry-run` | 预览 Playbook |
+| GET | `/redact/rules` | 列出脱敏规则 |
+| POST | `/redact/rules` | 新增脱敏规则 |
+| POST | `/redact/rules/update` | 按 pattern 替换脱敏规则 |
+| POST | `/redact/rules/delete` | 删除脱敏规则 |
+| POST | `/redact/rules/reset` | 恢复内置脱敏规则 |
+| GET | `/highlight/rules` | 列出终端高亮规则 |
+| POST | `/highlight/rules` | 新增高亮规则 |
+| POST | `/highlight/rules/update` | 按 keyword 替换高亮规则 |
+| POST | `/highlight/rules/delete` | 删除高亮规则 |
+| POST | `/highlight/rules/reset` | 恢复内置高亮规则 |
+| GET | `/algo/prefs` | 查看当前生效的算法偏好 |
+| PUT | `/algo/prefs` | 整体替换算法偏好 |
+| DELETE | `/algo/prefs` | 丢弃算法偏好覆盖，回到内置默认 |
+| POST | `/containers/start-service` | 启动本地容器运行时的后台服务 |
 | GET | `/daemons` | 列出守护进程 |
 | GET | `/daemons/view` | 守护进程统一视图 |
 | POST | `/daemons/:alias/exec` | 代理执行 |
@@ -123,11 +157,15 @@ allowed hosts/tags 过滤。修改 gate、主机、策略、脱敏/高亮、算�
 | POST | `/config/import/preview` | 预览团队配置导入 |
 | GET | `/health-snapshot` | 主机健康快照 |
 | POST | `/health-snapshot` | 收集主机健康快照 |
+| GET | `/prompts/pending` | 列出等待回答的 prompt |
+| POST | `/prompts/respond` | 回答一个待处理 prompt |
 | GET | `/webhook/config` | 获取 Webhook 配置 |
 | PUT | `/webhook/config` | 更新 Webhook 配置 |
 | GET | `/events/stream` | SSE 实时事件流 |
+| GET | `/webdav/status` | 查看版本化便携配置同步状态 |
 | GET | `/ssh-sync/diff` | 与 `~/.ssh/config` 对比 |
 | POST | `/ssh-sync/export` | 导出到 SSH 配置文件 |
+| POST | `/shutdown` | 停止 daemon |
 | GET | `/console` | Web 控制台 |
 
 ---
@@ -874,7 +912,9 @@ curl -X PUT -H "$AUTH" \
 
 当 URL 包含 `hooks.slack.com` 时，自动使用 Slack Block Kit 格式发送消息。配置了 `secret` 时，请求头包含 `X-Agent2SSH-Signature: sha256=<hex>` 签名。
 
-普通 SSH `/exec` 因 daemon 关闭而中断时，`exec_completed` webhook 会携带 `remote_outcome_unknown`：`true` 表示命令可能已发送、远端结果未知；`false` 表示关闭前尚未发送命令。结果未知时不要自动重试。其他事件不包含该字段。
+普通 SSH `/exec` 因 daemon 关闭而中断时，`exec_completed` webhook 会携带 `remote_outcome_unknown`：`true` 表示命令可能已发送、远端结果未知；`false` 表示关闭前尚未发送命令。结果未知时不要自动重试。
+
+其他事件不包含该字段——四个非 `exec_completed` 的构造点都写 `None`，而值为 `None` 时默认 JSON 载荷直接省略这个键。Slack 卡片只用它给 `exec_completed` 挑标题文案（"SSH Outcome Unknown" / "SSH Command Not Sent" / "Command Completed"），别的事件即便带上它也不改变输出。
 
 ---
 

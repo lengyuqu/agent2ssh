@@ -56,6 +56,10 @@ components:
         env:       { type: string, nullable: true }
         role:      { type: string, nullable: true }
         owner:     { type: string, nullable: true }
+        proxy_id:  { type: string, nullable: true, description: "Proxy profile id used for the TCP connection to this host." }
+        group:     { type: string, description: "UI grouping bucket. A value that is not one of the configured group ids is reset to `default` when the config is normalized, so a group must be registered before a host can name it." }
+        init_command: { type: string, nullable: true, description: "Command run in the remote shell immediately after connect (OpenSSH `RemoteCommand`)." }
+        passphrase: { type: string, nullable: true, description: "Passphrase for an encrypted private key; persisted as a secret reference in hosts.json, like password." }
         ai_allowed: { type: boolean, default: true, description: "false = human-only host; AI/automation sources are refused" }
 
     ExecRequest:
@@ -230,8 +234,14 @@ components:
         decision:
           type: string
           nullable: true
-          enum: [approved, rejected, timed_out, auto_allowed, blocked]
-          description: "Authorization verdict; absent on older entries and on operations that never ran"
+          enum: [approved, approved_rewritten, rejected, timed_out, auto_allowed, blocked]
+          description: >
+            Authorization verdict; absent on older entries and on operations that
+            never ran. `approved_rewritten` means a human approved a *different*
+            command than the one requested — read it against `original_command`. It
+            is kept distinct from `approved` because the substitution is checked by
+            risk *level*, so an edit can change what a command does without changing
+            how it ranks.
         decided_by:
           type: string
           nullable: true
@@ -572,6 +582,42 @@ components:
       type: object
       properties:
         error: { type: string }
+
+    AlgoPrefsState:
+      type: object
+      required: [prefs, custom, defaults]
+      properties:
+        prefs:    { type: object, description: "The preferences in effect for the next handshake; each field is a comma-separated list in preference order." }
+        custom:   { type: boolean, description: "True when an override is stored rather than the built-in defaults." }
+        defaults: { type: object, description: "The built-in safe defaults, so a caller can offer a reset target." }
+
+    SshSyncHostDiff:
+      type: object
+      required: [name, host]
+      properties:
+        name: { type: string }
+        host: { type: string }
+        user: { type: string, nullable: true }
+        port: { type: integer, nullable: true }
+
+    SshSyncHostConflict:
+      type: object
+      required: [name, field, agent2ssh_value, ssh_config_value]
+      properties:
+        name: { type: string }
+        field: { type: string, description: "The HostProfile field that differs, for example `port`." }
+        agent2ssh_value: { type: string }
+        ssh_config_value: { type: string }
+
+    SshSyncDiff:
+      type: object
+      required: [only_in_agent2ssh, only_in_ssh_config, conflicts, matching, summary]
+      properties:
+        only_in_agent2ssh: { type: array, items: { $ref: "#/components/schemas/SshSyncHostDiff" } }
+        only_in_ssh_config: { type: array, items: { $ref: "#/components/schemas/SshSyncHostDiff" } }
+        conflicts: { type: array, items: { $ref: "#/components/schemas/SshSyncHostConflict" } }
+        matching: { type: array, items: { type: string } }
+        summary: { type: string, description: "Human-readable one-liner, not a machine-stable format." }
 
 paths:
   /health:
@@ -1255,7 +1301,7 @@ paths:
           schema: { type: string }
         - name: decision
           in: query
-          schema: { type: string, enum: [approved, rejected, timed_out, auto_allowed, blocked] }
+          schema: { type: string, enum: [approved, approved_rewritten, rejected, timed_out, auto_allowed, blocked] }
         - name: agent
           in: query
           description: Requesting client label, exact case-insensitive match on source
@@ -1311,7 +1357,7 @@ paths:
           schema: { type: string }
         - name: decision
           in: query
-          schema: { type: string, enum: [approved, rejected, timed_out, auto_allowed, blocked] }
+          schema: { type: string, enum: [approved, approved_rewritten, rejected, timed_out, auto_allowed, blocked] }
         - name: agent
           in: query
           description: Requesting client label, exact case-insensitive match on source
@@ -2894,7 +2940,7 @@ paths:
         "200":
           content:
             application/json:
-              schema: { type: object }
+              schema: { $ref: "#/components/schemas/SshSyncDiff" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
 
@@ -3335,12 +3381,7 @@ paths:
         "200":
           content:
             application/json:
-              schema:
-                type: object
-                properties:
-                  prefs:    { type: object, description: "The effective preferences; each field is a comma-separated list in preference order." }
-                  custom:   { type: boolean, description: "True when an override is stored rather than the defaults." }
-                  defaults: { type: object, description: "The built-in safe defaults." }
+              schema: { $ref: "#/components/schemas/AlgoPrefsState" }
     put:
       summary: Replace the SSH algorithm preferences
       description: Sent whole rather than field by field, so a caller changing one list reads the current value first. Each list must be non-empty, free of duplicates and composed of plausible algorithm names, so a list that could not complete a handshake is rejected rather than written. Takes effect on the next handshake.
@@ -3365,7 +3406,7 @@ paths:
           description: The preferences in effect after the write.
           content:
             application/json:
-              schema: { type: object }
+              schema: { $ref: "#/components/schemas/AlgoPrefsState" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
         "400":
@@ -3378,7 +3419,7 @@ paths:
           description: The preferences in effect after the change.
           content:
             application/json:
-              schema: { type: object }
+              schema: { $ref: "#/components/schemas/AlgoPrefsState" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
         "500":

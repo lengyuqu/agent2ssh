@@ -834,7 +834,9 @@ secret = "my-secret-key"
 当 URL 包含 `hooks.slack.com` 时，自动使用 Slack Block Kit 格式：
 
 - 标题显示事件类型（Approval Required / Command Blocked / Command Completed / Anomaly Detected）
-- 字段显示主机名、命令、风险等级、退出码
+- 每条消息固定带两个字段：`Host` 与 `Command`（命令装在围栏代码块里）
+- `Risk Level` 与 `Exit Code` 是**条件字段**，只有事件带了非空值才出现。所以 `diagnostic_error` 的卡片只有 `Host` 与 `Command` 两个 field（它的 `risk_level` 与 `exit_code` 都是 `None`）；命令没执行时（例如被 gate 拦下）`exec_completed` 也没有 `Exit Code`
+- 对 `diagnostic_error`，`Host` 里装的是**组件名**、`Command` 里装的是错误文本（见上一节的字段说明），在 Slack 里读起来就是「一个组件名 + 一段错误消息」，不是「一台主机 + 一条命令」
 - `approval_required` 事件包含打开本地 Approvals 控制台的按钮；实际批准或拒绝仍通过已认证的控制台/API 完成
 
 ### 自定义 Webhook

@@ -2,6 +2,17 @@
 
 Agent2SSH exposes 76 tools via the Model Context Protocol (MCP) stdio server.
 
+## Daemon address
+
+Every tool that reaches the local daemon does so through `local_daemon_url()`:
+`http://127.0.0.1:7722` by default, the value of `AGENT2SSH_DAEMON_ADDR` when that
+names another `host:port`, and loopback whenever the daemon is bound to a wildcard
+(`0.0.0.0` / `::`). No tool hard-codes the address, so a daemon moved off the
+default port stays reachable without reconfiguring the client. This applies to
+every daemon-backed tool — `ssh_metrics`, `ssh_gate_status`, the approval and
+event tools, `local_exec`, `resident_session_*` and `containers_*` alike — not to
+`ssh_metrics` alone.
+
 ## Tool List
 
 The numbering below matches the order returned by `tools/list` in
@@ -56,7 +67,7 @@ the `mcp_tools_match_skills_md_documentation` integration test.
 | 44 | `ssh_config_import` | Import team configuration from a JSON object. Merges hosts (skips duplicates by name), and overwrites risk rules and playbooks if provided. |
 | 45 | `ssh_config_import_preview` | Preview what a team config import will change without actually importing. Shows hosts to add, skip, update, and risk rules/playbook changes. |
 | 46 | `ssh_doctor` | Run diagnostic checks on the agent2ssh environment: embedded SSH/keygen capability, config directory, `hosts.json`, daemon token permissions, daemon health, optional config files, and audit log size. |
-| 47 | `ssh_metrics` | Retrieve basic metrics from the local agent2ssh daemon (requests, execs, blocked commands, durations, approvals). Reads from `GET /metrics` on the local daemon — `127.0.0.1:7722` unless `AGENT2SSH_DAEMON_ADDR` names another address. |
+| 47 | `ssh_metrics` | Retrieve basic metrics from the local agent2ssh daemon (requests, execs, blocked commands, durations, approvals). Reads from `GET /metrics` on the local daemon — see [Daemon address](#daemon-address). |
 | 48 | `ssh_preview_exec` | Preview what an execution will do before running it. Returns target hosts, commands, risk levels, warnings, and whether approval is required. Supports single-host and multi-host preview. Fails when a multi-host selection matches no configured host, matching `ssh_exec_multi`. |
 | 49 | `ssh_approval_policies_list` | List all configured approval policies. Each policy specifies when approval is required based on host, tags, risk level, and command pattern. |
 | 50 | `ssh_approval_check` | Check whether running a command on a specific host requires approval based on configured policies. Returns the matching policy name and whether approval is needed. |
