@@ -87,14 +87,13 @@ function placeholders(text: string): Set<string> {
 const has = (key: string) => Object.prototype.hasOwnProperty.call(zh, key);
 
 describe("i18n dictionary", () => {
-  it("finds the call sites it is supposed to check", () => {
-    // A guard that silently scans nothing is worth less than no guard: this
-    // pins the scanner. The exact count moves as the UI grows; the floor is
-    // what matters. 900 rather than 600 because a per-line scan (the shape
-    // this replaced) sees only 922 of the 948 sites, so a floor of 600 has
-    // enough headroom to hide that whole class of regression.
-    expect(literalCallSites().length).toBeGreaterThan(900);
-  });
+  // There used to be a `> 900` count floor here. It was removed because it
+  // could not be falsified: dropping one `t()` call moved 948 to 947, so only
+  // losing 48 of them would have turned it red, and a floor set 48 below the
+  // current count is not an assertion about anything. The two tests that
+  // follow cover what it was reaching for — "sees more calls than a per-line
+  // scan" fails if the scan degrades or returns nothing, and the dictionary
+  // test fails if any literal it does see is unknown.
 
   it("checks a t() call whose literal starts on the next line", () => {
     // The scan is whole-file for this reason: prettier splits long help

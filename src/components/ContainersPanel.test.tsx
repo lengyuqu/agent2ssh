@@ -12,11 +12,14 @@ const mockApi = vi.hoisted(() => ({
   discoverContainers: vi.fn(),
   containerRuntimes: vi.fn(),
   launchContainerTarget: vi.fn(),
+  // Hoisted out of the module factory so the launch-failure test can assert
+  // the error was reported, not only that the button came back.
+  reportError: vi.fn(),
 }));
 
 vi.mock("../api", () => ({
   api: mockApi,
-  reportError: vi.fn(),
+  reportError: mockApi.reportError,
 }));
 
 /** A stopped wslc container, as `agent2ssh containers list --all` reports it. */
@@ -201,8 +204,20 @@ describe("ContainersPanel", () => {
 
     fireEvent.click(await screen.findByText("Open in terminal"));
 
+    // The three assertions are deliberately separate: before them, this test
+    // asserted only that the API was called (true the moment the button is
+    // clicked) and that the idle label came back (true from the `finally`
+    // block), so emptying the `catch` left it green. The toast and the
+    // reported error are what "instead of pretending" actually means.
     await waitFor(() => expect(mockApi.launchContainerTarget).toHaveBeenCalled());
+    expect(await screen.findByText("docker is not a runtime on this host")).toBeTruthy();
+    expect(mockApi.reportError).toHaveBeenCalledWith(
+      "containers-panel",
+      "launch container terminal failed",
+      "docker is not a runtime on this host"
+    );
     // The launch button must leave its busy label behind and stay clickable.
     expect(await screen.findByText("Open in terminal")).toBeTruthy();
+    expect(screen.queryByText("Opening...")).toBeNull();
   });
 });
