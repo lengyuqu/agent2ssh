@@ -521,7 +521,7 @@ agent2ssh policy test "terraform destroy -auto-approve" --host prod-db --json
 agent2ssh daemon start
 ```
 
-守护进程启动后会在 `127.0.0.1:7722` 监听 HTTP API，并提供 Web 控制台。
+守护进程启动后会在 `127.0.0.1:7722` 监听 HTTP API，并提供 Web 控制台。这个地址是默认值，`AGENT2SSH_DAEMON_ADDR` 可以改成别的 `host:port`；客户端（CLI / MCP / 桌面端）都经同一条解析逻辑取地址，改端口不需要另外配置。
 
 ### 停止守护进程
 

@@ -1,6 +1,6 @@
 # Daemon API 快速入门
 
-Agent2SSH Daemon 提供本地 HTTP API 和 WebSocket 接口，允许通过 REST 调用所有 SSH 操作。守护进程监听 `127.0.0.1:7722`，使用 Bearer Token 认证。
+Agent2SSH Daemon 提供本地 HTTP API 和 WebSocket 接口，允许通过 REST 调用所有 SSH 操作。守护进程默认监听 `127.0.0.1:7722`（`AGENT2SSH_DAEMON_ADDR` 可改，下文示例都用默认地址），使用 Bearer Token 认证。
 
 ---
 
