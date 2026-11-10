@@ -1045,8 +1045,13 @@ paths:
         platforms, but stopping is two steps rather than one: this request, and —
         only once a daemon has accepted it and is still running when the wait ends —
         a force-terminate. A request that never gets an accepted answer ends the
-        attempt instead: the caller reports why and sends no signal, so `401`, `409`
-        and a refused connection all leave the process alone. The caller waits
+        attempt instead: the caller reports why and sends no signal, so a refused
+        connection, and every 4xx this operation can answer, leave the process
+        alone. The 409 is one such answer; on a stop, so are the refusals the
+        caller makes before connecting — no `/health` answer, another PID, another
+        config directory, or no admin token file — which never reach this route, so
+        a reader should not go looking for a 401 on a request that was never sent.
+        The caller waits
         `GRACEFUL_STOP_WAIT` (8 s) for the process to exit; on `Running` it records
         a warning, signals the process by force, then waits 2 more seconds, and a
         `StillRunning` observation at that point is an error rather than a silent
