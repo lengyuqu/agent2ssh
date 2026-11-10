@@ -960,6 +960,7 @@ components:
         hourly_breakdown:  { type: array, items: { $ref: "#/components/schemas/HourlyBucket" } }
 
 paths:
+
   /health:
     get:
       summary: Health check
@@ -1052,6 +1053,11 @@ paths:
           description: >
             `expect_pid` was present but not a PID. Omitting the field is how a
             caller stops without a check.
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
         "409":
@@ -1070,6 +1076,11 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/HostProfile" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
     post:
       summary: Create or update a host profile
       requestBody:
@@ -1082,6 +1093,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/HostProfile" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
 
@@ -1095,6 +1111,11 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/HostProfile" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
 
@@ -1114,6 +1135,11 @@ paths:
                 type: object
                 properties:
                   ok: { type: boolean }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
         "404":
@@ -1140,6 +1166,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/HostPolicySummary" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           content:
             application/json:
@@ -1170,6 +1201,11 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/PingResult" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scoped token does not allow one of the requested hosts or the ping operation
           content:
@@ -1195,6 +1231,11 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ExecResult" }
         "400":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1243,6 +1284,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scope denied or approval rejected
           content:
@@ -1279,7 +1325,12 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ExecMultiBatchResult" }
         "400":
-          description: Command too long, or the requested hosts/tags matched no configured host
+          description: The command is too long, no configured host matched the requested hosts/tags, or risk policy blocked the command on at least one target (a blocked target is refused with 400 before anything runs, and the message names the rule).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1319,7 +1370,12 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ExecComparison" }
         "400":
-          description: Command too long, or the requested hosts/tags matched no configured host
+          description: The command is too long, no configured host matched the requested hosts/tags, or risk policy blocked the command on at least one target (a blocked target is refused with 400 before anything runs, and the message names the rule).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1392,6 +1448,12 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ExecutionGateStatus" }
 
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /gate/pause:
     post:
       summary: Pause non-desktop daemon execution
@@ -1405,6 +1467,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ExecutionGateStatus" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
 
@@ -1421,6 +1488,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ExecutionGateStatus" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
 
@@ -1522,6 +1594,12 @@ paths:
         "400":
           description: "The command is empty, over the length cap, or contains control characters; there are fewer than 2 or more than 32 targets; or a `terminal_id` is a duplicate. A `terminal_id` that is not a UUID is **not** a 400 — it is resolved to no live endpoint and comes back per target as `authorized: false` with `terminal is not connected`."
 
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /terminal/broadcast:
     post:
       summary: Authorize and enqueue a multi-terminal command
@@ -1545,6 +1623,12 @@ paths:
         "400":
           description: "Same validation as `/terminal/broadcast/preview`: empty command, control characters, fewer than 2 or more than 32 targets, or a duplicate `terminal_id`. A non-UUID `terminal_id` is resolved per target, not rejected here."
 
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /recordings/config:
     description: Recording endpoints require the unrestricted admin token; scoped tokens are rejected.
     get:
@@ -1555,6 +1639,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/RecordingConfig" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Terminal recordings require the unrestricted admin token; a scoped token gets 403.
     put:
@@ -1574,6 +1663,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/RecordingConfig" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Terminal recordings require the unrestricted admin token; a scoped token gets 403.
 
@@ -1589,6 +1683,11 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/RecordingInfo" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Terminal recordings require the unrestricted admin token; a scoped token gets 403.
 
@@ -1607,6 +1706,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/RecordingContent" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Terminal recordings require the unrestricted admin token; a scoped token gets 403.
         "404": { description: Missing or invalid recording }
@@ -1624,6 +1728,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/RecordingInfo" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Terminal recordings require the unrestricted admin token; a scoped token gets 403.
         "400": { description: Confirmation missing or recording id invalid }
@@ -1709,6 +1818,12 @@ paths:
                 type: array
                 items: { $ref: "#/components/schemas/AuditEntry" }
 
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /audit/export:
     get:
       summary: Export filtered audit records as JSONL or CSV
@@ -1772,6 +1887,12 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /sftp/upload:
     post:
       summary: Upload a file via SCP
@@ -1786,6 +1907,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/SftpResult" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scope denied or approval rejected
           content:
@@ -1821,6 +1947,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/SftpResult" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scope denied or approval rejected
           content:
@@ -1861,6 +1992,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ExecResult" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scope denied or approval rejected
           content:
@@ -1901,6 +2037,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ExecResult" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scope denied or approval rejected
           content:
@@ -1941,6 +2082,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ExecResult" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scope denied or approval rejected
           content:
@@ -1984,6 +2130,11 @@ paths:
               schema: { $ref: "#/components/schemas/ExecResult" }
         "400":
           description: Rename rejected by the SSH/SFTP layer
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -2032,6 +2183,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scope denied or approval rejected
           content:
@@ -2074,6 +2230,11 @@ paths:
               schema: { $ref: "#/components/schemas/ExecResult" }
         "400":
           description: Directory is not empty, or the SSH/SFTP layer rejected the removal
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -2133,6 +2294,11 @@ paths:
               schema: { $ref: "#/components/schemas/ExecResult" }
         "400":
           description: Blocked by risk policy or recursive delete failed in the SSH/SFTP layer
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -2246,6 +2412,11 @@ paths:
                 type: object
                 properties:
                   id: { type: string, format: uuid }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scope denied or approval rejected
           content:
@@ -2280,6 +2451,12 @@ paths:
                     id:   { type: string, format: uuid }
                     host: { type: string }
 
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /sessions/{id}/write:
     post:
       summary: Write input to a session
@@ -2302,6 +2479,11 @@ paths:
                 type: object
                 properties:
                   ok: { type: boolean }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "423":
           description: Execution gate paused
           content:
@@ -2347,6 +2529,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scope denied — the token's allowed hosts, tags and `session_read` command scope do not cover the host this session was opened on.
           content:
@@ -2371,6 +2558,11 @@ paths:
                   ok: { type: boolean }
         "400":
           description: The id is not a UUID, or it names no live session.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -2441,6 +2633,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scope denied — the token's allowed hosts and tags do not cover this environment id.
           content:
@@ -2461,6 +2658,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          description: Internal failure while serving the request (a config file could not be read, or the authorization chain hit an internal error).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
     get:
       summary: List resident sessions
       description: Filters sessions by the caller token's allowed hosts and tags using each session's own host id. Available while the execution gate is paused.
@@ -2478,6 +2680,12 @@ paths:
                     label: { type: string }
                     idle_secs: { type: integer }
                     dead: { type: boolean }
+
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /resident-sessions/{id}/exec:
     post:
@@ -2522,6 +2730,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scope denied — the command is outside the token's allowed hosts, tags or command patterns for the session's own environment id.
           content:
@@ -2539,6 +2752,12 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "429":
           description: Execution limit exceeded.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "500":
+          description: Internal failure while serving the request (a config file could not be read, or the authorization chain hit an internal error).
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -2581,6 +2800,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Token scope does not permit reading this session
           content:
@@ -2612,6 +2836,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Token scope or authorization policy refuses closing this session
           content:
@@ -2633,6 +2862,12 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+        "500":
+          description: Internal failure while serving the request (a config file could not be read, or the authorization chain hit an internal error).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /forwards:
     post:
       summary: Add a port forward tunnel
@@ -2647,6 +2882,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ForwardRule" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scope denied or approval rejected
           content:
@@ -2677,6 +2917,12 @@ paths:
                 type: array
                 items: { $ref: "#/components/schemas/ForwardRule" }
 
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /forwards/{id}:
     delete:
       summary: Remove a tunnel
@@ -2693,6 +2939,12 @@ paths:
                 type: object
                 properties:
                   ok: { type: boolean }
+
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /forwards/multi:
     post:
@@ -2739,6 +2991,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scope denied or approval rejected
           content:
@@ -2779,6 +3036,11 @@ paths:
                   ok: { type: boolean }
         "400":
           description: The id is not a UUID, no rule has it, or the rule still exists but its worker could not be started (the SSH connection or the listener failed; the message names which).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -2829,6 +3091,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scope denied, or the approval policy refused the stop. A rule outside the token's hosts and tags is answered like an unknown id (400).
           content:
@@ -2860,6 +3127,12 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/ApprovalRequest" }
+
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /approvals/{id}/approve:
     post:
@@ -2899,6 +3172,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "500":
           description: |
             The authentication middleware could not read `daemon_tokens.toml` while validating a
@@ -2933,6 +3211,12 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /risk/check:
     post:
       summary: Check risk level of a command
@@ -2963,6 +3247,12 @@ paths:
                       pattern is not carried, so the two possible values are `null`
                       and the literal `"user_rule"`.
 
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /connections:
     get:
       summary: List retained embedded SSH connection states
@@ -2973,6 +3263,12 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/ConnectionStatus" }
+
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /connections/{host}/connect:
     post:
@@ -2991,6 +3287,11 @@ paths:
                 type: object
                 properties:
                   ok: { type: boolean }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scope denied or approval rejected
           content:
@@ -3024,6 +3325,11 @@ paths:
                 type: object
                 properties:
                   ok: { type: boolean }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scope denied or approval rejected
           content:
@@ -3046,6 +3352,12 @@ paths:
                 type: array
                 items: { $ref: "#/components/schemas/Playbook" }
 
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /playbooks/run:
     post:
       summary: Execute a playbook on a host
@@ -3060,6 +3372,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/PlaybookRunResult" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scope denied or approval rejected
           content:
@@ -3092,6 +3409,12 @@ paths:
                 type: array
                 items: { $ref: "#/components/schemas/DaemonInfo" }
 
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /daemons/{alias}/exec:
     post:
       summary: Execute a command through a configured daemon alias
@@ -3111,6 +3434,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ExecResult" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scope denied or approval rejected
           content:
@@ -3140,6 +3468,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/WebhookConfig" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
     put:
       summary: Set webhook notification configuration
       requestBody:
@@ -3152,6 +3485,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/WebhookConfig" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403
 
@@ -3188,6 +3526,12 @@ paths:
           description: Requires the unrestricted admin token; a scoped token gets 403.
         "400":
           description: Unknown period
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "401":
+          description: Missing or invalid bearer token.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -3245,6 +3589,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Scoped token does not allow one of the requested targets or the command
           content:
@@ -3276,6 +3625,12 @@ paths:
                   risk_level:        { $ref: "#/components/schemas/RiskLevel" }
                   ttl_secs:          { type: integer, nullable: true }
 
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /approval/policies:
     get:
       summary: List approval policies
@@ -3286,6 +3641,11 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/ApprovalPolicy" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
     put:
       summary: Replace approval policies
       description: Sent whole rather than field by field. These policies decide which commands need a human, so a replace that omits a policy removes it.
@@ -3304,6 +3664,11 @@ paths:
                 type: object
                 properties:
                   ok: { type: boolean }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403
 
@@ -3336,6 +3701,12 @@ paths:
           description: Requires the unrestricted admin token; a scoped token gets 403.
         "400":
           description: The id is not a UUID, no known request has it, or it is no longer pending.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "401":
+          description: Missing or invalid bearer token.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -3383,6 +3754,12 @@ paths:
                           type: array
                           items: { type: string }
 
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /daemons/view:
     get:
       summary: Unified view of the local daemon and all configured remote daemons
@@ -3391,6 +3768,12 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/DaemonUnifiedView" }
+
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /diagnostics:
     get:
@@ -3402,6 +3785,12 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/DaemonDiagnostic" }
+
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /diagnostics/{alias}:
     get:
@@ -3417,6 +3806,12 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/DaemonDiagnostic" }
 
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /version-check/{alias}:
     get:
       summary: Check protocol/version compatibility with a configured remote daemon
@@ -3431,6 +3826,12 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/VersionCompatibility" }
 
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /config/export:
     get:
       summary: Export shareable team configuration
@@ -3440,6 +3841,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/TeamConfigExport" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
         "500":
@@ -3468,6 +3874,11 @@ paths:
                   hosts_updated:       { type: integer, description: "Name matched and at least one of host, user, port, jump_host, proxy_id, risk_override, tags, group, env, role or owner differed; that host was then replaced in place. A name that matches and is otherwise identical counts as `hosts_skipped`, not here." }
                   risk_rules_imported: { type: boolean }
                   playbooks_imported:  { type: boolean }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
 
@@ -3499,6 +3910,12 @@ paths:
                   playbooks_change:  { type: string, nullable: true }
                   summary:           { type: string }
 
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /ssh-sync/diff:
     get:
       summary: Compare Agent2SSH hosts against `~/.ssh/config`
@@ -3507,6 +3924,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/SshSyncDiff" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
 
@@ -3522,6 +3944,11 @@ paths:
                 properties:
                   path:           { type: string }
                   hosts_exported: { type: integer }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
         "500":
@@ -3539,6 +3966,12 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/WebDavSyncStatus" }
+
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /health-snapshot:
     get:
@@ -3582,6 +4015,11 @@ paths:
                         error:        { type: string, nullable: true }
                   collected_at: { type: string, format: date-time }
                   total_ms:     { type: integer }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
     post:
       summary: Collect health snapshot for specified hosts
       description: Triggers a concurrent health collection for the given hosts (or all configured hosts if omitted).
@@ -3619,6 +4057,11 @@ paths:
                         error:        { type: string, nullable: true }
                   collected_at: { type: string, format: date-time }
                   total_ms:     { type: integer }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403
         "500":
@@ -3647,6 +4090,11 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/Snippet" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
     post:
       summary: Create or replace a command snippet, keyed by name
       requestBody:
@@ -3668,6 +4116,12 @@ paths:
         "400":
           description: Invalid snippet name or command.
 
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /snippets/{name}:
     delete:
       summary: Remove a command snippet
@@ -3687,6 +4141,12 @@ paths:
         "400":
           description: Invalid snippet name.
 
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /redact/rules:
     get:
       summary: List sensitive-data redaction rules
@@ -3698,6 +4158,11 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/RedactRuleInfo" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
     post:
       summary: Add a redaction rule
       description: A rule's pattern is its identity, so a pattern that is already present is rejected rather than overwritten, and an invalid regex is rejected before anything is written.
@@ -3723,6 +4188,12 @@ paths:
           description: Requires the unrestricted admin token; a scoped token gets 403.
         "400":
           description: The pattern does not compile, matches the empty string, or is already in the set. An empty replacement is allowed — it deletes the matched text rather than substituting it.
+
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /redact/rules/update:
     post:
@@ -3751,6 +4222,12 @@ paths:
         "400":
           description: No rule matches the pattern, or the new pattern does not compile, matches the empty string, or is already taken by another rule.
 
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /redact/rules/delete:
     post:
       summary: Remove a redaction rule
@@ -3778,6 +4255,12 @@ paths:
         "400":
           description: Missing `force`, or no rule matches the pattern.
 
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /redact/rules/reset:
     post:
       summary: Restore the built-in redaction rule set
@@ -3790,6 +4273,11 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/RedactRuleInfo" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
         "500":
@@ -3805,6 +4293,11 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/HighlightRule" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
     post:
       summary: Add a terminal highlight rule
       description: A rule's keyword is its identity, so a duplicate is rejected. Rules are stored as regular expressions, so a caller that wants plain-text matching has to escape the keyword itself before sending it.
@@ -3835,6 +4328,12 @@ paths:
         "400":
           description: Empty keyword, a missing or over-long name, a color that is not `#RRGGBB`, or a keyword already in the set. The keyword's regex syntax is deliberately not checked here — the renderer compiles it with JavaScript, whose grammar differs from the one a Rust-side check would use.
 
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /highlight/rules/update:
     post:
       summary: Replace the terminal highlight rule identified by keyword
@@ -3861,6 +4360,12 @@ paths:
           description: Requires the unrestricted admin token; a scoped token gets 403.
         "400":
           description: No rule matches the keyword, or the replacement rule fails the same checks as an added one.
+
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /highlight/rules/delete:
     post:
@@ -3889,6 +4394,12 @@ paths:
         "400":
           description: Missing `force`, or no rule matches the keyword.
 
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /highlight/rules/reset:
     post:
       summary: Restore the built-in terminal highlight rules
@@ -3901,6 +4412,11 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/HighlightRule" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
         "500":
@@ -3915,6 +4431,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/AlgoPrefsState" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
     put:
       summary: Replace the SSH algorithm preferences
       description: Sent whole rather than field by field, so a caller changing one list reads the current value first. Each list must be non-empty, free of duplicates and composed of plausible algorithm names, so a list that could not complete a handshake is rejected rather than written. Takes effect on the next handshake.
@@ -3934,6 +4455,11 @@ paths:
           description: Requires the unrestricted admin token; a scoped token gets 403.
         "400":
           description: A list is empty, repeats an entry, or contains an implausible algorithm name.
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
     delete:
       summary: Drop the SSH algorithm overrides
       description: Goes back to the built-in safe defaults.
@@ -3943,6 +4469,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/AlgoPrefsState" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
         "500":
@@ -3973,6 +4504,11 @@ paths:
                         nonce:       { type: string, description: "Identifies this prompt when answering it." }
                         prompt_text: { type: string, description: "The question as the server asked it." }
                   count: { type: integer }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
 
@@ -3999,6 +4535,11 @@ paths:
                 properties:
                   status: { type: string, enum: [responded] }
                   nonce:  { type: string }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
         "404":

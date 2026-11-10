@@ -608,6 +608,48 @@ fn resident_session_close_respects_the_gate_while_reads_remain_available() {
 }
 
 #[test]
+fn resident_session_open_and_exec_respect_the_gate() {
+    // The close path is covered above; open and exec go through the same
+    // `preflight_guarded_request`, so a paused gate must refuse them too. Only
+    // reads are supposed to stay available, and a refactor that dropped the
+    // preflight from either handler would leave `delete` still answering 423 —
+    // the suite would stay green while `open` spawned a shell into a paused
+    // gate. That is exactly the shape of gap this asserts against.
+    let daemon = TestDaemon::start("open-exec-gate");
+    let session = daemon.open_default_session("open-exec-gate");
+    let id = session["id"].as_str().expect("session id");
+    let exec_path = format!("/resident-sessions/{id}/exec");
+
+    let paused = daemon.post("/gate/pause", serde_json::json!({}));
+    assert_eq!(paused.status(), 200, "{}", body_text(paused));
+
+    let open = daemon.post(
+        "/resident-sessions",
+        serde_json::json!({ "host": "local", "force": true }),
+    );
+    assert_eq!(open.status(), 423, "{}", body_text(open));
+    assert!(open
+        .text()
+        .unwrap_or_default()
+        .contains("execution gate paused"));
+
+    let exec = daemon.post(
+        &exec_path,
+        serde_json::json!({ "command": "echo gate-should-refuse", "force": true }),
+    );
+    assert_eq!(exec.status(), 423, "{}", body_text(exec));
+    assert!(exec
+        .text()
+        .unwrap_or_default()
+        .contains("execution gate paused"));
+
+    let resumed = daemon.post("/gate/resume", serde_json::json!({}));
+    assert_eq!(resumed.status(), 200, "{}", body_text(resumed));
+    let close = daemon.delete(&format!("/resident-sessions/{id}"));
+    assert_eq!(close.status(), 200, "{}", body_text(close));
+}
+
+#[test]
 fn resident_session_close_waits_for_approval_before_killing_the_shell() {
     let daemon = TestDaemon::start("close-approval");
     let session = daemon.open_default_session("close-approval");

@@ -5,10 +5,22 @@
 //! 1. **Core function tests** — exercise the library functions that the daemon
 //!    HTTP handlers wrap, verifying business logic without going through HTTP.
 //!
-//! 2. **HTTP handler tests** — build a minimal axum `Router` that mirrors the
-//!    daemon's route structure and use axum's `oneshot` test utility to verify
-//!    request/response semantics (auth, routing, JSON serialization, status
-//!    codes) without spawning a real TCP server.
+//! 2. **HTTP handler tests** — build a small axum `Router` that reproduces the
+//!    shape of 18 of the daemon's 92 routes, and use axum's `oneshot` test
+//!    utility to verify request/response semantics (auth, routing, JSON
+//!    serialization, status codes) without spawning a real TCP server.
+//!
+//!    **This layer is a shape-mirror, not an implementation test.** The copies
+//!    carry neither `AuthContext` nor `require_admin` — `check_auth` compares
+//!    one fixed token — so nothing here can say what a *scoped* token gets, and
+//!    a handler that gained or lost an admin gate would keep these assertions
+//!    green. The 74 routes that are not mirrored at all (`/metrics`, `/gate*`,
+//!    `/audit*`, `/sftp/*`, `/sessions*`, `/forwards*`, `/recordings*`,
+//!    `/prompts/*`, `/terminal*`, `/events/stream`) have no coverage here in
+//!    either direction. Behaviour that depends on scope, admin, or a route this
+//!    router does not mount belongs in the real-daemon e2e targets
+//!    (`daemon_local_exec_e2e`, `daemon_resident_session_e2e`, ...), which spawn
+//!    `agent2ssh-daemon` itself.
 
 mod common;
 
@@ -2116,13 +2128,86 @@ fn risk_tiers_match_mcp_tool_registry() {
 
 // ── S3-2: OpenAPI / daemon contract checks ──────────────────────────────────
 
-/// Every daemon route is in `docs/api.yaml`, and nothing else is.
+/// The five method builders axum's `routing` module exposes for the verbs the
+/// daemon uses, as they appear in source (with the call paren) and as OpenAPI
+/// spells them (without).
+const METHOD_BUILDERS: [(&str, &str); 5] = [
+    ("get(", "get"),
+    ("post(", "post"),
+    ("put(", "put"),
+    ("delete(", "delete"),
+    ("patch(", "patch"),
+];
+
+/// `:id` (axum) → `{id}` (OpenAPI), trailing slash trimmed.
+///
+/// A `:` starts a parameter that runs to the next `/`, so the whole segment is
+/// renamed at once; anything else is copied verbatim.
+fn normalized_route_path(path: &str) -> String {
+    let mut normalized = String::new();
+    let mut chars = path.chars();
+    while let Some(ch) = chars.next() {
+        if ch == ':' {
+            normalized.push('{');
+            for ch in chars.by_ref() {
+                if ch == '/' {
+                    break;
+                }
+                normalized.push(ch);
+            }
+            normalized.push('}');
+            normalized.push('/');
+        } else {
+            normalized.push(ch);
+        }
+    }
+    // Keep the root path intact; only strip trailing slashes after it.
+    while normalized.len() > 1 && normalized.ends_with('/') {
+        normalized.pop();
+    }
+    normalized
+}
+
+/// The methods one `.route(...)` call mounts, in source order.
+///
+/// `get(a).post(b)` mounts two, and a builder chain that wraps across lines
+/// still belongs to a single call — so the caller bounds `segment` at the next
+/// `.route(`. A builder is only counted when the character before it is not
+/// part of a name: `algo_prefs_get` ends in `_get` and must not read as a
+/// `get(` call.
+fn mounted_methods(segment: &str) -> Vec<&'static str> {
+    let mut methods = Vec::new();
+    for (needle, name) in METHOD_BUILDERS {
+        let mut from = 0;
+        while let Some(found) = segment[from..].find(needle) {
+            let at = from + found;
+            let preceded_by_name = segment[..at]
+                .chars()
+                .next_back()
+                .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_');
+            if !preceded_by_name {
+                methods.push(name);
+            }
+            from = at + needle.len();
+        }
+    }
+    methods
+}
+
+/// Every daemon route is in `docs/api.yaml`, and nothing else is — path,
+/// method, and the 401 that the auth middleware answers with.
 ///
 /// `docs/api.yaml` is the published contract, so a route that is not in it is a
 /// route no client can discover — and the gap is invisible from either side
 /// alone, which is how `/snippets`, the port-forward batch operations and the
 /// 2FA prompt endpoints all went undocumented at once. The two non-API routes
 /// are the browser console and its root redirect.
+///
+/// Paths alone are only a third of the contract. A handler whose *method*
+/// changed still has its path documented, and an operation with no documented
+/// `401` still looks complete — yet 401 is the one code every non-public route
+/// can return, because `auth_middleware` rejects before any handler runs. It
+/// went missing on 98 of 103 operations without a single test going red.
 #[test]
 fn api_yaml_documents_every_daemon_route() {
     // `/` and `/console` serve the web console, not the API.
@@ -2132,9 +2217,25 @@ fn api_yaml_documents_every_daemon_route() {
     let spec = include_str!("../../docs/api.yaml");
 
     // `Path` parameters are `:id` in axum and `{id}` in OpenAPI.
+    //
+    // Each call is bounded at the next `.route(` (or at `.with_state(`, which
+    // ends the router chain) so a multi-line builder chain cannot borrow the
+    // methods of the call that follows it.
+    let route_starts: Vec<usize> = daemon
+        .match_indices(".route(")
+        .map(|(index, _)| index)
+        .collect();
     let mut routes: Vec<String> = Vec::new();
-    for (index, _) in daemon.match_indices(".route(") {
-        let rest = &daemon[index..];
+    let mut mounted: Vec<(String, &'static str)> = Vec::new();
+    for (position, start) in route_starts.iter().enumerate() {
+        let mut end = route_starts
+            .get(position + 1)
+            .copied()
+            .unwrap_or(daemon.len());
+        if let Some(with_state) = daemon[*start..].find(".with_state(") {
+            end = end.min(start + with_state);
+        }
+        let rest = &daemon[*start..end];
         let Some(open) = rest.find('"') else { continue };
         let Some(close) = rest[open + 1..].find('"') else {
             continue;
@@ -2143,26 +2244,9 @@ fn api_yaml_documents_every_daemon_route() {
         if !path.starts_with('/') {
             continue;
         }
-        let mut normalized = String::new();
-        let mut chars = path.chars();
-        while let Some(ch) = chars.next() {
-            if ch == ':' {
-                normalized.push('{');
-                for ch in chars.by_ref() {
-                    if ch == '/' {
-                        break;
-                    }
-                    normalized.push(ch);
-                }
-                normalized.push('}');
-                normalized.push('/');
-            } else {
-                normalized.push(ch);
-            }
-        }
-        // Keep the root path intact; only strip trailing slashes after it.
-        while normalized.len() > 1 && normalized.ends_with('/') {
-            normalized.pop();
+        let normalized = normalized_route_path(path);
+        for method in mounted_methods(rest) {
+            mounted.push((normalized.clone(), method));
         }
         if !NON_API_ROUTES.contains(&normalized.as_str()) {
             routes.push(normalized);
@@ -2170,6 +2254,8 @@ fn api_yaml_documents_every_daemon_route() {
     }
     routes.sort();
     routes.dedup();
+    mounted.sort();
+    mounted.dedup();
     assert!(!routes.is_empty(), "no daemon routes were found to compare");
 
     // Top-level OpenAPI paths are indented two spaces under `paths:`.
@@ -2204,6 +2290,104 @@ fn api_yaml_documents_every_daemon_route() {
         phantom.is_empty(),
         "docs/api.yaml documents paths the daemon does not serve: {phantom:?}. \
          Either the route was removed and the spec was not, or the path is misspelled."
+    );
+
+    // ── Methods and the auth code ───────────────────────────────────────────
+    //
+    // A path alone is not the contract: the method is what a client calls, and
+    // the 401 is what every non-public route answers with before a handler
+    // runs. Both drifted while this test stayed green.
+    struct DocumentedOperation {
+        path: String,
+        method: &'static str,
+        has_401: bool,
+        is_public: bool,
+    }
+
+    let mut operations: Vec<DocumentedOperation> = Vec::new();
+    let mut current_path: Option<String> = None;
+    for line in spec.lines() {
+        let body = line.trim_start();
+        let indent = line.len() - body.len();
+        if let Some(rest) = line.strip_prefix("  /") {
+            let path = rest.split(':').next().unwrap_or_default();
+            current_path = Some(if path.is_empty() {
+                "/".to_string()
+            } else {
+                format!("/{path}")
+            });
+            continue;
+        }
+        // Path items and the operation keys under them: methods sit four
+        // spaces in, `security` and the response codes deeper.
+        if indent == 4 {
+            if let Some(name) = body.strip_suffix(':') {
+                if let Some((_, method)) = METHOD_BUILDERS.iter().find(|(_, known)| *known == name)
+                {
+                    operations.push(DocumentedOperation {
+                        path: current_path.clone().unwrap_or_default(),
+                        method,
+                        has_401: false,
+                        is_public: false,
+                    });
+                }
+            }
+            continue;
+        }
+        let Some(operation) = operations.last_mut() else {
+            continue;
+        };
+        if indent == 6 && body == "security: []" {
+            operation.is_public = true;
+        }
+        if indent == 8 && body.starts_with("\"401\":") {
+            operation.has_401 = true;
+        }
+    }
+
+    let undocumented_methods: Vec<String> = mounted
+        .iter()
+        .filter(|(path, method)| {
+            !NON_API_ROUTES.contains(&path.as_str())
+                && !operations
+                    .iter()
+                    .any(|operation| operation.path == *path && operation.method == *method)
+        })
+        .map(|(path, method)| format!("{method} {path}"))
+        .collect();
+    assert!(
+        undocumented_methods.is_empty(),
+        "these daemon route methods are missing from docs/api.yaml: {undocumented_methods:?}. \
+         A client programs against the method as well as the path, so a changed method breaks \
+         it even when the path still matches."
+    );
+
+    let phantom_methods: Vec<String> = operations
+        .iter()
+        .filter(|operation| {
+            !mounted
+                .iter()
+                .any(|(path, method)| *path == operation.path && *method == operation.method)
+        })
+        .map(|operation| format!("{} {}", operation.method, operation.path))
+        .collect();
+    assert!(
+        phantom_methods.is_empty(),
+        "docs/api.yaml documents methods the daemon does not serve: {phantom_methods:?}. \
+         Either the route's method changed and the spec was not, or the spec is wrong."
+    );
+
+    let missing_401: Vec<String> = operations
+        .iter()
+        .filter(|operation| !operation.is_public && !operation.has_401)
+        .map(|operation| format!("{} {}", operation.method, operation.path))
+        .collect();
+    assert!(
+        missing_401.is_empty(),
+        "these operations do not document the 401 the auth middleware returns: {missing_401:?}. \
+         Every route outside `is_public_path` is rejected with 401 before its handler runs, so \
+         the code belongs to the operation, not to the handler body — which is why it went \
+         missing without a test going red."
     );
 }
 
