@@ -680,7 +680,7 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
 
 - **L1 已落**：`63f81f5`（5 文件）。新增 `src/i18n.test.tsx`（8 项）：721 条字面量逐条查字典 + 占位符双侧一致 + 扫描器自身下限（`> 600`）+ 语言选择的四条行为。四处注释：`format.ts` 的 locale 口径（L2-55）、`dialog.tsx` 的 ConfirmHost 可达性 + label 分工、`toast.tsx` 的无障碍名缺口（L2-56）、`i18n.tsx` 的 try/catch 不一致（L2-57）。
 - **验证**：`npm run build` 6.42s；`npm test` **202 passed / 27 files**（基线 194/26，新增 8/1）；`cargo test --no-default-features --lib` **861 passed / 1 failed / 1 ignored**（失败项仍是那条故意红的 IPv6 测试）；`cargo fmt --check` 绿。
-- **回帖**：`（待填）`。
+- **回帖**：`2120022142895943680`（`## 第 1 轮收尾`，2026-11-10T05:14:01Z）。
 - **L2 新增**：L2-55（前端 locale 口径）、L2-56（toast 关闭按钮 a11y 名）、L2-57（`initialLanguage` 无 try/catch）。另在 L2-PENDING 里写明一条**分级口径待确认**：分级表没有覆盖前端 `src/**` 产品代码，本轮按「改用户可见行为 → L2」处理（比字面更保守）。
 
 ### 第 1 轮新增的不成立条目（原文保留，请勿重复提）
