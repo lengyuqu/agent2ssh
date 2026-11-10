@@ -425,11 +425,11 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
 - **N10（`api.yaml` 三处）**：两个 `403` 与 `/health-snapshot` 的 scope 句都在 `2476ec3` 里，`api_yaml_documents_every_daemon_route` 绿。**闭环**，但补 schema 时发现同一个 `path` 的 200 响应体一直是错的，见下。
 - **N6 / N7 的「不成立」是否过头**：两处事实经复核都站得住——`exec_blocked` 的发送点在 `:754`/`:763`，`fire_webhook` 在 daemon 里 5 个调用点（`:650`/`:763`/`:1714`/`:1810`/`:5634`，我说 `:5632` 差了个偏移，是按上一笔的行号说的）加 `anomaly.rs:295`；`format_slack_message` 确实按 `remote_outcome_unknown` 选 header 并带四个 field。**但 N7 的回应里我有一句话过头了**：我说「内联 span 与 fenced block 同样抑制这些 mrkdwn 标记」——这在 Slack 文档里是对的，而我手上没有 Slack 客户端，所以它只是「与文档一致」，不是「我验证过」。改为如实：机制由 Slack 侧决定，本仓只能保证发出去的 payload 是什么；本轮把 payload 的形状写成了可断言的事实（`format_slack_message` 的 `*Command:*\n```…``` ` 不转义，命令含三连反引号会提前闭合围栏），这才是本仓能负责的那一半。**N7 的判定不变（不成立），但理由收窄为「推论反过来也不成立 + 本仓无法验证对方的解析器」**。
 - **本轮新查出的三条**（都记 L2，因为都需拍板）：
-  - **L2-31**：`a04e99d` 的注释讲清了「不能以 `read() == 0` 退出」，但 `/exec/stream` 那个循环（`:5129-5153`）是**直接**以 `channel.eof()` 退出的，没有 `drain_channel`（`embedded_ssh.rs:1594-1601`）那样的 `&& !progressed` 计次。`eof()` 是「流结束且两队列空」，而 `close()`/reader 消失时 `mark_closed` 会**立刻**把 `state.eof` 置真、此时另一个 task 可能还在往队列里 push——`drain_channel` 的注释写的就是这件事（"the extra idle passes absorb a trailing packet"）。同一条主线，一个实现有护栏、一个没有。
-  - **L2-32**：`session_write` 的 body 没有 `command` / `change_id`，也不 `deny_unknown_fields`，与 `/exec` 一族的入参不同形；`api.yaml` 原来一句没写，本轮写进了 `SessionWriteRequest.input` 的描述。
-  - **L2-33**：`/health-snapshot` 的 200 一直是错的（写裸数组，实为 `HealthSnapshot` 对象，键名是 `load_avg`/`disk_usage`/`memory_usage`）。`http_health_snapshot_get_returns_200` 用 `hosts.is_some() || error.is_some()` 兜住，所以没红。本轮改了 `api.yaml` 的响应表（get + post，含 `403`/`500`），并把测试留在 L2-33 的建议改法里（它需要 L2-29 的 harness 隔离）。
+  - **L2-34**：`a04e99d` 的注释讲清了「不能以 `read() == 0` 退出」，但 `/exec/stream` 那个循环（`:5129-5153`）是**直接**以 `channel.eof()` 退出的，没有 `drain_channel`（`embedded_ssh.rs:1594-1601`）那样的 `&& !progressed` 计次。`eof()` 是「流结束且两队列空」，而 `close()`/reader 消失时 `mark_closed` 会**立刻**把 `state.eof` 置真、此时另一个 task 可能还在往队列里 push——`drain_channel` 的注释写的就是这件事（"the extra idle passes absorb a trailing packet"）。同一条主线，一个实现有护栏、一个没有。
+  - **L2-35**：`session_write` 的 body 没有 `command` / `change_id`，也不 `deny_unknown_fields`，与 `/exec` 一族的入参不同形；`api.yaml` 原来一句没写，本轮写进了 `SessionWriteRequest.input` 的描述。
+  - **L2-36**：`/health-snapshot` 的 200 一直是错的（写裸数组，实为 `HealthSnapshot` 对象，键名是 `load_avg`/`disk_usage`/`memory_usage`）。`http_health_snapshot_get_returns_200` 用 `hosts.is_some() || error.is_some()` 兜住，所以没红。本轮改了 `api.yaml` 的响应表（get + post，含 `403`/`500`），并把测试留在 L2-36 的建议改法里（它需要 L2-29 的 harness 隔离）。
 - **顺带**：`notify.rs` 的 `#[allow(dead_code)]` 标志已删（`fire_webhook` 在 `:250` 调它，`--lib` 构建下也在用）。
-- **动作**：本笔（`api.yaml` 的 `/health-snapshot` 两个响应表 + `SessionWriteRequest.input` 描述、`daemon_integration.rs` 的 `http_risk_check_blocked_command` 断言口径与注释、`notify.rs` 去掉过期 `allow`、`OPT-LOOP-L2-PENDING.md` 的 L2-31/32/33 + 本 ledger）。
+- **动作**：本笔（`api.yaml` 的 `/health-snapshot` 两个响应表 + `SessionWriteRequest.input` 描述、`daemon_integration.rs` 的 `http_risk_check_blocked_command` 断言口径与注释、`notify.rs` 去掉过期 `allow`、`OPT-LOOP-L2-PENDING.md` 的 L2-34/32/33 + 本 ledger）。
 - **验证**（本机首次跑 Rust 侧，见下）：`npm install` + `npm run build` 12.33 s；`npm test` **194 passed / 26 files**；`cargo fmt --check` 绿；`cargo test --no-default-features --lib` **861 passed / 1 failed / 1 ignored**（仍是基线那条故意红测 `an_ipv6_literal_at_port_22_is_removed`）；`cargo test --no-default-features --features daemon --test daemon_integration` **63 passed / 0 failed**；`cargo check --no-default-features --features daemon --bin agent2ssh-daemon` 干净；`api.yaml` 可解析、path 数仍 90。
 
 ## 批次汇总 · 2026-11-10 · issue #8 · SSH 传输、known_hosts 与认证（russh 侧）
@@ -459,6 +459,8 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
 | L2-29 | 给 `/risk/check` 的 `matched_rule` 补覆盖，前提是先隔离测试的配置目录 | 工程（结构性改动） |
 | L2-30 | 两个 handler 的执行门只有间接来源：补一次判定，还是改断言的判定口径 | 工程 / 口径 |
 | 其余 | L2-16…L2-25（错误分类、文案、TOFU 记录顺序、`import` 校验、`Unknown` 命名等）见上文各轮表格 | 逐条已写明代价 |
+
+**末轮之后的复核**：见上文「复核 · 末轮之后（基线 `2476ec3`）」，一笔提交 `18d9888` 推 `origin main`（`2476ec3..18d9888`），三条新 L2（L2-34/35/36）进 `OPT-LOOP-L2-PENDING.md`。
 
 **给下一批的方法学（新增三条，接前一批的三条）**
 
