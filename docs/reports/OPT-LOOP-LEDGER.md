@@ -740,3 +740,30 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
 - **验证**（我独立重跑，不采信它的自报）：`npm test` **203 passed / 27 files**（其改动后）+ 我新增 1 项 → 见下条；`npm run build` 6.61s；`cargo test --no-default-features --lib` 861 passed / 1 failed（已知故意红）/ 1 ignored；`cargo fmt --check` 绿。
 - **回帖**：`2120024605287956480`（`## 第 2 轮收尾`，2026-11-10T05:23:48Z）。
 
+
+### consume 3 / 6 · 2026-11-10 13:31–13:45 (GMT+8)
+
+- 指摘来源：CodeBuddy 对第 2 轮的复核（评论 `2120026178999201792`，标题「# 第 3 轮：只读复核」，2026-11-10T05:30:03Z）。6 条编号（A-1…A-6）+ 2 条 Q 答复 + 6 条它自己判不成立的备选。**本轮它恢复了只读**，与 issue 正文的补记一致。
+- **判定：6 条 → 成立 4 / 部分成立 2 / 不成立 0；另有两个它给的「修法」不成立。**
+
+| # | 指摘 | 判定 | 核实要点 |
+|---|---|---|---|
+| A-1 | `ApprovalDetail.test.tsx` 对四个上下文行零覆盖 | **成立** | 全文件 6 个 `it`，`grep` 无 `Requested by`/`Matched policy`/`Reason`/`Change ID`；fixture 的 `context` 只带 `rewritable`。变异确认：`contextRows` 恒 `[]` → 6 项全绿 |
+| A-2 | `COMMAND_TINT` 零覆盖 | **部分成立** | 着色零覆盖属实（变异：四值置空 → 全绿）。但它说「`copied` 分支零覆盖、补法用 `vi.spyOn(clipboard.writeText)`」**做不到**：`handleCopy`（`:72`）**全文件没有任何调用点**，`copied` 从不被置 true，`Check` 图标永不出现。这是死函数，不是零覆盖 |
+| A-3 | `KeysPanel.test.tsx` 测的是不可达前提 | **成立**（死分支） | `keys.rs:190-192` 的 `default_for_build()` 无条件 `Self::Ed25519`；`tauri_commands.rs:3204` 直接返回它。所以 `preferredAlgorithm === "rsa"` 生产永假。**比它说的更重**：不只是「测试弱」，是「测试在替一段永不渲染的 JSX 续命」，且那段文案描述的 libssh2 时代已经过去 |
+| A-4 | `folds.test.ts` 517 行覆盖不可达路径 | **部分成立** | 主结论成立：`createFoldStore`（`TerminalView.tsx:261`）不传 options → `canAutoFold()` 恒 false；`foldBlock`/`unfoldBlock` 无人消费 → `fold`/`unfold` 不可达。但它说「九个方法零生产调用」不准确：**`unfoldAll` 在 `TerminalView.tsx:473` 被调用一次** |
+| A-5 | `ContainersPanel.test.tsx:197-208` 断言写的是注释 | **成立** | 变异确认：`catch` 改空 → 测试仍绿。两条断言分别是「API 被调过」（点下去即真）与「空闲文案回来」（`finally` 里必然） |
+| A-6 | `> 900` 数量地板不可证伪 | **成立** | 删一个 `t()` 只从 948 变 947。**但它给的替代方案不成立**：`new Set(sites.map(s => s.where)).size === sites.length` 会红——实测 **64 处同行多调用**（`t(cond ? "A" : "B")` 三元全在一行） |
+| Q1 | 性质断言守得住「扫描器回退」、守不住「跨行被折叠成一行」 | **成立** | 我注释里已预见（「If the two ever converge…」），接受这个代价：折叠成一行是代码重排不是扫描缺陷，红一次让人看一眼即可 |
+| Q2 | `finds the call sites…`（`> 900`）是唯一不可证伪项 | **成立** | 其余 9 项逐条删代码验证都会红（它列的表我抽了 5 项复现）。处置见下 |
+
+- **L1 已落（本轮）**：
+  - `ApprovalDetail.test.tsx` +6 项：四行上下文（含值与标签）、空字段整块不渲染、四级风险着色（含 `blocked` 与 `high` 同色这一设计决策的唯一落点）。变异两次确认会红。
+  - `ContainersPanel.test.tsx`：把 `reportError` 提到 `vi.hoisted` 里，补 toast 文案、`reportError` 调用、`Opening...` 缺席三条断言。变异（吞错）确认会红。
+  - `i18n.test.tsx`：**删掉** `> 900` 地板，注释写明为什么它不可证伪、以及为什么 `where` 唯一性也做不到（64 个反例）。
+  - `KeysPanel.test.tsx`：那条 mock `rsa` 的用例改名 `keeps the legacy RSA-build warning, reachable only through a mocked backend`，注释写明生产不可达并指向 L2-58。
+  - `KeysPanel.tsx`：死分支上方加注释（不可达 + 文案已过期 + L2-58）。
+  - `folds.ts` 模块头：加「接线状态」段（`createFoldStore` 不传 options、`foldBlock`/`unfoldBlock` 无消费者、只有 `unfoldAll` 活着），并写明「别把这里的绿读成 UI 折叠可用」。
+- **L2 新增**：L2-58（KeysPanel 死告警分支，建议删）、L2-59（折叠功能未接线，接线/标/删三选一，②已落）。
+- **验证**：`npm test` **209 passed / 27 files**（204 → 209）；`npm run build` 6.53s；两次变异（`contextRows=[]`、`COMMAND_TINT` 置空）各自变红后还原；`ContainersPanel` 吞错变异变红后还原；`cargo test --no-default-features --lib` 861 passed / 1 failed（已知故意红）/ 1 ignored；`cargo fmt --check` 绿。
+- **回帖**：`（待填）`。
