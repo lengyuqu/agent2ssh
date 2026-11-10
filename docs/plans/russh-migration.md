@@ -491,7 +491,7 @@ agent2ssh exec agent-test "..." → exit 0
 
 负对照是这条验证的关键：它证明成功走的是 agent，而不是 `~/.ssh` 的兜底密钥，也证明 `identities()` 会跳过被拒的第一个身份、用第二个通过（Finding 1 的行为）。
 
-⚠️ **未验证的一支**：PuTTY **Pageant 本身**没装，所以 `PageantStream::new()` 成功的那条分支没跑过；实际跑到的是它失败后回退到 `\.\pipe\openssh-ssh-agent` 的路径。代码里 Pageant 优先、管道兜底，两者都在编译路径上，但只有兜底路径有运行时证据。
+⚠️ **未验证的一支**：PuTTY **Pageant 本身**没装，所以 `PageantStream::new()` 成功的那条分支没跑过。顺序也不是这里原先写的那个——代码是**管道优先、Pageant 兜底**（`agent.rs:317-327`）：`e67fd04` 同一天把顺序翻了过来，因为 Pageant 在没运行时也会先「连接成功」、等第一次真实请求才报 `early eof`。本节这次运行把 OpenSSH agent 服务临时置为 Manual 并启动过，命名管道能打开，所以它跑的是**第一条**分支，Pageant 根本没被试。「只有兜底路径有运行时证据」这句因此说反了：有运行时证据的是管道；Pageant 侧的证据来自 2026-10-23 的验收（`PAGEANT-ACCEPTANCE-2026-10-23.md`，那次 OpenSSH agent 全程 Stopped、管道打开失败，才走到 Pageant）。
 
 ### 10.2 与 macOS 基线的差值
 

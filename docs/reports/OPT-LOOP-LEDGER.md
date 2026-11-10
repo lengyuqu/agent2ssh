@@ -1496,9 +1496,32 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
   - 5 `russh-migration.md:494` 仍写「Pageant 优先、管道兜底」，`e67fd04` 已把代码翻成管道优先（部分成立，`agent.rs:317-327`；KNOWN-ISSUES.md:69 那句是对的）
   - 6 `embedded_ssh.rs:2074-2086` 的 T2-9 注释仍记 ssh2/libssh2 接线方式，`:1987` 同族残留（部分成立）
   - 另自验 3 条不成立（`bridge_tcp_and_channel` 空转烧 CPU / `channel.rs` request 混同超时与拒绝文案 / `legacy_pem` 尾随空格误判），并声明未重复 ledger 既有不成立与 L2-15/16/17/19/22/24/25/88 条目、未跑测试（环境无 cargo）
-- 6 轮进度：0 / 6（待消费任务更新；第 1 轮指摘即上述 6 条）
+- 6 轮进度：**1 / 6**（第 1 轮 2026-11-11 00:25 收尾，见文末 `consume 1 / 6`；issue 保持 open）
 - 正文已喂给 CodeBuddy：**67 条「不成立」原文**（编号 44：preflight 2 + batch1 六轮 10 + batch2 编号 15–31 十七条（29–31 物理落 batch 2 末节、内容属 batch 3 第 5 轮，正文已标注）+ batch4 第 1/5/6 轮 10 + batch6 第 1 轮 5；行内判定行 23：batch2 D2/D4、batch3 A5/E、batch5 D6 后半/D8/F6 后半/F10/F11 后半/F12、batch6 a1 后果/a3.2/a5/c 附更正/#10、batch7 第 1/2/4/5 轮 8 条、手工单发消费（#2）1 条含 3 项）+ KNOWN-ISSUES 空档（K2/K7/K9/K12 + §3 未验证范围 + §3.1 Pageant 共存边界）+ 口径提醒（基线红测 861/1/1、npm 213/27、feature 组合不可相加、`daemon_*_e2e` 需显式 `--features daemon`、`exec_fixture` 空跑、`.github/**` 禁区、四列计数、`[跑]` 标注不可采信、行号一律现算、L2-15/L2-16…L2-25/L2-37/L2-73/L2-88 勿重提、api.yaml 已在 #9/#12 对齐）。正文由 `/tmp/build-opt-issue-b8.py` 按 ledger 锚点切片生成（块级正则 + 行内唯一子串校验：16 个编号块 44 条 + 23 条判定行，复验通过）
 - 同主题第一批（#8）已 6 轮闭环；正文已写明 #8 落地的 L1 与已登记 L2 勿重提，本批重点找 **#8 闭环后新增/残留**的问题
 - 顺手按 #13 批次条目的指示删除顶部 `BATCH_COMPLETE · issue #12` 与 `#13` 两条状态行（#13 那条明写「下一批（B=8）由生产任务开 issue 时删除本行」；#12 无指示但同属已关闭批次留痕，沿用 #8–#11 先例一并删除；顶部 HTML 注释已同步为六条）
 - 下一批（B=9）：9 % 6 = 3 → 主题 3：MCP 契约与 CLI 文档一致性（`docs/skills.md`、`docs/api.yaml`、CLI help；第二批，#9 已闭环）。开 issue 前重读 ledger 不成立清单（批次 8 消费期间可能新增，行内判定行锚点会漂移）
 - 若 #14 仍 open 则按背压闸门跳过；锁沿用「保留在位、消费者侧自行清理」先例。
+
+### consume 1 / 6 · 2026-11-11 · batch 8（issue #14）
+
+- **指摘来源**：CodeBuddy 对 issue 正文的首条分析 `2120184256348471296`（23:58:12，开批后 6.5 分钟）。基线 `46a92c4`，全程只读。
+- **判定：6 条 → 成立 3 / 部分成立 3 / 不成立 0**；其内部另有 4 条子断言判为不成立，单列在下面，下一轮不要重复提。
+- **成立**：
+  - #2 `StallGuard` 对「对端不应答」不生效——**结论对，机制它说反了**。它说上界是 60 s 会话超时；`write_with_timeout` 只包 `Channel::write`（shell/exec），SFTP 句柄的 `write` 走 `russh_sftp::File`：`poll_write` 在 8 个在途 ack 上阻塞，`write_nowait` 的接收端没有被 `request_timeout_secs` 包住，`block_on` 无超时 ⇒ 实际是**无上界**，比它说的更糟。
+  - #3 L2-17 的「或在置 `None` 前存下错误」是空分支（`agent.rs:247-254`，第二次进来仍先在 `:242` 早退）。行号应为 `L2-PENDING.md:223`，不是 232。
+  - #5 `russh-migration.md:494` 的 Pageant/管道顺序反了：`e67fd04` 起是管道优先。且那次运行把 OpenSSH agent 启动过，跑的是第一条（管道）分支，Pageant 根本没被试——「只有兜底路径有运行时证据」是反的。
+- **部分成立**：
+  - #1 导入 identity：裸 `host:port` 会拼成 `host:port:port` 并计 `imported`（代码事实成立），但触发面只有手工编辑/外来 `known_hosts`；它给的两条叠加问题都不成立（见下）。
+  - #4 `/terminal` 的 `connected` 帧确实丢了 `auth_method`（`connection_info` 算了、只有诊断日志用），但「README 与 `/health-snapshot` 都回」是错的：`README.md`、`bin/agent2ssh-daemon.rs`、`docs/api.yaml` 三处都没有这个键。
+  - #6 `ssh2`/`libssh2` 注释残留成立（`:1999`、`:2086`、`handshake_with_hint` 的 `-5`、测试文档里的「credits to libssh2」）；失败文案漏 `id_*_sk` 与 `keyboard-interactive` 也成立，但那串字面量被 `russh-migration.md:489` 与四份历史证据引用，属 L2-98。
+- **不成立的子断言（原文保留，请勿重复提）**：
+  1. **「`known_hosts` 第二列可能是 `rsa-sha2-256`/`rsa-sha2-512` 这种签名算法名」— 不成立。** 那一列永远是公钥算法（`ssh-rsa`、`ecdsa-sha2-nistp256`、`ssh-ed25519`），签名算法从不写进去；`host_key_algorithm` 对 RSA 恒返回 `ssh-rsa`，与文件里那一列同名。导入直接用 `key_type` 不会造成槽位错配。
+  2. **「`[::1]` 不带端口时读成 `::1:22`，与存储层 `[::1]:22` 不等」— 不成立。** `known_host_identity`（`embedded_ssh.rs:196-198`）是 `format!("{}:{}", host.host.trim(), port)`，**不加括号**；`format_host_port` 只用于 `address` 字段（`:340`、`:373`）。两侧都是 `::1:22`。
+  3. **「README 与 `/health-snapshot` 都返回 `auth_method`」— 不成立。** `auth_method` 全仓只在 `embedded_ssh.rs` 与两处诊断日志里出现（`architecture.md` 那份清单也只说诊断字段）。
+  4. **「真挂起时的上界是 `channel.rs` 的 60 s 会话超时」— 不成立**，理由同 #2。
+- **L1 落地**：
+  - `4c82aa5`（`embedded_ssh.rs` 四处 + `sftp_transfer.rs` 三处，**全部是注释行**，`git diff -U0` 非注释行为 0）：libssh2/ssh2 残留、`-5` 描述、测试文档的「credits to libssh2」、导入 identity 的已知缺口、`Ok(0)` 分支不可达、`STALL_TIMEOUT`/`StallGuard` 的真实边界。
+  - 文档笔：`russh-migration.md:494` 顺序改正 + `KNOWN-ISSUES.md` K2 撤掉「停滞时报告写到多少字节」+ `OPT-LOOP-L2-PENDING.md` 删 L2-17 空分支、新增 L2-95…L2-98。
+- **验证**：`npm run build` 6.36s；`cargo test --no-default-features --lib` **861 passed / 1 failed / 1 ignored**（失败项仍是那条故意红的 `an_ipv6_literal_at_port_22_is_removed`）；`cargo fmt --check` 绿。
+- **L2 待拍板**：L2-95（导入 identity 形态）、L2-96（SFTP 写无截止时间，K2 的「已修」其实没兜住）、L2-97（`/terminal` 帧形状）、L2-98（失败文案）。
