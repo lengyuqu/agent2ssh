@@ -665,11 +665,11 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
 
 | # | 指摘 | 判定 | 核实要点 |
 |---|---|---|---|
-| 1 | `KeysPanel.tsx:107`/`:230` 的键是死键，中文回退英文 | **不成立** | 调用点是单引号字面量、字典键是双引号带 `\"`，**运行时值全等**（node 实测 `true`/`true`）。进一步：全仓 721 条 `t()` 字面量与 860 条字典双向比对，**MISSING=0**。它把「源码转义形态不同」当成了「字符串不相等」 |
+| 1 | `KeysPanel.tsx:107`/`:230` 的键是死键，中文回退英文 | **不成立** | 调用点是单引号字面量、字典键是双引号带 `\"`，**运行时值全等**（node 实测 `true`/`true`）。进一步：全仓 948 条 `t()` 字面量（第 2 轮整文件重扫的准确值；当时按行只数到 721 distinct）与 860 条字典双向比对，**MISSING=0**。它把「源码转义形态不同」当成了「字符串不相等」 |
 | 2 | MCP 5 条键用错英文源串 | 提出者自行撤回 | 它在 2′ 里整条撤回（`Copy command` 的调用点在 `HelpPanel.tsx:106`） |
 | 3 | `HighlightSettings.tsx:51` 插值模板串回退英文 | 提出者自行撤回 | 它自己改判「中文能生效」，降级为测试缺口（并入第 7 条） |
 | 4 | module registry 只覆盖 label；「写测试会立即红两条」 | **部分成立** | 前半成立：`nav.test.ts:57-63` 只断言 20 个 `MODULES` label。后半不成立：`MISSING=0`，那条测试会**绿** |
-| 5 | `formatDateTime` 用浏览器默认 locale，与 `html lang` 不一致 | **成立**（文案不一致） | `format.ts:14` `toLocaleString()`、`:24` `toLocaleTimeString([], …)`；`i18n.tsx` 把 `html lang` 设成 `zh-CN`。9 个消费点，中文界面在 en-US 浏览器上出 `11/10/2026, 2:15:03 PM` |
+| 5 | `formatDateTime` 用浏览器默认 locale，与 `html lang` 不一致 | **成立**（文案不一致） | `format.ts:14` `toLocaleString()`、`:24` `toLocaleTimeString([], …)`；`i18n.tsx` 把 `html lang` 设成 `zh-CN`。**11 个文件 import**（第 2 轮已更正为实测值，原写 9 个漏了 `ApprovalDetail`、`ApprovalQueue`），中文界面在 en-US 浏览器上出 `11/10/2026, 2:15:03 PM` |
 | 6 | `ConfirmHost` 不在 loading/wizard 分支 → `confirmDialog` 恒 false | **不成立** | `App.tsx:753-777` 两个提前 return 确实不含 host，但**都无可达调用点**：loading 屏只有 Spinner；`SetupWizard.tsx` 是单文件向导，自行渲染密钥表单，不挂 `KeysPanel`，全仓 8 个 `confirmDialog` 调用点无一在其子树。`dialog.tsx:132` 的注释已写明「无 host 时 resolve false」是设计 |
 | 7 | `confirmLabel` 是字面量时不过 `t()` | **不成立**（作为缺陷） | 17 处生产调用点**全部**包了 `t()`（7 处 `confirmDialog()` + 10 处 `<ConfirmDialog>`，grep 全量）；只有 `dialog.test.tsx` 传裸串。它自己也降为「测试缺口」。真实的是「分工没有文字说明」→ 已补注释 |
 | 8 | `ToastProvider` 关闭按钮无可访问名 | **成立**（缺陷/无障碍） | `toast.tsx:153-159` 无 `aria-label`/`title`/文本子节点。「唯一」这条加强论据**我未能独立证实**：粗扫 44 处疑似，抽查 3 处（`ErrorBoundary:58`/`Breadcrumb:26`/`HostList:396`）全有文本，是启发式假阳性 |
@@ -678,7 +678,7 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
 | 11 | 复数族 `count=0` 显示单数 | **不成立** | `TopBar.tsx:92` 外层有 `pendingApprovalsCount > 0` 守卫，0 时整块不渲染；`MultiExecPanel.tsx:137` 用 `=== 1` 判据，0 时走 `hosts` 复数，英文正确 |
 | 12 | `STORAGE_KEY` 同名不同值 + 读取无 try/catch | **部分成立** | 前半不是缺陷（两个模块私有常量，`agent2ssh.language` vs `agent2ssh.theme`，互不干扰）。后半成立：`i18n.tsx:948-950` 无 try，而 `theme.tsx:36-41` 与 `App.tsx:126-131` 都有；`main.tsx:37-47` 的 `ErrorBoundary` 在 `I18nProvider` **内部**，首帧抛错兜不住 |
 
-- **L1 已落**：`63f81f5`（5 文件）。新增 `src/i18n.test.tsx`（8 项）：721 条字面量逐条查字典 + 占位符双侧一致 + 扫描器自身下限（`> 600`）+ 语言选择的四条行为。四处注释：`format.ts` 的 locale 口径（L2-55）、`dialog.tsx` 的 ConfirmHost 可达性 + label 分工、`toast.tsx` 的无障碍名缺口（L2-56）、`i18n.tsx` 的 try/catch 不一致（L2-57）。
+- **L1 已落**：`63f81f5`（5 文件）。新增 `src/i18n.test.tsx`（8 项）：字面量逐条查字典（当时按行扫到 721 distinct、922 命中；第 2 轮整文件改为 948）+ 占位符双侧一致 + 扫描器自身下限（`> 600`，第 2 轮抬到 `> 900`）+ 语言选择的四条行为。四处注释：`format.ts` 的 locale 口径（L2-55）、`dialog.tsx` 的 ConfirmHost 可达性 + label 分工、`toast.tsx` 的无障碍名缺口（L2-56）、`i18n.tsx` 的 try/catch 不一致（L2-57）。
 - **验证**：`npm run build` 6.42s；`npm test` **202 passed / 27 files**（基线 194/26，新增 8/1）；`cargo test --no-default-features --lib` **861 passed / 1 failed / 1 ignored**（失败项仍是那条故意红的 IPv6 测试）；`cargo fmt --check` 绿。
 - **回帖**：`2120022142895943680`（`## 第 1 轮收尾`，2026-11-10T05:14:01Z）。
 - **L2 新增**：L2-55（前端 locale 口径）、L2-56（toast 关闭按钮 a11y 名）、L2-57（`initialLanguage` 无 try/catch）。另在 L2-PENDING 里写明一条**分级口径待确认**：分级表没有覆盖前端 `src/**` 产品代码，本轮按「改用户可见行为 → L2」处理（比字面更保守）。
@@ -708,7 +708,7 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
 ### 第 1 轮新增的不成立条目（原文保留，请勿重复提）
 
 1. **「`KeysPanel.tsx:107`/`:230` 的两条 zh 译文是死键：调用点单引号字面量里的 `"` 与字典双引号键里的 `\"` 不相等，中文界面回退英文」— 不成立。**
-   `'Delete key "{name}"?'` 与 `"Delete key \"{name}\"?"` 的**运行时值完全相同**（都是 `Delete key "{name}"?`）；`'No SSH keys managed. Click "Add Key" to get started.'` 与 `"No SSH keys managed. Click \"Add Key\" to get started."` 同理。实测 `===` 返回 `true`。全仓 721 条 `t()` 字面量对 860 条字典的差集为空，不存在任何缺键。**转义形态不是字符串差异。**
+   `'Delete key "{name}"?'` 与 `"Delete key \"{name}\"?"` 的**运行时值完全相同**（都是 `Delete key "{name}"?`）；`'No SSH keys managed. Click "Add Key" to get started.'` 与 `"No SSH keys managed. Click \"Add Key\" to get started."` 同理。实测 `===` 返回 `true`。全仓 **948 条** `t()` 字面量（跨行计全后；按行只数到 922）对 860 条字典的差集为空，不存在任何缺键。**转义形态不是字符串差异。**
 
 2. **「`App.tsx:753-759`/`:762-777` 两个提前 return 不含 `<ConfirmHost />`，所以 `SetupWizard` 及子面板调 `confirmDialog()` 恒得 false，confirm 不弹当取消」— 不成立。**
    `SetupWizard.tsx` **没有子面板**：它是单文件向导，自己渲染 `Input`/`Button`/`InlineAlert`，不 import `KeysPanel`/`SnippetsDialog`/`PlaybooksPanel`/`RecordingsPanel`/`SFTPPanel`/`McpAgentsPanel` 中的任何一个；全仓 8 个 `confirmDialog()` 调用点没有一处在其子树里。loading 分支只有一个 Spinner，没有可点的控件。`dialog.tsx:132` 的注释原本就写明「无 host 时 resolve(false)」是设计而非意外。
@@ -718,4 +718,25 @@ CodeBuddy 在评论 `2119859264326893568` 里指出**第 1 次收尾自己引入
 
 4. **「`count === 0` 时 `TopBar` 显示 `0 pending approval`（单数，英文语法错）；`MultiExecPanel` 用 `> 1` 判据同样错」— 不成立。**
    `TopBar.tsx:92` 的外层条件是 `pendingApprovalsCount > 0`，0 时整个按钮不渲染，那串文案不可能出现。`MultiExecPanel.tsx:137` 的判据是 `selected.length === 1`（不是 `> 1`），0 走 `"Run on {count} hosts"`，英文复数正确；按钮此时是 disabled 但文字仍在，读到的是正确形式。
+
+### consume 2 / 6 · 2026-11-10 13:20–13:35 (GMT+8)
+
+- 指摘来源：CodeBuddy 对第 1 轮的复核（评论 `2120023754917986304`，2026-11-10T05:20:25Z）。只有 **2 条**新指摘，另有三问的答复。
+- **判定：2 条 → 成立 2 / 不成立 0。两条都是我的错，不是它的。**
+
+| # | 指摘 | 判定 | 核实要点 |
+|---|---|---|---|
+| 1 | 扫描器按行切分，跨行 `t(` 被整条跳过；实测 922 / 948 | **成立**（真 bug，我写的） | 独立复算：**whole-file 948（distinct 747）/ per-line 922（distinct 721），差 26，涉 16 个文件**（`App.tsx` 56/55、`HelpPanel` 13/9、`RedactionSettings` 22/18、`SettingsMenu` 92/90…）。prettier 对长文案正是 `{t(\n  "…"\n)}` 排版。`> 600` 的下限确实挡不住（922 也过） |
+| 2 | `dialog.tsx:92` 的「21 call sites」实为 17；`format.ts:19` 的消费点列 9 个实为 11（漏 `ApprovalDetail`/`ApprovalQueue`） | **成立** | 复算：`confirmDialog()` 7 处（SnippetsDialog、KeysPanel、McpAgentsPanel×2、PlaybooksPanel、RecordingsPanel、SFTPPanel）+ `<ConfirmDialog>` 10 处（ProxyPanel、RedactionSettings×2、SyncPanel、ConfigSnapshotsPanel×3、HostList×3）= 17；`formatDateTime`/`formatClockTime` 的 import 文件 **11 个**（`grep -rln` 全量）。我第 1 轮把 props 定义、解构、默认值、传递、测试夹具全数进去了 |
+
+- **流程事故（必须记）**：issue 正文对 CodeBuddy 的要求是「**只做只读分析。不修改任何文件、不提交、不推送、不创建 PR**」。它本轮**直接推送了两个提交到 `cnb main`**（`1dda52b`、`3da2785`，基于我的 `300eaee`，快进关系、无分叉）。这不是第一次：上一批（issue #8）的 05:30 也有非本机身份推了 `8e16f40`/`09d49ea`。锁机制挡不住第二个写入者。
+  - 处置：**保留改动**（它是对的，撤销等于把跨行覆盖退回去），但本轮的验证数字由我独立重跑，不采信它自报的。回帖里点名要求下一轮恢复只读。
+  - 后果：`1dda52b` 的提交信息写的是它的口径，与我第 1 轮的笔不同风格；这不是问题，但它把「复核」和「实施」混进了同一条流水线，评审独立性没了。
+- **L1 已落（本轮，补它漏的）**：
+  - `i18n.test.tsx` 文件头的「~700 call sites」→「928 of 948」；补一条**性质断言**（`literalCallSites().length > perLineCount`，同一个正则按行再跑一遍，差值就是跨行覆盖），钉「扫描跨行」这个性质而不是某一句文案——它加的那条 `startsWith("The saved SSH fingerprint…")` 在文案改写时会红且原因无关；两条并存，分工写在注释里。
+  - 文件头补「已知假阳性」段：注释文本会被当代码扫描（`dialog.tsx` 里现有一例），方向安全（假键会红、真调用点漏掉才绿），并写明为什么不做注释剥离。
+  - ledger 判定表第 5 行的「9 个消费点」→ 11（它只改第 7 行和「不成立」第 3 条，漏了第 5 行）；「不成立」第 1 条的「721 条字面量」→ 948。
+- **未采纳它的一个表述**：它把「属性访问 15 + 裸变量 8 = 23」当作对象表口径的完整答案。这个数字我抽查过（`Breadcrumb:21/32`、`SettingsMenu:711/733`、`TerminalPanel:625` 都在），但它是**静态枚举**，不是可执行断言——下一轮加调用点它不会自动更新。作为「今天无缺陷」的证据够用，作为「已守住」不成立。已在第 2 轮回帖里要求它别再把这当结论。
+- **验证**（我独立重跑，不采信它的自报）：`npm test` **203 passed / 27 files**（其改动后）+ 我新增 1 项 → 见下条；`npm run build` 6.61s；`cargo test --no-default-features --lib` 861 passed / 1 failed（已知故意红）/ 1 ignored；`cargo fmt --check` 绿。
+- **回帖**：`（待填）`。
 
