@@ -613,9 +613,10 @@ fn clear_daemon_owner_if(pid: u32, start_time: u64) -> Result<bool> {
 /// daemon gives each WebSocket two seconds to finish, then waits up to four
 /// seconds for its drain registry to empty. The two waits run in sequence, so
 /// the worst case is about six seconds and a shorter constant would cut a
-/// graceful stop short. Those numbers are literals in `agent2ssh-daemon.rs`
-/// (`:5009`, `:5428`, `:5937`), so a change there has to be reflected here
-/// rather than compiled against; exit is observed on a 50 ms poll
+/// graceful stop short. Those numbers are literals in `agent2ssh-daemon.rs` —
+/// the per-connection grace at `:5014` (`/terminal`) and `:5442`
+/// (`/exec/stream`), the registry wait at `:5951` — so a change there has to be
+/// reflected here rather than compiled against; exit is observed on a 50 ms poll
 /// (`wait_for_exit`), which is why the margin over six seconds is measured in
 /// seconds and not milliseconds.
 const GRACEFUL_STOP_WAIT: Duration = Duration::from_secs(8);
