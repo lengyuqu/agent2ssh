@@ -1600,7 +1600,7 @@ async fn authorize_local_operation(
         None,
         None,
         "approval required but no local approval handler is available",
-        "; this subcommand has neither --force nor daemon forwarding, so a policy match can only be approved from the desktop app or the HTTP API",
+        "; sftp has neither --force nor daemon forwarding, and the desktop app has no approval handler either — only a daemon's /sftp/* routes can approve this",
     )
     .await
     .map_err(command_authorization_error)?;
