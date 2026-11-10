@@ -2168,16 +2168,16 @@ fn normalized_route_path(path: &str) -> String {
     normalized
 }
 
-/// The methods one `.route(...)` call mounts, in source order.
+/// The methods one `.route(...)` call mounts, in source order, with their handler.
 ///
 /// `get(a).post(b)` mounts two, and a builder chain that wraps across lines
 /// still belongs to a single call — so the caller bounds `segment` at the next
 /// `.route(`. A builder is only counted when the character before it is not
 /// part of a name: `algo_prefs_get` ends in `_get` and must not read as a
 /// `get(` call.
-fn mounted_methods(segment: &str) -> Vec<&'static str> {
-    let mut methods = Vec::new();
-    for (needle, name) in METHOD_BUILDERS {
+fn mounted_handlers(segment: &str) -> Vec<(&'static str, String)> {
+    let mut mounted = Vec::new();
+    for (needle, method) in METHOD_BUILDERS {
         let mut from = 0;
         while let Some(found) = segment[from..].find(needle) {
             let at = from + found;
@@ -2186,12 +2186,71 @@ fn mounted_methods(segment: &str) -> Vec<&'static str> {
                 .next_back()
                 .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_');
             if !preceded_by_name {
-                methods.push(name);
+                let handler: String = segment[at + needle.len()..]
+                    .chars()
+                    .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+                    .collect();
+                if !handler.is_empty() {
+                    mounted.push((method, handler));
+                }
             }
             from = at + needle.len();
         }
     }
-    methods
+    mounted
+}
+
+/// Every `.route(...)` call in the daemon, as (normalized path, method, handler).
+///
+/// Each call is bounded at the next one (or at `.with_state(`, which ends the
+/// router chain) so a multi-line builder chain cannot borrow the methods of the
+/// call that follows it.
+fn daemon_routes(daemon: &str) -> Vec<(String, &'static str, String)> {
+    let starts: Vec<usize> = daemon
+        .match_indices(".route(")
+        .map(|(index, _)| index)
+        .collect();
+    let mut routes = Vec::new();
+    for (position, start) in starts.iter().enumerate() {
+        let mut end = starts.get(position + 1).copied().unwrap_or(daemon.len());
+        if let Some(with_state) = daemon[*start..].find(".with_state(") {
+            end = end.min(start + with_state);
+        }
+        let segment = &daemon[*start..end];
+        let Some(open) = segment.find('"') else {
+            continue;
+        };
+        let Some(close) = segment[open + 1..].find('"') else {
+            continue;
+        };
+        let path = &segment[open + 1..open + 1 + close];
+        if !path.starts_with('/') {
+            continue;
+        }
+        let normalized = normalized_route_path(path);
+        for (method, handler) in mounted_handlers(segment) {
+            routes.push((normalized.clone(), method, handler));
+        }
+    }
+    routes
+}
+
+/// The body of one handler, from its `async fn` line to the next top-level item.
+///
+/// The panicking `handler_body` further down takes a full signature and is used
+/// by tests that assert on a named handler; this one takes a bare name because
+/// the name comes out of a route table, where the signature is not known.
+fn handler_body_of<'a>(daemon: &'a str, handler: &str) -> Option<&'a str> {
+    let signature = format!("\nasync fn {handler}(");
+    let start = daemon.find(&signature)? + 1;
+    let rest = &daemon[start..];
+    let end = rest
+        .match_indices("\nasync fn ")
+        .map(|(at, _)| at)
+        .chain(rest.match_indices("\nfn ").map(|(at, _)| at))
+        .min()
+        .unwrap_or(rest.len());
+    Some(&rest[..end])
 }
 
 /// Every daemon route is in `docs/api.yaml`, and nothing else is — path,
@@ -2217,43 +2276,18 @@ fn api_yaml_documents_every_daemon_route() {
     let spec = include_str!("../../docs/api.yaml");
 
     // `Path` parameters are `:id` in axum and `{id}` in OpenAPI.
-    //
-    // Each call is bounded at the next `.route(` (or at `.with_state(`, which
-    // ends the router chain) so a multi-line builder chain cannot borrow the
-    // methods of the call that follows it.
-    let route_starts: Vec<usize> = daemon
-        .match_indices(".route(")
-        .map(|(index, _)| index)
+    let parsed = daemon_routes(daemon);
+    let mut routes: Vec<String> = parsed
+        .iter()
+        .map(|(path, _, _)| path.clone())
+        .filter(|path| !NON_API_ROUTES.contains(&path.as_str()))
         .collect();
-    let mut routes: Vec<String> = Vec::new();
-    let mut mounted: Vec<(String, &'static str)> = Vec::new();
-    for (position, start) in route_starts.iter().enumerate() {
-        let mut end = route_starts
-            .get(position + 1)
-            .copied()
-            .unwrap_or(daemon.len());
-        if let Some(with_state) = daemon[*start..].find(".with_state(") {
-            end = end.min(start + with_state);
-        }
-        let rest = &daemon[*start..end];
-        let Some(open) = rest.find('"') else { continue };
-        let Some(close) = rest[open + 1..].find('"') else {
-            continue;
-        };
-        let path = &rest[open + 1..open + 1 + close];
-        if !path.starts_with('/') {
-            continue;
-        }
-        let normalized = normalized_route_path(path);
-        for method in mounted_methods(rest) {
-            mounted.push((normalized.clone(), method));
-        }
-        if !NON_API_ROUTES.contains(&normalized.as_str()) {
-            routes.push(normalized);
-        }
-    }
     routes.sort();
     routes.dedup();
+    let mut mounted: Vec<(String, &'static str)> = parsed
+        .iter()
+        .map(|(path, method, _)| (path.clone(), *method))
+        .collect();
     mounted.sort();
     mounted.dedup();
     assert!(!routes.is_empty(), "no daemon routes were found to compare");
@@ -2388,6 +2422,98 @@ fn api_yaml_documents_every_daemon_route() {
          Every route outside `is_public_path` is rejected with 401 before its handler runs, so \
          the code belongs to the operation, not to the handler body — which is why it went \
          missing without a test going red."
+    );
+}
+
+/// Every operation whose handler can answer 500 documents it.
+///
+/// 401 is a property of the route (the middleware rejects before a handler
+/// runs); 500 is a property of the *handler*, which knows what it had to read.
+/// That is what made it invisible: 21 operations answered 500 for an
+/// unreadable config while the spec listed only a 200, and a client generated
+/// from the spec treats an undocumented 500 as an unknown error — `GET /gate`
+/// being the worst case, since the one question a broken gate file must still
+/// answer is "is the gate paused", and the answer arrives as an undocumented
+/// 500.
+///
+/// The handler→operation map is derived rather than written down: the handler
+/// named in each `.route(...)` call is looked up in the same source text and
+/// its own body is checked for `INTERNAL_SERVER_ERROR`. A 500 that arrives
+/// through a shared helper (`preflight_guarded_request`, `authorize_targets`)
+/// is not visible this way, because that is the handler's *dependency*
+/// failing, not its own branch — `/exec-multi` and `/exec/compare` document
+/// theirs by hand.
+#[test]
+fn api_yaml_documents_the_500_each_handler_can_return() {
+    let daemon = include_str!("../src/bin/agent2ssh-daemon.rs");
+    let spec = include_str!("../../docs/api.yaml");
+
+    // Operations and the status codes they document, parsed by indentation:
+    // methods sit four spaces in under their path, response keys eight.
+    let mut documented: Vec<(String, &'static str, Vec<String>)> = Vec::new();
+    let mut current_path: Option<String> = None;
+    for line in spec.lines() {
+        let body = line.trim_start();
+        let indent = line.len() - body.len();
+        if let Some(rest) = line.strip_prefix("  /") {
+            let path = rest.split(':').next().unwrap_or_default();
+            current_path = Some(if path.is_empty() {
+                "/".to_string()
+            } else {
+                format!("/{path}")
+            });
+            continue;
+        }
+        if indent == 4 {
+            if let Some(name) = body.strip_suffix(':') {
+                if let Some((_, method)) = METHOD_BUILDERS.iter().find(|(_, known)| *known == name)
+                {
+                    documented.push((current_path.clone().unwrap_or_default(), method, Vec::new()));
+                }
+            }
+            continue;
+        }
+        if indent != 8 {
+            continue;
+        }
+        let Some(operation) = documented.last_mut() else {
+            continue;
+        };
+        if let Some(code) = body
+            .strip_prefix('"')
+            .and_then(|rest| rest.split('"').next())
+        {
+            operation.2.push(code.to_string());
+        }
+    }
+
+    let undocumented: Vec<String> = daemon_routes(daemon)
+        .into_iter()
+        .filter_map(|(path, method, handler)| {
+            let body = handler_body_of(daemon, &handler)?;
+            if !body.contains("INTERNAL_SERVER_ERROR") {
+                return None;
+            }
+            // An entirely undocumented operation is the route test's finding.
+            let codes = documented
+                .iter()
+                .find(|(known_path, known_method, _)| {
+                    *known_path == path && *known_method == method
+                })?
+                .2
+                .clone();
+            if codes.iter().any(|code| code == "500") {
+                None
+            } else {
+                Some(format!("{method} {path} ({handler})"))
+            }
+        })
+        .collect();
+    assert!(
+        undocumented.is_empty(),
+        "these operations answer 500 but do not document it: {undocumented:?}. \
+         The handler's own body returns INTERNAL_SERVER_ERROR, so a client that programs \
+         against the spec cannot tell this failure from an unknown one."
     );
 }
 

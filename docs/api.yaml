@@ -1081,6 +1081,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          description: The hosts configuration could not be read, or could not be parsed. Answered with 500 rather than an empty list, so a broken config is distinguishable from no hosts.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
     post:
       summary: Create or update a host profile
       requestBody:
@@ -1093,6 +1098,15 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/HostProfile" }
+        "400":
+          description: |
+            The profile is rejected by validation, or the hosts configuration could not be
+            written (`save_config`: a read-only config directory, a full disk). A save
+            failure answers 400 rather than 500, so the status alone cannot tell "your
+            profile is malformed" from "we could not write it" — read the message.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "401":
           description: Missing or invalid bearer token.
           content:
@@ -1118,6 +1132,12 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
+
+        "500":
+          description: Reading `~/.ssh/config`, or saving the imported hosts, failed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /hosts/{name}:
     delete:
@@ -1325,7 +1345,10 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ExecMultiBatchResult" }
         "400":
-          description: The command is too long, no configured host matched the requested hosts/tags, or risk policy blocked the command on at least one target (a blocked target is refused with 400 before anything runs, and the message names the rule).
+          description: |
+            The command is too long; the hosts configuration could not be read or parsed; no configured host matched the
+            requested hosts/tags; or risk policy blocked the command on at least one target (a blocked target is refused
+            with 400 before anything runs, and the message names the rule).
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1355,6 +1378,12 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+        "500":
+          description: The authorization chain hit an internal error, or the hosts configuration could not be read.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /exec/compare:
     post:
       summary: Execute a command on multiple hosts and compare results
@@ -1370,7 +1399,10 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ExecComparison" }
         "400":
-          description: The command is too long, no configured host matched the requested hosts/tags, or risk policy blocked the command on at least one target (a blocked target is refused with 400 before anything runs, and the message names the rule).
+          description: |
+            The command is too long; the hosts configuration could not be read or parsed; no configured host matched the
+            requested hosts/tags; or risk policy blocked the command on at least one target (a blocked target is refused
+            with 400 before anything runs, and the message names the rule).
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1396,6 +1428,12 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "429":
           description: Execution limit exceeded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "500":
+          description: The authorization chain hit an internal error, or the hosts configuration could not be read.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1454,6 +1492,12 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+        "500":
+          description: "`execution_gate.json` could not be read (`load_execution_gate`), so the daemon cannot say whether the gate is paused."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /gate/pause:
     post:
       summary: Pause non-desktop daemon execution
@@ -1475,6 +1519,12 @@ paths:
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
 
+        "500":
+          description: "`execution_gate.json` could not be written (`save_execution_gate`); the gate is not paused."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /gate/resume:
     post:
       summary: Resume daemon execution
@@ -1495,6 +1545,12 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
+
+        "500":
+          description: "`execution_gate.json` could not be written (`save_execution_gate`); the gate stays paused."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /exec/stream:
     get:
@@ -1671,6 +1727,12 @@ paths:
         "403":
           description: Terminal recordings require the unrestricted admin token; a scoped token gets 403.
 
+        "500":
+          description: The recording configuration could not be written.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /recordings:
     get:
       summary: List local asciicast v2 terminal recordings
@@ -1690,6 +1752,12 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Terminal recordings require the unrestricted admin token; a scoped token gets 403.
+
+        "500":
+          description: The recording index could not be read.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /recordings/{id}:
     parameters:
@@ -1824,6 +1892,12 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+        "500":
+          description: The audit log could not be read.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /audit/export:
     get:
       summary: Export filtered audit records as JSONL or CSV
@@ -1889,6 +1963,12 @@ paths:
 
         "401":
           description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "500":
+          description: The audit log could not be read, or the CSV could not be written.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -2654,7 +2734,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "429":
-          description: A session or execution limit was exceeded (`register_limited_session_for_command`, or the source's session cap).
+          description: A rate or concurrency limit was exceeded (the shared `reject_if_rate_limited` preflight, or the local-environment session cap). The per-command session cap on `/sessions` is a 400 here, not a 429.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -3358,6 +3438,12 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+        "500":
+          description: The playbook store could not be read.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /playbooks/run:
     post:
       summary: Execute a playbook on a host
@@ -3415,6 +3501,12 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+        "500":
+          description: The daemon registry could not be read.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /daemons/{alias}/exec:
     post:
       summary: Execute a command through a configured daemon alias
@@ -3460,6 +3552,12 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+        "500":
+          description: The HTTP client used to reach the remote daemon could not be built.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /webhook/config:
     get:
       summary: Get webhook notification configuration
@@ -3492,6 +3590,12 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403
+
+        "500":
+          description: "`webhook.toml` could not be written."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /metrics:
     get:
@@ -3532,6 +3636,12 @@ paths:
 
         "401":
           description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "500":
+          description: The audit log could not be read while computing the trend.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -3631,6 +3741,12 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+        "500":
+          description: The approval policy configuration could not be read.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /approval/policies:
     get:
       summary: List approval policies
@@ -3643,6 +3759,11 @@ paths:
                 items: { $ref: "#/components/schemas/ApprovalPolicy" }
         "401":
           description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          description: The approval policy configuration could not be read.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -3671,6 +3792,12 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403
+
+        "500":
+          description: The approval policy configuration could not be written.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /approval/{id}/respond:
     post:
@@ -3775,6 +3902,12 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+        "500":
+          description: The unified view could not be assembled; the daemon registry could not be read.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /diagnostics:
     get:
       summary: Run connectivity/auth/version diagnostics against all configured remote daemons
@@ -3788,6 +3921,12 @@ paths:
 
         "401":
           description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+        "500":
+          description: The remote inventory could not be read.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -3931,6 +4070,12 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "403":
           description: Requires the unrestricted admin token; a scoped token gets 403.
+
+        "500":
+          description: "`~/.ssh/config` could not be read or compared."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /ssh-sync/export:
     post:
@@ -4092,6 +4237,11 @@ paths:
                 items: { $ref: "#/components/schemas/Snippet" }
         "401":
           description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          description: The snippet store could not be read.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
