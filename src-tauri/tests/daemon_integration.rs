@@ -3199,7 +3199,16 @@ fn a_websocket_drain_budget_claim_matches_the_loop_it_describes() {
         ("/terminal", "handle_terminal"),
     ] {
         let claims_budget = path_block(spec, path).contains("drains for up to 500 ms");
-        let measures_one_deadline = handler_body_of(daemon, handler).contains("timeout_at(");
+        let body = handler_body_of(daemon, handler);
+        // The span has to stop at this handler's own closing brace: if it ran to
+        // the end of the file, the `timeout_at(` below could belong to another
+        // function and the comparison would answer for the whole daemon.
+        assert!(
+            !body.contains("\nasync fn "),
+            "`{handler}`'s extracted body runs past the function — it contains another \
+             `async fn`, so a `timeout_at(` from elsewhere could satisfy this check"
+        );
+        let measures_one_deadline = body.contains("timeout_at(");
         assert_eq!(
             claims_budget,
             measures_one_deadline,

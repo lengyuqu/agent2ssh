@@ -1748,9 +1748,11 @@ paths:
         {"type":"shutdown"} with no other field, drains for up to 500 ms, and closes.
         That frame is the client's only notice that the daemon is going away; it is not
         an error, and reconnecting immediately will race the shutdown. The drain
-        forwards stdout and stderr only: an exit that arrives after the shutdown frame
-        is recorded for the audit and not sent as {"type":"exit"}, so a client waiting
-        for that frame sees the close instead.
+        forwards stdout and stderr only: an exit that arrives during it is recorded for
+        the audit, not sent there. The handler sends its one {"type":"exit"} after the
+        loop, which on this path is after the Close — so treat the close as final and
+        do not wait for that frame. (A data frame after a close frame is a protocol
+        violation; the ordering is L2-87 in `docs/reports/OPT-LOOP-L2-PENDING.md`.)
         Every authorization refusal after the upgrade — scope, execution gate, rate limit, approval — arrives as
         {"type":"error","error":"..."} over the socket, not as an HTTP status: the handler body only counts the
         request and then hands the socket to `on_upgrade`. The only HTTP-level failure is the handshake itself.
@@ -1784,7 +1786,8 @@ paths:
         output until 500 ms pass with no new terminal event, and closes. That 500 ms
         is an idle timeout, not a budget: a terminal that keeps producing output is
         drained until the two-second per-connection deadline in `POST /shutdown`
-        drops the loop, and a `Closed` or error event ends the drain early.
+        drops the loop; a `Closed` or error event, or a send that fails, ends the
+        drain early.
         Note the `message` field: `/exec/stream`'s shutdown frame has
         none, so a client that handles both routes has to accept the two shapes —
         and the same 500 ms means something else there: an absolute deadline
