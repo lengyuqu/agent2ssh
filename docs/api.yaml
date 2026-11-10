@@ -1520,7 +1520,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/TerminalBroadcastResponse" }
         "400":
-          description: The command is empty, over the length cap, or contains control characters; there are fewer than 2 or more than 32 targets; a `terminal_id` is a duplicate or not a UUID.
+          description: "The command is empty, over the length cap, or contains control characters; there are fewer than 2 or more than 32 targets; or a `terminal_id` is a duplicate. A `terminal_id` that is not a UUID is **not** a 400 — it is resolved to no live endpoint and comes back per target as `authorized: false` with `terminal is not connected`."
 
   /terminal/broadcast:
     post:
@@ -1543,7 +1543,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/TerminalBroadcastResponse" }
         "400":
-          description: Same validation as `/terminal/broadcast/preview` — empty command, control characters, fewer than 2 or more than 32 targets, duplicate or non-UUID `terminal_id`.
+          description: "Same validation as `/terminal/broadcast/preview`: empty command, control characters, fewer than 2 or more than 32 targets, or a duplicate `terminal_id`. A non-UUID `terminal_id` is resolved per target, not rejected here."
 
   /recordings/config:
     description: Recording endpoints require the unrestricted admin token; scoped tokens are rejected.
