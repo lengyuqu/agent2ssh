@@ -1032,7 +1032,7 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 ### batch 2026-11-10 · 测试覆盖缺口（只有代码依据、无断言的分支）
 - issue #12 / 开批时间 2026-11-10 18:29 (GMT+8)
 - CodeBuddy 首条分析：**未到**（等待中——issue 发出后 60 s × 5 次轮询（18:30–18:34）与结束前即时复核均 0 条 CodeBuddy 评论；消费者下次运行重新等。**注意**：#12 现有 1 条评论 `2120103682455814144` 是**生产任务的更正**（见下），不是 CodeBuddy 分析，判定「已到」须按作者区分）
-- 6 轮进度：0 / 6（待消费任务更新）
+- 6 轮进度：4 / 6（第 4 轮于 20:07–20:5x 完成，见文末 `consume 4 / 6`；第 5 轮待跑）
 - 正文喂给 CodeBuddy：**49 条「不成立」原文**（preflight 2 + batch 1 六轮 10 + batch 2 行内 D2/D4 2 条、编号 15–28 十四条与物理落在其末节的 29–31 三条共 19 + batch 3 行内 A5/E 2 条 + batch 4 第 1/5/6 轮 10 条 + batch 5 行内 6 条；29–31 内容属 batch 3 第 5 轮，正文已标注来源）+ KNOWN-ISSUES 空档 7 项（§3 反向用例只对 ed25519 做过、§3 多轮 keyboard-interactive、§3 端口转发/PTY 按服务端版本、K14 `pid_definitely_missing`/`Unknown` 纯代码路径、K15 终端 WebSocket 背压、E6/E8 Apple container、K2 `STALL_TIMEOUT` 复测）+ 基线口径（861/1/1 故意红测勿再提、npm 213/27、feature 组合不可相加、`exec_fixture` 空跑、`daemon_*_e2e` 需显式 `--features daemon`、`.github/**` 禁区、L2-29/L2-53 前置依赖注明即可、i18n 键覆盖已闭环勿重扫）。正文由脚本按 ledger 锚点切片生成（`/tmp/build-opt-issue-b6.py`），避免转写误差；脚本初版 `find()` 未按批次区域定位，batch 1 第 2–6 轮与 batch 4 第 5/6 轮错配到 batch 2 同名小节，已修并复验 49 条。
 - **开批后竞态（消费者必读）**：18:37 rebase 时发现消费者侧在 #11 收尾复核推了 `7175314` / `b5483c3` 两笔，**重写 batch 5 第 6 轮记录并推翻 3 条不成立**（「/exec/stream 在 on_upgrade 前判 gate，应有 423」——gate/限额确在闭包内走 error 帧，但 401 在中间件层成立、已补；「app_preferences.json 归进按需组」——消费者自认第 3 轮归组错误；「F22 total_ms」——改判该补 `format: int64`）。生产任务已发更正评论 `2120103682455814144`（18:38）：**撤销该 3 条（恢复为可重提），其余 46 条维持**，并同步首项状态——F19 `/forwards/{id}/start|stop` 已补全、F14 补一半（`POST /resident-sessions` 与 `/{id}/exec` 已补，列表/读取两条只补 400 描述）、**F13 `/exec-multi` 仍未做**；下一批真正首项 = 把「方法 + responses 状态码集合 + 401/403/500 三处共享签名」加进 `api_yaml_documents_every_daemon_route`。**第 1 轮起以更正评论与 ledger 当前版为准，勿按 issue 正文旧文执行。**
 - 顶部 `BATCH_COMPLETE · issue #11` 状态行已由本次生产运行删除（沿用 #10 遗留要求，#12 开批后它会让消费任务误判「只报告不执行」）。
@@ -1146,3 +1146,43 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 - **接手过来的两条（20:02 预核，待第 4 轮正式核实）**：
   1. `GET /diagnostics` 的 500 文案写的是「The remote inventory could not be read」，而 `load_remotes()` 里的 `validate_remotes(&file.remotes)?` 会因**五条语义校验**（alias 空 / alias 是 `localhost` / alias 重复 / url 不是 http(s) / 缺 token_env 与 token）返回 `Err`——这些是人手写错的配置，不是「读不出来」。`bin/agent2ssh-daemon.rs:3847`。**它说三条，实数五条**（`remote.rs:170-198`）。
   2. `PUT /approval/policies` 的 500 文案是「could not be written」，但 `approval.rs:994` 的 `toml::to_string_pretty(&file)?` 是**序列化**失败，写盘在下一行。同一句文案盖住了两个不同阶段。
+
+### consume 4 / 6 · 2026-11-10 20:07–20:5x (GMT+8) · issue #12
+
+- **指摘来源**：CodeBuddy 对第 3 轮收尾的复核（评论 `2120125896106352640`，20:06 到，工作基点 `e414b63`）。本轮 20:07 起，评论刚落地即取到，**没有等待**。
+- **判定：(a) 6 项 → 成立 3 / 部分成立 1 / 不成立 2；(b) 2 项 → 成立 1 / 部分成立 1；(c) 1 项 + 1 处对我有利的更正 → 全部成立；(d) 1 项 → 成立；(e) 自撤 → 成立。**
+
+| 项 | 它的指摘 | 判定 | 证据 |
+|---|---|---|---|
+| a1 | `handler_body_of` 的终点是下一个 `async fn`/`fn`；`/sftp/*` 的「真实体长 ~750 B」被吃到 **3 300–4 100 B 一路到 `session_open`**；`proxy_exec` 3 092 B = 3 092 B「正常」 | **部分成立（机制对，实例与量级全错）** | 机制成立且**比它说的更广**：106 个 route handler 里 **93 个越界**，最大 `session_list` +1 877 B、`delete_snippet` +1 830 B。但它点名的 8 个 `/sftp/*` 里 7 个 over=0（`sftp_upload` 748/748、`sftp_download` 756/756、`sftp_ls` 1 401/1 401、`sftp_stat` 1 407/1 407、`sftp_rename` 905/904、`sftp_rm` 810/809、`sftp_rmdir` 815/814），只有 `sftp_mkdir` +481；`proxy_exec` 是 3 092/**3 010**（+82），不是「相等」。**没有一个 `/sftp/*` 吃到 `session_open`** |
+| a1 后果 | 「现在是『假红』而不是『假绿』」 | **不成立（今天）** | 逐 handler 比较 `StatusCode::` 常量多重集：**0 个 handler 的尾部带外来常量**。越界是真的，代价暂时为零——这恰是「该修但不是缺陷」的形状 |
+| a2 | `else { return Vec::new() }`：handler 名对不上时**静默跳过**，`None` 分支进不去所以今天无害，但 `async fn` 一旦被折行/加 `pub` 就永久退出扫描且全绿 | **成立** | 原文如此。已改成 `panic!`；实测把 `gate_status` 改成 `pub async fn` 后报 `the route table names \`gate_status\`, but the daemon has no \`async fn gate_status(\``，不再静默 |
+| a3.1 | `proxy_exec` 的 `StatusCode::from_u16(status.as_u16()).unwrap_or(BAD_GATEWAY)` 把远端**任意**状态码原样透传，502 描述漏了「转发回来的 4xx」 | **成立（行号 3 996，非 3 992）** | `:3996` 原文如此。已补 502 描述 |
+| a3.2 | `:322` 有自由函数 `err(status, msg)`，所以 `err(423, …)` 合法且不含 `StatusCode::` | **不成立** | `fn err(status: StatusCode, msg: impl ToString)`（`:334`，不是 `:322`）——`err(423, …)` 是**类型错误，编译不过**。绕开常量必须写 `from_u16`，全仓 3 处：`locked_status`、`too_many_requests_status`、`proxy_exec`，前两个是 helper（属已声明的边界）。`macro_rules!` 0 个，这条它说对了 |
+| a3.3 | `terminal_attach:4716` 用 `e.into_response()`；`terminal_broadcast_run` 把 `Err((status, _))` 吞成 JSON 字段后仍回 200，契约没写 | **成立（两半；行号 4 717）** | 4 处 `e.into_response()`；`Err((_, Json(error)))` 显式丢弃状态码。已补 `/terminal/broadcast` 的 operation 描述与 200 说明 |
+| a5 | `GET /exec/stream` 契约「只有 101/401/403」、`GET /terminal` 有 400/423/429/101/401/403，「同一个 handler 的四条失败路径一个写在线上一个写在帧里，客户端无从分辨」 | **不成立** | `/exec/stream` 只有 **`101` + `401`（没有 403）**，且 description 明写「Every authorization refusal after the upgrade … arrives as `{"type":"error"}` … The only HTTP-level failure is the handshake itself」。`/terminal` 的 423 条目原文就是「Unlike `/exec/stream`, this route runs the gate check before the upgrade, so the refusal is an HTTP status rather than a WebSocket error frame」。**它说「无从分辨」的那件事，契约里写了两遍** |
+| a4 | `daemon_tokens.toml` 校验失败 → `authenticate_token` 500 → 全站非公开路由 500，「而且是没有 500 文档的那 82 个 operation」 | **部分成立** | 行为成立（`bin/agent2ssh_daemon/auth.rs:40-62`，`remote.rs:203-215`）。**文档不是空白**：`/approvals/{id}/approve` 的 500 已写「Applies to every authed route, not just this one — a broken `daemon_tokens.toml` answers 500 to any token that is not the admin token」。缺的只是 `info.description` 没提，已补一段。**它漏了一半机制**：admin token 在 `load_scoped_daemon_tokens` **之前**就返回，所以「全站 500」只对外来 token 成立 |
+| b1 | 24 个补丁的可达性逐条都活 | **成立（我方确认）** | 抽查 5 条全活；它顺带指出的 `/daemons/{alias}/exec` 400「取决于 `alias == "localhost"` 而非 `host`」与源码一致（`:3934`） |
+| b2 | `POST /hosts` 的 403 没写 `content`，「全库就这一处」 | **部分成立（实例对，唯一性错）** | 确实缺，但全库 **57 个 response** 缺 `content`，横跨 40 个 operation，绝大多数是 403。已全补并加断言 |
+| c | 18 个 operation 状态码乱序，附行号；并**更正**我第 2 轮说的「`POST /hosts` 的 400 位置不对」其实合法 | **成立（逐条命中）** | PyYAML 与逐行解析两路各算一遍，都是 18 个；行号 1236/1577/1785/1902/2571/3269/3322/3706/3896/4372/4400/4440/4473/4506/4575/4612/4645/4713 **全部命中**。`POST /hosts` 的更正也成立，**第 2 轮那条指摘撤回** |
+| c 附 | `/hosts/import` 的 403 与 500 之间有空行；`/recordings/{id}` 是 200/401/403/400 | **成立** | 两处都实测在。已随重排清掉 |
+| d | `impl` 全仓 1 个且在 `#[cfg(test)] mod tests` 内，顶层 0 个，「今天是伪问题」；建议终点改**花括号配平 + `panic!`**，与 `handler_body` 的兜底对齐 | **成立** | `grep -n "^ *impl "` 只有 `:5976`。花括号配平方案已采纳，也正是 a1 的修法 |
+| e | 自撤上一轮「`impl` 会吃到文件尾」 | **成立（自纠）** | 与我的实测一致 |
+
+**本轮最该记住的一件事：它整份 (a) 的量化表是自造的。** 它自己也写了「同一份常量，只是把终点也算出来」，但 `proxy_exec` 的「3 092 = 3 092」说明它比较的是**两次相同的计算**，而不是「配平体 vs 断点体」。它点名的 `/sftp/*` 3 300–4 100 B 在我这里有 7 个是 748–1 407 B 且 over=0。**方向对、实例错、量级错**——与 batch 5 的 F1、本轮 (b2) 的「全库就一处」是同一个失效形态：**它抓到一个真现象后，用印象补全了细节**。凡它的表格里出现「A = B」或「每个 X 都…」，一律自己重算。
+
+**L1 落地**（一笔）：`7dddb51`；回帖见下
+- `src-tauri/tests/daemon_integration.rs`：`handler_body_of` 改成花括号配平（跳过字符串/字符字面量/行注释/块注释/raw string `r#"…"#`），查不到 handler 或配平失败一律 `panic!`，返回类型由 `Option<&str>` 改成 `&str`，调用点的 `else { return Vec::new() }` 随之删掉（**a2 的静默跳过就此消失**）。新增 `api_yaml_declares_a_body_for_every_response`（除 101 外每条 response 必须有 `content`）与 `api_yaml_descriptions_with_a_colon_are_quoted`（plain `description:` 值不得含 `: `）。
+- `docs/api.yaml`：57 个 response 补 `content`；18 个 operation 的响应码改为升序；两条 flow 写法（`{ description: … }`）展开成块写法才能挂 `content`；`/daemons/{alias}/exec` 的 502 写明**远端拒绝会原样透传**；`/terminal/broadcast` 写明**每目标授权失败不改 HTTP 状态**（operation 描述 + 200 两条）；`GET /diagnostics` 的 500 列出 `validate_remotes` 的五条语义校验；`PUT /approval/policies` 的 500 拆开「序列化 / 写盘」两个阶段；`info.description` 增一段讲 `daemon_tokens.toml` 坏掉时的全站 500；`/hosts/import` 的空行清掉。
+- **第 3 轮预核的两条（`GET /diagnostics` 与 `PUT /approval/policies`）本轮全部兑现**，判定均为成立。
+
+**验证**：`npm run build` 7.04s；`cargo fmt --check` 绿；`--no-default-features --lib` **861 passed / 1 failed / 1 ignored**（基线那条故意红的 `an_ipv6_literal_at_port_22_is_removed`）；`--features daemon --test daemon_integration` **66 passed**（64 + 新增 2）。
+**四条断言都做了破坏性验证**：①去掉 `/gate` 500 的 `content` → `api_yaml_declares_a_body_for_every_response` 红并点名 `["500 GET /gate"]`；②整条删掉 `/gate` 的 500 → `api_yaml_documents_the_codes_each_handler_can_return` 红并点名 `["500 get /gate (gate_status)"]`（证明**配平后并没有变瞎**）；③把 `gate_status` 改成 `pub async fn` → 查表 `panic!` 而不是静默跳过；④把一句 description 改回带 `: ` 的 plain scalar → 冒号 lint 红并点名该行。
+
+**本轮自己撞出来的一个真坑（必须记）**：我新写的两句 description 里有 `verbatim: when …` 与 `authorized: false`，**plain YAML scalar 里的 `: ` 不是字符串**——写完之后 `api.yaml` 根本解析不了，而两条契约测试**全是逐行解析的，一路绿**。用 PyYAML 才发现。这就是第 ③ 个新台账的原因。教训：**`api.yaml` 的改动不能只靠仓内的逐行测试验收，必须另外过一遍真解析器**；本轮起把 `python3 -c "import yaml; yaml.safe_load(...)"` 列为 `api.yaml` 改动的必跑项。
+
+**未做（L2，需拍板）**：新增 **L2-80**（`daemon_tokens.toml` 坏掉时对非 admin token 返 500 而非 401，零测试覆盖）与 **L2-81**（`/terminal/broadcast` 丢弃 per-target 授权状态码，全拒绝仍 200）。详见 `OPT-LOOP-L2-PENDING.md`。
+
+**没加断言的两件事（故意的）**：响应码升序是**风格**不是契约，加 lint 会把「先 4xx 后 5xx 的阅读顺序」也禁掉；`locked_status`/`too_many_requests_status` 这类 helper 产生的码不在扫描内，这是第 3 轮已写明的边界，扩表解决不了。
+
+**下一轮首项**：`api.yaml` 里成串的 JSON 帧样例仍无覆盖（batch 5 的四份文档同时错就长在这条缝里），而 `api_yaml_documents_every_daemon_route` 只比路由与方法。第 5 轮若 CodeBuddy 还能给出「契约写了但代码不会那么答」的具体条目，优先核那一类；否则转 `/health-snapshot` 与 `/config/import` 的 400/500 描述逐条对源码。
