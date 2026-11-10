@@ -144,7 +144,11 @@ pub struct ConfigDiffPreview {
     pub hosts_to_add: Vec<String>,
     /// Names of hosts already present (duplicates that will be skipped)
     pub hosts_to_skip: Vec<String>,
-    /// Names of hosts that will be updated (name matches but host/port/user differs)
+    /// Names of hosts that will be updated: the name matches and at least one
+    /// of the eleven fields [`team_host_same`] compares differs — `host`,
+    /// `user`, `port`, `jump_host`, `proxy_id`, `risk_override`, `tags`,
+    /// `group`, `env`, `role`, `owner`. A same-name host that matches on all
+    /// eleven is reported as skipped, not updated.
     pub hosts_to_update: Vec<String>,
     /// "new", "overwrite", or None
     pub risk_rules_change: Option<String>,
