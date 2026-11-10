@@ -957,6 +957,14 @@ pub fn stop_daemon_process(pid: u32) -> std::result::Result<(), DaemonStopError>
     // unrelated process can reuse the PID or spoof argv[0]. Require the health
     // PID to match, the daemon to serve *this* config directory, and this
     // config's admin token to be accepted before asking for anything.
+    //
+    // This is the second identity entry point in this file, not a reuse of
+    // [`daemon_pid_state`]: that one is consulted only in the `None` branch
+    // above (no observable start time) and answers from a `/health` + `/gate`
+    // pair without ever looking at the config directory, while this path
+    // authenticates with `/shutdown` itself and refuses on a `config_dir`
+    // mismatch. Both criteria are deliberate, and changing one will not turn
+    // the other's tests red — change them together.
     let health = health_identity();
     if health.as_ref().map(|identity| identity.pid) == Some(pid) {
         match (

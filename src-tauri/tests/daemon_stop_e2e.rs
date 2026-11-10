@@ -514,6 +514,14 @@ fn shutdown_cancels_a_request_waiting_for_approval() {
     assert_eq!(final_record["status"], "rejected");
     let audit = std::fs::read_to_string(daemon.dir.join("audit.jsonl")).unwrap();
     assert!(audit.contains("daemon shutting down; approval wait cancelled"));
+    // The audit line proves the execution was refused; this proves the daemon
+    // said so in its own diagnostics too, which is what the module comment on
+    // `daemon_activity` promises. Nothing else pinned that entry.
+    let diagnostics = std::fs::read_to_string(daemon.dir.join("app.log")).unwrap();
+    assert!(
+        diagnostics.contains("approval wait cancelled during shutdown"),
+        "the cancelled approval left no diagnostics entry: {diagnostics}"
+    );
 }
 
 #[cfg(unix)]

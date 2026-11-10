@@ -4,9 +4,14 @@
 //! PTY sessions, resident shells, port forwards and pending approvals live in
 //! the daemon's memory (see `session.rs`, `resident_session.rs`, `forward.rs`,
 //! `approval.rs`), so stopping the daemon ends all of them. The first three go
-//! silently; a pending approval does not — the daemon records it as rejected and
-//! leaves an audit line before exiting, because "the daemon was stopped" must not
-//! be indistinguishable from "nobody ever answered".
+//! silently; a pending approval does not — the shutdown cancels the wait,
+//! answers the approval `rejected` while it is still pending, and writes
+//! `daemon shutting down; approval wait cancelled` to `audit.jsonl` before
+//! exiting, because "the daemon was stopped" must not be indistinguishable from
+//! "nobody ever answered". Two limits on that promise: an approval that had
+//! already timed out keeps `timed_out` in `approvals.jsonl` (the audit line is
+//! written either way), and a daemon force-terminated after the grace window
+//! writes nothing at all on its way out.
 //! The desktop app uses [`fetch_daemon_activity`] to tell the person that
 //! before it does.
 //!
