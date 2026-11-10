@@ -1652,3 +1652,31 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 **顺带一条自纠**：我在补记里立的 `L2-100` 写的是「`/local-exec` 的 webhook 恒说结果已知」——它与已有的 **L2-27** 是同一件事的外一层，不是新发现；`daemon.rs:1807` 的 `None` 与 `:1711` 的 `Some` 只差 `:1700` 那一次 `ssh_shutdown_outcome()`，而 local 侧的类型在 `core.rs:1267` 就折成了字符串。已把 `L2-100` 换成本批真正新立的那条（`forward.rs` 的 accept 循环），并在登记处写下「立条前先 grep 已有的」这条教训。
 
 **计数不变**：27 条指摘，14 / 9 / 4；待拍板 7 项（`L2-95`…`L2-101`）。撞号由 12 改 **13**。文档两笔，仍在 `cnb main`，未推 github。
+
+### 手工/单发消费 · 2026-11-11 · daemon 身份绑定与异常状态恢复（issue #2，模式 B）
+
+- **选靶理由**：open 只剩 #2、#6，无 `[opt-round]`（#14 已于 batch 8 闭环）→ 模式 B。两条的最新评论都是 CodeBuddy 的复核、其后没有我的回帖，都不在「等对方回应」状态，按 P1 同级取编号最小 → **#2**。#2 的最新复核带 5 条按函数名定位的断言，其中三条（N2/N3/N4）正好落在下一批主题「MCP 契约与 CLI 文档一致性」上，所以它既是最该推进的，也是下一批的首查项。
+- **基线**：本地 `4def153` 落后 `cnb/main` 4 笔（PR #3「Resolve relative daemon configuration paths」）→ `--ff-only` 快进到 `b83b9c1`。无分叉，工作树只多一个未跟踪的 `.deja/`（非本流程产物，未动）。
+- **指摘来源**：评论 `2120173738653020160`（11-10 23:16），即对上一轮收尾 `2120172790916468736` 的复核。
+- **判定：5 条 → 成立 4 / 部分成立 1 / 不成立 0**；另有 6 条子断言判不成立（见下节，原文保留）。
+
+| 编号 | 指摘 | 判定 | 证据要点 |
+|---|---|---|---|
+| N1 | `/terminal/broadcast` 少了整条闸门链：gate 与 `RiskLevel::Blocked` 只算不拒、`requires_approval` 从不被消费 | **部分成立** | 事实对：`reject_if_gate_paused` 的 15 个生产调用点里没有 `terminal_broadcast_run`；`preview_results`（`daemon.rs:4355-4358`/`:4365-4368`）把 gate 与 Blocked 写成逐目标 `error` + `continue`；`run` 从不读 `requires_approval`。但「应回 423」这一半是 **L2-81** 的既有条目，且契约本来就写着「每目标拒绝 → 200 + `authorized: false`，不冒 4xx」。真正新的缺陷是**字段无语义**：preview 与 run 共用同一个 schema，`authorized: true` 在 preview 里只能表示「暂时没人拒绝」，却被读者当成放行 |
+| N2 | `ssh_events_subscribe` 永远返回空数组，而 `docs/skills.md:79` 与 `tools.rs:852` 都承诺「latest events」 | **成立（且比指摘更硬）** | `agent2ssh-mcp.rs:1801` 每次调用新建 `broadcast` receiver，`:1803` 同一同步块里 `try_recv()` 抽干；`tokio::broadcast` 的新 receiver 无历史 → 结构上恒空。`docs/skills.md` 已按实际改写，工具本体属 `src-tauri/src/**` → L2-103 |
+| N3 | `/forwards/{id}/start` 的 403 描述把「scope 外的 id」说成像未知 id 一样返 400，实际是 403 | **成立** | `forward_list_core`（`forward.rs:739-746`）返回**全部** rule、无 scope 过滤；三条 handler（`daemon.rs:3046`/`:3103`/`:3159`）都先 `.find(id)` 再 `check_daemon_scope(rule.host)`，越权必落 403。所以那句「not with a 403 that would confirm the tunnel exists」是**从未实现的保证**——它恰好会让人不去找这个泄露。`/forwards/{id}` 的 DELETE 分支本来就写得对（「Scope denied: the rule's host is outside…」），已让两条对齐。改成 400 要动取数顺序 → L2-102 |
+| N4 | `DaemonMetricsSummary.approval_count` 与 `/metrics` 的 `approvals_total` 是同一个数的两个名字，且前者裸无描述 | **成立** | `remote.rs:530` 明确 `body.get("approvals_total")`；`approval_count` 与 `request_count`/`exec_count`/`exec_blocked_count` 并列、无 description。已补与 `:4229` 同义的描述；改名/拆分仍是 L2-94 |
+| N5 | L2-93 的窗口比记录的宽：`approval_respond` 失败不止 TTL 一种 | **成立（第四种更糟）** | `approval_respond_inner`（`approval.rs:678-725`）三种 `Err`：`unknown approval`、`has timed out`、`already {:?}`，都不需要竞态。第四种：`append_approval`（`:486-503`）把写盘错误吞成一条 warn 诊断，函数仍返 `Ok(())` → `daemon.rs:668` 写 `rejected: true`、`audit.jsonl` 写 cancelled，而 `approvals.jsonl` 末条还停在 `pending`，**三方没有一个说它被回答过**。已就地扩写 L2-93，未开新号 |
+
+**L1（本笔）**：`30264bb`（`docs/api.yaml` 三处 + `docs/skills.md` 一处 + `docs/guides/configuration-guide.md` 的停止预算句 + `OPT-LOOP-L2-PENDING.md` 的 L2-93 扩写与 L2-102/103）。推 `cnb main`，未推 github。
+
+**验证**：`npm run build` 6.35s；`cargo fmt --check` 绿；`--no-default-features --lib` **861 passed / 1 failed / 1 ignored**（失败项仍是那条故意红的 `an_ipv6_literal_at_port_22_is_removed`，与 `b83b9c1` 一致）；`--features daemon --test daemon_integration` **71 passed**（含 `api_yaml_documents_every_daemon_route`、`api_yaml_documents_the_codes_each_handler_can_return`、`api_yaml_descriptions_with_a_colon_are_quoted`、`mcp_tools_match_skills_md_documentation`）；`yaml.safe_load(docs/api.yaml)` 90 paths 通过。
+
+### 本轮判定不成立（原文保留，请勿重复提）
+
+1. **「`/terminal/broadcast` 的 operation 描述承诺 gate 被 enforced」— 不成立。** 原文写的是「A target whose authorization is refused is reported in the response body with `authorized: false` and an `error`; the HTTP status stays 200 and nothing is sent to that target, so a per-target refusal never surfaces as a 4xx from this operation」。gate paused 正落在这个描述里，不存在「读者会以为返回 423」的问题。
+2. **「gate / `RiskLevel::Blocked` 只算不拒，应回 423」— 不是新缺陷，已并入 L2-81。** 该条早就记着「广播三处授权/限流失败全 200」，且 `api.yaml` 同期就写明逐目标拒绝不改状态码。本轮不新立。
+3. **「MCP 侧的 bus 上只有 MCP 自己 `publish_event` 的东西（据我 grep，MCP bin 里没有任何 `publish_event` 调用点）」— 不成立。** bin 里 0 处是真的，但 lib 会在**同一进程**里替它发布：MCP 在 `:846`/`:853` 调 `exec_ssh_core`，而 `core.rs:1117` 与 `:1322` 就是 `publish_event`（`approval.rs` 另有四处）。所以给 MCP 进程加环形缓冲对 MCP 自己发起的 exec 是**有效**的，「即便修好回放也只回放空」这个推论不成立。失效形态是**grep 作用域选错**：只 grep bin、不 grep 它调的 lib。
+4. **「`/forwards/{id}` 的 DELETE 上可能有同一句错话」— 不成立。** 那条 403 写的是「Scope denied: the rule's host is outside the token's allowed hosts and tags.」，从未承诺 200/400。
+5. **「`health_identity()` 在 `stop_daemon_process` 里被调用两次」— 不成立。** 全文件四处引用：`:231` 是定义，`:218` 属 `daemon_pid_state`、`:287` 属另一处身份核对，`stop_daemon_process` 里只有 `:997` 一处。它在同一句括号里也把这半走回了。真正的第二次读是 `read_admin_token()`（`:1030` 与 `request_shutdown` 的 `:876`），一次 token 文件读不构成「身份探测被数了两次」。
+6. **「地址解析是毫秒级，所以『不能只按 2 秒算』是反的」— 不成立。** `request_at` 的 `to_socket_addrs()` 在 `connect_timeout` **之前**且不吃任何超时，`AGENT2SSH_DAEMON_ADDR` 允许写主机名——L2-92 正是按这条立的。默认值是 loopback 字面量，但「默认」不是上界。它另一半（该把 ≈12.5 s 这个数写出来）成立，已采纳进指南。
