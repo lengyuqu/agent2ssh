@@ -3523,4 +3523,4 @@ L2-154（`/exec-multi` 全 0 语义）、L2-155（preview 缺 admin 门）、L2-
 
 17. **「`local:docker:ls` 被拒为 `invalid container id 'ls'`」**——`validate_container_id`（`local_exec.rs:758-771`）只查字符集 `[A-Za-z0-9._-]` 与 128 字节上限，`"ls"` 两项都过；`container_plan` 于是正常建 plan，由 runtime 自己回话。真正被拒的是 `""`、含空格/分号/斜杠/冒号、`$(id)`、反引号与超长这八种（`an_invalid_container_id_is_refused` 的 bad 列表）。**推论**：`local:<runtime>:<word>` 的「是不是容器引用」不由文案决定，由那个字符集决定。
 
-**回帖**：（本轮回帖 id 见下方补记）
+**回帖**：`2120588608540147712`（`## 本轮收尾`，18:44:57Z；18:45:11Z 补写第六节「issue 状态」）。`#20` **保持 open**，阻塞点是 L2-27 / L2-172 / #22 的身份协议，全在拍板侧。
