@@ -841,3 +841,43 @@ CodeBuddy 的复核 `2120258070138740736` 新批 3 条 → **成立 1（§五.2�
 | `TerminalView`（`:170`、`:184`、`:259`） | 覆盖 | 显式 `?.writeText` 检查 + `clipboard_unavailable` reason。**不是缺口** |
 
 **所以 L2-115 的范围要再扩一次**：不是「四处各写一个 `.catch`」，而是 **`McpAgentsPanel` 一处的保护 + `AuditPanel` 一处的顺序**，加上「复制失败到底该不该给确认」这一个产品口径。三件事都要一个 `copyText` helper 才能一次收口——helper 必须**同步可判**（返回 `{ok:true}` / `{ok:false, reason}` 或抛给调用方），否则调用方又会把确认写在 await 之前。本轮不动：`AuditPanel` 的修法要选「换顺序」还是「换 promise 形状」，`McpAgentsPanel` 的修法要选「静默」还是「toast」，两个都是 L2-115 那个尚未拍板的产品问题。
+
+## 2026-11-11 · batch 10 第 6 轮（收尾轮）：两处更正 + 一处越过 L2 边界的修复
+
+### 一、`9f965f5` 是**未验证的 Rust 行为改动**，直接落在 main 上，且是红的
+
+`9f965f5`（`import_team_config` 保留 `init_command`）改的是 `src-tauri/src/core/team_config.rs` 与 `src-tauri/src/core.rs`，按本流程的定级属 **L2**（`src-tauri/src/**` 行为改动），本应只登记、不动 main。它的 commit message 自己写明「本容器没有 Rust 工具链，`cargo test` 与 `cargo fmt --check` 没有跑」——也就是说这笔是**按未经执行的验证**声称完成的。
+
+本机复跑的结果：`cargo test --no-default-features --lib` **862 passed / 2 failed**，多出来的那条失败正是它新加的 `test_team_config_import_preserves_a_local_init_command`。
+
+**根因不是实现写错，是设计矛盾**：`import_team_config` 里 `if next.init_command.is_none() { next.init_command = init_command }` 是对的（包里没带就保留本地），但 `team_host_same` 把 `init_command` 完全排除在比较之外，而它正是「跳过」的闸门。于是包里**带了**一个不同的 `init_command` 时，11 个字段全等 → 判为 same → 整条跳过 → 包里的新值永远不落地。它的测试第二半（「包里有值则以包为准」）正是在断言这一半，也正是在这里失败。
+
+**已就地修复**（`core/team_config.rs`）：比较条件改成 `incoming.init_command.is_none() || existing.init_command == incoming.init_command`——包里没带才算「相同」，带了且不同就算「不同」，让跳过闸门与保留语义同向。全量复跑 **862 passed / 1 failed / 1 ignored**（仅剩那条故意红的 IPv6），`cargo fmt --check` 绿。
+
+**这条记录的目的不是追责，而是留证据**：L2 边界的意义就是「未经人拍板的行为改动不进 main」，而这一次它进了、且是红的。下次任何人（包括复核方自己）要往 main 推 `src-tauri/src/**`，请先在本机跑 `cargo test --no-default-features --lib`——**没有工具链就不写这条代码**，写进 L2 表比写进 main 便宜。
+
+### 二、更正：`AuditPanel` 的失败形态不是「报了成功」
+
+复核方写「`.catch` 挂在一个根本没返回的 promise 上，于是 toast 已经报了 `Copied N entries`——在看到失败的情况下撒谎」。**方向反了**：`navigator.clipboard` 为 `undefined` 时，`navigator.clipboard.writeText(...)` 在**取属性那一刻**就抛同步 TypeError，`.then` 与 `.catch` 都还没被挂上，所以**成功与失败的 toast 都不会出现**——不是撒谎，是彻底静默（异常走 `window.onerror` 进 `app.log`）。本轮已补守卫并在不可用时给一条明确 toast。
+
+### 三、剪贴板一族收口（五个站点）
+
+| 站点 | 原状 | 现状 |
+|---|---|---|
+| `ApprovalDetail.handleCopy` | 第 2 轮才接线，且会抛 | `?.writeText` 守卫 + `.catch`（第 2 轮） |
+| `ContainersPanel.copyCommand` | 裸调 | 守卫 + `.catch`（第 5 轮） |
+| `KeysPanel.copyPublicKey` | 裸调 | 守卫 + `.catch`（第 5 轮） |
+| `McpAgentsPanel.copyCommand` | `await` 裸调 | 守卫（第 6 轮） |
+| `AuditPanel.copySelectedAsJson` | 取属性即抛 | 守卫 + 明确的「不支持剪贴板」toast（第 6 轮） |
+
+**仍待拍板的只剩「写失败要不要统一提示」**（L2-115）：现在有四处 `.catch` 是空的、一处给了 toast，风格不一。抽 `copyText` helper 时一并定，不要各自为政。
+
+### 四、批末仍 open 的 L2（供下一批按序拍板）
+
+| 编号 | 一句话 | 影响面 |
+|---|---|---|
+| L2-115 | 复制失败要不要提示 + 是否抽 `copyText`（现五个站点风格不一） | `src/**`，产品口径 |
+| L2-118 | `HostPolicyLine` 的 `auto` 一词两义（无策略 vs 策略显式放行） | `src/**` 显示 |
+| L2-119 | `decidedToday` 按 `requested_at` 判日 + 30 天保留期在 UI 上静默截断 | `src/**` 显示 |
+| L2-120 | `update_host_core` 对省略的 `init_command` 不做保留（桌面端已修，其他客户端仍会清空） | `src-tauri`，需哨兵 |
+| L2-121（后半） | 已决定的审批请求幂等化成 409（前端半边已落） | 契约：`approval.rs` + `api.yaml` |

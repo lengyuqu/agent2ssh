@@ -7,6 +7,10 @@
 - 顶部出现 `LOOP_PAUSED` 或 `BATCH_COMPLETE` 时，对应任务只报告不执行。
 - **`不成立` 的条目必须原文保留**：生产任务每批都会把它整段喂给 CodeBuddy 作为「不要重复提」清单，删掉就等于允许同一个错误无限重放。
 
+## `BATCH_COMPLETE` · batch 10 · issue #16 · 2026-11-11 · **6 / 6 闭环**
+
+**本批已收尾，消费任务此后只报告不执行。** 下一次「优化批次生产」开新 `[opt-round]` issue 时，按 #8–#15 的先例删除本行。6 轮汇总见文末「batch 10 六轮汇总」。
+
 ## 消费任务的轮次语义
 
 一个批次 = 一条 `[opt-round]` issue = **最多 6 轮闭环**，每轮形状固定：
@@ -2003,3 +2007,44 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 **验证**：`npm run build` **12.60 s**（清装 `node_modules` 后首次；同一台机上一轮的 6.37 s 是热缓存）；`npm test` **220 passed / 30 files**（216 → 220 是本轮新增 4 条）；`npx biome check` 对本轮改动的 6 个文件干净（全仓仍有 `i18n.test.tsx` 两处既有告警，与本轮无关）；`cargo test --no-default-features --lib` 未重跑——Rust 零改动，上一轮 861 passed / 1 failed / 1 ignored（故意红的 IPv6）仍然成立。
 
 **#16 进度 5 / 6。第 6 轮只需复核 R2-2 的新措辞、把 L2 收敛成一张表、关帖。**
+
+### consume 6 / 6 · 2026-11-11 · batch 10 (#16) · 收尾轮
+
+**进轮状态**：第 5 轮收尾（08:23）后 3×60 s 拿到复核（`2120312433137852416`，08:27）。但同一时间远端还出现了**两个我没有推过的写入者提交**——`9f965f5`/`a90b620`（`init_command` 的第三处写入口）与复核方自己推的 `8ce8e71`/`366d9fe`。本机 `df43e59` 落后 4 笔、无分叉，`git merge --ff-only` 到 `366d9fe`。
+
+**判定 3 条 → 成立 2 / 不成立 1（外加一笔必须当场修的他人改动）。**
+
+| # | 项 | 判定 | 处置 |
+|---|---|---|---|
+| ① | `9f965f5` 的 `test_team_config_import_preserves_a_local_init_command` 失败 | **成立（main 是红的）** | 根因是设计矛盾不是实现错：`import_team_config` 保留本地值（对），但 `team_host_same` 把 `init_command` 排除在比较外，而它是跳过闸门——包里带了新值时被判「same」→ 整条跳过 → 新值永不落地。改比较条件为「包里没带才算相同」，全量复跑 **862 / 1 / 1** |
+| ② | `AuditPanel` 的 `.catch` 会「在看到失败的情况下报 Copied」 | **不成立** | `navigator.clipboard` 为 `undefined` 时，`navigator.clipboard.writeText(...)` 在取属性那一刻同步抛，`.then`/`.catch` 都还没挂上 → 成功与失败的 toast **都不出现**，是彻底静默而非撒谎。守卫仍补了，并加了「不支持剪贴板」的明确 toast |
+| ③ | 复核方的 L2-121 前端半边（`isAlreadyDecided` + 仅在 daemon 确认 non-pending 时摘卡） | 成立且写法比我的两个选项都好 | 保留。它绕开了「断线时重拉也失败」：判据是「拿不到证据就不摘卡」，而非「重拉一定成功」 |
+| ④ | `(no policy)` → `(no policy configured)` | 成立 | 保留。`(no policy)` 会被读成「此刻没有策略命中」，而那正是 `summary !== null` 那一支 |
+
+**本轮 L1**：`AuditPanel.tsx`、`McpAgentsPanel.tsx`（最后两处剪贴板）、`i18n.tsx`（一条新键）、`core/team_config.rs`（修 ① 的跳过闸门）、`core.rs` 未动（测试保留）。剪贴板一族五个站点至此全部有守卫。
+
+**关于 ① 的定性**：这笔是 `src-tauri/src/**` 行为改动，按流程属 L2、本应只登记不动 main；它进了 main 且是红的，commit message 自己承认「本容器没有 Rust 工具链，cargo test 没跑」。我在 L2 清单里记了完整证据与复跑数字。**不追责，但留痕**——L2 边界的存在意义就是这件事。
+
+**验证**：`npm run build` **6.70 s**；`npm test` **220 passed / 30 files**；`cargo test --no-default-features --lib` **862 passed / 1 failed / 1 ignored**（唯一失败是那条故意红的 IPv6，`embedded_ssh.rs` 注释自述 "Pinned as a failure so the fix has a target"）；`cargo fmt --check` 绿。
+
+---
+
+## batch 10 六轮汇总（issue #16 · 前端与 i18n 文案键完整性，第二批）
+
+| 轮 | 指摘来源 | 判定 | L1 落地 | 备注 |
+|---|---|---|---|---|
+| 1 | CodeBuddy 首条分析 | 15 条：成立 9 / 部分 3 / 不成立 1 / 已并入 2 | `2254d13`、`872e6c1` | 推翻 A1（`authorize_targets` 的解构写法被记混），并一次补了 8 条 L2 |
+| 2 | 对第 1 轮的复核 | 9 条：成立 5 / 部分 3 / 不成立 1 | `d64a135`、`1357909` | 自取发现「Copy 按钮从不复制」；推翻 A2 的 high 半与 D1 |
+| 3 | 对第 2 轮的复核 | 4 条：成立 3 / 部分 1 | `03b4a57`、`8fa3dcd` | 承认上一轮 commit message 过度声称；删掉画不出一帧的 `Check` 状态 |
+| 4 | **自取**（等待超时） | 1 条成立（数据丢失）+ 1 条形状已核 | `3c81984`、`e3f603d` | 首查项①的机械对账；`init_command` 被桌面端静默清空；答生产方的 `let (risk, _)` 之问（8 个不是 6 个） |
+| 5 | 对第 3 轮的迟到复核 | 4 条：成立 2 / 部分 1 / 不成立 1 | `7401cf6`、`df43e59` | 两处无保护剪贴板；推翻「WSL 提示错报」与「白屏」两条 |
+| 6 | 对第 5 轮的复核 | 3 条：成立 2 / 不成立 1（+ 修复他人一笔） | 本笔 | 修红了的 `team_config` 跳过闸门；剪贴板五站点收口；推翻 `AuditPanel` 的「撒谎」描述 |
+
+**六轮合计**：36 条指摘 → **成立 25 / 部分成立 9 / 不成立 6**（含 2 条已并入存量）。L2 新增 12 条（110–121），其中 **L2-58 按建议①执行完毕**。
+
+**留给下一批的四条判据**：
+
+1. **「契约宽于镜像」这一族要按后果分拣**：`side_effect` 是观感（桌面不传），`init_command` 是数据丢失（桌面传了、传的是残缺品）。扫 `types.ts` ↔ `api.yaml` 时先问「这个字段会不会被回写」，再决定只记录还是当缺陷。
+2. **`src-tauri/src/**` 的行为改动一律 L2**，包括自己的修复冲动。本批有一笔越过这条线并让 main 红了 20 分钟，证据在 L2 清单第 6 轮小节。
+3. **兜底文案是最容易被想当然的一类**：`low auto · med/high need approval` 活了很久，因为没人把它和 `needs_approval = policy.is_some() || (risk == High && !force)` 对读。
+4. **复核方的 `[读]` 断言本批命中率约 3/4**：四次整条反转（A2 的 high 半、D1、R2-3 的 WSL、R2-4 的白屏），两次方向反了（`AuditPanel` 的「撒谎」、`let (risk, _)` 的 8→6）。它给的**行号与函数名基本可信，因果链要自己走一遍**。
