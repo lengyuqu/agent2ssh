@@ -1222,3 +1222,83 @@ if resolved.runtime.service_running(&resolved.binary).is_none() {               
 是**闭包**挂载，`mounted_handlers` 取到的 handler 名为空，所以 `/` 在 `daemon_routes` 里从来没有条目。它落在 `NON_API_ROUTES` 里，不影响契约；但如果**新加一条 API 路由也写成闭包**，旧代码下八个族会一起静默，现在会红。
 
 仍未钉住的是 `tests/daemon_integration.rs` 头部那三个数（「18 of the daemon's 92 routes」「74 routes that are not mirrored」）：它们是散文，改镜像不会红。要钉得解析测试文件自身的 `build_test_router`，本轮未做——它不影响任何断言的真假，只影响读者对覆盖面的估计。
+
+## 2026-11-11 · batch 12 第 2 轮复核：`mounted_handlers` 的字面一致性（新 L2-123），与两条覆盖面登记（L2-124/125）
+
+本轮是**复核**（读代码、复算，不改行为）。三件事：上一轮我自己提出的「`mounted_handlers` 的字面一致性断言」现在有了确切形状和成本，落成 L2-123；顺手按第 1 轮 Q1.4 的结论复查时，查出两处**覆盖面缺口**（L2-124/125），都不是行为 bug，但都会让某类改动不红。行号基线 `614f355`，按符号引用。
+
+### L2-123 · `mounted_handlers` 把「白名单内路径」与「这里挂的是什么」混成一个事实
+
+**位置**：`tests/daemon_integration.rs:2289-2290`（`if !handler.is_empty() { mounted.push(…) }`）配合 `:2377-2383`（`mounted.is_empty()` → `DroppedRoute`），白名单是 `:2264` 的 `NON_API_ROUTES`。
+
+**为什么不能自动落**：这是「该断言什么」的选择，不是错。它现在的语义是：**任何一个 `.route("…", X)`，只要该路径在 `NON_API_ROUTES` 里、且 `X` 里读不出 `<method>(<ident>`，就当作可解释的丢弃。** 对本仓今天的树它是精确的——我把整棵树按 `daemon_routes_and_drops` 的算法复算了一遍，`.route(` 共 92 次、丢弃 **1** 条（`:5814`，路径 `/`，原因「无 handler」），与 `every_route_call_is_read_as_an_operation` 的 `expected` 逐字一致。
+
+**但「精确」依赖三件事同时成立**，其中两件今天已经在漂：
+
+1. **丢弃路径落在白名单里**——白名单在 `:2264`，断言在 `:2612` 起的 `expected` 里又硬编码了一遍 `/`。两份声明，一份是「集合」，一份是「带原因的单条」。加一条新的白名单路径、或改 `/` 的挂载方式，两处都得手改，且没有任何东西会提示它们该一起动。
+2. **`/` 今天只能被闭包挂载，而已**——`serve_console` 是普通的 `async fn`，`get(serve_console)` 是合法调用。所以「`/console` 有一天换成闭包」是一个**能编译、能起服务、语义不变**的改动。
+3. **`/console` 被 `mounted_handlers` 正确读出**——今天成立（`:5818` 是 `get(serve_console)`）。
+
+**第 2 件已经不出声了（L2-124，见下）**：`/console` 换成闭包后，`daemon_routes` 会少一条条目，`api_yaml_documents_every_daemon_route` 只检查 `/console` 不在 spec 里、不会红；`every_route_call_is_read_as_an_operation` 会红。所以今天唯一的哨兵是那条新断言——**它对，但它红的时候说的是「解析器读不懂了」，而真正发生的事是「这条非 API 路由换了挂载方式」**，这两句话不对应，第一个照顾它的人大概率直接把 `/console` 加进 `expected`。
+
+**建议改法（可判定的判据）**：把「路径在非 API 集合里」换成「**这一条 `.route` 挂的是闭包字面量**」，用例集只放形状、不放路径：
+
+```rust
+// 每个丢弃的 `.route` 段，判据是「段里的实参是闭包字面量」，而不是「路径在白名单里」
+fn mounts_a_closure_literal(segment: &str) -> bool {
+    // `.route(\s*"[\w/:]+"\s*,\s*(get|post|put|delete|patch)\(\s*(async\s*)?(\|[^|]*\||\|\|)`
+}
+```
+
+断言：`dropped.iter().all(|d| mounts_a_closure_literal(d.segment))`，并且 `dropped.len()` 只进失败信息、不进期望。这样：
+
+- `/` 的闭包 → 通过（与今天等价）；
+- **任何路径**写成闭包 → 通过（同形同待遇，不再依赖白名单）；
+- `.route("/console", get(serve_console))` 因为某种 `mounted_handlers` 的退化被误读 → **红**（因为它不是闭包）；
+- 有人新加一条闭包 API 路由 → **通过**——这是这个判据唯一的代价，需要人拍板「闭包路由算不算可接受的 API 形状」。若判「不算」，把判据反过来写即可（`!mounts_a_closure_literal` 全部红，`/` 单独列一条显式豁免），两种写法成本相同。
+
+**顺带**：`DroppedRoute` 现在只有 `line/path/reason`，没有段文本，加判据要给它加一个 `segment: &'a str`（`daemon_routes_and_drops` 要加生命周期参数）。这是签名变化，属 `src-tauri/tests/**`，可以落 L1；我没落是因为上面那条产品判断还没定。
+
+**取证方式说明**：本仓工作区没有 Rust 工具链（`command -v cargo` 为空），所以这一节所有数字都是用一个按 `daemon_routes_and_drops` / `mounted_handlers` 原文逐行复写的脚本对**当前树**复算的；`every_route_call_is_read_as_an_operation` 的 `expected` 只有一条（`/` + 原因），与复算逐字一致，这是复写正确的交叉验证。破坏性对照是对 daemon 源文本注入后重跑同一脚本，**没有真的编译**——所以「会红」是按断言源码推的，不是测出来的。
+
+### L2-124 · `/console` 的 GET 挂载没有任何断言
+
+**位置**：`bin/agent2ssh-daemon.rs:5818`（`.route("/console", get(serve_console))`）、`:5603-5605`（`serve_console`）、`:5815-5817`（`/` → `Redirect::to("/console")`）；白名单侧 `agent2ssh_daemon/auth.rs:99`（`is_public_path` 认 `/console`、**不认任何 `/console/…`**）、`:100-101`（`accepts_query_token` 不认 `/console`）。
+
+**事实**：`/console` 既不在 `docs/api.yaml` 里（`NON_API_ROUTES` 把它排除出全部 spec 断言），也**不被任何解析器读到**——它进了 `daemon_routes`，但 `every_route_call_is_read_as_an_operation` 只比 `dropped`，`api_yaml_documents_every_daemon_route` 用 `NON_API_ROUTES` 把它滤掉。所以 `get(serve_console)` 这个字面量在 `src-tauri/tests/**` 里**零命中**（我把 daemon 源按 `mounted_handlers` 复算过：把它换成闭包，`daemon_routes` 少一条条目，**没有一条断言会红**）。
+
+`tests/daemon_integration.rs:668-696` 的 `http_console_serves_key_workflow_entrypoints` 测的是**镜像**：`:145-146` 的本地 `console` 函数 + `:425` 的 `build_test_router().route("/console", get(console))`。所以它断言的 HTML 是真的，路由**挂法**是假的。
+
+**为什么记在这一节**：它不影响任何断言的真假，但它是 L2-123 那个判据的第 2 件成立理由——如果 `/console` 的挂法被闭包替换，今天没有任何东西能说出「换掉的是一条曾用 `async fn` 挂载的路由」。
+
+**建议改法**（两条都可，成本都低）：
+
+- 在 `every_route_call_is_read_as_an_operation` 旁边加一条：解析 `.route("/console"` 的段，断言它 `mounted_handlers` 恰好等于 `[("get", "serve_console")]`，且 `serve_console` 在 daemon 源里是 `async fn`。三行代码，钉住「非 API 路由**用命名 handler** 挂载」这件事，与 L2-123 的「闭包只能是闭包」互为补集；
+- 或按 L2-123 的判据统一处理（`/console` 不是闭包，就必须被 `mounted_handlers` 读出来），那时这条就是判据的推论，不必单独立。
+
+**无法自动落的原因**：它是 `src-tauri/tests/**` 的新断言，但判据取决于 L2-123 的产品决定；若那条判「闭包路由可接受」，这一条仍然是必要的补集。
+
+### L2-125 · 头部那三个数：一个「可钉」、两个「不可钉」，且不可钉的原因不是成本
+
+**位置**：`tests/daemon_integration.rs:9`（「18 of the daemon's 92 routes」）、`:17-18`（「74 routes that are not mirrored at all」）。
+
+**先把数复算清楚**（都是 `614f355` 的树）：
+
+| 数 | 复算 | 结论 |
+|---|---|---|
+| `92` | `.route(` 字面次数 = **92**；解析出 `(path,method,handler)` 的条目 = **106**；去重 `(path,method)` = **106**；去重 path（含 `/console`）= **91** | 92 数的是**调用**，不是路由。正文说「92 routes」，单位错。换成 `(path,method)` 是 106，换成 path 是 91 |
+| `18` | `build_test_router`（`:420-449`）里 `.route(` = **18**，但挂的方法数是 **21**（`/webhook/config` 与 `/approval/policies` 各挂 2 个、`/exec/preview` 1 个） | 18 是**路径数**，不是「shape of 18 routes」里那个 route 的单位；与 92 的口径不同（92 是调用数），两个数不可相约 |
+| `74` | 92 − 18 = 74 | 这个减法**只在「92 与 18 同一口径」时才对**。92 是调用、18 是路径，74 是两条不同口径相减的产物。它今天的真值（按路径）= 91 − 17 = **74**（`/console` 在两者里都有，所以减出来仍是 74）——**数字对，理由不对** |
+| `105`/`106` 指代一致 | spec 的 `(path,method)` = **105**；daemon 的 = **106**，差集是 `/console` | 一致，无需改 |
+
+**为什么只钉得动一半**：18 可以由「解析测试文件自身」稳定得到（`build_test_router` 的 `.route(` 次数，或 `mounted_handlers` 的方法数）。但**「mirrored」这件事在运行时不可判定**：镜像 router 的 18 条里有 `console`、`list_hosts` 这类**同名、同路径、不同实现**的本地函数（`:145`、`:180` 起），源文本能证明「有一条同路径的 `.route`」，不能证明「handler 是 daemon 的」。所以「74 条未镜像」只能钉成「daemon 的 (path,method) 集合减去镜像 router 的 (path,method) 集合 = 74」——它钉的是**形状差**，不是**实现差**，措辞也要跟着改。
+
+**建议改法**：头部改成三个可解析的句子，并把「什么算 mirrored」写明——
+
+- 92 → 「92 `.route(...)` calls, 106 (path, method) pairs」；
+- 18 → 「18 paths / 21 operations」；
+- 74 → 「74 (path, method) pairs that no mirrored route shares a path with」，并加一句「sharing a path is not sharing an implementation」。
+
+然后加一条断言：解析 `daemon_integration.rs` 自身的 `build_test_router`，把这三个数与正文里的三个数逐字比对。**成本约 40 行，全部在 `src-tauri/tests/**`**，属 L1；我没落是因为它要和 `docs/reports/` 里的表述一起改，且 `105/106/74/18/92` 这几个数在 `docs/architecture.md`、`docs/api.yaml` 的注释里还有副本，需要一次找准范围。
+
+**一条可复算的旁证**（写在这里供落地时做破坏性对照）：给 daemon 加一条 `.route("/console", post(serve_console))` 后，`daemon_routes` 变成 107 条 `(path,method)`，`phantom` 检查不会红（`/console` 在 `NON_API_ROUTES` 里），头部三个数**一个都不会动**。这就是 L2-125 想钉住的那类漂移。

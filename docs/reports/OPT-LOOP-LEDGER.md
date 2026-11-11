@@ -2333,3 +2333,27 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 **§四、关于「33」的单位（它的复算与我的不同，原因是口径）**
 
 它数出 26（handler 体内直接调）+ 2（`preflight_sftp_rm_rf`）+ 2（`load_execution_gate`）= **30 handler**；我数出 29 + 2 + 2 = **33**。差别是那三条 in-band 路由（`GET /exec/stream`、`POST /terminal/broadcast`、`POST /terminal/broadcast/preview`）：它们也读 gate，但拒绝走帧内/target 内，「会不会 423」不同，所以按「能返回 HTTP 423」的口径该扣掉 3。两个数都对，**单位不同**。`e2bf8dc` 已把 `daemon_integration.rs` 那句「33 operations」换成它所代表的判据（不再写数），理由与 batch 5 的「标题里的数字是零漂移源」同一条。
+
+### consume 3 / 6 · 2026-11-11 12:3x (GMT+8) · batch 12（issue #18）
+
+- 指摘来源：第 2 轮收尾回帖里的四个复核问题（`@CodeBuddy` 自取答案），本轮**只读代码、不改行为**。
+- 落 main 的是 `docs/reports/OPT-LOOP-L2-PENDING.md` + 本段：三条新登记（L2-123/124/125），全部 `src-tauri/tests/**` 或措辞，无行为改动。
+- 行号基线 `614f355`，按符号引用；没有 Rust 工具链的一侧用一个按 `daemon_routes_and_drops` 原文算法复写的脚本复算（结果与断言逐字一致，见下）。
+
+**一、四个复核问题的答复（可复算）**
+
+| # | 问题 | 答复 | 证据 |
+|---|---|---|---|
+| 1 | `expected` 里那条 `/` 是硬编码的，怎么判断「改期望」是合法修还是改软 | **判据不能放在 `expected` 里，得放在「丢弃的段长什么样」上**：`/` 与 `/console` 的丢弃只可能在「段内没有 `<method>(<ident>`」时发生，而今天唯一合法的这种段是**闭包字面量**。所以判据应是「每个丢弃段都挂闭包」，路径与条数都不进期望 | 复算：`.route(` = 92、丢弃 = 1（`:5814`，`/`，无 handler）→ 与 `expected` 一致。反例（都是用复写脚本对 daemon 源注入、再按原文算法复算，未编译、未跑测试）：注入一个闭包 `/console`（带类型的 `|_req: Request<Body>|`，**这是我构造的**，不是树里已有的东西）→ 丢弃集变 `[("/console", 无 handler), ("/", 无 handler)]`，新断言**会红**；注入 `.route("/console", post(serve_console))`（**合法、能编译**）→ 丢弃集不变、`(path,method)` 从 106 变 107，**没有一条断言会红** |
+| 2 | 删掉局部 `NON_API_ROUTES` 后，`api_yaml_documents_how_each_handler_reads_its_body` 对 `/` 与 `/console` 的处理是否逐条等价 | **等价，唯一差别是「曾经判据为假时不会 panic」这个不可能的分支** | 删掉的那份局部常量内容 = 模块级那份（两条字符串）；改动前该函数自身就先把白名单滤掉；`:3212` 之后再无读取 `spec` 的路径引用 `/` 或 `/console`——`documented` 是从 `spec.lines()` 构造的，`api.yaml` 的 90 个 path 里没有这两个（`grep -n "console" docs/api.yaml` 零命中）。差的一步：旧代码没有 `!path.is_empty()` 这个判据，若白名单里有一条空串就能匹配 `/`；今天的模块级常量没有空串，两者恒等 |
+| 3 | L2-80 的「解析不了的 TOML」fixture 下，有没有第三个分支能产生同样的 200/500 使断言通过而语义不同 | **有：进程内缓存的命中。** `load_scoped_daemon_tokens`（`remote.rs:203-214`）走 `SCOPED_TOKENS_CACHE.load_with`，`:52-55` 在签名相同（同 path、同 `(mtime, len)`）时直接返回旧值、**不跑 loader**。所以「先写得对、让一次非 admin 请求把它读进缓存、再把文件改坏」之后，非 admin 仍然 401，admin 仍然 200 → 断言通过，但 500 臂从未走过。**同进程里先出现任何一次非 admin 认证**（包括一个 `with_temp_config` 块里的前一个用例）就把缓存填上了 | 键是 `(modified, len)`（`config_cache.rs:34-38`）：先写对（例：`[[tokens]]` + 一条合法条目）、再写坏（例：`this is not toml`），字节长度至少差 4，签名必变 → 强制重读 → **构造「长度恰好不变」的坏文件不可靠**（`len()` 是 `u64`，撞上就相等）。可行做法：把「让非 admin 认证发生一次」这段显式去掉、或令两条断言在**同一个 `Runtime` 里**但只允许 admin 先到达，并在断言里额外要求失败串含 `failed to load scoped daemon tokens`——**但那串只出现在响应体里**，而 `err(StatusCode::INTERNAL_SERVER_ERROR, …)` 的 body 形如 `{"error": "failed to load scoped daemon tokens: …"}`，一条 `response_text` 就够了。这是目前唯一能把「500 臂」与「缓存里没填到」分开的判据 |
+| 4 | 那 4 条不成立里有没有其实成立的 | **4 条都不成立。** 但其中第 1 条（`.route(b"/health", …)`）的**方向错了一半**：字节串确实编译不过，可是「解析器读不懂形状」这件事本身是真的——只是它由 `mounted_handlers` 的**字面扫描**给出，而不是由 `Router::route` 的类型给出 | `.route(b"/health", get(health))`：`b"/health"` 是 `&[u8; 7]`，`route` 签名取 `&str`（`axum-0.7.9/src/routing/mod.rs:164`）→ `E0308`，**编译不过**，不构成可运行的 daemon。可运行的版本是 `.route("/health", get(health))`——这条**能被正确读出**（复算：`/health` GET 在 106 条 `(path,method)` 里）。真正读不出形状的只有闭包，见 §二第 1 条 |
+
+**二、本轮查出的两条覆盖面缺口（`src-tauri/tests/**`，已登记）**
+
+1. **L2-124：`/console` 的 GET 挂载零断言。** `bin/agent2ssh-daemon.rs:5818` 的 `.route("/console", get(serve_console))` 既不在 spec（被 `NON_API_ROUTES` 排除），也不被 `every_route_call_is_read_as_an_operation` 约束（只比 `dropped`，它不掉）。`src-tauri/tests/**` 里 `serve_console` 零命中：`http_console_serves_key_workflow_entrypoints`（`:668-696`）测的是 `:145-146` + `:425` 的**镜像**，HTML 是真的、挂法是假的。可复算：把 `:5818` 换成闭包，`daemon_routes` 少一条条目，**没有一条断言会红**。
+2. **L2-125：头部三个数——一个可钉、两个不可钉。** 复算：`.route(` = 92（调用），`(path,method)` = 106，distinct path = 91，spec 的 `(path,method)` = 105，`build_test_router` 的 `.route(` = 18 但方法数 = 21。所以头部的「92 routes」单位是调用、「18 routes」单位是路径、「74」是两条不同口径相减的产物（值 91 − 17 = 74 **对**，理由不对）。且「mirrored」在源文本上不可判定（`console`/`list_hosts` 是**同名同路径不同实现**的本地副本），只能钉「形状差」不能钉「实现差」——这一条与上一轮「三个数仍是散文」的登记合并，但落地面缩小到 40 行、且必须同改 `docs/architecture.md` 里的副本。
+
+**三、上一轮 §五 第 1 条（`mounted_handlers` 的字面一致性断言）改判**
+
+上一轮我写「今天能红的只有 `/` 的闭包（已被覆盖），其余构造要么编译不过、要么触发 axum 重叠路由 panic，收益低于成本」——**「收益低」这一半错了**。成本比估计低（判据可以只写在丢弃段上，不需要枚举「合法形状」），收益也确在：`/console` 换成闭包这个改动今天**静默**（L2-124），而它正是新断言想钉的类别。已改登为 **L2-123**，落地形式与判据写在那里，等「闭包 API 路由是否可接受」这个产品问题定。
