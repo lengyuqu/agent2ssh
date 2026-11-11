@@ -3203,3 +3203,13 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 #### 验证
 
 `yaml.safe_load` **90 paths**；三个 in-band marker 与三条 in-band 路由「不含 423/429/408」仍成立。**`cargo` 不在这个容器里，`cargo test` 与 `cargo fmt` 一条都没跑**——为不把「没跑」写成「跑过了绿」，我把这段逻辑用 Python 实现两遍（一个独立分析器、一个 Rust 测试的逐行移植），两份都报 34 条 / 6 组 / 0 问题；另做三次变异（改回裸句、删 gate 调用、塞注释）验证两个方向都会红。**合并前必须补跑 `cargo test ... --test daemon_integration api_yaml` 与 `cargo fmt`**：本轮 Rust 没编译过，Python 移植只能证明逻辑与文件一致，不能证明 `spec_operation_block` / `response_description` 这两个新 helper 能编过。
+
+#### 第 6 轮补验（2026-11-11 21:55，另一会话执行）
+
+上一轮在**没有 cargo 的容器里**写完 Rust 并直接推送，自陈「合并前必须补跑」。补跑结果：**`--features daemon --test daemon_integration` 在 `c41a6c4` 上根本编不过**——`:3185` 把 `split_once` 的两元组解构成三元组（`E0308`，expected 2, found 3）。同一个测试二进制里二十多条 `api.yaml` 契约测试因此一起沉默，**main 上的契约检查整批停摆**，而 ledger 当时记的是「Python 移植两份都绿」——那只能证明逻辑与文件内容一致，证明不了它能编译。
+
+- 修法：`let (_, remote_branch) = …`（一行）。`cargo fmt` 同时产出三处纯重排。
+- 验证：`--features daemon --test daemon_integration` **77 passed / 0 failed**（含 `every_scope_checked_route_documents_the_order_its_refusals_arrive_in` 与 `api_yaml_documents_how_each_handler_reads_its_body`）；`cargo fmt --check` 干净。
+- 提交 `6e67dd8`。
+
+**工艺**:「本容器没有 cargo」不是「可以不编译就推」的理由。要么不推，要么把改动留在分支上等能编译的会话接手；推上去的未编译代码会让**同一二进制里的其它测试**一起失效，代价比晚一轮合流大得多。
