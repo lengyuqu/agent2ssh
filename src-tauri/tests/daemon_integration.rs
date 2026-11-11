@@ -4389,6 +4389,108 @@ fn api_yaml_describes_every_error_response() {
     );
 }
 
+/// One operation's slice of `docs/api.yaml`, from its `path:` line through the
+/// last line indented deeper than the method key.
+fn api_yaml_operation(spec: &str, path: &str, method: &str) -> String {
+    let path_key = format!("  {path}:");
+    let mut block = String::new();
+    let mut inside = false;
+    let mut seen_method = false;
+    for line in spec.lines() {
+        if !inside {
+            if line == path_key {
+                inside = true;
+            }
+            continue;
+        }
+        let body = line.trim_start();
+        let indent = line.len() - body.len();
+        // A sibling path (indent 2) or a sibling method (indent 4) ends the block.
+        if line.starts_with("  /") || (indent == 4 && !body.is_empty() && !body.starts_with('#')) {
+            if seen_method {
+                break;
+            }
+            if indent == 4 {
+                // Still inside the path, before reaching our method.
+                if body.strip_suffix(':') == Some(method) {
+                    seen_method = true;
+                }
+                continue;
+            }
+            break;
+        }
+        if seen_method {
+            block.push_str(line);
+            block.push('\n');
+        }
+    }
+    assert!(
+        seen_method,
+        "docs/api.yaml has no `{method}` under `{path}`; the test is looking for an operation \
+         that no longer exists"
+    );
+    block
+}
+
+/// The two session endpoints answer 429 for different reasons, and the `scope`
+/// suffix in the body is the only thing that tells them apart.
+///
+/// Both rejections share one message template
+/// (`execution limit exceeded: <scope> current=… limit=…`), so a client that
+/// retries on 429 cannot infer from the status alone whether it is waiting for a
+/// window to slide or for a slot to be released. The contract said this
+/// backwards once: `DELETE /sessions/{id}` claimed no 429 while
+/// "`/sessions` — the open side — does list one", which reads as "opening is
+/// rate-limited"; `session_open` never calls `reject_if_rate_limited`, it
+/// reserves a slot through `check_session_open`, and `/resident-sessions` is the
+/// endpoint that is rate-limited. Each sentence is now pinned to the mechanism
+/// it describes.
+#[test]
+fn api_yaml_names_the_mechanism_behind_each_session_429() {
+    let spec = include_str!("../../docs/api.yaml");
+
+    let open = api_yaml_operation(spec, "/sessions", "post");
+    assert!(
+        open.contains("check_session_open"),
+        "`POST /sessions` answers 429 from the session cap (`check_session_open`), and its 429 \
+         description has to name that instead of implying a rate limit"
+    );
+    assert!(
+        open.contains("sessions`,") || open.contains("sessions`."),
+        "the scope suffix `sessions` is the only client-visible discriminator; it belongs in the \
+         `POST /sessions` 429 description"
+    );
+    assert!(
+        open.contains("never calls"),
+        "`session_open` never calls `reject_if_rate_limited`; a description that only lists the \
+         429 without saying so is what let the two mechanisms be confused"
+    );
+
+    let close = api_yaml_operation(spec, "/sessions/{id}", "delete");
+    assert!(
+        !close.contains("\"429\":"),
+        "`session_close` checks no limit — it releases the slot — so a 429 there would be a \
+         promise the handler cannot keep"
+    );
+    assert!(
+        close.contains("unregister_session"),
+        "the reason `DELETE /sessions/{{id}}` cannot answer 429 is that it calls \
+         `unregister_session`; state the release, not just the absence"
+    );
+
+    let resident = api_yaml_operation(spec, "/resident-sessions", "post");
+    assert!(
+        resident.contains("reject_if_rate_limited") && resident.contains("`rate`"),
+        "`resident_session_open` runs the shared preflight, so its 429 is the per-minute rate \
+         limit and the suffix reads `rate`"
+    );
+    assert!(
+        resident.contains("AGENT2SSH_MAX_RESIDENT_SESSIONS") && resident.contains("400"),
+        "the resident-session cap answers 400 from `resident_open_core`, not 429; a 429 \
+         description that also claims that cap sends clients to wait for the wrong thing"
+    );
+}
+
 /// Every WebSocket frame the daemon can push is named in the contract.
 ///
 /// `{"type":"shutdown"}` was pushed by both socket routes and appeared nowhere in
