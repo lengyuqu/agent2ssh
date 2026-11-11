@@ -1951,3 +1951,16 @@ forward_start（:3204-3244）与 forward_remove（:3077-3113）、forward_stop�
 ### 一条流程失误（第 4 轮，记下来）
 
 本轮先把「preview 放行 / run 拒」写进了 `api.yaml` 与 `info.description`，**再去逐行核 `run` 有没有自己的 gate 调用**，才发现两侧同源。改顺序本应是「核完再写」。代价是两处文案要改第二遍，而且如果我写完就推送，两次的差异会被读成「意见变了」。这条不算 L2——它是我自己的工作顺序问题——但下一个人读这份文件时，看到 `d83xxxx` 之后 `api.yaml` 的这条描述被连着改两次，应该知道原因在这里。
+
+### batch 14 第 5 轮：M1 成立，但两处细节和复核说的不同
+
+**M1 成立的部分**：`/daemons/{alias}/exec` 的正文把顺序写反了（`:4315-4316` 原为「caller token scope, local remote-alias scope, execution gate, execution limits, and local authorization」），而 `proxy_exec` 的远程分支实际是 `get_daemon_with_scope`（`:3994`，404）→ gate（`:3998`）→ rate（`:3999`）→ `check_daemon_scope`（`:4000`）→ authorize。`/connections/{host}/connect` 同样：正文把 scope 写在 gate 前面，实际 `ssh_connect` 是 gate（`:3601`）→ rate（`:3603`）→ scope（`:3604`）→ authorize（`:3606`）；`ssh_disconnect`（`:3655-3660`）一模一样。两页都已按「顺序即应答顺序」改写，403 补上前置条件。
+
+**两处需要更正复核的措辞**：
+
+1. **不是「七处」，是 20 处以上。** 裸文案 `Scope denied or approval rejected` 在本轮改完后仍出现 **20 次**（`grep -c 'description: Scope denied or approval rejected' docs/api.yaml`）。本轮只改了已逐行核过顺序的两条（`connect`、`exec`），其余**没有动**——每条都要先读它的 handler 才能判断该不该加限定，盲改会把对的写成错的。这是本轮刻意留下的欠账，不是遗漏。
+2. **`proxy_exec` 的两条分支顺序相同。** 复核说「同一 handler 两条分支两种顺序」。核实：`preflight_guarded_request_inner`（`:574-590`）也是 gate（`:587`）→ rate（`:589`）→ `authorize_command_inner`（`:590`，其内部第一步是 scope）。所以两条分支是**同序、不同机制**（内联 vs 共享 helper），不是两种顺序。已在 `api.yaml` 里这么写。
+
+**顺带更正我自己第 4 轮的一处过度声明**：我说 `assert_eq!(host_key_algorithm(HostKeyKind::Rsa), "ssh-rsa")` 能「钉住」N1 的回归。**不成立**——`host_key_algorithm` 那行代码从没被改过，改动前这条断言也是绿的；它不是护栏，是文档。真正的回归点是**测试传参**，没有任何断言覆盖它。记此以免后续把「已加断言」读成「已验证」。
+
+**不变式测试的欠账（L1 待办）**：现在的三路由比较仍是**手工清单**——加第四条内联 scope 的 handler 不会自动进来。复核给的改法（按 handler 形状分组：内联 `check_daemon_scope` 且不经 shared preflight 的算 A 组，经 preflight 的算 B 组，组内响应码集合两两相等）方向对，但需要解析 handler 体而不是只解析 spec，本轮时间不够。测试里已写明这个缺口，避免下一个人以为它已经是自动的。

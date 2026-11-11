@@ -3128,7 +3128,7 @@ fn api_yaml_documents_every_daemon_route() {
 /// `authorize_command`, which answers `REQUEST_TIMEOUT` when an approval
 /// expires. That omission was invisible because nothing compared the two.
 #[test]
-fn api_yaml_gives_the_two_forward_authorization_routes_the_same_codes() {
+fn api_yaml_gives_the_three_forward_authorization_routes_the_same_codes() {
     let spec = include_str!("../../docs/api.yaml");
 
     fn codes(spec: &str, path: &str, method: &str) -> Vec<String> {
@@ -3164,13 +3164,23 @@ fn api_yaml_gives_the_two_forward_authorization_routes_the_same_codes() {
         found
     }
 
+    // The list below is still hand-maintained, which is the weakness this test
+    // was supposed to remove: add a fourth inline-scope handler and it will not
+    // appear here. Grouping by handler shape instead of by path would fix that,
+    // but it needs the handler body parsed, not just the spec. Until then this
+    // pins the three that exist and names the gap.
     let remove = codes(spec, "/forwards/{id}", "delete");
     let stop = codes(spec, "/forwards/{id}/stop", "post");
+    let start = codes(spec, "/forwards/{id}/start", "post");
 
     assert!(remove.contains(&"408".to_string()), "{remove:?}");
     assert_eq!(
         remove, stop,
-        "the two routes share one authorization path, so they share one set of codes"
+        "remove and stop share one authorization path, so they share one set of codes"
+    );
+    assert_eq!(
+        remove, start,
+        "start runs the same four checks in the same order as remove and stop"
     );
 }
 

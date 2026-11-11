@@ -3140,3 +3140,35 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 #### 验证
 
 `yaml.safe_load` **90 paths**；`/forwards/{id}`、`/forwards/{id}/start`、`/forwards/{id}/stop` 三条的响应码集合完全一致（`200/400/401/403/408/423/429`）。契约测试依赖的四个短语仍在（`drains for up to 500 ms`、`only as a frame`、`returns 200`、`into that target's \`error\``）——逐条 `grep -c` 为 1。**本轮零源码改动，且本容器无 Rust/Node 工具链（`which cargo` 为空），故 `cargo test` 与 `npm test` 一律未跑**：这不是「跑过了绿」而是「没跑」，引用本轮的验证结论时请只引用 `yaml.safe_load` 与 `grep`。
+
+### consume 5 / 6 · batch 14 · issue #30（M1 与「断言不是护栏」）
+
+本轮开工先重列评论（第 4 轮的教训），发现**两条**新复核同时到达：`2120508887198515200`（13:28，2989 B）与 `2120509144074469376`（13:29，7979 B）。**前者是复核直接推的提交**，不是评论——`4db0762` 已在 main 上，且它自述「本容器无 cargo，一条都没跑」。所以本轮第一件事是把那条没人跑过的提交跑一遍。
+
+#### `4db0762` 的验证（复核未做的那一半）
+
+`cargo test --no-default-features --features daemon --test daemon_integration api_yaml` → **7 passed**。它的 api.yaml 改动（`/forwards/{id}/start` 的 403、broadcast 的 preview 不作预测、`info.description` 的第三处 gate 缺口）没有破坏任何既有契约断言，也没破坏我第 4 轮加的那条码集合比较。
+
+#### M1 判定：成立，但两处措辞要更正
+
+| 复核的说法 | 判定 |
+|---|---|
+| `/daemons/{alias}/exec` 的正文把 scope 写在 gate 前面 | **成立**。原文 `:4315-4316` 确为「caller token scope, local remote-alias scope, execution gate, execution limits, and local authorization」；实际 `proxy_exec` 远程分支是 `get_daemon_with_scope`（`:3994`，404）→ gate（`:3998`）→ rate（`:3999`）→ scope（`:4000`）→ authorize |
+| `/connections/{host}/connect` 的 403 是无条件句 | **成立**。`ssh_connect`（`:3601-3606`）与 `ssh_disconnect`（`:3655-3660`）都是 gate→rate→scope→authorize |
+| 「七处」无条件 403 | **低估**。改完后 `grep -c 'description: Scope denied or approval rejected'` 仍为 **20** |
+| 「同一 handler 两条分支两种顺序」 | **不成立**。`preflight_guarded_request_inner`（`:574-590`）也是 gate（`:587`）→ rate（`:589`）→ `authorize_command_inner`（`:590`，内部第一步即 scope）。两条分支**同序、不同机制** |
+| 我第 4 轮说 `assert_eq!(host_key_algorithm(Rsa), "ssh-rsa")` 能钉住 N1 回归 | **不成立，是我写错**。那行代码从未被改过，改动前断言也绿；它是文档不是护栏。真正的回归点是**测试传参**，无任何断言覆盖 |
+
+#### 本轮改动
+
+- `docs/api.yaml`：`/connections/{host}/connect` 与 `/daemons/{alias}/exec` 的 description 改成「顺序即应答顺序」；两条的 403 补上前置条件（423/429 先于 403）；`disconnect` 的描述补上它本来就有的 gate 与 limits。
+- `src-tauri/tests/daemon_integration.rs`：码集合比较从两路由扩到三路由（加入 `start`），函数名相应改为 `..._three_forward_authorization_routes...`；测试里写明**清单仍是手工的**，并记下按 handler 形状分组的改法。
+- `docs/reports/OPT-LOOP-L2-PENDING.md`：本轮判定表；21→20 的计数更正；两分支同序的更正；我自己那句「断言能钉住」的撤回；不变式测试的 L1 欠账。
+
+#### 验证
+
+`yaml.safe_load` 90 paths；`cargo fmt` 干净；`cargo test --no-default-features --features daemon --test daemon_integration api_yaml` → **7 passed**（含改名后的三路由测试）。本轮零源码行为改动。
+
+#### 一条口径
+
+复核开始推提交了（`4db0762`）。**它说「没跑」，那这一轮的第一件事就是把那条提交跑一遍**——不是复核意见，是既成事实的验证。以后凡 main 上出现我未亲自跑过的提交，都按这个顺序处理：先跑，再谈意见。

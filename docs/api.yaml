@@ -4114,7 +4114,13 @@ paths:
   /connections/{host}/connect:
     post:
       summary: Establish a retained embedded SSH connection to a host
-      description: Applies bearer-token scope, execution gate, effective risk, and approval policy using `connect`.
+      description: |
+        Runs the same four checks as the forward routes, in the same order:
+        execution gate, execution limits, caller scope, then authorization using
+        `connect`. That order is also the answer order — a paused gate answers
+        423 and an exceeded limit 429 before scope is consulted at all, so a
+        request that is both out of scope and refused by the gate never sees
+        403. `disconnect` below runs the same sequence.
       parameters:
         - name: host
           in: path
@@ -4139,7 +4145,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "403":
-          description: Scope denied or approval rejected
+          description: Scope denied, or the approval policy refused the connect. The gate and the limit are checked first, so a paused gate answers 423 and an exceeded limit 429 even when the host is also outside the token's hosts and tags.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -4162,7 +4168,7 @@ paths:
   /connections/{host}/disconnect:
     post:
       summary: Close a retained embedded SSH connection to a host
-      description: Applies bearer-token scope, effective risk, and approval policy using `disconnect`.
+      description: Applies execution gate, execution limits, bearer-token scope, effective risk, and approval policy using `disconnect` — the same sequence as `connect`, and in the same order.
       parameters:
         - name: host
           in: path
@@ -4312,15 +4318,24 @@ paths:
     post:
       summary: Execute a command through a configured daemon alias
       description: |
-        Applies the caller token scope, local remote-alias scope, execution gate,
-        execution limits, and local authorization before forwarding to a remote
-        daemon. The remote daemon may enforce its own scoped token and policy again.
-        `localhost` is the exception the first sentence does not cover: that alias
-        is executed in this process — `preflight_guarded_request`, then
+        Two branches, one order.
+
+        A remote alias is resolved first — `get_daemon_with_scope` matches
+        `remotes.toml` by name without consulting the caller's token, so an
+        unknown alias answers 404 before anything else is asked — and then runs
+        execution gate, execution limits, caller scope, and finally approval.
+        The gate and the limit come before scope, so a request that is both out
+        of scope and refused by the gate answers 423, not 403: the quieter code
+        is the one that does not disclose that the host exists. The remote daemon
+        may enforce its own scoped token and policy again.
+
+        `localhost` is the exception the first paragraph does not cover: that
+        alias is executed in this process — `preflight_guarded_request`, then
         `exec_ssh_core` — so nothing is forwarded and no remote-alias scope is
-        consulted. Both branches answer an `ExecResult`, so the response shape
-        does not tell a caller which one it got; the alias it sent is the only
-        signal.
+        consulted. The shared preflight runs the same four checks in the same
+        order, so the refusals line up; only the mechanism differs. Both branches
+        answer an `ExecResult`, so the response shape does not tell a caller
+        which one it got; the alias it sent is the only signal.
       parameters:
         - name: alias
           in: path
@@ -4355,7 +4370,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "403":
-          description: Scope denied or approval rejected
+          description: Scope denied, or the approval policy refused the request. The gate and the limit are checked first on both branches, so a paused gate answers 423 and an exceeded limit 429 even when the caller is also outside the token's hosts and tags.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
