@@ -1302,3 +1302,61 @@ fn mounts_a_closure_literal(segment: &str) -> bool {
 然后加一条断言：解析 `daemon_integration.rs` 自身的 `build_test_router`，把这三个数与正文里的三个数逐字比对。**成本约 40 行，全部在 `src-tauri/tests/**`**，属 L1；我没落是因为它要和 `docs/reports/` 里的表述一起改，且 `105/106/74/18/92` 这几个数在 `docs/architecture.md`、`docs/api.yaml` 的注释里还有副本，需要一次找准范围。
 
 **一条可复算的旁证**（写在这里供落地时做破坏性对照）：给 daemon 加一条 `.route("/console", post(serve_console))` 后，`daemon_routes` 变成 107 条 `(path,method)`，`phantom` 检查不会红（`/console` 在 `NON_API_ROUTES` 里），头部三个数**一个都不会动**。这就是 L2-125 想钉住的那类漂移。
+
+> **这条旁证已失效**（batch 12 第 3 轮）：`the_console_route_mounts_one_named_handler` 现在数 `.route("/console"` 的出现次数，加第二条会红。见本文件末节「batch 12 第 3 轮」。
+
+---
+
+## 2026-11-11 · batch 12 第 3 轮：L2-123 / L2-124 已落地，L2-125 只落了单位（两个数被更正）
+
+上一节（复核小节）登记的三条，本轮全部处理完：两条**已落地**成 L1（`1a0b723` + `3e86b4b`，只动 `tests/daemon_integration.rs`），一条**落了一半**并更正了原文两个数。行号是 `3e86b4b` 的快照，按符号引用。
+
+### 一、L2-123 已落地，但只落一半——「任何路径写成闭包都放行」被有意拒掉
+
+`DroppedRoute` 增 `mounts_closure: bool`，在**丢弃发生时**算好（`mounts_closure(segment)`），所以结构体不持借用、`daemon_routes_and_drops` 的签名不用加生命周期（原建议是加 `segment: &'a str`，见上一节「顺带」那段）。`every_route_call_is_read_as_an_operation` 拆成两条各自可判定的断言：
+
+1. **形状**：每个丢弃段的挂载实参都是闭包（`!drop.mounts_closure` 一律红）；
+2. **归属**：每个被丢弃的路径都 ∈ `NON_API_ROUTES`。
+
+第 2 条与 L2-123 建议的「任何路径写成闭包 → 通过（同形同待遇）」**不同**，理由是那条判据有条可构造的漏：
+
+- 一条**未写进 `api.yaml`** 的路由若用闭包挂载，`daemon_routes` 掉一条，而 `api.yaml` 侧的 `phantom` 也没有条目可比对（spec 里根本没写它）——两条网同时漏。L2-123 自己把这点写成「这个判据唯一的代价，需要人拍板」。
+- 产品问题该由人拍；L1 车道不该用**撤掉一条护栏**来表达「闭包路由可接受」。要让某条路由享受豁免，就把它登记进 `NON_API_ROUTES`——那是一个必须显式做的动作，不是默认放行。
+
+**破坏性对照**（三次，每次改完 daemon 源后还原，`git diff` 确认无残留）：
+
+| 改动 | 形状断言 | 归属断言 | 旧版（固定 (path, reason) 集合） |
+|---|---|---|---|
+| `/console` 改成闭包（能编译、语义相同） | 绿（闭包） | 绿（`/console` ∈ 白名单） | 红 |
+| `/metrics` 改成闭包 | 绿（闭包） | **红**，报 `line 5821 `/metrics`` | 红 |
+| `/console` 写成 `get (serve_console)`（一个空格，仍能编译） | **红**，报「mount a named handler and did not parse」 | — | 红，但文案说「update this expectation deliberately」 |
+
+第一行是**唯一**旧版比新版严的格子，也正是新版为此付出代价的地方：它由 `the_console_route_mounts_one_named_handler` 补上（下一节）。第二、三行说明新判据并不更松——它把「哪条路由被豁免」变成一个必须写下来的决定。
+
+### 二、L2-124 已落地：`/console` 的挂载有断言了
+
+新增 `the_console_route_mounts_one_named_handler`，三件事：
+
+1. `daemon.matches(".route(\"/console\"")` 必须恰为 **1**；
+2. 该段 `mounted_handlers` 恰为 `[("get", "serve_console")]`；
+3. daemon 源里有 `async fn serve_console(`。
+
+**第 1 条是补上的**：第一版只解析第一个 `.route("/console"` 段，而我用上一节那条旁证（`.route("/console", post(serve_console))`）实测时，测试**仍然是绿的**——axum 把同一路径的第二条 `.route` 合并进第一条，第二段根本没进断言。所以那条被当作「头部数不可钉」的证据的反例，正好是这条测试第一版的漏。`3e86b4b` 补上计数后实测：`/console is mounted by 2 .route(...) calls`。
+
+破坏性对照（已还原）：`/console` 改闭包 → **只有**这条新 test 红，`every_route_call_is_read_as_an_operation` 仍绿（`/console` ∈ 白名单）。这正是 L2-124 说的「静默」，也是这条 test 唯一的存在理由。
+
+### 三、L2-125：单位改了，两个数被更正
+
+| 上一节原文 | 复算 | 结论 |
+|---|---|---|
+| `build_test_router` 的方法数 = **21** | **20**：18 条 `.route(` 里 `/webhook/config`（get+put）与 `/approval/policies`（get+put）各两个方法，其余 16 条各一个 | 原文多算 1 |
+| 「74 是两条不同口径相减的产物（值 91 − 17 = 74 对，理由不对）」 | **74 在调用口径与路径口径下都对**：92 calls − 18 calls = 74；按**调用路径**数是 92 条 distinct − 18 = 74。解析出的 distinct path 是 91，只因为 `/` 是那个唯一的 drop、不产出 entry。换成 `(path, method)` 才是 106 − 22 = **84** | 「74 理由不对」不成立；成立的是「92 与 18 的**名词**不对」（它们都是调用数，不是路由数） |
+| 必须同改 `docs/architecture.md` 里的副本 | `git grep -i 'mirror\|镜像' docs/architecture.md` **零命中**，`92`/`74`/`18` 也不在那份文件里 | 不成立：这些数只在测试文件头部两处与本台账里有 |
+
+于是头部改成：`18 of the daemon's 92 .route(...) calls (20 of its 106 (path, method) pairs)`，以及 `The other 74 calls — 84 (path, method) pairs over 74 distinct paths`。另补一句原文没有、复算得来的事实：**路径被镜像 ≠ 方法被镜像**——daemon 在 `/hosts` 与 `/health-snapshot` 上各多挂一个 `POST`，镜像里没有。这与 L2-124 同类：读者会把「18 条路径」读成「这 18 条覆盖了」。
+
+### 四、没落的那一半：不把 74 / 18 / 92 钉成断言
+
+`every_route_call_is_read_as_an_operation` 的文档里已经写明它钉的是「rather than a count a new route would break」——本仓在这条路径上的既定取舍是**不钉计数**。再给头部三个数加一条自解析断言，等于把刚拆掉的漂移源换成另一种：每加一条路由、每改一次镜像都要连带改断言。
+
+留给拍板的措辞：**若要钉，钉的是形状差**（daemon 的 `(path, method)` 集合 vs 镜像 router 的集合），不是「实现差」——源文本无法证明同路径的本地 `console`/`list_hosts` 就是 daemon 的实现。影响面比 L2-125 估的小：只需改测试文件一处。
