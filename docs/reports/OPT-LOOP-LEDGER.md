@@ -1,5 +1,7 @@
 # 优化轮次账本（OPT-LOOP）
 
+**BATCH_COMPLETE** · issue #19 · batch 13 · 2026-11-11 · **6 / 6 轮闭环**（六轮判定与 SHA 汇总在文末「批次汇总」节）。此后本任务的每次运行只输出一行状态；生产任务开 batch 14 时必须删掉本行（HTML 注释里数的是已被删掉的条数）。
+
 这份文件是「优化批次生产 / 消费」两个定时任务之间**唯一的跨轮记忆**。约定：
 
 - 生产任务追加 `### batch <日期> · <主题>`：记 issue 号与 CodeBuddy 首条分析索引，6 轮进度留 `0 / 6`。
@@ -2514,7 +2516,7 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 ### batch 2026-11-11 · daemon 控制与停止协议（第三批，B=13）
 - issue #19 / 开批时间 2026-11-11 13:25 (GMT+8)
 - CodeBuddy 首条分析：**已到**（05:32:08Z = 13:32 GMT+8，开批后约 6.3 分钟；60 s × 5 轮询 13:26–13:31 均空，延时复核 ≈13:33 命中），评论 `2120389088577478656`，**6 条指摘（成立 4 / 部分成立 2 / 不成立 0）**，索引：①`HELPER_STATUS` 的 423 项遮蔽 helper 自读 gate 的 500——`/daemon/:alias/exec` 的 localhost 分支自己调 `reject_if_gate_paused`，其 500 成因与 api.yaml 已写的「HTTP client 构不出来」是两条路径（成立）；②`INBAND_REJECTIONS` 以「路径在表里」为豁免判据，区分不了「Err 被消费」与「Err 被返回」两种形态，`terminal_attach` 不该进表（成立）；③L2-84 机制复核与当前树一致，新缺口 = `daemon_stop_e2e.rs` 零「持续输出 + 停机」用例（部分成立）；④`/exec/stream` 的 `interrupted` 在「取消后 drain 读到 `Exit(None)`（超时/worker 失败来源）」时误记为 daemon 中断，审计与 `ExecCompleted` 事件同错（部分成立）；⑤L2-129 第 3 条复核仍开，落地成本更正为约 5 行（复用 `closing_brace` 已有的字面量扫描器）（成立）；⑥L2-82 落地形状更正：三处 `Option<Json<T>>` 不能共用同一条断言——`/health-snapshot` 与 dry-run 在空配置目录下假绿，须拆「坏 body 与无 body 行为不同」判据（成立）。另**自撤 3 条候选**（`:4878` Close 不受 2 s 约束 / 坏 gate 下 preview 返回 423 / `drain_all` 4 s 计费——`drain_all` 无生产调用点，L2-91 正文措辞残留）。
-- 6 轮进度：3 / 6（第 1 轮 16:38–17:12、第 2 轮 17:30–18:15、第 3 轮 18:28–18:55 自取，判定见文末三条 `### consume K / 6`）
+- 6 轮进度：**6 / 6（已闭环，issue #19 已关闭）**（第 1 轮 16:38–17:12、第 2 轮 17:30–18:15、第 3 轮 18:28–18:55 自取、第 4 轮 18:01–18:09、第 5 轮 18:09–18:20、第 6 轮 18:20–18:45；判定见文末六条 `### consume K / 6` 与「批次汇总」）
 - 正文已喂给 CodeBuddy：**136 条「不成立」原文**（编号 91 = 旧 71 + batch 12 五个加粗伪小节 20；判定行 39；摘录 6），由 `/tmp/build-opt-issue-b13.py` 生成（复用 b12 骨架 + batch 12 区域锚点；batch 12 的 5 个小节是 `**…**` 独立加粗行而非 `###` 标题，b13 为其加了独立的区域限定扫描器，7/4/4/2/3 分布；全部锚点唯一性校验通过，计数复验 136）。**注意：batch 12 收尾汇总自述新增 21 条，原文清点为 20 条**（第 5 轮小节自报 3 条、汇总行写成 4），issue 正文已注明以原文切片为准。
 - KNOWN-ISSUES 空档喂 K14/K15/§3；口径提醒含基线（`--no-default-features --lib` 862/1/1、`daemon_integration` 76 passed、npm 220/30）、L2-75…L2-129 勿重复立条（本批靶子 L2-80 / L2-82 / L2-122 第 5 条 / L2-84…L2-91 / L2-99 / L2-129 除外）、L2 撞号 13 对须带主题限定、AGENTS 测试口径三则、batch 11 抗漂约定、`.github` 禁区与 L2 越权重申。
 - 顺手按 BATCH_COMPLETE 行自述删除顶部 `BATCH_COMPLETE · issue #18 · batch 12` 状态行（HTML 注释同步为十一条）。
@@ -2786,3 +2788,74 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 11. 「`host_policy_summary` 把坏配置报成 `404 host '{name}' not found`」——**部分不成立**：状态码确是 404，但正文是配置错误原文，不是 `host not found`。
 
 **回帖**：`2120461604117458944`（10:20Z）。推 `cnb main`（`1a21949..05604af`，三笔：`69ce18e` / `05604af`，中间 rebase 一次——另一个写者的 `1a21949` 把 `store.rs` 推后约 187 行）。轮次进度 **5 / 6**，第 6 轮收尾即为批次收尾。
+
+### consume 6 / 6 · 2026-11-11 · issue #19 · 第 6 轮（末轮）
+
+指摘来源：复核方对第 5 轮的复核 `2120462813050073088`（10:25Z）。它的行号一律给符号不给数字（它那棵树 `daemon_control.rs` 只有 1322 行），本轮按 `05604af` 的树自己锚。
+
+**一、判定：9 条 → 成立 5 / 部分成立 2 / 不成立 2（其中一条「结论对、机理全错」）**
+
+| # | 主张 | 判定 | 证据 |
+|---|---|---|---|
+| 1 | L2-135 的方案 2 对既有语义零影响 | **成立** | `a_local_target_is_not_gated_by_the_human_only_flag`（`execution_control.rs:668`）先写一份**合法**配置（只有 `vault`），再循环 `local*`：这些主机「未配置」而配置可读，`is_none_or` 仍返回 true，方案 2 不碰它 |
+| 2 | 写 `ai_allowed = false` 的测试只有两处 | **部分成立** | 两条**测试**（`:610`、`:668`），但三处 fixture 写 `ai_allowed: false`（`:616`、`:673`、`:796` 的 `db-1`） |
+| 3 | `AuditFilter` 只给了 decision + limit，没有 `since` | **不成立** | 结构体有 `since`（`types.rs:448`）；是**那条测试**的构造没设。建议（加 `since` 稳计数）本身有效 |
+| 4 | `1a21949` 没动审计函数体 | **成立** | `git show 1a21949 -- src-tauri/src/store.rs` 里 `append_operation_audit`/`derive_audit_outcome`/`fn append_audit` 零命中 |
+| 5 | `1a21949` 新增「credential store is behind hosts.json」告警，读失败多第三种形态 | **成立** | `store.rs:557`（warning）、`:783`（拒绝保存） |
+| 6 | 我写「零测试覆盖」会让人以为函数完全裸奔 | **成立，已改** | 行为两半各有一条测试；零覆盖只是「读失败」那一支 |
+| 7 | 用 `CARGO_BIN_EXE_agent2ssh` 的套件「不带 bin 前置 → Cargo 不会顺带编 bin」 | **不成立** | 实测 `cargo test --no-default-features --test host_secret_stdin` → **3 passed / 0 failed**（3.43 s）。Cargo 为集成测试会编 bin 目标，`agent2ssh` 的 `required-features = []` 无需前置。所以「补丁②会让两条红变多条红」的担心不成立 |
+| 8 | `App.tsx` 的 `refresh().catch(showToast)` ＋ `hosts.length === 0` 会弹设置向导 | **成立** | `src/App.tsx:299-303`：`!loading && hosts.length === 0 && !wizardDismissed` → `setShowWizard(true)`。属 `src/**` 行为，登记 **L2-136**，不动 |
+| 9 | `:1504` 收紧后今天绿 | **结论成立，机理全错** | 实测：改成 `assert!(stopped.is_ok())` 后 `--features daemon --test daemon_stop_e2e` **33 passed / 0 failed**（36.15 s）。它说的四条全不成立：桩对**非 POST** 请求返回 `{"ok":true,"pid":…,"config_dir":…}`（`:1466-1470`），health 身份因此过关；`posted` 只在 `request.starts_with(b"POST /shutdown ")` 时自增（`:1462-1465`），没有代理；`sleep 30` 超过 8 s drain 窗口，只能被强杀 |
+
+**二、本轮落地**
+
+`daemon_stop_e2e.rs:1504`：`stopped.is_ok() || !still_running` → `assert!(stopped.is_ok())`。属「非平台相关测试断言强度」，L1。收紧后这条用例钉的是「请求发出 ＋ 强杀完成 ＋ owner 清理成功」，而不是「进程恰好不在」。
+
+新增 **L2-136**：`hosts.json` 读不出来 → 前端 `hosts.length === 0` → 设置向导自动弹出（`src/App.tsx:299-303`），用户看到的是「添加你的第一台主机」。属 `src/**` 行为，登记不动。
+
+修正 **L2-135 的判据**：原文把「坏 JSON」与「主机不存在」写成一条，会让拍板的人以为方案 2 也把后者翻成 `false`。已拆成两行表格，并注明零覆盖只指读失败那一支。
+
+**三、验证（当前树，含 `1a21949`）**
+
+`npm run build` **7.13 s**；`--no-default-features --lib` **862 / 1 / 1**（红项仍是那条故意红的 IPv6）；`--features daemon --test daemon_stop_e2e` **33 passed / 0 failed**（36.15 s，收紧后）；`--no-default-features --test host_secret_stdin` **3 passed / 0 failed**（3.43 s）。
+
+**四、本轮新增不成立（请勿重复提）**
+
+12. 「`AuditFilter` 没有 `since`」——不成立：`types.rs:448` 有，是那条测试的构造没设。
+13. 「带 `CARGO_BIN_EXE_agent2ssh` 的套件需要 bin 前置，Cargo 不会顺带编其他 bin」——不成立：实测 3 passed。
+14. 「`a_daemon_that_ignores_the_expected_pid_stops_and_says_so` 没有真 daemon、health 身份过不去、请求一次都不发、`posted` 是代理记的」——不成立：桩对非 POST 回 pid/config_dir，POST 计数在桩里，进程只能被强杀。
+
+---
+
+## 批次汇总 · issue #19 · batch 13（daemon 控制与停止协议，第三批）
+
+**BATCH_COMPLETE** · 6 / 6 轮闭环 · 2026-11-11 · issue 已关闭（`state_reason=completed`）
+
+| 轮 | 指摘来源 | 判定 | SHA（L1） |
+|---|---|---|---|
+| 1 | CodeBuddy 首条分析 `2120389088577478656` | 6 条 → 成立 4 / 部分 1 / 不成立 1 | `09553fc` `6c57a8a` |
+| 2 | 对第 1 轮的复核（形态是「复核我三个判定」，不是指摘表） | 3 个结论 ＋ 2 处新事实 | `b458305` `2027493` |
+| 3 | 自取（60 s × 5 无回复） | 3 靶 → 成立 2 / 一半不成立 1 | `a469e31` `4cd9074` |
+| 4 | 对第 3 轮的复核 `2120449917180080128` | 7 条 → 成立 5 / 部分 1 / 接受 1；另立 2 条不成立 | `ef5885a` `2720096` `5a8cb5b` |
+| 5 | 对第 4 轮的复核 `2120460600642805760` | 11 条 → 成立 6 / 部分 2 / 不成立 2；自我更正 1 | `69ce18e` `05604af` |
+| 6 | 对第 5 轮的复核 `2120462813050073088` | 9 条 → 成立 5 / 部分 2 / 不成立 2 | 见本轮 |
+
+**本批最值钱的三条**
+
+1. **`.cnb.yml` 的门禁自 2026-11-10 起空转**（第 5–6 轮）：`daemon-regressions` 首条命令 `--lib` 因 L2-15 那条故意红的 IPv6 用例失败，脚本 `set -eu`、无 `allow_failure`，于是后面六条命令行（13 个测试目标）从未跑到。**要恢复可见性先拍 L2-15**，不是 L2-132。
+2. **`host_allows_source` 是 fail-open**（第 6 轮，L2-135）：`is_none_or` 让「配置读不出来」与「主机不存在」都放行 AI 来源，且与 `command_authorization_target` 的空 tags 叠乘——两道闸同时变松。方向与同族的 `audit_host_scope`（收）相反。
+3. **L2-132 的载体早就存在**（第 5 轮）：`append_operation_audit` 的注释就是「rejected before execution」。原条目把它写成「要新增类型」，抬高了拍板成本；真正要选的只是一个裁决值，代价是 `api.yaml` 两处枚举 ＋ `refused.len() == 3`。
+
+**待人拍板（按优先级）**
+
+1. **L2-15**：那条故意红的 IPv6 `known_hosts` 用例怎么处置（配修复 / 降 `#[ignore]` / 删）——它挡着整条 CNB 门禁。
+2. **L2-135**：`host_allows_source` 读失败三选一（fail-closed / 区分两种 `None` / 只加日志）。
+3. **L2-132**：gate 读失败的审计裁决值三选一；`.cnb.yml` 是禁区，补丁只能由人或 CI 所有者落。
+4. **L2-136**：坏配置下前端弹「添加第一台主机」要不要改文案/条件。
+5. **O-1**（复核方登记）：`stop_daemon_process` 的身份链可被自算 PID 满足，修法是改 `daemon.pid` 写协议或给 `/health` 加 nonce。
+
+**工艺教训（给下一批）**
+
+- **行号是快照**：本批两次被并发提交推后（`1a21949` 把 `store.rs` 推后 187 行），所有引用最终改成「符号 ＋ 当时的行号」并注明。
+- **「一条红」要问「它后面还有几条命令」**：`set -eu` ＋ 首条红 ＝ 整段静默。这个组合比红本身危害大。
+- **复核方的 `[读]` 类断言这批有明显进步，但「机理」仍是它的弱项**：第 6 轮那条结论对、四条机理全错；第 4 轮那条「没有断言」也错在没读到 `read_to_string(…).unwrap()`。**结论可以信，机理一律自己走一遍。**

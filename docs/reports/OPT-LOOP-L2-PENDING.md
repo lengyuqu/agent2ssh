@@ -1628,11 +1628,41 @@ batch 7 判「不成立」时用的论据是「`code.is_some()` 时 `interrupted
 
 对照 `audit_host_scope`（`bin/agent2ssh-daemon.rs:465`）的 `unwrap_or_default()`：空配置让 scope 变窄，方向是**收**。两条写法几乎一样、方向相反——本批第四次出现「同族里一条写、一条不写，从任何一条看过去都像一致」。
 
-**危险面**：`host_allows_source` 的唯一调用点是 `:452`，判据文案是 `host is restricted to human operators`。坏配置期间每条 `ai_allowed = false` 的限制全部失效，而「配置文件损坏」正是最可能发生的运维事故之一。**零测试覆盖**：`host_allows_source` 在 `src-tauri/tests/` 与 `execution_control.rs` 的测试模块里都没有出现。
+**危险面**：`host_allows_source` 的唯一调用点是 `:452`，判据文案是 `host is restricted to human operators`。坏配置期间每条 `ai_allowed = false` 的限制全部失效，而「配置文件损坏」正是最可能发生的运维事故之一。**零测试覆盖**（仅指读失败那一支）：`host_allows_source` 这个名字在 `src-tauri/tests/` 与 `execution_control.rs` 的测试模块里都不出现；但它**行为**的两半有两条测试钉着，见下。
 
 **修法（三选一，要拍板）**：
 1. 读失败 → `false`（fail-closed）。人类来源不受影响，因为 `human` 短路在 `||` 之前。
 2. 区分两种 `None`：读失败 → `false`，主机不存在 → 维持 `is_none_or` 的默认。最贴原意，但要 `.ok()` 换 `match`。
 3. 保持现状，只加一条 ERROR 级诊断日志，让「坏配置期间放行了」至少可查。
 
-**判据**：`hosts.json` 写成非法 JSON，`host_allows_source("any-host", "ai")` 今天是 `true`，方案 1/2 之后应为 `false`。
+**判据（两条必须分开，别写成一条）**：
+
+| 输入 | 今天 | 方案 1 之后 | 方案 2 之后 |
+|---|---|---|---|
+| `hosts.json` 写成非法 JSON | `true`（**缺陷**） | `false` | `false` |
+| 配置合法但主机不存在 | `true` | `false` | **`true`**（方案 2 的全部卖点就是保住这条） |
+
+第 6 轮之前的写法只写了第一行并说「方案 1/2 之后应为 false」，那会让拍板的人以为方案 2 也翻第二行——**写错了，已改**。
+
+**覆盖现状要说准**：`host_allows_source` 的**行为**有两条测试钉着——`human_only_host_refuses_ai_sources_and_audits_the_refusal`（`execution_control.rs:610`，`vault` 已配置且 `ai_allowed: false`）与 `a_local_target_is_not_gated_by_the_human_only_flag`（`:668`，`local*` 未配置仍放行）。零覆盖的是**读失败**那一支，不是整个函数——别让接手的人以为它完全裸奔。
+
+### L2-136（新，第 6 轮）：配置读不出来时前端弹「添加你的第一台主机」
+
+`src/App.tsx:299-303`：
+
+```ts
+  // Show wizard when no hosts are configured and user hasn't dismissed it
+  useEffect(() => {
+    if (!loading && hosts.length === 0 && !wizardDismissed) {
+      setShowWizard(true);
+    }
+  }, [loading, hosts.length, wizardDismissed]);
+```
+
+配置读取失败时，`refresh()` 的 `.catch()` 只 `showToast`（同文件 `:265` 附近），`hosts` 落空 → `hosts.length === 0` 成立 → **设置向导盖住整页**。用户看到「添加你的第一台主机」，真实原因是 `hosts.json` 坏了。
+
+与 L2-134 / L2-135 同一病因、不同载体：后端把「读不出来」说成「没有」，前端再把「没有」渲染成引导流。**修 L2-134 只改后端文案不会让这条跟着好**——需要 `refresh()` 把错误状态传下来，让向导只在「读成功且为空」时弹。
+
+属 `src/**` 行为改动，**登记不动**。
+
+**判据**：把 `hosts.json` 写成非法 JSON 后启动桌面端。今天是「向导弹出」，修好后应是「错误提示 ＋ 不弹向导」。
