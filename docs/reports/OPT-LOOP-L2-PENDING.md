@@ -1056,9 +1056,11 @@ for (index, sender) in senders.into_iter().enumerate() {
 
 第 5 轮把第 1 条判成 fail-closed 后，第 6 轮复核确认了落地形状。**下面五步是一笔改动，缺一步就是编译红或文档说谎。**
 
+> **行号是 `ad9fdf1` 的快照，不是契约。** 本清单里每个 `:NNNN` 都锚在一个**符号**上（函数名、常量名、配置键）；行号漂了按符号重新定位，遇到形状与本清单不一致时，**先当代码变了、别当清单错了**——唯一允许照抄的是文案与「按码豁免」这两条语义。
+
 **第 1 步：把唯一的 `.ok()` 换成带文案的 `?`。**
 
-`bin/agent2ssh-daemon.rs` 里 `load_execution_gate()` 共 3 处消费（`:386` `reject_if_gate_paused`、`:1265` `GET /gate`、`:4331` `terminal_broadcast_preview_results`），前两处都 `map_err` 成 500，第三处用 `.ok()` 吞掉——**全仓唯一的孤例**。`?` 不能直接写：`load_execution_gate` 返回 `anyhow::Result`，handler 要 `(StatusCode, Json<ErrorBody>)`，必须过一次 `map_err`，文案要与 `:386`/`:1265` 逐字相同：
+`bin/agent2ssh-daemon.rs` 里 `load_execution_gate()` 共 3 处消费（`:386` 的 `reject_if_gate_paused`、`:1265` 的 `gate_status`（`GET /gate`）、`:4331` 的 `terminal_broadcast_preview_results`），前两处都 `map_err` 成 500，第三处用 `.ok()` 吞掉——**全仓唯一的孤例**（`gate.rs:83` 那处消费在库内且已 `?`，不在 daemon 路由面上）。`?` 不能直接写：`load_execution_gate` 返回 `anyhow::Result`，handler 要 `(StatusCode, Json<ErrorBody>)`，必须过一次 `map_err`，文案要与 `:386`/`:1265` 逐字相同：
 
 ```rust
 let gate = load_execution_gate().map_err(|e| {
@@ -1088,8 +1090,10 @@ let gate = load_execution_gate().map_err(|e| {
 - `/terminal/broadcast/preview` 的 description 现在写「A paused gate is a per-target verdict here — not a 423」。改后要拆成：**paused** 仍是 per-target 判定；**读不出来**是整条路由 500。这两种情况不再是同一句话。
 - `/terminal/broadcast` 的 description 写「folds **both** into every eligible target's `error` and returns 200」——改后只对「限流」和「gate 判为 Paused」成立，对「gate 读失败」不成立。同一段末尾「a preview that reports `execution gate paused` predicts the run exactly」在文件损坏时也失效（两边都 500）。
 
-**第 4 步：`responses` 只补 423，不补 500。** 见第 1 步下的更正：gate 读失败的 500 由 `info.description` 第二段统一承担。
+**第 4 步：`responses` 只补 423，不补 500。** 依据在 `api.yaml` 的 `info.description` **第二段**，原文是「every operation that consults the gate can answer 500 … which is why **none of them** lists the gate-read 500 in its own `responses`」（`ad9fdf1` 时点 `:24-33`）。「none of them」是这段的全部力量：给两条广播路由逐条补 500，它们就成了 33 个读 gate 的 operation 里仅有的两个例外，那句话同时从「盖住全部」退化成「盖住 31 个」。**同笔改动里这两段话一个字都不用动**——paused 仍是 per-target、读失败仍是整条 500，第二段本来就说的是后者。
 
 **第 5 步：可选的 e2e，单独一笔。** `daemon_integration.rs` 跑的是镜像 router，`api_yaml_*` 是文本扫描，所以第 1 步落地后唯一的可验证信号是「`:4331` 的 `.ok()` 消失」，除非新写真 daemon e2e：写坏 `execution_gate.json` → `POST /terminal/broadcast` → 断言 500 且 `error` 含 `failed to load execution gate`。它要起 daemon + 两个活终端目标，比第 1–4 步加起来都大，**不塞进 batch 11 收尾**。
 
 **已知不可断言的一环**：想给「读 gate 的 operation 不得声明 gate-read 500」加扫描断言，做不到——OpenAPI 里 500 不带来源，无法区分 gate-read 500 与配置读失败 500（`GET /hosts`、`/resident-sessions` 都两者兼备）。要断言就得加 `x-500-source` 这类扩展，代价大于缺陷本身。
+
+替代方案不是「加来源」，而是**把来源下移到 `description` 文本**：扫每个读 gate 的 operation 的 `responses["500"].description`，断言不出现 `gate` / `execution_gate.json` 字样。这不需要改 spec 任何结构，只把这条约定变成一个可判定的**文本**规则（哪怕 500 的 `description` 写的是「`info.description` 里说的两种 500」）。第 1 步落地后如果顺手补它，成本约等于零；不补也不算缺口——第 4 步的话在 `info.description` 里仍然如实。
