@@ -37,7 +37,7 @@ required-features = ["daemon"]
 
 [features]
 default = ["tauri"]
-tauri = ["dep:tauri", "dep:tauri-plugin-shell", "dep:tauri-plugin-dialog", "dep:tauri-plugin-updater", "dep:tauri-plugin-single-instance", "dep:tauri-build"]
+tauri = ["dep:tauri", "dep:tauri-plugin-shell", "dep:tauri-plugin-dialog", "dep:tauri-plugin-updater", "dep:tauri-plugin-single-instance", "dep:tauri-build", "dep:pin_gtk_generation", "dep:gio", "dep:pango", "dep:cairo-rs", "dep:gdk-pixbuf"]
 daemon = ["dep:axum", "dep:tower", "dep:tower-http", "dep:futures-util", "dep:tracing", "dep:tracing-subscriber"]
 
 [build-dependencies]
@@ -168,21 +168,30 @@ fontdb = "0.23"
 # this graph confirms, and it is why this block names five crates and no -sys.
 #
 # Only the tauri desktop feature reaches these crates; the sidecar binaries, the
-# daemon and the macOS/Windows builds never see them. The gate has to name
-# `feature = "tauri"` and not only the target, because a target table is
-# resolved by target: with `target_os` alone these five crates also entered the
-# graph of `--no-default-features`, which is exactly the build the sidecar
-# binaries and the daemon use *to stay off* the GTK stack. `cargo tree
-# --no-default-features` showed `cairo-rs 0.20` / `glib 0.20` hanging directly
-# off `agent2ssh-app` — crates nothing linked, pulled in only to pin a
-# generation. Delete the block once `gtk` moves to a `glib 0.20` generation and
-# `wry`/`tao` follow.
-[target.'cfg(all(target_os = "linux", feature = "tauri"))'.dependencies]
-glib = "0.20"
-gio = "0.20"
-pango = "0.20"
-cairo-rs = "0.20"
-gdk-pixbuf = "0.20"
+# daemon and the macOS/Windows builds never see them. The block is gated on the
+# feature as well as the target because a target table is resolved by target:
+# with `target_os` alone these five crates also entered the graph of
+# `--no-default-features` — the build the sidecar binaries and the daemon use
+# *to stay off* the GTK stack — where `cargo tree` showed `cairo-rs 0.20` /
+# `glib 0.20` hanging directly off `agent2ssh-app`, linked by nothing.
+#
+# The gate is the feature itself, not `feature = "tauri"` written into the cfg:
+# a dependency-table cfg is evaluated at *manifest* time, before cargo has
+# resolved any feature, so `cfg(feature = ...)` reads as false and cargo fails
+# every build with "failed to parse manifest: feature `tauri` is not allowed in
+# `target.'cfg(all(target_os = "linux", feature = "tauri"))'`". An *optional*
+# dependency that the `tauri` feature enables is the same gate in the one form
+# the manifest parser accepts: with `--no-default-features` nothing asks for
+# `pin_gtk_generation`, so the five crates are not in the graph at all; with the
+# default features `tauri` is on, so they are — and the pin applies exactly as
+# before. Delete the block (and its `tauri` entry) once `gtk` moves to a
+# `glib 0.20` generation and `wry`/`tao` follow.
+[target.'cfg(target_os = "linux")'.dependencies]
+pin_gtk_generation = { version = "0.20", package = "glib", optional = true }
+gio = { version = "0.20", optional = true }
+pango = { version = "0.20", optional = true }
+cairo-rs = { version = "0.20", optional = true }
+gdk-pixbuf = { version = "0.20", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.48", features = [
