@@ -952,3 +952,100 @@ forward_remove_core(uuid)     // :3108
 于是 `SftpUploadRequest.transfer_id`（`types.rs:721-723`）经 HTTP 传进来后，`sftp_upload_core_with_source:1952-1955` 会 `sftp_transfer::register(id)` 建一个取消标志，但 daemon 进程内没有任何路由能把那个标志置位——注册了、永远等不到取消。
 
 两个方向：① 加 `POST /sftp/cancel`（新路由 = 新契约面 + 权限口径要定，比本条其它项都大）；② 明确「HTTP 上的 `transfer_id` 只为审计/幂等预留，取消只在桌面端」，写进契约即可（**第 4 轮已按 ② 落了描述**，所以这条只需拍板要不要往 ① 走）。
+
+## 2026-11-11 · batch 11 第 5 轮：L2-122 第 1 条的判定（fail-closed）与两条新发现
+
+上一轮把「gate 读失败时广播一族该 fail-open 还是 fail-closed」交回给人拍板。本轮给出判定和判据，**不改代码**：两条新发现都落在 `src-tauri/src/**` 的授权顺序上，动它们不是文档收窄，是本批之外的一笔。
+
+### 一、判定：fail-closed。广播一族与 exec 一族同一个语义
+
+判据只有一条，而且它不依赖 `broadcast` 这个动词：
+
+> **一个决定要不要执行的安全开关，在「读不出来」和「读出来是 Active」之间没有第三种事实。把前者当成后者，等于让一个损坏的文件替操作员按了 resume。**
+
+`execution_gate.json` 是操作员的急停按钮（`agent2ssh pause` 写的是同一个文件）。它读不出来，说明「现在是否急停」这件事**未知**——而未知不是允许。`reject_if_gate_paused` 的 500 早就这么处理了，那句错话写在 `api.yaml:26-32`，措辞故意直白：「An unreadable gate file is an operator-fixable condition, not a crash」。广播一族偏离的不是「exec 的实现方式」，是这条语义本身。
+
+**为什么「一次影响 N 个目标」让这个判定变成必要条件，而不是加分项。** 广播的风险是基数乘积：一次调用 × 最多 32 个目标。执行器本身有 8 个在途槽位、限流按目标逐个记，加一次重试就可能上千次 shell 交互。对单目标路径说「读不出来就放行」，代价是 1 次命令；对广播说同一句话，代价是 32 次。同一个原则在高基数一侧要更严，不能更松——而现在恰好是更松。
+
+**反方向（改成 fail-open）的成本，这里记清楚，免得下一轮又重开。** 若选 fail-open，必须同时改 `reject_if_gate_paused` 的 500——否则同一份 `execution_gate.json`、同一个操作员动作，`/exec` 拒绝而 `/terminal/broadcast` 照跑，这不叫取舍，叫两套语义。而改成 fail-open 会让 `GET /gate` 变成全系统唯一一处告诉你「急停也许没生效」的地方，且它自己也是 500。所以那一半的收益是零，代价是让急停按钮在文件损坏后静默失效。
+
+**落地形状（下一轮可以直接照做，不需要再拍板）：**
+
+1. `terminal_broadcast_preview_results:4331` 的 `load_execution_gate().ok()` 换成 `?` 传播，让两条路由与 exec 一族共用同一个 500 文案（`failed to load execution gate: …`）。这两条路由的 `responses` 因此要加一个 `500`——**逐条加，而不是靠 `info.description` 的全局段**：全局段的原文是「every non-public route answers 500 to a caller that does not present the admin token」，那是 `auth_middleware` 的 500；gate 读失败是 handler 自己的 500，两者来源不同，全局段盖不住它（这也是 `docs/api.yaml:22-32` 为什么专门写了第二段）。
+2. `INBAND_REJECTIONS` 从 3 条变 2 条（`/terminal/broadcast` 与 `/terminal/broadcast/preview` 出表），`exec_stream` 留表——它的 `reject_if_gate_paused` 用 `.is_err()` 吞掉，升级后仍只发帧，语义上它也没在做决定：升级已经在 socket 里，拒绝一帧与断开连接等价。**这三条要同笔改**，因为第三段断言双向校验「出表的不能再写 423」。
+
+### 二、新发现 A：广播的审批回执**从不影响投递**，只进审计（比第 1 条重）
+
+`terminal_broadcast_run` 的流程是 preflight → 限流 → `authorize_command(...)`（`:4497-4522`，真的会等审批）→ `all_or_nothing` 复查 → 投递。看着对。错在投递条件：
+
+```rust
+let sender = ...;                  // 只按 principal + host 过滤（:4534-4552）
+for (index, sender) in senders.into_iter().enumerate() {
+    if !results[index].authorized { continue; }   // :4558 —— 这个字段 preflight 时已是 true
+    ...
+}
+```
+
+`authorize_command` 的 Err 臂只写 `error`，**不清** `authorized`（对照 `:4497-4522` 与 `:4395`：该字段在 `check_approval_required` 的 `Ok` 臂就已置 true）。所以：
+
+| `authorize_command` 结果 | `authorized` | `error` | 实际投递 |
+|---|---|---|---|
+| `Ok` | true | — | 投递 |
+| `Err`（`ApprovalRejected` 403 / `ApprovalTimedOut` 408 / 风险 400 / 内部 500） | **true** | 被覆盖成那条错误 | **仍然投递** |
+
+`all_or_nothing: true`（默认值）也拦不住：它查的是 `results.iter().any(|r| !r.authorized)`，而全 true。唯一「拦住」的形态是 `all_or_nothing: false` + 目标之间风险不一致——那时先被拒绝的目标保持 true 照发，后面的目标被 `authorized=false`，等于把「被拒的那台照发、没被拒的那台不发」演成了。**拒绝在审批卡上按下去，命令照样送达**，这不是文档层能收窄的，属 `src-tauri/src/**` 行为，建议新立一条 L2-123。
+
+修法（小，但需一条 e2e）：`authorize_command` 的 Err 臂补 `results[*index].authorized = false`，与 `:4502`/`:4509` 的限流臂同形；或把投递条件改成 `results[index].authorized && results[index].error.is_none()`——前者更好，因为「有没有被授权」的字段就该反映这件事。
+
+### 三、新发现 B：同一个 operation 的限流与授权用了两套风险与两套审批事实
+
+同一次 `/terminal/broadcast` 调用里：
+
+- **限流**按 preflight 的目标集算（`:4470-4490`，`check_execution_batch` 是 all-or-nothing，任一目标越限即全拒）；
+- **授权**按 `authorize_command` 逐个重算（`:4497-4522`），而它**唯一**的 override 来源是 `command_authorization_target(host).risk_override`（`execution_control.rs:189-207`，读 `hosts.json` 的 `HostProfile.risk_override`）。
+
+于是 `preflight` 与执行之间的差异不止「跳过审批」一件：
+
+1. **风险 override 不继承**：preflight 用 `apply_risk_override(effective_command_risk, host_risk_override(&h))`（`:4382`），`authorize_command` 传的是 `None`（`:4506` 的 `risk_override` 位），函数内部自己再从 `host_risk_override(host)` 取一次（`execution_control.rs:752`）。两处**同源但不同入口**——现在恰好一致，但这是巧合。
+2. **审批事实在第二段丢失**：`authorize_command` → `check_approval_required` 只看 `policy.toml`。preflight 把 `risk == High && !body.force` 也算作 `requires_approval`（`:4393-4394`），而这条规则在 `execution_control.rs:487` 里**要等的人答了才叫 approved**。也就是说，一个 `requires_approval: true, force: false` 的高风险命令，`/preview` 说不问，`/broadcast` 会问——`api.yaml` 的 `TerminalBroadcastResponse.authorized` 描述里那句「`authorized: true` with `requires_approval: true` only means 'nothing refused it yet'」正是在说这件事，但它写在错误的位置上：读的人会以为那是 preview 的一家之言，实际是两条路由的**共同**性质。
+
+这两条与 L2-122 第 1 条同族（「preflight 与执行之间的语义漂移」），但修法不同：A 是补一个字段赋值，B 要让 preflight 与执行走**同一个**风险/审批函数。**B 建议并入 L2-101 一起拍**（那一条已经在问「审批依据是请求时刻的快照还是执行时刻的事实」），否则会拆成两个各自都不完整的答案。
+
+### 四、保持原判定（不重开）
+
+1. **「把 `/terminal/broadcast` 与 `/terminal/broadcast/preview` 的路由删掉一半」——不成立，不值得讨论。** preview 的价值正是让人在按下去之前看到 per-target 裁决；第 2 条里的 `authorized` 语义问题该修字段，不该砍路由。
+2. **「`read` 一次 gate 就够，所以不应该在 preview 放 gate 检查」——不成立。** `terminal_broadcast_run` 调的就是 `terminal_broadcast_preview_results`，是**同一个函数**；把检查移到 `run` 里就等于让 `run` 直接用 preflight 的结论，那正是第二节那个 bug 的形状（结论被复用、事实被重算）。
+
+**勘误（本轮自查）**：第二节的「新发现 A」被我写反了。`authorize_command` 的 `Err` 臂在 `:4503-4506` **确实**补了 `results[*index].authorized = false`——我只读了 `Ok` 臂和投递条件（`:4534-4560`），没等到读完 `:4503` 就开始写这张表。所以：
+
+- 上表第二行的「仍然投递」**不成立**，那一行作废；
+- 投递条件 `if !results[index].authorized { continue; }` 因此是对的，`all_or_nothing` 的两段复查也都在。
+- 「新发现 A」整节**撤回**，不立 L2-123。
+
+留下的教训记在这里，因为它比那条错指摘更有用：**判「字段没被清」必须把同一个函数的两个臂都读完**。这一批前面几条（`/shutdown` 的 500、`reject_if_gate_paused` 的 `.is_err()`）都是靠「读完整个臂」才判对的，这次是我自己破了一次。
+
+**第三节「新发现 B」不撤回，但它要收窄一半。** 重核后：
+
+- 风险 override 那一半**不成立**：preflight 走 `host_risk_override(&endpoint.host)`（`:4382`，读 `endpoint.host`），`authorize_command` 在 `execution_control.rs:752` 走 `host_risk_override(host)`（读传入的 `host`，即同一个 `endpoint.host`）。同源同值，`risk_override: None` 是有意让函数内部接管，不是丢字段。
+- 审批事实那一半**成立**，而且要说得更准：`authorize_command` 内部 `needs_approval = approval_policy.is_some() || (risk == High && !input.force)`（`execution_control.rs:487`），广播传的是 `request.force`（`:4511` 一带的 `force` 位）。所以「高风险 + 未 force」在**两段**都会被判定为需要审批、都会真的弹卡——`/preview` 不弹只是因为 `terminal_broadcast_preview` 根本没走到 `authorize_command`（它只调 `terminal_broadcast_preview_results`）。
+
+  于是 `api.yaml` 里 `authorized` 的描述**不是错，而是精确的**：「On `/terminal/broadcast/preview` it grants nothing — the route sends no input and raises no approval card, so `authorized: true` with `requires_approval: true` only means "nothing refused it yet"」。它已经把「preview 不弹卡」写在句子里了。
+
+  这一半也不新立条目：它已经是 L2-101 的同一句话（「审批依据是请求时刻的快照还是执行时刻的事实」），而广播这里的答案是「两段都真判、preview 只是不问」——不存在快照漂移。
+
+### 五、`expect_pid` 那句的正确措辞（给 `docs/api.yaml` 的 `/shutdown`）
+
+当前 `api.yaml:1138-1146` 的原文是：
+
+> `{"expect_pid": "1234"}` …stops the daemon without a check and the 409 never fires, and the same goes for a negative or out-of-range PID, or a truncated body. `0` is the exception on the other side: it is inside `u32`, so it parses, gets compared, and is refused with 409 — "out of range" here means outside `u32`, not merely implausible as a PID.
+
+「部分成立」的分歧点只剩一个词：`out-of-range` 指不指「超出 `u32`」。我认为指，理由不是用法习惯，而是缺陷的**分界线在解析这一步**：
+
+- **解析失败**（`"1234"`、负数、> `u32::MAX`、截断的正文）→ axum 把整个 body 当「没发」→ `None` 臂 → 不比对、直接停。
+- **解析成功但不像 PID**（`0`、`1`、等于自己的 pid）→ `Some` 臂 → 真比对 → `0`/`1` 落 409，等于自己的 pid 落 200。
+
+同一份契约里两句话在讲同一个分界的两侧，所以措辞应当把**机制**写在前面、把 `0` 写成例外。建议改成（照此替换那三句）：
+
+> A body that does not parse is *dropped*, not refused: `{"expect_pid": "1234"}` — the string a shell produces from `"$PID"` — stops the daemon without a check and the 409 never fires. The same goes for every body the `u32` parse rejects, which is the whole family: a negative PID, a PID above `4294967295`, or a truncated body. `0` is the other case and does *not* belong to that family: it parses, so it is compared, and is refused with 409 because it is not this process. The rule is therefore "parsed ⇒ compared", not "plausible ⇒ compared" — an implausible-but-representable PID is still checked.
+
+改动点只有三处，都为了同一个目的：**把「大于 `u32`」从「不合法」里点名出来**，并让 `0` 的原因从「u32 内」升级成「解析成功 ⇒ 比对」。前者是机制，后者才是读者要的行动指南。
