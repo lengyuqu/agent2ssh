@@ -2167,3 +2167,30 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 **三、本轮新发现两条，两条都在自查里收窄。** 先报「广播的审批回执从不影响投递」（`authorize_command` 的 Err 臂不清 `authorized` → 拒绝后仍投递），复核发现 `:4503-4506` **确实**清了，是我没读完整个 `Err` 臂就下笔——**整节撤回，不立条**。第二条「preflight 与执行两套风险/审批」重核后只剩一半不成立：`risk_override` 两处同源同值；审批事实那一半也是 `api.yaml` 已经写准的句子。两半都不新立条目。留下的教训写进了小节：判「字段没被清」必须把同一个函数的两个臂都读完。
 
 **本轮未做**：L2-122 第 2–4 条仍等人拍板；第 1 条虽已判定，但改 `terminal_broadcast_preview_results` 的返回类型会动 handler 签名 + `api.yaml` 两条 responses + 豁免表，一笔记不完（试过一次，编译红一片），留给下一轮单独一笔。
+
+### consume 5 / 6 · 2026-11-11 10:56–11:20 (GMT+8) · batch 11（issue #17）· 回帖 `2120346285940064256`
+
+> 本轮开头遇到一次真实的并发推进：远端 tip 被推到 `1e2753d`（复核方那一笔），本地 `git cat-file -t 1e2753d` 报 `Not a valid object name`。`git fetch` 确认是 `91ef123..1e2753d` 的**快进**（无分叉），`merge --ff-only` 对齐后才动手；没有 force、没有覆盖。上一轮的「说了没做」与本轮的「真做了但记账错」是两件事。
+
+6 轮进度 **5 / 6**，issue 保持 open。指摘 = CodeBuddy 的判定轮（`2120345752881774592`）。
+
+| # | 结论 | 判定 | 证据 |
+|---|---|---|---|
+| 1 | gate 读失败时广播一族应 fail-closed | **成立（判据采纳）** | 补一条它没写的定案事实：`terminal_broadcast_preview_results:4331` 与 `reject_if_gate_paused:386` 读的是同一个文件、同一个函数 `gate.rs:46-57`，差别只在 `.ok()` 与 `?`——不是两种设计取向，是同一读操作被解释成两个意思。`load_execution_gate()` 在 daemon 里共 3 处调用：`:386`（`map_err` → 500）、`:1265`（`GET /gate`）、`:4331`（**唯一 `.ok()` 吞掉的**） |
+| 2 | 落地第 2 步：两条广播路由的 `responses` 逐条加 500 | **不成立** | `info.description` 有**两段** 500：第一段是 `auth_middleware`，第二段（第 3 轮加的）原文「every operation that consults the gate can answer 500 … which is why none of them lists the gate-read 500 in its own `responses`」。33 个读 gate 的 operation 里 30 个只写 423；只给两条补 500 会让它们成为仅有的两个例外。已在 L2-122 该步下写明更正 |
+| 3 | `out-of-range` 指「超出 `u32`」，措辞应按「parsed ⇒ compared」 | **成立（分歧关闭）** | 它的理由（分界线在解析）比我的（`0` 在 `u32` 内）更能解释为何要点名 `4294967295`。已整段采用，`05a6ed5` |
+| 4 | 新发现 A：审批回执不影响投递（`Err` 臂不清 `authorized`） | 撤回正确，不计缺陷 | 它自撤后我复核：`:4503-4506` 的 `Err` 臂确实写 `authorized = false`，投递条件 `:4555` 查这个字段 |
+| 5 | 新发现 B：preflight 与执行两套风险 / 两套审批事实 | 两半都不立条 | 风险 override 半它已自撤（`host_risk_override` 两处同源同值）；审批事实半归 L2-101，且「preview 不弹卡」是 `api.yaml` 已写准的句子 |
+| 6 | 它把这一轮写成 `consume 5 / 6`、进度 5/6 | **记账不成立** | 轮次 = 消费者的 `## 第 K 轮收尾` 评论数，当时是 4 条。已改为「复核小节（不计入轮次）」，内容全留、只去编号——否则下一批会跳过一轮 |
+
+**本轮 L1**：`05a6ed5`（`api.yaml` 的 `/shutdown` `expect_pid` 三句换成「parsed ⇒ compared」）、`8559ef3`（L2-122 落地第 2 步更正 + 台账那一节改为不计入轮次）。
+
+**验证**：`--test daemon_integration` 71 passed；`cargo fmt --check` 绿；`api.yaml` 105 operations / 30 带 423 / 29 带 429；`git ls-remote cnb` = `8559ef3`（推后复核）。
+
+**本轮未做**：L2-122 四条等拍板。第 1 条已判定但被级别表挡住（改返回类型会连带两个 handler 签名 + 豁免表 + 两条描述）；第 4 条（`POST /sftp/cancel`）面最大。`src-tauri/src/**` 本轮零改动。
+
+#### 第 5 轮新增的不成立条目（原文保留，请勿重复提）
+
+1. **「两条广播路由的 `responses` 该逐条加 500，全局段盖不住 handler 自己的 500」— 不成立。** 全局段有两段，第二段专讲 gate 读失败的 500，并明说「none of them lists it」。逐条加会让 33 个读 gate 的 operation 里出现仅有的两个例外。
+2. **「广播的审批回执从不影响投递」— 已自撤，不计缺陷。** `:4503-4506` 清 `authorized`，`:4555` 查它。
+3. **「preflight 与执行用两套 `risk_override`」— 已自撤。** 两处都读 `host_risk_override`，同源同值。
