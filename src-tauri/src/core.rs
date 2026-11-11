@@ -4515,6 +4515,76 @@ mod tests {
         let _ = std::fs::remove_dir_all(&config_dir);
     }
 
+    /// A team-config import used to turn a host's post-connect command off,
+    /// and the preview said nothing about it.
+    ///
+    /// `export_team_config` carries `init_command` (it strips only `key_path`,
+    /// `password` and `passphrase`), and `import_team_config` replaced the
+    /// stored profile with the bundle's copy. A bundle from a machine that did
+    /// not set one therefore cleared the local one. `team_host_same` does not
+    /// compare the field, so the two ways this could have surfaced were both
+    /// silent: matching hosts were reported as "skipped, nothing changed" and
+    /// then replaced, and mismatching hosts were reported as "updated" without
+    /// naming which field.
+    ///
+    /// Both halves are pinned here: the import keeps the local command, and a
+    /// host whose only difference is that command is reported as skipped --
+    /// which is honest, because the import now preserves it.
+    #[test]
+    #[serial_test::serial]
+    fn test_team_config_import_preserves_a_local_init_command() {
+        let config_dir =
+            std::env::temp_dir().join(format!("agent2ssh-team-initcmd-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::env::set_var(CONFIG_DIR_ENV, &config_dir);
+
+        let mut local = make_test_host("web1");
+        local.init_command = Some("cd /app && source env.sh".into());
+        add_host_core(local).unwrap();
+
+        // A bundle from a machine that never set one: same name, same
+        // host/port/user, identical on all eleven compared fields.
+        let mut incoming = make_test_host("web1");
+        incoming.init_command = None;
+        let export = TeamConfigExport {
+            hosts: vec![incoming.clone()],
+            risk_rules: None,
+            playbooks: None,
+        };
+
+        let preview = preview_team_config_import(&export).unwrap();
+        assert_eq!(preview.hosts_to_skip, vec!["web1"]);
+        assert!(preview.hosts_to_update.is_empty());
+
+        let result = import_team_config(&export).unwrap();
+        assert_eq!(result.hosts_skipped, 1);
+
+        let config = crate::store::load_config().unwrap();
+        let stored = config.hosts.iter().find(|h| h.name == "web1").unwrap();
+        assert_eq!(
+            stored.init_command.as_deref(),
+            Some("cd /app && source env.sh"),
+            "a bundle without init_command must not clear a local one"
+        );
+
+        // And a bundle that *does* carry one still wins, so the preservation
+        // is not a silent veto of the sharer's setting.
+        let mut carrying = make_test_host("web1");
+        carrying.init_command = Some("cd /srv".into());
+        let export = TeamConfigExport {
+            hosts: vec![carrying],
+            risk_rules: None,
+            playbooks: None,
+        };
+        import_team_config(&export).unwrap();
+        let config = crate::store::load_config().unwrap();
+        let stored = config.hosts.iter().find(|h| h.name == "web1").unwrap();
+        assert_eq!(stored.init_command.as_deref(), Some("cd /srv"));
+
+        std::env::remove_var(CONFIG_DIR_ENV);
+        let _ = std::fs::remove_dir_all(&config_dir);
+    }
+
     #[test]
     #[serial_test::serial]
     fn test_update_host_rename_moves_encrypted_secret_and_drops_orphan() {

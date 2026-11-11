@@ -103,6 +103,7 @@ pub fn import_team_config(export: &TeamConfigExport) -> Result<ImportResult> {
                 let key_path = existing.key_path.clone();
                 let password = existing.password.clone();
                 let passphrase = existing.passphrase.clone();
+                let init_command = existing.init_command.clone();
                 let mut next = host.clone();
                 if next.key_path.is_none() {
                     next.key_path = key_path;
@@ -112,6 +113,18 @@ pub fn import_team_config(export: &TeamConfigExport) -> Result<ImportResult> {
                 }
                 if next.passphrase.is_none() {
                     next.passphrase = passphrase;
+                }
+                // `export_team_config` never strips `init_command`, so an
+                // omitted one means "the bundle came from a machine that did
+                // not have it", never "the sharer turned it off". Without this
+                // an import turned a working post-connect command off with no
+                // report to say so: `team_host_same` does not compare the
+                // field either, so the same import reported the host as
+                // skipped and rewrote it. Deliberately not in
+                // `team_host_same`'s eleven -- doing that would report a
+                // host as updated on a difference it then preserves.
+                if next.init_command.is_none() {
+                    next.init_command = init_command;
                 }
                 *existing = next;
                 updated += 1;
@@ -247,6 +260,15 @@ pub fn preview_team_config_import(export: &TeamConfigExport) -> Result<ConfigDif
     })
 }
 
+/// Whether an incoming team-config host matches the stored one closely enough
+/// that the import can skip it.
+///
+/// Compares eleven fields. `init_command` and `passphrase` are deliberately
+/// outside the set, because both are *preserved* rather than compared when a
+/// host is updated (`import_team_config`): a field that reports a difference
+/// would then be a field the import does not act on, so a host differing only
+/// in one of them is reported as skipped -- correctly, since nothing about it
+/// changes. `password` and `key_path` are outside for the same reason.
 fn team_host_same(existing: &HostProfile, incoming: &HostProfile) -> bool {
     existing.host == incoming.host
         && existing.user == incoming.user
