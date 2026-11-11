@@ -3394,3 +3394,35 @@ L2-154（`/exec-multi` 全 0 语义）、L2-155（preview 缺 admin 门）、L2-
 1. **「文档没提 X」与「X 的行为是 A」是两件事**。它观察到 api.yaml 从未提 `Content-Length`（真），然后推断「声明了会被先拒」（假）——两者之间隔着 `http_body_util::Limited` 的实现。凡「文档缺一句」的指摘，落笔前必须把**要补的那句**核到实现，否则补进去的是新错误。
 2. **同一个事实在两条路由上写两遍，一致性就没人负责**。本条与上批「同族里一条写一条不写」同型，但这次两处**都有**、只是详略不同，所以任何按「有没有」写的断言都抓不住。`code_block` 那种「按状态码切段」的断言才是能抓住详略差的形状。
 3. **指向 `src-tauri/src/**` 的指摘，先查它是否已在 K14 / L2 清单里**。第 9 条是它本轮唯一「可零成本做」的建议，而 K14 早已记了同一现象、L2-3 早已给了四步改法——不查就会立出第 113 条重复条目。
+
+### 手工/单发消费 · 2026-11-12 · #21 异常诊断（第三次进入 · 日志脱敏边界 + 一条 429 假承诺）
+
+**模式 B 单发**（open 十条 #20–#29，无 `[opt-round]`；第二段为空）。基线 `7847ea2` = `cnb/main`。选靶 **#21**：它是这一族的入口（#20 是回执、#22 是身份协议、#23–#25 是平台落地），最新评论是 CodeBuddy 对上一轮收尾的复核（`2120529873901891584`，14:51:34Z）且未被消费；编号小于同样未消费的 #23。排除项：#22/#25 是 P2 设计、#24/#27 要 Windows 实机、#26/#28 前置是本单设计、#29 编号更晚。
+
+**判定 8 条 → 成立 5 / 部分成立 2 / 不成立 1**；另复核对上一轮的两处订正：一处**不成立**（见 N1-b）、一处**已登记**（L2-161）。
+
+| # | 指摘 | 判定 | 证据 |
+|---|---|---|---|
+| N1 | 非默认 `AGENT2SSH_DAEMON_ADDR` 时桌面「真的启动、永远看不见」 | **部分成立** | 机制成立：`App.tsx:375-399` 的 `ensureLocalDaemon` 先 `api.daemonStart()`（后端跟随变量，`remote.rs:22` 读 env），再 `api.getDaemonHealth()` 打写死的 7722（`api.ts:71`）→ 成功判据恒假。但「**反复尝试启动**」不成立：该回调只挂在 `App.tsx:409` 一个 `useEffect`（deps `[ensureLocalDaemon]`，其 deps 是 `[t]`），10 秒定时器跑的是 `pollDaemonHealth`（`:369-373`，只读不启动）。行为面已在 **L2-159**；本轮只补文档 |
+| N1-b | 「`/events/stream`（`api.ts:880`）是『直连请求不跟随变量』的反例」 | **不成立** | `:880` 用的还是同一个 `daemonUrl` 常量，它**也不跟随**变量，与面板那几条同向。「只在订阅时才有请求」是**触发时机**不同，不是行为相反；把「同一常量的第三条出口」当反例，结论与前提相反。已把这条出口补进枚举（避免读者以为只有面板与 ws 两条） |
+| N2 | `architecture.md` 把 Tauri 与 CLI/MCP 并列成用 `set_trace_id`/`seed_trace_id_from_env` | **成立** | `grep -rn seed_trace_id_from_env src-tauri/src/` = 3 行：定义 `diagnostics.rs:71` + `bin/agent2ssh.rs:1856` + `bin/agent2ssh-mcp.rs:609`；`run_tauri()`（`tauri_commands.rs:3567`）只调 `install_panic_hook`。`set_trace_id` 的调用点也只有 `diagnostics.rs:76`（在 `seed_trace_id_from_env` 内部）。L1 已改 |
+| N3 | `a_forged_endpoint_cannot_report_an_absent_pid_as_running` 在 CI 里恒绿（CLI 子进程打的是 7722 真 daemon） | **不成立** | 执行顺序反了：`:955-956` 在测试进程设 `CONFIG_DIR_ENV`/`ADDR_ENV`，`:987-992` 在**同一时刻**把两者显式 `.env()` 给 CLI 子进程，`:995` 的 `restore_default_config_env()` 在 `server.join()` 之后才跑，改不回已捕获的值。CLI 的 `DaemonCommands::Status`（`bin/agent2ssh.rs:3083-3091`）读 `daemon_health_pid()`，地址来自那个变量 → 确实打在假端点（假端点回 `{"ok":true,"pid":u32::MAX-1}`，该 pid 不存活 ⇒ `Unverified` ⇒ `identity cannot be verified`）。断言不是空转 |
+| N4 | `.cnb.yml` 的 `mktemp -d` 目录不是「无配置」，`restore_default_config_env` 的语义与注释不符 | **部分成立（自陈非缺陷）** | 机制对：`tests/common/mod.rs:71-76` 恢复的是 `DEFAULT_CONFIG_DIR` 快照，CI 下就是那个 `mktemp -d` 目录，不是「未设」。但每个测试用前各自 `set_var` 到自己的 tempdir 且串行（`#[serial]`），不串味；它自己也写「属可读性问题，不是缺陷」。不立条 |
+| N5 | 四个 exec handler 的 `command = %…` 只落不脱敏的 `daemon.log` | **成立** | `bin/agent2ssh-daemon.rs:1728/1826/1862/1906` 四处 `tracing::info!`；桥接层 `trace.rs:135` 只放 `<= WARN`；`fmt::layer()`（`:5700-5710`）无 filter；`app.log` 的脱敏在 `diagnostics.rs:295`/`:323`。L1 补文档，行为面登记 **L2-169** |
+| N6 | `/exec/compare` 丢弃 `source`/`reason`/`change_id` | **成立** | `ExecCompareBody`（`:1092-1100`）无这三字段；`:1908` `source_from_transport()`；`:1914-1924` `authorize_targets(…, None, None)`；`:1932` `reason: None`。对照 `ExecMultiBody`（`:1074-1090`）+`:1863`+`:1889-1893` 三样齐全。`api.yaml:232-245` 如实反映差异 → 缺能力不缺文档。登记 **L2-167** |
+| N7 | `DaemonControlResult.pid` 在桌面端有两种含义 | **成立** | `tauri_commands.rs:1761-1780`：`pid` 来自 `read_daemon_pid()`；`:1781-1790`：`pid` 来自 `daemon_health_pid()` 且 `running: false`。`src/types.ts` 只有 `pid: number \| null`。CLI 侧（`bin/agent2ssh.rs:3083-3091`）只打印，故歧义只在桌面/IPC 一侧。登记 **L2-168** |
+| N8 | `/sessions/{id}` 的 DELETE 正文承诺 429，handler 不经过限流 | **成立**（且是全量扫描里唯一一条） | `session_close`（`:2649-2702`）只调 `reject_if_gate_paused`（`:2664`）+ `check_daemon_scope`（`:2665`）+ `authorize_command`（`:2667`）；`reject_if_rate_limited` 全仓 14 处调用点无一处在此。responses 也只有 200/400/401/403/408/423。**全量扫描**：105 个 operation 里「正文提 4xx、responses 缺」共 6 处，其余 5 处都是**已文档化的例外**——`/shutdown` 明写 `A 429 is not one of them`、`/exec/stream` 明写 `This is why no 429 and no 423 appear below`、两个 broadcast 明写 per-target 折叠，且文件级 `info.description` 对 `GET /terminal` 的 500 单独成段（本条与台账 2537/2552 的「不成立」不冲突：那条判的是「helper 的 500 被遮蔽」，而 `api.yaml:24-31` 逐字点名了 `reject_if_gate_paused`）。L1 已改 |
+| 订正-a | 「`:388` 没写桌面的 `daemon_restart` 在这个窗口里不设防」 | **成立但已登记** | `tauri_commands.rs:1886-1893` 先 log `terminated existing process` 再 `remove_daemon_pid_file_if(...)?`；CLI restart（`bin/agent2ssh.rs:3103-3107`）与 rotate-token（`:3122`，检查 bool）收尾各不相同——正是 **L2-161** 的 `Ok(false)` 家族，不新立条 |
+
+**本轮改了什么**（全部 L1，`src-tauri/src/**` 零改动）：
+
+- `docs/api.yaml`：`/sessions/{id}` DELETE 的 403 描述去掉 429 承诺，改为「gate 先于 scope，所以 423 会在越权之前答；不限流所以没有 429」，并与 `/sessions`（开口侧确实列了 429）对照。
+- `docs/architecture.md`：Correlation IDs 段把「CLI/MCP/Tauri」收窄为「CLI 与 MCP 从 `AGENT2SSH_TRACE_ID` 播种」，并写明 `run_tauri()` 只装 panic hook、桌面只从前端拿 `trace_id` 字段；daemon 段补一句 `daemon.log` 无脱敏（`fmt::layer()` 无 filter），与 `app.log` 的写前脱敏对照。
+- `docs/guides/configuration-guide.md`：目录结构补 `daemon.log` 行；新增小节「两个日志文件不是同一份东西」（`app.log` 脱敏 + 5 MB 内联轮转 3 代 vs `daemon.log` 原样落盘 + 仅启动时轮转 + 四个 exec handler 的 `command=` 原文 + 分享前先裁剪）；`:1437` 补「桌面不仅显示 Unavailable，还会真的在变量地址起一个它拨不到的 daemon，每次挂载一行诊断」与 SSE 那条出口。
+- `docs/reports/OPT-LOOP-L2-PENDING.md`：新增 **L2-167**（compare 缺 source/reason/change_id）、**L2-168**（`pid` 双语义）、**L2-169**（`info` 级命令原文进 `daemon.log`，三条改法）。
+
+**验证**：`npm run build` **6.61 s**；`cargo test --no-default-features --lib` **863 passed / 1 failed / 1 ignored**（红项仍是那条故意红的 IPv6 `an_ipv6_literal_at_port_22_is_removed`，与基线一致）；`--features daemon --test daemon_integration api_yaml` **7 passed**；`python3 -c "yaml.safe_load"` **90 paths**，`DELETE /sessions/{id}` 的码集合 `200/400/401/403/408/423`。
+
+**未做的 L2**：L2-167/168/169（都改 `src-tauri/src/**` 或 IPC 形状）、L2-159 的 (a) 修法、L2-161。
+
+**给下一轮**：`#21` 保持 open（剩余全部在 L2 拍板侧）。下一轮按「待处理指摘最早、未被消费」应取 **#23**（最新 `2120546004976975872` 是 CodeBuddy 的复核，未消费；P1；#20 现在也有未答复的收尾帖）。行号基线 **本轮合流后的 SHA**；`api.yaml` 因本轮改写 403 描述，`/sessions/{id}` 段整体下移约 3 行。
