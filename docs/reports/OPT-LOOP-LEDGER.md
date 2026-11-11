@@ -3078,3 +3078,32 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 本轮开始时 `/tmp/agent2ssh-opt-loop.lock/owner` 写着 `76868`，`kill -0` 失败——那是上一个上下文窗口里**某个 Bash 子进程**的 pid，子进程退出后锁就变成「本机死主」。按协议这是可接管的陈旧锁，已改写成 `76692`（本会话的 WorkBuddy Electron 宿主，随会话存活）。
 
 口径：**owner 不能写 `$$`**。Bash 工具每次调用都是新 shell，写进去的 pid 活不过下一次调用；下次运行会把它判成死锁并接管，等于互斥形同虚设。要写在 `ps -o ppid=` 链上真实存活的那个宿主进程。
+
+### consume 4 / 6 · batch 14 · issue #30（第 2 条复核：R2-1/R2-2 + N1–N4）
+
+第 3 轮开工时我只信了上一轮留下的「唯一一条复核」清单，没有重新 `list-comments`。实际有两条：`2120503339707183104`（13:06:07Z，已处理）与 **`2120505546544406528`（13:14:54Z，11.3 KB，未读）**。后者是复核第 2 轮的，正好是本轮指摘来源。**六条判定：成立 3 / 部分成立 2 / 不成立 1。**
+
+| 指摘 | 判定 | 要点 |
+|---|---|---|
+| R2-1 `yaml.safe_load` 绿 ≠ 字段值正确 | 成立 | 已落成断言：新增 `api_yaml_gives_the_two_forward_authorization_routes_the_same_codes`，要求两条同构路由的响应码集合相等。上一轮唯一实际缺陷（删页缺 408）本该被它抓到 |
+| R2-2 `--lib` 到不了 `tauri_commands.rs`，需侧车 | 部分成立（结论对、机制错） | `tauri_commands` 由 `#[cfg(feature = "tauri")]` 门控（`lib.rs:69-70`），`--no-default-features` 不编译它、不需要侧车——本轮在无 `dist/`、无 `binaries/` 的全新 worktree 里跑通。但「到不了 `forward_stats`」成立 |
+| N1 `host_key_algorithm` 注释与测试 | 部分成立（测试对、注释那半反了） | 注释 `:152-164` 写的正是「`rsa-sha2-*` 是签名算法、key blob 是 `ssh-rsa`」，没有复核说要删的那层表述。测试确实把签名算法名当 key 类型 |
+| N2 `rsa_hash_alg` 的 `None` 是「没试就降级」 | **不成立** | `:321-322` 与 `:802-805` 都已写明该分支的语义；`server-sig-algs` 无 `rsa-sha2-*` 的服务器试 SHA-2 只会多一次失败往返 |
+| N3 `aborted()` 早退无测试 | 成立 | 补 `a_call_after_an_abort_reports_the_earlier_timeout` |
+| N4 `ErrorKind::WouldBlock` 文档与样例 | 成立 | 改文档 + 换测试样例为生产文案 |
+
+#### 本轮改动
+
+- `src-tauri/src/transport/types.rs`：`WouldBlock` 的 doc 改成「转发连接队列为空」，并写明「非阻塞通道读走的是 `io::ErrorKind::WouldBlock`，从不经过本枚举」；测试样例从 `"[Session(-37)] would block"` 换成 `"no forwarded connection is pending"`，附注释说明旧样例属于另一种类型。
+- `src-tauri/src/transport/russh_impl/channel.rs`：新增 `a_call_after_an_abort_reports_the_earlier_timeout`，补上 `run_with_abort` 四臂里缺的「`aborted` 早退」。
+- `src-tauri/src/embedded_ssh.rs`：测试里两处 `"rsa-sha2-256"` 改为 `"ssh-rsa"`；doc 重写，写明本测试覆盖存储的键方式、不覆盖 RSA 映射、不得被引作映射的证据；测试开头加 `assert_eq!(host_key_algorithm(HostKeyKind::Rsa), "ssh-rsa")`。
+- `src-tauri/tests/daemon_integration.rs`：新增两条同构路由的响应码集合断言。
+- `docs/reports/OPT-LOOP-L2-PENDING.md`：本轮判定表 + N1 最后一步为何做不到（`host_key_algorithm` 是对 `HostKeyKind` 的纯 match，可驱动的输入在 `check_server_key`，要真服务器）。
+
+#### 验证
+
+`cargo fmt`；`cargo test --no-default-features --lib` → **863 passed / 1 failed / 1 ignored**（红项仍是 L2-15 那条刻意红的 IPv6，新增测试使总数从 862 升到 863）；`cargo test --no-default-features --features daemon --test daemon_integration api_yaml` → **7 passed**（含新增的不变式测试）。
+
+#### 一条流程自记：每轮开工先重列评论，别信上一轮的清单
+
+复核是在我**正在改第 3 轮的时候**到达的，收尾时我没再看一眼评论列表，于是那条 11 KB 的复核在第 3 轮里完全没被读到——而我还在收尾里写「下一轮请看」。**到达时间与读取时间是两件事**，判断「有没有新指摘」只能靠本轮开工时重新列一遍并减去已处理集合，不能靠上一轮的结论。已写进收尾流程。

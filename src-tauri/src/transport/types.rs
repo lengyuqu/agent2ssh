@@ -24,7 +24,12 @@ pub enum ErrorKind {
     KeyExchange,
     /// The server rejected the offered credentials.
     PublicKeyRefused,
-    /// Non-blocking call with no data available yet.
+    /// Nothing is waiting in a forwarded-connection queue.
+    ///
+    /// This is the only thing that constructs it (`russh_impl::forward::Registry::take`).
+    /// A non-blocking *channel* read that has no data is a different value: it
+    /// returns [`std::io::ErrorKind::WouldBlock`] wrapped in `io::Error`, which
+    /// never passes through this enum.
     WouldBlock,
     /// Anything the facade does not need to name.
     Other,
@@ -247,10 +252,14 @@ mod tests {
 
     #[test]
     fn error_keeps_kind_and_verbatim_message() {
-        let error = Error::new(ErrorKind::WouldBlock, "[Session(-37)] would block");
+        // The sample is the message `WouldBlock` is actually built with
+        // (`russh_impl::forward::Registry::take`). It used to be the libssh2-era
+        // "[Session(-37)] would block", which is a `std::io::Error` from a
+        // non-blocking channel read -- a value that never reaches this type.
+        let error = Error::new(ErrorKind::WouldBlock, "no forwarded connection is pending");
         assert_eq!(error.kind(), ErrorKind::WouldBlock);
-        assert_eq!(error.to_string(), "[Session(-37)] would block");
-        assert_eq!(error.message(), "[Session(-37)] would block");
+        assert_eq!(error.to_string(), "no forwarded connection is pending");
+        assert_eq!(error.message(), "no forwarded connection is pending");
     }
 
     #[test]

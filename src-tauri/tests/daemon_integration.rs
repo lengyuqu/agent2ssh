@@ -3119,6 +3119,61 @@ fn api_yaml_documents_every_daemon_route() {
 /// routes whose helper call answers inside a 2xx, and the third assertion below
 /// holds them to the opposite rule. It names no count on purpose — the list has
 /// grown once already, and a number here is the first thing to drift.
+/// `DELETE /forwards/{id}` and `POST /forwards/{id}/stop` run the same four
+/// checks in the same order -- gate, rate limit, scope, approval -- because
+/// `forward_remove` and `forward_stop` are line-for-line identical apart from
+/// the operation string. Whatever can come back from one can therefore come
+/// back from the other, so the two pages must document the same codes. They
+/// did not: the delete page omitted `408` even though both call the same
+/// `authorize_command`, which answers `REQUEST_TIMEOUT` when an approval
+/// expires. That omission was invisible because nothing compared the two.
+#[test]
+fn api_yaml_gives_the_two_forward_authorization_routes_the_same_codes() {
+    let spec = include_str!("../../docs/api.yaml");
+
+    fn codes(spec: &str, path: &str, method: &str) -> Vec<String> {
+        let mut in_path = false;
+        let mut in_method = false;
+        let mut found = Vec::new();
+        for line in spec.lines() {
+            let body = line.trim_start();
+            let indent = line.len() - body.len();
+            if indent == 2 && body.starts_with('/') {
+                in_path = body.split(':').next() == Some(path);
+                in_method = false;
+                continue;
+            }
+            if !in_path {
+                continue;
+            }
+            if indent == 4 {
+                in_method = body.strip_suffix(':') == Some(method);
+                continue;
+            }
+            if !in_method || indent != 8 {
+                continue;
+            }
+            if let Some(code) = body
+                .strip_prefix('"')
+                .and_then(|rest| rest.split('"').next())
+            {
+                found.push(code.to_string());
+            }
+        }
+        found.sort();
+        found
+    }
+
+    let remove = codes(spec, "/forwards/{id}", "delete");
+    let stop = codes(spec, "/forwards/{id}/stop", "post");
+
+    assert!(remove.contains(&"408".to_string()), "{remove:?}");
+    assert_eq!(
+        remove, stop,
+        "the two routes share one authorization path, so they share one set of codes"
+    );
+}
+
 #[test]
 fn api_yaml_documents_the_codes_each_handler_can_return() {
     let daemon = include_str!("../src/bin/agent2ssh-daemon.rs");

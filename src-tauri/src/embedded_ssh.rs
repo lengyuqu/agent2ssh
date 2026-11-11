@@ -2573,10 +2573,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&config_dir);
     }
 
-    /// A server that offers two host keys has two fingerprints, and which one a
-    /// connection sees follows the negotiated algorithm. Keying by `host:port`
-    /// alone made the second type look like a change of the first, so switching
-    /// `algo set --hostkey` locked the user out until they re-trusted by hand.
+    /// A server that offers two host key types has two fingerprints, and which
+    /// one a connection sees depends on which key the server presents for the
+    /// negotiated algorithm. Keying by `host:port` alone made the second type
+    /// look like a change of the first, so switching `algo set --hostkey` locked
+    /// the user out until they re-trusted by hand.
+    ///
+    /// The type strings below are the ones `host_key_algorithm` produces, and
+    /// the first assertion pins that. This test covers how the store keys its
+    /// entries -- it does not exercise the RSA -> `ssh-rsa` mapping, so it must
+    /// not be cited as evidence for it, and it must not substitute a signature
+    /// algorithm name (`rsa-sha2-256`) for a key type.
     #[test]
     #[serial_test::serial]
     fn two_host_key_types_for_one_host_coexist() {
@@ -2586,26 +2593,18 @@ mod tests {
         std::env::set_var(CONFIG_DIR_ENV, &config_dir);
         let host = test_host();
 
+        assert_eq!(host_key_algorithm(HostKeyKind::Rsa), "ssh-rsa");
+
         trust_or_verify_host_fingerprint(&host, "example.internal:22", "ssh-ed25519", "SHA256:ed")
             .unwrap();
         // A different key type is a new entry, not a conflict.
-        trust_or_verify_host_fingerprint(
-            &host,
-            "example.internal:22",
-            "rsa-sha2-256",
-            "SHA256:rsa",
-        )
-        .unwrap();
+        trust_or_verify_host_fingerprint(&host, "example.internal:22", "ssh-rsa", "SHA256:rsa")
+            .unwrap();
         // And both keep verifying afterwards, in either order.
         trust_or_verify_host_fingerprint(&host, "example.internal:22", "ssh-ed25519", "SHA256:ed")
             .unwrap();
-        trust_or_verify_host_fingerprint(
-            &host,
-            "example.internal:22",
-            "rsa-sha2-256",
-            "SHA256:rsa",
-        )
-        .unwrap();
+        trust_or_verify_host_fingerprint(&host, "example.internal:22", "ssh-rsa", "SHA256:rsa")
+            .unwrap();
 
         let trusted = load_known_host_fingerprints_unlocked().unwrap();
         assert_eq!(trusted.len(), 2, "one entry per key type: {trusted:?}");

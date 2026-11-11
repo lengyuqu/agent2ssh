@@ -618,6 +618,43 @@ mod tests {
         assert_eq!(peer.read(&mut [0u8; 1]).unwrap(), 0);
     }
 
+    /// The early return in `run_with_abort` is not a shortcut for the timeout
+    /// branch -- it is the only place that message is produced. Pinning it here
+    /// keeps the two branches from being collapsed: once a connection is
+    /// aborted, every later operation is refused with wording that names the
+    /// *earlier* timeout, even when the current call finished instantly.
+    #[test]
+    fn a_call_after_an_abort_reports_the_earlier_timeout() {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        let settings = Settings::new();
+        settings.set_socket(&socket).unwrap();
+        settings.set_timeout(100);
+
+        let first = settings
+            .run("exec", async {
+                std::future::pending::<Result<(), Error>>().await
+            })
+            .unwrap_err();
+        assert!(
+            first.message().contains("timed out after 100 ms"),
+            "{}",
+            first.message()
+        );
+        assert!(settings.aborted());
+
+        let second = settings
+            .run("exec", async { Ok::<(), Error>(()) })
+            .unwrap_err();
+        assert_eq!(
+            second.message(),
+            "SSH connection was closed after an operation timed out"
+        );
+    }
+
     #[test]
     fn close_wait_observes_external_abort_without_peer_notification() {
         use std::sync::mpsc;

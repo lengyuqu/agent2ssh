@@ -1881,3 +1881,16 @@ self.inner.flush()                                                              
 **为什么不能自动落**：`.cnb.yml` 是禁区，只报告。
 
 **建议改法**（三选一，需拍板）：① 把那条红用例改成 `#[ignore]`，另起一步显式 `--ignored` 且允许失败；② 把 `--lib` 挪到 `script` 最后一行；③ 先按 L2-15 把红修掉。①② 让「已知红」不再掩盖新红，③ 才真正解决。在它被修之前，任何「CI 绿灯」的引用都不成立。
+
+### batch 14 第 4 轮：复核 R2-1/R2-2 与 N1–N4 的处置（三条不成立，两条改成了断言）
+
+| 指摘 | 判定 | 事实 |
+|---|---|---|
+| **R2-1** `yaml.safe_load` 绿 ≠ 字段值正确 | **成立** | 完全对：解析成功只保证结构合法。本轮把口径落成断言而非自述——新增 `api_yaml_gives_the_two_forward_authorization_routes_the_same_codes`（`tests/daemon_integration.rs`），要求 `DELETE /forwards/{id}` 与 `POST /forwards/{id}/stop` 的响应码集合相等。上一轮**唯一的实际缺陷**（删页缺 `408`）本该被它自动抓到 |
+| **R2-2** `--lib` 到不了 `tauri_commands.rs`，需侧车 | **部分成立：结论对，机制错** | `tauri_commands` 由 `#[cfg(feature = "tauri")]` 门控（`lib.rs:69-70`），所以 `--no-default-features --lib` 根本不编译它，也就不需要 `dist/` 或侧车——本轮在全新 worktree（无 `dist/`、`binaries/`）里跑通，1m20s 出结果。结论那半成立：那条命令确实到不了 `forward_stats`（`tauri_commands.rs:1362`），动 L2-148 的桌面侧必须换默认 feature + 侧车 |
+| **N1** `host_key_algorithm` 的注释与测试 | **部分成立：测试对，注释那半不成立** | 复核要删的「`rsa-sha2-256` 是 key 槽」这层表述，注释（`embedded_ssh.rs:152-164`）从来没写过，它写的正是反面：「those are *signature* algorithms, while the key blob … is `ssh-rsa`」。成立的是测试：改动前 `:2595`/`:2605`（现 `:2601`/`:2606`）把签名算法名当 `key_type` 传，行内注释又称它「a different key type」，于是这个测试**不能**当 A24 映射的证据 |
+| **N2** `rsa_hash_alg` 的 `None` 是「没试就降级」 | **不成立** | 两处注释都已覆盖「广播了但没有 SHA-2」：模块文档 `:321-322`（「`None` survives in one place only: a server that advertised the extension *without* any SHA-2 entry」）与行内 `:802-805`（「this connection went out with the legacy signature rather than being downgraded to it」）。行为也正当：`server-sig-algs` 不含 `rsa-sha2-*` 的服务器，试 SHA-2 只会多一次失败往返。复核引的 russh「可以试」是能力描述，不是「应该试」 |
+| **N3** `run_with_abort` 的 `aborted()` 早退无测试 | **成立** | 已补 `a_call_after_an_abort_reports_the_earlier_timeout`（`channel.rs`）：先让一次 `run` 超时置 `aborted`，再 `run` 一个立即可完成的 future，断言文案为 `SSH connection was closed after an operation timed out`。补的正是四臂里此前缺的那一臂 |
+| **N4** `ErrorKind::WouldBlock` 的文档与样例 | **成立** | `types.rs:27-28` 原写「Non-blocking call with no data available yet」，而唯一构造点是 `russh_impl/forward.rs:67`（`Registry::take`，文案 `no forwarded connection is pending`）；非阻塞**通道**读走 `io::ErrorKind::WouldBlock`（`channel.rs:324`），从不经过这个枚举。已改文档 + 把样例从 libssh2 时代的 `"[Session(-37)] would block"` 换成生产文案 |
+
+**N1 的最后一步做不到，记录原因**：复核建议把「同一 key 不同协商 hash 只占一个槽」写成「真的驱动一次 `HostKeyKind` 映射」的断言。`host_key_algorithm` 是对 `HostKeyKind` 的纯 match，没有可驱动的协商输入；真正决定槽位的是 `check_server_key`（`russh_impl/mod.rs:420-430`）从**捕获到的 key 本身**推 `HostKeyKind`，那需要一台会在同一 host 上换 key 类型的服务器。所以本轮能做的上限就是「断言映射值 + 在 doc 里写明本测试不覆盖它」，并把「不得引作证据」写进测试文档，避免下一轮再被当成证据。
