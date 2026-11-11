@@ -1099,8 +1099,13 @@ paths:
         a force-terminate. A request that never gets an accepted answer ends the
         attempt instead: the caller reports why and sends no signal, so a refused
         connection and every 4xx this operation can answer leave the process
-        alone. Who answered what is worth separating. A `409` means another daemon
-        holds the listener: the PID in `expect_pid` is not the one that replied.
+        alone. Who answered what is worth separating. A `409` is the check
+        answering: this daemon compared `expect_pid` with its own PID, found them
+        different, and kept running. Which PID it names lives in the error text,
+        so that number is a claim by whoever answered rather than a field a
+        client can trust — a `409` naming the very PID the caller sent can only
+        be read as "this answer cannot be verified", never as "another daemon
+        holds the listener" (K14).
         A `401` — or the `403` of the admin gate, which the caller treats the same
         way — means this route did reply: the token in this config's `daemon.token`
         is not the one the running daemon accepts as admin, which is what a file
@@ -1135,6 +1140,16 @@ paths:
         Send an empty body to stop without a check, as a hand-written `curl`
         can do. The check narrows the race and cannot close it — see K14 in
         `docs/KNOWN-ISSUES.md`.
+
+        A `200` is `{"ok": true}` on every path that accepts the stop: the one
+        that compared `expect_pid`, the one that was sent an empty body, and —
+        from a daemon that ignores the body — the one that intended a check and
+        got none. The response carries no receipt, so it does not tell a caller
+        whether `expect_pid` was compared. `agent2ssh daemon stop` names a PID on
+        every real stop, so it cannot report the difference either: a stop that
+        succeeded is logged as unverified even when the daemon verified it. The
+        receipt that would separate them is not implemented (K14,
+        `OPT-LOOP-L2-PENDING.md` L2-137).
 
         A non-empty body must have a JSON content type and parse as an object
         containing a numeric `expect_pid`. Malformed JSON, an invalid content
@@ -3910,6 +3925,15 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "413":
+          description: >
+            The request body exceeds the default body size limit. The handler
+            reads `axum::body::Bytes`, so axum refuses a body over the limit
+            before the handler sees it, and this is the only refusal here that
+            is not the `Error` object.
+          content:
+            text/plain:
+              schema: { type: string }
         "500":
           description: |
             The authentication middleware could not read `daemon_tokens.toml` while validating a

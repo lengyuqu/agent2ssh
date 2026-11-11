@@ -1666,3 +1666,51 @@ batch 7 判「不成立」时用的论据是「`code.is_some()` 时 `interrupted
 属 `src/**` 行为改动，**登记不动**。
 
 **判据**：把 `hosts.json` 写成非法 JSON 后启动桌面端。今天是「向导弹出」，修好后应是「错误提示 ＋ 不弹向导」。
+
+---
+
+## 2026-11-11 · 手工单发：issue #20（daemon 停止回执与旧版兼容）
+
+四条都改 `src-tauri/src/**` 的行为，按协议只登记不动。逐条判定与证据见 `OPT-LOOP-LEDGER.md` 同日「手工/单发消费 · issue #20」小节。**下文的行号以 `7a4bd7c` 为准**（本轮注释扩写后 `daemon_control.rs` 的 `request_shutdown` 起 +2、`AcceptedUnchecked` 臂起 +8，所以引用一律以符号为锚）。
+
+### L2-137（新）：`/shutdown` 的 200 不带回执，每次成功停止都被记成「未核验」
+
+**事实链**（本轮逐条读过，不是推断）
+
+- daemon 只有一处 200：`bin/agent2ssh-daemon.rs:227` 的 `Ok(Json(OkBody { ok: true }))`；`OkBody` 只有 `ok: bool`（`:1231-1233`，全文件 30 处引用），所以「加一个回执字段」不能改 `OkBody`，必须新起只给本路由用的类型。
+- 两条接受臂 —— `:211-213`（PID 匹配）与 `:223`（空 body）—— 都落到这一处，所以服务端的 200 body 只有一种形状。
+- 客户端第一臂的守卫是 `status == 200 && expected_pid.is_none()`（`daemon_control.rs` 的 `request_shutdown`），而 `stop_daemon_process` 传的是 `Some(pid)` → 这一臂恒假，**每一次成功的真实停止都落 `AcceptedUnchecked`**，并在 `stop_daemon_process` 里记一条 `warn`「the daemon accepted the shutdown without checking expect_pid (daemon predates it)」。核对通过的新 daemon 与忽略 body 的旧 daemon 在此逐字节同形。
+
+**做法**（沿用本文件 2026-11-10「加字段、不换状态码」的结论）
+
+1. daemon：新起只给本路由用的响应类型（不动 `OkBody`），两条接受臂都带 `own_pid` → `{"ok": true, "checked_pid": N}`。
+2. 客户端：`Accepted` / `AcceptedUnchecked` 从无载荷变体改为带 `checked_pid`/`reported`，200 臂先解析 body 再比 `expected_pid`；`reported_pid` 继续只服务 409。
+3. 文案：那条 `warn` 去掉版本归因（改「回答里没有回执，无法说明核对是否发生」），`warn` → `info`；CLI（`bin/agent2ssh.rs` 的 `DaemonCommands::Stop`）与桌面（`DaemonControlResult`，`src/types.ts:205-209`）各加一位「已核验 / 未核验」。
+4. 契约：`docs/api.yaml` 的 `/shutdown` 200 schema 加 `checked_pid`，并替换本轮写下的过渡文字（「A `200` is `{"ok": true}` on every path …」）。
+
+**回滚**：删掉 200 body 里多出的字段即回到今天的行为；旧客户端忽略未知字段，无迁移成本。
+
+**覆盖现状**：`git grep predates src-tauri/` 只命中实现处与一条测试注释，**没有任何断言**。「新 daemon 的停止不产生 predates 记录」仍是零覆盖（L2-3、L2-30 各记了一半）。本轮只把那条测试的自述改准，**没有加断言**——加了就是钉住一句要改的文案。
+
+### L2-138（新）：`409` 报出的 PID 是对端文案里的字，可能与请求里的 PID 相同
+
+`reported_pid` 从错误文案里 `split("is pid ").nth(1)` 取词解析；`Refused { actual }` → `ExpectedPidRefused { expected, actual }` → `Display`（`daemon_control.rs:827-832`）输出「the daemon listening now is pid {actual}, not the pid {expected} … Retry the stop to address pid {actual}」。`actual == expected` 时这三句自相矛盾，并让用户去重试一个只会重复失败的动作用。
+
+真 daemon 不会产生 `actual == expected`（它只在 `expected != own_pid` 时回 409），所以这条只对「能答这个形状的**别的**进程」成立 —— 与 K14 的威胁边界同级，不是新攻击面；它把「停不掉」变成一句误导。
+
+**要拍的口径**：`actual == expected` 时归 `NotAccepted` 并给出下一步（`kill <pid>` / `taskkill /PID <pid> /F`），而不是 `ExpectedPidRefused`。会改 CLI 的对外文案与退出语义，需人确认。
+
+### L2-139（新）：缺回执时「拒绝自动停止」是策略项，不是默认行为
+
+issue #20 正文要求在两种策略里选一个。两个落点：
+
+| 落点 | 代价 | 失败模式 |
+|---|---|---|
+| 继续兼容（现状 + L2-137 的可见化） | 降级可见，但不阻止 | 用户看到「未核验」照旧停止 |
+| `shutdown.require_receipt = true`（默认关） | 新配置项 + 文档 + 一条拒绝路径 | 打开后旧 daemon 卸不掉，必须留 `kill` 的一步 |
+
+**回执一个字节都不改变安全属性**：`Accepted*` 之后仍要等 `GRACEFUL_STOP_WAIT`（8 s）再 `signal_daemon(pid, start_time, true)` 强杀（`stop_daemon_process` 尾段），杀不杀由 `observe_process` 的 pid + 秒级 `start_time` 决定，与回执无关。所以「拒绝停止」换不到安全，只换到严格性。属产品拍板。
+
+### L2-140（新）：`Bytes` 形状的 413 这轮有断言了，回执那半仍无
+
+本轮给 `api_yaml_documents_how_each_handler_reads_its_body` 加了「`Bytes` 形状必须文档 413、且必须是 `text/plain`」的断言（L1 已落），并补上 `/approvals/{id}/approve` 缺失的 413 —— 它是第二个 `Bytes` 处理器，此前静默地少一格契约，而 `/shutdown` 有这一格。**仍未覆盖**：真 daemon 发一个超过 2 MiB 的 body 观察 413（没有任何 e2e 做过）；以及 L2-137 落地后「新 daemon 的停止带回执」的断言，后者要等 daemon 先发回执。
