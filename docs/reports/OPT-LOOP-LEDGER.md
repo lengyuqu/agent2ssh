@@ -3428,3 +3428,46 @@ L2-154（`/exec-multi` 全 0 语义）、L2-155（preview 缺 admin 门）、L2-
 **回帖**：`2120565582104784896`（`## 本轮收尾`，17:13:27Z）。`#21` 保持 open（剩余全部在 L2 拍板侧）。
 
 **给下一轮**：`#21` 保持 open（剩余全部在 L2 拍板侧）。下一轮按「待处理指摘最早、未被消费」应取 **#23**（最新 `2120546004976975872` 是 CodeBuddy 的复核，未消费；P1；#20 现在也有未答复的收尾帖）。行号基线 **本轮合流后的 SHA**；`api.yaml` 因本轮改写 403 描述，`/sessions/{id}` 段整体下移约 3 行。
+
+### 手工/单发消费 · 2026-11-12 · #23 Linux 生命周期绑定（第四次进入 · 身份入口同族清点 + pidfd 素材与 errno 归属）
+
+**模式 B 单发**（open 十条 #20–#29，无 `[opt-round]`；第二段为空）。开工基线 `e80b98f` = `cnb/main`：`ls-remote` 120 s 两值相同、三个其它 worktree 全 0 行、`src`/`src-tauri/src`/`docs` 十五分钟内零写入 → 不让位。选靶 **#23**：`#20`、`#21` 的最新评论都是本流程的 `## 本轮收尾`（等复核，按防重复消费跳过）；`#22`/`#25` 是 P2 设计、`#24`/`#27` 要 Windows 实机（排除）；`#29` 编号更晚；**#23 的最新评论是 CodeBuddy 的只读复核（`2120546004976975872`，15:55:40Z），未被消费，P1**。pidfd 本体本轮仍做不了——它要改 `stop_daemon_process` 的签名（L2），且文件身份格式是 #22 的决策项——所以本轮交付是「把它的材料逐条核到能复算，再把我写错/漏写的地方改对」。
+
+**判定 10 条 → 成立 3 / 部分成立 2 / 不成立 5**。五条不成立里四条整条反转，全部发生在因果链上。
+
+| # | 指摘 | 判定 | 证据 |
+|---|---|---|---|
+| 1 | `request_graceful_shutdown()` 是「零调用点 + 恒 false」的双重死码（称 `request_shutdown(None)` 落 `AcceptedUnchecked` 支） | **部分成立**：「零调用点」成立，「恒 false」**不成立** | `request_shutdown` 有两条 200 臂：`:904` 是 `status == 200 && expected_pid.is_none() => Accepted`，`:919` 才是 `=> AcceptedUnchecked`。`request_graceful_shutdown`（`:964-966`）传 `None`，**命中的是第一条**，返 true。且 `daemon_stop_e2e.rs:1149 the_shutdown_route_stops_the_daemon_gracefully` 断言 `assert!(request_graceful_shutdown(), "the admin token is accepted")` 并通过——一个恒 false 的函数会让这条用例恒红。零调用点那半成立（生产零调用，唯一调用点是这条测试 `:1150`） |
+| 2 | `direct_daemon_with_another_port_cannot_replace_a_live_pid` 里第二个实例「死在 `:5795` 的 `bind` 上」，用例与真实路径之间有未证明的间隙 | **不成立** | 该用例（`daemon_stop_e2e.rs:632`）先 `TcpListener::bind("127.0.0.1:0")` 拿一个**空闲**端口、`drop(listener)` 释放、再把 `ADDR_ENV` 指过去（`:636-639`）。**不同端口在同地址上不排他**，`bind` 必然成功，拒绝只能来自 `write_daemon_pid`。它把「同地址」读成「同端口」，再据此推出「`write_daemon_pid` 只是第二道防线」——而 daemon 侧的顺序（`:5791` token、`:5795` bind、`:5798` write_daemon_pid）确实如它所述，只是这个用例没走 bind 失败那条 |
+| 3 | 整数秒只影响 `daemon_process_start_time` 一处；`OwnerMarker` 把秒级时间写盘，同秒重启会继承「自有」身份 | **部分成立** | 四处同源读取成立：`daemon_process_start_time:117`、`observable_live_start_time:271`、`process_start_time:587`、`observe_process:732`，都取 `sysinfo::Process::start_time()`；`OwnerMarker { pid, start_time }` 写盘成立（`:578-581`/`:595-605`/`:608-619`）；测试只覆盖 `wrapping_add(10_000)`（`:1293-1310`）成立。**但「同秒重启即继承」不成立**：`daemon_is_owned` 先要求 `marker.pid == pid`，重启必然换 pid；真正被过度承诺的是那条注释。已按此改注释（见下） |
+| 4 | 「两个身份入口给出相反答案」漏了第三个：`agent2ssh doctor` | **成立** | `bin/agent2ssh.rs:5025-5039`：`daemon_running = recorded_pid.is_some_and(daemon_matches_config)`（不看名字）→ `pass`，detail 是 `daemon PID and config token verified`。用户被指向「为什么停不掉」时最可能跑的命令，恰好给出最权威的相反答案 |
+| 5 | 诊断包在同一份 JSON 里同时给 `daemon_process_alive: false` 与 `daemon_health_ok: true` | **成立** | `diagnostics.rs:493-501`（bundle）与 `:593-596`（system report）：前者走 `process_is_alive`（看名字），后者走 `daemon_matches_config`（不看名字）。`doctor` 与这两处零测试覆盖（`grep -c doctor src-tauri/tests/daemon_stop_e2e.rs` = 0） |
+| 6 | K14 新写的「Linux 把 `starttime` 除以 `clock_cycle`」可疑，`clock_cycle` 更像 ticks→纳秒的内部常量 | **不成立** | sysinfo 0.39.3 的 `unix/linux/system.rs:147`+`:156`：`clock_cycle: sysconf(_SC_CLK_TCK) as _`；`unix/linux/process.rs:429`：`(raw, raw / info.clock_cycle)`。它就是 USER_HZ，我的措辞就是实现本身。已补「即 `sysconf(_SC_CLK_TCK)`」，让锚点不必读 sysinfo 源码也能复算 |
+| 7 | `wait_for_exit` 写成 `:745-755`、实际是 `:746-756` | **不成立** | 在 `e80b98f` 上 `wait_for_exit` 的 fn 体正是 `:745-755`（收在 `observe_process(pid, expected_start)`），`:746` 是 `let start = Instant::now();`。它偏的是 `observe_process`（`fn` 在 `:729`，它写 `:726`），不是 `wait_for_exit` |
+| 8 | `prctl(PR_SET_NAME)` 能把 comm 改成白名单字面量，从而过 `daemon_process_start_time` 的名称门槛 | **不成立** | `process_looks_like_daemon:156-164` 第一条读 `process.name()`（Linux 上是 comm），而内核把 comm 截断到 15 字节，`agent2ssh-daemon` 是 **16** 字节。**它自己的实测输出就是 `comm : agent2ssh-daemo`**——那个值一个白名单字面量都不匹配（四个字面量最短的也是 16 字节）。这正是代码注释 `:120-121` 说的「Linux truncates process names to 15 bytes, so the daemon's full name must also be read from its command line」。所以负向用例的素材只能用真同名二进制或 `execve` 改 argv[0]，不能用 `prctl` |
+| 9 | `daemon_stop_e2e.rs` 有 33 个用例全部直接传 `pid: u32` | **不成立（数字错，方向对）** | 实测：34 个 `#[test]`、34 个 `#[serial_test::serial]`、15 个 `#[cfg(unix)]`，`stop_daemon_process(` 出现在 **16** 个 test 体里。我上一轮 L2-165 里写的「33 个用例」同样错，本轮一并改正。它给的改法方向对：先加 `PidHandle` newtype + `From<u32>` 垫片，这 16 条里多条靠 `set_var` 切 `CONFIG_DIR_ENV`/`ADDR_ENV` 再读 PID 文件，直接改签名会把「改类型」与「改测试语义」混成一笔 |
+| 10 | `AGENT2SSH_DAEMON_ADDR` 指向另一台主机时，停止路径整条失效且文案误导（P-4） | **成立** | `stop_daemon_process:977` 读**本机**进程表，`:999` 的 `health_identity()` 经 `local_daemon_connect_addr()`（`remote.rs:34-36`）打**该变量解析出的地址**。两台机器时两个观察必然一处命中一处不命中，落 `:1027-1030` 的 `health PID, config directory, or admin token did not match`——没有一个词提到地址。同形后果：`daemon status` 报 `cannot be verified`；`daemon token rotate` 被拒（`:3118-3120` 两道闸，远端活着时 `daemon_health_pid().is_some()` 恒真——这一道本身讲得通，换掉正在用的 token 会切断那只 daemon） |
+
+**本轮改了什么**（全部 L1；`src-tauri/src/**` 只动注释，零行为改动）：
+
+- `9ac56a5`：`daemon_control.rs` 的 `OwnerMarker` 文档注释。原文承诺「The start time makes a marker left behind by an earlier daemon fail to match a later, unrelated process that happens to get the same pid」——只在两次启动时间不同时成立，而三平台都是整秒，同秒复用的 pid 会匹配。同处的 `a_marker_does_not_survive_pid_reuse` 只测了「未来时间戳」这一个方向，补一句写明另一个方向没有覆盖。
+- `2de2545`：`docs/KNOWN-ISSUES.md` K14 把「两个身份入口」扩成完整清点——状态类（`status`/`start`/`doctor`）说健康、停止类（`stop`/`restart`）说认不出、诊断面在同一份 JSON 里自相矛盾；并写明 `renamed_daemon_is_reported_healthy_but_not_unsafely_stopped` 只钉 status/start/stop 三处。`docs/guides/configuration-guide.md` 同步（停止一节补 `doctor`，环境变量表补「指向另一台主机时本机 stop/status 必然失败、文案不提地址」）。`daemon_stop_e2e.rs` 的 doctor 缺口与句中的 `clock_cycle` 锚点一并落笔。
+- `docs/reports/OPT-LOOP-L2-PENDING.md`：**L2-170**（`UnverifiedIdentity` 三支共用一个文案，分不清「PID 被复用」与「地址在别处」）、**L2-171**（`write_daemon_pid_if_absent` 的「保留可恢复 PID」零 e2e，附 `#[cfg(unix)]` + `chmod` 夹具）；L2-165 就地修正三处（`wait_for_exit` 行号的订正记录、`prctl` 素材改用真同名二进制或 `execve`、`EPERM` 必须绑在 `pidfd_send_signal` 而非 `pidfd_open`），并把「33 个用例」改成实测的 16/34。
+
+**验证**：`npm run build` **6.77 s**；`cargo fmt --check` 干净；`cargo test --no-default-features --lib` **863 passed / 1 failed / 1 ignored**（红项仍是那条故意红的 IPv6 `an_ipv6_literal_at_port_22_is_removed`）。合流时远端已推进到 `aa08c55`（别人把 russh 升到 0.65.1），rebase 干净、无冲突，**依赖变更所以合流后重跑了一遍 lib 测试**（数字同上）。
+
+**未做的 L2**：pidfd 本体（L2-165 五步，等 #22 拍文件身份格式）、白名单派生（L2-166 二选一）、L2-170/171。P-1/P-2 的两条 pidfd errno 实测来自复核方（Linux 5.4.241），本机是 macOS、无法复现，已按「实施前在目标内核重跑」记进 L2-165 第 4 步。
+
+**这次的两条判据**（比单个修复值钱）：
+
+1. **「两个 X」这种计数式表述要用同族清点去证伪，不是去补**。上一轮我写「两个身份入口」，这一轮顺着 `grep` 把 `daemon.pid` 的读者全列出来，才看见 `doctor` 与诊断面——它们不是第三个和第四个「入口」，而是**同一族里判据分叉的另外两个落点**。凡写「A 与 B 相反」，先把 `daemon_matches_config` 与 `daemon_process_start_time` 各自的调用点列全。
+2. **复核方给的「更强证据」要先跑一遍它引的用例**。它说我引的测试「与真实路径之间有间隙」，而那个测试的第一行就是自己挑空闲端口——`bind` 不可能冲突。同类：它说 `request_graceful_shutdown` 恒 false，而现有用例断言的正是 true。**引用一条测试时读它怎么准备夹具，引用一个函数时读它的所有返回臂**，这两条在台账里已各出现三次以上。
+
+**以下已核实为不成立，不要重复提**（编号接本族前序条目）：
+
+11. 「`request_graceful_shutdown()` 恒为 false」——`:904` 的 `200 && expected_pid.is_none()` 臂返回 `Accepted`，现有用例 `the_shutdown_route_stops_the_daemon_gracefully` 断言的正是 true。只保留「生产零调用点」。
+12. 「`direct_daemon_with_another_port_cannot_replace_a_live_pid` 里第二个实例死在 `bind` 上」——该用例显式挑一个空闲端口，`bind` 必然成功，拒绝来自 `write_daemon_pid`。
+13. 「`clock_cycle` 是 ticks→纳秒的内部常量」——它就是 `sysconf(_SC_CLK_TCK)`（`sysinfo-0.39.3` 的 `unix/linux/system.rs:156`）。
+14. 「`wait_for_exit` 的行号偏一」——`e80b98f` 上 `:745-755` 是准的；偏的是 `observe_process`。
+15. 「`prctl(PR_SET_NAME)` 能冒充白名单可执行名」——comm 截断到 15 字节，四个字面量最短 16 字节，`agent2ssh-daemo` 不匹配任何一个；复核方自己的实测输出就是这个截断值。
+16. 「`daemon_stop_e2e.rs` 有 33 个用例传 `pid`」——实测 34 个测试里 16 个调 `stop_daemon_process`。此条同时更正我上一轮 L2-165 的同一数字。
