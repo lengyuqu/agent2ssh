@@ -795,3 +795,49 @@ CodeBuddy 的复核 `2120258070138740736` 新批 3 条 → **成立 1（§五.2�
 **为什么「保留」而不是「按包覆盖」**：与 `password`/`passphrase` 不同，`init_command` 不是凭据，导出**没有理由**剥掉它——所以包里缺这个字段只可能意味着「来源机器没有」，不可能意味着「分享者关掉了」。这一点让「省略即保留」在这里是有据可依的，而不是 L2-120 那种需要哨兵才能表达的选择。
 
 **与 L2-120 的分工**：L2-120 是「客户端用自己拼的残缺载荷覆盖整条记录」，这里的 L2-40 补记是「服务端用包里的残缺记录覆盖整条记录」。两者都需要「省略即保留」才能根治，**但这一处可以就地补，因为不存在「显式清空」的产品需求**（没有任何界面能清空 `init_command`，而 `password` 有）。所以本轮补了，L2-120 仍要拍板。
+
+## 2026-11-11 · batch 10 第 5 轮收尾（L2-121 降成半条，只剩契约那一半）
+
+本轮按「第 6 轮关帖前最该落的一件事」的自问，挑了 **L2-121**——它是本轮唯一一条**会让用户做错事**的缺口（卡片残留 ⇒「卡片还在 = 还没决定」这个前提失真），而不是继续铺新面。
+
+**L2-121 已拆成两半，前半已落、后半仍待拍板。**
+
+| 半边 | 状态 | 落法 |
+|---|---|---|
+| 前端：`catch` 里不做任何对齐 | **已落（本轮）** | 见下 |
+| 契约：把「已决定」幂等化成 409 | **仍在此表**，需拍板 | 改 `approval.rs` 的对外状态码 + `api.yaml`，是契约改动 |
+
+本轮落地的是「**只在确有证据时摘卡**」，一个既不是 ①「无条件重拉」也不是 ②「改契约」的第三条路：
+
+- 新增 `src/lib/approval-decision.ts` 的 `isAlreadyDecided(message)`，只认 `already (Approved|Rejected|TimedOut|Revoked)`。判据是**消息**不是状态码，因为两条路由对每一种拒绝都返 400（`bin/agent2ssh-daemon.rs:3384`、`:3398`），而只有 `approval_respond_inner` 的 `already {req.status:?}`（`approval.rs:699-701`）意味着「已决定」。**rewrite 被 blocked、rewrite 更危险、has timed out、unknown approval 都不能匹配**——它们对应的是「请求仍然 pending」，误匹配会把操作员还没答的请求从队列里抹掉，比残留更坏。同理不写 `already \{[^}]*\}` 这种宽松尾巴，否则将来的 `already blocked by policy` 会把活卡片退役。4 条单测钉住这两侧。
+- `App.tsx` 的 `handleApprove` / `handleReject` 的 `catch` 改走 `reportUndecided`：**先原样 toast（措辞不变）**，再仅当 `isAlreadyDecided` 为真时补一次 `api.fetchApprovals()`，**并且只有 daemon 把那一条列为 `non-pending` 才摘卡**。这样 ① 那种「断线时重拉也失败」被处理掉了——不是靠重拉成功，而是靠「拿不到证据就不摘卡」：`fetchApprovals` 在 daemon 不可达时返回 `[]`（`src/api.ts:794-806`），而空表**不是**「已决定」的证据。
+- 代价诚实写出：这一路仍会被「400 但不是已决定」的路径**留在队列里**（与修前一致），也不会修正本地 `pending` 之外的任何状态。它只解决「已决定却还挂着」。
+
+**② 仍在此表，且本轮取证后它更不急着做**：把 400 变 409 是契约改动，而前端的可观察后果现在只剩「toast 里仍是 `Failed to approve request: approval … already Approved`」——一个措辞问题，不再是「卡片再也摘不掉」。
+
+**为什么 ② 不归 L1**：`approval_respond` / `approval_approve` 的 400 是 `api.yaml` 里 `/approvals/{id}/approve` 与 `/approvals/{id}/reject` 的 responses，改它要同步契约、Rust 与前端三处，属对外契约。落地要求：`cargo test --no-default-features --lib` + `cargo test --lib`（default feature 才编 `tauri_commands`）+ `npm test`，并在 `api.yaml` 写明 409 携带的 `status` 字段。
+
+## 2026-11-11 · batch 10 第 5 轮收尾（`(no policy)` 的限定词够不够）
+
+上一轮把兜底文案从 `low auto-approve` / `med/high need approval` 改成 `low/med auto-approve (no policy)`。复核结论：**方向对，但词选窄了**，本轮改成 `low/med auto-approve (no policy configured)`（中文 `low/med 自动放行（未配置策略）`）。
+
+- `(no policy)` 读起来像名词短语「没有策略这件事」，可以指「**此刻**没有策略命中」——而那正是 `summary !== null` 分支的情况，两支的限定词就互相打架了。兜底分支的真实前提是**没有配置文件**（`load_approval_policies` 在 `policy.toml` 与 `approval_policies.toml` 都不存在时返回空 `Vec`，`approval.rs:969-980`），所以 `configured` 是必须的，它把「无文件的默认」与「有文件但没命中」分开。
+- 但没有采用更显式的「本条只描述无策略时的执行页」：这是一枚 `text-[11px] uppercase` 的一行 chip，带「执行页 / 审批页」两个词会把 11px 的一行推到两行，并把读者的注意力从三个风险档挪到一个元声明上。**取舍写在这里，而不是写进 UI**：限定词负责「不撒谎」（它不再暗示 medium 一定不进卡），注释负责「说全」（`HostPolicyLine.tsx:78-86` 记了两支的语义分工）。若第 6 轮判定仍不够，唯一还能加而不撑爆这一行的是把 high 那份改成 `high need approval (always)`，让「无条件」与「无策略」在视觉上对称——我没有自己拍。
+
+**同步已改**：`i18n.tsx:843` 的 key 与译文、`HostPolicyLine.test.tsx` 两条断言（`i18n.test.tsx:72-74` 会遍历源码里的 `t("…")` 字面量并要求 key 在表里，所以 key 改名必须三处一起动，否则测试先红）。
+
+## 2026-11-11 · batch 10 第 5 轮收尾（`ContainersPanel` 的守卫覆盖范围）
+
+复核结论：**`ContainersPanel` 内部覆盖完整，但它不是最后两处**——同一个缺陷在另外三个站点上还开着，其中两处的结果**比「死按钮」严重**，因为它们会在剪贴板写入**真的失败了**的时候报「已复制」。
+
+| 站点 | 状态 | 说明 |
+|---|---|---|
+| `ContainersPanel.copyCommand` | **已覆盖**（上一轮） | 唯一调用点 `:261` 的 `IconButton` 也只走这一条；`copied` 状态在同一函数里设，没有第二条路径能翻转图标 |
+| `KeysPanel.copyPublicKey` | **已覆盖**（上一轮） | 唯一调用点 `:267`；`k.public_key ?` 已保证文本非空 |
+| `McpAgentsPanel.copyCommand`（`:146-150`） | **未覆盖** | 直接 `await navigator.clipboard.writeText(...)` 再 `setCopied`。事件处理器里的 reject ⇒ `setCopied` 不执行 ⇒ 死按钮；`navigator.clipboard` 为 `undefined` ⇒ TypeError 同上。本轮的 `(no policy)` 之外唯一「同一形状还没补」的一处 |
+| `AuditPanel.copySelectedAsJson`（`:260-265`） | 有 `.catch`，**但顺序错** | 同 `ContainersPanel` 修前一样的问题：先 `setCopied`/`showToast` 再等 promise。`writeText` 在不可用时**同步抛** TypeError，`.catch` 挂在它返回的 promise 上（根本不返回），于是 toast 已经报「Copied {count} entries to clipboard」——**撒谎的确认**，比静默失效严重 |
+| `SettingsMenu.copyConsoleUrl`（`:255`） | 部分覆盖 | `try/catch` 包住了，能落到 `failed`；但 `navigator.clipboard` 为 `undefined` 时抛的是 TypeError，`catch` 能接住 ⇒ 实际可用。**不是缺口** |
+| `HelpPanel.copy`（`:30-37`） | 部分覆盖 | 同上，`try/catch` 已够。**不是缺口** |
+| `TerminalView`（`:170`、`:184`、`:259`） | 覆盖 | 显式 `?.writeText` 检查 + `clipboard_unavailable` reason。**不是缺口** |
+
+**所以 L2-115 的范围要再扩一次**：不是「四处各写一个 `.catch`」，而是 **`McpAgentsPanel` 一处的保护 + `AuditPanel` 一处的顺序**，加上「复制失败到底该不该给确认」这一个产品口径。三件事都要一个 `copyText` helper 才能一次收口——helper 必须**同步可判**（返回 `{ok:true}` / `{ok:false, reason}` 或抛给调用方），否则调用方又会把确认写在 await 之前。本轮不动：`AuditPanel` 的修法要选「换顺序」还是「换 promise 形状」，`McpAgentsPanel` 的修法要选「静默」还是「toast」，两个都是 L2-115 那个尚未拍板的产品问题。

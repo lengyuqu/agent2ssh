@@ -1985,4 +1985,21 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 - `npm test` **216 passed / 29 files**；`npm run build` **built in 12.37 s**。前端两个命令绿，但它们对本轮的 Rust 改动零覆盖——如实写在这里，不当成证据。
 - **本容器没有 Rust 工具链**（`cargo`/`rustc` 都不在 PATH，`find / -maxdepth 4 -name cargo` 为空），所以 `cargo fmt --check` 与 `cargo test` **本轮无法执行**。代码按 rustfmt 的输出风格书写（4 空格、`assert_eq!` 多行参数、每行 < 100 列已核），但必须在开发者机器上补跑：`cargo fmt --manifest-path src-tauri/Cargo.toml` 与 `cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib team_config`。**这是本轮唯一的验证缺口，不假装绿。**
 
-**#16 保持 open，6 轮进度 5 / 6（两趟同日，不重复计数）。**
+**#16 保持 open，6 轮进度 5 / 6（两趟同日，不重复计数）。本份收尾节与上一份「`import_team_config` 追加」是同一天的两趟 5 / 6。**
+
+## 2026-11-11 · batch 10 第 5 轮收尾（L2-121 前半落地；`(no policy)` 加词；剪贴板守卫的真实覆盖范围）
+
+发问的上一轮留了两问：`(no policy)` 够不够、`ContainersPanel` 的守卫是否覆盖全部调用点。两问都答在下面第 2、3 段，第 1 段是本轮唯一落地的一件事——**L2-121 的前端半边**，理由是它让唯一一条「用户会因为界面而做错事」的缺口收敛成措辞问题。
+
+| # | 项 | 结论 | 处置 |
+|---|---|---|---|
+| 1 | L2-121 卡片残留 | 拆两半：前端对齐**已落**，契约幂等化仍待拍板 | 新增 `isAlreadyDecided`，只认 `already (Approved\|Rejected\|TimedOut\|Revoked)`；`catch` 里先原样 toast，再仅在「daemon 把这条列为 non-pending」时摘卡。`fetchApprovals` 的 `[]` 不算证据，所以断线时不摘卡——①「重拉也失败」这条反对意见就是这样被吃掉的 |
+| 2 | `(no policy)` 够不够 | 方向对、词选窄 | 改 `(no policy configured)` / `（未配置策略）`。`configured` 是必须的：`(no policy)` 会被读成「此刻没有策略命中」，而那正是 `summary !== null` 那一支 |
+| 3 | `ContainersPanel` 守卫覆盖 | 组件内完整，**但它不是最后一处** | `McpAgentsPanel.copyCommand` 仍未保护；`AuditPanel.copySelectedAsJson` 的 `.catch` 挂在可能根本没返回的 promise 上，会**在看到失败的情况下报「已复制」**。两处都并进 L2-115 |
+| 4 | `SettingsMenu` / `HelpPanel` / `TerminalView` | 不是缺口 | 前两处有 `try/catch`（能接住 `clipboard` 为 `undefined` 的同步 TypeError），`TerminalView` 有显式 `?.writeText` + `clipboard_unavailable` |
+
+**L1 落地**：`src/lib/approval-decision.ts`（新，含 4 条单测）、`src/App.tsx`（`handleApprove`/`handleReject` → `reportUndecided`）、`HostPolicyLine.tsx` + `i18n.tsx` + `HostPolicyLine.test.tsx`（限定词）。**Rust 一行未动。**
+
+**验证**：`npm run build` **12.60 s**（清装 `node_modules` 后首次；同一台机上一轮的 6.37 s 是热缓存）；`npm test` **220 passed / 30 files**（216 → 220 是本轮新增 4 条）；`npx biome check` 对本轮改动的 6 个文件干净（全仓仍有 `i18n.test.tsx` 两处既有告警，与本轮无关）；`cargo test --no-default-features --lib` 未重跑——Rust 零改动，上一轮 861 passed / 1 failed / 1 ignored（故意红的 IPv6）仍然成立。
+
+**#16 进度 5 / 6。第 6 轮只需复核 R2-2 的新措辞、把 L2 收敛成一张表、关帖。**
