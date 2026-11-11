@@ -75,8 +75,20 @@ export default function ApprovalDetail({
   ];
   const contextRows = candidateRows.filter((row): row is [string, string] => Boolean(row[1]));
 
+  // The "Copy command and open Execution" button below calls this and then
+  // `onCopyAndExecute`. It used to call only the latter: the label promised a
+  // clipboard write that never happened, so the icon could never reach its
+  // `Check` state either.
   function handleCopy() {
-    navigator.clipboard
+    // `navigator.clipboard` is absent outside a secure context (and in jsdom),
+    // where reaching for it would throw before the caller's navigation runs.
+    // A *rejecting* clipboard is still silent -- that half is L2-115.
+    const clipboard = navigator.clipboard;
+    if (!clipboard?.writeText) {
+      setCopied(false);
+      return;
+    }
+    clipboard
       .writeText(approval?.command ?? "")
       .then(() => {
         setCopied(true);
@@ -159,7 +171,14 @@ export default function ApprovalDetail({
             </Button>
           )
         ) : (
-          <Button variant="secondary" disabled={busy} onClick={onCopyAndExecute}>
+          <Button
+            variant="secondary"
+            disabled={busy}
+            onClick={() => {
+              handleCopy();
+              onCopyAndExecute();
+            }}
+          >
             {copied ? <Check size={14} /> : <Copy size={14} />}
             {t("Copy command and open Execution")}
           </Button>

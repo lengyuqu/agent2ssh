@@ -1,4 +1,4 @@
-import { Key, Plus, Trash2, Copy, Download, Check, AlertTriangle } from "lucide-react";
+import { Key, Plus, Trash2, Copy, Download, Check } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
@@ -191,26 +191,10 @@ export default function KeysPanel({ onChanged }: Props) {
                   </button>
                 ))}
               </div>
-              {/* Unreachable against a real backend: `default_for_build()` is
-                  `Ed25519` unconditionally (`src-tauri/src/keys.rs:190`), so
-                  `preferredAlgorithm` is never "rsa" and this paragraph never
-                  renders. Its copy is stale too -- it describes the libssh2
-                  build, and the transport has read Ed25519 since russh. Kept
-                  only because `KeysPanel.test.tsx` mocks the backend into
-                  returning "rsa"; deleting the paragraph and that test
-                  together is L2-58. */}
-              {algorithm === "ed25519" && preferredAlgorithm === "rsa" && (
-                <p className="flex items-start gap-1.5 text-[11px] text-muted-foreground">
-                  <AlertTriangle size={12} className="mt-0.5 shrink-0" />
-                  {t(
-                    "This platform's SSH library cannot read Ed25519 keys, so a key generated here will not authenticate. Choose RSA to get a usable key."
-                  )}
-                </p>
-              )}
               {algorithm === "rsa" && (
                 <p className="text-[11px] text-muted-foreground">
                   {t(
-                    "RSA keys are written as traditional PEM (`-----BEGIN RSA PRIVATE KEY-----`) because that is the only private-key encoding this platform's SSH library can read."
+                    "RSA keys are written as traditional PKCS#1 PEM (`-----BEGIN RSA PRIVATE KEY-----`) because that is what the `rsa` crate emits, not because the transport needs it: it reads this form and the OpenSSH container `ssh-keygen` writes. The OpenSSH container would have to be hand-rolled."
                   )}
                 </p>
               )}

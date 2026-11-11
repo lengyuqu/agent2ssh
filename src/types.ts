@@ -548,6 +548,15 @@ export type ApprovalRequest = {
   context?: ApprovalContext | null;
   /** Set when the approver ran a rewritten command instead of `command`. */
   rewritten_command?: string | null;
+  /** Withdrawal timestamp for an already-approved request. `docs/api.yaml`
+   *  declares it and `approval.rs` writes it, but no HTTP route produces it
+   *  today — mirrored here so the type stops dropping a field that is on the
+   *  wire. Nothing renders it; that would be a product decision (L2-110). */
+  revoked_at?: string | null;
+  /** Command text captured at approval time, so the approved command survives
+   *  a later edit to `command` (holds the rewritten text when one was
+   *  approved). Declared in `docs/api.yaml`, dropped by this mirror until now. */
+  approved_command_snapshot?: string | null;
 };
 
 // Rust: keys.rs — SshKeyInfo

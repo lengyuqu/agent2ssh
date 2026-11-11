@@ -26,7 +26,11 @@ type Props = {
   /** `command` approves that text instead of the requested one. */
   onApprove: (approval: ApprovalRequest, command?: string) => void | Promise<void>;
   onReject: (approval: ApprovalRequest) => void | Promise<void>;
-  /** Fallback for requests that cannot be rewritten: copy + jump to Execution. */
+  /** Fallback for requests that cannot be rewritten: open the Execution module
+   *  with this approval's host selected. The command is **not** carried over --
+   *  `App.tsx`'s handler only sets the host and switches module, and the
+   *  Execution panel still starts from its own default command. The copy half
+   *  happens in `ApprovalDetail` before this fires. */
   onGoExecute: (approval: ApprovalRequest) => void;
 };
 

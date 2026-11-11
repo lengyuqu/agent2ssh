@@ -22,9 +22,12 @@ export type PaletteQuickAction = {
 };
 
 /** Frontend mirror of the `ssh_*` MCP tool names that have a desktop module to
- *  jump to (see `src-tauri/src/bin/agent2ssh_mcp/tools.rs`). The palette cannot
- *  invoke tools (they need arguments); activating one opens the module that
- *  exercises the same capability.
+ *  jump to (see `src-tauri/src/bin/agent2ssh_mcp/tools.rs`). The palette never
+ *  invokes a tool: `activate()` maps every `mcp-tool` entry to
+ *  `onNavigateModule(item.moduleId)`, and a module is a screen, not a
+ *  call. The join key is therefore the module id — not "does the tool need
+ *  arguments", which would be the wrong test: `ssh_list_hosts` needs none and
+ *  is still only reachable through its module.
  *
  *  This is deliberately a subset, not a mirror: the registry has 76 tools and
  *  this list has 60. The sixteen absent ones are absent for a reason —

@@ -96,24 +96,11 @@ describe("KeysPanel key algorithm", () => {
     );
   });
 
-  // Reachable only through this mock: `KeyAlgorithm::default_for_build()`
-  // (`src-tauri/src/keys.rs:190`) returns `Ed25519` unconditionally, so
-  // `preferredAlgorithm === "rsa"` never holds against a real backend. The
-  // warning it triggers is therefore dead UI kept for an older build, and this
-  // test pins the mock path, not a behaviour a user can reach. Deleting the
-  // branch and this test together is parked as L2-58.
-  it("keeps the legacy RSA-build warning, reachable only through a mocked backend", async () => {
-    mockApi.defaultKeyAlgorithm.mockResolvedValue("rsa");
-    renderPanel();
-    await waitFor(() => expect(mockApi.defaultKeyAlgorithm).toHaveBeenCalled());
-
-    await openFormWithName("id-work");
-    fireEvent.click(screen.getByText("Ed25519"));
-
-    expect(screen.getByText(/cannot read Ed25519 keys/)).toBeTruthy();
-  });
-
-  it("stays silent about the warning on a build that can read Ed25519", async () => {
+  // The "this build cannot read Ed25519" warning is gone: `default_for_build()`
+  // (`src-tauri/src/keys.rs:190`) returns `Ed25519` unconditionally, so the
+  // `preferredAlgorithm === "rsa"` branch it hung off was unreachable against a
+  // real backend, and the transport reads Ed25519 either way. L2-58.
+  it("offers Ed25519 as the recommendation and never warns about it", async () => {
     renderPanel();
     await waitFor(() => expect(mockApi.defaultKeyAlgorithm).toHaveBeenCalled());
 
