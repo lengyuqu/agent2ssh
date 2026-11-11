@@ -175,17 +175,18 @@ fontdb = "0.23"
 # *to stay off* the GTK stack — where `cargo tree` showed `cairo-rs 0.20` /
 # `glib 0.20` hanging directly off `agent2ssh-app`, linked by nothing.
 #
-# The gate is the feature itself, not `feature = "tauri"` written into the cfg:
-# a dependency-table cfg is evaluated at *manifest* time, before cargo has
-# resolved any feature, so `cfg(feature = ...)` reads as false and cargo fails
-# every build with "failed to parse manifest: feature `tauri` is not allowed in
-# `target.'cfg(all(target_os = "linux", feature = "tauri"))'`". An *optional*
+# The gate is the feature itself, not a feature condition written into the cfg:
+# a dependency-table cfg is evaluated at *manifest-parse* time, before cargo has
+# resolved any feature, so `cfg(feature = "...")` there is rejected outright and
+# every cargo command fails with "feature ... is not allowed in target.'cfg(...)'"
+# — which is how this PR first broke the whole pipeline. An *optional*
 # dependency that the `tauri` feature enables is the same gate in the one form
-# the manifest parser accepts: with `--no-default-features` nothing asks for
+# the parser accepts: with `--no-default-features` nothing asks for
 # `pin_gtk_generation`, so the five crates are not in the graph at all; with the
 # default features `tauri` is on, so they are — and the pin applies exactly as
-# before. Delete the block (and its `tauri` entry) once `gtk` moves to a
-# `glib 0.20` generation and `wry`/`tao` follow.
+# before. `glib` is renamed to `pin_gtk_generation` so the block reads as a pin
+# rather than a crate anything links. Delete the block (and its `tauri` entry)
+# once `gtk` moves to a `glib 0.20` generation and `wry`/`tao` follow.
 [target.'cfg(target_os = "linux")'.dependencies]
 pin_gtk_generation = { version = "0.20", package = "glib", optional = true }
 gio = { version = "0.20", optional = true }
