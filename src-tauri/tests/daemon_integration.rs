@@ -2252,6 +2252,14 @@ const INBAND_REJECTIONS: [(&str, &str, &str); 3] = [
     ),
 ];
 
+/// The two routes that serve the browser console rather than the API.
+///
+/// They are outside every contract check: `api.yaml` documents neither, and `/`
+/// is mounted with a closure, so it has no `async fn` for the body checks to
+/// read. Naming them once keeps the parse-loss assertion from having to know
+/// which shape a non-API route takes.
+const NON_API_ROUTES: [&str; 2] = ["/", "/console"];
+
 /// The methods one `.route(...)` call mounts, in source order, with their handler.
 ///
 /// `get(a).post(b)` mounts two, and a builder chain that wraps across lines
@@ -2290,33 +2298,88 @@ fn mounted_handlers(segment: &str) -> Vec<(&'static str, String)> {
 /// router chain) so a multi-line builder chain cannot borrow the methods of the
 /// call that follows it.
 fn daemon_routes(daemon: &str) -> Vec<(String, &'static str, String)> {
+    daemon_routes_and_drops(daemon).0
+}
+
+/// A `.route(...)` call the derived checks cannot read, and why.
+#[derive(Debug)]
+struct DroppedRoute {
+    line: usize,
+    /// Empty when the call carried no path literal at all.
+    path: String,
+    reason: &'static str,
+}
+
+/// The same parse, plus the `.route(...)` calls it could not turn into an entry.
+///
+/// A call is dropped when its segment carries no string literal, when the first
+/// literal is not a path, or when the segment names no method builder with a
+/// name after it. Every one of those drops is silent by construction: eight
+/// families read `daemon_routes` and each is phrased as "no operation here
+/// violates X", so a lost operation makes its own checks vacuous while the
+/// family stays green, and the only thing that would move is prose. Returning
+/// the drops lets one test assert the parse is lossless, instead of every family
+/// trusting a denominator nobody states.
+///
+/// One drop is legitimate and known: `/` redirects to the console through a
+/// closure, which has no `async fn` for the body checks to read, and it is not
+/// an API route. See `NON_API_ROUTES`.
+fn daemon_routes_and_drops(
+    daemon: &str,
+) -> (Vec<(String, &'static str, String)>, Vec<DroppedRoute>) {
     let starts: Vec<usize> = daemon
         .match_indices(".route(")
         .map(|(index, _)| index)
         .collect();
     let mut routes = Vec::new();
+    let mut dropped = Vec::new();
     for (position, start) in starts.iter().enumerate() {
         let mut end = starts.get(position + 1).copied().unwrap_or(daemon.len());
         if let Some(with_state) = daemon[*start..].find(".with_state(") {
             end = end.min(start + with_state);
         }
         let segment = &daemon[*start..end];
+        let line = daemon[..*start].lines().count() + 1;
         let Some(open) = segment.find('"') else {
+            dropped.push(DroppedRoute {
+                line,
+                path: String::new(),
+                reason: "no path literal",
+            });
             continue;
         };
         let Some(close) = segment[open + 1..].find('"') else {
+            dropped.push(DroppedRoute {
+                line,
+                path: String::new(),
+                reason: "unterminated path literal",
+            });
             continue;
         };
         let path = &segment[open + 1..open + 1 + close];
         if !path.starts_with('/') {
+            dropped.push(DroppedRoute {
+                line,
+                path: path.to_string(),
+                reason: "the first literal is not a path",
+            });
+            continue;
+        }
+        let mounted = mounted_handlers(segment);
+        if mounted.is_empty() {
+            dropped.push(DroppedRoute {
+                line,
+                path: path.to_string(),
+                reason: "the segment names no method builder with a handler after it",
+            });
             continue;
         }
         let normalized = normalized_route_path(path);
-        for (method, handler) in mounted_handlers(segment) {
+        for (method, handler) in mounted {
             routes.push((normalized.clone(), method, handler));
         }
     }
-    routes
+    (routes, dropped)
 }
 
 /// The body of one handler, from its `async fn` line to its closing brace.
@@ -2529,6 +2592,37 @@ fn a_brace_inside_a_literal_does_not_close_the_body() {
     }
 }
 
+/// The route parse must not quietly lose a `.route(...)` call.
+///
+/// Eight families read `daemon_routes`, and each is phrased as "no operation
+/// here violates X". A call the parser cannot read makes that phrase vacuous for
+/// the operation it mounted: the family sees one entry fewer and stays green,
+/// and nothing in the suite says how many entries it expected. So the
+/// denominators are only decidable while the parse is lossless — that is what
+/// this pins, rather than a count a new route would break.
+#[test]
+fn every_route_call_is_read_as_an_operation() {
+    let daemon = include_str!("../src/bin/agent2ssh-daemon.rs");
+    let (routes, dropped) = daemon_routes_and_drops(daemon);
+    // A drop on a non-API route is accounted for; a drop anywhere else means an
+    // operation fell out of every derived check at once.
+    let unexplained: Vec<&DroppedRoute> = dropped
+        .iter()
+        .filter(|drop| !NON_API_ROUTES.contains(&drop.path.as_str()))
+        .collect();
+    assert!(
+        unexplained.is_empty(),
+        "these `.route(...)` calls name something the derived contract checks cannot read, \
+         so every family built on `daemon_routes` skips them in silence: {unexplained:?}. \
+         Teach `daemon_routes` the shape, or mount the handler through \
+         `.route(path, get(handler))`."
+    );
+    assert!(
+        !routes.is_empty(),
+        "the route parse found no operations at all, so every derived check is vacuous"
+    );
+}
+
 /// Every daemon route is in `docs/api.yaml`, and nothing else is — path,
 /// method, and the 401 that the auth middleware answers with.
 ///
@@ -2545,9 +2639,6 @@ fn a_brace_inside_a_literal_does_not_close_the_body() {
 /// went missing on 98 of 103 operations without a single test going red.
 #[test]
 fn api_yaml_documents_every_daemon_route() {
-    // `/` and `/console` serve the web console, not the API.
-    const NON_API_ROUTES: [&str; 2] = ["/", "/console"];
-
     let daemon = include_str!("../src/bin/agent2ssh-daemon.rs");
     let spec = include_str!("../../docs/api.yaml");
 
