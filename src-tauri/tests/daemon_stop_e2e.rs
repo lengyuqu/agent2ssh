@@ -1520,6 +1520,51 @@ fn a_daemon_that_ignores_the_expected_pid_stops_and_says_so() {
     std::env::remove_var(ADDR_ENV);
 }
 
+/// The body limit is the third refusal these two routes can answer, and the
+/// only one no handler writes.
+///
+/// `POST /shutdown` and `POST /approvals/{id}/approve` take
+/// `axum::body::Bytes`, which buffers the whole body before the handler runs.
+/// A body past axum's default 2 MiB limit is therefore refused as `413` from
+/// inside the extractor, with a plain-text message rather than the daemon's
+/// `Error` object. Both are asserted against the real binary: the mirrored
+/// router in `daemon_integration` mounts neither route, so it cannot answer for
+/// the limit, and the doc-side check there only proves the status is listed.
+///
+/// The body is one byte past the limit and carries nothing either handler would
+/// read, so a 400 here would mean the handler ran — which is the distinction
+/// this pins.
+#[test]
+#[serial_test::serial]
+fn an_oversized_body_is_refused_with_a_plain_text_413_before_the_handler() {
+    let daemon = RunningDaemon::start("oversized-body", &[]);
+    let oversized = serde_json::json!({ "pad": "x".repeat(2 * 1024 * 1024) });
+    for path in [
+        "/shutdown",
+        "/approvals/00000000-0000-0000-0000-000000000000/approve",
+    ] {
+        let response = local_daemon_request_with_body(
+            "POST",
+            path,
+            Some(&daemon.token),
+            &oversized,
+            Duration::from_secs(5),
+        )
+        .unwrap_or_else(|error| panic!("{path} answers an oversized body: {error}"));
+        assert_eq!(response.status, 413, "{path}: {}", response.body);
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&response.body).is_err(),
+            "{path} answers the body limit in plain text, not as the Error object: {}",
+            response.body
+        );
+    }
+    // A refused body is inert: the daemon is still serving, so nothing read the
+    // body and nothing acted on it.
+    let health = local_daemon_request("GET", "/health", None, Duration::from_secs(2))
+        .expect("the daemon still answers after two refused bodies");
+    assert_eq!(health.status, 200, "{}", health.body);
+}
+
 /// The listener that answers may be a daemon serving a *different* config
 /// directory — started from a shell that exported another `AGENT2SSH_CONFIG_DIR`.
 /// It accepts this caller's token only if the tokens happen to be equal; the

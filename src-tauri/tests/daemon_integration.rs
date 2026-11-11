@@ -3975,7 +3975,9 @@ fn api_yaml_documents_how_each_handler_reads_its_body() {
         violations.is_empty(),
         "these operations document a body contract the handler does not have: {violations:?}. \
          `Json<T>` answers 415/422 by itself, `Option<Json<T>>` cannot answer either, and \
-         `Bytes` answers only what the handler writes."
+         `Bytes` cannot answer 415/422 at all — the only status it adds on its own is the 413 \
+         the default body limit raises before the handler runs, so every other refusal on those \
+         operations has to be one the handler writes."
     );
 
     // The sentence in `info.description` that enumerates the swallowed
