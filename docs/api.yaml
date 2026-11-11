@@ -3332,8 +3332,12 @@ paths:
         "403":
           description: >-
             Scope denied, or the approval policy refused `session_close`. The gate is checked
-            first, so a paused gate answers 423 and an exceeded limit 429 even when the session's
-            host is also outside the token's hosts and tags.
+            first, so a paused gate answers 423 even when the session's host is also outside the
+            token's hosts and tags. A rate limit is not one of the refusals this operation can
+            answer: `session_close` reads the gate, the scope and the approval policy, and never
+            calls `reject_if_rate_limited`, so closing a session is not counted against
+            `execution_limits.toml` and a retry loop will never meet a 429 here. This is why no
+            `429` is listed below, while `/sessions` — the open side — does list one.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }

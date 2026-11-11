@@ -12,7 +12,8 @@ Agent2SSH 的所有配置和数据文件存储在 `~/.agent2ssh/` 目录下。�
   daemon.pid       # 守护进程 PID（自动管理）
   daemon.owner     # 记录哪个 daemon 是桌面应用启动的（自动管理）
   audit.jsonl      # 执行审计日志（自动追加）
-  app.log          # 结构化诊断日志（JSONL，自动轮转）
+  app.log          # 结构化诊断日志（JSONL，自动轮转，写前脱敏）
+  daemon.log       # daemon 的 stdout/stderr（原样落盘，不脱敏，仅启动时轮转）
   secrets.enc      # App 自建加密凭据库（主密码派生密钥，自动管理）
   known_hosts.json # SSH 主机指纹信任记录（自动管理）
   .hosts.lock      # hosts.json 跨进程写锁（自动管理）
@@ -40,6 +41,10 @@ Agent2SSH 的所有配置和数据文件存储在 `~/.agent2ssh/` 目录下。�
   backups/         # 同步/写入前的本地版本备份
   keys/            # SSH 密钥存储目录
 ```
+
+### 两个日志文件不是同一份东西
+
+`app.log` 是应用写的结构化诊断（JSONL，每条都过 `redact_sensitive_text`，5 MB 内联轮转、保留 3 代），四个 surface 都往里写。`daemon.log` 是 daemon 进程自己的 stdout/stderr 重定向，内容是 `tracing` 的 `fmt` 输出，**没有任何脱敏**：`AGENT2SSH_LOG` 为默认 `info` 时，`POST /exec`、`/local-exec`、`/exec-multi`、`/exec/compare` 四个 handler 各会写一行 `command=…`，命令原文就落在这个文件里。只有 `WARN`/`ERROR` 经 `DiagnosticBridgeLayer` 桥进 `app.log` 时才会被脱敏，`info`/`debug` 不会过桥。轮转也只在 `daemon start`/`daemon restart` 时做一次（超过 5 MB 转成 `daemon.log.1`、`daemon.log.2`），长时间运行的 daemon 不会自己截断。所以排查完要分享或上传 `daemon.log` 之前，先按命令行内容决定是否需要手工裁剪。
 
 ---
 
@@ -1434,7 +1439,7 @@ shasum -a 256 -c <checksum> team-config.json
 |------|--------|--------|------|
 | `AGENT2SSH_CONFIG_DIR` | 全部 | `~/.agent2ssh` | 覆盖配置与数据目录（`hosts.json`、`audit.jsonl`、`keys/`、`app.log` 等）。测试与多实例隔离常用；相对路径按各进程当前工作目录解析，跨目录启动 CLI 和 daemon 时应使用同一绝对路径。 |
 | `AGENT2SSH_SOURCE` | CLI / MCP / Tauri | 各 surface 自带标签（如 `cli`、`mcp`、`desktop`） | 覆盖审计与 Live Activity 中的来源标签，用于区分是哪个 agent/客户端发起的操作。 |
-| `AGENT2SSH_DAEMON_ADDR` | daemon（绑定）+ client（拨号，桌面窗口除外） | `127.0.0.1:7722` | 本地 daemon 的监听地址。daemon 按此绑定；CLI/MCP 客户端、Tauri 后端命令与 Webhook 链接经同一解析器（`local_daemon_url`）拨号，绑定到通配地址（`0.0.0.0`/`::`）时 client 自动回退到回环。**桌面窗口的直连请求不跟随此变量**：`src/api.ts` 的 `daemonUrl` 固定写 `http://127.0.0.1:7722`，健康指示、闸门状态、会话与终端 WebSocket 都打默认地址，所以把本变量改成非默认值后，CLI 与 MCP 正常而桌面显示 `Daemon unavailable`。绑定非回环地址会写一条 `warn` 诊断提示对外暴露。 |
+| `AGENT2SSH_DAEMON_ADDR` | daemon（绑定）+ client（拨号，桌面窗口除外） | `127.0.0.1:7722` | 本地 daemon 的监听地址。daemon 按此绑定；CLI/MCP 客户端、Tauri 后端命令与 Webhook 链接经同一解析器（`local_daemon_url`）拨号，绑定到通配地址（`0.0.0.0`/`::`）时 client 自动回退到回环。**桌面窗口的直连请求不跟随此变量**：`src/api.ts` 的 `daemonUrl` 固定写 `http://127.0.0.1:7722`，健康指示、闸门状态、会话、终端 WebSocket 与 SSE 活动流（`/events/stream`，只有在订阅时才有请求）都打默认地址。所以把本变量改成非默认值后，CLI 与 MCP 正常，而桌面不只是显示 `Daemon unavailable`：窗口挂载时 `src/App.tsx` 的 `ensureLocalDaemon` 会调后端命令 `daemon_start`（它跟随本变量）真的在那个地址起一个 daemon，再用前端固定地址复查、永远复查不到，于是每次挂载都留下一次「启动成功」或「已有健康 daemon，跳过启动」的诊断加一块空面板。反复开关窗口不会堆进程（`daemon_start` 见 PID 文件里已有健康 daemon 就跳过），只会堆诊断行。绑定非回环地址会写一条 `warn` 诊断提示对外暴露。 |
 | `AGENT2SSH_TRACE_ID` | CLI / MCP | 自动生成 | 由上游调用方（如 agent）注入的关联 ID，写入诊断 `trace_id` 字段并随转发请求透传，便于跨 surface 串联一次操作。 |
 | `AGENT2SSH_LOG` | daemon | `info` | daemon `tracing` 的 `EnvFilter` 级别（如 `debug`、`agent2ssh=debug,info`）。 |
 | `AGENT2SSH_LOG_FORMAT` | daemon | `text` | daemon 控制台日志格式：`text` 或 `json`。 |

@@ -2211,3 +2211,37 @@ forward_start（:3204-3244）与 forward_remove（:3077-3113）、forward_stop�
 **建议改法**：二选一。①保留判据，只补文档（本轮已做：K14 + 指南停止一节，含「改回白名单名」与「带外 kill」两条出口）；②让 `is_daemon_executable` 接受 `agent2ssh-daemon` 前缀，同时把 `observable_live_start_time` 也加上同一个名称判据，使 `status` 与 `stop` 不再给出相反答案——代价是 `daemon_pid_state` 对重命名 daemon 从 `Healthy` 变 `Unverified`，`start` 也随之拒绝。
 
 **明确不成立的一条（勿再提）**：本轮复核推翻了「换个端口就能让两个实例共用同一 `daemon.token` 与 `daemon.pid`、没有实例级单例」。`write_daemon_pid`（`:76-84`）在锁内检查旧 PID，活着或不可核实就 `Err`，而 daemon 侧 `write_daemon_pid(std::process::id())?` 用 `?` 传播——**第二个实例会在发布 PID 之前退出**；`daemon_stop_e2e.rs:632 direct_daemon_with_another_port_cannot_replace_a_live_pid` 断言的正是「竞争 daemon 退出且非零、stderr 含 live or cannot be verified、旧 PID 不变」，不是只比文件内容。
+
+## 2026-11-12 · 手工单发：issue #21（第三次进入）
+
+三条都改 `src-tauri/src/**` 或前端契约，按协议只登记不动。逐条判定与证据见 `OPT-LOOP-LEDGER.md` 同日「手工/单发消费 · #21 第三次进入」小节。**行号基线 `7847ea2`**。
+
+### L2-167（新）：`/exec/compare` 没有按请求传 `source`/`reason`/`change_id` 的入口，审计里 compare 批次只有一个来源值
+
+**位置**：`src-tauri/src/bin/agent2ssh-daemon.rs:1092-1100`（`ExecCompareBody` 只有 `hosts/command/force/timeout_secs/tags`）；`:1908`（`let source = source_from_transport();`）；`:1914-1924`（`authorize_targets(…, None, None)`）；`:1926-1936`（`ExecMultiRequest { reason: None, change_id: None, source: Some(source) }`）。对照 `:1074-1090` 的 `ExecMultiBody` 接收三者，`:1863` 用 `source_or_env_for_request(body.source, "daemon")`、`:1889-1893` 全部传给下游。契约侧 `docs/api.yaml:232-245` 的 `ExecCompareRequest` 如实缺这三个字段，所以**文档没有说谎，缺的是能力**。
+
+**判断**：**成立**。`source_from_transport()`（`types.rs:689-692`）只认 `AGENT2SSH_SOURCE` 或 transport 名，所以同一个 daemon 上两个 agent 都发 `/exec/compare` 时，审计与 `ExecCompleted` webhook 都记成同一个来源；`reason`/`change_id` 恒空，跨系统对账时 compare 的批次无法挂到变更单上。`/exec-multi` 在同样位置上三样齐全。
+
+**为什么它是 L2**：加字段要改 `ExecCompareBody`、`api.yaml` 的 schema 与 `exec_multi_core` 的入参，并新增「compare 也能被审计归属」的断言；行为面（webhook payload 会多出非空字段）超出文档改动。
+
+**建议改法**：把 `ExecCompareBody` 的三个字段与 `ExecMultiBody` 对齐，`source_or_env_for_request(body.source, "daemon")` 取来源，`authorize_targets` 传 `body.reason`/`body.change_id`。代价：结构体 + schema + 一处断言。回滚：删三个字段即回到今天。
+
+### L2-168（新）：`DaemonControlResult.pid` 在桌面端有两种含义——PID 文件里的 pid，或健康端点自报的 pid
+
+**位置**：`src-tauri/src/tauri_commands.rs:1761-1780`（`Some(pid)` 分支：`pid: Some(pid)` 来自 `read_daemon_pid()`，四种 `DaemonPidState` 都照此返回）；`:1781-1790`（`None` 分支：`pid: endpoint_pid`，来自 `daemon_health_pid()`，同时 `running: false`）。类型 `src/types.ts` 只写 `pid: number | null`。
+
+**判断**：**成立**。同一个字段，一处是「PID 文件里记的进程」，一处是「一个没被任何文件证实的进程自报的号码」；调用方拿 `running: false` + `pid: Some(n)` 无法判断 `n` 属于哪一种，只能去读 `message` 文本。CLI 的对应分支（`bin/agent2ssh.rs:3083-3091`）只打印、不返回结构体，所以这个歧义只存在于桌面/`api.ts` 这一侧。
+
+**为什么它是 L2**：加字段或改语义都会改 IPC 返回形状，属于 `src-tauri/src/**` 的行为改动；也会影响 `daemon_stop_e2e.rs` 的 `desktop_status` 断言（`:986`、`:1001`）。
+
+**建议改法**：(a) 新增 `endpoint_pid: Option<u32>`，`pid` 只在 `Some(pid)` 分支有值——最小、不破坏现有消费者；(b) 新增 `identity: "pid_file" | "endpoint_only"` 判别字段；(c) 保持现状，只在 `message` 里说明（今天已经是这样）。代价 (a)=一处结构体 + 三处构造 + 类型；(b) 同量级但判别更直白。
+
+### L2-169（新）：四个 exec handler 把命令原文写进 `info` 级 `tracing`，只落不脱敏的 `daemon.log`
+
+**位置**：`src-tauri/src/bin/agent2ssh-daemon.rs:1728`（`/exec`）、`:1826`（`/local-exec`）、`:1862`（`/exec-multi`）、`:1906`（`/exec/compare`），形如 `tracing::info!(host = %req.host, command = %req.command, "… handler invoked")`。桥接层 `src-tauri/src/bin/agent2ssh_daemon/trace.rs:135` 只要 `level > WARN` 就 `return`，`fmt::layer()`（`agent2ssh-daemon.rs:5700-5710`）不带任何 filter；`app.log` 的脱敏在 `diagnostics.rs:295`/`:323`（`redact_sensitive_text`）。
+
+**判断**：**成立**。默认 `AGENT2SSH_LOG=info` 下，任一 `POST /exec` 都会让命令原文进 `daemon.log`，且该文件是 stdout 重定向、只在 `daemon start|restart` 时轮转（`daemon_control.rs:379-407`，5 MB、2 代），没有 `app.log` 的写前脱敏。本轮已在 `docs/guides/configuration-guide.md` 把这条边界写成文档（含「分享前先裁剪」），行为未动。
+
+**为什么它是 L2**：改日志级别或加脱敏层都会改变运维可见性，并且可能踩到「`daemon.log` 是排查唯一现场」的既有约定。
+
+**建议改法**：(a) 保持并依赖文档（本轮做法，代价 0）；(b) `info` 行去掉 `command`，只留 `host` + 长度 + 前 8 字节哈希；(c) 给 `fmt::layer()` 套一层自定义 `Layer` 做脱敏——需要一个能改写 `Display` 值的 visitor，成本最高。选 (b) 要在 `daemon.log` 的可排查性与命令保密之间拍板。
