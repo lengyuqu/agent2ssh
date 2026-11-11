@@ -3652,3 +3652,5 @@ L2-154（`/exec-multi` 全 0 语义）、L2-155（preview 缺 admin 门）、L2-
 1. **「桌面 `daemon_start` 没有 CLI 那份 Healthy 提前返回」，判据 `grep -n "DaemonPidState::Healthy" tauri_commands.rs` = 0**——`tauri_commands.rs:1796-1825` 就有，且带一条 `daemon start skipped because daemon is already healthy` 诊断；`grep` 实测 2 处（`:1770`、`:1800`）。由此推出的「从桌面点启动每次都会轮转」也不成立。
 2. **「`architecture.md` 的 every frontend diagnostic 会让人以为 Rust 侧也有 id」**——同段下一句原文已否认这个读法；「every frontend diagnostic」本身为真。
 
+**回帖**：`2120634031854219264`（`## 本轮收尾`）。`#21` **保持 open**：文档一致性这条线已走完，剩余四项（L2-176~179）全在「改日志落地方式或 IPC 形状」的决策侧，按本轮把四条写成可在 5 分钟内选一条的形态留在 L2 清单里。分支 `opt/single-21-20261112d` 与 worktree `…/single-21` 已在合流验收后清理，本条补记用的 `opt/single-21b-20261112` / `…/single-21-ledger` 随之清理。
+
