@@ -1797,6 +1797,10 @@ issue #20 正文要求在两种策略里选一个。两个落点：
 
 推荐第一种：它把「已经存在的真值」暴露出来，而不是砍能力。属 `src-tauri/src/**` + 契约改动。
 
+**第 2 轮的更正（比原判断更糟）**：`RuleStats.effective_port` 不是「桌面端能看到」，而是**产品里没有任何地方显示它**。`ForwardPanel.tsx:51` 确实 `Promise.all([api.forwardList(), api.forwardStats()])` 把 stats 取回来了，但 `:215-221` 只渲染 `connections` / `bytes_tx` / `bytes_rx`，`effective_port` 一次都没读；`grep -rn effective_port src/` 只命中 `src/types.ts:693` 的类型声明。所以「`-R 0` 起一条隧道，之后想知道它监听在哪」在 CLI、HTTP、桌面三处**都没有答案**，只有 `app.log` 里那条启动日志有。修 L2-148 时要把面板一起算进去，否则加了 HTTP 字段仍然没人看得见。
+
+另外 `RuleStats.effective_port` 自己的文档说「None until the listener is bound」，而 `stop_worker`（`forward.rs:212-247`）**不清这个值**：停止后的规则仍带着上次绑定的端口。本轮已把这条文档改准（`state: stopped` + `Some` 只表示「上次绑在这里」），但「停止时是否清零」是 L2-148 拍板时要一起定的第二问。
+
 ### L2-96 补充（batch 14 第 1 轮）：`StallGuard::flush` 会在 `inner.flush()` 之前抢答
 
 L2-96 的修法已定为「`write` + `flush` 同一处 deadline」。补一条顺序约束：`StallGuard::flush`（`sftp_transfer.rs:440-445`）是

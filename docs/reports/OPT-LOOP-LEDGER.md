@@ -3005,3 +3005,40 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 #### 一处流程事故（自记）
 
 `docs/api.yaml` 的 `/forwards/{id}/start` description 是**未加引号的 plain scalar**，我追加的句子里带 `` `bind_port: 0` ``（冒号+空格），第一次写直接把 YAML 解析打断（`mapping values are not allowed here`，3760 列 373）。改为「a zero bind port」后恢复。**以后往 plain scalar 里追加句子，先 `yaml.safe_load` 一次再继续**，别等 cargo 测试才报。
+
+---
+
+### consume 2 / 6 · batch 14 · issue #30（等待超时 → 自取轮）
+
+**等待超时**：第 1 轮收尾（`2120501251870715904`，12:57:50Z）之后按 60 s × 5 + 一次 90 s 复核轮询，13:04:14Z 时 #30 仍只有两条评论（首条分析 + 我的收尾）。按协议标「等待超时」，不自造指摘，改从首条分析末尾它自己留的两条「下一轮线索」里取靶。**本轮不占「复核链」**：指摘来源是我的核实，不是它的复核。
+
+#### 对两条线索的判定
+
+| 线索（它给的方向） | 判定 | 证据 |
+|---|---|---|
+| `legacy_pem::decrypt` 对「有 `DEK-Info` 无 `Proc-Type`」当加密处理，是一条可构造边界 | **不成立（方向反了）** | `DEK-Info` 就是那条头里唯一带密码学内容的东西（算法 + IV），`Proc-Type: 4,ENCRYPTED` 只是冗余标签；按 `DEK-Info` 判「这是加密的」**是对的**（`legacy_pem.rs:56-73`）。真实的小缺口在反方向：只有 `Proc-Type` 没有 `DEK-Info` 时 `encryption` 保持 `None` → `Ok(None)` → 调用方按明文解析 → 报的是 ASN.1/base64 类错误，而不是「这份 PEM 声明自己加密了却没写算法」。纯文案问题，不立条 |
+| `ssh_algo::supported_algorithms` 的 `OnceLock` 把失败**永久**缓存为 `None`，与 `config_cache` 相反 | **不可达** | 闭包只有两处可失败的调用，两处都不会失败：`Session::new()`（`russh_impl/mod.rs:511-526`）恒 `Ok`，`supported_algs`（`:1103-1105`）直接 `Ok(supported_names(method))`。所以 `get_or_init` 永远存 `Some`，`Option` 返回类型与调用方的 `None` 分支都是化石。**不是缺陷，但「`None` 表示后端不支持」这句文档现在描述的是一个不可达状态** —— 与 L2-13 的「死分支」同型，不新立条 |
+
+#### 本轮的真实发现（自取）
+
+**`RuleStats.effective_port` 在产品里没有任何显示路径**——而我在第 1 轮的 `api.yaml` 里刚写成「桌面端 `forward_stats` 能读到」，那半句只对「数据存在」成立，对「人能看见」不成立：
+
+- `ForwardPanel.tsx:51` 用 `Promise.all([api.forwardList(), api.forwardStats()])` 把 stats 取回来了；
+- 但 `:215-221` 只渲染 `connections` / `bytes_tx` / `bytes_rx`；
+- `grep -rn effective_port src/` 只命中 `src/types.ts:693` 的类型声明。
+
+所以「`-R 0` 起一条隧道，之后想知道它监听在哪」在 CLI / HTTP / 桌面三处都没有答案，只有 `app.log` 的启动日志有。这是**我第 1 轮写错的地方**，本轮改正。
+
+顺带纠正一个字段文档：`RuleStats.effective_port` 原写「None until the listener is bound」，而 `stop_worker`（`forward.rs:212-247`）不清这个值——停止后仍带着上次绑定的端口。`Some` + `state: stopped` 只表示「上次绑在这里」。
+
+#### 本轮改动
+
+- `src-tauri/src/forward.rs`：`RuleStats.effective_port` 的文档改成「最后一次绑定的端口；停止不清零；`connected` 才是活着的判据」。
+- `docs/api.yaml`：`ForwardRule.bind_port` 那句从「桌面端 `forward_stats` 能读到」改成「`forward_stats` 是桌面专属命令，且转发面板只渲染连接数/字节/状态——产品里没有任何地方显示它」。
+- `docs/reports/OPT-LOOP-L2-PENDING.md`：L2-148 补「第 2 轮的更正（比原判断更糟）」段，并把「停止时是否清零」列为拍板时的第二问。
+
+**验证**：`npm run build` 6.5 s；`cargo fmt --check` 绿；`--no-default-features --lib` **862 / 1 / 1**（红项仍是 L2-15 那条故意红的 IPv6）；`--features daemon --test daemon_integration api_yaml` **6 passed**；`yaml.safe_load` 90 paths。
+
+#### 一条流程口径
+
+「等待超时」不等于「可以随便找点东西改」。本轮拒绝了两条线索（一条方向反、一条不可达），只落一处**自己上一轮写错**的更正——这类自查比新增条目便宜，也比把弱线索升格成 L2 诚实。下一次运行若复核仍不到，应在 ledger 里明确写「本轮无新指摘可核，只做自查」，而不是凑够 6 轮。
