@@ -2267,7 +2267,7 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 ### batch 2026-11-11 · 测试覆盖缺口（第二批，B=12）
 - issue #18 / 开批时间 2026-11-11 11:10 (GMT+8)
 - CodeBuddy 首条分析：**已于 03:22Z（local 11:22）到达**，评论 `2120356381013209088`——生产任务的 60 s × 5（11:11–11:15）与两次延时复核（≈11:17/11:19）都扑空，它在约 **12 分钟**处才发；与 #16 的 13 分钟同类。消费任务开在 11:53，直接取到，未再等待。
-- 6 轮进度：**1 / 6**（第 1 轮见下方 `consume 1 / 6`；issue 保持 open）
+- 6 轮进度：**2 / 6**（见下方 `consume 1 / 6`、`consume 2 / 6`；issue 保持 open）
 - 正文已喂给 CodeBuddy：**116 条「不成立」原文**（编号 71 = 旧 58 + batch 11 五个编号小节 13 条〔第 1 轮 3 / 第 2–3 轮 4 / 第 4 轮 2 / 第 5 轮 3 / 第 6 轮 1〕；判定行 39 = 旧 38 + batch 11 第 4 轮 row 9 已自撤 1 条；摘录 6 = 旧 4 + `8042f11` 复核 2 条：`gate.rs:83` 第 4 调用点、结构 vs 文本收窄）+ KNOWN-ISSUES 空档（K2/K7/K8/K14/K15/§3/E6/E8）+ 口径（基线 `--no-default-features --lib` 862/1/1、`daemon_integration` 71、npm 220/30、L2-75…L2-122 勿重提、AGENTS 测试口径三则〔组合不可相加 / `exec_fixture` 空跑 / default 下三个 e2e 目标 0 passed 正常〕、batch 11 抗漂约定、batch 6 工艺教训、`.github` 禁区与 L2 越权重申）。正文由 `/tmp/build-opt-issue-b12.py` 生成（复用 b11 骨架 + batch 11 区域锚点；region 边界匹配 `key + " "` 天然区分 batch 1 与 batch 11 前缀；全部锚点唯一性校验通过，计数复验 116）。
 - 本批重点：**#12 闭环后 batch 7–11 五批 30 轮 + `8042f11` 新长出来的无断言分支**；三条已登记靶子（L2-80 `daemon_tokens.toml` 写坏全员 500 零测试、L2-82 `Option<Json>` 吞解析错、L2-122 第 5 条真 daemon e2e）；KNOWN-ISSUES §3/E6/E8 中可用单测/集成测试钉住的项（反向用例只测过 ed25519、E8 假脚本）。
 - 顺手按 BATCH_COMPLETE 行自述删除顶部 `BATCH_COMPLETE · issue #17 · batch 11` 状态行（HTML 注释同步为十条）。
@@ -2304,3 +2304,32 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 
 - `daemon.rs:5813-5817` 的 `/` 用**闭包**挂载（`get(|| async { Redirect::to("/console") })`），`mounted_handlers` 取到空 handler 名 → `/` 在 `daemon_routes` 里从来没有条目。落在 `NON_API_ROUTES` 内不影响契约，但同一写法出现在 API 路由上会让八个族一起静默——本轮新增的断言正是钉这个。
 - `daemon_integration.rs` 头部「18 of the daemon's 92 routes」「74 routes that are not mirrored」三个数是散文，改镜像不会红（记入 L2 本轮小节第五节末）。
+
+### consume 2 / 6 · 2026-11-11 12:08–12:2x (GMT+8) · batch 12（issue #18）
+
+- 指摘来源：CodeBuddy 对第 1 轮的复核（评论 `2120368025479057408`，04:08Z）。
+- 计数：**6 组 → 成立 3 / 部分成立 1 / 不成立 2**；另判 4 条子断言不成立（下 §三）。
+- L1：`e2bf8dc`（`tests/daemon_integration.rs`：drop 集合改成比整集；`daemon_routes` 读者数从「八」改成「三 test / 四调用点」；删掉 `api_yaml_documents_how_each_handler_reads_its_body` 里的同名局部 `NON_API_ROUTES`；`HELPER_STATUS` 那条注释里的「33」换成它所代表的判据）。
+- 验证：`npm run build` 6.38 s；`--no-default-features --lib` **862 / 1 / 1**；`--features daemon --test daemon_integration` **72 passed**；`cargo fmt --check` 绿。
+
+| # | 指摘 | 判定 | 依据 |
+|---|---|---|---|
+| Q1.1 | 「八个族」实际只有四个调用点（三个 test）；注释与 commit message 都写 eight | **成立** | `grep -n "daemon_routes("` → `:2646`（every_daemon_route）、`:2865`/`:2893`（codes 的两个循环）、`:3195`（body）；**三 test / 四调用点**。issue 正文里的「8 条派生式断言族」数的是断言而不是 `daemon_routes` 的读者，我把两者混了 |
+| Q1.2 | 形状 A：`.route(b"/health", …)` 会让解析器读出一个假 operation | **不成立** | `axum-0.7.9/src/routing/mod.rs:164` 是 `pub fn route(self, path: &str, …)`；`b"/health"` 是 `&[u8; 7]`，**编译不过**，这种形状在能编译的 daemon 里不存在 |
+| Q1.3 | 形状 B：把 `.layer(…)` 挪到第一个 `.route` 之前，会让 `/` 段右边界前移、被丢弃，而白名单让它绿 | **机制不成立，结论成立并已采纳** | 机制错：`daemon_routes_and_drops` 的右边界只有「下一个 `.route(`」与「下一个 `.with_state(`」两种，`.layer(` 不是边界；段起点是 `.route(`，在其之前插入 `.layer(` 不在段内。结论对：`/` 既是唯一被丢弃的路由，又在白名单里，所以「有丢弃就红」在那个 path 上退化成「恰好是 `/` 就绿」。已把断言改成比较**整集**（`/` + 原因），破坏性对照见下 |
+| Q1.4 | 存在一条合法、同形、骗过所有族的假 entry（靠 `mounted_handlers` 只看字面） | **不成立（构造成本 = 编译错或运行时 panic）** | 它给的具体反例是「把 `get(health)` 改成 `(get(health))`」——多一层括号，语义不变，红不了是**正确**行为，不是缺陷。真构造假 entry 需要：`(path,method)` 与 spec 一致、handler 存在、handler 体内无 `StatusCode::` 且不读 `Option<Json<`。满足这三条的写法只有「同一 `(path,method)` 挂两次不同 handler」，而 axum 对重叠路由是 `panic_on_err!`（`routing/mod.rs:166`），daemon 起不来。`phantom_methods`（`:2766-2779`）还会独立抓「spec 有、路由无」 |
+| Q1.5 | 「`.route` 块整行删掉后没有族看得见」；注释里的「manifests every operation」措辞该改 | **部分成立** | 前半：删整块会让 `phantom`（`:2595-2603`）红，所以**看得见**，它自己也这么写了；「新断言钉的是读不出来、不是读漏了」与注释一致。后半：「manifests every operation」这句我没写过（原文是「Eight families read `daemon_routes`」），属误引；真正要改的是「八」这个数，已在 `e2bf8dc` 改 |
+| Q2 | `NON_API_ROUTES` 提到模块级后语义没变，但 `api_yaml_documents_how_each_handler_reads_its_body` 里还有一份同名局部常量 | **成立** | `:3090` 的局部常量与 `:2261` 的模块级常量内容相同、作用域不同。已在 `e2bf8dc` 删掉局部那份 |
+| Q3 | `chmod 000` 在 root runner 上失效，判据要换（建议把 `daemon_tokens.toml` 做成目录） | **成立（但结论比我与它都更简单）** | 它的机制对：root 忽略 mode 位，`read_to_string` 照样成功，假绿。但它接受了我第 1 轮那句「必须 `chmod 000`、语法错不行」——**那句本身是错的**：`authenticate_token` 在 `:44-49` 就返回，admin 不进 `:51` 的读，所以**任何 `Err` fixture**（语法错也算）都得到 admin 200 / 非 admin 500。真正要避开的是「文件不存在」——`:206-208` 返回 `Ok(vec![])`，非 admin 得 401，500 臂走不到。已按此改写 L2 段落，权限与目录两种做法都不必要 |
+| Q4 | §二.6 仍成立：那句话的字面集合比实际大四条公开路由 | **不成立（引文被截断）** | 它引的是「…a broken `daemon_tokens.toml` answers 500 to a caller that does not present the admin token…」，**漏掉了同句前半**。`api.yaml:20-21` 原文是「every **non-public route** answers 500 to a caller that does not present the admin token」——`non-public` 就在这句话里，四条公开路由已被排除。它建议的改法「to an authenticated caller that did not present the admin token」**会改错**：未知 token 恰恰是得 500 而不是 401 的那一类，「authenticated」把它排掉了 |
+
+**§三、新增「不成立」条目（原文保留，请勿重复提）**
+
+1. **「`.route(b\"/health\", …)` 是解析器拦不住的形状」— 不成立。** `axum-0.7.9` 的 `Router::route` 取 `&str`（`routing/mod.rs:164`），字节串字面量编译不过。
+2. **「把 `.layer(…)` 挪到第一个 `.route` 之前会改变 `/` 段的边界」— 不成立。** 边界只有 `.route(` 与 `.with_state(` 两种，`.layer(` 不在其中。
+3. **「`get(health)` 加一层括号说明新断言能接受形状变化」— 不成立。** 多一层括号不改语义，不红是正确行为。
+4. **「删掉一整条 `.route` 块没有任何族看得见」— 不成立。** `phantom`（`api_yaml_documents_every_daemon_route`）会报「spec 有、路由无」，这是既有断言。
+
+**§四、关于「33」的单位（它的复算与我的不同，原因是口径）**
+
+它数出 26（handler 体内直接调）+ 2（`preflight_sftp_rm_rf`）+ 2（`load_execution_gate`）= **30 handler**；我数出 29 + 2 + 2 = **33**。差别是那三条 in-band 路由（`GET /exec/stream`、`POST /terminal/broadcast`、`POST /terminal/broadcast/preview`）：它们也读 gate，但拒绝走帧内/target 内，「会不会 423」不同，所以按「能返回 HTTP 423」的口径该扣掉 3。两个数都对，**单位不同**。`e2bf8dc` 已把 `daemon_integration.rs` 那句「33 operations」换成它所代表的判据（不再写数），理由与 batch 5 的「标题里的数字是零漂移源」同一条。

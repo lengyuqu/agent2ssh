@@ -1133,15 +1133,15 @@ Router::new()
     .layer(from_fn_with_state(state, auth_middleware))
 ```
 
-**断言的判据要钉「admin 根本没读这个文件」，所以 fixture 必须是「存在但不可读」（`chmod 000`），不是「语法错」。** 三条路径分叉在 `src/remote.rs`：
+**断言的判据是「admin 分支不依赖这次读成功」，所以 fixture 只需让 loader 返回 `Err`——语法错就够，不必造权限问题。**（第 2 轮更正本段：上一稿写「必须 `chmod 000`、语法错不行」，那是错的。`authenticate_token` 在 `:44-49` 就返回了，admin 根本不进 `:51` 的读；所以任何 `Err` fixture 都得到 admin 200 / 非 admin 500，与失败点在 `:209` 还是 `:210` 无关。）三条路径分叉在 `src/remote.rs`：
 
-| fixture | 失败点 | 结果 |
-|---|---|---|
-| 文件不存在 | `:206-208` 提前 `return Ok(Vec::new())` | 非 admin 得 401，不是 500 |
-| 存在但不可读 | `:209` `read_to_string` | 500 |
-| 存在但语法错 | `:210` `toml::from_str` | 500 |
+| fixture | 失败点 | 非 admin | admin |
+|---|---|---|---|
+| 文件不存在 | `:206-208` 提前 `return Ok(Vec::new())` | 401 | 200 |
+| 存在但是目录 | `:209` `read_to_string` → `EISDIR` | 500 | 200 |
+| 存在但不是 TOML | `:210` `toml::from_str` | 500 | 200 |
 
-后两者同走一个 `map_err`，所以只有权限 0 能区分「admin 短路在读文件之前」。用语法错的话，「把 admin 短路挪到读文件之后」这个破坏**仍然是绿的**（两边都 500），断言就白写了。
+**要避开的是第一行，不是后两行。** 缺文件时 loader 返回 `Ok(Vec::new())`，非 admin 落 401，那条 500 臂根本没被走到；只有让 loader 真的 `Err`，断言才在验 500。语法错是最省事的一种，且与 uid 无关——`chmod 000` 在 root 下不生效（本仓容器自测与 `scripts/e2e-container.sh` 常以 root 跑），会把「拒绝读」与「语法错」压成同一个形状；目录（`EISDIR`）也能用，但没有额外好处。悬空符号链接**不能用**：`Path::exists()` 对悬空链接返回 `false`，与「文件不存在」同形，非 admin 得 401。
 
 **推翻一条旧记录（原 L2-80 附带的缓存猜测）**：`SCOPED_TOKENS_CACHE` 确实没有 `invalidate()` 调用点（`remote.rs:200` 定义、`:205` 唯一使用；对比 `policy.rs:126/251`、`store.rs:690/2367`、`notify.rs:64` 都有），**但这不需要修**：`ConfigCache::load_with` 是
 
