@@ -2514,7 +2514,7 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 ### batch 2026-11-11 · daemon 控制与停止协议（第三批，B=13）
 - issue #19 / 开批时间 2026-11-11 13:25 (GMT+8)
 - CodeBuddy 首条分析：**已到**（05:32:08Z = 13:32 GMT+8，开批后约 6.3 分钟；60 s × 5 轮询 13:26–13:31 均空，延时复核 ≈13:33 命中），评论 `2120389088577478656`，**6 条指摘（成立 4 / 部分成立 2 / 不成立 0）**，索引：①`HELPER_STATUS` 的 423 项遮蔽 helper 自读 gate 的 500——`/daemon/:alias/exec` 的 localhost 分支自己调 `reject_if_gate_paused`，其 500 成因与 api.yaml 已写的「HTTP client 构不出来」是两条路径（成立）；②`INBAND_REJECTIONS` 以「路径在表里」为豁免判据，区分不了「Err 被消费」与「Err 被返回」两种形态，`terminal_attach` 不该进表（成立）；③L2-84 机制复核与当前树一致，新缺口 = `daemon_stop_e2e.rs` 零「持续输出 + 停机」用例（部分成立）；④`/exec/stream` 的 `interrupted` 在「取消后 drain 读到 `Exit(None)`（超时/worker 失败来源）」时误记为 daemon 中断，审计与 `ExecCompleted` 事件同错（部分成立）；⑤L2-129 第 3 条复核仍开，落地成本更正为约 5 行（复用 `closing_brace` 已有的字面量扫描器）（成立）；⑥L2-82 落地形状更正：三处 `Option<Json<T>>` 不能共用同一条断言——`/health-snapshot` 与 dry-run 在空配置目录下假绿，须拆「坏 body 与无 body 行为不同」判据（成立）。另**自撤 3 条候选**（`:4878` Close 不受 2 s 约束 / 坏 gate 下 preview 返回 423 / `drain_all` 4 s 计费——`drain_all` 无生产调用点，L2-91 正文措辞残留）。
-- 6 轮进度：2 / 6（第 1 轮 16:38–17:12、第 2 轮 17:30–18:15 由消费任务闭环，判定见文末两条 `### consume K / 6`）
+- 6 轮进度：3 / 6（第 1 轮 16:38–17:12、第 2 轮 17:30–18:15、第 3 轮 18:28–18:55 自取，判定见文末三条 `### consume K / 6`）
 - 正文已喂给 CodeBuddy：**136 条「不成立」原文**（编号 91 = 旧 71 + batch 12 五个加粗伪小节 20；判定行 39；摘录 6），由 `/tmp/build-opt-issue-b13.py` 生成（复用 b12 骨架 + batch 12 区域锚点；batch 12 的 5 个小节是 `**…**` 独立加粗行而非 `###` 标题，b13 为其加了独立的区域限定扫描器，7/4/4/2/3 分布；全部锚点唯一性校验通过，计数复验 136）。**注意：batch 12 收尾汇总自述新增 21 条，原文清点为 20 条**（第 5 轮小节自报 3 条、汇总行写成 4），issue 正文已注明以原文切片为准。
 - KNOWN-ISSUES 空档喂 K14/K15/§3；口径提醒含基线（`--no-default-features --lib` 862/1/1、`daemon_integration` 76 passed、npm 220/30）、L2-75…L2-129 勿重复立条（本批靶子 L2-80 / L2-82 / L2-122 第 5 条 / L2-84…L2-91 / L2-99 / L2-129 除外）、L2 撞号 13 对须带主题限定、AGENTS 测试口径三则、batch 11 抗漂约定、`.github` 禁区与 L2 越权重申。
 - 顺手按 BATCH_COMPLETE 行自述删除顶部 `BATCH_COMPLETE · issue #18 · batch 12` 状态行（HTML 注释同步为十一条）。
@@ -2602,3 +2602,29 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 **验证**：本轮只改 `docs/`。`src-tauri/**` 与 `src/**` 一行未动，所以 Rust/Frontend 测试面不变；`npm run build` 与 `cargo test` 未跑（无相关改动），**不写「已验证」**。
 
 **下一轮**：它给的候选是分支覆盖表第一梯队（`stop_daemon_process` 的 `UnverifiedIdentity`、`wait_for_exit` 的 `Running`→强杀支、`health_identity` 的 `ok:false`）。我倾向先做 L2-132 与 L2-133(a)——两条都**零成本可测**（一条不需要真 daemon，一条只要一个沉默的 `TcpListener`），而覆盖表那三条都要真进程，且 `UnverifiedIdentity` 有三条不同的触发路径（`:977` 无 start_time、`:1004` config_dir 不符、`:1013` 不报 config_dir、`:1025` health 不认账），先写它们会先撞上「四选一还是四选四」这个口径问题。
+
+> **并记**：本文件现有两条并行记录（`consume 2 / 7` 与 `consume 3 / 6`），来自两个同时消费 issue #19 的会话。轮次计数以 issue 内 `## 第 K 轮收尾` 评论数为准，不以本文件的小节编号为准。两边记录的事实各自成立，冲突处已在回帖里对齐。
+
+### consume 3 / 6 · 2026-11-11 18:28–18:55 · issue #19 · 自取（等待超时）
+
+第 2 轮回帖（`2120439846266122240`）后 60 s × 5 轮询无回复，评论数停在 4。按协议不空等，自取复核方上轮自述「留给下一轮」的分支覆盖方向。
+
+**核实**：它给的三个第一梯队靶子，**一个的「零覆盖」是假阴性**。
+
+| 靶子 | 它的主张 | 判定 | 证据 |
+|---|---|---|---|
+| `stop_daemon_process` 的 `UnverifiedIdentity` | 零覆盖 | **成立** | 全仓 5 处全在 `daemon_control.rs`（`:797` 定义、`:821` Display、`:977`/`:1004`/`:1013`/`:1025` 四个 `return Err`）；`src-tauri/tests/` 零命中；内部单测只调了 `stop_daemon_process(u32::MAX - 1)`，走的是「进程不存在」分支 |
+| `wait_for_exit` 的 `Running` → 强杀支 | 零覆盖 | **一半不成立** | `wait_for_exit` 的 `Running` **返回值**有单测：`daemon_control.rs:1256` 的 `exit_wait_does_not_mistake_an_unrecognized_live_process_for_exit` 直接调 `wait_for_exit(pid, start, Duration::ZERO)` 并断言 `ProcessObservation::Running`。**无覆盖的是下一跳**——返回非 `Exited` 之后 `stop_daemon_process` 是否真的 `signal_daemon(…, force=true)`（`:1057` 的 `match wait_for_exit(...)` 之后） |
+| `health_identity` 的 `ok:false` | 零覆盖 | **成立（无直接覆盖）** | `health_identity`（`:231`）是私有函数，`tests/` 零命中，内部单测也没直接调；只被 `daemon_pid_state`（`:218`）、`daemon_matches_config`（`:287`）、`stop_daemon_process`（`:997`）间接消费 |
+
+**为什么它是假阴性**：`daemon_control.rs` 在 `:1081` 起有 `#[cfg(test)] mod tests`，含 16 条单测。它只 grep 了 `src-tauri/tests/`，没看这个模块。**这是「grep 作用域选错」的第三次出现**（前两次：batch 7 只 grep bin 下结论、batch 13 把闭包边界当函数边界）。
+
+**下一批可直接用**：① `UnverifiedIdentity` 与 `health_identity` 的 `ok:false` 是真空档，但都在私有函数里，只能靠 `daemon_stop_e2e` 的外部观察（`spawn_daemon_at`/`start_listener_at` 在 `daemon_stop_e2e.rs:1314`/`:1334` 可复用）；② `wait_for_exit` 之后那一跳可以在 `daemon_control.rs` 的内部单测里直接造（把 `stop_daemon_process` 的 `signal_daemon` 调用抽成一个可注入的参数），比 e2e 便宜。
+
+**本轮改动**：仅本文件。无代码改动、无新 L2。推 `cnb main`，未推 github。
+
+**验证**：本轮未改代码，沿用第 2 轮终值（`npm run build` 6.57 s；`--lib` 862 / 1 / 1；`--features daemon --test daemon_integration` 76 passed）。
+
+**本轮新增不成立（原文保留，请勿重复提）**：
+
+5. **「`wait_for_exit` 的 `Running` → 强杀支零覆盖（`daemon_stop_e2e.rs` 里没有用例）」— 一半不成立。** `Running` 返回值本身有单测：`daemon_control.rs:1256` 的 `exit_wait_does_not_mistake_an_unrecognized_live_process_for_exit`。`src-tauri/tests/` 零命中不等于全仓零覆盖——`daemon_control.rs:1081` 起有 16 条内部单测。真正无覆盖的是「返回非 `Exited` 后强制信号」那一跳。
