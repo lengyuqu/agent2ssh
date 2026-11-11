@@ -3355,16 +3355,14 @@ fn api_yaml_declares_a_body_for_every_response() {
 ///   (`JsonSyntaxError`). None of those three codes appeared on any of the 105
 ///   operations, so a generated client saw every body mistake as an unknown
 ///   failure — the same blind spot the missing 401s had, one layer down.
-/// - `axum::body::Bytes` — `approval_approve` only. The handler parses by hand
+/// - `axum::body::Bytes` — `approval_approve` and `daemon_shutdown`. The handler parses by hand
 ///   and answers its own 400, so 415 and 422 cannot happen and must not be
 ///   claimed. The spec claimed both for one round, because the response codes
 ///   had been added by grepping for `requestBody` instead of reading the
 ///   signature.
-/// - `Option<Json<T>>` — 3 handlers. Its rejection type is `Infallible`, so the
+/// - `Option<Json<T>>` — 2 handlers. Its rejection type is `Infallible`, so the
 ///   `.ok()` these handlers use cannot fail: a wrong content type, invalid JSON
-///   and a mistyped field all arrive as `None`, i.e. "no body was sent". The
-///   dangerous case is `/shutdown`, where a body that was meant to name a PID
-///   silently skips the check instead of failing it.
+///   and a mistyped field all arrive as `None`, i.e. "no body was sent".
 ///
 /// The reader is derived from each handler's own parameter list, so this stays
 /// correct when a signature changes; the operation is then looked up in the spec

@@ -37,15 +37,15 @@ info:
     type as 415, a body that parses but does not fit the schema as 422, and a
     body that is not JSON at all as 400, all before the handler runs.
     `axum::body::Bytes` hands the raw bytes to the handler, which parses them
-    itself: `/approvals/{id}/approve` is the only one, and a malformed body there
-    is its own 400 rather than 415 or 422. `Option<Json<T>>` is neither. axum's
+    itself: `/approvals/{id}/approve` and `/shutdown` return their own 400 for
+    malformed bodies rather than 415 or 422. `Option<Json<T>>` is neither. axum's
     rejection for the `Option` wrapper is `Infallible`, so the `.ok()` the
     handlers use turns *every* extraction error into "no body was sent" — a
     wrong content type, invalid JSON, or a field of the wrong type all read as an
-    absent body. Three operations read their body that way — `/shutdown`,
-    `/playbooks/{name}/dry-run` and `/health-snapshot` — so for those three a
+    absent body. Two operations read their body that way —
+    `/playbooks/{name}/dry-run` and `/health-snapshot` — so for those two a
     malformed body is ignored instead of refused, and the operation's own 400
-    does not cover it. `/containers/start-service` looks like a fourth and is
+    does not cover it. `/containers/start-service` looks like a third and is
     not: its body is a plain `Json<ContainerStartBody>`, so a malformed body
     there is refused like any other `Json<T>` handler. This list names paths,
     and `api_yaml_documents_how_each_handler_reads_its_body` checks it against
@@ -1126,35 +1126,27 @@ paths:
         daemon that answers the second request accepts the same admin token
         because the token is a file in the shared config directory. A request
         naming a different PID is refused with 409 and this daemon keeps running.
-        `expect_pid: null` is a 400 rather than an unchecked stop; omit the field
-        entirely to stop without a check, which is what a hand-written `curl`
-        does. The check narrows the race and cannot close it — see K14 in
+        `expect_pid: null` or an absent field in a non-empty body is a 400.
+        Send an empty body to stop without a check, as a hand-written `curl`
+        can do. The check narrows the race and cannot close it — see K14 in
         `docs/KNOWN-ISSUES.md`.
 
-        The guard is weaker than the paragraphs above suggest, because this
-        operation reads its body as `Option<Json<ShutdownRequest>>` — see the
-        note on body handling at the top of this document. A body that type-checks
-        is checked; a body that does not parse is *dropped*, not refused. So
-        `{"expect_pid": "1234"}` — the string a shell produces from `"$PID"` —
-        stops the daemon without a check and the 409 never fires. The same goes
-        for every body the `u32` parse rejects, which is the whole family: a
-        negative PID, a PID above `4294967295`, or a truncated body. `0` is the
-        other case and does *not* belong to that family: it parses, so it is
-        compared, and is refused with 409 because it is not this process. The
-        rule is therefore "parsed ⇒ compared", not "plausible ⇒ compared" — an
-        implausible-but-representable PID is still checked. The 400
-        below is reached only by a body that parses *and* carries
-        `expect_pid: null`. Send the field as a bare JSON number, or omit the
-        body entirely.
+        A non-empty body must have a JSON content type and parse as an object
+        containing a numeric `expect_pid`. Malformed JSON, an invalid content
+        type, a missing or null field, and a PID outside the u32 range return 400
+        without stopping the daemon. A valid but different PID returns 409.
       requestBody:
         required: false
         content:
           application/json:
             schema:
               type: object
+              required: [expect_pid]
               properties:
                 expect_pid:
                   type: integer
+                  minimum: 0
+                  maximum: 4294967295
                   description: The PID the caller believes it is addressing.
       responses:
         "200":
@@ -1167,8 +1159,9 @@ paths:
                   ok: { type: boolean }
         "400":
           description: >
-            `expect_pid` was present but not a PID. Omitting the field is how a
-            caller stops without a check.
+            The non-empty body is malformed, has a non-JSON content type, or
+            does not contain a valid numeric `expect_pid`. Send an empty body
+            to stop without a check.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1190,6 +1183,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "413":
+          description: The request body exceeds the default body size limit.
+          content:
+            text/plain:
+              schema: { type: string }
 
   /hosts:
     get:

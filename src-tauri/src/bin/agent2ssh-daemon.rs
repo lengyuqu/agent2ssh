@@ -55,7 +55,7 @@ use agent2ssh::store::*;
 use agent2ssh::types::*;
 
 use axum::{
-    extract::{Extension, Path, Query, State, WebSocketUpgrade},
+    extract::{Extension, FromRequest, Path, Query, State, WebSocketUpgrade},
     http::StatusCode,
     response::{
         sse::{Event, KeepAlive, Sse},
@@ -145,8 +145,8 @@ fn serving_config_dir() -> String {
 
 #[derive(serde::Deserialize)]
 struct ShutdownRequest {
-    /// The PID the caller believed it was addressing. Optional so a hand-written
-    /// `curl -X POST` keeps working; every first-party caller sends it.
+    /// The PID the caller believed it was addressing. An empty HTTP body is
+    /// accepted for hand-written `curl -X POST`; every first-party caller sends it.
     expect_pid: Option<u32>,
 }
 
@@ -164,10 +164,29 @@ struct ShutdownRequest {
 /// clock, no atomic swap between the two processes. See K14.
 async fn daemon_shutdown(
     Extension(auth): Extension<AuthContext>,
-    body: Option<Json<ShutdownRequest>>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
 ) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     require_admin(&auth)?;
+    // Only an actually empty body means an unchecked stop. `Option<Json<_>>`
+    // treats all extraction failures as absent, including malformed PIDs.
+    let body = if body.is_empty() {
+        None
+    } else {
+        let mut request = axum::extract::Request::new(axum::body::Body::from(body));
+        *request.headers_mut() = headers;
+        Some(
+            Json::<ShutdownRequest>::from_request(request, &())
+                .await
+                .map_err(|e| {
+                    err(
+                        StatusCode::BAD_REQUEST,
+                        format!("invalid shutdown body: {e}"),
+                    )
+                })?,
+        )
+    };
     let own_pid = std::process::id();
     match body {
         Some(Json(ShutdownRequest {
@@ -194,11 +213,11 @@ async fn daemon_shutdown(
         })) => {}
         // An explicit `expect_pid: null` asks for an unchecked stop. Dropping
         // the check is not the same as making no claim, so say so rather than
-        // quietly honouring it; leaving the field out is what a `curl` does.
+        // quietly honouring it; an empty body is how a `curl` omits the check.
         Some(Json(ShutdownRequest { expect_pid: None })) => {
             return Err(err(
                 StatusCode::BAD_REQUEST,
-                "expect_pid must be a PID when present; omit the field to stop without a check",
+                "expect_pid must be a PID; send an empty body to stop without a check",
             ))
         }
         None => {}
@@ -6082,9 +6101,13 @@ mod tests {
         };
         let (status, Json(body)) = daemon_shutdown(
             Extension(admin),
-            Some(Json(ShutdownRequest {
-                expect_pid: Some(std::process::id().wrapping_add(1)),
-            })),
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "application/json".parse().unwrap(),
+            )]
+            .into_iter()
+            .collect(),
+            format!("{{\"expect_pid\":{}}}", std::process::id().wrapping_add(1)).into(),
         )
         .await
         .expect_err("a request for another PID must not be honoured");
@@ -6102,7 +6125,13 @@ mod tests {
         };
         let (status, _) = daemon_shutdown(
             Extension(admin),
-            Some(Json(ShutdownRequest { expect_pid: None })),
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "application/json".parse().unwrap(),
+            )]
+            .into_iter()
+            .collect(),
+            r#"{"expect_pid":null}"#.into(),
         )
         .await
         .expect_err("an explicit null must not mean 'no opinion'");
@@ -6120,9 +6149,13 @@ mod tests {
         };
         let accepted = daemon_shutdown(
             Extension(admin),
-            Some(Json(ShutdownRequest {
-                expect_pid: Some(std::process::id()),
-            })),
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "application/json".parse().unwrap(),
+            )]
+            .into_iter()
+            .collect(),
+            format!("{{\"expect_pid\":{}}}", std::process::id()).into(),
         )
         .await;
         match accepted {

@@ -1162,6 +1162,66 @@ fn the_shutdown_route_stops_the_daemon_gracefully() {
 
 #[test]
 #[serial_test::serial]
+fn malformed_shutdown_bodies_are_rejected_without_stopping_the_daemon() {
+    use std::io::{Read, Write};
+    let mut daemon = RunningDaemon::start("malformed-shutdown", &[]);
+    let addr = std::env::var(ADDR_ENV).expect("daemon address");
+    for (content_type, body) in [
+        (Some("application/json"), r#"{"expect_pid":"1234"}"#),
+        (Some("application/json"), r#"{"expect_pid":-1}"#),
+        (Some("application/json"), r#"{"expect_pid":4294967296}"#),
+        (Some("application/json"), r#"{"expect_pid":"#),
+        (Some("application/json"), r#"{"expect_pid":null}"#),
+        (Some("application/json"), "{}"),
+        (Some("application/json"), "null"),
+        (Some("application/json"), " "),
+        (Some("text/plain"), r#"{"expect_pid":1234}"#),
+        (None, r#"{"expect_pid":1234}"#),
+    ] {
+        let mut stream = std::net::TcpStream::connect(&addr).expect("connect to daemon");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let content_type = content_type
+            .map(|value| format!("Content-Type: {value}\r\n"))
+            .unwrap_or_default();
+        write!(stream, "POST /shutdown HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n{}", daemon.token, content_type, body.len(), body).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(
+            response.starts_with("HTTP/1.1 400 "),
+            "body {body:?}: {response}"
+        );
+        let health = local_daemon_request("GET", "/health", None, Duration::from_secs(2))
+            .expect("daemon remains healthy");
+        assert_eq!(health.status, 200, "body {body:?}");
+        assert!(daemon.child.try_wait().unwrap().is_none(), "body {body:?}");
+    }
+
+    // JSON media-type parameters and +json variants are valid; a numeric zero
+    // reaches the PID comparison instead of being rejected as malformed.
+    for content_type in [
+        "application/json; charset=utf-8",
+        "application/problem+json",
+    ] {
+        let mut stream = std::net::TcpStream::connect(&addr).expect("connect to daemon");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let body = r#"{"expect_pid":0}"#;
+        write!(stream, "POST /shutdown HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", daemon.token, content_type, body.len(), body).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(
+            response.starts_with("HTTP/1.1 409 "),
+            "content type {content_type}: {response}"
+        );
+        assert!(daemon.child.try_wait().unwrap().is_none());
+    }
+}
+
+#[test]
+#[serial_test::serial]
 fn the_shutdown_route_is_closed_to_anonymous_and_scoped_callers() {
     let daemon = RunningDaemon::start(
         "denied",
@@ -1183,6 +1243,16 @@ fn the_shutdown_route_is_closed_to_anonymous_and_scoped_callers() {
     )
     .expect("scoped request");
     assert_eq!(scoped.status, 403, "{}", scoped.body);
+
+    let scoped_bad_body = local_daemon_request_with_body(
+        "POST",
+        "/shutdown",
+        Some("scoped-token"),
+        &serde_json::json!({ "expect_pid": "not-a-pid" }),
+        Duration::from_secs(2),
+    )
+    .expect("scoped malformed request");
+    assert_eq!(scoped_bad_body.status, 403, "{}", scoped_bad_body.body);
 
     // Neither refusal may have taken the daemon down.
     let health = local_daemon_request("GET", "/health", None, Duration::from_secs(2))

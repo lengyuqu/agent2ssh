@@ -61,8 +61,7 @@ pub fn local_daemon_request(
 ///
 /// A body rather than a query parameter because `/shutdown` names the process it
 /// means (`expect_pid`), and a PID in a URL is the kind of thing that ends up in
-/// a log line. The daemon reads it with axum's `Json` extractor, which accepts
-/// `POST` regardless of an absent `Content-Type`, but the header goes out anyway.
+/// a log line. The daemon requires a JSON content type for a non-empty body.
 pub fn local_daemon_request_with_body(
     method: &str,
     path: &str,
