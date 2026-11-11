@@ -1250,7 +1250,8 @@ enum LocalCommands {
     /// Run one command in a one-shot local environment via the daemon
     Exec {
         /// Target environment: `local`, `local:<environment>` (`local:pwsh`,
-        /// `local:cmd`, `local:gitbash`, `local:vs`, `local:wsl[:<dist>]`) or
+        /// `local:cmd`, `local:gitbash`, `local:vs`, `local:wsl[:<dist>]`, or an
+        /// id you defined in `environments.toml`) or
         /// `local:<runtime>:<container-id>` (`local:docker:abc123`)
         #[arg(short = 'H', long)]
         host: String,

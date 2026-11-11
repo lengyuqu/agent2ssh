@@ -1001,7 +1001,7 @@ fn tool_definitions() -> Vec<Value> {
                 },
                 {
                     "name": "local_exec",
-                    "description": "Run one command on the machine the daemon runs on, in a one-shot terminal environment: 'local' for the default shell, 'local:<environment>' for a named one (local:pwsh, local:cmd, local:gitbash, local:vs, local:wsl[:<distribution>]), or 'local:<runtime>:<container-id>' (local:docker:abc123) for one command inside a container. Forwards to the daemon, so the same gate chain as SSH exec applies (scope, risk, approval). For a shell whose state persists across commands use resident_session_open.",
+                    "description": "Run one command on the machine the daemon runs on, in a one-shot terminal environment: 'local' for the default shell, 'local:<environment>' for a named one (local:pwsh, local:cmd, local:gitbash, local:vs, local:wsl[:<distribution>], or an id you defined in environments.toml), or 'local:<runtime>:<container-id>' (local:docker:abc123) for one command inside a container. Forwards to the daemon, so the same gate chain as SSH exec applies (scope, risk, approval). For a shell whose state persists across commands use resident_session_open.",
                     "inputSchema": {
                         "type": "object",
                         "required": ["host", "command"],
@@ -1018,7 +1018,7 @@ fn tool_definitions() -> Vec<Value> {
                 },
                 {
                     "name": "resident_session_open",
-                    "description": "Open a resident session: one shell for a 'local:<id>' environment that stays alive across commands, so cwd and exported variables persist. Blocks until the shell is warm. Forwards to the daemon; the open is authorized like an exec keyed on the environment's host id. Containers are refused (one-shot targets).",
+                    "description": "Open a resident session: one shell for a 'local:<id>' environment (a built-in id, or one defined in environments.toml) that stays alive across commands, so cwd and exported variables persist. Blocks until the shell is warm. Forwards to the daemon; the open is authorized like an exec keyed on the environment's host id. Containers are refused (one-shot targets).",
                     "inputSchema": {
                         "type": "object",
                         "required": ["host"],

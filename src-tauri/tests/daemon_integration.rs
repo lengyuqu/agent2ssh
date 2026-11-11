@@ -4027,12 +4027,26 @@ fn api_yaml_documents_how_each_handler_reads_its_body() {
     );
 }
 
+/// A response key is a line shaped exactly `"413":` — a quote, three ASCII
+/// digits, then a quote and a colon. Checking the digits is what keeps this
+/// honest: the shape alone (`"` … `":`) is also taken by a quoted id, and a key
+/// that is not a code (`"unknown":`) would end a block early and turn a real
+/// claim into a false negative.
+fn is_response_key(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    bytes.len() == 6
+        && bytes[0] == b'"'
+        && bytes[1..4].iter().all(u8::is_ascii_digit)
+        && bytes[4] == b'"'
+        && bytes[5] == b':'
+}
+
 /// The lines an operation documents for one status code, so a claim can be tied
 /// to the response that makes it instead of to the whole operation.
 ///
 /// `operation.text` holds every line of the operation with leading space
-/// stripped, and a code is the only line shaped exactly `"413":`. Four-digit
-/// years and quoted ids inside prose are therefore not mistaken for codes.
+/// stripped, so a block runs from the code's own line to the next response key.
+/// If an operation ever repeated a code, the first block wins; none does today.
 fn code_block(operation_text: &str, code: &str) -> String {
     let marker = format!("\"{code}\":");
     let mut lines = operation_text.lines().skip_while(|line| *line != marker);
@@ -4040,9 +4054,23 @@ fn code_block(operation_text: &str, code: &str) -> String {
         return String::new();
     }
     lines
-        .take_while(|line| !(line.starts_with('"') && line.ends_with("\":") && line.len() == 6))
+        .take_while(|line| !is_response_key(line))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// `code_block` must end on a status code, not on any quoted key.
+///
+/// The length check alone let `"abc":` through and would have let a longer
+/// `"unknown":` through by ending the block before it — both turn a documented
+/// claim into a silent false negative, which reads as "the docs are fine".
+#[test]
+fn a_response_key_is_a_three_digit_code() {
+    assert!(is_response_key("\"413\":"));
+    assert!(is_response_key("\"200\":"));
+    assert!(!is_response_key("\"abc\":"));
+    assert!(!is_response_key("\"unknown\":"));
+    assert!(!is_response_key("413"));
 }
 
 /// `local:<id>` is not limited to the environments this crate ships.
@@ -4080,6 +4108,52 @@ fn api_yaml_documents_user_defined_local_environments() {
          `local:<id>` defined in `environments.toml` reaches the same handler; a client reading \
          this operation is told its own environment does not exist"
     );
+}
+
+/// `/local-exec` refuses with 400 for reasons whose next step differs, and two of
+/// them were missing from the 400 description.
+///
+/// The operation closed its `host` enumeration with a single "any other value is
+/// rejected with 400", which reads as one refusal with one remedy. A suffix on an
+/// environment that takes none (`local:cmd:ls`) and an empty distribution
+/// (`local:wsl:`) each carry their own message in `local_exec.rs`, and neither
+/// appeared in the 400 — so a client was told "rejected" without being told what
+/// to change. The source side is asserted first for the same reason as the test
+/// above: if those arms disappear, the failure names the source instead of the
+/// prose.
+#[test]
+fn api_yaml_lists_the_local_refusals_it_can_produce() {
+    let resolver = include_str!("../src/local_exec.rs");
+    let spec = include_str!("../../docs/api.yaml");
+
+    for (needle, host) in [
+        ("takes no argument", "`local:cmd:ls`"),
+        ("names no distribution", "`local:wsl:`"),
+    ] {
+        assert!(
+            resolver.contains(needle),
+            "`local_exec.rs` no longer refuses {host} with {needle:?}, so the 400 description has \
+             a reason to delete rather than a reason to keep"
+        );
+    }
+
+    let operation = spec
+        .lines()
+        .skip_while(|line| !line.starts_with("  /local-exec:"))
+        .skip(1)
+        .take_while(|line| !line.starts_with("  /"))
+        .map(str::trim_start)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let refused = code_block(&operation, "400");
+    for needle in ["takes no argument", "names no distribution"] {
+        assert!(
+            refused.contains(needle),
+            "`local:cmd:ls` and `local:wsl:` are refused with {needle:?}, but the /local-exec 400 \
+             description does not say so; a client reads one reason where there are several. \
+             Block was:\n{refused}"
+        );
+    }
 }
 
 /// An error response without a description tells a client the shape of a
