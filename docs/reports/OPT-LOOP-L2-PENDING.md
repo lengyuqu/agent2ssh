@@ -1801,17 +1801,83 @@ issue #20 正文要求在两种策略里选一个。两个落点：
 
 另外 `RuleStats.effective_port` 自己的文档说「None until the listener is bound」，而 `stop_worker`（`forward.rs:212-247`）**不清这个值**：停止后的规则仍带着上次绑定的端口。本轮已把这条文档改准（`state: stopped` + `Some` 只表示「上次绑在这里」），但「停止时是否清零」是 L2-148 拍板时要一起定的第二问。
 
-### L2-96 补充（batch 14 第 1 轮）：`StallGuard::flush` 会在 `inner.flush()` 之前抢答
+### L2-96 补充（batch 14 第 1 轮，第 3 轮订正措辞）：只有 `flush` 在内层之前抢答，`write` 相反
 
-L2-96 的修法已定为「`write` + `flush` 同一处 deadline」。补一条顺序约束：`StallGuard::flush`（`sftp_transfer.rs:440-445`）是
+L2-96 的修法已定为「`write` + `flush` 同一处 deadline」。两处的顺序**不一样**，不能压成一句「`StallGuard` 先判自己」——第 1 轮就是这么写的，那是错的：
 
 ```rust
-if self.last_progress.elapsed() >= STALL_TIMEOUT { return Err(self.stalled()); }
-self.inner.flush()
+// write（:427-436）：先调内层，只在 written == 0 这一支才判自己
+let written = self.inner.write(buf)?;            // :428
+if written > 0 { …; self.last_progress = Instant::now(); }
+else if self.last_progress.elapsed() >= STALL_TIMEOUT { return Err(self.stalled()); }  // :432
+
+// flush（:438-443）：先判自己，再调内层
+if self.last_progress.elapsed() >= STALL_TIMEOUT { return Err(self.stalled()); }        // :439
+self.inner.flush()                                                                     // :442
 ```
 
-即**先用自己的 600 s 判定，再调内层**。所以当 deadline ≥ `STALL_TIMEOUT`（或 `last_progress` 早已过期）时，最终文案会是 `StallGuard` 的「no progress for 600s」，而不是 deadline 的新文案；反过来 deadline 短于 600 s 时 `StallGuard` 不会抢先，报错来自内层。要让 deadline 的文案稳定胜出，`StallGuard::flush` 的判定得让位（或改成只在 `inner.flush` 返回后判）。这一条只在「deadline ≥ 600 s」时影响观测，不影响正确性。
+（第三处 `last_progress` 是构造器 `:405` 的 `Instant::now()`，只赋值、不判定。）
+
+所以：
+
+- **write 路径上 deadline 一定赢**：`inner.write` 先被调用，包在外层的 `tokio::time::timeout` 先到期就先返回，600 s 那一支根本轮不到。何况它本来就不达（`File::write` 不返回 `Ok(0)`，见 L2-96 正文）。
+- **只有 `copy_cancellable_with_chunk` 末尾那一次 `writer.flush()?`（`:488`）可能被抢答**：deadline ≥ `STALL_TIMEOUT` 且 `last_progress` 已过期时，最终文案是 `StallGuard` 的「no progress for 600s」而不是 deadline 的新文案；deadline 短于 600 s 时不抢答。
+- **第 1 轮漏掉的另一半**：`flush` 的判定在**尝试内层之前**，所以它能做到「一次都不 flush 就报错」——`last_progress` 过期时直接返回 `TimedOut`，哪怕这次 flush 本来会成功。今天不可达（那次 flush 紧跟最后一次 write），但加 deadline 之后会被测试踩到，届时「flush 没被尝试」与「flush 试了才超时」给出同一种错误，观测上分不开。
+
+要让 deadline 的文案稳定胜出，`StallGuard::flush` 的判定得让位（或改成只在 `inner.flush` 返回后判）。这一条只在「deadline ≥ 600 s」时影响文案，不影响正确性。
 
 ### L2-134 补充（batch 14 第 1 轮）：折点不止 `/exec/stream`，还有 `/terminal` 与 `/sessions`
 
 `session::resolve_host`（`session.rs:57-62`）是 `load_config()?` + `unknown host profile`，所以**配置读失败**与**名字不存在**折成同一个 `anyhow`；`bin/agent2ssh-daemon.rs:4760-4763`（`terminal_attach`）与 `:2434` 附近（`session_open`）都用 `err(StatusCode::BAD_REQUEST, e.to_string())` 把两者一起变成 400 正文。与 L2-134 同一形态、只是路由不同，修 L2-134 时一并改这三处（`/exec/stream`、`/terminal`、`/sessions`），否则同一个 `load_config()` 失败在三处仍给三种（或同一种错的）解释。
+
+### L2-148 补充（batch 14 第 3 轮）：`POST /forwards` 丢 `name`/`group_id`，`multi` 连请求值都不回
+
+两条同族事实，都是「请求里给了、产品里收不到」：
+
+1. **`/forwards` 静默丢弃两个字段。** handler 收 `Json<ForwardRule>`（`bin/agent2ssh-daemon.rs:3000`），却只把 `host`/`direction`/`bind_port`/`target_host`/`target_port` 传给 `forward_add_core_via`（`:3027-3034`）。客户端填 `name`/`group_id` 不报错，落盘的规则里就是没有。响应回的是 core 造出来的规则，所以调用方**能**从响应里看出被丢了——前提是它逐字段比对。
+2. **`/forwards/multi` 的响应只有 `ids`/`host`/`count`**（`forward.rs:842-849`）。`bind_port: 0` 在这一路上更糟：连「你请求的是 0」都看不到。
+
+修 L2-148 时把这两处一起算进去：`effective_port` 只加给 `/forwards` 而不加给 `multi`，等于把「取不到实际端口」从单发搬到批量。
+
+### 一条不成立（batch 14 第 3 轮）：诊断日志的 `target_host` 并非「不脱敏」
+
+复核提「诊断日志的 `target_host` 不脱敏（内置规则不含 `127.0.0.1`）」。括号里的观察对，前半句把机制说反了：`append_diagnostic_log_inner` 对 message 调 `redact_sensitive_text`（`diagnostics.rs:295`）、对**每个字段值**调 `redact_value` → `redact_sensitive_text`（`:310`、`:146-149`），`local forward listening` 的 `target_host`（`forward.rs:521-529`）确实走这条路径。它是**经过了脱敏、但没有被任何内置规则命中**——对主机名而言这是正确行为，抹掉 `target_host` 这条日志就没有信息量。不立项；记此以免后续把「没匹配」重述成「没调用」。
+
+### L2-149（新，batch 14 第 3 轮）：`forward multi` 的授权串只有主机名与条数，端口全丢
+
+**位置**：`bin/agent2ssh-daemon.rs:3275-3280`（`forward_add_multi` 的 command 构造）；对照 `:3004-3012`（`forward_add`）。
+
+**判断**：成立，且后果不止「审计信息少」，是**授权粒度**的问题。
+
+`authorize_command` 与 `check_daemon_scope` 都拿这串字面量去 `glob_match`（`remote.rs:616-620`）：单发是 `forward add -L 8080:db:5432 -> web:22`，白名单能写到端口；批量只有 `forward multi web (3 rules)`。于是「给某个 token 批量建隧道的能力」只有一个写法 —— `allowed_commands = ["forward multi *"]`，它等于「该主机上任意方向、任意端口、任意目标的隧道」。不存在「允许 8080 的批量、禁止 9000 的批量」这种中间档。
+
+审批卡上同样只有条数：批的是 3 条还是 3 条里混了一条 `-R 0`（= 对外开一个临时端口，见 L2-148），批的人无从分辨。
+
+**建议改法**：把每条规则压成 `{direction} {bind}:{target_host}:{target_port}` 拼进去（超过 N 条截断并写 `+k more`，且截断不得改变 glob 前缀语义），或给批量一个独立的规范形状（如 `forward multi {host} rules=[...]`）并要求 `allowed_commands` 用它。两条都会改变 `allowed_commands` 的既有写法，需要拍板。属 `src-tauri/src/**` 行为。
+
+### L2-150（新，batch 14 第 3 轮）：broadcast 在「非全有全无」下不给被拒的 target 留审计，限流分支两种模式都不留
+
+**位置**：`bin/agent2ssh-daemon.rs:4439-4613`。
+
+**判断**：成立，复核只说了一半。四条事实：
+
+1. `all_or_nothing: true` + 预检失败 → 每个 target 都写审计（`:4452-4466`）。
+2. `all_or_nothing: true` + 授权失败 → 每个 target 都写审计（`:4529-4544`）。
+3. `all_or_nothing: false` → 未授权的 target 在 `:4574-4576` 被 `continue` 跳过，**不写任何审计**，但它的 `error` 仍出现在响应里。
+4. 复核没提的：限流提前返回（`:4487-4500`）在**两种模式**下都是零审计。
+
+**后果**：被拒的恰恰是值得记的事件。持 token 的一方可以把 N 个主机塞进一次 `all_or_nothing: false` 广播，逐个收到 `authorized: false` + 原因，而审计里只有成功投递的那几条（`:4580-4588`）与投递失败的（`:4592-4600`）。等于一个**不留痕的 scope 探针**：试错成本只受限流约束，试过什么都没留下。
+
+**建议改法**：把 `:4529-4544` 那个「全量写审计」的循环从 `all_or_nothing` 分支里提出来，对 `!authorized` 的 target 无条件写一条（含 `authorized=false` 与 error）；限流提前返回处同样补一轮。需一条「一次含被拒 target 的广播，审计条数 = targets 数」的用例。属 `src-tauri/src/**` 行为。
+
+### L2-151（新，batch 14 第 3 轮，**禁区·只报告**）：`.cnb.yml` 的 `daemon-regressions` 首步即红，后面六步从不执行
+
+**位置**：`.cnb.yml:11-21`。
+
+**判断**：成立，比复核说的严重一档。`daemon-regressions` 的 `script` 是单个 `|` 块 + `set -eu`（`:11`），第一行测试是 `cargo test --locked --no-default-features --lib`（`:15`）。这套 lib 测试里有一条**故意红**的用例（`embedded_ssh::remove_system_known_host_matching::an_ipv6_literal_at_port_22_is_removed`，见 L2-15），于是 `:16-21` 六行从不执行。
+
+复核说的是「L2-132 那条刻意的红被另一条红遮住」；实际是**整个 daemon 回归作业一直没跑过**——`daemon_stop_e2e`、`daemon_local_exec_e2e`、`daemon_resident_session_e2e`、`daemon_sftp_approval_e2e` 以及 `:21` 那五个集成目标全在内。
+
+**为什么不能自动落**：`.cnb.yml` 是禁区，只报告。
+
+**建议改法**（三选一，需拍板）：① 把那条红用例改成 `#[ignore]`，另起一步显式 `--ignored` 且允许失败；② 把 `--lib` 挪到 `script` 最后一行；③ 先按 L2-15 把红修掉。①② 让「已知红」不再掩盖新红，③ 才真正解决。在它被修之前，任何「CI 绿灯」的引用都不成立。

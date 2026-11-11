@@ -3042,3 +3042,39 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 #### 一条流程口径
 
 「等待超时」不等于「可以随便找点东西改」。本轮拒绝了两条线索（一条方向反、一条不可达），只落一处**自己上一轮写错**的更正——这类自查比新增条目便宜，也比把弱线索升格成 L2 诚实。下一次运行若复核仍不到，应在 ledger 里明确写「本轮无新指摘可核，只做自查」，而不是凑够 6 轮。
+
+### consume 3 / 6 · batch 14 · issue #30（复核 D1–D5 的处置）
+
+第 1 轮复核 `2120503339707183104`（`2026-11-11T13:06:07Z`）在 13:11 才落到本地，比它的预期晚、也比我的第 2 轮推送晚。十三条指摘逐个核实：**成立 5 / 部分成立 2 / 不成立 1 + 未提的补 2**。
+
+| 指摘 | 判定 | 事实 |
+|---|---|---|
+| D1 同一 spec 里两段对 scope/gate 顺序说法相反 | **部分成立，方向反了一半** | 两处 handler（`forward_remove:3077-3113`、`forward_stop:3135-3189`）**逐行同构**，都是 gate→rate→scope→authorize。`delete` 那段「gate、limits、scope 依序只走找到规则的分支」与代码一致，**是 stop 的 403 单方面把「越权返回 403」写成了无条件句**。所以不是「两段互相矛盾」，是一段正确、一段漏了前置条件 |
+| D2 `forward multi` 授权串丢全部端口 | **成立** | `:3275-3280` 只有 `{host} ({n} rules)`。后果比「审计信息少」硬：`allowed_commands` 是 `glob_match` 命令原文（`remote.rs:616-620`），想给批量能力只能写 `["forward multi *"]`，等于「该主机任意方向/端口/目标」，不存在端口级中间档 |
+| D3 `all_or_nothing: false` 下被拒 target 不留审计 | **成立，且漏了一半** | `:4574-4576` 的 `continue` 跳过未授权 target，不写审计；另有一条它没提的：限流提前返回（`:4487-4500`）在**两种模式**下都零审计。合并起来是一个不留痕的 scope 探针 |
+| D4 我对 `StallGuard::flush` 的措辞要更精确 | **成立，我第 1 轮写错** | 只有 flush 在 `inner.flush()` 之前判自己（`:439` vs `:442`）；write 是**先调内层**（`:428`）且只在 `written == 0` 支判定（`:432`）。所以「deadline 会输给 600 s 文案」**只在收尾那一次 flush 成立**，write 路径上 deadline 必赢 |
+| D5 `.cnb.yml` 的首步 `--lib` 挡住 L2-132 的刻意红 | **成立，但严重一档** | 实测该测试在 HEAD 上确实失败（`0 passed; 1 failed; 863 filtered out`）。`set -eu` + 单个 `|` 块意味着 `:16-21` 六行**从不执行**——不是「遮住一条刻意红」，是整个 daemon 回归作业一直空转，含四个 `*_e2e` 与 `:21` 的五个集成目标 |
+| A1-1 `POST /forwards` 不读 `name`/`group_id` | 成立 | `:3000` 收 `Json<ForwardRule>`，`:3027-3034` 只传五个字段 |
+| A1-2 `forward_add_multi` 响应只有 `count`/`ids`/`host` | 成立 | `forward.rs:842-849`，连请求的 `bind_port` 都不回 |
+| A1-3 诊断日志 `target_host` 不脱敏 | **不成立** | 它**经过了**脱敏：`diagnostics.rs:295`（message）、`:310` + `:146-149`（每个字段值）都调 `redact_sensitive_text`。只是内置规则不匹配主机名——对主机名这是正确行为。括注「内置规则不含 `127.0.0.1`」是对的，前半句把「没匹配」说成了「没调用」 |
+
+#### 本轮改动
+
+- `docs/api.yaml`
+  - `/forwards/{id}` 的 `description` 补「顺序即应答顺序」：gate 的 423 与 limit 的 429 在 scope 之前应答，故「已暂停 + 越权」永不返回 403；审批是最后一步，408 与审批拒绝的 403 来自它。并写明 `/forwards/{id}/stop` 走完全相同的序列。
+  - `/forwards/{id}` 的响应表补 **`408`**（同一 `authorize_command`，`ApprovalTimedOut` → `:809-812`），`400`/`403` 的描述补上审批来源（`Blocked` → 400、`ApprovalRejected` → 403）。
+  - `/forwards/{id}/stop` 的 `403` 从无条件句改成有条件句：除非 gate/限流先拒（423/429），否则越权答 403 而不是 unknown-id 400；`400` 同样补审批来源。
+- `docs/reports/OPT-LOOP-L2-PENDING.md`
+  - **重写** L2-96 补充段（D4）：逐行标出 `write:428/432` 与 `flush:439/442` 的顺序差异，把结论收窄到「只有收尾 flush 可能被抢答」，并补一条第 1 轮漏掉的：flush 的判定在尝试内层之前，能「一次都不 flush 就报错」。
+  - 新增 **L2-149**（multi 授权串）、**L2-150**（broadcast 审计缺口，含限流分支）、**L2-151**（`.cnb.yml` 首步即红，禁区·只报告）。
+  - L2-148 补两条同族事实（`name`/`group_id` 丢弃、multi 响应无端口），并记「A1-3 不成立」以免后续把「没匹配」重述成「没调用」。
+
+#### 验证
+
+`yaml.safe_load` **90 paths**，两条路由的响应码集合现在完全相同（`200/400/401/403/408/423/429`）。`cargo test --no-default-features --lib an_ipv6_literal_at_port_22_is_removed` → **FAILED**（D5 的前提实测，非引用记忆）。本轮零源码改动，故不跑全量 lib；`cargo fmt --check` 与 `npm run build` 本轮无相关改动，略过。
+
+#### 一条流程自记：锁的 owner 必须写会话宿主 pid
+
+本轮开始时 `/tmp/agent2ssh-opt-loop.lock/owner` 写着 `76868`，`kill -0` 失败——那是上一个上下文窗口里**某个 Bash 子进程**的 pid，子进程退出后锁就变成「本机死主」。按协议这是可接管的陈旧锁，已改写成 `76692`（本会话的 WorkBuddy Electron 宿主，随会话存活）。
+
+口径：**owner 不能写 `$$`**。Bash 工具每次调用都是新 shell，写进去的 pid 活不过下一次调用；下次运行会把它判成死锁并接管，等于互斥形同虚设。要写在 `ps -o ppid=` 链上真实存活的那个宿主进程。
