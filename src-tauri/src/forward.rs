@@ -114,7 +114,10 @@ pub struct RuleStats {
     pub bytes_rx: u64,
     pub connections: u32,
     pub state: RuleState,
-    /// The actual bound port (None until the listener is bound).
+    /// The port the listener last bound. `None` only until the first bind — a
+    /// stop does not clear it, so `Some(_)` next to `state: stopped` means
+    /// "this is where it used to listen", not "it is listening there now".
+    /// `connected` is the field that says whether it is live.
     pub effective_port: Option<u16>,
     /// Whether the SSH transport / listener is alive.
     pub connected: bool,
