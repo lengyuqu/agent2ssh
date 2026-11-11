@@ -2201,21 +2201,31 @@ const HANDLER_STATUS: [(&str, &str); 10] = [
 /// `INBAND_REJECTIONS` below for the three routes that consume the `Err`
 /// instead of returning it, and would be wrongly indicted by this list.
 ///
+/// 403 arrives through a helper too, and was invisible the same way:
+/// `require_admin` builds the status inside itself, so a route whose only
+/// authorization code is the admin gate could document none at all.
+/// `/shutdown` is that shape — its `responses` carry 200/400/401/409 and a 403
+/// whose presence no assertion checked, because the 401 check above only covers
+/// the middleware's code. No route was missing it when this entry was added; the
+/// point is the next one.
+///
 /// 423 is listed too, and only through `reject_if_gate_paused`. That helper is
 /// the one place where a function name maps 1:1 onto a constant — it returns
 /// `StatusCode::LOCKED` and nothing else — so the same text scan can pin it
 /// without guessing. The half it cannot pin is the other direction: the same
-/// helper answers `500` when `gate.json` cannot be read, and *that* is not
-/// listed, because it would demand a 500 on 33 operations that document it once
-/// in `info.description` instead of 33 times. A per-operation repeat would be an
-/// invitation to delete both copies.
-const HELPER_STATUS: [(&str, &str); 6] = [
+/// helper answers `500` when `execution_gate.json` cannot be read, and *that* is
+/// not listed, because it would demand a 500 on 33 operations that document it
+/// once in `info.description` instead of 33 times. A per-operation repeat would
+/// be an invitation to delete both copies.
+const HELPER_STATUS: [(&str, &str); 8] = [
     ("too_many_requests_status()", "429"),
     ("reject_if_rate_limited(", "429"),
     ("register_limited_session_for_command(", "429"),
     ("preflight_guarded_request(", "429"),
     ("preflight_rewritable_request(", "429"),
     ("reject_if_gate_paused(", "423"),
+    ("require_admin(", "403"),
+    ("require_recording_admin(", "403"),
 ];
 
 /// Operations whose gate and rate-limit refusals never become an HTTP status.
@@ -2235,7 +2245,11 @@ const HELPER_STATUS: [(&str, &str); 6] = [
 const INBAND_REJECTIONS: [(&str, &str, &str); 3] = [
     ("get", "/exec/stream", "only as a frame"),
     ("post", "/terminal/broadcast", "returns 200"),
-    ("post", "/terminal/broadcast/preview", "not a 423"),
+    (
+        "post",
+        "/terminal/broadcast/preview",
+        "into that target's `error`",
+    ),
 ];
 
 /// The methods one `.route(...)` call mounts, in source order, with their handler.
