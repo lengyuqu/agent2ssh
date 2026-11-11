@@ -2514,9 +2514,41 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 ### batch 2026-11-11 · daemon 控制与停止协议（第三批，B=13）
 - issue #19 / 开批时间 2026-11-11 13:25 (GMT+8)
 - CodeBuddy 首条分析：**已到**（05:32:08Z = 13:32 GMT+8，开批后约 6.3 分钟；60 s × 5 轮询 13:26–13:31 均空，延时复核 ≈13:33 命中），评论 `2120389088577478656`，**6 条指摘（成立 4 / 部分成立 2 / 不成立 0）**，索引：①`HELPER_STATUS` 的 423 项遮蔽 helper 自读 gate 的 500——`/daemon/:alias/exec` 的 localhost 分支自己调 `reject_if_gate_paused`，其 500 成因与 api.yaml 已写的「HTTP client 构不出来」是两条路径（成立）；②`INBAND_REJECTIONS` 以「路径在表里」为豁免判据，区分不了「Err 被消费」与「Err 被返回」两种形态，`terminal_attach` 不该进表（成立）；③L2-84 机制复核与当前树一致，新缺口 = `daemon_stop_e2e.rs` 零「持续输出 + 停机」用例（部分成立）；④`/exec/stream` 的 `interrupted` 在「取消后 drain 读到 `Exit(None)`（超时/worker 失败来源）」时误记为 daemon 中断，审计与 `ExecCompleted` 事件同错（部分成立）；⑤L2-129 第 3 条复核仍开，落地成本更正为约 5 行（复用 `closing_brace` 已有的字面量扫描器）（成立）；⑥L2-82 落地形状更正：三处 `Option<Json<T>>` 不能共用同一条断言——`/health-snapshot` 与 dry-run 在空配置目录下假绿，须拆「坏 body 与无 body 行为不同」判据（成立）。另**自撤 3 条候选**（`:4878` Close 不受 2 s 约束 / 坏 gate 下 preview 返回 423 / `drain_all` 4 s 计费——`drain_all` 无生产调用点，L2-91 正文措辞残留）。
-- 6 轮进度：0 / 6（待消费任务更新）
+- 6 轮进度：1 / 6（第 1 轮 2026-11-11 16:38–17:3x 由消费任务闭环，判定见文末 `### consume 1 / 6`）
 - 正文已喂给 CodeBuddy：**136 条「不成立」原文**（编号 91 = 旧 71 + batch 12 五个加粗伪小节 20；判定行 39；摘录 6），由 `/tmp/build-opt-issue-b13.py` 生成（复用 b12 骨架 + batch 12 区域锚点；batch 12 的 5 个小节是 `**…**` 独立加粗行而非 `###` 标题，b13 为其加了独立的区域限定扫描器，7/4/4/2/3 分布；全部锚点唯一性校验通过，计数复验 136）。**注意：batch 12 收尾汇总自述新增 21 条，原文清点为 20 条**（第 5 轮小节自报 3 条、汇总行写成 4），issue 正文已注明以原文切片为准。
 - KNOWN-ISSUES 空档喂 K14/K15/§3；口径提醒含基线（`--no-default-features --lib` 862/1/1、`daemon_integration` 76 passed、npm 220/30）、L2-75…L2-129 勿重复立条（本批靶子 L2-80 / L2-82 / L2-122 第 5 条 / L2-84…L2-91 / L2-99 / L2-129 除外）、L2 撞号 13 对须带主题限定、AGENTS 测试口径三则、batch 11 抗漂约定、`.github` 禁区与 L2 越权重申。
 - 顺手按 BATCH_COMPLETE 行自述删除顶部 `BATCH_COMPLETE · issue #18 · batch 12` 状态行（HTML 注释同步为十一条）。
 - 下一批（B=14）：14 % 6 = 2 → 主题 2：SSH 传输、known_hosts 与认证（russh 侧，**第三批**，#8/#14 已闭环）。开 issue 前先 fetch cnb main 重读 ledger 不成立清单（本批消费期间会新增，行内锚点会漂移），b13 脚本可改造复用（注意 batch 13 消费期间可能出现新的加粗伪小节形态）。
 - 若 #19 仍 open 则按背压闸门跳过；锁沿用「保留在位、消费者侧自行清理」先例。
+
+---
+
+### consume 1 / 6 · 2026-11-11 16:38–17:12 · issue #19 · daemon 控制与停止协议（第三批）
+
+**让位记录终止**：本批前两次运行（14:17、15:26）都因并发会话活跃而零改动退出。本次进入时 §0 锁仍是 13:21:27 那个孤儿（无 `owner.txt`、mtime 从未刷新），但三重独立证据表明无写者：两个 worktree `status --porcelain` 均为 0 行、仓库 10 分钟内零改动、`ps` 无 CLI agent 进程。等待一个 120 s 重试周期后复检全部不变，遂接管并写 `owner.txt`。
+
+**指摘**：CodeBuddy 首条分析 `2120389088577478656`（13:32），6 条，它自评 成立 4 / 部分成立 2 / 不成立 0。
+
+| # | 它的判定 | 我的判定 | 关键证据 |
+|---|---|---|---|
+| ①  `HELPER_STATUS` 的 423 项遮蔽 helper 自读 gate 的 500，`/daemon/:alias/exec` 是扫描器盲区 | 成立 | **不成立** | `docs/api.yaml:24-26` 逐字点名 `reject_if_gate_paused`（不只 preflight），「30 个不在覆盖面上」的前提不存在。且 `proxy_exec`（`:3959`）的 `localhost` 分支在 `:3970` 判别名后走 `preflight_guarded_request`（`:3971`）、`:3987` 就 `return`，`:3998` 的直调在**远端**分支。路径名也错（是 `/daemons/{alias}/exec`） |
+| ②  `INBAND_REJECTIONS` 以「路径在表里」为判据，区分不了「Err 被消费」与「Err 被返回」 | 成立 | **部分成立** | 事实面对：`load_execution_gate().ok()`（`:4350`）+ `is_some_and`（`:4391-4398`）在坏 gate 下整段跳过 → 200 + 逐目标字段，`/terminal` 的 `:4757` 是 `?` 传播。但「表里加一条就同时关掉两个方向」是**可构造性**，它自己也说「今天没有漏」；第三列短语被断言钉住，已有一半护栏。已按它的口径改注释，未采纳「第三列改枚举」（会牵动 `a_websocket_drain_budget_claim_matches_the_loop_it_describes` 的双向断言，收益不抵） |
+| ③  L2-84 机制复核一致，新缺口是 `daemon_stop_e2e.rs` 零「持续输出 + 停机」用例 | 部分成立 | **成立** | `git grep -c Output src-tauri/tests/daemon_stop_e2e.rs` = **0**，33 条用例无一在停机期间持续写终端输出。它自己撤掉的那半（`:4878` 的 `Close` 逃出 2 s）确实不成立：`run_ws_with_shutdown_deadline`（`:119-129`）的 `timeout(grace, &mut future)` 覆盖整个闭包 |
+| ④  `/exec/stream` 的 `interrupted` 在「drain 读到 `Exit(None)`」时误记为 daemon 中断 | 部分成立 | **成立（正向）** | `code: Option<i32>`（`:5363`）使「收到 `Exit(None)`」与「从未收到 `Exit`」同值；`Exit(None)` 有三个生产者：`:5189`（超时）、`:5204`（worker 出错）、`:5200`（`exit_status().ok()` 失败）。审计 `:5496-5497`、事件 `:5529` 同源。**不改 main**（改 `src-tauri/src/**` 行为），立 **L2-130** |
+| ⑤  L2-129 第 3 条仍开，落地成本更正为约 5 行 | 成立 | **成立（数字另有第三说）** | `chain.find(".with_state(")` 取第一个成立（`:2888` 附近，今天链上只有 `:5967` 一处，它写的是 `:5950`）。但「5 行」与原文「20 行」都不对：`closing_brace`（`:2583`）第一个分支就是 `//`，抽成 `code_only(source)` + 复用是 +15/−6 量级。已在 L2-129 记两向更正 |
+| ⑥  L2-82 落地形状：三处 `Option<Json<T>>` 不能共用一条断言，两处会假绿 | 成立 | **成立（数量已过时）** | `RunningDaemon::start_with_name` 只写 `daemon.token` + `extra_files`（`:54-59`），配置目录其余为空 → `/health-snapshot`（`:5593`）空扫、dry-run（`:3834`）整段跳过，同一条断言必假绿。但「三处」现在只剩**两处**：`/shutdown` 已由 `380e166` 换成 `HeaderMap + Bytes` + 显式 `Json::from_request`，并配 `daemon_stop_e2e.rs:1165` 真进程 e2e |
+
+**本轮落地（L1）**：`09553fc`（`daemon_integration.rs` 的 `INBAND_REJECTIONS` 文档把「identical checks, run before the upgrade」拆成「returned vs swallowed」两种形态）+ 本文件与 L2 清单。推 `cnb main`，未推 github。
+
+**验证**：`npm run build` 6.53 s；`cargo fmt --check` 绿；`--no-default-features --lib` **862 / 1 / 1**（红项仍是那条故意红的 IPv6 `an_ipv6_literal_at_port_22_is_removed`，与基线一致）；`--features daemon --test daemon_integration` **76 passed**（与基线一致）。Rust 行为代码一行未动。
+
+**L2 变更**：新增 **L2-130**（`/exec/stream` 的 `interrupted`，三条改法 + 回滚路径 + 一条可执行证伪）；L2-82 表格行号按当前树更正（`:5574→:5593`、`:3815→:3834`）并补「红的方向只有一个，绿的方向是开放的」与「三处不能共用断言」；L2-84 补「验证前置」（先补持续输出 e2e 再决定循环语义）与行号（`:4830→:4866`、`:5014→:5057`、`:5340→:5363`）；L2-129 第 1 条补成本的两向更正。
+
+**本轮新增不成立（原文保留，请勿重复提）**：
+
+1. **「`HELPER_STATUS` 的 423 项把 helper 自己读 gate 的 500 遮蔽了，那 30 个读 gate 的 operation 不在 `info.description` 的覆盖面上，`/daemon/:alias/exec` 的 423+500 组合是扫描器盲区」— 不成立。** 三个子句各错一处：(a) `docs/api.yaml:24-26` 原文是「`reject_if_gate_paused`, and the preflights built on the same gate read, … when that read fails they answer `500`」，**helper 被逐字点名**，覆盖面包含它；(b) `proxy_exec`（`bin/agent2ssh-daemon.rs:3959`）的 `localhost` 分支在 `:3970` 判 `alias == "localhost"` 后走 `preflight_guarded_request`（`:3971-3983`），`:3987` 就 `return exec_ssh_core(...)`，它指的 `:3979` 在远端分支；(c) 路径是 `/daemons/{alias}/exec`，不是 `/daemon/:alias/exec`。
+2. **「`INBAND_REJECTIONS` 的缺陷是当下输出错误」— 不成立（作为缺陷等级）。** 它自己在正文承认「今天没有漏」。真实形态是**判据的可构造漏洞**：表的键是 `(method, path)`，而两种豁免理由不同源。已按「说明两种形态」改注释；「把第三列改成枚举」未采纳，理由见上表。
+
+**未做的 L2 项与理由**：④ 的修复要动 `src-tauri/src/**` 的 `interrupted` 判定与对外契约（`ExecCompleted` 载荷），按协议属 L2，只登记不落 main。③ 的 e2e 同样要新增真进程用例并可能改循环语义，一并留在 L2-84。
+
+**下一轮**：第 2 轮的指摘在 CodeBuddy 对本轮回帖的回复里。行号基线 `09553fc`（`380e166` 之后整体下移约 36 行，再按本轮注释 +11 行微调）。`daemon_stop_e2e.rs` 的 `Output` 零覆盖、`L2-130` 的三条改法、`L2-129` 的 `code_only` 抽取是它请求复核的三个面。

@@ -488,6 +488,10 @@ enum DrainOutcome {
 | L2-85 | `daemon_control.rs:986-989`（`UnverifiedIdentity` 的文案）、分支入口 `:982`（`health.as_ref().map(\|i\| i.pid) == Some(pid)` 的 `else`） | 成立（诊断文案） | 文案括号里列了三种原因（health PID / config directory / admin token），但这一支**只可能**是「没有 `/health` 答复」或「`/health` 报了另一个 PID」：`config_dir` 的比对在 `:959-981` 的 `if` 分支里，`admin token` 的比对在 `:991` 之后。打印这句话时，括号里后两种原因都不可能成立，运维会去查两个没参与判定的东西 | 括号收窄成「no `/health` answer, or it named another PID」。**没有测试钉这条分支**：`daemon_stop_e2e.rs:872-877` 只断言 `contains("could not be authenticated")`（首句），加一句「不含 `config directory`、不含 `admin token`」就能把括号钉住。属 `src-tauri/src/**` 文案 + 测试断言 |
 | L2-86 | `daemon_activity.rs:205-217`（`fetch_daemon_activity` 只串行读 `/sessions`、`/resident-sessions`、`/forwards`、`/approvals`）、`:180-195`（`summarize_activity` 折四个计数）、`tauri_commands.rs:2016-2049`（`confirm_quit` 以 `is_idle()` 决定弹不弹框） | 部分成立（产品口径） | 一次在途的 `/exec` **不在任何列表里**：`exec`（`bin/agent2ssh-daemon.rs:1665`）不注册 registry，`resident_session.rs:361-367` 的摘要只有 `id/host/label/idle_secs/dead`。所以「有命令在跑」的 daemon 被 `is_idle()` 判成空闲，退出确认框不弹，`shutdown` 直接中断那条命令。要不要把 `/exec` 纳入退出确认是产品决策（`/exec` 自带 `timeout_secs` 上界），且要动 `src-tauri/src/**` | 若要做：daemon 侧先有一条可读的在途视图（在 `exec` 与 `exec_stream` 入口 `register` 一个 owner，或在 `AppState` 里加一个 `AtomicUsize` 计数器 + `GET /exec/activity`），再让 `fetch_daemon_activity` 读它、`DaemonActivity` 加 `running_execs` 字段（`Serialize` 变化会牵动桌面契约与 `quit_confirm_labels` 的文案键）。若不做：至少在 `docs/architecture.md:191` 那段「问 daemon 会丢什么」后面注明 `/exec` 不计入，免得读文档的人以为它是全量 |
 
+**L2-84 的验证前置（batch 14 第 1 轮补）**：上面第 ① 与 ② 两个方案落哪个都**测不出来**，因为 `/terminal` 的 drain 循环只有「静态停机」覆盖：`git grep -c Output src-tauri/tests/daemon_stop_e2e.rs` 为 **0**，33 条用例里没有一条在停机期间持续写终端输出。而 500 ms 空闲超时与 2 s future 上限的分歧**只在这一支上才可见**（静态流量下两者都远小于 2 s，跑不出差异）。所以顺序必须是：先补一条「对端持续输出 + 停机」的 e2e（断言退出耗时 ≤ 2 s + 余量且收到 `Close`），再决定循环语义。该用例不需要真 SSH——`daemon_stop_e2e.rs` 的 `AGENT2SSH_TEST_SSH_PORT` 脚手架用不上，只需一个持续吐字节的本地 mock。
+
+行号按当前树更正（`380e166` 之后整体下移约 36 行）：`timeout(500ms, …)` 在 `:4866-4869`，`Output` 分支在 `:4871`，terminal 的 `run_ws_with_shutdown_deadline(` 起于 `:4855` 而其 grace 参数在 `:5057`（`from_secs(2)`，闭包结束后才传，所以两行相隔 200 行不是笔误），exec 侧 `let mut code = None` 在 `:5363`、其 grace 在 `:5485`。
+
 ### L2-4 的行号与触发条件更正（本轮复核）
 
 `L2-4` 记的两件事仍然成立，但位置和措辞要按当前树更正：`NotAuthenticated` 的唯一触发点是 `daemon_control.rs:991` 的 `crate::daemon_activity::read_admin_token().is_none()`（**一个请求都没发**），不是 `:986-988`；`Display` 在 `:792-796`。所以它说「the daemon that answered did not accept this config's admin token」时，事实上既没有 daemon 答话、也没有 token 被拒。
@@ -1170,10 +1174,19 @@ impl<S, T> FromRequest<S> for Option<T> where T: FromRequest<S> {
 | 操作 | 参数 | 坏 body 的后果 |
 |---|---|---|
 | `POST /shutdown` | `daemon_shutdown:167` | `:204 None => {}` → `:207 SHUTDOWN_REQUESTED.notify_one()` → **关机**。`require_admin` 已在 `:170` 过，所以不是提权，是「本该被 400 拒掉的请求被执行」 |
-| `POST /health-snapshot` | `post_health_snapshot:5574` | `:5579-5582 None => (None, None)` → `:5584-5594` 的 `_ =>` 分支 → **扫描全部已配置主机**（把「指定三台」读成「全部」） |
-| `POST /playbooks/{name}/dry-run` | `dry_run_playbook_handler:3815` | `:3818 unwrap_or_default()` → `:3819-3826` 的「路径名与 body 名不一致 → 400」整段跳过 |
+| `POST /health-snapshot` | `post_health_snapshot:5593` | `:5598-5601` 的 `None => (None, None)` → `:5603-5614` 的 `_ =>` 分支 → **扫描全部已配置主机**（把「指定三台」读成「全部」） |
+| `POST /playbooks/{name}/dry-run` | `dry_run_playbook_handler:3834` | `:3837 unwrap_or_default()` → `:3838-3845` 的「路径名与 body 名不一致 → 400」整段跳过 |
 
-**推翻「换签名不红」这个对照**：`daemon.rs:6077/6097/6115` 三条单测直传 `Some(Json(ShutdownRequest{…}))`，把 `:167` 改成 `Json<ShutdownRequest>` 会让它们**编译失败**——是红了，不是绿的。所以这三条钉住的是 handler 分支，缺的是**提取器到 handler 之间**那一段，而不是「分支无断言」。落地只能走真进程（`daemon_stop_e2e` 已有 `env!("CARGO_BIN_EXE_agent2ssh-daemon")` + 预置 `daemon.token` + 探 `/health` 的脚手架），断言「坏 body → 4xx 且进程仍在」。
+**推翻「换签名不红」这个对照**：`daemon.rs:6077/6097/6115` 三条单测直传 `Some(Json(ShutdownRequest{…}))`，把 `:167` 改成 `Json<ShutdownRequest>` 会让它们**编译失败**——是红了，不是绿的。所以这三条钉住的是 handler 分支，缺的是**提取器到 handler 之间**那一段，而不是「分支无断言」。
+
+**但红的方向只有一个，绿的方向是开放的**（batch 14 第 1 轮）：不改签名、只在 handler 内部先判 `body.is_none()` 再解析，那三条单测**仍然全绿**——它们钉分支，不钉提取器。所以「编译失败」不能当成护栏存在的证据。`/shutdown` 现在两道都有：`380e166` 把参数换成 `HeaderMap + axum::body::Bytes` 并显式 `Json::from_request`（编译期），加 `daemon_stop_e2e.rs:1165` 的真进程 e2e（运行期）。**剩余两处一道都没有。**
+
+**「三处共用一条断言」是错的——两处会假绿**（batch 14 第 1 轮）：`daemon_stop_e2e.rs` 的 `RunningDaemon::start_with_name` 只写 `daemon.token` 与 `extra_files`（`:54-59`），配置目录其余为空。于是：
+
+- `/health-snapshot` 的坏 body 落到 `_ =>` 后「扫描全部已配置主机」（`:5607`），空目录下**什么都没扫**，返回 200 + 空数组——与无 body 的结果**相同**；
+- `/playbooks/{name}/dry-run` 的坏 body → `unwrap_or_default()`（`:3837`）→「路径名与 body 名不一致 → 400」整段跳过；空 `playbooks` 列表下任何 body 都给同一结果。
+
+所以判据必须拆开：`/shutdown` 用「坏 body → 4xx 且 `/health` 仍 200」（进程还在）；另两处用「**坏 body 与无 body 的行为不同**」——例如 `/health-snapshot` 预置两台主机，无 body → 200 + 2 条，坏 body 收窄前应是 400、收窄后仍是 2 条。同一条断言覆盖三处会给出假绿。
 
 ### 三、L2-122 第 5 条的成本重估
 
@@ -1431,6 +1444,8 @@ fn mounts_a_closure_literal(segment: &str) -> bool {
 ### 三、L2-129（新）· 链守卫的三个口子，两个成立、一个不成立
 
 1. **`split("//")` 被字符串字面量骗——成立。** `.route("/c", get(|| { let _ = "//"; })).nest(…)` 写在同一行时，`//` 之后全被截掉，`.nest(` 看不见。今天零例（要「同一行 + 含 `//` 的字符串 + 其后紧跟 `.nest(`」三件事同时成立）。**修法**：把「剥行注释」换成一个跳字符串/字符字面量的小扫描器，约 20 行。**优先级低但不为零**：`.nest` 载荷造出的假 entry，只有当 handler 名恰好是顶层已有函数（如 `get(health)`）时，L2-126 那条断言才不管——那种组合是躲得过两条网的。
+
+   **成本更正（batch 14 第 1 轮，两个方向都修）**：`closing_brace`（`daemon_integration.rs:2583`）的 `match bytes[at]` 第一个分支就是 `b'/' if bytes.get(at + 1) == Some(&b'/')`，随后是块注释、`"` → `string_end`、`'` → `char_end`。也就是说这套跳过逻辑**已经在同一文件里**，不需要重写。但「约 20 行」与复核方说的「约 5 行」都不对：`closing_brace` 不能直接拿来剥注释（它还要数括号），得把这四个分支抽成一个独立的 `code_only(source)`，再让 `closing_brace` 复用它——实测是 +15/−6 量级，收益是**同一份文件只剩一套扫描器**（`parse_route_table` 的 `mounted_handlers` 另有一套懂字面量的，见 `:2620-2658`）。两个数字都别信，按「抽公共扫描器」估。
 2. **「其余 builders 不含 `.route(` 这句理由在文本上错」——不成立。** `.route_service(` 第 6 位是 `_` 而不是 `(`：`".route_service(".find(".route(") == -1`。它含 `.route`，不含 `.route(`，而解析器扫的是后者。测试里的原话成立，不改。
 3. **守卫终点取第一个 `.with_state(`——成立。** `let app = Router::new()` 之后若先出现 `sub.with_state(s)`，窗口会在那里断掉，其后的 `.nest(` 落到窗口外。今天链上只有一个 `.with_state(`。**修法**：改用「链段内最后一个 `.with_state(`」或「最后一次 `.route(` 之后再取一段」。成本 1 行，但「窗口」的语义会更含糊，故与 L2-128 一起等下次动这个文件时做。
 
@@ -1445,3 +1460,47 @@ fn mounts_a_closure_literal(segment: &str) -> bool {
 - **破坏性对照**：`/metrics` 写成 `get(metrics).post(|| async { … })` → **只有新断言红**，drop 检查、`api.yaml` 对账、handler 存在性三条全绿。
 
 **L2-129 仍开**（链守卫的两个口子，见上一节 §三 第 1、3 条）。下一批若要动这张表，两件一起做：把「剥行注释」换成跳字符串/字符/注释的小扫描器；窗口终点改用链段内最后一个 `.with_state(`。
+
+---
+
+## 2026-11-11 · batch 14 第 1 轮：L2-130（新）· `/exec/stream` 的 `interrupted` 分不清「没收到 Exit」与「收到 `Exit(None)`」
+
+**状态：开，需人拍板。** 与 batch 7 那条「不成立」判定**不冲突，是它的补集**——那条只覆盖 `Exit(Some(n))`。
+
+### 位置（当前树，`d3a4a71`）
+
+| 事实 | 位置 |
+|---|---|
+| `code` 的类型是 `Option<i32>` | `bin/agent2ssh-daemon.rs:5363`（`let mut code = None;`） |
+| 取消分支 drain 的赋值 | `:5403`（`EmbeddedExecStreamEvent::Exit(exit_code) => { code = exit_code; }`） |
+| 主循环的赋值 | `:5478`（同一句，随后 `break`） |
+| `interrupted` 判定 | `:5493`（`shutdown_token.is_cancelled_now() && code.is_none()`） |
+| 审计文案 | `:5496-5497`（`daemon shutdown interrupted stream; remote outcome unknown`） |
+| `ExecCompleted` 事件载荷 | `:5529`（`"interrupted": interrupted`） |
+| `Exit(None)` 的生产者之一：超时 | `:5186-5189`（先 `Error("SSH command timed out after {timeout_secs}s")`，再 `Exit(None)`） |
+| 生产者之二：worker 出错 | `:5204` |
+| 生产者之三：正常路径 `exit_status()` 失败 | `:5198`（`let code = channel.exit_status().ok();`） |
+
+### 判据
+
+`Exit(None)` 被赋给 `Option<i32>` 时，`code = None` 与「从未收到 `Exit`」在类型上同值。于是：
+
+- 一条**在停机前就已经超时结束**的 `/exec/stream`，只要它的 `Exit(None)` 留在队列里被取消分支 drain 读到，`interrupted` 就是 **true**；
+- 审计写成 `daemon shutdown interrupted stream; remote outcome unknown`，而真实原因是 `SSH command timed out after Ns`——**那句 `Error` 事件可能已经在 drain 里被发给了客户端，但审计不读它**；
+- `ExecCompleted` 的 `"interrupted": true` 同源，webhook 侧无从分辨。
+
+batch 7 判「不成立」时用的论据是「`code.is_some()` 时 `interrupted` 必为 false」——对 `Exit(Some(n))` 成立，对 `Exit(None)` 不成立。所以那条判定不用撤，只需要知道它没有覆盖这一支。
+
+### 为什么不能自动落（L2）
+
+改法有三条，都要动 `src-tauri/src/**` 的行为：
+
+1. `code: Option<Option<i32>>` — 最小改动，但 `Option<Option<_>>` 在审计与事件路径上要展开两次，可读性差；
+2. `saw_exit: bool` + `code: Option<i32>` — 推荐。`interrupted` 判 `!saw_exit`，审计文案按「超时 / worker 失败 / 未知」分三句，`ExecCompleted` 增加一个 `exit_seen` 字段（**对外契约变更，要同步 `docs/api.yaml`**）；
+3. 让线程侧在 `Exit` 之前多播一个 `TimedOut` 事件 — 改动面最大，但能同时修掉「`Error` 事件被 drain 丢掉」这一层。
+
+**回滚路径**：三条都不改语义的默认值（`saw_exit` 缺省 `false` = 维持现状），所以可以分两步落：先加字段并让 `interrupted` 读它，再改文案与契约。
+
+### 一个可执行的证伪
+
+`daemon_stop_e2e.rs` 今天测不到这一支：要触发，得让一个 `/exec/stream` 先超时（`timeout_secs` 设小 + 远端 sleep）**再**撞上停机。这条用例不需要真实 SSH 主机，但需要一个能被 `timeout_secs` 触发超时的本地命令——`/local-exec` 的命名环境即可。
