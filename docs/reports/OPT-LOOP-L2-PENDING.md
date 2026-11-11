@@ -1545,9 +1545,13 @@ batch 7 判「不成立」时用的论据是「`code.is_some()` 时 `interrupted
 
 也就是说：**客户端看状态码的路径，审计缺；审计齐全的路径，客户端信息缺。** 两条路由各丢一半，而 `docs/api.yaml` 的 `info.description` 第二段只承诺了「客户端遇 500 要读 message」——它对 `/terminal` 成立、对 `/exec/stream` 不成立；反过来「拒绝必留审计」这条更强的性质，两处都不成文也不成立。
 
-**判据（可执行，不需要真 daemon）**：`load_execution_gate()` 在 `execution_gate.json` 存在但内容不合法时返回 `Err`（`gate.rs:46-54`：`fs::read_to_string` 后 `serde_json::from_str` 的 `?`）。在 daemon 的测试模块里（`with_temp_config` 已具备）写一份坏 JSON 到 `<config_dir>/execution_gate.json`，然后调 `reject_if_gate_paused("mcp", "h", "uptime")`：断言 `status == 500`，并断言 `list_audit_core` **为空**。这条用例与现有的 `:6374 paused_gate_rejects_non_desktop_source_and_writes_audit` 成对——一条钉「paused 有审计」，一条钉「unreadable 没有」，后者正是要改的那个事实，所以它今天会绿、改完会红，是**故意红的**那种写法，登记时要说清。
+**判据（可执行，不需要真 daemon）**：`load_execution_gate()` 在 `execution_gate.json` 存在但内容不合法时返回 `Err`（`gate.rs:46-54`：`fs::read_to_string` 后 `serde_json::from_str` 的 `?`）。在 daemon 的测试模块里（`with_temp_config` 已具备）写一份坏 JSON 到 `<config_dir>/execution_gate.json`，然后调 `reject_if_gate_paused("mcp", "h", "uptime")`：断言 `status == 500`，并断言 `list_audit_core` **非空**。这条用例与现有的 `:6374 paused_gate_rejects_non_desktop_source_and_writes_audit` 成对——一条钉「paused 有审计」，一条钉 `unreadable` 的审计。**这个方向在第 4 轮被反过来过，理由值得记**：原先设想的是「断言审计为空」（钉住缺陷存在），那会让用例在修法落地那一刻转红，等于把门禁装在错的一侧；现在断言 `500 + 审计非空`，红在修法之前、绿在修法之后。
 
 **已落地（第 4 轮，代码 `src-tauri/src/bin/agent2ssh-daemon.rs`）**：用例名改为 `unreadable_gate_rejects_with_500_and_writes_audit`，断言方向按**修好之后**写（500 + 审计非空），并钉住 `host` / `command` / `source` / `risk_level` 四个字段。**本条只落了判据、没落修法**：`reject_if_gate_paused` 一个字未改，所以这条用例现在是**刻意红的**，`cargo test --features daemon --bin agent2ssh-daemon` 会失败一条。修法仍待拍板，且拍板问题比登记时更具体：500 支要写的审计条目里**没有一条真实命令**——它发生在 `gate_blocks_source` 之前，连「这条命令被拒了」都不成立，成立的是「这个请求没被处理」。所以要么给审计加一个「基础设施故障」形态，要么在 `reason` 前缀上钉死 `failed to load execution gate:` 并在台账里写死「这不算一次拒绝」。两者都不该顺手选。
+
+**这条红的影响面（第 4 轮实测核对，两处要更正）**：
+1. `5684510` 的提交信息写「`.cnb.yml`'s daemon binary job says so from now on」，但 `.cnb.yml` **全文 76 行、零提及**（最后一次改动是 `da79e93`，早于本条），该笔提交也只动了三个文件。所以 `daemon-regressions` 报红时**没有一处文字解释它**。`.cnb.yml` 在本循环里是禁区，这条注释只能由人或 CI 所有者补——**要么补注释，要么在修法落地前把用例 `#[ignore]` 掉并由 L2-132 的文字承载判据**，两条都需要拍板。
+2. 「一条刻意的红进了主分支，等于这条流水线从此报红」说得过头：`daemon-regressions` 的第一条命令是 `cargo test --locked --no-default-features --lib`，而 `--lib` 自 `09d49ea`（2026-11-10）起就是红的（`embedded_ssh::remove_system_known_host_matching::an_ipv6_literal_at_port_22_is_removed`，见 L2-15）。流水线**在这条之前已经红**，L2-132 把它从「一条红」变成「两条红」。这个区分对读 CI 的人有用：修掉 L2-132 不会让流水线转绿，还会剩 L2-15 那条。
 
 **修法（L2，需拍板）**：在 `:405-410` 的 `map_err` 里补一次审计（`RiskLevel::Blocked`、reason 用 `format!("failed to load execution gate: {e}")`、`side_effect: None`），以及一条 `GateRejected` 事件带 `"gate_load_failed": true`。要拍板的是**审计条目的语义**：这是一次「命令被拒」还是「一次基础设施故障」？现在 `append_audit` 只接受 `ExecResult`，用 `RiskLevel::Blocked` 表示会让「服务器坏了」与「管理员按了急停」在审计里同形——那正是 L2-130/131 在修的同一类事，别在修它的时候再造一个。可选：新增 `AuditOutcome`/事件类型，或沿用 `Blocked` 但在 `reason` 前缀上钉死 `failed to load execution gate:` 并让 `LEDGER` 记录这个口径。
 
@@ -1566,3 +1570,19 @@ batch 7 判「不成立」时用的论据是「`code.is_some()` 时 `interrupted
 **这条批注的口径收窄一处**：原文的「任何一条改法都**必须**有一个沉默对端」过强——`timeout_secs` 覆盖握手与命令两段，「超时」在两段都能造，沉默对端只是**握手段最省事的做法**。要证明 `interrupted` 能把「没收到 Exit」与「收到 `Exit(None)`」分开，得各造一次，后者需要真跑完一条命令的目标。
 
 **(b) 「the other ~52 daemon handlers」是 95。** `preflight_guarded_request`（`:503`）的文档注释说 `REQUEST_COUNT` 的递增「consistent with the other ~52 daemon handlers」。全仓 `REQUEST_COUNT.fetch_add(1, Ordering::Relaxed)` 实测 **95** 处（`grep -c`）。这个数字本身不影响行为，但它是**别人的引用源**：任何按「52 个 handler 都没有 preflight」推覆盖率的人会漏掉 43 个。要么改成实测数，要么删掉数字只留「consistent with every other daemon handler」。没有理由保留一个过期数——这正是本批反复在修的「写下没核过的数」。
+
+### L2-134（新，第 4 轮）：`/exec/stream` 把「配置读不出来」折成 `unknown host`
+
+同一个文件里三处读 `hosts.json`，两种形态：
+
+| 位置 | 写法 | 配置损坏时客户端看到 |
+|---|---|---|
+| `POST /health-snapshot`（`:5607`） | `load_config().map_err(\|e\| err(500, e))?` | 500 ＋ 原因 |
+| `POST /exec/stream`（`:5331-5334`） | `load_config().ok().and_then(… find …)` | WS 帧 `{"type":"error","error":"unknown host"}` |
+| `audit_host_scope`（`:465`） | `load_config().unwrap_or_default()` | 客户端看不到；空配置让 scope 更窄，方向是收，可接受 |
+
+`/exec/stream` 那一处是**诊断错位**而不是越权：请求仍被拒，但理由从「配置读不出来，可能整个 daemon 都病了」变成「这个主机不存在」。运维按 `unknown host` 去查主机别名，方向完全错——同一类错在 batch 13 修过一次（`gate_blocks_source` 之前的 500 被写成 423 文案）。
+
+**修法**：`.ok()` 换成 `map_err`，按帧发 `{"type":"error","error":"failed to load config: {e}"}`，与 `reject_if_gate_paused` 的 500 文案同族。属 `src-tauri/src/**` 行为改动，**登记不动**。
+
+**判据**：把 `hosts.json` 写成非法 JSON，`POST /exec/stream {"host":"whatever"}`，断言第一帧 `error` 含 `failed to load config`。今天拿到的是 `unknown host`。

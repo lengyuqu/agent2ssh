@@ -1078,7 +1078,12 @@ paths:
         that misses its deadline stops being waited for: its drain loop is
         dropped and the handler finishes its own cleanup, which can take up to
         another half second. The drain is therefore best effort, not a guarantee.
-        It then removes `daemon.pid`. Everything the daemon holds in memory ends
+        It then removes `daemon.pid` — but only if that file still names this
+        process. When it names another PID the file is left alone, because a
+        legacy or external writer that replaced it is the daemon this config
+        serves now, and deleting its PID would strand it; the outcome is not
+        silent, since the diagnostic log (`app.log`) records `pid_file_removed`
+        with the boolean. Everything the daemon holds in memory ends
         with it — PTY sessions, resident shells, port forwards and pending
         approvals. A pending approval is not left ambiguous: the wait behind it
         is cancelled, the approval is answered `rejected` while it is still
