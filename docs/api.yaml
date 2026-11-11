@@ -443,7 +443,7 @@ components:
       properties:
         host:        { type: string }
         direction:   { type: string, enum: [local, remote] }
-        bind_port:   { type: integer }
+        bind_port:   { type: integer, description: "Port to bind. `0` asks for an ephemeral port — the OS picks it for `local`, the server picks it for `remote` — and the rule is stored with the `0`, not with the port that was picked (see `ForwardRule.bind_port`)." }
         target_host: { type: string }
         target_port: { type: integer }
 
@@ -453,7 +453,7 @@ components:
         id:          { type: string, format: uuid }
         host:        { type: string }
         direction:   { type: string, enum: [local, remote] }
-        bind_port:   { type: integer }
+        bind_port:   { type: integer, description: "The port the rule was created with — not the port it is listening on. A rule created with `0` keeps that `0` after the OS or the server assigned a port, and no HTTP route reports the assigned one: `RuleStats.effective_port` carries it, but `forward_stats` is a desktop-only command. A stop-then-start of such a rule can therefore bind a different port under the same id, recorded only by a `remote forward listening` or dual-stack diagnostic line." }
         target_host: { type: string }
         target_port: { type: integer }
         name:        { type: string, nullable: true, description: "Human-readable label, serialized as null when unset (`ForwardRule.name` is an `Option`, with no `skip_serializing_if`). Rules created by `POST /forwards` always carry null here, because that handler reads five fields and ignores this one; `/forwards/multi` and the desktop app can set it." }
@@ -3757,7 +3757,7 @@ paths:
   /forwards/{id}/start:
     post:
       summary: Start a stopped tunnel
-      description: Routed through the same authorization path as adding a tunnel, using a `forward start ...` operation string. Like `DELETE /forwards/{id}`, that path runs only when the id matches a rule in the live table — an id that matches nothing skips gate, limits, scope, approval and the audit entry alike, and answers from the core.
+      description: Routed through the same authorization path as adding a tunnel, using a `forward start ...` operation string. Like `DELETE /forwards/{id}`, that path runs only when the id matches a rule in the live table — an id that matches nothing skips gate, limits, scope, approval and the audit entry alike, and answers from the core. A rule created with a zero bind port is started again with that same zero, so the assigned port may differ — the id survives, the port does not, and the response does not name it.
       parameters:
         - name: id
           in: path

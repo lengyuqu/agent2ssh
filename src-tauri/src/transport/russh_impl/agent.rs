@@ -246,6 +246,12 @@ impl Agent {
                 });
         if fetched.is_err() {
             // An interrupted agent packet cannot be resumed on this stream.
+            // Dropping the client is why one agent timeout is the last one for
+            // this connection: `run_independent` deliberately leaves SSH usable
+            // for fallback key authentication, and `embedded_ssh`'s authenticate
+            // loop calls `connect()` + `list_identities()` exactly once, so it
+            // does not retry the agent after this. Keep that pair in step: a
+            // retry here would need a fresh `connect()` first.
             *self
                 .client
                 .try_lock()

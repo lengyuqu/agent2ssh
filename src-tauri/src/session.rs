@@ -183,8 +183,14 @@ pub async fn session_open_core(host_name: &str) -> Result<Uuid> {
             // Send Close so the terminal thread exits promptly instead of
             // blocking on channel.read() until the SSH server times out.
             // The thread is in non-blocking mode, so it picks this up within
-            // ~10ms. If the send fails (thread already gone), the error is
-            // ignored — the handle drop below will still disconnect the channel.
+            // ~10ms. The `Close` command is what closes the channel; dropping
+            // the handle does **not** — it only drops this end of both queues,
+            // and `run_terminal`'s loop reads a closed command queue as "no
+            // commands this round", not as an exit. What actually stops the
+            // thread after a drop is the event sender failing on the next
+            // remote output, which a silent session never produces. So if the
+            // send below fails, the thread is already gone; do not rely on the
+            // drop for anything else.
             let _ = handle.tx.send(TerminalCommand::Close);
             let _ = lifecycle.lock().unwrap().close(&id.to_string(), None);
             return Err(anyhow!(
