@@ -31,11 +31,28 @@ pub struct FileLockGuard {
     _file: File,
 }
 
+/// Acquire `.hosts.lock` and resolve any commit left behind by a crashed
+/// writer before another write proceeds.
+///
+/// This is the cross-process half of [`store_write_lock`]. Async paths (WebDAV
+/// pull) call it directly: a `std::sync::MutexGuard` cannot be held across an
+/// await, but the advisory file lock still serializes them with every other
+/// writer because all writers use this same `.hosts.lock` file.
+pub fn hosts_file_lock() -> Result<FileLockGuard> {
+    let guard = lock_config_file(".hosts.lock")?;
+    let recovery = crate::store_commit::recover()
+        .context("failed to recover a pending hosts/secrets commit")?;
+    if recovery.replayed {
+        HOSTS_CACHE.invalidate();
+    }
+    Ok(guard)
+}
+
 pub fn store_write_lock() -> Result<StoreWriteGuard> {
     let process_guard = hosts_lock()
         .lock()
         .map_err(|_| anyhow::anyhow!("store lock poisoned"))?;
-    let file_guard = lock_config_file(".hosts.lock")?;
+    let file_guard = hosts_file_lock()?;
     Ok(StoreWriteGuard {
         _process_guard: process_guard,
         _file_guard: file_guard,
@@ -238,6 +255,57 @@ pub fn ensure_config_dir() -> Result<()> {
     fs::create_dir_all(config_dir()?).context("failed to create ~/.agent2ssh")
 }
 
+/// Atomically replace `target` with the already-synced `tmp`.
+///
+/// Windows refuses `fs::rename` over a file another process still has open and
+/// over a file carrying `FILE_ATTRIBUTE_READONLY`; both are ordinary states for
+/// a config file another CLI is reading. Clear the read-only bit and retry the
+/// rename with a bounded backoff (at most 6 attempts, ~630 ms total). POSIX
+/// rename is atomic over an existing target and needs neither workaround.
+pub fn replace_file_atomic(tmp: &Path, target: &Path) -> Result<()> {
+    clear_readonly_attribute(target);
+    replace_file_atomic_impl(tmp, target)
+}
+
+#[cfg(windows)]
+fn clear_readonly_attribute(target: &Path) {
+    if let Ok(metadata) = fs::metadata(target) {
+        if metadata.permissions().readonly() {
+            let mut permissions = metadata.permissions();
+            permissions.set_readonly(false);
+            let _ = fs::set_permissions(target, permissions);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn clear_readonly_attribute(_target: &Path) {}
+
+#[cfg(windows)]
+fn replace_file_atomic_impl(tmp: &Path, target: &Path) -> Result<()> {
+    let mut last_error = None;
+    for attempt in 0..6u32 {
+        match fs::rename(tmp, target) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                last_error = Some(error);
+                std::thread::sleep(std::time::Duration::from_millis(10u64 << attempt));
+            }
+        }
+    }
+    Err(last_error.expect("rename attempted at least once")).with_context(|| {
+        format!(
+            "failed to replace {} after 6 retries (another process may still hold it open)",
+            target.display()
+        )
+    })
+}
+
+#[cfg(not(windows))]
+fn replace_file_atomic_impl(tmp: &Path, target: &Path) -> Result<()> {
+    fs::rename(tmp, target).with_context(|| format!("failed to replace {}", target.display()))
+}
+
 /// Write sensitive bytes with owner-only permissions and crash-safe replacement.
 ///
 /// The temporary file is created beside the destination, flushed before the
@@ -273,8 +341,7 @@ pub fn write_private_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
             .with_context(|| format!("failed to sync temp file {}", tmp_path.display()))?;
         drop(file);
         restrict_file_to_owner(&tmp_path)?;
-        fs::rename(&tmp_path, path)
-            .with_context(|| format!("failed to replace {}", path.display()))?;
+        replace_file_atomic(&tmp_path, path)?;
         restrict_file_to_owner(path)?;
 
         // Best-effort directory fsync makes the rename durable across power
@@ -477,6 +544,21 @@ fn load_config_from_disk(path: &Path) -> Result<AppConfig> {
 /// the marker prevents an unrelated save from destroying the only migration
 /// signal.
 fn internalize_secrets(config: &mut AppConfig) {
+    let store_gen = crate::secrets::store_generation();
+    // A config whose generation is ahead of the store was written against a
+    // newer credential file that has since been restored or removed. Blank a
+    // marker to `None` in that state and the next save erases the only
+    // remaining reference — the failure looks exactly like "password deleted".
+    let store_is_behind = store_gen
+        .map(|generation| config.secrets_generation > generation)
+        .unwrap_or(false);
+    if store_is_behind {
+        eprintln!(
+            "warning: credential store is behind hosts.json (config generation {}, store generation {}); secret references are preserved, not resolved",
+            config.secrets_generation,
+            store_gen.unwrap_or(0)
+        );
+    }
     let unlocked = crate::secrets::is_unlocked() || crate::secrets::try_unlock_from_env();
     for host in &mut config.hosts {
         if let Some(pw) = &host.password {
@@ -485,7 +567,7 @@ fn internalize_secrets(config: &mut AppConfig) {
                     crate::secrets::get_secret(&crate::secrets::host_account(&host.name))
                 {
                     host.password = Some(real);
-                } else if unlocked {
+                } else if unlocked && !store_is_behind {
                     // Genuinely missing (entry deleted) — don't leak the marker.
                     host.password = None;
                 }
@@ -498,7 +580,7 @@ fn internalize_secrets(config: &mut AppConfig) {
                     crate::secrets::get_secret(&crate::secrets::host_passphrase_account(&host.name))
                 {
                     host.passphrase = Some(real);
-                } else if unlocked {
+                } else if unlocked && !store_is_behind {
                     host.passphrase = None;
                 }
             }
@@ -511,7 +593,7 @@ fn internalize_secrets(config: &mut AppConfig) {
                     crate::secrets::get_secret(&crate::secrets::proxy_account(&proxy.id))
                 {
                     proxy.password = Some(real);
-                } else if unlocked {
+                } else if unlocked && !store_is_behind {
                     proxy.password = None;
                 }
             }
@@ -521,9 +603,14 @@ fn internalize_secrets(config: &mut AppConfig) {
 
 /// Encrypt real credentials into the app-managed store before persisting (K1),
 /// replacing each with the [`crate::secrets::SECRET_REF`] marker on disk. An
-/// existing marker is left untouched. Legacy password/proxy behavior remains
-/// compatible when the vault is locked, but private-key passphrases fail closed
-/// so they are never newly written to `hosts.json` in plaintext.
+/// existing marker is left untouched.
+///
+/// Failure policy (K8): a new **host password** supplied through a legacy
+/// `--password` argument still warns and falls back to plaintext when the
+/// vault is locked, unless `strict_host` names that host (the `--*-stdin`
+/// path, which must never fall back). A **private-key passphrase** and a
+/// **proxy password** both fail closed unconditionally — the same locked store
+/// must not produce one plaintext credential and one refusal in a single save.
 fn externalize_secrets(config: &mut AppConfig, strict_host: Option<&str>) -> Result<()> {
     use crate::secrets::{
         host_account, host_passphrase_account, is_secret_ref, proxy_account, store_secret,
@@ -569,12 +656,19 @@ fn externalize_secrets(config: &mut AppConfig, strict_host: Option<&str>) -> Res
             if pw.is_empty() || is_secret_ref(pw) {
                 continue;
             }
+            // P2: proxy passwords used to be the one branch that still wrote
+            // plaintext with a warning while the passphrase branch failed
+            // closed. Keep one policy for the same locked store.
             match store_secret(&proxy_account(&proxy.id), pw) {
                 Ok(()) => proxy.password = Some(SECRET_REF.to_string()),
-                Err(e) => eprintln!(
-                    "warning: could not encrypt password for proxy '{}' ({e}); left as plaintext until the credential store is unlocked",
-                    proxy.id
-                ),
+                Err(e) => {
+                    return Err(e).with_context(|| {
+                        format!(
+                            "refusing to persist an unencrypted password for proxy '{}'",
+                            proxy.id
+                        )
+                    })
+                }
             }
         }
     }
@@ -621,8 +715,15 @@ pub fn migrate_plaintext_secrets() -> Result<usize> {
         return Ok(0);
     }
 
+    // Phase 0: this migration is a read-modify-write over two files. Hold the
+    // same `.hosts.lock` as every other writer across both halves, and use the
+    // unlocked save so the lock is not taken twice (the process-local mutex is
+    // not reentrant). The count above is only a cheap early-out; this write is
+    // the authoritative, serialized one.
+    let _guard = store_write_lock()?;
+    HOSTS_CACHE.invalidate();
     let config = load_config()?;
-    save_config(&config)?;
+    save_config_unlocked(&config)?;
     Ok(plaintext_count)
 }
 
@@ -635,32 +736,109 @@ pub(crate) fn save_config_unlocked(config: &AppConfig) -> Result<()> {
     save_config_unlocked_strict_host(config, None)
 }
 
+/// Removes the prepared temp file on every ordinary exit path except a
+/// successful rename. A `kill -9` runs no destructor — that is exactly the gap
+/// the commit log covers — but errors and panics no longer leave a
+/// config-shaped file (possibly holding a plaintext fallback) behind.
+struct TempConfigGuard {
+    path: PathBuf,
+    created: bool,
+    keep: bool,
+}
+
+impl TempConfigGuard {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            created: false,
+            keep: false,
+        }
+    }
+}
+
+impl Drop for TempConfigGuard {
+    fn drop(&mut self) {
+        if self.created && !self.keep {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
 pub(crate) fn save_config_unlocked_strict_host(
     config: &AppConfig,
     strict_host: Option<&str>,
 ) -> Result<()> {
     ensure_config_dir()?;
-    let mut normalized = normalize_config(config.clone());
     let path = config_path()?;
     let tmp_path = path.with_extension(format!("json.tmp.{}", std::process::id()));
-    let mut created_temp = false;
+    let mut temp = TempConfigGuard::new(tmp_path.clone());
+
+    // A config whose generation is ahead of the store was written against a
+    // newer secrets.enc that has since been restored or removed. Writing it
+    // back would certify dangling references as current.
+    let generation_before = crate::secrets::store_generation();
+    if let Some(store_generation) = generation_before {
+        if config.secrets_generation > store_generation {
+            anyhow::bail!(
+                "credential store is behind hosts.json (config generation {}, store generation {}); refusing to save until secrets.enc is restored",
+                config.secrets_generation,
+                store_generation
+            );
+        }
+    }
+
+    let mut normalized = normalize_config(config.clone());
+    let mut log_started = false;
     let write_result = (|| -> Result<()> {
         let mut file = OpenOptions::new()
             .create_new(true)
             .write(true)
             .open(&tmp_path)
             .with_context(|| format!("failed to open temp config {}", tmp_path.display()))?;
-        created_temp = true;
+        temp.created = true;
         // Reserve the configuration output before mutating the credential
         // store. If opening it fails, the previous credentials are untouched.
-        // Later write/rename failures can still occur after secret updates.
         externalize_secrets(&mut normalized, strict_host)?;
+
+        // Stamp the generation the references in this file were written
+        // against. `externalize_secrets` bumps it once per sealed secret.
+        let generation_after = crate::secrets::store_generation().unwrap_or(0);
+        normalized.secrets_generation = generation_after;
+        let secrets_changed = generation_after != generation_before.unwrap_or(0);
+
         let raw = serde_json::to_string_pretty(&normalized)?;
         file.write_all(raw.as_bytes())
             .with_context(|| format!("failed to write temp config {}", tmp_path.display()))?;
         file.sync_all()
             .with_context(|| format!("failed to sync temp config {}", tmp_path.display()))?;
+        drop(file);
         restrict_file_to_owner(&tmp_path)?;
+
+        // Only a save that actually changed the credential store needs a
+        // two-file commit record. A hosts-only save is already covered by the
+        // single atomic rename below.
+        if secrets_changed {
+            let secrets_path = crate::store_commit::secrets_file_path()?;
+            let secrets_hash =
+                crate::store_commit::sha256_file(&secrets_path)?.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "credential store changed but {} is missing",
+                        secrets_path.display()
+                    )
+                })?;
+            crate::store_commit::begin(&crate::store_commit::CommitLog {
+                version: 1,
+                hosts_sha256: crate::store_commit::sha256_bytes(raw.as_bytes()),
+                secrets_sha256: secrets_hash,
+                secrets_generation: generation_after,
+                tmp_name: tmp_path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .ok_or_else(|| anyhow::anyhow!("config temp file has no name"))?,
+            })?;
+            log_started = true;
+        }
+
         // Write-before backup: snapshot the last-good file so a bad write (or a
         // hand-edit gone wrong) can be rolled back from `hosts.json.bak`. The
         // rename below is already atomic, so this protects against bad *content*,
@@ -677,17 +855,26 @@ pub(crate) fn save_config_unlocked_strict_host(
                 let _ = restrict_file_to_owner(&backup);
             }
         }
-        fs::rename(&tmp_path, &path)
-            .with_context(|| format!("failed to replace hosts config {}", path.display()))?;
+        replace_file_atomic(&tmp_path, &path)?;
+        temp.keep = true;
         restrict_file_to_owner(&path)?;
         Ok(())
     })();
-    if write_result.is_err() && created_temp {
-        let _ = fs::remove_file(&tmp_path);
-    } else if write_result.is_ok() {
+
+    if write_result.is_err() && log_started {
+        // Drop is about to remove the prepared temp file; the log must not
+        // outlive it or recovery would refuse every later write.
+        let _ = crate::store_commit::finish();
+    }
+    if write_result.is_ok() {
         // Drop the cached value so this process reads the new hosts immediately,
         // independent of filesystem mtime granularity. (I5)
         HOSTS_CACHE.invalidate();
+        if log_started {
+            // Best-effort: hosts.json is already committed. A leftover log
+            // whose target hash matches is cleared by the next lock holder.
+            let _ = crate::store_commit::finish();
+        }
     }
     write_result
 }
@@ -1764,6 +1951,7 @@ mod tests {
     fn migrate_config_is_idempotent_and_does_not_downgrade() {
         // Already-current config is unchanged.
         let mut current = AppConfig {
+            secrets_generation: 0,
             schema_version: CONFIG_SCHEMA_VERSION,
             ..Default::default()
         };
@@ -1772,6 +1960,7 @@ mod tests {
 
         // A file written by a hypothetical newer build is never downgraded.
         let future = AppConfig {
+            secrets_generation: 0,
             schema_version: CONFIG_SCHEMA_VERSION + 5,
             ..Default::default()
         };
@@ -1787,6 +1976,7 @@ mod tests {
 
         // ...but never below an existing higher version.
         let future = AppConfig {
+            secrets_generation: 0,
             schema_version: CONFIG_SCHEMA_VERSION + 2,
             ..Default::default()
         };
@@ -1802,6 +1992,7 @@ mod tests {
         std::env::set_var(CONFIG_DIR_ENV, &dir);
 
         let first = AppConfig {
+            secrets_generation: 0,
             hosts: vec![crate::types::HostProfile {
                 ai_allowed: true,
                 name: "alpha".into(),
@@ -1873,6 +2064,7 @@ mod tests {
             passphrase: Some("key-passphrase".into()),
         };
         save_config(&AppConfig {
+            secrets_generation: 0,
             hosts: vec![host],
             ..Default::default()
         })

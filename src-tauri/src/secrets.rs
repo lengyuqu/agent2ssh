@@ -36,10 +36,12 @@ use std::collections::HashMap;
 use std::sync::{Mutex, RwLock};
 
 use crate::app_state::app_state;
-use crate::store::{config_dir, ensure_config_dir, restrict_file_to_owner};
+use crate::store::{
+    config_dir, ensure_config_dir, lock_config_file, restrict_file_to_owner, FileLockGuard,
+};
 
 /// Encrypted credential file under the config dir.
-const SECRETS_FILE: &str = "secrets.enc";
+pub const SECRETS_FILE: &str = "secrets.enc";
 
 /// On-disk sentinel that replaces a real password in `hosts.json`. When a
 /// `password` field equals this exact value, the real secret lives (encrypted)
@@ -241,6 +243,13 @@ struct EncryptedStoreV2 {
     kdf: String,
     /// base64 Argon2 salt (16 bytes).
     salt: String,
+    /// Monotonic counter bumped on every change to `entries`. `hosts.json`
+    /// records the generation its secret references were written against, so a
+    /// restored/removed `secrets.enc` can be detected before a save silently
+    /// turns dangling references into missing passwords. Legacy v2 files have
+    /// no field and read as generation 0.
+    #[serde(default)]
+    generation: u64,
     /// Per-account encrypted entries. Key = account name (e.g. "host:myhost").
     entries: HashMap<String, EncryptedEntry>,
 }
@@ -258,6 +267,38 @@ struct EncryptedStoreV1 {
 
 fn secrets_path() -> Result<std::path::PathBuf> {
     Ok(config_dir()?.join(SECRETS_FILE))
+}
+
+/// Read the on-disk credential-store generation **without decrypting**.
+///
+/// `None` means there is no file-backed store to compare against (missing file,
+/// memory backend, or unreadable JSON); callers skip the generation guard in
+/// that case. A legacy v2/v1 file without the field reports `Some(0)`.
+pub fn store_generation() -> Option<u64> {
+    if backend_is_memory() {
+        return None;
+    }
+    let path = secrets_path().ok()?;
+    if !path.exists() {
+        return None;
+    }
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let probe: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    Some(
+        probe
+            .get("generation")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0),
+    )
+}
+
+/// Exclusive lock covering the whole `load_map -> modify -> save_map` window.
+///
+/// `.secrets.lock` is a **leaf** lock: paths that also write `hosts.json` hold
+/// `.hosts.lock` first (via `store_write_lock`) and acquire this one inside
+/// `externalize_secrets`. No path may acquire them in the reverse order.
+fn secrets_write_lock() -> Result<FileLockGuard> {
+    lock_config_file(".secrets.lock")
 }
 
 // ── Migration marker chain (B2) ───────────────────────────────────────────────
@@ -667,6 +708,7 @@ fn save_map(map: &HashMap<String, String>) -> Result<()> {
         version: 2,
         kdf: "argon2id".into(),
         salt: b64().encode(&salt),
+        generation: store_generation().unwrap_or(0).saturating_add(1),
         entries,
     };
     let raw = serde_json::to_string_pretty(&store)?;
@@ -701,20 +743,36 @@ fn atomic_write_file(path: &std::path::Path, raw: &[u8]) -> Result<()> {
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "store".to_string());
-    let tmp = dir.join(format!(".{file_name}.tmp-{}", std::process::id()));
-    {
-        let mut file = std::fs::File::create(&tmp)
-            .with_context(|| format!("failed to create temp store {}", tmp.display()))?;
-        file.write_all(raw).context("failed to write temp store")?;
-        file.sync_all().context("failed to fsync temp store")?;
+    // A fresh UUID keeps a crashed writer's leftover temp file from colliding
+    // with (or being truncated by) a later save in the same process tree.
+    let tmp = dir.join(format!(
+        ".{file_name}.tmp-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let result = (|| -> Result<()> {
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&tmp)
+                .with_context(|| format!("failed to create temp store {}", tmp.display()))?;
+            file.write_all(raw).context("failed to write temp store")?;
+            file.sync_all().context("failed to fsync temp store")?;
+        }
+        crate::store::replace_file_atomic(&tmp, path)
+            .with_context(|| format!("failed to rename temp store to {}", path.display()))?;
+        // Best-effort: fsync the directory so the rename is durable across
+        // power loss.
+        if let Ok(dir_file) = std::fs::File::open(dir) {
+            let _ = dir_file.sync_all();
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("failed to rename temp store to {}", path.display()))?;
-    // Best-effort: fsync the directory so the rename is durable across power loss.
-    if let Ok(dir_file) = std::fs::File::open(dir) {
-        let _ = dir_file.sync_all();
-    }
-    Ok(())
+    result
 }
 
 /// Read the stored Argon2 salt, if the file exists. Works with both v1 and v2
@@ -813,6 +871,7 @@ pub fn unlock_or_init(password: &str) -> Result<()> {
             version: 2,
             kdf: "argon2id".into(),
             salt: b64().encode(salt),
+            generation: 0,
             entries,
         };
         let json = serde_json::to_string_pretty(&store)?;
@@ -877,6 +936,9 @@ pub fn change_master_password(new_password: &str) -> Result<()> {
     if new_password.is_empty() {
         return Err(anyhow!("master password must not be empty"));
     }
+    // Re-encrypting the whole store is a read-modify-write too; serialize it
+    // against `store_secret`/`delete_secret` in other processes.
+    let _guard = secrets_write_lock()?;
     let map = load_map()?; // requires unlocked (loads v1 or v2 transparently)
     let salt = random_bytes::<16>()?;
     let key = derive_key(new_password, &salt)?;
@@ -900,6 +962,10 @@ pub fn change_master_password(new_password: &str) -> Result<()> {
         version: 2,
         kdf: "argon2id".into(),
         salt: b64().encode(salt),
+        // Changing the master password re-encrypts the same entries under a
+        // new key; the *content* generation is unchanged, so references in
+        // hosts.json remain valid and must not be flagged as stale.
+        generation: store_generation().unwrap_or(0),
         entries,
     };
     let path = secrets_path()?;
@@ -972,6 +1038,11 @@ pub fn store_secret(account: &str, secret: &str) -> Result<()> {
             }
         }
     }
+    // Phase 0 of the cross-file commit protocol: one exclusive lock spans the
+    // entire read-modify-write window. Without it two processes can each load
+    // the same map, add different accounts, and the later `save_map` silently
+    // erases the earlier secret while `hosts.json` still references it.
+    let _guard = secrets_write_lock()?;
     let mut map = load_map()?;
     map.insert(account.to_string(), secret.to_string());
     save_map(&map)
@@ -1044,6 +1115,11 @@ pub fn delete_secret(account: &str) {
     if !is_unlocked() && !try_unlock_from_env() {
         return;
     }
+    // Best-effort by contract, but the RMW window is still serialized so a
+    // concurrent `store_secret` cannot be lost by this rewrite.
+    let Ok(_guard) = secrets_write_lock() else {
+        return;
+    };
     if let Ok(mut map) = load_map() {
         if map.remove(account).is_some() {
             let _ = save_map(&map);

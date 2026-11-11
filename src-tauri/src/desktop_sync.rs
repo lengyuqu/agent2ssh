@@ -1,7 +1,7 @@
 //! Validation and recovery of the desktop's encrypted JSON snapshot format.
 use crate::{
-    store::{config_dir, write_private_bytes},
-    webdav_sync::{create_sync_backup, restore_config_snapshot, SYNCABLE_FILES},
+    store::{config_dir, hosts_file_lock, write_private_bytes},
+    webdav_sync::{create_sync_backup, restore_config_snapshot_unlocked, SYNCABLE_FILES},
 };
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
@@ -84,6 +84,10 @@ impl Snapshot {
     /// Returns the undo snapshot id. Failures after the first write roll back
     /// through the same local snapshot mechanism exposed by the desktop.
     pub fn restore(&self) -> Result<String> {
+        // Phase 0: a cloud restore writes hosts.json directly. Hold the same
+        // `.hosts.lock` as `save_config` for the *whole* attempt, including the
+        // rollback, so no host edit can interleave with the multi-file write.
+        let _guard = hosts_file_lock()?;
         self.restore_with(write_private_bytes)
     }
 
@@ -126,7 +130,7 @@ impl Snapshot {
             Ok(())
         })();
         if let Err(error) = applied {
-            return match restore_config_snapshot(&id) {
+            return match restore_config_snapshot_unlocked(&id) {
                 Ok(_) => Err(anyhow!("cloud restore failed; previous configuration restored: {error:#}")),
                 Err(rollback) => Err(anyhow!("cloud restore failed: {error:#}; rollback failed: {rollback:#}; recovery snapshot: {id}")),
             };
@@ -170,7 +174,7 @@ mod tests {
             "trust"
         );
         assert_eq!(fs::read_to_string(dir.join("keys/private")).unwrap(), "key");
-        restore_config_snapshot(&id).unwrap();
+        crate::webdav_sync::restore_config_snapshot(&id).unwrap();
         assert_eq!(
             fs::read_to_string(dir.join("policy.toml")).unwrap(),
             "mode = 'old'"

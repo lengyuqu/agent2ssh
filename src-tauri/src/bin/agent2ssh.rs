@@ -2864,29 +2864,36 @@ async fn async_main() -> Result<()> {
                 }
             }
             SecretsCommands::SetPassword { password } => {
-                let password =
-                    match password.or_else(|| std::env::var("AGENT2SSH_MASTER_PASSWORD").ok()) {
-                        Some(p) if !p.is_empty() => p,
-                        _ => {
-                            eprint!("New master password: ");
-                            use std::io::Write as _;
-                            std::io::stderr().flush().ok();
-                            let mut line = String::new();
-                            std::io::stdin().read_line(&mut line)?;
-                            line.trim_end_matches(['\n', '\r']).to_string()
-                        }
-                    };
+                let initialized = agent2ssh::secrets::is_initialized();
+                // `--password` is always the NEW value. On an existing store,
+                // AGENT2SSH_MASTER_PASSWORD is the CURRENT value used to unlock
+                // it; reusing it as the new password (the old fallback) silently
+                // "changed" nothing and produced a misleading error when locked.
+                let password = match password {
+                    Some(p) if !p.is_empty() => p,
+                    _ if initialized => {
+                        return Err(anyhow::anyhow!(
+                            "changing the master password requires --password <NEW>; AGENT2SSH_MASTER_PASSWORD holds the CURRENT password used to unlock the existing store"
+                        ));
+                    }
+                    _ => match std::env::var("AGENT2SSH_MASTER_PASSWORD")
+                        .ok()
+                        .filter(|p| !p.is_empty())
+                    {
+                        Some(p) => p,
+                        None => read_secret_line("New master password: ")?,
+                    },
+                };
                 if password.is_empty() {
                     return Err(anyhow::anyhow!("master password must not be empty"));
                 }
-                let initialized = agent2ssh::secrets::is_initialized();
                 if initialized {
                     // Changing requires the store to be unlocked first.
                     if !agent2ssh::secrets::is_unlocked()
                         && !agent2ssh::secrets::try_unlock_from_env()
                     {
                         return Err(anyhow::anyhow!(
-                            "store is locked; set AGENT2SSH_MASTER_PASSWORD to the current password before changing it"
+                            "store is locked; --password is the NEW master password and cannot unlock the existing store. Set AGENT2SSH_MASTER_PASSWORD to the CURRENT password (or unlock from the desktop) before changing it"
                         ));
                     }
                     agent2ssh::secrets::change_master_password(&password)?;
@@ -5686,6 +5693,50 @@ async fn daemon_json<T: serde::de::DeserializeOwned>(
         .json::<T>()
         .await
         .context("failed to parse daemon response")
+}
+
+/// Read a master password from stdin without echoing it (A12 / issue #6).
+///
+/// On a terminal, reuse the existing `raw_terminal` guard to disable `ECHO`
+/// (and canonical input) and read byte-by-byte until Enter; a single trailing
+/// line ending is implied by the Enter key, and backspace edits the buffer.
+/// On a pipe or redirect there is no terminal to echo to, so read one line and
+/// print no prompt — a prompt on stderr would contaminate captured output and
+/// there is no way to suppress echo anyway. Only trailing `\\n`/`\\r` are
+/// stripped, so leading/trailing spaces remain part of the password.
+fn read_secret_line(prompt: &str) -> anyhow::Result<String> {
+    use std::io::{IsTerminal, Read, Write as _};
+
+    if !std::io::stdin().is_terminal() {
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+        return Ok(line.trim_end_matches(['\n', '\r']).to_string());
+    }
+
+    eprint!("{prompt}");
+    std::io::stderr().flush().ok();
+    let raw = raw_terminal::RawTerminal::enable()
+        .map_err(|error| anyhow::anyhow!("cannot disable terminal echo: {error}"))?;
+    let mut bytes = Vec::new();
+    let mut stdin = std::io::stdin().lock();
+    let mut byte = [0u8; 1];
+    loop {
+        if stdin.read(&mut byte)? == 0 {
+            break;
+        }
+        match byte[0] {
+            b'\n' | b'\r' => break,
+            0x7f | 0x08 => {
+                bytes.pop();
+            }
+            value => bytes.push(value),
+        }
+    }
+    drop(stdin);
+    drop(raw);
+    eprintln!();
+    String::from_utf8(bytes)
+        .map_err(|error| anyhow::anyhow!("master password is not valid UTF-8: {error}"))
 }
 
 // ── G14: interactive terminal (host open) ──────────────────────────────────

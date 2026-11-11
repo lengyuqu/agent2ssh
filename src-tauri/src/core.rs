@@ -4242,6 +4242,7 @@ mod tests {
         std::env::set_var(CONFIG_DIR_ENV, &config_dir);
 
         crate::store::save_config(&AppConfig {
+            secrets_generation: 0,
             schema_version: 0,
             groups: vec![],
             proxies: vec![],
@@ -4353,6 +4354,7 @@ mod tests {
 
         // Set up existing config with one host
         let existing_config = AppConfig {
+            secrets_generation: 0,
             schema_version: 0,
             groups: vec![],
             proxies: vec![],
@@ -4446,6 +4448,7 @@ mod tests {
         std::env::set_var(CONFIG_DIR_ENV, &config_dir);
 
         crate::store::save_config(&AppConfig {
+            secrets_generation: 0,
             schema_version: 0,
             groups: vec![],
             proxies: vec![],

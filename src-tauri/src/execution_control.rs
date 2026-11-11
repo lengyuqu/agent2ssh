@@ -610,6 +610,7 @@ mod tests {
     async fn human_only_host_refuses_ai_sources_and_audits_the_refusal() {
         let _dir = crate::store::TestConfigDir::new("humanonly");
         crate::store::save_config(&crate::types::AppConfig {
+            secrets_generation: 0,
             hosts: vec![
                 host_json(
                     serde_json::json!({"name": "vault", "host": "10.0.0.1", "ai_allowed": false}),
@@ -667,6 +668,7 @@ mod tests {
     async fn a_local_target_is_not_gated_by_the_human_only_flag() {
         let _dir = crate::store::TestConfigDir::new("localhumanonly");
         crate::store::save_config(&crate::types::AppConfig {
+            secrets_generation: 0,
             hosts: vec![host_json(
                 serde_json::json!({"name": "vault", "host": "10.0.0.1", "ai_allowed": false}),
             )],
@@ -789,6 +791,7 @@ mod tests {
     async fn host_policy_summary_reflects_live_policies() {
         let _dir = crate::store::TestConfigDir::new("policysummary");
         crate::store::save_config(&crate::types::AppConfig {
+            secrets_generation: 0,
             hosts: vec![host_json(
                 serde_json::json!({"name": "db-1", "host": "10.0.0.3", "tags": ["prod"], "ai_allowed": false}),
             )],

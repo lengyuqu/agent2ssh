@@ -11,8 +11,8 @@ use std::{
 };
 
 use crate::store::{
-    config_dir, ensure_config_dir, lock_config_file, restrict_file_to_owner, write_private_bytes,
-    FileLockGuard,
+    config_dir, ensure_config_dir, hosts_file_lock, lock_config_file, restrict_file_to_owner,
+    write_private_bytes, FileLockGuard,
 };
 
 const SYNC_VERSION_FILE: &str = "sync_version.json";
@@ -864,6 +864,16 @@ pub fn create_named_snapshot(label: &str) -> Result<ConfigSnapshotInfo> {
 /// snapshot of the CURRENT state first (so restoring is itself undoable), then
 /// restores both the contents and absence of files in the snapshot's scope.
 pub fn restore_config_snapshot(id: &str) -> Result<ConfigSnapshotInfo> {
+    // Phase 0: a snapshot restore overwrites hosts.json directly — it never
+    // goes through `save_config`. Take the same lock as every other writer so
+    // it cannot interleave with a host edit's read-modify-write.
+    let _guard = hosts_file_lock()?;
+    restore_config_snapshot_unlocked(id)
+}
+
+/// Lock-free body of [`restore_config_snapshot`], for a caller that already
+/// holds `.hosts.lock` for the whole attempt (the desktop restore's rollback).
+pub(crate) fn restore_config_snapshot_unlocked(id: &str) -> Result<ConfigSnapshotInfo> {
     let source_dir = backup_dir_for_id(id)?;
     let info = read_backup_manifest(&source_dir)?;
     // Verify and read the entire snapshot before touching live configuration.
@@ -952,13 +962,17 @@ pub fn apply_config_template(files: &[(String, String)]) -> Result<ConfigSnapsho
             ));
         }
     }
+    // Phase 0: templates can include hosts.json. Hold `.hosts.lock` and use the
+    // same owner-only atomic replacement as the rest of the config writers —
+    // a bare `fs::write` truncated the live file in place and skipped the lock.
+    let _guard = hosts_file_lock()?;
     let pre_apply = create_named_snapshot("pre-template")?;
     ensure_config_dir()?;
     let dir = config_dir()?;
     for (name, content) in files {
         let dest = dir.join(name);
-        fs::write(&dest, content).with_context(|| format!("failed to write {}", dest.display()))?;
-        restrict_file_to_owner(&dest)?;
+        write_private_bytes(&dest, content.as_bytes())
+            .with_context(|| format!("failed to write {}", dest.display()))?;
     }
     Ok(pre_apply)
 }
@@ -1225,31 +1239,35 @@ async fn sync_pull<R: SyncRemote>(
         return Err(anyhow!("sync conflict: remote marker changed during pull"));
     }
 
-    let backup = create_sync_backup(None)?;
-    let dir = config_dir()?;
-    let remote_paths: HashSet<String> =
-        applied_files.iter().map(|file| file.path.clone()).collect();
+    // Phase 0: pull rewrites hosts.json without going through `save_config`.
+    // `webdav_pull` already holds `.sync.lock`; the order is always
+    // sync -> hosts -> secrets, never the reverse, so no ABBA deadlock.
+    let backup = {
+        let _hosts_guard = hosts_file_lock()?;
+        let backup = create_sync_backup(None)?;
+        let dir = config_dir()?;
+        let remote_paths: HashSet<String> =
+            applied_files.iter().map(|file| file.path.clone()).collect();
 
-    for (path, plaintext) in downloaded {
-        let dest = dir.join(&path);
-        let tmp = dest.with_extension(format!("tmp.{}", std::process::id()));
-        fs::write(&tmp, plaintext).with_context(|| format!("failed to write {}", tmp.display()))?;
-        restrict_file_to_owner(&tmp)?;
-        fs::rename(&tmp, &dest).with_context(|| format!("failed to replace {}", dest.display()))?;
-        restrict_file_to_owner(&dest)?;
-    }
+        for (path, plaintext) in downloaded {
+            let dest = dir.join(&path);
+            write_private_bytes(&dest, &plaintext)
+                .with_context(|| format!("failed to restore {}", dest.display()))?;
+        }
 
-    for rel in SYNCABLE_FILES {
-        if remote_paths.contains(*rel) {
-            continue;
+        for rel in SYNCABLE_FILES {
+            if remote_paths.contains(*rel) {
+                continue;
+            }
+            let local = dir.join(rel);
+            if local.exists() {
+                fs::remove_file(&local).with_context(|| {
+                    format!("failed to remove stale local file {}", local.display())
+                })?;
+            }
         }
-        let local = dir.join(rel);
-        if local.exists() {
-            fs::remove_file(&local).with_context(|| {
-                format!("failed to remove stale local file {}", local.display())
-            })?;
-        }
-    }
+        backup
+    };
 
     let local_marker = WebDavSyncMarker {
         schema_version: remote_marker.schema_version.max(2),

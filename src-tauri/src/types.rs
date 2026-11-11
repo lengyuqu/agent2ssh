@@ -699,6 +699,14 @@ pub struct AppConfig {
     /// top of the file.
     #[serde(default)]
     pub schema_version: u32,
+    /// Generation of `secrets.enc` that the credential references in this file
+    /// were written against. A value *ahead* of the store means the credential
+    /// file was rolled back or removed while `hosts.json` kept its references;
+    /// the save path refuses to persist that state and the load path keeps the
+    /// markers instead of resolving them to `None`. Absent in legacy files.
+    /// See `store_commit` for the cross-file commit protocol.
+    #[serde(default)]
+    pub secrets_generation: u64,
     #[serde(default = "default_host_groups")]
     pub groups: Vec<HostGroup>,
     #[serde(default)]

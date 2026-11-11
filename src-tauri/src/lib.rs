@@ -57,6 +57,7 @@ pub mod snippets;
 pub mod ssh_algo;
 pub mod ssh_config;
 pub mod store;
+pub mod store_commit;
 pub mod telemetry;
 pub mod transport;
 pub mod types;
