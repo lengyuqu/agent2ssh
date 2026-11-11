@@ -1771,3 +1771,43 @@ issue #20 正文要求在两种策略里选一个。两个落点：
 `read_daemon_pid` 把所有 `ErrorKind::NotFound` 当作「没有文件」（`daemon_control.rs:60`）。悬空符号链接的 `read_to_string` 正是 NotFound，于是 `daemon status` 打印 `Daemon is not running.`、`daemon start` 走 `write_daemon_pid` 的 `std::fs::write(path)`——它会**跟随链接**到不存在的目标，报 `failed to write daemon PID file: No such file or directory`。用户看到的是「未运行」与一句写盘错误，中间没有「记录坏了」这个事实。
 
 **要拍的口径**：悬空链接算 `Malformed`（保留并报错）还是继续算 `Absent`（并允许启动覆盖）。若选前者，`read_daemon_pid` 要用 `symlink_metadata` 先判链接自身；若选后者，`write_daemon_pid` 应在目标不存在时先 `remove_file` 再写，否则「覆盖」根本不会发生。两条都属 `src-tauri/src/**` 行为，且会改 `daemon start` 的失败语义。
+
+### L2-147（新，batch 14 第 1 轮）：`Registry::push` 无界，`_queue_maxsize` 是 no-op
+
+`transport/russh_impl/mod.rs:1040-1046` 的 `channel_forward_listen(&self, remote_port, host, _queue_maxsize: Option<u32>)` **从不读**这个参数；`run_remote_forward`（`forward.rs:625-626`）传的是 `Some(16)`，所以代码里那句话读起来像有背压，实际没有。`Registry::push`（`transport/russh_impl/forward.rs:46-50`）是 `queues.entry(port).or_default().push_back(channel)`，每端口一个 `VecDeque`，无上限；`take` 每轮 `pop_front` 一个。
+
+所以队列长度 = `push` 速率 − `accept` 速率 的积分，无上界。`run_remote_forward` 的 accept 循环（`forward.rs:644-676`）每接一个就 `thread::spawn` 一条桥接线程，两个资源一起无界：慢目标主机 + 快连接速率下既堆 channel 又堆线程。
+
+**建议改法**：`Registry` 每端口设上限（与 `Some(16)` 对齐），超限时把新 channel `close()` 掉（服务端会把它当成拒绝），并给 `RuleStats` 或诊断日志一个丢弃计数。删掉 `_queue_maxsize` 的下划线、让它真的有作用，比新增字段更小。属 `src-tauri/src/**` 行为改动。
+
+**回滚**：把上限设成 `usize::MAX` 即回到今天的行为。
+
+### L2-148（新，batch 14 第 1 轮）：`bind_port: 0` 的规则，实际端口在 HTTP API 上取不到，重启后还可能变
+
+`forward_add_core_via` 把调用方给的 `bind_port` 原样存进 `ForwardRule`（`forward.rs:388`）；实际端口只在 `RuleControl.effective_port`（`:70`、`:515`、`:644`）里，经 `RuleStats`（`:112-120`）由 `forward_stats_core` 暴露——而后者只挂在 Tauri 命令 `forward_stats`（`tauri_commands.rs:1362-1364`）上，**daemon 没有任何路由返回它**。`forward_list_core` 返回的是 `h.rule`（`:739-746`），`bind_port` 仍是 `0`。
+
+两个后果：① 通过 `POST /forwards` 或 CLI 建一条 `0` 端口的隧道，调用方从响应里读不到它实际监听在哪（CLI 在 `bin/agent2ssh.rs:2709-2717` 打印的也是 `rule.bind_port`，即 `0`）；② `forward_start_core`（`forward.rs:795-822`）用 `handle.rule().clone()` 重启，`bind_port` 仍是 `0`，于是同一个 id 换了端口，调用方无从得知，只有启动时那条 `remote forward listening`（`:645-656`）或 dual-stack 日志里能看出来。
+
+本轮已在 `api.yaml` 把这两点写成契约事实（`ForwardRule.bind_port` 与 `/forwards/{id}/start` 的 description），**没有改行为**。要真正修，二选一：
+
+| 方案 | 代价 | 失败模式 |
+|---|---|---|
+| 给 `/forwards` 的响应加 `effective_port`（daemon 侧从 `forward_stats_core` 取） | 一处 handler + 契约字段，向后兼容（新增可选字段） | 与 `ForwardRule` 的「存的是请求值」语义并存，读者仍可能把两个字段搞混——要同时改名或加注释 |
+| 拒绝 `bind_port: 0`（让用户显式给端口） | 更简单，零新字段 | 砍掉一个今天能用的能力，且 `bind_local` 的 ephemeral 语义在测试里被用到 |
+
+推荐第一种：它把「已经存在的真值」暴露出来，而不是砍能力。属 `src-tauri/src/**` + 契约改动。
+
+### L2-96 补充（batch 14 第 1 轮）：`StallGuard::flush` 会在 `inner.flush()` 之前抢答
+
+L2-96 的修法已定为「`write` + `flush` 同一处 deadline」。补一条顺序约束：`StallGuard::flush`（`sftp_transfer.rs:440-445`）是
+
+```rust
+if self.last_progress.elapsed() >= STALL_TIMEOUT { return Err(self.stalled()); }
+self.inner.flush()
+```
+
+即**先用自己的 600 s 判定，再调内层**。所以当 deadline ≥ `STALL_TIMEOUT`（或 `last_progress` 早已过期）时，最终文案会是 `StallGuard` 的「no progress for 600s」，而不是 deadline 的新文案；反过来 deadline 短于 600 s 时 `StallGuard` 不会抢先，报错来自内层。要让 deadline 的文案稳定胜出，`StallGuard::flush` 的判定得让位（或改成只在 `inner.flush` 返回后判）。这一条只在「deadline ≥ 600 s」时影响观测，不影响正确性。
+
+### L2-134 补充（batch 14 第 1 轮）：折点不止 `/exec/stream`，还有 `/terminal` 与 `/sessions`
+
+`session::resolve_host`（`session.rs:57-62`）是 `load_config()?` + `unknown host profile`，所以**配置读失败**与**名字不存在**折成同一个 `anyhow`；`bin/agent2ssh-daemon.rs:4760-4763`（`terminal_attach`）与 `:2434` 附近（`session_open`）都用 `err(StatusCode::BAD_REQUEST, e.to_string())` 把两者一起变成 400 正文。与 L2-134 同一形态、只是路由不同，修 L2-134 时一并改这三处（`/exec/stream`、`/terminal`、`/sessions`），否则同一个 `load_config()` 失败在三处仍给三种（或同一种错的）解释。

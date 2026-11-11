@@ -2971,3 +2971,37 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 - 台账本节。
 
 **SHA**：代码提交见下方「SHA 与回帖」。分支 `opt/single-21-20261111`，worktree `/Users/yuqu/Vbercodeing/agent2ssh-opt-worktrees/single-21`（合流后已清理）。
+
+---
+
+### consume 1 / 6 · batch 14 · issue #30
+
+指摘来源：CodeBuddy 首条分析（评论 `2120486923494924288`，20:00:53 GMT+8，HEAD `b0f8b0d`）。**10 条 → 成立 1 / 部分成立 3 / 不成立 2 / 已并入 1 / 已登记项新证据 2**（另 1 条 C2 判「成立但只是覆盖边界」，计入不成立一侧的观察）。
+
+#### 判定
+
+| # | 指摘 | 判定 | 证据 |
+|---|---|---|---|
+| A1 | `stop_worker` 不撤销 `tcpip_forward`，监听 socket 一直留着；`bind_port: 0` 的远端转发重启后换端口而无事件/审计 | **部分成立** | headline 被它自己下一段推翻：`stop_worker` 走 `session.disconnect(...)`（`forward.rs:220-227`），服务端随之清掉监听，它自己也写了「停掉这一半没事」。**成立的那半**是动态端口：`forward_add_core_via` 把 `bind_port` 原样存进 `ForwardRule`（`:388`），实际端口只在 `RuleControl.effective_port`（`:70`/`:515`/`:644`）→ `RuleStats`（`:112-120`）→ 只有 Tauri 的 `forward_stats`（`tauri_commands.rs:1362`）能读到；`forward_list_core` 返回 `h.rule`（`:739-746`）仍是 `0`。CLI 建完打印的也是 `rule.bind_port`（`bin/agent2ssh.rs:2709-2717`）= `0`。它说「没有任何事件/审计」不准确：每次启动写一条 `remote forward listening`（`forward.rs:645-656`）或 dual-stack 日志，带实际端口 |
+| A2 | `Registry::push` 无界，`_queue_maxsize: Some(16)` 被下划线吞掉 | **成立** | `transport/russh_impl/mod.rs:1040-1046` 的参数名就是 `_queue_maxsize`、从不读取；`Registry::push`（`russh_impl/forward.rs:46-50`）无上限；accept 循环每接一个 `thread::spawn`（`forward.rs:644-676`）。→ L2-147 |
+| B1 | 注释里「`ssh-keygen -R` 是参照」实为更强的验收口径，三形态都会命中，建议写进 L2-15 的修法 | **不成立** | 与本仓 2026-11-10 已实测的结论冲突（ledger「不成立」第 17 条）：`ssh-keygen -R ::1` **只删** `::1`、保留 `[::1]:22`；只有 `ssh-keygen -R '[::1]:22'` 才删那一行。它把「会处理哈希行」正确推广成「三种形态都处理」，而方括号形态恰好是 `-R` 也不处理的。按它写验收口径会把一条假判据固化进 L2-15。哈希行不可匹配是真事，但早已在 C6 / L2-18 / L2-19 登记 |
+| B2 | agent 超时后「下次还能用」只在 SSH 门面成立，`list_identities` 失败丢 client | **成立（注释层面）** | `agent.rs:245-256` 失败即 `client = None`；`run_independent` 不 abort（`channel.rs:129-148`）；`embedded_ssh.rs:2096-2102` 是 `connect()` + `list_identities()` 各一次，失败即跳默认密钥。已在 `list_identities` 处补注释（L1） |
+| B3 | `StallGuard::flush` 会先用自己的 600 s 判定挡住 deadline 的报错 | **部分成立** | 形状属实（`sftp_transfer.rs:440-445` 先判 `last_progress` 再调 `inner.flush()`），但它只说对了「deadline ≥ 600 s」这一种：deadline 短于 600 s 时 `StallGuard` 不抢先，报错来自内层。「flush 也要包 deadline」早已写进 L2-96（第 3 轮扩展），新增的只是顺序约束 → 记为 L2-96 补充 |
+| C1 | `session.rs:152-155` 注释后半句「handle drop 会断开 channel」是假的 | **成立（注释确需改），但它给的原因不完整** | `run_terminal` 的循环（`embedded_ssh.rs:2350-2398`）只在 EOF / read 错误 / `Close` 命令 / `event_tx.send` 失败时退出；`try_recv` 拿到 `Disconnected` 只让内层 while 结束，不是退出条件。所以 handle drop **不会**断开 channel——但它也不是「什么都没发生」：drop 会同时丢掉事件接收端，于是线程在下一次远端输出、`event_tx.send` 失败时才退出，静默会话则一直挂着。真正关掉 channel 的是那条 `Close` 命令（`:184` 已发）。已按此改正注释（L1） |
+| C2 | `agent.rs:432-441` 的测试不覆盖 abort 的 socket 关闭 | **成立（覆盖边界，不是缺陷）** | 该测试用 `connect_stream` + duplex 造会话，从不调 `set_socket`；`Settings::abort()`（`channel.rs:91-96`）对空 socket 只置 `aborted`。且 `run_independent` 本来就不 abort。只记录，不立条 |
+| C3 | `handle_terminal` select 循环持锁等待 | **已并入** | 它自己判为并入 L2-34 / L2-73，接受，不重复核实 |
+| 已登记 1 | L2-96 的「超时后 abort session」在 `impl Write for File` 里做不到（`File` 只持 `RhFile`） | **成立** | `russh_impl/sftp.rs:204-206` 确认 `File { inner: RhFile }`，无门面 `Session`；`Sftp { session: Arc<SftpSession> }`。落点约束成立，不新立条 |
+| 已登记 2 | L2-134 的第三个折点：`terminal_attach` / `session_open` 也把 `load_config()` 失败折成 `unknown host` | **成立** | `session.rs:57-62` 的 `resolve_host` 是 `load_config()?` + `ok_or_else(unknown host profile)`；`bin/agent2ssh-daemon.rs:4760-4763` 与 `:2434` 附近都 `err(400, e.to_string())`。已把两处路由补进 L2-134 的清单 |
+
+#### 本轮改动
+
+- `docs/api.yaml`：`ForwardAddRequest.bind_port` 写明 `0` = 临时端口（`local` 由 OS 选、`remote` 由服务端选），规则里存的是 `0` 而不是选中的端口；`ForwardRule.bind_port` 写明它「是创建时给的值，不是正在监听的端口」，并指出实际端口只有桌面端 `forward_stats` 的 `effective_port` 有、HTTP 没有任何路由返回，stop→start 可能换端口；`/forwards/{id}/start` 的 description 补同一句。
+- `src-tauri/src/session.rs`：更正「handle drop 会断开 channel」那句（改成：`Close` 命令才是断开的那一步；drop 只丢队列两端，静默会话会一直挂着）。
+- `src-tauri/src/transport/russh_impl/agent.rs`：在 `list_identities` 丢 client 处写明「一次 agent 超时就是这条连接的最后一次」，与 `embedded_ssh` 只调一次 `connect` 的写法对齐。
+- L2：新增 **L2-147**（`Registry` 无界）、**L2-148**（`bind_port: 0` 的实际端口取不到），另加 **L2-96 补充**（`StallGuard::flush` 抢答的边界）与 **L2-134 补充**（`/terminal`、`/sessions` 两处折点）。
+
+**验证**：`npm run build` 6.53 s；`cargo fmt --check` 绿；`--no-default-features --lib` **862 / 1 / 1**（红项仍是 L2-15 那条故意红的 IPv6）；`--features daemon --test daemon_integration api_yaml` **6 passed**；`yaml.safe_load` 90 paths。
+
+#### 一处流程事故（自记）
+
+`docs/api.yaml` 的 `/forwards/{id}/start` description 是**未加引号的 plain scalar**，我追加的句子里带 `` `bind_port: 0` ``（冒号+空格），第一次写直接把 YAML 解析打断（`mapping values are not allowed here`，3760 列 373）。改为「a zero bind port」后恢复。**以后往 plain scalar 里追加句子，先 `yaml.safe_load` 一次再继续**，别等 cargo 测试才报。
