@@ -2360,7 +2360,7 @@ fn mounted_handlers(segment: &str) -> Vec<(&'static str, String)> {
 /// router chain) so a multi-line builder chain cannot borrow the methods of the
 /// call that follows it.
 fn daemon_routes(daemon: &str) -> Vec<(String, &'static str, String)> {
-    daemon_routes_and_drops(daemon).0
+    parse_route_table(daemon).routes
 }
 
 /// A `.route(...)` call the derived checks cannot read, and why.
@@ -2374,7 +2374,30 @@ struct DroppedRoute {
     mounts_closure: bool,
 }
 
-/// The same parse, plus the `.route(...)` calls it could not turn into an entry.
+/// A `.route(...)` call that mounts a closure on one method and a name on
+/// another.
+///
+/// `get(h).post(|| …)` becomes one entry for `get` and nothing at all for
+/// `post`: the closure is not an entry, and the call does not drop because it
+/// did produce something. The POST is then served by the daemon and read by no
+/// check — the entries look complete.
+#[derive(Debug)]
+struct MixedMount {
+    line: usize,
+    path: String,
+}
+
+/// The route table as the derived checks read it.
+struct RouteTable {
+    /// Every `(path, method, handler)` the parse could read.
+    routes: Vec<(String, &'static str, String)>,
+    /// Calls it could not turn into an entry.
+    dropped: Vec<DroppedRoute>,
+    /// Calls that mounted a closure and a name in the same `.route(...)`.
+    mixed: Vec<MixedMount>,
+}
+
+/// The same parse, plus what it could not read and what it read in halves.
 ///
 /// A call is dropped when its segment carries no string literal, when the first
 /// literal is not a path, or when the segment names no method builder with a
@@ -2388,15 +2411,17 @@ struct DroppedRoute {
 /// One drop is legitimate and known: `/` redirects to the console through a
 /// closure, which has no `async fn` for the body checks to read, and it is not
 /// an API route. See `NON_API_ROUTES`.
-fn daemon_routes_and_drops(
-    daemon: &str,
-) -> (Vec<(String, &'static str, String)>, Vec<DroppedRoute>) {
+///
+/// A call that mounts both shapes is neither dropped nor described: it lands in
+/// `mixed`, because the entry it does produce makes every count look right.
+fn parse_route_table(daemon: &str) -> RouteTable {
     let starts: Vec<usize> = daemon
         .match_indices(".route(")
         .map(|(index, _)| index)
         .collect();
     let mut routes = Vec::new();
     let mut dropped = Vec::new();
+    let mut mixed = Vec::new();
     for (position, start) in starts.iter().enumerate() {
         let mut end = starts.get(position + 1).copied().unwrap_or(daemon.len());
         if let Some(with_state) = daemon[*start..].find(".with_state(") {
@@ -2442,12 +2467,22 @@ fn daemon_routes_and_drops(
             });
             continue;
         }
+        if mounts_closure(segment) {
+            mixed.push(MixedMount {
+                line,
+                path: path.to_string(),
+            });
+        }
         let normalized = normalized_route_path(path);
         for (method, handler) in mounted {
             routes.push((normalized.clone(), method, handler));
         }
     }
-    (routes, dropped)
+    RouteTable {
+        routes,
+        dropped,
+        mixed,
+    }
 }
 
 /// The body of one handler, from its `async fn` line to its closing brace.
@@ -2682,7 +2717,8 @@ fn a_brace_inside_a_literal_does_not_close_the_body() {
 #[test]
 fn every_route_call_is_read_as_an_operation() {
     let daemon = include_str!("../src/bin/agent2ssh-daemon.rs");
-    let (routes, dropped) = daemon_routes_and_drops(daemon);
+    let table = parse_route_table(daemon);
+    let (routes, dropped) = (&table.routes, &table.dropped);
     let detail =
         |drop: &DroppedRoute| format!("line {} `{}`: {}", drop.line, drop.path, drop.reason);
     // A closure is the one shape with no handler to read, so it is the one
@@ -2697,7 +2733,7 @@ fn every_route_call_is_read_as_an_operation() {
         "these `.route(...)` calls were dropped without mounting a closure — either a named \
          handler the parse could not read, or a closure in a shape it does not model: \
          {unreadable:?}. Each one is an operation that fell out of every derived check at once, \
-         in silence. Teach `daemon_routes_and_drops` the shape, or mount the handler through \
+         in silence. Teach `parse_route_table` the shape, or mount the handler through \
          `.route(path, get(handler))`."
     );
     // And a closure is only tolerable on a route no contract covers. The other
@@ -2755,6 +2791,31 @@ fn every_parsed_handler_is_a_function_the_daemon_defines() {
         "the route table names handlers the daemon does not define: {unresolved:?}. A name can \
          come from a nested router's scope, or from a builder argument that is not a handler at \
          all; either way the entry stands in for an operation whose body nothing can read."
+    );
+}
+
+/// One `.route(...)` call mounts one kind of handler, not both.
+///
+/// The two shapes are read in different places: a name becomes an entry, a
+/// closure becomes a drop. A call that does both — `get(h).post(|| …)` — yields
+/// an entry for the method it can name and nothing at all for the other, and
+/// because it did produce something it never drops either. The closure's method
+/// is then served by the daemon and read by no check: `api.yaml` compares
+/// `(path, method)` from entries, the drop check only looks at calls that
+/// produced nothing, and the handler check only looks at what did.
+#[test]
+fn a_route_call_does_not_mix_a_closure_with_a_named_handler() {
+    let table = parse_route_table(include_str!("../src/bin/agent2ssh-daemon.rs"));
+    let mixed: Vec<String> = table
+        .mixed
+        .iter()
+        .map(|mount| format!("line {} `{}`", mount.line, mount.path))
+        .collect();
+    assert!(
+        mixed.is_empty(),
+        "these `.route(...)` calls mount a closure on one method and a named handler on another: \
+         {mixed:?}. The closure's method produces no entry and no drop, so the daemon serves it \
+         and no check reads it. Give the closure its own `.route(...)`, or name the handler."
     );
 }
 
@@ -2843,7 +2904,7 @@ fn the_router_chain_mounts_paths_only_through_route() {
         offenders.is_empty(),
         "the router chain mounts paths through {offenders:?}. The route parse reads `.route(...)` \
          only, so those routes produce no entry and no drop, and every derived check skips them \
-         without a word. Teach `daemon_routes_and_drops` the shape, or mount them with `.route`."
+         without a word. Teach `parse_route_table` the shape, or mount them with `.route`."
     );
 }
 
