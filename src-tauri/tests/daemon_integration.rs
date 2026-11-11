@@ -2191,11 +2191,15 @@ const HANDLER_STATUS: [(&str, &str); 10] = [
 ///
 /// `HANDLER_STATUS` reads `StatusCode::` literals, so a handler that delegates
 /// its 429 to `reject_if_rate_limited` (directly, or through the preflight
-/// shared by every host operation) documents nothing and failed nothing. Five
-/// operations had drifted that way — `/exec/stream`, `/terminal/broadcast`,
-/// `DELETE /forwards/{id}` and both `/connections/{host}/…` — while their
-/// sibling routes (`/forwards/{id}/start|stop`) did document it, which is how
-/// the omission stayed invisible: the family looked consistent from one route.
+/// shared by every host operation) documents nothing and failed nothing. Three
+/// operations had drifted that way — `DELETE /forwards/{id}` and both
+/// `/connections/{host}/…` — while their sibling routes
+/// (`/forwards/{id}/start|stop`) did document it, which is how the omission
+/// stayed invisible: the family looked consistent from one route.
+///
+/// A call in the body is not proof the status is reachable: see
+/// `INBAND_REJECTIONS` below for the two routes that consume the `Err` instead
+/// of returning it, and would be wrongly indicted by this list.
 ///
 /// Only 429 is listed. `preflight_guarded_request` can also surface 408/423/500
 /// from the authorization chain, and pinning those here would demand a status
@@ -2206,6 +2210,25 @@ const HELPER_STATUS: [(&str, &str); 4] = [
     ("reject_if_rate_limited(", "429"),
     ("register_limited_session_for_command(", "429"),
     ("preflight_guarded_request(", "429"),
+];
+
+/// Operations whose gate and rate-limit refusals never become an HTTP status.
+///
+/// `HELPER_STATUS` is a text scan: it sees `reject_if_rate_limited(` in a body
+/// and concludes the caller can receive a 429. Two handlers consume that `Err`
+/// instead of returning it — `exec_stream` sends `{"type":"error"}` over the
+/// socket it has already upgraded, and `terminal_broadcast_run` marks every
+/// eligible target `authorized: false` and returns 200 — so a `"429"` or
+/// `"423"` there would promise a branch this server never takes. `/terminal` is
+/// the control in the same family: identical checks, run before the upgrade, so
+/// its 423 and 429 are real and stay in its `responses`.
+///
+/// The third field is a phrase the path block must still carry, so the
+/// exemption cannot decay into silence — the refusal stays documented, just not
+/// as a status. Rewording that prose breaks this test on purpose.
+const INBAND_REJECTIONS: [(&str, &str, &str); 2] = [
+    ("get", "/exec/stream", "only as a frame"),
+    ("post", "/terminal/broadcast", "returns 200"),
 ];
 
 /// The methods one `.route(...)` call mounts, in source order, with their handler.
@@ -2678,6 +2701,10 @@ fn api_yaml_documents_every_daemon_route() {
 /// document their 408/423/500 by hand. The one exception is 429: it is decided
 /// before authorization on every helper path, so `HELPER_STATUS` makes it
 /// required rather than remembered.
+///
+/// Reachability is not the same as presence: `INBAND_REJECTIONS` names the two
+/// operations whose helper call answers inside a 2xx, and the third assertion
+/// below holds them to the opposite rule.
 #[test]
 fn api_yaml_documents_the_codes_each_handler_can_return() {
     let daemon = include_str!("../src/bin/agent2ssh-daemon.rs");
@@ -2759,6 +2786,16 @@ fn api_yaml_documents_the_codes_each_handler_can_return() {
             }) else {
                 return Vec::new();
             };
+            // The call is in the body, but the `Err` is consumed rather than
+            // returned, so no status ever reaches the client.
+            if INBAND_REJECTIONS
+                .iter()
+                .any(|(exempt_method, exempt_path, _)| {
+                    *exempt_method == method && *exempt_path == path
+                })
+            {
+                return Vec::new();
+            }
             HELPER_STATUS
                 .iter()
                 .filter(|(call, code)| {
@@ -2775,6 +2812,61 @@ fn api_yaml_documents_the_codes_each_handler_can_return() {
          of these paths, so the failure reaches a caller who cannot tell it apart from an \
          unknown error."
     );
+
+    // The exemption above is itself a claim about the code, so check it in both
+    // directions. Without this the list would be a place to silence the check:
+    // an operation could drop 423/429 from its `responses` and say nothing.
+    let unbacked: Vec<String> = INBAND_REJECTIONS
+        .iter()
+        .flat_map(|entry| {
+            let (method, path, marker) = *entry;
+            let Some((_, _, codes)) = documented.iter().find(|(known_path, known_method, _)| {
+                known_path.as_str() == path && *known_method == method
+            }) else {
+                return vec![format!(
+                    "{method} {path} is exempt from the helper check but has no operation in \
+                     the spec, so the exemption guards nothing"
+                )];
+            };
+            let mut problems: Vec<String> = ["423", "429"]
+                .iter()
+                .filter(|code| codes.iter().any(|documented| documented == *code))
+                .map(|code| format!("{method} {path} documents {code} but answers it in-band"))
+                .collect();
+            match spec_path_block(spec, path) {
+                Some(block) if block.contains(marker) => {}
+                Some(_) => problems.push(format!(
+                    "{method} {path} no longer says `{marker}`, so an in-band refusal is now \
+                     undocumented rather than mis-documented"
+                )),
+                None => problems.push(format!("{method} {path} has no spec block to read")),
+            }
+            problems
+        })
+        .collect();
+    assert!(
+        unbacked.is_empty(),
+        "the in-band exemption list and docs/api.yaml disagree: {unbacked:?}. An operation \
+         on that list must document neither 423 nor 429 — those refusals never become an \
+         HTTP status — and must still say in prose where the refusal does go."
+    );
+}
+
+/// The spec text of one path item, from its `  /path:` header to the next one.
+///
+/// Path items are the only lines indented exactly two spaces that open with a
+/// slash, so the next such header bounds the block. Used to check that prose the
+/// test above depends on has not drifted away from the claim built on it.
+fn spec_path_block<'a>(spec: &'a str, path: &str) -> Option<&'a str> {
+    let header = format!("\n  {path}:");
+    let start = spec.find(&header)? + 1;
+    let rest = &spec[start..];
+    let end = rest[1..]
+        .match_indices("\n  /")
+        .next()
+        .map(|(index, _)| index + 1)
+        .unwrap_or(rest.len());
+    Some(&rest[..end])
 }
 
 /// Every documented response declares a body, because every one of them has one.

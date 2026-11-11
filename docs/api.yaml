@@ -1831,16 +1831,15 @@ paths:
         Every authorization refusal after the upgrade — scope, execution gate, rate limit, approval — arrives as
         {"type":"error","error":"..."} over the socket, not as an HTTP status: the handler body only counts the
         request and then hands the socket to `on_upgrade`. The only HTTP-level failure is the handshake itself.
+        This is why no `429` and no `423` appear below. Both are reachable, but only as a frame, and a response
+        entry would hand a generated client a status branch this server never takes. `/terminal` is the
+        contrast in the same family: it runs the gate and concurrency checks before the upgrade, so the same
+        two refusals *are* HTTP statuses there.
       responses:
         "101":
           description: Switching Protocols
         "401":
           description: "Missing or invalid token: `Authorization: Bearer`, or `?token=` on the upgrade; the same handshake-level check every non-public route runs."
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-        "429":
-          description: Execution limit exceeded.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1965,7 +1964,13 @@ paths:
         A target whose authorization is refused is reported in the response body
         with `authorized: false` and an `error`; the HTTP status stays 200 and
         nothing is sent to that target, so a per-target refusal never surfaces as
-        a 4xx from this operation.
+        a 4xx from this operation. A paused execution gate and a rate-limit
+        rejection are two of those per-target refusals — `terminal_broadcast_run`
+        folds both into every eligible target's `error` and returns 200 — which is
+        why no `423` and no `429` are listed below. The gate verdict is decided in
+        `terminal_broadcast_preview_results`, the same function the `/preview`
+        route calls, so a preview that reports `execution gate paused` predicts the
+        run exactly.
       requestBody:
         required: true
         content:
@@ -2001,11 +2006,6 @@ paths:
           content:
             text/plain:
               schema: { type: string }
-        "429":
-          description: Execution limit exceeded.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
 
   /recordings/config:
     description: Recording endpoints require the unrestricted admin token; scoped tokens are rejected.
@@ -3589,6 +3589,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "423":
+          description: Execution gate paused.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /forwards/multi:
     post:
@@ -4054,6 +4059,11 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "429":
           description: Execution limit exceeded.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "423":
+          description: Execution gate paused.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
