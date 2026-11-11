@@ -4047,12 +4047,20 @@ fn is_response_key(line: &str) -> bool {
 /// `operation.text` holds every line of the operation with leading space
 /// stripped, so a block runs from the code's own line to the next response key.
 /// If an operation ever repeated a code, the first block wins; none does today.
+///
+/// A missing code is a failure, not an empty answer. Returning `""` made every
+/// caller's `contains(...)` report "the docs do not say this" — which reads as a
+/// documentation bug in the *caller's* subject while the real fault is that the
+/// status was never documented at all. Panicking here names the code and the
+/// operation instead, and costs the callers no special case.
 fn code_block(operation_text: &str, code: &str) -> String {
     let marker = format!("\"{code}\":");
     let mut lines = operation_text.lines().skip_while(|line| *line != marker);
-    if lines.next().is_none() {
-        return String::new();
-    }
+    assert!(
+        lines.next().is_some(),
+        "no response block for \"{code}\": in the operation being checked, so a claim about it \
+         would be asserted against an empty string"
+    );
     lines
         .take_while(|line| !is_response_key(line))
         .collect::<Vec<_>>()
@@ -4071,6 +4079,47 @@ fn a_response_key_is_a_three_digit_code() {
     assert!(!is_response_key("\"abc\":"));
     assert!(!is_response_key("\"unknown\":"));
     assert!(!is_response_key("413"));
+}
+
+/// Every response key in the spec is one `is_response_key` recognises.
+///
+/// The helper accepts exactly `"NNN":` — double quotes, three ASCII digits. YAML
+/// also allows `'400':` and a bare `400:`, and neither would end a block: the
+/// block would run into the next response and every claim checked against it
+/// would pass for the wrong reason. Today all keys are double-quoted, so the
+/// premise holds; this test is what makes that a fact rather than something a
+/// reviewer has to re-measure. Restyle a key and it fails here, naming the line.
+#[test]
+fn every_response_key_in_the_spec_is_a_quoted_three_digit_code() {
+    let spec = include_str!("../../docs/api.yaml");
+    let mut keys = 0;
+    for line in spec.lines() {
+        let trimmed = line.trim_start();
+        if !trimmed.ends_with(':') || trimmed.len() > 12 {
+            continue;
+        }
+        let candidate = trimmed.trim_end_matches(':');
+        // Only lines whose key is made of digits and quotes can be a status
+        // code; `default:` and every schema key drop out here.
+        if candidate.is_empty()
+            || !candidate
+                .chars()
+                .all(|c| c.is_ascii_digit() || c == '"' || c == '\'')
+        {
+            continue;
+        }
+        keys += 1;
+        assert!(
+            is_response_key(trimmed),
+            "the spec writes a response key as `{trimmed}` (Debug: {trimmed:?}), which \
+             `is_response_key` does not recognise; `code_block` would then run past it and every \
+             assertion about that response would be checked against the following block"
+        );
+    }
+    assert!(
+        keys > 400,
+        "only {keys} response keys found in the spec; this scan is not looking at what it thinks"
+    );
 }
 
 /// `local:<id>` is not limited to the environments this crate ships.
@@ -4110,26 +4159,46 @@ fn api_yaml_documents_user_defined_local_environments() {
     );
 }
 
-/// `/local-exec` refuses with 400 for reasons whose next step differs, and two of
-/// them were missing from the 400 description.
+/// `/local-exec` refuses with 400 for reasons whose next step differs, and the
+/// ones whose remedy is "install something" were missing from the description.
 ///
 /// The operation closed its `host` enumeration with a single "any other value is
 /// rejected with 400", which reads as one refusal with one remedy. A suffix on an
-/// environment that takes none (`local:cmd:ls`) and an empty distribution
-/// (`local:wsl:`) each carry their own message in `local_exec.rs`, and neither
-/// appeared in the 400 — so a client was told "rejected" without being told what
-/// to change. The source side is asserted first for the same reason as the test
-/// above: if those arms disappear, the failure names the source instead of the
-/// prose.
+/// environment that takes none (`local:cmd:ls`), an empty distribution
+/// (`local:wsl:`), an environment this machine cannot build (`local:pwsh` with no
+/// PowerShell) and a container runtime without its CLI (`local:docker:x` with no
+/// `docker`) each carry their own message in `local_exec.rs`. The first two were
+/// added earlier; the last two were still absent, and they are the pair a client
+/// cannot guess from "fix the definition" — the definition is fine, the machine
+/// is not. The source side is asserted first so a deleted arm fails by naming the
+/// source instead of the prose.
 #[test]
 fn api_yaml_lists_the_local_refusals_it_can_produce() {
     let resolver = include_str!("../src/local_exec.rs");
     let spec = include_str!("../../docs/api.yaml");
 
-    for (needle, host) in [
+    // Every needle must exist in the source *and* in the 400 block. Two of these
+    // are the same shape as the "definition cannot be built" arm in the 400 and
+    // deliberately distinct from it: `environment 'X' is based on ...` is about a
+    // definition, `no PowerShell found on PATH` is about the machine.
+    const NEEDLES: [(&str, &str); 5] = [
         ("takes no argument", "`local:cmd:ls`"),
         ("names no distribution", "`local:wsl:`"),
-    ] {
+        (
+            "no PowerShell found on PATH",
+            "`local:pwsh` where no PowerShell exists",
+        ),
+        (
+            "WSL is not available",
+            "`local:wsl` where wsl.exe is not installed",
+        ),
+        (
+            "is not installed, so there is nothing to exec into",
+            "`local:docker:x` where the runtime's CLI is missing",
+        ),
+    ];
+
+    for (needle, host) in NEEDLES {
         assert!(
             resolver.contains(needle),
             "`local_exec.rs` no longer refuses {host} with {needle:?}, so the 400 description has \
@@ -4146,12 +4215,56 @@ fn api_yaml_lists_the_local_refusals_it_can_produce() {
         .collect::<Vec<_>>()
         .join("\n");
     let refused = code_block(&operation, "400");
-    for needle in ["takes no argument", "names no distribution"] {
+    for (needle, host) in NEEDLES {
         assert!(
             refused.contains(needle),
-            "`local:cmd:ls` and `local:wsl:` are refused with {needle:?}, but the /local-exec 400 \
-             description does not say so; a client reads one reason where there are several. \
-             Block was:\n{refused}"
+            "{host} is refused with {needle:?}, but the /local-exec 400 description does not say \
+             so; a client reads one reason where there are several. Block was:\n{refused}"
+        );
+    }
+}
+
+/// The two 500s `/local-exec` can answer are documented on the operation itself.
+///
+/// `api_yaml_documents_the_codes_each_handler_can_return` reads a handler's own
+/// body, and this handler's 500s are not there: `preflight_guarded_request` reads
+/// `execution_gate.json` and the approval chain reads `policy.toml`, and both
+/// report an unreadable file as an internal error from inside the helper. The
+/// file-level contract is therefore that a route documents helper-produced codes
+/// by hand — so this asserts the hand-work exists, and names the two files whose
+/// failure it describes.
+#[test]
+fn local_exec_documents_the_internal_errors_its_helper_answers_with() {
+    let daemon = include_str!("../src/bin/agent2ssh-daemon.rs");
+    let spec = include_str!("../../docs/api.yaml");
+
+    assert!(
+        daemon.contains("preflight_guarded_request("),
+        "`/local-exec` no longer runs the shared preflight, so the two 500s below no longer apply \
+         and this test should be deleted rather than repaired"
+    );
+    assert!(
+        daemon.contains("failed to load execution gate: {e}")
+            && daemon.contains("StatusCode::INTERNAL_SERVER_ERROR"),
+        "the gate check no longer answers 500 on an unreadable `execution_gate.json`; the 500 in \
+         the spec now describes a branch that does not exist"
+    );
+
+    let operation = spec
+        .lines()
+        .skip_while(|line| !line.starts_with("  /local-exec:"))
+        .skip(1)
+        .take_while(|line| !line.starts_with("  /"))
+        .map(str::trim_start)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let internal = code_block(&operation, "500");
+    for needle in ["execution_gate.json", "policy.toml"] {
+        assert!(
+            internal.contains(needle),
+            "`/local-exec` answers 500 when {needle} cannot be read, but its 500 description does \
+             not name the file; a client reads a generic internal error where the remedy is \"fix \
+             that file\". Block was:\n{internal}"
         );
     }
 }
