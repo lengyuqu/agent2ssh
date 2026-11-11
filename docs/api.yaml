@@ -65,14 +65,18 @@ info:
     the handlers, because a path added here while its handler reads `Json<T>`
     tells a client that a refuse-that-body endpoint ignores it.
 
-    Two consequences for a client. First, the extractor's own answers are
+    Three consequences for a client. First, the extractor's own answers are
     `text/plain` carrying axum's message, not the `Error` object: 415 and 422 are
     documented that way on every operation that can produce them, and a body sent
-    without a content type is the likeliest way to meet one. `Bytes` adds a third
+    without a content type is the likeliest way to meet one. Second, `Bytes` adds
     one that neither `Json<T>` shape can produce: it buffers the body before the
     handler runs, so a body over axum's default 2 MiB limit is answered `413`
     from inside the extractor — also `text/plain`, and on those two operations
-    the only refusal that is not this document's `Error` object. Second, a body that
+    the only refusal that is not this document's `Error` object. That limit is
+    counted against the bytes actually read, not against the declared
+    `Content-Length`: a request announcing more than 2 MiB but sending less is
+    refused only when the sender gets there, and one announcing less while
+    sending more is still refused at the limit. Third, a body that
     is not JSON at all reaches the caller as the operation's 400 with that same
     plain-text body, so a client cannot tell "your body was not JSON" from "the
     handler refused what was in it" by the status code — and a client that
@@ -182,11 +186,31 @@ components:
         strategy:
           type: object
           nullable: true
+          description: >
+            How to spread the command over the resolved hosts. Every field
+            treats `0` — and `null`, and an absent `strategy` — as "no limit":
+            `concurrency` 0 means as many hosts at once as there are hosts,
+            `max_failures` 0 means never stop early, `batch_size` 0 means one
+            batch holding every host, and `pause_between_batches_secs` 0 means
+            no pause. All four at 0 therefore runs exactly like a request that
+            carried no strategy at all.
           properties:
-            concurrency: { type: integer, nullable: true }
-            max_failures: { type: integer, nullable: true }
-            batch_size: { type: integer, nullable: true }
-            pause_between_batches_secs: { type: integer, nullable: true }
+            concurrency:
+              type: integer
+              nullable: true
+              description: Maximum hosts in flight at once; 0 = unlimited.
+            max_failures:
+              type: integer
+              nullable: true
+              description: Stop after this many failures; 0 = never stop early.
+            batch_size:
+              type: integer
+              nullable: true
+              description: Hosts per batch, each batch finishing before the next starts; 0 = every host in one batch.
+            pause_between_batches_secs:
+              type: integer
+              nullable: true
+              description: Seconds to wait between batches; 0 = no pause.
         reason:       { type: string, nullable: true }
         change_id:    { type: string, nullable: true }
         source:       { type: string, nullable: true }
@@ -1234,7 +1258,11 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "413":
-          description: The request body exceeds the default body size limit.
+          description: >
+            The request body exceeds the default body size limit. The handler
+            reads `axum::body::Bytes`, so axum refuses a body over the limit
+            before the handler sees it, and this is the only refusal here that
+            is not the `Error` object.
           content:
             text/plain:
               schema: { type: string }
@@ -1538,7 +1566,7 @@ paths:
   /local-exec:
     post:
       summary: Execute a command in a terminal environment on the daemon's own machine
-      description: "Runs the command in a shell on the host the daemon is running on, through the same token scope, execution gate, execution limits, risk classifier and approval policy as `/exec`. `host` selects the environment: `local` for the shell the app would open, `local:<environment>` where environment is one of `pwsh`, `cmd`, `gitbash`, `vs` (a Visual Studio developer shell with MSVC on PATH), `wsl` or `wsl:<distribution>` (a WSL login shell), or `local:<runtime>:<container-id>` where runtime is one of `docker`, `wslc`, `apple` to run the command inside that container through the runtime's non-TTY exec (no stdin; a request carrying `stdin` is rejected with 400). Any other value is rejected with 400, so a request cannot borrow another host alias's scope entry and then execute here. Returns the same `ExecResult` shape as `/exec`, with `host` echoing the id that was requested."
+      description: "Runs the command in a shell on the host the daemon is running on, through the same token scope, execution gate, execution limits, risk classifier and approval policy as `/exec`. `host` selects the environment: `local` for the shell the app would open, `local:<environment>` where environment is one of `pwsh`, `cmd`, `gitbash`, `vs` (a Visual Studio developer shell with MSVC on PATH), `wsl` or `wsl:<distribution>` (a WSL login shell), `local:<id>` naming an environment the user defined in `environments.toml` (that definition layers a working directory, process environment variables and a prelude over one of the built-ins above — see the configuration guide), or `local:<runtime>:<container-id>` where runtime is one of `docker`, `wslc`, `apple` to run the command inside that container through the runtime's non-TTY exec (no stdin; a request carrying `stdin` is rejected with 400). Any other value — including a `local:` id that is neither built in nor defined in `environments.toml` — is rejected with 400, so a request cannot borrow another host alias's scope entry and then execute here. Returns the same `ExecResult` shape as `/exec`, with `host` echoing the id that was requested."
       requestBody:
         required: true
         content:
@@ -1550,7 +1578,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ExecResult" }
         "400":
-          description: A host that is not a local id, an unknown environment or container runtime, a malformed container id, an environment that cannot be built, a container request carrying stdin, an over-long command, or a command blocked by risk policy
+          description: A host that is not a local id, an unknown environment or container runtime, a malformed container id, an environment that cannot be built, a working directory named by an environment definition that is no longer a directory (checked before every command, not only when the definition was loaded), a container request carrying stdin, an over-long command, or a command blocked by risk policy
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
