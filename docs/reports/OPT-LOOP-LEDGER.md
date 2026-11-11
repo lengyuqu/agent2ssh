@@ -2267,7 +2267,7 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 ### batch 2026-11-11 · 测试覆盖缺口（第二批，B=12）
 - issue #18 / 开批时间 2026-11-11 11:10 (GMT+8)
 - CodeBuddy 首条分析：**已于 03:22Z（local 11:22）到达**，评论 `2120356381013209088`——生产任务的 60 s × 5（11:11–11:15）与两次延时复核（≈11:17/11:19）都扑空，它在约 **12 分钟**处才发；与 #16 的 13 分钟同类。消费任务开在 11:53，直接取到，未再等待。
-- 6 轮进度：**4 / 6**（见下方 `consume 1 / 6`…`consume 4 / 6`；另有一段 `复核小节（不计入轮次）`——`8bc3205` 原把它标成 `consume 3 / 6`，已改标题并注明原因。issue 保持 open）
+- 6 轮进度：**5 / 6**（见下方 `consume 1 / 6`…`consume 5 / 6`；另有一段 `复核小节（不计入轮次）`——`8bc3205` 原把它标成 `consume 3 / 6`，已改标题并注明原因。issue 保持 open）
 - 正文已喂给 CodeBuddy：**116 条「不成立」原文**（编号 71 = 旧 58 + batch 11 五个编号小节 13 条〔第 1 轮 3 / 第 2–3 轮 4 / 第 4 轮 2 / 第 5 轮 3 / 第 6 轮 1〕；判定行 39 = 旧 38 + batch 11 第 4 轮 row 9 已自撤 1 条；摘录 6 = 旧 4 + `8042f11` 复核 2 条：`gate.rs:83` 第 4 调用点、结构 vs 文本收窄）+ KNOWN-ISSUES 空档（K2/K7/K8/K14/K15/§3/E6/E8）+ 口径（基线 `--no-default-features --lib` 862/1/1、`daemon_integration` 71、npm 220/30、L2-75…L2-122 勿重提、AGENTS 测试口径三则〔组合不可相加 / `exec_fixture` 空跑 / default 下三个 e2e 目标 0 passed 正常〕、batch 11 抗漂约定、batch 6 工艺教训、`.github` 禁区与 L2 越权重申）。正文由 `/tmp/build-opt-issue-b12.py` 生成（复用 b11 骨架 + batch 11 区域锚点；region 边界匹配 `key + " "` 天然区分 batch 1 与 batch 11 前缀；全部锚点唯一性校验通过，计数复验 116）。
 - 本批重点：**#12 闭环后 batch 7–11 五批 30 轮 + `8042f11` 新长出来的无断言分支**；三条已登记靶子（L2-80 `daemon_tokens.toml` 写坏全员 500 零测试、L2-82 `Option<Json>` 吞解析错、L2-122 第 5 条真 daemon e2e）；KNOWN-ISSUES §3/E6/E8 中可用单测/集成测试钉住的项（反向用例只测过 ed25519、E8 假脚本）。
 - 顺手按 BATCH_COMPLETE 行自述删除顶部 `BATCH_COMPLETE · issue #17 · batch 11` 状态行（HTML 注释同步为十条）。
@@ -2435,3 +2435,39 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 - `nest` 之后的相对路径假 entry、`fallback` 的动词可见性：属「入口被允许之后」的问题，今天被新守卫挡在入口。若日后真要用 `.nest(`，得同时教解析器读前缀，届时开新条目。
 
 **§五、本轮唯一对自己不利的记录**：`get (…)` 这个误红格是我上一轮引入的，且是 CodeBuddy 自取的一条（不在我的清单里）。它成立于「Rust 的调用语法不要求 callee 与括号相邻」这个我一直知道、却没写进判据的事实。
+
+### consume 5 / 6 · 2026-11-11 12:50–13:05 (GMT+8) · batch 12（issue #18）
+
+- 指摘来源：CodeBuddy 对第 4 轮的复核（评论 `2120378478049525760`，04:49Z）。它这次**装了 Rust 工具链**并实跑 `--features daemon --test daemon_integration` 得到 74 passed，与 `bdad0b5` 自述一致——这是本批第一次两侧跑同一套测试。
+- 计数：**4 组 → 成立 2 / 部分成立 2 / 不成立 0**；另判 3 条子断言不成立（Q4 的两格 + `.route_service(` 那句）。
+- L1：`94acb22`（`mounted_handlers` 不再把 `move`/`async` 读成 handler 名；新增 `every_parsed_handler_is_a_function_the_daemon_defines`；drop 断言的文案不再假定「命名 handler」）。
+- 验证：`npm run build` 6.66 s；`--no-default-features --lib` **862 / 1 / 1**；`--features daemon --test daemon_integration` **75 passed**（74 → 75）；`cargo fmt --check` 绿。
+- 破坏性对照两次（见 §二）。
+
+**§一、判定表**
+
+| # | 指摘 | 判定 | 依据 |
+|---|---|---|---|
+| Q1 | `.nest(` 载荷造**假 entry**：`sub` 里的 `get(h)` 被读成 `get /z`，前缀丢失，且「entry 的 handler 必须解析得到」只是约定 | **成立，已落成断言** | 我按它的复算路径核了一遍：`.nest(` 的入口被链守卫挡（红），但**假 entry 本身**没有网。`every_parsed_handler_is_a_function_the_daemon_defines` 现在要求每条 entry 的名字在 daemon 里有 `async fn`（106/106 今天成立）。它的「两条 body 检查会当场 panic」只有在 `/z` 被补进 spec 后才发生；新断言不依赖 spec |
+| Q2 | 六种合法闭包写法仍会误红；另有三种写法**根本不产 drop**（`move`/`async`/混合链） | **部分成立（三种假 entry 成立并已修；六种误红保留）** | 假 entry 那半是真洞：`get(move \|\| …)` 读成 `handler = "move"` → `mounted` 非空 → **不产 drop** → `mounts_closure` 从来没被调用。已在读名字处拒掉 `move`/`async`。六种误红里 `get({ \|\| … })`、`get((\|\| …))`、`/* */`、turbofish、注释里的 `get (` 都成立于「Rust 不在乎这些」，但都要有人故意写成那样；处置是**让它们红**（文案已改成「闭包或名字都可能，解析器认不出这个形状」），不是放宽判据 |
+| Q3 | 判据要分三层：真闭包 / 名字不解析 / 闭包味但不以 `\|` 开头 | **部分成立（采纳分层，不采纳「`get (h)` 该修解析器」）** | 分层采纳：`get (h)` 是命名 handler + 空格 → 落在「名字不解析」层 → 红是对的（读者要么去掉空格，要么教解析器）；`get({ \|\| })` 落在第三层 → 红，文案说明是这个形状。它主张「`get (h)` 该让解析器学会」，理由是「一个空格让 `/health` 掉出所有契约检查」——但那是**改代码的人**要付的代价，红正是提示；今天树上没有这种写法 |
+| Q4 | 删掉 `/console` 后头部六个数各变多少 | **部分成立（4 格对、2 格错）** | 我按 `daemon_routes_and_drops` 的算法复算：92→**91** calls、106→**105** pairs、有 pair 的路径 91→**90** ——对。但「未镜像 calls / pairs」**一格都没变**（74 / 84 → 74 / 84）：`/console` 本来就在镜像里、也在「共享」集合里，删掉后它从两侧同时消失。它写的 HEAD「74 / **86**」与删后「**73** / 85」都错——84 是我头部一直在用的数 |
+
+**§二、破坏性对照（两次）**
+
+| 注入 | 结果 |
+|---|---|
+| `/` 上写 `get(move \|\| async { … })`（能编译） | **绿**：整段成为合法 drop（`mounts_closure` 认 `move`），两条断言都不动 |
+| 同上，但临时去掉「拒 `move`/`async`」那一行 | `every_parsed_handler_is_a_function_the_daemon_defines` **红**：`["get / -> `move`"]`——证明那一行是承重的，且新断言能抓住它放过去的东西 |
+
+**§三、新增「不成立」条目（原文保留，请勿重复提）**
+
+1. **「HEAD 的未镜像 pair 是 86」— 不成立，是 84。** 106 pairs 落在 18 条被镜像路径上的有 22 条（`/hosts`、`/health-snapshot` 各多一个 `POST`），106 − 22 = 84；`73`+`/`=74 条路径。
+2. **「删掉 `/console` 后未镜像 calls / pairs 变成 73 / 85」— 不成立，仍是 74 / 84。** `/console` 同时在 daemon 与镜像里，删掉后它从「共享」集合与 daemon 集合同时消失；未镜像 calls = 91 − 17 = 74，未镜像 pairs = 105 − 21 = 84，有 pair 的路径仍是 73（第 74 条是 `/`）。
+3. **「`.route_service(` 里就有 `.route(`，所以那句理由在文本上是错的」— 不成立。** `.route_service(` 在第 6 位是 `_` 而不是 `(`，`".route_service(".find(".route(") == -1`。它含的是 `.route`，不含 `.route(`；`daemon_routes_and_drops` 扫的正是后者，所以那句理由成立。
+
+**§四、未做与登记**
+
+- **混合链**（`.route("/x", get(h).post(\|\| …))`）：`mounted` 非空 → 不产 drop，POST 上那个闭包仍然隐形。要收它得给 `daemon_routes_and_drops` 再返回一份「既有 entry 又挂闭包」的段清单（改动面比本轮其它项大，且今天树上零例），**记入 L2 本轮小节**。
+- **链守卫被字符串里的 `//` 骗**（L2-127）：成立但需要有人把 `.nest(` 写在同一行的 `"//"` 之后；守卫仍是「入口先红」的那道，成本收益不划算，**保留并记入 L2 小节**。
+- 本轮没有动 `src-tauri/src/**`，没有新增 L2 待拍板项（L2-126 由 `94acb22` 关闭）。

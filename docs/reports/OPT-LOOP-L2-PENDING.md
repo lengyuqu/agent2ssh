@@ -1405,3 +1405,31 @@ fn mounts_a_closure_literal(segment: &str) -> bool {
 **政策一句**：面向使用者的现行文档（`docs/guides/**`、`docs/api.yaml`）按今天的树修；带日期的 `docs/reports/**` 保留快照，新的更正写在追加的小节里（本轮两节都是这个做法）。
 
 `docs/skills.md` 与 mcp 系列的「76 个工具」有断言（`mcp_tool_list_contains_exactly_76_tools`），它自己也认，不算缺口。
+
+---
+
+## 2026-11-11 · batch 12 第 5 轮：L2-126 关闭，混合链与链守卫的两个口子登记为 L2-128 / L2-129
+
+### 一、L2-126 已关闭（`94acb22`）——「entry 的 handler 必须解析得到」有断言了
+
+它的原话是「要教解析器读 nest 前缀，得先加这条断言」。**只落了后半句**，而且不依赖 nest：
+
+- `every_parsed_handler_is_a_function_the_daemon_defines`：每条 entry 的 handler 必须在 daemon 里有 `async fn <name>(`。今天是 106 / 106。
+- 同笔修了同一个洞更常见的形态：`get(move || …)` 曾被读成 `handler = "move"` → `mounted` 非空 → **不产 drop** → `mounts_closure` 从来没有被调用过。现在读名字处直接拒掉 `move` / `async`。
+- **读 nest 前缀本身没做**：它要回答「相对路径怎么拼」「多层 nest 怎么算」「`nest_service` 的通配怎么表达」，而今天树上零例。**判断：等真实用例出现再做，不猜规格。**
+
+### 二、L2-128（新）· 混合链里的闭包仍然隐形
+
+`.route("/x", get(h).post(|| async { … }))`：`mounted_handlers` 只读到 `h`，`mounted` 非空 → **不产 drop** → 那个 POST 闭包既不产 entry 也不产 drop，两条网都不看它。
+
+**为什么本轮不做**：要一条判据，得让 `daemon_routes_and_drops` 多返回一份「既有 entry 又挂闭包」的段（第三个返回值），或把 `mounts_closure` 提成「每段都算」。两者都改签名，而今天 92 段里零例。
+
+**落地面（估）**：解析侧 +15 行、断言 +10 行、破坏性对照 1 次；全在 `src-tauri/tests/**`，属 L1。**优先级中**：要发生得有人同时把命名 handler 与闭包写进一条 `.route`。
+
+**给将来做的人的判据**：**一段里不许混装**——`mounted` 非空且 `mounts_closure(segment)` 为真就红，文案写「同一条 `.route` 上不要混挂闭包与命名 handler」。
+
+### 三、L2-129（新）· 链守卫的三个口子，两个成立、一个不成立
+
+1. **`split("//")` 被字符串字面量骗——成立。** `.route("/c", get(|| { let _ = "//"; })).nest(…)` 写在同一行时，`//` 之后全被截掉，`.nest(` 看不见。今天零例（要「同一行 + 含 `//` 的字符串 + 其后紧跟 `.nest(`」三件事同时成立）。**修法**：把「剥行注释」换成一个跳字符串/字符字面量的小扫描器，约 20 行。**优先级低但不为零**：`.nest` 载荷造出的假 entry，只有当 handler 名恰好是顶层已有函数（如 `get(health)`）时，L2-126 那条断言才不管——那种组合是躲得过两条网的。
+2. **「其余 builders 不含 `.route(` 这句理由在文本上错」——不成立。** `.route_service(` 第 6 位是 `_` 而不是 `(`：`".route_service(".find(".route(") == -1`。它含 `.route`，不含 `.route(`，而解析器扫的是后者。测试里的原话成立，不改。
+3. **守卫终点取第一个 `.with_state(`——成立。** `let app = Router::new()` 之后若先出现 `sub.with_state(s)`，窗口会在那里断掉，其后的 `.nest(` 落到窗口外。今天链上只有一个 `.with_state(`。**修法**：改用「链段内最后一个 `.with_state(`」或「最后一次 `.route(` 之后再取一段」。成本 1 行，但「窗口」的语义会更含糊，故与 L2-128 一起等下次动这个文件时做。
