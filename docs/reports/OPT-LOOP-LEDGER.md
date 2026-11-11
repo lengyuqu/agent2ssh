@@ -3654,3 +3654,49 @@ L2-154（`/exec-multi` 全 0 语义）、L2-155（preview 缺 admin 门）、L2-
 
 **回帖**：`2120634031854219264`（`## 本轮收尾`）。`#21` **保持 open**：文档一致性这条线已走完，剩余四项（L2-176~179）全在「改日志落地方式或 IPC 形状」的决策侧，按本轮把四条写成可在 5 分钟内选一条的形态留在 L2 清单里。分支 `opt/single-21-20261112d` 与 worktree `…/single-21` 已在合流验收后清理，本条补记用的 `opt/single-21b-20261112` / `…/single-21-ledger` 随之清理。
 
+
+## 2026-11-12 06:47–07:1x · 模式 B 单发 · issue #20 第七次进入（基线 `20b88c4`）
+
+**模式**：`open` 十二条（#20–#29 + #31/#32 安全贴），**无 `[opt-round]`** → 模式 B，第二段为空。开工前无锁、三个其它 worktree 全 0 行、`ls-remote cnb/main` 与本地同为 `20b88c4`、`src`/`docs` 十分钟零写入 → 不让位。
+
+**选靶**：#20 的最新评论是 CodeBuddy 的复核 `2120616575756582912`（2026-11-11T20:36:05Z），**未被消费**；#21（`2120634812074455040`）与 #23（`2120583722461192192`）的复核同样未消费，但 #20 编号最小且是这一族的入口。**上一轮（05:35）选 #21 时把 #20 记成「刚收尾在等复核」，而那份复核 04:36 就到了——比它开工早一小时。判「在等复核」只能看最新一条的时间戳，不能沿用上一轮结论。**
+
+### 判定（10 条 → 成立 6 / 部分成立 1 / 不成立 3）
+
+| # | 复核的断言 | 判定 | 证据 |
+|---|---|---|---|
+| 1 | (a) 文件级段落把「两个共享读」说清了 | 成立 | `api.yaml:25-43` 与 `approval.rs` 的 `policy_approval_policies()` → `existing_policy_path()` → `approval_policies_path()` 兜底逐字对得上 |
+| 2 | (a) **有第三个共享读 `load_risk_rules`，你没数到** | **部分成立** | 事实对（`risk_config.rs:41-70` 读同一份 `policy.toml`，`is_some()` 时走 `load_policy_from_path(&path)?.risk`）；**后果全错**，见第 3 条 |
+| 3 | (a) 它把 `load_risk_rules` 的 `Err` 翻成 500：「`exec_preview` 的 500 在 `api.yaml` 里有；`/risk/check`、`/approval/check` 有 500」 | **不成立** | `exec_preview` 把 `preview_exec*` 的 `Err` 映射成 **400**（`:3563`、`:3572`），`/exec/preview` 的 responses 无 500；`/risk/check` 的 `classify_with_user_rules(...).map(...)` 是 `Result::map`，`Err` 被丢弃，且 `effective_command_risk` 返回 `RiskLevel` 不是 `Result`；`host_policy` 映射成 **404**（`:1407`）；`/approval/check` 的 500 来自 `check_approval_required`（`:3493-3494`），是**审批链**不是风险规则 |
+| 4 | (b) `/local-exec` 删掉 500 之后客户端读得到 | 成立 | 我复核同一结论；它把「挪 500 到文件级」与「补 400 那半句」判为两个必要条件也对 |
+| 5 | (b) 我的自评只归功于第一步，漏了「补 400 那半句」 | 成立 | 接受，记入本轮 |
+| 6 | (c) 没有一条路由被误判成「必然 403」 | 成立 | 403 只由 `authorize_command_inner` 的两个 `Err` 臂产生，16 个 preflight 调用点全部可达但不必然 |
+| 7 | (c) `preflight_rewritable_request(` 有 **2** 个调用点（`:1711`、`:1813`） | **不成立** | 实测 **1** 个（`:1711`，`exec`）；`:1813` 是 `preflight_guarded_request(`（`local_exec`）。它把两个包装函数看成同一个 |
+| 8 | (c) 删掉那两条 `preflight_rewritable_request(` 表项「不会有任何一条路由从表里消失，新增路由 = 0」 | **不成立，且照做会造出真回归** | `exec` handler（`:1702`）正文**只有** `preflight_rewritable_request(`，没有 `preflight_guarded_request(`；删掉那两条，`POST /exec` 的 429 与 403 立刻零守卫 |
+| 9 | (c) `preflight_sftp_rm_rf(` 的两条路由是漏报，删 403 不会红 | 成立 | 变异验证实测：删掉 `/sftp/rm-rf` 的 403 后新表项立刻红并点名 `403 post /sftp/rm-rf (sftp_rm_rf via helper)` |
+| 10 | (c) `HELPER_STATUS` 只扫 handler 自身函数体、不传递 | 成立（已文档化） | 测试自带注释 `daemon_integration.rs:3557-3569` 早已写明，不是新发现 |
+
+### 本轮自取（不在它清单里）
+
+`ensure_command_length` 在 `:390` 里造 `400`，所以「handler 正文无 `StatusCode::BAD_REQUEST`」的 handler 一律看不见这条码。11 个调用点里 9 个文档了 400，**漏的两个是 `/risk/check` 与 `/approval/check`**——正是「只回答问题、不执行任何东西」的那一对。把新表项加进去后实测只红这两条，零新增红；`/exec/stream` 在 `INBAND_REJECTIONS` 里，把同一条拒绝写进帧而不是状态码，所以不受影响。
+
+### 改了什么（全 L1）
+
+- `src-tauri/tests/daemon_integration.rs`：`HELPER_STATUS` **10 → 13**，新增 `("ensure_command_length(", "400")`、`("preflight_sftp_rm_rf(", "429")`、`("preflight_sftp_rm_rf(", "403")`；模块文档补两段，说明「400 这一层的同族一致性」与「包装函数扫不穿」。**同时保留 `preflight_rewritable_request(` 那两条**并写明理由（它是 `/exec` 唯一的 429/403 来源）。
+- `docs/api.yaml`：`/risk/check` 与 `/approval/check` 各补一条 `"400"`，措辞沿用同族的「The command is longer than the daemon's command-length limit」，不写死 16384（本仓既有教训：写进文档的数字是零覆盖的漂移源）。
+- `docs/reports/OPT-LOOP-L2-PENDING.md`：新增 **L2-180**（`[risk.*]` 解析失败时全族 fail-open，与审批链答 500 的态度相反），并把四条「不是 500」的证据逐条列进条目里。
+
+### 反向验证（两次，实测）
+
+1. 加表项、不改 api.yaml → `api_yaml_documents_the_codes_each_handler_can_return` 红，且**只**点名 `400 post /approval/check` 与 `400 post /risk/check`。
+2. 补完 api.yaml 后，把 `/sftp/rm-rf` 块里的 `"403":` 改名 → 同一条测试红并点名 `403 post /sftp/rm-rf (sftp_rm_rf via helper)`；恢复后全绿。**这一条同时证明新 wrapper 表项不是装饰。**
+
+### 验证
+
+`npm run build` **6.30 s**；`cargo fmt --check` 绿；`--no-default-features --lib` **863 passed / 1 failed / 1 ignored**（红项仍是那条故意红的 `an_ipv6_literal_at_port_22_is_removed`，与基线一致）；`--no-default-features --features daemon --test daemon_integration` **83 passed / 0 failed**（与上轮同数：本轮没有新增测试函数，只改了表与契约）；`yaml.safe_load` **90 paths**。
+
+### 新增「不成立」，不要重复提
+
+1. **「`preflight_rewritable_request(` 在 `bin/agent2ssh-daemon.rs` 有 2 个调用点（`:1711`、`:1813`）」**——只有 1 个（`:1711`）；`:1813` 是 `preflight_guarded_request(`。
+2. **「删掉 `HELPER_STATUS` 里 `preflight_rewritable_request(` 的两条不会让任何路由从表里消失」**——`exec` handler 正文只有这个包装，删掉后 `POST /exec` 的 429/403 零守卫。这条如果照做，是本轮唯一会造出真回归的改动。
+3. **「`load_risk_rules` 的读失败会让 `exec_preview` / `risk_check` / `approval_check` / `host_policy` 答 500」**——四条依次是 400、丢弃（`Result::map`）、审批链的 500（与本条无关）、404。

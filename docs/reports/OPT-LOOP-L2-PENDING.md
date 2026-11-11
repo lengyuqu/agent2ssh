@@ -2370,3 +2370,27 @@ forward_start（:3204-3244）与 forward_remove（:3077-3113）、forward_stop�
 **为什么它是 L2**：让 daemon 自己轮转要把 stdout 的 `Stdio::from(File)` 换成可重开的 writer（或改用 `logrotate` 的信风格），是进程 I/O 结构的改动；改成"每次 spawn 无条件轮转"丢历史；两者都要有人定"多大、保留几代、谁负责"。
 
 **建议改法**：(a) 保持现状，文档已写明"运行中的 daemon 不会自己截断"，由运维定期 `daemon restart`；(b) spawn 前由启动器检查，超阈值时提示（不自动转）——零风险，让问题可见；(c) daemon 侧周期性 reopen：`main` 里起一个定时任务，按大小 rename + 重新 `dup2`/重开文件；(d) 交给系统 `logrotate` 并把它写进发行说明。回滚：(b) 删掉提示即可，(c) 删掉定时任务即可回到今天。倾向 (b) 先做，(c) 与 L2-176 一起拍——两者都在改日志落地方式。
+
+### L2-180（新，单发 #20 第七次进入）：`policy.toml` 里 `[risk.*]` 段解析失败时，所有用户风险规则静默失效（fail-open），而审批链读到同一个文件失败却答 500
+
+**位置**：`src-tauri/src/risk_config.rs:41-70`（`load_risk_rules`）。`policy_path = crate::policy::existing_policy_path()?`，`policy_path.is_some()` 时走 `crate::policy::load_policy_from_path(&path)?.risk`（`:61-62`），否则 `read_to_string(&path)?` + `toml::from_str(&raw)?`（`:64-65`）——两处都是 `?`，所以**同一份 `policy.toml` 解析失败会返回 `Err`**。
+
+**判断**：**成立（代码事实）**，但复核对它的后果判断反了——它说四条路由因此答 500。逐条核过，四条都不是：
+
+| 调用点 | 复核的判据 | 实际 |
+|---|---|---|
+| `exec_preview`（`bin/agent2ssh-daemon.rs:3546`） | 「500 在 `api.yaml` 里有」 | 它把 `preview_exec*` 的 `Err` **映射成 400**（`:3563`、`:3572`）；`/exec/preview` 的 `responses` 根本没有 500，也答不出 500 |
+| `risk_check`（`:3513`） | 「`execution_control.rs:186` → 500」 | `effective_command_risk` 返回 `RiskLevel` 不是 `Result`（`execution_control.rs:185-187`）；`classify_with_user_rules(...).map(...)` 是 `Result::map`，`Err` 被丢弃、`matched_rule` 变 `null`。零 500 |
+| `approval_check`（`:3479`） | 「同上一行」 | 它的 500 来自 `check_approval_required(...).map_err(INTERNAL_SERVER_ERROR)`（`:3493-3494`），那是**审批链**（`policy.toml` 存在时先读 `[approval.policies]`），不是风险规则 |
+| `host_policy`（`:1392`） | 「`execution_control.rs:179` 的 `blocked_patterns`」 | `host_policy_summary(...)` 的 `Err` 映射成 **404**（`:1407`）；`blocked_patterns` 在 `execution_control.rs` 里读的是策略快照，不经过 `load_risk_rules` |
+
+真正的问题不是「少写了几条 500」，而是**没有任何一条路径把这件事说出来**：`classify_with_user_rules`（`risk_config.rs:73-75`）开头就是 `load_risk_rules().await.ok()?`，`effective_command_risk` 直接返回等级，于是 `policy.toml` 的 `[risk.*]` 段写坏之后，`blocked` 规则不再拦、`high` 规则不再升级、`/risk/check` 照旧报一个等级出来——**从调用方看与「没有任何自定义规则」完全同形**。而审批链读同一份文件失败时是 500（`/approval/check` 已经文档化），两者对同一个文件的失败态度相反。
+
+**为什么它是 L2**：三种修法都要动 `src-tauri/src/**` 的行为或签名——
+(a) `load_risk_rules` 返回的 `Err` 在 preflight 里变成 500：与 `reject_if_gate_paused` 的 fail-closed 一致，但会把「策略文件写坏」升级成「所有执行被拒」，且要先定「哪些 operation 需要文档这条 500」（正是 L2-174 收口时否掉的那条路）；
+(b) 降级但记账：`classify_with_user_rules` 改成返回 `Result` 或额外返回一个 `rules_load_error: bool`，`/risk/check` 的响应里多一个字段——对外契约扩张；
+(c) 保持 fail-open，只在 daemon 启动时读一次并在失败时打一条 `error!`：零契约变化，但运行中的损坏仍然看不见。
+
+**建议改法**：先做 (c)（零回滚成本：删掉日志即回到今天），(b) 与 L2-26 的取值域改造一起拍——两者都在改 `/risk/check` 的响应形状，一次改完比分两次便宜。**回滚**：(a) 把 `?` 换回 `.ok()`；(b) 删字段；(c) 删日志。
+
+**不新立条的部分**：`load_risk_rules` 与 `risk_rules.toml`/`policy.toml` 的优先级错位已在 **L2-108**；`/risk/check` 一次请求读两遍规则已在 **L2-26**。本条只记「读失败之后所有人都当没读过」这一件。

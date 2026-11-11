@@ -4189,6 +4189,17 @@ paths:
                       pattern is not carried, so the two possible values are `null`
                       and the literal `"user_rule"`.
 
+        "400":
+          description: >-
+            The command is longer than the daemon's command-length limit. This
+            route runs the same length check `/exec` runs, before it classifies
+            anything, so an over-long command is refused here too — the one
+            refusal this page shares with the operations that execute rather
+            than report.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
         "401":
           description: Missing or invalid bearer token.
           content:
@@ -4758,6 +4769,16 @@ paths:
                   matched_policy:    { type: string, nullable: true }
                   risk_level:        { $ref: "#/components/schemas/RiskLevel" }
                   ttl_secs:          { type: integer, nullable: true }
+
+        "400":
+          description: >-
+            The command is longer than the daemon's command-length limit,
+            checked before any policy is consulted. An over-long command cannot
+            be answered as "no approval needed" because the policy match never
+            ran.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
         "401":
           description: Missing or invalid bearer token.
