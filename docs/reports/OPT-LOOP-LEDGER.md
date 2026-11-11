@@ -2861,3 +2861,63 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 - **复核方的 `[读]` 类断言这批有明显进步，但「机理」仍是它的弱项**：第 6 轮那条结论对、四条机理全错；第 4 轮那条「没有断言」也错在没读到 `read_to_string(…).unwrap()`。**结论可以信，机理一律自己走一遍。**
 
 **回帖**：`2120464188978937856`（10:30Z）。推 `cnb main`（`6f17e85..e59d99a`，两笔：`8ae1a6f` 测试 / `e59d99a` 文档），未推 github。**issue #19 已关闭**（`state_reason=completed`），`## 第 K 轮收尾` 评论实测 6 条，与 6 / 6 一致。
+
+---
+
+### 手工/单发消费 · 2026-11-11 · daemon 停止回执与旧版兼容（issue #20）
+
+- **选靶**：open 里共 10 条、无 `[opt-round]` → 模式 B。按 P1 定义（body 或最新评论含带文件路径＋行号的具体缺陷断言）筛，#20 是同级里编号最小的一条，也是这一族的入口：#21（诊断与恢复）依赖它的回执语义，#23/#24/#25 依赖 #22 的身份协议。它的首条分析已在 issue 里到位（`2120408250179825664`），本轮不必自取靶。
+- **模式判定在前**：开工前先过 1.1 让位判据 —— 两个 WorkBuddy worktree 与 codex 的 PR worktree `status --porcelain` 全为 0 行、远端 `7a4bd7c` 与本地一致、`/tmp/agent2ssh-opt-loop.lock` 不存在。无并发写者，开锁并写 `owner`（pid 49564）。
+- **isolation**：`opt/single-20-20261111` / `agent2ssh-opt-worktrees/single-20`，`node_modules` 与 `src-tauri/binaries/*` 逐项软链，`CARGO_TARGET_DIR` 指向主仓 target。
+
+#### 判定（11 条独立指摘 ＋ 1 条已登记）
+
+下表的「它的基线」是它自述的 `380e166`。**`daemon_control.rs` 在 `380e166..7a4bd7c` 之间没有任何提交**（`git log` 为空），所以下面的行号偏差不是漂移：
+
+| # | 指摘 | 判定 | 证据 |
+|---|---|---|---|
+| 1 | body 那句「带 `expect_pid` 请求**成功时**新旧 daemon 均返回相同 200」对**新旧都不成立**，新 daemon 回 200/409 两种形状 | **不成立** | body 的限定词是「请求成功时」，它没主张「PID 不符也回 200」。新 daemon 失败时回 409，successful 时回 200 —— 这一点上 body 与它说的是同一件事。它把限定词删掉后反驳了一句没人写过的话 |
+| 2 | §1.1 分支表（401/403、400、409、空 body 200、显式 null 400） | 成立 | `daemon_shutdown` 实为 `:165-228`（它写 `:160`）；`:171` 鉴权、`:174-189` 手写解析、`:192-207` 409、`:211-213` 匹配、`:217-222` 显式 null 400、`:223` 空 body 均与源码一致 |
+| 3 | 「`daemon_shutdown` 的**三条** 200 路径（`:197`、`:213`、`:223`）都回 `own_pid`」 | **不成立** | 全函数只有一处 200：`:227`；`:197` 是 409 臂里的 `append_diagnostic_log`。接受臂只有两条（`:211-213`、`:223`），都落到那一处 return |
+| 4 | 「`api.yaml` 的 `/shutdown` 里**没有** `413`，`:1186-1190` 的 413 是 `/hosts` 的」 | **不成立** | `413` 在 `/shutdown` 内、带 `text/plain`，`380e166` 版本就有（`git show 380e166:docs/api.yaml` 命中），`/hosts` 从下一行才开始 |
+| 5 | 「`Bytes` 形状只回自己写的状态码」这条在 `api.yaml:37-42` 的表里 | **不成立** | 那句是 `daemon_integration.rs:3591` 的 **assert 消息**；`api.yaml:37-60` 写的是「`Bytes` 把原始字节交给 handler，由它自己解析」。它把测试的失败文案当成契约正文 |
+| 6 | §1.2 客户端分支表与「`stop_daemon_process` 走 `Some(pid)`，所以第一臂恒假」 | 成立，但**已在 K14** | 真值判定对（第一臂 `:902`，`AcceptedUnchecked` 在 `:917`）；它给的行号 `:913`/`:917`/`:927`/`:931`/`:938`/`:815-820` 分别应为 `:902`/`:905`/`:917`/`:918-935`/`:940-949`/`:827-832`，同一文件同一基线偏 11–13 行。**K14 已写「每次正常停止都会记一条 daemon predates it 的 warn（2026-11-10 核实，代码事实，未修）」**，L2-3 也已给出两条出路，不是新发现 |
+| 7 | 两个 `Accepted*` 变体无载荷、`reported_pid` 不能复用 | 成立 | `:855-868`；`reported_pid` 解析的是 409 的错误文案 |
+| 8 | `request_graceful_shutdown()` 只有一个调用者，MCP 无 daemon 停止工具 | 成立 | 调用点 `daemon_stop_e2e.rs:1150`（它写 `:1155`）；`agent2ssh-mcp.rs` 里 `stop_daemon_process` 零命中 |
+| 9 | CLI 与桌面都不读回执；`DaemonControlResult` 无字段 | 成立 | `bin/agent2ssh.rs` 的 `DaemonCommands::Stop` 只 `stop_daemon_process` + `remove_daemon_pid_file_if` + 一句 `Daemon stopped`；`tauri_commands.rs:1852-1876`、`src/types.ts:205-209` |
+| 10 | 409 的 `actual` 来自错误文案解析，`actual == expected` 时 `Display` 自相矛盾并引导重试 | 成立（新） | `reported_pid` 的 `split("is pid ")` + `Display` 同时用 `actual` 与 `expected`；真 daemon 不产生该组合，所以只对「能答这个形状的别的进程」成立 —— 与 K14 威胁边界同级。已立 L2-138 |
+| 11 | §4.2 七条新用例中「新 daemon 的停止不产生 predates warn」是靶子、`app.log` 断言须在 `Drop` 之前读 | 成立 | `git grep predates src-tauri/` 只命中实现处与一条测试注释，零断言；`a_daemon_that_ignores_the_expected_pid_stops_and_says_so` 只断言 `posted == 1` 与结果，不读日志 |
+| 12 | 「409 分支 Windows 有覆盖、200→`AcceptedUnchecked` 零覆盖」 | 已登记 | 即 L2-30，未重复立条 |
+
+#### 本轮改了什么
+
+- **L1（代码注释 ＋ 断言强度）** `092d0f9`：
+  - `daemon_control.rs`：`AcceptedUnchecked` 变体文档与 `stop_daemon_process` 里那条臂的注释，原本写「accepted by a daemon that does not check `expect_pid`」「too old to know `expect_pid`」。**这两个说法对本仓当前代码都不成立**：守卫要求 `expected_pid.is_none()`，真实停止永远传 `Some`，所以每一次成功的停止都落这条臂 —— 包括核对通过的新 daemon。注释改成「只有回执缺失，没有版本信息」，并指向 K14。**警告文案本身没动**（属行为，L2-137）。
+  - `daemon_integration.rs`：`api_yaml_documents_how_each_handler_reads_its_body` 新增「`Bytes` 形状必须文档 413、且必须是 `text/plain`」。此前该测试只管 415/422，413 无任何断言 —— 而这条缝里真实存在一处漏格（见下）。
+  - `daemon_stop_e2e.rs`：`a_daemon_that_ignores_the_expected_pid_stops_and_says_so` 的文档注释声称「调用方的日志记录了这次回答未核对 PID」，实测该测试从不读 `app.log`。改成它真正钉住的三件事，并点名日志断言为零。
+- **L1（契约与文档）** `e07e527`：
+  - `api.yaml` `/shutdown`：把「A `409` means another daemon holds the listener: the PID in `expect_pid` is not the one that replied」改成「409 是核对自己答的：比较过、不同、继续运行」，并写明报出的 PID 是对端文案里的字，`actual == expected` 只能读成「这个回答无法核实」。新增一段：200 在所有接受路径上都是 `{"ok": true}`，**不告诉调用方核对是否发生**，`daemon stop` 因此把核验过的停止也记成未核验（L2-137）。
+  - `api.yaml` `/approvals/{id}/approve`：补 `413`（`text/plain`）。它是第二个 `Bytes` 处理器，与 `/shutdown` 受同一条 2 MiB 默认上限约束，此前契约里少一格 —— 这正是它第 4 条想说但指错了路由的那件事。
+  - `KNOWN-ISSUES.md` K14：补 `409` 报出的 PID 是文案解析、可与请求 PID 相同（2026-11-11 核实），指向 L2-138。
+
+#### 未做（L2，只登记）
+
+- **L2-137**：`/shutdown` 200 加 `checked_pid` 回执 ＋ 客户端两条臂带载荷 ＋ CLI/桌面/日志文案。改动集与回滚路径已写进清单。
+- **L2-138**：`actual == expected` 归 `NotAccepted` 的口径（会改 CLI 对外文案，需拍板）。
+- **L2-139**：`shutdown.require_receipt` 策略项（默认关；开启后旧 daemon 卸不掉）。论证要点：回执不改变安全属性，强杀判据仍是 pid ＋ 秒级 `start_time`。
+- **L2-140**：413 的真 daemon e2e（>2 MiB body）与回执断言（需 L2-137 先进）。
+
+#### 验证
+
+`npm run build` 6.80 s；`cargo test --no-default-features --lib` **862 passed / 1 failed / 1 ignored**（失败项仍是那条故意红的 IPv6 `known_hosts` 用例，与基线一致）；`cargo test --no-default-features --features daemon --test daemon_integration api_yaml` **6 passed**，并做了**反向验证**：把 `/approvals/{id}/approve` 的 413 临时去掉后该用例立刻红，断言不是空转；`cargo fmt --check` 绿。
+
+#### 判定不成立（原文保留，请勿重复提；本节编号独立）
+
+1. **「body 那句『带 `expect_pid` 请求成功时新旧 daemon 均返回相同的 200』对**新旧都不成立**」— 不成立。** 限定词是「请求成功时」。新 daemon 在 PID 不符时回 409、成功时回 200，body 从没主张失败也回 200。
+2. **「`daemon_shutdown` 的三条 200 路径（`:197`、`:213`、`:223`）都回 `own_pid`」— 不成立。** 全函数只有一处 200（`:227`）；`:197` 在 409 臂里，是 `append_diagnostic_log`。
+3. **「`api.yaml` 的 `/shutdown` 里没有 `413`，`:1186-1190` 的 413 是 `/hosts` 的」— 不成立。** `413` 就在 `/shutdown` 里且带 `text/plain`，`380e166` 已如此。
+4. **「`api.yaml:37-42` 的表格说 `Bytes` 形状『只回自己写的状态码』」— 不成立。** 那是 `daemon_integration.rs:3591` 的 assert 消息，不是契约正文。
+
+#### SHA 与回帖
+
+`092d0f9`（代码/注释/断言）＋ `e07e527`（契约与文档），已推 `cnb main`（`7a4bd7c..e07e527`），未推 github / git233。回帖见下方 id 记录。
