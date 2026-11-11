@@ -2680,3 +2680,5 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 
 6. **「`wait_for_exit` 的 `Running` → 强杀支零覆盖」——不成立（收窄版）。** `a_daemon_that_ignores_the_expected_pid_stops_and_says_so` 里 stand-in 不响应关闭、`stop` 仍返回 `Ok`，这条路径**只能**由 `Running → 强杀 → Exited` 走到。缺的是「单独钉住它的用例」，不是覆盖。
 7. **「L2-133(a) 证明 `/exec/stream` 的回归测试必须有沉默 `TcpListener`」——结论过强。** 前提（`/exec/stream` 无本地分支）成立，但 `timeout_secs` 两段都能超时，沉默对端只是握手段最省事的做法。
+
+**回帖**：`2120449917180080128`（09:33Z）。推 `cnb main`（`4cd9074..5684510`，rebase 过），未推 github。
