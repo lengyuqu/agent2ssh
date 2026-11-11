@@ -263,12 +263,17 @@ pub fn preview_team_config_import(export: &TeamConfigExport) -> Result<ConfigDif
 /// Whether an incoming team-config host matches the stored one closely enough
 /// that the import can skip it.
 ///
-/// Compares eleven fields. `init_command` and `passphrase` are deliberately
-/// outside the set, because both are *preserved* rather than compared when a
-/// host is updated (`import_team_config`): a field that reports a difference
-/// would then be a field the import does not act on, so a host differing only
-/// in one of them is reported as skipped -- correctly, since nothing about it
-/// changes. `password` and `key_path` are outside for the same reason.
+/// Compares eleven fields unconditionally. `init_command` is compared **only
+/// when the bundle carries one**: `import_team_config` preserves the local value
+/// when the bundle omits it, so an omitted one must not make the host look
+/// different — but a bundle that *does* carry a different value has to look
+/// different, or this function's skip gate fires first and the value never
+/// lands. Both directions are pinned by
+/// `test_team_config_import_preserves_a_local_init_command`.
+///
+/// `passphrase`, `password` and `key_path` stay outside the set entirely,
+/// because the import preserves them unconditionally and no bundle value can
+/// replace them.
 fn team_host_same(existing: &HostProfile, incoming: &HostProfile) -> bool {
     existing.host == incoming.host
         && existing.user == incoming.user
@@ -281,4 +286,5 @@ fn team_host_same(existing: &HostProfile, incoming: &HostProfile) -> bool {
         && existing.env == incoming.env
         && existing.role == incoming.role
         && existing.owner == incoming.owner
+        && (incoming.init_command.is_none() || existing.init_command == incoming.init_command)
 }

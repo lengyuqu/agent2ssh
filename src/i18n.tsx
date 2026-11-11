@@ -726,6 +726,7 @@ export const zh: Record<string, string> = {
   "Duration": "耗时",
   "Copy selected as JSON": "复制所选为 JSON",
   "Copied {count} entries to clipboard": "已复制 {count} 条记录到剪贴板",
+  "Clipboard is not available in this context.": "当前环境不支持剪贴板。",
   // V3-1: SFTP file preview
   "File too large to preview": "文件过大，无法预览",
   "Cannot preview this file": "无法预览该文件",

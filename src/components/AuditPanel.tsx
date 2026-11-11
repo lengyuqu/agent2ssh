@@ -258,7 +258,15 @@ export default function AuditPanel({ audit, onRefresh, onReplay }: Props) {
 
   function copySelectedAsJson() {
     const selected = audit.filter((entry) => rowSelection[entry.id]);
-    navigator.clipboard
+    // Both branches have to be reachable: `navigator.clipboard` is absent
+    // outside a secure context, and reading `.writeText` off it throws
+    // synchronously -- before any `.then`/`.catch` exists to report anything.
+    const clipboard = navigator.clipboard;
+    if (!clipboard?.writeText) {
+      showToast("error", t("Clipboard is not available in this context."));
+      return;
+    }
+    clipboard
       .writeText(JSON.stringify(selected, null, 2))
       .then(() => showToast("success", t("Copied {count} entries to clipboard", { count: selected.length })))
       .catch((err) => showToast("error", String(err)));

@@ -144,7 +144,13 @@ export default function McpAgentsPanel() {
   }
 
   async function copyCommand(agent: McpAgentConfigStatus) {
-    await navigator.clipboard.writeText(agent.recommended_command);
+    // Same guard as the other copy buttons: absent outside a secure context,
+    // where `await` on it rejects and the confirmation below never runs.
+    const clipboard = navigator.clipboard;
+    if (!clipboard?.writeText) {
+      return;
+    }
+    await clipboard.writeText(agent.recommended_command);
     setCopied(agent.id);
     window.setTimeout(() => setCopied(null), 1600);
   }
