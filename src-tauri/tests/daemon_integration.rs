@@ -2704,6 +2704,15 @@ fn every_route_call_is_read_as_an_operation() {
 #[test]
 fn the_console_route_mounts_one_named_handler() {
     let daemon = include_str!("../src/bin/agent2ssh-daemon.rs");
+    // The count comes first: axum merges a second `.route` on the same path into
+    // the first, so `POST /console` is a legal addition that this test would
+    // otherwise read as a different segment and never look at.
+    let calls = daemon.matches(".route(\"/console\"").count();
+    assert_eq!(
+        calls, 1,
+        "`/console` is mounted by {calls} `.route(...)` calls. A second one adds a method to a \
+         path that no `api.yaml` check reads and that never drops, so it would ship unremarked"
+    );
     let at = daemon
         .find(".route(\"/console\"")
         .expect("the daemon no longer mounts `/console`, so the browser console is unreachable");
