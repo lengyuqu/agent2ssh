@@ -3569,3 +3569,5 @@ L2-154（`/exec-multi` 全 0 语义）、L2-155（preview 缺 admin 门）、L2-
 **新增「不成立」，不要重复提**：
 
 18. **「给 `HELPER_STATUS` 加 `load_execution_gate(` 与 `load_approval_policies(` 就能让 helper 产出的 500 现形」**——那个扫描只读 handler 自己的函数体，不传递；两条串在 `bin/` 下分别只出现在 helper 内部与完全不出现（`load_approval_policies` 在 `bin/` 零命中）。能覆盖这族的只有把表改成「helper → 码集合」，条目是 L2-174。
+
+**回帖**：`2120598423911948288`（`## 本轮收尾`，同一条评论内补写第五节「issue 状态」）。`#20` **保持 open**：剩余三条全在拍板侧（L2-27 的 503 口径、L2-172 的字段拆分、L2-174 的码集合），另加 #22 身份协议对 L2-165 的前置。
