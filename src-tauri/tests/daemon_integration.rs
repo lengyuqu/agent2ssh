@@ -3182,7 +3182,7 @@ fn every_scope_checked_route_documents_the_order_its_refusals_arrive_in() {
         // read from that branch's marker onward rather than letting whichever
         // call comes first in the source define the shape.
         if body.contains("if alias == \"localhost\"") && body.contains("get_daemon_with_scope(") {
-            let (_, _, remote_branch) = body
+            let (_, remote_branch) = body
                 .split_once("get_daemon_with_scope(")
                 .expect("guarded by the contains above");
             let remote = chain(remote_branch);
@@ -3320,7 +3320,10 @@ fn chain(cleaned: &str) -> Vec<&'static str> {
                 "preflight_sftp_rm_rf(",
             ],
         ),
-        ("authorize", ["authorize_command(", "authorize_targets(", ""]),
+        (
+            "authorize",
+            ["authorize_command(", "authorize_targets(", ""],
+        ),
     ];
     let mut at: Vec<(usize, &'static str)> = Vec::new();
     for (label, needles) in STEPS {
@@ -3410,9 +3413,9 @@ fn spec_operation_block(spec: &str, path: &str, method: &str) -> Option<String> 
         let trimmed = line.trim_start();
         let is_method_key = !trimmed.starts_with('/')
             && line.len() - trimmed.len() == 4
-            && trimmed.strip_suffix(':').is_some_and(|name| {
-                matches!(name, "get" | "post" | "put" | "delete" | "patch")
-            });
+            && trimmed
+                .strip_suffix(':')
+                .is_some_and(|name| matches!(name, "get" | "post" | "put" | "delete" | "patch"));
         if is_method_key {
             inside = trimmed
                 .strip_suffix(':')
@@ -3475,8 +3478,6 @@ fn response_description(operation: &str, code: &str) -> Option<String> {
     }
     None
 }
-
-
 
 #[test]
 fn api_yaml_documents_the_codes_each_handler_can_return() {
