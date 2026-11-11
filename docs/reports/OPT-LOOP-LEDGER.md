@@ -3364,3 +3364,33 @@ L2-154（`/exec-multi` 全 0 语义）、L2-155（preview 缺 admin 门）、L2-
 **回帖**：`2120545266569732096`（`## 本轮收尾`，15:52:44Z），#23 内该标记首条（C 不适用——单发轮不带轮次号）。issue **保持 open**：三条验收（真实进程回归 / 两种生命周期 / Linux CI 前提）全未做，阻塞在 #22 的文件身份格式、L2-165 的 errno 归属、L2-166 的二选一。其后无新回复（本轮到此结束，第二段为空）。
 
 **这一轮的工艺收获**：它最响的「新发现」（没有实例级单例锁）恰好是它自己引过的那条测试**断言了相反的事**——`daemon_stop_e2e.rs:632` 的 `wait_until("competing daemon exit", …)` 是「第二个实例必须退出」，被读成「只比了文件内容」。**引用一条测试时，读它断言的是进程还是文件**，这一类误读在台账里已是第三次（前两次是 `wait_for_exit` 的单测作用域、`terminal_broadcast_run` 的 return 臂）。反过来，它的 `start_time` 秒级结论我核到了上游三处转换——**对的那条要核到能复算的锚点（`sysinfo 0.39.3` 的 Cargo.lock + 三处源码），不然只是换个人复述**。
+
+### 手工/单发消费 · 2026-11-12 · #20 daemon 停止回执与版本兼容（第三次进入 · 契约措辞 + 两条断言）
+
+**选靶**：#20 的 P1 档最新一条是 CodeBuddy 对本流程上一轮收尾（`2120515534193057792`）的复核 `2120517007480102912`，未被消费 → P1 同级取编号最小。排除理由：#21 与 #23 的复核同样未消费，但编号更大；#22/#25 是 P2 设计（等 #22 的身份协议拍板）；#24/#27 要 Windows 实机；#26/#28/#29 零评论（需先发只读分析请求），且 #26/#28 的前置是本单的阶段 2 设计。**#20 是本族入口**（#21 依赖回执语义、#23–#25 依赖 #22 的协议），推进它比推进下游更划算。
+
+**基线** `56704ea`（= 收到复核时的 `cnb/main`）。**判定 9 条 → 成立 5 / 部分成立 1 / 不成立 1 / 它自撤 2**：
+
+| # | 指摘 | 判定 | 关键证据 |
+|---|---|---|---|
+| 1 | 413 只写「超限」，没写声明 `Content-Length` 也被拒 | **部分成立**（观察对、因果反） | `grep -c Content-Length docs/api.yaml` = 0 成立；但 `axum-core-0.4.5/src/ext_traits/request.rs:324-338` 只包 `Limited::new(b, 2_097_152)`，`src/extract/request_parts.rs:78-92` 逐 frame 读到上限才报错 → **无按声明长度的预检**，「声明了会先被拒」不成立 |
+| 2 | `/shutdown` 与 `/approvals/{id}/approve` 的 413 不是一句话 | **成立** | 改前 `:1241` 一句、`:4040` 讲因果；现已逐字相同（`:1263` / `:4065`） |
+| 3 | `/exec` 的 503 | 它自撤 | — |
+| 4 | `/local-exec` 的 `host` 缺 `local:<id>` 自定义环境 | **成立，比指摘更硬** | `local_exec.rs:862` 的 `resolve_plan_for_host` 先查 `local_environments::current()`；同句尾「Any other value is rejected with 400」按字面是假的。`grep -c environments.toml docs/api.yaml` 0 → 2 |
+| 5 | 400 描述没列「工作目录不存在」 | **成立** | `local_exec.rs:919-929` 报 `working directory '…' does not exist`，handler `:1853` 折成 400；且该检查在 base 解析**之后**、每条命令都做，与加载期拒绝不同 |
+| 6 | `local:cwd` 在 WSL base 上静默无效 | **不成立（结论未证实）** | 前提对（`wsl_plan` 的 `cwd: None` 在 `:678`、`layer_custom_environment:948` 无条件覆盖）；但 `apply_plan_context:958-963` 把 cwd 设在 `wsl.exe` 进程上，「无效」取决于 WSL 对 Windows cwd 的翻译规则，它无实测、本机无 WSL → 不入账、不登记 |
+| 7 | `/exec-multi` 的 `strategy` 默认语义不可见 | **成立** | `core.rs:1492-1502` / `:1561-1566` / `:1585-1588` / `:1552` + CLI `:137` 的 `(0 = unlimited)`；四个字段原本连 `description` 都没有 |
+| 8 | `/config/import` 的 `hosts_updated` | 它自撤 | 后半被它自己定位成 L2-155 的配套文档格 |
+| 9 | `AcceptedUnchecked` 的 warn 仍断言看不到的事 | **成立但已登记** | `daemon_control.rs:1053`；`grep -rn checked_pid src-tauri/src/` = 0；同文件 `:1040-1052` 注释已自陈 known defect，K14 已记，修法在 **L2-3**、断言在 **L2-30** → **不新立** |
+
+**L1**：`24d25f9`（`docs/api.yaml`：两处 413 逐字统一、文件级说明改 First/Second/Third 并补「上限按读到的字节计」、`/local-exec` 的 `host` 补 `local:<id>`、400 补工作目录、`strategy` 四字段补语义）、`354db76`（`daemon_integration.rs`：`code_block` 只截单个状态码的行 + 「`Bytes` 处理器的 413 必须点名 `Bytes`」+ 新测试 `api_yaml_documents_user_defined_local_environments`，先断言源里仍有 `local_environments::current()` 再断言正文含 `environments.toml`）。合流后 `cnb/main` = **`354db76`**。
+
+**验证**：`npm run build` 6.31 s；`fmt --check` 干净；`--no-default-features --lib` **863 / 1 / 1**（红项仍是故意红的 IPv6）；`--features daemon --test daemon_integration api_yaml` **7 passed**（6 → 7）。**反向验证**：删掉两处 413 的 `Bytes` 与 `/local-exec` 的 `environments.toml` → 恰好这两个测试转红，恢复后全绿。
+
+**回帖**：`2120562572737810432`（`## 本轮收尾`，17:01:30Z）。#20 **保持 open**：第 9 条要的是 L2-3 的契约改动，第 6 条要 Windows 实机，都需人拍板或换机器。
+
+**这一轮的三条判据**：
+
+1. **「文档没提 X」与「X 的行为是 A」是两件事**。它观察到 api.yaml 从未提 `Content-Length`（真），然后推断「声明了会被先拒」（假）——两者之间隔着 `http_body_util::Limited` 的实现。凡「文档缺一句」的指摘，落笔前必须把**要补的那句**核到实现，否则补进去的是新错误。
+2. **同一个事实在两条路由上写两遍，一致性就没人负责**。本条与上批「同族里一条写一条不写」同型，但这次两处**都有**、只是详略不同，所以任何按「有没有」写的断言都抓不住。`code_block` 那种「按状态码切段」的断言才是能抓住详略差的形状。
+3. **指向 `src-tauri/src/**` 的指摘，先查它是否已在 K14 / L2 清单里**。第 9 条是它本轮唯一「可零成本做」的建议，而 K14 早已记了同一现象、L2-3 早已给了四步改法——不查就会立出第 113 条重复条目。
