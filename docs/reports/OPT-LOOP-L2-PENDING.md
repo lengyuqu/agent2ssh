@@ -773,3 +773,13 @@ CodeBuddy 的复核 `2120258070138740736` 新批 3 条 → **成立 1（§五.2�
 **另外 6 处契约宽于镜像（只记录，不另立号，与 L2-110 一并拍板）**：`AuditEntry` 缺 `action`/`outcome`/`risk_unclassified`/`side_effect`；`AuditFilter` 缺 `command_pattern`/`host_env`/`host_owner`/`host_role`/`search`（桌面审计面板因此没有这些筛选入口）；`DaemonInfo` 缺 `scope`；`ExecRequest`/`ExecResult` 缺 `side_effect`（即 L2-110 本身）、`ExecResult` 另缺 `dropped_bytes`。`WebDavSyncStatus` 是**同名的前端视图模型**（camelCase 字段），不是镜像，属误报。
 
 **生产方在开批更正里问的那条形状（`let (risk, _)` 忽略 `approved`）**：已核，**数量是 8 个不是 6 个**（它漏了 `ssh_connect`/`ssh_disconnect`），且**无行为后果**——8 处都不经过 `core::exec*` 的 `force` 闸门；真正需要 `approved` 的五个消费点（`exec`、`local_exec`、`proxy_exec`、`run_playbook`、`authorize_targets`）都消费了。**不另立号**，改为在 `authorize_command` 上写一段文档注释说明「哪些调用点必须消费、为什么其余 8 处可以不消费」，避免下一轮再被当成漏翻 force 报上来。
+
+## 2026-11-11 · batch 10 第 5 轮追加（审批失败的卡片残留）
+
+第 5 轮 4 条，核实 **成立 2 / 部分成立 1 / 不成立 1**。两条 L1（两处无保护剪贴板、兜底文案加限定词），下面一条是行为改动。
+
+| 编号 | 位置 | 判断 | 为什么不能自动落 |
+|---|---|---|---|
+| **L2-121** | `src/App.tsx:462-486`（`handleApprove`/`handleReject` 的 `catch` 只 `showToast`，不把卡片从 `pendingApprovals` 摘掉也不重拉）、`src/api.ts:819-846`（非 2xx 抛 `Failed to approve/reject`）、`src-tauri/src/approval.rs:702-704`（`approval_respond_inner` 对非 pending 返 400） | 成立 | 可构造：请求已被 daemon 处理、但响应在路上丢了（本地超时／连接重启／代理 502），前端走 `catch` → toast「already Approved」→ 卡片**仍留在待办队列**，此后每次再点都得到同一个 400。`useAgentEvents`（`App.tsx:319-325`）只在收到 `approval_requested/responded` 时才重拉，而那条事件正是没收到的那条。**这不是纯 UI 问题**：它让「卡片还在 = 还没决定」这个基本前提失真 | 二选一：①`catch` 里补一次 `GET /approvals`（或 `api.fetchApprovals()`）对齐服务端，代价是多一次往返、且在断线时仍失败；②把 `approval_respond_inner` 的「已决定」映射成 409 + 当前状态，前端把 409 当成功处理（幂等化），代价是改 `approval.rs` 的对外状态码与 `api.yaml`。②根治但属契约改动，①只动前端 |
+
+**顺带更新 L2-115 的范围**：`ContainersPanel.copyCommand` 与 `KeysPanel.copyPublicKey` 本轮已加同一套缺失保护（原来直接 `navigator.clipboard.writeText(...)`），但「写失败要不要 toast」这个产品问题现在有**四个**站点（审批卡、容器、密钥、以及将来的任何复制），应由一个 `copyText` helper 统一决定，而不是四处各写一个 `.catch(() => {})`。

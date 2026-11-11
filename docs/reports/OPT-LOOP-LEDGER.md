@@ -1933,3 +1933,28 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 **验证**：`npm run build` **6.33 s**；`npm test` **216 passed / 29 files**（214 → 216 是新增 `AddHostForm.test.tsx` 两条）；`cargo test --no-default-features --lib` **861 passed / 1 failed / 1 ignored**（仍那条故意红的 IPv6）；`cargo fmt --check` 绿；`--features daemon --bin agent2ssh-daemon` 编译通过（本轮唯一的 Rust 改动是一段文档注释）。
 
 **#16 保持 open，6 轮进度 4 / 6。**
+
+### consume 5 / 6 · 2026-11-11 · batch 10 (#16) · 消费第 3 轮的那条迟到复核
+
+**判定 4 条 → 成立 2 / 部分成立 1 / 不成立 1。** 它同时确认我第 3 轮的 4 条判定（含 N2 删 `Check` 的方向）全部同意。
+
+| # | 指摘 | 判定 | 处置 |
+|---|---|---|---|
+| R2-1 | 审批失败后卡片残留，再点必报「already Approved」 | 成立 | **L2-121**（`catch` 不摘卡也不重拉）。修法二选一：`catch` 里重拉，或把「已决定」幂等化成 409 |
+| R2-2 | 兜底文案说 `low/med auto-approve`，与 Approvals 页仍会收到 medium 卡冲突 | 部分成立 | **L1**：文案加限定词 `(no policy)`，说明这是「无策略时执行页的答案」，不覆盖「策略把 medium 送进审批队列」 |
+| R2-3 | `risk_unclassified` 的提示把 `local:wsl` 也说成「cmd.exe 或 PowerShell」 | **不成立**（见下） | 无动作 |
+| R2-4 | `ContainersPanel` / `KeysPanel` 的 `navigator.clipboard.writeText` 无保护，可致整棵 UI 变错误页 | 部分成立 | **L1**：两处都补 `?.writeText` 保护 + `.catch`。「白屏」那半不成立（见下） |
+
+### 判定不成立（原文保留，请勿重复提）
+
+1. **R2-3「`local:wsl` 的提示文案错报」— 不成立。**
+   `local_exec.rs:349-351` 的 `is_bash_compatible` 是 `matches!(self, Self::Default | Self::GitBash | Self::Wsl)` —— **`Wsl` 在 bash 兼容集合里**，所以 `host_risk_is_classifiable("local:wsl")` 返回 `true`，`risk_unclassified` 为 `false`，那条提示**根本不会为 WSL 显示**。它只对 `local:pwsh` / `local:cmd` / `local:vs` 这类 `is_bash_compatible() == false` 的环境出现，而文案里写的正是 cmd.exe / PowerShell。前提（WSL 被判为读不了）不成立。
+
+2. **R2-4 的「整棵 UI 变成错误页」— 不成立。**
+   React 的错误边界**不捕获事件处理器里抛出的异常**（只捕渲染/生命周期）。`main.tsx:17-27` 的 `window.addEventListener("error")` 只把错误写进 `app.log`，不替换界面。所以 `copyCommand` 里的 TypeError 的后果是「复制没发生、图标不翻转」，不是白屏。修复仍然值得（原来那行连 `.catch` 都没有），但严重度是「功能静默失效」，不是「应用崩溃」。
+
+**L1 落地**：`src/**`（`ContainersPanel.tsx`、`KeysPanel.tsx` 两处剪贴板保护；`HostPolicyLine.tsx` 文案限定词 + 测试断言同步）。**Rust 一行未动。**
+
+**验证**：`npm run build` **6.37 s**；`npm test` **216 passed / 29 files**；`cargo test --no-default-features --lib` **861 passed / 1 failed / 1 ignored**（仍那条故意红的 IPv6）。
+
+**#16 保持 open，6 轮进度 5 / 6。**
