@@ -577,7 +577,7 @@ CodeBuddy 首条分析 6 条，核实后 **成立 3 / 部分成立 3 / 不成立
 | 编号 | 位置 | 判断 | 为什么不能自动落 | 建议改法 |
 |---|---|---|---|---|
 | L2-95 | `embedded_ssh.rs:536-540`（`import_known_hosts_from_ssh` 的 identity 构造） | 部分成立 | 裸 `host:port` 经 `split_host_port`（`:643-657`）原样返回、端口写死 22，于是 `format!("{hostname}:{port}")` 拼出 `host:2222:22`：条目按一个没有 `HostProfile` 解析得到的 identity 落盘，计数仍是 `imported`。触发面窄——OpenSSH 对所有非 22 端口都写 `[host]:port`，只有手工编辑或外来 `known_hosts` 才有裸形式。指摘同时给的两条叠加问题（`key_type` 是签名算法、`[host]` 与存储层括号形态不等）核实为**不成立** | 让 `split_host_port` 认识裸 `host:port`（或把这种行计入 `skipped` 而非 `imported`），identity 改用 `format_host_port`。改的是落盘内容，需要一条覆盖 `host` / `[host]:port` / 裸 `host:port` 三形态的测试 |
-| L2-96 | `sftp_transfer.rs:365`（`STALL_TIMEOUT`）、`:407-416`（`StallGuard::write`）、`russh_impl/sftp.rs:223-231`（`File::write`） | 成立（结论对，机制说反） | `Ok(0)` 在当前传输上不出现：`File::write` 返回 `Ok(min(buf, max_write_len))` 或 `Err`，所以 600 s 分支与 `write_all_shrinking` 的减半分支都不可达。对端不 ACK 时 `russh_sftp` 的 `poll_write` 在 8 个在途 ack 上阻塞，`write_nowait` 的接收端没有被 `request_timeout_secs` 包住，`block_on` 也没有超时 ⇒ 仍然是「无错误地挂着」。指摘把上界说成 60 s 会话超时，但 `write_with_timeout` 只服务 `Channel::write`（shell/exec），不服务 SFTP 句柄 | 给 SFTP 写路径一个真截止时间：在 `File::write` 外面包 `tokio::time::timeout`（**不要**用 `request_timeout_secs`——它只服务 `request()`，对写 ack 无效）。闸门只有 `write_acks` 的 8 个在途请求一处（`russh_sftp` 的 `mpsc::unbounded_channel` 没有背压），所以要包住 **`write` 与 `flush` 两处**——`File::flush` 的 `poll_drain_writes` 抽的是同一个队列（`poll_shutdown` 也是，但本仓的 `impl Write for File` 没有 `shutdown`）；文案仍由 `StallGuard` 负责「已写多少字节」。**落点必须在 `transport/russh_impl/sftp.rs:223` 的 `impl Write for File`**：那里是 `StallGuard` 唯一能等到的地方；在 `core.rs` 的 `spawn_blocking` 闭包里包 `tokio::time::timeout` 无效（同步闭包里没有 reactor，`block_on` 会互相等）。另注意 `timeout` **不取消**内部 future——超时后 `File` 仍攥着那 8 个 ack，必须先 abort session，否则下一个请求在同一个队列上继续卡。**超时分支的文案必须自己读 `bytes_written`**：`StallGuard::write` 在 `inner.write` 返回 `Err` 时先 `?` 走人，`stalled()` 不会在真错误上被调用，「命名写了多少字节」不会自己出现。需一条能复现「读 TCP、不应答 SFTP」的集成测试 |
+| L2-96 | `sftp_transfer.rs:365`（`STALL_TIMEOUT`）、`:407-416`（`StallGuard::write`）、`russh_impl/sftp.rs:223-231`（`File::write`） | 成立（结论对，机制说反） | `Ok(0)` 在当前传输上不出现：`File::write` 返回 `Ok(min(buf, max_write_len))` 或 `Err`，所以 600 s 分支与 `write_all_shrinking` 的减半分支都不可达。对端不 ACK 时 `russh_sftp` 的 `poll_write` 在 8 个在途 ack 上阻塞，`write_nowait` 的接收端没有被 `request_timeout_secs` 包住，`block_on` 也没有超时 ⇒ 仍然是「无错误地挂着」。指摘把上界说成 60 s 会话超时，但 `write_with_timeout` 只服务 `Channel::write`（shell/exec），不服务 SFTP 句柄 | 给 SFTP 写路径一个真截止时间：在 `File::write` 外面包 `tokio::time::timeout`（**不要**用 `request_timeout_secs`——它只服务 `request()`，对写 ack 无效）。**SFTP 层**的闸门只有 `write_acks` 的 8 个在途请求一处（`russh_sftp` 的 `mpsc::unbounded_channel` 没有背压）；内核 socket 写超时（由连接预算给出，`/sftp/upload` 路径是 60 s，`embedded_ssh.rs:1676-1677`）只拦「TCP 发送缓冲满」，拦不住「窗口一直开着但 SFTP 层不应答 ack」——正是本条的场景，所以它不构成写路径的截止时间，所以要包住 **`write` 与 `flush` 两处**——`File::flush` 的 `poll_drain_writes` 抽的是同一个队列（`poll_shutdown` 也是，但本仓的 `impl Write for File` 没有 `shutdown`）；文案仍由 `StallGuard` 负责「已写多少字节」。**落点必须在 `transport/russh_impl/sftp.rs:223` 的 `impl Write for File`**：那里是 `StallGuard` 唯一能等到的地方；在 `core.rs` 的 `spawn_blocking` 闭包里包 `tokio::time::timeout` 无效（同步闭包里没有 reactor，`block_on` 会互相等）。另注意 `timeout` **不取消**内部 future——超时后 `File` 仍攥着那 8 个 ack，必须先 abort session，否则下一个请求在同一个队列上继续卡。**超时分支的文案必须自己读 `bytes_written`**：`StallGuard::write` 在 `inner.write` 返回 `Err` 时先 `?` 走人，`stalled()` 不会在真错误上被调用，「命名写了多少字节」不会自己出现。需一条能复现「读 TCP、不应答 SFTP」的集成测试 |
 | L2-97 | `bin/agent2ssh-daemon.rs:4864-4875`（`/terminal` 的 `connected` 帧）；`embedded_ssh.rs:899`（`auth_method_for_host`）、`:2291-2292` | 部分成立 | `auth_method` 在 `connection_info` 里算出来，终端路径只在诊断日志里用它，`connected` 帧没有这个键；且 `auth_method_for_host` 是**按 host 预测**（password > key_path > agent），不是 `authenticate` 的返回值。指摘称「README 与 `/health-snapshot` 都回」核实为**不成立**：`README.md`、该 daemon、`api.yaml` 三处都没有 `auth_method`。改帧形状属对外契约 | 二选一：①帧里补 `auth_method`，同时把预测值换成 `authenticate` 的返回值（要先把该返回值从 `connect_embedded_ssh` 传出来）；②维持现状，在 `api.yaml` 的 `/terminal` 帧说明里写明「`auth_method` 只进诊断日志」 |
 | L2-98 | `embedded_ssh.rs:2134-2136`（认证失败文案） | 成立 | 文案只列 `~/.ssh/id_rsa, id_ed25519, id_ecdsa`，而循环还试 `id_ed25519_sk`/`id_ecdsa_sk`（`:2111-2112`），`keyboard-interactive`（`:1947`）也在尝试列表里。这串字面量属 `src-tauri/src/**` 的用户可见字符串；`docs/reports/evidence/pageant-acceptance-2026-10-23.json` 还留 4 份带**旧版**原文的历史证据（不可改写）。**`russh-migration.md:489` 不需要同步**——它引的是 `"...or default key succeeded"`（不带括号），本来就是旧版串 | 改成「…or a default key in `~/.ssh`…」；历史证据 JSON 不动，在报告里注明「该次运行的文案是旧版」。属 `src-tauri/src/**` 的用户可见字符串 |
 
@@ -895,7 +895,7 @@ L2-120 的建议里写着「承认 `PUT /hosts/{name}` 是**整条替换**」，
 
 这是**脱敏的正确代价**，不是缺陷。拍板时要一并决定的是「要不要给一个可回传的 `secret_ref` 句柄」或「明确只允许桌面端做部分更新」。本轮只把这条写进两份指南与 `api.yaml`（`a54fcd0`），不改行为。
 
-## 2026-11-11 · batch 11 第 3 轮：L2-122（同一份 `execution_gate.json` 读失败，一族 fail-closed，一族 fail-open）
+## 2026-11-11 · batch 11 第 3–4 轮：L2-122（同一份 `execution_gate.json` 读失败，一族 fail-closed，一族 fail-open；第 4 轮补第四条）
 
 三条都出自「契约里 423/429 到底可不可达」这条线，都需要动 `src-tauri/src/**`，本轮只记录。
 
@@ -935,10 +935,20 @@ forward_remove_core(uuid)     // :3108
 
 问题不在于「不该删不存在的隧道」，而在于**这个操作在审计里没有痕迹**：同一条 `DELETE /forwards/{id}` 请求，返回 400 还是 200 可以在事后核对，但它有没有进过审计完全取决于规则当时在不在。L2-102 是同一族的取数范围问题，这条应并进去，而不是单独修——单独补 `append_operation_audit` 会让「未命中」也产生一条和「命中」同形的记录，反而更难分辨。
 
-### 三、`/sftp/upload` 没有连接预算，`rm-rf` 有
+### 三、`/sftp/upload` 没有**调用方**能调的连接预算，`rm-rf` 有
 
 `SftpDirBody` 带 `timeout_secs`（`core.rs:2446` 取默认 60，`:2784` 传给 `connect_embedded_ssh`），`SftpUploadRequest`（`types.rs:711-723`）没有这个字段，`sftp_upload_core_with_source:1910` 也没有对应形参。
 
 两个方向都可能：① 上传也该有连接预算（大文件上传在慢链路上会撞 `connect_embedded_ssh` 的超时，而调用方无法调），那就加字段；② 上传本来就不该有（超时该由传输层自己管），那就把「为什么只有目录操作有」写进 `/sftp/upload` 的描述。
 
-**下一轮如果要定这条，先跟到 `sftp_transfer` 的实际超时来源**——本轮只核到 core 的函数签名，没跟到传输层用的是哪个默认值，所以「upload 没有超时入口」这句话目前只在 HTTP 契约层成立。
+**第 4 轮已跟到底，措辞要收窄**：不是「没有超时」，而是「没有**调用方**入口 + 有一份隐式预算」。`sftp_upload_core_with_source:1957` 传的是字面量 `60`，`connect_embedded_ssh` 把它分成三处（`embedded_ssh.rs`）：`connect_tcp_address` 的 `timeout_secs.min(30)`（`:851`，拨号上限，多地址共享）、`set_read_timeout`/`set_write_timeout`（`:1676-1677`）、`session.set_timeout(session_timeout_ms(60))`（`:1687`，请求-应答）。
+
+所以这条真正要定的是：**这个 60 s 该不该由调用方调**。`/sftp/rm-rf` 能调，`/sftp/upload` 不能，两者走的是同一族 `connect_embedded_ssh`——不对称成立，但「upload 有 bug」不成立。契约层已在第 4 轮写明这段（`api.yaml` 的 `/sftp/upload` 描述）。
+
+### 四、daemon 侧没有 `/sftp/cancel` 路由，`transfer_id` 对 HTTP 调用方是死的
+
+第 4 轮核实：`sftp_cancel` 只存在于 `tauri_commands.rs:650`（桌面 Tauri 命令，`:3657` 注册）。daemon 的 sftp 路由共 10 条（`agent2ssh-daemon.rs:5875-5884`），**没有 cancel**。
+
+于是 `SftpUploadRequest.transfer_id`（`types.rs:721-723`）经 HTTP 传进来后，`sftp_upload_core_with_source:1952-1955` 会 `sftp_transfer::register(id)` 建一个取消标志，但 daemon 进程内没有任何路由能把那个标志置位——注册了、永远等不到取消。
+
+两个方向：① 加 `POST /sftp/cancel`（新路由 = 新契约面 + 权限口径要定，比本条其它项都大）；② 明确「HTTP 上的 `transfer_id` 只为审计/幂等预留，取消只在桌面端」，写进契约即可（**第 4 轮已按 ② 落了描述**，所以这条只需拍板要不要往 ① 走）。
