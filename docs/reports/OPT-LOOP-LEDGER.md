@@ -1893,3 +1893,24 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 **验证**：`npm run build` **6.40 s**；`npm test` **212 passed / 27 files**（213 → 212 是两条测试合并成一条，不是丢了断言）；`cargo test --no-default-features --lib` **861 passed / 1 failed / 1 ignored**（红项仍是那条故意红的 `an_ipv6_literal_at_port_22_is_removed`）；`--features daemon --test daemon_integration api_yaml` **6 passed**。Rust 源码本轮一行未动。
 
 **#16 保持 open，6 轮进度 2 / 6。**
+
+### consume 3 / 6 · 2026-11-11 · batch 10 (#16) · 同前
+
+**进轮状态**：第 2 轮回帖（`2120305896189218816`，08:01）后 **1 分钟**就有复核（`2120306371001217024`，08:03），无需自取。它确认我第 2 轮的 9 条判定「完全一致，没有一条被推翻」，据此往下追了一轮。
+
+**判定 4 条 → 成立 3 / 部分成立 1 / 不成立 0。**
+
+| # | 指摘 | 判定 | 处置 |
+|---|---|---|---|
+| N1 | 接上复制之后，按钮仍然到不了「执行页带命令」：`onGoExecute` 只设 host、`ExecPanel` 的命令初值写死 `uname -a` | 部分成立 | **「按钮名不符」这半不成立**——文案是 `open Execution`，打开模块这件事做到了；缺的是预填，属 L2-115 ①。已写明 |
+| N2 | `Check` 图标是死状态：`openModule` 让 `ApprovalDetail` 在同一 tick 卸载，`copied` 一帧都画不出来 | 成立 | **L1**：删 `copied` 状态与 `Check` 分支，`handleCopy` 改 fire-and-forget。我上一轮的 commit message 说「接线解决了 Check 不可达」，那半是错的——卸载才是原因，已在本轮承认 |
+| N3 | 无 daemon 时的兜底文案说 `med/high need approval`，而真实默认 medium 是 auto | 成立 | **L1**：改成 `low/med auto-approve` + `high need approval`；新建 `HostPolicyLine.test.tsx`（该组件此前零覆盖） |
+| N4 | `ExecPanel` 的 `initialHost` 只当初始值，prop 变化不生效 | 成立（潜伏） | 并入 **L2-115 ①**：一旦加 `initialCommand`，「第二张卡沿用上一个 host」立刻成真 bug |
+
+**N3 的证据链**（这类「兜底文案」最容易想当然）：`load_approval_policies` 在 policy.toml 与 approval_policies.toml 都不存在时返回空 `Vec`；`authorize_command_with_approval` 的判定是 `needs_approval = approval_policy.is_some() || (risk == High && !force)`，所以 medium 在默认下**不**需要审批；`host_policy_summary` 只把 high 的 `Auto` 改写成 `Required`。原兜底文案把 medium 也算进「need approval」，是保守方向的错报。
+
+**L1 落地**：`src/**`（`ApprovalDetail.tsx` 删死状态、`HostPolicyLine.tsx` 兜底文案、`HostPolicyLine.test.tsx` 新增、`i18n.tsx` 两个键改名）；`docs/**`（L2-115 的三面收敛记录 + 本文件）。**Rust 一行未动。**
+
+**验证**：`npm run build` **6.60 s**；`npm test` **214 passed / 28 files**（212 → 214 是新增 `HostPolicyLine.test.tsx` 两条）；`cargo test --no-default-features --lib` **861 passed / 1 failed / 1 ignored**（仍是那条故意红的 IPv6）。
+
+**#16 保持 open，6 轮进度 3 / 6。**

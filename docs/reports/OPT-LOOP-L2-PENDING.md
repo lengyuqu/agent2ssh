@@ -748,3 +748,16 @@ CodeBuddy 的复核 `2120258070138740736` 新批 3 条 → **成立 1（§五.2�
 | L2-119 | `src/components/approval/ApprovalWorkbench.tsx:126-133`（`decidedToday`）、`:150-200`（`history` 分组）对照 `approval.rs:194-200`（30 天保留期）、`:289-290`（读时过滤） | 成立 | 两件事同一个后果——「历史」在 UI 上不可信：①`decidedToday` 按 `requested_at` 判「今天」，且 `status !== "pending"` 把 approved/rejected/timed_out/revoked 全算进去，于是这个数实际是「今天**发起**且已出结果」而不是「今天判决」；②`approvals.jsonl` 只留 30 天，更早的条目在**读的时候**被丢掉，面板没有任何「更早的已丢弃」提示，读者会以为那就是全部历史。契约侧本轮已在 `/approvals` 的 description 写明保留期与读时过滤，UI 侧仍是静默截断 | ①把 `decidedToday` 改成按最后状态变更时间判日（契约需补 `decided_at`），或至少把文案改成「今日发起」；②在历史分组尾部加一行「仅显示最近 30 天（`AGENT2SSH_APPROVAL_RETENTION_DAYS`）」。两条都是 `src/**` 显示改动，需拍板 |
 
 **2026-11-11 补记（batch 10 第 2 轮，针对 L2-110）**：`revoked_at` 与 `approved_command_snapshot` 已补进 `src/types.ts` 的 `ApprovalRequest`（`docs/api.yaml` 与 `approval.rs:95/101` 本来就有），所以「镜像缺」那半不用再做。仍缺的是**没有任何面板渲染这两个字段**——`grep -rn "revoked_at\|approved_command_snapshot" src/` 只命中 `types.ts`。这与 `side_effect`（L2-110 正文）和 `recent_commands`（L2-74 补记）是同一族：**契约与后端都有，前端只镜像不消费**。要不要显示属产品问题，与 L2-110 一并拍板即可，不另立号。
+
+## 2026-11-11 · batch 10 第 3 轮追加（「Copy command and open Execution」的剩余语义）
+
+第 3 轮 4 条指摘，核实 **成立 3 / 部分成立 1**。其中两条在本轮作为 L1 落地（删掉不可见的 `copied` 状态、修正无 daemon 时的兜底文案 + 补测试），剩下两条都归到 **L2-115**，不再另立号——它们与 L2-115 是同一件事的三个面：这个按钮点了之后到底发生什么。
+
+| # | 位置 | 判断 | 为什么不能自动落 |
+|---|---|---|---|
+| N1 → 并入 **L2-115 ①** | `src/App.tsx:1199-1204`（`onGoExecute` 只 `setSelectedHost` + `openModule("execute")`）、`src/App.tsx` 的 `<ExecPanel hosts={hosts} initialHost={selectedHost} …>`、`src/components/ExecPanel.tsx:16-26`（`Props` 无 command，`useState("uname -a")`） | 部分成立 | 指摘说「按钮名不符」过头了：文案是 `open Execution`，**打开模块**这件事确实做到了（本轮已把复制接上）；缺的是「顺带把命令填进去」这个能力，也就是 L2-115 的①。要落它得加 `initialCommand` prop + `ExecPanel` 的 state 初始化，属行为改动 |
+| N4 → 并入 **L2-115 ①** | `src/components/ExecPanel.tsx:25`（`useState(initialHost)`）与 `:20-26`（`useEffect` 只依赖 `[targetHost]`） | 成立（潜伏） | `initialHost` 只在挂载时读一次，之后 prop 变化不生效。今天看不出来是因为切模块会卸载 `ExecPanel`；**一旦按①加 `initialCommand`，「第二张审批卡沿用上一个 host」就会立刻变成真 bug**。所以①落地时必须同时把 `initialHost`/`initialCommand` 改成「prop 变就 set」的同步 effect，测试要覆盖连续两次导航 |
+| N2 | `src/components/approval/ApprovalDetail.tsx`（`copied` 状态与 `Check` 图标分支） | 成立 | `onCopyAndExecute` 会切模块（`App.tsx:1196` 是 `{activeModule === "approvals" && …}`），面板在同一个 tick 内卸载，`Check` 一帧都画不出来。**本轮按 L1 删掉 `copied` 与 `Check`**，`handleCopy` 变成 fire-and-forget；「剪贴板被拒时给 toast」仍是 L2-115 的第②半，未做 |
+| N3 | `src/components/HostPolicyLine.tsx`（`summary === null` 的兜底数组）对照 `approval.rs` 的 `load_approval_policies`（`:969-980` 无文件返回空 `Vec`）与 `execution_control.rs` 的 `needs_approval`（`:490-492`，`policy.is_some() \|\| (risk == High && !force)`） | 成立 | 兜底文案原写 `low auto-approve` / `med/high need approval`，把 medium 报成需审批。真实默认是 low、medium 都无人管，只有 high 被 `host_policy_summary` 改写成 `Required`。**本轮已改成 `low/med auto-approve` + `high need approval`**，并新建 `src/components/HostPolicyLine.test.tsx`（此前该组件零覆盖）钉住兜底分支与 summary 分支 |
+
+**L2-115 的现状（供拍板时一并看）**：①透传命令到执行页（含 `initialHost` 同步，N1+N4）；②剪贴板被拒时给提示。两条都在 `src/**`，都改用户可见行为。**N2 已作为 L1 关闭**——它不是独立缺陷，是①之前「按钮名不实」的副产物。
