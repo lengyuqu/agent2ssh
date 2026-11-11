@@ -2313,13 +2313,22 @@ fn mounts_closure(segment: &str) -> bool {
     })
 }
 
-/// The methods one `.route(...)` call mounts, in source order, with their handler.
+/// The methods one `.route(...)` call mounts, with the handler each names.
 ///
 /// `get(a).post(b)` mounts two, and a builder chain that wraps across lines
 /// still belongs to a single call — so the caller bounds `segment` at the next
 /// `.route(`. A builder is only counted when the character before it is not
 /// part of a name: `algo_prefs_get` ends in `_get` and must not read as a
 /// `get(` call.
+///
+/// The order is the one `METHOD_BUILDERS` declares, not the source order. This
+/// is the set of what a call mounts; every consumer compares it as a set, and
+/// no reader should depend on which builder was written first.
+///
+/// A builder whose argument starts with `move` or `async` mounts a closure:
+/// reading `get(move || …)` as a handler named `move` would invent an entry
+/// that no other check has a reason to question, since `(path, method)` is all
+/// most of them look at.
 fn mounted_handlers(segment: &str) -> Vec<(&'static str, String)> {
     let mut mounted = Vec::new();
     for (needle, method) in METHOD_BUILDERS {
@@ -2335,7 +2344,7 @@ fn mounted_handlers(segment: &str) -> Vec<(&'static str, String)> {
                     .chars()
                     .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
                     .collect();
-                if !handler.is_empty() {
+                if !handler.is_empty() && !matches!(handler.as_str(), "move" | "async") {
                     mounted.push((method, handler));
                 }
             }
@@ -2685,9 +2694,10 @@ fn every_route_call_is_read_as_an_operation() {
         .collect();
     assert!(
         unreadable.is_empty(),
-        "these `.route(...)` calls mount a named handler and did not parse: {unreadable:?}. Each \
-         one is an operation that fell out of every derived check at once, in silence. Teach \
-         `daemon_routes_and_drops` the shape, or mount the handler through \
+        "these `.route(...)` calls were dropped without mounting a closure — either a named \
+         handler the parse could not read, or a closure in a shape it does not model: \
+         {unreadable:?}. Each one is an operation that fell out of every derived check at once, \
+         in silence. Teach `daemon_routes_and_drops` the shape, or mount the handler through \
          `.route(path, get(handler))`."
     );
     // And a closure is only tolerable on a route no contract covers. The other
@@ -2710,6 +2720,41 @@ fn every_route_call_is_read_as_an_operation() {
     assert!(
         !routes.is_empty(),
         "the route parse found no operations at all, so every derived check is vacuous"
+    );
+}
+
+/// Every entry names a handler the daemon actually has.
+///
+/// `daemon_routes` reads a name after each method builder without knowing what a
+/// name is, so it will accept one from a scope that is not the daemon's: a
+/// `.nest`-ed sub-router's `get(h)` yields `h`, which the top level of this file
+/// never defines. Nothing else questions it — the entries are compared as
+/// `(path, method)`, and the body and status-code tests only complain when that
+/// path is in `api.yaml`, where the panic reads "no `async fn h(`" rather than
+/// saying the name came from somewhere else.
+///
+/// So the parse has to land on a function the daemon defines. That is also what
+/// keeps every other derived check honest: they read bodies by name, and a name
+/// they cannot resolve makes them panic, which is where the check stops being a
+/// check.
+#[test]
+fn every_parsed_handler_is_a_function_the_daemon_defines() {
+    let daemon = include_str!("../src/bin/agent2ssh-daemon.rs");
+    let parsed = daemon_routes(daemon);
+    assert!(
+        !parsed.is_empty(),
+        "the route parse found no operations, so this check would pass for the wrong reason"
+    );
+    let unresolved: Vec<String> = parsed
+        .iter()
+        .filter(|(_, _, handler)| !daemon.contains(&format!("\nasync fn {handler}(")))
+        .map(|(path, method, handler)| format!("{method} {path} -> `{handler}`"))
+        .collect();
+    assert!(
+        unresolved.is_empty(),
+        "the route table names handlers the daemon does not define: {unresolved:?}. A name can \
+         come from a nested router's scope, or from a builder argument that is not a handler at \
+         all; either way the entry stands in for an operation whose body nothing can read."
     );
 }
 
