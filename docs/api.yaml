@@ -68,7 +68,11 @@ info:
     Two consequences for a client. First, the extractor's own answers are
     `text/plain` carrying axum's message, not the `Error` object: 415 and 422 are
     documented that way on every operation that can produce them, and a body sent
-    without a content type is the likeliest way to meet one. Second, a body that
+    without a content type is the likeliest way to meet one. `Bytes` adds a third
+    one that neither `Json<T>` shape can produce: it buffers the body before the
+    handler runs, so a body over axum's default 2 MiB limit is answered `413`
+    from inside the extractor — also `text/plain`, and on those two operations
+    the only refusal that is not this document's `Error` object. Second, a body that
     is not JSON at all reaches the caller as the operation's 400 with that same
     plain-text body, so a client cannot tell "your body was not JSON" from "the
     handler refused what was in it" by the status code — and a client that

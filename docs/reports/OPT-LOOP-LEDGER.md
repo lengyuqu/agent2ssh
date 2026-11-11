@@ -3213,3 +3213,43 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 - 提交 `6e67dd8`。
 
 **工艺**:「本容器没有 cargo」不是「可以不编译就推」的理由。要么不推，要么把改动留在分支上等能编译的会话接手；推上去的未编译代码会让**同一二进制里的其它测试**一起失效，代价比晚一轮合流大得多。
+
+### 手工/单发消费 · 2026-11-11 · daemon 停止回执与旧版兼容（issue #20 · 第二次进入）
+
+`open` 共 11 条：#30 是 `[opt-round]`（batch 14），其余 #20–#29 为 MANUAL。**选靶 #20**：P1 同级编号最小，且它最新评论（`2120483657423958016`）正是复核对本流程上一轮的驳回——不处理就等于把一条「自述比改动前更差」的测试留在 main 上。排除：**#27** 需 Windows 实机（本机做不了）；**#22/#25** 是纯设计（P2）。#21 也够格（有 `## 本轮收尾` + 新复核），但编号更大。
+
+基线 `c41a6c4`。本轮 10 条指摘 → **成立 3 / 部分成立 2 / 不成立 5**。
+
+#### 判定
+
+| # | 指摘 | 判定 | 证据 |
+|---|---|---|---|
+| 1 | `daemon_stop_e2e.rs:1408-1422` 的桩答的是**无 `pid`** 的 `/health`，`health_identity()` 在 `:1022` 返回 `None`，所以到不了 `POST /shutdown`，`posted == 1` 在空转 | **不成立** | 复核自述基线 `1904cc2` 的同一段落里，`POST /shutdown` 才回 `{"ok":true}`，**其余回** `{"ok":true,"pid":N,"config_dir":"…"}`（`git show 1904cc2:src-tauri/tests/daemon_stop_e2e.rs` 的 `:1472-1477`）。`posted` 只在 `request.starts_with(b"POST /shutdown ")` 时自增，所以这条测试**今天能过**本身就证明请求发出过——它是活的断言 |
+| 2 | 同条里「三句 What must hold here 全不成立」 | **不成立** | 随 ① 一起塌：桩回 pid ⇒ 身份链通过 ⇒ `AcceptedUnchecked` 臂 ⇒ 等待 + 硬杀 ⇒ `Ok`。三句各自对应 `posted == 1`、`stopped.is_ok()`、`/bin/sleep 30` 只能被强杀 |
+| 3 | `daemon_integration.rs` 只断言 `swallowed > 0`，钉不住「哪两条吞 body」 | **不成立** | 同一基线已有 `swallowed_paths`（`git show 1904cc2:… \| grep -c swallowed_paths` = **5**）。断言是「note 列出的名字数 == `swallowed`」+「每个名字都在 `swallowed_paths` 里」，等长 + 子集 ⇒ 集合相等 |
+| 4 | `:3616` 的失败文案仍写「`Bytes` answers only what the handler writes」，因果不对 | **成立** | 现位于 `:3977`。413 是 extractor 的 body limit 加的，不是 handler 写的。已改 |
+| 5 | `api.yaml` 文件级说明只把 415/422 列为 extractor 的 `text/plain` 应答，没提 413 | **成立** | 第 67–72 行原文只有「415 and 422」；而 `413` 已在 `/shutdown`（`:1232`）与 `/approvals/{id}/approve`（`:4030`）两处成文。已补第三格 |
+| 6 | 两条路由的 413 没有任何状态断言（L2-140 那半） | **成立** | `grep -rn 413 src-tauri/tests/*.rs` 只有文档侧检查；无一条用例发过超限 body。已加真 daemon e2e |
+| 7 | `/exec-multi` 的 `strategy` 三项全 0 = 无限并发 | **部分成立** | `core.rs:1495-1504` 确是「三项全 0 一次全展开」。但这是既有的「无策略 = 无约束」语义（CLI `:137` 写「0 = unlimited」），不是挂死、也不 panic。属策略拍板 → L2-154 |
+| 8 | `batch_size > 0 && concurrency == 0` 会 `chunks(0)` panic | **不可达**（复核自己已收回） | `:1561` 的 `if batch_size > 0` 保证 `effective_batch_size > 0`；`chunks(0)` 永远走不到。记下来免得第三人再查 |
+| 9 | `/config/import/preview` 无 admin 门，`/config/import` 有 | **成立** | `:3943` 有 `require_admin(&auth)?`；`:3949-3951` 的 preview 把 `auth` 绑成 `_auth` 后从不使用。受限 token 可枚举全部主机名 → L2-155 |
+| 10 | `team_host_same` 不比 `ai_allowed`，于是同一次导入**既报 skipped 又改写** | **部分成立** | 两分支互斥（`team_config.rs:95-102` 的 `if … { skipped += 1 } else { … *existing = next }`），不会「既跳过又改写」。真实后果是另一半：别的字段不同时，bundle 缺省 `ai_allowed`（`types.rs:94-95` 的 `serde(default)`）会把 `false` 翻成 `true`，而 `api.yaml:5041` 已把这条写成「`ai_allowed` is the exception」→ L2-156 |
+| 11 | `export_team_config` 不剥 `ai_allowed`，且 `api.yaml` 那句 `strips` 没覆盖它 | **不成立** | `export` 只剥 `key_path`/`password`/`passphrase`（`team_config.rs:42-44`），属实；但 `api.yaml` 现在**没有**笼统的 `strips` 句，`5041` 明写 ai_allowed 是例外 |
+
+#### 本轮改动（L1）
+
+- `docs/api.yaml`：文件级 body 段补第三格——`Bytes` 在 handler 之前缓冲，超 2 MiB 由 extractor 回 `413`、也是 `text/plain`。
+- `src-tauri/tests/daemon_integration.rs`：`api_yaml_documents_how_each_handler_reads_its_body` 的失败文案改因果：`Bytes` 不可能回 415/422，它唯一自带的状态是 body limit 的 413。
+- `src-tauri/tests/daemon_stop_e2e.rs`：新增 `an_oversized_body_is_refused_with_a_plain_text_413_before_the_handler`——真 daemon、超限 body 分别打 `/shutdown` 与 `/approvals/{id}/approve`，断言 413、断言正文**不是** `Error` 对象、断言 daemon 之后仍 200。**反向验证**：把期望 413 改成 400 立刻红（`left: 413 right: 400`，正文 `Failed to buffer the request body: length limit exceeded`），再改回。
+
+#### 未做（L2）
+
+L2-154（`/exec-multi` 全 0 语义）、L2-155（preview 缺 admin 门）、L2-156（`ai_allowed` 不比不保）。三条都要改 `src-tauri/src/**`，按协议只登记。
+
+#### 验证
+
+`npm run build` **6.62 s**；`yaml.safe_load` **90 paths**；`cargo test --no-default-features --lib` **863 / 1 / 1**（红项仍是故意红的 IPv6；比上一轮多一条，是并发会话加的）；`--features daemon --test daemon_integration api_yaml` **6 passed**（该二进制全量 **77 passed / 0 failed**，含 `every_scope_checked_route_documents_the_order_its_refusals_arrive_in`）；`--features daemon --test daemon_stop_e2e` **34 passed**；`cargo fmt --check` 干净。
+
+#### 一条工艺教训
+
+复核这轮 10 条里 5 条不成立，其中 ①②③ 都是**同一形态**：它把「自己基线上已经改好的东西」当成还没改（`1904cc2` 的桩回 pid、`1904cc2` 已有 `swallowed_paths`）。**判「上一轮留下的破绽」之前必须先 `git show <它自述的基线>:<file>`**，不能只读自己记忆里的旧版本。顺带：它这次自陈「按 `1904cc2` 读」，而我上一轮实际推的是 `092d0f9`/`e07e527`——基线差一笔就够把结论整条反转。

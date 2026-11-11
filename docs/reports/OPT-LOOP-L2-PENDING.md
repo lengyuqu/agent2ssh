@@ -2055,3 +2055,29 @@ forward_start（:3204-3244）与 forward_remove（:3077-3113）、forward_stop�
 **做对的唯一一步**是先 `git show HEAD:...` 取回原文再做字节级替换（`at`/`end` 精确到 `#[test]` 与花括号配对），而不是继续手工拼接。**教训：删一段带文档块的东西之前，先确认那段文档块是不是与相邻项共享的**；共享的话只能删 `#[test]` 之后的函数体。
 
 **当前状态的自检**（本容器能做的最强检查）：`#[test]` 计数 34（与 HEAD 相同：删 1 加 1）、测试函数名无重复、helper 名各出现 1 次、花括号计数与 HEAD 同为 -4（那 4 个差来自字符串字面量里的 `{`/`}`，HEAD 也是 -4）、`awk length>100` 在我新增的 3140-3470 行区间为空。**这些都不等于「能编过」**，合并前必须补跑 `cargo test`。
+
+### L2-154（新，单发 #20 第二次进入）：`/exec-multi` 的 `strategy` 三项全 0 是「无约束」，不是「拒绝」
+
+**位置**：`src-tauri/src/core.rs:1495-1504`（三项全 0 走一次全展开）、`:1561`（`effective_batch_size`）、`:1602-1603`（`concurrency == 0` 时 `sem` 为 `None`）。
+
+**判断**：**部分成立**。复核说「`batch_size == 0` 是挂死」——不是挂死，也没有 panic：`:1561` 的 `if batch_size > 0` 保证 `chunks()` 的块长恒 `> 0`（它自己列的第二条「`batch_size > 0 && concurrency == 0` 会 `chunks(0)` panic」也因此**不可达**，一并记在此处，免得第三人再查）。真实形状是：三项全 0 时**一次把所有主机全展开**，`concurrency == 0 && batch_size > 0` 时**批内不限并发**。对 200 台主机就是 200 条并发 SSH，不是死锁，是资源放大。
+
+**为什么它仍是 L2**：`0 = unlimited` 是**既有契约**（`bin/agent2ssh.rs:137` 的 `--concurrency … (0 = unlimited)`），CLI 与 MCP 都原样透传 0。要把它改成「0 是拒绝」等于改 CLI 语义，属拍板。
+
+**建议改法**：三选一——(a) 保持现状，只在 `api.yaml` 的 `/exec-multi` 写明「全 0 = 无约束」；(b) 给 `strategy` 全 0 加一个服务端上限（需要拍板上限值）；(c) 把 `0` 解释为「服务端默认」，另设一个显式的 `unlimited`。代价 (a)=0、(b)=一个常量 + 一条断言、(c)=CLI/MCP/文档三处一起改。
+
+### L2-155（新，单发 #20 第二次进入）：`POST /config/import/preview` 没有 admin 门，受限 token 可枚举全部主机名
+
+**位置**：`src-tauri/src/bin/agent2ssh-daemon.rs:3943`（`config_import` 的 `require_admin(&auth)?`）对比 `:3949-3951`（`config_import_preview` 把 `auth` 绑成 `_auth`，此后不再使用）。
+
+**判断**：**成立**。preview 只要有任意有效 token 就能答，而它返回 `hosts_to_add` / `hosts_to_skip` / `hosts_to_update`（`core/team_config.rs:195-250`），即**主机名清单**。一个被 `allowed_hosts` 限死的 token 今天能读到它不该看见的名字。`api.yaml` 侧与实现一致（`/config/import/preview` 本就没有 403 格），所以这不是文档漂移，是**门本身的缺口**。
+
+**建议改法**：`:3951` 改成 `Extension(auth)` + `require_admin(&auth)?`，`api.yaml` 补 403 格。代价：一个 `_auth` → `auth`、一行门、一处文档；失败模式是「原本能预览的受限 token 开始收 403」——这正是要的，但属行为变更，需拍板。
+
+### L2-156（新，单发 #20 第二次进入）：导入路径上 `ai_allowed` 既不在 `team_host_same` 里，也不在保留列表里
+
+**位置**：`src-tauri/src/core/team_config.rs:277-290`（`team_host_same` 比 11 个字段 + 条件性 `init_command`）、`:107-127`（保留 `key_path`/`password`/`passphrase`/`init_command`，没有 `ai_allowed`）、`src-tauri/src/types.rs:94-95`（`#[serde(default = "default_ai_allowed")]`）。
+
+**判断**：**成立，但形状与复核说的不同**。复核说「同一次导入既报 `hosts_skipped` 又改写」——**不成立**，两分支互斥。真实后果是：当一个主机**别的字段确实不同**时，bundle 里缺省的 `ai_allowed` 会按 serde 默认值 `true` 覆盖本地的 `false`。`ai_allowed: false` 是人工设的「该主机仅人工使用」，一次无关的导入会把它静默恢复成可被 AI 使用。
+
+**为什么没顺手修**：它需要 `src-tauri/src/**` 行为改动，且「缺省 = true」这个 serde 默认本身是既有契约（`api.yaml:5041` 已把它写成「`ai_allowed` is the exception: an omitted one deserialises to `true` and does overwrite」）。**文档已经准确描述了现状**，所以这里要拍的是「现状要不要保持」：保持（不改）／保留本地值（加进 `:107-127` 的保留列表，与 `init_command` 同形，代价最小）／把 `ai_allowed` 加进 `team_host_same`（会造出「报 updated 却保留」的反向不一致，不建议）。
