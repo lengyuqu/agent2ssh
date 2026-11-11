@@ -5,11 +5,9 @@ description = "SSH capability layer for general-purpose agents"
 authors = ["agent2ssh"]
 license = "MIT"
 edition = "2021"
-# The floor comes from `russh`, which is edition 2024 and declares 1.85, but this
-# crate needs 1.89 of its own: `store.rs` calls `File::lock_shared`, which only
-# became stable there. `clippy::incompatible_msrv` enforces the number below, so
-# raising it is a compile-time signal rather than a guess — declaring 1.85 first
-# and being told about 1.89 is how this value was found.
+# Both russh 0.65 and this crate require 1.89: `store.rs` calls
+# `File::lock_shared`, which became stable there. `clippy::incompatible_msrv`
+# enforces the declared floor for this crate's own code.
 rust-version = "1.89"
 default-run = "agent2ssh-app"
 
@@ -93,7 +91,7 @@ md-5 = "0.10"
 # `russh` already depends on this exact major, so naming it adds nothing to the
 # build; it only makes `Signer` nameable, which `ssh-key` does not re-export.
 signature = "3"
-russh = { version = "0.64.1", default-features = false, features = ["rsa", "ring"] }
+russh = { version = "0.65.1", default-features = false, features = ["rsa", "ring"] }
 russh-sftp = { version = "2", default-features = false }
 # `pkcs1` is still pinned to the exact release candidate `russh` declares, and
 # has to be: 0.8.0-rc.5 re-generalised `RsaPrivateKey<B>` and dropped the API
