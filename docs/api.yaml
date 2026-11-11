@@ -32,6 +32,19 @@ info:
     read the message before assuming a server bug. An unreadable gate file is an
     operator-fixable condition, not a crash.
 
+    Three routes answer differently on that same file, and none of them lists it.
+    `GET /terminal` returns `reject_if_gate_paused`'s error *before* upgrading, so
+    the refusal is a status there — 500 for an unreadable file, 423 for a paused
+    gate. The two broadcast routes never call `reject_if_gate_paused`: their gate
+    verdict comes from `terminal_broadcast_preview_results`, which reads the file
+    with `load_execution_gate().ok()` and tests it with `is_some_and`. So a paused
+    gate becomes `execution gate paused` in each target's `error` (200, no status
+    change), while a file that cannot be read makes the test false and the gate
+    step is skipped altogether — the request proceeds as if nothing had paused it.
+    That collapse of "unreadable" into "not paused" is the third gap in this list,
+    and it is why `/terminal` and `/terminal/broadcast` disagree about the same
+    broken file. See L2-153 in `docs/reports/OPT-LOOP-L2-PENDING.md`.
+
     A request body is read one of three ways, and the three fail differently.
     `Json<T>` — 47 handlers — rejects a body with no `application/json` content
     type as 415, a body that parses but does not fit the schema as 422, and a
@@ -1972,8 +1985,22 @@ paths:
         A paused gate is a per-target verdict here — not a 423, and not a
         200-versus-4xx split: `terminal_broadcast_preview_results` writes
         `execution gate paused` into that target's `error` and leaves it
-        `authorized: false`, exactly as the run path does, which is why neither
-        this operation nor `/terminal/broadcast` lists a 423 in its responses.
+        `authorized: false`, exactly as the run path does (the run's verdicts *are*
+        this function's), which is why neither this operation nor
+        `/terminal/broadcast` lists a 423 in its responses. That identity is also
+        why a gate file that cannot be read fails the same way on both: the gate is
+        read with `load_execution_gate().ok()` and tested with `is_some_and`, so an
+        unreadable file skips the step instead of answering it, rather than
+        producing a 500 as `GET /terminal` does.
+
+        What this preview is *not* is a complete forecast, and the remaining gap is
+        the direction a client actually uses. A target refused here is refused by
+        the run too, but a target this operation passes is not thereby safe: the
+        rate limit is applied in `terminal_broadcast_run` and not in this shared
+        verdict function, so a preview cannot report the `execution limit exceeded`
+        refusals that follow it. `authorized: true` here keeps the meaning the
+        field description gives it — nothing has refused this target *yet*. See
+        L2-153 in `docs/reports/OPT-LOOP-L2-PENDING.md`.
       requestBody:
         required: true
         content:
@@ -2022,10 +2049,19 @@ paths:
         a 4xx from this operation. A paused execution gate and a rate-limit
         rejection are two of those per-target refusals — `terminal_broadcast_run`
         folds both into every eligible target's `error` and returns 200 — which is
-        why no `423` and no `429` are listed below. The gate verdict is decided in
-        `terminal_broadcast_preview_results`, the same function the `/preview`
-        route calls, so a preview that reports `execution gate paused` predicts the
-        run exactly.
+        why no `423` and no `429` are listed below. The per-target *verdict* is
+        decided in `terminal_broadcast_preview_results`, the same function the
+        `/preview` route calls — which is why this route has no gate check of its
+        own and, unlike `/terminal`, answers no 500 for a gate file it cannot
+        read: `load_execution_gate().ok()` inside that function makes an
+        unreadable file indistinguishable from an unpaused gate, on both routes
+        at once. The one place the two routes do part is the rate limit, which
+        lives here and not in the shared function, so a preview cannot forecast
+        the `execution limit exceeded` refusals below. What this route reports
+        about refusals is not a mirror of what it records: a target refused under
+        `all_or_nothing: false`, and every target refused by the limit check, are
+        refused in the body with no audit entry written — see
+        `docs/reports/OPT-LOOP-L2-PENDING.md` L2-150 and L2-153.
       requestBody:
         required: true
         content:
@@ -3785,7 +3821,7 @@ paths:
                 properties:
                   ok: { type: boolean }
         "400":
-          description: The id is not a UUID, no rule has it, or the rule still exists but its worker could not be started (the SSH connection or the listener failed; the message names which).
+          description: The id is not a UUID, no rule has it, or the rule still exists but its worker could not be started (the SSH connection or the listener failed; the message names which). A rule the approval policy blocked is also a 400 — `forward_start` maps `Blocked` to BAD_REQUEST, the same as `forward_remove` and `forward_stop`.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -3798,8 +3834,11 @@ paths:
           description: |
             Scope denied, or the approval policy refused the restart. The handler resolves the
             id against the daemon's full tunnel list and checks the rule's host afterwards, so
-            a rule whose host is outside the token's allowed hosts and tags is answered with 403
-            here — that does disclose the tunnel exists. An id no rule has is the 400 case.
+            a rule that exists but sits outside the token's allowed hosts and tags answers 403
+            rather than the unknown-id 400 — unless the execution gate or the rate limit refused
+            the request first, in which case the answer is 423 or 429 and scope is never
+            consulted. An id no rule has is the 400 case, and so is a rule the approval policy
+            blocked.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }

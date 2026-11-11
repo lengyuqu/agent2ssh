@@ -1894,3 +1894,60 @@ self.inner.flush()                                                              
 | **N4** `ErrorKind::WouldBlock` 的文档与样例 | **成立** | `types.rs:27-28` 原写「Non-blocking call with no data available yet」，而唯一构造点是 `russh_impl/forward.rs:67`（`Registry::take`，文案 `no forwarded connection is pending`）；非阻塞**通道**读走 `io::ErrorKind::WouldBlock`（`channel.rs:324`），从不经过这个枚举。已改文档 + 把样例从 libssh2 时代的 `"[Session(-37)] would block"` 换成生产文案 |
 
 **N1 的最后一步做不到，记录原因**：复核建议把「同一 key 不同协商 hash 只占一个槽」写成「真的驱动一次 `HostKeyKind` 映射」的断言。`host_key_algorithm` 是对 `HostKeyKind` 的纯 match，没有可驱动的协商输入；真正决定槽位的是 `check_server_key`（`russh_impl/mod.rs:420-430`）从**捕获到的 key 本身**推 `HostKeyKind`，那需要一台会在同一 host 上换 key 类型的服务器。所以本轮能做的上限就是「断言映射值 + 在 doc 里写明本测试不覆盖它」，并把「不得引作证据」写进测试文档，避免下一轮再被当成证据。
+
+---
+
+## batch 14 第 3 轮复核的处置（第 4 轮自查 + 三条新事实）
+
+复核只点明了两个「没核」的问题和一个「还有没有第三个」的问题。逐个核完，**两个问题的答案都是「有，而且不止一处」**，另外在自查 D1 时掉出一条同一族的越权句。
+
+### L2-149 补（自核）：审批策略层没有 `forward multi` 的独立分支，严重程度**不调**
+
+复核问「审批策略是否对 `forward multi` 有独立分支——如果策略层按命令前缀分类，这条的严重程度还要再调」。答案是**没有**，`grep -rn "forward" src-tauri/src/risk_extra.rs src-tauri/src/core.rs` 零命中，两处分类器只认 `sftp` 与 shell 动词（`core.rs:518-530` 的 `sftp` 特判块是唯一的应用合成串分支）。三个消费者，全走 `glob_match(用户写的 pattern, 这串字面量)`：
+
+| 消费者 | 位置 | 输入 |
+|---|---|---|
+| `check_daemon_scope` | `remote.rs:589` / `:620` | `command`（`forward multi {host} ({n} rules)`） |
+| `check_approval_required_with` | `approval.rs:1063` | 同上 |
+| `matches_pattern`（用户风险规则） | `risk_config.rs:121-140` | 同上 |
+
+**所以策略层比 `allowed_commands` 更糟一格，不是更轻**：`approval.rs:1063` 的 `command_pattern` 同样是整串 glob，所以「当批量里出现 `-R 0` 就要求审批」这种策略**写不出来**——`-R 0` 根本不在串里。风险规则同理。原来写的「批量能力只有一个写法 `forward multi *`」成立，并且现在能加上「三处消费者一致，没有一条能看见端口」。`glob_match` 的 `*` 跨空格且大小写不敏感（`store.rs:1779-1800`）复核已核过，我不重复。
+
+**另一个没人提的粒度缺口，比 `multi` 更细**：`store.rs:1144-1145` 的 `derive_audit_action` 认 `"forward add"` 与 `"forward add-multi"`——而 `forward_add_multi` 实际发的是 `forward multi ...`（`:3276`）。所以批量的审计 `action` 落到 `else` 分支，值 `"exec"`。这是审计**分类**错，不是授权错，但让「按 action 过滤 forward 操作」漏掉所有批量。同一条修法（把规范形状定下来）能一起解决。
+
+### L2-150 补（自核）：提前返回有**第三处**，而且不在 `terminal_broadcast_run` 里
+
+复核问「除了限流（`:4487`）与逐 target 授权失败（`:4515`）之外，是否还有第三条我没走到的提前返回」。`terminal_broadcast_run`（`:4439-4613`）里确实只有那两条路径 + 两条 `all_or_nothing` 分支 + 最终投递循环，**再没有第三条**。本轮掉出来的是相邻的两件，都不是「提前返回」，但都是同一口径「拒绝写进响应、不写进审计」：
+
+1. **`all_or_nothing: true` + 限流 → 仍零审计（结论加强，不是新事实）**：把第 4 条和第 1、2 条并起来读，`all_or_nothing: true` 的三种拒绝里只有**限流**那一次不留痕，所以「留不留痕」既不由「全有全无」决定，也不由「拒绝发生在哪一步」决定——只因恰好写没写。
+2. **`terminal_broadcast_preview` 与 run 的判据不同源（新）**：`api.yaml` 现在有一句「the gate verdict is decided in `terminal_broadcast_preview_results`, the same function the `/preview` route calls, so a preview that reports `execution gate paused` predicts the run exactly」。**`/preview` 不跑限流**（`reject_if_rate_limited` 只出现在 run 里，`:4487`），而且 gate 读失败时 `/preview` 直接跳过该步（`load_execution_gate().ok()` ＋ `is_some_and` ＝ false），run 则把它折成 `execution gate paused`。同一份坏 `execution_gate.json`：`/preview` 说 target「没被谁拒」，run 拒它并给出一模一样的句子。→ **L2-153**。
+
+### L2-152（新，batch 14 第 4 轮，自查 D1 掉出来的同族）：`/forwards/{id}/start` 的 403 是同一句无条件话
+
+复核 D1 的判据是「把『越权返回 403』写成无条件句」。按同一条判据把三条路由扫完，**`start` 一条没被提到，而它正是同一句**：
+
+```
+forward_start（:3204-3244）与 forward_remove（:3077-3113）、forward_stop（:3135-3189）逐行同构：
+  reject_if_gate_paused → reject_if_rate_limited → check_daemon_scope → authorize_command
+```
+
+`/forwards/{id}/start` 的 403 原文是「is answered with 403 here — that does disclose the tunnel exists」，无前置条件。gate 暂停时 `reject_if_gate_paused` 在 `:3209` 先返回 423，scope 根本没被问。**同一族、同一修法**，本轮已按「顺序即应答顺序」改写（连带补 400 的审批来源，三页现在措辞一致）。不是新缺陷——它一直在那里，是 D1 的定位漏了第三页。`check_daemon_scope` 在三条路由里也都是**冗余**的：`authorize_command_with_approval` 的第一次调用就是 `check_daemon_scope`（`execution_control.rs:445-446`），所以内联那一次只改变「哪些拒绝先被审计」，不改变判定。这一点值得单独记，否则下一轮会有人以为内联那次是唯一的 scope 检查。
+
+### L2-153（新，batch 14 第 4 轮）：`/terminal/broadcast/preview` 只是单向预测器（限流不进 preview）
+
+**位置**：`bin/agent2ssh-daemon.rs:4333-4421`（`terminal_broadcast_preview_results`）、`:4423-4437`（`terminal_broadcast_preview`）、`:4439-4613`（`terminal_broadcast_run`）。
+
+**判断**：**半个成立**。原验收句「A preview that reports `execution gate paused` predicts the run exactly」单向上成立（说了就一定会被拒），反向不成立——而反向才是客户端决定「要不要发」的方向。两个候选缺口，核完只有一个是真的：
+
+1. **gate 读失败**：`preview_results` 把 `load_execution_gate()` 折成 `.ok()`（`:4350`），`gate.as_ref().is_some_and(...)` 于是 false，target 保持 `authorized: true`。run 走的是同一个 `preview_results`（`:4442`），**拿到的是同一份 `authorized: true`**，然后在限流、授权之后仍不会拒它——事实上两侧都看不见这份坏文件。真正把它变成拒绝的是 `authorize_command` 里那条 `preflight` 之外**没有**的 gate 检查……核实结果：`authorize_command_with_approval` 不读 gate。所以 run **也不拒**，两侧一致。**这一条我原来的写法是错的**——见下面「收回」。
+2. **限流**（成立）：`reject_if_rate_limited` 只在 run 里（`:4487`），`preview_results` 一行没有。所以 preview 报 `authorized: true` 的 target，run 可能因为 batch 超限把它改成 `authorized: false` + `execution limit exceeded`。**这个缺口是真的**：preview 的注释说「nothing refused it yet」，而限流确实还没问过。
+
+**收回第 1 条**（细节）：`terminal_broadcast_run`（`:4439-4613`）全文没有 `reject_if_gate_paused`，也没有 `load_execution_gate`；gate 只在 `preview_results:4350` 读一次。所以坏 gate 文件对广播的正确描述是「两个路由一起静默跳过 gate」。这比 L2-132 那条 500 更坏一格——`/terminal` 至少答 500，广播这里当没这回事。修法归 L2-132 那条线，但**修在 `reject_if_gate_paused` 上不会自动修到这里**，因为广播根本不调它：要么 `preview_results` 改成调它、把 `Err` 写进 target 的 `error`，要么广播从此不声称自己有 gate 判定。本条因此留两条：限流不进 preview（成立），以及 `preview_results` 自己那份 gate 读法（成立，但归 L2-132 的修法时**必须单独覆盖**）。
+
+**建议改法**：`preview_results` 里补一次限流的**只读**探测（`limiter.check_execution_batch` 不带副作用的那半，必要时拆成 `would_reject`），把结果写进 target 的 `error`；或者把验收句改成单向来写（「a preview's refusal predicts the run; a preview's silence does not」）。前者改行为，后者改措辞，需拍板。属 `src-tauri/src/**` 行为或纯文档。
+
+**已落的文档部分（本轮）**：`api.yaml` 的 `/terminal/broadcast` 与 `/terminal/broadcast/preview` 两处「predicts exactly」已改写成单向句，`info.description` 补了一段「`/terminal` 答 500/423，两个广播路由既无 500 也无独立 gate 判定」。三处都指向本条，`/terminal/broadcast` 那句还改成「the per-target *verdict* is decided in `preview_results`」——原文说「the gate verdict」，而 gate 只是 verdict 的一个输入。
+
+### 一条流程失误（第 4 轮，记下来）
+
+本轮先把「preview 放行 / run 拒」写进了 `api.yaml` 与 `info.description`，**再去逐行核 `run` 有没有自己的 gate 调用**，才发现两侧同源。改顺序本应是「核完再写」。代价是两处文案要改第二遍，而且如果我写完就推送，两次的差异会被读成「意见变了」。这条不算 L2——它是我自己的工作顺序问题——但下一个人读这份文件时，看到 `d83xxxx` 之后 `api.yaml` 的这条描述被连着改两次，应该知道原因在这里。

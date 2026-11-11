@@ -3107,3 +3107,36 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 #### 一条流程自记：每轮开工先重列评论，别信上一轮的清单
 
 复核是在我**正在改第 3 轮的时候**到达的，收尾时我没再看一眼评论列表，于是那条 11 KB 的复核在第 3 轮里完全没被读到——而我还在收尾里写「下一轮请看」。**到达时间与读取时间是两件事**，判断「有没有新指摘」只能靠本轮开工时重新列一遍并减去已处理集合，不能靠上一轮的结论。已写进收尾流程。
+
+### consume 4 / 6 · batch 14 · issue #30（第 3 轮复核的两个「没核」＋一个「还有没有第三条」）
+
+复核第 1 轮留了三个问题，本轮逐个核完，**两个「有没有」的答案都是「有，但位置不是它猜的那个」**。
+
+| 复核的问题 | 判定 | 事实 |
+|---|---|---|
+| D1 新措辞是否还有无条件句 | **有，但不在我改的那两页** | `forward_remove:3077-3113`、`forward_stop:3135-3189`、`forward_start:3204-3244` **三条逐行同构**（gate→rate→scope→authorize）。D1 只点了前两条，`start` 的 403 是同一种无条件句（「is answered with 403 here」）。→ **L2-152**，本轮已改 |
+| L2-149：审批策略是否对 `forward multi` 有独立分支，严重程度要不要调 | **没有分支，所以不调，而且更糟** | `grep -rn forward src-tauri/src/risk_extra.rs src-tauri/src/core.rs` **零命中**；`core.rs:518-530` 的 `sftp` 特判是唯一的应用合成串分支。三个消费者全是整串 glob：`check_daemon_scope`（`remote.rs:589/620`）、`check_approval_required_with`（`approval.rs:1063`）、用户风险规则 `matches_pattern`（`risk_config.rs:121`）。所以「批量里出现 `-R 0` 就要审批」这种策略**写不出来**——`-R 0` 不在串里 |
+| L2-150：除了限流与逐 target 授权失败，还有第三条提前返回吗 | **没有第三条，但有同族的另一处** | `terminal_broadcast_run:4439-4613` 的提前返回确实只有那两条。掉出来的是：`/preview` 不跑限流，所以 preview 的 `authorized: true` 不预测 run 的 429 → **L2-153**；以及一条**我自己写错又收回的**（下条） |
+
+#### 一条收回：广播的 gate 判定没有自己的实现
+
+我一开始把「preview 放行 / run 拒绝」写进了 `api.yaml` 与 `info.description`，**写完才去逐行核 `terminal_broadcast_run` 有没有自己的 gate 调用**。结果是没有：`:4439-4613` 全文既无 `reject_if_gate_paused` 也无 `load_execution_gate`，gate 只在 `preview_results:4350` 读一次（`.ok()` ＋ `is_some_and`）。所以坏 `execution_gate.json` 对广播的正确描述是**两个路由一起静默跳过 gate**，不是两侧分叉。这与 L2-132 那条 500 是两回事，且**修在 `reject_if_gate_paused` 上不会自动修到广播**——它根本不调那个函数。
+
+顺序教训：先核后写。这次代价是同一段描述改了两遍，且如果我写完就推，两次差异会被读成「意见变了」。已在 L2-153 里留了「一条流程失误」，免得下一个人把两次改动读成反复。
+
+#### 本轮改动
+
+- `docs/api.yaml`
+  - `/forwards/{id}/start` 的 `403` 与第 3 轮改过的 `stop` 对齐（顺序即应答顺序：423/429 先于 403）；`400` 补审批来源（`Blocked` → 400）。三页措辞现在一致。
+  - `info.description` 第二段补第三条 500 族：`/terminal` 答状态，两个广播路由**既无 500 也无独立 gate 判定**，`unreadable` 与 `paused` 在 target 的 `error` 里同形。
+  - `/terminal/broadcast`、`/terminal/broadcast/preview` 两处「predicts the run exactly」改成单向句，并写明限流缺口；`/terminal/broadcast` 的「the gate verdict」改成「the per-target *verdict*」——gate 只是 verdict 的一个输入。
+  - `/terminal/broadcast` 补一句**响应与审计不同源**（`all_or_nothing: false` 的被拒 target 与限流拒绝都不写审计），指向 L2-150。
+- `docs/reports/OPT-LOOP-L2-PENDING.md`
+  - **L2-149 补**：三处消费者逐条列出，结论是策略层比 `allowed_commands` 更糟一格；另补一条没人提的：`store.rs:1144` 的 `derive_audit_action` 认 `"forward add-multi"`，而 handler 发的是 `"forward multi ..."`，批量的审计 `action` 落到 `"exec"`。
+  - **L2-150 补**：`terminal_broadcast_run` 没有第三条提前返回；加强的是「留不留痕既不由模式也不由拒绝发生在哪一步决定」。
+  - **L2-152**（新）：`/forwards/{id}/start` 的 403 无条件句。附一条：三条路由里内联的 `check_daemon_scope` 是**冗余**的，`authorize_command_with_approval` 第一步就是它（`execution_control.rs:445-446`）。
+  - **L2-153**（新，半个成立）：`/preview` 不跑限流，故只是单向预测器；并记「preview_results 的 gate 读法」这条因修 L2-132 时**必须单独覆盖**。
+
+#### 验证
+
+`yaml.safe_load` **90 paths**；`/forwards/{id}`、`/forwards/{id}/start`、`/forwards/{id}/stop` 三条的响应码集合完全一致（`200/400/401/403/408/423/429`）。契约测试依赖的四个短语仍在（`drains for up to 500 ms`、`only as a frame`、`returns 200`、`into that target's \`error\``）——逐条 `grep -c` 为 1。**本轮零源码改动，且本容器无 Rust/Node 工具链（`which cargo` 为空），故 `cargo test` 与 `npm test` 一律未跑**：这不是「跑过了绿」而是「没跑」，引用本轮的验证结论时请只引用 `yaml.safe_load` 与 `grep`。
