@@ -1360,3 +1360,48 @@ fn mounts_a_closure_literal(segment: &str) -> bool {
 `every_route_call_is_read_as_an_operation` 的文档里已经写明它钉的是「rather than a count a new route would break」——本仓在这条路径上的既定取舍是**不钉计数**。再给头部三个数加一条自解析断言，等于把刚拆掉的漂移源换成另一种：每加一条路由、每改一次镜像都要连带改断言。
 
 留给拍板的措辞：**若要钉，钉的是形状差**（daemon 的 `(path, method)` 集合 vs 镜像 router 的集合），不是「实现差」——源文本无法证明同路径的本地 `console`/`list_hosts` 就是 daemon 的实现。影响面比 L2-125 估的小：只需改测试文件一处。
+
+---
+
+## 2026-11-11 · batch 12 第 4 轮：`get (…)` 的误红格（已修）、链上其余挂载器（已钉）、头部那条 73/74（已改）
+
+`bca51ea` 一笔解决三件事，全在 `src-tauri/tests/daemon_integration.rs`。
+
+### 一、`get (|| …)` 误红——成立，已修
+
+它给的注入 `.route("/", get (|| async { … }))`：Rust 不要求 callee 与 `(` 相邻，所以**能编译、仍是闭包、运行时一字不差**；而 `mounts_closure` 只认 `"get("` 这个子串，`match_indices` 找不到，返回 `false`，第一条断言就报「these `.route(...)` calls mount a named handler and did not parse」。旧版对这条注入是**绿**的（`(path, reason)` 一字未变）。
+
+这是上一轮我引入的**唯一误红格**，而且文案把人指向「教解析器认命名 handler」，真正的修法只是一个空格。这正是 `every_route_call_is_read_as_an_operation` 的文档里反对的那件事：断言红的时候要在说真问题。
+
+修法：先按**词**找 `get`（前一个字符不是标识符字符），跳空白，`strip_prefix('(')`，再跳空白，然后认 `|`（`move` / `async` 作为前缀一并跳过）。`get_x(` 这类仍被 `strip_prefix('(')` 挡掉，不必再单独判「后随标识符」。
+
+实测：注入 `get (|| …)` → **绿**（修前红）；注入 `get (serve_console)`（命名 handler）→ **仍红**。两条一起说明判据区分的是「闭包 vs 名字」，不是「有没有空格」——这也正是它在复核里说的「`mounts_closure` 真正比旧版多看到的东西」。
+
+### 二、链上其余挂载器——结构成立，已钉（覆盖入口，不覆盖语义）
+
+`Router::route_service` / `nest` / `nest_service` / `merge` / `fallback` / `fallback_service` 的文本里**没有 `.route(` 子串**，所以经它们挂的路由既不产出 entry、也不产出 drop——`daemon_routes_and_drops` 甚至会把后面那行吞进上一条 `.route(` 的 segment。新增 `the_router_chain_mounts_paths_only_through_route`：取 `Router::new()` 到 `.with_state(` 之间那段，**先去掉行注释**（一句注释点名 `.route_service(` 不该被当成挂载），再断言六个构建器都不出现。
+
+**覆盖范围要说清**：它钉的是「入口」。它列的另外三条里，(b) `nest` 内部 `.route("/z", …)` 会被读成相对路径 `/z`（假 entry，名字错）、(c) `fallback` 让未列出的动词也有响应、(d) 同名方法重复是 `panic!`——这三条要发生，都得先出现 `.nest(`/`.fallback(`，而那会先被这条钉住。所以是「入口先红」，不是「语义已覆盖」。
+
+实测：`.nest("/zz", Router::new())` 注入 → 红并点名 `.nest(`（**能编译**，其余断言一动不动，正是「零痕迹」的样子）；链上写一句 `// … .route_service( … .fallback( …` 的注释 → 绿。
+
+### 三、头部 73/74——部分成立，已改
+
+它说「那 74 calls 落在 **73** 条不同路径上」：**不成立**。那 74 次调用各自落在 74 条不同路径上，其中一条是 `/`（闭包重定向，不产出 pair）；**73** 是「有 pair 的路径数」。我原句「84 `(path, method)` pairs over 74 distinct paths」字面为真，但容易被读成「84 对分布在 74 条有 pair 的路径」，所以改成分开说：`84 (path, method) pairs over 73 paths, and the one path with no pair is the / redirect`。
+
+### 四、它列的 14 行文档表——只改了 1 行，其余是快照
+
+**改**：`docs/guides/daemon-api-quickstart.md:62`（成立）。那句自己跟自己打架：先说「两个数不要混用」，再把 **107**（= 105 API + 2 条非 API 的 **operation** 总数）叫「107 条路由」。已改成「105 API operation / 107 operation 总数 / 92 条路径」，并把「目前没有测试守着它」更新成点名两条现有守卫（`api_yaml_documents_every_daemon_route`、`the_console_route_mounts_one_named_handler`）——**这张表本身仍无断言**，所以那半句保留。
+
+**不改**，理由是它们是**日期快照**，不是当前声明：
+
+- `docs/reports/redundancy-audit.md:990`（当轮审计的「84 条 `.route(..)` − 2 = 82 paths」）
+- `docs/reports/OPT-LOOP-L2-PENDING.md:363`（L2-53 那一行把 107 叫「路由」，同一种名词错，但那是 11-10 的记录）
+- `:1224` / `:1283` / `:1289-1291`（上一轮复核原文，已由第 3、4 轮的小节覆盖）
+- `docs/reports/OPT-LOOP-LEDGER.md:1050` / `:1065`（历史轮次记录）
+
+改这些等于改写历史，下一个读的人会以为当轮的树就是今天这样。
+
+**政策一句**：面向使用者的现行文档（`docs/guides/**`、`docs/api.yaml`）按今天的树修；带日期的 `docs/reports/**` 保留快照，新的更正写在追加的小节里（本轮两节都是这个做法）。
+
+`docs/skills.md` 与 mcp 系列的「76 个工具」有断言（`mcp_tool_list_contains_exactly_76_tools`），它自己也认，不算缺口。
