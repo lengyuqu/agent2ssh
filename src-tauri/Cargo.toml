@@ -157,15 +157,16 @@ fontdb = "0.23"
 # 0.19 — so a lone upgrade leaves two incompatible `glib` majors in one graph.
 # What *can* move is the part of the stack nothing names: `glib`, `gio`, `pango`,
 # `cairo-rs` and `gdk-pixbuf` are additive across that boundary (the 0.20 crate
-# compiles a v2_66+ feature set against the same C library), so a dependency on
-# them here pins the *whole* graph to 0.20 — `gtk 0.18` then binds against 0.20
-# `pango` / `cairo-rs` / `gdk-pixbuf` instead of pulling 0.18 copies in.
+# compiles a v2_66+ feature set against the same C library). A dependency on
+# them here puts 0.20 in the graph; whether `gtk 0.18` then binds it depends on
+# the `^` range each binding declares — `glib` moves, the three visual crates do
+# not (see the end of this comment).
 #
-# `gtk-sys 0.18` pins `glib-sys = 0.18` (a `^0.18` can only take 0.18 if nothing
-# else asks for 0.20), so nothing here may name a -sys crate: with `glib-sys`
-# held at 0.18 and `cairo-sys-rs` / `pango-sys` unconstrained, the rest of the
-# generation splits around them on their own — which is what `cargo check` on
-# this graph confirms, and it is why this block names five crates and no -sys.
+# `gtk-sys 0.18` pins `glib-sys = 0.18`. Declaring `glib = "0.20"` here moves
+# `glib` itself (and with it the `glib-sys` its `-sys` crates ask for) while
+# `atk 0.18` keeps its own `glib ^0.18`; nothing in this block names a -sys
+# crate, because a second `glib-sys` can only exist once the `glib` they belong
+# to does.
 #
 # Only the tauri desktop feature reaches these crates; the sidecar binaries, the
 # daemon and the macOS/Windows builds never see them. The block is gated on the
@@ -186,7 +187,13 @@ fontdb = "0.23"
 # `pin_gtk_generation`, so the five crates are not in the graph at all; with the
 # default features `tauri` is on, so they are — and the pin applies exactly as
 # before. `glib` is renamed to `pin_gtk_generation` so the block reads as a pin
-# rather than a crate anything links. Delete the block (and its `tauri` entry)
+# rather than a crate anything links. The effect is on `glib` and `gio` only:
+# `gtk 0.18` binds `pango` / `cairo-rs` / `gdk-pixbuf` by their own declared
+# `^0.18`, so those three are pulled in twice (0.18 through `gtk`, 0.20 here)
+# and no code links the 0.20 copy. Checked on Debian 12 + GLib 2.74:
+# `cargo tree -e normal --invert pango@0.18.3` starts at `gdk`/`gtk 0.18`.
+# Paying two copies to keep the advisory off the reachable one is the trade
+# `docs/KNOWN-ISSUES.md` K17 records; delete the block (and its `tauri` entry)
 # once `gtk` moves to a `glib 0.20` generation and `wry`/`tao` follow.
 [target.'cfg(target_os = "linux")'.dependencies]
 pin_gtk_generation = { version = "0.20", package = "glib", optional = true }
