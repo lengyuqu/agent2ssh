@@ -2266,10 +2266,41 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 
 ### batch 2026-11-11 · 测试覆盖缺口（第二批，B=12）
 - issue #18 / 开批时间 2026-11-11 11:10 (GMT+8)
-- CodeBuddy 首条分析：**未到（等待中）**——issue 发出后 60 s × 5 次轮询（11:11–11:15）+ 延时复核（≈11:17 与 ≈11:19，约 6.5 与 8.5 分钟处）均 0 评论。消费者下次运行重新等（晚到窗口先例：#13/#14 为 6–6.5 分钟，#16 为 13 分钟，窗口不可靠）。
-- 6 轮进度：**0 / 6**（待消费任务更新）
+- CodeBuddy 首条分析：**已于 03:22Z（local 11:22）到达**，评论 `2120356381013209088`——生产任务的 60 s × 5（11:11–11:15）与两次延时复核（≈11:17/11:19）都扑空，它在约 **12 分钟**处才发；与 #16 的 13 分钟同类。消费任务开在 11:53，直接取到，未再等待。
+- 6 轮进度：**1 / 6**（第 1 轮见下方 `consume 1 / 6`；issue 保持 open）
 - 正文已喂给 CodeBuddy：**116 条「不成立」原文**（编号 71 = 旧 58 + batch 11 五个编号小节 13 条〔第 1 轮 3 / 第 2–3 轮 4 / 第 4 轮 2 / 第 5 轮 3 / 第 6 轮 1〕；判定行 39 = 旧 38 + batch 11 第 4 轮 row 9 已自撤 1 条；摘录 6 = 旧 4 + `8042f11` 复核 2 条：`gate.rs:83` 第 4 调用点、结构 vs 文本收窄）+ KNOWN-ISSUES 空档（K2/K7/K8/K14/K15/§3/E6/E8）+ 口径（基线 `--no-default-features --lib` 862/1/1、`daemon_integration` 71、npm 220/30、L2-75…L2-122 勿重提、AGENTS 测试口径三则〔组合不可相加 / `exec_fixture` 空跑 / default 下三个 e2e 目标 0 passed 正常〕、batch 11 抗漂约定、batch 6 工艺教训、`.github` 禁区与 L2 越权重申）。正文由 `/tmp/build-opt-issue-b12.py` 生成（复用 b11 骨架 + batch 11 区域锚点；region 边界匹配 `key + " "` 天然区分 batch 1 与 batch 11 前缀；全部锚点唯一性校验通过，计数复验 116）。
 - 本批重点：**#12 闭环后 batch 7–11 五批 30 轮 + `8042f11` 新长出来的无断言分支**；三条已登记靶子（L2-80 `daemon_tokens.toml` 写坏全员 500 零测试、L2-82 `Option<Json>` 吞解析错、L2-122 第 5 条真 daemon e2e）；KNOWN-ISSUES §3/E6/E8 中可用单测/集成测试钉住的项（反向用例只测过 ed25519、E8 假脚本）。
 - 顺手按 BATCH_COMPLETE 行自述删除顶部 `BATCH_COMPLETE · issue #17 · batch 11` 状态行（HTML 注释同步为十条）。
 - 下一批（B=13）：13 % 6 = 1 → 主题 1：daemon 控制与停止协议（**第三批**，#7/#13 已闭环）。开 issue 前先 fetch cnb main 重读 ledger 不成立清单（本批消费期间会新增，行内锚点会漂移），b12 脚本可改造复用。
 - 若 #18 仍 open 则按背压闸门跳过；锁沿用「保留在位、消费者侧自行清理」先例。
+
+### consume 1 / 6 · 2026-11-11 11:53–12:4x (GMT+8) · batch 12（issue #18）
+
+- 指摘来源：CodeBuddy 首条分析（评论 `2120356381013209088`，03:22Z）。C=0 → 本轮是第 1 轮。
+- 计数：**6 组 → 成立 1 / 部分成立 4 / 不成立 1**；组内另判 **5 条子断言不成立**（下 1/3/4/5/6）、**1 条判据不成立**（下 2）、**1 条位置错**（下 7）。
+- L1：`a9d7ec9`（`tests/daemon_integration.rs`：`daemon_routes_and_drops` + `every_route_call_is_read_as_an_operation` + `NON_API_ROUTES` 提到模块级）。
+- 验证：`npm run build` 6.39 s；`--no-default-features --lib` **862 / 1 / 1**（红项仍是故意红的 IPv6）；`--features daemon --test daemon_integration` **72 passed**（原 71 + 新增 1）；`cargo fmt --check` 绿。
+
+| # | 指摘 | 判定 | 依据 |
+|---|---|---|---|
+| 一 | L2-80：`auth.rs:51` 的 `Err` 臂零测试；handler 层写不出，只能落路由层；断言要钉「admin 没读文件」 | **部分成立** | `:51-56` 与 admin 短路 `:44-49` 的位置都对，`authenticate_token` 调用点只有 `:148`/`:34` 也对。但它附带的两条子断言错（见下 1、2） |
+| 二 | L2-82：三处 `Option<Json<T>>` 只有一处会红，`/shutdown` 缺真进程反证 | **部分成立** | axum-core 0.4.5 `extract/mod.rs:119-129` 确为 `Infallible` + `.ok()`；三处行号 `:167`/`:3815`/`:5574` 全对（`/health-snapshot` 路由是 `:5932` 不是 `:5931`）。但「换签名不红」错（见下 3） |
+| 三 | L2-122 第 5 条：真 daemon e2e 的脚手架已存在，成本被高估 | **成立** | `:4331` 仍是唯一 `.ok()`；`execution_gate` 在 `tests/` 只有 `:2216` 一行注释；gate 检查确实在 per-target 循环内（`:4372-4379`），所以「目标为空不执行」成立 |
+| 四 | 派生断言族只看得见 18 个 handler，`handler_body_of` 的 panic 靠静默跳过才没触发 | **不成立** | 见下 4 |
+| 五 | `start_local_service`：`:514` 与 `:511` 两条都是死分支；`:515` 零断言 | **部分成立** | `:514` 在 `None` 臂不可达成立；`:511` 不可达错（见下 5）；`:515` 零断言成立 |
+| 六 | `api.yaml` 三处措辞（无凭据漏写 / 500 挂在 approve 上 / 「33 operations」不可复算） | **部分成立** | 6.1 错（见下 6）；6.2 是清晰度问题不是事实错（`:3864` 那条 500 自己写着「Applies to every authed route, not just this one」）；6.3 的行号错（见下 7），但「没有可执行复算路径」成立 |
+
+**新增「不成立」条目与更正（原文保留，请勿重复提；每条自带判定）**
+
+1. **「`config_cache.rs` 的缓存让第一次失败被记住，直到 `(mtime, len)` 变化」— 不成立。** `ConfigCache::load_with` 是 `let value = loader()?;` 然后才 `*guard = Some(Entry{…})`（`config_cache.rs:58-63`），失败在 `?` 处返回、**不写缓存**。所以「修好文件后坏结果还留着」不存在。`SCOPED_TOKENS_CACHE` 确实没有 `invalidate()` 调用点，但进程内也没有写 `daemon_tokens.toml` 的路径，加它是纯增噪。
+2. **「admin 分支的破坏有两种，其中 `token == state.token` 改成纯文本比较测试照样绿，所以要断言文件没被读」— 结论成立，举的判据不成立。** 「断言文件没被读」是对的方向，但它列的两条破坏（挪短路位置、改纯文本比较）都不是判据：真正能区分「admin 短路在读文件之前」与「之后」的只有**权限 0** 的 fixture——语法错/坏 base64 两边都 500，权限 0 才有 200/500 之分（详见 L2 文件本轮小节）。
+3. **「把 `:167` 的 `body: Option<Json<ShutdownRequest>>` 换成 `Json<ShutdownRequest>`，这三条单测都不会红」— 不成立。** 三条单测（`:6077`/`:6097`/`:6115`）直传 `Some(Json(…))`，换签名是**编译失败**。它们钉住的是 handler 分支，缺的是提取器到 handler 之间那一段——这个缺口是真的，但那个对照是假的。
+4. **「`daemon_routes()` 只能看见镜像里能找到的 18 个 handler，另外 88 个一行都不看；`handler_body_of` 的 panic 之所以没触发是因为外层 `documented.find` 先筛掉了」— 不成立，整条反转。** 三个数都对（92 个 `.route(` 块、106 个 entry、镜像 18 条），但**它们不属于同一个对象**：`api_yaml_documents_the_codes_each_handler_can_return`（`:2731`）、`HELPER_STATUS`（`:2220`）、`api_yaml_documents_how_each_handler_reads_its_body`（`:2997`）的输入是 `include_str!("../src/bin/agent2ssh-daemon.rs")`（`:2732`/`:2551`/`:3001`），即**真实 daemon 源**，不是镜像。106 个 handler 在该文件里都有 `async fn`，所以 `handler_body_of` 全部命中。而 `handler_body_of` 在 `:2777`/`:2805` 被调用，**早于** `:2779`/`:2806` 的 `documented.find`——顺序反了。镜像的 18 条是 `build_test_router`（`:420-448`）的事，测试文件头 `:9-23` 已经写明它是 shape-mirror、「74 routes 完全没镜像」。（真正剩下的缺口是散文里的三个数没有断言，已记 L2 本轮小节第五节。）
+5. **「`:511` 的 `.ok_or_else` 也永远不执行」— 不成立。** `available()`（`:470-479`）只返回**已安装**的 runtime；主机上只装了 Docker/wslc 时 `.find(..is_some())` 返回 `None`，`ok_or_else` 就执行。这是 Linux + Docker 的常见形态。只有 `:514` 在 `None` 臂不可达。
+6. **「`api.yaml:20-22` 的『a caller that does not present the admin token』漏了无凭据这一类」— 不成立。** 无 `Authorization` 头 → `bearer_token` 返 `None` → `.unwrap_or_default()` → `""`（`auth.rs:141-147`）→ `token_matches("", admin)` 为假（`:86-88` 只对空 *expected* 早退）→ 落到 `:51`。**「does not present the admin token」字面就包含无凭据**，这句是 batch 9 特意从 `a scoped caller` 改宽的。
+7. **「`api.yaml:2212-2219` 那句『33 operations』」— 位置错。** `api.yaml:2212-2219` 是 `/audit` 的 403 块。33 出现在 `tests/daemon_integration.rs:2217` 的注释与 L2-PENDING 里。**且它是可复算的**：29（handler 体内直接出现 `reject_if_gate_paused(`/`preflight_*`）+ 2（`/sftp/rm-rf`、`/sftp/rm-rf/authorize` 经 `preflight_sftp_rm_rf:2313` 再下一层）+ 2（直接 `load_execution_gate`：`GET /gate:1265`、`/terminal/broadcast/preview:4331`）= 33；30 个声明 423 = 33 − 3 条 in-band。本条不再作为缺陷跟踪。
+
+**本轮自取的两条（不在它的清单里）**
+
+- `daemon.rs:5813-5817` 的 `/` 用**闭包**挂载（`get(|| async { Redirect::to("/console") })`），`mounted_handlers` 取到空 handler 名 → `/` 在 `daemon_routes` 里从来没有条目。落在 `NON_API_ROUTES` 内不影响契约，但同一写法出现在 API 路由上会让八个族一起静默——本轮新增的断言正是钉这个。
+- `daemon_integration.rs` 头部「18 of the daemon's 92 routes」「74 routes that are not mirrored」三个数是散文，改镜像不会红（记入 L2 本轮小节第五节末）。

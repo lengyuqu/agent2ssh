@@ -1097,3 +1097,128 @@ let gate = load_execution_gate().map_err(|e| {
 **已知不可断言的一环**：想给「读 gate 的 operation 不得声明 gate-read 500」加扫描断言，做不到——OpenAPI 里 500 不带来源，无法区分 gate-read 500 与配置读失败 500（`GET /hosts`、`/resident-sessions` 都两者兼备）。要断言就得加 `x-500-source` 这类扩展，代价大于缺陷本身。
 
 替代方案不是「加来源」，而是**把来源下移到 `description` 文本**：扫每个读 gate 的 operation 的 `responses["500"].description`，断言不出现 `gate` / `execution_gate.json` 字样。这不需要改 spec 任何结构，只把这条约定变成一个可判定的**文本**规则（哪怕 500 的 `description` 写的是「`info.description` 里说的两种 500」）。第 1 步落地后如果顺手补它，成本约等于零；不补也不算缺口——第 4 步的话在 `info.description` 里仍然如实。
+
+---
+
+## 2026-11-11 · batch 12 第 1 轮：L2-80 / L2-82 / L2-122 第 5 条的落地形状更正，与两个新靶子
+
+本轮的六条指摘全部落在**已经登记过**的三条测试缺口上，所以这一节不新开编号，而是把三条的「怎么落地」改对，并记下两条本轮新查出来的零断言分支。行号是 `b02acef` 的快照，锚符号。
+
+### 一、L2-80（`daemon_tokens.toml` 写坏 → 非 admin 得 500）——落地必须走路由层，且必须用「不可读」而不是「语法错」
+
+`bin/agent2ssh_daemon/auth.rs` 里读文件的唯一位置是 `authenticate_token`（`:40`）的 `:51-56`：
+
+```rust
+let scoped_tokens = load_scoped_daemon_tokens().map_err(|e| {
+    err(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("failed to load scoped daemon tokens: {e}"),
+    )
+})?;
+```
+
+**handler 层写不出这条用例。** admin 短路在 `:44-49`，早于 `:51` 的读文件：
+
+```rust
+if token_matches(token, &state.token) {
+    return Ok(AuthContext { scope: None, principal: token_principal(token) });
+}
+```
+
+而 `authenticate_token` 是同步私有函数，调用点只有 `auth_middleware`（`:148`）与 `#[cfg(test)] check_auth`（`:34`）。`daemon.rs` 的 `mod tests` 已经 `use agent2ssh_daemon_auth::{auth_middleware, …}`，所以可走的路是**路由层**：
+
+```rust
+Router::new()
+    .route("/probe", get(|| async { "ok" }))
+    .layer(from_fn_with_state(state, auth_middleware))
+```
+
+**断言的判据要钉「admin 根本没读这个文件」，所以 fixture 必须是「存在但不可读」（`chmod 000`），不是「语法错」。** 三条路径分叉在 `src/remote.rs`：
+
+| fixture | 失败点 | 结果 |
+|---|---|---|
+| 文件不存在 | `:206-208` 提前 `return Ok(Vec::new())` | 非 admin 得 401，不是 500 |
+| 存在但不可读 | `:209` `read_to_string` | 500 |
+| 存在但语法错 | `:210` `toml::from_str` | 500 |
+
+后两者同走一个 `map_err`，所以只有权限 0 能区分「admin 短路在读文件之前」。用语法错的话，「把 admin 短路挪到读文件之后」这个破坏**仍然是绿的**（两边都 500），断言就白写了。
+
+**推翻一条旧记录（原 L2-80 附带的缓存猜测）**：`SCOPED_TOKENS_CACHE` 确实没有 `invalidate()` 调用点（`remote.rs:200` 定义、`:205` 唯一使用；对比 `policy.rs:126/251`、`store.rs:690/2367`、`notify.rs:64` 都有），**但这不需要修**：`ConfigCache::load_with` 是
+
+```rust
+let value = loader()?;          // config_cache.rs:58 —— 失败在这里返回，不写 guard
+*guard = Some(Entry { … });
+```
+
+失败**不进缓存**，所以「第一次失败会被记住直到 `(mtime, len)` 变化」不成立，下一次调用会重新读。进程内也没有任何写 `daemon_tokens.toml` 的路径（全仓只有 `remote.rs` 的读、测试 fixture、以及 `daemon_resident_session_e2e.rs:62` 的预置写入，都是进程启动前）。**加 `invalidate()` 是纯增噪。**
+
+### 二、L2-82（`Option<Json<T>>` 吞解析错）——三处的后果不同，只有一处有安全含义
+
+提取器这一层已经核到依赖源码：`axum-core-0.4.5/src/extract/mod.rs:119-129`
+
+```rust
+impl<S, T> FromRequest<S> for Option<T> where T: FromRequest<S> {
+    type Rejection = Infallible;
+    async fn from_request(req: Request, state: &S) -> Result<Option<T>, Self::Rejection> {
+        Ok(T::from_request(req, state).await.ok())
+    }
+}
+```
+
+所以「任何提取失败都变成没有 body」成立。三处的后果**不能合并成一句**：
+
+| 操作 | 参数 | 坏 body 的后果 |
+|---|---|---|
+| `POST /shutdown` | `daemon_shutdown:167` | `:204 None => {}` → `:207 SHUTDOWN_REQUESTED.notify_one()` → **关机**。`require_admin` 已在 `:170` 过，所以不是提权，是「本该被 400 拒掉的请求被执行」 |
+| `POST /health-snapshot` | `post_health_snapshot:5574` | `:5579-5582 None => (None, None)` → `:5584-5594` 的 `_ =>` 分支 → **扫描全部已配置主机**（把「指定三台」读成「全部」） |
+| `POST /playbooks/{name}/dry-run` | `dry_run_playbook_handler:3815` | `:3818 unwrap_or_default()` → `:3819-3826` 的「路径名与 body 名不一致 → 400」整段跳过 |
+
+**推翻「换签名不红」这个对照**：`daemon.rs:6077/6097/6115` 三条单测直传 `Some(Json(ShutdownRequest{…}))`，把 `:167` 改成 `Json<ShutdownRequest>` 会让它们**编译失败**——是红了，不是绿的。所以这三条钉住的是 handler 分支，缺的是**提取器到 handler 之间**那一段，而不是「分支无断言」。落地只能走真进程（`daemon_stop_e2e` 已有 `env!("CARGO_BIN_EXE_agent2ssh-daemon")` + 预置 `daemon.token` + 探 `/health` 的脚手架），断言「坏 body → 4xx 且进程仍在」。
+
+### 三、L2-122 第 5 条的成本重估
+
+原文写「要起 daemon + 两个活终端目标，比第 1–4 步加起来都大」。这句过期了：gate 检查在 `terminal_broadcast_preview_results` 的 **per-target 循环内**（`:4372-4379`），遍历的是 `request.targets`，所以目标为空时根本不执行——「至少一个已注册终端」是必须的，但注册终端只要一次 `/terminal` WS 握手（insert 点在 `:4800`），**不需要真实 SSH 主机**。真实成本 = 一条新文件 + 一个写坏 `execution_gate.json` 的 fixture + 一条 500 断言，与 `daemon_stop_e2e` 同量级。
+
+### 四、新靶子：`start_local_service` 的两条拒绝文案零断言
+
+`src/container_runtime.rs:505-527`：
+
+```rust
+let resolved = match explicit.filter(|id| !id.trim().is_empty()) {
+    Some(id) => select(Some(id))?,
+    None => available()
+        .into_iter()
+        .find(|r| r.runtime.service_running(&r.binary).is_some())
+        .ok_or_else(|| anyhow!("no installed container runtime has a service to start"))?,   // :511
+};
+…
+if resolved.runtime.service_running(&resolved.binary).is_none() {                              // :514
+    return Err(anyhow!("{display_name} has no separate service to start"));                    // :515
+}
+```
+
+两条拒绝文案在 `src-tauri/tests/` 与 `src-tauri/src/` 的测试里**都是零命中**（只有定义处）。而 `docs/skills.md:99` 与 `tools.rs:1052` 把「Docker and wslc have none and are refused rather than silently accepted」当对外契约发出去。
+
+**`None` 臂的两条分支要分开说，不能一起叫「死分支」**：
+
+- `:514` 在该臂**不可达**——`:510` 的 `find` 已经保证 `service_running(...).is_some()`，同一个 binary 再问一次还是 `Some`。
+- `:511` 的 `ok_or_else` 在该臂**可达**：`available()`（`:470-479`）只返回**已安装**的 runtime，主机上只装了 Docker/wslc 时 `find` 返回 `None`，`ok_or_else` 就执行。这是 Linux + Docker 的常见形态，不是理论分支。（本轮此前把它记成「两条都是死分支」，那是错的。）
+
+**单测配方**（不依赖真实外部服务、不需要 macOS）：`resolve_executable_in` 走 `PATH`（`path_resolver.rs:54-58`），`binary_candidates()` 对 Docker 写死 `["docker"]`。在临时目录放一个名为 `docker` 的可执行空脚本并把 `PATH` 指向它 →
+
+- `start_local_service(Some("docker"))` 必须返回 `has no separate service to start`，且**不执行任何启动**（`:515` 在 `:520` 的 `start_service` 之前）；
+- 同一 fixture 下 `start_local_service(None)` 必须返回 `no installed container runtime has a service to start`。
+
+注意 `unsupported_reason()` 要放行（Docker 全平台支持），所以不能靠 `AGENT2SSH_CONTAINER_RUNTIME` 之外的手段。
+
+### 五、本轮已落一半：派生族的**分母**现在可判定，剩下的是镜像那三个数
+
+`daemon_routes` 原来对读不懂的 `.route(...)` 块静默 `continue`，八个派生族的覆盖面因此没有分母。本轮加了 `daemon_routes_and_drops` + `every_route_call_is_read_as_an_operation`：任何非 `NON_API_ROUTES` 的块读不出来就红。写这条时立刻抓到一处真形状——`daemon.rs:5813-5817` 的
+
+```rust
+.route("/", get(|| async { axum::response::Redirect::to("/console") }))
+```
+
+是**闭包**挂载，`mounted_handlers` 取到的 handler 名为空，所以 `/` 在 `daemon_routes` 里从来没有条目。它落在 `NON_API_ROUTES` 里，不影响契约；但如果**新加一条 API 路由也写成闭包**，旧代码下八个族会一起静默，现在会红。
+
+仍未钉住的是 `tests/daemon_integration.rs` 头部那三个数（「18 of the daemon's 92 routes」「74 routes that are not mirrored」）：它们是散文，改镜像不会红。要钉得解析测试文件自身的 `build_test_router`，本轮未做——它不影响任何断言的真假，只影响读者对覆盖面的估计。
