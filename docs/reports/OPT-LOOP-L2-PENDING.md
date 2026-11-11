@@ -971,7 +971,9 @@ forward_remove_core(uuid)     // :3108
 
 **落地形状（下一轮可以直接照做，不需要再拍板）：**
 
-1. `terminal_broadcast_preview_results:4331` 的 `load_execution_gate().ok()` 换成 `?` 传播，让两条路由与 exec 一族共用同一个 500 文案（`failed to load execution gate: …`）。这两条路由的 `responses` 因此要加一个 `500`——**逐条加，而不是靠 `info.description` 的全局段**：全局段的原文是「every non-public route answers 500 to a caller that does not present the admin token」，那是 `auth_middleware` 的 500；gate 读失败是 handler 自己的 500，两者来源不同，全局段盖不住它（这也是 `docs/api.yaml:22-32` 为什么专门写了第二段）。
+1. `terminal_broadcast_preview_results:4331` 的 `load_execution_gate().ok()` 换成 `?` 传播，让两条路由与 exec 一族共用同一个 500 文案（`failed to load execution gate: …`）。
+
+   **`responses` 不加 500（第 5 轮更正）**：`info.description` 的**第二段**（第 3 轮加的）原文是「So every operation that consults the gate can answer 500 even though its body only ever names 423 — which is why none of them lists the gate-read 500 in its own `responses`」。33 个读 gate 的 operation 里 30 个只写 423、500 由那一段统一承担；只给两条广播路由补 500，会让它们成为 33 个里仅有的两个例外——这正是本批反复在修的「同一族里一条写一条不写，从任何一条看过去都像一致」。上一稿把全局段误认成只有 `auth_middleware` 那一条，漏了它后面紧跟的这一段。
 2. `INBAND_REJECTIONS` 从 3 条变 2 条（`/terminal/broadcast` 与 `/terminal/broadcast/preview` 出表），`exec_stream` 留表——它的 `reject_if_gate_paused` 用 `.is_err()` 吞掉，升级后仍只发帧，语义上它也没在做决定：升级已经在 socket 里，拒绝一帧与断开连接等价。**这三条要同笔改**，因为第三段断言双向校验「出表的不能再写 423」。
 
 ### 二、新发现 A：广播的审批回执**从不影响投递**，只进审计（比第 1 条重）
