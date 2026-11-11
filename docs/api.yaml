@@ -1136,11 +1136,13 @@ paths:
         note on body handling at the top of this document. A body that type-checks
         is checked; a body that does not parse is *dropped*, not refused. So
         `{"expect_pid": "1234"}` — the string a shell produces from `"$PID"` —
-        stops the daemon without a check and the 409 never fires, and the same
-        goes for a negative or out-of-range PID, or a truncated body. `0` is the
-        exception on the other side: it is inside `u32`, so it parses, gets
-        compared, and is refused with 409 — "out of range" here means outside
-        `u32`, not merely implausible as a PID. The 400
+        stops the daemon without a check and the 409 never fires. The same goes
+        for every body the `u32` parse rejects, which is the whole family: a
+        negative PID, a PID above `4294967295`, or a truncated body. `0` is the
+        other case and does *not* belong to that family: it parses, so it is
+        compared, and is refused with 409 because it is not this process. The
+        rule is therefore "parsed ⇒ compared", not "plausible ⇒ compared" — an
+        implausible-but-representable PID is still checked. The 400
         below is reached only by a body that parses *and* carries
         `expect_pid: null`. Send the field as a bare JSON number, or omit the
         body entirely.
