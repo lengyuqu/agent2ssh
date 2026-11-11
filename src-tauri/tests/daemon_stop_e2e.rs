@@ -1500,9 +1500,14 @@ fn a_daemon_that_ignores_the_expected_pid_stops_and_says_so() {
         let _ = host_process.kill();
         let _ = host_process.wait();
     }
+    // The disjunction accepted `Err` as long as the process was gone, so a stop
+    // that failed after the force signal still passed. Here the request was sent
+    // (the stub answered POST /shutdown above, and `posted == 1` says so) and the
+    // process only goes away after the force-kill, so `Ok` is the honest
+    // outcome; `Err` would mean the kill stage or the owner cleanup failed.
     assert!(
-        stopped.is_ok() || !still_running,
-        "the stop was attempted, and the process is gone either way: {stopped:?}"
+        stopped.is_ok(),
+        "the stop completes once the old daemon's 200 has been force-killed: {stopped:?}"
     );
     let _ = std::fs::remove_dir_all(&dir);
     common::restore_default_config_env();
