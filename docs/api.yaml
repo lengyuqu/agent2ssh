@@ -1839,6 +1839,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Execution limit exceeded.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /terminal:
     get:
@@ -1996,6 +2001,12 @@ paths:
           content:
             text/plain:
               schema: { type: string }
+        "429":
+          description: Execution limit exceeded.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /recordings/config:
     description: Recording endpoints require the unrestricted admin token; scoped tokens are rejected.
     get:
@@ -3163,11 +3174,6 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
-        "429":
-          description: Execution limit exceeded.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
 
   /resident-sessions:
     post:
@@ -3575,6 +3581,11 @@ paths:
 
         "403":
           description: "Scope denied: the rule's host is outside the token's allowed hosts and tags."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Execution limit exceeded.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -3998,6 +4009,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Execution limit exceeded.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /connections/{host}/disconnect:
     post:
@@ -4033,6 +4049,11 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "408":
           description: Approval timed out
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Execution limit exceeded.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
