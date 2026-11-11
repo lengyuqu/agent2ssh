@@ -5,22 +5,26 @@
 //! 1. **Core function tests** — exercise the library functions that the daemon
 //!    HTTP handlers wrap, verifying business logic without going through HTTP.
 //!
-//! 2. **HTTP handler tests** — build a small axum `Router` that reproduces the
-//!    shape of 18 of the daemon's 92 routes, and use axum's `oneshot` test
-//!    utility to verify request/response semantics (auth, routing, JSON
-//!    serialization, status codes) without spawning a real TCP server.
+//! 2. **HTTP handler tests** — build a small axum `Router` that mirrors 18 of
+//!    the daemon's 92 `.route(...)` calls (20 of its 106 `(path, method)`
+//!    pairs), and use axum's `oneshot` test utility to verify request/response
+//!    semantics (auth, routing, JSON serialization, status codes) without
+//!    spawning a real TCP server.
 //!
 //!    **This layer is a shape-mirror, not an implementation test.** The copies
 //!    carry neither `AuthContext` nor `require_admin` — `check_auth` compares
 //!    one fixed token — so nothing here can say what a *scoped* token gets, and
 //!    a handler that gained or lost an admin gate would keep these assertions
-//!    green. The 74 routes that are not mirrored at all (`/metrics`, `/gate*`,
+//!    green. Mirroring a path is not mirroring every method on it: the daemon
+//!    also mounts `POST /hosts` and `POST /health-snapshot`, and neither has a
+//!    counterpart here. The other 74 calls — 84 `(path, method)` pairs over 74
+//!    distinct paths — are not mirrored at all (`/metrics`, `/gate*`,
 //!    `/audit*`, `/sftp/*`, `/sessions*`, `/forwards*`, `/recordings*`,
-//!    `/prompts/*`, `/terminal*`, `/events/stream`) have no coverage here in
-//!    either direction. Behaviour that depends on scope, admin, or a route this
-//!    router does not mount belongs in the real-daemon e2e targets
-//!    (`daemon_local_exec_e2e`, `daemon_resident_session_e2e`, ...), which spawn
-//!    `agent2ssh-daemon` itself.
+//!    `/prompts/*`, `/terminal*`, `/events/stream`), so behaviour that depends
+//!    on scope, admin, or a route this router does not mount belongs in the
+//!    real-daemon e2e targets (`daemon_local_exec_e2e`,
+//!    `daemon_resident_session_e2e`, ...), which spawn `agent2ssh-daemon`
+//!    itself.
 
 mod common;
 
@@ -2257,11 +2261,37 @@ const INBAND_REJECTIONS: [(&str, &str, &str); 3] = [
 
 /// The two routes that serve the browser console rather than the API.
 ///
-/// They are outside every contract check: `api.yaml` documents neither, and `/`
-/// is mounted with a closure, so it has no `async fn` for the body checks to
-/// read. Naming them once keeps the parse-loss assertion from having to know
-/// which shape a non-API route takes.
+/// They are outside every contract check: `api.yaml` documents neither, and
+/// neither is a JSON operation a client calls — one redirects, one serves HTML.
+/// This is the only place they are declared, so no assertion restates the list:
+/// the `api.yaml` check skips both, and the parse-loss check accepts a closure
+/// only on a path named here. `/console`'s mount is additionally pinned by
+/// `the_console_route_mounts_one_named_handler`.
 const NON_API_ROUTES: [&str; 2] = ["/", "/console"];
+
+/// Whether a segment mounts a method whose argument is a closure.
+///
+/// This is the only way a `.route(...)` call can name a method builder and still
+/// yield no handler — `get(|| async { … })` — so it is the property that
+/// explains why a drop is legitimate. Recording the shape rather than the path
+/// keeps the check from degenerating into "the one path I already know about is
+/// allowed": a closure moved onto an API path still fails, and a named handler
+/// that stops parsing no longer hides behind a whitelisted path.
+fn mounts_closure(segment: &str) -> bool {
+    METHOD_BUILDERS.iter().any(|(needle, _)| {
+        segment.match_indices(*needle).any(|(at, _)| {
+            let preceded_by_name = segment[..at]
+                .chars()
+                .next_back()
+                .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_');
+            let starts_an_identifier = segment[at + needle.len()..]
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_');
+            !preceded_by_name && !starts_an_identifier
+        })
+    })
+}
 
 /// The methods one `.route(...)` call mounts, in source order, with their handler.
 ///
@@ -2311,6 +2341,8 @@ struct DroppedRoute {
     /// Empty when the call carried no path literal at all.
     path: String,
     reason: &'static str,
+    /// True when the segment's mount argument is a closure rather than a name.
+    mounts_closure: bool,
 }
 
 /// The same parse, plus the `.route(...)` calls it could not turn into an entry.
@@ -2348,6 +2380,7 @@ fn daemon_routes_and_drops(
                 line,
                 path: String::new(),
                 reason: "no path literal",
+                mounts_closure: false,
             });
             continue;
         };
@@ -2356,6 +2389,7 @@ fn daemon_routes_and_drops(
                 line,
                 path: String::new(),
                 reason: "unterminated path literal",
+                mounts_closure: false,
             });
             continue;
         };
@@ -2365,6 +2399,7 @@ fn daemon_routes_and_drops(
                 line,
                 path: path.to_string(),
                 reason: "the first literal is not a path",
+                mounts_closure: false,
             });
             continue;
         }
@@ -2374,6 +2409,7 @@ fn daemon_routes_and_drops(
                 line,
                 path: path.to_string(),
                 reason: "the segment names no method builder with a handler after it",
+                mounts_closure: mounts_closure(segment),
             });
             continue;
         }
@@ -2605,40 +2641,87 @@ fn a_brace_inside_a_literal_does_not_close_the_body() {
 /// lossless — that is what this pins, rather than a count a new route would
 /// break.
 ///
-/// It pins the *set* of drops, not just "no drop on an API path": `/` is both
-/// the one route mounted with a closure and one of the two non-API paths, so a
-/// predicate that only asked about the path would accept any future unreadable
-/// shape that happened to land on it.
+/// It pins the *shape* of a drop, not the path: a mount argument that is a
+/// closure has no name for the body checks to read, and that is the only reason
+/// a segment may name a method builder and still yield nothing. A named handler
+/// that stops parsing is therefore red on any path it sits on. The version this
+/// replaces compared a fixed set of (path, reason) pairs, so it was red on the
+/// same changes — but its message said to "update this expectation
+/// deliberately", which for a non-API path means appending a path to a list
+/// instead of noticing that the mount changed shape. That instruction is what
+/// made it the wrong sentinel for `/console`, which has a test of its own now.
 #[test]
 fn every_route_call_is_read_as_an_operation() {
     let daemon = include_str!("../src/bin/agent2ssh-daemon.rs");
     let (routes, dropped) = daemon_routes_and_drops(daemon);
-    // The line is left out of the comparison on purpose: adding a route above
-    // the router chain shifts it, and a test that breaks on that is noise. The
-    // pair is what carries the claim.
-    let expected = [(
-        "/",
-        "the segment names no method builder with a handler after it",
-    )];
-    let actual: Vec<(&str, &str)> = dropped
+    let detail =
+        |drop: &DroppedRoute| format!("line {} `{}`: {}", drop.line, drop.path, drop.reason);
+    // A closure is the one shape with no handler to read, so it is the one
+    // shape a drop is allowed to be.
+    let unreadable: Vec<String> = dropped
         .iter()
-        .map(|drop| (drop.path.as_str(), drop.reason))
+        .filter(|drop| !drop.mounts_closure)
+        .map(detail)
         .collect();
-    let detail: Vec<String> = dropped
+    assert!(
+        unreadable.is_empty(),
+        "these `.route(...)` calls mount a named handler and did not parse: {unreadable:?}. Each \
+         one is an operation that fell out of every derived check at once, in silence. Teach \
+         `daemon_routes_and_drops` the shape, or mount the handler through \
+         `.route(path, get(handler))`."
+    );
+    // And a closure is only tolerable on a route no contract covers. The other
+    // half of the net is the `api.yaml` check: it would call a documented
+    // closure `phantom`, since the parse yields no entry for it. Between the
+    // two, a closure on a non-API path is the only shape that passes both —
+    // which is exactly what the console redirect is.
+    let covered: Vec<String> = dropped
         .iter()
-        .map(|drop| format!("line {} `{}`: {}", drop.line, drop.path, drop.reason))
+        .filter(|drop| !NON_API_ROUTES.contains(&drop.path.as_str()))
+        .map(detail)
         .collect();
-    assert_eq!(
-        actual, expected,
-        "the set of `.route(...)` calls the parser cannot read has changed: {detail:?}. A drop \
-         on an API path means that operation fell out of every contract check at once, in \
-         silence; a drop on `/` is expected and is the closure that redirects to the console. \
-         Teach `daemon_routes_and_drops` the shape, or mount the handler through \
-         `.route(path, get(handler))`, and update this expectation deliberately."
+    assert!(
+        covered.is_empty(),
+        "these routes are mounted with a closure, so no contract check can read them, and they \
+         are not among the non-API routes {NON_API_ROUTES:?}: {covered:?}. Name the handler, or \
+         declare the route non-API — a third shape that neither check sees is what this test \
+         exists to stop."
     );
     assert!(
         !routes.is_empty(),
         "the route parse found no operations at all, so every derived check is vacuous"
+    );
+}
+
+/// `/console` is exempt from every derived check, so its shape is stated once.
+///
+/// It sits in `NON_API_ROUTES` because it serves HTML to a browser, not because
+/// its mount is unreadable — the handler is a named `async fn` the body checks
+/// could read if they were pointed at it. Left unstated, "the console is
+/// served" would rest on the route line still being there: a second method, a
+/// different handler, or a redirect left in its place would keep the whole
+/// suite green while the browser console 404s or doubles up.
+#[test]
+fn the_console_route_mounts_one_named_handler() {
+    let daemon = include_str!("../src/bin/agent2ssh-daemon.rs");
+    let at = daemon
+        .find(".route(\"/console\"")
+        .expect("the daemon no longer mounts `/console`, so the browser console is unreachable");
+    // Bounded the same way the parser bounds it: at the next `.route(`.
+    let rest = &daemon[at + 1..];
+    let end = rest
+        .find(".route(")
+        .map_or(daemon.len(), |offset| at + 1 + offset);
+    assert_eq!(
+        mounted_handlers(&daemon[at..end]),
+        vec![("get", "serve_console".to_string())],
+        "`/console` must mount exactly one GET of `serve_console`; every `api.yaml` check skips \
+         this path, so nothing else in the suite states its shape"
+    );
+    assert!(
+        daemon.contains("\nasync fn serve_console("),
+        "`/console` names `serve_console`, but there is no `async fn serve_console(` for it to \
+         reach"
     );
 }
 
