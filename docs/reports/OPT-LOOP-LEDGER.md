@@ -2621,7 +2621,7 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 
 **下一批可直接用**：① `UnverifiedIdentity` 与 `health_identity` 的 `ok:false` 是真空档，但都在私有函数里，只能靠 `daemon_stop_e2e` 的外部观察（`spawn_daemon_at`/`start_listener_at` 在 `daemon_stop_e2e.rs:1314`/`:1334` 可复用）；② `wait_for_exit` 之后那一跳可以在 `daemon_control.rs` 的内部单测里直接造（把 `stop_daemon_process` 的 `signal_daemon` 调用抽成一个可注入的参数），比 e2e 便宜。
 
-**本轮改动**：仅本文件。无代码改动、无新 L2。推 `cnb main`，未推 github。
+**本轮改动**：仅本文件。无代码改动、无新 L2。推 `cnb main`（`c3ccf86..a469e31`，rebase 过），未推 github。**回帖 `2120441492589150208`**。
 
 **验证**：本轮未改代码，沿用第 2 轮终值（`npm run build` 6.57 s；`--lib` 862 / 1 / 1；`--features daemon --test daemon_integration` 76 passed）。
 
