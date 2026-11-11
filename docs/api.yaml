@@ -14,6 +14,21 @@ info:
     operation whose 403 description names a *scope* or an *approval* instead is a
     per-host permission denial or a rejected approval, not an admin gate.
 
+    Two different mechanisms answer 429, and only the response text tells them
+    apart. `reject_if_rate_limited` counts executions in a rolling window and
+    refuses with `execution limit exceeded: source:<id> rate current=… limit=…`,
+    where the scope suffix is `rate`; the session cap counts *live* sessions
+    instead and refuses with the same template and the scope suffix `sessions`.
+    Both are 429 with an identical `{"error": …}` body, so a client that retries
+    on 429 has to read the suffix to know what it is waiting for: a `rate`
+    rejection clears when the window slides, while a `sessions` rejection clears
+    only when a session is closed. The two families are configured independently
+    in `execution_limits.toml` — `*_per_minute` for the first,
+    `*_max_sessions` for the second — and an operation can be subject to one, the
+    other, both, or neither. Most of the 429s below say only "Execution limit
+    exceeded"; the two that differ are called out where they occur
+    (`POST /sessions`, `POST /resident-sessions`).
+
     One 500 sits outside every operation's own list. `auth_middleware` reads
     `daemon_tokens.toml` for any token that is not the admin token, so a file
     that does not parse answers 500 to that request before any handler runs:
@@ -3191,7 +3206,15 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "429":
-          description: Execution limit exceeded
+          description: >-
+            The session cap was reached, not the per-minute rate limit. `session_open` reserves a
+            slot through `register_limited_session_for_command` → `check_session_open`, which
+            compares the caller's live session count against `default_source_max_sessions`,
+            `default_host_max_sessions` and `default_tag_max_sessions`; it never calls
+            `reject_if_rate_limited`. The body uses the shared template, so the scope suffix is
+            the only discriminator: `source:<id> sessions`, not `source:<id> rate`. The slot is
+            released by closing the session, so the retry that works is `DELETE /sessions/{id}`,
+            not a timed retry.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -3316,6 +3339,13 @@ paths:
   /sessions/{id}:
     delete:
       summary: Close a session
+      description: |
+        Closing is how a session's reservation is released back to the counter, so this
+        operation deliberately checks no limit: `session_close` reads the execution gate, the
+        token scope and the approval policy, then calls `unregister_session`. A limit check here
+        would be able to refuse the only call that frees a slot, which is how a session cap turns
+        into a deadlock. That is why no `429` appears below, while `POST /sessions` — the side
+        that *takes* a slot — does answer one.
       parameters:
         - name: id
           in: path
@@ -3343,11 +3373,8 @@ paths:
           description: >-
             Scope denied, or the approval policy refused `session_close`. The gate is checked
             first, so a paused gate answers 423 even when the session's host is also outside the
-            token's hosts and tags. A rate limit is not one of the refusals this operation can
-            answer: `session_close` reads the gate, the scope and the approval policy, and never
-            calls `reject_if_rate_limited`, so closing a session is not counted against
-            `execution_limits.toml` and a retry loop will never meet a 429 here. This is why no
-            `429` is listed below, while `/sessions` — the open side — does list one.
+            token's hosts and tags; read a 403 here as a scope denial or an approver's refusal,
+            never as a gate verdict.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -3439,7 +3466,14 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "429":
-          description: A rate or concurrency limit was exceeded (the shared `reject_if_rate_limited` preflight, or the local-environment session cap). The per-command session cap on `/sessions` is a 400 here, not a 429.
+          description: >-
+            The per-minute rate limit refused the request. `resident_session_open` runs the shared
+            preflight (`preflight_guarded_request`), so its 429 comes from
+            `reject_if_rate_limited` and the scope suffix reads `rate`. The concurrent-session cap
+            for this endpoint (`AGENT2SSH_MAX_RESIDENT_SESSIONS`) is *not* a 429: it is enforced
+            inside `resident_open_core` and surfaces as the 400 above. Note this is the opposite
+            split from `POST /sessions`, where the session cap is the 429 and there is no rate
+            check at all.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }

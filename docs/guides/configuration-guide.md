@@ -13,7 +13,7 @@ Agent2SSH 的所有配置和数据文件存储在 `~/.agent2ssh/` 目录下。�
   daemon.owner     # 记录哪个 daemon 是桌面应用启动的（自动管理）
   audit.jsonl      # 执行审计日志（自动追加）
   app.log          # 结构化诊断日志（JSONL，自动轮转，写前脱敏）
-  daemon.log       # daemon 的 stdout/stderr（原样落盘，不脱敏，仅启动时轮转）
+  daemon.log       # daemon 的 stdout/stderr（原样落盘，不脱敏，仅在 spawn 新进程时按大小轮转）
   secrets.enc      # App 自建加密凭据库（主密码派生密钥，自动管理）
   known_hosts.json # SSH 主机指纹信任记录（自动管理）
   .hosts.lock      # hosts.json 跨进程写锁（自动管理）
@@ -44,7 +44,19 @@ Agent2SSH 的所有配置和数据文件存储在 `~/.agent2ssh/` 目录下。�
 
 ### 两个日志文件不是同一份东西
 
-`app.log` 是应用写的结构化诊断（JSONL，每条都过 `redact_sensitive_text`，5 MB 内联轮转、保留 3 代），四个 surface 都往里写。`daemon.log` 是 daemon 进程自己的 stdout/stderr 重定向，内容是 `tracing` 的 `fmt` 输出，**没有任何脱敏**：`AGENT2SSH_LOG` 为默认 `info` 时，`POST /exec`、`/local-exec`、`/exec-multi`、`/exec/compare` 四个 handler 各会写一行 `command=…`，命令原文就落在这个文件里。只有 `WARN`/`ERROR` 经 `DiagnosticBridgeLayer` 桥进 `app.log` 时才会被脱敏，`info`/`debug` 不会过桥。轮转也只在 `daemon start`/`daemon restart` 时做一次（超过 5 MB 转成 `daemon.log.1`、`daemon.log.2`），长时间运行的 daemon 不会自己截断。所以排查完要分享或上传 `daemon.log` 之前，先按命令行内容决定是否需要手工裁剪。
+`app.log` 是应用写的结构化诊断（JSONL，每条都过 `redact_sensitive_text`，5 MB 内联轮转、保留 3 代），四个 surface 都往里写。`daemon.log` 是 daemon 进程自己的 stdout/stderr 重定向，内容是 `tracing` 的 `fmt` 输出，**没有任何脱敏**：`AGENT2SSH_LOG` 为默认 `info` 时，`POST /exec`、`/local-exec`、`/exec-multi`、`/exec/compare` 四个 handler 各会写一行 `command=…`，命令原文就落在这个文件里。只有 `WARN`/`ERROR` 经 `DiagnosticBridgeLayer` 桥进 `app.log` 时才会被脱敏，`info`/`debug` 不会过桥。所以排查完要分享或上传 `daemon.log` 之前，先按命令行内容决定是否需要手工裁剪。
+
+五点容易想当然，逐条写清：
+
+**一、`redact_sensitive_text` 是模式匹配，不是"没有秘密"的保证。** 它做三件事：跑十条内置正则（私网 IPv4、IPv6 loopback/link-local、`Bearer <20+>`、`sk-…`、`AKIA…`、JWT、32 位以上十六进制）；按空白切词后看 `key=value` 的 key 是否命中一份**精确匹配**的 11 个拼写（`password` `passwd` `token` `secret` `api-key` `apikey` `access-token` `authorization` `bearer` `cookie` `set-cookie`，比对前去掉前导 `-` 和尾部 `:`），命中则只把值替换掉；最后按高熵启发式兜底（≥40 字符且同时含字母、数字、`+/_-=`，或 ≥32 位纯十六进制）。因为 key 表是精确匹配而不是后缀或包含匹配，**表外拼写一律原样留下**——实测（`--no-default-features` 下直接调 `store::redact_sensitive_text`）：`mysql --password=hunter2` 抹成 `--password=[REDACTED]`，而 `mysql -p hunter2`、`mysql -phunter2`、`openssl enc -pass pass:hunter2`、`export API_TOKEN=abc123`、`export API_KEY=abc123`、`export PGPASSWORD=abc123` 六种全部原样输出。注意 `api-key` 与 `apikey` 在表里、`api_key` 不在——漏的是**一整类下划线拼写**，不是个别单词。这条边界不只影响日志：同一个函数还负责 `audit.jsonl` 的 `command` 字段、审批通知外发时的 `command`（Slack 或任意 webhook 的 JSON 载荷）、以及下面第五点的诊断包尾部。所以一个漏网的口令不只留在本机日志里，它会随审计记录长期留存、并随 webhook 发到外部。
+
+**二、写进 `daemon.log` 的命令未必是用户发的那条。** 四个 `command=…` 里只有一个会变：`/exec` 走 `preflight_rewritable_request`，审批人可以批准一段改写过的文本，handler 在 `:1725-1727` 覆盖 `req.command` 之后才打日志，所以那一行是**权威化后、真要执行**的文本。`/local-exec` 走 `preflight_guarded_request`（`rewritable: false`），`/exec-multi` 与 `/exec/compare` 不经过这两个 helper 而是 `authorize_targets`，三者都不改写，日志里就是请求原文。用日志反推"用户当时发了什么"之前先确认是哪一个端点。
+
+**三、两份日志不能按 `trace_id` 对上。** `trace_id` 是 `DiagnosticBridgeLayer` 在桥接时从 `REQUEST_TRACE_ID` 取出后塞进 `app.log` 那条 JSON 的字段，`daemon.log` 走的是 `tracing_subscriber::fmt::layer()`，不读 task-local，所以**一行 `trace_id` 都没有**。同一请求在两份文件里的关联只能靠时间戳与主机名。
+
+**四、轮转只在 spawn 新进程时按大小触发，而且保留三代。** 入口只有一个：`start_daemon_background` 在真正 spawn 前调 `append_log_file()`（`daemon_control.rs:458`），后者先跑 `rotate_daemon_log_if_needed(…, 5 MB)` 再以追加方式打开。因此：已有健康 daemon 时 `daemon start` 提前返回（CLI 与桌面都有这道判断），**不轮转**；`daemon restart` 一定 spawn，一定检查；文件超过 5 MB 才真的转，转的时候 `.log.2 → .log.3`、`.log.1 → .log.2`、当前 → `.log.1`，即**最多三代**。运行中的 daemon 不会自己截断，日志涨到多大都不转。
+
+**五、导出诊断包会把 `daemon.log` 的尾部带走。** `export_diagnostic_bundle` 在产物里追加 `## daemon.log tail` 段，取最后 300 行，每行过一遍 `redact_sensitive_text`（`diagnostics.rs:519-520`）——也就是说上面第一、二两点的漏网内容会随包一起离开本机。"分享前先裁剪"这条提醒真正会撞上的场景就在这里，不只是手工上传日志时。
 
 ---
 
