@@ -2223,13 +2223,29 @@ const HANDLER_STATUS: [(&str, &str); 10] = [
 /// per-operation repeat would be an invitation to delete both copies, and the
 /// count it would take is not one this file derives — it spans operations that
 /// reach the gate directly, through `preflight_sftp_rm_rf`, and through
-/// `load_execution_gate` itself, so any number written here is a snapshot.
-const HELPER_STATUS: [(&str, &str); 8] = [
+/// `load_execution_gate` itself, so any number written here is a snapshot. The
+/// approval chain behind the same preflights has the same shape and is stated in
+/// the same paragraph, for the same reason.
+///
+/// 403 arrives through the preflight as well, and was the last code with no
+/// guard at all: `authorize_command_inner` builds `FORBIDDEN` for a scope denial
+/// and for a rejected approval, three call levels below the handler, so a route
+/// whose only 403 path runs through it documents nothing and fails nothing.
+/// `/local-exec` was one — deleting its `403` turned no test red, because its
+/// body holds neither `StatusCode::FORBIDDEN` nor `require_admin(`. Listing the
+/// preflight here is not the 1:1 claim the 423 entry makes: the preflight can
+/// answer 400, 403, 408, 423, 429 and 500. Only 403 is pinned through it, because
+/// it is the only one of those the handler body cannot show and no other entry
+/// already covers; 408 and 423 have their own call sites, and both 500s are
+/// stated once in `info.description`.
+const HELPER_STATUS: [(&str, &str); 10] = [
     ("too_many_requests_status()", "429"),
     ("reject_if_rate_limited(", "429"),
     ("register_limited_session_for_command(", "429"),
     ("preflight_guarded_request(", "429"),
     ("preflight_rewritable_request(", "429"),
+    ("preflight_guarded_request(", "403"),
+    ("preflight_rewritable_request(", "403"),
     ("reject_if_gate_paused(", "423"),
     ("require_admin(", "403"),
     ("require_recording_admin(", "403"),
@@ -4224,31 +4240,47 @@ fn api_yaml_lists_the_local_refusals_it_can_produce() {
     }
 }
 
-/// The two 500s `/local-exec` can answer are documented on the operation itself.
+/// The two internal errors the preflight can answer are stated once, at file
+/// level, and not repeated on the operations that can answer them.
 ///
 /// `api_yaml_documents_the_codes_each_handler_can_return` reads a handler's own
-/// body, and this handler's 500s are not there: `preflight_guarded_request` reads
-/// `execution_gate.json` and the approval chain reads `policy.toml`, and both
-/// report an unreadable file as an internal error from inside the helper. The
-/// file-level contract is therefore that a route documents helper-produced codes
-/// by hand — so this asserts the hand-work exists, and names the two files whose
-/// failure it describes.
+/// body, and these 500s are not there: `reject_if_gate_paused` reads
+/// `execution_gate.json`, and the approval chain behind it reads `policy.toml` /
+/// `policy.json` before falling back to `approval_policies.toml`. Both report an
+/// unreadable file as an internal error from inside the helper.
+///
+/// A per-operation copy on all sixteen preflight callers was the alternative,
+/// and it is the wrong one: the same paragraph in sixteen places is sixteen
+/// chances to name the wrong file, which is exactly what the one round that
+/// added a copy to `/local-exec` did — it named `policy.toml` and left out
+/// `approval_policies.toml`, the file the same chain falls back to.
+///
+/// So this pins the shape in three places: the shared statement still names both
+/// reads, `/local-exec` still carries no per-operation 500 (the entry whose
+/// existence would contradict that statement), and its 400 still says that a
+/// failure from the runner itself arrives on the same code — the half a client
+/// cannot infer from a list of refusals.
 #[test]
-fn local_exec_documents_the_internal_errors_its_helper_answers_with() {
-    let daemon = include_str!("../src/bin/agent2ssh-daemon.rs");
+fn the_spec_states_the_preflight_internal_errors_once() {
     let spec = include_str!("../../docs/api.yaml");
 
-    assert!(
-        daemon.contains("preflight_guarded_request("),
-        "`/local-exec` no longer runs the shared preflight, so the two 500s below no longer apply \
-         and this test should be deleted rather than repaired"
-    );
-    assert!(
-        daemon.contains("failed to load execution gate: {e}")
-            && daemon.contains("StatusCode::INTERNAL_SERVER_ERROR"),
-        "the gate check no longer answers 500 on an unreadable `execution_gate.json`; the 500 in \
-         the spec now describes a branch that does not exist"
-    );
+    let file_level = spec
+        .lines()
+        .take_while(|line| !line.starts_with("  /"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for needle in [
+        "execution_gate.json",
+        "policy.toml",
+        "approval_policies.toml",
+    ] {
+        assert!(
+            file_level.contains(needle),
+            "the file-level section no longer names {needle} as one of the two shared reads that \
+             answer 500. Every preflight caller relies on that paragraph instead of repeating the \
+             500 on its own operation, so a client would now meet an undocumented 500"
+        );
+    }
 
     let operation = spec
         .lines()
@@ -4258,15 +4290,21 @@ fn local_exec_documents_the_internal_errors_its_helper_answers_with() {
         .map(str::trim_start)
         .collect::<Vec<_>>()
         .join("\n");
-    let internal = code_block(&operation, "500");
-    for needle in ["execution_gate.json", "policy.toml"] {
-        assert!(
-            internal.contains(needle),
-            "`/local-exec` answers 500 when {needle} cannot be read, but its 500 description does \
-             not name the file; a client reads a generic internal error where the remedy is \"fix \
-             that file\". Block was:\n{internal}"
-        );
-    }
+    assert!(
+        !operation.contains("\"500\":"),
+        "/local-exec lists a 500 of its own again. The two internal errors it can answer are stated \
+         once at file level — see the paragraph beginning `A second 500 does need the handler` — and \
+         a per-operation copy both contradicts that sentence and, the first time it was tried here, \
+         named only one of the two files. If a 500 belongs on this operation for a different reason, \
+         change the file-level sentence first so the two do not disagree."
+    );
+    let refused = code_block(&operation, "400");
+    assert!(
+        refused.contains("a refusal from a run that failed"),
+        "/local-exec's 400 also carries every failure from the runner itself, and that is the half \
+         a client cannot infer from a list of refusals; the description no longer says so. Block \
+         was:\n{refused}"
+    );
 }
 
 /// An error response without a description tells a client the shape of a
