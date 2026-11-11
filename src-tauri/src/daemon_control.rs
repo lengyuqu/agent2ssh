@@ -860,10 +860,12 @@ enum ShutdownRequest {
     },
     /// Refused or unreadable for another reason, with something to print.
     NotAccepted(String),
-    /// Accepted by a daemon that does not check `expect_pid`, so the answer
-    /// says nothing about which process is stopping. Which is usually fine — the
-    /// health check a moment earlier named this PID — but it is not the checked
-    /// path, and the caller deserves to know which one it got.
+    /// A `200` to a request that named a PID — the only arm a `200` can reach
+    /// in that case, because the guarded arm above requires
+    /// `expected_pid.is_none()`. It therefore also catches a current daemon
+    /// that compared the PID and matched, so the answer says only "the request
+    /// was accepted", never "the check did or did not happen". Telling those
+    /// apart needs a receipt the daemon does not send yet (K14).
     AcceptedUnchecked,
 }
 
@@ -1034,10 +1036,16 @@ pub fn stop_daemon_process(pid: u32) -> std::result::Result<(), DaemonStopError>
     // listener that changed hands in between refuses instead of exiting.
     match request_shutdown(Some(pid)) {
         ShutdownRequest::Accepted => {}
-        // A daemon too old to know `expect_pid` stops anyway. It is still the
-        // daemon that health-checked a moment ago (its config directory matched),
-        // so this is the previous behaviour, not a hole it opened — but `false
-        // compatibility` would be claiming the check happened when it did not.
+        // Every `200` to a stop that named a PID lands here, a current daemon
+        // that compared the PID and matched included: the guard on the first
+        // arm requires `expected_pid.is_none()`, which a real stop never is. So
+        // this arm cannot say that the daemon is old — only that its answer
+        // carried no receipt. It is still the daemon that health-checked a
+        // moment ago (its config directory matched), so continuing is the
+        // previous behaviour, not a hole this opened; claiming the check
+        // happened would be the lie. The warning below still attributes the
+        // missing receipt to a version, which is a known defect and not
+        // something this arm can support (K14).
         ShutdownRequest::AcceptedUnchecked => {
             let _ = crate::diagnostics::append_diagnostic_log(
                 "warn",

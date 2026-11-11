@@ -3562,6 +3562,33 @@ fn api_yaml_documents_how_each_handler_reads_its_body() {
             }
         }
 
+        // `Bytes` extraction still goes through axum's body limit, so a
+        // too-large body is refused before the handler parses anything — and as
+        // plain text, not the `Error` object. Nothing checked this:
+        // `/shutdown` documented the 413 and `/approvals/{id}/approve`, the
+        // other `Bytes` handler, did not, which is invisible from either side.
+        if matches!(reader, BodyReader::HandParsed) {
+            if !documents("413") {
+                violations.push(format!(
+                    "{label} reads `axum::body::Bytes`, so the default body limit answers 413 \
+                     before the handler parses anything, but the operation does not document it"
+                ));
+            } else {
+                let media: Vec<&str> = operation
+                    .media
+                    .iter()
+                    .filter(|(known, _)| known == "413")
+                    .map(|(_, media)| media.as_str())
+                    .collect();
+                if media != ["text/plain"] {
+                    violations.push(format!(
+                        "{label} documents 413 with {media:?}; axum answers the body limit with \
+                         a plain-text message before the handler runs"
+                    ));
+                }
+            }
+        }
+
         match reader {
             BodyReader::Required if !operation.has_request_body => violations.push(format!(
                 "{label} requires a JSON body but the operation declares no requestBody, so \

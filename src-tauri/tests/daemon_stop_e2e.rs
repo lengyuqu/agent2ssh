@@ -1407,8 +1407,14 @@ fn proxy(front: TcpListener, back: Arc<std::sync::Mutex<String>>) -> Arc<AtomicU
 
 /// A daemon that predates `expect_pid` ignores it and accepts the stop — which
 /// is the previous behaviour, and the reason the client does not claim the
-/// check happened. What must hold: the stop still completes, and the caller's
-/// log records that the answer did not verify the PID.
+/// check happened. What must hold here: the stop still completes after the
+/// stub's 200, the request was sent exactly once, and it is the force-kill stage
+/// that ends the process.
+///
+/// Nothing here reads `app.log`, so the warning the client writes on this path is
+/// pinned by no test at all (K14); the other half — a current daemon's stop
+/// reporting the PID it checked — cannot be asserted until the daemon sends a
+/// receipt.
 ///
 /// The "old daemon" is a stub speaking the old protocol (200 to any body) on the
 /// address this config points at, with a PID its `/health` also reports, so the
