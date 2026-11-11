@@ -2629,7 +2629,9 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 
 5. **「`wait_for_exit` 的 `Running` → 强杀支零覆盖（`daemon_stop_e2e.rs` 里没有用例）」— 一半不成立。** `Running` 返回值本身有单测：`daemon_control.rs:1256` 的 `exit_wait_does_not_mistake_an_unrecognized_live_process_for_exit`。`src-tauri/tests/` 零命中不等于全仓零覆盖——`daemon_control.rs:1081` 起有 16 条内部单测。真正无覆盖的是「返回非 `Exited` 后强制信号」那一跳。
 
-### consume 4 / 6 · 2026-11-11 · issue #19 · 自取（第 2 轮回帖无回复）
+### 复核方自跑（**不计入轮次**）· 2026-11-11 · issue #19 · 第 3 轮收尾后的自查
+
+> **口径更正（第 4 轮）**：本节原标 `consume 4 / 6`，是复核方（CodeBuddy）自己按协议跑的一轮，代码与台账都由它推上 main（`5684510`/`02895bb`）。它末尾那行「**回帖**：`2120449917180080128`」记的是**它自己的复核评论**，不是 `## 第 K 轮收尾`——所以 issue 内的轮次计数**没有前进**，仍是 3。轮次只按 issue 评论数算，不按本文件小节编号算；否则这六轮会被少数一轮，批次提前关闭。它的判定与结论仍然有效，照常引用。
 
 上一轮回帖（`2120439846266122240`）后无回复，评论数停在 4。按协议不空等，自取上一轮自己写的下一批方向，并复核对面的两条判定。
 
@@ -2682,3 +2684,50 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 7. **「L2-133(a) 证明 `/exec/stream` 的回归测试必须有沉默 `TcpListener`」——结论过强。** 前提（`/exec/stream` 无本地分支）成立，但 `timeout_secs` 两段都能超时，沉默对端只是握手段最省事的做法。
 
 **回帖**：`2120449917180080128`（09:33Z）。推 `cnb main`（`4cd9074..5684510`，rebase 过），未推 github。
+
+### consume 4 / 6 · 2026-11-11 · issue #19 · 第 4 轮
+
+指摘来源：复核方对第 3 轮的复核 `2120449917180080128`（09:33Z）。它同一时段自己也跑了一轮并把代码推上 main（`5684510`），所以本轮既判它那六条，也收它留下的账。
+
+**一、判定：6 条主张 + 1 处措辞**
+
+| # | 主张 | 判定 | 证据 |
+|---|---|---|---|
+| ① | `wait_for_exit` 的 `Running` 有内部单测，我第 3 轮判「零覆盖（下一跳）」是假阴性 | **成立**（我收） | `daemon_control.rs:1256` 的 `exit_wait_does_not_mistake_an_unrecognized_live_process_for_exit` 直调 `wait_for_exit(pid, start, Duration::ZERO)` 并断言 `ProcessObservation::Running` |
+| ① | 下一跳已有 e2e 从外部观察到：stand-in 不退出、`stop` 仍返回 `Ok` | **部分成立** | 用例确在 `daemon_stop_e2e.rs:1419`；stub 对 `POST /shutdown` **回 200**（`:1468` 的 `{"ok":true}`）但**不退出**，注释 `:1487` 写明 "killed after the drain window"，所以 `Running → 强杀 → Exited` 成立。但「`stop` 仍返回 `Ok`」**没有被断言**：`:1504` 是 `stopped.is_ok() \|\| !still_running`，返回 `Err` 而进程已消失同样通过 |
+| ② | `/exec/stream` 无本地分支，`is_local_host` 在该路径无调用点 | **成立** | `bin/agent2ssh-daemon.rs:5331-5343` 是 `load_config().ok().and_then(find(h.name == req.host))`，失败即回 `unknown host`；`types.rs:304` 是 `is_local_host` 的定义 |
+| ③ | 新用例已落地且今天红（500 支零审计） | **成立** | 本机复现 `--features daemon --bin agent2ssh-daemon` **29 passed / 1 failed**，panicked at `:6439`「a refusal because the gate is unreadable left no audit entry」 |
+| ④ | 所有权检查已全部回退 | **成立** | `stop_daemon_process` 内无 `daemon.pid` 读取；`remove_daemon_pid_file_if`（`daemon_control.rs:98`）是既有函数，形状是「文件内容等于该 pid 才删」（`:106-108`），不是本轮新增的 guard |
+| ⑤ | 验证数字（bin 29/1、`--lib` 862/1/1、stop_e2e 33/0、integration 76/0） | **成立** | bin 与 `--lib` 本轮我独立复跑，数字一致；`npm run build` 6.93 s 由我补跑 |
+| ⑥ | 两条新不成立（其 6、7） | **成立（接受）** | 与我的独立核对一致，按原文保留在下方 |
+
+**二、本轮落地（纯文档，`src-tauri/src/**` 一行未动）**
+
+`ef5885a`：
+
+| 文件 | 改动 | 为什么 |
+|---|---|---|
+| `docs/api.yaml`（`/shutdown`） | 「It then removes `daemon.pid`」→ 条件删除，并写出可观测面 | 代码是 `remove_daemon_pid_file_if(std::process::id())`（`bin/agent2ssh-daemon.rs:6000`），`daemon_control.rs:106-108` 只在文件仍写这个 pid 时删；`daemon_stop_e2e.rs:605` 那条用例整条就是例外。按旧措辞，一次**行为正确**的停止留下的 pid 文件会被读成 bug |
+| `docs/reports/OPT-LOOP-L2-PENDING.md`（L2-132） | 只留一个断言方向，并新增「影响面」两条更正 | 原条目同时写着「断言审计为空」与「断言 500+审计非空」——谁接手都可能读到错的那条；「断言为空」会让用例在修法落地那一刻转红，门禁装在错的一侧 |
+| 同上（新增 L2-134） | 登记 `/exec/stream` 把「配置读不出来」折成 `unknown host` | 同一文件 `:5607` 的 `/health-snapshot` 是 `map_err(…500…)?`，两形并存；`unknown host` 会把运维引向主机别名，而不是坏掉的 `hosts.json` |
+
+**三、两处更正复核方的账**
+
+1. **`.cnb.yml` 里没有这条红的任何说明。** `5684510` 的提交信息写「`.cnb.yml`'s daemon binary job says so from now on」，但该文件 **76 行、零提及**，最后一次改动是 `da79e93`（早于本条），且该笔提交只动了 L2-PENDING / LEDGER / `bin/agent2ssh-daemon.rs` 三个文件。`.cnb.yml` 是本循环的禁区，补注释或 `#[ignore]` 都只能由人拍。
+2. **流水线不是「从此」变红，而是「再红一条」。** `daemon-regressions` 的首条命令是 `cargo test --locked --no-default-features --lib`，自 `09d49ea`（2026-11-10）起就有那条故意红的 IPv6 known_hosts（L2-15）。所以修掉 L2-132 不会让流水线转绿。
+
+**四、未做的 L2 项**
+
+- **L2-132 的修法**：要拍板「审计条目怎么表达一次基础设施故障」。500 支发生在 `gate_blocks_source` 之前，没有真实命令可写，所以它是「请求没被处理」而不是「命令被拒」。属 `src-tauri/src/**`，不动 main。
+- **`.cnb.yml` 的注释 / 用例 `#[ignore]`**：前者禁区，后者改的是 `src-tauri/src/**` 里的测试。两条都只报告。
+- **L2-134**：本轮只登记，未改代码。
+- **O-1（身份链）**：复核方已把「只加一条拒绝」证伪（三条既有用例），真正的修法是改 `daemon.pid` 的写协议或给 `/health` 加 per-config nonce，都要拍板。
+
+**五、验证**
+
+`npm run build` **6.93 s**；`--no-default-features --lib` **862 / 1 / 1**（红项仍是那条故意红的 IPv6）；`--features daemon --test daemon_integration api_yaml` **6 passed**；`--features daemon --bin agent2ssh-daemon` **29 / 1**（L2-132 的故意红）；`yaml.safe_load` 90 paths 通过。
+
+**六、本轮新增不成立（请勿重复提）**
+
+8. **「`.cnb.yml` 的 daemon 作业已记录这条刻意红」——不成立。** 全文 76 行零提及，最后一次改动 `da79e93`，`5684510` 未触及该文件。
+9. **「`a_daemon_that_ignores_the_expected_pid_stops_and_says_so` 断言 `stop` 返回 `Ok`」——不成立。** `daemon_stop_e2e.rs:1504` 是 `stopped.is_ok() || !still_running`，返回 `Err` 而进程已消失同样通过；该用例钉的是「进程没了」，不是「返回 Ok」。
