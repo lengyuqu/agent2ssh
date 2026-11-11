@@ -737,3 +737,14 @@ CodeBuddy 的复核 `2120258070138740736` 新批 3 条 → **成立 1（§五.2�
 | L2-117 | `src/components/LiveActivityPanel.tsx:77-95`（`auditToItem`）、`:97-103`（`needsAttention`）对照 `src/components/AuditPanel.tsx`（`decision` 5 处） | 成立（同一数据两种可读性） | 活动流不渲染 `decision`，于是 `blocked`/`rejected`/`timed_out` 这些「根本没执行」的条目显示成 `exec recorded` + `duration 0ms` + `exit ?`，与「跑完了但没退出码」同形；审计面板有判决列。补它会**改变「注意条」的判定范围**（`needsAttention` 现在按 `kind.includes("approval")` 与 `high/blocked` 风险算），所以不是纯加一列 | 在 `auditToItem` 里带上 `decision`，行尾加一个与 `AuditPanel` 同款的 chip；`needsAttention` 增加 `decision === "rejected" || decision === "blocked"`。属 UI 行为改动 |
 
 **2026-11-11 补记（batch 10 第 1 轮，针对 L2-74）**：L2-74 的前提有一半已过时——`docs/api.yaml:488` 现在**有** `recent_commands`（含 `items` 的三个属性），是后续批次补进去的，所以「契约没声明」那半不用再做。仍缺的只有 `src/types.ts` 的 `ApprovalContext` 字段与任何渲染点（`grep -rn recent_commands src/` = 0）。这条因此收敛为「镜像缺 + 没人渲染」，与 L2-110（`side_effect` 三处镜像缺）同族。批注写在这里而不是插进原表：插在表行之间会把那张表截断成两张。
+
+## 2026-11-11 · batch 10 第 2 轮追加（`/approvals` 的时效性 + 前端两处显示口径）
+
+第 2 轮 9 条指摘，核实 **成立 5 / 部分成立 3 / 不成立 1**。文档侧与 `src/**` 的文案、注释、类型镜像已落 main；下面两条是显示层改动，需拍板。
+
+| 编号 | 位置 | 判断 | 为什么不能自动落 | 建议改法 |
+|---|---|---|---|---|
+| L2-118 | `src/components/HostPolicyLine.tsx:35-56`（`MODE_LABEL` 与四个 `summary.*` 段）对照 `src-tauri/src/approval.rs:1130-1150`（`approval_mode_for_risk`）、`execution_control.rs:157-172`（`host_policy_summary`） | 部分成立（A2 的残余） | `ApprovalMode::Auto` 有两种来源：「没有任何 policy 命中」与「policy 命中且 `requires_approval = false`」，`MODE_LABEL.auto = "auto-approve"` 把两者渲染成同一句话。**但它说的「未配策略的主机会显示 `high 自动放行` 却收到审批卡」不成立**：`host_policy_summary` 已把 high 的 `Auto` 改写成 `Required`（`:164-166`，`match mode(High) { Auto => Required, other => other }`），high 一行永远显示 `need approval`。真实缺口只在 low/medium：一台没有任何 policy 的主机会显示 `low auto-approve`，读起来像「已决定放行」，实际是「没有规则，因此不强制审批」 | 二选一：①给 `HostPolicySummary` 加一个「是否命中任何 policy」的布尔，未命中时改说 `no policy — not required`；②维持现状，在 `api.yaml` 的 `HostPolicySummary` 与面板上加一句「auto = 无强制审批，不等于已批准」 |
+| L2-119 | `src/components/approval/ApprovalWorkbench.tsx:126-133`（`decidedToday`）、`:150-200`（`history` 分组）对照 `approval.rs:194-200`（30 天保留期）、`:289-290`（读时过滤） | 成立 | 两件事同一个后果——「历史」在 UI 上不可信：①`decidedToday` 按 `requested_at` 判「今天」，且 `status !== "pending"` 把 approved/rejected/timed_out/revoked 全算进去，于是这个数实际是「今天**发起**且已出结果」而不是「今天判决」；②`approvals.jsonl` 只留 30 天，更早的条目在**读的时候**被丢掉，面板没有任何「更早的已丢弃」提示，读者会以为那就是全部历史。契约侧本轮已在 `/approvals` 的 description 写明保留期与读时过滤，UI 侧仍是静默截断 | ①把 `decidedToday` 改成按最后状态变更时间判日（契约需补 `decided_at`），或至少把文案改成「今日发起」；②在历史分组尾部加一行「仅显示最近 30 天（`AGENT2SSH_APPROVAL_RETENTION_DAYS`）」。两条都是 `src/**` 显示改动，需拍板 |
+
+**2026-11-11 补记（batch 10 第 2 轮，针对 L2-110）**：`revoked_at` 与 `approved_command_snapshot` 已补进 `src/types.ts` 的 `ApprovalRequest`（`docs/api.yaml` 与 `approval.rs:95/101` 本来就有），所以「镜像缺」那半不用再做。仍缺的是**没有任何面板渲染这两个字段**——`grep -rn "revoked_at\|approved_command_snapshot" src/` 只命中 `types.ts`。这与 `side_effect`（L2-110 正文）和 `recent_commands`（L2-74 补记）是同一族：**契约与后端都有，前端只镜像不消费**。要不要显示属产品问题，与 L2-110 一并拍板即可，不另立号。

@@ -1855,3 +1855,41 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 - **回帖**：`2120287487317688320`（`## 第 1 轮收尾`，06:48）。**#16 保持 open，6 轮进度 1 / 6。**
 - **验证**：`npm run build` 6.51 s；`npm test` **213 passed / 27 files**（与基线同）；`cargo test --no-default-features --lib` **861 passed / 1 failed / 1 ignored**（红项仍是那条故意红的 IPv6）；改 `api.yaml` 后加跑 `--features daemon --test daemon_integration api_yaml` **6 passed**；`yaml.safe_load` 90 paths 通过。Rust 源码本轮一行未动。
 - **CodeBuddy 本轮的失效形态**：①**把函数内的解构写法记混**（A1：`let (risk, approved)` 当成 `let (risk, _)`，据此推出「恒定失败路径」）；②**把自己的编号当既有编号**（它自拟 L2-110…116，而本仓最大是 L2-109）。A1 是本批第一次「它给出可复现反例、复核后完全反转」的条目，记下来供下一轮提防。
+
+### consume 2 / 6 · 2026-11-11 · batch 10 (#16) · 前端与 i18n 文案键完整性（第二批）
+
+**进批状态**：open 里 `[opt-round]` 只有 #16，评论 4 条、`## 第 K 轮收尾` 计 **1**（我 06:48 那帖）→ 从第 2 轮起。指摘来源是 CodeBuddy 06:58 对第 1 轮的复核（`2120290131411120128`），**不是自取轮**。
+
+**判定 9 条 → 成立 5 / 部分成立 3 / 不成立 1。**
+
+| # | 指摘 | 判定 | 处置 |
+|---|---|---|---|
+| 1 | C2 残余：`ApprovalWorkbench.tsx:29` 的 prop 注释仍写「copy + jump to Execution」 | 成立 | 改写为「只带主机、不带命令；复制在 `ApprovalDetail` 内先做」 |
+| 2 | A1：`/approvals` 的 description 没写「翻牌发生在读的时候」 | 成立 | `api.yaml` 补懒翻牌 + 小时任务只按保留期删 + SSE 客户端会漏过期 |
+| 3 | A2：`HostPolicyLine` 把「无 policy」显示成「auto-approve」 | **部分成立** | high 行那半**不成立**（见下）；low/medium 的一词两义立 **L2-118** |
+| 4 | A3：30 天保留期把「历史」裁掉大半 + `ApprovalRequest` 镜像缺两字段 | 部分成立 | 镜像半 L1 修（`types.ts` 补 `revoked_at`/`approved_command_snapshot`）；UI 静默截断与 `decidedToday` 口径立 **L2-119** |
+| 5 | B1：`KeysPanel.tsx` 的 RSA 文案仍说「本平台 SSH 库唯一能读的格式」 | 成立 | 改成「`rsa` crate 的输出形式，传输层两种都读」，`i18n.tsx` 同笔 |
+| 6 | B2：死分支上方写了 11 行墓志铭，该删就删 | 成立 | **删**：`KeysPanel.tsx` 的 `<p>` + 两个测试合并为一条「从不警告 Ed25519」 |
+| 7 | C1：`CommandPalette` 注释把「不能调工具」的理由归给「需要参数」 | 部分成立 | 改成「palette 只导航，join key 是 module id」，并点明 `ssh_list_hosts` 不需要参数却仍只在模块里 |
+| 8 | D1：`AlgoPrefsDialog` 注释指向 `ssh_algo.rs::apply_algo_prefs`，说真正的赋值在 `russh_impl::apply_prefs` | **不成立**（见下） | 无动作 |
+| 9 | 六.3：`api.yaml` 的 `via` 只写了 null 的语义，没写非 null 会覆盖 `host.jump_host` | 成立 | `resolve_host_with_jump` 先 `resolve_host` 再 `host.jump_host = Some(via)`，已补进契约 |
+
+**自取（不在它的清单里，本轮最值钱的一条）**：`ApprovalDetail.tsx` 的「Copy command and open Execution」按钮**从不复制**——`onClick` 只调 `onCopyAndExecute`，而 `handleCopy` 自 `34226cd` 起没有任何调用点，`copied` 状态因此永远到不了 `Check`。上一轮（L2-115）把这条读成「复制失败静默」，漏了「复制根本没发生」。本轮接线，并把 `navigator.clipboard` 缺失（非安全上下文 / jsdom）保护起来，否则点击会在导航前抛错。**L2-115 只剩「被拒时静默」那半。**
+
+### 判定不成立（原文保留，请勿重复提）
+
+1. **A2 的「未配策略的主机会显示 `high 自动放行` 却收到审批卡」— 不成立。**
+   `host_policy_summary`（`src-tauri/src/execution_control.rs:157-172`）对 high 做了唯一一次改写：`match mode(RiskLevel::High) { ApprovalMode::Auto => ApprovalMode::Required, other => other }`，所以 `summary.high` 里**不可能**出现 `Auto`；`HostPolicyLine.tsx:52-56` 渲染的是 `summary.high`。low/medium 的一词两义是真缺口（已立 L2-118），但 high 那半的失败叙事无法构造：面板显示 `high need approval`，`/exec` 也的确要 `force` 或审批（`core.rs:1034`）。
+
+2. **D1 的「`ssh_algo::apply_algo_prefs` 只做校验与过滤，真正的赋值在 `transport/russh_impl/mod.rs::apply_prefs`」— 不成立。**
+   `ssh_algo.rs:209-226` 的 `apply_algo_prefs` 逐项调 `apply_method`，而 `apply_method`（`:228-263`）在 fail-closed 检查之后**最后一句就是 `session.method_pref(method_type, prefs)`** ——那是写入，不是校验。调用点 `embedded_ssh.rs:323`、`:1688` 都在 `handshake_with_hint` **之前**，与本轮注释一致。`russh_impl/mod.rs:646 apply_prefs` 是另一条路径（对 `Config` 赋值 `config.preferred.*`），不是这个函数的实现。
+
+**L2 新增**：L2-118（`HostPolicyLine` 的 `auto` 一词两义）、L2-119（`decidedToday` 按 `requested_at` 判日 + 30 天保留期在 UI 上静默截断）。L2-110 补记「两字段已进镜像、仍无人渲染」。**L2-58 本轮按建议①执行**（删死分支 + 合并测试），因此从待拍板清单里消失。
+
+**L1 落地**（代码与文档分家）：
+- `src/**`：`ApprovalDetail.tsx`（接线 + 剪贴板缺失保护 + 注释）、`ApprovalWorkbench.tsx`（prop 注释）、`KeysPanel.tsx`（删死分支 + RSA 文案）、`KeysPanel.test.tsx`（两条测试合一）、`CommandPalette.tsx`（注释）、`i18n.tsx`（RSA 键改写、删掉死警告的译文）、`types.ts`（两个字段）。
+- `docs/**`：`api.yaml`（`/approvals` description 全段重写、`ForwardRule.via` 补覆盖语义）、本文件与 L2 清单。
+
+**验证**：`npm run build` **6.40 s**；`npm test` **212 passed / 27 files**（213 → 212 是两条测试合并成一条，不是丢了断言）；`cargo test --no-default-features --lib` **861 passed / 1 failed / 1 ignored**（红项仍是那条故意红的 `an_ipv6_literal_at_port_22_is_removed`）；`--features daemon --test daemon_integration api_yaml` **6 passed**。Rust 源码本轮一行未动。
+
+**#16 保持 open，6 轮进度 2 / 6。**

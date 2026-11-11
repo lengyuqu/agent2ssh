@@ -447,7 +447,7 @@ components:
         target_port: { type: integer }
         name:        { type: string, nullable: true, description: "Human-readable label, serialized as null when unset (`ForwardRule.name` is an `Option`, with no `skip_serializing_if`). Rules created by `POST /forwards` always carry null here, because that handler reads five fields and ignores this one; `/forwards/multi` and the desktop app can set it." }
         group_id:    { type: string, nullable: true, description: "Optional group id, mirroring host groups; null when unset. Same caveats as `name`: `POST /forwards` ignores it, `/forwards/multi` accepts it." }
-        via:         { type: string, nullable: true, description: "Jump-host alias captured when the tunnel was created through `?via=`, so `/forwards/{id}/start` re-establishes the same path after a stop. Null means the host profile's own `jump_host` applies." }
+        via:         { type: string, nullable: true, description: "Jump-host alias captured when the tunnel was created through `?via=`, so `/forwards/{id}/start` re-establishes the same path after a stop. Null means the host profile's own `jump_host` applies; non-null **replaces** it for this tunnel (`resolve_host_with_jump` overwrites `host.jump_host`), so a rule built with `?via=b` no longer uses the profile's configured jump host. An alias that is not a known host profile is rejected." }
 
     ConnectionStatus:
       type: object
@@ -3754,12 +3754,23 @@ paths:
         Every request the daemon still holds, not only the pending ones:
         `approval_list` sweeps expired pending entries to `timed_out`, then
         returns the whole store in `HashMap` iteration order, so the array is
-        neither filtered nor sorted. Clients that want the queue must filter
-        `status == "pending"` themselves — the desktop polling loop does exactly
-        that — and must not rely on the order. There is no pagination and no
-        query parameter: the array is whatever the in-memory store holds, which
-        is `approvals.jsonl` as loaded at startup plus everything recorded
-        since, minus what compaction dropped.
+        neither filtered nor sorted. The sweep runs **when this route is read**,
+        not on a timer: the daemon's hourly job is `cleanup_expired_approvals`,
+        which only drops entries older than the retention window (30 days by
+        default, `AGENT2SSH_APPROVAL_RETENTION_DAYS`) and never flips a
+        `pending` entry. So an expired card stays `pending` in the store until
+        somebody reads this route or polls its id — `/exec`-style waiters flip
+        their own card through `approval_poll`, the broadcast (terminal) path
+        has no such waiter. Clients that want the queue must filter
+        `status == "pending"` themselves: the desktop does that in a 2 s
+        polling loop, with the SSE bus as the fast path, so a client that only
+        listens to SSE will miss expiry entirely. The array must not be assumed
+        ordered. There is no pagination and no query parameter: it is whatever
+        the in-memory store holds, which is `approvals.jsonl` as loaded at
+        startup (entries past the retention window are already dropped at load
+        time) plus everything recorded since, minus what compaction removed —
+        so "history" is bounded by retention, and a request older than 30 days
+        is not merely unpaged, it is gone.
       responses:
         "200":
           content:
