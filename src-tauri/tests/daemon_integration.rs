@@ -3946,6 +3946,20 @@ fn api_yaml_documents_how_each_handler_reads_its_body() {
                          a plain-text message before the handler runs"
                     ));
                 }
+                // The two `Bytes` handlers documented the same fact in two
+                // different amounts: one said only "over the limit", the other
+                // said why the response cannot be the `Error` object. A client
+                // reading one operation has no way to see the other, so the
+                // explanation has to be on both — and "this one is different",
+                // without the reason, reads as an inconsistency rather than a
+                // contract.
+                if !code_block(&operation.text, "413").contains("Bytes") {
+                    violations.push(format!(
+                        "{label} documents 413 without naming `Bytes`: this is the only status \
+                         axum answers for a handler that reads the body itself, and that is why \
+                         it cannot carry the `Error` object"
+                    ));
+                }
             }
         }
 
@@ -4010,6 +4024,61 @@ fn api_yaml_documents_how_each_handler_reads_its_body() {
         unexpected.is_empty(),
         "the file-level note names {unexpected:?} as operations that swallow a malformed body, \
          but no handler for them reads `Option<Json<T>>` (that list is {swallowed_paths:?})"
+    );
+}
+
+/// The lines an operation documents for one status code, so a claim can be tied
+/// to the response that makes it instead of to the whole operation.
+///
+/// `operation.text` holds every line of the operation with leading space
+/// stripped, and a code is the only line shaped exactly `"413":`. Four-digit
+/// years and quoted ids inside prose are therefore not mistaken for codes.
+fn code_block(operation_text: &str, code: &str) -> String {
+    let marker = format!("\"{code}\":");
+    let mut lines = operation_text.lines().skip_while(|line| *line != marker);
+    if lines.next().is_none() {
+        return String::new();
+    }
+    lines
+        .take_while(|line| !(line.starts_with('"') && line.ends_with("\":") && line.len() == 6))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// `local:<id>` is not limited to the environments this crate ships.
+///
+/// `resolve_plan_for_host` consults `environments.toml` before falling back to
+/// the built-ins, so a definition named `py-ml` is reachable as `local:py-ml`
+/// through `/local-exec` exactly like `local:gitbash`. The operation used to
+/// enumerate only the built-ins and then say any other value is rejected with
+/// 400 — which told a client that the one id the configuration guide documents
+/// at length does not exist.
+#[test]
+fn api_yaml_documents_user_defined_local_environments() {
+    let resolver = include_str!("../src/local_exec.rs");
+    let spec = include_str!("../../docs/api.yaml");
+
+    // The registry lookup is what makes the documented id work. Asserting it
+    // first keeps this test honest in the other direction too: if the lookup is
+    // removed, the failure names the source rather than the prose.
+    assert!(
+        resolver.contains("local_environments::current()"),
+        "`resolve_plan_for_host` no longer consults the environments registry, so a user-defined \
+         `local:<id>` is not reachable and `/local-exec` must stop saying it is"
+    );
+
+    let operation = spec
+        .lines()
+        .skip_while(|line| !line.starts_with("  /local-exec:"))
+        .skip(1)
+        .take_while(|line| !line.starts_with("  /"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        operation.contains("environments.toml"),
+        "`/local-exec` documents `host` as an enumeration of the built-in environments, but a \
+         `local:<id>` defined in `environments.toml` reaches the same handler; a client reading \
+         this operation is told its own environment does not exist"
     );
 }
 
