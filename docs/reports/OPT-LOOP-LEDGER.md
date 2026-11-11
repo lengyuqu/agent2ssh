@@ -3471,3 +3471,5 @@ L2-154（`/exec-multi` 全 0 语义）、L2-155（preview 缺 admin 门）、L2-
 14. 「`wait_for_exit` 的行号偏一」——`e80b98f` 上 `:745-755` 是准的；偏的是 `observe_process`。
 15. 「`prctl(PR_SET_NAME)` 能冒充白名单可执行名」——comm 截断到 15 字节，四个字面量最短 16 字节，`agent2ssh-daemo` 不匹配任何一个；复核方自己的实测输出就是这个截断值。
 16. 「`daemon_stop_e2e.rs` 有 33 个用例传 `pid`」——实测 34 个测试里 16 个调 `stop_daemon_process`。此条同时更正我上一轮 L2-165 的同一数字。
+
+**回帖**：`2120580606311424000`（`## 本轮收尾`，18:13:09Z）。`#23` 保持 open。
