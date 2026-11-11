@@ -2243,8 +2243,18 @@ const HELPER_STATUS: [(&str, &str); 8] = [
 /// socket it has already upgraded, and `terminal_broadcast_run` and its
 /// `preview_results` mark every eligible target `authorized: false` and return
 /// 200 — so a `"429"` or `"423"` there would promise a branch this server never
-/// takes. `/terminal` is the control in the same family: identical checks, run
-/// before the upgrade, so its 423 and 429 are real and stay in its `responses`.
+/// takes.
+///
+/// `/terminal` is the control in the same family, and the difference is not
+/// only "before versus after the upgrade". `/terminal` returns the refusal as a
+/// status — `reject_if_gate_paused(...)` before `on_upgrade`, propagated with
+/// `?` — so an unreadable gate file answers 423 or 500 like any other reader.
+/// `preview_results` folds the same read into `load_execution_gate().ok()` and
+/// tests it with `is_some_and`, so a gate file that cannot be read skips the
+/// branch entirely and the target proceeds: 200 with a per-target field, never
+/// a 423 and never a 500. Two consumption shapes share one exemption table, so
+/// a route that returns the status belongs here only if it also consumes it
+/// somewhere else.
 ///
 /// The third field is a phrase the path block must still carry, so the
 /// exemption cannot decay into silence — the refusal stays documented, just not
