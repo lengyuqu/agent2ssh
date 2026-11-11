@@ -1433,3 +1433,15 @@ fn mounts_a_closure_literal(segment: &str) -> bool {
 1. **`split("//")` 被字符串字面量骗——成立。** `.route("/c", get(|| { let _ = "//"; })).nest(…)` 写在同一行时，`//` 之后全被截掉，`.nest(` 看不见。今天零例（要「同一行 + 含 `//` 的字符串 + 其后紧跟 `.nest(`」三件事同时成立）。**修法**：把「剥行注释」换成一个跳字符串/字符字面量的小扫描器，约 20 行。**优先级低但不为零**：`.nest` 载荷造出的假 entry，只有当 handler 名恰好是顶层已有函数（如 `get(health)`）时，L2-126 那条断言才不管——那种组合是躲得过两条网的。
 2. **「其余 builders 不含 `.route(` 这句理由在文本上错」——不成立。** `.route_service(` 第 6 位是 `_` 而不是 `(`：`".route_service(".find(".route(") == -1`。它含 `.route`，不含 `.route(`，而解析器扫的是后者。测试里的原话成立，不改。
 3. **守卫终点取第一个 `.with_state(`——成立。** `let app = Router::new()` 之后若先出现 `sub.with_state(s)`，窗口会在那里断掉，其后的 `.nest(` 落到窗口外。今天链上只有一个 `.with_state(`。**修法**：改用「链段内最后一个 `.with_state(`」或「最后一次 `.route(` 之后再取一段」。成本 1 行，但「窗口」的语义会更含糊，故与 L2-128 一起等下次动这个文件时做。
+
+---
+
+## 2026-11-11 · batch 12 第 6 轮（末轮）：L2-128 已落地，L2-129 留给下一批
+
+**L2-128 关闭（`7369ecd`）**。`parse_route_table` 现在返回 `RouteTable { routes, dropped, mixed }`，`mixed` 收「同一条 `.route` 上既挂闭包又挂命名 handler」的段；`a_route_call_does_not_mix_a_closure_with_a_named_handler` 断言它为空。
+
+- **落地形状与估的差别**：没有加第三个返回值，而是把两个返回值收进一个结构体，函数名 `daemon_routes_and_drops` → `parse_route_table`。理由：三元组会让 `daemon_routes` 的 `.0` 变成 `.routes`，一样要改，而结构体顺便给三个字段各写了文档。
+- **成本**：+70 / −9（含改名与三处文案），比估的 +25 高；多出来的全是注释与改名，逻辑只有 6 行。
+- **破坏性对照**：`/metrics` 写成 `get(metrics).post(|| async { … })` → **只有新断言红**，drop 检查、`api.yaml` 对账、handler 存在性三条全绿。
+
+**L2-129 仍开**（链守卫的两个口子，见上一节 §三 第 1、3 条）。下一批若要动这张表，两件一起做：把「剥行注释」换成跳字符串/字符/注释的小扫描器；窗口终点改用链段内最后一个 `.with_state(`。
