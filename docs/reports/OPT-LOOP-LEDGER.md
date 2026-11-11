@@ -3515,7 +3515,7 @@ L2-154（`/exec-multi` 全 0 语义）、L2-155（preview 缺 admin 门）、L2-
 
 **反向验证**（这次做了）：新增测试先红后绿——第一次跑时 400 块被读成空（我漏了对 `operation` 做 `trim_start`，`code_block` 的 marker 是去缩进后的形状），修好后仍红，因为正文写的是「takes none」而断言要的是源码里的字面量「takes no argument」；**正是这次红，逼出了「文档该逐字引用 message」这个改动**——不逐字引用的话，客户端没法按文案分流。
 
-**验证**：`npm run build` **6.56 s**；`cargo test --no-default-features --lib` **863 passed / 1 failed / 1 ignored**（红项仍是那条故意红的 IPv6 `an_ipv6_literal_at_port_22_is_removed`，与基线一致）；`--features daemon --test daemon_integration` **80 passed / 0 failed**（含新增两条）；`cargo fmt --check` 干净；`yaml.safe_load` 90 paths。
+**验证**：`npm run build` **6.56 s**；`cargo test --no-default-features --lib` **863 passed / 1 failed / 1 ignored**（红项仍是那条故意红的 IPv6 `an_ipv6_literal_at_port_22_is_removed`，与基线一致）；`--features daemon --test daemon_integration` **80 passed / 0 failed**（含新增两条）；`cargo fmt --check` 干净；`yaml.safe_load` 90 paths。**合流时远端已推进到 `0244364`**（PR #33 与 #34：glib 与 zip 的依赖升级），rebase 干净无冲突；因为那是依赖变更（`Cargo.lock` 1170 行、`Cargo.toml` +28），**合流后把 lib 与 `daemon_integration` 都重跑了一遍**，数字不变（863/1/1、80/0）。
 
 **未做的 L2**：L2-27（要先把 `LocalExecShutdown` 从 `core.rs` 透出来，再定 local 语境下「未知」的措辞与状态码）、L2-172（`stopped_early` 的语义拆字段）。两条都改 `src-tauri/src/**` 行为。
 
