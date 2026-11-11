@@ -2579,3 +2579,26 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 4. **「表里把 `terminal_broadcast_run` 记成『returns 200』，实际它返回 429（`:4488-4500`）」— 不成立。** `:4491-4502` 是 `for index in eligible_indexes { results[index].authorized = false; results[index].error = Some(error.error.clone()); } return Ok(Json(TerminalBroadcastResponse { broadcast_id, enqueued_any: false, all_or_nothing, targets: results }))`——逐目标写 error 后返 **200**。它引的行号正是表里「returns 200」的出处。
 
 **下一轮**：第 3 轮的指摘在 CodeBuddy 对本轮回帖的回复里。行号基线 `b458305`。它自述留给下一轮的两块是「分支覆盖表」与「L2-10 实测上界」，其中后者本轮已改为下修不必实测。
+
+---
+
+### consume 2 / 7 · 2026-11-11 18:20–19:05 · issue #19 · 第 2 轮复核的回应（对 2027493 那帖）
+
+**指摘**：CodeBuddy 复核 `2027493` 那帖的三问 + 两个替代方向。它不是五组指摘，是**要求复核我自己三个判定**，所以这一轮的产物是「三个结论 + 两处新事实」，不是「成立/不成立」表。
+
+| 问 | 它的要求 | 我的结论 | 依据 |
+|---|---|---|---|
+| ① `b458305` 的新措辞是否还留着「把两个失效源混成一句」的余地；要不要点名 gate / limits / authorize / scope | 要判断「uniform refusal form」这个提法够不够 | **够了，不必点名——但「统一」缺一个边界：不含 `all_or_nothing` 收尾那一支** | `terminal_broadcast_run` 的 200 拒绝有四处：限流（`:4487-4503`）、逐目标授权（`:4566-4568`）、`all_or_nothing` 收尾（`:4536-4560`）、投递失败（`:4587-4590`）。前三处都逐目标写 `error`；第四处（投递失败）在成功路径里写同一个字段，所以「有 `error` 字段」连「这条被拒」都推不出来。点四类名只是把它们换一种写法列举一遍，而读者的误读是「200 ⇒ 目标已授权」——现在的末句正好否掉了这一句。真正会误导的是 `all_or_nothing`：它给**已授权**的目标也写一条 error（"broadcast cancelled because another target was denied"），所以「有 error 字段」不等于「被拒」。建议补半句，而不是补枚举 |
+| ② L2-131 与 L2-130 该不该合并 | 若判据相同就并 | **不该并。判据不同：一个是「可观测性」，一个是「信息已丢弃」** | L2-130 修完后 `interrupted` 全分支可观测（真 ⇒ `exit_code` 为 `None`；假 ⇒ `Some`），这条线可关；L2-131 只要 `.is_err()` + 字面量还在，就**不可能**从任何字段分辨 423/500。合并会逼出「只修 `.is_err()`、留固定文案」这条不修 L2-131 的修法，合并项永远关不掉 |
+| ③ 我对「`/local-exec` 够用」的反驳是否成立 | 核反驳 | **反驳成立，它的前提不成立；而且我自己引的 `:5266-5275` 是 `exec_stream` 的，不是 `terminal_attach` 的——这点必须自己指出** | `exec_stream`（`:5210`）与 `terminal_attach`（`:4749`）是两个路由两个 handler。`:5266` 的 `.is_err()` 在 `exec_stream` 的 `on_upgrade` 闭包里，`/terminal` 的 gate 检查在升级**之前**且是 `return e.into_response()`（`:4757-4760`）。把两个 handler 的行号混着用，正是这批一直在修的「同一族里一条写一条不写」；行号对不代表归属对 |
+
+**本轮新增事实（都在 `docs/reports/OPT-LOOP-L2-PENDING.md`）**：
+
+1. **L2-132（新）**：`reject_if_gate_paused` 的 500 支（`:405-410` 的 `map_err`）**零审计**——423 支在 `:421-436` 写了 `append_audit` + `GateRejected`，500 支在读文件失败时直接返回。于是 `/exec/stream`（审计全、帧缺信息）与 `/terminal`（状态码对、审计缺）各丢一半，是同一族缺陷的相反形态。可执行判据：`with_temp_config` 里写坏 `<config_dir>/execution_gate.json`，断言 `500` 且 `list_audit_core` **为空**（今天绿，改完红）。
+2. **L2-133（新）**：(a) L2-130 写的「`/local-exec` 的命名环境即可证伪」**架构上不成立**——`/exec/stream` 没有本地分支，`is_local_host` 在那条路径上无调用点，必须给它一个「接受 TCP 后沉默」的 loopback 对端（`tests/connect_deadline.rs` 同形，不需要 sshd）。(b) `preflight_guarded_request` 注释里的「the other ~52 daemon handlers」实测 **95**（`grep -c REQUEST_COUNT.fetch_add`）。
+
+**顺带核实的旧账**：L2-10 记的两个文件分工成立——`ACTIVITY_TIMEOUT = 2s` 与四个 `local_daemon_request` 在 `daemon_activity.rs:202-217`，`daemon_pid_state`／`daemon_matches_config`／`GRACEFUL_STOP_WAIT` 在 `daemon_control.rs:343/283/651`（`daemon_control.rs` 1322 行，`:651` 确实在里面）。第 2 轮我说这两组行号是一回事、文件写错只是笔误——**这半句要收窄**：L2-10 原文的 `daemon_activity.rs:198-217` 是**对的**，错的是那帖把 `daemon_control` 的三处也记到这个文件里。8s 与 ~11s 两个数各自出在各自文件里，都对。
+
+**验证**：本轮只改 `docs/`。`src-tauri/**` 与 `src/**` 一行未动，所以 Rust/Frontend 测试面不变；`npm run build` 与 `cargo test` 未跑（无相关改动），**不写「已验证」**。
+
+**下一轮**：它给的候选是分支覆盖表第一梯队（`stop_daemon_process` 的 `UnverifiedIdentity`、`wait_for_exit` 的 `Running`→强杀支、`health_identity` 的 `ok:false`）。我倾向先做 L2-132 与 L2-133(a)——两条都**零成本可测**（一条不需要真 daemon，一条只要一个沉默的 `TcpListener`），而覆盖表那三条都要真进程，且 `UnverifiedIdentity` 有三条不同的触发路径（`:977` 无 start_time、`:1004` config_dir 不符、`:1013` 不报 config_dir、`:1025` health 不认账），先写它们会先撞上「四选一还是四选四」这个口径问题。

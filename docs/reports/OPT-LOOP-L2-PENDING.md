@@ -1524,6 +1524,41 @@ batch 7 判「不成立」时用的论据是「`code.is_some()` 时 `interrupted
 
 它与 L2-130 的 `Error` 帧丢失是兄弟，但独立：L2-130 是审计侧把来源抹平，L2-131 是帧侧把来源抹平。修法：匹配状态码分两句文案（`paused` / `failed to load execution gate`），属 `src-tauri/src/**` 行为改动，登记不动。
 
+**与 L2-130 不合并（batch 14 第 3 轮定）**：两条的判据不是同一个。L2-130 的问句是「`interrupted` 说的事实是真的吗」——修法 1 之后 `interrupted` 在所有分支上都可观测为等价（为假时 `exit_code` 必为 `Some`、为真时必为 `None`），这条线**可以关**。L2-131 的问句是「客户端能不能分辨 423 与 500」——只要 `.is_err()` 还在、还写一个固定字面量，**就不可能靠任何字段分辨**，不是可观测性问题而是信息已被丢弃。合并会逼出第三条修法：「只修 `.is_err()` 留固定文案」，它不修 L2-131（正是 `api.yaml:24-31` 反对的那种）却修完了 L2-130，于是合并项永远关不掉。
+
+**顺带核到的边界（比原文宽，已实测）**：`.is_err()` 抹掉的不止状态码，还有**副作用**。`:5278-5300` 的限流拒绝分支用的是 `body.error`（`reject_if_rate_limited` 在 `:1031` 先写 `write_limit_rejection_audit` 再返回），所以那条拒绝在审计里有记录；而 gate 分支的 `.is_err()` 丢掉的是 423 那一支里 `:421-436` 写的 `append_audit` + `GateRejected` 事件**仍然会发**、500 那一支（`:405-410` 的 `map_err` 在读文件失败时提前返回）**什么都没有**。两码的差别因此不只在帧里，也在审计里：一次「gate 文件坏了」的 `/exec/stream` 请求在审计里可以是**零记录**。这是 L2-131 的加强论据，不另立条。
+
 ### 一个可执行的证伪
 
 `daemon_stop_e2e.rs` 今天测不到这一支：要触发，得让一个 `/exec/stream` 先超时（`timeout_secs` 设小 + 远端 sleep）**再**撞上停机。这条用例不需要真实 SSH 主机，但需要一个能被 `timeout_secs` 触发超时的本地命令——`/local-exec` 的命名环境即可。
+
+### L2-132（新，batch 14 第 3 轮）：`/terminal` 的 gate 拒绝不留痕 —— 与 `/exec/stream` 恰好相反
+
+`terminal_attach`（`:4756-4762`）在 `on_upgrade` **之前**判 gate，`:4758` 是 `return e.into_response()`。这条路径**没有一个字节的审计**：`:421-436` 的 `append_audit` + `publish_event(GateRejected)` 在 `:437` 的 `Err(err(locked_status(), …))` 之前就执行完了，所以 423 那一支有记录——但 `:405-410` 的 `map_err` 读文件失败时**直接返回**，500 那一支零记录。
+
+这与 L2-131 是**同一族缺陷的两个相反形态**，而且都不是「文案问题」：
+
+| 路径 | 423（paused） | 500（gate 读失败） |
+|---|---|---|
+| `/exec/stream` | 帧里写死 `"execution gate paused"`（对）＋审计有记录 | 帧里**也**写 `"execution gate paused"`（错），审计**零记录** |
+| `/terminal` | **HTTP 423**（对，契约亦然）＋审计有记录 | **HTTP 500**（对）＋审计**零记录** |
+
+也就是说：**客户端看状态码的路径，审计缺；审计齐全的路径，客户端信息缺。** 两条路由各丢一半，而 `docs/api.yaml` 的 `info.description` 第二段只承诺了「客户端遇 500 要读 message」——它对 `/terminal` 成立、对 `/exec/stream` 不成立；反过来「拒绝必留审计」这条更强的性质，两处都不成文也不成立。
+
+**判据（可执行，不需要真 daemon）**：`load_execution_gate()` 在 `execution_gate.json` 存在但内容不合法时返回 `Err`（`gate.rs:46-54`：`fs::read_to_string` 后 `serde_json::from_str` 的 `?`）。在 daemon 的测试模块里（`with_temp_config` 已具备）写一份坏 JSON 到 `<config_dir>/execution_gate.json`，然后调 `reject_if_gate_paused("mcp", "h", "uptime")`：断言 `status == 500`，并断言 `list_audit_core` **为空**。这条用例与现有的 `:6374 paused_gate_rejects_non_desktop_source_and_writes_audit` 成对——一条钉「paused 有审计」，一条钉「unreadable 没有」，后者正是要改的那个事实，所以它今天会绿、改完会红，是**故意红的**那种写法，登记时要说清。
+
+**修法（L2，需拍板）**：在 `:405-410` 的 `map_err` 里补一次审计（`RiskLevel::Blocked`、reason 用 `format!("failed to load execution gate: {e}")`、`side_effect: None`），以及一条 `GateRejected` 事件带 `"gate_load_failed": true`。要拍板的是**审计条目的语义**：这是一次「命令被拒」还是「一次基础设施故障」？现在 `append_audit` 只接受 `ExecResult`，用 `RiskLevel::Blocked` 表示会让「服务器坏了」与「管理员按了急停」在审计里同形——那正是 L2-130/131 在修的同一类事，别在修它的时候再造一个。可选：新增 `AuditOutcome`/事件类型，或沿用 `Blocked` 但在 `reason` 前缀上钉死 `failed to load execution gate:` 并让 `LEDGER` 记录这个口径。
+
+**成本**：`reject_if_gate_paused` 一个函数、一处 `map_err`、一个字段；测试侧一条（不需要真 daemon，不需要 WS）。比 L2-84 的 WS e2e 便宜得多。
+
+**这条会撞一条现有契约测试（第 3 轮实测）**：`daemon_integration.rs:3792` 的 `claims_budget` 是 `path_block(spec, path).contains("drains for up to 500 ms")`，而 `:3762-3764` 的文档注释写的是「the terminal description **used to** make the budget claim for the idle timeout」。`/terminal` 的当前描述（`api.yaml:1877-1885`，`:1880` 那句）逐字是「output until 500 ms pass with no new terminal event」＋「That 500 ms is an idle timeout, not a budget」，全文**不含** `drains for up to 500 ms`。（注意 `path_block` 的边界是「下一个 `\n  /`」，`/terminal` 的块里只有 `:1862-1932`，所以别在 `:1933` 之后找。）所以循环里的 `assert_eq!` 今天是 `false == false` 通过；文档里那句「used to」是过期叙述（它对 **exec 侧**才成立）。L2-84 改法 ① 落地时必须**连描述文案一起改**（把 `drains for up to 500 ms` 写回 `/terminal` 的描述），两处漏一处就红：漏改循环 → `false vs true`，漏改文案 → `true vs false`。两个方向都红，所以「测试会提醒我」这句在**这一步**上是成立的——但它提醒的是错的那一半（改完循环、文案没改时，红的是 `measures_one_deadline`＝true／`claims_budget`＝false，而提示语 `path … does not claim a 500 ms budget, but … computes a single deadline` 会把责任指向循环）。要在 L2-84 的落地清单里指名。
+
+### L2-133（新，batch 14 第 3 轮）：L2-130 的假绿证伪 ＋ `~52` 的注释是错的
+
+两件事都是本轮核对时掉出来的，都便宜。
+
+**(a) L2-130 的证伪不成立（架构上）。** L2-130 写的是「这条用例不需要真实 SSH 主机，但需要一个能被 `timeout_secs` 触发超时的本地命令——`/local-exec` 的命名环境即可」。**`/local-exec` 不是 `ExecRequest` 的第二个实现，它是另一个 handler，`/exec/stream` 根本到不了它。** `exec_stream`（`:5210`）的请求体里即使 `host`/`source` 写成 `local`，它走的也是 `spawn_embedded_exec_stream` → `exec_ssh_core`（`embedded_ssh.rs` 的 `connect_embedded_ssh`）——`/exec/stream` 不存在本地分支，`types::is_local_host` 在那条路径上没有任何调用点。所以 L2-130 的三条改法里，任何一条的回归测试都**必须**有一个会「接受 TCP 后保持沉默直到超时」的 SSH 对端。
+
+现成的便宜做法（本仓已有，不需要 sshd）：`connect_tcp_address` 的测试形态——在 `127.0.0.1:0` 上起一个 `TcpListener`，接受连接后不写一个字节。`timeout_secs: 1` 的 `/exec/stream` 会在 `connect_embedded_ssh` 的握手阶段超时并返回 `ExecTimeout`（`embedded_ssh.rs:1355-1362` 的 `Display` 就是 `SSH command timed out after 1s`）。这条不依赖 `AGENT2SSH_TEST_SSH_PORT`，与 `tests/connect_deadline.rs`（同目录、同样自绑 loopback）是同一个形状。
+
+**(b) 「the other ~52 daemon handlers」是 95。** `preflight_guarded_request`（`:503`）的文档注释说 `REQUEST_COUNT` 的递增「consistent with the other ~52 daemon handlers」。全仓 `REQUEST_COUNT.fetch_add(1, Ordering::Relaxed)` 实测 **95** 处（`grep -c`）。这个数字本身不影响行为，但它是**别人的引用源**：任何按「52 个 handler 都没有 preflight」推覆盖率的人会漏掉 43 个。要么改成实测数，要么删掉数字只留「consistent with every other daemon handler」。没有理由保留一个过期数——这正是本批反复在修的「写下没核过的数」。
