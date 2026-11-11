@@ -2176,7 +2176,7 @@ forward_start（:3204-3244）与 forward_remove（:3077-3113）、forward_stop�
 
 ### L2-165（新）：pidfd 绑定未实施——现在能关掉哪个窗口、关不掉哪个，已有定论
 
-**位置**：`src-tauri/src/daemon_control.rs` 的 `stop_daemon_process`（`:975-1087`）、`wait_for_exit`（`:745-755`）、`signal_daemon`（`:759-788`）、`observe_process`（`:728-743`）。
+**位置**：`src-tauri/src/daemon_control.rs` 的 `stop_daemon_process`（`:975-1087`）、`wait_for_exit`（`:745-755`）、`signal_daemon`（`:759-788`）、`observe_process`（`:728-743`）。以上行号是 **`e80b98f` 的快照**；2026-11-12 的单发轮把 `OwnerMarker` 的文档注释从 3 行扩到 6 行，该行之后整体下移 3 行（`wait_for_exit` 现在 `:748-758`、`signal_daemon` 现在 `:762-791`），**按符号重定位，不要按数字**。同轮核对过：这四个范围在 `e80b98f` 上都是准的，包括 `wait_for_exit` 的截止行——复核方说的「`:745-755` 实际是 `:746-756`」不成立。
 
 **本轮核实到的边界**（每条都能只看本仓代码复核）
 
@@ -2187,13 +2187,13 @@ forward_start（:3204-3244）与 forward_remove（:3077-3113）、forward_stop�
 
 **建议实施顺序**（每步可独立回滚；第 2 步起才碰签名）
 
-1. 负向用例先行（纯测试）：伪造 `/health` 的监听者 + 同名 symlink 的无关进程，断言停止路径不杀它。已有的 `a_stop_that_reached_the_wrong_daemon_stops_nothing` 覆盖代理换监听者，**不覆盖「同名不同实例」**。
+1. 负向用例先行（纯测试）：伪造 `/health` 的监听者 + 同名 symlink 的无关进程，断言停止路径不杀它。已有的 `a_stop_that_reached_the_wrong_daemon_stops_nothing` 覆盖代理换监听者，**不覆盖「同名不同实例」**。**素材只能用真同名二进制（symlink 或副本），不能用 `prctl(PR_SET_NAME)`**：`process_looks_like_daemon`（`:156-164`）的第一条判据读 `process.name()`，Linux 上是 comm，而 comm 被内核截断到 15 字节——`agent2ssh-daemon` 是 16 字节，改 comm 只能得到 `agent2ssh-daemo`，四个白名单字面量没有一个能被匹配（复核方自己测出的 `comm : agent2ssh-daemo` 就是这个截断，它据此推出「prctl 能过名称门槛」是读反了）。第二条判据读 `cmd().first()`（argv[0]），只有 `execve` 能改，那等于重写整个进程。
 2. P2 最小闭环：`read_daemon_pid()` 之后立刻 `pidfd_open`，把 fd 沿 `stop_daemon_process` 传下去，`wait_for_exit` 与 `signal_daemon` 改用 fd；`start_time` 从判据降为附加观察。
 3. 文件身份（修「获取前」复用）：`daemon.pid` 旁路 `daemon.pid.id` = `{pid, start_time, nonce}`，`/health` 报同一 nonce；旧客户端读到不认识的格式继续「拒绝 + 提示升级」（`read_daemon_pid` 的 `:63-69` 已经是这条路径）。
-4. 平台门禁：`ENOSYS`（内核 < 5.3）关闭 pidfd 路径但**保留**现有 `start_time` + 名称检查；`EPERM` 归 `UncertainExit`，`ESRCH` 判死——三者不得合并（`pid_definitely_missing` 的 `:307-321` 已经是「只认 ESRCH」的口径，pidfd 版沿用）。
+4. 平台门禁：`ENOSYS`（内核 < 5.3）关闭 pidfd 路径但**保留**现有 `start_time` + 名称检查；`EPERM` 归 `UncertainExit`，`ESRCH` 判死——三者不得合并（`pid_definitely_missing` 的 `:307-321` 已经是「只认 ESRCH」的口径，pidfd 版沿用）。**`EPERM` 必须绑在 `pidfd_send_signal` 上，不能绑在 `pidfd_open`**：复核方在 Linux 5.4.241（euid 0）上实测——root 打开 nobody 的进程 `pidfd_open` 成功，nobody 打开 root 的进程也成功，`EPERM` 只在 `pidfd_send_signal` 出现（`pidfd_open(4194304) → ESRCH(3)`、`pidfd_open(self) → ok`、`pidfd_send_signal(fd, 0) → 0`）。本机是 macOS，这两条**无法复现**，实施前要在目标内核重跑一遍；把 `pidfd_open` 的 `EPERM` 也映射成 `UncertainExit` 会造出一条永不触发的分支，写测试时是假绿。`ENOSYS` 同理无法在 5.4 内核上自然造出，建议用注入（seccomp 或返回 `ENOSYS` 的替身），不要靠内核版本。
 5. #22 定稿后再谈控制面凭据（`SO_PEERCRED` / `LOCAL_PEERPID` / 命名管道），且必须写死「经代理时不适用」。
 
-**为什么是 L2 而不是 L1**：改 `stop_daemon_process` 的签名会牵动 `bin/agent2ssh.rs:3079/:3106`、`tauri_commands.rs:1855/:1885/:1918` 五个调用点与 `daemon_stop_e2e.rs` 的 33 个用例，属行为改动。
+**为什么是 L2 而不是 L1**：改 `stop_daemon_process` 的签名会牵动 `bin/agent2ssh.rs:3079/:3106`、`tauri_commands.rs:1855/:1885/:1918` 五个生产调用点与 `daemon_stop_e2e.rs`——2026-11-12 实测该文件：34 个 `#[test]`、34 个 `#[serial_test::serial]` 属性、15 个 `#[cfg(unix)]` 块，其中 **`stop_daemon_process(` 出现在 16 个 test 体里**。此前记的「33 个用例」是错的，那个数字既不是测试数也不是调用点数，复核方沿用同一数字也错。**签名改动的真正代价不在类型，而在用例取 pid 的方式**：这 16 条里有多条靠 `std::env::set_var` 切 `CONFIG_DIR_ENV`/`ADDR_ENV`，再读 PID 文件拿号；先加一个 `PidHandle` newtype + `From<u32>` 垫片，能让这 16 条一行不改，再改内层——否则「改签名」与「改测试语义」会混进同一笔，回归失去基线。
 
 ### L2-166（新）：可执行名白名单是四个字面量，而两个身份入口对它的态度相反
 
@@ -2245,3 +2245,27 @@ forward_start（:3204-3244）与 forward_remove（:3077-3113）、forward_stop�
 **为什么它是 L2**：改日志级别或加脱敏层都会改变运维可见性，并且可能踩到「`daemon.log` 是排查唯一现场」的既有约定。
 
 **建议改法**：(a) 保持并依赖文档（本轮做法，代价 0）；(b) `info` 行去掉 `command`，只留 `host` + 长度 + 前 8 字节哈希；(c) 给 `fmt::layer()` 套一层自定义 `Layer` 做脱敏——需要一个能改写 `Display` 值的 visitor，成本最高。选 (b) 要在 `daemon.log` 的可排查性与命令保密之间拍板。
+
+## 2026-11-12 · 手工单发：issue #23（第四次进入）
+
+逐条判定与证据见 `OPT-LOOP-LEDGER.md` 同日「手工/单发消费 · #23 第四次进入」小节。**行号基线 `e80b98f`**；本轮 L1 把 `daemon_control.rs` 的 `OwnerMarker` 文档注释从 3 行扩到 6 行，该行（`:574`）之后整体下移 3 行，读新 tip 时按符号重定位。
+
+### L2-170（新）：`UnverifiedIdentity` 的文案分不清「PID 被复用」与「你的地址指向另一台机器」
+
+**位置**：`src-tauri/src/daemon_control.rs:1027-1030`（「No daemon answered, or one did and it is not this PID」那一支，文案 `health PID, config directory, or admin token did not match`；同 `UnverifiedIdentity` 还有 `:1006` 与 `:1015` 两支）；`src-tauri/src/remote.rs:34-36`（`local_daemon_connect_addr` = `normalize_connect_addr(&local_daemon_addr())`，被 `AGENT2SSH_DAEMON_ADDR` 决定）；`src-tauri/src/bin/agent2ssh.rs:3118-3120`（`daemon token rotate` 的两道闸：`daemon_pid_state(pid) != Stale` 与 `daemon_health_pid().is_some()`）。
+
+**判断**：**成立**。`stop_daemon_process` 先读**本机**进程表（`daemon_process_start_time`），再向 `AGENT2SSH_DAEMON_ADDR` 解析出的地址要 `/health`；变量指向另一台主机时两个观察必然一处命中一处不命中，于是落到 `:1027` 那一支，而那句文案没有一个词提到地址。同形后果：`daemon status` 报 `cannot be verified`；`daemon token rotate` 被拒——它的拒绝理由只提 PID，真正原因是 `daemon_health_pid()` 看到远端那只还活着（这一道闸本身讲得通：换掉正在用的 token 会切断那只 daemon）。
+
+**为什么它是 L2**：拆文案要改 `DaemonStopError::UnverifiedIdentity` 的构造点（`:1006`/`:1015`/`:1027` 三支共用一个变体），并新增「地址指向一台只 listen、不应答 `/health` 的 socket」的断言；只改字面量会动到 `daemon_stop_e2e.rs` 里按子串匹配的既有断言。
+
+**建议改法**：(a) 只补文档——本轮做法，已写进 K14 与指南停止一节（含「两个观察必然一处命中一处不命中」与两条出口），代价 0；(b) 在 `:1027` 那一支先比监听地址，若它不是回环就单独出一句「the daemon listening at <addr> is not on this host; stop it from there」——要把地址带进 `DaemonStopError`，代价是一处构造 + 一条断言。回滚：删那一支即回到今天。
+
+### L2-171（新）：「失败清理时保留可恢复 PID」这条承诺没有任何 e2e 造出过
+
+**位置**：`src-tauri/src/daemon_control.rs:86-94`（`write_daemon_pid_if_absent`，靠 `create_new(true)` 只在文件不存在时成功）、`:527`（`start_daemon_background` 的失败清理在 `child.kill()` 之后调它）；现有覆盖只有单测 `:1117` 与 `:1128`（`pid_cleanup_preserves_replacement_and_invalid_files`）。
+
+**判断**：**成立**。`grep -c "write_daemon_pid_if_absent" src-tauri/tests/daemon_stop_e2e.rs` = 0，16 个调用 `stop_daemon_process` 的用例没有一个走到这条清理。它要求「子进程已决定放弃、但还没写 PID 文件」这个窗口：正常路径下 `read_daemon_pid()` 要么先抛 `Err`（文件损坏）要么已被 daemon 写走。所以它不是不可达，而是**没有夹具**。
+
+**为什么它是 L2**：造这个窗口要让 `start_daemon_background` 在 spawn 之后、`write_daemon_pid` 成功之前失败（例如预置一个只读的 `daemon.pid`），这改的是测试夹具而非断言强度，且要挑平台（`chmod` 只在 Unix 有意义）。
+
+**建议改法**：在 `daemon_stop_e2e.rs` 加一条 `#[serial]` 用例，`#[cfg(unix)]`：预置一个**内容合法但指向已死进程**的 `daemon.pid`，把该文件设为只读让 daemon 侧 `write_daemon_pid` 失败，断言 CLI 退出非零、且 PID 文件内容仍是原来那个可恢复的号。代价：一条用例 + 一次 `chmod`，不改任何行为。
