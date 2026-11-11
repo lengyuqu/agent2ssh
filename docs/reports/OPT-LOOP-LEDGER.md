@@ -3524,3 +3524,48 @@ L2-154（`/exec-multi` 全 0 语义）、L2-155（preview 缺 admin 门）、L2-
 17. **「`local:docker:ls` 被拒为 `invalid container id 'ls'`」**——`validate_container_id`（`local_exec.rs:758-771`）只查字符集 `[A-Za-z0-9._-]` 与 128 字节上限，`"ls"` 两项都过；`container_plan` 于是正常建 plan，由 runtime 自己回话。真正被拒的是 `""`、含空格/分号/斜杠/冒号、`$(id)`、反引号与超长这八种（`an_invalid_container_id_is_refused` 的 bad 列表）。**推论**：`local:<runtime>:<word>` 的「是不是容器引用」不由文案决定，由那个字符集决定。
 
 **回帖**：`2120588608540147712`（`## 本轮收尾`，18:44:57Z；18:45:11Z 补写第六节「issue 状态」）。`#20` **保持 open**，阻塞点是 L2-27 / L2-172 / #22 的身份协议，全在拍板侧。
+
+## 2026-11-12 · 手工单发消费 · issue #20（第五次进入）
+
+**选靶理由**：open 里无 `[opt-round]`（#30 已关）→ 模式 B，第二段为空。MANUAL 里 #20 是 P1 且编号最小，最新评论是 CodeBuddy 的只读复核 `2120592339033829376`（18:59:46Z，**未被消费**）；#21/#23 的复核同样未消费但编号更大；#22/#25 是 P2 设计、#24/#27 要 Windows 实机、#26/#28 零评论且前置是 #22、#29 零评论需先发分析请求。**基线 `f77e6ed`**（= 收到这条复核时的 `cnb/main`，它的自述基线 `b693647` 与 `f77e6ed` 只差一笔「回帖 id」）。
+
+**这一行的价值**：复核方本轮把验证从「读代码」提到了「在 Linux 容器里跑真 daemon」，用独立 config dir 打 `/local-exec`，并做了两次变异测试。它的 400 分类学因此是**实测分类**而非推断——这是它第一次给出可以直接照抄进契约的错误文案清单。
+
+| # | 它的指摘 | 判定 | 证据 |
+|---|---|---|---|
+| 1 | Q1-12：400 分类学缺「环境建不起来」一类（`no PowerShell found on PATH` / `Visual Studio developer shell not found` / `WSL is not available`），与 #7「definition that cannot be built」是两句不同的话 | **成立** | `local_exec.rs:715-727` 的五个 `ok_or_else` 文案互不相同，且都不以 `environment 'X' is based on` 开头（后者在 `:911-916`，说的是*定义*；前者说的是*这台机器*）。400 原文只有「a definition that cannot be built」一项，读上去像已覆盖 |
+| 2 | Q1-13：`local:docker:ls` 在没装 docker 的机器上是 **400**（`Docker is not installed, so there is nothing to exec into`），而 400 列表没有这项 | **成立** | `container_plan`（`:784-793`）先 `validate_container_id` 再 `runtime.resolve()`；`resolve()` 为 `None` 即 400。**同一 id 在装了 docker 的机器上是 200** —— 行为依赖机器状态 |
+| 3 | Q1-14：自定义环境的「多余后缀」与内置环境是两条不同的臂、文案逐字相同，400 列表没分开 | **部分成立** | 两条臂确实不同（`:427-430` 内置、`:884-889` 自定义），但 400 原文已写「and a defined environment answers the same way」——**该分的是 `description` 里那句「four different refusals with four different messages」的计数**：实际 ≥10 类成因，且其中两条共用一句文案 |
+| 4 | Q1 尾：`load_error` 不构成第五类，但依据要换成「运行中坏文件不影响已注册定义」 | **成立** | `local_environments.rs:244`（`Mutex<Option<Arc<…>>>`）、`:279-282`（`current()` 写入后不再读盘）、`:284-290`（`reload()` 的文档自己写「Called by the daemon at start; there is deliberately no request path to it」）、`bin/agent2ssh-daemon.rs:5713`（唯一调用点）。它实测「启动时好、随后写坏文件 → `local:py-ml` 仍按已注册定义工作」与这四行一致 |
+| 5 | Q1 连带：指南 `:710` 那句「整个文件解析失败只会让自定义环境不可用」该加「下次启动时」 | **成立** | 同第 4 条；且反方向也成立：启动时坏、运行中修好 → 到重启前仍不可用，`annotate_unknown`（`:218-233`）会一直挂着 `could not be loaded` |
+| 6 | Q2：`local:docker:ls` 它判对（我上一轮判对），但 api.yaml 那句让人反推成「任何机器上都不会 400」 | **成立** | `container_plan` 的两步顺序（见第 2 条）就是反例；它用假 `docker` 打的 argv 实测（`exec ls /bin/sh -c echo hi`）与 `validate_container_id` 只查字符集一致 |
+| 7 | Q3-A：`/local-exec` 有两类 500（gate 读不了、`policy.toml` 读不了）而 responses 没有 500 | **成立** | `reject_if_gate_paused`（`bin/agent2ssh-daemon.rs:400-410`）→ `INTERNAL_SERVER_ERROR`；`approval.rs:1019` → `load_approval_policies` → `execution_control.rs:481-482` `Internal` → `bin/agent2ssh-daemon.rs:812-815` 500。`/local-exec` 的 responses 实测 200/400/401/403/408/415/422/423/429，`/exec` 有 500 |
+| 7-b | 它给的修法：给 `HELPER_STATUS` 加 `("load_execution_gate(",…)` 与 `("load_approval_policies(",…)` 就能让 `/local-exec` 现形 | **不成立** | 那个测试只读**该 handler 自己的函数体**（`handler_body_of`，`:3482` 起，文档注释 `:3111-3117` 明写经 helper 到达的码看不到）。`local_exec` 体内只有 `preflight_guarded_request(`；`load_execution_gate(` 在 `reject_if_gate_paused` 内部（`:405`），`load_approval_policies(` 在 `bin/` 下**零出现**。两条新增都匹配不到任何 handler 体，加完仍然一条都不报。真正的修法是把表改成「helper → 码集合」（`preflight_guarded_request(` 现在只登记 429，实际还能回 423/500）→ **L2-174** |
+| 8 | Q3-B：`code_block` 在 marker 找不到时返回空串，调用点的 `contains` 会全部假阴 | **成立** | `:4050-4060` 原文 `return String::new()`。它同时承认现有两个调用点都自保（空块会让断言红），但主张就地失败——已按此改（见下） |
+| 8-b | Q3-B 附带：`is_response_key` 只认 `"NNN":`，单引号与裸键不识别，是没写下来的隐含前提 | **成立** | 普查：全文件 571 个候选 key（含本轮新增的 500）**全部**是双引号三数字，误判为 0 → 前提今天成立但无人守；已加测试 |
+| 9 | Q3-D / 第 4 条提醒：`stopped_early`/`skipped`/`batches_executed`/`total_duration_ms` 只有 `is_some()`，取值零覆盖 | **成立，未做** | `daemon_integration.rs:4707-4750` 是 serde 形状测试，构造值 `stopped_early: false, skipped: 0` 从未被比较。它的临时测试复现了单批次 `stopped_early: true` + `skipped: 0`，与 L2-172 一致。补取值断言要么新增一条真跑 `exec_multi_with_strategy` 的用例（两个不可达 host，慢且受 DNS 影响），要么改 `core.rs` 的单测（属 `src/**`）——**留给下一轮，不塞进本轮** |
+| 10 | Q3-E：`local:wsl:a:b` 的 distro 不校验，而 `local:docker:a:b` 被 `validate_container_id` 拒 | **成立（代码事实，行为未实测）** | `:414-423` 只拒 `Some("")`；`container_target_for_host`（`:743-748`）对 `wsl` 返 `None` → 走 `environment_for_host`。本机无 WSL，`wsl.exe -d a:b` 的真实反应无实测 → **L2-173** |
+| 11 | 它自报的失误：第一次启 daemon 没设 `AGENT2SSH_DAEMON_ADDR`，在容器里创建了 `~/.agent2ssh` | **记录，非仓库缺陷** | 该行为是 `resolve_config_dir` 的既有默认路径（未设变量即用户主目录）；它的 `~` 是容器内的 home，本机 `~/.agent2ssh` mtime 仍是 11-04，未被触碰 |
+| 12 | 它本轮对上一轮 4 处改动的判定（`is_response_key` 收紧、400 逐字引用、`max_failures` 按批、`skipped`/`stopped_early` 语义） | **全部成立** | 与我的自评一致；它的两条变异（删数字检查、抹掉两句 message）与我上一轮的反向验证同向，互为独立复核 |
+
+**本轮改了什么**（全部 L1；`src-tauri/src/**` 零改动，产物在 `docs/**` 与 `src-tauri/tests/**`）：
+
+- `docs/api.yaml`：
+  - `/local-exec` description：把「four different refusals with four different messages」改成「four examples, each with its own message」并点明两条臂共用一句；`local:docker:ls` 那句补上「但只在 runtime 装好时——没装 `docker` 时同一 id 是 400 `Docker is not installed…`，因为 CLI 先于容器解析，答案取决于这台机器」。
+  - `/local-exec` 的 400：新增两类（环境在这台机器上建不起来，六个 message 逐字；容器 runtime 的 CLI 未安装），并把「a definition that cannot be built」收窄成「a definition whose base is not usable」以与前者区分；结尾的「四种补救」改成「different remedies」并补一句「两条共用 `takes no argument`，只有 `host` 能区分」。
+  - `/local-exec` 新增 `500`（含 `application/json` + `Error` schema，否则 `api_yaml_declares_a_body_for_every_response` 会红——见下）。
+- `docs/guides/configuration-guide.md:710-711`：把「整个文件解析失败只会让自定义环境不可用」限定为「这次启动内」，并新增一条**运行中改文件无效**的说明（两个方向：启动时好→运行中改坏，已注册定义照常工作；启动时坏→运行中改好，到重启前仍不可用且 400 一直挂着 `could not be loaded` 的注解）。
+- `src-tauri/tests/daemon_integration.rs`：
+  - `code_block` 的「找不到 marker」从 `return String::new()` 改成 `assert!`，失败信息点名那个码。
+  - `api_yaml_lists_the_local_refusals_it_can_produce`：needle 从 2 条扩到 5 条，新增「环境建不起来」（PowerShell / WSL 两句）与「runtime 未安装」，源码侧与 400 块两侧都断言。
+  - 新增 `every_response_key_in_the_spec_is_a_quoted_three_digit_code`（571 个 key 全过 + `keys > 400` 防空转）。
+  - 新增 `local_exec_documents_the_internal_errors_its_helper_answers_with`（按路由守卫：`/local-exec` 的 500 必须点名 `execution_gate.json` 与 `policy.toml`，且 `preflight_guarded_request(` 与 `failed to load execution gate` 仍在源码里）。
+- `docs/reports/OPT-LOOP-L2-PENDING.md`：**L2-173**（`local:wsl:<distro>` 不校验，三方案）、**L2-174**（`HELPER_STATUS` 1:1 且不传递，三方案）。
+
+**反向验证**（做了两次）：①把 500 描述里的 `policy.toml` 改成「a policy file」+ 把一个 `"408":` 改成裸 `408:` → `local_exec_documents_the_internal_errors_its_helper_answers_with` 与 `every_response_key_in_the_spec_is_a_quoted_three_digit_code` **各自红**，恢复后绿；②`code_block` 的 `assert!` 不是空转：新增 500 块时忘了写 `content:`，`api_yaml_declares_a_body_for_every_response` 立刻红并点名 `["500 POST /local-exec"]`，补 schema 后绿。
+
+**验证**：`npm run build` 见下节；`--features daemon --test daemon_integration` **82 passed / 0 failed**（原 80，新增 2 条）；`--no-default-features --lib` 与 `cargo fmt --check` 见回帖。
+
+**新增「不成立」，不要重复提**：
+
+18. **「给 `HELPER_STATUS` 加 `load_execution_gate(` 与 `load_approval_policies(` 就能让 helper 产出的 500 现形」**——那个扫描只读 handler 自己的函数体，不传递；两条串在 `bin/` 下分别只出现在 helper 内部与完全不出现（`load_approval_policies` 在 `bin/` 零命中）。能覆盖这族的只有把表改成「helper → 码集合」，条目是 L2-174。
