@@ -2187,6 +2187,27 @@ const HANDLER_STATUS: [(&str, &str); 10] = [
     ("SERVICE_UNAVAILABLE", "503"),
 ];
 
+/// Helpers that answer a status their caller's body never names.
+///
+/// `HANDLER_STATUS` reads `StatusCode::` literals, so a handler that delegates
+/// its 429 to `reject_if_rate_limited` (directly, or through the preflight
+/// shared by every host operation) documents nothing and failed nothing. Five
+/// operations had drifted that way — `/exec/stream`, `/terminal/broadcast`,
+/// `DELETE /forwards/{id}` and both `/connections/{host}/…` — while their
+/// sibling routes (`/forwards/{id}/start|stop`) did document it, which is how
+/// the omission stayed invisible: the family looked consistent from one route.
+///
+/// Only 429 is listed. `preflight_guarded_request` can also surface 408/423/500
+/// from the authorization chain, and pinning those here would demand a status
+/// on routes that legitimately never reach that branch; 429 is the one that is
+/// decided before authorization, on every path that calls these helpers.
+const HELPER_STATUS: [(&str, &str); 4] = [
+    ("too_many_requests_status()", "429"),
+    ("reject_if_rate_limited(", "429"),
+    ("register_limited_session_for_command(", "429"),
+    ("preflight_guarded_request(", "429"),
+];
+
 /// The methods one `.route(...)` call mounts, in source order, with their handler.
 ///
 /// `get(a).post(b)` mounts two, and a builder chain that wraps across lines
@@ -2654,7 +2675,9 @@ fn api_yaml_documents_every_daemon_route() {
 /// arrives through a shared helper (`preflight_guarded_request`,
 /// `authorize_targets`, `locked_status`) is not visible this way, because that
 /// is the handler's *dependency* failing, not its own branch — those routes
-/// document their 408/423/429/500 by hand.
+/// document their 408/423/500 by hand. The one exception is 429: it is decided
+/// before authorization on every helper path, so `HELPER_STATUS` makes it
+/// required rather than remembered.
 #[test]
 fn api_yaml_documents_the_codes_each_handler_can_return() {
     let daemon = include_str!("../src/bin/agent2ssh-daemon.rs");
@@ -2724,6 +2747,33 @@ fn api_yaml_documents_the_codes_each_handler_can_return() {
         "these operations answer a status code they do not document: {undocumented:?}. \
          The code comes from the handler's own body, so a client that programs against \
          the spec cannot tell this failure from an unknown one."
+    );
+
+    // The same map for the statuses a helper decides rather than the handler.
+    let undocumented_via_helper: Vec<String> = daemon_routes(daemon)
+        .into_iter()
+        .flat_map(|(path, method, handler)| {
+            let body = handler_body_of(daemon, &handler);
+            let Some((_, _, codes)) = documented.iter().find(|(known_path, known_method, _)| {
+                *known_path == path && *known_method == method
+            }) else {
+                return Vec::new();
+            };
+            HELPER_STATUS
+                .iter()
+                .filter(|(call, code)| {
+                    body.contains(call) && !codes.iter().any(|documented| documented == code)
+                })
+                .map(|(_, code)| format!("{code} {method} {path} ({handler} via helper)"))
+                .collect()
+        })
+        .collect();
+    assert!(
+        undocumented_via_helper.is_empty(),
+        "these operations can answer a status through a shared helper and do not document \
+         it: {undocumented_via_helper:?}. The check runs before authorization on every one \
+         of these paths, so the failure reaches a caller who cannot tell it apart from an \
+         unknown error."
     );
 }
 
