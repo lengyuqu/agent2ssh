@@ -3127,62 +3127,356 @@ fn api_yaml_documents_every_daemon_route() {
 /// did not: the delete page omitted `408` even though both call the same
 /// `authorize_command`, which answers `REQUEST_TIMEOUT` when an approval
 /// expires. That omission was invisible because nothing compared the two.
+/// Every route whose handler consults the token scope documents a 403 that says
+/// which refusal it is, and the description follows the order the handler
+/// actually calls things in.
+///
+/// This replaces a test that compared three forward routes and said, in its own
+/// comment, that its list of paths was hand-maintained — so a fourth
+/// inline-scope handler would not appear, and neither would any of the bare
+/// `Scope denied or approval rejected` descriptions elsewhere in the spec. What
+/// that test could not see at all was the *order*: a client reading a bare
+/// sentence on a route whose gate runs first will expect a paused gate to answer
+/// 403 when it actually answers 423, because `reject_if_gate_paused` returns
+/// before the token's scope is ever consulted. Reading the handler body for the
+/// order of its gate, rate-limit, scope and authorize calls is what answers
+/// that, and it needs no more machinery than `handler_body_of`.
+///
+/// Comments are stripped before the search. This file's own prose spells out
+/// `reject_if_gate_paused(...)`, and a comment is the one place in the source
+/// where a call-shaped string is not a call. Measured: an unstripped read of
+/// `approval_check` answers `["gate", "scope"]` where the real chain is
+/// `["scope"]`, and since that route's bare 403 is *correct*, the test would go
+/// red on a route with nothing wrong with it.
 #[test]
-fn api_yaml_gives_the_three_forward_authorization_routes_the_same_codes() {
+fn every_scope_checked_route_documents_the_order_its_refusals_arrive_in() {
+    let daemon = include_str!("../src/bin/agent2ssh-daemon.rs");
     let spec = include_str!("../../docs/api.yaml");
 
-    fn codes(spec: &str, path: &str, method: &str) -> Vec<String> {
-        let mut in_path = false;
-        let mut in_method = false;
-        let mut found = Vec::new();
-        for line in spec.lines() {
-            let body = line.trim_start();
-            let indent = line.len() - body.len();
-            if indent == 2 && body.starts_with('/') {
-                in_path = body.split(':').next() == Some(path);
-                in_method = false;
-                continue;
-            }
-            if !in_path {
-                continue;
-            }
-            if indent == 4 {
-                in_method = body.strip_suffix(':') == Some(method);
-                continue;
-            }
-            if !in_method || indent != 8 {
-                continue;
-            }
-            if let Some(code) = body
-                .strip_prefix('"')
-                .and_then(|rest| rest.split('"').next())
-            {
-                found.push(code.to_string());
-            }
-        }
-        found.sort();
-        found
+    // The scope question, asked directly or through the shared preflight, whose
+    // first step it is.
+    fn consults_scope(chain: &[&'static str]) -> bool {
+        chain.contains(&"scope") || chain.contains(&"preflight")
     }
 
-    // The list below is still hand-maintained, which is the weakness this test
-    // was supposed to remove: add a fourth inline-scope handler and it will not
-    // appear here. Grouping by handler shape instead of by path would fix that,
-    // but it needs the handler body parsed, not just the spec. Until then this
-    // pins the three that exist and names the gap.
-    let remove = codes(spec, "/forwards/{id}", "delete");
-    let stop = codes(spec, "/forwards/{id}/stop", "post");
-    let start = codes(spec, "/forwards/{id}/start", "post");
+    // A helper that asks the scope question on its caller's behalf. Only one
+    // exists: `terminal_broadcast_run` takes its per-target verdict from
+    // `terminal_broadcast_preview_results`, which is where its
+    // `check_daemon_scope` call actually is. Without this the route would be
+    // read as "rate, authorize" with no scope step at all — the worse error of
+    // the two, since it would describe a scope-checked route as un-scoped and
+    // silently exempt it from every rule below.
+    const DELEGATES: [(&str, &str); 1] = [(
+        "terminal_broadcast_preview_results(",
+        "terminal_broadcast_preview_results",
+    )];
 
-    assert!(remove.contains(&"408".to_string()), "{remove:?}");
-    assert_eq!(
-        remove, stop,
-        "remove and stop share one authorization path, so they share one set of codes"
+    // The order a route's refusals arrive in, or `None` when it consults no
+    // scope at all.
+    fn order_of(daemon: &str, handler: &str) -> Option<Vec<&'static str>> {
+        let body = strip_rust_comments(handler_body_of(daemon, handler));
+
+        // `proxy_exec` has two branches: `localhost` takes the shared preflight,
+        // a remote alias checks inline. One handler, one documented order, and
+        // the remote branch is the one that can also answer 404 and 502 — so
+        // read from that branch's marker onward rather than letting whichever
+        // call comes first in the source define the shape.
+        if body.contains("if alias == \"localhost\"") && body.contains("get_daemon_with_scope(") {
+            let (_, _, remote_branch) = body
+                .split_once("get_daemon_with_scope(")
+                .expect("guarded by the contains above");
+            let remote = chain(remote_branch);
+            if consults_scope(&remote) {
+                return Some(remote);
+            }
+        }
+
+        for (call, helper) in DELEGATES {
+            if body.contains(call) {
+                let delegated = chain(&strip_rust_comments(handler_body_of(daemon, helper)));
+                if consults_scope(&delegated) {
+                    return Some(delegated);
+                }
+            }
+        }
+        let own = chain(&body);
+        consults_scope(&own).then_some(own)
+    }
+
+    /// One of the phrases a 403 has to use to be saying "a scope denial or an
+    /// approver's refusal". A scoped token's own wording counts: `/ping` and
+    /// `/exec/preview` answer "Scoped token does not allow …", which names the
+    /// refusal without using the noun.
+    const SCOPE_WORDS: [&str; 7] = [
+        "scope denied",
+        "scope denial",
+        "outside the token",
+        "token scope",
+        "token's allowed hosts",
+        "scoped token",
+        "does not allow",
+    ];
+
+    let mut problems: Vec<String> = Vec::new();
+    let mut shapes: Vec<(Vec<&'static str>, Vec<String>)> = Vec::new();
+    let mut compared = 0usize;
+
+    for (path, method, handler) in daemon_routes(daemon) {
+        let Some(chain) = order_of(daemon, &handler) else {
+            continue;
+        };
+        compared += 1;
+
+        let Some(operation) = spec_operation_block(spec, &path, method) else {
+            problems.push(format!(
+                "`{handler}` consults the token scope, but {method} {path} has no operation in \
+                 docs/api.yaml — the scope refusal has nowhere to be documented"
+            ));
+            continue;
+        };
+        let Some(described) = response_description(&operation, "403") else {
+            problems.push(format!(
+                "{method} {path} ({handler}) consults the token scope and documents no 403"
+            ));
+            continue;
+        };
+        if !SCOPE_WORDS
+            .iter()
+            .any(|phrase| described.to_lowercase().contains(phrase))
+        {
+            problems.push(format!(
+                "{method} {path} ({handler}) consults the token scope and its 403 does not name \
+                 that refusal: `{described}`"
+            ));
+        }
+
+        // Three shapes, and what the description may claim differs per shape
+        // because what the server does differs per shape.
+        let names_a_precondition = ["first", "before", "unless", "even when"]
+            .iter()
+            .any(|marker| described.contains(marker));
+        let scope_at = chain
+            .iter()
+            .position(|step| *step == "scope" || *step == "preflight");
+        let gate_before_scope = match (chain.iter().position(|step| *step == "gate"), scope_at) {
+            (Some(gate), Some(scope)) => gate < scope,
+            _ => false,
+        };
+
+        if !gate_before_scope && names_a_precondition {
+            problems.push(format!(
+                "{method} {path}: `{handler}` runs the scope work at {chain:?} — nothing answers \
+                 before it — but its 403 names a precondition: `{described}`"
+            ));
+        }
+        if gate_before_scope && !names_a_precondition {
+            problems.push(format!(
+                "{method} {path}: `{handler}` calls the gate before the scope work ({chain:?}), \
+                 so a paused gate answers 423 and scope is never consulted — but the 403 is a \
+                 bare sentence, `{described}`. Say the order, or a client reads a paused gate as \
+                 a scope denial"
+            ));
+        }
+
+        match shapes.iter_mut().find(|(shape, _)| *shape == chain) {
+            Some((_, paths)) => paths.push(format!("{method} {path}")),
+            None => shapes.push((chain, vec![format!("{method} {path}")])),
+        }
+    }
+
+    // The parse must not be vacuous. If it stopped finding scope-gated handlers,
+    // both assertions below would pass by comparing nothing.
+    assert!(
+        compared >= 25,
+        "only {compared} routes were found to consult the token scope; the call-order parse \
+         has stopped reading handler bodies. Shapes found: {shapes:?}"
     );
-    assert_eq!(
-        remove, start,
-        "start runs the same four checks in the same order as remove and stop"
+
+    assert!(
+        problems.is_empty(),
+        "the documented refusal order and the handler's own call order disagree:\n  {}\n\n\
+         Shapes found: {shapes:?}",
+        problems.join("\n  ")
     );
 }
+
+/// The first call of each gate/rate/scope/authorize step in one handler body, in
+/// source order, with comments already stripped.
+///
+/// Variants collapse to their step: `preflight_rewritable_request` and
+/// `preflight_sftp_rm_rf` are the preflight step, and `authorize_targets` is the
+/// authorization step. That is what lets `proxy_exec`'s two branches be read as
+/// "same order, different mechanism" instead of as two shapes.
+fn chain(cleaned: &str) -> Vec<&'static str> {
+    const STEPS: [(&str, [&str; 3]); 5] = [
+        ("gate", ["reject_if_gate_paused(", "", ""]),
+        ("rate", ["reject_if_rate_limited(", "", ""]),
+        ("scope", ["check_daemon_scope(", "", ""]),
+        (
+            "preflight",
+            [
+                "preflight_guarded_request(",
+                "preflight_rewritable_request(",
+                "preflight_sftp_rm_rf(",
+            ],
+        ),
+        ("authorize", ["authorize_command(", "authorize_targets(", ""]),
+    ];
+    let mut at: Vec<(usize, &'static str)> = Vec::new();
+    for (label, needles) in STEPS {
+        let earliest = needles
+            .iter()
+            .filter(|needle| !needle.is_empty())
+            .filter_map(|needle| cleaned.find(needle))
+            .min();
+        if let Some(position) = earliest {
+            at.push((position, label));
+        }
+    }
+    at.sort();
+    at.into_iter().map(|(_, label)| label).collect()
+}
+
+/// Strip `//` and `/* */` comments from Rust source, keeping string literals.
+///
+/// The call-order test searches a handler body for `name(` text, and this file's
+/// prose spells those calls out. Without this the search reads a comment as a
+/// call site.
+fn strip_rust_comments(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut out = String::with_capacity(source.len());
+    let mut index = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if in_string {
+            out.push(byte as char);
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            index += 1;
+            continue;
+        }
+        if byte == b'"' {
+            in_string = true;
+            out.push('"');
+            index += 1;
+            continue;
+        }
+        if source[index..].starts_with("//") {
+            match source[index..].find('\n') {
+                Some(len) => {
+                    out.extend(std::iter::repeat_n(' ', len));
+                    index += len;
+                }
+                None => break,
+            }
+            continue;
+        }
+        if source[index..].starts_with("/*") {
+            let len = source[index..]
+                .find("*/")
+                .map(|end| end + 2)
+                .unwrap_or(bytes.len() - index);
+            for byte in &bytes[index..index + len] {
+                out.push(if *byte == b'\n' { '\n' } else { ' ' });
+            }
+            index += len;
+            continue;
+        }
+        out.push(byte as char);
+        index += 1;
+    }
+    out
+}
+
+/// One operation's block: the method key and everything under it, bounded by the
+/// next method key or the end of the path item.
+///
+/// `spec_path_block` returns the whole path item, and most paths mount several
+/// methods. Reading one method's responses out of the whole block would let
+/// `DELETE /sessions/{id}` pass on `POST`'s description — which is exactly the
+/// confusion this test exists to catch, since those two genuinely differ here.
+fn spec_operation_block(spec: &str, path: &str, method: &str) -> Option<String> {
+    let block = spec_path_block(spec, path)?;
+    let mut kept: Vec<&str> = Vec::new();
+    let mut inside = false;
+    for line in block.lines() {
+        let trimmed = line.trim_start();
+        let is_method_key = !trimmed.starts_with('/')
+            && line.len() - trimmed.len() == 4
+            && trimmed.strip_suffix(':').is_some_and(|name| {
+                matches!(name, "get" | "post" | "put" | "delete" | "patch")
+            });
+        if is_method_key {
+            inside = trimmed
+                .strip_suffix(':')
+                .is_some_and(|name| name.eq_ignore_ascii_case(method));
+            if inside {
+                kept.push(line);
+            }
+            continue;
+        }
+        if inside {
+            kept.push(line);
+        }
+    }
+    (!kept.is_empty()).then(|| kept.join("\n"))
+}
+
+/// The description under one response code, joined if it is a folded scalar.
+///
+/// A `description: |` or `description: >-` body sits on the lines below the key,
+/// so stopping at the key's own line finds nothing — and a test that treated
+/// "found nothing" as "documents nothing" would fail every route that describes
+/// itself at length. Folding the continuation into one line also lets the marker
+/// search above see a phrase that wraps across two source lines.
+fn response_description(operation: &str, code: &str) -> Option<String> {
+    let lines: Vec<&str> = operation.lines().collect();
+    let key = format!("\"{code}\":");
+    let at = lines.iter().position(|line| line.trim() == key)?;
+    for line in &lines[at + 1..] {
+        let trimmed = line.trim();
+        let Some(rest) = trimmed.strip_prefix("description: ") else {
+            // Anything other than a description immediately after the code means
+            // this response has none.
+            return None;
+        };
+        if matches!(rest, "|" | "|-" | ">" | ">-") {
+            let base = line.len() - line.trim_start().len();
+            let mut folded = String::new();
+            let mut started = false;
+            for continuation in &lines[at + 1..] {
+                let text = continuation.trim();
+                if text.is_empty() {
+                    continue;
+                }
+                if !started {
+                    // The first continuation line is the marker itself.
+                    started = true;
+                    continue;
+                }
+                if continuation.len() - continuation.trim_start().len() <= base {
+                    break;
+                }
+                if !folded.is_empty() {
+                    folded.push(' ');
+                }
+                folded.push_str(text);
+            }
+            return (!folded.is_empty()).then_some(folded);
+        }
+        return Some(rest.to_string());
+    }
+    None
+}
+
+
 
 #[test]
 fn api_yaml_documents_the_codes_each_handler_can_return() {

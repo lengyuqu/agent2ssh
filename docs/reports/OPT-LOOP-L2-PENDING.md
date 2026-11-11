@@ -1964,3 +1964,94 @@ forward_start（:3204-3244）与 forward_remove（:3077-3113）、forward_stop�
 **顺带更正我自己第 4 轮的一处过度声明**：我说 `assert_eq!(host_key_algorithm(HostKeyKind::Rsa), "ssh-rsa")` 能「钉住」N1 的回归。**不成立**——`host_key_algorithm` 那行代码从没被改过，改动前这条断言也是绿的；它不是护栏，是文档。真正的回归点是**测试传参**，没有任何断言覆盖它。记此以免后续把「已加断言」读成「已验证」。
 
 **不变式测试的欠账（L1 待办）**：现在的三路由比较仍是**手工清单**——加第四条内联 scope 的 handler 不会自动进来。复核给的改法（按 handler 形状分组：内联 `check_daemon_scope` 且不经 shared preflight 的算 A 组，经 preflight 的算 B 组，组内响应码集合两两相等）方向对，但需要解析 handler 体而不是只解析 spec，本轮时间不够。测试里已写明这个缺口，避免下一个人以为它已经是自动的。
+
+### batch 14 第 6 轮：20 处裸 403 里哪些真的在 gate 之后、K7 的指纹可比性、以及不变式测试能不能只靠 grep
+
+复核给了三个问题。三个都核完了，**两个的答案是「能，而且已经做了」，一个的答案是「不该新立条」**。
+
+#### Q1：那 20 处裸 403 里，哪些 handler 的 scope 真的在 gate 之后
+
+**先纠正计数口径**：20 是**描述文案**的个数，不是路由的个数。`/terminal`（`api.yaml:1964`）写的是裸的 `Scope denied`——没有「or approval rejected」，所以 `grep -c 'Scope denied or approval rejected'` 数不到它，但它同样是裸句。**裸 403 一共 21 处**。
+
+判据不能只看 handler 里有没有 `check_daemon_scope`。三条链都会问 scope：内联的 `check_daemon_scope`、`preflight_guarded_request`（内部 gate→rate→authorize，authorize 第一步即 scope）、`authorize_command`（同上）。只看内联那一个会漏掉 15 条 preflight 路由——而那 15 条的 bare 403 **都是对的**，因为顺序就是 gate→rate→scope，gate 本来就会先拒。
+
+按「第一个可能赢的 step 在什么位置」逐条核完（handler 体、注释剥离后按源码顺序取首个调用点）：
+
+| 形状 | 路由 | 裸 403 对不对 |
+|---|---|---|
+| `scope` 单独（无 gate、无 limit） | `/ping`、`/sessions/{id}/read`、`/resident-sessions/{id}` GET、`/approval/check`、`/risk/check`、`/exec/preview`、`/terminal/broadcast/preview` | **对**。没有 gate 能抢先，裸句就是全部真相 |
+| `preflight`（15 条） | `/exec`、`/local-exec`、`/sftp/*`（10）、`/forwards`、`/forwards/multi`、`/resident-sessions`、`/resident-sessions/{id}/exec`、`/sessions/{id}` POST(resident) | **对**。preflight 内部就是 gate→rate→scope，gate 在前 |
+| `gate, rate, scope, authorize` | `/forwards/{id}`、`/stop`、`/start`、`/connections/{host}/connect`、`/disconnect` | **前四条已改，`disconnect` 漏了** |
+| `gate, scope, authorize` | `/sessions` POST、`/sessions/{id}` DELETE | **不对，两条都裸** |
+| `gate, rate, scope` | `/daemons/{alias}/exec` | 已改（第 5 轮） |
+| `preflight` + `gate, rate, scope`（两分支） | `/daemons/{alias}/exec` 的 `localhost` 分支 | 已改（第 5 轮） |
+| **无 gate、无 limit，但 404 在 403 之前** | 见下 | |
+
+**本轮真的改了的，没料到的三处**：
+
+1. `/sessions` POST（`session_open`）：`reject_if_gate_paused` → `check_daemon_scope` → `register_limited_session_for_command` → `authorize_command`。**先 gate、再 scope、最后才是 limit**——所以暂停的 gate 答 423，超限答 429，而 403 只可能是 scope 或审批。裸句把 423 说成了 403。
+2. `/sessions/{id}` DELETE（`session_close`）：`gate` → `scope` → `authorize`，同一个形状。
+3. `/connections/{host}/disconnect`：与 `connect` 逐行同构。第 5 轮改了 `connect`，**`disconnect` 漏在同一页下面**——它当时就在改动范围的相邻行里。
+
+**两处刻意不动，因为它们不是缺口**：`/ping` 与 `/exec/preview` 的裸句其实不裸——它们写的是「Scoped token does not allow one of the requested hosts」，把 scope 拒绝说清楚了，只是没用 `scope` 这个词。`/terminal/broadcast` 与 `/broadcast/preview` 原本**没有 403 条目**（它们的 scope 拒绝写进每个 target 的 `error`，HTTP 仍是 200），本轮补的两个条目都写明了「这个 403 不是 scope 拒绝走的路径」，免得反过来说错。
+
+**剩下 18 条没动的裸句**：全部落在「gate 在前、但 gate 不是最强制的那个」之外——也就是 `scope` 单形状与 `preflight` 形状，改不加限定只会在本来正确的地方加一层噪音。**这里没有欠账**，除了下面那条。
+
+#### 一条没人问的：同一 handler 两条分支，403 说的是哪一条
+
+`/daemons/{alias}/exec` 的 `proxy_exec` 有 `localhost`（shared preflight）与远程 alias（内联 gate→rate→scope）两条分支。第 5 轮我判「两分支同序、不同机制」，那一半成立——**但「同序」不等于「同形」**：`localhost` 分支的结构在 `preflight_*` 里，远程分支的第一句是 `get_daemon_with_scope`（`:3994`，404），404 先于 gate 与 scope。所以对客户端来说，这条路由的**首个**拒绝是 404，不是 423。第 5 轮改的措辞只说「gate 与 limit 先于 403」，**没说 404 更先**。本轮不改（要让 `api.yaml` 说清分支选择，值得单独拍板），记在这里。
+
+#### Q2：`check_server_key` 的证书路径指纹可比性，值不值得挂到 K7 的「下一步」
+
+**值，而且 K7 原文已经说过方向了，只是没说这一半。** 三个事实，都在源码里：
+
+- `fingerprint_sha256`（`embedded_ssh.rs:176-184`）先试 `session.host_key_hash(Sha256)`，这个走的是 `russh_impl/mod.rs:946` 的 `host_key_hash`，对 **`CapturedKey.blob`** 求哈希；而 `blob` 是 `check_server_key` 里 `cert.public_key()` 解包后的**裸 key**（`mod.rs:418-421`）。
+- 失败才回落到 `session.host_key()` + `Sha256::digest`——同样是对 `CapturedKey.blob` 求哈希（`mod.rs:939`），**不是** `host_key_hash` 的注释里说的「negotiated hash」。
+- 而 OpenSSH 的 `~/.ssh/known_hosts` 在服务器出示证书时那一行是 **`ssh-ed25519-cert-v01@openssh.com`**，`ssh-keygen -lf` 报的是**整张证书**的指纹。`ssh-keyscan` 如果握手拿到的是证书，也同样报证书。
+
+所以两次「同一条记录」的指纹不可比：本实现 `known_hosts.json` 里存的是裸 key 的 SHA256，`ssh-keyscan` 报的是证书的 SHA256。**判错的方向不是「该拒的没拒」，而是「该过的过不了」**：用 `agent2ssh known-hosts import` 从一份含有 `-cert-v01` 行的 `known_hosts` 导入后，那一行的 blob 是证书本体，算出的指纹被记成 `host:port|ssh-ed25519` 的指纹；真连上去时 `CapturedKey.blob` 是裸 key，指纹不同 → `trust_or_verify_host_fingerprint` 报 `SSH host fingerprint changed`（`embedded_ssh.rs:285-296`），而实际上 CA 没换、key 也没换。这正好落在 K7 自陈的 TOFU 取舍的对侧：**K7 说的是「不校验 CA 链与有效期」，这里说的是「连合法情况都比对不上」**。
+
+处置：**挂 K7 的「下一步」，不新立条**。理由是它没有独立的行为主张——它改的是 K7 已经声称覆盖的那一半（证书路径的可比性），两条分开写会在两处各自漂。K7 的单元格本轮补一段，并把「下一步」写成可执行的一条：要么落盘存**证书**的指纹（与 OpenSSH 一致），要么在 `known_hosts.json` 的价值里加一个 `presented_as` 字段、比较时按「裸 key 优先、证书其次」两路匹配。两条都改 `src-tauri/src/**`，属 `L2` 待拍板，不是文档。
+
+**未核**：russh 0.64 的 `PublicKeyOrCertificate::Certificate` 是否可能在 `cert.public_key()` 之外还暴露整段证书字节——本容器**没有 `~/.cargo`，也没有 vendored russh 源码**（`find / -type d -name 'russh-0.64*'` 空），所以这一点只能按本仓库的调用面判断，不能按上游签名判断。落地时先确认这一条。
+
+#### Q3：「按 handler 形状分组」的不变式测试能不能只靠 grep 调用点顺序
+
+**能，而且本轮做完了。** 不需要解析函数体——需要的是**把一个 handler 体切出来**（这一步这个文件早就有 `handler_body_of`，走花括号，不是正则），然后在切出来的文本上按字节位置排序 5 个调用点。真正必须解决的问题只有三个，都不是「解析」：
+
+1. **注释会被当调用点。** 我第一次写的时候就在这个文件里踩了：注释里写着 `reject_if_gate_paused(...)`，按文本搜会数成一次调用。实测构造后，`approval_check` 未剥注释的链读成 `['gate','scope']`，剥完是 `['scope']`——而它的 403 是对的裸句，于是测试会在一条**正确**的路由上变红。所以 `strip_rust_comments` 是这个测试的必要条件，不是修饰。
+2. **同一 handler 两条分支。** `proxy_exec` 的 `localhost` 分支先出现，按「首个调用点」会读到 `preflight`。修法不是解析 `if`，是**按分支标记切**：`get_daemon_with_scope(` 之后那一段就是远程分支，也是唯一可能答 404/502 的分支。
+3. **delegate 会读成「没有 scope」。** `terminal_broadcast_run` 自己只调 `rate` 与 `authorize`，`check_daemon_scope` 在 `terminal_broadcast_preview_results` 里。按字面会把它归到「不查 scope」，于是完全逃出检查——比报错更坏，因为它是静默的。所以有一个具名 delegate 表。
+
+三个都解决后，形状分组就自然成立了：34 条路由落进 6 组，两两相等；加第四条内联 scope 的 handler 会**自动进来**，因为它由 `daemon_routes()` 的解析驱动，而不是手写清单。
+
+**改了什么**：`src-tauri/tests/daemon_integration.rs` 里删掉三路由比较那条的**函数体**（它的文档块与 code-集合测试共享，见下面的流程失误），换成 `every_scope_checked_route_documents_the_order_its_refusals_arrive_in` + 四个 helper（`chain` / `strip_rust_comments` / `spec_operation_block` / `response_description`）。旧测试的响应码集合比较**没有保留**——新测试比的是 403 的**措辞与顺序**，比码集合更严，但不再断言 `remove`/`stop`/`start` 三页码集合完全一致。那一条如果还有人想要，应该单独一条测试回到 `api.yaml` 上做，而不是挂在 scope 顺序这条测试上。**code-集合测试（`api_yaml_documents_the_codes_each_handler_can_return`）一行未动。**
+
+#### 验证（本轮做了什么，没做什么）
+
+`cargo` 不在这个容器里（`which cargo` 空），所以 **`cargo test` 与 `cargo fmt` 一条都没跑**。为了不把「没跑」写成「跑过了绿」，我把这段逻辑**用 Python 实现了两遍**并在真实文件上跑：
+
+- `/tmp/sim.py`：独立分析器（先写、后改），用来发现缺口，不追随 Rust 的实现细节。
+- `/tmp/sim2.py`：Rust 测试的逐行移植（同样的 helper、同样的 marker 表、同样的 `compared >= 25` 断言）。
+
+两个都报 **34 条路由 / 6 组形状 / 0 问题**，形状分别是 `['scope']×8`、`['preflight']×17`、`['scope','gate']×1`、`['gate','scope','authorize']×2`、`['gate','rate','scope','authorize']×5`、`['gate','rate','scope']×1`。
+
+**三次变异测试**（改完即还原）：
+
+1. 把 `disconnect` 的 403 改回裸句 → 红：「gate first but bare 403」。
+2. 删掉 `ssh_disconnect` 里的 `reject_if_gate_paused` 那一行 → 红：「scope first but 403 names precondition」。两个方向都能红，说明它不是「恒绿」的。
+3. 往 `approval_check` 体里加一行提到 `reject_if_gate_paused(...)` 的注释 → 剥离后仍绿，不剥离则链读成 `['gate','scope']`，而该页 403 是裸的正确句 → 会红。这就是第 1 条的实测证据。
+
+`yaml.safe_load` **90 paths**；`docs/api.yaml` 里三个既有的 in-band 豁免 marker（`only as a frame`、`returns 200`、`into that target's \`error\``）仍各在；三条 in-band 路由仍**不含** 423/429/408。
+
+**没跑**的：`cargo test --no-default-features --features daemon --test daemon_integration api_yaml`、`cargo fmt`。合并前必须补跑这两条——本轮的 Rust 是**没编译过**的，Python 移植只能证明逻辑与文件内容一致，不能证明它能编过（`spec_operation_block` / `response_description` 这两个 helper 是新写的 Rust 代码）。
+
+#### 一条流程失误（第 6 轮，必须记）
+
+本轮我在改 `daemon_integration.rs` 时，为了「删掉三路由测试」连做了几次删除/回填。**前两次都把 `api_yaml_documents_the_codes_each_handler_can_return` 的文档注释与相邻测试的注释合并了**——因为那条旧测试的文档块在文件里是**共享**的：`/// Every status code a handler answers with on its own is documented.` 这段同时是 code-集合测试与三路由测试的前缀，三路由测试只是接着它往下写。按「删一整段」处理，删掉的会包含下一段的开头。
+
+代价：文件在中间状态出现过**两个同名 `fn api_yaml_documents_the_codes_each_handler_can_return`**（`grep -c` 为 2），以及一段 `#[test]` 属性被吞掉的合并注释。本容器没有 cargo，**这两个错误里任何一个都会让整个测试二进制编译失败**，而我发现它们靠的是 `grep -c "fn ..."` 与花括号计数，不是编译器。
+
+**做对的唯一一步**是先 `git show HEAD:...` 取回原文再做字节级替换（`at`/`end` 精确到 `#[test]` 与花括号配对），而不是继续手工拼接。**教训：删一段带文档块的东西之前，先确认那段文档块是不是与相邻项共享的**；共享的话只能删 `#[test]` 之后的函数体。
+
+**当前状态的自检**（本容器能做的最强检查）：`#[test]` 计数 34（与 HEAD 相同：删 1 加 1）、测试函数名无重复、helper 名各出现 1 次、花括号计数与 HEAD 同为 -4（那 4 个差来自字符串字面量里的 `{`/`}`，HEAD 也是 -4）、`awk length>100` 在我新增的 3140-3470 行区间为空。**这些都不等于「能编过」**，合并前必须补跑 `cargo test`。

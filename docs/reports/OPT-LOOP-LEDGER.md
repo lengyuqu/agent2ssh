@@ -3172,3 +3172,34 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 #### 一条口径
 
 复核开始推提交了（`4db0762`）。**它说「没跑」，那这一轮的第一件事就是把那条提交跑一遍**——不是复核意见，是既成事实的验证。以后凡 main 上出现我未亲自跑过的提交，都按这个顺序处理：先跑，再谈意见。
+
+### consume 6 / 6 · batch 14 · issue #30（三个问题都核完了：两个「能」、一个「不新立条」）
+
+复核留了三个问题。核完的结论：**Q1 的计数口径是错的（20 是文案数不是路由数，裸句共 21 处，且真要改的只有 3 条）**；**Q2 成立，但挂 K7 的「下一步」而不是新立条**；**Q3 能只靠 grep，本轮做完了，并实测了「不剥注释就会在正确路由上变红」**。
+
+#### Q1：哪些 handler 的 scope 真在 gate 之后
+
+判据不能只看内联 `check_daemon_scope`——`preflight_guarded_request` 与 `authorize_command` 也会问 scope（前者内部 gate→rate→authorize，后者第一步即 scope）。只看内联会漏 15 条 preflight 路由，而那 15 条**裸句全是对的**（gate 在前，本来就先拒）。逐条核完：`/sessions` POST、`/sessions/{id}` DELETE、`/connections/{host}/disconnect` **三条不对**，本轮改。`connect` 第 5 轮改过，`disconnect` 漏在它下面。`/ping` 与 `/exec/preview` 的「裸句」其实把 scope 拒绝说清了（「Scoped token does not allow …」），不算缺口。剩下 18 条落在 `scope` 单形状与 `preflight` 形状里，**加限定只会在正确的地方加噪音，这不是欠账**。
+
+顺手发现一条没人问的：`proxy_exec` 两条分支**同序不同形**，`localhost` 走 preflight、远程分支第一句是 `get_daemon_with_scope`（404 先于 gate 与 scope）。第 5 轮说「同序」没错，但「首个拒绝是 404 不是 423」没说。本轮不改，记在本轮台账里。
+
+#### Q2：证书路径的指纹可比性
+
+`fingerprint_sha256` 与 `host_key_hash` 都是对 `CapturedKey.blob`（`cert.public_key()` 解包后的**裸 key**）求哈希，而 OpenSSH 在证书场景报的是**整张证书**的指纹。所以 import 一份含 `-cert-v01` 行的 `known_hosts` 之后，合法情况会被报成 `SSH host fingerprint changed`——方向是「该过的过不了」。这是 K7 已经声称覆盖的那一半，**故写进 K7 单元格而不是新立条**（两条分开写会在两处各自漂）。**未核**：russh 0.64 的 `Certificate` 是否暴露整段证书字节——本容器没有 `~/.cargo` 也没有 vendored 源码，只按本仓库的调用面判断。
+
+#### Q3：不变式测试能不能只靠 grep
+
+**能。** 不需要解析函数体：`handler_body_of` 早就在切 handler 体（走花括号），切完之后按字节位置排 5 个调用点即可。要解决的就三件事，都不是解析：(1) **注释会被数成调用点**——实测：给 `approval_check` 体里塞一行提到 `reject_if_gate_paused(...)` 的注释，不剥 → 链变 `['gate','scope']`，而它的 403 是正确的裸句 → **测试会在一条对的路上变红**；(2) **同一 handler 两条分支**——按 `get_daemon_with_scope(` 切，不解析 `if`；(3) **delegate 会读成「没有 scope」**——`terminal_broadcast_run` 的 `check_daemon_scope` 在 `terminal_broadcast_preview_results` 里，按字面会**静默逃出检查**，比报错更坏。三件解决后分组自然成立：34 条路由 6 组，新加的内联 scope handler 会自动进来，因为它由 `daemon_routes()` 驱动而不是手写清单。
+
+**删掉的东西要说**：三路由比较那条（含它自陈「清单是手工的」的注释）删了。新测试比的是 403 的**措辞与顺序**，比码集合更严，但**不再断言** `remove`/`stop`/`start` 三页码集合完全一致。有人还想要那条，应该单独回到 `api.yaml` 上做。
+
+#### 本轮改动
+
+- `docs/api.yaml`：`/sessions` POST、`/sessions/{id}` DELETE、`/connections/{host}/disconnect` 三处 403 改为「顺序即应答顺序」；`/terminal/broadcast` 与 `/broadcast/preview` **补了两个 403 条目**（原本没有），并写明「scope 拒绝走的是每个 target 的 `error`、HTTP 仍是 200，这个 403 不是它走的路径」——补条目是因为不补就有「handler 查 scope、却无 403 可对应」的空档，写错方向的那半由措辞挡住。
+- `src-tauri/tests/daemon_integration.rs`：新增 `every_scope_checked_route_documents_the_order_its_refusals_arrive_in` + 四个 helper；函数级注释记下三个陷阱（注释、双分支、delegate）与为什么那一个不能省。
+- `docs/KNOWN-ISSUES.md`：K7 补上可比性那半 + 两条可执行下一步。
+- 本文件与 `OPT-LOOP-L2-PENDING.md` 的本轮台账。
+
+#### 验证
+
+`yaml.safe_load` **90 paths**；三个 in-band marker 与三条 in-band 路由「不含 423/429/408」仍成立。**`cargo` 不在这个容器里，`cargo test` 与 `cargo fmt` 一条都没跑**——为不把「没跑」写成「跑过了绿」，我把这段逻辑用 Python 实现两遍（一个独立分析器、一个 Rust 测试的逐行移植），两份都报 34 条 / 6 组 / 0 问题；另做三次变异（改回裸句、删 gate 调用、塞注释）验证两个方向都会红。**合并前必须补跑 `cargo test ... --test daemon_integration api_yaml` 与 `cargo fmt`**：本轮 Rust 没编译过，Python 移植只能证明逻辑与文件一致，不能证明 `spec_operation_block` / `response_description` 这两个新 helper 能编过。
