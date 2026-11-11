@@ -3610,3 +3610,45 @@ L2-154（`/exec-multi` 全 0 语义）、L2-155（preview 缺 admin 门）、L2-
 19. **「把 `HELPER_STATUS` 扩成码集合是零红的空转，因为 15 个 preflight operation 都已经写了 500」**——11 个能回 gate-read 500 的 operation 没有 500（清单见上表第 6 条）；扩表会红 11~13 条。它引用的「`/exec` 有 500」来自我上一轮台账的笔误，已在本条更正。
 
 **回帖**：`2120615980584833024`（`## 本轮收尾`）。`#20` **保持 open**：剩余阻塞全在决策侧（L2-27 的分类学口径、L2-172 的字段取值、L2-175 的 400 双语义），另加 #22 的文件身份协议是 L2-165 的前置。
+
+### 手工/单发消费 · 2026-11-12 · #21 异常诊断（第四次进入 · 脱敏是模式匹配、两份日志的关联断裂、两条 429 的机制错配）
+
+**选靶**：`open` 十二条（#20–#29 + #31/#32 安全扫描贴），**无 `[opt-round]`** → 模式 B，第二段为空。#20 本轮之前刚收尾（`2120615980584833024`）且其后无回复 → 跳过；#21 最新评论是复核方 `2120566812650676224`（2026-11-11T17:18:21Z），未被消费；#23 的复核同样未消费但编号更大；#24/#27 要 Windows 实机、#22/#25 是 P2、#26/#28/#29 零评论。按「P1、编号最小、未消费」取 **#21**。
+
+**基线**：`1942b10`（= `cnb/main`）。复核方自述推了 `ff3c4a8`，**`git merge-base --is-ancestor ff3c4a8 cnb/main` 为假**——它的修订从未落地，本轮改的是 `f0ebc29` 那一版。
+
+**判定 13 条 → 成立 6 / 部分成立 2 / 不成立 2 / 与前条同源 3**。
+
+| # | 指摘 | 判定 | 证据要点 |
+|---|---|---|---|
+| 1 | ①「`/sessions` — the open side — does list one」立了个错前提 | **成立（我的错）** | `session_open`（`agent2ssh-daemon.rs:2416-2450`）调 `register_limited_session_for_command` → `check_session_open`（`limits.rs:130-193`，比 source/host/tag 的 `max_sessions`），**从不调** `reject_if_rate_limited`；close 侧两个都不调。真正的差别不是「open 限流、close 不限流」，而是「open 占一个槽、close 放一个槽，两边都不看每分钟速率」 |
+| 2 | ①′ 五处 4xx 例外清单无第六条 | **成立（复核方替我重扫）** | 我自己用 `yaml.safe_load` 复扫 105 个 operation、29 个列 429：正文提 4xx 而 responses 缺的有 17 条，全部落在四类里（文件级 500 段覆盖的 gate/policy 读失败、`Bytes` 处理器的 413、`/exec/stream` 只走帧、两个 broadcast 的 per-target 折叠），无第六条 |
+| 3 | ② `architecture.md` 同段三处夸大没删干净 | **成立** | `SESSION_TRACE_ID`（`src/api.ts:81-85`）是模块级 `const`，**每进程一个**不是 per-session；`tauri_commands.rs` 13 处 `append_diagnostic_log` 里只有 `write_diagnostic_log`（`:1546-1551`）带调用方 `fields`，其余 12 处 `grep trace_id` = 0；前端 `grep "headers.get\|x-agent2ssh-trace-id" src/` 为空 → 响应头里的 id 没人读 |
+| 4 | ③1 脱敏写成了「保证」 | **成立** | `is_sensitive_key`（`store.rs:1541-1556`）是 11 个拼写的**精确匹配**；`BUILTIN_RULES`（`redaction.rs:151-178`）10 条正则覆盖私网 IP/Bearer/`sk-`/`AKIA`/JWT/32 位 hex，无命令行口令 |
+| 5 | ③2 轮转时机写得不准 | **部分成立** | 结论对：`append_log_file()`（`daemon_control.rs:402-414`）是唯一轮转入口，在 `start_daemon_background` 的 Healthy 提前返回（`:421-435`）之后，只在真要 spawn 时跑。但它给的理由**不成立**，见第 12 条。另我自己发现文档写的「保留 `.1`/`.2` 两代」也错——`for i in (1..=2).rev()` 会造出 `.3`，是三代 |
+| 6 | ③3 四个 `command=` 都是权威化后的文本 | **部分成立** | 只有 `/exec`（`:1728`）在 `pf.command` 覆盖（`:1725-1727`）之后打；`/local-exec` 走 `preflight_guarded_request`（`rewritable: false`）、`/exec-multi` 与 `/exec/compare` 走 `authorize_targets`，三者都写请求原文。四→一 |
+| 7 | ③4 漏了「导出诊断包也带 `daemon.log` 尾部」 | **成立** | `diagnostics.rs:519-520` 追加 `## daemon.log tail`，`read_tail`（`:456-467`）取 300 行、逐行过 `redact_sensitive_text` 即第 4 条的盲区 |
+| 8 | M1 `session_open` 的 429 来自会话配额 | **成立**（与 1 同源） | `try_register_session` → `check_session_open`；scope 后缀是 ` sessions` 而不是 ` rate`（`limits.rs:151/168/186` vs `:243/258/275`） |
+| 9 | M2 `app.log` 脱敏漏 `-p`/`api_token` | **成立，实测**（与 4 同源） | 探针跑 `store::redact_sensitive_text`：`mysql -p hunter2`、`mysql -phunter2`、`openssl enc -pass pass:hunter2`、`API_TOKEN=abc123`、`API_KEY=abc123`、`PGPASSWORD=abc123` 六种原样；`--password=hunter2` 抹掉。补了它没试的 `api_key` 与 `PGPASSWORD`——`api-key`/`apikey` 在表里而 `api_key` 不在，说明漏的是**一整类拼写** |
+| 10 | M3 诊断包带走 `daemon.log` 尾部 | **成立**（与 7 同源） | 同上；另实测该函数也守着 `audit.jsonl` 的 `command`（`store.rs:1062`）与 webhook 载荷（`notify.rs:96/246`），所以漏网口令不只留本机 |
+| 11 | M4 `daemon.log` 无 `trace_id` | **成立** | 桥接层 `trace.rs:135` 只放 `<= WARN`，`trace_id` 在 `:155-160` 塞进 `app.log` 条目；`fmt::layer()`（`agent2ssh-daemon.rs:5686-5697`）不读 task-local |
+| 12 | M5 桌面 `daemon_start` 没有 CLI 那份 Healthy 提前返回；判据 `grep -n "DaemonPidState::Healthy" tauri_commands.rs` = 0 | **不成立** | 桌面 `daemon_start`（`tauri_commands.rs:1796-1825`）就有这道判断，命中时还写一条 `daemon start skipped because daemon is already healthy` 诊断并早返回；`grep` 实测 **2 处命中**（`:1770`、`:1800`，后者是 `crate::daemon_control::DaemonPidState::Healthy` 全路径写法）。这是它本轮唯一的整条反转 |
+| 13 | M6 `architecture.md` 的「every frontend diagnostic」会让人以为 Rust 侧也有 id | **不成立** | 紧接的下一句原文就是「A Rust-side desktop diagnostic therefore carries a `trace_id` only when the frontend supplied one」，已经否认了那个读法；而「every frontend diagnostic」本身是真的（`logDiagnostic` 无条件 `trace_id: SESSION_TRACE_ID`）。本轮仍把这段拆成四条 bullet 写清，但不记为缺陷 |
+
+**本轮改了什么**（全部 L1；`src-tauri/src/**` 零改动）：
+
+- `src-tauri/tests/daemon_integration.rs`：新增 `api_yaml_operation` 辅助函数与守卫 `api_yaml_names_the_mechanism_behind_each_session_429`，三条断言分别钉住「`POST /sessions` 的 429 必须点名 `check_session_open` 与 `sessions` 后缀」「`DELETE /sessions/{id}` 不得列 429 且必须写出 `unregister_session` 这个释放动作」「`POST /resident-sessions` 的 429 必须点名 `reject_if_rate_limited`/`rate`，且把 `AGENT2SSH_MAX_RESIDENT_SESSIONS` 归给 400」。
+- `docs/api.yaml`：文件级段落新增「两种 429」一段，把 `rate` 与 `sessions` 两个 scope 后缀写成客户端唯一可用的判据，并说明两族在 `execution_limits.toml` 里由 `*_per_minute` 与 `*_max_sessions` 各自配置；`DELETE /sessions/{id}` 补 operation 级 `description`（**为什么这里不能查限流**：它是释放槽位的唯一调用，查了会让会话上限变成死锁），403 文案收回到只管 403；`POST /sessions` 的 429 从一句「Execution limit exceeded」改成点名 `check_session_open` 与重试的正确姿势（`DELETE` 而非定时重试）；`POST /resident-sessions` 的 429 删掉「or the local-environment session cap」这个错归因（该上限走 `resident_open_core` → 400）并写明与 `/sessions` 恰好相反。
+- `docs/architecture.md` 的 Correlation IDs 段：把一段长句拆成四条——id 只落 `app.log` 且只在 WARN/ERROR 上、`daemon.log` 一行都没有、前端 id 是每进程一个、12 处桌面 Rust 诊断不带 id、响应头里的 id 前端从不读回。
+- `docs/guides/configuration-guide.md`：`daemon.log` 那节从一段话扩成五点——脱敏是模式匹配（含实测的六种漏网形状与「`api_key` 不在表里」这个类级结论）、四个 `command=` 里只有一个会变、两份日志不能按 `trace_id` 对上、轮转只在 spawn 时按 5 MB 触发且保留三代、诊断包会带走尾部 300 行；树状清单里 `daemon.log` 那行同步改成「仅在 spawn 新进程时按大小轮转」。
+- `docs/reports/OPT-LOOP-L2-PENDING.md`：新增 **L2-176**（敏感键表精确匹配，实测清单 + 三条改法）、**L2-177**（诊断包默认带 `daemon.log` 尾部）、**L2-178**（`daemon.log` 无 `trace_id`）、**L2-179**（运行中的 daemon 的 `daemon.log` 无上界，轮转只在 spawn 时发生）。
+
+**反向验证（一次，实测）**：把 `POST /sessions` 429 里的 `\`register_limited_session_for_command\` → \`check_session_open\`` 改成泛指的 `the session counter`，`api_yaml_names_the_mechanism_behind_each_session_429` 立刻红并打出「has to name that instead of implying a rate limit」；恢复后全绿。
+
+**验证**：`npm run build` **6.63 s**；`cargo fmt --check` 绿；`--no-default-features --lib` **863 passed / 1 failed / 1 ignored**（红项仍是那条故意红的 `an_ipv6_literal_at_port_22_is_removed`，与基线一致）；`--no-default-features --features daemon --test daemon_integration` **83 passed / 0 failed**（原 82，新守卫 +1）；`yaml.safe_load` **90 paths / 105 operations / 29 个列 429**。
+
+**新增「不成立」，不要重复提**：
+
+1. **「桌面 `daemon_start` 没有 CLI 那份 Healthy 提前返回」，判据 `grep -n "DaemonPidState::Healthy" tauri_commands.rs` = 0**——`tauri_commands.rs:1796-1825` 就有，且带一条 `daemon start skipped because daemon is already healthy` 诊断；`grep` 实测 2 处（`:1770`、`:1800`）。由此推出的「从桌面点启动每次都会轮转」也不成立。
+2. **「`architecture.md` 的 every frontend diagnostic 会让人以为 Rust 侧也有 id」**——同段下一句原文已否认这个读法；「every frontend diagnostic」本身为真。
+

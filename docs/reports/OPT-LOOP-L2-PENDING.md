@@ -2328,3 +2328,45 @@ forward_start（:3204-3244）与 forward_remove（:3077-3113）、forward_stop�
 **本轮已做的（文档侧，不是行为侧）**：`/local-exec` 的 400 末尾补一句「所有这些都是在执行前就决定好的拒绝；handler 最后一步也把 local exec 自身的任何失败映射成 400，其中一些发生在进程启动之后，所以码本身分不清拒绝与跑到一半失败」——与 `/sftp/*` 早就在用的「the request is invalid, or the upload failed」同形。行为面不动。
 
 **建议改法**：(a) 保持 400 但保证消息可分辨（现状，本轮已文档化），代价 0；(b) 执行失败改成 500，与「gate/policy 读不了」的 500 混在一起，需要先加一个可区分的 message 前缀，否则客户端仍然只能读文本；(c) 改成 200 + `exit_code: null` + `stderr` 里的失败原因，最贴近「命令跑过」的语义，但要改 `ExecResult` 的消费方（桌面端、CLI、MCP、活动流五处）。倾向 (a) 现在、(c) 与 `/exec` 家族一起拍。
+
+### L2-176（新）：`redact_sensitive_text` 的敏感键表是精确匹配，`-p hunter2` / `api_key=` / `PGPASSWORD=` 这类口令原样落审计、且随 webhook 外发
+
+**位置**：`src-tauri/src/store.rs` 的 `is_sensitive_key`（`:1541-1556`，11 个精确拼写）与 `redact_sensitive_text`（`:1421-1473`）；调用面四处——`store.rs:1062`（`audit.jsonl` 的 `command` 字段）、`diagnostics.rs:148/295/323/464`（`app.log` 与诊断包尾部）、`notify.rs:96/246`（审批通知的 Slack / 通用 webhook 载荷）、`playbook.rs:858`（playbook 结果）。
+
+**判断**：**成立，实测**（2026-11-12，`--no-default-features` 下直接调 `store::redact_sensitive_text`，探针测试跑完即删）。六种形状原样输出：`mysql -p hunter2`、`mysql -phunter2`、`openssl enc -pass pass:hunter2`、`export API_TOKEN=abc123`、`export API_KEY=abc123`、`export PGPASSWORD=abc123`；被正确抹掉的是 `mysql --password=hunter2`、`Authorization: Bearer <20+>`、私网 IP。
+
+根因不是"漏了几个词"，而是**匹配方式是精确相等**：key 表里同时有 `api-key` 与 `apikey`，却没有 `api_key`；有 `token`，没有 `*_token`；短选项 `-p` 去掉前导 `-` 之后是单字母 `p`。所以漏的是一整类拼写，补单词补不完。
+
+**为什么它是 L2**：改这张表会同时改 `audit.jsonl`、`app.log`、外发 webhook、诊断包四处的内容，是对外可见的行为变更；而放宽匹配有真实误伤面——`-p` 同时是 `--port`/`--pid` 的短选项，`PASSWORD`/`PASS` 会作为普通英文单词或环境变量名出现，`*_key` 会命中 `key=value` 形式的各种无秘密配置。匹配口径必须有人定，不能由消费任务顺手放宽。
+
+**建议改法**：(a) 改后缀/包含匹配（`*password*`、`*_token`、`*_key`、`*_secret`），覆盖最广、误伤最大，需要一份白名单压住 `key=`、`public-key=`、`monkey=…` 这类；(b) 保留 key 表不动，另加一张**短选项白名单**（`-p` `-P` `--pass` `-pass` `pass:` `--api-token` `--api_token` `--auth`…），并加两条约束：`-p` 之后的值不能以 `-` 开头、当前 token 必须是裸选项而不是 `-pfoo` 的一部分；(c) 不猜形状，改成写审计/外发之前按 shell 词法解析命令，认出 `mysql`/`mysqldump`/`openssl`/`psql`/`redis-cli` 等已知程序的口令参数——最准，代价是维护程序清单。回滚：三条都是独立函数/独立表，(b) 删掉白名单即回到今天，不动调用面。倾向 (b) 先做（成本最低、误伤可控），(c) 作为 (b) 漏网的兜底另议。
+
+### L2-177（新）：诊断包默认带走 `daemon.log` 尾部 300 行，把 L2-169 的暴露面从"本机运维看日志"变成"发一个包就带走"
+
+**位置**：`src-tauri/src/diagnostics.rs:487-520`（`read_tail(daemon_log, 300)` 写进 `## daemon.log tail` 段），`read_tail` 在 `:456-467`，逐行过 `redact_sensitive_text` 即 L2-176 的盲区。
+
+**判断**：**成立（代码事实）**。`export_diagnostic_bundle` 的产物里固定包含 `daemon.log` 最后 300 行；而 `daemon.log` 正是四个 exec handler 写 `command=` 原文的文件（L2-169）。两者叠加的后果不是说错，是**成本变了**：原本只有能登机器的人能看到命令行，现在任何一个拿到诊断包的人都能看到，而包里那层脱敏恰好漏掉口令形状（L2-176）。
+
+**为什么它是 L2**：加开关就是改 IPC 形状（`export_diagnostic_bundle` 的参数与桌面调用点），改默认值是改变已有产物的内容语义，两者都会让"同一个按钮导出的包"在不同版本里含义不同。
+
+**建议改法**：(a) 保持现状，本轮已在指南写明"分享前先裁剪"具体指这一步；(b) 加 `include_daemon_log: bool`（默认 `true`）并在导出 UI 上显式勾选，勾选处写明"含未脱敏命令原文"；(c) 默认不包含，需要时用 `--include-daemon-log`；(d) 只在包里写行数与时间范围，正文另存。回滚：(b)(c) 都是参数级改动，去掉参数即回到今天。倾向 (b)+(b) 的提示文案，因为它让用户在**做出选择的那一刻**看到风险，而不是事后读指南。
+
+### L2-178（新）：`daemon.log` 永远没有 `trace_id`，同一请求的两份日志只能靠时间戳对齐
+
+**位置**：`src-tauri/src/bin/agent2ssh_daemon/trace.rs:135`（`if level > tracing::Level::WARN { return; }`，只有 WARN/ERROR 过桥）与 `:155-160`（从 `REQUEST_TRACE_ID` 取 id 塞进 `app.log` 条目）；`src-tauri/src/bin/agent2ssh-daemon.rs:5686-5697`（`tracing_subscriber::fmt::layer()`，无 `FormatEvent`、不读 task-local）。
+
+**判断**：**成立（代码事实）**。`trace_id` 只存在于 `app.log` 的 JSON 字段里，且只在 WARN/ERROR 上；`daemon.log` 的一行都没有。所以"用 trace_id 把前端动作与 daemon 日志连起来"这条链在默认 `info` 级别下是断的：成功请求的 `command=` 行既不在 `app.log` 里，`daemon.log` 里那行也没有 id。
+
+**为什么它是 L2**：给 `fmt::layer()` 换 `FormatEvent` 是纯输出格式变更，但它会让**每一行** `daemon.log` 多一个字段，属于对外可见的日志格式契约；而放宽桥接级别会成倍放大 `app.log` 体积（每个 exec 一条），是运维成本决策。
+
+**建议改法**：(a) 不动，本轮已把边界写进 `docs/architecture.md` 的 Correlation IDs 段（说明两份文件不能按 id 关联）；(b) 给 `fmt::layer()` 加自定义 `FormatEvent`，从 task-local 读 id，带上 `trace_id=`——只改 `daemon.log` 的格式；(c) 桥接级别放到 `<= INFO`，让 `app.log` 承接关联职责，代价是日志量；(d) 两条都做，(b) 保证 `daemon.log` 自足、(c) 保证 `app.log` 可过滤。回滚：(b) 换回默认 `FormatEvent` 即可，(c) 改回 `<= WARN` 即可。
+
+### L2-179（新）：长时间运行的 daemon 的 `daemon.log` 没有上界，轮转只在 spawn 时按大小发生
+
+**位置**：`src-tauri/src/daemon_control.rs:402-414`（`append_log_file` 先 `rotate_daemon_log_if_needed(&log_path, 5 MB)` 再以追加方式打开），唯一调用点 `:458`（在 `start_daemon_background` 内，Healthy 提前返回在 `:421-435` 之后）。
+
+**判断**：**成立（代码事实）**。轮转是启动器的动作，不是 daemon 的动作：运行中的 daemon 持有 stdout/stderr 的 fd，日志涨到多大都不会转；只有下一次真的 spawn 时才检查一次大小。因此一个跑几个月的 daemon 可以让 `daemon.log` 无上界增长，而 `daemon start` 在已有健康 daemon 时提前返回、连这次检查都不做（CLI 与桌面都有这道判断，桌面在 `tauri_commands.rs:1797-1802`）。顺带更正一处文档旧写法：轮转保留的是 `.1`/`.2`/`.3` **三代**（`rotate_daemon_log_if_needed` 的 `for i in (1..=2).rev()` 把 `.2 → .3`、`.1 → .2`，再当前 → `.1`），不是两代。
+
+**为什么它是 L2**：让 daemon 自己轮转要把 stdout 的 `Stdio::from(File)` 换成可重开的 writer（或改用 `logrotate` 的信风格），是进程 I/O 结构的改动；改成"每次 spawn 无条件轮转"丢历史；两者都要有人定"多大、保留几代、谁负责"。
+
+**建议改法**：(a) 保持现状，文档已写明"运行中的 daemon 不会自己截断"，由运维定期 `daemon restart`；(b) spawn 前由启动器检查，超阈值时提示（不自动转）——零风险，让问题可见；(c) daemon 侧周期性 reopen：`main` 里起一个定时任务，按大小 rename + 重新 `dup2`/重开文件；(d) 交给系统 `logrotate` 并把它写进发行说明。回滚：(b) 删掉提示即可，(c) 删掉定时任务即可回到今天。倾向 (b) 先做，(c) 与 L2-176 一起拍——两者都在改日志落地方式。
