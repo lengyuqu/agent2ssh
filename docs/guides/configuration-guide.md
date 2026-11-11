@@ -178,20 +178,30 @@ JSON 格式，包含 `hosts` 数组，也可以包含由桌面端代理管理页
 
 ### 文件格式
 
-JSON 对象，键为 `host:port` 形式的连接身份，值包含主机别名、解析后的地址、host key 算法、SHA256 指纹和 Unix 秒级时间戳：
+JSON 对象，键为 `host:port|<algorithm>`：`host:port` 部分是连接身份，`|` 之后是这条指纹对应的 host key 类型（`known_host_key`，`embedded_ssh.rs`）。一台服务器可以同时提供多种 host key，所以同一台主机常有多条并列记录——与 OpenSSH 的 `known_hosts` 每行一条「主机 + 密钥类型」同构。值包含主机别名、解析后的地址、host key 算法、SHA256 指纹和 Unix 秒级时间戳：
 
 ```json
 {
-  "192.168.1.10:22": {
+  "192.168.1.10:22|ssh-ed25519": {
     "host": "web1",
     "address": "192.168.1.10",
     "host_key_algorithm": "ssh-ed25519",
     "fingerprint_sha256": "SHA256:abc123...",
     "first_seen_unix": 1781836215,
     "last_seen_unix": 1781836215
+  },
+  "192.168.1.10:22|ssh-rsa": {
+    "host": "web1",
+    "address": "192.168.1.10",
+    "host_key_algorithm": "ssh-rsa",
+    "fingerprint_sha256": "SHA256:def456...",
+    "first_seen_unix": 1781836215,
+    "last_seen_unix": 1781836215
   }
 }
 ```
+
+校验只比对**本次协商出的那一种**：同一类型指纹变了仍然拒绝连接，另一种类型的存在不算冲突（切换 `algo set --hostkey` 偏好不再误报「fingerprint changed」）。落盘形态是带 `|算法` 的键；旧版本写入的无 `|` 条目（算法在值里的 `host_key_algorithm`）仍然可用——加载时按值里的算法重键到内存，下一次写盘时迁移成新形态。手工编辑时建议直接写带 `|` 的形态，与文件实际长相一致。
 
 ### 注意事项
 
@@ -325,7 +335,7 @@ denied_commands = ["rm -rf *", "mkfs *"]
 - 主机列表、审计、健康快照、连接、会话、转发和审批列表会按 scoped token 的 allowed hosts/tags 过滤；审计导出、趋势指标、事件流、待处理 OTP prompt 和 SSH sync diff 属于敏感全局读取，仅 unrestricted admin 可用
 - resident session 列表同样按会话自身的 `local:<id>` 主机和标签过滤。读取缓冲输出使用操作字符串 `resident-session read` 检查主机、标签和命令 scope；关闭使用 `resident-session close`，并经过执行 gate、限流、风险和审批。列表和读取在 gate 暂停时仍可使用，但关闭会被拒绝。
 - resident 命令执行期间仍可读取会话元数据与滚动输出。通过授权的关闭请求会取消当前命令及同一会话中排队的命令，结束 shell 并回收其进程树；关闭不必等到当前命令的执行超时。
-- 桌面 SFTP 删除目录先请求 daemon 的 `POST /sftp/rm-rf/authorize`，完成 scope、gate、限额、风险和审批检查。daemon 只授权，不连接 SSH；桌面校验响应中的主机和路径一致后，在自身进程执行删除，使用桌面已解锁的凭据，不跨进程传递密码。普通路径默认属于高风险，确认删除后仍需在审批队列批准；`/`、`/*`、`/.` 被直接阻断。没有 `force` 或绕过审批的回退，daemon 未运行时应先启动服务。原 `POST /sftp/rm-rf` 仍由 daemon 授权并执行，供需要在 daemon 中执行的客户端使用；其 `timeout_secs`（默认 60 秒）约束 SSH/SFTP 传输操作，审批等待使用独立的审批 TTL。
+- 桌面 SFTP 删除目录先请求 daemon 的 `POST /sftp/rm-rf/authorize`，完成 scope、gate、限额、风险和审批检查。daemon 只授权，不连接 SSH；桌面校验响应中的主机和路径一致后，在自身进程执行删除，使用桌面已解锁的凭据，不跨进程传递密码。普通路径默认属于高风险，确认删除后仍需在审批队列批准；`/`、`/*`、`/.` 被直接阻断。没有 `force` 或绕过审批的回退，daemon 未运行时应先启动服务。原 `POST /sftp/rm-rf` 仍由 daemon 授权并执行，供需要在 daemon 中执行的客户端使用；其 `timeout_secs`（默认 60 秒）是**连接预算**：它作为第二个实参交给 `connect_embedded_ssh`（TCP 连接、套接字读写与 session 超时），不是整棵目录树的删除总时限——`sftp_remove_dir_all_core_with_source` 的 BFS 循环逐条 `readdir`/`remove`，目录越大，总耗时越可能超过这个数。审批等待使用独立的审批 TTL。
 - MCP 的 `local_exec` 和 `resident_session_*` 请求由 daemon 管理执行、预热及审批期限，不再受客户端固定 30 秒总超时限制；建立 HTTP 连接仍限时 10 秒。命令的 `timeout_secs` 继续生效，resident 命令超时仍会结束整个会话。
 - PTY session 写入按已完成的输入行做授权和审计；daemon session 和 desktop 本地 session 都会缓存未完成输入，直到换行后再按完整命令授权；`session_read`、`session_list`、`forward_list` 这类观察操作通过 token/scope 控制，不默认写入 `audit.jsonl`
 
@@ -918,7 +928,7 @@ X-Agent2SSH-Signature: sha256=<hex-encoded-signature>
 
 ### 用途
 
-配置 daemon 层的执行速率和 session 并发限额。限额在 daemon 进程内强制执行，覆盖 `/exec`、`/exec-multi`、`/exec/compare`、SFTP 操作、`/playbooks/run`、session write、session open、forward add、WebSocket exec、WebSocket terminal 和 `/daemons/localhost/exec`。
+配置 daemon 层的执行速率和 session 并发限额。限额在 daemon 进程内强制执行。速率限额覆盖：`/exec`、`/local-exec`、`/exec-multi`、`/exec/compare`、`/exec/stream`、全部 `/sftp/*`（含 `/sftp/rm-rf` 与 `/sftp/rm-rf/authorize`）、`/sessions/:id/write`、`/resident-sessions` 与 `/resident-sessions/:id/exec`、`DELETE /resident-sessions/:id`、`/forwards`、`/forwards/multi`、`DELETE /forwards/:id`、`/forwards/:id/start`、`/forwards/:id/stop`、`/connections/:host/connect`、`/connections/:host/disconnect`、`/playbooks/run`、`/terminal`（WebSocket terminal）与 `/terminal/broadcast`（WebSocket exec）、`/daemons/:alias/exec`。**不覆盖**的只有只读/预览路径：`/exec/preview`、`/playbooks/:name/dry-run`、`/ping` 及各类列表查询。判据是代码里的 `reject_if_rate_limited` 调用点：13 个 handler 直接调用，另有一批经 `preflight_guarded_request`（`:570`）统一进入。
 
 ### 文件位置
 
@@ -966,7 +976,7 @@ per_minute = 10
 max_sessions = 2
 ```
 
-`per_minute = 0` 或 `max_sessions = 0` 表示该维度不限额。速率限额覆盖 WebSocket terminal 的 completed-line input；session 并发限额覆盖 WebSocket terminal open。超限请求返回 HTTP 429，写入 `blocked` audit，并发布 `limit_rejected` 事件。
+`per_minute = 0` 或 `max_sessions = 0` 表示该维度不限额。速率限额的完整覆盖面见本节开头的清单，不是只有 WebSocket：在 WebSocket terminal 上它按 **completed-line input** 计（每写完一行算一次），而不是按连接或按帧。session 并发限额覆盖 session open 与 WebSocket terminal open。超限请求返回 HTTP 429，写入 `blocked` audit，并发布 `limit_rejected` 事件。
 
 ---
 

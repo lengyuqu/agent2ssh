@@ -1196,6 +1196,19 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
     post:
       summary: Create or update a host profile
+      description: >-
+        Matched by `name`, and a match is replaced **wholesale**, not merged:
+        `add_host_core` assigns the new profile over the old one
+        (`core.rs:172-173`), so every field the request omits resets to its
+        default — `init_command` becomes null, `tags` empty, `group` falls back
+        to `default` after `normalize_config`. `update_host_core` (the desktop
+        path) carries `password` and `passphrase` over when they are omitted;
+        this route carries nothing over. `HostProfile.required` is
+        `[name, host]`, so a two-field body is contract-valid and will clear the
+        rest. Reading the record first does not make a read-modify-write safe
+        either: the response redacts `password` and `passphrase` to null
+        (`redacted_for_transport`), so echoing it back clears the stored
+        credentials. Send the complete profile when you mean to replace one.
       requestBody:
         required: true
         content:

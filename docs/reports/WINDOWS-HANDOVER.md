@@ -128,7 +128,7 @@
 
 | 项 | 结果 |
 |---|---|
-| SFTP 8 MiB 往返（K2 复测） | OpenSSH 10.3：上传 648 ms / 下载 1077 ms；Dropbear 2024.85（Alpine 3.20）：上传 827 ms / 下载 1077 ms；两侧 SHA-256 均一致，无停滞。停滞报告本身由 `a_stalled_peer_reports_how_far_the_transfer_got` 覆盖；真机未诱导 600 s 超时 |
+| SFTP 8 MiB 往返（K2 复测） | OpenSSH 10.3：上传 648 ms / 下载 1077 ms；Dropbear 2024.85（Alpine 3.20）：上传 827 ms / 下载 1077 ms；两侧 SHA-256 均一致，无停滞。**停滞报告的文案与计数**由 `a_stalled_peer_reports_how_far_the_transfer_got` 覆盖——它直接构造 `StallGuard{last_progress: now - STALL_TIMEOUT, bytes_written: 4096, …}` 再调私有方法 `stalled()`，测的是消息与计数，**不是「停滞被检出」**；检测在当前传输上不成立（`File::write` 不产生 `Ok(0)`，见 K2 与 L2-96），真机也未诱导 600 s 超时 |
 | known_hosts 双算法键控 | 同一 127.0.0.1:22222 下 `…\|ssh-ed25519` 与 `…\|ssh-rsa` 两条目共存；把 ed25519 条目的指纹改坏后仍报 `SSH host fingerprint changed`（负对照） |
 | 证书拒绝三因 | 容器 sshd 只信任测试 CA：合法证书通过；错误 principal、过期、不受信 CA 分别给出各自的文案（`valid for ["somebody-else"]` / `expired at …` / 提示 `TrustedUserCAKeys`） |
 | SHA-1 回退 warn | 见 7.3：发现并修复误报；真阳性为 `PubkeyAcceptedAlgorithms ssh-rsa` 下 RSA 认证，记录 `detected_by: "transport fallback"` |

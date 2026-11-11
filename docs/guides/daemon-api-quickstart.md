@@ -219,7 +219,7 @@ curl http://127.0.0.1:7722/health
 curl -H "$AUTH" http://127.0.0.1:7722/hosts
 ```
 
-### 添加主机
+### 添加或整条替换主机
 
 ```bash
 curl -X POST -H "$AUTH" \
@@ -239,6 +239,10 @@ curl -X POST -H "$AUTH" \
   }' \
   http://127.0.0.1:7722/hosts
 ```
+
+**同名主机是整条替换，不是字段合并**：`add_host_core` 找到同名记录就 `*existing = host.clone()`（`core.rs:172-173`），`update_host_core` 也只对 `password`/`passphrase` 做「省略即保留」。所以对一台已存在的主机重发上面这个 body，会把它没写出来的字段——包括 `init_command`、`group`、`proxy_id`——全部落回默认值（`init_command` 变成 `None`，`group` 还会被 `normalize_config` 归一成 `default`）。契约里 `HostProfile` 的 `required` 只有 `[name, host]`，这个 body 是合法的，代价却是静默清空。
+
+反过来的坑同样存在：`GET /hosts` 的响应会把 `password`/`passphrase` 脱敏成 `null`（`redacted_for_transport`），所以「先 GET 再整体 POST 回去」这种读-改-写会**连凭据一起清掉**。要改个别字段，用桌面端（它走 `update_host_core` 且会带回省略字段）；HTTP 与 `agent2ssh host add` 都是整条替换，替代做法是把完整记录连同凭据一起提交。
 
 ### 删除主机
 
@@ -341,7 +345,7 @@ curl -X POST -H "$AUTH" \
 在另一个终端批准审批：
 
 ```bash
-# 1. 查看待审批列表
+# 1. 查看审批列表（返回全部记录，含已结束项；客户端自己按 status 过滤）
 curl -H "$AUTH" http://127.0.0.1:7722/approvals
 
 # 2. 批准（替换为实际的 approval-id）
@@ -438,7 +442,7 @@ per_minute = 10
 max_sessions = 2
 ```
 
-`per_minute = 0` 或 `max_sessions = 0` 表示该维度不限额。速率限额覆盖 `/exec`、`/exec-multi`、`/exec/compare`、SFTP 操作、session write、forward add、`/playbooks/run`、WebSocket exec、WebSocket terminal completed-line input 和 `/daemons/localhost/exec`；session 并发限额覆盖 session open 和 WebSocket terminal open。超限时 HTTP 入口返回 429，并写入 `blocked` audit；事件流发布 `limit_rejected`。本地代理执行路径 `/daemons/localhost/exec` 同样受本地 daemon 限额约束。
+`per_minute = 0` 或 `max_sessions = 0` 表示该维度不限额。速率限额覆盖：`/exec`、`/local-exec`、`/exec-multi`、`/exec/compare`、`/exec/stream`、全部 `/sftp/*`（含 `/sftp/rm-rf` 与 `/sftp/rm-rf/authorize`）、`/sessions/:id/write`、`/resident-sessions` 及其 `:id/exec`、`DELETE /resident-sessions/:id`、`/forwards`、`/forwards/multi`、`DELETE /forwards/:id`、`/forwards/:id/start`、`/forwards/:id/stop`、`/connections/:host/connect`、`/connections/:host/disconnect`、`/playbooks/run`、`/terminal`（WebSocket terminal，按 completed-line input 计）与 `/terminal/broadcast`（WebSocket exec）、`/daemons/:alias/exec`；`/exec/preview` 与 `/playbooks/:name/dry-run` 这类只读预览路径不在其中。session 并发限额覆盖 session open 和 WebSocket terminal open。超限时 HTTP 入口返回 429，并写入 `blocked` audit；事件流发布 `limit_rejected`。本地代理执行路径 `/daemons/:alias/exec` 同样受本地 daemon 限额约束：`proxy_exec` 先按本地限额拦一次，再把请求转给目标 daemon。
 
 ---
 
@@ -724,11 +728,13 @@ curl -X DELETE -H "$AUTH" \
 
 ## Approvals
 
-### 列出待审批请求
+### 列出审批请求（全部，含已结束项）
 
 ```bash
 curl -H "$AUTH" http://127.0.0.1:7722/approvals
 ```
+
+**这个数组不过滤、不排序、不分页。** `approval_list` 先把过期的 `pending` 翻成 `timed_out`，然后返回内存 store 的**全部**记录（`approval.rs:796-805`，`HashMap` 迭代序），已批准、已拒绝、已超时的都在里面，顺序每次可能不同，也没有任何 query 参数。想要「待审批队列」就自己筛 `status == "pending"`；桌面端就是这么做的（2 秒轮询 + SSE 快路径）。另外，过期翻状态发生在**读这个路由的时候**，不是定时任务——没人读、也没有 waiter 的审批卡会一直显示 `pending`。
 
 响应示例：
 
