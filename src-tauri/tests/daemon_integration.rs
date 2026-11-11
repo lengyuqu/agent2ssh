@@ -2214,9 +2214,12 @@ const HANDLER_STATUS: [(&str, &str); 10] = [
 /// `StatusCode::LOCKED` and nothing else — so the same text scan can pin it
 /// without guessing. The half it cannot pin is the other direction: the same
 /// helper answers `500` when `execution_gate.json` cannot be read, and *that* is
-/// not listed, because it would demand a 500 on 33 operations that document it
-/// once in `info.description` instead of 33 times. A per-operation repeat would
-/// be an invitation to delete both copies.
+/// not listed, because it would demand a per-operation 500 on every operation
+/// that can consult the gate, where `info.description` states it once. A
+/// per-operation repeat would be an invitation to delete both copies, and the
+/// count it would take is not one this file derives — it spans operations that
+/// reach the gate directly, through `preflight_sftp_rm_rf`, and through
+/// `load_execution_gate` itself, so any number written here is a snapshot.
 const HELPER_STATUS: [(&str, &str); 8] = [
     ("too_many_requests_status()", "429"),
     ("reject_if_rate_limited(", "429"),
@@ -2314,12 +2317,12 @@ struct DroppedRoute {
 ///
 /// A call is dropped when its segment carries no string literal, when the first
 /// literal is not a path, or when the segment names no method builder with a
-/// name after it. Every one of those drops is silent by construction: eight
-/// families read `daemon_routes` and each is phrased as "no operation here
-/// violates X", so a lost operation makes its own checks vacuous while the
-/// family stays green, and the only thing that would move is prose. Returning
-/// the drops lets one test assert the parse is lossless, instead of every family
-/// trusting a denominator nobody states.
+/// name after it. Every one of those drops is silent by construction: three
+/// tests read `daemon_routes` (four call sites) and each is phrased as "no
+/// operation here violates X", so a lost operation makes its own checks vacuous
+/// while the test stays green, and the only thing that would move is prose.
+/// Returning the drops lets one test assert the parse is lossless, instead of
+/// those checks trusting a denominator nobody states.
 ///
 /// One drop is legitimate and known: `/` redirects to the console through a
 /// closure, which has no `async fn` for the body checks to read, and it is not
@@ -2594,28 +2597,44 @@ fn a_brace_inside_a_literal_does_not_close_the_body() {
 
 /// The route parse must not quietly lose a `.route(...)` call.
 ///
-/// Eight families read `daemon_routes`, and each is phrased as "no operation
-/// here violates X". A call the parser cannot read makes that phrase vacuous for
-/// the operation it mounted: the family sees one entry fewer and stays green,
-/// and nothing in the suite says how many entries it expected. So the
-/// denominators are only decidable while the parse is lossless — that is what
-/// this pins, rather than a count a new route would break.
+/// Three tests read `daemon_routes`, four call sites between them, and each is
+/// phrased as "no operation here violates X". A call the parser cannot read
+/// makes that phrase vacuous for the operation it mounted: the test sees one
+/// entry fewer and stays green, and nothing in the suite says how many entries
+/// it expected. So the denominators are only decidable while the parse is
+/// lossless — that is what this pins, rather than a count a new route would
+/// break.
+///
+/// It pins the *set* of drops, not just "no drop on an API path": `/` is both
+/// the one route mounted with a closure and one of the two non-API paths, so a
+/// predicate that only asked about the path would accept any future unreadable
+/// shape that happened to land on it.
 #[test]
 fn every_route_call_is_read_as_an_operation() {
     let daemon = include_str!("../src/bin/agent2ssh-daemon.rs");
     let (routes, dropped) = daemon_routes_and_drops(daemon);
-    // A drop on a non-API route is accounted for; a drop anywhere else means an
-    // operation fell out of every derived check at once.
-    let unexplained: Vec<&DroppedRoute> = dropped
+    // The line is left out of the comparison on purpose: adding a route above
+    // the router chain shifts it, and a test that breaks on that is noise. The
+    // pair is what carries the claim.
+    let expected = [(
+        "/",
+        "the segment names no method builder with a handler after it",
+    )];
+    let actual: Vec<(&str, &str)> = dropped
         .iter()
-        .filter(|drop| !NON_API_ROUTES.contains(&drop.path.as_str()))
+        .map(|drop| (drop.path.as_str(), drop.reason))
         .collect();
-    assert!(
-        unexplained.is_empty(),
-        "these `.route(...)` calls name something the derived contract checks cannot read, \
-         so every family built on `daemon_routes` skips them in silence: {unexplained:?}. \
-         Teach `daemon_routes` the shape, or mount the handler through \
-         `.route(path, get(handler))`."
+    let detail: Vec<String> = dropped
+        .iter()
+        .map(|drop| format!("line {} `{}`: {}", drop.line, drop.path, drop.reason))
+        .collect();
+    assert_eq!(
+        actual, expected,
+        "the set of `.route(...)` calls the parser cannot read has changed: {detail:?}. A drop \
+         on an API path means that operation fell out of every contract check at once, in \
+         silence; a drop on `/` is expected and is the closure that redirects to the console. \
+         Teach `daemon_routes_and_drops` the shape, or mount the handler through \
+         `.route(path, get(handler))`, and update this expectation deliberately."
     );
     assert!(
         !routes.is_empty(),
@@ -3086,9 +3105,6 @@ fn api_yaml_declares_a_body_for_every_response() {
 /// and held to whatever that reading implies.
 #[test]
 fn api_yaml_documents_how_each_handler_reads_its_body() {
-    // `/` and `/console` serve the web console, not the API.
-    const NON_API_ROUTES: [&str; 2] = ["/", "/console"];
-
     let daemon = include_str!("../src/bin/agent2ssh-daemon.rs");
     let spec = include_str!("../../docs/api.yaml");
 
