@@ -572,8 +572,11 @@ pub fn start_daemon_background(daemon_bin: &Path) -> Result<DaemonStartResult> {
 const DAEMON_OWNER_FILE: &str = "daemon.owner";
 
 /// `pid` alone is not enough to name a process for long: the OS recycles them.
-/// The start time makes a marker left behind by an earlier daemon fail to match
-/// a later, unrelated process that happens to get the same pid.
+/// The start time separates a marker left behind by an earlier daemon from a
+/// later process that gets the same pid, but only while the two start times
+/// differ. It is whole-second resolution (see [`observable_live_start_time`]),
+/// so a recycled pid that starts in the same second the marker recorded is
+/// indistinguishable from the process the marker named.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct OwnerMarker {
     pid: u32,
@@ -1295,7 +1298,9 @@ mod tests {
         let me = std::process::id();
         // The same pid with a start time that is not this process's: what a
         // marker left by an earlier daemon looks like once the OS recycles its
-        // pid for something else.
+        // pid for something else. The reverse is not covered here and cannot be
+        // told apart by `daemon_is_owned`: a recycled pid whose start time lands
+        // in the same whole second as the recorded one matches the marker.
         let stale = OwnerMarker {
             pid: me,
             start_time: process_start_time(me).unwrap().wrapping_add(10_000),
