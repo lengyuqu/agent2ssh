@@ -2127,3 +2127,30 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 2. **「`proxy_exec` 两臂的限流目标是同一个，可能重复计数」— 不成立。** 两臂 `if/else` 互斥，同一次请求只走一条；提出者本人也标注「不是缺陷」。
 3. **「契约把 `SftpUploadRequest.timeout_secs` 写成了不存在」— 不成立。** 类型与 core 都没有这个字段，故契约没写是对的。
 4. **「给 `/exec/stream` / `/terminal/broadcast` 补 429（以及 423）能让契约更完整」— 不成立，且是消费者自己第 2 轮犯的错。** 两条路由在升级后/广播内把拒绝折成帧或 per-target 字段，HTTP 恒 101/200；契约里写码就是给生成客户端一个永不进入的分支。第 3 轮已删，并加 `INBAND_REJECTIONS` 双向断言防回来。
+
+### consume 4 / 6 · 2026-11-11 10:32–10:50 (GMT+8) · batch 11（issue #17）· 回帖 `2120344711834537984`
+
+6 轮进度 **4 / 6**，issue 保持 open。指摘 = CodeBuddy 两条评论（`2120343464557592576` 验上轮点的两块、`2120343510778798080` 自撤它自己一条假报）。
+
+| # | 结论 | 判定 | 证据 |
+|---|---|---|---|
+| 1 | `/sftp/upload` 有隐式 30/60 s 预算，「没有超时入口」要加限定 | 成立 | `sftp_upload_core_with_source:1957` 传字面量 60；`connect_tcp_address:851` 的 `timeout_secs.min(30)`、`set_read/write_timeout:1676-1677`、`session.set_timeout:1687`。契约改成「没有**调用方**入口 + 60 s 隐式预算」，超出落成 400（`sftp_upload` 的 `map_err` = `BAD_REQUEST`） |
+| 2 | L2-96「唯一闸门」偏窄 | 成立 | 改成「SFTP 层的闸门只有 8 个在途 ack；socket 写超时只拦发送缓冲满」。结论不变 |
+| 3 | `/shutdown` 缺自己该有的 500 | **不成立** | `info.description` 第一段原文「every non-public route answers 500 to a caller that does not present the admin token」已覆盖；`auth.rs:37-63` 的 500 属于每条非公开路由，不属于 `/shutdown` |
+| 4 | 该 500 来自 `auth_middleware` 而非 extractor | 成立 | 否掉上一轮自己列的「`Option<Json<_>>` 交汇点」 |
+| 5 | `{"expect_pid":0}` 读作被覆盖、实际 409 | 部分成立 | `0` 在 `u32` 内、会比对、答 409，已补；但「只有 negative 成立」不对——超出 `u32` 同样解析失败、同样跳过检查 |
+| 6 | 三个 `forward_*` 外部臂同形 | 成立 | `forward_remove:3058`、`forward_start:3180`、`forward_stop:3140` 结构一致；`/start` 与 `/stop` 已补前置条件 |
+| 7 | `"not a 423"` 否定式 marker 会假红 | 成立 | 改成 `into that target's \`error\``；真改代码时「不得声明 423」那条也会红，所以假红只是表述层 |
+| 8 | daemon 无 `/sftp/cancel`，`transfer_id` 对 HTTP 是死的 | 成立 | `sftp_cancel` 仅在 `tauri_commands.rs:650`（`:3657` 注册）；daemon 10 条 `/sftp/*`（`:5875-5884`）无 cancel。写进 upload 描述 + L2-122 第四条 |
+| 9 | 它自报「已在 api.yaml 补 500」 | 不成立（已自撤） | 当时工作区干净、`/shutdown` 仍 5 条码。仅作流程记录 |
+
+**本轮 L1**：`93abb92`（`/sftp/upload`、`/forwards/{id}/start|stop`、`/shutdown` 的 `expect_pid: 0`；`HELPER_STATUS` 扩到 8 项，新增 `require_admin(`/`require_recording_admin(` → 403；preview marker 改肯定句）、`24ce4dd`（L2-96 措辞收窄、L2-122 第三节改写 + 第四条）。
+
+**验证**：`npm run build` 6.61 s；`--lib` 862/1/1；`--test daemon_integration` 71 passed；`cargo fmt --check` 绿；105 operations / 30 带 423 / 29 带 429。负向对照：删 `POST /shutdown` 的 403 → `403 post /shutdown (daemon_shutdown via helper)`。**新增的 403 入口当前零缺口**，纯为下一条 admin 路由准备。
+
+**本轮未做**：L2-122 四条待拍板。第 1 条（gate 读失败时广播一族 fail-open）决定 `INBAND_REJECTIONS` 是 3 条还是 2 条，也决定那个 500 要不要改；第 4 条（加 `POST /sftp/cancel`）面最大。
+
+#### 第 4 轮新增的不成立条目（原文保留，请勿重复提）
+
+1. **「`/shutdown` 缺一个自己该有的 500」— 不成立。** 被 `info.description` 第一段的全局 500 覆盖；逐条补即上一轮共同反对的重复。
+2. **「`{"expect_pid": 0}` 证明『out-of-range』只有 negative 成立」— 部分不成立。** 超出 `u32` 的值同样解析失败并跳过检查；`0` 是另一类（在范围内但会比对）。
