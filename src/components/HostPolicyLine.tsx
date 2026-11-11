@@ -65,10 +65,20 @@ export default function HostPolicyLine({ host }: Props) {
         },
       ]
     : [
-        { key: "low", label: t("low auto-approve"), tone: "text-risk-low", dot: "bg-risk-low" },
+        // What the daemon actually does with no policy on the host, which is
+        // what "no summary" means here: `load_approval_policies` returns an
+        // empty list when neither `policy.toml` nor `approval_policies.toml`
+        // is configured, and `authorize_command_with_approval` only demands
+        // approval when a policy matched or the risk is high
+        // (`needs_approval = approval_policy.is_some() || (risk == High && !force)`).
+        // So low and medium are both unpoliced, and only high is gated -- by
+        // `host_policy_summary` rewriting its `Auto` to `Required`, not by a
+        // default policy that does not exist. The old copy said "med/high need
+        // approval", which over-reported medium.
+        { key: "low", label: t("low/med auto-approve"), tone: "text-risk-low", dot: "bg-risk-low" },
         {
-          key: "medium",
-          label: t("med/high need approval"),
+          key: "high",
+          label: t("high need approval"),
           tone: "text-risk-medium",
           dot: "bg-risk-medium",
         },

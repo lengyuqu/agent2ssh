@@ -1,4 +1,4 @@
-import { Check, Copy, Pencil } from "lucide-react";
+import { Copy, Pencil } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useI18n } from "../../i18n";
 import type { ApprovalRequest, RiskLevel } from "../../types";
@@ -39,7 +39,6 @@ export default function ApprovalDetail({
   onCopyAndExecute,
 }: Props) {
   const { t } = useI18n();
-  const [copied, setCopied] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
 
@@ -76,27 +75,23 @@ export default function ApprovalDetail({
   const contextRows = candidateRows.filter((row): row is [string, string] => Boolean(row[1]));
 
   // The "Copy command and open Execution" button below calls this and then
-  // `onCopyAndExecute`. It used to call only the latter: the label promised a
-  // clipboard write that never happened, so the icon could never reach its
-  // `Check` state either.
+  // `onCopyAndExecute`. It used to call only the latter, so the label promised
+  // a clipboard write that never happened.
+  //
+  // There is deliberately no "copied" state: `onCopyAndExecute` switches the
+  // module, which unmounts this whole panel in the same tick, so a `Check`
+  // icon would never paint a frame. A rejecting clipboard is caught and
+  // dropped -- turning that into a toast is L2-115.
   function handleCopy() {
     // `navigator.clipboard` is absent outside a secure context (and in jsdom),
     // where reaching for it would throw before the caller's navigation runs.
-    // A *rejecting* clipboard is still silent -- that half is L2-115.
     const clipboard = navigator.clipboard;
     if (!clipboard?.writeText) {
-      setCopied(false);
       return;
     }
-    clipboard
-      .writeText(approval?.command ?? "")
-      .then(() => {
-        setCopied(true);
-        window.setTimeout(() => setCopied(false), 1500);
-      })
-      .catch(() => {
-        setCopied(false);
-      });
+    clipboard.writeText(approval?.command ?? "").catch(() => {
+      // Silent by design here; see L2-115.
+    });
   }
 
   return (
@@ -179,7 +174,7 @@ export default function ApprovalDetail({
               onCopyAndExecute();
             }}
           >
-            {copied ? <Check size={14} /> : <Copy size={14} />}
+            <Copy size={14} />
             {t("Copy command and open Execution")}
           </Button>
         )}

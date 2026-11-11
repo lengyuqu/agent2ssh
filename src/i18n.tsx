@@ -840,8 +840,8 @@ export const zh: Record<string, string> = {
   "Live terminal": "实时终端",
   "Approved · daemon executing on this host": "已批准 · daemon 正在该主机执行",
   // v3 T04: host policy summary + audit skin
-  "low auto-approve": "low 自动放行",
-  "med/high need approval": "med/high 需审批",
+  "low/med auto-approve": "low/med 自动放行",
+  "high need approval": "high 需审批",
   "deletion forbidden": "删除类禁止",
   "deletion forbidden +{count} custom": "删除类禁止 +{count} 条自定义",
   "auto-approve": "自动放行",
