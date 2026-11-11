@@ -17,14 +17,14 @@
 //!    a handler that gained or lost an admin gate would keep these assertions
 //!    green. Mirroring a path is not mirroring every method on it: the daemon
 //!    also mounts `POST /hosts` and `POST /health-snapshot`, and neither has a
-//!    counterpart here. The other 74 calls — 84 `(path, method)` pairs over 74
-//!    distinct paths — are not mirrored at all (`/metrics`, `/gate*`,
-//!    `/audit*`, `/sftp/*`, `/sessions*`, `/forwards*`, `/recordings*`,
-//!    `/prompts/*`, `/terminal*`, `/events/stream`), so behaviour that depends
-//!    on scope, admin, or a route this router does not mount belongs in the
-//!    real-daemon e2e targets (`daemon_local_exec_e2e`,
-//!    `daemon_resident_session_e2e`, ...), which spawn `agent2ssh-daemon`
-//!    itself.
+//!    counterpart here. The other 74 calls are not mirrored at all (`/metrics`,
+//!    `/gate*`, `/audit*`, `/sftp/*`, `/sessions*`, `/forwards*`,
+//!    `/recordings*`, `/prompts/*`, `/terminal*`, `/events/stream`): they carry
+//!    84 `(path, method)` pairs over 73 paths, and the one path with no pair is
+//!    the `/` redirect. So behaviour that depends on scope, admin, or a route
+//!    this router does not mount belongs in the real-daemon e2e targets
+//!    (`daemon_local_exec_e2e`, `daemon_resident_session_e2e`, ...), which
+//!    spawn `agent2ssh-daemon` itself.
 
 mod common;
 
@@ -2277,18 +2277,38 @@ const NON_API_ROUTES: [&str; 2] = ["/", "/console"];
 /// keeps the check from degenerating into "the one path I already know about is
 /// allowed": a closure moved onto an API path still fails, and a named handler
 /// that stops parsing no longer hides behind a whitelisted path.
+///
+/// The name and its parenthesis are read with the whitespace between them
+/// optional, because `get (handler)` is the same call to Rust: a check that
+/// insisted on `get(` would call that closure a named handler and send the
+/// reader off to teach the parser a shape it already understands.
 fn mounts_closure(segment: &str) -> bool {
     METHOD_BUILDERS.iter().any(|(needle, _)| {
-        segment.match_indices(*needle).any(|(at, _)| {
+        let name = needle.trim_end_matches('(');
+        segment.match_indices(name).any(|(at, _)| {
             let preceded_by_name = segment[..at]
                 .chars()
                 .next_back()
                 .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_');
-            let starts_an_identifier = segment[at + needle.len()..]
-                .chars()
-                .next()
-                .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_');
-            !preceded_by_name && !starts_an_identifier
+            if preceded_by_name {
+                return false;
+            }
+            // `get (…)` is the same call with a space between the name and the
+            // parenthesis, so the argument starts after the whitespace rather
+            // than straight after the name.
+            let Some(argument) = segment[at + name.len()..].trim_start().strip_prefix('(') else {
+                return false;
+            };
+            let mut argument = argument.trim_start();
+            // `move || …` and `async || …` wrap the closure without naming it.
+            for word in ["move", "async"] {
+                if let Some(after) = argument.strip_prefix(word) {
+                    if after.starts_with(|ch: char| ch.is_whitespace() || ch == '|') {
+                        argument = after.trim_start();
+                    }
+                }
+            }
+            argument.starts_with('|')
         })
     })
 }
@@ -2731,6 +2751,54 @@ fn the_console_route_mounts_one_named_handler() {
         daemon.contains("\nasync fn serve_console("),
         "`/console` names `serve_console`, but there is no `async fn serve_console(` for it to \
          reach"
+    );
+}
+
+/// The router chain mounts paths through `.route(...)` and nothing else.
+///
+/// The parser reads that one call shape, and axum's other mounting builders do
+/// not contain the substring `.route(`: `route_service` takes a service,
+/// `nest` and `nest_service` re-root a sub-router, `merge` splices another
+/// router in, and `fallback`/`fallback_service` answer methods the segment never
+/// names. A path added through any of them yields neither an entry nor a drop,
+/// so every derived check — including the drop check — would skip it in silence.
+/// That is the one way to mount a route that neither net sees, which is why it
+/// is stated rather than parsed.
+#[test]
+fn the_router_chain_mounts_paths_only_through_route() {
+    let daemon = include_str!("../src/bin/agent2ssh-daemon.rs");
+    let start = daemon
+        .find("let app = Router::new()")
+        .expect("the router chain moved, so this test no longer knows where it starts");
+    let chain = &daemon[start..];
+    let Some(end) = chain.find(".with_state(") else {
+        panic!("the router chain no longer ends at `.with_state(`, so it has no bound here");
+    };
+    let chain = &chain[..end];
+    // A comment naming one of these builders would read as a mount, so the
+    // chain is reduced to its code first.
+    let chain: String = chain
+        .lines()
+        .map(|line| line.split("//").next().unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let others = [
+        ".route_service(",
+        ".nest(",
+        ".nest_service(",
+        ".merge(",
+        ".fallback(",
+        ".fallback_service(",
+    ];
+    let offenders: Vec<&str> = others
+        .into_iter()
+        .filter(|builder| chain.contains(builder))
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "the router chain mounts paths through {offenders:?}. The route parse reads `.route(...)` \
+         only, so those routes produce no entry and no drop, and every derived check skips them \
+         without a word. Teach `daemon_routes_and_drops` the shape, or mount them with `.route`."
     );
 }
 
