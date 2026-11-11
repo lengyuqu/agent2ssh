@@ -2285,3 +2285,27 @@ forward_start（:3204-3244）与 forward_remove（:3077-3113）、forward_stop�
 **为什么它是 L2**：改的是 `src-tauri/src/core.rs` 的返回值，任何一个改法都会改变既有客户端读到的值。
 
 **建议改法**：(a) 只补文档——本轮做法，`api.yaml` 已写明「`stopped_early` 是阈值被触发、不等于 `skipped > 0`；单批次下两者可以一个是 `true` 一个是 0」，代价 0；(b) 只在还有下一批时置位——`if batch_idx + 1 < batches.len() { stopped_early = true; }`，一行，但会让「阈值触发」这件事从响应里消失，旧客户端再也看不到 `max_failures` 是否生效；(c) 拆成 `threshold_reached` + `stopped_early` 两个字段，语义最准，代价是契约新增字段 + `types.ts`/CLI 打印同步。建议 (a) 现在做、(c) 排到下一次契约变更窗口，(b) 不要单独做。
+
+## 2026-11-12 · 手工单发：issue #20（第五次进入）
+
+逐条判定与证据见 `OPT-LOOP-LEDGER.md` 同日「手工/单发消费 · #20 第五次进入」小节。**行号基线 `f77e6ed`**；本轮 `src-tauri/src/**` 零改动，产物全在 `docs/**` 与 `src-tauri/tests/**`。
+
+### L2-173（新）：`local:wsl:<distro>` 的发行版名完全不校验，而同一位置的容器 id 要过字符集检查
+
+**位置**：`src-tauri/src/local_exec.rs:414-423`（`(Wsl, Some(distro))` 只拒 `Some("")`，其余原样进 `distro`）；`wsl_plan`（`:659-680`）把 `-d <distro>` 直接拼进 argv；对照 `container_target_for_host`（`:743-748`）+ `validate_container_id`（`:758-771`）——容器 id 走 `[A-Za-z0-9._-]` + 128 字节上限。
+
+**判断**：**成立（代码事实，行为未实测）**。`local:wsl:a:b` 经 `split_once(':')` 得到 `kind = "wsl"`、`argument = "a:b"`，`ContainerRuntime::from_id("wsl")` 为 `None`（`wsl` 是 shell 环境不是 runtime），于是落到 `environment_for_host` 的 `Wsl` 臂，`distro = "a:b"` 不被拒绝。装了 WSL 的机器上这就是 `wsl.exe -d a:b --shell-type login sh -c …`，由 `wsl.exe` 自己报错；没装 WSL 的机器上先撞 `WSL is not available`。**本机无 WSL，所以「`wsl.exe` 到底怎么命名一个不存在的发行版」没有实测**；能实测的只有间接证据（`local:WSL:x` 返回 `WSL is not available`，说明 `Wsl` 臂确实被走到）。同一族里 Docker 一侧同形输入（`local:docker:a:b`）被 `validate_container_id` 拒成 400，两条路径对「冒号后缀」的处理不一致。
+
+**为什么它是 L2**：任何修法都改 `src-tauri/src/**` 的拒绝面（加一道 distro 校验 → 原本 200 的请求可能变 400，或原本由 `wsl.exe` 报的错变成 daemon 的 400），属于对外可见的行为变化。
+
+**建议改法**：(a) 只补文档——写明「发行版名由 `wsl.exe` 解释，daemon 不校验；名字不对是 `wsl.exe` 的错误，不是 400」，代价 0；(b) 与容器 id 对齐，用同一套 `[A-Za-z0-9._-]` 校验 distro，代价是一条断言 + 「哪些合法发行版名会被误拒」的复核（真实发行版名含空格，如 `Ubuntu 22.04 LTS`，所以照抄容器那套会误伤——这条要人拍板）；(c) 只拒含 `:` 的 distro，最小改动但仍与容器的字符集口径不同。倾向 (a) 现在、(b) 等有人拿真 WSL 实测过再说。
+
+### L2-174（新）：`HELPER_STATUS` 是「helper → 单个码」的 1:1 表，且文本扫描不传递——helper 产出的 500 没有任何自动守卫
+
+**位置**：`src-tauri/tests/daemon_integration.rs:2227-2236`（8 条 `(helper, code)`）；`:3482` 起的 `api_yaml_documents_the_codes_each_handler_can_return` 用 `handler_body_of` 取**函数体原文**比对；同一测试的文档注释明说「经 shared helper 到达的码看不到，那些路由要手写 408/423/500」（`:3111-3117`）。产出 500 的两条链：`reject_if_gate_paused`（`bin/agent2ssh-daemon.rs:400-410`，`load_execution_gate` 失败 → `INTERNAL_SERVER_ERROR`）与 `check_approval_required`（`approval.rs:1019` → `load_approval_policies` → `execution_control.rs:481-482` → `CommandAuthorizationError::Internal` → `:812-815` 的 500）。
+
+**判断**：**成立**，但复核方给的修法**不成立**。「给 `HELPER_STATUS` 加 `("load_execution_gate(", "500")` 与 `("load_approval_policies(", "500")` 后 `/local-exec` 会立刻出现在失败列表里」——实测不成立：那个扫描只读**该 handler 自己的函数体**，`local_exec` 体内只有 `preflight_guarded_request(`，而 `load_execution_gate(` 在 `reject_if_gate_paused` 内部（`:405`）、`load_approval_policies(` 全仓在 `bin/` 下**零出现**（只在 lib 的 `approval.rs` / `execution_control.rs`）。两条新增都不会匹配到任何一个 handler 体，加完仍然一条都不报。真正能覆盖这族的是把表从「helper → 一个码」改成「helper → 码集合」：`preflight_guarded_request(` 目前只登记 `429`，实际还能回 `423`（gate 暂停）与 `500`（gate/policy 读不了）。
+
+**为什么它是 L2**：改成码集合会让 17 个走 preflight 的 operation 一次性被要求补 `423`/`500`，其中多数今天没写 500；这是**契约面**的批量变更，不该由消费任务一轮扫完。
+
+**建议改法**：(a) 保持现状 + 靠本轮新增的按路由守卫（`local_exec_documents_the_internal_errors_its_helper_answers_with`），代价 0，覆盖只有一条路由；(b) 把 `HELPER_STATUS` 扩成 `&[(&str, &[&str])]`，先只加 `500` 到 `preflight_*` 两条，按失败清单一次性补齐 api.yaml——预计 10–15 个 operation，一次提交可完成，但要有人确认「gate/policy 读失败一律 500」这个口径（与 L2-122 的 fail-closed 决策同源）；(c) 折中：只给「400 分类学」这类一手可证的路由加按路由守卫。倾向 (b)，但先拍 L2-122。
