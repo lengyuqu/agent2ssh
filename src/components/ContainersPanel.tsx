@@ -128,7 +128,16 @@ export default function ContainersPanel() {
   }
 
   function copyCommand(target: ContainerDiscoveryTarget) {
-    navigator.clipboard.writeText(execCommand(target));
+    // Absent outside a secure context (and in jsdom). Reaching through it would
+    // throw and skip the confirmation below, so a copy that cannot happen must
+    // not claim it did.
+    const clipboard = navigator.clipboard;
+    if (!clipboard?.writeText) {
+      return;
+    }
+    clipboard.writeText(execCommand(target)).catch(() => {
+      // Silent; surfacing it is the same open question as L2-115.
+    });
     setCopied(target.id);
     setTimeout(() => setCopied((current) => (current === target.id ? null : current)), 2000);
   }

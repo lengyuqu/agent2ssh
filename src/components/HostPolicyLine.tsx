@@ -75,7 +75,7 @@ export default function HostPolicyLine({ host }: Props) {
         // `host_policy_summary` rewriting its `Auto` to `Required`, not by a
         // default policy that does not exist. The old copy said "med/high need
         // approval", which over-reported medium.
-        { key: "low", label: t("low/med auto-approve"), tone: "text-risk-low", dot: "bg-risk-low" },
+        { key: "low", label: t("low/med auto-approve (no policy)"), tone: "text-risk-low", dot: "bg-risk-low" },
         {
           key: "high",
           label: t("high need approval"),

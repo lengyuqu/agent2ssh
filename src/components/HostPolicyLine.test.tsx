@@ -45,7 +45,7 @@ describe("HostPolicyLine", () => {
     fetchHostPolicy.mockResolvedValue(null);
     renderLine(null);
 
-    expect(screen.getByText("low/med auto-approve")).toBeTruthy();
+    expect(screen.getByText("low/med auto-approve (no policy)")).toBeTruthy();
     expect(screen.getByText("high need approval")).toBeTruthy();
     expect(screen.getByText("deletion forbidden")).toBeTruthy();
     expect(screen.queryByText("med/high need approval")).toBeNull();
@@ -58,6 +58,6 @@ describe("HostPolicyLine", () => {
     await waitFor(() => expect(fetchHostPolicy).toHaveBeenCalledWith("db-2"));
     expect(await screen.findByText("db-2")).toBeTruthy();
     expect(screen.getByText("med need approval")).toBeTruthy();
-    expect(screen.queryByText("low/med auto-approve")).toBeNull();
+    expect(screen.queryByText("low/med auto-approve (no policy)")).toBeNull();
   });
 });

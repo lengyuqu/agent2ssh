@@ -120,7 +120,15 @@ export default function KeysPanel({ onChanged }: Props) {
   }
 
   function copyPublicKey(pubKey: string, name: string) {
-    navigator.clipboard.writeText(pubKey);
+    // Same guard as `ApprovalDetail.handleCopy`: `navigator.clipboard` is absent
+    // outside a secure context, and throwing here would skip the confirmation.
+    const clipboard = navigator.clipboard;
+    if (!clipboard?.writeText) {
+      return;
+    }
+    clipboard.writeText(pubKey).catch(() => {
+      // Silent; surfacing it is the same open question as L2-115.
+    });
     setCopiedKey(name);
     setTimeout(() => setCopiedKey(null), 2000);
   }
