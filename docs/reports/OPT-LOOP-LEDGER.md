@@ -1914,3 +1914,22 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 **验证**：`npm run build` **6.60 s**；`npm test` **214 passed / 28 files**（212 → 214 是新增 `HostPolicyLine.test.tsx` 两条）；`cargo test --no-default-features --lib` **861 passed / 1 failed / 1 ignored**（仍是那条故意红的 IPv6）。
 
 **#16 保持 open，6 轮进度 3 / 6。**
+
+### consume 4 / 6 · 2026-11-11 · batch 10 (#16) · 自取轮（等待超时）
+
+**等待记录**：第 3 轮回帖（`2120307967374282752`，08:09）后 5×60 s + 一次 90 s 复核，评论总数停在 7，CodeBuddy 未回（它前三轮都在 1–2 分钟内回，这轮改慢）。按协议标「等待超时」，用 issue 正文的点名首查项自取，不空等。
+
+**判定 1 条成立（数据丢失）+ 1 条形状已核（不立号）。**
+
+| 来源 | 内容 | 判定 | 处置 |
+|---|---|---|---|
+| 自取 · 首查项① | `HostProfile.init_command` 在 `src/types.ts` 里根本不存在，而 `api.yaml` 有、`types.rs` 有 `#[serde(default)]`；`AddHostForm` 的保存载荷从零构造，`update_host_core` 又只对 `password`/`passphrase` 做「省略即保留」 | **成立（数据丢失）** | **L1**：`types.ts` 补字段、`AddHostForm` 携带 `editingHost?.init_command ?? null`、新增 `AddHostForm.test.tsx` 两条往返断言。**L2-120**：其余客户端的同类清空要后端加哨兵才能根治 |
+| 生产方开批更正 | 六个调用点 `let (risk, _)` 忽略 `approved`，而 `/exec` 会翻 `force` | 成立但**数量是 8 个不是 6 个**，且无行为后果 | 不立号；在 `authorize_command` 上补文档注释（哪五处必须消费、哪八处可以不消费及原因） |
+
+**为什么这轮值得做**：前三轮的首查项①一直在「文案/注释」层面打转，这轮第一次在同一个对账里抓到**会改变用户数据**的缺口——`init_command` 只在连接后被 `embedded_ssh.rs` 执行，界面上完全看不见，丢了也没有任何提示。它同时说明「契约宽于镜像」这一族并不都只是观感问题：`side_effect` 那种是（桌面不传），`init_command` 这种不是（桌面传了、但传的是残缺品）。
+
+**机械对账的口径**（下次可直接复用）：从 `api.ts` 抓 `${daemonUrl}` 后的路径与方法，与 `api.yaml` 的 `paths` 逐条比 → 18/18 相符；再用脚本把 69 个 schema 的 `properties` 与 `types.ts` 的 `export type` 字段集对齐 → 33 对可比，7 对漂移，其中 1 对是**同名不同物**（`WebDavSyncStatus` 是前端视图模型，camelCase），1 对（`HostProfile`）有后果，5 对属 L2-110 同族。
+
+**验证**：`npm run build` **6.33 s**；`npm test` **216 passed / 29 files**（214 → 216 是新增 `AddHostForm.test.tsx` 两条）；`cargo test --no-default-features --lib` **861 passed / 1 failed / 1 ignored**（仍那条故意红的 IPv6）；`cargo fmt --check` 绿；`--features daemon --bin agent2ssh-daemon` 编译通过（本轮唯一的 Rust 改动是一段文档注释）。
+
+**#16 保持 open，6 轮进度 4 / 6。**

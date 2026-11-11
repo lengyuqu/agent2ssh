@@ -761,3 +761,15 @@ CodeBuddy 的复核 `2120258070138740736` 新批 3 条 → **成立 1（§五.2�
 | N3 | `src/components/HostPolicyLine.tsx`（`summary === null` 的兜底数组）对照 `approval.rs` 的 `load_approval_policies`（`:969-980` 无文件返回空 `Vec`）与 `execution_control.rs` 的 `needs_approval`（`:490-492`，`policy.is_some() \|\| (risk == High && !force)`） | 成立 | 兜底文案原写 `low auto-approve` / `med/high need approval`，把 medium 报成需审批。真实默认是 low、medium 都无人管，只有 high 被 `host_policy_summary` 改写成 `Required`。**本轮已改成 `low/med auto-approve` + `high need approval`**，并新建 `src/components/HostPolicyLine.test.tsx`（此前该组件零覆盖）钉住兜底分支与 summary 分支 |
 
 **L2-115 的现状（供拍板时一并看）**：①透传命令到执行页（含 `initialHost` 同步，N1+N4）；②剪贴板被拒时给提示。两条都在 `src/**`，都改用户可见行为。**N2 已作为 L1 关闭**——它不是独立缺陷，是①之前「按钮名不实」的副产物。
+
+## 2026-11-11 · batch 10 第 4 轮追加（`HostProfile.init_command` 的镜像缺口与它造成的真实丢数据）
+
+第 4 轮是自取轮（CodeBuddy 5×60 s + 90 s 无回复，标「等待超时」）。按 issue 正文首查项①「`src/types.ts` / `src/api.ts` ↔ `docs/api.yaml` 漂移」做机械对账：**路由层干净**（`api.ts` 用到的 18 条路径与 `api.yaml` 声明的方法逐条相符），漂移全在 schema 层。7 处类型镜像差异里，6 处是「契约更宽、镜像更窄」的差集（与 L2-110 同族），**只有一处有后果**。
+
+| 编号 | 位置 | 判断 | 为什么不能自动落 |
+|---|---|---|---|
+| **L2-120** | `src-tauri/src/core.rs:186-244`（`update_host_core` 的 `config.hosts[original_idx] = host.clone()` 整条替换）对照 `types.rs:81-85`（`#[serde(default)] pub init_command: Option<String>`）、`embedded_ssh.rs:2326-2339`（连接后执行它）、`bin/agent2ssh.rs:652/2007/2043`（`host add --init-command` 是唯一写入方） | 成立（**数据丢失**） | 桌面端那条已经用 L1 修掉了（`types.ts` 补字段 + `AddHostForm` 携带 `editingHost?.init_command`），但**任何其他省略该字段的客户端仍会把它清掉**：`update_host_core` 只对 `password` / `passphrase` 做了「省略即保留」（`:200-216` 有注释解释桌面不回显），`init_command` 没有同样的保护，`config.hosts[idx] = host` 直接覆盖成 `None`。手工改过 `hosts.json`、或用 CLI 设过 `--init-command` 的主机，只要被任何 API 客户端整条 `PUT` 一次，连接后的那条命令就静默消失 | 二选一：①给 `init_command` 加哨兵（沿用 `passphrase` 的 `""` 约定，或改成 `Option<Option<String>>`）并在 `update_host_core` 里「省略即保留」——与既有两处的语义统一，代价是契约要写清哨兵；②承认 `PUT /hosts/{name}` 是**整条替换**，把 `init_command` 暴露到桌面表单里，让每次保存都显式带上它（属产品改动，要加表单控件）。①更彻底，②更符合 REST 语义但要求所有客户端都懂这个字段 |
+
+**另外 6 处契约宽于镜像（只记录，不另立号，与 L2-110 一并拍板）**：`AuditEntry` 缺 `action`/`outcome`/`risk_unclassified`/`side_effect`；`AuditFilter` 缺 `command_pattern`/`host_env`/`host_owner`/`host_role`/`search`（桌面审计面板因此没有这些筛选入口）；`DaemonInfo` 缺 `scope`；`ExecRequest`/`ExecResult` 缺 `side_effect`（即 L2-110 本身）、`ExecResult` 另缺 `dropped_bytes`。`WebDavSyncStatus` 是**同名的前端视图模型**（camelCase 字段），不是镜像，属误报。
+
+**生产方在开批更正里问的那条形状（`let (risk, _)` 忽略 `approved`）**：已核，**数量是 8 个不是 6 个**（它漏了 `ssh_connect`/`ssh_disconnect`），且**无行为后果**——8 处都不经过 `core::exec*` 的 `force` 闸门；真正需要 `approved` 的五个消费点（`exec`、`local_exec`、`proxy_exec`、`run_playbook`、`authorize_targets`）都消费了。**不另立号**，改为在 `authorize_command` 上写一段文档注释说明「哪些调用点必须消费、为什么其余 8 处可以不消费」，避免下一轮再被当成漏翻 force 报上来。
