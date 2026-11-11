@@ -4791,7 +4791,7 @@ paths:
                 properties:
                   hosts_added:         { type: integer }
                   hosts_skipped:       { type: integer }
-                  hosts_updated:       { type: integer, description: "Name matched and at least one of host, user, port, jump_host, proxy_id, risk_override, tags, group, env, role or owner differed; that host was then replaced in place. A name that matches and is otherwise identical counts as `hosts_skipped`, not here." }
+                  hosts_updated:       { type: integer, description: "Name matched and at least one of host, user, port, jump_host, proxy_id, risk_override, tags, group, env, role or owner differed; that host was then replaced in place. A name that matches and is otherwise identical counts as `hosts_skipped`, not here. Three fields are never the reason for an update, because they are carried over rather than replaced: `key_path`, `password` and `passphrase` when the bundled host omits them, and `init_command` for the same reason — the export never strips it, so an omitted one means the exporting machine had none, not that the sharer disabled it. `ai_allowed` is the exception: an omitted one deserialises to `true` and does overwrite." }
                   risk_rules_imported: { type: boolean }
                   playbooks_imported:  { type: boolean }
         "400":

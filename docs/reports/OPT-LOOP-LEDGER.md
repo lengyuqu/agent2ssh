@@ -1957,4 +1957,32 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 
 **验证**：`npm run build` **6.37 s**；`npm test` **216 passed / 29 files**；`cargo test --no-default-features --lib` **861 passed / 1 failed / 1 ignored**（仍那条故意红的 IPv6）。
 
-**#16 保持 open，6 轮进度 5 / 6。**
+### consume 5 / 6 · 2026-11-11 · batch 10 (#16) · 同一轮的第二趟
+
+**进轮状态**：第 5 轮分了两趟。第一趟是消费生产方 08:18 那条迟到复核（R2-1…R2-4），`7401cf6` / `df43e59` 已落地；第二趟是同一条复核里对 `init_command` 的两个提问（是否还有第三处写入口、`AddHostForm` 之外是否还有别处从零构造 `HostProfile`），`869dbe1` / `fde3c17` 是本趟。**两趟同属第 5 轮，进度仍记 5 / 6，不重复计数。**
+
+**生产方的两个提问，逐条回答。**
+
+| 提问 | 回答 |
+|---|---|
+| `init_command` 是否还有第三条写入口 | **没有第四条写入方，但有一条你没列的「保留方」**：`import_team_config`（`core/team_config.rs:87-133`）。它不是写入方之一——导出会带上 `init_command`，导入把它**从包里搬进库**，所以看起来是「正常的导入语义」。但它同时**只保留 `key_path`/`password`/`passphrase`** 三个字段（`:111-122`），`init_command` 不在保留名单里。于是导入一份来自**没设过 init_command 的机器**的团队配置，会把本机那条 `cd /app && source env.sh` 清掉 |
+| 除 `AddHostForm` 外是否还有别处从零构造 `HostProfile` | **前端：没有**（`grep addHost\|updateHost` 只有 `AddHostForm`；`SetupWizard` 走 `api.importSshConfig()`，那是后端 `import_ssh_config_core`，不是前端拼载荷）。**后端：四个 from-scratch 构造点，全部只产生新记录，不碰已有记录**——`core.rs:2953 import_ssh_config_core`（`:3076-3088` 只 push `!existing.contains(name)`）、`core.rs:3295 parse_ssh_config_file`（给 `/ssh-sync/diff` 用，纯读）、`netcatty_import.rs:819`（`config.hosts.push`，同名跳过）、`jump_chain.rs:120`（临时 profile）。**唯一穿透的是 `team_config`**，见上。 |
+
+**判定：1 条成立（数据丢失，L1 已修）· 3 条写进口已核（不立号）。**
+
+| 来源 | 内容 | 判定 | 处置 |
+|---|---|---|---|
+| 本轮自取 | `import_team_config` 对同名主机整条替换，`init_command` 不在保留名单里；`team_host_same` 的 11 个比对字段里也**没有**它 | **成立（数据丢失）**，且比 L2-120 更难发现：L2-120 至少是「客户端传了残缺品」，这里是**服务端自己的合并逻辑**丢的，且 `preview` 报 `skipped`（「什么都没变」）然后把它改掉了 | **L1**：`:111` 补 `init_command` 保留 + `core.rs` 新增 `test_team_config_import_preserves_a_local_init_command`（两条断言：无则保留、有则采用），并在 `team_host_same` 上写清「为什么这个字段不进 11 个比对字段」——进了就会「报 updated 然后不改」。**L2-40 就地扩写**（不另立号：同函数同病因，L2-40 原本就点了 `init_command` 在导出侧保留却没说导入了会怎样） |
+| 生产方 08:18 复核 R2-1…R2-4 | 审批失败卡片残留（L2-121）、兜底文案缺限定词、`risk_unclassified` 文案、两处无保护剪贴板 | 见上一段「消费第 3 轮的那条迟到复核」 | 同属本轮，已全部落地或立号 |
+| issue 正文：「仅 `--init-command` 一处写入方」 | 见上表第一行 | 部分成立（还有 MCP `ssh_add_host`、daemon `POST /hosts`；两者都是 `add_host_core`） | 不另立号，写进 L2-120 的位置列 |
+
+**为什么两趟是同一个第 5 轮**：R2-4 与 `init_command` 都不是「等下一轮才发现」的独立线索——前者是生产方复核里点名要我优先做的，后者是同一份复核末尾的两个提问。把它们拆成两轮只是因为一次提交里同时改 `src/**` 的剪贴板和 `src-tauri/src/**` 的导入语义，评审时看不出哪条在哪。**分两趟提交，不分工期。**
+
+**一处口径要更正**：L2-120 的位置列把 `bin/agent2ssh.rs:652/2007/2043` 写成「唯一写入方」。实际写 `HostProfile.init_command` 的还有 MCP `ssh_add_host`（`agent2ssh-mcp.rs:748`，`serde_json::from_value` 直落 `add_host_core`）与 daemon `POST /hosts`（`agent2ssh-daemon.rs:1349`，`Json<HostProfile>`），两者都经由 `add_host_core` 的 `*existing = host.clone()` 覆盖同名主机——**这正好是 L2-120 的第二条触发路径**：一个只带 `{name, host}` 的 `POST /hosts` 就能把 `init_command` 连同 tags/group/env 一起清空。已在 L2-40/L2-120 两处标注，不另立号。
+
+**验证**：
+- 本轮只改 `src-tauri/src/core/team_config.rs`（保留一行 + 两段注释）与 `src-tauri/src/core.rs`（新增一条测试），`src/**` 一行未动。
+- `npm test` **216 passed / 29 files**；`npm run build` **built in 12.37 s**。前端两个命令绿，但它们对本轮的 Rust 改动零覆盖——如实写在这里，不当成证据。
+- **本容器没有 Rust 工具链**（`cargo`/`rustc` 都不在 PATH，`find / -maxdepth 4 -name cargo` 为空），所以 `cargo fmt --check` 与 `cargo test` **本轮无法执行**。代码按 rustfmt 的输出风格书写（4 空格、`assert_eq!` 多行参数、每行 < 100 列已核），但必须在开发者机器上补跑：`cargo fmt --manifest-path src-tauri/Cargo.toml` 与 `cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib team_config`。**这是本轮唯一的验证缺口，不假装绿。**
+
+**#16 保持 open，6 轮进度 5 / 6（两趟同日，不重复计数）。**
