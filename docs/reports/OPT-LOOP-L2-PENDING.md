@@ -1555,7 +1555,7 @@ batch 7 判「不成立」时用的论据是「`code.is_some()` 时 `interrupted
 
 **修法（L2，需拍板）**：在 `:405-410` 的 `map_err` 里补一次审计（`RiskLevel::Blocked`、reason 用 `format!("failed to load execution gate: {e}")`、`side_effect: None`），以及一条 `GateRejected` 事件带 `"gate_load_failed": true`。要拍板的是**审计条目的语义**：这是一次「命令被拒」还是「一次基础设施故障」？现在 `append_audit` 只接受 `ExecResult`，用 `RiskLevel::Blocked` 表示会让「服务器坏了」与「管理员按了急停」在审计里同形——那正是 L2-130/131 在修的同一类事，别在修它的时候再造一个。可选：新增 `AuditOutcome`/事件类型，或沿用 `Blocked` 但在 `reason` 前缀上钉死 `failed to load execution gate:` 并让 `LEDGER` 记录这个口径。
 
-**载体已存在，别造新类型（第 5 轮核对）**：`store.rs:908` 的 `append_operation_audit(source, host, command, risk, exit_code, duration_ms, reason)` 就是为这一类写的，注释原话 *"typically an operation that was **rejected before execution**, or a control-plane action such as an SFTP transfer or a session open"*。所以「`append_audit` 只吃 `ExecResult`」虽然对，但它不是唯一入口。要拍的是一个**取值**，不是形状——`derive_audit_outcome`（`store.rs:980-990`）只看 `risk_level` 与 `exit_code`：
+**载体已存在，别造新类型（第 5 轮核对）**：`store.rs:1095` 的 `append_operation_audit(source, host, command, risk, exit_code, duration_ms, reason)` 就是为这一类写的，注释原话 *"typically an operation that was **rejected before execution**, or a control-plane action such as an SFTP transfer or a session open"*（行号是 `1a21949` 之后的快照，`1a21949` 之前是 `:908`——按符号定位，别按数字）。所以「`append_audit` 只吃 `ExecResult`」虽然对，但它不是唯一入口。要拍的是一个**取值**，不是形状——`derive_audit_outcome`（`store.rs:1167`）只看 `risk_level` 与 `exit_code`：
 
 | 传什么 | `outcome` | 读起来 |
 |---|---|---|

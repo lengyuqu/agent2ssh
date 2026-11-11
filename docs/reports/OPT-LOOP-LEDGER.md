@@ -2748,8 +2748,8 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 | 4 | L2-134 少六个成员，`host_policy_summary` 折成 404 | **成立（4.5 条）** | `execution_control.rs:157-167` ＋ `bin/agent2ssh-daemon.rs:1404-1407`（`map_err(NOT_FOUND)` 把所有错误折成 404）——**但正文是配置错误原文，不是 `host not found`**，它把文案说错一档；`:189-208` 空 tags 成立；`bin/agent2ssh-mcp.rs:1745-1748` 成立；它自己也说 `host_tags` 只是包装；`terminal_broadcast_preview_results` 属 L2-122 |
 | 5 | `host_allows_source` 读不出来 ≡ 主机不存在 ≡ 默认放行，方向与 `audit_host_scope` 相反 | **成立，且比它说的更重** | `execution_control.rs:119-133`，`is_none_or` 对 `None` 返回 true → 放行；与 `command_authorization_target` 的空 tags **叠乘**（`authorize_command:445-452` 两道闸同时变松）。**零测试覆盖** |
 | 6 | `session::resolve_host` 不在缺陷族里，`?` 是对的 | **成立** | `session.rs:57-62` 先 `load_config()?` 短路。我第 4 轮「两种形态」的写法会被读成正反都错，已改 |
-| 7 | L2-132 的载体：`store.rs:908` 的 `append_operation_audit` 就是为这一类写的 | **成立** | 注释原话「typically an operation that was rejected before execution」。原条目据此推出的「要新增类型」过强，已改 |
-| 8 | `derive_audit_outcome` 只看 risk/exit_code；`AuditDecision` 在 schema 里两处 | **成立（行号偏 3）** | `store.rs:980-990`；`docs/api.yaml:287`/`:368`（它写 `:290`/`:371`） |
+| 7 | L2-132 的载体：`store.rs` 的 `append_operation_audit` 就是为这一类写的 | **成立** | 注释原话「typically an operation that was rejected before execution」。原条目据此推出的「要新增类型」过强，已改。**行号已被 `1a21949` 推后**：核这条时它在 `:908`，`1a21949` 之后在 `:1095` |
+| 8 | `derive_audit_outcome` 只看 risk/exit_code；`AuditDecision` 在 schema 里两处 | **成立（行号偏 3）** | 当时 `store.rs:980-990`，`1a21949` 之后 `:1167`；`docs/api.yaml:287`/`:368`（它写 `:290`/`:371`） |
 | 9 | `execution_control.rs:650` 的 `assert_eq!(refused.len(), 3)` | **成立（行号偏 6）** | 实际在 `:656` |
 | 10 | `.cnb.yml` 的问题不止没注释：无 `allow_failure`、`set -eu`，红即中止后面的套件 | **成立，且我的第 4 轮结论要撤** | `:15` 是 `--lib`（第一条命令），`:16` 才是 daemon bin。见下节 |
 | 11 | `/exec/stream` 的 `:5266` 要从 `.is_err()` 改成匹配状态码 | **成立** | `:5266` 逐字确认 |
