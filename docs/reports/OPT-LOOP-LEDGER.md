@@ -3318,3 +3318,45 @@ L2-154（`/exec-multi` 全 0 语义）、L2-155（preview 缺 admin 门）、L2-
 **回帖**：`2120527459916357632`。issue #21 **保持 open**：余下八条全部需要人拍板，代码侧无未做项。
 
 **这一轮的工艺收获**：复核第 1 条是「整条反转」，而它给的**判据本身**就是错的（`grep "traceHeaders()"` 只命中 1 处，却被写成 2 处，因为它漏了同一个常量另有 20 处内联用法）。顺着它的错误路径去核，才发现它引的 `:1438` 与它想说的 `:1436` 是两行——于是额外检查了「`AGENT2SSH_SOURCE` 到底管不管桌面」，结论是**管**（`source_from_transport()` 在 `tauri_commands.rs` 有 9 处）。也就是说这次「旁边那条也没缺」，但那条判断只有走完 `types.rs:676` 才敢下——**不能因为对方引错了行就停止核对它想说的那件事**。第 7 条同理：它数错调用点（4 vs 9）是次要的，真正的反转来自 `start_daemon_background` 会重读并重判状态。
+
+### 手工/单发消费 · 2026-11-11 · Linux daemon 进程对象绑定（issue #23）
+
+**前置**：锁目录不存在（主动建立并写 `owner`，结束释放）；三个其它 worktree `status --porcelain` 全 0 行；`ls-remote cnb/main` 与 120 秒后的值都是 `04398e0`；本仓工作树只有 `.deja/` 未跟踪 → 不开让位流程。`open` 十条（#20–#29）：**无 `[opt-round]`**（#30 已关）→ 模式 B，第二段（批次循环）为空。
+
+**选靶 #23**：
+
+- #20、#21 的最新评论都是本流程的 `## 本轮收尾`（`2120515534193057792`、`2120527459916357632`），且其后无回复 → 按防重复消费规则跳过。
+- #22 是纯设计（P2，设计稿 `docs/plans/daemon-identity-protocol.md` 已存在，等的是人拍板），#25 同为 P2；#24 要 Windows 实机，本机做不了 → 三者均不入本轮。
+- #23 是 **P1**：CodeBuddy 的首条分析（`2120415425753149440`）带文件路径 + 行号的具体断言，且尚未被消费。它的前置 #22 未定稿，所以本轮**不动代码**，只做「核实 + 可落的文档口径 + L2 实施顺序」。
+
+**判定 15 条 → 成立 9 / 部分成立 4 / 不成立 2**：
+
+| # | 指摘 | 判定 | 关键证据 |
+|---|---|---|---|
+| 1 | `stop_daemon_process` 四步（`:973-1079`），`signal_daemon` 注释自陈不原子 | **成立** | 实际 `:975-1087`；`:757-758` 原文 "narrows the PID reuse window but cannot make a PID-based signal atomic with this inspection" |
+| 2 | 进程名 + argv 白名单挡不住复用，白名单里有"包名" | **成立** | `is_daemon_executable`（`:141-154`）只有四个字面量；任何进程都能改成这四个名字之一 |
+| 3 | `/health` 的信任度为 0（`daemon_health_ok` 只认 200 + `"ok":true`） | **成立** | `daemon_health_ok:166-194`；`health_identity` 不读 `version` |
+| 4 | `start_time` 是秒级，5 次相邻 spawn 相同 | **成立** | 本仓 `:270` 注释已写 "seconds-resolution snapshot"；`sysinfo 0.39.3` 三平台均截断到整秒（Linux `raw / clock_cycle`、macOS `pbi_start_tvsec`、Windows `FILETIME / 10_000_000`） |
+| 5 | 「`:986-988` 注释里说 start time 挡住复用」 | **不成立** | `:987-991` 讲的是「名字不是证明」，从未声称 `start_time` 能挡复用；`:270` 反而明说它是秒级快照 |
+| 6 | pidfd 不解决「获取前」的 PID 复用 | **成立** | 设计判断与代码一致：`read_daemon_pid:56-70` 只拿到号 |
+| 7 | `daemon.pid` 内容升级后旧客户端会按「损坏」拒绝 | **成立** | `read_daemon_pid:63-69` 的 `parse::<u32>()` 失败即 `Err` 且明写 "file retained" |
+| 8 | `SO_PEERCRED` / `SCM_CREDENTIALS` / `SO_PEERPIDFD`（6.5+）语义与取样时机 | **成立（本机未实测，仅按 Linux 语义核）** | 它自述在 Linux 5.4 容器实测 `SO_PEERPIDFD` = `ENOPROTOOPT(92)`，与该常量 6.5 引入一致 |
+| 9 | 「`SO_PEERCRED` 的 pid 是连接的属性，不是进程的身份」 | **成立** | 与 `LOCAL_PEERCRED`/`getpeereid` 的语义一致，且是本轮最该记住的一条设计约束 |
+| 10 | 「现状里唯一按 PID 强杀的降级在 `:1069`」 | **成立** | 实际 `:1077`（`signal_daemon(pid, start_time, true)`），`:1085` 之后才清 owner |
+| 11 | 测试矩阵里称 `invalid_or_partial_pid_files_*` 在 `:1125` | **成立（行号偏 8）** | 实际 `daemon_control.rs:1133` |
+| 12 | K14 对「秒级碰撞」只有一句「可能碰撞」，应升级为事实 | **部分成立** | 该句确实存在且确实只是「可能」，但同段早已写了「重命名或新平台后缀的 daemon 也可能不在名称白名单」——不是"只有一句"。本轮把两处都升级为确定性表述 + 补后果 |
+| 13 | 反例：target triple 换成 `x86_64-pc-windows-gnu` / `aarch64-unknown-linux-musl` 的构建 → 「停不掉也起不来」 | **部分成立** | **停不掉成立**；**「起不来」只在一半情形成立**：`start` 先看 `daemon_pid_state`，`Healthy` 时直接打印 `already running` 并返回 Ok（`bin/agent2ssh.rs:3054-3058`，`renamed_daemon_is_reported_healthy_but_not_unsafely_stopped` 钉住），只有 health 不可用（落 `Unverified`）才拒绝。另外**触发条件写错**：发出去的二进制造名恒为 `agent2ssh-daemon`（`daemon_binary_path:4890-4900`、`bundled_daemon_binary_path:126-139` 都写死无 triple），三处 triple 字面量只在直接跑 `src-tauri/binaries/` 里那份 staged 副本时生效 |
+| 14 | §0-3「新发现：没有实例级单例锁，换端口就能让两个实例共用同一 token 与 `daemon.pid`」 | **不成立** | `write_daemon_pid:76-84` 在 `.daemon-pid.lock` 内检查旧 PID，活着或不可核实即 `Err`；daemon 侧 `write_daemon_pid(std::process::id())?` 用 `?` 传播 → **第二个实例在发布 PID 之前退出**。`daemon_stop_e2e.rs:632` 断言的正是「竞争 daemon 退出、非零、stderr 含 live or cannot be verified、旧 PID 不变」，不是它说的"只比文件内容" |
+| 15 | §0-3「`request_graceful_shutdown()` 会关掉任意一只」 | **部分成立** | 函数行为如此，但**生产代码零调用点**：全仓唯一调用是 `daemon_stop_e2e.rs:1150`，`stop_daemon_process` 恒传 `Some(pid)`。此事实 ledger 2026-11-10 已记过一次（"该函数在生产代码里无调用点，仅测试用"） |
+
+**L1 落了什么**：
+
+- `docs/KNOWN-ISSUES.md` K14 两处：
+  - 「秒级启动时间可能碰撞」→ 改成「启动时间是整数秒，`sysinfo 0.39.3` 三平台都截断到整秒（Linux `/ clock_cycle`、macOS `pbi_start_tvsec`、Windows `FILETIME / 10_000_000`），因此同一秒内启动的两个进程在这条判据下完全不可区分，不是「可能碰撞」而是构造上必然」，并指向 L2-165。锚点：`grep -c "秒级启动时间可能碰撞"` = **0**，`grep -c "构造上必然"` = **1**。
+  - 「重命名或新平台后缀的 daemon 也可能不在名称白名单」→ 补成「四个字面量 + 两个身份入口给出相反答案（`status`/`start` 说 running，`stop`/`restart` 说 cannot be safely identified）+ 测试钉住 + 两条恢复出口」。锚点：`grep -c "两个身份入口给出相反答案"` = **1**。
+- `docs/guides/configuration-guide.md` 停止一节：在既有「带外 kill」出口后加「同一个出口也适用于可执行名不在白名单的 daemon」，说明 `status` 会说 running 而 `stop`/`restart` 拒绝的原因（状态判据不看名字、停止第一步看名字），锚点 `grep -c "同一个带外出口也适用于另一种"` = **1**。
+- `docs/reports/OPT-LOOP-L2-PENDING.md`：新增 **L2-165**（pidfd 五步实施顺序 + 「fd 拿不到不得回退裸 PID」契约）、**L2-166**（白名单字面量 vs 两个身份入口判据相反，含「实例级单例」这条不成立的原文留痕）。
+
+**未做的 L2 项与理由**：pidfd 本体（`stop_daemon_process` / `wait_for_exit` / `signal_daemon` 改成以进程对象为参数）牵动 5 个调用点与 33 个 e2e 用例，且前置 #22 未拍板；白名单派生会改变 `renamed_daemon_*` 测试的安全语义。两者都只登记。
+
+**验证**：见本轮收尾时的实测数字（`npm run build`、`cargo fmt --check`、`--no-default-features --lib`）。本轮零 Rust 改动，`src-tauri/src/**` 与 `src-tauri/tests/**` 一行未动。

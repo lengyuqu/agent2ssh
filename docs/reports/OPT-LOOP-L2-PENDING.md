@@ -2165,3 +2165,49 @@ forward_start（:3204-3244）与 forward_remove（:3077-3113）、forward_stop�
 **为什么它是 L2**：`bin/**` 的文案改动会打既有 CLI 输出断言。
 
 **建议改法**：并入 L2-145，两条命令共用一个字符串，并在 status 那句后面补「该进程的启动时间读不到，因此无法与 PID 文件交叉验证」。
+
+---
+
+## 2026-11-11 · 手工单发：issue #23（Linux daemon 进程对象绑定）
+
+两条都改 `src-tauri/src/**` 的行为，按协议只登记不动。逐条判定与证据见 `OPT-LOOP-LEDGER.md` 同日「手工/单发消费 · issue #23」小节。**行号以 `04398e0` 为基线**（`daemon_control.rs` 本轮零改动，行号未位移）。
+
+**为什么本轮只有 L2**：#23 的正文是「实现并验证 Linux pidfd 绑定」，其交付物必然落在 `src-tauri/src/daemon_control.rs` 的签名与行为上（`stop_daemon_process` / `wait_for_exit` / `signal_daemon` 都要改成以进程对象为参数），且**前置 #22（身份协议与迁移）尚未拍板**。所以本轮把可核实的事实与实施顺序固化下来，不动 main 的行为。
+
+### L2-165（新）：pidfd 绑定未实施——现在能关掉哪个窗口、关不掉哪个，已有定论
+
+**位置**：`src-tauri/src/daemon_control.rs` 的 `stop_daemon_process`（`:975-1087`）、`wait_for_exit`（`:745-755`）、`signal_daemon`（`:759-788`）、`observe_process`（`:728-743`）。
+
+**本轮核实到的边界**（每条都能只看本仓代码复核）
+
+1. `signal_daemon` 的注释（`:757-758`）原文是「narrows the PID reuse window but cannot make a PID-based signal atomic with this inspection」——它自己就承认不原子。`observable_live_start_time` 上方的 `:270` 更直接：「It is still a seconds-resolution snapshot, not proof of daemon identity」。
+2. 秒级不是实现疏忽，是 `sysinfo 0.39.3` 的取值形状：Linux `start_time_raw(...) / info.clock_cycle`、macOS `pbi_start_tvsec`、Windows `compute_start` 的 `process_times / 10_000_000` **三处都截断到整秒**。Cargo.lock 里的版本可查，所以这是「换 sysinfo 也修不掉」的一层。
+3. pidfd 能关掉的正是「open 之后到 send 之前」这一段：`pidfd_send_signal(fd)` 作用在对象上，目标已死只回 `ESRCH`；`poll(pidfd)` 在退出后给 `POLLIN`。它**关不掉**「读 `daemon.pid` 的那一刻已经认错人」——那一层要靠文件带身份（`daemon.pid` 加 `start_time`，或旁路 `daemon.pid.id` + `/health` 报同一 nonce），属 #22 的决策项。
+4. 现有降级路径里唯一「按 PID 强杀」的是 `:1077` 的 `signal_daemon(pid, start_time, true)`。pidfd 改造必须同时决定：fd 拿不到时**不回退**到这条，而是返回 `StillRunning(pid)` + 一句「无法以身份绑定的方式强制终止」。
+
+**建议实施顺序**（每步可独立回滚；第 2 步起才碰签名）
+
+1. 负向用例先行（纯测试）：伪造 `/health` 的监听者 + 同名 symlink 的无关进程，断言停止路径不杀它。已有的 `a_stop_that_reached_the_wrong_daemon_stops_nothing` 覆盖代理换监听者，**不覆盖「同名不同实例」**。
+2. P2 最小闭环：`read_daemon_pid()` 之后立刻 `pidfd_open`，把 fd 沿 `stop_daemon_process` 传下去，`wait_for_exit` 与 `signal_daemon` 改用 fd；`start_time` 从判据降为附加观察。
+3. 文件身份（修「获取前」复用）：`daemon.pid` 旁路 `daemon.pid.id` = `{pid, start_time, nonce}`，`/health` 报同一 nonce；旧客户端读到不认识的格式继续「拒绝 + 提示升级」（`read_daemon_pid` 的 `:63-69` 已经是这条路径）。
+4. 平台门禁：`ENOSYS`（内核 < 5.3）关闭 pidfd 路径但**保留**现有 `start_time` + 名称检查；`EPERM` 归 `UncertainExit`，`ESRCH` 判死——三者不得合并（`pid_definitely_missing` 的 `:307-321` 已经是「只认 ESRCH」的口径，pidfd 版沿用）。
+5. #22 定稿后再谈控制面凭据（`SO_PEERCRED` / `LOCAL_PEERPID` / 命名管道），且必须写死「经代理时不适用」。
+
+**为什么是 L2 而不是 L1**：改 `stop_daemon_process` 的签名会牵动 `bin/agent2ssh.rs:3079/:3106`、`tauri_commands.rs:1855/:1885/:1918` 五个调用点与 `daemon_stop_e2e.rs` 的 33 个用例，属行为改动。
+
+### L2-166（新）：可执行名白名单是四个字面量，而两个身份入口对它的态度相反
+
+**位置**：`src-tauri/src/daemon_control.rs:141-154`（`is_daemon_executable`）、`:117-137`（`daemon_process_start_time`，走 `process_looks_like_daemon`）、`:271-279`（`observable_live_start_time`，**不看名字**）、`:283-303`（`daemon_matches_config`）。
+
+**判断**：**成立**，且比 K14 原来那句「也可能不在名称白名单」更具体——它会造出一对相反的回答：
+
+- `daemon_control.rs` 的 `daemon_process_start_time` 要求 `process_looks_like_daemon`，名字不在四个字面量里就返回 `None` → `stop_daemon_process:977-982` 报 `cannot be safely identified` 并保留 PID 文件；`daemon restart` 走同一条路，同样被拒（`bin/agent2ssh.rs:3106`）。
+- `observable_live_start_time` 只核「非僵尸 + `start_time != 0`」，**不核名字**，所以 `daemon_matches_config` 可以通过 → `daemon_pid_state` 报 `Healthy` → `daemon status` 说 `Daemon is running`、`daemon start` 说 `already running`（`bin/agent2ssh.rs:3055`）。
+
+这组行为**已被测试钉死**：`daemon_stop_e2e.rs:724 renamed_daemon_is_reported_healthy_but_not_unsafely_stopped` 同时断言 `process_is_alive(pid) == false`、`daemon_pid_state == Healthy`、CLI `stop` 失败且含 `cannot be safely identified`、CLI `start` 成功且含 `already running`。所以它不是缺陷突变，是一个没有被写进用户文档的**出口缺失**。
+
+**为什么是 L2**：把白名单改成从 `daemon_binary_path()` 派生（或退一步用前缀匹配 `agent2ssh-daemon`）是行为改动，并且会改变 `renamed_daemon_*` 这条测试的语义——要不要保留「重命名即拒绝停止」这个安全属性，得先拍板（保留则必须补文档出口，见本轮 L1；不保留则要论证重命名后的进程凭什么可信）。
+
+**建议改法**：二选一。①保留判据，只补文档（本轮已做：K14 + 指南停止一节，含「改回白名单名」与「带外 kill」两条出口）；②让 `is_daemon_executable` 接受 `agent2ssh-daemon` 前缀，同时把 `observable_live_start_time` 也加上同一个名称判据，使 `status` 与 `stop` 不再给出相反答案——代价是 `daemon_pid_state` 对重命名 daemon 从 `Healthy` 变 `Unverified`，`start` 也随之拒绝。
+
+**明确不成立的一条（勿再提）**：本轮复核推翻了「换个端口就能让两个实例共用同一 `daemon.token` 与 `daemon.pid`、没有实例级单例」。`write_daemon_pid`（`:76-84`）在锁内检查旧 PID，活着或不可核实就 `Err`，而 daemon 侧 `write_daemon_pid(std::process::id())?` 用 `?` 传播——**第二个实例会在发布 PID 之前退出**；`daemon_stop_e2e.rs:632 direct_daemon_with_another_port_cannot_replace_a_live_pid` 断言的正是「竞争 daemon 退出且非零、stderr 含 live or cannot be verified、旧 PID 不变」，不是只比文件内容。
