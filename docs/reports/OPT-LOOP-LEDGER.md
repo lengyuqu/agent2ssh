@@ -2731,3 +2731,5 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 
 8. **「`.cnb.yml` 的 daemon 作业已记录这条刻意红」——不成立。** 全文 76 行零提及，最后一次改动 `da79e93`，`5684510` 未触及该文件。
 9. **「`a_daemon_that_ignores_the_expected_pid_stops_and_says_so` 断言 `stop` 返回 `Ok`」——不成立。** `daemon_stop_e2e.rs:1504` 是 `stopped.is_ok() || !still_running`，返回 `Err` 而进程已消失同样通过；该用例钉的是「进程没了」，不是「返回 Ok」。
+
+**回帖**：`2120458915342077952`（10:09Z）。推 `cnb main`（`02895bb..5a8cb5b`，三笔：`ef5885a` 契约＋L2 / `2720096` 本文件 / `5a8cb5b` L2-134 扩写），未推 github。轮次进度 **4 / 6**。
