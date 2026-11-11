@@ -2198,37 +2198,44 @@ const HANDLER_STATUS: [(&str, &str); 10] = [
 /// stayed invisible: the family looked consistent from one route.
 ///
 /// A call in the body is not proof the status is reachable: see
-/// `INBAND_REJECTIONS` below for the two routes that consume the `Err` instead
-/// of returning it, and would be wrongly indicted by this list.
+/// `INBAND_REJECTIONS` below for the three routes that consume the `Err`
+/// instead of returning it, and would be wrongly indicted by this list.
 ///
-/// Only 429 is listed. `preflight_guarded_request` can also surface 408/423/500
-/// from the authorization chain, and pinning those here would demand a status
-/// on routes that legitimately never reach that branch; 429 is the one that is
-/// decided before authorization, on every path that calls these helpers.
-const HELPER_STATUS: [(&str, &str); 4] = [
+/// 423 is listed too, and only through `reject_if_gate_paused`. That helper is
+/// the one place where a function name maps 1:1 onto a constant — it returns
+/// `StatusCode::LOCKED` and nothing else — so the same text scan can pin it
+/// without guessing. The half it cannot pin is the other direction: the same
+/// helper answers `500` when `gate.json` cannot be read, and *that* is not
+/// listed, because it would demand a 500 on 33 operations that document it once
+/// in `info.description` instead of 33 times. A per-operation repeat would be an
+/// invitation to delete both copies.
+const HELPER_STATUS: [(&str, &str); 6] = [
     ("too_many_requests_status()", "429"),
     ("reject_if_rate_limited(", "429"),
     ("register_limited_session_for_command(", "429"),
     ("preflight_guarded_request(", "429"),
+    ("preflight_rewritable_request(", "429"),
+    ("reject_if_gate_paused(", "423"),
 ];
 
 /// Operations whose gate and rate-limit refusals never become an HTTP status.
 ///
 /// `HELPER_STATUS` is a text scan: it sees `reject_if_rate_limited(` in a body
-/// and concludes the caller can receive a 429. Two handlers consume that `Err`
+/// and concludes the caller can receive a 429. Three handlers consume that `Err`
 /// instead of returning it — `exec_stream` sends `{"type":"error"}` over the
-/// socket it has already upgraded, and `terminal_broadcast_run` marks every
-/// eligible target `authorized: false` and returns 200 — so a `"429"` or
-/// `"423"` there would promise a branch this server never takes. `/terminal` is
-/// the control in the same family: identical checks, run before the upgrade, so
-/// its 423 and 429 are real and stay in its `responses`.
+/// socket it has already upgraded, and `terminal_broadcast_run` and its
+/// `preview_results` mark every eligible target `authorized: false` and return
+/// 200 — so a `"429"` or `"423"` there would promise a branch this server never
+/// takes. `/terminal` is the control in the same family: identical checks, run
+/// before the upgrade, so its 423 and 429 are real and stay in its `responses`.
 ///
 /// The third field is a phrase the path block must still carry, so the
 /// exemption cannot decay into silence — the refusal stays documented, just not
 /// as a status. Rewording that prose breaks this test on purpose.
-const INBAND_REJECTIONS: [(&str, &str, &str); 2] = [
+const INBAND_REJECTIONS: [(&str, &str, &str); 3] = [
     ("get", "/exec/stream", "only as a frame"),
     ("post", "/terminal/broadcast", "returns 200"),
+    ("post", "/terminal/broadcast/preview", "not a 423"),
 ];
 
 /// The methods one `.route(...)` call mounts, in source order, with their handler.

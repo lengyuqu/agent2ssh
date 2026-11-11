@@ -928,7 +928,11 @@ X-Agent2SSH-Signature: sha256=<hex-encoded-signature>
 
 ### 用途
 
-配置 daemon 层的执行速率和 session 并发限额。限额在 daemon 进程内强制执行。速率限额覆盖：`/exec`、`/local-exec`、`/exec-multi`、`/exec/compare`、`/exec/stream`、全部 `/sftp/*`（含 `/sftp/rm-rf` 与 `/sftp/rm-rf/authorize`）、`/sessions/:id/write`、`/resident-sessions` 与 `/resident-sessions/:id/exec`、`DELETE /resident-sessions/:id`、`/forwards`、`/forwards/multi`、`DELETE /forwards/:id`、`/forwards/:id/start`、`/forwards/:id/stop`、`/connections/:host/connect`、`/connections/:host/disconnect`、`/playbooks/run`、`/terminal`（WebSocket terminal）与 `/terminal/broadcast`（WebSocket exec）、`/daemons/:alias/exec`。**不覆盖**的只有只读/预览路径：`/exec/preview`、`/playbooks/:name/dry-run`、`/ping` 及各类列表查询。判据是代码里的 `reject_if_rate_limited` 调用点：13 个 handler 直接调用，另有一批经 `preflight_guarded_request`（`:570`）统一进入。
+配置 daemon 层的执行速率和 session 并发限额。限额在 daemon 进程内强制执行。速率限额覆盖：`/exec`、`/local-exec`、`/exec-multi`、`/exec/compare`、`/exec/stream`、全部 `/sftp/*`（含 `/sftp/rm-rf` 与 `/sftp/rm-rf/authorize`）、`/sessions/:id/write`、`/resident-sessions` 与 `/resident-sessions/:id/exec`、`DELETE /resident-sessions/:id`、`/forwards`、`/forwards/multi`、`DELETE /forwards/:id`、`/forwards/:id/start`、`/forwards/:id/stop`、`/connections/:host/connect`、`/connections/:host/disconnect`、`/playbooks/run`、`/terminal`（WebSocket 交互终端）、`/terminal/broadcast`（多终端广播，普通 POST）、`/daemons/:alias/exec`。
+
+清单之外的路由**一律不受限流**，而且范围比「只读/预览」大得多。除 `/exec/preview`、`/playbooks/:name/dry-run`、`/ping` 与各类列表查询外，配置与规则写入（`POST /hosts`、`/hosts/import`、`DELETE /hosts/:name`、`/snippets/*`、`/redact/rules/*`、`/highlight/rules/*`、`/algo/prefs`、`/recordings/*`）、审批与门控（`/approvals/:id/approve`、`/approvals/:id/reject`、`/gate/pause`、`/gate/resume`）以及 `POST /shutdown` 都不在其中。`POST /shutdown` 尤其值得记住：它的 handler 只累加请求计数并校验 admin token，既不进限流也不读执行门，所以 `execution_limits.toml` 里写什么都约束不到停止路径。
+
+判据只有一个：handler 是否真的调用 `reject_if_rate_limited`（或它的三个包装 `preflight_guarded_request`、`preflight_rewritable_request`、`register_limited_session_for_command`）。13 个 handler 直接调用，另有一批经共享前置（`:570`）统一进入。想让一条新路由受限流，只能在那里加调用点——写进文档不会让它受限。
 
 ### 文件位置
 

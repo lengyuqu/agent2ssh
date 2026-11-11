@@ -21,6 +21,16 @@ info:
     admin token, while the admin token keeps working. `/approvals/{id}/approve`
     states this once in full rather than repeating it on a hundred operations.
 
+    A second 500 does need the handler, and it is stated here for the same
+    reason. `reject_if_gate_paused`, and the preflights built on the same gate
+    read, load `gate.json` before deciding anything; when that read fails they
+    answer `500` with `failed to load execution gate: …` instead of `423`. So
+    every operation that consults the gate can answer 500 even though its body
+    only ever names 423 — which is why none of them lists the gate-read 500 in
+    its own `responses`, and why a client that meets a 500 on one of them should
+    read the message before assuming a server bug. An unreadable gate file is an
+    operator-fixable condition, not a crash.
+
     A request body is read one of three ways, and the three fail differently.
     `Json<T>` — 47 handlers — rejects a body with no `application/json` content
     type as 415, a body that parses but does not fit the schema as 422, and a
@@ -1089,13 +1099,14 @@ paths:
         way — means this route did reply: the token in this config's `daemon.token`
         is not the one the running daemon accepts as admin, which is what a file
         replaced under it looks like.
-        A `429` is neither: the request was understood and refused for
-        rate-limiting, before this handler ran, because `/shutdown` is subject to
-        the execution limits like every other route. Those counts are per minute
-        and default to 30 per source and 20 per host — the host being the name the
-        request carries, e.g. `local:vs` — and they are configurable in
-        `execution_limits.toml`, so a busy stop loop meets one before any of the
-        answers above. And the stop path's own pre-flight refusals — no `/health`
+        A `429` is not one of them, and that is not an omission: `daemon_shutdown`
+        increments the request counter and checks the admin token, then acts — it
+        never enters the rate limiter and never reads the execution gate. The
+        per-minute counts in `execution_limits.toml` therefore do not apply to
+        this route, no `host` is involved (the body carries only `expect_pid`),
+        and a retry loop against it will never meet a 429; a stop that a limiter
+        could refuse would be a stop an operator cannot perform. And the stop
+        path's own pre-flight refusals — no `/health`
         answer, another PID, another config directory, no token file at all —
         never connect, so no status code describes them.
         The caller waits
@@ -1918,7 +1929,14 @@ paths:
   /terminal/broadcast/preview:
     post:
       summary: Preview an authenticated multi-terminal broadcast
-      description: Resolves live terminal IDs, verifies token ownership, scope, gate, effective risk and approval requirements. It never sends terminal input.
+      description: |
+        Resolves live terminal IDs, verifies token ownership, scope, gate,
+        effective risk and approval requirements. It never sends terminal input.
+        A paused gate is a per-target verdict here — not a 423, and not a
+        200-versus-4xx split: `terminal_broadcast_preview_results` writes
+        `execution gate paused` into that target's `error` and leaves it
+        `authorized: false`, exactly as the run path does, which is why neither
+        this operation nor `/terminal/broadcast` lists a 423 in its responses.
       requestBody:
         required: true
         content:
@@ -3554,6 +3572,16 @@ paths:
   /forwards/{id}:
     delete:
       summary: Remove a tunnel
+      description: |
+        The three checks below — execution gate, execution limits, scope — run
+        only on the branch that found the rule: `forward_remove` looks the id up
+        in the live forwarding table first, and everything from `reject_if_gate_paused`
+        to `authorize_command` sits inside that `if let Some(rule)`.
+        An id that matches nothing skips gate, limits, scope, approval and the
+        audit entry alike, and answers from the core: 400 for a malformed id or a
+        removal that failed, 200 otherwise. So `423` and `429` are reachable, but
+        only for a tunnel that exists when the request arrives — a client cannot
+        use them to tell "refused" from "already gone".
       parameters:
         - name: id
           in: path
@@ -4172,7 +4200,16 @@ paths:
   /daemons/{alias}/exec:
     post:
       summary: Execute a command through a configured daemon alias
-      description: Applies the caller token scope, local remote-alias scope, execution gate, execution limits, and local authorization before forwarding to a remote daemon. The remote daemon may enforce its own scoped token and policy again.
+      description: |
+        Applies the caller token scope, local remote-alias scope, execution gate,
+        execution limits, and local authorization before forwarding to a remote
+        daemon. The remote daemon may enforce its own scoped token and policy again.
+        `localhost` is the exception the first sentence does not cover: that alias
+        is executed in this process — `preflight_guarded_request`, then
+        `exec_ssh_core` — so nothing is forwarded and no remote-alias scope is
+        consulted. Both branches answer an `ExecResult`, so the response shape
+        does not tell a caller which one it got; the alias it sent is the only
+        signal.
       parameters:
         - name: alias
           in: path
@@ -4212,7 +4249,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "404":
-          description: No remote daemon is registered under this alias, or the token cannot see the one that is.
+          description: "No remote daemon is registered under this alias. `get_daemon_with_scope` matches `remotes.toml` by alias only — the caller's token is not consulted, so a 404 never means \"you cannot see it\". A remote that exists but carries no token answers 401 instead."
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
