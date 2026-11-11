@@ -1547,6 +1547,8 @@ batch 7 判「不成立」时用的论据是「`code.is_some()` 时 `interrupted
 
 **判据（可执行，不需要真 daemon）**：`load_execution_gate()` 在 `execution_gate.json` 存在但内容不合法时返回 `Err`（`gate.rs:46-54`：`fs::read_to_string` 后 `serde_json::from_str` 的 `?`）。在 daemon 的测试模块里（`with_temp_config` 已具备）写一份坏 JSON 到 `<config_dir>/execution_gate.json`，然后调 `reject_if_gate_paused("mcp", "h", "uptime")`：断言 `status == 500`，并断言 `list_audit_core` **为空**。这条用例与现有的 `:6374 paused_gate_rejects_non_desktop_source_and_writes_audit` 成对——一条钉「paused 有审计」，一条钉「unreadable 没有」，后者正是要改的那个事实，所以它今天会绿、改完会红，是**故意红的**那种写法，登记时要说清。
 
+**已落地（第 4 轮，代码 `src-tauri/src/bin/agent2ssh-daemon.rs`）**：用例名改为 `unreadable_gate_rejects_with_500_and_writes_audit`，断言方向按**修好之后**写（500 + 审计非空），并钉住 `host` / `command` / `source` / `risk_level` 四个字段。**本条只落了判据、没落修法**：`reject_if_gate_paused` 一个字未改，所以这条用例现在是**刻意红的**，`cargo test --features daemon --bin agent2ssh-daemon` 会失败一条。修法仍待拍板，且拍板问题比登记时更具体：500 支要写的审计条目里**没有一条真实命令**——它发生在 `gate_blocks_source` 之前，连「这条命令被拒了」都不成立，成立的是「这个请求没被处理」。所以要么给审计加一个「基础设施故障」形态，要么在 `reason` 前缀上钉死 `failed to load execution gate:` 并在台账里写死「这不算一次拒绝」。两者都不该顺手选。
+
 **修法（L2，需拍板）**：在 `:405-410` 的 `map_err` 里补一次审计（`RiskLevel::Blocked`、reason 用 `format!("failed to load execution gate: {e}")`、`side_effect: None`），以及一条 `GateRejected` 事件带 `"gate_load_failed": true`。要拍板的是**审计条目的语义**：这是一次「命令被拒」还是「一次基础设施故障」？现在 `append_audit` 只接受 `ExecResult`，用 `RiskLevel::Blocked` 表示会让「服务器坏了」与「管理员按了急停」在审计里同形——那正是 L2-130/131 在修的同一类事，别在修它的时候再造一个。可选：新增 `AuditOutcome`/事件类型，或沿用 `Blocked` 但在 `reason` 前缀上钉死 `failed to load execution gate:` 并让 `LEDGER` 记录这个口径。
 
 **成本**：`reject_if_gate_paused` 一个函数、一处 `map_err`、一个字段；测试侧一条（不需要真 daemon，不需要 WS）。比 L2-84 的 WS e2e 便宜得多。
@@ -1557,8 +1559,10 @@ batch 7 判「不成立」时用的论据是「`code.is_some()` 时 `interrupted
 
 两件事都是本轮核对时掉出来的，都便宜。
 
-**(a) L2-130 的证伪不成立（架构上）。** L2-130 写的是「这条用例不需要真实 SSH 主机，但需要一个能被 `timeout_secs` 触发超时的本地命令——`/local-exec` 的命名环境即可」。**`/local-exec` 不是 `ExecRequest` 的第二个实现，它是另一个 handler，`/exec/stream` 根本到不了它。** `exec_stream`（`:5210`）的请求体里即使 `host`/`source` 写成 `local`，它走的也是 `spawn_embedded_exec_stream` → `exec_ssh_core`（`embedded_ssh.rs` 的 `connect_embedded_ssh`）——`/exec/stream` 不存在本地分支，`types::is_local_host` 在那条路径上没有任何调用点。所以 L2-130 的三条改法里，任何一条的回归测试都**必须**有一个会「接受 TCP 后保持沉默直到超时」的 SSH 对端。
+**(a) L2-130 的证伪不成立（架构上）。** L2-130 写的是「这条用例不需要真实 SSH 主机，但需要一个能被 `timeout_secs` 触发超时的本地命令——`/local-exec` 的命名环境即可」。**`/local-exec` 不是 `ExecRequest` 的第二个实现，它是另一个 handler，`/exec/stream` 根本到不了它。** `exec_stream` 的请求体里即使 `host`/`source` 写成 `local`，它走的也是 `spawn_embedded_exec_stream` → `exec_ssh_core`（`embedded_ssh.rs` 的 `connect_embedded_ssh`，调用点 `bin/agent2ssh-daemon.rs:5362`）——`/exec/stream` 不存在本地分支，`types::is_local_host` 在那条路径上没有任何调用点。所以 `/local-exec` 造不出 `/exec/stream` 的超时帧。L2-130 的回归测试因此需要一条**已配置的** SSH 主机记录——`{"host":"local"}` 到 `/exec/stream` 拿到的是 `unknown host`（同一函数里 `load_config()` 之后），连网络都不碰。
 
 现成的便宜做法（本仓已有，不需要 sshd）：`connect_tcp_address` 的测试形态——在 `127.0.0.1:0` 上起一个 `TcpListener`，接受连接后不写一个字节。`timeout_secs: 1` 的 `/exec/stream` 会在 `connect_embedded_ssh` 的握手阶段超时并返回 `ExecTimeout`（`embedded_ssh.rs:1355-1362` 的 `Display` 就是 `SSH command timed out after 1s`）。这条不依赖 `AGENT2SSH_TEST_SSH_PORT`，与 `tests/connect_deadline.rs`（同目录、同样自绑 loopback）是同一个形状。
+
+**这条批注的口径收窄一处**：原文的「任何一条改法都**必须**有一个沉默对端」过强——`timeout_secs` 覆盖握手与命令两段，「超时」在两段都能造，沉默对端只是**握手段最省事的做法**。要证明 `interrupted` 能把「没收到 Exit」与「收到 `Exit(None)`」分开，得各造一次，后者需要真跑完一条命令的目标。
 
 **(b) 「the other ~52 daemon handlers」是 95。** `preflight_guarded_request`（`:503`）的文档注释说 `REQUEST_COUNT` 的递增「consistent with the other ~52 daemon handlers」。全仓 `REQUEST_COUNT.fetch_add(1, Ordering::Relaxed)` 实测 **95** 处（`grep -c`）。这个数字本身不影响行为，但它是**别人的引用源**：任何按「52 个 handler 都没有 preflight」推覆盖率的人会漏掉 43 个。要么改成实测数，要么删掉数字只留「consistent with every other daemon handler」。没有理由保留一个过期数——这正是本批反复在修的「写下没核过的数」。

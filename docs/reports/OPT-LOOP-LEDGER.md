@@ -2628,3 +2628,55 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 **本轮新增不成立（原文保留，请勿重复提）**：
 
 5. **「`wait_for_exit` 的 `Running` → 强杀支零覆盖（`daemon_stop_e2e.rs` 里没有用例）」— 一半不成立。** `Running` 返回值本身有单测：`daemon_control.rs:1256` 的 `exit_wait_does_not_mistake_an_unrecognized_live_process_for_exit`。`src-tauri/tests/` 零命中不等于全仓零覆盖——`daemon_control.rs:1081` 起有 16 条内部单测。真正无覆盖的是「返回非 `Exited` 后强制信号」那一跳。
+
+### consume 4 / 6 · 2026-11-11 · issue #19 · 自取（第 2 轮回帖无回复）
+
+上一轮回帖（`2120439846266122240`）后无回复，评论数停在 4。按协议不空等，自取上一轮自己写的下一批方向，并复核对面的两条判定。
+
+**一、复核「`wait_for_exit` 的 `Running` 是假阴性」——翻转成立，且我补一条细节。**
+
+`daemon_control.rs:1256` 的 `exit_wait_does_not_mistake_an_unrecognized_live_process_for_exit` 直接调 `wait_for_exit(pid, start, Duration::ZERO)` 并断言 `ProcessObservation::Running`，确实钉住了「返回 `Running` 而不是 `Exited`」这个契约。所谓「内部单测不算覆盖」在这里没有立足点：这条用例绕过的只是 `stop_daemon_process` 的**前半段**（`daemon_process_start_time`、`health_identity`、`request_shutdown`），而这三段都不是这条用例要证的东西——它证的是「活着却被认成已退出」。唯一没被绕过的是 `observe_process` 在真实进程上的行为，那正是要点。
+
+但**「无覆盖的是下一跳」这句要收窄**：那一跳（`stop_daemon_process` 里 `ProcessObservation::Running` → `signal_daemon(…, force=true)`）确实没有用例，可是**它已经有一条 e2e 从外部观察到了**：`a_daemon_that_ignores_the_expected_pid_stops_and_says_so`（`daemon_stop_e2e.rs:1419`）里的 stand-in「不响应关闭请求，于是在 drain 窗口之后被杀掉」，而 `stop` 返回 `Ok` ——必须走完 `Running → 强杀 → Exited` 才能到 `Ok`。所以准确说法是「**没有把它单独钉住的用例**」，不是「零覆盖」。按上一轮自己的标准，这也是个（较轻的）假阴性。
+
+**二、L2-133 的判定：前提成立，结论过强。**
+
+- 成立的一半：`/exec/stream` 没有本地分支。`exec_stream` 判 gate 之后先 `load_config().find(|h| h.name == req.host)`（`bin/agent2ssh-daemon.rs:5331-5343`），找不到就回 `unknown host`；`is_local_host` 在这条路径上没有调用点。所以 `/local-exec` 造不出 `/exec/stream` 的超时帧。
+- 过强的一半：「所以回归测试**必须**有沉默的 `TcpListener`」。`timeout_secs` 覆盖握手和命令两段，两段都能造超时；沉默对端是**握手段最省事**的做法，不是唯一做法。它连 `AGENT2SSH_TEST_SSH_PORT` 都不需要，这一点比「必须」有价值。已在 `OPT-LOOP-L2-PENDING.md` 的 L2-133(a) 原地收窄。
+
+**三、本轮落地：L2-132 的判据 + 一次被自己否掉的修法**
+
+| 文件 | 改动 |
+|---|---|
+| `src-tauri/src/bin/agent2ssh-daemon.rs` | 新增 `unreadable_gate_rejects_with_500_and_writes_audit`（L2-132 的判据） |
+| `docs/reports/OPT-LOOP-L2-PENDING.md` | L2-132 记为「判据已落、修法未落」；L2-133(a) 的「必须」降为「握手段最省事」 |
+
+**一次没落地的修法，写清楚为什么**：本轮先给 `stop_daemon_process` 加了一条**所有权**检查（`daemon.pid` 记的 PID 是不是它），想把上一次回帖留下的「身份链四项全中但指向不属于本配置目录的 daemon」堵住。连跑 `daemon_stop_e2e` 三次，被三个既有用例逐一否掉：
+
+1. `a_daemon_that_ignores_the_expected_pid_stops_and_says_so` —— 固件**根本没有 `daemon.pid`**。把「文件不存在」读成「不是我的」，等于拒绝一切「调用方拿到 pid 而不是自己读文件」的路径。
+2. `exiting_old_daemon_preserves_replacement_pid_in_the_same_config` —— 另一个写入者**故意**把 `daemon.pid` 换掉，然后停旧 daemon。把「文件换了」读成「不是我的」，就是拒绝这条既有行为。
+3. 把判据从「caller 的 pid」改成「监听者与文件是否一致」之后，回头发现**上一轮我自己引的那条**（`a_daemon_that_ignores_the_expected_pid_stops_and_says_so` 里的 `Ok` 必经强杀支）恰好也建立了「文件」与「监听者」的不一致关系。
+
+结论：这条检查在本仓的既有语义下**无法只靠加一条拒绝来消除**。它要的是一致性——要么 `daemon.pid` 与监听者永远同源，要么 stop 全程持锁——那是重新设计 `daemon.pid` 的写协议，不是一条 guard。**可得的收益也很薄**：能写 `daemon.pid` 的人同样能读 `daemon.token`，所以对「日志里那条威胁」并无实质削弱。因此**代码全部回退**，只在下面记成开放项，而不是留一条被三个用例围着的补丁。
+
+**四、验证（真跑了，口径写死）**
+
+本机原本没有 Rust 工具链；本轮自己装了 `rustup`（stable 1.99.1 + rustfmt）与 `build-essential`/`pkg-config`/`libssl-dev`，所以下面的数是实测，不是引用：
+
+- `cargo fmt --check`：**clean**
+- `cargo test --no-default-features --lib`：**862 passed / 1 failed / 1 ignored**（失败的是既有的 `an_ipv6_literal_at_port_22_is_removed`，与 `a469e31` 记录的终值一致）
+- `cargo test --no-default-features --features daemon --bin agent2ssh-daemon`：**29 passed / 1 failed**（失败的是本轮新增的 `unreadable_gate_rejects_with_500_and_writes_audit`，**刻意红**：它断言 500 支要写审计，而 500 支今天不写）
+- `cargo test --no-default-features --features daemon --test daemon_stop_e2e`：**33 passed / 0 failed**
+- `cargo test --no-default-features --test daemon_integration`：**76 passed / 0 failed**
+- `npm run build`：未跑（前端一行未动）
+
+**注意这条红的代价**：`.cnb.yml` 的 `daemon-regressions` 会在 `--features daemon --bin agent2ssh-daemon` 上失败。一条刻意的红进了主分支，等于这条流水线从此报红，直到修法落地——这是**明知的取舍**，不是疏忽：L2-132 的修法要拍的是「审计条目怎么表达一次基础设施故障」，而修法一旦落地，这条用例立刻转绿、并从此钉住那个修法。若这条红不能接受，正确的回退是**撤掉这条用例**（判据留在 L2-132 的文字里），而不是让它留在树上被当成噪音。
+
+**五、开放项（新，本轮实测发现，未修）**
+
+**O-1：`stop_daemon_process(pid)` 的身份链可以被一个自己算出 PID 的调用方全部满足。** 四项检查——进程可观测、`/health` 报这个 PID、`config_dir` 一致、admin token 通过——对一个**不属于本配置目录**的 daemon 都能成立，因为 token 与目录都在本机磁盘上。`daemon.pid` 是唯一还能区分的东西，而上面第三节说明了「只靠加一条拒绝」会把三条既有行为打红。真正的修法是让 stop 与 `daemon.pid` 的写入**同锁**，或让 `/health` 报一个本目录独有的 nonce。前者是改协议，后者是改契约（`docs/api.yaml` 的 `/health` 要加字段），两条都要拍板，所以本轮不动。
+
+**五、本轮新增不成立（请勿重复提）**
+
+6. **「`wait_for_exit` 的 `Running` → 强杀支零覆盖」——不成立（收窄版）。** `a_daemon_that_ignores_the_expected_pid_stops_and_says_so` 里 stand-in 不响应关闭、`stop` 仍返回 `Ok`，这条路径**只能**由 `Running → 强杀 → Exited` 走到。缺的是「单独钉住它的用例」，不是覆盖。
+7. **「L2-133(a) 证明 `/exec/stream` 的回归测试必须有沉默 `TcpListener`」——结论过强。** 前提（`/exec/stream` 无本地分支）成立，但 `timeout_secs` 两段都能超时，沉默对端只是握手段最省事的做法。

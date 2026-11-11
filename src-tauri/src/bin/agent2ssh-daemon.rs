@@ -6395,6 +6395,56 @@ mod tests {
         });
     }
 
+    /// L2-132: the gate's 500 branch leaves nothing behind.
+    ///
+    /// A paused gate answers 423 *and* appends an audit entry plus a
+    /// `GateRejected` event, so a refusal is visible. An unreadable
+    /// `execution_gate.json` answers 500 from the `map_err` at the top of the
+    /// same helper and returns before either — so the request is refused with
+    /// no record at all, and an operator reading the audit trail sees a request
+    /// that never happened.
+    ///
+    /// The two branches must agree on being observable, not on the status code:
+    /// the 500 says the gate could not be consulted, and that is exactly the
+    /// moment an audit entry is worth most.
+    #[test]
+    fn unreadable_gate_rejects_with_500_and_writes_audit() {
+        with_temp_config(|| {
+            // Valid JSON would be *read* successfully, and an unknown mode would
+            // be a different failure. Truncated JSON is the shape a hand edit or
+            // a half-written file leaves: parse fails, the file exists.
+            std::fs::write(
+                agent2ssh::store::config_dir()
+                    .unwrap()
+                    .join("execution_gate.json"),
+                "{\"mode\": \"pau",
+            )
+            .unwrap();
+
+            let rejected = reject_if_gate_paused("mcp", "test-host", "uptime");
+            let (status, body) = rejected.expect_err("an unreadable gate must refuse");
+            assert_eq!(
+                status,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "an unreadable gate is not a paused gate: {}",
+                body.error
+            );
+
+            let audit = list_audit_core(AuditFilter {
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap();
+            let entry = audit.first().unwrap_or_else(|| {
+                panic!("a refusal because the gate is unreadable left no audit entry")
+            });
+            assert_eq!(entry.host, "test-host");
+            assert_eq!(entry.command, "uptime");
+            assert_eq!(entry.source.as_deref(), Some("mcp"));
+            assert_eq!(entry.risk_level, RiskLevel::Blocked);
+        });
+    }
+
     #[test]
     fn paused_gate_allows_desktop_source() {
         with_temp_config(|| {
