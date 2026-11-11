@@ -202,7 +202,7 @@ components:
             max_failures:
               type: integer
               nullable: true
-              description: Stop after this many failures; 0 = never stop early.
+              description: Stop after this many failures; 0 = never stop early. Failures are counted when a batch finishes, so nothing already in flight is interrupted — reaching the threshold prevents the *next* batch from starting.
             batch_size:
               type: integer
               nullable: true
@@ -224,8 +224,12 @@ components:
         total_hosts:       { type: integer }
         successful:        { type: integer }
         failed:            { type: integer }
-        skipped:           { type: integer }
-        stopped_early:     { type: boolean }
+        skipped:
+          type: integer
+          description: Hosts that were never attempted, because an earlier batch tripped `max_failures`.
+        stopped_early:
+          type: boolean
+          description: "`max_failures` was reached. Not the same as `skipped > 0`: with a single batch (`batch_size` 0, or at least the number of hosts) every host has already run by the time the count is evaluated, so this can be `true` while `skipped` is 0 — read it as \"the threshold tripped\", not \"hosts were spared\"."
         batches_executed:  { type: integer }
         total_duration_ms: { type: integer }
 
@@ -1566,7 +1570,7 @@ paths:
   /local-exec:
     post:
       summary: Execute a command in a terminal environment on the daemon's own machine
-      description: "Runs the command in a shell on the host the daemon is running on, through the same token scope, execution gate, execution limits, risk classifier and approval policy as `/exec`. `host` selects the environment: `local` for the shell the app would open, `local:<environment>` where environment is one of `pwsh`, `cmd`, `gitbash`, `vs` (a Visual Studio developer shell with MSVC on PATH), `wsl` or `wsl:<distribution>` (a WSL login shell), `local:<id>` naming an environment the user defined in `environments.toml` (that definition layers a working directory, process environment variables and a prelude over one of the built-ins above — see the configuration guide), or `local:<runtime>:<container-id>` where runtime is one of `docker`, `wslc`, `apple` to run the command inside that container through the runtime's non-TTY exec (no stdin; a request carrying `stdin` is rejected with 400). Any other value — including a `local:` id that is neither built in nor defined in `environments.toml` — is rejected with 400, so a request cannot borrow another host alias's scope entry and then execute here. Returns the same `ExecResult` shape as `/exec`, with `host` echoing the id that was requested."
+      description: "Runs the command in a shell on the host the daemon is running on, through the same token scope, execution gate, execution limits, risk classifier and approval policy as `/exec`. `host` selects the environment: `local` for the shell the app would open, `local:<environment>` where environment is one of `pwsh`, `cmd`, `gitbash`, `vs` (a Visual Studio developer shell with MSVC on PATH), `wsl` or `wsl:<distribution>` (a WSL login shell), `local:<id>` naming an environment the user defined in `environments.toml` (that definition layers a working directory, process environment variables and a prelude over one of the built-ins above — see the configuration guide), or `local:<runtime>:<container-id>` where runtime is one of `docker`, `wslc`, `apple` to run the command inside that container through the runtime's non-TTY exec (no stdin; a request carrying `stdin` is rejected with 400). Anything outside those four shapes is refused with 400 before a plan is built — an id that is neither built in nor defined in `environments.toml`, an argument after an environment that takes none, an empty distribution, and a malformed container id are four different refusals with four different messages (see the 400 below), so a request can never borrow another host alias's scope entry and then execute here. Note that a bare word after a runtime is a *valid* container reference: `local:docker:ls` names a container called `ls`, so it is planned and the runtime's own answer arrives in the result rather than as a 400. Returns the same `ExecResult` shape as `/exec`, with `host` echoing the id that was requested."
       requestBody:
         required: true
         content:
@@ -1578,7 +1582,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ExecResult" }
         "400":
-          description: A host that is not a local id, an unknown environment or container runtime, a malformed container id, an environment that cannot be built, a working directory named by an environment definition that is no longer a directory (checked before every command, not only when the definition was loaded), a container request carrying stdin, an over-long command, or a command blocked by risk policy
+          description: A host that is not a local id, an unknown environment or container runtime, a malformed container id (`local:docker:` or `local:docker:a:b` — a bare word such as `local:docker:ls` is a well-formed container reference and is not refused here), an argument after an environment that takes none (`local:cmd:ls` answers `'cmd' takes no argument, but got 'ls'`, and a defined environment answers the same way), an empty distribution (`local:wsl:` answers `'local:wsl:' names no distribution`), an environment defined in `environments.toml` whose definition was rejected, a definition that cannot be built, a working directory named by an environment definition that is no longer a directory (checked before every command, not only when the definition was loaded), a container request carrying stdin, an over-long command, or a command blocked by risk policy. These are four different remedies — fix the id, drop the argument, name a distribution, or fix the definition — so a client should read the message, not just the code.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }

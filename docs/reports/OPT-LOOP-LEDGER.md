@@ -3473,3 +3473,54 @@ L2-154（`/exec-multi` 全 0 语义）、L2-155（preview 缺 admin 门）、L2-
 16. 「`daemon_stop_e2e.rs` 有 33 个用例传 `pid`」——实测 34 个测试里 16 个调 `stop_daemon_process`。此条同时更正我上一轮 L2-165 的同一数字。
 
 **回帖**：`2120580606311424000`（`## 本轮收尾`，18:13:09Z）。`#23` 保持 open。
+
+### 手工/单发消费 · 2026-11-12 · #20 daemon 停止回执（第四次进入 · `/local-exec` 的拒绝分类学、批次停止语义、`code_block` 判据）
+
+**选靶理由**：`open` 12 条，**无 `[opt-round]`** → 模式 B，第二段为空。#20 编号最小且是这一族的入口（#21 依赖回执语义、#23–#25 依赖 #22 协议）；最新评论是 CodeBuddy 的复核 `2120564624440336384`（17:09:39Z），**未被消费**。#21/#23 的最新评论是本流程的 `## 本轮收尾`（仍在等复核）；#22/#25 是 P2；#24/#27 要 Windows 实机；#26/#28 前置未定、#29 编号更晚。
+
+**一处自我更正**：02:03 那一轮把 #20 记成「最新评论是 `## 本轮收尾`、在等复核」而跳过，但那份复核 17:09Z 就到了，比那一轮开工（18:03Z）早 54 分钟。**判断「在等复核」要看最新一条的 id/时间，不能沿用上一轮的结论**——它一条新评论就足以让状态从「等」变成「可消费」。
+
+**判定 12 条 → 成立 11 / 举例不成立 1**（另它自撤 1 条、我自取 1 条成立）。
+
+| # | 指摘 | 判定 | 证据 |
+|---|---|---|---|
+| 1 | 两处 413 逐字统一后，`/local-exec` 上同一段因果仍是反的（`bin/agent2ssh-daemon.rs:1855-1859` 全折 400，`/exec` 的 `:1755-1759` 对同一个 `ExecShutdown` 判 503） | **成立，但已登记** | 计数对：`grep -c SERVICE_UNAVAILABLE src-tauri/src/bin/agent2ssh-daemon.rs` = **1**（只有 `:1757`）；`/local-exec` 的 responses 实测是 200/400/401/403/408/415/422/423/429，**无 503**。但这件事在 **L2-27** 里，原文已写到「状态码是否也统一成 503 是同一决策的一部分」，且写明「即使把 `None` 换成 `ssh_shutdown_outcome(...)`，`ExecShutdown` 类型在 `core.rs:1267` 之前就被抹掉了」——**不新立条** |
+| 2 | `local:<id>` 枚举漏了第三种形态：保留形态里的非法后缀走的是另一条拒绝路径，而不是「any other value」 | **成立** | `local:cmd:ls` → `'cmd' takes no argument, but got 'ls'`（`local_exec.rs:427-430`）；`local:wsl:` → `'local:wsl:' names no distribution`（`:416-419`）；`local:docker:a:b` → `invalid container id`（`:758-771`）。三句都不是「未知 id」，而 `api.yaml` 的 400 列表里一条都没有 |
+| 2-b | 它举的例子「`local:docker:ls` 被拒为 `invalid container id 'ls'`」 | **不成立** | `validate_container_id` 只查两件事：字符集 `[A-Za-z0-9._-]` 与 128 字节上限。`"ls"` 两项都过，于是 `container_plan` 正常建 plan，由 runtime 自己回话（docker 不在 PATH 时是「Docker is not installed…」）。它自己引的 `an_invalid_container_id_is_refused`（`:1841`）的 bad 列表是 `""`/`"a b"`/`"a;b"`/`"a/b"`/`"a:b"`/`"$(id)"`/`` `id` ``/超长——**没有 `ls`** |
+| 3 | 400 补工作目录那句「成立，且没有说多」 | **成立** | `local_exec.rs:920-929` + `core.rs:1218-1225` 与文案「checked before every command」对得上；`custom_environment_plan:905-917` 的 `config_dir`/`base` 不可用已由「cannot be built」覆盖 |
+| 4 | `strategy` 四处代码位置全对，唯 `max_failures` 是「按批」而非「即时」 | **成立** | `core.rs:1644` 的 `batch_failures` 在 `while let Some(joined) = set.join_next()` **之后**统计，`:1648-1651` 的 `break` 在循环末尾；`batch_size = 1, max_failures = 1` 时同批其它 host 不会被打断 |
+| 5 | `code_block` 的 `len == 6` 是纯冗余，且注释给的理由是错的（「a code is the only line shaped exactly `"413":`」） | **成立** | 谓词实为「三字符码」而非「这个码」。全文件普查：`"` 开头且 `":` 结尾的行 **570**，`len == 6` 者 570，非数字中间者 **0** → 当前不误判；但 `"unknown":` 这种键会让块提前结束，`contains("Bytes")` 假阴 |
+| 6 | 同码重复时取第一个块，应写明 | **成立（无实例）** | 105 个 operation 里没有重复码；已在注释里写明 |
+| 7 | (a) `/local-exec` 的中断折进 400，「它今天连断言都没有」 | **成立，已登记** | 与第 1 条同源，条目仍是 **L2-27**；「没有断言」这半也对（`grep -c SERVICE_UNAVAILABLE` = 1，没有第二处、更没有测试） |
+| 8 | (b) `local:<id>` 第三种形态 + 「any other value」 | **成立**（例错见 2-b） | 同第 2 条；本轮已改文案 |
+| 9 | (c) MCP 面与 CLI `--help` 面缺 `environments.toml` | **成立** | `grep -c environments.toml`：`agent2ssh_mcp/tools.rs` **0**、`docs/skills.md` **0**、`bin/agent2ssh.rs` **0**（`api.yaml` 1、指南 4）。`local_exec` 与 `resident_session_open` 的描述、`local exec -H` 的 clap 文档各写了一遍枚举，四处都没有用户自定义环境 |
+| 10 | (d) `/exec-multi` 的 `max_failures` 只按批生效，`api.yaml:1812` 应补一句 | **成立** | 同第 4 条；`max_failures` 原描述只有 "Stop after this many failures; 0 = never stop early." |
+| 11 | (e) `remote_outcome_unknown` 在 `/local-exec` 恒 `None`，与 (a) 是一件事的两面 | **成立，已登记** | `daemon.rs:1843` 恒 `None`，`:1744`（`/exec`）由 `ssh_shutdown_outcome` 算出。条目 **L2-27**，不新立 |
+| 12 | (f) `code_block` 判据比注释宽 | **成立** | 同第 5 条；它给的复算方式（删掉 `len == 6` 后仍 8 passed）与我的普查一致 |
+| — | 第 6 条 WSL 的 `cwd` 静默无效 | **它自撤** | 无 Windows + WSL 实机、无可复算对照，按不成立处理、不重提（#27 范畴） |
+| 自取 | `stopped_early: true` 与 `skipped: 0` 在单批次下同时成立 | **成立（新）** | `core.rs:1561-1566`（`batch_size` 0 → `effective_batch_size = total_hosts`，只有一批）、`:1650-1651`（阈值在批次末尾命中即 `break`，而循环已无下一轮）、`:1657`（`skipped` 于是 0）。默认 `strategy` + `max_failures: 1` 就可达。**L2-172** |
+
+**它这一轮的两个数字纠正**（不影响结论）：`grep -c "takes no argument" src-tauri/src/local_exec.rs` 实测 **3**（它说 2，漏了 `:1549` 的断言）；`an_invalid_container_id_is_refused` 在 `:1841`（它说 `:1850`）。
+
+**本轮改了什么**（全部 L1；`src-tauri/src/**` 只动文案属性——两处 MCP 工具描述与一处 clap 文档，零行为改动、零签名改动，按 batch 2 第 2 轮 `f23f006` 的 clap 文档先例计）：
+
+- `docs/api.yaml`：
+  - `/local-exec` 的 description 收尾句从「**Any other value** — including a `local:` id that is neither built in nor defined in `environments.toml` — is rejected with 400」改成「四类拒绝、四种不同的 message」，并补一句「a bare word after a runtime is a *valid* container reference: `local:docker:ls` names a container called `ls`，所以它会被 plan，runtime 自己的答复在结果里，不是 400」。
+  - `/local-exec` 的 400 从 8 项扩到 10 项，新增「环境不吃参数」（逐字引用 `'cmd' takes no argument, but got 'ls'`）与「空发行版」（逐字引用 `'local:wsl:' names no distribution`），末尾加「These are four different remedies — fix the id, drop the argument, name a distribution, or fix the definition — so a client should read the message, not just the code.」
+  - `max_failures`：「Stop after this many failures; 0 = never stop early.」→ 补「Failures are counted when a batch finishes, so nothing already in flight is interrupted — reaching the threshold prevents the *next* batch from starting.」
+  - `skipped` / `stopped_early`：从 `{ type: integer }` / `{ type: boolean }` 零描述，改为写明「从未被尝试的主机数」与「阈值被触发，不等于 `skipped > 0`；单批次下可以一个是 `true` 一个是 0」。
+- `docs/skills.md` 第 72/73 行、`src-tauri/src/bin/agent2ssh_mcp/tools.rs` 的 `local_exec`/`resident_session_open` 描述、`src-tauri/src/bin/agent2ssh.rs` 的 `local exec -H` clap 文档：四处各补「an id you defined in `environments.toml`」。
+- `src-tauri/tests/daemon_integration.rs`：`code_block` 的边界判据抽成 `is_response_key`（必须是 `"` + 三个 ASCII 数字 + `":`），注释按实情重写；新增 `a_response_key_is_a_three_digit_code`（钉住收紧本身，`"abc":` 与 `"unknown":` 都必须为假）与 `api_yaml_lists_the_local_refusals_it_can_produce`（先断言 `local_exec.rs` 里两条拒绝臂还在，再断言 400 块里逐字引用了这两句）。
+- `docs/reports/OPT-LOOP-L2-PENDING.md`：**L2-172**（单批次 `stopped_early`/`skipped` 自相矛盾，三条改法 + 回滚）。
+
+**反向验证**（这次做了）：新增测试先红后绿——第一次跑时 400 块被读成空（我漏了对 `operation` 做 `trim_start`，`code_block` 的 marker 是去缩进后的形状），修好后仍红，因为正文写的是「takes none」而断言要的是源码里的字面量「takes no argument」；**正是这次红，逼出了「文档该逐字引用 message」这个改动**——不逐字引用的话，客户端没法按文案分流。
+
+**验证**：`npm run build` **6.56 s**；`cargo test --no-default-features --lib` **863 passed / 1 failed / 1 ignored**（红项仍是那条故意红的 IPv6 `an_ipv6_literal_at_port_22_is_removed`，与基线一致）；`--features daemon --test daemon_integration` **80 passed / 0 failed**（含新增两条）；`cargo fmt --check` 干净；`yaml.safe_load` 90 paths。
+
+**未做的 L2**：L2-27（要先把 `LocalExecShutdown` 从 `core.rs` 透出来，再定 local 语境下「未知」的措辞与状态码）、L2-172（`stopped_early` 的语义拆字段）。两条都改 `src-tauri/src/**` 行为。
+
+**新增「不成立」，不要重复提**：
+
+17. **「`local:docker:ls` 被拒为 `invalid container id 'ls'`」**——`validate_container_id`（`local_exec.rs:758-771`）只查字符集 `[A-Za-z0-9._-]` 与 128 字节上限，`"ls"` 两项都过；`container_plan` 于是正常建 plan，由 runtime 自己回话。真正被拒的是 `""`、含空格/分号/斜杠/冒号、`$(id)`、反引号与超长这八种（`an_invalid_container_id_is_refused` 的 bad 列表）。**推论**：`local:<runtime>:<word>` 的「是不是容器引用」不由文案决定，由那个字符集决定。
+
+**回帖**：（本轮回帖 id 见下方补记）

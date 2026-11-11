@@ -2269,3 +2269,19 @@ forward_start（:3204-3244）与 forward_remove（:3077-3113）、forward_stop�
 **为什么它是 L2**：造这个窗口要让 `start_daemon_background` 在 spawn 之后、`write_daemon_pid` 成功之前失败（例如预置一个只读的 `daemon.pid`），这改的是测试夹具而非断言强度，且要挑平台（`chmod` 只在 Unix 有意义）。
 
 **建议改法**：在 `daemon_stop_e2e.rs` 加一条 `#[serial]` 用例，`#[cfg(unix)]`：预置一个**内容合法但指向已死进程**的 `daemon.pid`，把该文件设为只读让 daemon 侧 `write_daemon_pid` 失败，断言 CLI 退出非零、且 PID 文件内容仍是原来那个可恢复的号。代价：一条用例 + 一次 `chmod`，不改任何行为。
+
+## 2026-11-12 · 手工单发：issue #20（第四次进入）
+
+逐条判定与证据见 `OPT-LOOP-LEDGER.md` 同日「手工/单发消费 · #20 第四次进入」小节。**行号基线 `0955e64`**；本轮 `src-tauri/src/**` 只动了三处文案属性（两处 MCP 工具描述、一处 clap 文档），零行为改动。
+
+本轮**只有一条新登记**：CodeBuddy 提的 `/local-exec` 中断折成 400 那条**已在 L2-27 里**（原条目正文已写到「状态码是否也统一成 503 是同一决策的一部分」），不重复立号；它的 `remote_outcome_unknown` 那半是同一件事的外一层，同样并入 L2-27。
+
+### L2-172（新）：单批次下 `stopped_early: true` 与 `skipped: 0` 同时成立
+
+**位置**：`src-tauri/src/core.rs:1561-1566`（`batch_size` 为 0 时 `effective_batch_size = total_hosts`，于是只有一批）、`:1644`（`batch_failures` 在整批 join 完之后才统计）、`:1648-1651`（阈值命中 → `stopped_early = true; break`，而循环已无下一轮）、`:1657`（`skipped = total_hosts - executed_hosts`，此时为 0）、`:1668`（响应字段）；`src-tauri/src/types.rs:436-437`；消费者 `src-tauri/src/bin/agent2ssh.rs:2345`（CLI 的 `--- Batch Summary ---` 直接打印 `Stopped early: {}`）。
+
+**判断**：**成立**。默认 `strategy`（四项全 0，即单批次）配 `max_failures: 1`，所有主机都跑完之后阈值在尾部命中，响应于是 `stopped_early: true` 且 `skipped: 0`。它说的不是「有主机被跳过」，而是「阈值被触发了」——两者在文档里此前都没有区分（`api.yaml` 的 `skipped`/`stopped_early` 只有 `{ type: integer }` / `{ type: boolean }`，零描述）。
+
+**为什么它是 L2**：改的是 `src-tauri/src/core.rs` 的返回值，任何一个改法都会改变既有客户端读到的值。
+
+**建议改法**：(a) 只补文档——本轮做法，`api.yaml` 已写明「`stopped_early` 是阈值被触发、不等于 `skipped > 0`；单批次下两者可以一个是 `true` 一个是 0」，代价 0；(b) 只在还有下一批时置位——`if batch_idx + 1 < batches.len() { stopped_early = true; }`，一行，但会让「阈值触发」这件事从响应里消失，旧客户端再也看不到 `max_failures` 是否生效；(c) 拆成 `threshold_reached` + `stopped_early` 两个字段，语义最准，代价是契约新增字段 + `types.ts`/CLI 打印同步。建议 (a) 现在做、(c) 排到下一次契约变更窗口，(b) 不要单独做。
