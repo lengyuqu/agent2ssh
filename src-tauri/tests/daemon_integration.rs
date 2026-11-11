@@ -2251,10 +2251,16 @@ const HELPER_STATUS: [(&str, &str); 8] = [
 /// `?` — so an unreadable gate file answers 423 or 500 like any other reader.
 /// `preview_results` folds the same read into `load_execution_gate().ok()` and
 /// tests it with `is_some_and`, so a gate file that cannot be read skips the
-/// branch entirely and the target proceeds: 200 with a per-target field, never
-/// a 423 and never a 500. Two consumption shapes share one exemption table, so
-/// a route that returns the status belongs here only if it also consumes it
-/// somewhere else.
+/// branch entirely rather than answering 423 or 500. That does not make the
+/// request succeed: the same handler answers its rate-limit refusal
+/// (`reject_if_rate_limited`, which reads `execution_limits.toml` — a different
+/// file with its own failure modes) and its per-target authorization by
+/// writing each into the same per-target `error` field and returning 200. The
+/// 200-with-a-field shape is this route's uniform refusal form, not a property
+/// of the gate branch: "the gate is unreadable" does not mean "the target is
+/// authorized", and one unreadable file is not the only way to reach it. Two
+/// consumption shapes share one exemption table, so a route that returns the
+/// status belongs here only if it also consumes it somewhere else.
 ///
 /// The third field is a phrase the path block must still carry, so the
 /// exemption cannot decay into silence — the refusal stays documented, just not
