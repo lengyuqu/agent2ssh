@@ -1,6 +1,6 @@
 # 已知问题与未覆盖范围
 
-日期：2026-11-04（K1、K3、K4、K5、K6 已修复；K10、K11 均已修复；K12 为上游限制；K13、K14、K15、K16 为设计限制；E1、E2、E5、E7 已解决并按维护约定移入 `CHANGELOG.md`）。基线：macOS 开发机 + WinR9，Docker / wslc / Apple container；GitHub Actions。Windows 真机验证已于同日完成，结果见 [reports/WINDOWS-HANDOVER.md](reports/WINDOWS-HANDOVER.md) §7。
+日期：2026-11-04（K1、K3、K4、K5、K6 已修复；K10、K11 均已修复；K12 为上游限制；K13、K14、K15、K16 为设计限制；K17 为依赖上游的迁移项；E1、E2、E5、E7 已解决并按维护约定移入 `CHANGELOG.md`）。基线：macOS 开发机 + WinR9，Docker / wslc / Apple container；GitHub Actions。Windows 真机验证已于同日完成，结果见 [reports/WINDOWS-HANDOVER.md](reports/WINDOWS-HANDOVER.md) §7。
 
 本文只记录 **已经知道、尚未解决** 的事项，以及 **没有验证过所以不能下结论** 的范围，按处理价值排序。已修复的问题在 `CHANGELOG.md`；历史缺陷快照在 `DEFECTS.md`（0.2.1 时代，已归档）；Windows 相关的细节在 [reports/WINDOWS-HANDOVER.md](reports/WINDOWS-HANDOVER.md)，此处只列条目。
 
@@ -25,6 +25,8 @@
 | K15 | 限制 | 部分请求仍可能延迟 daemon 停止 | 关闭时会取消等待中的审批、session 读取和本地一次性命令；`/exec` 已建立的 SSH 通道会结束本地等待并中断连接，等待通道关闭时也可响应取消。但无 PTY 的远端命令可能继续运行，结果记为未知。SSH 连接建立、通道启动和阻塞写入阶段，以及 `/exec-multi`、本机代理执行、playbook 和健康快照等其他路径仍可能超过停止等待期限；客户端会先等 8 秒宽限，再重新核对 PID 身份并尝试强制终止一次，然后只等 2 秒，仍未退出才报错并保留 PID 文件。`/exec/stream` 的网络背压已在 macOS + Docker SSH fixture 验证；终端 WebSocket 背压和 Windows 实机尚未验证。 | 后续需在确保远端资源与审计语义明确的前提下处理其他阶段及请求的协作式取消。 |
 
 | K16 | 限制 | `AGENT2SSH_CONFIG_DIR` 用相对路径时，跨工作目录看到的是两个目录 | 这个值由**读取它的进程**按自己的工作目录解析（`daemon_control` 用它定位 `daemon.pid` / `daemon.log`，路径按此解析成绝对路径报出，`./cfg` 不会多出一级）。但两个进程工作目录不同时，同一个相对值就是两个目录：daemon 在 A 写的 `cfg/daemon.pid`，从 B 启动的 CLI 读不到，`daemon status` / `stop` 会如实报「健康端点有 pid，但 PID 文件缺失，无法核实」而**不会**去猜或去停。这不是可以修好的缺陷——相对路径的含义本来就取决于工作目录。 | 用绝对路径即可。回归：`daemon_stop_e2e.rs` 的 `a_relative_config_dir_in_one_working_directory_names_one_daemon`（同目录下不多一级、路径为绝对）与 `a_relative_config_dir_from_another_working_directory_is_a_different_daemon`（跨目录时读到的是另一个文件）；文档见 `configuration-guide.md` 的环境变量表 |
+
+| K17 | 待修（依赖上游） | `glib` 0.18 的 `VariantStrIter` 不可靠（GHSA-wrw7-89jp-8q8g），升级路径被 tauri 的 GTK3 绑定链挡住 | 告警点的是 `Cargo.lock` 里的 `glib 0.18.5`，它只由 Linux 桌面构建的 GTK3 栈引入：`tauri` → `wry` / `tao` / `webkit2gtk` → `glib`，另加托盘图标的 `tray-icon` → `muda` / `libappindicator` 与 `tauri-plugin-dialog` 的 `rfd`。旁路二进制（`agent2ssh`、`agent2ssh-mcp`、`agent2ssh-daemon`，即 CNB 与 GitHub CI 实际构建的目标）走 `--no-default-features`，整个 GTK 家族都不在它们的图里；macOS / Windows 桌面构建用的是 `objc2-web-kit` / `webview2-com`，同样没有 `glib`。**不能单点升级**：`glib-macros`、`gio`、`gdk`、`gtk`、`atk`、`pango`、`cairo-rs`、`soup3`、`webkit2gtk` 都与 `glib 0.18` 同代，把 `glib` 单独抬到 0.20 会在同一张图里出现两个互不兼容的 `glib` 大版本。修复需要上游把 tauri / wry / tao 的绑定代次整体抬到 0.20。`Cargo.toml` 里加了 `cfg(target_os = "linux")` 的 0.20 版本声明（`Cargo.lock` 因此移除了 0.18 的整族条目），它表达的是**要迁到的目标**而非可达状态：在上游跟上之前，Linux 桌面构建的依赖解析会**失败**而不是悄悄装回 0.18。这是刻意的取舍——顶到上游才修好，否则告警只是被藏起来。 | 位置：`src-tauri/Cargo.toml` 的 `[target.'cfg(target_os = "linux")'.dependencies]`、`src-tauri/Cargo.lock`。**下一步**：跟踪 `tauri` 的 GTK3-rs 绑定代次，上游发布带 0.20 绑定的版本后删除该声明块并重新生成锁文件；在那之前 Linux 桌面包（`npm run tauri:build`）无法解析依赖，CI 的 Linux 目标是旁路二进制，不受影响。验证边界：本次没有 Rust 工具链可跑，锁文件的删除是手工按依赖图闭合做的（无悬空依赖、无版本错配），**未用 `cargo` 验证过** |
 
 ## 2. 环境与工程问题
 

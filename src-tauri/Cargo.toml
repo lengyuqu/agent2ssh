@@ -149,6 +149,34 @@ libc = "0.2"
 # B24/font: System font enumeration for terminal font selection.
 fontdb = "0.23"
 
+# GHSA-wrw7-89jp-8q8g: `glib` 0.18.x's `VariantStrIter` iterators are unsound
+# (a `&`-pointed out-argument the optimiser now discards), fixed in 0.20. Every
+# GTK3 binding above it is locked to the same 0.18 bindings generation, so the
+# family has to move together — asking for `glib 0.20` alone yields two
+# incompatible `glib` majors in one graph, which is worse than the advisory.
+# The whole Linux stack is pulled in by the tauri desktop feature only; the
+# sidecar binaries, the daemon and the macOS/Windows builds never touch it.
+#
+# This block is a migration, not a fix: until tauri/wry/tao pick up the 0.20
+# bindings, `cargo` cannot resolve a graph in which those crates agree with it,
+# and resolution fails loudly rather than silently shipping 0.18 (see
+# KNOWN-ISSUES.md K17). Delete the block when the upstream move lands.
+[target.'cfg(target_os = "linux")'.dependencies]
+glib = "0.20"
+gio = "0.20"
+gobject-sys = "0.20"
+glib-sys = "0.20"
+gio-sys = "0.20"
+gtk = "0.20"
+gdk = "0.20"
+gdk-sys = "0.20"
+gdk-pixbuf = "0.20"
+pango = "0.20"
+cairo-rs = "0.20"
+atk = "0.20"
+soup3 = "0.20"
+webkit2gtk = "0.20"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.48", features = [
     "Win32_System_Console",
