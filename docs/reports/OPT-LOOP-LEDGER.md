@@ -2784,3 +2784,5 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 
 10. 「全仓没有一处断言 `/shutdown` 之后 `daemon.pid` 仍在、内容仍是 replacement」——**不成立**：`daemon_stop_e2e.rs:619-622` 用 `read_to_string(…).unwrap()` 钉住；且 `RunningDaemon` 起的是真 daemon 二进制，不是库层 stub。
 11. 「`host_policy_summary` 把坏配置报成 `404 host '{name}' not found`」——**部分不成立**：状态码确是 404，但正文是配置错误原文，不是 `host not found`。
+
+**回帖**：`2120461604117458944`（10:20Z）。推 `cnb main`（`1a21949..05604af`，三笔：`69ce18e` / `05604af`，中间 rebase 一次——另一个写者的 `1a21949` 把 `store.rs` 推后约 187 行）。轮次进度 **5 / 6**，第 6 轮收尾即为批次收尾。
