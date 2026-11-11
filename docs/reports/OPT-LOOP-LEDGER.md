@@ -3277,3 +3277,44 @@ L2-154（`/exec-multi` 全 0 语义）、L2-155（preview 缺 admin 门）、L2-
 2. **复核方开始直接推提交**（`4db0762`、`c41a6c4`）。凡 main 上出现本流程没亲自跑过的提交，先跑再谈意见——第 5 轮就是靠这个顺序发现它「一条都没跑」。
 
 **待拍板（跨批次累积，优先级自上而下）**：L2-15（故意红的 IPv6，卡住 CNB `daemon-regressions` 整条链）> L2-135（`host_allows_source` fail-open）> L2-132（审计裁决值）> L2-136 > L2-154/155/156（本轮 #20 新增：`/exec-multi` 全 0 语义、import preview 缺 admin 门、`ai_allowed` 不比较不保留）。
+
+### 手工/单发消费 · 2026-11-11 · daemon 异常诊断与保守恢复（issue #21 · 第二次进入）
+
+**前置**：无锁（锁目录不存在，主动建立并写 `owner`，结束释放）；三个其它 worktree `status --porcelain` 全 0 行；`ls-remote cnb/main` 与 120 秒后的值都是 `f84c9bc`；`src/`、`docs/` 十分钟零写入 → 不开让位流程。`open` 共 11 条：**无 `[opt-round]`**（#30 已关），MANUAL = #20–#29 → 模式 B，第二段（批次循环）为空。
+
+**选靶 #21（而不是编号最小的 #20）**——理由要留档，因为按「同级取编号最小」应当选 #20：
+
+1. 按「待处理指摘的到达时间」这一层 FCFS，#21 的复核 `2120501607040184320`（12:59Z）比 #20 的 `2120517007480102912`（14:00Z）早一小时，且 #20 的复核落在我上一轮结束之后 4 分钟，上一轮的「下次取 #21」计划不是判断失误、是时间差。
+2. 按可推进量：#20 的剩余三项是「一处排比句噪声 + 两条 413/Content-Length 文档措辞」，全部落在同一段契约文字上，且它的实质项早已被 L2-154/155/156 挡住；#21 的复核给了 10 条带行号的新断言，其中一条是**用户可见文档的事实错误**（`AGENT2SSH_DAEMON_ADDR` 声称作用于全部 client，而桌面 WebView 写死地址）。
+3. 排除理由（本轮无）：#22/#25 是纯设计（P2）、#27 要 Windows 实机且无夹具，都不在本轮候选；#23/#24/#26/#28/#29 是本族下游，等 #21/#22 的结论。
+
+**判定 12 条 → 成立 7 / 部分成立 3 / 不成立 2**：
+
+| # | 指摘 | 判定 | 关键证据 |
+|---|---|---|---|
+| 1 | 桌面 `trace_id` 到不了 daemon，文档 `:1438` 的 Tauri 一半不成立 | **不成立** | `TRACE_ID_HEADER` 有 **20 处内联**使用（`api.ts:444…880`），不只 `traceHeaders()` 那一处；`/sessions` 的 handler 有 `tracing::info!`（`bin/agent2ssh-daemon.rs:2427`）；`:1438` 是 `AGENT2SSH_TRACE_ID` 行、作用域正是 `CLI / MCP`，带 Tauri 的是 `:1436` 的 `AGENT2SSH_SOURCE`，而那一行成立（`types.rs:676` 的 `source_from_env` 对所有 transport 生效，`tauri_commands.rs` 有 9 处 `source_from_transport()`） |
+| 2 | `daemon_status` 的 debug 无级别过滤、会刷满 `app.log` | **部分成立** | 机制对（`:1763-1770`、`normalize_level:139`、`:308` 只按体积轮转），但 `daemonStatus` **零调用点**，刷满只会在 L2-142 接线后发生 |
+| 3 | 「Daemon unavailable」把两种相反情形压成一句 | **成立** | `SettingsMenu.tsx:115-116`；`api.ts:695-709` 的 `:700`/`:707` 都返回 `null`，类型无第三档 |
+| 4 | 前端写死 `127.0.0.1:7722` | **成立** | `api.ts:71`/`:128`；20 处请求 + `TerminalView.tsx:418` 的 ws |
+| 5 | `UnverifiedIdentity` 文案列了 token，该分支不读 token | **成立** | `daemon_control.rs:1027-1029` 在 `health.pid` 不符的 else 里，token 判据在 `:1032` |
+| 6 | 桌面与 CLI 对 `RunningUnhealthy` 分叉 | **部分成立** | 它已自撤「行为分叉」，剩下文案缺「谁写的」，并入 L2-145 |
+| 7 | `remove_daemon_pid_file_if` 的 `Ok(false)` 被当成功、restart 报假 pid | **部分成立** | bool 被忽略属实（`:3107`），但「4 处调用、无一处检查」不成立——**9 处**非测试调用，`:3122` 与 `daemon_control.rs:441` **都检查**；「报一个已经不在的 pid」也不成立（`start_daemon_background:417-425` 重读 + `daemon_pid_state`，死 pid 落 `Stale`、乱码 `Err`） |
+| 8 | 悬空 `daemon.pid` + 空 token：启动失败却已轮换凭据 | **成立** | 顺序 token → bind → pid（`bin/agent2ssh-daemon.rs:5786-5798`），空 token 在 `:337` 换新 UUID |
+| 9 | `doctor`/MCP 的 `daemon.token` 只看 mode | **成立** | `bin/agent2ssh.rs:4989-5018`、`bin/agent2ssh-mcp.rs:1579-1598` |
+| 10 | `status` 与 `stop` 对同一事实两种说法 | **成立** | `bin/agent2ssh.rs:3086` 对 `daemon_control.rs:980` |
+| 修-1 | owner 标记也在锁内，停止卡住是两步 | **成立** | `daemon_control.rs:598`/`:622` 各拿锁，`:1084` 尾部清 owner |
+| 修-2 | 失败点在 `write_daemon_pid` 之前的 `read_daemon_pid` | **成立** | `daemon_control.rs:78` |
+
+**L1 落了什么**：
+
+- `93bb0d5`：`configuration-guide.md:1437` 把 `AGENT2SSH_DAEMON_ADDR` 的作用域改成「daemon（绑定）+ client（拨号，桌面窗口除外）」，并写明桌面窗口的直连请求固定 `127.0.0.1:7722`、设非默认值后 CLI/MCP 正常而桌面显示 `Daemon unavailable`；`:388` 把「卡在删 PID 文件那一步」改成**两步**（先清 `daemon.owner`，返回后调用方再删 PID，各拿一次锁、都无上限）。
+- `bac4dba`：`OPT-LOOP-L2-PENDING.md` 新增 **L2-157…L2-164**；顺带在文件头记下「下一个是 L2-109」已滞后 55 号，改成让读者 `grep` 最大号。
+- 合流：`f84c9bc..bac4dba` 快进，**`cnb/main` = `bac4dba`**。分支 `opt/single-21-20261111` + worktree `single-21` 已清理（先验 `merge-base --is-ancestor`）。只推 `cnb`。
+
+**新增 L2（八条，三条并入既有条目）**：L2-157（status 的 debug 无级别过滤，属 L2-142 配套）、L2-158（`DaemonHealth | null` 缺「不可达」一档）、L2-159（桌面 WebView 写死 daemon 地址）、L2-160（`UnverifiedIdentity` 文案比判定宽）、L2-161（`Ok(false)` 被当成功，restart 路径）、L2-162（悬空链接 + 空 token 会先轮换凭据，并入 L2-146 口径）、L2-163（doctor/MCP 不查空 token，并入 L2-145）、L2-164（status/stop 两种说法，并入 L2-145）。
+
+**验证**：`npm run build` 6.32 s；`cargo fmt --check` 干净；`cargo test --no-default-features --lib` **863 / 1 / 1**（红项仍是故意红的 IPv6，与基线一致）。本轮零 Rust 改动，故未跑 daemon 集成目标。
+
+**回帖**：`2120527459916357632`。issue #21 **保持 open**：余下八条全部需要人拍板，代码侧无未做项。
+
+**这一轮的工艺收获**：复核第 1 条是「整条反转」，而它给的**判据本身**就是错的（`grep "traceHeaders()"` 只命中 1 处，却被写成 2 处，因为它漏了同一个常量另有 20 处内联用法）。顺着它的错误路径去核，才发现它引的 `:1438` 与它想说的 `:1436` 是两行——于是额外检查了「`AGENT2SSH_SOURCE` 到底管不管桌面」，结论是**管**（`source_from_transport()` 在 `tauri_commands.rs` 有 9 处）。也就是说这次「旁边那条也没缺」，但那条判断只有走完 `types.rs:676` 才敢下——**不能因为对方引错了行就停止核对它想说的那件事**。第 7 条同理：它数错调用点（4 vs 9）是次要的，真正的反转来自 `start_daemon_background` 会重读并重判状态。
