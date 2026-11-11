@@ -13,7 +13,7 @@
 **引用规则（立即生效）：**
 
 - 引用撞号条目时**必须带主题限定**，写成 `L2-15（known_hosts 形态）` / `L2-15（shutdown 后仍 200）` 这种形式。这个文件里凡出现裸 `L2-13`…`L2-30` 而无主题限定的引用，都是旧引用，需按上下文重判。
-- **新条目从 `L2-100` 起编号**，不再取 13–99 的空号——空号看起来安全，实际每次都挑到别人用过的号。**已用：`L2-100`（`forward.rs` accept 循环）、`L2-101`（SFTP 审批用标签快照）、`L2-102`（三条 forward 单条路由的 scope 越权返 403）、`L2-103`（MCP `ssh_events_subscribe` 结构上恒空）、`L2-104`（`tools.rs` 的 `tools/list` 文案）、`L2-105`（daemon 侧 `transfer_id`）、`L2-106`（`ResourceKind::Transfer` 条目从未建成）、`L2-107`（`--risk-override` 的取值与静默丢弃）、`L2-108`（`team_config` 的风险规则路径没跟上 policy）。下一个是 `L2-109`。**
+- **新条目从 `L2-100` 起编号**，不再取 13–99 的空号——空号看起来安全，实际每次都挑到别人用过的号。**已用：`L2-100`（`forward.rs` accept 循环）、`L2-101`（SFTP 审批用标签快照）、`L2-102`（三条 forward 单条路由的 scope 越权返 403）、`L2-103`（MCP `ssh_events_subscribe` 结构上恒空）、`L2-104`（`tools.rs` 的 `tools/list` 文案）、`L2-105`（daemon 侧 `transfer_id`）、`L2-106`（`ResourceKind::Transfer` 条目从未建成）、`L2-107`（`--risk-override` 的取值与静默丢弃）、`L2-108`（`team_config` 的风险规则路径没跟上 policy）。下一个是 `L2-109`。**（2026-11-11 补记：这一行已滞后于实际，最大编号到 `L2-164`（本轮新增 `L2-157`…`L2-164`）。取新号前先 `grep -o "L2-[0-9]*" 本文件 | sort -t- -k2 -n | tail -1`，不要信这一行的「下一个」。）**
 - **上一轮的教训（关帖后补记）**：`L2-100` 立条时我写的是「`/local-exec` 的 webhook 恒说结果已知」——那是错的，`/local-exec` 的 `remote_outcome_unknown: None`（`daemon.rs:1807`）的确恒真，但它**不是**没人做过：同一形状在 `:1711` 的 `/exec` 上工作，两边差的是 `:1700` 那一次 `ssh_shutdown_outcome()`，而 local 侧的类型在 `core.rs:1267` 就被折成了字符串。所以那件事的条目是 **L2-27**，不是新号。**立条前先 `grep` 一遍已经有了什么**，这一条是从「差一点就重复登记」里换来的。
 - **同号 + 括号后缀**（目前只有 `L2-23（收窄）`）视为对同号条目的**修订**，不计入撞号，但正文必须写明它在修订哪一条、撤掉了哪个选项。否则下一次按首列扫表的脚本会把它当成一个独立条目。
 - 全量重编号要同时改 ledger 里六批的引用，属人拍板项，不在这里做。半途重编号会让「按编号追溯」比现在更坏。
@@ -2081,3 +2081,87 @@ forward_start（:3204-3244）与 forward_remove（:3077-3113）、forward_stop�
 **判断**：**成立，但形状与复核说的不同**。复核说「同一次导入既报 `hosts_skipped` 又改写」——**不成立**，两分支互斥。真实后果是：当一个主机**别的字段确实不同**时，bundle 里缺省的 `ai_allowed` 会按 serde 默认值 `true` 覆盖本地的 `false`。`ai_allowed: false` 是人工设的「该主机仅人工使用」，一次无关的导入会把它静默恢复成可被 AI 使用。
 
 **为什么没顺手修**：它需要 `src-tauri/src/**` 行为改动，且「缺省 = true」这个 serde 默认本身是既有契约（`api.yaml:5041` 已把它写成「`ai_allowed` is the exception: an omitted one deserialises to `true` and does overwrite」）。**文档已经准确描述了现状**，所以这里要拍的是「现状要不要保持」：保持（不改）／保留本地值（加进 `:107-127` 的保留列表，与 `init_command` 同形，代价最小）／把 `ai_allowed` 加进 `team_host_same`（会造出「报 updated 却保留」的反向不一致，不建议）。
+
+## 2026-11-11 · 来自 issue #21 的消费（第二次进入，单发轮）
+
+十项指摘的行号按 `f84c9bc` 重算。八条落在这里，两条属文档级、已在同轮改掉（`configuration-guide.md:388` 的停止收尾两步、`:1437` 的 `AGENT2SSH_DAEMON_ADDR` 与桌面窗口）。
+
+### L2-157（新，单发 #21 第二次进入）：`daemon status` 的 `debug` 诊断会被原样写进 `app.log`，没有级别过滤
+
+**位置**：`src-tauri/src/tauri_commands.rs:1763-1770`（`daemon_status` 在 `:1758`，每次调用都 `append_diagnostic_log("debug", "tauri", "daemon status checked", …)`，字符串在 `:1766`）；`src-tauri/src/diagnostics.rs:139-144`（`normalize_level` 白名单含 `debug`，`append_diagnostic_log` 不看级别一律追加）、`:176`/`:308`（只按 5 MiB 体积轮转）。
+
+**判断**：**部分成立**——机制成立，但**当前还没有调用者**：`grep -rn "daemonStatus" src/` 只有 `api.ts:711` 的定义与 `SettingsMenu.tsx:116` 的 `daemonStatusText`（另一个标识符），没有任何组件调这条命令。所以「每轮询一次写一条、刷满 `app.log`」只在 L2-142 真正接线之后发生。
+
+**为什么它是 L2**：它是 L2-142 的配套决定，不是独立缺陷。接线的人必须同时回答「这条 debug 留不留」。
+
+**建议改法**：接线时三选一——(a) 删掉这条 debug；(b) 只在 `state` 变化时写；(c) 原样保留（接受每次轮询一条）。代价分别 0 / 一个 last-state 变量 / 0。
+
+### L2-158（新，单发 #21 第二次进入）：`DaemonHealth | null` 只有两档，「没连上」与「答了但不对」被压成同一句文案
+
+**位置**：`src/api.ts:695-709`（`!res.ok` 在 `:700` 返回 `null`、`fetch` 抛错在 `:707` 也返回 `null`）；`src/components/SettingsMenu.tsx:115-116`（`daemonHealthy = daemonHealth?.ok === true` → `Daemon healthy` / `Daemon unavailable`）；`src/components/TopBar.tsx` 用同一输入写 `Daemon running` / `Daemon offline`。
+
+**判断**：**成立**。`null` 有两个来路而类型上只有一档，所以前端结构上无法把「daemon 明确回了非 200」与「根本没连上」分开。这与 L2-141（`Unverified` 一档四种原因）是同一形状，但落在前端。
+
+**为什么它是 L2**：需要改 `getDaemonHealth` 的返回契约（新增 `unreachable` 档或 `{ reason }`），属 `src/**` 改动，会牵动两个消费点的文案与既有前端测试。
+
+**建议改法**：(a) 返回 `DaemonHealth | null` 改为 `{ state: "ok" | "error" | "unreachable", … }`，两个消费点各加一句文案；(b) 只把 `unavailable` 的文案改成「Unavailable or unreachable」，零结构改动、信息量少一档。代价 (a)=类型 + 两处 UI + 测试、(b)=一句 i18n 文案。
+
+### L2-159（新，单发 #21 第二次进入）：桌面 WebView 把 daemon 地址写死，`AGENT2SSH_DAEMON_ADDR` 对面板无效
+
+**位置**：`src/api.ts:71`（`const daemonUrl = "http://127.0.0.1:7722"`）、`:128`（`getDaemonUrl()` 原样返回该常量）；消费点 `api.ts` 的 20 处 `[TRACE_ID_HEADER]` 请求与 `TerminalView.tsx:418` 的 WebSocket。对照 Rust 侧：`src-tauri/src/remote.rs:22`（`local_daemon_addr()` 读 `AGENT2SSH_DAEMON_ADDR`）、`tauri_commands.rs:853`（后端用 `local_daemon_url()`）。
+
+**判断**：**成立**。把 `AGENT2SSH_DAEMON_ADDR` 设成 `127.0.0.1:7723` 后，CLI/MCP 与 Tauri 后端的请求跟着走，桌面窗口的健康、闸门、会话、终端全部仍打 7722，面板只能显示 `Daemon unavailable`。同轮已在 `docs/guides/configuration-guide.md:1437` 把这个限制写成文档（不改变行为）。
+
+**为什么它是 L2**：要修必须新增一条 IPC（把 `local_daemon_url()` 暴露给前端）或改变量注入方式，属 `src/**` + 可能的 Tauri 命令面改动。
+
+**建议改法**：(a) 新增 `daemon_url` 命令，`App` 启动时取一次并缓存（一次 IPC，之后前端不再硬编码）；(b) 保持现状，只保留本轮的文档说明。代价 (a)=一条命令 + 一个 `useEffect` + 前端全部消费点改成读缓存值；(b)=0。
+
+### L2-160（新，单发 #21 第二次进入）：`UnverifiedIdentity` 的括号文案列了 admin token，而那条分支从不读 token
+
+**位置**：`src-tauri/src/daemon_control.rs:1027-1029`（else 分支的 `format!` 固定含 `admin token did not match`）；token 的判据在 `:1032`（`read_admin_token()` → `NotAuthenticated`）。else 分支的进入条件是 `health.pid != Some(pid)` 或 `/health` 无应答，此时 `config_dir` 没有比较、token 没有读取。
+
+**判断**：**成立**（文案比判定宽）。这是「一句文案列了三种原因、其中一种不在这条分支的判定表里」的第三例（前两例见 L2-85 / L2-144），也是我在上一轮判定表里把 `NotAuthenticated` 说成「够不着」的原因——它可达，但只在这一条窄路上。
+
+**为什么它是 L2**：`src-tauri/src/**` 的字符串改动，会打既有 `daemon_stop_e2e` 断言（该文案被至少一处 e2e 用来区分失败原因）。
+
+**建议改法**：(a) 括号改成只列这条分支真评估过的项（`health PID did not match`）；(b) 保留原文案、在后面补一句「token 在下一道门才查」。代价 (a)=一行字符串 + 若干断言；(b)=一句注释。
+
+### L2-161（新，单发 #21 第二次进入）：`remove_daemon_pid_file_if` 的 `Ok(false)` 在四处被当成功，但复核的「4 处、无一处检查」不成立
+
+**位置**：`src-tauri/src/daemon_control.rs:98-111`（`Ok(false)` 的两种情形：文件缺失、内容的 pid 不是传入值）；只 `?` 不读 bool 的调用点：`bin/agent2ssh.rs:3080`（stop）、`:3107`（**restart**）、`tauri_commands.rs:1856`、`:1892`；**检查了** bool 的两处：`bin/agent2ssh.rs:3122`（rotate-token，`if !…bail!`）、`daemon_control.rs:441`（stale 清理，同形）；`daemon_control.rs:537` 是 `let _ =`。
+
+**判断**：**部分成立**。复核说「4 处调用、全是 `?` 或 `let _ =`、无一处 `if !…`」——实测非测试调用共 **9 处**、其中 **2 处检查**，这句不成立。真缺口只剩 `daemon restart`：`Ok(false)` 被忽略后仍然调 `start_daemon_background`。但复核推的后果「打印一个已经不在的 pid」站不住：`start_daemon_background:417-425` 会重读 PID 并过 `daemon_pid_state`，`Healthy` 要求 `/health` 报同一个 pid，死 pid 会落到 `Stale`（删掉重起），而 `read_daemon_pid` 对乱码内容直接 `Err`。真实残留风险只有一种：文件在 stop 与 remove 之间被并发替换成另一个**活着且健康**的 daemon —— 此时报的 pid 是真的，只是不是本次重启起的那个。
+
+**为什么它是 L2**：「`Ok(false)` 视为成功」是既有契约，改成中止或重读会改 CLI 与桌面的失败语义。
+
+**建议改法**：(a) 保持，并在指南写明 restart 报的 pid 可能来自并发启动；(b) restart 检查 bool，`false` 时重读一次再决定；(c) 统一改成「`false` 即中止并提示」。代价 (a)=一句文档、(b)=三行、(c)=四处调用点 + 断言。
+
+### L2-162（新，单发 #21 第二次进入）：悬空 `daemon.pid` 链接 + 空 token 时，启动失败却已经轮换凭据
+
+**位置**：`src-tauri/src/bin/agent2ssh-daemon.rs:5786-5798`（顺序是 `create_dir_all` → `load_or_create_daemon_token` → `TcpListener::bind` → `write_daemon_pid`）；`load_or_create_daemon_token:319-343`（`daemon.token` 为空 → `warn` + 生成新 UUID 并落盘）；`daemon_control.rs:76-82`（`write_daemon_pid` 先 `read_daemon_pid()?`：悬空链接让 `read_to_string` 得 `NotFound` → `Ok(None)`，随后 `std::fs::write` 才失败）。
+
+**判断**：**成立**。后果全部由顺序决定：token 已在 bind 之前落盘，所以进程因 PID 写不进去而退出时，`daemon.token` 已经是新的、所有旧客户端失效、端口被占过一次，而 `daemon.pid` 仍是那条悬空链接。
+
+**为什么它是 L2**：与 L2-146 同一处（PID 文件的畸形形态），两个候选口径（Malformed / Absent）都会改 `read_daemon_pid` 或 `write_daemon_pid` 的语义。
+
+**建议改法**：并入 L2-146 一起拍；若要单独止血，最小的动作是把 `write_daemon_pid` 提到 `load_or_create_daemon_token` 之前，但那会反转现有「绑定失败不覆盖 PID 文件」的保证（`bin/agent2ssh-daemon.rs:5790-5792` 的注释就是在讲这条），必须一起拍。
+
+### L2-163（新，单发 #21 第二次进入）：`doctor` 与 MCP 的 `daemon.token` 检查只看 mode，不看内容
+
+**位置**：`src-tauri/src/bin/agent2ssh.rs:4989-5018`（`mode == 0o600` → `pass`，否则 `warn`；从不读内容，也不看长度）；`src-tauri/src/bin/agent2ssh-mcp.rs:1579-1598`（同形）。对照 `load_or_create_daemon_token` 对空 token 的处理是**重新生成**。
+
+**判断**：**成立**。空 token + 0600 会被判 `pass`，而下一次 daemon 启动会轮换 token、使所有旧客户端失效——恰好在最该 `warn` 的一档给了 `pass`。
+
+**为什么它是 L2**：`bin/**` 行为改动（新增一档 `warn`）。
+
+**建议改法**：并入 L2-145（`doctor` 补三项）一起做，加一个 `metadata.len() == 0` 分支即可。
+
+### L2-164（新，单发 #21 第二次进入）：`daemon status` 与 `daemon stop` 对「PID 文件缺失但 `/health` 活着」是两种说法
+
+**位置**：`src-tauri/src/bin/agent2ssh.rs:3086`（status：`identity cannot be verified`）对 `src-tauri/src/daemon_control.rs:975-981`（`stop_daemon_process` 的 `UnverifiedIdentity`，文案在 `:980`）。
+
+**判断**：**成立**（同一事实两种措辞），且 status 那句没说「为什么」——真正的原因是 `daemon_process_start_time(pid)` 为 `None`，而它决定 `stop_daemon_process` 只在这一种情形下直接拒绝。
+
+**为什么它是 L2**：`bin/**` 的文案改动会打既有 CLI 输出断言。
+
+**建议改法**：并入 L2-145，两条命令共用一个字符串，并在 status 那句后面补「该进程的启动时间读不到，因此无法与 PID 文件交叉验证」。
