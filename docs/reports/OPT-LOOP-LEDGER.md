@@ -2733,3 +2733,54 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 9. **「`a_daemon_that_ignores_the_expected_pid_stops_and_says_so` 断言 `stop` 返回 `Ok`」——不成立。** `daemon_stop_e2e.rs:1504` 是 `stopped.is_ok() || !still_running`，返回 `Err` 而进程已消失同样通过；该用例钉的是「进程没了」，不是「返回 Ok」。
 
 **回帖**：`2120458915342077952`（10:09Z）。推 `cnb main`（`02895bb..5a8cb5b`，三笔：`ef5885a` 契约＋L2 / `2720096` 本文件 / `5a8cb5b` L2-134 扩写），未推 github。轮次进度 **4 / 6**。
+
+### consume 5 / 6 · 2026-11-11 · issue #19 · 第 5 轮
+
+指摘来源：复核方对第 4 轮的复核 `2120460600642805760`（10:15Z）。它同轮推了 `aa095ad`（纯文档，`docs/reports/` 两文件）。
+
+**一、判定：11 条 → 成立 6 / 部分成立 2 / 不成立 2 / 自我更正 1**
+
+| # | 主张 | 判定 | 证据 |
+|---|---|---|---|
+| 1 | `ef5885a` 的措辞成立但「差一环」：全仓没有一处断言 `/shutdown` 之后 pid 文件仍在 | **不成立**（一半对） | `daemon_stop_e2e.rs:619-622` 就是那处：`std::fs::read_to_string(old.pid_file()).unwrap()` 在文件被删时会 panic。且 `RunningDaemon` 起的是**真 daemon 二进制**（`:69` 的 `env!("CARGO_BIN_EXE_agent2ssh-daemon")`），`stop_daemon_process` 打的正是它的 `/shutdown`，所以不是「库层用例」。**对的那半**：`:618` 的 `assert!(!remove_daemon_pid_file_if(old_pid).unwrap())` 恒真——文件不在时该函数也返回 `Ok(false)` |
+| 2 | `pid_file_removed` 只在正常返回时写，`:6000` 的 `?` 失败则三处调用方各自再删且不写日志 | **成立** | `:6000` 的 `let pid_removed = …?;` 在 `:6001` 的 `append_diagnostic_log` 之前；`tauri_commands.rs:1856`/`:1892`/`:1920`、`bin/agent2ssh.rs:3073`/`:3100`/`:3115` 各自再调 |
+| 3 | `:1504` 会掩盖真失败，给了构造 A/B/C | **部分成立（未实测）** | 构造 B 的机制成立：`daemon_control.rs:1069` 的 `signal_daemon(…).map_err(…)?` 一旦 `Err` 就在 `:1070` 的 `match` 之前返回，`StillRunning` 不可达。构造 A 也成立（`:1077` 的 `clear_daemon_owner_if(…)?` 在进程已退出之后）。构造 C 要改测试本体，只作论证。三条**都没跑过**，按「可复现的假设」记，不当结论 |
+| 4 | L2-134 少六个成员，`host_policy_summary` 折成 404 | **成立（4.5 条）** | `execution_control.rs:157-167` ＋ `bin/agent2ssh-daemon.rs:1404-1407`（`map_err(NOT_FOUND)` 把所有错误折成 404）——**但正文是配置错误原文，不是 `host not found`**，它把文案说错一档；`:189-208` 空 tags 成立；`bin/agent2ssh-mcp.rs:1745-1748` 成立；它自己也说 `host_tags` 只是包装；`terminal_broadcast_preview_results` 属 L2-122 |
+| 5 | `host_allows_source` 读不出来 ≡ 主机不存在 ≡ 默认放行，方向与 `audit_host_scope` 相反 | **成立，且比它说的更重** | `execution_control.rs:119-133`，`is_none_or` 对 `None` 返回 true → 放行；与 `command_authorization_target` 的空 tags **叠乘**（`authorize_command:445-452` 两道闸同时变松）。**零测试覆盖** |
+| 6 | `session::resolve_host` 不在缺陷族里，`?` 是对的 | **成立** | `session.rs:57-62` 先 `load_config()?` 短路。我第 4 轮「两种形态」的写法会被读成正反都错，已改 |
+| 7 | L2-132 的载体：`store.rs:908` 的 `append_operation_audit` 就是为这一类写的 | **成立** | 注释原话「typically an operation that was rejected before execution」。原条目据此推出的「要新增类型」过强，已改 |
+| 8 | `derive_audit_outcome` 只看 risk/exit_code；`AuditDecision` 在 schema 里两处 | **成立（行号偏 3）** | `store.rs:980-990`；`docs/api.yaml:287`/`:368`（它写 `:290`/`:371`） |
+| 9 | `execution_control.rs:650` 的 `assert_eq!(refused.len(), 3)` | **成立（行号偏 6）** | 实际在 `:656` |
+| 10 | `.cnb.yml` 的问题不止没注释：无 `allow_failure`、`set -eu`，红即中止后面的套件 | **成立，且我的第 4 轮结论要撤** | `:15` 是 `--lib`（第一条命令），`:16` 才是 daemon bin。见下节 |
+| 11 | `/exec/stream` 的 `:5266` 要从 `.is_err()` 改成匹配状态码 | **成立** | `:5266` 逐字确认 |
+
+**二、最重要的自我更正（本轮唯一撤掉的结论）**
+
+我第 4 轮写「L2-132 把流水线从一条红变两条红」是错的，方向对但机理错：`daemon-regressions` 的第一条命令是 `cargo test --locked --no-default-features --lib`（`.cnb.yml:15`），它自 `09d49ea` 起就红（L2-15 那条故意红的 IPv6），而脚本是 `set -eu` 且无 `allow_failure` ——所以作业在**第一步**就中止，`:16`–`:21` 的六条命令行（共 13 个测试目标，含 `--bin agent2ssh-daemon`、`daemon_integration`、四个 daemon e2e、`resident_close`）**从未跑到**。
+
+结论：CNB 门禁自 2026-11-10 起空转，L2-132 那条刻意红今天**不可观测**。要恢复可见性，先该拍的是 **L2-15**，不是 L2-132。
+
+**三、本轮落地（纯文档，`src-tauri/src/**` 一行未动）**
+
+| 文件 | 改动 | 为什么 |
+|---|---|---|
+| `OPT-LOOP-L2-PENDING.md` L2-134 | 成员表补到七行；框架从「两种形态」改成「`.ok()` 是缺陷形态，`?` 是对的」 | 原写法会让读者以为 `?` 那些也是缺陷；`host_policy_summary` 的 404 折叠比文案错更严重一档 |
+| 同上，新增 **L2-135** | `host_allows_source` 在读配置失败时**放行** | `is_none_or` 对 `None` 返回 true；与空 tags 叠乘；零覆盖；三选一修法待人拍 |
+| 同上，L2-132 | 补「载体已存在」（`append_operation_audit`）＋ 三种取值与账单 ＋ `.is_err()` 必须先改 | 原条目把「要拍板」写成「要新类型」，抬高了决策成本 |
+| 同上，L2-132 影响面第 2 条 | 按 `set -eu` 重写 | 见上节自我更正 |
+
+**四、未做的 L2 项**
+
+- **L2-135**：三选一（fail-closed / 区分两种 `None` / 只加日志）待人拍，属 `src-tauri/src/**`。
+- **L2-132**：裁决值三选一；`.cnb.yml` 是禁区，只报告。
+- **`:1504` 的断言收紧**：改 `src-tauri/tests/**` 属 L1，但「收紧到 `assert!(stopped.is_ok())` 会不会打红 `exiting_old_daemon_preserves_replacement_pid_in_the_same_config`」要先跑一次才能定，本轮没时间做，留给第 6 轮。
+- **L2-15**：现在看是本批最该先拍的（它挡着整条门禁），但不属本轮指摘。
+
+**五、验证**
+
+本轮只改 `docs/**`，未跑 cargo（无相关改动），不写「已验证」；沿用第 4 轮终值：`npm run build` 6.93 s、`--lib` 862/1/1、`--bin agent2ssh-daemon` 29/1、`daemon_integration api_yaml` 6 passed。
+
+**六、本轮新增不成立（请勿重复提）**
+
+10. 「全仓没有一处断言 `/shutdown` 之后 `daemon.pid` 仍在、内容仍是 replacement」——**不成立**：`daemon_stop_e2e.rs:619-622` 用 `read_to_string(…).unwrap()` 钉住；且 `RunningDaemon` 起的是真 daemon 二进制，不是库层 stub。
+11. 「`host_policy_summary` 把坏配置报成 `404 host '{name}' not found`」——**部分不成立**：状态码确是 404，但正文是配置错误原文，不是 `host not found`。

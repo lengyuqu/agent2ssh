@@ -1551,9 +1551,23 @@ batch 7 判「不成立」时用的论据是「`code.is_some()` 时 `interrupted
 
 **这条红的影响面（第 4 轮实测核对，两处要更正）**：
 1. `5684510` 的提交信息写「`.cnb.yml`'s daemon binary job says so from now on」，但 `.cnb.yml` **全文 76 行、零提及**（最后一次改动是 `da79e93`，早于本条），该笔提交也只动了三个文件。所以 `daemon-regressions` 报红时**没有一处文字解释它**。`.cnb.yml` 在本循环里是禁区，这条注释只能由人或 CI 所有者补——**要么补注释，要么在修法落地前把用例 `#[ignore]` 掉并由 L2-132 的文字承载判据**，两条都需要拍板。
-2. 「一条刻意的红进了主分支，等于这条流水线从此报红」说得过头：`daemon-regressions` 的第一条命令是 `cargo test --locked --no-default-features --lib`，而 `--lib` 自 `09d49ea`（2026-11-10）起就是红的（`embedded_ssh::remove_system_known_host_matching::an_ipv6_literal_at_port_22_is_removed`，见 L2-15）。流水线**在这条之前已经红**，L2-132 把它从「一条红」变成「两条红」。这个区分对读 CI 的人有用：修掉 L2-132 不会让流水线转绿，还会剩 L2-15 那条。
+2. 「一条刻意的红进了主分支，等于这条流水线从此报红」说得过头，而且**我第 4 轮据此写的「从一条红变两条红」是错的**：`.cnb.yml` 无 `allow_failure`、脚本是 `set -eu`，而 `cargo test --locked --no-default-features --lib` 是**第一条**命令（`:15`）。它自 `09d49ea`（2026-11-10）起就红（`embedded_ssh::remove_system_known_host_matching::an_ipv6_literal_at_port_22_is_removed`，见 L2-15），所以 `daemon-regressions` 在第一步就中止，`:16`–`:21` 的六条命令行（共 13 个测试目标，含 `--bin agent2ssh-daemon`、`daemon_integration`、四个 daemon e2e、`resident_close`）**从未跑到**。也就是说 L2-132 这条红今天**不可观测**，而整条 CNB 门禁已经空转一天。要恢复可见性，先拍的应是 **L2-15**（那条故意红的 IPv6 用例），不是 L2-132。
 
 **修法（L2，需拍板）**：在 `:405-410` 的 `map_err` 里补一次审计（`RiskLevel::Blocked`、reason 用 `format!("failed to load execution gate: {e}")`、`side_effect: None`），以及一条 `GateRejected` 事件带 `"gate_load_failed": true`。要拍板的是**审计条目的语义**：这是一次「命令被拒」还是「一次基础设施故障」？现在 `append_audit` 只接受 `ExecResult`，用 `RiskLevel::Blocked` 表示会让「服务器坏了」与「管理员按了急停」在审计里同形——那正是 L2-130/131 在修的同一类事，别在修它的时候再造一个。可选：新增 `AuditOutcome`/事件类型，或沿用 `Blocked` 但在 `reason` 前缀上钉死 `failed to load execution gate:` 并让 `LEDGER` 记录这个口径。
+
+**载体已存在，别造新类型（第 5 轮核对）**：`store.rs:908` 的 `append_operation_audit(source, host, command, risk, exit_code, duration_ms, reason)` 就是为这一类写的，注释原话 *"typically an operation that was **rejected before execution**, or a control-plane action such as an SFTP transfer or a session open"*。所以「`append_audit` 只吃 `ExecResult`」虽然对，但它不是唯一入口。要拍的是一个**取值**，不是形状——`derive_audit_outcome`（`store.rs:980-990`）只看 `risk_level` 与 `exit_code`：
+
+| 传什么 | `outcome` | 读起来 |
+|---|---|---|
+| `RiskLevel::Blocked` | `blocked` | 与「管理员按了急停」「风控拦了这条」同形 |
+| `RiskLevel::Low` ＋ `exit_code: None` | `error` | 「请求没被处理」，`Low` 只是占位 |
+| 新增 `AuditDecision` 变体（`types.rs:640`） | 不变 | 基础设施故障有自己的裁决值，`AuditFilter.decision` 可直接过滤 |
+
+第三条最干净，但要同时改两处枚举清单：`docs/api.yaml:287`（`AuditEntry.properties.decision.enum`）与 `:368`（`AuditFilter.properties.decision.enum`），现值 `[approved, approved_rewritten, rejected, timed_out, auto_allowed, blocked]`。漏一处就是「过滤一个读得到、写不出的裁决」。
+
+**账要一起算**：`execution_control.rs:656` 的 `assert_eq!(refused.len(), 3)` 是精确计数，任何新 `Blocked` 落进同一个 config dir 就变 4——这是「沿用 `Blocked`」最直接的代价，也是第三条（新增裁决值）更划算的理由。
+
+**还有一个必须先改的调用点**：`/exec/stream` 的 `:5266` 用 `.is_err()` 把任何错误都翻成 `execution gate paused`（即 L2-131）。审计补上了而文案不改，运维看到的仍然是「被暂停」。
 
 **成本**：`reject_if_gate_paused` 一个函数、一处 `map_err`、一个字段；测试侧一条（不需要真 daemon，不需要 WS）。比 L2-84 的 WS e2e 便宜得多。
 
@@ -1573,7 +1587,7 @@ batch 7 判「不成立」时用的论据是「`code.is_some()` 时 `interrupted
 
 ### L2-134（新，第 4 轮）：`/exec/stream` 把「配置读不出来」折成 `unknown host`
 
-读 `hosts.json` 的地方有五处，两种形态（`.ok()` 吞错 与 `?` 传播）：
+读配置文件失败的地方有一族，**只有 `.ok()` 那一种是缺陷形态**：它把「读不出来」和「这个主机不存在」压成同一个值。`?` 传播的那几处（如 `session::resolve_host`，`session.rs:57-62`）是对的——调用方拿到的是 `failed to parse hosts config: …`，别把它们并进缺陷表。
 
 | 位置 | 写法 | 配置损坏时客户端看到 |
 |---|---|---|
@@ -1582,11 +1596,43 @@ batch 7 判「不成立」时用的论据是「`code.is_some()` 时 `interrupted
 | `ping_hosts_core`（`core.rs:3559-3563`） | 同上 `.ok().and_then(…)` | 每条 `PingResult.error = "unknown host profile"` |
 | `collect_health_snapshot`（`health.rs:44-47`） | 同上 `.ok().and_then(…)` | 每条 `HostHealthSnapshot.error = "unknown host profile"` |
 | `audit_host_scope`（`:465`） | `load_config().unwrap_or_default()` | 客户端看不到；空配置让 scope 更窄，方向是收，可接受 |
+| `host_policy_summary`（`execution_control.rs:157-167`）← `GET /hosts/{name}/policy` | `load_config()?` ＋ `.ok_or_else("host not found")`，调用点 `bin/agent2ssh-daemon.rs:1404-1407` 把**所有**错误折成 `NOT_FOUND` | `404` ＋ 配置错误的原文。状态码说的是「这个主机没有」，正文说的是「配置读不出来」——两处互相打脸 |
+| `command_authorization_target`（`execution_control.rs:189-208`） | `.ok().and_then(find).unwrap_or_else(空 tags / None override)` | 空 tags → 该主机的 tag 策略与 tag 限速全部失配，无日志。`host_tags`（`bin/agent2ssh-daemon.rs:447-449`）只是它的包装，**不是独立成员** |
+| MCP `health_snapshot` 不点名支（`bin/agent2ssh-mcp.rs:1745-1748`） | `list_hosts_core().unwrap_or_default()` | 坏配置被说成「没有主机」。同一条命令在 CLI 是 `bin/agent2ssh.rs:3491` 的 `?` ＋ `failed to load configuration`（**对的**）——两种说法 |
 
 `/exec/stream` 那一处是**诊断错位**而不是越权：请求仍被拒，但理由从「配置读不出来，可能整个 daemon 都病了」变成「这个主机不存在」。运维按 `unknown host` 去查主机别名，方向完全错——同一类错在 batch 13 修过一次（`gate_blocks_source` 之前的 500 被写成 423 文案）。
 
-四处里三处是 `.ok()`、一处是 `?`，而 `?` 那处恰好是同一条路由的另一种入参形态（`/health-snapshot` 只在调用方不点名主机时才自己读配置）。所以同一条路由会因为「有没有点名主机」而对同一个坏配置给出两种说法：点名 → 每条 `unknown host profile`，不点名 → 500。`health.rs` / `ping_hosts_core` 的 per-host `error` 字段本身是设计，问题只在**它写的病因是错的**。
+表里七处，六处 `.ok()`、一处 `?`（`/health-snapshot` 那个 `?` 是对的）。所以同一条路由会对同一个坏配置给出两种说法：点名主机 → 每条 `unknown host profile`，不点名 → 500。`health.rs` / `ping_hosts_core` 的 per-host `error` 字段本身是设计，问题只在**它写的病因是错的**。`host_policy_summary` 比文案错更严重一档：`404` 会让人直接放弃这条路由，而正文里那句配置错误根本不会被读到。
 
-**修法**：`.ok()` 换成 `map_err`，让三处共用同一句病因。`/exec/stream` 按帧发 `{"type":"error","error":"failed to load config: {e}"}`，与 `reject_if_gate_paused` 的 500 文案同族；`ping_hosts_core` / `collect_health_snapshot` 是逐条返回的结构，没有状态码可发，但 `error` 是 `Option<String>`，容量够写同一句。属 `src-tauri/src/**` 行为改动，**登记不动**。
+**修法**：`.ok()` 换成 `map_err`，让六处共用同一句病因。`/exec/stream` 按帧发 `{"type":"error","error":"failed to load config: {e}"}`，与 `reject_if_gate_paused` 的 500 文案同族；`ping_hosts_core` / `collect_health_snapshot` 是逐条返回的结构，没有状态码可发，但 `error` 是 `Option<String>`，容量够写同一句；`host_policy_summary` 的调用点要先把配置错误与「主机不存在」分成两个状态码（500 / 404），再谈文案。属 `src-tauri/src/**` 行为改动，**登记不动**。
 
-**判据**：把 `hosts.json` 写成非法 JSON，`POST /exec/stream {"host":"whatever"}`，断言第一帧 `error` 含 `failed to load config`。今天拿到的是 `unknown host`。
+**判据**：把 `hosts.json` 写成非法 JSON。`POST /exec/stream {"host":"whatever"}` 今天的第一帧是 `unknown host`，应含 `failed to load config`；`GET /hosts/whatever/policy` 今天是 `404`，应是 `500`。注意 `DELETE /hosts/{name}`（`bin/agent2ssh-daemon.rs:1389`）的 `404 no host profile named` 是**真的** 404，不是本族成员——判据必须写成「坏配置时这条路由的文案必须是配置错误，而 DELETE 保持原样」，否则修法会把正确的 404 一起改坏。
+
+**这条与 L2-135 方向相反，别合并**：本族全是「说错病因」，L2-135 是「读不出来就放行」。
+
+### L2-135（新，第 5 轮）：`hosts.json` 读不出来时，AI 来源**被放行**
+
+`execution_control.rs:119-133` 的最后一段：
+
+```rust
+    human
+        || load_config()
+            .ok()
+            .and_then(|config| config.hosts.into_iter().find(|p| p.name == host))
+            .is_none_or(|profile| profile.ai_allowed)
+```
+
+`Option::is_none_or` 对 `None` 返回 **true**，所以「配置读不出来」与「主机不存在」都落到**允许非人类来源执行**。方向是**放**。
+
+**会叠乘**：同一轮配置损坏还会让 `command_authorization_target`（`:189-208`）返回**空 tags**，而 `host_tags`（`bin/agent2ssh-daemon.rs:447`）正是它的包装。于是 `authorize_command`（`:445-452`）里的两道闸同时变松：`check_daemon_scope(…, input.tags, …)` 失去 tag 规则，紧接着 `host_allows_source` 返回 true。**两个 `.unwrap_or_*` 互相喂饭**，单独看任何一处都像「只是文案问题」。
+
+对照 `audit_host_scope`（`bin/agent2ssh-daemon.rs:465`）的 `unwrap_or_default()`：空配置让 scope 变窄，方向是**收**。两条写法几乎一样、方向相反——本批第四次出现「同族里一条写、一条不写，从任何一条看过去都像一致」。
+
+**危险面**：`host_allows_source` 的唯一调用点是 `:452`，判据文案是 `host is restricted to human operators`。坏配置期间每条 `ai_allowed = false` 的限制全部失效，而「配置文件损坏」正是最可能发生的运维事故之一。**零测试覆盖**：`host_allows_source` 在 `src-tauri/tests/` 与 `execution_control.rs` 的测试模块里都没有出现。
+
+**修法（三选一，要拍板）**：
+1. 读失败 → `false`（fail-closed）。人类来源不受影响，因为 `human` 短路在 `||` 之前。
+2. 区分两种 `None`：读失败 → `false`，主机不存在 → 维持 `is_none_or` 的默认。最贴原意，但要 `.ok()` 换 `match`。
+3. 保持现状，只加一条 ERROR 级诊断日志，让「坏配置期间放行了」至少可查。
+
+**判据**：`hosts.json` 写成非法 JSON，`host_allows_source("any-host", "ai")` 今天是 `true`，方案 1/2 之后应为 `false`。
