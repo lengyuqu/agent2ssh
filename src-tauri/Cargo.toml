@@ -150,32 +150,32 @@ libc = "0.2"
 fontdb = "0.23"
 
 # GHSA-wrw7-89jp-8q8g: `glib` 0.18.x's `VariantStrIter` iterators are unsound
-# (a `&`-pointed out-argument the optimiser now discards), fixed in 0.20. Every
-# GTK3 binding above it is locked to the same 0.18 bindings generation, so the
-# family has to move together — asking for `glib 0.20` alone yields two
-# incompatible `glib` majors in one graph, which is worse than the advisory.
-# The whole Linux stack is pulled in by the tauri desktop feature only; the
-# sidecar binaries, the daemon and the macOS/Windows builds never touch it.
+# (a `&`-pointed out-argument the optimiser now discards), fixed in 0.20.
 #
-# This block is a migration, not a fix: until tauri/wry/tao pick up the 0.20
-# bindings, `cargo` cannot resolve a graph in which those crates agree with it,
-# and resolution fails loudly rather than silently shipping 0.18 (see
-# KNOWN-ISSUES.md K17). Delete the block when the upstream move lands.
+# `glib` cannot simply be bumped: the GTK3 bindings above it (`gtk`, `gdk`,
+# `atk`, `webkit2gtk`, `gdkx11`) have no 0.20 release at all — `gtk` tops out at
+# 0.19 — so a lone upgrade leaves two incompatible `glib` majors in one graph.
+# What *can* move is the part of the stack nothing names: `glib`, `gio`, `pango`,
+# `cairo-rs` and `gdk-pixbuf` are additive across that boundary (the 0.20 crate
+# compiles a v2_66+ feature set against the same C library), so a dependency on
+# them here pins the *whole* graph to 0.20 — `gtk 0.18` then binds against 0.20
+# `pango` / `cairo-rs` / `gdk-pixbuf` instead of pulling 0.18 copies in.
+#
+# `gtk-sys 0.18` pins `glib-sys = 0.18` (a `^0.18` can only take 0.18 if nothing
+# else asks for 0.20), so nothing here may name a -sys crate: with `glib-sys`
+# held at 0.18 and `cairo-sys-rs` / `pango-sys` unconstrained, the rest of the
+# generation splits around them on their own — which is what `cargo check` on
+# this graph confirms, and it is why this block names five crates and no -sys.
+#
+# Only the tauri desktop feature reaches these crates; the sidecar binaries, the
+# daemon and the macOS/Windows builds never see them. Delete the block once
+# `gtk` moves to a `glib 0.20` generation and `wry`/`tao` follow.
 [target.'cfg(target_os = "linux")'.dependencies]
 glib = "0.20"
 gio = "0.20"
-gobject-sys = "0.20"
-glib-sys = "0.20"
-gio-sys = "0.20"
-gtk = "0.20"
-gdk = "0.20"
-gdk-sys = "0.20"
-gdk-pixbuf = "0.20"
 pango = "0.20"
 cairo-rs = "0.20"
-atk = "0.20"
-soup3 = "0.20"
-webkit2gtk = "0.20"
+gdk-pixbuf = "0.20"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.48", features = [
