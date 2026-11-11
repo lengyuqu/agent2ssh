@@ -3571,3 +3571,42 @@ L2-154（`/exec-multi` 全 0 语义）、L2-155（preview 缺 admin 门）、L2-
 18. **「给 `HELPER_STATUS` 加 `load_execution_gate(` 与 `load_approval_policies(` 就能让 helper 产出的 500 现形」**——那个扫描只读 handler 自己的函数体，不传递；两条串在 `bin/` 下分别只出现在 helper 内部与完全不出现（`load_approval_policies` 在 `bin/` 零命中）。能覆盖这族的只有把表改成「helper → 码集合」，条目是 L2-174。
 
 **回帖**：`2120598423911948288`（`## 本轮收尾`，同一条评论内补写第五节「issue 状态」）。`#20` **保持 open**：剩余三条全在拍板侧（L2-27 的 503 口径、L2-172 的字段拆分、L2-174 的码集合），另加 #22 身份协议对 L2-165 的前置。
+
+## 手工/单发消费 · 2026-11-12 · #20 第六次进入（停止回执与旧版兼容）
+
+**选靶**：`open` 12 条（#20–#29 + #31/#32 两条安全扫描贴），无 `[opt-round]` → 模式 B，第二段为空。P1 同级取编号最小：#20 的最新评论是复核 `2120600934320328704`（19:33:56Z），未被消费；#21（`2120566812650676224`）与 #23（`2120583722461192192`）的复核同样未消费但编号更大；#22/#25 是 P2 设计类，#24/#27 要 Windows 实机（本机做不了，排除），#26/#28/#29 零评论、需先发只读分析请求再等 5 min。
+
+**判定 12 条 → 成立 8 / 部分成立 1 / 不成立 1 / 记录 2**
+
+| # | 它的指摘 | 判定 | 证据 |
+|---|---|---|---|
+| 1 | §1-1：`code_block` 找不到 marker 改 `assert!` 是对的——三个调用点里只有 `:3956` 传的是已确认存在的码 | **成立** | 上一轮已改，本轮未动；它读的 `:4056-4070` 与现树一致 |
+| 2 | §1-2：`every_response_key_…` 的 571 个候选 key 它按同一套过滤规则复算，indent 全 8、误判 0 | **成立** | 独立复算一致；本轮删掉 `/local-exec` 的 500 后该键数为 570，测试只断言 `keys > 400`，不钉具体数字，所以不需要改 |
+| 3 | §1-3：400 的 needle 2→5 五个在源码侧与文档侧都在 | **成立** | `local_exec.rs` 的五个 `ok_or_else` 文案与 400 块逐字对得上 |
+| 4 | §1-4：新测试只挡回归、不发现问题——「在这个位置是对的形状」 | **成立（性质确认）** | 与我的自评一致；本轮把它换掉了，见下 |
+| 5 | §1-5 / §4：`/local-exec` 的 500 点名 `policy.toml`，而审批链的另一条臂读 `approval_policies.toml` | **成立（本轮最值钱）** | `approval.rs:969-979`：先 `policy::policy_approval_policies()?`，`Ok(None)` 才落到 `approval_policies_path()`；`policy.rs:93-97` 对 `.toml` 直接 `toml::from_str`，`AgentPolicyFile`（`policy.rs:9-15`）两个字段都是 `#[serde(default)]`，所以只写 `[[approval.policies]]` 也能解析成功——失败面比「parse 失败」更宽。它说「全仓 `deny_unknown_fields` 零命中」不准确（`local_environments.rs:81`、`:99` 各一处），但那两处与策略文件无关，结论不受影响 |
+| 6 | §2：「把表改成码集合是零红的空转」——今天 15 个走 `preflight_guarded_request` 的 operation 全都写了 500 | **不成立** | 逐 operation 取 `responses` 键：能回 gate-read 500 却**没有** 500 的有 11 个 —— `/exec`、`/sftp/{upload,download,ls,stat,mkdir,rename,rm,rmdir}`、`POST /forwards`、`POST /forwards/multi`（`/sftp/rm-rf` 与 `/sftp/rm-rf/authorize` 经 `preflight_sftp_rm_rf` 同源，也没有）。扩表会一次红 11~13 条。**它的前提来自我上一轮写错的一行**：台账「不成立」第 7 条写着「`/exec` 有 500」，而 `git show f77e6ed/4a69666/5c0e53e` 三个版本的 `/exec` 都是 `200/400/401/403/408/415/422/423/429/503`，从来没有 500。**这个错误算我的。** 它的结论（不要走码集合）方向恰好吃对，但理由是错的：口径早在 `daemon_integration.rs` 的 `HELPER_STATUS` 注释里拍过（「不在每条 operation 上重复，`info.description` 说一次」，并写明 per-operation 重复会诱使两处一起被删）→ L2-174 按此收口 |
+| 7 | Q1：`/local-exec` 的 400 是一份「拒绝枚举」，而 handler 尾部 `map_err(BAD_REQUEST)` 把执行失败也落成 400，契约里没说 | **成立** | `local_exec` 末尾 `result.map(Json).map_err(\|e\| err(StatusCode::BAD_REQUEST, e))`（本轮改前 `:1850-1852`）；`/sftp/*` 的 400 早写着「the request is invalid, or the upload failed」——同族一侧写了、一侧没写 |
+| 8 | Q2：`/exec` 缺 500，与 `/exec-multi`、`/exec/compare` 不同族 | **部分成立** | 事实对（`/exec` 无 500，且它经 `preflight_rewritable_request` → `preflight_guarded_request_inner` → `reject_if_gate_paused`，确实能 500）。但定性错：按文件级口径这**不是缺陷**。真正的不一致是上一轮我自己给 `/local-exec` 加的那条 per-operation 500——本轮删掉它，让 `/exec` 的写法变成规范 |
+| 9 | Q3：`HANDLER_STATUS` 的 403 有一处静默漏检——删掉 `/local-exec` 的 403 不会红 | **成立** | 变异验证：删掉 `/local-exec` 的 `"403":` 块后，改前的 82 条全绿；给 `HELPER_STATUS` 加 `preflight_guarded_request(`/`preflight_rewritable_request(` → `403` 后，同一变异立刻红，且**只**点名 `403 post /local-exec (local_exec via helper)`。全仓 16 个 preflight 调用点今天都已文档 403，加表零红 |
+| 10 | Q4：`load_error` 两向性成立，建议指南补一句「日志只有启动时那一条」 | **成立（采纳）** | `local_environments.rs:279-282`（`current()` 缓存后不再读盘）、`:284-290`（`reload()` 只在启动调用）；指南 `:711` 原文只说「daemon 启动时会把这些问题写入日志」，读者会去翻日志确认「最近没报错」 |
+| 11 | Q5：第 9 条的取值断言（`stopped_early`/`skipped`）推到下一轮 | **记录，非本轮缺陷** | 与它自己的结论一致；要动 `core.rs` 属 `src/**` |
+| 12 | §4：建议新立 L2-175（500 文案点名两个文件，推荐 (a) 零代价） | **记录，已按 (a) 落地** | 但没有新立该条——它要修的就是第 5 条，本轮直接改了文案。编号 L2-175 被本轮另一件事占用（400 双语义） |
+
+**本轮改了什么**（全部 L1；`src-tauri/src/**` 零改动）：
+
+- `docs/api.yaml` 的文件级段落：把「第二个 500」那段从「gate 读不了」扩成**两个共享读**——`execution_gate.json` 与审批链（`policy.toml`/`policy.json` 先、`approval_policies.toml` 兜底，谁存在谁决定），并保留原有那句「这就是为什么它们都不在自己的 `responses` 里重复」。
+- `docs/api.yaml` 的 `/local-exec`：**删掉**上一轮加的 per-operation `500`（它与上面那句直接矛盾，且只点了两个文件里的一个）；400 末尾补一句「以上都是执行前的拒绝；handler 最后一步也把 local exec 自身的失败映射成 400，其中一些发生在进程启动之后，所以码本身分不清拒绝与跑到一半失败」。
+- `docs/guides/configuration-guide.md:711`：补「日志只有启动时那一条」，并点名「最近没看到报错」不是验证。
+- `src-tauri/tests/daemon_integration.rs`：`HELPER_STATUS` 8 → 10，加 `preflight_guarded_request(` / `preflight_rewritable_request(` → `403`，并把注释里「423 是唯一 1:1」的说法改成「preflight 是超集，只钉 403」；`local_exec_documents_the_internal_errors_its_helper_answers_with` 改名为 `the_spec_states_the_preflight_internal_errors_once`，断言换成三条：文件级段落必须点名 `execution_gate.json` / `policy.toml` / `approval_policies.toml`、`/local-exec` 不得自带 500、它的 400 必须承认执行失败落在同一个码。
+- `docs/reports/OPT-LOOP-L2-PENDING.md`：**L2-174 收口**（裁决为「不扩表、走文件级」，附它的错误前提与我自己那行错账）、**L2-175 新增**（400 双语义，三方案）。
+
+**反向验证（三次，全部实测）**：①删掉 `/local-exec` 的 `"403":` → `api_yaml_documents_the_codes_each_handler_can_return` 红，消息只说 `403 post /local-exec (local_exec via helper)`；②给它重新加一条 `"500":` → `the_spec_states_the_preflight_internal_errors_once` 红；③把文件级段落里的 `approval_policies.toml` 改名 → 同一条测试红。三次恢复后全绿。
+
+**验证**：`npm run build` 6.21 s；`--no-default-features --lib` **863 passed / 1 failed / 1 ignored**（红项仍是那条故意红的 IPv6 `an_ipv6_literal_at_port_22_is_removed`，与基线同）；`--features daemon --test daemon_integration` **82 passed / 0 failed**（含 8 条 `api_yaml*` 与新守卫）。
+
+**新增「不成立」，不要重复提**：
+
+19. **「把 `HELPER_STATUS` 扩成码集合是零红的空转，因为 15 个 preflight operation 都已经写了 500」**——11 个能回 gate-read 500 的 operation 没有 500（清单见上表第 6 条）；扩表会红 11~13 条。它引用的「`/exec` 有 500」来自我上一轮台账的笔误，已在本条更正。
+
+**回帖**：见下一条提交（本轮先落代码与台账，回帖 id 单独记账）。

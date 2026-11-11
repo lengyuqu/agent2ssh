@@ -2309,3 +2309,22 @@ forward_start（:3204-3244）与 forward_remove（:3077-3113）、forward_stop�
 **为什么它是 L2**：改成码集合会让 17 个走 preflight 的 operation 一次性被要求补 `423`/`500`，其中多数今天没写 500；这是**契约面**的批量变更，不该由消费任务一轮扫完。
 
 **建议改法**：(a) 保持现状 + 靠本轮新增的按路由守卫（`local_exec_documents_the_internal_errors_its_helper_answers_with`），代价 0，覆盖只有一条路由；(b) 把 `HELPER_STATUS` 扩成 `&[(&str, &[&str])]`，先只加 `500` 到 `preflight_*` 两条，按失败清单一次性补齐 api.yaml——预计 10–15 个 operation，一次提交可完成，但要有人确认「gate/policy 读失败一律 500」这个口径（与 L2-122 的 fail-closed 决策同源）；(c) 折中：只给「400 分类学」这类一手可证的路由加按路由守卫。倾向 (b)，但先拍 L2-122。
+
+**2026-11-12 收口：本条已裁决，不再待拍板。**
+
+- **复核方替我算了一笔账，方向对、数字错**：它主张 (b) 是「零红的空转」——理由是「今天 15 个走 `preflight_guarded_request` 的 operation 全都写了 500」。实测（`yaml.safe_load` 逐 operation 取 `responses` 键）**11 个能回 gate-read 500 的 operation 根本没有 500**：`/exec`、`/sftp/{upload,download,ls,stat,mkdir,rename,rm,rmdir}`、`POST /forwards`、`POST /forwards/multi`；`/sftp/rm-rf` 与 `/sftp/rm-rf/authorize` 经 `preflight_sftp_rm_rf` 同源，同样没有。按 (b) 扩表会一次红 11~13 条，不是 0 条。
+- **它引用的前提来自我上一轮写错的一行**：第 5 次进入的台账在「不成立」清单第 7 条写着「`/exec` 有 500」。`git show` 核过 `f77e6ed`/`4a69666`/`5c0e53e` 三个版本，`/exec` 的 responses **一直**是 `200/400/401/403/408/415/422/423/429/503`，从来没有 500。**我的台账把它的前提喂错了，这个错误算我的。**
+- **口径其实早就拍过，只是记在测试文件里**：`daemon_integration.rs` 的 `HELPER_STATUS` 注释明写 gate-read 500「不在每条 operation 上重复，`info.description` 说一次」，理由写得很直白——「per-operation repeat 会诱使两处一起被删」，且「任何写在这里的数字都是快照」。所以 (b) 不是待拍板，而是**上一轮已经否掉的方向**。
+- **本轮按既有口径收口**：文件级段落补上审批策略那一半（`policy.toml`/`policy.json` 先、`approval_policies.toml` 兜底）；删掉 `/local-exec` 上一轮那条 per-operation 500（它同时与文件级句子矛盾、且只点了两个文件里的一个）；守卫改成三条断言（文件级必须点名三个文件、`/local-exec` 不得自带 500、400 必须承认执行失败落同一个码），三条都做过变异验证。编号不复用。那条守卫已从 `local_exec_documents_the_internal_errors_its_helper_answers_with` 改名为 `the_spec_states_the_preflight_internal_errors_once`（下面 (a) 里的旧名字指的就是它）。
+
+### L2-175（新）：`/local-exec` 把「执行失败」与「请求非法」答成同一个 400，客户端只能靠读消息区分
+
+**位置**：`src-tauri/src/bin/agent2ssh-daemon.rs`（`local_exec`，函数末尾 `result.map(Json).map_err(|e| err(StatusCode::BAD_REQUEST, e))`，2026-11-12 时为 `:1850-1852`）。同形的三处：`exec_compare` 的 `:1936-1937`、`exec_multi` 的 `:1897-1898`、`sftp_upload` 的尾部。
+
+**判断**：**成立（代码事实）**。这一族的 400 同时承载两类完全不同的结果：执行前被拒（id 不合法、环境建不起来、命令过长、风险策略拦截）与执行本身失败（`exec_local_core_with_shutdown` 返回 `Err`——shell 起不来、plan 之后的 I/O 失败、`to_bytes` 之类）。后者可能已经 spawn 了进程，`/exec-multi` 甚至可能已经在多台机器上跑过一部分，而对外仍是 400 + 同一个 `Error` 形状。
+
+**为什么它是 L2**：改码是对外可见的行为变更（400 → 500，或 200 + `exit_code: null` + 一条 error 字段），且必须与 `/exec`、`/sftp/*`、`/exec-multi` 同批定；单改 `/local-exec` 会立刻造出「一族三种写法」，正是本仓反复出现的那个形态。
+
+**本轮已做的（文档侧，不是行为侧）**：`/local-exec` 的 400 末尾补一句「所有这些都是在执行前就决定好的拒绝；handler 最后一步也把 local exec 自身的任何失败映射成 400，其中一些发生在进程启动之后，所以码本身分不清拒绝与跑到一半失败」——与 `/sftp/*` 早就在用的「the request is invalid, or the upload failed」同形。行为面不动。
+
+**建议改法**：(a) 保持 400 但保证消息可分辨（现状，本轮已文档化），代价 0；(b) 执行失败改成 500，与「gate/policy 读不了」的 500 混在一起，需要先加一个可区分的 message 前缀，否则客户端仍然只能读文本；(c) 改成 200 + `exit_code: null` + `stderr` 里的失败原因，最贴近「命令跑过」的语义，但要改 `ExecResult` 的消费方（桌面端、CLI、MCP、活动流五处）。倾向 (a) 现在、(c) 与 `/exec` 家族一起拍。
