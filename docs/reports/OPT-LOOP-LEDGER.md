@@ -3359,4 +3359,8 @@ L2-154（`/exec-multi` 全 0 语义）、L2-155（preview 缺 admin 门）、L2-
 
 **未做的 L2 项与理由**：pidfd 本体（`stop_daemon_process` / `wait_for_exit` / `signal_daemon` 改成以进程对象为参数）牵动 5 个调用点与 33 个 e2e 用例，且前置 #22 未拍板；白名单派生会改变 `renamed_daemon_*` 测试的安全语义。两者都只登记。
 
-**验证**：见本轮收尾时的实测数字（`npm run build`、`cargo fmt --check`、`--no-default-features --lib`）。本轮零 Rust 改动，`src-tauri/src/**` 与 `src-tauri/tests/**` 一行未动。
+**验证**：`npm run build` 6.29 s；`cargo fmt --check` 干净；`cargo test --no-default-features --lib` **863 / 1 / 1**（红项仍是故意红的 IPv6，与基线一致）。本轮零 Rust 改动，`src-tauri/src/**` 与 `src-tauri/tests/**` 一行未动。
+
+**回帖**：`2120545266569732096`（`## 本轮收尾`，15:52:44Z），#23 内该标记首条（C 不适用——单发轮不带轮次号）。issue **保持 open**：三条验收（真实进程回归 / 两种生命周期 / Linux CI 前提）全未做，阻塞在 #22 的文件身份格式、L2-165 的 errno 归属、L2-166 的二选一。其后无新回复（本轮到此结束，第二段为空）。
+
+**这一轮的工艺收获**：它最响的「新发现」（没有实例级单例锁）恰好是它自己引过的那条测试**断言了相反的事**——`daemon_stop_e2e.rs:632` 的 `wait_until("competing daemon exit", …)` 是「第二个实例必须退出」，被读成「只比了文件内容」。**引用一条测试时，读它断言的是进程还是文件**，这一类误读在台账里已是第三次（前两次是 `wait_for_exit` 的单测作用域、`terminal_broadcast_run` 的 return 臂）。反过来，它的 `start_time` 秒级结论我核到了上游三处转换——**对的那条要核到能复算的锚点（`sysinfo 0.39.3` 的 Cargo.lock + 三处源码），不然只是换个人复述**。
