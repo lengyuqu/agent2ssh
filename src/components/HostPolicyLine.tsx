@@ -75,7 +75,21 @@ export default function HostPolicyLine({ host }: Props) {
         // `host_policy_summary` rewriting its `Auto` to `Required`, not by a
         // default policy that does not exist. The old copy said "med/high need
         // approval", which over-reported medium.
-        { key: "low", label: t("low/med auto-approve (no policy)"), tone: "text-risk-low", dot: "bg-risk-low" },
+        //
+        // The parenthetical names *why* auto applies, not *what* auto means:
+        // with no policy file there is no default one, so what is left is the
+        // execution page's answer (nothing is demanded), while the Approvals
+        // page still shows a medium card the moment any policy asks for one.
+        // "no policy configured" therefore describes the missing configuration;
+        // "this line describes only the no-policy case" is the comment's job,
+        // because a banner this size cannot carry two clauses and still be read
+        // at a glance.
+        {
+          key: "low",
+          label: t("low/med auto-approve (no policy configured)"),
+          tone: "text-risk-low",
+          dot: "bg-risk-low",
+        },
         {
           key: "high",
           label: t("high need approval"),

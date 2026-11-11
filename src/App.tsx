@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, reportError } from "./api";
+import { isAlreadyDecided } from "./lib/approval-decision";
 import { MODULES, RELATED_MODULES, SIDEBAR_ORDER } from "./nav";
 import AddHostForm from "./components/AddHostForm";
 import ApprovalWorkbench from "./components/approval/ApprovalWorkbench";
@@ -469,7 +470,7 @@ export default function App() {
       // command — that would execute it twice.
       setTerminalDrawer({ host: approval.host, command: null });
     } catch (err) {
-      showToast("error", t("Failed to approve: {error}", { error: String(err) }));
+      await reportUndecided(err, approval, "approve");
     }
   }
 
@@ -478,7 +479,35 @@ export default function App() {
       await api.approvalReject(approval.id);
       setPendingApprovals((prev) => prev.filter((a) => a.id !== approval.id));
     } catch (err) {
-      showToast("error", t("Failed to reject: {error}", { error: String(err) }));
+      await reportUndecided(err, approval, "reject");
+    }
+  }
+
+  /**
+   * The daemon answers 400 for every refusal, so "already Approved" (the
+   * request was decided and only the response was lost) is indistinguishable
+   * from "the command is blocked" or "unknown approval" by status alone. The
+   * message is the only thing that tells them apart, and only the first one may
+   * retire the card here: a still-pending request must stay in the queue, or a
+   * refusal would quietly drop the operator's decision.
+   */
+  async function reportUndecided(err: unknown, approval: ApprovalRequest, action: "approve" | "reject") {
+    showToast(
+      "error",
+      t(action === "approve" ? "Failed to approve: {error}" : "Failed to reject: {error}", {
+        error: String(err),
+      }),
+    );
+    if (!isAlreadyDecided(String(err))) return;
+    // The review's L2-121: without this the card outlives every later click,
+    // each one repeating the same 400, because the `approval_responded` event
+    // that would have refreshed the list is the one that went missing. This
+    // read only says what the daemon has on record; when it is unreachable the
+    // entry `fetchApprovals` would substitute (`[]`) is no evidence of a
+    // decision, so only drop an id the daemon itself listed as decided.
+    const listed = (await api.fetchApprovals()).find((a) => a.id === approval.id);
+    if (listed && listed.status !== "pending") {
+      setPendingApprovals((prev) => prev.filter((a) => a.id !== approval.id));
     }
   }
 
