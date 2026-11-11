@@ -2723,9 +2723,10 @@ fn api_yaml_documents_every_daemon_route() {
 /// before authorization on every helper path, so `HELPER_STATUS` makes it
 /// required rather than remembered.
 ///
-/// Reachability is not the same as presence: `INBAND_REJECTIONS` names the two
-/// operations whose helper call answers inside a 2xx, and the third assertion
-/// below holds them to the opposite rule.
+/// Reachability is not the same as presence: `INBAND_REJECTIONS` names the
+/// routes whose helper call answers inside a 2xx, and the third assertion below
+/// holds them to the opposite rule. It names no count on purpose — the list has
+/// grown once already, and a number here is the first thing to drift.
 #[test]
 fn api_yaml_documents_the_codes_each_handler_can_return() {
     let daemon = include_str!("../src/bin/agent2ssh-daemon.rs");

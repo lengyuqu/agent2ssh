@@ -895,7 +895,7 @@ L2-120 的建议里写着「承认 `PUT /hosts/{name}` 是**整条替换**」，
 
 这是**脱敏的正确代价**，不是缺陷。拍板时要一并决定的是「要不要给一个可回传的 `secret_ref` 句柄」或「明确只允许桌面端做部分更新」。本轮只把这条写进两份指南与 `api.yaml`（`a54fcd0`），不改行为。
 
-## 2026-11-11 · batch 11 第 3–4 轮：L2-122（同一份 `execution_gate.json` 读失败，一族 fail-closed，一族 fail-open；第 4 轮补第四条）
+## 2026-11-11 · batch 11 第 3–6 轮：L2-122（同一份 `execution_gate.json` 读失败，一族 fail-closed，一族 fail-open；第 4 轮补第四条，第 6 轮定落地形状）
 
 三条都出自「契约里 423/429 到底可不可达」这条线，都需要动 `src-tauri/src/**`，本轮只记录。
 
@@ -1051,3 +1051,45 @@ for (index, sender) in senders.into_iter().enumerate() {
 > A body that does not parse is *dropped*, not refused: `{"expect_pid": "1234"}` — the string a shell produces from `"$PID"` — stops the daemon without a check and the 409 never fires. The same goes for every body the `u32` parse rejects, which is the whole family: a negative PID, a PID above `4294967295`, or a truncated body. `0` is the other case and does *not* belong to that family: it parses, so it is compared, and is refused with 409 because it is not this process. The rule is therefore "parsed ⇒ compared", not "plausible ⇒ compared" — an implausible-but-representable PID is still checked.
 
 改动点只有三处，都为了同一个目的：**把「大于 `u32`」从「不合法」里点名出来**，并让 `0` 的原因从「u32 内」升级成「解析成功 ⇒ 比对」。前者是机制，后者才是读者要的行动指南。
+
+### 五、收尾清单（第 6 轮定形，可直接照做）
+
+第 5 轮把第 1 条判成 fail-closed 后，第 6 轮复核确认了落地形状。**下面五步是一笔改动，缺一步就是编译红或文档说谎。**
+
+**第 1 步：把唯一的 `.ok()` 换成带文案的 `?`。**
+
+`bin/agent2ssh-daemon.rs` 里 `load_execution_gate()` 共 3 处消费（`:386` `reject_if_gate_paused`、`:1265` `GET /gate`、`:4331` `terminal_broadcast_preview_results`），前两处都 `map_err` 成 500，第三处用 `.ok()` 吞掉——**全仓唯一的孤例**。`?` 不能直接写：`load_execution_gate` 返回 `anyhow::Result`，handler 要 `(StatusCode, Json<ErrorBody>)`，必须过一次 `map_err`，文案要与 `:386`/`:1265` 逐字相同：
+
+```rust
+let gate = load_execution_gate().map_err(|e| {
+    err(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("failed to load execution gate: {e}"),
+    )
+})?;
+```
+
+`terminal_broadcast_preview_results`（`:4314`）的返回类型随之变成 `Result<Vec<TerminalBroadcastTargetResult>, (StatusCode, Json<ErrorBody>)>`，两个调用点 `:4411`（`terminal_broadcast_preview`）与 `:4429`（`terminal_broadcast_run`）各加一个 `?`——两者本来就返回 `Result<Json<…>, (StatusCode, Json<ErrorBody>)>`，签名不用动。`?` 求值在 `let registry = …lock()` 之后、`drop(registry)` 之前，中途返回时 `MutexGuard` 正常释放。
+
+**第 2 步：豁免表从「按路由」改成「按状态码」。**
+
+改完后两条广播路由的 423 变成 HTTP 可达，而 `/terminal/broadcast` 的 **429 仍然**是 per-target（`terminal_broadcast_run:4469` 的 `if let Err` 不动），`/terminal/broadcast/preview` 则完全不调限流。所以「两条出表、一条留表」这个说法是错的，正确形态是**按码豁免**：
+
+| 改动后 | 423 | 429 |
+|---|---|---|
+| `GET /exec/stream` | 帧内（留表） | 帧内（留表） |
+| `POST /terminal/broadcast` | **HTTP（出表，`responses` 补 423）** | per-target（留表） |
+| `POST /terminal/broadcast/preview` | **HTTP（出表，`responses` 补 423）** | 不存在（不调限流，无需豁免） |
+
+于是 `INBAND_REJECTIONS` 的类型从 `[(&str, &str, &str); 3]` 变成 `[(&str, &str, &str, &str); 3]`——第三字段是状态码，第四字段是 marker；三行分别是 `(get /exec/stream 423 …)`、`(get /exec/stream 429 …)`、`(post /terminal/broadcast 429 …)`。第三段断言从「不得声明 423 **和** 429」改成「不得声明**这一条**码」，否则 `/terminal/broadcast` 的 423 会假红。
+
+**第 3 步：两句 `api.yaml` 描述必须同笔改，否则代码改了、合同说谎。**
+
+- `/terminal/broadcast/preview` 的 description 现在写「A paused gate is a per-target verdict here — not a 423」。改后要拆成：**paused** 仍是 per-target 判定；**读不出来**是整条路由 500。这两种情况不再是同一句话。
+- `/terminal/broadcast` 的 description 写「folds **both** into every eligible target's `error` and returns 200」——改后只对「限流」和「gate 判为 Paused」成立，对「gate 读失败」不成立。同一段末尾「a preview that reports `execution gate paused` predicts the run exactly」在文件损坏时也失效（两边都 500）。
+
+**第 4 步：`responses` 只补 423，不补 500。** 见第 1 步下的更正：gate 读失败的 500 由 `info.description` 第二段统一承担。
+
+**第 5 步：可选的 e2e，单独一笔。** `daemon_integration.rs` 跑的是镜像 router，`api_yaml_*` 是文本扫描，所以第 1 步落地后唯一的可验证信号是「`:4331` 的 `.ok()` 消失」，除非新写真 daemon e2e：写坏 `execution_gate.json` → `POST /terminal/broadcast` → 断言 500 且 `error` 含 `failed to load execution gate`。它要起 daemon + 两个活终端目标，比第 1–4 步加起来都大，**不塞进 batch 11 收尾**。
+
+**已知不可断言的一环**：想给「读 gate 的 operation 不得声明 gate-read 500」加扫描断言，做不到——OpenAPI 里 500 不带来源，无法区分 gate-read 500 与配置读失败 500（`GET /hosts`、`/resident-sessions` 都两者兼备）。要断言就得加 `x-500-source` 这类扩展，代价大于缺陷本身。
