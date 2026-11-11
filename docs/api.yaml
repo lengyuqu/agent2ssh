@@ -23,8 +23,9 @@ info:
 
     A second 500 does need the handler, and it is stated here for the same
     reason. `reject_if_gate_paused`, and the preflights built on the same gate
-    read, load `gate.json` before deciding anything; when that read fails they
-    answer `500` with `failed to load execution gate: …` instead of `423`. So
+    read, load `execution_gate.json` before deciding anything; when that read
+    fails they answer `500` with `failed to load execution gate: …` instead of
+    `423`. So
     every operation that consults the gate can answer 500 even though its body
     only ever names 423 — which is why none of them lists the gate-read 500 in
     its own `responses`, and why a client that meets a 500 on one of them should
