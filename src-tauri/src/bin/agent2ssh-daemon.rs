@@ -685,6 +685,24 @@ async fn request_and_wait_for_approval(
     }
 }
 
+/// Gate a daemon request, returning `(risk, approved)`.
+///
+/// `approved` is true only when a human actually approved this command — never
+/// for the "no approval was needed" path (`authorize_command_with_approval`
+/// returns `approved: false` together with `Ok`). Callers that hand the command
+/// to `core::exec*`, which refuses `risk == High` without `force`, must consume
+/// it and flip `force`: `exec`, `local_exec`, `proxy_exec`, `run_playbook`, and
+/// both `authorize_targets` call sites (/exec-multi, /exec/compare).
+///
+/// Eight call sites destructure `let (risk, _)` instead: `session_open`,
+/// `session_write`, `session_close`, `forward_remove`, `forward_stop`,
+/// `forward_start`, `ssh_connect`, `ssh_disconnect`. That is deliberate, not an
+/// oversight — none of them reaches a `force` gate (they open a PTY, write to
+/// one, or move a forward), so an approval there has no second consequence to
+/// unlock. `terminal_broadcast_run` also reads `approved`, but only to report
+/// `approval_granted` in its response; it types the command into the target PTY
+/// rather than executing it, so there is nothing to force. Adding a `force` gate
+/// to any of the eight means it must start consuming `approved` too.
 #[allow(clippy::too_many_arguments)]
 async fn authorize_command(
     auth_scope: &Option<DaemonScope>,

@@ -93,6 +93,14 @@ export type HostProfile = {
   owner?: string | null;
   /** false = human-only: AI/automation sources are refused (default true). */
   ai_allowed?: boolean;
+  /** Command run on the remote shell right after connect (OpenSSH's
+   *  `RemoteCommand`). Settable through `agent2ssh host add --init-command` and
+   *  consumed in `embedded_ssh.rs`; `docs/api.yaml` declares it and
+   *  `types.rs:84` has `#[serde(default)]`, so a missing field deserialises to
+   *  `None`. This mirror used to omit it, and `AddHostForm` rebuilt the whole
+   *  payload from its own form state — every host edited in the desktop lost a
+   *  CLI-set `init_command` without a word. See L2-120 for the backend half. */
+  init_command?: string | null;
 };
 
 // Rust: approval.rs — ApprovalMode (rename_all = "snake_case")

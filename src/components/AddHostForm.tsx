@@ -124,6 +124,12 @@ export default function AddHostForm({
       role: form.role.trim() || null,
       owner: form.owner.trim() || null,
       ai_allowed: form.ai_allowed,
+      // Not editable here, but it must survive the round trip: `update_host`
+      // replaces the stored profile wholesale and only preserves `password`
+      // and `passphrase` when they are omitted (`core.rs:200-216`). Dropping
+      // this field silently turns off a `host add --init-command` that was
+      // working, with nothing in the UI to show it ever existed.
+      init_command: editingHost?.init_command ?? null,
     };
     setSaving(true);
     try {
