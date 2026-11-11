@@ -2238,7 +2238,27 @@ const HANDLER_STATUS: [(&str, &str); 10] = [
 /// it is the only one of those the handler body cannot show and no other entry
 /// already covers; 408 and 423 have their own call sites, and both 500s are
 /// stated once in `info.description`.
-const HELPER_STATUS: [(&str, &str); 10] = [
+///
+/// `ensure_command_length` is the same shape one level down: it builds `400`
+/// inside itself, so a route whose only 400 is an over-long command documents
+/// nothing. Nine of the eleven handlers that call it did document it — `/exec`,
+/// `/local-exec`, `/exec-multi`, `/exec/compare`, `/exec/preview`, both resident
+/// and approval routes — and the two that did not are `/risk/check` and
+/// `/approval/check`, the pair that answers questions rather than running
+/// anything. That is the family-looks-consistent-from-one-route failure again:
+/// the sibling that reports a risk level has no reason to look different from
+/// the sibling that runs a command. `/exec/stream` calls the same helper and is
+/// exempt: it writes the refusal into a frame on a socket it has already
+/// upgraded, which is why it is in `INBAND_REJECTIONS`.
+///
+/// `preflight_sftp_rm_rf` is a wrapper, and a text scan does not see through it:
+/// `sftp_rm_rf` and `sftp_rm_rf_authorize` call the wrapper, the wrapper calls
+/// `preflight_guarded_request`, and the handler bodies name neither the inner
+/// helper nor `reject_if_rate_limited`. Both routes document 403 and 429 today,
+/// so listing the wrapper costs nothing and makes those two codes as hard to
+/// delete as any other route's.
+const HELPER_STATUS: [(&str, &str); 13] = [
+    ("ensure_command_length(", "400"),
     ("too_many_requests_status()", "429"),
     ("reject_if_rate_limited(", "429"),
     ("register_limited_session_for_command(", "429"),
@@ -2246,6 +2266,8 @@ const HELPER_STATUS: [(&str, &str); 10] = [
     ("preflight_rewritable_request(", "429"),
     ("preflight_guarded_request(", "403"),
     ("preflight_rewritable_request(", "403"),
+    ("preflight_sftp_rm_rf(", "429"),
+    ("preflight_sftp_rm_rf(", "403"),
     ("reject_if_gate_paused(", "423"),
     ("require_admin(", "403"),
     ("require_recording_admin(", "403"),
