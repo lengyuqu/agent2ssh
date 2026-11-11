@@ -89,6 +89,12 @@
 
 ---
 
+**L2-10 的预算更正（batch 14 第 2 轮）**：原文「四个串行请求各 2 s connect + 2 s read，最坏 16 s」把两段超时相加了。`daemon_activity.rs:102-110` 的 `request_at` 里 `connect_timeout`、`set_read_timeout`、`set_write_timeout` 用的是**同一个 `timeout` 参数**，全仓调用方恒传 `Duration::from_secs(2)`，所以**逐请求上界是 2 s**，四个串行请求最坏 **8 s**。实测上界受 `ErrorKind` 分派影响（EAGAIN 可能连续重试），不是干净可复算的数；**按「2 s × 4 = 8 s」登记，这是最坏值里唯一可推导的那部分**。
+
+真正的挂起预算比 L2-10 记的更宽，且横跨三个函数——都在 `daemon_control.rs`（复核方这条写错了文件名，写成 `daemon_activity.rs`，但行号是对的）：`daemon_pid_state`（`:343`）→ `daemon_matches_config`（`:283`）→ 两次 500 ms 请求 ≈ 1 s，然后 `request_shutdown` 再 2 s，然后 `wait_for_exit(pid, start_time, GRACEFUL_STOP_WAIT)` 的 8 s（`:651` 定义、`:1057` 调用），最坏 **~11 s**。
+
+---
+
 ## 2026-11-10 · 来自 issue #7 第 2 轮（CodeBuddy 复核后的新一批）
 
 第二轮指摘 15 条（L2-19…L2-33），核实后**成立 6 / 部分成立 5 / 不成立 2**（另有 2 条已在第 2 轮的 L1 改动里做掉）。这一批里有两条是真正的代码缺陷，其余是观测与措辞问题。
@@ -491,6 +497,12 @@ enum DrainOutcome {
 **L2-84 的验证前置（batch 14 第 1 轮补）**：上面第 ① 与 ② 两个方案落哪个都**测不出来**，因为 `/terminal` 的 drain 循环只有「静态停机」覆盖：`git grep -c Output src-tauri/tests/daemon_stop_e2e.rs` 为 **0**，33 条用例里没有一条在停机期间持续写终端输出。而 500 ms 空闲超时与 2 s future 上限的分歧**只在这一支上才可见**（静态流量下两者都远小于 2 s，跑不出差异）。所以顺序必须是：先补一条「对端持续输出 + 停机」的 e2e（断言退出耗时 ≤ 2 s + 余量且收到 `Close`），再决定循环语义。该用例不需要真 SSH——`daemon_stop_e2e.rs` 的 `AGENT2SSH_TEST_SSH_PORT` 脚手架用不上，只需一个持续吐字节的本地 mock。
 
 行号按当前树更正（`380e166` 之后整体下移约 36 行）：`timeout(500ms, …)` 在 `:4866-4869`，`Output` 分支在 `:4871`，terminal 的 `run_ws_with_shutdown_deadline(` 起于 `:4855` 而其 grace 参数在 `:5057`（`from_secs(2)`，闭包结束后才传，所以两行相隔 200 行不是笔误），exec 侧 `let mut code = None` 在 `:5363`、其 grace 在 `:5485`。
+
+**第 2 轮复核的回应**：复核方主张「`/local-exec` 够用，`/terminal` 的 WS 路径修不了这条」，理由是 `/local-exec` 在 `:1813` 调同一个 `preflight_guarded_request`、且认领 `/terminal` 会让 `/sessions` 非空从而污染 `confirm_quit` 的回归面。**后半接受、前半不接受**：
+
+- **接受**：认领一次 `/terminal` 会让 `:4842` 注册、`:1055` 占额，`confirm_quit` 的「有活跃会话」分支随之改变——这条 e2e 确实会污染退出流程的回归面，应放进独立测试文件或在用例里显式标注前提。
+- **不接受**：`/local-exec` 覆盖不了这个缺口。它走 `run_local_command_capture`（`local_exec.rs`），**没有 WS drain 循环**；而 L2-84 的分歧点正是 `/terminal` 的 `while let Ok(Some(event)) = timeout(500ms, recv())`（`:4866-4869`）与 `run_ws_with_shutdown_deadline` 的 2 s grace（`:5057`）之间。前者的行为只有「已升级的 WS 上持续有 `TerminalEvent::Output`」时才可观测，`/local-exec` 连这个循环都不进。**这条用例必须建 WS**，不能拿 `/local-exec` 代替。
+- **它附带的两条发现仍然有用**（落地时会踩）：① `shutdown_reaps_a_running_local_command_and_its_child`（`daemon_stop_e2e.rs:556`）是「本地命令 + 停机」的现成模板，连接与断言骨架可复用（但断言对象不同——它断 PID 被杀，不是 drain 语义）；② daemon 限流默认开启（`limits.rs` 的 `default_true`、`window_secs = 60`、`default_source_per_minute = 30`），同 source 一分钟内超 30 次请求会拿 429，新用例要么把 `execution_limits.toml` 写进 `extra_files`（`start_with_name` 支持），要么留足间隔。
 
 ### L2-4 的行号与触发条件更正（本轮复核）
 
@@ -1493,13 +1505,24 @@ batch 7 判「不成立」时用的论据是「`code.is_some()` 时 `interrupted
 
 ### 为什么不能自动落（L2）
 
-改法有三条，都要动 `src-tauri/src/**` 的行为：
+改法有三条，都要动 `src-tauri/src/**` 的行为。**成本排序在 batch 14 第 2 轮被复核方纠正过一次，下面是更正后的**：
 
-1. `code: Option<Option<i32>>` — 最小改动，但 `Option<Option<_>>` 在审计与事件路径上要展开两次，可读性差；
-2. `saw_exit: bool` + `code: Option<i32>` — 推荐。`interrupted` 判 `!saw_exit`，审计文案按「超时 / worker 失败 / 未知」分三句，`ExecCompleted` 增加一个 `exit_seen` 字段（**对外契约变更，要同步 `docs/api.yaml`**）；
-3. 让线程侧在 `Exit` 之前多播一个 `TimedOut` 事件 — 改动面最大，但能同时修掉「`Error` 事件被 drain 丢掉」这一层。
+1. **`code: Option<Option<i32>>` — 推荐，最便宜。** 只有四处：类型（`:5363`）、两处赋值改成 `Some(exit_code)`（`:5403`、`:5478`）、判定改成 `code.is_none()`（`:5493`）。**不需要给事件加字段**——`"interrupted"` 与 `"exit_code"` 已经同时在线，语义由两者的组合表达。
+2. `saw_exit: bool` + `code: Option<i32>` — 名义成本最低、实际最高。判据修好之后 `saw_exit` 与 `exit_code.is_some()` 恒等，是冗余字段；而 `ExecCompleted` 的载荷今天有**四个**发布点（`bin/agent2ssh-daemon.rs:5521`、`core.rs:1118`、`core.rs:1323`、`resident_session.rs:803`），只有第一个带你这条 `"interrupted"`，加字段要四个点一起想清楚。
+3. 让线程侧在 `Exit` 之前多播一个 `TimedOut` 事件 — 改动面最大。**它修的是 `Error` 帧（`:5189`、`:5204`），不是审计**：审计在 `:5494` 之后才拼，那时 `code` 已携带信息。这一条与 `interrupted` 的修正彼此独立，应排在其后。
 
-**回滚路径**：三条都不改语义的默认值（`saw_exit` 缺省 `false` = 维持现状），所以可以分两步落：先加字段并让 `interrupted` 读它，再改文案与契约。
+**拆成两步落**（复核方建议，采纳）：
+
+- **第一步（自动可落）**：只修判据——`interrupted` 不再把「收到 `Exit(None)`」当「没收到 `Exit`」。
+- **第二步（要拍板）**：统一文案与字段名。`/exec` 停机路径已有一个现成答案——`WebhookEvent.remote_outcome_unknown`（`:1748`），而 `/exec/stream` 对同一件事写的是另一种说法（`embedded_ssh.rs:1385` 的 `SSH request interrupted during daemon shutdown; remote command outcome unknown`）。这一步要问的是「stream 的完成事件是否复用这个字段形状」，**不要造新词**（`exit_seen` 之类）。
+
+**回滚路径**：第一步不改任何对外形状（`interrupted` 只是从「假 true」变回「真 false」），可独立回退；第二步改的是已有字段的措辞与命名，回退面在 `api.yaml` 与四个发布点。
+
+### 同一族的第二个口子：`.is_err()` 抹掉状态码（新，L2-131）
+
+`:5266-5275` 的 `if reject_if_gate_paused(&source, &req.host, &req.command).is_err() { … "execution gate paused" … }` 把 423（paused）与 500（`execution_gate.json` 读失败）压进同一个 `Err`，帧里的 `error` 又固定写 `"execution gate paused"`。而 `docs/api.yaml:24-31` 明说「a client that meets a 500 on one of them should read the message」——这条路径恰好不给 message，于是 gate 文件坏掉时客户端会看到「已暂停」这个错误结论。
+
+它与 L2-130 的 `Error` 帧丢失是兄弟，但独立：L2-130 是审计侧把来源抹平，L2-131 是帧侧把来源抹平。修法：匹配状态码分两句文案（`paused` / `failed to load execution gate`），属 `src-tauri/src/**` 行为改动，登记不动。
 
 ### 一个可执行的证伪
 

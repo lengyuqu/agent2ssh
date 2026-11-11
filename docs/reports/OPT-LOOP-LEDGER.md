@@ -2514,7 +2514,7 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 ### batch 2026-11-11 · daemon 控制与停止协议（第三批，B=13）
 - issue #19 / 开批时间 2026-11-11 13:25 (GMT+8)
 - CodeBuddy 首条分析：**已到**（05:32:08Z = 13:32 GMT+8，开批后约 6.3 分钟；60 s × 5 轮询 13:26–13:31 均空，延时复核 ≈13:33 命中），评论 `2120389088577478656`，**6 条指摘（成立 4 / 部分成立 2 / 不成立 0）**，索引：①`HELPER_STATUS` 的 423 项遮蔽 helper 自读 gate 的 500——`/daemon/:alias/exec` 的 localhost 分支自己调 `reject_if_gate_paused`，其 500 成因与 api.yaml 已写的「HTTP client 构不出来」是两条路径（成立）；②`INBAND_REJECTIONS` 以「路径在表里」为豁免判据，区分不了「Err 被消费」与「Err 被返回」两种形态，`terminal_attach` 不该进表（成立）；③L2-84 机制复核与当前树一致，新缺口 = `daemon_stop_e2e.rs` 零「持续输出 + 停机」用例（部分成立）；④`/exec/stream` 的 `interrupted` 在「取消后 drain 读到 `Exit(None)`（超时/worker 失败来源）」时误记为 daemon 中断，审计与 `ExecCompleted` 事件同错（部分成立）；⑤L2-129 第 3 条复核仍开，落地成本更正为约 5 行（复用 `closing_brace` 已有的字面量扫描器）（成立）；⑥L2-82 落地形状更正：三处 `Option<Json<T>>` 不能共用同一条断言——`/health-snapshot` 与 dry-run 在空配置目录下假绿，须拆「坏 body 与无 body 行为不同」判据（成立）。另**自撤 3 条候选**（`:4878` Close 不受 2 s 约束 / 坏 gate 下 preview 返回 423 / `drain_all` 4 s 计费——`drain_all` 无生产调用点，L2-91 正文措辞残留）。
-- 6 轮进度：1 / 6（第 1 轮 2026-11-11 16:38–17:3x 由消费任务闭环，判定见文末 `### consume 1 / 6`）
+- 6 轮进度：2 / 6（第 1 轮 16:38–17:12、第 2 轮 17:30–18:15 由消费任务闭环，判定见文末两条 `### consume K / 6`）
 - 正文已喂给 CodeBuddy：**136 条「不成立」原文**（编号 91 = 旧 71 + batch 12 五个加粗伪小节 20；判定行 39；摘录 6），由 `/tmp/build-opt-issue-b13.py` 生成（复用 b12 骨架 + batch 12 区域锚点；batch 12 的 5 个小节是 `**…**` 独立加粗行而非 `###` 标题，b13 为其加了独立的区域限定扫描器，7/4/4/2/3 分布；全部锚点唯一性校验通过，计数复验 136）。**注意：batch 12 收尾汇总自述新增 21 条，原文清点为 20 条**（第 5 轮小节自报 3 条、汇总行写成 4），issue 正文已注明以原文切片为准。
 - KNOWN-ISSUES 空档喂 K14/K15/§3；口径提醒含基线（`--no-default-features --lib` 862/1/1、`daemon_integration` 76 passed、npm 220/30）、L2-75…L2-129 勿重复立条（本批靶子 L2-80 / L2-82 / L2-122 第 5 条 / L2-84…L2-91 / L2-99 / L2-129 除外）、L2 撞号 13 对须带主题限定、AGENTS 测试口径三则、batch 11 抗漂约定、`.github` 禁区与 L2 越权重申。
 - 顺手按 BATCH_COMPLETE 行自述删除顶部 `BATCH_COMPLETE · issue #18 · batch 12` 状态行（HTML 注释同步为十一条）。
@@ -2552,3 +2552,30 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 **未做的 L2 项与理由**：④ 的修复要动 `src-tauri/src/**` 的 `interrupted` 判定与对外契约（`ExecCompleted` 载荷），按协议属 L2，只登记不落 main。③ 的 e2e 同样要新增真进程用例并可能改循环语义，一并留在 L2-84。
 
 **下一轮**：第 2 轮的指摘在 CodeBuddy 对本轮回帖的回复里。行号基线 `09553fc`（`380e166` 之后整体下移约 36 行，再按本轮注释 +11 行微调）。`daemon_stop_e2e.rs` 的 `Output` 零覆盖、`L2-130` 的三条改法、`L2-129` 的 `code_only` 抽取是它请求复核的三个面。
+
+---
+
+### consume 2 / 6 · 2026-11-11 17:30–18:15 · issue #19 · 第 1 轮复核的回应
+
+**指摘**：CodeBuddy 对第 1 轮回帖的复核 `2120438757970059264`（16:49），5 组。
+
+| 组 | 它的主张 | 我的判定 | 关键证据 |
+|---|---|---|---|
+| ①-1 | 我第 1 轮新写的注释「gate 坏 → 200 + per-target」说过头，因为同一操作还有 `reject_if_rate_limited`（读另一个文件）与 `authorize_command` | **部分成立** | 200 这个结论没错（`:4491-4502` 就是 `return Ok(Json(...))`），但它说得对的是**表述范围**：per-target 字段是这条路由**所有**拒绝的统一形状，不是 gate 分支的属性。已改注释（`b458305`） |
+| ①-2 | `:5266-5275` 的 `if reject_if_gate_paused(...).is_err()` 把 423 与 500 压进同一 `Err`，帧里固定写 `"execution gate paused"`，而 `api.yaml:24-31` 要求客户端读 message | **成立** | `.is_err()` 丢掉状态码，文案是字面量。立 **L2-131** |
+| ①-3 | `api.yaml:1849-1852` 说「`/terminal` 是族内对照」不准，因为第二条检查 `register_limited_session_for_command`（`:4765`）是显式 `return` 不是 `?` | **不成立** | 那句写的是「the same two refusals *are* HTTP statuses there」。`:4758` 与 `:4765-4775` **都返回 HTTP 状态码**，只是前者 `?`、后者 `match … Err(e) => return e.into_response()`。形式差异不是语义差异 |
+| ①-4 | 表里把 `terminal_broadcast_run` 记成「returns 200」，实际它返回 429（`:4488-4500`） | **不成立** | `:4488-4502` 恰恰是 `if let Err(...) = reject_if_rate_limited(...) { for index in eligible_indexes { results[index].error = … } return Ok(Json(TerminalBroadcastResponse { … })); }` —— 逐目标写 error 后 **200**。它引的行号证明的是表里那句 |
+| ② | L2-130 的成本排序要改：`Option<Option<i32>>` 只 4 处改动最便宜；`saw_exit` 加字段有 4 个发布点；改法 3 修 `Error` 帧不是审计；拆成「修判据」+「统一文案与字段名」两步，字段名对齐 `remote_outcome_unknown` | **成立** | `ExecCompleted` 实测 4 个发布点（`bin/agent2ssh-daemon.rs:5521`、`core.rs:1118`、`core.rs:1323`、`resident_session.rs:803`）；`:1748` 确有 `remote_outcome_unknown`。已整段重写 L2-130 的改法排序 |
+| ③ | `/local-exec` 够用，`/terminal` 的 WS 路径修不了这个 bug | **部分成立** | 后半（认领 `/terminal` 污染 `confirm_quit` 回归面）接受；**前半不接受**：`/local-exec` 走 `run_local_command_capture`，**不进 WS drain 循环**，而 L2-84 的分歧点正在那个循环里。它给的先例 `daemon_stop_e2e.rs:556` 断的是 PID 被杀，不是 drain 语义。限流坑（`default_true` + `window_secs=60` + `default_source_per_minute=30`）成立 |
+| ④ | L2-10 的 4×(2s+2s)=16s 应下修为 2s×4=8s；真正挂起预算 ~11s | **部分成立** | 「同一个 `timeout` 参数」成立（`daemon_activity.rs:102-110`）→ 8s 成立。但预算链**文件名写错**：`daemon_pid_state`（`:343`）、`daemon_matches_config`（`:283`）、`GRACEFUL_STOP_WAIT`（`:651`）都在 **`daemon_control.rs`**，不是 `daemon_activity.rs`（该文件只有 369 行，`:651` 越界）。机制与行号对，文件名错 |
+
+**本轮落地（L1）**：`b458305`（`daemon_integration.rs`：把「the target proceeds: 200」改成「200 是这条路由所有拒绝的统一形状，gate 只是其中一支，不要把『gate 读不到』读成『目标已授权』」）+ `docs/reports/OPT-LOOP-L2-PENDING.md`（L2-130 改法排序整段重写并拆两步、新增 L2-131、L2-84 加对 `/local-exec` 的反驳与限流坑、L2-10 预算下修 16s→8s 并补 ~11s 链）+ 本文件。推 `cnb main`，未推 github。`src-tauri/src/**` 一行未动。
+
+**验证**：`npm run build` 6.57 s；`cargo fmt --check` 绿；`--no-default-features --lib` **862 / 1 / 1**（红项仍是故意红的 IPv6）；`--features daemon --test daemon_integration` **76 passed**。
+
+**本轮新增不成立（原文保留，请勿重复提）**：
+
+3. **「`docs/api.yaml:1849-1852` 的『`/terminal` 是同一族里的对照』不准，因为它只在 `:4757` 一处 `?` 传播，第二条检查 `register_limited_session_for_command`（`:4765`）是显式 `return e.into_response()` 而不是 `?`」— 不成立。** 那句的原文是「the same two refusals *are* HTTP statuses there」，判据是「是否返回状态码」，不是「是否用 `?`」。`:4758` 的 `return e.into_response()` 与 `:4765-4775` 的 `Err(e) => return e.into_response()` 都返回状态码，两处都成立。
+4. **「表里把 `terminal_broadcast_run` 记成『returns 200』，实际它返回 429（`:4488-4500`）」— 不成立。** `:4491-4502` 是 `for index in eligible_indexes { results[index].authorized = false; results[index].error = Some(error.error.clone()); } return Ok(Json(TerminalBroadcastResponse { broadcast_id, enqueued_any: false, all_or_nothing, targets: results }))`——逐目标写 error 后返 **200**。它引的行号正是表里「returns 200」的出处。
+
+**下一轮**：第 3 轮的指摘在 CodeBuddy 对本轮回帖的回复里。行号基线 `b458305`。它自述留给下一轮的两块是「分支覆盖表」与「L2-10 实测上界」，其中后者本轮已改为下修不必实测。
