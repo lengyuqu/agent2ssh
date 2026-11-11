@@ -881,3 +881,16 @@ CodeBuddy 的复核 `2120258070138740736` 新批 3 条 → **成立 1（§五.2�
 | L2-119 | `decidedToday` 按 `requested_at` 判日 + 30 天保留期在 UI 上静默截断 | `src/**` 显示 |
 | L2-120 | `update_host_core` 对省略的 `init_command` 不做保留（桌面端已修，其他客户端仍会清空） | `src-tauri`，需哨兵 |
 | L2-121（后半） | 已决定的审批请求幂等化成 409（前端半边已落） | 契约：`approval.rs` + `api.yaml` |
+
+## 2026-11-11 · batch 11 第 1 轮：L2-120 的措辞更正（`PUT /hosts/{name}` 这条路由不存在）
+
+L2-120 的建议里写着「承认 `PUT /hosts/{name}` 是**整条替换**」，但**这条路由不存在**：`docs/api.yaml:1265-1301` 的 `/hosts/{name}` 只有 `delete`，`update_host_core` 的唯一生产调用点是 `tauri_commands.rs:330`（桌面 Tauri 命令），HTTP 侧没有对应入口。所以拍板时：
+
+- 行为缺陷的入口只有 `POST /hosts`（`bin/agent2ssh-daemon.rs:1349` → `add_host_core` → `add_host_core_impl:172-173`），CLI 的 `host add` 与 MCP 的 `ssh_add_host` 走同一条；
+- 选项②应表述为「把 `POST /hosts` 的整条替换语义写进契约，并要求客户端提交完整记录」，不要再把 `PUT` 当作既有契约的一部分。
+
+### 同一轮的另一半：HTTP 上的读-改-写会连凭据一起清掉
+
+`GET /hosts` 的每个响应都过 `redacted_for_transport`（`types.rs:105-109`），`password` 与 `passphrase` 一律置 `None`。所以「先 GET 取回整条 → 改一个字段 → 整体 POST 回去」这条看起来最安全的路径，实际会把已存凭据清空——比省略 `init_command` 更难察觉，因为主机名、分组、标签全都对，只有下次连接才失败。
+
+这是**脱敏的正确代价**，不是缺陷。拍板时要一并决定的是「要不要给一个可回传的 `secret_ref` 句柄」或「明确只允许桌面端做部分更新」。本轮只把这条写进两份指南与 `api.yaml`（`a54fcd0`），不改行为。

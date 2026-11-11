@@ -2054,3 +2054,28 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 - 顺手按 BATCH_COMPLETE 行自述删除顶部 `BATCH_COMPLETE · batch 10 · issue #16` 状态行（HTML 注释同步为九条）。
 - 下一批（B=12）：12 % 6 = 0 → 主题 0：测试覆盖缺口（**第二批**，同主题 #12 已闭环）。开 issue 前先 fetch cnb main 重读 ledger（本批消费期间会新增不成立条目，行内锚点会漂移，b11 脚本可改造复用，注意上述两处脚本修复）。
 - 若 #17 仍 open 则按背压闸门跳过；锁沿用「保留在位、消费者侧自行清理」先例。
+
+### consume 1 / 6 · 2026-11-11 09:53–10:05 (GMT+8) · batch 11（issue #17）· 回帖 `<PENDING>`
+
+6 轮进度 **1 / 6**，issue 保持 open。指摘 = CodeBuddy 首条分析（它自报「成立 6 / 部分 0 / 不成立 0」）。
+
+| # | 指摘 | 判定 | 证据要点 |
+|---|---|---|---|
+| 1 | `known_hosts.json` 键形态，文档还写 `host:port` | **部分成立** | 文档确已过时：`configuration-guide.md:181` 与 `:185` 示例都是 `host:port`，代码是 `known_host_key` 拼 `identity\|algo`（`embedded_ssh.rs:211-213`，五个使用点）。**但它的后果判断不成立**——「手改会造出代码读不到也匹配不上的条目」：`load_known_host_fingerprints_unlocked`（`:236-250`）对无 `\|` 的键按值里的 `host_key_algorithm` 重键，所以文档那个旧形态**恰好仍然工作**。这正是它活了两个批次没人发现的原因，不是「读者一改就坏」 |
+| 2 | quickstart 把 `/approvals` 标题成「待审批请求」 | 成立 | `approval.rs:796-805`：先翻过期 `pending` → `timed_out`，再 `s.requests.values().cloned().collect()`，既不过滤也不排序。`api.yaml:3753-3773` 已写全两段。**它漏了同一文件第二处**：`:344` 的 `# 1. 查看待审批列表` |
+| 3 | `POST /hosts` 整条替换，示例恰好省略 `init_command` | 成立 | `core.rs:172-173` `*existing = host.clone()`；`HostProfile.required` 只有 `[name, host]`（`api.yaml:81`）。**它引的 `PUT /hosts/{name}` 不存在**——`api.yaml` 该路径只有 `delete`，`update_host_core` 仅经 `tauri_commands.rs:330`（桌面）到达。所以 HTTP 侧唯一的写入口就是这条 POST，Warning 必须写在这里 |
+| 4 | CHANGELOG 的 stall-guard 条目声称会报进度 | 成立（两半都对） | `StallGuard::write`：`self.inner.write(buf)?` 先 `?` 返回，过期检查在 `else if written == 0`（`sftp_transfer.rs:427-436`）；`russh_impl/sftp.rs:223-226` 的 `File::write` 返回 `Ok(min(..))` 或 `Err`，**不产生 `Ok(0)`**；同文件 `:360-380` 自述「It does not fire on the current transport」。它指出的测试覆盖也是准的：`a_stalled_peer_reports_how_far_the_transfer_got`（`:584-599`）直接构造 `StallGuard{last_progress: now - STALL_TIMEOUT, …}` 再调私有 `stalled()`，钉的是文案与计数 |
+| 5 | `execution_limits` 覆盖清单漏 5 条路由 | **成立，且漏得更多** | 两份指南的实际缺失是 **11 条路由家族**：`/local-exec`、`/exec/stream`、`/forwards/multi`、`DELETE /forwards/:id`、`/forwards/:id/start`、`/forwards/:id/stop`、`/connections/:host/connect`、`/connections/:host/disconnect`、`/resident-sessions`、`/resident-sessions/:id/exec`、`DELETE /resident-sessions/:id`。它的分母也自相矛盾：写「13 个生产调用点」却列了 14 个行号（正解：`grep -c` = 17，减定义 `:998` 与两处测试 `:6384/:6387` = **14** 生产调用点，其中 `:570` 是共享前置、13 个在 handler 里） |
+| 6 | `/sftp/rm-rf` 的 `timeout_secs` 管的是**整个递归删除**，文档写窄了 | **不成立（因果链反了）** | `timeout` 的落点是 `connect_embedded_ssh(host, timeout)`（`core.rs:2446` 取默认 60 → `:2784` 传入）——即 TCP 连接、套接字读写与 `session.set_timeout`；BFS 循环（`:2792-2811`）逐条 `readdir`/`remove`，**没有任何总 deadline**。所以文档「约束 SSH/SFTP 传输操作」不是窄了，而是比实情还宽；本轮改成「连接预算」，并写明大目录树的总耗时可超过它 |
+
+**本轮 L1**：`a54fcd0`（5 文件：`configuration-guide.md` 四处、`daemon-api-quickstart.md` 四处、`api.yaml` 的 `POST /hosts` 描述、`CHANGELOG.md` 的 0.4.5 条目就地更正、`WINDOWS-HANDOVER.md` 的覆盖口径）。推 `cnb main`，未推 github。
+
+**验证**：`npm run build` 6.35 s；`--no-default-features --lib` **862 passed / 1 failed / 1 ignored**（唯一红项仍是故意红的 IPv6）；`--features daemon --test daemon_integration api_yaml` **6 passed**；`cargo fmt --check` 绿；`api.yaml` 可解析 90 paths / 105 operations。
+
+**本轮未做**：无 L2 新增（第 3 条的根治仍是 L2-120，第 4 条的根治仍是 L2-96，两者都在等人拍板）。L2-120 的措辞需更正一处：它提到的「整条 `PUT /hosts/{name}`」这条路由不存在，见 `OPT-LOOP-L2-PENDING.md` 本轮小节。
+
+#### 第 1 轮新增的不成立条目（原文保留，请勿重复提）
+
+1. **「文档写的 `host:port` 键形态会让读者手改出代码读不到也匹配不上的条目」— 不成立。** `load_known_host_fingerprints_unlocked`（`embedded_ssh.rs:236-250`）对没有 `|` 的键走 `split_known_host_key` 的 `(identity, None)` 分支，用值里的 `host_key_algorithm` 重键；文档 `:185` 那个示例（算法在值里）正是这个旧形态，**能被读、能被匹配**，下一次写盘还会被迁移成新形态。真正成立的只是「文档描述的不是落盘形态」。
+2. **「`/sftp/rm-rf` 的 `timeout_secs` 是递归删除循环的截止时间，大目录树删到一半会撞它，慢链路反而无关」— 不成立。** 该值经 `sftp_dir_operation_with_value_core`（`core.rs:2446`）只传给 `task(host, path, timeout)`，闭包里唯一用途是 `connect_embedded_ssh(&host, timeout)`（`:2784`）；删除循环不读它。所以「慢链路才受影响 / 大目录树会撞它」两个方向都不成立：连接阶段之外没有截止时间。
+3. **「`api.yaml` 里有 `PUT /hosts/{name}`，L2-120 说的整条替换包括它」— 不成立。** `docs/api.yaml:1265-1301` 的 `/hosts/{name}` 只有 `delete`；`update_host_core` 的唯一生产调用点是 `tauri_commands.rs:330`（桌面）。HTTP 侧只有 `POST /hosts`，`grep -n "put:" ` 在该路径下无命中。
