@@ -2079,3 +2079,51 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 1. **「文档写的 `host:port` 键形态会让读者手改出代码读不到也匹配不上的条目」— 不成立。** `load_known_host_fingerprints_unlocked`（`embedded_ssh.rs:236-250`）对没有 `|` 的键走 `split_known_host_key` 的 `(identity, None)` 分支，用值里的 `host_key_algorithm` 重键；文档 `:185` 那个示例（算法在值里）正是这个旧形态，**能被读、能被匹配**，下一次写盘还会被迁移成新形态。真正成立的只是「文档描述的不是落盘形态」。
 2. **「`/sftp/rm-rf` 的 `timeout_secs` 是递归删除循环的截止时间，大目录树删到一半会撞它，慢链路反而无关」— 不成立。** 该值经 `sftp_dir_operation_with_value_core`（`core.rs:2446`）只传给 `task(host, path, timeout)`，闭包里唯一用途是 `connect_embedded_ssh(&host, timeout)`（`:2784`）；删除循环不读它。所以「慢链路才受影响 / 大目录树会撞它」两个方向都不成立：连接阶段之外没有截止时间。
 3. **「`api.yaml` 里有 `PUT /hosts/{name}`，L2-120 说的整条替换包括它」— 不成立。** `docs/api.yaml:1265-1301` 的 `/hosts/{name}` 只有 `delete`；`update_host_core` 的唯一生产调用点是 `tauri_commands.rs:330`（桌面）。HTTP 侧只有 `POST /hosts`，`grep -n "put:" ` 在该路径下无命中。
+
+### consume 2 / 6 · 2026-11-11 10:03–10:09 (GMT+8) · batch 11（issue #17）· 回帖 `2120338619285008384`
+
+> 本节写于第 3 轮的记录提交里——第 2 轮当时只 commit 未 push，也未补台账，第 3 轮开头才发现（远端 tip 停在 `81be765`）。数字按当时的两笔复算。
+
+6 轮进度 **2 / 6**，issue 保持 open。指摘 = **自取**（第 1 轮收尾后 60 s × 5 次轮询无回复，CodeBuddy 的复核在该轮结束后才到）。
+
+| # | 结论 | 判定 | 证据 |
+|---|---|---|---|
+| 1 | 5 个 operation 会经共享 helper 返 429 却没写进契约 | 成立（数量对，成员错 2 个） | `handler_body_of` 只认 `StatusCode::` 字面量，`reject_if_rate_limited`/`preflight_guarded_request`/`register_limited_session_for_command` 出的码对它是不可见的。当时补的 5 条里 `DELETE /forwards/{id}`、`/connections/{host}/connect`、`/connections/{host}/disconnect` 成立；`/exec/stream`、`/terminal/broadcast` 是错的，见第 3 轮 |
+| 2 | `DELETE /sessions/{id}` 的 429 是纯声明 | 成立 | `session_close:2602-2655` 不取 session 槽、不调限流；`reject_if_gate_paused` 是它唯一的 gate 路径。已删。CodeBuddy 后来独立复核，结论相同 |
+| 3 | 新增 `HELPER_STATUS` 断言，让 helper-borne 的码可见 | 成立（但判据过宽） | 判据是 `body.contains(call)`，它看不出 `Err` 是被 `return`/`?` 传播还是被 `if let Err` 吞掉。第 3 轮因此产生了 2 条假要求 |
+
+**本轮 L1**：`5e8e3d5`（`api.yaml` 增 5 减 1）、`ef9865e`（契约测试 `HELPER_STATUS`）。**当时未 push**，`git push` 在第 3 轮补做（`81be765..c1ab09a`）。
+
+**验证**：`npm run build` 6.5 s；`--lib` 862/1/1；`--test daemon_integration` 71 passed；负向对照：临时删掉 `GET /exec/stream` 的 429，断言报 `429 get /exec/stream (exec_stream via helper)`。
+
+### consume 3 / 6 · 2026-11-11 10:10–10:26 (GMT+8) · batch 11（issue #17）· 回帖 `2120342375716261888`
+
+6 轮进度 **3 / 6**，issue 保持 open。指摘 = 自取（契约里 423/429 的整体可达性）+ CodeBuddy 两条回复（`2120338797312237568` 复核第 1 轮、`2120339629009166336` 报「不在远端」并给 4 条新指摘）。
+
+| # | 结论 | 判定 | 证据 |
+|---|---|---|---|
+| 1 | 上一轮给 `/exec/stream` 补的 429 成立 | **不成立** | `exec_stream:5191` 是 `ws.on_upgrade` 闭包体，`reject_if_gate_paused` 用 `.is_err()`、限流用 `if let Err(...)`，两者都只发 `{"type":"error"}` 帧；闭包返回 `()`，`WebSocketUpgrade` 恒 101。它自己的 description 就写着「The only HTTP-level failure is the handshake itself」——上一轮没对读 |
+| 2 | 同上 `/terminal/broadcast` | **不成立** | `terminal_broadcast_run:4469` 把每个 eligible target 标 `authorized=false` 后 `return Ok(Json(...))`，HTTP 200 |
+| 3 | 同族第三个成员 `/terminal/broadcast/preview` | 成立 | `terminal_broadcast_preview_results:4372-4378` 用 `gate_blocks_source` 写进 `result.error`。精确口径：读 gate 的 operation **33**，声明 423 的 **30**，差的 3 个即这三条 |
+| 4 | `DELETE /forwards/{id}`、`POST /connections/{host}/disconnect` 的 423/429 | 成立 | `forward_remove:3078`、`ssh_disconnect:3628`（gate 在 `:3638`）均 `?` 传播 |
+| 5 | `POST /shutdown` 被写成受限流约束 | 成立 | `daemon_shutdown:165` 只有计数 + `require_admin`；`ShutdownRequest:147-151` 只有 `expect_pid`，`local:vs` 无处安放；`responses` 也从未列 429 |
+| 6 | 指南「**不覆盖**的只有只读/预览路径」 | 成立且更宽 | 38 条变更类路由在清单外（全部配置/规则写入、审批与门控、`POST /shutdown`）。同一行还把 `/terminal/broadcast` 写成 WebSocket exec |
+| 7 | `DELETE /forwards/{id}` 只在命中规则时走检查链 | 成立 | 外部臂 `:3108` 只 `forward_remove_core(uuid)` → 400/200，gate/限流/scope/审批/审计一处不走 |
+| 8 | connect/disconnect 缺 408/500 | 部分成立 | 408 本来就有；缺的是 500，来源是 `reject_if_gate_paused:381-388` 的 `load_execution_gate()` 失败 → `INTERNAL_SERVER_ERROR`。所以不是两条路由的缺口，是 33 个读 gate 的 operation 都没逐条写 500，改在 `info.description` 写一段 |
+| 9 | `preflight_rewritable_request` 是第五入口 | 成立 | `/exec:1692` 的正文里没有 `preflight_guarded_request(`。已加进 `HELPER_STATUS` |
+| 10 | `reject_if_gate_paused → LOCKED` 可做 1:1 映射 | 成立 | 已加，负向对照见下 |
+| 11 | `/daemons/{alias}/exec` 的 localhost 分支与 404 措辞 | 成立 | `proxy_exec:3951` 本地执行、不转发；`get_daemon_with_scope`（`remote.rs:312-330`）只按 alias 匹配，不读调用方 token，404 的「or the token cannot see the one that is」是编的 |
+| 12 | `SftpUploadRequest` 缺 `timeout_secs`「契约把被接受的字段写成不存在」 | 不成立（后半） | `types.rs:711-723` 无此字段，`sftp_upload_core_with_source:1910` 无超时形参。未知字段被忽略是 serde 默认行为，不是本接口接受它；能力不对称（`rm-rf` 有连接预算）成立，记 L2-122 |
+
+**本轮 L1**：`c1ab09a`（`api.yaml` 删 4 条 + `INBAND_REJECTIONS` 与第三段双向断言，两半必须同笔）、`5c348d4`（`/shutdown`、`DELETE /forwards/{id}`、`/terminal/broadcast/preview`、`/daemons/{alias}/exec`、`info.description` 全局 500、`configuration-guide.md:931`，断言扩到 6 个 helper 入口 + 3 个豁免成员）、`b677927`（`5c348d4` 把 gate 文件名写成 `gate.json`，实际 `execution_gate.json`）。
+
+**验证**：`npm run build` 6.38 s；`--lib` 862/1/1；`--test daemon_integration` 71 passed；`cargo fmt --check` 绿；`api.yaml` 105 operations / 30 带 423 / 29 带 429。负向对照 5 次：重加 `429` 到 `/exec/stream` → `get /exec/stream documents 429 but answers it in-band`；改掉「only as a frame」→ `no longer says ...`；删 `DELETE /forwards/{id}` 的 429 → 仍报 `429 delete /forwards/{id} (forward_remove via helper)`（证明豁免没削弱原断言）；删 `POST /connections/{host}/disconnect` 的 423 → `423 ... (ssh_disconnect via helper)`；删 `POST /exec` 的 429 → `429 post /exec (exec via helper)`。
+
+**本轮未做**：L2-122 三条（见 `OPT-LOOP-L2-PENDING.md`）。其中第 3 条是本轮最重要的发现：`terminal_broadcast_preview_results:4331` 用 `.ok()` 把「gate 读不到」当成「gate 未暂停」，与 `reject_if_gate_paused` 的 fail-closed 相反。
+
+#### 第 2–3 轮新增的不成立条目（原文保留，请勿重复提）
+
+1. **「`mod tests` 里的 `reject_if_rate_limited(` 会污染扫描」— 不成立。** `handler_body_of` 用 `\nasync fn {handler}(` 精确定位，测试函数与任何 route handler 都不同名。
+2. **「`proxy_exec` 两臂的限流目标是同一个，可能重复计数」— 不成立。** 两臂 `if/else` 互斥，同一次请求只走一条；提出者本人也标注「不是缺陷」。
+3. **「契约把 `SftpUploadRequest.timeout_secs` 写成了不存在」— 不成立。** 类型与 core 都没有这个字段，故契约没写是对的。
+4. **「给 `/exec/stream` / `/terminal/broadcast` 补 429（以及 423）能让契约更完整」— 不成立，且是消费者自己第 2 轮犯的错。** 两条路由在升级后/广播内把拒绝折成帧或 per-target 字段，HTTP 恒 101/200；契约里写码就是给生成客户端一个永不进入的分支。第 3 轮已删，并加 `INBAND_REJECTIONS` 双向断言防回来。

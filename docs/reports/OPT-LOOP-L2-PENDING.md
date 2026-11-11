@@ -894,3 +894,51 @@ L2-120 的建议里写着「承认 `PUT /hosts/{name}` 是**整条替换**」，
 `GET /hosts` 的每个响应都过 `redacted_for_transport`（`types.rs:105-109`），`password` 与 `passphrase` 一律置 `None`。所以「先 GET 取回整条 → 改一个字段 → 整体 POST 回去」这条看起来最安全的路径，实际会把已存凭据清空——比省略 `init_command` 更难察觉，因为主机名、分组、标签全都对，只有下次连接才失败。
 
 这是**脱敏的正确代价**，不是缺陷。拍板时要一并决定的是「要不要给一个可回传的 `secret_ref` 句柄」或「明确只允许桌面端做部分更新」。本轮只把这条写进两份指南与 `api.yaml`（`a54fcd0`），不改行为。
+
+## 2026-11-11 · batch 11 第 3 轮：L2-122（同一份 `execution_gate.json` 读失败，一族 fail-closed，一族 fail-open）
+
+三条都出自「契约里 423/429 到底可不可达」这条线，都需要动 `src-tauri/src/**`，本轮只记录。
+
+### 一、`terminal_broadcast_preview_results` 把 gate 读失败当成「未暂停」（最重）
+
+`bin/agent2ssh-daemon.rs:4331`：
+
+```rust
+let gate = load_execution_gate().ok();
+```
+
+后面是 `gate.as_ref().is_some_and(|status| gate_blocks_source(status, source))`（`:4372-4378`）。`load_execution_gate`（`gate.rs:46-57`）只在**文件存在但读不了或解析失败**时返回 `Err`（文件不存在返回 `Ok(default)`，即 Active）。于是：
+
+| 场景 | `reject_if_gate_paused`（`daemon.rs:381-388`） | `terminal_broadcast_preview_results` |
+|---|---|---|
+| 文件不存在 | 放行 | 放行 |
+| 文件存在、解析失败 | **500，拒绝** | **放行** |
+
+也就是说 `execution_gate.json` 一旦损坏，普通 exec 一族全部 fail-closed，而 `/terminal/broadcast` 与 `/terminal/broadcast/preview` 照常授权并向多条终端发命令。这两条路由恰好是「一次影响 N 个目标」的那一族。
+
+要拍板的是**期望语义**，不是实现细节：gate 读失败时，广播一族该 500 拒绝（与 exec 一致）还是继续？如果选后者，那 `reject_if_gate_paused` 的 500 才是那个需要改的；两者必须统一，不能一族一义。改法也影响契约：现在是「不产 423」的第三条豁免，改成 500 就要把豁免表从 `INBAND_REJECTIONS` 里挪出来。
+
+### 二、`forward_remove|stop|start` 的外部臂不写审计
+
+`forward_remove:3058` 的结构是：
+
+```rust
+if let Some(rule) = forward_list_core().await...find(|rule| rule.id == uuid) {
+    // gate → 限流 → scope → authorize → append_operation_audit
+    return Ok(Json(OkBody { ok: true }));
+}
+forward_remove_core(uuid)     // :3108
+    .await.map(...).map_err(|e| err(StatusCode::BAD_REQUEST, e))
+```
+
+命中规则时那条臂会写 `append_operation_audit`（`:3098-3106`），不命中时**什么都不写**。`forward_stop`（`:3140`）与 `forward_start` 同构。
+
+问题不在于「不该删不存在的隧道」，而在于**这个操作在审计里没有痕迹**：同一条 `DELETE /forwards/{id}` 请求，返回 400 还是 200 可以在事后核对，但它有没有进过审计完全取决于规则当时在不在。L2-102 是同一族的取数范围问题，这条应并进去，而不是单独修——单独补 `append_operation_audit` 会让「未命中」也产生一条和「命中」同形的记录，反而更难分辨。
+
+### 三、`/sftp/upload` 没有连接预算，`rm-rf` 有
+
+`SftpDirBody` 带 `timeout_secs`（`core.rs:2446` 取默认 60，`:2784` 传给 `connect_embedded_ssh`），`SftpUploadRequest`（`types.rs:711-723`）没有这个字段，`sftp_upload_core_with_source:1910` 也没有对应形参。
+
+两个方向都可能：① 上传也该有连接预算（大文件上传在慢链路上会撞 `connect_embedded_ssh` 的超时，而调用方无法调），那就加字段；② 上传本来就不该有（超时该由传输层自己管），那就把「为什么只有目录操作有」写进 `/sftp/upload` 的描述。
+
+**下一轮如果要定这条，先跟到 `sftp_transfer` 的实际超时来源**——本轮只核到 core 的函数签名，没跟到传输层用的是哪个默认值，所以「upload 没有超时入口」这句话目前只在 HTTP 契约层成立。
