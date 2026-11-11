@@ -1038,6 +1038,19 @@ paths:
     get:
       summary: Health check
       security: []
+      description: >
+        Unauthenticated on purpose (`security: []`), and therefore not proof of
+        identity: any local process that returns this shape (`ok`, a `pid`, and
+        optionally a `config_dir`) passes the first test a client makes. Two
+        consumers read it differently. `daemon_pid_state` requires the PID to
+        match, the admin token to be accepted by `GET /gate`, and the process
+        start time to be unchanged before and after those calls — it never
+        compares `config_dir`. `stop_daemon_process` requires the PID to match
+        and, when the answer carries one, the `config_dir` to equal the
+        caller's; an answer without `config_dir` (a daemon older than that
+        field) is refused by name rather than treated as a match, and the token
+        is exercised by `POST /shutdown` itself, whose 401/403 is reported as
+        "nothing was stopped". Neither check reads `version`.
       responses:
         "200":
           description: OK

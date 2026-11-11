@@ -1714,3 +1714,60 @@ issue #20 正文要求在两种策略里选一个。两个落点：
 ### L2-140（新）：`Bytes` 形状的 413 这轮有断言了，回执那半仍无
 
 本轮给 `api_yaml_documents_how_each_handler_reads_its_body` 加了「`Bytes` 形状必须文档 413、且必须是 `text/plain`」的断言（L1 已落），并补上 `/approvals/{id}/approve` 缺失的 413 —— 它是第二个 `Bytes` 处理器，此前静默地少一格契约，而 `/shutdown` 有这一格。**仍未覆盖**：真 daemon 发一个超过 2 MiB 的 body 观察 413（没有任何 e2e 做过）；以及 L2-137 落地后「新 daemon 的停止带回执」的断言，后者要等 daemon 先发回执。
+
+### L2-141（新）：`Unverified` 把「拿到反向证据」与「什么都没看见」压成一个词
+
+`daemon_pid_state`（`daemon_control.rs:343-366`）的两个入口都产出 `Unverified`：一是 `/health` 报了**另一个** PID 或 `daemon_matches_config` 为假（`:346-350`），二是进程快照有该 PID 但不像 daemon（`:362`）或快照根本没有它却又不能证明不存在（`:364`）。这四种情况的下一步相反——前者是「记录过期了，去看是谁」，后者是「我现在什么都看不见，先别动」——却共用一句 `process identity cannot be verified`（CLI `bin/agent2ssh.rs:3098`、桌面 `tauri_commands.rs:1772`）。
+
+同族的第二处：`DaemonStopError::UnverifiedIdentity` 的文案括号里列了三种原因 `health PID, config directory, or admin token did not match`（`daemon_control.rs:1027-1030`），而这一支只可能由前两种进入（`config_dir` 的比对在 `:1005-1020`，token 的比对在 `:1032` 之后）——与 L2-85 同一条，本轮不重复立。
+
+**要拍的口径**：① 拆成 `IdentityMismatch`（有反向证据）与 `CannotObserve(detail)`（无证据），代价是桌面状态从 4 个变 5–6 个、`i18n.tsx` 一批新文案；② 只拆内部类型、UI 仍合并显示，但**下面那行原因必须不同**。方案 ② 的代价约是一次 `daemon_control` 重构 + 两处文案，不碰前端。
+
+**是否顺带做 `DaemonObservation` 数据层（`pid_file: Absent|Unreadable|Malformed`、`listener`、`token`、`process`、`owner`）**：它与 ① 是同一笔决策。收益是 `daemon status --json` 与 `daemon diagnose` 都能直接复用，且 #22 落地后只需把 `process` 一项换掉；代价是新增一个公开结构 + 序列化形状，属 `src-tauri/src/**` 行为改动。
+
+**回滚**：新增变体而不改既有四支的判定，回滚 = 删变体与文案，无数据迁移。
+
+### L2-142（新）：桌面看不到 PID 记录，`daemon_status` 是零调用点
+
+`src/api.ts:711` 定义了 `daemonStatus: () => invoke("daemon_status")`，**全仓没有任何调用点**（`grep -rn '"daemon_status"\|daemonStatus(' src/` 只命中这一行定义）。面板的状态来自 `getDaemonHealth()`（`src/api.ts:693-708`，只打 `/health`）→ `App.tsx:370` → `daemonHealthy`（`SettingsMenu.tsx:115`）。
+
+后果有两半，方向相反：
+
+- 比「报错」更差的一半：`daemon.pid` 损坏、权限不足、指向别的进程，在面板上**完全不可见**——`/health` 一通则显示 `Daemon healthy`，与记录损坏可以同时成立（`health_identity` 只读 `ok`/`pid`/`config_dir`，`daemon_control.rs:231-253`）。
+- 比「全禁」更好的一半：`Restart` 只被 `daemonActionBusy` 支配（`SettingsMenu.tsx:672`），不受 `daemonHealthy` 限制。
+
+`Stop` 的 `disabled={daemonActionBusy !== null || !daemonHealthy}`（`:660`）意味着**最需要停止时按钮是灰的**：`RunningUnhealthy` / `Unverified` 下 `/health` 不通 → 灰。点 `Start` 才把原始错误（`invalid daemon PID file …` / `failed to read daemon PID file`）显示在 `daemonActionMessage` 里。
+
+**要拍的口径**：桌面是否接受一次 IPC 形状变更（`daemon_status` 返回 `DaemonObservation`，见 L2-141），以及 `Stop` 是否改成「永远可点、点下去走拒绝路径并把理由显示出来」。后者是按 #21 正文「错误状态可恢复、可重试」的直接落地，但会改变「按钮灰着」这个既有观感。
+
+### L2-143（新）：`.daemon-pid.lock` 的阻塞式等待会污染启动与停止两条路径
+
+`store.rs` 的 `lock_config_file` 用 `file.lock_exclusive()`（`store.rs:71-77`），**阻塞且无超时**。拿这把锁的有 `daemon_control.rs:77`（daemon 启动写 PID）、`:99`（条件删除）、`daemon_control.rs:537`（启动器失败清理）、`bin/agent2ssh.rs:3080`/`:3107`（stop / restart 收尾）、`tauri_commands.rs:1856`/`:1892`/`:1920`（桌面同一动作）、`bin/agent2ssh-daemon.rs:6000`（daemon 收尾删 PID）。
+
+所以一个卡住的持有者（被 `SIGSTOP`、NFS 上 `flock` 不可靠）有两个可观测后果：`daemon start` 在 `wait_for_daemon_pid` 的 3 秒期限用尽、已经决定杀掉子进程之后，仍会卡在 `:537` 的删除上；`daemon stop` 在宽限超时强杀 daemon 之后，卡在 `bin/agent2ssh.rs:3080`。两者都没有输出、没有上限——**诊断工具自己变成了新的不明故障**，且这段等待不进入 `configuration-guide.md` 原先那 12.5 秒的分解。
+
+**建议改法**：只在 `daemon_control` 的这几处用一个 `try_lock_config_file`（`fs2::FileExt::try_lock_exclusive`），失败即 `bail!("another process is operating on {}; inspect it before retrying")`，不动 `store` 的默认语义。属 `src-tauri/src/**` 行为改动，且要新增一条「外部持锁 → 命令在 X 秒内报错」的测试（现有 `daemon_control` 单测用真进程持锁，可复用）。
+
+**回滚**：把 `try_lock` 换回 `lock_exclusive` 即恢复今天的行为。
+
+### L2-144（新）：停止的**每一条**拒绝路径都不落盘
+
+`daemon_control.rs` 里 `append_diagnostic_log` 只有 7 处，停止路径只有两条会写：`:1050`（`AcceptedUnchecked` 的假 warn，K14 已记）与 `:1071`（"did not exit"）。`UnverifiedIdentity`、`NotAuthenticated`、`ExpectedPidRefused`、`NotAccepted`、`UncertainExit`、`StillRunning` 全部只 `return`，不写日志。
+
+后果：用户在 GUI 里点停止，只看到 `daemonActionMessage` 里一闪而过的一句话（`SettingsMenu.tsx:245` 存的是 `String(err)`，下一次操作即被覆盖），`app.log` 里一个字都没有。而 `configuration-guide.md:388` 恰恰让人去 `app.log` 找 `UncertainExit` 与 "did not exit" 的区分线索——那两类有，其余没有。
+
+**建议改法**：在 `stop_daemon_process` 的每个 `Err` 之前各写一条 `warn`，字段带 `pid` 与错误类别；`Display` 文案不动。属 `src-tauri/src/**` 行为（新增日志），需一条断言：制造 `NotAccepted`（换掉 token）后 `app.log` 出现对应 `warn`。
+
+### L2-145（新）：`doctor` 把「读不到 PID 文件」说成「没有 PID 文件」
+
+`bin/agent2ssh.rs:5026`：`let recorded_pid = read_daemon_pid().ok().flatten();`。`read_daemon_pid` 对 NotFound 返回 `Ok(None)`，其余错误返回 `Err`；`.ok()` 把后者也折成 `None`，于是**损坏、权限不足、根本没有**在 `doctor` 输出里完全同形，只落成一句 `daemon PID or config token could not be verified`。
+
+同一段还不查 `daemon.pid` 的存在性、不查 `daemon.owner`（`diagnostics.rs` 的导出也只是列 `daemon_pid`/`daemon_process_alive`/`daemon_health_ok`，没有 owner），所以「桌面退出为什么没停它启动的 daemon」在诊断输出里无迹可寻。
+
+**建议改法**：`doctor` 增三项 `daemon.pid`（present/malformed/unreadable/absent）、`daemon.owner`（present/absent/malformed）、`daemon.health`（改成三值：verified / endpoint-only / unreachable）；`.ok().flatten()` 拆成 `match`。属 `bin/agent2ssh.rs` 输出改动，会动 `cli_contract` 与该子命令的 JSON 形状，需拍板。
+
+### L2-146（新）：悬空符号链接的 `daemon.pid` 被判成「没有记录」，随后启动在写盘处失败
+
+`read_daemon_pid` 把所有 `ErrorKind::NotFound` 当作「没有文件」（`daemon_control.rs:60`）。悬空符号链接的 `read_to_string` 正是 NotFound，于是 `daemon status` 打印 `Daemon is not running.`、`daemon start` 走 `write_daemon_pid` 的 `std::fs::write(path)`——它会**跟随链接**到不存在的目标，报 `failed to write daemon PID file: No such file or directory`。用户看到的是「未运行」与一句写盘错误，中间没有「记录坏了」这个事实。
+
+**要拍的口径**：悬空链接算 `Malformed`（保留并报错）还是继续算 `Absent`（并允许启动覆盖）。若选前者，`read_daemon_pid` 要用 `symlink_metadata` 先判链接自身；若选后者，`write_daemon_pid` 应在目标不存在时先 `remove_file` 再写，否则「覆盖」根本不会发生。两条都属 `src-tauri/src/**` 行为，且会改 `daemon start` 的失败语义。

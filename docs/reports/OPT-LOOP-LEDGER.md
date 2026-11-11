@@ -2935,3 +2935,39 @@ B 尤其值得记，因为**缺陷是真的、证据是假的**：`L2-66` 确实
 - 6 轮进度：0 / 6（待消费任务更新）。
 - 顺手按 #19 批次 BATCH_COMPLETE 行自述删除该状态行（HTML 注释同步为十二条）。
 - 下一批（B=15）主题：15 % 6 = 3 → MCP 契约与 CLI 文档一致性（**第三批**，#9/#15 已闭环）。开 issue 前先 fetch cnb main 重读 ledger 不成立清单（本批消费期间会新增，行内锚点会漂移）。若 #30 仍 open 则按背压闸门跳过；锁沿用「保留在位、消费者侧自行清理」先例。
+
+---
+
+### 手工/单发消费 · 2026-11-11 · daemon 异常诊断与保守恢复（issue #21）
+
+**选靶**：open 里无其它待消费的 P1 比它更靠前——#20 已在 11:42 收尾并保持 open（`## 本轮收尾` 之后无新回复），#21 是这一族的入口（#20 的回执语义 → #21 的诊断层 → #22 身份协议 → #23/#24/#25 平台落地）。**排除**：#22/#25 是纯设计（P2，只产方案对比，本轮无人在等）、#26 依赖 #22 未落地、#27 是 Windows 实机验证（本机做不了）、#28/#29 是编号更晚的 P1。**不选「最容易」的理由**：#21 的实现主体几乎全在 `src-tauri/src/**`（L2），选它是因为它的**判定表本身**有产出价值——它给出了 21 条可核实的断言，而其中两条会把运维引向错误的排查方向。
+
+**判定：21 条 → 成立 14 / 部分成立 2 / 不成立 2 / 建议已落地 1 / 已登记 2。**
+
+#### 两条不成立（原文保留，请勿重复提）
+
+1. **「`stop_daemon_process` 在 token 不匹配时走到 `DaemonStopError::NotAuthenticated`」— 不成立。** token 被 daemon 拒绝时走的是 `NotAccepted(detail)`（`daemon_control.rs:923-929` → `:1063`），文案是「the daemon did not accept this config's admin token for a shutdown；nothing was stopped」。`NotAuthenticated` 只有一个入口：`read_admin_token()` 返回 `None`，即**配置文件里没有 token**（`:1032-1034`）。它引的 `:800`（枚举定义）与 `:822-826`（`Display`）都不是调用点。差别有实际后果：前者说明「token 轮换过、daemon 是旧的」，后者说明「这份配置根本没有凭据」。
+2. **「桌面 `daemon_status` 报错 → 面板只剩一行 `String(err)`」— 不成立。** `src/api.ts:711` 的 `daemonStatus` **零调用点**（全仓 grep 只命中定义行）；面板的状态来自 `getDaemonHealth()`（`api.ts:693-708`，只打 `/health`）。真实情形是反向的一半：读者以为面板至少会报错，实际是**完全看不见**——PID 文件损坏而 `/health` 正常时，面板照旧显示 `Daemon healthy`。
+
+#### 两条部分成立
+
+- **「CLI 与桌面共用 `daemon_pid_state`」**：判定共用成立，但桌面那一半（`tauri_commands.rs:1758-1793`）是死路——命令存在、前端不调。它给的行号 `3043-3103` 覆盖的是 CLI 的 `Start`..`Status` 整段，`daemon status` 本体在 `:3083-3101`。
+- **「`:660` 让停止和重启都灰」**：`Stop` 确实被 `!daemonHealthy` 支配（`:660`），`Restart` 只受 `daemonActionBusy`（`:672`）——所以「最需要停止时没有按钮」只对 `Stop` 成立，`Restart` 一直可点，点下去才在 `daemonActionMessage` 里显示原始错误。
+
+#### 一条建议已落地
+
+它建议「给畸形 shutdown body 补一个 test 钉住」。该测试 `malformed_shutdown_bodies_are_rejected_without_stopping_the_daemon` 在 `380e166` 就存在（`daemon_stop_e2e.rs:1165`，覆盖 10 种畸形体），而它的基线正是 `380e166`。
+
+#### 它没说出的两层（本轮补强）
+
+- **`daemon.token` 在结构上就躲得开脱敏**：admin token 是 `uuid::Uuid::new_v4()` 的 36 字符带连字符形状；`looks_like_high_entropy_secret`（`store.rs:1505-1539`）要么要求全 hex 且 ≥32 字符（连字符不满足），要么要求 ≥40 字符。所以它的结论「token 不出现在诊断输出」今天成立，但**成立的原因是「根本不打印」，不是脱敏兜底**；谁哪天在诊断里打一行 token，这层保护不会拦住。
+- **阻塞锁不止挡住诊断，还挡住停止本身**：`.daemon-pid.lock` 的 `lock_exclusive()` 没有超时，而 daemon 自己启动时（`bin/agent2ssh-daemon.rs:5798` 的 `write_daemon_pid`）与收尾时（`:6000` 的 `remove_daemon_pid_file_if`）都要拿它。所以一个卡住的持有者会让 `daemon stop` 在**已经强杀 daemon 之后**卡在删除那一步（`bin/agent2ssh.rs:3080`），让 `daemon start` 在**已经决定放弃子进程之后**卡在启动器的清理那一步（`daemon_control.rs:537`）。它测到的 11 秒是「还愿意等」的情形，不是上界。
+
+#### 本轮落地
+
+- `docs/guides/configuration-guide.md`：`daemon.pid` 的停止预算段补上「第二段没有上界的等待」（阻塞锁，与地址解析无关）；`daemon.owner` 的停止按钮段补上桌面面板的真实判据（只轮询 `/health`、`Stop` 在 `/health` 不通时置灰、桌面不读 PID 记录），并指明用 `daemon status` 判断记录状态。
+- `docs/api.yaml`：`/health` 加 description，写明它是 `security: []` 的公开路由、**不是身份证明**，并分别写清 `daemon_pid_state`（pid + `/gate` token + 启动时间快照，**不比 `config_dir`**）与 `stop_daemon_process`（pid + `config_dir` + `/shutdown` 自身的 401/403）各读哪几项、两者都不读 `version`。
+- `docs/reports/OPT-LOOP-L2-PENDING.md`：新增 **L2-141…L2-146**（`Unverified` 拆分与 `DaemonObservation`；桌面 `daemon_status` 零调用点；阻塞锁；拒绝路径不落盘；`doctor` 吞读失败；悬空符号链接）。六条全部需拍板，`src-tauri/src/**` 与 `src/**` 一行未改。
+- 台账本节。
+
+**SHA**：代码提交见下方「SHA 与回帖」。分支 `opt/single-21-20261111`，worktree `/Users/yuqu/Vbercodeing/agent2ssh-opt-worktrees/single-21`（合流后已清理）。
