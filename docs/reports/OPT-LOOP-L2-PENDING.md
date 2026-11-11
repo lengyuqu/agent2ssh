@@ -1573,16 +1573,20 @@ batch 7 判「不成立」时用的论据是「`code.is_some()` 时 `interrupted
 
 ### L2-134（新，第 4 轮）：`/exec/stream` 把「配置读不出来」折成 `unknown host`
 
-同一个文件里三处读 `hosts.json`，两种形态：
+读 `hosts.json` 的地方有五处，两种形态（`.ok()` 吞错 与 `?` 传播）：
 
 | 位置 | 写法 | 配置损坏时客户端看到 |
 |---|---|---|
 | `POST /health-snapshot`（`:5607`） | `load_config().map_err(\|e\| err(500, e))?` | 500 ＋ 原因 |
 | `POST /exec/stream`（`:5331-5334`） | `load_config().ok().and_then(… find …)` | WS 帧 `{"type":"error","error":"unknown host"}` |
+| `ping_hosts_core`（`core.rs:3559-3563`） | 同上 `.ok().and_then(…)` | 每条 `PingResult.error = "unknown host profile"` |
+| `collect_health_snapshot`（`health.rs:44-47`） | 同上 `.ok().and_then(…)` | 每条 `HostHealthSnapshot.error = "unknown host profile"` |
 | `audit_host_scope`（`:465`） | `load_config().unwrap_or_default()` | 客户端看不到；空配置让 scope 更窄，方向是收，可接受 |
 
 `/exec/stream` 那一处是**诊断错位**而不是越权：请求仍被拒，但理由从「配置读不出来，可能整个 daemon 都病了」变成「这个主机不存在」。运维按 `unknown host` 去查主机别名，方向完全错——同一类错在 batch 13 修过一次（`gate_blocks_source` 之前的 500 被写成 423 文案）。
 
-**修法**：`.ok()` 换成 `map_err`，按帧发 `{"type":"error","error":"failed to load config: {e}"}`，与 `reject_if_gate_paused` 的 500 文案同族。属 `src-tauri/src/**` 行为改动，**登记不动**。
+四处里三处是 `.ok()`、一处是 `?`，而 `?` 那处恰好是同一条路由的另一种入参形态（`/health-snapshot` 只在调用方不点名主机时才自己读配置）。所以同一条路由会因为「有没有点名主机」而对同一个坏配置给出两种说法：点名 → 每条 `unknown host profile`，不点名 → 500。`health.rs` / `ping_hosts_core` 的 per-host `error` 字段本身是设计，问题只在**它写的病因是错的**。
+
+**修法**：`.ok()` 换成 `map_err`，让三处共用同一句病因。`/exec/stream` 按帧发 `{"type":"error","error":"failed to load config: {e}"}`，与 `reject_if_gate_paused` 的 500 文案同族；`ping_hosts_core` / `collect_health_snapshot` 是逐条返回的结构，没有状态码可发，但 `error` 是 `Option<String>`，容量够写同一句。属 `src-tauri/src/**` 行为改动，**登记不动**。
 
 **判据**：把 `hosts.json` 写成非法 JSON，`POST /exec/stream {"host":"whatever"}`，断言第一帧 `error` 含 `failed to load config`。今天拿到的是 `unknown host`。
