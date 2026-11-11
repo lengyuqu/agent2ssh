@@ -47,7 +47,7 @@ impl Handler for Server {
     async fn auth_publickey(
         &mut self,
         _: &str,
-        _: &russh::keys::PublicKey,
+        _: russh::server::VerifiedPublicKey<'_>,
     ) -> Result<Auth, Self::Error> {
         if self.0 == Behavior::PublicKeyStall {
             std::future::pending::<()>().await;

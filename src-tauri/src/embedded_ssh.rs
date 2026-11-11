@@ -580,8 +580,10 @@ pub fn import_known_hosts_from_ssh(path: Option<&str>) -> Result<KnownHostImport
 // deliberately not merged, because this one edits a file OpenSSH also writes.
 /// Finding 18: Remove a host entry from the system OpenSSH `~/.ssh/known_hosts`.
 ///
-/// Equivalent to `ssh-keygen -R <hostname>`. Removes all lines matching the
-/// given hostname (or `[hostname]:port` for non-default ports). The file is
+/// Equivalent to `ssh-keygen -R <hostname>`, modulo spelling: every line whose
+/// host field names this host at this port is removed, so a line written
+/// `[host]:22` or `host:22` is swept too — shapes `ssh-keygen -R` leaves behind
+/// because it matches spellings rather than `(host, port)` pairs. The file is
 /// rewritten in-place with a backup (`.bak`).
 ///
 /// Returns the number of entries removed.
@@ -596,21 +598,38 @@ pub fn remove_system_known_host(host_name: &str, port: u16) -> Result<usize> {
     let raw = std::fs::read_to_string(&ssh_path)
         .with_context(|| format!("failed to read {}", ssh_path.display()))?;
 
-    // Build the patterns to match: bare hostname and [hostname]:port form.
+    // Compare `(host, port)` pairs, not spellings.
     //
-    // The comparison below is textual, so it misses every shape it does not
-    // spell out: with `port == 22` the only pattern is the bare name, and a
-    // line written `[example.internal]:22` — OpenSSH does not write that, but a
-    // hand-edited or foreign file does — survives the `forget` with `removed 0`.
-    // A bare `example.internal:22` misses for the same reason. Both are the same
-    // normalization gap as the IPv6 literal at port 22 (L2-15) and as the
-    // import identity (L2-95), so the three want one decision: parse the host
-    // field with `split_host_port` and compare `(host, port)` instead of
-    // comparing strings.
-    let patterns: Vec<String> = if port == 22 {
-        vec![host_name.to_string()]
-    } else {
-        vec![format!("[{}]:{}", host_name, port)]
+    // A textual comparison builds one spelling per port — the bare name at 22,
+    // `[name]:port` elsewhere — and therefore misses every other way the same
+    // pair can be written: `[example.internal]:22`, `example.internal:22`, or a
+    // bracketed IPv6 literal at 22 (which `ssh-keygen -R` also leaves behind
+    // and which `an_ipv6_literal_at_port_22_is_removed` pins). `forget` means
+    // "this endpoint is no longer trusted", so the pair is what it should look
+    // for. Reading the field with `split_host_port` also keeps the bracketed
+    // IPv6 literal distinct from a bare `:`-containing host.
+    //
+    // The scoping is unchanged and the port is still required to agree: a bare
+    // name is port 22 and nothing else, so forgetting `host:2222` cannot take
+    // the port-22 line with it
+    // (`forgetting_one_port_leaves_the_other_port_alone`).
+    //
+    // A trailing root dot (`example.internal.` in DNS absolute form) is the
+    // same endpoint as the name without it, and a file written by hand or by
+    // another tool may hold either. Case is deliberately *not* folded: a
+    // known_hosts host field is an address, not a name to be guessed at.
+    let normalise = |host: &str| host.trim().trim_end_matches('.').to_string();
+    let wanted_host = normalise(host_name);
+    let matches_host_field = |field: &str| {
+        field.split(',').any(|entry| {
+            // A hashed entry (`|1|<salt>|<hmac>`) has no readable host field;
+            // it cannot be matched without hashing and is left alone.
+            if entry.trim_start().starts_with('|') {
+                return false;
+            }
+            let (host, line_port) = split_host_port(entry);
+            line_port == port && normalise(&host) == wanted_host
+        })
     };
 
     let mut kept = String::new();
@@ -622,13 +641,11 @@ pub fn remove_system_known_host(host_name: &str, port: u16) -> Result<usize> {
             kept.push('\n');
             continue;
         }
-        // Check if this line matches any of our patterns.
+        // A known_hosts line is `<host field> <key type> <key>`; the host field
+        // can hold a comma-separated list of names, a hashed entry, or one
+        // address in any of the bracketed/bare forms `split_host_port` knows.
         let host_field = trimmed.split_whitespace().next().unwrap_or("");
-        let matches = patterns.iter().any(|p| {
-            // known_hosts can have comma-separated hostnames.
-            host_field.split(',').any(|h| h == p.as_str())
-        });
-        if matches {
+        if matches_host_field(host_field) {
             removed += 1;
         } else {
             kept.push_str(line);
@@ -654,16 +671,30 @@ fn split_host_port(host_field: &str) -> (String, u16) {
     if let Some(rest) = host_field.strip_prefix('[') {
         if let Some(close) = rest.find(']') {
             let host = &rest[..close];
-            let after = &rest[close + 1..];
-            if let Some(port_str) = after.strip_prefix(':') {
-                if let Ok(port) = port_str.parse::<u16>() {
-                    return (host.to_string(), port);
-                }
-            }
-            return (host.to_string(), 22);
+            // Everything after the bracket is reported as it found it, so a
+            // caller comparing ports sees a shape it cannot read as "not this
+            // port" rather than as a port-22 line.
+            return (host.to_string(), trailing_port(&rest[close + 1..]));
+        }
+    }
+    // Only write the bracket form for a *non-standard* port, so OpenSSH never
+    // produces a `:` in the host field; anything there is a written-out port.
+    if let Some((host, port_str)) = host_field.rsplit_once(':') {
+        let reads_as_port = !port_str.is_empty() && port_str.bytes().all(|b| b.is_ascii_digit());
+        if reads_as_port && !host.contains(':') {
+            return (host.to_string(), trailing_port(&format!(":{port_str}")));
         }
     }
     (host_field.to_string(), 22)
+}
+
+/// The port `after` names — `":2222"` — or, when it names none, 0: there is no
+/// standard port that could satisfy a caller asking for one it cannot read.
+fn trailing_port(after: &str) -> u16 {
+    after
+        .strip_prefix(':')
+        .and_then(|port| port.parse::<u16>().ok())
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -717,29 +748,63 @@ mod remove_system_known_host_matching {
         result
     }
 
-    /// Its premise does not hold: OpenSSH writes a bare `::1` at port 22 and only
-    /// brackets the address for a *non-standard* port (`man 8 sshd`; observed from
-    /// both `ssh` and `ssh-keyscan` against a local sshd). So `[::1]:22` is a form
-    /// no OpenSSH produces, and only the bare form is built for port 22, which is
-    /// `Ok(0)` here — the CLI then prints its idempotent miss line and the entry
-    /// stays. **Pinned as a failure while the question is open**: whether `forget`
-    /// should also sweep the bracketed form is L2-15 in
-    /// `docs/reports/OPT-LOOP-L2-PENDING.md`, and deleting this test is one
-    /// resolution of it, not a maintenance edit.
+    /// `[::1]:22` is a spelling no OpenSSH writes — it brackets only a
+    /// non-standard port (`man 8 sshd`) — but a hand-edited or foreign file has
+    /// it, and `ssh-keygen -R ::1` leaves it behind too. That is exactly the
+    /// case this file's `forget` is for, so the human says "forget ::1" and the
+    /// entry goes: the comparison is a `(host, port)` pair, not a spelling.
+    ///
+    /// The premise this used to be pinned as a *failure* against — that
+    /// `ssh-keygen -R` would sweep the bracketed form — was measured and is
+    /// false; the resolution recorded for L2-15
+    /// (`docs/reports/OPT-LOOP-L2-PENDING.md`) is the product reading taken
+    /// here: `forget` removes more spellings than the reference, and says so in
+    /// the function's doc comment.
     #[test]
     #[serial_test::serial]
     fn an_ipv6_literal_at_port_22_is_removed() {
-        let body = line("[::1]:22") + &line("other.example");
+        let body = line("[::1]:22") + &line("[::1]:2222") + &line("other.example");
         let removed = with_home(&body, |home| {
             let removed = remove_system_known_host("::1", 22).unwrap();
+            // Assert on the line, not on a substring: `[::1]:2222` contains
+            // `[::1]:22` and would make a `contains` check pass for the wrong
+            // reason.
+            let left = home.known_hosts();
             assert!(
-                !home.known_hosts().contains("[::1]:22"),
-                "the [::1]:22 line survived: {}",
-                home.known_hosts()
+                !left.lines().any(|l| l.starts_with("[::1]:22 ")),
+                "the [::1]:22 line survived: {left}"
+            );
+            assert!(
+                left.contains("[::1]:2222"),
+                "the other port must survive, left: {left}"
             );
             removed
         });
         assert_eq!(removed, 1, "one line matched, not zero");
+    }
+
+    /// The other spelling of the same endpoint: a bracketed name at 22, and the
+    /// bare name with the port written out. Both have to go — and the 2222 line
+    /// beside them has to stay, which is what keeps this from becoming "match
+    /// any line mentioning the host".
+    #[test]
+    #[serial_test::serial]
+    fn other_spellings_of_the_same_endpoint_are_removed() {
+        let body = line("[example.internal]:22")
+            + &line("example.internal:22")
+            + &line("mixed.example,example.internal")
+            + &line("[example.internal]:2222");
+        let removed = with_home(&body, |home| {
+            let removed = remove_system_known_host("example.internal", 22).unwrap();
+            let left = home.known_hosts();
+            assert_eq!(
+                left,
+                line("[example.internal]:2222"),
+                "only the [example.internal]:2222 line may survive"
+            );
+            removed
+        });
+        assert_eq!(removed, 3, "three lines name this endpoint");
     }
 
     /// The other direction of the same asymmetry, and a latent data-loss one: a
@@ -809,6 +874,25 @@ mod remove_system_known_host_matching {
         );
         assert_eq!(split_host_port("[::1]:22"), ("::1".into(), 22));
         assert_eq!(split_host_port("127.0.0.1"), ("127.0.0.1".into(), 22));
+        // A port written without brackets. OpenSSH brackets a non-standard
+        // port, so this shape comes from a hand-edited or foreign file — the
+        // same audience as the bracketed form at 22.
+        assert_eq!(
+            split_host_port("example.internal:2222"),
+            ("example.internal".into(), 2222)
+        );
+        assert_eq!(
+            split_host_port("example.internal:22"),
+            ("example.internal".into(), 22)
+        );
+        // A non-standard port written without brackets in the host field is
+        // *not* a port to imply, and a port that reads as none is not 22
+        // either: the caller has to be able to tell the two apart.
+        assert_eq!(
+            split_host_port("no-port.example"),
+            ("no-port.example".into(), 22)
+        );
+        assert_eq!(split_host_port("[::1]"), ("::1".into(), 0));
     }
 }
 

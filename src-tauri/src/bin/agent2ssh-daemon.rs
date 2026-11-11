@@ -402,16 +402,47 @@ fn reject_if_gate_paused(
     host: &str,
     command: &str,
 ) -> Result<(), (StatusCode, Json<ErrorBody>)> {
-    let status = load_execution_gate().map_err(|e| {
-        err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("failed to load execution gate: {e}"),
-        )
-    })?;
-    if !gate_blocks_source(&status, source) {
-        return Ok(());
-    }
-
+    let paused = match load_execution_gate() {
+        Ok(status) if !gate_blocks_source(&status, source) => return Ok(()),
+        Ok(status) => status,
+        Err(e) => {
+            // A gate that cannot be *read* and a gate an operator *paused* are
+            // different answers (500 vs 423) but the same question — "did this
+            // request reach the server and get refused?" — and an operator
+            // reading the audit trail has to be able to answer it for both.
+            // This is the branch where the record is worth most: the gate could
+            // not be consulted, so nothing else will say what happened.
+            //
+            // `append_operation_audit`, not a `Blocked` exec entry: the command
+            // was never considered, so recording it as blocked would put "the
+            // server is misconfigured" and "an operator pressed stop" in the
+            // same shape. The reason carries the load failure verbatim.
+            let reason = format!("failed to load execution gate: {e}");
+            append_operation_audit(
+                source,
+                host,
+                command,
+                RiskLevel::Medium,
+                None,
+                0,
+                Some(&reason),
+            );
+            publish_event(
+                EventType::GateRejected,
+                serde_json::json!({
+                    "source": source,
+                    "host": host,
+                    "command_preview": preview_text(command, 2048),
+                    "gate_load_failed": true,
+                    "reason": reason,
+                }),
+            );
+            return Err(err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to load execution gate: {e}"),
+            ));
+        }
+    };
     let result = ExecResult {
         host: host.to_string(),
         command: command.to_string(),
@@ -428,7 +459,7 @@ fn reject_if_gate_paused(
     let _ = append_audit(
         &result,
         RiskLevel::Blocked,
-        status.reason.as_deref().or(Some("execution gate paused")),
+        paused.reason.as_deref().or(Some("execution gate paused")),
         None,
         Some(source),
     );
@@ -438,8 +469,8 @@ fn reject_if_gate_paused(
             "source": source,
             "host": host,
             "command_preview": preview_text(command, 2048),
-            "mode": status.mode.to_string(),
-            "reason": status.reason,
+            "mode": paused.mode.to_string(),
+            "reason": paused.reason,
         }),
     );
     Err(err(locked_status(), "execution gate paused"))
@@ -6241,6 +6272,11 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
 
     fn with_temp_config<T>(f: impl FnOnce() -> T) -> T {
+        // Named in full because this module has no `use super::*`: the bare
+        // identifier here resolved only because a `use` in another test's body
+        // leaked the name across the module, so any edit to that test broke the
+        // whole target.
+        use agent2ssh::store::CONFIG_DIR_ENV;
         static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         // Poison-tolerant: a test that panics while holding this lock must not
         // turn every later with_temp_config test into a PoisonError, because a
@@ -6441,7 +6477,20 @@ mod tests {
             assert_eq!(entry.host, "test-host");
             assert_eq!(entry.command, "uptime");
             assert_eq!(entry.source.as_deref(), Some("mcp"));
-            assert_eq!(entry.risk_level, RiskLevel::Blocked);
+            // A load failure is not an operator's stop: it is recorded at
+            // Medium so "the gate could not be read" and "an operator paused
+            // it" stay distinguishable in the trail (the paused branch below
+            // asserts `Blocked`).
+            assert_eq!(entry.risk_level, RiskLevel::Medium);
+            assert!(
+                entry
+                    .reason
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("failed to load execution gate"),
+                "the reason must name the load failure, got {:?}",
+                entry.reason
+            );
         });
     }
 
