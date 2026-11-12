@@ -3872,3 +3872,36 @@ L2-154（`/exec-multi` 全 0 语义）、L2-155（preview 缺 admin 门）、L2-
 2. **「`the_console_route_mounts_one_named_handler` 不存在」**——`daemon_integration.rs:2918` 就是它。
 
 **回帖**：`2120722536529829888`（`## 本轮收尾`）。`#20` **保持 open**：剩余 L2-27 / L2-172 / L2-175 / L2-180 / L2-182 与 `#22` 的身份协议前置项全在决策侧。
+
+### 手工/单发消费 · 2026-11-12 · #23 第五次进入（身份入口清点补全 + 退出路径的错归因）
+
+**模式 B 单发**（open 十二条 #20–#29 + #31/#32 安全扫描贴，**无 `[opt-round]`** → 第二段为空）。开工基线 `437ae7e` = `cnb/main`：`ls-remote` 与本地同值、三个其它 worktree 的 `status --porcelain` 全 0 行、`src`/`src-tauri/src`/`docs` 三十分钟零写入 → 不让位。**选靶 #23**：`#20`（`03:37:08Z`）与 `#21`（`01:16:53Z`）的最新评论都是本流程的 `## 本轮收尾`（等复核），`#22`/`#25` 是 P2 设计、`#24`/`#27` 要 Windows 实机（本机做不了，排除）、`#26`/`#28`/`#29` 零评论、`#31`/`#32` 是安全扫描贴；`#23` 最新是 CodeBuddy 的只读复核 `2120583722461192192`（11-11 18:25:32Z，**未消费**），P1 且编号最小。它的自述基线 `c5604c8` 是 `437ae7e` 的祖先，行号已按当前树复核。
+
+**判定（去重后 17 条 → 成立 8 / 部分成立 4 / 不成立 1 / 记录 4）**。三条要点：
+
+1. **桌面「停止」按钮的启用条件是第四套判据，且与它触发的动作相反**（成立，新）：`SettingsMenu.tsx:660` 的 `disabled={daemonActionBusy !== null || !daemonHealthy}`，而 `daemonHealthy`（`:115`）只等于 `api.getDaemonHealth()` 那次裸 `fetch(/health)` 的 `ok`（`api.ts:693-710`，`daemonUrl` 在 `:71` 硬编码）。它既不看名字也不看 PID，所以重命名 daemon 下是「绿灯亮 + 按钮可点 + 点了必败」——`daemon_stop` 仍走名称门槛。同页 `:648` 的「启动」按钮被同一个绿灯禁用，那一侧恰好是对的（CLI 也说 already running），所以这一对按钮是「一个对、一个错」而不是整体错了。
+2. **`stop_owned_daemon` 的失败路径是静默的，不是它说的那条日志**（部分成立→本轮改正 K14）：它说 `daemon_is_owned`（`daemon_control.rs:612-623`）与 `process_is_alive`（`:1906`）都因名字返回 false，日志写的是既有的那句 `quit leaves the daemon running: it was not started by the desktop app`。**前半错**：`daemon_is_owned` 用的是 `process_start_time`（`:591-596`），只读 sysinfo 的 `start_time`，**不看名字**，在重命名 daemon 上返回 true。**后半也错**：`process_is_alive` 在 `tauri_commands.rs:1906` 就 early return 了，`daemon_is_owned` 根本没执行，所以**一条日志都不写**。结论（退出不会停重命名 daemon）是对的，机制与可观测性都错。
+3. **`daemon.pid` 的「两种权限口径」不成立**（不成立，实测）：它说 `write_daemon_pid_if_absent`（`daemon_control.rs:86-94`）以 0444 创建、与 `std::fs::write` 那条的 0644 不一致。用与本仓同形的 `OpenOptions::new().write(true).create_new(true)` 实测，umask 022 下两种写法都是 **0644**——`OpenOptions` 只带 `write(true)` 不会改变 create 的默认 mode（`0o666 & ~umask`）。它把「访问模式」当成了「文件模式」。与 `daemon.token` 的 0600 之差属 **L2-171** 的附带属性，不新立条。
+
+### 改了什么（全 L1）
+
+- `src-tauri/tests/daemon_stop_e2e.rs`：在既有的 `renamed_daemon_is_reported_healthy_but_not_unsafely_stopped` 里补三条断言，把 K14 那句「同一份输出自相矛盾」钉住——`report["daemon"]["process_alive"] == false`、`health_ok == true`、`pid == pid`。这两半此前**零测试覆盖**（`grep -c doctor src-tauri/tests/daemon_stop_e2e.rs` = 0 说的是 doctor，诊断面同样为零）。夹具本来就是一只真名不在白名单里的 daemon，只有它能同时造出两个相反答案。
+- `docs/KNOWN-ISSUES.md` K14：身份入口清点从「三状态 + 两停止」补全为**六个可观察面 + 一个静默面**——加桌面 `daemon_status`（与 CLI status 同派）、桌面「停止」按钮（第四套判据）、`daemon rotate-token`（第三类：以 `daemon_pid_state != Stale` 拒绝，与名称门槛无关）、`daemon list`/`daemon view` 的 `localhost` 项（HTTP-only），并改正退出路径的描述（`process_is_alive` 先 early return，零日志；`daemon_is_owned` 反而比它宽松）。
+- `docs/guides/configuration-guide.md` 停止一节：把同样五件事写成用户视角，并明确「面板绿灯 ≠ 可停」「退出应用后 daemon 还在在重命名场景是预期行为」「rotate-token 拒绝与名字无关」。
+- `docs/reports/OPT-LOOP-L2-PENDING.md`：新增 **L2-183**（桌面停止按钮的启用条件与动作判据不一致，三案：改 `daemonStatus().running` / 后端结构化 reason / 只加 tooltip）与 **L2-184**（`stop_owned_daemon` 对重命名 daemon 静默返回，退出路径零日志）。**最大编号 L2-184**。
+
+### 反向验证（一次，红在新增断言上）
+
+把 `process_alive` 的期望改成 `true` → 红在 `daemon_stop_e2e.rs:736`，输出 `left: Bool(false) / right: Bool(true)` 并带 `REVERSE-PROBE` 标记；恢复后单测复跑 **1 passed / 6.21 s**。这一条同时证明测试函数真的执行了（不是被 `#[ignore]` 或前置 skip 吞掉），以及报告里那个字段确实是 `false` 而不是 `null`。
+
+### 验证
+
+`npm run build` **6.47 s**；`cargo fmt --check` 绿；`--no-default-features --lib` **863 passed / 1 failed / 1 ignored**（红项仍是那条故意红的 `an_ipv6_literal_at_port_22_is_removed`）；`--no-default-features --features daemon --test daemon_stop_e2e -- --test-threads=1` **34 passed / 0 failed / 34.98 s**（与改动前同数——只加强断言，未加测试函数）。
+
+### 新增「不成立」，不要重复提
+
+1. **「system report 的 `health_ok` / `process_alive` 是 K14 漏写的第三处自相矛盾，而且是顶层字段」**——K14 原文已同时写了这两对（「`daemon_process_alive` / `process_alive`」与「`daemon_health_ok` / `health_ok`」）；两个字段在 `diagnostics.rs:643-648` 的 `"daemon": {…}` 里，不是顶层。
+2. **「`write_daemon_pid_if_absent` 以 0444 创建 `daemon.pid`，两种写法权限口径不一致」**——实测两种写法在 umask 022 下都是 **0644**。见上。
+3. **「`daemon_is_owned` 在名称门槛后面，因名字 `None` 而 false」**——它用 `process_start_time`（`daemon_control.rs:591-596`），不看名字；挡住退出路径的是排在它前面的 `process_is_alive`（`tauri_commands.rs:1906`）。
+
+**回帖**：见本文件末条。`#23` **保持 open**：三条验收（真实进程回归 / 两种生命周期 / Linux CI 前提）仍未做，且 pidfd 本体要改 `stop_daemon_process` 的签名、前置 #22 的文件身份格式未拍板。

@@ -2439,3 +2439,35 @@ allowed_commands = ["uptime", "df *", "session_open"]
 
 **建议改法**：(a) 两处都改实时 `host_tags()`——一致性最高，代价是 `preview` 的答案会随 `hosts.json` 变化，与「终端连上时冻结目标集」的既有说法需要对齐；(b) 两处都用注册快照——配额与授权跟着终端生命周期走，代价是 tag 变更对已注册终端不生效，运维改了 `hosts.json` 以为生效了却没有；(c) 不统一，只在 `/terminal/broadcast` 的 description 里写清「per-target scope 判定用连接时的 tags，限流与审批用当前 tags」。**倾向**：(a) + 在 description 里把「以当前 `hosts.json` 为准」写明，因为 (b) 会造成「改了配置看起来生效了其实没有」这类更难查的偏差。
 **回滚**：(a) 改回 `&endpoint.tags` 即回到今天；(c) 删掉那句话。
+
+## 2026-11-12 · 手工单发：issue #23（第五次进入）
+
+两条都改 `src/**` 或 `src-tauri/src/**` 的行为，按协议只登记不动。逐条判定与证据见 `OPT-LOOP-LEDGER.md` 同日「手工/单发消费 · #23 第五次进入」小节。**行号基线 `437ae7e`**。
+
+**为什么本轮仍只有 L2**：#23 的交付物是 pidfd 绑定，要改 `stop_daemon_process` 的签名，且前置 #22 的文件身份格式仍未拍板。本轮把「身份入口到底有几个、每个用哪套判据」清点完整并写进 K14/指南（L1），把两处需要拍板的行为改动登记在这里。
+
+### L2-183（新，单发 #23 第五次进入）：桌面「停止」按钮的启用条件与它触发的动作不是同一套判据
+
+**位置**：`src/components/SettingsMenu.tsx:660`（`disabled={daemonActionBusy !== null || !daemonHealthy}`）、`:115`（`const daemonHealthy = daemonHealth?.ok === true`）、`src/App.tsx:370`（每 10 s 一次 `api.getDaemonHealth()`）、`src/api.ts:693-710`（裸 `fetch(`${daemonUrl}/health`)`，`daemonUrl` 在 `:71` 硬编码 `http://127.0.0.1:7722`）。对照动作侧：`src-tauri/src/tauri_commands.rs:1851-1880`（`daemon_stop` → `daemon_control::stop_daemon_process`，名称门槛在 `daemon_process_start_time`）。
+
+**判断**：**成立**。按钮放行的是「`/health` 回了 200」，而动作要求的是「`daemon_process_start_time` 非空」——前者是 HTTP 观察，后者是名称白名单 + 非僵尸 + `start_time != 0`。重命名 daemon 下两者相反：`/health` 照常 200（绿灯、按钮可点），`daemon_stop` 回 `Err(... cannot be safely identified ...)`。用户在面板上看到的是「健康」加一个点了就弹错的按钮，而错误文案里没有任何一个字解释按钮为什么亮。这一条与 L2-159（地址硬编码）、L2-158（`DaemonHealth | null` 只有两档）、L2-168（`pid` 两种含义）不同：那三条各自只影响一个观察面，这条是**两个不同的判据被摆在了同一个按钮的两端**。
+
+**为什么它是 L2**：任一改法都动前端行为或 IPC 形状。
+
+**建议改法**：(a) 按钮的禁用条件换成 `await api.daemonStatus()` 的 `running`（一次 IPC，与动作同判据，且天然带上 `DaemonPidState` 的四档语义）；(b) 后端在 `daemon_stop` 失败时返回结构化 reason（`name_not_whitelisted` / `pid_reused` / `token_mismatch` / `pid_file_missing`），前端按 reason 出文案；(c) 保持现状，只在按钮上加 tooltip 写明「健康 ≠ 可停」。**倾向**：(a)，因为它是唯一能让「亮着就能点、点了就能成」成立的做法；(b) 是它的补充而不是替代——(a) 之后仍会出现「点了失败」，那时需要 reason。
+
+**回滚**：(a) 换回 `daemonHealthy`；(b) 删掉 reason 字段与前端分支；(c) 删掉 tooltip。三者都不动 Rust 执行路径。
+
+### L2-184（新，单发 #23 第五次进入）：`stop_owned_daemon` 对重命名 daemon 静默返回，退出路径零日志
+
+**位置**：`src-tauri/src/tauri_commands.rs:1902-1917`——`:1906` 的 `if !crate::daemon_control::process_is_alive(pid) { return; }` 排在 `:1909` 的 `if !crate::daemon_control::daemon_is_owned(pid)` 之前。判据来源：`daemon_control.rs:113-115`（`process_is_alive` → `daemon_process_start_time`，走 `process_looks_like_daemon`，**看名字**）、`:591-596`（`process_start_time`，只读 sysinfo 的 `start_time`，**不看名字**）、`:612-623`（`daemon_is_owned` 用的是后者）。
+
+**判断**：**成立**，而且与「退出时会写下 `quit leaves the daemon running: it was not started by the desktop app`」这个说法相反：那条日志在 `:1910-1915`，要先过 `:1906`。重命名 daemon 在 `:1906` 就返回了，`daemon_is_owned` 根本没执行，因此**一条日志都不写**。也就是说，「关窗口后 daemon 还在」这件事在 `app.log` 里没有痕迹，只能从「daemon 还活着」反推。
+
+**后果**：`docs/architecture.md` 里「quit stops only a daemon it started」这句仍然成立（结果对），但它的失败路径不可观测；K14 原先把它写成「日志写的是『不是本应用起的』」，是错归因，本轮已在 K14 与指南里改正。
+
+**为什么它是 L2**：补日志是 `src-tauri/src/**` 的行为改动（会改变 `app.log` 的内容与既有断言的作用域）。
+
+**建议改法**：(a) 在 `:1906` 的 early return 之前写一条 `info`，把两种「没停」分开：`process_not_recognised`（名字不在白名单）与既有的 `not_started_by_app`；(b) 把 `daemon_is_owned` 提到 `process_is_alive` 之前——**这不会改变结论**（`daemon_is_owned` 不看名字，重命名 daemon 上仍为 true），反而会让「不是本应用起的」这条日志在重命名 daemon 上误报，所以先要补判据再调序；(c) 保持现状，只在文档里写清「这条路径静默」。**倾向**：(a)。本轮已做 (c) 的文档部分。
+
+**回滚**：(a) 删掉那条日志即回到今天。
