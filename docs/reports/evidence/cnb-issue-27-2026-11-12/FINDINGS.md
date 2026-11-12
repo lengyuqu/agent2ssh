@@ -86,15 +86,27 @@ IME 组合输入。
 | D3 | 同上，但句柄在 300 ms 后释放 | 退出码 0，耗时 674 ms | **实测通过**：退避窗口足够等到短命读者 |
 | D4 | 目标被带 `FILE_SHARE_DELETE` 的句柄打开（Rust `File::open` 的形态） | 退出码 0 | **实测**：普通的「另一个 CLI 正在读」不会阻塞替换 |
 | D5 | 目录里有残留 `hosts.json.tmp.999999`（模拟崩溃遗留） | 退出码 0；残留文件仍在且未被误删 | **实测通过**：临时文件名含 pid，残留不影响下一次保存 |
-| D6 | `icacls` 失败时是否 fail-closed | **未能实测** | 见下 |
+| D6 | `icacls` 失败时是否 fail-closed | **未验证**：三种构造手法都被实测排除 | 见下 |
 
 D2 的耗时：1319 ms 总时长 − 669 ms 基线 ≈ **650 ms**，与源码的
 `10+20+40+80+160+320 = 630 ms` 退避吻合（差值是一次额外文件操作的开销）。
 
-D6 为什么没测成：用「PATH 前置一个伪造的 `icacls.exe`」无法拦截 —— Windows 的
-`CreateProcess` 搜索顺序是 exe 目录 → 当前目录 → `System32` → `PATH`，`System32\icacls.exe`
-始终先命中（`case_icacls_failure` 因此返回 0、配置被更新）。要真的制造 `icacls` 失败，需要受限
-账户/低完整性令牌或临时改系统文件，本轮不做。**源码事实**（不是实测）：
+D6 为什么没测成（三次尝试，都是实测排除，不是没试）：
+
+1. **PATH 前置伪造的 `icacls.exe`**：拦不住。`CreateProcess` 的搜索顺序是 exe 目录 → 当前目录
+   → `System32` → `PATH`，`System32\icacls.exe` 始终先命中（`case_icacls_failure` 返回 0、配置被
+   更新）。
+2. **FAT32 卷**：用 `diskpart` 建 64 MB 固定 VHD、格式化为 FAT32、挂载成盘符，然后
+   `icacls E:\probe.txt /inheritance:r /grant:r "<user>:(F)"` —— **返回 0**
+   （`Successfully processed 1 files; Failed processing 0 files`）。FAT32 不支持安全描述符，
+   但 `icacls` 不把它当失败，因此触发不了 CLI 的错误分支。VHD 用完已 detach 并删除，卷不残留。
+3. **deny 自己的 WRITE_DAC**：`icacls file /deny "<user>:(WDAC)"` 之后再改 ACL，仍返回 0。
+   文件 owner 隐含 `READ_CONTROL`/`WRITE_DAC`，deny ACE 拦不住 owner 改自己文件的 DACL；而
+   `write_private_bytes` 的临时文件由运行用户 `create_new` 创建，owner 就是运行用户。
+
+所以「同一用户在单机上把 `icacls` 弄失败」这条路不成立：真实失败需要「文件不归运行用户所有且
+ACL 拒绝 `WRITE_DAC`」「安全软件拦截」「受限令牌去掉写 DACL」或网络卷等条件之一，本轮都做不到。
+**源码事实**（不是实测）：
 `write_private_bytes` 在 rename **之前**调用 `restrict_file_to_owner(&tmp_path)?`，失败即清理临时
 文件、目标不变（fail-closed）；`save_config_inner` 在 rename **之后**再调一次
 `restrict_file_to_owner(&path)?`，这一次失败会让命令报错，但配置已经落盘 —— 也就是「权限加固失败
@@ -189,6 +201,7 @@ SMB 上的 rename 重试是否够用。
 
 **未验证**：其他 Windows 版本（本机 10.0.26300）、受限账户/低完整性令牌、真实键盘与 IME、
 真实断电、网络文件系统、`GetCommandLineW` 之外的进程表读法（如 WMI）在其他权限模型下的可见性。
+`icacls` 失败路径见 §3 D6：三种构造手法都实测排除，不是「没试」。
 
 ## 7. 对 K8 的影响
 
