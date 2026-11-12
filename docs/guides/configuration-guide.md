@@ -416,6 +416,12 @@ unset ssh_password
 活着但端点沉默 → `running-unhealthy`；活着 + 端点同 PID + 配置目录一致 + token 被接受 → `healthy`
 （仍然只是观察一致，不是绑定的身份，见 K14）。 macOS 未完成绑定时，诊断不会向 HTTP 端点发送管理员 token，`token` 恒为 `not checked`，即使健康响应一致也报告 `unverified`。PID 记录缺失时也报告 `unverified`，因为无法排除未被发现的进程；若 IPC 实例或 socket 有残留则提示检查残留。
 
+桌面设置面板的「Daemon health」区块消费同一份诊断（#21 前端接入）：面板打开、点击「Refresh daemon
+health」、以及执行启动/停止/重启/未验证关闭之后，各调用一次 `daemon_status`，在健康行下方显示
+`verdict`（非 healthy 时附 `next` 建议原文）。它只是显示：指示灯与「启动/停止」按钮的可用性仍由
+`/health` 探测决定，诊断本身不驱动任何按钮，也不发信号。每次调用会在 `app.log` 留一条 debug 记录
+（`daemon status checked`，含 verdict 与 record），所以面板不做轮询，只在上述时点各取一次。
+
 ### 清理残留记录（`daemon clear-stale --expect-pid N`）
 
 全平台可用。没有 IPC 记录时，它只删除一条**仍与预期一致**的 PID 记录；macOS 上完整 IPC 残留还需 `--expect-instance`，并按下文的条件清理实例和 socket。两种路径均不发送信号。安全性来自锁内
@@ -475,7 +481,7 @@ unset ssh_password
 
 - 由桌面应用在启动 daemon 时写入；停止时仅清理由相同 PID 和启动时间标识的记录，无法确认启动时间时保留；无需手动维护。新版写入和清理使用 `.daemon-pid.lock` 协调，旧版程序不参与此协议
 - 文件缺失、损坏或与当前 daemon 对不上，都视为"不是桌面应用启动的"，退出应用时不会停止它
-- 设置里的"停止 Daemon"按钮和 `agent2ssh daemon stop` 是明确的停止指令，不受此文件限制。但两者的门槛不同：CLI 的 `daemon stop` 会读 `daemon.pid`，读到损坏、权限不足或身份不可核实时会带着具体理由拒绝；桌面面板只轮询 `/health`（`api.ts` 的 `getDaemonHealth`），"停止 Daemon"按钮在 `/health` 不通时直接置灰，此时同一屏上的"启动"却仍可点，点下去才会把 PID 文件的真实错误显示在按钮下方。桌面端**不读** `daemon.pid` / `daemon.owner` 来展示状态（`daemon_status` 命令至今没有调用方），所以「面板显示 Daemon unavailable」既不等于「有残留记录」，也不等于「没有」——要判断记录状态请用 `agent2ssh daemon status`
+- 设置里的"停止 Daemon"按钮和 `agent2ssh daemon stop` 是明确的停止指令，不受此文件限制。但两者的门槛不同：CLI 的 `daemon stop` 会读 `daemon.pid`，读到损坏、权限不足或身份不可核实时会带着具体理由拒绝；桌面面板的指示灯与按钮可用性只看 `/health`（`api.ts` 的 `getDaemonHealth`），"停止 Daemon"按钮在 `/health` 不通时直接置灰，此时同一屏上的"启动"却仍可点，点下去才会把 PID 文件的真实错误显示在按钮下方。面板自 #21 前端接入后会在「Daemon health」区块下方显示 `daemon_status` 的只读 verdict 与建议（见上文「只读诊断」），但它不驱动按钮：所以「面板显示 Daemon unavailable」仍然既不等于「有残留记录」，也不等于「没有」——要判断记录状态看面板的诊断行，或用 `agent2ssh daemon status`
 - 桌面应用退出前，如果它启动的 daemon 里还有终端会话、常驻 shell、端口转发或待审批请求，会先弹窗确认，因为这些都只存在于 daemon 内存里，停止即丢失
 
 ---
