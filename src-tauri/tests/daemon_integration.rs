@@ -2242,15 +2242,25 @@ const HANDLER_STATUS: [(&str, &str); 10] = [
 ///
 /// `ensure_command_length` is the same shape one level down: it builds `400`
 /// inside itself, so a route whose only 400 is an over-long command documents
-/// nothing. Nine of the eleven handlers that call it did document it — `/exec`,
+/// nothing. Ten handlers call it. Nine document the 400 — `/exec`,
 /// `/local-exec`, `/exec-multi`, `/exec/compare`, `/exec/preview`, both resident
-/// and approval routes — and the two that did not are `/risk/check` and
-/// `/approval/check`, the pair that answers questions rather than running
-/// anything. That is the family-looks-consistent-from-one-route failure again:
-/// the sibling that reports a risk level has no reason to look different from
-/// the sibling that runs a command. `/exec/stream` calls the same helper and is
-/// exempt: it writes the refusal into a frame on a socket it has already
-/// upgraded, which is why it is in `INBAND_REJECTIONS`.
+/// and approval routes — and the tenth is `/exec/stream`, which writes the
+/// refusal into a frame on a socket it has already upgraded and is therefore in
+/// `INBAND_REJECTIONS`. Two of those nine did not document it until this entry
+/// existed: `/risk/check` and `/approval/check`, the pair that answers questions
+/// rather than running anything. That is the family-looks-consistent-from-one-
+/// route failure again: the sibling that reports a risk level has no reason to
+/// look different from the sibling that runs a command.
+///
+/// The eleventh call site is one level further down, and it is why this list
+/// also names a validator. `validate_terminal_broadcast_request` calls
+/// `ensure_command_length` and builds five more `400`s of its own;
+/// `terminal_broadcast_preview` and `terminal_broadcast_run` call *it*. Their
+/// bodies therefore contain neither `ensure_command_length(` nor any
+/// `StatusCode::` literal, so neither check saw the 400 those routes answer —
+/// deleting `"400"` from either operation's `responses` left every assertion
+/// green. Listing the validator costs nothing today (both routes document 400)
+/// and makes that code as hard to delete as any other route's.
 ///
 /// `preflight_sftp_rm_rf` is a wrapper, and a text scan does not see through it:
 /// `sftp_rm_rf` and `sftp_rm_rf_authorize` call the wrapper, the wrapper calls
@@ -2258,8 +2268,9 @@ const HANDLER_STATUS: [(&str, &str); 10] = [
 /// helper nor `reject_if_rate_limited`. Both routes document 403 and 429 today,
 /// so listing the wrapper costs nothing and makes those two codes as hard to
 /// delete as any other route's.
-const HELPER_STATUS: [(&str, &str); 13] = [
+const HELPER_STATUS: [(&str, &str); 14] = [
     ("ensure_command_length(", "400"),
+    ("validate_terminal_broadcast_request(", "400"),
     ("too_many_requests_status()", "429"),
     ("reject_if_rate_limited(", "429"),
     ("register_limited_session_for_command(", "429"),
@@ -2301,15 +2312,36 @@ const HELPER_STATUS: [(&str, &str); 13] = [
 /// consumption shapes share one exemption table, so a route that returns the
 /// status belongs here only if it also consumes it somewhere else.
 ///
-/// The third field is a phrase the path block must still carry, so the
+/// The third field is the set of codes this route consumes instead of
+/// returning, so the exemption is per code and not per route. That distinction
+/// is load-bearing: a broadcast route answers its 400 as a status
+/// (`validate_terminal_broadcast_request` returns it and the handler propagates
+/// with `?`) while consuming its 423/429 in the per-target `error` field. An
+/// exemption that skipped the whole route would hide the 400 again — which is
+/// exactly what it did before this field existed, and what made the
+/// `validate_terminal_broadcast_request(` entry in `HELPER_STATUS` a no-op for
+/// the two routes it was added for.
+///
+/// The fourth field is a phrase the path block must still carry, so the
 /// exemption cannot decay into silence — the refusal stays documented, just not
 /// as a status. Rewording that prose breaks this test on purpose.
-const INBAND_REJECTIONS: [(&str, &str, &str); 3] = [
-    ("get", "/exec/stream", "only as a frame"),
-    ("post", "/terminal/broadcast", "returns 200"),
+const INBAND_REJECTIONS: [(&str, &str, &[&str], &str); 3] = [
+    (
+        "get",
+        "/exec/stream",
+        &["400", "423", "429"],
+        "only as a frame",
+    ),
+    (
+        "post",
+        "/terminal/broadcast",
+        &["423", "429"],
+        "returns 200",
+    ),
     (
         "post",
         "/terminal/broadcast/preview",
+        &["423", "429"],
         "into that target's `error`",
     ),
 ];
@@ -3599,20 +3631,22 @@ fn api_yaml_documents_the_codes_each_handler_can_return() {
             }) else {
                 return Vec::new();
             };
-            // The call is in the body, but the `Err` is consumed rather than
-            // returned, so no status ever reaches the client.
-            if INBAND_REJECTIONS
+            // The codes this route consumes rather than returns. Only those are
+            // exempt: a route can answer one code as a status and fold another
+            // into a 2xx, and skipping the whole route would silence both.
+            let inband: &[&str] = INBAND_REJECTIONS
                 .iter()
-                .any(|(exempt_method, exempt_path, _)| {
+                .find(|(exempt_method, exempt_path, _, _)| {
                     *exempt_method == method && *exempt_path == path
                 })
-            {
-                return Vec::new();
-            }
+                .map(|(_, _, exempt_codes, _)| *exempt_codes)
+                .unwrap_or(&[]);
             HELPER_STATUS
                 .iter()
                 .filter(|(call, code)| {
-                    body.contains(call) && !codes.iter().any(|documented| documented == code)
+                    body.contains(call)
+                        && !inband.contains(code)
+                        && !codes.iter().any(|documented| documented == code)
                 })
                 .map(|(_, code)| format!("{code} {method} {path} ({handler} via helper)"))
                 .collect()
@@ -3632,7 +3666,7 @@ fn api_yaml_documents_the_codes_each_handler_can_return() {
     let unbacked: Vec<String> = INBAND_REJECTIONS
         .iter()
         .flat_map(|entry| {
-            let (method, path, marker) = *entry;
+            let (method, path, _, marker) = *entry;
             let Some((_, _, codes)) = documented.iter().find(|(known_path, known_method, _)| {
                 known_path.as_str() == path && *known_method == method
             }) else {
@@ -4304,6 +4338,18 @@ fn the_spec_states_the_preflight_internal_errors_once() {
              500 on its own operation, so a client would now meet an undocumented 500"
         );
     }
+
+    // The paragraph above attributes every preflight 500 to a file, and that
+    // attribution is what a client acts on: "read the message, fix that file".
+    // Two of them name no file — the approval wait is cancelled by a shutdown,
+    // or the daemon sees a status it cannot interpret — so deleting this
+    // sentence puts the reader back on the wrong remedy for both.
+    assert!(
+        file_level.contains("daemon shutting down; approval wait cancelled"),
+        "the file-level 500 section no longer says that a cancelled approval wait answers 500 \
+         without naming a file. The three names above then read as the complete list of causes, \
+         and a client told to fix `policy.toml` on every 500 will look for a file that is fine"
+    );
 
     let operation = spec
         .lines()
