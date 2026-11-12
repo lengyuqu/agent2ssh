@@ -3995,7 +3995,8 @@ L2-154（`/exec-multi` 全 0 语义）、L2-155（preview 缺 admin 门）、L2-
   - `docs/KNOWN-ISSUES.md` K14：把「`daemon_health_ok` 只认 …，`health_identity` 不读 version」改成两函数分开叙述，并点明停止路径用的是 `health_identity`、子串判定零调用（L2-187）。
   - `docs/reports/OPT-LOOP-L2-PENDING.md`：**L2-189**（起始时间秒级 → `pbi_start_tvusec` 微秒，含旧 `daemon.owner` 按 `sec*1_000_000` 读的兼容要求）、**L2-190**（`kqueue` 只能证明「此刻存在」，实测 `EACCES` 不出现、错误只在 `EV_ERROR`）、**L2-191**（macOS 缺对端凭据通道，附实测改动面 5+2+1）。**最大编号 L2-191**。
 - **验证**：`npm run build` **6.40 s**；`cargo fmt --check` 绿；`--no-default-features --lib` **865 / 0 / 1**（与上一轮基线同值）；`--no-default-features --features daemon --test daemon_stop_e2e -- --test-threads=1` **34 passed / 0 failed / 40.75 s**（这是本轮的关键证据：unix 门控用例在 macOS 上真的执行）。
-- **过程记录**：本轮探针全部在 `/tmp/a2s-macos-probe/`（两个 C 程序），未在仓库任何目录留下未跟踪产物；`Edit`/`Write` 路径全部带 `$WT`（上一轮的失误没有复现）。
+- **过程记录**：本轮探针全部在 `/tmp/a2s-macos-probe/`（两个 C 程序），源码与原始输出已归档到 `docs/reports/evidence/macos-identity-2026-11-12/`（3 个文件，随内容提交进 main）；`Edit`/`Write` 路径全部带 `$WT`（上一轮的失误没有复现）。
+- **回帖**：`2120795338402324480`（`## 本轮收尾`，不带轮次号，`08:26:25Z`）。`#25` **保持 open**：两项人决策（MD1 / MD2）+ 一项前置（#22 D4）。
 
 ### 新增「不成立」，不要重复提
 
