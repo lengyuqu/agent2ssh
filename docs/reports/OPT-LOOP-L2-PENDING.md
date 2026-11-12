@@ -2399,7 +2399,7 @@ forward_start（:3204-3244）与 forward_remove（:3077-3113）、forward_stop�
 
 ### L2-181（新，单发 #21 第五次进入）：`allowed_commands` 是绝对白名单，一个「能开会话、关不掉会话」的 token 会把自己的配额锁死
 
-**位置**：`src-tauri/src/remote.rs:614-624`（`check_daemon_scope` 的 `allowed_commands` 分支：非空且无任何 `glob_match` 命中就 `return Err`，没有回退）；拒绝面 `src-tauri/src/bin/agent2ssh-daemon.rs:2665`（`session_close`）、`:2431`（`session_open`）、`:4753`（`terminal`）、`:2967`（`resident-session close`，经 `preflight_guarded_request` → `execution_control.rs:445` 里的第二次 `check_daemon_scope`）。
+**位置**：`src-tauri/src/remote.rs:614-624`（`check_daemon_scope` 的 `allowed_commands` 分支：非空且无任何 `glob_match` 命中就 `return Err`，没有回退）；拒绝面 `src-tauri/src/bin/agent2ssh-daemon.rs:2665`（`session_close`）、`:2431`（`session_open`）、`:4753`（`terminal`）、`:2967`（`resident-session close`，经 `preflight_guarded_request` → `execution_control.rs:445` 里的第二次 `check_daemon_scope`）、`:3658`（`disconnect`，同形状的第二对）、`:3604`（`connect`）。
 
 **判断**：**部分成立**。机制成立：scope 这一层确实能拒绝一个释放动作，而且它排在限流之前——`session_close`（`:2665`）先显式查一次 scope，再走 `authorize_command`，后者开头（`execution_control.rs:445`）又查一次。但「配额满了以后这个 token 的 `POST /sessions` 永远 429」只在**同一个 token 写了 `session_open` 却没写 `session_close`** 时成立：
 
@@ -2413,8 +2413,10 @@ allowed_commands = ["uptime", "df *", "session_open"]
 ```
 开满 `max_sessions` 之后：`POST /sessions` → 429 `sessions`（`check_session_open`），`DELETE /sessions/{id}` → 403（`session_close` 不在白名单）。释放只能靠 admin token 或另一个写了 `session_close` 的 token；`GET /terminal` 占的是同一个计数器，同理只能等 socket 关闭或 admin 介入。
 
+**第二对（单发 #21 第六次进入补入）：`connect` / `disconnect` 同形状，后果不同。** `ssh_connect`（`:3604`）与 `ssh_disconnect`（`:3658`）都以 gate → rate → `check_daemon_scope` → `authorize_command` 的同一顺序调用，所以「写了 `connect` 没写 `disconnect`」的 token 能建连接、放不掉。差别在**症状**：会话有 `max_sessions` 配额，锁死表现为 429；连接没有并发配额，`connect_host`（`connection.rs:141-190`）对同一 host 还幂等——已连上就 `return Ok(())`，不再占新的 lifecycle 条目——所以不会 429，也不会随调用次数累积。真正的代价是那条被保留的连接（`RetainedConnection` + supervisor 的 keepalive 与自动重连）在该 token 手里无法释放，只能等 daemon 重启或由另一个有 `disconnect` 的 token / admin 放掉。因此 (b)(c) 的释放集与自检若只覆盖会话三件套，这一对仍是同样的坑，只是不会自己报错。
+
 **为什么它是 L2**：三种改法都在改行为或改契约，且要连同「关会话也要授权」这条既有语义一起拍，不是消费任务能顺手定的。
 
-**建议改法**：(a) 什么都不改，只把语义写进文档——**本轮已做**（`docs/guides/configuration-guide.md` 的 scope 注意事项里写清「绝对白名单」与九个操作字符串，并点名「能开会话关不掉」这个坑）；(b) 给释放类操作开豁免：`session_close` / `resident-session close` 只受 host/tag 约束、不受 `allowed_commands` 约束，改动面是 `check_daemon_scope` 加一个释放集判断，但会让「关会话也要授权」的契约出现例外，审计口径要同步；(c) 加载时自检：`daemon_tokens.toml` 读入后，若某 token 的 `allowed_commands` 含 `session_open` 而不含 `session_close`（或含 `resident-session open` 而不含 `resident-session close`），启动时 `warn!` 一次并在 `/health` 里报一条——零行为变化，只让配置错误可见；(d) 在 `POST /sessions` 的 429 描述里补一句「若该 token 也在 `allowed_commands` 下，确认白名单含 `session_close`」，把排查方向直接给出来。
+**建议改法**：(a) 什么都不改，只把语义写进文档——**本轮已做**（`docs/guides/configuration-guide.md` 的 scope 注意事项里写清「绝对白名单」与十个固定操作字符串，并点名「能开会话关不掉」这个坑；第六次进入补齐 `disconnect` 与 `connect`/`disconnect` 那一对）；(b) 给释放类操作开豁免：`session_close` / `resident-session close` / `disconnect` 只受 host/tag 约束、不受 `allowed_commands` 约束，改动面是 `check_daemon_scope` 加一个释放集判断，但会让「关会话也要授权」的契约出现例外，审计口径要同步；(c) 加载时自检：`daemon_tokens.toml` 读入后，若某 token 的 `allowed_commands` 含 `session_open` 而不含 `session_close`（或含 `resident-session open` 而不含 `resident-session close`，或含 `connect` 而不含 `disconnect`），启动时 `warn!` 一次并在 `/health` 里报一条——零行为变化，只让配置错误可见；(d) 在 `POST /sessions` 的 429 描述里补一句「若该 token 也在 `allowed_commands` 下，确认白名单含 `session_close`」，把排查方向直接给出来。
 **回滚**：(b) 删掉释放集判断即回到今天；(c) 删掉自检；(d) 删掉那句话。三者都不动执行路径。
 **倾向**：(c)+(d)。成本最低，且 (c) 让配置错误在部署时就可见，而不是等运维从 429 里猜——症状是 429 而不是 403，这一点本身就很难归因。

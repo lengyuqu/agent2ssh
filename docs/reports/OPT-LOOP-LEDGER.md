@@ -3745,3 +3745,42 @@ L2-154（`/exec-multi` 全 0 语义）、L2-155（preview 缺 admin 门）、L2-
 3. **「`api.yaml` 的 `info.version` 停在 0.4.5 属于台账空缺」**——`docs/RELEASE.md:35/168` 已把该字段列进发布清单，它随应用版本走。
 
 **回帖**：`2120668306523717632`（`## 本轮收尾`）。`#21` **保持 open**：剩余四项 L2-176/177/178/179 与本轮新增的 L2-181 全在决策侧（改日志落地方式 / 改 scope 语义），文档一致性这条线已收口。
+
+## 2026-11-12 · 手工/单发消费 · #21 第六次进入 · `allowed_commands` 漏 `disconnect` 与指南侧无断言
+
+模式 B 单发（open 十二条 `#20`–`#29` + `#31`/`#32` 安全贴，**无 `[opt-round]`** → 批次段为空）。基线 `7ef8c2a`。选靶理由：`#20` 最新是本流程 22:58 的 `## 本轮收尾`（等复核），`#21` 最新是 CodeBuddy 复核 `2120668878740021248`（11-12 00:03:55Z，未消费），编号更小且 P1；`#23` 编号更大。
+
+### 判定（4 条新指摘 + 4 条确认）
+
+| # | 指摘 | 判定 | 证据要点 |
+|---|---|---|---|
+| 1 | `configuration-guide.md:350` 的操作字符串清单漏 `disconnect`（列 9，代码有 10） | **成立** | 从 `agent2ssh-daemon.rs` 抽出 4 参字面量 8 个（`ping`/`session_open`/`session_read`/`session_close`/`terminal`/`connect`/`disconnect`/`resident-session read`）+ `RESIDENT_*_COMMAND` 三个常量 = **10**；`ssh_disconnect:3658` 用的就是 `"disconnect"`，且 gate→rate→scope→authorize 四步齐全 |
+| 2 | `:352` 与本轮新增的 `:350` 互相矛盾（一个 4 项、一个 9 项） | **部分成立** | `:352` 原文是「会使用**类似** … 的操作字符串做匹配」，是举例不是清单，严格说不构成矛盾；真实缺陷是它贴着完整清单、只列 4 项且同样漏 `disconnect`，读者会当成缩写 |
+| 3 | 指南侧无任何测试兜底（`grep configuration-guide src-tauri/tests/*.rs` = 0） | **成立** | 全仓 `src-tauri` 只有 3 处提及，全在 src 的 doc comment（`daemon_control.rs:37`、`local_exec.rs:123`/`:998`），tests 里 0；而 `docs/skills.md`、`docs/skill-distribution.md`、`docs/api.yaml` 都有 `include_str!` 断言，指南是唯一裸文本 |
+| 4 | L2-181 的 (b)(c) 案漏了 `connect`/`disconnect` 这一对 | **部分成立** | 同形状成立：两者都走 `check_daemon_scope`，写 `connect` 不写 `disconnect` 就能连不能断。但**后果不同**：连接没有并发配额，`connect_host`（`connection.rs:141-190`）对同一 host 幂等（已连上直接 `Ok(())`，不占新 lifecycle 条目），所以不会像会话那样 429；代价是那条 `RetainedConnection`（含 supervisor keepalive 与自动重连）只能等 daemon 重启或由别的 token 放掉 |
+| 5 | F1「429 四处、两族各两个」复核 | **确认成立** | 逐条核过 `:2434`/`:4764` 生产面、`:2665` 无 rate、`preflight_guarded_request_inner:574` 的 gate→rate 顺序、`limits.rs:151/168/186` vs `:243/258/275` 的两种后缀 |
+| 6 | F4 轮转「三代」复核 | **确认成立** | `daemon_control.rs:379-381` 注释与 `:393` 的 `for i in (1..=2).rev()` 一致 |
+| 7 | F3 白名单语义复核 | **确认成立（语义）** | 与第 1 条同源；它对「九项」的计数正确，但**自己那张代码块只列了 6 个字面量 + 3 个常量 = 9，却写成「就这十个」**（漏在清单里的正是 `ping`）。结论（差集 = `{disconnect}`）不受影响 |
+| 8 | L2-181 收窄「只有 open 没 close 才 429」 | **确认成立** | scope 在限流之前，别 source 占满先 403 |
+
+### 改了什么（全 L1）
+
+- `src-tauri/tests/daemon_integration.rs`：新增 `fixed_action_strings()` / `call_arguments()` 两个解析辅助与守卫 `configuration_guide_lists_every_fixed_action_string`。集合**从源码派生**（`check_daemon_scope` 第四参的字面量 + `RESIDENT_*_COMMAND` 常量），再断言指南那条 bullet 逐个以反引号拼写出现；顺手加了下界断言（解析结果 < 10 视为解析失配而不是「代码变少了」）。源码扫描在本文件有先例（`:2773`/`:2832`/`:2862` 都 `include_str!` 同一份 daemon 源）。
+- `docs/guides/configuration-guide.md`：`:350` 补 `disconnect`，把「十项」写成可对表的定数并点明由哪条测试盯着；`:351` 加 `connect`/`disconnect` 这一对（幂等 + 无配额 → 症状不是 429）；`:352` 补 `disconnect` 并明说该行只是举例、完整清单以上一条为准。
+- `docs/reports/OPT-LOOP-L2-PENDING.md`：L2-181 的「位置」补 `:3658`/`:3604`，新增一段「第二对」说明同形状不同后果，(b) 释放集补 `disconnect`、(c) 自检补 `connect`/`disconnect` 配对。**编号未变，最大仍是 L2-181**。
+
+### 反向验证（两次，各自红在不同断言上）
+
+1. 从 `:350` 删掉 `disconnect` → 红并点名 `["disconnect"]`。
+2. 把 daemon 里的 `"ping"` 改成 `"ping2"` → 红并点名 `["ping2"]`，证明「代码里新增一个固定操作字符串」会自己浮出来，而不是靠人去数。恢复后 84 passed。
+
+### 验证
+
+`npm run build` **6.41 s**；`cargo fmt --check` 绿（首次红：`if let Some(literal) = …` 那行超宽，已 `cargo fmt`）；`--no-default-features --lib` **863 passed / 1 failed / 1 ignored**（红项仍是那条故意红的 `an_ipv6_literal_at_port_22_is_removed`）；`--no-default-features --features daemon --test daemon_integration` **84 passed / 0 failed**（原 83）。
+
+### 新增「不成立」，不要重复提
+
+1. **「`configuration-guide.md:352` 与 `:350` 互相矛盾」**——`:352` 原文是「会使用**类似** … 的操作字符串做匹配」，是举例；两行不构成同一份清单的两个版本。本轮仍把 `disconnect` 补进去并加了「完整清单以上一条为准」，但记为措辞改进而非矛盾修复。
+2. **「`connect`/`disconnect` 是 L2-181 那个坑的同一个坑」**——同形状（同一个白名单检查、同一个开/关不对称），不同后果：会话有 `max_sessions` → 429 死锁；连接无并发配额且 `connect_host` 幂等 → 不 429、不累积，只是那条保留连接在该 token 手里放不掉。
+
+**回帖**：见本轮 `## 本轮收尾`。
