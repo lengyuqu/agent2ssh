@@ -6,7 +6,7 @@
 //!    HTTP handlers wrap, verifying business logic without going through HTTP.
 //!
 //! 2. **HTTP handler tests** — build a small axum `Router` that mirrors 18 of
-//!    the daemon's 92 `.route(...)` calls (20 of its 106 `(path, method)`
+//!    the daemon's 92 `.route(...)` calls (20 of its 107 `(path, method)`
 //!    pairs), and use axum's `oneshot` test utility to verify request/response
 //!    semantics (auth, routing, JSON serialization, status codes) without
 //!    spawning a real TCP server.
@@ -20,8 +20,10 @@
 //!    counterpart here. The other 74 calls are not mirrored at all (`/metrics`,
 //!    `/gate*`, `/audit*`, `/sftp/*`, `/sessions*`, `/forwards*`,
 //!    `/recordings*`, `/prompts/*`, `/terminal*`, `/events/stream`): they carry
-//!    84 `(path, method)` pairs over 73 paths, and the one path with no pair is
-//!    the `/` redirect. So behaviour that depends on scope, admin, or a route
+//!    85 `(path, method)` pairs over 74 paths. One of those pairs, the `/`
+//!    redirect, is an inline closure rather than a named handler, so a scan
+//!    keyed on `async fn` names sees 106 of the 107. So behaviour that depends
+//!    on scope, admin, or a route
 //!    this router does not mount belongs in the real-daemon e2e targets
 //!    (`daemon_local_exec_e2e`, `daemon_resident_session_e2e`, ...), which
 //!    spawn `agent2ssh-daemon` itself.
@@ -2262,15 +2264,24 @@ const HANDLER_STATUS: [(&str, &str); 10] = [
 /// green. Listing the validator costs nothing today (both routes document 400)
 /// and makes that code as hard to delete as any other route's.
 ///
+/// `authorize_command` is the 408 source no other entry covered. It builds
+/// `REQUEST_TIMEOUT` for `ApprovalTimedOut` one level down, and only two
+/// handlers that name it also swallow it: `exec_stream` writes it into a frame,
+/// `terminal_broadcast_run` writes it into one target's `error`. Both are in
+/// `INBAND_REJECTIONS`, so this entry is what makes those two exemptions
+/// load-bearing — without it, "408 never becomes a status here" was not a claim
+/// anything could falsify.
+///
 /// `preflight_sftp_rm_rf` is a wrapper, and a text scan does not see through it:
 /// `sftp_rm_rf` and `sftp_rm_rf_authorize` call the wrapper, the wrapper calls
 /// `preflight_guarded_request`, and the handler bodies name neither the inner
 /// helper nor `reject_if_rate_limited`. Both routes document 403 and 429 today,
 /// so listing the wrapper costs nothing and makes those two codes as hard to
 /// delete as any other route's.
-const HELPER_STATUS: [(&str, &str); 14] = [
+const HELPER_STATUS: [(&str, &str); 15] = [
     ("ensure_command_length(", "400"),
     ("validate_terminal_broadcast_request(", "400"),
+    ("authorize_command(", "408"),
     ("too_many_requests_status()", "429"),
     ("reject_if_rate_limited(", "429"),
     ("register_limited_session_for_command(", "429"),
@@ -2316,11 +2327,21 @@ const HELPER_STATUS: [(&str, &str); 14] = [
 /// returning, so the exemption is per code and not per route. That distinction
 /// is load-bearing: a broadcast route answers its 400 as a status
 /// (`validate_terminal_broadcast_request` returns it and the handler propagates
-/// with `?`) while consuming its 423/429 in the per-target `error` field. An
+/// with `?`) while consuming its 408/423/429 in the per-target `error` field. An
 /// exemption that skipped the whole route would hide the 400 again — which is
 /// exactly what it did before this field existed, and what made the
 /// `validate_terminal_broadcast_request(` entry in `HELPER_STATUS` a no-op for
-/// the two routes it was added for.
+/// the two routes it was added for. `exec_stream` is the same shape one layer
+/// up: it answers 400/408/423/429 as frames and none of them as a status.
+///
+/// Every code in that set is also checked in the other direction: the route's
+/// `responses` must not list it, and `HELPER_STATUS` must know the code at all —
+/// an exemption for a code no helper entry answers would silence a check that
+/// could never have fired. An earlier version hard-coded 423/429 in the reverse
+/// check while this field held the set, so a superset — or an empty set — was
+/// exempt from the helper scan and unconstrained by the reverse check at the
+/// same time. That is the same "the list became the place to silence the check"
+/// failure the field was added to close, one level down.
 ///
 /// The fourth field is a phrase the path block must still carry, so the
 /// exemption cannot decay into silence — the refusal stays documented, just not
@@ -2329,13 +2350,13 @@ const INBAND_REJECTIONS: [(&str, &str, &[&str], &str); 3] = [
     (
         "get",
         "/exec/stream",
-        &["400", "423", "429"],
+        &["400", "408", "423", "429"],
         "only as a frame",
     ),
     (
         "post",
         "/terminal/broadcast",
-        &["423", "429"],
+        &["408", "423", "429"],
         "returns 200",
     ),
     (
@@ -3662,11 +3683,11 @@ fn api_yaml_documents_the_codes_each_handler_can_return() {
 
     // The exemption above is itself a claim about the code, so check it in both
     // directions. Without this the list would be a place to silence the check:
-    // an operation could drop 423/429 from its `responses` and say nothing.
+    // an operation could exempt a code it still documents and say nothing.
     let unbacked: Vec<String> = INBAND_REJECTIONS
         .iter()
         .flat_map(|entry| {
-            let (method, path, _, marker) = *entry;
+            let (method, path, exempt_codes, marker) = *entry;
             let Some((_, _, codes)) = documented.iter().find(|(known_path, known_method, _)| {
                 known_path.as_str() == path && *known_method == method
             }) else {
@@ -3675,11 +3696,29 @@ fn api_yaml_documents_the_codes_each_handler_can_return() {
                      the spec, so the exemption guards nothing"
                 )];
             };
-            let mut problems: Vec<String> = ["423", "429"]
+            let mut problems: Vec<String> = exempt_codes
                 .iter()
                 .filter(|code| codes.iter().any(|documented| documented == *code))
                 .map(|code| format!("{method} {path} documents {code} but answers it in-band"))
                 .collect();
+            if exempt_codes.is_empty() {
+                problems.push(format!(
+                    "{method} {path} exempts no code at all, so the entry hides nothing and \
+                     guards nothing"
+                ));
+            }
+            // A code can only be exempt as "answered through a shared helper" if
+            // the table knows that code at all. Exempting one it has never heard
+            // of says nothing about the handler and silences a check that was
+            // never going to fire — the superset form of the same failure.
+            for code in exempt_codes {
+                if !HELPER_STATUS.iter().any(|(_, known)| known == code) {
+                    problems.push(format!(
+                        "{method} {path} exempts {code}, but no `HELPER_STATUS` entry answers \
+                         that code, so nothing in the handler scan could ever have flagged it"
+                    ));
+                }
+            }
             match spec_path_block(spec, path) {
                 Some(block) if block.contains(marker) => {}
                 Some(_) => problems.push(format!(
@@ -3694,8 +3733,8 @@ fn api_yaml_documents_the_codes_each_handler_can_return() {
     assert!(
         unbacked.is_empty(),
         "the in-band exemption list and docs/api.yaml disagree: {unbacked:?}. An operation \
-         on that list must document neither 423 nor 429 — those refusals never become an \
-         HTTP status — and must still say in prose where the refusal does go."
+         on that list must document none of the codes it exempts — those refusals never \
+         become an HTTP status — and must still say in prose where the refusal does go."
     );
 }
 
