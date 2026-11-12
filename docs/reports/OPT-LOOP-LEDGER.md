@@ -3825,3 +3825,4 @@ L2-154（`/exec-multi` 全 0 语义）、L2-155（preview 缺 admin 门）、L2-
 1. **「删掉 `/terminal/broadcast` 的 `"400":` 会因 `StatusCode::BAD_REQUEST` 那半变红」**——五个 `BAD_REQUEST` 字面量在 `validate_terminal_broadcast_request` 里，两个 handler 正文的 `StatusCode::` 计数是 0；现在能红是靠本轮新加的表项 + 按码豁免。
 2. **「`/sftp/rm-rf` 的 `responses` 没有 408、description 里的 below 是死指针」**——408 存在（`200/400/401/403/408/415/422/423/429`），"below" 指的就是它。
 
+**回帖**：`2120705041878114304`（`## 本轮收尾`）。`#20` **保持 open**：剩余 L2-27 / L2-172 / L2-174（已收口）/ L2-175 / L2-180 与 `#22` 的身份协议前置项全在决策侧，文档一致性这条线本轮补到「第三条 500 不来自文件」为止。
