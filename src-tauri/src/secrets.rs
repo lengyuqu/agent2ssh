@@ -52,21 +52,81 @@ pub const SECRET_REF: &str = "$agent2ssh-secret$";
 /// builds must never treat it as an SSH password.
 pub const LEGACY_KEYRING_REF: &str = "$agent2ssh-keyring$";
 
-/// True if `value` is a credential reference marker rather than a real secret
-/// (or the empty string).
-pub fn is_secret_ref(value: &str) -> bool {
-    value == SECRET_REF || value == LEGACY_KEYRING_REF
+/// Structured parse of an on-disk credential reference (CNB #26, phase 2).
+///
+/// The bare [`SECRET_REF`] marker cannot prove *which* ciphertext it was
+/// written against: restoring an older `hosts.json` silently resolves it to a
+/// same-named but newer secret. New writes carry a content-version tag. Every
+/// caller used to compare against the marker with exact equality; a tagged
+/// reference mistaken for plaintext would be re-sealed as a new secret, so all
+/// classification goes through this parser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretRef<'a> {
+    /// Legacy `$agent2ssh-secret$` with no content identity.
+    Bare,
+    /// `$agent2ssh-secret$:<tag>`, bound to one content version.
+    Tagged(&'a str),
+    /// Legacy OS-keyring marker; never usable as an SSH password.
+    Keyring,
+    /// Begins with the current marker but carries an invalid tag. It is still a
+    /// reference (never re-seal it as plaintext) but must not be resolved.
+    Malformed,
 }
 
-/// True only for the current app-managed encrypted-store marker.
+/// A tag is 128 bits of randomness encoded as unpadded base64url (22 chars).
+pub fn is_valid_tag(tag: &str) -> bool {
+    tag.len() == 22
+        && tag
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
+pub fn tagged_secret_ref(tag: &str) -> String {
+    format!("{SECRET_REF}:{tag}")
+}
+
+/// `None` means a real plaintext value (possibly empty), not a reference.
+pub fn parse_secret_ref(value: &str) -> Option<SecretRef<'_>> {
+    if value == SECRET_REF {
+        return Some(SecretRef::Bare);
+    }
+    if value == LEGACY_KEYRING_REF {
+        return Some(SecretRef::Keyring);
+    }
+    if let Some(rest) = value.strip_prefix(SECRET_REF) {
+        return match rest.strip_prefix(':') {
+            Some(tag) if is_valid_tag(tag) => Some(SecretRef::Tagged(tag)),
+            _ => Some(SecretRef::Malformed),
+        };
+    }
+    None
+}
+
+/// True if `value` is any credential reference marker rather than a real
+/// secret. Malformed references are included: re-sealing them as plaintext
+/// would destroy the only signal that the config needs inspection.
+pub fn is_secret_ref(value: &str) -> bool {
+    parse_secret_ref(value).is_some()
+}
+
+/// True for references the current store can resolve (legacy or tagged).
+/// Malformed and keyring references are deliberately excluded.
+pub fn is_resolvable_secret_ref(value: &str) -> bool {
+    matches!(
+        parse_secret_ref(value),
+        Some(SecretRef::Bare | SecretRef::Tagged(_))
+    )
+}
+
+/// Kept for callers that only need the legacy exact marker.
 pub fn is_current_secret_ref(value: &str) -> bool {
-    value == SECRET_REF
+    matches!(parse_secret_ref(value), Some(SecretRef::Bare))
 }
 
 /// True for the legacy OS-keyring marker. This is preserved on disk until the
 /// user re-enters or explicitly migrates the password into `secrets.enc`.
 pub fn is_legacy_keyring_ref(value: &str) -> bool {
-    value == LEGACY_KEYRING_REF
+    matches!(parse_secret_ref(value), Some(SecretRef::Keyring))
 }
 
 /// Read-only adapter over the encrypted secrets file.
@@ -230,6 +290,12 @@ struct EncryptedEntry {
     nonce: String,
     /// base64 AES-256-GCM ciphertext (includes the 16-byte AEAD tag).
     ciphertext: String,
+    /// CNB #26: content-version tag (128 random bits, base64url). It is stable
+    /// across re-encryption (including a master-password change) and changes
+    /// whenever the plaintext for this account changes. Empty on v2 files that
+    /// predate phase 2; those references stay bare until the entry is rewritten.
+    #[serde(default)]
+    tag: String,
 }
 
 /// v2 on-disk format: per-entry encryption with AAD binding to account name.
@@ -290,6 +356,50 @@ pub fn store_generation() -> Option<u64> {
             .and_then(|value| value.as_u64())
             .unwrap_or(0),
     )
+}
+
+/// A fresh 128-bit content-version tag (unpadded base64url, 22 chars).
+fn new_content_tag() -> Result<String> {
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(random_bytes::<16>()?))
+}
+
+/// Read every entry's content tag **without decrypting** the store (CNB #26).
+///
+/// A v1 store, a missing/corrupt file or an invalid tag all yield no entry:
+/// callers treat that as "no proof" rather than guessing a tag. This is what
+/// lets a tagged reference be checked against the *current* ciphertext even
+/// while the store is locked.
+pub fn entry_tags() -> HashMap<String, String> {
+    let mut tags = HashMap::new();
+    if backend_is_memory() {
+        return tags;
+    }
+    let Ok(path) = secrets_path() else {
+        return tags;
+    };
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return tags;
+    };
+    let Ok(probe) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return tags;
+    };
+    if probe.get("version").and_then(|v| v.as_u64()).unwrap_or(1) < 2 {
+        return tags;
+    }
+    if let Some(entries) = probe.get("entries").and_then(|v| v.as_object()) {
+        for (account, entry) in entries {
+            if let Some(tag) = entry.get("tag").and_then(|v| v.as_str()) {
+                if is_valid_tag(tag) {
+                    tags.insert(account.clone(), tag.to_string());
+                }
+            }
+        }
+    }
+    tags
+}
+
+pub fn entry_tag(account: &str) -> Option<String> {
+    entry_tags().remove(account)
 }
 
 /// Exclusive lock covering the whole `load_map -> modify -> save_map` window.
@@ -562,6 +672,7 @@ fn key_check_entry(key: &[u8; 32]) -> Result<(String, EncryptedEntry)> {
         EncryptedEntry {
             nonce: b64().encode(&nonce),
             ciphertext: b64().encode(&ciphertext),
+            tag: String::new(),
         },
     ))
 }
@@ -689,6 +800,14 @@ fn save_map(map: &HashMap<String, String>) -> Result<()> {
     // write the salt must already have been chosen by `unlock_or_init`.
     let salt = read_salt()?.ok_or_else(|| anyhow!("secrets store salt missing"))?;
 
+    // CNB #26: a tag identifies one content version, not one ciphertext.
+    // `save_map` rewrites every entry on each save, so keep the tag for entries
+    // whose plaintext did not change; only a real secret change gets a new tag.
+    // Otherwise every unrelated save (or a master-password change) would
+    // invalidate every reference in hosts.json.
+    let previous = load_map().unwrap_or_default();
+    let old_tags = entry_tags();
+
     let mut entries = HashMap::with_capacity(map.len() + 1);
     // Key-check entry so unlock can verify the master password even for
     // empty stores (an empty store previously accepted any password).
@@ -696,11 +815,18 @@ fn save_map(map: &HashMap<String, String>) -> Result<()> {
     entries.insert(check_account, check_entry);
     for (account, secret) in map {
         let (nonce, ciphertext) = encrypt_entry(&key, account, secret.as_bytes())?;
+        let unchanged = previous.get(account).map(String::as_str) == Some(secret.as_str());
+        let tag = if unchanged {
+            old_tags.get(account).cloned().unwrap_or_default()
+        } else {
+            new_content_tag()?
+        };
         entries.insert(
             account.clone(),
             EncryptedEntry {
                 nonce: b64().encode(&nonce),
                 ciphertext: b64().encode(&ciphertext),
+                tag,
             },
         );
     }
@@ -948,6 +1074,11 @@ pub fn change_master_password(new_password: &str) -> Result<()> {
     // Key-check entry: without it an empty store would accept any password.
     let (check_account, check_entry) = key_check_entry(&key)?;
     entries.insert(check_account, check_entry);
+    // CNB #26: re-encrypting under a new key does not change plaintext, so the
+    // content tags survive verbatim. v2 entries without a tag stay empty and
+    // their bare references remain valid. Read the tags *before* the atomic
+    // replace below, which is what rewrites the file.
+    let old_tags = entry_tags();
     for (account, secret) in &map {
         let (nonce, ciphertext) = encrypt_entry(&key, account, secret.as_bytes())?;
         entries.insert(
@@ -955,6 +1086,7 @@ pub fn change_master_password(new_password: &str) -> Result<()> {
             EncryptedEntry {
                 nonce: b64().encode(&nonce),
                 ciphertext: b64().encode(&ciphertext),
+                tag: old_tags.get(account).cloned().unwrap_or_default(),
             },
         );
     }
@@ -1154,6 +1286,45 @@ mod tests {
         assert!(!is_legacy_keyring_ref(SECRET_REF));
         assert!(!is_secret_ref("hunter2"));
         assert!(!is_secret_ref(""));
+    }
+
+    /// CNB #26 phase A: a tagged reference must never be classified as
+    /// plaintext, or `externalize_secrets` would re-seal it as a new secret.
+    #[test]
+    fn phase2_reference_parser_classifies_every_on_disk_shape() {
+        use super::SecretRef::{Bare, Keyring, Malformed, Tagged};
+
+        const TAG: &str = "AAAAAAAAAAAAAAAAAAAAAA"; // 22 base64url chars
+        assert_eq!(parse_secret_ref(SECRET_REF), Some(Bare));
+        assert_eq!(parse_secret_ref(&tagged_secret_ref(TAG)), Some(Tagged(TAG)));
+        assert_eq!(parse_secret_ref(LEGACY_KEYRING_REF), Some(Keyring));
+        assert_eq!(
+            parse_secret_ref("$agent2ssh-secret$:short"),
+            Some(Malformed)
+        );
+        assert_eq!(parse_secret_ref("$agent2ssh-secret$-junk"), Some(Malformed));
+        assert_eq!(parse_secret_ref("$agent2ssh-secret$:"), Some(Malformed));
+        assert_eq!(parse_secret_ref("hunter2"), None);
+        assert_eq!(parse_secret_ref(""), None);
+
+        assert!(is_secret_ref(&tagged_secret_ref(TAG)));
+        assert!(is_secret_ref("$agent2ssh-secret$:short")); // malformed is still a ref
+        assert!(is_resolvable_secret_ref(SECRET_REF));
+        assert!(is_resolvable_secret_ref(&tagged_secret_ref(TAG)));
+        assert!(!is_resolvable_secret_ref("$agent2ssh-secret$:short"));
+        assert!(!is_resolvable_secret_ref(LEGACY_KEYRING_REF));
+        assert!(!is_secret_ref("hunter2"));
+
+        assert!(is_valid_tag(TAG));
+        assert!(!is_valid_tag("short"));
+        assert!(!is_valid_tag("AAAAAAAAAAAAAAAAAAAAA=")); // padding
+        assert!(!is_valid_tag("AAAAAAAAAAAAAAAAAAAAA+")); // not base64url
+        assert!(!is_valid_tag("AAAAAAAAAAAAAAAAAAAAAA/"));
+        assert_eq!(
+            parse_secret_ref(&tagged_secret_ref(TAG)),
+            Some(Tagged(TAG)),
+            "a written reference must round-trip through the parser"
+        );
     }
 
     #[test]

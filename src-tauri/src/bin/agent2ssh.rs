@@ -1010,15 +1010,20 @@ enum DaemonCommands {
         allow_unbound_graceful: bool,
     },
     /// Check if the daemon is running
-    Status,
+    Status {
+        /// Machine-readable diagnosis: paths, record, process, health, token
+        /// acceptance and the verdict. Read-only; never prints the token.
+        #[arg(long)]
+        json: bool,
+    },
     /// Restart the daemon
     Restart,
     /// Remove an unchanged PID record only if its PID is definitely absent
-    #[cfg(target_os = "macos")]
     ClearStale {
         #[arg(long)]
         expect_pid: u32,
         /// Instance ID from daemon.instance.json, required when IPC records exist
+        #[cfg(target_os = "macos")]
         #[arg(long)]
         expect_instance: Option<String>,
     },
@@ -3130,34 +3135,12 @@ async fn async_main() -> Result<()> {
                     remove_daemon_pid_file_if(pid)?;
                     println!("Daemon stopped (pid={}).", pid);
                 }
-                DaemonCommands::Status => {
-                    let Some(pid) = read_daemon_pid()? else {
-                        if let Some(pid) = daemon_health_pid() {
-                            println!("Daemon health endpoint is active (pid={pid}) but PID file is missing; identity cannot be verified.");
-                        } else {
-                            #[cfg(target_os = "macos")]
-                            println!("No daemon PID record; daemon process state is unknown.");
-                            #[cfg(not(target_os = "macos"))]
-                            println!("Daemon is not running.");
-                        }
-                        return Ok(());
-                    };
-                    match daemon_pid_state(pid) {
-                        DaemonPidState::Healthy => {
-                            #[cfg(target_os = "macos")]
-                            println!("A daemon endpoint reports PID {pid}; process identity is unbound.");
-                            #[cfg(not(target_os = "macos"))]
-                            println!("Daemon is running (pid={pid}).");
-                            if let Ok(body) = daemon_health_body().await { println!("{body}"); }
-                        }
-                        DaemonPidState::RunningUnhealthy => println!("Daemon PID file exists (pid={pid}) but health check failed."),
-                        DaemonPidState::Unverified => println!("Daemon PID file exists (pid={pid}) but the process identity cannot be verified."),
-                        DaemonPidState::Stale => {
-                            #[cfg(target_os = "macos")]
-                            println!("Daemon PID {pid} appears absent; identity is unbound and PID file retained. Inspect it before using clear-stale.");
-                            #[cfg(not(target_os = "macos"))]
-                            println!("Daemon PID file exists (pid={pid}) but process is not running.");
-                        },
+                DaemonCommands::Status { json } => {
+                    let report = agent2ssh::daemon_control::daemon_status_report()?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&report)?);
+                    } else {
+                        print_daemon_status_report(&report);
                     }
                 }
                 DaemonCommands::Restart => {
@@ -3175,11 +3158,12 @@ async fn async_main() -> Result<()> {
                         started.log_path.display()
                     );
                 }
-                #[cfg(target_os = "macos")]
                 DaemonCommands::ClearStale {
                     expect_pid,
+                    #[cfg(target_os = "macos")]
                     expect_instance,
                 } => {
+                    #[cfg(target_os = "macos")]
                     if let Some(instance) = expect_instance {
                         agent2ssh::daemon_identity::macos::recover(
                             &agent2ssh::store::config_dir()?,
@@ -3189,6 +3173,8 @@ async fn async_main() -> Result<()> {
                     } else {
                         agent2ssh::daemon_control::clear_stale_daemon_pid(expect_pid)?;
                     }
+                    #[cfg(not(target_os = "macos"))]
+                    agent2ssh::daemon_control::clear_stale_daemon_pid(expect_pid)?;
                     println!("Removed the checked stale records for PID {expect_pid}; no process was stopped. Older processes that ignore the lock can still race this cleanup.");
                 }
                 DaemonCommands::RotateToken { json } => {
@@ -5193,7 +5179,93 @@ async fn run_doctor(output_json: bool) -> Result<()> {
     Ok(())
 }
 
-// ── Daemon Doctor (F5-1) ────────────────────────────────────────────────────
+// ── Daemon status (issue #21) ───────────────────────────────────────────────
+
+/// Human-readable rendering of [`agent2ssh::daemon_control::DaemonStatusReport`].
+/// Every line is a fact the report measured; `next` is advice, never an action.
+fn print_daemon_status_report(report: &agent2ssh::daemon_control::DaemonStatusReport) {
+    use agent2ssh::daemon_control::{
+        DaemonPidRecord, DaemonVerdict, HealthObservation, PidLockObservation, PidObservation,
+        TokenObservation,
+    };
+
+    let record = match &report.record {
+        DaemonPidRecord::Missing => "missing".to_string(),
+        DaemonPidRecord::Pid { pid } => format!("pid {pid}"),
+        DaemonPidRecord::Malformed { raw, reason } => {
+            format!("malformed ({reason}): {raw:?}")
+        }
+        DaemonPidRecord::Unreadable { reason } => format!("unreadable: {reason}"),
+        DaemonPidRecord::NotARegularFile => "not a regular file".to_string(),
+    };
+    let process = match &report.observation {
+        None => "not applicable".to_string(),
+        Some(PidObservation::Absent) => "absent (OS reports no such process)".to_string(),
+        Some(PidObservation::Live { start_time }) => {
+            format!("live (start_time {start_time}; seconds, not identity)")
+        }
+        Some(PidObservation::Zombie) => "terminated (zombie)".to_string(),
+        Some(PidObservation::Denied { reason }) => format!("not observable: {reason}"),
+        Some(PidObservation::Unknown { reason }) => format!("unknown: {reason}"),
+    };
+    let health = match &report.health {
+        HealthObservation::Inactive => "no endpoint answered".to_string(),
+        HealthObservation::Reporting {
+            pid,
+            same_pid,
+            config_dir_matches,
+        } => {
+            let pid = if *same_pid {
+                format!("pid {pid} (recorded)")
+            } else {
+                format!("pid {pid} (NOT the recorded pid)")
+            };
+            let dir = match config_dir_matches {
+                Some(true) => "config dir matches",
+                Some(false) => "config dir DIFFERS",
+                None => "config dir not reported (older daemon)",
+            };
+            format!("{pid}, {dir}")
+        }
+    };
+    let token = match report.token {
+        TokenObservation::Accepted => "accepted",
+        TokenObservation::Rejected => "rejected",
+        TokenObservation::Missing => "no token file",
+        TokenObservation::NotChecked => "not checked",
+    };
+    let lock = match report.pid_lock {
+        PidLockObservation::Free => "free",
+        PidLockObservation::Held => "held by another process",
+        PidLockObservation::Unknown => "unknown",
+    };
+    let verdict = match report.verdict {
+        DaemonVerdict::Healthy => "healthy (identity still unbound, see #22)",
+        DaemonVerdict::RunningUnhealthy => "running, health endpoint silent",
+        DaemonVerdict::Unverified => "unverified",
+        DaemonVerdict::Stale => "stale record",
+        DaemonVerdict::Damaged => "damaged record",
+        DaemonVerdict::NotRunning => "not running",
+    };
+
+    println!("Daemon status");
+    println!("  config dir: {}", report.config_dir);
+    println!("  pid file:   {}", report.pid_path);
+    println!("  token file: {}", report.token_path);
+    println!("  log file:   {}", report.log_path);
+    println!("  pid lock:   {lock}");
+    println!("  record:     {record}");
+    println!("  process:    {process}");
+    println!("  health:     {health}");
+    println!("  token:      {token}");
+    println!("  verdict:    {verdict}");
+    println!("  next:       {}", report.next_step);
+    if !matches!(report.health, HealthObservation::Inactive) {
+        if let Some(body) = daemon_health_body_blocking() {
+            println!("  /health:    {body}");
+        }
+    }
+}
 
 async fn run_daemon_doctor(alias: &str, output_json: bool) -> Result<()> {
     let diagnostic = diagnose_daemon(alias).await?;
@@ -5692,26 +5764,18 @@ fn print_webdav_status(status: &agent2ssh::WebDavSyncStatus) {
     }
 }
 
-async fn daemon_health_body() -> Result<String> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(2))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
-    let response = client
-        .get(format!("{}/health", agent2ssh::local_daemon_url()))
-        .send()
-        .await
-        .context("failed to reach daemon health endpoint")?;
-    let status = response.status();
-    let body = response
-        .text()
-        .await
-        .context("failed to read daemon health response")?;
-    if status.is_success() {
-        Ok(body)
-    } else {
-        Err(anyhow::anyhow!("daemon health failed ({status}): {body}"))
-    }
+/// The raw `/health` body, when one answers, is the evidence a reader can
+/// compare against the structured fields (it names pid, config dir and
+/// version). It carries no credential, so it is safe to print.
+fn daemon_health_body_blocking() -> Option<String> {
+    let response = agent2ssh::daemon_activity::local_daemon_request(
+        "GET",
+        "/health",
+        None,
+        std::time::Duration::from_millis(500),
+    )
+    .ok()?;
+    (response.status == 200).then_some(response.body)
 }
 
 async fn update_gate(

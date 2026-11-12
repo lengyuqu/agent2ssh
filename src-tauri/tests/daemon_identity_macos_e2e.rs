@@ -98,6 +98,7 @@ fn wait_exit(child: &mut ChildGuard) {
     }
 }
 #[test]
+#[serial_test::serial]
 fn daemon_requires_order_token_and_instance_before_accepting_one_stop() {
     let dir = tempfile::Builder::new()
         .prefix("a2s-ipc-")
@@ -160,6 +161,7 @@ fn daemon_requires_order_token_and_instance_before_accepting_one_stop() {
     assert!(!dir.path().join(".daemon-ipc/s").exists());
 }
 #[test]
+#[serial_test::serial]
 fn crash_is_retained_and_explicit_recovery_checks_instance() {
     let dir = tempfile::Builder::new()
         .prefix("a2s-ipc-")
@@ -199,6 +201,7 @@ fn crash_is_retained_and_explicit_recovery_checks_instance() {
 }
 
 #[test]
+#[serial_test::serial]
 fn live_instance_cannot_be_recovered_and_partial_record_is_not_cleaned() {
     let dir = tempfile::Builder::new()
         .prefix("a2s-ipc-")
@@ -237,6 +240,7 @@ fn live_instance_cannot_be_recovered_and_partial_record_is_not_cleaned() {
 }
 
 #[test]
+#[serial_test::serial]
 fn world_writable_directory_and_symlinked_socket_directory_are_refused() {
     use std::os::unix::fs::{symlink, PermissionsExt};
     let dir = tempfile::Builder::new()
@@ -274,6 +278,7 @@ fn world_writable_directory_and_symlinked_socket_directory_are_refused() {
 }
 
 #[test]
+#[serial_test::serial]
 fn startup_times_out_on_held_publication_lock_without_writing_records() {
     use fs2::FileExt;
     let dir = tempfile::Builder::new()
@@ -308,6 +313,7 @@ fn startup_times_out_on_held_publication_lock_without_writing_records() {
 }
 
 #[test]
+#[serial_test::serial]
 fn occupied_socket_is_preserved_and_never_taken_over() {
     use std::os::unix::{fs::PermissionsExt, net::UnixListener};
     let dir = tempfile::Builder::new()
@@ -337,6 +343,7 @@ fn occupied_socket_is_preserved_and_never_taken_over() {
 }
 
 #[test]
+#[serial_test::serial]
 fn directory_acl_grants_are_rejected() {
     let dir = tempfile::Builder::new()
         .prefix("a2s-ipc-")
@@ -366,6 +373,7 @@ fn directory_acl_grants_are_rejected() {
 }
 
 #[test]
+#[serial_test::serial]
 fn untrusted_parent_is_rejected_before_creating_config() {
     use std::os::unix::fs::PermissionsExt;
     let parent = tempfile::Builder::new()
@@ -390,6 +398,7 @@ fn untrusted_parent_is_rejected_before_creating_config() {
 }
 
 #[test]
+#[serial_test::serial]
 fn socket_path_too_long_is_refused_without_shortening_or_publishing() {
     let root = tempfile::Builder::new()
         .prefix("a2s-ipc-")
@@ -409,7 +418,11 @@ fn socket_path_too_long_is_refused_without_shortening_or_publishing() {
         .output()
         .unwrap();
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("path may be too long"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("path may be too long"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(!config.join("daemon.pid").exists());
     assert!(!config.join("daemon.instance.json").exists());
 }

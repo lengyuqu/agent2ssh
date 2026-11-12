@@ -202,10 +202,52 @@ export type DaemonHealth = {
   pid?: number | null;
 };
 
+/// Read-only daemon diagnosis (#21). Only `daemon_status` returns it; the
+/// field names are the Rust struct's snake_case because they travel over IPC.
+export type DaemonDiagnosis = {
+  config_dir: string;
+  pid_path: string;
+  token_path: string;
+  log_path: string;
+  pid_lock: "free" | "held" | "unknown";
+  record:
+    | { state: "missing" }
+    | { state: "pid"; pid: number }
+    | { state: "malformed"; raw: string; reason: string }
+    | { state: "unreadable"; reason: string }
+    | { state: "not-a-regular-file" };
+  observation?:
+    | { state: "absent" }
+    | { state: "live"; start_time: number }
+    | { state: "zombie" }
+    | { state: "denied"; reason: string }
+    | { state: "unknown"; reason: string }
+    | null;
+  health:
+    | { state: "inactive" }
+    | {
+        state: "reporting";
+        pid: number;
+        same_pid: boolean;
+        config_dir_matches?: boolean | null;
+      };
+  token: "accepted" | "rejected" | "missing" | "not-checked";
+  verdict:
+    | "healthy"
+    | "running-unhealthy"
+    | "unverified"
+    | "stale"
+    | "damaged"
+    | "not-running";
+  next_step: string;
+};
+
 export type DaemonControlResult = {
   running: boolean;
   pid?: number | null;
   message: string;
+  /// Present only on `daemon_status`; other commands omit it.
+  diagnosis?: DaemonDiagnosis | null;
 };
 
 export type CliPathStatus = {

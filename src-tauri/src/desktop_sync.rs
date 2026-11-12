@@ -112,6 +112,13 @@ impl Snapshot {
                 Err(e) => return Err(e.into()),
             }
         }
+        // Phase 2 C: verify tagged references before the backup or any write.
+        if let Some(file) = self.files.iter().find(|f| f.path == "hosts.json") {
+            crate::config_pair::guard_restore(
+                file.content.as_bytes(),
+                "restore desktop cloud snapshot",
+            )?;
+        }
         let backup = create_sync_backup(Some("pre-cloud-restore"))?;
         let id = backup
             .file_name()

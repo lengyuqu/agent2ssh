@@ -1,0 +1,39 @@
+== environment ==
+probe pid            23944
+
+== 1. self: FILETIME vs sysinfo ==
+ft_raw_100ns         134389699048639939
+ft_unix_secs         1794496304   (raw/1e7 - epoch_diff)
+ft_subsec_ticks      8639939   (0 => whole second, else precision lost)
+sysinfo_start_time   1794496304
+delta (sys - ft)     0
+
+== 2. children: OpenProcess(QUERY_LIMITED_INFORMATION) vs sysinfo ==
+pid              ft_raw_100ns   ft_unix_secs    ft_frac  sysinfo_start   delta
+11284      134389699048913927     1794496304    8913927     1794496304       0
+31396      134389699049049755     1794496304    9049755     1794496304       0
+20788      134389699049073100     1794496304    9073100     1794496304       0
+22740      134389699049097344     1794496304    9097344     1794496304       0
+36584      134389699049123397     1794496304    9123397     1794496304       0
+
+distinct deltas      [0]
+any subsec ticks     true
+
+== 3. second-level collision (does sysinfo collapse them?) ==
+sysinfo_start 1794496304 -> 5 process(es): [11284, 31396, 20788, 22740, 36584]   <-- same second, indistinguishable by start_time alone
+distinct ft_raw      5 of 5
+distinct sysinfo     1 of 5
+
+== 4. handle survives exit: read creation time after the process is gone ==
+pid                  24748 (exited)
+held handle ticks    Some(134389699053357438)   (Some => handle outlived exit)
+reopen by pid        Some(134389699053357438)   (None expected: pid free or reused)
+sysinfo after exit   None
+
+== 5. identity comparison the current code performs ==
+sysinfo == ft_unix_secs (truncated): 5 match / 0 mismatch
+
+== verdict ==
+OK: sysinfo start_time == ftCreationTime/1e7 - 11644473600 (truncated to seconds)
+    => a held handle's GetProcessTimes is directly comparable to OwnerMarker.start_time
+    => second-level resolution confirmed; subsec ticks present: true

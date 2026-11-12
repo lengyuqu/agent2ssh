@@ -126,6 +126,18 @@ pub fn recover() -> Result<Recovery> {
             });
         }
     };
+    // Phase 2 C (CNB #26): a crash between the hosts rename and the
+    // paired-index update leaves the index describing an older state. Report
+    // it, but never let an auxiliary index block recovery — the commit log is
+    // still the authority for the two-file transaction.
+    match crate::config_pair::index_status() {
+        crate::config_pair::IndexStatus::Consistent
+        | crate::config_pair::IndexStatus::Missing => {}
+        status => eprintln!(
+            "warning: pending config commit found and paired snapshot index is {status:?}; recovery uses the commit log, and restore paths must not assume a paired snapshot"
+        ),
+    }
+
     let log: CommitLog = serde_json::from_str(&raw).map_err(|error| {
         anyhow!(
             "unreadable pending config commit {} ({error}); refusing to write until it is inspected",

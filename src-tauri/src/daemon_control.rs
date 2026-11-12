@@ -101,8 +101,9 @@ pub fn write_daemon_pid(pid: u32) -> Result<()> {
 
 /// Explicitly remove an unchanged PID record only when the OS reports the PID
 /// absent while the cooperating writers' lock is held. This is not proof of the
-/// old process identity, and cannot protect against older non-cooperating writers.
-#[cfg(target_os = "macos")]
+/// old process identity, and cannot protect against older non-cooperating
+/// writers. Available on every platform: the safety comes from the re-read
+/// under the lock, not from the OS.
 pub fn clear_stale_daemon_pid(expected_pid: u32) -> Result<()> {
     let path = daemon_pid_path()?;
     if !std::fs::symlink_metadata(&path)
@@ -117,7 +118,6 @@ pub fn clear_stale_daemon_pid(expected_pid: u32) -> Result<()> {
     clear_stale_daemon_pid_with_snapshot(expected_pid, &snapshot)
 }
 
-#[cfg(target_os = "macos")]
 fn clear_stale_daemon_pid_with_snapshot(expected_pid: u32, snapshot: &str) -> Result<()> {
     let _guard = crate::store::lock_config_file(DAEMON_PID_LOCK)?;
     let ipc_dir = config_dir_absolute()?.join(".daemon-ipc");
@@ -437,16 +437,31 @@ fn pid_definitely_missing(pid: u32) -> bool {
 
 #[cfg(windows)]
 fn pid_definitely_missing(pid: u32) -> bool {
-    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_INVALID_PARAMETER};
-    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, ERROR_INVALID_PARAMETER, WAIT_OBJECT_0,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+    };
     unsafe {
-        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-        if handle != 0 {
-            CloseHandle(handle);
-            false
-        } else {
-            GetLastError() == ERROR_INVALID_PARAMETER
+        let handle = OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            0,
+            pid,
+        );
+        if handle == 0 {
+            // An invalid parameter is "no such process". Access denied and
+            // every other error are not: the process may be running under
+            // another account, and this function must not call that absent.
+            return GetLastError() == ERROR_INVALID_PARAMETER;
         }
+        // A process that has exited but whose handle someone still holds (the
+        // launcher, the desktop app, a test's `Child`) still opens, and
+        // `OpenProcess` succeeding would otherwise read as "still alive". Ask
+        // the object itself: a signaled handle means the process ended.
+        let ended = WaitForSingleObject(handle, 0) == WAIT_OBJECT_0;
+        CloseHandle(handle);
+        ended
     }
 }
 
@@ -478,6 +493,471 @@ pub fn daemon_pid_state(pid: u32) -> DaemonPidState {
         None if pid_definitely_missing(pid) => DaemonPidState::Stale,
         None => DaemonPidState::Unverified,
     }
+}
+
+/// What the OS said about a recorded PID — with "could not observe" kept
+/// separate from "does not exist".
+///
+/// A failed lookup is not proof of absence: `OpenProcess` denies access for
+/// processes this account may not query, and `kill(pid, 0)` returns `EPERM` for
+/// a live process it may not signal. Only an explicit "no such process" may be
+/// reported as [`PidObservation::Absent`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub enum PidObservation {
+    /// The OS explicitly reports that no process has this PID.
+    Absent,
+    /// Observable and live. `start_time` is a seconds-resolution snapshot, not
+    /// proof of identity.
+    Live { start_time: u64 },
+    /// Observable and already terminated.
+    Zombie,
+    /// The OS refused to describe the process. Access denied is not absence.
+    Denied { reason: String },
+    /// Not observable and not explicitly absent.
+    Unknown { reason: String },
+}
+
+/// State of the `daemon.pid` file itself, independent of any process.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub enum DaemonPidRecord {
+    Missing,
+    Pid { pid: u32 },
+    Malformed { raw: String, reason: String },
+    Unreadable { reason: String },
+    NotARegularFile,
+}
+
+/// What the local `/health` endpoint says, if anything answers it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub enum HealthObservation {
+    Inactive,
+    Reporting {
+        pid: u32,
+        same_pid: bool,
+        /// `None` when the answering daemon predates reporting its config
+        /// directory — unknown, not "different".
+        config_dir_matches: Option<bool>,
+    },
+}
+
+/// Whether the admin token was accepted. The token itself is never reported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TokenObservation {
+    Accepted,
+    Rejected,
+    Missing,
+    NotChecked,
+}
+
+/// Whether the cooperating writers' lock was held while the report was taken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PidLockObservation {
+    Free,
+    Held,
+    Unknown,
+}
+
+/// The one-line answer a person can act on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DaemonVerdict {
+    /// A live process answered health, accepted the token and named the same
+    /// config directory. Still not cryptographic proof of identity (#22).
+    Healthy,
+    /// A live process matches the record but the health endpoint does not answer.
+    RunningUnhealthy,
+    /// A process exists but identity cannot be established, or the endpoint
+    /// disagrees with the record.
+    Unverified,
+    /// The record names a process the OS says is absent.
+    Stale,
+    /// The record itself cannot be used (malformed, unreadable, not a file).
+    Damaged,
+    /// No record and no endpoint.
+    NotRunning,
+}
+
+impl DaemonVerdict {
+    /// A short, stable label for CLI and desktop text. The `serde` form uses
+    /// the same words, so a script and a screenshot agree.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DaemonVerdict::Healthy => "healthy",
+            DaemonVerdict::RunningUnhealthy => "running-unhealthy",
+            DaemonVerdict::Unverified => "unverified",
+            DaemonVerdict::Stale => "stale",
+            DaemonVerdict::Damaged => "damaged",
+            DaemonVerdict::NotRunning => "not-running",
+        }
+    }
+}
+
+/// A read-only diagnosis of the local daemon record. Nothing here mutates a
+/// file, signals a process, or prints the admin token.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DaemonStatusReport {
+    pub config_dir: String,
+    pub pid_path: String,
+    pub token_path: String,
+    pub log_path: String,
+    pub pid_lock: PidLockObservation,
+    pub record: DaemonPidRecord,
+    pub observation: Option<PidObservation>,
+    pub health: HealthObservation,
+    pub token: TokenObservation,
+    pub verdict: DaemonVerdict,
+    pub next_step: String,
+}
+
+/// A short, escaped preview of a damaged record. PID files contain digits, so
+/// anything else is already unexpected; escaping keeps control characters out
+/// of a terminal and a JSON consumer alike.
+fn record_preview(raw: &str) -> String {
+    let trimmed = raw.trim_end_matches(['\r', '\n']);
+    let mut preview: String = trimmed
+        .chars()
+        .take(40)
+        .flat_map(char::escape_debug)
+        .collect();
+    if trimmed.chars().count() > 40 {
+        preview.push('…');
+    }
+    preview
+}
+
+pub fn read_daemon_pid_record(path: &Path) -> DaemonPidRecord {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return DaemonPidRecord::Missing
+        }
+        Err(error) => {
+            return DaemonPidRecord::Unreadable {
+                reason: error.to_string(),
+            }
+        }
+    };
+    if !metadata.file_type().is_file() {
+        return DaemonPidRecord::NotARegularFile;
+    }
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(error) => {
+            return DaemonPidRecord::Unreadable {
+                reason: error.to_string(),
+            }
+        }
+    };
+    match raw.trim().parse::<u32>().ok().filter(|pid| *pid != 0) {
+        Some(pid) => DaemonPidRecord::Pid { pid },
+        None => DaemonPidRecord::Malformed {
+            raw: record_preview(&raw),
+            reason: "not a positive integer".to_string(),
+        },
+    }
+}
+
+/// Ask the OS about a PID without turning "could not look" into "is gone".
+///
+/// Stop decisions use [`observe_process`] instead, because they answer a
+/// different question — "is this still the process I verified" — and need an
+/// expected start time. A diagnosis must answer "what did the OS say", so this
+/// keeps access-denied, zombie and live-with-start-time apart instead of
+/// collapsing them into exited/unknown.
+pub fn observe_pid(pid: u32) -> PidObservation {
+    // The record protocol accepts only positive PIDs. In particular, never
+    // pass zero to kill(2), where it denotes a process group rather than a
+    // single process. Represent that invalid record value as absent.
+    if pid == 0 {
+        return PidObservation::Absent;
+    }
+    let sys_pid = sysinfo::Pid::from_u32(pid);
+    let mut system = sysinfo::System::new();
+    system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[sys_pid]), true);
+    if let Some(process) = system.process(sys_pid) {
+        if process.status() == sysinfo::ProcessStatus::Zombie {
+            return PidObservation::Zombie;
+        }
+        if process.start_time() != 0 {
+            return PidObservation::Live {
+                start_time: process.start_time(),
+            };
+        }
+    }
+    if pid_definitely_missing(pid) {
+        return PidObservation::Absent;
+    }
+    match pid_access_error(pid) {
+        Some(reason) => PidObservation::Denied { reason },
+        None => PidObservation::Unknown {
+            reason: "process not observable through the process table".to_string(),
+        },
+    }
+}
+
+/// `Some(reason)` only when the OS explicitly refused access, which is a
+/// different fact from a PID that does not exist.
+#[cfg(windows)]
+fn pid_access_error(pid: u32) -> Option<String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ACCESS_DENIED};
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle != 0 {
+            CloseHandle(handle);
+            return None;
+        }
+        let code = GetLastError();
+        (code == ERROR_ACCESS_DENIED).then(|| format!("OpenProcess denied (error {code})"))
+    }
+}
+
+#[cfg(unix)]
+fn pid_access_error(pid: u32) -> Option<String> {
+    let Ok(pid) = i32::try_from(pid) else {
+        return None;
+    };
+    if pid <= 0 {
+        return None;
+    }
+    let result = unsafe { libc::kill(pid, 0) };
+    if result == 0 {
+        return None;
+    }
+    let errno = std::io::Error::last_os_error().raw_os_error();
+    (errno == Some(libc::EPERM)).then(|| "kill(pid, 0) denied (EPERM)".to_string())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn pid_access_error(_pid: u32) -> Option<String> {
+    None
+}
+
+fn observe_health(expected_pid: Option<u32>) -> HealthObservation {
+    match health_identity() {
+        None => HealthObservation::Inactive,
+        Some(identity) => HealthObservation::Reporting {
+            pid: identity.pid,
+            same_pid: expected_pid == Some(identity.pid),
+            config_dir_matches: identity.config_dir.map(|reported| {
+                expected_config_dir()
+                    .map(|expected| reported == expected)
+                    .unwrap_or(false)
+            }),
+        },
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn observe_token() -> TokenObservation {
+    let Some(token) = crate::daemon_activity::read_admin_token() else {
+        return TokenObservation::Missing;
+    };
+    match crate::daemon_activity::local_daemon_request(
+        "GET",
+        "/gate",
+        Some(&token),
+        Duration::from_millis(500),
+    ) {
+        Ok(response) if response.status == 200 => TokenObservation::Accepted,
+        Ok(_) => TokenObservation::Rejected,
+        // No answer is not a rejection; the endpoint did not speak.
+        Err(_) => TokenObservation::NotChecked,
+    }
+}
+
+fn observe_pid_lock(dir: &Path) -> PidLockObservation {
+    let path = dir.join(DAEMON_PID_LOCK);
+    let file = match OpenOptions::new().read(true).write(true).open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return PidLockObservation::Free
+        }
+        Err(_) => return PidLockObservation::Unknown,
+    };
+    // `std::fs::File` grew advisory locks of its own; a shared attempt answers
+    // "is a writer holding `.daemon-pid.lock` right now" without blocking and
+    // without creating the file.
+    match file.try_lock_shared() {
+        Ok(()) => {
+            let _ = file.unlock();
+            PidLockObservation::Free
+        }
+        Err(std::fs::TryLockError::WouldBlock) => PidLockObservation::Held,
+        Err(_) => PidLockObservation::Unknown,
+    }
+}
+
+fn classify_daemon(
+    record: &DaemonPidRecord,
+    observation: Option<&PidObservation>,
+    health: &HealthObservation,
+    token: TokenObservation,
+) -> DaemonVerdict {
+    // An endpoint that names a different process is the strongest evidence
+    // available here: the record and the answering daemon are not the same
+    // instance, whatever the process table says about the recorded PID.
+    if let HealthObservation::Reporting {
+        same_pid: false, ..
+    } = health
+    {
+        return DaemonVerdict::Unverified;
+    }
+    // The endpoint claims the recorded PID while the process table cannot
+    // confirm it is live. That contradiction is not a stale record: something
+    // answered, so erasing the record could erase the only pointer to it.
+    if let (HealthObservation::Reporting { same_pid: true, .. }, Some(observation)) =
+        (health, observation)
+    {
+        if !matches!(observation, PidObservation::Live { .. }) {
+            return DaemonVerdict::Unverified;
+        }
+    }
+    match record {
+        DaemonPidRecord::Missing => match health {
+            HealthObservation::Inactive => DaemonVerdict::NotRunning,
+            HealthObservation::Reporting { .. } => DaemonVerdict::Unverified,
+        },
+        DaemonPidRecord::Malformed { .. }
+        | DaemonPidRecord::Unreadable { .. }
+        | DaemonPidRecord::NotARegularFile => DaemonVerdict::Damaged,
+        DaemonPidRecord::Pid { .. } => match observation {
+            Some(PidObservation::Absent) | Some(PidObservation::Zombie) => DaemonVerdict::Stale,
+            Some(PidObservation::Denied { .. }) | Some(PidObservation::Unknown { .. }) | None => {
+                DaemonVerdict::Unverified
+            }
+            Some(PidObservation::Live { .. }) => match health {
+                HealthObservation::Inactive => DaemonVerdict::RunningUnhealthy,
+                HealthObservation::Reporting {
+                    same_pid: true,
+                    config_dir_matches,
+                    ..
+                } => {
+                    if *config_dir_matches == Some(false) {
+                        DaemonVerdict::Unverified
+                    } else if token == TokenObservation::Accepted {
+                        DaemonVerdict::Healthy
+                    } else {
+                        DaemonVerdict::Unverified
+                    }
+                }
+                HealthObservation::Reporting {
+                    same_pid: false, ..
+                } => DaemonVerdict::Unverified,
+            },
+        },
+    }
+}
+
+fn daemon_next_step(
+    record: &DaemonPidRecord,
+    observation: Option<&PidObservation>,
+    health: &HealthObservation,
+    verdict: DaemonVerdict,
+) -> String {
+    match verdict {
+        DaemonVerdict::Healthy => {
+            "Nothing to do. Health and the admin token agree with the record, but process identity is still unbound (see #22).".to_string()
+        }
+        DaemonVerdict::RunningUnhealthy => "A process holds the record but /health does not answer. Inspect daemon.log and the listening port; do not signal the PID from this report.".to_string(),
+        DaemonVerdict::Stale => {
+            let pid = match record {
+                DaemonPidRecord::Pid { pid } => *pid,
+                _ => 0,
+            };
+            format!("Run 'agent2ssh daemon clear-stale --expect-pid {pid}' to remove the record only if it still matches and the PID stays absent. No process is signalled.")
+        }
+        DaemonVerdict::Damaged => "The PID file is not a usable record. Inspect it by hand; clear-stale refuses malformed, unreadable and non-file records.".to_string(),
+        DaemonVerdict::NotRunning => "No daemon record and no endpoint. Start one with 'agent2ssh daemon start'.".to_string(),
+        DaemonVerdict::Unverified => match (record, observation, health) {
+            (DaemonPidRecord::Missing, _, HealthObservation::Reporting { pid, .. }) => format!(
+                "An endpoint reports PID {pid} but no PID record exists. Do not create or delete a record from this observation alone."
+            ),
+            (_, Some(PidObservation::Denied { .. }), _) => "The OS denied process inspection. That is not evidence the process exited: re-run as the owning user or inspect the process out of band.".to_string(),
+            (_, _, HealthObservation::Reporting { same_pid: false, pid, .. }) => format!(
+                "The endpoint reports PID {pid}, which is not the recorded PID and/or not this config directory. Inspect both before stopping anything."
+            ),
+            _ => "The record and the endpoint do not prove the same instance. Inspect daemon.log and the process out of band; clear-stale only removes a record it can prove absent.".to_string(),
+        },
+    }
+}
+
+/// Read-only diagnosis of the local daemon record.
+pub fn daemon_status_report() -> Result<DaemonStatusReport> {
+    let dir = config_dir_absolute()?;
+    let pid_path = dir.join("daemon.pid");
+    let record = read_daemon_pid_record(&pid_path);
+    let recorded_pid = match &record {
+        DaemonPidRecord::Pid { pid } => Some(*pid),
+        _ => None,
+    };
+    let observation = recorded_pid.map(observe_pid);
+    let health = observe_health(recorded_pid);
+    #[cfg(not(target_os = "macos"))]
+    let token = match (recorded_pid, observation.as_ref()) {
+        (Some(_), Some(PidObservation::Live { .. })) => observe_token(),
+        _ => TokenObservation::NotChecked,
+    };
+    // A PID and HTTP health response cannot bind this endpoint to the daemon.
+    // Do not disclose the admin token while diagnosing an unbound macOS peer.
+    #[cfg(target_os = "macos")]
+    let token = TokenObservation::NotChecked;
+    let verdict = classify_daemon(&record, observation.as_ref(), &health, token);
+    #[cfg(target_os = "macos")]
+    let ipc_evidence = {
+        let socket_dir = dir.join(".daemon-ipc");
+        let unsafe_dir = match std::fs::symlink_metadata(&socket_dir) {
+            Ok(metadata) => !metadata.file_type().is_dir(),
+            Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+        };
+        unsafe_dir
+            || ["daemon.instance.json", ".daemon-ipc/s"]
+                .iter()
+                .any(|name| match std::fs::symlink_metadata(dir.join(name)) {
+                    Ok(_) => true,
+                    Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+                })
+    };
+    #[cfg(target_os = "macos")]
+    let verdict = if verdict == DaemonVerdict::NotRunning {
+        DaemonVerdict::Unverified
+    } else {
+        verdict
+    };
+    let next_step = daemon_next_step(&record, observation.as_ref(), &health, verdict);
+    #[cfg(target_os = "macos")]
+    let next_step = if ipc_evidence
+        && matches!(verdict, DaemonVerdict::Stale | DaemonVerdict::Unverified)
+    {
+        let prefix = if matches!(record, DaemonPidRecord::Missing) {
+            "No PID record. "
+        } else {
+            ""
+        };
+        format!("{prefix}IPC identity artifacts exist or cannot be inspected. Inspect them before recovery; a complete stale instance requires clear-stale --expect-pid <PID> --expect-instance <instance-id>. No process is signalled.")
+    } else if matches!(record, DaemonPidRecord::Missing) && verdict == DaemonVerdict::Unverified {
+        "No daemon PID record; daemon identity and state is unknown. Inspect the endpoint and processes before recovery.".to_string()
+    } else {
+        next_step
+    };
+    Ok(DaemonStatusReport {
+        config_dir: dir.display().to_string(),
+        pid_path: pid_path.display().to_string(),
+        token_path: dir.join("daemon.token").display().to_string(),
+        log_path: dir.join("daemon.log").display().to_string(),
+        pid_lock: observe_pid_lock(&dir),
+        record,
+        observation,
+        health,
+        token,
+        verdict,
+        next_step,
+    })
 }
 
 fn wait_for_daemon_pid(pid: u32, timeout: Duration) -> bool {
@@ -857,6 +1337,241 @@ fn process_handle_is_signaled(_pid: u32) -> bool {
     false
 }
 
+/// `GetProcessTimes().ftCreationTime` as Unix seconds.
+///
+/// Measured against `sysinfo::Process::start_time` on Windows 11 26300: equal
+/// in every sample (24/24 across four runs), because sysinfo divides the same
+/// tick count by 10^7. So a value read from a handle is directly comparable to
+/// [`OwnerMarker::start_time`] without a conversion table — see
+/// `docs/reports/CNB-ISSUE-24-WINDOWS-PRIMITIVES-2026-11-12.md`.
+#[cfg(windows)]
+fn creation_time_secs(handle: isize) -> Option<u64> {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::GetProcessTimes;
+    /// Seconds between the FILETIME epoch (1601-01-01) and the Unix epoch.
+    const FILETIME_TO_UNIX_SECS: u64 = 11_644_473_600;
+    unsafe {
+        let mut creation: FILETIME = std::mem::zeroed();
+        let mut exit: FILETIME = std::mem::zeroed();
+        let mut kernel: FILETIME = std::mem::zeroed();
+        let mut user: FILETIME = std::mem::zeroed();
+        if GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) == 0 {
+            return None;
+        }
+        let ticks = ((creation.dwHighDateTime as u64) << 32) | creation.dwLowDateTime as u64;
+        Some(ticks / 10_000_000 - FILETIME_TO_UNIX_SECS)
+    }
+}
+
+/// The Windows process object a stop is allowed to touch.
+///
+/// `OpenProcess(pid)` only ever answers "the object holding this PID right
+/// now", and the PID can change hands between that call and the one that
+/// signals. Opening once and keeping the handle is what makes verification,
+/// waiting and termination act on the same object: a signaled handle means
+/// *that* process ended, not that whoever took the PID next is alive.
+///
+/// The handle is only trusted after its own creation time matches the record.
+/// It is seconds, not the 100 ns `GetProcessTimes` returns, because the record
+/// stores whole seconds — and two processes created within the same second are
+/// indistinguishable at that precision (measured, 4/4 runs; report §3.3). So
+/// this is strictly stronger than re-opening per poll, not omniscient: it
+/// narrows the reuse window to the instant of `open` and removes it for the
+/// 8 s that follow.
+#[cfg(windows)]
+struct BoundProcess {
+    handle: isize,
+    pid: u32,
+    /// The creation time this binding was accepted for. Kept so termination can
+    /// refuse a handle opened for a different process.
+    start_time: u64,
+}
+
+#[cfg(windows)]
+impl BoundProcess {
+    /// Open the object behind `pid` and keep the handle.
+    ///
+    /// `None` means "not bound": the process is gone, the access was denied, or
+    /// the creation time is not the recorded one. None of those is evidence of
+    /// exit, so every caller falls back to the existing observation path rather
+    /// than treating it as one. The name whitelist is not re-checked here
+    /// because `expected_start` was read from a process that already passed it
+    /// ([`daemon_process_start_time`]).
+    ///
+    /// Only the rights needed to *observe* are requested here. A caller that may
+    /// not terminate the process can still bind and wait; [`terminate`] asks for
+    /// the extra right when a forced stop is actually requested.
+    fn open(pid: u32, expected_start: u64) -> Option<Self> {
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+        };
+        let handle = unsafe {
+            OpenProcess(
+                PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                0,
+                pid,
+            )
+        };
+        if handle == 0 {
+            return None;
+        }
+        match creation_time_secs(handle) {
+            Some(start) if start == expected_start => Some(Self {
+                handle,
+                pid,
+                start_time: expected_start,
+            }),
+            _ => {
+                unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
+                None
+            }
+        }
+    }
+
+    /// Has the object this handle names terminated?
+    fn is_signaled(&self) -> bool {
+        use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+        use windows_sys::Win32::System::Threading::WaitForSingleObject;
+        unsafe { WaitForSingleObject(self.handle, 0) == WAIT_OBJECT_0 }
+    }
+
+    /// Terminate the process this binding verified.
+    ///
+    /// The binding only asked for `SYNCHRONIZE | QUERY_LIMITED_INFORMATION`, so
+    /// a caller that may wait but not terminate (another account, a restricted
+    /// token) can still bind and observe. Termination asks for `PROCESS_TERMINATE`
+    /// only when it is actually needed, and re-checks the creation time on the
+    /// newly opened handle before signalling — a reused PID is refused instead
+    /// of killed.
+    ///
+    /// This is the one place that re-opens by PID; it is not the old fallback,
+    /// because a failure here returns an error rather than trying another
+    /// mechanism. Whether a partially privileged token can bind but not
+    /// terminate is inferred from the documented access rights, not measured on
+    /// such an account.
+    fn terminate(&self) -> Result<()> {
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, TerminateProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+        };
+        let handle = unsafe {
+            OpenProcess(
+                PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION,
+                0,
+                self.pid,
+            )
+        };
+        if handle == 0 {
+            return Err(anyhow!(
+                "could not open daemon PID {} for termination ({}); no signal was sent",
+                self.pid,
+                std::io::Error::last_os_error()
+            ));
+        }
+        if creation_time_secs(handle) != Some(self.start_time) {
+            unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
+            return Err(anyhow!(
+                "daemon PID {} was reused before it could be terminated; no signal was sent",
+                self.pid
+            ));
+        }
+        let sent = unsafe { TerminateProcess(handle, 1) };
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
+        if sent == 0 {
+            return Err(anyhow!(
+                "failed to terminate daemon process {}: {}",
+                self.pid,
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+impl Drop for BoundProcess {
+    fn drop(&mut self) {
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.handle) };
+    }
+}
+
+/// Placeholder so the stop path reads the same on every platform.
+///
+/// [`BoundProcess::open`] always answers `None` here, so the handle path is
+/// never taken and the Unix observers keep deciding.
+#[cfg(all(not(windows), any(not(target_os = "macos"), test)))]
+struct BoundProcess;
+
+#[cfg(all(not(windows), any(not(target_os = "macos"), test)))]
+impl BoundProcess {
+    fn open(_pid: u32, _expected_start: u64) -> Option<Self> {
+        None
+    }
+}
+
+/// Wait for exit using the bound handle when there is one.
+///
+/// A bound handle cannot answer `Unknown`: it either signals (that object
+/// ended) or it does not (that object is running). That is the whole point of
+/// binding it — the three-way guess exists because a PID can be reinterpreted,
+/// and a handle cannot.
+#[cfg(any(not(target_os = "macos"), test))]
+fn wait_for_bound_exit(
+    bound: Option<&BoundProcess>,
+    pid: u32,
+    expected_start: u64,
+    within: Duration,
+) -> ProcessObservation {
+    #[cfg(windows)]
+    if let Some(bound) = bound {
+        let start = Instant::now();
+        while start.elapsed() < within {
+            if bound.is_signaled() {
+                return ProcessObservation::Exited;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        return if bound.is_signaled() {
+            ProcessObservation::Exited
+        } else {
+            ProcessObservation::Running
+        };
+    }
+    let _ = bound;
+    wait_for_exit(pid, expected_start, within)
+}
+
+/// Force the daemon down.
+///
+/// On Windows this only acts through the handle opened before the shutdown
+/// request (#24). Re-opening the process by PID here would hand the
+/// termination to whatever holds that PID now — exactly the fallback the issue
+/// forbids. `None` means the object was denied, already gone, or already
+/// replaced; the caller gets an error and neither the process nor the PID file
+/// is touched.
+///
+/// Elsewhere the PID-based recheck (`start_time` + name) is still the only
+/// mechanism available, and it is not atomic with the signal.
+#[cfg(not(target_os = "macos"))]
+fn terminate_for_stop(bound: Option<&BoundProcess>, pid: u32, expected_start: u64) -> Result<()> {
+    #[cfg(windows)]
+    {
+        let _ = expected_start;
+        let bound = bound.ok_or_else(|| {
+            anyhow!(
+                "daemon PID {pid} did not exit after a guarded shutdown and its process object \
+                 could not be bound (access denied, already exited, or the PID was reused); \
+                 no signal was sent and the PID file is retained"
+            )
+        })?;
+        bound.terminate()
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = bound;
+        signal_daemon(pid, expected_start, true)
+    }
+}
+
 #[cfg(any(not(target_os = "macos"), test))]
 fn observe_process(pid: u32, expected_start: u64) -> ProcessObservation {
     let sys_pid = sysinfo::Pid::from_u32(pid);
@@ -890,7 +1605,11 @@ fn wait_for_exit(pid: u32, expected_start: u64, within: Duration) -> ProcessObse
 
 // Recheck identity immediately before signalling. This narrows the PID reuse
 // window but cannot make a PID-based signal atomic with this inspection.
-#[cfg(not(target_os = "macos"))]
+//
+// Windows never calls this from the stop path any more: a forced stop must go
+// through the handle bound before the shutdown request (#24). Keeping the
+// function out of that build also keeps the forbidden fallback unreachable.
+#[cfg(all(not(target_os = "macos"), not(windows)))]
 fn signal_daemon(pid: u32, expected_start: u64, force: bool) -> Result<()> {
     let sys_pid = sysinfo::Pid::from_u32(pid);
     let mut system = sysinfo::System::new();
@@ -1139,6 +1858,13 @@ pub fn stop_daemon_process(pid: u32) -> std::result::Result<(), DaemonStopError>
         // replacement process; a stale marker is safer than removing it.
         return Ok(());
     };
+    // Bind the process object before asking for a shutdown, so the grace period
+    // and any forced termination both address the object that was verified here
+    // — not whatever holds the PID eight seconds later. `None` (denied, gone, or
+    // already reused) is not evidence that the process exited: the observers
+    // below still decide whether it is running, and a forced stop refuses
+    // rather than re-opening the PID (see [`terminate_for_stop`]).
+    let bound = BoundProcess::open(pid, start_time);
     // A matching executable name is not proof that this is our daemon: an
     // unrelated process can reuse the PID or spoof argv[0]. Require the health
     // PID to match, the daemon to serve *this* config directory, and this
@@ -1217,7 +1943,7 @@ pub fn stop_daemon_process(pid: u32) -> std::result::Result<(), DaemonStopError>
         }
         ShutdownRequest::NotAccepted(detail) => return Err(Refused::NotAccepted(detail)),
     }
-    match wait_for_exit(pid, start_time, GRACEFUL_STOP_WAIT) {
+    match wait_for_bound_exit(bound.as_ref(), pid, start_time, GRACEFUL_STOP_WAIT) {
         ProcessObservation::Exited => {}
         ProcessObservation::Unknown => {
             return Err(Refused::UncertainExit(pid));
@@ -1229,8 +1955,8 @@ pub fn stop_daemon_process(pid: u32) -> std::result::Result<(), DaemonStopError>
                 "daemon did not exit after a guarded shutdown; leaving it running",
                 Some(serde_json::json!({ "pid": pid })),
             );
-            signal_daemon(pid, start_time, true).map_err(DaemonStopError::Other)?;
-            match wait_for_exit(pid, start_time, Duration::from_secs(2)) {
+            terminate_for_stop(bound.as_ref(), pid, start_time).map_err(DaemonStopError::Other)?;
+            match wait_for_bound_exit(bound.as_ref(), pid, start_time, Duration::from_secs(2)) {
                 ProcessObservation::Exited => {}
                 ProcessObservation::Running => return Err(Refused::StillRunning(pid)),
                 ProcessObservation::Unknown => return Err(Refused::UncertainExit(pid)),
@@ -1537,6 +2263,115 @@ mod tests {
         assert!(!process_handle_is_signaled(std::process::id()));
     }
 
+    /// Read the second `GetProcessTimes` reports, the same way `open` does, so a
+    /// test can name the value it expects to be accepted.
+    #[cfg(windows)]
+    fn creation_time_of(pid: u32) -> Option<u64> {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if handle == 0 {
+            return None;
+        }
+        let secs = creation_time_secs(handle);
+        unsafe { CloseHandle(handle) };
+        secs
+    }
+
+    #[cfg(windows)]
+    fn spawn_sleeper() -> std::process::Child {
+        Command::new("cmd.exe")
+            .args(["/C", "ping", "-n", "20", "127.0.0.1"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn sleeper")
+    }
+
+    /// A PID is not an object. Two processes can share one over time, and the
+    /// only way to notice is to refuse a handle whose creation time is not the
+    /// recorded one — which is what `open` does before the stop is allowed to
+    /// trust the handle.
+    #[cfg(windows)]
+    #[test]
+    fn a_bound_handle_refuses_a_creation_time_it_did_not_open() {
+        let child = spawn_sleeper();
+        let pid = child.id();
+        let start = creation_time_of(pid).expect("read creation time");
+        let bound = BoundProcess::open(pid, start);
+        assert!(
+            bound.is_some(),
+            "the recorded second opened this process, so it must bind"
+        );
+        assert!(
+            BoundProcess::open(pid, start + 1).is_none(),
+            "a different second names a different object, and must not bind"
+        );
+        drop(bound);
+        let mut child = child;
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// The handle has to answer for its own object across the exit, otherwise
+    /// the stop path would be back to re-opening a PID it no longer controls.
+    #[cfg(windows)]
+    #[test]
+    fn a_bound_handle_tracks_its_object_through_exit() {
+        let mut child = spawn_sleeper();
+        let pid = child.id();
+        let start = creation_time_of(pid).expect("read creation time");
+        let bound = BoundProcess::open(pid, start).expect("bind live child");
+        assert!(!bound.is_signaled(), "a live child is not signaled");
+        assert_eq!(
+            wait_for_bound_exit(Some(&bound), pid, start, Duration::ZERO),
+            ProcessObservation::Running,
+            "a bound handle never answers Unknown while the object lives"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !bound.is_signaled() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            bound.is_signaled(),
+            "the bound object must report its own termination"
+        );
+        assert_eq!(
+            wait_for_bound_exit(Some(&bound), pid, start, Duration::ZERO),
+            ProcessObservation::Exited
+        );
+    }
+
+    /// Termination goes through the handle, so it ends that object and reports
+    /// failure instead of silently falling back to a PID.
+    #[cfg(windows)]
+    #[test]
+    fn terminating_a_bound_handle_ends_the_object_it_opened() {
+        let mut target = spawn_sleeper();
+        let bystander = spawn_sleeper();
+        let pid = target.id();
+        let start = creation_time_of(pid).expect("read creation time");
+        let bound = BoundProcess::open(pid, start).expect("bind");
+        terminate_for_stop(Some(&bound), pid, start).expect("terminate bound object");
+        let status = target.wait().expect("reap terminated child");
+        assert!(
+            !status.success(),
+            "TerminateProcess exits 1, which must not look like a clean exit"
+        );
+        assert!(bound.is_signaled());
+        assert!(
+            !process_handle_is_signaled(bystander.id()),
+            "a neighbouring process on another PID must be untouched"
+        );
+        let mut bystander = bystander;
+        let _ = bystander.kill();
+        let _ = bystander.wait();
+    }
+
     #[cfg(unix)]
     #[test]
     fn exit_wait_does_not_mistake_an_unrecognized_live_process_for_exit() {
@@ -1612,5 +2447,33 @@ mod tests {
             .contains("no shutdown or signal"));
         #[cfg(not(target_os = "macos"))]
         stop_daemon_process(u32::MAX - 1).expect("nothing to stop");
+    }
+
+    /// #24: a forced stop must not fall back to re-opening the PID. The old
+    /// fallback treated "no such process" as success, so restoring it makes this
+    /// assertion fail instead of passing quietly.
+    #[cfg(windows)]
+    #[test]
+    fn an_unbound_force_stop_refuses_instead_of_reopening_by_pid() {
+        let error = terminate_for_stop(None, u32::MAX - 1, 0)
+            .expect_err("an unbound force stop must not report success");
+        assert!(error.to_string().contains("could not be bound"), "{error}");
+    }
+
+    /// The binding is only valid for the creation time it was opened for; a
+    /// different one is a reused PID, not the same process.
+    #[cfg(windows)]
+    #[test]
+    fn a_binding_is_accepted_only_for_the_creation_time_it_was_opened_for() {
+        let pid = std::process::id();
+        let start = observable_live_start_time(pid).expect("this process has a start time");
+        assert!(
+            BoundProcess::open(pid, start).is_some(),
+            "the same creation time binds"
+        );
+        assert!(
+            BoundProcess::open(pid, start + 1).is_none(),
+            "a different creation time must not bind"
+        );
     }
 }
