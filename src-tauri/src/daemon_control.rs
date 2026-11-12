@@ -376,12 +376,13 @@ fn wait_for_daemon_pid(pid: u32, timeout: Duration) -> bool {
     daemon_matches_config(pid)
 }
 
-/// Rotate daemon.log if it has grown past `max_size_bytes`, keeping two prior
-/// generations (`daemon.log.1`, `daemon.log.2`). The daemon writes via a
-/// redirected stdout/stderr handle that we cannot rotate while it runs, so this
-/// runs at (re)start time — bounding unbounded growth across restarts. Unlike
-/// app.log, which the core rotates inline on every write, daemon.log is only
-/// pruned here.
+/// Rotate daemon.log if it has grown past `max_size_bytes`, keeping three prior
+/// generations (`daemon.log.1`, `daemon.log.2`, `daemon.log.3` — the loop below
+/// shifts `.2 → .3` and `.1 → .2` before moving the live file to `.1`). The
+/// daemon writes via a redirected stdout/stderr handle that we cannot rotate
+/// while it runs, so this runs at (re)start time — bounding unbounded growth
+/// across restarts. Unlike app.log, which the core rotates inline on every
+/// write, daemon.log is only pruned here.
 fn rotate_daemon_log_if_needed(log_path: &Path, max_size_bytes: u64) {
     let Ok(metadata) = std::fs::metadata(log_path) else {
         return;

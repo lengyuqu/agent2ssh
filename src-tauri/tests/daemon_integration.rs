@@ -4454,8 +4454,8 @@ fn api_yaml_operation(spec: &str, path: &str, method: &str) -> String {
     block
 }
 
-/// The two session endpoints answer 429 for different reasons, and the `scope`
-/// suffix in the body is the only thing that tells them apart.
+/// The session-shaped endpoints answer 429 for different reasons, and the
+/// `scope` suffix in the body is the only thing that tells them apart.
 ///
 /// Both rejections share one message template
 /// (`execution limit exceeded: <scope> current=… limit=…`), so a client that
@@ -4467,9 +4467,52 @@ fn api_yaml_operation(spec: &str, path: &str, method: &str) -> String {
 /// reserves a slot through `check_session_open`, and `/resident-sessions` is the
 /// endpoint that is rate-limited. Each sentence is now pinned to the mechanism
 /// it describes.
+///
+/// The session cap has two takers, not one: `GET /terminal` calls the same
+/// `register_limited_session_for_command` as `POST /sessions` and reserves a slot
+/// of the same kind, while the two resident-session routes sit on the other side
+/// (`POST` is rate-limited, `DELETE` is the preflighted close). Four operations
+/// therefore depart from the template — two per family — and the file-level
+/// paragraph that named only one from each under-counted the places a client has
+/// to read the suffix.
 #[test]
 fn api_yaml_names_the_mechanism_behind_each_session_429() {
     let spec = include_str!("../../docs/api.yaml");
+
+    let rate_paragraph = spec
+        .split("Two different mechanisms answer 429")
+        .nth(1)
+        .unwrap_or_default()
+        .split("\n\n")
+        .next()
+        .unwrap_or_default();
+    for operation in [
+        "`GET /terminal`",
+        "`POST /sessions`",
+        "`POST /resident-sessions`",
+        "`DELETE /resident-sessions/{id}`",
+    ] {
+        assert!(
+            rate_paragraph.contains(operation),
+            "the 429 paragraph has to name every operation whose 429 description departs from \
+             the template, and {operation} is one of them; a reader who trusts a short list will \
+             not look at the operations it left out"
+        );
+    }
+
+    let terminal = api_yaml_operation(spec, "/terminal", "get");
+    assert!(
+        terminal.contains("register_limited_session_for_command")
+            && terminal.contains("terminal_open"),
+        "`GET /terminal` answers 429 from the session cap through the same helper as \
+         `POST /sessions` (`register_limited_session_for_command`, operation `terminal_open`); a \
+         bare \"session concurrency limit\" leaves the family unstated"
+    );
+    assert!(
+        terminal.contains("`sessions`") && terminal.contains("never calls"),
+        "the `sessions` suffix is what tells the client to close something rather than wait, and \
+         `terminal_attach` never calls `reject_if_rate_limited` — both belong in the description"
+    );
 
     let open = api_yaml_operation(spec, "/sessions", "post");
     assert!(
@@ -4510,6 +4553,20 @@ fn api_yaml_names_the_mechanism_behind_each_session_429() {
         resident.contains("AGENT2SSH_MAX_RESIDENT_SESSIONS") && resident.contains("400"),
         "the resident-session cap answers 400 from `resident_open_core`, not 429; a 429 \
          description that also claims that cap sends clients to wait for the wrong thing"
+    );
+
+    let resident_close = api_yaml_operation(spec, "/resident-sessions/{id}", "delete");
+    assert!(
+        resident_close.contains("reject_if_rate_limited") && resident_close.contains("`rate`"),
+        "closing a resident session runs the shared preflight, so its 429 is the `rate` family — \
+         the one close that *is* rate-limited, and the sentence has to say so rather than leaving \
+         a short label the reader can mistake for the slot-releasing case"
+    );
+    assert!(
+        resident_close.contains("DELETE /sessions/{id}"),
+        "the contrast is the useful part: `DELETE /sessions/{{id}}` checks no limit precisely \
+         because it is the only release for its counter, and a reader who mixes the two will \
+         retry a close that can never clear the other one"
     );
 }
 
