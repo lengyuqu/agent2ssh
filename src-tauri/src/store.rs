@@ -916,6 +916,13 @@ fn save_config_inner(config: &AppConfig) -> Result<()> {
         }
         replace_file_atomic(&tmp_path, &path)?;
         temp.keep = true;
+        // Phase 2 C (CNB #26): record a paired snapshot of the state just
+        // committed. Only two-file commits produce a new pair — a hosts-only
+        // save leaves secrets.enc untouched. This is best-effort by design:
+        // the index is diagnostic evidence, never a write blocker.
+        if log_started {
+            crate::config_pair::record_current_pair();
+        }
         restrict_file_to_owner(&path)?;
         Ok(())
     })();

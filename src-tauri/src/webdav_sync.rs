@@ -920,6 +920,14 @@ pub(crate) fn restore_config_snapshot_unlocked(id: &str) -> Result<ConfigSnapsho
         }
     }
 
+    // Phase 2 C: a snapshot's hosts.json may carry tagged references written
+    // against a different secrets.enc. Verify before any live file is touched.
+    if let Some((_, bytes)) = contents
+        .iter()
+        .find(|(rel, _)| rel.as_str() == "hosts.json")
+    {
+        crate::config_pair::guard_restore(bytes, "restore config snapshot")?;
+    }
     create_sync_backup(Some("pre-restore"))?;
     for (rel, bytes) in contents {
         let dest = dest_dir.join(rel);
@@ -966,6 +974,9 @@ pub fn apply_config_template(files: &[(String, String)]) -> Result<ConfigSnapsho
     // same owner-only atomic replacement as the rest of the config writers —
     // a bare `fs::write` truncated the live file in place and skipped the lock.
     let _guard = hosts_file_lock()?;
+    if let Some((_, content)) = files.iter().find(|(name, _)| name == "hosts.json") {
+        crate::config_pair::guard_restore(content.as_bytes(), "apply config template")?;
+    }
     let pre_apply = create_named_snapshot("pre-template")?;
     ensure_config_dir()?;
     let dir = config_dir()?;
@@ -1244,6 +1255,9 @@ async fn sync_pull<R: SyncRemote>(
     // sync -> hosts -> secrets, never the reverse, so no ABBA deadlock.
     let backup = {
         let _hosts_guard = hosts_file_lock()?;
+        if let Some((_, plaintext)) = downloaded.iter().find(|(path, _)| path == "hosts.json") {
+            crate::config_pair::guard_restore(plaintext, "apply WebDAV pull")?;
+        }
         let backup = create_sync_backup(None)?;
         let dir = config_dir()?;
         let remote_paths: HashSet<String> =

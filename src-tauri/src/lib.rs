@@ -3,6 +3,7 @@ pub mod app_state;
 pub mod approval;
 pub mod backup_crypto;
 pub mod config_cache;
+pub mod config_pair;
 pub mod connection;
 pub mod container_discovery;
 pub mod container_runtime;
