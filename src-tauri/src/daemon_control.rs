@@ -101,8 +101,9 @@ pub fn write_daemon_pid(pid: u32) -> Result<()> {
 
 /// Explicitly remove an unchanged PID record only when the OS reports the PID
 /// absent while the cooperating writers' lock is held. This is not proof of the
-/// old process identity, and cannot protect against older non-cooperating writers.
-#[cfg(target_os = "macos")]
+/// old process identity, and cannot protect against older non-cooperating
+/// writers. Available on every platform: the safety comes from the re-read
+/// under the lock, not from the OS.
 pub fn clear_stale_daemon_pid(expected_pid: u32) -> Result<()> {
     let path = daemon_pid_path()?;
     if !std::fs::symlink_metadata(&path)
@@ -117,7 +118,6 @@ pub fn clear_stale_daemon_pid(expected_pid: u32) -> Result<()> {
     clear_stale_daemon_pid_with_snapshot(expected_pid, &snapshot)
 }
 
-#[cfg(target_os = "macos")]
 fn clear_stale_daemon_pid_with_snapshot(expected_pid: u32, snapshot: &str) -> Result<()> {
     let _guard = crate::store::lock_config_file(DAEMON_PID_LOCK)?;
     let path = daemon_pid_path()?;
@@ -435,6 +435,417 @@ pub fn daemon_pid_state(pid: u32) -> DaemonPidState {
         None if pid_definitely_missing(pid) => DaemonPidState::Stale,
         None => DaemonPidState::Unverified,
     }
+}
+
+/// What the OS said about a recorded PID — with "could not observe" kept
+/// separate from "does not exist".
+///
+/// A failed lookup is not proof of absence: `OpenProcess` denies access for
+/// processes this account may not query, and `kill(pid, 0)` returns `EPERM` for
+/// a live process it may not signal. Only an explicit "no such process" may be
+/// reported as [`PidObservation::Absent`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub enum PidObservation {
+    /// The OS explicitly reports that no process has this PID.
+    Absent,
+    /// Observable and live. `start_time` is a seconds-resolution snapshot, not
+    /// proof of identity.
+    Live { start_time: u64 },
+    /// Observable and already terminated.
+    Zombie,
+    /// The OS refused to describe the process. Access denied is not absence.
+    Denied { reason: String },
+    /// Not observable and not explicitly absent.
+    Unknown { reason: String },
+}
+
+/// State of the `daemon.pid` file itself, independent of any process.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub enum DaemonPidRecord {
+    Missing,
+    Pid { pid: u32 },
+    Malformed { raw: String, reason: String },
+    Unreadable { reason: String },
+    NotARegularFile,
+}
+
+/// What the local `/health` endpoint says, if anything answers it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub enum HealthObservation {
+    Inactive,
+    Reporting {
+        pid: u32,
+        same_pid: bool,
+        /// `None` when the answering daemon predates reporting its config
+        /// directory — unknown, not "different".
+        config_dir_matches: Option<bool>,
+    },
+}
+
+/// Whether the admin token was accepted. The token itself is never reported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TokenObservation {
+    Accepted,
+    Rejected,
+    Missing,
+    NotChecked,
+}
+
+/// Whether the cooperating writers' lock was held while the report was taken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PidLockObservation {
+    Free,
+    Held,
+    Unknown,
+}
+
+/// The one-line answer a person can act on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DaemonVerdict {
+    /// A live process answered health, accepted the token and named the same
+    /// config directory. Still not cryptographic proof of identity (#22).
+    Healthy,
+    /// A live process matches the record but the health endpoint does not answer.
+    RunningUnhealthy,
+    /// A process exists but identity cannot be established, or the endpoint
+    /// disagrees with the record.
+    Unverified,
+    /// The record names a process the OS says is absent.
+    Stale,
+    /// The record itself cannot be used (malformed, unreadable, not a file).
+    Damaged,
+    /// No record and no endpoint.
+    NotRunning,
+}
+
+impl DaemonVerdict {
+    /// A short, stable label for CLI and desktop text. The `serde` form uses
+    /// the same words, so a script and a screenshot agree.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DaemonVerdict::Healthy => "healthy",
+            DaemonVerdict::RunningUnhealthy => "running-unhealthy",
+            DaemonVerdict::Unverified => "unverified",
+            DaemonVerdict::Stale => "stale",
+            DaemonVerdict::Damaged => "damaged",
+            DaemonVerdict::NotRunning => "not-running",
+        }
+    }
+}
+
+/// A read-only diagnosis of the local daemon record. Nothing here mutates a
+/// file, signals a process, or prints the admin token.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DaemonStatusReport {
+    pub config_dir: String,
+    pub pid_path: String,
+    pub token_path: String,
+    pub log_path: String,
+    pub pid_lock: PidLockObservation,
+    pub record: DaemonPidRecord,
+    pub observation: Option<PidObservation>,
+    pub health: HealthObservation,
+    pub token: TokenObservation,
+    pub verdict: DaemonVerdict,
+    pub next_step: String,
+}
+
+/// A short, escaped preview of a damaged record. PID files contain digits, so
+/// anything else is already unexpected; escaping keeps control characters out
+/// of a terminal and a JSON consumer alike.
+fn record_preview(raw: &str) -> String {
+    let trimmed = raw.trim_end_matches(['\r', '\n']);
+    let mut preview: String = trimmed
+        .chars()
+        .take(40)
+        .flat_map(char::escape_debug)
+        .collect();
+    if trimmed.chars().count() > 40 {
+        preview.push('…');
+    }
+    preview
+}
+
+pub fn read_daemon_pid_record(path: &Path) -> DaemonPidRecord {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return DaemonPidRecord::Missing
+        }
+        Err(error) => {
+            return DaemonPidRecord::Unreadable {
+                reason: error.to_string(),
+            }
+        }
+    };
+    if !metadata.file_type().is_file() {
+        return DaemonPidRecord::NotARegularFile;
+    }
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(error) => {
+            return DaemonPidRecord::Unreadable {
+                reason: error.to_string(),
+            }
+        }
+    };
+    match raw.trim().parse::<u32>().ok().filter(|pid| *pid != 0) {
+        Some(pid) => DaemonPidRecord::Pid { pid },
+        None => DaemonPidRecord::Malformed {
+            raw: record_preview(&raw),
+            reason: "not a positive integer".to_string(),
+        },
+    }
+}
+
+/// Ask the OS about a PID without turning "could not look" into "is gone".
+pub fn observe_pid(pid: u32) -> PidObservation {
+    let sys_pid = sysinfo::Pid::from_u32(pid);
+    let mut system = sysinfo::System::new();
+    system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[sys_pid]), true);
+    if let Some(process) = system.process(sys_pid) {
+        if process.status() == sysinfo::ProcessStatus::Zombie {
+            return PidObservation::Zombie;
+        }
+        if process.start_time() != 0 {
+            return PidObservation::Live {
+                start_time: process.start_time(),
+            };
+        }
+    }
+    if pid_definitely_missing(pid) {
+        return PidObservation::Absent;
+    }
+    match pid_access_error(pid) {
+        Some(reason) => PidObservation::Denied { reason },
+        None => PidObservation::Unknown {
+            reason: "process not observable through the process table".to_string(),
+        },
+    }
+}
+
+/// `Some(reason)` only when the OS explicitly refused access, which is a
+/// different fact from a PID that does not exist.
+#[cfg(windows)]
+fn pid_access_error(pid: u32) -> Option<String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ACCESS_DENIED};
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle != 0 {
+            CloseHandle(handle);
+            return None;
+        }
+        let code = GetLastError();
+        (code == ERROR_ACCESS_DENIED).then(|| format!("OpenProcess denied (error {code})"))
+    }
+}
+
+#[cfg(unix)]
+fn pid_access_error(pid: u32) -> Option<String> {
+    let Ok(pid) = i32::try_from(pid) else {
+        return None;
+    };
+    if pid <= 0 {
+        return None;
+    }
+    let result = unsafe { libc::kill(pid, 0) };
+    if result == 0 {
+        return None;
+    }
+    let errno = std::io::Error::last_os_error().raw_os_error();
+    (errno == Some(libc::EPERM)).then(|| "kill(pid, 0) denied (EPERM)".to_string())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn pid_access_error(_pid: u32) -> Option<String> {
+    None
+}
+
+fn observe_health(expected_pid: Option<u32>) -> HealthObservation {
+    match health_identity() {
+        None => HealthObservation::Inactive,
+        Some(identity) => HealthObservation::Reporting {
+            pid: identity.pid,
+            same_pid: expected_pid == Some(identity.pid),
+            config_dir_matches: identity.config_dir.map(|reported| {
+                expected_config_dir()
+                    .map(|expected| reported == expected)
+                    .unwrap_or(false)
+            }),
+        },
+    }
+}
+
+fn observe_token() -> TokenObservation {
+    let Some(token) = crate::daemon_activity::read_admin_token() else {
+        return TokenObservation::Missing;
+    };
+    match crate::daemon_activity::local_daemon_request(
+        "GET",
+        "/gate",
+        Some(&token),
+        Duration::from_millis(500),
+    ) {
+        Ok(response) if response.status == 200 => TokenObservation::Accepted,
+        Ok(_) => TokenObservation::Rejected,
+        // No answer is not a rejection; the endpoint did not speak.
+        Err(_) => TokenObservation::NotChecked,
+    }
+}
+
+fn observe_pid_lock(dir: &Path) -> PidLockObservation {
+    let path = dir.join(DAEMON_PID_LOCK);
+    let file = match OpenOptions::new().read(true).write(true).open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return PidLockObservation::Free
+        }
+        Err(_) => return PidLockObservation::Unknown,
+    };
+    // `std::fs::File` grew advisory locks of its own; a shared attempt answers
+    // "is a writer holding `.daemon-pid.lock` right now" without blocking and
+    // without creating the file.
+    match file.try_lock_shared() {
+        Ok(()) => {
+            let _ = file.unlock();
+            PidLockObservation::Free
+        }
+        Err(std::fs::TryLockError::WouldBlock) => PidLockObservation::Held,
+        Err(_) => PidLockObservation::Unknown,
+    }
+}
+
+fn classify_daemon(
+    record: &DaemonPidRecord,
+    observation: Option<&PidObservation>,
+    health: &HealthObservation,
+    token: TokenObservation,
+) -> DaemonVerdict {
+    // An endpoint that names a different process is the strongest evidence
+    // available here: the record and the answering daemon are not the same
+    // instance, whatever the process table says about the recorded PID.
+    if let HealthObservation::Reporting {
+        same_pid: false, ..
+    } = health
+    {
+        return DaemonVerdict::Unverified;
+    }
+    // The endpoint claims the recorded PID while the process table cannot
+    // confirm it is live. That contradiction is not a stale record: something
+    // answered, so erasing the record could erase the only pointer to it.
+    if let (HealthObservation::Reporting { same_pid: true, .. }, Some(observation)) =
+        (health, observation)
+    {
+        if !matches!(observation, PidObservation::Live { .. }) {
+            return DaemonVerdict::Unverified;
+        }
+    }
+    match record {
+        DaemonPidRecord::Missing => match health {
+            HealthObservation::Inactive => DaemonVerdict::NotRunning,
+            HealthObservation::Reporting { .. } => DaemonVerdict::Unverified,
+        },
+        DaemonPidRecord::Malformed { .. }
+        | DaemonPidRecord::Unreadable { .. }
+        | DaemonPidRecord::NotARegularFile => DaemonVerdict::Damaged,
+        DaemonPidRecord::Pid { .. } => match observation {
+            Some(PidObservation::Absent) | Some(PidObservation::Zombie) => DaemonVerdict::Stale,
+            Some(PidObservation::Denied { .. }) | Some(PidObservation::Unknown { .. }) | None => {
+                DaemonVerdict::Unverified
+            }
+            Some(PidObservation::Live { .. }) => match health {
+                HealthObservation::Inactive => DaemonVerdict::RunningUnhealthy,
+                HealthObservation::Reporting {
+                    same_pid: true,
+                    config_dir_matches,
+                    ..
+                } => {
+                    if *config_dir_matches == Some(false) {
+                        DaemonVerdict::Unverified
+                    } else if token == TokenObservation::Accepted {
+                        DaemonVerdict::Healthy
+                    } else {
+                        DaemonVerdict::Unverified
+                    }
+                }
+                HealthObservation::Reporting {
+                    same_pid: false, ..
+                } => DaemonVerdict::Unverified,
+            },
+        },
+    }
+}
+
+fn daemon_next_step(
+    record: &DaemonPidRecord,
+    observation: Option<&PidObservation>,
+    health: &HealthObservation,
+    verdict: DaemonVerdict,
+) -> String {
+    match verdict {
+        DaemonVerdict::Healthy => {
+            "Nothing to do. Health and the admin token agree with the record, but process identity is still unbound (see #22).".to_string()
+        }
+        DaemonVerdict::RunningUnhealthy => "A process holds the record but /health does not answer. Inspect daemon.log and the listening port; do not signal the PID from this report.".to_string(),
+        DaemonVerdict::Stale => {
+            let pid = match record {
+                DaemonPidRecord::Pid { pid } => *pid,
+                _ => 0,
+            };
+            format!("Run 'agent2ssh daemon clear-stale --expect-pid {pid}' to remove the record only if it still matches and the PID stays absent. No process is signalled.")
+        }
+        DaemonVerdict::Damaged => "The PID file is not a usable record. Inspect it by hand; clear-stale refuses malformed, unreadable and non-file records.".to_string(),
+        DaemonVerdict::NotRunning => "No daemon record and no endpoint. Start one with 'agent2ssh daemon start'.".to_string(),
+        DaemonVerdict::Unverified => match (record, observation, health) {
+            (DaemonPidRecord::Missing, _, HealthObservation::Reporting { pid, .. }) => format!(
+                "An endpoint reports PID {pid} but no PID record exists. Do not create or delete a record from this observation alone."
+            ),
+            (_, Some(PidObservation::Denied { .. }), _) => "The OS denied process inspection. That is not evidence the process exited: re-run as the owning user or inspect the process out of band.".to_string(),
+            (_, _, HealthObservation::Reporting { same_pid: false, pid, .. }) => format!(
+                "The endpoint reports PID {pid}, which is not the recorded PID and/or not this config directory. Inspect both before stopping anything."
+            ),
+            _ => "The record and the endpoint do not prove the same instance. Inspect daemon.log and the process out of band; clear-stale only removes a record it can prove absent.".to_string(),
+        },
+    }
+}
+
+/// Read-only diagnosis of the local daemon record.
+pub fn daemon_status_report() -> Result<DaemonStatusReport> {
+    let dir = config_dir_absolute()?;
+    let pid_path = dir.join("daemon.pid");
+    let record = read_daemon_pid_record(&pid_path);
+    let recorded_pid = match &record {
+        DaemonPidRecord::Pid { pid } => Some(*pid),
+        _ => None,
+    };
+    let observation = recorded_pid.map(observe_pid);
+    let health = observe_health(recorded_pid);
+    let token = match (recorded_pid, observation.as_ref()) {
+        (Some(_), Some(PidObservation::Live { .. })) => observe_token(),
+        _ => TokenObservation::NotChecked,
+    };
+    let verdict = classify_daemon(&record, observation.as_ref(), &health, token);
+    let next_step = daemon_next_step(&record, observation.as_ref(), &health, verdict);
+    Ok(DaemonStatusReport {
+        config_dir: dir.display().to_string(),
+        pid_path: pid_path.display().to_string(),
+        token_path: dir.join("daemon.token").display().to_string(),
+        log_path: dir.join("daemon.log").display().to_string(),
+        pid_lock: observe_pid_lock(&dir),
+        record,
+        observation,
+        health,
+        token,
+        verdict,
+        next_step,
+    })
 }
 
 fn wait_for_daemon_pid(pid: u32, timeout: Duration) -> bool {
@@ -983,7 +1394,6 @@ fn terminate_for_stop(bound: Option<&BoundProcess>, pid: u32, expected_start: u6
     let _ = bound;
     signal_daemon(pid, expected_start, true)
 }
-
 
 #[cfg(any(not(target_os = "macos"), test))]
 fn observe_process(pid: u32, expected_start: u64) -> ProcessObservation {

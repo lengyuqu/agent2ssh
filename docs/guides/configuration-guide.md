@@ -395,6 +395,35 @@ unset ssh_password
 
 记录当前运行的守护进程 PID，用于 `daemon stop` 和 `daemon status` 命令。
 
+### 只读诊断（`daemon status`）
+
+`agent2ssh daemon status` 只读、不阻塞、不发信号，输出下面这些字段；加 `--json` 得到同一份
+结构化结果（适合脚本，字段名与文本标签一致）：
+
+| 字段 | 含义 |
+|---|---|
+| `config dir` / `pid file` / `token file` / `log file` | 本次真正读取的绝对路径（相对 `AGENT2SSH_CONFIG_DIR` 已按当前工作目录解析） |
+| `pid lock` | `.daemon-pid.lock` 是否被写入者持有（`free` / `held by another process` / `unknown`）。**持有不会让 status 阻塞** |
+| `record` | `missing`、`pid N`、`malformed`（带转义预览）、`unreadable: …`、`not a regular file` |
+| `process` | `absent`（OS 明确说没有这个进程）、`live`（带秒级 start_time，**不是身份**）、`terminated (zombie)`、`not observable: …`（**访问被拒不等于已退出**）、`unknown` |
+| `health` | `no endpoint answered`，或 `pid N (recorded / NOT the recorded pid) + config dir matches / DIFFERS / not reported` |
+| `token` | `accepted` / `rejected` / `no token file` / `not checked`。**token 本身从不打印** |
+| `verdict` | `healthy`、`running-unhealthy`、`unverified`、`stale`、`damaged`、`not-running` |
+| `next` | 一句可操作建议。它是建议，不是已执行的动作 |
+
+判定顺序：端点报的 PID 与记录不同 → 一律 `unverified`（不管进程表怎么说）；记录缺失但端点活着 →
+`unverified`；记录里是损坏/不可读/非普通文件 → `damaged`；PID 被 OS 明确判为不存在或僵尸 → `stale`；
+活着但端点沉默 → `running-unhealthy`；活着 + 端点同 PID + 配置目录一致 + token 被接受 → `healthy`
+（仍然只是观察一致，不是绑定的身份，见 K14）。
+
+### 清理残留记录（`daemon clear-stale --expect-pid N`）
+
+全平台可用。它只做一件事：删掉一条**仍与预期一致**的 PID 记录，不发送任何信号。安全性来自锁内
+重读而不是平台：持 `.daemon-pid.lock` 后重新读文件、与命令开始前的原始内容逐字节比较、要求 PID
+仍是期望值、要求 OS 明确返回该 PID 不存在；文件损坏、非普通文件、读不到、被替换、PID 不同或
+进程仍可观察时都拒绝。旧版程序不遵守这把锁，外部替换仍有竞态；PID 空闲也不是原实例退出的身份
+证明（PID 复用）。
+
 ### 文件格式
 
 纯文本，包含进程 ID：

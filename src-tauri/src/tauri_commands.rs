@@ -107,6 +107,10 @@ pub struct DaemonControlResult {
     pub running: bool,
     pub pid: Option<u32>,
     pub message: String,
+    /// Full read-only diagnosis (#21). Omitted by commands that are not a
+    /// diagnosis, so their payloads do not change.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnosis: Option<crate::daemon_control::DaemonStatusReport>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1756,43 +1760,29 @@ pub fn reset_redact_rules() -> Result<Vec<crate::types::RedactRuleInfo>, String>
 
 #[tauri::command]
 pub fn daemon_status() -> Result<DaemonControlResult, String> {
-    use crate::daemon_control::{daemon_pid_state, DaemonPidState};
-    match crate::daemon_control::read_daemon_pid().map_err(|e| e.to_string())? {
-        Some(pid) => {
-            let state = daemon_pid_state(pid);
-            let _ = append_diagnostic_log(
-                "debug",
-                "tauri",
-                "daemon status checked",
-                Some(serde_json::json!({ "pid": pid, "state": format!("{state:?}") })),
-            );
-            let (running, message) = match state {
-                DaemonPidState::Healthy => (true, if cfg!(target_os = "macos") { format!("A daemon endpoint reports PID {pid}; process identity is unbound.") } else { format!("Daemon is running (pid={pid}).") }),
-                DaemonPidState::RunningUnhealthy => (false, format!("Daemon PID {pid} is running but the health check failed; PID file retained.")),
-                DaemonPidState::Unverified => (false, format!("Daemon PID {pid} cannot be verified; PID file retained.")),
-                DaemonPidState::Stale => (false, if cfg!(target_os = "macos") { format!("Daemon PID {pid} appears absent; identity is unbound and PID file retained. Inspect it before using clear-stale.") } else { format!("Daemon PID {pid} is stale; PID file retained.") }),
-            };
-            Ok(DaemonControlResult {
-                running,
-                pid: Some(pid),
-                message,
-            })
-        }
-        None => {
-            let endpoint_pid = crate::daemon_control::daemon_health_pid();
-            #[cfg(target_os = "macos")]
-            return Ok(DaemonControlResult { running: false, pid: endpoint_pid, message: "No daemon PID record; daemon process identity and state are unknown. Inspect the endpoint and processes before recovery.".into() });
-            #[cfg(not(target_os = "macos"))]
-            Ok(DaemonControlResult {
-                running: false,
-                pid: endpoint_pid,
-                message: endpoint_pid.map_or_else(
-                    || "Daemon is not running.".into(),
-                    |pid| format!("Daemon health endpoint is active (pid={pid}) but PID file is missing; identity cannot be verified."),
-                ),
-            })
-        }
-    }
+    use crate::daemon_control::{DaemonPidRecord, DaemonVerdict};
+    let report = crate::daemon_control::daemon_status_report().map_err(|e| e.to_string())?;
+    let _ = append_diagnostic_log(
+        "debug",
+        "tauri",
+        "daemon status checked",
+        Some(serde_json::json!({
+            "verdict": report.verdict.as_str(),
+            "record": serde_json::to_value(&report.record).ok(),
+            "pid_lock": serde_json::to_value(report.pid_lock).ok(),
+        })),
+    );
+    let pid = match &report.record {
+        DaemonPidRecord::Pid { pid } => Some(*pid),
+        _ => crate::daemon_control::daemon_health_pid(),
+    };
+    let message = format!("{}: {}", report.verdict.as_str(), report.next_step);
+    Ok(DaemonControlResult {
+        running: matches!(report.verdict, DaemonVerdict::Healthy),
+        pid,
+        message,
+        diagnosis: Some(report),
+    })
 }
 
 /// This is an explicit compatibility action, not proof of process exit.
@@ -1838,6 +1828,7 @@ pub fn daemon_start(app: AppHandle) -> Result<DaemonControlResult, String> {
                 } else {
                     format!("Daemon is already running (pid={pid}).")
                 },
+                diagnosis: None,
             });
         }
     }
@@ -1874,6 +1865,7 @@ pub fn daemon_start(app: AppHandle) -> Result<DaemonControlResult, String> {
             started.pid,
             started.log_path.display()
         ),
+        diagnosis: None,
     })
 }
 
@@ -1893,6 +1885,7 @@ pub fn daemon_stop() -> Result<DaemonControlResult, String> {
                 running: false,
                 pid: Some(pid),
                 message: format!("Daemon stopped (pid={pid})."),
+                diagnosis: None,
             })
         }
         None => {
@@ -1906,6 +1899,7 @@ pub fn daemon_stop() -> Result<DaemonControlResult, String> {
                 running: false,
                 pid: None,
                 message: "Daemon is not running.".into(),
+                diagnosis: None,
             })
         }
     }

@@ -819,13 +819,10 @@ fn renamed_daemon_is_reported_healthy_but_not_unsafely_stopped() {
     };
     let status = cli("status");
     assert!(status.status.success());
-    assert!(
-        String::from_utf8_lossy(&status.stdout).contains(if cfg!(target_os = "macos") {
-            "identity is unbound"
-        } else {
-            "Daemon is running"
-        })
-    );
+    // The diagnosis names the verdict instead of one sentence per platform:
+    // the renamed daemon answers health and accepts the token, so the verdict
+    // is still `healthy` even though `daemon stop` will refuse it by name.
+    assert!(String::from_utf8_lossy(&status.stdout).contains("healthy"));
     let start = cli("start");
     assert!(start.status.success());
     assert!(
@@ -926,12 +923,12 @@ fn start_refuses_to_claim_an_existing_health_endpoint_without_a_pid_file() {
             .unwrap()
     };
     let status = cli("status");
-    assert!(String::from_utf8_lossy(&status.stdout).contains("PID file is missing"));
+    assert!(String::from_utf8_lossy(&status.stdout).contains("no PID record"));
     assert!(!cli("stop").status.success());
     #[cfg(feature = "tauri")]
     {
         let status = agent2ssh::tauri_commands::daemon_status().unwrap();
-        assert!(!status.running && status.message.contains("PID file is missing"));
+        assert!(!status.running && status.message.contains("no PID record"));
         assert!(agent2ssh::tauri_commands::daemon_stop().is_err());
     }
     let error =
@@ -1097,7 +1094,7 @@ fn a_forged_endpoint_cannot_report_an_absent_pid_as_running() {
         assert!(desktop_status.message.contains("cannot be verified"));
     }
     assert!(status.status.success());
-    assert!(String::from_utf8_lossy(&status.stdout).contains("identity cannot be verified"));
+    assert!(String::from_utf8_lossy(&status.stdout).contains("unverified"));
     assert_eq!(
         std::fs::read_to_string(dir.path().join("daemon.pid")).unwrap(),
         pid.to_string()
