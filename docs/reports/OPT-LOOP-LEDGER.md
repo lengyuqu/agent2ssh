@@ -4031,6 +4031,7 @@ L2-154（`/exec-multi` 全 0 语义）、L2-155（preview 缺 admin 门）、L2-
   - `docs/reports/OPT-LOOP-L2-PENDING.md`：**L2-192**（31 行里只有 5 行自证，删行静默）、**L2-193**（删 `preflight_guarded_request_inner` 的 gate/rate 全绿）、**L2-194**（缺「文档了但没人实现」方向）、**L2-195**（按缩进读 spec，description 里能塞假 response 块）、**L2-196**（`--bin` 单测不在 CI 清单）。**最大编号 L2-196**。
 - **反向验证 7 次（全部实跑）**：①无关委派 → 红并点名「`exec` … never calls it」；②兄弟方法 + marker 借用 → 同时红两条；③`finish_sftp_operation` 行改成 423 → 红「its body builds 400」；④`locked_status` 423→400 → 红「it spells ["400"]」；⑤字符串字面量 → 修复前绿、修复后红；⑥`/terminal` 文档化 408 → 红「documents 408 but answers it in-band」；⑦marker 句子缩短 → 红「no longer says …」。
 - **验证**：`npm run build` **6.34 s**；`cargo fmt --check` 绿；`--no-default-features --lib` **865 / 0 / 1**；`--no-default-features --features daemon --test daemon_integration` **86 passed / 0 failed**（原 85，+1 是新测试；旧 85 项全部仍绿）。
+- **回帖**：`2120814886648197120`（`## 本轮收尾`，不带轮次号，`09:44:06Z`）。`#20` **保持 open**：L2-192 至 L2-196 与人决策项都还挂着。worktree `…/single-20` 已 remove、分支 `opt/single-20-20261112h` 已 `-d`。
 - **未做**：L2-192 至 L2-196 五条全部待拍板；L2-185 的锚点漂移已按 #20 复核方的正确区间（`4777-4809`、分支 `4784-4786`）在本轮一并核对（`4753` 现在是 `if matches!`），L2 正文不另改。
 
 ### 新增「不成立」，不要重复提
