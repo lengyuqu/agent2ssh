@@ -1,0 +1,48 @@
+[
+  {
+    "case": "readonly-target",
+    "readonly_before": true,
+    "returncode": 0,
+    "elapsed_ms": 683.9,
+    "config_changed": true,
+    "readonly_after": false,
+    "stderr": ""
+  },
+  {
+    "case": "open-without-delete-share",
+    "returncode": 1,
+    "elapsed_ms": 1319.5,
+    "config_unchanged": true,
+    "stderr": "Error: failed to replace C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\a2s27-ren-locked-8830ed\\hosts.json after 6 retries (another process may still hold it open)\n\nCaused by:\n    拒绝访问。 (os error 5)",
+    "retries_visible": true
+  },
+  {
+    "case": "released-after-300ms",
+    "returncode": 0,
+    "elapsed_ms": 674.1,
+    "stderr": ""
+  },
+  {
+    "case": "open-with-delete-share",
+    "returncode": 0,
+    "elapsed_ms": 687.0,
+    "stderr": ""
+  },
+  {
+    "case": "stale-temp-file",
+    "returncode": 0,
+    "elapsed_ms": 668.8,
+    "stale_still_there": true,
+    "leftovers": [
+      "hosts.json.tmp.999999"
+    ],
+    "stderr": ""
+  },
+  {
+    "case": "icacls-fails",
+    "returncode": 0,
+    "config_unchanged": false,
+    "stderr": "",
+    "temp_files": []
+  }
+]

@@ -1,0 +1,245 @@
+[
+  {
+    "case": "cmd-echo-pipe",
+    "expectation": "success; stored value has no CR/LF",
+    "returncode": 0,
+    "stdout": "{\n  \"name\": \"cmd-echo\",\n  \"host\": \"127.0.0.1\",\n  \"user\": null,\n  \"port\": null,\n  \"key_path\": null,\n  \"password\": null,\n  \"jump_host\": null,\n  \"proxy_id\": null,\n  \"risk_override\": null,\n  \"tags\": [],\n  \"group\": \"default\",\n  \"env\": null,\n  \"role\": null,\n  \"owner\": null,\n  \"init_command\": null,\n  \"passphrase\": null,\n  \"ai_allowed\": true\n}\n",
+    "stderr": "",
+    "elapsed_ms": 713.9,
+    "argv": "cmd.exe /c echo SYNTHETIC_CMD_ECHO| \"C:\\Users\\Administrator\\WorkBuddy\\Worktrees\\agent2ssh\\main-cd4d72f6\\src-tauri\\target\\debug\\agent2ssh.exe\" host add cmd-echo --host 127.0.0.1 --password-stdin --json",
+    "stored_hex": "53594e5448455449435f434d445f4543484f",
+    "stored_text": "SYNTHETIC_CMD_ECHO",
+    "show_rc": 0,
+    "config_dir": "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\a2s27-cmd-echo-384a0bf1"
+  },
+  {
+    "case": "cmd-redirect-crlf",
+    "expectation": "success; exactly one trailing CRLF trimmed",
+    "returncode": 0,
+    "stdout": "{\n  \"name\": \"cmd-redirect\",\n  \"host\": \"127.0.0.1\",\n  \"user\": null,\n  \"port\": null,\n  \"key_path\": null,\n  \"password\": null,\n  \"jump_host\": null,\n  \"proxy_id\": null,\n  \"risk_override\": null,\n  \"tags\": [],\n  \"group\": \"default\",\n  \"env\": null,\n  \"role\": null,\n  \"owner\": null,\n  \"init_command\": null,\n  \"passphrase\": null,\n  \"ai_allowed\": true\n}\n",
+    "stderr": "",
+    "elapsed_ms": 687.9,
+    "argv": "cmd.exe /c \"\"C:\\Users\\Administrator\\WorkBuddy\\Worktrees\\agent2ssh\\main-cd4d72f6\\src-tauri\\target\\debug\\agent2ssh.exe\" host add cmd-redirect --host 127.0.0.1 --password-stdin --json < \"C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\a2s27-cmd-redirect-06e8fd37\\secret-crlf.txt\"\"",
+    "stored_hex": "53594e5448455449435f434d445f5245444952454354",
+    "stored_text": "SYNTHETIC_CMD_REDIRECT",
+    "show_rc": 0,
+    "config_dir": "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\a2s27-cmd-redirect-06e8fd37"
+  },
+  {
+    "case": "cmd-redirect-interior-lines",
+    "expectation": "success; only the final CRLF is trimmed",
+    "returncode": 0,
+    "stdout": "{\n  \"name\": \"cmd-interior\",\n  \"host\": \"127.0.0.1\",\n  \"user\": null,\n  \"port\": null,\n  \"key_path\": null,\n  \"password\": null,\n  \"jump_host\": null,\n  \"proxy_id\": null,\n  \"risk_override\": null,\n  \"tags\": [],\n  \"group\": \"default\",\n  \"env\": null,\n  \"role\": null,\n  \"owner\": null,\n  \"init_command\": null,\n  \"passphrase\": null,\n  \"ai_allowed\": true\n}\n",
+    "stderr": "",
+    "elapsed_ms": 685.5,
+    "argv": "cmd.exe /c \"\"C:\\Users\\Administrator\\WorkBuddy\\Worktrees\\agent2ssh\\main-cd4d72f6\\src-tauri\\target\\debug\\agent2ssh.exe\" host add cmd-interior --host 127.0.0.1 --password-stdin --json < \"C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\a2s27-cmd-interior-a2cf431a\\secret-interior.txt\"\"",
+    "stored_hex": "202053594e5448455449435f434d445f494e544552494f5220200d0a7365636f6e64206c696e652020",
+    "stored_text": "  SYNTHETIC_CMD_INTERIOR  \r\nsecond line  ",
+    "show_rc": 0,
+    "config_dir": "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\a2s27-cmd-interior-a2cf431a"
+  },
+  {
+    "case": "cmd-empty-pipe",
+    "expectation": "non-zero; 'secret input is empty'; no config written",
+    "returncode": 1,
+    "stdout": "",
+    "stderr": "Error: secret input is empty\n",
+    "elapsed_ms": 66.2,
+    "argv": "cmd.exe /c type NUL| \"C:\\Users\\Administrator\\WorkBuddy\\Worktrees\\agent2ssh\\main-cd4d72f6\\src-tauri\\target\\debug\\agent2ssh.exe\" host add cmd-empty --host 127.0.0.1 --password-stdin",
+    "hosts_exists": false,
+    "config_dir": "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\a2s27-cmd-empty-a2759262"
+  },
+  {
+    "case": "cmd-invalid-utf8-pipe",
+    "expectation": "non-zero; stderr says UTF-8; no config written",
+    "returncode": 1,
+    "stdout": "",
+    "stderr": "Error: secret input must be UTF-8\n",
+    "elapsed_ms": 69.2,
+    "argv": "cmd.exe /c type \"C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\a2s27-cmd-invalid-utf8-0d8641c4\\secret-invalid.bin\"| \"C:\\Users\\Administrator\\WorkBuddy\\Worktrees\\agent2ssh\\main-cd4d72f6\\src-tauri\\target\\debug\\agent2ssh.exe\" host add cmd-invalid --host 127.0.0.1 --password-stdin",
+    "hosts_exists": false,
+    "config_dir": "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\a2s27-cmd-invalid-utf8-0d8641c4"
+  },
+  {
+    "case": "pwsh-pipe-string",
+    "expectation": "success; terminator trimmed",
+    "returncode": 0,
+    "stdout": "{\n  \"name\": \"pwsh-pipe\",\n  \"host\": \"127.0.0.1\",\n  \"user\": null,\n  \"port\": null,\n  \"key_path\": null,\n  \"password\": null,\n  \"jump_host\": null,\n  \"proxy_id\": null,\n  \"risk_override\": null,\n  \"tags\": [],\n  \"group\": \"default\",\n  \"env\": null,\n  \"role\": null,\n  \"owner\": null,\n  \"init_command\": null,\n  \"passphrase\": null,\n  \"ai_allowed\": true\n}\n",
+    "stderr": "",
+    "elapsed_ms": 1113.9,
+    "argv": [
+      "C:\\Program Files\\PowerShell\\7\\pwsh.EXE",
+      "-NoLogo",
+      "-NoProfile",
+      "-Command",
+      "\"SYNTHETIC_PWSH_PIPE\" | & \"C:\\Users\\Administrator\\WorkBuddy\\Worktrees\\agent2ssh\\main-cd4d72f6\\src-tauri\\target\\debug\\agent2ssh.exe\" host add pwsh-pipe --host 127.0.0.1 --password-stdin --json"
+    ],
+    "stored_hex": "53594e5448455449435f505753485f50495045",
+    "stored_text": "SYNTHETIC_PWSH_PIPE",
+    "show_rc": 0,
+    "config_dir": "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\a2s27-pwsh-pipe-50bb82de",
+    "shell": "C:\\Program Files\\PowerShell\\7\\pwsh.EXE"
+  },
+  {
+    "case": "powershell51-pipe-string",
+    "expectation": "success; the pipe's own encoding is visible in the stored value",
+    "returncode": 0,
+    "stdout": "{\n  \"name\": \"ps51-pipe\",\n  \"host\": \"127.0.0.1\",\n  \"user\": null,\n  \"port\": null,\n  \"key_path\": null,\n  \"password\": null,\n  \"jump_host\": null,\n  \"proxy_id\": null,\n  \"risk_override\": null,\n  \"tags\": [],\n  \"group\": \"default\",\n  \"env\": null,\n  \"role\": null,\n  \"owner\": null,\n  \"init_command\": null,\n  \"passphrase\": null,\n  \"ai_allowed\": true\n}\n",
+    "stderr": "",
+    "elapsed_ms": 964.4,
+    "argv": [
+      "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+      "-NoLogo",
+      "-NoProfile",
+      "-Command",
+      "\"SYNTHETIC_PS51_PIPE\" | & \"C:\\Users\\Administrator\\WorkBuddy\\Worktrees\\agent2ssh\\main-cd4d72f6\\src-tauri\\target\\debug\\agent2ssh.exe\" host add ps51-pipe --host 127.0.0.1 --password-stdin --json"
+    ],
+    "stored_hex": "efbbbf53594e5448455449435f505335315f50495045",
+    "stored_text": "﻿SYNTHETIC_PS51_PIPE",
+    "show_rc": 0,
+    "config_dir": "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\a2s27-ps51-pipe-a5dcf7d3",
+    "shell": "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+  },
+  {
+    "case": "powershell51-outputencoding",
+    "expectation": "diagnostic: default pipe encoder and preamble length",
+    "returncode": 0,
+    "stdout": "type=System.Text.ASCIIEncoding\r\npreamble=0\r\n",
+    "stderr": "",
+    "elapsed_ms": 241.9,
+    "argv": [
+      "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+      "-NoLogo",
+      "-NoProfile",
+      "-Command",
+      "\"type=\" + $OutputEncoding.GetType().FullName; \"preamble=\" + $OutputEncoding.GetPreamble().Length"
+    ],
+    "config_dir": "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\a2s27-ps51-encoding-7fab7f5b",
+    "shell": "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+  },
+  {
+    "case": "powershell51-pipe-no-bom",
+    "expectation": "explicit BOM-less encoder; stored value clean",
+    "returncode": 0,
+    "stdout": "{\n  \"name\": \"ps51-nobom\",\n  \"host\": \"127.0.0.1\",\n  \"user\": null,\n  \"port\": null,\n  \"key_path\": null,\n  \"password\": null,\n  \"jump_host\": null,\n  \"proxy_id\": null,\n  \"risk_override\": null,\n  \"tags\": [],\n  \"group\": \"default\",\n  \"env\": null,\n  \"role\": null,\n  \"owner\": null,\n  \"init_command\": null,\n  \"passphrase\": null,\n  \"ai_allowed\": true\n}\n",
+    "stderr": "",
+    "elapsed_ms": 956.0,
+    "argv": [
+      "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+      "-NoLogo",
+      "-NoProfile",
+      "-Command",
+      "$OutputEncoding = New-Object System.Text.UTF8Encoding $false; \"SYNTHETIC_PS51_NOBOM\" | & \"C:\\Users\\Administrator\\WorkBuddy\\Worktrees\\agent2ssh\\main-cd4d72f6\\src-tauri\\target\\debug\\agent2ssh.exe\" host add ps51-nobom --host 127.0.0.1 --password-stdin --json"
+    ],
+    "stored_hex": "efbbbf53594e5448455449435f505335315f4e4f424f4d",
+    "stored_text": "﻿SYNTHETIC_PS51_NOBOM",
+    "show_rc": 0,
+    "config_dir": "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\a2s27-ps51-nobom-b46f60bc",
+    "shell": "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+  },
+  {
+    "case": "pwsh-lt-redirection",
+    "expectation": "parse error: '<' is reserved / not supported",
+    "returncode": 1,
+    "stdout": "",
+    "stderr": "ParserError: \r\nLine |\r\n   1 |  … gent2ssh.exe\" host add lt --host 127.0.0.1 --password-stdin < \"C:\\Use …\r\n     |                                                                ~\r\n     | “<”运算符保留供将来使用。\r\n",
+    "elapsed_ms": 528.4,
+    "argv": [
+      "C:\\Program Files\\PowerShell\\7\\pwsh.EXE",
+      "-NoLogo",
+      "-NoProfile",
+      "-Command",
+      "& \"C:\\Users\\Administrator\\WorkBuddy\\Worktrees\\agent2ssh\\main-cd4d72f6\\src-tauri\\target\\debug\\agent2ssh.exe\" host add lt --host 127.0.0.1 --password-stdin < \"C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\a2s27-pwsh-lt-be30f594\\nope.txt\""
+    ],
+    "hosts_exists": false,
+    "config_dir": "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\a2s27-pwsh-lt-be30f594"
+  },
+  {
+    "case": "powershell51-lt-redirection",
+    "expectation": "parse error: '<' is reserved / not supported",
+    "returncode": 1,
+    "stdout": "",
+    "stderr": "At line:1 char:155\r\n+ ... gent2ssh.exe\" host add lt --host 127.0.0.1 --password-stdin < \"C:\\Use ...\r\n+                                                                 ~\r\nThe '<' operator is reserved for future use.\r\n    + CategoryInfo          : ParserError: (:) [], ParentContainsErrorRecordException\r\n    + FullyQualifiedErrorId : RedirectionNotSupported\r\n \r\n",
+    "elapsed_ms": 305.7,
+    "argv": [
+      "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+      "-NoLogo",
+      "-NoProfile",
+      "-Command",
+      "& \"C:\\Users\\Administrator\\WorkBuddy\\Worktrees\\agent2ssh\\main-cd4d72f6\\src-tauri\\target\\debug\\agent2ssh.exe\" host add lt --host 127.0.0.1 --password-stdin < \"C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\a2s27-powershell51-lt-b3a5edb2\\nope.txt\""
+    ],
+    "hosts_exists": false,
+    "config_dir": "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\a2s27-powershell51-lt-b3a5edb2"
+  },
+  {
+    "case": "pwsh-getcontent-raw",
+    "expectation": "success; Get-Content -Raw adds its own terminator on top of the file's",
+    "returncode": 0,
+    "stdout": "{\n  \"name\": \"pwsh-getcontent\",\n  \"host\": \"127.0.0.1\",\n  \"user\": null,\n  \"port\": null,\n  \"key_path\": null,\n  \"password\": null,\n  \"jump_host\": null,\n  \"proxy_id\": null,\n  \"risk_override\": null,\n  \"tags\": [],\n  \"group\": \"default\",\n  \"env\": null,\n  \"role\": null,\n  \"owner\": null,\n  \"init_command\": null,\n  \"passphrase\": null,\n  \"ai_allowed\": true\n}\n",
+    "stderr": "",
+    "elapsed_ms": 1223.9,
+    "argv": [
+      "C:\\Program Files\\PowerShell\\7\\pwsh.EXE",
+      "-NoLogo",
+      "-NoProfile",
+      "-Command",
+      "Get-Content -Raw -LiteralPath \"C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\a2s27-pwsh-getcontent-ec2c8c24\\secret.txt\" | & \"C:\\Users\\Administrator\\WorkBuddy\\Worktrees\\agent2ssh\\main-cd4d72f6\\src-tauri\\target\\debug\\agent2ssh.exe\" host add pwsh-getcontent --host 127.0.0.1 --password-stdin --json"
+    ],
+    "stored_hex": "53594e5448455449435f474554434f4e54454e540d0a",
+    "stored_text": "SYNTHETIC_GETCONTENT\r\n",
+    "show_rc": 0,
+    "config_dir": "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\a2s27-pwsh-getcontent-ec2c8c24"
+  },
+  {
+    "case": "pwsh-getcontent-lines",
+    "expectation": "success; single terminator trimmed",
+    "returncode": 0,
+    "stdout": "{\n  \"name\": \"pwsh-lines\",\n  \"host\": \"127.0.0.1\",\n  \"user\": null,\n  \"port\": null,\n  \"key_path\": null,\n  \"password\": null,\n  \"jump_host\": null,\n  \"proxy_id\": null,\n  \"risk_override\": null,\n  \"tags\": [],\n  \"group\": \"default\",\n  \"env\": null,\n  \"role\": null,\n  \"owner\": null,\n  \"init_command\": null,\n  \"passphrase\": null,\n  \"ai_allowed\": true\n}\n",
+    "stderr": "",
+    "elapsed_ms": 1192.8,
+    "argv": [
+      "C:\\Program Files\\PowerShell\\7\\pwsh.EXE",
+      "-NoLogo",
+      "-NoProfile",
+      "-Command",
+      "Get-Content -LiteralPath \"C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\a2s27-pwsh-getcontent-ec2c8c24\\secret.txt\" | & \"C:\\Users\\Administrator\\WorkBuddy\\Worktrees\\agent2ssh\\main-cd4d72f6\\src-tauri\\target\\debug\\agent2ssh.exe\" host add pwsh-lines --host 127.0.0.1 --password-stdin --json"
+    ],
+    "stored_hex": "53594e5448455449435f474554434f4e54454e54",
+    "stored_text": "SYNTHETIC_GETCONTENT",
+    "show_rc": 0,
+    "config_dir": "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\a2s27-pwsh-getcontent-lines-26ed6d4a"
+  },
+  {
+    "case": "pwsh-empty-pipe",
+    "expectation": "non-zero; 'secret input is empty'",
+    "returncode": 1,
+    "stdout": "",
+    "stderr": "Error: secret input is empty\n",
+    "elapsed_ms": 459.1,
+    "argv": [
+      "C:\\Program Files\\PowerShell\\7\\pwsh.EXE",
+      "-NoLogo",
+      "-NoProfile",
+      "-Command",
+      "$null | & \"C:\\Users\\Administrator\\WorkBuddy\\Worktrees\\agent2ssh\\main-cd4d72f6\\src-tauri\\target\\debug\\agent2ssh.exe\" host add pwsh-empty --host 127.0.0.1 --password-stdin"
+    ],
+    "hosts_exists": false,
+    "config_dir": "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\a2s27-pwsh-empty-324a995f"
+  },
+  {
+    "case": "set-password-pipe-no-prompt",
+    "expectation": "no 'New master password:' on stderr",
+    "returncode": 0,
+    "stdout": "Master password set.\n",
+    "stderr": "",
+    "elapsed_ms": 849.6,
+    "argv": [
+      "C:\\Program Files\\PowerShell\\7\\pwsh.EXE",
+      "-NoLogo",
+      "-NoProfile",
+      "-Command",
+      "\"\" | & \"C:\\Users\\Administrator\\WorkBuddy\\Worktrees\\agent2ssh\\main-cd4d72f6\\src-tauri\\target\\debug\\agent2ssh.exe\" secrets set-password --password SYNTHETIC_SETPW_NEW"
+    ],
+    "config_dir": "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\a2s27-setpw-pipe-be30fb57"
+  }
+]

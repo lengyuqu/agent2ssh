@@ -628,7 +628,7 @@ mod tests {
         use std::net::TcpListener;
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (mut peer, _) = listener.accept().unwrap();
+        let (peer, _) = listener.accept().unwrap();
         peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
         let settings = Settings::new();
         settings.set_socket(&socket).unwrap();
