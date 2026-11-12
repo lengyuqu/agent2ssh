@@ -3951,7 +3951,7 @@ L2-154（`/exec-multi` 全 0 语义）、L2-155（preview 缺 admin 门）、L2-
 - **判定 11 条 → 成立 9 / 部分成立 1 / 数字不成立 1**（行号按其基线 `d3a4a71` 基本准确，本轮全部按 `4487f7f` 重映射，不记它漂移）：
   1. **名称白名单未点明 → 成立**。`is_daemon_executable:141-154` 是四个字面量，不是「看起来像 daemon」；后果是三元组不在表内的打包构建**停不掉也起不来**（`:774-779` 静默 `Ok(())`、`start_daemon_background:448-452` 拒绝）→ **L2-186**。
   2. **两文件协调已存在 + 无锁读 → 成立，但文件名错**。它写 `daemon-owner.json`，实际是 `daemon.owner`（`daemon_control.rs:587`）；`OwnerMarker{pid,start_time}:582-585`、`clear_daemon_owner_if:625-643` 锁内重匹配确实存在，`daemon_is_owned:612-623` 确实**不加锁** → **L2-188**。
-  3. **§6.3 当前走不到 + 更强的结论 → 成立**。客户端只靠 `/health` **响应体**里的 `pid`（`:231-250`）；全仓 `SO_PEERCRED`/`GetNamedPipeServerProcessId` 零命中；控制面只有一条 `TcpListener::bind`（`agent2ssh-daemon.rs:5826`）。所以 §3.2 的绑定在现有 TCP 通道上不可达，这是**结构结论**而不是「待验证」。
+  3. **§6.3 当前走不到 + 更强的结论 → 成立**。客户端只靠 `/health` **响应体**里的 `pid`（`:231-253`）；全仓 `SO_PEERCRED`/`GetNamedPipeServerProcessId` 零命中；控制面只有一条 `TcpListener::bind`（`agent2ssh-daemon.rs:5826`）。所以 §3.2 的绑定在现有 TCP 通道上不可达，这是**结构结论**而不是「待验证」。
   4. **`daemon_health_ok` 子串匹配 → 部分成立**。`:193` 的 `contains("\"ok\":true")` 确实能被**响应头**骗过；但它说的影响面（`daemon start` 误拒、`daemon status` 进错分支）**不成立**：`start_daemon_background:454-457` 走 `daemon_health_pid` → `health_identity`，那是对**响应体**做 `serde_json` 解析；而 `daemon_health_ok` 在生产路径上**零调用**（唯一调用者 `wait_for_daemon_health:196-205` 本身全仓零调用，只有 `daemon_integration.rs:5420` 打它）→ **L2-187**（休眠隐患，不是可用的 DoS）。
   5. **`Stale` 是「无身份证明的删除授权」→ 成立**。`pid_definitely_missing` unix 版只判 `kill(pid,0)==ESRCH`（`:305-322`，不比较 start_time），`start_daemon_background:435-448` 与 `bin/agent2ssh.rs:3123-3129` 直接删记录。已写进 §3.3「遗留路径不得当作 `Exited`」。
   6. **每次正常停止都写假 warn → 成立**。能落 `AcceptedUnchecked` 的只有 `200`，而真实停止永远带 `expect_pid`（`request_shutdown:881-947`）；warn 在 `:1053-1061`（文案 `:1057`）。代码注释 `:1039-1052` 已自陈这是已知缺陷——文档此前没写。
@@ -3968,6 +3968,40 @@ L2-154（`/exec-multi` 全 0 语义）、L2-155（preview 缺 admin 门）、L2-
 
 ### 新增「不成立」，不要重复提
 
-1. **「`daemon_health_ok` 的子串判定让任意本机进程能让 `daemon start` 误判已有实例而拒绝启动」**——不成立。`start_daemon_background:454-457` 用的是 `daemon_health_pid()` → `health_identity():231-250`，那是对**响应体**做 `serde_json::from_str` + `ok` 布尔 + `pid` u64 三重校验，响应头里的 `{"ok":true}` 过不去；`daemon_health_ok` 本身在生产路径上零调用（唯一调用者 `wait_for_daemon_health` 全仓零调用）。子串判定是真的，但它是休眠隐患。
+1. **「`daemon_health_ok` 的子串判定让任意本机进程能让 `daemon start` 误判已有实例而拒绝启动」**——不成立。`start_daemon_background:454-457` 用的是 `daemon_health_pid()` → `health_identity():231-253`，那是对**响应体**做 `serde_json::from_str` + `ok` 布尔 + `pid` u64 三重校验，响应头里的 `{"ok":true}` 过不去；`daemon_health_ok` 本身在生产路径上零调用（唯一调用者 `wait_for_daemon_health` 全仓零调用）。子串判定是真的，但它是休眠隐患。
 2. **「`daemon_stop_e2e.rs` 共 74 个 `fn`，其中 13 项 `#[cfg(unix)]`」**——两个数都错。实测 `grep -c 'fn '` = 51、`#[test]` = 34、`#[cfg(unix)]` 出现 15 次而**门住测试的只有 8 个**。结论（两个核心竞态用例在 Windows/macOS 零覆盖）成立，数字不要引用。
 3. **「两文件协调是纯提案，`daemon-owner.json` 还不存在」**——不成立。既有文件叫 `daemon.owner`，且已经是 `{pid, start_time}` 记录 + 锁内条件删除（`clear_daemon_owner_if:625-643`）。
+
+## 2026-11-12 16:16–（模式 B 单发 · issue #25 首次进入 · P2 设计类，单段闭环）
+
+- **前置**：无锁 → 主动建 pid 15935 写入 `owner`；三个其它 worktree（`.codex/worktrees/cnb-pr3-merge`、`WorkBuddy/Worktrees/main-f0ecd0ba`、`main-f749b514`）`status --porcelain` 全 0 行、`src`/`docs` 四十分钟零写入；`ls-remote cnb/main` 与本地同为 `4d06549` → 不让位。`open` **十条**（#20–#29），**无 `[opt-round]`** → 模式 B，第二段为空。
+- **选靶 #25**（P2，首次进入）：**没有 P1 可选**——#20/#21/#22/#23 的最新一条都是本流程的收尾帖（等复核）；#24/#27 要 Windows 实机（排除，本机 macOS）；#26/#28/#29 零评论且正文无「文件:行号」级断言（#26 只给文件路径、自称「源码推断，未构造竞态」）。#25 是唯一有**未消费** CodeBuddy 设计分析（`2120409164848472064`，11-11）且**本机可实测**的一条：它是 macOS 分册，而本机就是 macOS。按 §5.3 的 P2 口径，交付物是「能让人 5 分钟内拍板的方案对比」，不是代码。
+- **判定 12 条 → 成立 6 / 部分成立 4 / 不成立 2**：
+  1. **控制面纯 TCP、无对端凭据 → 成立**。`remote.rs:13` 常量、`agent2ssh-daemon.rs:5826` 唯一一条 `TcpListener::bind`；同一组 grep（`LOCAL_PEER|SO_PEERCRED|getpeereid|UnixListener`）在当前树仍是 **0**。
+  2. **`health_identity()` 只认子串 → 部分成立（引用错函数）**。它引的 `HTTP/1.1 200` + `"ok":true` 是 `daemon_health_ok:166-194`，而 `health_identity:231-253` 是对**响应体**做 JSON 解析。结论（任何进程能回这个形状）仍对，机制不同；已在 K14 里把这两者分开写。
+  3. **`kill(pid,0)` 三档与 `pid_definitely_missing` 只判 `ESRCH` → 成立**（实测 self=0 / pid1=EPERM / 不存在=ESRCH）。
+  4. **`kqueue` 必须实测 → 部分成立**。`ESRCH` 成立；但它说的 `EACCES` **在本机没有出现**（对 pid 1 注册 `data=0`），且错误**只**从 `EV_ERROR` 事件出（`kevent()` 返回 1），不是 `-1`。
+  5. **`upid` 对其他 uid 的权限「未确证」→ 成立 + 补实测**。flavor 17 对 self 与 pid 1 都返回 56 字节（`p_uniqueid` 511811 / 1），但 `PROC_PIDTBSDINFO` 对 pid 1 返回 0/EPERM。两个 flavor 的权限面**不一样**。
+  6. **`libc` 是否导出 `LOCAL_PEERPID`/`LOCAL_PEERTOKEN` 未核实 → 成立（导出）**。`libc 0.2.186` 的 `unix/bsd/apple/mod.rs:2908/2910/2918`；`proc_pidinfo` 在 `:4902`、`PROC_PIDTBSDINFO` 在 `:3684`；但**没有** `proc_uniqidentifierinfo` / flavor 17 常量。
+  7. **`start_time` 秒级来自 `pbi_start_tvsec` → 成立**（`sysinfo 0.39.3` `unix/apple/macos/process.rs:385`），而 `pbi_start_tvusec` 就在同一公开结构里没被读 → 本轮最实的改进点，**L2-189**。
+  8. **「74 个 `fn`、13 项 `#[cfg(unix)]`」→ 不成立（数字）**。实测 51 `fn` / 34 `#[test]` / 15 个 `#[cfg(unix)]` 属性、其中门住 **8 个测试**。
+  9. **「Windows 与 macOS 上零覆盖」→ 部分成立（macOS 半不成立，且计划稿也带着这个错）**。`#[cfg(unix)]` 在 macOS 成立：本轮实测 `daemon_stop_e2e` **34 passed / 0 failed / 40.75 s**，两条核心竞态用例单独复跑各 1 passed。计划稿 §5 与上一节「不成立」第 2 条的后半一并更正。
+  10. **行号引用 → 部分成立（整体下移）**。按其基线 `380e166` 大体准，当前树全部重映射：`read_daemon_pid:56`、`DaemonPidState:210`、`daemon_pid_state:343`、`signal_daemon:763`、`wait_for_exit:749`、`stop_daemon_process:979`、`bind:5826`。
+  11. **方案 B「影响 CLI/桌面/MCP 三面」→ 不成立（代价高估）**。本地 daemon 请求只有两个接缝（`daemon_activity.rs:44/65`），`stop_daemon_process` 只有 **5 个调用点**（`tauri_commands.rs:1855/1885/1918`、`bin/agent2ssh.rs:3080/3107`），三面都经它，不需要各改一遍。
+  12. **「macOS 上不存在 pidfd 等价物、窗口只能缩小」→ 成立**，且本轮把它拆成两段可执行的收窄（MD2 精度、MD4 kqueue），并明确二者都**不构成 `Bound`**。
+- **本轮改了什么（全部 L1，`src-tauri/src/**` 零改动）**：
+  - 新增 **`docs/plans/macos-daemon-identity.md`**：实测环境与复算命令、E1–E5 能力表、三条硬结论（无进程对象原语 / 可观察面宽于可发信号面 / `LOCAL_PEERPID` 是「最近访问者」）、对 #25 分析的判定表、与 #22 D3–D6 的对接、MACOS-0..3 顺序、M1–M12 现状、六条未验证。
+  - `docs/plans/daemon-identity-protocol.md` 两处：§5 的 macOS 行由「可供 #25 调研」换成实测事实；平台覆盖缺口段落更正 macOS 那半（附 34 passed 数字与更正标注）。
+  - `docs/KNOWN-ISSUES.md` K14：把「`daemon_health_ok` 只认 …，`health_identity` 不读 version」改成两函数分开叙述，并点明停止路径用的是 `health_identity`、子串判定零调用（L2-187）。
+  - `docs/reports/OPT-LOOP-L2-PENDING.md`：**L2-189**（起始时间秒级 → `pbi_start_tvusec` 微秒，含旧 `daemon.owner` 按 `sec*1_000_000` 读的兼容要求）、**L2-190**（`kqueue` 只能证明「此刻存在」，实测 `EACCES` 不出现、错误只在 `EV_ERROR`）、**L2-191**（macOS 缺对端凭据通道，附实测改动面 5+2+1）。**最大编号 L2-191**。
+- **验证**：`npm run build` **6.40 s**；`cargo fmt --check` 绿；`--no-default-features --lib` **865 / 0 / 1**（与上一轮基线同值）；`--no-default-features --features daemon --test daemon_stop_e2e -- --test-threads=1` **34 passed / 0 failed / 40.75 s**（这是本轮的关键证据：unix 门控用例在 macOS 上真的执行）。
+- **过程记录**：本轮探针全部在 `/tmp/a2s-macos-probe/`（两个 C 程序），未在仓库任何目录留下未跟踪产物；`Edit`/`Write` 路径全部带 `$WT`（上一轮的失误没有复现）。
+
+### 新增「不成立」，不要重复提
+
+1. **「`daemon_stop_e2e.rs` 有 74 个 `fn`、13 项 `#[cfg(unix)]`」**——两数都错，实测 51 `fn` / 34 `#[test]` / 15 个属性、门住 8 个测试。
+2. **「这两条核心竞态用例在 macOS 上也零覆盖」**——不成立。`#[cfg(unix)]` 在 macOS 成立，2026-11-12 实测 34 passed，两条用例单独复跑也各 1 passed。只有 Windows 零覆盖。
+3. **「`kqueue EVFILT_PROC` 在无权限时返回 `EACCES`，所以可以拿注册失败当权限否证」**——不成立。对 pid 1（root）注册成功（`EV_ERROR` 置位但 `data=0`），同一个 pid 的 `kill(1,0)` 才是 `EPERM`。可观察面比可发信号面宽，注册成功不能推出「能停它」。
+4. **「`PROC_PIDTBSDINFO` 与 `PROC_PIDUNIQIDENTIFIERINFO` 对目标进程的可见性一致」**——不成立。对 pid 1：前者返回 0/`EPERM`，后者返回 56 字节真实数据。
+5. **「方案 B 要改 CLI/桌面/MCP 三面的连接逻辑」**——不成立。本地请求只有两个接缝，停止入口只有 5 个调用点且都经 `stop_daemon_process`。
+6. **「`libc` 是否导出 `LOCAL_PEERPID`/`LOCAL_PEERTOKEN` 需自己定义常量」**——不成立。`libc 0.2.186` 已导出三个 `LOCAL_PEER*` 常量与 `proc_pidinfo`；**只有** flavor 17 的常量与结构没导出。

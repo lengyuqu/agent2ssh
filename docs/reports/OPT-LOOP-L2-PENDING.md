@@ -2511,7 +2511,7 @@ allowed_commands = ["uptime", "df *", "session_open"]
 
 **位置**：`src-tauri/src/daemon_control.rs:193`——`response.starts_with("HTTP/1.1 200") && response.contains("\"ok\":true")`。调用链只有 `wait_for_daemon_health:196-205`，而后者的全仓调用者为 **0**（唯一使用点是集成测试 `src-tauri/tests/daemon_integration.rs:5420`）。
 
-**判断**：**成立（观察）/ 不成立（影响面）**。子串判定确实只看整段响应（含响应头），伪造一个 `HTTP/1.1 200 OK` + 任意头里带 `{"ok":true}` 的空体响应即可通过。但「`daemon start` 会因此误判已有实例而拒绝启动」**不成立**：`start_daemon_background:454-457` 用的是 `daemon_health_pid()` → `health_identity():231-250`，那是对**响应体**做 `serde_json::from_str` 并校验 `ok` 为 bool、`pid` 为 u64，头伪造过不去。`daemon status` 的四档分类同样走 `health_identity`。
+**判断**：**成立（观察）/ 不成立（影响面）**。子串判定确实只看整段响应（含响应头），伪造一个 `HTTP/1.1 200 OK` + 任意头里带 `{"ok":true}` 的空体响应即可通过。但「`daemon start` 会因此误判已有实例而拒绝启动」**不成立**：`start_daemon_background:454-457` 用的是 `daemon_health_pid()` → `health_identity():231-253`，那是对**响应体**做 `serde_json::from_str` 并校验 `ok` 为 bool、`pid` 为 u64，头伪造过不去。`daemon status` 的四档分类同样走 `health_identity`。
 
 **后果**：当前是休眠隐患——今天没有任何生产路径吃这条判定，所以它不是一个可用的拒绝服务面；但它是「看起来像健康检查」的唯一入口，下一个复用者会直接继承这个宽判据。
 
@@ -2534,3 +2534,52 @@ allowed_commands = ["uptime", "df *", "session_open"]
 **建议改法**：(a) `daemon_is_owned` 改成在一次 `lock_config_file` 内读并返回 `OwnerMarker`，调用方拿记录而不是布尔；(b) 维持无锁，但在文档与注释里写明「它只是线索，不能作为行动依据」；(c) 把 owner 记录并入 #22 的 `daemon.instance.json`，一次做完。**倾向**：(c)，因为 #22 本来就要重做这份记录，单独改一次等于改两遍。
 
 **回滚**：纯函数级改动，可回退。
+
+### L2-189（新，单发 #25）：起始时间只有整秒，而 macOS 的微秒字段就在同一个公开结构里却没被读
+
+**位置**：`src-tauri/src/daemon_control.rs:117`（`daemon_process_start_time`）、`:271-279`（`observable_live_start_time`）、`:591`（`process_start_time`）、`:732`（`observe_process`）——四处都取 `sysinfo::Process::start_time()`，而 `sysinfo 0.39.3` 的 `src/unix/apple/macos/process.rs:385` 是 `let start_time = info.pbi_start_tvsec;`，**只取秒**。同一结构 `struct proc_bsdinfo` 的 `pbi_start_tvusec`（SDK `sys/proc_info.h:80-81`）从未被读。
+
+**判断**：**成立（精度可提升，且 macOS 是唯一有两级精度却只用一级的平台）**。macOS 27.2.1 实测（2026-11-12，arm64，uid 501）：`proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &bi, sizeof bi)` 对自身返回 `pbi_start_tvsec=1794471496`、`pbi_start_tvusec=745616`。同一探针还测出**反向限制**：对 pid 1（其他 uid）该调用返回 0 且 `errno=EPERM`，所以微秒精度只对同 uid 目标有效——而停止路径的目标按定义就是同 uid 的 daemon，这条限制不构成阻塞。
+
+**后果**：K14 记的「同一秒内启动的两个进程在这条判据下完全不可区分」在 macOS 上从「可能」变「必然」，而修法只值一个字段。它不消除「核验 → 发信号」窗口（那需要进程对象），但把「PID 复用 + 同秒启动」这一类的假匹配概率压到微秒量级。
+
+**为什么它是 L2**：`start_time` 是 `u64` 秒，改成微秒要同时改 `OwnerMarker`（`:582-585`，`mark_daemon_owned:599`、`clear_daemon_owner_if:625-643` 读写它）与 `daemon.owner` 的既有磁盘编码；旧记录只有秒，读旧格式必须按 `sec * 1_000_000` 解释，否则升级后第一次启动会把自己上一版写的 owner 判成不匹配。这条与 #22 的 D6（记录格式与兼容期）绑定。
+
+**建议改法**：(a) 在 macOS 上绕开 sysinfo，直接 `proc_pidinfo(PROC_PIDTBSDINFO)` 取 `(tvsec, tvusec)` 并编码成 `sec * 1_000_000 + usec`，其余平台保持秒级并把单位写进字段名（如 `start_time_us`）；(b) 换一个带微秒的 crate——**不选**，为一个平台引入依赖不划算；(c) 维持秒级，只在 K14 里写清它是构造性碰撞——**现状**，等于放弃一个免费改进。
+
+**回滚**：编码改动集中在 `OwnerMarker` 的序列化与四个读取点，回退即恢复秒级；旧记录在回退后仍可读（微秒值整除 `1_000_000`）。
+
+### L2-190（新，单发 #25）：`kqueue NOTE_EXIT` 只能当「此刻存在」的确认，不能当发信号权限的闸门
+
+**位置**：`src-tauri/src/daemon_control.rs:763-786`（`signal_daemon` 的强制终止分支）与 `:732-747`（`observe_process`）。今天两者都只按 PID 重新 `refresh_processes` + `kill`，没有任何内核事件参与。
+
+**判断**：**成立（能力可用，但语义与常见预期相反）**。macOS 27.2.1 实测三条：
+1. 注册不存在的 pid → `kevent()` 返回 **1**，事件带 `EV_ERROR`、`data=ESRCH(3)`；**没有**出现 `kevent() == -1`。
+2. 注册自己、自己的子进程、以及 **pid 1（root 进程）** → 同样带 `EV_ERROR` 但 `data=0`（成功）。`NOTE_EXITSTATUS` 在 pid 1 上也成功。
+3. 同一个 pid 1 的 `kill(1, 0)` 返回 `-1 EPERM`。
+
+即：**可观察面比可发信号面宽**，`EACCES` 这条分支在本机没有出现（与 `kqueue(2)` 手册 ERRORS 段的描述不一致）。把「注册成功」当「有权限停它」会在 root 进程上误判。
+
+**后果**：它能做的是把「核验」与「发信号」之间的窗口从「一次 sysinfo 刷新」缩到「注册那一刻」，**不能**证成 `Bound`。写错方向的实现（只检查 `kevent() == -1`）会把 `ESRCH` 当成注册成功，反而在目标已退出时继续走强杀路径。
+
+**为什么它是 L2**：改的是强制终止分支的行为，且新增了一个「目标不存在就不再发信号」的判据，属行为改动。
+
+**建议改法**：(a) 在 `signal_daemon` 的 force 分支前插一次 `kqueue(EVFILT_PROC | EV_ADD | EV_RECEIPT | EV_ONESHOT, NOTE_EXIT)`：`EV_ERROR && data == ESRCH` → 直接按「已退出」返回，不发信号；`data != 0` → 按 `Unverified` 拒绝；只有 `data == 0` 才继续；(b) 只把它用在诊断面（`describe_identity`），不参与决策。**倾向**：(a) + 在注释里写死「它不证明权限，只证明存在」，因为这条改动的收益（少打一次信号到已退出的 pid）比风险大。
+
+**回滚**：删掉那段 `kqueue` 调用即回到今天。
+
+### L2-191（新，单发 #25）：macOS 侧缺一条能取对端凭据的本机通道，且成本比早前估计的小
+
+**位置**：`src-tauri/src/bin/agent2ssh-daemon.rs:5826`（唯一一条 `TcpListener::bind`）；客户端两个接缝 `src-tauri/src/daemon_activity.rs:44`（`local_daemon_request`）与 `:65`（`local_daemon_request_with_body`）；停止入口 `src-tauri/src/daemon_control.rs:979`。
+
+**判断**：**成立（能力已有，通道没有）**。macOS 实测可用：`LOCAL_PEERPID`（对端最近访问者 pid）、`LOCAL_PEERCRED`（`struct xucred`，`uid=501`）、`LOCAL_PEERTOKEN`（32 字节审计令牌，前 8 字节 `f5010000 f5010000` = auid/euid）。`libc 0.2.186` 已导出这三个常量（`src/unix/bsd/apple/mod.rs:2908/2910/2918`），所以不需要自己定义常量。**反向实测**：fd 经 `SCM_RIGHTS` 交给另一个进程后，再读 `LOCAL_PEERPID` 返回的是**那个进程**的 pid——它的语义是「最近访问者」，不是「连接所有者」，代理场景下必然误判。
+
+**后果**：不加这条通道时，macOS 的停止判据永远停在「名称白名单 + 起始时间 + `/health` + token」，即 `Unbound`；加了之后能证明「此刻发停止请求的是哪个 pid」，但仍证明不了「谁拥有监听 socket」。
+
+**为什么它是 L2**：新增监听端点与一条客户端连接路径，会改变 daemon 的对外暴露面与 `docs/api.yaml` 的契约叙述（`api_yaml_documents_every_daemon_route` 需要知道「本机 IPC 不是 HTTP 路由」）。
+
+**改动面（实测，比早前分析稿估计的小）**：daemon +1 个 `UnixListener`；客户端只改 `daemon_activity.rs` 的两个函数；`stop_daemon_process` 的 **5 个调用点**（`tauri_commands.rs:1855/1885/1918`、`bin/agent2ssh.rs:3080/3107`）**不用动**，CLI/桌面/MCP 三面也不需要各改一遍——它们全部经过这两个函数。早前「会影响 CLI/桌面/MCP 三面的连接逻辑」的判断是高估。
+
+**建议改法**：(a) 配置目录内 `daemon.sock`（目录 0700、socket 0600），服务端只在 accept 后取 `(LOCAL_PEERPID, LOCAL_PEERCRED.uid)`，`/shutdown` 要求 `expect_pid == 对端 pid` 且 `uid == geteuid()`；TCP 保留为 legacy 并显式打标；(b) 放弃传输层绑定，只对「自己 spawn 过并持有子进程」成立——独立 CLI 永远 `Unbound`。**倾向**：(a)，但**必须等 #22 的 D4 定案**，否则会造出第二套并行协议（`/shutdown/guarded` 已经为此付过一次代价）。
+
+**回滚**：删监听 + 客户端退回 `TcpStream`，HTTP 路径不受影响。

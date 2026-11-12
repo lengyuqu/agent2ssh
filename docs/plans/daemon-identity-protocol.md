@@ -12,7 +12,7 @@
 
 身份绑定要解决两类不同问题：一是实例 A 已退出后 PID 被 B 复用，操作不能落到 B；二是发出停止请求的客户端需要判断**回答它的服务端**是否是期望的实例。仅解决第一类，不证明第二类。持久记录、随机 ID、健康响应和共享 token 可辅助发现、认证授权或拒绝不一致，不能各自证明以上两项。
 
-**一条结构约束（2026-11-12 核实）**：当前控制面只有一条 TCP 监听（`agent2ssh-daemon.rs:5826`），全仓没有任何 `SO_PEERCRED` / `GetNamedPipeServerProcessId` 调用（`git grep` 零命中），客户端识别服务端所依据的 `pid` 是 `/health` **响应体里的自报字段**（`daemon_control.rs:231-250`）。因此本节下面 §3.2 的绑定规则在现有 TCP 通道上**不可达**——这不是「实现时再验证」，是传输层没有对端凭据语义。是否为本机停止单开一条 IPC 通道，是 §7 的 **D4**，必须在 #23 动工前拍板。
+**一条结构约束（2026-11-12 核实）**：当前控制面只有一条 TCP 监听（`agent2ssh-daemon.rs:5826`），全仓没有任何 `SO_PEERCRED` / `GetNamedPipeServerProcessId` 调用（`git grep` 零命中），客户端识别服务端所依据的 `pid` 是 `/health` **响应体里的自报字段**（`daemon_control.rs:231-253`）。因此本节下面 §3.2 的绑定规则在现有 TCP 通道上**不可达**——这不是「实现时再验证」，是传输层没有对端凭据语义。是否为本机停止单开一条 IPC 通道，是 §7 的 **D4**，必须在 #23 动工前拍板。
 
 默认威胁范围涵盖诚实进程重启、旧文件、PID 复用、代理/端口切换、不同用户和权限不足。**能够读取或修改同用户配置、替换二进制或接管控制端点的主动攻击者不在本提案的安全保证内**；不同用户隔离需要依赖经验证的权限/ACL。即便排除此攻击者，也不能用其作为理由省略正常重启、继承或竞态测试。
 
@@ -28,7 +28,7 @@
 | 强制终止 | 关闭请求被接受但宽限后仍存活时，`signal_daemon`（`daemon_control.rs:763-792`）重查名称、秒级启动时间并按 PID 强制结束；重查与信号不是原子操作。**这里的「名称」是硬编码四字面量白名单**（`is_daemon_executable:141-154`）：`agent2ssh-daemon` 与 `-aarch64-apple-darwin` / `-x86_64-unknown-linux-gnu` / `-x86_64-pc-windows-msvc` 三个三元组后缀，不是「看起来像 daemon」。打包三元组不在这四项内的构建，在停止路径上等价于 `Unbound`：既停不掉（`:774-779` 判据不中就 `Ok(())` 静默返回、不发信号），也起不来（`start_daemon_background:448-452` 判 `RunningUnhealthy\|Unverified` 后拒绝）。未知状态保留记录。 |
 | 请求体 | `380e166` 已让 `/shutdown` 的无效非空 body 返回 400；空 body 仍是管理员可用的无 PID 检查关闭。旧 daemon 可以忽略 `expect_pid`。 |
 | 回执 | `request_shutdown(Some(pid))` 把成功 200 归入 `AcceptedUnchecked`；新旧 daemon 的成功回包无法区分。修复及兼容策略归 #20；回执不证明响应者身份。**后果是这条 warn 每次正常停止都写**：能落到 `AcceptedUnchecked` 的只有 `200`，而真实停止永远带 `expect_pid`，所以 `daemon_control.rs:1053-1061`（文案在 `:1057`）在每次成功停止后都会记一条 `daemon accepted the shutdown without checking expect_pid (daemon predates it)`——指控一个并非事实的版本过旧。代码注释 `:1039-1052` 已自陈这是已知缺陷。 |
-| 健康探测 | `daemon_health_ok`（`daemon_control.rs:166-194`）用子串判定：`response.starts_with("HTTP/1.1 200") && response.contains("\"ok\":true")`（`:193`），只伪造响应头也能通过。**但它当前在生产路径上零调用**：唯一调用者是 `wait_for_daemon_health`（`:196-205`），后者全仓无调用者，只有一个集成测试（`daemon_integration.rs:5420`）直接打它。真正决定 `start` / `status` 的是 `health_identity`（`:231-250`）对**响应体**的 `serde_json` 解析，头伪造过不去。所以这是休眠隐患，不是今天可用的拒绝服务路径。 |
+| 健康探测 | `daemon_health_ok`（`daemon_control.rs:166-194`）用子串判定：`response.starts_with("HTTP/1.1 200") && response.contains("\"ok\":true")`（`:193`），只伪造响应头也能通过。**但它当前在生产路径上零调用**：唯一调用者是 `wait_for_daemon_health`（`:196-205`），后者全仓无调用者，只有一个集成测试（`daemon_integration.rs:5420`）直接打它。真正决定 `start` / `status` 的是 `health_identity`（`:231-253`）对**响应体**的 `serde_json` 解析，头伪造过不去。所以这是休眠隐患，不是今天可用的拒绝服务路径。 |
 | 实例归属记录 | `daemon.owner`（文件名不是 `daemon-owner.json`）已经是 `OwnerMarker { pid, start_time }` 两字段（`daemon_control.rs:582-585`）。`mark_daemon_owned:599-609` 在 `.daemon-pid.lock` 内写；`clear_daemon_owner_if:625-643` 在锁内重新匹配 pid **与** start_time 才删；但 `daemon_is_owned:612-623` **不加锁**直接读，判定与使用之间没有互斥。 |
 
 参照源码：`src-tauri/src/daemon_control.rs::{write_daemon_pid, daemon_matches_config, stop_daemon_process, signal_daemon}`、`src-tauri/src/bin/agent2ssh-daemon.rs::{daemon_shutdown, main}` 与 `src-tauri/tests/daemon_stop_e2e.rs::direct_daemon_with_another_port_cannot_replace_a_live_pid`。
@@ -97,9 +97,9 @@
 |---|---|---|
 | Linux | `pidfd_open`、`pidfd_send_signal`、Unix socket 对端凭据；研究可直接取得对端 pidfd 或可靠传递进程对象的可用机制。 | 从 peer PID 再打开 pidfd 的窗口仍在；不能仅靠进程仍存在、随机 ID 或同一启动 tick 证明连接与 pidfd 属于同一实例。不同内核、namespace、socket 继承及权限待 #23 实测。 |
 | Windows | 创建进程时的句柄、`OpenProcess`、句柄等待及终止；命名管道服务端 PID 查询供客户端侧研究。 | `OpenProcess` 前 PID 复用、管道端点抢占/代理、ACL 和句柄关联尚未解决；拒绝访问不是进程退出。#24 须在 Windows 真机验证。 |
-| macOS | Unix socket 相关对端凭据、进程观察与退出通知可供 #25 调研。 | 目前没有验证与 pidfd 同等的安全发信号方式；`kill(pid, …)` 仍按数字寻址，二次观察只缩小窗口。无法达到绑定条件时不自动强杀。 |
+| macOS | **已实测**（见 [macos-daemon-identity.md](macos-daemon-identity.md)）：`LOCAL_PEERPID` / `LOCAL_PEERCRED` / `LOCAL_PEERTOKEN` 三者可取，`kqueue EVFILT_PROC` 可作退出通知，`proc_pidinfo(PROC_PIDTBSDINFO)` 的 `pbi_start_tvusec` 可把起始时间从秒提到微秒。 | `LOCAL_PEERPID` 的语义是**最近访问者**，fd 传递后即换人（实测），不能当「连接所有者」；`kqueue` 注册对其他 uid 的进程**也会成功**（实测 pid 1），因此不构成发信号权限的否证；没有 pidfd 等价物，`kill(pid, …)` 仍按数字寻址，二次观察只缩小窗口。无法达到绑定条件时不自动强杀。 |
 
-**平台覆盖缺口（实测数字）**：`daemon_stop_e2e.rs` 有 34 个 `#[test]`，其中 **8 个**带 `#[cfg(unix)]`，含两个核心竞态用例——`a_daemon_that_ignores_the_expected_pid_stops_and_says_so`（`:1434`，`#[cfg(unix)]` 在 `:1431`）与 `a_stop_that_reached_the_wrong_daemon_stops_nothing`（`:1702`，`#[cfg(unix)]` 在 `:1699`）。因此 Windows 与 macOS 上这两条路径**零覆盖**；#24/#25 若复用它们，必须先摘掉 `#[cfg(unix)]` 并补平台夹具，不能把「同一份测试文件」当成「全平台矩阵」。
+**平台覆盖缺口（实测数字）**：`daemon_stop_e2e.rs` 有 51 个 `fn`、34 个 `#[test]`，其中 **8 个**带 `#[cfg(unix)]`，含两个核心竞态用例——`a_daemon_that_ignores_the_expected_pid_stops_and_says_so`（`:1434`，`#[cfg(unix)]` 在 `:1431`）与 `a_stop_that_reached_the_wrong_daemon_stops_nothing`（`:1702`，`#[cfg(unix)]` 在 `:1699`）。`#[cfg(unix)]` 在 macOS 上成立，所以这 8 条**在 macOS 上照常执行**：2026-11-12 实测 `cargo test --no-default-features --features daemon --test daemon_stop_e2e -- --test-threads=1` → **34 passed / 0 failed / 40.75 s**，两条核心用例单独复跑也各 1 passed。因此**只有 Windows 上这两条路径零覆盖**；#24 若复用它们必须先摘掉 `#[cfg(unix)]` 并补平台夹具，不能把「同一份测试文件」当成「全平台矩阵」。**（2026-11-12 更正：本文早前写「Windows 与 macOS 上零覆盖」，macOS 这半是错的。）**
 
 **macOS 的结构性后果**：按 §3.2 的绑定规则，macOS 上若不新增能取对端凭据的本机通道（D4），`kill(pid, …)` 永远只能停在 `Unbound`——即**macOS 没有自动强杀**。这是产品取舍，必须由 D3 明确，不能默认继承 Linux 的行为。
 
@@ -109,7 +109,7 @@
 
 1. 先写平台无关状态机及错误分类测试：未经绑定不能调用自动强杀；`Unknown` 不能清理；实例改变、拒绝/超时、旧版无回执均不误报成功。模拟测试须覆盖每个转换及不能转换的分支。
 2. 用**真实 daemon 和独立临时配置**测试同 token A/B 的健康与停止之间切换、伪造 health/回执、后台进程独立重连、不同目录、端点被抢占、句柄传递、无权限、丢失/损坏记录及并发发布清理。记录操作实际指向哪个进程、两个进程是否存活、文件是否保留；不能只断言状态码。**既有用例已经给出一个必须被推翻的反例**：`a_daemon_that_ignores_the_expected_pid_stops_and_says_so`（`:1434`）用 `symlink("/bin/sleep")` 造了个名为 `agent2ssh-daemon` 的替身（`:1445-1446`），并接受「强杀打到这个替身」为诚实结果。它证明「名称白名单 + 秒级 start_time」不构成绑定；新协议应把该用例的验收改成「必须 `Unbound` 且不发信号」。
-3. Linux/Windows 构造“取对端 PID → 原进程退出并回收 → PID 指向另一进程 → 打开对象”的受控时序；不能稳定复用时，用可控适配层及真实对象组合验证拒绝分支，并明确真实 PID 复用未覆盖。证明打开对象后的等待/信号使用同一对象。macOS 必须实测其候选机制，不能沿用 Linux 结果。**这一条在今天的实现上走不到**：客户端识别服务端只靠 `/health` 响应体里的 `pid`（`daemon_control.rs:231-250`），全仓无 `SO_PEERCRED` / `GetNamedPipeServerProcessId` 调用，控制面只有一条 TCP 监听（`agent2ssh-daemon.rs:5826`）。所以它是**给 #23/#24 新实现准备的验收**，不是对现状的补测；把它写成「待验证」会让人以为现有代码已接近该结构。
+3. Linux/Windows 构造“取对端 PID → 原进程退出并回收 → PID 指向另一进程 → 打开对象”的受控时序；不能稳定复用时，用可控适配层及真实对象组合验证拒绝分支，并明确真实 PID 复用未覆盖。证明打开对象后的等待/信号使用同一对象。macOS 必须实测其候选机制，不能沿用 Linux 结果。**这一条在今天的实现上走不到**：客户端识别服务端只靠 `/health` 响应体里的 `pid`（`daemon_control.rs:231-253`），全仓无 `SO_PEERCRED` / `GetNamedPipeServerProcessId` 调用，控制面只有一条 TCP 监听（`agent2ssh-daemon.rs:5826`）。所以它是**给 #23/#24 新实现准备的验收**，不是对现状的补测；把它写成「待验证」会让人以为现有代码已接近该结构。
 4. 新旧客户端 × 新旧 daemon、升级/回滚、旧程序不持锁、socket/pipe 残留、重复实例和平台能力不可用均须覆盖；另覆盖停止写出后丢失响应并在 A/B 切换后的重试、同 PID 新实例、长时间持锁及记录两步发布之间崩溃。测试破坏后要能清理子进程并隔离真实 `~/.agent2ssh`。
 5. 按 #20、#21 和 #23–#25 分别提交平台测试报告：OS/内核、权限、编译/运行命令、真实或模拟、结果和盲区。更新 `docs/api.yaml`、配置指南、K14 与契约测试；只有所有适用平台达到评审通过的保证，才可声称对应范围完成。
 

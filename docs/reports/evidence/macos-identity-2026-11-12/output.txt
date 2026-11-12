@@ -1,0 +1,43 @@
+# 环境
+ProductName:		macOS
+ProductVersion:		27.2.1
+BuildVersion:		26B131
+uname -m: arm64
+System Integrity Protection status: enabled.
+uid: 501
+
+# clang -O1 -o probe probe.c && ./probe
+macOS probe pid=19564
+== E1 socketpair LOCAL_PEERPID (same process, two fds)
+   peer_pid(sv[0]) = 19564 (self=19564) match=1
+   peer_pid(sv[1]) = 19564 (self=19564) match=1
+== E1b LOCAL_PEERCRED / LOCAL_PEERTOKEN on the same pair
+   LOCAL_PEERCRED: version=0 uid=501 ngroups=16
+   LOCAL_PEERTOKEN: ok, 32 bytes, first8=f5010000f5010000
+== E2 SCM_RIGHTS hand-off: does LOCAL_PEERPID follow the latest writer?
+   before hand-off: peer_pid=19564 (self=19564)
+   after child send: peer_pid=19565 (child=19565) bytes=1
+   CONCLUSION: last_pid tracks the accessor, not the connector = 1
+== E3 kqueue EVFILT_PROC NOTE_EXIT registration
+   [nonexistent pid (self+400000)] kevent()=1 EV_ERROR=1 err=ESRCH(3)
+   [pid 1 (launchd, other uid)] kevent()=1 EV_ERROR=1 err=0(0)
+   [self] kevent()=1 EV_ERROR=1 err=0(0)
+   [own child] kevent()=1 EV_ERROR=1 err=0(0)
+== E4 kill(pid,0) permission matrix (uid=501)
+   [self] kill(19564,0)=0 errno=0(0)
+   [pid 1 (root)] kill(1,0)=-1 errno=EPERM(1)
+   [nonexistent] kill(419564,0)=-1 errno=ESRCH(3)
+== E5 proc_pidinfo flavors
+   [self] PROC_PIDTBSDINFO ok: pbi_pid=19564 uid=501 comm=probe start=1794471890.979734
+   [self] flavor17 ok: size=56 p_uniqueid=514474 p_puniqueid=514466
+   [pid 1 (root)] PROC_PIDTBSDINFO rc=0 errno=EPERM(1)
+   [pid 1 (root)] flavor17 ok: size=56 p_uniqueid=1 p_puniqueid=0
+
+# clang -O1 -o probe2 probe2.c && ./probe2
+== E3b registration shapes (EV_RECEIPT vs plain)
+  no-EV_RECEIPT / nonexistent                    n=1 EV_ERROR=1 data=ESRCH(3)
+  EV_RECEIPT / nonexistent                       n=1 EV_ERROR=1 data=ESRCH(3)
+  EV_RECEIPT / pid 1 NOTE_EXIT                   n=1 EV_ERROR=1 data=0(0)
+  EV_RECEIPT / pid 1 NOTE_EXITSTATUS             n=1 EV_ERROR=1 data=0(0)
+  EV_RECEIPT / self NOTE_EXITSTATUS              n=1 EV_ERROR=1 data=0(0)
+  EV_RECEIPT / bad flags NOTE_FORK|NOTE_EXIT     n=1 EV_ERROR=1 data=0(0)
