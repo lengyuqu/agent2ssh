@@ -324,9 +324,12 @@ P1–P6 均未拍板；本设计不替人决定，也不把「倾向」写成已
 结构化引用解析、`secrets.enc` 内容 tag、`$agent2ssh-secret$:<tag>` 写入与校验、
 旧裸 marker 惰性升级、改主密码 tag 稳定、P2 的保守拒绝与明确指引；代码见
 `secrets.rs` / `store.rs` / `embedded_ssh.rs`，回归见 `tests/store_phase2.rs`（5 项真实 CLI）。
-**阶段 C（成对快照与四条恢复路径的前置判定）、阶段 D（修复命令）与阶段 3 仍未实施**；
-C4–C8 未实测，Windows 实机（#27）与 Linux 侧边界未验证。§2–§5 中关于 C 的描述仍是设计，
-不是实现记录。#26 保持 open。
+**阶段 C 已按 B2 方案实施**（`config_pair_index.json` + 成对 `.pair` 副本 + 四条恢复路径
+统一前置判定 + `recover()` 索引只读诊断），见 `tests/store_phase2_c.rs`；实际实现与 §3 的
+设计有一处务实偏差：索引只作诊断与后续 D 阶段的证据，**不阻断常规写入**，判定以内容 tag
+本身为准（避免第三个文件成为单点故障）。**阶段 D（显式成对恢复 / 修复命令）与阶段 3 仍未实施**；
+C4–C6 有构造状态回归，C7（回卷中途崩溃）、阶段 C 的真实 SIGKILL 注入、C8 的真机复现未实测；
+Windows 实机结论以 #27（`15e2ac5`）为准，Linux 侧边界未验证。#26 保持 open。
 
 P1–P6 的可勾选版本、推荐默认作为实施轮工作假设的说明、分阶段实施顺序与逐文件改动清单，
 见 [cross-file-transaction-phase2-decisions.md](cross-file-transaction-phase2-decisions.md)。
