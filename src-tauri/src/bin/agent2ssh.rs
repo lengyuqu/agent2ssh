@@ -275,6 +275,24 @@ enum Commands {
         #[arg(long)]
         preview: bool,
     },
+    /// Inspect and repair the two-file config transaction (explicit, audited)
+    ConfigRepair {
+        /// List recorded paired snapshots (read-only)
+        #[arg(long)]
+        list: bool,
+        /// Preview or discard an unreplayable .commit.json
+        #[arg(long)]
+        discard_pending: bool,
+        /// Preview or restore a paired snapshot by index (see --list)
+        #[arg(long)]
+        restore_pair: Option<usize>,
+        /// Required to actually apply a change; without it only a preview is printed
+        #[arg(long)]
+        confirm: bool,
+        /// Machine-readable preview / list output
+        #[arg(long)]
+        json: bool,
+    },
     /// Compare and sync Agent2SSH hosts with ~/.ssh/config
     SshSync {
         /// Show diff between Agent2SSH and ~/.ssh/config without changes
@@ -3378,6 +3396,66 @@ async fn async_main() -> Result<()> {
                 );
                 if json {
                     println!("\nUse --json to output machine-readable JSON.");
+                }
+            }
+        }
+        Commands::ConfigRepair {
+            list,
+            discard_pending,
+            restore_pair,
+            confirm,
+            json,
+        } => {
+            agent2ssh::config_repair::validate_action(list, discard_pending, restore_pair)?;
+            if list {
+                let pairs = agent2ssh::config_repair::list_pairs()?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&pairs)?);
+                } else if pairs.is_empty() {
+                    println!("No paired config snapshots recorded.");
+                } else {
+                    println!("Paired config snapshots (newest last):");
+                    for pair in &pairs {
+                        println!(
+                            "  [{}] created={} generation={} hosts={} secrets={}",
+                            pair.index,
+                            pair.created_at,
+                            pair.secrets_generation,
+                            &pair.hosts_sha256[..12.min(pair.hosts_sha256.len())],
+                            &pair.secrets_sha256[..12.min(pair.secrets_sha256.len())]
+                        );
+                    }
+                    println!(
+                        "Only records whose paired copies still hash to the recorded values can be restored."
+                    );
+                }
+            } else if discard_pending {
+                let preview = agent2ssh::config_repair::preview_discard()?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&preview)?);
+                } else {
+                    print!("{}", agent2ssh::config_repair::describe_discard(&preview));
+                }
+                if preview.has_pending {
+                    if confirm {
+                        println!("{}", agent2ssh::config_repair::apply_discard(&preview)?);
+                    } else if !json {
+                        println!(
+                            "Not applied. Re-run with --confirm to discard the pending commit."
+                        );
+                    }
+                }
+            } else if let Some(index) = restore_pair {
+                let preview = agent2ssh::config_repair::preview_restore(index)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&preview)?);
+                } else {
+                    print!("{}", agent2ssh::config_repair::describe_restore(&preview));
+                }
+                if confirm {
+                    println!("{}", agent2ssh::config_repair::apply_restore(&preview)?);
+                } else if !json {
+                    println!("Not applied. Re-run with --confirm to restore this paired snapshot.");
                 }
             }
         }
