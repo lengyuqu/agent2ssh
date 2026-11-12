@@ -26,8 +26,13 @@ info:
     in `execution_limits.toml` — `*_per_minute` for the first,
     `*_max_sessions` for the second — and an operation can be subject to one, the
     other, both, or neither. Most of the 429s below say only "Execution limit
-    exceeded"; the two that differ are called out where they occur
-    (`POST /sessions`, `POST /resident-sessions`).
+    exceeded"; the four that name the family and the mechanism behind it are
+    called out where they occur — `GET /terminal` and `POST /sessions` on the
+    `sessions` side, `POST /resident-sessions` and
+    `DELETE /resident-sessions/{id}` on the `rate` side. Closing a session is
+    not a way out of a `rate` refusal and vice versa: `DELETE /sessions/{id}`
+    checks no limit at all, while `DELETE /resident-sessions/{id}` runs the
+    shared preflight and can itself be rate-limited.
 
     One 500 sits outside every operation's own list. `auth_middleware` reads
     `daemon_tokens.toml` for any token that is not the admin token, so a file
@@ -2028,7 +2033,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "429":
-          description: Session concurrency limit exceeded, also checked before the upgrade.
+          description: "The session cap was reached, not the per-minute rate limit. `terminal_attach` reserves a slot through `register_limited_session_for_command` with the `terminal_open` operation, and that helper calls `check_session_open`; it never calls `reject_if_rate_limited`. The scope suffix in the body is therefore `sessions`, and the slot comes back when the socket closes (`unregister_session` at the end of `handle_terminal`) — a timed retry waits for nothing. The check runs before the upgrade, so the refusal is an HTTP status rather than a frame."
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -3686,7 +3691,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "429":
-          description: Execution rate limit exceeded
+          description: "The per-minute rate limit refused the request. Closing a resident session runs the shared preflight (`preflight_guarded_request` with the `resident-session close` operation), so the 429 comes from `reject_if_rate_limited` and the scope suffix reads `rate`. This close *is* rate-limited — unlike `DELETE /sessions/{id}`, which checks no limit because it is the only way to release its counter — and the refusal clears when the window slides."
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }

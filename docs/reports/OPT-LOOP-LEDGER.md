@@ -3704,3 +3704,44 @@ L2-154（`/exec-multi` 全 0 语义）、L2-155（preview 缺 admin 门）、L2-
 **回帖**：`2120651071402958848`（`## 本轮收尾`）。`#20` **保持 open**：剩余四项（L2-27 / L2-172 / L2-175 / L2-180）全在决策侧，另加 #22 的文件身份协议是 L2-165 的前置。分支 `opt/single-20-20261112d` 与 worktree `…/single-20` 已在合流验收后清理。
 
 **给下一轮的交接**：`#20` 现在也进入「等复核」；`#21`（`2120634812074455040`）与 `#23`（`2120583722461192192`）的复核仍未消费，按编号应取 #21。**判「谁在等复核」只能看最新一条评论的时间戳，不能沿用上一轮的结论**——本轮选靶就是因为上一轮把 #20 的复核时间记晚了一小时。
+
+## 2026-11-12 07:54–08:2x · 模式 B 单发 · issue #21 异常诊断（第五次进入 · 会话配额的第三个出口、「绝对白名单」与三处文档）
+
+**基线** `9a71f9d`（= 收到复核时的 `cnb/main`）。**选靶**：12 条 open、无 `[opt-round]` → 模式 B，第二段为空。`#20` 最新一条是本流程 22:58 的 `## 本轮收尾`（在等复核，跳过）；`#21` 最新一条是 CodeBuddy 21:48:33Z 的复核 `2120634812074455040`，未被消费，且是仅剩的两条 P1 里编号更小的（另一条 `#23`）。`#24`/`#27` 要 Windows 实机、`#22`/`#25` 是 P2、`#26`/`#28`/`#29` 零评论 —— 均排除。
+
+### 判定表（6 条）
+
+| # | 指摘 | 判定 | 证据要点 |
+|---|---|---|---|
+| F1 | 文件级段落写「the two that differ（`POST /sessions`、`POST /resident-sessions`）」，漏了 `GET /terminal` | **成立，且它少数了一处** | 实测 29 个 operation 带 429、6 种描述：`GET /terminal`（`sessions` 族）与 `DELETE /resident-sessions/{id}`（`rate` 族，写的是 `Execution rate limit exceeded`）都不是模板句。`terminal_attach`（`:4746-4780`）走 `register_limited_session_for_command(…, "terminal_open")`，函数体内 `reject_if_rate_limited` = 0 次；槽位在 `handle_terminal` 收尾 `unregister_session`（`:5085`）。所以「differ」的是**四个**，不是三个 |
+| F2 | `session_close` 会被 scope 挡住，满额时是真死锁 | **部分成立** | 机制成立（`remote.rs:614-624` 白名单无回退；`session_close` 先 `:2665` 查一次、`authorize_command` 再查一次）。但「满额后自己的 `POST /sessions` 永远 429」只在**同一 token 写了 `session_open`、没写 `session_close`** 时成立；它举的「会话被别的 source 占满」那条路径会先拿到 403（scope 在限流之前），不是 429。记为 **L2-181** |
+| F3 | 指南 `:350` 没说明 `allowed_commands` 是绝对白名单 | **成立** | 原两行只说「glob 风格、denied 优先」，没有「非空即封闭」这句话，也没列全操作字符串；`remote.rs:614-624` 是硬白名单 |
+| F4 | `daemon_control.rs:379-380` 源码注释仍写「两代」 | **成立** | `for i in (1..=2).rev()` 把 `.2→.3`、`.1→.2` 再当前→`.1`，是**三代**；全仓 `grep "two generations\|daemon.log.1\|daemon.log.2"` 只剩这一处 |
+| F5 | 诊断包也带走 `app.log` 尾部 | **记录，不新立** | 它自己也判「无新缺陷」。实测 `export_diagnostic_bundle` 有三段尾部（`:518/520/522`：300/300/120 行），全过 `read_tail` → `redact_sensitive_text`；已把这一点补进 L2-176 的影响面 |
+| F6 | `api.yaml` 的 `info.version` 停在 `0.4.5` | **不成立（有约定）** | `docs/RELEASE.md:35` 与 `:168` 把 `docs/api.yaml` 的 `info.version` 列进「发布时必须同步的版本字段」表 —— 它随应用版本走，不随每次契约措辞变更。改 description 不升级是对的 |
+
+### 改了什么（全 L1）
+
+- `docs/api.yaml`：文件级 429 段落从「两处不同」改成**四处并逐个点名**，并补一句「关会话不是 `rate` 的出路、反之亦然」；`GET /terminal` 的 429 从一句「Session concurrency limit exceeded」改成点名 `register_limited_session_for_command` / `terminal_open` / `sessions` 后缀 / 槽位在 socket 关闭时归还 / 拒绝发生在 upgrade 之前；`DELETE /resident-sessions/{id}` 的 429 从「Execution rate limit exceeded」改成说明它走共享 preflight、是 `rate` 族、**是唯一受速率限制的 close**，并与 `DELETE /sessions/{id}` 对照。
+- `docs/guides/configuration-guide.md`：scope 注意事项里加两条 —— 「`allowed_commands` 非空时是绝对白名单」并列出九个操作字符串（`ping`/`session_open`/`session_read`/`session_close`/`terminal`/`resident-session open|read|close`/`connect` 及 `sftp …`/`forward …`/`playbook:<名字>` 形状）；以及「能开会话、关不掉会话」这个具体坑与两条出路（三个字符串一起写，或干脆不写 `allowed_commands`）。
+- `src-tauri/src/daemon_control.rs`：轮转函数的 doc comment 从「two prior generations (.1/.2)」改成三代并点明循环形状（**仅注释**，无行为改动）。
+- `src-tauri/tests/daemon_integration.rs`：`api_yaml_names_the_mechanism_behind_each_session_429` 扩写 —— 新增「429 段落必须点名四个 operation」的段落级断言（`spec.split("Two different mechanisms answer 429").nth(1).split("\n\n").next()`，**不能对全文断言**：`GET /terminal` 在 `info.description` 的另一段也出现过一次，对全文断言会假绿）、`GET /terminal` 的两条机制断言、`DELETE /resident-sessions/{id}` 的两条断言。
+- `docs/reports/OPT-LOOP-L2-PENDING.md`：新增 **L2-181**（`allowed_commands` 绝对白名单能挡住释放动作）；L2-176 的「位置」补三段尾部的行号与「三处一起变」的提醒。
+
+### 反向验证（三次，各自红在不同断言上）
+
+1. 429 段落里删掉 `GET /terminal` → 段落级断言红并点名它。**第一次写成对 `header` 全文断言时是假绿**（`GET /terminal` 在 gate 那段也出现），因此改成段落切片。
+2. `GET /terminal` 的 429 退回原一句 → `terminal` 的机制断言红（`register_limited_session_for_command` / `terminal_open`）。
+3. `DELETE /resident-sessions/{id}` 的 429 退回 `Execution rate limit exceeded` → 该条断言红。恢复后 83 passed。
+
+### 验证
+
+`npm run build` **6.29 s**；`cargo fmt --check` 绿；`--no-default-features --lib` **863 passed / 1 failed / 1 ignored**（红项仍是那条故意红的 `an_ipv6_literal_at_port_22_is_removed`）；`--no-default-features --features daemon --test daemon_integration` **83 passed / 0 failed**（未加测试函数，只加断言）；`yaml.safe_load` **90 paths / 105 operations**（与基线同）。
+
+### 新增「不成立」，不要重复提
+
+1. **「`api.yaml` 的 429 段落只漏了 `GET /terminal` 一处，实际三点」**——`DELETE /resident-sessions/{id}` 的 429 也不是模板句（`Execution rate limit exceeded`），是第四处。
+2. **「会话被别的 source 占满时，那个 token 的 `POST /sessions` 永远 429」**——它先 403（`check_daemon_scope` 在限流之前）；429 只在同一 token 持有 `session_open` 而不持有 `session_close` 时出现。
+3. **「`api.yaml` 的 `info.version` 停在 0.4.5 属于台账空缺」**——`docs/RELEASE.md:35/168` 已把该字段列进发布清单，它随应用版本走。
+
+**回帖**：`__REPLY_ID__`（`## 本轮收尾`）。`#21` **保持 open**：剩余四项 L2-176/177/178/179 与本轮新增的 L2-181 全在决策侧（改日志落地方式 / 改 scope 语义），文档一致性这条线已收口。
