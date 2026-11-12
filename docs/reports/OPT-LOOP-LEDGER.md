@@ -3904,4 +3904,4 @@ L2-154（`/exec-multi` 全 0 语义）、L2-155（preview 缺 admin 门）、L2-
 2. **「`write_daemon_pid_if_absent` 以 0444 创建 `daemon.pid`，两种写法权限口径不一致」**——实测两种写法在 umask 022 下都是 **0644**。见上。
 3. **「`daemon_is_owned` 在名称门槛后面，因名字 `None` 而 false」**——它用 `process_start_time`（`daemon_control.rs:591-596`），不看名字；挡住退出路径的是排在它前面的 `process_is_alive`（`tauri_commands.rs:1906`）。
 
-**回帖**：见本文件末条。`#23` **保持 open**：三条验收（真实进程回归 / 两种生命周期 / Linux CI 前提）仍未做，且 pidfd 本体要改 `stop_daemon_process` 的签名、前置 #22 的文件身份格式未拍板。
+**回帖**：`2120739993617330176`（`## 本轮收尾`，`04:46:30Z`；`#23` 内第 3 条该标记）。`#23` **保持 open**：三条验收（真实进程回归 / 两种生命周期 / Linux CI 前提）仍未做，且 pidfd 本体要改 `stop_daemon_process` 的签名、前置 #22 的文件身份格式未拍板；本轮新增的 L2-183 / L2-184 也都要人拍板。
