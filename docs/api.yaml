@@ -2009,7 +2009,11 @@ paths:
         jump-host proxy channels, and do not require system `ssh` or `sshpass`.
         Completed input lines are
         authorized before bytes are forwarded to the remote PTY; denied input is
-        reported as an error frame and dropped.
+        reported as an error frame and dropped. A rejected approval, an approval
+        that times out — the `408` a REST route answers — and a rate-limit
+        refusal all arrive as the same error frame, which carries the message
+        and no status, so a client reading this route learns which refusal it
+        was from the text rather than from a code.
       parameters:
         - name: host
           in: query

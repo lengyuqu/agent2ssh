@@ -3931,6 +3931,8 @@ L2-154（`/exec-multi` 全 0 语义）、L2-155（preview 缺 admin 门）、L2-
 
 **绑定面复算**（同一份脚本，归一化 `:id`→`{id}` 后按 `.route(...)` 解析出 106 个 pair）：documented 408 **29 → 未绑定 20 → 0**；423 **30 → 17 → 0**；403 **78 → 21 → 1**（剩 `GET /hosts/{name}/policy`，其 403 在体内无来源 —— 反方向，留待下轮）；400 **60 → 49 → 34**（其余靠 body 里的 `StatusCode::BAD_REQUEST` 字面量，由 `HANDLER_STATUS` 守；helper 侧不再兜底）；429 **29 → 0 → 0**。
 
+> **更正（2026-11-12 17:28 起的这一轮）**：上面那句「`GET /hosts/{name}/policy` 的 403 在体内无来源 —— 反方向」**是错的**。`host_policy:1429-1433` 就是 `if !scope_allows_observe_host(&auth, &name) { return Err(err(StatusCode::FORBIDDEN, …)) }`，直写 `FORBIDDEN`；CodeBuddy 指出后我复算：把该 operation 的 `"403"` 从 `api.yaml` 删掉，`api_command` 测试立刻红并点名 `403 get /hosts/{name}/policy (host_policy)`。所以那 1 项不是缺口，是**唯一一条由 handler 字面量自证、不该进 helper 绑定表**的正常项。`403 21→1` 的终值仍然对，**但「反方向」这个定性作废，下轮不要再追它**。
+
 **未做**：CodeBuddy 的 ⑤（marker 只要出现在 path block 某处，挪进 401 的 description 也能过）——本轮没动 `spec_path_block`，属「同一段散文里哪个 response 说的」这类定位问题，改法要引入 anchor，成本高于本轮；记录，不记不成立。
 
 ### 新增「不成立」，不要重复提
@@ -4006,3 +4008,32 @@ L2-154（`/exec-multi` 全 0 语义）、L2-155（preview 缺 admin 门）、L2-
 4. **「`PROC_PIDTBSDINFO` 与 `PROC_PIDUNIQIDENTIFIERINFO` 对目标进程的可见性一致」**——不成立。对 pid 1：前者返回 0/`EPERM`，后者返回 56 字节真实数据。
 5. **「方案 B 要改 CLI/桌面/MCP 三面的连接逻辑」**——不成立。本地请求只有两个接缝，停止入口只有 5 个调用点且都经 `stop_daemon_process`。
 6. **「`libc` 是否导出 `LOCAL_PEERPID`/`LOCAL_PEERTOKEN` 需自己定义常量」**——不成立。`libc 0.2.186` 已导出三个 `LOCAL_PEER*` 常量与 `proc_pidinfo`；**只有** flavor 17 的常量与结构没导出。
+
+## 2026-11-12 17:28–（模式 B 单发 · issue #20 第十一次进入 · 单段闭环）
+
+- **前置**：无锁 → 主动建 pid 40610 写 `owner`（结束时手工 `rm -rf`）；三个其它 worktree（`.codex/worktrees/cnb-pr3-merge`、`WorkBuddy/Worktrees/main-f0ecd0ba`、`main-f749b514`）`status --porcelain` 全 0 行、`src`/`src-tauri/src`/`docs` 三十分钟零写入；`ls-remote cnb/main` 与本地同为 `2289778` → 不让位。`open` **十条**（#20–#29），**无 `[opt-round]`** → 模式 B，第二段为空。
+- **选靶 #20**：最新是 CodeBuddy `2120802349722533888`（`08:54:17Z`），比我 06:03:51Z 的收尾帖晚 2 h 50 min；#21（01:16Z）、#22（07:13Z）、#23（04:46Z）、#25（08:26Z）最新都是本流程的收尾帖。P1、编号最小、未消费 → #20。**连续第八轮靠「只看最新一条评论时间戳」纠正选靶。**
+- **判定 12 条（Q1 三 + Q2 七 + Q3 十二去重）→ 成立 7 / 部分成立 3 / 不成立 1 / 结构确认 1**。核心：
+  1. **`HELPER_STATUS` 只有一个强制消费者、缺行永不失败 → 成立**。`undocumented_via_helper` 遍历的是表本身（`HELPER_STATUS.iter().filter(...)`），表里没有的码不会被任何路由的扫描举出来；唯一会因缺行而红的路径是 `unbacked` 对**已登记豁免**的证据检查。
+  2. **豁免证据是「任何一个登记过的体里出现过该 needle」→ 成立，三个借用形态全部实测为真**：①委派可以指向与本路由无关的 handler（把 preview 行的委派改成 `exec`，仍 85 绿（当时基线））；②委派可以来自同一 path item 的另一个方法（给 GET `/resident-sessions/{id}` 加一行、委派写 DELETE 的 `resident_session_close`、marker 借 DELETE 的 "killing"，仍 85 绿）；③marker 检查用的是 `spec_path_block`（整条 path item），不是方法块。**②与③是我上一轮记录「未做」的那条，本轮一并修掉。**
+  3. **表项可以与实现相反而不报错 → 成立**。`("finish_sftp_operation(", "423")` 仍 85 绿，而它的体只建一个 `400`。
+  4. **数字辅助函数的码没有任何检查 → 成立**。`locked_status` 的 `from_u16(423)` 改成 `400`，85 绿；`reject_if_gate_paused` 与 `reject_if_rate_limited` 的 423/429 全靠它。
+  5. **字符串字面量能当调用用 → 成立（修复前后各跑一次）**。把 preview 行的委派清空、在 `terminal_broadcast_preview` 里写 `tracing::debug!("reject_if_gate_paused( covers this route")`：**修复前 84+1 全绿，修复后红**。`strip_rust_comments` 不处理字符字面量（`'"'` 会让它把后面的代码当字符串吞掉）也是真的，本轮一并处理。
+  6. **`/terminal` 的 408 可达但未文档化 → 成立**。`handle_terminal` 的每条输入行都过 `authorize_command`（相对行 196），`Err` 一律写成 `{"type":"error","error":…}`，状态码丢弃；而 `/terminal` 只文档 400/401/403/423/429。这是「第四个 in-band 码」，本轮的第四行豁免把它钉住。
+  7. **`GET /hosts/{name}/policy` 的 403「无来源」→ 不成立（我上一轮的结论错）**。`host_policy:1429-1433` 直写 `FORBIDDEN`；删掉该 operation 的 `"403"`，测试立刻红并点名 `403 get /hosts/{name}/policy (host_policy)`。已在上一节加更正标注。
+- **本轮改了什么（全部 L1；`src-tauri/src/**` 净改动为零）**：
+  - 新增 **`strip_rust_literals`**：注释 + 字符串/字符/raw-string 一起抹掉，四个 needle 扫描改用它（`undocumented`、`undocumented_via_helper`、`unbacked` 的证据体、needle 存活检查）。`order_of` 仍用 `strip_rust_comments`，因为它要读 `if alias == "localhost"` 这个字面量。
+  - **委派必须被 handler 实际调用**（`own.contains("{delegate}(")`），否则报「证据来自本路由不跑的体」。
+  - **marker 改用 `spec_operation_block`**（方法块），不再接受同一 path item 里别的方法的散文。
+  - 新增 **`every_helper_status_row_agrees_with_the_code_its_helper_builds`** + `item_body_of` + `codes_a_body_spells` + `numbers_a_body_spells` + `status_helpers_called`：行内码必须与函数体自建的码一致（数字优先，其次「恰好一个字面量」；透传与多码 helper 不判）。
+  - **`INBAND_REJECTIONS` 3 → 4**：新增 `("get", "/terminal", &["408"], "as the same error frame, which carries the message", &["handle_terminal"])`，`api.yaml` 的 `/terminal` 补一句把 403/408/429 三形态写成同一个 error frame。
+  - **文档码提取器只认三位数字**：`api.yaml:1048` 的 `"unknown"` 与 `:1133` 的 `"nothing was stopped"` 不再被记成码（全仓仅此两条）。
+  - `docs/reports/OPT-LOOP-L2-PENDING.md`：**L2-192**（31 行里只有 5 行自证，删行静默）、**L2-193**（删 `preflight_guarded_request_inner` 的 gate/rate 全绿）、**L2-194**（缺「文档了但没人实现」方向）、**L2-195**（按缩进读 spec，description 里能塞假 response 块）、**L2-196**（`--bin` 单测不在 CI 清单）。**最大编号 L2-196**。
+- **反向验证 7 次（全部实跑）**：①无关委派 → 红并点名「`exec` … never calls it」；②兄弟方法 + marker 借用 → 同时红两条；③`finish_sftp_operation` 行改成 423 → 红「its body builds 400」；④`locked_status` 423→400 → 红「it spells ["400"]」；⑤字符串字面量 → 修复前绿、修复后红；⑥`/terminal` 文档化 408 → 红「documents 408 but answers it in-band」；⑦marker 句子缩短 → 红「no longer says …」。
+- **验证**：`npm run build` **6.34 s**；`cargo fmt --check` 绿；`--no-default-features --lib` **865 / 0 / 1**；`--no-default-features --features daemon --test daemon_integration` **86 passed / 0 failed**（原 85，+1 是新测试；旧 85 项全部仍绿）。
+- **未做**：L2-192 至 L2-196 五条全部待拍板；L2-185 的锚点漂移已按 #20 复核方的正确区间（`4777-4809`、分支 `4784-4786`）在本轮一并核对（`4753` 现在是 `if matches!`），L2 正文不另改。
+
+### 新增「不成立」，不要重复提
+
+1. **「`GET /hosts/{name}/policy` 的 403 在 handler 体内无来源，属反方向缺口」**——不成立，且是我上一轮写错的。`host_policy:1429-1433` 直写 `StatusCode::FORBIDDEN`；删掉 spec 里的 `"403"` 立刻红并点名。**不要再把它当缺口追。**
+2. **「`HELPER_STATUS` 的 31 行里 5 行是生产者」**——数字按字面量口径成立，但漏了两类自证：`reject_if_gate_paused`→423（经 `locked_status`）与 `reject_if_rate_limited`→429（自建数字）。按本轮新增测试的口径，能自证的是 **8 行**（5 字面量 + 3 数字），不是 5。

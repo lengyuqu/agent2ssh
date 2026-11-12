@@ -2583,3 +2583,73 @@ allowed_commands = ["uptime", "df *", "session_open"]
 **建议改法**：(a) 配置目录内 `daemon.sock`（目录 0700、socket 0600），服务端只在 accept 后取 `(LOCAL_PEERPID, LOCAL_PEERCRED.uid)`，`/shutdown` 要求 `expect_pid == 对端 pid` 且 `uid == geteuid()`；TCP 保留为 legacy 并显式打标；(b) 放弃传输层绑定，只对「自己 spawn 过并持有子进程」成立——独立 CLI 永远 `Unbound`。**倾向**：(a)，但**必须等 #22 的 D4 定案**，否则会造出第二套并行协议（`/shutdown/guarded` 已经为此付过一次代价）。
 
 **回滚**：删监听 + 客户端退回 `TcpStream`，HTTP 路径不受影响。
+
+### L2-192（新，单发 #20 第十一轮）：`HELPER_STATUS` 的 31 行里只有 5 行是「自证的生产者」，其余是透传，删掉它们不报错
+
+**位置**：`src-tauri/tests/daemon_integration.rs` 的 `HELPER_STATUS`（31 行）与唯一强制消费者 `unbacked` 里的证据检查。
+
+**判断**：**成立（结构如此）**。本轮的 `every_helper_status_row_agrees_with_the_code_its_helper_builds` 只约束「行写下来之后必须与实现相符」，不约束「这一行必须存在」。表里没有任何断言要求「某条路由把某个码折进 2xx，就必须有一行登记它」，所以删掉整条豁免行（以及只被它用到的行）是静默的。凡是靠 `preflight_guarded_request(` 这类透传行的 113 个 pair，其「被覆盖」是文本巧合而非可达性证明。
+
+**后果**：表的覆盖率是「看起来 31 行」而不是「31 个约束」。复核方按行给结论时会系统性高估。
+
+**为什么它是 L2**：要改表的形状（分成「生产者」「透传」两段，或从源码派生生产者集合），会同时改 `undocumented_via_helper`、`unbacked`、`every_helper_status_needle_names_a_call_a_body_makes` 三个消费者，属测试框架重构。
+
+**建议改法**：(a) 把表拆成 `PRODUCERS: [(fn, code)]`（体内自建该码，可用本轮新增的 `codes_a_body_spells` 自动校验）与 `PASS_THROUGHS`（显式声明「我把它交给谁」），两边都不允许空集合；(b) 让 `unbacked` 对每条豁免要求「至少一个生产者行 + 一条 handler→delegate 的实调用边」，本轮已加后者。**倾向** (a)，但它会让 31 行变成约 8+23 两段，需要逐行确认归属。
+
+**回滚**：纯测试文件改动，`git revert` 单笔即可。
+
+### L2-193（新，单发 #20 第十一轮）：删掉委派函数体里的 gate/rate 调用，全绿
+
+**位置**：`src-tauri/src/bin/agent2ssh-daemon.rs:618`（`reject_if_gate_paused`）与 `:620`（`reject_if_rate_limited`），都在 `preflight_guarded_request_inner` 里。
+
+**判断**：**成立（本轮实跑）**。删掉这两行，`--test daemon_integration` **86/86 绿**，而所有经 preflight 的路由仍文档化 423/429。`--lib` 根本不编译这个 bin，所以那一侧看不见它是必然的。原因同 L2-192 的镜像：检查读的是「某个被点名的体里出现过这个 needle」，不读「这个体是否还调用它」。
+
+**后果**：一个真实的守卫删除（安全相关：暂停闸门与速率限制）在契约层完全无感，只能靠路由级行为测试发现，而这类测试覆盖不到全部 30+ 路由。
+
+**为什么它是 L2**：给 `preflight_guarded_request_inner` 加「必须调用 gate 与 rate」的断言要引入「期望调用集」的新概念（哪两个函数、按什么顺序），属新机制而非修补。
+
+**建议改法**：(a) 在 `preflight_guarded_request_inner` 上挂一个显式的期望调用序（`["reject_if_gate_paused(", "reject_if_rate_limited("]`），与 `every_scope_checked_route_documents_the_order_its_refusals_arrive_in` 的 `chain()` 同源但反向使用；(b) 只对这一个函数加断言，不做通用化。**倾向** (b)：`chain()` 已经有顺序语义，复用它比新建机制便宜。
+
+**回滚**：删断言即可。
+
+### L2-194（新，单发 #20 第十一轮）：契约测试只有「实现了但没文档」一个方向，「文档了但没人实现」无检查
+
+**位置**：`api_yaml_documents_the_codes_each_handler_can_return`（`undocumented` 与 `undocumented_via_helper` 两个断言）。
+
+**判断**：**成立（实测）**。给 `POST /local-exec` 加一个 `"409"` response，全套绿；同理任何 operation 都可以声明一个永远不出现的码。这与「删掉一个真码」的检查方向相反，且没有任何断言覆盖。
+
+**后果**：契约可以单向膨胀。客户端按 spec 写 409 分支，服务端永远不返回——比缺文档更隐蔽，因为它看起来"已经处理了"。
+
+**为什么它是 L2**：要判定「这个码是否可能返回」，需要对每个 operation 建立完整的生产者集合（handler 字面量 + 可达 helper + middleware），而今天的 `HANDLER_STATUS` 只管 handler 自己的字面量。做成全量会把 34 个仍靠 `StatusCode::` 字面量兜底的 400 与 500 的中间件来源一并卷进来。
+
+**建议改法**：(a) 只对 4xx 里「无任何生产者」的码报警，豁免集合显式列出（middleware 的 401/413/415/422、`Ok` 的 200/101）；(b) 先做「新增码必须同时给出生产者的文件:行号注释」这种弱形式。**倾向** (a)，但先跑一次全量看噪声有多大再定。
+
+**回滚**：删测试即可。
+
+### L2-195（新，单发 #20 第十一轮）：spec 是按缩进读的，`description` 里缩进 8 的 `"408":` 会被当成已文档化的码
+
+**位置**：`api_yaml_documents_the_codes_each_handler_can_return` 里的 codes 提取（`indent == 8` + `strip_prefix('"')`）。
+
+**判断**：**部分成立，且已修掉一半**。本轮把 key 限定为「三位数字」，于是 `api.yaml:1048` 的 `"unknown"` 与 `:1133` 的 `"nothing was stopped"` 不再被记成码（全仓仅此两条，实测）。但**仍成立的是**：在 `description` 里按同样缩进植入一个完整的 `"408":` 块，仍会被读成该 operation 的响应；`pyyaml` 会报 YAML 语法错，说明那个块在真实 YAML 里根本不是 response。
+
+**后果**：一份写坏的 spec 可以通过契约测试，而生成器/校验器读到的是另一份东西——测试证明的是「文本形状对」，不是「文档有效」。
+
+**为什么它是 L2**：正确做法是解析 YAML（`serde_yaml` 或 `yaml-rust2`），而那要重写 `documented` 的数据来源、牵动 6 个以上测试的断言口径，并且要动 `Cargo.toml` 的 dev-dependencies（本任务的禁区）。
+
+**建议改法**：(a) 引入 `serde_yaml` 作为 **dev-dependency**，把 `documented` 换成解析结果，其余断言不动；(b) 保留文本读取，但要求每个 response key 之后紧跟 `description:` 或 `content:`（缩进 10），挡掉"描述里塞块"这一种形态。**倾向** (a)，但它不再是本循环能单独完成的一轮。
+
+**回滚**：单笔 revert。
+
+### L2-196（新，单发 #20 第十一轮）：`source_or_env_for_request` 的 403 只被一个 `--bin` 单测挡住，而 CI 清单里没有跑 `--bin` 的任务
+
+**位置**：`src-tauri/src/bin/agent2ssh-daemon.rs:383`（`STATUS_FORBIDDEN` 分支），守卫测试 `tests::remote_request_source_cannot_claim_desktop`（`agent2ssh-daemon.rs:6330`，断言在 `:6337`）。
+
+**判断**：**成立（本轮实跑）**。把这个 403 改成 401，`--test daemon_integration` **86 绿**，`--bin agent2ssh-daemon` **29 passed / 1 failed**，红的正是 `tests::remote_request_source_cannot_claim_desktop`。而 `AGENTS.md` 的命令清单里，`--bin agent2ssh-daemon` 是「本轮新增、用于跑 handler 单测层」的那条，`docs/` 与 CI 都未把它列为必跑项。
+
+**后果**：一个安全语义的降级（403 拒绝 vs 401 未认证）不会被任何强制门挡住。
+
+**为什么它是 L2**：改 CI/脚本属禁区（`.cnb.yml`、`scripts/**`），只能报。
+
+**建议改法**：把 `cargo test --no-default-features --features daemon --bin agent2ssh-daemon` 加进 CI 的必跑集合；它便宜（本机 30 passed，秒级）。**倾向**：直接加，无需设计。
+
+**回滚**：CI 配置回退。
