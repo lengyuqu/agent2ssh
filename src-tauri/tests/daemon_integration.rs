@@ -32,6 +32,7 @@ use agent2ssh::approval::*;
 use agent2ssh::core::*;
 use agent2ssh::risk_config::*;
 use agent2ssh::types::*;
+use std::collections::{BTreeMap, BTreeSet};
 
 // ── HTTP test helpers ───────────────────────────────────────────────────────
 
@@ -5226,5 +5227,171 @@ async fn daemon_honors_configured_listen_address_end_to_end() {
     assert!(
         healthy,
         "daemon_health_ok should reach a server bound to the configured AGENT2SSH_DAEMON_ADDR"
+    );
+}
+
+// ── The guide's action-string list vs the daemon's ──────────────────────────
+
+/// Action strings in `agent2ssh-daemon.rs`: every string literal handed to
+/// `check_daemon_scope` as its fourth argument, plus the `RESIDENT_*_COMMAND`
+/// constants.
+///
+/// The constants are in the set because those two reach the same check through
+/// `preflight_guarded_request` → `authorize_command_with_approval`
+/// (`execution_control.rs:445` is its first statement) rather than through an
+/// inline call, so scanning only the literal call sites would miss
+/// `resident-session open` and `resident-session close`.
+///
+/// A fourth argument that is a shell command (`&body.command`,
+/// `&request.command`, `&command`) is not an action string and is skipped: the
+/// guide matches those with glob patterns, not by enumerating them.
+fn fixed_action_strings(source: &str) -> BTreeSet<String> {
+    let mut consts: BTreeMap<String, String> = BTreeMap::new();
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        let Some(rest) = trimmed.strip_prefix("const ") else {
+            continue;
+        };
+        let Some((name, tail)) = rest.split_once(": &str = \"") else {
+            continue;
+        };
+        let Some(value) = tail.split('"').next() else {
+            continue;
+        };
+        if name.starts_with("RESIDENT_") && name.ends_with("_COMMAND") {
+            consts.insert(name.to_string(), value.to_string());
+        }
+    }
+
+    let mut actions: BTreeSet<String> = consts.values().cloned().collect();
+    let call = "check_daemon_scope";
+    let mut search = 0usize;
+    while let Some(relative) = source[search..].find(call) {
+        let at = search + relative;
+        search = at + call.len();
+        // Skip the definition and any doc-comment mention: only a call has `(`.
+        if !source[search..].starts_with('(') {
+            continue;
+        }
+        // A definition reads `fn check_daemon_scope(`.
+        if source[..at].trim_end().ends_with("fn") {
+            continue;
+        }
+        let Some(arguments) = call_arguments(source, search) else {
+            continue;
+        };
+        let Some(fourth) = arguments.get(3) else {
+            continue;
+        };
+        let fourth = fourth.trim();
+        if let Some(literal) = fourth
+            .strip_prefix('"')
+            .and_then(|rest| rest.split('"').next())
+        {
+            actions.insert(literal.to_string());
+        } else if let Some(value) = consts.get(fourth) {
+            actions.insert(value.clone());
+        }
+    }
+    actions
+}
+
+/// Split the argument list that starts at `open` (the byte index of `(`).
+///
+/// Tracks nesting so a `format!(...)` or a tuple inside one argument does not
+/// split it, and skips string literals so a comma or paren inside one is not
+/// read as structure.
+fn call_arguments(source: &str, open: usize) -> Option<Vec<String>> {
+    let mut depth = 0usize;
+    let mut arguments = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    let mut escaped = false;
+    for character in source[open..].chars() {
+        if quoted {
+            current.push(character);
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                quoted = false;
+            }
+            continue;
+        }
+        match character {
+            '"' => {
+                quoted = true;
+                current.push(character);
+            }
+            '(' | '[' | '{' => {
+                depth += 1;
+                if depth > 1 {
+                    current.push(character);
+                }
+            }
+            ')' | ']' | '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    if !current.trim().is_empty() {
+                        arguments.push(current);
+                    }
+                    return Some(arguments);
+                }
+                current.push(character);
+            }
+            ',' if depth == 1 => {
+                arguments.push(std::mem::take(&mut current));
+            }
+            _ => current.push(character),
+        }
+    }
+    None
+}
+
+/// `docs/guides/configuration-guide.md` lists the fixed action strings verbatim,
+/// and `allowed_commands` is a hard whitelist, so a string missing from that
+/// list is a token that cannot perform the operation — silently, until the
+/// deployment that needs it.
+///
+/// The list is prose, which is why it went stale: `disconnect` was authorizing a
+/// real route (`ssh_disconnect`, `agent2ssh-daemon.rs:3658`) while the bullet
+/// named only `connect`, and nothing in the suite could notice. Deriving the set
+/// from the source closes that: the tenth string cannot be added to the daemon
+/// without this test naming the paragraph that has to grow with it.
+#[test]
+fn configuration_guide_lists_every_fixed_action_string() {
+    let actions = fixed_action_strings(include_str!("../src/bin/agent2ssh-daemon.rs"));
+    assert!(
+        actions.len() >= 10,
+        "the parse found only {} action strings, fewer than the ten the daemon authorizes \
+         (`ping`, `session_open`, `session_read`, `session_close`, `terminal`, \
+         `resident-session open|read|close`, `connect`, `disconnect`) — teach \
+         `fixed_action_strings` the shape it stopped reading, or this test has quietly stopped \
+         covering the list it exists to cover: {actions:?}",
+        actions.len()
+    );
+
+    let guide = include_str!("../../docs/guides/configuration-guide.md");
+    let bullet = guide
+        .lines()
+        .find(|line| line.contains("`allowed_commands` 非空时是一张绝对白名单"))
+        .expect(
+            "docs/guides/configuration-guide.md no longer has the `allowed_commands` whitelist \
+             bullet; if it was reworded, update the marker in this test rather than deleting \
+             the assertion",
+        );
+
+    let missing: Vec<&String> = actions
+        .iter()
+        .filter(|action| !bullet.contains(&format!("`{action}`")))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these action strings are authorized by the daemon but absent from the `allowed_commands` \
+         bullet in docs/guides/configuration-guide.md: {missing:?}. Each one is a whitelist entry \
+         an operator has to write by hand, so an omission is a token that is refused on that \
+         operation alone. Add them to the bullet, with the same backticked spelling the daemon \
+         matches."
     );
 }
