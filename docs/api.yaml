@@ -2043,7 +2043,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "429":
-          description: "The session cap was reached, not the per-minute rate limit. `terminal_attach` reserves a slot through `register_limited_session_for_command` with the `terminal_open` operation, and that helper calls `check_session_open`; it never calls `reject_if_rate_limited`. The scope suffix in the body is therefore `sessions`, and the slot comes back when the socket closes (`unregister_session` at the end of `handle_terminal`) — a timed retry waits for nothing. The check runs before the upgrade, so the refusal is an HTTP status rather than a frame."
+          description: "The session cap was reached, not the per-minute rate limit. `terminal_attach` reserves a slot through `register_limited_session_for_command` with the `terminal_open` operation, and that helper calls `check_session_open`; it never calls `reject_if_rate_limited`. The scope suffix in the body is therefore `sessions`, and the slot comes back when the socket closes (`unregister_session` at the end of `handle_terminal`) — a timed retry waits for nothing. The check runs before the upgrade, so this refusal is an HTTP status rather than a frame. The route answers 429 in a second form once the socket is up: `handle_terminal` rate-limits each completed command through `reject_if_rate_limited` and writes that refusal into a `{\"type\":\"error\"}` frame, so a client on the socket must read 429 from the frame channel and never waits for a status it cannot receive."
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -2186,11 +2186,13 @@ paths:
             Same shape as `/terminal/broadcast/preview`, and same reason: the token's allowed
             hosts and tags are checked per target, so a scope denial or a rejected approval is
             carried in each target's `authorized` and `error` inside a 200 rather than in this
-            status. The refusals that do stop the whole request are 400 (validation) and 429 (the
-            batch limit), and the run adds no status of its own — it reuses
-            `terminal_broadcast_preview_results` for the verdict. A target refused for scope is
-            therefore reported exactly as an enforcement is, `authorized: false`; and a paused gate
-            is not 423 here either.
+            status. The only refusal that stops the whole request is 400 (validation): the batch
+            rate limit is checked once over the eligible targets, and its refusal is written into
+            each of their `authorized` and `error` inside the same 200, so a throttled batch looks
+            exactly like a denied one and still answers 200. The run adds no status of its own —
+            it reuses `terminal_broadcast_preview_results` for the verdict. A target refused for
+            scope is therefore reported exactly as an enforcement is, `authorized: false`; and a
+            paused gate is not 423 here either.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }

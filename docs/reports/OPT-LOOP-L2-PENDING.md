@@ -2475,3 +2475,20 @@ allowed_commands = ["uptime", "df *", "session_open"]
 **建议改法**：(a) 在 `:1906` 的 early return 之前写一条 `info`，把两种「没停」分开：`process_not_recognised`（名字不在白名单）与既有的 `not_started_by_app`；(b) 把 `daemon_is_owned` 提到 `process_is_alive` 之前——**这不会改变结论**（`daemon_is_owned` 不看名字，重命名 daemon 上仍为 true），反而会让「不是本应用起的」这条日志在重命名 daemon 上误报，所以先要补判据再调序；(c) 保持现状，只在文档里写清「这条路径静默」。**倾向**：(a)。本轮已做 (c) 的文档部分。
 
 **回滚**：(a) 删掉那条日志即回到今天。
+
+### L2-185（新，单发 #20 第十次进入）：`GET /terminal` 的 scope 拒绝答 **200 text/plain**，契约承诺的是 403
+
+**位置**：`src-tauri/src/bin/agent2ssh-daemon.rs:4753-4754`。判据链三条，全是纯文本：
+1. `if let Err(e) = check_daemon_scope(&auth.scope, &params.host, &tags, "terminal") { return e.into_response(); }`（`:4753-4755`）
+2. `sed -n '582p' src-tauri/src/remote.rs` → `) -> Result<(), String> {`，所以 `e` 是 `String`
+3. `awk 'NR>=4746 && NR<=4778' src-tauri/src/bin/agent2ssh-daemon.rs | grep -c 'StatusCode::FORBIDDEN'` → **0**
+
+**判断**：**成立（行为缺陷，非文档缺陷）**。axum 对 `String` 的 `IntoResponse` 只插入 `content-type: text/plain; charset=utf-8`，状态码取 `StatusCode::default()` = **200 OK**；`http::response::Parts::new()` 不给 `Upgrade` 头。同函数另外两处 `e.into_response()`（`:4758` 的 gate 423、`:4774` 的限流 429）的 `e` 是 `(StatusCode, Json<ErrorBody>)`，状态码保住了 —— **只有 scope 这一处裸奔**。全仓 18 个 `check_daemon_scope(` 调用点里 16 个紧跟 `map_err` 转 403，这是唯一例外。
+
+**后果**：scoped token 越权打开 terminal 时，客户端拿到一个没有 `Upgrade` 头的 200（浏览器侧 WS 握手照样失败，但 HTTP 语义是成功）；`docs/api.yaml` 的 `GET /terminal` 403 因此**永不发生**，而 `HANDLER_STATUS` 只读 `StatusCode::` 字面量、该体里一个都没有 → 没有任何断言能发现。
+
+**为什么它是 L2**：改的是 `src-tauri/src/**` 的行为（状态码从 200 变 403），会改变真 daemon 的对外语义。
+
+**建议改法**：(a) 与其余 16 处一致，改成 `return err(StatusCode::FORBIDDEN, e).into_response();`（一行）；(b) 把 `check_daemon_scope` 的返回类型改成 `(StatusCode, Json<ErrorBody>)`，一次性消灭「裸 `String`」这类形状——牵动 `remote.rs` 与全部 18 个调用点；(c) 在 `api.yaml` 里把 403 改成「可能答 200」——**不选**，那是把 bug 写进契约。**倾向**：(a)，并用一条真 daemon 测试固定「scoped token 越权 → 403」。
+
+**回滚**：(a) 换回 `e.into_response()`；(b) 撤销类型改动。两者都不动其他路由。

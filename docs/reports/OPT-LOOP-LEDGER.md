@@ -3905,3 +3905,37 @@ L2-154（`/exec-multi` 全 0 语义）、L2-155（preview 缺 admin 门）、L2-
 3. **「`daemon_is_owned` 在名称门槛后面，因名字 `None` 而 false」**——它用 `process_start_time`（`daemon_control.rs:591-596`），不看名字；挡住退出路径的是排在它前面的 `process_is_alive`（`tauri_commands.rs:1906`）。
 
 **回帖**：`2120739993617330176`（`## 本轮收尾`，`04:46:30Z`；`#23` 内第 3 条该标记）。`#23` **保持 open**：三条验收（真实进程回归 / 两种生命周期 / Linux CI 前提）仍未做，且 pidfd 本体要改 `stop_daemon_process` 的签名、前置 #22 的文件身份格式未拍板；本轮新增的 L2-183 / L2-184 也都要人拍板。
+
+## 2026-11-12 · 手工/单发消费 · #20 第十次进入 · 表里的「通过 helper 可达」从来没被验到任何一个 body
+
+**前置**：无锁 → 主动建 pid 58549 并写 `owner`；三个其它 worktree `status --porcelain` 全 0 行、三十分钟无写入；`ls-remote cnb/main` 120 秒两值都是 `7caa1bc`；`src`/`src-tauri/src`/`docs` 三十分钟零写入 → 不让位。`open` 十二条（#20–#29 + #31/#32），**无 `[opt-round]`** → 模式 B，第二段为空。
+
+**选靶 #20**：#20 最新是 CodeBuddy `2120743340202151936`（**04:59:48Z**），比我 03:37:08Z 的收尾帖晚 82 分钟；#21（01:16Z）、#23（04:46Z）最新都是本流程的 `## 本轮收尾`（等复核）→ #20 是唯一有未消费复核的 P1，且编号最小。**连续第七轮靠「看最新一条时间戳」纠正选靶。**
+
+**判定 17 条 → 成立 11 / 部分成立 3 / 不成立 2 / 记录 1**。核心三条：
+
+1. **`/terminal` 的 scope 拒绝答 200 text/plain**（成立，行为缺陷）→ **L2-185**：`daemon.rs:4753-4755` 把 `check_daemon_scope` 的 `String` 直接 `into_response()`，axum 只补 `content-type`、状态码是默认 200。18 个调用点里 16 个紧跟 `map_err` 转 403，这是唯一例外；`HANDLER_STATUS` 只读 `StatusCode::` 字面量，该体里 0 个 → 无断言能发现。
+2. **`api.yaml` 把 429 写成「终止整个请求」**（成立）：`:2189` 原文 "The refusals that do stop the whole request are 400 (validation) and 429 (the batch limit)"，而 `daemon.rs:4488-4502` 把限流 `Err` 逐 target 写进 `error` 后 `return Ok(Json(...))` —— 200。已改。
+3. **「20 个 documented 408 删掉全绿」**（成立，**我复算同数**）：29 个 408 里，旧表只有 `authorize_command(` 一条 needle，20 个 operation 的 body 里没有它。补表后 **0 个**。
+
+**本轮改的是三处「检查自身没有兜底」，不是补几条表项**：
+
+- `f7470f6`（`daemon_integration.rs`）：①`HELPER_STATUS` 15 → **31** 行，三个 `preflight_*` 包装、`authorize_targets`、`finish_sftp_operation`、`check_daemon_scope`、`terminal_broadcast_preview_results`、`authorize_command` 的 403、gate 谓词 `gate_blocks_source(` 各按码登记；②新增 `every_helper_status_needle_names_a_call_a_body_makes`，**死 needle 现形**（原来 `too_many_requests_status()` 只被限流器自己调用，任何 handler body 都不含它，删行）；③两处 body 扫描先 `strip_rust_comments`；④`INBAND_REJECTIONS` 加第五段 `delegates`，`unbacked` 要求每个豁免码被 handler 或该 delegate 消费。
+- 本小节所在提交（`api.yaml` + `L2-185` + 台账）：`/terminal/broadcast` 的 403 段改成「只有 400 终止整个请求，批次限流逐 target 折进 200」；`GET /terminal` 的 429 补「升级后同一个码还走 `{"type":"error"}` 帧」；`handler_body_of` 的「66 of the 106」换成不带数字的说明（那个数任何人复算都对不上，快照数字会被当成已验证事实引用）。
+
+**反向验证四次**（各自红在不同断言上）：①把 `check_daemon_scope(` 拼成 `check_daemon_scope_typo(` → 新测试点名 `["check_daemon_scope_typo("]`；②preview 的豁免集加回 `429` → `unbacked` 点名「neither its handler nor [terminal_broadcast_preview_results] calls a helper that answers that code」；③在 `health` 体里注入一行 `// preflight_guarded_request(` → **剥离后绿**，把剥离关掉则同时点名 400/403/408/423/429 五条（证明注释能被当调用）；④删 `/exec-multi` 的 408 → 红并点名 `408 post /exec-multi (exec_multi via helper)`，撤掉 `preflight_guarded_request(` 与 `authorize_targets(` 两条 408 表项后同一删除**转绿**（证明红来自新表项，不是别处）。
+
+**验证**：`npm run build` **6.60 s**；`cargo fmt --check` 绿；`--no-default-features --lib` **863 / 1 / 1**（红项仍是故意红的 IPv6）；`--no-default-features --features daemon --test daemon_integration` **85 passed / 0 failed**（原 84，+1 是新测试）。
+
+**绑定面复算**（同一份脚本，归一化 `:id`→`{id}` 后按 `.route(...)` 解析出 106 个 pair）：documented 408 **29 → 未绑定 20 → 0**；423 **30 → 17 → 0**；403 **78 → 21 → 1**（剩 `GET /hosts/{name}/policy`，其 403 在体内无来源 —— 反方向，留待下轮）；400 **60 → 49 → 34**（其余靠 body 里的 `StatusCode::BAD_REQUEST` 字面量，由 `HANDLER_STATUS` 守；helper 侧不再兜底）；429 **29 → 0 → 0**。
+
+**未做**：CodeBuddy 的 ⑤（marker 只要出现在 path block 某处，挪进 401 的 description 也能过）——本轮没动 `spec_path_block`，属「同一段散文里哪个 response 说的」这类定位问题，改法要引入 anchor，成本高于本轮；记录，不记不成立。
+
+### 新增「不成立」，不要重复提
+
+1. **「`handler_body_of` 的注释数字错，现在是 93/106」**——**数字本身不可复算**：把它描述的旧终点（「下一个 `async fn`/`fn`」）按三种切法各算一次，越界数分别是 91/91（含下一项的 doc comment）、93/106（它的口径，我复现不出）、以及若干中间值，没有一个是稳定值。真正的缺陷是「这个数字被当成已验证事实引用」，所以本轮删数字、改写成不带快照的说明，而不是换一个同样会腐烂的数。**不要再给这个注释补数字。**
+2. **「`/terminal` 的 429 描述完全错」**——`:2046` 那句的主语是 `terminal_attach` 与 `register_limited_session_for_command`，就它自己而言没错（升级前的会话配额）；缺的是「升级后同一个码还走帧」这半句，属**部分成立**，本轮补的是后半句，不是重写前半句。
+
+### 过程失误（写下来防再犯）
+
+本轮前四次 `Edit` 全部打在 **REPO 主工作区**的 `src-tauri/tests/daemon_integration.rs` 上（路径没带 `-opt-worktrees/single-20`），发现时已改了表、扫描与新增测试三处。处置：`git -C $REPO checkout -- <file>` 还原，`git status` 确认只剩既有的 `.deja/`，再在 WT 里重做全部改动。**代价是前两次 `cargo test`（84 passed）读数无意义——它们跑的是未被改动的 WT 源码**。教训：`Edit`/`Write` 的路径必须落在 `$WT` 下；「测试绿了」要先确认改动真的在跑的那棵树里。
