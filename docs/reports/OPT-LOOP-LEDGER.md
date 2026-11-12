@@ -3943,3 +3943,30 @@ L2-154（`/exec-multi` 全 0 语义）、L2-155（preview 缺 admin 门）、L2-
 本轮前四次 `Edit` 全部打在 **REPO 主工作区**的 `src-tauri/tests/daemon_integration.rs` 上（路径没带 `-opt-worktrees/single-20`），发现时已改了表、扫描与新增测试三处。处置：`git -C $REPO checkout -- <file>` 还原，`git status` 确认只剩既有的 `.deja/`，再在 WT 里重做全部改动。**代价是前两次 `cargo test`（84 passed）读数无意义——它们跑的是未被改动的 WT 源码**。教训：`Edit`/`Write` 的路径必须落在 `$WT` 下；「测试绿了」要先确认改动真的在跑的那棵树里。
 
 **回帖**：`2120759458635624448`（`## 本轮收尾`，`06:03:51Z`）。`#20` **保持 open**：L2-176/177/178/179/180/181/182 与新增 **L2-185** 都要人拍板；本轮的 ①marker 定位、②一码两形态、③`GET /hosts/{name}/policy` 的 403 反方向缺口留待下一批。worktree `…/single-20` 已 remove、分支 `opt/single-20-20261112g` 已 `-d`，主工作区 `--ff-only` 到 `55989ca`，仅 `.deja/` 未跟踪。
+
+## 2026-11-12 15:05–（模式 B 单发 · issue #22 首次进入 · P2 设计类，单段闭环）
+
+- **前置**：主动建立锁（pid 91170 写入 `owner`）；三个其它 worktree `status --porcelain` 全 0 行；`ls-remote cnb/main` 两值都是 `4487f7f`；`src`/`src-tauri/src`/`docs` 三十分钟零写入 → 不让位。`open` 十条（#20–#29），**无 `[opt-round]`** → 模式 B，第二段为空。
+- **选靶 #22**：三条 P1 全部在等复核（#20 最新是 06:03Z 的本流程收尾、#21 是 01:16Z、#23 是 04:46Z），#24/#27 要 Windows 实机（排除）、#26/#28/#29 零评论（本该先发只读分析请求，但 #22 有未消费的 CodeBuddy 设计复核且编号更小）。**#22 是 P2，也是 #23 的阻塞源**：#23 反复卡在「文件身份格式未定」，而 #22 的协议稿正是那个决策的载体。按 §5.3 的 P2 口径，交付物是「能让人 5 分钟内拍板的方案对比」，不是代码。
+- **判定 11 条 → 成立 9 / 部分成立 1 / 数字不成立 1**（行号按其基线 `d3a4a71` 基本准确，本轮全部按 `4487f7f` 重映射，不记它漂移）：
+  1. **名称白名单未点明 → 成立**。`is_daemon_executable:141-154` 是四个字面量，不是「看起来像 daemon」；后果是三元组不在表内的打包构建**停不掉也起不来**（`:774-779` 静默 `Ok(())`、`start_daemon_background:448-452` 拒绝）→ **L2-186**。
+  2. **两文件协调已存在 + 无锁读 → 成立，但文件名错**。它写 `daemon-owner.json`，实际是 `daemon.owner`（`daemon_control.rs:587`）；`OwnerMarker{pid,start_time}:582-585`、`clear_daemon_owner_if:625-643` 锁内重匹配确实存在，`daemon_is_owned:612-623` 确实**不加锁** → **L2-188**。
+  3. **§6.3 当前走不到 + 更强的结论 → 成立**。客户端只靠 `/health` **响应体**里的 `pid`（`:231-250`）；全仓 `SO_PEERCRED`/`GetNamedPipeServerProcessId` 零命中；控制面只有一条 `TcpListener::bind`（`agent2ssh-daemon.rs:5826`）。所以 §3.2 的绑定在现有 TCP 通道上不可达，这是**结构结论**而不是「待验证」。
+  4. **`daemon_health_ok` 子串匹配 → 部分成立**。`:193` 的 `contains("\"ok\":true")` 确实能被**响应头**骗过；但它说的影响面（`daemon start` 误拒、`daemon status` 进错分支）**不成立**：`start_daemon_background:454-457` 走 `daemon_health_pid` → `health_identity`，那是对**响应体**做 `serde_json` 解析；而 `daemon_health_ok` 在生产路径上**零调用**（唯一调用者 `wait_for_daemon_health:196-205` 本身全仓零调用，只有 `daemon_integration.rs:5420` 打它）→ **L2-187**（休眠隐患，不是可用的 DoS）。
+  5. **`Stale` 是「无身份证明的删除授权」→ 成立**。`pid_definitely_missing` unix 版只判 `kill(pid,0)==ESRCH`（`:305-322`，不比较 start_time），`start_daemon_background:435-448` 与 `bin/agent2ssh.rs:3123-3129` 直接删记录。已写进 §3.3「遗留路径不得当作 `Exited`」。
+  6. **每次正常停止都写假 warn → 成立**。能落 `AcceptedUnchecked` 的只有 `200`，而真实停止永远带 `expect_pid`（`request_shutdown:881-947`）；warn 在 `:1053-1061`（文案 `:1057`）。代码注释 `:1039-1052` 已自陈这是已知缺陷——文档此前没写。
+  7. **`to_socket_addrs` 无上界 → 成立**。`daemon_health_ok:170` 的解析在 `connect_timeout(500ms)` 之前且无超时，`local_daemon_addr:21-28` 允许主机名 → `status`/`stop` 总时长无上界。已把「需实现时验证」改成「既有事实」。
+  8. **symlink 替身可被强杀 → 成立**。`a_daemon_that_ignores_the_expected_pid_stops_and_says_so`（`:1434`）用 `symlink("/bin/sleep")` 造名 `agent2ssh-daemon` 的替身（`:1445-1446`），`signal_daemon:774-779` 的名称判据恰好被这个 symlink 满足。
+  9. **§1 与 §5 矛盾（#22 原型验收的责任真空）→ 成立**。已改成「#22 只交付状态机 + 错误分类 + 决策表，原型验收归 #23–#25」。
+  10. **平台缺口的方向对、数字错 → 数字不成立**。它说「74 个 `fn`、13 项 `#[cfg(unix)]`」；实测 `grep -c 'fn '` = **51**、`#[test]` = **34**、带 `#[cfg(unix)]` 的**测试** = **8**（`#[cfg(unix)]` 总出现 15 次，其余门在 helper 上）。两个核心竞态用例确实是 unix-only（`:1431`、`:1699`），结论保留。
+  11. **「TCP 控制面是否保留」应列为决策 → 成立**，且比它说的更硬：不拍这一项，#23 的 pidfd 实现无处安放。
+- **本轮改了什么（全部 L1，零代码）**：`b8dcb1b` —— `docs/plans/daemon-identity-protocol.md` 六处（§1 加结构约束与责任划分、§2 补名称白名单/回执后果/健康探测/实例归属四行、§3.1 补既有约定与无锁读反例并把 DNS 无上界改为既有事实、§3.3 补 `Stale` 遗留路径、§5 补平台覆盖缺口与 macOS 结构性后果、§6 补 symlink 反例与 6.3 的「当前走不到」、§7 由五条散文改成 **D1–D6 决策表**）；`docs/reports/OPT-LOOP-L2-PENDING.md` 追加 **L2-186/187/188**（**最大编号 L2-188**）。
+- **验证**：`npm run build` **6.67 s**；`cargo fmt --check` 绿；`--no-default-features --lib` **865 / 0 / 1**（与上一轮建立的新基线一致，红项已随 #35 消失）。未改任何测试断言，故未跑其它目标。
+- **过程失误（记下来防再犯）**：建 worktree 时 `ln -s $REPO/node_modules` 的 `$REPO` 在子 shell 里未定义，落成 `node_modules -> /node_modules` 的**悬挂链接**；`git status` 干净（在 info/exclude 里）骗过了「worktree 就绪」的判断，直到 `npm run build` 报 `tsc: command not found` 才暴露。**下轮：建完 WT 先 `ls node_modules/.bin/tsc`，不要只看 status 干净。**
+- 未关闭 `#22`：D1–D6 全部要人拍板，其中 **D4 是 #23 的前置**。回帖 `## 本轮收尾`（不带轮次号）。
+
+### 新增「不成立」，不要重复提
+
+1. **「`daemon_health_ok` 的子串判定让任意本机进程能让 `daemon start` 误判已有实例而拒绝启动」**——不成立。`start_daemon_background:454-457` 用的是 `daemon_health_pid()` → `health_identity():231-250`，那是对**响应体**做 `serde_json::from_str` + `ok` 布尔 + `pid` u64 三重校验，响应头里的 `{"ok":true}` 过不去；`daemon_health_ok` 本身在生产路径上零调用（唯一调用者 `wait_for_daemon_health` 全仓零调用）。子串判定是真的，但它是休眠隐患。
+2. **「`daemon_stop_e2e.rs` 共 74 个 `fn`，其中 13 项 `#[cfg(unix)]`」**——两个数都错。实测 `grep -c 'fn '` = 51、`#[test]` = 34、`#[cfg(unix)]` 出现 15 次而**门住测试的只有 8 个**。结论（两个核心竞态用例在 Windows/macOS 零覆盖）成立，数字不要引用。
+3. **「两文件协调是纯提案，`daemon-owner.json` 还不存在」**——不成立。既有文件叫 `daemon.owner`，且已经是 `{pid, start_time}` 记录 + 锁内条件删除（`clear_daemon_owner_if:625-643`）。
