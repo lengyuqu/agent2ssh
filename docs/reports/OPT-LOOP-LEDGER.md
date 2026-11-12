@@ -3963,7 +3963,8 @@ L2-154（`/exec-multi` 全 0 语义）、L2-155（preview 缺 admin 门）、L2-
 - **本轮改了什么（全部 L1，零代码）**：`b8dcb1b` —— `docs/plans/daemon-identity-protocol.md` 六处（§1 加结构约束与责任划分、§2 补名称白名单/回执后果/健康探测/实例归属四行、§3.1 补既有约定与无锁读反例并把 DNS 无上界改为既有事实、§3.3 补 `Stale` 遗留路径、§5 补平台覆盖缺口与 macOS 结构性后果、§6 补 symlink 反例与 6.3 的「当前走不到」、§7 由五条散文改成 **D1–D6 决策表**）；`docs/reports/OPT-LOOP-L2-PENDING.md` 追加 **L2-186/187/188**（**最大编号 L2-188**）。
 - **验证**：`npm run build` **6.67 s**；`cargo fmt --check` 绿；`--no-default-features --lib` **865 / 0 / 1**（与上一轮建立的新基线一致，红项已随 #35 消失）。未改任何测试断言，故未跑其它目标。
 - **过程失误（记下来防再犯）**：建 worktree 时 `ln -s $REPO/node_modules` 的 `$REPO` 在子 shell 里未定义，落成 `node_modules -> /node_modules` 的**悬挂链接**；`git status` 干净（在 info/exclude 里）骗过了「worktree 就绪」的判断，直到 `npm run build` 报 `tsc: command not found` 才暴露。**下轮：建完 WT 先 `ls node_modules/.bin/tsc`，不要只看 status 干净。**
-- 未关闭 `#22`：D1–D6 全部要人拍板，其中 **D4 是 #23 的前置**。回帖 `## 本轮收尾`（不带轮次号）。
+- 未关闭 `#22`：D1–D6 全部要人拍板，其中 **D4 是 #23 的前置**。回帖 `2120776970253275136`（`## 本轮收尾`，不带轮次号，`07:13:26Z`）。
+- **合流**：`4487f7f..8152ed9`，合流后 `cnb/main` = **`8152ed9`**（只推 cnb，未推 github / git233）。分支 `opt/single-22-20261112` 与 worktree `…/single-22` 在本节合流验收后按 4.4 清理（先 `merge-base --is-ancestor`，再删 `node_modules` 链接、`binaries` 链接与 `dist`）。
 
 ### 新增「不成立」，不要重复提
 
