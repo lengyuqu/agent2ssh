@@ -1,4 +1,18 @@
 //! Real CLI coverage for redirected host credentials, isolated from user data.
+
+/// Phase 2 (#26): a sealed credential is either a legacy bare marker or a
+/// `$agent2ssh-secret$:<tag>` reference. Both are valid on-disk references;
+/// asserting the exact bare string would reject the new format.
+fn assert_secret_ref(value: &serde_json::Value) {
+    let text = value.as_str().expect("credential field should be a string");
+    assert!(
+        matches!(
+            agent2ssh::secrets::parse_secret_ref(text),
+            Some(agent2ssh::secrets::SecretRef::Bare | agent2ssh::secrets::SecretRef::Tagged(_))
+        ),
+        "expected a resolvable secret reference, got {text}"
+    );
+}
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
 
@@ -133,14 +147,13 @@ fn legacy_plaintext_requires_unlock_before_a_save_and_then_migrates() {
     let saved = std::fs::read_to_string(path).unwrap();
     assert!(!saved.contains("historical-password-marker"));
     let saved: serde_json::Value = serde_json::from_str(&saved).unwrap();
-    assert_eq!(
-        saved["hosts"]
+    assert_secret_ref(
+        &saved["hosts"]
             .as_array()
             .unwrap()
             .iter()
             .find(|h| h["name"] == "old")
             .unwrap()["password"],
-        agent2ssh::secrets::SECRET_REF
     );
 }
 
@@ -197,8 +210,8 @@ fn import_config_skips_existing_credentials_with_locked_or_unlocked_vault() {
         let hosts = parsed["hosts"].as_array().unwrap();
         let existing = hosts.iter().find(|h| h["name"] == "existing").unwrap();
         assert_eq!(existing["host"], "original.example");
-        assert_eq!(existing["password"], agent2ssh::secrets::SECRET_REF);
-        assert_eq!(existing["passphrase"], agent2ssh::secrets::SECRET_REF);
+        assert_secret_ref(&existing["password"]);
+        assert_secret_ref(&existing["passphrase"]);
         assert_eq!(hosts.iter().filter(|h| h["name"] == "new").count(), 1);
         assert_eq!(
             hosts.iter().find(|h| h["name"] == "new").unwrap()["host"],
@@ -260,10 +273,7 @@ fn password_reference_does_not_bypass_passphrase_encryption() {
     let hosts = std::fs::read_to_string(dir.path().join("hosts.json")).unwrap();
     assert!(!hosts.contains(marker));
     let parsed: serde_json::Value = serde_json::from_str(&hosts).unwrap();
-    assert_eq!(
-        parsed["hosts"][0]["passphrase"],
-        agent2ssh::secrets::SECRET_REF
-    );
+    assert_secret_ref(&parsed["hosts"][0]["passphrase"]);
 }
 
 fn run_with_blocked_config_temp(dir: &std::path::Path, name: &str, regular_file: bool) -> Output {

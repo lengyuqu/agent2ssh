@@ -549,6 +549,73 @@ fn load_config_from_disk(path: &Path) -> Result<AppConfig> {
 /// the marker prevents an unrelated save from destroying the only migration
 /// signal.
 fn internalize_secrets(config: &mut AppConfig) {
+    enum Resolution {
+        Keep,
+        Clear,
+        Replace(String),
+    }
+
+    /// Resolve one on-disk credential reference (CNB #26, phase 2).
+    ///
+    /// A tagged reference whose tag no longer matches `secrets.enc` is
+    /// **kept**: replacing it with the current plaintext would silently use the
+    /// wrong credential, and blanking it would let the next save erase the only
+    /// reference. `embedded_ssh` filters every marker out of auth attempts, so
+    /// keeping it blocks login without guessing.
+    fn resolve(
+        value: &str,
+        account: &str,
+        label: &str,
+        tags: &std::collections::HashMap<String, String>,
+        unlocked: bool,
+        store_is_behind: bool,
+    ) -> Resolution {
+        use crate::secrets::SecretRef::{Bare, Keyring, Malformed, Tagged};
+        match crate::secrets::parse_secret_ref(value) {
+            Some(Bare) => match crate::secrets::get_secret(account) {
+                Some(real) => Resolution::Replace(real),
+                None if unlocked && !store_is_behind => Resolution::Clear,
+                None => Resolution::Keep,
+            },
+            Some(Tagged(tag)) => {
+                let current = tags.get(account).map(String::as_str);
+                if current != Some(tag) {
+                    eprintln!(
+                        "warning: credential reference for {label} was written against content tag {tag}, but secrets.enc now has {}; the stored secret is NOT used. Re-enter the credential or restore a paired hosts.json/secrets.enc snapshot.",
+                        current.unwrap_or("no matching entry")
+                    );
+                    Resolution::Keep
+                } else if let Some(real) = crate::secrets::get_secret(account) {
+                    Resolution::Replace(real)
+                } else {
+                    eprintln!(
+                        "warning: credential entry for {label} disappeared while loading; keeping the reference intact"
+                    );
+                    Resolution::Keep
+                }
+            }
+            Some(Keyring) | Some(Malformed) | None => Resolution::Keep,
+        }
+    }
+
+    fn apply(
+        field: &mut Option<String>,
+        account: &str,
+        label: &str,
+        tags: &std::collections::HashMap<String, String>,
+        unlocked: bool,
+        store_is_behind: bool,
+    ) {
+        let Some(value) = field.take() else {
+            return;
+        };
+        match resolve(&value, account, label, tags, unlocked, store_is_behind) {
+            Resolution::Keep => *field = Some(value),
+            Resolution::Clear => {}
+            Resolution::Replace(real) => *field = Some(real),
+        }
+    }
+
     let store_gen = crate::secrets::store_generation();
     // A config whose generation is ahead of the store was written against a
     // newer credential file that has since been restored or removed. Blank a
@@ -565,44 +632,37 @@ fn internalize_secrets(config: &mut AppConfig) {
         );
     }
     let unlocked = crate::secrets::is_unlocked() || crate::secrets::try_unlock_from_env();
+    let tags = crate::secrets::entry_tags();
+
     for host in &mut config.hosts {
-        if let Some(pw) = &host.password {
-            if crate::secrets::is_current_secret_ref(pw) {
-                if let Some(real) =
-                    crate::secrets::get_secret(&crate::secrets::host_account(&host.name))
-                {
-                    host.password = Some(real);
-                } else if unlocked && !store_is_behind {
-                    // Genuinely missing (entry deleted) — don't leak the marker.
-                    host.password = None;
-                }
-                // else: locked — keep the marker so save preserves the ref.
-            }
-        }
-        if let Some(passphrase) = &host.passphrase {
-            if crate::secrets::is_current_secret_ref(passphrase) {
-                if let Some(real) =
-                    crate::secrets::get_secret(&crate::secrets::host_passphrase_account(&host.name))
-                {
-                    host.passphrase = Some(real);
-                } else if unlocked && !store_is_behind {
-                    host.passphrase = None;
-                }
-            }
-        }
+        let name = host.name.clone();
+        apply(
+            &mut host.password,
+            &crate::secrets::host_account(&name),
+            &format!("host '{name}' password"),
+            &tags,
+            unlocked,
+            store_is_behind,
+        );
+        apply(
+            &mut host.passphrase,
+            &crate::secrets::host_passphrase_account(&name),
+            &format!("host '{name}' passphrase"),
+            &tags,
+            unlocked,
+            store_is_behind,
+        );
     }
     for proxy in &mut config.proxies {
-        if let Some(pw) = &proxy.password {
-            if crate::secrets::is_current_secret_ref(pw) {
-                if let Some(real) =
-                    crate::secrets::get_secret(&crate::secrets::proxy_account(&proxy.id))
-                {
-                    proxy.password = Some(real);
-                } else if unlocked && !store_is_behind {
-                    proxy.password = None;
-                }
-            }
-        }
+        let id = proxy.id.clone();
+        apply(
+            &mut proxy.password,
+            &crate::secrets::proxy_account(&id),
+            &format!("proxy '{id}' password"),
+            &tags,
+            unlocked,
+            store_is_behind,
+        );
     }
 }
 
@@ -613,66 +673,66 @@ fn internalize_secrets(config: &mut AppConfig) {
 /// All credentials fail closed if they cannot be encrypted. Existing plaintext
 /// must be migrated by unlocking the vault before the configuration can be saved.
 fn externalize_secrets(config: &mut AppConfig) -> Result<()> {
+    use crate::secrets::SecretRef::{Bare, Keyring, Malformed, Tagged};
     use crate::secrets::{
-        host_account, host_passphrase_account, is_secret_ref, proxy_account, store_secret,
-        SECRET_REF,
+        host_account, host_passphrase_account, parse_secret_ref, proxy_account, store_secret,
+        tagged_secret_ref, SECRET_REF,
     };
 
+    /// Seal a plaintext credential and return the reference to write to
+    /// `hosts.json`. CNB #26: prefer a tagged reference so that restoring an
+    /// older `hosts.json` cannot silently resolve to a different ciphertext.
+    fn seal(account: &str, value: &str, what: &str) -> Result<String> {
+        store_secret(account, value)
+            .with_context(|| format!("refusing to persist an unencrypted {what}"))?;
+        Ok(match crate::secrets::entry_tag(account) {
+            Some(tag) => tagged_secret_ref(&tag),
+            None => SECRET_REF.to_string(),
+        })
+    }
+
+    /// P1: lazily upgrade a legacy bare marker when the store can prove a tag.
+    /// A locked store keeps the bare marker; nothing is rewritten blindly.
+    fn upgraded_bare(account: &str) -> Option<String> {
+        crate::secrets::entry_tag(account).map(|tag| tagged_secret_ref(&tag))
+    }
+
+    fn handle(field: &mut Option<String>, account: &str, what: &str) -> Result<()> {
+        let Some(value) = field.take() else {
+            return Ok(());
+        };
+        match parse_secret_ref(&value) {
+            Some(Bare) => *field = Some(upgraded_bare(account).unwrap_or(value)),
+            Some(Tagged(_)) | Some(Keyring) | Some(Malformed) => *field = Some(value),
+            None if value.is_empty() => *field = Some(value),
+            None => *field = Some(seal(account, &value, what)?),
+        }
+        Ok(())
+    }
+
     for host in &mut config.hosts {
-        if let Some(pw) = host
-            .password
-            .as_ref()
-            .filter(|pw| !pw.is_empty() && !is_secret_ref(pw))
-        {
-            match store_secret(&host_account(&host.name), pw) {
-                Ok(()) => host.password = Some(SECRET_REF.to_string()),
-                Err(e) => {
-                    return Err(e).with_context(|| {
-                        format!(
-                            "refusing to persist an unencrypted password for host '{}'",
-                            host.name
-                        )
-                    });
-                }
-            }
-        }
-        if let Some(passphrase) = &host.passphrase {
-            if passphrase.is_empty() || is_secret_ref(passphrase) {
-                continue;
-            }
-            match store_secret(&host_passphrase_account(&host.name), passphrase) {
-                Ok(()) => host.passphrase = Some(SECRET_REF.to_string()),
-                Err(e) => {
-                    return Err(e).with_context(|| {
-                        format!(
-                            "refusing to persist an unencrypted key passphrase for host '{}'",
-                            host.name
-                        )
-                    })
-                }
-            }
-        }
+        let name = host.name.clone();
+        handle(
+            &mut host.password,
+            &host_account(&name),
+            &format!("password for host '{name}'"),
+        )?;
+        handle(
+            &mut host.passphrase,
+            &host_passphrase_account(&name),
+            &format!("key passphrase for host '{name}'"),
+        )?;
     }
     for proxy in &mut config.proxies {
-        if let Some(pw) = &proxy.password {
-            if pw.is_empty() || is_secret_ref(pw) {
-                continue;
-            }
-            // P2: proxy passwords used to be the one branch that still wrote
-            // plaintext with a warning while the passphrase branch failed
-            // closed. Keep one policy for the same locked store.
-            match store_secret(&proxy_account(&proxy.id), pw) {
-                Ok(()) => proxy.password = Some(SECRET_REF.to_string()),
-                Err(e) => {
-                    return Err(e).with_context(|| {
-                        format!(
-                            "refusing to persist an unencrypted password for proxy '{}'",
-                            proxy.id
-                        )
-                    })
-                }
-            }
-        }
+        let id = proxy.id.clone();
+        // P2 (of #6): proxy passwords used to be the one branch that still
+        // wrote plaintext with a warning while the passphrase branch failed
+        // closed. Keep one policy for the same locked store.
+        handle(
+            &mut proxy.password,
+            &proxy_account(&id),
+            &format!("password for proxy '{id}'"),
+        )?;
     }
     Ok(())
 }

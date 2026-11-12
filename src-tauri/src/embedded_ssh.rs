@@ -2000,7 +2000,10 @@ fn authenticate(
         let guidance = if crate::secrets::is_legacy_keyring_ref(marker) {
             "legacy OS keyring reference; re-enter the password so it can be stored in secrets.enc"
         } else {
-            "locked app-managed secret reference; unlock the credential store with the master password"
+            // A kept reference can mean a locked store, a CNB #26 content-tag
+            // mismatch, or a malformed marker. None of them may be sent as a
+            // password; say what to do instead of claiming it is only "locked".
+            "unresolved app-managed secret reference; unlock the credential store with the master password, or re-enter the credential if it was changed or an older hosts.json was restored"
         };
         return Err(anyhow!("SSH password for '{}' is a {guidance}", host.name));
     }

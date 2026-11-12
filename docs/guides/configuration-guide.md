@@ -1241,6 +1241,8 @@ agent2ssh webdav pull --force
 
 **`hosts.json.bak` 不是一致性快照（阶段 2 设计进行中，尚未实现）**：常规保存只把上一次的 `hosts.json` 用 `fs::copy` 复制成 `hosts.json.bak`（`store.rs:841-851`，复制失败仅告警、不阻断保存），它防的是「上一次内容写坏了可手工回卷」，不保证跨文件一致。凭据库 `secrets.enc` 既没有配对副本，也不在 WebDAV 同步白名单与本地配置快照的恢复范围内；上述恢复路径都直接覆盖 `hosts.json` 而不碰 `secrets.enc`。因此手工把 `hosts.json.bak` 拷回、恢复旧配置快照或从远端 pull 回旧版本后，文件里的 `$agent2ssh-secret$` 引用仍会按 account 名解析到**当前** `secrets.enc` 中的密文——若这期间改过口令，可能用错凭据且不会有任何提示。阶段 2 的内容 tag 与成对快照设计见 `docs/plans/cross-file-transaction-phase2.md`，目前只是评审稿。请勿把 `.bak` 当作可安全回卷的成对备份；确需回卷时先另行备份当前 `secrets.enc`，并逐项核对主机凭据。
 
+**升级与降级（阶段 2 引用格式，已落地 A/B）**：自 2026-11-12 起，新写入的凭据引用为 `$agent2ssh-secret$:<tag>`，`secrets.enc` 条目同时带内容 `tag`。旧版本程序用精确相等判定识别引用，会把带 tag 的字符串当成**明文口令重新密封**，因此升级后的配置目录不能被旧版本直接读写；降级前必须先把引用改回 `$agent2ssh-secret$` 并备份 `secrets.enc`。多设备共享配置（含 WebDAV 只同步 `hosts.json`）需要所有端同时升级——`secrets.enc` 不在同步白名单内，远端只会拿到带 tag 的 `hosts.json` 而没有对应凭据库。恢复旧 `hosts.json` 时若 tag 与当前凭据库不匹配，引用会被保留并给出明确指引、登录被拒绝，不会静默使用改过的口令；修复方式是重新输入凭据或恢复成对快照。**成对快照本身尚未实现**（阶段 2 C），目前不能作为修复手段。
+
 ---
 
 ## 终端录制

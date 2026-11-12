@@ -319,9 +319,14 @@ P1–P6 均未拍板；本设计不替人决定，也不把「倾向」写成已
 
 ## 9. 状态
 
-**本文是设计评审稿。`src-tauri/src/` 本轮零改动，没有新增测试、没有跑平台原型，
-也没有关闭 #26。** 待 P1–P6 拍板后另起实施轮，届时按 §7 的验收映射逐项落地并区分
-实测 / 构造回归 / 推断。
+**本文是设计评审稿（阶段 2 的方案与决策依据）。** 2026-11-12 按
+[decisions](cross-file-transaction-phase2-decisions.md) 的推荐默认完成了**阶段 A/B**：
+结构化引用解析、`secrets.enc` 内容 tag、`$agent2ssh-secret$:<tag>` 写入与校验、
+旧裸 marker 惰性升级、改主密码 tag 稳定、P2 的保守拒绝与明确指引；代码见
+`secrets.rs` / `store.rs` / `embedded_ssh.rs`，回归见 `tests/store_phase2.rs`（5 项真实 CLI）。
+**阶段 C（成对快照与四条恢复路径的前置判定）、阶段 D（修复命令）与阶段 3 仍未实施**；
+C4–C8 未实测，Windows 实机（#27）与 Linux 侧边界未验证。§2–§5 中关于 C 的描述仍是设计，
+不是实现记录。#26 保持 open。
 
 P1–P6 的可勾选版本、推荐默认作为实施轮工作假设的说明、分阶段实施顺序与逐文件改动清单，
 见 [cross-file-transaction-phase2-decisions.md](cross-file-transaction-phase2-decisions.md)。
