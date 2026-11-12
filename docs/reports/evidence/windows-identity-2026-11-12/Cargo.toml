@@ -1,0 +1,11 @@
+[package]
+name = "a2s-win-probe"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sysinfo = { version = "0.39", default-features = false, features = ["system"] }
+windows-sys = { version = "0.48", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+] }
