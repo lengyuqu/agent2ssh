@@ -2492,3 +2492,45 @@ allowed_commands = ["uptime", "df *", "session_open"]
 **建议改法**：(a) 与其余 16 处一致，改成 `return err(StatusCode::FORBIDDEN, e).into_response();`（一行）；(b) 把 `check_daemon_scope` 的返回类型改成 `(StatusCode, Json<ErrorBody>)`，一次性消灭「裸 `String`」这类形状——牵动 `remote.rs` 与全部 18 个调用点；(c) 在 `api.yaml` 里把 403 改成「可能答 200」——**不选**，那是把 bug 写进契约。**倾向**：(a)，并用一条真 daemon 测试固定「scoped token 越权 → 403」。
 
 **回滚**：(a) 换回 `e.into_response()`；(b) 撤销类型改动。两者都不动其他路由。
+
+### L2-186（新，单发 #22）：daemon 名称判据是硬编码四字面量白名单，三元组不在表内的构建既停不掉也起不来
+
+**位置**：`src-tauri/src/daemon_control.rs:141-154`（`is_daemon_executable`）——`matches!` 里只有 `agent2ssh-daemon`、`agent2ssh-daemon-aarch64-apple-darwin`、`agent2ssh-daemon-x86_64-unknown-linux-gnu`、`agent2ssh-daemon-x86_64-pc-windows-msvc`；调用方 `process_looks_like_daemon:156-164`（名字或 argv[0]）、`signal_daemon:774-779`、`daemon_process_start_time`。
+
+**判断**：**成立**（本仓独有的布局事实，不是推测）。`cargo build` 产出的裸 `agent2ssh-daemon` 命中第一项，所以开发机上看不出来；一旦按 `bundle.externalBin` 命名成 `<name>-<triple>` 且三元组不在表内（例：`x86_64-pc-windows-gnu`、`aarch64-unknown-linux-musl`、`aarch64-pc-windows-msvc`），`process_looks_like_daemon` 恒 false → `daemon_process_start_time` 返回 `None` → `stop_daemon_process:979-988` 直接 `UnverifiedIdentity`「cannot be safely identified」。同一只 daemon 若不健康，`start_daemon_background:448-452` 又以 `RunningUnhealthy|Unverified` 拒绝启动。
+
+**后果**：用户的可见症状是「面板上 daemon 活着、`stop` 说认不出、`start` 说已有」。`renamed_daemon_is_reported_healthy_but_not_unsafely_stopped`（`daemon_stop_e2e.rs:724`）已把这个行为钉成预期，所以它不会自己暴露。
+
+**为什么它是 L2**：判据怎么派生是安全策略（等值白名单 vs 前缀匹配 vs `current_exe` 比对），三种改法的信任边界不同。
+
+**建议改法**：(a) 派生：`agent2ssh-daemon` 或 `agent2ssh-daemon-<任意三元组>` 前缀匹配（最省事，但把「名字可控」这件事彻底放开）；(b) 与 `std::env::current_exe()` 的 file_name 比对（最紧，但要求被检查进程与当前可执行文件同名，`cargo run` 下不成立）；(c) 维持白名单，补一条启动自检：若 `current_exe` 的 file_name 不在表内，`daemon start` 拒绝启动并明确要求补表。**倾向**：(c) + 把表从 `scripts/prepare-sidecars.sh` 的三元组列表生成，避免两处漂移。
+
+**回滚**：(a)(b) 换回 `matches!`；(c) 删掉自检。
+
+### L2-187（新，单发 #22）：`daemon_health_ok` 用子串判定健康，且生产路径上零调用
+
+**位置**：`src-tauri/src/daemon_control.rs:193`——`response.starts_with("HTTP/1.1 200") && response.contains("\"ok\":true")`。调用链只有 `wait_for_daemon_health:196-205`，而后者的全仓调用者为 **0**（唯一使用点是集成测试 `src-tauri/tests/daemon_integration.rs:5420`）。
+
+**判断**：**成立（观察）/ 不成立（影响面）**。子串判定确实只看整段响应（含响应头），伪造一个 `HTTP/1.1 200 OK` + 任意头里带 `{"ok":true}` 的空体响应即可通过。但「`daemon start` 会因此误判已有实例而拒绝启动」**不成立**：`start_daemon_background:454-457` 用的是 `daemon_health_pid()` → `health_identity():231-250`，那是对**响应体**做 `serde_json::from_str` 并校验 `ok` 为 bool、`pid` 为 u64，头伪造过不去。`daemon status` 的四档分类同样走 `health_identity`。
+
+**后果**：当前是休眠隐患——今天没有任何生产路径吃这条判定，所以它不是一个可用的拒绝服务面；但它是「看起来像健康检查」的唯一入口，下一个复用者会直接继承这个宽判据。
+
+**为什么它是 L2**：删函数或收紧判定都改 `src-tauri/src/**`。
+
+**建议改法**：(a) 删掉 `daemon_health_ok` / `wait_for_daemon_health` 与那条集成测试，统一走 `health_identity`（最小面）；(b) 保留但改成 `health_identity().is_some()`；(c) 保留现状，加 `#[doc(hidden)]` 或在注释里写死「不得用于身份判断」。**倾向**：(a)——零调用者的宽判据只会被误用。
+
+**回滚**：从 git 恢复函数与测试。
+
+### L2-188（新，单发 #22）：`daemon_is_owned` 无锁读 `daemon.owner`，与 `clear_daemon_owner_if` 的锁内删除构成判定/使用分离
+
+**位置**：`src-tauri/src/daemon_control.rs:612-623`（`std::fs::read_to_string` 前后无 guard）对 `:625-643`（`clear_daemon_owner_if` 先 `lock_config_file(DAEMON_PID_LOCK)` 再读再匹配再删）；写侧 `mark_daemon_owned:599-609` 持同一把锁。
+
+**判断**：**成立**。`store.rs:72-86` 只有阻塞式 `lock_exclusive` / `lock_shared`，没有 `try_lock`，所以「读时试着持锁、拿不到就降级」这条修法在本仓不存在，读侧只能二选一：持锁（可能阻塞调用方）或不持锁（今天这样）。
+
+**后果**：`daemon_is_owned(pid) == true` 返回后、调用方据此动手前，标记可被并发 `clear_daemon_owner_if` 删除，期间 PID 也可能被复用。当前唯一调用方是桌面退出路径（`tauri_commands.rs:1909`），它紧接着只做一件事——`stop_daemon_process(pid)`，而后者有一整套独立判据（`daemon_process_start_time` + `/health` + config_dir + token），所以**今天不构成误停**；但它是 #22 要新增的实例记录的直接模板，照抄就会把洞带到新协议里。
+
+**为什么它是 L2**：给读侧加锁会改变桌面退出路径的阻塞行为（持有 `.daemon-pid.lock` 期间不得等待网络），属行为改动。
+
+**建议改法**：(a) `daemon_is_owned` 改成在一次 `lock_config_file` 内读并返回 `OwnerMarker`，调用方拿记录而不是布尔；(b) 维持无锁，但在文档与注释里写明「它只是线索，不能作为行动依据」；(c) 把 owner 记录并入 #22 的 `daemon.instance.json`，一次做完。**倾向**：(c)，因为 #22 本来就要重做这份记录，单独改一次等于改两遍。
+
+**回滚**：纯函数级改动，可回退。
