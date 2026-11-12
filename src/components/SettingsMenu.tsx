@@ -30,6 +30,7 @@ import HighlightSettings from "./HighlightSettings";
 import RedactionSettings from "./RedactionSettings";
 import AlgoPrefsDialog from "./AlgoPrefsDialog";
 import { Button } from "./ui/button";
+import { confirmDialog } from "./ui/dialog";
 import { IconButton } from "./ui/icon-button";
 import { Spinner } from "./ui/state";
 import { THEMES, useTheme } from "../theme";
@@ -83,6 +84,8 @@ export default function SettingsMenu({
     null
   );
   const [daemonActionMessage, setDaemonActionMessage] = useState<string | null>(null);
+  const [canRequestUnboundStop, setCanRequestUnboundStop] = useState(false);
+  const [confirmingUnboundStop, setConfirmingUnboundStop] = useState(false);
   const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "failed">("idle");
   const [diagnosticBusy, setDiagnosticBusy] = useState<"refresh" | "export" | "clear" | null>(
     null
@@ -126,9 +129,10 @@ export default function SettingsMenu({
 
   useEffect(() => {
     if (!open) return;
+    void api.daemonSupportsUnboundGraceful().then(setCanRequestUnboundStop).catch(() => setCanRequestUnboundStop(false));
 
     function handlePointerDown(event: PointerEvent) {
-      if (!menuRef.current?.contains(event.target as Node)) {
+      if (!confirmingUnboundStop && !menuRef.current?.contains(event.target as Node)) {
         setOpen(false);
       }
     }
@@ -136,7 +140,7 @@ export default function SettingsMenu({
     function handleKeyDown(event: KeyboardEvent) {
       // The algorithm dialog handles its own Escape; don't tear down the menu
       // underneath it at the same time.
-      if (event.key === "Escape" && !algoOpen) setOpen(false);
+      if (event.key === "Escape" && !algoOpen && !confirmingUnboundStop) setOpen(false);
     }
 
     document.addEventListener("pointerdown", handlePointerDown);
@@ -145,7 +149,7 @@ export default function SettingsMenu({
       document.removeEventListener("pointerdown", handlePointerDown);
       document.removeEventListener("keydown", handleKeyDown);
     };
-  }, [open, algoOpen]);
+  }, [open, algoOpen, confirmingUnboundStop]);
 
   // K10: load the telemetry opt-in state when the menu opens.
   useEffect(() => {
@@ -250,6 +254,33 @@ export default function SettingsMenu({
     } catch (err) {
       setDaemonActionMessage(String(err));
       reportError("settings-menu", "daemon action failed", err, { action });
+    } finally {
+      setDaemonActionBusy(null);
+    }
+  }
+
+  async function requestUnboundStop() {
+    if (daemonActionBusy !== null) return;
+    setDaemonActionBusy("stop");
+    setConfirmingUnboundStop(true);
+    const confirmed = await confirmDialog({
+      title: t("Request unverified shutdown?"),
+      description: t("The endpoint is not bound to a verified process. This request may stop the wrong daemon and expose the admin token. Process exit will not be verified; no automatic retry, signal, or PID cleanup will occur. The daemon must have legacy HTTP shutdown enabled."),
+      confirmLabel: t("Request shutdown"),
+      danger: true,
+    });
+    setConfirmingUnboundStop(false);
+    if (!confirmed) {
+      setDaemonActionBusy(null);
+      return;
+    }
+    setDaemonActionMessage(null);
+    try {
+      const message = await api.daemonStopUnboundGraceful();
+      setDaemonActionMessage(message);
+      await onDaemonHealthRefresh();
+    } catch (err) {
+      setDaemonActionMessage(String(err));
     } finally {
       setDaemonActionBusy(null);
     }
@@ -655,6 +686,7 @@ export default function SettingsMenu({
 
           <section className="grid gap-2">
             <div className={sectionTitleCls}>{t("Daemon controls")}</div>
+            {canRequestUnboundStop && <p className="text-xs text-muted-foreground">{t("Health only shows that an endpoint responded; it does not verify daemon process identity. Quitting does not request shutdown, but the environment may still stop the daemon.")}</p>}
             <div className="grid grid-cols-3 gap-2">
               <Button
                 variant="outline"
@@ -693,6 +725,11 @@ export default function SettingsMenu({
                 </span>
               </Button>
             </div>
+            {canRequestUnboundStop && (
+              <Button variant="outline" block onClick={requestUnboundStop} disabled={daemonActionBusy !== null}>
+                {t("Request unverified shutdown")}
+              </Button>
+            )}
             {daemonActionMessage && (
               <div className="flex flex-wrap gap-x-2.5 gap-y-1 text-xs text-muted-foreground">
                 {daemonActionMessage}

@@ -23,7 +23,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agent2ssh::daemon_activity::{local_daemon_request, local_daemon_request_with_body};
-use agent2ssh::daemon_control::{process_is_alive, request_graceful_shutdown, stop_daemon_process};
+#[cfg(not(target_os = "macos"))]
+use agent2ssh::daemon_control::request_graceful_shutdown;
+use agent2ssh::daemon_control::{process_is_alive, stop_daemon_process};
 use agent2ssh::store::CONFIG_DIR_ENV;
 
 mod common;
@@ -97,7 +99,12 @@ impl RunningDaemon {
     fn spawn(binary: &std::path::Path, dir: &std::path::Path) -> Child {
         let stderr =
             std::fs::File::create(dir.join("daemon.stderr")).expect("create daemon stderr");
-        Command::new(binary)
+        let mut command = Command::new(binary);
+        // These existing tests exercise the explicitly enabled legacy route;
+        // daemon_macos_conservative_e2e separately checks the default refusal.
+        #[cfg(target_os = "macos")]
+        command.env("AGENT2SSH_ALLOW_UNBOUND_HTTP_SHUTDOWN", "1");
+        command
             .env(CONFIG_DIR_ENV, dir)
             .env(ADDR_ENV, std::env::var(ADDR_ENV).expect("daemon address"))
             .env("AGENT2SSH_LOG", "warn")
@@ -147,6 +154,28 @@ impl RunningDaemon {
 
     fn pid_file(&self) -> PathBuf {
         self.dir.join("daemon.pid")
+    }
+}
+
+/// Exercise daemon draining with an explicit compatibility request on macOS;
+/// this helper is not an implementation of the production stop contract.
+fn request_drain_for_test(pid: u32) -> Result<(), String> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        stop_daemon_process(pid).map_err(|error| error.to_string())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        agent2ssh::daemon_control::request_unbound_graceful_shutdown(pid)
+            .map_err(|error| error.to_string())?;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if !process_is_alive(pid) {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        Err("daemon did not exit after explicit test request".into())
     }
 }
 
@@ -210,7 +239,7 @@ fn stop_daemon_process_waits_for_a_graceful_exit() {
     assert!(process_is_alive(pid));
 
     let started = Instant::now();
-    stop_daemon_process(pid).expect("stop the daemon");
+    request_drain_for_test(pid).expect("stop the daemon");
 
     assert!(
         started.elapsed() < Duration::from_secs(7),
@@ -269,7 +298,7 @@ fn stop_closes_an_active_event_stream_and_exits() {
     }
     assert!(received.starts_with(b"HTTP/1.1 200"));
     let started = Instant::now();
-    stop_daemon_process(pid).expect("stop with an active SSE subscriber");
+    request_drain_for_test(pid).expect("stop with an active SSE subscriber");
     assert!(started.elapsed() < Duration::from_secs(8));
     assert!(!process_is_alive(pid));
     assert!(!daemon.pid_file().exists());
@@ -301,7 +330,7 @@ fn stop_closes_an_active_event_stream_and_exits() {
         restarted.0.try_wait().unwrap().is_none(),
         "restart must remain alive"
     );
-    stop_daemon_process(restarted_pid).expect("stop restarted daemon");
+    request_drain_for_test(restarted_pid).expect("stop restarted daemon");
 }
 
 #[test]
@@ -329,7 +358,7 @@ fn stop_exits_with_an_idle_exec_websocket() {
         String::from_utf8_lossy(&response)
     );
     // Deliberately keep the upgraded socket open without sending a request.
-    stop_daemon_process(daemon.child.id()).expect("stop with idle WebSocket");
+    request_drain_for_test(daemon.child.id()).expect("stop with idle WebSocket");
     assert!(!daemon.pid_file().exists());
 }
 
@@ -417,7 +446,7 @@ fn stop_exits_when_exec_websocket_peer_stops_reading() {
     // The peer stops reading while the remote command floods output.
     std::thread::sleep(Duration::from_secs(2));
     let started = Instant::now();
-    stop_daemon_process(daemon.child.id()).expect("stop with backpressured WebSocket");
+    request_drain_for_test(daemon.child.id()).expect("stop with backpressured WebSocket");
     assert!(started.elapsed() < Duration::from_secs(7));
     assert!(!daemon.pid_file().exists());
     let diagnostics = std::fs::read_to_string(daemon.dir.join("app.log")).unwrap();
@@ -474,7 +503,7 @@ fn shutdown_interrupts_an_active_ssh_request() {
             .send().ok().and_then(|response| response.json::<serde_json::Value>().ok())
             .is_some_and(|body| body["exit_code"] == 0)
     });
-    stop_daemon_process(daemon.child.id()).expect("stop while SSH command is running");
+    request_drain_for_test(daemon.child.id()).expect("stop while SSH command is running");
     let mut response = String::new();
     request.read_to_string(&mut response).unwrap();
     assert!(response.starts_with("HTTP/1.1 503"), "{response}");
@@ -529,7 +558,7 @@ fn shutdown_cancels_a_request_waiting_for_approval() {
         })
         .unwrap_or(false)
     });
-    stop_daemon_process(daemon.child.id()).expect("stop while approval is pending");
+    request_drain_for_test(daemon.child.id()).expect("stop while approval is pending");
     assert!(!daemon.pid_file().exists());
     let records = std::fs::read_to_string(daemon.dir.join("approvals.jsonl")).unwrap();
     let final_record = records
@@ -576,7 +605,7 @@ fn shutdown_reaps_a_running_local_command_and_its_child() {
         .map(|value| value.parse::<i32>().unwrap())
         .collect::<Vec<_>>();
     assert_eq!(pids.len(), 2);
-    let stopped = stop_daemon_process(daemon.child.id());
+    let stopped = request_drain_for_test(daemon.child.id());
     if stopped.is_err() {
         // Only the process group spawned by this test is targeted.
         unsafe {
@@ -614,7 +643,22 @@ fn exiting_old_daemon_preserves_replacement_pid_in_the_same_config() {
     std::fs::write(old.pid_file(), replacement_pid.to_string()).unwrap();
     agent2ssh::daemon_control::mark_daemon_owned(replacement_pid).expect("mark replacement owned");
     std::env::set_var(ADDR_ENV, old_addr);
-    stop_daemon_process(old_pid).expect("stop old daemon");
+    #[cfg(not(target_os = "macos"))]
+    request_drain_for_test(old_pid).expect("stop old daemon");
+    #[cfg(target_os = "macos")]
+    {
+        // The record was deliberately replaced, so the unbound client must
+        // refuse. Stop this test-owned child out of band to exercise its own
+        // conditional cleanup of the replacement's record.
+        assert!(agent2ssh::daemon_control::request_unbound_graceful_shutdown(old_pid).is_err());
+        assert_eq!(
+            unsafe { libc::kill(old_pid as libc::pid_t, libc::SIGTERM) },
+            0
+        );
+        wait_until("old test daemon exit", Duration::from_secs(10), || {
+            !process_is_alive(old_pid)
+        });
+    }
     assert!(!agent2ssh::daemon_control::remove_daemon_pid_file_if(old_pid).unwrap());
     assert_eq!(
         std::fs::read_to_string(old.pid_file()).unwrap(),
@@ -646,7 +690,14 @@ fn direct_daemon_with_another_port_cannot_replace_a_live_pid() {
     let stderr = std::fs::read_to_string(old.dir.join("daemon.stderr")).unwrap();
     std::env::set_var(ADDR_ENV, old_addr);
     assert!(!status.success());
-    assert!(stderr.contains("live or cannot be verified"), "{stderr}");
+    assert!(
+        stderr.contains(if cfg!(target_os = "macos") {
+            "automatic replacement is disabled"
+        } else {
+            "live or cannot be verified"
+        }),
+        "{stderr}"
+    );
     assert_eq!(
         std::fs::read_to_string(old.pid_file()).unwrap(),
         old_pid.to_string()
@@ -654,6 +705,10 @@ fn direct_daemon_with_another_port_cannot_replace_a_live_pid() {
     assert!(old.child.try_wait().unwrap().is_none());
 }
 
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "legacy automatic stale-record replacement; macOS conservative replacement is covered by daemon_macos_conservative_e2e"
+)]
 #[test]
 #[serial_test::serial]
 fn direct_daemon_recovers_a_definitely_absent_pid() {
@@ -684,7 +739,11 @@ fn stop_does_not_signal_a_process_with_daemon_name_in_an_argument() {
         "an argument is not the executable name"
     );
     let error = stop_daemon_process(pid).expect_err("unrelated process is not safely identified");
-    assert!(error.to_string().contains("cannot be safely identified"));
+    assert!(error.to_string().contains(if cfg!(target_os = "macos") {
+        "not bound"
+    } else {
+        "cannot be safely identified"
+    }));
     let still_running = child.try_wait().expect("check unrelated process").is_none();
     let _ = child.kill();
     let _ = child.wait();
@@ -715,7 +774,11 @@ fn stop_refuses_a_daemon_named_process_without_authenticated_health() {
     assert!(result
         .unwrap_err()
         .to_string()
-        .contains("could not be authenticated"));
+        .contains(if cfg!(target_os = "macos") {
+            "not bound"
+        } else {
+            "could not be authenticated"
+        }));
     assert!(still_running && pid_retained);
 }
 
@@ -756,13 +819,31 @@ fn renamed_daemon_is_reported_healthy_but_not_unsafely_stopped() {
     };
     let status = cli("status");
     assert!(status.status.success());
-    assert!(String::from_utf8_lossy(&status.stdout).contains("Daemon is running"));
+    assert!(
+        String::from_utf8_lossy(&status.stdout).contains(if cfg!(target_os = "macos") {
+            "identity is unbound"
+        } else {
+            "Daemon is running"
+        })
+    );
     let start = cli("start");
     assert!(start.status.success());
-    assert!(String::from_utf8_lossy(&start.stdout).contains("already running"));
+    assert!(
+        String::from_utf8_lossy(&start.stdout).contains(if cfg!(target_os = "macos") {
+            "identity is unbound"
+        } else {
+            "already running"
+        })
+    );
     let stop = cli("stop");
     assert!(!stop.status.success());
-    assert!(String::from_utf8_lossy(&stop.stderr).contains("cannot be safely identified"));
+    assert!(
+        String::from_utf8_lossy(&stop.stderr).contains(if cfg!(target_os = "macos") {
+            "not bound"
+        } else {
+            "cannot be safely identified"
+        })
+    );
     assert_eq!(
         std::fs::read_to_string(daemon.pid_file()).unwrap(),
         pid.to_string()
@@ -824,7 +905,8 @@ fn wrong_admin_token_never_signals_the_real_daemon() {
     // the daemon going away, or the reason being anything else.
     assert!(
         message.contains("did not accept this config's admin token")
-            || message.contains("could not be authenticated for shutdown"),
+            || message.contains("could not be authenticated for shutdown")
+            || (cfg!(target_os = "macos") && message.contains("not bound")),
         "{message}"
     );
     assert!(alive && pid_retained);
@@ -915,7 +997,11 @@ fn recognized_process_with_a_different_health_pid_is_unverified() {
     assert!(result
         .unwrap_err()
         .to_string()
-        .contains("could not be authenticated"));
+        .contains(if cfg!(target_os = "macos") {
+            "not bound"
+        } else {
+            "could not be authenticated"
+        }));
     assert!(still_running);
     assert!(process_is_alive(daemon.child.id()));
 }
@@ -1018,6 +1104,10 @@ fn a_forged_endpoint_cannot_report_an_absent_pid_as_running() {
     );
 }
 
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "legacy automatic stale-record replacement; macOS conservative replacement is covered by daemon_macos_conservative_e2e"
+)]
 #[test]
 #[serial_test::serial]
 fn background_start_verifies_and_stops_its_own_daemon() {
@@ -1156,7 +1246,10 @@ fn startup_does_not_accept_another_process_health_response() {
 #[serial_test::serial]
 fn the_shutdown_route_stops_the_daemon_gracefully() {
     let mut daemon = RunningDaemon::start("route", &[]);
+    #[cfg(not(target_os = "macos"))]
     assert!(request_graceful_shutdown(), "the admin token is accepted");
+    #[cfg(target_os = "macos")]
+    request_drain_for_test(daemon.child.id()).expect("explicit test compatibility request");
 
     wait_until("the daemon to exit", Duration::from_secs(10), || {
         daemon.child.try_wait().ok().flatten().is_some()
@@ -1327,6 +1420,7 @@ fn spawn_daemon_at(dir: &std::path::Path, addr: &str) -> Child {
         .open(dir.join("daemon.stderr"))
         .expect("open daemon stderr");
     Command::new(env!("CARGO_BIN_EXE_agent2ssh-daemon"))
+        .env("AGENT2SSH_ALLOW_UNBOUND_HTTP_SHUTDOWN", "1")
         .env(CONFIG_DIR_ENV, dir)
         .env(ADDR_ENV, addr)
         .env("AGENT2SSH_LOG", "info")
@@ -1545,6 +1639,17 @@ fn a_daemon_that_ignores_the_expected_pid_stops_and_says_so() {
     // A stand-in that does not exit on request is killed after the drain window,
     // which the stop reports as success — so reaching Ok is the honest outcome.
     let stopped = stop_daemon_process(pid);
+    if cfg!(target_os = "macos") {
+        assert!(stopped.unwrap_err().to_string().contains("not bound"));
+        assert_eq!(posted.load(Ordering::SeqCst), 0);
+        assert!(host_process.try_wait().unwrap().is_none());
+        let _ = host_process.kill();
+        let _ = host_process.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+        common::restore_default_config_env();
+        std::env::remove_var(ADDR_ENV);
+        return;
+    }
     assert_eq!(
         posted.load(Ordering::SeqCst),
         1,
@@ -1655,7 +1760,14 @@ fn a_daemon_serving_another_config_directory_is_not_stopped() {
     std::env::set_var(CONFIG_DIR_ENV, &other);
     let error = stop_daemon_process(pid).expect_err("that is not this config's daemon");
     let message = error.to_string();
-    assert!(message.contains("serves config directory"), "{message}");
+    assert!(
+        message.contains(if cfg!(target_os = "macos") {
+            "not bound"
+        } else {
+            "serves config directory"
+        }),
+        "{message}"
+    );
     assert!(
         daemon.child.try_wait().unwrap().is_none(),
         "the daemon is still running"
@@ -1767,6 +1879,9 @@ fn a_stop_that_reached_the_wrong_daemon_stops_nothing() {
     // client's view is which process answers.
     let _ = a.kill();
     let _ = a.wait();
+    #[cfg(target_os = "macos")]
+    agent2ssh::daemon_control::clear_stale_daemon_pid(a_pid)
+        .expect("explicitly clear A's exited PID record");
     let mut b = start_listener_at(&dir, &first_addr);
     let b_pid = b.id();
     assert_ne!(a_pid, b_pid);
@@ -1914,6 +2029,7 @@ fn a_relative_config_dir_in_one_working_directory_names_one_daemon() {
     );
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_agent2ssh-daemon"))
+        .env("AGENT2SSH_ALLOW_UNBOUND_HTTP_SHUTDOWN", "1")
         .env(CONFIG_DIR_ENV, "cfg")
         .env(ADDR_ENV, &addr)
         .env("AGENT2SSH_LOG", "warn")
@@ -1949,7 +2065,7 @@ fn a_relative_config_dir_in_one_working_directory_names_one_daemon() {
         agent2ssh::daemon_control::daemon_pid_state(pid),
         agent2ssh::daemon_control::DaemonPidState::Healthy
     );
-    stop_daemon_process(pid).expect("stop it");
+    request_drain_for_test(pid).expect("stop it");
     drop(guard);
 
     std::env::set_current_dir(previous).expect("restore the working directory");

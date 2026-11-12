@@ -1164,6 +1164,13 @@ paths:
     post:
       summary: Shut the daemon down
       description: >
+        On macOS, HTTP shutdown is disabled by default, including empty bodies.
+        An admin may explicitly start the daemon with
+        `AGENT2SSH_ALLOW_UNBOUND_HTTP_SHUTDOWN=1` to enable this unbound legacy
+        route. An HTTP response cannot bind the endpoint to the target process;
+        a caller can stop the wrong process or expose its token. The macOS
+        client never sends an automatic shutdown request or signal, and a single
+        explicit compatibility request does not prove the process exited.
         Asks the daemon to shut down the way `SIGTERM` does: it stops accepting
         connections, ends event streams, and drains open WebSocket connections on
         a budget — up to two seconds for each connection (they drain in parallel),
@@ -1186,8 +1193,8 @@ paths:
         only exists for a stop the daemon completes itself: one that is
         force-terminated after the grace window, or killed outright, writes
         nothing on its way out.
-        The desktop app and `agent2ssh daemon stop` use this route on all
-        platforms, but stopping is two steps rather than one: this request, and —
+        On non-macOS platforms, the desktop app and `agent2ssh daemon stop` use
+        this route, and stopping is two steps rather than one: this request, and —
         only once a daemon has accepted it and is still running when the wait ends —
         a force-terminate. A request that never gets an accepted answer ends the
         attempt instead: the caller reports why and sends no signal, so a refused
@@ -1199,10 +1206,9 @@ paths:
         client can trust — a `409` naming the very PID the caller sent can only
         be read as "this answer cannot be verified", never as "another daemon
         holds the listener" (K14).
-        A `401` — or the `403` of the admin gate, which the caller treats the same
-        way — means this route did reply: the token in this config's `daemon.token`
-        is not the one the running daemon accepts as admin, which is what a file
-        replaced under it looks like.
+        A `401` means the bearer token is missing or invalid. `403` can mean a
+        scoped token was denied; on macOS it can also mean legacy HTTP shutdown
+        is disabled even though the unrestricted admin token was accepted.
         A `429` is not one of them, and that is not an omission: `daemon_shutdown`
         increments the request counter and checks the admin token, then acts — it
         never enters the rate limiter and never reads the execution gate. The
@@ -1213,7 +1219,7 @@ paths:
         path's own pre-flight refusals — no `/health`
         answer, another PID, another config directory, no token file at all —
         never connect, so no status code describes them.
-        The caller waits
+        On non-macOS, the caller waits
         `GRACEFUL_STOP_WAIT` (8 s) for the process to exit; on `Running` it records
         a warning, signals the process by force, then waits 2 more seconds, and a
         `StillRunning` observation at that point is an error rather than a silent
@@ -1284,7 +1290,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "403":
-          description: Requires the unrestricted admin token; a scoped token gets 403.
+          description: Requires an unrestricted admin token; on macOS also returned when unbound HTTP shutdown is disabled.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }

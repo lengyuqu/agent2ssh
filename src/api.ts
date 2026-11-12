@@ -153,6 +153,7 @@ export interface QuitConfirmLabels {
   residentSessions: string;
   forwards: string;
   pendingApprovals: string;
+  unknownMessage: string;
 }
 
 export const api = {
@@ -711,6 +712,8 @@ export const api = {
   daemonStatus: () => invoke<DaemonControlResult>("daemon_status"),
   daemonStart: () => invoke<DaemonControlResult>("daemon_start"),
   daemonStop: () => invoke<DaemonControlResult>("daemon_stop"),
+  daemonStopUnboundGraceful: () => invoke<string>("daemon_stop_unbound_graceful"),
+  daemonSupportsUnboundGraceful: () => invoke<boolean>("daemon_supports_unbound_graceful"),
   daemonRestart: () => invoke<DaemonControlResult>("daemon_restart"),
   quitApp: () => invoke<void>("quit_app"),
   getAppPreferences: () => invoke<AppPreferences>("get_app_preferences"),

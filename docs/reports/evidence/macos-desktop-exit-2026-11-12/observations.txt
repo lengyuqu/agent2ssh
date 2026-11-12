@@ -1,0 +1,21 @@
+# macOS 27.2.1 (26B131), arm64, uid 501, SIP enabled
+# C siginfo calibration: Python sender PID=73660, probe target PID=73661
+signal=15 sender_pid=73660 sender_uid=501 target_pid=73661
+# Isolated GUI launched by CUA / LaunchServices; synthetic stand-in target 73834, GUI 73828
+signal=15 sender_pid=174 sender_uid=0 target_pid=73834
+# Before quit: ps -p 73828,73834 -o pid=,ppid=,pgid=,stat=,command= (test paths abbreviated)
+73828 1 73828 S .../agent2ssh-app
+73834 73828 73834 Ss .../agent2ssh-daemon
+# Before-quit process snapshot for the sender only
+174     1 /System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow
+# Current process identity and real/effective UID
+174     1   501     0 /System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow
+# Independent CLI starter: PID 72480 remained alive after CLI exit, then was explicitly SIGTERM-cleaned by the test.
+# Independent raw GUI control: parent 74616 was explicitly SIGTERM-terminated by test shell; child 74656 remained alive for 3 seconds, then test shell explicitly SIGTERM-cleaned it.
+signal=15 sender_pid=74610 sender_uid=501 target_pid=74656
+# Real daemon GUI diagnostic subset from instrumented build (the GUI owner and SIGTERM trigger, no claim about sender):
+{"component": "tauri", "fields": {}, "message": "desktop quit does not stop an unbound daemon on macOS", "ts": "2026-11-12T14:53:51.836828+00:00"}
+{"component": "daemon", "fields": {"trigger": "sigterm"}, "message": "shutdown initiated", "ts": "2026-11-12T14:53:53.099546+00:00"}
+{"component": "tauri", "fields": {}, "message": "desktop quit does not stop an unbound daemon on macOS", "ts": "2026-11-12T14:55:43.408548+00:00"}
+{"component": "tauri", "fields": {}, "message": "desktop quit does not stop an unbound daemon on macOS", "ts": "2026-11-12T14:55:43.680222+00:00"}
+{"component": "daemon", "fields": {"trigger": "sigterm"}, "message": "shutdown initiated", "ts": "2026-11-12T14:55:44.921420+00:00"}

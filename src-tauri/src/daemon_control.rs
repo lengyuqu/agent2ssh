@@ -76,11 +76,83 @@ const DAEMON_PID_LOCK: &str = ".daemon-pid.lock";
 pub fn write_daemon_pid(pid: u32) -> Result<()> {
     let _guard = crate::store::lock_config_file(DAEMON_PID_LOCK)?;
     if let Some(previous) = read_daemon_pid()? {
+        #[cfg(target_os = "macos")]
+        anyhow::bail!("daemon PID file names {previous}; file retained because automatic replacement is disabled on macOS. Inspect it, then use 'agent2ssh daemon clear-stale --expect-pid {previous}' only if the process has exited");
+        #[cfg(not(target_os = "macos"))]
         if !pid_definitely_missing(previous) {
             return Err(anyhow!("daemon PID file names process {previous}, which is live or cannot be verified; file retained"));
         }
     }
+    #[cfg(target_os = "macos")]
+    {
+        // The existence check above cannot constrain a legacy writer that
+        // ignores the lock. Never truncate a file it created in the meantime,
+        // and do not follow a dangling symlink to create a different file.
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(daemon_pid_path()?)
+            .context("failed to create daemon PID file; existing path retained")?;
+        write!(file, "{pid}").context("failed to write daemon PID file")
+    }
+    #[cfg(not(target_os = "macos"))]
     std::fs::write(daemon_pid_path()?, pid.to_string()).context("failed to write daemon PID file")
+}
+
+/// Explicitly remove an unchanged PID record only when the OS reports the PID
+/// absent while the cooperating writers' lock is held. This is not proof of the
+/// old process identity, and cannot protect against older non-cooperating writers.
+#[cfg(target_os = "macos")]
+pub fn clear_stale_daemon_pid(expected_pid: u32) -> Result<()> {
+    let path = daemon_pid_path()?;
+    if !std::fs::symlink_metadata(&path)
+        .context("cannot inspect daemon PID file; retained")?
+        .file_type()
+        .is_file()
+    {
+        anyhow::bail!("daemon PID path is not a regular file; retained for manual inspection");
+    }
+    let snapshot =
+        std::fs::read_to_string(&path).context("cannot read daemon PID file; retained")?;
+    clear_stale_daemon_pid_with_snapshot(expected_pid, &snapshot)
+}
+
+#[cfg(target_os = "macos")]
+fn clear_stale_daemon_pid_with_snapshot(expected_pid: u32, snapshot: &str) -> Result<()> {
+    let _guard = crate::store::lock_config_file(DAEMON_PID_LOCK)?;
+    let path = daemon_pid_path()?;
+    if !std::fs::symlink_metadata(&path)
+        .context("cannot inspect daemon PID file; retained")?
+        .file_type()
+        .is_file()
+    {
+        anyhow::bail!("daemon PID path is not a regular file; retained for manual inspection");
+    }
+    let raw = std::fs::read_to_string(&path).context("cannot read daemon PID file; retained")?;
+    if raw != snapshot {
+        anyhow::bail!("daemon PID file changed during cleanup; retained");
+    }
+    let actual = raw
+        .trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|pid| *pid != 0)
+        .ok_or_else(|| {
+            anyhow!(
+                "invalid daemon PID file {}; retained for manual inspection",
+                path.display()
+            )
+        })?;
+    if actual != expected_pid {
+        anyhow::bail!(
+            "daemon PID file changed (expected {expected_pid}, found {actual}); retained"
+        );
+    }
+    if !pid_definitely_missing(actual) {
+        anyhow::bail!("daemon PID {actual} exists or cannot be observed; PID file retained");
+    }
+    std::fs::remove_file(path).context("failed to remove stale daemon PID file")?;
+    Ok(())
 }
 
 fn write_daemon_pid_if_absent(pid: u32) -> Result<()> {
@@ -433,16 +505,21 @@ pub fn start_daemon_background(daemon_bin: &Path) -> Result<DaemonStartResult> {
                 });
             }
             DaemonPidState::Stale => {
-                let _ = crate::diagnostics::append_diagnostic_log(
-                    "warn",
-                    "daemon_control",
-                    "removing stale daemon pid before start",
-                    Some(serde_json::json!({ "pid": pid })),
-                );
-                if !remove_daemon_pid_file_if(pid)? {
-                    return Err(anyhow!(
-                        "daemon PID file changed during cleanup; retry after inspecting it"
-                    ));
+                #[cfg(target_os = "macos")]
+                return Err(anyhow!("daemon PID {pid} appears absent, but its identity is unbound; PID file retained. Inspect it and use 'agent2ssh daemon clear-stale --expect-pid {pid}' to remove only the stale record"));
+                #[cfg(not(target_os = "macos"))]
+                {
+                    let _ = crate::diagnostics::append_diagnostic_log(
+                        "warn",
+                        "daemon_control",
+                        "removing stale daemon pid before start",
+                        Some(serde_json::json!({ "pid": pid })),
+                    );
+                    if !remove_daemon_pid_file_if(pid)? {
+                        return Err(anyhow!(
+                            "daemon PID file changed during cleanup; retry after inspecting it"
+                        ));
+                    }
                 }
             }
             DaemonPidState::RunningUnhealthy | DaemonPidState::Unverified => {
@@ -622,6 +699,7 @@ pub fn daemon_is_owned(pid: u32) -> bool {
     marker.pid == pid && process_start_time(pid) == Some(marker.start_time)
 }
 
+#[cfg(any(not(target_os = "macos"), test))]
 fn clear_daemon_owner_if(pid: u32, start_time: u64) -> Result<bool> {
     let _guard = crate::store::lock_config_file(DAEMON_PID_LOCK)?;
     let path = daemon_owner_path()?;
@@ -652,15 +730,18 @@ fn clear_daemon_owner_if(pid: u32, start_time: u64) -> Result<bool> {
 /// reflected here rather than compiled against; exit is observed on a 50 ms poll
 /// (`wait_for_exit`), which is why the margin over six seconds is measured in
 /// seconds and not milliseconds.
+#[cfg(not(target_os = "macos"))]
 const GRACEFUL_STOP_WAIT: Duration = Duration::from_secs(8);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(any(not(target_os = "macos"), test))]
 enum ProcessObservation {
     Exited,
     Running,
     Unknown,
 }
 
+#[cfg(any(not(target_os = "macos"), test))]
 fn classify_process_observation(
     snapshot: Option<(u64, bool)>,
     definitely_missing: bool,
@@ -679,6 +760,7 @@ fn classify_process_observation(
 // macOS can omit an unreaped zombie from sysinfo while kill(pid, 0) still
 // succeeds. Observe our own exited children without consuming their wait status.
 #[cfg(unix)]
+#[cfg(any(not(target_os = "macos"), test))]
 fn child_has_exited(pid: u32) -> bool {
     let Ok(pid_signed) = i32::try_from(pid) else {
         return false;
@@ -699,6 +781,7 @@ fn child_has_exited(pid: u32) -> bool {
 }
 
 #[cfg(not(unix))]
+#[cfg(any(not(target_os = "macos"), test))]
 fn child_has_exited(_pid: u32) -> bool {
     false
 }
@@ -708,6 +791,7 @@ fn child_has_exited(_pid: u32) -> bool {
 // A signaled handle proves termination without consuming the Child's exit
 // status; a failed or denied query is not evidence of exit either.
 #[cfg(windows)]
+#[cfg(any(not(target_os = "macos"), test))]
 fn process_handle_is_signaled(pid: u32) -> bool {
     use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
     use windows_sys::Win32::System::Threading::{
@@ -725,10 +809,12 @@ fn process_handle_is_signaled(pid: u32) -> bool {
 }
 
 #[cfg(not(windows))]
+#[cfg(any(not(target_os = "macos"), test))]
 fn process_handle_is_signaled(_pid: u32) -> bool {
     false
 }
 
+#[cfg(any(not(target_os = "macos"), test))]
 fn observe_process(pid: u32, expected_start: u64) -> ProcessObservation {
     let sys_pid = sysinfo::Pid::from_u32(pid);
     let mut system = sysinfo::System::new();
@@ -746,6 +832,7 @@ fn observe_process(pid: u32, expected_start: u64) -> ProcessObservation {
     classify_process_observation(snapshot, definitely_missing, expected_start)
 }
 
+#[cfg(any(not(target_os = "macos"), test))]
 fn wait_for_exit(pid: u32, expected_start: u64, within: Duration) -> ProcessObservation {
     let start = Instant::now();
     while start.elapsed() < within {
@@ -760,6 +847,7 @@ fn wait_for_exit(pid: u32, expected_start: u64, within: Duration) -> ProcessObse
 
 // Recheck identity immediately before signalling. This narrows the PID reuse
 // window but cannot make a PID-based signal atomic with this inspection.
+#[cfg(not(target_os = "macos"))]
 fn signal_daemon(pid: u32, expected_start: u64, force: bool) -> Result<()> {
     let sys_pid = sysinfo::Pid::from_u32(pid);
     let mut system = sysinfo::System::new();
@@ -856,6 +944,7 @@ impl From<anyhow::Error> for DaemonStopError {
 }
 
 /// The outcome of asking the daemon to shut itself down.
+#[cfg(not(target_os = "macos"))]
 enum ShutdownRequest {
     Accepted,
     /// The daemon says it is a different PID than the one asked for.
@@ -878,6 +967,7 @@ enum ShutdownRequest {
 /// `expected_pid` is `None` only for [`request_graceful_shutdown`], which has no
 /// PID to name: a real stop always names its target, so a daemon that moved
 /// under the caller's feet can refuse instead of exiting.
+#[cfg(not(target_os = "macos"))]
 fn request_shutdown(expected_pid: Option<u32>) -> ShutdownRequest {
     let Some(token) = crate::daemon_activity::read_admin_token() else {
         return ShutdownRequest::NotAccepted(
@@ -943,6 +1033,7 @@ fn request_shutdown(expected_pid: Option<u32>) -> ShutdownRequest {
 }
 
 /// The PID a `409` names, so the error can point at the daemon that refused.
+#[cfg(any(not(target_os = "macos"), test))]
 fn reported_pid(body: &str) -> Option<u32> {
     let body: serde_json::Value = serde_json::from_str(body).ok()?;
     let message = body.get("error")?.as_str()?;
@@ -956,26 +1047,43 @@ fn reported_pid(body: &str) -> Option<u32> {
 
 /// Ask the running daemon to shut itself down, over its own admin API.
 ///
-/// This is how every platform stops a daemon; there is no `SIGTERM` branch to
+/// On non-macOS platforms this requests shutdown; there is no `SIGTERM` branch to
 /// fall back to. Windows is why the route exists at all — signalling there means
 /// `TerminateProcess`, which skips the drain that closes WebSocket connections
 /// cleanly and removes the pid file — but the stop path sends this request on
-/// Unix too, because it is what carries `expect_pid`.
+/// Unix too, because it is what carries `expect_pid`. On macOS the default is
+/// refusal without sending a request.
 ///
 /// Without a PID to name this sends the old, unchecked request, which is all it
 /// can do. [`stop_daemon_process`] — the path every real stop takes — names its
 /// target instead.
 pub fn request_graceful_shutdown() -> bool {
-    matches!(request_shutdown(None), ShutdownRequest::Accepted)
+    #[cfg(target_os = "macos")]
+    {
+        false
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        matches!(request_shutdown(None), ShutdownRequest::Accepted)
+    }
 }
 
-/// Stop the daemon with this `pid` and wait until it is gone.
+/// On macOS, refuse to stop an unbound daemon without sending a request or signal.
+#[cfg(target_os = "macos")]
+pub fn stop_daemon_process(pid: u32) -> std::result::Result<(), DaemonStopError> {
+    Err(DaemonStopError::UnverifiedIdentity(format!(
+        "daemon PID {pid} is not bound to an authenticated process object; no shutdown or signal was sent and this client did not remove the PID file. Inspect the process and stop it out of band, or explicitly try 'agent2ssh daemon stop --allow-unbound-graceful' (may stop the wrong process and expose the admin token)"
+    )))
+}
+
+/// Stop the daemon with this `pid` and wait until it is gone (non-macOS).
 ///
 /// Authenticate the local daemon and request shutdown through its admin route,
-/// then signal it by force if it has not exited within [`GRACEFUL_STOP_WAIT`].
+/// then signal it by force if it has not exited within the graceful-stop timeout.
 /// Returning only once the process has exited is what makes a restart safe — the
 /// old daemon still holds the listening port while it drains, so starting the
 /// new one straight away would fail to bind.
+#[cfg(not(target_os = "macos"))]
 pub fn stop_daemon_process(pid: u32) -> std::result::Result<(), DaemonStopError> {
     use DaemonStopError as Refused;
     let Some(start_time) = daemon_process_start_time(pid) else {
@@ -1009,7 +1117,7 @@ pub fn stop_daemon_process(pid: u32) -> std::result::Result<(), DaemonStopError>
             (Some(answered), Some(expected)) if answered != expected => {
                 return Err(Refused::UnverifiedIdentity(format!(
                     "daemon PID {pid} serves config directory {answered}, not {expected}; \
-                     PID file retained"
+                 PID file retained"
                 )))
             }
             // A daemon that does not say which config directory it serves cannot
@@ -1018,8 +1126,8 @@ pub fn stop_daemon_process(pid: u32) -> std::result::Result<(), DaemonStopError>
             (None, _) => {
                 return Err(Refused::UnverifiedIdentity(format!(
                     "daemon PID {pid} does not report its config directory, so this stop \
-                     cannot verify it is the daemon this config started; PID file retained. \
-                     Upgrade the daemon (agent2ssh daemon restart) and retry"
+                 cannot verify it is the daemon this config started; PID file retained. \
+                 Upgrade the daemon (agent2ssh daemon restart) and retry"
                 )))
             }
             _ => {}
@@ -1030,7 +1138,7 @@ pub fn stop_daemon_process(pid: u32) -> std::result::Result<(), DaemonStopError>
         // repeating the PID the caller already knows.
         return Err(Refused::UnverifiedIdentity(format!(
             "the daemon answering for PID {pid} could not be authenticated for shutdown \
-             (health PID, config directory, or admin token did not match); PID file retained"
+         (health PID, config directory, or admin token did not match); PID file retained"
         )));
     }
     if crate::daemon_activity::read_admin_token().is_none() {
@@ -1090,9 +1198,118 @@ pub fn stop_daemon_process(pid: u32) -> std::result::Result<(), DaemonStopError>
     Ok(())
 }
 
+/// Explicit, unbound legacy compatibility attempt. Acceptance is not proof of
+/// process identity or exit. Never wait, signal, retry, or clean a PID record.
+#[cfg(target_os = "macos")]
+pub fn request_unbound_graceful_shutdown(pid: u32) -> Result<()> {
+    let addr = crate::local_daemon_connect_addr();
+    let socket: std::net::SocketAddr = addr.parse().map_err(|_| {
+        anyhow!("unbound shutdown requires a numeric loopback address; no request sent")
+    })?;
+    if !socket.ip().is_loopback() {
+        anyhow::bail!("unbound shutdown requires a loopback address; no request sent");
+    }
+    let read_record = || -> Result<String> {
+        let _guard = crate::store::lock_config_file(DAEMON_PID_LOCK)?;
+        let path = daemon_pid_path()?;
+        if !std::fs::symlink_metadata(&path)
+            .context("cannot inspect daemon PID file; no request sent")?
+            .file_type()
+            .is_file()
+        {
+            anyhow::bail!("daemon PID path is not a regular file; no request sent");
+        }
+        let raw = std::fs::read_to_string(path)
+            .context("cannot read daemon PID file; no request sent")?;
+        if raw.trim().parse::<u32>().ok() != Some(pid) {
+            anyhow::bail!("daemon PID record does not match; no request sent");
+        }
+        Ok(raw)
+    };
+    let original_record = read_record()?;
+    if daemon_process_start_time(pid).is_none() {
+        anyhow::bail!(
+            "daemon PID {pid} cannot be observed as a daemon; no request sent; this client did not remove the PID file"
+        );
+    }
+    let health = health_identity().ok_or_else(|| {
+        anyhow!("daemon health is unavailable; no request sent; this client did not remove the PID file")
+    })?;
+    if health.pid != pid
+        || health.config_dir != expected_config_dir()
+        || health.config_dir.is_none()
+    {
+        anyhow::bail!("daemon PID or configuration directory does not match; no request sent; this client did not remove the PID file");
+    }
+    if read_record()? != original_record {
+        anyhow::bail!("daemon PID record changed during discovery; no request sent");
+    }
+    let token = crate::daemon_activity::read_admin_token()
+        .ok_or_else(|| anyhow!("admin token unavailable; no request sent"))?;
+    let _ = crate::diagnostics::append_diagnostic_log(
+        "warn",
+        "daemon_control",
+        "explicit unbound HTTP shutdown requested; target identity is not verified",
+        Some(serde_json::json!({"pid": pid, "address": addr})),
+    );
+    let response = crate::daemon_activity::local_daemon_request_with_body(
+        "POST",
+        "/shutdown",
+        Some(&token),
+        &serde_json::json!({"expect_pid": pid}),
+        Duration::from_secs(2),
+    )
+    .map_err(|error| {
+        anyhow!(
+            "shutdown outcome is unknown ({error}); this client did not remove the PID file, but the daemon may have exited; do not automatically retry"
+        )
+    })?;
+    if response.status != 200 {
+        anyhow::bail!(
+            "shutdown returned HTTP {}; process outcome is unknown and this client did not remove the PID file",
+            response.status
+        );
+    }
+    let accepted = serde_json::from_str::<serde_json::Value>(&response.body)
+        .ok()
+        .and_then(|body| body.get("ok").and_then(|ok| ok.as_bool()))
+        == Some(true);
+    if !accepted {
+        anyhow::bail!("shutdown response was not a valid acceptance; process outcome is unknown and this client did not remove the PID file");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn stale_cleanup_rejects_same_pid_if_record_bytes_changed() {
+        let _config = crate::store::TestConfigDir::new("daemon-stale-snapshot");
+        let path = daemon_pid_path().unwrap();
+        std::fs::write(&path, "2147483647\n").unwrap();
+        let error = clear_stale_daemon_pid_with_snapshot(2147483647, "2147483647").unwrap_err();
+        assert!(error.to_string().contains("changed during cleanup"));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "2147483647\n");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pid_publication_does_not_follow_a_dangling_symlink() {
+        let _config = crate::store::TestConfigDir::new("daemon-pid-symlink");
+        let path = daemon_pid_path().unwrap();
+        let target = path.with_file_name("uncreated-target");
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        let error = write_daemon_pid(std::process::id()).unwrap_err();
+        assert!(error.to_string().contains("existing path retained"));
+        assert!(!target.exists());
+        assert!(std::fs::symlink_metadata(path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
 
     #[test]
     fn pid_publication_refuses_live_or_invalid_records_and_recovers_absent_processes() {
@@ -1109,8 +1326,22 @@ mod tests {
         assert!(write_daemon_pid(me).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "broken");
         std::fs::write(&path, (u32::MAX - 1).to_string()).unwrap();
-        write_daemon_pid(me).unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), me.to_string());
+        #[cfg(target_os = "macos")]
+        {
+            assert!(write_daemon_pid(me)
+                .unwrap_err()
+                .to_string()
+                .contains("automatic replacement"));
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                (u32::MAX - 1).to_string()
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            write_daemon_pid(me).unwrap();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), me.to_string());
+        }
     }
 
     #[test]
@@ -1331,6 +1562,12 @@ mod tests {
     #[test]
     fn stopping_a_process_that_is_not_running_is_a_no_op() {
         let _config = crate::store::TestConfigDir::new("daemon-stop-missing");
+        #[cfg(target_os = "macos")]
+        assert!(stop_daemon_process(u32::MAX - 1)
+            .unwrap_err()
+            .to_string()
+            .contains("no shutdown or signal"));
+        #[cfg(not(target_os = "macos"))]
         stop_daemon_process(u32::MAX - 1).expect("nothing to stop");
     }
 }

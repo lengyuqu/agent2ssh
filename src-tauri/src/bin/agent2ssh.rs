@@ -1003,11 +1003,22 @@ enum DaemonCommands {
     /// Start the daemon in the background
     Start,
     /// Stop the running daemon
-    Stop,
+    Stop {
+        /// Explicitly attempt one unbound HTTP shutdown (macOS only; may stop
+        /// another process and expose the admin token to the wrong endpoint).
+        #[arg(long)]
+        allow_unbound_graceful: bool,
+    },
     /// Check if the daemon is running
     Status,
     /// Restart the daemon
     Restart,
+    /// Remove an unchanged PID record only if its PID is definitely absent
+    #[cfg(target_os = "macos")]
+    ClearStale {
+        #[arg(long)]
+        expect_pid: u32,
+    },
     /// Rotate daemon token while the daemon is stopped
     RotateToken {
         #[arg(long)]
@@ -3069,6 +3080,9 @@ async fn async_main() -> Result<()> {
                 DaemonCommands::Start => {
                     if let Some(pid) = read_daemon_pid()? {
                         if daemon_pid_state(pid) == DaemonPidState::Healthy {
+                            #[cfg(target_os = "macos")]
+                            println!("A daemon endpoint reports PID {pid}; process identity is unbound. No new process started.");
+                            #[cfg(not(target_os = "macos"))]
                             println!("Daemon is already running (pid={pid})");
                             return Ok(());
                         }
@@ -3081,17 +3095,34 @@ async fn async_main() -> Result<()> {
                         started.log_path.display()
                     );
                 }
-                DaemonCommands::Stop => {
+                DaemonCommands::Stop {
+                    allow_unbound_graceful,
+                } => {
                     let Some(pid) = read_daemon_pid()? else {
                         if let Some(pid) = daemon_health_pid() {
                             anyhow::bail!("daemon health endpoint is active (pid={pid}) but PID file is missing; cannot verify or stop it");
                         }
-                        println!("Daemon is not running (no PID file).");
-                        return Ok(());
+                        #[cfg(target_os = "macos")]
+                        anyhow::bail!("No daemon PID record; daemon process identity and state are unknown. Inspect the endpoint and processes before recovery.");
+                        #[cfg(not(target_os = "macos"))]
+                        {
+                            println!("Daemon is not running (no PID file).");
+                            return Ok(());
+                        }
                     };
                     // A refusal is a typed error, and its text is the whole
                     // point: "the daemon listening now is pid B, not the pid A"
                     // tells a person what to do, where "stop failed" does not.
+                    if allow_unbound_graceful {
+                        #[cfg(target_os = "macos")]
+                        {
+                            eprintln!("Warning: the endpoint is not bound to a process; this may stop the wrong daemon and expose the admin token. No automatic signal, retry or PID cleanup will occur.");
+                            agent2ssh::daemon_control::request_unbound_graceful_shutdown(pid)?;
+                            anyhow::bail!("Shutdown request accepted without verified identity; process exit is not verified and the PID file was not removed by this client. Inspect the process before acting again.");
+                        }
+                        #[cfg(not(target_os = "macos"))]
+                        anyhow::bail!("--allow-unbound-graceful is available only on macOS");
+                    }
                     stop_daemon_process(pid)?;
                     remove_daemon_pid_file_if(pid)?;
                     println!("Daemon stopped (pid={}).", pid);
@@ -3101,18 +3132,29 @@ async fn async_main() -> Result<()> {
                         if let Some(pid) = daemon_health_pid() {
                             println!("Daemon health endpoint is active (pid={pid}) but PID file is missing; identity cannot be verified.");
                         } else {
+                            #[cfg(target_os = "macos")]
+                            println!("No daemon PID record; daemon process state is unknown.");
+                            #[cfg(not(target_os = "macos"))]
                             println!("Daemon is not running.");
                         }
                         return Ok(());
                     };
                     match daemon_pid_state(pid) {
                         DaemonPidState::Healthy => {
+                            #[cfg(target_os = "macos")]
+                            println!("A daemon endpoint reports PID {pid}; process identity is unbound.");
+                            #[cfg(not(target_os = "macos"))]
                             println!("Daemon is running (pid={pid}).");
                             if let Ok(body) = daemon_health_body().await { println!("{body}"); }
                         }
                         DaemonPidState::RunningUnhealthy => println!("Daemon PID file exists (pid={pid}) but health check failed."),
                         DaemonPidState::Unverified => println!("Daemon PID file exists (pid={pid}) but the process identity cannot be verified."),
-                        DaemonPidState::Stale => println!("Daemon PID file exists (pid={pid}) but process is not running."),
+                        DaemonPidState::Stale => {
+                            #[cfg(target_os = "macos")]
+                            println!("Daemon PID {pid} appears absent; identity is unbound and PID file retained. Inspect it before using clear-stale.");
+                            #[cfg(not(target_os = "macos"))]
+                            println!("Daemon PID file exists (pid={pid}) but process is not running.");
+                        },
                     }
                 }
                 DaemonCommands::Restart => {
@@ -3130,15 +3172,25 @@ async fn async_main() -> Result<()> {
                         started.log_path.display()
                     );
                 }
+                #[cfg(target_os = "macos")]
+                DaemonCommands::ClearStale { expect_pid } => {
+                    agent2ssh::daemon_control::clear_stale_daemon_pid(expect_pid)?;
+                    println!("Removed the stale PID record for {expect_pid}; no process was stopped. Older processes that ignore the lock can still race this cleanup.");
+                }
                 DaemonCommands::RotateToken { json } => {
                     if let Some(pid) = read_daemon_pid()? {
-                        if daemon_pid_state(pid) != DaemonPidState::Stale {
-                            anyhow::bail!("daemon PID {pid} is live or cannot be verified; refusing to rotate token");
-                        }
-                        if !remove_daemon_pid_file_if(pid)? {
-                            anyhow::bail!(
+                        #[cfg(target_os = "macos")]
+                        anyhow::bail!("daemon PID record {pid} exists; token not rotated. Inspect it and use 'agent2ssh daemon clear-stale --expect-pid {pid}' only if the process is absent");
+                        #[cfg(not(target_os = "macos"))]
+                        {
+                            if daemon_pid_state(pid) != DaemonPidState::Stale {
+                                anyhow::bail!("daemon PID {pid} is live or cannot be verified; refusing to rotate token");
+                            }
+                            if !remove_daemon_pid_file_if(pid)? {
+                                anyhow::bail!(
                                 "daemon PID file changed during cleanup; retry after inspecting it"
                             );
+                            }
                         }
                     }
                     if daemon_health_pid().is_some() {

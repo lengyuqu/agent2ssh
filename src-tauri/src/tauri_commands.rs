@@ -1767,10 +1767,10 @@ pub fn daemon_status() -> Result<DaemonControlResult, String> {
                 Some(serde_json::json!({ "pid": pid, "state": format!("{state:?}") })),
             );
             let (running, message) = match state {
-                DaemonPidState::Healthy => (true, format!("Daemon is running (pid={pid}).")),
+                DaemonPidState::Healthy => (true, if cfg!(target_os = "macos") { format!("A daemon endpoint reports PID {pid}; process identity is unbound.") } else { format!("Daemon is running (pid={pid}).") }),
                 DaemonPidState::RunningUnhealthy => (false, format!("Daemon PID {pid} is running but the health check failed; PID file retained.")),
                 DaemonPidState::Unverified => (false, format!("Daemon PID {pid} cannot be verified; PID file retained.")),
-                DaemonPidState::Stale => (false, format!("Daemon PID {pid} is stale; PID file retained.")),
+                DaemonPidState::Stale => (false, if cfg!(target_os = "macos") { format!("Daemon PID {pid} appears absent; identity is unbound and PID file retained. Inspect it before using clear-stale.") } else { format!("Daemon PID {pid} is stale; PID file retained.") }),
             };
             Ok(DaemonControlResult {
                 running,
@@ -1780,6 +1780,9 @@ pub fn daemon_status() -> Result<DaemonControlResult, String> {
         }
         None => {
             let endpoint_pid = crate::daemon_control::daemon_health_pid();
+            #[cfg(target_os = "macos")]
+            return Ok(DaemonControlResult { running: false, pid: endpoint_pid, message: "No daemon PID record; daemon process identity and state are unknown. Inspect the endpoint and processes before recovery.".into() });
+            #[cfg(not(target_os = "macos"))]
             Ok(DaemonControlResult {
                 running: false,
                 pid: endpoint_pid,
@@ -1790,6 +1793,28 @@ pub fn daemon_status() -> Result<DaemonControlResult, String> {
             })
         }
     }
+}
+
+/// This is an explicit compatibility action, not proof of process exit.
+#[tauri::command]
+pub fn daemon_stop_unbound_graceful() -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let pid = crate::daemon_control::read_daemon_pid()
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "No daemon PID record; no request sent.".to_string())?;
+        crate::daemon_control::request_unbound_graceful_shutdown(pid).map_err(|e| e.to_string())?;
+        Ok("Shutdown request accepted without verified identity; process exit is not verified and this client did not remove the PID file.".into())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("Unbound graceful shutdown is available only on macOS.".into())
+    }
+}
+
+#[tauri::command]
+pub fn daemon_supports_unbound_graceful() -> bool {
+    cfg!(target_os = "macos")
 }
 
 #[tauri::command]
@@ -1808,7 +1833,11 @@ pub fn daemon_start(app: AppHandle) -> Result<DaemonControlResult, String> {
             return Ok(DaemonControlResult {
                 running: true,
                 pid: Some(pid),
-                message: format!("Daemon is already running (pid={pid})."),
+                message: if cfg!(target_os = "macos") {
+                    format!("A daemon endpoint reports PID {pid}; identity is unbound. No new process started.")
+                } else {
+                    format!("Daemon is already running (pid={pid}).")
+                },
             });
         }
     }
@@ -1870,6 +1899,9 @@ pub fn daemon_stop() -> Result<DaemonControlResult, String> {
             if let Some(pid) = crate::daemon_control::daemon_health_pid() {
                 return Err(format!("Daemon health endpoint is active (pid={pid}) but PID file is missing; cannot verify or stop it."));
             }
+            #[cfg(target_os = "macos")]
+            return Err("No daemon PID record; daemon process identity and state are unknown. Inspect the endpoint and processes before recovery.".into());
+            #[cfg(not(target_os = "macos"))]
             Ok(DaemonControlResult {
                 running: false,
                 pid: None,
@@ -1899,6 +1931,7 @@ pub fn daemon_restart(app: AppHandle) -> Result<DaemonControlResult, String> {
 /// The explicit Stop button and `agent2ssh daemon stop` stop whatever daemon is
 /// running; quitting a window is a weaker statement than that, and a daemon the
 /// CLI or an MCP client started is serving agents that never opened this app.
+#[cfg(not(target_os = "macos"))]
 fn stop_owned_daemon() {
     let Ok(Some(pid)) = crate::daemon_control::read_daemon_pid() else {
         return;
@@ -1943,6 +1976,16 @@ fn stop_owned_daemon() {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn stop_owned_daemon() {
+    let _ = append_diagnostic_log(
+        "info",
+        "tauri",
+        "desktop quit does not stop an unbound daemon on macOS",
+        None,
+    );
+}
+
 /// Wording for the "this will end live work" confirmation. The frontend owns
 /// the language, so it hands these over with the tray labels; the English
 /// defaults cover the moments before it has.
@@ -1959,21 +2002,33 @@ pub struct QuitConfirmLabels {
     pub resident_sessions: String,
     pub forwards: String,
     pub pending_approvals: String,
+    #[serde(default = "default_unknown_quit_message")]
+    pub unknown_message: String,
+}
+
+fn default_unknown_quit_message() -> String {
+    "Daemon activity could not be determined. Quitting may stop the daemon and interrupt active work.".into()
 }
 
 impl Default for QuitConfirmLabels {
     fn default() -> Self {
         Self {
             title: "Quit Agent2SSH?".into(),
-            body: "Quitting stops the background service, which ends: {items}.".into(),
+            body: "Quitting may stop the background service and end: {items}.".into(),
             quit: "Quit".into(),
             cancel: "Cancel".into(),
             pty_sessions: "Terminal sessions: {n}".into(),
             resident_sessions: "Resident shells: {n}".into(),
             forwards: "Port forwards: {n}".into(),
             pending_approvals: "Pending approvals: {n}".into(),
+            unknown_message: default_unknown_quit_message(),
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_quit_confirmation(daemon_evidence: bool, labels: &QuitConfirmLabels) -> Option<String> {
+    daemon_evidence.then(|| labels.unknown_message.clone())
 }
 
 static QUIT_CONFIRM_LABELS: std::sync::Mutex<Option<QuitConfirmLabels>> =
@@ -1988,6 +2043,7 @@ fn quit_confirm_labels() -> QuitConfirmLabels {
 }
 
 /// The confirmation text for `activity`, or `None` when nothing would be lost.
+#[cfg(any(not(target_os = "macos"), test))]
 fn quit_confirm_message(
     activity: &crate::daemon_activity::DaemonActivity,
     labels: &QuitConfirmLabels,
@@ -2009,43 +2065,95 @@ fn quit_confirm_message(
     }
 }
 
-/// Whether to go ahead and quit. Asks only when quitting would actually stop a
-/// daemon that is holding live work; everything else just quits.
+/// Whether to go ahead and quit. Ask when an owned daemon has live work that
+/// may be interrupted as the desktop process exits.
 ///
 /// Must run off the main thread: it blocks on the daemon and on the dialog.
 fn confirm_quit(app: &AppHandle) -> bool {
-    let Ok(Some(pid)) = crate::daemon_control::read_daemon_pid() else {
-        return true;
-    };
-    // A daemon this app would leave running loses nothing, so there is nothing
-    // to ask about.
-    if !crate::daemon_control::process_is_alive(pid) || !crate::daemon_control::daemon_is_owned(pid)
-    {
-        return true;
-    }
-    let Some(activity) = crate::daemon_activity::fetch_daemon_activity() else {
-        // Unknown, not idle. Asking about work we cannot name would be noise, and
-        // refusing to quit over it would trap the user in the app.
-        let _ = append_diagnostic_log(
-            "warn",
-            "tauri",
-            "quit could not read daemon activity; quitting without a confirmation",
-            Some(serde_json::json!({ "pid": pid })),
-        );
-        return true;
-    };
     let labels = quit_confirm_labels();
-    let Some(message) = quit_confirm_message(&activity, &labels) else {
+    #[cfg(target_os = "macos")]
+    let message = {
+        // On macOS loginwindow may stop an app-started child even when our
+        // ownership marker is missing or stale. Do not infer safety from it.
+        let daemon_evidence = match crate::daemon_control::read_daemon_pid() {
+            Ok(Some(_)) | Err(_) => true,
+            Ok(None) => crate::daemon_control::daemon_health_pid().is_some(),
+        };
+        // Activity endpoints require the admin token. A daemon endpoint is not
+        // bound to a process on macOS, so do not send that token automatically.
+        macos_quit_confirmation(daemon_evidence, &labels)
+    };
+    #[cfg(not(target_os = "macos"))]
+    let message = {
+        let Ok(Some(pid)) = crate::daemon_control::read_daemon_pid() else {
+            return true;
+        };
+        // A daemon not owned by this app is not its child and is not targeted by
+        // this quit path.
+        if !crate::daemon_control::process_is_alive(pid)
+            || !crate::daemon_control::daemon_is_owned(pid)
+        {
+            return true;
+        }
+        let Some(activity) = crate::daemon_activity::fetch_daemon_activity() else {
+            // Unknown, not idle. Asking about work we cannot name would be noise, and
+            // refusing to quit over it would trap the user in the app.
+            let _ = append_diagnostic_log(
+                "warn",
+                "tauri",
+                "quit could not read daemon activity; quitting without a confirmation",
+                Some(serde_json::json!({ "pid": pid })),
+            );
+            return true;
+        };
+        quit_confirm_message(&activity, &labels)
+    };
+    let Some(message) = message else {
         return true;
     };
-    app.dialog()
+    let dialog = app
+        .dialog()
         .message(message)
         .title(labels.title.clone())
         .buttons(MessageDialogButtons::OkCancelCustom(
             labels.quit.clone(),
             labels.cancel.clone(),
-        ))
-        .blocking_show()
+        ));
+    #[cfg(target_os = "macos")]
+    let dialog = {
+        // Without a parent, rfd uses CFUserNotification, which was invisible
+        // in the test environment. A parent selects an NSAlert sheet instead.
+        let Some(window) = app.get_webview_window("main") else {
+            let _ = append_diagnostic_log(
+                "warn",
+                "tauri",
+                "quit confirmation has no main window; quit cancelled",
+                None,
+            );
+            return false;
+        };
+        if let Err(error) = window.show() {
+            let _ = append_diagnostic_log(
+                "warn",
+                "tauri",
+                "quit confirmation window could not be shown; quit cancelled",
+                Some(serde_json::json!({"error": error.to_string()})),
+            );
+            return false;
+        }
+        let _ = window.unminimize();
+        if let Err(error) = window.set_focus() {
+            let _ = append_diagnostic_log(
+                "warn",
+                "tauri",
+                "quit confirmation window could not be focused; quit cancelled",
+                Some(serde_json::json!({"error": error.to_string()})),
+            );
+            return false;
+        }
+        dialog.parent(&window)
+    };
+    dialog.blocking_show()
 }
 
 fn finish_quit(app: &AppHandle) {
@@ -3691,6 +3799,8 @@ pub fn run_tauri() {
             daemon_status,
             daemon_start,
             daemon_stop,
+            daemon_stop_unbound_graceful,
+            daemon_supports_unbound_graceful,
             daemon_restart,
             quit_app,
             get_app_preferences,
@@ -3791,8 +3901,8 @@ pub fn run_tauri() {
                 api.prevent_exit();
                 request_quit(app);
             }
-            // Backstop for exits that never asked first (an updater restart):
-            // the daemon this app started must not outlive it.
+            // Backstop for exits that never asked first (an updater restart).
+            // macOS deliberately does not send an unbound stop request here.
             RunEvent::Exit => stop_owned_daemon(),
             _ => {}
         });
@@ -3830,7 +3940,7 @@ mod tests {
             quit_confirm_message(&activity(2, 0, 1, 0), &QuitConfirmLabels::default()).unwrap();
         assert_eq!(
             message,
-            "Quitting stops the background service, which ends: Terminal sessions: 2, Port forwards: 1."
+            "Quitting may stop the background service and end: Terminal sessions: 2, Port forwards: 1."
         );
     }
 
@@ -3847,6 +3957,16 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_quit_warns_on_daemon_evidence_without_assuming_activity_or_ownership() {
+        let labels = QuitConfirmLabels::default();
+        assert!(macos_quit_confirmation(true, &labels)
+            .unwrap()
+            .contains("could not be determined"));
+        assert!(macos_quit_confirmation(false, &labels).is_none());
+    }
+
     #[test]
     fn the_frontend_label_payload_deserializes_in_camel_case() {
         let labels: QuitConfirmLabels = serde_json::from_str(
@@ -3856,6 +3976,10 @@ mod tests {
         .expect("the shape src/api.ts sends");
         assert_eq!(labels.pty_sessions, "p {n}");
         assert_eq!(labels.pending_approvals, "a {n}");
+        assert_eq!(
+            labels.unknown_message,
+            "Daemon activity could not be determined. Quitting may stop the daemon and interrupt active work."
+        );
     }
 
     #[tokio::test]

@@ -169,6 +169,10 @@ async fn daemon_shutdown(
 ) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     require_admin(&auth)?;
+    #[cfg(target_os = "macos")]
+    if std::env::var("AGENT2SSH_ALLOW_UNBOUND_HTTP_SHUTDOWN").as_deref() != Ok("1") {
+        return Err(err(StatusCode::FORBIDDEN, "unbound HTTP shutdown is disabled; use an explicitly enabled legacy compatibility path or stop the process out of band"));
+    }
     // Only an actually empty body means an unchecked stop. `Option<Json<_>>`
     // treats all extraction failures as absent, including malformed PIDs.
     let body = if body.is_empty() {
@@ -236,7 +240,10 @@ async fn daemon_shutdown(
 /// drain pending messages before closing.
 async fn shutdown_signal(shutdown_token: agent2ssh::ws_drain::ShutdownToken) {
     let ctrl_c = async {
-        let _ = tokio::signal::ctrl_c().await;
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            tracing::error!(%error, "could not install Ctrl+C handler");
+            std::future::pending::<()>().await;
+        }
     };
     let requested = SHUTDOWN_REQUESTED.notified();
 
@@ -244,7 +251,9 @@ async fn shutdown_signal(shutdown_token: agent2ssh::ws_drain::ShutdownToken) {
     let terminate = async {
         match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
             Ok(mut sig) => {
-                sig.recv().await;
+                if sig.recv().await.is_none() {
+                    std::future::pending::<()>().await;
+                }
             }
             // If the handler can't be installed, never resolve via this arm.
             Err(_) => std::future::pending::<()>().await,
@@ -253,15 +262,18 @@ async fn shutdown_signal(shutdown_token: agent2ssh::ws_drain::ShutdownToken) {
     #[cfg(not(unix))]
     let terminate = std::future::pending::<()>();
 
-    tokio::select! {
-        _ = ctrl_c => {}
-        _ = terminate => {}
-        _ = requested => {}
-    }
+    let trigger = tokio::select! {
+        _ = ctrl_c => "ctrl_c",
+        _ = terminate => "sigterm",
+        _ = requested => "http",
+    };
 
     // T2-15: Broadcast shutdown to all WS handlers
     shutdown_token.cancel().await;
-    tracing::info!("shutdown signal received, draining WS connections...");
+    tracing::info!(
+        trigger,
+        "shutdown signal received, draining WS connections..."
+    );
 }
 
 #[cfg(unix)]
@@ -5816,6 +5828,16 @@ async fn main() -> anyhow::Result<()> {
     let config_dir = config_dir()?;
     std::fs::create_dir_all(&config_dir)?;
 
+    #[cfg(target_os = "macos")]
+    if std::env::var("AGENT2SSH_ALLOW_UNBOUND_HTTP_SHUTDOWN").as_deref() == Ok("1") {
+        let _ = agent2ssh::append_diagnostic_log(
+            "warn",
+            "daemon",
+            "unbound legacy HTTP shutdown is enabled; requests may reach the wrong process",
+            None,
+        );
+    }
+
     // Token
     let token = load_or_create_daemon_token(&config_dir)?;
 
@@ -6140,8 +6162,21 @@ mod tests {
         )
         .await
         .expect_err("a request for another PID must not be honoured");
-        assert_eq!(status, StatusCode::CONFLICT);
-        assert!(body.error.contains("refusing to shut down"), "{body:?}");
+        #[cfg(target_os = "macos")]
+        {
+            if std::env::var("AGENT2SSH_ALLOW_UNBOUND_HTTP_SHUTDOWN").as_deref() == Ok("1") {
+                assert_eq!(status, StatusCode::CONFLICT);
+                assert!(body.error.contains("refusing to shut down"));
+            } else {
+                assert_eq!(status, StatusCode::FORBIDDEN);
+                assert!(body.error.contains("unbound HTTP shutdown is disabled"));
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert!(body.error.contains("refusing to shut down"), "{body:?}");
+        }
     }
 
     /// `expect_pid: null` asks for an unchecked stop. Accepting it silently
@@ -6164,6 +6199,16 @@ mod tests {
         )
         .await
         .expect_err("an explicit null must not mean 'no opinion'");
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            status,
+            if std::env::var("AGENT2SSH_ALLOW_UNBOUND_HTTP_SHUTDOWN").as_deref() == Ok("1") {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::FORBIDDEN
+            }
+        );
+        #[cfg(not(target_os = "macos"))]
         assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
@@ -6187,6 +6232,13 @@ mod tests {
             format!("{{\"expect_pid\":{}}}", std::process::id()).into(),
         )
         .await;
+        #[cfg(target_os = "macos")]
+        if std::env::var("AGENT2SSH_ALLOW_UNBOUND_HTTP_SHUTDOWN").as_deref() == Ok("1") {
+            assert!(matches!(accepted, Ok(Json(OkBody { ok: true }))));
+        } else {
+            assert!(matches!(accepted, Err((StatusCode::FORBIDDEN, _))));
+        }
+        #[cfg(not(target_os = "macos"))]
         match accepted {
             Ok(Json(body)) => assert!(body.ok, "a named request for this PID is accepted"),
             Err((status, Json(body))) => {
