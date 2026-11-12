@@ -109,6 +109,7 @@
 | L2-23 | `daemon_control.rs:488-500`、`61-68` | 成立（并入 L2-9） | 同 L2-9 | 比 L2-9 更紧的一层：`child.kill()` 失败 → `write_daemon_pid_if_absent` 返回 `AlreadyExists` 被吞时，状态是「child 仍活着 + PID 文件写的是别人」，没有任何路径能发现。修 L2-9 时一并处理 |
 | L2-25 | `:5934-5945` | 成立 | 改返回/诊断 + 契约 | `wait_until_empty` 返回 false 时只 warn，函数仍 `Ok(())`；所以「drains open WebSocket connections」在超时情形下不成立。文档已改成 best effort（L1）；代码侧应把「有几个连接没排空」写进诊断，或让关闭结果带上这个事实 |
 | L2-30 | `daemon_stop_e2e.rs:1315`（`#[cfg(unix)]`）vs `:1412` | 成立 | 测试夹具 | Windows 上「409 分支」有覆盖、「200 → AcceptedUnchecked」零覆盖，而 L2-3 要改的正是后者。补一个在 `cfg(windows)` 下也成立的等价用例，至少断言「新 daemon 的停止不产生 predates warn」 |
+| L2-30（2026-11-13 更新，已补） | 同上 | 已解决 | 测试夹具 | `a_daemon_that_ignores_the_expected_pid_stops_and_says_so` 已去掉 `cfg(unix)`，Windows 通过（8.5 s，stand-in 为改名后的 `ping.exe`）。它断言 `posted == 1`、stop 成功，并读 `app.log` 断言含「without a verifiable expect_pid receipt」、不含 `predates`——同时覆盖 L2-3 想改的那条分支与「不归因版本」两件事 |
 | L2-31 | `:1212-1228` vs `api.yaml:565` | 部分成立 | 契约 | `health()` 恒回 `version`，`api.yaml` 把它列为可选，`health_identity` 不读。若要用版本号区分新旧 daemon，得先提为必填并让客户端读——但同版本的两个构建仍可能一个有 `checked_pid` 一个没有，所以最终判据只能是字段本身 |
 | L2-33 | `:119-130` | 部分成立 | 改名/注释 | 返回值语义是「future 是否在 deadline 前走完」，调用点却当「drain 是否完整」用。改名或补注释，否则 L2-22 的两种 `false` 永远混在一起 |
 

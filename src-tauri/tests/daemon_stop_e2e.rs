@@ -1707,6 +1707,18 @@ fn a_daemon_that_ignores_the_expected_pid_stops_and_says_so() {
         stopped.is_ok(),
         "the stop completes once the old daemon's 200 has been force-killed: {stopped:?}"
     );
+    // The warning may say that the receipt is missing; it may not claim to know
+    // the daemon's version, because a current daemon that compared and matched
+    // answers the same 200 (#20).
+    let log = std::fs::read_to_string(dir.join("app.log")).unwrap_or_default();
+    assert!(
+        log.contains("without a verifiable expect_pid receipt"),
+        "the missing receipt should be logged: {log}"
+    );
+    assert!(
+        !log.contains("predates"),
+        "the log must not attribute the missing receipt to a version: {log}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
     common::restore_default_config_env();
     std::env::remove_var(ADDR_ENV);
