@@ -1,0 +1,78 @@
+ProductName:		macOS
+ProductVersion:		27.2.1
+BuildVersion:		26B131
+arm64
+501
+System Integrity Protection status: enabled.
+
+round 1
+self pid=83990 uid=501 NOTE_EXIT=0x80000000 NOTE_EXITSTATUS=0x4000000
+kill0 target=self pid=83990 returned=0 errno=0
+kqueue target=self pid=83990 notes=0x80000000 returned=1 ev_error=1 data=0
+kqueue target=self pid=83990 notes=0x4000000 returned=1 ev_error=1 data=0
+kqueue target=self pid=83990 notes=0x84000000 returned=1 ev_error=1 data=0
+kill0 target=child pid=83991 returned=0 errno=0
+kqueue target=child pid=83991 notes=0x80000000 returned=1 ev_error=1 data=0
+kqueue target=child pid=83991 notes=0x4000000 returned=1 ev_error=1 data=0
+kqueue target=child pid=83991 notes=0x84000000 returned=1 ev_error=1 data=0
+kill0 target=pid1 pid=1 returned=-1 errno=1
+kqueue target=pid1 pid=1 notes=0x80000000 returned=1 ev_error=1 data=0
+kqueue target=pid1 pid=1 notes=0x4000000 returned=1 ev_error=1 data=0
+kqueue target=pid1 pid=1 notes=0x84000000 returned=1 ev_error=1 data=13
+kill0 target=missing pid=2147483647 returned=-1 errno=3
+kqueue target=missing pid=2147483647 notes=0x80000000 returned=1 ev_error=1 data=3
+kqueue target=missing pid=2147483647 notes=0x4000000 returned=1 ev_error=1 data=3
+kqueue target=missing pid=2147483647 notes=0x84000000 returned=1 ev_error=1 data=3
+server pid=83992 peer_pid=83990 expected_client=83990
+client pid=83990 expected_server=83992 peer_after_accept=83992
+client expected_server=83992 peer_after_server_reply=83992
+server pid=83992 inherited_fd_writer=83993
+client expected_server=83992 peer_after_inherited_fd_reply=83993
+
+round 2
+self pid=83994 uid=501 NOTE_EXIT=0x80000000 NOTE_EXITSTATUS=0x4000000
+kill0 target=self pid=83994 returned=0 errno=0
+kqueue target=self pid=83994 notes=0x80000000 returned=1 ev_error=1 data=0
+kqueue target=self pid=83994 notes=0x4000000 returned=1 ev_error=1 data=0
+kqueue target=self pid=83994 notes=0x84000000 returned=1 ev_error=1 data=0
+kill0 target=child pid=83995 returned=0 errno=0
+kqueue target=child pid=83995 notes=0x80000000 returned=1 ev_error=1 data=0
+kqueue target=child pid=83995 notes=0x4000000 returned=1 ev_error=1 data=0
+kqueue target=child pid=83995 notes=0x84000000 returned=1 ev_error=1 data=0
+kill0 target=pid1 pid=1 returned=-1 errno=1
+kqueue target=pid1 pid=1 notes=0x80000000 returned=1 ev_error=1 data=0
+kqueue target=pid1 pid=1 notes=0x4000000 returned=1 ev_error=1 data=0
+kqueue target=pid1 pid=1 notes=0x84000000 returned=1 ev_error=1 data=13
+kill0 target=missing pid=2147483647 returned=-1 errno=3
+kqueue target=missing pid=2147483647 notes=0x80000000 returned=1 ev_error=1 data=3
+kqueue target=missing pid=2147483647 notes=0x4000000 returned=1 ev_error=1 data=3
+kqueue target=missing pid=2147483647 notes=0x84000000 returned=1 ev_error=1 data=3
+server pid=83996 peer_pid=83994 expected_client=83994
+client pid=83994 expected_server=83996 peer_after_accept=83996
+client expected_server=83996 peer_after_server_reply=83996
+server pid=83996 inherited_fd_writer=83997
+client expected_server=83996 peer_after_inherited_fd_reply=83997
+
+round 3
+self pid=83998 uid=501 NOTE_EXIT=0x80000000 NOTE_EXITSTATUS=0x4000000
+kill0 target=self pid=83998 returned=0 errno=0
+kqueue target=self pid=83998 notes=0x80000000 returned=1 ev_error=1 data=0
+kqueue target=self pid=83998 notes=0x4000000 returned=1 ev_error=1 data=0
+kqueue target=self pid=83998 notes=0x84000000 returned=1 ev_error=1 data=0
+kill0 target=child pid=83999 returned=0 errno=0
+kqueue target=child pid=83999 notes=0x80000000 returned=1 ev_error=1 data=0
+kqueue target=child pid=83999 notes=0x4000000 returned=1 ev_error=1 data=0
+kqueue target=child pid=83999 notes=0x84000000 returned=1 ev_error=1 data=0
+kill0 target=pid1 pid=1 returned=-1 errno=1
+kqueue target=pid1 pid=1 notes=0x80000000 returned=1 ev_error=1 data=0
+kqueue target=pid1 pid=1 notes=0x4000000 returned=1 ev_error=1 data=0
+kqueue target=pid1 pid=1 notes=0x84000000 returned=1 ev_error=1 data=13
+kill0 target=missing pid=2147483647 returned=-1 errno=3
+kqueue target=missing pid=2147483647 notes=0x80000000 returned=1 ev_error=1 data=3
+kqueue target=missing pid=2147483647 notes=0x4000000 returned=1 ev_error=1 data=3
+kqueue target=missing pid=2147483647 notes=0x84000000 returned=1 ev_error=1 data=3
+server pid=84000 peer_pid=83998 expected_client=83998
+client pid=83998 expected_server=84000 peer_after_accept=84000
+client expected_server=84000 peer_after_server_reply=84000
+server pid=84000 inherited_fd_writer=84001
+client expected_server=84000 peer_after_inherited_fd_reply=84001

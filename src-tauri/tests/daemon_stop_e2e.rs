@@ -1414,6 +1414,49 @@ fn proxy(front: TcpListener, back: Arc<std::sync::Mutex<String>>) -> Arc<AtomicU
     counted
 }
 
+/// The local transport is shared by the stop health check. This tests the
+/// transport's actual response parsing, not whether a stop sends a shutdown.
+#[cfg(unix)]
+#[test]
+fn local_health_response_parser_does_not_enforce_content_length() {
+    use std::io::{Read, Write};
+
+    for (response, expect_json) in [
+        (
+            "HTTP/1.1 200 OK\r\nX-Health: {\"ok\":true,\"pid\":42}\r\nContent-Length: 0\r\n\r\n",
+            false,
+        ),
+        (
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n\r\n{\"ok\":true,\"pid\":42}",
+            true,
+        ),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0; 1024];
+            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = stream.read(&mut chunk).unwrap();
+                assert!(n > 0);
+                request.extend_from_slice(&chunk[..n]);
+            }
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        let result =
+            agent2ssh::daemon_activity::direct_daemon_request(&address, "GET", "/health", None)
+                .unwrap();
+        server.join().unwrap();
+        assert_eq!(result.status, 200);
+        let body = serde_json::from_str::<serde_json::Value>(&result.body).ok();
+        assert_eq!(
+            body.as_ref().and_then(|json| json["pid"].as_u64()),
+            expect_json.then_some(42)
+        );
+    }
+}
+
 /// A daemon that predates `expect_pid` ignores it and accepts the stop — which
 /// is the previous behaviour, and the reason the client does not claim the
 /// check happened. What must hold here: the stop still completes after the

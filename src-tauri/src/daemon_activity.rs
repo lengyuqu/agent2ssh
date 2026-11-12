@@ -15,7 +15,7 @@
 //! The desktop app uses [`fetch_daemon_activity`] to tell the person that
 //! before it does.
 //!
-//! The client is a raw `TcpStream`, like `daemon_control::daemon_health_ok`,
+//! The client is a raw `TcpStream` for local daemon HTTP requests,
 //! rather than `reqwest::blocking`: the CLI calls into this from inside a tokio
 //! runtime, where building a blocking reqwest client panics.
 
