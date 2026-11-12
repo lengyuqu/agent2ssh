@@ -3962,9 +3962,9 @@ L2-154（`/exec-multi` 全 0 语义）、L2-155（preview 缺 admin 门）、L2-
   11. **「TCP 控制面是否保留」应列为决策 → 成立**，且比它说的更硬：不拍这一项，#23 的 pidfd 实现无处安放。
 - **本轮改了什么（全部 L1，零代码）**：`b8dcb1b` —— `docs/plans/daemon-identity-protocol.md` 六处（§1 加结构约束与责任划分、§2 补名称白名单/回执后果/健康探测/实例归属四行、§3.1 补既有约定与无锁读反例并把 DNS 无上界改为既有事实、§3.3 补 `Stale` 遗留路径、§5 补平台覆盖缺口与 macOS 结构性后果、§6 补 symlink 反例与 6.3 的「当前走不到」、§7 由五条散文改成 **D1–D6 决策表**）；`docs/reports/OPT-LOOP-L2-PENDING.md` 追加 **L2-186/187/188**（**最大编号 L2-188**）。
 - **验证**：`npm run build` **6.67 s**；`cargo fmt --check` 绿；`--no-default-features --lib` **865 / 0 / 1**（与上一轮建立的新基线一致，红项已随 #35 消失）。未改任何测试断言，故未跑其它目标。
-- **过程失误（记下来防再犯）**：建 worktree 时 `ln -s $REPO/node_modules` 的 `$REPO` 在子 shell 里未定义，落成 `node_modules -> /node_modules` 的**悬挂链接**；`git status` 干净（在 info/exclude 里）骗过了「worktree 就绪」的判断，直到 `npm run build` 报 `tsc: command not found` 才暴露。**下轮：建完 WT 先 `ls node_modules/.bin/tsc`，不要只看 status 干净。**
+- **过程失误（记下来防再犯）**：① 把「当前 tip」写进台账是自指——写它的提交必然又推进 tip，本轮因此白跑了一笔（`57b59ee` → `3532a12`）。台账只记「内容提交区间 + tip 以 `ls-remote` 为准」。② 建 worktree 时 `ln -s $REPO/node_modules` 的 `$REPO` 在子 shell 里未定义，落成 `node_modules -> /node_modules` 的**悬挂链接**；`git status` 干净（在 info/exclude 里）骗过了「worktree 就绪」的判断，直到 `npm run build` 报 `tsc: command not found` 才暴露。**下轮：建完 WT 先 `ls node_modules/.bin/tsc`，不要只看 status 干净。**
 - 未关闭 `#22`：D1–D6 全部要人拍板，其中 **D4 是 #23 的前置**。回帖 `2120776970253275136`（`## 本轮收尾`，不带轮次号，`07:13:26Z`）。
-- **合流**：内容提交 `4487f7f..8152ed9`，记账笔 `57b59ee`，**当前 `cnb/main` tip = `57b59ee`**（只推 cnb，未推 github / git233）。分支 `opt/single-22-20261112` 与 worktree `…/single-22` 在本节合流验收后按 4.4 清理（先 `merge-base --is-ancestor`，再删 `node_modules` 链接、`binaries` 链接与 `dist`）。
+- **合流**：内容提交 `4487f7f..8152ed9`；其后是记账提交（回帖 id、本节 tip 措辞两笔）。**`cnb/main` 的 tip 一律以 `git ls-remote cnb refs/heads/main` 为准，不要引用本节任何 SHA 当基线**——本节的第三个数字就写错过一次（把 tip 写成 `57b59ee`，而写出这句话本身又把 tip 推到 `3532a12`）。只推 cnb，未推 github / git233。分支 `opt/single-22-20261112` 与 worktree `…/single-22` 在本节合流验收后按 4.4 清理（先 `merge-base --is-ancestor`，再删 `node_modules` 链接、`binaries` 链接与 `dist`）。
 
 ### 新增「不成立」，不要重复提
 
