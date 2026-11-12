@@ -8,6 +8,8 @@
 
 > **2026-11-12 后续复核更正（基线 `17068ff`）**：以下原始表格中的 MD4、M4 和 E3b 已按新实测收窄。`NOTE_EXIT` 单独注册成功不能证明有发信号权限；同时设置 `NOTE_EXIT | NOTE_EXITSTATUS` 对本机 pid 1 返回 `EACCES`。这只说明当前组合、当前时刻的权限检查，不能证明此后 `kill` 必然成功，更不能消除 PID 复用。客户端的 `LOCAL_PEERPID` 在普通服务端响应后等于服务端 pid，但服务端将已连接 fd 交给仍存活的子进程写入后，返回子进程 pid；读数不是监听进程的稳定绑定。三轮原始输出和源码见 [后续探针](../reports/evidence/macos-identity-followup-2026-11-12/output.txt)。
 
+> **协议收敛**：关于 #25 的 v1 默认行为和实现接口，以 [daemon-identity-v1.md](daemon-identity-v1.md) 为新的评审提案；本文 MD1 等历史倾向保留供对照；用户已确认新客户端默认拒绝未绑定停止、新 daemon 默认关闭 HTTP `/shutdown`，具体协议仍待验证，当前代码尚未实现。
+
 ## 0. 结论先行
 
 | # | 决策 | 推荐 | 一句话理由 | 代价 |

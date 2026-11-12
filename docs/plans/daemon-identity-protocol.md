@@ -1,6 +1,8 @@
 # Daemon 身份绑定与异常恢复协议：设计提案
 
-状态：**待评审；未实现**（2026-11-11 起稿，2026-11-12 修订）
+状态：**历史分析与选项；未实现**（2026-11-11 起稿，2026-11-12 修订）
+
+> 本轮的具体协议与 D1–D6 推荐见 [daemon-identity-v1.md](daemon-identity-v1.md)。以下保留历史分析；其 D3“分平台保留裸 PID 强杀”、D2 旧版无绑定停止等倾向与新提案不一致时，以新提案为评审基线。用户已确认新客户端默认拒绝未绑定停止、新 daemon 默认关闭 HTTP `/shutdown`；新提案的其余设计仍需评审和验证，当前代码尚未实现。
 
 范围：[CNB #22](https://cnb.cool/zdzso/agent2ssh/-/issues/22)，基线 `4487f7f`（起稿时 `380e166`；文中行号已按 `4487f7f` 全部复核，不是起稿时的快照）
 
@@ -67,7 +69,7 @@
 | `Exited` | 锁内重新读取并条件清理该实例记录 | 清理成功或记录已被替换，均如实报告 |
 | `Unbound` / `Unknown` | 展示证据和恢复指导；不自动强杀、不把不可观察当退出 | 重新发现并验证，或人工带外处理 |
 
-**遗留路径不得当作 `Exited`**：`daemon_pid_state`（`:343-367`）在 `/health` 无应答时用 `pid_definitely_missing`（unix 版 `:305-322`，只判 `kill(pid, 0) == ESRCH`，**不比较 start_time**）判 `Stale`，随后 `start_daemon_background:435-448` 与 `agent2ssh daemon rotate-token`（`bin/agent2ssh.rs:3123-3129`）**直接删记录**。这条路径不经过 `Discovered → Connected → Bound` 中的任何一步，也没有任何身份证明，只有「这个号当前无主」。语义上它足够安全（号空闲即可清），但它**不满足 `Exited` 的绑定条件**：新协议不得把 `Stale` 重命名为 `Exited`，也不得让它在 `Bound` 之外的任何状态触发强杀。
+**遗留路径不得当作 `Exited`**：`daemon_pid_state`（`:343-367`）在 `/health` 无应答时用 `pid_definitely_missing`（unix 版 `:305-322`，只判 `kill(pid, 0) == ESRCH`，**不比较 start_time**）判 `Stale`，随后 `start_daemon_background:435-448` 与 `agent2ssh daemon rotate-token`（`bin/agent2ssh.rs:3123-3129`）**直接删记录**。这条路径不经过 `Discovered → Connected → Bound` 中的任何一步，也没有任何身份证明，只有「这个号当前无主」。号码此刻空闲不能保证锁外观察与后续 PID 发布之间没有竞争，尤其旧程序不遵守锁时；它只是现有清理路径，但它**不满足 `Exited` 的绑定条件**：新协议不得把 `Stale` 重命名为 `Exited`，也不得让它在 `Bound` 之外的任何状态触发强杀。
 
 停止请求回执属于协议层：携带 `checked_pid` 可以表明**声称**已检查，但如果服务端本身未认证/绑定，回执可被伪造，不能单独让连接进入 `Bound`。`/shutdown` 的错误 PID 409、空 body 兼容、超时、连接关闭与已接受但未退出必须分别返回；请求失败不能静默重连到另一实例或回退到裸 PID 强杀。是否允许 `Unbound` 状态下仍通过旧 HTTP 发送优雅停止，是产品兼容性决策；即使允许，也必须明确未绑定及可能停错的风险，且**不能把收到 200 当成进程退出的证明**。
 
@@ -97,11 +99,11 @@
 |---|---|---|
 | Linux | `pidfd_open`、`pidfd_send_signal`、Unix socket 对端凭据；研究可直接取得对端 pidfd 或可靠传递进程对象的可用机制。 | 从 peer PID 再打开 pidfd 的窗口仍在；不能仅靠进程仍存在、随机 ID 或同一启动 tick 证明连接与 pidfd 属于同一实例。不同内核、namespace、socket 继承及权限待 #23 实测。 |
 | Windows | 创建进程时的句柄、`OpenProcess`、句柄等待及终止；命名管道服务端 PID 查询供客户端侧研究。 | `OpenProcess` 前 PID 复用、管道端点抢占/代理、ACL 和句柄关联尚未解决；拒绝访问不是进程退出。#24 须在 Windows 真机验证。 |
-| macOS | **已实测**（见 [macos-daemon-identity.md](macos-daemon-identity.md)）：`LOCAL_PEERPID` / `LOCAL_PEERCRED` / `LOCAL_PEERTOKEN` 三者可取，`kqueue EVFILT_PROC` 可作退出通知，`proc_pidinfo(PROC_PIDTBSDINFO)` 的 `pbi_start_tvusec` 可把起始时间从秒提到微秒。 | `LOCAL_PEERPID` 的语义是**最近访问者**，fd 传递后即换人（实测），不能当「连接所有者」；`kqueue` 注册对其他 uid 的进程**也会成功**（实测 pid 1），因此不构成发信号权限的否证；没有 pidfd 等价物，`kill(pid, …)` 仍按数字寻址，二次观察只缩小窗口。无法达到绑定条件时不自动强杀。 |
+| macOS | **已实测**（见 [macos-daemon-identity.md](macos-daemon-identity.md)）：`LOCAL_PEERPID` / `LOCAL_PEERCRED` / `LOCAL_PEERTOKEN` 三者可取，`kqueue EVFILT_PROC` 可作退出通知，`proc_pidinfo(PROC_PIDTBSDINFO)` 的 `pbi_start_tvusec` 可把起始时间从秒提到微秒。 | `LOCAL_PEERPID` 的语义是**最近访问者**，fd 传递后即换人（实测），不能当「连接所有者」；`kqueue NOTE_EXIT` 单独注册 pid 1 成功，但同时设置 `NOTE_EXIT | NOTE_EXITSTATUS` 对该目标返回 `EACCES`；均不是稳定的进程对象或后续发信号权限证明；没有 pidfd 等价物，`kill(pid, …)` 仍按数字寻址，二次观察只缩小窗口。无法达到绑定条件时不自动强杀。 |
 
 **平台覆盖缺口（实测数字）**：`daemon_stop_e2e.rs` 有 51 个 `fn`、34 个 `#[test]`，其中 **8 个**带 `#[cfg(unix)]`，含两个核心竞态用例——`a_daemon_that_ignores_the_expected_pid_stops_and_says_so`（`:1434`，`#[cfg(unix)]` 在 `:1431`）与 `a_stop_that_reached_the_wrong_daemon_stops_nothing`（`:1702`，`#[cfg(unix)]` 在 `:1699`）。`#[cfg(unix)]` 在 macOS 上成立，所以这 8 条**在 macOS 上照常执行**：2026-11-12 实测 `cargo test --no-default-features --features daemon --test daemon_stop_e2e -- --test-threads=1` → **34 passed / 0 failed / 40.75 s**，两条核心用例单独复跑也各 1 passed。因此**只有 Windows 上这两条路径零覆盖**；#24 若复用它们必须先摘掉 `#[cfg(unix)]` 并补平台夹具，不能把「同一份测试文件」当成「全平台矩阵」。**（2026-11-12 更正：本文早前写「Windows 与 macOS 上零覆盖」，macOS 这半是错的。）**
 
-**macOS 的结构性后果**：按 §3.2 的绑定规则，macOS 上若不新增能取对端凭据的本机通道（D4），`kill(pid, …)` 永远只能停在 `Unbound`——即**macOS 没有自动强杀**。这是产品取舍，必须由 D3 明确，不能默认继承 Linux 的行为。
+**macOS 的结构性后果**：当前可用的对端 PID、kqueue 与按数字寻址的 `kill` 尚不能证明 §3.2 的对象绑定；即使新增本机 IPC 也不能单凭对端 PID 声称 `Bound`。v1 推荐在未有验证方案前不自动强杀，详见新提案与 #25 实测。
 
 源码/平台资料：Linux [pidfd_open](https://man7.org/linux/man-pages/man2/pidfd_open.2.html)、[pidfd_send_signal](https://man7.org/linux/man-pages/man2/pidfd_send_signal.2.html)、[Unix socket](https://man7.org/linux/man-pages/man7/unix.7.html)；Microsoft [OpenProcess](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-openprocess)、[管道函数](https://learn.microsoft.com/en-us/windows/win32/ipc/pipe-functions)、[命名管道安全边界](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipes)；Apple [kill](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/kill.2.html)。资料只说明原语，不证明组合方案已安全。
 
