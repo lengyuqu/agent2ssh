@@ -1,0 +1,30 @@
+{
+  "config": "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\a2s-denied-eja323yq\\config",
+  "stand_in_pid": 5180,
+  "addr": "127.0.0.1:65470",
+  "elevated_status": {
+    "config_dir": "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\a2s-denied-eja323yq\\config",
+    "pid_path": "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\a2s-denied-eja323yq\\config\\daemon.pid",
+    "token_path": "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\a2s-denied-eja323yq\\config\\daemon.token",
+    "log_path": "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\a2s-denied-eja323yq\\config\\daemon.log",
+    "pid_lock": "free",
+    "record": {
+      "state": "pid",
+      "pid": 5180
+    },
+    "observation": {
+      "state": "live",
+      "start_time": 1794507745
+    },
+    "health": {
+      "state": "inactive"
+    },
+    "token": "not-checked",
+    "verdict": "running-unhealthy",
+    "next_step": "A process holds the record but /health does not answer. Inspect daemon.log and the listening port; do not signal the PID from this report."
+  },
+  "probe_stdout": "[elevated ] can_open=OpenProcess=true signaled=false\n[elevated ] DACL rewritten to SYSTEM + Administrators\n[elevated ] can_open_after=OpenProcess=true signaled=false\n{\"control\":\"whoami\",\"status\":-1073741502,\"stdout\":\"\"}\n{\"argv\":[\"daemon\", \"status\", \"--json\"],\"status\":-1073741502,\"stdout\":\"\",\"stderr\":\"\"}\n{\"argv\":[\"daemon\", \"stop\"],\"status\":-1073741502,\"stdout\":\"\",\"stderr\":\"\"}\n{\"open_self\":\"OpenProcess=true signaled=false\"}",
+  "probe_stderr": "",
+  "probe_exit": 0,
+  "stand_in_alive_after": true
+}
