@@ -715,8 +715,11 @@ mod windows_shells {
 
         // 0xC3 0x28 is invalid UTF-8 but not a UTF-16 BOM: a file starting with
         // FF FE makes `type` emit nothing at all, which would test cmd instead.
-        let bad = dir.path().join("bad.bin");
-        std::fs::write(&bad, [0xc3, 0x28]).unwrap();
+        // The marker rides along so the "nothing leaked" scan below has a string
+        // that can only appear if the rejected bytes were written somewhere.
+        let inputs = tempfile::tempdir().unwrap();
+        let bad = inputs.path().join("bad.bin");
+        std::fs::write(&bad, b"windows-invalid-marker\xc3\x28").unwrap();
         let invalid = cmd(
             dir.path(),
             &format!(
@@ -727,6 +730,21 @@ mod windows_shells {
         assert!(!invalid.status.success());
         assert!(String::from_utf8_lossy(&invalid.stderr).contains("UTF-8"));
         assert!(!dir.path().join("hosts.json").exists());
+        // The rejected bytes must not survive anywhere in the config directory
+        // either — the input file lives outside it so this only sees output.
+        for entry in std::fs::read_dir(dir.path()).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_file() {
+                let bytes = std::fs::read(&path).unwrap();
+                assert!(
+                    !bytes
+                        .windows(b"windows-invalid-marker".len())
+                        .any(|window| window == b"windows-invalid-marker"),
+                    "{} leaked the rejected marker",
+                    path.display()
+                );
+            }
+        }
     }
 
     #[test]
