@@ -2205,7 +2205,7 @@ const HANDLER_STATUS: [(&str, &str); 10] = [
 /// stayed invisible: the family looked consistent from one route.
 ///
 /// A call in the body is not proof the status is reachable: see
-/// `INBAND_REJECTIONS` below for the three routes that consume the `Err`
+/// `INBAND_REJECTIONS` below for the four routes that consume the `Err`
 /// instead of returning it, and would be wrongly indicted by this list.
 ///
 /// 403 arrives through a helper too, and was invisible the same way:
@@ -2323,7 +2323,8 @@ const HELPER_STATUS: [(&str, &str); 31] = [
     ("preflight_sftp_rm_rf(", "429"),
 ];
 
-/// Operations whose gate and rate-limit refusals never become an HTTP status.
+/// Operations whose gate, rate-limit or approval-wait refusals never become an
+/// HTTP status.
 ///
 /// `HELPER_STATUS` is a text scan: it sees `reject_if_rate_limited(` in a body
 /// and concludes the caller can receive a 429. Three handlers consume that `Err`
@@ -2349,6 +2350,16 @@ const HELPER_STATUS: [(&str, &str); 31] = [
 /// authorized", and one unreadable file is not the only way to reach it. Two
 /// consumption shapes share one exemption table, so a route that returns the
 /// status belongs here only if it also consumes it somewhere else.
+///
+/// `/terminal` is the sharpest case of that split, and it is why the exemption
+/// is per code: the route is in the table for `408` alone. Its gate and
+/// rate-limit refusals happen in `terminal_attach`, before `on_upgrade`, and
+/// are statuses — which is what the paragraph above contrasts against
+/// `preview_results`. Its approval wait happens in `handle_terminal`, after the
+/// upgrade, where every refusal becomes `{"type":"error"}`; the status the REST
+/// routes would answer is never written to the socket. A per-route exemption
+/// could not express that, and a route left out of the table entirely left the
+/// 408 reachable and undocumented.
 ///
 /// The third field is the set of codes this route consumes instead of
 /// returning, so the exemption is per code and not per route. That distinction
@@ -2380,7 +2391,7 @@ const HELPER_STATUS: [(&str, &str); 31] = [
 /// The fourth field is a phrase the path block must still carry, so the
 /// exemption cannot decay into silence — the refusal stays documented, just not
 /// as a status. Rewording that prose breaks this test on purpose.
-const INBAND_REJECTIONS: [(&str, &str, &[&str], &str, &[&str]); 3] = [
+const INBAND_REJECTIONS: [(&str, &str, &[&str], &str, &[&str]); 4] = [
     (
         "get",
         "/exec/stream",
@@ -2394,6 +2405,13 @@ const INBAND_REJECTIONS: [(&str, &str, &[&str], &str, &[&str]); 3] = [
         &["408", "423", "429"],
         "returns 200",
         &["terminal_broadcast_preview_results"],
+    ),
+    (
+        "get",
+        "/terminal",
+        &["408"],
+        "as the same error frame, which carries the message",
+        &["handle_terminal"],
     ),
     (
         "post",
@@ -3530,6 +3548,122 @@ fn strip_rust_comments(source: &str) -> String {
     out
 }
 
+/// Whether one byte can appear inside a Rust identifier.
+fn is_ident_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+/// The same text with comments **and** string or char literals blanked.
+///
+/// `strip_rust_comments` keeps literals on purpose: the call-order test reads
+/// `if alias == "localhost"` out of a body, and blanking that would break it.
+/// The helper scans want the opposite. A needle is a call expression, so a
+/// literal that spells one is not a call — yet `body.contains(needle)` accepted
+/// it, and a single
+/// `tracing::debug!("reject_if_gate_paused( covers this route")` was enough to
+/// satisfy a `HELPER_STATUS` row and, through the delegate search, an
+/// exemption. Blanking literals is what separates "this body runs the helper"
+/// from "this body talks about the helper".
+///
+/// Char literals are handled because they desync a literal-naive scanner:
+/// `'"'` opens a string as far as the byte scan is concerned, and every byte up
+/// to the next real quote — code included — would be swallowed. No handler
+/// contains one today; the point is that the first one to appear must not
+/// silently blind four checks at once. A lifetime (`'a`) is not a char literal,
+/// and the two patterns below tell them apart: an escape (`'\''`) or exactly one
+/// char before the closing quote.
+fn strip_rust_literals(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut out = String::with_capacity(source.len());
+    let mut index = 0;
+    // Blank one byte range, keeping newlines so any line-shaped reading of the
+    // result still lines up.
+    let blank = |out: &mut String, range: &[u8]| {
+        for byte in range {
+            out.push(if *byte == b'\n' { '\n' } else { ' ' });
+        }
+    };
+    while index < bytes.len() {
+        if source[index..].starts_with("//") {
+            let len = source[index..].find('\n').unwrap_or(bytes.len() - index);
+            blank(&mut out, &bytes[index..index + len]);
+            index += len;
+            continue;
+        }
+        if source[index..].starts_with("/*") {
+            let len = source[index..]
+                .find("*/")
+                .map(|end| end + 2)
+                .unwrap_or(bytes.len() - index);
+            blank(&mut out, &bytes[index..index + len]);
+            index += len;
+            continue;
+        }
+        // Raw string: `r"…"`, `r#"…"#`, `r##"…"##`. The `r` only starts one when
+        // it does not continue a name — `error` ends in `r` and is not a prefix.
+        if bytes[index] == b'r'
+            && !index
+                .checked_sub(1)
+                .is_some_and(|at| is_ident_byte(bytes[at]))
+        {
+            let mut hashes = 0;
+            while index + 1 + hashes < bytes.len() && bytes[index + 1 + hashes] == b'#' {
+                hashes += 1;
+            }
+            if index + 1 + hashes < bytes.len() && bytes[index + 1 + hashes] == b'"' {
+                let opening = index + 2 + hashes;
+                let terminator = format!("\"{}", "#".repeat(hashes));
+                let len = source[opening..]
+                    .find(&terminator)
+                    .map(|end| end + terminator.len())
+                    .unwrap_or(bytes.len() - opening);
+                blank(&mut out, &bytes[index..opening + len]);
+                index = opening + len;
+                continue;
+            }
+        }
+        if bytes[index] == b'"' {
+            // Walk to the closing quote, honouring `\"`.
+            let mut at = index + 1;
+            while at < bytes.len() {
+                if bytes[at] == b'\\' {
+                    at += 2;
+                    continue;
+                }
+                if bytes[at] == b'"' {
+                    break;
+                }
+                at += 1;
+            }
+            let end = (at + 1).min(bytes.len());
+            blank(&mut out, &bytes[index..end]);
+            index = end;
+            continue;
+        }
+        if bytes[index] == b'\'' {
+            // `'\''` / `'\n'` / `'\u{1F600}'`: an escape, then the closing quote.
+            let escaped_end = if bytes.get(index + 1) == Some(&b'\\') {
+                source[index + 2..].find('\'').map(|at| index + 2 + at + 1)
+            } else {
+                None
+            };
+            // `'x'` / `'"'`: exactly one byte between the quotes. A lifetime has
+            // no closing quote in that position, so it fails this test.
+            let plain_end = (bytes.get(index + 2) == Some(&b'\''))
+                .then_some(index + 3)
+                .filter(|end| *end <= bytes.len());
+            if let Some(end) = escaped_end.or(plain_end) {
+                blank(&mut out, &bytes[index..end]);
+                index = end;
+                continue;
+            }
+        }
+        out.push(bytes[index] as char);
+        index += 1;
+    }
+    out
+}
+
 /// One operation's block: the method key and everything under it, bounded by the
 /// next method key or the end of the path item.
 ///
@@ -3651,18 +3785,27 @@ fn api_yaml_documents_the_codes_each_handler_can_return() {
             .strip_prefix('"')
             .and_then(|rest| rest.split('"').next())
         {
-            operation.2.push(code.to_string());
+            // A response key is three digits. Quoted prose sits at the same
+            // indent inside `description:` scalars — `"unknown"` and
+            // `"nothing was stopped"` both did — and used to be recorded as
+            // documented codes: non-codes that no check could ever match, which
+            // is worse than noise because it made the map look populated where
+            // the operation documents nothing.
+            if code.len() == 3 && code.bytes().all(|byte| byte.is_ascii_digit()) {
+                operation.2.push(code.to_string());
+            }
         }
     }
 
     let undocumented: Vec<String> = daemon_routes(daemon)
         .into_iter()
         .flat_map(|(path, method, handler)| {
-            // Comments are stripped before the scan: this file's prose spells
-            // these calls out, and a `//` line naming one used to read as a
-            // call site — the same failure `strip_rust_comments` was added for
-            // in the call-order test.
-            let body = strip_rust_comments(handler_body_of(daemon, &handler));
+            // Comments and literals are stripped before the scan: this file's
+            // prose spells these calls out, and a `//` line naming one used to
+            // read as a call site. A string literal is the same failure with a
+            // longer fuse — `debug!("reject_if_gate_paused( …")` is a mention,
+            // not a call — so this scan strips both.
+            let body = strip_rust_literals(handler_body_of(daemon, &handler));
             // An entirely undocumented operation is the route test's finding.
             let Some((_, _, codes)) = documented.iter().find(|(known_path, known_method, _)| {
                 *known_path == path && *known_method == method
@@ -3690,11 +3833,12 @@ fn api_yaml_documents_the_codes_each_handler_can_return() {
     let undocumented_via_helper: Vec<String> = daemon_routes(daemon)
         .into_iter()
         .flat_map(|(path, method, handler)| {
-            // Comments are stripped before the scan: this file's prose spells
-            // these calls out, and a `//` line naming one used to read as a
-            // call site — the same failure `strip_rust_comments` was added for
-            // in the call-order test.
-            let body = strip_rust_comments(handler_body_of(daemon, &handler));
+            // Comments and literals are stripped before the scan: this file's
+            // prose spells these calls out, and a `//` line naming one used to
+            // read as a call site. A string literal is the same failure with a
+            // longer fuse — `debug!("reject_if_gate_paused( …")` is a mention,
+            // not a call — so this scan strips both.
+            let body = strip_rust_literals(handler_body_of(daemon, &handler));
             let Some((_, _, codes)) = documented.iter().find(|(known_path, known_method, _)| {
                 *known_path == path && *known_method == method
             }) else {
@@ -3779,9 +3923,24 @@ fn api_yaml_documents_the_codes_each_handler_can_return() {
                 .into_iter()
                 .find(|(known_path, known_method, _)| known_path == path && *known_method == method)
             {
-                let mut bodies = vec![strip_rust_comments(handler_body_of(daemon, &handler))];
+                let own = strip_rust_literals(handler_body_of(daemon, &handler));
+                let mut bodies = vec![own.clone()];
                 for delegate in delegates {
-                    bodies.push(strip_rust_comments(handler_body_of(daemon, *delegate)));
+                    // A delegate the handler never calls is borrowed evidence.
+                    // The fifth field exists so an exemption can point at the
+                    // callee that actually folds the refusal, and the check
+                    // used to accept *any* body with that name — another
+                    // route's handler, or the sibling method of the same path
+                    // item. Both passed. Requiring the call keeps the evidence
+                    // on this route's own path.
+                    if !own.contains(&format!("{delegate}(")) {
+                        problems.push(format!(
+                            "{method} {path} names `{delegate}` as the body that folds its \
+                             refusal, but `{handler}` never calls it, so the evidence comes \
+                             from a body this route does not run"
+                        ));
+                    }
+                    bodies.push(strip_rust_literals(handler_body_of(daemon, delegate)));
                 }
                 for code in exempt_codes {
                     let backed = HELPER_STATUS.iter().any(|(needle, known)| {
@@ -3796,7 +3955,11 @@ fn api_yaml_documents_the_codes_each_handler_can_return() {
                     }
                 }
             }
-            match spec_path_block(spec, path) {
+            // The marker has to live in this method's own block. `spec_path_block`
+            // returns the whole path item, so a GET could satisfy its marker with
+            // prose the DELETE wrote about a refusal the DELETE performs — the
+            // same borrow the delegate rule above now refuses, one field over.
+            match spec_operation_block(spec, path, method) {
                 Some(block) if block.contains(marker) => {}
                 Some(_) => problems.push(format!(
                     "{method} {path} no longer says `{marker}`, so an in-band refusal is now \
@@ -3834,11 +3997,11 @@ fn every_helper_status_needle_names_a_call_a_body_makes() {
     let daemon = include_str!("../src/bin/agent2ssh-daemon.rs");
     let mut bodies: Vec<String> = daemon_routes(daemon)
         .into_iter()
-        .map(|(_, _, handler)| strip_rust_comments(handler_body_of(daemon, &handler)))
+        .map(|(_, _, handler)| strip_rust_literals(handler_body_of(daemon, &handler)))
         .collect();
     for (_, _, _, _, delegates) in INBAND_REJECTIONS {
         for delegate in delegates {
-            bodies.push(strip_rust_comments(handler_body_of(daemon, delegate)));
+            bodies.push(strip_rust_literals(handler_body_of(daemon, delegate)));
         }
     }
     let dead: Vec<&str> = HELPER_STATUS
@@ -3850,6 +4013,143 @@ fn every_helper_status_needle_names_a_call_a_body_makes() {
         dead.is_empty(),
         "these `HELPER_STATUS` needles match no route handler body and no declared \
          delegate, so the code they claim to make reachable is not: {dead:?}"
+    );
+}
+
+/// The body of a named item in the daemon, `fn` or `async fn`.
+///
+/// `handler_body_of` requires `async fn` because every route handler is one.
+/// `HELPER_STATUS` also names plain functions (`ensure_command_length`,
+/// `locked_status`'s callers), and those are exactly the rows whose code a test
+/// can check against the source. `None` means the item is not in this file —
+/// `check_daemon_scope` lives in `src/remote.rs`, and a row that points there is
+/// covered by the route scans rather than by this one.
+fn item_body_of<'a>(daemon: &'a str, name: &str) -> Option<&'a str> {
+    for signature in [format!("\nasync fn {name}("), format!("\nfn {name}(")] {
+        if let Some(at) = daemon.find(&signature) {
+            let rest = &daemon[at + 1..];
+            return Some(&rest[..closing_brace(rest, opening_brace(rest)?)?]);
+        }
+    }
+    None
+}
+
+/// The `from_u16(N)` numbers one body spells, in source order.
+fn numbers_a_body_spells(body: &str) -> Vec<String> {
+    let mut numerics: Vec<String> = Vec::new();
+    let mut from = 0;
+    while let Some(found) = body[from..].find("from_u16(") {
+        let at = from + found + "from_u16(".len();
+        let digits: String = body[at..]
+            .chars()
+            .take_while(|ch| ch.is_ascii_digit())
+            .collect();
+        if !digits.is_empty() {
+            numerics.push(digits);
+        }
+        from = at;
+    }
+    numerics
+}
+
+/// The names of the `*_status()` helpers one body calls.
+fn status_helpers_called(body: &str) -> Vec<String> {
+    let bytes = body.as_bytes();
+    let mut names: Vec<String> = Vec::new();
+    for (at, _) in body.match_indices("_status()") {
+        let mut start = at;
+        while start > 0 && is_ident_byte(bytes[start - 1]) {
+            start -= 1;
+        }
+        names.push(body[start..at + "_status".len()].to_string());
+    }
+    names
+}
+
+/// The status codes a body spells, one level of `*_status()` deep.
+///
+/// Two spellings exist. `StatusCode::BAD_REQUEST` names the constant; the two
+/// refusals that have no useful name (`423`, `429`) go through
+/// `StatusCode::from_u16(…).expect(…)` inside a helper of their own, because
+/// `StatusCode` has no `LOCKED` constructor in this tree's version of `http`.
+/// A number is the easier of the two to mistype and the harder to notice:
+/// `423` → `400` turns "the operator paused the gate" into "your request was
+/// malformed" with no compile error, and before this check no test read it.
+///
+/// The `*_status()` walk is one level and not recursive: `locked_status` is a
+/// leaf, and a walk that followed calls generally would be a call graph this
+/// file has no reason to build.
+fn codes_a_body_spells(daemon: &str, body: &str) -> (Vec<String>, Vec<String>) {
+    let mut literals: Vec<String> = HANDLER_STATUS
+        .iter()
+        .filter(|(constant, _)| body.contains(&format!("StatusCode::{constant}")))
+        .map(|(_, code)| code.to_string())
+        .collect();
+    // `reject_if_gate_paused` does not spell 423 itself — it returns
+    // `locked_status()`. Following the `*_status()` call is what makes the
+    // numeric rows checkable at all.
+    let mut numerics = numbers_a_body_spells(body);
+    for name in status_helpers_called(body) {
+        if let Some(helper) = item_body_of(daemon, &name) {
+            // The helper exists to spell one number, so its literals are its
+            // own business; only the number answers the row.
+            numerics.extend(numbers_a_body_spells(&strip_rust_literals(helper)));
+        }
+    }
+    literals.sort();
+    literals.dedup();
+    numerics.sort();
+    numerics.dedup();
+    (literals, numerics)
+}
+
+/// Each `HELPER_STATUS` row must agree with the code its helper actually builds.
+///
+/// The table's other two checks ask *where* a needle appears, never *what the
+/// named function answers*. That left two shapes green: a row registered with a
+/// code its helper does not build (`finish_sftp_operation` as `423`, while its
+/// body builds one `400`), and a numeric status helper edited to a different
+/// number (`locked_status`'s `423` → `400`), which silently rewrites every route
+/// the gate check covers. Both were measured green on this file before the
+/// check existed.
+///
+/// The rule is deliberately narrow, because a row is not a claim that its helper
+/// answers *only* that code:
+/// - if the body spells numbers, the row's code must be one of them;
+/// - otherwise, if it spells exactly one literal code, the row's code must be
+///   that one;
+/// - otherwise (a pass-through, or a helper that answers several codes and
+///   reaches this one through a callee) this check says nothing, and the route
+///   scans remain what covers the row.
+#[test]
+fn every_helper_status_row_agrees_with_the_code_its_helper_builds() {
+    let daemon = include_str!("../src/bin/agent2ssh-daemon.rs");
+
+    let disagreements: Vec<String> = HELPER_STATUS
+        .iter()
+        .filter_map(|(needle, code)| {
+            let name = needle.trim_end_matches('(');
+            let body = strip_rust_literals(item_body_of(daemon, name)?);
+            let (literals, numerics) = codes_a_body_spells(daemon, &body);
+            if !numerics.is_empty() {
+                return (!numerics.iter().any(|known| known == code)).then(|| {
+                    format!("`{name}` is registered as {code}, but it spells {numerics:?}")
+                });
+            }
+            match literals.as_slice() {
+                [only] if only != code => Some(format!(
+                    "`{name}` is registered as {code}, but its body builds {only}"
+                )),
+                _ => None,
+            }
+        })
+        .collect();
+
+    assert!(
+        disagreements.is_empty(),
+        "these `HELPER_STATUS` rows disagree with the source: {disagreements:?}. A row is \
+         what the route scans treat as proof that a code is reachable, so a row that names \
+         the wrong code makes every route it covers document the wrong status."
     );
 }
 
