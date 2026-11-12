@@ -2374,6 +2374,10 @@ paths:
         the desktop Live Agent Activity panel to observe local daemon/session
         activity and streaming exec output. The stream ends when the daemon
         shuts down; an EOF alone does not distinguish shutdown from disconnection.
+        `session_input` and `session_output` events contain source, session_id
+        and byte counts only; PTY content is omitted because it may contain
+        credentials. This does not redact session read responses, command audit,
+        approvals, webhooks, recordings, or other event types.
       responses:
         "200":
           description: Event stream

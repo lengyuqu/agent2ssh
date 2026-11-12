@@ -396,6 +396,91 @@ fn save_is_refused_when_the_credential_store_is_behind() {
 
 // ── set-password input handling ───────────────────────────────────────────
 
+#[cfg(unix)]
+#[test]
+fn interactive_initial_password_requires_matching_confirmation_without_echo() {
+    use std::io::{Read, Write};
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::time::{Duration, Instant};
+
+    fn read_until(pty: &mut std::fs::File, needle: &str, output: &mut String) {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !output.contains(needle) {
+            assert!(Instant::now() < deadline, "missing prompt: {needle}");
+            let mut pollfd = libc::pollfd {
+                fd: pty.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            if unsafe { libc::poll(&mut pollfd, 1, 100) } <= 0 {
+                continue;
+            }
+            let mut buf = [0; 1024];
+            match pty.read(&mut buf) {
+                Ok(0) | Err(_) => panic!("terminal closed before {needle}"),
+                Ok(n) => output.push_str(&String::from_utf8_lossy(&buf[..n])),
+            }
+        }
+    }
+
+    for (matches, cancelled) in [(false, false), (true, false), (false, true)] {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut master, mut slave) = (-1, -1);
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
+        let mut master = unsafe { std::fs::File::from_raw_fd(master) };
+        let slave = unsafe { std::fs::File::from_raw_fd(slave) };
+        let mut child = Command::new(env!("CARGO_BIN_EXE_agent2ssh"))
+            .args(["secrets", "set-password"])
+            .env("AGENT2SSH_CONFIG_DIR", dir.path())
+            .env("AGENT2SSH_SECRETS_BACKEND", "encrypted")
+            .env_remove("AGENT2SSH_MASTER_PASSWORD")
+            .stdin(Stdio::from(slave.try_clone().unwrap()))
+            .stdout(Stdio::from(slave.try_clone().unwrap()))
+            .stderr(Stdio::from(slave))
+            .spawn()
+            .unwrap();
+        let mut output = String::new();
+        read_until(&mut master, "New master password: ", &mut output);
+        // Backspace removes an entire UTF-8 character, not just its last byte.
+        master
+            .write_all("pty-first-password-marker中\x7f\n".as_bytes())
+            .unwrap();
+        read_until(&mut master, "Confirm master password: ", &mut output);
+        master
+            .write_all(if cancelled {
+                b"\x03".as_slice()
+            } else if matches {
+                b"pty-first-password-marker\n"
+            } else {
+                b"pty-other-password-marker\n"
+            })
+            .unwrap();
+        let expected = if cancelled {
+            "master password input cancelled"
+        } else if matches {
+            "Master password set."
+        } else {
+            "master password confirmation does not match"
+        };
+        read_until(&mut master, expected, &mut output);
+        assert_eq!(child.wait().unwrap().success(), matches);
+        assert!(!output.contains("pty-first-password-marker"));
+        assert!(!output.contains("pty-other-password-marker"));
+        assert_eq!(dir.path().join(SECRETS_FILE).exists(), matches);
+    }
+}
+
 #[test]
 fn set_password_separates_the_current_password_from_the_new_one() {
     let dir = tempfile::tempdir().unwrap();

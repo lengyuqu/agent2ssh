@@ -1,6 +1,6 @@
 //! Crash-recovery log for the two-file `hosts.json` + `secrets.enc` commit.
 //!
-//! `store::save_config_unlocked_strict_host` seals new credentials into
+//! `store::save_config_unlocked` seals new credentials into
 //! `secrets.enc` *before* it replaces `hosts.json`. A crash in that window
 //! leaves ciphertexts that no config references (harmless), but a later save
 //! could also observe a half-finished pair. The log below makes the window

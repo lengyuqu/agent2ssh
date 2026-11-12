@@ -605,13 +605,9 @@ fn internalize_secrets(config: &mut AppConfig) {
 /// replacing each with the [`crate::secrets::SECRET_REF`] marker on disk. An
 /// existing marker is left untouched.
 ///
-/// Failure policy (K8): a new **host password** supplied through a legacy
-/// `--password` argument still warns and falls back to plaintext when the
-/// vault is locked, unless `strict_host` names that host (the `--*-stdin`
-/// path, which must never fall back). A **private-key passphrase** and a
-/// **proxy password** both fail closed unconditionally — the same locked store
-/// must not produce one plaintext credential and one refusal in a single save.
-fn externalize_secrets(config: &mut AppConfig, strict_host: Option<&str>) -> Result<()> {
+/// All credentials fail closed if they cannot be encrypted. Existing plaintext
+/// must be migrated by unlocking the vault before the configuration can be saved.
+fn externalize_secrets(config: &mut AppConfig) -> Result<()> {
     use crate::secrets::{
         host_account, host_passphrase_account, is_secret_ref, proxy_account, store_secret,
         SECRET_REF,
@@ -625,13 +621,14 @@ fn externalize_secrets(config: &mut AppConfig, strict_host: Option<&str>) -> Res
         {
             match store_secret(&host_account(&host.name), pw) {
                 Ok(()) => host.password = Some(SECRET_REF.to_string()),
-                Err(e) if strict_host == Some(host.name.as_str()) => {
-                    return Err(e).with_context(|| format!("refusing to persist an unencrypted password for host '{}'", host.name));
+                Err(e) => {
+                    return Err(e).with_context(|| {
+                        format!(
+                            "refusing to persist an unencrypted password for host '{}'",
+                            host.name
+                        )
+                    });
                 }
-                Err(e) => eprintln!(
-                    "warning: could not encrypt password for host '{}' ({e}); left as plaintext until the credential store is unlocked",
-                    host.name
-                ),
             }
         }
         if let Some(passphrase) = &host.passphrase {
@@ -733,13 +730,13 @@ pub fn save_config(config: &AppConfig) -> Result<()> {
 }
 
 pub(crate) fn save_config_unlocked(config: &AppConfig) -> Result<()> {
-    save_config_unlocked_strict_host(config, None)
+    save_config_inner(config)
 }
 
 /// Removes the prepared temp file on every ordinary exit path except a
 /// successful rename. A `kill -9` runs no destructor — that is exactly the gap
 /// the commit log covers — but errors and panics no longer leave a
-/// config-shaped file (possibly holding a plaintext fallback) behind.
+/// config-shaped file behind.
 struct TempConfigGuard {
     path: PathBuf,
     created: bool,
@@ -764,10 +761,7 @@ impl Drop for TempConfigGuard {
     }
 }
 
-pub(crate) fn save_config_unlocked_strict_host(
-    config: &AppConfig,
-    strict_host: Option<&str>,
-) -> Result<()> {
+fn save_config_inner(config: &AppConfig) -> Result<()> {
     ensure_config_dir()?;
     let path = config_path()?;
     let tmp_path = path.with_extension(format!("json.tmp.{}", std::process::id()));
@@ -798,7 +792,7 @@ pub(crate) fn save_config_unlocked_strict_host(
         temp.created = true;
         // Reserve the configuration output before mutating the credential
         // store. If opening it fails, the previous credentials are untouched.
-        externalize_secrets(&mut normalized, strict_host)?;
+        externalize_secrets(&mut normalized)?;
 
         // Stamp the generation the references in this file were written
         // against. `externalize_secrets` bumps it once per sealed secret.

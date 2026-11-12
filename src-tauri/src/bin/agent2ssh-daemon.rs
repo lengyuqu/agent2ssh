@@ -2614,7 +2614,6 @@ async fn session_write(
                 serde_json::json!({
                     "source": source,
                     "session_id": id,
-                    "input_preview": preview_text(&body.input, 2048),
                     "input_bytes": body.input.len(),
                 }),
             );
@@ -2668,7 +2667,6 @@ async fn session_read(
                 serde_json::json!({
                     "source": source,
                     "session_id": id,
-                    "output_preview": preview_text(&output, 4096),
                     "output_bytes": output.len(),
                 }),
             );

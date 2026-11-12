@@ -40,10 +40,18 @@ function asNumber(value: unknown): number | null | undefined {
   return typeof value === "number" ? value : value === null ? null : undefined;
 }
 
+function safeActivityEvent(event: AgentEvent): AgentEvent {
+  // Older daemons may still send PTY previews. Do not render or retain them in
+  // the activity panel, including the expandable raw event view.
+  if (event.event_type !== "session_input" && event.event_type !== "session_output") return event;
+  const data = Object.fromEntries(Object.entries(event.data).filter(([key]) =>
+    ["source", "session_id", "input_bytes", "output_bytes"].includes(key)));
+  return { ...event, data };
+}
+
 function eventToItem(event: AgentEvent): ActivityItem {
   const data = event.data;
   const output = asString(data.output_preview);
-  const input = asString(data.input_preview);
   const stream = asString(data.stream);
   const sessionId = asString(data.session_id);
   const source = asString(data.source) ?? "daemon";
@@ -51,7 +59,7 @@ function eventToItem(event: AgentEvent): ActivityItem {
   const anomalyKind = asString(data.kind);
   const severity = asString(data.severity);
 
-  let detail = anomalyReason ?? output ?? input;
+  let detail = anomalyReason ?? output;
   if (!detail && sessionId) detail = `session ${sessionId.slice(0, 8)}`;
   if (stream && detail) detail = `${stream}: ${detail}`;
 
@@ -122,7 +130,7 @@ export default function LiveActivityPanel() {
   const flushTimerRef = useRef<number | null>(null);
 
   useAgentEvents((event) => {
-    eventQueueRef.current.push(event);
+    eventQueueRef.current.push(safeActivityEvent(event));
     if (flushTimerRef.current !== null) return;
     flushTimerRef.current = window.setTimeout(() => {
       flushTimerRef.current = null;

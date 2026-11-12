@@ -103,6 +103,7 @@ export default function SettingsMenu({
   // K1: credential-store master password state.
   const [secretsInitialized, setSecretsInitialized] = useState(false);
   const [masterPassword, setMasterPassword] = useState("");
+  const [masterPasswordConfirmation, setMasterPasswordConfirmation] = useState("");
   const [secretsBusy, setSecretsBusy] = useState(false);
   const [secretsMessage, setSecretsMessage] = useState<string | null>(null);
   // A22: SSH algorithm preferences. `null` means "not loaded yet / load failed",
@@ -177,6 +178,10 @@ export default function SettingsMenu({
   // first time also encrypts any existing plaintext credentials.
   async function submitMasterPassword() {
     if (!masterPassword || secretsBusy) return;
+    if (!secretsInitialized && masterPassword !== masterPasswordConfirmation) {
+      setSecretsMessage(t("Master passwords do not match"));
+      return;
+    }
     setSecretsBusy(true);
     setSecretsMessage(null);
     try {
@@ -189,6 +194,7 @@ export default function SettingsMenu({
         setSecretsMessage(t("Master password set"));
       }
       setMasterPassword("");
+      setMasterPasswordConfirmation("");
     } catch (err) {
       setSecretsMessage(String(err));
     } finally {
@@ -560,7 +566,7 @@ export default function SettingsMenu({
               {secretsInitialized
                 ? t("Encrypted at rest with your master password (Argon2id + AES-256-GCM).")
                 : t(
-                    "Encrypted at rest with a master password (Argon2id + AES-256-GCM). Not yet set — credentials are stored in plaintext until you set one."
+                    "Set a master password to encrypt credentials (Argon2id + AES-256-GCM). New credentials cannot be saved until one is set."
                   )}
             </p>
             {secretsMessage && (
@@ -583,6 +589,16 @@ export default function SettingsMenu({
                 {secretsInitialized ? t("Change master password") : t("Set master password")}
               </Button>
             </div>
+            {!secretsInitialized && (
+              <input
+                type="password"
+                value={masterPasswordConfirmation}
+                onChange={(e) => setMasterPasswordConfirmation(e.target.value)}
+                placeholder={t("Confirm master password")}
+                aria-label={t("Confirm master password")}
+                className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+              />
+            )}
           </section>
 
           <section className="grid gap-2">

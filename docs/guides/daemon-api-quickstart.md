@@ -1005,8 +1005,8 @@ curl -N -H "$AUTH" http://127.0.0.1:7722/events/stream
 | `exec_output` | WebSocket streaming exec 输出片段，包含 `stream` 和 bounded preview |
 | `exec_completed` | 命令执行完成；普通 CLI/MCP exec 也会写入 audit 并发布完成事件 |
 | `session_opened` | daemon-managed PTY session 打开 |
-| `session_input` | 向 PTY session 写入输入，包含输入预览和字节数 |
-| `session_output` | 读取到 PTY session 输出，包含输出预览和字节数 |
+| `session_input` | 向 PTY session 写入输入，仅提供来源、会话 ID 和字节数 |
+| `session_output` | 读取 PTY session 输出，仅提供来源、会话 ID 和字节数 |
 | `session_closed` | PTY session 关闭 |
 | `approval_requested` / `approval_responded` | 审批请求和响应 |
 | `audit_rotated` | 审计日志轮转 |
@@ -1014,6 +1014,11 @@ curl -N -H "$AUTH" http://127.0.0.1:7722/events/stream
 | `gate_rejected` | execution gate 拒绝了一次非桌面来源执行 |
 | `limit_rejected` | execution limits 拒绝了一次执行或 session open |
 | `anomaly_detected` | audit 滑动窗口检测到异常行为，包含 `kind`、`severity` 和 `reason` |
+
+会话输入可能是密码，输出也可能回显敏感内容，因此事件流不提供 PTY 输入或输出预览。
+这不改变实际会话读写，也不保证审计、审批、webhook、终端录制、其他事件或会话读取
+响应中没有敏感内容；会话命令仍可能进入审计和审批，避免在终端输入中传递口令。
+旧 daemon 仍可能发送预览，应升级 daemon；新版桌面活动面板不会展示旧版会话预览。
 
 桌面端的 Live Agent Activity 面板会订阅该事件流，并同时轮询 recent audit，用来观察 Codex、Claude Code、opencode 等 agent 通过 CLI/MCP/daemon 发起的 SSH 操作。
 

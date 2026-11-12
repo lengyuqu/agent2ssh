@@ -20,8 +20,8 @@ use crate::{
     sanitize::{analyze_command, split_commands, ShapeRisk},
     session::resolve_host,
     store::{
-        append_audit, list_audit_raw, load_config, save_config_unlocked,
-        save_config_unlocked_strict_host, store_write_lock, write_private_text,
+        append_audit, list_audit_raw, load_config, save_config_unlocked, store_write_lock,
+        write_private_text,
     },
     types::{
         default_host_group, is_local_host, source_from_env, AuditEntry, AuditFilter, BatchStrategy,
@@ -156,15 +156,15 @@ fn normalized_filter(value: Option<&str>) -> Option<String> {
 }
 
 pub fn add_host_core(host: HostProfile) -> Result<HostProfile> {
-    add_host_core_impl(host, false)
+    add_host_core_impl(host)
 }
 
 /// Add a host without falling back to plaintext for its password.
 pub fn add_host_core_without_plaintext_password(host: HostProfile) -> Result<HostProfile> {
-    add_host_core_impl(host, true)
+    add_host_core_impl(host)
 }
 
-fn add_host_core_impl(host: HostProfile, strict: bool) -> Result<HostProfile> {
+fn add_host_core_impl(host: HostProfile) -> Result<HostProfile> {
     validate_host(&host)?;
     let _guard = store_write_lock()?;
     let mut config = load_config()?;
@@ -175,11 +175,7 @@ fn add_host_core_impl(host: HostProfile, strict: bool) -> Result<HostProfile> {
         config.hosts.push(host.clone());
     }
     config.hosts.sort_by(|a, b| a.name.cmp(&b.name));
-    if strict {
-        save_config_unlocked_strict_host(&config, Some(&host.name))?;
-    } else {
-        save_config_unlocked(&config)?;
-    }
+    save_config_unlocked(&config)?;
     Ok(host)
 }
 
@@ -3074,18 +3070,20 @@ pub fn import_ssh_config_core(path: Option<&str>) -> Result<Vec<HostProfile>> {
     // Add only profiles whose name doesn't already exist
     let _guard = store_write_lock()?;
     let mut config = load_config()?;
-    let existing: std::collections::HashSet<String> =
+    let mut existing: std::collections::HashSet<String> =
         config.hosts.iter().map(|h| h.name.clone()).collect();
 
     let mut added = Vec::new();
     for p in profiles {
-        if !existing.contains(&p.name) {
+        if existing.insert(p.name.clone()) {
             added.push(p.clone());
             config.hosts.push(p);
         }
     }
-    config.hosts.sort_by(|a, b| a.name.cmp(&b.name));
-    save_config_unlocked(&config)?;
+    if !added.is_empty() {
+        config.hosts.sort_by(|a, b| a.name.cmp(&b.name));
+        save_config_unlocked(&config)?;
+    }
     Ok(added)
 }
 

@@ -227,10 +227,8 @@ pub fn import_netcatty_core(path: &Path, options: &ImportOptions) -> Result<Impo
         return Ok(report);
     }
 
-    // A locked credential store makes `save_config` fall back to writing the
-    // password verbatim, which is exactly what a migration must not do: the
-    // plaintext would sit in `hosts.json` until someone unlocks the store and
-    // it gets rewritten. Refuse instead, and name the way forward.
+    // Reject early with import-specific guidance before writing any keys.
+    // The shared save path also rejects an unencrypted password if locked.
     //
     // The check mirrors `store::save_config`: it accepts a store unlocked in
     // this process *or* one that can be unlocked from the environment, because

@@ -227,6 +227,10 @@ export const zh: Record<string, string> = {
   "Unlock": "解锁",
   "Unlocking…": "正在解锁…",
   "Master password": "主密码",
+  "Confirm master password": "确认主密码",
+  "Master passwords do not match": "两次输入的主密码不一致",
+  "Set a master password to encrypt credentials (Argon2id + AES-256-GCM). New credentials cannot be saved until one is set.":
+    "设置主密码以加密凭据（Argon2id + AES-256-GCM）。设置前无法保存新凭据。",
   "Enter your master password to decrypt saved SSH passwords. Stored credentials are encrypted on this machine; without the password, password-auth hosts are unavailable.":
     "输入主密码以解密已保存的 SSH 密码。凭据在本机加密存储；未输入主密码时，密码认证的主机不可用。",
   "Credential encryption": "凭据加密",

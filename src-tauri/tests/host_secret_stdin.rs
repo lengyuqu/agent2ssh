@@ -26,6 +26,209 @@ fn no_marker(output: &Output, marker: &str) {
 }
 
 #[test]
+fn legacy_password_fails_closed_when_locked() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = "legacy-locked-password-marker";
+    let output = run(
+        dir.path(),
+        &[
+            "host",
+            "add",
+            "locked",
+            "--host",
+            "127.0.0.1",
+            "--password",
+            marker,
+        ],
+        b"",
+        false,
+    );
+    assert!(
+        !output.status.success(),
+        "locked vault must reject legacy password"
+    );
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("refusing to persist an unencrypted password"));
+    no_marker(&output, marker);
+    for entry in std::fs::read_dir(dir.path()).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_file() {
+            assert!(!std::fs::read(&path)
+                .unwrap()
+                .windows(marker.len())
+                .any(|b| b == marker.as_bytes()));
+        }
+    }
+    let initial = run(
+        dir.path(),
+        &[
+            "host",
+            "add",
+            "locked",
+            "--host",
+            "original.example",
+            "--password",
+            "original-secret-marker",
+        ],
+        b"",
+        true,
+    );
+    assert!(initial.status.success());
+    let before_hosts = std::fs::read(dir.path().join("hosts.json")).unwrap();
+    let before_secrets = std::fs::read(dir.path().join("secrets.enc")).unwrap();
+    let overwrite = run(
+        dir.path(),
+        &[
+            "host",
+            "add",
+            "locked",
+            "--host",
+            "replacement.example",
+            "--password",
+            marker,
+        ],
+        b"",
+        false,
+    );
+    assert!(!overwrite.status.success());
+    no_marker(&overwrite, marker);
+    assert_eq!(
+        std::fs::read(dir.path().join("hosts.json")).unwrap(),
+        before_hosts
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("secrets.enc")).unwrap(),
+        before_secrets
+    );
+}
+
+#[test]
+fn legacy_plaintext_requires_unlock_before_a_save_and_then_migrates() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = run(
+        dir.path(),
+        &["host", "add", "old", "--host", "old.example"],
+        b"",
+        false,
+    );
+    assert!(first.status.success());
+    let path = dir.path().join("hosts.json");
+    let mut config: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    config["hosts"][0]["password"] = "historical-password-marker".into();
+    let original = serde_json::to_vec_pretty(&config).unwrap();
+    std::fs::write(&path, &original).unwrap();
+    let args = ["host", "add", "new", "--host", "new.example"];
+    let locked = run(dir.path(), &args, b"", false);
+    assert!(!locked.status.success());
+    no_marker(&locked, "historical-password-marker");
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    let unlocked = run(dir.path(), &args, b"", true);
+    assert!(
+        unlocked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&unlocked.stderr)
+    );
+    no_marker(&unlocked, "historical-password-marker");
+    let saved = std::fs::read_to_string(path).unwrap();
+    assert!(!saved.contains("historical-password-marker"));
+    let saved: serde_json::Value = serde_json::from_str(&saved).unwrap();
+    assert_eq!(
+        saved["hosts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|h| h["name"] == "old")
+            .unwrap()["password"],
+        agent2ssh::secrets::SECRET_REF
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn import_config_skips_existing_credentials_with_locked_or_unlocked_vault() {
+    let dir = tempfile::tempdir().unwrap();
+    let ssh = dir.path().join("ssh-config");
+    std::fs::write(&ssh, "Host existing\n  HostName replacement.example\nHost new\n  HostName new.example\nHost new\n  HostName duplicate.example\n").unwrap();
+    let seeded = run(
+        dir.path(),
+        &[
+            "host",
+            "add",
+            "existing",
+            "--host",
+            "original.example",
+            "--password",
+            "import-password-marker",
+            "--passphrase",
+            "import-passphrase-marker",
+        ],
+        b"",
+        true,
+    );
+    assert!(
+        seeded.status.success(),
+        "{}",
+        String::from_utf8_lossy(&seeded.stderr)
+    );
+    let before_secrets = std::fs::read(dir.path().join("secrets.enc")).unwrap();
+    for unlocked in [false, true] {
+        let output = run(
+            dir.path(),
+            &[
+                "host",
+                "import-config",
+                "--path",
+                ssh.to_str().unwrap(),
+                "--json",
+            ],
+            b"",
+            unlocked,
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        no_marker(&output, "import-password-marker");
+        no_marker(&output, "import-passphrase-marker");
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.path().join("hosts.json")).unwrap()).unwrap();
+        let hosts = parsed["hosts"].as_array().unwrap();
+        let existing = hosts.iter().find(|h| h["name"] == "existing").unwrap();
+        assert_eq!(existing["host"], "original.example");
+        assert_eq!(existing["password"], agent2ssh::secrets::SECRET_REF);
+        assert_eq!(existing["passphrase"], agent2ssh::secrets::SECRET_REF);
+        assert_eq!(hosts.iter().filter(|h| h["name"] == "new").count(), 1);
+        assert_eq!(
+            hosts.iter().find(|h| h["name"] == "new").unwrap()["host"],
+            "new.example"
+        );
+        // Saving an unlocked configuration may reseal unchanged secrets, so
+        // compare bytes only for the locked import.
+        if !unlocked {
+            assert_eq!(
+                std::fs::read(dir.path().join("secrets.enc")).unwrap(),
+                before_secrets
+            );
+        }
+    }
+    std::env::set_var("AGENT2SSH_CONFIG_DIR", dir.path());
+    std::env::set_var("AGENT2SSH_SECRETS_BACKEND", "encrypted");
+    agent2ssh::secrets::unlock_or_init("test-master-only").unwrap();
+    assert_eq!(
+        agent2ssh::secrets::get_secret(&agent2ssh::secrets::host_account("existing")).as_deref(),
+        Some("import-password-marker")
+    );
+    assert_eq!(
+        agent2ssh::secrets::get_secret(&agent2ssh::secrets::host_passphrase_account("existing"))
+            .as_deref(),
+        Some("import-passphrase-marker")
+    );
+    agent2ssh::secrets::lock();
+}
+
+#[test]
 fn password_reference_does_not_bypass_passphrase_encryption() {
     let dir = tempfile::tempdir().unwrap();
     let args = [
@@ -106,6 +309,7 @@ fn run_with_blocked_config_temp(dir: &std::path::Path, name: &str, regular_file:
 }
 
 #[test]
+#[serial_test::serial]
 fn redirected_credentials_are_encrypted_and_fail_closed() {
     let dir = tempfile::tempdir().unwrap();
     let password = "  stdin-password-marker\nsecond line  ";

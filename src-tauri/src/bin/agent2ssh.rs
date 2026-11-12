@@ -2882,7 +2882,22 @@ async fn async_main() -> Result<()> {
                         .filter(|p| !p.is_empty())
                     {
                         Some(p) => p,
-                        None => read_secret_line("New master password: ")?,
+                        None => {
+                            use std::io::IsTerminal;
+                            let interactive = std::io::stdin().is_terminal();
+                            let first = read_secret_line("New master password: ")?;
+                            if first.is_empty() {
+                                return Err(anyhow::anyhow!("master password must not be empty"));
+                            }
+                            if interactive
+                                && read_secret_line("Confirm master password: ")? != first
+                            {
+                                return Err(anyhow::anyhow!(
+                                    "master password confirmation does not match"
+                                ));
+                            }
+                            first
+                        }
                     },
                 };
                 if password.is_empty() {
@@ -5714,10 +5729,10 @@ fn read_secret_line(prompt: &str) -> anyhow::Result<String> {
         return Ok(line.trim_end_matches(['\n', '\r']).to_string());
     }
 
-    eprint!("{prompt}");
-    std::io::stderr().flush().ok();
     let raw = raw_terminal::RawTerminal::enable()
         .map_err(|error| anyhow::anyhow!("cannot disable terminal echo: {error}"))?;
+    eprint!("{prompt}");
+    std::io::stderr().flush().ok();
     let mut bytes = Vec::new();
     let mut stdin = std::io::stdin().lock();
     let mut byte = [0u8; 1];
@@ -5727,8 +5742,13 @@ fn read_secret_line(prompt: &str) -> anyhow::Result<String> {
         }
         match byte[0] {
             b'\n' | b'\r' => break,
+            0x03 => return Err(anyhow::anyhow!("master password input cancelled")),
             0x7f | 0x08 => {
-                bytes.pop();
+                while let Some(last) = bytes.pop() {
+                    if last & 0xc0 != 0x80 {
+                        break;
+                    }
+                }
             }
             value => bytes.push(value),
         }

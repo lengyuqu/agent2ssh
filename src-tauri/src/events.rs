@@ -48,6 +48,21 @@ pub fn event_bus() -> &'static broadcast::Sender<Agent2SSHEvent> {
 
 /// Publish an event to the event bus.
 pub fn publish_event(event_type: EventType, data: serde_json::Value) {
+    // PTY input can be a password and output can echo it. Do not try to
+    // classify individual chunks: prompts and input may arrive fragmented.
+    // An allowlist also prevents a future publisher adding a preview by mistake.
+    let data = match event_type {
+        EventType::SessionInput | EventType::SessionOutput => {
+            let mut safe = serde_json::Map::new();
+            for key in ["source", "session_id", "input_bytes", "output_bytes"] {
+                if let Some(value) = data.get(key) {
+                    safe.insert(key.to_owned(), value.clone());
+                }
+            }
+            serde_json::Value::Object(safe)
+        }
+        _ => data,
+    };
     let event = Agent2SSHEvent {
         id: uuid::Uuid::new_v4().to_string(),
         event_type,
@@ -66,6 +81,38 @@ pub fn subscribe_events() -> broadcast::Receiver<Agent2SSHEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn session_events_never_publish_pty_content() {
+        let mut rx = subscribe_events();
+        let session_id = uuid::Uuid::new_v4().to_string();
+        for kind in [EventType::SessionInput, EventType::SessionOutput] {
+            publish_event(
+                kind.clone(),
+                serde_json::json!({
+                    "session_id": session_id, "source": "test", "input_bytes": 12,
+                    "output_bytes": 12, "input_preview": "synthetic-secret-marker",
+                    "output_preview": "synthetic-secret-marker", "other": "synthetic-secret-marker"
+                }),
+            );
+            let event = loop {
+                let event = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if event.data["session_id"] == session_id {
+                    break event;
+                }
+            };
+            assert_eq!(event.event_type, kind);
+            assert_eq!(event.data["source"], "test");
+            assert_eq!(event.data["input_bytes"], 12);
+            assert!(!serde_json::to_string(&event)
+                .unwrap()
+                .contains("synthetic-secret-marker"));
+        }
+    }
 
     #[test]
     fn test_event_serialization() {
