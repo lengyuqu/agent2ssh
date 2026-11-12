@@ -120,6 +120,23 @@ pub fn clear_stale_daemon_pid(expected_pid: u32) -> Result<()> {
 #[cfg(target_os = "macos")]
 fn clear_stale_daemon_pid_with_snapshot(expected_pid: u32, snapshot: &str) -> Result<()> {
     let _guard = crate::store::lock_config_file(DAEMON_PID_LOCK)?;
+    let ipc_dir = config_dir_absolute()?.join(".daemon-ipc");
+    match std::fs::symlink_metadata(&ipc_dir) {
+        Ok(metadata) if !metadata.file_type().is_dir() => {
+            anyhow::bail!("invalid identity socket directory; retained for manual inspection")
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).context("cannot inspect identity socket directory"),
+    }
+    for name in ["daemon.instance.json", ".daemon-ipc/s"] {
+        let path = config_dir_absolute()?.join(name);
+        match std::fs::symlink_metadata(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).context("cannot inspect identity recovery record"),
+            Ok(_) => anyhow::bail!("identity records exist; use clear-stale with --expect-instance after inspecting them"),
+        }
+    }
     let path = daemon_pid_path()?;
     if !std::fs::symlink_metadata(&path)
         .context("cannot inspect daemon PID file; retained")?
@@ -157,6 +174,8 @@ fn clear_stale_daemon_pid_with_snapshot(expected_pid: u32, snapshot: &str) -> Re
 
 fn write_daemon_pid_if_absent(pid: u32) -> Result<()> {
     let _guard = crate::store::lock_config_file(DAEMON_PID_LOCK)?;
+    #[cfg(target_os = "macos")]
+    refuse_ipc_artifacts()?;
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -169,6 +188,8 @@ fn write_daemon_pid_if_absent(pid: u32) -> Result<()> {
 /// Older clients and daemons do not honor this advisory lock.
 pub fn remove_daemon_pid_file_if(pid: u32) -> Result<bool> {
     let _guard = crate::store::lock_config_file(DAEMON_PID_LOCK)?;
+    #[cfg(target_os = "macos")]
+    refuse_ipc_artifacts()?;
     let path = daemon_pid_path()?;
     let raw = match std::fs::read_to_string(&path) {
         Ok(raw) => raw,
@@ -180,6 +201,28 @@ pub fn remove_daemon_pid_file_if(pid: u32) -> Result<bool> {
     }
     std::fs::remove_file(path).context("failed to remove daemon PID file")?;
     Ok(true)
+}
+
+#[cfg(target_os = "macos")]
+fn refuse_ipc_artifacts() -> Result<()> {
+    let dir = config_dir_absolute()?;
+    let ipc_dir = dir.join(".daemon-ipc");
+    match std::fs::symlink_metadata(&ipc_dir) {
+        Ok(m) if !m.file_type().is_dir() => {
+            anyhow::bail!("invalid identity socket directory; retained")
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    for name in ["daemon.instance.json", ".daemon-ipc/s"] {
+        match std::fs::symlink_metadata(dir.join(name)) {
+            Ok(_) => anyhow::bail!("identity records exist; retained for explicit recovery"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(())
 }
 
 pub fn process_is_alive(pid: u32) -> bool {

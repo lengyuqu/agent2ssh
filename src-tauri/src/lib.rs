@@ -12,6 +12,7 @@ pub mod core;
 // Crate-private: the transport is the only caller.
 pub mod daemon_activity;
 pub mod daemon_control;
+pub mod daemon_identity;
 pub mod desktop_sync;
 pub mod diagnostics;
 pub mod embedded_ssh;

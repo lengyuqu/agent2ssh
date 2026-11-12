@@ -1018,6 +1018,9 @@ enum DaemonCommands {
     ClearStale {
         #[arg(long)]
         expect_pid: u32,
+        /// Instance ID from daemon.instance.json, required when IPC records exist
+        #[arg(long)]
+        expect_instance: Option<String>,
     },
     /// Rotate daemon token while the daemon is stopped
     RotateToken {
@@ -3173,9 +3176,20 @@ async fn async_main() -> Result<()> {
                     );
                 }
                 #[cfg(target_os = "macos")]
-                DaemonCommands::ClearStale { expect_pid } => {
-                    agent2ssh::daemon_control::clear_stale_daemon_pid(expect_pid)?;
-                    println!("Removed the stale PID record for {expect_pid}; no process was stopped. Older processes that ignore the lock can still race this cleanup.");
+                DaemonCommands::ClearStale {
+                    expect_pid,
+                    expect_instance,
+                } => {
+                    if let Some(instance) = expect_instance {
+                        agent2ssh::daemon_identity::macos::recover(
+                            &agent2ssh::store::config_dir()?,
+                            expect_pid,
+                            &instance,
+                        )?;
+                    } else {
+                        agent2ssh::daemon_control::clear_stale_daemon_pid(expect_pid)?;
+                    }
+                    println!("Removed the checked stale records for PID {expect_pid}; no process was stopped. Older processes that ignore the lock can still race this cleanup.");
                 }
                 DaemonCommands::RotateToken { json } => {
                     if let Some(pid) = read_daemon_pid()? {

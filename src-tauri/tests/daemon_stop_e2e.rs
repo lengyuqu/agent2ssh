@@ -33,6 +33,19 @@ mod common;
 const ADDR_ENV: &str = "AGENT2SSH_DAEMON_ADDR";
 const STARTUP_BUDGET: Duration = Duration::from_secs(30);
 
+// macOS Unix sockets have a short pathname limit; these test config dirs need
+// not embed the descriptive test name, which can exceed that limit.
+fn fixture_root() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        PathBuf::from("/tmp")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        std::env::temp_dir()
+    }
+}
+
 struct RunningDaemon {
     child: Child,
     dir: PathBuf,
@@ -44,9 +57,9 @@ impl RunningDaemon {
         Self::start_with_name(label, extra_files, false)
     }
 
-    fn start_with_name(label: &str, extra_files: &[(&str, &str)], renamed: bool) -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "a2s-daemon-stop-{label}-{}-{}",
+    fn start_with_name(_label: &str, extra_files: &[(&str, &str)], renamed: bool) -> Self {
+        let dir = fixture_root().join(format!(
+            "a2s-{}-{:x}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -659,7 +672,10 @@ fn exiting_old_daemon_preserves_replacement_pid_in_the_same_config() {
             !process_is_alive(old_pid)
         });
     }
+    #[cfg(not(target_os = "macos"))]
     assert!(!agent2ssh::daemon_control::remove_daemon_pid_file_if(old_pid).unwrap());
+    #[cfg(target_os = "macos")]
+    assert!(agent2ssh::daemon_control::remove_daemon_pid_file_if(old_pid).is_err());
     assert_eq!(
         std::fs::read_to_string(old.pid_file()).unwrap(),
         replacement_pid.to_string()
@@ -692,7 +708,7 @@ fn direct_daemon_with_another_port_cannot_replace_a_live_pid() {
     assert!(!status.success());
     assert!(
         stderr.contains(if cfg!(target_os = "macos") {
-            "automatic replacement is disabled"
+            "already exists; retained"
         } else {
             "live or cannot be verified"
         }),
@@ -1376,9 +1392,9 @@ fn the_shutdown_route_is_closed_to_anonymous_and_scoped_callers() {
 // stop. These tests hold that race still.
 
 /// A throwaway config dir with a token already written.
-fn race_config_dir(label: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "a2s-daemon-stop-{label}-{}-{}",
+fn race_config_dir(_label: &str) -> PathBuf {
+    let dir = fixture_root().join(format!(
+        "a2s-{}-{:x}",
         std::process::id(),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1865,6 +1881,9 @@ fn a_stop_that_reached_the_wrong_daemon_stops_nothing() {
     // A is the daemon the client finds through the proxy.
     let mut a = start_listener_at(&dir, &first_addr);
     let a_pid = a.id();
+    #[cfg(target_os = "macos")]
+    let a_instance: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("daemon.instance.json")).unwrap()).unwrap();
     let destination = Arc::new(std::sync::Mutex::new(first_addr.clone()));
     let front = TcpListener::bind(&proxy_addr).expect("bind the proxy");
     let connections = proxy(front, destination.clone());
@@ -1880,8 +1899,12 @@ fn a_stop_that_reached_the_wrong_daemon_stops_nothing() {
     let _ = a.kill();
     let _ = a.wait();
     #[cfg(target_os = "macos")]
-    agent2ssh::daemon_control::clear_stale_daemon_pid(a_pid)
-        .expect("explicitly clear A's exited PID record");
+    agent2ssh::daemon_identity::macos::recover(
+        &dir,
+        a_pid,
+        a_instance["instance_id"].as_str().unwrap(),
+    )
+    .expect("explicitly recover A's exited identity records");
     let mut b = start_listener_at(&dir, &first_addr);
     let b_pid = b.id();
     assert_ne!(a_pid, b_pid);
@@ -1998,10 +2021,10 @@ fn activity_counts_a_resident_session() {
 #[test]
 #[serial_test::serial]
 fn a_relative_config_dir_in_one_working_directory_names_one_daemon() {
-    let root = std::fs::canonicalize(std::env::temp_dir())
+    let root = std::fs::canonicalize(fixture_root())
         .expect("canonical temp dir")
         .join(format!(
-            "a2s-relative-{}-{}",
+            "a2sr-{}-{:x}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -2079,10 +2102,10 @@ fn a_relative_config_dir_in_one_working_directory_names_one_daemon() {
 #[test]
 #[serial_test::serial]
 fn a_relative_config_dir_from_another_working_directory_is_a_different_daemon() {
-    let root = std::fs::canonicalize(std::env::temp_dir())
+    let root = std::fs::canonicalize(fixture_root())
         .expect("canonical temp dir")
         .join(format!(
-            "a2s-relative-split-{}-{}",
+            "a2ss-{}-{:x}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)

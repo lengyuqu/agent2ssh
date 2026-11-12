@@ -20,7 +20,7 @@
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use agent2ssh::store::CONFIG_DIR_ENV;
 use agent2ssh::LOCAL_TARGET_ID;
@@ -50,15 +50,16 @@ impl TestDaemon {
     }
 
     fn start_seeded(label: &str, environments: Option<&str>) -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "a2s-daemon-local-exec-{label}-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("clock before the epoch")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).expect("create the throwaway config dir");
+        let _ = label;
+        #[cfg(target_os = "macos")]
+        let root = PathBuf::from("/tmp");
+        #[cfg(not(target_os = "macos"))]
+        let root = std::env::temp_dir();
+        let dir = tempfile::Builder::new()
+            .prefix("a2sl-")
+            .tempdir_in(root)
+            .expect("create the throwaway config dir")
+            .keep();
 
         // Written before the daemon starts: `load_or_create_daemon_token` keeps
         // an existing non-empty token, so the test knows it up front instead of
@@ -74,24 +75,38 @@ impl TestDaemon {
         }
 
         let addr = free_loopback_addr();
-        let child = Command::new(env!("CARGO_BIN_EXE_agent2ssh-daemon"))
-            .env(CONFIG_DIR_ENV, &dir)
-            .env("AGENT2SSH_DAEMON_ADDR", &addr)
-            .env("AGENT2SSH_LOG", "warn")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn agent2ssh-daemon");
-
-        let daemon = Self {
+        let child = Self::spawn(&dir, &addr);
+        let mut daemon = Self {
             child,
             dir,
             addr,
             token,
         };
-        daemon.wait_until_serving();
-        daemon
+        for attempt in 0..5 {
+            match daemon.wait_until_serving() {
+                Ok(()) => return daemon,
+                Err((true, _)) if attempt < 4 => {
+                    daemon.addr = free_loopback_addr();
+                    daemon.child = Self::spawn(&daemon.dir, &daemon.addr);
+                }
+                Err((_, detail)) => panic!("{detail}"),
+            }
+        }
+        unreachable!()
+    }
+
+    fn spawn(dir: &std::path::Path, addr: &str) -> Child {
+        let stderr =
+            std::fs::File::create(dir.join("daemon.stderr")).expect("create daemon stderr");
+        Command::new(env!("CARGO_BIN_EXE_agent2ssh-daemon"))
+            .env(CONFIG_DIR_ENV, dir)
+            .env("AGENT2SSH_DAEMON_ADDR", addr)
+            .env("AGENT2SSH_LOG", "warn")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(stderr))
+            .spawn()
+            .expect("spawn agent2ssh-daemon")
     }
 
     fn url(&self, path: &str) -> String {
@@ -107,7 +122,7 @@ impl TestDaemon {
 
     /// Block until `/health` answers, which is the daemon's public liveness
     /// route — no token needed, so this cannot accidentally pass on a 401.
-    fn wait_until_serving(&self) {
+    fn wait_until_serving(&mut self) -> Result<(), (bool, String)> {
         let probe = reqwest::blocking::Client::builder()
             .timeout(Duration::from_millis(500))
             .build()
@@ -116,12 +131,31 @@ impl TestDaemon {
         while Instant::now() < deadline {
             if let Ok(response) = probe.get(self.url("/health")).send() {
                 if response.status().is_success() {
-                    return;
+                    if let Ok(body) = response.json::<serde_json::Value>() {
+                        if body["pid"].as_u64() == Some(u64::from(self.child.id())) {
+                            return Ok(());
+                        }
+                    }
                 }
+            }
+            if let Some(status) = self.child.try_wait().expect("check daemon process") {
+                let stderr =
+                    std::fs::read_to_string(self.dir.join("daemon.stderr")).unwrap_or_default();
+                let collision = ["os error 48", "os error 98", "os error 10048"]
+                    .iter()
+                    .any(|code| stderr.contains(code))
+                    && !stderr.contains("private daemon socket");
+                return Err((
+                    collision,
+                    format!("daemon exited before health check: {status}; stderr: {stderr}"),
+                ));
             }
             std::thread::sleep(Duration::from_millis(100));
         }
-        panic!("the daemon did not answer /health within {STARTUP_BUDGET:?}");
+        Err((
+            false,
+            format!("the daemon did not answer /health within {STARTUP_BUDGET:?}"),
+        ))
     }
 
     fn post_local_exec(&self, body: serde_json::Value) -> reqwest::blocking::Response {

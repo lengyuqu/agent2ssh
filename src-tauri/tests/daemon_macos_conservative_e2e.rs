@@ -72,8 +72,8 @@ fn daemon(dir: &Path, addr: &str, compatibility: bool) -> ChildGuard {
         .env("AGENT2SSH_LOG", "info")
         .env("AGENT2SSH_LOG_FORMAT", "json")
         .stdin(Stdio::null())
-        .stdout(Stdio::from(log))
-        .stderr(Stdio::null());
+        .stdout(Stdio::from(log.try_clone().unwrap()))
+        .stderr(Stdio::from(log));
     if compatibility {
         cmd.env("AGENT2SSH_ALLOW_UNBOUND_HTTP_SHUTDOWN", "1");
     }
@@ -94,7 +94,10 @@ fn daemon(dir: &Path, addr: &str, compatibility: bool) -> ChildGuard {
         }
         std::thread::sleep(Duration::from_millis(30));
     }
-    panic!("daemon did not become ready");
+    panic!(
+        "daemon did not become ready: {}",
+        std::fs::read_to_string(dir.join("daemon-output.log")).unwrap_or_default()
+    );
 }
 fn address() -> String {
     TcpListener::bind("127.0.0.1:0")
@@ -105,6 +108,7 @@ fn address() -> String {
 }
 
 #[test]
+#[serial_test::serial]
 fn missing_pid_record_is_reported_as_unknown() {
     let dir = tempfile::tempdir().unwrap();
     let addr = address();
@@ -121,6 +125,7 @@ fn missing_pid_record_is_reported_as_unknown() {
 }
 
 #[test]
+#[serial_test::serial]
 fn default_refuses_http_cli_stop_and_restart_without_touching_process() {
     let dir = tempfile::tempdir().unwrap();
     let addr = address();
@@ -166,6 +171,7 @@ fn default_refuses_http_cli_stop_and_restart_without_touching_process() {
 }
 
 #[test]
+#[serial_test::serial]
 fn explicit_cleanup_refuses_live_mismatch_and_all_automatic_replacement() {
     let dir = tempfile::tempdir().unwrap();
     let addr = address();
@@ -213,7 +219,7 @@ fn explicit_cleanup_refuses_live_mismatch_and_all_automatic_replacement() {
         .output()
         .unwrap();
     assert!(!direct.status.success());
-    assert!(body(&direct).contains("automatic replacement is disabled"));
+    assert!(body(&direct).contains("already exists; retained"));
     assert_eq!(std::fs::read_to_string(&record).unwrap(), absent);
     let out = cli(
         dir.path(),
@@ -240,6 +246,7 @@ fn explicit_cleanup_refuses_live_mismatch_and_all_automatic_replacement() {
 }
 
 #[test]
+#[serial_test::serial]
 fn explicit_unbound_attempt_does_not_signal_or_clean_a_forged_process() {
     let dir = tempfile::tempdir().unwrap();
     let named = dir.path().join("agent2ssh-daemon");
@@ -333,6 +340,7 @@ fn explicit_unbound_attempt_does_not_signal_or_clean_a_forged_process() {
 }
 
 #[test]
+#[serial_test::serial]
 fn real_daemon_legacy_opt_in_accepts_only_when_explicitly_enabled() {
     let dir = tempfile::tempdir().unwrap();
     let addr = address();
@@ -374,6 +382,7 @@ fn real_daemon_legacy_opt_in_accepts_only_when_explicitly_enabled() {
 }
 
 #[test]
+#[serial_test::serial]
 fn external_sigterm_is_recorded_as_the_shutdown_trigger() {
     let dir = tempfile::tempdir().unwrap();
     let addr = address();
@@ -396,6 +405,7 @@ fn external_sigterm_is_recorded_as_the_shutdown_trigger() {
 }
 
 #[test]
+#[serial_test::serial]
 fn explicit_attempt_fails_when_listener_switches_from_a_to_b() {
     let a_dir = tempfile::tempdir().unwrap();
     let b_dir = tempfile::tempdir().unwrap();
@@ -482,6 +492,7 @@ fn explicit_attempt_fails_when_listener_switches_from_a_to_b() {
 }
 
 #[test]
+#[serial_test::serial]
 fn compatibility_refuses_mismatched_health_and_reports_lost_or_invalid_replies() {
     for scenario in ["mismatch", "record-change", "invalid", "lost"] {
         let dir = tempfile::tempdir().unwrap();

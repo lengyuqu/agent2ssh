@@ -19,7 +19,7 @@
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use agent2ssh::store::CONFIG_DIR_ENV;
 
@@ -44,15 +44,16 @@ impl TestDaemon {
     }
 
     fn start_with_address(label: &str, scoped_tokens: &str, addr: String) -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "a2s-daemon-resident-e2e-{label}-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("clock before the epoch")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).expect("create the throwaway config dir");
+        let _ = label;
+        #[cfg(target_os = "macos")]
+        let root = PathBuf::from("/tmp");
+        #[cfg(not(target_os = "macos"))]
+        let root = std::env::temp_dir();
+        let dir = tempfile::Builder::new()
+            .prefix("a2sr-")
+            .tempdir_in(root)
+            .expect("create the throwaway config dir")
+            .keep();
 
         // Written before the daemon starts: the loader keeps an existing
         // non-empty token, so the test knows it without racing the daemon.
@@ -154,7 +155,8 @@ impl TestDaemon {
                 // Never retry an unrelated crash or a startup timeout.
                 let collision = ["os error 48", "os error 98", "os error 10048"]
                     .iter()
-                    .any(|code| stderr.contains(code));
+                    .any(|code| stderr.contains(code))
+                    && !stderr.contains("private daemon socket");
                 return Err((
                     collision,
                     format!(
