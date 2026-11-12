@@ -1770,8 +1770,9 @@ pub fn stop_daemon_process(pid: u32) -> std::result::Result<(), DaemonStopError>
     // Bind the process object before asking for a shutdown, so the grace period
     // and any forced termination both address the object that was verified here
     // — not whatever holds the PID eight seconds later. `None` (denied, gone, or
-    // already reused) falls back to the PID-based observers below; it is not
-    // evidence that the process exited.
+    // already reused) is not evidence that the process exited: the observers
+    // below still decide whether it is running, and a forced stop refuses
+    // rather than re-opening the PID (see [`terminate_for_stop`]).
     let bound = BoundProcess::open(pid, start_time);
     // A matching executable name is not proof that this is our daemon: an
     // unrelated process can reuse the PID or spoof argv[0]. Require the health

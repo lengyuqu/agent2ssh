@@ -1595,6 +1595,11 @@ fn stand_in_named_daemon(dir: &std::path::Path) -> Child {
 /// The old daemon in this test is a stub speaking that protocol on the
 /// address this config points at, with a PID its `/health` also reports, so the
 /// identity checks pass and only the missing field check differs.
+///
+/// On Windows this is also the case that pins "the stop path really binds":
+/// the stand-in never exits, so the stop reaches the forced-termination branch,
+/// and replacing `BoundProcess::open` with `None` turns it red (the stop then
+/// refuses to signal instead of succeeding).
 #[test]
 #[serial_test::serial]
 fn a_daemon_that_ignores_the_expected_pid_stops_and_says_so() {
