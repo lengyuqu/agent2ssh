@@ -1963,8 +1963,9 @@ paths:
         Every authorization refusal after the upgrade — scope, execution gate, rate limit, approval — arrives as
         {"type":"error","error":"..."} over the socket, not as an HTTP status: the handler body only counts the
         request and then hands the socket to `on_upgrade`. The only HTTP-level failure is the handshake itself.
-        This is why no `429` and no `423` appear below. Both are reachable, but only as a frame, and a response
-        entry would hand a generated client a status branch this server never takes. `/terminal` is the
+        This is why none of `400`, `408`, `423` or `429` appears below. All four are
+        reachable, but only as a frame, and a response entry would hand a generated
+        client a status branch this server never takes. `/terminal` is the
         contrast in the same family: it runs the gate and concurrency checks before the upgrade, so the same
         two refusals *are* HTTP statuses there.
       responses:
@@ -2136,7 +2137,13 @@ paths:
         a 4xx from this operation. A paused execution gate and a rate-limit
         rejection are two of those per-target refusals — `terminal_broadcast_run`
         folds both into every eligible target's `error` and returns 200 — which is
-        why no `423` and no `429` are listed below. The per-target *verdict* is
+        why no `423` and no `429` are listed below. An approval timeout is the
+        third: `authorize_command` builds the 408 for `ApprovalTimedOut` one call
+        level down, this handler writes it into that target's `error` like any
+        other refusal, and an approval that outlives its TTL therefore shows up as
+        `authorized: false` with the timeout message rather than as a 408 from
+        this operation — which is why no `408` is listed below either. The
+        per-target *verdict* is
         decided in `terminal_broadcast_preview_results`, the same function the
         `/preview` route calls — which is why this route has no gate check of its
         own and, unlike `/terminal`, answers no 500 for a gate file it cannot

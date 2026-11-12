@@ -3826,3 +3826,49 @@ L2-154（`/exec-multi` 全 0 语义）、L2-155（preview 缺 admin 门）、L2-
 2. **「`/sftp/rm-rf` 的 `responses` 没有 408、description 里的 below 是死指针」**——408 存在（`200/400/401/403/408/415/422/423/429`），"below" 指的就是它。
 
 **回帖**：`2120705041878114304`（`## 本轮收尾`）。`#20` **保持 open**：剩余 L2-27 / L2-172 / L2-174（已收口）/ L2-175 / L2-180 与 `#22` 的身份协议前置项全在决策侧，文档一致性这条线本轮补到「第三条 500 不来自文件」为止。
+
+## 2026-11-12 · 手工/单发消费 · #20 第九次进入 · 「按码豁免」的反向约束没读那个码，以及 broadcast 的 408 也在体内被吞
+
+- **前置**：无锁（主动建立 pid 10888 并写 `owner`）；三个其它 worktree `status --porcelain` 全 0 行；`ls-remote cnb/main` 两值同为 `19e85c2`；`src`/`src-tauri/src`/`docs` 三十分钟零写入 → 不让位。`open` 十二条（#20–#29 + #31/#32），**无 `[opt-round]`** → 模式 B，第二段为空。
+- **选靶 #20**：最新是 CodeBuddy 复核 `2120706748276170752`（2026-11-12T02:34:24Z），比我 02:27:37Z 的收尾帖**晚 6 分钟**——上一轮收尾时它还没到。判「在等复核」只看最新一条的 id 与时间戳，沿用上一轮结论会把它漏掉（这是第五次靠回看时间戳纠正）。#21 最新是本流程 01:19 的收尾帖（等复核）、#23 编号更大。
+
+### 判定（12 条 → 成立 9 / 部分成立 1 / 不成立 2）
+
+| # | 指摘 | 判定 | 证据 |
+|---|---|---|---|
+| 1 | `unbacked` 不读 `exempt_codes`，硬编码 `["423","429"]`，所以超集与空集都不报 | **成立** | 改前解构是 `let (method, path, _, marker) = *entry;`，第三段直接丢弃；`let mut problems: Vec<String> = ["423", "429"]`。`&[]` 时豁免等于不存在，超集时 `undocumented_via_helper` 全放过 |
+| 2 | `/terminal/broadcast` 的 **408 也是 in-band**，`exempt_codes` 没列 | **成立** | `terminal_broadcast_run:4505-4530` 把 `authorize_command` 的 `Err` 写进 `results[index].error`；`authorize_command` 无条件传 `request_and_wait_for_approval` 闭包，`authorize_command_inner:809-812` 把 `ApprovalTimedOut` 映射成 `REQUEST_TIMEOUT`。python 复核 `responses` = `200/400/401/403/415/422`，确无 408 |
+| 3 | 同上，「另有一条 408 作为状态码返回，见 `validate_terminal_broadcast_request` 的 400 同一位置」 | **不成立** | 该 validator（`:4287-4320`）只有 `ensure_command_length` + 五个 `BAD_REQUEST`，**没有任何 408**。它把「同一个 validator 位置」当成「同一个码」 |
+| 4 | 反向（有没有路由返回了却被当 in-band）没有 | **成立（确认）** | `/exec/stream` 的 400/408/423/429 全走 `Message::Text({"type":"error"})` 后 `return`；两条 broadcast 的折叠路径见第 2 条 |
+| 5 | 两条 broadcast 的 tags 来源不一致（`preview_results` 用 `endpoint.tags`，run 的 rate/authorize 用 `host_tags()`） | **成立** | `:4376-4381` 用 `&endpoint.tags`（注册快照）；`:4483-4486` 与 `:4506` 用 `host_tags(&host)`（实时 `hosts.json`）→ **L2-182** |
+| 6 | `request_and_wait_for_approval` 只有那两处 `Err`，上一轮措辞准确 | **成立（确认）** | `:689` 与 `:701`，本轮无改动 |
+| 7 | `Internal` 在 CLI / 桌面 / MCP 上被映射成非 500 的形态 | **成立（记录）** | `bin/agent2ssh.rs:1621` → `anyhow!`；`tauri_commands.rs:458` → 字符串；`bin/agent2ssh-mcp.rs:78-83` → `McpError::internal`（`-32000`）。跨面语义，不入本轮改动 |
+| 8 | `proxy_exec` 的 localhost 分支跳过 `get_daemon_with_scope`，三条 response 描述没写各自属于哪个分支 | **成立** | `:3970-3991` 的 localhost 分支 `return exec_ssh_core(req)`，`get_daemon_with_scope` 在其后（`:3994`）；404 与 500 只在远端分支，401 同理。`api.yaml:4473` 确有 "Two branches, one order"，但三条 response 各自没写归属 |
+| 9 | 没有断言绑住「handler 里每个 `err(StatusCode::X)` 的 X 都在 `responses` 里」 | **成立** | `HANDLER_STATUS` 是常量表 + `body.contains("StatusCode::X")`，不是从 handler 抓取；今天四条恰好都对 |
+| 10 | `exec_stream` 的 `Message::Close` 顺序 | **成立（记录，不新开）** | 已有 L2-87，`api.yaml:1959-1962` 已写明 |
+| 11 | 模块文档「106 `(path, method)` pairs」错 | **部分成立（数对了一半）** | 实测 92 routes / **107** pairs（它只说「不是 106」，没给正确值）；镜像 18 / 20；非镜像 74 calls / **85** pairs / **74** paths——文档写的是 84 / 73，这两处它没点。文档三处错，它指出两处（106 出现两次） |
+| 12 | `NON_API_ROUTES` 注释点名的 `the_console_route_mounts_one_named_handler` grep 不到 | **不成立** | 该测试就在 `daemon_integration.rs:2918`，`git grep` 一次命中 |
+
+### 改了什么（全 L1）
+
+- `src-tauri/tests/daemon_integration.rs`：①`HELPER_STATUS` 14 → 15，加 `("authorize_command(", "408")`——这是 408 唯一的守卫来源，也只有两条路由会因此浮出来；②`INBAND_REJECTIONS` 的码集合补 408（`/exec/stream` = `400/408/423/429`，`/terminal/broadcast` = `408/423/429`，preview 仍是 `423/429`，它确实不调 `authorize_command`）；③`unbacked` 改成遍历 `exempt_codes` 而不是硬编码两个字面量，并补两条反向约束——**空集**要点名（豁免等于不存在），**`HELPER_STATUS` 不认识的码**也要点名（否则豁免的是一条永远不会触发的检查）；④模块文档三处计数改正：107 pairs、85 pairs、74 paths，并写清 106 是「按 `async fn` 名扫描」的视角（`/` 是内联闭包）。
+- `docs/api.yaml`：`/terminal/broadcast` 的 description 补第三类 per-target 拒绝——审批超时由 `authorize_command` 造 408、被这个 handler 写进该 target 的 `error`，所以 `authorized: false` + 超时消息，而不是 408；`/exec/stream` 那句「no `429` and no `423`」改成四个码（`400`/`408`/`423`/`429`），与豁免集合对齐。
+- `docs/reports/OPT-LOOP-L2-PENDING.md`：新增 **L2-182**（同一次 broadcast 里 scope 用注册快照 tags、限流与授权用实时 tags）。**最大编号 L2-182**。
+
+### 反向验证（四次，各自红在不同断言上）
+
+1. 把 `/terminal/broadcast` 的豁免集合加 `"422"`（它文档化了 422）→ 红并同时点名两条：`documents 422 but answers it in-band` + `no HELPER_STATUS entry answers that code`。**旧版硬编码 423/429 时这两条都不会出现**，这就是本轮修的东西。
+2. `/exec/stream` 的集合改成 `&[]` → 红（83 passed / 1 failed）。
+3. 删掉 `("authorize_command(", "408")` 表项 → 红并**同时点名两条路由**的 408，证明「豁免的码必须有表项支撑」这条新约束是活的。
+4. 改 `api.yaml` 时顺手撞到既有 needle：把 "only as a frame" 折行拆断 → 红并点名 `get /exec/stream no longer says \`only as a frame\``，说明第四段 marker 仍在守「豁免不能退化成沉默」。
+
+### 验证
+
+`npm run build` **6.35 s**；`cargo fmt --check` 绿；`--no-default-features --lib` **863 passed / 1 failed / 1 ignored**（红项仍是那条故意红的 `an_ipv6_literal_at_port_22_is_removed`）；`--no-default-features --features daemon --test daemon_integration` **84 passed / 0 failed**（与上轮同数——本轮只加强既有断言，未加测试函数）。
+
+### 新增「不成立」，不要重复提
+
+1. **「`validate_terminal_broadcast_request` 也会返回 408」**——它只有 `ensure_command_length`（400）与五个 `BAD_REQUEST`，没有 `REQUEST_TIMEOUT`。408 只从 `authorize_command_inner:809` 出来，经 `terminal_broadcast_run:4505-4530` 折进 target 的 `error`。
+2. **「`the_console_route_mounts_one_named_handler` 不存在」**——`daemon_integration.rs:2918` 就是它。
+
+**回帖**：`PLACEHOLDER_REPLY_ID`（`## 本轮收尾`）。`#20` **保持 open**：剩余 L2-27 / L2-172 / L2-175 / L2-180 / L2-182 与 `#22` 的身份协议前置项全在决策侧。

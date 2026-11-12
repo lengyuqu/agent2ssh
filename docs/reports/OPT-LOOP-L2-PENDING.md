@@ -2426,3 +2426,16 @@ allowed_commands = ["uptime", "df *", "session_open"]
 **建议改法**：(a) 什么都不改，只把语义写进文档——**本轮已做**（`docs/guides/configuration-guide.md` 的 scope 注意事项里写清「绝对白名单」与十个固定操作字符串，并点名「能开会话关不掉」这个坑；第六次进入补齐 `disconnect` 与 `connect`/`disconnect` 那一对）；(b) 给释放类操作开豁免：`session_close` / `resident-session close` / `disconnect` 只受 host/tag 约束、不受 `allowed_commands` 约束，改动面是 `check_daemon_scope` 加一个释放集判断，但会让「关会话也要授权」的契约出现例外，审计口径要同步；(c) 加载时自检：`daemon_tokens.toml` 读入后，若某 token 的 `allowed_commands` 含 `session_open` 而不含 `session_close`（或含 `resident-session open` 而不含 `resident-session close`，或含 `connect` 而不含 `disconnect`），启动时 `warn!` 一次并在 `/health` 里报一条——零行为变化，只让配置错误可见；(d) 在 `POST /sessions` 的 429 描述里补一句「若该 token 也在 `allowed_commands` 下，确认白名单含 `session_close`」，把排查方向直接给出来。
 **回滚**：(b) 删掉释放集判断即回到今天；(c) 删掉自检；(d) 删掉那句话。三者都不动执行路径。
 **倾向**：(c)+(d)。成本最低，且 (c) 让配置错误在部署时就可见，而不是等运维从 429 里猜——症状是 429 而不是 403，这一点本身就很难归因。
+
+### L2-182（新，单发 #20 第九次进入）：同一次 `POST /terminal/broadcast` 里，scope 判定用注册快照 tags、限流与授权用实时 tags
+
+**位置**：`src-tauri/src/bin/agent2ssh-daemon.rs:4376-4381`（`terminal_broadcast_preview_results` 的 `check_daemon_scope(&auth.scope, &endpoint.host, &endpoint.tags, …)`，`endpoint` 是 PTY 注册时存进 registry 的快照）对照 `:4483-4486`（同一 handler 的 `rate_targets` 用 `host_tags(&target.host)`，实时读 `hosts.json`）与 `:4506`（逐 target 的 `authorize_command` 里又用 `host_tags(&host)` 取一次）。
+
+**判断**：成立（本轮读码复核）。两条 broadcast 路由都用 `preview_results` 决定「这个 target 的 scope 过不过」，但那一段用的 tags 是终端连上时的快照；而同一个请求后面的限流配额与 `authorize_command` 的风险/审批策略读的是当前 `hosts.json` 的 tags。
+
+**后果**：终端注册之后 host 的 tags 被改过（加 `prod`、去掉 `staging`），同一个 target 会在同一个请求里得到两套判定：scope 仍按旧 tags 放行/拒绝，限流与审批策略按新 tags 计配额与命中的 policy。症状是「`/preview` 说 authorized，`/broadcast` 却 429 或被审批策略拦下」，且两边都不报错——只是答案不同。
+
+**为什么它是 L2**：三种改法都改行为，且要连「终端快照到底代表什么」这条语义一起拍。
+
+**建议改法**：(a) 两处都改实时 `host_tags()`——一致性最高，代价是 `preview` 的答案会随 `hosts.json` 变化，与「终端连上时冻结目标集」的既有说法需要对齐；(b) 两处都用注册快照——配额与授权跟着终端生命周期走，代价是 tag 变更对已注册终端不生效，运维改了 `hosts.json` 以为生效了却没有；(c) 不统一，只在 `/terminal/broadcast` 的 description 里写清「per-target scope 判定用连接时的 tags，限流与审批用当前 tags」。**倾向**：(a) + 在 description 里把「以当前 `hosts.json` 为准」写明，因为 (b) 会造成「改了配置看起来生效了其实没有」这类更难查的偏差。
+**回滚**：(a) 改回 `&endpoint.tags` 即回到今天；(c) 删掉那句话。
