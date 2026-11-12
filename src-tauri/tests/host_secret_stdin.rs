@@ -658,12 +658,30 @@ mod windows_shells {
     /// measured, because the JSON output redacts the value by design. Callers
     /// hold `serial_test`'s lock; this only mutates the process environment.
     fn stored_password(dir: &Path, host: &str) -> String {
+        stored_secret(
+            dir,
+            &agent2ssh::secrets::host_account(host),
+            "password",
+            host,
+        )
+    }
+
+    fn stored_passphrase(dir: &Path, host: &str) -> String {
+        stored_secret(
+            dir,
+            &agent2ssh::secrets::host_passphrase_account(host),
+            "passphrase",
+            host,
+        )
+    }
+
+    fn stored_secret(dir: &Path, account: &str, kind: &str, host: &str) -> String {
         std::env::set_var("AGENT2SSH_CONFIG_DIR", dir);
         std::env::set_var("AGENT2SSH_SECRETS_BACKEND", "encrypted");
         std::env::set_var("AGENT2SSH_MASTER_PASSWORD", "test-master-only");
         agent2ssh::secrets::unlock_or_init("test-master-only").unwrap();
-        let value = agent2ssh::secrets::get_secret(&agent2ssh::secrets::host_account(host))
-            .unwrap_or_else(|| panic!("no stored password for {host}"));
+        let value = agent2ssh::secrets::get_secret(account)
+            .unwrap_or_else(|| panic!("no stored {kind} for {host}"));
         agent2ssh::secrets::lock();
         value
     }
@@ -795,6 +813,55 @@ mod windows_shells {
             String::from_utf8_lossy(&output.stderr)
         );
         assert_eq!(stored_password(dir.path(), "ps51"), marker51);
+    }
+
+    /// `--passphrase-stdin` reads through the same function as
+    /// `--password-stdin`, so the shell contract has to be measured for it too:
+    /// "same code path" is an inference until a shell's bytes reach a stored
+    /// key passphrase intact. Both Windows BOM sources are covered — the
+    /// `cmd` pipe's CRLF and the PowerShell 5.1 native-pipe BOM.
+    #[test]
+    #[serial_test::serial]
+    fn passphrase_stdin_takes_the_same_redirected_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = "windows-cmd-passphrase-marker";
+        let output = cmd(
+            dir.path(),
+            &format!(
+                "echo {marker}| agent2ssh.exe host add cmd-pass --host 127.0.0.1 --passphrase-stdin --json"
+            ),
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        no_marker(&output, marker);
+        assert_eq!(stored_passphrase(dir.path(), "cmd-pass"), marker);
+        let hosts = std::fs::read_to_string(dir.path().join("hosts.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&hosts).unwrap();
+        let saved = &parsed["hosts"][0];
+        assert_secret_ref(&saved["passphrase"]);
+        assert!(
+            saved["password"].is_null(),
+            "a passphrase must not land in the password field: {saved}"
+        );
+        assert!(!hosts.contains(marker));
+
+        let marker51 = "windows-ps51-passphrase-marker";
+        let output = powershell(
+            &powershell51(),
+            dir.path(),
+            &format!(
+                "\"{marker51}\" | & agent2ssh.exe host add ps51-pass --host 127.0.0.1 --passphrase-stdin --json"
+            ),
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(stored_passphrase(dir.path(), "ps51-pass"), marker51);
     }
 
     #[test]
