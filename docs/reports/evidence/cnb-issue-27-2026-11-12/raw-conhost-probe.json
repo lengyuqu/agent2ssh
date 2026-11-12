@@ -1,0 +1,47 @@
+[
+  {
+    "case": "conhost-plain",
+    "backend": "conhost",
+    "config_dir": "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\a2s27-conhost-conhost-plain-1c8f3a",
+    "prompt1": true,
+    "prompt2": true,
+    "completed": true,
+    "screen_contains_password": false,
+    "screen_contains_confirm_value": false,
+    "screen": "\r\n\r\n\r\n\r\n\r\n\r\n \r\n \r\nMaster password set",
+    "unlock_with_expected": true
+  },
+  {
+    "case": "conhost-backspace",
+    "backend": "conhost",
+    "config_dir": "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\a2s27-conhost-conhost-backspace-c5be04",
+    "prompt1": true,
+    "prompt2": true,
+    "completed": true,
+    "screen_contains_password": false,
+    "screen_contains_confirm_value": false,
+    "screen": "\r\n\r\n\r\n\r\n\r\n\r\n \r\n \r\nMaster password set",
+    "unlock_with_expected": true
+  },
+  {
+    "case": "conhost-cjk",
+    "backend": "conhost",
+    "config_dir": "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\a2s27-conhost-conhost-cjk-02d73e",
+    "prompt1": true,
+    "prompt2": true,
+    "completed": true,
+    "screen_contains_password": false,
+    "screen_contains_confirm_value": false,
+    "screen": "\r\n\r\n\r\n\r\n\r\n\r\n \r\n \r\nMaster password set",
+    "unlock_with_expected": true
+  },
+  {
+    "case": "conhost-ctrl-c",
+    "backend": "conhost",
+    "config_dir": "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\a2s27-conhost-conhost-ctrl-c-b37a1a",
+    "prompt1": true,
+    "cancelled": true,
+    "created_store": false,
+    "screen": "\r\n\r\n\r\n\r\n\r\n\r\n Error: master password input cancelled"
+  }
+]

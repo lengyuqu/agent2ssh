@@ -272,6 +272,11 @@ fn clear_readonly_attribute(target: &Path) {
     if let Ok(metadata) = fs::metadata(target) {
         if metadata.permissions().readonly() {
             let mut permissions = metadata.permissions();
+            // Windows-only: `set_readonly(false)` clears
+            // FILE_ATTRIBUTE_READONLY, which is the only way `rename` may
+            // replace the file. The lint fires because the same call on Unix
+            // would widen `mode` to 0666, and this branch never compiles there.
+            #[allow(clippy::permissions_set_readonly_false)]
             permissions.set_readonly(false);
             let _ = fs::set_permissions(target, permissions);
         }

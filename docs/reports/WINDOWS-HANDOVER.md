@@ -161,3 +161,12 @@
 - `keys algorithm --name --json` 回答 `ed25519`，`reads_openssh_private_keys` 恒为 `true`，与 §3.2 的预期一致。
 - 带空格与反斜杠的证书路径（`…\work dir with spaces\cert key` + `cert key-cert.pub`）下证书被正确识别并认证成功。
 - `cli_contract` 40 项在 6.64 s 内跑完，起子进程的测试未复现 CI 上的无输出挂起。CI 已为每个 job 加 `timeout-minutes`，再发生会变成带日志的失败。
+
+## 8. 2026-11-12 补充：凭据输入与 rename 语义的真机验证
+
+#6 拆分单 #27 的三项「只有源码事实」已落地为实测：ConPTY 与经典 conhost 下
+`secrets set-password` 的 `SetConsoleMode` 无回显、退格与 Ctrl+C；`--password-stdin` 在
+`cmd.exe` 与两个 PowerShell 下的管道/重定向字节；`replace_file_atomic` 的只读属性、被占用、
+残留临时文件三种状态。本轮还发现并修复了 Windows PowerShell 5.1 的 native 管道在值前写
+UTF-8 BOM、导致存下的口令带不可见 `U+FEFF` 而永远认证失败的问题。
+详见 [evidence/cnb-issue-27-2026-11-12/FINDINGS.md](evidence/cnb-issue-27-2026-11-12/FINDINGS.md)。

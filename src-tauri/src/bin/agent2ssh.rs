@@ -5193,6 +5193,15 @@ fn read_redirected_host_secret() -> Result<Zeroizing<String>> {
     } else if bytes.ends_with(b"\n") {
         bytes.truncate(size - 1);
     }
+    // Windows PowerShell 5.1 writes a UTF-8 BOM ahead of the payload when the
+    // producer is a native command (`"secret" | agent2ssh ...`). Measured on
+    // 10.0.26300: it happens even with `$OutputEncoding` set to a BOM-less
+    // encoder, so the pipe's first three bytes are not part of the secret and
+    // cannot be left in — an invisible U+FEFF prefix makes authentication fail
+    // while the password looks identical on screen.
+    if bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
+        bytes.drain(..3);
+    }
     if bytes.is_empty() {
         anyhow::bail!("secret input is empty");
     }
@@ -5726,6 +5735,10 @@ fn read_secret_line(prompt: &str) -> anyhow::Result<String> {
     if !std::io::stdin().is_terminal() {
         let mut line = String::new();
         std::io::stdin().read_line(&mut line)?;
+        // Same BOM story as `read_redirected_host_secret`: a 5.1 native pipe
+        // precedes the payload with U+FEFF, which is an encoding marker rather
+        // than a character of the password.
+        let line = line.strip_prefix('\u{feff}').unwrap_or(&line);
         return Ok(line.trim_end_matches(['\n', '\r']).to_string());
     }
 

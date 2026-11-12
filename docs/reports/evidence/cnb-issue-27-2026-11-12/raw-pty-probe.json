@@ -1,0 +1,42 @@
+[
+  {
+    "case": "conpty-plain",
+    "backend": "ConPTY",
+    "reached_prompt": true,
+    "password_in_transcript": false,
+    "unlock_with_expected": true,
+    "exit_status": 0,
+    "transcript": "\u001b[1t\u001b[c\u001b[?1004h\u001b[?9001hNew master password: \r\nConfirm master password: \r\nMaster password set.\r\n",
+    "config_dir": "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\a2s27-pty-conpty-plain-1561c2"
+  },
+  {
+    "case": "conpty-backspace",
+    "backend": "ConPTY",
+    "reached_prompt": true,
+    "password_in_transcript": false,
+    "unlock_with_expected": true,
+    "exit_status": 0,
+    "transcript": "\u001b[1t\u001b[c\u001b[?1004h\u001b[?9001hNew master password: \r\nConfirm master password: \r\n",
+    "config_dir": "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\a2s27-pty-conpty-backspace-64d101"
+  },
+  {
+    "case": "conpty-cjk",
+    "backend": "ConPTY",
+    "reached_prompt": true,
+    "password_in_transcript": false,
+    "unlock_with_expected": true,
+    "exit_status": 0,
+    "transcript": "\u001b[1t\u001b[c\u001b[?1004h\u001b[?9001hNew master password: \r\nConfirm master password: \r\nMaster password set.\r\n",
+    "config_dir": "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\a2s27-pty-conpty-cjk-e1c939"
+  },
+  {
+    "case": "conpty-ctrl-c",
+    "backend": "ConPTY",
+    "reached_prompt": true,
+    "password_in_transcript": null,
+    "unlock_with_expected": null,
+    "exit_status": 1,
+    "transcript": "\u001b[1t\u001b[c\u001b[?1004h\u001b[?9001hNew master password: Error: master password input cancelled\r\n",
+    "config_dir": "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\a2s27-pty-conpty-ctrl-c-3d46e4"
+  }
+]

@@ -1,0 +1,3 @@
+# Evidence archives are raw tool output; line-ending normalisation would
+# rewrite bytes a reader may be checking against the hex values recorded there.
+docs/reports/evidence/** -text
