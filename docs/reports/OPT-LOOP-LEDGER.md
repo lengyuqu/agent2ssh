@@ -3871,4 +3871,4 @@ L2-154（`/exec-multi` 全 0 语义）、L2-155（preview 缺 admin 门）、L2-
 1. **「`validate_terminal_broadcast_request` 也会返回 408」**——它只有 `ensure_command_length`（400）与五个 `BAD_REQUEST`，没有 `REQUEST_TIMEOUT`。408 只从 `authorize_command_inner:809` 出来，经 `terminal_broadcast_run:4505-4530` 折进 target 的 `error`。
 2. **「`the_console_route_mounts_one_named_handler` 不存在」**——`daemon_integration.rs:2918` 就是它。
 
-**回帖**：`PLACEHOLDER_REPLY_ID`（`## 本轮收尾`）。`#20` **保持 open**：剩余 L2-27 / L2-172 / L2-175 / L2-180 / L2-182 与 `#22` 的身份协议前置项全在决策侧。
+**回帖**：`2120722536529829888`（`## 本轮收尾`）。`#20` **保持 open**：剩余 L2-27 / L2-172 / L2-175 / L2-180 / L2-182 与 `#22` 的身份协议前置项全在决策侧。
