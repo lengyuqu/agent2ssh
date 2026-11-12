@@ -1745,6 +1745,8 @@ issue #20 正文要求在两种策略里选一个。两个落点：
 
 **要拍的口径**：桌面是否接受一次 IPC 形状变更（`daemon_status` 返回 `DaemonObservation`，见 L2-141），以及 `Stop` 是否改成「永远可点、点下去走拒绝路径并把理由显示出来」。后者是按 #21 正文「错误状态可恢复、可重试」的直接落地，但会改变「按钮灰着」这个既有观感。
 
+**2026-11-13 更新（#21 前端接入，前半已解决）**：`daemon_status` 已有调用方——设置面板在菜单打开、点击「Refresh daemon health」、执行 start/stop/restart/unverified-shutdown 后各调用一次，在「Daemon health」区块下方显示 verdict 与非 healthy 时的 next_step；`daemon.pid` 损坏/指向别处从此在面板上可见。IPC 形状走的是 `DaemonStatusReport`（`diagnosis` 字段，serde skip-none），L2-141 的 `DaemonObservation` 提法已被它取代。**后半（Stop 按钮判据）仍未拍板**：指示灯与按钮可用性依旧只看 `/health`，诊断不驱动按钮——「最需要停止时按钮是灰的」这个观感原样保留，只是旁边多了一行说明原因的诊断。L2-158 的两档文案也仍未改。
+
 ### L2-143（新）：`.daemon-pid.lock` 的阻塞式等待会污染启动与停止两条路径
 
 `store.rs` 的 `lock_config_file` 用 `file.lock_exclusive()`（`store.rs:71-77`），**阻塞且无超时**。拿这把锁的有 `daemon_control.rs:77`（daemon 启动写 PID）、`:99`（条件删除）、`daemon_control.rs:537`（启动器失败清理）、`bin/agent2ssh.rs:3080`/`:3107`（stop / restart 收尾）、`tauri_commands.rs:1856`/`:1892`/`:1920`（桌面同一动作）、`bin/agent2ssh-daemon.rs:6000`（daemon 收尾删 PID）。
@@ -2100,6 +2102,8 @@ forward_start（:3204-3244）与 forward_remove（:3077-3113）、forward_stop�
 **为什么它是 L2**：它是 L2-142 的配套决定，不是独立缺陷。接线的人必须同时回答「这条 debug 留不留」。
 
 **建议改法**：接线时三选一——(a) 删掉这条 debug；(b) 只在 `state` 变化时写；(c) 原样保留（接受每次轮询一条）。代价分别 0 / 一个 last-state 变量 / 0。
+
+**2026-11-13 更新（接线已发生，选了变体 c 的非轮询版）**：前端已接线（见 L2-142 更新），但**不做轮询**——只在菜单打开、手动刷新、daemon 动作后调用，正常一次会话多出个位数的 debug 条目，「刷满 `app.log`」的放大器不存在。三选一的决策仍未正式拍板，若将来加轮询必须先回来处理这条。
 
 ### L2-158（新，单发 #21 第二次进入）：`DaemonHealth | null` 只有两档，「没连上」与「答了但不对」被压成同一句文案
 

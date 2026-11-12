@@ -24,7 +24,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 import { api, getDaemonUrl, reportError } from "../api";
 import { useI18n } from "../i18n";
-import type { DaemonHealth, DiagnosticLogEntry, ExecutionGateStatus } from "../types";
+import type { DaemonDiagnosis, DaemonHealth, DiagnosticLogEntry, ExecutionGateStatus } from "../types";
 import LanguageSwitcher from "./LanguageSwitcher";
 import HighlightSettings from "./HighlightSettings";
 import RedactionSettings from "./RedactionSettings";
@@ -84,6 +84,12 @@ export default function SettingsMenu({
     null
   );
   const [daemonActionMessage, setDaemonActionMessage] = useState<string | null>(null);
+  // #21: read-only verdict from `daemon_status` (PID record + process table +
+  // endpoint). The /health probe above still decides the indicator and the
+  // button states; this surfaces record damage /health cannot see (L2-142).
+  // `null` means "not loaded yet or the command itself failed" — rendered as
+  // nothing rather than as a claim.
+  const [daemonDiagnosis, setDaemonDiagnosis] = useState<DaemonDiagnosis | null>(null);
   const [canRequestUnboundStop, setCanRequestUnboundStop] = useState(false);
   const [confirmingUnboundStop, setConfirmingUnboundStop] = useState(false);
   const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "failed">("idle");
@@ -118,6 +124,29 @@ export default function SettingsMenu({
   const gateUnavailable = gateStatus === null;
   const daemonHealthy = daemonHealth?.ok === true;
   const daemonStatusText = daemonHealthy ? t("Daemon healthy") : t("Daemon unavailable");
+  // #21: localized label for the diagnosis verdict. The backend's `next_step`
+  // stays in English on purpose — it names CLI commands verbatim.
+  const daemonVerdictText = daemonDiagnosis
+    ? daemonDiagnosis.verdict === "healthy"
+      ? t("verified healthy")
+      : daemonDiagnosis.verdict === "running-unhealthy"
+        ? t("running but not answering")
+        : daemonDiagnosis.verdict === "unverified"
+          ? t("identity unverified")
+          : daemonDiagnosis.verdict === "stale"
+            ? t("stale PID record")
+            : daemonDiagnosis.verdict === "damaged"
+              ? t("damaged PID record")
+              : t("not running")
+    : null;
+  const daemonVerdictTone =
+    daemonDiagnosis?.verdict === "healthy"
+      ? "text-success"
+      : daemonDiagnosis?.verdict === "stale" ||
+          daemonDiagnosis?.verdict === "damaged" ||
+          daemonDiagnosis?.verdict === "running-unhealthy"
+        ? "text-destructive"
+        : "text-muted-foreground";
   const daemonUrl = getDaemonUrl();
   const consoleUrl = `${daemonUrl}/console`;
   const checkedAtText = gateCheckedAt
@@ -176,6 +205,9 @@ export default function SettingsMenu({
       .getAlgoPrefs()
       .then((s) => setAlgoCustom(s.custom))
       .catch(() => setAlgoCustom(null));
+    // #21: read-only diagnosis, loaded once per menu open — not a poll, because
+    // every `daemon_status` call appends one debug entry to app.log (L2-157).
+    void refreshDaemonDiagnosis();
   }, [open]);
 
   // K1: set the master password (first time) or change it. Setting it for the
@@ -226,10 +258,24 @@ export default function SettingsMenu({
     }
   }
 
+  // #21: pull the read-only verdict. A failed command clears the line (no
+  // in-panel error string) and leaves a breadcrumb in the diagnostic log via
+  // reportError; the section then asserts nothing.
+  async function refreshDaemonDiagnosis() {
+    try {
+      const result = await api.daemonStatus();
+      setDaemonDiagnosis(result.diagnosis ?? null);
+    } catch (err) {
+      setDaemonDiagnosis(null);
+      reportError("settings-menu", "daemon status failed", err);
+    }
+  }
+
   async function handleDaemonHealthRefresh() {
     setHealthBusy(true);
     try {
       await onDaemonHealthRefresh();
+      await refreshDaemonDiagnosis();
     } finally {
       setHealthBusy(false);
     }
@@ -250,6 +296,7 @@ export default function SettingsMenu({
         await new Promise((resolve) => window.setTimeout(resolve, 700));
       }
       await onDaemonHealthRefresh();
+      await refreshDaemonDiagnosis();
       await onGateRefresh();
     } catch (err) {
       setDaemonActionMessage(String(err));
@@ -279,6 +326,7 @@ export default function SettingsMenu({
       const message = await api.daemonStopUnboundGraceful();
       setDaemonActionMessage(message);
       await onDaemonHealthRefresh();
+      await refreshDaemonDiagnosis();
     } catch (err) {
       setDaemonActionMessage(String(err));
     } finally {
@@ -541,6 +589,23 @@ export default function SettingsMenu({
               {daemonHealth?.pid != null && <span>{t("PID: {pid}", { pid: daemonHealth.pid })}</span>}
               <span>{t("Last checked: {time}", { time: daemonCheckedAtText })}</span>
             </div>
+            {daemonDiagnosis && daemonVerdictText && (
+              <div
+                className="grid gap-1 text-xs"
+                title={t(
+                  "Read-only diagnosis of the PID record, process table and endpoint; it never signals a process."
+                )}
+              >
+                <span className={`font-bold ${daemonVerdictTone}`}>
+                  {t("Diagnosis: {verdict}", { verdict: daemonVerdictText })}
+                </span>
+                {daemonDiagnosis.verdict !== "healthy" && daemonDiagnosis.next_step && (
+                  <span className="leading-snug text-muted-foreground">
+                    {daemonDiagnosis.next_step}
+                  </span>
+                )}
+              </div>
+            )}
             <Button
               variant="outline"
               block
