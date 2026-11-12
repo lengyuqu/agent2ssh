@@ -44,7 +44,7 @@
 
 **每阶段验收门**：`cargo fmt --check` + `cargo test --no-default-features --lib` +
 `--test store_transaction` + 新增 `--test store_phase2_*`；跨平台结论仍按平台分别标注，
-Windows 实机归 #27。
+Windows 实机结论以 #27（`15e2ac5`）为准，未覆盖的 SMB/其他版本/断电持久性仍需单独标注。
 
 ---
 
@@ -97,5 +97,6 @@ Windows 实机归 #27。
 ## 6. 状态
 
 **代码零改动，无新增测试，无平台原型。** 本文件是「拍板后怎么走」的预案，
-不是实施记录。#26 保持 open：P1–P6 待确认、C4–C8 未实测、Windows 实机（#27）
-与 Linux 侧边界未验证。
+不是实施记录。#26 保持 open：P1–P6 待确认、C4–C8 未实测、Linux 侧边界未验证。
+Windows 侧由 #27（`15e2ac5`）补上真机结论（rename 重试 / 只读 / 共享删除 / 残留临时文件），
+`icacls` 失败路径仍是未验证，SMB、其他 Windows 版本与断电持久性同样未验证。
