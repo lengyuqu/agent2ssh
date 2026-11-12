@@ -2235,12 +2235,18 @@ const HANDLER_STATUS: [(&str, &str); 10] = [
 /// and for a rejected approval, three call levels below the handler, so a route
 /// whose only 403 path runs through it documents nothing and fails nothing.
 /// `/local-exec` was one — deleting its `403` turned no test red, because its
-/// body holds neither `StatusCode::FORBIDDEN` nor `require_admin(`. Listing the
-/// preflight here is not the 1:1 claim the 423 entry makes: the preflight can
-/// answer 400, 403, 408, 423, 429 and 500. Only 403 is pinned through it, because
-/// it is the only one of those the handler body cannot show and no other entry
-/// already covers; 408 and 423 have their own call sites, and both 500s are
-/// stated once in `info.description`.
+/// body holds neither `StatusCode::FORBIDDEN` nor `require_admin(`.
+///
+/// The preflight is an all-or-nothing occurrence: a handler that calls
+/// `preflight_guarded_request(` names no code at all, so every code the wrapper
+/// can answer is equally invisible from its body — not just the 403. The table
+/// therefore registers 400, 403, 408, 423 and 429 for each of the three
+/// wrappers, and the same for `authorize_targets`, `finish_sftp_operation`,
+/// `check_daemon_scope` and `terminal_broadcast_preview_results`. Measured
+/// before the change: of the 29 operations documenting a 408, 20 could lose it
+/// silently, because 408 has no `preflight_*` entry — the same asymmetry the
+/// 403 paragraph describes, one code over. 500 stays out for the reason the
+/// 423 paragraph gives.
 ///
 /// `ensure_command_length` is the same shape one level down: it builds `400`
 /// inside itself, so a route whose only 400 is an over-long command documents
@@ -2278,22 +2284,43 @@ const HANDLER_STATUS: [(&str, &str); 10] = [
 /// helper nor `reject_if_rate_limited`. Both routes document 403 and 429 today,
 /// so listing the wrapper costs nothing and makes those two codes as hard to
 /// delete as any other route's.
-const HELPER_STATUS: [(&str, &str); 15] = [
+const HELPER_STATUS: [(&str, &str); 31] = [
+    // 400 — validation that lives below the handler.
     ("ensure_command_length(", "400"),
     ("validate_terminal_broadcast_request(", "400"),
+    ("finish_sftp_operation(", "400"),
+    ("authorize_targets(", "400"),
+    ("preflight_guarded_request(", "400"),
+    ("preflight_rewritable_request(", "400"),
+    ("preflight_sftp_rm_rf(", "400"),
+    // 403 — scope, admin and rejected approval.
+    ("authorize_command(", "403"),
+    ("authorize_targets(", "403"),
+    ("check_daemon_scope(", "403"),
+    ("terminal_broadcast_preview_results(", "403"),
+    ("preflight_guarded_request(", "403"),
+    ("preflight_rewritable_request(", "403"),
+    ("preflight_sftp_rm_rf(", "403"),
+    ("require_admin(", "403"),
+    ("require_recording_admin(", "403"),
+    // 408 — the approval wait.
     ("authorize_command(", "408"),
-    ("too_many_requests_status()", "429"),
+    ("authorize_targets(", "408"),
+    ("preflight_guarded_request(", "408"),
+    ("preflight_rewritable_request(", "408"),
+    ("preflight_sftp_rm_rf(", "408"),
+    // 423 — the paused execution gate.
+    ("reject_if_gate_paused(", "423"),
+    ("gate_blocks_source(", "423"),
+    ("preflight_guarded_request(", "423"),
+    ("preflight_rewritable_request(", "423"),
+    ("preflight_sftp_rm_rf(", "423"),
+    // 429 — the per-minute rate limit and the session cap.
     ("reject_if_rate_limited(", "429"),
     ("register_limited_session_for_command(", "429"),
     ("preflight_guarded_request(", "429"),
     ("preflight_rewritable_request(", "429"),
-    ("preflight_guarded_request(", "403"),
-    ("preflight_rewritable_request(", "403"),
     ("preflight_sftp_rm_rf(", "429"),
-    ("preflight_sftp_rm_rf(", "403"),
-    ("reject_if_gate_paused(", "423"),
-    ("require_admin(", "403"),
-    ("require_recording_admin(", "403"),
 ];
 
 /// Operations whose gate and rate-limit refusals never become an HTTP status.
@@ -2335,9 +2362,16 @@ const HELPER_STATUS: [(&str, &str); 15] = [
 /// up: it answers 400/408/423/429 as frames and none of them as a status.
 ///
 /// Every code in that set is also checked in the other direction: the route's
-/// `responses` must not list it, and `HELPER_STATUS` must know the code at all —
-/// an exemption for a code no helper entry answers would silence a check that
-/// could never have fired. An earlier version hard-coded 423/429 in the reverse
+/// `responses` must not list it, `HELPER_STATUS` must know the code at all, and
+/// the handler — or a delegate named in the fifth field — must call a helper
+/// that answers it. The first two were the original pair; the third is what
+/// stops an exemption from citing a body that is not on this route's path, which
+/// is how `423` and `429` once sat in the preview row with neither code
+/// reachable from it. `429` was the plain error: the preview never rate-limits
+/// at all, so the entry claimed a form of refusal the route does not have, and
+/// the row now lists only the gate's 423, folded by the shared preview pass.
+///
+/// An earlier version hard-coded 423/429 in the reverse
 /// check while this field held the set, so a superset — or an empty set — was
 /// exempt from the helper scan and unconstrained by the reverse check at the
 /// same time. That is the same "the list became the place to silence the check"
@@ -2346,24 +2380,27 @@ const HELPER_STATUS: [(&str, &str); 15] = [
 /// The fourth field is a phrase the path block must still carry, so the
 /// exemption cannot decay into silence — the refusal stays documented, just not
 /// as a status. Rewording that prose breaks this test on purpose.
-const INBAND_REJECTIONS: [(&str, &str, &[&str], &str); 3] = [
+const INBAND_REJECTIONS: [(&str, &str, &[&str], &str, &[&str]); 3] = [
     (
         "get",
         "/exec/stream",
-        &["400", "408", "423", "429"],
+        &["400", "403", "408", "423", "429"],
         "only as a frame",
+        &[],
     ),
     (
         "post",
         "/terminal/broadcast",
         &["408", "423", "429"],
         "returns 200",
+        &["terminal_broadcast_preview_results"],
     ),
     (
         "post",
         "/terminal/broadcast/preview",
-        &["423", "429"],
+        &["423"],
         "into that target's `error`",
+        &["terminal_broadcast_preview_results"],
     ),
 ];
 
@@ -2596,13 +2633,16 @@ fn parse_route_table(daemon: &str) -> RouteTable {
 /// The body of one handler, from its `async fn` line to its closing brace.
 ///
 /// The obvious terminator — "the next `async fn` or `fn`" — is wrong in a way
-/// that stayed invisible while it was merely unfortunate: 66 of the 106 route
-/// handlers are followed by a `struct`, a `const`, a doc comment or a helper,
-/// so their "bodies" ran hundreds of bytes past the closing brace. Nothing
-/// foreign happened to carry a `StatusCode::` constant yet, which is exactly
-/// why this could rot unnoticed — the day a neighbouring item gains one, the
-/// scan reports it against the wrong operation. Walking the braces instead
-/// bounds the body at the item it belongs to.
+/// that stayed invisible while it was merely unfortunate: most route handlers
+/// are followed by a `struct`, a `const`, a doc comment or a helper, so their
+/// "bodies" ran hundreds of bytes past the closing brace. Nothing foreign
+/// happened to carry a `StatusCode::` constant yet, which is exactly why this
+/// could rot unnoticed — the day a neighbouring item gains one, the scan reports
+/// it against the wrong operation. Walking the braces instead bounds the body at
+/// the item it belongs to. (This paragraph used to carry a ratio — "66 of the
+/// 106 route handlers" — and by the time anyone recomputed it every handler
+/// overran under that reading, which is the failure a snapshot number invites:
+/// it is quoted as a verified fact long after it stopped being one.)
 ///
 /// It panics rather than returning the rest of the file, for the reason
 /// `handler_body` below already panics: a body that cannot be isolated makes
@@ -3618,7 +3658,11 @@ fn api_yaml_documents_the_codes_each_handler_can_return() {
     let undocumented: Vec<String> = daemon_routes(daemon)
         .into_iter()
         .flat_map(|(path, method, handler)| {
-            let body = handler_body_of(daemon, &handler);
+            // Comments are stripped before the scan: this file's prose spells
+            // these calls out, and a `//` line naming one used to read as a
+            // call site — the same failure `strip_rust_comments` was added for
+            // in the call-order test.
+            let body = strip_rust_comments(handler_body_of(daemon, &handler));
             // An entirely undocumented operation is the route test's finding.
             let Some((_, _, codes)) = documented.iter().find(|(known_path, known_method, _)| {
                 *known_path == path && *known_method == method
@@ -3646,7 +3690,11 @@ fn api_yaml_documents_the_codes_each_handler_can_return() {
     let undocumented_via_helper: Vec<String> = daemon_routes(daemon)
         .into_iter()
         .flat_map(|(path, method, handler)| {
-            let body = handler_body_of(daemon, &handler);
+            // Comments are stripped before the scan: this file's prose spells
+            // these calls out, and a `//` line naming one used to read as a
+            // call site — the same failure `strip_rust_comments` was added for
+            // in the call-order test.
+            let body = strip_rust_comments(handler_body_of(daemon, &handler));
             let Some((_, _, codes)) = documented.iter().find(|(known_path, known_method, _)| {
                 *known_path == path && *known_method == method
             }) else {
@@ -3657,10 +3705,10 @@ fn api_yaml_documents_the_codes_each_handler_can_return() {
             // into a 2xx, and skipping the whole route would silence both.
             let inband: &[&str] = INBAND_REJECTIONS
                 .iter()
-                .find(|(exempt_method, exempt_path, _, _)| {
+                .find(|(exempt_method, exempt_path, _, _, _)| {
                     *exempt_method == method && *exempt_path == path
                 })
-                .map(|(_, _, exempt_codes, _)| *exempt_codes)
+                .map(|(_, _, exempt_codes, _, _)| *exempt_codes)
                 .unwrap_or(&[]);
             HELPER_STATUS
                 .iter()
@@ -3687,7 +3735,7 @@ fn api_yaml_documents_the_codes_each_handler_can_return() {
     let unbacked: Vec<String> = INBAND_REJECTIONS
         .iter()
         .flat_map(|entry| {
-            let (method, path, exempt_codes, marker) = *entry;
+            let (method, path, exempt_codes, marker, delegates) = *entry;
             let Some((_, _, codes)) = documented.iter().find(|(known_path, known_method, _)| {
                 known_path.as_str() == path && *known_method == method
             }) else {
@@ -3719,6 +3767,35 @@ fn api_yaml_documents_the_codes_each_handler_can_return() {
                     ));
                 }
             }
+            // An exemption is a claim that the route consumes the code instead
+            // of returning it, and until this check existed nothing tested that
+            // claim against a body. The table only asked whether some
+            // `HELPER_STATUS` entry *anywhere* answers the code, so a route
+            // could exempt a code none of its own calls produce and still look
+            // backed — by another route's body. The evidence has to be local:
+            // the handler's own body, or a delegate named in the fifth field
+            // whose body folds the refusal into the same 2xx.
+            if let Some((_, _, handler)) = daemon_routes(daemon)
+                .into_iter()
+                .find(|(known_path, known_method, _)| known_path == path && *known_method == method)
+            {
+                let mut bodies = vec![strip_rust_comments(handler_body_of(daemon, &handler))];
+                for delegate in delegates {
+                    bodies.push(strip_rust_comments(handler_body_of(daemon, *delegate)));
+                }
+                for code in exempt_codes {
+                    let backed = HELPER_STATUS.iter().any(|(needle, known)| {
+                        known == code && bodies.iter().any(|body| body.contains(needle))
+                    });
+                    if !backed {
+                        problems.push(format!(
+                            "{method} {path} exempts {code}, but neither its handler nor \
+                             {delegates:?} calls a helper that answers that code, so the \
+                             exemption hides a code this route never consumes"
+                        ));
+                    }
+                }
+            }
             match spec_path_block(spec, path) {
                 Some(block) if block.contains(marker) => {}
                 Some(_) => problems.push(format!(
@@ -3735,6 +3812,44 @@ fn api_yaml_documents_the_codes_each_handler_can_return() {
         "the in-band exemption list and docs/api.yaml disagree: {unbacked:?}. An operation \
          on that list must document none of the codes it exempts — those refusals never \
          become an HTTP status — and must still say in prose where the refusal does go."
+    );
+}
+
+/// Every `HELPER_STATUS` needle must name a call some body actually makes.
+///
+/// The table is a text scan, so a needle that matches nothing is silently dead:
+/// it claims a code is reachable through that helper while the reverse check on
+/// `INBAND_REJECTIONS` keeps treating the code as backed. One entry was exactly
+/// that — a status helper only the rate limiter itself calls, so no route body
+/// ever contained it — and nothing noticed, because the table's only consumer is
+/// a filter that fails open when a needle misses. A typo in a needle is the same
+/// failure: renaming `authorize_command(` to `authorize_command_inner(` unbinds
+/// nine routes' 408s at once.
+///
+/// Delegates are part of the search because an exemption may legitimately point
+/// at a callee that folds the refusal; `handler_body_of` panics on a name the
+/// daemon does not define, so a stale delegate is red rather than ignored.
+#[test]
+fn every_helper_status_needle_names_a_call_a_body_makes() {
+    let daemon = include_str!("../src/bin/agent2ssh-daemon.rs");
+    let mut bodies: Vec<String> = daemon_routes(daemon)
+        .into_iter()
+        .map(|(_, _, handler)| strip_rust_comments(handler_body_of(daemon, &handler)))
+        .collect();
+    for (_, _, _, _, delegates) in INBAND_REJECTIONS {
+        for delegate in delegates {
+            bodies.push(strip_rust_comments(handler_body_of(daemon, delegate)));
+        }
+    }
+    let dead: Vec<&str> = HELPER_STATUS
+        .iter()
+        .map(|(needle, _)| *needle)
+        .filter(|needle| !bodies.iter().any(|body| body.contains(needle)))
+        .collect();
+    assert!(
+        dead.is_empty(),
+        "these `HELPER_STATUS` needles match no route handler body and no declared \
+         delegate, so the code they claim to make reachable is not: {dead:?}"
     );
 }
 
