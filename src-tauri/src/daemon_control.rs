@@ -605,6 +605,12 @@ pub fn read_daemon_pid_record(path: &Path) -> DaemonPidRecord {
 }
 
 /// Ask the OS about a PID without turning "could not look" into "is gone".
+///
+/// Stop decisions use [`observe_process`] instead, because they answer a
+/// different question — "is this still the process I verified" — and need an
+/// expected start time. A diagnosis must answer "what did the OS say", so this
+/// keeps access-denied, zombie and live-with-start-time apart instead of
+/// collapsing them into exited/unknown.
 pub fn observe_pid(pid: u32) -> PidObservation {
     let sys_pid = sysinfo::Pid::from_u32(pid);
     let mut system = sysinfo::System::new();
