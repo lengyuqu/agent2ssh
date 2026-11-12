@@ -1,0 +1,315 @@
+=== environment ===
+
+$ sw_vers
+ProductName:		macOS
+ProductVersion:		27.2.1
+BuildVersion:		26B131
+[exit=0] os version
+
+$ csrutil status
+System Integrity Protection status: enabled.
+[exit=0] sip
+
+$ id
+uid=501(yuqu) gid=20(staff) groups=20(staff),12(everyone),61(localaccounts),79(_appserverusr),80(admin),81(_appserveradm),33(_appstore),98(_lpadmin),100(_lpoperator),204(_developer),250(_analyticsusers),395(com.apple.access_ftp),398(com.apple.access_screensharing),399(com.apple.access_ssh),400(com.apple.access_remote_ae),701(com.apple.sharepoint.group.1)
+[exit=0] identity
+
+$ uname -a
+Darwin MacBookPro 27.2.0 Darwin Kernel Version 27.2.0: Thu Oct 15 00:02:46 PDT 2026; root:xnu-13432.41.4~25/RELEASE_ARM64_T6000 arm64
+[exit=0] kernel
+
+$ sh -c sysctl -a 2>/dev/null | grep -i hidepid || echo 'no hidepid sysctl on macOS'
+no hidepid sysctl on macOS
+[exit=0] hidepid equivalent
+
+=== build probe ===
+
+$ clang -O0 -o /Users/yuqu/WorkBuddy/Worktrees/agent2ssh/main-9315708c/docs/reports/evidence/macos-exposure-crash-2026-11-12/procargs_probe /Users/yuqu/WorkBuddy/Worktrees/agent2ssh/main-9315708c/docs/reports/evidence/macos-exposure-crash-2026-11-12/procargs_probe.c
+[exit=0] clang
+
+=== start target process (synthetic markers only) ===
+$ env A2S_EXPOSURE_ENV_9B2E=<synthetic> /Users/yuqu/.local/share/mise/installs/python/3.14/bin/python3 -c import sys,time; print('child ready', flush=True); time.sleep(30) A2S_EXPOSURE_ARGV_7F3C
+child_pid=94535 child_uid=501
+
+=== E1: same-uid KERN_PROCARGS2 (argv + environ) ===
+
+$ /Users/yuqu/WorkBuddy/Worktrees/agent2ssh/main-9315708c/docs/reports/evidence/macos-exposure-crash-2026-11-12/procargs_probe 94535
+len=32236 argc=4
+S: /Users/yuqu/.local/share/mise/installs/python/3.14/bin/python3
+S: /Users/yuqu/.local/share/mise/installs/python/3.14/bin/python3
+S: -c
+S: import sys,time; print('child ready', flush=<redacted>
+S: A2S_EXPOSURE_ARGV_7F3C
+S: OSLogRateLimit=<redacted>
+S: MallocNanoZone=<redacted>
+S: USER=<redacted>
+S: COMMAND_MODE=<redacted>
+S: __CFBundleIdentifier=<redacted>
+S: PATH=<redacted>
+S: LOGNAME=<redacted>
+S: SSH_AUTH_SOCK=<redacted>
+S: HOME=<redacted>
+S: SHELL=<redacted>
+S: TMPDIR=<redacted>
+S: __CF_USER_TEXT_ENCODING=<redacted>
+S: XPC_SERVICE_NAME=<redacted>
+S: XPC_FLAGS=<redacted>
+S: ORIGINAL_XDG_CURRENT_DESKTOP=<redacted>
+S: WORKBUDDY_IS_PACKAGED=<redacted>
+S: WORKBUDDY_DISABLE_SYSTEM_CA=<redacted>
+S: WORKBUDDY_APP_PATH=<redacted>
+S: WORKBUDDY_CONFIG_DIR=<redacted>
+S: WORKBUDDY_DATA_FOLDER_NAME=<redacted>
+S: WORKBUDDY_CLIENT_USER_AGENT=<redacted>
+S: WORKBUDDY_APPLICATION_NAME=<redacted>
+S: WORKBUDDY_APP_NAME=<redacted>
+S: TERM=<redacted>
+S: APPLE_SUPPRESS_DEVELOPER_TOOL_POPUP=<redacted>
+S: GIT_TERMINAL_PROMPT=<redacted>
+S: SHLVL=<redacted>
+S: PWD=<redacted>
+S: OLDPWD=<redacted>
+S: LANG=<redacted>
+S: HOMEBREW_PREFIX=<redacted>
+S: HOMEBREW_CELLAR=<redacted>
+S: HOMEBREW_REPOSITORY=<redacted>
+S: FPATH=<redacted>
+S: INFOPATH=<redacted>
+S: LC_ALL=<redacted>
+S: EDITOR=<redacted>
+S: HISTFILE=<redacted>
+S: HISTSIZE=<redacted>
+S: SAVEHIST=<redacted>
+S: HOMEBREW_NO_AUTO_UPDATE=<redacted>
+S: HOMEBREW_NO_ENV_HINTS=<redacted>
+S: __MISE_ORIG_PATH=<redacted>
+S: MISE_SHELL=<redacted>
+S: __MISE_ZSH_PRECMD_RUN=<redacted>
+S: __MISE_ZSH_CHPWD_RAN=<redacted>
+S: CARGO_HOME=<redacted>
+S: GOBIN=<redacted>
+S: GOROOT=<redacted>
+S: JAVA_HOME=<redacted>
+S: MISE_GO_DOWNLOAD_MIRROR=<redacted>
+S: MISE_NODE_MIRROR_URL=<redacted>
+S: PIP_INDEX_URL=<redacted>
+S: PUB_HOSTED_URL=<redacted>
+S: RUSTUP_DIST_SERVER=<redacted>
+S: RUSTUP_HOME=<redacted>
+S: RUSTUP_TOOLCHAIN=<redacted>
+S: RUSTUP_UPDATE_ROOT=<redacted>
+S: npm_config_registry=<redacted>
+S: __MISE_DIFF=<redacted>
+S: __MISE_SESSION=<redacted>
+S: __MISE_ZSH_ACTIVATE_PATH=<redacted>
+S: __MISE_ZSH_ACTIVATE_ENV=<redacted>
+S: FZF_DEFAULT_OPTS=<redacted>
+S: FZF_CTRL_T_OPTS=<redacted>
+S: FZF_CTRL_R_OPTS=<redacted>
+S: MODELSCOPE_ENDPOINT=<redacted>
+S: HF_ENDPOINT=<redacted>
+S: HF_HUB_ENABLE_HF_TRANSFER=<redacted>
+S: HF_TOKEN=<redacted>
+S: STARSHIP_SHELL=<redacted>
+S: STARSHIP_SESSION_KEY=<redacted>
+S: PNPM_HOME=<redacted>
+S: WORKBUDDY_APP_VERSION=<redacted>
+S: WORKBUDDY_MENU_LOCALE=<redacted>
+S: SANDBOX_CENTER_IPC_ADDRESS=<redacted>
+S: WORKBUDDY_STARTUP_PID=<redacted>
+S: WORKBUDDY_STARTUP_DATE=<redacted>
+S: WORKBUDDY_STARTUP_TIME=<redacted>
+S: CLIENT_INFO_PRODUCT_VERSION=<redacted>
+S: WORKBUDDY_APP_DEEPLINK_SCHEME=<redacted>
+S: WORKBUDDY_FS_PROTECTION_ROLE=<redacted>
+S: WORKBUDDY_LOCALE=<redacted>
+S: WORKBUDDY_PROMPT_TEMPLATES_DIR=<redacted>
+S: WORKBUDDY_PRODUCT_NAME=<redacted>
+S: WORKBUDDY_RESOURCES_PATH=<redacted>
+S: WORKBUDDY_USER_DATA_DIR=<redacted>
+S: WORKBUDDY_DAEMON_CATALOG_STDIO=<redacted>
+S: WORKBUDDY_GPU_DEVICE_NAME=<redacted>
+S: WORKBUDDY_BUDDY_ONE_ID=<redacted>
+S: DISABLE_TELEMETRY=<redacted>
+S: DISABLE_AUTOUPDATER=<redacted>
+S: ELECTRON_RUN_AS_NODE=<redacted>
+S: CODEBUDDY_GIT_REPO_SCAN_DISABLED=<redacted>
+S: CODEBUDDY_PROMPT_SUGGESTION_DISABLED=<redacted>
+S: CODEBUDDY_GATEWAY_AUTH=<redacted>
+S: CODEBUDDY_GATEWAY_PASSWORD=<redacted>
+S: CODEBUDDY_GATEWAY_DISABLE_API_DOCS=<redacted>
+S: CODEBUDDY_DISABLE_CRON=<redacted>
+S: CODEBUDDY_FORCE_LITE_WB_BUNDLE=<redacted>
+S: CODEBUDDY_FORCE_HEADLESS_BUNDLE=<redacted>
+S: CODEBUDDY_DISABLE_AUTO_MEMORY=<redacted>
+S: CODEBUDDY_DISABLE_SYSTEM_REMINDER_MD=<redacted>
+S: CODEBUDDY_DISABLE_REQUEST_VALIDATION=<redacted>
+S: CODEBUDDY_SKIP_GIT_BASH_CHECK=<redacted>
+S: CODEBUDDY_HOST=<redacted>
+S: CODEBUDDY_HIGH_CREDIT_APPROVAL_ENABLED=<redacted>
+S: CODEBUDDY_ALWAYS_APPROVAL_OVERRIDES_HOOK_ASK=<redacted>
+S: CODEBUDDY_APPROVAL_MEMORY_GROUPS=<redacted>
+S: CODEBUDDY_COMMAND_APPROVAL_PATTERNS=<redacted>
+S: CODEBUDDY_DISABLE_EXTENDED_PLUGIN_HOOKS=<redacted>
+S: CODEBUDDY_DISABLE_SESSION_HISTORY_CLEANUP=<redacted>
+S: CODEBUDDY_INCLUDE_TOPIC_MESSAGE=<redacted>
+S: CODEBUDDY_CODE_DISABLE_SESSION_SUMMARY=<redacted>
+S: CODEBUDDY_BUILTIN_SKILLS_DIR=<redacted>
+S: CODEBUDDY_POWERSHELL_USE_PTY=<redacted>
+S: CODEBUDDY_REPLAY_SHOW_PRE_COMPACT=<redacted>
+S: CODEBUDDY_REASONING_ONLY_END_TURN=<redacted>
+S: CODEBUDDY_CODE_IMAGE_COMPRESSION_MAX_DIMENSION=<redacted>
+S: CODEBUDDY_SKILL_TOOL_CHAR_BUDGET=<redacted>
+S: CODEBUDDY_SKILL_DESC_MAX_OVERRIDES=<redacted>
+S: CODEBUDDY_DISABLE_FORK_SUBAGENT=<redacted>
+S: CODEBUDDY_ENABLE_SECURITY_AUDIT=<redacted>
+S: WORKBUDDY_NODE_ENV=<redacted>
+S: CLIENT_INFO_PLATFORM=<redacted>
+S: CLIENT_INFO_PLATFORM_VERSION=<redacted>
+S: CLIENT_INFO_IDE_TYPE=<redacted>
+S: CLIENT_INFO_PRODUCT_NAME=<redacted>
+S: CLIENT_INFO_PLUGIN_NAME=<redacted>
+S: CLIENT_INFO_PLUGIN_VERSION=<redacted>
+S: CLIENT_INFO_USER_AGENT_EXTENSION=<redacted>
+S: CLIENT_INFO_MACHINE_ID=<redacted>
+S: ACC_PRODUCT_CONFIG_PATH=<redacted>
+S: CODEBUDDY_INTERNET_ENVIRONMENT=<redacted>
+S: WORKBUDDY_EXTRA_PATHS=<redacted>
+S: WORKBUDDY_MANAGED_RUNTIME_DISABLED=<redacted>
+S: CODEBUDDY_API_KEY_HELPER_DISABLED=<redacted>
+S: CODEBUDDY_DISABLE_PRODUCT_CACHE=<redacted>
+S: WORKBUDDY_PAC_RPC_SOCKET=<redacted>
+S: WORKBUDDY_PAC_RPC_TOKEN=<redacted>
+S: CODEBUDDY_QIMEI36=<redacted>
+S: CODEBUDDY_DISABLE_BROWSER_MCP=<redacted>
+S: CODEBUDDY_DISABLE_IDE=<redacted>
+S: SERVER__PORT=<redacted>
+S: SERVER__HOST=<redacted>
+S: CODEBUDDY_HOST_CAPABILITIES=<redacted>
+S: TENCENT_DOCS_LOCAL_MCP=<redacted>
+S: TENCENT_DOCS_LOCAL_SERVER=<redacted>
+S: editor_sdk_port=<redacted>
+S: WORKBUDDY_VLM_CHAT_URL=<redacted>
+S: WORKBUDDY_VLM_AUTH_TOKEN=<redacted>
+S: WORKBUDDY_VLM_CONTEXT=<redacted>
+S: WORKBUDDY_VLM_MODEL=<redacted>
+S: CODEBUDDY_REMOTE_AGENTS_URL=<redacted>
+S: CODEBUDDY_A2A_OUTBOUND_ENABLED=<redacted>
+S: CODEBUDDY_A2A_TRUSTED_RESULTS=<redacted>
+S: WECOM_MEDIA_UPLOAD_BASE_URL=<redacted>
+S: WECOM_MEDIA_API_EXTRA_QUERY=<redacted>
+S: WECOM_CLI_ADDITIONAL_HEADERS_AGENT_TICKET=<redacted>
+S: WECOM_CLI_ADDITIONAL_HEADERS_CUSTOMER_USERID=<redacted>
+S: WECOM_CLI_ADDITIONAL_HEADERS_ENTERPRISE_TYPE=<redacted>
+S: WECOM_CLI_CONFIG_DIR=<redacted>
+S: CODEBUDDY_ENV_FILE=<redacted>
+S: CODEBUDDY_CODE_EXPERIMENTAL_AGENT_TEAMS=<redacted>
+S: NODE_OPTIONS=<redacted>
+S: ACC_PRODUCT_CONFIG_V3=<redacted>
+S: ACC_PRODUCT_CONFIG_V2=<redacted>
+S: ACC_PRODUCT_CONFIG=<redacted>
+S: GALILEO_ENABLE=<redacted>
+S: GALILEO_SDK_READY=<redacted>
+S: CODEBUDDY_PROJECT_DIR=<redacted>
+S: CLAUDE_PROJECT_DIR=<redacted>
+S: CODEBUDDY_SESSION_ID=<redacted>
+S: CLAUDE_SESSION_ID=<redacted>
+S: CODEBUDDY_CONVERSATION_REQUEST_ID=<redacted>
+S: CODEBUDDY_ROOT_REQUEST_ID=<redacted>
+S: CODEBUDDY_MCP_CONFIG=<redacted>
+S: CODEBUDDY_CURRENT_MODEL_ID=<redacted>
+S: CODEBUDDY_CONVERSATION_MESSAGE_ID=<redacted>
+S: CODEBUDDY_SERVICE_PROXY_URL=<redacted>
+S: CODEBUDDY_ARTIFACTS=<redacted>
+S: GIT_PAGER=<redacted>
+S: HGPAGER=<redacted>
+S: AWS_PAGER=<redacted>
+S: SYSTEMD_PAGER=<redacted>
+S: PAGER=<redacted>
+S: MANPAGER=<redacted>
+S: LESSHISTFILE=<redacted>
+S: CODEBUDDY_SAFE_DELETE_ENABLED=<redacted>
+S: CODEBUDDY_TOOL_CALL_ID=<redacted>
+S: PYTHONDONTWRITEBYTECODE=<redacted>
+S: PYTHONPATH=<redacted>
+S: CODEBUDDY_SAFE_DELETE_BIN_DIR=<redacted>
+S: GENIE_TRASH_DIR=<redacted>
+S: CODEBUDDY_SAFE_DELETE_REPORT_PATH=<redacted>
+S: BASH_ENV=<redacted>
+S: CODEBUDDY_NODE_BIN=<redacted>
+S: CODEBUDDY_SAFE_DELETE_BULK_GUARD=<redacted>
+S: CODEBUDDY_SAFE_DELETE_BULK_STATE_DIR=<redacted>
+S: CODEBUDDY_SAFE_DELETE_BULK_THRESHOLD=<redacted>
+S: CODEBUDDY_SAFE_DELETE_BROKER_DELETE=<redacted>
+S: TRACEPARENT=<redacted>
+S: BAGGAGE=<redacted>
+S: _=<redacted>
+S: A2S_EXPOSURE_ENV_9B2E=A2S_SYNTHETIC_VALUE_DO_NOT_USE
+S: ptr_munge=<redacted>
+S: main_stack=<redacted>
+S: executable_file=<redacted>
+S: dyld_file=<redacted>
+S: executable_cdhash=<redacted>
+S: executable_boothash=<redacted>
+S: th_port=<redacted>
+S: security_config=<redacted>
+[exit=0] read child procargs2
+ARGV_MARKER_VISIBLE=True
+ENV_MARKER_VISIBLE=True
+
+=== E2: ps argv visibility, same uid ===
+
+$ ps -p 94535 -o args=
+/Users/yuqu/.local/share/mise/installs/python/3.14/bin/python3 -c import sys,time; print('child ready', flush=True); time.sleep(30) A2S_EXPOSURE_ARGV_7F3C
+[exit=0] ps -o args
+PS_ARGV_MARKER_VISIBLE=True
+$ ps auxww | grep A2S_EXPOSURE_ARGV_7F3C  (only hit count is printed)
+PS_AUXWW_HIT_COUNT=1
+PS_AUXWW_MARKER_VISIBLE=True
+
+=== E3: control - another same-uid process (parent shell) ===
+
+$ /Users/yuqu/WorkBuddy/Worktrees/agent2ssh/main-9315708c/docs/reports/evidence/macos-exposure-crash-2026-11-12/procargs_probe 94523
+len=3279 argc=3
+S: /bin/zsh
+S: /bin/zsh
+S: -c
+[exit=0] read same-uid pid 94523 procargs2
+
+=== E4: different uid / pid 1 (launchd, SIP-protected) ===
+
+$ /Users/yuqu/WorkBuddy/Worktrees/agent2ssh/main-9315708c/docs/reports/evidence/macos-exposure-crash-2026-11-12/procargs_probe 1
+ERROR size errno=22 (Invalid argument)
+[exit=0] read pid 1 procargs2
+PID1_MARKER_ABSENT=True
+
+$ ps -p 1 -o args=
+/sbin/launchd
+[exit=0] ps -p 1 -o args
+
+=== E5: other root-owned processes (different uid) ===
+$ ps -U root -o pid= -o comm=  (first 3 of 196)
+  1 /sbin/launchd
+  96 /usr/libexec/logd
+  98 /usr/libexec/smd
+
+$ /Users/yuqu/WorkBuddy/Worktrees/agent2ssh/main-9315708c/docs/reports/evidence/macos-exposure-crash-2026-11-12/procargs_probe 1
+ERROR size errno=22 (Invalid argument)
+[exit=0] read root pid 1 procargs2
+
+$ /Users/yuqu/WorkBuddy/Worktrees/agent2ssh/main-9315708c/docs/reports/evidence/macos-exposure-crash-2026-11-12/procargs_probe 96
+ERROR size errno=22 (Invalid argument)
+[exit=0] read root pid 96 procargs2
+
+=== E6: hidepid-like mount options on macOS ===
+
+$ sh -c mount | head -6
+/dev/disk3s1s1 on / (apfs, sealed, local, read-only, journaled)
+devfs on /dev (devfs, local, nobrowse)
+/dev/disk3s6 on /System/Volumes/VM (apfs, local, noexec, journaled, noatime, nobrowse)
+/dev/disk3s2 on /System/Volumes/Preboot (apfs, local, journaled, nobrowse)
+/dev/disk3s4 on /System/Volumes/Update (apfs, local, journaled, nobrowse)
+/dev/disk1s2 on /System/Volumes/xarts (apfs, local, noexec, journaled, noatime, nobrowse)
+[exit=0] mount (first 6)
+
+=== done ===

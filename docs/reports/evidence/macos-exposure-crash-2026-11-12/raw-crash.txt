@@ -1,0 +1,296 @@
+=== toolchain / host ===
+  repo=/Users/yuqu/WorkBuddy/Worktrees/agent2ssh/main-9315708c
+  cli=/Users/yuqu/WorkBuddy/Worktrees/agent2ssh/main-9315708c/src-tauri/target/debug/agent2ssh exists=True
+  ProductName:		macOS | ProductVersion:		27.2.1 | BuildVersion:		26B131
+  isolated root=/var/folders/k3/hy99wl890fl6nyzr42fv0cbr0000gn/T/a2s-crash-ja2hcgj5  (never ~/.agent2ssh)
+
+$ clang -dynamiclib -o /var/folders/k3/hy99wl890fl6nyzr42fv0cbr0000gn/T/a2s-crash-ja2hcgj5/liba2s_crashhook.dylib /Users/yuqu/WorkBuddy/Worktrees/agent2ssh/main-9315708c/src-tauri/tests/fixtures/crash_hook.c
+  [PASS] hook dylib built
+
+=== seed: initialize store + one sealed credential ===
+$ secrets set-password  -> 0 stderr=''
+  [PASS] master password set
+$ host add seed --password-stdin -> 0 stdout="Saved host 'seed'."
+  [PASS] seed host added
+  [PASS] no A2S_CRASH_SE leaked into seed stdout
+  [PASS] no A2S_CRASH_NE leaked into seed stdout
+  [PASS] no A2S_CRASH_SE leaked into seed stderr
+  [PASS] no A2S_CRASH_NE leaked into seed stderr
+  [PASS] no A2S_CRASH_SE leaked into seed file secrets.enc
+  [PASS] no A2S_CRASH_NE leaked into seed file secrets.enc
+  [PASS] no A2S_CRASH_SE leaked into seed file .secrets.lock
+  [PASS] no A2S_CRASH_NE leaked into seed file .secrets.lock
+  [PASS] no A2S_CRASH_SE leaked into seed file .hosts.lock
+  [PASS] no A2S_CRASH_NE leaked into seed file .hosts.lock
+  [PASS] no A2S_CRASH_SE leaked into seed file migrations.json
+  [PASS] no A2S_CRASH_NE leaked into seed file migrations.json
+  [PASS] no A2S_CRASH_SE leaked into seed file hosts.json
+  [PASS] no A2S_CRASH_NE leaked into seed file hosts.json
+
+=========== CASE before-rename ===========
+$ DYLD_INSERT_LIBRARIES=<hook> A2S_HOOK_STAGE=before-rename agent2ssh host add crash-target --host 127.0.0.2 --password-stdin
+  [PASS] before-rename: hook reached the intended breakpoint :: child_status=None
+  child returncode=-9 (SIGKILL = -9)
+  [PASS] before-rename: process died from SIGKILL
+  [PASS] no A2S_CRASH_SE leaked into before-rename stdout
+  [PASS] no A2S_CRASH_NE leaked into before-rename stdout
+  [PASS] no A2S_CRASH_SE leaked into before-rename stderr
+  [PASS] no A2S_CRASH_NE leaked into before-rename stderr
+
+--- before-rename after crash: on-disk state ---
+  .commit.json                                    257  sha256=e36282d72d598c81
+  .hosts.lock                                       0  sha256=e3b0c44298fc1c14
+  .secrets.lock                                     0  sha256=e3b0c44298fc1c14
+  hosts.json                                      640  sha256=b4468eed2f82641a
+  hosts.json.bak                                  640  sha256=b4468eed2f82641a
+  hosts.json.tmp.98592                           1075  sha256=691a8acaf3ead7ee
+  migrations.json                                 242  sha256=0955e99a1098901a
+  secrets.enc                                     549  sha256=be0f5dab81da5695
+  hosts.secrets_generation=1 secrets.generation=3
+  host names=['seed']
+  secret keys=['__agent2ssh_key_check__', 'host:crash-target', 'host:seed']
+  commit log={"hosts_sha256": "691a8acaf3ead7ee22b925f2f37b5759d41c21020a852c276f572cf57d40bd23", "secrets_generation": 3, "secrets_sha256": "be0f5dab81da56951d83052d93f528a85e0f33f41238fd2f2126db6e5b221b1e", "tmp_name": "hosts.json.tmp.98592", "version": 1}
+  [PASS] no A2S_CRASH_SE leaked into before-rename file .commit.json
+  [PASS] no A2S_CRASH_NE leaked into before-rename file .commit.json
+  [PASS] no A2S_CRASH_SE leaked into before-rename file .hosts.lock
+  [PASS] no A2S_CRASH_NE leaked into before-rename file .hosts.lock
+  [PASS] no A2S_CRASH_SE leaked into before-rename file .secrets.lock
+  [PASS] no A2S_CRASH_NE leaked into before-rename file .secrets.lock
+  [PASS] no A2S_CRASH_SE leaked into before-rename file hosts.json
+  [PASS] no A2S_CRASH_NE leaked into before-rename file hosts.json
+  [PASS] no A2S_CRASH_SE leaked into before-rename file hosts.json.bak
+  [PASS] no A2S_CRASH_NE leaked into before-rename file hosts.json.bak
+  [PASS] no A2S_CRASH_SE leaked into before-rename file hosts.json.tmp.98592
+  [PASS] no A2S_CRASH_NE leaked into before-rename file hosts.json.tmp.98592
+  [PASS] no A2S_CRASH_SE leaked into before-rename file migrations.json
+  [PASS] no A2S_CRASH_NE leaked into before-rename file migrations.json
+  [PASS] no A2S_CRASH_SE leaked into before-rename file secrets.enc
+  [PASS] no A2S_CRASH_NE leaked into before-rename file secrets.enc
+  [PASS] before-rename: commit log survived the crash
+  tmp_name=hosts.json.tmp.98592 tmp_exists=True hosts_has_crash_target=False
+  [PASS] before-rename: hosts.json still holds the previous config
+  [PASS] before-rename: prepared temp file is intact
+  [PASS] before-rename: tmp hash matches the logged target hash
+  [PASS] before-rename: logged secrets hash matches secrets.enc
+
+--- before-rename: restart (fresh CLI process, no hook) ---
+$ host add after-recovery --host 127.0.0.3 -> 0
+  stdout="Saved host 'after-recovery'."
+  stderr=''
+  [PASS] before-rename: restart write succeeded
+  [PASS] no A2S_CRASH_SE leaked into before-rename stdout
+  [PASS] no A2S_CRASH_NE leaked into before-rename stdout
+  [PASS] no A2S_CRASH_SE leaked into before-rename stderr
+  [PASS] no A2S_CRASH_NE leaked into before-rename stderr
+
+--- before-rename after restart: on-disk state ---
+  .hosts.lock                                       0  sha256=e3b0c44298fc1c14
+  .secrets.lock                                     0  sha256=e3b0c44298fc1c14
+  hosts.json                                     1496  sha256=b0b090ab8b65b7f3
+  hosts.json.bak                                 1075  sha256=691a8acaf3ead7ee
+  migrations.json                                 242  sha256=0955e99a1098901a
+  secrets.enc                                     549  sha256=556372a3207dd3af
+  hosts.secrets_generation=5 secrets.generation=5
+  host names=['after-recovery', 'crash-target', 'seed']
+  secret keys=['__agent2ssh_key_check__', 'host:crash-target', 'host:seed']
+  commit log=None
+  [PASS] no A2S_CRASH_SE leaked into before-rename file .hosts.lock
+  [PASS] no A2S_CRASH_NE leaked into before-rename file .hosts.lock
+  [PASS] no A2S_CRASH_SE leaked into before-rename file .secrets.lock
+  [PASS] no A2S_CRASH_NE leaked into before-rename file .secrets.lock
+  [PASS] no A2S_CRASH_SE leaked into before-rename file hosts.json
+  [PASS] no A2S_CRASH_NE leaked into before-rename file hosts.json
+  [PASS] no A2S_CRASH_SE leaked into before-rename file hosts.json.bak
+  [PASS] no A2S_CRASH_NE leaked into before-rename file hosts.json.bak
+  [PASS] no A2S_CRASH_SE leaked into before-rename file migrations.json
+  [PASS] no A2S_CRASH_NE leaked into before-rename file migrations.json
+  [PASS] no A2S_CRASH_SE leaked into before-rename file secrets.enc
+  [PASS] no A2S_CRASH_NE leaked into before-rename file secrets.enc
+  [PASS] before-rename: recovery replayed the prepared hosts file
+  [PASS] before-rename: restart write built on the replayed config
+  [PASS] before-rename: commit log cleared
+  [PASS] before-rename: generation aligned :: 5 vs 5
+  [PASS] before-rename: reference for crash-target.password has a ciphertext entry :: host:crash-target
+  [PASS] before-rename: reference for seed.password has a ciphertext entry :: host:seed
+  NOTE: with the v2 bare marker, key existence + generation alignment is all that can be verified without decrypting; content matching requires #26 phase 2 tags.
+
+=========== CASE before-finish ===========
+$ DYLD_INSERT_LIBRARIES=<hook> A2S_HOOK_STAGE=before-finish agent2ssh host add crash-target --host 127.0.0.2 --password-stdin
+  [PASS] before-finish: hook reached the intended breakpoint :: child_status=None
+  child returncode=-9 (SIGKILL = -9)
+  [PASS] before-finish: process died from SIGKILL
+  [PASS] no A2S_CRASH_SE leaked into before-finish stdout
+  [PASS] no A2S_CRASH_NE leaked into before-finish stdout
+  [PASS] no A2S_CRASH_SE leaked into before-finish stderr
+  [PASS] no A2S_CRASH_NE leaked into before-finish stderr
+
+--- before-finish after crash: on-disk state ---
+  .commit.json                                    257  sha256=bcd2e15a45dc831e
+  .hosts.lock                                       0  sha256=e3b0c44298fc1c14
+  .secrets.lock                                     0  sha256=e3b0c44298fc1c14
+  hosts.json                                     1075  sha256=691a8acaf3ead7ee
+  hosts.json.bak                                  640  sha256=b4468eed2f82641a
+  migrations.json                                 242  sha256=0955e99a1098901a
+  secrets.enc                                     549  sha256=6742445d04e8782e
+  hosts.secrets_generation=3 secrets.generation=3
+  host names=['crash-target', 'seed']
+  secret keys=['__agent2ssh_key_check__', 'host:crash-target', 'host:seed']
+  commit log={"hosts_sha256": "691a8acaf3ead7ee22b925f2f37b5759d41c21020a852c276f572cf57d40bd23", "secrets_generation": 3, "secrets_sha256": "6742445d04e8782e90e840ab0ae6b4340c3943536f69848cc65ec901d46c980d", "tmp_name": "hosts.json.tmp.98597", "version": 1}
+  [PASS] no A2S_CRASH_SE leaked into before-finish file .commit.json
+  [PASS] no A2S_CRASH_NE leaked into before-finish file .commit.json
+  [PASS] no A2S_CRASH_SE leaked into before-finish file .hosts.lock
+  [PASS] no A2S_CRASH_NE leaked into before-finish file .hosts.lock
+  [PASS] no A2S_CRASH_SE leaked into before-finish file .secrets.lock
+  [PASS] no A2S_CRASH_NE leaked into before-finish file .secrets.lock
+  [PASS] no A2S_CRASH_SE leaked into before-finish file hosts.json
+  [PASS] no A2S_CRASH_NE leaked into before-finish file hosts.json
+  [PASS] no A2S_CRASH_SE leaked into before-finish file hosts.json.bak
+  [PASS] no A2S_CRASH_NE leaked into before-finish file hosts.json.bak
+  [PASS] no A2S_CRASH_SE leaked into before-finish file migrations.json
+  [PASS] no A2S_CRASH_NE leaked into before-finish file migrations.json
+  [PASS] no A2S_CRASH_SE leaked into before-finish file secrets.enc
+  [PASS] no A2S_CRASH_NE leaked into before-finish file secrets.enc
+  [PASS] before-finish: commit log survived the crash
+  tmp_name=hosts.json.tmp.98597 tmp_exists=False hosts_has_crash_target=True
+  [PASS] before-finish: hosts rename already completed
+  [PASS] before-finish: hosts hash matches the logged target hash
+  [PASS] before-finish: prepared temp file was consumed
+  [PASS] before-finish: logged secrets hash matches secrets.enc
+
+--- before-finish: restart (fresh CLI process, no hook) ---
+$ host add after-recovery --host 127.0.0.3 -> 0
+  stdout="Saved host 'after-recovery'."
+  stderr=''
+  [PASS] before-finish: restart write succeeded
+  [PASS] no A2S_CRASH_SE leaked into before-finish stdout
+  [PASS] no A2S_CRASH_NE leaked into before-finish stdout
+  [PASS] no A2S_CRASH_SE leaked into before-finish stderr
+  [PASS] no A2S_CRASH_NE leaked into before-finish stderr
+
+--- before-finish after restart: on-disk state ---
+  .hosts.lock                                       0  sha256=e3b0c44298fc1c14
+  .secrets.lock                                     0  sha256=e3b0c44298fc1c14
+  hosts.json                                     1496  sha256=b0b090ab8b65b7f3
+  hosts.json.bak                                 1075  sha256=691a8acaf3ead7ee
+  migrations.json                                 242  sha256=0955e99a1098901a
+  secrets.enc                                     549  sha256=ce6b1a55e862dbff
+  hosts.secrets_generation=5 secrets.generation=5
+  host names=['after-recovery', 'crash-target', 'seed']
+  secret keys=['__agent2ssh_key_check__', 'host:crash-target', 'host:seed']
+  commit log=None
+  [PASS] no A2S_CRASH_SE leaked into before-finish file .hosts.lock
+  [PASS] no A2S_CRASH_NE leaked into before-finish file .hosts.lock
+  [PASS] no A2S_CRASH_SE leaked into before-finish file .secrets.lock
+  [PASS] no A2S_CRASH_NE leaked into before-finish file .secrets.lock
+  [PASS] no A2S_CRASH_SE leaked into before-finish file hosts.json
+  [PASS] no A2S_CRASH_NE leaked into before-finish file hosts.json
+  [PASS] no A2S_CRASH_SE leaked into before-finish file hosts.json.bak
+  [PASS] no A2S_CRASH_NE leaked into before-finish file hosts.json.bak
+  [PASS] no A2S_CRASH_SE leaked into before-finish file migrations.json
+  [PASS] no A2S_CRASH_NE leaked into before-finish file migrations.json
+  [PASS] no A2S_CRASH_SE leaked into before-finish file secrets.enc
+  [PASS] no A2S_CRASH_NE leaked into before-finish file secrets.enc
+  [PASS] before-finish: hosts already holds the committed config
+  [PASS] before-finish: no double replay / no data loss
+  [PASS] before-finish: leftover log cleared by case 1 of recover()
+  [PASS] before-finish: generation aligned :: 5 vs 5
+  [PASS] before-finish: reference for crash-target.password has a ciphertext entry :: host:crash-target
+  [PASS] before-finish: reference for seed.password has a ciphertext entry :: host:seed
+  NOTE: with the v2 bare marker, key existence + generation alignment is all that can be verified without decrypting; content matching requires #26 phase 2 tags.
+
+=========== CASE before-rename ===========
+$ DYLD_INSERT_LIBRARIES=<hook> A2S_HOOK_STAGE=before-rename agent2ssh host add crash-target --host 127.0.0.2 --password-stdin
+  [PASS] before-rename: hook reached the intended breakpoint :: child_status=None
+  child returncode=-9 (SIGKILL = -9)
+  [PASS] before-rename: process died from SIGKILL
+  [PASS] no A2S_CRASH_SE leaked into before-rename stdout
+  [PASS] no A2S_CRASH_NE leaked into before-rename stdout
+  [PASS] no A2S_CRASH_SE leaked into before-rename stderr
+  [PASS] no A2S_CRASH_NE leaked into before-rename stderr
+
+--- before-rename after crash: on-disk state ---
+  .commit.json                                    257  sha256=d5f29a03d26c6828
+  .hosts.lock                                       0  sha256=e3b0c44298fc1c14
+  .secrets.lock                                     0  sha256=e3b0c44298fc1c14
+  hosts.json                                      640  sha256=b4468eed2f82641a
+  hosts.json.bak                                  640  sha256=b4468eed2f82641a
+  hosts.json.tmp.98601                           1075  sha256=691a8acaf3ead7ee
+  migrations.json                                 242  sha256=0955e99a1098901a
+  secrets.enc                                     549  sha256=a421d909432e36c7
+  hosts.secrets_generation=1 secrets.generation=3
+  host names=['seed']
+  secret keys=['__agent2ssh_key_check__', 'host:crash-target', 'host:seed']
+  commit log={"hosts_sha256": "691a8acaf3ead7ee22b925f2f37b5759d41c21020a852c276f572cf57d40bd23", "secrets_generation": 3, "secrets_sha256": "a421d909432e36c70adcad623bc2a38731d48745cacff4a3ac4171ac516c5a81", "tmp_name": "hosts.json.tmp.98601", "version": 1}
+  [PASS] no A2S_CRASH_SE leaked into before-rename file .commit.json
+  [PASS] no A2S_CRASH_NE leaked into before-rename file .commit.json
+  [PASS] no A2S_CRASH_SE leaked into before-rename file .hosts.lock
+  [PASS] no A2S_CRASH_NE leaked into before-rename file .hosts.lock
+  [PASS] no A2S_CRASH_SE leaked into before-rename file .secrets.lock
+  [PASS] no A2S_CRASH_NE leaked into before-rename file .secrets.lock
+  [PASS] no A2S_CRASH_SE leaked into before-rename file hosts.json
+  [PASS] no A2S_CRASH_NE leaked into before-rename file hosts.json
+  [PASS] no A2S_CRASH_SE leaked into before-rename file hosts.json.bak
+  [PASS] no A2S_CRASH_NE leaked into before-rename file hosts.json.bak
+  [PASS] no A2S_CRASH_SE leaked into before-rename file hosts.json.tmp.98601
+  [PASS] no A2S_CRASH_NE leaked into before-rename file hosts.json.tmp.98601
+  [PASS] no A2S_CRASH_SE leaked into before-rename file migrations.json
+  [PASS] no A2S_CRASH_NE leaked into before-rename file migrations.json
+  [PASS] no A2S_CRASH_SE leaked into before-rename file secrets.enc
+  [PASS] no A2S_CRASH_NE leaked into before-rename file secrets.enc
+  [PASS] before-rename: commit log survived the crash
+  tmp_name=hosts.json.tmp.98601 tmp_exists=True hosts_has_crash_target=False
+  [PASS] before-rename: hosts.json still holds the previous config
+  [PASS] before-rename: prepared temp file is intact
+  [PASS] before-rename: tmp hash matches the logged target hash
+  [PASS] before-rename: logged secrets hash matches secrets.enc
+
+$ rm hosts.json.tmp.98601   # simulate a prepared temp file lost with the crash
+
+--- lost-tmp: restart (fresh CLI process, no hook) ---
+$ host add must-not-land --host 127.0.0.3 -> 1
+  stdout=''
+  stderr='Error: failed to recover a pending hosts/secrets commit\n\nCaused by:\n    pending config commit cannot be replayed: prepared hosts file /var/folders/k3/hy99wl890fl6nyzr42fv0cbr0000gn/T/a2s-crash-ja2hcgj5/case-lost-tmp/config/hosts.json.tmp.98601 is missing or altered. hosts.json still holds the previous configuration; inspect /var/folders/k3/hy99wl890fl6nyzr42fv0cbr0000gn/T/a2s-crash-ja2hcgj5/case-lost-tmp/config/.commit.json before writing again'
+  [PASS] lost-tmp: restart write was refused
+  [PASS] no A2S_CRASH_SE leaked into lost-tmp stdout
+  [PASS] no A2S_CRASH_NE leaked into lost-tmp stdout
+  [PASS] no A2S_CRASH_SE leaked into lost-tmp stderr
+  [PASS] no A2S_CRASH_NE leaked into lost-tmp stderr
+
+--- lost-tmp after restart: on-disk state ---
+  .commit.json                                    257  sha256=d5f29a03d26c6828
+  .hosts.lock                                       0  sha256=e3b0c44298fc1c14
+  .secrets.lock                                     0  sha256=e3b0c44298fc1c14
+  hosts.json                                      640  sha256=b4468eed2f82641a
+  hosts.json.bak                                  640  sha256=b4468eed2f82641a
+  migrations.json                                 242  sha256=0955e99a1098901a
+  secrets.enc                                     549  sha256=a421d909432e36c7
+  hosts.secrets_generation=1 secrets.generation=3
+  host names=['seed']
+  secret keys=['__agent2ssh_key_check__', 'host:crash-target', 'host:seed']
+  commit log={"hosts_sha256": "691a8acaf3ead7ee22b925f2f37b5759d41c21020a852c276f572cf57d40bd23", "secrets_generation": 3, "secrets_sha256": "a421d909432e36c70adcad623bc2a38731d48745cacff4a3ac4171ac516c5a81", "tmp_name": "hosts.json.tmp.98601", "version": 1}
+  [PASS] no A2S_CRASH_SE leaked into lost-tmp file .commit.json
+  [PASS] no A2S_CRASH_NE leaked into lost-tmp file .commit.json
+  [PASS] no A2S_CRASH_SE leaked into lost-tmp file .hosts.lock
+  [PASS] no A2S_CRASH_NE leaked into lost-tmp file .hosts.lock
+  [PASS] no A2S_CRASH_SE leaked into lost-tmp file .secrets.lock
+  [PASS] no A2S_CRASH_NE leaked into lost-tmp file .secrets.lock
+  [PASS] no A2S_CRASH_SE leaked into lost-tmp file hosts.json
+  [PASS] no A2S_CRASH_NE leaked into lost-tmp file hosts.json
+  [PASS] no A2S_CRASH_SE leaked into lost-tmp file hosts.json.bak
+  [PASS] no A2S_CRASH_NE leaked into lost-tmp file hosts.json.bak
+  [PASS] no A2S_CRASH_SE leaked into lost-tmp file migrations.json
+  [PASS] no A2S_CRASH_NE leaked into lost-tmp file migrations.json
+  [PASS] no A2S_CRASH_SE leaked into lost-tmp file secrets.enc
+  [PASS] no A2S_CRASH_NE leaked into lost-tmp file secrets.enc
+  [PASS] lost-tmp: stderr explains the refusal :: Error: failed to recover a pending hosts/secrets commit
+
+Caused by:
+    pending config commit cannot be replayed: prepared hosts file /var/folders/k3/hy99wl890f
+  [PASS] lost-tmp: hosts.json unchanged
+  [PASS] lost-tmp: log kept for inspection
+  [PASS] lost-tmp: the refused host did not land
+
+=== summary ===
+  cases=3 (before-rename, before-finish, lost-tmp)  failures=0
+
+  isolated tree retained at /var/folders/k3/hy99wl890fl6nyzr42fv0cbr0000gn/T/a2s-crash-ja2hcgj5

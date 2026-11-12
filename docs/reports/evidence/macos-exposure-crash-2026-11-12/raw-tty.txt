@@ -1,0 +1,27 @@
+=== environment ===
+ProductName:		macOS | ProductVersion:		27.2.1 | BuildVersion:		26B131
+  cli=/Users/yuqu/WorkBuddy/Worktrees/agent2ssh/main-9315708c/src-tauri/target/debug/agent2ssh exists=True
+  isolated root=/var/folders/k3/hy99wl890fl6nyzr42fv0cbr0000gn/T/a2s-tty-ggnrpcfo  (never ~/.agent2ssh)
+
+=== T1: real PTY, first-time set-password ===
+$ (pty) agent2ssh secrets set-password   config=/var/folders/k3/hy99wl890fl6nyzr42fv0cbr0000gn/T/a2s-tty-ggnrpcfo/pty-config
+  [PASS] T1: first prompt observed on the PTY
+  typed (hex, first 40 bytes)=4132535f5454595f4d41524b45525f38443331e4b8ad7f0a  (synthetic marker, not a credential)
+  [PASS] T1: confirmation prompt observed
+  [PASS] T1: success message observed
+  [PASS] T1: process exited successfully :: rc=0
+  [PASS] T1: synthetic password never echoed on the PTY
+  PTY output (escaped)='New master password: \r\nConfirm master password: \r\nMaster password set.\r\n'
+  [PASS] T1: secrets.enc created
+
+=== T2: non-TTY redirected stdin ===
+$ printf '<synthetic>\n' | agent2ssh secrets set-password   config=/var/folders/k3/hy99wl890fl6nyzr42fv0cbr0000gn/T/a2s-tty-ggnrpcfo/pipe-config
+  rc=0 stdout='Master password set.'
+  stderr=''
+  [PASS] T2: pipe form succeeded
+  [PASS] T2: no interactive prompt printed to stderr
+  [PASS] T2: no interactive prompt printed to stdout
+  [PASS] T2: synthetic password absent from stdout/stderr
+  [PASS] T2: secrets.enc created
+
+=== summary === failures=0
