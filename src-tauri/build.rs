@@ -1,10 +1,38 @@
 fn main() {
-    #[cfg(feature = "tauri")]
-    {
-        blank_missing_sidecars();
-        tauri_build::build();
-        delay_load_comctl32();
+    // Nothing this script does belongs in a metadata collection; see
+    // `cargo_is_collecting_metadata` for why skipping it is load-bearing.
+    if !cargo_is_collecting_metadata() {
+        #[cfg(feature = "tauri")]
+        {
+            blank_missing_sidecars();
+            tauri_build::build();
+            delay_load_comctl32();
+        }
     }
+}
+
+/// Leave `main` alone when cargo is only describing the package.
+///
+/// `cargo metadata --filter-platform <another platform>` is the read used to
+/// check that `glib` is absent from the Windows and macOS graphs, and a caller
+/// checking a crate the `tauri` feature pulls in has no reason to add
+/// `--no-default-features` — the CNB job does not. Without that flag the two
+/// arms below are live, and cargo runs build scripts for *the host* even while
+/// describing another platform. `tauri_build::build()` then emits
+/// `cargo:rustc-link-lib=ssl` to the host rustc, which evaluates the
+/// `#[link(name = "ssl")]` attribute openssl-sys 0.9.116 puts on a cfg-gated
+/// `OPENSSL_init_ssl`. On the CNB `rust:bookworm` image that library has no
+/// headers, so the collection dies with `Could not find directory of OpenSSL
+/// installation` — the requested platform's graph refused over this host's
+/// packaging. That is PR #35's second red; the manifest is fine, the query is
+/// what fails.
+///
+/// `CARGO_CFG_TARGET_OS` cannot separate the two runs, being the host in both.
+/// This can: while collecting, cargo prefixes `RUSTFLAGS` with a unit
+/// separator (`\u{1f}`) when it hands them to a build script, and a real build
+/// never has an empty first flag.
+fn cargo_is_collecting_metadata() -> bool {
+    std::env::var("CARGO_ENCODED_RUSTFLAGS").is_ok_and(|flags| flags.starts_with('\u{1f}'))
 }
 
 /// Compile the tauri-feature library even when the sidecars have not been built.
