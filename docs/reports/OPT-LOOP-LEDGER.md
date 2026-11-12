@@ -3920,8 +3920,10 @@ L2-154（`/exec-multi` 全 0 语义）、L2-155（preview 缺 admin 门）、L2-
 
 **本轮改的是三处「检查自身没有兜底」，不是补几条表项**：
 
-- `f7470f6`（`daemon_integration.rs`）：①`HELPER_STATUS` 15 → **31** 行，三个 `preflight_*` 包装、`authorize_targets`、`finish_sftp_operation`、`check_daemon_scope`、`terminal_broadcast_preview_results`、`authorize_command` 的 403、gate 谓词 `gate_blocks_source(` 各按码登记；②新增 `every_helper_status_needle_names_a_call_a_body_makes`，**死 needle 现形**（原来 `too_many_requests_status()` 只被限流器自己调用，任何 handler body 都不含它，删行）；③两处 body 扫描先 `strip_rust_comments`；④`INBAND_REJECTIONS` 加第五段 `delegates`，`unbacked` 要求每个豁免码被 handler 或该 delegate 消费。
-- 本小节所在提交（`api.yaml` + `L2-185` + 台账）：`/terminal/broadcast` 的 403 段改成「只有 400 终止整个请求，批次限流逐 target 折进 200」；`GET /terminal` 的 429 补「升级后同一个码还走 `{"type":"error"}` 帧」；`handler_body_of` 的「66 of the 106」换成不带数字的说明（那个数任何人复算都对不上，快照数字会被当成已验证事实引用）。
+- `ca97585`（`daemon_integration.rs`）：①`HELPER_STATUS` 15 → **31** 行，三个 `preflight_*` 包装、`authorize_targets`、`finish_sftp_operation`、`check_daemon_scope`、`terminal_broadcast_preview_results`、`authorize_command` 的 403、gate 谓词 `gate_blocks_source(` 各按码登记；②新增 `every_helper_status_needle_names_a_call_a_body_makes`，**死 needle 现形**（原来 `too_many_requests_status()` 只被限流器自己调用，任何 handler body 都不含它，删行）；③两处 body 扫描先 `strip_rust_comments`；④`INBAND_REJECTIONS` 加第五段 `delegates`，`unbacked` 要求每个豁免码被 handler 或该 delegate 消费。
+- `55989ca`（`api.yaml` + `L2-185` + 台账）：`/terminal/broadcast` 的 403 段改成「只有 400 终止整个请求，批次限流逐 target 折进 200」；`GET /terminal` 的 429 补「升级后同一个码还走 `{"type":"error"}` 帧」；`handler_body_of` 的「66 of the 106」换成不带数字的说明（那个数任何人复算都对不上，快照数字会被当成已验证事实引用）。
+
+**基线变更（不是本轮改的）**：合流时远端已前进到 `9c31553`（他人 PR #35 glib pin 合并，动了 `Cargo.toml` / `build.rs` / `agent2ssh-daemon.rs` / `embedded_ssh.rs`）。rebase 干净，全部验证在 rebase 后重跑。`--lib` 从 863/1/1 变成 **865/0/1**：那条故意红的 `an_ipv6_literal_at_port_22_is_removed`（`embedded_ssh.rs:765`，仍在）已被 #35 的重写带绿。**下轮不要再用 863/1/1 当基线。**
 
 **反向验证四次**（各自红在不同断言上）：①把 `check_daemon_scope(` 拼成 `check_daemon_scope_typo(` → 新测试点名 `["check_daemon_scope_typo("]`；②preview 的豁免集加回 `429` → `unbacked` 点名「neither its handler nor [terminal_broadcast_preview_results] calls a helper that answers that code」；③在 `health` 体里注入一行 `// preflight_guarded_request(` → **剥离后绿**，把剥离关掉则同时点名 400/403/408/423/429 五条（证明注释能被当调用）；④删 `/exec-multi` 的 408 → 红并点名 `408 post /exec-multi (exec_multi via helper)`，撤掉 `preflight_guarded_request(` 与 `authorize_targets(` 两条 408 表项后同一删除**转绿**（证明红来自新表项，不是别处）。
 
@@ -3939,3 +3941,5 @@ L2-154（`/exec-multi` 全 0 语义）、L2-155（preview 缺 admin 门）、L2-
 ### 过程失误（写下来防再犯）
 
 本轮前四次 `Edit` 全部打在 **REPO 主工作区**的 `src-tauri/tests/daemon_integration.rs` 上（路径没带 `-opt-worktrees/single-20`），发现时已改了表、扫描与新增测试三处。处置：`git -C $REPO checkout -- <file>` 还原，`git status` 确认只剩既有的 `.deja/`，再在 WT 里重做全部改动。**代价是前两次 `cargo test`（84 passed）读数无意义——它们跑的是未被改动的 WT 源码**。教训：`Edit`/`Write` 的路径必须落在 `$WT` 下；「测试绿了」要先确认改动真的在跑的那棵树里。
+
+**回帖**：`2120759458635624448`（`## 本轮收尾`，`06:03:51Z`）。`#20` **保持 open**：L2-176/177/178/179/180/181/182 与新增 **L2-185** 都要人拍板；本轮的 ①marker 定位、②一码两形态、③`GET /hosts/{name}/policy` 的 403 反方向缺口留待下一批。worktree `…/single-20` 已 remove、分支 `opt/single-20-20261112g` 已 `-d`，主工作区 `--ff-only` 到 `55989ca`，仅 `.deja/` 未跟踪。
