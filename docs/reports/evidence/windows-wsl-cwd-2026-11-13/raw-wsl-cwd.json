@@ -1,0 +1,119 @@
+{
+  "wsl_list": "NAME              STATE           VERSION\n\n* Ubuntu            Stopped         2\n\n  docker-desktop    Running         2",
+  "cases": [
+    {
+      "case": "default-distro-cwd-user",
+      "distro_arg": null,
+      "cwd": "C:\\Users\\Administrator",
+      "argv": [
+        "C:\\WINDOWS\\System32\\wsl.exe",
+        "--shell-type",
+        "login",
+        "sh",
+        "-c",
+        "pwd; printf 'env_pwd=%s\\n' \"$PWD\""
+      ],
+      "returncode": 0,
+      "stdout": "/mnt/c/Users/Administrator\nenv_pwd=/mnt/c/Users/Administrator",
+      "stderr": ""
+    },
+    {
+      "case": "default-distro-cwd-system32",
+      "distro_arg": null,
+      "cwd": "C:\\WINDOWS\\System32",
+      "argv": [
+        "C:\\WINDOWS\\System32\\wsl.exe",
+        "--shell-type",
+        "login",
+        "sh",
+        "-c",
+        "pwd; printf 'env_pwd=%s\\n' \"$PWD\""
+      ],
+      "returncode": 0,
+      "stdout": "/mnt/c/WINDOWS/System32\nenv_pwd=/mnt/c/WINDOWS/System32",
+      "stderr": ""
+    },
+    {
+      "case": "default-distro-cwd-drive-root",
+      "distro_arg": null,
+      "cwd": "D:\\",
+      "argv": [
+        "C:\\WINDOWS\\System32\\wsl.exe",
+        "--shell-type",
+        "login",
+        "sh",
+        "-c",
+        "pwd; printf 'env_pwd=%s\\n' \"$PWD\""
+      ],
+      "returncode": 0,
+      "stdout": "/mnt/d\nenv_pwd=/mnt/d",
+      "stderr": ""
+    },
+    {
+      "case": "named-distro-cwd-user",
+      "distro_arg": "Ubuntu",
+      "cwd": "C:\\Users\\Administrator",
+      "argv": [
+        "C:\\WINDOWS\\System32\\wsl.exe",
+        "-d",
+        "Ubuntu",
+        "--shell-type",
+        "login",
+        "sh",
+        "-c",
+        "pwd; printf 'env_pwd=%s\\n' \"$PWD\""
+      ],
+      "returncode": 0,
+      "stdout": "/mnt/c/Users/Administrator\nenv_pwd=/mnt/c/Users/Administrator",
+      "stderr": ""
+    },
+    {
+      "case": "unc-cwd-localhost",
+      "distro_arg": null,
+      "cwd": "\\\\localhost\\C$\\Users",
+      "argv": [
+        "C:\\WINDOWS\\System32\\wsl.exe",
+        "--shell-type",
+        "login",
+        "sh",
+        "-c",
+        "pwd; printf 'env_pwd=%s\\n' \"$PWD\""
+      ],
+      "returncode": 0,
+      "stdout": "/root\nenv_pwd=/root",
+      "stderr": "wsl: Failed to translate '\\\\localhost\\C$\\Users'"
+    },
+    {
+      "case": "unc-cwd-wsl-localhost",
+      "distro_arg": null,
+      "cwd": "\\\\wsl.localhost\\Ubuntu\\home",
+      "argv": [
+        "C:\\WINDOWS\\System32\\wsl.exe",
+        "--shell-type",
+        "login",
+        "sh",
+        "-c",
+        "pwd; printf 'env_pwd=%s\\n' \"$PWD\""
+      ],
+      "returncode": 0,
+      "stdout": "/home\nenv_pwd=/home",
+      "stderr": ""
+    },
+    {
+      "case": "unc-shell-fallback-cwd",
+      "distro_arg": null,
+      "cwd": "C:\\WINDOWS",
+      "argv": [
+        "C:\\WINDOWS\\System32\\wsl.exe",
+        "--shell-type",
+        "login",
+        "sh",
+        "-c",
+        "pwd; printf 'env_pwd=%s\\n' \"$PWD\""
+      ],
+      "returncode": 0,
+      "stdout": "/mnt/c/WINDOWS\nenv_pwd=/mnt/c/WINDOWS",
+      "stderr": ""
+    }
+  ]
+}
