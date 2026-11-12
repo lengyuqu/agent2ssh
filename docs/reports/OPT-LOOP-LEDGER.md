@@ -3784,3 +3784,44 @@ L2-154（`/exec-multi` 全 0 语义）、L2-155（preview 缺 admin 门）、L2-
 2. **「`connect`/`disconnect` 是 L2-181 那个坑的同一个坑」**——同形状（同一个白名单检查、同一个开/关不对称），不同后果：会话有 `max_sessions` → 429 死锁；连接无并发配额且 `connect_host` 幂等 → 不 429、不累积，只是那条保留连接在该 token 手里放不掉。
 
 **回帖**：`2120687239158980608`（`## 本轮收尾`）。`#21` **保持 open**（L2-176/177/178/179/181 五项待拍板；文档一致性这条线本轮到 `disconnect` 为止）。
+
+## 2026-11-12 · 手工/单发消费 · #20 第八次进入 · 广播路由的 400 没有任何守卫，以及「第三条 500 不来自文件」
+
+模式 B 单发（open 十二条 `#20`–`#29` + `#31`/`#32` 安全贴，**无 `[opt-round]`** → 批次段为空）。基线 `7028cc9`。选靶理由：`#20` 最新是 CodeBuddy 复核 `2120652444223832064`（11-11 22:58:37Z，未消费），比本流程 22:53 的收尾帖**晚 5 分钟**——上两轮都把它读成「在等复核」，实质是那份复核早于它们开工；`#21` 最新是本流程 09:07 的 `## 本轮收尾`（真在等），`#23` 的复核 `2120583722461192192` 未消费但编号更大。
+
+### 判定（10 条 → 成立 6 / 部分成立 2 / 不成立 2）
+
+| # | 指摘 | 判定 | 证据要点 |
+|---|---|---|---|
+| 1 | Q1：11 个 `ensure_command_length` 调用点分三种形状（9 直传 `?`、1 帧内 `exec_stream`、1 经 validator 间接） | **成立** | 逐一跑 `grep ensure_command_length(` 得 11 处（`:1710`/`:1812`/`:1864`/`:1907`/`:2863`/`:3397`/`:3485`/`:3519`/`:3552`/`:4290`/`:5257`）；`:4290` 属 `validate_terminal_broadcast_request`，其余 10 处逐个用「向上找最近 `fn`」确认了所属 handler |
+| 2 | Q1：两条 broadcast 的 400 是 `HELPER_STATUS` 视野外（handler 正文无该字面量） | **成立** | `terminal_broadcast_preview`（`:4422-4437`）与 `terminal_broadcast_run`（`:4438-4611`）正文各只有一句 `validate_terminal_broadcast_request(&request)?`，`ensure_command_length(` 零命中 |
+| 3 | Q1：「删掉 `"400":` 靠 `StatusCode::BAD_REQUEST` 那半还能红（五个臂之一）」 | **不成立** | 那五个 `StatusCode::BAD_REQUEST` 全在 `validate_terminal_broadcast_request`（`:4287-4320`）里，**不在 handler 正文**：两个 handler 正文的 `StatusCode::` 计数为 0。实测删掉 `/terminal/broadcast` 的 `"400":`，改动前 84 passed 零红 |
+| 4 | Q1 修法：给表项补 `("validate_terminal_broadcast_request(", "400")` | **部分成立（单独照做无效）** | `INBAND_REJECTIONS` 的旧形态是「整条路由 return Vec::new()」，而两条 broadcast 都在那张表里 → 新表项对它们同样是零作用。实测：保留旧豁免形状 + 新表项 + 删掉 `"400":` → **84 passed**（不红）。必须同时把豁免改成按状态码（见改法） |
+| 5 | Q1：`/risk/check`、`/approval/check` 的 400 位置与措辞与同族一致 | **成立** | `api.yaml` 两处 400 的可读码存在且措辞同族，上一轮补的 |
+| 6 | Q2：包装层共四个，其余三个（`preflight_*` 外层、`authorize_targets`、`validate_*`）不需要加表项 | **成立** | `authorize_command_inner`（`:770-816`）只有 `ScopeDenied`/`ApprovalRejected` 两个 403 臂（`:786`/`:807`），`Internal` 才是 500（`:813`）；`exec_multi:1867-1868`、`exec_compare:1911-1912` 在 `authorize_targets` 之前已内联 `reject_if_gate_paused` + `reject_if_rate_limited`，再加表项确实是空转 |
+| 7 | Q2 附：`handle_terminal` 不是扫描对象（`/terminal` 挂的是 `terminal_attach`） | **成立（记录，不重复提）** | `:5877` `.route("/terminal", get(terminal_attach))` |
+| 8 | Q3：(c) 只是半步，另给「mtime 变化时也打一条」的折中 | **成立（采纳一半，写进 L2-180）** | `risk_config.rs` 与 `policy.rs` 的 `tracing` 计数都是 **0**；`load_risk_rules` 已在比 `current_modified`（`:46-56`/`:66`），加 `last_logged_modified` 的代价只有日志频率 |
+| 9 | §4.1：`/exec` 与 `/local-exec` 能答 500、`api.yaml` 都没写 | **部分成立** | 两条 operation 的 `responses` 确实都没有 500——但这是 L2-174 定下的口径（文件级说一次，不在每条 operation 上重复），不是遗漏。**真正缺的是另一件事**：文件级段落把 preflight 的 500 全部归因成「两个共享读取失败、消息点名那个文件」，而 `authorize_command_inner:813` 的 `Internal` 还有第三源——`request_and_wait_for_approval`（`:611-700`）在 daemon 关闭时 `return Err("daemon shutting down; approval wait cancelled")`、未知状态返回 `Err("unexpected approval status")`，两者都**不提文件** |
+| 10 | §4.2：`/sftp/rm-rf` 的 `responses` 无 408，description 里的 "below" 是死指针 | **不成立** | 该 operation 的 `responses` 依次是 `200/400/401/403/408/415/422/423/429`，408 就在 "below" 指向的下一段，指针活着 |
+
+### 改了什么（全 L1）
+
+- `src-tauri/tests/daemon_integration.rs`：①`HELPER_STATUS` 13 → 14，加 `("validate_terminal_broadcast_request(", "400")`；②`INBAND_REJECTIONS` 从 `(&str, &str, &str)` 改成 `(&str, &str, &[&str], &str)`，第三段是**该路由吞掉的码集合**（`/exec/stream` = `400/423/429`，两条 broadcast = `423/429`），`undocumented_via_helper` 由「整条路由 return」改成「按码过滤」；③模块文档把 `ensure_command_length` 那段的数量改正（十个 handler 调用、九个文档化、第十个是帧内的 `/exec/stream`），并把 validator 这条第十一个调用点写清；④`the_spec_states_the_preflight_internal_errors_once` 加一条 needle，钉住「取消的审批等待答 500 且不点文件」这句话。
+- `docs/api.yaml`：`info.description` 的 500 段落补一段——preflight 的 500 不止「两个共享读取」两源，审批等待被 shutdown 取消（`daemon shutting down; approval wait cancelled`）与未知状态（`unexpected approval status`）也不提文件，补救是重试而不是改策略文件。**没有**给任何 operation 加 per-operation 500（L2-174 的口径不变）。
+- `docs/reports/OPT-LOOP-L2-PENDING.md`：L2-180 补「(c) 只是半步、收口是 (b)」，新增 (c+)「日志跟 mtime 走」与「(a) 不重新开」。**编号未变，最大仍是 L2-181**。
+
+### 反向验证（三次）
+
+1. 删掉 `/terminal/broadcast` 的 `"400":` → 红并点名 `["400 post /terminal/broadcast (terminal_broadcast_run via helper)"]`。
+2. 保留旧豁免形状（整条路由跳过）+ 新表项 + 同样删掉 `"400":` → **84 passed 不红**，证明「只加表项」是空转，必须同时改豁免粒度。
+3. 把 api.yaml 里 `daemon shutting down; approval wait cancelled` 改成 `approval wait cancelled` → 新 needle 红并给出「三个文件名会被读成完整成因清单」的原因。
+
+### 验证
+
+`npm run build` **6.25 s**；`cargo fmt --check` 绿（首次红：`INBAND_REJECTIONS` 两项超宽，已 `cargo fmt`）；`--no-default-features --lib` **863 passed / 1 failed / 1 ignored**（红项仍是那条故意红的 `an_ipv6_literal_at_port_22_is_removed`）；`--no-default-features --features daemon --test daemon_integration` **84 passed / 0 failed**（与上轮同数，本轮只加强既有断言、未加测试函数）。
+
+### 新增「不成立」，不要重复提
+
+1. **「删掉 `/terminal/broadcast` 的 `"400":` 会因 `StatusCode::BAD_REQUEST` 那半变红」**——五个 `BAD_REQUEST` 字面量在 `validate_terminal_broadcast_request` 里，两个 handler 正文的 `StatusCode::` 计数是 0；现在能红是靠本轮新加的表项 + 按码豁免。
+2. **「`/sftp/rm-rf` 的 `responses` 没有 408、description 里的 below 是死指针」**——408 存在（`200/400/401/403/408/415/422/423/429`），"below" 指的就是它。
+

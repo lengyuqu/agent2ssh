@@ -58,6 +58,15 @@ info:
     unreadable gate or policy file is an operator-fixable condition, not a
     crash.
 
+    Those two reads are not the only way a preflight route answers 500. Once an
+    approval is actually required, the wait itself can fail: a daemon that shuts
+    down while a request is waiting rejects the pending card and answers `500`
+    with `daemon shutting down; approval wait cancelled`, and a status this
+    daemon cannot interpret answers `unexpected approval status`. Neither names
+    a file, so "read the message, then fix that file" holds only for the two
+    above — these two mean the request never got a verdict, and the remedy is to
+    retry once the daemon is back, not to edit policy.
+
     Three routes answer differently on that same file, and none of them lists it.
     `GET /terminal` returns `reject_if_gate_paused`'s error *before* upgrading, so
     the refusal is a status there — 500 for an unreadable file, 423 for a paused
