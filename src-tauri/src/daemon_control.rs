@@ -394,16 +394,31 @@ fn pid_definitely_missing(pid: u32) -> bool {
 
 #[cfg(windows)]
 fn pid_definitely_missing(pid: u32) -> bool {
-    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_INVALID_PARAMETER};
-    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, ERROR_INVALID_PARAMETER, WAIT_OBJECT_0,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+    };
     unsafe {
-        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-        if handle != 0 {
-            CloseHandle(handle);
-            false
-        } else {
-            GetLastError() == ERROR_INVALID_PARAMETER
+        let handle = OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            0,
+            pid,
+        );
+        if handle == 0 {
+            // An invalid parameter is "no such process". Access denied and
+            // every other error are not: the process may be running under
+            // another account, and this function must not call that absent.
+            return GetLastError() == ERROR_INVALID_PARAMETER;
         }
+        // A process that has exited but whose handle someone still holds (the
+        // launcher, the desktop app, a test's `Child`) still opens, and
+        // `OpenProcess` succeeding would otherwise read as "still alive". Ask
+        // the object itself: a signaled handle means the process ended.
+        let ended = WaitForSingleObject(handle, 0) == WAIT_OBJECT_0;
+        CloseHandle(handle);
+        ended
     }
 }
 
@@ -1276,6 +1291,9 @@ fn creation_time_secs(handle: isize) -> Option<u64> {
 struct BoundProcess {
     handle: isize,
     pid: u32,
+    /// The creation time this binding was accepted for. Kept so termination can
+    /// refuse a handle opened for a different process.
+    start_time: u64,
 }
 
 #[cfg(windows)]
@@ -1288,13 +1306,17 @@ impl BoundProcess {
     /// than treating it as one. The name whitelist is not re-checked here
     /// because `expected_start` was read from a process that already passed it
     /// ([`daemon_process_start_time`]).
+    ///
+    /// Only the rights needed to *observe* are requested here. A caller that may
+    /// not terminate the process can still bind and wait; [`terminate`] asks for
+    /// the extra right when a forced stop is actually requested.
     fn open(pid: u32, expected_start: u64) -> Option<Self> {
         use windows_sys::Win32::System::Threading::{
-            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
         };
         let handle = unsafe {
             OpenProcess(
-                PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE,
+                PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
                 0,
                 pid,
             )
@@ -1303,7 +1325,11 @@ impl BoundProcess {
             return None;
         }
         match creation_time_secs(handle) {
-            Some(start) if start == expected_start => Some(Self { handle, pid }),
+            Some(start) if start == expected_start => Some(Self {
+                handle,
+                pid,
+                start_time: expected_start,
+            }),
             _ => {
                 unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
                 None
@@ -1318,10 +1344,48 @@ impl BoundProcess {
         unsafe { WaitForSingleObject(self.handle, 0) == WAIT_OBJECT_0 }
     }
 
-    /// Terminate exactly the object this handle names.
+    /// Terminate the process this binding verified.
+    ///
+    /// The binding only asked for `SYNCHRONIZE | QUERY_LIMITED_INFORMATION`, so
+    /// a caller that may wait but not terminate (another account, a restricted
+    /// token) can still bind and observe. Termination asks for `PROCESS_TERMINATE`
+    /// only when it is actually needed, and re-checks the creation time on the
+    /// newly opened handle before signalling — a reused PID is refused instead
+    /// of killed.
+    ///
+    /// This is the one place that re-opens by PID; it is not the old fallback,
+    /// because a failure here returns an error rather than trying another
+    /// mechanism. Whether a partially privileged token can bind but not
+    /// terminate is inferred from the documented access rights, not measured on
+    /// such an account.
     fn terminate(&self) -> Result<()> {
-        use windows_sys::Win32::System::Threading::TerminateProcess;
-        if unsafe { TerminateProcess(self.handle, 1) } == 0 {
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, TerminateProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+        };
+        let handle = unsafe {
+            OpenProcess(
+                PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION,
+                0,
+                self.pid,
+            )
+        };
+        if handle == 0 {
+            return Err(anyhow!(
+                "could not open daemon PID {} for termination ({}); no signal was sent",
+                self.pid,
+                std::io::Error::last_os_error()
+            ));
+        }
+        if creation_time_secs(handle) != Some(self.start_time) {
+            unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
+            return Err(anyhow!(
+                "daemon PID {} was reused before it could be terminated; no signal was sent",
+                self.pid
+            ));
+        }
+        let sent = unsafe { TerminateProcess(handle, 1) };
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
+        if sent == 0 {
             return Err(anyhow!(
                 "failed to terminate daemon process {}: {}",
                 self.pid,
@@ -1385,20 +1449,36 @@ fn wait_for_bound_exit(
     wait_for_exit(pid, expected_start, within)
 }
 
-/// Force the daemon down, preferring the bound handle.
+/// Force the daemon down.
 ///
-/// Falling back to [`signal_daemon`] keeps the previous behaviour when the
-/// handle could not be obtained (denied access, gone, or already reused), where
-/// the name whitelist and a second `start_time` read are still the only checks
-/// available.
+/// On Windows this only acts through the handle opened before the shutdown
+/// request (#24). Re-opening the process by PID here would hand the
+/// termination to whatever holds that PID now — exactly the fallback the issue
+/// forbids. `None` means the object was denied, already gone, or already
+/// replaced; the caller gets an error and neither the process nor the PID file
+/// is touched.
+///
+/// Elsewhere the PID-based recheck (`start_time` + name) is still the only
+/// mechanism available, and it is not atomic with the signal.
 #[cfg(any(not(target_os = "macos"), test))]
 fn terminate_for_stop(bound: Option<&BoundProcess>, pid: u32, expected_start: u64) -> Result<()> {
     #[cfg(windows)]
-    if let Some(bound) = bound {
-        return bound.terminate();
+    {
+        let _ = expected_start;
+        let bound = bound.ok_or_else(|| {
+            anyhow!(
+                "daemon PID {pid} did not exit after a guarded shutdown and its process object \
+                 could not be bound (access denied, already exited, or the PID was reused); \
+                 no signal was sent and the PID file is retained"
+            )
+        })?;
+        bound.terminate()
     }
-    let _ = bound;
-    signal_daemon(pid, expected_start, true)
+    #[cfg(not(windows))]
+    {
+        let _ = bound;
+        signal_daemon(pid, expected_start, true)
+    }
 }
 
 #[cfg(any(not(target_os = "macos"), test))]
@@ -1434,7 +1514,11 @@ fn wait_for_exit(pid: u32, expected_start: u64, within: Duration) -> ProcessObse
 
 // Recheck identity immediately before signalling. This narrows the PID reuse
 // window but cannot make a PID-based signal atomic with this inspection.
-#[cfg(not(target_os = "macos"))]
+//
+// Windows never calls this from the stop path any more: a forced stop must go
+// through the handle bound before the shutdown request (#24). Keeping the
+// function out of that build also keeps the forbidden fallback unreachable.
+#[cfg(all(not(target_os = "macos"), not(windows)))]
 fn signal_daemon(pid: u32, expected_start: u64, force: bool) -> Result<()> {
     let sys_pid = sysinfo::Pid::from_u32(pid);
     let mut system = sysinfo::System::new();
@@ -2271,5 +2355,33 @@ mod tests {
             .contains("no shutdown or signal"));
         #[cfg(not(target_os = "macos"))]
         stop_daemon_process(u32::MAX - 1).expect("nothing to stop");
+    }
+
+    /// #24: a forced stop must not fall back to re-opening the PID. The old
+    /// fallback treated "no such process" as success, so restoring it makes this
+    /// assertion fail instead of passing quietly.
+    #[cfg(windows)]
+    #[test]
+    fn an_unbound_force_stop_refuses_instead_of_reopening_by_pid() {
+        let error = terminate_for_stop(None, u32::MAX - 1, 0)
+            .expect_err("an unbound force stop must not report success");
+        assert!(error.to_string().contains("could not be bound"), "{error}");
+    }
+
+    /// The binding is only valid for the creation time it was opened for; a
+    /// different one is a reused PID, not the same process.
+    #[cfg(windows)]
+    #[test]
+    fn a_binding_is_accepted_only_for_the_creation_time_it_was_opened_for() {
+        let pid = std::process::id();
+        let start = observable_live_start_time(pid).expect("this process has a start time");
+        assert!(
+            BoundProcess::open(pid, start).is_some(),
+            "the same creation time binds"
+        );
+        assert!(
+            BoundProcess::open(pid, start + 1).is_none(),
+            "a different creation time must not bind"
+        );
     }
 }
