@@ -289,6 +289,37 @@ fn read_config_id(dir: &Path) -> Result<String> {
     Ok(id)
 }
 
+/// Check published discovery records for a freshly spawned child. This is
+/// only a consistency check; it does not bind a socket to a process object.
+pub fn published_for(config: &Path, pid: u32) -> Result<bool> {
+    let dir = owner_dir(config)?;
+    private_socket_dir(&dir, false)?;
+    let pid_path = dir.join("daemon.pid");
+    let record_path = dir.join(INSTANCE);
+    let pid_md = fs::symlink_metadata(&pid_path)?;
+    let record_md = fs::symlink_metadata(&record_path)?;
+    let socket_md = fs::symlink_metadata(dir.join(SOCKET))?;
+    if !pid_md.file_type().is_file()
+        || pid_md.len() > 20
+        || !record_md.file_type().is_file()
+        || record_md.len() > 4096
+        || !socket_md.file_type().is_socket()
+        || pid_md.uid() != unsafe { libc::geteuid() }
+        || record_md.uid() != unsafe { libc::geteuid() }
+    {
+        return Ok(false);
+    }
+    let record: Instance = serde_json::from_slice(&fs::read(record_path)?)?;
+    Ok(fs::read(pid_path)? == pid.to_string().as_bytes()
+        && record.version == super::VERSION
+        && record.pid == pid
+        && super::valid_id(&record.instance_id)
+        && super::valid_id(&record.config_id)
+        && record.config_id == read_config_id(&dir)?
+        && record.endpoint.kind == "unix"
+        && record.endpoint.path == SOCKET)
+}
+
 pub struct Publication {
     pub listener: UnixListener,
     pub instance: Instance,

@@ -1860,11 +1860,15 @@ pub fn daemon_start(app: AppHandle) -> Result<DaemonControlResult, String> {
     Ok(DaemonControlResult {
         running: true,
         pid: Some(started.pid),
-        message: format!(
-            "Daemon started (pid={}); log: {}.",
-            started.pid,
-            started.log_path.display()
-        ),
+        message: if started.endpoint_authenticated {
+            format!(
+                "Daemon started (pid={}); log: {}.",
+                started.pid,
+                started.log_path.display()
+            )
+        } else {
+            format!("Daemon child started (pid={}); HTTP endpoint identity is unbound and not authenticated; log: {}.", started.pid, started.log_path.display())
+        },
         diagnosis: None,
     })
 }

@@ -18,6 +18,9 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 pub struct DaemonStartResult {
     pub pid: u32,
     pub log_path: PathBuf,
+    /// Whether startup/reuse authenticated the endpoint. On macOS the child
+    /// and its anonymous health response are observations, not binding.
+    pub endpoint_authenticated: bool,
 }
 
 /// The config directory as an absolute path.
@@ -383,6 +386,7 @@ fn expected_config_dir() -> Option<String> {
 // A health response alone can be forged. This observation is deliberately
 // independent of the executable name so a renamed daemon remains visible.
 // It is still a seconds-resolution snapshot, not proof of daemon identity.
+#[cfg(any(not(target_os = "macos"), test))]
 fn observable_live_start_time(pid: u32) -> Option<u64> {
     let sys_pid = sysinfo::Pid::from_u32(pid);
     let mut system = sysinfo::System::new();
@@ -393,28 +397,36 @@ fn observable_live_start_time(pid: u32) -> Option<u64> {
     })
 }
 
-/// Verify that the claimed process is observable before and after the health
-/// and token checks. Neither a process snapshot nor the endpoint proves identity.
+/// Verify the legacy authenticated health checks on non-macOS platforms.
+/// macOS has no proved binding and must never send a token for this check.
 pub fn daemon_matches_config(pid: u32) -> bool {
-    let Some(start_time) = observable_live_start_time(pid) else {
-        return false;
-    };
-    if health_identity().map(|identity| identity.pid) != Some(pid) {
-        return false;
+    #[cfg(target_os = "macos")]
+    {
+        let _ = pid;
+        false
     }
-    let Some(token) = crate::daemon_activity::read_admin_token() else {
-        return false;
-    };
-    let authenticated = crate::daemon_activity::local_daemon_request(
-        "GET",
-        "/gate",
-        Some(&token),
-        Duration::from_millis(500),
-    )
-    .is_ok_and(|response| response.status == 200);
-    authenticated
-        && daemon_health_pid() == Some(pid)
-        && observable_live_start_time(pid) == Some(start_time)
+    #[cfg(not(target_os = "macos"))]
+    {
+        let Some(start_time) = observable_live_start_time(pid) else {
+            return false;
+        };
+        if health_identity().map(|identity| identity.pid) != Some(pid) {
+            return false;
+        }
+        let Some(token) = crate::daemon_activity::read_admin_token() else {
+            return false;
+        };
+        let authenticated = crate::daemon_activity::local_daemon_request(
+            "GET",
+            "/gate",
+            Some(&token),
+            Duration::from_millis(500),
+        )
+        .is_ok_and(|response| response.status == 200);
+        authenticated
+            && daemon_health_pid() == Some(pid)
+            && observable_live_start_time(pid) == Some(start_time)
+    }
 }
 
 // A missing sysinfo entry can also mean the OS denied inspection. Only treat
@@ -960,6 +972,7 @@ pub fn daemon_status_report() -> Result<DaemonStatusReport> {
     })
 }
 
+#[cfg(not(target_os = "macos"))]
 fn wait_for_daemon_pid(pid: u32, timeout: Duration) -> bool {
     let start = Instant::now();
     while start.elapsed() < timeout {
@@ -969,6 +982,32 @@ fn wait_for_daemon_pid(pid: u32, timeout: Duration) -> bool {
         thread::sleep(Duration::from_millis(100));
     }
     daemon_matches_config(pid)
+}
+
+/// Observe only the child this caller spawned. Matching self-reported HTTP
+/// health and on-disk records are readiness hints, never identity binding.
+#[cfg(target_os = "macos")]
+fn wait_for_spawned_daemon(child: &mut std::process::Child, timeout: Duration) -> Result<bool> {
+    let pid = child.id();
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if child.try_wait()?.is_some() {
+            return Ok(false);
+        }
+        let records_match = config_dir()
+            .and_then(|dir| crate::daemon_identity::macos::published_for(&dir, pid))
+            .unwrap_or(false);
+        let health_matches = health_identity().is_some_and(|health| {
+            health.pid == pid
+                && health.config_dir == expected_config_dir()
+                && health.config_dir.is_some()
+        });
+        if records_match && health_matches && child.try_wait()?.is_none() {
+            return Ok(true);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    Ok(false)
 }
 
 /// Rotate daemon.log if it has grown past `max_size_bytes`, keeping three prior
@@ -1025,6 +1064,7 @@ pub fn start_daemon_background(daemon_bin: &Path) -> Result<DaemonStartResult> {
                 return Ok(DaemonStartResult {
                     pid,
                     log_path: daemon_log_path()?,
+                    endpoint_authenticated: true,
                 });
             }
             DaemonPidState::Stale => {
@@ -1046,6 +1086,9 @@ pub fn start_daemon_background(daemon_bin: &Path) -> Result<DaemonStartResult> {
                 }
             }
             DaemonPidState::RunningUnhealthy | DaemonPidState::Unverified => {
+                #[cfg(target_os = "macos")]
+                return Err(anyhow!("daemon PID {pid} is live or cannot be verified; endpoint identity is unbound, so it was not reused and no admin token was sent. PID file retained for inspection"));
+                #[cfg(not(target_os = "macos"))]
                 return Err(anyhow!(
                     "daemon PID {pid} is live or cannot be verified; PID file retained"
                 ));
@@ -1105,7 +1148,11 @@ pub fn start_daemon_background(daemon_bin: &Path) -> Result<DaemonStartResult> {
             "log_path": daemon_log_path()?.display().to_string(),
         })),
     );
-    if !wait_for_daemon_pid(pid, Duration::from_secs(3)) {
+    #[cfg(target_os = "macos")]
+    let ready = wait_for_spawned_daemon(&mut child, Duration::from_secs(3)).unwrap_or(false);
+    #[cfg(not(target_os = "macos"))]
+    let ready = wait_for_daemon_pid(pid, Duration::from_secs(3));
+    if !ready {
         // This is the exact child just spawned by this call, not a PID read
         // from disk. Do not abandon it when startup could not be verified.
         if child
@@ -1139,24 +1186,33 @@ pub fn start_daemon_background(daemon_bin: &Path) -> Result<DaemonStartResult> {
         let _ = crate::diagnostics::append_diagnostic_log(
             "error",
             "daemon_control",
-            "daemon child did not provide an authenticated health response",
+            if cfg!(target_os = "macos") {
+                "spawned daemon readiness was not observed"
+            } else {
+                "daemon child did not provide an authenticated health response"
+            },
             Some(
                 serde_json::json!({ "pid": pid, "log_path": daemon_log_path()?.display().to_string() }),
             ),
         );
-        return Err(anyhow!("daemon child (pid={pid}) did not provide an authenticated health response and was stopped; see {}", daemon_log_path()?.display()));
+        return Err(anyhow!("daemon child (pid={pid}) did not provide the required readiness evidence and was stopped; see {}", daemon_log_path()?.display()));
     }
 
     let _ = crate::diagnostics::append_diagnostic_log(
         "info",
         "daemon_control",
-        "daemon health endpoint reachable",
+        if cfg!(target_os = "macos") {
+            "spawned daemon has an unbound health response"
+        } else {
+            "daemon health endpoint reachable"
+        },
         Some(serde_json::json!({ "pid": pid })),
     );
 
     Ok(DaemonStartResult {
         pid,
         log_path: daemon_log_path()?,
+        endpoint_authenticated: !cfg!(target_os = "macos"),
     })
 }
 

@@ -803,15 +803,21 @@ fn renamed_daemon_is_reported_healthy_but_not_unsafely_stopped() {
     let daemon = RunningDaemon::start_with_name("renamed", &[], true);
     let pid = daemon.child.id();
     assert!(!process_is_alive(pid));
-    assert_eq!(daemon_pid_state(pid), DaemonPidState::Healthy);
-    // K14 says the diagnostic report contradicts itself in one JSON: the
-    // process-name gate answers "not a daemon of ours" while the config/token
-    // identity answers "healthy". Neither half is covered anywhere else, so pin
-    // both here — a change to either judgement should have to come here and
-    // decide which one is wrong, not drift apart silently.
+    let expected = if cfg!(target_os = "macos") {
+        DaemonPidState::Unverified
+    } else {
+        DaemonPidState::Healthy
+    };
+    assert_eq!(daemon_pid_state(pid), expected);
+    // The legacy diagnostic health field uses the authenticated check on
+    // other platforms. On macOS it must stay false rather than exposing a
+    // token to a peer whose identity has not been bound.
     let report = agent2ssh::diagnostics::generate_system_report().expect("system report");
     assert_eq!(report["daemon"]["process_alive"], serde_json::json!(false));
-    assert_eq!(report["daemon"]["health_ok"], serde_json::json!(true));
+    assert_eq!(
+        report["daemon"]["health_ok"],
+        serde_json::json!(!cfg!(target_os = "macos"))
+    );
     assert_eq!(report["daemon"]["pid"], serde_json::json!(pid));
     #[cfg(feature = "tauri")]
     {
@@ -846,14 +852,13 @@ fn renamed_daemon_is_reported_healthy_but_not_unsafely_stopped() {
         })
     );
     let start = cli("start");
-    assert!(start.status.success());
-    assert!(
-        String::from_utf8_lossy(&start.stdout).contains(if cfg!(target_os = "macos") {
-            "identity is unbound"
-        } else {
-            "already running"
-        })
-    );
+    if cfg!(target_os = "macos") {
+        assert!(!start.status.success());
+        assert!(String::from_utf8_lossy(&start.stderr).contains("not reused"));
+    } else {
+        assert!(start.status.success());
+        assert!(String::from_utf8_lossy(&start.stdout).contains("already running"));
+    }
     let stop = cli("stop");
     assert!(!stop.status.success());
     assert!(
@@ -867,7 +872,7 @@ fn renamed_daemon_is_reported_healthy_but_not_unsafely_stopped() {
         std::fs::read_to_string(daemon.pid_file()).unwrap(),
         pid.to_string()
     );
-    assert_eq!(daemon_pid_state(pid), DaemonPidState::Healthy);
+    assert_eq!(daemon_pid_state(pid), expected);
 
     // A matching PID alone is not enough if this config has a different token.
     std::fs::write(daemon.dir.join("daemon.token"), "wrong-token").unwrap();
@@ -881,7 +886,7 @@ fn renamed_daemon_is_reported_healthy_but_not_unsafely_stopped() {
         pid.to_string()
     );
     std::fs::write(daemon.dir.join("daemon.token"), &daemon.token).unwrap();
-    assert_eq!(daemon_pid_state(pid), DaemonPidState::Healthy);
+    assert_eq!(daemon_pid_state(pid), expected);
 
     // A live renamed daemon with an unavailable health endpoint is uncertain,
     // not stale. No desktop or CLI path may silently discard its PID.
@@ -2144,7 +2149,11 @@ fn a_relative_config_dir_in_one_working_directory_names_one_daemon() {
     );
     assert_eq!(
         agent2ssh::daemon_control::daemon_pid_state(pid),
-        agent2ssh::daemon_control::DaemonPidState::Healthy
+        if cfg!(target_os = "macos") {
+            agent2ssh::daemon_control::DaemonPidState::Unverified
+        } else {
+            agent2ssh::daemon_control::DaemonPidState::Healthy
+        }
     );
     request_drain_for_test(pid).expect("stop it");
     drop(guard);

@@ -3115,11 +3115,15 @@ async fn async_main() -> Result<()> {
                     }
                     let daemon_bin = daemon_binary_path()?;
                     let started = start_daemon_background(&daemon_bin)?;
-                    println!(
-                        "Daemon started (pid={}). Log: {}",
-                        started.pid,
-                        started.log_path.display()
-                    );
+                    if started.endpoint_authenticated {
+                        println!(
+                            "Daemon started (pid={}). Log: {}",
+                            started.pid,
+                            started.log_path.display()
+                        );
+                    } else {
+                        println!("Daemon child started (pid={}); HTTP endpoint identity is unbound and not authenticated. Log: {}", started.pid, started.log_path.display());
+                    }
                 }
                 DaemonCommands::Stop {
                     allow_unbound_graceful,
@@ -3170,11 +3174,15 @@ async fn async_main() -> Result<()> {
                     }
                     let daemon_bin = daemon_binary_path()?;
                     let started = start_daemon_background(&daemon_bin)?;
-                    println!(
-                        "Daemon restarted (pid={}). Log: {}",
-                        started.pid,
-                        started.log_path.display()
-                    );
+                    if started.endpoint_authenticated {
+                        println!(
+                            "Daemon restarted (pid={}). Log: {}",
+                            started.pid,
+                            started.log_path.display()
+                        );
+                    } else {
+                        println!("Daemon child started (pid={}); HTTP endpoint identity is unbound and not authenticated. Log: {}", started.pid, started.log_path.display());
+                    }
                 }
                 DaemonCommands::ClearStale {
                     expect_pid,

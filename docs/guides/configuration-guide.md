@@ -434,6 +434,8 @@ unset ssh_password
 
 ### 注意事项
 
+**macOS 启动和复用（#22）**：启动与复用健康检查不再向未经绑定的 HTTP 端点发送管理员 token。已存在的 PID/端点不能证明为期望实例，因此不会自动复用，也不会覆盖记录；请检查现有实例。新启动时检查直接创建的子进程、PID/实例/socket 记录与匿名健康响应；它们只是就绪线索，CLI 和桌面会明确提示 HTTP 端点身份未绑定、未认证。这不证明随后其他业务 API 连接的对端，业务 HTTP API 仍按其各自调用方式使用 token。
+
 **macOS 保守策略（#25）**：当前没有经证明的进程对象绑定，普通 `daemon stop`、`daemon restart` 和桌面停止均拒绝发送关闭请求或信号；退出桌面不会主动向未绑定 daemon 发送停止请求或信号；但系统或进程托管环境仍可能使 daemon 退出，正在进行的会话等任务可能中断。macOS 退出前若有 PID 记录、损坏记录或健康端点迹象，会提示活动状态未知；此路径不自动向未绑定端点发送管理员 token。本机隔离桌面实验观察到 `loginwindow` 向测试 daemon 发送 SIGTERM；其他环境尚未验证。`/health` 和 PID 一致只是线索，不代表身份已绑定。新 daemon 的 HTTP `/shutdown` 默认返回 403；只有 daemon 启动环境显式设置 `AGENT2SSH_ALLOW_UNBOUND_HTTP_SHUTDOWN=1` 才开放旧路径；若 daemon 监听非回环地址，该开关也会允许有管理员令牌的远程 HTTP 请求。要承担风险并请求一次优雅关闭，可在数字 loopback 地址上使用 `agent2ssh daemon stop --allow-unbound-graceful` 或桌面确认操作：请求可能停错进程并向错误端点暴露管理员 token；客户端不会重试、强杀、清理 PID 或声称退出已确认；CLI 即使收到接受回执也以非零状态退出，提示结果未验证。旧 daemon 不认识此服务端开关，仍可能接收请求。这个开关仅影响 daemon 启动时的进程环境，设置在客户端环境里不能启用已运行 daemon 的路由。不要通过代理使用此例外；客户端无法识别所有本地代理。
 
 **macOS IPC（#22，部分实现）**：daemon 在不可被其他用户写入、由当前用户拥有的配置目录中创建 0700 的 `.daemon-ipc`，在其中发布 socket `s`；`daemon.instance.json` 记录非秘密实例 ID、PID、配置 ID 和端点，`daemon.config-id` 是持久标识，不是认证凭据。配置目录末级或 socket 子目录若为符号链接、权限不安全，路径上的目录含 ACL 允许项、上级目录不可信或 socket 路径超长，启动会失败并保留已有内容；仅收紧权限的 ACL 拒绝项可保留。配置目录不存在时，仅在安全的现有父目录下创建最后一级；多级缺失时须先创建并检查父目录。首次启用时若旧 daemon 的 PID 仍在，需要先带外检查和停止旧实例，不自动认领或覆盖其记录。进程正常关闭时，daemon 校验记录和 socket inode 后清理自己的 PID、实例文件和 socket；PID 和实例分步发布/删除，不是断电原子事务，异常退出或不一致均保留检查。
