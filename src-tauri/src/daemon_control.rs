@@ -814,6 +814,177 @@ fn process_handle_is_signaled(_pid: u32) -> bool {
     false
 }
 
+/// `GetProcessTimes().ftCreationTime` as Unix seconds.
+///
+/// Measured against `sysinfo::Process::start_time` on Windows 11 26300: equal
+/// in every sample (24/24 across four runs), because sysinfo divides the same
+/// tick count by 10^7. So a value read from a handle is directly comparable to
+/// [`OwnerMarker::start_time`] without a conversion table — see
+/// `docs/reports/CNB-ISSUE-24-WINDOWS-PRIMITIVES-2026-11-12.md`.
+#[cfg(windows)]
+fn creation_time_secs(handle: isize) -> Option<u64> {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::GetProcessTimes;
+    /// Seconds between the FILETIME epoch (1601-01-01) and the Unix epoch.
+    const FILETIME_TO_UNIX_SECS: u64 = 11_644_473_600;
+    unsafe {
+        let mut creation: FILETIME = std::mem::zeroed();
+        let mut exit: FILETIME = std::mem::zeroed();
+        let mut kernel: FILETIME = std::mem::zeroed();
+        let mut user: FILETIME = std::mem::zeroed();
+        if GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) == 0 {
+            return None;
+        }
+        let ticks = ((creation.dwHighDateTime as u64) << 32) | creation.dwLowDateTime as u64;
+        Some(ticks / 10_000_000 - FILETIME_TO_UNIX_SECS)
+    }
+}
+
+/// The Windows process object a stop is allowed to touch.
+///
+/// `OpenProcess(pid)` only ever answers "the object holding this PID right
+/// now", and the PID can change hands between that call and the one that
+/// signals. Opening once and keeping the handle is what makes verification,
+/// waiting and termination act on the same object: a signaled handle means
+/// *that* process ended, not that whoever took the PID next is alive.
+///
+/// The handle is only trusted after its own creation time matches the record.
+/// It is seconds, not the 100 ns `GetProcessTimes` returns, because the record
+/// stores whole seconds — and two processes created within the same second are
+/// indistinguishable at that precision (measured, 4/4 runs; report §3.3). So
+/// this is strictly stronger than re-opening per poll, not omniscient: it
+/// narrows the reuse window to the instant of `open` and removes it for the
+/// 8 s that follow.
+#[cfg(windows)]
+struct BoundProcess {
+    handle: isize,
+    pid: u32,
+}
+
+#[cfg(windows)]
+impl BoundProcess {
+    /// Open the object behind `pid` and keep the handle.
+    ///
+    /// `None` means "not bound": the process is gone, the access was denied, or
+    /// the creation time is not the recorded one. None of those is evidence of
+    /// exit, so every caller falls back to the existing observation path rather
+    /// than treating it as one. The name whitelist is not re-checked here
+    /// because `expected_start` was read from a process that already passed it
+    /// ([`daemon_process_start_time`]).
+    fn open(pid: u32, expected_start: u64) -> Option<Self> {
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+        };
+        let handle = unsafe {
+            OpenProcess(
+                PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE,
+                0,
+                pid,
+            )
+        };
+        if handle == 0 {
+            return None;
+        }
+        match creation_time_secs(handle) {
+            Some(start) if start == expected_start => Some(Self { handle, pid }),
+            _ => {
+                unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
+                None
+            }
+        }
+    }
+
+    /// Has the object this handle names terminated?
+    fn is_signaled(&self) -> bool {
+        use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+        use windows_sys::Win32::System::Threading::WaitForSingleObject;
+        unsafe { WaitForSingleObject(self.handle, 0) == WAIT_OBJECT_0 }
+    }
+
+    /// Terminate exactly the object this handle names.
+    fn terminate(&self) -> Result<()> {
+        use windows_sys::Win32::System::Threading::TerminateProcess;
+        if unsafe { TerminateProcess(self.handle, 1) } == 0 {
+            return Err(anyhow!(
+                "failed to terminate daemon process {}: {}",
+                self.pid,
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+impl Drop for BoundProcess {
+    fn drop(&mut self) {
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.handle) };
+    }
+}
+
+/// Placeholder so the stop path reads the same on every platform.
+///
+/// [`BoundProcess::open`] always answers `None` here, so the handle path is
+/// never taken and the Unix observers keep deciding.
+#[cfg(all(not(windows), any(not(target_os = "macos"), test)))]
+struct BoundProcess;
+
+#[cfg(all(not(windows), any(not(target_os = "macos"), test)))]
+impl BoundProcess {
+    fn open(_pid: u32, _expected_start: u64) -> Option<Self> {
+        None
+    }
+}
+
+/// Wait for exit using the bound handle when there is one.
+///
+/// A bound handle cannot answer `Unknown`: it either signals (that object
+/// ended) or it does not (that object is running). That is the whole point of
+/// binding it — the three-way guess exists because a PID can be reinterpreted,
+/// and a handle cannot.
+#[cfg(any(not(target_os = "macos"), test))]
+fn wait_for_bound_exit(
+    bound: Option<&BoundProcess>,
+    pid: u32,
+    expected_start: u64,
+    within: Duration,
+) -> ProcessObservation {
+    #[cfg(windows)]
+    if let Some(bound) = bound {
+        let start = Instant::now();
+        while start.elapsed() < within {
+            if bound.is_signaled() {
+                return ProcessObservation::Exited;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        return if bound.is_signaled() {
+            ProcessObservation::Exited
+        } else {
+            ProcessObservation::Running
+        };
+    }
+    let _ = bound;
+    wait_for_exit(pid, expected_start, within)
+}
+
+/// Force the daemon down, preferring the bound handle.
+///
+/// Falling back to [`signal_daemon`] keeps the previous behaviour when the
+/// handle could not be obtained (denied access, gone, or already reused), where
+/// the name whitelist and a second `start_time` read are still the only checks
+/// available.
+#[cfg(any(not(target_os = "macos"), test))]
+fn terminate_for_stop(bound: Option<&BoundProcess>, pid: u32, expected_start: u64) -> Result<()> {
+    #[cfg(windows)]
+    if let Some(bound) = bound {
+        return bound.terminate();
+    }
+    let _ = bound;
+    signal_daemon(pid, expected_start, true)
+}
+
+
 #[cfg(any(not(target_os = "macos"), test))]
 fn observe_process(pid: u32, expected_start: u64) -> ProcessObservation {
     let sys_pid = sysinfo::Pid::from_u32(pid);
@@ -1096,6 +1267,12 @@ pub fn stop_daemon_process(pid: u32) -> std::result::Result<(), DaemonStopError>
         // replacement process; a stale marker is safer than removing it.
         return Ok(());
     };
+    // Bind the process object before asking for a shutdown, so the grace period
+    // and any forced termination both address the object that was verified here
+    // — not whatever holds the PID eight seconds later. `None` (denied, gone, or
+    // already reused) falls back to the PID-based observers below; it is not
+    // evidence that the process exited.
+    let bound = BoundProcess::open(pid, start_time);
     // A matching executable name is not proof that this is our daemon: an
     // unrelated process can reuse the PID or spoof argv[0]. Require the health
     // PID to match, the daemon to serve *this* config directory, and this
@@ -1174,7 +1351,7 @@ pub fn stop_daemon_process(pid: u32) -> std::result::Result<(), DaemonStopError>
         }
         ShutdownRequest::NotAccepted(detail) => return Err(Refused::NotAccepted(detail)),
     }
-    match wait_for_exit(pid, start_time, GRACEFUL_STOP_WAIT) {
+    match wait_for_bound_exit(bound.as_ref(), pid, start_time, GRACEFUL_STOP_WAIT) {
         ProcessObservation::Exited => {}
         ProcessObservation::Unknown => {
             return Err(Refused::UncertainExit(pid));
@@ -1186,8 +1363,8 @@ pub fn stop_daemon_process(pid: u32) -> std::result::Result<(), DaemonStopError>
                 "daemon did not exit after a guarded shutdown; leaving it running",
                 Some(serde_json::json!({ "pid": pid })),
             );
-            signal_daemon(pid, start_time, true).map_err(DaemonStopError::Other)?;
-            match wait_for_exit(pid, start_time, Duration::from_secs(2)) {
+            terminate_for_stop(bound.as_ref(), pid, start_time).map_err(DaemonStopError::Other)?;
+            match wait_for_bound_exit(bound.as_ref(), pid, start_time, Duration::from_secs(2)) {
                 ProcessObservation::Exited => {}
                 ProcessObservation::Running => return Err(Refused::StillRunning(pid)),
                 ProcessObservation::Unknown => return Err(Refused::UncertainExit(pid)),
@@ -1492,6 +1669,115 @@ mod tests {
     #[test]
     fn a_live_process_handle_is_not_signaled() {
         assert!(!process_handle_is_signaled(std::process::id()));
+    }
+
+    /// Read the second `GetProcessTimes` reports, the same way `open` does, so a
+    /// test can name the value it expects to be accepted.
+    #[cfg(windows)]
+    fn creation_time_of(pid: u32) -> Option<u64> {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if handle == 0 {
+            return None;
+        }
+        let secs = creation_time_secs(handle);
+        unsafe { CloseHandle(handle) };
+        secs
+    }
+
+    #[cfg(windows)]
+    fn spawn_sleeper() -> std::process::Child {
+        Command::new("cmd.exe")
+            .args(["/C", "ping", "-n", "20", "127.0.0.1"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn sleeper")
+    }
+
+    /// A PID is not an object. Two processes can share one over time, and the
+    /// only way to notice is to refuse a handle whose creation time is not the
+    /// recorded one — which is what `open` does before the stop is allowed to
+    /// trust the handle.
+    #[cfg(windows)]
+    #[test]
+    fn a_bound_handle_refuses_a_creation_time_it_did_not_open() {
+        let child = spawn_sleeper();
+        let pid = child.id();
+        let start = creation_time_of(pid).expect("read creation time");
+        let bound = BoundProcess::open(pid, start);
+        assert!(
+            bound.is_some(),
+            "the recorded second opened this process, so it must bind"
+        );
+        assert!(
+            BoundProcess::open(pid, start + 1).is_none(),
+            "a different second names a different object, and must not bind"
+        );
+        drop(bound);
+        let mut child = child;
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// The handle has to answer for its own object across the exit, otherwise
+    /// the stop path would be back to re-opening a PID it no longer controls.
+    #[cfg(windows)]
+    #[test]
+    fn a_bound_handle_tracks_its_object_through_exit() {
+        let mut child = spawn_sleeper();
+        let pid = child.id();
+        let start = creation_time_of(pid).expect("read creation time");
+        let bound = BoundProcess::open(pid, start).expect("bind live child");
+        assert!(!bound.is_signaled(), "a live child is not signaled");
+        assert_eq!(
+            wait_for_bound_exit(Some(&bound), pid, start, Duration::ZERO),
+            ProcessObservation::Running,
+            "a bound handle never answers Unknown while the object lives"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !bound.is_signaled() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            bound.is_signaled(),
+            "the bound object must report its own termination"
+        );
+        assert_eq!(
+            wait_for_bound_exit(Some(&bound), pid, start, Duration::ZERO),
+            ProcessObservation::Exited
+        );
+    }
+
+    /// Termination goes through the handle, so it ends that object and reports
+    /// failure instead of silently falling back to a PID.
+    #[cfg(windows)]
+    #[test]
+    fn terminating_a_bound_handle_ends_the_object_it_opened() {
+        let mut target = spawn_sleeper();
+        let bystander = spawn_sleeper();
+        let pid = target.id();
+        let start = creation_time_of(pid).expect("read creation time");
+        let bound = BoundProcess::open(pid, start).expect("bind");
+        terminate_for_stop(Some(&bound), pid, start).expect("terminate bound object");
+        let status = target.wait().expect("reap terminated child");
+        assert!(
+            !status.success(),
+            "TerminateProcess exits 1, which must not look like a clean exit"
+        );
+        assert!(bound.is_signaled());
+        assert!(
+            !process_handle_is_signaled(bystander.id()),
+            "a neighbouring process on another PID must be untouched"
+        );
+        let mut bystander = bystander;
+        let _ = bystander.kill();
+        let _ = bystander.wait();
     }
 
     #[cfg(unix)]
