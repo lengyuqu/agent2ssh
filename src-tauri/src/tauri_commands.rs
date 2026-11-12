@@ -1927,17 +1927,25 @@ pub fn daemon_restart(app: AppHandle) -> Result<DaemonControlResult, String> {
 /// CLI or an MCP client started is serving agents that never opened this app.
 #[cfg(not(target_os = "macos"))]
 fn stop_owned_daemon() {
+    // Every exit path leaves a trace. Before this, a renamed daemon hit the
+    // `process_is_alive` name check and returned without a single log line, so
+    // "quitting did not stop the daemon" had no evidence anywhere (K14).
     let Ok(Some(pid)) = crate::daemon_control::read_daemon_pid() else {
+        let _ = append_diagnostic_log(
+            "info",
+            "tauri",
+            "quit found no daemon PID record; nothing to stop",
+            None,
+        );
         return;
     };
-    if !crate::daemon_control::process_is_alive(pid) {
-        return;
-    }
+    // Ownership, not the executable name: `daemon_is_owned` compares the
+    // recorded start time, which a renamed or copied daemon still matches.
     if !crate::daemon_control::daemon_is_owned(pid) {
         let _ = append_diagnostic_log(
             "info",
             "tauri",
-            "quit leaves the daemon running: it was not started by the desktop app",
+            "quit leaves the daemon running: this app has no ownership record for that PID (started elsewhere, already exited, or the record was rotated)",
             Some(serde_json::json!({ "pid": pid })),
         );
         return;
@@ -3918,6 +3926,31 @@ mod tests {
             forwards,
             pending_approvals: approvals,
         }
+    }
+
+    /// A daemon this app started but whose executable name is not on the
+    /// allowlist (a renamed or copied binary) used to make the exit path
+    /// return silently: the name check failed first, so neither the stop nor
+    /// any log line happened. The exit path now decides by ownership and
+    /// records what it found — the stop itself still refuses by name, which is
+    /// exactly the reason that has to be visible.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    #[serial_test::serial]
+    fn quitting_a_renamed_daemon_logs_why_it_survived() {
+        let config = crate::store::TestConfigDir::new("quit-renamed-daemon");
+        let pid = std::process::id();
+        std::fs::write(config.path().join("daemon.pid"), pid.to_string())
+            .expect("write the PID record");
+        crate::daemon_control::mark_daemon_owned(pid).expect("record ownership of this process");
+
+        stop_owned_daemon();
+
+        let log = std::fs::read_to_string(config.path().join("app.log")).unwrap_or_default();
+        assert!(
+            log.contains("quit could not stop the daemon"),
+            "the exit path must say why the daemon survived: {log}"
+        );
     }
 
     #[test]
