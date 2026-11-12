@@ -785,6 +785,20 @@ prelude = "export JAVA_HOME=/opt/jdk-21"   # WSL 的变量写在这里，不能�
 
 常驻会话（`agent2ssh resident open -H local:wsl`）走另一条路径：它不带命令，直接打开发行版的交互式登录 shell，之后每条命令写进同一个 shell 的 stdin，所以 `cd`、`export` 的状态跨命令保留，bash 语法在那里也可用。
 
+**起始目录不是用户主目录，而是调用进程工作目录的翻译结果**（2026-11-13 实测，Windows 11
+10.0.26300 + WSL 2，证据见 `docs/reports/evidence/windows-wsl-cwd-2026-11-13/`）：
+
+| 调用进程的 Windows cwd | 发行版内的起始目录 |
+|---|---|
+| `C:\Users\me` | `/mnt/c/Users/me` |
+| `C:\Windows\System32`（许多 daemon 启动位置） | `/mnt/c/WINDOWS/System32` |
+| `D:\` | `/mnt/d` |
+| `\\wsl.localhost\Ubuntu\home` | `/home`（`\\wsl.localhost\<发行版>\<路径>` 直接映射） |
+| 其他 UNC（如 `\\localhost\C$\Users`） | 回退到默认用户 home（本机 root → `/root`），stderr 有 `wsl: Failed to translate` 警告 |
+
+`-d <发行版>` 只选发行版，不改变起点。所以同一条 `local:wsl:pwd` 在 CLI 里和从桌面应用触发时
+可能给出不同目录；要在发行版内固定位置，命令里显式 `cd`（`sh -c 'cd ~ && …'`）。
+
 ---
 
 ## remotes.toml

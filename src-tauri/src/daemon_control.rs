@@ -935,7 +935,7 @@ pub fn daemon_status_report() -> Result<DaemonStatusReport> {
         && matches!(verdict, DaemonVerdict::Stale | DaemonVerdict::Unverified)
     {
         let prefix = if matches!(record, DaemonPidRecord::Missing) {
-            "No PID record. "
+            "There is no PID record. "
         } else {
             ""
         };
@@ -1924,14 +1924,14 @@ pub fn stop_daemon_process(pid: u32) -> std::result::Result<(), DaemonStopError>
         // carried no receipt. It is still the daemon that health-checked a
         // moment ago (its config directory matched), so continuing is the
         // previous behaviour, not a hole this opened; claiming the check
-        // happened would be the lie. The warning below still attributes the
-        // missing receipt to a version, which is a known defect and not
-        // something this arm can support (K14).
+        // happened would be the lie. The warning therefore reports the missing
+        // receipt and says the version is undeterminable, rather than
+        // attributing it to an older daemon (#20).
         ShutdownRequest::AcceptedUnchecked => {
             let _ = crate::diagnostics::append_diagnostic_log(
                 "warn",
                 "daemon_control",
-                "the daemon accepted the shutdown without checking expect_pid (daemon predates it)",
+                "the daemon accepted the shutdown without a verifiable expect_pid receipt; its version cannot be determined from this response",
                 Some(serde_json::json!({ "pid": pid })),
             );
         }
