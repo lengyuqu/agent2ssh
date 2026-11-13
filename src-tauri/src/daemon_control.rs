@@ -79,6 +79,7 @@ pub fn read_daemon_pid() -> Result<Option<u32>> {
     })
 }
 
+#[cfg(not(target_os = "macos"))]
 const DAEMON_PID_LOCK: &str = ".daemon-pid.lock";
 
 #[cfg(target_os = "macos")]
@@ -841,7 +842,15 @@ fn observe_token() -> TokenObservation {
 }
 
 fn observe_pid_lock(dir: &Path) -> PidLockObservation {
+    #[cfg(target_os = "macos")]
+    let file = match crate::daemon_identity::macos::open_existing_lock(dir) {
+        Ok(Some(file)) => file,
+        Ok(None) => return PidLockObservation::Free,
+        Err(_) => return PidLockObservation::Unknown,
+    };
+    #[cfg(not(target_os = "macos"))]
     let path = dir.join(DAEMON_PID_LOCK);
+    #[cfg(not(target_os = "macos"))]
     let file = match OpenOptions::new().read(true).write(true).open(&path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -852,14 +861,21 @@ fn observe_pid_lock(dir: &Path) -> PidLockObservation {
     // `std::fs::File` grew advisory locks of its own; a shared attempt answers
     // "is a writer holding `.daemon-pid.lock` right now" without blocking and
     // without creating the file.
-    match file.try_lock_shared() {
-        Ok(()) => {
-            let _ = file.unlock();
-            PidLockObservation::Free
-        }
+    let observation = match file.try_lock_shared() {
+        Ok(()) => PidLockObservation::Free,
         Err(std::fs::TryLockError::WouldBlock) => PidLockObservation::Held,
         Err(_) => PidLockObservation::Unknown,
+    };
+    #[cfg(target_os = "macos")]
+    let observation = if crate::daemon_identity::macos::verify_existing_lock(dir, &file).is_ok() {
+        observation
+    } else {
+        PidLockObservation::Unknown
+    };
+    if observation == PidLockObservation::Free {
+        let _ = file.unlock();
     }
+    observation
 }
 
 fn classify_daemon(

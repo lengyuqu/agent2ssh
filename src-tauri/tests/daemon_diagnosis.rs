@@ -397,6 +397,12 @@ fn held_pid_lock_is_reported_without_blocking() {
         .truncate(false)
         .open(&lock_path)
         .unwrap();
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        lock.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+    }
     lock.lock_exclusive().unwrap();
 
     let started = std::time::Instant::now();
@@ -408,4 +414,54 @@ fn held_pid_lock_is_reported_without_blocking() {
         "status blocked on the writers' lock for {elapsed:?}"
     );
     FileExt::unlock(&lock).unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn unsafe_pid_lock_is_unknown_and_target_is_untouched() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    let dir = tempfile::tempdir().unwrap();
+    let lock = dir.path().join(".daemon-pid.lock");
+    let target = dir.path().join("unrelated");
+    std::fs::write(&target, b"synthetic").unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+    for hardlink in [false, true] {
+        if hardlink {
+            std::fs::hard_link(&target, &lock).unwrap();
+        } else {
+            symlink(&target, &lock).unwrap();
+        }
+        let report = status_json(dir.path(), &dead_addr());
+        assert_eq!(report["pid_lock"], "unknown");
+        assert_eq!(std::fs::read(&target).unwrap(), b"synthetic");
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(std::fs::symlink_metadata(&lock).is_ok());
+        std::fs::remove_file(&lock).unwrap();
+    }
+    std::fs::remove_file(&target).unwrap();
+    symlink(&target, &lock).unwrap();
+    assert_eq!(status_json(dir.path(), &dead_addr())["pid_lock"], "unknown");
+    assert!(!target.exists());
+    std::fs::remove_file(&lock).unwrap();
+    std::fs::write(&lock, b"synthetic-lock").unwrap();
+    std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(status_json(dir.path(), &dead_addr())["pid_lock"], "free");
+    std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(status_json(dir.path(), &dead_addr())["pid_lock"], "unknown");
+    assert_eq!(
+        std::fs::metadata(&lock).unwrap().permissions().mode() & 0o777,
+        0o644
+    );
+    std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let status = Command::new("chmod")
+        .args(["+a", "everyone allow read"])
+        .arg(&lock)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(status_json(dir.path(), &dead_addr())["pid_lock"], "unknown");
+    assert_eq!(std::fs::read(&lock).unwrap(), b"synthetic-lock");
 }

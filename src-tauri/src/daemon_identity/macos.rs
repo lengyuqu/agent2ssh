@@ -92,6 +92,47 @@ pub(crate) fn control_lock(config: &Path) -> Result<fs::File> {
     lock(&dir).context("cannot acquire validated daemon PID lock")
 }
 
+/// Open an existing PID lock for nonblocking diagnostics without creating or
+/// following it. This never changes the lock file's permissions.
+pub(crate) fn open_existing_lock(config: &Path) -> Result<Option<fs::File>> {
+    let dir = owner_dir(config)?;
+    let path = dir.join(LOCK);
+    let file = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&path)
+    {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+        Ok(file) => file,
+    };
+    verify_existing_lock(config, &file)?;
+    Ok(Some(file))
+}
+
+/// Confirm that an already opened diagnostic lock is still the safe path.
+pub(crate) fn verify_existing_lock(config: &Path, file: &fs::File) -> Result<()> {
+    let dir = owner_dir(config)?;
+    let path = dir.join(LOCK);
+    let opened = file.metadata()?;
+    let matches = |md: &fs::Metadata| {
+        md.file_type().is_file()
+            && md.uid() == unsafe { libc::geteuid() }
+            && md.nlink() == 1
+            && md.mode() & 0o077 == 0
+            && (md.dev(), md.ino()) == (opened.dev(), opened.ino())
+    };
+    if !matches(&opened) || !matches(&fs::symlink_metadata(&path)?) {
+        bail!("unsafe daemon PID lock; status unknown");
+    }
+    no_acl_grants(&path).context("daemon PID lock ACL is not private")?;
+    if !matches(&fs::symlink_metadata(&path)?) {
+        bail!("daemon PID lock changed; status unknown");
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Instance {

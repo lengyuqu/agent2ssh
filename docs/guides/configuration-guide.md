@@ -428,7 +428,7 @@ Get-Content -Raw .\password.txt | agent2ssh host add example --host example.com 
 | 字段 | 含义 |
 |---|---|
 | `config dir` / `pid file` / `token file` / `log file` | 本次真正读取的绝对路径（相对 `AGENT2SSH_CONFIG_DIR` 已按当前工作目录解析） |
-| `pid lock` | `.daemon-pid.lock` 是否被写入者持有（`free` / `held by another process` / `unknown`）。**持有不会让 status 阻塞** |
+| `pid lock` | `.daemon-pid.lock` 是否被写入者持有（`free` / `held by another process` / `unknown`）。**持有不会让 status 阻塞**；macOS 上链接、非私有权限、ACL 允许项或路径变化报告 `unknown`，诊断不会跟随链接或修改权限 |
 | `record` | `missing`、`pid N`、`malformed`（带转义预览）、`unreadable: …`、`not a regular file` |
 | `process` | `absent`（OS 明确说没有这个进程）、`live`（带秒级 start_time，**不是身份**）、`terminated (zombie)`、`not observable: …`（**访问被拒不等于已退出**）、`unknown` |
 | `health` | `no endpoint answered`，或 `pid N (recorded / NOT the recorded pid) + config dir matches / DIFFERS / not reported` |

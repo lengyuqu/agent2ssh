@@ -46,6 +46,10 @@ PID 清理复核又发现：旧的条件清理会跟随符号链接读取，并�
 
 继续审查发现普通 PID 发现仍会跟随链接并无限读取，显式旧 HTTP 停止和状态诊断也有独立读取路径。隔离测试先复现了链接被当作 PID，之后 macOS 的这些入口统一采用有界、不跟随链接的读取；链接、异常权限/ACL 和超过 64 字节的记录不作为 PID。诊断、保守停止和启动回归分别 10、12、4 项通过，无默认特性库 887 通过/1 忽略、Tauri 库 905 通过/1 忽略，Windows GNU 交叉编译检查通过；这一改动不改变未绑定状态，也不证明 HTTP 端点身份。
 
+随后针对状态诊断复现了锁路径为链接时错误报告 `free`：macOS 诊断现在只对安全的已存在锁做非阻塞观察，链接、硬链接、非私有权限、ACL 允许项或观察期间路径变化均报告 `unknown`；不创建锁、不跟随链接、不修改目标权限。真实 CLI 诊断回归覆盖上述异常以及正常空闲/持锁状态；该观察仍不是实例身份或进程退出证明。
+
+本机最终验证：诊断 11 项通过；无默认特性库 887 通过/1 忽略，Tauri 库 905 通过/1 忽略；Windows GNU 交叉编译检查通过，未替代 Windows 真机验证。
+
 候选方向另见 Apple [Mach IPC 安全限制说明](https://developer.apple.com/documentation/xcode/conforming-to-mach-ipc-security-restrictions?changes=__8%2C__8)：task identity token 转换时仍需权限检查。该文讨论异常消息，不证明 Unix socket 可以安全获得同一对象，尚无相应生产绑定实现或验证。
 
 提交前复核新增了 hello 后、兼容请求读取 token 前的快照复核；`observation_rejects_a_record_replaced_after_hello` 使用相同内容替换记录，确认 inode 变化被拒绝。此检查不能消除复核之后的替换竞态，也不绑定 HTTP 与 IPC 端点。
