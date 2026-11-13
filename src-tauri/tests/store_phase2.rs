@@ -265,7 +265,7 @@ fn changing_the_master_password_keeps_tags_and_references_valid() {
 }
 
 #[test]
-fn legacy_bare_marker_is_lazily_upgraded_on_the_next_save() {
+fn a_bare_reference_is_upgraded_when_the_store_entry_still_has_its_tag() {
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path());
     let tag = store_tag(dir.path()).unwrap();
@@ -288,6 +288,59 @@ fn legacy_bare_marker_is_lazily_upgraded_on_the_next_save() {
         parse_secret_ref(&upgraded),
         Some(SecretRef::Tagged(tag.as_str())),
         "bare marker was not upgraded: {upgraded}"
+    );
+}
+
+/// Put the pair into the shape a pre-phase-2 build leaves behind: a bare
+/// reference and entries whose `tag` is empty (so `is_valid_tag()` rejects it).
+fn strip_entry_tags(dir: &Path) {
+    let mut store = secrets_json(dir);
+    for entry in store["entries"].as_object_mut().unwrap().values_mut() {
+        entry["tag"] = serde_json::Value::String(String::new());
+    }
+    fs::write(
+        dir.join("secrets.enc"),
+        serde_json::to_string_pretty(&store).unwrap(),
+    )
+    .unwrap();
+}
+
+/// Pins a **measured limitation**, not a desired invariant (2026-11-13). The
+/// test above upgrades because the store entry still carries a tag. With no tag
+/// anywhere — what a pre-phase-2 build actually leaves on disk — an ordinary
+/// save leaves the reference bare: `entry_tags()` drops tags that fail
+/// `is_valid_tag()`, so `upgraded_bare()` has nothing to offer and the value has
+/// to be written again before it gets a tag. If an upgrade path for a fully
+/// legacy pair is ever added, update this test rather than treating it as the
+/// contract.
+#[test]
+fn a_fully_legacy_pair_keeps_its_bare_reference_on_the_next_save() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+    replace_ref(dir.path(), SECRET_REF);
+    strip_entry_tags(dir.path());
+    assert_eq!(store_tag(dir.path()).as_deref(), Some(""));
+
+    let output = run(
+        dir.path(),
+        &["host", "add", "phase2-legacy", "--host", "127.0.0.6"],
+        None,
+        true,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        password_ref(dir.path()),
+        SECRET_REF,
+        "a fully legacy pair must not be rewritten into a tagged reference"
+    );
+    assert_eq!(
+        store_tag(dir.path()).as_deref(),
+        Some(""),
+        "no tag can be invented for an entry that has none"
     );
 }
 
