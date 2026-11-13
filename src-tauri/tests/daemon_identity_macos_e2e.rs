@@ -30,7 +30,7 @@ fn receive(s: &mut UnixStream) -> Value {
     s.read_exact(&mut b).unwrap();
     serde_json::from_slice(&b).unwrap()
 }
-fn daemon(dir: &Path) -> (ChildGuard, Value) {
+fn daemon(dir: &Path) -> (ChildGuard, Value, String) {
     let addr = TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()
@@ -39,7 +39,9 @@ fn daemon(dir: &Path) -> (ChildGuard, Value) {
     std::fs::write(dir.join("daemon.token"), TOKEN).unwrap();
     let child = Command::new(env!("CARGO_BIN_EXE_agent2ssh-daemon"))
         .env("AGENT2SSH_CONFIG_DIR", dir)
-        .env("AGENT2SSH_DAEMON_ADDR", addr)
+        .env("AGENT2SSH_DAEMON_ADDR", &addr)
+        .env("AGENT2SSH_LOCAL_SHELL", "/bin/sh")
+        .env_remove("AGENT2SSH_MASTER_PASSWORD")
         .env_remove("AGENT2SSH_ALLOW_UNBOUND_HTTP_SHUTDOWN")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -52,7 +54,7 @@ fn daemon(dir: &Path) -> (ChildGuard, Value) {
         if let Ok(raw) = std::fs::read(dir.join("daemon.instance.json")) {
             let record: Value = serde_json::from_slice(&raw).unwrap();
             if UnixStream::connect(dir.join(".daemon-ipc/s")).is_ok() {
-                return (guard, record);
+                return (guard, record, addr);
             }
         }
         if let Some(status) = guard.0.try_wait().unwrap() {
@@ -104,7 +106,7 @@ fn daemon_requires_order_token_and_instance_before_accepting_one_stop() {
         .prefix("a2s-ipc-")
         .tempdir_in("/tmp")
         .unwrap();
-    let (mut child, rec) = daemon(dir.path());
+    let (mut child, rec, _) = daemon(dir.path());
     let pid = child.0.id();
     assert_eq!(rec["pid"], pid);
     assert_eq!(
@@ -186,7 +188,7 @@ fn crash_is_retained_and_explicit_recovery_checks_instance() {
         .prefix("a2s-ipc-")
         .tempdir_in("/tmp")
         .unwrap();
-    let (mut child, rec) = daemon(dir.path());
+    let (mut child, rec, _) = daemon(dir.path());
     let pid = child.0.id().to_string();
     let instance = rec["instance_id"].as_str().unwrap();
     child.0.kill().unwrap();
@@ -226,7 +228,7 @@ fn live_instance_cannot_be_recovered_and_partial_record_is_not_cleaned() {
         .prefix("a2s-ipc-")
         .tempdir_in("/tmp")
         .unwrap();
-    let (mut child, record) = daemon(dir.path());
+    let (mut child, record, _) = daemon(dir.path());
     let pid = child.0.id().to_string();
     let output = Command::new(env!("CARGO_BIN_EXE_agent2ssh"))
         .args([
@@ -444,4 +446,135 @@ fn socket_path_too_long_is_refused_without_shortening_or_publishing() {
     );
     assert!(!config.join("daemon.pid").exists());
     assert!(!config.join("daemon.instance.json").exists());
+}
+
+#[test]
+#[serial_test::serial]
+fn replaced_socket_cannot_receive_stop_and_real_daemon_stays_alive() {
+    use std::os::unix::{fs::PermissionsExt, net::UnixListener};
+    let dir = tempfile::Builder::new()
+        .prefix("a2s-ipc-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let (mut child, _, addr) = daemon(dir.path());
+    let pid = child.0.id();
+    // The command is sent only to this test's loopback daemon with a
+    // synthetic token; no user SSH host or config is used.
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .unwrap();
+    let ready_until = Instant::now() + Duration::from_secs(15);
+    loop {
+        let ready = client
+            .get(format!("http://{addr}/health"))
+            .send()
+            .ok()
+            .and_then(|response| response.json::<Value>().ok())
+            .and_then(|health| health["pid"].as_u64())
+            == Some(u64::from(pid));
+        if ready {
+            break;
+        }
+        assert!(
+            Instant::now() < ready_until,
+            "real daemon did not become HTTP-ready"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    let session: Value = client
+        .post(format!("http://{addr}/resident-sessions"))
+        .bearer_auth(TOKEN)
+        .json(&json!({"host":"local","force":true}))
+        .send()
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .unwrap();
+    let session_id = session["id"].as_str().unwrap().to_owned();
+    let pid_before = std::fs::read(dir.path().join("daemon.pid")).unwrap();
+    let instance_before = std::fs::read(dir.path().join("daemon.instance.json")).unwrap();
+    let token_before = std::fs::read(dir.path().join("daemon.token")).unwrap();
+    let socket = dir.path().join(".daemon-ipc/s");
+    std::fs::remove_file(&socket).unwrap();
+    let fake = UnixListener::bind(&socket).unwrap();
+    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+    fake.set_nonblocking(true).unwrap();
+    let server = thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut stream = loop {
+            match fake.accept() {
+                Ok((s, _)) => break s,
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline =>
+                {
+                    thread::sleep(Duration::from_millis(5))
+                }
+                Err(e) => panic!("fake accept: {e}"),
+            }
+        };
+        stream.set_nonblocking(false).unwrap();
+        let mut bytes = Vec::new();
+        if let Err(e) = stream.read_to_end(&mut bytes) {
+            assert_eq!(e.kind(), std::io::ErrorKind::ConnectionReset);
+        }
+        bytes
+    });
+    let output = Command::new(env!("CARGO_BIN_EXE_agent2ssh"))
+        .args(["daemon", "stop"])
+        .env("AGENT2SSH_CONFIG_DIR", dir.path())
+        .env("AGENT2SSH_DAEMON_ADDR", "127.0.0.1:9")
+        .env_remove("AGENT2SSH_ALLOW_UNBOUND_HTTP_SHUTDOWN")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let received = server.join().unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("peer PID conflicts"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        received.is_empty(),
+        "the replacement received bytes before peer validation"
+    );
+    assert!(child.0.try_wait().unwrap().is_none());
+    assert_eq!(
+        std::fs::read(dir.path().join("daemon.pid")).unwrap(),
+        pid_before
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("daemon.instance.json")).unwrap(),
+        instance_before
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("daemon.token")).unwrap(),
+        token_before
+    );
+    assert_eq!(String::from_utf8(pid_before).unwrap(), pid.to_string());
+    let result: Value = client
+        .post(format!("http://{addr}/resident-sessions/{session_id}/exec"))
+        .bearer_auth(TOKEN)
+        .json(&json!({"command":"printf a2s_still_running","force":true}))
+        .send()
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(result["exit_code"], 0);
+    assert!(result["stdout"]
+        .as_str()
+        .unwrap()
+        .contains("a2s_still_running"));
+    client
+        .delete(format!("http://{addr}/resident-sessions/{session_id}"))
+        .bearer_auth(TOKEN)
+        .send()
+        .unwrap()
+        .error_for_status()
+        .unwrap();
 }

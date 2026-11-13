@@ -1,0 +1,14 @@
+run 1 exit=0
+message=1 expected_pid=91925 actual_pid=91925 pidversion=1351233 task_matches_trailer=1
+message=2 expected_pid=91926 actual_pid=91926 pidversion=1351234 task_matches_trailer=1
+pinned_first_accept_second=0
+
+run 2 exit=0
+message=1 expected_pid=91928 actual_pid=91928 pidversion=1351237 task_matches_trailer=1
+message=2 expected_pid=91929 actual_pid=91929 pidversion=1351238 task_matches_trailer=1
+pinned_first_accept_second=0
+
+run 3 exit=0
+message=1 expected_pid=91931 actual_pid=91931 pidversion=1351241 task_matches_trailer=1
+message=2 expected_pid=91932 actual_pid=91932 pidversion=1351242 task_matches_trailer=1
+pinned_first_accept_second=0

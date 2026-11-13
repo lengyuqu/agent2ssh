@@ -1,0 +1,161 @@
+run 1 exit=0
+adhoc_no_team=1 different_binary_bytes=1
+distinct_cdhash=1
+match bootstrap_exit=0
+match client_exit=0
+set_requirement_rc=0
+result=reply kind=synthetic-pong variant=original server_pid=99061 peer_pid=99061
+match server_received_synthetic=1
+match bootout_exit=0 final_service_state=absent
+wrong bootstrap_exit=0
+wrong client_exit=5
+set_requirement_rc=0
+result=error description=Peer Forbidden
+wrong server_received_synthetic=1
+wrong bootout_exit=0 final_service_state=absent
+same_id_substitute bootstrap_exit=0
+same_id_substitute client_exit=0
+set_requirement_rc=0
+result=reply kind=synthetic-pong variant=substitute server_pid=99073 peer_pid=99073
+same_id_substitute server_received_synthetic=1
+same_id_substitute bootout_exit=0 final_service_state=absent
+apple_anchor bootstrap_exit=0
+apple_anchor client_exit=5
+set_requirement_rc=0
+result=error description=Peer Forbidden
+apple_anchor server_received_synthetic=1
+apple_anchor bootout_exit=0 final_service_state=absent
+pinned_match bootstrap_exit=0
+pinned_match client_exit=0
+set_requirement_rc=0
+result=reply kind=synthetic-pong variant=original server_pid=99085 peer_pid=99085
+pinned_match server_received_synthetic=1
+pinned_match bootout_exit=0 final_service_state=absent
+pinned_substitute bootstrap_exit=0
+pinned_substitute client_exit=5
+set_requirement_rc=0
+result=error description=Peer Forbidden
+pinned_substitute server_received_synthetic=1
+pinned_substitute bootout_exit=0 final_service_state=absent
+client_allowed bootstrap_exit=0
+client_allowed client_exit=0
+set_requirement_rc=0
+result=reply kind=synthetic-pong variant=original server_pid=99097 peer_pid=99097
+client_allowed server_received_synthetic=1
+client_allowed server_set_requirement=1
+client_allowed bootout_exit=0 final_service_state=absent
+client_rejected bootstrap_exit=0
+client_rejected client_exit=5
+set_requirement_rc=0
+result=error description=Connection interrupted
+client_rejected server_received_synthetic=0
+client_rejected server_set_requirement=1
+client_rejected bootout_exit=0 final_service_state=absent
+
+run 2 exit=0
+adhoc_no_team=1 different_binary_bytes=1
+distinct_cdhash=1
+match bootstrap_exit=0
+match client_exit=0
+set_requirement_rc=0
+result=reply kind=synthetic-pong variant=original server_pid=99130 peer_pid=99130
+match server_received_synthetic=1
+match bootout_exit=0 final_service_state=absent
+wrong bootstrap_exit=0
+wrong client_exit=5
+set_requirement_rc=0
+result=error description=Peer Forbidden
+wrong server_received_synthetic=1
+wrong bootout_exit=0 final_service_state=absent
+same_id_substitute bootstrap_exit=0
+same_id_substitute client_exit=0
+set_requirement_rc=0
+result=reply kind=synthetic-pong variant=substitute server_pid=99142 peer_pid=99142
+same_id_substitute server_received_synthetic=1
+same_id_substitute bootout_exit=0 final_service_state=absent
+apple_anchor bootstrap_exit=0
+apple_anchor client_exit=5
+set_requirement_rc=0
+result=error description=Peer Forbidden
+apple_anchor server_received_synthetic=1
+apple_anchor bootout_exit=0 final_service_state=absent
+pinned_match bootstrap_exit=0
+pinned_match client_exit=0
+set_requirement_rc=0
+result=reply kind=synthetic-pong variant=original server_pid=99155 peer_pid=99155
+pinned_match server_received_synthetic=1
+pinned_match bootout_exit=0 final_service_state=absent
+pinned_substitute bootstrap_exit=0
+pinned_substitute client_exit=5
+set_requirement_rc=0
+result=error description=Peer Forbidden
+pinned_substitute server_received_synthetic=1
+pinned_substitute bootout_exit=0 final_service_state=absent
+client_allowed bootstrap_exit=0
+client_allowed client_exit=0
+set_requirement_rc=0
+result=reply kind=synthetic-pong variant=original server_pid=99167 peer_pid=99167
+client_allowed server_received_synthetic=1
+client_allowed server_set_requirement=1
+client_allowed bootout_exit=0 final_service_state=absent
+client_rejected bootstrap_exit=0
+client_rejected client_exit=5
+set_requirement_rc=0
+result=error description=Connection interrupted
+client_rejected server_received_synthetic=0
+client_rejected server_set_requirement=1
+client_rejected bootout_exit=0 final_service_state=absent
+
+run 3 exit=0
+adhoc_no_team=1 different_binary_bytes=1
+distinct_cdhash=1
+match bootstrap_exit=0
+match client_exit=0
+set_requirement_rc=0
+result=reply kind=synthetic-pong variant=original server_pid=99198 peer_pid=99198
+match server_received_synthetic=1
+match bootout_exit=0 final_service_state=absent
+wrong bootstrap_exit=0
+wrong client_exit=5
+set_requirement_rc=0
+result=error description=Peer Forbidden
+wrong server_received_synthetic=1
+wrong bootout_exit=0 final_service_state=absent
+same_id_substitute bootstrap_exit=0
+same_id_substitute client_exit=0
+set_requirement_rc=0
+result=reply kind=synthetic-pong variant=substitute server_pid=99210 peer_pid=99210
+same_id_substitute server_received_synthetic=1
+same_id_substitute bootout_exit=0 final_service_state=absent
+apple_anchor bootstrap_exit=0
+apple_anchor client_exit=5
+set_requirement_rc=0
+result=error description=Peer Forbidden
+apple_anchor server_received_synthetic=1
+apple_anchor bootout_exit=0 final_service_state=absent
+pinned_match bootstrap_exit=0
+pinned_match client_exit=0
+set_requirement_rc=0
+result=reply kind=synthetic-pong variant=original server_pid=99222 peer_pid=99222
+pinned_match server_received_synthetic=1
+pinned_match bootout_exit=0 final_service_state=absent
+pinned_substitute bootstrap_exit=0
+pinned_substitute client_exit=5
+set_requirement_rc=0
+result=error description=Peer Forbidden
+pinned_substitute server_received_synthetic=1
+pinned_substitute bootout_exit=0 final_service_state=absent
+client_allowed bootstrap_exit=0
+client_allowed client_exit=0
+set_requirement_rc=0
+result=reply kind=synthetic-pong variant=original server_pid=99281 peer_pid=99281
+client_allowed server_received_synthetic=1
+client_allowed server_set_requirement=1
+client_allowed bootout_exit=0 final_service_state=absent
+client_rejected bootstrap_exit=0
+client_rejected client_exit=5
+set_requirement_rc=0
+result=error description=Connection interrupted
+client_rejected server_received_synthetic=0
+client_rejected server_set_requirement=1
+client_rejected bootout_exit=0 final_service_state=absent

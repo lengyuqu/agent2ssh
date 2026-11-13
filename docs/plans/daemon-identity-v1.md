@@ -4,6 +4,8 @@
 
 > 2026-11-13 Mach task identity token 真机研究见 [macOS Mach 身份与安全停止](../reports/macos-mach-task-identity-2026-11-13.md)：name 端口可观察 task audit token，但 socket 交接及 exec 反例使其不能直接升级现有连接为 `Bound`。
 
+> 2026-11-13 补充：[临时 XPC 服务与逐消息身份实验](../reports/macos-xpc-deployment-2026-11-13.md) 表明签名要求不保护认证前已发送的请求，可信部署与完整安全停止仍未验收。
+
 ## 1. 推荐决定及对 #25 的直接答案
 
 | 项 | v1 推荐 | 代价与必须审阅的兼容性 |
