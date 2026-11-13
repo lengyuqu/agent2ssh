@@ -87,7 +87,7 @@ int main(int argc,char **argv){
         if(getchar()!='x'){printf("refused=test_release token_sent=0\n");return 2;}
     }
     mach_port_t exit_port=MACH_PORT_NULL;int exit_kq=-1;
-    if(!strcmp(argv[5],"wait-exit")||!strcmp(argv[5],"hold-registration")) {
+    if(!strcmp(argv[5],"wait-exit")||!strcmp(argv[5],"hold-registration")||!strcmp(argv[5],"hold-before-registration")) {
         mach_port_t previous=MACH_PORT_NULL;
         if(mach_port_allocate(mach_task_self(),MACH_PORT_RIGHT_RECEIVE,&exit_port)!=KERN_SUCCESS ||
            mach_port_request_notification(mach_task_self(),name,MACH_NOTIFY_DEAD_NAME,0,exit_port,MACH_MSG_TYPE_MAKE_SEND_ONCE,&previous)!=KERN_SUCCESS || MACH_PORT_VALID(previous)) {
@@ -95,6 +95,11 @@ int main(int argc,char **argv){
         }
         exit_kq=kqueue();struct kevent registration;
         if(exit_kq<0){printf("refused=kqueue token_sent=0\n");return 2;}
+        if(!strcmp(argv[5],"hold-before-registration")) {
+            const char *path=getenv("A2S_MACH_LAB_CLIENT_READY");if(!path)return 2;
+            FILE *ready=fopen(path,"w");if(!ready)return 2;fputs("before registration\n",ready);fclose(ready);
+            if(getchar()!='x')return 2;
+        }
         EV_SET(&registration,(uintptr_t)expected,EVFILT_PROC,EV_ADD|EV_ENABLE|EV_CLEAR,NOTE_EXIT,0,NULL);
         if(kevent(exit_kq,&registration,1,NULL,0,NULL)<0){printf("refused=proc_registration token_sent=0\n");return 2;}
         if(!strcmp(argv[5],"hold-registration")) {

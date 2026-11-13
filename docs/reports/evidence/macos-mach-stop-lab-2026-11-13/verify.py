@@ -359,9 +359,14 @@ with tempfile.TemporaryDirectory(prefix='a2s-mach-lab-tools-',dir='/tmp') as too
      if proc.poll() is None:proc.terminate()
      proc.wait(timeout=8);log.close();raise
     return proc,log
-   a=b=held=registration_held=None;log_a=log_b=None
+   a=b=held=registration_held=before_registration_held=None;log_a=log_b=None
    try:
     a,log_a=start(config_a);record_a=json.loads((config_a/'daemon.instance.json').read_text());pid_a=a.pid
+    before_ready=root/f'before-registration-held-{i}';before_env=dict(clean);before_env['A2S_MACH_LAB_CLIENT_READY']=str(before_ready)
+    before_registration_held=subprocess.Popen([str(client),service,str(pid_a),record_a['instance_id'],good,'hold-before-registration'],env=before_env,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+    deadline=time.monotonic()+8
+    while not before_ready.exists() and before_registration_held.poll() is None and time.monotonic()<deadline:time.sleep(.02)
+    if not before_ready.exists():raise RuntimeError('client did not reach pre-registration barrier')
     registration_ready=root/f'registration-held-{i}';registration_env=dict(clean);registration_env['A2S_MACH_LAB_CLIENT_READY']=str(registration_ready)
     registration_held=subprocess.Popen([str(client),service,str(pid_a),record_a['instance_id'],good,'hold-registration'],env=registration_env,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
     deadline=time.monotonic()+8
@@ -386,6 +391,10 @@ with tempfile.TemporaryDirectory(prefix='a2s-mach-lab-tools-',dir='/tmp') as too
     if not service_absent(lookup,service):raise RuntimeError('old service name did not disappear')
     b,log_b=start(config_b);record_b=json.loads((config_b/'daemon.instance.json').read_text());pid_b=b.pid
     if pid_a==pid_b or record_a['instance_id']==record_b['instance_id']:raise AssertionError('replacement was not a distinct instance')
+    before_out,before_err=before_registration_held.communicate(input='x',timeout=8)
+    if before_registration_held.returncode==0 or ('refused=proc_registration token_sent=0' not in before_out and 'refused=post_registration_identity token_sent=0' not in before_out):
+     raise AssertionError(f'pre-registration target exit did not fail closed: {before_out} {before_err}')
+    before_registration_held=None
     reg_out,reg_err=registration_held.communicate(input='x',timeout=8)
     if registration_held.returncode==0 or 'refused=post_registration_identity token_sent=0' not in reg_out:
      raise AssertionError(f'changed target was not refused before token: {reg_out} {reg_err}')
@@ -401,7 +410,7 @@ with tempfile.TemporaryDirectory(prefix='a2s-mach-lab-tools-',dir='/tmp') as too
     fresh=invoke(client,service,pid_b,record_b['instance_id'],good,'stop')
     if fresh.returncode or 'result=accepted_exit_unverified' not in fresh.stdout:raise AssertionError(f'fresh replacement stop failed: {fresh.stdout} {fresh.stderr}')
     if b.wait(timeout=10)!=0:raise AssertionError('replacement daemon exited with error')
-    line=f'handoff_run={i} different_sender_rejected=1 same_pid_reexec_rejected=1 registration_race_no_token=1 old_right_rejected=1 replacement_received_no_old_stop=1 replacement_survived=1 stale_a_preserved=1 fresh_stop_accepted=1\n';results.append(line);print(line,end='')
+    line=f'handoff_run={i} different_sender_rejected=1 same_pid_reexec_rejected=1 before_registration_no_token=1 registration_race_no_token=1 old_right_rejected=1 replacement_received_no_old_stop=1 replacement_survived=1 stale_a_preserved=1 fresh_stop_accepted=1\n';results.append(line);print(line,end='')
    finally:
     if held is not None:
      if held.poll() is None:held.kill()
@@ -409,6 +418,9 @@ with tempfile.TemporaryDirectory(prefix='a2s-mach-lab-tools-',dir='/tmp') as too
     if registration_held is not None:
      if registration_held.poll() is None:registration_held.kill()
      registration_held.communicate(timeout=5)
+    if before_registration_held is not None:
+     if before_registration_held.poll() is None:before_registration_held.kill()
+     before_registration_held.communicate(timeout=5)
     for proc in (a,b):
      if proc is not None:
       if proc.poll() is None:proc.terminate()

@@ -8,6 +8,6 @@
 - 上述身份一致仍不足以证明后续消息由原进程接收：五轮未保护 Mach receive right 转移后，已核验的 A 仍活着，实际是 B 接收合成数据。三轮 `MPG_IMMOVABLE_RECEIVE` 保护下转移失败，内核终止尝试转移的合成进程，B 未收到数据。发送权持有者不能因此独立查询 guard 状态。
 - 对受保护端点补做同 PID `exec`：五轮执行原代码、三轮切换到不同 CDHash 的代码，原发送权均返回 `MACH_SEND_INVALID_DEST`，新映像未收到合成数据。新映像内相同数字端口名称偶尔对应另一个 receive right，因此端口数字或类型不能证明是原端点。该实验证明不了其他部署和 OS 版本的行为。
 - 真实 daemon 的临时 ad-hoc 副本中，没有 hardened runtime 时无害 DYLD 标记库能运行，同时代码身份验证通过；启用 hardened runtime 且同时允许 DYLD 环境变量和关闭库验证时也观察到注入。其他所测组合没有观察到标记；这不是对全部注入路径的证明，也不能代表正式签名产物。
-- `python3 verify_bundle.py --archive` 在临时目录使用项目 Tauri 配置和已有 debug 二进制构建 ad-hoc bundle，未安装或启动桌面。Tauri 给 daemon 和桌面都赋予 `disable-library-validation` 和 `allow-unsigned-executable-memory`，不满足实验客户端的严格策略。临时重签 daemon 为空 entitlement、再按原配置重签外层后，`codesign --verify --deep --strict` 成功，隔离 daemon 副本启动且运行中身份验证通过。该实验不修改发布流程；debug 桌面二进制可能陈旧，正式 Developer ID、Notarization、升级和安装包尚未验证。
+- `python3 verify_bundle.py --archive` 在临时目录使用项目 Tauri 配置和已有 debug 二进制构建 ad-hoc bundle，未安装或启动桌面。Tauri 给 daemon 和桌面都赋予 `disable-library-validation` 和 `allow-unsigned-executable-memory`，不满足实验客户端的严格策略。临时重签 daemon 为空 entitlement、再按原配置重签外层后，`codesign --verify --deep --strict` 成功，隔离 daemon 副本启动且运行中身份验证通过。该实验不修改发布流程；所用 debug 二进制可能陈旧，正式 Developer ID、Notarization、升级和安装包尚未验证。
 
 该结果说明正式方案还需要可信来源的代码要求、运行时和 entitlement 约束，以及可证明的接收权所有权约束。无法从实验中的 ad-hoc CDHash 推导正式信任根。
