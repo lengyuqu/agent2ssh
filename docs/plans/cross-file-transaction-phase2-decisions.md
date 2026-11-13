@@ -102,7 +102,7 @@ Windows 实机结论以 #27（`15e2ac5`）为准，未覆盖的 SMB/其他版本
 **阶段 C 已实施**（B2 索引 + 成对 `.pair` 副本 + 四条恢复路径统一前置判定 +
 `recover()` 索引只读诊断，`tests/store_phase2_c.rs` 6 项回归）。实现按 §3 的 B2 方案，
 但索引只作诊断、不阻断常规写入；判定以内容 tag 为准。**阶段 D 已实施**（`config-repair --discard-pending` / `--restore-pair`，带确认与审计，
-`tests/config_repair.rs` 6 项真实 CLI 回归）；**E（阶段 3）未实施**；C1–C3/C5/C7 已有真机 SIGKILL 实测，C4/C6 为构造状态回归，C8 未用旧版本二进制复现，逐项见 `docs/reports/issue26-acceptance-matrix.md`，
+`tests/config_repair.rs` 6 项真实 CLI 回归）；**E（阶段 3）未实施**；C1–C3/C5/C7 已有真机 SIGKILL 实测，C4/C6 为构造状态回归，**C8 已用阶段 A/B 之前的真实二进制实测**（`docs/reports/evidence/c8-downgrade-2026-11-13/`），逐项见 `docs/reports/issue26-acceptance-matrix.md`，
 Linux 侧边界未验证。§2 的阶段表仍是后续实施顺序，§4 的升级不可逆警告已在配置指南落地。
 Windows 侧由 #27（`15e2ac5`）补上真机结论（rename 重试 / 只读属性 / 共享删除 / 残留临时文件），
 `icacls` 失败路径仍是未验证，SMB、其他 Windows 版本与断电持久性同样未验证。

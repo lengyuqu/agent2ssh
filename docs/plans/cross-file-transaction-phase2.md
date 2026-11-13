@@ -1,6 +1,12 @@
 # 跨文件事务阶段 2：引用自证与成对快照（设计评审稿）
 
-**状态：设计待评审，代码未落地。** 对应 [CNB #26](https://cnb.cool/zdzso/agent2ssh/-/issues/26)，基线 `cnb/main` = `f98bd83`（2026-11-12）。本轮只交付可拍板的方案对比、兼容与回滚表，**不修改 `src-tauri/src/`、不改 CLI 输入方式、不重做阶段 0/1**。所有「实测」都有证据路径，其余一律标注为源码事实、推断或未验证。
+**状态：本文件是 2026-11-12 的设计评审稿，保留原样供追溯。** 阶段 A/B/C/D 已于 2026-11-12
+落地（`f98a4b9`），实现与本文的偏差、以及 C1–C8 与 P1–P6 的逐项证据级别见
+`docs/reports/issue26-acceptance-matrix.md`；决策取舍见
+`docs/plans/cross-file-transaction-phase2-decisions.md`。对应
+[CNB #26](https://cnb.cool/zdzso/agent2ssh/-/issues/26)，评审时基线 `cnb/main` = `f98bd83`。
+本文写作时**不修改 `src-tauri/src/`、不改 CLI 输入方式、不重做阶段 0/1**；所有「实测」都有
+证据路径，其余一律标注为源码事实、推断或未验证。
 
 本文的决策编号用 **P1–P6**，避免与 #22 身份协议 v1 的 D1–D6 混淆。
 
@@ -264,10 +270,11 @@ daemon 身份绑定（#22–#25）；Windows 实机验证（#27，已交付，�
 | C5 | 新增：两份 `.bak` 已写、索引 rename 前崩溃 | 索引缺失 → 保守拒绝恢复（不猜测配对） | 待测 |
 | C6 | 新增：索引存在但 `tag_digest` 与当前 `secrets.enc` 不符 | 明确点名，不允许用旧 hosts 覆盖 | 待测 |
 | C7 | 新增：回卷过程中第二次崩溃 | 整体回滚到回卷前状态，两份文件都不处于中间态 | 待测 |
-| C8 | 新增：旧程序写新格式（F5） | 新程序能检测出「带 tag 引用被当明文密封」并给出迁移指引，不静默吞掉 | 待测 |
+| C8 | 新增：旧程序写新格式（F5） | 新程序能检测出「带 tag 引用被当明文密封」并给出迁移指引，不静默吞掉 | **已实测**（阶段 A/B 之前的二进制 `48ac012`）：解锁态下任意命令即触发重新密封，新程序拒绝该凭据并给出指引；`docs/reports/evidence/c8-downgrade-2026-11-13/` |
 
 每项必须区分「真机 `SIGKILL` 实测」「构造状态回归」「源码推断」三类，不得混写。
-C4–C8 在本轮**未实现、未实测**，是验收待测项。
+C4–C8 在**设计轮**未实现、未实测；落地后的分级见 `docs/reports/issue26-acceptance-matrix.md`
+（C1–C3/C5/C7 真机 `SIGKILL`、C8 旧版本二进制实测，C4/C6 构造回归）。
 
 ---
 
@@ -328,7 +335,7 @@ P1–P6 均未拍板；本设计不替人决定，也不把「倾向」写成已
 统一前置判定 + `recover()` 索引只读诊断），见 `tests/store_phase2_c.rs`；实际实现与 §3 的
 设计有一处务实偏差：索引只作诊断与后续 D 阶段的证据，**不阻断常规写入**，判定以内容 tag
 本身为准（避免第三个文件成为单点故障）。**阶段 D 已实施**（`config-repair --list` / `--discard-pending` / `--restore-pair`，带确认与审计，回归 `tests/config_repair.rs`）；**阶段 3 仍未实施**；
-C1–C3/C5/C7 已有真机 SIGKILL 实测（`tests/store_phase2_cd_crash.rs`），C4/C6 为构造状态回归，C8 未用旧版本二进制复现；逐项证据级别与收口判定见 `docs/reports/issue26-acceptance-matrix.md`；
+C1–C3/C5/C7 已有真机 SIGKILL 实测（`tests/store_phase2_cd_crash.rs`），C4/C6 为构造状态回归，**C8 已用阶段 A/B 之前的真实二进制实测**（`docs/reports/evidence/c8-downgrade-2026-11-13/`，解锁态下任意命令即触发重新密封）；逐项证据级别与收口判定见 `docs/reports/issue26-acceptance-matrix.md`；
 Windows 实机结论以 #27（`15e2ac5`）为准，Linux 侧边界未验证。#26 保持 open。
 
 P1–P6 的可勾选版本、推荐默认作为实施轮工作假设的说明、分阶段实施顺序与逐文件改动清单，
