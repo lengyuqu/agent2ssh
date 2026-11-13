@@ -2015,23 +2015,23 @@ pub fn request_graceful_shutdown() -> bool {
     }
 }
 
-/// On macOS, refuse to stop an unbound daemon without sending a request or signal.
+/// On macOS, stop through the private Mach port. A missed handshake sends
+/// nothing. A stop that may have been delivered is not retried and does not
+/// delete records when exit was not observed.
 #[cfg(target_os = "macos")]
 pub fn stop_daemon_process(pid: u32) -> std::result::Result<(), DaemonStopError> {
-    let discovery = match config_dir()
-        .and_then(|dir| crate::daemon_identity::macos_client::inspect_unbound(&dir, pid))
-    {
-        Ok(observation) => format!(
-            "IPC hello matched peer PID {}, but no stable process object is bound",
-            observation.peer_pid
-        ),
-        Err(error) => {
-            format!("IPC identity discovery could not establish consistent evidence ({error})")
+    let config = config_dir_absolute()?;
+    match crate::daemon_identity::macos_mach::stop(&config, pid) {
+        crate::daemon_identity::macos_mach::StopOutcome::Exited => Ok(()),
+        crate::daemon_identity::macos_mach::StopOutcome::Refused(detail) => {
+            Err(DaemonStopError::UnverifiedIdentity(format!(
+                "daemon PID {pid} is not bound to an authenticated process object; {detail}; no shutdown or signal was sent and this client did not remove the PID file. Inspect the process and records before recovery"
+            )))
         }
-    };
-    Err(DaemonStopError::UnverifiedIdentity(format!(
-        "daemon PID {pid} is not bound to an authenticated process object; {discovery}; no shutdown or signal was sent and this client did not remove the PID file. Inspect the process and records before recovery"
-    )))
+        crate::daemon_identity::macos_mach::StopOutcome::Unknown => {
+            Err(DaemonStopError::UncertainExit(pid))
+        }
+    }
 }
 
 /// Stop the daemon with this `pid` and wait until it is gone (non-macOS).

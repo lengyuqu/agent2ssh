@@ -1,8 +1,8 @@
 //! Fail-closed building blocks for the local daemon identity protocol.
 //!
-//! A hello and the operating system's peer PID are discovery evidence only.
-//! In particular, macOS has no verified connection-to-process-object binding
-//! here. This module deliberately cannot authorize a stop or transmit a token.
+//! The length-prefixed hello and a Unix peer PID are discovery evidence only.
+//! On macOS the stop path that may send the admin token is the separate Mach
+//! control channel, which does not consult a code signature.
 
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
@@ -201,8 +201,11 @@ pub mod macos;
 #[cfg(target_os = "macos")]
 pub mod macos_client;
 
-// The verifier provides code-signing evidence only. It is not yet wired to
-// the client because endpoint binding and a release trust root remain open.
+#[cfg(target_os = "macos")]
+pub mod macos_mach;
+
+// Code-signing evidence stays available for diagnostics. The Mach stop path
+// does not call it: a release signature is not required for the program check.
 #[cfg(target_os = "macos")]
 #[allow(dead_code)]
 mod macos_codesign;

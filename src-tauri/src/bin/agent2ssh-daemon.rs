@@ -116,6 +116,15 @@ static SHUTDOWN_REQUESTED: tokio::sync::Notify = tokio::sync::Notify::const_new(
 #[cfg(target_os = "macos")]
 static IPC_SHUTDOWN_REQUESTED: tokio::sync::Notify = tokio::sync::Notify::const_new();
 
+// Production Mach control wakes the same drain as the laboratory callback.
+// The C object keeps a weak no-op so library tests link; this strong
+// definition is the one the daemon process runs.
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub extern "C" fn a2s_mach_control_notify_shutdown() {
+    IPC_SHUTDOWN_REQUESTED.notify_one();
+}
+
 // This callback exists only in an explicitly enabled native laboratory build.
 // It wakes the same drain path as the existing macOS IPC handler.
 #[cfg(all(target_os = "macos", feature = "macos-mach-lab"))]
@@ -5918,6 +5927,15 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(target_os = "macos")]
     let identity_publication =
         agent2ssh::daemon_identity::macos::publish(&config_dir, std::process::id())?;
+    #[cfg(target_os = "macos")]
+    if let Err(error) = agent2ssh::daemon_identity::macos_mach::start(
+        &identity_publication.instance.config_id,
+        &identity_publication.instance.instance_id,
+        &token,
+    ) {
+        let _ = identity_publication.cleanup();
+        return Err(error.context("Mach control channel failed to start"));
+    }
     #[cfg(not(target_os = "macos"))]
     agent2ssh::daemon_control::write_daemon_pid(std::process::id())?;
 

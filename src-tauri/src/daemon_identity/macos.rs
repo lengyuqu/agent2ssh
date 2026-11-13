@@ -723,6 +723,48 @@ pub(crate) fn discovery_snapshot(config: &Path, expected_pid: u32) -> Result<Dis
     })
 }
 
+/// Config id and instance id for the Mach control channel. The snapshot is
+/// discovery only; it does not authorize a stop and the lock is not held
+/// after this returns.
+pub(crate) fn mach_target(config: &Path, pid: u32) -> Result<(String, String)> {
+    let snap = discovery_snapshot(config, pid)?;
+    let config_id = read_config_id(&snap.dir)?;
+    if !super::valid_id(&config_id) || !super::valid_id(&snap.instance_id) {
+        bail!("invalid Mach discovery identifiers");
+    }
+    Ok((config_id, snap.instance_id))
+}
+
+/// Read the existing admin token. This never creates one: a stop must not
+/// invent the credential it is about to send.
+pub(crate) fn read_existing_token(config: &Path) -> Result<String> {
+    let dir = owner_dir(config)?;
+    let path = dir.join("daemon.token");
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&path)
+        .context("cannot open daemon token securely")?;
+    let md = file.metadata()?;
+    if !md.file_type().is_file()
+        || md.uid() != unsafe { libc::geteuid() }
+        || md.nlink() != 1
+        || md.len() == 0
+        || md.len() >= 128
+        || md.mode() & 0o077 != 0
+    {
+        bail!("daemon token is not a safe existing credential");
+    }
+    no_acl_grants(&path).context("daemon token ACL is not private")?;
+    let mut token = String::new();
+    file.read_to_string(&mut token)?;
+    let token = token.trim().to_string();
+    if token.is_empty() || token.len() >= 128 || token.as_bytes().contains(&0) {
+        bail!("daemon token is not a safe existing credential");
+    }
+    Ok(token)
+}
+
 pub(crate) fn verify_discovery_snapshot(previous: &DiscoverySnapshot) -> Result<()> {
     if discovery_snapshot(&previous.dir, previous.pid)? != *previous {
         bail!("IPC records or socket changed during discovery");

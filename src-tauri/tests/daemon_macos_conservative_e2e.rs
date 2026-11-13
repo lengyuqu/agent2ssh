@@ -126,12 +126,16 @@ fn missing_pid_record_is_reported_as_unknown() {
 
 #[test]
 #[serial_test::serial]
-fn default_refuses_http_cli_stop_and_restart_without_touching_process() {
+fn http_shutdown_stays_disabled_and_mach_stop_exits() {
     let dir = tempfile::tempdir().unwrap();
     let addr = address();
     let mut child = daemon(dir.path(), &addr, false);
     let pid = child.0.id();
     let before = std::fs::read(dir.path().join("daemon.pid")).unwrap();
+    assert_eq!(
+        std::str::from_utf8(&before).unwrap().trim(),
+        pid.to_string()
+    );
     let unauthorized = request(&addr, "wrong-synthetic-token");
     assert!(unauthorized.starts_with("HTTP/1.1 401"), "{unauthorized}");
     let response = request(&addr, TOKEN);
@@ -150,24 +154,25 @@ fn default_refuses_http_cli_stop_and_restart_without_touching_process() {
         std::fs::read(dir.path().join("daemon.pid")).unwrap(),
         before
     );
-    for args in [&["daemon", "stop"][..], &["daemon", "restart"][..]] {
-        let out = cli(dir.path(), &addr, args);
-        assert!(!out.status.success());
+    let out = cli(dir.path(), &addr, &["daemon", "stop"]);
+    assert!(out.status.success(), "{}", body(&out));
+    assert!(body(&out).contains(&format!("Daemon stopped (pid={pid})")));
+    assert!(!body(&out).contains(TOKEN));
+    let until = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        if let Some(status) = child.0.try_wait().unwrap() {
+            break status;
+        }
         assert!(
-            body(&out).contains("no shutdown or signal was sent"),
-            "{}",
-            body(&out)
+            Instant::now() < until,
+            "daemon still running after Mach stop"
         );
-        assert!(child.0.try_wait().unwrap().is_none());
-        assert_eq!(
-            std::fs::read(dir.path().join("daemon.pid")).unwrap(),
-            before
-        );
-    }
-    assert_eq!(
-        std::str::from_utf8(&before).unwrap().trim(),
-        pid.to_string()
-    );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(status.success(), "{status}");
+    assert!(!dir.path().join("daemon.pid").exists());
+    assert!(!dir.path().join("daemon.instance.json").exists());
+    assert_shutdown_trigger(dir.path(), "ipc");
 }
 
 #[test]
