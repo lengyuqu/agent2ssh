@@ -209,6 +209,26 @@ with tempfile.TemporaryDirectory(prefix='a2s-mach-lab-tools-',dir='/tmp') as too
       except subprocess.TimeoutExpired:child.kill();child.wait(timeout=5)
     if not service_absent(lookup,service):raise RuntimeError(f'test Mach service remains: {service}')
     print('test_service_absent=1')
+ # A validly signed lab daemon deliberately returns a receive right where the
+ # client expects a send right. The client must reject before sending token.
+ with tempfile.TemporaryDirectory(prefix='a2s-mach-lab-',dir='/tmp') as cd:
+  config=Path(cd);(config/'mach-lab-only').write_bytes(b'synthetic-only');(config/'daemon.token').write_text(TOKEN);(config/'daemon.token').chmod(0o600)
+  addr=free_port();service=f'org.agent2ssh.lab.{os.getpid()}.{uuid.uuid4().hex}'
+  env={k:v for k,v in os.environ.items() if not k.startswith(('DYLD_','AGENT2SSH_','A2S_MACH_LAB_'))}
+  env.update({'AGENT2SSH_CONFIG_DIR':str(config),'AGENT2SSH_DAEMON_ADDR':f'127.0.0.1:{addr}','AGENT2SSH_LOG':'error','A2S_MACH_LAB_SERVICE':service,'A2S_MACH_LAB_REPLY_RECEIVE_FOR_TEST':'1'})
+  with tempfile.TemporaryFile(mode='w+t') as log:
+   proc=subprocess.Popen([str(binary)],env=env,stdin=subprocess.DEVNULL,stdout=log,stderr=log)
+   try:
+    wait_health(proc,addr);instance=json.loads((config/'daemon.instance.json').read_text())['instance_id']
+    malformed=invoke(client,service,proc.pid,instance,good,'stop')
+    if malformed.returncode==0 or 'refused=hello_reply token_sent=0' not in malformed.stdout or proc.poll() is not None:raise AssertionError(f'wrong reply right was not refused: {malformed.stdout} {malformed.stderr}')
+    line='reply_receive_right refused_before_token=1 daemon_alive=1\n';results.append(line);print(line,end='')
+   finally:
+    if proc.poll() is None:proc.terminate()
+    try:proc.wait(timeout=8)
+    except subprocess.TimeoutExpired:proc.kill();proc.wait(timeout=5)
+    if not service_absent(lookup,service):raise RuntimeError(f'test Mach service remains: {service}')
+    print('test_service_absent=1')
  # A known CDHash is not sufficient when runtime hardening is absent or
  # exceptions allow injected/modified code. All these are synthetic builds.
  policies=[('no-runtime',False,None),

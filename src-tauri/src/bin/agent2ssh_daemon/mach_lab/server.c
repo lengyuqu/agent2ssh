@@ -58,6 +58,12 @@ static void accept_hello(a2s_lab_hello *req,audit_token_t sender) {
     req->reply.name=MACH_PORT_NULL; // The response now owns the send-once right.
     resp.identity.name=identity;resp.identity.disposition=MACH_MSG_TYPE_MOVE_SEND;resp.identity.type=MACH_MSG_PORT_DESCRIPTOR;
     resp.endpoint.name=listener;resp.endpoint.disposition=MACH_MSG_TYPE_MAKE_SEND;resp.endpoint.type=MACH_MSG_PORT_DESCRIPTOR;
+    // Deliberately malformed reply for an isolated client boundary test.
+    if(getenv("A2S_MACH_LAB_REPLY_RECEIVE_FOR_TEST")) {
+        mach_port_t extra=MACH_PORT_NULL;
+        if(mach_port_allocate(mach_task_self(),MACH_PORT_RIGHT_RECEIVE,&extra)!=KERN_SUCCESS){mach_msg_destroy(&resp.h);return;}
+        resp.endpoint.name=extra;resp.endpoint.disposition=MACH_MSG_TYPE_MOVE_RECEIVE;
+    }
     memcpy(resp.nonce,req->nonce,sizeof(resp.nonce));memcpy(resp.instance,instance_id,sizeof(instance_id));resp.pid=(uint32_t)getpid();
     sessions[slot].active=1;sessions[slot].client=sender;sessions[slot].expires_ms=now+10000;memcpy(sessions[slot].nonce,req->nonce,16);
     kern_return_t kr=mach_msg(&resp.h,MACH_SEND_MSG|MACH_SEND_TIMEOUT,sizeof(resp),0,0,1000,0);

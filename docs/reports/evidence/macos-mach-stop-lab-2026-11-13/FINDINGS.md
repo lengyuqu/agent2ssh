@@ -20,6 +20,7 @@ python3 docs/reports/evidence/macos-mach-stop-lab-2026-11-13/verify_launchd_daem
 - 无 hardened runtime 或携带六种测试用异常 entitlement 的临时签名副本在发送 token 前被拒绝；缺少标记或 token 不符的实验 daemon 不注册服务。拒绝范围包括 JIT、关闭可执行页保护、关闭库验证和未签名可执行内存；不是所有注入手段的穷尽列表。
 - 三轮 launchd 真实 daemon 测试中，将客户端要求设为 `anchor apple generic` 时，ad-hoc daemon 在发送 token 前被拒绝。这只验证失败侧；没有 Developer ID 身份时无法验证正式签名的成功侧和 Team ID 绑定。
 - 修复实验接收循环遇到超大 Mach 消息即退出的问题：三轮各发送一条超出接收缓冲的无秘密消息，观察到丢弃记录，随后正常握手、认证及停止均成功。这只覆盖该消息形态，不能证明对持续洪泛免疫。
+- 客户端在使用握手回复前检查两项端口描述符及其发送权类型。测试 daemon 故意返回 receive right 而非 send right 时，客户端在发 token 前拒绝，daemon 保持运行；这只覆盖该类格式错误。
 - 32 个合成 hello 占满实验会话表后，额外 hello 未发送 token 即被拒绝；10 秒超时后新会话可用。该结果不排除同用户进程在容量占满期间造成拒绝服务。
 - 发送后立即销毁回复端口的竞态中，客户端报告结果未知；本次观察到 daemon 仍在运行。另一个有同步屏障的实验在服务端完成授权后、发出回执前销毁回复端口：客户端同样报告未知且未重试，而测试父进程观察到 daemon 退出。两者说明未知状态不能推断停止是否已执行；并未覆盖所有丢失方式。
 - 三轮 A/B 服务替换中，另一进程复用 nonce，以及原客户端在相同 PID 下 `exec` 后复用 nonce 的请求均被拒绝。客户端分别在注册进程事件前、注册后复核 identity 前被暂停；A 退出、同名 B 启动后恢复，客户端均保守拒绝且没有发送 token。另一个客户端保存的旧发送权没有向 B 投递请求，B 保持存活，重新认证 B 后可完成停止。这是不同 PID 的受控切换，不是真实 PID 复用。实验代码的 receive right 使用 `MPG_IMMOVABLE_RECEIVE`。

@@ -68,7 +68,7 @@ int main(int argc,char **argv){
     a2s_lab_hello hello={0};hello.h.msgh_bits=MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,0)|MACH_MSGH_BITS_COMPLEX;hello.h.msgh_remote_port=service;hello.h.msgh_size=sizeof(hello);hello.h.msgh_id=A2S_LAB_HELLO;
     hello.body.msgh_descriptor_count=1;hello.reply.name=reply;hello.reply.disposition=MACH_MSG_TYPE_MAKE_SEND_ONCE;hello.reply.type=MACH_MSG_PORT_DESCRIPTOR;arc4random_buf(hello.nonce,sizeof(hello.nonce));memcpy(hello.instance,argv[3],32);hello.expected_pid=(uint32_t)expected;
     if(mach_msg(&hello.h,MACH_SEND_MSG|MACH_SEND_TIMEOUT,sizeof(hello),0,0,1000,0)){printf("refused=hello_send token_sent=0\n");return 2;}
-    response_t resp;if(receive(reply,&resp)||resp.h.msgh_id!=A2S_LAB_HELLO_REPLY||resp.h.msgh_size!=sizeof(a2s_lab_hello_reply)||!(resp.h.msgh_bits&MACH_MSGH_BITS_COMPLEX)||resp.hello.body.msgh_descriptor_count!=2){printf("refused=hello_reply token_sent=0\n");return 2;}
+    response_t resp;if(receive(reply,&resp)||resp.h.msgh_id!=A2S_LAB_HELLO_REPLY||resp.h.msgh_size!=sizeof(a2s_lab_hello_reply)||!(resp.h.msgh_bits&MACH_MSGH_BITS_COMPLEX)||resp.hello.body.msgh_descriptor_count!=2||resp.hello.identity.type!=MACH_MSG_PORT_DESCRIPTOR||resp.hello.endpoint.type!=MACH_MSG_PORT_DESCRIPTOR||resp.hello.identity.disposition!=MACH_MSG_TYPE_PORT_SEND||resp.hello.endpoint.disposition!=MACH_MSG_TYPE_PORT_SEND){printf("refused=hello_reply token_sent=0\n");return 2;}
     mach_msg_audit_trailer_t *t=trailer(&resp);if(!t){printf("refused=audit token_sent=0\n");return 2;}
     audit_token_t sender=t->msgh_audit;task_name_t name=MACH_PORT_NULL;
     int expect_private=getenv("A2S_MACH_LAB_EXPECT_PRIVATE")!=NULL;
