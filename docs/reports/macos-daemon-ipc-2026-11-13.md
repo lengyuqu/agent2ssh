@@ -38,6 +38,8 @@ macOS `daemon_matches_config` 现在直接保留未验证状态，不读取 toke
 
 锁修复本机回归：诊断 10 项、真实 daemon IPC 10 项、保守停止 12 项、macOS 启动 4 项通过；IPC 客户端 14 项通过，daemon 停止套件 33 项通过、2 项按 macOS 策略忽略（未配置 SSH fixture 的测试自行跳过实际 SSH）。无默认特性 Rust 库 879 通过/1 忽略，Tauri 库 897 通过/1 忽略。macOS 相关端到端目标已加入 GitHub CI 配置，本地 YAML 可解析；远端工作流结果尚未验证。
 
+同一轮审查发现 macOS 桌面写入 `daemon.owner` 时会跟随符号链接或硬链接并覆盖目标；隔离单元测试在修复前复现了错误成功。现在写入先检查文件类型、所有权、链接数、权限与 ACL；有效旧记录通过同目录私有临时文件和锁内复核更新，损坏记录及观察到的并发变化被保留。回归覆盖符号链接、硬链接、有效旧 `0644` 文件、损坏或重复字段以及写入前内容变化；这仍不能约束不遵守锁的进程在最终检查后替换路径。
+
 候选方向另见 Apple [Mach IPC 安全限制说明](https://developer.apple.com/documentation/xcode/conforming-to-mach-ipc-security-restrictions?changes=__8%2C__8)：task identity token 转换时仍需权限检查。该文讨论异常消息，不证明 Unix socket 可以安全获得同一对象，尚无相应生产绑定实现或验证。
 
 提交前复核新增了 hello 后、兼容请求读取 token 前的快照复核；`observation_rejects_a_record_replaced_after_hello` 使用相同内容替换记录，确认 inode 变化被拒绝。此检查不能消除复核之后的替换竞态，也不绑定 HTTP 与 IPC 端点。

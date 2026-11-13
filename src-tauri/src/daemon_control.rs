@@ -1266,12 +1266,16 @@ pub fn mark_daemon_owned(pid: u32) -> Result<()> {
     let start_time =
         process_start_time(pid).ok_or_else(|| anyhow!("process {pid} is not running"))?;
     let _guard = daemon_pid_lock()?;
-    let path = daemon_owner_path()?;
-    std::fs::write(
-        path,
-        serde_json::to_string(&OwnerMarker { pid, start_time })?,
-    )
-    .context("failed to record daemon ownership")
+    let marker = serde_json::to_vec(&OwnerMarker { pid, start_time })?;
+    #[cfg(target_os = "macos")]
+    {
+        crate::daemon_identity::macos::write_owner_marker(&config_dir_absolute()?, &marker)
+            .context("failed to record daemon ownership")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        std::fs::write(daemon_owner_path()?, marker).context("failed to record daemon ownership")
+    }
 }
 
 /// Whether the daemon with this `pid` is the one the desktop started.
@@ -2605,6 +2609,77 @@ mod tests {
 
         assert!(clear_daemon_owner_if(me, start).unwrap());
         assert!(!daemon_is_owned(me));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ownership_marker_never_overwrites_symlink_or_hardlink_targets() {
+        use std::os::unix::fs::symlink;
+        let _config = crate::store::TestConfigDir::new("daemon-owner-links");
+        let marker = daemon_owner_path().unwrap();
+        let target = marker.with_file_name("unrelated");
+        for hardlink in [false, true] {
+            std::fs::write(&target, b"synthetic-unrelated").unwrap();
+            if hardlink {
+                std::fs::hard_link(&target, &marker).unwrap();
+            } else {
+                symlink(&target, &marker).unwrap();
+            }
+            let error =
+                mark_daemon_owned(std::process::id()).expect_err("unsafe marker must be refused");
+            assert!(error.to_string().contains("ownership"), "{error:#}");
+            assert_eq!(std::fs::read(&target).unwrap(), b"synthetic-unrelated");
+            std::fs::remove_file(&marker).unwrap();
+        }
+        std::fs::remove_file(&target).unwrap();
+        symlink(&target, &marker).unwrap();
+        assert!(mark_daemon_owned(std::process::id()).is_err());
+        assert!(!target.exists(), "dangling link target must not be created");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ownership_marker_updates_valid_legacy_file_and_preserves_corruption() {
+        use std::os::unix::fs::PermissionsExt;
+        let _config = crate::store::TestConfigDir::new("daemon-owner-update");
+        let marker = daemon_owner_path().unwrap();
+        let me = std::process::id();
+        let legacy = serde_json::to_vec(&OwnerMarker {
+            pid: me,
+            start_time: process_start_time(me).unwrap(),
+        })
+        .unwrap();
+        std::fs::write(&marker, legacy).unwrap();
+        std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o644)).unwrap();
+        mark_daemon_owned(me).unwrap();
+        assert!(daemon_is_owned(me));
+        assert_eq!(
+            std::fs::metadata(&marker).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        for invalid in [
+            b"synthetic-invalid".as_slice(),
+            br#"{"pid":1,"pid":2,"start_time":3}"#.as_slice(),
+            br#"{"pid":1,"start_time":3,"extra":true}"#.as_slice(),
+        ] {
+            std::fs::write(&marker, invalid).unwrap();
+            assert!(mark_daemon_owned(me).is_err());
+            assert_eq!(std::fs::read(&marker).unwrap(), invalid);
+        }
+        let valid = serde_json::to_vec(&OwnerMarker {
+            pid: me,
+            start_time: process_start_time(me).unwrap(),
+        })
+        .unwrap();
+        std::fs::write(&marker, &valid).unwrap();
+        let status = Command::new("chmod")
+            .args(["+a", "everyone allow read"])
+            .arg(&marker)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert!(mark_daemon_owned(me).is_err());
+        assert_eq!(std::fs::read(&marker).unwrap(), valid);
     }
 
     #[test]

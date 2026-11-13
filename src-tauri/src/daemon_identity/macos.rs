@@ -311,6 +311,118 @@ fn install(path: &Path, data: &[u8]) -> Result<()> {
     result
 }
 
+/// Write the legacy desktop ownership hint without following links or
+/// truncating an unrelated file. The caller holds the daemon PID lock.
+pub(crate) fn write_owner_marker(config: &Path, data: &[u8]) -> Result<()> {
+    write_owner_marker_after_read(config, data, || {})
+}
+
+fn write_owner_marker_after_read(
+    config: &Path,
+    data: &[u8],
+    after_read: impl FnOnce(),
+) -> Result<()> {
+    let dir = owner_dir(config)?;
+    let path = dir.join("daemon.owner");
+    let original = match fs::symlink_metadata(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return install(&path, data),
+        Err(e) => return Err(e.into()),
+        Ok(md) => md,
+    };
+    if !original.file_type().is_file()
+        || original.uid() != unsafe { libc::geteuid() }
+        || original.nlink() != 1
+        || original.mode() & 0o022 != 0
+        || original.len() > 4096
+    {
+        bail!("unsafe daemon ownership marker; retained");
+    }
+    no_acl_grants(&path).context("daemon ownership marker ACL is not safe")?;
+    let existing_file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&path)?;
+    let opened = existing_file.metadata()?;
+    if !opened.file_type().is_file()
+        || opened.uid() != unsafe { libc::geteuid() }
+        || opened.nlink() != 1
+        || opened.mode() & 0o022 != 0
+        || (opened.dev(), opened.ino()) != (original.dev(), original.ino())
+    {
+        bail!("daemon ownership marker changed; retained");
+    }
+    let mut bytes = Vec::new();
+    existing_file.take(4097).read_to_end(&mut bytes)?;
+    if bytes.len() > 4096 {
+        bail!("invalid daemon ownership marker; retained");
+    }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ExistingOwner {
+        pid: u32,
+        start_time: u64,
+    }
+    let existing: ExistingOwner =
+        serde_json::from_slice(&bytes).context("invalid daemon ownership marker; retained")?;
+    let _start_time = existing.start_time;
+    if existing.pid == 0 {
+        bail!("invalid daemon ownership marker; retained");
+    }
+    after_read();
+    let tmp = dir.join(format!(".daemon-owner-{}.tmp", new_id()?));
+    let result = (|| -> Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(&tmp)?;
+        file.write_all(data)?;
+        file.sync_all()?;
+        let current = fs::symlink_metadata(&path)?;
+        if !current.file_type().is_file()
+            || current.uid() != unsafe { libc::geteuid() }
+            || current.nlink() != 1
+            || current.mode() & 0o022 != 0
+            || (current.dev(), current.ino()) != (original.dev(), original.ino())
+        {
+            bail!("daemon ownership marker changed; retained");
+        }
+        let latest = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(&path)?;
+        let latest_md = latest.metadata()?;
+        if !latest_md.file_type().is_file()
+            || (latest_md.dev(), latest_md.ino()) != (original.dev(), original.ino())
+            || latest_md.uid() != unsafe { libc::geteuid() }
+            || latest_md.nlink() != 1
+            || latest_md.mode() & 0o022 != 0
+        {
+            bail!("daemon ownership marker changed; retained");
+        }
+        let mut current_bytes = Vec::new();
+        latest.take(4097).read_to_end(&mut current_bytes)?;
+        if current_bytes != bytes {
+            bail!("daemon ownership marker changed; retained");
+        }
+        no_acl_grants(&path).context("daemon ownership marker ACL is not safe")?;
+        let final_md = fs::symlink_metadata(&path)?;
+        if !final_md.file_type().is_file()
+            || (final_md.dev(), final_md.ino()) != (original.dev(), original.ino())
+            || final_md.uid() != unsafe { libc::geteuid() }
+            || final_md.nlink() != 1
+            || final_md.mode() & 0o022 != 0
+        {
+            bail!("daemon ownership marker changed; retained");
+        }
+        fs::rename(&tmp, &path).context("cannot replace daemon ownership marker")?;
+        Ok(())
+    })();
+    let _ = fs::remove_file(tmp);
+    result
+}
+
 fn config_id(dir: &Path) -> Result<String> {
     let path = dir.join(CONFIG_ID);
     if matches!(fs::symlink_metadata(&path), Err(ref e) if e.kind() == std::io::ErrorKind::NotFound)
@@ -712,6 +824,24 @@ mod token_tests {
             fs::metadata(&path).unwrap().ino(),
             new.metadata().unwrap().ino()
         );
+    }
+
+    #[test]
+    fn ownership_marker_changed_after_read_is_preserved() {
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let marker = dir.path().join("daemon.owner");
+        let original = br#"{"pid":1,"start_time":2}"#;
+        let replacement = br#"{"pid":3,"start_time":4}"#;
+        fs::write(&marker, original).unwrap();
+        let error = write_owner_marker_after_read(dir.path(), original, || {
+            fs::write(&marker, replacement).unwrap();
+        })
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("ownership marker changed"),
+            "{error:#}"
+        );
+        assert_eq!(fs::read(&marker).unwrap(), replacement);
     }
 
     #[test]
