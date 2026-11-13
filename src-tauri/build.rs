@@ -21,11 +21,14 @@ fn build_macos_codesign() {
     let source = "src/daemon_identity/macos_codesign.c";
     cc::Build::new()
         .file(source)
+        .file("src/daemon_identity/macos_exit_observer.c")
         .std("c11")
         .warnings(true)
         .compile("a2s_macos_codesign");
     println!("cargo:rerun-if-changed={source}");
     println!("cargo:rerun-if-changed=src/daemon_identity/macos_codesign.h");
+    println!("cargo:rerun-if-changed=src/daemon_identity/macos_exit_observer.c");
+    println!("cargo:rerun-if-changed=src/daemon_identity/macos_exit_observer.h");
     println!("cargo:rustc-link-lib=framework=Security");
     println!("cargo:rustc-link-lib=framework=CoreFoundation");
     println!("cargo:rustc-link-lib=bsm");

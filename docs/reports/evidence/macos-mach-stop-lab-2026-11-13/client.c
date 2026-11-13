@@ -2,6 +2,7 @@
 // user credentials. The supplied token is a fixed synthetic test value only.
 #include "protocol.h"
 #include "macos_codesign.h"
+#include "macos_exit_observer.h"
 #include <mach/task.h>
 #include <mach/notify.h>
 #include <servers/bootstrap.h>
@@ -73,13 +74,17 @@ int main(int argc,char **argv){
         fputc('\n',ready);fclose(ready);
         if(getchar()!='x'){printf("refused=test_release token_sent=0\n");return 2;}
     }
-    mach_port_t exit_port=MACH_PORT_NULL;int exit_kq=-1;
+    mach_port_t exit_port=MACH_PORT_NULL;int exit_kq=-1;a2s_exit_observer *observer=NULL;
     if(!strcmp(argv[5],"wait-exit")||!strcmp(argv[5],"hold-registration")||!strcmp(argv[5],"hold-before-registration")) {
         mach_port_t previous=MACH_PORT_NULL;
         if(mach_port_allocate(mach_task_self(),MACH_PORT_RIGHT_RECEIVE,&exit_port)!=KERN_SUCCESS ||
            mach_port_request_notification(mach_task_self(),name,MACH_NOTIFY_DEAD_NAME,0,exit_port,MACH_MSG_TYPE_MAKE_SEND_ONCE,&previous)!=KERN_SUCCESS || MACH_PORT_VALID(previous)) {
             printf("refused=exit_notification_setup token_sent=0\n");return 2;
         }
+        if(!strcmp(argv[5],"wait-exit")) {
+            if(a2s_exit_observer_create(&sender,resp.hello.identity.name,expected,&observer)!=0){printf("refused=proc_registration token_sent=0\n");return 2;}
+            printf("post_registration_identity_match=1\n");
+        } else {
         exit_kq=kqueue();struct kevent registration;
         if(exit_kq<0){printf("refused=kqueue token_sent=0\n");return 2;}
         if(!strcmp(argv[5],"hold-before-registration")) {
@@ -102,6 +107,7 @@ int main(int argc,char **argv){
         (void)mach_port_deallocate(mach_task_self(),rechecked);
         printf("post_registration_identity_match=1\n");
         if(!strcmp(argv[5],"hold-registration")){printf("result=unexpected_identity token_sent=0\n");return 2;}
+        }
     }
     a2s_lab_stop stop={0};stop.h.msgh_bits=MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,0)|MACH_MSGH_BITS_COMPLEX;stop.h.msgh_remote_port=!strcmp(argv[5],"public-stop")?service:resp.hello.endpoint.name;stop.h.msgh_size=sizeof(stop);stop.h.msgh_id=A2S_LAB_STOP;stop.body.msgh_descriptor_count=1;stop.reply.name=reply;stop.reply.disposition=MACH_MSG_TYPE_MAKE_SEND_ONCE;stop.reply.type=MACH_MSG_PORT_DESCRIPTOR;memcpy(stop.nonce,hello.nonce,16);memcpy(stop.instance,hello.instance,33);stop.expected_pid=(uint32_t)expected;
     if(!strcmp(argv[5],"borrowed-stop")) {
@@ -129,6 +135,11 @@ int main(int argc,char **argv){
         struct kevent event={0};struct timespec timeout={3,0};int n=kevent(exit_kq,NULL,0,&event,1,&timeout);
         printf("proc_exit_event=%d event_pid_matches=%d note_exit=%d\n",n,n==1 && event.ident==(uintptr_t)expected,n==1 && (event.fflags&NOTE_EXIT)!=0);
         close(exit_kq);
+    }
+    if(observer) {
+        int event=a2s_exit_observer_wait(observer,3000);
+        printf("proc_exit_event=%d event_pid_matches=%d note_exit=%d\n",event,event==1,event==1);
+        a2s_exit_observer_destroy(observer);
     }
     return 0;
 }

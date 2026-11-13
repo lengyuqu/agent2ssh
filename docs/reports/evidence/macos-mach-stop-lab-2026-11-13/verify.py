@@ -100,7 +100,7 @@ with tempfile.TemporaryDirectory(prefix='a2s-mach-lab-tools-',dir='/tmp') as too
  if not match or 'Signature=adhoc' not in info or 'adhoc,runtime' not in info:raise RuntimeError('expected hardened ad-hoc lab binary')
  good=f'identifier "org.agent2ssh.research.machlab" and cdhash H"{match.group(1)}"'
  bad='identifier "org.agent2ssh.not-the-lab"'
- run(['clang','-std=c11','-D_DARWIN_C_SOURCE','-Wall','-Wextra','-Werror','-Wno-deprecated-declarations','-O1',f'-I{REPO / "src-tauri/src/bin/agent2ssh_daemon/mach_lab"}',f'-I{REPO / "src-tauri/src/daemon_identity"}',ROOT/'client.c',REPO/'src-tauri/src/daemon_identity/macos_codesign.c','-framework','Security','-framework','CoreFoundation','-lbsm','-o',client])
+ run(['clang','-std=c11','-D_DARWIN_C_SOURCE','-Wall','-Wextra','-Werror','-Wno-deprecated-declarations','-O1',f'-I{REPO / "src-tauri/src/bin/agent2ssh_daemon/mach_lab"}',f'-I{REPO / "src-tauri/src/daemon_identity"}',ROOT/'client.c',REPO/'src-tauri/src/daemon_identity/macos_codesign.c',REPO/'src-tauri/src/daemon_identity/macos_exit_observer.c','-framework','Security','-framework','CoreFoundation','-lbsm','-o',client])
  run(['clang','-std=c11','-D_DARWIN_C_SOURCE','-Wall','-Wextra','-Werror','-Wno-deprecated-declarations','-O1',REPO/'docs/reports/evidence/macos-mach-discovery-2026-11-13/bootstrap_probe.c','-o',lookup])
  results=[]
  for i in range(1,4):

@@ -51,6 +51,14 @@ unsafe extern "C" {
         name: libc::mach_port_t,
         expected_pid: libc::pid_t,
     ) -> c_int;
+    fn a2s_exit_observer_create(
+        audit: *const KernelAuditToken,
+        task_identity: libc::mach_port_t,
+        expected_pid: libc::pid_t,
+        out: *mut *mut std::ffi::c_void,
+    ) -> c_int;
+    fn a2s_exit_observer_wait(observer: *mut std::ffi::c_void, timeout_ms: u32) -> c_int;
+    fn a2s_exit_observer_destroy(observer: *mut std::ffi::c_void);
 }
 
 /// Compare a kernel-provided audit observation with a held task port. The
@@ -66,6 +74,71 @@ pub(crate) fn task_audit_matches(
     // SAFETY: audit has the asserted Darwin layout; name is a borrowed port
     // name and the C helper does not consume or transfer the right.
     unsafe { a2s_task_audit_matches(audit, name, pid) == 1 }
+}
+
+/// A candidate exit event observer. It owns its queue and task name port but
+/// does not own a control endpoint or authorize a stop/record cleanup.
+pub(crate) struct ExitObserver {
+    raw: std::ptr::NonNull<std::ffi::c_void>,
+    observed: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ExitObservation {
+    TimedOut,
+    EventObserved,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ExitObserverUnavailable;
+
+impl ExitObserver {
+    pub(crate) fn create(
+        audit: &KernelAuditToken,
+        task_identity: libc::mach_port_t,
+        expected_pid: u32,
+    ) -> Result<Self, ExitObserverUnavailable> {
+        let pid = libc::pid_t::try_from(expected_pid).map_err(|_| ExitObserverUnavailable)?;
+        let mut raw = std::ptr::null_mut();
+        // SAFETY: the audit token lives throughout the call, task_identity is
+        // borrowed, and `raw` points to writable output storage.
+        if unsafe { a2s_exit_observer_create(audit, task_identity, pid, &mut raw) } != 0 {
+            return Err(ExitObserverUnavailable);
+        }
+        let raw = std::ptr::NonNull::new(raw).ok_or(ExitObserverUnavailable)?;
+        Ok(Self {
+            raw,
+            observed: false,
+        })
+    }
+
+    pub(crate) fn wait(
+        &mut self,
+        timeout: std::time::Duration,
+    ) -> Result<ExitObservation, ExitObserverUnavailable> {
+        if self.observed {
+            return Ok(ExitObservation::EventObserved);
+        }
+        // A positive fractional millisecond must not become an immediate poll.
+        let millis = u32::try_from(timeout.as_nanos().div_ceil(1_000_000))
+            .map_err(|_| ExitObserverUnavailable)?;
+        // SAFETY: raw remains uniquely owned and valid until Drop.
+        match unsafe { a2s_exit_observer_wait(self.raw.as_ptr(), millis) } {
+            0 => Ok(ExitObservation::TimedOut),
+            1 => {
+                self.observed = true;
+                Ok(ExitObservation::EventObserved)
+            }
+            _ => Err(ExitObserverUnavailable),
+        }
+    }
+}
+
+impl Drop for ExitObserver {
+    fn drop(&mut self) {
+        // SAFETY: this object uniquely owns the pointer returned by create.
+        unsafe { a2s_exit_observer_destroy(self.raw.as_ptr()) };
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -335,6 +408,71 @@ mod tests {
         ));
         assert!(!task_audit_matches(&audit, 0, std::process::id()));
         assert!(!task_audit_matches(&audit, task, u32::MAX));
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn exit_observer_requires_matching_task_and_keeps_timeouts_distinct() {
+        unsafe extern "C" {
+            fn task_create_identity_token(
+                task: libc::mach_port_t,
+                token: *mut libc::mach_port_t,
+            ) -> libc::c_int;
+            fn mach_port_deallocate(
+                task: libc::mach_port_t,
+                name: libc::mach_port_t,
+            ) -> libc::c_int;
+        }
+        let task = unsafe { libc::mach_task_self() };
+        let mut audit = KernelAuditToken([0; 8]);
+        let mut count = 8;
+        assert_eq!(
+            unsafe {
+                libc::task_info(
+                    task,
+                    15,
+                    (&mut audit as *mut KernelAuditToken).cast(),
+                    &mut count,
+                )
+            },
+            0
+        );
+        assert_eq!(count, 8);
+        let mut identity = 0;
+        assert_eq!(
+            unsafe { task_create_identity_token(task, &mut identity) },
+            0
+        );
+        assert_ne!(identity, 0);
+        let mut observer = ExitObserver::create(&audit, identity, std::process::id()).unwrap();
+        assert_eq!(
+            observer.wait(std::time::Duration::ZERO),
+            Ok(ExitObservation::TimedOut)
+        );
+        assert_eq!(
+            observer.wait(std::time::Duration::from_nanos(1)),
+            Ok(ExitObservation::TimedOut)
+        );
+        assert_eq!(
+            observer.wait(std::time::Duration::from_millis(u64::from(u32::MAX) + 1)),
+            Err(ExitObserverUnavailable)
+        );
+        let mut altered = audit;
+        altered.0[7] ^= 1;
+        assert!(matches!(
+            ExitObserver::create(&altered, identity, std::process::id()),
+            Err(ExitObserverUnavailable)
+        ));
+        assert!(matches!(
+            ExitObserver::create(&audit, 0, std::process::id()),
+            Err(ExitObserverUnavailable)
+        ));
+        assert!(matches!(
+            ExitObserver::create(&audit, identity, u32::MAX),
+            Err(ExitObserverUnavailable)
+        ));
+        drop(observer);
+        assert_eq!(unsafe { mach_port_deallocate(task, identity) }, 0);
     }
 
     #[test]

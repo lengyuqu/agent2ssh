@@ -37,4 +37,6 @@ macOS 构建现在包含 `daemon_identity/macos_codesign`，它通过内核 audi
 
 同一 macOS 原语还提供 audit token 与持有的 task name port 的比较：检查 UID/PID、`TASK_AUDIT_TOKEN` 及返回长度，完整 token 不一致时拒绝。它不接管端口，也不证明端点归属。单元测试覆盖真实 self task、篡改 token、错误 PID 和无效端口；真实 daemon 的直接注册与临时 launchd 实验客户端复用该比较并通过回归。生产停止路径仍未接入，Unix socket 的 peer audit 快照不能借此升级为 `Bound`。
 
+候选退出观察器现已抽出为共享原语：先核对 task identity，再注册 `NOTE_EXIT`，注册后重新由原 token 获取 task port 并复核 audit；观察器拥有并释放自己的 queue 与 task name port。超时、错误和事件分别返回，事件仅是观察线索。隔离单测覆盖当前 task 的超时、错误 token/端口/PID；实验客户端复用该实现并在真实 daemon 停止中观察事件。真实 PID 复用、受限权限、fd 继承与正式生产绑定仍未验收；它不能单独授权信号或清理记录，也未接入普通停止路径。
+
 构建和回归：`npm run build` 通过；macOS Rust 无默认特性库 877 通过、1 忽略，Tauri 库 895 通过、1 忽略，新增的运行时单测在两种特性下单独复跑通过；普通 CLI 与 daemon 构建通过。`cargo check --locked --no-default-features --target x86_64-pc-windows-gnu --bin agent2ssh` 在 macOS 交叉编译通过，不能代替 Windows 运行验证。新增本地原语没有接入停止路径，CNB 配额不足的限制仍适用。
