@@ -1,0 +1,224 @@
+//! Runtime code-signing evidence for a kernel-provided macOS audit token.
+//!
+//! A matching signature is not endpoint binding, process liveness or stop
+//! authorization. The production client is deliberately not wired to use this
+//! primitive until a trusted release policy and the full binding are ready.
+use std::ffi::{c_char, c_int, CString};
+
+/// The Darwin audit token representation consumed by Security.framework.
+/// Only create it from a kernel-supplied message or peer credential.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(crate) struct KernelAuditToken([u32; 8]);
+
+unsafe extern "C" {
+    fn a2s_verify_running_code(audit: *const KernelAuditToken, requirement: *const c_char)
+        -> c_int;
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SigningEvidenceError {
+    /// No project release policy has been configured and reviewed yet.
+    TrustRootUnavailable,
+    Rejected,
+}
+
+// No team or release identifier has been selected. Never populate this from a
+// daemon response, config file, environment variable, or an ad-hoc hash.
+const COMPILED_RELEASE_REQUIREMENT: Option<&str> = None;
+
+/// Check code identity without granting a bound-process or endpoint capability.
+pub(crate) fn verify_release_code(audit: &KernelAuditToken) -> Result<(), SigningEvidenceError> {
+    let requirement =
+        COMPILED_RELEASE_REQUIREMENT.ok_or(SigningEvidenceError::TrustRootUnavailable)?;
+    verify_requirement(audit, requirement)
+}
+
+fn verify_requirement(
+    audit: &KernelAuditToken,
+    requirement: &str,
+) -> Result<(), SigningEvidenceError> {
+    let requirement = CString::new(requirement).map_err(|_| SigningEvidenceError::Rejected)?;
+    // SAFETY: `audit` is a Darwin audit-token-shaped value, and the CString is
+    // NUL-terminated and remains alive for the entire synchronous call.
+    if unsafe { a2s_verify_running_code(audit, requirement.as_ptr()) } == 1 {
+        Ok(())
+    } else {
+        Err(SigningEvidenceError::Rejected)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        io::Read,
+        os::{fd::AsRawFd, unix::net::UnixStream},
+        path::Path,
+        process::{Child, Command, Stdio},
+    };
+
+    struct TestChild(Child);
+    impl Drop for TestChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    fn clean_env(command: &mut Command) {
+        for (key, _) in std::env::vars_os() {
+            let name = key.to_string_lossy();
+            if name.starts_with("DYLD_")
+                || name.starts_with("AGENT2SSH_")
+                || name.starts_with("A2S_MACH_LAB_")
+            {
+                command.env_remove(key);
+            }
+        }
+    }
+
+    fn run(program: &str, args: &[&std::ffi::OsStr]) -> std::process::Output {
+        let mut command = Command::new(program);
+        clean_env(&mut command);
+        let result = command.args(args).output().unwrap();
+        assert!(
+            result.status.success(),
+            "{program}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        result
+    }
+
+    fn signed_child(
+        dir: &Path,
+        entitlement: Option<&str>,
+        hardened: bool,
+    ) -> (TestChild, KernelAuditToken, String) {
+        let source = dir.join("synthetic.c");
+        let binary = dir.join("synthetic");
+        std::fs::write(&source, b"#include <unistd.h>\nint main(void) { if (write(1, \"x\", 1) != 1) return 2; sleep(30); return 0; }\n").unwrap();
+        run(
+            "/usr/bin/clang",
+            &[source.as_os_str(), "-o".as_ref(), binary.as_os_str()],
+        );
+        let mut args: Vec<&std::ffi::OsStr> = vec![
+            "--force".as_ref(),
+            "--sign".as_ref(),
+            "-".as_ref(),
+            "--identifier".as_ref(),
+            "org.agent2ssh.signing-test".as_ref(),
+        ];
+        if hardened {
+            args.extend([
+                std::ffi::OsStr::new("--options"),
+                std::ffi::OsStr::new("runtime"),
+            ]);
+        }
+        let plist = dir.join("entitlements.plist");
+        if let Some(key) = entitlement {
+            std::fs::write(&plist, format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict><key>{key}</key><true/></dict></plist>")).unwrap();
+            args.extend(["--entitlements".as_ref(), plist.as_os_str()]);
+        }
+        args.push(binary.as_os_str());
+        run("/usr/bin/codesign", &args);
+        let details = run(
+            "/usr/bin/codesign",
+            &["-dv".as_ref(), "--verbose=4".as_ref(), binary.as_os_str()],
+        );
+        let details = String::from_utf8(details.stderr).unwrap();
+        let hash = details
+            .lines()
+            .find_map(|line| line.strip_prefix("CDHash="))
+            .unwrap();
+        assert_eq!(hash.len(), 40);
+        let requirement =
+            format!("identifier \"org.agent2ssh.signing-test\" and cdhash H\"{hash}\"");
+        let (mut reader, writer) = UnixStream::pair().unwrap();
+        reader
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let fd: std::os::fd::OwnedFd = writer.into();
+        let mut command = Command::new(binary);
+        clean_env(&mut command);
+        let child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(fd))
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let child = TestChild(child);
+        let mut byte = [0u8; 1];
+        reader.read_exact(&mut byte).unwrap();
+        assert_eq!(byte, *b"x");
+        let mut audit = KernelAuditToken([0; 8]);
+        let mut len = std::mem::size_of_val(&audit) as libc::socklen_t;
+        let rc = unsafe {
+            libc::getsockopt(
+                reader.as_raw_fd(),
+                libc::SOL_LOCAL,
+                libc::LOCAL_PEERTOKEN,
+                (&mut audit as *mut KernelAuditToken).cast(),
+                &mut len,
+            )
+        };
+        assert_eq!(rc, 0, "{}", std::io::Error::last_os_error());
+        assert_eq!(len as usize, std::mem::size_of_val(&audit));
+        let mut peer: libc::pid_t = 0;
+        let mut peer_len = std::mem::size_of_val(&peer) as libc::socklen_t;
+        let rc = unsafe {
+            libc::getsockopt(
+                reader.as_raw_fd(),
+                libc::SOL_LOCAL,
+                libc::LOCAL_PEERPID,
+                (&mut peer as *mut libc::pid_t).cast(),
+                &mut peer_len,
+            )
+        };
+        assert_eq!(rc, 0, "{}", std::io::Error::last_os_error());
+        assert_eq!(peer_len as usize, std::mem::size_of_val(&peer));
+        assert_eq!(peer as u32, child.0.id());
+        (child, audit, requirement)
+    }
+
+    #[test]
+    fn dynamic_code_evidence_refuses_missing_root_wrong_code_and_unsafe_runtime() {
+        let clean = tempfile::tempdir_in("/tmp").unwrap();
+        let (_child, audit, requirement) = signed_child(clean.path(), None, true);
+        assert_eq!(
+            verify_release_code(&audit),
+            Err(SigningEvidenceError::TrustRootUnavailable)
+        );
+        assert_eq!(verify_requirement(&audit, &requirement), Ok(()));
+        assert_eq!(
+            verify_requirement(&audit, "anchor apple generic"),
+            Err(SigningEvidenceError::Rejected)
+        );
+        assert_eq!(
+            verify_requirement(&audit, "identifier \"org.agent2ssh.wrong\""),
+            Err(SigningEvidenceError::Rejected)
+        );
+        assert_eq!(
+            verify_requirement(&audit, "bad\0requirement"),
+            Err(SigningEvidenceError::Rejected)
+        );
+        assert_eq!(
+            verify_requirement(&audit, ""),
+            Err(SigningEvidenceError::Rejected)
+        );
+
+        let jit = tempfile::tempdir_in("/tmp").unwrap();
+        let (_child, audit, requirement) =
+            signed_child(jit.path(), Some("com.apple.security.cs.allow-jit"), true);
+        assert_eq!(
+            verify_requirement(&audit, &requirement),
+            Err(SigningEvidenceError::Rejected)
+        );
+        let plain = tempfile::tempdir_in("/tmp").unwrap();
+        let (_child, audit, requirement) = signed_child(plain.path(), None, false);
+        assert_eq!(
+            verify_requirement(&audit, &requirement),
+            Err(SigningEvidenceError::Rejected)
+        );
+    }
+}

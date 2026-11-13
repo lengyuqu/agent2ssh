@@ -1,11 +1,10 @@
 // Isolated Mach stop lab client. Never use this experimental protocol with
 // user credentials. The supplied token is a fixed synthetic test value only.
 #include "protocol.h"
+#include "macos_codesign.h"
 #include <mach/task.h>
 #include <mach/notify.h>
 #include <servers/bootstrap.h>
-#include <Security/Security.h>
-#include <CoreFoundation/CoreFoundation.h>
 #include <bsm/libbsm.h>
 #include <sys/event.h>
 #include <stdio.h>
@@ -14,24 +13,6 @@
 #include <unistd.h>
 
 typedef union {mach_msg_header_t h;a2s_lab_hello_reply hello;a2s_lab_stop_reply stop;unsigned char bytes[2048];} response_t;
-static int valid_code(audit_token_t audit,const char *requirement) {
-    CFDataRef data=CFDataCreate(NULL,(UInt8*)&audit,sizeof(audit));const void *k[]={kSecGuestAttributeAudit},*v[]={data};
-    CFDictionaryRef attrs=CFDictionaryCreate(NULL,k,v,1,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);SecCodeRef code=NULL;
-    OSStatus result=SecCodeCopyGuestWithAttributes(NULL,attrs,kSecCSDefaultFlags,&code);CFRelease(attrs);CFRelease(data);if(result)return 0;
-    CFStringRef text=CFStringCreateWithCString(NULL,requirement,kCFStringEncodingUTF8);SecRequirementRef req=NULL;
-    result=SecRequirementCreateWithString(text,kSecCSDefaultFlags,&req);CFRelease(text);if(result){CFRelease(code);return 0;}
-    result=SecCodeCheckValidity(code,kSecCSDefaultFlags,req);CFRelease(req);if(result){CFRelease(code);return 0;}
-    CFDictionaryRef info=NULL;result=SecCodeCopySigningInformation(code,kSecCSSigningInformation|kSecCSDynamicInformation,&info);CFRelease(code);if(result||!info)return 0;
-    CFNumberRef f=CFDictionaryGetValue(info,kSecCodeInfoFlags),s=CFDictionaryGetValue(info,kSecCodeInfoStatus);int64_t flags=0,status=0;
-    int good=f&&CFGetTypeID(f)==CFNumberGetTypeID()&&CFNumberGetValue(f,kCFNumberSInt64Type,&flags)&&(flags&kSecCodeSignatureRuntime)
-        && s&&CFGetTypeID(s)==CFNumberGetTypeID()&&CFNumberGetValue(s,kCFNumberSInt64Type,&status)&&(status&kSecCodeStatusValid)&&!(status&kSecCodeStatusDebugged);
-    CFDictionaryRef ent=CFDictionaryGetValue(info,kSecCodeInfoEntitlementsDict);
-    if(ent && CFGetTypeID(ent)==CFDictionaryGetTypeID()) {
-        const CFStringRef forbidden[]={CFSTR("com.apple.security.cs.allow-dyld-environment-variables"),CFSTR("com.apple.security.cs.disable-library-validation"),CFSTR("com.apple.security.cs.allow-unsigned-executable-memory"),CFSTR("com.apple.security.cs.allow-jit"),CFSTR("com.apple.security.cs.disable-executable-page-protection"),CFSTR("com.apple.security.get-task-allow")};
-        for(unsigned i=0;i<sizeof(forbidden)/sizeof(forbidden[0]);i++){CFTypeRef x=CFDictionaryGetValue(ent,forbidden[i]);if(x && (CFGetTypeID(x)!=CFBooleanGetTypeID()||CFBooleanGetValue(x)))good=0;}
-    } else if(ent || CFDictionaryContainsKey(info,kSecCodeInfoEntitlements)) good=0;
-    CFRelease(info);return good;
-}
 static int receive(mach_port_t port,response_t *msg){
     memset(msg,0,sizeof(*msg));mach_msg_option_t opts=MACH_RCV_MSG|MACH_RCV_TIMEOUT|MACH_RCV_TRAILER_TYPE(MACH_MSG_TRAILER_FORMAT_0)|MACH_RCV_TRAILER_ELEMENTS(MACH_RCV_TRAILER_AUDIT);
     return mach_msg(&msg->h,opts,0,sizeof(*msg),port,2500,0);
@@ -74,7 +55,7 @@ int main(int argc,char **argv){
     int expect_private=getenv("A2S_MACH_LAB_EXPECT_PRIVATE")!=NULL;
     if(audit_token_to_euid(sender)!=geteuid()||audit_token_to_pid(sender)!=expected||resp.hello.pid!=(uint32_t)expected||memcmp(resp.hello.nonce,hello.nonce,16)||memcmp(resp.hello.instance,hello.instance,33)||!MACH_PORT_VALID(resp.hello.endpoint.name)||(expect_private ? resp.hello.endpoint.name==service : resp.hello.endpoint.name!=service)||task_identity_token_get_task_port(resp.hello.identity.name,TASK_FLAVOR_NAME,&name)){printf("refused=identity token_sent=0\n");return 2;}
     audit_token_t task={0};mach_msg_type_number_t count=TASK_AUDIT_TOKEN_COUNT;
-    if(task_info(name,TASK_AUDIT_TOKEN,(task_info_t)&task,&count)||memcmp(&task,&sender,sizeof(task))||!valid_code(sender,argv[4])){printf("refused=code_or_task token_sent=0\n");return 2;}
+    if(task_info(name,TASK_AUDIT_TOKEN,(task_info_t)&task,&count)||memcmp(&task,&sender,sizeof(task))||!a2s_verify_running_code(&sender,argv[4])){printf("refused=code_or_task token_sent=0\n");return 2;}
     printf("identity_observations_match=1 same_endpoint=1 runtime_policy_match=1\n");
     // Guard use is a property of the exact laboratory binary and source path,
     // not something this client can independently query from a send right.

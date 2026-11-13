@@ -24,3 +24,11 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts/tests/test_macos_daemon
 - CNB 对提交 `1b17616` 的构建 [cnb-e77-1k7a7ckc4](https://cnb.cool/zdzso/agent2ssh/-/build/logs/cnb-e77-1k7a7ckc4) 两条流水线均在 Prepare 阶段因根组织 CPU 核时配额不足失败，测试阶段跳过；这不是代码测试通过或失败的证据。
 
 本机仍无可用的**项目** Developer ID 身份，不能证明 Agent2SSH 的正式签名、Team ID、外层 app、Notarization、更新或回滚。静态工具还不能验证运行中进程的签名状态、Mach 私有端点归属或检查后文件未被替换；这些仍是 [生产验收条件](../plans/macos-mach-identity-v2.md)和 #22 的未完成部分。
+
+## 运行时代码签名原语
+
+macOS 构建现在包含 `daemon_identity/macos_codesign`，它通过内核 audit token 获取运行中代码，核对调用方提供的代码要求、动态有效状态、hardened runtime 和受限 entitlement。生产侧的项目发行要求尚未配置，`verify_release_code` 因此返回 `TrustRootUnavailable`；它也没有接入普通停止路径。该原语只提供代码签名证据，调用方仍须独立证明 audit token 来源、私有端点绑定、存活和授权，不得以其结果单独发送 token 或清理记录。
+
+本机合成进程单元测试从 Unix socket 的 `LOCAL_PEERTOKEN` 获取实际 audit token，验证测试固定 CDHash 的 ad-hoc hardened 进程能通过底层检查；错误标识、Apple anchor、无 hardened runtime、JIT entitlement 和缺少项目发行信任根均被拒绝。实验 Mach 客户端也改用相同 C 校验原语，直接注册与临时 launchd 的真实 daemon 回归均通过。ad-hoc 的正向检查只用于测试原语，并不满足生产发布策略；正式 Developer ID 成功路径仍未验证。
+
+构建和回归：`npm run build` 通过；macOS Rust 无默认特性库 877 通过、1 忽略，Tauri 库 895 通过、1 忽略，新增的运行时单测在两种特性下单独复跑通过；普通 CLI 与 daemon 构建通过。`cargo check --locked --no-default-features --target x86_64-pc-windows-gnu --bin agent2ssh` 在 macOS 交叉编译通过，不能代替 Windows 运行验证。新增本地原语没有接入停止路径，CNB 配额不足的限制仍适用。

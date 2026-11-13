@@ -2,6 +2,7 @@ fn main() {
     // Nothing this script does belongs in a metadata collection; see
     // `cargo_is_collecting_metadata` for why skipping it is load-bearing.
     if !cargo_is_collecting_metadata() {
+        build_macos_codesign();
         #[cfg(feature = "macos-mach-lab")]
         build_macos_mach_lab();
         #[cfg(feature = "tauri")]
@@ -11,6 +12,22 @@ fn main() {
             delay_load_comctl32();
         }
     }
+}
+
+fn build_macos_codesign() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
+        return;
+    }
+    let source = "src/daemon_identity/macos_codesign.c";
+    cc::Build::new()
+        .file(source)
+        .std("c11")
+        .warnings(true)
+        .compile("a2s_macos_codesign");
+    println!("cargo:rerun-if-changed={source}");
+    println!("cargo:rerun-if-changed=src/daemon_identity/macos_codesign.h");
+    println!("cargo:rustc-link-lib=framework=Security");
+    println!("cargo:rustc-link-lib=framework=CoreFoundation");
 }
 
 /// A native, explicitly enabled local experiment. It is not part of default

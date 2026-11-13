@@ -47,6 +47,7 @@ daemon = ["dep:axum", "dep:tower", "dep:tower-http", "dep:futures-util", "dep:tr
 macos-mach-lab = []
 
 [build-dependencies]
+cc = "1"
 tauri-build = { version = "2", features = [], optional = true }
 
 [dependencies]

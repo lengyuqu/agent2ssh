@@ -200,3 +200,9 @@ pub mod macos;
 
 #[cfg(target_os = "macos")]
 pub mod macos_client;
+
+// The verifier provides code-signing evidence only. It is not yet wired to
+// the client because endpoint binding and a release trust root remain open.
+#[cfg(target_os = "macos")]
+#[allow(dead_code)]
+mod macos_codesign;

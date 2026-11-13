@@ -91,6 +91,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "cairo-rs 0.20.12",
+ "cc",
  "chrono",
  "clap",
  "clap_complete",

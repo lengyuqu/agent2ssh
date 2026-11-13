@@ -64,7 +64,7 @@ try:
  signature=must(['codesign','-dv','--verbose=4',binary]).stderr;cdhash=re.search(r'^CDHash=([0-9a-f]{40})$',signature,re.MULTILINE)
  if not cdhash or 'Signature=adhoc' not in signature:raise AssertionError('expected ad-hoc signed test binary')
  requirement=f'identifier "org.agent2ssh.research.launchddaemon" and cdhash H"{cdhash.group(1)}"'
- must(['clang','-std=c11','-D_DARWIN_C_SOURCE','-Wall','-Wextra','-Werror','-Wno-deprecated-declarations','-O1',f'-I{REPO / "src-tauri/src/bin/agent2ssh_daemon/mach_lab"}',ROOT/'client.c','-framework','Security','-framework','CoreFoundation','-lbsm','-o',client])
+ must(['clang','-std=c11','-D_DARWIN_C_SOURCE','-Wall','-Wextra','-Werror','-Wno-deprecated-declarations','-O1',f'-I{REPO / "src-tauri/src/bin/agent2ssh_daemon/mach_lab"}',f'-I{REPO / "src-tauri/src/daemon_identity"}',ROOT/'client.c',REPO/'src-tauri/src/daemon_identity/macos_codesign.c','-framework','Security','-framework','CoreFoundation','-lbsm','-o',client])
  must(['clang','-std=c11','-D_DARWIN_C_SOURCE','-Wall','-Wextra','-Werror','-Wno-deprecated-declarations','-O1',REPO/'docs/reports/evidence/macos-mach-discovery-2026-11-13/bootstrap_probe.c','-o',probe])
  results=[]
  for i in range(1,4):
