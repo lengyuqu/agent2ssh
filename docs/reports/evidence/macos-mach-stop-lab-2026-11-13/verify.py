@@ -114,6 +114,11 @@ with tempfile.TemporaryDirectory(prefix='a2s-mach-lab-tools-',dir='/tmp') as too
     local_request=None
     try:
      wait_health(proc,addr);instance=json.loads((config/'daemon.instance.json').read_text())['instance_id']
+     oversized=invoke(client,service,proc.pid,instance,good,'oversized')
+     if oversized.returncode or 'oversized_sent=1 token_sent=0' not in oversized.stdout:raise AssertionError('oversized test message was not sent')
+     deadline=time.monotonic()+3
+     while b'A2S_MACH_LAB_OVERSIZED_DISCARDED' not in os.pread(log.fileno(),100000,0) and proc.poll() is None and time.monotonic()<deadline:time.sleep(.02)
+     if b'A2S_MACH_LAB_OVERSIZED_DISCARDED' not in os.pread(log.fileno(),100000,0):raise AssertionError('server did not discard oversized message')
      wrong=invoke(client,service,proc.pid,instance,bad,'stop')
      if wrong.returncode==0 or 'refused=code_or_task token_sent=0' not in wrong.stdout or proc.poll() is not None:raise AssertionError(f'wrong requirement did not fail closed: {wrong.stdout} {wrong.stderr}')
      mismatched=invoke(client,service,proc.pid,'f'*32,good,'stop')
@@ -142,7 +147,7 @@ with tempfile.TemporaryDirectory(prefix='a2s-mach-lab-tools-',dir='/tmp') as too
      deadline=time.monotonic()+5
      while not processes_not_live(pids) and time.monotonic()<deadline:time.sleep(.05)
      if not processes_not_live(pids):raise AssertionError('test local process tree still live')
-     line=f'run={i} wrong_code_no_token=1 wrong_instance_no_token=1 hello_no_token=1 wrong_token_no_stop=1 verified_same_endpoint=1 accepted_exit_unverified=1 child_exited=1 task_name_notification={notification.group(1).replace(" ",",")} proc_registration_rechecked=1 proc_exit_event=1 drain_ipc=1 local_exec_cancelled=1 local_tree_not_live=1 records_removed=1\n';results.append(line);print(line,end='')
+     line=f'run={i} oversized_discarded_service_continued=1 wrong_code_no_token=1 wrong_instance_no_token=1 hello_no_token=1 wrong_token_no_stop=1 verified_same_endpoint=1 accepted_exit_unverified=1 child_exited=1 task_name_notification={notification.group(1).replace(" ",",")} proc_registration_rechecked=1 proc_exit_event=1 drain_ipc=1 local_exec_cancelled=1 local_tree_not_live=1 records_removed=1\n';results.append(line);print(line,end='')
     finally:
      if local_request is not None:local_request.close()
      if proc.poll() is None:proc.terminate()

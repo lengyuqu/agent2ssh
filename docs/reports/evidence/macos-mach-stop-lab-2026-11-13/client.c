@@ -44,6 +44,12 @@ int main(int argc,char **argv){
     int expected=atoi(argv[2]);if(expected<=0||strlen(argv[3])!=32)return 1;
     mach_port_t service=MACH_PORT_NULL,reply=MACH_PORT_NULL;
     if(bootstrap_look_up(bootstrap_port,argv[1],&service)!=KERN_SUCCESS||!MACH_PORT_VALID(service)){printf("refused=lookup token_sent=0\n");return 2;}
+    if(!strcmp(argv[5],"oversized")) {
+        struct {mach_msg_header_t h;char payload[4096];} large={0};
+        large.h.msgh_bits=MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,0);large.h.msgh_remote_port=service;large.h.msgh_size=sizeof(large);large.h.msgh_id=0xa229;
+        if(mach_msg(&large.h,MACH_SEND_MSG|MACH_SEND_TIMEOUT,sizeof(large),0,0,1000,0))return 3;
+        printf("oversized_sent=1 token_sent=0\n");return 0;
+    }
     if(mach_port_allocate(mach_task_self(),MACH_PORT_RIGHT_RECEIVE,&reply)||mach_port_guard_with_flags(mach_task_self(),reply,0xb522,MPG_IMMOVABLE_RECEIVE)){printf("refused=reply_port token_sent=0\n");return 2;}
     if(!strcmp(argv[5],"adversarial-stop")) {
         // Deliberately bypass the client proof for a separate-process negative

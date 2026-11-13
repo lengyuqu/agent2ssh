@@ -77,7 +77,10 @@ static void accept_stop(a2s_lab_stop *req,audit_token_t sender) {
 static void *serve(void *unused) {
     (void)unused;
     for(;;){a2s_lab_receive msg={0};mach_msg_option_t opts=MACH_RCV_MSG|MACH_RCV_TIMEOUT|MACH_RCV_TRAILER_TYPE(MACH_MSG_TRAILER_FORMAT_0)|MACH_RCV_TRAILER_ELEMENTS(MACH_RCV_TRAILER_AUDIT);
-        kern_return_t kr=mach_msg(&msg.h,opts,0,sizeof(msg),listener,1000,0);if(kr==MACH_RCV_TIMED_OUT)continue;if(kr!=KERN_SUCCESS)break;
+        kern_return_t kr=mach_msg(&msg.h,opts,0,sizeof(msg),listener,1000,0);
+        if(kr==MACH_RCV_TIMED_OUT)continue;
+        if(kr==MACH_RCV_TOO_LARGE){fputs("A2S_MACH_LAB_OVERSIZED_DISCARDED\n",stderr);fflush(stderr);continue;}
+        if(kr!=KERN_SUCCESS)break;
         mach_msg_audit_trailer_t *trailer=message_trailer(&msg);if(!trailer || audit_token_to_euid(trailer->msgh_audit)!=geteuid()) {mach_msg_destroy(&msg.h);continue;}
         if(msg.h.msgh_id==A2S_LAB_HELLO)accept_hello(&msg.hello,trailer->msgh_audit);
         else if(msg.h.msgh_id==A2S_LAB_STOP){fputs("A2S_MACH_LAB_STOP_RECEIVED\n",stderr);fflush(stderr);accept_stop(&msg.stop,trailer->msgh_audit);}
