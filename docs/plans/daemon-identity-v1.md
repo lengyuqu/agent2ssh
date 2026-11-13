@@ -66,6 +66,15 @@ stateDiagram-v2
 
 候选退出观察顺序：在获得已核对的 task identity 后注册 PID 的 `EVFILT_PROC/NOTE_EXIT`，然后再次从原 token 取得 task port 并比对 audit token；任一步失败都不能发送 token 或声称已绑定退出观察。本机实测该事件在 `exec` 后不触发、真实退出后触发，且三次 A 在注册和复核之间退出并被不同 PID 的 B 取代时，复核失败、未发送 token。**这是实验候选，不是已证明的生产协议**：仍需验证真实 PID 复用、内核/权限与事件语义、完整部署和清理竞态；它也不提供可绑定的发信号句柄。
 
+### macOS 生产接入的待验收条件（2026-11-13）
+
+以下是候选接入条件，不代表正式产品已经启用：
+
+1. **可信代码要求与打包。** 在客户端内提供可验证的发布者信任根和允许的 daemon 标识；无有效信任根、ad-hoc、签名/运行时校验失败或不允许的 entitlement 均保持 `Unbound`，不能由可写的实例记录、服务端响应或环境变量提供信任根。Developer ID、Team ID、签名轮换和降级策略需结合实际发布身份设计并验证；目前没有可用的正式签名身份。临时 Tauri 打包实验发现当前配置会给 daemon 附加不符合实验策略的 entitlement，单独重签后可在 ad-hoc debug 包中通过校验，正式签名、公证和更新链尚未验证。
+2. **发现与授权分离。** launchd 管理的公共 MachServices 端口只接收无秘密发现；[实测](../reports/evidence/macos-mach-discovery-2026-11-13/FINDINGS.md) A 退出后旧公共发送权可投递给重启的 B，即使 A 曾 guard receive right。A 必须另建实例专属、不可转移的 receive right，并在无秘密回复中给出其发送权与 task identity。客户端核对 kernel audit、task identity、记录、nonce、可信代码及运行时策略后，只在该私有端点发送管理员 token 与一次停止。当前的隔离真实 daemon 实验覆盖了该形态，尚不是正式客户端实现；guard 不能由发送权独立查询，依赖可信发布代码及其不变量。
+3. **等待与恢复。** 将接受回执和退出观察分开；回复丢失、进程事件不可注册或复核失败时保留记录并报告未知，不自动重发或按 PID 信号。`NOTE_EXIT` 加注册后 identity 复核仅是候选退出观察，不是已证明的跨版本保证；不得用 task dead-name 代替进程退出。实验中的 launchd 崩溃残留须先停用测试 job，再由显式 `clear-stale` 按期望 PID 和实例核对清理，不能据此承诺生产自动恢复。
+4. **正式验收。** 须在正式签名并安装的 app、daemon 和 CLI 上验证信任根成功与不匹配拒绝、daemon 独立 entitlement、签名/更新/回滚、跨用户和权限失败、真实 PID 复用及注册竞态、服务替换与消息权利交接、回执丢失、SSH/本地任务 drain 和记录恢复。缺失能力、旧版或任何证明失败继续使用已确认的保守默认；实验 ad-hoc 结果不替代这些验收。
+
 ## 4. 线协议及对象建立
 
 ### 4.1 一个连接、一个停止操作
