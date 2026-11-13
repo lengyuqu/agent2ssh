@@ -311,6 +311,114 @@ fn install(path: &Path, data: &[u8]) -> Result<()> {
     result
 }
 
+/// Read a legacy PID record without following links or accepting unsafe files.
+pub(crate) fn read_pid_record_snapshot(config: &Path) -> Result<String> {
+    let dir = owner_dir(config)?;
+    let path = dir.join("daemon.pid");
+    let original =
+        fs::symlink_metadata(&path).context("cannot inspect daemon PID file; retained")?;
+    if !original.file_type().is_file() {
+        bail!("daemon PID path is not a regular file; retained for manual inspection");
+    }
+    let safe = |md: &fs::Metadata| {
+        md.file_type().is_file()
+            && md.uid() == unsafe { libc::geteuid() }
+            && md.nlink() == 1
+            && md.mode() & 0o022 == 0
+            && md.len() <= 64
+            && (md.dev(), md.ino()) == (original.dev(), original.ino())
+    };
+    if !safe(&original) {
+        bail!("unsafe daemon PID record; retained");
+    }
+    no_acl_grants(&path).context("daemon PID record ACL is not safe")?;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&path)?;
+    if !safe(&file.metadata()?) {
+        bail!("daemon PID record changed; retained");
+    }
+    let mut raw = String::new();
+    file.take(65).read_to_string(&mut raw)?;
+    if raw.len() > 64 || !safe(&fs::symlink_metadata(&path)?) {
+        bail!("daemon PID record changed or is too large; retained");
+    }
+    Ok(raw)
+}
+
+/// Remove a legacy PID file only if its non-link file and contents still match.
+/// The caller holds the PID lock and has ruled out IPC identity artifacts.
+pub(crate) fn remove_pid_record_if(
+    config: &Path,
+    expected_pid: u32,
+    expected_raw: Option<&str>,
+) -> Result<bool> {
+    remove_pid_record_if_after_read(config, expected_pid, expected_raw, || {})
+}
+
+fn remove_pid_record_if_after_read(
+    config: &Path,
+    expected_pid: u32,
+    expected_raw: Option<&str>,
+    after_read: impl FnOnce(),
+) -> Result<bool> {
+    if expected_pid == 0 {
+        bail!("invalid expected PID; record retained");
+    }
+    let dir = owner_dir(config)?;
+    let path = dir.join("daemon.pid");
+    let original = match fs::symlink_metadata(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e.into()),
+        Ok(md) => md,
+    };
+    let safe = |md: &fs::Metadata| {
+        md.file_type().is_file()
+            && md.uid() == unsafe { libc::geteuid() }
+            && md.nlink() == 1
+            && md.mode() & 0o022 == 0
+            && md.len() <= 64
+            && (md.dev(), md.ino()) == (original.dev(), original.ino())
+    };
+    if !safe(&original) {
+        bail!("unsafe daemon PID record; retained");
+    }
+    no_acl_grants(&path).context("daemon PID record ACL is not safe")?;
+    let read_checked = || -> Result<String> {
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(&path)?;
+        if !safe(&file.metadata()?) {
+            bail!("daemon PID record changed; retained");
+        }
+        let mut raw = String::new();
+        file.take(65).read_to_string(&mut raw)?;
+        if raw.len() > 64 {
+            bail!("daemon PID record is too large; retained");
+        }
+        Ok(raw)
+    };
+    let raw = read_checked()?;
+    if expected_raw.is_some_and(|expected| expected != raw) {
+        bail!("daemon PID record changed; retained");
+    }
+    if raw.trim().parse::<u32>().ok() != Some(expected_pid) {
+        return Ok(false);
+    }
+    after_read();
+    if read_checked()? != raw {
+        bail!("daemon PID record changed; retained");
+    }
+    no_acl_grants(&path).context("daemon PID record ACL is not safe")?;
+    if !safe(&fs::symlink_metadata(&path)?) {
+        bail!("daemon PID record changed; retained");
+    }
+    fs::remove_file(path).context("failed to remove daemon PID file")?;
+    Ok(true)
+}
+
 /// Write the legacy desktop ownership hint without following links or
 /// truncating an unrelated file. The caller holds the daemon PID lock.
 pub(crate) fn write_owner_marker(config: &Path, data: &[u8]) -> Result<()> {
@@ -842,6 +950,35 @@ mod token_tests {
             "{error:#}"
         );
         assert_eq!(fs::read(&marker).unwrap(), replacement);
+    }
+
+    #[test]
+    fn pid_record_changed_after_read_is_preserved() {
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let path = dir.path().join("daemon.pid");
+        fs::write(&path, b"123").unwrap();
+        let error = remove_pid_record_if_after_read(dir.path(), 123, None, || {
+            fs::write(&path, b"456").unwrap();
+        })
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("PID record changed"),
+            "{error:#}"
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"456");
+    }
+
+    #[test]
+    fn pid_record_same_number_with_changed_bytes_is_preserved() {
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let path = dir.path().join("daemon.pid");
+        fs::write(&path, b"123\n").unwrap();
+        let error = remove_pid_record_if(dir.path(), 123, Some("123")).unwrap_err();
+        assert!(
+            error.to_string().contains("PID record changed"),
+            "{error:#}"
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"123\n");
     }
 
     #[test]

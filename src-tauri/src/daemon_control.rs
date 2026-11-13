@@ -118,16 +118,21 @@ pub fn write_daemon_pid(pid: u32) -> Result<()> {
 /// writers. Available on every platform: the safety comes from the re-read
 /// under the lock, not from the OS.
 pub fn clear_stale_daemon_pid(expected_pid: u32) -> Result<()> {
-    let path = daemon_pid_path()?;
-    if !std::fs::symlink_metadata(&path)
-        .context("cannot inspect daemon PID file; retained")?
-        .file_type()
-        .is_file()
-    {
-        anyhow::bail!("daemon PID path is not a regular file; retained for manual inspection");
-    }
+    #[cfg(target_os = "macos")]
     let snapshot =
-        std::fs::read_to_string(&path).context("cannot read daemon PID file; retained")?;
+        crate::daemon_identity::macos::read_pid_record_snapshot(&config_dir_absolute()?)?;
+    #[cfg(not(target_os = "macos"))]
+    let snapshot = {
+        let path = daemon_pid_path()?;
+        if !std::fs::symlink_metadata(&path)
+            .context("cannot inspect daemon PID file; retained")?
+            .file_type()
+            .is_file()
+        {
+            anyhow::bail!("daemon PID path is not a regular file; retained for manual inspection");
+        }
+        std::fs::read_to_string(&path).context("cannot read daemon PID file; retained")?
+    };
     clear_stale_daemon_pid_with_snapshot(expected_pid, &snapshot)
 }
 
@@ -151,14 +156,19 @@ fn clear_stale_daemon_pid_with_snapshot(expected_pid: u32, snapshot: &str) -> Re
         }
     }
     let path = daemon_pid_path()?;
-    if !std::fs::symlink_metadata(&path)
-        .context("cannot inspect daemon PID file; retained")?
-        .file_type()
-        .is_file()
-    {
-        anyhow::bail!("daemon PID path is not a regular file; retained for manual inspection");
-    }
-    let raw = std::fs::read_to_string(&path).context("cannot read daemon PID file; retained")?;
+    #[cfg(target_os = "macos")]
+    let raw = crate::daemon_identity::macos::read_pid_record_snapshot(&config_dir_absolute()?)?;
+    #[cfg(not(target_os = "macos"))]
+    let raw = {
+        if !std::fs::symlink_metadata(&path)
+            .context("cannot inspect daemon PID file; retained")?
+            .file_type()
+            .is_file()
+        {
+            anyhow::bail!("daemon PID path is not a regular file; retained for manual inspection");
+        }
+        std::fs::read_to_string(&path).context("cannot read daemon PID file; retained")?
+    };
     if raw != snapshot {
         anyhow::bail!("daemon PID file changed during cleanup; retained");
     }
@@ -181,8 +191,22 @@ fn clear_stale_daemon_pid_with_snapshot(expected_pid: u32, snapshot: &str) -> Re
     if !pid_definitely_missing(actual) {
         anyhow::bail!("daemon PID {actual} exists or cannot be observed; PID file retained");
     }
-    std::fs::remove_file(path).context("failed to remove stale daemon PID file")?;
-    Ok(())
+    #[cfg(target_os = "macos")]
+    {
+        if !crate::daemon_identity::macos::remove_pid_record_if(
+            &config_dir_absolute()?,
+            actual,
+            Some(snapshot),
+        )? {
+            anyhow::bail!("daemon PID record changed; retained");
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        std::fs::remove_file(path).context("failed to remove stale daemon PID file")?;
+        Ok(())
+    }
 }
 
 fn write_daemon_pid_if_absent(pid: u32) -> Result<()> {
@@ -202,18 +226,24 @@ fn write_daemon_pid_if_absent(pid: u32) -> Result<()> {
 pub fn remove_daemon_pid_file_if(pid: u32) -> Result<bool> {
     let _guard = daemon_pid_lock()?;
     #[cfg(target_os = "macos")]
-    refuse_ipc_artifacts()?;
-    let path = daemon_pid_path()?;
-    let raw = match std::fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error).context("failed to read daemon PID file for cleanup"),
-    };
-    if raw.trim().parse::<u32>().ok() != Some(pid) {
-        return Ok(false);
+    {
+        refuse_ipc_artifacts()?;
+        crate::daemon_identity::macos::remove_pid_record_if(&config_dir_absolute()?, pid, None)
     }
-    std::fs::remove_file(path).context("failed to remove daemon PID file")?;
-    Ok(true)
+    #[cfg(not(target_os = "macos"))]
+    {
+        let path = daemon_pid_path()?;
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error).context("failed to read daemon PID file for cleanup"),
+        };
+        if raw.trim().parse::<u32>().ok() != Some(pid) {
+            return Ok(false);
+        }
+        std::fs::remove_file(path).context("failed to remove daemon PID file")?;
+        Ok(true)
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -2254,6 +2284,62 @@ mod tests {
             .unwrap()
             .file_type()
             .is_symlink());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pid_cleanup_preserves_symlink_and_hardlink() {
+        use std::os::unix::fs::symlink;
+        let _config = crate::store::TestConfigDir::new("daemon-pid-clean-links");
+        let path = daemon_pid_path().unwrap();
+        let target = path.with_file_name("unrelated-pid-data");
+        let contents = std::process::id().to_string();
+        for hardlink in [false, true] {
+            std::fs::write(&target, &contents).unwrap();
+            if hardlink {
+                std::fs::hard_link(&target, &path).unwrap();
+            } else {
+                symlink(&target, &path).unwrap();
+            }
+            assert!(remove_daemon_pid_file_if(std::process::id()).is_err());
+            assert!(
+                std::fs::symlink_metadata(&path).is_ok(),
+                "unsafe path must be retained"
+            );
+            assert_eq!(std::fs::read_to_string(&target).unwrap(), contents);
+            std::fs::remove_file(&path).unwrap();
+        }
+        let missing = u32::MAX - 1;
+        std::fs::write(&target, missing.to_string()).unwrap();
+        std::fs::hard_link(&target, &path).unwrap();
+        assert!(clear_stale_daemon_pid(missing).is_err());
+        assert!(std::fs::symlink_metadata(&path).is_ok());
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            missing.to_string()
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pid_cleanup_preserves_nonprivate_and_acl_granted_records() {
+        use std::os::unix::fs::PermissionsExt;
+        let _config = crate::store::TestConfigDir::new("daemon-pid-clean-access");
+        let path = daemon_pid_path().unwrap();
+        let contents = std::process::id().to_string();
+        std::fs::write(&path, &contents).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(remove_daemon_pid_file_if(std::process::id()).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), contents);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let status = Command::new("chmod")
+            .args(["+a", "everyone allow read"])
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert!(remove_daemon_pid_file_if(std::process::id()).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), contents);
     }
 
     #[test]
