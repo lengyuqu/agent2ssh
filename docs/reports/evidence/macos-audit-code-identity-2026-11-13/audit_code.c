@@ -2,6 +2,7 @@
 // Only this test's own child and synthetic signing requirements are used.
 #include <mach/mach.h>
 #include <mach/task.h>
+#include <mach/notify.h>
 #include <mach/task_special_ports.h>
 #include <Security/Security.h>
 #include <CoreFoundation/CoreFoundation.h>
@@ -62,6 +63,9 @@ int main(int argc,char **argv){
  mach_msg_audit_trailer_t *tr=(void *)((char*)&msg.m+round_msg(msg.m.h.msgh_size));if(tr->msgh_trailer_size<sizeof(*tr)){fprintf(stderr,"short trailer\n");return 2;}
  audit_token_t audit=tr->msgh_audit; if(read_byte(sock[0])!='a')return 2;
  task_name_t name=0;ok("name port",task_identity_token_get_task_port(msg.m.token.name,TASK_FLAVOR_NAME,&name));
+ mach_port_t notify=0,previous=0;ok("notify port",mach_port_allocate(mach_task_self(),MACH_PORT_RIGHT_RECEIVE,&notify));
+ ok("request dead-name",mach_port_request_notification(mach_task_self(),name,MACH_NOTIFY_DEAD_NAME,0,notify,MACH_MSG_TYPE_MAKE_SEND_ONCE,&previous));
+ if(MACH_PORT_VALID(previous)){fprintf(stderr,"unexpected previous notification\n");return 2;}
  audit_token_t task={0};mach_msg_type_number_t n=TASK_AUDIT_TOKEN_COUNT;ok("task audit",task_info(name,TASK_AUDIT_TOKEN,(task_info_t)&task,&n));
  int match=memcmp(&audit,&task,sizeof(audit))==0;OSStatus correct=check_code(audit,argv[1]),incorrect=check_code(audit,wrong),incorrect_hash=check_code(audit,wrong_hash);
  SecCodeRef retained=NULL; OSStatus retained_lookup=lookup_code(audit,&retained);
@@ -70,13 +74,21 @@ int main(int argc,char **argv){
  if(retained_lookup!=errSecSuccess || retained_req_status!=errSecSuccess) { fprintf(stderr,"retained code setup failed\n"); close(sock[0]); waitpid(child,NULL,0); return 2; }
  printf("child_pid=%d sender_pid=%d pidversion=%d task_audit_match=%d correct_status=%d wrong_status=%d wrong_hash_status=%d\n",child,audit_token_to_pid(audit),audit_token_to_pidversion(audit),match,(int)correct,(int)incorrect,(int)incorrect_hash);
  send_byte(sock[0],'e');if(read_byte(sock[0])!='e')return 2;
+ struct { mach_dead_name_notification_t msg; mach_msg_trailer_t trailer; } note={0};kern_return_t note_before=mach_msg(&note.msg.not_header,MACH_RCV_MSG|MACH_RCV_TIMEOUT,0,sizeof(note),notify,100,0);
+ audit_token_t task_after={0};mach_msg_type_number_t after_count=TASK_AUDIT_TOKEN_COUNT;
+ kern_return_t name_after=task_info(name,TASK_AUDIT_TOKEN,(task_info_t)&task_after,&after_count);
+ task_name_t reopened=MACH_PORT_NULL;kern_return_t reopen_kr=task_identity_token_get_task_port(msg.m.token.name,TASK_FLAVOR_NAME,&reopened);
+ printf("after_exec_task_notification_kr=%d notification_is_dead_name=%d name_task_info_kr=%d task_matches_old=%d task_matches_new_pidversion=%d\n",note_before,note_before==0 && note.msg.not_header.msgh_id==MACH_NOTIFY_DEAD_NAME,name_after,name_after==0 && !memcmp(&task_after,&audit,sizeof(audit)),name_after==0 ? audit_token_to_pidversion(task_after) : -1);
+ printf("after_exec_original_identity_reopen_kr=%d\n",reopen_kr);if(MACH_PORT_VALID(reopened))(void)mach_port_deallocate(mach_task_self(),reopened);
  OSStatus old_status=check_code(audit,argv[1]);audit_token_t current={0};socklen_t size=sizeof(current);if(getsockopt(sock[0],SOL_LOCAL,LOCAL_PEERTOKEN,&current,&size)||size!=sizeof(current))return 2;
  OSStatus new_status=check_code(current,argv[1]);OSStatus replacement_status=argc==4?check_code(current,argv[3]):new_status;
  OSStatus retained_status=SecCodeCheckValidity(retained,kSecCSDefaultFlags,retained_req);
  printf("retained_code_after_exec_status=%d\n",(int)retained_status);
  printf("after_exec_pid=%d pidversion=%d old_audit_status=%d new_audit_status=%d waitpid_nohang=%d replacement_status=%d replacement_mode=%d\n",audit_token_to_pid(current),audit_token_to_pidversion(current),(int)old_status,(int)new_status,waitpid(child,NULL,WNOHANG),(int)replacement_status,argc==4);
  send_byte(sock[0],'x');close(sock[0]);int status=0;if(waitpid(child,&status,0)!=child||!WIFEXITED(status)||WEXITSTATUS(status))return 2;
+ memset(&note,0,sizeof(note));kern_return_t note_after=mach_msg(&note.msg.not_header,MACH_RCV_MSG|MACH_RCV_TIMEOUT,0,sizeof(note),notify,100,0);
+ printf("after_exit_task_notification_kr=%d message_id=%d\n",note_after,note_after==0?note.msg.not_header.msgh_id:0);
  CFRelease(retained_req); CFRelease(retained_text); CFRelease(retained);
- (void)mach_port_deallocate(mach_task_self(),name);(void)mach_port_deallocate(mach_task_self(),msg.m.token.name);(void)mach_port_deallocate(mach_task_self(),old);(void)mach_port_mod_refs(mach_task_self(),service,MACH_PORT_RIGHT_RECEIVE,-1);(void)mach_port_deallocate(mach_task_self(),service);
+ (void)mach_port_deallocate(mach_task_self(),name);(void)mach_port_deallocate(mach_task_self(),msg.m.token.name);(void)mach_port_deallocate(mach_task_self(),old);(void)mach_port_mod_refs(mach_task_self(),notify,MACH_PORT_RIGHT_RECEIVE,-1);(void)mach_port_mod_refs(mach_task_self(),service,MACH_PORT_RIGHT_RECEIVE,-1);(void)mach_port_deallocate(mach_task_self(),service);
  return match && correct==errSecSuccess && incorrect!=errSecSuccess && incorrect_hash!=errSecSuccess && old_status!=errSecSuccess && replacement_status==errSecSuccess && (argc==4 ? new_status!=errSecSuccess : new_status==errSecSuccess) ? 0 : 6;
 }

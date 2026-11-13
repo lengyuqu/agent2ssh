@@ -85,8 +85,16 @@ int main(int argc,char **argv){
         fputc('\n',ready);fclose(ready);
         if(getchar()!='x'){printf("refused=test_release token_sent=0\n");return 2;}
     }
+    mach_port_t exit_port=MACH_PORT_NULL;
+    if(!strcmp(argv[5],"wait-exit")) {
+        mach_port_t previous=MACH_PORT_NULL;
+        if(mach_port_allocate(mach_task_self(),MACH_PORT_RIGHT_RECEIVE,&exit_port)!=KERN_SUCCESS ||
+           mach_port_request_notification(mach_task_self(),name,MACH_NOTIFY_DEAD_NAME,0,exit_port,MACH_MSG_TYPE_MAKE_SEND_ONCE,&previous)!=KERN_SUCCESS || MACH_PORT_VALID(previous)) {
+            printf("refused=exit_notification_setup token_sent=0\n");return 2;
+        }
+    }
     a2s_lab_stop stop={0};stop.h.msgh_bits=MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,0)|MACH_MSGH_BITS_COMPLEX;stop.h.msgh_remote_port=service;stop.h.msgh_size=sizeof(stop);stop.h.msgh_id=A2S_LAB_STOP;stop.body.msgh_descriptor_count=1;stop.reply.name=reply;stop.reply.disposition=MACH_MSG_TYPE_MAKE_SEND_ONCE;stop.reply.type=MACH_MSG_PORT_DESCRIPTOR;memcpy(stop.nonce,hello.nonce,16);memcpy(stop.instance,hello.instance,33);stop.expected_pid=(uint32_t)expected;
-    if(!strcmp(argv[5],"wrong-token"))strcpy(stop.token,"wrong-synthetic-token");else if(!strcmp(argv[5],"stop")||!strcmp(argv[5],"hold")||!strcmp(argv[5],"drop-reply")||!strcmp(argv[5],"hold-reply"))strcpy(stop.token,A2S_LAB_TOKEN);else return 1;
+    if(!strcmp(argv[5],"wrong-token"))strcpy(stop.token,"wrong-synthetic-token");else if(!strcmp(argv[5],"stop")||!strcmp(argv[5],"hold")||!strcmp(argv[5],"drop-reply")||!strcmp(argv[5],"hold-reply")||!strcmp(argv[5],"wait-exit"))strcpy(stop.token,A2S_LAB_TOKEN);else return 1;
     if(mach_msg(&stop.h,MACH_SEND_MSG|MACH_SEND_TIMEOUT,sizeof(stop),0,0,1000,0)){printf("result=unknown token_sent=1\n");return 3;}
     printf("token_sent=1\n");
     if(!strcmp(argv[5],"hold-reply") && getchar()!='x')return 4;
@@ -96,5 +104,11 @@ int main(int argc,char **argv){
     }
     if(receive(reply,&resp)||resp.h.msgh_id!=A2S_LAB_STOP_REPLY||resp.h.msgh_size!=sizeof(a2s_lab_stop_reply)){printf("result=unknown\n");return 3;}
     t=trailer(&resp);if(!t||memcmp(&sender,&t->msgh_audit,sizeof(sender))||memcmp(resp.stop.nonce,hello.nonce,16)||resp.stop.pid!=(uint32_t)expected||!resp.stop.accepted){printf("result=unknown\n");return 3;}
-    printf("result=accepted_exit_unverified\n");return 0;
+    printf("result=accepted_exit_unverified\n");
+    if(MACH_PORT_VALID(exit_port)) {
+        response_t notification;int kr=receive(exit_port,&notification);
+        if(kr==KERN_SUCCESS && notification.h.msgh_id==MACH_NOTIFY_DEAD_NAME)printf("task_name_exit_notification=dead_name\n");
+        else printf("task_name_exit_notification=other receive_kr=%d message_id=%d\n",kr,kr==KERN_SUCCESS?notification.h.msgh_id:0);
+    }
+    return 0;
 }

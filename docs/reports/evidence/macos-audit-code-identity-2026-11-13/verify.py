@@ -64,11 +64,14 @@ with tempfile.TemporaryDirectory(prefix="a2s-audit-code-", dir="/tmp") as temp:
         first = re.search(r"child_pid=(\d+) sender_pid=(\d+) pidversion=(\d+) task_audit_match=(\d+) correct_status=(-?\d+) wrong_status=(-?\d+) wrong_hash_status=(-?\d+)", result.stdout)
         after = re.search(r"after_exec_pid=(\d+) pidversion=(\d+) old_audit_status=(-?\d+) new_audit_status=(-?\d+) waitpid_nohang=(-?\d+)", result.stdout)
         retained = re.search(r"retained_code_after_exec_status=(-?\d+)", result.stdout)
-        if not first or not after or not retained:
+        notification = re.search(r"after_exec_task_notification_kr=(\d+) notification_is_dead_name=(\d+) name_task_info_kr=(\d+)", result.stdout)
+        reopen = re.search(r"after_exec_original_identity_reopen_kr=(\d+)", result.stdout)
+        if not first or not after or not retained or not notification or not reopen:
             raise AssertionError(f"missing observation:\n{result.stdout}")
         if not (first.group(1) == first.group(2) == after.group(1) and first.group(3) != after.group(2)
                 and first.group(4) == "1" and first.group(5) == "0" and first.group(6) != "0"
-                and first.group(7) != "0" and after.group(3) != "0" and after.group(4) == "0" and after.group(5) == "0" and retained.group(1) != "0"):
+                and first.group(7) != "0" and after.group(3) != "0" and after.group(4) == "0" and after.group(5) == "0" and retained.group(1) != "0"
+                and notification.group(1) == "0" and notification.group(2) == "1" and notification.group(3) != "0" and reopen.group(1) != "0"):
             raise AssertionError(f"unexpected audit/code result:\n{result.stdout}")
         runs.append(f"run {i} exit=0\n{result.stdout}")
     replaced_runs = []
@@ -77,9 +80,12 @@ with tempfile.TemporaryDirectory(prefix="a2s-audit-code-", dir="/tmp") as temp:
         first = re.search(r"child_pid=(\d+) sender_pid=(\d+) pidversion=(\d+) task_audit_match=(\d+) correct_status=(-?\d+) wrong_status=(-?\d+) wrong_hash_status=(-?\d+)", result.stdout)
         after = re.search(r"after_exec_pid=(\d+) pidversion=(\d+) old_audit_status=(-?\d+) new_audit_status=(-?\d+) waitpid_nohang=(-?\d+) replacement_status=(-?\d+) replacement_mode=(\d+)", result.stdout)
         retained = re.search(r"retained_code_after_exec_status=(-?\d+)", result.stdout)
-        if not first or not after or not retained or not (first.group(1) == first.group(2) == after.group(1) and first.group(3) != after.group(2)
+        notification = re.search(r"after_exec_task_notification_kr=(\d+) notification_is_dead_name=(\d+) name_task_info_kr=(\d+)", result.stdout)
+        reopen = re.search(r"after_exec_original_identity_reopen_kr=(\d+)", result.stdout)
+        if not first or not after or not retained or not notification or not reopen or not (first.group(1) == first.group(2) == after.group(1) and first.group(3) != after.group(2)
                 and first.group(4) == "1" and first.group(5) == "0" and first.group(6) != "0" and first.group(7) != "0"
-                and after.group(3) != "0" and after.group(4) != "0" and after.group(5) == "0" and after.group(6) == "0" and after.group(7) == "1" and retained.group(1) != "0"):
+                and after.group(3) != "0" and after.group(4) != "0" and after.group(5) == "0" and after.group(6) == "0" and after.group(7) == "1" and retained.group(1) != "0"
+                and notification.group(1) == "0" and notification.group(2) == "1" and notification.group(3) != "0" and reopen.group(1) != "0"):
             raise AssertionError(f"unexpected replacement process result:\n{result.stdout}")
         replaced_runs.append(f"run {i} exit=0\n{result.stdout}")
     handoff_runs = []

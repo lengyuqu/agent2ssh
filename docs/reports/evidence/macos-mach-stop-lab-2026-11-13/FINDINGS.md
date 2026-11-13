@@ -13,7 +13,7 @@ python3 docs/reports/evidence/macos-mach-stop-lab-2026-11-13/verify.py --daemon 
 
 ## 已观察
 
-- 三轮真实 daemon 停止：错误 CDHash、实例、token 均不停止；客户端在核对同一 Mach 端点、audit token、task identity、代码和运行时策略后请求停止。回执只表示已接受；测试父进程另行观察到退出、IPC drain、活动本地进程树停止和实例记录清理。
+- 三轮真实 daemon 停止：错误 CDHash、实例、token 均不停止；客户端在核对同一 Mach 端点、audit token、task identity、代码和运行时策略后请求停止。回执只表示已接受；客户端观察到 task name 的 dead-name 通知，测试父进程另行观察到退出、IPC drain、活动本地进程树停止和实例记录清理。邻近的 exec 反例表明，单独的 dead-name 通知不能证明 PID 进程退出。
 - 一次真实 SSH 请求在执行中停止：客户端收到 503，明确表示远端结果未知；审计保留相同结论和请求元数据。不据此推断远端命令一定终止。
 - 不安全运行时或异常 entitlement 的五种临时签名副本在发送 token 前被拒绝；缺少标记或 token 不符的实验 daemon 不注册服务。
 - 32 个合成 hello 占满实验会话表后，额外 hello 未发送 token 即被拒绝；10 秒超时后新会话可用。该结果不排除同用户进程在容量占满期间造成拒绝服务。

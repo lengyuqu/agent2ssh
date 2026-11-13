@@ -62,6 +62,8 @@ stateDiagram-v2
 
 `Accepted` 表示响应声称接受，不等于退出；如果 C 在发请求后断开，即使之后能找到相同 PID/端点也不能推断是否成功。`ExitedBound` 必须来源于 **O 的退出**；`kill(pid, 0)==ESRCH` 只说明观测时该号码不存在，不能证明历史实例身份，也不能独自触发 `ExitedBound`。未经绑定的管理员显式清除残留属于 #21 独立恢复操作，只能清理记录、不能发信号；需要锁内比对原始内容，确认的只是用户接受不确定性，旧程序不配合时仍无完全安全保证。
 
+**macOS 实测补充（2026-11-13）**：Mach task name port 的 `MACH_NOTIFY_DEAD_NAME` 不能单独提升为 `ExitedBound` 或作为清理 PID 记录的依据。在 [同 PID 的 exec 实验](../reports/evidence/macos-audit-code-identity-2026-11-13/FINDINGS.md)中，原 task port 变为 dead name、原 identity token 无法重新取得 port，但子进程仍存活。三轮[真实 daemon 停止实验](../reports/evidence/macos-mach-stop-lab-2026-11-13/FINDINGS.md)也收到 dead-name，退出由测试父进程另行确认。生产代码须把 task 失效与进程已退出分开；缺少可信退出证据时保留记录并报告未知，不能只按数字 PID 发信号或自动删除。
+
 ## 4. 线协议及对象建立
 
 ### 4.1 一个连接、一个停止操作

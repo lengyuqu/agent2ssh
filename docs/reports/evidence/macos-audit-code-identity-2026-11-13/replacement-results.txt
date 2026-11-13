@@ -1,17 +1,26 @@
 run 1 exit=0
-child_pid=78053 sender_pid=78053 pidversion=1460571 task_audit_match=1 correct_status=0 wrong_status=-67050 wrong_hash_status=-67050
+child_pid=96282 sender_pid=96282 pidversion=1486630 task_audit_match=1 correct_status=0 wrong_status=-67050 wrong_hash_status=-67050
 helper_variant=replacement
+after_exec_task_notification_kr=0 notification_is_dead_name=1 name_task_info_kr=268435459 task_matches_old=0 task_matches_new_pidversion=-1
+after_exec_original_identity_reopen_kr=56
 retained_code_after_exec_status=-67065
-after_exec_pid=78053 pidversion=1460572 old_audit_status=-67065 new_audit_status=-67050 waitpid_nohang=0 replacement_status=0 replacement_mode=1
+after_exec_pid=96282 pidversion=1486631 old_audit_status=-67065 new_audit_status=-67050 waitpid_nohang=0 replacement_status=0 replacement_mode=1
+after_exit_task_notification_kr=268451843 message_id=0
 
 run 2 exit=0
-child_pid=78065 sender_pid=78065 pidversion=1460596 task_audit_match=1 correct_status=0 wrong_status=-67050 wrong_hash_status=-67050
+child_pid=96284 sender_pid=96284 pidversion=1486634 task_audit_match=1 correct_status=0 wrong_status=-67050 wrong_hash_status=-67050
 helper_variant=replacement
+after_exec_task_notification_kr=0 notification_is_dead_name=1 name_task_info_kr=268435459 task_matches_old=0 task_matches_new_pidversion=-1
+after_exec_original_identity_reopen_kr=56
 retained_code_after_exec_status=-67065
-after_exec_pid=78065 pidversion=1460598 old_audit_status=-67065 new_audit_status=-67050 waitpid_nohang=0 replacement_status=0 replacement_mode=1
+after_exec_pid=96284 pidversion=1486635 old_audit_status=-67065 new_audit_status=-67050 waitpid_nohang=0 replacement_status=0 replacement_mode=1
+after_exit_task_notification_kr=268451843 message_id=0
 
 run 3 exit=0
-child_pid=78068 sender_pid=78068 pidversion=1460602 task_audit_match=1 correct_status=0 wrong_status=-67050 wrong_hash_status=-67050
+child_pid=96286 sender_pid=96286 pidversion=1486638 task_audit_match=1 correct_status=0 wrong_status=-67050 wrong_hash_status=-67050
 helper_variant=replacement
+after_exec_task_notification_kr=0 notification_is_dead_name=1 name_task_info_kr=268435459 task_matches_old=0 task_matches_new_pidversion=-1
+after_exec_original_identity_reopen_kr=56
 retained_code_after_exec_status=-67065
-after_exec_pid=78068 pidversion=1460603 old_audit_status=-67065 new_audit_status=-67050 waitpid_nohang=0 replacement_status=0 replacement_mode=1
+after_exec_pid=96286 pidversion=1486639 old_audit_status=-67065 new_audit_status=-67050 waitpid_nohang=0 replacement_status=0 replacement_mode=1
+after_exit_task_notification_kr=268451843 message_id=0
