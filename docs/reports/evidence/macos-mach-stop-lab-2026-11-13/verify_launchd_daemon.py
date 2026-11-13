@@ -90,6 +90,8 @@ try:
    a=wait_for(lambda:identity(config,port));pid_a=a['pid']
    wrong=run([client,service,str(pid_a),a['instance_id'],'identifier "org.agent2ssh.wrong"','stop'])
    if wrong.returncode==0 or 'refused=code_or_task token_sent=0' not in wrong.stdout or not alive(pid_a):raise AssertionError(f'wrong code did not fail closed: {wrong.stdout} {wrong.stderr}')
+   apple=run([client,service,str(pid_a),a['instance_id'],'anchor apple generic','stop'])
+   if apple.returncode==0 or 'refused=code_or_task token_sent=0' not in apple.stdout or not alive(pid_a):raise AssertionError(f'ad-hoc code satisfied Apple anchor: {apple.stdout} {apple.stderr}')
    mismatched=run([client,service,str(pid_a),'f'*32,requirement,'stop'])
    if mismatched.returncode==0 or 'token_sent=0' not in mismatched.stdout or not alive(pid_a):raise AssertionError(f'wrong instance did not fail closed: {mismatched.stdout} {mismatched.stderr}')
    held_env=dict(env);held_env['A2S_MACH_LAB_CLIENT_READY']=str(ready)
@@ -132,7 +134,7 @@ try:
    fresh=must([client,service,str(pid_b),b['instance_id'],requirement,'wait-exit'],timeout=8)
    if 'result=accepted_exit_unverified' not in fresh.stdout or 'post_registration_identity_match=1' not in fresh.stdout or 'proc_exit_event=1 event_pid_matches=1 note_exit=1' not in fresh.stdout:raise AssertionError('replacement stop or exit observation failed')
    wait_for(lambda:not alive(pid_b) and not (config/'daemon.pid').exists())
-   line=f'run={i} wrong_code_and_instance_no_token=1 other_sender_rejected=1 normal_client_private_only=1 synthetic_public_stop_rejected=1 private_proof=1 first_stop_and_exit_observed=1 ssh_drain_tested={int(i==1)} replacement_distinct=1 old_private_invalid_dest=1 replacement_survived=1 fresh_stop_and_exit_observed=1\n';results.append(line);print(line,end='')
+   line=f'run={i} wrong_code_and_instance_no_token=1 apple_anchor_adhoc_refused_no_token=1 other_sender_rejected=1 normal_client_private_only=1 synthetic_public_stop_rejected=1 private_proof=1 first_stop_and_exit_observed=1 ssh_drain_tested={int(i==1)} replacement_distinct=1 old_private_invalid_dest=1 replacement_survived=1 fresh_stop_and_exit_observed=1\n';results.append(line);print(line,end='')
   finally:
    if held is not None:
     if held.poll() is None:held.kill()
