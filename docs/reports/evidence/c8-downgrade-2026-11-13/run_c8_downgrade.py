@@ -11,9 +11,9 @@ binaries instead of inferring it from source.
 
 The measurement also shows the damage needs no write command: the older CLI
 runs `migrate_plaintext_secrets()` at startup for every command except
-`completions`, `webdav decrypt` and `events`, so a single `host list` with an
-unlocked store is enough. With the store locked the same command changes
-nothing.
+`completions` and `webdav decrypt`, so a single `host list` with an unlocked
+store is enough (`events` merely skips the event subscriber). With the store
+locked the same command changes nothing.
 
 Every run uses throwaway config directories, a throwaway master password and
 synthetic passwords. `~/.agent2ssh` is never touched.

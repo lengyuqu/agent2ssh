@@ -8,10 +8,11 @@ CNB #26 的崩溃/回滚矩阵里，C8 原本只有「源码推断 + 构造回�
 ## 结论
 
 1. **锁定态安全**：库未解锁时，旧版本只读命令不改动 `hosts.json` / `secrets.enc`（逐字节相同）。
-2. **解锁态即损坏，不需要写命令**：旧版本 CLI 在启动时对除 `completions` / `webdav decrypt` /
-   `events` 之外的每条命令都跑 `migrate_plaintext_secrets()`。库已解锁时，**一次 `host list`
-   就足以**把 `$agent2ssh-secret$:<tag>` 当成明文口令密封：引用退化成裸 marker，
-   `secrets.enc` 丢掉 `tag` 字段并退回 v2 形状，代次 +1，另留下一个 `hosts.json.bak`。
+2. **解锁态即损坏，不需要写命令**：旧版本 CLI 在启动时对除 `completions` 与 `webdav decrypt`
+   之外的每条命令都跑 `migrate_plaintext_secrets()`（`events` 只是跳过事件订阅者，迁移照跑）。
+   库已解锁时，**一次 `host list` 就足以**把 `$agent2ssh-secret$:<tag>` 当成明文口令密封：
+   引用退化成裸 marker，`secrets.enc` 丢掉 `tag` 字段并退回 v2 形状，代次 +1，
+   另留下一个 `hosts.json.bak`。
 3. **新版本读回该状态不会静默用错凭据**：引用会被还原成当初被封存的那串 41 字符文本，
    与库中无 tag 的条目对不上，`host list` 打印明确 warning 且**不使用**该凭据。
 4. **可恢复**：`agent2ssh config-repair --restore-pair 0 --confirm` 把两个文件逐字节恢复到
@@ -53,8 +54,9 @@ snapshot.
 
 **一、「保存时才坏」是低估。** 设计稿与 CHANGELOG 原本的措辞是「旧程序会把带 tag 引用当明文
 重新密封」，容易被读成「只要不保存就没事」。实测是：旧版本 CLI 的启动迁移
-（`src-tauri/src/bin/agent2ssh.rs:1884` 的 `migrate_plaintext_secrets()`）对几乎所有子命令都生效，
-解锁态下**一次只读命令**就完成同样的破坏。锁定态是安全的，因为迁移在未解锁时是 no-op。
+（`src-tauri/src/bin/agent2ssh.rs:1884` 的 `migrate_plaintext_secrets()`）在除 `completions` 与
+`webdav decrypt` 之外的每条命令上都会执行，解锁态下**一次只读命令**就完成同样的破坏。
+锁定态是安全的，因为迁移在未解锁时是 no-op。
 
 **二、旧版本连 `tag` 字段都静默丢弃。** 旧结构的 `EncryptedEntry` 只有 `nonce` / `ciphertext`，
 没有 `deny_unknown_fields`，所以能读 v3 文件，但重写时把 `tag` 整个丢掉、把文件降回 v2 形状。

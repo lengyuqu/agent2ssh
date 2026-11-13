@@ -1,4 +1,4 @@
-date: 2026-11-13T05:45:24+00:00
+date: 2026-11-13T05:49:38+00:00
 platform: macOS-27.2.1-arm64-arm-64bit-Mach-O (arm64) uid=501
 older build: /private/tmp/a2s_old_target/debug/agent2ssh
   sha256 8875196064d44b877b9f1c7aae5c372492eac5355e48fbe3bd813c00e33433c3  agent2ssh 0.4.5  commit 48ac012
@@ -10,9 +10,9 @@ current build: /Users/yuqu/WorkBuddy/Worktrees/agent2ssh/main-9315708c/src-tauri
 ==============================================================================
   host add probe-a: exit=0 stderr=''
   state: hosts_generation=1 store_version=2 store_generation=1
-    ref probe-a  = '$agent2ssh-secret$:7Be-NM40hK4Pq80HYKi1_w'
+    ref probe-a  = '$agent2ssh-secret$:kevhgh5lkx_xBF2I64rMnw'
     entry __agent2ssh_key_check__    tag='' ciphertext_len=48
-    entry host:probe-a               tag='7Be-NM40hK4Pq80HYKi1_w' ciphertext_len=48
+    entry host:probe-a               tag='kevhgh5lkx_xBF2I64rMnw' ciphertext_len=48
   PASS probe-a reference carries a content tag
   PASS the store entry carries the same tag
   PASS store is still the v2 envelope
@@ -38,21 +38,21 @@ current build: /Users/yuqu/WorkBuddy/Worktrees/agent2ssh/main-9315708c/src-tauri
   PASS the startup migration bumped the generation
   PASS the migration also left a hosts.json.bak of the previous file
   PASS host:probe-a now holds a 41-character plaintext (the reference text)
-  the sealed text is '$agent2ssh-secret$:7Be-NM40hK4Pq80HYKi1_w' (41 chars)
+  the sealed text is '$agent2ssh-secret$:kevhgh5lkx_xBF2I64rMnw' (41 chars)
 
 ==============================================================================
 4. reopen: the current build reads the downgraded pair
 ==============================================================================
   host add probe-c: exit=0 stderr=''
   state: hosts_generation=3 store_version=2 store_generation=3
-    ref probe-a  = '$agent2ssh-secret$:7Be-NM40hK4Pq80HYKi1_w'
-    ref probe-c  = '$agent2ssh-secret$:PsWeUQwOUIjIP5uA30GyKw'
+    ref probe-a  = '$agent2ssh-secret$:kevhgh5lkx_xBF2I64rMnw'
+    ref probe-c  = '$agent2ssh-secret$:XQH1DEMqLxquEM8yYq3PyA'
     entry __agent2ssh_key_check__    tag='' ciphertext_len=48
     entry host:probe-a               tag='' ciphertext_len=76
-    entry host:probe-c               tag='PsWeUQwOUIjIP5uA30GyKw' ciphertext_len=44
+    entry host:probe-c               tag='XQH1DEMqLxquEM8yYq3PyA' ciphertext_len=44
   PASS probe-a's reference came back as the exact tagged text it was sealed as
   PASS the entry has no tag, so the reference cannot resolve
-  host list stderr: "warning: credential reference for host 'probe-a' password was written against content tag 7Be-NM40hK4Pq80HYKi1_w, but secrets.enc now has no matching entry; the stored secret is NOT used. Re-enter the credential or restore a paired hosts.json/secrets.enc snapshot."
+  host list stderr: "warning: credential reference for host 'probe-a' password was written against content tag kevhgh5lkx_xBF2I64rMnw, but secrets.enc now has no matching entry; the stored secret is NOT used. Re-enter the credential or restore a paired hosts.json/secrets.enc snapshot."
   PASS the current build refuses the credential instead of using it
 
 ==============================================================================
@@ -84,32 +84,32 @@ current build: /Users/yuqu/WorkBuddy/Worktrees/agent2ssh/main-9315708c/src-tauri
     entry host:probe-b               tag=None ciphertext_len=48
   restore preview: exit=0
     Restore paired snapshot [0] — preview
-      created_at: 1794548727
+      created_at: 1794548981
       target generation: 1
-      target hosts hash:   626e2a173ed0
-      target secrets hash: d05495ab271b
+      target hosts hash:   89fa9908631b
+      target secrets hash: 697b7377c088
       paired copies present: hosts=true secrets=true; hashes match record: true
       current hosts hash:   502886b2bd01
-      current secrets hash: 235798d08b7b
+      current secrets hash: 36689dc44539
       Both files are replaced together under the hosts and secrets locks.
     Not applied. Re-run with --confirm to restore this paired snapshot.
   restore applied: exit=0
     Restore paired snapshot [0] — preview
-      created_at: 1794548727
+      created_at: 1794548981
       target generation: 1
-      target hosts hash:   626e2a173ed0
-      target secrets hash: d05495ab271b
+      target hosts hash:   89fa9908631b
+      target secrets hash: 697b7377c088
       paired copies present: hosts=true secrets=true; hashes match record: true
       current hosts hash:   502886b2bd01
-      current secrets hash: 235798d08b7b
+      current secrets hash: 36689dc44539
       Both files are replaced together under the hosts and secrets locks.
-    Restored paired snapshot [0]: hosts.json and secrets.enc now match generation 1 (626e2a173ed0 / d05495ab271b).
+    Restored paired snapshot [0]: hosts.json and secrets.enc now match generation 1 (89fa9908631b / 697b7377c088).
   PASS hosts.json is byte-identical to the pre-downgrade file
   PASS secrets.enc is byte-identical to the pre-downgrade file
   repaired: hosts_generation=1 store_version=2 store_generation=1
-    ref probe-a  = '$agent2ssh-secret$:ekBH9Adfop7SQ8SkVR79HQ'
+    ref probe-a  = '$agent2ssh-secret$:mHbVMXrDLk2bEckcelqj-Q'
     entry __agent2ssh_key_check__    tag='' ciphertext_len=48
-    entry host:probe-a               tag='ekBH9Adfop7SQ8SkVR79HQ' ciphertext_len=48
+    entry host:probe-a               tag='mHbVMXrDLk2bEckcelqj-Q' ciphertext_len=48
   PASS the restored entry carries its tag again
   later save: exit=0 stderr=''
   PASS the repaired pair loads without a tag warning
