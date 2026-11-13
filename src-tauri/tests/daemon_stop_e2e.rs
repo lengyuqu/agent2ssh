@@ -374,13 +374,13 @@ fn stop_exits_with_an_idle_exec_websocket() {
 }
 
 // Real network backpressure: opt in with the existing isolated SSH fixture.
-#[cfg(unix)]
+// Runs on every platform — the K15 note that the Windows leg was unverified
+// closed here; only the receive-buffer shrink is spelled per platform.
 #[test]
 #[serial_test::serial]
 fn stop_exits_when_exec_websocket_peer_stops_reading() {
     use std::io::{Read, Write};
     use std::net::TcpStream;
-    use std::os::fd::AsRawFd;
     let Some(port) = std::env::var("AGENT2SSH_TEST_SSH_PORT").ok() else {
         assert_ne!(
             std::env::var("AGENT2SSH_TEST_REQUIRE_SSH").as_deref(),
@@ -402,17 +402,40 @@ fn stop_exits_when_exec_websocket_peer_stops_reading() {
     let hosts = serde_json::json!({"schema_version":1,"hosts":[host]}).to_string();
     let daemon = RunningDaemon::start("stop-ws-backpressure", &[("hosts.json", &hosts)]);
     let mut stream = TcpStream::connect(std::env::var(ADDR_ENV).unwrap()).unwrap();
-    let size: libc::c_int = 4096;
-    let result = unsafe {
-        libc::setsockopt(
-            stream.as_raw_fd(),
-            libc::SOL_SOCKET,
-            libc::SO_RCVBUF,
-            &size as *const _ as *const _,
-            std::mem::size_of_val(&size) as libc::socklen_t,
-        )
-    };
-    assert_eq!(result, 0, "set receive buffer");
+    // Shrink the receive buffer so the flooding command fills it and the
+    // daemon's send side actually blocks. WinSock and libc spell the same
+    // option differently; 4096 is above both platform minimums.
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        let size: libc::c_int = 4096;
+        let result = unsafe {
+            libc::setsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_RCVBUF,
+                &size as *const _ as *const _,
+                std::mem::size_of_val(&size) as libc::socklen_t,
+            )
+        };
+        assert_eq!(result, 0, "set receive buffer");
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawSocket;
+        use windows_sys::Win32::Networking::WinSock::{setsockopt, SOL_SOCKET, SO_RCVBUF};
+        let size: i32 = 4096;
+        let result = unsafe {
+            setsockopt(
+                stream.as_raw_socket() as usize,
+                SOL_SOCKET,
+                SO_RCVBUF,
+                &size as *const i32 as *const u8,
+                std::mem::size_of_val(&size) as i32,
+            )
+        };
+        assert_eq!(result, 0, "set receive buffer");
+    }
     stream
         .set_read_timeout(Some(Duration::from_secs(20)))
         .unwrap();

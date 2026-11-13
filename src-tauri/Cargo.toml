@@ -220,6 +220,10 @@ windows-sys = { version = "0.48", features = [
     # ...and `LocalFree`, which windows-sys keeps under System::Memory even
     # though it is Foundation's `HLOCAL` that it takes and returns.
     "Win32_System_Memory",
+    # `daemon_stop_e2e::stop_exits_when_exec_websocket_peer_stops_reading`
+    # shrinks the test socket's receive buffer to create real backpressure;
+    # WinSock is where `setsockopt`/`SOL_SOCKET`/`SO_RCVBUF` live.
+    "Win32_Networking_WinSock",
 ] }
 # Pageant's transport, for the SSH agent. `russh` already pulls this in on
 # Windows, so naming it here adds no crate to the build — but it does make

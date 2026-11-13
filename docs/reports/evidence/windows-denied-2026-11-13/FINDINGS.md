@@ -53,3 +53,15 @@ Windows 11 10.0.26300，当前会话已提升（`IsInRole(Administrator)=True`�
   管理员令牌观察——这一步只需要管理员，不需要受限令牌。
 
 本轮不继续，先记录边界。
+
+## 2026-11-13 追记：denied 端到端已构造成功（换路径）
+
+上面「未验证」的结论被同日稍晚的一轮推翻了一半：`runas /trustlevel:0x20000`（免密的
+UAC 过滤令牌，非受限令牌）下对 SYSTEM 进程 `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)`
+直接返回 err=5，无需 spawn 受限孙进程。用它对指向 winlogon 的 `daemon.pid` 执行真实
+`agent2ssh daemon stop`，`a3800f6` 的跨账户诊断文案完整输出、PID 记录保留、无信号。
+证据与复现见 `../windows-cross-account-denied-2026-11-13/`。
+
+仍然成立的部分：本文件「sysinfo 先返回 Live，denied 观测需要 sysinfo 无条目 + 拒绝的
+组合」的结论不变（那是 `observe_pid` 诊断路径，本轮构造的是 stop 路径的
+`pid_access_error`）；提升上下文下 denied 依旧不可构造。

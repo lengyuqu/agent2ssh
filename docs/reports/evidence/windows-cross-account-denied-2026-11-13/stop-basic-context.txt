@@ -1,0 +1,1 @@
+Error: the OS denied inspection of daemon PID 1480 (OpenProcess denied (error 5)); the daemon may be running under another account. Access denied is not evidence that it exited: no signal was sent and the PID file is retained. Re-run as the owning user, or inspect the process out of band before removing anything

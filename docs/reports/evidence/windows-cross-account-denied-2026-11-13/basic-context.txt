@@ -1,0 +1,5 @@
+﻿whoami: macheniker9\administrator
+is-elevated: False
+winlogon pid=1480 OpenProcess(QUERY_LIMITED_INFORMATION) DENIED err=5
+services pid=1556 OpenProcess(QUERY_LIMITED_INFORMATION) DENIED err=5
+lsass pid=1584 OpenProcess(QUERY_LIMITED_INFORMATION) DENIED err=5
