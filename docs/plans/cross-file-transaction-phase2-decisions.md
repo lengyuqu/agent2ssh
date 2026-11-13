@@ -97,7 +97,9 @@ Windows 实机结论以 #27（`15e2ac5`）为准，未覆盖的 SMB/其他版本
 ## 6. 状态
 
 **阶段 A/B 已实施**（P1–P6 按推荐默认锁定后的实施轮）：结构化引用解析、`secrets.enc` 内容 tag、
-`$agent2ssh-secret$:<tag>` 写入与校验、引用自证与 P2 的保守拒绝、旧裸 marker 惰性升级、
+`$agent2ssh-secret$:<tag>` 写入与校验、引用自证与 P2 的保守拒绝、旧裸 marker 惰性升级
+（**限定条件**：只有条目本身已带合法 tag 时才升级——`entry_tags()` 会丢掉空 tag，实测
+2026-11-13 一对「裸引用 + 空 tag」的全遗留配置经过普通保存后仍是裸引用，必须重写该凭据才会打上 tag）、
 改主密码 tag 稳定；`tests/store_phase2.rs` 5 项真实 CLI 回归 + 1 项解析单元测试全绿。
 **阶段 C 已实施**（B2 索引 + 成对 `.pair` 副本 + 四条恢复路径统一前置判定 +
 `recover()` 索引只读诊断，`tests/store_phase2_c.rs` 6 项回归）。实现按 §3 的 B2 方案，
