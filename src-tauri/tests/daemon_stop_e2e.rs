@@ -16,9 +16,7 @@
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-#[cfg(unix)]
 use std::sync::atomic::{AtomicUsize, Ordering};
-#[cfg(unix)]
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -33,6 +31,19 @@ mod common;
 const ADDR_ENV: &str = "AGENT2SSH_DAEMON_ADDR";
 const STARTUP_BUDGET: Duration = Duration::from_secs(30);
 
+// macOS Unix sockets have a short pathname limit; these test config dirs need
+// not embed the descriptive test name, which can exceed that limit.
+fn fixture_root() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        PathBuf::from("/tmp")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        std::env::temp_dir()
+    }
+}
+
 struct RunningDaemon {
     child: Child,
     dir: PathBuf,
@@ -44,9 +55,9 @@ impl RunningDaemon {
         Self::start_with_name(label, extra_files, false)
     }
 
-    fn start_with_name(label: &str, extra_files: &[(&str, &str)], renamed: bool) -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "a2s-daemon-stop-{label}-{}-{}",
+    fn start_with_name(_label: &str, extra_files: &[(&str, &str)], renamed: bool) -> Self {
+        let dir = fixture_root().join(format!(
+            "a2s-{}-{:x}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -659,7 +670,10 @@ fn exiting_old_daemon_preserves_replacement_pid_in_the_same_config() {
             !process_is_alive(old_pid)
         });
     }
+    #[cfg(not(target_os = "macos"))]
     assert!(!agent2ssh::daemon_control::remove_daemon_pid_file_if(old_pid).unwrap());
+    #[cfg(target_os = "macos")]
+    assert!(agent2ssh::daemon_control::remove_daemon_pid_file_if(old_pid).is_err());
     assert_eq!(
         std::fs::read_to_string(old.pid_file()).unwrap(),
         replacement_pid.to_string()
@@ -692,7 +706,7 @@ fn direct_daemon_with_another_port_cannot_replace_a_live_pid() {
     assert!(!status.success());
     assert!(
         stderr.contains(if cfg!(target_os = "macos") {
-            "automatic replacement is disabled"
+            "already exists; retained"
         } else {
             "live or cannot be verified"
         }),
@@ -789,20 +803,29 @@ fn renamed_daemon_is_reported_healthy_but_not_unsafely_stopped() {
     let daemon = RunningDaemon::start_with_name("renamed", &[], true);
     let pid = daemon.child.id();
     assert!(!process_is_alive(pid));
-    assert_eq!(daemon_pid_state(pid), DaemonPidState::Healthy);
-    // K14 says the diagnostic report contradicts itself in one JSON: the
-    // process-name gate answers "not a daemon of ours" while the config/token
-    // identity answers "healthy". Neither half is covered anywhere else, so pin
-    // both here — a change to either judgement should have to come here and
-    // decide which one is wrong, not drift apart silently.
+    let expected = if cfg!(target_os = "macos") {
+        DaemonPidState::Unverified
+    } else {
+        DaemonPidState::Healthy
+    };
+    assert_eq!(daemon_pid_state(pid), expected);
+    // The legacy diagnostic health field uses the authenticated check on
+    // other platforms. On macOS it must stay false rather than exposing a
+    // token to a peer whose identity has not been bound.
     let report = agent2ssh::diagnostics::generate_system_report().expect("system report");
     assert_eq!(report["daemon"]["process_alive"], serde_json::json!(false));
-    assert_eq!(report["daemon"]["health_ok"], serde_json::json!(true));
+    assert_eq!(
+        report["daemon"]["health_ok"],
+        serde_json::json!(!cfg!(target_os = "macos"))
+    );
     assert_eq!(report["daemon"]["pid"], serde_json::json!(pid));
     #[cfg(feature = "tauri")]
     {
         let status = agent2ssh::tauri_commands::daemon_status().expect("desktop status");
+        #[cfg(not(target_os = "macos"))]
         assert!(status.running);
+        #[cfg(target_os = "macos")]
+        assert!(!status.running);
         assert_eq!(status.pid, Some(pid));
         assert!(agent2ssh::tauri_commands::daemon_stop().is_err());
         assert_eq!(
@@ -819,19 +842,23 @@ fn renamed_daemon_is_reported_healthy_but_not_unsafely_stopped() {
     };
     let status = cli("status");
     assert!(status.status.success());
-    // The diagnosis names the verdict instead of one sentence per platform:
-    // the renamed daemon answers health and accepts the token, so the verdict
-    // is still `healthy` even though `daemon stop` will refuse it by name.
-    assert!(String::from_utf8_lossy(&status.stdout).contains("healthy"));
-    let start = cli("start");
-    assert!(start.status.success());
+    // macOS status does not disclose a token to an unbound endpoint, so the
+    // same self-reported health can only be reported as unverified.
     assert!(
-        String::from_utf8_lossy(&start.stdout).contains(if cfg!(target_os = "macos") {
-            "identity is unbound"
+        String::from_utf8_lossy(&status.stdout).contains(if cfg!(target_os = "macos") {
+            "unverified"
         } else {
-            "already running"
+            "healthy"
         })
     );
+    let start = cli("start");
+    if cfg!(target_os = "macos") {
+        assert!(!start.status.success());
+        assert!(String::from_utf8_lossy(&start.stderr).contains("not reused"));
+    } else {
+        assert!(start.status.success());
+        assert!(String::from_utf8_lossy(&start.stdout).contains("already running"));
+    }
     let stop = cli("stop");
     assert!(!stop.status.success());
     assert!(
@@ -845,7 +872,7 @@ fn renamed_daemon_is_reported_healthy_but_not_unsafely_stopped() {
         std::fs::read_to_string(daemon.pid_file()).unwrap(),
         pid.to_string()
     );
-    assert_eq!(daemon_pid_state(pid), DaemonPidState::Healthy);
+    assert_eq!(daemon_pid_state(pid), expected);
 
     // A matching PID alone is not enough if this config has a different token.
     std::fs::write(daemon.dir.join("daemon.token"), "wrong-token").unwrap();
@@ -859,7 +886,7 @@ fn renamed_daemon_is_reported_healthy_but_not_unsafely_stopped() {
         pid.to_string()
     );
     std::fs::write(daemon.dir.join("daemon.token"), &daemon.token).unwrap();
-    assert_eq!(daemon_pid_state(pid), DaemonPidState::Healthy);
+    assert_eq!(daemon_pid_state(pid), expected);
 
     // A live renamed daemon with an unavailable health endpoint is uncertain,
     // not stale. No desktop or CLI path may silently discard its PID.
@@ -1373,9 +1400,9 @@ fn the_shutdown_route_is_closed_to_anonymous_and_scoped_callers() {
 // stop. These tests hold that race still.
 
 /// A throwaway config dir with a token already written.
-fn race_config_dir(label: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "a2s-daemon-stop-{label}-{}-{}",
+fn race_config_dir(_label: &str) -> PathBuf {
+    let dir = fixture_root().join(format!(
+        "a2s-{}-{:x}",
         std::process::id(),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1391,7 +1418,6 @@ fn race_config_dir(label: &str) -> PathBuf {
     dir
 }
 
-#[cfg(unix)]
 fn free_addr() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
     listener.local_addr().expect("local addr").to_string()
@@ -1403,13 +1429,11 @@ fn free_addr() -> String {
 /// handed out again by the kernel, so anything that must actually own one
 /// re-checks. A neighbour test binding and releasing has no other symptom than
 /// this, which is why a bound port is retried rather than reported.
-#[cfg(unix)]
 fn port_is_free(addr: &str) -> bool {
     TcpListener::bind(addr).is_ok()
 }
 
 /// Spawn a daemon on an explicit address.
-#[cfg(unix)]
 fn spawn_daemon_at(dir: &std::path::Path, addr: &str) -> Child {
     let stderr = std::fs::OpenOptions::new()
         .create(true)
@@ -1430,7 +1454,6 @@ fn spawn_daemon_at(dir: &std::path::Path, addr: &str) -> Child {
 
 /// Start a daemon on `addr` and wait until it answers `/health` as itself,
 /// without going through the proxy (which may still be pointing at the old one).
-#[cfg(unix)]
 fn start_listener_at(dir: &std::path::Path, addr: &str) -> Child {
     for _ in 0..10 {
         // The port may have been taken by a neighbour since it was chosen; a
@@ -1476,7 +1499,6 @@ fn start_listener_at(dir: &std::path::Path, addr: &str) -> Child {
 /// address host two different daemons in turn: the client's second request
 /// reaches a listener its first request did not. Deliberately dumb otherwise —
 /// a buffering proxy would hide the very thing this holds still.
-#[cfg(unix)]
 fn proxy(front: TcpListener, back: Arc<std::sync::Mutex<String>>) -> Arc<AtomicUsize> {
     let counted = Arc::new(AtomicUsize::new(0));
     let counter = counted.clone();
@@ -1560,9 +1582,53 @@ fn local_health_response_parser_does_not_enforce_content_length() {
 /// receipt.
 ///
 /// The "old daemon" is a stub speaking the old protocol (200 to any body) on the
+/// A real process whose executable name is `agent2ssh-daemon`, used where a
+/// test needs something the identity checks will name but which is not a daemon.
+///
+/// Unix symlinks `/bin/sleep`; Windows copies `ping.exe` under that name and
+/// runs it in a loop, because a symlink needs a privilege the test account may
+/// not hold and `Process::name()` reads the executable's file name on both.
+#[cfg(unix)]
+fn stand_in_named_daemon(dir: &std::path::Path) -> Child {
+    let named = dir.join("agent2ssh-daemon");
+    let _ = std::fs::remove_file(&named);
+    std::os::unix::fs::symlink("/bin/sleep", &named).expect("a stand-in process");
+    Command::new(&named)
+        .arg("30")
+        .spawn()
+        .expect("a process to name")
+}
+
+#[cfg(windows)]
+fn stand_in_named_daemon(dir: &std::path::Path) -> Child {
+    let system_root = std::env::var_os("SystemRoot")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    let named = dir.join("agent2ssh-daemon.exe");
+    std::fs::copy(system_root.join("System32").join("ping.exe"), &named)
+        .expect("copy a stand-in process");
+    Command::new(&named)
+        .args(["-t", "127.0.0.1"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("a process to name")
+}
+
+/// A matching executable name is not proof of identity: an unrelated process
+/// can reuse the PID. This stub answers the old protocol — `200` to any body,
+/// including one carrying `expect_pid` — so the client cannot tell whether the
+/// daemon compared it.
+///
+/// The old daemon in this test is a stub speaking that protocol on the
 /// address this config points at, with a PID its `/health` also reports, so the
 /// identity checks pass and only the missing field check differs.
-#[cfg(unix)]
+///
+/// On Windows this is also the case that pins "the stop path really binds":
+/// the stand-in never exits, so the stop reaches the forced-termination branch,
+/// and replacing `BoundProcess::open` with `None` turns it red (the stop then
+/// refuses to signal instead of succeeding).
 #[test]
 #[serial_test::serial]
 fn a_daemon_that_ignores_the_expected_pid_stops_and_says_so() {
@@ -1576,12 +1642,7 @@ fn a_daemon_that_ignores_the_expected_pid_stops_and_says_so() {
 
     // A real process, so the identity checks that run before the request have
     // something to name; the stub merely claims to be it.
-    let named = dir.join("agent2ssh-daemon");
-    std::os::unix::fs::symlink("/bin/sleep", &named).expect("a stand-in process");
-    let mut host_process = Command::new(&named)
-        .arg("30")
-        .spawn()
-        .expect("a process to name");
+    let mut host_process = stand_in_named_daemon(&dir);
     let pid = host_process.id();
     // Give the kernel a moment to publish its start time.
     std::thread::sleep(Duration::from_millis(200));
@@ -1616,7 +1677,13 @@ fn a_daemon_that_ignores_the_expected_pid_stops_and_says_so() {
                 // The old daemon knows nothing of `expect_pid`.
                 r#"{"ok":true}"#.to_string()
             } else {
-                format!(r#"{{"ok":true,"pid":{pid},"config_dir":"{served_dir}"}}"#)
+                // The config directory has to be escaped: on Windows it is a
+                // path full of backslashes, and pasting it into a JSON string
+                // produces `\U` — invalid JSON, which would make the client see
+                // no health answer at all rather than the PID it expected.
+                let served_json =
+                    serde_json::to_string(&served_dir).expect("encode the config dir");
+                format!(r#"{{"ok":true,"pid":{pid},"config_dir":{served_json}}}"#)
             };
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -1668,6 +1735,18 @@ fn a_daemon_that_ignores_the_expected_pid_stops_and_says_so() {
     assert!(
         stopped.is_ok(),
         "the stop completes once the old daemon's 200 has been force-killed: {stopped:?}"
+    );
+    // The warning may say that the receipt is missing; it may not claim to know
+    // the daemon's version, because a current daemon that compared and matched
+    // answers the same 200 (#20).
+    let log = std::fs::read_to_string(dir.join("app.log")).unwrap_or_default();
+    assert!(
+        log.contains("without a verifiable expect_pid receipt"),
+        "the missing receipt should be logged: {log}"
+    );
+    assert!(
+        !log.contains("predates"),
+        "the log must not attribute the missing receipt to a version: {log}"
     );
     let _ = std::fs::remove_dir_all(&dir);
     common::restore_default_config_env();
@@ -1848,7 +1927,10 @@ fn a_daemon_refuses_a_shutdown_that_names_another_process() {
 /// The second request is the one the old code sent (it had no field to send):
 /// nothing in it said which process it meant, so whichever daemon held the
 /// socket took it. With the check, B refuses and stays up.
-#[cfg(unix)]
+///
+/// Both daemons are the real binary on the real platform, so this is the same
+/// race on Windows and on Unix; the proxy and the port probe are plain
+/// `TcpListener` code with nothing platform-specific in them.
 #[test]
 #[serial_test::serial]
 fn a_stop_that_reached_the_wrong_daemon_stops_nothing() {
@@ -1862,6 +1944,9 @@ fn a_stop_that_reached_the_wrong_daemon_stops_nothing() {
     // A is the daemon the client finds through the proxy.
     let mut a = start_listener_at(&dir, &first_addr);
     let a_pid = a.id();
+    #[cfg(target_os = "macos")]
+    let a_instance: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("daemon.instance.json")).unwrap()).unwrap();
     let destination = Arc::new(std::sync::Mutex::new(first_addr.clone()));
     let front = TcpListener::bind(&proxy_addr).expect("bind the proxy");
     let connections = proxy(front, destination.clone());
@@ -1877,8 +1962,12 @@ fn a_stop_that_reached_the_wrong_daemon_stops_nothing() {
     let _ = a.kill();
     let _ = a.wait();
     #[cfg(target_os = "macos")]
-    agent2ssh::daemon_control::clear_stale_daemon_pid(a_pid)
-        .expect("explicitly clear A's exited PID record");
+    agent2ssh::daemon_identity::macos::recover(
+        &dir,
+        a_pid,
+        a_instance["instance_id"].as_str().unwrap(),
+    )
+    .expect("explicitly recover A's exited identity records");
     let mut b = start_listener_at(&dir, &first_addr);
     let b_pid = b.id();
     assert_ne!(a_pid, b_pid);
@@ -1995,10 +2084,10 @@ fn activity_counts_a_resident_session() {
 #[test]
 #[serial_test::serial]
 fn a_relative_config_dir_in_one_working_directory_names_one_daemon() {
-    let root = std::fs::canonicalize(std::env::temp_dir())
+    let root = std::fs::canonicalize(fixture_root())
         .expect("canonical temp dir")
         .join(format!(
-            "a2s-relative-{}-{}",
+            "a2sr-{}-{:x}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -2060,7 +2149,11 @@ fn a_relative_config_dir_in_one_working_directory_names_one_daemon() {
     );
     assert_eq!(
         agent2ssh::daemon_control::daemon_pid_state(pid),
-        agent2ssh::daemon_control::DaemonPidState::Healthy
+        if cfg!(target_os = "macos") {
+            agent2ssh::daemon_control::DaemonPidState::Unverified
+        } else {
+            agent2ssh::daemon_control::DaemonPidState::Healthy
+        }
     );
     request_drain_for_test(pid).expect("stop it");
     drop(guard);
@@ -2076,10 +2169,10 @@ fn a_relative_config_dir_in_one_working_directory_names_one_daemon() {
 #[test]
 #[serial_test::serial]
 fn a_relative_config_dir_from_another_working_directory_is_a_different_daemon() {
-    let root = std::fs::canonicalize(std::env::temp_dir())
+    let root = std::fs::canonicalize(fixture_root())
         .expect("canonical temp dir")
         .join(format!(
-            "a2s-relative-split-{}-{}",
+            "a2ss-{}-{:x}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)

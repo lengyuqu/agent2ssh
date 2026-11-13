@@ -1,6 +1,8 @@
 # Daemon 身份协议 v1：可实施的评审方案
 
-**状态：用户已接受安全默认值；协议细节待评审，尚未实现。** 2026-11-12 用户明确接受：新客户端默认拒绝未绑定停止，新 daemon 默认关闭 HTTP `/shutdown`，并知悉对旧客户端和远程运维的影响。未绑定兼容操作只能显式发起，不自动强杀。其余线路、格式和平台能力仍是待实现、待验证的设计，不能说成已有保证。对应 [CNB #22](https://cnb.cool/zdzso/agent2ssh/-/issues/22)，以 `587ebee` 为代码和 #25 实测基线。本文收敛旧草案 [daemon-identity-protocol.md](daemon-identity-protocol.md) 的 D1–D6；与旧草案的建议冲突时，以本文为本轮评审文本。实现和平台验收分别属于 #20、#21、#23、#24、#25；不把当前 TCP + PID 检查描述为本协议。
+**状态更新（2026-11-13）：macOS 的 IPC 服务端、实例记录和显式恢复已部分实现；客户端尚不能证明连接与稳定进程对象绑定，仍保持 Unbound。Linux / Windows 绑定尚未实现，以下设计与矩阵不能视为已全面落地。** 2026-11-12 用户明确接受：新客户端默认拒绝未绑定停止，新 daemon 默认关闭 HTTP `/shutdown`，并知悉对旧客户端和远程运维的影响。未绑定兼容操作只能显式发起，不自动强杀。其余线路、格式和平台能力仍是待实现、待验证的设计，不能说成已有保证。对应 [CNB #22](https://cnb.cool/zdzso/agent2ssh/-/issues/22)，以 `587ebee` 为代码和 #25 实测基线。本文收敛旧草案 [daemon-identity-protocol.md](daemon-identity-protocol.md) 的 D1–D6；与旧草案的建议冲突时，以本文为本轮评审文本。实现和平台验收分别属于 #20、#21、#23、#24、#25；不把当前 TCP + PID 检查描述为本协议。
+
+> 2026-11-13 Mach task identity token 真机研究见 [macOS Mach 身份与安全停止](../reports/macos-mach-task-identity-2026-11-13.md)：name 端口可观察 task audit token，但 socket 交接及 exec 反例使其不能直接升级现有连接为 `Bound`。
 
 ## 1. 推荐决定及对 #25 的直接答案
 

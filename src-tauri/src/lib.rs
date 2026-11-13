@@ -4,6 +4,7 @@ pub mod approval;
 pub mod backup_crypto;
 pub mod config_cache;
 pub mod config_pair;
+pub mod config_repair;
 pub mod connection;
 pub mod container_discovery;
 pub mod container_runtime;
@@ -13,6 +14,7 @@ pub mod core;
 // Crate-private: the transport is the only caller.
 pub mod daemon_activity;
 pub mod daemon_control;
+pub mod daemon_identity;
 pub mod desktop_sync;
 pub mod diagnostics;
 pub mod embedded_ssh;

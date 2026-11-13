@@ -76,6 +76,10 @@ use tokio::sync::{mpsc, Mutex};
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use uuid::Uuid;
 
+#[cfg(target_os = "macos")]
+#[path = "agent2ssh_daemon/identity_macos.rs"]
+mod identity_macos;
+
 #[path = "agent2ssh_daemon/auth.rs"]
 mod agent2ssh_daemon_auth;
 #[path = "agent2ssh_daemon/trace.rs"]
@@ -109,6 +113,8 @@ fn uptime_secs() -> u64 {
 /// `TerminateProcess`, which skips the drain below. `notify_one` stores a permit
 /// when nothing is waiting yet, so a request that races the listener still lands.
 static SHUTDOWN_REQUESTED: tokio::sync::Notify = tokio::sync::Notify::const_new();
+#[cfg(target_os = "macos")]
+static IPC_SHUTDOWN_REQUESTED: tokio::sync::Notify = tokio::sync::Notify::const_new();
 // The daemon has one shutdown lifecycle. Approval waiters must leave their
 // HTTP handlers when it starts, rather than holding graceful shutdown open.
 static DAEMON_SHUTDOWN: std::sync::OnceLock<agent2ssh::ws_drain::ShutdownToken> =
@@ -246,6 +252,10 @@ async fn shutdown_signal(shutdown_token: agent2ssh::ws_drain::ShutdownToken) {
         }
     };
     let requested = SHUTDOWN_REQUESTED.notified();
+    #[cfg(target_os = "macos")]
+    let ipc_requested = IPC_SHUTDOWN_REQUESTED.notified();
+    #[cfg(not(target_os = "macos"))]
+    let ipc_requested = std::future::pending::<()>();
 
     #[cfg(unix)]
     let terminate = async {
@@ -266,6 +276,7 @@ async fn shutdown_signal(shutdown_token: agent2ssh::ws_drain::ShutdownToken) {
         _ = ctrl_c => "ctrl_c",
         _ = terminate => "sigterm",
         _ = requested => "http",
+        _ = ipc_requested => "ipc",
     };
 
     // T2-15: Broadcast shutdown to all WS handlers
@@ -325,6 +336,12 @@ struct TerminalEndpoint {
     input: mpsc::Sender<Vec<u8>>,
 }
 
+#[cfg(target_os = "macos")]
+fn load_or_create_daemon_token(config_dir: &std::path::Path) -> anyhow::Result<String> {
+    agent2ssh::daemon_identity::macos::load_or_create_token(config_dir)
+}
+
+#[cfg(not(target_os = "macos"))]
 fn load_or_create_daemon_token(config_dir: &std::path::Path) -> anyhow::Result<String> {
     let token_path = config_dir.join("daemon.token");
     if token_path.exists() {
@@ -5669,6 +5686,11 @@ async fn serve_console() -> axum::response::Html<&'static str> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     std::env::set_var("AGENT2SSH_APPROVAL_PERSIST", "1");
+    let config_dir = config_dir()?;
+    #[cfg(target_os = "macos")]
+    agent2ssh::daemon_identity::macos::prepare_config(&config_dir)?;
+    #[cfg(not(target_os = "macos"))]
+    std::fs::create_dir_all(&config_dir)?;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
@@ -5825,8 +5847,6 @@ async fn main() -> anyhow::Result<()> {
             Some(serde_json::json!({ "addr": addr })),
         );
     }
-    let config_dir = config_dir()?;
-    std::fs::create_dir_all(&config_dir)?;
 
     #[cfg(target_os = "macos")]
     if std::env::var("AGENT2SSH_ALLOW_UNBOUND_HTTP_SHUTDOWN").as_deref() == Ok("1") {
@@ -5846,6 +5866,10 @@ async fn main() -> anyhow::Result<()> {
     let listener = TcpListener::bind(addr).await?;
 
     // PID
+    #[cfg(target_os = "macos")]
+    let identity_publication =
+        agent2ssh::daemon_identity::macos::publish(&config_dir, std::process::id())?;
+    #[cfg(not(target_os = "macos"))]
     agent2ssh::daemon_control::write_daemon_pid(std::process::id())?;
 
     let limits = load_execution_limits()?;
@@ -6029,6 +6053,16 @@ async fn main() -> anyhow::Result<()> {
             "console_url": format!("http://{addr}/console"),
         })),
     );
+    #[cfg(target_os = "macos")]
+    let identity_task = {
+        let socket = identity_publication.listener.try_clone()?;
+        let listener = tokio::net::UnixListener::from_std(socket)?;
+        tokio::spawn(identity_macos::serve(
+            listener,
+            identity_publication.instance.clone(),
+            token.clone(),
+        ))
+    };
     // T2-15: Graceful shutdown with WS drain: on Ctrl-C / SIGTERM,
     // 1. Stop accepting new HTTP connections (axum graceful shutdown)
     // 2. Broadcast shutdown to all active WS handlers (ShutdownToken)
@@ -6048,6 +6082,13 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("WebSocket handlers did not finish before shutdown deadline");
     }
 
+    #[cfg(target_os = "macos")]
+    let pid_removed = {
+        identity_task.abort();
+        let _ = identity_task.await;
+        identity_publication.cleanup()?
+    };
+    #[cfg(not(target_os = "macos"))]
     let pid_removed = agent2ssh::daemon_control::remove_daemon_pid_file_if(std::process::id())?;
     let _ = append_diagnostic_log(
         "info",

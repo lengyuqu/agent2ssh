@@ -416,7 +416,7 @@ Get-Content -Raw .\password.txt | agent2ssh host add example --host example.com 
 
 ### 用途
 
-`daemon.log` 在 info 级别记录关闭触发来源：`sigterm`、`ctrl_c` 或 `http`；这不是信号发送者身份，日志级别较高时可能不输出。
+`daemon.log` 在 info 级别记录关闭触发来源：`sigterm`、`ctrl_c`、`http` 或 `ipc`；这不是信号发送者身份，日志级别较高时可能不输出。
 
 记录当前运行的守护进程 PID，用于 `daemon stop` 和 `daemon status` 命令。
 
@@ -439,11 +439,17 @@ Get-Content -Raw .\password.txt | agent2ssh host add example --host example.com 
 判定顺序：端点报的 PID 与记录不同 → 一律 `unverified`（不管进程表怎么说）；记录缺失但端点活着 →
 `unverified`；记录里是损坏/不可读/非普通文件 → `damaged`；PID 被 OS 明确判为不存在或僵尸 → `stale`；
 活着但端点沉默 → `running-unhealthy`；活着 + 端点同 PID + 配置目录一致 + token 被接受 → `healthy`
-（仍然只是观察一致，不是绑定的身份，见 K14）。
+（仍然只是观察一致，不是绑定的身份，见 K14）。 macOS 未完成绑定时，诊断不会向 HTTP 端点发送管理员 token，`token` 恒为 `not checked`，即使健康响应一致也报告 `unverified`。PID 记录缺失时也报告 `unverified`，因为无法排除未被发现的进程；若 IPC 实例或 socket 有残留则提示检查残留。
+
+桌面设置面板的「Daemon health」区块消费同一份诊断（#21 前端接入）：面板打开、点击「Refresh daemon
+health」、以及执行启动/停止/重启/未验证关闭之后，各调用一次 `daemon_status`，在健康行下方显示
+`verdict`（非 healthy 时附 `next` 建议原文）。它只是显示：指示灯与「启动/停止」按钮的可用性仍由
+`/health` 探测决定，诊断本身不驱动任何按钮，也不发信号。每次调用会在 `app.log` 留一条 debug 记录
+（`daemon status checked`，含 verdict 与 record），所以面板不做轮询，只在上述时点各取一次。
 
 ### 清理残留记录（`daemon clear-stale --expect-pid N`）
 
-全平台可用。它只做一件事：删掉一条**仍与预期一致**的 PID 记录，不发送任何信号。安全性来自锁内
+全平台可用。没有 IPC 记录时，它只删除一条**仍与预期一致**的 PID 记录；macOS 上完整 IPC 残留还需 `--expect-instance`，并按下文的条件清理实例和 socket。两种路径均不发送信号。安全性来自锁内
 重读而不是平台：持 `.daemon-pid.lock` 后重新读文件、与命令开始前的原始内容逐字节比较、要求 PID
 仍是期望值、要求 OS 明确返回该 PID 不存在；文件损坏、非普通文件、读不到、被替换、PID 不同或
 进程仍可观察时都拒绝。旧版程序不遵守这把锁，外部替换仍有竞态；PID 空闲也不是原实例退出的身份
@@ -459,9 +465,19 @@ Get-Content -Raw .\password.txt | agent2ssh host add example --host example.com 
 
 ### 注意事项
 
+**macOS 启动和复用（#22）**：启动与复用健康检查不再向未经绑定的 HTTP 端点发送管理员 token。已存在的 PID/端点不能证明为期望实例，因此不会自动复用，也不会覆盖记录；请检查现有实例。新启动时检查直接创建的子进程、PID/实例/socket 记录与匿名健康响应；它们只是就绪线索，CLI 和桌面会明确提示 HTTP 端点身份未绑定、未认证。这不证明随后其他业务 API 连接的对端，业务 HTTP API 仍按其各自调用方式使用 token。
+
+**macOS 本地 IPC 发现（#22）**：普通停止会在锁内读取实例快照，在同一 socket 上进行不含 token 的 hello，核对对端 PID、nonce 与实例 ID，并在通信后重新核对记录及 socket 的内容和 inode。记录缺失、矛盾、更换、对端异常或通信超时均拒绝并保留记录；就算一致也仍是 `Unbound`，不发送 token、停止或信号，也不自动重连。hello 的通信时限为 1.5 秒；文件锁各有独立上限，文件系统调用本身不保证总时限。Unix socket 对端 PID、实例 ID 和记录不能证明连接与稳定进程对象绑定，符号一致或读取两次也不构成此证明。
+
+显式旧式 HTTP 停止仍是未绑定的风险例外：如果发现 IPC 实例或 socket 记录，客户端先进行上面的无密钥发现；IPC 证据不一致、不可检查或超时时，不发送 HTTP token 或关闭请求；发送前会再次复核同一记录快照，发现持续存在的替换即拒绝。旧 daemon 没有 IPC 记录时仍可使用该明确例外；即使 hello 一致，也不能证明 HTTP 端点与 IPC 端点属于同一进程，token 仍可能暴露给错误端点。旧程序不遵守锁时的路径变化仍存在竞态。
+
 **macOS 保守策略（#25）**：当前没有经证明的进程对象绑定，普通 `daemon stop`、`daemon restart` 和桌面停止均拒绝发送关闭请求或信号；退出桌面不会主动向未绑定 daemon 发送停止请求或信号；但系统或进程托管环境仍可能使 daemon 退出，正在进行的会话等任务可能中断。macOS 退出前若有 PID 记录、损坏记录或健康端点迹象，会提示活动状态未知；此路径不自动向未绑定端点发送管理员 token。本机隔离桌面实验观察到 `loginwindow` 向测试 daemon 发送 SIGTERM；其他环境尚未验证。`/health` 和 PID 一致只是线索，不代表身份已绑定。新 daemon 的 HTTP `/shutdown` 默认返回 403；只有 daemon 启动环境显式设置 `AGENT2SSH_ALLOW_UNBOUND_HTTP_SHUTDOWN=1` 才开放旧路径；若 daemon 监听非回环地址，该开关也会允许有管理员令牌的远程 HTTP 请求。要承担风险并请求一次优雅关闭，可在数字 loopback 地址上使用 `agent2ssh daemon stop --allow-unbound-graceful` 或桌面确认操作：请求可能停错进程并向错误端点暴露管理员 token；客户端不会重试、强杀、清理 PID 或声称退出已确认；CLI 即使收到接受回执也以非零状态退出，提示结果未验证。旧 daemon 不认识此服务端开关，仍可能接收请求。这个开关仅影响 daemon 启动时的进程环境，设置在客户端环境里不能启用已运行 daemon 的路由。不要通过代理使用此例外；客户端无法识别所有本地代理。
 
-恢复时，先独立核实本机进程与端点，由操作者决定是否带外停止；确认目标 PID 已不存在后，可执行 `agent2ssh daemon clear-stale --expect-pid <PID>`。该命令仅在锁内重读的文件与读取前原始内容一致且 OS 明确返回 PID 不存在时删除 PID 记录，不发送信号，也不删除 `daemon.owner`；文件损坏、非普通文件、PID 不同、权限不足或进程存活时拒绝。旧版不遵守锁，外部替换仍有竞态，PID 空闲不是原实例退出的身份证明。默认启动、直接启动 daemon 和令牌轮换均不会自动删除或替换已有 PID 文件；直接启动时以独占创建 PID 文件，已有路径（包括悬空符号链接）不会被截断或跟随创建目标。下面的旧停止/重试细节适用于非 macOS 和显式兼容路线，不应视为 macOS 默认保证。
+**macOS IPC（#22，部分实现）**：daemon 在不可被其他用户写入、由当前用户拥有的配置目录中创建 0700 的 `.daemon-ipc`，在其中发布 socket `s`；`daemon.instance.json` 记录非秘密实例 ID、PID、配置 ID 和端点，`daemon.config-id` 是持久标识，不是认证凭据。配置目录末级或 socket 子目录若为符号链接、权限不安全，路径上的目录含 ACL 允许项、上级目录不可信或 socket 路径超长，启动会失败并保留已有内容；仅收紧权限的 ACL 拒绝项可保留。配置目录不存在时，仅在安全的现有父目录下创建最后一级；多级缺失时须先创建并检查父目录。首次启用时若旧 daemon 的 PID 仍在，需要先带外检查和停止旧实例，不自动认领或覆盖其记录。进程正常关闭时，daemon 校验记录和 socket inode 后清理自己的 PID、实例文件和 socket；PID 和实例分步发布/删除，不是断电原子事务，异常退出或不一致均保留检查。
+
+完整 IPC 崩溃残留需先由操作者检查进程和实例记录，再运行 `agent2ssh daemon clear-stale --expect-pid <PID> --expect-instance <实例ID>`。仅当记录一致、PID 确认不存在且 socket 的非阻塞连接明确返回拒绝时才移除匹配的三项；没有实例记录、记录损坏或其他不完整状态须带外检查。PID 复用、旧版不遵守锁、继承的描述符及非可靠文件系统不在此恢复操作的保证内。普通客户端仍不能证明 macOS 的连接与稳定进程对象绑定，因此不会通过 IPC 发送令牌或发起停止；服务端的 hello/授权/停止状态机供后续完成绑定的平台使用，同用户恶意进程不在协议威胁模型内。
+
+恢复时，先独立核实本机进程与端点，由操作者决定是否带外停止；确认目标 PID 已不存在后，可执行 `agent2ssh daemon clear-stale --expect-pid <PID>`。没有 IPC 记录时，该命令仅在锁内重读的文件与读取前原始内容一致且 OS 明确返回 PID 不存在时删除 PID 记录，不发送信号，也不删除 `daemon.owner`；文件损坏、非普通文件、PID 不同、权限不足或进程存活时拒绝。旧版不遵守锁，外部替换仍有竞态，PID 空闲不是原实例退出的身份证明。默认启动、直接启动 daemon 和令牌轮换均不会自动删除或替换已有 PID 文件；直接启动时以独占创建 PID 文件，已有路径（包括悬空符号链接）不会被截断或跟随创建目标。下面的旧停止/重试细节适用于非 macOS 和显式兼容路线，不应视为 macOS 默认保证。
 
 - 守护进程启动时自动写入
 - 守护进程正常退出时自动删除
@@ -472,7 +488,7 @@ Get-Content -Raw .\password.txt | agent2ssh host add example --host example.com 
 - 进程仍存在但身份不明，或守护进程存活但健康检查失败时，启动和停止会拒绝猜测并保留 PID 文件；非 macOS 的旧停止路径要求健康响应 PID 匹配、健康响应里的 `config_dir` 与本进程的配置目录一致，并使用当前配置的管理员 token 成功请求 `/shutdown`，先检查进程和监听地址后再处理。重命名的 daemon 可以通过匹配 PID 且接受当前 token 的健康响应显示为运行中，但不会仅凭该响应向其发送进程信号
 - `/shutdown` 接受一个可选的 `expect_pid`：调用方在认证通过后声明"我要停的是这个进程"，daemon 核对后不符就回 409 并继续运行。停止路径总是带上它，所以在健康检查和发请求之间监听者被换成另一个用同一 token 的 daemon（重启、重生成）时，停止会失败而不会落到新进程上。旧版本 daemon 不认识该字段、会照旧关闭自己；它的 200 与新版 daemon 核对通过后的 200 在客户端看来完全一样（都是 `{"ok":true}`），**带 `expect_pid` 的那一类 200 都会落进同一条 warn**（不带 body 的 `request_graceful_shutdown` 走另一支，不记 warn），所以这条 warn 只说明"这次停止没有拿到检查回执"，不能反推 daemon 版本——而 daemon 侧也帮不上忙：它只在 409 时写日志，核对通过不留痕，所以"日志里没有核对记录"什么也证明不了；显式传 `expect_pid: null` 会得到 400，想不检查就别带这个字段。健康响应里没有 `config_dir` 的旧 daemon 会被判为无法识别并拒绝停止，`daemon restart` 走的是同一条停止路径、同样会被拒，所以要带外停掉它：Unix 用 `kill <pid>`（SIGTERM 会走正常清理并删掉 PID 文件），Windows 没有 SIGTERM 处理路径、只能 `taskkill /PID <pid> /F`（跳过整个 drain，PID 文件会留在磁盘上），之后 `agent2ssh daemon start` 会把指向已死进程的 PID 文件当作 stale 清掉；若它反过来报「daemon PID N is live or cannot be verified」，说明那个 PID 已被别的进程复用，按上一段的办法核对后再处理。同一个带外出口也适用于另一种「无法识别」：**可执行名不在白名单**里的 daemon（重命名过，或直接跑 `src-tauri/binaries/` 下带 target triple 的那一份）。这类 daemon 的 `daemon status` 会照常说 running、`daemon start` 说 already running、`agent2ssh doctor` 的 `daemon health` 一项也报 `pass`，只有 `daemon stop` 与 `daemon restart` 以 `cannot be safely identified` 拒绝——因为状态判据（`daemon_matches_config`）不看可执行名，而停止路径的第一步（`daemon_process_start_time`）看。把二进制改回 `agent2ssh-daemon` 再停，或按上一句带外 kill。**桌面面板上还要多一层注意**：设置里的「停止」按钮能不能点，看的只是 `http://127.0.0.1:7722/health` 有没有回 200（前端 `daemonHealthy`），既不看进程名也不看 PID 文件——所以重命名 daemon 时它会**亮绿灯并且可点，点下去却报 `cannot be safely identified`**；同理，把 `AGENT2SSH_DAEMON_ADDR` 指到别处时面板完全不受影响（前端地址是硬编码的，见 L2-159），面板说健康、CLI 说连不上，两者都不是在说同一个 daemon。非 macOS 的关窗口退出路径更安静：它先用 `process_is_alive`（看名字）判断，名字不在白名单就直接返回，**连一条「为什么没停」的日志都不写**，所以「退出应用后 daemon 还在」在重命名过的 daemon 上是预期行为而不是故障，要停它就按上面的带外出口处理。`agent2ssh daemon rotate-token` 拒绝的情况不同：它比的是 `daemon_pid_state(pid) != Stale`，只要那只 daemon 还活着且身份可核实就拒绝，理由是对的（换掉令牌等于切断正在用它的人），与可执行名无关。**另一种同形的「无法识别」是地址指向别处**：`AGENT2SSH_DAEMON_ADDR` 指向另一台主机时，`stop_daemon_process` 先用**本机**进程表核对 PID（`daemon_process_start_time`），再向**该变量解析出的地址**要 `/health`，两个观察必然一处命中一处不命中，于是落到 `health PID, config directory, or admin token did not match` 那一支——**这句文案里没有任何一个词提到「你的地址在别处」**，与「本机 PID 被复用」完全同形；`daemon status` 同理会报 `cannot be verified`，`daemon token rotate` 也会被拒（它有两道闸：`daemon_pid_state(pid) != Stale` 和 `daemon_health_pid().is_some()`，远端活着时后者恒为真，所以共用 token 在远端存活期间本地换不掉——这未必是缺陷，换掉正在用的 token 会切断那只 daemon，但用户在本地看到的理由只提 PID，看不出真正原因是地址）。要停远端 daemon，就在那台机器上用它自己的 CLI；或者把变量恢复成本机地址再操作。该检查只能收窄竞态，不能消除它：见 `docs/KNOWN-ISSUES.md` 的 K14
 - daemon 成功绑定地址后才写 PID；已有健康端点或其他进程占用端口时，启动不会报告新进程已就绪。新创建的子进程未在启动期限内通过已认证健康检查时，启动器会终止并回收该子进程；若无法终止则保留或记录其 PID 以便人工检查
-- 非 macOS 上，已接受受保护关闭请求的 daemon 如果在 8 秒宽限内没有退出，自动停止和重启会重新核对它的身份，核对通过才尝试强制终止，然后只等 2 秒；仍未退出就报错并保留 PID 文件。这 2 秒只是**最后一段**：一次停止按顺序还包含身份探测（`/health` 500 毫秒）、关闭请求（2 秒）、8 秒宽限、2 秒强制终止等待，最坏约 **12.5 秒**。进程快照是单 PID 刷新、读 `daemon.token` 是一次文件读，两者都在毫秒级；但**地址解析不受任何超时约束**（`to_socket_addrs` 在 `connect_timeout` 之前跑了，而 `AGENT2SSH_DAEMON_ADDR` 允许写主机名），所以配了主机名时「一次 stop 最多多久」没有上界，只按 12.5 秒算也不行。**另有一段的等待与地址无关，同样没有上界**：`.daemon-pid.lock` 走的是阻塞式 `lock_exclusive()`，没有超时（`store.rs` 的 `lock_config_file`），而 daemon 自己启动时要拿它写 PID 文件、收尾时要拿它删 PID 文件（`bin/agent2ssh-daemon.rs` 的 `write_daemon_pid` / `remove_daemon_pid_file_if`），启动器在失败清理时、CLI 与桌面在停止返回后也各要拿一次。所以一个卡住的持有者（被 `SIGSTOP` 的进程、不保证 `flock` 语义的网络文件系统）能让 `daemon start` 在「子进程已决定放弃」之后仍卡在删除那一步，也能让 `daemon stop` 在宽限超时把 daemon 强杀之后，卡在收尾的两步上——先由 `stop_daemon_process` 尾部清 `daemon.owner`（`clear_daemon_owner_if`，同一把锁），返回后调用方再删 PID 文件，两步各拿一次锁——两种都没有输出、没有上限，前面 12.5 秒的分解对这一段不适用。失败也不止两种：除了「进程忽略了终止请求」（强制终止后仍是 `StillRunning`）与「它已无法被确认成这个配置的 daemon」（`UnverifiedIdentity`），还有第三种 `UncertainExit`——读不到进程状态，而这一种可以在**进入宽限分支之前**就返回，此时根本没有任何信号发出去。区分线索在 `app.log`（不是 `daemon.log`：后者是 daemon 自己的 stdout/stderr 重定向）：出现 `daemon did not exit after a guarded shutdown; leaving it running` 说明宽限内它确实还在跑；报 `UncertainExit` 而没有这一条，说明问题在可观测性——从头就判定不出它在不在。检查 `app.log`、监听地址和系统进程信息，确定进程确实属于该配置后，由操作者自行决定如何停止；确认进程已退出后再重试启动。不能仅凭进程名、匿名健康响应或共享 token 确认身份
+- 非 macOS 上，已接受受保护关闭请求的 daemon 如果在 8 秒宽限内没有退出，自动停止和重启会尝试强制终止，然后只等 2 秒；仍未退出就报错并保留 PID 文件。**Windows 上这次终止只作用于发送 `/shutdown` 之前按创建时间绑定的那个进程对象**：绑定失败（拒绝访问、已退出或 PID 已复用）时不回退到按 PID 重开，而是保留记录并报错；绑定本身只申请 `SYNCHRONIZE|QUERY_LIMITED_INFORMATION`，强杀时才另开 `PROCESS_TERMINATE` 并复核创建时间。这 2 秒只是**最后一段**：一次停止按顺序还包含身份探测（`/health` 500 毫秒）、关闭请求（2 秒）、8 秒宽限、2 秒强制终止等待，最坏约 **12.5 秒**。进程快照是单 PID 刷新、读 `daemon.token` 是一次文件读，两者都在毫秒级；但**地址解析不受任何超时约束**（`to_socket_addrs` 在 `connect_timeout` 之前跑了，而 `AGENT2SSH_DAEMON_ADDR` 允许写主机名），所以配了主机名时「一次 stop 最多多久」没有上界，只按 12.5 秒算也不行。**另有一段的等待与地址无关，同样没有上界**：`.daemon-pid.lock` 走的是阻塞式 `lock_exclusive()`，没有超时（`store.rs` 的 `lock_config_file`），而 daemon 自己启动时要拿它写 PID 文件、收尾时要拿它删 PID 文件（`bin/agent2ssh-daemon.rs` 的 `write_daemon_pid` / `remove_daemon_pid_file_if`），启动器在失败清理时、CLI 与桌面在停止返回后也各要拿一次。所以一个卡住的持有者（被 `SIGSTOP` 的进程、不保证 `flock` 语义的网络文件系统）能让 `daemon start` 在「子进程已决定放弃」之后仍卡在删除那一步，也能让 `daemon stop` 在宽限超时把 daemon 强杀之后，卡在收尾的两步上——先由 `stop_daemon_process` 尾部清 `daemon.owner`（`clear_daemon_owner_if`，同一把锁），返回后调用方再删 PID 文件，两步各拿一次锁——两种都没有输出、没有上限，前面 12.5 秒的分解对这一段不适用。失败也不止两种：除了「进程忽略了终止请求」（强制终止后仍是 `StillRunning`）与「它已无法被确认成这个配置的 daemon」（`UnverifiedIdentity`），还有第三种 `UncertainExit`——读不到进程状态，而这一种可以在**进入宽限分支之前**就返回，此时根本没有任何信号发出去。区分线索在 `app.log`（不是 `daemon.log`：后者是 daemon 自己的 stdout/stderr 重定向）：出现 `daemon did not exit after a guarded shutdown; leaving it running` 说明宽限内它确实还在跑；报 `UncertainExit` 而没有这一条，说明问题在可观测性——从头就判定不出它在不在。检查 `app.log`、监听地址和系统进程信息，确定进程确实属于该配置后，由操作者自行决定如何停止；确认进程已退出后再重试启动。不能仅凭进程名、匿名健康响应或共享 token 确认身份
 
 ---
 
@@ -494,7 +510,7 @@ Get-Content -Raw .\password.txt | agent2ssh host add example --host example.com 
 
 - 由桌面应用在启动 daemon 时写入；停止时仅清理由相同 PID 和启动时间标识的记录，无法确认启动时间时保留；无需手动维护。新版写入和清理使用 `.daemon-pid.lock` 协调，旧版程序不参与此协议
 - 文件缺失、损坏或与当前 daemon 对不上，都视为"不是桌面应用启动的"，退出应用时不会停止它
-- 设置里的"停止 Daemon"按钮和 `agent2ssh daemon stop` 是明确的停止指令，不受此文件限制。但两者的门槛不同：CLI 的 `daemon stop` 会读 `daemon.pid`，读到损坏、权限不足或身份不可核实时会带着具体理由拒绝；桌面面板只轮询 `/health`（`api.ts` 的 `getDaemonHealth`），"停止 Daemon"按钮在 `/health` 不通时直接置灰，此时同一屏上的"启动"却仍可点，点下去才会把 PID 文件的真实错误显示在按钮下方。桌面端**不读** `daemon.pid` / `daemon.owner` 来展示状态（`daemon_status` 命令至今没有调用方），所以「面板显示 Daemon unavailable」既不等于「有残留记录」，也不等于「没有」——要判断记录状态请用 `agent2ssh daemon status`
+- 设置里的"停止 Daemon"按钮和 `agent2ssh daemon stop` 是明确的停止指令，不受此文件限制。但两者的门槛不同：CLI 的 `daemon stop` 会读 `daemon.pid`，读到损坏、权限不足或身份不可核实时会带着具体理由拒绝；桌面面板的指示灯与按钮可用性只看 `/health`（`api.ts` 的 `getDaemonHealth`），"停止 Daemon"按钮在 `/health` 不通时直接置灰，此时同一屏上的"启动"却仍可点，点下去才会把 PID 文件的真实错误显示在按钮下方。面板自 #21 前端接入后会在「Daemon health」区块下方显示 `daemon_status` 的只读 verdict 与建议（见上文「只读诊断」），但它不驱动按钮：所以「面板显示 Daemon unavailable」仍然既不等于「有残留记录」，也不等于「没有」——要判断记录状态看面板的诊断行，或用 `agent2ssh daemon status`
 - 桌面应用退出前，如果它启动的 daemon 里还有终端会话、常驻 shell、端口转发或待审批请求，会先弹窗确认，因为这些都只存在于 daemon 内存里，停止即丢失
 
 ---
@@ -805,6 +821,20 @@ prelude = "export JAVA_HOME=/opt/jdk-21"   # WSL 的变量写在这里，不能�
 - **一次 exec 只跑一条命令字符串。** 命令作为单个参数传给 `sh -c`，其中的引号、`;`、管道都由那个 shell 解释，和 `local`、`local:gitbash` 一致。
 
 常驻会话（`agent2ssh resident open -H local:wsl`）走另一条路径：它不带命令，直接打开发行版的交互式登录 shell，之后每条命令写进同一个 shell 的 stdin，所以 `cd`、`export` 的状态跨命令保留，bash 语法在那里也可用。
+
+**起始目录不是用户主目录，而是调用进程工作目录的翻译结果**（2026-11-13 实测，Windows 11
+10.0.26300 + WSL 2，证据见 `docs/reports/evidence/windows-wsl-cwd-2026-11-13/`）：
+
+| 调用进程的 Windows cwd | 发行版内的起始目录 |
+|---|---|
+| `C:\Users\me` | `/mnt/c/Users/me` |
+| `C:\Windows\System32`（许多 daemon 启动位置） | `/mnt/c/WINDOWS/System32` |
+| `D:\` | `/mnt/d` |
+| `\\wsl.localhost\Ubuntu\home` | `/home`（`\\wsl.localhost\<发行版>\<路径>` 直接映射） |
+| 其他 UNC（如 `\\localhost\C$\Users`） | 回退到默认用户 home（本机 root → `/root`），stderr 有 `wsl: Failed to translate` 警告 |
+
+`-d <发行版>` 只选发行版，不改变起点。所以同一条 `local:wsl:pwd` 在 CLI 里和从桌面应用触发时
+可能给出不同目录；要在发行版内固定位置，命令里显式 `cd`（`sh -c 'cd ~ && …'`）。
 
 ---
 
@@ -1293,9 +1323,15 @@ agent2ssh webdav pull --force
 
 恢复前先验证完整 manifest、文件名白名单及所有捕获文件，并读取完全部文件；非法、重复或缺失条目会报错，不会部分应用。通过检查后先保存当前状态的 `pre-restore` 安全备份，再恢复文件并删除快照范围内的新增项。私钥、凭据库、主机信任等非同步文件不参与恢复，也不会因快照中缺失而被删除。既有 `backup_manifest.json` 格式仍可使用。执行限额与 `policy.toml` 一样是热加载的：daemon 在每次限额检查前按 `(mtime, len)` 判断文件是否变化，变了就重读，改完立即对下一次执行生效（记录的事件与已开会话保留，不会因为重载而重置窗口）。读到损坏的文件时保留上一份限额并记一条警告，而不是让每次执行都失败。
 
-**`hosts.json.bak` 不是一致性快照（阶段 2 设计进行中，尚未实现）**：常规保存只把上一次的 `hosts.json` 用 `fs::copy` 复制成 `hosts.json.bak`（`store.rs:841-851`，复制失败仅告警、不阻断保存），它防的是「上一次内容写坏了可手工回卷」，不保证跨文件一致。凭据库 `secrets.enc` 既没有配对副本，也不在 WebDAV 同步白名单与本地配置快照的恢复范围内；上述恢复路径都直接覆盖 `hosts.json` 而不碰 `secrets.enc`。因此手工把 `hosts.json.bak` 拷回、恢复旧配置快照或从远端 pull 回旧版本后，文件里的 `$agent2ssh-secret$` 引用仍会按 account 名解析到**当前** `secrets.enc` 中的密文——若这期间改过口令，可能用错凭据且不会有任何提示。阶段 2 的内容 tag 与成对快照设计见 `docs/plans/cross-file-transaction-phase2.md`，目前只是评审稿。请勿把 `.bak` 当作可安全回卷的成对备份；确需回卷时先另行备份当前 `secrets.enc`，并逐项核对主机凭据。
+**`hosts.json.bak` 不是一致性快照（阶段 2 已落地，但 `.bak` 不在成对范围内）**：常规保存只把上一次的 `hosts.json` 用 `fs::copy` 复制成 `hosts.json.bak`（`store.rs:841-851`，复制失败仅告警、不阻断保存），它防的是「上一次内容写坏了可手工回卷」，不保证跨文件一致。成对快照是另一套机制：双文件提交会额外写 `hosts.json.pair` / `secrets.enc.pair` 与 `config_pair_index.json`，`agent2ssh config-repair --restore-pair <N>` 用它把两份文件一起回卷；`.bak` 不参与其中。**带 tag 的引用**在恢复旧配置快照、模板应用、WebDAV pull 与桌面云恢复这四条路径上都会先做内容判定：tag 与当前 `secrets.enc` 不匹配即拒绝写入并点名 account，不会静默用错凭据。仍然无法自证内容的是裸 `$agent2ssh-secret$` 与 `$agent2ssh-keyring$`——它们按 account 名解析到**当前** `secrets.enc` 中的密文，恢复这类旧配置只给告警；若这期间改过口令，仍可能用错凭据。请勿把 `.bak` 当作可安全回卷的成对备份；确需回卷时用 `config-repair --restore-pair`，或先另行备份当前 `secrets.enc` 并逐项核对主机凭据。
 
-**升级与降级（阶段 2 引用格式，已落地 A/B）**：自 2026-11-12 起，新写入的凭据引用为 `$agent2ssh-secret$:<tag>`，`secrets.enc` 条目同时带内容 `tag`。旧版本程序用精确相等判定识别引用，会把带 tag 的字符串当成**明文口令重新密封**，因此升级后的配置目录不能被旧版本直接读写；降级前必须先把引用改回 `$agent2ssh-secret$` 并备份 `secrets.enc`。多设备共享配置（含 WebDAV 只同步 `hosts.json`）需要所有端同时升级——`secrets.enc` 不在同步白名单内，远端只会拿到带 tag 的 `hosts.json` 而没有对应凭据库。恢复旧 `hosts.json` 时若 tag 与当前凭据库不匹配，引用会被保留并给出明确指引、登录被拒绝，不会静默使用改过的口令；修复方式是重新输入凭据或恢复成对快照。阶段 2 C 已落地成对索引与四条恢复路径的前置判定，但**显式成对恢复命令（阶段 D）仍未提供**，目前遇到 tag 不匹配只能重新输入凭据。
+**升级与降级（阶段 2 引用格式，已落地 A/B）**：自 2026-11-12 起，新写入的凭据引用为 `$agent2ssh-secret$:<tag>`，`secrets.enc` 条目同时带内容 `tag`。旧版本程序用精确相等判定识别引用，会把带 tag 的字符串当成**明文口令重新密封**，因此升级后的配置目录不能被旧版本直接读写；降级前必须先把引用改回 `$agent2ssh-secret$` 并备份 `secrets.enc`。**这一点已用阶段 A/B 之前的真实二进制实测（2026-11-13，`48ac012`，证据见 `docs/reports/evidence/c8-downgrade-2026-11-13/`）**，而且要强调时机：旧版本在启动时对除 `completions` 与 `webdav decrypt` 之外的每条命令都会跑一次明文迁移（`src-tauri/src/bin/agent2ssh.rs:1884`），所以**库处于解锁状态时，一条 `host list` 就足以**完成破坏——引用退化为裸 marker、`secrets.enc` 丢掉 `tag` 并退回 v2 形状、代次 +1，还会留下一个 `hosts.json.bak`；库未解锁时同一条命令不改动任何文件。**另外两条入口同样会触发迁移（同日补测）**：桌面端在设置里解锁时走 `secrets_unlock` 命令，它解锁后无条件调用同一个迁移，界面显示解锁成功而 tag 已被吃掉；daemon 若通过 `AGENT2SSH_MASTER_PASSWORD` 拿到主密码，会在**启动时、接受任何客户端请求之前**完成同样的降级（不设该变量时 daemon 不动文件）。旧 CLI 侧不存在这条通路——它没有任何「提示输入当前主密码」的命令，`AGENT2SSH_MASTER_PASSWORD` 是它唯一的解锁入口。所以「只要不写配置就安全」不成立：**锁着库的旧进程是安全的，一旦解锁就随时可能落盘**。新版本再读这种数据时会还原出当初被封存的那串引用文本、发现 tag 对不上，打印 `... the stored secret is NOT used` 并拒绝该凭据的登录；`agent2ssh config-repair --restore-pair <N> --confirm` 能把两个文件逐字节恢复到降级前（前提是降级前已写过成对快照）。多设备共享配置（含 WebDAV 只同步 `hosts.json`）需要所有端同时升级——`secrets.enc` 不在同步白名单内，远端只会拿到带 tag 的 `hosts.json` 而没有对应凭据库。恢复旧 `hosts.json` 时若 tag 与当前凭据库不匹配，引用会被保留并给出明确指引、登录被拒绝，不会静默使用改过的口令；修复方式是重新输入凭据或恢复成对快照。阶段 2 C 已落地成对索引与四条恢复路径的前置判定；**阶段 D 提供 `agent2ssh config-repair`**（显式、带确认与审计）：
+
+- `agent2ssh config-repair --list`（可加 `--json`）：列出成对快照记录。
+- `agent2ssh config-repair --discard-pending`：预览不可重放的 `.commit.json`（代次差、孤儿凭据 account）；加 `--confirm` 才删除日志。**只删日志，不改 `hosts.json` / `secrets.enc`，也不清理孤儿密文**，删除后写入可恢复。
+- `agent2ssh config-repair --restore-pair <N>`：预览把 `hosts.json` 与 `secrets.enc` 一起回卷到第 N 条成对快照；加 `--confirm` 才执行，在 hosts 与 secrets 两把锁内完成，第二次替换失败会尽力回滚第一次，并写 `app.log` 审计。
+
+不带 `--confirm` 时命令只打印预览、绝不改动文件；只有成对副本的 hash 仍与索引记录吻合时才允许回卷（历史记录因共用同一副本会自然失效，属 fail-closed）。两次替换不是单一原子事务，中途崩溃仍需人工检查（C7 未实测）。
 
 ---
 

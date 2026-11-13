@@ -51,6 +51,8 @@ struct FakeDaemon {
     addr: String,
     stop: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
+    #[cfg(target_os = "macos")]
+    requests: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl FakeDaemon {
@@ -60,6 +62,10 @@ impl FakeDaemon {
         listener.set_nonblocking(true).unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
+        #[cfg(target_os = "macos")]
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        #[cfg(target_os = "macos")]
+        let captured = requests.clone();
         let health_body = health.map(|value| value.to_string());
         let handle = std::thread::spawn(move || {
             while !flag.load(Ordering::SeqCst) {
@@ -68,6 +74,8 @@ impl FakeDaemon {
                         let mut buffer = [0u8; 2048];
                         let read = stream.read(&mut buffer).unwrap_or(0);
                         let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+                        #[cfg(target_os = "macos")]
+                        captured.lock().unwrap().push(request.clone());
                         let path = request.split_whitespace().nth(1).unwrap_or("/").to_string();
                         let (status, body) = if path.starts_with("/health") {
                             match &health_body {
@@ -101,6 +109,8 @@ impl FakeDaemon {
             addr,
             stop,
             handle: Some(handle),
+            #[cfg(target_os = "macos")]
+            requests,
         }
     }
 }
@@ -139,14 +149,23 @@ fn pid_zero_is_absent_not_denied() {
 fn no_record_and_no_endpoint_reports_not_running() {
     let dir = tempfile::tempdir().unwrap();
     let report = status_json(dir.path(), &dead_addr());
+    #[cfg(not(target_os = "macos"))]
     assert_eq!(report["verdict"], "not-running");
+    #[cfg(target_os = "macos")]
+    assert_eq!(report["verdict"], "unverified");
     assert_eq!(report["record"]["state"], "missing");
     assert_eq!(report["health"]["state"], "inactive");
     assert_eq!(report["pid_lock"], "free");
+    #[cfg(not(target_os = "macos"))]
     assert!(report["next_step"]
         .as_str()
         .unwrap()
         .contains("daemon start"));
+    #[cfg(target_os = "macos")]
+    assert!(report["next_step"]
+        .as_str()
+        .unwrap()
+        .contains("state is unknown"));
     let name = dir
         .path()
         .file_name()
@@ -158,6 +177,21 @@ fn no_record_and_no_endpoint_reports_not_running() {
         "config_dir should be the directory the report read: {}",
         report["config_dir"]
     );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn leftover_instance_does_not_report_not_running_or_suggest_unsafe_cleanup() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("daemon.instance.json"), "partial").unwrap();
+    let report = status_json(dir.path(), &dead_addr());
+    assert_eq!(report["verdict"], "unverified");
+    assert_eq!(report["token"], "not-checked");
+    assert!(report["next_step"]
+        .as_str()
+        .unwrap()
+        .contains("--expect-instance"));
+    assert!(dir.path().join("daemon.instance.json").exists());
 }
 
 #[test]
@@ -324,7 +358,18 @@ fn rejected_token_is_reported_and_the_token_is_not_printed() {
     let output = cli(dir.path(), &fake.addr, &["daemon", "status", "--json"]);
     assert!(output.status.success());
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    #[cfg(not(target_os = "macos"))]
     assert_eq!(report["token"], "rejected");
+    #[cfg(target_os = "macos")]
+    {
+        assert_eq!(report["token"], "not-checked");
+        let requests = fake.requests.lock().unwrap();
+        assert!(!requests.is_empty());
+        assert!(requests.iter().all(|request| !request.contains(token)));
+        assert!(requests
+            .iter()
+            .all(|request| !request.to_ascii_lowercase().contains("authorization:")));
+    }
     assert_eq!(report["verdict"], "unverified");
     for stream in [&output.stdout, &output.stderr] {
         assert!(

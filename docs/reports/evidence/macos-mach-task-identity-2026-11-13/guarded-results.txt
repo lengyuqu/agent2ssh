@@ -1,0 +1,41 @@
+run 1 exit=0
+guarded=0 get_guard_behavior_kr=0 flags=0x0
+guarded=0 set_nonfatal_kr=0
+guarded=0 transfer_send_kr=0 ((os/kern) successful)
+guarded=0 transfer_receive_kr=0 ((os/kern) successful) descriptor_count=1 type=0
+guarded=0 child_exited=1 exit=0 signaled=0 signal=0
+guarded=1 get_guard_behavior_kr=0 flags=0x0
+guarded=1 set_nonfatal_kr=0
+guarded=1 guard_kr=0 ((os/kern) successful)
+guarded=1 transfer_receive_kr=268451843 ((ipc/rcv) timed out)
+guarded=1 child_exited=0 exit=-1 signaled=1 signal=9
+query_guarded=0 get_context_kr=17 receive_status_kr=17 flags=0x0 info_ext_kr=17 ext_flags=0x0
+query_guarded=1 get_context_kr=17 receive_status_kr=17 flags=0x0 info_ext_kr=17 ext_flags=0x0
+
+run 2 exit=0
+guarded=0 get_guard_behavior_kr=0 flags=0x0
+guarded=0 set_nonfatal_kr=0
+guarded=0 transfer_send_kr=0 ((os/kern) successful)
+guarded=0 transfer_receive_kr=0 ((os/kern) successful) descriptor_count=1 type=0
+guarded=0 child_exited=1 exit=0 signaled=0 signal=0
+guarded=1 get_guard_behavior_kr=0 flags=0x0
+guarded=1 set_nonfatal_kr=0
+guarded=1 guard_kr=0 ((os/kern) successful)
+guarded=1 transfer_receive_kr=268451843 ((ipc/rcv) timed out)
+guarded=1 child_exited=0 exit=-1 signaled=1 signal=9
+query_guarded=0 get_context_kr=17 receive_status_kr=17 flags=0x0 info_ext_kr=17 ext_flags=0x0
+query_guarded=1 get_context_kr=17 receive_status_kr=17 flags=0x0 info_ext_kr=17 ext_flags=0x0
+
+run 3 exit=0
+guarded=0 get_guard_behavior_kr=0 flags=0x0
+guarded=0 set_nonfatal_kr=0
+guarded=0 transfer_send_kr=0 ((os/kern) successful)
+guarded=0 transfer_receive_kr=0 ((os/kern) successful) descriptor_count=1 type=0
+guarded=0 child_exited=1 exit=0 signaled=0 signal=0
+guarded=1 get_guard_behavior_kr=0 flags=0x0
+guarded=1 set_nonfatal_kr=0
+guarded=1 guard_kr=0 ((os/kern) successful)
+guarded=1 transfer_receive_kr=268451843 ((ipc/rcv) timed out)
+guarded=1 child_exited=0 exit=-1 signaled=1 signal=9
+query_guarded=0 get_context_kr=17 receive_status_kr=17 flags=0x0 info_ext_kr=17 ext_flags=0x0
+query_guarded=1 get_context_kr=17 receive_status_kr=17 flags=0x0 info_ext_kr=17 ext_flags=0x0

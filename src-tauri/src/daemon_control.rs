@@ -18,6 +18,9 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 pub struct DaemonStartResult {
     pub pid: u32,
     pub log_path: PathBuf,
+    /// Whether startup/reuse authenticated the endpoint. On macOS the child
+    /// and its anonymous health response are observations, not binding.
+    pub endpoint_authenticated: bool,
 }
 
 /// The config directory as an absolute path.
@@ -120,6 +123,23 @@ pub fn clear_stale_daemon_pid(expected_pid: u32) -> Result<()> {
 
 fn clear_stale_daemon_pid_with_snapshot(expected_pid: u32, snapshot: &str) -> Result<()> {
     let _guard = crate::store::lock_config_file(DAEMON_PID_LOCK)?;
+    let ipc_dir = config_dir_absolute()?.join(".daemon-ipc");
+    match std::fs::symlink_metadata(&ipc_dir) {
+        Ok(metadata) if !metadata.file_type().is_dir() => {
+            anyhow::bail!("invalid identity socket directory; retained for manual inspection")
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).context("cannot inspect identity socket directory"),
+    }
+    for name in ["daemon.instance.json", ".daemon-ipc/s"] {
+        let path = config_dir_absolute()?.join(name);
+        match std::fs::symlink_metadata(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).context("cannot inspect identity recovery record"),
+            Ok(_) => anyhow::bail!("identity records exist; use clear-stale with --expect-instance after inspecting them"),
+        }
+    }
     let path = daemon_pid_path()?;
     if !std::fs::symlink_metadata(&path)
         .context("cannot inspect daemon PID file; retained")?
@@ -157,6 +177,8 @@ fn clear_stale_daemon_pid_with_snapshot(expected_pid: u32, snapshot: &str) -> Re
 
 fn write_daemon_pid_if_absent(pid: u32) -> Result<()> {
     let _guard = crate::store::lock_config_file(DAEMON_PID_LOCK)?;
+    #[cfg(target_os = "macos")]
+    refuse_ipc_artifacts()?;
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -169,6 +191,8 @@ fn write_daemon_pid_if_absent(pid: u32) -> Result<()> {
 /// Older clients and daemons do not honor this advisory lock.
 pub fn remove_daemon_pid_file_if(pid: u32) -> Result<bool> {
     let _guard = crate::store::lock_config_file(DAEMON_PID_LOCK)?;
+    #[cfg(target_os = "macos")]
+    refuse_ipc_artifacts()?;
     let path = daemon_pid_path()?;
     let raw = match std::fs::read_to_string(&path) {
         Ok(raw) => raw,
@@ -180,6 +204,28 @@ pub fn remove_daemon_pid_file_if(pid: u32) -> Result<bool> {
     }
     std::fs::remove_file(path).context("failed to remove daemon PID file")?;
     Ok(true)
+}
+
+#[cfg(target_os = "macos")]
+fn refuse_ipc_artifacts() -> Result<()> {
+    let dir = config_dir_absolute()?;
+    let ipc_dir = dir.join(".daemon-ipc");
+    match std::fs::symlink_metadata(&ipc_dir) {
+        Ok(m) if !m.file_type().is_dir() => {
+            anyhow::bail!("invalid identity socket directory; retained")
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    for name in ["daemon.instance.json", ".daemon-ipc/s"] {
+        match std::fs::symlink_metadata(dir.join(name)) {
+            Ok(_) => anyhow::bail!("identity records exist; retained for explicit recovery"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(())
 }
 
 pub fn process_is_alive(pid: u32) -> bool {
@@ -340,6 +386,7 @@ fn expected_config_dir() -> Option<String> {
 // A health response alone can be forged. This observation is deliberately
 // independent of the executable name so a renamed daemon remains visible.
 // It is still a seconds-resolution snapshot, not proof of daemon identity.
+#[cfg(any(not(target_os = "macos"), test))]
 fn observable_live_start_time(pid: u32) -> Option<u64> {
     let sys_pid = sysinfo::Pid::from_u32(pid);
     let mut system = sysinfo::System::new();
@@ -350,28 +397,36 @@ fn observable_live_start_time(pid: u32) -> Option<u64> {
     })
 }
 
-/// Verify that the claimed process is observable before and after the health
-/// and token checks. Neither a process snapshot nor the endpoint proves identity.
+/// Verify the legacy authenticated health checks on non-macOS platforms.
+/// macOS has no proved binding and must never send a token for this check.
 pub fn daemon_matches_config(pid: u32) -> bool {
-    let Some(start_time) = observable_live_start_time(pid) else {
-        return false;
-    };
-    if health_identity().map(|identity| identity.pid) != Some(pid) {
-        return false;
+    #[cfg(target_os = "macos")]
+    {
+        let _ = pid;
+        false
     }
-    let Some(token) = crate::daemon_activity::read_admin_token() else {
-        return false;
-    };
-    let authenticated = crate::daemon_activity::local_daemon_request(
-        "GET",
-        "/gate",
-        Some(&token),
-        Duration::from_millis(500),
-    )
-    .is_ok_and(|response| response.status == 200);
-    authenticated
-        && daemon_health_pid() == Some(pid)
-        && observable_live_start_time(pid) == Some(start_time)
+    #[cfg(not(target_os = "macos"))]
+    {
+        let Some(start_time) = observable_live_start_time(pid) else {
+            return false;
+        };
+        if health_identity().map(|identity| identity.pid) != Some(pid) {
+            return false;
+        }
+        let Some(token) = crate::daemon_activity::read_admin_token() else {
+            return false;
+        };
+        let authenticated = crate::daemon_activity::local_daemon_request(
+            "GET",
+            "/gate",
+            Some(&token),
+            Duration::from_millis(500),
+        )
+        .is_ok_and(|response| response.status == 200);
+        authenticated
+            && daemon_health_pid() == Some(pid)
+            && observable_live_start_time(pid) == Some(start_time)
+    }
 }
 
 // A missing sysinfo entry can also mean the OS denied inspection. Only treat
@@ -394,16 +449,31 @@ fn pid_definitely_missing(pid: u32) -> bool {
 
 #[cfg(windows)]
 fn pid_definitely_missing(pid: u32) -> bool {
-    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_INVALID_PARAMETER};
-    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, ERROR_INVALID_PARAMETER, WAIT_OBJECT_0,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+    };
     unsafe {
-        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-        if handle != 0 {
-            CloseHandle(handle);
-            false
-        } else {
-            GetLastError() == ERROR_INVALID_PARAMETER
+        let handle = OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            0,
+            pid,
+        );
+        if handle == 0 {
+            // An invalid parameter is "no such process". Access denied and
+            // every other error are not: the process may be running under
+            // another account, and this function must not call that absent.
+            return GetLastError() == ERROR_INVALID_PARAMETER;
         }
+        // A process that has exited but whose handle someone still holds (the
+        // launcher, the desktop app, a test's `Child`) still opens, and
+        // `OpenProcess` succeeding would otherwise read as "still alive". Ask
+        // the object itself: a signaled handle means the process ended.
+        let ended = WaitForSingleObject(handle, 0) == WAIT_OBJECT_0;
+        CloseHandle(handle);
+        ended
     }
 }
 
@@ -612,6 +682,12 @@ pub fn read_daemon_pid_record(path: &Path) -> DaemonPidRecord {
 /// keeps access-denied, zombie and live-with-start-time apart instead of
 /// collapsing them into exited/unknown.
 pub fn observe_pid(pid: u32) -> PidObservation {
+    // The record protocol accepts only positive PIDs. In particular, never
+    // pass zero to kill(2), where it denotes a process group rather than a
+    // single process. Represent that invalid record value as absent.
+    if pid == 0 {
+        return PidObservation::Absent;
+    }
     let sys_pid = sysinfo::Pid::from_u32(pid);
     let mut system = sysinfo::System::new();
     system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[sys_pid]), true);
@@ -689,6 +765,7 @@ fn observe_health(expected_pid: Option<u32>) -> HealthObservation {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 fn observe_token() -> TokenObservation {
     let Some(token) = crate::daemon_activity::read_admin_token() else {
         return TokenObservation::Missing;
@@ -833,12 +910,53 @@ pub fn daemon_status_report() -> Result<DaemonStatusReport> {
     };
     let observation = recorded_pid.map(observe_pid);
     let health = observe_health(recorded_pid);
+    #[cfg(not(target_os = "macos"))]
     let token = match (recorded_pid, observation.as_ref()) {
         (Some(_), Some(PidObservation::Live { .. })) => observe_token(),
         _ => TokenObservation::NotChecked,
     };
+    // A PID and HTTP health response cannot bind this endpoint to the daemon.
+    // Do not disclose the admin token while diagnosing an unbound macOS peer.
+    #[cfg(target_os = "macos")]
+    let token = TokenObservation::NotChecked;
     let verdict = classify_daemon(&record, observation.as_ref(), &health, token);
+    #[cfg(target_os = "macos")]
+    let ipc_evidence = {
+        let socket_dir = dir.join(".daemon-ipc");
+        let unsafe_dir = match std::fs::symlink_metadata(&socket_dir) {
+            Ok(metadata) => !metadata.file_type().is_dir(),
+            Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+        };
+        unsafe_dir
+            || ["daemon.instance.json", ".daemon-ipc/s"]
+                .iter()
+                .any(|name| match std::fs::symlink_metadata(dir.join(name)) {
+                    Ok(_) => true,
+                    Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+                })
+    };
+    #[cfg(target_os = "macos")]
+    let verdict = if verdict == DaemonVerdict::NotRunning {
+        DaemonVerdict::Unverified
+    } else {
+        verdict
+    };
     let next_step = daemon_next_step(&record, observation.as_ref(), &health, verdict);
+    #[cfg(target_os = "macos")]
+    let next_step = if ipc_evidence
+        && matches!(verdict, DaemonVerdict::Stale | DaemonVerdict::Unverified)
+    {
+        let prefix = if matches!(record, DaemonPidRecord::Missing) {
+            "There is no PID record. "
+        } else {
+            ""
+        };
+        format!("{prefix}IPC identity artifacts exist or cannot be inspected. Inspect them before recovery; a complete stale instance requires clear-stale --expect-pid <PID> --expect-instance <instance-id>. No process is signalled.")
+    } else if matches!(record, DaemonPidRecord::Missing) && verdict == DaemonVerdict::Unverified {
+        "No daemon PID record; daemon identity and state is unknown. Inspect the endpoint and processes before recovery.".to_string()
+    } else {
+        next_step
+    };
     Ok(DaemonStatusReport {
         config_dir: dir.display().to_string(),
         pid_path: pid_path.display().to_string(),
@@ -854,6 +972,7 @@ pub fn daemon_status_report() -> Result<DaemonStatusReport> {
     })
 }
 
+#[cfg(not(target_os = "macos"))]
 fn wait_for_daemon_pid(pid: u32, timeout: Duration) -> bool {
     let start = Instant::now();
     while start.elapsed() < timeout {
@@ -863,6 +982,32 @@ fn wait_for_daemon_pid(pid: u32, timeout: Duration) -> bool {
         thread::sleep(Duration::from_millis(100));
     }
     daemon_matches_config(pid)
+}
+
+/// Observe only the child this caller spawned. Matching self-reported HTTP
+/// health and on-disk records are readiness hints, never identity binding.
+#[cfg(target_os = "macos")]
+fn wait_for_spawned_daemon(child: &mut std::process::Child, timeout: Duration) -> Result<bool> {
+    let pid = child.id();
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if child.try_wait()?.is_some() {
+            return Ok(false);
+        }
+        let records_match = config_dir()
+            .and_then(|dir| crate::daemon_identity::macos::published_for(&dir, pid))
+            .unwrap_or(false);
+        let health_matches = health_identity().is_some_and(|health| {
+            health.pid == pid
+                && health.config_dir == expected_config_dir()
+                && health.config_dir.is_some()
+        });
+        if records_match && health_matches && child.try_wait()?.is_none() {
+            return Ok(true);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    Ok(false)
 }
 
 /// Rotate daemon.log if it has grown past `max_size_bytes`, keeping three prior
@@ -919,6 +1064,7 @@ pub fn start_daemon_background(daemon_bin: &Path) -> Result<DaemonStartResult> {
                 return Ok(DaemonStartResult {
                     pid,
                     log_path: daemon_log_path()?,
+                    endpoint_authenticated: true,
                 });
             }
             DaemonPidState::Stale => {
@@ -940,6 +1086,9 @@ pub fn start_daemon_background(daemon_bin: &Path) -> Result<DaemonStartResult> {
                 }
             }
             DaemonPidState::RunningUnhealthy | DaemonPidState::Unverified => {
+                #[cfg(target_os = "macos")]
+                return Err(anyhow!("daemon PID {pid} is live or cannot be verified; endpoint identity is unbound, so it was not reused and no admin token was sent. PID file retained for inspection"));
+                #[cfg(not(target_os = "macos"))]
                 return Err(anyhow!(
                     "daemon PID {pid} is live or cannot be verified; PID file retained"
                 ));
@@ -999,7 +1148,11 @@ pub fn start_daemon_background(daemon_bin: &Path) -> Result<DaemonStartResult> {
             "log_path": daemon_log_path()?.display().to_string(),
         })),
     );
-    if !wait_for_daemon_pid(pid, Duration::from_secs(3)) {
+    #[cfg(target_os = "macos")]
+    let ready = wait_for_spawned_daemon(&mut child, Duration::from_secs(3)).unwrap_or(false);
+    #[cfg(not(target_os = "macos"))]
+    let ready = wait_for_daemon_pid(pid, Duration::from_secs(3));
+    if !ready {
         // This is the exact child just spawned by this call, not a PID read
         // from disk. Do not abandon it when startup could not be verified.
         if child
@@ -1033,24 +1186,33 @@ pub fn start_daemon_background(daemon_bin: &Path) -> Result<DaemonStartResult> {
         let _ = crate::diagnostics::append_diagnostic_log(
             "error",
             "daemon_control",
-            "daemon child did not provide an authenticated health response",
+            if cfg!(target_os = "macos") {
+                "spawned daemon readiness was not observed"
+            } else {
+                "daemon child did not provide an authenticated health response"
+            },
             Some(
                 serde_json::json!({ "pid": pid, "log_path": daemon_log_path()?.display().to_string() }),
             ),
         );
-        return Err(anyhow!("daemon child (pid={pid}) did not provide an authenticated health response and was stopped; see {}", daemon_log_path()?.display()));
+        return Err(anyhow!("daemon child (pid={pid}) did not provide the required readiness evidence and was stopped; see {}", daemon_log_path()?.display()));
     }
 
     let _ = crate::diagnostics::append_diagnostic_log(
         "info",
         "daemon_control",
-        "daemon health endpoint reachable",
+        if cfg!(target_os = "macos") {
+            "spawned daemon has an unbound health response"
+        } else {
+            "daemon health endpoint reachable"
+        },
         Some(serde_json::json!({ "pid": pid })),
     );
 
     Ok(DaemonStartResult {
         pid,
         log_path: daemon_log_path()?,
+        endpoint_authenticated: !cfg!(target_os = "macos"),
     })
 }
 
@@ -1276,6 +1438,9 @@ fn creation_time_secs(handle: isize) -> Option<u64> {
 struct BoundProcess {
     handle: isize,
     pid: u32,
+    /// The creation time this binding was accepted for. Kept so termination can
+    /// refuse a handle opened for a different process.
+    start_time: u64,
 }
 
 #[cfg(windows)]
@@ -1288,13 +1453,17 @@ impl BoundProcess {
     /// than treating it as one. The name whitelist is not re-checked here
     /// because `expected_start` was read from a process that already passed it
     /// ([`daemon_process_start_time`]).
+    ///
+    /// Only the rights needed to *observe* are requested here. A caller that may
+    /// not terminate the process can still bind and wait; [`terminate`] asks for
+    /// the extra right when a forced stop is actually requested.
     fn open(pid: u32, expected_start: u64) -> Option<Self> {
         use windows_sys::Win32::System::Threading::{
-            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
         };
         let handle = unsafe {
             OpenProcess(
-                PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE,
+                PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
                 0,
                 pid,
             )
@@ -1303,7 +1472,11 @@ impl BoundProcess {
             return None;
         }
         match creation_time_secs(handle) {
-            Some(start) if start == expected_start => Some(Self { handle, pid }),
+            Some(start) if start == expected_start => Some(Self {
+                handle,
+                pid,
+                start_time: expected_start,
+            }),
             _ => {
                 unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
                 None
@@ -1318,10 +1491,48 @@ impl BoundProcess {
         unsafe { WaitForSingleObject(self.handle, 0) == WAIT_OBJECT_0 }
     }
 
-    /// Terminate exactly the object this handle names.
+    /// Terminate the process this binding verified.
+    ///
+    /// The binding only asked for `SYNCHRONIZE | QUERY_LIMITED_INFORMATION`, so
+    /// a caller that may wait but not terminate (another account, a restricted
+    /// token) can still bind and observe. Termination asks for `PROCESS_TERMINATE`
+    /// only when it is actually needed, and re-checks the creation time on the
+    /// newly opened handle before signalling — a reused PID is refused instead
+    /// of killed.
+    ///
+    /// This is the one place that re-opens by PID; it is not the old fallback,
+    /// because a failure here returns an error rather than trying another
+    /// mechanism. Whether a partially privileged token can bind but not
+    /// terminate is inferred from the documented access rights, not measured on
+    /// such an account.
     fn terminate(&self) -> Result<()> {
-        use windows_sys::Win32::System::Threading::TerminateProcess;
-        if unsafe { TerminateProcess(self.handle, 1) } == 0 {
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, TerminateProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+        };
+        let handle = unsafe {
+            OpenProcess(
+                PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION,
+                0,
+                self.pid,
+            )
+        };
+        if handle == 0 {
+            return Err(anyhow!(
+                "could not open daemon PID {} for termination ({}); no signal was sent",
+                self.pid,
+                std::io::Error::last_os_error()
+            ));
+        }
+        if creation_time_secs(handle) != Some(self.start_time) {
+            unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
+            return Err(anyhow!(
+                "daemon PID {} was reused before it could be terminated; no signal was sent",
+                self.pid
+            ));
+        }
+        let sent = unsafe { TerminateProcess(handle, 1) };
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
+        if sent == 0 {
             return Err(anyhow!(
                 "failed to terminate daemon process {}: {}",
                 self.pid,
@@ -1385,20 +1596,36 @@ fn wait_for_bound_exit(
     wait_for_exit(pid, expected_start, within)
 }
 
-/// Force the daemon down, preferring the bound handle.
+/// Force the daemon down.
 ///
-/// Falling back to [`signal_daemon`] keeps the previous behaviour when the
-/// handle could not be obtained (denied access, gone, or already reused), where
-/// the name whitelist and a second `start_time` read are still the only checks
-/// available.
-#[cfg(any(not(target_os = "macos"), test))]
+/// On Windows this only acts through the handle opened before the shutdown
+/// request (#24). Re-opening the process by PID here would hand the
+/// termination to whatever holds that PID now — exactly the fallback the issue
+/// forbids. `None` means the object was denied, already gone, or already
+/// replaced; the caller gets an error and neither the process nor the PID file
+/// is touched.
+///
+/// Elsewhere the PID-based recheck (`start_time` + name) is still the only
+/// mechanism available, and it is not atomic with the signal.
+#[cfg(not(target_os = "macos"))]
 fn terminate_for_stop(bound: Option<&BoundProcess>, pid: u32, expected_start: u64) -> Result<()> {
     #[cfg(windows)]
-    if let Some(bound) = bound {
-        return bound.terminate();
+    {
+        let _ = expected_start;
+        let bound = bound.ok_or_else(|| {
+            anyhow!(
+                "daemon PID {pid} did not exit after a guarded shutdown and its process object \
+                 could not be bound (access denied, already exited, or the PID was reused); \
+                 no signal was sent and the PID file is retained"
+            )
+        })?;
+        bound.terminate()
     }
-    let _ = bound;
-    signal_daemon(pid, expected_start, true)
+    #[cfg(not(windows))]
+    {
+        let _ = bound;
+        signal_daemon(pid, expected_start, true)
+    }
 }
 
 #[cfg(any(not(target_os = "macos"), test))]
@@ -1434,7 +1661,11 @@ fn wait_for_exit(pid: u32, expected_start: u64, within: Duration) -> ProcessObse
 
 // Recheck identity immediately before signalling. This narrows the PID reuse
 // window but cannot make a PID-based signal atomic with this inspection.
-#[cfg(not(target_os = "macos"))]
+//
+// Windows never calls this from the stop path any more: a forced stop must go
+// through the handle bound before the shutdown request (#24). Keeping the
+// function out of that build also keeps the forbidden fallback unreachable.
+#[cfg(all(not(target_os = "macos"), not(windows)))]
 fn signal_daemon(pid: u32, expected_start: u64, force: bool) -> Result<()> {
     let sys_pid = sysinfo::Pid::from_u32(pid);
     let mut system = sysinfo::System::new();
@@ -1658,8 +1889,19 @@ pub fn request_graceful_shutdown() -> bool {
 /// On macOS, refuse to stop an unbound daemon without sending a request or signal.
 #[cfg(target_os = "macos")]
 pub fn stop_daemon_process(pid: u32) -> std::result::Result<(), DaemonStopError> {
+    let discovery = match config_dir()
+        .and_then(|dir| crate::daemon_identity::macos_client::inspect_unbound(&dir, pid))
+    {
+        Ok(observation) => format!(
+            "IPC hello matched peer PID {}, but no stable process object is bound",
+            observation.peer_pid
+        ),
+        Err(error) => {
+            format!("IPC identity discovery could not establish consistent evidence ({error})")
+        }
+    };
     Err(DaemonStopError::UnverifiedIdentity(format!(
-        "daemon PID {pid} is not bound to an authenticated process object; no shutdown or signal was sent and this client did not remove the PID file. Inspect the process and stop it out of band, or explicitly try 'agent2ssh daemon stop --allow-unbound-graceful' (may stop the wrong process and expose the admin token)"
+        "daemon PID {pid} is not bound to an authenticated process object; {discovery}; no shutdown or signal was sent and this client did not remove the PID file. Inspect the process and records before recovery"
     )))
 }
 
@@ -1686,8 +1928,9 @@ pub fn stop_daemon_process(pid: u32) -> std::result::Result<(), DaemonStopError>
     // Bind the process object before asking for a shutdown, so the grace period
     // and any forced termination both address the object that was verified here
     // — not whatever holds the PID eight seconds later. `None` (denied, gone, or
-    // already reused) falls back to the PID-based observers below; it is not
-    // evidence that the process exited.
+    // already reused) is not evidence that the process exited: the observers
+    // below still decide whether it is running, and a forced stop refuses
+    // rather than re-opening the PID (see [`terminate_for_stop`]).
     let bound = BoundProcess::open(pid, start_time);
     // A matching executable name is not proof that this is our daemon: an
     // unrelated process can reuse the PID or spoof argv[0]. Require the health
@@ -1748,14 +1991,14 @@ pub fn stop_daemon_process(pid: u32) -> std::result::Result<(), DaemonStopError>
         // carried no receipt. It is still the daemon that health-checked a
         // moment ago (its config directory matched), so continuing is the
         // previous behaviour, not a hole this opened; claiming the check
-        // happened would be the lie. The warning below still attributes the
-        // missing receipt to a version, which is a known defect and not
-        // something this arm can support (K14).
+        // happened would be the lie. The warning therefore reports the missing
+        // receipt and says the version is undeterminable, rather than
+        // attributing it to an older daemon (#20).
         ShutdownRequest::AcceptedUnchecked => {
             let _ = crate::diagnostics::append_diagnostic_log(
                 "warn",
                 "daemon_control",
-                "the daemon accepted the shutdown without checking expect_pid (daemon predates it)",
+                "the daemon accepted the shutdown without a verifiable expect_pid receipt; its version cannot be determined from this response",
                 Some(serde_json::json!({ "pid": pid })),
             );
         }
@@ -1834,8 +2077,27 @@ pub fn request_unbound_graceful_shutdown(pid: u32) -> Result<()> {
     {
         anyhow::bail!("daemon PID or configuration directory does not match; no request sent; this client did not remove the PID file");
     }
+    let dir = config_dir()?;
+    let ipc_artifacts = crate::daemon_identity::macos::has_ipc_artifacts(&dir)
+        .context("cannot inspect IPC identity records; no request sent")?;
+    let ipc_observation = if ipc_artifacts {
+        Some(
+            crate::daemon_identity::macos_client::inspect_unbound(&dir, pid)
+                .context("IPC identity evidence is inconsistent or unavailable; no request sent")?,
+        )
+    } else {
+        None
+    };
     if read_record()? != original_record {
         anyhow::bail!("daemon PID record changed during discovery; no request sent");
+    }
+    if crate::daemon_identity::macos::has_ipc_artifacts(&dir)? != ipc_artifacts {
+        anyhow::bail!("IPC identity records changed during discovery; no request sent");
+    }
+    if let Some(observation) = ipc_observation {
+        observation.revalidate().context(
+            "IPC identity records changed before compatibility request; no request sent",
+        )?;
     }
     let token = crate::daemon_activity::read_admin_token()
         .ok_or_else(|| anyhow!("admin token unavailable; no request sent"))?;
@@ -2271,5 +2533,33 @@ mod tests {
             .contains("no shutdown or signal"));
         #[cfg(not(target_os = "macos"))]
         stop_daemon_process(u32::MAX - 1).expect("nothing to stop");
+    }
+
+    /// #24: a forced stop must not fall back to re-opening the PID. The old
+    /// fallback treated "no such process" as success, so restoring it makes this
+    /// assertion fail instead of passing quietly.
+    #[cfg(windows)]
+    #[test]
+    fn an_unbound_force_stop_refuses_instead_of_reopening_by_pid() {
+        let error = terminate_for_stop(None, u32::MAX - 1, 0)
+            .expect_err("an unbound force stop must not report success");
+        assert!(error.to_string().contains("could not be bound"), "{error}");
+    }
+
+    /// The binding is only valid for the creation time it was opened for; a
+    /// different one is a reused PID, not the same process.
+    #[cfg(windows)]
+    #[test]
+    fn a_binding_is_accepted_only_for_the_creation_time_it_was_opened_for() {
+        let pid = std::process::id();
+        let start = observable_live_start_time(pid).expect("this process has a start time");
+        assert!(
+            BoundProcess::open(pid, start).is_some(),
+            "the same creation time binds"
+        );
+        assert!(
+            BoundProcess::open(pid, start + 1).is_none(),
+            "a different creation time must not bind"
+        );
     }
 }

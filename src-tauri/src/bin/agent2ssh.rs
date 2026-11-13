@@ -275,6 +275,24 @@ enum Commands {
         #[arg(long)]
         preview: bool,
     },
+    /// Inspect and repair the two-file config transaction (explicit, audited)
+    ConfigRepair {
+        /// List recorded paired snapshots (read-only)
+        #[arg(long)]
+        list: bool,
+        /// Preview or discard an unreplayable .commit.json
+        #[arg(long)]
+        discard_pending: bool,
+        /// Preview or restore a paired snapshot by index (see --list)
+        #[arg(long)]
+        restore_pair: Option<usize>,
+        /// Required to actually apply a change; without it only a preview is printed
+        #[arg(long)]
+        confirm: bool,
+        /// Machine-readable preview / list output
+        #[arg(long)]
+        json: bool,
+    },
     /// Compare and sync Agent2SSH hosts with ~/.ssh/config
     SshSync {
         /// Show diff between Agent2SSH and ~/.ssh/config without changes
@@ -1022,6 +1040,10 @@ enum DaemonCommands {
     ClearStale {
         #[arg(long)]
         expect_pid: u32,
+        /// Instance ID from daemon.instance.json, required when IPC records exist
+        #[cfg(target_os = "macos")]
+        #[arg(long)]
+        expect_instance: Option<String>,
     },
     /// Rotate daemon token while the daemon is stopped
     RotateToken {
@@ -3093,11 +3115,15 @@ async fn async_main() -> Result<()> {
                     }
                     let daemon_bin = daemon_binary_path()?;
                     let started = start_daemon_background(&daemon_bin)?;
-                    println!(
-                        "Daemon started (pid={}). Log: {}",
-                        started.pid,
-                        started.log_path.display()
-                    );
+                    if started.endpoint_authenticated {
+                        println!(
+                            "Daemon started (pid={}). Log: {}",
+                            started.pid,
+                            started.log_path.display()
+                        );
+                    } else {
+                        println!("Daemon child started (pid={}); HTTP endpoint identity is unbound and not authenticated. Log: {}", started.pid, started.log_path.display());
+                    }
                 }
                 DaemonCommands::Stop {
                     allow_unbound_graceful,
@@ -3148,15 +3174,34 @@ async fn async_main() -> Result<()> {
                     }
                     let daemon_bin = daemon_binary_path()?;
                     let started = start_daemon_background(&daemon_bin)?;
-                    println!(
-                        "Daemon restarted (pid={}). Log: {}",
-                        started.pid,
-                        started.log_path.display()
-                    );
+                    if started.endpoint_authenticated {
+                        println!(
+                            "Daemon restarted (pid={}). Log: {}",
+                            started.pid,
+                            started.log_path.display()
+                        );
+                    } else {
+                        println!("Daemon child started (pid={}); HTTP endpoint identity is unbound and not authenticated. Log: {}", started.pid, started.log_path.display());
+                    }
                 }
-                DaemonCommands::ClearStale { expect_pid } => {
+                DaemonCommands::ClearStale {
+                    expect_pid,
+                    #[cfg(target_os = "macos")]
+                    expect_instance,
+                } => {
+                    #[cfg(target_os = "macos")]
+                    if let Some(instance) = expect_instance {
+                        agent2ssh::daemon_identity::macos::recover(
+                            &agent2ssh::store::config_dir()?,
+                            expect_pid,
+                            &instance,
+                        )?;
+                    } else {
+                        agent2ssh::daemon_control::clear_stale_daemon_pid(expect_pid)?;
+                    }
+                    #[cfg(not(target_os = "macos"))]
                     agent2ssh::daemon_control::clear_stale_daemon_pid(expect_pid)?;
-                    println!("Removed the stale PID record for {expect_pid}; no process was stopped. Older processes that ignore the lock can still race this cleanup.");
+                    println!("Removed the checked stale records for PID {expect_pid}; no process was stopped. Older processes that ignore the lock can still race this cleanup.");
                 }
                 DaemonCommands::RotateToken { json } => {
                     if let Some(pid) = read_daemon_pid()? {
@@ -3378,6 +3423,66 @@ async fn async_main() -> Result<()> {
                 );
                 if json {
                     println!("\nUse --json to output machine-readable JSON.");
+                }
+            }
+        }
+        Commands::ConfigRepair {
+            list,
+            discard_pending,
+            restore_pair,
+            confirm,
+            json,
+        } => {
+            agent2ssh::config_repair::validate_action(list, discard_pending, restore_pair)?;
+            if list {
+                let pairs = agent2ssh::config_repair::list_pairs()?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&pairs)?);
+                } else if pairs.is_empty() {
+                    println!("No paired config snapshots recorded.");
+                } else {
+                    println!("Paired config snapshots (newest last):");
+                    for pair in &pairs {
+                        println!(
+                            "  [{}] created={} generation={} hosts={} secrets={}",
+                            pair.index,
+                            pair.created_at,
+                            pair.secrets_generation,
+                            &pair.hosts_sha256[..12.min(pair.hosts_sha256.len())],
+                            &pair.secrets_sha256[..12.min(pair.secrets_sha256.len())]
+                        );
+                    }
+                    println!(
+                        "Only records whose paired copies still hash to the recorded values can be restored."
+                    );
+                }
+            } else if discard_pending {
+                let preview = agent2ssh::config_repair::preview_discard()?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&preview)?);
+                } else {
+                    print!("{}", agent2ssh::config_repair::describe_discard(&preview));
+                }
+                if preview.has_pending {
+                    if confirm {
+                        println!("{}", agent2ssh::config_repair::apply_discard(&preview)?);
+                    } else if !json {
+                        println!(
+                            "Not applied. Re-run with --confirm to discard the pending commit."
+                        );
+                    }
+                }
+            } else if let Some(index) = restore_pair {
+                let preview = agent2ssh::config_repair::preview_restore(index)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&preview)?);
+                } else {
+                    print!("{}", agent2ssh::config_repair::describe_restore(&preview));
+                }
+                if confirm {
+                    println!("{}", agent2ssh::config_repair::apply_restore(&preview)?);
+                } else if !json {
+                    println!("Not applied. Re-run with --confirm to restore this paired snapshot.");
                 }
             }
         }
