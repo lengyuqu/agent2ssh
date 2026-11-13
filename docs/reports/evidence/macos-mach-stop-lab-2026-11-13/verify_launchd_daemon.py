@@ -21,7 +21,7 @@ import uuid
 
 ROOT=Path(__file__).resolve().parent;REPO=ROOT.parents[3];DOMAIN=f'gui/{os.getuid()}'
 TOKEN='a2s-mach-lab-synthetic-token'
-parser=argparse.ArgumentParser();parser.add_argument('--daemon',type=Path,required=True);parser.add_argument('--archive',action='store_true');args=parser.parse_args()
+parser=argparse.ArgumentParser();parser.add_argument('--daemon',type=Path,required=True);parser.add_argument('--cli',type=Path,default=REPO/'src-tauri/target/debug/agent2ssh');parser.add_argument('--archive',action='store_true');args=parser.parse_args()
 env={k:v for k,v in os.environ.items() if not k.startswith(('DYLD_','AGENT2SSH_','A2S_MACH_LAB_'))}
 env['A2S_MACH_LAB_EXPECT_PRIVATE']='1'
 def run(args,timeout=12):return subprocess.run([str(x) for x in args],capture_output=True,text=True,timeout=timeout,env=env)
@@ -113,6 +113,45 @@ try:
     while time.monotonic()<deadline and state(service)=='present':time.sleep(.05)
     if state(service)!='absent':keep=True;raise RuntimeError(f'test job not confirmed absent: {DOMAIN}/{service}; files retained: {root}, {config}')
    print('test_service_absent=1')
+ # Crash A while launchd owns discovery, demonstrate that a restarted
+ # instance preserves A's records, then use the explicit recovery command.
+ config=Path(tempfile.mkdtemp(prefix='a2s-mach-lab-',dir='/tmp'));configs.append(config)
+ (config/'mach-lab-only').write_bytes(b'synthetic-only');(config/'daemon.token').write_text(TOKEN);(config/'daemon.token').chmod(0o600)
+ service=f'org.agent2ssh.lab.{os.getpid()}.{uuid.uuid4().hex[:12]}';plist=root/'crash.plist';err=root/'crash.err';port=free_port()
+ variables={'AGENT2SSH_CONFIG_DIR':str(config),'AGENT2SSH_DAEMON_ADDR':f'127.0.0.1:{port}','AGENT2SSH_LOG':'error','A2S_MACH_LAB_SERVICE':service,'A2S_MACH_LAB_LAUNCHD_DISCOVERY':'1'}
+ plist.write_bytes(plistlib.dumps({'Label':service,'ProgramArguments':[str(binary)],'RunAtLoad':True,'MachServices':{service:True},'EnvironmentVariables':variables,'StandardOutPath':str(root/'crash.out'),'StandardErrorPath':str(err)}))
+ installed=False
+ try:
+  must(['launchctl','bootstrap',DOMAIN,plist]);installed=True
+  a=wait_for(lambda:identity(config,port));pid_a=a['pid'];instance=a['instance_id']
+  paths=[config/'daemon.pid',config/'daemon.instance.json',config/'.daemon-ipc/s']
+  snapshots=[paths[0].read_bytes(),paths[1].read_bytes()];socket_id=(paths[2].lstat().st_dev,paths[2].lstat().st_ino)
+  cli_env=dict(env);cli_env['AGENT2SSH_CONFIG_DIR']=str(config);cli_env['AGENT2SSH_DAEMON_ADDR']=f'127.0.0.1:{port}'
+  command=[str(args.cli.resolve(strict=True)),'daemon','clear-stale','--expect-pid',str(pid_a),'--expect-instance',instance]
+  live=subprocess.run(command,capture_output=True,text=True,timeout=8,env=cli_env)
+  if live.returncode==0 or not alive(pid_a):raise AssertionError('live daemon records were not protected')
+  must(['launchctl','kill','SIGKILL',f'{DOMAIN}/{service}']);wait_for(lambda:not alive(pid_a))
+  must([probe,'lookup',service,'send'])
+  wait_for(lambda:err.exists() and 'already exists; retained for explicit recovery' in err.read_text(),seconds=25)
+  if identity(config,port) is not None or paths[0].read_bytes()!=snapshots[0] or paths[1].read_bytes()!=snapshots[1] or (paths[2].lstat().st_dev,paths[2].lstat().st_ino)!=socket_id:
+   raise AssertionError('crash records were overwritten or daemon unexpectedly active')
+  must(['launchctl','bootout',f'{DOMAIN}/{service}']);installed=False
+  wait_for(lambda:state(service)=='absent')
+  repaired=subprocess.run(command,capture_output=True,text=True,timeout=8,env=cli_env)
+  if repaired.returncode or any(path.exists() for path in paths):raise AssertionError(f'explicit recovery failed: {repaired.stdout} {repaired.stderr}')
+  must(['launchctl','bootstrap',DOMAIN,plist]);installed=True
+  b=wait_for(lambda:identity(config,port));pid_b=b['pid']
+  if pid_b==pid_a or b['instance_id']==instance:raise AssertionError('recovery did not start a distinct instance')
+  stopped=must([client,service,str(pid_b),b['instance_id'],requirement,'stop'],timeout=8)
+  if 'result=accepted_exit_unverified' not in stopped.stdout:raise AssertionError('recovered daemon did not accept private stop')
+  wait_for(lambda:not alive(pid_b) and not (config/'daemon.pid').exists())
+  line='crash_recovery live_clear_refused=1 crash_records_preserved=1 explicit_clear=1 distinct_restart=1 private_stop=1\n';results.append(line);print(line,end='')
+ finally:
+  if installed or state(service)!='absent':
+   run(['launchctl','bootout',f'{DOMAIN}/{service}']);deadline=time.monotonic()+4
+   while time.monotonic()<deadline and state(service)=='present':time.sleep(.05)
+   if state(service)!='absent':keep=True;raise RuntimeError(f'test job not confirmed absent: {DOMAIN}/{service}; files retained: {root}, {config}')
+  print('test_service_absent=1')
  if args.archive:(ROOT/'launchd-daemon-results.txt').write_text(''.join(results))
 finally:
  if not keep:
