@@ -262,6 +262,62 @@ with tempfile.TemporaryDirectory(prefix='a2s-mach-lab-tools-',dir='/tmp') as too
     except subprocess.TimeoutExpired:proc.kill();proc.wait(timeout=5)
     if not service_absent(lookup,service):raise RuntimeError(f'test Mach service remains: {service}')
     print('test_service_absent=1')
+ # Deterministically destroy the reply port after the server has consumed the
+ # authorized request but before it sends. No retry is sent by the client.
+ with tempfile.TemporaryDirectory(prefix='a2s-mach-lab-',dir='/tmp') as cd:
+  config=Path(cd);(config/'mach-lab-only').write_bytes(b'synthetic-only');(config/'daemon.token').write_text(TOKEN);(config/'daemon.token').chmod(0o600)
+  addr=free_port();service=f'org.agent2ssh.lab.{os.getpid()}.{uuid.uuid4().hex}';barrier=config/'reply-barrier'
+  env={k:v for k,v in os.environ.items() if not k.startswith(('DYLD_','AGENT2SSH_','A2S_MACH_LAB_'))}
+  env.update({'AGENT2SSH_CONFIG_DIR':str(config),'AGENT2SSH_DAEMON_ADDR':f'127.0.0.1:{addr}','AGENT2SSH_LOG':'error','A2S_MACH_LAB_SERVICE':service,'A2S_MACH_LAB_REPLY_BARRIER':str(barrier)})
+  with tempfile.TemporaryFile(mode='w+t') as log:
+   proc=subprocess.Popen([str(binary)],env=env,stdin=subprocess.DEVNULL,stdout=log,stderr=log);held=None
+   try:
+    wait_health(proc,addr);instance=json.loads((config/'daemon.instance.json').read_text())['instance_id']
+    held=subprocess.Popen([str(client),service,str(proc.pid),instance,good,'hold-reply'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+    accepted=Path(str(barrier)+'.accepted');deadline=time.monotonic()+4
+    while not accepted.exists() and held.poll() is None and proc.poll() is None and time.monotonic()<deadline:time.sleep(.01)
+    if not accepted.exists():raise AssertionError('server did not reach post-authorization reply barrier')
+    out,err=held.communicate(input='x',timeout=4)
+    if held.returncode==0 or 'result=unknown reply_destroyed=1' not in out:raise AssertionError(f'client did not report unknown: {out} {err}')
+    held=None;Path(str(barrier)+'.release').write_text('release')
+    if proc.wait(timeout=8)!=0:raise AssertionError('daemon did not exit after accepted reply was lost')
+    line='accepted_reply_lost client_unknown=1 daemon_exit_observed=1 no_retry=1\n';results.append(line);print(line,end='')
+   finally:
+    if held is not None:
+     if held.poll() is None:held.kill()
+     held.communicate(timeout=5)
+    if proc.poll() is None:proc.terminate()
+    try:proc.wait(timeout=8)
+    except subprocess.TimeoutExpired:proc.kill();proc.wait(timeout=5)
+    if not service_absent(lookup,service):raise RuntimeError(f'test Mach service remains: {service}')
+    print('test_service_absent=1')
+ # The bounded hello table must fail closed when full, then allow a fresh
+ # client after expiry. Every request in this test is secret-free.
+ with tempfile.TemporaryDirectory(prefix='a2s-mach-lab-',dir='/tmp') as cd:
+  config=Path(cd);(config/'mach-lab-only').write_bytes(b'synthetic-only');(config/'daemon.token').write_text(TOKEN);(config/'daemon.token').chmod(0o600)
+  addr=free_port();service=f'org.agent2ssh.lab.{os.getpid()}.{uuid.uuid4().hex}'
+  env={k:v for k,v in os.environ.items() if not k.startswith(('DYLD_','AGENT2SSH_','A2S_MACH_LAB_'))}
+  env.update({'AGENT2SSH_CONFIG_DIR':str(config),'AGENT2SSH_DAEMON_ADDR':f'127.0.0.1:{addr}','AGENT2SSH_LOG':'error','A2S_MACH_LAB_SERVICE':service})
+  with tempfile.TemporaryFile(mode='w+t') as log:
+   proc=subprocess.Popen([str(binary)],env=env,stdin=subprocess.DEVNULL,stdout=log,stderr=log)
+   try:
+    wait_health(proc,addr);instance=json.loads((config/'daemon.instance.json').read_text())['instance_id']
+    for _ in range(32):
+     hello=invoke(client,service,proc.pid,instance,good,'hello-only')
+     if hello.returncode or 'result=hello_only token_sent=0' not in hello.stdout:raise AssertionError('hello table filled early')
+    full=invoke(client,service,proc.pid,instance,good,'hello-only')
+    if full.returncode==0 or 'token_sent=0' not in full.stdout or proc.poll() is not None:raise AssertionError('full hello table did not fail closed')
+    time.sleep(10.1)
+    fresh=invoke(client,service,proc.pid,instance,good,'stop')
+    if fresh.returncode or 'result=accepted_exit_unverified' not in fresh.stdout:raise AssertionError('expired sessions did not release capacity')
+    if proc.wait(timeout=8)!=0:raise AssertionError('daemon failed after capacity recovery')
+    line='hello_capacity=32 full_refused_no_token=1 expired_capacity_recovered=1\n';results.append(line);print(line,end='')
+   finally:
+    if proc.poll() is None:proc.terminate()
+    try:proc.wait(timeout=8)
+    except subprocess.TimeoutExpired:proc.kill();proc.wait(timeout=5)
+    if not service_absent(lookup,service):raise RuntimeError(f'test Mach service remains: {service}')
+    print('test_service_absent=1')
  # The opt-in binary must not register the lab endpoint with an ordinary
  # credential or without its dedicated temporary-directory marker.
  for label,marker_value,token_value in [('missing-marker',False,TOKEN),('wrong-token',True,'different-synthetic-token')]:
@@ -314,6 +370,10 @@ with tempfile.TemporaryDirectory(prefix='a2s-mach-lab-tools-',dir='/tmp') as too
     attacker=invoke(client,service,pid_a,record_a['instance_id'],good,'adversarial-stop',{'A2S_MACH_LAB_TEST_NONCE':nonce})
     if attacker.returncode==0 or 'adversarial_stop=refused' not in attacker.stdout or a.poll() is not None:
      raise AssertionError(f'different sender was not rejected: {attacker.stdout} {attacker.stderr}')
+    reexec=invoke(client,service,pid_a,record_a['instance_id'],good,'exec-attack')
+    before=re.search(r'sender_before_exec_pid=(\d+)',reexec.stdout);after=re.search(r'sender_after_exec_pid=(\d+)',reexec.stdout)
+    if reexec.returncode==0 or 'adversarial_stop=refused' not in reexec.stdout or not before or not after or before.group(1)!=after.group(1) or a.poll() is not None:
+     raise AssertionError(f're-exec sender was not rejected: {reexec.stdout} {reexec.stderr}')
     if 'A2S_MACH_LAB_STOP_RECEIVED' not in (config_a/'lab-output.log').read_text():raise AssertionError('adversarial test did not reach server')
     a.kill();a.wait(timeout=8)
     if not service_absent(lookup,service):raise RuntimeError('old service name did not disappear')
@@ -330,7 +390,7 @@ with tempfile.TemporaryDirectory(prefix='a2s-mach-lab-tools-',dir='/tmp') as too
     fresh=invoke(client,service,pid_b,record_b['instance_id'],good,'stop')
     if fresh.returncode or 'result=accepted_exit_unverified' not in fresh.stdout:raise AssertionError(f'fresh replacement stop failed: {fresh.stdout} {fresh.stderr}')
     if b.wait(timeout=10)!=0:raise AssertionError('replacement daemon exited with error')
-    line=f'handoff_run={i} different_sender_rejected=1 old_right_rejected=1 replacement_received_no_old_stop=1 replacement_survived=1 stale_a_preserved=1 fresh_stop_accepted=1\n';results.append(line);print(line,end='')
+    line=f'handoff_run={i} different_sender_rejected=1 same_pid_reexec_rejected=1 old_right_rejected=1 replacement_received_no_old_stop=1 replacement_survived=1 stale_a_preserved=1 fresh_stop_accepted=1\n';results.append(line);print(line,end='')
    finally:
     if held is not None:
      if held.poll() is None:held.kill()

@@ -48,6 +48,7 @@ int main(int argc,char **argv){
         // Deliberately bypass the client proof for a separate-process negative
         // test. The fixed token and nonce are synthetic and non-production.
         const char *hex=getenv("A2S_MACH_LAB_TEST_NONCE");if(!hex||strlen(hex)!=32)return 1;
+        printf("sender_after_exec_pid=%d\n",getpid());
         a2s_lab_stop attack={0};attack.h.msgh_bits=MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,0)|MACH_MSGH_BITS_COMPLEX;attack.h.msgh_remote_port=service;attack.h.msgh_size=sizeof(attack);attack.h.msgh_id=A2S_LAB_STOP;
         attack.body.msgh_descriptor_count=1;attack.reply.name=reply;attack.reply.disposition=MACH_MSG_TYPE_MAKE_SEND_ONCE;attack.reply.type=MACH_MSG_PORT_DESCRIPTOR;
         for(unsigned i=0;i<16;i++){int high=hex_nibble(hex[2*i]),low=hex_nibble(hex[2*i+1]);if(high<0||low<0)return 1;attack.nonce[i]=(uint8_t)((high<<4)|low);}
@@ -70,6 +71,12 @@ int main(int argc,char **argv){
     // Guard use is a property of the exact laboratory binary and source path,
     // not something this client can independently query from a send right.
     if(!strcmp(argv[5],"hello-only")){printf("result=hello_only token_sent=0\n");return 0;}
+    if(!strcmp(argv[5],"exec-attack")) {
+        char nonce[33];for(unsigned i=0;i<16;i++)snprintf(nonce+2*i,3,"%02x",hello.nonce[i]);
+        if(setenv("A2S_MACH_LAB_TEST_NONCE",nonce,1))return 1;
+        printf("sender_before_exec_pid=%d\n",getpid());
+        argv[5]="adversarial-stop";execv(argv[0],argv);return 1;
+    }
     if(!strcmp(argv[5],"hold")) {
         const char *path=getenv("A2S_MACH_LAB_CLIENT_READY");
         if(!path){printf("refused=missing_test_marker token_sent=0\n");return 2;}
@@ -79,10 +86,11 @@ int main(int argc,char **argv){
         if(getchar()!='x'){printf("refused=test_release token_sent=0\n");return 2;}
     }
     a2s_lab_stop stop={0};stop.h.msgh_bits=MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,0)|MACH_MSGH_BITS_COMPLEX;stop.h.msgh_remote_port=service;stop.h.msgh_size=sizeof(stop);stop.h.msgh_id=A2S_LAB_STOP;stop.body.msgh_descriptor_count=1;stop.reply.name=reply;stop.reply.disposition=MACH_MSG_TYPE_MAKE_SEND_ONCE;stop.reply.type=MACH_MSG_PORT_DESCRIPTOR;memcpy(stop.nonce,hello.nonce,16);memcpy(stop.instance,hello.instance,33);stop.expected_pid=(uint32_t)expected;
-    if(!strcmp(argv[5],"wrong-token"))strcpy(stop.token,"wrong-synthetic-token");else if(!strcmp(argv[5],"stop")||!strcmp(argv[5],"hold")||!strcmp(argv[5],"drop-reply"))strcpy(stop.token,A2S_LAB_TOKEN);else return 1;
+    if(!strcmp(argv[5],"wrong-token"))strcpy(stop.token,"wrong-synthetic-token");else if(!strcmp(argv[5],"stop")||!strcmp(argv[5],"hold")||!strcmp(argv[5],"drop-reply")||!strcmp(argv[5],"hold-reply"))strcpy(stop.token,A2S_LAB_TOKEN);else return 1;
     if(mach_msg(&stop.h,MACH_SEND_MSG|MACH_SEND_TIMEOUT,sizeof(stop),0,0,1000,0)){printf("result=unknown token_sent=1\n");return 3;}
     printf("token_sent=1\n");
-    if(!strcmp(argv[5],"drop-reply")){
+    if(!strcmp(argv[5],"hold-reply") && getchar()!='x')return 4;
+    if(!strcmp(argv[5],"drop-reply")||!strcmp(argv[5],"hold-reply")){
         if(mach_port_destruct(mach_task_self(),reply,0,0xb522)!=KERN_SUCCESS)return 4;
         printf("result=unknown reply_destroyed=1\n");return 3;
     }

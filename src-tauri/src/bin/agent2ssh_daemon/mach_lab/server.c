@@ -21,6 +21,19 @@ static uint64_t monotonic_ms(void) {
     return (uint64_t)now.tv_sec*1000u+(uint64_t)now.tv_nsec/1000000u;
 }
 
+// Harness-only barrier after authorization, before replying. It uses only a
+// synthetic lab config directory and has a bounded wait even if a test dies.
+static void wait_reply_barrier(void) {
+    const char *base=getenv("A2S_MACH_LAB_REPLY_BARRIER");
+    if(!base)return;
+    char accepted[1024],release[1024];
+    if(snprintf(accepted,sizeof(accepted),"%s.accepted",base)>=(int)sizeof(accepted) ||
+       snprintf(release,sizeof(release),"%s.release",base)>=(int)sizeof(release))return;
+    FILE *f=fopen(accepted,"w");if(!f)return;fputs("accepted\n",f);fclose(f);
+    const struct timespec interval={0,10000000};
+    for(unsigned i=0;i<500 && access(release,F_OK)!=0;i++)nanosleep(&interval,NULL);
+}
+
 static int same_token(const char *a,const char *b,size_t size) {
     unsigned diff=0;for(size_t i=0;i<size;i++)diff|=(unsigned char)a[i]^(unsigned char)b[i];return diff==0;
 }
@@ -54,6 +67,7 @@ static void accept_stop(a2s_lab_stop *req,audit_token_t sender) {
     unsigned slot=32;for(unsigned i=0;i<32;i++)if(sessions[i].active && sessions[i].expires_ms>now && !memcmp(sessions[i].nonce,req->nonce,16) && !memcmp(&sessions[i].client,&sender,sizeof(sender))){slot=i;break;}
     if(slot==32 || !same_token(req->token,A2S_LAB_TOKEN,sizeof(A2S_LAB_TOKEN)) || req->token[sizeof(A2S_LAB_TOKEN)]!='\0')return;
     sessions[slot].active=0;
+    wait_reply_barrier();
     a2s_lab_stop_reply resp={0};resp.h.msgh_bits=MACH_MSGH_BITS(MACH_MSG_TYPE_MOVE_SEND_ONCE,0);resp.h.msgh_remote_port=req->reply.name;resp.h.msgh_size=sizeof(resp);resp.h.msgh_id=A2S_LAB_STOP_REPLY;memcpy(resp.nonce,req->nonce,16);resp.accepted=1;resp.pid=(uint32_t)getpid();
     req->reply.name=MACH_PORT_NULL;
     if(mach_msg(&resp.h,MACH_SEND_MSG|MACH_SEND_TIMEOUT,sizeof(resp),0,0,1000,0)!=KERN_SUCCESS)mach_msg_destroy(&resp.h);
