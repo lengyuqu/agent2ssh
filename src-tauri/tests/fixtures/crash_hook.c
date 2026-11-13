@@ -10,10 +10,16 @@
  * returns - the process dies with the exact on-disk state of that point.
  *
  * Stages (A2S_HOOK_STAGE):
- *   before-rename  immediately before rename(tmp, hosts.json),
- *                  i.e. after store_commit::begin()
- *   before-finish  immediately before unlink(.commit.json),
- *                  i.e. after the hosts rename but before finish()
+ *   before-rename           immediately before rename(tmp, hosts.json),
+ *                           i.e. after store_commit::begin() (CNB #28)
+ *   before-finish           immediately before unlink(.commit.json),
+ *                           i.e. after the hosts rename but before finish() (#28)
+ *   before-pair-index       immediately before rename(tmp, config_pair_index.json),
+ *                           i.e. after the paired .pair copies were written but
+ *                           before the index records them (CNB #26, C5)
+ *   before-restore-secrets  immediately before rename(tmp, secrets.enc) during
+ *                           an explicit paired restore, i.e. hosts.json has
+ *                           already been rolled back (CNB #26, C7)
  *
  * The replacement functions call the equivalent *at() entry points rather
  * than resolving the interposed symbols with dlsym: RTLD_NEXT is NULL for an
@@ -47,7 +53,12 @@ static void fire_if_selected(const char *stage) {
 }
 
 int a2s_rename(const char *from, const char *to) {
-    if (strcmp(base_of(to), "hosts.json") == 0) fire_if_selected("before-rename");
+    const char *base = base_of(to);
+    if (strcmp(base, "hosts.json") == 0) fire_if_selected("before-rename");
+    else if (strcmp(base, "config_pair_index.json") == 0)
+        fire_if_selected("before-pair-index");
+    else if (strcmp(base, "secrets.enc") == 0)
+        fire_if_selected("before-restore-secrets");
     return renameat(AT_FDCWD, from, AT_FDCWD, to);
 }
 

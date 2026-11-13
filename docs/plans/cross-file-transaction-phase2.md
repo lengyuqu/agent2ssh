@@ -328,7 +328,7 @@ P1–P6 均未拍板；本设计不替人决定，也不把「倾向」写成已
 统一前置判定 + `recover()` 索引只读诊断），见 `tests/store_phase2_c.rs`；实际实现与 §3 的
 设计有一处务实偏差：索引只作诊断与后续 D 阶段的证据，**不阻断常规写入**，判定以内容 tag
 本身为准（避免第三个文件成为单点故障）。**阶段 D 已实施**（`config-repair --list` / `--discard-pending` / `--restore-pair`，带确认与审计，回归 `tests/config_repair.rs`）；**阶段 3 仍未实施**；
-C4–C6 有构造状态回归，C7（回卷中途崩溃）、阶段 C 的真实 SIGKILL 注入、C8 的真机复现未实测；
+C1–C3/C5/C7 已有真机 SIGKILL 实测（`tests/store_phase2_cd_crash.rs`），C4/C6 为构造状态回归，C8 未用旧版本二进制复现；逐项证据级别与收口判定见 `docs/reports/issue26-acceptance-matrix.md`；
 Windows 实机结论以 #27（`15e2ac5`）为准，Linux 侧边界未验证。#26 保持 open。
 
 P1–P6 的可勾选版本、推荐默认作为实施轮工作假设的说明、分阶段实施顺序与逐文件改动清单，
