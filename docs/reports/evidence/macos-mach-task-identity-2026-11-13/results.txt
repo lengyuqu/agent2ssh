@@ -1,0 +1,74 @@
+run 1 exit=0
+parent_pid=73439 uid=501
+dead_name_calibration kr=0 msg_id=72 expected=72 name_matches=1
+child_pid=73440 create_token kr=0 ((os/kern) successful)
+child_send_token kr=0 ((os/kern) successful)
+parent_receive kr=0 ((os/kern) successful)
+mach_sender_pid=73440 sender_pidversion=1327076 expected_child=73440
+unix_peer_rc=0 errno=0 len=32 peer_pid_rc=0 peer_pid=73440 audit_pid=73440 audit_pidversion=1327076 audit_equal=1
+live_convert flavor=0 kr=53 ((os/kern) denied by security policy) port_valid=0
+live_convert flavor=1 kr=53 ((os/kern) denied by security policy) port_valid=0
+live_convert flavor=2 kr=53 ((os/kern) denied by security policy) port_valid=0
+live_convert flavor=3 kr=0 ((os/kern) successful) port_valid=1 pid_for_task_kr=0 pid=73440 task_audit_kr=0 count=8 task_audit_pid=73440 task_audit_pidversion=1327076 matches_sender=1
+token_before_exit kr=0 type=0x10000
+dead_name_registration token_kr=0 name_kr=0
+name_notification_while_alive kr=268451843 ((ipc/rcv) timed out) msg_id=0
+token_after_exit kr=0 type=0x80010000
+exited_convert flavor=0 kr=56 ((os/kern) result not found) port_valid=0
+exited_convert flavor=1 kr=56 ((os/kern) result not found) port_valid=0
+exited_convert flavor=2 kr=56 ((os/kern) result not found) port_valid=0
+exited_convert flavor=3 kr=56 ((os/kern) result not found) port_valid=0
+retained_port_after_exit flavor=3 type_kr=0 type=0x100000 pid_kr=5 pid=-1
+token_notification_after_exit kr=268451843 ((ipc/rcv) timed out) msg_id=0
+name_notification_after_exit kr=0 ((os/kern) successful) msg_id=72 name_matches=1
+name_after_notification type_kr=0 type=0x100000 is_dead_name=1
+
+run 2 exit=0
+parent_pid=73441 uid=501
+dead_name_calibration kr=0 msg_id=72 expected=72 name_matches=1
+child_pid=73442 create_token kr=0 ((os/kern) successful)
+child_send_token kr=0 ((os/kern) successful)
+parent_receive kr=0 ((os/kern) successful)
+mach_sender_pid=73442 sender_pidversion=1327079 expected_child=73442
+unix_peer_rc=0 errno=0 len=32 peer_pid_rc=0 peer_pid=73442 audit_pid=73442 audit_pidversion=1327079 audit_equal=1
+live_convert flavor=0 kr=53 ((os/kern) denied by security policy) port_valid=0
+live_convert flavor=1 kr=53 ((os/kern) denied by security policy) port_valid=0
+live_convert flavor=2 kr=53 ((os/kern) denied by security policy) port_valid=0
+live_convert flavor=3 kr=0 ((os/kern) successful) port_valid=1 pid_for_task_kr=0 pid=73442 task_audit_kr=0 count=8 task_audit_pid=73442 task_audit_pidversion=1327079 matches_sender=1
+token_before_exit kr=0 type=0x10000
+dead_name_registration token_kr=0 name_kr=0
+name_notification_while_alive kr=268451843 ((ipc/rcv) timed out) msg_id=0
+token_after_exit kr=0 type=0x80010000
+exited_convert flavor=0 kr=56 ((os/kern) result not found) port_valid=0
+exited_convert flavor=1 kr=56 ((os/kern) result not found) port_valid=0
+exited_convert flavor=2 kr=56 ((os/kern) result not found) port_valid=0
+exited_convert flavor=3 kr=56 ((os/kern) result not found) port_valid=0
+retained_port_after_exit flavor=3 type_kr=0 type=0x100000 pid_kr=5 pid=-1
+token_notification_after_exit kr=268451843 ((ipc/rcv) timed out) msg_id=0
+name_notification_after_exit kr=0 ((os/kern) successful) msg_id=72 name_matches=1
+name_after_notification type_kr=0 type=0x100000 is_dead_name=1
+
+run 3 exit=0
+parent_pid=73444 uid=501
+dead_name_calibration kr=0 msg_id=72 expected=72 name_matches=1
+child_pid=73445 create_token kr=0 ((os/kern) successful)
+child_send_token kr=0 ((os/kern) successful)
+parent_receive kr=0 ((os/kern) successful)
+mach_sender_pid=73445 sender_pidversion=1327086 expected_child=73445
+unix_peer_rc=0 errno=0 len=32 peer_pid_rc=0 peer_pid=73445 audit_pid=73445 audit_pidversion=1327086 audit_equal=1
+live_convert flavor=0 kr=53 ((os/kern) denied by security policy) port_valid=0
+live_convert flavor=1 kr=53 ((os/kern) denied by security policy) port_valid=0
+live_convert flavor=2 kr=53 ((os/kern) denied by security policy) port_valid=0
+live_convert flavor=3 kr=0 ((os/kern) successful) port_valid=1 pid_for_task_kr=0 pid=73445 task_audit_kr=0 count=8 task_audit_pid=73445 task_audit_pidversion=1327086 matches_sender=1
+token_before_exit kr=0 type=0x10000
+dead_name_registration token_kr=0 name_kr=0
+name_notification_while_alive kr=268451843 ((ipc/rcv) timed out) msg_id=0
+token_after_exit kr=0 type=0x80010000
+exited_convert flavor=0 kr=56 ((os/kern) result not found) port_valid=0
+exited_convert flavor=1 kr=56 ((os/kern) result not found) port_valid=0
+exited_convert flavor=2 kr=56 ((os/kern) result not found) port_valid=0
+exited_convert flavor=3 kr=56 ((os/kern) result not found) port_valid=0
+retained_port_after_exit flavor=3 type_kr=0 type=0x80010000 pid_kr=5 pid=-1
+token_notification_after_exit kr=268451843 ((ipc/rcv) timed out) msg_id=0
+name_notification_after_exit kr=0 ((os/kern) successful) msg_id=72 name_matches=1
+name_after_notification type_kr=0 type=0x100000 is_dead_name=1

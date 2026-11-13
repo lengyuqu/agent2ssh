@@ -1,0 +1,29 @@
+run 1 exit=0
+server_pid=74291 worker_pid=74292
+before_client_sends audit_rc=0 errno=0 audit_len=32 audit_pid=74291 pidversion=1328109 peer_pid_rc=0 peer_pid=74291
+worker_pid=74292 received_synthetic_byte=T
+after_worker_read audit_rc=0 errno=0 audit_len=32 audit_pid=74292 pidversion=1328110 peer_pid_rc=0 peer_pid=74292
+
+run 2 exit=0
+server_pid=74294 worker_pid=74295
+before_client_sends audit_rc=0 errno=0 audit_len=32 audit_pid=74294 pidversion=1328113 peer_pid_rc=0 peer_pid=74294
+worker_pid=74295 received_synthetic_byte=T
+after_worker_read audit_rc=0 errno=0 audit_len=32 audit_pid=74295 pidversion=1328114 peer_pid_rc=0 peer_pid=74295
+
+run 3 exit=0
+server_pid=74297 worker_pid=74298
+before_client_sends audit_rc=0 errno=0 audit_len=32 audit_pid=74297 pidversion=1328117 peer_pid_rc=0 peer_pid=74297
+worker_pid=74298 received_synthetic_byte=T
+after_worker_read audit_rc=0 errno=0 audit_len=32 audit_pid=74298 pidversion=1328118 peer_pid_rc=0 peer_pid=74298
+
+run 4 exit=0
+server_pid=74300 worker_pid=74301
+before_client_sends audit_rc=0 errno=0 audit_len=32 audit_pid=74300 pidversion=1328121 peer_pid_rc=0 peer_pid=74300
+worker_pid=74301 received_synthetic_byte=T
+after_worker_read audit_rc=0 errno=0 audit_len=32 audit_pid=74301 pidversion=1328122 peer_pid_rc=0 peer_pid=74301
+
+run 5 exit=0
+server_pid=74303 worker_pid=74304
+before_client_sends audit_rc=0 errno=0 audit_len=32 audit_pid=74303 pidversion=1328125 peer_pid_rc=0 peer_pid=74303
+worker_pid=74304 received_synthetic_byte=T
+after_worker_read audit_rc=0 errno=0 audit_len=32 audit_pid=74304 pidversion=1328126 peer_pid_rc=0 peer_pid=74304
