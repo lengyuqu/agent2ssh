@@ -14,3 +14,5 @@
 上述实验已在仅限合成配置的 feature-gated 真实 daemon 中实现；复现方式、观察结果和限制见 [实验记录](../reports/evidence/macos-mach-stop-lab-2026-11-13/FINDINGS.md)。它没有接入正式客户端或默认 daemon，也没有证明正式签名和真实运行环境的不可转移不变量；这些仍是 #22 的验收缺口。
 
 **launchd 部署反例**：上述直接 `bootstrap_register` 的独立 receive right 不等同于 launchd 管理的 MachServices 端口。[三轮实测](../reports/evidence/macos-mach-discovery-2026-11-13/FINDINGS.md)中，服务给 receive right 加 guard 后退出，旧发送权仍可向重启的服务成功投递。正式方案不能将 token 发往该公共端口；若使用它发现服务，必须先建立并验证独立、受保护且不会被重用的实例端点，仍须实测部署与签名信任根。
+
+同一证据目录中的独立端点对照已在临时 launchd job 上跑三轮：A 自建并 guard 的端点随 A 退出失效，即使 B 已经启动，旧发送权也返回目标无效。该小型探针核对了 audit、task identity 和测试 harness 固定的 ad-hoc CDHash；它尚不是生产 daemon 的安全证明或正式签名部署验证。
