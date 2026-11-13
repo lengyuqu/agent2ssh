@@ -296,6 +296,12 @@ fn concurrent_replacement_is_refused() {
         .truncate(false)
         .open(&lock_path)
         .unwrap();
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        lock.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+    }
     lock.lock_exclusive().unwrap();
 
     let addr = dead_addr();

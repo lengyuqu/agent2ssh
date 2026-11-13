@@ -302,6 +302,7 @@ fn world_writable_directory_and_symlinked_socket_directory_are_refused() {
 #[serial_test::serial]
 fn startup_times_out_on_held_publication_lock_without_writing_records() {
     use fs2::FileExt;
+    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::Builder::new()
         .prefix("a2s-ipc-")
         .tempdir_in("/tmp")
@@ -312,6 +313,8 @@ fn startup_times_out_on_held_publication_lock_without_writing_records() {
         .create(true)
         .truncate(false)
         .open(dir.path().join(".daemon-pid.lock"))
+        .unwrap();
+    lock.set_permissions(std::fs::Permissions::from_mode(0o600))
         .unwrap();
     lock.lock_exclusive().unwrap();
     let addr = TcpListener::bind("127.0.0.1:0")

@@ -34,6 +34,10 @@ macOS `daemon_matches_config` 现在直接保留未验证状态，不读取 toke
 
 随后补上握手后的复核窗口：客户端在 `UnboundObservation` 存续期间保留原 socket，显式旧 HTTP 例外读取 token 前会复核同一 socket 的 PID、audit token 与记录快照，并拒绝对端关闭或非预期数据。测试让同 PID 进程在 hello 完成后 `exec` 并向原 socket 写入数据，复核拒绝；另外验证对端关闭和意外数据均拒绝。客户端测试更新为 14 项（含 3 个辅助进程测试）通过，真实 daemon IPC 10 项及保守停止 9 项通过。该复核仍不能检测所有描述符转移、静默 `exec` 或之后的变化，也不能绑定另一条 HTTP 连接。
 
+后续锁检查发现：显式旧 HTTP 停止使用通用锁时，锁路径为符号链接会跟随链接并将目标权限改为 `0600`；若锁被占用则可能无限等待。隔离回归在修复前分别复现了这两项。macOS daemon PID 操作现共用发布路径的两秒有界锁：拒绝符号链接、硬链接、非私有权限或 ACL 允许项，并在取得锁后复核路径 inode。真实 CLI 回归覆盖旧 HTTP 停止与显式恢复遇符号链接时不修改目标、硬链接/ACL/非私有权限拒绝及持锁超时；锁路径在打开后替换的有同步屏障单元回归。之前的真实 CLI 替换实验也观察到拒绝；现用同步屏障代替依赖 `lsof` 时序的回归，减少 CI 不稳定。该检查不能阻止不遵守锁的进程在最后复核之后替换路径，记录恢复仍有既有边界。
+
+锁修复本机回归：诊断 10 项、真实 daemon IPC 10 项、保守停止 12 项、macOS 启动 4 项通过；IPC 客户端 14 项通过，daemon 停止套件 33 项通过、2 项按 macOS 策略忽略（未配置 SSH fixture 的测试自行跳过实际 SSH）。无默认特性 Rust 库 879 通过/1 忽略，Tauri 库 897 通过/1 忽略。macOS 相关端到端目标已加入 GitHub CI 配置，本地 YAML 可解析；远端工作流结果尚未验证。
+
 候选方向另见 Apple [Mach IPC 安全限制说明](https://developer.apple.com/documentation/xcode/conforming-to-mach-ipc-security-restrictions?changes=__8%2C__8)：task identity token 转换时仍需权限检查。该文讨论异常消息，不证明 Unix socket 可以安全获得同一对象，尚无相应生产绑定实现或验证。
 
 提交前复核新增了 hello 后、兼容请求读取 token 前的快照复核；`observation_rejects_a_record_replaced_after_hello` 使用相同内容替换记录，确认 inode 变化被拒绝。此检查不能消除复核之后的替换竞态，也不绑定 HTTP 与 IPC 端点。

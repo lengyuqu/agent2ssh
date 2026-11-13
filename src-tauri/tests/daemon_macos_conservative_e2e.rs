@@ -677,3 +677,156 @@ fn legacy_stop_refuses_conflicting_ipc_before_sending_http_token() {
         && !r.to_ascii_lowercase().contains("authorization:")
         && r.starts_with("GET /health ")));
 }
+
+#[test]
+#[serial_test::serial]
+fn legacy_stop_refuses_symlinked_pid_lock_without_changing_target() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::Builder::new()
+        .prefix("a2s-lock-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let target = dir.path().join("unrelated");
+    std::fs::write(&target, b"synthetic").unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::fs::write(dir.path().join("daemon.pid"), "1").unwrap();
+    std::fs::write(dir.path().join("daemon.token"), TOKEN).unwrap();
+    symlink(&target, dir.path().join(".daemon-pid.lock")).unwrap();
+    for args in [
+        &["daemon", "stop", "--allow-unbound-graceful"][..],
+        &["daemon", "clear-stale", "--expect-pid", "1"][..],
+    ] {
+        let output = cli(dir.path(), "127.0.0.1:9", args);
+        assert!(!output.status.success());
+        assert!(
+            body(&output).contains("daemon PID lock"),
+            "{}",
+            body(&output)
+        );
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"synthetic");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("daemon.pid")).unwrap(),
+            "1"
+        );
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn legacy_stop_times_out_when_pid_lock_is_held() {
+    use fs2::FileExt;
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::Builder::new()
+        .prefix("a2s-lock-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    std::fs::write(dir.path().join("daemon.pid"), "1").unwrap();
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(dir.path().join(".daemon-pid.lock"))
+        .unwrap();
+    lock.set_permissions(std::fs::Permissions::from_mode(0o600))
+        .unwrap();
+    lock.lock_exclusive().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_agent2ssh"))
+        .args(["daemon", "stop", "--allow-unbound-graceful"])
+        .env("AGENT2SSH_CONFIG_DIR", dir.path())
+        .env("AGENT2SSH_DAEMON_ADDR", "127.0.0.1:9")
+        .env_remove("AGENT2SSH_MASTER_PASSWORD")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let started = Instant::now();
+    while child.try_wait().unwrap().is_none() && started.elapsed() < Duration::from_secs(4) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let finished = child.try_wait().unwrap().is_some();
+    FileExt::unlock(&lock).unwrap();
+    if !finished {
+        let _ = child.kill();
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        finished,
+        "legacy stop blocked on the PID lock beyond its deadline"
+    );
+    assert!(!output.status.success());
+    assert!(
+        body(&output).contains("timed out acquiring daemon PID lock"),
+        "{}",
+        body(&output)
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("daemon.pid")).unwrap(),
+        "1"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn legacy_stop_refuses_hardlinked_or_nonprivate_pid_lock() {
+    use std::os::unix::fs::PermissionsExt;
+    for kind in ["hardlink", "acl", "mode"] {
+        let dir = tempfile::Builder::new()
+            .prefix("a2s-lock-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        std::fs::write(dir.path().join("daemon.pid"), "1").unwrap();
+        let lock = dir.path().join(".daemon-pid.lock");
+        let target = dir.path().join("unrelated");
+        if kind == "hardlink" {
+            std::fs::write(&target, b"synthetic").unwrap();
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+            std::fs::hard_link(&target, &lock).unwrap();
+        } else {
+            std::fs::write(&lock, b"synthetic").unwrap();
+            std::fs::set_permissions(
+                &lock,
+                std::fs::Permissions::from_mode(if kind == "mode" { 0o644 } else { 0o600 }),
+            )
+            .unwrap();
+            if kind == "acl" {
+                let status = Command::new("chmod")
+                    .args(["+a", "everyone allow read"])
+                    .arg(&lock)
+                    .status()
+                    .unwrap();
+                assert!(status.success());
+            }
+        }
+        let output = cli(
+            dir.path(),
+            "127.0.0.1:9",
+            &["daemon", "stop", "--allow-unbound-graceful"],
+        );
+        assert!(!output.status.success(), "{kind}");
+        assert!(
+            body(&output).contains("daemon PID lock"),
+            "{kind}: {}",
+            body(&output)
+        );
+        assert_eq!(std::fs::read(&lock).unwrap(), b"synthetic");
+        if kind == "mode" {
+            assert_eq!(
+                std::fs::metadata(&lock).unwrap().permissions().mode() & 0o777,
+                0o644
+            );
+        }
+        if kind == "hardlink" {
+            assert_eq!(std::fs::read(&target).unwrap(), b"synthetic");
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("daemon.pid")).unwrap(),
+            "1"
+        );
+    }
+}

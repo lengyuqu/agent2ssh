@@ -16,23 +16,64 @@ const CONFIG_ID: &str = "daemon.config-id";
 const LOCK: &str = ".daemon-pid.lock";
 
 fn lock(dir: &Path) -> Result<fs::File> {
+    lock_after_open(dir, || {})
+}
+
+fn lock_after_open(dir: &Path, after_open: impl FnOnce()) -> Result<fs::File> {
     use fs2::FileExt;
     use std::time::{Duration, Instant};
+    let path = dir.join(LOCK);
     let file = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(dir.join(LOCK))?;
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&path)?;
     let metadata = file.metadata()?;
-    if !metadata.file_type().is_file() || metadata.uid() != unsafe { libc::geteuid() } {
+    if !metadata.file_type().is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.nlink() != 1
+        || metadata.mode() & 0o077 != 0
+    {
         bail!("invalid daemon PID lock file");
     }
+    no_acl_grants(&path).context("daemon PID lock ACL is not private")?;
+    let observed = fs::symlink_metadata(&path)?;
+    if !observed.file_type().is_file()
+        || (observed.dev(), observed.ino()) != (metadata.dev(), metadata.ino())
+    {
+        bail!("daemon PID lock path changed while opening");
+    }
+    after_open();
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         match file.try_lock_exclusive() {
-            Ok(()) => return Ok(file),
+            Ok(()) => {
+                // A process ignoring the lock may have replaced its path while
+                // we waited. Holding the old inode would not coordinate with
+                // current writers; refuse if that replacement is visible.
+                let current = fs::symlink_metadata(&path)?;
+                if !current.file_type().is_file()
+                    || (current.dev(), current.ino()) != (metadata.dev(), metadata.ino())
+                    || current.uid() != unsafe { libc::geteuid() }
+                    || current.nlink() != 1
+                    || current.mode() & 0o077 != 0
+                {
+                    bail!("daemon PID lock path changed while waiting");
+                }
+                no_acl_grants(&path).context("daemon PID lock ACL is not private")?;
+                let after_acl = fs::symlink_metadata(&path)?;
+                if !after_acl.file_type().is_file()
+                    || (after_acl.dev(), after_acl.ino()) != (metadata.dev(), metadata.ino())
+                    || after_acl.uid() != unsafe { libc::geteuid() }
+                    || after_acl.nlink() != 1
+                    || after_acl.mode() & 0o077 != 0
+                {
+                    bail!("daemon PID lock path changed while waiting");
+                }
+                return Ok(file);
+            }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(10))
             }
@@ -42,6 +83,13 @@ fn lock(dir: &Path) -> Result<fs::File> {
             Err(e) => return Err(e.into()),
         }
     }
+}
+
+/// Shared daemon-control lock with the same path validation and bounded wait
+/// as IPC publication. The returned file holds the advisory lock until drop.
+pub(crate) fn control_lock(config: &Path) -> Result<fs::File> {
+    let dir = owner_dir(config)?;
+    lock(&dir).context("cannot acquire validated daemon PID lock")
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -614,6 +662,57 @@ pub fn recover(config: &Path, expected_pid: u32, expected_instance: &str) -> Res
 mod token_tests {
     use super::*;
     use std::os::unix::fs::symlink;
+
+    #[test]
+    fn pid_lock_replaced_after_open_is_not_accepted() {
+        use fs2::FileExt;
+        use std::sync::mpsc;
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let path = dir.path().join(LOCK);
+        let old = OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap();
+        old.lock_exclusive().unwrap();
+        let (opened_tx, opened_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let target = dir.path().to_path_buf();
+        let worker = std::thread::spawn(move || {
+            lock_after_open(&target, || {
+                opened_tx.send(()).unwrap();
+                resume_rx
+                    .recv_timeout(std::time::Duration::from_secs(3))
+                    .unwrap();
+            })
+        });
+        opened_rx
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .unwrap();
+        fs::rename(&path, dir.path().join("old-lock")).unwrap();
+        let new = OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap();
+        FileExt::unlock(&old).unwrap();
+        resume_tx.send(()).unwrap();
+        let error = worker.join().unwrap().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("lock path changed while waiting"),
+            "{error:#}"
+        );
+        assert_eq!(
+            fs::metadata(&path).unwrap().ino(),
+            new.metadata().unwrap().ino()
+        );
+    }
 
     #[test]
     fn token_is_private_from_creation_and_empty_file_is_reinitialized() {

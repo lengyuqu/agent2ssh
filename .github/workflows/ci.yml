@@ -275,6 +275,11 @@ jobs:
         if: runner.os == 'macOS'
         run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts/tests/test_macos_daemon_signature.py
 
+      - name: macOS daemon identity and conservative stop tests
+        if: runner.os == 'macOS'
+        run: cargo test --no-default-features --features daemon --test daemon_identity_macos_client_e2e --test daemon_identity_macos_e2e --test daemon_macos_conservative_e2e --test daemon_macos_start_e2e -- --test-threads=1
+        working-directory: src-tauri
+
       - name: Rust integration tests (daemon)
         run: cargo test --no-default-features --test daemon_integration
         working-directory: src-tauri

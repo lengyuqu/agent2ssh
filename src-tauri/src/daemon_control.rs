@@ -74,10 +74,20 @@ pub fn read_daemon_pid() -> Result<Option<u32>> {
 
 const DAEMON_PID_LOCK: &str = ".daemon-pid.lock";
 
+#[cfg(target_os = "macos")]
+fn daemon_pid_lock() -> Result<File> {
+    crate::daemon_identity::macos::control_lock(&config_dir_absolute()?)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn daemon_pid_lock() -> Result<crate::store::FileLockGuard> {
+    crate::store::lock_config_file(DAEMON_PID_LOCK)
+}
+
 /// Serialize PID publication and conditional cleanup between current versions.
 /// This lock is for file coordination, not proof of a process's identity.
 pub fn write_daemon_pid(pid: u32) -> Result<()> {
-    let _guard = crate::store::lock_config_file(DAEMON_PID_LOCK)?;
+    let _guard = daemon_pid_lock()?;
     if let Some(previous) = read_daemon_pid()? {
         #[cfg(target_os = "macos")]
         anyhow::bail!("daemon PID file names {previous}; file retained because automatic replacement is disabled on macOS. Inspect it, then use 'agent2ssh daemon clear-stale --expect-pid {previous}' only if the process has exited");
@@ -122,7 +132,7 @@ pub fn clear_stale_daemon_pid(expected_pid: u32) -> Result<()> {
 }
 
 fn clear_stale_daemon_pid_with_snapshot(expected_pid: u32, snapshot: &str) -> Result<()> {
-    let _guard = crate::store::lock_config_file(DAEMON_PID_LOCK)?;
+    let _guard = daemon_pid_lock()?;
     let ipc_dir = config_dir_absolute()?.join(".daemon-ipc");
     match std::fs::symlink_metadata(&ipc_dir) {
         Ok(metadata) if !metadata.file_type().is_dir() => {
@@ -176,7 +186,7 @@ fn clear_stale_daemon_pid_with_snapshot(expected_pid: u32, snapshot: &str) -> Re
 }
 
 fn write_daemon_pid_if_absent(pid: u32) -> Result<()> {
-    let _guard = crate::store::lock_config_file(DAEMON_PID_LOCK)?;
+    let _guard = daemon_pid_lock()?;
     #[cfg(target_os = "macos")]
     refuse_ipc_artifacts()?;
     let mut file = OpenOptions::new()
@@ -190,7 +200,7 @@ fn write_daemon_pid_if_absent(pid: u32) -> Result<()> {
 /// Remove only the PID we observed, preserving a replacement or malformed file.
 /// Older clients and daemons do not honor this advisory lock.
 pub fn remove_daemon_pid_file_if(pid: u32) -> Result<bool> {
-    let _guard = crate::store::lock_config_file(DAEMON_PID_LOCK)?;
+    let _guard = daemon_pid_lock()?;
     #[cfg(target_os = "macos")]
     refuse_ipc_artifacts()?;
     let path = daemon_pid_path()?;
@@ -1255,7 +1265,7 @@ fn process_start_time(pid: u32) -> Option<u64> {
 pub fn mark_daemon_owned(pid: u32) -> Result<()> {
     let start_time =
         process_start_time(pid).ok_or_else(|| anyhow!("process {pid} is not running"))?;
-    let _guard = crate::store::lock_config_file(DAEMON_PID_LOCK)?;
+    let _guard = daemon_pid_lock()?;
     let path = daemon_owner_path()?;
     std::fs::write(
         path,
@@ -1280,7 +1290,7 @@ pub fn daemon_is_owned(pid: u32) -> bool {
 
 #[cfg(any(not(target_os = "macos"), test))]
 fn clear_daemon_owner_if(pid: u32, start_time: u64) -> Result<bool> {
-    let _guard = crate::store::lock_config_file(DAEMON_PID_LOCK)?;
+    let _guard = daemon_pid_lock()?;
     let path = daemon_owner_path()?;
     let raw = match std::fs::read_to_string(&path) {
         Ok(raw) => raw,
@@ -2122,7 +2132,7 @@ pub fn request_unbound_graceful_shutdown(pid: u32) -> Result<()> {
         anyhow::bail!("unbound shutdown requires a loopback address; no request sent");
     }
     let read_record = || -> Result<String> {
-        let _guard = crate::store::lock_config_file(DAEMON_PID_LOCK)?;
+        let _guard = daemon_pid_lock()?;
         let path = daemon_pid_path()?;
         if !std::fs::symlink_metadata(&path)
             .context("cannot inspect daemon PID file; no request sent")?
