@@ -12,6 +12,8 @@
 
 extern void a2s_mach_lab_notify_shutdown(void);
 static mach_port_t listener=MACH_PORT_NULL;
+static mach_port_t discovery=MACH_PORT_NULL;
+static mach_port_t receive_port=MACH_PORT_NULL;
 static char instance_id[33];
 static struct { int active; uint8_t nonce[16]; audit_token_t client; uint64_t expires_ms; } sessions[32];
 
@@ -77,13 +79,14 @@ static void accept_stop(a2s_lab_stop *req,audit_token_t sender) {
 static void *serve(void *unused) {
     (void)unused;
     for(;;){a2s_lab_receive msg={0};mach_msg_option_t opts=MACH_RCV_MSG|MACH_RCV_TIMEOUT|MACH_RCV_TRAILER_TYPE(MACH_MSG_TRAILER_FORMAT_0)|MACH_RCV_TRAILER_ELEMENTS(MACH_RCV_TRAILER_AUDIT);
-        kern_return_t kr=mach_msg(&msg.h,opts,0,sizeof(msg),listener,1000,0);
+        kern_return_t kr=mach_msg(&msg.h,opts,0,sizeof(msg),receive_port,1000,0);
         if(kr==MACH_RCV_TIMED_OUT)continue;
         if(kr==MACH_RCV_TOO_LARGE){fputs("A2S_MACH_LAB_OVERSIZED_DISCARDED\n",stderr);fflush(stderr);continue;}
         if(kr!=KERN_SUCCESS)break;
         mach_msg_audit_trailer_t *trailer=message_trailer(&msg);if(!trailer || audit_token_to_euid(trailer->msgh_audit)!=geteuid()) {mach_msg_destroy(&msg.h);continue;}
-        if(msg.h.msgh_id==A2S_LAB_HELLO)accept_hello(&msg.hello,trailer->msgh_audit);
-        else if(msg.h.msgh_id==A2S_LAB_STOP){fputs("A2S_MACH_LAB_STOP_RECEIVED\n",stderr);fflush(stderr);accept_stop(&msg.stop,trailer->msgh_audit);}
+        if(msg.h.msgh_id==A2S_LAB_HELLO && msg.h.msgh_local_port==discovery)accept_hello(&msg.hello,trailer->msgh_audit);
+        else if(msg.h.msgh_id==A2S_LAB_STOP && msg.h.msgh_local_port==listener){fputs("A2S_MACH_LAB_STOP_RECEIVED\n",stderr);fflush(stderr);accept_stop(&msg.stop,trailer->msgh_audit);}
+        else if(msg.h.msgh_id==A2S_LAB_STOP && discovery!=listener && msg.h.msgh_local_port==discovery){fputs("A2S_MACH_LAB_PUBLIC_STOP_REJECTED\n",stderr);fflush(stderr);}
         // Release all received rights that were not moved into a reply.
         mach_msg_destroy(&msg.h);
     }
@@ -95,8 +98,18 @@ int a2s_mach_lab_start(const char *service,const char *instance) {
     if(mach_port_allocate(mach_task_self(),MACH_PORT_RIGHT_RECEIVE,&listener)!=KERN_SUCCESS)return -2;
     if(mach_port_guard_with_flags(mach_task_self(),listener,0xa522,MPG_IMMOVABLE_RECEIVE)!=KERN_SUCCESS)return -3;
     if(mach_port_insert_right(mach_task_self(),listener,listener,MACH_MSG_TYPE_MAKE_SEND)!=KERN_SUCCESS)return -4;
-    // Deprecated API is used only in the lab; production deployment is unresolved.
-    if(bootstrap_register(bootstrap_port,(char *)service,listener)!=KERN_SUCCESS)return -5;
-    pthread_t thread;if(pthread_create(&thread,NULL,serve,NULL)!=0)return -6;
+    const char *launchd=getenv("A2S_MACH_LAB_LAUNCHD_DISCOVERY");
+    if(launchd && !strcmp(launchd,"1")) {
+        // Public launchd discovery is never the token-bearing endpoint.
+        if(bootstrap_check_in(bootstrap_port,(char *)service,&discovery)!=KERN_SUCCESS)return -5;
+        if(mach_port_guard_with_flags(mach_task_self(),discovery,0xb522,MPG_IMMOVABLE_RECEIVE)!=KERN_SUCCESS)return -6;
+        if(mach_port_allocate(mach_task_self(),MACH_PORT_RIGHT_PORT_SET,&receive_port)!=KERN_SUCCESS)return -7;
+        if(mach_port_move_member(mach_task_self(),listener,receive_port)!=KERN_SUCCESS || mach_port_move_member(mach_task_self(),discovery,receive_port)!=KERN_SUCCESS)return -8;
+    } else {
+        // Deprecated API is used only in the lab; production deployment is unresolved.
+        if(bootstrap_register(bootstrap_port,(char *)service,listener)!=KERN_SUCCESS)return -5;
+        discovery=listener;receive_port=listener;
+    }
+    pthread_t thread;if(pthread_create(&thread,NULL,serve,NULL)!=0)return -9;
     pthread_detach(thread);return 0;
 }

@@ -71,7 +71,8 @@ int main(int argc,char **argv){
     response_t resp;if(receive(reply,&resp)||resp.h.msgh_id!=A2S_LAB_HELLO_REPLY||resp.h.msgh_size!=sizeof(a2s_lab_hello_reply)||!(resp.h.msgh_bits&MACH_MSGH_BITS_COMPLEX)||resp.hello.body.msgh_descriptor_count!=2){printf("refused=hello_reply token_sent=0\n");return 2;}
     mach_msg_audit_trailer_t *t=trailer(&resp);if(!t){printf("refused=audit token_sent=0\n");return 2;}
     audit_token_t sender=t->msgh_audit;task_name_t name=MACH_PORT_NULL;
-    if(audit_token_to_euid(sender)!=geteuid()||audit_token_to_pid(sender)!=expected||resp.hello.pid!=(uint32_t)expected||memcmp(resp.hello.nonce,hello.nonce,16)||memcmp(resp.hello.instance,hello.instance,33)||resp.hello.endpoint.name!=service||task_identity_token_get_task_port(resp.hello.identity.name,TASK_FLAVOR_NAME,&name)){printf("refused=identity token_sent=0\n");return 2;}
+    int expect_private=getenv("A2S_MACH_LAB_EXPECT_PRIVATE")!=NULL;
+    if(audit_token_to_euid(sender)!=geteuid()||audit_token_to_pid(sender)!=expected||resp.hello.pid!=(uint32_t)expected||memcmp(resp.hello.nonce,hello.nonce,16)||memcmp(resp.hello.instance,hello.instance,33)||!MACH_PORT_VALID(resp.hello.endpoint.name)||(expect_private ? resp.hello.endpoint.name==service : resp.hello.endpoint.name!=service)||task_identity_token_get_task_port(resp.hello.identity.name,TASK_FLAVOR_NAME,&name)){printf("refused=identity token_sent=0\n");return 2;}
     audit_token_t task={0};mach_msg_type_number_t count=TASK_AUDIT_TOKEN_COUNT;
     if(task_info(name,TASK_AUDIT_TOKEN,(task_info_t)&task,&count)||memcmp(&task,&sender,sizeof(task))||!valid_code(sender,argv[4])){printf("refused=code_or_task token_sent=0\n");return 2;}
     printf("identity_observations_match=1 same_endpoint=1 runtime_policy_match=1\n");
@@ -122,9 +123,14 @@ int main(int argc,char **argv){
         printf("post_registration_identity_match=1\n");
         if(!strcmp(argv[5],"hold-registration")){printf("result=unexpected_identity token_sent=0\n");return 2;}
     }
-    a2s_lab_stop stop={0};stop.h.msgh_bits=MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,0)|MACH_MSGH_BITS_COMPLEX;stop.h.msgh_remote_port=service;stop.h.msgh_size=sizeof(stop);stop.h.msgh_id=A2S_LAB_STOP;stop.body.msgh_descriptor_count=1;stop.reply.name=reply;stop.reply.disposition=MACH_MSG_TYPE_MAKE_SEND_ONCE;stop.reply.type=MACH_MSG_PORT_DESCRIPTOR;memcpy(stop.nonce,hello.nonce,16);memcpy(stop.instance,hello.instance,33);stop.expected_pid=(uint32_t)expected;
-    if(!strcmp(argv[5],"wrong-token"))strcpy(stop.token,"wrong-synthetic-token");else if(!strcmp(argv[5],"stop")||!strcmp(argv[5],"hold")||!strcmp(argv[5],"drop-reply")||!strcmp(argv[5],"hold-reply")||!strcmp(argv[5],"wait-exit"))strcpy(stop.token,A2S_LAB_TOKEN);else return 1;
-    if(mach_msg(&stop.h,MACH_SEND_MSG|MACH_SEND_TIMEOUT,sizeof(stop),0,0,1000,0)){printf("result=unknown token_sent=1\n");return 3;}
+    a2s_lab_stop stop={0};stop.h.msgh_bits=MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,0)|MACH_MSGH_BITS_COMPLEX;stop.h.msgh_remote_port=!strcmp(argv[5],"public-stop")?service:resp.hello.endpoint.name;stop.h.msgh_size=sizeof(stop);stop.h.msgh_id=A2S_LAB_STOP;stop.body.msgh_descriptor_count=1;stop.reply.name=reply;stop.reply.disposition=MACH_MSG_TYPE_MAKE_SEND_ONCE;stop.reply.type=MACH_MSG_PORT_DESCRIPTOR;memcpy(stop.nonce,hello.nonce,16);memcpy(stop.instance,hello.instance,33);stop.expected_pid=(uint32_t)expected;
+    if(!strcmp(argv[5],"borrowed-stop")) {
+        const char *hex=getenv("A2S_MACH_LAB_TEST_NONCE");if(!hex||strlen(hex)!=32)return 1;
+        for(unsigned i=0;i<16;i++){int high=hex_nibble(hex[2*i]),low=hex_nibble(hex[2*i+1]);if(high<0||low<0)return 1;stop.nonce[i]=(uint8_t)((high<<4)|low);}
+    }
+    if(!strcmp(argv[5],"wrong-token"))strcpy(stop.token,"wrong-synthetic-token");else if(!strcmp(argv[5],"stop")||!strcmp(argv[5],"hold")||!strcmp(argv[5],"drop-reply")||!strcmp(argv[5],"hold-reply")||!strcmp(argv[5],"wait-exit")||!strcmp(argv[5],"public-stop")||!strcmp(argv[5],"borrowed-stop"))strcpy(stop.token,A2S_LAB_TOKEN);else return 1;
+    kern_return_t sent=mach_msg(&stop.h,MACH_SEND_MSG|MACH_SEND_TIMEOUT,sizeof(stop),0,0,1000,0);
+    if(sent){printf("result=unknown token_sent=1 send_kr=%d\n",sent);return 3;}
     printf("token_sent=1\n");
     if(!strcmp(argv[5],"hold-reply") && getchar()!='x')return 4;
     if(!strcmp(argv[5],"drop-reply")||!strcmp(argv[5],"hold-reply")){

@@ -7,6 +7,7 @@
 ```sh
 cargo build --manifest-path src-tauri/Cargo.toml --no-default-features --features daemon,macos-mach-lab --bin agent2ssh-daemon-mach-lab
 python3 docs/reports/evidence/macos-mach-stop-lab-2026-11-13/verify.py --daemon src-tauri/target/debug/agent2ssh-daemon-mach-lab --archive
+python3 docs/reports/evidence/macos-mach-stop-lab-2026-11-13/verify_launchd_daemon.py --daemon src-tauri/target/debug/agent2ssh-daemon-mach-lab --archive
 ```
 
 脚本创建并清理其自有 daemon、临时 sshd 和 Mach 服务，结果在 `results.txt`。所有请求仅携带固定合成 token。实验二进制要求隔离目录标记、固定 token 和随机实验前缀，默认构建没有启用该服务。
@@ -20,6 +21,7 @@ python3 docs/reports/evidence/macos-mach-stop-lab-2026-11-13/verify.py --daemon 
 - 32 个合成 hello 占满实验会话表后，额外 hello 未发送 token 即被拒绝；10 秒超时后新会话可用。该结果不排除同用户进程在容量占满期间造成拒绝服务。
 - 发送后立即销毁回复端口的竞态中，客户端报告结果未知；本次观察到 daemon 仍在运行。另一个有同步屏障的实验在服务端完成授权后、发出回执前销毁回复端口：客户端同样报告未知且未重试，而测试父进程观察到 daemon 退出。两者说明未知状态不能推断停止是否已执行；并未覆盖所有丢失方式。
 - 三轮 A/B 服务替换中，另一进程复用 nonce，以及原客户端在相同 PID 下 `exec` 后复用 nonce 的请求均被拒绝。客户端分别在注册进程事件前、注册后复核 identity 前被暂停；A 退出、同名 B 启动后恢复，客户端均保守拒绝且没有发送 token。另一个客户端保存的旧发送权没有向 B 投递请求，B 保持存活，重新认证 B 后可完成停止。这是不同 PID 的受控切换，不是真实 PID 复用。实验代码的 receive right 使用 `MPG_IMMOVABLE_RECEIVE`。
+- 三轮临时 launchd 管理的真实 daemon：公开发现端口和实例自建的 guarded 私有端点分离；正常客户端先检查 audit、task identity 和实验固定 CDHash，再只在私有端点发送合成 token。错误代码要求或实例在发送前拒绝；不同进程复用另一客户端 nonce 的合成停止被拒绝。另行故意向公开端口发送合成停止，服务拒绝处理且保持运行；A 停止、B 重启后旧私有发送权返回目标无效，B 存活，用新身份可停止。每个临时 launchd job 均确认注销；详见 `launchd-daemon-results.txt`。
 
 ## 边界与剩余工作
 
