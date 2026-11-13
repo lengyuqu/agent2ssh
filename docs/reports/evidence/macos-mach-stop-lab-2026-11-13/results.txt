@@ -1,6 +1,6 @@
-run=1 wrong_code_no_token=1 wrong_instance_no_token=1 hello_no_token=1 wrong_token_no_stop=1 verified_same_endpoint=1 accepted_exit_unverified=1 child_exited=1 task_name_notification=dead_name drain_ipc=1 local_exec_cancelled=1 local_tree_not_live=1 records_removed=1
-run=2 wrong_code_no_token=1 wrong_instance_no_token=1 hello_no_token=1 wrong_token_no_stop=1 verified_same_endpoint=1 accepted_exit_unverified=1 child_exited=1 task_name_notification=dead_name drain_ipc=1 local_exec_cancelled=1 local_tree_not_live=1 records_removed=1
-run=3 wrong_code_no_token=1 wrong_instance_no_token=1 hello_no_token=1 wrong_token_no_stop=1 verified_same_endpoint=1 accepted_exit_unverified=1 child_exited=1 task_name_notification=dead_name drain_ipc=1 local_exec_cancelled=1 local_tree_not_live=1 records_removed=1
+run=1 wrong_code_no_token=1 wrong_instance_no_token=1 hello_no_token=1 wrong_token_no_stop=1 verified_same_endpoint=1 accepted_exit_unverified=1 child_exited=1 task_name_notification=dead_name proc_registration_rechecked=1 proc_exit_event=1 drain_ipc=1 local_exec_cancelled=1 local_tree_not_live=1 records_removed=1
+run=2 wrong_code_no_token=1 wrong_instance_no_token=1 hello_no_token=1 wrong_token_no_stop=1 verified_same_endpoint=1 accepted_exit_unverified=1 child_exited=1 task_name_notification=dead_name proc_registration_rechecked=1 proc_exit_event=1 drain_ipc=1 local_exec_cancelled=1 local_tree_not_live=1 records_removed=1
+run=3 wrong_code_no_token=1 wrong_instance_no_token=1 hello_no_token=1 wrong_token_no_stop=1 verified_same_endpoint=1 accepted_exit_unverified=1 child_exited=1 task_name_notification=dead_name proc_registration_rechecked=1 proc_exit_event=1 drain_ipc=1 local_exec_cancelled=1 local_tree_not_live=1 records_removed=1
 ssh_drain real_daemon=1 ssh_started=1 response_503_outcome_unknown=1 audit_unknown=1 exit_observed=1
 policy=no-runtime no_token=1 daemon_alive=1
 policy=allow-dyld no_token=1 daemon_alive=1

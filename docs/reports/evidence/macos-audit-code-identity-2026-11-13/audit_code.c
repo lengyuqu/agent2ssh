@@ -8,6 +8,7 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <bsm/libbsm.h>
 #include <sys/socket.h>
+#include <sys/event.h>
 #include <sys/types.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -63,6 +64,14 @@ int main(int argc,char **argv){
  mach_msg_audit_trailer_t *tr=(void *)((char*)&msg.m+round_msg(msg.m.h.msgh_size));if(tr->msgh_trailer_size<sizeof(*tr)){fprintf(stderr,"short trailer\n");return 2;}
  audit_token_t audit=tr->msgh_audit; if(read_byte(sock[0])!='a')return 2;
  task_name_t name=0;ok("name port",task_identity_token_get_task_port(msg.m.token.name,TASK_FLAVOR_NAME,&name));
+ int kq=kqueue();if(kq<0){perror("kqueue");return 2;}
+ struct kevent registration;EV_SET(&registration,(uintptr_t)child,EVFILT_PROC,EV_ADD|EV_ENABLE|EV_CLEAR,NOTE_EXIT,0,NULL);
+ if(kevent(kq,&registration,1,NULL,0,NULL)<0){perror("register proc exit");return 2;}
+ task_name_t post_register=MACH_PORT_NULL;ok("post-register token",task_identity_token_get_task_port(msg.m.token.name,TASK_FLAVOR_NAME,&post_register));
+ audit_token_t post_audit={0};mach_msg_type_number_t post_count=TASK_AUDIT_TOKEN_COUNT;
+ ok("post-register audit",task_info(post_register,TASK_AUDIT_TOKEN,(task_info_t)&post_audit,&post_count));
+ int post_match=memcmp(&post_audit,&audit,sizeof(audit))==0;
+ printf("post_register_task_audit_match=%d\n",post_match);(void)mach_port_deallocate(mach_task_self(),post_register);
  mach_port_t notify=0,previous=0;ok("notify port",mach_port_allocate(mach_task_self(),MACH_PORT_RIGHT_RECEIVE,&notify));
  ok("request dead-name",mach_port_request_notification(mach_task_self(),name,MACH_NOTIFY_DEAD_NAME,0,notify,MACH_MSG_TYPE_MAKE_SEND_ONCE,&previous));
  if(MACH_PORT_VALID(previous)){fprintf(stderr,"unexpected previous notification\n");return 2;}
@@ -74,6 +83,8 @@ int main(int argc,char **argv){
  if(retained_lookup!=errSecSuccess || retained_req_status!=errSecSuccess) { fprintf(stderr,"retained code setup failed\n"); close(sock[0]); waitpid(child,NULL,0); return 2; }
  printf("child_pid=%d sender_pid=%d pidversion=%d task_audit_match=%d correct_status=%d wrong_status=%d wrong_hash_status=%d\n",child,audit_token_to_pid(audit),audit_token_to_pidversion(audit),match,(int)correct,(int)incorrect,(int)incorrect_hash);
  send_byte(sock[0],'e');if(read_byte(sock[0])!='e')return 2;
+ struct kevent event={0};struct timespec immediate={0,0};int proc_after_exec=kevent(kq,NULL,0,&event,1,&immediate);
+ printf("proc_events_after_exec=%d\n",proc_after_exec);
  struct { mach_dead_name_notification_t msg; mach_msg_trailer_t trailer; } note={0};kern_return_t note_before=mach_msg(&note.msg.not_header,MACH_RCV_MSG|MACH_RCV_TIMEOUT,0,sizeof(note),notify,100,0);
  audit_token_t task_after={0};mach_msg_type_number_t after_count=TASK_AUDIT_TOKEN_COUNT;
  kern_return_t name_after=task_info(name,TASK_AUDIT_TOKEN,(task_info_t)&task_after,&after_count);
@@ -85,7 +96,9 @@ int main(int argc,char **argv){
  OSStatus retained_status=SecCodeCheckValidity(retained,kSecCSDefaultFlags,retained_req);
  printf("retained_code_after_exec_status=%d\n",(int)retained_status);
  printf("after_exec_pid=%d pidversion=%d old_audit_status=%d new_audit_status=%d waitpid_nohang=%d replacement_status=%d replacement_mode=%d\n",audit_token_to_pid(current),audit_token_to_pidversion(current),(int)old_status,(int)new_status,waitpid(child,NULL,WNOHANG),(int)replacement_status,argc==4);
- send_byte(sock[0],'x');close(sock[0]);int status=0;if(waitpid(child,&status,0)!=child||!WIFEXITED(status)||WEXITSTATUS(status))return 2;
+ send_byte(sock[0],'x');close(sock[0]);struct timespec wait_exit={2,0};memset(&event,0,sizeof(event));int proc_after_exit=kevent(kq,NULL,0,&event,1,&wait_exit);
+ printf("proc_events_after_exit=%d exit_flag=%d event_pid_matches=%d\n",proc_after_exit,proc_after_exit==1 && (event.fflags&NOTE_EXIT)!=0,proc_after_exit==1 && event.ident==(uintptr_t)child);
+ int status=0;if(waitpid(child,&status,0)!=child||!WIFEXITED(status)||WEXITSTATUS(status))return 2;close(kq);
  memset(&note,0,sizeof(note));kern_return_t note_after=mach_msg(&note.msg.not_header,MACH_RCV_MSG|MACH_RCV_TIMEOUT,0,sizeof(note),notify,100,0);
  printf("after_exit_task_notification_kr=%d message_id=%d\n",note_after,note_after==0?note.msg.not_header.msgh_id:0);
  CFRelease(retained_req); CFRelease(retained_text); CFRelease(retained);

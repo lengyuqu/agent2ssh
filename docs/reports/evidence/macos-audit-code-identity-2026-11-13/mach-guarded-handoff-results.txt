@@ -1,17 +1,17 @@
 run 1 exit=0
 guard_kr=0
-verified_owner_pid=96304 sender_pid=96304 task_audit_match=1 pinned_code_status=0
-worker_cancelled pid=96303
+verified_owner_pid=96693 sender_pid=96693 task_audit_match=1 pinned_code_status=0
+worker_cancelled pid=96692
 guarded_transfer_receive_kr=268451843 owner_signaled=1 owner_signal=9 worker_received_synthetic=0
 
 run 2 exit=0
 guard_kr=0
-verified_owner_pid=96308 sender_pid=96308 task_audit_match=1 pinned_code_status=0
-worker_cancelled pid=96307
+verified_owner_pid=96697 sender_pid=96697 task_audit_match=1 pinned_code_status=0
+worker_cancelled pid=96696
 guarded_transfer_receive_kr=268451843 owner_signaled=1 owner_signal=9 worker_received_synthetic=0
 
 run 3 exit=0
 guard_kr=0
-verified_owner_pid=96314 sender_pid=96314 task_audit_match=1 pinned_code_status=0
-worker_cancelled pid=96313
+verified_owner_pid=96701 sender_pid=96701 task_audit_match=1 pinned_code_status=0
+worker_cancelled pid=96700
 guarded_transfer_receive_kr=268451843 owner_signaled=1 owner_signal=9 worker_received_synthetic=0

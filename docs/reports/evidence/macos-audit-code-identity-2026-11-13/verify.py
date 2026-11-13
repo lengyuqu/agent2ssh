@@ -66,7 +66,7 @@ with tempfile.TemporaryDirectory(prefix="a2s-audit-code-", dir="/tmp") as temp:
         retained = re.search(r"retained_code_after_exec_status=(-?\d+)", result.stdout)
         notification = re.search(r"after_exec_task_notification_kr=(\d+) notification_is_dead_name=(\d+) name_task_info_kr=(\d+)", result.stdout)
         reopen = re.search(r"after_exec_original_identity_reopen_kr=(\d+)", result.stdout)
-        if not first or not after or not retained or not notification or not reopen:
+        if not first or not after or not retained or not notification or not reopen or 'post_register_task_audit_match=1' not in result.stdout or 'proc_events_after_exec=0' not in result.stdout or 'proc_events_after_exit=1 exit_flag=1 event_pid_matches=1' not in result.stdout:
             raise AssertionError(f"missing observation:\n{result.stdout}")
         if not (first.group(1) == first.group(2) == after.group(1) and first.group(3) != after.group(2)
                 and first.group(4) == "1" and first.group(5) == "0" and first.group(6) != "0"
@@ -82,7 +82,7 @@ with tempfile.TemporaryDirectory(prefix="a2s-audit-code-", dir="/tmp") as temp:
         retained = re.search(r"retained_code_after_exec_status=(-?\d+)", result.stdout)
         notification = re.search(r"after_exec_task_notification_kr=(\d+) notification_is_dead_name=(\d+) name_task_info_kr=(\d+)", result.stdout)
         reopen = re.search(r"after_exec_original_identity_reopen_kr=(\d+)", result.stdout)
-        if not first or not after or not retained or not notification or not reopen or not (first.group(1) == first.group(2) == after.group(1) and first.group(3) != after.group(2)
+        if not first or not after or not retained or not notification or not reopen or 'post_register_task_audit_match=1' not in result.stdout or 'proc_events_after_exec=0' not in result.stdout or 'proc_events_after_exit=1 exit_flag=1 event_pid_matches=1' not in result.stdout or not (first.group(1) == first.group(2) == after.group(1) and first.group(3) != after.group(2)
                 and first.group(4) == "1" and first.group(5) == "0" and first.group(6) != "0" and first.group(7) != "0"
                 and after.group(3) != "0" and after.group(4) != "0" and after.group(5) == "0" and after.group(6) == "0" and after.group(7) == "1" and retained.group(1) != "0"
                 and notification.group(1) == "0" and notification.group(2) == "1" and notification.group(3) != "0" and reopen.group(1) != "0"):

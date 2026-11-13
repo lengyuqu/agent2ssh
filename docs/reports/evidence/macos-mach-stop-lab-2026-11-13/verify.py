@@ -124,7 +124,7 @@ with tempfile.TemporaryDirectory(prefix='a2s-mach-lab-tools-',dir='/tmp') as too
      if wrong_token.returncode==0 or 'result=unknown' not in wrong_token.stdout or proc.poll() is not None:raise AssertionError(f'wrong token did not fail closed: {wrong_token.stdout} {wrong_token.stderr}')
      local_request,pids=start_local_exec(addr,config)
      stopped=invoke(client,service,proc.pid,instance,good,'wait-exit')
-     if stopped.returncode or 'identity_observations_match=1 same_endpoint=1 runtime_policy_match=1' not in stopped.stdout or 'result=accepted_exit_unverified' not in stopped.stdout:raise AssertionError(f'valid lab request failed: {stopped.stdout} {stopped.stderr}')
+     if stopped.returncode or 'identity_observations_match=1 same_endpoint=1 runtime_policy_match=1' not in stopped.stdout or 'result=accepted_exit_unverified' not in stopped.stdout or 'post_registration_identity_match=1' not in stopped.stdout or 'proc_exit_event=1 event_pid_matches=1 note_exit=1' not in stopped.stdout:raise AssertionError(f'valid lab request failed: {stopped.stdout} {stopped.stderr}')
      if proc.wait(timeout=10)!=0:raise AssertionError('lab daemon exited with error')
      notification=re.search(r'task_name_exit_notification=([^\n]+)',stopped.stdout)
      if not notification or notification.group(1)!='dead_name':raise AssertionError(f'missing task name dead-name observation: {stopped.stdout}')
@@ -142,7 +142,7 @@ with tempfile.TemporaryDirectory(prefix='a2s-mach-lab-tools-',dir='/tmp') as too
      deadline=time.monotonic()+5
      while not processes_not_live(pids) and time.monotonic()<deadline:time.sleep(.05)
      if not processes_not_live(pids):raise AssertionError('test local process tree still live')
-     line=f'run={i} wrong_code_no_token=1 wrong_instance_no_token=1 hello_no_token=1 wrong_token_no_stop=1 verified_same_endpoint=1 accepted_exit_unverified=1 child_exited=1 task_name_notification={notification.group(1).replace(" ",",")} drain_ipc=1 local_exec_cancelled=1 local_tree_not_live=1 records_removed=1\n';results.append(line);print(line,end='')
+     line=f'run={i} wrong_code_no_token=1 wrong_instance_no_token=1 hello_no_token=1 wrong_token_no_stop=1 verified_same_endpoint=1 accepted_exit_unverified=1 child_exited=1 task_name_notification={notification.group(1).replace(" ",",")} proc_registration_rechecked=1 proc_exit_event=1 drain_ipc=1 local_exec_cancelled=1 local_tree_not_live=1 records_removed=1\n';results.append(line);print(line,end='')
     finally:
      if local_request is not None:local_request.close()
      if proc.poll() is None:proc.terminate()

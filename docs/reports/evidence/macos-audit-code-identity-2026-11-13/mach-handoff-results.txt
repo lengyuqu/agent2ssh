@@ -1,24 +1,24 @@
 run 1 exit=0
-verified_owner_pid=96289 sender_pid=96289 task_audit_match=1 pinned_code_status=0
-worker_received_synthetic pid=96288 marker=0x51a2
+verified_owner_pid=96678 sender_pid=96678 task_audit_match=1 pinned_code_status=0
+worker_received_synthetic pid=96677 marker=0x51a2
 after_handoff_owner_alive=1 worker_alive=1
 
 run 2 exit=0
-verified_owner_pid=96292 sender_pid=96292 task_audit_match=1 pinned_code_status=0
-worker_received_synthetic pid=96291 marker=0x51a2
+verified_owner_pid=96681 sender_pid=96681 task_audit_match=1 pinned_code_status=0
+worker_received_synthetic pid=96680 marker=0x51a2
 after_handoff_owner_alive=1 worker_alive=1
 
 run 3 exit=0
-verified_owner_pid=96295 sender_pid=96295 task_audit_match=1 pinned_code_status=0
-worker_received_synthetic pid=96294 marker=0x51a2
+verified_owner_pid=96684 sender_pid=96684 task_audit_match=1 pinned_code_status=0
+worker_received_synthetic pid=96683 marker=0x51a2
 after_handoff_owner_alive=1 worker_alive=1
 
 run 4 exit=0
-verified_owner_pid=96298 sender_pid=96298 task_audit_match=1 pinned_code_status=0
-worker_received_synthetic pid=96297 marker=0x51a2
+verified_owner_pid=96687 sender_pid=96687 task_audit_match=1 pinned_code_status=0
+worker_received_synthetic pid=96686 marker=0x51a2
 after_handoff_owner_alive=1 worker_alive=1
 
 run 5 exit=0
-verified_owner_pid=96301 sender_pid=96301 task_audit_match=1 pinned_code_status=0
-worker_received_synthetic pid=96300 marker=0x51a2
+verified_owner_pid=96690 sender_pid=96690 task_audit_match=1 pinned_code_status=0
+worker_received_synthetic pid=96689 marker=0x51a2
 after_handoff_owner_alive=1 worker_alive=1

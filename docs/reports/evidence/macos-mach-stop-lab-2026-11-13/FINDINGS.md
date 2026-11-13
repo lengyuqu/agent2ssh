@@ -13,7 +13,7 @@ python3 docs/reports/evidence/macos-mach-stop-lab-2026-11-13/verify.py --daemon 
 
 ## 已观察
 
-- 三轮真实 daemon 停止：错误 CDHash、实例、token 均不停止；客户端在核对同一 Mach 端点、audit token、task identity、代码和运行时策略后请求停止。回执只表示已接受；客户端观察到 task name 的 dead-name 通知，测试父进程另行观察到退出、IPC drain、活动本地进程树停止和实例记录清理。邻近的 exec 反例表明，单独的 dead-name 通知不能证明 PID 进程退出。
+- 三轮真实 daemon 停止：错误 CDHash、实例、token 均不停止；客户端在核对同一 Mach 端点、audit token、task identity、代码和运行时策略后，注册 PID 的 `EVFILT_PROC/NOTE_EXIT` 并重新核对 task identity，再请求停止。回执只表示已接受；客户端随后观察到匹配 PID 的退出事件和 task name 的 dead-name 通知，测试父进程另行观察到退出、IPC drain、活动本地进程树停止和实例记录清理。邻近的 exec 反例表明，单独的 dead-name 通知不能证明 PID 进程退出。
 - 一次真实 SSH 请求在执行中停止：客户端收到 503，明确表示远端结果未知；审计保留相同结论和请求元数据。不据此推断远端命令一定终止。
 - 不安全运行时或异常 entitlement 的五种临时签名副本在发送 token 前被拒绝；缺少标记或 token 不符的实验 daemon 不注册服务。
 - 32 个合成 hello 占满实验会话表后，额外 hello 未发送 token 即被拒绝；10 秒超时后新会话可用。该结果不排除同用户进程在容量占满期间造成拒绝服务。
@@ -22,6 +22,6 @@ python3 docs/reports/evidence/macos-mach-stop-lab-2026-11-13/verify.py --daemon 
 
 ## 边界与剩余工作
 
-实验的 CDHash 由测试 harness 获取，不是正式可信分发；客户端无法仅凭发送权独立查询 receive right 的 guard 状态，实验依赖所核对代码的实现。`bootstrap_register` 已弃用，此实验不证明受支持的生产部署和恢复方式。尚须实现并审查正式客户端/daemon 接入、安装与签名信任根、逐消息对抗和资源耗尽测试、其他回复丢失与恢复场景、真实 PID 复用及跨平台验收。用户当前没有 Apple Developer 身份，正式签名的包及其运行时策略未验证。不能据此关闭 #22。
+实验的 CDHash 由测试 harness 获取，不是正式可信分发；客户端无法仅凭发送权独立查询 receive right 的 guard 状态，实验依赖所核对代码的实现。`bootstrap_register` 已弃用，此实验不证明受支持的生产部署和恢复方式。先注册进程事件再复核 task identity 是待审查候选：尚无真实 PID 复用、权限失败、内核支持差异或所有注册竞态的验证，且不提供安全发信号的进程句柄。尚须实现并审查正式客户端/daemon 接入、安装与签名信任根、逐消息对抗和资源耗尽测试、其他回复丢失与恢复场景及跨平台验收。用户当前没有 Apple Developer 身份，正式签名的包及其运行时策略未验证。不能据此关闭 #22。
 
 相邻证据：`../macos-audit-code-identity-2026-11-13/` 中有 audit token、替换、注入和 receive right 转移实验；`../macos-mach-discovery-2026-11-13/` 中有临时服务发现和旧发送权实验。它们的结果只覆盖该机器及其测试配置。

@@ -7,6 +7,7 @@
 #include <Security/Security.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <bsm/libbsm.h>
+#include <sys/event.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -85,13 +86,24 @@ int main(int argc,char **argv){
         fputc('\n',ready);fclose(ready);
         if(getchar()!='x'){printf("refused=test_release token_sent=0\n");return 2;}
     }
-    mach_port_t exit_port=MACH_PORT_NULL;
+    mach_port_t exit_port=MACH_PORT_NULL;int exit_kq=-1;
     if(!strcmp(argv[5],"wait-exit")) {
         mach_port_t previous=MACH_PORT_NULL;
         if(mach_port_allocate(mach_task_self(),MACH_PORT_RIGHT_RECEIVE,&exit_port)!=KERN_SUCCESS ||
            mach_port_request_notification(mach_task_self(),name,MACH_NOTIFY_DEAD_NAME,0,exit_port,MACH_MSG_TYPE_MAKE_SEND_ONCE,&previous)!=KERN_SUCCESS || MACH_PORT_VALID(previous)) {
             printf("refused=exit_notification_setup token_sent=0\n");return 2;
         }
+        exit_kq=kqueue();struct kevent registration;
+        if(exit_kq<0){printf("refused=kqueue token_sent=0\n");return 2;}
+        EV_SET(&registration,(uintptr_t)expected,EVFILT_PROC,EV_ADD|EV_ENABLE|EV_CLEAR,NOTE_EXIT,0,NULL);
+        if(kevent(exit_kq,&registration,1,NULL,0,NULL)<0){printf("refused=proc_registration token_sent=0\n");return 2;}
+        task_name_t rechecked=MACH_PORT_NULL;audit_token_t again={0};mach_msg_type_number_t again_count=TASK_AUDIT_TOKEN_COUNT;
+        if(task_identity_token_get_task_port(resp.hello.identity.name,TASK_FLAVOR_NAME,&rechecked)!=KERN_SUCCESS ||
+           task_info(rechecked,TASK_AUDIT_TOKEN,(task_info_t)&again,&again_count)!=KERN_SUCCESS || memcmp(&again,&sender,sizeof(sender))) {
+            printf("refused=post_registration_identity token_sent=0\n");return 2;
+        }
+        (void)mach_port_deallocate(mach_task_self(),rechecked);
+        printf("post_registration_identity_match=1\n");
     }
     a2s_lab_stop stop={0};stop.h.msgh_bits=MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,0)|MACH_MSGH_BITS_COMPLEX;stop.h.msgh_remote_port=service;stop.h.msgh_size=sizeof(stop);stop.h.msgh_id=A2S_LAB_STOP;stop.body.msgh_descriptor_count=1;stop.reply.name=reply;stop.reply.disposition=MACH_MSG_TYPE_MAKE_SEND_ONCE;stop.reply.type=MACH_MSG_PORT_DESCRIPTOR;memcpy(stop.nonce,hello.nonce,16);memcpy(stop.instance,hello.instance,33);stop.expected_pid=(uint32_t)expected;
     if(!strcmp(argv[5],"wrong-token"))strcpy(stop.token,"wrong-synthetic-token");else if(!strcmp(argv[5],"stop")||!strcmp(argv[5],"hold")||!strcmp(argv[5],"drop-reply")||!strcmp(argv[5],"hold-reply")||!strcmp(argv[5],"wait-exit"))strcpy(stop.token,A2S_LAB_TOKEN);else return 1;
@@ -109,6 +121,11 @@ int main(int argc,char **argv){
         response_t notification;int kr=receive(exit_port,&notification);
         if(kr==KERN_SUCCESS && notification.h.msgh_id==MACH_NOTIFY_DEAD_NAME)printf("task_name_exit_notification=dead_name\n");
         else printf("task_name_exit_notification=other receive_kr=%d message_id=%d\n",kr,kr==KERN_SUCCESS?notification.h.msgh_id:0);
+    }
+    if(exit_kq>=0) {
+        struct kevent event={0};struct timespec timeout={3,0};int n=kevent(exit_kq,NULL,0,&event,1,&timeout);
+        printf("proc_exit_event=%d event_pid_matches=%d note_exit=%d\n",n,n==1 && event.ident==(uintptr_t)expected,n==1 && (event.fflags&NOTE_EXIT)!=0);
+        close(exit_kq);
     }
     return 0;
 }
