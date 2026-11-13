@@ -215,6 +215,8 @@ with tempfile.TemporaryDirectory(prefix='a2s-mach-lab-tools-',dir='/tmp') as too
            ('allow-dyld',True,'com.apple.security.cs.allow-dyld-environment-variables'),
            ('disable-validation',True,'com.apple.security.cs.disable-library-validation'),
            ('unsigned-memory',True,'com.apple.security.cs.allow-unsigned-executable-memory'),
+           ('allow-jit',True,'com.apple.security.cs.allow-jit'),
+           ('disable-page-protection',True,'com.apple.security.cs.disable-executable-page-protection'),
            ('get-task-allow',True,'com.apple.security.get-task-allow')]
  for label,runtime,entitlement in policies:
   candidate=root/f'daemon-{label}';shutil.copy2(source,candidate)
@@ -436,4 +438,4 @@ with tempfile.TemporaryDirectory(prefix='a2s-mach-lab-tools-',dir='/tmp') as too
     if not service_absent(lookup,service):raise RuntimeError(f'test Mach service remains: {service}')
     print('test_service_absent=1')
  if args.archive:(ROOT/'results.txt').write_text(''.join(results))
-print('Verified 3 successful cycles, 5 policy refusals, 2 lab safety gates and 3 service replacements; ad-hoc signing, synthetic token only')
+print('Verified 3 successful cycles, 7 policy refusals, 2 lab safety gates and 3 service replacements; ad-hoc signing, synthetic token only')

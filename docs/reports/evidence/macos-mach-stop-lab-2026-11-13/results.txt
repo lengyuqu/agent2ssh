@@ -6,6 +6,8 @@ policy=no-runtime no_token=1 daemon_alive=1
 policy=allow-dyld no_token=1 daemon_alive=1
 policy=disable-validation no_token=1 daemon_alive=1
 policy=unsigned-memory no_token=1 daemon_alive=1
+policy=allow-jit no_token=1 daemon_alive=1
+policy=disable-page-protection no_token=1 daemon_alive=1
 policy=get-task-allow no_token=1 daemon_alive=1
 lost_reply client_unknown=1 observed_daemon=still_running
 accepted_reply_lost client_unknown=1 daemon_exit_observed=1 no_retry=1

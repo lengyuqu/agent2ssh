@@ -27,7 +27,7 @@ static int valid_code(audit_token_t audit,const char *requirement) {
         && s&&CFGetTypeID(s)==CFNumberGetTypeID()&&CFNumberGetValue(s,kCFNumberSInt64Type,&status)&&(status&kSecCodeStatusValid)&&!(status&kSecCodeStatusDebugged);
     CFDictionaryRef ent=CFDictionaryGetValue(info,kSecCodeInfoEntitlementsDict);
     if(ent && CFGetTypeID(ent)==CFDictionaryGetTypeID()) {
-        const CFStringRef forbidden[]={CFSTR("com.apple.security.cs.allow-dyld-environment-variables"),CFSTR("com.apple.security.cs.disable-library-validation"),CFSTR("com.apple.security.cs.allow-unsigned-executable-memory"),CFSTR("com.apple.security.get-task-allow")};
+        const CFStringRef forbidden[]={CFSTR("com.apple.security.cs.allow-dyld-environment-variables"),CFSTR("com.apple.security.cs.disable-library-validation"),CFSTR("com.apple.security.cs.allow-unsigned-executable-memory"),CFSTR("com.apple.security.cs.allow-jit"),CFSTR("com.apple.security.cs.disable-executable-page-protection"),CFSTR("com.apple.security.get-task-allow")};
         for(unsigned i=0;i<sizeof(forbidden)/sizeof(forbidden[0]);i++){CFTypeRef x=CFDictionaryGetValue(ent,forbidden[i]);if(x && (CFGetTypeID(x)!=CFBooleanGetTypeID()||CFBooleanGetValue(x)))good=0;}
     } else if(ent || CFDictionaryContainsKey(info,kSecCodeInfoEntitlements)) good=0;
     CFRelease(info);return good;

@@ -17,7 +17,7 @@ python3 docs/reports/evidence/macos-mach-stop-lab-2026-11-13/verify_launchd_daem
 
 - 三轮真实 daemon 停止：错误 CDHash、实例、token 均不停止；客户端在核对同一 Mach 端点、audit token、task identity、代码和运行时策略后，注册 PID 的 `EVFILT_PROC/NOTE_EXIT` 并重新核对 task identity，再请求停止。回执只表示已接受；客户端随后观察到匹配 PID 的退出事件和 task name 的 dead-name 通知，测试父进程另行观察到退出、IPC drain、活动本地进程树停止和实例记录清理。邻近的 exec 反例表明，单独的 dead-name 通知不能证明 PID 进程退出。
 - 一次真实 SSH 请求在执行中停止：客户端收到 503，明确表示远端结果未知；审计保留相同结论和请求元数据。不据此推断远端命令一定终止。
-- 不安全运行时或异常 entitlement 的五种临时签名副本在发送 token 前被拒绝；缺少标记或 token 不符的实验 daemon 不注册服务。
+- 无 hardened runtime 或携带六种测试用异常 entitlement 的临时签名副本在发送 token 前被拒绝；缺少标记或 token 不符的实验 daemon 不注册服务。拒绝范围包括 JIT、关闭可执行页保护、关闭库验证和未签名可执行内存；不是所有注入手段的穷尽列表。
 - 修复实验接收循环遇到超大 Mach 消息即退出的问题：三轮各发送一条超出接收缓冲的无秘密消息，观察到丢弃记录，随后正常握手、认证及停止均成功。这只覆盖该消息形态，不能证明对持续洪泛免疫。
 - 32 个合成 hello 占满实验会话表后，额外 hello 未发送 token 即被拒绝；10 秒超时后新会话可用。该结果不排除同用户进程在容量占满期间造成拒绝服务。
 - 发送后立即销毁回复端口的竞态中，客户端报告结果未知；本次观察到 daemon 仍在运行。另一个有同步屏障的实验在服务端完成授权后、发出回执前销毁回复端口：客户端同样报告未知且未重试，而测试父进程观察到 daemon 退出。两者说明未知状态不能推断停止是否已执行；并未覆盖所有丢失方式。
