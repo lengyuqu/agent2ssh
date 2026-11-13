@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 import SettingsMenu from "./SettingsMenu";
 import { ConfirmHost } from "./ui/dialog";
@@ -13,6 +13,7 @@ const mockApi = vi.hoisted(() => ({
   getAlgoPrefs: vi.fn().mockResolvedValue({ custom: false }),
   daemonSupportsUnboundGraceful: vi.fn().mockResolvedValue(false),
   daemonStopUnboundGraceful: vi.fn().mockResolvedValue("Request accepted; exit unverified"),
+  daemonRestart: vi.fn(),
   daemonStatus: vi.fn().mockResolvedValue({ running: false, pid: null, message: "", diagnosis: null }),
 }));
 vi.mock("../api", () => ({ api: mockApi, getDaemonUrl: () => "", reportError: vi.fn() }));
@@ -36,6 +37,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockApi.secretsStatus.mockResolvedValue({ initialized: false, unlocked: false });
   mockApi.daemonSupportsUnboundGraceful.mockResolvedValue(false);
+  mockApi.daemonRestart.mockResolvedValue({ message: "Restarted" });
   // clearAllMocks keeps implementations, so re-pin the default in case an
   // earlier test overrode it with a rejection.
   mockApi.daemonStatus.mockResolvedValue({ running: false, pid: null, message: "", diagnosis: null });
@@ -210,7 +212,8 @@ it("shows the verdict without the next step when the daemon is healthy", async (
     )
   );
   openSettings();
-  expect(await screen.findByText("Diagnosis: verified healthy")).toBeTruthy();
+  expect(await screen.findByText("Diagnosis: health checks passed")).toBeTruthy();
+  expect(screen.getByText("Health checks do not verify daemon process identity.")).toBeTruthy();
   expect(screen.queryByText(/Nothing to do/)).toBeNull();
 });
 
@@ -219,4 +222,59 @@ it("renders no diagnosis line when daemon_status itself fails", async () => {
   openSettings();
   await waitFor(() => expect(mockApi.daemonStatus).toHaveBeenCalled());
   expect(screen.queryByText(/^Diagnosis:/)).toBeNull();
+});
+
+it("ignores an older diagnosis that finishes after a newer refresh", async () => {
+  let finishFirst!: (value: ReturnType<typeof diagnosisResult>) => void;
+  mockApi.daemonStatus
+    .mockImplementationOnce(() => new Promise((resolve) => { finishFirst = resolve; }))
+    .mockResolvedValueOnce(diagnosisResult("stale", "Inspect the stale record.", 42));
+  openSettings();
+  await waitFor(() => expect(mockApi.daemonStatus).toHaveBeenCalledTimes(1));
+  fireEvent.click(screen.getByRole("button", { name: "Refresh daemon health" }));
+  expect(await screen.findByText("Diagnosis: stale PID record")).toBeTruthy();
+  await act(async () => finishFirst(diagnosisResult("healthy", "Old result", 1)));
+  expect(screen.getByText("Diagnosis: stale PID record")).toBeTruthy();
+  expect(screen.queryByText("Diagnosis: health checks passed")).toBeNull();
+});
+
+it("ignores a diagnosis from before the menu was closed and reopened", async () => {
+  let finishFirst!: (value: ReturnType<typeof diagnosisResult>) => void;
+  mockApi.daemonStatus
+    .mockImplementationOnce(() => new Promise((resolve) => { finishFirst = resolve; }))
+    .mockResolvedValueOnce(diagnosisResult("stale", "Inspect the stale record.", 42));
+  openSettings();
+  await waitFor(() => expect(mockApi.daemonStatus).toHaveBeenCalledTimes(1));
+  fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+  fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+  expect(await screen.findByText("Diagnosis: stale PID record")).toBeTruthy();
+  await act(async () => finishFirst(diagnosisResult("healthy", "Old result", 1)));
+  expect(screen.getByText("Diagnosis: stale PID record")).toBeTruthy();
+});
+
+it("refreshes the diagnosis after a failed daemon action", async () => {
+  mockApi.daemonStatus
+    .mockResolvedValueOnce(diagnosisResult("healthy", "Old result", 1))
+    .mockResolvedValueOnce(diagnosisResult("stale", "Inspect the stale record.", 42));
+  mockApi.daemonRestart.mockRejectedValue(new Error("restart failed"));
+  openSettings();
+  await screen.findByText("Diagnosis: health checks passed");
+  fireEvent.click(screen.getByRole("button", { name: "Restart daemon" }));
+  expect(await screen.findByText("Error: restart failed")).toBeTruthy();
+  expect(await screen.findByText("Diagnosis: stale PID record")).toBeTruthy();
+});
+
+it("does not show a pre-action diagnosis while a restart is in progress", async () => {
+  let finishRestart!: (value: { message: string }) => void;
+  mockApi.daemonStatus.mockResolvedValue(diagnosisResult("stale", "Inspect the record.", 42));
+  mockApi.daemonRestart.mockImplementationOnce(() => new Promise((resolve) => { finishRestart = resolve; }));
+  openSettings();
+  await screen.findByText("Diagnosis: stale PID record");
+  fireEvent.click(screen.getByRole("button", { name: "Restart daemon" }));
+  expect(screen.queryByText(/^Diagnosis:/)).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Refresh daemon health" }));
+  await waitFor(() => expect(mockApi.daemonStatus).toHaveBeenCalledTimes(1));
+  expect(screen.queryByText(/^Diagnosis:/)).toBeNull();
+  await act(async () => finishRestart({ message: "Restarted" }));
+  expect(await screen.findByText("Diagnosis: stale PID record", {}, { timeout: 2000 })).toBeTruthy();
 });

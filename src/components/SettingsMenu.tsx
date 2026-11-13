@@ -93,6 +93,8 @@ export default function SettingsMenu({
   // #24: whether a `daemon_status` read completed, so "unavailable" is stated
   // instead of the panel silently showing only the /health probe.
   const [daemonDiagnosisChecked, setDaemonDiagnosisChecked] = useState(false);
+  const daemonDiagnosisRequest = useRef(0);
+  const daemonActionInProgress = useRef(false);
   const [canRequestUnboundStop, setCanRequestUnboundStop] = useState(false);
   const [confirmingUnboundStop, setConfirmingUnboundStop] = useState(false);
   const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "failed">("idle");
@@ -131,7 +133,7 @@ export default function SettingsMenu({
   // stays in English on purpose — it names CLI commands verbatim.
   const daemonVerdictText = daemonDiagnosis
     ? daemonDiagnosis.verdict === "healthy"
-      ? t("verified healthy")
+      ? t("health checks passed")
       : daemonDiagnosis.verdict === "running-unhealthy"
         ? t("running but not answering")
         : daemonDiagnosis.verdict === "unverified"
@@ -217,6 +219,7 @@ export default function SettingsMenu({
     // #21: read-only diagnosis, loaded once per menu open — not a poll, because
     // every `daemon_status` call appends one debug entry to app.log (L2-157).
     void refreshDaemonDiagnosis();
+    return () => { daemonDiagnosisRequest.current += 1; };
   }, [open]);
 
   // K1: set the master password (first time) or change it. Setting it for the
@@ -272,14 +275,20 @@ export default function SettingsMenu({
   // reportError; the section then asserts nothing — but it does say the
   // diagnosis is unavailable rather than falling back to silence (#24).
   async function refreshDaemonDiagnosis() {
+    if (daemonActionInProgress.current) return;
+    const request = ++daemonDiagnosisRequest.current;
+    setDaemonDiagnosis(null);
+    setDaemonDiagnosisChecked(false);
     try {
       const result = await api.daemonStatus();
-      setDaemonDiagnosis(result.diagnosis ?? null);
+      if (request === daemonDiagnosisRequest.current) setDaemonDiagnosis(result.diagnosis ?? null);
     } catch (err) {
-      setDaemonDiagnosis(null);
-      reportError("settings-menu", "daemon status failed", err);
+      if (request === daemonDiagnosisRequest.current) {
+        setDaemonDiagnosis(null);
+        reportError("settings-menu", "daemon status failed", err);
+      }
     } finally {
-      setDaemonDiagnosisChecked(true);
+      if (request === daemonDiagnosisRequest.current) setDaemonDiagnosisChecked(true);
     }
   }
 
@@ -287,15 +296,19 @@ export default function SettingsMenu({
     setHealthBusy(true);
     try {
       await onDaemonHealthRefresh();
-      await refreshDaemonDiagnosis();
     } finally {
+      await refreshDaemonDiagnosis();
       setHealthBusy(false);
     }
   }
 
   async function runDaemonAction(action: "start" | "stop" | "restart") {
+    daemonActionInProgress.current = true;
     setDaemonActionBusy(action);
     setDaemonActionMessage(null);
+    daemonDiagnosisRequest.current += 1;
+    setDaemonDiagnosis(null);
+    setDaemonDiagnosisChecked(false);
     try {
       const result =
         action === "start"
@@ -308,12 +321,18 @@ export default function SettingsMenu({
         await new Promise((resolve) => window.setTimeout(resolve, 700));
       }
       await onDaemonHealthRefresh();
-      await refreshDaemonDiagnosis();
       await onGateRefresh();
     } catch (err) {
       setDaemonActionMessage(String(err));
       reportError("settings-menu", "daemon action failed", err, { action });
+      try {
+        await onDaemonHealthRefresh();
+      } catch (refreshError) {
+        reportError("settings-menu", "daemon health refresh failed", refreshError);
+      }
     } finally {
+      daemonActionInProgress.current = false;
+      await refreshDaemonDiagnosis();
       setDaemonActionBusy(null);
     }
   }
@@ -334,14 +353,24 @@ export default function SettingsMenu({
       return;
     }
     setDaemonActionMessage(null);
+    daemonActionInProgress.current = true;
+    daemonDiagnosisRequest.current += 1;
+    setDaemonDiagnosis(null);
+    setDaemonDiagnosisChecked(false);
     try {
       const message = await api.daemonStopUnboundGraceful();
       setDaemonActionMessage(message);
       await onDaemonHealthRefresh();
-      await refreshDaemonDiagnosis();
     } catch (err) {
       setDaemonActionMessage(String(err));
+      try {
+        await onDaemonHealthRefresh();
+      } catch (refreshError) {
+        reportError("settings-menu", "daemon health refresh failed", refreshError);
+      }
     } finally {
+      daemonActionInProgress.current = false;
+      await refreshDaemonDiagnosis();
       setDaemonActionBusy(null);
     }
   }
@@ -611,6 +640,11 @@ export default function SettingsMenu({
                 <span className={`font-bold ${daemonVerdictTone}`}>
                   {t("Diagnosis: {verdict}", { verdict: daemonVerdictText })}
                 </span>
+                {daemonDiagnosis.verdict === "healthy" && (
+                  <span className="text-muted-foreground">
+                    {t("Health checks do not verify daemon process identity.")}
+                  </span>
+                )}
                 {daemonRecordPid != null && (
                   <span className="text-muted-foreground">
                     {t("Record PID: {pid}", { pid: daemonRecordPid })}
