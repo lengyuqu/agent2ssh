@@ -9,6 +9,7 @@ import argparse
 import json
 import os
 import plistlib
+import pwd
 import re
 import shutil
 import socket
@@ -72,8 +73,19 @@ try:
   service=f'org.agent2ssh.lab.{os.getpid()}.{uuid.uuid4().hex[:12]}';plist=root/f'{i}.plist';ready=root/f'{i}.ready';port=free_port()
   variables={'AGENT2SSH_CONFIG_DIR':str(config),'AGENT2SSH_DAEMON_ADDR':f'127.0.0.1:{port}','AGENT2SSH_LOG':'error','A2S_MACH_LAB_SERVICE':service,'A2S_MACH_LAB_LAUNCHD_DISCOVERY':'1'}
   plist.write_bytes(plistlib.dumps({'Label':service,'ProgramArguments':[str(binary)],'RunAtLoad':True,'MachServices':{service:True},'EnvironmentVariables':variables,'StandardOutPath':str(root/f'{i}.out'),'StandardErrorPath':str(root/f'{i}.err')}))
-  installed=False;held=None
+  installed=False;held=None;sshd=None;ssh_request=None
   try:
+   if i==1:
+    key=config/'key';hostkey=config/'hostkey';authorized=config/'authorized_keys';sshport=free_port()
+    for path in (key,hostkey):must(['ssh-keygen','-q','-t','ed25519','-N','','-f',path])
+    authorized.write_bytes(key.with_suffix('.pub').read_bytes());authorized.chmod(0o600)
+    sshd_conf=config/'sshd_config';sshd_conf.write_text(f'Port {sshport}\nListenAddress 127.0.0.1\nHostKey {hostkey}\nPidFile {config}/sshd.pid\nAuthorizedKeysFile {authorized}\nStrictModes no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nUsePAM no\nPermitUserRC no\nSetEnv HOME={config} ZDOTDIR={config}\n')
+    user=pwd.getpwuid(os.getuid()).pw_name
+    (config/'hosts.json').write_text(json.dumps({'schema_version':1,'hosts':[{'name':'fixture','host':'127.0.0.1','port':sshport,'user':user,'key_path':str(key)}]}))
+    sshd=subprocess.Popen(['/usr/sbin/sshd','-D','-e','-f',str(sshd_conf)],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,env=env)
+    time.sleep(.4)
+    probe_home=must(['ssh','-F','/dev/null','-o','StrictHostKeyChecking=no','-o','UserKnownHostsFile=/dev/null','-o','IdentitiesOnly=yes','-o','BatchMode=yes','-i',key,'-p',str(sshport),f'{user}@127.0.0.1','printf "%s\\n%s\\n" "$HOME" "$ZDOTDIR"'])
+    if probe_home.stdout.splitlines()!=[str(config),str(config)]:raise AssertionError('remote shell HOME was not isolated')
    must(['launchctl','bootstrap',DOMAIN,plist]);installed=True
    a=wait_for(lambda:identity(config,port));pid_a=a['pid']
    wrong=run([client,service,str(pid_a),a['instance_id'],'identifier "org.agent2ssh.wrong"','stop'])
@@ -93,9 +105,26 @@ try:
    public=run([client,service,str(pid_a),a['instance_id'],requirement,'public-stop'],timeout=8)
    if public.returncode==0 or 'result=unknown' not in public.stdout or not alive(pid_a):raise AssertionError(f'public stop was not rejected: {public.stdout} {public.stderr}')
    wait_for(lambda:(root/f'{i}.err').exists() and 'A2S_MACH_LAB_PUBLIC_STOP_REJECTED' in (root/f'{i}.err').read_text())
+   if i==1:
+    marker=config/'remote-ready';command=f"printf ready > '{marker}'; sleep 8"
+    body=json.dumps({'host':'fixture','command':command,'force':True,'timeout_secs':20,'reason':'launchd test','side_effect':'synthetic','change_id':'launchd-ssh'}).encode()
+    ssh_request=socket.create_connection(('127.0.0.1',port),timeout=3)
+    ssh_request.sendall((f'POST /exec HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {TOKEN}\r\nContent-Type: application/json\r\nContent-Length: {len(body)}\r\nConnection: close\r\n\r\n').encode()+body)
+    wait_for(marker.exists,seconds=12)
    stopped=must([client,service,str(pid_a),a['instance_id'],requirement,'wait-exit'],timeout=8)
    if 'result=accepted_exit_unverified' not in stopped.stdout or 'post_registration_identity_match=1' not in stopped.stdout or 'proc_exit_event=1 event_pid_matches=1 note_exit=1' not in stopped.stdout:raise AssertionError('first stop or exit observation failed')
    wait_for(lambda:not alive(pid_a) and not (config/'daemon.pid').exists())
+   if i==1:
+    ssh_request.settimeout(5);response=bytearray()
+    while True:
+     chunk=ssh_request.recv(4096)
+     if not chunk:break
+     response.extend(chunk)
+    ssh_request.close();ssh_request=None
+    if not response.startswith(b'HTTP/1.1 503') or b'remote command outcome unknown' not in response:raise AssertionError(f'wrong SSH drain response: {response!r}')
+    audit=[json.loads(line) for line in (config/'audit.jsonl').read_text().splitlines()]
+    entry=next((item for item in audit if item.get('change_id')=='launchd-ssh'),None)
+    if not entry or 'remote command outcome unknown' not in entry.get('reason','') or entry.get('side_effect')!='synthetic':raise AssertionError('missing SSH drain audit')
    must([probe,'lookup',service,'send']) # synthetic public discovery wake-up
    b=wait_for(lambda:(v if (v:=identity(config,port)) and v['pid']!=pid_a else None),seconds=25);pid_b=b['pid']
    old_out,old_err=held.communicate(input='x',timeout=8);old_code=held.returncode;held=None
@@ -103,11 +132,16 @@ try:
    fresh=must([client,service,str(pid_b),b['instance_id'],requirement,'wait-exit'],timeout=8)
    if 'result=accepted_exit_unverified' not in fresh.stdout or 'post_registration_identity_match=1' not in fresh.stdout or 'proc_exit_event=1 event_pid_matches=1 note_exit=1' not in fresh.stdout:raise AssertionError('replacement stop or exit observation failed')
    wait_for(lambda:not alive(pid_b) and not (config/'daemon.pid').exists())
-   line=f'run={i} wrong_code_and_instance_no_token=1 other_sender_rejected=1 normal_client_private_only=1 synthetic_public_stop_rejected=1 private_proof=1 first_stop_and_exit_observed=1 replacement_distinct=1 old_private_invalid_dest=1 replacement_survived=1 fresh_stop_and_exit_observed=1\n';results.append(line);print(line,end='')
+   line=f'run={i} wrong_code_and_instance_no_token=1 other_sender_rejected=1 normal_client_private_only=1 synthetic_public_stop_rejected=1 private_proof=1 first_stop_and_exit_observed=1 ssh_drain_tested={int(i==1)} replacement_distinct=1 old_private_invalid_dest=1 replacement_survived=1 fresh_stop_and_exit_observed=1\n';results.append(line);print(line,end='')
   finally:
    if held is not None:
     if held.poll() is None:held.kill()
     held.communicate(timeout=5)
+   if ssh_request is not None:ssh_request.close()
+   if sshd is not None:
+    if sshd.poll() is None:sshd.terminate()
+    try:sshd.wait(timeout=8)
+    except subprocess.TimeoutExpired:sshd.kill();sshd.wait(timeout=5)
    if installed or state(service)!='absent':
     run(['launchctl','bootout',f'{DOMAIN}/{service}']);deadline=time.monotonic()+4
     while time.monotonic()<deadline and state(service)=='present':time.sleep(.05)
