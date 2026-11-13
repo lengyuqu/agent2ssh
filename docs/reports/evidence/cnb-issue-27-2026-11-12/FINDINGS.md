@@ -39,6 +39,14 @@ hex，不是从 JSON 输出推断的。
 | B7 | pwsh 7：`Get-Content file \| & agent2ssh …`（不加 `-Raw`） | `SYNTHETIC_GETCONTENT` | **实测通过**：推荐写法 |
 | B8 | pwsh 7：`$null \| & agent2ssh … --password-stdin` | `Error: secret input is empty` | **实测通过** |
 
+**`--passphrase-stdin` 的覆盖状态。** 上表 15 个用例全部是 `--password-stdin`。两条路径在
+`bin/agent2ssh.rs` 里合并成一次 `read_redirected_host_secret()` 调用（`password_stdin || passphrase_stdin`
+→ 同一个 `stdin_secret`，再分别落到 `password` / `passphrase` 字段），所以「shell 的字节对两者一致」
+在源码上是**推断**，不是本轮的实测结论。收尾时补了一条回归（见 §5 的
+`passphrase_stdin_takes_the_same_redirected_path`），覆盖 cmd 管道与 PS 5.1 管道两条最苛刻的路径，
+断言密文可解出同一个值、`hosts.json` 的 `password` 字段仍为空、明文不出现在磁盘上；它随
+`windows-latest` 的 CI 腿运行，**本机尚未单独跑过**，因此这里仍标为「有回归、没真机数字」。
+
 补充实测（cmd 自身语义，非 CLI 缺陷）：
 
 - `cmd /c type` 对一个以 `FF FE` 开头的文件输出 **0 字节**（`probe_cmd_details.py`），所以「非法 UTF-8」
@@ -154,6 +162,7 @@ argv）；要证明**被测的 CLI 子进程**，必须读进程表。实测结�
 | `powershell_pipes_arrive_without_a_bom` | B1 + B2（B2 是修复的锚点） |
 | `powershell_refuses_angle_bracket_redirection` | B5 |
 | `the_secret_never_reaches_the_child_command_line` | D5 |
+| `passphrase_stdin_takes_the_same_redirected_path` | §1 的 passphrase 覆盖缺口的回归（cmd 管道 + PS 5.1 管道） |
 
 **反向验证**（证明 B2 的测试不是空转）：临时把剥离条件加上一个环境变量开关，令
 `A2S_REVERT_BOM_STRIP=1` 时跳过剥离，重跑：
@@ -173,7 +182,7 @@ test result: FAILED. 0 passed; 1 failed
 
 | 命令 | 结果 |
 |---|---|
-| `cargo test --test host_secret_stdin` | **11 passed / 0 failed**（原有 5 + 新增 6） |
+| `cargo test --test host_secret_stdin` | **11 passed / 0 failed**（原有 5 + 新增 6）。收尾补的 `passphrase_stdin_takes_the_same_redirected_path` 未在本机跑过，全量应为 12 |
 | `cargo test --lib store::` / `secrets::` / `russh_impl::channel` | 29 / 21 / 11 passed |
 | `cargo test --lib`（全量） | 856 passed / 4 failed / 1 ignored |
 | `cargo clippy --bin agent2ssh --test host_secret_stdin -- -D warnings` | 通过 |

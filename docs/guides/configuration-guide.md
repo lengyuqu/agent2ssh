@@ -370,7 +370,9 @@ denied_commands = ["rm -rf *", "mkfs *"]
 
 ## CLI 主机凭据输入
 
-`agent2ssh host add` 支持 `--password-stdin` 或 `--passphrase-stdin`：从重定向的标准输入读到 EOF，去掉末尾一个 LF 或 CRLF，保留其余空格和换行。两者不能同时使用，且不能与对应的 `--password` 或 `--passphrase` 同时使用。空输入、非 UTF-8 和超过 65536 字节的输入会被拒绝；标准输入直接连接终端时也会拒绝，避免输入被回显。
+`agent2ssh host add` 支持 `--password-stdin` 或 `--passphrase-stdin`：从重定向的标准输入读到 EOF，去掉末尾一个 LF 或 CRLF，保留其余空格和换行；若开头是 UTF-8 BOM（`EF BB BF`），这三个字节会被丢弃，再做空值检查。两者不能同时使用，且不能与对应的 `--password` 或 `--passphrase` 同时使用。空输入、非 UTF-8 和超过 65536 字节的输入会被拒绝；标准输入直接连接终端时也会拒绝，避免输入被回显。
+
+BOM 剥离不是宽容，而是 Windows PowerShell 5.1 的必需处理：5.1 把字符串管道给原生程序时会在值前写一个 UTF-8 BOM，`$OutputEncoding` 控制不了它（设成无 BOM 的编码器仍写一个，设成带 BOM 的会写成两个）。不剥离的话存下的口令会以不可见的 `U+FEFF` 开头，认证必然失败，而两端看起来完全一样。
 
 例如在 Bash 中交互输入密码（不要将实际密码写进命令或脚本）：
 
@@ -380,6 +382,29 @@ printf '\n' >&2
 printf '%s' "$ssh_password" | agent2ssh host add example --host example.com --password-stdin
 unset ssh_password
 ```
+
+`cmd.exe` 下用管道或 `<` 重定向都可以，只裁一个行尾：
+
+```bat
+echo %SSH_PASSWORD%| agent2ssh host add example --host example.com --password-stdin
+agent2ssh host add example --host example.com --password-stdin < password.txt
+```
+
+PowerShell 不能照抄 `<` 重定向：PowerShell 7 报 `"<" 运算符保留供将来使用`，Windows PowerShell 5.1 报 `The '<' operator is reserved for future use`，两者都在解析期就拒绝，跟本程序无关。改用管道读文件，且**不要加 `-Raw`**：
+
+```powershell
+# 推荐：逐行读取，末尾换行由 CLI 裁掉
+Get-Content .\password.txt | agent2ssh host add example --host example.com --password-stdin
+
+# 不推荐：-Raw 会保留文件自身的换行，PowerShell 再追加一个，两个里只裁一个，
+# 存下的口令末尾会多一个换行
+Get-Content -Raw .\password.txt | agent2ssh host add example --host example.com --password-stdin
+
+# 管道长度与其他非 ASCII 内容不受影响：5.1 的 BOM 由 CLI 剥离，不需要设置 $OutputEncoding
+"$env:SSH_PASSWORD" | agent2ssh host add example --host example.com --password-stdin
+```
+
+`--passphrase-stdin` 走同一个读路径（`read_redirected_host_secret`），因此上面 cmd 与 PowerShell 的写法对它同样适用。
 
 新输入方式要求凭据能够写入加密凭据库：例如在无头环境设置 `AGENT2SSH_MASTER_PASSWORD` 以初始化或解锁库；库不可用时操作失败，不会把新密码写成明文。主密码环境变量本身也可能被同用户进程或子进程读取，应按运行环境保护。旧 `--password` 和 `--passphrase` 保持兼容，它们的值可能出现在进程参数中；旧密码入口的锁库明文回退行为不变。`--password-stdin` 与 `--passphrase-stdin` 使用同一个标准输入，需在一次调用中选择一个。
 
