@@ -160,47 +160,27 @@ struct TestDaemonCleanup {
 }
 impl Drop for TestDaemonCleanup {
     fn drop(&mut self) {
-        // On failure, stop only the synthetic daemon over its isolated socket;
-        // do not fall back to a numeric PID signal.
-        let _ = (|| -> std::io::Result<()> {
-            let record: serde_json::Value =
-                serde_json::from_slice(&std::fs::read(self.dir.join("daemon.instance.json"))?)?;
-            let mut stream = UnixStream::connect(self.dir.join(".daemon-ipc/s"))?;
-            stream.set_read_timeout(Some(Duration::from_secs(1)))?;
-            stream.set_write_timeout(Some(Duration::from_secs(1)))?;
-            let exchange =
-                |stream: &mut UnixStream, value: serde_json::Value| -> std::io::Result<()> {
-                    let bytes = serde_json::to_vec(&value)?;
-                    stream.write_all(&(bytes.len() as u32).to_be_bytes())?;
-                    stream.write_all(&bytes)?;
-                    let mut header = [0; 4];
-                    stream.read_exact(&mut header)?;
-                    let len = u32::from_be_bytes(header) as usize;
-                    if len > 16 * 1024 {
-                        return Err(std::io::ErrorKind::InvalidData.into());
-                    }
-                    let mut body = vec![0; len];
-                    stream.read_exact(&mut body)?;
-                    Ok(())
-                };
-            exchange(
-                &mut stream,
-                serde_json::json!({"type":"hello","version":1,"client_nonce":NONCE}),
-            )?;
-            exchange(
-                &mut stream,
-                serde_json::json!({"type":"authorize","version":1,"admin_token":TOKEN}),
-            )?;
-            exchange(
-                &mut stream,
-                serde_json::json!({"type":"stop","version":1,"instance_id":record["instance_id"],"expect_pid":self.pid,"request_id":NONCE}),
-            )
-        })();
+        // Stop only the synthetic daemon, through the same Mach channel the
+        // product uses. The discovery socket cannot stop anything, and a
+        // numeric PID signal is never the fallback.
+        if std::fs::read_to_string(self.dir.join("daemon.pid"))
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u32>().ok())
+            != Some(self.pid)
+        {
+            return;
+        }
+        let _ = Command::new(env!("CARGO_BIN_EXE_agent2ssh"))
+            .args(["daemon", "stop"])
+            .env("AGENT2SSH_CONFIG_DIR", &self.dir)
+            .env_remove("AGENT2SSH_ALLOW_UNBOUND_HTTP_SHUTDOWN")
+            .stdin(Stdio::null())
+            .output();
     }
 }
 #[test]
 #[serial_test::serial]
-fn real_spawn_reports_unbound_and_can_be_cleaned_up_over_test_ipc() {
+fn real_spawn_reports_unbound_and_stops_over_the_mach_channel() {
     let dir = tempfile::Builder::new()
         .prefix("a2s-start-")
         .tempdir_in("/tmp")
@@ -220,9 +200,8 @@ fn real_spawn_reports_unbound_and_can_be_cleaned_up_over_test_ipc() {
     };
     assert!(!started.endpoint_authenticated);
     assert_eq!(daemon_pid_state(started.pid), DaemonPidState::Unverified);
-    let instance: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(dir.path().join("daemon.instance.json")).unwrap())
-            .unwrap();
+    // The socket still answers the keyless hello a start uses as a readiness
+    // clue. It no longer authorizes anything.
     let mut stream = UnixStream::connect(dir.path().join(".daemon-ipc/s")).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
@@ -232,16 +211,8 @@ fn real_spawn_reports_unbound_and_can_be_cleaned_up_over_test_ipc() {
         serde_json::json!({"type":"hello","version":1,"client_nonce":NONCE}),
     );
     assert_eq!(read(&mut stream)["pid"], started.pid);
-    send(
-        &mut stream,
-        serde_json::json!({"type":"authorize","version":1,"admin_token":TOKEN}),
-    );
-    assert_eq!(read(&mut stream)["result"], "ok");
-    send(
-        &mut stream,
-        serde_json::json!({"type":"stop","version":1,"instance_id":instance["instance_id"],"expect_pid":started.pid,"request_id":NONCE}),
-    );
-    assert_eq!(read(&mut stream)["result"], "accepted");
+    drop(stream);
+    agent2ssh::daemon_control::stop_daemon_process(started.pid).unwrap();
     let until = std::time::Instant::now() + Duration::from_secs(10);
     while dir.path().join("daemon.pid").exists() && std::time::Instant::now() < until {
         std::thread::sleep(Duration::from_millis(25));

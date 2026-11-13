@@ -882,15 +882,14 @@ fn renamed_daemon_is_reported_healthy_but_not_unsafely_stopped() {
         assert!(start.status.success());
         assert!(String::from_utf8_lossy(&start.stdout).contains("already running"));
     }
-    let stop = cli("stop");
-    assert!(!stop.status.success());
-    assert!(
-        String::from_utf8_lossy(&stop.stderr).contains(if cfg!(target_os = "macos") {
-            "not bound"
-        } else {
-            "cannot be safely identified"
-        })
-    );
+    // The macOS stop goes through the Mach control channel, which checks the
+    // kernel's view of the process and never its executable name. A renamed
+    // daemon is stopped there, so that stop is left for the end of the test.
+    if !cfg!(target_os = "macos") {
+        let stop = cli("stop");
+        assert!(!stop.status.success());
+        assert!(String::from_utf8_lossy(&stop.stderr).contains("cannot be safely identified"));
+    }
     assert_eq!(
         std::fs::read_to_string(daemon.pid_file()).unwrap(),
         pid.to_string()
@@ -929,14 +928,26 @@ fn renamed_daemon_is_reported_healthy_but_not_unsafely_stopped() {
             diagnosis.verdict,
             agent2ssh::daemon_control::DaemonVerdict::RunningUnhealthy
         );
+        #[cfg(not(target_os = "macos"))]
         assert!(agent2ssh::tauri_commands::daemon_stop().is_err());
     }
     assert!(!cli("start").status.success());
-    assert!(!cli("stop").status.success());
-    assert_eq!(
-        std::fs::read_to_string(daemon.pid_file()).unwrap(),
-        pid.to_string()
-    );
+    if cfg!(target_os = "macos") {
+        // Neither the name nor the silent HTTP endpoint is on the Mach path.
+        let stop = cli("stop");
+        assert!(
+            stop.status.success(),
+            "{}",
+            String::from_utf8_lossy(&stop.stderr)
+        );
+        assert!(!daemon.pid_file().exists());
+    } else {
+        assert!(!cli("stop").status.success());
+        assert_eq!(
+            std::fs::read_to_string(daemon.pid_file()).unwrap(),
+            pid.to_string()
+        );
+    }
     std::env::set_var(ADDR_ENV, previous_addr);
 }
 
@@ -960,7 +971,11 @@ fn wrong_admin_token_never_signals_the_real_daemon() {
     assert!(
         message.contains("did not accept this config's admin token")
             || message.contains("could not be authenticated for shutdown")
-            || (cfg!(target_os = "macos") && message.contains("not bound")),
+            // macOS: the handshake holds, the daemon drops the stop that
+            // carries the wrong token without a reply, and the client can
+            // only report that it saw no exit.
+            || (cfg!(target_os = "macos")
+                && (message.contains("not bound") || message.contains("exit cannot be verified"))),
         "{message}"
     );
     assert!(alive && pid_retained);

@@ -471,7 +471,7 @@ macOS 的普通 PID 发现、状态诊断和显式兼容停止也使用有界、
 
 **macOS 启动和复用（#22）**：启动与复用健康检查不再向未经绑定的 HTTP 端点发送管理员 token。已存在的 PID/端点不能证明为期望实例，因此不会自动复用，也不会覆盖记录；请检查现有实例。新启动时检查直接创建的子进程、PID/实例/socket 记录与匿名健康响应；它们只是就绪线索，CLI 和桌面会明确提示 HTTP 端点身份未绑定、未认证。这不证明随后其他业务 API 连接的对端，业务 HTTP API 仍按其各自调用方式使用 token。
 
-**macOS 本地 IPC 发现（#22）**：普通停止会在锁内读取实例快照，在同一 socket 上进行不含 token 的 hello，核对对端 PID、握手前后的内核 audit token、nonce 与实例 ID，并在通信后重新核对记录及 socket 的内容和 inode。记录缺失、矛盾、更换、对端异常、audit token 不可读取或发生变化、通信超时均拒绝并保留记录；就算一致也仍是 `Unbound`，不发送 token、停止或信号，也不自动重连。hello 的通信时限为 1.5 秒；文件锁各有独立上限，文件系统调用本身不保证总时限。Unix socket 对端 PID、audit token、实例 ID 和记录不能证明后续接收者与稳定进程对象绑定，读取两次一致也不构成此证明。
+**macOS 本地 IPC 发现（#22）**：socket 只用于发现，不能停止 daemon：它回答一次不含 token 的 hello，收到其他任何消息就断开，不读取管理员令牌。普通停止不经过它（见下一段的 Mach 路径）；显式的 `--allow-unbound-graceful` 在发送 HTTP 请求之前，会在锁内读取实例快照，在同一 socket 上进行不含 token 的 hello，核对对端 PID、握手前后的内核 audit token、nonce 与实例 ID，并在通信后重新核对记录及 socket 的内容和 inode。记录缺失、矛盾、更换、对端异常、audit token 不可读取或发生变化、通信超时均拒绝并保留记录；就算一致也仍是 `Unbound`，这条 socket 上不发送 token、停止或信号，也不自动重连。hello 的通信时限为 1.5 秒；文件锁各有独立上限，文件系统调用本身不保证总时限。Unix socket 对端 PID、audit token、实例 ID 和记录不能证明后续接收者与稳定进程对象绑定，读取两次一致也不构成此证明。
 
 显式旧式 HTTP 停止仍是未绑定的风险例外：如果发现 IPC 实例或 socket 记录，客户端先进行上面的无密钥发现；IPC 证据不一致、不可检查或超时时，不发送 HTTP token 或关闭请求；发送前保留原 socket，再次复核记录、对端 PID 与 audit token，若连接关闭、出现非预期数据或观察到变化则拒绝。旧 daemon 没有 IPC 记录时仍可使用该明确例外；即使检查一致，也不能证明 HTTP 端点与 IPC 端点属于同一进程，token 仍可能暴露给错误端点。旧程序不遵守锁时的路径变化仍存在竞态。
 

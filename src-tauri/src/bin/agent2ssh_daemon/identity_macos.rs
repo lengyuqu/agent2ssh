@@ -1,10 +1,10 @@
-//! macOS local IPC server. Client-side process binding is a separate condition;
-//! receipt of an authorization here does not prove that the client has it.
+//! macOS local discovery socket. It answers one keyless hello and nothing
+//! else: it never reads the admin token and never stops the daemon. Stopping
+//! is the Mach control channel's job (`daemon_identity::macos_mach`); two
+//! local protocols that can both stop the process are not allowed to coexist.
 use agent2ssh::daemon_identity::{macos::Instance, MAX_FRAME, VERSION};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{io, sync::Arc};
-use subtle::ConstantTimeEq;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{UnixListener, UnixStream},
@@ -13,20 +13,13 @@ use tokio::{
     time::{timeout, Duration},
 };
 
+// `authorize` and `stop` are not variants on purpose: an unknown tag fails to
+// parse, so a frame carrying a token is wiped without being interpreted.
 #[derive(Deserialize)]
 #[serde(tag = "type", deny_unknown_fields)]
 enum Request {
     #[serde(rename = "hello")]
     Hello { version: u32, client_nonce: String },
-    #[serde(rename = "authorize")]
-    Authorize { version: u32, admin_token: String },
-    #[serde(rename = "stop")]
-    Stop {
-        version: u32,
-        instance_id: String,
-        expect_pid: u32,
-        request_id: String,
-    },
 }
 #[derive(Serialize)]
 #[serde(tag = "type")]
@@ -37,16 +30,6 @@ enum Response<'a> {
         client_nonce: &'a str,
         instance_id: &'a str,
         pid: u32,
-    },
-    #[serde(rename = "authorized")]
-    Authorized { version: u32, result: &'static str },
-    #[serde(rename = "stop_result")]
-    Stop {
-        version: u32,
-        instance_id: &'a str,
-        request_id: &'a str,
-        result: &'static str,
-        checked_pid: u32,
     },
 }
 fn id(s: &str) -> bool {
@@ -65,7 +48,7 @@ async fn read(stream: &mut UnixStream) -> io::Result<Request> {
     let mut bytes = vec![0; n];
     stream.read_exact(&mut bytes).await?;
     let result = serde_json::from_slice(&bytes).map_err(|_| invalid());
-    // Minimize the lifetime of token-containing frames in the buffer.
+    // A client may still send a token-bearing frame this server rejects.
     use zeroize::Zeroize;
     bytes.zeroize();
     result
@@ -75,7 +58,7 @@ async fn write(stream: &mut UnixStream, response: &Response<'_>) -> io::Result<(
     stream.write_u32(bytes.len() as u32).await?;
     stream.write_all(&bytes).await
 }
-async fn handle(mut stream: UnixStream, instance: Instance, token: Arc<String>) -> io::Result<()> {
+async fn handle(mut stream: UnixStream, instance: Instance) -> io::Result<()> {
     // Unix permissions alone are not authentication. Reject other UIDs even if
     // directory permissions are changed while the daemon is running.
     let cred = stream.peer_cred()?;
@@ -99,60 +82,15 @@ async fn handle(mut stream: UnixStream, instance: Instance, token: Arc<String>) 
         },
     )
     .await?;
-    let supplied = match read(&mut stream).await? {
-        Request::Authorize {
-            version: VERSION,
-            admin_token,
-        } => zeroize::Zeroizing::new(admin_token),
-        _ => return Err(invalid()),
-    };
-    // Fixed-size digests avoid a content-dependent comparison of the secrets.
-    let supplied_hash = Sha256::digest(supplied.as_bytes());
-    let expected_hash = Sha256::digest(token.as_bytes());
-    if !bool::from(supplied_hash.ct_eq(&expected_hash)) {
-        return Err(invalid());
-    }
-    drop(supplied);
-    write(
-        &mut stream,
-        &Response::Authorized {
-            version: VERSION,
-            result: "ok",
-        },
-    )
-    .await?;
-    let request_id = match read(&mut stream).await? {
-        Request::Stop {
-            version: VERSION,
-            instance_id,
-            expect_pid,
-            request_id,
-        } if instance_id == instance.instance_id
-            && expect_pid == instance.pid
-            && id(&request_id) =>
-        {
-            request_id
-        }
-        _ => return Err(invalid()),
-    };
-    let sent = write(
-        &mut stream,
-        &Response::Stop {
-            version: VERSION,
-            instance_id: &instance.instance_id,
-            request_id: &request_id,
-            result: "accepted",
-            checked_pid: instance.pid,
-        },
-    )
-    .await;
-    // A lost receipt is an unknown outcome. Never replay it automatically.
-    super::IPC_SHUTDOWN_REQUESTED.notify_one();
-    sent
+    // The client revalidates on this connection and expects it to stay open
+    // and silent, so hold it until the peer closes or the caller's deadline.
+    // Anything the peer sends now is discarded and ends the connection.
+    let mut rest = [0u8; 1];
+    let _ = stream.read(&mut rest).await;
+    Ok(())
 }
 
-pub async fn serve(listener: UnixListener, instance: Instance, token: String) {
-    let token = Arc::new(token);
+pub async fn serve(listener: UnixListener, instance: Instance) {
     let limit = Arc::new(Semaphore::new(16));
     let mut tasks = JoinSet::new();
     loop {
@@ -162,10 +100,9 @@ pub async fn serve(listener: UnixListener, instance: Instance, token: String) {
                 let Ok((stream, _)) = result else { break };
                 let Ok(permit) = limit.clone().try_acquire_owned() else { continue };
                 let instance = instance.clone();
-                let token = token.clone();
                 tasks.spawn(async move {
                     let _permit = permit;
-                    let _ = timeout(Duration::from_secs(5), handle(stream, instance, token)).await;
+                    let _ = timeout(Duration::from_secs(5), handle(stream, instance)).await;
                 });
             }
         }

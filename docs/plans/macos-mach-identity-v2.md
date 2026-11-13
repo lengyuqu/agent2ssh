@@ -1,6 +1,6 @@
 # macOS daemon 身份绑定候选协议：评审稿
 
-状态（2026-11-13，`88856f6`）：**程序路径已落地，未完成正式验收，不是 `Bound`**。macOS 的默认 `daemon stop` 已按本稿的两端点形态实现（`daemon_identity/macos_mach.rs`、`macos_mach_control.c`），但省去了可信代码要求，发现名也不是 launchd 托管；逐步差异见下文「已落地路径与本稿的差异」，剩余收口在 [CNB #39](https://cnb.cool/zdzso/agent2ssh/-/issues/39)。这是 #22 在已有 [v1](daemon-identity-v1.md) 安全默认之上的 macOS 细化。本稿不是 `macos-mach-lab` 的 C 结构体规范，也没有选定最终发布者身份。不得把实验特性、ad-hoc CDHash、环境变量或实例文件作为生产信任根。
+状态（2026-11-14）：**程序路径已落地，未完成正式验收，不是 `Bound`**。macOS 的默认 `daemon stop` 已按本稿的两端点形态实现（`daemon_identity/macos_mach.rs`、`macos_mach_control.c`），但省去了可信代码要求，发现名也不是 launchd 托管；逐步差异见下文「已落地路径与本稿的差异」，剩余收口在 [CNB #39](https://cnb.cool/zdzso/agent2ssh/-/issues/39)。这是 #22 在已有 [v1](daemon-identity-v1.md) 安全默认之上的 macOS 细化。本稿不是 `macos-mach-lab` 的 C 结构体规范，也没有选定最终发布者身份。不得把实验特性、ad-hoc CDHash、环境变量或实例文件作为生产信任根。
 
 ## 对象与信任边界
 
@@ -20,11 +20,11 @@
 
 ## 已落地路径与本稿的差异
 
-按源码核对，未重跑测试。左列是上面的步骤，右列是 `88856f6` 的实际行为。
+按源码核对，并在本机重跑了真实 daemon 测试（结果见 [v1](daemon-identity-v1.md) 第 0 节）。左列是上面的步骤，右列是代码的实际行为。
 
 | 步骤 | 代码现状 | 差异 |
 |---|---|---|
-| D 由用户域服务管理器持有 | daemon 启动时自己分配 D，设 `MPG_IMMOVABLE_RECEIVE`，再用已弃用的 `bootstrap_register` 以 `org.agent2ssh.<config_id>` 注册 | 不是 launchd 托管的 `MachServices`。名字注册竞态、进程退出后的回收、崩溃残留未验收 |
+| D 由用户域服务管理器持有 | daemon 启动时自己分配 D，设 `MPG_IMMOVABLE_RECEIVE`，再用已弃用的 `bootstrap_register` 以 `org.agent2ssh.<config_id>` 注册 | 不是 launchd 托管的 `MachServices`。本机已验收：正常退出和 SIGKILL 后名字被回收、同一配置可再次注册；名字被占用时启动失败且不留记录。注册竞态与其他系统版本未验证 |
 | P 不可转移 | P 同样设 `MPG_IMMOVABLE_RECEIVE`，每次 hello 回复时 `MAKE_SEND` | 一致。客户端仍不能从发送权验证 guard |
 | 可信发布策略、代码要求、entitlement | 不检查。`macos_codesign` 原语保留作诊断，Mach 停止路径不调用它 | 明确省去：代码签名不是这条路径的门槛。信任只到同 euid 加内核 audit token |
 | 1 发现：锁内读记录，不读 token | 锁内读 PID、实例记录、配置标识（`macos::mach_target`），锁随即释放；紧接着读已有 token | token 在握手之前已进入客户端内存。只取 D 的发送权这一点一致 |
@@ -34,7 +34,9 @@
 | 5 授权与停止 | token、nonce、实例、期望 PID 发往保留的 P。daemon 只在 P 上处理 stop，要求发送者 audit 与 hello 会话相同、token 常量时间比较相同，会话一次性作废；D 上的 stop 被丢弃 | token 读取时机见第 1 步，其余一致 |
 | 6 结果与清理 | 回执须来自与 hello 回复相同的 audit token，nonce 与 PID 相符，再等 `NOTE_EXIT` 至多 8 秒，三项成立才报告已退出；否则未知结果，不重试、不回退、不发信号 | 客户端不做「锁内比对原快照后清理」：记录由 daemon 自行清理，客户端只在没有身份残留时删除仍匹配的 PID 记录，否则报错保留 |
 
-另有一处本稿没有覆盖：macOS daemon 同时监听 v1 第 4.1 节的 Unix socket 协议，`authorize` + `stop` 之后同样会触发关闭。两条停止协议并存与 v1 的 D4 冲突，处理方式未决（#39）。
+macOS daemon 还监听 v1 第 4.1 节的 Unix socket，但它只回答无密钥 hello，不认识 `authorize` 和 `stop`，不能停止 daemon。本稿的 Mach 路径是 macOS 上唯一能触发关闭的本机协议。
+
+D 被同 uid 的其他进程占用时（本机用测试进程在 daemon 崩溃后抢注同名实测）：客户端只向它发出第 2 步的 hello，其中没有令牌；得不到相符的回复就拒绝，不进入第 5 步。
 
 ## 发布与迁移待办
 
@@ -42,7 +44,7 @@
 - launchd job 的注册、禁用、升级与卸载必须有明确所有权及隔离配置目录；崩溃后残留文件不被新实例自动覆盖。已有实验先注销测试 job，再显式按 PID 和实例核对恢复；它不构成自动恢复方案。
 - daemon 必须以受限 entitlement 独立签名，外层 bundle、CLI 和更新包必须与实际发布信任策略一致。一次 ad-hoc 调试包重签通过仅说明本机可行；正式签名、bundle 验证、公证、更新和回滚均未验证。固定 hash 的更新/回滚与撤销策略必须先定案。
 - 发布评审可在隔离、不会被并发修改的产物目录中运行 `python3 scripts/check_macos_daemon_signature.py <daemon-binary> --team-id <trusted-team> --identifier <trusted-identifier>`。该工具要求由发布方提供预期 Team ID 和标识，验证 Apple Developer ID Application 的代码要求，并逐架构检查 hardened runtime 和已知不允许的 entitlement；失败返回非零。它是**静态检查**，不为运行时客户端提供信任根，不检查公证、外层包、版本回滚或检查后的文件替换，也不能证明端点归属。Team ID、标识与可接受版本仍须通过可信发布流程固定；不要从待测 daemon 自报结果自动取得。证书要求的候选组合参照 Apple 的 [代码签名要求说明](https://developer.apple.com/documentation/technotes/tn3127-inside-code-signing-requirements/)；正式项目签名的成功侧尚未验证。
-- 生产接入前还须审查 Mach 消息资源释放、发送失败与通知、队列和会话耗尽、fork/exec、跨用户权限及最低支持系统。`bootstrap_register` 已弃用；现状是程序路径仍在用它自注册发现名（构建时关闭了弃用告警），替换为受管注册或验收其残留处理是 #39 的收口项。
+- 生产接入前还须审查 Mach 消息资源释放、发送失败与通知、队列和会话耗尽、fork/exec、跨用户权限及最低支持系统。`bootstrap_register` 已弃用；现状是程序路径仍在用它自注册发现名（构建时关闭了弃用告警）。它的回收与残留处理已在本机验收，换成受管注册属于正式签名发布的范围，目前不做。
 
 ## 证据和剩余验收
 

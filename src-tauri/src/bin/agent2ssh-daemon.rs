@@ -116,9 +116,9 @@ static SHUTDOWN_REQUESTED: tokio::sync::Notify = tokio::sync::Notify::const_new(
 #[cfg(target_os = "macos")]
 static IPC_SHUTDOWN_REQUESTED: tokio::sync::Notify = tokio::sync::Notify::const_new();
 
-// Production Mach control wakes the same drain as the laboratory callback.
-// The C object keeps a weak no-op so library tests link; this strong
-// definition is the one the daemon process runs.
+// The Mach control channel is the only local protocol that wakes this drain
+// in a production build. The C object keeps a weak no-op so library tests
+// link; this strong definition is the one the daemon process runs.
 #[cfg(target_os = "macos")]
 #[no_mangle]
 pub extern "C" fn a2s_mach_control_notify_shutdown() {
@@ -126,7 +126,7 @@ pub extern "C" fn a2s_mach_control_notify_shutdown() {
 }
 
 // This callback exists only in an explicitly enabled native laboratory build.
-// It wakes the same drain path as the existing macOS IPC handler.
+// It wakes the same drain path as the production Mach control channel.
 #[cfg(all(target_os = "macos", feature = "macos-mach-lab"))]
 #[no_mangle]
 pub extern "C" fn a2s_mach_lab_notify_shutdown() {
@@ -6127,7 +6127,6 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(identity_macos::serve(
             listener,
             identity_publication.instance.clone(),
-            token.clone(),
         ))
     };
     #[cfg(all(target_os = "macos", feature = "macos-mach-lab"))]
