@@ -279,6 +279,7 @@ export const zh: Record<string, string> = {
   "Connect {name}": "连接 {name}",
   "Remove {name}": "删除 {name}",
   "No hosts configured": "尚未配置主机",
+  "Add one on the right, or import a Netcatty backup.": "在右侧添加一台，或从 Netcatty 备份导入。",
   "No hosts match filters": "没有符合筛选条件的主机",
   "Remove host {name}?": "删除主机 {name}？",
   "Any open sessions or forwards to this host will become orphaned.": "该主机上的会话或转发会变成孤立资源。",
@@ -591,6 +592,8 @@ export const zh: Record<string, string> = {
   "MCP server for AI agent integration": "用于 AI agent 集成的 MCP server",
   "This wizard will help you get started in a few steps.": "该向导会通过几个步骤帮助你完成初始化。",
   "Import host profiles from ~/.ssh/config. Existing profiles will not be overwritten.": "从 ~/.ssh/config 导入主机配置。已有配置不会被覆盖。",
+  "Or import a Netcatty vault backup. Existing hosts are skipped, never overwritten.":
+    "也可以导入一份 Netcatty 保险库备份。同名主机只会跳过，绝不覆盖。",
   "Importing...": "导入中...",
   "Imported {count} host(s):": "已导入 {count} 个主机：",
   "No new hosts found. You may not have a ~/.ssh/config file, or all hosts are already imported. You can add hosts manually later.": "未发现新主机。你可能没有 ~/.ssh/config 文件，或所有主机都已导入。稍后仍可手动添加主机。",
@@ -940,7 +943,6 @@ export const zh: Record<string, string> = {
   "Open in terminal": "在终端中打开",
   "Opening...": "正在打开…",
   "Import from Netcatty": "从 Netcatty 导入",
-  "Import hosts from a Netcatty backup": "从 Netcatty 备份导入主机",
   "Reads a Netcatty vault backup (encrypted or plain JSON) and adds its hosts, private keys and command snippets. Existing hosts are skipped, never overwritten.":
     "读取 Netcatty 保险库备份（加密或明文 JSON），导入其中的主机、私钥与命令片段。同名主机只会跳过，绝不覆盖。",
   "Choose backup file…": "选择备份文件…",

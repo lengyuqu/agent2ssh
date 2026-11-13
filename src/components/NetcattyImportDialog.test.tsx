@@ -55,6 +55,17 @@ describe("NetcattyImportDialog", () => {
     vi.clearAllMocks();
   });
 
+  it("stays off screen until it is opened", () => {
+    renderDialog({ open: false });
+    expect(screen.queryByText("Import from Netcatty")).toBeNull();
+  });
+
+  it("closes from the file picker", () => {
+    const { onClose } = renderDialog();
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   it("starts on the file picker and asks the backend for a dry run", async () => {
     mockApi.openDialog.mockResolvedValue("/tmp/backup.json");
     mockApi.netcattyImport.mockResolvedValue(makeReport({ dryRun: true }));

@@ -40,6 +40,8 @@ type Props = {
   editingHost?: HostProfile | null;
   onCancelEdit?: () => void;
   onSaved: () => void | Promise<void>;
+  /** Open the Netcatty importer. Shown only while adding, once a host exists. */
+  onImportNetcatty?: () => void;
 };
 
 function formFromHost(host: HostProfile) {
@@ -73,6 +75,7 @@ export default function AddHostForm({
   editingHost,
   onCancelEdit,
   onSaved,
+  onImportNetcatty,
 }: Props) {
   const { t } = useI18n();
   const { showToast } = useToast();
@@ -159,6 +162,17 @@ export default function AddHostForm({
       <div className="flex items-center gap-2 font-semibold">
         <Plus size={16} className="text-muted-foreground" />
         {isEditing ? t("Edit Host") : t("Add Host")}
+        {!isEditing && hosts.length > 0 && onImportNetcatty && (
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            className="ml-auto"
+            onClick={onImportNetcatty}
+          >
+            {t("Import from Netcatty")}
+          </Button>
+        )}
         {isEditing && (
           <IconButton className="ml-auto" type="button" title={t("Cancel")} onClick={onCancelEdit}>
             <X size={14} />

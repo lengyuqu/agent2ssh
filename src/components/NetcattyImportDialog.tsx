@@ -1,11 +1,12 @@
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { AlertTriangle, FileUp } from "lucide-react";
+import { AlertTriangle, FileUp, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import { useI18n } from "../i18n";
 import type { NetcattyImportReport } from "../types";
 import { Button } from "./ui/button";
 import { Dialog } from "./ui/dialog";
+import { IconButton } from "./ui/icon-button";
 import { Spinner } from "./ui/state";
 import { useToast } from "./ui/toast";
 
@@ -92,12 +93,38 @@ export default function NetcattyImportDialog({ open, onClose, onImported }: Prop
 
   const busy = stage === "importing";
 
+  // The overlay only closes on a click outside the card. Escape is the other
+  // way out, and it has to be silent while an import is writing.
+  useEffect(() => {
+    if (!open || busy) return;
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") onClose();
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [open, busy, onClose]);
+
+  // `open` is the only thing that should put this card on screen. The hosts
+  // page keeps the component mounted, so rendering <Dialog> unconditionally
+  // pops the importer on every visit — and onClose only flips `open`, which
+  // then changes nothing.
+  if (!open) return null;
+
   return (
     <Dialog onClose={busy ? () => {} : onClose} className="w-[560px] max-w-[92vw]">
       <div className="space-y-4">
         <div className="flex items-center gap-2 text-base font-semibold">
           <FileUp size={18} className="text-muted-foreground" />
           {t("Import from Netcatty")}
+          <IconButton
+            className="ml-auto"
+            variant="ghost"
+            title={t("Close")}
+            onClick={onClose}
+            disabled={busy}
+          >
+            <X size={14} />
+          </IconButton>
         </div>
 
         <p className="text-sm text-muted-foreground">

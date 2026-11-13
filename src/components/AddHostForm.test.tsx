@@ -44,7 +44,28 @@ function editingHost(overrides: Partial<HostProfile> = {}): HostProfile {
   };
 }
 
-function renderForm(host: HostProfile) {
+function renderForm(host: HostProfile | null, hosts: HostProfile[] = host ? [host] : []) {
+  const onImportNetcatty = vi.fn();
+  render(
+    <I18nProvider>
+      <ToastProvider>
+        <AddHostForm
+          hosts={hosts}
+          groups={[{ id: "default", name: "default", color: "#4A6CF7", sort_order: 0 }]}
+          proxies={[]}
+          initialGroup="default"
+          editingHost={host}
+          onSaved={vi.fn().mockResolvedValue(undefined)}
+          onCancelEdit={vi.fn()}
+          onImportNetcatty={onImportNetcatty}
+        />
+      </ToastProvider>
+    </I18nProvider>
+  );
+  return { onImportNetcatty };
+}
+
+function renderEditingForm(host: HostProfile) {
   render(
     <I18nProvider>
       <ToastProvider>
@@ -73,7 +94,7 @@ describe("AddHostForm edit round trip", () => {
     // this field turns the host's post-connect command off silently. The form
     // never renders it, so the only place to notice is here.
     const host = editingHost({ init_command: "cd /app && source env.sh" });
-    renderForm(host);
+    renderEditingForm(host);
 
     fireEvent.submit(screen.getByText("Update host").closest("form")!);
 
@@ -89,5 +110,35 @@ describe("AddHostForm edit round trip", () => {
 
     await waitFor(() => expect(updateHost).toHaveBeenCalledTimes(1));
     expect(updateHost.mock.calls[0][1].init_command).toBeNull();
+  });
+
+  it("offers the Netcatty import beside Add Host once a host exists", () => {
+    const host = editingHost();
+    const { onImportNetcatty } = renderForm(null, [host]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Import from Netcatty" }));
+    expect(onImportNetcatty).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves the Netcatty import off an empty list and off an edit", () => {
+    const { unmount } = render(
+      <I18nProvider>
+        <ToastProvider>
+          <AddHostForm
+            hosts={[]}
+            groups={[{ id: "default", name: "default", color: "#4A6CF7", sort_order: 0 }]}
+            proxies={[]}
+            initialGroup="default"
+            onSaved={vi.fn()}
+            onImportNetcatty={vi.fn()}
+          />
+        </ToastProvider>
+      </I18nProvider>
+    );
+    expect(screen.queryByRole("button", { name: "Import from Netcatty" })).toBeNull();
+    unmount();
+
+    renderEditingForm(editingHost());
+    expect(screen.queryByRole("button", { name: "Import from Netcatty" })).toBeNull();
   });
 });

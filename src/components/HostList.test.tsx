@@ -69,9 +69,17 @@ describe("HostList", () => {
   });
 
   it("shows the empty state when no hosts are configured", () => {
-    renderHostList({ hosts: [] });
+    const { props } = renderHostList({ hosts: [] });
 
     expect(screen.getByText("No hosts configured")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Import from Netcatty" }));
+    expect(props.onImportNetcatty).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the Netcatty import off the list header once hosts exist", () => {
+    renderHostList();
+
+    expect(screen.queryByRole("button", { name: "Import from Netcatty" })).toBeNull();
   });
 
   it("selects a host when its row is clicked", () => {

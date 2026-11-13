@@ -10,6 +10,8 @@ import { InlineAlert } from "./ui/state";
 interface SetupWizardProps {
   onComplete: () => void;
   onSkip: () => void;
+  /** Open the Netcatty vault importer. Same dialog the host list uses. */
+  onImportNetcatty: () => void;
 }
 
 const TOTAL_STEPS = 5;
@@ -26,7 +28,7 @@ const codeCls = "rounded bg-muted px-1.5 py-0.5 font-mono text-sm text-primary";
 const hintCls = "text-sm text-muted-foreground";
 const stepTextCls = "m-0 leading-relaxed text-foreground/80";
 const previewCls = "rounded-lg border border-border bg-muted/40 p-3.5";
-export default function SetupWizard({ onComplete, onSkip }: SetupWizardProps) {
+export default function SetupWizard({ onComplete, onSkip, onImportNetcatty }: SetupWizardProps) {
   const { t } = useI18n();
   const [step, setStep] = useState(0);
   const [importedHosts, setImportedHosts] = useState<HostProfile[]>([]);
@@ -201,6 +203,16 @@ export default function SetupWizard({ onComplete, onSkip }: SetupWizardProps) {
                   {t("No new hosts found. You may not have a ~/.ssh/config file, or all hosts are already imported. You can add hosts manually later.")}
                 </p>
               )}
+              <div className="flex flex-col gap-3.5 border-t border-border pt-3.5">
+                <p className={stepTextCls}>
+                  {t(
+                    "Or import a Netcatty vault backup. Existing hosts are skipped, never overwritten.",
+                  )}
+                </p>
+                <Button variant="secondary" onClick={onImportNetcatty} className="self-start">
+                  {t("Import from Netcatty")}
+                </Button>
+              </div>
             </div>
           )}
 

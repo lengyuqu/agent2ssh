@@ -791,17 +791,25 @@ export default function App() {
   // Render setup wizard overlay when active
   if (showWizard) {
     return (
-      <SetupWizard
-        onComplete={() => {
-          setShowWizard(false);
-          setWizardDismissed(true);
-          refresh().catch((err) => showToast("error", String(err)));
-        }}
-        onSkip={() => {
-          setShowWizard(false);
-          setWizardDismissed(true);
-        }}
-      />
+      <>
+        <SetupWizard
+          onComplete={() => {
+            setShowWizard(false);
+            setWizardDismissed(true);
+            refresh().catch((err) => showToast("error", String(err)));
+          }}
+          onSkip={() => {
+            setShowWizard(false);
+            setWizardDismissed(true);
+          }}
+          onImportNetcatty={() => setNetcattyOpen(true)}
+        />
+        <NetcattyImportDialog
+          open={netcattyOpen}
+          onClose={() => setNetcattyOpen(false)}
+          onImported={refresh}
+        />
+      </>
     );
   }
 
@@ -1153,11 +1161,6 @@ export default function App() {
                 onForgetOpenssh={handleForgetOpenssh}
                 onImportNetcatty={() => setNetcattyOpen(true)}
               />
-              <NetcattyImportDialog
-                open={netcattyOpen}
-                onClose={() => setNetcattyOpen(false)}
-                onImported={refresh}
-              />
               <AddHostForm
                 hosts={hosts}
                 groups={groups}
@@ -1166,6 +1169,7 @@ export default function App() {
                 editingHost={editingHost}
                 onCancelEdit={() => setEditingHost(null)}
                 onSaved={handleHostSaved}
+                onImportNetcatty={() => setNetcattyOpen(true)}
               />
             </div>
           )}
@@ -1262,6 +1266,11 @@ export default function App() {
       />
 
       <ConfirmHost />
+      <NetcattyImportDialog
+        open={netcattyOpen}
+        onClose={() => setNetcattyOpen(false)}
+        onImported={refresh}
+      />
     </div>
   );
 }

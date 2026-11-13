@@ -1,6 +1,5 @@
 import {
   Edit3,
-  FileUp,
   Folder,
   Plug,
   PlugZap,
@@ -342,9 +341,6 @@ export default function HostList({
         >
           <ShieldCheck size={15} />
         </IconButton>
-        <IconButton onClick={onImportNetcatty} title={t("Import hosts from a Netcatty backup")}>
-          <FileUp size={15} />
-        </IconButton>
       </div>
 
       <HostPolicyLine host={selectedNames.length === 1 ? selectedNames[0] : null} />
@@ -498,7 +494,12 @@ export default function HostList({
 
       <div className="max-h-[430px] overflow-auto pr-0.5">
         {hosts.length === 0 ? (
-          <EmptyState icon={Server} title={t("No hosts configured")} />
+          <EmptyState
+            icon={Server}
+            title={t("No hosts configured")}
+            description={t("Add one on the right, or import a Netcatty backup.")}
+            action={{ label: t("Import from Netcatty"), onClick: onImportNetcatty }}
+          />
         ) : filteredHosts.length === 0 ? (
           <EmptyState icon={Server} title={t("No hosts match filters")} />
         ) : (
