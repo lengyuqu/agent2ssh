@@ -1,0 +1,24 @@
+run 1 exit=0
+verified_owner_pid=78076 sender_pid=78076 task_audit_match=1 pinned_code_status=0
+worker_received_synthetic pid=78075 marker=0x51a2
+after_handoff_owner_alive=1 worker_alive=1
+
+run 2 exit=0
+verified_owner_pid=78079 sender_pid=78079 task_audit_match=1 pinned_code_status=0
+worker_received_synthetic pid=78078 marker=0x51a2
+after_handoff_owner_alive=1 worker_alive=1
+
+run 3 exit=0
+verified_owner_pid=78082 sender_pid=78082 task_audit_match=1 pinned_code_status=0
+worker_received_synthetic pid=78081 marker=0x51a2
+after_handoff_owner_alive=1 worker_alive=1
+
+run 4 exit=0
+verified_owner_pid=78085 sender_pid=78085 task_audit_match=1 pinned_code_status=0
+worker_received_synthetic pid=78084 marker=0x51a2
+after_handoff_owner_alive=1 worker_alive=1
+
+run 5 exit=0
+verified_owner_pid=78088 sender_pid=78088 task_audit_match=1 pinned_code_status=0
+worker_received_synthetic pid=78087 marker=0x51a2
+after_handoff_owner_alive=1 worker_alive=1

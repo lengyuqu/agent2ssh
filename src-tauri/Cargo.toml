@@ -35,10 +35,16 @@ name = "agent2ssh-daemon"
 path = "src/bin/agent2ssh-daemon.rs"
 required-features = ["daemon"]
 
+[[bin]]
+name = "agent2ssh-daemon-mach-lab"
+path = "src/bin/agent2ssh-daemon-mach-lab.rs"
+required-features = ["daemon", "macos-mach-lab"]
+
 [features]
 default = ["tauri"]
 tauri = ["dep:tauri", "dep:tauri-plugin-shell", "dep:tauri-plugin-dialog", "dep:tauri-plugin-updater", "dep:tauri-plugin-single-instance", "dep:tauri-build", "dep:pin_gtk_generation", "dep:gio", "dep:pango", "dep:cairo-rs", "dep:gdk-pixbuf"]
 daemon = ["dep:axum", "dep:tower", "dep:tower-http", "dep:futures-util", "dep:tracing", "dep:tracing-subscriber"]
+macos-mach-lab = []
 
 [build-dependencies]
 tauri-build = { version = "2", features = [], optional = true }

@@ -2,6 +2,8 @@ fn main() {
     // Nothing this script does belongs in a metadata collection; see
     // `cargo_is_collecting_metadata` for why skipping it is load-bearing.
     if !cargo_is_collecting_metadata() {
+        #[cfg(feature = "macos-mach-lab")]
+        build_macos_mach_lab();
         #[cfg(feature = "tauri")]
         {
             blank_missing_sidecars();
@@ -9,6 +11,54 @@ fn main() {
             delay_load_comctl32();
         }
     }
+}
+
+/// A native, explicitly enabled local experiment. It is not part of default
+/// binaries or release packaging and deliberately supports native macOS only.
+#[cfg(feature = "macos-mach-lab")]
+fn build_macos_mach_lab() {
+    use std::{path::PathBuf, process::Command};
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
+        return;
+    }
+    assert_eq!(
+        std::env::var("HOST").ok(),
+        std::env::var("TARGET").ok(),
+        "Mach lab only supports native builds"
+    );
+    let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));
+    let source = "src/bin/agent2ssh_daemon/mach_lab/server.c";
+    let object = out.join("a2s_mach_lab.o");
+    let library = out.join("liba2s_mach_lab.a");
+    let status = Command::new("clang")
+        .args([
+            "-std=c11",
+            "-D_DARWIN_C_SOURCE",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-Wno-deprecated-declarations",
+            "-O1",
+            "-c",
+            source,
+            "-o",
+        ])
+        .arg(&object)
+        .status()
+        .expect("run clang for Mach lab");
+    assert!(status.success(), "Mach lab C compilation failed");
+    let status = Command::new("ar")
+        .arg("crs")
+        .arg(&library)
+        .arg(&object)
+        .status()
+        .expect("run ar for Mach lab");
+    assert!(status.success(), "Mach lab archive failed");
+    println!("cargo:rerun-if-changed={source}");
+    println!("cargo:rerun-if-changed=src/bin/agent2ssh_daemon/mach_lab/protocol.h");
+    println!("cargo:rustc-link-search=native={}", out.display());
+    println!("cargo:rustc-link-lib=static=a2s_mach_lab");
+    println!("cargo:rustc-link-lib=bsm");
 }
 
 /// Leave `main` alone when cargo is only describing the package.

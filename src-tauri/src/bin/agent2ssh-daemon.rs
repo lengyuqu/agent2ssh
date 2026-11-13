@@ -115,6 +115,55 @@ fn uptime_secs() -> u64 {
 static SHUTDOWN_REQUESTED: tokio::sync::Notify = tokio::sync::Notify::const_new();
 #[cfg(target_os = "macos")]
 static IPC_SHUTDOWN_REQUESTED: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+// This callback exists only in an explicitly enabled native laboratory build.
+// It wakes the same drain path as the existing macOS IPC handler.
+#[cfg(all(target_os = "macos", feature = "macos-mach-lab"))]
+#[no_mangle]
+pub extern "C" fn a2s_mach_lab_notify_shutdown() {
+    IPC_SHUTDOWN_REQUESTED.notify_one();
+}
+
+#[cfg(all(target_os = "macos", feature = "macos-mach-lab"))]
+fn start_mach_lab_if_requested(
+    config: &std::path::Path,
+    token: &str,
+    instance: &str,
+) -> anyhow::Result<()> {
+    use std::{ffi::CString, path::Path};
+    unsafe extern "C" {
+        fn a2s_mach_lab_start(
+            service: *const std::ffi::c_char,
+            instance: *const std::ffi::c_char,
+        ) -> std::ffi::c_int;
+    }
+    let Some(service) = std::env::var_os("A2S_MACH_LAB_SERVICE") else {
+        return Ok(());
+    };
+    let dir = std::fs::canonicalize(config)?;
+    anyhow::ensure!(
+        dir.starts_with(Path::new("/private/tmp"))
+            && dir
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("a2s-mach-lab-")),
+        "Mach lab requires a dedicated /tmp/a2s-mach-lab-* configuration directory"
+    );
+    anyhow::ensure!(
+        std::fs::read(dir.join("mach-lab-only"))? == b"synthetic-only",
+        "Mach lab marker is missing or invalid"
+    );
+    anyhow::ensure!(
+        token == "a2s-mach-lab-synthetic-token",
+        "Mach lab accepts only its fixed synthetic token"
+    );
+    let service = CString::new(service.to_string_lossy().as_bytes())?;
+    let instance = CString::new(instance)?;
+    // SAFETY: both NUL-terminated strings live for the duration of the call;
+    // the C lab copies them before returning and does not retain the pointers.
+    let result = unsafe { a2s_mach_lab_start(service.as_ptr(), instance.as_ptr()) };
+    anyhow::ensure!(result == 0, "Mach lab registration failed ({result})");
+    Ok(())
+}
 // The daemon has one shutdown lifecycle. Approval waiters must leave their
 // HTTP handlers when it starts, rather than holding graceful shutdown open.
 static DAEMON_SHUTDOWN: std::sync::OnceLock<agent2ssh::ws_drain::ShutdownToken> =
@@ -6063,6 +6112,12 @@ async fn main() -> anyhow::Result<()> {
             token.clone(),
         ))
     };
+    #[cfg(all(target_os = "macos", feature = "macos-mach-lab"))]
+    start_mach_lab_if_requested(
+        &config_dir,
+        &token,
+        &identity_publication.instance.instance_id,
+    )?;
     // T2-15: Graceful shutdown with WS drain: on Ctrl-C / SIGTERM,
     // 1. Stop accepting new HTTP connections (axum graceful shutdown)
     // 2. Broadcast shutdown to all active WS handlers (ShutdownToken)

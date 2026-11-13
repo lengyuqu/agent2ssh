@@ -1,0 +1,17 @@
+run 1 exit=0
+guard_kr=0
+verified_owner_pid=78091 sender_pid=78091 task_audit_match=1 pinned_code_status=0
+worker_cancelled pid=78090
+guarded_transfer_receive_kr=268451843 owner_signaled=1 owner_signal=9 worker_received_synthetic=0
+
+run 2 exit=0
+guard_kr=0
+verified_owner_pid=78118 sender_pid=78118 task_audit_match=1 pinned_code_status=0
+worker_cancelled pid=78117
+guarded_transfer_receive_kr=268451843 owner_signaled=1 owner_signal=9 worker_received_synthetic=0
+
+run 3 exit=0
+guard_kr=0
+verified_owner_pid=78138 sender_pid=78138 task_audit_match=1 pinned_code_status=0
+worker_cancelled pid=78137
+guarded_transfer_receive_kr=268451843 owner_signaled=1 owner_signal=9 worker_received_synthetic=0
