@@ -82,6 +82,8 @@ fn matching_peer_remains_unbound_and_receives_no_token_or_stop() {
     let (publication, server) = fake(dir.path(), |stream, id, pid, _| hello(stream, id, pid));
     let observation = macos_client::inspect_unbound(dir.path(), std::process::id()).unwrap();
     assert_eq!(observation.peer_pid, std::process::id());
+    observation.revalidate().unwrap();
+    drop(observation);
     assert!(server.join().unwrap().is_empty());
     assert!(publication.cleanup().unwrap());
 }
@@ -292,13 +294,50 @@ fn observation_rejects_a_record_replaced_after_hello() {
         .unwrap();
     let (publication, server) = fake(dir.path(), |stream, id, pid, _| hello(stream, id, pid));
     let observation = macos_client::inspect_unbound(dir.path(), std::process::id()).unwrap();
-    assert!(server.join().unwrap().is_empty());
     let record = dir.path().join("daemon.instance.json");
     let replacement = dir.path().join("same-bytes-replacement");
     std::fs::write(&replacement, std::fs::read(&record).unwrap()).unwrap();
     std::fs::rename(replacement, record).unwrap();
     assert!(observation.revalidate().is_err());
+    drop(observation);
+    assert!(server.join().unwrap().is_empty());
     drop(publication);
+}
+
+#[test]
+fn revalidation_refuses_unsolicited_data_or_peer_closure() {
+    use std::{net::Shutdown, sync::mpsc};
+    for close in [false, true] {
+        let dir = tempfile::Builder::new()
+            .prefix("a2s-ipc-client-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let (go_tx, go_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let (publication, server) = fake(dir.path(), move |stream, id, pid, _| {
+            hello(stream, id, pid);
+            go_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+            if close {
+                stream.shutdown(Shutdown::Write).unwrap();
+            } else {
+                stream.write_all(b"x").unwrap();
+            }
+            done_tx.send(()).unwrap();
+        });
+        let observation = macos_client::inspect_unbound(dir.path(), std::process::id()).unwrap();
+        go_tx.send(()).unwrap();
+        done_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        let error = observation
+            .revalidate()
+            .expect_err("changed connection must be refused");
+        assert!(
+            error.to_string().contains("closed or sent unexpected data"),
+            "{error:#}"
+        );
+        drop(observation);
+        assert!(server.join().unwrap().is_empty());
+        assert!(publication.cleanup().unwrap());
+    }
 }
 
 // These helpers exec the test binary itself, preserving only the synthetic
@@ -317,6 +356,24 @@ fn exec_peer_before_helper() {
     let HelloFrame::Hello { client_nonce, .. } = read_hello(&mut stream).unwrap() else {
         panic!("expected hello")
     };
+    let post_hello = std::env::var_os("A2S_EXEC_PEER_POST_HELLO").is_some();
+    if post_hello {
+        write_hello(
+            &mut stream,
+            &HelloFrame::HelloOk {
+                version: 1,
+                client_nonce: client_nonce.clone(),
+                instance_id: publication.instance.instance_id.clone(),
+                pid: std::process::id(),
+            },
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !Path::new(&dir).join("exec-continue").exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(Path::new(&dir).join("exec-continue").exists());
+    }
     let fd = stream.as_raw_fd();
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
     assert!(flags >= 0);
@@ -326,13 +383,18 @@ fn exec_peer_before_helper() {
     );
     let mut command = Command::new(std::env::current_exe().unwrap());
     isolate_helper(&mut command);
-    let error = command
+    command
         .args(["--exact", "exec_peer_after_helper", "--nocapture"])
         .env("A2S_EXEC_PEER_AFTER", "1")
         .env("A2S_EXEC_PEER_FD", fd.to_string())
         .env("A2S_EXEC_PEER_NONCE", client_nonce)
-        .env("A2S_EXEC_PEER_INSTANCE", &publication.instance.instance_id)
-        .exec();
+        .env("A2S_EXEC_PEER_INSTANCE", &publication.instance.instance_id);
+    if post_hello {
+        command
+            .env("A2S_EXEC_PEER_POST_HELLO", "1")
+            .env("A2S_EXEC_PEER_DIR", &dir);
+    }
+    let error = command.exec();
     panic!("exec failed: {error}");
 }
 
@@ -345,16 +407,25 @@ fn exec_peer_after_helper() {
     let fd: i32 = std::env::var("A2S_EXEC_PEER_FD").unwrap().parse().unwrap();
     // SAFETY: the companion helper intentionally inherited this owned fd.
     let mut stream = unsafe { UnixStream::from_raw_fd(fd) };
-    write_hello(
-        &mut stream,
-        &HelloFrame::HelloOk {
-            version: 1,
-            client_nonce: std::env::var("A2S_EXEC_PEER_NONCE").unwrap(),
-            instance_id: std::env::var("A2S_EXEC_PEER_INSTANCE").unwrap(),
-            pid: std::process::id(),
-        },
-    )
-    .unwrap();
+    if std::env::var_os("A2S_EXEC_PEER_POST_HELLO").is_some() {
+        stream.write_all(b"x").unwrap();
+        std::fs::write(
+            Path::new(&std::env::var("A2S_EXEC_PEER_DIR").unwrap()).join("exec-done"),
+            b"ready",
+        )
+        .unwrap();
+    } else {
+        write_hello(
+            &mut stream,
+            &HelloFrame::HelloOk {
+                version: 1,
+                client_nonce: std::env::var("A2S_EXEC_PEER_NONCE").unwrap(),
+                instance_id: std::env::var("A2S_EXEC_PEER_INSTANCE").unwrap(),
+                pid: std::process::id(),
+            },
+        )
+        .unwrap();
+    }
     stream
         .set_read_timeout(Some(Duration::from_secs(4)))
         .unwrap();
@@ -404,6 +475,63 @@ fn same_pid_exec_during_hello_is_refused_before_authorization() {
     assert!(
         error.to_string().contains("peer audit token changed"),
         "{error:#}"
+    );
+}
+
+#[test]
+fn same_pid_exec_after_hello_is_refused_on_revalidation() {
+    use std::process::{Command, Stdio};
+    let dir = tempfile::Builder::new()
+        .prefix("a2s-ipc-exec-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    isolate_helper(&mut command);
+    let mut child = command
+        .args(["--exact", "exec_peer_before_helper", "--nocapture"])
+        .env("A2S_EXEC_PEER_DIR", dir.path())
+        .env("A2S_EXEC_PEER_POST_HELLO", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !dir.path().join("exec-ready").exists() && Instant::now() < deadline {
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!("helper exited: {status}");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if !dir.path().join("exec-ready").exists() {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("helper did not become ready");
+    }
+    let observation = macos_client::inspect_unbound(dir.path(), child.id()).unwrap();
+    std::fs::write(dir.path().join("exec-continue"), b"continue").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !dir.path().join("exec-done").exists() && Instant::now() < deadline {
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!("helper exited: {status}");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(dir.path().join("exec-done").exists());
+    let error = observation
+        .revalidate()
+        .expect_err("same-PID exec after hello must be refused");
+    assert!(
+        error.to_string().contains("peer audit token changed"),
+        "{error:#}"
+    );
+    drop(observation);
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 

@@ -32,6 +32,8 @@ macOS `daemon_matches_config` 现在直接保留未验证状态，不读取 toke
 
 本机验证：修改前新回归确实复现了错误接受；修改后客户端测试 12 项（含 3 个辅助进程测试）、真实 daemon IPC 10 项和保守停止 9 项通过。`npm run build`、无默认特性 Rust 库 877 通过/1 忽略、Tauri 库 895 通过/1 忽略。测试只覆盖当前 macOS 与隔离合成进程，未验证真实 PID 复用或正式签名。
 
+随后补上握手后的复核窗口：客户端在 `UnboundObservation` 存续期间保留原 socket，显式旧 HTTP 例外读取 token 前会复核同一 socket 的 PID、audit token 与记录快照，并拒绝对端关闭或非预期数据。测试让同 PID 进程在 hello 完成后 `exec` 并向原 socket 写入数据，复核拒绝；另外验证对端关闭和意外数据均拒绝。客户端测试更新为 14 项（含 3 个辅助进程测试）通过，真实 daemon IPC 10 项及保守停止 9 项通过。该复核仍不能检测所有描述符转移、静默 `exec` 或之后的变化，也不能绑定另一条 HTTP 连接。
+
 候选方向另见 Apple [Mach IPC 安全限制说明](https://developer.apple.com/documentation/xcode/conforming-to-mach-ipc-security-restrictions?changes=__8%2C__8)：task identity token 转换时仍需权限检查。该文讨论异常消息，不证明 Unix socket 可以安全获得同一对象，尚无相应生产绑定实现或验证。
 
 提交前复核新增了 hello 后、兼容请求读取 token 前的快照复核；`observation_rejects_a_record_replaced_after_hello` 使用相同内容替换记录，确认 inode 变化被拒绝。此检查不能消除复核之后的替换竞态，也不绑定 HTTP 与 IPC 端点。

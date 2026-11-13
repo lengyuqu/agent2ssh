@@ -469,7 +469,7 @@ health」、以及执行启动/停止/重启/未验证关闭之后，各调用�
 
 **macOS 本地 IPC 发现（#22）**：普通停止会在锁内读取实例快照，在同一 socket 上进行不含 token 的 hello，核对对端 PID、握手前后的内核 audit token、nonce 与实例 ID，并在通信后重新核对记录及 socket 的内容和 inode。记录缺失、矛盾、更换、对端异常、audit token 不可读取或发生变化、通信超时均拒绝并保留记录；就算一致也仍是 `Unbound`，不发送 token、停止或信号，也不自动重连。hello 的通信时限为 1.5 秒；文件锁各有独立上限，文件系统调用本身不保证总时限。Unix socket 对端 PID、audit token、实例 ID 和记录不能证明后续接收者与稳定进程对象绑定，读取两次一致也不构成此证明。
 
-显式旧式 HTTP 停止仍是未绑定的风险例外：如果发现 IPC 实例或 socket 记录，客户端先进行上面的无密钥发现；IPC 证据不一致、不可检查或超时时，不发送 HTTP token 或关闭请求；发送前会再次复核同一记录快照，发现持续存在的替换即拒绝。旧 daemon 没有 IPC 记录时仍可使用该明确例外；即使 hello 一致，也不能证明 HTTP 端点与 IPC 端点属于同一进程，token 仍可能暴露给错误端点。旧程序不遵守锁时的路径变化仍存在竞态。
+显式旧式 HTTP 停止仍是未绑定的风险例外：如果发现 IPC 实例或 socket 记录，客户端先进行上面的无密钥发现；IPC 证据不一致、不可检查或超时时，不发送 HTTP token 或关闭请求；发送前保留原 socket，再次复核记录、对端 PID 与 audit token，若连接关闭、出现非预期数据或观察到变化则拒绝。旧 daemon 没有 IPC 记录时仍可使用该明确例外；即使检查一致，也不能证明 HTTP 端点与 IPC 端点属于同一进程，token 仍可能暴露给错误端点。旧程序不遵守锁时的路径变化仍存在竞态。
 
 **macOS 保守策略（#25）**：当前没有经证明的进程对象绑定，普通 `daemon stop`、`daemon restart` 和桌面停止均拒绝发送关闭请求或信号；退出桌面不会主动向未绑定 daemon 发送停止请求或信号；但系统或进程托管环境仍可能使 daemon 退出，正在进行的会话等任务可能中断。macOS 退出前若有 PID 记录、损坏记录或健康端点迹象，会提示活动状态未知；此路径不自动向未绑定端点发送管理员 token。本机隔离桌面实验观察到 `loginwindow` 向测试 daemon 发送 SIGTERM；其他环境尚未验证。`/health` 和 PID 一致只是线索，不代表身份已绑定。新 daemon 的 HTTP `/shutdown` 默认返回 403；只有 daemon 启动环境显式设置 `AGENT2SSH_ALLOW_UNBOUND_HTTP_SHUTDOWN=1` 才开放旧路径；若 daemon 监听非回环地址，该开关也会允许有管理员令牌的远程 HTTP 请求。要承担风险并请求一次优雅关闭，可在数字 loopback 地址上使用 `agent2ssh daemon stop --allow-unbound-graceful` 或桌面确认操作：请求可能停错进程并向错误端点暴露管理员 token；客户端不会重试、强杀、清理 PID 或声称退出已确认；CLI 即使收到接受回执也以非零状态退出，提示结果未验证。旧 daemon 不认识此服务端开关，仍可能接收请求。这个开关仅影响 daemon 启动时的进程环境，设置在客户端环境里不能启用已运行 daemon 的路由。不要通过代理使用此例外；客户端无法识别所有本地代理。
 

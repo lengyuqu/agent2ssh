@@ -12,17 +12,57 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[derive(Debug)]
 pub struct UnboundObservation {
     pub peer_pid: u32,
     snapshot: super::macos::DiscoverySnapshot,
+    stream: UnixStream,
+    peer_audit: super::macos_codesign::KernelAuditToken,
+}
+
+impl std::fmt::Debug for UnboundObservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UnboundObservation")
+            .field("peer_pid", &self.peer_pid)
+            .finish_non_exhaustive()
+    }
 }
 
 impl UnboundObservation {
     /// Detect a replacement since hello. This is still not a bound process
     /// object and does not eliminate races after the check.
     pub fn revalidate(&self) -> Result<()> {
-        super::macos::verify_discovery_snapshot(&self.snapshot)
+        super::macos::verify_discovery_snapshot(&self.snapshot)?;
+        if macos_peer_pid(&self.stream).context("cannot recheck IPC peer PID")? != self.peer_pid {
+            bail!("IPC peer changed after hello");
+        }
+        if super::macos_codesign::peer_audit_token(&self.stream)
+            .context("cannot recheck IPC peer audit token")?
+            != self.peer_audit
+        {
+            bail!("IPC peer audit token changed after hello");
+        }
+        // This protocol expects no data until authorization, which this client
+        // never sends. A closed peer or unexpected bytes are contradictions,
+        // not proof of process exit. A quiet socket is still unbound.
+        let mut byte = 0u8;
+        // SAFETY: the stream remains open and `byte` provides one writable
+        // byte; the flags make this a non-consuming, nonblocking observation.
+        let n = unsafe {
+            libc::recv(
+                self.stream.as_raw_fd(),
+                (&mut byte as *mut u8).cast(),
+                1,
+                libc::MSG_PEEK | libc::MSG_DONTWAIT,
+            )
+        };
+        if n >= 0 {
+            bail!("IPC peer closed or sent unexpected data after hello");
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::WouldBlock {
+            return Err(error).context("cannot recheck IPC peer connection");
+        }
+        Ok(())
     }
 }
 
@@ -183,5 +223,7 @@ pub fn inspect_unbound(config: &Path, expected_pid: u32) -> Result<UnboundObserv
     Ok(UnboundObservation {
         peer_pid: after,
         snapshot,
+        stream,
+        peer_audit: after_audit,
     })
 }

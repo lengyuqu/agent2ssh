@@ -2172,7 +2172,7 @@ pub fn request_unbound_graceful_shutdown(pid: u32) -> Result<()> {
     }
     if let Some(observation) = ipc_observation {
         observation.revalidate().context(
-            "IPC identity records changed before compatibility request; no request sent",
+            "IPC identity evidence changed or became unavailable before compatibility request; no request sent",
         )?;
     }
     let token = crate::daemon_activity::read_admin_token()
