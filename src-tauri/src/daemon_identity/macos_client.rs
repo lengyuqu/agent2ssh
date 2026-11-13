@@ -145,6 +145,8 @@ pub fn inspect_unbound(config: &Path, expected_pid: u32) -> Result<UnboundObserv
     if before != expected_pid {
         bail!("IPC peer PID conflicts with record");
     }
+    let before_audit = super::macos_codesign::peer_audit_token(&stream)
+        .context("cannot read IPC peer audit token")?;
     let mut nonce_bytes = [0u8; 16];
     getrandom::fill(&mut nonce_bytes)
         .map_err(|e| anyhow::anyhow!("cannot create hello nonce: {e}"))?;
@@ -170,6 +172,11 @@ pub fn inspect_unbound(config: &Path, expected_pid: u32) -> Result<UnboundObserv
     let after = macos_peer_pid(&stream).context("cannot recheck IPC peer PID")?;
     if before != after {
         bail!("IPC peer changed during hello");
+    }
+    let after_audit = super::macos_codesign::peer_audit_token(&stream)
+        .context("cannot recheck IPC peer audit token")?;
+    if before_audit != after_audit {
+        bail!("IPC peer audit token changed during hello");
     }
     check_hello_reply(&reply, &nonce, &snapshot.instance_id, expected_pid, after)?;
     super::macos::verify_discovery_snapshot(&snapshot)?;

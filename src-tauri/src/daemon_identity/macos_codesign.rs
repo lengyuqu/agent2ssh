@@ -3,13 +3,45 @@
 //! A matching signature is not endpoint binding, process liveness or stop
 //! authorization. The production client is deliberately not wired to use this
 //! primitive until a trusted release policy and the full binding are ready.
-use std::ffi::{c_char, c_int, CString};
+use std::{
+    ffi::{c_char, c_int, CString},
+    io,
+    os::{fd::AsRawFd, unix::net::UnixStream},
+};
 
 /// The Darwin audit token representation consumed by Security.framework.
 /// Only create it from a kernel-supplied message or peer credential.
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct KernelAuditToken([u32; 8]);
+
+/// Read a kernel peer observation for diagnostics and rejection only. A Unix
+/// socket and this snapshot do not prove which process will receive later data.
+pub(super) fn peer_audit_token(stream: &UnixStream) -> io::Result<KernelAuditToken> {
+    let mut token = KernelAuditToken([0; 8]);
+    let mut len = std::mem::size_of_val(&token) as libc::socklen_t;
+    // SAFETY: token and len point to writable storage of the declared size;
+    // stream owns an open Unix socket throughout the call.
+    let rc = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERTOKEN,
+            (&mut token as *mut KernelAuditToken).cast(),
+            &mut len,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if len as usize != std::mem::size_of_val(&token) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid peer audit token size",
+        ));
+    }
+    Ok(token)
+}
 
 unsafe extern "C" {
     fn a2s_verify_running_code(audit: *const KernelAuditToken, requirement: *const c_char)
@@ -151,19 +183,7 @@ mod tests {
         let mut byte = [0u8; 1];
         reader.read_exact(&mut byte).unwrap();
         assert_eq!(byte, *b"x");
-        let mut audit = KernelAuditToken([0; 8]);
-        let mut len = std::mem::size_of_val(&audit) as libc::socklen_t;
-        let rc = unsafe {
-            libc::getsockopt(
-                reader.as_raw_fd(),
-                libc::SOL_LOCAL,
-                libc::LOCAL_PEERTOKEN,
-                (&mut audit as *mut KernelAuditToken).cast(),
-                &mut len,
-            )
-        };
-        assert_eq!(rc, 0, "{}", std::io::Error::last_os_error());
-        assert_eq!(len as usize, std::mem::size_of_val(&audit));
+        let audit = peer_audit_token(&reader).unwrap();
         let mut peer: libc::pid_t = 0;
         let mut peer_len = std::mem::size_of_val(&peer) as libc::socklen_t;
         let rc = unsafe {

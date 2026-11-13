@@ -26,6 +26,12 @@ macOS `daemon_matches_config` 现在直接保留未验证状态，不读取 toke
 
 2026-11-13 本机 macOS 27.2.1 (26B131)、arm64、隔离配置及合成 token：客户端原有测试 7 项通过（含一个仅供子进程调用的辅助测试），覆盖真实不同 PID 对端、匹配 hello 仍无授权、错误实例、记录和 socket 替换、慢速帧 deadline、没有自动重连；真实 daemon IPC 9 项通过，包括调用生产 `daemon stop` 后 daemon 仍存活；保守停止 9 项通过，包括 IPC 矛盾时显式 HTTP 例外没有发送 token；停止回归 33 项通过、2 项忽略，未配置 SSH fixture。无默认特性 Rust 库 873 通过/1 忽略，Tauri 库 891 通过/1 忽略。仍未测试真实 PID 重用、跨 UID、沙箱及签名发布包。
 
+### 同 PID `exec` 的握手中变化
+
+后续真实进程回归发现：服务端读取 hello 后在同一 PID 下 `exec`，新映像沿用 socket 回复正确 nonce、实例和 PID 时，原客户端仅按 PID 的两次比较会接受发现结果。现在客户端在 hello 前后同时读取 `LOCAL_PEERTOKEN`，无法读取或结果变化时拒绝；直接发现回归和真实 CLI 的显式旧 HTTP 兼容回归均验证该场景在发送 token 前拒绝，HTTP 伪造端点只收到匿名健康检查。该检查只检测观察到的变化：它不能阻止描述符转移，也不能证明检查后或另一条 HTTP 连接的接收者；成功仍是 `Unbound`，显式旧 HTTP 例外仍有原先的风险。
+
+本机验证：修改前新回归确实复现了错误接受；修改后客户端测试 12 项（含 3 个辅助进程测试）、真实 daemon IPC 10 项和保守停止 9 项通过。`npm run build`、无默认特性 Rust 库 877 通过/1 忽略、Tauri 库 895 通过/1 忽略。测试只覆盖当前 macOS 与隔离合成进程，未验证真实 PID 复用或正式签名。
+
 候选方向另见 Apple [Mach IPC 安全限制说明](https://developer.apple.com/documentation/xcode/conforming-to-mach-ipc-security-restrictions?changes=__8%2C__8)：task identity token 转换时仍需权限检查。该文讨论异常消息，不证明 Unix socket 可以安全获得同一对象，尚无相应生产绑定实现或验证。
 
 提交前复核新增了 hello 后、兼容请求读取 token 前的快照复核；`observation_rejects_a_record_replaced_after_hello` 使用相同内容替换记录，确认 inode 变化被拒绝。此检查不能消除复核之后的替换竞态，也不绑定 HTTP 与 IPC 端点。

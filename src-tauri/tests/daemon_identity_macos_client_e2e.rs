@@ -20,6 +20,17 @@ fn accept(listener: &UnixListener) -> UnixStream {
         }
     }
 }
+fn isolate_helper(command: &mut std::process::Command) {
+    for (key, _) in std::env::vars_os() {
+        let name = key.to_string_lossy();
+        if name.starts_with("DYLD_")
+            || name.starts_with("AGENT2SSH_")
+            || name.starts_with("A2S_EXEC_PEER_")
+        {
+            command.env_remove(key);
+        }
+    }
+}
 fn fake<F>(dir: &Path, action: F) -> (macos::Publication, std::thread::JoinHandle<Vec<u8>>)
 where
     F: FnOnce(&mut UnixStream, &str, u32, &Path) + Send + 'static,
@@ -288,4 +299,237 @@ fn observation_rejects_a_record_replaced_after_hello() {
     std::fs::rename(replacement, record).unwrap();
     assert!(observation.revalidate().is_err());
     drop(publication);
+}
+
+// These helpers exec the test binary itself, preserving only the synthetic
+// accepted socket. No real daemon or user config is opened.
+#[test]
+fn exec_peer_before_helper() {
+    use std::{os::fd::AsRawFd, os::unix::process::CommandExt, process::Command};
+    let Ok(dir) = std::env::var("A2S_EXEC_PEER_DIR") else {
+        return;
+    };
+    let publication = macos::publish(Path::new(&dir), std::process::id()).unwrap();
+    let listener = publication.listener.try_clone().unwrap();
+    std::fs::write(Path::new(&dir).join("exec-ready"), b"ready").unwrap();
+    let mut stream = accept(&listener);
+    stream.set_nonblocking(false).unwrap();
+    let HelloFrame::Hello { client_nonce, .. } = read_hello(&mut stream).unwrap() else {
+        panic!("expected hello")
+    };
+    let fd = stream.as_raw_fd();
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    assert!(flags >= 0);
+    assert_eq!(
+        unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) },
+        0
+    );
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    isolate_helper(&mut command);
+    let error = command
+        .args(["--exact", "exec_peer_after_helper", "--nocapture"])
+        .env("A2S_EXEC_PEER_AFTER", "1")
+        .env("A2S_EXEC_PEER_FD", fd.to_string())
+        .env("A2S_EXEC_PEER_NONCE", client_nonce)
+        .env("A2S_EXEC_PEER_INSTANCE", &publication.instance.instance_id)
+        .exec();
+    panic!("exec failed: {error}");
+}
+
+#[test]
+fn exec_peer_after_helper() {
+    use std::os::fd::FromRawFd;
+    if std::env::var_os("A2S_EXEC_PEER_AFTER").is_none() {
+        return;
+    }
+    let fd: i32 = std::env::var("A2S_EXEC_PEER_FD").unwrap().parse().unwrap();
+    // SAFETY: the companion helper intentionally inherited this owned fd.
+    let mut stream = unsafe { UnixStream::from_raw_fd(fd) };
+    write_hello(
+        &mut stream,
+        &HelloFrame::HelloOk {
+            version: 1,
+            client_nonce: std::env::var("A2S_EXEC_PEER_NONCE").unwrap(),
+            instance_id: std::env::var("A2S_EXEC_PEER_INSTANCE").unwrap(),
+            pid: std::process::id(),
+        },
+    )
+    .unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(4)))
+        .unwrap();
+    let mut extra = Vec::new();
+    stream.read_to_end(&mut extra).unwrap();
+    assert!(extra.is_empty(), "no token or stop may be sent after exec");
+}
+
+#[test]
+fn same_pid_exec_during_hello_is_refused_before_authorization() {
+    use std::process::{Command, Stdio};
+    let dir = tempfile::Builder::new()
+        .prefix("a2s-ipc-exec-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    isolate_helper(&mut command);
+    let mut child = command
+        .args(["--exact", "exec_peer_before_helper", "--nocapture"])
+        .env("A2S_EXEC_PEER_DIR", dir.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !dir.path().join("exec-ready").exists() && Instant::now() < deadline {
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!("helper exited: {status}");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if !dir.path().join("exec-ready").exists() {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("helper did not become ready");
+    }
+    let result = macos_client::inspect_unbound(dir.path(), child.id());
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let error = result.expect_err("same-PID exec must be refused");
+    assert!(
+        error.to_string().contains("peer audit token changed"),
+        "{error:#}"
+    );
+}
+
+#[test]
+fn same_pid_exec_blocks_explicit_legacy_http_before_token() {
+    use std::{
+        net::TcpListener,
+        process::{Command, Stdio},
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc, Mutex,
+        },
+    };
+    let dir = tempfile::Builder::new()
+        .prefix("a2s-ipc-exec-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let token = "synthetic-exec-test-token";
+    std::fs::write(dir.path().join("daemon.token"), token).unwrap();
+    // The CLI's existing conservative check recognizes this test-owned process
+    // as a daemon by filename; the contents are this integration-test binary.
+    let executable = dir.path().join("agent2ssh-daemon");
+    std::fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
+    let mut command = Command::new(&executable);
+    isolate_helper(&mut command);
+    let mut child = command
+        .args(["--exact", "exec_peer_before_helper", "--nocapture"])
+        .env("A2S_EXEC_PEER_DIR", dir.path())
+        .env_remove("AGENT2SSH_MASTER_PASSWORD")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !dir.path().join("exec-ready").exists() && Instant::now() < deadline {
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!("helper exited: {status}");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if !dir.path().join("exec-ready").exists() {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("helper did not become ready");
+    }
+    let pid = child.id();
+    let server = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = server.local_addr().unwrap();
+    server.set_nonblocking(true).unwrap();
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let captured_worker = captured.clone();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_worker = stop.clone();
+    let config = std::fs::canonicalize(dir.path())
+        .unwrap()
+        .display()
+        .to_string();
+    let thread = std::thread::spawn(move || {
+        while !stop_worker.load(Ordering::SeqCst) {
+            match server.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
+                    let mut bytes = [0u8; 4096];
+                    let n = stream.read(&mut bytes).unwrap_or(0);
+                    captured_worker
+                        .lock()
+                        .unwrap()
+                        .push(String::from_utf8_lossy(&bytes[..n]).to_string());
+                    let body =
+                        serde_json::json!({"ok":true,"pid":pid,"config_dir":config}).to_string();
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5))
+                }
+                Err(e) => panic!("fake HTTP listener: {e}"),
+            }
+        }
+    });
+    let mut cli = Command::new(env!("CARGO_BIN_EXE_agent2ssh"));
+    isolate_helper(&mut cli);
+    let result = cli
+        .args(["daemon", "stop", "--allow-unbound-graceful"])
+        .env("AGENT2SSH_CONFIG_DIR", dir.path())
+        .env("AGENT2SSH_DAEMON_ADDR", addr.to_string())
+        .env_remove("AGENT2SSH_MASTER_PASSWORD")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    stop.store(true, Ordering::SeqCst);
+    thread.join().unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!result.status.success());
+    let message = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        message.contains("IPC identity evidence is inconsistent"),
+        "{message}"
+    );
+    assert!(message.contains("peer audit token changed"), "{message}");
+    let requests = captured.lock().unwrap();
+    assert!(!requests.is_empty(), "the health probe must be reached");
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.starts_with("GET /health ")
+                && !request.to_ascii_lowercase().contains("authorization:")
+                && !request.contains(token)),
+        "{requests:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("daemon.pid")).unwrap(),
+        pid.to_string()
+    );
 }
