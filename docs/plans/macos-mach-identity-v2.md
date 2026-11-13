@@ -23,6 +23,7 @@
 - 现有 `daemon.pid` 保持数字格式；新增记录需明确 schema 版本、配置标识、D 的发现方式和所有者，版本未知或跨配置复制不视为绑定。D/P 的内核权利不能通过 JSON 记录持久化。新旧客户端、daemon 和显式 HTTP 兼容组合仍按 v1 降级表处理；未知版本不得猜测为新协议。
 - launchd job 的注册、禁用、升级与卸载必须有明确所有权及隔离配置目录；崩溃后残留文件不被新实例自动覆盖。已有实验先注销测试 job，再显式按 PID 和实例核对恢复；它不构成自动恢复方案。
 - daemon 必须以受限 entitlement 独立签名，外层 bundle、CLI 和更新包必须与实际发布信任策略一致。一次 ad-hoc 调试包重签通过仅说明本机可行；正式签名、bundle 验证、公证、更新和回滚均未验证。固定 hash 的更新/回滚与撤销策略必须先定案。
+- 发布评审可在隔离、不会被并发修改的产物目录中运行 `python3 scripts/check_macos_daemon_signature.py <daemon-binary> --team-id <trusted-team> --identifier <trusted-identifier>`。该工具要求由发布方提供预期 Team ID 和标识，验证 Apple Developer ID Application 的代码要求，并逐架构检查 hardened runtime 和已知不允许的 entitlement；失败返回非零。它是**静态检查**，不为运行时客户端提供信任根，不检查公证、外层包、版本回滚或检查后的文件替换，也不能证明端点归属。Team ID、标识与可接受版本仍须通过可信发布流程固定；不要从待测 daemon 自报结果自动取得。证书要求的候选组合参照 Apple 的 [代码签名要求说明](https://developer.apple.com/documentation/technotes/tn3127-inside-code-signing-requirements/)；正式项目签名的成功侧尚未验证。
 - 生产接入前还须审查 Mach 消息资源释放、发送失败与通知、队列和会话耗尽、fork/exec、跨用户权限及最低支持系统。实验中的直接 `bootstrap_register` 已弃用，不作为生产发布路径。
 
 ## 证据和剩余验收
