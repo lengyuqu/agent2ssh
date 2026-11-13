@@ -58,6 +58,13 @@ pub fn daemon_log_path() -> Result<PathBuf> {
 
 pub fn read_daemon_pid() -> Result<Option<u32>> {
     let pid_path = daemon_pid_path()?;
+    #[cfg(target_os = "macos")]
+    let raw = match std::fs::symlink_metadata(&pid_path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("failed to inspect daemon PID file"),
+        Ok(_) => crate::daemon_identity::macos::read_pid_record_snapshot(&config_dir_absolute()?)?,
+    };
+    #[cfg(not(target_os = "macos"))]
     let raw = match std::fs::read_to_string(&pid_path) {
         Ok(raw) => raw,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -697,11 +704,21 @@ pub fn read_daemon_pid_record(path: &Path) -> DaemonPidRecord {
     if !metadata.file_type().is_file() {
         return DaemonPidRecord::NotARegularFile;
     }
-    let raw = match std::fs::read_to_string(path) {
+    #[cfg(target_os = "macos")]
+    let read_result = if path.file_name() == Some(std::ffi::OsStr::new("daemon.pid")) {
+        path.parent()
+            .ok_or_else(|| anyhow!("daemon PID path has no parent"))
+            .and_then(crate::daemon_identity::macos::read_pid_record_snapshot)
+    } else {
+        Err(anyhow!("unexpected daemon PID path"))
+    };
+    #[cfg(not(target_os = "macos"))]
+    let read_result = std::fs::read_to_string(path).map_err(anyhow::Error::from);
+    let raw = match read_result {
         Ok(raw) => raw,
         Err(error) => {
             return DaemonPidRecord::Unreadable {
-                reason: error.to_string(),
+                reason: format!("{error:#}"),
             }
         }
     };
@@ -2167,16 +2184,8 @@ pub fn request_unbound_graceful_shutdown(pid: u32) -> Result<()> {
     }
     let read_record = || -> Result<String> {
         let _guard = daemon_pid_lock()?;
-        let path = daemon_pid_path()?;
-        if !std::fs::symlink_metadata(&path)
-            .context("cannot inspect daemon PID file; no request sent")?
-            .file_type()
-            .is_file()
-        {
-            anyhow::bail!("daemon PID path is not a regular file; no request sent");
-        }
-        let raw = std::fs::read_to_string(path)
-            .context("cannot read daemon PID file; no request sent")?;
+        let raw = crate::daemon_identity::macos::read_pid_record_snapshot(&config_dir_absolute()?)
+            .context("cannot safely read daemon PID record; no request sent")?;
         if raw.trim().parse::<u32>().ok() != Some(pid) {
             anyhow::bail!("daemon PID record does not match; no request sent");
         }
@@ -2278,7 +2287,7 @@ mod tests {
         let target = path.with_file_name("uncreated-target");
         std::os::unix::fs::symlink(&target, &path).unwrap();
         let error = write_daemon_pid(std::process::id()).unwrap_err();
-        assert!(error.to_string().contains("existing path retained"));
+        assert!(error.to_string().contains("not a regular file"));
         assert!(!target.exists());
         assert!(std::fs::symlink_metadata(path)
             .unwrap()
@@ -2318,6 +2327,48 @@ mod tests {
             std::fs::read_to_string(&target).unwrap(),
             missing.to_string()
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pid_discovery_refuses_links_and_oversized_records() {
+        use std::os::unix::fs::symlink;
+        let _config = crate::store::TestConfigDir::new("daemon-pid-read-links");
+        let path = daemon_pid_path().unwrap();
+        let target = path.with_file_name("unrelated-pid-data");
+        std::fs::write(&target, b"123").unwrap();
+        for hardlink in [false, true] {
+            if hardlink {
+                std::fs::hard_link(&target, &path).unwrap();
+            } else {
+                symlink(&target, &path).unwrap();
+            }
+            assert!(
+                read_daemon_pid().is_err(),
+                "linked PID record must be refused"
+            );
+            let diagnosis = read_daemon_pid_record(&path);
+            assert!(
+                matches!(
+                    diagnosis,
+                    DaemonPidRecord::NotARegularFile | DaemonPidRecord::Unreadable { .. }
+                ),
+                "unsafe record must not be treated as a PID: {diagnosis:?}"
+            );
+            assert_eq!(std::fs::read(&target).unwrap(), b"123");
+            std::fs::remove_file(&path).unwrap();
+        }
+        let oversized = format!("{}1", "0".repeat(64));
+        std::fs::write(&path, &oversized).unwrap();
+        assert!(
+            read_daemon_pid().is_err(),
+            "oversized PID record must be refused"
+        );
+        assert!(matches!(
+            read_daemon_pid_record(&path),
+            DaemonPidRecord::Unreadable { .. }
+        ));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), oversized);
     }
 
     #[cfg(target_os = "macos")]
