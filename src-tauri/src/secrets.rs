@@ -402,6 +402,115 @@ pub fn entry_tag(account: &str) -> Option<String> {
     entry_tags().remove(account)
 }
 
+/// Accounts whose stored entry has no valid content tag (CNB #38), **without
+/// decrypting** the store.
+///
+/// This is the complement of [`entry_tags`]: entries with an empty or invalid
+/// tag — the shape a pre-phase-2 build leaves behind — are exactly the ones
+/// `secrets retag` can upgrade. The internal key-check entry is excluded
+/// because no reference in `hosts.json` ever points at it. A v1 store, a
+/// missing or corrupt file yields an empty list: callers treat that as
+/// "nothing provably legacy", never as a reason to guess.
+pub fn legacy_tag_accounts() -> Vec<String> {
+    let mut accounts = Vec::new();
+    if backend_is_memory() {
+        return accounts;
+    }
+    let Ok(path) = secrets_path() else {
+        return accounts;
+    };
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return accounts;
+    };
+    let Ok(probe) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return accounts;
+    };
+    if probe.get("version").and_then(|v| v.as_u64()).unwrap_or(1) < 2 {
+        return accounts;
+    }
+    if let Some(entries) = probe.get("entries").and_then(|v| v.as_object()) {
+        for (account, entry) in entries {
+            if account == KEY_CHECK_ACCOUNT {
+                continue;
+            }
+            let tag = entry
+                .get("tag")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            if !is_valid_tag(tag) {
+                accounts.push(account.clone());
+            }
+        }
+    }
+    accounts.sort();
+    accounts
+}
+
+/// Assign a fresh content tag to every stored entry that lacks one (CNB #38).
+///
+/// This is the write half of `secrets retag`. Plaintext never changes: each
+/// legacy entry is decrypted with the cached key, re-encrypted under a fresh
+/// nonce, and stamped with a new 128-bit content tag, so `hosts.json`
+/// references upgraded in the same window resolve to exactly the same secret.
+/// The store generation is bumped once for the whole rewrite because the
+/// on-disk entries changed; the caller must re-stamp `hosts.json` in the same
+/// locked window so the pair stays aligned.
+///
+/// Requires an **unlocked v2** store: a locked store fails closed without
+/// touching any file, and a v1 (single-blob) store has no per-entry structure
+/// to tag — it must first be migrated by an ordinary save with the store
+/// unlocked. Idempotent: a store where every entry already carries a valid tag
+/// is rewritten zero times (`Ok(0)`, bytes untouched).
+pub fn retag_legacy_entries() -> Result<usize> {
+    if backend_is_memory() {
+        return Ok(0);
+    }
+    if !is_unlocked() && !try_unlock_from_env() {
+        anyhow::bail!(
+            "credential store is locked — unlock it (desktop) or set AGENT2SSH_MASTER_PASSWORD before retagging"
+        );
+    }
+    let _guard = secrets_write_lock()?;
+    let path = secrets_path()?;
+    if !path.exists() {
+        anyhow::bail!("no credential store to retag");
+    }
+    let raw = std::fs::read_to_string(&path).context("failed to read secrets store")?;
+    let mut store: EncryptedStoreV2 = serde_json::from_str(&raw).map_err(|error| {
+        anyhow!(
+            "credential store is not a readable v2 store ({error}); retag needs per-entry structure — save once with the store unlocked to migrate a v1 store first"
+        )
+    })?;
+    let key = cached_key().ok_or_else(|| anyhow!("credential store is locked"))?;
+
+    let mut retagged = 0;
+    for (account, entry) in store.entries.iter_mut() {
+        if account == KEY_CHECK_ACCOUNT || is_valid_tag(&entry.tag) {
+            continue;
+        }
+        let nonce = b64()
+            .decode(entry.nonce.as_bytes())
+            .context("bad nonce encoding in entry")?;
+        let ciphertext = b64()
+            .decode(entry.ciphertext.as_bytes())
+            .context("bad ciphertext encoding in entry")?;
+        let plaintext = decrypt_entry(&key, account, &nonce, &ciphertext)?;
+        let (new_nonce, new_ciphertext) = encrypt_entry(&key, account, &plaintext)?;
+        entry.nonce = b64().encode(&new_nonce);
+        entry.ciphertext = b64().encode(&new_ciphertext);
+        entry.tag = new_content_tag()?;
+        retagged += 1;
+    }
+
+    if retagged > 0 {
+        store.generation = store.generation.saturating_add(1);
+        let updated = serde_json::to_string_pretty(&store)?;
+        atomic_write_file(&path, updated.as_bytes())?;
+        restrict_file_to_owner(&path)?;
+    }
+    Ok(retagged)
+}
+
 /// Exclusive lock covering the whole `load_map -> modify -> save_map` window.
 ///
 /// `.secrets.lock` is a **leaf** lock: paths that also write `hosts.json` hold

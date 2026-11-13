@@ -905,6 +905,33 @@ enum SecretsCommands {
         #[arg(long)]
         password: Option<String>,
     },
+    /// Upgrade credentials written before phase 2 (CNB #38): every entry in
+    /// secrets.enc without a content tag gets one (plaintext unchanged) and
+    /// every bare $agent2ssh-secret$ reference in hosts.json is upgraded to
+    /// $agent2ssh-secret$:<tag>, keeping hosts.json.secrets_generation aligned
+    /// with secrets.enc.generation.
+    ///
+    /// Without --confirm only a read-only preview is printed. Requires the
+    /// store to be unlocked (AGENT2SSH_MASTER_PASSWORD); a locked store is
+    /// refused before anything is written. Crash-safe: reuses the .commit.json
+    /// redo log of the ordinary save path, and re-running after an interrupted
+    /// retag completes idempotently.
+    ///
+    /// LIMIT: retag does not protect against a later DOWNGRADE. An old
+    /// agent2ssh binary that unlocks the store runs its plaintext migration at
+    /// startup and re-seals tagged references as plaintext, stripping the tags
+    /// again (measured against a pre-phase-2 binary, see
+    /// docs/reports/evidence/c8-downgrade-2026-11-13/). Downgrading still
+    /// requires reverting references to the bare $agent2ssh-secret$ marker
+    /// first — see the configuration guide.
+    Retag {
+        /// Required to actually apply; without it only a preview is printed
+        #[arg(long)]
+        confirm: bool,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Clone, Args)]
@@ -2962,6 +2989,29 @@ async fn async_main() -> Result<()> {
                             String::new()
                         }
                     );
+                }
+            }
+            SecretsCommands::Retag { confirm, json } => {
+                if confirm {
+                    let message = agent2ssh::retag::apply()?;
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "applied": true,
+                                "message": message,
+                            }))?
+                        );
+                    } else {
+                        println!("{message}");
+                    }
+                } else {
+                    let scan = agent2ssh::retag::preview()?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&scan)?);
+                    } else {
+                        print!("{}", agent2ssh::retag::describe(&scan));
+                    }
                 }
             }
         },
@@ -5137,6 +5187,23 @@ async fn run_doctor(output_json: bool) -> Result<()> {
             name: "hosts.json".into(),
             status: "warn".into(),
             detail: "not configured yet (no hosts.json)".into(),
+        });
+    }
+
+    // 4b. CNB #38: surface credentials stored before phase 2. Only reported
+    // when legacy (untagged) entries actually exist, so a fully-tagged store
+    // adds no noise.
+    let legacy_accounts = agent2ssh::secrets::legacy_tag_accounts();
+    if !legacy_accounts.is_empty() {
+        checks.push(DoctorCheck {
+            name: "credential tags".into(),
+            status: "warn".into(),
+            detail: format!(
+                "{} credential entr{} without a content tag ({}); run `agent2ssh secrets retag` to upgrade them",
+                legacy_accounts.len(),
+                if legacy_accounts.len() == 1 { "y" } else { "ies" },
+                legacy_accounts.join(", ")
+            ),
         });
     }
 
