@@ -5576,6 +5576,19 @@ fn exec_multi_batch_result_schema_matches_contract() {
         "response must have 'total_duration_ms'"
     );
 
+    // Presence alone would stay green if the fields stopped carrying values,
+    // so pin the wire values of the constructed result too. The behavioral
+    // counterpart (a real single-batch run ending `stopped_early: true` with
+    // `skipped: 0`) lives in core.rs's
+    // single_batch_threshold_hit_reports_stopped_early_with_zero_skipped.
+    assert_eq!(json["total_hosts"], 1);
+    assert_eq!(json["successful"], 1);
+    assert_eq!(json["failed"], 0);
+    assert_eq!(json["skipped"], 0);
+    assert_eq!(json["stopped_early"], false);
+    assert_eq!(json["batches_executed"], 1);
+    assert_eq!(json["results"].as_array().unwrap().len(), 1);
+
     let first = &json["results"][0];
     assert!(first.get("host").is_some());
     assert!(first.get("result").is_some());

@@ -3729,6 +3729,47 @@ mod tests {
         assert!(error.to_string().contains("no hosts matched"));
     }
 
+    /// The single-batch special case the /exec-multi contract documents: with
+    /// no `batch_size` there is exactly one batch, so the `max_failures`
+    /// threshold can only be noticed after that batch has finished — the
+    /// response then carries `stopped_early: true` together with `skipped: 0`.
+    /// Both values are pinned here so the documented semantics stay true (see
+    /// L2-172 for the decision on whether the fields themselves change).
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn single_batch_threshold_hit_reports_stopped_early_with_zero_skipped() {
+        // Unknown host profiles fail in `resolve_host` before any network I/O,
+        // and TestConfigDir keeps `load_config` away from the real config dir.
+        let _dir = crate::store::TestConfigDir::new("l2-172-single-batch");
+        let result = exec_multi_with_strategy(ExecMultiBatchRequest {
+            request: ExecMultiRequest {
+                hosts: vec!["missing-a".into(), "missing-b".into()],
+                command: "true".into(),
+                force: false,
+                approved_hosts: Vec::new(),
+                timeout_secs: Some(1),
+                tags: None,
+                reason: None,
+                change_id: None,
+                source: Some("test".into()),
+            },
+            strategy: Some(BatchStrategy {
+                concurrency: Some(1),
+                max_failures: Some(1),
+                batch_size: None,
+                pause_between_batches_secs: None,
+            }),
+        })
+        .await
+        .unwrap();
+        assert_eq!(result.total_hosts, 2);
+        assert_eq!(result.successful, 0);
+        assert_eq!(result.failed, 2);
+        assert_eq!(result.skipped, 0);
+        assert!(result.stopped_early);
+        assert_eq!(result.batches_executed, 1);
+    }
+
     #[tokio::test]
     #[serial_test::serial]
     async fn preview_rejects_empty_targets_like_exec_does() {
