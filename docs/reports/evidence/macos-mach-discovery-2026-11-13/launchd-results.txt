@@ -1,0 +1,3 @@
+run=1 first_exited=1 old_send_kr=0 new_lookup_kr=0 new_send_kr=0 replacement_received_old=1
+run=2 first_exited=1 old_send_kr=0 new_lookup_kr=0 new_send_kr=0 replacement_received_old=1
+run=3 first_exited=1 old_send_kr=0 new_lookup_kr=0 new_send_kr=0 replacement_received_old=1
