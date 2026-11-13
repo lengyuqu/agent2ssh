@@ -93,17 +93,17 @@ try:
    public=run([client,service,str(pid_a),a['instance_id'],requirement,'public-stop'],timeout=8)
    if public.returncode==0 or 'result=unknown' not in public.stdout or not alive(pid_a):raise AssertionError(f'public stop was not rejected: {public.stdout} {public.stderr}')
    wait_for(lambda:(root/f'{i}.err').exists() and 'A2S_MACH_LAB_PUBLIC_STOP_REJECTED' in (root/f'{i}.err').read_text())
-   stopped=must([client,service,str(pid_a),a['instance_id'],requirement,'stop'],timeout=8)
-   if 'result=accepted_exit_unverified' not in stopped.stdout:raise AssertionError('first stop not accepted')
+   stopped=must([client,service,str(pid_a),a['instance_id'],requirement,'wait-exit'],timeout=8)
+   if 'result=accepted_exit_unverified' not in stopped.stdout or 'post_registration_identity_match=1' not in stopped.stdout or 'proc_exit_event=1 event_pid_matches=1 note_exit=1' not in stopped.stdout:raise AssertionError('first stop or exit observation failed')
    wait_for(lambda:not alive(pid_a) and not (config/'daemon.pid').exists())
    must([probe,'lookup',service,'send']) # synthetic public discovery wake-up
    b=wait_for(lambda:(v if (v:=identity(config,port)) and v['pid']!=pid_a else None),seconds=25);pid_b=b['pid']
    old_out,old_err=held.communicate(input='x',timeout=8);old_code=held.returncode;held=None
    if old_code==0 or 'result=unknown token_sent=1 send_kr=268435459' not in old_out or not alive(pid_b):raise AssertionError(f'old endpoint was not rejected: {old_out} {old_err}')
-   fresh=must([client,service,str(pid_b),b['instance_id'],requirement,'stop'],timeout=8)
-   if 'result=accepted_exit_unverified' not in fresh.stdout:raise AssertionError('replacement stop not accepted')
+   fresh=must([client,service,str(pid_b),b['instance_id'],requirement,'wait-exit'],timeout=8)
+   if 'result=accepted_exit_unverified' not in fresh.stdout or 'post_registration_identity_match=1' not in fresh.stdout or 'proc_exit_event=1 event_pid_matches=1 note_exit=1' not in fresh.stdout:raise AssertionError('replacement stop or exit observation failed')
    wait_for(lambda:not alive(pid_b) and not (config/'daemon.pid').exists())
-   line=f'run={i} wrong_code_and_instance_no_token=1 other_sender_rejected=1 normal_client_private_only=1 synthetic_public_stop_rejected=1 private_proof=1 first_stop_accepted=1 replacement_distinct=1 old_private_invalid_dest=1 replacement_survived=1 fresh_stop_accepted=1\n';results.append(line);print(line,end='')
+   line=f'run={i} wrong_code_and_instance_no_token=1 other_sender_rejected=1 normal_client_private_only=1 synthetic_public_stop_rejected=1 private_proof=1 first_stop_and_exit_observed=1 replacement_distinct=1 old_private_invalid_dest=1 replacement_survived=1 fresh_stop_and_exit_observed=1\n';results.append(line);print(line,end='')
   finally:
    if held is not None:
     if held.poll() is None:held.kill()
