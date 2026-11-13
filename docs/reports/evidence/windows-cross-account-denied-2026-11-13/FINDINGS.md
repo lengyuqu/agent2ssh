@@ -42,7 +42,8 @@ owning user, or inspect the process out of band before removing anything
 ## 边界
 
 - 走到该分支的前提是 `daemon_process_start_time` 对该 PID 返回 `None`（名字白名单不过）。winlogon.exe 天然不在白名单，所以这构造的是「记录指向别的账户的进程」这一真实损伤场景，而不是「跨账户 daemon 被安全识别后仍拒绝」——后者仍不可构造（本机无第二交互账户）。
-- 诊断路径（`observe_pid`）的 `denied` 观测仍依赖「sysinfo 无条目 + OpenProcess 拒绝」的组合，本轮没有构造（sysinfo 对 SYSTEM 进程可见，先返回 Live）；`windows-denied-2026-11-13/` 的该结论不变。
+- 诊断路径（`observe_pid`）的 `denied` 观测仍依赖「sysinfo 无条目 + OpenProcess 拒绝」的组合，本轮没有构造（sysinfo 对 SYSTEM 进程可见，先返回 Live）；**该组合在 Unix 侧同样没有验证记录**，不适用「其他设备验过即覆盖」的口径——`windows-denied-2026-11-13/` 的该结论不变。
+- 提升上下文下 `OpenProcess` 全部成功是预期行为（管理员本应能观察一切本机进程），不是验证缺口；真实的跨账户场景就是非提升上下文，已由本文件的端到端覆盖。
 - 机器：WinR9（Windows 11，10.0.26300，管理员 Administrator，RDP 会话）。
 
 ## 复现
