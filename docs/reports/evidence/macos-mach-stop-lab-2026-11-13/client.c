@@ -54,8 +54,7 @@ int main(int argc,char **argv){
     audit_token_t sender=t->msgh_audit;task_name_t name=MACH_PORT_NULL;
     int expect_private=getenv("A2S_MACH_LAB_EXPECT_PRIVATE")!=NULL;
     if(audit_token_to_euid(sender)!=geteuid()||audit_token_to_pid(sender)!=expected||resp.hello.pid!=(uint32_t)expected||memcmp(resp.hello.nonce,hello.nonce,16)||memcmp(resp.hello.instance,hello.instance,33)||!MACH_PORT_VALID(resp.hello.endpoint.name)||(expect_private ? resp.hello.endpoint.name==service : resp.hello.endpoint.name!=service)||task_identity_token_get_task_port(resp.hello.identity.name,TASK_FLAVOR_NAME,&name)){printf("refused=identity token_sent=0\n");return 2;}
-    audit_token_t task={0};mach_msg_type_number_t count=TASK_AUDIT_TOKEN_COUNT;
-    if(task_info(name,TASK_AUDIT_TOKEN,(task_info_t)&task,&count)||memcmp(&task,&sender,sizeof(task))||!a2s_verify_running_code(&sender,argv[4])){printf("refused=code_or_task token_sent=0\n");return 2;}
+    if(!a2s_task_audit_matches(&sender,name,expected)||!a2s_verify_running_code(&sender,argv[4])){printf("refused=code_or_task token_sent=0\n");return 2;}
     printf("identity_observations_match=1 same_endpoint=1 runtime_policy_match=1\n");
     // Guard use is a property of the exact laboratory binary and source path,
     // not something this client can independently query from a send right.

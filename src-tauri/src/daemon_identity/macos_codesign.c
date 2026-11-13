@@ -1,10 +1,23 @@
 #include "macos_codesign.h"
 #include <Security/Security.h>
 #include <CoreFoundation/CoreFoundation.h>
+#include <bsm/libbsm.h>
 #include <stdint.h>
+#include <string.h>
+#include <unistd.h>
 
 _Static_assert(sizeof(audit_token_t) == sizeof(uint32_t) * 8, "unexpected Darwin audit token size");
 _Static_assert(_Alignof(audit_token_t) == _Alignof(uint32_t), "unexpected Darwin audit token alignment");
+
+int a2s_task_audit_matches(const audit_token_t *audit, mach_port_t name, pid_t expected_pid) {
+    if (!audit || !MACH_PORT_VALID(name) || expected_pid <= 0 ||
+        audit_token_to_euid(*audit) != geteuid() || audit_token_to_pid(*audit) != expected_pid) return 0;
+    audit_token_t task_audit = {0};
+    mach_msg_type_number_t count = TASK_AUDIT_TOKEN_COUNT;
+    if (task_info(name, TASK_AUDIT_TOKEN, (task_info_t)&task_audit, &count) != KERN_SUCCESS ||
+        count != TASK_AUDIT_TOKEN_COUNT) return 0;
+    return memcmp(audit, &task_audit, sizeof(*audit)) == 0;
+}
 
 // A token is meaningful only when the caller got it from the kernel for the
 // relevant message. A matching code signature alone is not endpoint binding.

@@ -35,4 +35,6 @@ macOS 构建现在包含 `daemon_identity/macos_codesign`，它通过内核 audi
 
 后续将生产候选的代码要求收紧为结构化组合：Apple Developer ID Application 证书链、预期 Team ID、代码标识和单个精确 CDHash 全部匹配，且拒绝无法安全嵌入要求语法的输入。使用上述第三方运行进程，正确组合通过，单独更换 Team ID、标识或 CDHash 均拒绝；实际项目策略仍为 `None`。单 hash 如何覆盖多架构、升级、回滚和撤销尚未决定，不能因为此候选通过而启用生产停止。
 
+同一 macOS 原语还提供 audit token 与持有的 task name port 的比较：检查 UID/PID、`TASK_AUDIT_TOKEN` 及返回长度，完整 token 不一致时拒绝。它不接管端口，也不证明端点归属。单元测试覆盖真实 self task、篡改 token、错误 PID 和无效端口；真实 daemon 的直接注册与临时 launchd 实验客户端复用该比较并通过回归。生产停止路径仍未接入，Unix socket 的 peer audit 快照不能借此升级为 `Bound`。
+
 构建和回归：`npm run build` 通过；macOS Rust 无默认特性库 877 通过、1 忽略，Tauri 库 895 通过、1 忽略，新增的运行时单测在两种特性下单独复跑通过；普通 CLI 与 daemon 构建通过。`cargo check --locked --no-default-features --target x86_64-pc-windows-gnu --bin agent2ssh` 在 macOS 交叉编译通过，不能代替 Windows 运行验证。新增本地原语没有接入停止路径，CNB 配额不足的限制仍适用。

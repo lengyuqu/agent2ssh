@@ -28,6 +28,7 @@ fn build_macos_codesign() {
     println!("cargo:rerun-if-changed=src/daemon_identity/macos_codesign.h");
     println!("cargo:rustc-link-lib=framework=Security");
     println!("cargo:rustc-link-lib=framework=CoreFoundation");
+    println!("cargo:rustc-link-lib=bsm");
 }
 
 /// A native, explicitly enabled local experiment. It is not part of default

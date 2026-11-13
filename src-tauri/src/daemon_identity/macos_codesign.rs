@@ -46,6 +46,26 @@ pub(super) fn peer_audit_token(stream: &UnixStream) -> io::Result<KernelAuditTok
 unsafe extern "C" {
     fn a2s_verify_running_code(audit: *const KernelAuditToken, requirement: *const c_char)
         -> c_int;
+    fn a2s_task_audit_matches(
+        audit: *const KernelAuditToken,
+        name: libc::mach_port_t,
+        expected_pid: libc::pid_t,
+    ) -> c_int;
+}
+
+/// Compare a kernel-provided audit observation with a held task port. The
+/// caller retains the port; a match alone does not prove endpoint ownership.
+pub(crate) fn task_audit_matches(
+    audit: &KernelAuditToken,
+    name: libc::mach_port_t,
+    expected_pid: u32,
+) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(expected_pid) else {
+        return false;
+    };
+    // SAFETY: audit has the asserted Darwin layout; name is a borrowed port
+    // name and the C helper does not consume or transfer the right.
+    unsafe { a2s_task_audit_matches(audit, name, pid) == 1 }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -284,6 +304,37 @@ mod tests {
             verify_requirement(&audit, &requirement),
             Err(SigningEvidenceError::Rejected)
         );
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn task_audit_evidence_rejects_mismatched_task_or_pid() {
+        // TASK_AUDIT_TOKEN is 15 in the public Darwin SDK. The self task
+        // port is borrowed and remains owned by the process.
+        let task = unsafe { libc::mach_task_self() };
+        let mut audit = KernelAuditToken([0; 8]);
+        let mut count = 8;
+        let rc = unsafe {
+            libc::task_info(
+                task,
+                15,
+                (&mut audit as *mut KernelAuditToken).cast(),
+                &mut count,
+            )
+        };
+        assert_eq!(rc, 0);
+        assert_eq!(count, 8);
+        assert!(task_audit_matches(&audit, task, std::process::id()));
+        let mut altered = audit;
+        altered.0[7] ^= 1;
+        assert!(!task_audit_matches(&altered, task, std::process::id()));
+        assert!(!task_audit_matches(
+            &audit,
+            task,
+            std::process::id().wrapping_add(1)
+        ));
+        assert!(!task_audit_matches(&audit, 0, std::process::id()));
+        assert!(!task_audit_matches(&audit, task, u32::MAX));
     }
 
     #[test]
