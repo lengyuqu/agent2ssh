@@ -359,9 +359,14 @@ with tempfile.TemporaryDirectory(prefix='a2s-mach-lab-tools-',dir='/tmp') as too
      if proc.poll() is None:proc.terminate()
      proc.wait(timeout=8);log.close();raise
     return proc,log
-   a=b=held=None;log_a=log_b=None
+   a=b=held=registration_held=None;log_a=log_b=None
    try:
     a,log_a=start(config_a);record_a=json.loads((config_a/'daemon.instance.json').read_text());pid_a=a.pid
+    registration_ready=root/f'registration-held-{i}';registration_env=dict(clean);registration_env['A2S_MACH_LAB_CLIENT_READY']=str(registration_ready)
+    registration_held=subprocess.Popen([str(client),service,str(pid_a),record_a['instance_id'],good,'hold-registration'],env=registration_env,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+    deadline=time.monotonic()+8
+    while not registration_ready.exists() and registration_held.poll() is None and time.monotonic()<deadline:time.sleep(.02)
+    if not registration_ready.exists():raise RuntimeError('client did not reach post-registration barrier')
     ready=root/f'held-client-{i}';env=dict(clean);env['A2S_MACH_LAB_CLIENT_READY']=str(ready)
     held=subprocess.Popen([str(client),service,str(pid_a),record_a['instance_id'],good,'hold'],env=env,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
     deadline=time.monotonic()+8
@@ -381,6 +386,10 @@ with tempfile.TemporaryDirectory(prefix='a2s-mach-lab-tools-',dir='/tmp') as too
     if not service_absent(lookup,service):raise RuntimeError('old service name did not disappear')
     b,log_b=start(config_b);record_b=json.loads((config_b/'daemon.instance.json').read_text());pid_b=b.pid
     if pid_a==pid_b or record_a['instance_id']==record_b['instance_id']:raise AssertionError('replacement was not a distinct instance')
+    reg_out,reg_err=registration_held.communicate(input='x',timeout=8)
+    if registration_held.returncode==0 or 'refused=post_registration_identity token_sent=0' not in reg_out:
+     raise AssertionError(f'changed target was not refused before token: {reg_out} {reg_err}')
+    registration_held=None
     old_out,old_err=held.communicate(input='x',timeout=8)
     if held.returncode==0 or 'result=unknown token_sent=1' not in old_out or 'result=accepted_exit_unverified' in old_out:
      raise AssertionError(f'old endpoint was not conservatively rejected: {old_out} {old_err}')
@@ -392,11 +401,14 @@ with tempfile.TemporaryDirectory(prefix='a2s-mach-lab-tools-',dir='/tmp') as too
     fresh=invoke(client,service,pid_b,record_b['instance_id'],good,'stop')
     if fresh.returncode or 'result=accepted_exit_unverified' not in fresh.stdout:raise AssertionError(f'fresh replacement stop failed: {fresh.stdout} {fresh.stderr}')
     if b.wait(timeout=10)!=0:raise AssertionError('replacement daemon exited with error')
-    line=f'handoff_run={i} different_sender_rejected=1 same_pid_reexec_rejected=1 old_right_rejected=1 replacement_received_no_old_stop=1 replacement_survived=1 stale_a_preserved=1 fresh_stop_accepted=1\n';results.append(line);print(line,end='')
+    line=f'handoff_run={i} different_sender_rejected=1 same_pid_reexec_rejected=1 registration_race_no_token=1 old_right_rejected=1 replacement_received_no_old_stop=1 replacement_survived=1 stale_a_preserved=1 fresh_stop_accepted=1\n';results.append(line);print(line,end='')
    finally:
     if held is not None:
      if held.poll() is None:held.kill()
      held.communicate(timeout=5)
+    if registration_held is not None:
+     if registration_held.poll() is None:registration_held.kill()
+     registration_held.communicate(timeout=5)
     for proc in (a,b):
      if proc is not None:
       if proc.poll() is None:proc.terminate()

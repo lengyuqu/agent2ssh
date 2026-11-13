@@ -64,6 +64,8 @@ stateDiagram-v2
 
 **macOS 实测补充（2026-11-13）**：Mach task name port 的 `MACH_NOTIFY_DEAD_NAME` 不能单独提升为 `ExitedBound` 或作为清理 PID 记录的依据。在 [同 PID 的 exec 实验](../reports/evidence/macos-audit-code-identity-2026-11-13/FINDINGS.md)中，原 task port 变为 dead name、原 identity token 无法重新取得 port，但子进程仍存活。三轮[真实 daemon 停止实验](../reports/evidence/macos-mach-stop-lab-2026-11-13/FINDINGS.md)也收到 dead-name，退出由测试父进程另行确认。生产代码须把 task 失效与进程已退出分开；缺少可信退出证据时保留记录并报告未知，不能只按数字 PID 发信号或自动删除。
 
+候选退出观察顺序：在获得已核对的 task identity 后注册 PID 的 `EVFILT_PROC/NOTE_EXIT`，然后再次从原 token 取得 task port 并比对 audit token；任一步失败都不能发送 token 或声称已绑定退出观察。本机实测该事件在 `exec` 后不触发、真实退出后触发，且三次 A 在注册和复核之间退出并被不同 PID 的 B 取代时，复核失败、未发送 token。**这是实验候选，不是已证明的生产协议**：仍需验证真实 PID 复用、内核/权限与事件语义、完整部署和清理竞态；它也不提供可绑定的发信号句柄。
+
 ## 4. 线协议及对象建立
 
 ### 4.1 一个连接、一个停止操作
