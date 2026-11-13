@@ -264,6 +264,51 @@ fn retag_sigkill_before_hosts_rename_replays_to_a_complete_pair() {
     );
 }
 
+#[test]
+#[serial_test::serial]
+fn retag_replay_preserves_an_unresolved_bare_reference() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("config");
+    let _scope = ScopedConfig::new(&dir);
+    let dylib = build_hook(root.path());
+    seed(&dir);
+    make_legacy(&dir);
+    let mut hosts = hosts_json(&dir);
+    let mut orphan = hosts["hosts"][0].clone();
+    orphan["name"] = serde_json::json!("orphan-host");
+    orphan["host"] = serde_json::json!("127.0.0.2");
+    orphan["password"] = serde_json::json!(SECRET_REF);
+    hosts["hosts"].as_array_mut().unwrap().push(orphan);
+    fs::write(
+        dir.join("hosts.json"),
+        serde_json::to_vec_pretty(&hosts).unwrap(),
+    )
+    .unwrap();
+    crash_at(
+        &dir,
+        &dylib,
+        "before-rename",
+        &root.path().join("hook-orphan"),
+        &["secrets", "retag", "--confirm"],
+    );
+    assert!(dir.join(".commit.json").exists());
+    let restarted = run(&dir, &["secrets", "retag", "--confirm"], None, true);
+    assert!(
+        restarted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&restarted.stderr)
+    );
+    assert_fully_retagged(&dir);
+    let hosts = hosts_json(&dir);
+    let orphan = hosts["hosts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|host| host["name"] == "orphan-host")
+        .unwrap();
+    assert_eq!(orphan["password"].as_str(), Some(SECRET_REF));
+}
+
 /// Crash before `secrets.enc` itself is replaced (the entry rewrite never
 /// lands): nothing changed on disk, and a rerun retags from scratch.
 #[test]

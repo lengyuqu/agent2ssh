@@ -529,11 +529,27 @@ pub fn load_config() -> Result<AppConfig> {
 }
 
 fn load_config_from_disk(path: &Path) -> Result<AppConfig> {
+    let mut config = load_config_without_resolving(path)?;
+    internalize_secrets(&mut config, false);
+    Ok(config)
+}
+
+/// Validate the current file before retag mutates the credential store. Read
+/// it without resolving references or using the shared cache.
+pub(crate) fn load_config_for_retag() -> Result<AppConfig> {
+    load_config_without_resolving(&config_path()?)
+}
+
+/// Resolve after retagging so ordinary saving retains the newly assigned tags.
+/// Unlike ordinary loads, keep unresolved bare references intact.
+pub(crate) fn resolve_config_for_retag(config: &mut AppConfig) {
+    internalize_secrets(config, true);
+}
+
+fn load_config_without_resolving(path: &Path) -> Result<AppConfig> {
     let raw = fs::read_to_string(path).context("failed to read hosts config")?;
     let config: AppConfig = serde_json::from_str(&raw).context("failed to parse hosts config")?;
-    let mut config = normalize_config(migrate_config(config));
-    internalize_secrets(&mut config);
-    Ok(config)
+    Ok(normalize_config(migrate_config(config)))
 }
 
 /// Resolve encrypted-secret references back into real passwords after loading
@@ -548,7 +564,7 @@ fn load_config_from_disk(path: &Path) -> Result<AppConfig> {
 /// the removed OS-keyring storage path, so they are not resolvable here; keeping
 /// the marker prevents an unrelated save from destroying the only migration
 /// signal.
-fn internalize_secrets(config: &mut AppConfig) {
+fn internalize_secrets(config: &mut AppConfig, preserve_unresolved: bool) {
     enum Resolution {
         Keep,
         Clear,
@@ -569,12 +585,13 @@ fn internalize_secrets(config: &mut AppConfig) {
         tags: &std::collections::HashMap<String, String>,
         unlocked: bool,
         store_is_behind: bool,
+        preserve_unresolved: bool,
     ) -> Resolution {
         use crate::secrets::SecretRef::{Bare, Keyring, Malformed, Tagged};
         match crate::secrets::parse_secret_ref(value) {
             Some(Bare) => match crate::secrets::get_secret(account) {
                 Some(real) => Resolution::Replace(real),
-                None if unlocked && !store_is_behind => Resolution::Clear,
+                None if unlocked && !store_is_behind && !preserve_unresolved => Resolution::Clear,
                 None => Resolution::Keep,
             },
             Some(Tagged(tag)) => {
@@ -605,11 +622,20 @@ fn internalize_secrets(config: &mut AppConfig) {
         tags: &std::collections::HashMap<String, String>,
         unlocked: bool,
         store_is_behind: bool,
+        preserve_unresolved: bool,
     ) {
         let Some(value) = field.take() else {
             return;
         };
-        match resolve(&value, account, label, tags, unlocked, store_is_behind) {
+        match resolve(
+            &value,
+            account,
+            label,
+            tags,
+            unlocked,
+            store_is_behind,
+            preserve_unresolved,
+        ) {
             Resolution::Keep => *field = Some(value),
             Resolution::Clear => {}
             Resolution::Replace(real) => *field = Some(real),
@@ -643,6 +669,7 @@ fn internalize_secrets(config: &mut AppConfig) {
             &tags,
             unlocked,
             store_is_behind,
+            preserve_unresolved,
         );
         apply(
             &mut host.passphrase,
@@ -651,6 +678,7 @@ fn internalize_secrets(config: &mut AppConfig) {
             &tags,
             unlocked,
             store_is_behind,
+            preserve_unresolved,
         );
     }
     for proxy in &mut config.proxies {
@@ -662,6 +690,7 @@ fn internalize_secrets(config: &mut AppConfig) {
             &tags,
             unlocked,
             store_is_behind,
+            preserve_unresolved,
         );
     }
 }

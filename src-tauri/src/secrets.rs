@@ -446,6 +446,32 @@ pub fn legacy_tag_accounts() -> Vec<String> {
     accounts
 }
 
+/// Confirm that retag has a readable per-entry store before reporting a
+/// no-op. A v1, missing, or damaged file must not look like a complete upgrade.
+pub(crate) fn validate_retag_store() -> Result<()> {
+    if backend_is_memory() {
+        anyhow::bail!("retag requires a file-backed v2 credential store");
+    }
+    let raw = std::fs::read_to_string(secrets_path()?).context("failed to read secrets store")?;
+    let value: serde_json::Value =
+        serde_json::from_str(&raw).context("credential store is not readable JSON")?;
+    let version = match value.get("version") {
+        None => 1,
+        Some(value) => value
+            .as_u64()
+            .context("credential store version is invalid")?,
+    };
+    if version == 1 {
+        anyhow::bail!("credential store uses v1 format; unlock it and perform a normal save to migrate to v2 before retagging");
+    }
+    if version != 2 {
+        anyhow::bail!("credential store version {version} is not supported for retagging");
+    }
+    let _: EncryptedStoreV2 =
+        serde_json::from_str(&raw).context("credential store is not a readable v2 store")?;
+    Ok(())
+}
+
 /// Assign a fresh content tag to every stored entry that lacks one (CNB #38).
 ///
 /// This is the write half of `secrets retag`. Plaintext never changes: each
@@ -481,6 +507,12 @@ pub fn retag_legacy_entries() -> Result<usize> {
             "credential store is not a readable v2 store ({error}); retag needs per-entry structure — save once with the store unlocked to migrate a v1 store first"
         )
     })?;
+    if store.version != 2 {
+        anyhow::bail!(
+            "credential store version {} is not supported for retagging",
+            store.version
+        );
+    }
     let key = cached_key().ok_or_else(|| anyhow!("credential store is locked"))?;
 
     let mut retagged = 0;

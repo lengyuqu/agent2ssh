@@ -907,9 +907,9 @@ enum SecretsCommands {
     },
     /// Upgrade credentials written before phase 2 (CNB #38): every entry in
     /// secrets.enc without a content tag gets one (plaintext unchanged) and
-    /// every bare $agent2ssh-secret$ reference in hosts.json is upgraded to
-    /// $agent2ssh-secret$:<tag>, keeping hosts.json.secrets_generation aligned
-    /// with secrets.enc.generation.
+    /// each bare $agent2ssh-secret$ reference with a matching entry is upgraded
+    /// to $agent2ssh-secret$:<tag>; missing entries remain bare. Keeps
+    /// hosts.json.secrets_generation aligned with secrets.enc.generation.
     ///
     /// Without --confirm only a read-only preview is printed. Requires the
     /// store to be unlocked (AGENT2SSH_MASTER_PASSWORD); a locked store is

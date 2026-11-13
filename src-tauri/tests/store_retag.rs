@@ -273,6 +273,213 @@ fn retag_upgrades_a_fully_legacy_pair_and_is_idempotent() {
 
 #[test]
 #[serial_test::serial]
+fn retag_preserves_unresolvable_bare_references_while_upgrading_others() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+    make_legacy(dir.path());
+    let mut config = hosts_json(dir.path());
+    let mut orphan = config["hosts"][host_index(&config)].clone();
+    orphan["name"] = serde_json::json!("orphan-host");
+    orphan["host"] = serde_json::json!("127.0.0.2");
+    orphan["password"] = serde_json::json!(SECRET_REF);
+    config["hosts"].as_array_mut().unwrap().push(orphan);
+    fs::write(
+        dir.path().join("hosts.json"),
+        serde_json::to_vec_pretty(&config).unwrap(),
+    )
+    .unwrap();
+    let preview = run(dir.path(), &["secrets", "retag"], None, true);
+    assert!(preview.status.success());
+    assert!(String::from_utf8_lossy(&preview.stdout).contains("no store entry — left as-is"));
+    let result = run(dir.path(), &["secrets", "retag", "--confirm"], None, true);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_fully_tagged(dir.path());
+    let after = hosts_json(dir.path());
+    let orphan = after["hosts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|host| host["name"] == "orphan-host")
+        .unwrap();
+    assert_eq!(
+        orphan["password"].as_str(),
+        Some(SECRET_REF),
+        "unresolvable marker must remain intact"
+    );
+    let hosts_before = fs::read(dir.path().join("hosts.json")).unwrap();
+    let secrets_before = fs::read(dir.path().join("secrets.enc")).unwrap();
+    let again = run(dir.path(), &["secrets", "retag", "--confirm"], None, true);
+    assert!(
+        again.status.success(),
+        "{}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+    assert!(String::from_utf8_lossy(&again.stdout).contains("unresolved bare reference"));
+    assert_eq!(
+        fs::read(dir.path().join("hosts.json")).unwrap(),
+        hosts_before
+    );
+    assert_eq!(
+        fs::read(dir.path().join("secrets.enc")).unwrap(),
+        secrets_before
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn retag_refuses_a_store_behind_hosts_before_rewriting_it() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+    make_legacy(dir.path());
+    let hosts_path = dir.path().join("hosts.json");
+    let secrets_path = dir.path().join("secrets.enc");
+    let mut hosts = hosts_json(dir.path());
+    let generation = secrets_json(dir.path())["generation"].as_u64().unwrap();
+    hosts["secrets_generation"] = serde_json::json!(generation + 1);
+    fs::write(&hosts_path, serde_json::to_vec_pretty(&hosts).unwrap()).unwrap();
+    let hosts_before = fs::read(&hosts_path).unwrap();
+    let secrets_before = fs::read(&secrets_path).unwrap();
+    let result = run(dir.path(), &["secrets", "retag", "--confirm"], None, true);
+    assert!(!result.status.success());
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("credential store is behind hosts.json")
+    );
+    assert_eq!(fs::read(hosts_path).unwrap(), hosts_before);
+    assert_eq!(fs::read(secrets_path).unwrap(), secrets_before);
+}
+
+#[test]
+#[serial_test::serial]
+fn retag_does_not_rewrite_secrets_when_hosts_are_invalid_or_missing() {
+    for missing in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        seed(dir.path());
+        make_legacy(dir.path());
+        let path = dir.path().join("hosts.json");
+        if missing {
+            fs::remove_file(&path).unwrap();
+        } else {
+            fs::write(&path, b"{broken").unwrap();
+        }
+        let secrets_before = fs::read(dir.path().join("secrets.enc")).unwrap();
+        let preview = run(dir.path(), &["secrets", "retag"], None, true);
+        assert!(
+            !preview.status.success(),
+            "invalid or missing hosts file must not look like a no-op"
+        );
+        let result = run(dir.path(), &["secrets", "retag", "--confirm"], None, true);
+        assert!(
+            !result.status.success(),
+            "invalid or missing hosts file must be refused"
+        );
+        assert_eq!(
+            fs::read(dir.path().join("secrets.enc")).unwrap(),
+            secrets_before
+        );
+        if missing {
+            assert!(!path.exists());
+        } else {
+            assert_eq!(fs::read(path).unwrap(), b"{broken");
+        }
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn retag_preview_refuses_a_corrupt_store_instead_of_claiming_completion() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+    let path = dir.path().join("secrets.enc");
+    fs::write(&path, b"{broken").unwrap();
+    let hosts_before = fs::read(dir.path().join("hosts.json")).unwrap();
+    let preview = run(dir.path(), &["secrets", "retag"], None, false);
+    assert!(!preview.status.success());
+    assert!(!String::from_utf8_lossy(&preview.stdout).contains("Nothing to do"));
+    assert_eq!(fs::read(path).unwrap(), b"{broken");
+    assert_eq!(
+        fs::read(dir.path().join("hosts.json")).unwrap(),
+        hosts_before
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn retag_writer_refuses_an_unsupported_store_version_without_rewriting() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+    make_legacy(dir.path());
+    let path = dir.path().join("secrets.enc");
+    let mut store = secrets_json(dir.path());
+    store["version"] = serde_json::json!(3);
+    fs::write(&path, serde_json::to_vec_pretty(&store).unwrap()).unwrap();
+    let before = fs::read(&path).unwrap();
+    with_store(dir.path(), || {
+        agent2ssh::secrets::unlock_or_init(MASTER).unwrap();
+        let error = agent2ssh::secrets::retag_legacy_entries().unwrap_err();
+        assert!(error.to_string().contains("not supported"), "{error:#}");
+    });
+    assert_eq!(fs::read(path).unwrap(), before);
+}
+
+#[test]
+#[serial_test::serial]
+fn retag_refuses_a_real_v1_store_without_rewriting_it() {
+    use aes_gcm::{
+        aead::{Aead, KeyInit},
+        Aes256Gcm, Nonce,
+    };
+    use argon2::{Algorithm, Argon2, Params, Version};
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+    replace_ref(dir.path(), SECRET_REF);
+    let salt = [7u8; 16];
+    let nonce = [9u8; 12];
+    let mut key = [0u8; 32];
+    Argon2::new(Algorithm::Argon2id, Version::V0x13, Params::default())
+        .hash_password_into(MASTER.as_bytes(), &salt, &mut key)
+        .unwrap();
+    let secrets = std::collections::HashMap::from([(ACCOUNT, SECRET_A)]);
+    let plaintext = serde_json::to_vec(&secrets).unwrap();
+    let ciphertext = Aes256Gcm::new((&key).into())
+        .encrypt(Nonce::from_slice(&nonce), plaintext.as_ref())
+        .unwrap();
+    let v1 = serde_json::json!({"version":1,"kdf":"argon2id","salt":STANDARD.encode(salt),"nonce":STANDARD.encode(nonce),"ciphertext":STANDARD.encode(ciphertext)});
+    fs::write(
+        dir.path().join("secrets.enc"),
+        serde_json::to_vec_pretty(&v1).unwrap(),
+    )
+    .unwrap();
+    let hosts_before = fs::read(dir.path().join("hosts.json")).unwrap();
+    let secrets_before = fs::read(dir.path().join("secrets.enc")).unwrap();
+    for args in [
+        &["secrets", "retag"][..],
+        &["secrets", "retag", "--confirm"][..],
+    ] {
+        let output = run(dir.path(), args, None, true);
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("v1 format"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            fs::read(dir.path().join("hosts.json")).unwrap(),
+            hosts_before
+        );
+        assert_eq!(
+            fs::read(dir.path().join("secrets.enc")).unwrap(),
+            secrets_before
+        );
+    }
+}
+
+#[test]
+#[serial_test::serial]
 fn retag_refuses_a_locked_store_without_touching_anything() {
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path());

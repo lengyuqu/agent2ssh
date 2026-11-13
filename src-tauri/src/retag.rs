@@ -23,7 +23,7 @@
 //! requires reverting references to the bare marker first (configuration
 //! guide).
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::fs;
@@ -73,8 +73,8 @@ pub struct RetagScan {
 /// Scan `hosts.json` and `secrets.enc` **without decrypting or locking**.
 ///
 /// Bare references that point at a missing store entry are reported (with
-/// `resolvable: false`) but not upgraded: an unlocked save clears those anyway,
-/// and inventing a tag for a nonexistent ciphertext would be a lie.
+/// `resolvable: false`) and kept intact; a tag cannot be assigned to a
+/// nonexistent ciphertext.
 pub fn scan() -> Result<RetagScan> {
     let mut result = RetagScan {
         legacy_entries: secrets::legacy_tag_accounts(),
@@ -82,12 +82,14 @@ pub fn scan() -> Result<RetagScan> {
     };
 
     let dir = store::config_dir()?;
-    let Ok(raw) = fs::read_to_string(dir.join("hosts.json")) else {
-        return Ok(result);
-    };
-    let Ok(config) = serde_json::from_str::<Value>(&raw) else {
-        return Ok(result);
-    };
+    let raw =
+        fs::read_to_string(dir.join("hosts.json")).context("cannot read hosts config for retag")?;
+    // Match the configuration loader's schema validation before presenting a
+    // preview; malformed data is not evidence that no references exist.
+    let _: crate::types::AppConfig =
+        serde_json::from_str(&raw).context("cannot parse hosts config for retag")?;
+    let config: Value =
+        serde_json::from_str(&raw).context("cannot parse hosts config for retag")?;
 
     let mut push_ref = |kind: &str, name: &str, field: &str, value: &str| {
         if crate::secrets::parse_secret_ref(value) == Some(crate::secrets::SecretRef::Bare) {
@@ -140,6 +142,10 @@ pub fn scan() -> Result<RetagScan> {
 /// Preview for the CLI: scan plus an `app.log` audit entry. Touches no config
 /// file.
 pub fn preview() -> Result<RetagScan> {
+    if !secrets::is_initialized() {
+        bail!("no credential store exists; nothing to retag");
+    }
+    secrets::validate_retag_store()?;
     let scan = scan()?;
     audit(
         false,
@@ -182,14 +188,20 @@ pub fn describe(scan: &RetagScan) -> String {
         ));
     }
     if scan.legacy_entries.is_empty() && scan.bare_refs.is_empty() {
-        out.push_str("  Nothing to do: every entry is tagged and every reference carries a tag.\n");
+        out.push_str(
+            "  Every entry and reference is tagged; --confirm only aligns generations if needed.\n",
+        );
+    } else if scan.legacy_entries.is_empty() && scan.upgradable_refs == 0 {
+        out.push_str(
+            "  No references can be upgraded until their missing credentials are restored.\n",
+        );
+        out.push_str("  --confirm keeps them unchanged and only aligns generations if needed.\n");
     } else {
         out.push_str(
             "  With --confirm: legacy entries get a fresh content tag (plaintext unchanged),\n",
         );
-        out.push_str(
-            "  bare references are upgraded to $agent2ssh-secret$:<tag>, and hosts.json\n",
-        );
+        out.push_str("  resolvable bare references are upgraded to $agent2ssh-secret$:<tag>,\n");
+        out.push_str("  unresolved references remain unchanged, and hosts.json\n");
         out.push_str("  secrets_generation is re-aligned with secrets.enc.generation.\n");
         out.push_str(
             "  NOTE: an OLD agent2ssh binary that unlocks the store downgrades this again\n",
@@ -226,28 +238,46 @@ pub fn apply() -> Result<String> {
         );
     }
 
-    let before = scan()?;
-    if before.legacy_entries.is_empty() && before.bare_refs.is_empty() {
-        audit(false, json!({ "nothing_to_do": true }));
-        return Ok(
-            "Nothing to retag: every credential entry has a content tag and every reference is tagged."
-                .to_string(),
-        );
-    }
-
     // Hosts lock first, then secrets — the fixed order. `store_write_lock`
     // also replays any commit a crashed writer left behind.
     let _guard = store::store_write_lock()?;
     let before = scan()?;
+    // Validate the current hosts file before rewriting secrets, but defer
+    // credential resolution until after the retag is complete.
+    let mut config = store::load_config_for_retag()?;
+    secrets::validate_retag_store()?;
+    let store_generation =
+        secrets::store_generation().context("cannot read credential store generation for retag")?;
+    if config.secrets_generation > store_generation {
+        bail!(
+            "credential store is behind hosts.json (config generation {}, store generation {}); refusing to retag until secrets.enc is restored",
+            config.secrets_generation,
+            store_generation
+        );
+    }
+    if before.legacy_entries.is_empty()
+        && before.upgradable_refs == 0
+        && store_generation == config.secrets_generation
+    {
+        audit(
+            false,
+            json!({ "nothing_to_do": true, "unresolved_refs": before.bare_refs.len() }),
+        );
+        return Ok(if before.bare_refs.is_empty() {
+            "Nothing to retag: every credential entry has a content tag and every reference is tagged.".to_string()
+        } else {
+            format!("Nothing to retag: {} unresolved bare reference(s) remain unchanged; restore their credentials before upgrading them.", before.bare_refs.len())
+        });
+    }
     let retagged = secrets::retag_legacy_entries()?;
+    store::resolve_config_for_retag(&mut config);
 
-    // Re-seal `hosts.json` through the ordinary save path: loading resolves
-    // bare references back to plaintext (the store is unlocked), and saving
-    // re-seals them — `save_map` keeps the tag of an unchanged secret, which
+    // Re-seal `hosts.json` through the ordinary save path: resolvable bare
+    // references become plaintext; unresolved references remain markers.
+    // `save_map` keeps the tag of an unchanged secret, which
     // is now the fresh tag written above, so references come out tagged and
     // `secrets_generation` is stamped to the new generation. This is where the
     // `.commit.json` redo log is written if secrets changed.
-    let config = store::load_config()?;
     store::save_config_unlocked(&config)?;
 
     let after = scan()?;
