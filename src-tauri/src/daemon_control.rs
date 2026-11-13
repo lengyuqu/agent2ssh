@@ -1419,6 +1419,47 @@ fn creation_time_secs(handle: isize) -> Option<u64> {
     }
 }
 
+/// Whether an opened handle may be trusted as the process a stop verified.
+///
+/// Both inputs come from the same handle, taken after `OpenProcess` succeeded:
+/// the `GetProcessTimes` creation time (in whole seconds, the record's
+/// resolution) and whether the image file behind the handle is named like a
+/// daemon. A reused PID fails this in two independent ways — a different
+/// creation time, or an image that is not a daemon — so a reuse that lands in
+/// the same whole second as the recorded start time is still refused when the
+/// replacement is not a daemon image. Pure so the refusal rules are testable
+/// on every platform; the Windows handle probes feed it in [`BoundProcess`].
+#[cfg(any(windows, test))]
+fn bound_identity_matches(
+    creation_time: Option<u64>,
+    expected_start: u64,
+    image_is_daemon: bool,
+) -> bool {
+    // An unreadable creation time or an unreadable image name is "cannot
+    // verify", never "accept": fail closed on both.
+    creation_time == Some(expected_start) && image_is_daemon
+}
+
+/// The executable path behind a process handle, reduced to the same
+/// name whitelist the process-table observations use. `false` covers both "not
+/// a daemon image" and "could not read the image name" — for a binding, both
+/// mean refuse.
+#[cfg(windows)]
+fn handle_image_is_daemon(handle: isize) -> bool {
+    use windows_sys::Win32::System::Threading::{QueryFullProcessImageNameW, PROCESS_NAME_WIN32};
+    let mut buf = [0u16; 1024];
+    let mut len = buf.len() as u32;
+    let written = unsafe {
+        QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut len)
+    };
+    if written == 0 || len as usize > buf.len() {
+        return false;
+    }
+    let path: std::ffi::OsString =
+        std::os::windows::ffi::OsStringExt::from_wide(&buf[..len as usize]);
+    is_daemon_executable(path.as_os_str())
+}
+
 /// The Windows process object a stop is allowed to touch.
 ///
 /// `OpenProcess(pid)` only ever answers "the object holding this PID right
@@ -1427,13 +1468,17 @@ fn creation_time_secs(handle: isize) -> Option<u64> {
 /// waiting and termination act on the same object: a signaled handle means
 /// *that* process ended, not that whoever took the PID next is alive.
 ///
-/// The handle is only trusted after its own creation time matches the record.
-/// It is seconds, not the 100 ns `GetProcessTimes` returns, because the record
+/// The handle is only trusted after its own creation time matches the record
+/// *and* the image behind it is named like a daemon. The creation time is
+/// seconds, not the 100 ns `GetProcessTimes` returns, because the record
 /// stores whole seconds — and two processes created within the same second are
-/// indistinguishable at that precision (measured, 4/4 runs; report §3.3). So
-/// this is strictly stronger than re-opening per poll, not omniscient: it
+/// indistinguishable at that precision (measured, 4/4 runs; report §3.3). The
+/// image check is what a same-second reuse by a non-daemon binary trips over.
+/// So this is strictly stronger than re-opening per poll, not omniscient: it
 /// narrows the reuse window to the instant of `open` and removes it for the
-/// 8 s that follow.
+/// 8 s that follow; a same-second reuse by another daemon image remains
+/// indistinguishable until #22's versioned instance record carries a finer
+/// creation time.
 #[cfg(windows)]
 struct BoundProcess {
     handle: isize,
@@ -1448,10 +1493,16 @@ impl BoundProcess {
     /// Open the object behind `pid` and keep the handle.
     ///
     /// `None` means "not bound": the process is gone, the access was denied, or
-    /// the creation time is not the recorded one. None of those is evidence of
-    /// exit, so every caller falls back to the existing observation path rather
-    /// than treating it as one. The name whitelist is not re-checked here
-    /// because `expected_start` was read from a process that already passed it
+    /// the object behind the PID is not the one the record named. The last case
+    /// is the `OpenProcess`-window itself: between the process-table snapshot
+    /// that produced `expected_start` and this `OpenProcess`, the process can
+    /// exit and the OS can hand the PID to someone else. The handle's creation
+    /// time catches a reuse with a different start time; the image name behind
+    /// the same handle catches one that lands in the same whole second but is
+    /// not a daemon. None of those outcomes is evidence of exit, so every
+    /// caller falls back to the existing observation path rather than treating
+    /// it as one. The name is not re-checked against the process table because
+    /// `expected_start` was read from a process that already passed it
     /// ([`daemon_process_start_time`]).
     ///
     /// Only the rights needed to *observe* are requested here. A caller that may
@@ -1471,16 +1522,17 @@ impl BoundProcess {
         if handle == 0 {
             return None;
         }
-        match creation_time_secs(handle) {
-            Some(start) if start == expected_start => Some(Self {
+        let creation_time = creation_time_secs(handle);
+        let image_is_daemon = handle_image_is_daemon(handle);
+        if bound_identity_matches(creation_time, expected_start, image_is_daemon) {
+            Some(Self {
                 handle,
                 pid,
                 start_time: expected_start,
-            }),
-            _ => {
-                unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
-                None
-            }
+            })
+        } else {
+            unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
+            None
         }
     }
 
@@ -1523,7 +1575,7 @@ impl BoundProcess {
                 std::io::Error::last_os_error()
             ));
         }
-        if creation_time_secs(handle) != Some(self.start_time) {
+        if creation_time_secs(handle) != Some(self.start_time) || !handle_image_is_daemon(handle) {
             unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
             return Err(anyhow!(
                 "daemon PID {} was reused before it could be terminated; no signal was sent",
@@ -1912,13 +1964,37 @@ pub fn stop_daemon_process(pid: u32) -> std::result::Result<(), DaemonStopError>
 /// Returning only once the process has exited is what makes a restart safe — the
 /// old daemon still holds the listening port while it drains, so starting the
 /// new one straight away would fail to bind.
+/// Why a stop cannot verify the process behind the record, kept as two
+/// distinct facts. "The OS refused to describe the process" (a daemon running
+/// under another account, a protected process) is not evidence that it exited
+/// and gets its own diagnosis and next step; anything else is the plain
+/// cannot-identify refusal. Both retain the PID file and send no signal —
+/// deciding *that* is the caller's job; this only decides how to say it.
+/// Pure so the wording rules are testable on every platform.
+#[cfg(any(not(target_os = "macos"), test))]
+fn unverified_stop_reason(pid: u32, access_error: Option<String>) -> String {
+    match access_error {
+        Some(reason) => format!(
+            "the OS denied inspection of daemon PID {pid} ({reason}); the daemon may be \
+             running under another account. Access denied is not evidence that it exited: \
+             no signal was sent and the PID file is retained. Re-run as the owning user, \
+             or inspect the process out of band before removing anything"
+        ),
+        None => format!("daemon PID {pid} cannot be safely identified; PID file retained"),
+    }
+}
+
 #[cfg(not(target_os = "macos"))]
 pub fn stop_daemon_process(pid: u32) -> std::result::Result<(), DaemonStopError> {
     use DaemonStopError as Refused;
     let Some(start_time) = daemon_process_start_time(pid) else {
         if daemon_pid_state(pid) != DaemonPidState::Stale {
-            return Err(Refused::UnverifiedIdentity(format!(
-                "daemon PID {pid} cannot be safely identified; PID file retained"
+            // `pid_access_error` distinguishes "the OS refused" (another
+            // account, a protected process) from "nothing observable", and the
+            // refusal says so instead of leaving both as one dead end.
+            return Err(Refused::UnverifiedIdentity(unverified_stop_reason(
+                pid,
+                pid_access_error(pid),
             )));
         }
         // With no start time we cannot distinguish an old marker from a
@@ -2260,6 +2336,25 @@ mod tests {
         assert_eq!(reported_pid("not json"), None);
     }
 
+    /// Access denied is its own fact: the diagnosis must not read as "the
+    /// daemon exited", must say the record is kept and nothing was signalled,
+    /// and must give the operator a next step (#24, cross-account daemons).
+    #[test]
+    fn access_denied_is_reported_as_unknown_identity_not_exit() {
+        let denied = unverified_stop_reason(4242, Some("OpenProcess denied (error 5)".into()));
+        assert!(denied.contains("another account"), "{denied}");
+        assert!(denied.contains("not evidence that it exited"), "{denied}");
+        assert!(denied.contains("no signal was sent"), "{denied}");
+        assert!(denied.contains("PID file is retained"), "{denied}");
+        assert!(denied.contains("out of band"), "{denied}");
+        // The plain refusal keeps its contract too: it retains the record and
+        // never claims an exit.
+        let plain = unverified_stop_reason(4242, None);
+        assert!(plain.contains("cannot be safely identified"), "{plain}");
+        assert!(plain.contains("PID file retained"), "{plain}");
+        assert!(!plain.to_lowercase().contains("exited"), "{plain}");
+    }
+
     #[test]
     fn daemon_executable_names_are_not_substring_matches() {
         use std::ffi::OsStr;
@@ -2368,8 +2463,22 @@ mod tests {
 
     #[cfg(windows)]
     fn spawn_sleeper() -> std::process::Child {
-        Command::new("cmd.exe")
-            .args(["/C", "ping", "-n", "20", "127.0.0.1"])
+        // `BoundProcess::open` verifies the image name behind the handle, so
+        // the child must be named like a daemon. A copy of a system binary
+        // under that name is the same stand-in the e2e suite uses (a symlink
+        // needs a privilege the test account may not hold).
+        let dir = std::env::temp_dir().join(format!("a2s-bind-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir for the stand-in binary");
+        let named = dir.join("agent2ssh-daemon.exe");
+        if !named.exists() {
+            let system_root = std::env::var_os("SystemRoot")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+            std::fs::copy(system_root.join("System32").join("ping.exe"), &named)
+                .expect("copy a stand-in process");
+        }
+        Command::new(&named)
+            .args(["-n", "20", "127.0.0.1"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -2551,15 +2660,67 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn a_binding_is_accepted_only_for_the_creation_time_it_was_opened_for() {
-        let pid = std::process::id();
-        let start = observable_live_start_time(pid).expect("this process has a start time");
+        let mut child = spawn_sleeper();
+        let pid = child.id();
+        let start = creation_time_of(pid).expect("read creation time");
         assert!(
             BoundProcess::open(pid, start).is_some(),
-            "the same creation time binds"
+            "the recorded second opened this process, so it must bind"
         );
         assert!(
             BoundProcess::open(pid, start + 1).is_none(),
-            "a different creation time must not bind"
+            "a different second names a different object, and must not bind"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// The `OpenProcess` window: a PID reused by a *non-daemon* image is
+    /// refused even when the reuse lands in the same whole second as the
+    /// recorded start time, because the image name behind the handle is part
+    /// of the binding check.
+    #[cfg(windows)]
+    #[test]
+    fn a_handle_on_a_non_daemon_image_does_not_bind() {
+        let mut child = Command::new("cmd.exe")
+            .args(["/C", "ping", "-n", "20", "127.0.0.1"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn a non-daemon image");
+        let pid = child.id();
+        let start = creation_time_of(pid).expect("read creation time");
+        assert!(
+            BoundProcess::open(pid, start).is_none(),
+            "the right creation time on the wrong image must not bind"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// The acceptance rules themselves, stated without an OS: the refusal
+    /// matrix every handle must pass through, testable on every platform.
+    #[test]
+    fn a_binding_requires_both_the_recorded_time_and_a_daemon_image() {
+        assert!(
+            bound_identity_matches(Some(7), 7, true),
+            "the recorded second on a daemon image binds"
+        );
+        assert!(
+            !bound_identity_matches(Some(8), 7, true),
+            "a different creation time is a reused PID"
+        );
+        assert!(
+            !bound_identity_matches(Some(7), 7, false),
+            "a same-second reuse by a non-daemon image is refused"
+        );
+        assert!(
+            !bound_identity_matches(None, 7, true),
+            "an unreadable creation time fails closed"
+        );
+        assert!(
+            !bound_identity_matches(None, 7, false),
+            "an unreadable image name fails closed"
         );
     }
 }
