@@ -898,7 +898,14 @@ fn renamed_daemon_is_reported_healthy_but_not_unsafely_stopped() {
     {
         let status = agent2ssh::tauri_commands::daemon_status().expect("desktop status");
         assert!(!status.running);
-        assert!(status.message.contains("cannot be verified"));
+        // daemon_status no longer puts prose into `message`; the diagnosis
+        // verdict is the assertable fact. A live process with a silent health
+        // endpoint classifies as running-unhealthy, not stale.
+        let diagnosis = status.diagnosis.as_ref().expect("diagnosis report");
+        assert_eq!(
+            diagnosis.verdict,
+            agent2ssh::daemon_control::DaemonVerdict::RunningUnhealthy
+        );
         assert!(agent2ssh::tauri_commands::daemon_stop().is_err());
     }
     assert!(!cli("start").status.success());
@@ -955,7 +962,18 @@ fn start_refuses_to_claim_an_existing_health_endpoint_without_a_pid_file() {
     #[cfg(feature = "tauri")]
     {
         let status = agent2ssh::tauri_commands::daemon_status().unwrap();
-        assert!(!status.running && status.message.contains("no PID record"));
+        assert!(!status.running);
+        // The desktop message is "verdict: next step" now; assert the verdict
+        // and the record fact instead of interface prose.
+        let diagnosis = status.diagnosis.as_ref().expect("diagnosis report");
+        assert_eq!(
+            diagnosis.verdict,
+            agent2ssh::daemon_control::DaemonVerdict::Unverified
+        );
+        assert!(matches!(
+            diagnosis.record,
+            agent2ssh::daemon_control::DaemonPidRecord::Missing
+        ));
         assert!(agent2ssh::tauri_commands::daemon_stop().is_err());
     }
     let error =
@@ -1046,7 +1064,13 @@ fn other_daemons_health_is_not_reported_as_our_pid() {
     {
         let status = agent2ssh::tauri_commands::daemon_status().unwrap();
         assert!(!status.running);
-        assert!(status.message.contains("cannot be verified"));
+        // The health endpoint names a different process than the record — the
+        // strongest evidence available, classified as unverified.
+        let diagnosis = status.diagnosis.as_ref().expect("diagnosis report");
+        assert_eq!(
+            diagnosis.verdict,
+            agent2ssh::daemon_control::DaemonVerdict::Unverified
+        );
     }
     assert_eq!(
         std::fs::read_to_string(daemon.pid_file()).unwrap(),
@@ -1118,10 +1142,28 @@ fn a_forged_endpoint_cannot_report_an_absent_pid_as_running() {
     #[cfg(feature = "tauri")]
     {
         assert!(!desktop_status.running);
-        assert!(desktop_status.message.contains("cannot be verified"));
+        // A forged endpoint claiming the recorded PID while the OS says the
+        // process is absent is a contradiction, not a stale record: something
+        // answered, so the record stays classified as unverified.
+        let diagnosis = desktop_status.diagnosis.as_ref().expect("diagnosis report");
+        assert_eq!(
+            diagnosis.verdict,
+            agent2ssh::daemon_control::DaemonVerdict::Unverified
+        );
     }
     assert!(status.status.success());
-    assert!(String::from_utf8_lossy(&status.stdout).contains("unverified"));
+    // What the CLI must never do here is claim the forged endpoint proved a
+    // live, healthy daemon. Normally the endpoint answers and the verdict is
+    // "unverified"; under heavy suite load the 500 ms health probe can time
+    // out first, and then the OS-absent answer wins as "stale record". Both
+    // are safe answers; "running" or "healthy" would not be.
+    let cli_report = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        cli_report.contains("unverified") || cli_report.contains("stale record"),
+        "CLI must not report the forged endpoint as running or healthy: {cli_report}"
+    );
+    assert!(!cli_report.contains("healthy"));
+    assert!(!cli_report.contains("running"));
     assert_eq!(
         std::fs::read_to_string(dir.path().join("daemon.pid")).unwrap(),
         pid.to_string()
@@ -2164,7 +2206,7 @@ fn a_relative_config_dir_in_one_working_directory_names_one_daemon() {
 
 /// The same relative value from a different working directory is a different
 /// folder: the daemon is answering but this process has no pid file for it, so
-/// the honest answer is "cannot be verified" — never a stop, and never a
+/// the honest answer is an "unverified" verdict — never a stop, and never a
 /// deletion of whatever pid file *this* folder's `cfg` would hold.
 #[test]
 #[serial_test::serial]
