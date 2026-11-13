@@ -48,6 +48,7 @@ pub mod recording;
 pub mod redaction;
 pub mod remote;
 pub mod resident_session;
+pub mod retag;
 pub mod risk_config;
 mod risk_extra;
 pub mod sanitize;
