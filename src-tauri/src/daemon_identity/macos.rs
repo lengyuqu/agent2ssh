@@ -320,6 +320,107 @@ pub fn published_for(config: &Path, pid: u32) -> Result<bool> {
         && record.endpoint.path == SOCKET)
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct DiscoverySnapshot {
+    pub(crate) socket_path: PathBuf,
+    pub(crate) instance_id: String,
+    dir: PathBuf,
+    pid: u32,
+    pid_bytes: Vec<u8>,
+    record_bytes: Vec<u8>,
+    pid_inode: (u64, u64),
+    record_inode: (u64, u64),
+    socket_inode: (u64, u64),
+    config_inode: (u64, u64),
+}
+
+/// Presence of any IPC record is not identity proof; it does mean the legacy
+/// compatibility path must not ignore an inconsistent new-protocol instance.
+pub fn has_ipc_artifacts(config: &Path) -> Result<bool> {
+    let dir = owner_dir(config)?;
+    let _lock = lock(&dir)?;
+    let ipc_dir = dir.join(".daemon-ipc");
+    match fs::symlink_metadata(&ipc_dir) {
+        Ok(md) if !md.file_type().is_dir() => bail!("unsafe IPC socket directory"),
+        Ok(_) => private_socket_dir(&dir, false)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    for path in [dir.join(INSTANCE), dir.join(SOCKET)] {
+        match fs::symlink_metadata(path) {
+            Ok(_) => return Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(false)
+}
+
+/// Snapshot short file transactions under the existing publication lock.
+/// Contents and metadata are discovery evidence only and never authorize stop.
+pub(crate) fn discovery_snapshot(config: &Path, expected_pid: u32) -> Result<DiscoverySnapshot> {
+    let dir = owner_dir(config)?;
+    let _lock = lock(&dir)?;
+    private_socket_dir(&dir, false)?;
+    let pid_path = dir.join("daemon.pid");
+    let record_path = dir.join(INSTANCE);
+    let socket_path = dir.join(SOCKET);
+    let config_path = dir.join(CONFIG_ID);
+    let pid_md = fs::symlink_metadata(&pid_path)?;
+    let record_md = fs::symlink_metadata(&record_path)?;
+    let socket_md = fs::symlink_metadata(&socket_path)?;
+    let config_md = fs::symlink_metadata(&config_path)?;
+    let owner = unsafe { libc::geteuid() };
+    if !pid_md.file_type().is_file()
+        || pid_md.len() > 20
+        || pid_md.uid() != owner
+        || !record_md.file_type().is_file()
+        || record_md.len() > 4096
+        || record_md.uid() != owner
+        || !config_md.file_type().is_file()
+        || !socket_md.file_type().is_socket()
+        || socket_md.uid() != owner
+        || socket_md.mode() & 0o077 != 0
+    {
+        bail!("unsafe or invalid IPC discovery records");
+    }
+    let pid_bytes = fs::read(&pid_path)?;
+    let record_bytes = fs::read(&record_path)?;
+    let record: Instance =
+        serde_json::from_slice(&record_bytes).context("invalid IPC instance record")?;
+    if expected_pid == 0
+        || pid_bytes != expected_pid.to_string().as_bytes()
+        || record.version != super::VERSION
+        || record.pid != expected_pid
+        || !super::valid_id(&record.instance_id)
+        || !super::valid_id(&record.config_id)
+        || record.config_id != read_config_id(&dir)?
+        || record.endpoint.kind != "unix"
+        || record.endpoint.path != SOCKET
+    {
+        bail!("IPC discovery records conflict");
+    }
+    Ok(DiscoverySnapshot {
+        socket_path,
+        instance_id: record.instance_id,
+        dir,
+        pid: expected_pid,
+        pid_bytes,
+        record_bytes,
+        pid_inode: (pid_md.dev(), pid_md.ino()),
+        record_inode: (record_md.dev(), record_md.ino()),
+        socket_inode: (socket_md.dev(), socket_md.ino()),
+        config_inode: (config_md.dev(), config_md.ino()),
+    })
+}
+
+pub(crate) fn verify_discovery_snapshot(previous: &DiscoverySnapshot) -> Result<()> {
+    if discovery_snapshot(&previous.dir, previous.pid)? != *previous {
+        bail!("IPC records or socket changed during discovery");
+    }
+    Ok(())
+}
+
 pub struct Publication {
     pub listener: UnixListener,
     pub instance: Instance,

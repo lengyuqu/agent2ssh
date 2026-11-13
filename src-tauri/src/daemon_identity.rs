@@ -197,3 +197,6 @@ mod tests {
 /// a process identity or a credential.
 #[cfg(target_os = "macos")]
 pub mod macos;
+
+#[cfg(target_os = "macos")]
+pub mod macos_client;

@@ -600,3 +600,80 @@ fn compatibility_refuses_mismatched_health_and_reports_lost_or_invalid_replies()
         );
     }
 }
+
+#[test]
+#[serial_test::serial]
+fn legacy_stop_refuses_conflicting_ipc_before_sending_http_token() {
+    use std::sync::{atomic::AtomicBool, Mutex};
+    let dir = tempfile::Builder::new()
+        .prefix("a2s-ipc-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let addr = address();
+    let mut child = daemon(dir.path(), &addr, true);
+    let pid = child.0.id();
+    let record_path = dir.path().join("daemon.instance.json");
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&record_path).unwrap()).unwrap();
+    record["instance_id"] = serde_json::json!("ffffffffffffffffffffffffffffffff");
+    std::fs::write(&record_path, serde_json::to_vec(&record).unwrap()).unwrap();
+    let front = TcpListener::bind("127.0.0.1:0").unwrap();
+    let proxy_addr = front.local_addr().unwrap().to_string();
+    front.set_nonblocking(true).unwrap();
+    let captured = Arc::new(Mutex::new(Vec::<String>::new()));
+    let copy = captured.clone();
+    let stop = Arc::new(AtomicBool::new(false));
+    let done = stop.clone();
+    let config = std::fs::canonicalize(dir.path())
+        .unwrap()
+        .display()
+        .to_string();
+    let server = std::thread::spawn(move || {
+        while !done.load(Ordering::SeqCst) {
+            match front.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
+                    let mut buf = [0u8; 4096];
+                    let n = stream.read(&mut buf).unwrap_or(0);
+                    copy.lock()
+                        .unwrap()
+                        .push(String::from_utf8_lossy(&buf[..n]).to_string());
+                    let body =
+                        serde_json::json!({"ok":true,"pid":pid,"config_dir":config}).to_string();
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5))
+                }
+                Err(e) => panic!("fake HTTP listener: {e}"),
+            }
+        }
+    });
+    let output = cli(
+        dir.path(),
+        &proxy_addr,
+        &["daemon", "stop", "--allow-unbound-graceful"],
+    );
+    stop.store(true, Ordering::SeqCst);
+    server.join().unwrap();
+    assert!(!output.status.success());
+    assert!(
+        body(&output).contains("IPC identity evidence is inconsistent"),
+        "{}",
+        body(&output)
+    );
+    assert!(child.0.try_wait().unwrap().is_none());
+    let requests = captured.lock().unwrap();
+    assert!(!requests.is_empty());
+    assert!(requests.iter().all(|r| !r.contains(TOKEN)
+        && !r.to_ascii_lowercase().contains("authorization:")
+        && r.starts_with("GET /health ")));
+}

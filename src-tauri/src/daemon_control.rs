@@ -1889,8 +1889,19 @@ pub fn request_graceful_shutdown() -> bool {
 /// On macOS, refuse to stop an unbound daemon without sending a request or signal.
 #[cfg(target_os = "macos")]
 pub fn stop_daemon_process(pid: u32) -> std::result::Result<(), DaemonStopError> {
+    let discovery = match config_dir()
+        .and_then(|dir| crate::daemon_identity::macos_client::inspect_unbound(&dir, pid))
+    {
+        Ok(observation) => format!(
+            "IPC hello matched peer PID {}, but no stable process object is bound",
+            observation.peer_pid
+        ),
+        Err(error) => {
+            format!("IPC identity discovery could not establish consistent evidence ({error})")
+        }
+    };
     Err(DaemonStopError::UnverifiedIdentity(format!(
-        "daemon PID {pid} is not bound to an authenticated process object; no shutdown or signal was sent and this client did not remove the PID file. Inspect the process and stop it out of band, or explicitly try 'agent2ssh daemon stop --allow-unbound-graceful' (may stop the wrong process and expose the admin token)"
+        "daemon PID {pid} is not bound to an authenticated process object; {discovery}; no shutdown or signal was sent and this client did not remove the PID file. Inspect the process and records before recovery"
     )))
 }
 
@@ -2066,8 +2077,27 @@ pub fn request_unbound_graceful_shutdown(pid: u32) -> Result<()> {
     {
         anyhow::bail!("daemon PID or configuration directory does not match; no request sent; this client did not remove the PID file");
     }
+    let dir = config_dir()?;
+    let ipc_artifacts = crate::daemon_identity::macos::has_ipc_artifacts(&dir)
+        .context("cannot inspect IPC identity records; no request sent")?;
+    let ipc_observation = if ipc_artifacts {
+        Some(
+            crate::daemon_identity::macos_client::inspect_unbound(&dir, pid)
+                .context("IPC identity evidence is inconsistent or unavailable; no request sent")?,
+        )
+    } else {
+        None
+    };
     if read_record()? != original_record {
         anyhow::bail!("daemon PID record changed during discovery; no request sent");
+    }
+    if crate::daemon_identity::macos::has_ipc_artifacts(&dir)? != ipc_artifacts {
+        anyhow::bail!("IPC identity records changed during discovery; no request sent");
+    }
+    if let Some(observation) = ipc_observation {
+        observation.revalidate().context(
+            "IPC identity records changed before compatibility request; no request sent",
+        )?;
     }
     let token = crate::daemon_activity::read_admin_token()
         .ok_or_else(|| anyhow!("admin token unavailable; no request sent"))?;

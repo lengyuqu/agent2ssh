@@ -111,6 +111,25 @@ fn daemon_requires_order_token_and_instance_before_accepting_one_stop() {
         std::fs::read_to_string(dir.path().join("daemon.pid")).unwrap(),
         pid.to_string()
     );
+    // The production client may perform a no-secret hello, but cannot promote
+    // a macOS peer PID into a bound object or stop the real daemon.
+    let stopped = Command::new(env!("CARGO_BIN_EXE_agent2ssh"))
+        .args(["daemon", "stop"])
+        .env("AGENT2SSH_CONFIG_DIR", dir.path())
+        .env("AGENT2SSH_DAEMON_ADDR", "127.0.0.1:9")
+        .output()
+        .unwrap();
+    assert!(!stopped.status.success());
+    assert!(
+        String::from_utf8_lossy(&stopped.stderr).contains("IPC hello matched"),
+        "{}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    assert!(child.0.try_wait().unwrap().is_none());
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("daemon.pid")).unwrap(),
+        pid.to_string()
+    );
     let mut wrong_order = connect(dir.path());
     send(
         &mut wrong_order,

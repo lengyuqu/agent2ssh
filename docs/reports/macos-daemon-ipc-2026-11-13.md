@@ -15,3 +15,17 @@ macOS arm64、27.2.1 (26B131)：真实 daemon 进程测试覆盖正确停止、�
 macOS `daemon_matches_config` 现在直接保留未验证状态，不读取 token 或访问认证端点。已存在 PID 的启动请求拒绝自动复用、保留记录。新启动只观察由本次调用创建的子进程、版本化实例/PID/socket 记录和匿名 `/health` 中一致的 PID/配置目录；这些只是就绪线索，CLI/桌面明确报告 HTTP 端点未绑定、未认证，不将它们升级为身份绑定。测试覆盖伪造端点自报一个活 PID、伪造子进程 PID 但不发布完整实例、真实 daemon 启动，以及真实 CLI 首次启动后再次启动；伪造服务的捕获记录验证没有 Authorization 头或合成 token。
 
 端点仍可能代理、伪造或转移 socket；这些检查不证明 HTTP 服务端属于子进程。业务调用和桌面页面后续主动使用的 HTTP API 不属于本次健康检查修复，仍需按自己的信任边界处理。未配置 SSH fixture 时不声称验证了活跃 SSH 的关闭行为。
+
+### 后续：macOS 生产客户端的无密钥发现
+
+默认停止现在读取锁内版本化实例/PID/配置 ID/socket 快照；在一条非阻塞本机连接上读取 `LOCAL_PEERPID`、发送随机 nonce 的 hello，核对响应和第二次 peer PID，再锁内复核记录内容及文件/socket inode。只要记录不一致、路径不安全、peer/hello 不符、连接或读写超时，就拒绝。通信采用单一 1.5 秒 deadline；两次锁等待分别有界，文件系统调用本身没有证明全局期限。客户端不读取 token、发送授权/停止、发信号、删除记录或自动重连。检查全部一致也只报告 `Unbound`，不自动停止。
+
+这是生产客户端的一部分，不是稳定对象绑定：记录与 inode 是发现线索，读取前后相同不证明中间没有替换；macOS 上 IPC 连接的 `LOCAL_PEERPID` 会受描述符继承/转移影响。Apple 的 [XPC 对端 PID 文档](https://developer.apple.com/documentation/xpc/xpc_connection_get_pid%28_%3A%29?language=objc) 同样提醒 PID 可回收；此来源是对 PID 时效性的说明，不证明 Unix socket 与进程对象关联。Mach task identity token 等机制还需要单独证明如何从实际 IPC 对端取得稳定对象、如何阻止描述符委派，以及无特权下是否可用，不能把 API 名称当成已验收方案。
+
+显式 `--allow-unbound-graceful` 若观察到 IPC 记录，会先验证无密钥发现的一致性，并在读取 token 前再次比对原快照；发现 IPC 矛盾或不可用时在读取/发送管理员 token 之前拒绝。没有 IPC 记录的旧 daemon 仍走人工选择的旧式路径；IPC hello 与 HTTP 监听者之间没有绑定，显式例外仍可能将 token 发给错误端点，不能因为 IPC hello 一致就声称安全绑定。
+
+2026-11-13 本机 macOS 27.2.1 (26B131)、arm64、隔离配置及合成 token：客户端原有测试 7 项通过（含一个仅供子进程调用的辅助测试），覆盖真实不同 PID 对端、匹配 hello 仍无授权、错误实例、记录和 socket 替换、慢速帧 deadline、没有自动重连；真实 daemon IPC 9 项通过，包括调用生产 `daemon stop` 后 daemon 仍存活；保守停止 9 项通过，包括 IPC 矛盾时显式 HTTP 例外没有发送 token；停止回归 33 项通过、2 项忽略，未配置 SSH fixture。无默认特性 Rust 库 873 通过/1 忽略，Tauri 库 891 通过/1 忽略。仍未测试真实 PID 重用、跨 UID、沙箱及签名发布包。
+
+候选方向另见 Apple [Mach IPC 安全限制说明](https://developer.apple.com/documentation/xcode/conforming-to-mach-ipc-security-restrictions?changes=__8%2C__8)：task identity token 转换时仍需权限检查。该文讨论异常消息，不证明 Unix socket 可以安全获得同一对象，尚无相应生产绑定实现或验证。
+
+提交前复核新增了 hello 后、兼容请求读取 token 前的快照复核；`observation_rejects_a_record_replaced_after_hello` 使用相同内容替换记录，确认 inode 变化被拒绝。此检查不能消除复核之后的替换竞态，也不绑定 HTTP 与 IPC 端点。
