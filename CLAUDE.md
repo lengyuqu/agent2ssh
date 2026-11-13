@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Priority rule (owner decision, 2026-11-13)
+
+**Experience > Features > Security (体验 > 功能 > 安全).** Pre-1.0, security-only work ranks last: record security defects instead of fixing them, unless one directly blocks a core feature or clearly hurts UX. Full wording in [AGENTS.md](AGENTS.md) → "Product Priorities".
+
 ## What this is
 
 Agent2SSH is a local SSH capability layer for general-purpose agents. One Rust core is exposed through four binaries plus a desktop UI:

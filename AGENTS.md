@@ -1,5 +1,14 @@
 # Repository Guidelines
 
+## Product Priorities (Pre-1.0, Decided by the Owner 2026-11-13)
+
+**Experience > Features > Security (体验 > 功能 > 安全).** This software has not shipped 1.0. Before 1.0, features and experience come first — without them there is no reason to keep building — and security is a guarantee for later iterations, not a current scheduling item. Practical rules:
+
+- When ordering tasks or picking work, security-only items (hardening, extra validation, rate limiting, path protections) rank last.
+- A security defect found along the way is **recorded, not fixed**, unless it directly blocks a core feature or clearly hurts the user experience.
+- Do not proactively propose security-hardening work.
+- This stops *new* security-oriented investment; it does not remove existing mechanisms. Already-merged guards stay as they are.
+
 ## Project Structure & Module Organization
 
 Agent2SSH combines a React/Vite desktop frontend with a Rust/Tauri backend. Frontend code lives in `src/`, with reusable UI in `src/components/`, shared types in `src/types.ts`, API helpers in `src/api.ts`, and styling/tokens in `src/index.css` plus `src/components/ui/`. Rust code is under `src-tauri/src/`; binaries are in `src-tauri/src/bin/` for the CLI, daemon, and MCP server. Rust integration tests live in `src-tauri/tests/`. Documentation is in `docs/`, `README.md`, and `CHANGELOG.md`. Helper scripts are in `scripts/`; bundled skill instructions are in `skills/agent2ssh/SKILL.md`.
