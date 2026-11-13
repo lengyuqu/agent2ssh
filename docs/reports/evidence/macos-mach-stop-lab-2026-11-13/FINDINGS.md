@@ -24,7 +24,7 @@ python3 docs/reports/evidence/macos-mach-stop-lab-2026-11-13/verify_launchd_daem
 - 三轮 A/B 服务替换中，另一进程复用 nonce，以及原客户端在相同 PID 下 `exec` 后复用 nonce 的请求均被拒绝。客户端分别在注册进程事件前、注册后复核 identity 前被暂停；A 退出、同名 B 启动后恢复，客户端均保守拒绝且没有发送 token。另一个客户端保存的旧发送权没有向 B 投递请求，B 保持存活，重新认证 B 后可完成停止。这是不同 PID 的受控切换，不是真实 PID 复用。实验代码的 receive right 使用 `MPG_IMMOVABLE_RECEIVE`。
 - 三轮临时 launchd 管理的真实 daemon：公开发现端口和实例自建的 guarded 私有端点分离；正常客户端先检查 audit、task identity 和实验固定 CDHash，再只在私有端点发送合成 token。错误代码要求或实例在发送前拒绝；不同进程复用另一客户端 nonce 的合成停止被拒绝。另行故意向公开端口发送合成停止，服务拒绝处理且保持运行；A 停止、B 重启后旧私有发送权返回目标无效，B 存活，用新身份可停止。两次正常停止的客户端均在发送前注册进程事件、再次核对原 task identity，并在接受后观察到目标 PID 的 `NOTE_EXIT`；测试守卫另行观察退出。每个临时 launchd job 均确认注销；详见 `launchd-daemon-results.txt`。
 - 上述 launchd 第一轮还通过本机临时 sshd 和合成密钥启动真实 SSH 请求，在命令运行中执行私有端点停止：客户端得到 503 和远端结果未知，审计保留同一语义。不据此断言远端命令终止。
-- 一次 launchd 管理的真实 daemon 崩溃恢复：活跃进程的 `clear-stale` 被拒绝；对该测试 job 定向发送 SIGKILL 后，launchd 拉起的候选实例拒绝覆盖 PID、实例记录和 socket inode。注销 job 后，用刚构建的真实 CLI、明确 PID 和实例执行 `clear-stale`，重新注册 job 后启动了新实例并通过其私有端点停止。这不证明自动恢复、真实 PID 复用或非配合旧版本写入的安全性。
+- 一次 launchd 管理的真实 daemon 崩溃恢复：活跃进程的 `clear-stale` 被拒绝；对该测试 job 定向发送 SIGKILL 后，launchd 拉起的候选实例拒绝覆盖 PID、实例记录和 socket inode。注销 job 后，真实 CLI 使用错误实例编号的清理请求被拒绝且三项记录不变；使用正确 PID 和实例执行 `clear-stale` 后，重新注册 job 启动了新实例并通过其私有端点停止。这不证明自动恢复、真实 PID 复用或非配合旧版本写入的安全性。
 
 ## 边界与剩余工作
 

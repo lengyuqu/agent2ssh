@@ -171,6 +171,9 @@ try:
    raise AssertionError('crash records were overwritten or daemon unexpectedly active')
   must(['launchctl','bootout',f'{DOMAIN}/{service}']);installed=False
   wait_for(lambda:state(service)=='absent')
+  wrong_command=[str(args.cli.resolve(strict=True)),'daemon','clear-stale','--expect-pid',str(pid_a),'--expect-instance','f'*32]
+  wrong_clear=subprocess.run(wrong_command,capture_output=True,text=True,timeout=8,env=cli_env)
+  if wrong_clear.returncode==0 or paths[0].read_bytes()!=snapshots[0] or paths[1].read_bytes()!=snapshots[1] or (paths[2].lstat().st_dev,paths[2].lstat().st_ino)!=socket_id:raise AssertionError('wrong instance removed or changed crash records')
   repaired=subprocess.run(command,capture_output=True,text=True,timeout=8,env=cli_env)
   if repaired.returncode or any(path.exists() for path in paths):raise AssertionError(f'explicit recovery failed: {repaired.stdout} {repaired.stderr}')
   must(['launchctl','bootstrap',DOMAIN,plist]);installed=True
@@ -179,7 +182,7 @@ try:
   stopped=must([client,service,str(pid_b),b['instance_id'],requirement,'stop'],timeout=8)
   if 'result=accepted_exit_unverified' not in stopped.stdout:raise AssertionError('recovered daemon did not accept private stop')
   wait_for(lambda:not alive(pid_b) and not (config/'daemon.pid').exists())
-  line='crash_recovery live_clear_refused=1 crash_records_preserved=1 explicit_clear=1 distinct_restart=1 private_stop=1\n';results.append(line);print(line,end='')
+  line='crash_recovery live_clear_refused=1 crash_records_preserved=1 wrong_instance_clear_refused=1 explicit_clear=1 distinct_restart=1 private_stop=1\n';results.append(line);print(line,end='')
  finally:
   if installed or state(service)!='absent':
    run(['launchctl','bootout',f'{DOMAIN}/{service}']);deadline=time.monotonic()+4
