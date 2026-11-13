@@ -1169,8 +1169,9 @@ paths:
         `AGENT2SSH_ALLOW_UNBOUND_HTTP_SHUTDOWN=1` to enable this unbound legacy
         route. An HTTP response cannot bind the endpoint to the target process;
         a caller can stop the wrong process or expose its token. The macOS
-        client never sends an automatic shutdown request or signal, and a single
-        explicit compatibility request does not prove the process exited.
+        client never sends this HTTP request or a signal automatically (its
+        default stop uses a local Mach port instead, not this route), and a
+        single explicit compatibility request does not prove the process exited.
         Asks the daemon to shut down the way `SIGTERM` does: it stops accepting
         connections, ends event streams, and drains open WebSocket connections on
         a budget — up to two seconds for each connection (they drain in parallel),

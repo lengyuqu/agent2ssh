@@ -6,18 +6,56 @@
 
 > 2026-11-13 补充：[临时 XPC 服务与逐消息身份实验](../reports/macos-xpc-deployment-2026-11-13.md) 表明签名要求不保护认证前已发送的请求，可信部署与完整安全停止仍未验收。
 
+## 0. 当前代码状态（`88856f6`，2026-11-13）
+
+本节只描述代码现在做什么，按源码核对，未重跑测试。第 1 节以后的内容是设计；二者不一致处在各节用「现状」标出，剩余收口跟踪在 [CNB #39](https://cnb.cool/zdzso/agent2ssh/-/issues/39)。
+
+| 项 | macOS | Linux / Windows |
+|---|---|---|
+| 默认停止（CLI `daemon stop` / `restart`、桌面停止与重启） | 走 Mach 私有端口：`daemon_control::stop_daemon_process` → `daemon_identity::macos_mach::stop`。握手不成立时不发送请求；请求可能已送达但未观察到退出时返回 `UncertainExit`，不重试、不回退 HTTP、不发信号 | 仍是旧路径：匿名 `/health` 对照 PID 与配置目录，带 `expect_pid` 的 HTTP `/shutdown`，等待退出，超时后调用 `terminate_for_stop` 强制终止。D2、D3 在这两个平台**尚未实施** |
+| 桌面退出 | 不停止 daemon，只写一条诊断日志（`tauri_commands::stop_owned_daemon` 的 macOS 版） | 停止本应用自己启动的 daemon，走上一行的旧路径 |
+| HTTP `/shutdown` | 默认 403，含空 body；仅 daemon 启动环境 `AGENT2SSH_ALLOW_UNBOUND_HTTP_SHUTDOWN=1` 时开放 | 默认开放，没有这个开关 |
+| 显式未绑定兼容 | `daemon stop --allow-unbound-graceful` 与桌面 `daemon_stop_unbound_graceful`：单次 HTTP，不等待、不发信号、不清理记录，CLI 收到接受回执也以非零退出 | CLI 报 `--allow-unbound-graceful is available only on macOS` |
+| 记录 | 数字 `daemon.pid` + `daemon.instance.json` + `.daemon-ipc/s`，由 daemon 发布并在正常退出时自行清理 | 只有数字 `daemon.pid`，没有实例记录和本机控制端点 |
+| 强制终止 | 无。任何路径都不按 PID 发信号 | 有，见上 |
+| 第 4.1 节的长度前缀 socket 协议 | daemon 端已实现并监听；生产客户端只用到无密钥 hello（`macos_client::inspect_unbound`，仅在显式兼容路径里做一致性检查），不发送 `authorize` / `stop`。**daemon 端在 `authorize` + `stop` 之后仍会触发关闭**，见下文第 7 条 | 未实现 |
+
+**macOS Mach 路径的实际时序**（`macos_mach.rs`、`macos_mach_control.c`）：
+
+1. 客户端锁内读取 PID、实例记录与配置标识（`macos::mach_target`），锁在返回后释放；再读取已有的管理 token（`read_existing_token`，不创建）。
+2. `bootstrap_look_up("org.agent2ssh.<config_id>")` 取得发现端口，发送无密钥 hello：随机 nonce、实例 ID、期望 PID 和一个 send-once 回复权。回复端口的接收权设了 `MPG_IMMOVABLE_RECEIVE`。
+3. daemon 只接受同 euid、实例与 PID 都等于自己的 hello，登记（nonce，客户端 audit token，10 秒有效期，最多 32 个会话），回复 task identity token 与私有端口的发送权。
+4. 客户端核对回复的内核 audit trailer（euid、PID）、回显的 nonce / 实例 / PID、私有端口不等于发现端口，并用 identity token 取 task name 端口比对 audit token。任一步不符即返回，此时 token 未发出。
+5. 客户端登记 `EVFILT_PROC/NOTE_EXIT`，登记前后各从同一 identity token 取一次 task name 端口并复核 audit token。
+6. 之后才把 token、nonce、实例、期望 PID 发到**私有端口**。daemon 只在该端口上处理 stop，要求发送者 audit token 与 hello 会话相同、token 相同，会话一次性作废；发现端口上的 stop 被丢弃。
+7. 客户端要求回执的发送者 audit token 与 hello 回复相同且 nonce / PID 相符，再等 `NOTE_EXIT` 最多 8 秒。只有这三项都成立才返回已退出；否则为未知结果。
+8. 已退出后，调用方执行 `remove_daemon_pid_file_if`：实例记录或 socket 仍在时报错并保留，交给显式 `clear-stale`；都已被 daemon 清掉时返回成功。
+
+**为什么这仍不是第 2 节的 `Bound`**：
+
+1. 不读代码签名，也没有发布者信任根。这是本轮的明确选择（签名不是这条路径的门槛），所以第 3 节「macOS 生产接入的待验收条件」第 1、4 条不成立。在 D1 范围内它依赖同 euid 与内核 audit token，不防同 uid 主动替换程序。
+2. 发现名由 daemon 自己调用已弃用的 `bootstrap_register` 注册，不是 launchd 托管的 `MachServices`。名字的注册竞态、进程退出后的回收、崩溃残留都没有验收。
+3. 客户端无法从发送权独立确认私有端口的接收权不可转移；这是 daemon 代码的不变量，不是客户端取得的证据。
+4. 退出观察是「登记 `NOTE_EXIT` + 前后 audit 复核」，不是一个可以等待并发信号的进程对象。真实 PID 复用没有在本机构造出来；D3 所需的同一对象强杀不存在，本路径也不提供强杀。
+5. 客户端在握手之前就把 token 读进了内存，与 [Mach 评审稿](macos-mach-identity-v2.md)第 5 步「证明成立后才读取」的顺序不同。「token 只在私有发送权上发出」成立。
+6. 第 3 节的 `ExitedBound → Cleaned / Replaced` 没有实现：客户端不在退出后持锁比对原快照，记录由 daemon 自己清理，客户端只做上面第 8 步的保守删除。
+7. macOS 上同时存在两条会触发关闭的本机协议：Mach 私有端口，以及 `.daemon-ipc/s` 上的 `hello → authorize → stop`（`bin/agent2ssh_daemon/identity_macos.rs`）。后者没有生产客户端调用，但持有 token 的同 uid 进程可以用它停止 daemon，且不经过上面任何一步核对。D4 禁止两条自动停止协议并存；去掉它的停止副作用还是只留发现，尚未决定。
+8. 证据范围：#39 记录本机 `daemon_macos_conservative_e2e` 12 项通过。没有覆盖正式签名包、不同 UID、受限进程、最低系统版本。
+
+Linux（#23）与 Windows（#24）的对象绑定是各自的工作，macOS 的结果不能外推。
+
 ## 1. 推荐决定及对 #25 的直接答案
 
 | 项 | v1 推荐 | 代价与必须审阅的兼容性 |
 |---|---|---|
 | D1 威胁范围 | 防止正常崩溃、重启、PID 复用、非恶意继承、端点切换和不同用户访问；同 uid 能主动替换程序、窃取 token、伪造配置或有调试权限者不在认证保证内。 | socket 权限和 token 无法抵御同 uid 主动攻击；代理/继承不能因为 D1 排除而忽略。 |
-| D2 兼容 | **新客户端默认不向 `Unbound` 的端点发送停止请求**。旧 daemon 仅由显式单次 `--allow-unbound-graceful`（桌面等价明确操作）允许尝试一次 HTTP 优雅停止；必须提示可能停错、管理员 token 可能交给错误端点，且永不自动发信号；已观察到 PID/实例/端点矛盾或代理时即使给出该选项也必须拒绝。新 daemon 默认拒绝 HTTP `/shutdown`，只有显式管理员兼容开关才开放，包括空 body；远程 HTTP 停止同受影响。 | 会改变旧客户端和远程运维行为。旧客户端和旧 daemon 的组合不能被新程序保护；历史回滚或显式兼容开关重新暴露旧风险。安全默认值已获用户确认；目前代码尚未实施。 |
+| D2 兼容 | **新客户端默认不向 `Unbound` 的端点发送停止请求**。旧 daemon 仅由显式单次 `--allow-unbound-graceful`（桌面等价明确操作）允许尝试一次 HTTP 优雅停止；必须提示可能停错、管理员 token 可能交给错误端点，且永不自动发信号；已观察到 PID/实例/端点矛盾或代理时即使给出该选项也必须拒绝。新 daemon 默认拒绝 HTTP `/shutdown`，只有显式管理员兼容开关才开放，包括空 body；远程 HTTP 停止同受影响。 | 会改变旧客户端和远程运维行为。旧客户端和旧 daemon 的组合不能被新程序保护；历史回滚或显式兼容开关重新暴露旧风险。安全默认值已获用户确认。现状：macOS 已实施（默认停止改走 Mach，HTTP `/shutdown` 默认 403）；Linux / Windows 尚未实施，见第 0 节。 |
 | D3 强制终止 | 仅 `Bound` 且始终用同一个已持有内核进程对象等待、发信号；进程不可观察、权限失败或连接身份不符均不强杀。 | macOS v1 不提供自动强杀；Windows 独立重连在可证明方案验收前也不提供。诊断和带外处理是必需品。 |
-| D4 本机通道 | 原候选为 Unix domain stream socket / Windows local-only named pipe **新增专用停止协议**；macOS 后续发现 socket 无法证明接收者绑定，另有[尚未验收的 Mach 双端点候选](macos-mach-identity-v2.md)。现有 HTTP 用于其他 API，不能作为绑定的回退；HTTP `/shutdown` 只在 D2 显式兼容开关下保留。 | 协议与旧客户端不兼容、需各平台测试。禁止同时运行两条自动停止协议及从 IPC 自动退回 TCP；对远程用途显式标识为非本地停止，不对本机 PID 发信号。macOS 双端点是一个候选协议的发现与授权阶段，不能把 launchd 公共端口当成绑定后的秘密接收端。 |
+| D4 本机通道 | 原候选为 Unix domain stream socket / Windows local-only named pipe **新增专用停止协议**；macOS 后续发现 socket 无法证明接收者绑定，改用 [Mach 双端点](macos-mach-identity-v2.md)；它已是 macOS 的默认停止路径，但未通过正式验收。现有 HTTP 用于其他 API，不能作为绑定的回退；HTTP `/shutdown` 只在 D2 显式兼容开关下保留。 | 协议与旧客户端不兼容、需各平台测试。禁止同时运行两条自动停止协议及从 IPC 自动退回 TCP；对远程用途显式标识为非本地停止，不对本机 PID 发信号。macOS 双端点是同一协议的发现与授权阶段，不能把公共发现端口当成绑定后的秘密接收端。现状：macOS daemon 的 socket 协议仍带停止副作用，与本条冲突，见第 0 节第 7 条。 |
 | D5 命名及权限 | 一个配置目录、一个持锁发布的专用本机端点。Unix socket 放在经校验、只允许拥有者访问的本地配置目录；Windows 命名管道名称由持久随机配置标识派生，明确 DACL、首实例与拒绝远程；路径太长或无法保护时拒绝，不截断、不改用共享路径。 | 配置复制、相对路径、软链接及不同用户可能无法使用；须报具体原因。标识不作为秘密或认证证据。 |
 | D6 记录 | 保留数字 `daemon.pid`，新增版本化 `daemon.instance.json`；明确锁内发布、两文件不原子、条件清理和降级。精确的生成号不从 PID/时钟推断。 | 旧程序不参与锁或忽略新记录时不能保证安全迁移；新旧共存需要显式策略，不允许自动认领。 |
 
-**#25 的实现边界已明确**：macOS 新独立客户端取得对端线索并完成无密钥握手后仍为 `Unbound`，本版不可按 PID 自动强杀。`LOCAL_PEERPID` / `LOCAL_PEERCRED`、`kqueue`、微秒起始时间可用于发现矛盾和诊断，不能单独升级成 `Bound`；新客户端默认拒绝未绑定停止。用户若明确选择 D2 的单次兼容尝试，可发一次不绑定的旧 HTTP 优雅停止并承担停错风险，不能声称绑定、不能自动补发或 `kill`。#25 可以据此实现保守拒绝、诊断、明确的单次兼容交互和平台验证，而不需要等待 Linux 的 pidfd 原型。用户已确认上述安全默认值；具体发布、旧版迁移和远程运维方案仍需实现评审与验收，不能宣称现有代码已应用。
+**#25 的实现边界已明确**（现状：本段说的是 Unix socket 线索，仍然成立；默认停止已不走这条线索，而是第 0 节的 Mach 路径）：macOS 新独立客户端在 socket 上取得对端线索并完成无密钥握手后仍为 `Unbound`，本版不可按 PID 自动强杀。`LOCAL_PEERPID` / `LOCAL_PEERCRED`、`kqueue`、微秒起始时间可用于发现矛盾和诊断，不能单独升级成 `Bound`；新客户端默认拒绝未绑定停止。用户若明确选择 D2 的单次兼容尝试，可发一次不绑定的旧 HTTP 优雅停止并承担停错风险，不能声称绑定、不能自动补发或 `kill`。#25 可以据此实现保守拒绝、诊断、明确的单次兼容交互和平台验证，而不需要等待 Linux 的 pidfd 原型。用户已确认上述安全默认值；macOS 已按此实现，具体发布、旧版迁移和远程运维方案仍需评审与验收，Linux / Windows 尚未应用。
 
 ## 2. 保护对象、可信假设与术语
 
@@ -64,14 +102,14 @@ stateDiagram-v2
 
 **macOS 实测补充（2026-11-13）**：Mach task name port 的 `MACH_NOTIFY_DEAD_NAME` 不能单独提升为 `ExitedBound` 或作为清理 PID 记录的依据。在 [同 PID 的 exec 实验](../reports/evidence/macos-audit-code-identity-2026-11-13/FINDINGS.md)中，原 task port 变为 dead name、原 identity token 无法重新取得 port，但子进程仍存活。三轮[真实 daemon 停止实验](../reports/evidence/macos-mach-stop-lab-2026-11-13/FINDINGS.md)也收到 dead-name，退出由测试父进程另行确认。生产代码须把 task 失效与进程已退出分开；缺少可信退出证据时保留记录并报告未知，不能只按数字 PID 发信号或自动删除。
 
-候选退出观察顺序：在获得已核对的 task identity 后注册 PID 的 `EVFILT_PROC/NOTE_EXIT`，然后再次从原 token 取得 task port 并比对 audit token；任一步失败都不能发送 token 或声称已绑定退出观察。本机实测该事件在 `exec` 后不触发、真实退出后触发，且三次 A 在注册和复核之间退出并被不同 PID 的 B 取代时，复核失败、未发送 token。**这是实验候选，不是已证明的生产协议**：仍需验证真实 PID 复用、内核/权限与事件语义、完整部署和清理竞态；它也不提供可绑定的发信号句柄。
+候选退出观察顺序：在获得已核对的 task identity 后注册 PID 的 `EVFILT_PROC/NOTE_EXIT`，然后再次从原 token 取得 task port 并比对 audit token；任一步失败都不能发送 token 或声称已绑定退出观察。本机实测该事件在 `exec` 后不触发、真实退出后触发，且三次 A 在注册和复核之间退出并被不同 PID 的 B 取代时，复核失败、未发送 token。**现状：macOS 默认停止已采用这个顺序（`macos_exit_observer.c`），但它仍不是已证明的保证**：仍需验证真实 PID 复用、内核/权限与事件语义、完整部署和清理竞态；它也不提供可绑定的发信号句柄。
 
 ### macOS 生产接入的待验收条件（2026-11-13）
 
-以下是候选接入条件，不代表正式产品已经启用：
+以下是把 Mach 路径称为 `Bound` 之前要满足的条件。现状：程序路径已作为 macOS 默认停止启用，但只满足第 2 条的端点形态和第 3 条的等待与恢复；第 1、4 条未满足，且发现名是自注册而非 launchd 托管。逐条差异见第 0 节。
 
 1. **可信代码要求与打包。** 在客户端内提供可验证的发布者信任根和允许的 daemon 标识；无有效信任根、ad-hoc、签名/运行时校验失败或不允许的 entitlement 均保持 `Unbound`，不能由可写的实例记录、服务端响应或环境变量提供信任根。Developer ID、Team ID、签名轮换和降级策略需结合实际发布身份设计并验证；目前没有可用的正式签名身份。临时 Tauri 打包实验发现当前配置会给 daemon 附加不符合实验策略的 entitlement，单独重签后可在 ad-hoc debug 包中通过校验，正式签名、公证和更新链尚未验证。
-2. **发现与授权分离。** launchd 管理的公共 MachServices 端口只接收无秘密发现；[实测](../reports/evidence/macos-mach-discovery-2026-11-13/FINDINGS.md) A 退出后旧公共发送权可投递给重启的 B，即使 A 曾 guard receive right。A 必须另建实例专属、不可转移的 receive right，并在无秘密回复中给出其发送权与 task identity。客户端核对 kernel audit、task identity、记录、nonce、可信代码及运行时策略后，只在该私有端点发送管理员 token 与一次停止。当前的隔离真实 daemon 实验覆盖了该形态，尚不是正式客户端实现；guard 不能由发送权独立查询，依赖可信发布代码及其不变量。
+2. **发现与授权分离。** launchd 管理的公共 MachServices 端口只接收无秘密发现；[实测](../reports/evidence/macos-mach-discovery-2026-11-13/FINDINGS.md) A 退出后旧公共发送权可投递给重启的 B，即使 A 曾 guard receive right。A 必须另建实例专属、不可转移的 receive right，并在无秘密回复中给出其发送权与 task identity。客户端核对 kernel audit、task identity、记录、nonce、可信代码及运行时策略后，只在该私有端点发送管理员 token 与一次停止。现状：生产客户端与 daemon 已按「发现端口只收无秘密 hello、私有端口才收 token」实现，但发现名由 daemon 用 `bootstrap_register` 自注册，不由 launchd 管理；guard 不能由发送权独立查询，依赖 daemon 代码及其不变量。
 3. **等待与恢复。** 将接受回执和退出观察分开；回复丢失、进程事件不可注册或复核失败时保留记录并报告未知，不自动重发或按 PID 信号。`NOTE_EXIT` 加注册后 identity 复核仅是候选退出观察，不是已证明的跨版本保证；不得用 task dead-name 代替进程退出。实验中的 launchd 崩溃残留须先停用测试 job，再由显式 `clear-stale` 按期望 PID 和实例核对清理，不能据此承诺生产自动恢复。
 4. **正式验收。** 须在正式签名并安装的 app、daemon 和 CLI 上验证信任根成功与不匹配拒绝、daemon 独立 entitlement、签名/更新/回滚、跨用户和权限失败、真实 PID 复用及注册竞态、服务替换与消息权利交接、回执丢失、SSH/本地任务 drain 和记录恢复。缺失能力、旧版或任何证明失败继续使用已确认的保守默认；实验 ad-hoc 结果不替代这些验收。
 
@@ -79,7 +117,7 @@ stateDiagram-v2
 
 ### 4.1 一个连接、一个停止操作
 
-以下长度前缀流是原 v1 跨平台候选，不证明 macOS 的 socket 对端绑定；macOS 现有生产客户端仍保持 `Unbound`。针对 launchd 端口重启反例的两端点候选与待验收条件见 [macOS Mach 评审稿](macos-mach-identity-v2.md)，其安全约束未通过正式发布验收，不能将两个传输机制互相背书。
+以下长度前缀流是原 v1 跨平台候选，不证明 macOS 的 socket 对端绑定。现状：macOS 生产客户端在这条 socket 上只做无密钥 hello，结果始终是 `Unbound`，不发送 `authorize` / `stop`；默认停止走 [macOS Mach 评审稿](macos-mach-identity-v2.md)描述的两端点路径。该路径未通过正式发布验收，不能将两个传输机制互相背书。macOS daemon 端仍完整实现了下面的 `authorize` → `stop` 并会据此关闭，这是第 0 节第 7 条的未决项。
 
 流协议采用本地私有的长度前缀 UTF-8 JSON：4 字节无符号大端长度 + JSON，单帧最大 **16 KiB**，先检查长度、UTF-8、完整对象和版本，再执行；截断、超限、重复 key、未知字段/版本均拒绝，不能部分执行。首次仅允许一组不含秘密的 `hello`/`hello_ok`；客户端验证同连接的 peer 与进程对象、进入 `Bound` 后，才发送 `authorize`/`authorized`，随后至多一条 `stop` 与一条结果；不支持复用、自动重连、代理或隐式重试。认证成功不替代进程绑定。帧、连接和总期限分别受界，且绝不在文件锁内等待。具体消息用例（值为示意）：
 
@@ -100,7 +138,7 @@ stateDiagram-v2
 
 **Windows / #24，当前默认 `Unbound`**：`GetNamedPipeServerProcessId(C)` 得到数字 PID，并不关闭之后 `OpenProcess(pid)` 前的复用窗口；不能以管道 ACL、PID、随机 ID 或重复读取时间自行填平。父进程保留 `CreateProcess` 返回的真实进程句柄只是 O 的一部分，还需把 C 与 O 证明关联，并处理句柄继承/多实例/服务退出时序；没有经 Windows 真机验证的证明前仍 `Unbound`，含独立重连。原型可研究启动时预建不可委派管道与句柄，但不预先宣布成功。管道 DACL 不得给客户端 `FILE_CREATE_PIPE_INSTANCE`；使用首实例和拒绝远程的机制，核对自身 SID、拒绝未授权用户并实测，不能把 pipe 名称或 SID 当作进程身份。拒绝访问是未知，不是已退出。
 
-**macOS / #25，当前默认 `Unbound`**：客户端在 C 上读 `LOCAL_PEERPID` 可用于对照 R，但 #25 已用真实父子 socket 实测已连接 fd 交给仍存活子进程写入后返回子进程 PID。`NOTE_EXIT | NOTE_EXITSTATUS` 对本机 pid 1 的 `EACCES` 是瞬时权限线索；单标志和双标志不同，均不提供通过同一对象发信号。`proc_pidinfo` 微秒字段也不封闭 PID→`kill` 窗口。实现读取这些线索仅用于诊断/拒绝，不得调用裸 PID `kill` 作为自动强杀或将它们升级为 `Bound`；不把未研究的其他原语宣称为永不可能。
+**macOS / #25，socket 线索默认 `Unbound`**（默认停止改走 Mach，见第 0 节；以下各项对 socket 线索仍成立）：客户端在 C 上读 `LOCAL_PEERPID` 可用于对照 R，但 #25 已用真实父子 socket 实测已连接 fd 交给仍存活子进程写入后返回子进程 PID。`NOTE_EXIT | NOTE_EXITSTATUS` 对本机 pid 1 的 `EACCES` 是瞬时权限线索；单标志和双标志不同，均不提供通过同一对象发信号。`proc_pidinfo` 微秒字段也不封闭 PID→`kill` 窗口。实现读取这些线索仅用于诊断/拒绝，不得调用裸 PID `kill` 作为自动强杀或将它们升级为 `Bound`；不把未研究的其他原语宣称为永不可能。
 
 **直接启动者**：可保留操作系统创建时返回的进程对象，但即使 O 已固定，独立建立的 C 仍需证明与 O 相连；仅比较 PID 不足。启动时预建且严格禁止继承/委派的专用端点或其他候选必须在各平台原型中证明该联系。启动者退出后其内存句柄不能从 PID 文件恢复；独立重连只能按各平台规则重新发现，不能继承上次 `Bound`。
 
@@ -143,13 +181,37 @@ stateDiagram-v2
 | 请求已写出但响应丢失 / 连接切换 | `UnknownOutcome`；不重新连接代发或自动补发；是否手动重新发现由用户决定 | 无法宣称未执行 |
 | 回滚、老进程或不受信锁/文件系统 | 停用自动动作，走显式人工恢复；若还在运行旧客户端，标明新保证不适用 | 兼容路径带回历史风险 |
 
+### 6.1 当前代码的实际降级表（`88856f6`）
+
+上表是设计目标。下表是代码现在的行为，按源码核对；「旧」指没有实例记录和 Mach 发现名的版本。旧客户端的行为取自上文对旧版的描述，本轮没有拿旧二进制重测。
+
+**macOS**
+
+| 客户端 / daemon | 默认 `daemon stop`、`restart`、桌面停止 | 显式 `--allow-unbound-graceful` |
+|---|---|---|
+| 新 / 新，记录完整、握手成立 | Mach 停止；回执相符且观察到 `NOTE_EXIT` 才报告已停止。daemon 自行清理记录 | 仍可用，但 daemon 默认回 403，客户端报结果未知、不清理 |
+| 新 / 新，握手不成立（发现名查不到、PID / 实例 / nonce / audit 不符、退出观察登记失败） | 拒绝：未发送 token 与请求，不发信号，保留记录 | 若存在身份记录，先做 socket 无密钥一致性检查；不一致即拒绝，不发送 token |
+| 新 / 新，stop 已发出但回执缺失、不符，或 8 秒内未见退出 | `UncertainExit`：不重试，不回退 HTTP，不发信号，保留记录 | 不适用；这是用户另行发起的单次操作 |
+| 新 / 新，已观察到退出但实例记录或 socket 仍在 | 报错并保留，提示用 `clear-stale --expect-pid --expect-instance` | 不清理 |
+| 新 / 旧（只有数字 PID，或记录缺失、损坏、不一致） | 拒绝：读取记录即失败，不读 token，不发送任何请求 | 允许一次旧 HTTP 优雅停止：要求数字回环地址、PID 记录前后一致、进程可观察、`/health` 的 PID 与配置目录相符。不等待、不强杀、不清理，CLI 以非零退出 |
+| 旧 / 新 | 旧客户端的 HTTP `/shutdown` 得到 403；其后是否按 PID 强杀取决于旧版本，新 daemon 无法阻止 | 仅当 daemon 启动环境设置 `AGENT2SSH_ALLOW_UNBOUND_HTTP_SHUTDOWN=1` 时 HTTP 才被接受 |
+| 残留记录（进程已不在） | 拒绝自动覆盖或删除；`daemon start` 也拒绝复用 | 不清理；走 `clear-stale` |
+
+**Linux / Windows**
+
+| 客户端 / daemon | 当前行为 | 与设计的差距 |
+|---|---|---|
+| 新 / 新、新 / 旧 | `/health` 对照 PID 与配置目录 → 带 `expect_pid` 的 HTTP `/shutdown` → 等待 → 超时后强制终止。旧 daemon 的 200 记为 `AcceptedUnchecked` 并继续 | 没有未绑定拒绝，没有实例记录，强制终止不以 `Bound` 为前提。属于 #23、#24 |
+| `--allow-unbound-graceful` | CLI 直接报错：仅 macOS 可用 | 这两个平台的默认路径本身就是未绑定 HTTP，没有需要显式开启的例外 |
+| HTTP `/shutdown` 空 body | 接受，不做 PID 检查 | D2 要求默认关闭 |
+
 ## 7. 交付与验收顺序
 
-1. **#22 评审**：用户已确认 D2 的两项安全默认值及其旧版/远程影响；其余实现细节、威胁模型和平台能力须在编码前评审。记录 macOS 默认没有自动停止/强杀的体验与显式兼容路径，不能把提案说成已实现。
+1. **#22 评审**：用户已确认 D2 的两项安全默认值及其旧版/远程影响；其余实现细节、威胁模型和平台能力须在编码前评审。现状：macOS 默认停止已经可用（Mach 路径），没有强杀，显式兼容路径保留；Linux / Windows 仍是旧行为。第 0 节与 6.1 节记录实际状态，不能把其余提案说成已实现。
 2. **#20 / #21**：定义旧 HTTP 回执和人可理解的 `Unbound`、`UnknownOutcome`、权限拒绝、记录损坏、端点冲突、条件清理反馈。不得借“用户确认”把身份不明变成 `Bound`；明确 token/日志脱敏与恢复的竞态边界。
 3. **#23 Linux**：构造真实 Unix socket 与 `SO_PEERPIDFD` 原型，验证 peer 凭据采样时机、监听 fd 和已连接 fd 的继承/传递、父进程退出、client PID namespace、内核不支持和权限失败；在可控注入下重现“peer PID 已取、原进程退出、同 PID 被复用，再打开对象”，证明裸 `pidfd_open` 不可升级；测试 peer pidfd 的 wait/signal 指向同一对象并覆盖 A/B 切换。当前主机是 macOS，未实测 Linux。
 4. **#24 Windows**：真实机器测首实例、DACL/远程拒绝、管道多实例、进程句柄及管道 server PID 采样、继承与代理、`OpenProcess` 前复用/拒绝访问；证明不了即保持 `Unbound`。不能以其他平台结果替代。
-5. **#25 macOS**：基于已实测 peer PID/传递结果实现不绑定默认拒绝、不自动信号、可操作诊断和显式兼容流程；用真实进程覆盖 A/B、伪造、权限不足、旧 daemon、端点和 PID 记录并发替换、目标退出与不可观察、跨版本和不可靠目录。无法稳定构造 PID 复用时结合可控注入，明确未实测，不能只断言状态码。
+5. **#25 macOS**：基于已实测 peer PID/传递结果实现不绑定默认拒绝、不自动信号、可操作诊断和显式兼容流程（现状：已实现，并在其上增加了 Mach 默认停止；Mach 路径自身的剩余验收见 #39）；用真实进程覆盖 A/B、伪造、权限不足、旧 daemon、端点和 PID 记录并发替换、目标退出与不可观察、跨版本和不可靠目录。无法稳定构造 PID 复用时结合可控注入，明确未实测，不能只断言状态码。
 6. **全平台契约**：每一个非法转换都测试（不可 `Unbound → force`、`Unknown → cleanup`、断线后向 B 重试）；真实进程前后分别核对 A/B 是否存活和原/新记录内容，隔离 `AGENT2SSH_CONFIG_DIR`。矩阵覆盖新旧客户端 × 新旧 daemon、兼容开关启用前后、HTTP 空 body 和远程停止、权限失败、记录发布前后各崩溃点、锁被替换及回滚。同步 `api.yaml`、配置指南与 K14，只有平台原型和真实验收通过才能声称对应保证已落地。
 
 ## 8. 原语依据与证据等级
