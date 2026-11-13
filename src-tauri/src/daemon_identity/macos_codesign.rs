@@ -84,7 +84,7 @@ fn verify_requirement(
 mod tests {
     use super::*;
     use std::{
-        io::Read,
+        io::{Read, Write},
         os::{fd::AsRawFd, unix::net::UnixStream},
         path::Path,
         process::{Child, Command, Stdio},
@@ -104,6 +104,7 @@ mod tests {
             if name.starts_with("DYLD_")
                 || name.starts_with("AGENT2SSH_")
                 || name.starts_with("A2S_MACH_LAB_")
+                || name.starts_with("A2S_TEST_DEVELOPER_")
             {
                 command.env_remove(key);
             }
@@ -239,6 +240,101 @@ mod tests {
         assert_eq!(
             verify_requirement(&audit, &requirement),
             Err(SigningEvidenceError::Rejected)
+        );
+    }
+
+    #[test]
+    fn optional_running_developer_id_fixture_is_checked_dynamically() {
+        let (Some(binary), Ok(team), Ok(identifier)) = (
+            std::env::var_os("A2S_TEST_DEVELOPER_BINARY"),
+            std::env::var("A2S_TEST_DEVELOPER_TEAM"),
+            std::env::var("A2S_TEST_DEVELOPER_IDENTIFIER"),
+        ) else {
+            eprintln!(
+                "no signed ripgrep fixture configured; skipping optional Developer ID observation"
+            );
+            return;
+        };
+        assert_eq!(team.len(), 10);
+        assert!(team
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit()));
+        assert!(
+            !identifier.is_empty()
+                && identifier
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+        );
+        let (mut reader, writer) = UnixStream::pair().unwrap();
+        reader
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let fd: std::os::fd::OwnedFd = writer.into();
+        let mut command = Command::new(binary);
+        clean_env(&mut command);
+        // ripgrep is explicitly fed one synthetic line through stdin; it does
+        // not scan files or access the user's application configuration.
+        let child = command
+            .args(["--no-config", "--line-buffered", "^A2S-SYNTHETIC$", "-"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::from(fd))
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut child = TestChild(child);
+        child
+            .0
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(b"A2S-SYNTHETIC\n")
+            .unwrap();
+        let mut line = [0u8; 14];
+        reader.read_exact(&mut line).unwrap();
+        assert_eq!(&line, b"A2S-SYNTHETIC\n");
+        let audit = peer_audit_token(&reader).unwrap();
+        let mut peer: libc::pid_t = 0;
+        let mut len = std::mem::size_of_val(&peer) as libc::socklen_t;
+        let rc = unsafe {
+            libc::getsockopt(
+                reader.as_raw_fd(),
+                libc::SOL_LOCAL,
+                libc::LOCAL_PEERPID,
+                (&mut peer as *mut libc::pid_t).cast(),
+                &mut len,
+            )
+        };
+        assert_eq!(rc, 0, "{}", std::io::Error::last_os_error());
+        assert_eq!(len as usize, std::mem::size_of_val(&peer));
+        assert_eq!(peer as u32, child.0.id());
+        let make_requirement = |team: &str, identifier: &str| {
+            format!("anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = \"{team}\" and identifier \"{identifier}\"")
+        };
+        let requirement = make_requirement(&team, &identifier);
+        assert_eq!(verify_requirement(&audit, &requirement), Ok(()));
+        let wrong_team_id = if team == "AAAAAAAAAA" {
+            "BBBBBBBBBB"
+        } else {
+            "AAAAAAAAAA"
+        };
+        let wrong_team = make_requirement(wrong_team_id, &identifier);
+        assert_eq!(
+            verify_requirement(&audit, &wrong_team),
+            Err(SigningEvidenceError::Rejected)
+        );
+        let wrong_id = if identifier == "org.agent2ssh.incorrect" {
+            "org.agent2ssh.other"
+        } else {
+            "org.agent2ssh.incorrect"
+        };
+        let wrong_identifier = make_requirement(&team, wrong_id);
+        assert_eq!(
+            verify_requirement(&audit, &wrong_identifier),
+            Err(SigningEvidenceError::Rejected)
+        );
+        assert_eq!(
+            verify_release_code(&audit),
+            Err(SigningEvidenceError::TrustRootUnavailable)
         );
     }
 }
