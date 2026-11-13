@@ -58,6 +58,17 @@ with tempfile.TemporaryDirectory(prefix="a2s-audit-code-", dir="/tmp") as temp:
     if not handoff_hash or "Signature=adhoc" not in handoff_info:
         raise AssertionError(f"expected ad-hoc signed handoff executable:\n{handoff_info}")
     handoff_requirement = f'identifier "org.agent2ssh.research.handoff" and cdhash H"{handoff_hash.group(1)}"'
+    exec_probe = Path(temp) / "mach-exec"
+    run(["clang", "-std=c11", "-D_DARWIN_C_SOURCE", "-Wall", "-Wextra", "-Werror", "-O1", str(ROOT / "mach_exec.c"), "-o", str(exec_probe)])
+    run(["codesign", "--force", "--sign", "-", "--identifier", "org.agent2ssh.research.machexec", str(exec_probe)])
+    exec_replacement = Path(temp) / "mach-exec-replacement"
+    run(["clang", "-std=c11", "-D_DARWIN_C_SOURCE", '-DA2S_VARIANT="replacement"', "-Wall", "-Wextra", "-Werror", "-O1", str(ROOT / "mach_exec.c"), "-o", str(exec_replacement)])
+    run(["codesign", "--force", "--sign", "-", "--identifier", "org.agent2ssh.research.machexec", str(exec_replacement)])
+    original_info=run(["codesign", "-dv", "--verbose=4", str(exec_probe)]).stderr
+    changed_info=run(["codesign", "-dv", "--verbose=4", str(exec_replacement)]).stderr
+    original_hash=re.search(r"^CDHash=([0-9a-f]{40})$",original_info,re.MULTILINE)
+    changed_hash=re.search(r"^CDHash=([0-9a-f]{40})$",changed_info,re.MULTILINE)
+    if not original_hash or not changed_hash or original_hash.group(1)==changed_hash.group(1):raise AssertionError("expected two distinct signed Mach exec images")
     runs = []
     for i in range(1, 6):
         result = run([str(binary), requirement])
@@ -104,9 +115,19 @@ with tempfile.TemporaryDirectory(prefix="a2s-audit-code-", dir="/tmp") as temp:
         if not owner or not worker or not (owner.group(1) == owner.group(2) and owner.group(1) != worker.group(1) and owner.group(3) == "1" and owner.group(4) == "0" and "guard_kr=0" in result.stdout and "guarded_transfer_receive_kr=268451843 owner_signaled=1 owner_signal=9 worker_received_synthetic=0" in result.stdout and "worker_received_synthetic pid=" not in result.stdout):
             raise AssertionError(f"unexpected guarded Mach handoff result:\n{result.stdout}")
         guarded_handoff_runs.append(f"run {i} exit=0\n{result.stdout}")
+    exec_runs = []
+    for i in range(1, 9):
+        replaced = i > 5
+        result = run([str(exec_probe)] + ([str(exec_replacement)] if replaced else []))
+        before = re.search(r"owner_before_exec_pid=(\d+)", result.stdout)
+        after = re.search(r"after_exec_pid=(\d+) port_type_kr=(\d+) has_receive=(\d+) receive_kr=(\d+) synthetic_received=(\d+)", result.stdout)
+        if not before or not after or before.group(1) != after.group(1) or after.group(5) != "0" or "send_after_exec_kr=268435459" not in result.stdout or ("variant=replacement" if replaced else "variant=original") not in result.stdout:
+            raise AssertionError(f"unexpected guarded endpoint after exec:\n{result.stdout}")
+        exec_runs.append(f"run {i} exit=0\n{result.stdout}")
     if args.archive:
         (ROOT / "results.txt").write_text("\n".join(runs))
         (ROOT / "replacement-results.txt").write_text("\n".join(replaced_runs))
         (ROOT / "mach-handoff-results.txt").write_text("\n".join(handoff_runs))
         (ROOT / "mach-guarded-handoff-results.txt").write_text("\n".join(guarded_handoff_runs))
-    print("Verified 5 same-code, 3 replaced-code, 5 handoff and 3 guarded-handoff runs; ad-hoc signatures, no Team ID")
+        (ROOT / "mach-exec-results.txt").write_text("\n".join(exec_runs))
+    print("Verified 5 same-code, 3 replaced-code, 5 handoff, 3 guarded-handoff and 8 guarded-exec runs; ad-hoc signatures, no Team ID")

@@ -1,0 +1,39 @@
+run 1 exit=0
+owner_before_exec_pid=99260
+send_after_exec_kr=268435459
+after_exec_pid=99260 port_type_kr=0 has_receive=0 receive_kr=268451842 synthetic_received=0 variant=original
+
+run 2 exit=0
+owner_before_exec_pid=99262
+after_exec_pid=99262 port_type_kr=15 has_receive=0 receive_kr=268451842 synthetic_received=0 variant=original
+send_after_exec_kr=268435459
+
+run 3 exit=0
+owner_before_exec_pid=99264
+after_exec_pid=99264 port_type_kr=15 has_receive=0 receive_kr=268451842 synthetic_received=0 variant=original
+send_after_exec_kr=268435459
+
+run 4 exit=0
+owner_before_exec_pid=99266
+after_exec_pid=99266 port_type_kr=15 has_receive=0 receive_kr=268451842 synthetic_received=0 variant=original
+send_after_exec_kr=268435459
+
+run 5 exit=0
+owner_before_exec_pid=99268
+after_exec_pid=99268 port_type_kr=0 has_receive=0 receive_kr=268451842 synthetic_received=0 variant=original
+send_after_exec_kr=268435459
+
+run 6 exit=0
+owner_before_exec_pid=99270
+after_exec_pid=99270 port_type_kr=0 has_receive=0 receive_kr=268451842 synthetic_received=0 variant=replacement
+send_after_exec_kr=268435459
+
+run 7 exit=0
+owner_before_exec_pid=99272
+after_exec_pid=99272 port_type_kr=15 has_receive=0 receive_kr=268451842 synthetic_received=0 variant=replacement
+send_after_exec_kr=268435459
+
+run 8 exit=0
+owner_before_exec_pid=99274
+send_after_exec_kr=268435459
+after_exec_pid=99274 port_type_kr=0 has_receive=0 receive_kr=268451842 synthetic_received=0 variant=replacement
