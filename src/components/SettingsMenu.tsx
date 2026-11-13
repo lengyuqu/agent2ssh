@@ -90,6 +90,9 @@ export default function SettingsMenu({
   // `null` means "not loaded yet or the command itself failed" — rendered as
   // nothing rather than as a claim.
   const [daemonDiagnosis, setDaemonDiagnosis] = useState<DaemonDiagnosis | null>(null);
+  // #24: whether a `daemon_status` read completed, so "unavailable" is stated
+  // instead of the panel silently showing only the /health probe.
+  const [daemonDiagnosisChecked, setDaemonDiagnosisChecked] = useState(false);
   const [canRequestUnboundStop, setCanRequestUnboundStop] = useState(false);
   const [confirmingUnboundStop, setConfirmingUnboundStop] = useState(false);
   const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "failed">("idle");
@@ -147,6 +150,12 @@ export default function SettingsMenu({
           daemonDiagnosis?.verdict === "running-unhealthy"
         ? "text-destructive"
         : "text-muted-foreground";
+  // #24: the record and observation behind the verdict — what daemon_status
+  // actually saw, not the /health probe. Denied inspection gets its own line:
+  // it is the cross-account case, and it must not read as "the daemon exited".
+  const daemonRecordPid =
+    daemonDiagnosis?.record.state === "pid" ? daemonDiagnosis.record.pid : null;
+  const daemonObservation = daemonDiagnosis?.observation ?? null;
   const daemonUrl = getDaemonUrl();
   const consoleUrl = `${daemonUrl}/console`;
   const checkedAtText = gateCheckedAt
@@ -260,7 +269,8 @@ export default function SettingsMenu({
 
   // #21: pull the read-only verdict. A failed command clears the line (no
   // in-panel error string) and leaves a breadcrumb in the diagnostic log via
-  // reportError; the section then asserts nothing.
+  // reportError; the section then asserts nothing — but it does say the
+  // diagnosis is unavailable rather than falling back to silence (#24).
   async function refreshDaemonDiagnosis() {
     try {
       const result = await api.daemonStatus();
@@ -268,6 +278,8 @@ export default function SettingsMenu({
     } catch (err) {
       setDaemonDiagnosis(null);
       reportError("settings-menu", "daemon status failed", err);
+    } finally {
+      setDaemonDiagnosisChecked(true);
     }
   }
 
@@ -599,11 +611,53 @@ export default function SettingsMenu({
                 <span className={`font-bold ${daemonVerdictTone}`}>
                   {t("Diagnosis: {verdict}", { verdict: daemonVerdictText })}
                 </span>
+                {daemonRecordPid != null && (
+                  <span className="text-muted-foreground">
+                    {t("Record PID: {pid}", { pid: daemonRecordPid })}
+                  </span>
+                )}
+                {daemonObservation?.state === "live" && (
+                  <span className="text-muted-foreground">
+                    {t("The OS observes the recorded PID live")}
+                  </span>
+                )}
+                {daemonObservation?.state === "absent" && (
+                  <span className="text-muted-foreground">
+                    {t("The OS reports the recorded PID absent")}
+                  </span>
+                )}
+                {daemonObservation?.state === "zombie" && (
+                  <span className="text-muted-foreground">
+                    {t("The recorded PID is an unreaped zombie")}
+                  </span>
+                )}
+                {daemonObservation?.state === "unknown" && (
+                  <span className="text-muted-foreground">
+                    {t("The recorded PID could not be observed")}
+                  </span>
+                )}
+                {daemonObservation?.state === "denied" && (
+                  <span className="font-bold text-muted-foreground">
+                    {t(
+                      "The OS denied inspection of this process (it may run under another account); this is not evidence it exited."
+                    )}
+                  </span>
+                )}
+                {daemonDiagnosis.pid_lock === "held" && (
+                  <span className="text-muted-foreground">
+                    {t("Another start or stop is holding the PID lock")}
+                  </span>
+                )}
                 {daemonDiagnosis.verdict !== "healthy" && daemonDiagnosis.next_step && (
                   <span className="leading-snug text-muted-foreground">
                     {daemonDiagnosis.next_step}
                   </span>
                 )}
+              </div>
+            )}
+            {!daemonDiagnosis && daemonDiagnosisChecked && (
+              <div className="text-xs text-muted-foreground">
+                {t("Read-only diagnosis unavailable")}
               </div>
             )}
             <Button

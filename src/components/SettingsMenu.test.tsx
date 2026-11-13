@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 import SettingsMenu from "./SettingsMenu";
 import { ConfirmHost } from "./ui/dialog";
+import type { DaemonDiagnosis } from "../types";
 
 const mockApi = vi.hoisted(() => ({
   getTelemetryEnabled: vi.fn().mockResolvedValue(false),
@@ -76,8 +77,81 @@ it("requires explicit confirmation before requesting an unbound shutdown", async
   fireEvent.click(screen.getByRole("button", { name: "Request unverified shutdown" }));
   fireEvent.pointerDown(screen.getByRole("button", { name: "Request shutdown" }));
   fireEvent.click(screen.getByRole("button", { name: "Request shutdown" }));
-  await waitFor(() => expect(mockApi.daemonStopUnboundGraceful).toHaveBeenCalledTimes(1));
+  await waitFor(() =>   expect(mockApi.daemonStopUnboundGraceful).toHaveBeenCalledTimes(1));
   expect(await screen.findByText("Request accepted; exit unverified")).toBeTruthy();
+});
+
+// A full diagnosis so a test can name exactly what the panel should read out
+// of `daemon_status`: the verdict, the recorded PID, the OS observation and
+// the lock state — the real record, not the /health probe.
+function diagnosisFor(overrides: Partial<DaemonDiagnosis> = {}): DaemonDiagnosis {
+  return {
+    config_dir: "/cfg",
+    pid_path: "/cfg/daemon.pid",
+    token_path: "/cfg/daemon.token",
+    log_path: "/cfg/daemon.log",
+    pid_lock: "free",
+    record: { state: "pid", pid: 4242 },
+    observation: { state: "live", start_time: 1700000000 },
+    health: { state: "reporting", pid: 4242, same_pid: true, config_dir_matches: true },
+    token: "not-checked",
+    verdict: "unverified",
+    next_step: "Inspect the process out of band.",
+    ...overrides,
+  };
+}
+
+it("shows the daemon_status record, observation and lock instead of only the health probe", async () => {
+  mockApi.daemonStatus.mockResolvedValue({
+    running: true,
+    pid: 4242,
+    message: "",
+    diagnosis: diagnosisFor({ pid_lock: "held" }),
+  });
+  openSettings();
+  expect(await screen.findByText("Diagnosis: identity unverified")).toBeTruthy();
+  expect(screen.getByText("Record PID: 4242")).toBeTruthy();
+  expect(screen.getByText("The OS observes the recorded PID live")).toBeTruthy();
+  expect(screen.getByText("Another start or stop is holding the PID lock")).toBeTruthy();
+});
+
+// #24: a cross-account daemon denies inspection. The panel must relay that as
+// "identity unknown", never as "the daemon exited".
+it("relays a denied observation as unknown identity, not as an exit", async () => {
+  mockApi.daemonStatus.mockResolvedValue({
+    running: true,
+    pid: 4242,
+    message: "",
+    diagnosis: diagnosisFor({
+      observation: { state: "denied", reason: "OpenProcess denied (error 5)" },
+    }),
+  });
+  openSettings();
+  const line = await screen.findByText(/denied inspection of this process/);
+  expect(line.textContent).toContain("not evidence it exited");
+});
+
+it("names the observation states that contradict or erode the record", async () => {
+  mockApi.daemonStatus.mockResolvedValue({
+    running: false,
+    pid: null,
+    message: "",
+    diagnosis: diagnosisFor({
+      observation: { state: "absent" },
+      health: { state: "inactive" },
+      verdict: "stale",
+    }),
+  });
+  openSettings();
+  expect(await screen.findByText("The OS reports the recorded PID absent")).toBeTruthy();
+});
+
+// #24: when `daemon_status` itself fails or has nothing to say, the panel
+// states that instead of leaving only the legacy /health line.
+it("says the read-only diagnosis is unavailable instead of staying silent", async () => {
+  mockApi.daemonStatus.mockResolvedValue({ running: false, pid: null, message: "", diagnosis: null });
+  openSettings();
+  expect(await screen.findByText("Read-only diagnosis unavailable")).toBeTruthy();
 });
 
 it("keeps the existing change-password flow for an initialized store", async () => {
