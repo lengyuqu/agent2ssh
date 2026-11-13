@@ -31,7 +31,7 @@
 | C5 | 索引 rename 前崩溃（副本已写、索引未更新） | **真机实测（本轮）** | 崩溃瞬间 `.commit.json` 仍在、索引为 Stale；重启后 `recover()` 清 log、普通写入恢复、引用仍解析到正确密文 | `tests/store_phase2_cd_crash.rs::c5_sigkill_before_pair_index_leaves_writes_recoverable` |
 | C6 | 索引存在但 `tag_digest` 与当前库不符 | **构造状态回归** | `index_status()` = Stale；恢复判定不受索引影响，写入不阻断 | `tests/store_phase2_c.rs` |
 | C7 | 成对回卷中途崩溃（hosts 已回卷、secrets 未回卷） | **真机实测（本轮）** | 半回卷状态**保持 fail-closed**：`verify_hosts_restore` = `Refused`，不会静默用错密文；重启后重复同一 `--restore-pair` 可完成修复并解密回原值 | `tests/store_phase2_cd_crash.rs::c7_sigkill_during_paired_restore_stays_fail_closed_and_repairable` |
-| C8 | 旧程序把带 tag 引用当明文重新密封 | **真机实测（旧版本二进制 `48ac012`）** | 锁定态：旧版本 `host list` 不改动任何文件；解锁态：**同一只读命令**即触发启动迁移，引用退化为裸 marker、`secrets.enc` 丢掉 `tag` 并退回 v2、代次 +1、留下 `hosts.json.bak`；新版本再读回该状态时把引用还原成被封存的 41 字符文本并**拒绝使用**；`config-repair --restore-pair` 可逐字节恢复 | `docs/reports/evidence/c8-downgrade-2026-11-13/`（`FINDINGS.md` / `run_c8_downgrade.py` / `raw-c8.txt`，20 项检查全过）；构造回归 `tests/store_phase2.rs::malformed_reference_is_never_re_sealed_as_plaintext` |
+| C8 | 旧程序把带 tag 引用当明文重新密封 | **真机实测（旧版本二进制 `48ac012`）** | 锁定态：旧版本 `host list` 不改动任何文件；解锁态：**同一只读命令**即触发启动迁移，引用退化为裸 marker、`secrets.enc` 丢掉 `tag` 并退回 v2、代次 +1、留下 `hosts.json.bak`；新版本再读回该状态时把引用还原成被封存的 41 字符文本并**拒绝使用**；`config-repair --restore-pair` 可逐字节恢复。**另两条入口同样实测**：桌面端 `secrets_unlock` 命令体解锁后吃掉 tag（返回成功）；旧 daemon 在 `AGENT2SSH_MASTER_PASSWORD` 下**启动时**即降级，锁定态与新 daemon 均不动文件；旧 CLI 无「提示当前主密码」命令，锁定态喂 stdin 只报 `credential store is locked` | `docs/reports/evidence/c8-downgrade-2026-11-13/`（`FINDINGS.md` / `run_c8_downgrade.py` / `raw-c8.txt`，20 项检查；`run_c8_gaps.py` / `raw-c8-gaps.txt`，26 项检查；`desktop-unlock-probe.rs`）；构造回归 `tests/store_phase2.rs::malformed_reference_is_never_re_sealed_as_plaintext` |
 
 注入手法：`src-tauri/tests/fixtures/crash_hook.c` 经 `DYLD_INSERT_LIBRARIES` 注入**真实 CLI 进程**，
 在 `rename` / `unlink` 前冻结并由测试进程从外部发 `SIGKILL`（`returncode == -9`）；
@@ -73,8 +73,8 @@
 
 - **本单实施与四条验收已闭合**：A/B/C/D 全部落地，C1–C3/C5/C7 真机 `SIGKILL`、
   C8 用阶段 A/B 之前的真实二进制复现，C4/C6 为构造回归并如实标注，文档与配置指南同步完成。
-- **仍未闭合的是边界而非功能**：阶段 3（按 P5=a 明确不在本单）、交互式解锁路径下
-  的 C8 复现与 daemon/桌面端二进制、Linux/Windows 遗留平台矩阵、真实断电持久性。
+- **仍未闭合的是边界而非功能**：阶段 3（按 P5=a 明确不在本单）、Linux/Windows 遗留平台矩阵、
+  真实断电持久性、旧桌面端真正的 GUI 点击（只测到 `secrets_unlock` 命令体）。
   这些分别归属 #27、#28 或需要专门环境。
 - **建议**：若按 `P5=a` 与既有 issue 边界，#26 可以收口；若要求「所有平台/断电边界
   实测完毕」才关闭，则继续等 #27 / #28 补测。

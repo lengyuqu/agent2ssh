@@ -16,3 +16,5 @@ linux-bin/
 demo/
 scripts/extract_git233_token.py
 scripts/peek_tea_config.py
+# 证据脚本是 Python，跑一次就会生成字节码缓存
+__pycache__/

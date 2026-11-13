@@ -1,0 +1,114 @@
+date: 2026-11-13T06:11:31+00:00
+platform: macOS-27.2.1-arm64-arm-64bit-Mach-O (arm64) uid=501
+older cli: /private/tmp/a2s_old_target/debug/agent2ssh
+  sha256 766a8b50134c4e5e932d7508b17fad59ee46b22b1633bd1b70bd1ac408aa9516  agent2ssh 0.4.5  commit 48ac012
+older daemon: /private/tmp/a2s_old_target/debug/agent2ssh-daemon
+  sha256 cdae024467221448e752a183849c20449646b6fe3dc10bce43a30c7fa751b2fa  commit 48ac012
+older desktop-unlock probe: /private/tmp/a2s_old_target/debug/c8_desktop_unlock_probe
+  sha256 1f79a383f16293b267d6bb970a406d5691c42f77eefd1c72720e36300ba472ec  commit 48ac012
+current cli: /Users/yuqu/WorkBuddy/Worktrees/agent2ssh/main-9315708c/src-tauri/target/debug/agent2ssh
+  sha256 46b2b22b665965cfb45d26998b9e06110ab85f15c02f21a59d51fcc2af1a13a3  agent2ssh 0.4.5
+current daemon: /Users/yuqu/WorkBuddy/Worktrees/agent2ssh/main-9315708c/src-tauri/target/debug/agent2ssh-daemon
+  sha256 c4136c4a6b9ad103c09c3abad7cfde3c1207c1bca8bc327eaac0c56e787cb704
+
+==============================================================================
+1. older CLI, locked store, master password on stdin
+==============================================================================
+  host add: exit=1 last stderr line='    credential store is locked — set a master password (desktop) or AGENT2SSH_MASTER_PASSWORD to store credentials'
+  state: hosts_generation=1 store_version=2
+    ref probe-a  = '$agent2ssh-secret$:7xctUMhlUL2YEEqfrZsXcw'
+    entry __agent2ssh_key_check__    tag='' ciphertext_len=48
+    entry host:probe-a               tag='7xctUMhlUL2YEEqfrZsXcw' ciphertext_len=48
+  PASS the command failed instead of unlocking from stdin
+  PASS the error says the store is locked
+  PASS neither file changed
+  PASS no host was added
+  PASS the tagged reference is intact
+
+==============================================================================
+2. older desktop unlock command (the Tauri command body)
+==============================================================================
+  before: hosts_generation=1 store_version=2
+    ref probe-a  = '$agent2ssh-secret$:OiDy16RRoowpz2NvQIxGnw'
+    entry __agent2ssh_key_check__    tag='' ciphertext_len=48
+    entry host:probe-a               tag='OiDy16RRoowpz2NvQIxGnw' ciphertext_len=48
+  secrets_unlock: exit=0 stdout='secrets_unlock: ok' stderr=''
+  after: hosts_generation=2 store_version=2
+    ref probe-a  = '$agent2ssh-secret$'
+    entry __agent2ssh_key_check__    tag=None ciphertext_len=48
+    entry host:probe-a               tag=None ciphertext_len=76
+  PASS the unlock command reported success
+  PASS the tagged reference became the bare marker
+  PASS the store entry lost its tag
+  PASS the migration bumped the generation
+  PASS the entry now holds the 41-character reference text
+  PASS a hosts.json.bak was left behind
+  the sealed text is '$agent2ssh-secret$:OiDy16RRoowpz2NvQIxGnw'
+
+==============================================================================
+3. older daemon, locked store
+==============================================================================
+  before: hosts_generation=1 store_version=2
+    ref probe-a  = '$agent2ssh-secret$:vd_yYSqTGn5U1900oMGs9A'
+    entry __agent2ssh_key_check__    tag='' ciphertext_len=48
+    entry host:probe-a               tag='vd_yYSqTGn5U1900oMGs9A' ciphertext_len=48
+  older daemon (locked) /health: '{"config_dir":"/private/var/folders/k3/hy99wl890fl6nyzr42fv0cbr0000gn/'
+  after: hosts_generation=1 store_version=2
+    ref probe-a  = '$agent2ssh-secret$:vd_yYSqTGn5U1900oMGs9A'
+    entry __agent2ssh_key_check__    tag='' ciphertext_len=48
+    entry host:probe-a               tag='vd_yYSqTGn5U1900oMGs9A' ciphertext_len=48
+  PASS older daemon (locked): the daemon answered /health
+  older daemon (locked) daemon exit: 0
+    older daemon (locked) log: [2m2026-11-13T06:11:34.018216Z[0m [32m INFO[0m [2magent2ssh_daemon[0m[2m:[0m Web console available [3murl[0m[2m=[0mhttp://127.0.0.1:52746/
+    older daemon (locked) log: [2m2026-11-13T06:11:34.174753Z[0m [32m INFO[0m [2magent2ssh_daemon[0m[2m:[0m shutdown signal received, draining WS connections...
+  PASS locked daemon: the tagged reference is intact
+  PASS locked daemon: the store entry keeps its tag
+
+==============================================================================
+4. older daemon, master password in the environment
+==============================================================================
+  before: hosts_generation=1 store_version=2
+    ref probe-a  = '$agent2ssh-secret$:mkeIOCYMC1yT4jZ_NlZpAA'
+    entry __agent2ssh_key_check__    tag='' ciphertext_len=48
+    entry host:probe-a               tag='mkeIOCYMC1yT4jZ_NlZpAA' ciphertext_len=48
+  older daemon (unlocked) /health: '{"config_dir":"/private/var/folders/k3/hy99wl890fl6nyzr42fv0cbr0000gn/'
+  after: hosts_generation=2 store_version=2
+    ref probe-a  = '$agent2ssh-secret$'
+    entry __agent2ssh_key_check__    tag=None ciphertext_len=48
+    entry host:probe-a               tag=None ciphertext_len=76
+  PASS older daemon (unlocked): the daemon answered /health
+  older daemon (unlocked) daemon exit: 0
+    older daemon (unlocked) log: [2m2026-11-13T06:11:35.176968Z[0m [32m INFO[0m [2magent2ssh_daemon[0m[2m:[0m Web console available [3murl[0m[2m=[0mhttp://127.0.0.1:52751/
+    older daemon (unlocked) log: [2m2026-11-13T06:11:35.267459Z[0m [32m INFO[0m [2magent2ssh_daemon[0m[2m:[0m shutdown signal received, draining WS connections...
+  PASS startup alone replaced the tagged reference with the bare marker
+  PASS the store entry lost its tag before any client request
+  PASS the startup migration bumped the generation
+  PASS the entry now holds the 41-character reference text
+  PASS a hosts.json.bak was left behind
+
+==============================================================================
+5. contrast: the current daemon on the same tagged config
+==============================================================================
+  before: hosts_generation=1 store_version=2
+    ref probe-a  = '$agent2ssh-secret$:4miBgOnxsKaYYfijj0KRlQ'
+    entry __agent2ssh_key_check__    tag='' ciphertext_len=48
+    entry host:probe-a               tag='4miBgOnxsKaYYfijj0KRlQ' ciphertext_len=48
+  current daemon /health: '{"config_dir":"/private/var/folders/k3/hy99wl890fl6nyzr42fv0cbr0000gn/'
+  after: hosts_generation=1 store_version=2
+    ref probe-a  = '$agent2ssh-secret$:4miBgOnxsKaYYfijj0KRlQ'
+    entry __agent2ssh_key_check__    tag='' ciphertext_len=48
+    entry host:probe-a               tag='4miBgOnxsKaYYfijj0KRlQ' ciphertext_len=48
+  PASS current daemon: the daemon answered /health
+  current daemon daemon exit: 0
+    current daemon log: [2m2026-11-13T06:11:35.993956Z[0m [32m INFO[0m [2magent2ssh_daemon[0m[2m:[0m Web console available [3murl[0m[2m=[0mhttp://127.0.0.1:52755/
+    current daemon log: [2m2026-11-13T06:11:36.114549Z[0m [32m INFO[0m [2magent2ssh_daemon[0m[2m:[0m shutdown signal received, draining WS connections... [3mtrigger
+  PASS the current daemon leaves the tagged reference alone
+  PASS the store entry keeps the same tag
+  later save: exit=0 stderr=''
+  PASS a later save emits no tag warning
+  PASS the credential still carries its tag after that save
+
+==============================================================================
+summary
+==============================================================================
+  every check passed
