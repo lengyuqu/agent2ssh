@@ -31,3 +31,5 @@
 本机 macOS 的合成签名真实 daemon 覆盖了私有端点 A/B 替换、不同客户端 nonce 复用、错误身份、公开端口拒绝、退出观察、SSH drain、丢失回执及显式崩溃恢复，详见 [记录和脚本](../reports/evidence/macos-mach-stop-lab-2026-11-13/FINDINGS.md)。这些测试没有证明正式签名信任根、真实 PID 复用、所有受限账户/系统版本或正式 app/CLI 的端到端行为。#23 Linux 与 #24 Windows 的对象绑定、退化及真实平台验收继续分别跟踪；不能将 macOS 的结果推及其他平台。
 
 macOS 构建现已包含共用的运行时代码签名检查原语，并由实验 Mach 客户端使用；[验证记录](../reports/macos-developer-id-release-check-2026-11-13.md)覆盖内核 audit token、错误代码与不安全运行时。当前项目发行信任要求仍未配置，生产接口返回 `TrustRootUnavailable`，普通客户端没有接入该原语或私有 Mach 端点；该进展不改变本稿的未验收状态。
+
+内部候选发行策略现在可组合 Developer ID Application 证书链、Team ID、代码标识和一个精确 CDHash；这些字段只能来自编译进客户端的受审策略，当前值仍为空。单 hash 的多架构与轮换策略尚未定案，不能将测试夹具的第三方身份填入产品或据此启用停止。

@@ -33,4 +33,6 @@ macOS 构建现在包含 `daemon_identity/macos_codesign`，它通过内核 audi
 
 补充运行中真实 Developer ID 对照：在用户显式提供可选 fixture 时，测试启动一个第三方签名的 `rg`，只通过 stdin 提供一行合成文本，并从其 stdout 所连接的 Unix socket 获取内核 audit token；没有扫描用户文件或读取应用配置。Apple Developer ID 证书要求、该 fixture 的 Team ID 和标识均匹配时，底层运行时代码检查通过；分别更换 Team ID 或标识时拒绝，项目发行信任根未配置时也拒绝。本机使用 ChatGPT 随附的签名 `rg` 运行通过；该第三方发行者不是 Agent2SSH 信任根，也不能替代项目签名 daemon、私有 Mach 端点或完整发布包验收。该 fixture 仅在显式设置 `A2S_TEST_DEVELOPER_BINARY`、`A2S_TEST_DEVELOPER_TEAM` 和 `A2S_TEST_DEVELOPER_IDENTIFIER` 时运行，常规测试不依赖第三方应用。
 
+后续将生产候选的代码要求收紧为结构化组合：Apple Developer ID Application 证书链、预期 Team ID、代码标识和单个精确 CDHash 全部匹配，且拒绝无法安全嵌入要求语法的输入。使用上述第三方运行进程，正确组合通过，单独更换 Team ID、标识或 CDHash 均拒绝；实际项目策略仍为 `None`。单 hash 如何覆盖多架构、升级、回滚和撤销尚未决定，不能因为此候选通过而启用生产停止。
+
 构建和回归：`npm run build` 通过；macOS Rust 无默认特性库 877 通过、1 忽略，Tauri 库 895 通过、1 忽略，新增的运行时单测在两种特性下单独复跑通过；普通 CLI 与 daemon 构建通过。`cargo check --locked --no-default-features --target x86_64-pc-windows-gnu --bin agent2ssh` 在 macOS 交叉编译通过，不能代替 Windows 运行验证。新增本地原语没有接入停止路径，CNB 配额不足的限制仍适用。

@@ -55,15 +55,58 @@ pub(crate) enum SigningEvidenceError {
     Rejected,
 }
 
-// No team or release identifier has been selected. Never populate this from a
-// daemon response, config file, environment variable, or an ad-hoc hash.
-const COMPILED_RELEASE_REQUIREMENT: Option<&str> = None;
+/// Only a reviewed, immutable release policy may construct a code requirement.
+/// Matching this policy is still not a bound endpoint or stop authorization.
+struct ReleaseIdentity<'a> {
+    team: &'a str,
+    identifier: &'a str,
+    cdhash: &'a str,
+}
+
+impl ReleaseIdentity<'_> {
+    fn requirement(&self) -> Result<String, SigningEvidenceError> {
+        if self.team.len() != 10
+            || !self
+                .team
+                .bytes()
+                .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+            || self.identifier.is_empty()
+            || self.identifier.len() > 255
+            || !self.identifier.as_bytes()[0].is_ascii_alphanumeric()
+            || !self
+                .identifier
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+            || self.cdhash.len() != 40
+            || !self.cdhash.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            return Err(SigningEvidenceError::Rejected);
+        }
+        Ok(format!(
+            "anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = \"{}\" and identifier \"{}\" and cdhash H\"{}\"",
+            self.team, self.identifier, self.cdhash
+        ))
+    }
+}
+
+// No project team, release identifier, or release CDHash has been selected.
+// Never populate this from a daemon response, config file or environment.
+// Multi-architecture releases and safe hash rotation remain undecided.
+const COMPILED_RELEASE_IDENTITY: Option<ReleaseIdentity<'static>> = None;
 
 /// Check code identity without granting a bound-process or endpoint capability.
 pub(crate) fn verify_release_code(audit: &KernelAuditToken) -> Result<(), SigningEvidenceError> {
-    let requirement =
-        COMPILED_RELEASE_REQUIREMENT.ok_or(SigningEvidenceError::TrustRootUnavailable)?;
-    verify_requirement(audit, requirement)
+    let identity = COMPILED_RELEASE_IDENTITY
+        .as_ref()
+        .ok_or(SigningEvidenceError::TrustRootUnavailable)?;
+    verify_identity(audit, identity)
+}
+
+fn verify_identity(
+    audit: &KernelAuditToken,
+    identity: &ReleaseIdentity<'_>,
+) -> Result<(), SigningEvidenceError> {
+    verify_requirement(audit, &identity.requirement()?)
 }
 
 fn verify_requirement(
@@ -244,6 +287,40 @@ mod tests {
     }
 
     #[test]
+    fn release_identity_rejects_invalid_or_injectable_values() {
+        let valid = ReleaseIdentity {
+            team: "ABCDEFGHIJ",
+            identifier: "org.agent2ssh.daemon",
+            cdhash: "0123456789abcdef0123456789abcdef01234567",
+        };
+        assert!(valid.requirement().is_ok());
+        for bad in [
+            ReleaseIdentity {
+                team: "short",
+                identifier: valid.identifier,
+                cdhash: valid.cdhash,
+            },
+            ReleaseIdentity {
+                team: valid.team,
+                identifier: "daemon\" or true",
+                cdhash: valid.cdhash,
+            },
+            ReleaseIdentity {
+                team: valid.team,
+                identifier: valid.identifier,
+                cdhash: "abc",
+            },
+            ReleaseIdentity {
+                team: valid.team,
+                identifier: valid.identifier,
+                cdhash: "0123456789abcdef0123456789abcdef0123456!",
+            },
+        ] {
+            assert_eq!(bad.requirement(), Err(SigningEvidenceError::Rejected));
+        }
+    }
+
+    #[test]
     fn optional_running_developer_id_fixture_is_checked_dynamically() {
         let (Some(binary), Ok(team), Ok(identifier)) = (
             std::env::var_os("A2S_TEST_DEVELOPER_BINARY"),
@@ -265,12 +342,22 @@ mod tests {
                     .bytes()
                     .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
         );
+        let binary = std::path::PathBuf::from(binary);
+        let details = run(
+            "/usr/bin/codesign",
+            &["-dv".as_ref(), "--verbose=4".as_ref(), binary.as_os_str()],
+        );
+        let details = String::from_utf8(details.stderr).unwrap();
+        let cdhash = details
+            .lines()
+            .find_map(|line| line.strip_prefix("CDHash="))
+            .unwrap();
         let (mut reader, writer) = UnixStream::pair().unwrap();
         reader
             .set_read_timeout(Some(std::time::Duration::from_secs(5)))
             .unwrap();
         let fd: std::os::fd::OwnedFd = writer.into();
-        let mut command = Command::new(binary);
+        let mut command = Command::new(&binary);
         clean_env(&mut command);
         // ripgrep is explicitly fed one synthetic line through stdin; it does
         // not scan files or access the user's application configuration.
@@ -307,19 +394,24 @@ mod tests {
         assert_eq!(rc, 0, "{}", std::io::Error::last_os_error());
         assert_eq!(len as usize, std::mem::size_of_val(&peer));
         assert_eq!(peer as u32, child.0.id());
-        let make_requirement = |team: &str, identifier: &str| {
-            format!("anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = \"{team}\" and identifier \"{identifier}\"")
+        let identity = ReleaseIdentity {
+            team: &team,
+            identifier: &identifier,
+            cdhash,
         };
-        let requirement = make_requirement(&team, &identifier);
-        assert_eq!(verify_requirement(&audit, &requirement), Ok(()));
+        assert_eq!(verify_identity(&audit, &identity), Ok(()));
         let wrong_team_id = if team == "AAAAAAAAAA" {
             "BBBBBBBBBB"
         } else {
             "AAAAAAAAAA"
         };
-        let wrong_team = make_requirement(wrong_team_id, &identifier);
+        let wrong_team = ReleaseIdentity {
+            team: wrong_team_id,
+            identifier: &identifier,
+            cdhash,
+        };
         assert_eq!(
-            verify_requirement(&audit, &wrong_team),
+            verify_identity(&audit, &wrong_team),
             Err(SigningEvidenceError::Rejected)
         );
         let wrong_id = if identifier == "org.agent2ssh.incorrect" {
@@ -327,9 +419,22 @@ mod tests {
         } else {
             "org.agent2ssh.incorrect"
         };
-        let wrong_identifier = make_requirement(&team, wrong_id);
+        let wrong_identifier = ReleaseIdentity {
+            team: &team,
+            identifier: wrong_id,
+            cdhash,
+        };
         assert_eq!(
-            verify_requirement(&audit, &wrong_identifier),
+            verify_identity(&audit, &wrong_identifier),
+            Err(SigningEvidenceError::Rejected)
+        );
+        let wrong_hash = ReleaseIdentity {
+            team: &team,
+            identifier: &identifier,
+            cdhash: "0000000000000000000000000000000000000000",
+        };
+        assert_eq!(
+            verify_identity(&audit, &wrong_hash),
             Err(SigningEvidenceError::Rejected)
         );
         assert_eq!(
