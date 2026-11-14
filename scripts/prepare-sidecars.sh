@@ -72,7 +72,12 @@ for pair in "${BINS[@]}"; do
   echo "    $src -> $dst"
 
   # Tauri's macOS bundler may normalize Cargo binary names with dashes to
-  # underscores while copying companion binaries from target/release.
+  # underscores while copying companion binaries from target/release. Windows
+  # needs the underscore file too — the NSIS package looks the sidecar up as
+  # `agent2ssh_daemon.exe` — so both spellings stay here. The MSI generator
+  # cannot cope with the pair (it derives one component id from each spelling
+  # and fails with "Duplicate symbol 'Component:agent2ssh_mcp'"), which is why
+  # `tauri.windows.conf.json` builds NSIS only.
   if [[ "$src_name" == *"-"* ]]; then
     alias_src="$RELEASE_DIR/${src_name//-/_}${EXT}"
     cp "$src" "$alias_src"
