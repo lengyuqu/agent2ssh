@@ -419,7 +419,7 @@ fn decode_safe_storage(payload: &[u8], service: &str) -> Result<Vec<u8>> {
 /// vectors, which is the one reason it is still compiled on Windows.
 #[cfg(any(unix, test))]
 fn pbkdf2_hmac_sha1(password: &[u8], salt: &[u8], iterations: u32, output: &mut [u8]) {
-    use hmac::{Hmac, Mac};
+    use hmac::{Hmac, KeyInit, Mac};
     use sha1::Sha1;
     type HmacSha1 = Hmac<Sha1>;
 
@@ -452,7 +452,7 @@ fn pbkdf2_hmac_sha1(password: &[u8], salt: &[u8], iterations: u32, output: &mut 
 /// use this; Windows hands the payload straight to DPAPI instead.
 #[cfg(unix)]
 fn aes_128_cbc_decrypt(password: &str, ciphertext: &[u8]) -> Result<Vec<u8>> {
-    use aes::cipher::{BlockDecrypt, BlockSizeUser, KeyInit};
+    use aes::cipher::{BlockCipherDecrypt, BlockSizeUser, KeyInit};
     use aes::Aes128;
 
     const SALT: &[u8] = b"saltysalt";
@@ -474,9 +474,7 @@ fn aes_128_cbc_decrypt(password: &str, ciphertext: &[u8]) -> Result<Vec<u8>> {
     let mut plain = Vec::with_capacity(ciphertext.len());
     for chunk in ciphertext.chunks_exact(block_size) {
         let mut block = chunk.to_vec();
-        cipher.decrypt_block(aes::cipher::generic_array::GenericArray::from_mut_slice(
-            &mut block,
-        ));
+        cipher.decrypt_block(aes::cipher::Block::<Aes128>::from_mut_slice(&mut block));
         for (index, byte) in block.iter().enumerate() {
             plain.push(byte ^ previous[index]);
         }

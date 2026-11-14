@@ -91,11 +91,20 @@ ed25519-dalek = "3"
 # Legacy `Proc-Type: 4,ENCRYPTED` PEM: the transport decrypts PKCS#1 (RSA) keys
 # itself but then parses the plaintext as PKCS#1 whatever the label says, so an
 # EC key in that container fails. `legacy_pem` decrypts the container here and
-# hands the transport a plaintext PEM instead. `aes` is already in the graph via
-# the transport's ciphers; `md-5` is the one addition, and it is the KDF the
-# OpenSSL format specifies.
-aes = "0.8"
-md-5 = "0.10"
+# hands the transport a plaintext PEM instead. `md-5` is the KDF the OpenSSL
+# format specifies.
+#
+# The whole RustCrypto set in this file — `aes`, `md-5`, `hmac`, `sha1`, `sha2`,
+# `aes-gcm`, `argon2` — sits on the digest-0.11 / cipher-0.5 generation because
+# the transport already does: `russh 0.65` depends on sha1 0.11, sha2 0.11,
+# hmac 0.13, aes 0.9 and digest 0.11. Both generations would compile (digest
+# traits do not cross majors, so nothing forces a choice), but the older one
+# would be a second copy of primitives the binary already contains, and any
+# later `rsa` alignment would stop at a type mismatch. `rand_core` is the one
+# exception and stays 0.6: `rsa 0.9` requires that trait, and `rsa 0.10` cannot
+# be taken while `russh` pins `pkcs1 = 0.8.0-rc.4` (see that pin below).
+aes = "0.9"
+md-5 = "0.11"
 # The signature trait, for the local-key signer behind RSA certificates.
 # `russh` already depends on this exact major, so naming it adds nothing to the
 # build; it only makes `Signer` nameable, which `ssh-key` does not re-export.
@@ -116,8 +125,8 @@ pkcs5 = { version = "0.8", default-features = false }
 # second `getrandom` major version next to the 0.4 this crate already uses.
 rand_core = "0.6"
 getrandom = "0.4"
-hmac = "0.12"
-sha2 = "0.10"
+hmac = "0.13"
+sha2 = "0.11"
 hex = "0.4"
 subtle = "2"
 futures-util = { version = "0.3", optional = true }
@@ -127,19 +136,18 @@ fs2 = "0.4"
 sysinfo = { version = "0.40", default-features = false, features = ["system"] }
 # App-managed credential encryption (K1, master-password model): Argon2id KDF +
 # AES-256-GCM. No OS keychain, no plaintext key on disk.
-aes-gcm = "0.10"
-argon2 = "0.5"
+aes-gcm = "0.11"
+argon2 = "0.6"
 # B43: In-memory passphrase cache — Zeroizing<String> wipes bytes on drop,
 # reducing plaintext exposure in memory dumps / swap.
 zeroize = { version = "1", features = ["derive"] }
 # `netcatty_import`: Electron's `safeStorage` wraps its payload with Chromium's
 # OSCrypt, whose macOS/Linux key derivation is PBKDF2-HMAC-**SHA-1** (1003
 # iterations, salt `saltysalt`) — the hash is fixed by the format, not chosen
-# here. Already in the graph (`sha2`'s sibling, pulled in by the transport), so
-# naming it adds no crate to the build; PBKDF2 itself is ~20 lines over this
-# plus `hmac`, which keeps us off a second KDF crate whose digest major would
-# have to agree with ours.
-sha1 = "0.10"
+# here. Same digest generation as the transport, so naming it adds no crate to
+# the build; PBKDF2 itself is ~20 lines over this plus `hmac`, which keeps us
+# off a KDF crate whose digest major would have to agree with ours.
+sha1 = "0.11"
 # AST-based command analysis for risk classification (P0-2): tree-sitter-bash
 # parses shell commands into a syntax tree, allowing canonical command head
 # extraction that is resilient to flag reordering, wrapper stacking, and

@@ -793,7 +793,7 @@ fn encrypt_entry(key: &[u8; 32], account: &str, plaintext: &[u8]) -> Result<(Vec
         aad: account.as_bytes(),
     };
     let ciphertext = cipher
-        .encrypt(Nonce::from_slice(&nonce_bytes), payload)
+        .encrypt(&Nonce::from(nonce_bytes), payload)
         .map_err(|e| anyhow!("encryption failed: {e}"))?;
     Ok((nonce_bytes.to_vec(), ciphertext))
 }
@@ -856,11 +856,11 @@ fn decrypt_entry(
         msg: ciphertext,
         aad: account.as_bytes(),
     };
-    let plaintext = cipher
-        .decrypt(Nonce::from_slice(nonce), payload)
-        .map_err(|_| {
-            anyhow!("decryption failed (wrong master password, corrupt entry, or account mismatch)")
-        })?;
+    let nonce =
+        Nonce::try_from(nonce).map_err(|_| anyhow!("the stored nonce has the wrong length"))?;
+    let plaintext = cipher.decrypt(&nonce, payload).map_err(|_| {
+        anyhow!("decryption failed (wrong master password, corrupt entry, or account mismatch)")
+    })?;
     Ok(plaintext)
 }
 
@@ -1070,8 +1070,10 @@ fn decrypt_v1_map(
     use aes_gcm::aead::{Aead, KeyInit};
     use aes_gcm::{Aes256Gcm, Nonce};
     let cipher = Aes256Gcm::new(key.into());
+    let nonce =
+        Nonce::try_from(nonce).map_err(|_| anyhow!("the stored nonce has the wrong length"))?;
     let plaintext = cipher
-        .decrypt(Nonce::from_slice(nonce), ciphertext)
+        .decrypt(&nonce, ciphertext)
         .map_err(|_| anyhow!("decryption failed (wrong master password or corrupt store)"))?;
     Ok(serde_json::from_slice(&plaintext)?)
 }

@@ -373,7 +373,7 @@ fn format_slack_message(event: &WebhookEvent) -> serde_json::Value {
 /// Compute HMAC-SHA256 signature and return hex-encoded lowercase string.
 #[allow(dead_code)]
 fn compute_signature(payload: &[u8], secret: &str) -> String {
-    use hmac::{Hmac, Mac};
+    use hmac::{Hmac, KeyInit, Mac};
     use sha2::Sha256;
 
     type HmacSha256 = Hmac<Sha256>;

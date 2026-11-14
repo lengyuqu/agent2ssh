@@ -79,15 +79,15 @@ pub fn encrypt_backup(password: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
         .map_err(|e| anyhow!("failed to generate backup nonce: {e}"))?;
 
     let key_bytes = derive_key(password, &salt)?;
-    let key = Key::<Aes256Gcm>::from_slice(&key_bytes);
-    let cipher = Aes256Gcm::new(key);
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    let key = Key::<Aes256Gcm>::from(key_bytes);
+    let cipher = Aes256Gcm::new(&key);
+    let nonce = Nonce::from(nonce_bytes);
 
     // AAD binds the magic prefix to the ciphertext, so a file that
     // doesn't start with the right magic can't be swapped in.
     let ciphertext = cipher
         .encrypt(
-            nonce,
+            &nonce,
             Payload {
                 msg: plaintext,
                 aad: ENCRYPTED_MAGIC,
@@ -124,13 +124,16 @@ pub fn decrypt_backup(password: &[u8], data: &[u8]) -> Result<Vec<u8>> {
     let (nonce_bytes, ciphertext) = rest.split_at(NONCE_LEN);
 
     let key_bytes = derive_key(password, salt)?;
-    let key = Key::<Aes256Gcm>::from_slice(&key_bytes);
-    let cipher = Aes256Gcm::new(key);
-    let nonce = Nonce::from_slice(nonce_bytes);
+    let key = Key::<Aes256Gcm>::from(key_bytes);
+    let cipher = Aes256Gcm::new(&key);
+    // `split_at` already guarantees the length; the conversion is still fallible
+    // in the type system, and a wrong length here means a malformed file.
+    let nonce = Nonce::try_from(nonce_bytes)
+        .map_err(|_| anyhow!("the backup nonce is not {NONCE_LEN} bytes"))?;
 
     cipher
         .decrypt(
-            nonce,
+            &nonce,
             Payload {
                 msg: ciphertext,
                 aad: ENCRYPTED_MAGIC,

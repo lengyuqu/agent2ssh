@@ -31,7 +31,7 @@
 //! cannot do for this container — it fails with an ASN.1 error that says
 //! nothing about the passphrase.
 
-use aes::cipher::{BlockDecrypt, BlockSizeUser, KeyInit};
+use aes::cipher::{BlockCipherDecrypt, BlockSizeUser, KeyInit};
 use aes::{Aes128, Aes192, Aes256};
 use base64::Engine as _;
 use md5::{Digest, Md5};
@@ -145,7 +145,7 @@ fn derive_key_and_iv<C: KeyInit + BlockSizeUser>(
 
 fn cbc_decrypt<C>(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, String>
 where
-    C: BlockDecrypt + KeyInit + BlockSizeUser,
+    C: BlockCipherDecrypt + KeyInit + BlockSizeUser,
 {
     let block = C::block_size();
     debug_assert_eq!(block, 16, "AES block size");
@@ -159,7 +159,9 @@ where
     let mut plain = Vec::with_capacity(ciphertext.len());
     for chunk in ciphertext.chunks_exact(block) {
         let mut block_bytes = chunk.to_vec();
-        let block_ref = aes::cipher::generic_array::GenericArray::from_mut_slice(&mut block_bytes);
+        let block_ref: &mut aes::cipher::Block<C> = (&mut block_bytes[..])
+            .try_into()
+            .expect("a whole-block chunk is exactly one block");
         cipher.decrypt_block(block_ref);
         for (index, byte) in block_bytes.iter().enumerate() {
             plain.push(byte ^ previous[index]);
