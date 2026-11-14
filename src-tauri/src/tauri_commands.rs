@@ -390,6 +390,7 @@ pub fn netcatty_import(
 ) -> Result<ImportReport, String> {
     let options = ImportOptions {
         service,
+        local_state: None,
         dry_run: dry_run.unwrap_or(false),
         skip_credentials: skip_credentials.unwrap_or(false),
     };

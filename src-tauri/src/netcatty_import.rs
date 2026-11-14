@@ -24,16 +24,20 @@
 //! - **macOS** — Keychain item `"<app> Safe Storage"` holds a password; the key
 //!   is PBKDF2-HMAC-SHA1(password, `"saltysalt"`, 1003, 16) and the payload
 //!   after the `v10` tag is AES-128-CBC with sixteen 0x20 bytes as the IV.
-//! - **Windows** — the payload after `v10` is DPAPI-protected directly (no
-//!   second cipher layer), so `CryptUnprotectData` returns the JSON.
+//! - **Windows** — two generations share the `v10` tag. Legacy Electron builds
+//!   DPAPI-protect the JSON directly (the blob leads with the DPAPI magic).
+//!   Modern builds (Electron 42 / Chrome 148 verified against a real backup)
+//!   use Chromium's full OSCrypt: `[12-byte GCM nonce | AES-256-GCM ciphertext
+//!   | tag]`, with the 32-byte key DPAPI-wrapped in the app's `Local State`
+//!   (`os_crypt.encrypted_key`). Both open on the account that encrypted them.
 //! - **Linux** — the password comes from libsecret via `secret-tool`, the same
 //!   KDF as macOS, and the tag is `v11`.
 //!
-//! Only the macOS path has been verified against a real backup on this
-//! machine. The Windows and Linux paths are written from the documented scheme
-//! and compile for their targets, but running them needs a host of that OS;
-//! when the key cannot be read the error says so instead of guessing, and
-//! `plain-json-v1` remains the portable fallback.
+//! Only the macOS and Windows paths have been verified against real backups.
+//! The Linux path is written from the documented scheme and compiles for its
+//! target, but running it needs a host of that OS; when the key cannot be read
+//! the error says so instead of guessing, and `plain-json-v1` remains the
+//! portable fallback.
 //!
 //! ## What the import keeps, and what it drops
 //!
@@ -57,6 +61,9 @@ use std::path::{Path, PathBuf};
 
 /// Default Keychain/libsecret service name. Electron derives it from
 /// `app.getName()`, which for this app is the lowercase package name.
+/// Windows never consults it (DPAPI is the key source), so it is only
+/// compiled where the credential store is consulted.
+#[cfg(unix)]
 const DEFAULT_SAFE_STORAGE_SERVICE: &str = "netcatty Safe Storage";
 
 // ── Envelope and payload ─────────────────────────────────────────────────────
@@ -139,6 +146,10 @@ pub struct ImportOptions {
     /// Override the credential-store service name. Needed when the backup was
     /// written by a differently-named build of the app.
     pub service: Option<String>,
+    /// Windows OSCrypt only: override the path to Netcatty's `Local State`
+    /// file (which carries the DPAPI-wrapped vault key). Defaults to
+    /// `%APPDATA%\<Netcatty's user-data dir>\Local State`.
+    pub local_state: Option<PathBuf>,
     /// Decode and map everything, write nothing.
     pub dry_run: bool,
     /// Map hosts but leave `password` and `key_path` empty. Keys referenced by
@@ -340,11 +351,7 @@ fn read_backup(path: &Path, options: &ImportOptions) -> Result<SyncPayload> {
             let ciphertext = base64::engine::general_purpose::STANDARD
                 .decode(data)
                 .context("payloadData is not valid base64")?;
-            let service = options
-                .service
-                .as_deref()
-                .unwrap_or(DEFAULT_SAFE_STORAGE_SERVICE);
-            let plain = decode_safe_storage(&ciphertext, service)?;
+            let plain = decode_safe_storage(&ciphertext, options)?;
             String::from_utf8(plain).context("the decrypted payload is not UTF-8")?
         }
         other => {
@@ -360,9 +367,13 @@ fn read_backup(path: &Path, options: &ImportOptions) -> Result<SyncPayload> {
 /// Decrypt Chromium OSCrypt output. Each platform has its own key source but
 /// the same call shape, so the tag check lives here and the cipher work is
 /// delegated.
-fn decode_safe_storage(payload: &[u8], service: &str) -> Result<Vec<u8>> {
+fn decode_safe_storage(payload: &[u8], options: &ImportOptions) -> Result<Vec<u8>> {
     #[cfg(target_os = "macos")]
     {
+        let service = options
+            .service
+            .as_deref()
+            .unwrap_or(DEFAULT_SAFE_STORAGE_SERVICE);
         let password = keychain_password(service)?;
         let tag = payload
             .get(..3)
@@ -378,15 +389,29 @@ fn decode_safe_storage(payload: &[u8], service: &str) -> Result<Vec<u8>> {
 
     #[cfg(target_os = "windows")]
     {
-        // Electron on Windows hands the string to DPAPI itself; there is no
-        // second AES layer, so the tag is stripped and the blob unsealed.
-        let _ = service;
+        // Two generations of Electron safeStorage share the `v10` tag:
+        //
+        // - Legacy builds DPAPI-protected the JSON directly, so the blob is a
+        //   CryptProtectData output (leading `01 00 00 00 D0 8C 9D DF …`).
+        // - Modern builds (Electron 42 verified against a real vault backup)
+        //   use Chromium's full OSCrypt: the blob is
+        //   `[12-byte GCM nonce | AES-256-GCM ciphertext | 16-byte tag]`, and
+        //   the 32-byte key is DPAPI-wrapped in the app's `Local State`
+        //   (`os_crypt.encrypted_key`, `"DPAPI"`-prefixed base64). Same user +
+        //   machine required, which is why a same-account backup still opens.
         let blob = payload.strip_prefix(b"v10").unwrap_or(payload);
-        return dpapi_unprotect(blob);
+        if blob.starts_with(&DPAPI_BLOB_MAGIC) {
+            return dpapi_unprotect(blob);
+        }
+        return oscrypt_windows_unprotect(blob, options.local_state.as_deref());
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
     {
+        let service = options
+            .service
+            .as_deref()
+            .unwrap_or(DEFAULT_SAFE_STORAGE_SERVICE);
         let password = libsecret_password(service)?;
         let tag = payload
             .get(..3)
@@ -661,6 +686,106 @@ fn dpapi_unprotect(blob: &[u8]) -> Result<Vec<u8>> {
         LocalFree(output.pbData as isize);
     }
     Ok(owned)
+}
+
+/// Leading bytes of every `CryptProtectData` output blob.
+#[cfg(target_os = "windows")]
+const DPAPI_BLOB_MAGIC: [u8; 20] = [
+    0x01, 0x00, 0x00, 0x00, 0xD0, 0x8C, 0x9D, 0xDF, 0x01, 0x15, 0xD1, 0x11, 0x8C, 0x7A, 0x00, 0xC0,
+    0x4F, 0xC2, 0x97, 0xEB,
+];
+
+/// Decrypt a modern-Electron OSCrypt blob on Windows.
+///
+/// The blob is `[12-byte GCM nonce | AES-256-GCM ciphertext | 16-byte tag]`;
+/// the 32-byte key is DPAPI-wrapped inside the app's `Local State` under
+/// `os_crypt.encrypted_key` (`"DPAPI"`-prefixed base64). Verified end-to-end
+/// against a real Netcatty vault backup (Electron 42 / Chrome 148).
+#[cfg(target_os = "windows")]
+fn oscrypt_windows_unprotect(blob: &[u8], local_state: Option<&Path>) -> Result<Vec<u8>> {
+    use aes_gcm::aead::{Aead, KeyInit};
+    use aes_gcm::{Aes256Gcm, Key, Nonce};
+
+    const NONCE_LEN: usize = 12;
+    const TAG_LEN: usize = 16;
+    if blob.len() < NONCE_LEN + TAG_LEN + 1 {
+        return Err(anyhow!(
+            "the safeStorage payload is too short to be either a DPAPI blob or an \
+             OSCrypt GCM message ({} bytes after the version tag)",
+            blob.len()
+        ));
+    }
+    let (nonce, rest) = blob.split_at(NONCE_LEN);
+    let (ciphertext, tag) = rest.split_at(rest.len() - TAG_LEN);
+    let mut nonce_bytes = [0u8; NONCE_LEN];
+    nonce_bytes.copy_from_slice(nonce);
+
+    let key = oscrypt_windows_key(local_state)?;
+    let key = Key::<Aes256Gcm>::from(key);
+    let cipher = Aes256Gcm::new(&key);
+    let mut message = ciphertext.to_vec();
+    message.extend_from_slice(tag);
+    cipher
+        .decrypt(&Nonce::from(nonce_bytes), message.as_slice())
+        .map_err(|_| {
+            anyhow!(
+                "the OSCrypt payload failed AES-GCM authentication — the backup was most \
+                 likely encrypted under another Windows user or machine (or Netcatty has \
+                 reinstalled under a rebuilt profile). Export a plain JSON backup from \
+                 Netcatty on the machine that owns the data instead."
+            )
+        })
+}
+
+/// Read and DPAPI-unprotect the 32-byte OSCrypt vault key.
+#[cfg(target_os = "windows")]
+fn oscrypt_windows_key(local_state: Option<&Path>) -> Result<[u8; 32]> {
+    let path = match local_state {
+        Some(path) => path.to_path_buf(),
+        None => default_local_state_path()?,
+    };
+    let raw = std::fs::read_to_string(&path).with_context(|| {
+        format!(
+            "failed to read Netcatty's Local State at {} — Netcatty must have run under \
+             this Windows account at least once for the key to exist",
+            path.display()
+        )
+    })?;
+    let value: serde_json::Value = serde_json::from_str(&raw)
+        .with_context(|| format!("{} is not valid JSON", path.display()))?;
+    let encoded = value
+        .get("os_crypt")
+        .and_then(|os| os.get("encrypted_key"))
+        .and_then(|key| key.as_str())
+        .ok_or_else(|| {
+            anyhow!(
+                "{} carries no os_crypt.encrypted_key — this Netcatty build predates the \
+                 OSCrypt key file, or the profile was created under another account",
+                path.display()
+            )
+        })?;
+    let wrapped = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .context("os_crypt.encrypted_key is not valid base64")?;
+    let wrapped = wrapped
+        .strip_prefix(b"DPAPI")
+        .ok_or_else(|| anyhow!("os_crypt.encrypted_key is missing the DPAPI prefix"))?;
+    let key = dpapi_unprotect(wrapped)
+        .context("the OSCrypt key could not be DPAPI-unprotected under this account")?;
+    key.try_into().map_err(|shorter: Vec<u8>| {
+        anyhow!(
+            "the DPAPI-unprotected OSCrypt key is {} bytes, expected 32",
+            shorter.len()
+        )
+    })
+}
+
+/// `%APPDATA%\netcatty\Local State` — Electron's user-data dir for Netcatty.
+#[cfg(target_os = "windows")]
+fn default_local_state_path() -> Result<PathBuf> {
+    let appdata = std::env::var("APPDATA")
+        .map_err(|_| anyhow!("APPDATA is not set — cannot locate Netcatty's Local State"))?;
+    Ok(PathBuf::from(appdata).join("netcatty").join("Local State"))
 }
 
 // ── Planning ─────────────────────────────────────────────────────────────────

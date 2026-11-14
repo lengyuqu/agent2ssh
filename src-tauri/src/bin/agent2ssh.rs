@@ -2157,6 +2157,7 @@ async fn async_main() -> Result<()> {
             } => {
                 let options = agent2ssh::netcatty_import::ImportOptions {
                     service,
+                    local_state: None,
                     dry_run,
                     skip_credentials,
                 };
